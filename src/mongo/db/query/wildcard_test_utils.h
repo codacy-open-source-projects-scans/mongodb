@@ -32,7 +32,8 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index/wildcard_key_generator.h"
-#include "mongo/db/query/index_entry.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::wildcard_planning {
 /**
@@ -47,7 +48,7 @@ struct WildcardIndexEntryMock {
         const auto type = IndexNames::nameToType(IndexNames::findPluginName(keyPattern));
         indexEntry = std::make_unique<IndexEntry>(keyPattern,
                                                   type,
-                                                  IndexDescriptor::kLatestIndexVersion,
+                                                  IndexConfig::kLatestIndexVersion,
                                                   false,
                                                   emptyMultiKeyPaths,
                                                   multiKeyPathSet,

@@ -14,14 +14,14 @@
  * ]
  */
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
+import {getTimeseriesCollForDDLOps} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 
 TimeseriesTest.run(() => {
     const coll = db[jsTestName()];
     coll.drop();
 
     const timeFieldName = "time";
-    assert.commandWorked(
-        db.createCollection(coll.getName(), {timeseries: {timeField: timeFieldName}}));
+    assert.commandWorked(db.createCollection(coll.getName(), {timeseries: {timeField: timeFieldName}}));
 
     const numDocs = 5;
     for (let i = 0; i < numDocs; i++) {
@@ -32,6 +32,6 @@ TimeseriesTest.run(() => {
     // concurrent calls to compact.
     let res = db.runCommand({compact: coll.getName(), force: true});
     assert.commandWorkedOrFailedWithCode(res, ErrorCodes.Interrupted, tojson(res));
-    res = db.runCommand({compact: "system.buckets." + coll.getName(), force: true});
+    res = db.runCommand({compact: getTimeseriesCollForDDLOps(db, coll).getName(), force: true});
     assert.commandWorkedOrFailedWithCode(res, ErrorCodes.Interrupted, tojson(res));
 });

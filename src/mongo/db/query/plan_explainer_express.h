@@ -29,10 +29,11 @@
 
 #pragma once
 
-#include <fmt/format.h>
-
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/util/modules.h"
+
+#include <fmt/format.h>
 
 namespace mongo {
 namespace express {
@@ -58,8 +59,12 @@ public:
         return _indexKeyPattern;
     }
 
+    bool projectionCovered() const {
+        return _projectionCovered;
+    }
+
     void setStageName(StringData stageName) {
-        _stageName = stageName.toString();
+        _stageName = std::string{stageName};
     }
 
     void incNumKeysExamined(size_t amount) {
@@ -71,11 +76,15 @@ public:
     }
 
     void setIndexName(StringData indexName) {
-        _indexName = indexName.toString();
+        _indexName = std::string{indexName};
     }
 
     void setIndexKeyPattern(StringData indexKeyPattern) {
-        _indexKeyPattern = indexKeyPattern.toString();
+        _indexKeyPattern = std::string{indexKeyPattern};
+    }
+
+    void setProjectionCovered(bool projectionCovered) {
+        _projectionCovered = projectionCovered;
     }
 
     void populateSummaryStats(PlanSummaryStats* statsOut) const {
@@ -101,6 +110,7 @@ private:
     size_t _numDocumentsFetched{0};
     std::string _indexName;
     std::string _indexKeyPattern;
+    bool _projectionCovered{false};
 };
 
 class PlanStats {
@@ -145,7 +155,7 @@ public:
 
     void incUpdatedStats(size_t numDocsMatched) {
         _docsMatched += numDocsMatched;
-    };
+    }
 
     void setIsModUpdate(bool val) {
         _isModUpdate = val;
@@ -171,7 +181,7 @@ public:
 
     void incDeletedStats(size_t numDocsDeleted) {
         _docsDeleted += numDocsDeleted;
-    };
+    }
 
 private:
     std::string _stageName;
@@ -192,14 +202,14 @@ private:
  */
 class PlanExplainerExpress final : public PlanExplainer {
 public:
-    PlanExplainerExpress(const mongo::CommonStats* stats,
-                         const express::PlanStats* planStats,
+    PlanExplainerExpress(const express::PlanStats* planStats,
                          const express::IteratorStats* iteratorStats,
-                         const express::WriteOperationStats* writeOperationStats)
-        : _stats(stats),
-          _planStats(planStats),
+                         const express::WriteOperationStats* writeOperationStats,
+                         BSONObj projection)
+        : _planStats(planStats),
           _iteratorStats(iteratorStats),
-          _writeOperationStats(writeOperationStats) {}
+          _writeOperationStats(writeOperationStats),
+          _projection(std::move(projection)) {}
 
     const ExplainVersion& getVersion() const override {
         static const ExplainVersion kExplainVersion = "1";
@@ -226,9 +236,9 @@ public:
     }
 
 private:
-    const mongo::CommonStats* _stats;
     const express::PlanStats* _planStats;
     const express::IteratorStats* _iteratorStats;
     const express::WriteOperationStats* _writeOperationStats;
+    BSONObj _projection;
 };
 }  // namespace mongo

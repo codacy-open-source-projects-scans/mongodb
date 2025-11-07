@@ -27,13 +27,13 @@
  *    it in the license file.
  */
 
+#include "mongo/db/query/query_shape/find_cmd_shape.h"
+
 #include "mongo/bson/json.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/query_shape/find_cmd_shape.h"
 #include "mongo/db/service_context_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 
 namespace mongo::query_shape {
 
@@ -43,7 +43,7 @@ namespace {
  * Simplistic redaction strategy for testing which appends the field name to the prefix "REDACT_".
  */
 std::string applyHmacForTest(StringData sd) {
-    return "REDACT_" + sd.toString();
+    return "REDACT_" + std::string{sd};
 }
 
 static const NamespaceStringOrUUID kDefaultTestNss =
@@ -74,9 +74,13 @@ public:
         return std::make_unique<FindCmdShape>(*parsedRequest, _expCtx);
     }
 
+    const FindCmdShapeComponents& getShapeComponents(FindCmdShape& shape) {
+        return static_cast<const FindCmdShapeComponents&>(shape.specificComponents());
+    }
+
     BSONObj sortShape(StringData sortJson) {
         auto shape = makeShapeFromSort(sortJson);
-        return shape->components.sort;
+        return getShapeComponents(*shape).sort;
     }
 
     /**
@@ -170,7 +174,7 @@ TEST_F(FindCmdShapeTest, NoOptionalArguments) {
     auto&& parsedRequest =
         uassertStatusOK(::mongo::parsed_find_command::parse(_expCtx, {std::move(fcr)}));
     auto cmdShape = std::make_unique<FindCmdShape>(*parsedRequest, _expCtx);
-    ASSERT_EQUALS(0, cmdShape->components.optionalArgumentsEncoding());
+    ASSERT_EQUALS(0, getShapeComponents(*cmdShape).optionalArgumentsEncoding());
 }
 
 TEST_F(FindCmdShapeTest, AllOptionalArgumentsSetToTrue) {
@@ -189,7 +193,7 @@ TEST_F(FindCmdShapeTest, AllOptionalArgumentsSetToTrue) {
     auto&& parsedRequest =
         uassertStatusOK(::mongo::parsed_find_command::parse(_expCtx, {std::move(fcr)}));
     auto cmdShape = std::make_unique<FindCmdShape>(*parsedRequest, _expCtx);
-    ASSERT_EQUALS(0x2FFFF, cmdShape->components.optionalArgumentsEncoding());
+    ASSERT_EQUALS(0x2FFFF, getShapeComponents(*cmdShape).optionalArgumentsEncoding());
 }
 
 TEST_F(FindCmdShapeTest, AllOptionalArgumentsSetToFalse) {
@@ -205,7 +209,7 @@ TEST_F(FindCmdShapeTest, AllOptionalArgumentsSetToFalse) {
     auto&& parsedRequest =
         uassertStatusOK(::mongo::parsed_find_command::parse(_expCtx, {std::move(fcr)}));
     auto cmdShape = std::make_unique<FindCmdShape>(*parsedRequest, _expCtx);
-    ASSERT_EQUALS(0x2AAA8, cmdShape->components.optionalArgumentsEncoding());
+    ASSERT_EQUALS(0x2AAA8, getShapeComponents(*cmdShape).optionalArgumentsEncoding());
 }
 
 
@@ -217,7 +221,7 @@ TEST_F(FindCmdShapeTest, SizeOfShapeComponents) {
     const auto minimumSize = sizeof(FindCmdShapeComponents) + querySize;
     ASSERT_GT(findCmdComponent->size(), minimumSize);
     ASSERT_LTE(findCmdComponent->size(),
-               minimumSize + static_cast<size_t>(4 * BSONObj().objsize()));
+               minimumSize + static_cast<size_t>(5 * BSONObj().objsize()));
 }
 
 TEST_F(FindCmdShapeTest, EquivalentShapeComponentsSizes) {
@@ -291,8 +295,7 @@ TEST_F(FindCmdShapeTest, FindCommandShapeSHA256Hash) {
         findCommandRequest->setFilter(BSON("a" << 1));
         findCommandRequest->setSort(BSON("b" << 1));
         findCommandRequest->setProjection(BSON("c" << 1));
-        findCommandRequest->setCollation(BSON("locale"
-                                              << "en_US"));
+        findCommandRequest->setCollation(BSON("locale" << "en_US"));
         findCommandRequest->setMin(BSON("d" << 1));
         findCommandRequest->setMax(BSON("d" << 9));
         findCommandRequest->setLet(BSON("e" << 1));

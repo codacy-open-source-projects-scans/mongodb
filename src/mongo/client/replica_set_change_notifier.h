@@ -29,7 +29,14 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
+#include "mongo/client/connection_string.h"
+#include "mongo/executor/task_executor.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/util/functional.h"
+#include "mongo/util/hierarchical_acquisition.h"
+#include "mongo/util/net/hostandport.h"
+
 #include <cstdint>
 #include <memory>
 #include <set>
@@ -38,13 +45,7 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/client/connection_string.h"
-#include "mongo/executor/task_executor.h"
-#include "mongo/stdx/mutex.h"
-#include "mongo/stdx/unordered_map.h"
-#include "mongo/util/functional.h"
-#include "mongo/util/hierarchical_acquisition.h"
-#include "mongo/util/net/hostandport.h"
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 
@@ -55,7 +56,14 @@ class ReplicaSetChangeNotifier {
 public:
     using Key = std::string;
     class Listener;
-    struct State;
+
+    struct State {
+        ConnectionString connStr;
+        HostAndPort primary;
+        std::set<HostAndPort> passives;
+
+        int64_t generation = 0;
+    };
 
 public:
     ReplicaSetChangeNotifier() = default;
@@ -67,24 +75,24 @@ public:
     /**
      *  Notify every listener that there is a new ReplicaSet and initialize the State
      */
-    void onFoundSet(const std::string& replicaSet) noexcept;
+    void onFoundSet(const std::string& replicaSet);
 
     /**
      * Notify every listener that a scan completed without finding a primary and update
      */
-    void onPossibleSet(ConnectionString connectionString) noexcept;
+    void onPossibleSet(ConnectionString connectionString);
 
     /**
      * Notify every listener that a scan completed and found a new primary or config
      */
     void onConfirmedSet(ConnectionString connectionString,
                         HostAndPort primary,
-                        std::set<HostAndPort> passives) noexcept;
+                        std::set<HostAndPort> passives);
 
     /**
      * Notify every listener that a ReplicaSet is no longer in use and drop the State
      */
-    void onDroppedSet(const std::string& replicaSet) noexcept;
+    void onDroppedSet(const std::string& replicaSet);
 
     /**
      * Create a listener of a given type and bind it to this notifier
@@ -139,22 +147,22 @@ public:
     /**
      * React to a new ReplicaSet that will soon be scanned
      */
-    virtual void onFoundSet(const Key& key) noexcept = 0;
+    virtual void onFoundSet(const Key& key) = 0;
 
     /**
      * React to a finished scan that found no primary
      */
-    virtual void onPossibleSet(const State& data) noexcept = 0;
+    virtual void onPossibleSet(const State& data) = 0;
 
     /**
      * React to a finished scan that found a primary
      */
-    virtual void onConfirmedSet(const State& data) noexcept = 0;
+    virtual void onConfirmedSet(const State& data) = 0;
 
     /**
      * React to a ReplicaSet being dropped from use
      */
-    virtual void onDroppedSet(const Key& key) noexcept = 0;
+    virtual void onDroppedSet(const Key& key) = 0;
 
     /**
      * Get the State as of the last signal function invoked on the Notifier
@@ -163,14 +171,6 @@ public:
 
 private:
     Notifier* _notifier = nullptr;
-};
-
-struct ReplicaSetChangeNotifier::State {
-    ConnectionString connStr;
-    HostAndPort primary;
-    std::set<HostAndPort> passives;
-
-    int64_t generation = 0;
 };
 
 }  // namespace mongo

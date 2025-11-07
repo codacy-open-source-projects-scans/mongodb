@@ -29,13 +29,13 @@
 
 #pragma once
 
+#include "mongo/db/exec/sbe/values/slot.h"
+#include "mongo/db/query/plan_yield_policy_sbe.h"
+#include "mongo/util/modules.h"
+
 #include <absl/container/flat_hash_map.h>
 #include <absl/container/flat_hash_set.h>
 #include <boost/optional/optional.hpp>
-#include <memory>
-
-#include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/query/plan_yield_policy_sbe.h"
 
 namespace mongo {
 class InMatchExpression;
@@ -76,7 +76,8 @@ struct StageBuilderState {
                       SortSpecMap* sortSpecMap,
                       boost::intrusive_ptr<ExpressionContext> expCtx,
                       bool needsMerge,
-                      bool allowDiskUse)
+                      bool allowDiskUse,
+                      IncrementalFeatureRolloutContext& ifrContext)
         : slotIdGenerator{slotIdGenerator},
           frameIdGenerator{frameIdGenerator},
           spoolIdGenerator{spoolIdGenerator},
@@ -90,7 +91,8 @@ struct StageBuilderState {
           yieldPolicy{yieldPolicy},
           expCtx{expCtx},
           needsMerge{needsMerge},
-          allowDiskUse{allowDiskUse} {}
+          allowDiskUse{allowDiskUse},
+          ifrContext(ifrContext) {}
 
     StageBuilderState(const StageBuilderState& other) = delete;
 
@@ -174,6 +176,8 @@ struct StageBuilderState {
 
     // A flag to indicate the user allows disk use for spilling.
     bool allowDiskUse;
+
+    IncrementalFeatureRolloutContext& ifrContext;
 
     SimpleBSONObjMap<sbe::value::SlotId> keyPatternToSlotMap;
 };  // struct StageBuilderState

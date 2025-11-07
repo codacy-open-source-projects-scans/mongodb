@@ -27,17 +27,16 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <vector>
-
 #include "mongo/bson/json.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
+#include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/util/make_data_structure.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <memory>
+#include <vector>
 
 namespace mongo {
 namespace {
@@ -77,7 +76,8 @@ const auto expectedOptimizedGroupForMatchOnly = fromjson(R"(
     $group: {
         _id: {hour: {$dateTrunc: {date: '$time', unit: {$const: 'hour'}}}, symbol: '$tag.symbol'},
         open: {$top: {output: '$price', sortBy: {time: 1}}},
-        close: {$bottom: {output: '$price', sortBy: {time: 1}}}
+        close: {$bottom: {output: '$price', sortBy: {time: 1}}},
+        $willBeMerged: false
     }
 }
 )");
@@ -117,9 +117,9 @@ TEST_F(TopKSortOptimization, MatchOnlyAfterTopKSortPushedDownWithTopKSortOptimiz
                                                firstLastGroupSpecObj),
                                     getExpCtx());
 
-    ASSERT_EQ(pipeline->getSources().size(), 4U);
+    ASSERT_EQ(pipeline->size(), 4U);
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // The $match stage should be pushed down before the $_internalUnpackBucket and the
     // $_internalUnpackBucket should have the event filter and the $sort stage should be absorbed
@@ -144,9 +144,9 @@ TEST_F(TopKSortOptimization, MatchOnlyBeforeTopKSortPushedDownWithTopKSortOptimi
                                                firstLastGroupSpecObj),
                                     getExpCtx());
 
-    ASSERT_EQ(pipeline->getSources().size(), 4U);
+    ASSERT_EQ(pipeline->size(), 4U);
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // The $match stage should be pushed down before the $_internalUnpackBucket and the
     // $_internalUnpackBucket should have the event filter and the $sort stage should be absorbed
@@ -180,7 +180,8 @@ const auto expectedOptimizedGroupForMatchAndProject = fromjson(R"(
     $group: {
         _id: {hour: {$dateTrunc: {date: '$time', unit: {$const: 'hour'}}}, symbol: '$s'},
         open: {$top: {output: '$price', sortBy: {s: 1}}},
-        totalVol: {$sum: '$vol'}
+        totalVol: {$sum: '$vol'},
+        $willBeMerged: false
     }
 }
 )");
@@ -194,7 +195,7 @@ const auto expectedOptimizedUnpackBucketForMatchAndProject = fromjson(R"(
         include: ['_id', 'tag'],
         timeField: 'time',
         metaField: 'tag',
-        bucketMaxSpanSeconds: 3600}}
+        bucketMaxSpanSeconds: 3600
     }
 }
     )");
@@ -220,9 +221,9 @@ TEST_F(TopKSortOptimization,
                                    firstSumGroupSpecObj),
                         getExpCtx());
 
-    ASSERT_EQ(pipeline->getSources().size(), 5U);
+    ASSERT_EQ(pipeline->size(), 5U);
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // The $match stage should be pushed down before the $_internalUnpackBucket and the $sort stage
     // should be absorbed into the $group stage. The $project stage should be absorbed into the
@@ -252,9 +253,9 @@ TEST_F(TopKSortOptimization,
                                    firstSumGroupSpecObj),
                         getExpCtx());
 
-    ASSERT_EQ(pipeline->getSources().size(), 5U);
+    ASSERT_EQ(pipeline->size(), 5U);
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // The $match stage should be pushed down before the $_internalUnpackBucket and the $sort stage
     // should be absorbed into the $group stage. The $project stage should be absorbed into the
@@ -307,9 +308,9 @@ TEST_F(TopKSortOptimization,
                                    firstSumGroupSpecObj),
                         getExpCtx());
 
-    ASSERT_EQ(pipeline->getSources().size(), 5U);
+    ASSERT_EQ(pipeline->size(), 5U);
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // The $match stage should be pushed before the $_internalUnpackBucket and the
     // $_internalUnpackBucket absorb the $project stage. The $sort stage should be absorbed

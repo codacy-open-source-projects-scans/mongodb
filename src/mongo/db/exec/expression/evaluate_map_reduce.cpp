@@ -27,6 +27,7 @@
  *    it in the license file.
  */
 
+#include "mongo/bson/bson_depth.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/exec/expression/evaluate.h"
@@ -51,7 +52,7 @@ void mapReduceFilterWaitBeforeLoop(OperationContext* opCtx) {
 
 std::function<void()> getExpressionInterruptChecker(OperationContext* opCtx) {
     if (opCtx) {
-        ElapsedTracker et(opCtx->getServiceContext()->getFastClockSource(),
+        ElapsedTracker et(&opCtx->fastClockSource(),
                           internalQueryExpressionInterruptIterations.load(),
                           Milliseconds{internalQueryExpressionInterruptPeriodMS.load()});
         return [=]() mutable {
@@ -96,6 +97,9 @@ Value evaluate(const ExpressionMap& expr, const Document& root, Variables* varia
     for (size_t i = 0; i < input.size(); i++) {
         checkForInterrupt();
         variables->setValue(expr.getVarId(), input[i]);
+        if (expr.getIndexVariableId()) {
+            variables->setValue(*expr.getIndexVariableId(), Value(static_cast<int>(i)));
+        }
 
         Value toInsert = expr.getEach()->evaluate(root, variables);
         if (toInsert.missing()) {
@@ -132,13 +136,36 @@ Value evaluate(const ExpressionReduce& expr, const Document& root, Variables* va
     size_t memLimit = internalQueryMaxMapFilterReduceBytes.load();
     Value accumulatedValue = expr.getInitial()->evaluate(root, variables);
 
-    for (auto&& elem : inputVal.getArray()) {
+    int32_t prevDepth = -1;
+    size_t interval = expr.getAccumulatedValueDepthCheckInterval();
+    auto input = inputVal.getArray();
+    for (size_t i = 0; i < input.size(); ++i) {
         checkForInterrupt();
 
-        variables->setValue(expr.getThisVar(), elem);
+        variables->setValue(expr.getThisVar(), input[i]);
         variables->setValue(expr.getValueVar(), accumulatedValue);
+        if (expr.getIndexVariableId()) {
+            variables->setValue(*expr.getIndexVariableId(), Value(static_cast<int>(i)));
+        }
 
         accumulatedValue = expr.getIn()->evaluate(root, variables);
+        if ((interval > 0) && (i % interval) == 0 &&
+            (accumulatedValue.isObject() || accumulatedValue.isArray())) {
+            int32_t depth =
+                accumulatedValue.depth(2 * BSONDepth::getMaxAllowableDepth() /*maxDepth*/);
+            if (MONGO_unlikely(depth == -1)) {
+                uasserted(ErrorCodes::Overflow,
+                          "$reduce accumulated value exceeded max allowable BSON depth");
+            }
+            // Exponential backoff if depth has not increased.
+            if (depth == prevDepth) {
+                tassert(10236400,
+                        "unexpected control flow in $reduce object/array depth verification",
+                        prevDepth != -1);
+                interval *= 2;
+            }
+            prevDepth = depth;
+        }
         if (MONGO_unlikely(accumulatedValue.getApproximateSize() > memLimit)) {
             uasserted(ErrorCodes::ExceededMemoryLimit,
                       "$reduce would use too much memory and cannot spill");
@@ -200,12 +227,16 @@ Value evaluate(const ExpressionFilter& expr, const Document& root, Variables* va
 
     std::vector<Value> output;
     output.reserve(approximateOutputSize);
-    for (const auto& elem : input) {
+    for (size_t i = 0; i < input.size(); ++i) {
         checkForInterrupt();
-        variables->setValue(expr.getVariableId(), elem);
+
+        variables->setValue(expr.getVariableId(), input[i]);
+        if (expr.getIndexVariableId()) {
+            variables->setValue(*expr.getIndexVariableId(), Value(static_cast<int>(i)));
+        }
 
         if (expr.getCond()->evaluate(root, variables).coerceToBool()) {
-            output.push_back(elem);
+            output.push_back(input[i]);
             if (remainingLimitCounter && --*remainingLimitCounter == 0) {
                 return Value(std::move(output));
             }

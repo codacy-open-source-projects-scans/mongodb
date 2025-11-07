@@ -29,10 +29,6 @@
 
 #pragma once
 
-#include <functional>
-#include <memory>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -40,6 +36,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mock.h"
+#include "mongo/db/repl/last_vote.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/repl_settings.h"
@@ -54,8 +51,13 @@
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
+
+#include <functional>
+#include <memory>
+#include <string>
 
 namespace mongo {
 
@@ -77,7 +79,7 @@ using executor::NetworkInterfaceMock;
 /**
  * Fixture for testing ReplicationCoordinatorImpl behaviors.
  */
-class ReplCoordTest : public ServiceContextMongoDTest {
+class MONGO_MOD_OPEN ReplCoordTest : public ServiceContextMongoDTest {
 public:
     /**
      * Makes a command response with the given "doc" response and optional elapsed time "millis".
@@ -103,10 +105,9 @@ public:
     }
 
     static BSONObj configWithMembers(int version, long long term, BSONArray members) {
-        return BSON("_id"
-                    << "mySet"
-                    << "protocolVersion" << 1 << "version" << version << "term" << term << "members"
-                    << members);
+        return BSON("_id" << "mySet"
+                          << "protocolVersion" << 1 << "version" << version << "term" << term
+                          << "members" << members);
     }
 
 protected:
@@ -118,6 +119,15 @@ protected:
      * ReplicationCoordinator under test.
      */
     virtual void assertStartSuccess(const BSONObj& configDoc, const HostAndPort& selfHost);
+
+    /**
+     * Asserts that calling start with data (such as a populated oplog or last vote document)
+     * successfully initiates the ReplicationCoordinator under test.
+     */
+    virtual void assertStartSuccessWithData(const BSONObj& configDoc,
+                                            const HostAndPort& selfHost,
+                                            const LastVote& lastVote,
+                                            const OpTime& topOfOplog);
 
     /**
      * Gets the network mock.
@@ -212,7 +222,7 @@ protected:
      * Gets the topology coordinator used by the replication coordinator under test.
      */
     TopologyCoordinator& getTopoCoord() {
-        return *_topo;
+        return *_repl->getTopologyCoordinator_forTest();
     }
 
     /**
@@ -363,8 +373,6 @@ protected:
 
 private:
     std::unique_ptr<ReplicationCoordinatorImpl> _repl;
-    // Owned by ReplicationCoordinatorImpl
-    TopologyCoordinator* _topo = nullptr;
     // Owned by executor
     executor::NetworkInterfaceMock* _net = nullptr;
     // Owned by ReplicationCoordinatorImpl

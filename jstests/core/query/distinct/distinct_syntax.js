@@ -1,6 +1,6 @@
 // Vaildate input to distinct command. SERVER-12642
 
-var t = db.distinct4;
+let t = db.distinct4;
 
 t.drop();
 t.save({a: null});
@@ -12,7 +12,7 @@ t.save({a: 3});
 // first argument should be a string or error
 
 // from shell helper
-assert.throws(function() {
+assert.throws(function () {
     t.distinct({a: 1});
 });
 
@@ -22,19 +22,18 @@ assert.commandFailedWithCode(t.runCommand("distinct", {"key": {a: 1}}), ErrorCod
 // second argument should be a document or error
 
 // from shell helper
-assert.throws(function() {
-    t.distinct('a', '1');
+assert.throws(function () {
+    t.distinct("a", "1");
 });
 
 // from command interface
-assert.commandFailedWithCode(t.runCommand("distinct", {"key": "a", "query": "a"}),
-                             ErrorCodes.TypeMismatch);
+assert.commandFailedWithCode(t.runCommand("distinct", {"key": "a", "query": "a"}), ErrorCodes.TypeMismatch);
 
 // empty query clause should not cause error
 
 // from shell helper
-var a = assert.doesNotThrow(function() {
-    return t.distinct('a');
+let a = assert.doesNotThrow(function () {
+    return t.distinct("a");
 });
 // [ null, 1, 2, 3 ]
 assert.eq(4, a.length, tojson(a));
@@ -47,4 +46,4 @@ assert.contains(3, a);
 assert.commandWorked(t.runCommand("distinct", {"key": "a"}));
 
 // embedded nulls are prohibited in the key field
-assert.commandFailedWithCode(t.runCommand("distinct", {"key": "a\0b"}), 31032);
+assert.commandFailedWithCode(t.runCommand("distinct", {"key": "a\0b"}), [31032, 9527900]);

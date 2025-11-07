@@ -27,17 +27,13 @@
  *    it in the license file.
  */
 
-#include <memory>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/commands/profile_common.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/commands/profile_common.h"
 #include "mongo/db/commands/profile_gen.h"
 #include "mongo/db/profile_filter.h"
 #include "mongo/db/profile_settings.h"
@@ -45,10 +41,14 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/namespace_string_util.h"
+
+#include <memory>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -66,10 +66,11 @@ Status ProfileCmdBase::checkAuthForOperation(OperationContext* opCtx,
         : SerializationContext::stateCommandRequest();
 
     auto request =
-        ProfileCmdRequest::parse(IDLParserContext("profile", vts, dbName.tenantId(), sc), cmdObj);
+        ProfileCmdRequest::parse(cmdObj, IDLParserContext("profile", vts, dbName.tenantId(), sc));
     const auto profilingLevel = request.getCommandParameter();
 
-    if (profilingLevel < 0 && !request.getSlowms() && !request.getSampleRate()) {
+    if (profilingLevel < 0 && !request.getSlowms() && !request.getSlowinprogms() &&
+        !request.getSampleRate()) {
         // If the user just wants to view the current values of 'slowms' and 'sampleRate', they
         // only need read rights on system.profile, even if they can't change the profiling level.
         if (authzSession->isAuthorizedForActionsOnResource(
@@ -95,7 +96,7 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
         ? SerializationContext::stateCommandRequest(vts->hasTenantId(), vts->isFromAtlasProxy())
         : SerializationContext::stateCommandRequest();
     auto request =
-        ProfileCmdRequest::parse(IDLParserContext("profile", vts, dbName.tenantId(), sc), cmdObj);
+        ProfileCmdRequest::parse(cmdObj, IDLParserContext("profile", vts, dbName.tenantId(), sc));
     const auto profilingLevel = request.getCommandParameter();
 
     // Validate arguments before making changes.
@@ -113,6 +114,7 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
 
     result.append("was", oldSettings.level);
     result.append("slowms", oldSlowMS);
+    result.append("slowinprogms", oldSettings.slowOpInProgressThreshold.count());
     result.append("sampleRate", oldSampleRate);
     if (oldSettings.filter) {
         result.append("filter", oldSettings.filter->serialize());
@@ -131,8 +133,8 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
     }
 
     // Log the change made to server's profiling settings, if the request asks to change anything.
-    if (profilingLevel != -1 || request.getSlowms() || request.getSampleRate() ||
-        request.getFilter()) {
+    if (profilingLevel != -1 || request.getSlowms() || request.getSlowinprogms() ||
+        request.getSampleRate() || request.getFilter()) {
         logv2::DynamicAttributes attrs;
 
         BSONObjBuilder oldState;
@@ -140,6 +142,7 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
 
         oldState.append("level"_sd, oldSettings.level);
         oldState.append("slowms"_sd, oldSlowMS);
+        oldState.append("slowinprogms"_sd, oldSettings.slowOpInProgressThreshold.count());
         oldState.append("sampleRate"_sd, oldSampleRate);
         if (oldSettings.filter) {
             oldState.append("filter"_sd, oldSettings.filter->serialize());
@@ -153,6 +156,7 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
         auto newSettings = dbProfileSettings.getDatabaseProfileSettings(dbName);
         newState.append("level"_sd, newSettings.level);
         newState.append("slowms"_sd, serverGlobalParams.slowMS.load());
+        newState.append("slowinprogms"_sd, newSettings.slowOpInProgressThreshold.count());
         newState.append("sampleRate"_sd, serverGlobalParams.sampleRate.load());
         if (newSettings.filter) {
             newState.append("filter"_sd, newSettings.filter->serialize());
@@ -167,9 +171,9 @@ bool ProfileCmdBase::run(OperationContext* opCtx,
 }
 
 ObjectOrUnset parseObjectOrUnset(const BSONElement& element) {
-    if (element.type() == BSONType::Object) {
+    if (element.type() == BSONType::object) {
         return {{element.Obj()}};
-    } else if (element.type() == BSONType::String && element.String() == "unset"_sd) {
+    } else if (element.type() == BSONType::string && element.String() == "unset"_sd) {
         return {{}};
     } else {
         uasserted(ErrorCodes::BadValue, "Expected an object, or the string 'unset'.");

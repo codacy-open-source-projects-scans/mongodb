@@ -29,30 +29,22 @@
 
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 
-#include <boost/cstdint.hpp>
-#include <boost/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstdint>
-#include <mutex>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/rename_collection.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/error_labels.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/rename_collection.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/persistent_task_store.h"
@@ -64,32 +56,37 @@
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/resharding/recipient_resume_document_gen.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier_progress_gen.h"
 #include "mongo/db/s/resharding/resharding_oplog_fetcher_progress_gen.h"
 #include "mongo/db/s/resharding/resharding_txn_cloner_progress_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/s/session_catalog_migration.h"
-#include "mongo/db/s/sharding_index_catalog_ddl_util.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
-#include "mongo/db/shard_role.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/versioning_protocol/shard_version_factory.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/redaction.h"
-#include "mongo/s/index_version.h"
-#include "mongo/s/shard_version_factory.h"
-#include "mongo/s/sharding_index_catalog_cache.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/log_and_backoff.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
+
+#include <cstdint>
+#include <mutex>
+#include <utility>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
 
@@ -102,13 +99,16 @@ void ensureCollectionExists(OperationContext* opCtx,
     invariant(!shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
 
     writeConflictRetry(opCtx, "resharding::data_copy::ensureCollectionExists", nss, [&] {
-        AutoGetCollection coll(opCtx, nss, MODE_IX);
-        if (coll) {
+        AutoGetDb db(opCtx, nss.dbName(), MODE_IX);
+        const auto coll = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_IX);
+        if (coll.exists()) {
             return;
         }
-
         WriteUnitOfWork wuow(opCtx);
-        coll.ensureDbExists(opCtx)->createCollection(opCtx, nss, options);
+        db.ensureDbExists(opCtx)->createCollection(opCtx, nss, options);
         wuow.commit();
     });
 }
@@ -120,15 +120,19 @@ void ensureCollectionDropped(OperationContext* opCtx,
     invariant(!shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
 
     writeConflictRetry(opCtx, "resharding::data_copy::ensureCollectionDropped", nss, [&] {
-        AutoGetCollection coll(opCtx, nss, MODE_X);
-        if (!coll || (uuid && coll->uuid() != uuid)) {
+        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX);
+        const auto coll = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_X);
+        if (!coll.exists() || (uuid && coll.uuid() != uuid)) {
             // If the collection doesn't exist or exists with a different UUID, then the
             // requested collection has been dropped already.
             return;
         }
 
         WriteUnitOfWork wuow(opCtx);
-        uassertStatusOK(coll.getDb()->dropCollectionEvenIfSystem(
+        uassertStatusOK(autoDb.getDb()->dropCollectionEvenIfSystem(
             opCtx, nss, {} /* dropOpTime */, true /* markFromMigrate */));
         wuow.commit();
     });
@@ -186,35 +190,31 @@ void ensureTemporaryReshardingCollectionRenamed(OperationContext* opCtx,
     // because the coordinator will prevent two resharding operations from running for the same
     // namespace at the same time.
 
-    boost::optional<Timestamp> indexVersion;
     auto tempReshardingNssExists = [&] {
-        AutoGetCollection tempReshardingColl(opCtx, metadata.getTempReshardingNss(), MODE_IS);
+        const auto tempReshardingColl = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(
+                opCtx, metadata.getTempReshardingNss(), AcquisitionPrerequisites::kRead),
+            MODE_IS);
         uassert(ErrorCodes::InvalidUUID,
                 "Temporary resharding collection exists but doesn't have a UUID matching the"
                 " resharding operation",
-                !tempReshardingColl || tempReshardingColl->uuid() == metadata.getReshardingUUID());
-        auto sii = CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(
-                       opCtx, metadata.getTempReshardingNss())
-                       ->getIndexesInCritSec(opCtx);
-        indexVersion = sii
-            ? boost::make_optional<Timestamp>(sii->getCollectionIndexes().indexVersion())
-            : boost::none;
-        return bool(tempReshardingColl);
+                !tempReshardingColl.exists() ||
+                    tempReshardingColl.uuid() == metadata.getReshardingUUID());
+        return tempReshardingColl.exists();
     }();
 
     if (!tempReshardingNssExists) {
-        AutoGetCollection sourceColl(opCtx, metadata.getSourceNss(), MODE_IS);
+        const auto sourceColl =
+            acquireCollection(opCtx,
+                              CollectionAcquisitionRequest::fromOpCtx(
+                                  opCtx, metadata.getSourceNss(), AcquisitionPrerequisites::kRead),
+                              MODE_IS);
         auto errmsg =
             "Temporary resharding collection doesn't exist and hasn't already been renamed"_sd;
-        uassert(ErrorCodes::NamespaceNotFound, errmsg, sourceColl);
-        uassert(
-            ErrorCodes::InvalidUUID, errmsg, sourceColl->uuid() == metadata.getReshardingUUID());
+        uassert(ErrorCodes::NamespaceNotFound, errmsg, sourceColl.exists());
+        uassert(ErrorCodes::InvalidUUID, errmsg, sourceColl.uuid() == metadata.getReshardingUUID());
         return;
-    }
-
-    if (indexVersion) {
-        renameCollectionShardingIndexCatalog(
-            opCtx, metadata.getTempReshardingNss(), metadata.getSourceNss(), *indexVersion);
     }
 
     RenameCollectionOptions options;
@@ -228,10 +228,14 @@ bool isCollectionCapped(OperationContext* opCtx, const NamespaceString& nss) {
     invariant(!shard_role_details::getLocker(opCtx)->isLocked());
     invariant(!shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
 
-    AutoGetCollection coll(opCtx, nss, MODE_IS);
-    uassert(
-        ErrorCodes::NamespaceNotFound, "Temporary resharding collection doesn't exist."_sd, coll);
-    return coll.getCollection()->isCapped();
+    const auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kRead),
+        MODE_IS);
+    uassert(ErrorCodes::NamespaceNotFound,
+            "Temporary resharding collection doesn't exist."_sd,
+            coll.exists());
+    return coll.getCollectionPtr()->isCapped();
 }
 
 void deleteRecipientResumeData(OperationContext* opCtx, const UUID& reshardingUUID) {
@@ -259,7 +263,7 @@ void deleteRecipientResumeData(OperationContext* opCtx, const UUID& reshardingUU
         });
 }
 
-Value findHighestInsertedId(OperationContext* opCtx, const CollectionPtr& collection) {
+Value findHighestInsertedId(OperationContext* opCtx, const CollectionAcquisition& collection) {
     auto doc = findDocWithHighestInsertedId(opCtx, collection);
     if (!doc) {
         return Value{};
@@ -274,12 +278,12 @@ Value findHighestInsertedId(OperationContext* opCtx, const CollectionPtr& collec
 }
 
 boost::optional<Document> findDocWithHighestInsertedId(OperationContext* opCtx,
-                                                       const CollectionPtr& collection) {
-    if (collection && collection->isEmpty(opCtx)) {
+                                                       const CollectionAcquisition& collection) {
+    if (collection.exists() && collection.getCollectionPtr()->isEmpty(opCtx)) {
         return boost::none;
     }
 
-    auto findCommand = std::make_unique<FindCommandRequest>(collection->ns());
+    auto findCommand = std::make_unique<FindCommandRequest>(collection.nss());
     findCommand->setLimit(1);
     findCommand->setSort(BSON("_id" << -1));
 
@@ -288,46 +292,20 @@ boost::optional<Document> findDocWithHighestInsertedId(OperationContext* opCtx,
         return boost::none;
     }
 
-    auto doc = collection->docFor(opCtx, recordId).value();
+    auto doc = collection.getCollectionPtr()->docFor(opCtx, recordId).value();
     return Document{doc};
-}
-
-std::vector<InsertStatement> fillBatchForInsert(Pipeline& pipeline, int batchSizeLimitBytes) {
-    // The BlockingResultsMerger underlying by the $mergeCursors stage records how long the
-    // recipient spent waiting for documents from the donor shards. It doing so requires the CurOp
-    // to be marked as having started.
-    auto opCtx = pipeline.getContext()->getOperationContext();
-    auto* curOp = CurOp::get(opCtx);
-    curOp->ensureStarted();
-    ON_BLOCK_EXIT([curOp] { curOp->done(); });
-
-    std::vector<InsertStatement> batch;
-
-    int numBytes = 0;
-    do {
-        auto doc = pipeline.getNext();
-        if (!doc) {
-            break;
-        }
-
-        auto obj = doc->toBson();
-        batch.emplace_back(obj.getOwned());
-        numBytes += obj.objsize();
-    } while (numBytes < batchSizeLimitBytes);
-
-    return batch;
 }
 
 int insertBatchTransactionally(OperationContext* opCtx,
                                const NamespaceString& nss,
-                               const boost::optional<ShardingIndexesCatalogCache>& sii,
                                TxnNumber& txnNumber,
                                std::vector<InsertStatement>& batch,
                                const UUID& reshardingUUID,
                                const ShardId& donorShard,
                                const HostAndPort& donorHost,
-                               const BSONObj& resumeToken) {
-    int numBytes = 0;
+                               const BSONObj& resumeToken,
+                               bool storeProgress) {
+    long long numBytes = 0;
     int attempt = 1;
     for (auto insert = batch.begin(); insert != batch.end(); ++insert) {
         numBytes += insert->doc.objsize();
@@ -341,13 +319,14 @@ int insertBatchTransactionally(OperationContext* opCtx,
                 "txnNumber"_attr = txnNumber,
                 "donorShard"_attr = donorShard,
                 "donorHost"_attr = donorHost,
-                "resumeToken"_attr = resumeToken);
+                "resumeToken"_attr = resumeToken,
+                "storeProgress"_attr = storeProgress);
 
     while (true) {
         try {
             ++txnNumber;
             opCtx->setTxnNumber(txnNumber);
-            runWithTransactionFromOpCtx(opCtx, nss, sii, [&](OperationContext* opCtx) {
+            runWithTransactionFromOpCtx(opCtx, nss, [&](OperationContext* opCtx) {
                 const auto outputColl =
                     acquireCollection(opCtx,
                                       CollectionAcquisitionRequest::fromOpCtx(
@@ -373,15 +352,30 @@ int insertBatchTransactionally(OperationContext* opCtx,
                             NamespaceString::kRecipientReshardingResumeDataNamespace),
                         AcquisitionPrerequisites::kWrite),
                     MODE_IX);
-                ReshardingRecipientResumeData resumeData({reshardingUUID, donorShard});
-                resumeData.setDonorHost(donorHost);
-                resumeData.setResumeToken(resumeToken);
-                auto resumeDataBSON = resumeData.toBSON();
+
+                auto resumeDataIdBSON =
+                    ReshardingRecipientResumeDataId{reshardingUUID, donorShard}.toBSON();
+                auto query = BSON(ReshardingRecipientResumeData::kIdFieldName << resumeDataIdBSON);
+                BSONObjBuilder updateModBuilder;
+                updateModBuilder.append(
+                    "$set",
+                    BSON(ReshardingRecipientResumeData::kIdFieldName
+                         << resumeDataIdBSON << ReshardingRecipientResumeData::kDonorHostFieldName
+                         << donorHost.toString()
+                         << ReshardingRecipientResumeData::kResumeTokenFieldName << resumeToken));
+                if (storeProgress) {
+                    updateModBuilder.append(
+                        "$inc",
+                        BSON(ReshardingRecipientResumeData::kDocumentsCopiedFieldName
+                             << static_cast<long long>(batch.size())
+                             << ReshardingRecipientResumeData::kBytesCopiedFieldName << numBytes));
+                }
+
                 UpdateRequest updateRequest;
                 updateRequest.setNamespaceString(
                     NamespaceString::kRecipientReshardingResumeDataNamespace);
-                updateRequest.setQuery(resumeDataBSON["_id"].wrap());
-                updateRequest.setUpdateModification(resumeDataBSON);
+                updateRequest.setQuery(query);
+                updateRequest.setUpdateModification(updateModBuilder.obj());
                 updateRequest.setUpsert(true);
                 updateRequest.setYieldPolicy(PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
                 UpdateResult ur = update(opCtx, resumeDataColl, updateRequest);
@@ -443,63 +437,8 @@ int insertBatch(OperationContext* opCtx,
     });
 }
 
-boost::optional<SharedSemiFuture<void>> withSessionCheckedOut(OperationContext* opCtx,
-                                                              LogicalSessionId lsid,
-                                                              TxnNumber txnNumber,
-                                                              boost::optional<StmtId> stmtId,
-                                                              unique_function<void()> callable) {
-    {
-        auto lk = stdx::lock_guard(*opCtx->getClient());
-        opCtx->setLogicalSessionId(std::move(lsid));
-        opCtx->setTxnNumber(txnNumber);
-    }
-
-    auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
-    auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
-
-    auto txnParticipant = TransactionParticipant::get(opCtx);
-
-    try {
-        txnParticipant.beginOrContinue(opCtx,
-                                       {txnNumber},
-                                       boost::none /* autocommit */,
-                                       TransactionParticipant::TransactionActions::kNone);
-
-        if (stmtId && txnParticipant.checkStatementExecuted(opCtx, *stmtId)) {
-            // Skip the incoming statement because it has already been logged locally.
-            return boost::none;
-        }
-    } catch (const ExceptionFor<ErrorCodes::TransactionTooOld>&) {
-        // txnNumber < txnParticipant.o().activeTxnNumber
-        return boost::none;
-    } catch (const ExceptionFor<ErrorCodes::IncompleteTransactionHistory>&) {
-        // txnNumber == txnParticipant.o().activeTxnNumber &&
-        // !txnParticipant.transactionIsInRetryableWriteMode()
-        //
-        // If the transaction chain is incomplete because the oplog was truncated, just ignore the
-        // incoming write and don't attempt to "patch up" the missing pieces.
-        //
-        // This situation could also happen if the client reused the txnNumber for distinct
-        // operations (which is a violation of the protocol). The client would receive an error if
-        // they attempted to retry the retryable write they had reused the txnNumber with so it is
-        // safe to leave config.transactions as-is.
-        return boost::none;
-    } catch (const ExceptionFor<ErrorCodes::PreparedTransactionInProgress>&) {
-        // txnParticipant.transactionIsPrepared()
-        return txnParticipant.onExitPrepare();
-    } catch (const ExceptionFor<ErrorCodes::RetryableTransactionInProgress>&) {
-        // This is a retryable write that was executed using an internal transaction and there is
-        // a retry in progress.
-        return txnParticipant.onConflictingInternalTransactionCompletion(opCtx);
-    }
-
-    callable();
-    return boost::none;
-}
-
 void runWithTransactionFromOpCtx(OperationContext* opCtx,
                                  const NamespaceString& nss,
-                                 const boost::optional<ShardingIndexesCatalogCache>& sii,
                                  unique_function<void(OperationContext*)> func) {
     auto* const client = opCtx->getClient();
     opCtx->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
@@ -507,18 +446,6 @@ void runWithTransactionFromOpCtx(OperationContext* opCtx,
     AuthorizationSession::get(client)->grantInternalAuthorization();
     TxnNumber txnNumber = *opCtx->getTxnNumber();
     opCtx->setInMultiDocumentTransaction();
-
-    // ReshardingOpObserver depends on the collection metadata being known when processing writes to
-    // the temporary resharding collection. We attach placement version IGNORED to the write
-    // operations and leave it to ReshardingOplogBatchApplier::applyBatch() to retry on a
-    // StaleConfig error to allow the collection metadata information to be recovered.
-    ScopedSetShardRole scopedSetShardRole(
-        opCtx,
-        nss,
-        ShardVersionFactory::make(ChunkVersion::IGNORED(),
-                                  sii ? boost::make_optional(sii->getCollectionIndexes())
-                                      : boost::none) /* shardVersion */,
-        boost::none /* databaseVersion */);
 
     auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx);
     auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
@@ -584,7 +511,7 @@ void updateSessionRecord(OperationContext* opCtx,
     oplogEntry.setPreImageOpTime(std::move(preImageOpTime));
     oplogEntry.setPostImageOpTime(std::move(postImageOpTime));
     oplogEntry.setPrevWriteOpTimeInTransaction(txnParticipant.getLastWriteOpTime());
-    oplogEntry.setWallClockTime(opCtx->getServiceContext()->getFastClockSource()->now());
+    oplogEntry.setWallClockTime(opCtx->fastClockSource().now());
     oplogEntry.setFromMigrate(true);
 
     writeConflictRetry(
@@ -628,7 +555,7 @@ std::vector<ReshardingRecipientResumeData> getRecipientResumeData(OperationConte
     while (cursor->more()) {
         auto obj = cursor->nextSafe();
         results.emplace_back(ReshardingRecipientResumeData::parseOwned(
-            IDLParserContext("resharding::data_copy::getRecipientResumeData"), std::move(obj)));
+            std::move(obj), IDLParserContext("resharding::data_copy::getRecipientResumeData")));
     }
     return results;
 }

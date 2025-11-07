@@ -27,6 +27,23 @@
  *    it in the license file.
  */
 
+#include "mongo/transport/grpc/service.h"
+
+#include "mongo/db/wire_version.h"
+#include "mongo/logv2/constants.h"
+#include "mongo/logv2/log.h"
+#include "mongo/rpc/message.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/transport/grpc/grpc_server_context.h"
+#include "mongo/transport/grpc/metadata.h"
+#include "mongo/transport/grpc/test_fixtures.h"
+#include "mongo/transport/grpc/util.h"
+#include "mongo/transport/grpc/wire_version_provider.h"
+#include "mongo/unittest/log_test.h"
+#include "mongo/unittest/thread_assertion_monitor.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/concurrency/notification.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <memory>
@@ -38,25 +55,6 @@
 #include <grpcpp/support/byte_buffer.h>
 #include <grpcpp/support/status_code_enum.h>
 #include <grpcpp/support/sync_stream.h>
-
-#include "mongo/db/wire_version.h"
-#include "mongo/logv2/constants.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/rpc/message.h"
-#include "mongo/stdx/thread.h"
-#include "mongo/transport/grpc/grpc_server_context.h"
-#include "mongo/transport/grpc/metadata.h"
-#include "mongo/transport/grpc/service.h"
-#include "mongo/transport/grpc/test_fixtures.h"
-#include "mongo/transport/grpc/util.h"
-#include "mongo/transport/grpc/wire_version_provider.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/log_test.h"
-#include "mongo/unittest/thread_assertion_monitor.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/util/concurrency/notification.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -152,16 +150,15 @@ public:
                     logv2::LogComponent::kNetwork,
                     logv2::LogSeverity::Debug(logv2::LogSeverity::kMaxDebugLevel)};
 
-                startCapturingLogMessages();
+                unittest::LogCaptureGuard logs;
                 for (size_t i = 0; i < nStreamsToCreate; i++) {
                     ::grpc::ClientContext ctx;
                     initContext(ctx);
                     auto stream = streamFactory(ctx, stub);
                     ASSERT_EQ(stream->Finish().error_code(), ::grpc::OK);
                 }
-                stopCapturingLogMessages();
-
-                auto logLines = getCapturedBSONFormatLogMessages();
+                logs.stop();
+                auto logLines = logs.getBSON();
                 auto observed =
                     std::count_if(logLines.cbegin(), logLines.cend(), [&](const BSONObj& line) {
                         return line.getStringField(logv2::constants::kSeverityFieldName) ==
@@ -316,16 +313,16 @@ TEST_F(CommandServiceTest, ClientCancellation) {
 
 TEST_F(CommandServiceTest, TooLowWireVersionIsRejected) {
     ContextInitializerType initContext = [](auto& ctx) {
-        ctx.AddMetadata(util::constants::kWireVersionKey.toString(), "-1");
-        ctx.AddMetadata(util::constants::kAuthenticationTokenKey.toString(), "my-token");
+        ctx.AddMetadata(std::string{util::constants::kWireVersionKey}, "-1");
+        ctx.AddMetadata(std::string{util::constants::kAuthenticationTokenKey}, "my-token");
     };
     runMetadataValidationTest(::grpc::StatusCode::FAILED_PRECONDITION, initContext);
 }
 
 TEST_F(CommandServiceTest, InvalidWireVersionIsRejected) {
     ContextInitializerType initContext = [](auto& ctx) {
-        ctx.AddMetadata(util::constants::kWireVersionKey.toString(), "foo");
-        ctx.AddMetadata(util::constants::kAuthenticationTokenKey.toString(), "my-token");
+        ctx.AddMetadata(std::string{util::constants::kWireVersionKey}, "foo");
+        ctx.AddMetadata(std::string{util::constants::kAuthenticationTokenKey}, "my-token");
     };
     runMetadataValidationTest(::grpc::StatusCode::INVALID_ARGUMENT, initContext);
 }
@@ -333,14 +330,14 @@ TEST_F(CommandServiceTest, InvalidWireVersionIsRejected) {
 TEST_F(CommandServiceTest, InvalidClientIdIsRejected) {
     ContextInitializerType initContext = [](auto& ctx) {
         CommandServiceTestFixtures::addRequiredClientMetadata(ctx);
-        ctx.AddMetadata(util::constants::kClientIdKey.toString(), "not a valid UUID");
+        ctx.AddMetadata(std::string{util::constants::kClientIdKey}, "not a valid UUID");
     };
     runMetadataValidationTest(::grpc::StatusCode::INVALID_ARGUMENT, initContext);
 }
 
 TEST_F(CommandServiceTest, MissingWireVersionIsRejected) {
     ContextInitializerType initContext = [](auto& ctx) {
-        ctx.AddMetadata(util::constants::kAuthenticationTokenKey.toString(), "my-token");
+        ctx.AddMetadata(std::string{util::constants::kAuthenticationTokenKey}, "my-token");
     };
     runMetadataValidationTest(::grpc::StatusCode::FAILED_PRECONDITION, initContext);
 }
@@ -348,7 +345,7 @@ TEST_F(CommandServiceTest, MissingWireVersionIsRejected) {
 TEST_F(CommandServiceTest, ClientMetadataDocumentIsOptional) {
     ContextInitializerType initContext = [](auto& ctx) {
         CommandServiceTestFixtures::addRequiredClientMetadata(ctx);
-        ctx.AddMetadata(util::constants::kClientIdKey.toString(), UUID::gen().toString());
+        ctx.AddMetadata(std::string{util::constants::kClientIdKey}, UUID::gen().toString());
     };
     runMetadataValidationTest(::grpc::StatusCode::OK, initContext);
 }
@@ -368,7 +365,7 @@ TEST_F(CommandServiceTest, InvalidMetadataDocumentBase64Encoding) {
     // returning an error in such cases.
     ContextInitializerType initContext = [](auto& ctx) {
         CommandServiceTestFixtures::addRequiredClientMetadata(ctx);
-        ctx.AddMetadata(util::constants::kClientMetadataKey.toString(), "notvalidbase64:l;;?");
+        ctx.AddMetadata(std::string{util::constants::kClientMetadataKey}, "notvalidbase64:l;;?");
     };
     runMetadataValidationTest(::grpc::StatusCode::OK, initContext);
 }
@@ -376,7 +373,8 @@ TEST_F(CommandServiceTest, InvalidMetadataDocumentBase64Encoding) {
 TEST_F(CommandServiceTest, InvalidMetadataDocumentBSON) {
     ContextInitializerType initContext = [](auto& ctx) {
         CommandServiceTestFixtures::addRequiredClientMetadata(ctx);
-        ctx.AddMetadata(util::constants::kClientMetadataKey.toString(), base64::encode("Not BSON"));
+        ctx.AddMetadata(std::string{util::constants::kClientMetadataKey},
+                        base64::encode("Not BSON"));
     };
     runMetadataValidationTest(::grpc::StatusCode::OK, initContext);
 }
@@ -393,7 +391,7 @@ TEST_F(CommandServiceTest, NewClientsAreLogged) {
     ContextInitializerType initContext = [clientId = UUID::gen().toString()](auto& ctx) {
         CommandServiceTestFixtures::addRequiredClientMetadata(ctx);
         CommandServiceTestFixtures::addClientMetadataDocument(ctx);
-        ctx.AddMetadata(util::constants::kClientIdKey.toString(), clientId);
+        ctx.AddMetadata(std::string{util::constants::kClientIdKey}, clientId);
     };
     runMetadataLogTest(initContext,
                        5,  // nStreamsToCreate
@@ -415,7 +413,7 @@ TEST_F(CommandServiceTest, OmittedClientIdIsLogged) {
 TEST_F(CommandServiceTest, NoLogsForMissingMetadataDocument) {
     ContextInitializerType initContext = [clientId = UUID::gen().toString()](auto& ctx) {
         CommandServiceTestFixtures::addRequiredClientMetadata(ctx);
-        ctx.AddMetadata(util::constants::kClientIdKey.toString(), clientId);
+        ctx.AddMetadata(std::string{util::constants::kClientIdKey}, clientId);
     };
     runMetadataLogTest(initContext,
                        7,  // nStreamsToCreate
@@ -511,10 +509,10 @@ TEST_F(CommandServiceTest, AuthTokenHandling) {
         [&](const HostAndPort& addr, bool useAuth, boost::optional<std::string> authToken) {
             ::grpc::ClientContext ctx;
             auto stub = CommandServiceTestFixtures::makeStub(addr);
-            ctx.AddMetadata(util::constants::kWireVersionKey.toString(),
+            ctx.AddMetadata(std::string{util::constants::kWireVersionKey},
                             std::to_string(wireVersionProvider().getClusterMaxWireVersion()));
             if (authToken) {
-                ctx.AddMetadata(util::constants::kAuthenticationTokenKey.toString(), *authToken);
+                ctx.AddMetadata(std::string{util::constants::kAuthenticationTokenKey}, *authToken);
             }
             auto stream = useAuth ? stub.authenticatedCommandStream(&ctx)
                                   : stub.unauthenticatedCommandStream(&ctx);
@@ -560,8 +558,8 @@ TEST_F(CommandServiceTest, AuthTokenHandling) {
 TEST_F(CommandServiceTest, ServerProvidesClusterMaxWireVersion) {
     ClientCallbackType clientCallback = [&](auto&, auto stub, auto streamFactory, auto&) {
         ::grpc::ClientContext ctx;
-        ctx.AddMetadata(util::constants::kAuthenticationTokenKey.toString(), "my-token");
-        ctx.AddMetadata(util::constants::kWireVersionKey.toString(),
+        ctx.AddMetadata(std::string{util::constants::kAuthenticationTokenKey}, "my-token");
+        ctx.AddMetadata(std::string{util::constants::kWireVersionKey},
                         std::to_string(WireVersion::WIRE_VERSION_50));
 
         auto stream = streamFactory(ctx, stub);
@@ -688,16 +686,16 @@ TEST_F(CommandServiceTest, Shutdown) {
 }
 
 TEST(GRPCInteropTest, SharedBufferDeserialize) {
-    auto deserializationTest = [](std::vector<::grpc::Slice> slices, std::string_view expected) {
+    auto deserializationTest = [](std::vector<::grpc::Slice> slices, StringData expected) {
         SharedBuffer out;
         ::grpc::ByteBuffer buffer(&slices[0], slices.size());
         auto status = ::grpc::SerializationTraits<SharedBuffer>::Deserialize(&buffer, &out);
         ASSERT_TRUE(status.ok()) << "expected deserialization to succeed: "
                                  << status.error_message();
-        ASSERT_EQ((std::string_view{out.get(), expected.length()}), expected);
+        ASSERT_EQ(StringData(out.get(), expected.size()), expected);
     };
 
-    std::string_view expected{"foobar"};
+    StringData expected{"foobar"};
     deserializationTest({std::string{"foobar"}}, expected);
     deserializationTest({std::string{"foo"}, std::string{"bar"}}, expected);
 }

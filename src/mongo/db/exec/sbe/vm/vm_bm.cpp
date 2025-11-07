@@ -27,13 +27,7 @@
  *    it in the license file.
  */
 
-#include <benchmark/benchmark.h>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/exec/sbe/vm/vm.h"
 
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -44,12 +38,19 @@
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/db/query/collation/collator_factory_icu.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/platform/random.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <benchmark/benchmark.h>
+
 
 namespace mongo::sbe {
 namespace {
@@ -117,8 +118,7 @@ public:
         auto [tag, value] = value::makeNewArraySet(collator);
         auto* arraySet = value::getArraySetView(value);
         for (const auto& [tag, value] : values) {
-            auto [tagCopy, valueCopy] = value::copyValue(tag, value);
-            arraySet->push_back(tagCopy, valueCopy);
+            arraySet->push_back_clone(tag, value);
         }
         return {tag, value};
     }
@@ -140,9 +140,8 @@ public:
     }
 
     std::unique_ptr<CollatorInterface> createCollator() {
-        auto statusWithCollator = _collatorFactory.makeFromBSON(BSON("locale"
-                                                                     << "en_US"));
-        invariant(statusWithCollator.getStatus());
+        auto statusWithCollator = _collatorFactory.makeFromBSON(BSON("locale" << "en_US"));
+        tassert(11093705, "Could not create collator", statusWithCollator.isOK());
         return std::move(statusWithCollator.getValue());
     }
 

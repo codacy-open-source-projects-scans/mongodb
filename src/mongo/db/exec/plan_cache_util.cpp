@@ -29,36 +29,30 @@
 
 #include "mongo/db/exec/plan_cache_util.h"
 
-#include <absl/container/node_hash_map.h>
-#include <boost/optional/optional.hpp>
-#include <queue>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/basic_types_gen.h"
-#include "mongo/db/exec/multi_plan.h"
+#include "mongo/db/exec/classic/multi_plan.h"
+#include "mongo/db/exec/plan_cache_callbacks_impl.h"
 #include "mongo/db/query/canonical_query_encoder.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/index_entry.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
-#include "mongo/db/query/plan_cache/plan_cache_callbacks.h"
 #include "mongo/db/query/plan_cache/plan_cache_key_factory.h"
 #include "mongo/db/query/plan_cache/sbe_plan_cache.h"
 #include "mongo/db/query/plan_explainer_factory.h"
 #include "mongo/db/query/plan_explainer_impl.h"
-#include "mongo/db/query/stage_builder/stage_builder_util.h"
-#include "mongo/db/query/stage_types.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/stdx/unordered_map.h"
-#include "mongo/util/overloaded_visitor.h"
+
+#include <queue>
+#include <string>
+
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -133,7 +127,7 @@ bool shouldCacheBasedOnQueryAndPlan(const CanonicalQuery& query, const QuerySolu
 
 void updateClassicPlanCacheFromClassicCandidatesImpl(
     OperationContext* opCtx,
-    const CollectionPtr& collection,
+    const CollectionAcquisition& collection,
     const CanonicalQuery& query,
     ReadsOrWorks readsOrWorks,
     std::unique_ptr<plan_ranker::PlanRankingDecision> ranking,
@@ -153,15 +147,15 @@ void updateClassicPlanCacheFromClassicCandidatesImpl(
         return plan.toString();
     };
     PlanCacheCallbacksImpl<PlanCacheKey, SolutionCacheData, plan_cache_debug_info::DebugInfo>
-        callbacks{query, buildDebugInfoFn, printCachedPlanFn};
+        callbacks{query, buildDebugInfoFn, printCachedPlanFn, collection.getCollectionPtr()};
     winningPlan.solution->cacheData->indexFilterApplied = winningPlan.solution->indexFilterApplied;
     winningPlan.solution->cacheData->solutionHash = winningPlan.solution->hash();
     auto isSensitive = CurOp::get(opCtx)->getShouldOmitDiagnosticInformation();
 
     auto key = plan_cache_key_factory::make<PlanCacheKey>(query, collection);
 
-    uassertStatusOK(
-        CollectionQueryInfo::get(collection)
+    size_t evictedCount = uassertStatusOK(
+        CollectionQueryInfo::get(collection.getCollectionPtr())
             .getPlanCache()
             ->set(std::move(key),
                   winningPlan.solution->cacheData->clone(),
@@ -170,6 +164,7 @@ void updateClassicPlanCacheFromClassicCandidatesImpl(
                   &callbacks,
                   isSensitive ? PlanSecurityLevel::kSensitive : PlanSecurityLevel::kNotSensitive,
                   boost::none /* worksGrowthCoefficient */));
+    planCacheCounters.incrementClassicCachedPlansEvictedCounter(evictedCount);
 }
 
 void updateSbePlanCache(OperationContext* opCtx,
@@ -188,11 +183,11 @@ void updateSbePlanCache(OperationContext* opCtx,
     PlanCacheCallbacksImpl<sbe::PlanCacheKey,
                            sbe::CachedSbePlan,
                            plan_cache_debug_info::DebugInfoSBE>
-        callbacks{query, buildDebugInfoFn, printCachedPlanFn};
+        callbacks{query, buildDebugInfoFn, printCachedPlanFn, collections.getMainCollection()};
 
     auto isSensitive = CurOp::get(opCtx)->getShouldOmitDiagnosticInformation();
 
-    uassertStatusOK(sbe::getPlanCache(opCtx).set(
+    size_t evictedCount = uassertStatusOK(sbe::getPlanCache(opCtx).set(
         plan_cache_key_factory::make(query, collections),
         std::move(cachedPlan),
         nReads,
@@ -200,13 +195,14 @@ void updateSbePlanCache(OperationContext* opCtx,
         &callbacks,
         isSensitive ? PlanSecurityLevel::kSensitive : PlanSecurityLevel::kNotSensitive,
         boost::none /* worksGrowthCoefficient */));
+    planCacheCounters.incrementSbeCachedPlansEvictedCounter(evictedCount);
 }
 
 }  // namespace
 
 void updateClassicPlanCacheFromClassicCandidatesForSbeExecution(
     OperationContext* opCtx,
-    const CollectionPtr& collection,
+    const CollectionAcquisition& collection,
     const CanonicalQuery& query,
     NumReads reads,
     std::unique_ptr<plan_ranker::PlanRankingDecision> ranking,
@@ -219,7 +215,7 @@ void updateClassicPlanCacheFromClassicCandidatesForSbeExecution(
 
 void updateClassicPlanCacheFromClassicCandidatesForClassicExecution(
     OperationContext* opCtx,
-    const CollectionPtr& collection,
+    const CollectionAcquisition& collection,
     const CanonicalQuery& query,
     std::unique_ptr<plan_ranker::PlanRankingDecision> ranking,
     std::vector<plan_ranker::CandidatePlan>& candidates) {
@@ -265,7 +261,7 @@ void updateSbePlanCacheWithPinnedEntry(OperationContext* opCtx,
 
         bool shouldOmitDiagnosticInformation =
             CurOp::get(opCtx)->getShouldOmitDiagnosticInformation();
-        sbe::getPlanCache(opCtx).setPinned(
+        size_t evictedCount = sbe::getPlanCache(opCtx).setPinned(
             key,
             canonical_query_encoder::computeHash(
                 canonical_query_encoder::encodeForPlanCacheCommand(query)),
@@ -273,6 +269,7 @@ void updateSbePlanCacheWithPinnedEntry(OperationContext* opCtx,
             opCtx->getServiceContext()->getPreciseClockSource()->now(),
             buildDebugInfo(&solution),
             shouldOmitDiagnosticInformation);
+        planCacheCounters.incrementSbeCachedPlansEvictedCounter(evictedCount);
     }
 }
 
@@ -294,7 +291,10 @@ plan_cache_debug_info::DebugInfo buildDebugInfo(
             findCommand.getFilter().getOwned(),
             findCommand.getSort().getOwned(),
             projBuilder.obj().getOwned(),
-            query.getCollator() ? query.getCollator()->getSpec().toBSON() : BSONObj()};
+            query.getCollator() ? query.getCollator()->getSpec().toBSON() : BSONObj(),
+            query.getDistinct()
+                ? BSONObjBuilder{}.append("key", query.getDistinct()->getKey()).obj()
+                : BSONObj()};
 
     return {std::move(createdFromQuery), std::move(decision)};
 }
@@ -357,13 +357,28 @@ plan_cache_debug_info::DebugInfoSBE buildDebugInfo(const QuerySolution* solution
             case STAGE_EQ_LOOKUP: {
                 auto eln = static_cast<const EqLookupNode*>(node);
                 auto& secondaryStats = debugInfo.secondaryStats[eln->foreignCollection];
-                if (eln->lookupStrategy == EqLookupNode::LookupStrategy::kIndexedLoopJoin) {
-                    tassert(6466200, "Index join lookup should have an index entry", eln->idxEntry);
-                    secondaryStats.indexesUsed.push_back(eln->idxEntry->identifier.catalogName);
-                } else {
-                    secondaryStats.collectionScans++;
+                switch (eln->lookupStrategy) {
+                    case EqLookupNode::LookupStrategy::kNonExistentForeignCollection:
+                    case EqLookupNode::LookupStrategy::kHashJoin:
+                    case EqLookupNode::LookupStrategy::kNestedLoopJoin:
+                        secondaryStats.collectionScans++;
+                        break;
+                    case EqLookupNode::LookupStrategy::kDynamicIndexedLoopJoin: {
+                        tassert(8155502,
+                                "Dynamic indexed loop join lookup should have an index entry",
+                                eln->idxEntry);
+                        secondaryStats.indexesUsed.push_back(eln->idxEntry->identifier.catalogName);
+                        secondaryStats.collectionScans++;
+                        break;
+                    }
+                    case EqLookupNode::LookupStrategy::kIndexedLoopJoin: {
+                        tassert(
+                            6466200, "Index join lookup should have an index entry", eln->idxEntry);
+                        secondaryStats.indexesUsed.push_back(eln->idxEntry->identifier.catalogName);
+                        break;
+                    }
                 }
-                [[fallthrough]];
+                break;
             }
             default:
                 break;
@@ -387,14 +402,14 @@ void ClassicPlanCacheWriter::operator()(const CanonicalQuery& cq,
 
     if (_executeInSbe) {
         auto stats = mps.getStats();
-        auto nReads = computeNumReadsFromWorks(*stats, *ranking);
+        auto nReads = computeNumReadsFromStats(*stats, *ranking);
 
         updateClassicPlanCacheFromClassicCandidatesForSbeExecution(
-            _opCtx, _collection.getCollectionPtr(), cq, nReads, std::move(ranking), candidates);
+            _opCtx, _collection, cq, nReads, std::move(ranking), candidates);
     } else {
         // We've been asked to write a works value, for classic execution.
         updateClassicPlanCacheFromClassicCandidatesForClassicExecution(
-            _opCtx, _collection.getCollectionPtr(), cq, std::move(ranking), candidates);
+            _opCtx, _collection, cq, std::move(ranking), candidates);
     }
 }
 
@@ -459,11 +474,19 @@ bool ConditionalClassicPlanCacheWriter::shouldCacheBasedOnCachingMode(
     MONGO_UNREACHABLE;
 }
 
-NumReads computeNumReadsFromWorks(const PlanStageStats& stats,
+NumReads computeNumReadsFromStats(const PlanStageStats& stats,
                                   const plan_ranker::PlanRankingDecision& ranking) {
     auto winnerIdx = ranking.candidateOrder[0];
     auto summary = collectExecutionStatsSummary(&stats, winnerIdx);
-    return NumReads{summary.totalKeysExamined + summary.totalDocsExamined};
+
+    // The original "all classic" multiplanner uses the "works" stat as its unit of measure for
+    // tracking how much work a plan has done, while this multiplanner (the "CRP SBE" multiplanner)
+    // uses the "reads" metric (totalKeysExamined + totalDocsExamined) as its unit of measure.
+    //
+    // The "works" stat is always greater than zero. To play it safe and make it easier for the "all
+    // classic" and "CRP SBE" multiplanners to coexist, this function makes sure to always return
+    // a positive "reads" value.
+    return NumReads{std::max<size_t>(summary.totalKeysExamined + summary.totalDocsExamined, 1)};
 }
 
 }  // namespace plan_cache_util

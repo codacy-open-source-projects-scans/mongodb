@@ -27,16 +27,7 @@
  *    it in the license file.
  */
 
-#include "range_predicate.h"
-
-#include <algorithm>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <functional>
-#include <iterator>
-#include <utility>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/query/fle/range_predicate.h"
 
 #include "mongo/crypto/fle_crypto.h"
 #include "mongo/crypto/fle_tags.h"
@@ -48,6 +39,14 @@
 #include "mongo/db/query/fle/encrypted_predicate.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <algorithm>
+#include <functional>
+#include <iterator>
+#include <utility>
+
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::fle {
 
@@ -98,7 +97,7 @@ std::unique_ptr<ExpressionInternalFLEBetween> RangePredicate::fleBetweenFromPayl
     StringData path, ParsedFindRangePayload payload) const {
     auto* expCtx = _rewriter->getExpressionContext();
     return fleBetweenFromPayload(ExpressionFieldPath::createPathFromString(
-                                     expCtx, path.toString(), expCtx->variablesParseState),
+                                     expCtx, std::string{path}, expCtx->variablesParseState),
                                  payload);
 }
 
@@ -111,14 +110,12 @@ std::unique_ptr<ExpressionInternalFLEBetween> RangePredicate::fleBetweenFromPayl
     std::vector<ServerZerosEncryptionToken> serverZerosTokens;
     serverZerosTokens.reserve(payload.edges.value().size());
 
-    std::transform(
-        std::make_move_iterator(payload.edges.value().begin()),
-        std::make_move_iterator(payload.edges.value().end()),
-        std::back_inserter(serverZerosTokens),
-        [](FLEFindEdgeTokenSet&& edge) {
-            return FLEServerMetadataEncryptionTokenGenerator::generateServerZerosEncryptionToken(
-                edge.server);
-        });
+    std::transform(std::make_move_iterator(payload.edges.value().begin()),
+                   std::make_move_iterator(payload.edges.value().end()),
+                   std::back_inserter(serverZerosTokens),
+                   [](FLEFindEdgeTokenSet&& edge) {
+                       return ServerZerosEncryptionToken::deriveFrom(edge.server);
+                   });
 
     auto* expCtx = _rewriter->getExpressionContext();
     return std::make_unique<ExpressionInternalFLEBetween>(

@@ -27,6 +27,52 @@
  *    it in the license file.
  */
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bson_depth.h"
+#include "mongo/bson/json.h"
+#include "mongo/bson/oid.h"
+#include "mongo/db/auth/access_checks_gen.h"
+#include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/authorization_checks.h"
+#include "mongo/db/auth/authorization_contract.h"
+#include "mongo/db/auth/authorization_contract_guard.h"
+#include "mongo/db/auth/authorization_manager.h"
+#include "mongo/db/auth/authorization_session_test_fixture.h"
+#include "mongo/db/auth/builtin_roles.h"
+#include "mongo/db/auth/privilege.h"
+#include "mongo/db/auth/role_name.h"
+#include "mongo/db/auth/user_request_x509.h"
+#include "mongo/db/auth/validated_tenancy_scope.h"
+#include "mongo/db/client.h"
+#include "mongo/db/commands/query_cmd/release_memory_cmd.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/exec/classic/queued_data_stage.h"
+#include "mongo/db/local_catalog/ddl/list_collections_gen.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/query/client_cursor/cursor_manager.h"
+#include "mongo/db/query/plan_executor_factory.h"
+#include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/tenant_id.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/transport/mock_session.h"
+#include "mongo/transport/session.h"
+#include "mongo/transport/transport_layer_mock.h"
+#include "mongo/unittest/death_test.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/net/sockaddr.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
+
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
@@ -39,39 +85,6 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bson_depth.h"
-#include "mongo/bson/json.h"
-#include "mongo/bson/oid.h"
-#include "mongo/db/auth/access_checks_gen.h"
-#include "mongo/db/auth/authorization_checks.h"
-#include "mongo/db/auth/authorization_contract.h"
-#include "mongo/db/auth/authorization_manager.h"
-#include "mongo/db/auth/authorization_session_test_fixture.h"
-#include "mongo/db/auth/role_name.h"
-#include "mongo/db/auth/user_request_x509.h"
-#include "mongo/db/auth/validated_tenancy_scope.h"
-#include "mongo/db/client.h"
-#include "mongo/db/database_name.h"
-#include "mongo/db/list_collections_gen.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/tenant_id.h"
-#include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/transport/mock_session.h"
-#include "mongo/transport/session.h"
-#include "mongo/transport/transport_layer_mock.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/net/sockaddr.h"
-#include "mongo/util/time_support.h"
-#include "mongo/util/uuid.h"
-
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
@@ -82,6 +95,22 @@ public:
     using AuthorizationSessionTestFixture::AuthorizationSessionTestFixture;
 
     void testInvalidateUser();
+
+    std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeFakePlanExecutor(
+        OperationContext* _opCtx, NamespaceString nss) {
+        // Create a mock ExpressionContext.
+        auto expCtx = ExpressionContextBuilder{}.opCtx(_opCtx).ns(nss).build();
+        auto workingSet = std::make_unique<WorkingSet>();
+        auto queuedDataStage = std::make_unique<QueuedDataStage>(expCtx.get(), workingSet.get());
+        return unittest::assertGet(
+            plan_executor_factory::make(expCtx,
+                                        std::move(workingSet),
+                                        std::move(queuedDataStage),
+                                        boost::none,
+                                        PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
+                                        QueryPlannerParams::DEFAULT,
+                                        nss));
+    }
 };
 
 class AuthorizationSessionTestWithoutAuth : public AuthorizationSessionTest {
@@ -139,8 +168,6 @@ const std::unique_ptr<UserRequest> kTenant1UserTestRequest =
 const UserName kTenant2UserTest("userTenant2"_sd, "test"_sd, kTenantId2);
 const std::unique_ptr<UserRequest> kTenant2UserTestRequest =
     std::make_unique<UserRequestGeneral>(kTenant2UserTest, boost::none);
-
-const transport::TransportLayerMock transportLayer;
 
 TEST_F(AuthorizationSessionTest, MultiAuthSameUserAllowed) {
     ASSERT_OK(createUser(kUser1Test, {}));
@@ -373,9 +400,11 @@ TEST_F(AuthorizationSessionTest, SystemCollectionsAccessControl) {
 }
 
 void AuthorizationSessionTest::testInvalidateUser() {
+    transport::TransportLayerMock transportLayer;
     const std::shared_ptr<transport::Session> session =
         transport::MockSession::create(&transportLayer);
-    const auto& sslPeerInfo = SSLPeerInfo::forSession(session);
+    auto& sslPeerInfo = SSLPeerInfo::forSession(session);
+    sslPeerInfo = std::make_shared<SSLPeerInfo>();
 
     std::unique_ptr<UserRequest> userRequest = std::move(
         UserRequestX509::makeUserRequestX509(kSpencerTest, boost::none, sslPeerInfo).getValue());
@@ -472,26 +501,22 @@ TEST_F(AuthorizationSessionTest, UseOldUserInfoInFaceOfConnectivityProblems) {
 TEST_F(AuthorizationSessionTest, AcquireUserObtainsAndValidatesAuthenticationRestrictions) {
     ASSERT_OK(backendMock->insertUserDocument(
         _opCtx.get(),
-        BSON("user"
-             << "spencer"
-             << "db"
-             << "test"
-             << "credentials" << credentials << "roles"
-             << BSON_ARRAY(BSON("role"
-                                << "readWrite"
-                                << "db"
-                                << "test"))
-             << "authenticationRestrictions"
-             << BSON_ARRAY(BSON("clientSource" << BSON_ARRAY("192.168.0.0/24"
-                                                             << "192.168.2.10")
+        BSON("user" << "spencer"
+                    << "db"
+                    << "test"
+                    << "credentials" << credentials << "roles"
+                    << BSON_ARRAY(BSON("role" << "readWrite"
+                                              << "db"
+                                              << "test"))
+                    << "authenticationRestrictions"
+                    << BSON_ARRAY(
+                           BSON("clientSource" << BSON_ARRAY("192.168.0.0/24" << "192.168.2.10")
                                                << "serverAddress" << BSON_ARRAY("192.168.0.2"))
                            << BSON("clientSource" << BSON_ARRAY("2001:DB8::1") << "serverAddress"
                                                   << BSON_ARRAY("2001:DB8::2"))
-                           << BSON("clientSource" << BSON_ARRAY("127.0.0.1"
-                                                                << "::1")
+                           << BSON("clientSource" << BSON_ARRAY("127.0.0.1" << "::1")
                                                   << "serverAddress"
-                                                  << BSON_ARRAY("127.0.0.1"
-                                                                << "::1")))),
+                                                  << BSON_ARRAY("127.0.0.1" << "::1")))),
         BSONObj()));
 
 
@@ -568,7 +593,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateEmptyPipelineWithoutFindAction) 
 
         auto aggReq = buildAggReq(nss, BSONArray());
         PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, false));
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, false));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -585,7 +610,7 @@ TEST_F(AuthorizationSessionTest, CanAggregateEmptyPipelineWithFindAction) {
 
         auto aggReq = buildAggReq(nss, BSONArray());
         PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, false));
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, false));
         ASSERT_TRUE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -606,7 +631,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateWithoutFindActionIfFirstStageNot
 
         auto aggReq = buildAggReq(nss, pipeline);
         PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, false));
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, false));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -625,7 +650,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateWithFindActionIfPipelineContains
 
         auto aggReq = buildAggReq(nss, pipeline);
         PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, false));
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, false));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -643,7 +668,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateCollStatsWithoutCollStatsAction)
         BSONArray pipeline = BSON_ARRAY(BSON("$collStats" << BSONObj()));
         auto aggReq = buildAggReq(nss, pipeline);
         PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, false));
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, false));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -661,7 +686,7 @@ TEST_F(AuthorizationSessionTest, CanAggregateCollStatsWithCollStatsAction) {
         BSONArray pipeline = BSON_ARRAY(BSON("$collStats" << BSONObj()));
         auto aggReq = buildAggReq(nss, pipeline);
         PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, false));
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, false));
         ASSERT_TRUE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -679,7 +704,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateIndexStatsWithoutIndexStatsActio
         BSONArray pipeline = BSON_ARRAY(BSON("$indexStats" << BSONObj()));
         auto aggReq = buildAggReq(nss, pipeline);
         PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, false));
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, false));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -697,7 +722,7 @@ TEST_F(AuthorizationSessionTest, CanAggregateIndexStatsWithIndexStatsAction) {
         BSONArray pipeline = BSON_ARRAY(BSON("$indexStats" << BSONObj()));
         auto aggReq = buildAggReq(nss, pipeline);
         PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, false));
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, false));
         ASSERT_TRUE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -715,7 +740,7 @@ TEST_F(AuthorizationSessionTest, CanAggregateCurrentOpAllUsersFalseWithoutInprog
         BSONArray pipeline = BSON_ARRAY(BSON("$currentOp" << BSON("allUsers" << false)));
         auto aggReq = buildAggReq(nss, pipeline);
         PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, false));
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, false));
         ASSERT_TRUE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -732,8 +757,8 @@ TEST_F(AuthorizationSessionTest, CannotAggregateCurrentOpAllUsersFalseWithoutInp
 
         BSONArray pipeline = BSON_ARRAY(BSON("$currentOp" << BSON("allUsers" << false)));
         auto aggReq = buildAggReq(nss, pipeline);
-        PrivilegeVector privileges =
-            uassertStatusOK(auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, true));
+        PrivilegeVector privileges = uassertStatusOK(
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, true));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -761,8 +786,8 @@ TEST_F(AuthorizationSessionTest, CannotAggregateCurrentOpAllUsersFalseIfNotAuthe
         BSONArray pipeline = BSON_ARRAY(BSON("$currentOp" << BSON("allUsers" << false)));
         auto aggReq = buildAggReq(nss, pipeline);
 
-        PrivilegeVector privileges =
-            uassertStatusOK(auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, true));
+        PrivilegeVector privileges = uassertStatusOK(
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, true));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -780,7 +805,7 @@ TEST_F(AuthorizationSessionTest, CannotAggregateCurrentOpAllUsersTrueWithoutInpr
         BSONArray pipeline = BSON_ARRAY(BSON("$currentOp" << BSON("allUsers" << true)));
         auto aggReq = buildAggReq(nss, pipeline);
         PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, false));
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, false));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -797,8 +822,8 @@ TEST_F(AuthorizationSessionTest, CannotAggregateCurrentOpAllUsersTrueWithoutInpr
 
         BSONArray pipeline = BSON_ARRAY(BSON("$currentOp" << BSON("allUsers" << true)));
         auto aggReq = buildAggReq(nss, pipeline);
-        PrivilegeVector privileges =
-            uassertStatusOK(auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, true));
+        PrivilegeVector privileges = uassertStatusOK(
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, true));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -818,7 +843,7 @@ TEST_F(AuthorizationSessionTest, CanAggregateCurrentOpAllUsersTrueWithInprogActi
         BSONArray pipeline = BSON_ARRAY(BSON("$currentOp" << BSON("allUsers" << true)));
         auto aggReq = buildAggReq(nss, pipeline);
         PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, false));
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, false));
         ASSERT_TRUE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -837,8 +862,8 @@ TEST_F(AuthorizationSessionTest, CanAggregateCurrentOpAllUsersTrueWithInprogActi
 
         BSONArray pipeline = BSON_ARRAY(BSON("$currentOp" << BSON("allUsers" << true)));
         auto aggReq = buildAggReq(nss, pipeline);
-        PrivilegeVector privileges =
-            uassertStatusOK(auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, true));
+        PrivilegeVector privileges = uassertStatusOK(
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, true));
         ASSERT_TRUE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -857,7 +882,7 @@ TEST_F(AuthorizationSessionTest, CannotSpoofAllUsersTrueWithoutInprogActionOnMon
             BSON_ARRAY(BSON("$currentOp" << BSON("allUsers" << false << "allUsers" << true)));
         auto aggReq = buildAggReq(nss, pipeline);
         PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, false));
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, false));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -875,8 +900,8 @@ TEST_F(AuthorizationSessionTest, CannotSpoofAllUsersTrueWithoutInprogActionOnMon
         BSONArray pipeline =
             BSON_ARRAY(BSON("$currentOp" << BSON("allUsers" << false << "allUsers" << true)));
         auto aggReq = buildAggReq(nss, pipeline);
-        PrivilegeVector privileges =
-            uassertStatusOK(auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, true));
+        PrivilegeVector privileges = uassertStatusOK(
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, true));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -891,12 +916,12 @@ TEST_F(AuthorizationSessionTest, AddPrivilegesForStageFailsIfOutNamespaceIsNotVa
 
         authzSession->assumePrivilegesForDB(Privilege(rsrc, ActionType::find), nss.dbName());
 
-        BSONArray pipeline = BSON_ARRAY(BSON("$out"
-                                             << ""));
+        BSONArray pipeline = BSON_ARRAY(BSON("$out" << ""));
         auto aggReq = buildAggReq(nss, pipeline);
-        ASSERT_THROWS_CODE(auth::getPrivilegesForAggregate(authzSession.get(), nss, aggReq, false),
-                           AssertionException,
-                           ErrorCodes::InvalidNamespace);
+        ASSERT_THROWS_CODE(
+            auth::getPrivilegesForAggregate(_opCtx.get(), authzSession.get(), nss, aggReq, false),
+            AssertionException,
+            ErrorCodes::InvalidNamespace);
     }
 }
 
@@ -915,8 +940,8 @@ TEST_F(AuthorizationSessionTest, CannotAggregateOutWithoutInsertAndRemoveOnTarge
 
         BSONArray pipeline = BSON_ARRAY(BSON("$out" << nssBar.coll()));
         auto aggReq = buildAggReq(nssFoo, pipeline);
-        PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), testFooNss, aggReq, false));
+        PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
+            _opCtx.get(), authzSession.get(), testFooNss, aggReq, false));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
 
         // We have insert but not remove on the $out namespace.
@@ -950,15 +975,15 @@ TEST_F(AuthorizationSessionTest, CanAggregateOutWithInsertAndRemoveOnTargetNames
 
         BSONArray pipeline = BSON_ARRAY(BSON("$out" << nssBar.coll()));
         auto aggReq = buildAggReq(nssFoo, pipeline);
-        PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nssFoo, aggReq, false));
+        PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
+            _opCtx.get(), authzSession.get(), nssFoo, aggReq, false));
         ASSERT_TRUE(authzSession->isAuthorizedForPrivileges(privileges));
 
         auto aggNoBypassDocumentValidationReq =
             buildAggReq(nssFoo, pipeline, false /* bypassDocValidation*/);
 
         privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
-            authzSession.get(), nssFoo, aggNoBypassDocumentValidationReq, false));
+            _opCtx.get(), authzSession.get(), nssFoo, aggNoBypassDocumentValidationReq, false));
         ASSERT_TRUE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -981,8 +1006,8 @@ TEST_F(AuthorizationSessionTest,
 
         BSONArray pipeline = BSON_ARRAY(BSON("$out" << nssBar.coll()));
         auto aggReq = buildAggReq(nssFoo, pipeline, true /* bypassDocValidation*/);
-        PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nssFoo, aggReq, false));
+        PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
+            _opCtx.get(), authzSession.get(), nssFoo, aggReq, false));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -1007,8 +1032,8 @@ TEST_F(AuthorizationSessionTest,
 
         BSONArray pipeline = BSON_ARRAY(BSON("$out" << nssBar.coll()));
         auto aggReq = buildAggReq(nssFoo, pipeline, true /* bypassDocValidation*/);
-        PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nssFoo, aggReq, true));
+        PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
+            _opCtx.get(), authzSession.get(), nssFoo, aggReq, true));
         ASSERT_TRUE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -1026,8 +1051,8 @@ TEST_F(AuthorizationSessionTest, CannotAggregateLookupWithoutFindOnJoinedNamespa
 
         BSONArray pipeline = BSON_ARRAY(BSON("$lookup" << BSON("from" << nssBar.coll())));
         auto aggReq = buildAggReq(nssFoo, pipeline);
-        PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nssFoo, aggReq, false));
+        PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
+            _opCtx.get(), authzSession.get(), nssFoo, aggReq, false));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -1048,8 +1073,8 @@ TEST_F(AuthorizationSessionTest, CanAggregateLookupWithFindOnJoinedNamespace) {
 
         BSONArray pipeline = BSON_ARRAY(BSON("$lookup" << BSON("from" << nssBar.coll())));
         auto aggReq = buildAggReq(nssFoo, pipeline);
-        PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nssFoo, aggReq, true));
+        PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
+            _opCtx.get(), authzSession.get(), nssFoo, aggReq, true));
         ASSERT_TRUE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -1074,8 +1099,8 @@ TEST_F(AuthorizationSessionTest, CannotAggregateLookupWithoutFindOnNestedJoinedN
         BSONArray pipeline = BSON_ARRAY(
             BSON("$lookup" << BSON("from" << nssBar.coll() << "pipeline" << nestedPipeline)));
         auto aggReq = buildAggReq(nssFoo, pipeline);
-        PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nssFoo, aggReq, false));
+        PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
+            _opCtx.get(), authzSession.get(), nssFoo, aggReq, false));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -1101,8 +1126,8 @@ TEST_F(AuthorizationSessionTest, CanAggregateLookupWithFindOnNestedJoinedNamespa
         BSONArray pipeline = BSON_ARRAY(
             BSON("$lookup" << BSON("from" << nssBar.coll() << "pipeline" << nestedPipeline)));
         auto aggReq = buildAggReq(nssFoo, pipeline);
-        PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nssFoo, aggReq, false));
+        PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
+            _opCtx.get(), authzSession.get(), nssFoo, aggReq, false));
         ASSERT_TRUE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -1155,8 +1180,8 @@ TEST_F(AuthorizationSessionTest, CheckAuthForAggregateWithDeeplyNestedLookup) {
 
         auto aggReq = uassertStatusOK(aggregation_request_helper::parseFromBSONForTests(
             cmdBuilder.obj(), makeVTS(nssFoo), boost::none));
-        PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nssFoo, aggReq, false));
+        PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
+            _opCtx.get(), authzSession.get(), nssFoo, aggReq, false));
         ASSERT_TRUE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -1175,8 +1200,8 @@ TEST_F(AuthorizationSessionTest, CannotAggregateGraphLookupWithoutFindOnJoinedNa
 
         BSONArray pipeline = BSON_ARRAY(BSON("$graphLookup" << BSON("from" << nssBar.coll())));
         auto aggReq = buildAggReq(nssFoo, pipeline);
-        PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nssFoo, aggReq, false));
+        PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
+            _opCtx.get(), authzSession.get(), nssFoo, aggReq, false));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -1197,8 +1222,8 @@ TEST_F(AuthorizationSessionTest, CanAggregateGraphLookupWithFindOnJoinedNamespac
 
         BSONArray pipeline = BSON_ARRAY(BSON("$graphLookup" << BSON("from" << nssBar.coll())));
         auto aggReq = buildAggReq(nssFoo, pipeline);
-        PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nssFoo, aggReq, false));
+        PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
+            _opCtx.get(), authzSession.get(), nssFoo, aggReq, false));
         ASSERT_TRUE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -1221,8 +1246,8 @@ TEST_F(AuthorizationSessionTest,
             BSON_ARRAY(fromjson("{$facet: {lookup: [{$lookup: {from: 'bar'}}], graphLookup: "
                                 "[{$graphLookup: {from: 'qux'}}]}}"));
         auto aggReq = buildAggReq(nssFoo, pipeline);
-        PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nssFoo, aggReq, false));
+        PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
+            _opCtx.get(), authzSession.get(), nssFoo, aggReq, false));
         ASSERT_FALSE(authzSession->isAuthorizedForPrivileges(privileges));
 
         // We have find on the $lookup namespace but not on the $graphLookup namespace.
@@ -1262,8 +1287,8 @@ TEST_F(AuthorizationSessionTest,
                                 "[{$graphLookup: {from: 'qux'}}]}}"));
 
         auto aggReq = buildAggReq(nssFoo, pipeline);
-        PrivilegeVector privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(authzSession.get(), nssFoo, aggReq, true));
+        PrivilegeVector privileges = uassertStatusOK(auth::getPrivilegesForAggregate(
+            _opCtx.get(), authzSession.get(), nssFoo, aggReq, true));
         ASSERT_TRUE(authzSession->isAuthorizedForPrivileges(privileges));
     }
 }
@@ -1305,17 +1330,17 @@ TEST_F(AuthorizationSessionTestWithoutAuth,
 const auto listTestCollectionsPayload = BSON("listCollections"_sd << 1 << "$db"
                                                                   << "test"_sd);
 const auto listTestCollectionsCmd =
-    ListCollections::parse(IDLParserContext("listTestCollectionsCmd"), listTestCollectionsPayload);
+    ListCollections::parse(listTestCollectionsPayload, IDLParserContext("listTestCollectionsCmd"));
 const auto listOtherCollectionsPayload = BSON("listCollections"_sd << 1 << "$db"
                                                                    << "other"_sd);
 const auto listOtherCollectionsCmd = ListCollections::parse(
-    IDLParserContext("listOtherCollectionsCmd"), listOtherCollectionsPayload);
+    listOtherCollectionsPayload, IDLParserContext("listOtherCollectionsCmd"));
 const auto listOwnTestCollectionsPayload =
     BSON("listCollections"_sd << 1 << "$db"
                               << "test"_sd
                               << "nameOnly"_sd << true << "authorizedCollections"_sd << true);
 const auto listOwnTestCollectionsCmd = ListCollections::parse(
-    IDLParserContext("listOwnTestCollectionsCmd"), listOwnTestCollectionsPayload);
+    listOwnTestCollectionsPayload, IDLParserContext("listOwnTestCollectionsCmd"));
 
 TEST_F(AuthorizationSessionTest, CannotListCollectionsWithoutListCollectionsPrivilege) {
     // With no privileges, there is no authorization to list collections
@@ -1388,8 +1413,7 @@ TEST_F(AuthorizationSessionTest, CanCheckIfHasAnyPrivilegeOnResource) {
 }
 
 TEST_F(AuthorizationSessionTest, CanUseUUIDNamespacesWithPrivilege) {
-    BSONObj stringObj = BSON("a"
-                             << "string");
+    BSONObj stringObj = BSON("a" << "string");
     BSONObj uuidObj = BSON("a" << UUID::gen());
 
     // Strings require no privileges
@@ -1413,6 +1437,12 @@ TEST_F(AuthorizationSessionTest, CanUseUUIDNamespacesWithPrivilege) {
             Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::useUUID)});
 
     authzSession->verifyContract(&ac);
+
+    const auto& sessionContract = authzSession->getAuthorizationContract();
+    ASSERT_TRUE(
+        sessionContract.hasAccessCheck(AccessCheckEnum::kIsAuthorizedToParseNamespaceElement));
+    ASSERT_TRUE(sessionContract.hasPrivileges(
+        Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::useUUID)));
 }
 
 const UserName kGMarksAdmin("gmarks", "admin");
@@ -1425,15 +1455,13 @@ TEST_F(AuthorizationSessionTest, MayBypassWriteBlockingModeIsSetCorrectly) {
 
     // Add a user without the restore role and ensure we can't bypass
     ASSERT_OK(backendMock->insertUserDocument(_opCtx.get(),
-                                              BSON("user"
-                                                   << "spencer"
-                                                   << "db"
-                                                   << "test"
-                                                   << "credentials" << credentials << "roles"
-                                                   << BSON_ARRAY(BSON("role"
-                                                                      << "readWrite"
-                                                                      << "db"
-                                                                      << "test"))),
+                                              BSON("user" << "spencer"
+                                                          << "db"
+                                                          << "test"
+                                                          << "credentials" << credentials << "roles"
+                                                          << BSON_ARRAY(BSON("role" << "readWrite"
+                                                                                    << "db"
+                                                                                    << "test"))),
                                               BSONObj()));
     ASSERT_OK(
         authzSession->addAndAuthorizeUser(_opCtx.get(), kSpencerTestRequest->clone(), boost::none));
@@ -1441,15 +1469,13 @@ TEST_F(AuthorizationSessionTest, MayBypassWriteBlockingModeIsSetCorrectly) {
 
     // Add a user with restore role on admin db and ensure we can bypass
     ASSERT_OK(backendMock->insertUserDocument(_opCtx.get(),
-                                              BSON("user"
-                                                   << "gmarks"
-                                                   << "db"
-                                                   << "admin"
-                                                   << "credentials" << credentials << "roles"
-                                                   << BSON_ARRAY(BSON("role"
-                                                                      << "restore"
-                                                                      << "db"
-                                                                      << "admin"))),
+                                              BSON("user" << "gmarks"
+                                                          << "db"
+                                                          << "admin"
+                                                          << "credentials" << credentials << "roles"
+                                                          << BSON_ARRAY(BSON("role" << "restore"
+                                                                                    << "db"
+                                                                                    << "admin"))),
                                               BSONObj()));
     authzSession->logoutDatabase(kTestDB, "End of test"_sd);
 
@@ -1464,15 +1490,13 @@ TEST_F(AuthorizationSessionTest, MayBypassWriteBlockingModeIsSetCorrectly) {
     // Add a user with the root role, which should confer restore role for cluster resource, and
     // ensure we can bypass
     ASSERT_OK(backendMock->insertUserDocument(_opCtx.get(),
-                                              BSON("user"
-                                                   << "admin"
-                                                   << "db"
-                                                   << "admin"
-                                                   << "credentials" << credentials << "roles"
-                                                   << BSON_ARRAY(BSON("role"
-                                                                      << "root"
-                                                                      << "db"
-                                                                      << "admin"))),
+                                              BSON("user" << "admin"
+                                                          << "db"
+                                                          << "admin"
+                                                          << "credentials" << credentials << "roles"
+                                                          << BSON_ARRAY(BSON("role" << "root"
+                                                                                    << "db"
+                                                                                    << "admin"))),
                                               BSONObj()));
     authzSession->logoutDatabase(kAdminDB, ""_sd);
 
@@ -1811,6 +1835,195 @@ TEST_F(AuthorizationSessionTest, CheckBuiltInRolesForBypassDefaultMaxTimeMS) {
     authzSession->grantInternalAuthorization();
     ASSERT_TRUE(authzSession->isAuthorizedForClusterAction(ActionType::bypassDefaultMaxTimeMS,
                                                            boost::none));
+}
+
+TEST_F(AuthorizationSessionTest, CheckAuthorizationForReleaseMemoryAuthorizedUser) {
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", false);
+    authzManager->setAuthEnabled(true);
+
+    UserName username("spencer", "admin", boost::none);
+    const std::unique_ptr<UserRequest> usernameTestRequest =
+        std::make_unique<UserRequestGeneral>(username, boost::none);
+
+    // Get the authorization session that will be used when running the command.
+    auto authzSessionForCommand = AuthorizationSession::get(_opCtx->getClient());
+    ASSERT_OK(createUser(username, {{"readWrite", "test"}, {"dbAdmin", "test"}}));
+    ASSERT_OK(authzSessionForCommand->addAndAuthorizeUser(
+        _opCtx.get(), usernameTestRequest->clone(), boost::none));
+
+
+    // Assume privileges for the database to allow releaseMemoryAnyCursor action.
+    PrivilegeVector privileges;
+    auth::generateUniversalPrivileges(&privileges, boost::none /* tenantId */);
+    auto user = authzSessionForCommand->getAuthenticatedUser();
+    ASSERT(user != boost::none);
+    (*user)->addPrivileges(privileges);
+    ASSERT_TRUE(authzSessionForCommand->isAuthorizedForActionsOnResource(
+        CommandHelpers::resourcePatternForNamespace(testFooNss),
+        ActionType::releaseMemoryAnyCursor));
+
+    // Get the cursor manager and register a cursor. We need to detach it from the operation context
+    // to allow releaseMemory to reattach it later during execution.
+    CursorManager* cursorManager = CursorManager::get(_opCtx.get());
+    auto exec = makeFakePlanExecutor(_opCtx.get(), testFooNss);
+    exec->saveState();
+    exec->detachFromOperationContext();
+
+    auto cursorPin = cursorManager->registerCursor(
+        _opCtx.get(),
+        {
+            std::move(exec),
+            testFooNss,
+            username,
+            APIParameters(),
+            _opCtx->getWriteConcern(),
+            repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+            ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+            BSONObj(),
+            PrivilegeVector(),
+        });
+    const auto cursorId = cursorPin->cursorid();
+    cursorPin.release();
+
+    const IDLParserContext ctxt("releaseMemory");
+    auto bsonObj = BSON("releaseMemory" << BSON_ARRAY(cursorId) << "$db"
+                                        << "test");
+    ReleaseMemoryCommandRequest request = ReleaseMemoryCommandRequest::parse(bsonObj, ctxt);
+    ReleaseMemoryCmd commandInstance;
+    ReleaseMemoryCmd::Invocation invocation(_opCtx.get(), &commandInstance, request.serialize());
+    ReleaseMemoryCommandReply reply = invocation.typedRun(_opCtx.get());
+
+    // We expect the cursor to be released successfully.
+    ASSERT_EQ(reply.getCursorsReleased().size(), 1);
+    ASSERT_EQ(reply.getCursorsReleased()[0], cursorId);
+    ASSERT_TRUE(reply.getCursorsNotFound().empty());
+    ASSERT_TRUE(reply.getCursorsCurrentlyPinned().empty());
+}
+
+TEST_F(AuthorizationSessionTest, CheckAuthorizationForReleaseMemoryUnauthorizedUser) {
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", false);
+    authzManager->setAuthEnabled(true);
+    UserName usernameUnauth("fakeSpencer", "admin");
+
+    // Get the cursor manager and register a cursor. We need to detach it from the operation context
+    // to allow releaseMemory to reattach it later during execution.
+    CursorManager* cursorManager = CursorManager::get(_opCtx.get());
+    auto exec = makeFakePlanExecutor(_opCtx.get(), testFooNss);
+    exec->saveState();
+    exec->detachFromOperationContext();
+
+    auto cursorPin = cursorManager->registerCursor(
+        _opCtx.get(),
+        {
+            std::move(exec),
+            testFooNss,
+            usernameUnauth,
+            APIParameters(),
+            _opCtx->getWriteConcern(),
+            repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+            ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+            BSONObj(),
+            PrivilegeVector(),
+        });
+    const auto cursorId = cursorPin->cursorid();
+    cursorPin.release();
+
+    const IDLParserContext ctxt("releaseMemory");
+    auto bsonObj = BSON("releaseMemory" << BSON_ARRAY(cursorId) << "$db"
+                                        << "test");
+    ReleaseMemoryCommandRequest request = ReleaseMemoryCommandRequest::parse(bsonObj, ctxt);
+    ReleaseMemoryCmd commandInstance;
+    ReleaseMemoryCmd::Invocation invocation(_opCtx.get(), &commandInstance, request.serialize());
+    ASSERT_THROWS_CODE(invocation.typedRun(_opCtx.get()), DBException, ErrorCodes::Unauthorized);
+}
+
+TEST_F(AuthorizationSessionTest, CheckAuthorizationForKillCursorsAuthorizedUser) {
+    authzManager->setAuthEnabled(true);
+
+    UserName username("spencer", "admin", boost::none);
+    const std::unique_ptr<UserRequest> usernameTestRequest =
+        std::make_unique<UserRequestGeneral>(username, boost::none);
+
+    // Get the authorization session that will be used when running the command.
+    auto authzSessionForCommand = AuthorizationSession::get(_opCtx->getClient());
+    ASSERT_OK(createUser(username, {{"readWrite", "test"}, {"dbAdmin", "test"}}));
+    ASSERT_OK(authzSessionForCommand->addAndAuthorizeUser(
+        _opCtx.get(), usernameTestRequest->clone(), boost::none));
+
+
+    // Assume privileges for the database to allow killAnyCursor action.
+    PrivilegeVector privileges;
+    auth::generateUniversalPrivileges(&privileges, boost::none /* tenantId */);
+    auto user = authzSessionForCommand->getAuthenticatedUser();
+    ASSERT(user != boost::none);
+    (*user)->addPrivileges(privileges);
+    ASSERT_TRUE(authzSessionForCommand->isAuthorizedForActionsOnResource(
+        CommandHelpers::resourcePatternForNamespace(testFooNss), ActionType::killAnyCursor));
+
+    // Get the cursor manager and register a cursor. We need to detach it from the operation context
+    // to allow killCursors to reattach it later during execution.
+    CursorManager* _cursorManager = CursorManager::get(_opCtx.get());
+    auto exec = makeFakePlanExecutor(_opCtx.get(), testFooNss);
+    exec->saveState();
+    exec->detachFromOperationContext();
+
+    auto cursorPin = _cursorManager->registerCursor(
+        _opCtx.get(),
+        {
+            std::move(exec),
+            testFooNss,
+            username,
+            APIParameters(),
+            _opCtx->getWriteConcern(),
+            repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+            ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+            BSONObj(),
+            PrivilegeVector(),
+        });
+    const auto cursorId = cursorPin->cursorid();
+    cursorPin.release();
+
+    auto authCheck = [&](const ClientCursor& cc) {
+        uassertStatusOK(auth::checkAuthForKillCursors(
+            AuthorizationSession::get(_opCtx->getClient()), cc.nss(), cc.getAuthenticatedUser()));
+    };
+    ASSERT_OK(_cursorManager->killCursorWithAuthCheck(_opCtx.get(), cursorId, authCheck));
+}
+
+TEST_F(AuthorizationSessionTest, CheckAuthorizationForKillCursorsUnauthorizedUser) {
+    authzManager->setAuthEnabled(true);
+    UserName usernameUnauth("fakeSpencer", "admin");
+
+    // Get the cursor manager and register a cursor. We need to detach it from the operation context
+    // to allow killCursors to reattach it later during execution.
+    CursorManager* _cursorManager = CursorManager::get(_opCtx.get());
+    auto exec = makeFakePlanExecutor(_opCtx.get(), testFooNss);
+    exec->saveState();
+    exec->detachFromOperationContext();
+
+    auto cursorPin = _cursorManager->registerCursor(
+        _opCtx.get(),
+        {
+            std::move(exec),
+            testFooNss,
+            usernameUnauth,
+            APIParameters(),
+            _opCtx->getWriteConcern(),
+            repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+            ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+            BSONObj(),
+            PrivilegeVector(),
+        });
+    const auto cursorId = cursorPin->cursorid();
+    cursorPin.release();
+
+    auto authCheck = [&](const ClientCursor& cc) {
+        uassertStatusOK(auth::checkAuthForKillCursors(
+            AuthorizationSession::get(_opCtx->getClient()), cc.nss(), cc.getAuthenticatedUser()));
+    };
+    ASSERT_THROWS_CODE(_cursorManager->killCursorWithAuthCheck(_opCtx.get(), cursorId, authCheck),
+                       DBException,
+                       ErrorCodes::Unauthorized);
 }
 
 class SystemBucketsTest : public AuthorizationSessionTest {
@@ -2155,5 +2368,345 @@ TEST_F(AuthorizationSessionTest, ClusterActionsTestUser) {
     authzSession->logoutAllDatabases("Test finished");
 }
 
+// Test agg stage that doesn't use authz checks and doesn't use opt-out
+class TestDocumentSourceNoPrivsWithAuthzChecks : public DocumentSource {
+public:
+    static constexpr StringData kStageName = "$testNoPrivsWithAuthzChecks"_sd;
+
+    class LiteParsed : public LiteParsedDocumentSource {
+    public:
+        static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
+                                                 const BSONElement& spec,
+                                                 const LiteParserOptions& options) {
+            return std::make_unique<LiteParsed>(spec.fieldName());
+        }
+
+        LiteParsed(std::string parseTimeName)
+            : LiteParsedDocumentSource(std::move(parseTimeName)) {}
+
+        stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final {
+            return {};
+        }
+
+        PrivilegeVector requiredPrivileges(bool isMongos,
+                                           bool bypassDocumentValidation) const override {
+            return {};
+        }
+    };
+
+    TestDocumentSourceNoPrivsWithAuthzChecks(auto stageName,
+                                             const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : DocumentSource(stageName, expCtx) {}
+
+    GetNextResult doGetNext() {
+        return GetNextResult::makeEOF();
+    }
+
+    const char* getSourceName() const override {
+        return kStageName.data();
+    }
+
+    StageConstraints constraints(PipelineSplitState pipStage) const final {
+        return StageConstraints(StreamType::kStreaming,
+                                PositionRequirement::kNone,
+                                HostTypeRequirement::kNone,
+                                DiskUseRequirement::kNoDiskUse,
+                                FacetRequirement::kAllowed,
+                                TransactionRequirement::kAllowed,
+                                LookupRequirement::kAllowed,
+                                UnionRequirement::kAllowed,
+                                ChangeStreamRequirement::kAllowlist);
+    }
+    Id getId() const override {
+        return 0;
+    }
+    void addVariableRefs(std::set<Variables::Id>* refs) const override {}
+    boost::optional<DistributedPlanLogic> distributedPlanLogic() override {
+        return DistributedPlanLogic{};
+    }
+    Value serialize(const SerializationOptions& opts = SerializationOptions{}) const override {
+        return Value{};
+    }
+
+    static auto createFromBson(BSONElement elem,
+                               const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+        return boost::intrusive_ptr<TestDocumentSourceNoPrivsWithAuthzChecks>{
+            new TestDocumentSourceNoPrivsWithAuthzChecks("$testNoPrivsWithAuthzChecks", expCtx)};
+    }
+};
+
+REGISTER_DOCUMENT_SOURCE(testNoPrivsWithAuthzChecks,
+                         TestDocumentSourceNoPrivsWithAuthzChecks::LiteParsed::parse,
+                         TestDocumentSourceNoPrivsWithAuthzChecks::createFromBson,
+                         AllowedWithApiStrict::kAlways);
+
+// Test agg stage that doesn't use authz checks and uses opt-out
+class TestDocumentSourceNoPrivsWithAuthzChecksOptOut
+    : public TestDocumentSourceNoPrivsWithAuthzChecks {
+public:
+    static constexpr StringData kStageName = "$testNoPrivsWithAuthzChecksOptOut"_sd;
+
+    const char* getSourceName() const override {
+        return kStageName.data();
+    }
+
+    class LiteParsedOptOut : public TestDocumentSourceNoPrivsWithAuthzChecks::LiteParsed {
+    public:
+        static std::unique_ptr<LiteParsedOptOut> parse(const NamespaceString& nss,
+                                                       const BSONElement& spec,
+                                                       const LiteParserOptions& options) {
+            return std::make_unique<LiteParsedOptOut>(spec.fieldName());
+        }
+
+        LiteParsedOptOut(std::string parseTimeName)
+            : TestDocumentSourceNoPrivsWithAuthzChecks::LiteParsed(std::move(parseTimeName)) {}
+
+        // Opt-out
+        bool requiresAuthzChecks() const override {
+            return false;
+        }
+    };
+
+    TestDocumentSourceNoPrivsWithAuthzChecksOptOut(
+        auto stageName, const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : TestDocumentSourceNoPrivsWithAuthzChecks(stageName, expCtx) {}
+
+    static auto createFromBson(BSONElement elem,
+                               const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+        return boost::intrusive_ptr<TestDocumentSourceNoPrivsWithAuthzChecksOptOut>{
+            new TestDocumentSourceNoPrivsWithAuthzChecksOptOut("$testNoPrivsWithAuthzChecksOptOut",
+                                                               expCtx)};
+    }
+};
+
+REGISTER_DOCUMENT_SOURCE(testNoPrivsWithAuthzChecksOptOut,
+                         TestDocumentSourceNoPrivsWithAuthzChecksOptOut::LiteParsedOptOut::parse,
+                         TestDocumentSourceNoPrivsWithAuthzChecksOptOut::createFromBson,
+                         AllowedWithApiStrict::kAlways);
+
+// Test agg stage that uses authz checks (no need for opt out)
+class TestDocumentSourceWithPrivs : public TestDocumentSourceNoPrivsWithAuthzChecks {
+public:
+    static constexpr StringData kStageName = "$testWithPrivs"_sd;
+
+    const char* getSourceName() const override {
+        return kStageName.data();
+    }
+
+    class LiteParsedWithPrivs : public TestDocumentSourceWithPrivs::LiteParsed {
+    public:
+        static std::unique_ptr<LiteParsedWithPrivs> parse(const NamespaceString& nss,
+                                                          const BSONElement& spec,
+                                                          const LiteParserOptions& options) {
+            return std::make_unique<LiteParsedWithPrivs>(spec.fieldName(), nss);
+        }
+
+        // Includes authz checks
+        PrivilegeVector requiredPrivileges(bool isMongos,
+                                           bool bypassDocumentValidation) const override {
+            return {Privilege(ResourcePattern::forExactNamespace(_namespace), ActionType::find)};
+        }
+
+        LiteParsedWithPrivs(std::string parseTimeName, NamespaceString nss)
+            : TestDocumentSourceNoPrivsWithAuthzChecks::LiteParsed(std::move(parseTimeName)),
+              _namespace(std::move(nss)) {}
+
+    private:
+        NamespaceString _namespace;
+    };
+
+    TestDocumentSourceWithPrivs(auto stageName,
+                                const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : TestDocumentSourceNoPrivsWithAuthzChecks(stageName, expCtx) {}
+
+    static auto createFromBson(BSONElement elem,
+                               const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+        return boost::intrusive_ptr<TestDocumentSourceWithPrivs>{
+            new TestDocumentSourceWithPrivs("$testWithPrivs", expCtx)};
+    }
+};
+
+REGISTER_DOCUMENT_SOURCE(testWithPrivs,
+                         TestDocumentSourceWithPrivs::LiteParsedWithPrivs::parse,
+                         TestDocumentSourceWithPrivs::createFromBson,
+                         AllowedWithApiStrict::kAlways);
+
+//  Multitenancy disabled
+DEATH_TEST_F(
+    AuthorizationSessionTest,
+    AggStageFailsRequiresAuthzChecksWithNoPrivilegesAndNoOptOutMultitenancyDisabled,
+    "Must specify authorization checks for this stage: $testNoPrivsWithAuthzChecks or manually "
+    "opt out by overriding requiresAuthzChecks to false") {
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", false);
+    RAIIServerParameterControllerForTest featureFlagController{"featureFlagMandatoryAuthzChecks",
+                                                               true};
+
+    auto nss = testFooNss;
+    auto rsrc = ResourcePattern::forExactNamespace(nss);
+
+    // 1. Stage does not use authz checks, and developer did not opt out of authz checks -> FAIL
+    BSONArray pipeline_test_one = BSON_ARRAY(BSON("$testNoPrivsWithAuthzChecks" << nss.coll()));
+    auto aggReq_test_one = buildAggReq(nss, pipeline_test_one);
+    auto priv = auth::getPrivilegesForAggregate(
+        _opCtx.get(), authzSession.get(), nss, aggReq_test_one, false);
+}
+
+//  Multitenancy enabled
+DEATH_TEST_F(
+    AuthorizationSessionTest,
+    AggStageFailsRequiresAuthzChecksWithNoPrivilegesAndNoOptOutMultitenancyEnabled,
+    "Must specify authorization checks for this stage: $testNoPrivsWithAuthzChecks or manually "
+    "opt out by overriding requiresAuthzChecks to false") {
+    RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
+    RAIIServerParameterControllerForTest featureFlagController{"featureFlagMandatoryAuthzChecks",
+                                                               true};
+
+    auto nss = testTenant1FooNss;
+    auto rsrc = ResourcePattern::forExactNamespace(nss);
+
+    // 1. Stage does not use authz checks, and developer did not opt out of authz checks -> FAIL
+    BSONArray pipeline_test_one = BSON_ARRAY(BSON("$testNoPrivsWithAuthzChecks" << nss.coll()));
+    auto aggReq_test_one = buildAggReq(nss, pipeline_test_one);
+    auto priv = auth::getPrivilegesForAggregate(
+        _opCtx.get(), authzSession.get(), nss, aggReq_test_one, false);
+}
+
+TEST_F(AuthorizationSessionTest, AggStagePassesRequiresAuthzChecksWithPrivilegesOrOptOut) {
+    for (auto multitenancy : {false, true}) {
+        RAIIServerParameterControllerForTest multitenancyController("multitenancySupport",
+                                                                    multitenancy);
+        RAIIServerParameterControllerForTest featureFlagController{
+            "featureFlagMandatoryAuthzChecks", true};
+
+        auto nss = multitenancy ? testTenant1FooNss : testFooNss;
+        auto rsrc = ResourcePattern::forExactNamespace(nss);
+
+        // 2. Stage does not use authz checks, and developer opted out of authz checks -> SUCCESS
+        BSONArray pipeline_test_two =
+            BSON_ARRAY(BSON("$testNoPrivsWithAuthzChecksOptOut" << nss.coll()));
+        auto aggReq_test_two = buildAggReq(nss, pipeline_test_two);
+        ASSERT_OK(auth::getPrivilegesForAggregate(
+            _opCtx.get(), authzSession.get(), nss, aggReq_test_two, false));
+
+        // 3. Stage uses authz checks, and authz checks were implemented -> SUCCESS
+        BSONArray pipeline_test_three = BSON_ARRAY(BSON("$testWithPrivs" << nss.coll()));
+        auto aggReq_test_three = buildAggReq(nss, pipeline_test_three);
+        ASSERT_OK(auth::getPrivilegesForAggregate(
+            _opCtx.get(), authzSession.get(), nss, aggReq_test_three, false));
+    }
+}
+
+TEST_F(AuthorizationSessionTest, DBDirectClientDoesNotPolluteContract) {
+    ASSERT_OK(createUser({"spencer", "test"}, {{"readWrite", "test"}, {"dbAdmin", "test"}}));
+    ASSERT_OK(
+        authzSession->addAndAuthorizeUser(_opCtx.get(), kSpencerTestRequest->clone(), boost::none));
+
+    // Simulate a top-level command
+    authzSession->startContractTracking();
+
+    // Top-level command checks
+    ASSERT_TRUE(
+        authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::find));
+    ASSERT_TRUE(
+        authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::remove));
+
+    // Simulate DBDirectClient starting a nested command
+    authzSession->startContractTracking();
+
+    // Nested command tries to add checks (should be ignored)
+    ASSERT_TRUE(
+        authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::insert));
+    ASSERT_TRUE(authzSession->isAuthorizedForActionsOnResource(testFooCollResource,
+                                                               ActionType::createCollection));
+    // End nested command
+    authzSession->endContractTracking();
+
+    // Verify only the top-level checks are recorded
+    AuthorizationContract expectedContract(
+        std::initializer_list<AccessCheckEnum>{},
+        std::initializer_list<Privilege>{
+            Privilege(ResourcePattern::forExactNamespace(testFooCollResource.ns()),
+                      {ActionType::find, ActionType::remove})});
+
+    ASSERT_TRUE(authzSession->getAuthorizationContract().contains(expectedContract));
+
+    // The nested checks should not be in the contract
+    AuthorizationContract wrongContract(
+        std::initializer_list<AccessCheckEnum>{},
+        std::initializer_list<Privilege>{
+            Privilege(ResourcePattern::forExactNamespace(testFooCollResource.ns()),
+                      {ActionType::find,
+                       ActionType::remove,
+                       ActionType::insert,
+                       ActionType::createCollection})});
+
+    ASSERT_FALSE(authzSession->getAuthorizationContract().contains(wrongContract));
+
+    authzSession->endContractTracking();
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+}
+
+
+TEST_F(AuthorizationSessionTest, AuthorizationContractGuardRAII) {
+    ASSERT_OK(createUser({"spencer", "test"}, {{"readWrite", "test"}, {"dbAdmin", "test"}}));
+    ASSERT_OK(
+        authzSession->addAndAuthorizeUser(_opCtx.get(), kSpencerTestRequest->clone(), boost::none));
+
+    // Test normal flow
+    {
+        AuthorizationContractGuard guard(authzSession.get());
+
+        ASSERT_TRUE(
+            authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::find));
+
+        AuthorizationContract ac(
+            std::initializer_list<AccessCheckEnum>{},
+            std::initializer_list<Privilege>{Privilege(
+                ResourcePattern::forExactNamespace(testFooCollResource.ns()), ActionType::find)});
+
+        ASSERT_TRUE(authzSession->getAuthorizationContract().contains(ac));
+        // Guard destructor will call endContractTracking()
+    }
+
+    {
+        AuthorizationContractGuard guard1(authzSession.get());
+        ASSERT_TRUE(
+            authzSession->isAuthorizedForActionsOnResource(testFooCollResource, ActionType::find));
+
+        {
+            AuthorizationContractGuard guard2(authzSession.get());
+
+            // This should be at depth 2, so these checks should be ignored
+            ASSERT_TRUE(authzSession->isAuthorizedForActionsOnResource(testFooCollResource,
+                                                                       ActionType::insert));
+            ASSERT_TRUE(authzSession->isAuthorizedForActionsOnResource(testFooCollResource,
+                                                                       ActionType::remove));
+        }
+
+        // After nested guard destroyed, we're back at depth 1
+        // Add one more check at depth 1 to verify we can still add checks
+        ASSERT_TRUE(authzSession->isAuthorizedForActionsOnResource(testFooCollResource,
+                                                                   ActionType::update));
+
+        // Verify the contract contains only depth 1 checks and NOT the depth 2 checks
+        AuthorizationContract expectedContract(
+            std::initializer_list<AccessCheckEnum>{},
+            std::initializer_list<Privilege>{
+                Privilege(ResourcePattern::forExactNamespace(testFooCollResource.ns()),
+                          {ActionType::find, ActionType::update})});
+
+        ASSERT_TRUE(authzSession->getAuthorizationContract().contains(expectedContract));
+
+        // Verify that a contract including the nested checks would fail
+        AuthorizationContract wrongContract(
+            std::initializer_list<AccessCheckEnum>{},
+            std::initializer_list<Privilege>{Privilege(
+                ResourcePattern::forExactNamespace(testFooCollResource.ns()),
+                {ActionType::find, ActionType::update, ActionType::insert, ActionType::remove})});
+
+        ASSERT_FALSE(authzSession->getAuthorizationContract().contains(wrongContract));
+    }
+    authzSession->logoutDatabase(kTestDB, "Kill the test!"_sd);
+}
 }  // namespace
 }  // namespace mongo

@@ -34,13 +34,13 @@ namespace mongo {
 
 REGISTER_ACCUMULATOR_WITH_FEATURE_FLAG(setUnion,
                                        genericParseSingleExpressionAccumulator<AccumulatorSetUnion>,
-                                       feature_flags::gFeatureFlagArrayAccumulators);
+                                       &feature_flags::gFeatureFlagArrayAccumulators);
 
 REGISTER_WINDOW_FUNCTION_WITH_FEATURE_FLAG(
     setUnion,
     (mongo::window_function::ExpressionRemovable<AccumulatorSetUnion,
                                                  WindowFunctionSetUnion>::parse),
-    feature_flags::gFeatureFlagArrayAccumulators,
+    &feature_flags::gFeatureFlagArrayAccumulators,
     AllowedWithApiStrict::kAlways);
 
 AccumulatorSetUnion::AccumulatorSetUnion(ExpressionContext* const expCtx,
@@ -58,7 +58,7 @@ void AccumulatorSetUnion::addValues(const std::vector<Value>& values) {
             uassert(ErrorCodes::ExceededMemoryLimit,
                     str::stream() << "$setUnion used too much memory and spilling to disk will not "
                                      "reduce memory usage. Used: "
-                                  << _memUsageTracker.currentMemoryBytes()
+                                  << _memUsageTracker.inUseTrackedMemoryBytes()
                                   << "bytes. Memory limit: "
                                   << _memUsageTracker.maxAllowedMemoryUsageBytes() << " bytes",
                     _memUsageTracker.withinMemoryLimit());
@@ -102,11 +102,6 @@ Value AccumulatorSetUnion::getValue(bool) {
 void AccumulatorSetUnion::reset() {
     _set = getExpressionContext()->getValueComparator().makeFlatUnorderedValueSet();
     _memUsageTracker.set(sizeof(*this));
-}
-
-boost::intrusive_ptr<AccumulatorState> AccumulatorSetUnion::create(
-    ExpressionContext* const expCtx) {
-    return new AccumulatorSetUnion(expCtx, boost::none);
 }
 
 }  // namespace mongo

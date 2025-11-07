@@ -28,22 +28,20 @@
  */
 
 
-#include <mutex>
-#include <utility>
-
+#include "mongo/db/repl/replication_process.h"
 
 #include "mongo/base/status.h"
 #include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_consistency_markers.h"
-#include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
+
+#include <mutex>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -112,7 +110,7 @@ int ReplicationProcess::getRollbackID() const {
     if (kUninitializedRollbackId == _rbid) {
         // This may happen when serverStatus is called by an internal client before we have a chance
         // to read the rollback ID from storage.
-        LOGV2_WARNING(21533, "Rollback ID is not initialized yet");
+        LOGV2_DEBUG(21533, 3, "Rollback ID is not initialized yet");
     }
     return _rbid;
 }

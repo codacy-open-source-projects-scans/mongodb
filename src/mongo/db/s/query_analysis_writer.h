@@ -29,15 +29,6 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <map>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <vector>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -54,6 +45,16 @@
 #include "mongo/util/future.h"
 #include "mongo/util/periodic_runner.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace analyze_shard_key {
@@ -99,12 +100,14 @@ public:
 
     static const std::map<NamespaceString, BSONObj> kTTLIndexes;
 
+    static const std::set<ErrorCodes::Error> kNonRetryableInsertErrorCodes;
+
     /**
      * Temporarily stores documents to be written to disk.
      */
     struct Buffer {
     public:
-        Buffer(const NamespaceString& nss) : _nss(nss){};
+        Buffer(const NamespaceString& nss) : _nss(nss) {};
 
         const NamespaceString& getNss() const {
             return _nss;
@@ -138,6 +141,10 @@ public:
 
         BSONObj at(size_t index) const {
             return _docs[index];
+        }
+
+        std::vector<BSONObj> getDocuments() const {
+            return _docs;
         }
 
     private:
@@ -233,6 +240,11 @@ public:
         return _queries.getCount();
     }
 
+    std::vector<BSONObj> getQueriesForTest() const {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        return _queries.getDocuments();
+    }
+
     void flushQueriesForTest(OperationContext* opCtx) {
         _flushQueries(opCtx);
     }
@@ -240,6 +252,11 @@ public:
     int getDiffsCountForTest() const {
         stdx::lock_guard<stdx::mutex> lk(_mutex);
         return _diffs.getCount();
+    }
+
+    std::vector<BSONObj> getDiffsForTest() const {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        return _diffs.getDocuments();
     }
 
     void flushDiffsForTest(OperationContext* opCtx) {
@@ -255,9 +272,13 @@ private:
 
     void onStepUpBegin(OperationContext* opCtx, long long term) final {}
 
-    void onStepDown() final {}
+    void onStepDown() final {
+        _isPrimary.store(false);
+    }
 
-    void onRollbackBegin() final {}
+    void onRollbackBegin() final {
+        _isPrimary.store(false);
+    }
 
     void onBecomeArbiter() final {}
 
@@ -285,13 +306,15 @@ private:
      *
      * Throws an error if the inserts fail with any other error.
      */
-    void _flush(OperationContext* opCtx, Buffer* buffer);
+    void _flush(OperationContext* opCtx, stdx::unique_lock<stdx::mutex>& lk, Buffer* buffer);
 
     /**
      * Returns true if the total size of the buffered queries and diffs has exceeded the maximum
      * amount of memory that the writer is allowed to use.
      */
     bool _exceedsMaxSizeBytes();
+
+    AtomicWord<bool> _isPrimary{false};
 
     mutable stdx::mutex _mutex;
 

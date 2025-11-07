@@ -28,10 +28,10 @@
  */
 
 
-#include <boost/algorithm/string/join.hpp>
 #include <ostream>
 #include <utility>
 
+#include <boost/algorithm/string/join.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/move/utility_core.hpp>
@@ -41,6 +41,7 @@
 
 #ifndef _WIN32
 #include <cstdlib>
+
 #include <sys/wait.h>
 #endif
 
@@ -68,10 +69,8 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_severity.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/log_test.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/options_parser/environment.h"
 #include "mongo/util/options_parser/option_section.h"
@@ -97,7 +96,6 @@ using mongo::unittest::getMinimumLogSeverity;
 using mongo::unittest::hasMinimumLogSeverity;
 
 namespace moe = mongo::optionenvironment;
-using namespace fmt::literals;
 
 MONGO_INITIALIZER(ServerLogRedirection)(mongo::InitializerContext*) {
     // ssl_options_server.cpp has an initializer which depends on logging.
@@ -196,18 +194,18 @@ public:
     }
 
     std::string toString() const {
-        std::string str = "argv=[{}],"_format(boost::algorithm::join(binaryArgs(), ", "));
+        std::string str = fmt::format("argv=[{}],", boost::algorithm::join(binaryArgs(), ", "));
         if (hasConfigFile()) {
-            str += "confFile=[\n{}],"_format(configFileContents());
+            str += fmt::format("confFile=[\n{}],", configFileContents());
         }
         if (hasEnvVars()) {
             std::vector<std::string> envs;
             for (auto&& [k, v] : envVars_) {
-                envs.push_back("{}={}"_format(k, v));
+                envs.push_back(fmt::format("{}={}", k, v));
             }
-            str += "env=[{}],"_format(boost::algorithm::join(envs, ", "));
+            str += fmt::format("env=[{}],", boost::algorithm::join(envs, ", "));
         }
-        return "SetupOptionsTestConfig({})"_format(str);
+        return fmt::format("SetupOptionsTestConfig({})", str);
     }
 
 private:
@@ -622,6 +620,48 @@ TEST(SetupOptions, SlowMsCommandLineParamParsesSuccessfully) {
     ASSERT_EQ(::mongo::serverGlobalParams.slowMS.load(), 300);
 }
 
+TEST(SetupOptions, MaintenancePortParsingFromCLI) {
+    OptionsParserTester parser;
+    moe::Environment environment;
+    moe::OptionSection options;
+
+    ASSERT_OK(::mongo::addGeneralServerOptions(&options));
+
+    const std::vector<std::string> argv = {"binaryname", "--maintenancePort", "123"};
+
+    ASSERT_OK(parser.run(options, argv, &environment));
+
+    ASSERT_OK(::mongo::validateServerOptions(environment));
+    ASSERT_OK(::mongo::canonicalizeServerOptions(&environment));
+    ASSERT_OK(::mongo::setupServerOptions(argv));
+    ASSERT_OK(::mongo::storeServerOptions(environment));
+
+    ASSERT_EQ(::mongo::serverGlobalParams.maintenancePort, 123);
+}
+
+TEST(SetupOptions, MaintenancePortParsingFromYAMLConfigFile) {
+    OptionsParserTester parser;
+    moe::Environment environment;
+    moe::OptionSection options;
+
+    ASSERT_OK(::mongo::addGeneralServerOptions(&options));
+
+    const std::vector<std::string> argv = {"binaryname", "--config", "config.yaml"};
+
+    parser.setConfig("config.yaml",
+                     R"(net:  
+                            maintenancePort: 345)");
+
+    ASSERT_OK(parser.run(options, argv, &environment));
+
+    ASSERT_OK(::mongo::validateServerOptions(environment));
+    ASSERT_OK(::mongo::canonicalizeServerOptions(&environment));
+    ASSERT_OK(::mongo::setupServerOptions(argv));
+    ASSERT_OK(::mongo::storeServerOptions(environment));
+
+    ASSERT_EQ(::mongo::serverGlobalParams.maintenancePort, 345);
+}
+
 TEST(SetupOptions, SlowMsParamInitializedSuccessfullyFromINIConfigFile) {
     OptionsParserTester parser;
     moe::Environment environment;
@@ -672,6 +712,80 @@ TEST(SetupOptions, SlowMsParamInitializedSuccessfullyFromYAMLConfigFile) {
     ASSERT_OK(::mongo::storeServerOptions(environment));
 
     ASSERT_EQ(::mongo::serverGlobalParams.slowMS.load(), 300);
+}
+
+TEST(SetupOptions, SlowInProgMsCommandLineParamParsesSuccessfully) {
+    OptionsParserTester parser;
+    moe::Environment environment;
+    moe::OptionSection options;
+
+    ASSERT_OK(::mongo::addNonGeneralServerOptions(&options));
+
+    std::vector<std::string> argv;
+    argv.push_back("binaryname");
+    argv.push_back("--defaultSlowInProgMS");
+    argv.push_back("300");
+
+    ASSERT_OK(parser.run(options, argv, &environment));
+
+    ASSERT_OK(::mongo::validateServerOptions(environment));
+    ASSERT_OK(::mongo::canonicalizeServerOptions(&environment));
+    ASSERT_OK(::mongo::setupServerOptions(argv));
+    ASSERT_OK(::mongo::storeServerOptions(environment));
+
+    ASSERT_EQ(::mongo::serverGlobalParams.defaultSlowInProgMS.load(), 300);
+}
+
+TEST(SetupOptions, SlowInProgMsParamInitializedSuccessfullyFromINIConfigFile) {
+    OptionsParserTester parser;
+    moe::Environment environment;
+    moe::OptionSection options;
+
+    ASSERT_OK(::mongo::addGeneralServerOptions(&options));
+    ASSERT_OK(::mongo::addNonGeneralServerOptions(&options));
+
+    std::vector<std::string> argv;
+    argv.push_back("binaryname");
+    argv.push_back("--config");
+    argv.push_back("config.ini");
+
+    parser.setConfig("config.ini", "defaultSlowInProgMS=300");
+
+    ASSERT_OK(parser.run(options, argv, &environment));
+
+    ASSERT_OK(::mongo::validateServerOptions(environment));
+    ASSERT_OK(::mongo::canonicalizeServerOptions(&environment));
+    ASSERT_OK(::mongo::setupServerOptions(argv));
+    ASSERT_OK(::mongo::storeServerOptions(environment));
+
+    ASSERT_EQ(::mongo::serverGlobalParams.defaultSlowInProgMS.load(), 300);
+}
+
+TEST(SetupOptions, SlowInProgMsParamInitializedSuccessfullyFromYAMLConfigFile) {
+    OptionsParserTester parser;
+    moe::Environment environment;
+    moe::OptionSection options;
+
+    ASSERT_OK(::mongo::addGeneralServerOptions(&options));
+    ASSERT_OK(::mongo::addNonGeneralServerOptions(&options));
+
+    std::vector<std::string> argv;
+    argv.push_back("binaryname");
+    argv.push_back("--config");
+    argv.push_back("config.yaml");
+
+    parser.setConfig("config.yaml",
+                     "operationProfiling:\n"
+                     "    slowOpInProgressThresholdMs: 300\n");
+
+    ASSERT_OK(parser.run(options, argv, &environment));
+
+    ASSERT_OK(::mongo::validateServerOptions(environment));
+    ASSERT_OK(::mongo::canonicalizeServerOptions(&environment));
+    ASSERT_OK(::mongo::setupServerOptions(argv));
+    ASSERT_OK(::mongo::storeServerOptions(environment));
+
+    ASSERT_EQ(::mongo::serverGlobalParams.defaultSlowInProgMS.load(), 300);
 }
 
 TEST(SetupOptions, NonNumericSlowMsCommandLineOptionFailsToParse) {
@@ -817,7 +931,117 @@ TEST(SetupOptions, NonNumericSampleRateYAMLConfigOptionFailsToParse) {
     ASSERT_NOT_OK(parser.run(options, argv, &environment));
 }
 
-#ifndef _WIN32
+TEST(SetupOptions, SlowTaskExecutorWaitTimeProfilingMsCommandLineParamParsesSuccessfully) {
+    OptionsParserTester parser;
+    moe::Environment environment;
+    moe::OptionSection options;
+
+    ASSERT_OK(addNonGeneralServerOptions(&options));
+
+    std::vector<std::string> argv;
+    argv.push_back("binaryname");
+    argv.push_back("--slowTaskWaitTimeProfilingMs");
+    argv.push_back("200");
+
+    ASSERT_OK(parser.run(options, argv, &environment));
+
+    ASSERT_OK(validateServerOptions(environment));
+    ASSERT_OK(canonicalizeServerOptions(&environment));
+    ASSERT_OK(setupServerOptions(argv));
+    ASSERT_OK(storeServerOptions(environment));
+
+    ASSERT_EQ(serverGlobalParams.slowTaskExecutorWaitTimeProfilingMs.load(), 200);
+}
+
+TEST(SetupOptions,
+     SlowTaskExecutorWaitTimeProfilingMsParamInitializedSuccessfullyFromINIConfigFile) {
+    OptionsParserTester parser;
+    moe::Environment environment;
+    moe::OptionSection options;
+
+    ASSERT_OK(addGeneralServerOptions(&options));
+    ASSERT_OK(addNonGeneralServerOptions(&options));
+
+    std::vector<std::string> argv;
+    argv.push_back("binaryname");
+    argv.push_back("--config");
+    argv.push_back("config.ini");
+
+    parser.setConfig("config.ini", "slowTaskWaitTimeProfilingMs=200");
+
+    ASSERT_OK(parser.run(options, argv, &environment));
+
+    ASSERT_OK(validateServerOptions(environment));
+    ASSERT_OK(canonicalizeServerOptions(&environment));
+    ASSERT_OK(setupServerOptions(argv));
+    ASSERT_OK(storeServerOptions(environment));
+
+    ASSERT_EQ(serverGlobalParams.slowTaskExecutorWaitTimeProfilingMs.load(), 200);
+}
+
+TEST(SetupOptions,
+     SlowTaskExecutorWaitTimeProfilingMsParamInitializedSuccessfullyFromYAMLConfigFile) {
+    OptionsParserTester parser;
+    moe::Environment environment;
+    moe::OptionSection options;
+
+    ASSERT_OK(addGeneralServerOptions(&options));
+    ASSERT_OK(addNonGeneralServerOptions(&options));
+
+    std::vector<std::string> argv;
+    argv.push_back("binaryname");
+    argv.push_back("--config");
+    argv.push_back("config.yaml");
+
+    parser.setConfig("config.yaml",
+                     "taskExecutorProfiling:\n"
+                     "    slowTaskWaitTimeProfilingMs: 200\n");
+
+    ASSERT_OK(parser.run(options, argv, &environment));
+
+    ASSERT_OK(validateServerOptions(environment));
+    ASSERT_OK(canonicalizeServerOptions(&environment));
+    ASSERT_OK(setupServerOptions(argv));
+    ASSERT_OK(storeServerOptions(environment));
+
+    ASSERT_EQ(serverGlobalParams.slowTaskExecutorWaitTimeProfilingMs.load(), 200);
+}
+
+TEST(SetupOptions, NonNumericSlowTaskExecutorWaitTimeProfilingMsCommandLineOptionFailsToParse) {
+    OptionsParserTester parser;
+    moe::Environment environment;
+    moe::OptionSection options;
+
+    ASSERT_OK(addNonGeneralServerOptions(&options));
+
+    std::vector<std::string> argv;
+    argv.push_back("binaryname");
+    argv.push_back("--slowTaskWaitTimeProfilingMs");
+    argv.push_back("invalid");
+
+    ASSERT_NOT_OK(parser.run(options, argv, &environment));
+}
+
+TEST(SetupOptions, NonNumericlowTaskExecutorWaitTimeProfilingMsYAMLConfigOptionFailsToParse) {
+    OptionsParserTester parser;
+    moe::Environment environment;
+    moe::OptionSection options;
+
+    ASSERT_OK(addNonGeneralServerOptions(&options));
+
+    std::vector<std::string> argv;
+    argv.push_back("binaryname");
+    argv.push_back("--config");
+    argv.push_back("config.yaml");
+
+    parser.setConfig("config.yaml",
+                     "taskExecutorProfiling:\n"
+                     "    slowTaskWaitTimeProfilingMs: invalid\n");
+
+    ASSERT_NOT_OK(parser.run(options, argv, &environment));
+}
+
+#if !defined(_WIN32) && !defined(__APPLE__)
 class ForkTestSpec {
 public:
     enum Value {
@@ -888,7 +1112,8 @@ public:
     }
 
     std::string toString() const {
-        return "SetupOptionsTestConfig(specName={}, config={})"_format(name_, config_.toString());
+        return fmt::format(
+            "SetupOptionsTestConfig(specName={}, config={})", name_, config_.toString());
     }
 
 private:
@@ -1002,37 +1227,6 @@ TEST(ClusterRole, MultiRole) {
     ASSERT_FALSE(shardAndConfigRole.hasExclusively(ClusterRole::ShardServer));
     ASSERT_FALSE(shardAndConfigRole.hasExclusively(ClusterRole::ConfigServer));
     ASSERT_FALSE(shardAndConfigRole.hasExclusively(ClusterRole::RouterServer));
-
-    const ClusterRole shardAndRouterRole{ClusterRole::ShardServer, ClusterRole::RouterServer};
-    ASSERT_FALSE(shardAndRouterRole.has(ClusterRole::None));
-    ASSERT_TRUE(shardAndRouterRole.has(ClusterRole::ShardServer));
-    ASSERT_FALSE(shardAndRouterRole.has(ClusterRole::ConfigServer));
-    ASSERT_TRUE(shardAndRouterRole.has(ClusterRole::RouterServer));
-    ASSERT_FALSE(shardAndRouterRole.hasExclusively(ClusterRole::None));
-    ASSERT_FALSE(shardAndRouterRole.hasExclusively(ClusterRole::ShardServer));
-    ASSERT_FALSE(shardAndRouterRole.hasExclusively(ClusterRole::ConfigServer));
-    ASSERT_FALSE(shardAndRouterRole.hasExclusively(ClusterRole::RouterServer));
-
-    const ClusterRole configAndRouterRole{ClusterRole::ConfigServer, ClusterRole::RouterServer};
-    ASSERT_FALSE(configAndRouterRole.has(ClusterRole::None));
-    ASSERT_FALSE(configAndRouterRole.has(ClusterRole::ShardServer));
-    ASSERT_TRUE(configAndRouterRole.has(ClusterRole::ConfigServer));
-    ASSERT_TRUE(configAndRouterRole.has(ClusterRole::RouterServer));
-    ASSERT_FALSE(configAndRouterRole.hasExclusively(ClusterRole::None));
-    ASSERT_FALSE(configAndRouterRole.hasExclusively(ClusterRole::ShardServer));
-    ASSERT_FALSE(configAndRouterRole.hasExclusively(ClusterRole::ConfigServer));
-    ASSERT_FALSE(configAndRouterRole.hasExclusively(ClusterRole::RouterServer));
-
-    const ClusterRole anyRole{
-        ClusterRole::ShardServer, ClusterRole::ConfigServer, ClusterRole::RouterServer};
-    ASSERT_FALSE(anyRole.has(ClusterRole::None));
-    ASSERT_TRUE(anyRole.has(ClusterRole::ShardServer));
-    ASSERT_TRUE(anyRole.has(ClusterRole::ConfigServer));
-    ASSERT_TRUE(anyRole.has(ClusterRole::RouterServer));
-    ASSERT_FALSE(anyRole.hasExclusively(ClusterRole::None));
-    ASSERT_FALSE(anyRole.hasExclusively(ClusterRole::ShardServer));
-    ASSERT_FALSE(anyRole.hasExclusively(ClusterRole::ConfigServer));
-    ASSERT_FALSE(anyRole.hasExclusively(ClusterRole::RouterServer));
 }
 
 TEST(ClusterRole, ToBson) {

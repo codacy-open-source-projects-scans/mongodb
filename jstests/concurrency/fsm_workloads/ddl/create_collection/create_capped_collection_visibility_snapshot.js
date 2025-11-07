@@ -8,22 +8,25 @@
  *  requires_capped,
  *  # This test works on a capped collection, which do not support sharding.
  *  assumes_unsharded_collection,
+ *  # This test sets internalQueryExecYieldIterations to 1, which can cause other tests running
+ *  # concurrently in concurrency_simultaneous to take much longer to complete than expected.
+ *  incompatible_with_concurrency_simultaneous,
  * ]
  */
 import {interruptedQueryErrors} from "jstests/concurrency/fsm_libs/assert.js";
 
-export const $config = (function() {
+export const $config = (function () {
     const data = {
         // Use the workload name as a prefix for the collection name,
         // since the workload name is assumed to be unique.
-        prefix: 'create_capped_collection_visibility_snapshot',
+        prefix: "create_capped_collection_visibility_snapshot",
         collectionCount: 2,
     };
 
-    const states = (function() {
+    const states = (function () {
         const options = {
             capped: true,
-            size: 8192  // multiple of 256; larger than 4096 default
+            size: 8192, // multiple of 256; larger than 4096 default
         };
 
         function createCollName(prefix, suffix) {
@@ -64,12 +67,12 @@ export const $config = (function() {
             const localDb = db.getSiblingDB("local");
             const myCollName = randomCollectionName(this.prefix, this.collectionCount);
             for (let i = 0; i < 10; ++i) {
-                let res = localDb.runCommand(
-                    {find: myCollName, filter: {}, tailable: true, batchSize: 0});
+                let res = localDb.runCommand({find: myCollName, filter: {}, tailable: true, batchSize: 0});
                 assert.commandWorked(res);
                 assert.commandWorkedOrFailedWithCode(
                     localDb.runCommand({getMore: res.cursor.id, collection: myCollName}),
-                    interruptedQueryErrors);
+                    interruptedQueryErrors,
+                );
             }
         }
 
@@ -91,7 +94,7 @@ export const $config = (function() {
         cluster.executeOnMongodNodes((db) => {
             const res = db.adminCommand({
                 setParameter: 1,
-                internalQueryExecYieldIterations: internalQueryExecYieldIterationsDefault
+                internalQueryExecYieldIterations: internalQueryExecYieldIterationsDefault,
             });
             assert.commandWorked(res);
         });
@@ -105,7 +108,7 @@ export const $config = (function() {
         threadCount: 20,
         iterations: 100,
         data: data,
-        startState: 'create',
+        startState: "create",
         states: states,
         transitions: transitions,
         setup: setup,

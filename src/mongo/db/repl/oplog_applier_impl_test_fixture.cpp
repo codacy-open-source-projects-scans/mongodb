@@ -29,30 +29,24 @@
 
 #include "mongo/db/repl/oplog_applier_impl_test_fixture.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <utility>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/catalog/document_validation.h"
-#include "mongo/db/catalog/health_log.h"
-#include "mongo/db/catalog/health_log_interface.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/index_builds/index_builds_manager.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/document_validation.h"
+#include "mongo/db/local_catalog/health_log.h"
+#include "mongo/db/local_catalog/health_log_interface.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
@@ -61,24 +55,31 @@
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog_applier.h"
+#include "mongo/db/repl/oplog_entry_test_helpers.h"
 #include "mongo/db/repl/replication_consistency_markers_mock.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/session/session_catalog_mongod.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/storage/mdb_catalog.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/db/vector_clock_mutable.h"
+#include "mongo/db/vector_clock/vector_clock_mutable.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/str.h"
 #include "mongo/util/version/releases.h"
+
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace repl {
@@ -124,17 +125,19 @@ void OplogApplierImplOpObserver::onUpdate(OperationContext* opCtx,
     onUpdateFn(opCtx, args);
 }
 
-void OplogApplierImplOpObserver::onCreateCollection(OperationContext* opCtx,
-                                                    const CollectionPtr& coll,
-                                                    const NamespaceString& collectionName,
-                                                    const CollectionOptions& options,
-                                                    const BSONObj& idIndex,
-                                                    const OplogSlot& createOpTime,
-                                                    bool fromMigrate) {
+void OplogApplierImplOpObserver::onCreateCollection(
+    OperationContext* opCtx,
+    const NamespaceString& collectionName,
+    const CollectionOptions& options,
+    const BSONObj& idIndex,
+    const OplogSlot& createOpTime,
+    const boost::optional<CreateCollCatalogIdentifier>& createCollCatalogIdentifier,
+    bool fromMigrate,
+    bool isViewlessTimeseries) {
     if (!onCreateCollectionFn) {
         return;
     }
-    onCreateCollectionFn(opCtx, coll, collectionName, options, idIndex);
+    onCreateCollectionFn(opCtx, collectionName, options, idIndex, createCollCatalogIdentifier);
 }
 
 void OplogApplierImplOpObserver::onRenameCollection(OperationContext* opCtx,
@@ -144,7 +147,8 @@ void OplogApplierImplOpObserver::onRenameCollection(OperationContext* opCtx,
                                                     const boost::optional<UUID>& dropTargetUUID,
                                                     std::uint64_t numRecords,
                                                     bool stayTemp,
-                                                    bool markFromMigrate) {
+                                                    bool markFromMigrate,
+                                                    bool isViewlessTimeseries) {
     if (!onRenameCollectionFn) {
         return;
     }
@@ -161,19 +165,21 @@ void OplogApplierImplOpObserver::onRenameCollection(OperationContext* opCtx,
 void OplogApplierImplOpObserver::onCreateIndex(OperationContext* opCtx,
                                                const NamespaceString& nss,
                                                const UUID& uuid,
-                                               BSONObj indexDoc,
-                                               bool fromMigrate) {
+                                               const IndexBuildInfo& indexBuildInfo,
+                                               bool fromMigrate,
+                                               bool isViewlessTimeseries) {
     if (!onCreateIndexFn) {
         return;
     }
-    onCreateIndexFn(opCtx, nss, uuid, indexDoc, fromMigrate);
+    onCreateIndexFn(opCtx, nss, uuid, indexBuildInfo, fromMigrate);
 }
 
 void OplogApplierImplOpObserver::onDropIndex(OperationContext* opCtx,
                                              const NamespaceString& nss,
                                              const UUID& uuid,
                                              const std::string& indexName,
-                                             const BSONObj& idxDescriptor) {
+                                             const BSONObj& idxDescriptor,
+                                             bool isViewlessTimeseries) {
     if (!onDropIndexFn) {
         return;
     }
@@ -185,11 +191,17 @@ void OplogApplierImplOpObserver::onCollMod(OperationContext* opCtx,
                                            const UUID& uuid,
                                            const BSONObj& collModCmd,
                                            const CollectionOptions& oldCollOptions,
-                                           boost::optional<IndexCollModInfo> indexInfo) {
+                                           boost::optional<IndexCollModInfo> indexInfo,
+                                           bool isViewlessTimeseries) {
     if (!onCollModFn) {
         return;
     }
     onCollModFn(opCtx, nss, uuid, collModCmd, oldCollOptions, indexInfo);
+}
+
+std::unique_ptr<ReplicationCoordinator> OplogApplierImplTest::makeReplCoord(
+    ServiceContext* serviceContext) {
+    return std::make_unique<ReplicationCoordinatorMock>(serviceContext);
 }
 
 void OplogApplierImplTest::setUp() {
@@ -198,8 +210,7 @@ void OplogApplierImplTest::setUp() {
     serviceContext = getServiceContext();
     _opCtx = cc().makeOperationContext();
 
-    ReplicationCoordinator::set(serviceContext,
-                                std::make_unique<ReplicationCoordinatorMock>(serviceContext));
+    ReplicationCoordinator::set(serviceContext, makeReplCoord(serviceContext));
     ASSERT_OK(ReplicationCoordinator::get(_opCtx.get())->setFollowerMode(MemberState::RS_PRIMARY));
 
     StorageInterface::set(serviceContext, std::make_unique<StorageInterfaceImpl>());
@@ -231,16 +242,19 @@ void OplogApplierImplTest::setUp() {
 
     HealthLogInterface::set(serviceContext, std::make_unique<HealthLog>());
     HealthLogInterface::get(serviceContext)->startup();
+
+    _disableChecks.emplace(_opCtx.get());
 }
 
 void OplogApplierImplTest::tearDown() {
+    _disableChecks.reset();
     HealthLogInterface::get(serviceContext)->shutdown();
     _opCtx.reset();
     _consistencyMarkers = {};
     StorageInterface::set(serviceContext, {});
     ServiceContextMongoDTest::tearDown();
 
-    for (auto serverParamController : _serverParamControllers) {
+    for (auto&& serverParamController : _serverParamControllers) {
         serverParamController.reset();
     }
 }
@@ -335,13 +349,6 @@ void OplogApplierImplTest::_testApplyOplogEntryOrGroupedInsertsCrudOperation(
     ASSERT_EQ(applyOpCalled->load(), expectedApplyOpCalled);
 }
 
-Status failedApplyCommand(OperationContext* opCtx,
-                          const BSONObj& theOperation,
-                          OplogApplication::Mode) {
-    FAIL("applyCommand unexpectedly invoked.");
-    return Status::OK();
-}
-
 Status OplogApplierImplTest::runOpSteadyState(const OplogEntry& op) {
     return runOpsSteadyState({op});
 }
@@ -411,6 +418,28 @@ Status OplogApplierImplTest::runOpsInitialSync(std::vector<OplogEntry> ops) {
     return Status::OK();
 }
 
+long OplogApplierImplTest::getOplogSize() {
+    AutoGetOplogFastPath oplogRead(_opCtx.get(), OplogAccessMode::kRead);
+    const auto& oplog = oplogRead.getCollection();
+    return oplog->getRecordStore()->numRecords();
+}
+
+BSONObj getOplogDoc(OperationContext* opCtx, bool forward) {
+    AutoGetOplogFastPath oplogRead(opCtx, OplogAccessMode::kRead);
+    const auto& oplog = oplogRead.getCollection();
+    auto cursor = oplog->getRecordStore()->getCursor(
+        opCtx, *shard_role_details::getRecoveryUnit(opCtx), forward);
+    return cursor->next()->data.getOwned().toBson();
+}
+
+BSONObj OplogApplierImplTest::getFirstOplogDoc() {
+    return getOplogDoc(_opCtx.get(), /*forward=*/true);
+}
+
+BSONObj OplogApplierImplTest::getLastOplogDoc() {
+    return getOplogDoc(_opCtx.get(), /*forward=*/false);
+}
+
 void checkTxnTable(OperationContext* opCtx,
                    const LogicalSessionId& lsid,
                    const TxnNumber& txnNum,
@@ -423,7 +452,7 @@ void checkTxnTable(OperationContext* opCtx,
                                  BSON(SessionTxnRecord::kSessionIdFieldName << lsid.toBSON()));
     ASSERT_FALSE(result.isEmpty());
 
-    auto txnRecord = SessionTxnRecord::parse(IDLParserContext("parse txn record for test"), result);
+    auto txnRecord = SessionTxnRecord::parse(result, IDLParserContext("parse txn record for test"));
 
     ASSERT_EQ(txnNum, txnRecord.getTxnNum());
     ASSERT_EQ(expectedOpTime, txnRecord.getLastWriteOpTime());
@@ -440,9 +469,15 @@ void checkTxnTable(OperationContext* opCtx,
 }
 
 CollectionReader::CollectionReader(OperationContext* opCtx, const NamespaceString& nss)
-    : _collToScan(opCtx, nss),
+    : _collToScan(
+          acquireCollection(opCtx,
+                            CollectionAcquisitionRequest(nss,
+                                                         PlacementConcern::kPretendUnsharded,
+                                                         repl::ReadConcernArgs::get(opCtx),
+                                                         AcquisitionPrerequisites::kRead),
+                            MODE_IS)),
       _exec(InternalPlanner::collectionScan(opCtx,
-                                            &_collToScan.getCollection(),
+                                            _collToScan,
                                             PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                             InternalPlanner::FORWARD)) {}
 
@@ -453,7 +488,7 @@ StatusWith<BSONObj> CollectionReader::next() {
     if (state == PlanExecutor::IS_EOF) {
         return {ErrorCodes::CollectionIsEmpty,
                 str::stream() << "no more documents in "
-                              << _collToScan.getNss().toStringForErrorMsg()};
+                              << _collToScan.nss().toStringForErrorMsg()};
     }
 
     // PlanExecutors that do not yield should only return ADVANCED or EOF.
@@ -494,6 +529,7 @@ OplogEntry makeOplogEntry(OpTime opTime,
                               uuid,                       // uuid
                               fromMigrate,                // fromMigrate
                               boost::none,                // checkExistenceForDiffInsert
+                              boost::none,                // versionContext
                               OplogEntry::kOplogVersion,  // version
                               o,                          // o
                               o2,                         // o2
@@ -511,6 +547,36 @@ OplogEntry makeOplogEntry(OpTime opTime,
 
 OplogEntry makeOplogEntry(OpTypeEnum opType, NamespaceString nss, boost::optional<UUID> uuid) {
     return makeOplogEntry(opType, nss, uuid, BSON("_id" << 0), boost::none);
+}
+
+OplogEntry makeCreateCollectionOplogEntry(
+    OperationContext* opCtx,
+    const OpTime& opTime,
+    const NamespaceString& nss,
+    const CollectionOptions& collectionOptions,
+    const BSONObj& idIndex,
+    boost::optional<CreateCollCatalogIdentifier> createCollCatalogIdentifier) {
+    const auto object = MutableOplogEntry::makeCreateCollObject(nss, collectionOptions, idIndex);
+
+    boost::optional<BSONObj> o2;
+    if (createCollCatalogIdentifier) {
+        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+        auto identUniqueTag = storageEngine->getCollectionIdentUniqueTag(
+            createCollCatalogIdentifier->ident, nss.dbName());
+        auto idIndexIdentUniqueTag = createCollCatalogIdentifier->idIndexIdent
+            ? boost::optional<StringData>(storageEngine->getIndexIdentUniqueTag(
+                  *createCollCatalogIdentifier->idIndexIdent, nss.dbName()))
+            : boost::none;
+        o2 = MutableOplogEntry::makeCreateCollObject2(
+            createCollCatalogIdentifier->catalogId, identUniqueTag, idIndexIdentUniqueTag);
+    }
+    return makeCommandOplogEntry(opTime, nss, object, o2, collectionOptions.uuid);
+}
+OplogEntry makeCreateCollectionOplogEntry(OperationContext* opCtx,
+                                          const OpTime& opTime,
+                                          const NamespaceString& nss,
+                                          const UUID& uuid) {
+    return makeCreateCollectionOplogEntry(opCtx, opTime, nss, CollectionOptions{.uuid = uuid});
 }
 
 CollectionOptions createOplogCollectionOptions() {
@@ -531,11 +597,10 @@ void createCollection(OperationContext* opCtx,
                       const NamespaceString& nss,
                       const CollectionOptions& options) {
     writeConflictRetry(opCtx, "createCollection", nss, [&] {
-        Lock::DBLock dbLk(opCtx, nss.dbName(), MODE_IX);
+        AutoGetDb autodb(opCtx, nss.dbName(), MODE_IX);
         Lock::CollectionLock collLk(opCtx, nss, MODE_X);
 
-        OldClientContext ctx(opCtx, nss);
-        auto db = ctx.db();
+        auto db = autodb.ensureDbExists(opCtx);
         ASSERT_TRUE(db);
 
         mongo::WriteUnitOfWork wuow(opCtx);
@@ -563,7 +628,11 @@ void createDatabase(OperationContext* opCtx, StringData dbName) {
 }
 
 bool collectionExists(OperationContext* opCtx, const NamespaceString& nss) {
-    return static_cast<bool>(AutoGetCollectionForRead(opCtx, nss).getCollection());
+    const auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kRead),
+        MODE_IS);
+    return coll.exists();
 }
 
 void createIndex(OperationContext* opCtx,
@@ -579,6 +648,22 @@ void createIndex(OperationContext* opCtx,
     repl::UnreplicatedWritesBlock noRep(opCtx);
     indexBuildsCoord->createIndex(
         opCtx, collUUID, spec, IndexBuildsManager::IndexConstraints::kEnforce, false);
+}
+
+CreateCollCatalogIdentifier newCatalogIdentifier(OperationContext* opCtx,
+                                                 const DatabaseName& dbName,
+                                                 bool includeIdIndexIdent) {
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    auto mdbCatalog = storageEngine->getMDBCatalog();
+    invariant(mdbCatalog);
+
+    CreateCollCatalogIdentifier catalogIdentifier;
+    catalogIdentifier.catalogId = mdbCatalog->reserveCatalogId(opCtx);
+    catalogIdentifier.ident = storageEngine->generateNewCollectionIdent(dbName);
+    if (includeIdIndexIdent) {
+        catalogIdentifier.idIndexIdent = storageEngine->generateNewIndexIdent(dbName);
+    }
+    return catalogIdentifier;
 }
 
 }  // namespace repl

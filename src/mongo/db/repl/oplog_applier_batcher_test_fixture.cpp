@@ -27,12 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <memory>
-#include <mutex>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/repl/oplog_applier_batcher_test_fixture.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
@@ -41,16 +36,25 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
+#include "mongo/db/change_stream_pre_image_util.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/repl/oplog_applier_batcher_test_fixture.h"
+#include "mongo/db/pipeline/change_stream_preimage_gen.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
+#include "mongo/db/repl/truncate_range_oplog_entry_gen.h"
 #include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <mutex>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace repl {
@@ -206,6 +210,7 @@ OplogEntry makeInsertOplogEntry(int t,
                               uuid,                        // uuid
                               boost::none,                 // fromMigrate
                               boost::none,                 // checkExistenceForDiffInsert
+                              boost::none,                 // versionContext
                               version,                     // version
                               oField,                      // o
                               boost::none,                 // o2
@@ -237,6 +242,7 @@ OplogEntry makeDBCheckBatchEntry(int t, const NamespaceString& nss, boost::optio
                               uuid,                        // uuid
                               boost::none,                 // fromMigrate
                               boost::none,                 // checkExistenceForDiffInsert
+                              boost::none,                 // versionContext
                               OplogEntry::kOplogVersion,   // version
                               oField,                      // o
                               boost::none,                 // o2
@@ -253,45 +259,17 @@ OplogEntry makeDBCheckBatchEntry(int t, const NamespaceString& nss, boost::optio
 }
 
 /**
- * Generates an update oplog entry with the given number used for the timestamp, and the given
- * pre- and post- image optimes.
+ * Generates a New Primary batch oplog entry with the given number used for the timestamp.
  */
-OplogEntry makeUpdateOplogEntry(int t,
-                                const NamespaceString& nss,
-                                boost::optional<UUID> uuid,
-                                boost::optional<OpTime> preImageOpTime,
-                                boost::optional<OpTime> postImageOpTime) {
-    BSONObj oField = BSON("_id" << t << "a" << t);
-    BSONObj o2Field = BSON("_id" << t);
-    return {DurableOplogEntry(OpTime(Timestamp(t, 1), 1),  // optime
-                              OpTypeEnum::kUpdate,         // op type
-                              nss,                         // namespace
-                              uuid,                        // uuid
-                              boost::none,                 // fromMigrate
-                              boost::none,                 // checkExistenceForDiffInsert
-                              OplogEntry::kOplogVersion,   // version
-                              oField,                      // o
-                              boost::none,                 // o2
-                              {},                          // sessionInfo
-                              boost::none,                 // upsert
-                              Date_t() + Seconds(t),       // wall clock time
-                              {},                          // statement ids
-                              boost::none,  // optime of previous write within same transaction
-                              preImageOpTime,
-                              postImageOpTime,
-                              boost::none,    // ShardId of resharding recipient
-                              boost::none,    // _id
-                              boost::none)};  // needsRetryImage
-}
-
-OplogEntry makeNoopOplogEntry(int t, StringData msg) {
-    BSONObj oField = BSON("msg" << msg << "count" << t);
+OplogEntry makeNewPrimaryBatchEntry(int t) {
+    BSONObj oField = BSON(kNewPrimaryMsgField << kNewPrimaryMsg);
     return {DurableOplogEntry(OpTime(Timestamp(t, 1), 1),  // optime
                               OpTypeEnum::kNoop,           // op type
-                              NamespaceString::kEmpty,     // namespace
+                              {},                          // namespace
                               boost::none,                 // uuid
                               boost::none,                 // fromMigrate
                               boost::none,                 // checkExistenceForDiffInsert
+                              boost::none,                 // versionContext
                               OplogEntry::kOplogVersion,   // version
                               oField,                      // o
                               boost::none,                 // o2
@@ -327,6 +305,7 @@ OplogEntry makeApplyOpsOplogEntry(int t, bool prepare, const std::vector<OplogEn
                               boost::none,                 // uuid
                               boost::none,                 // fromMigrate
                               boost::none,                 // checkExistenceForDiffInsert
+                              boost::none,                 // versionContext
                               OplogEntry::kOplogVersion,   // version
                               oField.obj(),                // o
                               boost::none,                 // o2
@@ -374,6 +353,7 @@ OplogEntry makeCommitTransactionOplogEntry(int t,
                               boost::none,                 // uuid
                               boost::none,                 // fromMigrate
                               boost::none,                 // checkExistenceForDiffInsert
+                              boost::none,                 // versionContext
                               OplogEntry::kOplogVersion,   // version
                               oField,                      // o
                               boost::none,                 // o2
@@ -405,6 +385,7 @@ OplogEntry makeAbortTransactionOplogEntry(int t, const DatabaseName& dbName) {
                               boost::none,                 // uuid
                               boost::none,                 // fromMigrate
                               boost::none,                 // checkExistenceForDiffInsert
+                              boost::none,                 // versionContext
                               OplogEntry::kOplogVersion,   // version
                               oField,                      // o
                               boost::none,                 // o2
@@ -466,6 +447,7 @@ OplogEntry makeLargeTransactionOplogEntries(int t,
                               boost::none,                 // uuid
                               boost::none,                 // fromMigrate
                               boost::none,                 // checkExistenceForDiffInsert
+                              boost::none,                 // versionContext
                               OplogEntry::kOplogVersion,   // version
                               oField,                      // o
                               boost::none,                 // o2
@@ -514,6 +496,7 @@ OplogEntry makeLargeRetryableWriteOplogEntries(int t,
                           boost::none,                 // uuid
                           boost::none,                 // fromMigrate
                           boost::none,                 // checkExistenceForDiffInsert
+                          boost::none,                 // versionContext
                           OplogEntry::kOplogVersion,   // version
                           oField,                      // o
                           boost::none,                 // o2
@@ -533,6 +516,54 @@ OplogEntry makeLargeRetryableWriteOplogEntries(int t,
 }
 
 /**
+ * Generates a truncateRange oplog entry
+ */
+OplogEntry makeTruncateRangeEntry(int t, const NamespaceString& nss, const RecordId& maxRecordId) {
+    TruncateRangeOplogEntry oField(std::string(nss.coll()), RecordId(), maxRecordId, 0, 0);
+    return {DurableOplogEntry(OpTime(Timestamp(t, 1), 1),  // optime
+                              OpTypeEnum::kCommand,        // op type
+                              nss.getCommandNS(),          // namespace
+                              boost::none,                 // uuid
+                              boost::none,                 // fromMigrate
+                              boost::none,                 // checkExistenceForDiffInsert
+                              boost::none,                 // versionContext
+                              OplogEntry::kOplogVersion,   // version
+                              oField.toBSON(),             // o
+                              boost::none,                 // o2
+                              {},                          // sessionInfo
+                              boost::none,                 // upsert
+                              Date_t() + Seconds(t),       // wall clock time
+                              {},                          // statement ids
+                              boost::none,    // optime of previous write within same transaction
+                              boost::none,    // pre-image optime
+                              boost::none,    // post-image optime
+                              boost::none,    // ShardId of resharding recipient
+                              boost::none,    // _id
+                              boost::none)};  // needsRetryImage
+}
+
+/**
+ * Generates a truncateRange oplog entry that truncates the pre-images collection
+ */
+OplogEntry makeTruncateRangeOnPreImagesEntry(int t, int maxTruncateTimestamp) {
+    ChangeStreamPreImageId preImageId(UUID::gen(), Timestamp(maxTruncateTimestamp, 1), 0);
+    return makeTruncateRangeEntry(t,
+                                  NamespaceString::kChangeStreamPreImagesNamespace,
+                                  change_stream_pre_image_util::toRecordId(preImageId));
+}
+
+/**
+ * Generates a truncateRange oplog entry that truncates the oplog collection
+ */
+OplogEntry makeTruncateRangeOnOplogEntry(int t, int maxTruncateTimestamp) {
+    return makeTruncateRangeEntry(
+        t,
+        NamespaceString::kRsOplogNamespace,
+        record_id_helpers::keyForOptime(Timestamp(maxTruncateTimestamp, 1), KeyFormat::String)
+            .getValue());
+}
+
+/**
  * Generates a mock large-transaction which has more than one oplog entry.
  */
 std::vector<OplogEntry> makeMultiEntryTransactionOplogEntries(int t,
@@ -544,49 +575,6 @@ std::vector<OplogEntry> makeMultiEntryTransactionOplogEntries(int t,
     for (int i = 0; i < count; i++) {
         vec.push_back(makeLargeTransactionOplogEntries(
             t + i, prepared, i == 0, i == count - 1, i + 1, count, {}));
-    }
-    return vec;
-}
-
-/**
- * Generates a mock large-transaction which has more than one oplog entry and contains the
- * operations in innerOps.
- */
-std::vector<OplogEntry> makeMultiEntryTransactionOplogEntries(
-    int t,
-    const DatabaseName& dbName,
-    bool prepared,
-    std::vector<std::vector<OplogEntry>> innerOps) {
-    std::size_t count = innerOps.size() + (prepared ? 1 : 0);
-    ASSERT_GTE(count, 2);
-    std::vector<OplogEntry> vec;
-    for (std::size_t i = 0; i < count; i++) {
-        vec.push_back(makeLargeTransactionOplogEntries(
-            t + i,
-            prepared,
-            i == 0,
-            i == count - 1,
-            i + 1,
-            count,
-            i < innerOps.size() ? innerOps[i] : std::vector<OplogEntry>()));
-    }
-    return vec;
-}
-
-/**
- * Generates a mock applyOps retryable write which contains the operations in innerOps.
- */
-std::vector<OplogEntry> makeRetryableApplyOpsOplogEntries(
-    int t,
-    const DatabaseName& dbName,
-    const OperationSessionInfo& sessionInfo,
-    std::vector<std::vector<OplogEntry>> innerOps) {
-    StmtId nextStmtId{0};
-    std::vector<OplogEntry> vec;
-    for (std::size_t i = 0; i < innerOps.size(); i++) {
-        vec.push_back(makeLargeRetryableWriteOplogEntries(
-            t + i, i == 0, sessionInfo, nextStmtId, innerOps[i]));
-        nextStmtId += innerOps[i].size();
     }
     return vec;
 }

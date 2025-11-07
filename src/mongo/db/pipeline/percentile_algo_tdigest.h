@@ -29,6 +29,9 @@
 
 #pragma once
 
+#include "mongo/db/pipeline/percentile_algo.h"
+#include "mongo/util/modules.h"
+
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -38,15 +41,13 @@
 
 #include <boost/optional/optional.hpp>
 
-#include "mongo/db/pipeline/percentile_algo.h"
-
-namespace mongo {
+namespace MONGO_MOD_PUB mongo {
 
 /**
  * For the description of t-digest algorithm see
  * https://github.com/tdunning/t-digest/blob/main/docs/t-digest-paper/histo.pdf
  */
-class TDigest : public PercentileAlgorithm {
+class MONGO_MOD_PUB TDigest : public PercentileAlgorithm {
 public:
     typedef double (*ScalingFunction)(double /* q */, double /* delta */);
 
@@ -98,6 +99,11 @@ public:
     std::vector<double> computePercentiles(const std::vector<double>& ps) final;
 
     long memUsageBytes() const final;
+
+    /* These are provided in order to provide a uniform interface to the PercentileAlgo class, but
+     * remain unimplemented since TDigest does not need to handle spilling to disk.*/
+    void spill() final;
+    void reset() final {}
 
     //----------------------------------------------------------------------------------------------
     // Implementation details of t-digest
@@ -315,4 +321,4 @@ protected:
 std::ostream& operator<<(std::ostream& os, const TDigest& tdigest);
 std::ostream& operator<<(std::ostream& os, const TDigest::Centroid& centroid);
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

@@ -13,31 +13,29 @@
  *  # query stats results.
  *  incompatible_with_concurrency_simultaneous,
  *  requires_getmore,
- *  # TODO (SERVER-95174): Re-enable this test on txn concurrency suites.
- *  does_not_support_transactions,
+ *  uses_getmore_outside_of_transaction,
+ *  # This test relies on aggregations returning specific batch-sized responses.
+ *  assumes_no_implicit_cursor_exhaustion,
  * ]
  *
  */
 
 import {setParameterOnAllNodes} from "jstests/concurrency/fsm_workload_helpers/set_parameter.js";
 
-export const $config = (function() {
+export const $config = (function () {
     function setCacheSize(db, cacheSize) {
-        assert.commandWorked(
-            db.adminCommand({setParameter: 1, internalQueryStatsCacheSize: cacheSize}));
+        assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryStatsCacheSize: cacheSize}));
     }
 
     function setRateLimit(db, rateLimit) {
-        assert.commandWorked(
-            db.adminCommand({setParameter: 1, internalQueryStatsRateLimit: rateLimit}));
+        assert.commandWorked(db.adminCommand({setParameter: 1, internalQueryStatsRateLimit: rateLimit}));
     }
 
     function runQueryStats({db, options}) {
         try {
             // Use a small batch size to ensure these operations open up a cursor and use
             // multiple getMores - this will better stress odd concurrency states.
-            const cursor =
-                db.getSiblingDB("admin").aggregate([{$queryStats: options}], {batchSize: 1});
+            const cursor = db.getSiblingDB("admin").aggregate([{$queryStats: options}], {batchSize: 1});
             // Can't assert much in particular about the results.
             assert.gte(cursor.itcount(), 0);
         } catch (e) {
@@ -52,8 +50,8 @@ export const $config = (function() {
     const hmacOptions = {
         transformIdentifiers: {
             algorithm: "hmac-sha-256",
-            hmacKey: BinData(8, "MjM0NTY3ODkxMDExMTIxMzE0MTUxNjE3MTgxOTIwMjE=")
-        }
+            hmacKey: BinData(8, "MjM0NTY3ODkxMDExMTIxMzE0MTUxNjE3MTgxOTIwMjE="),
+        },
     };
     const nDifferentShapes = 200;
     const states = {
@@ -65,13 +63,14 @@ export const $config = (function() {
         enableViaRateLimit: (db, collName) => setRateLimit(db, -1),
 
         runOneQuery: function runOneQuery(db, collName) {
-            assert.eq(null,
-                      db[collName].findOne({["field" + Random.randInt(nDifferentShapes)]: 42}));
+            assert.eq(null, db[collName].findOne({["field" + Random.randInt(nDifferentShapes)]: 42}));
         },
 
         runQueryStatsWithHmac: (db, collName) => runQueryStats({db: db, options: hmacOptions}),
         runQueryStatsWithoutHmac: (db, collName) => runQueryStats({db: db, options: {}}),
-        init: (db, collName) => { /* no op */ },
+        init: (db, collName) => {
+            /* no op */
+        },
     };
 
     const transitions = {
@@ -95,19 +94,25 @@ export const $config = (function() {
         enableViaRateLimit: {init: 1},
     };
 
-    var internalQueryStatsRateLimit;
-    var internalQueryStatsCacheSize;
+    let internalQueryStatsRateLimit;
+    let internalQueryStatsCacheSize;
 
-    const setup = function(db, collName, cluster) {
+    const setup = function (db, collName, cluster) {
         // TODO SERVER-85405 Make this pattern easier and repeated throughout multiple workloads,
         // not just the query stats ones.
-        internalQueryStatsRateLimit = setParameterOnAllNodes(
-            {cluster: cluster, paramName: "internalQueryStatsRateLimit", newValue: -1});
-        internalQueryStatsCacheSize = setParameterOnAllNodes(
-            {cluster: cluster, paramName: "internalQueryStatsCacheSize", newValue: "1MB"});
+        internalQueryStatsRateLimit = setParameterOnAllNodes({
+            cluster: cluster,
+            paramName: "internalQueryStatsRateLimit",
+            newValue: -1,
+        });
+        internalQueryStatsCacheSize = setParameterOnAllNodes({
+            cluster: cluster,
+            paramName: "internalQueryStatsCacheSize",
+            newValue: "1MB",
+        });
     };
 
-    const teardown = function(db, collName, cluster) {
+    const teardown = function (db, collName, cluster) {
         setParameterOnAllNodes({
             cluster: cluster,
             paramName: "internalQueryStatsRateLimit",
@@ -131,6 +136,6 @@ export const $config = (function() {
         states: states,
         setup: setup,
         teardown: teardown,
-        transitions: transitions
+        transitions: transitions,
     };
 })();

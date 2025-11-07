@@ -27,32 +27,32 @@
  *    it in the license file.
  */
 
-#include <limits>
-#include <string>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/update/arithmetic_node.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
-#include "mongo/bson/mutable/document.h"
+#include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/update/arithmetic_node.h"
 #include "mongo/db/update/runtime_update_path.h"
 #include "mongo/db/update/update_executor.h"
 #include "mongo/db/update/update_node_test_fixture.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <limits>
+#include <string>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
 
 using ArithmeticNodeTest = UpdateTestFixture;
 
-DEATH_TEST_REGEX(ArithmeticNodeTest,
+DEATH_TEST_REGEX(ArithmeticNodeDeathTest,
                  InitFailsForEmptyElement,
                  R"#(Invariant failure.*modExpr.ok\(\))#") {
     auto update = fromjson("{$inc: {}}");
@@ -61,35 +61,35 @@ DEATH_TEST_REGEX(ArithmeticNodeTest,
     node.init(update["$inc"].embeddedObject().firstElement(), expCtx).transitional_ignore();
 }
 
-TEST(ArithmeticNodeTest, InitSucceedsForNumberIntElement) {
+TEST(SimpleArithmeticNodeTest, InitSucceedsForNumberIntElement) {
     auto update = fromjson("{$inc: {a: NumberInt(5)}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     ArithmeticNode node(ArithmeticNode::ArithmeticOp::kAdd);
     ASSERT_OK(node.init(update["$inc"]["a"], expCtx));
 }
 
-TEST(ArithmeticNodeTest, InitSucceedsForNumberLongElement) {
+TEST(SimpleArithmeticNodeTest, InitSucceedsForNumberLongElement) {
     auto update = fromjson("{$inc: {a: NumberLong(5)}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     ArithmeticNode node(ArithmeticNode::ArithmeticOp::kAdd);
     ASSERT_OK(node.init(update["$inc"]["a"], expCtx));
 }
 
-TEST(ArithmeticNodeTest, InitSucceedsForDoubleElement) {
+TEST(SimpleArithmeticNodeTest, InitSucceedsForDoubleElement) {
     auto update = fromjson("{$inc: {a: 5.1}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     ArithmeticNode node(ArithmeticNode::ArithmeticOp::kAdd);
     ASSERT_OK(node.init(update["$inc"]["a"], expCtx));
 }
 
-TEST(ArithmeticNodeTest, InitSucceedsForDecimalElement) {
+TEST(SimpleArithmeticNodeTest, InitSucceedsForDecimalElement) {
     auto update = fromjson("{$inc: {a: NumberDecimal(\"5.1\")}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     ArithmeticNode node(ArithmeticNode::ArithmeticOp::kAdd);
     ASSERT_OK(node.init(update["$inc"]["a"], expCtx));
 }
 
-TEST(ArithmeticNodeTest, InitFailsForNonNumericElement) {
+TEST(SimpleArithmeticNodeTest, InitFailsForNonNumericElement) {
     auto update = fromjson("{$inc: {a: 'foo'}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     ArithmeticNode node(ArithmeticNode::ArithmeticOp::kAdd);
@@ -99,7 +99,7 @@ TEST(ArithmeticNodeTest, InitFailsForNonNumericElement) {
     ASSERT_EQ(result.reason(), "Cannot increment with non-numeric argument: {a: \"foo\"}");
 }
 
-TEST(ArithmeticNodeTest, InitFailsForObjectElement) {
+TEST(SimpleArithmeticNodeTest, InitFailsForObjectElement) {
     auto update = fromjson("{$mul: {a: {b: 6}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     ArithmeticNode node(ArithmeticNode::ArithmeticOp::kMultiply);
@@ -109,7 +109,7 @@ TEST(ArithmeticNodeTest, InitFailsForObjectElement) {
     ASSERT_EQ(result.reason(), "Cannot multiply with non-numeric argument: {a: { b: 6 }}");
 }
 
-TEST(ArithmeticNodeTest, InitFailsForArrayElement) {
+TEST(SimpleArithmeticNodeTest, InitFailsForArrayElement) {
     auto update = fromjson("{$mul: {a: []}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     ArithmeticNode node(ArithmeticNode::ArithmeticOp::kMultiply);
@@ -487,13 +487,13 @@ TEST_F(ArithmeticNodeTest, OverflowIntToLong) {
 
     const int initialValue = std::numeric_limits<int>::max();
     mutablebson::Document doc(BSON("a" << initialValue));
-    ASSERT_EQUALS(mongo::NumberInt, doc.root()["a"].getType());
+    ASSERT_EQUALS(mongo::BSONType::numberInt, doc.root()["a"].getType());
     setPathTaken(makeRuntimeUpdatePathForTest("a"));
     addIndexedPath("a");
     auto result = node.apply(getApplyParams(doc.root()["a"]), getUpdateNodeApplyParams());
     ASSERT_FALSE(result.noop);
     ASSERT_TRUE(getIndexAffectedFromLogEntry());
-    ASSERT_EQUALS(mongo::NumberLong, doc.root()["a"].getType());
+    ASSERT_EQUALS(mongo::BSONType::numberLong, doc.root()["a"].getType());
     ASSERT_EQUALS(BSON("a" << static_cast<long long>(initialValue) + 1), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(getModifiedPaths(), "{a}");
@@ -507,13 +507,13 @@ TEST_F(ArithmeticNodeTest, UnderflowIntToLong) {
 
     const int initialValue = std::numeric_limits<int>::min();
     mutablebson::Document doc(BSON("a" << initialValue));
-    ASSERT_EQUALS(mongo::NumberInt, doc.root()["a"].getType());
+    ASSERT_EQUALS(mongo::BSONType::numberInt, doc.root()["a"].getType());
     setPathTaken(makeRuntimeUpdatePathForTest("a"));
     addIndexedPath("a");
     auto result = node.apply(getApplyParams(doc.root()["a"]), getUpdateNodeApplyParams());
     ASSERT_FALSE(result.noop);
     ASSERT_TRUE(getIndexAffectedFromLogEntry());
-    ASSERT_EQUALS(mongo::NumberLong, doc.root()["a"].getType());
+    ASSERT_EQUALS(mongo::BSONType::numberLong, doc.root()["a"].getType());
     ASSERT_EQUALS(BSON("a" << static_cast<long long>(initialValue) - 1), doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
     ASSERT_EQUALS(getModifiedPaths(), "{a}");

@@ -28,27 +28,23 @@
  */
 
 
-#include <cstdlib>
-#include <fmt/format.h>
-#include <iostream>
-
-#include <boost/filesystem/path.hpp>
-#include <boost/filesystem/path_traits.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/unittest/golden_test.h"
 
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/unittest/assert.h"
-#include "mongo/unittest/golden_test.h"
 #include "mongo/util/shell_exec.h"
+
+#include <cstdlib>
+#include <iostream>
+
+#include <boost/filesystem.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo::unittest {
-
-using namespace fmt::literals;
 
 void GoldenTestContext::printTestHeader(HeaderFormat format) {
     switch (format) {
@@ -93,7 +89,7 @@ void GoldenTestContext::onError(const std::string& message,
                     "reason"_attr = diffOutput.getStatus().reason());
     }
 
-    throw TestAssertionFailureException(_testInfo->file().toString(), _testInfo->line(), message);
+    throw TestAssertionFailureException(std::string{_testInfo->file()}, _testInfo->line(), message);
 }
 
 }  // namespace mongo::unittest

@@ -29,39 +29,41 @@
 
 #pragma once
 
-#include <boost/intrusive_ptr.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <fmt/format.h>
-#include <memory>
-#include <set>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/field_ref.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/transformer_interface.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/projection_policies.h"
-#include "mongo/platform/basic.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_policies.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <set>
+
+#include <boost/intrusive_ptr.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
 
 namespace mongo::projection_executor {
 /**
  * A ProjectionExecutor is responsible for parsing and executing a $project. It represents either an
  * inclusion or exclusion projection. This is the common interface between the two types of
  * projections.
+ *
+ * TODO SERVER-113179: Remove external dependencies on this class.
  */
-class ProjectionExecutor : public TransformerInterface {
+class MONGO_MOD_NEEDS_REPLACEMENT ProjectionExecutor : public TransformerInterface {
 public:
     /**
      * The name of an internal variable to bind a projection post image to, which is used by the
@@ -78,8 +80,8 @@ public:
         }
     }
 
-    Pipeline::SourceContainer::iterator doOptimizeAt(
-        Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) override {
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) override {
         return std::next(itr);
     }
 
@@ -146,14 +148,12 @@ protected:
 
 private:
     Document _applyRootReplacementExpression(const Document& input, const Document& output) const {
-        using namespace fmt::literals;
-
         _expCtx->variables.setValue(_projectionPostImageVarId, Value{output});
         auto val = _rootReplacementExpression->evaluate(input, &_expCtx->variables);
         uassert(51254,
-                "Root-replacement expression must return a document, but got {}"_format(
-                    typeName(val.getType())),
-                val.getType() == BSONType::Object);
+                fmt::format("Root-replacement expression must return a document, but got {}",
+                            typeName(val.getType())),
+                val.getType() == BSONType::object);
         return val.getDocument();
     }
 

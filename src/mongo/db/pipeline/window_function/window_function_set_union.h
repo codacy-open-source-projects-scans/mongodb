@@ -31,6 +31,7 @@
 
 #include "mongo/db/pipeline/memory_token_container_util.h"
 #include "mongo/db/pipeline/window_function/window_function.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -43,7 +44,7 @@ public:
     }
 
     explicit WindowFunctionSetUnion(ExpressionContext* const expCtx)
-        : WindowFunctionState(expCtx),
+        : WindowFunctionState(expCtx, internalQueryMaxSetUnionBytes.load()),
           _values(MemoryTokenValueComparator(&_expCtx->getValueComparator())) {
         _memUsageTracker.set(sizeof(*this));
     }
@@ -62,6 +63,13 @@ public:
         for (const auto& val : value.getArray()) {
             _values.emplace(SimpleMemoryUsageToken{val.getApproximateSize(), &_memUsageTracker},
                             val);
+            uassert(ErrorCodes::ExceededMemoryLimit,
+                    str::stream() << "$setUnion used too much memory and spilling to disk will not "
+                                     "reduce memory usage. Used: "
+                                  << _memUsageTracker.inUseTrackedMemoryBytes()
+                                  << "bytes. Memory limit: "
+                                  << _memUsageTracker.maxAllowedMemoryUsageBytes() << " bytes",
+                    _memUsageTracker.withinMemoryLimit());
         }
     }
 

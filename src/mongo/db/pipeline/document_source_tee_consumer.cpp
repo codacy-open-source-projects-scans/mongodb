@@ -29,47 +29,33 @@
 
 #include "mongo/db/pipeline/document_source_tee_consumer.h"
 
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/pipeline/expression_context.h"
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
 using boost::intrusive_ptr;
 
+ALLOCATE_DOCUMENT_SOURCE_ID(teeConsumer, DocumentSourceTeeConsumer::id)
+
 DocumentSourceTeeConsumer::DocumentSourceTeeConsumer(const intrusive_ptr<ExpressionContext>& expCtx,
                                                      size_t facetId,
-                                                     const intrusive_ptr<TeeBuffer>& bufferSource,
                                                      StringData stageName)
-    : DocumentSource(stageName, expCtx),
-      _facetId(facetId),
-      _bufferSource(bufferSource),
-      _stageName(stageName.toString()) {}
+    : DocumentSource(stageName, expCtx), _facetId(facetId), _stageName(std::string{stageName}) {}
 
 boost::intrusive_ptr<DocumentSourceTeeConsumer> DocumentSourceTeeConsumer::create(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    size_t facetId,
-    const boost::intrusive_ptr<TeeBuffer>& bufferSource,
-    StringData stageName) {
-    return new DocumentSourceTeeConsumer(expCtx, facetId, bufferSource, stageName);
+    const boost::intrusive_ptr<ExpressionContext>& expCtx, size_t facetId, StringData stageName) {
+    return new DocumentSourceTeeConsumer(expCtx, facetId, stageName);
 }
 
 const char* DocumentSourceTeeConsumer::getSourceName() const {
     return _stageName.c_str();
 }
 
-DocumentSource::GetNextResult DocumentSourceTeeConsumer::doGetNext() {
-    return _bufferSource->getNext(_facetId);
-}
-
-void DocumentSourceTeeConsumer::doDispose() {
-    _bufferSource->dispose(_facetId);
-}
-
 Value DocumentSourceTeeConsumer::serialize(const SerializationOptions& opts) const {
     // We only serialize this stage in the context of explain.
-    return opts.verbosity ? Value(DOC(_stageName << Document())) : Value();
+    return opts.isSerializingForExplain() ? Value(DOC(_stageName << Document())) : Value();
 }
 }  // namespace mongo

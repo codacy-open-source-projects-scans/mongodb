@@ -29,17 +29,19 @@
 
 #pragma once
 
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/feature_flag.h"
+#include "mongo/db/repl/oplog_batch.h"
+#include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/util/assert_util.h"
-#include <boost/optional.hpp>
+#include "mongo/util/interruptible.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/time_support.h"
+
 #include <cstddef>
 #include <vector>
 
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/commands/feature_compatibility_version.h"
-#include "mongo/db/feature_flag.h"
-#include "mongo/db/repl/oplog_batch.h"
-#include "mongo/util/interruptible.h"
-#include "mongo/util/time_support.h"
+#include <boost/optional.hpp>
 
 namespace mongo {
 
@@ -53,7 +55,7 @@ namespace repl {
  *
  * Implementations are only required to support one pusher and one popper.
  */
-class OplogBuffer {
+class MONGO_MOD_OPEN OplogBuffer {
     OplogBuffer(const OplogBuffer&) = delete;
     OplogBuffer& operator=(const OplogBuffer&) = delete;
 
@@ -207,7 +209,7 @@ struct OplogBuffer::Cost {
     std::size_t count = 0;
 };
 
-class OplogBuffer::Counters {
+class MONGO_MOD_PRIVATE OplogBuffer::Counters {
 public:
     // Number of operations in this OplogBuffer.
     Counter64 count;
@@ -267,7 +269,7 @@ public:
     }
 };
 
-class OplogBufferMetrics {
+class MONGO_MOD_PUB OplogBufferMetrics {
 public:
     OplogBuffer::Counters* getWriteBufferCounter() {
         return &_writeBufferCounter;
@@ -282,8 +284,7 @@ public:
         applierSubBuilder.append("count", _applyBufferCounter.count.get());
         applierSubBuilder.append("sizeBytes", _applyBufferCounter.size.get());
         applierSubBuilder.append("maxSizeBytes", _applyBufferCounter.maxSize.get());
-        if (feature_flags::gReduceMajorityWriteLatency.isEnabled(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        if (feature_flags::gReduceMajorityWriteLatency.isEnabled()) {
             BSONObjBuilder builder;
             BSONObjBuilder writerSubBuilder;
             writerSubBuilder.append("count", _writeBufferCounter.count.get());
@@ -316,7 +317,7 @@ private:
  * from the buffer.  It is up to the implementing subclass to ensure that such timestamps are
  * available to be read.
  */
-class RandomAccessOplogBuffer : public OplogBuffer {
+class MONGO_MOD_PRIVATE RandomAccessOplogBuffer : public OplogBuffer {
 public:
     enum SeekStrategy {
         kInexact = 0,

@@ -29,18 +29,21 @@
 
 #include "mongo/db/op_observer/op_observer_util.h"
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/dotted_path/dotted_path_support.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/rss/replicated_storage_service.h"
+#include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/fail_point.h"
+
 #include <string>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/query/bson/dotted_path_support.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/fail_point.h"
 
 namespace mongo {
 
@@ -50,6 +53,29 @@ const OpStateAccumulator::Decoration<std::unique_ptr<ShardingWriteRouter>>
 
 MONGO_FAIL_POINT_DEFINE(addDestinedRecipient);
 MONGO_FAIL_POINT_DEFINE(sleepBetweenInsertOpTimeGenerationAndLogOp);
+
+bool shouldReplicateLocalCatalogIdentifiers(const rss::PersistenceProvider& provider) {
+    if (provider.shouldUseReplicatedCatalogIdentifiers()) {
+        return true;
+    }
+    return feature_flags::gFeatureFlagReplicateLocalCatalogIdentifiers.isEnabled();
+}
+
+bool shouldReplicateRangeTruncates(const rss::PersistenceProvider& provider,
+                                   const VersionContext& vCtx) {
+    if (provider.shouldUseReplicatedTruncates()) {
+        return true;
+    }
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    return fcvSnapshot.isVersionInitialized() &&
+        feature_flags::gFeatureFlagUseReplicatedTruncatesForDeletions.isEnabled(vCtx, fcvSnapshot);
+}
+
+bool isPrimaryDrivenIndexBuildEnabled(const VersionContext& vCtx) {
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    return fcvSnapshot.isVersionInitialized() &&
+        feature_flags::gFeatureFlagPrimaryDrivenIndexBuilds.isEnabled(vCtx, fcvSnapshot);
+}
 
 /**
  * Given a raw collMod command object and associated collection metadata, create and return the
@@ -119,8 +145,7 @@ DocumentKey getDocumentKey(const CollectionPtr& coll, BSONObj const& doc) {
     boost::optional<BSONObj> shardKey;
 
     if (coll.isSharded_DEPRECATED()) {
-        shardKey = dotted_path_support::extractElementsBasedOnTemplate(
-                       doc, coll.getShardKeyPattern().toBSON())
+        shardKey = bson::extractElementsBasedOnTemplate(doc, coll.getShardKeyPattern().toBSON())
                        .getOwned();
     }
 
@@ -132,8 +157,7 @@ DocumentKey getDocumentKey(const ShardKeyPattern& shardKeyPattern, BSONObj const
     BSONObj id = idField ? idField.wrap() : doc;
 
     return {std::move(id),
-            dotted_path_support::extractElementsBasedOnTemplate(doc, shardKeyPattern.toBSON())
-                .getOwned()};
+            bson::extractElementsBasedOnTemplate(doc, shardKeyPattern.toBSON()).getOwned()};
 }
 
 }  // namespace mongo

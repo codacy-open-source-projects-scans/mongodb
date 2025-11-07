@@ -29,11 +29,12 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_severity.h"
 #include "mongo/logv2/log_tag.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
 
 namespace mongo::logv2 {
 class LogComponentSettings;

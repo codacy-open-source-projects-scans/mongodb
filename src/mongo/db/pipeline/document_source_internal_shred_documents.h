@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/db/pipeline/document_source.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -49,14 +50,16 @@ public:
     DocumentSourceInternalShredDocuments(const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
     const char* getSourceName() const override {
-        return kStageName.rawData();
+        return kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kInternalShredDocuments;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const override {
+    StageConstraints constraints(PipelineSplitState pipeState) const override {
         StageConstraints constraints(StreamType::kStreaming,
                                      PositionRequirement::kNone,
                                      HostTypeRequirement::kNone,
@@ -81,9 +84,6 @@ public:
     }
 
     void addVariableRefs(std::set<Variables::Id>* refs) const override {}
-
-private:
-    GetNextResult doGetNext() override;
 };
 
 }  // namespace mongo

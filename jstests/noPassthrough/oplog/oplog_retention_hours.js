@@ -20,10 +20,10 @@ const doTest = () => {
         oplogSize: PrepareHelpers.oplogSizeMB,
         // Oplog can be truncated each "sync" cycle. Increase its frequency to once per second.
         nodeOptions: {syncdelay: 1, setParameter: {logComponentVerbosity: tojson({storage: 1})}},
-        nodes: 1
+        nodes: 1,
     });
     const oplogMinRetentionHours = 0.002777;
-    const minRetention = {oplogMinRetentionHours};  // 10 seconds
+    const minRetention = {oplogMinRetentionHours}; // 10 seconds
     replSet.startSet(Object.assign(minRetention, PrepareHelpers.replSetStartSetOptions));
     replSet.initiate();
     const primary = replSet.getPrimary();
@@ -67,7 +67,7 @@ const InsertUntilPred = (replSet, pred, ...args) => {
     const oplog = primary.getDB("local").oplog.rs;
     const coll = primary.getDB("insertUntilPred").growOplogPastMaxSize;
     const numNodes = replSet.nodeList().length;
-    const tenKB = new Array(10 * 1024).join("a");
+    const tenKB = "a".repeat(10 * 1024);
 
     print(`Oplog on ${primary} dataSize = ${oplog.dataSize()}`);
     assert.soon(
@@ -84,11 +84,12 @@ const InsertUntilPred = (replSet, pred, ...args) => {
         },
         `timeout occurred while waiting for predicate function to return true`,
         ReplSetTest.kDefaultTimeoutMS,
-        1000);
+        1000,
+    );
 };
 
 // checks if the oplog has been truncated
-const didReplSetTruncate = replSet => {
+const didReplSetTruncate = (replSet) => {
     const oplogCol = replSet.getPrimary().getDB("local").oplog.rs;
     // The oplog milestone system allows the oplog to grow to 110% its max size.
     return oplogCol.dataSize() < 1.1 * PrepareHelpers.oplogSizeBytes;

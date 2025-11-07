@@ -2,3 +2,4 @@
 *.core
 *.new
 */1727963727765/**/*.results
+tests/query-correctness-tests-*

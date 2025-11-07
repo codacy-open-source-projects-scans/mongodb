@@ -29,26 +29,17 @@
 
 #pragma once
 
-#include <boost/intrusive_ptr.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <functional>
-#include <memory>
-#include <utility>
-
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/exec/agg/exec_pipeline.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/exec_shard_filter_policy.h"
-#include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/timeseries/bucket_unpacker.h"
-#include "mongo/db/matcher/expression_parser.h"
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
@@ -58,11 +49,22 @@
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/group_from_first_document_transformation.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_params.h"
-#include "mongo/db/query/sort_pattern.h"
+#include "mongo/util/modules.h"
+
+#include <functional>
+#include <memory>
+#include <utility>
+
+#include <boost/intrusive_ptr.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 class Collection;
@@ -78,12 +80,8 @@ class Pipeline;
 struct PlanSummaryStats;
 
 /**
- * PipelineD is an extension of the Pipeline class, but with additional material that references
- * symbols that are not available in mongos, where the remainder of the Pipeline class also
- * functions.  PipelineD is a friend of Pipeline so that it can have equal access to Pipeline's
- * members.
- *
- * See the friend declaration in Pipeline.
+ * PipelineD contains additional static methods that modify a 'Pipeline' that are not available in
+ * mongos, where the remainder of the Pipeline class also functions.
  */
 class PipelineD {
 public:
@@ -95,7 +93,8 @@ public:
     using AttachExecutorCallback =
         std::function<void(const MultipleCollectionAccessor&,
                            std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>,
-                           Pipeline*)>;
+                           Pipeline*,
+                           const boost::intrusive_ptr<CatalogResourceHandle>&)>;
 
     /**
      * A tuple to represent the result of query executors, includes a main executor, its pipeline
@@ -139,41 +138,48 @@ public:
      * 'buildInnerQueryExecutor()' method. If the callback doesn't hold a valid PlanExecutor, the
      * method does nothing. Otherwise, a new $cursor stage is created using the given PlanExecutor,
      * and added to the pipeline. The 'collections' parameter can reference any number of
-     * collections.
+     * collections. 'catalogResourceHandle' must store a
+     ShardRole::TransactionResourcesStasher that will hold the ShardRole::TransactionResources
+     associated with 'collections' and 'exec'.
+
      */
     static void attachInnerQueryExecutorToPipeline(
         const MultipleCollectionAccessor& collection,
         AttachExecutorCallback attachExecutorCallback,
         std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
-        Pipeline* pipeline);
+        Pipeline* pipeline,
+        const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle);
 
     /**
      * This method combines 'buildInnerQueryExecutor()' and 'attachInnerQueryExecutorToPipeline()'
      * into a single call to support auto completion of the cursor stage creation process. Can be
      * used when the executor attachment phase doesn't need to be deferred and the $cursor stage
-     * can be created right after building the executor.
+     * can be created right after building the executor. 'catalogResourceHandle' must store
+     a ShardRole::TransactionResourcesStasher that will hold the ShardRole::TransactionResources
+     associated with 'collections'.
      */
     static void buildAndAttachInnerQueryExecutorToPipeline(
         const MultipleCollectionAccessor& collections,
         const NamespaceString& nss,
         const AggregateCommandRequest* aggRequest,
         Pipeline* pipeline,
+        const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle,
         ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{});
 
-    static Timestamp getLatestOplogTimestamp(const Pipeline* pipeline);
+    static Timestamp getLatestOplogTimestamp(const exec::agg::Pipeline* pipeline);
 
     /**
      * Retrieves postBatchResumeToken from the 'pipeline' if it is available. Returns an empty
      * object otherwise.
      */
-    static BSONObj getPostBatchResumeToken(const Pipeline* pipeline);
+    static BSONObj getPostBatchResumeToken(const exec::agg::Pipeline* pipeline);
 
     // Returns true if it is a $search pipeline, 'featureFlagSearchInSbe' is enabled and
     // forceClassicEngine is false.
     static bool isSearchPresentAndEligibleForSbe(const Pipeline* pipeline);
 
 private:
-    PipelineD();  // does not exist:  prevent instantiation
+    PipelineD() = delete;  // does not exist: prevent instantiation
 
     /**
      * Build a PlanExecutor and prepare callback to create a generic DocumentSourceCursor for
@@ -230,7 +236,7 @@ private:
     static BuildQueryExecutorResult buildInnerQueryExecutorSample(
         DocumentSourceSample* sampleStage,
         DocumentSourceInternalUnpackBucket* unpackBucketStage,
-        const CollectionPtr& collection,
+        const CollectionAcquisition& collection,
         Pipeline* pipeline);
 
     /**
@@ -246,7 +252,7 @@ private:
      * returned by multiple shards.
      */
     static StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>>
-    createRandomCursorExecutor(const CollectionPtr& coll,
+    createRandomCursorExecutor(const CollectionAcquisition& coll,
                                const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                Pipeline* pipeline,
                                long long sampleSize,
@@ -290,4 +296,9 @@ private:
         const FieldPath& sortFieldPath);
 };
 
+// Public-facing version of internal function for use in join-ordering opt.
+StatusWith<std::unique_ptr<CanonicalQuery>> createCanonicalQuery(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const NamespaceString& nss,
+    Pipeline& pipeline);
 }  // namespace mongo

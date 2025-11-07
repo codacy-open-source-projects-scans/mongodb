@@ -27,6 +27,21 @@
  *    it in the license file.
  */
 
+#include "mongo/transport/grpc/server.h"
+
+#include "mongo/logv2/log.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/transport/grpc/test_fixtures.h"
+#include "mongo/transport/grpc/util.h"
+#include "mongo/transport/test_fixtures.h"
+#include "mongo/unittest/barrier.h"
+#include "mongo/unittest/thread_assertion_monitor.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/notification.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/net/socket_utils.h"
+
 #include <string>
 
 #include <grpcpp/client_context.h>
@@ -34,20 +49,6 @@
 #include <grpcpp/support/status.h>
 #include <grpcpp/support/status_code_enum.h>
 #include <grpcpp/support/sync_stream.h>
-
-#include "mongo/logv2/log.h"
-#include "mongo/stdx/thread.h"
-#include "mongo/transport/grpc/server.h"
-#include "mongo/transport/grpc/test_fixtures.h"
-#include "mongo/transport/grpc/util.h"
-#include "mongo/transport/test_fixtures.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/barrier.h"
-#include "mongo/unittest/thread_assertion_monitor.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/notification.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/net/socket_utils.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -255,7 +256,8 @@ TEST_F(ServerTest, MultipleAddresses) {
         HostAndPort("localhost", test::kLetKernelChoosePort),
         HostAndPort("127.0.0.1", test::kLetKernelChoosePort),
         HostAndPort("::1", test::kLetKernelChoosePort),
-        HostAndPort(makeUnixSockPath(test::kLetKernelChoosePort, "grpc-multiple-addresses-test"))};
+        HostAndPort(
+            makeGRPCUnixSockPath(test::kLetKernelChoosePort, "grpc-multiple-addresses-test"))};
 
     Server::Options options = CommandServiceTestFixtures::makeServerOptions();
     options.addresses = addresses;

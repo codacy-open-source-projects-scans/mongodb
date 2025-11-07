@@ -3,15 +3,10 @@
  * field 'p':[0.5].
  * @tags: [
  *   requires_fcv_81,
- *   featureFlagAccuratePercentiles,
- *   # TODO SERVER-91581: Support spilling
- *   incompatible_aubsan,
+ *   featureFlagAccuratePercentiles
  * ]
  */
-import {
-    testWithMultipleGroupsMedian,
-    testWithSingleGroupMedian
-} from "jstests/aggregation/libs/percentiles_util.js";
+import {testWithMultipleGroupsMedian, testWithSingleGroupMedian} from "jstests/aggregation/libs/percentiles_util.js";
 
 const coll = db[jsTestName()];
 
@@ -26,7 +21,7 @@ testWithSingleGroupMedian({
     docs: [{x: 0}, {x: "non-numeric"}, {x: 1}, {no_x: 0}, {x: 2}],
     medianSpec: {$median: {input: "$x", method: "discrete"}},
     expectedResult: 1,
-    msg: "Non-numeric data should be ignored"
+    msg: "Non-numeric data should be ignored",
 });
 
 testWithSingleGroupMedian({
@@ -34,7 +29,7 @@ testWithSingleGroupMedian({
     docs: [{x: "non-numeric"}, {non_x: 1}],
     medianSpec: {$median: {input: "$x", method: "discrete"}},
     expectedResult: null,
-    msg: "Median of completely non-numeric data."
+    msg: "Median of completely non-numeric data.",
 });
 
 /**
@@ -45,5 +40,5 @@ testWithMultipleGroupsMedian({
     docs: [{k: 0, x: 2}, {k: 0, x: 1}, {k: 1, x: 2}, {k: 2}, {k: 0, x: "str"}, {k: 1, x: 0}],
     medianSpec: {$median: {input: "$x", method: "discrete"}},
     expectedResult: [/* k:0 */ 1, /* k:1 */ 0, /* k:2 */ null],
-    msg: "Median of multiple groups"
+    msg: "Median of multiple groups",
 });

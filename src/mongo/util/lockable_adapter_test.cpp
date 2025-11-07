@@ -28,17 +28,17 @@
  */
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <future>
-#include <memory>
-#include <mutex>
-#include <system_error>
+#include "mongo/util/lockable_adapter.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/future.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/lockable_adapter.h"
+#include "mongo/unittest/unittest.h"
+
+#include <future>
+#include <memory>
+#include <mutex>
+#include <system_error>
 
 namespace mongo {
 
@@ -102,7 +102,7 @@ TEST(BasicLockableAdapter, TestWithMutexTypes) {
     }
 
     {
-        stdx::timed_mutex mut;
+        std::timed_mutex mut;  // NOLINT
         callUnderLock(mut);
     }
 

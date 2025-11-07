@@ -29,12 +29,13 @@
 
 #pragma once
 
-#include "mongo/base/string_data.h"
-#include "mongo/db/catalog/import_options.h"
-#include "mongo/db/catalog/validate/validate_results.h"
+#include "mongo/db/rss/persistence_provider.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_error_util.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_event_handler.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
-#include "mongo/util/string_map.h"
+#include "mongo/db/validate/validate_results.h"
+
+#include <span>
 
 namespace mongo {
 
@@ -44,26 +45,48 @@ class BSONObjBuilder;
 class OperationContext;
 class WiredTigerConfigParser;
 
+class WiredTigerKVEngineBase;
 class WiredTigerKVEngine;
-class WiredTigerSessionCache;
+class WiredTigerConnection;
+class WiredTigerSession;
 
-struct WiredTigerItem : public WT_ITEM {
+/**
+ * A wrapper for WT_ITEM to make it more convenient to work with from C++.
+ */
+class WiredTigerItem {
+public:
+    WiredTigerItem() = default;
     WiredTigerItem(const void* d, size_t s) {
-        data = d;
-        size = s;
+        _item = {d, s};
     }
-    WiredTigerItem(StringData str) {
-        data = str.data();
-        size = str.size();
+    WiredTigerItem(std::span<const char> str) : WiredTigerItem(str.data(), str.size()) {}
+
+    // Get this item as a WT_ITEM pointer
+    // The pointer returned by get() must not be allowed to live longer than *this.
+    WT_ITEM* get() {
+        return &_item;
     }
-    // NOTE: do not call Get() on a temporary.
-    // The pointer returned by Get() must not be allowed to live longer than *this.
-    WT_ITEM* Get() {
-        return this;
+    const WT_ITEM* get() const {
+        return &_item;
     }
-    const WT_ITEM* Get() const {
-        return this;
+
+    // Conform to std::ranges::contiguous_range and std::ranges::sized_range so that buffers read
+    // from WiredTiger can be consumed as ranges.
+    size_t size() const {
+        return _item.size;
     }
+    const char* data() const {
+        return static_cast<const char*>(_item.data);
+    }
+    const char* begin() const {
+        return data();
+    }
+    const char* end() const {
+        return data() + size();
+    }
+
+private:
+    WT_ITEM _item = {nullptr, 0};
 };
 
 class WiredTigerUtil {
@@ -75,33 +98,63 @@ private:
 
 public:
     static constexpr StringData kConfigStringField = "configString"_sd;
+    static constexpr StringData kTableUriPrefix = "table:"_sd;
+    static constexpr double memoryThresholdPercentage = 0.8;
+
+    static std::string buildTableUri(StringData ident);
 
     /**
      * Fetch the type and source fields out of the colgroup metadata.  'tableUri' must be a
      * valid table: uri.
      */
-    static void fetchTypeAndSourceURI(WiredTigerRecoveryUnit&,
+    static void fetchTypeAndSourceURI(WiredTigerSession& session,
                                       const std::string& tableUri,
                                       std::string* type,
                                       std::string* source);
 
-    static bool collectConnectionStatistics(WiredTigerKVEngine* engine, BSONObjBuilder& bob);
+    static std::unique_ptr<WiredTigerSession> getStatisticsSession(
+        WiredTigerKVEngineBase& engine,
+        StatsCollectionPermit& permit,
+        WiredTigerEventHandler& eventHandler);
+
+    static bool collectConnectionStatistics(
+        WiredTigerKVEngineBase& engine,
+        BSONObjBuilder& bob,
+        const std::vector<std::string>& fieldsToInclude = std::vector<std::string>());
+
+    /**
+     * Adds the History Store Statistics to the provided BSON Object builder.
+     *
+     * Returns true if statistics can be safely collected and false otherwise.
+     */
+    static bool historyStoreStatistics(WiredTigerKVEngine& engine, BSONObjBuilder& bob);
+
+    /**
+     * Dictates how filters passed to exportTableToBSON will behave.
+     */
+    enum class FilterBehavior {
+        /* Fields that are in the categories listed will be skipped */
+        kExcludeCategories,
+        /* Only fields with statistic descriptions listed in the filter will be exported */
+        kIncludeStats,
+    };
 
     /**
      * Reads the WT database statistics table using the URI and exports all keys to BSON as string
      * elements. Additionally, adds the 'uri' field to output document.
      *
-     * A filter can be specified to skip desired fields.
+     * The filterBehavior dictates how the filter will be used.
      */
-    static Status exportTableToBSON(WT_SESSION* s,
+    static Status exportTableToBSON(WiredTigerSession& session,
                                     const std::string& uri,
                                     const std::string& config,
                                     BSONObjBuilder& bob);
-    static Status exportTableToBSON(WT_SESSION* s,
+    static Status exportTableToBSON(WiredTigerSession& session,
                                     const std::string& uri,
                                     const std::string& config,
                                     BSONObjBuilder& bob,
-                                    const std::vector<std::string>& filter);
+                                    const std::vector<std::string>& filter,
+                                    FilterBehavior filterBehavior);
 
     /**
      * Creates an import configuration string suitable for the 'config' parameter in
@@ -111,7 +164,8 @@ public:
      */
     static StatusWith<std::string> generateImportString(StringData ident,
                                                         const BSONObj& storageMetadata,
-                                                        const ImportOptions& importOptions);
+                                                        bool panicOnCorruptWtMetadata,
+                                                        bool repair);
 
     /**
      * Creates the configuration string for the 'backup_restore_target' config option passed into
@@ -143,36 +197,44 @@ public:
     static void appendSnapshotWindowSettings(WiredTigerKVEngine* engine, BSONObjBuilder* bob);
 
     /**
-     * Gets the creation metadata string for a collection or index at a given URI. Accepts an
-     * OperationContext or session.
+     * Gets the creation metadata string for a collection or index at a given URI.
      *
-     * This returns more information, but is slower than getMetadata().
+     * This merges together the config strings for the table, colgroup, and file, which is a very
+     * slow process.
      */
-    static StatusWith<std::string> getMetadataCreate(WiredTigerRecoveryUnit&, StringData uri);
-    static StatusWith<std::string> getMetadataCreate(WT_SESSION* session, StringData uri);
+    static StatusWith<std::string> getMetadataCreate(WiredTigerSession& session, StringData uri);
 
     /**
-     * Gets the entire metadata string for collection or index at URI. Accepts an OperationContext
-     * or session.
+     * Gets the entire metadata string for collection or index at URI.
+     *
+     * This returns only the table config string, and for fields stored there is the fastest way to
+     * obtain that information.
      */
-    static StatusWith<std::string> getMetadata(WiredTigerRecoveryUnit&, StringData uri);
-    static StatusWith<std::string> getMetadata(WT_SESSION* session, StringData uri);
+    static StatusWith<std::string> getMetadata(WiredTigerSession& session, StringData uri);
+
+    /**
+     * Gets the source metadata string for collection or index at URI.
+     *
+     * This is the WiredTiger config string for a specific file. If given a table: URI, it will
+     * return the config for the file of the table's only colgroup.
+     */
+    static StatusWith<std::string> getSourceMetadata(WiredTigerSession& session, StringData uri);
 
     /**
      * Reads app_metadata for collection/index at URI as a BSON document.
      */
-    static Status getApplicationMetadata(WiredTigerRecoveryUnit&,
+    static Status getApplicationMetadata(WiredTigerSession& session,
                                          StringData uri,
                                          BSONObjBuilder* bob);
 
-    static StatusWith<BSONObj> getApplicationMetadata(WiredTigerRecoveryUnit&, StringData uri);
+    static StatusWith<BSONObj> getApplicationMetadata(WiredTigerSession& session, StringData uri);
 
     /**
      * Validates formatVersion in application metadata for 'uri'.
      * Version must be numeric and be in the range [minimumVersion, maximumVersion].
      * URI is used in error messages only. Returns actual version.
      */
-    static StatusWith<int64_t> checkApplicationMetadataFormatVersion(WiredTigerRecoveryUnit&,
+    static StatusWith<int64_t> checkApplicationMetadataFormatVersion(WiredTigerSession& session,
                                                                      StringData uri,
                                                                      int64_t minimumVersion,
                                                                      int64_t maximumVersion);
@@ -186,32 +248,49 @@ public:
      * Reads individual statistics using URI.
      * List of statistics keys WT_STAT_* can be found in wiredtiger.h.
      */
-    static StatusWith<int64_t> getStatisticsValue(WT_SESSION* session,
+    static StatusWith<int64_t> getStatisticsValue(WiredTigerSession& session,
                                                   const std::string& uri,
                                                   const std::string& config,
                                                   int statisticsKey);
 
-    static int64_t getEphemeralIdentSize(WT_SESSION* s, const std::string& uri);
+    // A version of the above taking a WT_SESSION is necessary due to encryptDB does not use the
+    // wrappers. Avoid using this, use the wrapped version instead.
+    static StatusWith<int64_t> getStatisticsValue_DoNotUse(WT_SESSION* session,
+                                                           const std::string& uri,
+                                                           const std::string& config,
+                                                           int statisticsKey);
 
-    static int64_t getIdentSize(WT_SESSION* s, const std::string& uri);
+    static int64_t getEphemeralIdentSize(WiredTigerSession& session, const std::string& uri);
+
+    static int64_t getIdentSize(WiredTigerSession& session, const std::string& uri);
 
     /**
      * Returns the bytes available for reuse for an ident. This is the amount of allocated space on
      * disk that is not storing any data.
      */
-    static int64_t getIdentReuseSize(WT_SESSION* s, const std::string& uri);
+    static int64_t getIdentReuseSize(WiredTigerSession& session, const std::string& uri);
 
     /**
      * Returns the bytes compaction may reclaim for an ident. This is the amount of allocated space
      * on disk that can be potentially reclaimed.
      */
-    static int64_t getIdentCompactRewrittenExpectedSize(WT_SESSION* s, const std::string& uri);
+    static int64_t getIdentCompactRewrittenExpectedSize(WiredTigerSession& session,
+                                                        const std::string& uri);
 
     /**
-     * Return amount of memory to use for the WiredTiger cache based on either the startup
-     * option chosen or the amount of available memory on the host.
+     * Return amount of memory to use for the WiredTiger cache. The calculation has lower and upper
+     * bounds. A non-zero value for either parameter indicates that parameter should be used for the
+     * calculation. If both are zero, half of available memory will be returned.
      */
-    static size_t getCacheSizeMB(double requestedCacheSizeGB);
+    static size_t getMainCacheSizeMB(double requestedCacheSizeGB, double requestedCacheSizePct = 0);
+
+    /**
+     * Returns the amount of memory in MB to use for the spill WiredTiger instance cache.
+     */
+    static int32_t getSpillCacheSizeMB(int32_t systemMemoryMB,
+                                       double pct,
+                                       int32_t minMB,
+                                       int32_t maxMB);
 
     class ErrorAccumulator : public WT_EVENT_HANDLER {
     public:
@@ -230,12 +309,12 @@ public:
     };
 
     /**
-     * Calls WT_SESSION::validate() on a side-session to ensure that your current transaction
+     * Calls WT_SESSION::verify() on a side-session to ensure that your current transaction
      * isn't left in an invalid state.
      *
      * If errors is non-NULL, all error messages will be appended to the array.
      */
-    static int verifyTable(WiredTigerRecoveryUnit&,
+    static int verifyTable(WiredTigerSession& session,
                            const std::string& uri,
                            const boost::optional<std::string>& configurationOverride,
                            StringSet* errors = nullptr);
@@ -244,15 +323,18 @@ public:
      * Checks the table logging setting in the metadata for the given uri, comparing it against
      * 'isLogged'. Populates 'valid', 'errors', and 'warnings' accordingly.
      */
-    static void validateTableLogging(WiredTigerRecoveryUnit&,
+    static void validateTableLogging(WiredTigerSession& session,
                                      StringData uri,
                                      bool isLogged,
                                      boost::optional<StringData> indexName,
                                      ValidateResultsIf& validationResult);
 
-    static bool useTableLogging(const NamespaceString& nss);
+    static bool useTableLogging(const rss::PersistenceProvider& provider,
+                                const NamespaceString& nss,
+                                bool isReplSet,
+                                bool shouldRecoverFromOplogAsStandalone);
 
-    static Status setTableLogging(WiredTigerRecoveryUnit&, const std::string& uri, bool on);
+    static Status setTableLogging(WiredTigerSession& session, const std::string& uri, bool on);
 
     /**
      * Generates a WiredTiger connection configuration given the LOGV2 WiredTiger components
@@ -302,6 +384,43 @@ public:
      */
     static Status canRunAutoCompact(bool isEphemeral);
 
+    /**
+     * Truncates the table identified by uri, removing all entries from it.
+     */
+    static void truncate(WiredTigerRecoveryUnit& ru, StringData uri);
+
+    static uint64_t genTableId();
+
+    /**
+     * For special cursors. Guaranteed never to collide with genTableId() ids.
+     */
+    enum TableId {
+        /* For "metadata:" cursors */
+        kMetadataTableId,
+        /* For "metadata:create" cursors */
+        kMetadataCreateTableId,
+        /* The start of non-special table ids for genTableId() */
+        kLastTableId
+    };
+
+    /**
+     * Given two configuration strings, concatenates them together with a ','. It's the callers
+     * responsibility to ensure both input configs are valid.
+     * Example:
+     *      - configA = "exclusive=true"
+     *      - configB = "key_format=q"
+     *      - returns "exclusive=true,key_format=q"
+     */
+    static std::string concatConfigs(const std::string& configA, const std::string& configB);
+
+    /**
+     * Helper for handling WT eviction events. Returns non-zero to indicate that WT should not take
+     * part in optional eviction on this session, and zero otherwise
+     */
+    static int handleWtEvictionEvent(WT_SESSION* session);
+
+    static long long getCancelledCacheMetric_forTest();
+
 private:
     /**
      * Casts unsigned 64-bit statistics value to T.
@@ -318,7 +437,7 @@ class WiredTigerConfigParser {
 public:
     WiredTigerConfigParser(StringData config) {
         invariantWTOK(
-            wiredtiger_config_parser_open(nullptr, config.rawData(), config.size(), &_parser),
+            wiredtiger_config_parser_open(nullptr, config.data(), config.size(), &_parser),
             nullptr);
     }
 
@@ -333,8 +452,7 @@ public:
     }
 
     int next(WT_CONFIG_ITEM* key, WT_CONFIG_ITEM* value) {
-        _nextCalled = true;
-        return _next(key, value);
+        return _parser->next(_parser, key, value);
     }
 
     int get(const char* key, WT_CONFIG_ITEM* value) const {
@@ -355,31 +473,8 @@ public:
      */
     boost::optional<bool> isTableLoggingEnabled() const;
 
-    /**
-     * Iterates through keys in config parser for metadata creation string and
-     * returns true if this configuration string has no logging settings that
-     * conflict with each other.
-     *
-     * Since this function has to iterate though all the keys in the configuration scanner,
-     * it is illegal to call this function after we have started iteration through the
-     * keys(), either through next() or a previous call to isTableLoggingSettingValid().
-     */
-    bool isTableLoggingSettingValid();
-
 private:
-    /**
-     * Internal implementation to advance iteration to the next key.
-     * We have both next() and _next() so that we can tell when a caller has
-     * started scanning the configuration through next(). This is important for
-     * isTableLoggingSettingValid() because it has to iterate through all the
-     * top-level keys for correct operation.
-     */
-    int _next(WT_CONFIG_ITEM* key, WT_CONFIG_ITEM* value) {
-        return _parser->next(_parser, key, value);
-    }
-
     WT_CONFIG_PARSER* _parser;
-    bool _nextCalled = false;
 };
 
 // static

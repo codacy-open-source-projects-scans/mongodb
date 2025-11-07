@@ -29,15 +29,16 @@
 
 #pragma once
 
-#include <type_traits>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/functional.h"
 #include "mongo/util/lockable_adapter.h"
+#include "mongo/util/modules_incompletely_marked_header.h"
 #include "mongo/util/time_support.h"
+
+#include <type_traits>
 
 namespace mongo {
 
@@ -46,7 +47,7 @@ class Waitable;
 /**
  * An interface for getting the current wall clock time.
  */
-class ClockSource {
+class MONGO_MOD_OPEN ClockSource {
     // We need a type trait to differentiate waitable ptr args from predicates.
     //
     // This returns true for non-pointers and function pointers
@@ -73,7 +74,7 @@ public:
         StopWatch(ClockSource* clockSource) : StopWatch(clockSource, clockSource->now()) {}
         StopWatch(/** SystemClockSource::get() */);
 
-        Date_t now() noexcept {
+        Date_t now() {
             return _clockSource->now();
         }
 
@@ -85,7 +86,7 @@ public:
             return _start;
         }
 
-        auto elapsed() noexcept {
+        auto elapsed() {
             return now() - _start;
         }
 

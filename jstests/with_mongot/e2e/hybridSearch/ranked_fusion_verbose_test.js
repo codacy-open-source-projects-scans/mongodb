@@ -2,23 +2,24 @@
  * Tests hybrid search with rank fusion using verbose syntax without the $rankFusion
  * stage. The collection used in this test includes no search score ties.
  *
- * @tags: [featureFlagRankFusionFull, requires_fcv_81]
+ * @tags: [featureFlagRankFusionBasic, requires_fcv_81]
  */
 
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {createSearchIndex, dropSearchIndex} from "jstests/libs/search.js";
 import {
     getMovieData,
     getMoviePlotEmbeddingById,
     getMovieSearchIndexSpec,
-    getMovieVectorSearchIndexSpec
-} from "jstests/with_mongot/e2e/lib/data/movies.js";
+    getMovieVectorSearchIndexSpec,
+} from "jstests/with_mongot/e2e_lib/data/movies.js";
 import {
     assertDocArrExpectedFuzzy,
     buildExpectedResults,
     datasets,
-} from "jstests/with_mongot/e2e/lib/search_e2e_utils.js";
+} from "jstests/with_mongot/e2e_lib/search_e2e_utils.js";
 
-const collName = "search_rank_fusion";
+const collName = jsTestName();
 const coll = db.getCollection(collName);
 coll.drop();
 
@@ -41,7 +42,7 @@ function getSearchPipeline() {
             $search: {
                 index: getMovieSearchIndexSpec().name,
                 text: {query: "ape", path: ["fullplot", "title"]},
-            }
+            },
         },
         {$limit: limit},
         {$group: {_id: null, docs: {$push: "$$ROOT"}}},
@@ -49,8 +50,8 @@ function getSearchPipeline() {
         {
             $addFields: {
                 // RRF: 1 divided by rank + full text search rank constant.
-                fts_score: {$divide: [1.0, {$add: ["$fts_rank", kRankConstant]}]}
-            }
+                fts_score: {$divide: [1.0, {$add: ["$fts_rank", kRankConstant]}]},
+            },
         },
         {
             $project: {
@@ -59,9 +60,9 @@ function getSearchPipeline() {
                 fullplot: "$docs.fullplot",
                 genres: "$docs.genres",
                 plot_embedding: "$docs.plot_embedding",
-                fts_score: 1
-            }
-        }
+                fts_score: 1,
+            },
+        },
     ];
     return searchPipeline;
 }
@@ -70,12 +71,12 @@ function getVectorSearchPipeline() {
     let vectorSearchPipeline = [
         {
             $vectorSearch: {
-                queryVector: getMoviePlotEmbeddingById(6),  //'Tarzan the Ape Man': _id = 6
+                queryVector: getMoviePlotEmbeddingById(6), //'Tarzan the Ape Man': _id = 6
                 path: "plot_embedding",
                 numCandidates: limit * vectorSearchOverrequestFactor,
                 index: getMovieVectorSearchIndexSpec().name,
                 limit: limit,
-            }
+            },
         },
         {$limit: limit},
         {$group: {_id: null, docs: {$push: "$$ROOT"}}},
@@ -86,14 +87,11 @@ function getVectorSearchPipeline() {
                     $divide: [
                         1.0,
                         {
-                            $add: [
-                                "$vs_rank",
-                                kRankConstant
-                            ]  // RRF: 1 divided by rank + vector search constant
-                        }
-                    ]
-                }
-            }
+                            $add: ["$vs_rank", kRankConstant], // RRF: 1 divided by rank + vector search constant
+                        },
+                    ],
+                },
+            },
         },
         {
             $project: {
@@ -102,9 +100,9 @@ function getVectorSearchPipeline() {
                 fullplot: "$docs.fullplot",
                 genres: "$docs.genres",
                 plot_embedding: "$docs.plot_embedding",
-                vs_score: 1
-            }
-        }
+                vs_score: 1,
+            },
+        },
     ];
     return vectorSearchPipeline;
 }
@@ -115,20 +113,19 @@ function getSearchWithSetWindowFieldsPipeline() {
             $search: {
                 index: getMovieSearchIndexSpec().name,
                 text: {query: "ape", path: ["fullplot", "title"]},
-            }
+            },
         },
         {$limit: limit},
         {
-            $setWindowFields:
-                {sortBy: {score: {$meta: "searchScore"}}, output: {fts_rank: {$rank: {}}}},
+            $setWindowFields: {sortBy: {score: {$meta: "searchScore"}}, output: {fts_rank: {$rank: {}}}},
         },
         {
             $addFields: {
                 // RRF: 1 divided by rank + full text search rank constant.
-                fts_score: {$divide: [1.0, {$add: ["$fts_rank", kRankConstant]}]}
-            }
+                fts_score: {$divide: [1.0, {$add: ["$fts_rank", kRankConstant]}]},
+            },
         },
-        {$project: {_id: 1, title: 1, fullplot: 1, genres: 1, plot_embedding: 1, fts_score: 1}}
+        {$project: {_id: 1, title: 1, fullplot: 1, genres: 1, plot_embedding: 1, fts_score: 1}},
     ];
     return searchPipeline;
 }
@@ -137,17 +134,16 @@ function getVectorSearchWithSetWindowFieldsPipeline() {
     let vectorSearchPipeline = [
         {
             $vectorSearch: {
-                queryVector: getMoviePlotEmbeddingById(6),  //'Tarzan the Ape Man': _id = 6
+                queryVector: getMoviePlotEmbeddingById(6), //'Tarzan the Ape Man': _id = 6
                 path: "plot_embedding",
                 numCandidates: limit * vectorSearchOverrequestFactor,
                 index: getMovieVectorSearchIndexSpec().name,
                 limit: limit,
-            }
+            },
         },
         {$limit: limit},
         {
-            $setWindowFields:
-                {sortBy: {score: {$meta: "vectorSearchScore"}}, output: {vs_rank: {$rank: {}}}},
+            $setWindowFields: {sortBy: {score: {$meta: "vectorSearchScore"}}, output: {vs_rank: {$rank: {}}}},
         },
         {
             $addFields: {
@@ -155,16 +151,13 @@ function getVectorSearchWithSetWindowFieldsPipeline() {
                     $divide: [
                         1.0,
                         {
-                            $add: [
-                                "$vs_rank",
-                                kRankConstant
-                            ]  // RRF: 1 divided by rank + vector search constant
-                        }
-                    ]
-                }
-            }
+                            $add: ["$vs_rank", kRankConstant], // RRF: 1 divided by rank + vector search constant
+                        },
+                    ],
+                },
+            },
         },
-        {$project: {_id: 1, title: 1, fullplot: 1, genres: 1, plot_embedding: 1, vs_score: 1}}
+        {$project: {_id: 1, title: 1, fullplot: 1, genres: 1, plot_embedding: 1, vs_score: 1}},
     ];
     return vectorSearchPipeline;
 }
@@ -178,8 +171,8 @@ let hybridSearchProcessingPipeline = [
             title: {$first: "$title"},
             genres: {$first: "$genres"},
             plot_embedding: {$first: "$plot_embedding"},
-            fullplot: {$first: "$fullplot"}
-        }
+            fullplot: {$first: "$fullplot"},
+        },
     },
     {
         $project: {
@@ -189,13 +182,13 @@ let hybridSearchProcessingPipeline = [
             fts_score: {$ifNull: ["$fts_score", 0]},
             fullplot: 1,
             genres: 1,
-            plot_embedding: 1
-        }
+            plot_embedding: 1,
+        },
     },
     {$addFields: {score: {$add: ["$fts_score", "$vs_score"]}}},
     {$sort: {score: -1, _id: 1}},
     {$limit: limit},
-    {$project: {_id: 1, title: 1, fullplot: 1, genres: 1, plot_embedding: 1}}
+    {$project: {_id: 1, title: 1, fullplot: 1, genres: 1, plot_embedding: 1}},
 ];
 
 // Perform a hybrid search with a $vectorSearch on plot_embedding for the plot_embedding of
@@ -207,12 +200,10 @@ function runTest(expectedResultIds, searchPipeline, vectorSearchPipeline) {
             $unionWith: {
                 coll: collName,
                 pipeline: searchPipeline,
-            }
+            },
         },
-
     ];
-    let hybridSearchQuery =
-        vectorSearchPipeline.concat(unionWithSearch).concat(hybridSearchProcessingPipeline);
+    let hybridSearchQuery = vectorSearchPipeline.concat(unionWithSearch).concat(hybridSearchProcessingPipeline);
     let results = coll.aggregate(hybridSearchQuery).toArray();
 
     assertDocArrExpectedFuzzy(buildExpectedResults(expectedResultIds, datasets.MOVIES), results);
@@ -222,14 +213,15 @@ function runTest(expectedResultIds, searchPipeline, vectorSearchPipeline) {
 // and a $vectorSearch on plot_embedding for the plot_embedding of 'Tarzan the Ape Man'.
 // Note: In rank fusion a higher rank constant will result in downplaying those results.
 function runTestFlipped(expectedResultIds, searchPipeline, vectorSearchPipeline) {
-    let unionWithVectorSearch = [{
-        $unionWith: {
-            coll: collName,
-            pipeline: vectorSearchPipeline,
-        }
-    }];
-    let hybridSearchQuery =
-        searchPipeline.concat(unionWithVectorSearch).concat(hybridSearchProcessingPipeline);
+    let unionWithVectorSearch = [
+        {
+            $unionWith: {
+                coll: collName,
+                pipeline: vectorSearchPipeline,
+            },
+        },
+    ];
+    let hybridSearchQuery = searchPipeline.concat(unionWithVectorSearch).concat(hybridSearchProcessingPipeline);
     let results = coll.aggregate(hybridSearchQuery).toArray();
 
     assert.eq(results, buildExpectedResults(expectedResultIds, datasets.MOVIES));
@@ -239,14 +231,26 @@ const expectedResultIdOrder = [6, 4, 1, 5, 2, 3, 8, 9, 10, 12, 13, 14, 11, 7, 15
 
 // Run tests with search in $unionWith
 runTest(expectedResultIdOrder, getSearchPipeline(), getVectorSearchPipeline());
-runTest(expectedResultIdOrder,
+if (FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "RankFusionFull")) {
+    // This test case uses a sort by {$meta: "searchScore"} which is protected by
+    // 'featureFlagRankFusionFull'.
+    runTest(
+        expectedResultIdOrder,
         getSearchWithSetWindowFieldsPipeline(),
-        getVectorSearchWithSetWindowFieldsPipeline());
+        getVectorSearchWithSetWindowFieldsPipeline(),
+    );
+}
 
 // Run tests with vectorSearch in $unionwith
 runTestFlipped(expectedResultIdOrder, getSearchPipeline(), getVectorSearchPipeline());
-runTestFlipped(expectedResultIdOrder,
-               getSearchWithSetWindowFieldsPipeline(),
-               getVectorSearchWithSetWindowFieldsPipeline());
+if (FeatureFlagUtil.isPresentAndEnabled(db.getMongo(), "RankFusionFull")) {
+    // This test case uses a sort by {$meta: "searchScore"} which is protected by
+    // 'featureFlagRankFusionFull'.
+    runTestFlipped(
+        expectedResultIdOrder,
+        getSearchWithSetWindowFieldsPipeline(),
+        getVectorSearchWithSetWindowFieldsPipeline(),
+    );
+}
 dropSearchIndex(coll, {name: getMovieSearchIndexSpec().name});
 dropSearchIndex(coll, {name: getMovieVectorSearchIndexSpec().name});

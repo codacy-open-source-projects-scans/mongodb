@@ -27,43 +27,41 @@
  *    it in the license file.
  */
 
-
-#include <absl/container/flat_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <wiredtiger.h>
+#include "mongo/db/storage/wiredtiger/wiredtiger_size_storer.h"
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/storage/exceptions.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_begin_transaction_block.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_connection.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_customization_hooks.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_error_util.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_size_storer.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/timer.h"
+
+#include <wiredtiger.h>
+
+#include <absl/container/flat_hash_map.h>
+#include <absl/meta/type_traits.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 
 namespace mongo {
 
-WiredTigerSizeStorer::WiredTigerSizeStorer(WT_CONNECTION* conn, const std::string& storageUri)
-    : _conn(conn), _storageUri(storageUri), _tableId(WiredTigerSession::genTableId()) {
+WiredTigerSizeStorer::WiredTigerSizeStorer(WiredTigerConnection* conn,
+                                           const std::string& storageUri)
+    : _conn(conn), _storageUri(storageUri), _tableId(WiredTigerUtil::genTableId()) {
     std::string config = WiredTigerCustomizationHooks::get(getGlobalServiceContext())
                              ->getTableCreateConfig(_storageUri);
 
     WiredTigerSession session(_conn);
-    invariantWTOK(
-        session.getSession()->create(session.getSession(), _storageUri.c_str(), config.c_str()),
-        session.getSession());
+    invariantWTOK(session.create(_storageUri.c_str(), config.c_str()), session);
 }
 
 void WiredTigerSizeStorer::store(StringData uri, std::shared_ptr<SizeInfo> sizeInfo) {
@@ -89,7 +87,8 @@ void WiredTigerSizeStorer::store(StringData uri, std::shared_ptr<SizeInfo> sizeI
                 "entryUseCount"_attr = entry.use_count());
 }
 
-std::shared_ptr<WiredTigerSizeStorer::SizeInfo> WiredTigerSizeStorer::load(StringData uri) const {
+std::shared_ptr<WiredTigerSizeStorer::SizeInfo> WiredTigerSizeStorer::load(
+    WiredTigerSession& session, StringData uri) const {
     {
         // Check if we can satisfy the read from the buffer.
         stdx::lock_guard<stdx::mutex> bufferLock(_bufferMutex);
@@ -98,11 +97,11 @@ std::shared_ptr<WiredTigerSizeStorer::SizeInfo> WiredTigerSizeStorer::load(Strin
             return it->second ? it->second : std::make_shared<SizeInfo>();
     }
 
-    WiredTigerSession session{_conn};
     auto cursor = session.getNewCursor(_storageUri);
+    ON_BLOCK_EXIT([&] { session.closeCursor(cursor); });
 
     {
-        WT_ITEM key = {uri.rawData(), uri.size()};
+        WT_ITEM key = {uri.data(), uri.size()};
         cursor->set_key(cursor, &key);
         int ret = cursor->search(cursor);
         if (ret == WT_NOTFOUND)
@@ -147,8 +146,12 @@ void WiredTigerSizeStorer::flush(bool syncToDisk) {
     // threads try to flush at the same time.
     stdx::lock_guard<stdx::mutex> flushLock(_flushMutex);
 
-    // When the session is destructed, it closes any cursors that remain open.
-    WiredTigerSession session(_conn);
+    // When the session is destructed, it closes any cursors that remain open. Set the config to a
+    // magic number that indicates to WT that this session should not take part in optional
+    // eviction. This is important for this path as it can be called by any thread which may be
+    // running a high priority operation.
+    WiredTigerSession session(_conn, nullptr, "isolation=snapshot,cache_max_wait_ms=1");
+
     WT_CURSOR* cursor = session.getNewCursor(_storageUri, "overwrite=true");
 
     {
@@ -172,7 +175,7 @@ void WiredTigerSizeStorer::flush(bool syncToDisk) {
 
         for (auto&& [uri, sizeInfo] : buffer) {
             WiredTigerItem key(uri.c_str(), uri.size());
-            cursor->set_key(cursor, key.Get());
+            cursor->set_key(cursor, key.get());
 
             int ret = 0;
             if (!sizeInfo) {
@@ -198,7 +201,7 @@ void WiredTigerSizeStorer::flush(bool syncToDisk) {
                             "data"_attr = redact(data));
 
                 WiredTigerItem value(data.objdata(), data.objsize());
-                cursor->set_value(cursor, value.Get());
+                cursor->set_value(cursor, value.get());
                 ret = cursor->insert(cursor);
             }
 
@@ -213,8 +216,7 @@ void WiredTigerSizeStorer::flush(bool syncToDisk) {
             invariantWTOK(ret, cursor->session);
         }
         txnOpen.done();
-        invariantWTOK(session.getSession()->commit_transaction(session.getSession(), nullptr),
-                      session.getSession());
+        invariantWTOK(session.commit_transaction(nullptr), session);
         buffer.clear();
     }
 

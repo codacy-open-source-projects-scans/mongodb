@@ -13,8 +13,6 @@ from buildscripts.resmokelib.testing.fixtures import interface as _fixtures
 from buildscripts.resmokelib.testing.fixtures.fixturelib import FixtureLib
 from buildscripts.resmokelib.utils import queue as _queue
 
-# pylint: disable=protected-access
-
 
 class TestJob(unittest.TestCase):
     TESTS = ["jstests/core/and.js", "jstests/core/or.js"]
@@ -56,7 +54,7 @@ class TestJob(unittest.TestCase):
     @staticmethod
     def expected_run_num(time_repeat_tests_secs, test_time_secs):
         """Return the number of times a test is expected to run."""
-        return time_repeat_tests_secs / test_time_secs
+        return time_repeat_tests_secs / test_time_secs + 1
 
     def test__run_num_repeat(self):
         num_repeat_tests = 1

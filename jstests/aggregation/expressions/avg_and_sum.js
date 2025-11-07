@@ -2,7 +2,7 @@
  * Additional tests for $avg and $sum when used as expressions.
  */
 
-var coll = db.collection;
+let coll = db.collection;
 assert(coll.drop());
 
 /*
@@ -30,7 +30,7 @@ coll.insertOne({
     "array2": [1, 2, 3, "string"],
     "array3": [12.4, 5.6, 9.805],
     "arrayNested1": [[1, 2, 3], new Map()],
-    "arrayNested2": [[1, 2, 3], 4, null]
+    "arrayNested2": [[1, 2, 3], 4, null],
 });
 
 // Single non-array input.

@@ -27,23 +27,7 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_map.h>
-#include <absl/hash/hash.h>
-#include <absl/meta/type_traits.h>
-#include <algorithm>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/repl/oplog_applier_utils.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -51,22 +35,24 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonelement_comparator.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/document_validation.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_metrics.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/document_validation.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/profile_settings.h"
 #include "mongo/db/repl/oplog_applier_utils.h"
-#include "mongo/db/repl/oplog_constraint_violation_logger.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
@@ -75,19 +61,33 @@
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/shard_role.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/db/storage/exceptions.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/hash/hash.h>
+#include <absl/meta/type_traits.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -142,6 +142,14 @@ void processCrudOp(OperationContext* opCtx,
         // bulk insert them.
         op->setIsForCappedCollection(true);
     }
+}
+
+void getContainerKeyHash(OperationContext* opCtx,
+                         OplogEntry* op,
+                         boost::optional<size_t>& hashKey) {
+    BSONElement key = op->getObject()["k"];
+    BSONElementComparator elementHasher(BSONElementComparator::FieldNamesMode::kIgnore, nullptr);
+    hashKey.emplace(elementHasher.hash(key));
 }
 
 /**
@@ -221,15 +229,17 @@ void addTopLevelCommitOrAbort(OperationContext* opCtx,
 uint32_t OplogApplierUtils::getOplogEntryHash(OperationContext* opCtx,
                                               OplogEntry* op,
                                               CachedCollectionProperties* collPropertiesCache) {
-    boost::optional<size_t> idHash;
+    boost::optional<size_t> opHash;
     NamespaceString nss = op->getNss();
 
     if (op->isCrudOpType()) {
         auto collProperties = collPropertiesCache->getCollectionProperties(opCtx, nss);
-        processCrudOp(opCtx, op, collProperties, idHash);
+        processCrudOp(opCtx, op, collProperties, opHash);
+    } else if (op->isContainerOpType()) {
+        getContainerKeyHash(opCtx, op, opHash);
     }
 
-    return idHash ? absl::HashOf(nss, *idHash) : absl::HashOf(nss);
+    return opHash ? absl::HashOf(nss, *opHash) : absl::HashOf(nss);
 }
 
 uint32_t OplogApplierUtils::addToWriterVector(
@@ -398,22 +408,6 @@ void OplogApplierUtils::addDerivedCommitsOrAborts(
     addTopLevelCommitOrAbort(opCtx, commitOrAbortOp, writerVectors);
 }
 
-NamespaceString OplogApplierUtils::parseUUIDOrNs(OperationContext* opCtx,
-                                                 const OplogEntry& oplogEntry) {
-    auto optionalUuid = oplogEntry.getUuid();
-    if (!optionalUuid) {
-        return oplogEntry.getNss();
-    }
-
-    const auto& uuid = optionalUuid.value();
-    auto catalog = CollectionCatalog::get(opCtx);
-    auto nss = catalog->lookupNSSByUUID(opCtx, uuid);
-    uassert(ErrorCodes::NamespaceNotFound,
-            str::stream() << "No namespace with UUID " << uuid.toString(),
-            nss);
-    return *nss;
-}
-
 NamespaceStringOrUUID OplogApplierUtils::getNsOrUUID(const NamespaceString& nss,
                                                      const OplogEntry& op) {
     if (auto ui = op.getUuid()) {
@@ -448,6 +442,14 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
         invariant(op->getTid() == boost::none);
     }
 
+    // VersionContext fixes a FCV snapshot over the opCtx, making FCV-gated feature
+    // flags checks in secondaries behave as they did on the primary, thus ensuring
+    // correct application even if the FCV changed due to a concurrent setFCV.
+    boost::optional<VersionContext::ScopedSetDecoration> scopedVersionContext;
+    if (op->getVersionContext()) {
+        scopedVersionContext.emplace(opCtx, *op->getVersionContext());
+    }
+
     if (opType == OpTypeEnum::kNoop) {
         incrementOpsAppliedStats();
         return Status::OK();
@@ -469,7 +471,7 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
                     coll.emplace(
                         acquireCollection(opCtx,
                                           {getNsOrUUID(nss, *op),
-                                           AcquisitionPrerequisites::kPretendUnsharded,
+                                           PlacementConcern::kPretendUnsharded,
                                            repl::ReadConcernArgs::get(opCtx),
                                            AcquisitionPrerequisites::kWrite},
                                           fixLockModeForSystemDotViewsChanges(nss, MODE_IX)));
@@ -481,7 +483,7 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
                         coll.emplace(
                             acquireCollection(opCtx,
                                               {nss,
-                                               AcquisitionPrerequisites::kPretendUnsharded,
+                                               PlacementConcern::kPretendUnsharded,
                                                repl::ReadConcernArgs::get(opCtx),
                                                AcquisitionPrerequisites::kWrite},
                                               fixLockModeForSystemDotViewsChanges(nss, MODE_IX)));
@@ -498,8 +500,14 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
                         str::stream()
                             << "missing database (" << nss.dbName().toStringForErrorMsg() << ")",
                         db);
-                OldClientContext ctx(opCtx, coll->nss(), db);
 
+                AutoStatsTracker statsTracker(
+                    opCtx,
+                    nss,
+                    Top::LockType::WriteLocked,
+                    AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                    DatabaseProfileSettings::get(opCtx->getServiceContext())
+                        .getDatabaseProfileLevel(nss.dbName()));
                 // We convert updates to upserts in secondary mode when the
                 // oplogApplicationEnforcesSteadyStateConstraints parameter is false, to avoid
                 // failing on the constraint that updates in steady state mode always update
@@ -573,6 +581,18 @@ Status OplogApplierUtils::applyOplogEntryOrGroupedInsertsCommon(
             }
         });
         return status;
+    } else if (DurableOplogEntry::isContainerOpType(opType)) {
+        return writeConflictRetry(opCtx, "applyOplogEntryOrGroupedInserts_container", nss, [&] {
+            auto coll = acquireCollection(opCtx,
+                                          {nss,
+                                           PlacementConcern::kPretendUnsharded,
+                                           ReadConcernArgs::get(opCtx),
+                                           AcquisitionPrerequisites::kWrite},
+                                          MODE_IX);
+            Status status = applyContainerOperation_inlock(opCtx, op, oplogApplicationMode);
+            incrementOpsAppliedStats();
+            return status;
+        });
     } else if (opType == OpTypeEnum::kCommand) {
         auto status =
             writeConflictRetry(opCtx, "applyOplogEntryOrGroupedInserts_command", nss, [&] {

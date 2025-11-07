@@ -29,35 +29,29 @@
 
 #pragma once
 
-#include <cstddef>
-#include <queue>
-#include <set>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/util/builder.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_change_stream_gen.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/resume_token.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 
+#include <set>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
 namespace mongo {
 
-class DocumentSourceChangeStreamSplitLargeEvent : public DocumentSource {
+class DocumentSourceChangeStreamSplitLargeEvent final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$changeStreamSplitLargeEvent"_sd;
-    static constexpr size_t kBSONObjMaxChangeEventSize = BSONObjMaxInternalSize - (8 * 1024);
 
     static boost::intrusive_ptr<DocumentSourceChangeStreamSplitLargeEvent> create(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -73,45 +67,40 @@ public:
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final;
+    StageConstraints constraints(PipelineSplitState pipeState) const final;
 
     void validatePipelinePosition(bool alreadyOptimized,
-                                  Pipeline::SourceContainer::const_iterator pos,
-                                  const Pipeline::SourceContainer& container) const final;
+                                  DocumentSourceContainer::const_iterator pos,
+                                  const DocumentSourceContainer& container) const final;
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
         return boost::none;
     }
 
     const char* getSourceName() const final {
-        return kStageName.rawData();
+        return kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kChangeStreamSplitLargeEvent;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
 protected:
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) final;
-
-    DocumentSource::GetNextResult doGetNext() final;
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) final;
 
 private:
+    friend boost::intrusive_ptr<exec::agg::Stage>
+    documentSourceChangeStreamSplitLargeEventToStageFn(
+        const boost::intrusive_ptr<DocumentSource>& documentSource);
+
     // This constructor is private, callers should use the 'create()' method above.
     DocumentSourceChangeStreamSplitLargeEvent(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                               boost::optional<ResumeTokenData> resumeAfterSplit);
 
-    Document _popFromQueue();
-
-    /**
-     * In case of resume after split, check whether 'eventDoc' is the split event. If so, extract
-     * and return the resume token's fragment number. Otherwise, return zero.
-     */
-    size_t _handleResumeAfterSplit(const Document& eventDoc, size_t eventBsonSize);
-
     boost::optional<ResumeTokenData> _resumeAfterSplit;
-    std::queue<Document> _splitEventQueue;
 };
 
 }  // namespace mongo

@@ -31,8 +31,54 @@
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
-#include <fmt/ostream.h>
 // IWYU pragma: no_include "cxxabi.h"
+#include "mongo/base/checked_cast.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/admission/ingress_request_rate_limiter.h"
+#include "mongo/db/baton.h"
+#include "mongo/db/client.h"
+#include "mongo/db/client_strand.h"
+#include "mongo/db/dbmessage.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/service_context_test_fixture.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/logv2/log.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/rpc/message.h"
+#include "mongo/rpc/op_msg.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/transport/asio/asio_session_manager.h"
+#include "mongo/transport/message_compressor_base.h"
+#include "mongo/transport/message_compressor_manager.h"
+#include "mongo/transport/message_compressor_registry.h"
+#include "mongo/transport/message_compressor_snappy.h"
+#include "mongo/transport/service_entry_point.h"
+#include "mongo/transport/service_executor.h"
+#include "mongo/transport/session_manager_common.h"
+#include "mongo/transport/session_manager_common_mock.h"
+#include "mongo/transport/session_workflow.h"
+#include "mongo/transport/session_workflow_test_util.h"
+#include "mongo/transport/test_fixtures.h"
+#include "mongo/transport/transport_layer_manager_impl.h"
+#include "mongo/transport/transport_options_gen.h"
+#include "mongo/unittest/log_test.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/functional.h"
+#include "mongo/util/future.h"
+#include "mongo/util/future_impl.h"
+#include "mongo/util/scopeguard.h"
+#include "mongo/util/synchronized_value.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -46,53 +92,10 @@
 #include <type_traits>
 #include <utility>
 
-#include "mongo/base/checked_cast.h"
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/baton.h"
-#include "mongo/db/client.h"
-#include "mongo/db/client_strand.h"
-#include "mongo/db/dbmessage.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/service_context_test_fixture.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/rpc/message.h"
-#include "mongo/rpc/op_msg.h"
-#include "mongo/stdx/condition_variable.h"
-#include "mongo/stdx/mutex.h"
-#include "mongo/transport/service_entry_point.h"
-#include "mongo/transport/service_executor.h"
-#include "mongo/transport/session_manager_common.h"
-#include "mongo/transport/session_manager_common_mock.h"
-#include "mongo/transport/session_workflow.h"
-#include "mongo/transport/session_workflow_test_util.h"
-#include "mongo/transport/test_fixtures.h"
-#include "mongo/transport/transport_layer_manager_impl.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/thread_pool.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/functional.h"
-#include "mongo/util/future.h"
-#include "mongo/util/future_impl.h"
-#include "mongo/util/scopeguard.h"
-#include "mongo/util/synchronized_value.h"
-
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo::transport {
 namespace {
-using namespace fmt::literals;
-
 const Status kClosedSessionError{ErrorCodes::SocketException, "Session is closed"};
 const Status kNetworkError{ErrorCodes::HostUnreachable, "Someone is unreachable"};
 const Status kShutdownError{ErrorCodes::ShutdownInProgress, "Something is shutting down"};
@@ -217,7 +220,8 @@ public:
         stdx::unique_lock lk{_mutex};
         _cv.wait(lk, [&] { return !!_cb; });
         auto h = std::exchange(_cb, {});
-        invariant(h->event() == e, "Expecting {}, got {}"_format(h->event(), e));
+        invariant(h->event() == e,
+                  fmt::format("Expecting {}, got {}", toString(h->event()), toString(e)));
         return std::move(static_cast<Expectation<e>&>(*h).cb);
     }
 
@@ -252,8 +256,14 @@ public:
         ServiceExecutor::shutdownAll(getServiceContext(), Seconds{10});
     }
 
-    void initializeNewSession() {
-        _session = std::make_shared<CustomMockSession>(this);
+    /**
+     * This must be called before beginning a session workflow on a new session in the test. It
+     * updates the _session shared pointer to a fresh session.
+     */
+    void initializeNewSession(HostAndPort remote = HostAndPort(),
+                              SockAddr remoteAddr = SockAddr(),
+                              SockAddr localAddr = SockAddr()) {
+        _session = std::make_shared<CustomMockSession>(this, remote, remoteAddr, localAddr);
         _session->getTransportLayerCb = [this] {
             return _transportLayer;
         };
@@ -275,7 +285,7 @@ public:
             getServiceContext()->getService()->getServiceEntryPoint());
     }
 
-    SessionManagerCommon* sessionManager() {
+    virtual SessionManagerCommon* sessionManager() {
         return _sessionManager;
     }
 
@@ -324,10 +334,31 @@ public:
 
     std::function<void(Client*)> onClientDisconnectCb;
 
+protected:
+    class SWTObserver : public ClientTransportObserver {
+    public:
+        explicit SWTObserver(SessionWorkflowTest* test) : _test(test) {}
+        void onClientDisconnect(Client* client) override {
+            _test->_onMockEvent<Event::sepEndSession>(std::tie(client->session()));
+            if (_test->onClientDisconnectCb) {
+                _test->onClientDisconnectCb(client);
+            }
+        }
+
+    private:
+        SessionWorkflowTest* _test;
+    };
+
+    SessionManagerCommon* _sessionManager{nullptr};
+
 private:
     class CustomMockSession : public CallbackMockSession {
     public:
-        explicit CustomMockSession(SessionWorkflowTest* fixture) {
+        explicit CustomMockSession(SessionWorkflowTest* fixture,
+                                   HostAndPort remote,
+                                   SockAddr remoteAddr,
+                                   SockAddr localAddr)
+            : CallbackMockSession(remote, remoteAddr, localAddr) {
             endCb = [this] {
                 *_connected = false;
             };
@@ -376,26 +407,16 @@ private:
         return sep;
     }
 
-    class SWTObserver : public ClientTransportObserver {
-    public:
-        explicit SWTObserver(SessionWorkflowTest* test) : _test(test) {}
-        void onClientDisconnect(Client* client) override {
-            _test->_onMockEvent<Event::sepEndSession>(std::tie(client->session()));
-            if (_test->onClientDisconnectCb) {
-                _test->onClientDisconnectCb(client);
-            }
-        }
-
-    private:
-        SessionWorkflowTest* _test;
-    };
-
-    void _initTransportLayer(ServiceContext* svcCtx) {
+    virtual std::unique_ptr<SessionManager> _initSessionManager(ServiceContext* svcCtx) {
         auto sm =
             std::make_unique<MockSessionManagerCommon>(svcCtx, std::make_unique<SWTObserver>(this));
         _sessionManager = sm.get();
+        return sm;
+    }
 
-        auto tl = std::make_unique<test::TransportLayerMockWithReactor>(std::move(sm));
+    void _initTransportLayer(ServiceContext* svcCtx) {
+        auto tl =
+            std::make_unique<test::TransportLayerMockWithReactor>(_initSessionManager(svcCtx));
         _transportLayer = tl.get();
         svcCtx->setTransportLayerManager(
             std::make_unique<TransportLayerManagerImpl>(std::move(tl)));
@@ -412,7 +433,7 @@ private:
      */
     template <Event event>
     EventResultT<event> _onMockEvent(const EventTiedArgumentsT<event>& args) {
-        LOGV2_DEBUG(6742616, 2, "Mock event arrived", "event"_attr = event);
+        LOGV2_DEBUG(6742616, 2, "Mock event arrived", "event"_attr = toString(event));
         return std::apply(_expect.pop<event>(), args);
     }
 
@@ -420,7 +441,6 @@ private:
     std::shared_ptr<CustomMockSession> _session;
     std::shared_ptr<ThreadPool> _threadPool = _makeThreadPool();
     test::TransportLayerMockWithReactor* _transportLayer{nullptr};
-    SessionManagerCommon* _sessionManager{nullptr};
 };
 
 TEST_F(SessionWorkflowTest, StartThenEndSession) {
@@ -438,6 +458,31 @@ TEST_F(SessionWorkflowTest, OneNormalCommand) {
     expect<Event::sessionSourceMessage>(kClosedSessionError);
     expect<Event::sepEndSession>();
     joinSessions();
+}
+
+TEST_F(SessionWorkflowTest, IngressLogicalNetworkMetricsTest) {
+    Message req = makeOpMsg();
+    Message resp = []() {
+        auto omb = OpMsgBuilder{};
+        omb.setBody(BSONObjBuilder{}.append("ok", 1).append("msg", "command result").obj());
+        return omb.finish();
+    }();
+
+    startSession();
+    auto stats = test::NetworkConnectionStats::get(NetworkCounter::ConnectionType::kIngress);
+    expect<Event::sessionSourceMessage>(req);
+    expect<Event::sepHandleRequest>(makeResponse(resp));
+    expect<Event::sessionSinkMessage>(Status::OK());
+    auto diff = test::NetworkConnectionStats::get(NetworkCounter::ConnectionType::kIngress)
+                    .getDifference(stats);
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+    joinSessions();
+
+    // Verify logical metrics of the ingress connection.
+    ASSERT_EQ(diff.logicalBytesIn, req.size());
+    ASSERT_EQ(diff.logicalBytesOut, resp.size());
+    ASSERT_EQ(diff.numRequests, 1);
 }
 
 TEST_F(SessionWorkflowTest, OnClientDisconnectCalledOnCleanup) {
@@ -465,6 +510,15 @@ TEST_F(SessionWorkflowTest, MoreToComeDisconnectAtSource3) {
     expect<Event::sepHandleRequest>(makeResponse(makeOpMsg()));
     expect<Event::sessionSinkMessage>(Status::OK());
     // Client disconnects while we're waiting for their next command.
+    expect<Event::sessionSourceMessage>(kShutdownError);
+    expect<Event::sepEndSession>();
+    joinSessions();
+}
+
+TEST_F(SessionWorkflowTest, GetOpenSession) {
+    startSession();
+    auto sessionIds = sessionManager()->getOpenSessionIDs();
+    ASSERT_EQ(sessionIds.size(), 1);
     expect<Event::sessionSourceMessage>(kShutdownError);
     expect<Event::sepEndSession>();
     joinSessions();
@@ -533,6 +587,269 @@ TEST_F(SessionWorkflowTest, CleanupFromGetMore) {
     // will be the end of the session.
     expect<Event::sepEndSession>();
     joinSessions();
+}
+
+class ConnectionEstablishmentQueueingTest : public SessionWorkflowTest {
+public:
+    AsioSessionManager* sessionManager() override {
+        return dynamic_cast<AsioSessionManager*>(_sessionManager);
+    }
+
+    BSONObj getConnectionStats() {
+        BSONObjBuilder bob;
+        sessionManager()->appendStats(&bob);
+        auto stats = bob.obj();
+        LOGV2(10481100, "Connection stats", "stats"_attr = stats);
+        return stats;
+    }
+
+    void waitUntil(std::function<bool(void)> pred) {
+        auto retries = 0;
+        while (!pred() && retries < 5) {
+            sleepmillis(pow(5, ++retries));
+        }
+    }
+
+private:
+    std::unique_ptr<SessionManager> _initSessionManager(ServiceContext* svcCtx) override {
+        auto sm = std::make_unique<AsioSessionManager>(svcCtx, std::make_unique<SWTObserver>(this));
+        _sessionManager = sm.get();
+        return sm;
+    }
+
+    RAIIServerParameterControllerForTest featureEnabled{
+        "ingressConnectionEstablishmentRateLimiterEnabled", true};
+    unittest::MinimumLoggedSeverityGuard logSeverityGuard{logv2::LogComponent::kDefault,
+                                                          logv2::LogSeverity::Debug(4)};
+};
+
+TEST_F(ConnectionEstablishmentQueueingTest, RejectEstablishmentWhenQueueingDisabled) {
+    RAIIServerParameterControllerForTest refreshRate{"ingressConnectionEstablishmentRatePerSec",
+                                                     1.0};
+    RAIIServerParameterControllerForTest burstCapacitySecs{
+        "ingressConnectionEstablishmentBurstCapacitySecs", 1};
+
+    // The first session gets a token successfully and calls sourceMessage.
+    startSession();
+    expect<Event::sessionSourceMessage>(makeOpMsg());
+    waitUntil([&] { return getConnectionStats()["active"].numberLong() == 1; });
+    ASSERT_EQ(getConnectionStats()["active"].numberLong(), 1);
+    ASSERT_EQ(getConnectionStats()["current"].numberLong(), 1);
+    expect<Event::sepHandleRequest>(makeResponse(makeOpMsg()));
+    expect<Event::sessionSinkMessage>(Status::OK());
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+
+    // The next session fails to get a token and is closed because queueing is disabled.
+    initializeNewSession();
+    startSession();
+    expect<Event::sepEndSession>();
+
+    // Rejected connections should be counted in both server status sections.
+    ASSERT_EQ(getConnectionStats()["rejected"].numberLong(), 1);
+    ASSERT_EQ(getConnectionStats()["establishmentRateLimit"]["rejected"].numberLong(), 1);
+    ASSERT_EQ(getConnectionStats()["queuedForEstablishment"].numberLong(), 0);
+    ASSERT_EQ(getConnectionStats()["totalCreated"].numberLong(), 2);
+
+    joinSessions();
+}
+
+TEST_F(ConnectionEstablishmentQueueingTest, InterruptQueuedEstablishments) {
+    RAIIServerParameterControllerForTest refreshRate{"ingressConnectionEstablishmentRatePerSec",
+                                                     1.0};
+    RAIIServerParameterControllerForTest burstCapacitySecs{
+        "ingressConnectionEstablishmentBurstCapacitySecs", 1};
+    RAIIServerParameterControllerForTest maxQueueDepth{
+        "ingressConnectionEstablishmentMaxQueueDepth", 10};
+    const auto initialAvailable = getConnectionStats()["available"].numberLong();
+
+    // The first session gets a token successfully and calls sourceMessage.
+    startSession();
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+
+    // The next session fails to get a token and queues until it is interrupted.
+    initializeNewSession();
+    startSession();
+
+    // Ensure the session queues.
+    waitUntil([&] { return getConnectionStats()["queuedForEstablishment"].numberLong() == 1; });
+    // Queued connections should be counted in "queuedForEstablishment", "totalCreated", and
+    // "available" stats.
+    ASSERT_EQ(getConnectionStats()["queuedForEstablishment"].numberLong(), 1);
+    ASSERT_EQ(getConnectionStats()["available"].numberLong(), initialAvailable - 1);
+    ASSERT_EQ(getConnectionStats()["totalCreated"].numberLong(), 2);
+
+    // Queued connections shouldn't be counted as active or current.
+    ASSERT_EQ(getConnectionStats()["active"].numberLong(), 0);
+    ASSERT_EQ(getConnectionStats()["current"].numberLong(), 0);
+
+    getServiceContext()->setKillAllOperations();
+    expect<Event::sepEndSession>();
+
+    ASSERT_EQ(getConnectionStats()["queuedForEstablishment"].numberLong(), 0);
+
+    joinSessions();
+}
+
+TEST_F(ConnectionEstablishmentQueueingTest, BypassQueueingEstablishment) {
+    std::string ip = "127.0.0.1";
+    RAIIServerParameterControllerForTest exemptionsGuard(
+        "ingressConnectionEstablishmentRateLimiterBypass",
+        BSON("ranges" << BSONArray(BSON("0" << ip))));
+    RAIIServerParameterControllerForTest refreshRate{"ingressConnectionEstablishmentRatePerSec",
+                                                     1.0};
+    RAIIServerParameterControllerForTest burstCapacitySecs{
+        "ingressConnectionEstablishmentBurstCapacitySecs", 1};
+
+    // The first session gets a token successfully and calls sourceMessage.
+    startSession();
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+
+    // Non-exempt ips fail because there are no tokens available and queueing is disabled.
+    initializeNewSession(HostAndPort("192.168.0.53", 27017),
+                         SockAddr::create("192.168.0.53", 27017, AF_INET));
+    startSession();
+    expect<Event::sepEndSession>();
+    ASSERT_EQ(getConnectionStats()["establishmentRateLimit"]["rejected"].numberLong(), 1);
+
+    // Exempted ips get through.
+    initializeNewSession(HostAndPort(ip, 27017), SockAddr::create(ip, 27017, AF_INET));
+    startSession();
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+    ASSERT_EQ(getConnectionStats()["establishmentRateLimit"]["exempted"].numberLong(), 1);
+
+    joinSessions();
+}
+
+class IngressRequestRateLimiterTest : public SessionWorkflowTest {
+public:
+    struct IngressRequestRateLimiterStats {
+        std::int32_t rejectedAdmissions;
+        std::int32_t successfulAdmissions;
+        std::int32_t exemptedAdmissions;
+        std::int32_t attemptedAdmissions;
+        double totalAvailableTokens;
+    };
+
+    void setUp() override {
+        SessionWorkflowTest::setUp();
+        auto& registry = MessageCompressorRegistry::get();
+        const auto& compressorNames = registry.getCompressorNames();
+
+        if (std::ranges::find(compressorNames, "snappy") == compressorNames.end()) {
+            registry.setSupportedCompressors({"snappy"});
+            registry.registerImplementation(std::make_unique<SnappyMessageCompressor>());
+            uassertStatusOK(registry.finalizeSupportedCompressors());
+        }
+
+        _requestLimiterEnabled.emplace("ingressRequestRateLimiterEnabled", true);
+    }
+
+    auto enableRateOverrideBehaviorWithSpecifiedBurstSize(double burstSize) -> void {
+        _overrideFailpoint.emplace("ingressRequestRateLimiterFractionalRateOverride",
+                                   BSON("rate" << kVerySlowRate));
+        _requestLimiterBurstCapacitySecs.emplace(
+            "ingressRequestAdmissionBurstCapacitySecs",
+            _convertBurstSizeToBurstCapacitySecs(kVerySlowRate, burstSize));
+    }
+
+    auto getRateLimiterStats() -> IngressRequestRateLimiterStats {
+        const auto sc = getServiceContext();
+        BSONObjBuilder bob;
+        IngressRequestRateLimiter::get(sc).appendStats(&bob);
+        auto stats = bob.obj();
+        LOGV2(10638801, "Request rate limiter stats", "stats"_attr = stats);
+        return IngressRequestRateLimiterStats{
+            .rejectedAdmissions = stats["rejectedAdmissions"].numberInt(),
+            .successfulAdmissions = stats["successfulAdmissions"].numberInt(),
+            .exemptedAdmissions = stats["exemptedAdmissions"].numberInt(),
+            .attemptedAdmissions = stats["attemptedAdmissions"].numberInt(),
+            .totalAvailableTokens = stats["totalAvailableTokens"].numberDouble(),
+        };
+    }
+
+    auto compressMessage(Message message) -> Message {
+        MessageCompressorManager compressorManager{};
+        const auto cid = static_cast<MessageCompressorId>(MessageCompressor::kSnappy);
+        return uassertStatusOK(compressorManager.compressMessage(message, &cid));
+    }
+
+private:
+    double _convertBurstSizeToBurstCapacitySecs(double refreshRate, double burstSize) {
+        // Rounding needed to ensure that the conversion back to burstSize won't be incorrect due
+        // to imprecisions in floating point division.
+        return std::round(burstSize / refreshRate);
+    }
+
+    static constexpr double kVerySlowRate = 5e-6;
+
+    unittest::MinimumLoggedSeverityGuard _logSeverityGuard{logv2::LogComponent::kDefault,
+                                                           logv2::LogSeverity::Debug(4)};
+
+    boost::optional<FailPointEnableBlock> _overrideFailpoint;
+    boost::optional<RAIIServerParameterControllerForTest> _requestLimiterEnabled;
+    boost::optional<RAIIServerParameterControllerForTest> _requestLimiterBurstCapacitySecs;
+    boost::optional<RAIIServerParameterControllerForTest> _requestAdmissionRatePerSec;
+};
+
+TEST_F(IngressRequestRateLimiterTest, FireAndForgetResponse) {
+    enableRateOverrideBehaviorWithSpecifiedBurstSize(1.0);
+
+    startSession();
+    auto msg = makeOpMsg();
+    setMoreToCome(msg);
+    expect<Event::sessionSourceMessage>(msg);
+    expect<Event::sepHandleRequest>(makeResponse(Message{}));
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+
+    initializeNewSession();
+    startSession();
+    expect<Event::sessionSourceMessage>(msg);
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+
+    joinSessions();
+
+    const auto stats = getRateLimiterStats();
+
+    ASSERT_EQ(stats.rejectedAdmissions, 1);
+    ASSERT_EQ(stats.successfulAdmissions, 1);
+    ASSERT_EQ(stats.exemptedAdmissions, 0);
+    ASSERT_EQ(stats.attemptedAdmissions, 2);
+    ASSERT_LT(stats.totalAvailableTokens, 1);
+}
+
+TEST_F(IngressRequestRateLimiterTest, FireAndForgetResponseCompressed) {
+    enableRateOverrideBehaviorWithSpecifiedBurstSize(1.0);
+
+    startSession();
+    auto msg = makeOpMsg();
+    setMoreToCome(msg);
+    msg = compressMessage(msg);
+    expect<Event::sessionSourceMessage>(msg);
+    expect<Event::sepHandleRequest>(makeResponse(Message{}));
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+
+    initializeNewSession();
+    startSession();
+    expect<Event::sessionSourceMessage>(msg);
+    expect<Event::sessionSourceMessage>(kClosedSessionError);
+    expect<Event::sepEndSession>();
+
+    joinSessions();
+
+    const auto stats = getRateLimiterStats();
+
+    ASSERT_EQ(stats.rejectedAdmissions, 1);
+    ASSERT_EQ(stats.successfulAdmissions, 1);
+    ASSERT_EQ(stats.exemptedAdmissions, 0);
+    ASSERT_EQ(stats.attemptedAdmissions, 2);
+    ASSERT_LT(stats.totalAvailableTokens, 1);
 }
 
 class StepRunnerSessionWorkflowTest : public SessionWorkflowTest {

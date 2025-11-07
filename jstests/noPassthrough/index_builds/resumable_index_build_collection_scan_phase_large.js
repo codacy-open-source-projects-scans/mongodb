@@ -4,6 +4,8 @@
  * resumed from the same phase to completion when the node is started back up.
  *
  * @tags: [
+ *   # Primary-driven index builds aren't resumable.
+ *   primary_driven_index_builds_incompatible,
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   requires_replication,
@@ -11,7 +13,7 @@
  */
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {ResumableIndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {ResumableIndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const dbName = "test";
 
@@ -20,7 +22,7 @@ const maxIndexBuildMemoryUsageMB = 50;
 
 const rst = new ReplSetTest({
     nodes: 1,
-    nodeOptions: {setParameter: {maxIndexBuildMemoryUsageMegabytes: maxIndexBuildMemoryUsageMB}}
+    nodeOptions: {setParameter: {maxIndexBuildMemoryUsageMegabytes: maxIndexBuildMemoryUsageMB}},
 });
 rst.startSet();
 rst.initiate();
@@ -45,6 +47,7 @@ ResumableIndexBuildTest.run(
     // Each document is at least 1 MB, so the index build must have spilled to disk by this point.
     maxIndexBuildMemoryUsageMB,
     ["collection scan"],
-    [{numScannedAfterResume: numDocuments - maxIndexBuildMemoryUsageMB}]);
+    [{numScannedAfterResume: numDocuments - maxIndexBuildMemoryUsageMB}],
+);
 
 rst.stopSet();

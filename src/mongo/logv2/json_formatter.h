@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <boost/log/core/record_view.hpp>
-#include <boost/log/utility/formatting_ostream_fwd.hpp>
-#include <cstdint>
-#include <fmt/format.h>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/constants.h"
@@ -45,11 +39,19 @@
 #include "mongo/logv2/log_tag.h"
 #include "mongo/logv2/log_truncation.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdint>
+#include <string>
+
+#include <boost/log/core/record_view.hpp>
+#include <boost/log/utility/formatting_ostream_fwd.hpp>
+#include <fmt/format.h>
 
 namespace mongo::logv2 {
 
-class JSONFormatter {
+class MONGO_MOD_OPEN JSONFormatter {
 public:
     JSONFormatter(const AtomicWord<int32_t>* maxAttributeSizeKB = nullptr,
                   LogTimestampFormat timestampFormat = LogTimestampFormat::kISO8601UTC)

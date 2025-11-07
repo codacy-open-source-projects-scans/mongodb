@@ -27,21 +27,7 @@
  *    it in the license file.
  */
 
-#include <array>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <js/CallArgs.h>
-#include <js/RootingAPI.h>
-#include <js/TracingAPI.h>
-#include <js/TypeDecls.h>
-#include <js/Value.h>
-#include <memory>
-#include <string>
-#include <utility>
-#include <variant>
-#include <vector>
+#pragma once
 
 #include "mongo/base/data_cursor.h"
 #include "mongo/base/data_range.h"
@@ -71,7 +57,6 @@
 #include "mongo/db/matcher/schema/encrypt_schema_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/platform/basic.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/object_check.h"  // IWYU pragma: keep
 #include "mongo/rpc/op_msg.h"
@@ -92,6 +77,23 @@
 #include "mongo/util/net/ssl_types.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <js/CallArgs.h>
+#include <js/RootingAPI.h>
+#include <js/TracingAPI.h>
+#include <js/TypeDecls.h>
+#include <js/Value.h>
 
 namespace mongo {
 
@@ -132,6 +134,8 @@ public:
                           JSContext* cx);
 
     std::string getServerAddress() const final;
+
+    std::string getLocalAddress() const final;
 
     void say(Message& toSend, bool isRetry, std::string* actualServer) final;
 
@@ -218,10 +222,10 @@ protected:
         RunCommandConnectionType type;
 
         RunCommandParams(OpMsgRequest request)
-            : request(std::move(request)), type(RunCommandConnectionType::rawPtr){};
+            : request(std::move(request)), type(RunCommandConnectionType::rawPtr) {};
 
         RunCommandParams(OpMsgRequest request, std::shared_ptr<DBClientBase> base)
-            : request(std::move(request)), conn(base), type(RunCommandConnectionType::sharedPtr){};
+            : request(std::move(request)), conn(base), type(RunCommandConnectionType::sharedPtr) {};
 
         RunCommandParams(OpMsgRequest request, RunCommandParams params)
             : request(std::move(request)), type(params.type) {

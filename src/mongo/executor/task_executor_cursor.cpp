@@ -27,11 +27,7 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/executor/task_executor_cursor.h"
 
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -40,15 +36,19 @@
 #include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/executor/pinned_connection_task_executor_factory.h"
-#include "mongo/executor/task_executor_cursor.h"
+#include "mongo/executor/pinned_connection_task_executor_registry.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/time_support.h"
+
+#include <algorithm>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -69,6 +69,12 @@ TaskExecutorCursor::TaskExecutorCursor(std::shared_ptr<executor::TaskExecutor> e
     if (_options.pinConnection) {
         _executor = makePinnedConnectionTaskExecutor(executor);
         _underlyingExecutor = std::move(executor);
+        // Hold a (PCTE, underlying executor) pair so shutdown can drain the PCTE before
+        // 'underlying' is destroyed.
+        if (rcr.opCtx) {
+            _pcteToken = std::make_unique<PinnedExecutorRegistryToken>(
+                rcr.opCtx->getServiceContext(), _executor, _underlyingExecutor);
+        }
     } else {
         _executor = std::move(executor);
     }
@@ -176,6 +182,7 @@ TaskExecutorCursor::~TaskExecutorCursor() {
                     // underlying if this is the last TaskExecutorCursor using that pinned executor.
                 });
             };
+            _pcteToken.reset();
         }
         auto swCallback = _executor->scheduleRemoteCommand(
             _createRequest(nullptr, KillCursorsCommandRequest(_ns, {_cursorId}).toBSON()),
@@ -312,7 +319,8 @@ void TaskExecutorCursor::_getNextBatch(OperationContext* opCtx) {
         out = _cmdState->promise.getFuture().getNoThrow(opCtx);
     };
     if (_options.yieldPolicy) {
-        uassertStatusOK(_options.yieldPolicy->yieldOrInterrupt(opCtx, getDataFunc));
+        uassertStatusOK(_options.yieldPolicy->yieldOrInterrupt(
+            opCtx, getDataFunc, RestoreContext::RestoreType::kYield));
     } else {
         getDataFunc();
     }
@@ -342,12 +350,10 @@ void TaskExecutorCursor::_getNextBatch(OperationContext* opCtx) {
     // Ensure we update the RCR we give to each 'child cursor' with the current opCtx.
     auto freshRcr = _createRequest(opCtx, _rcr.cmdObj);
     auto copyOptions = [&] {
-        TaskExecutorCursorOptions options;
         // In the case that pinConnection is true, we need to ensure that additional cursors also
         // pin their connection to the same socket as the original cursor. We don't need to share
         // the yield policy or getMore strategy.
-        options.pinConnection = _options.pinConnection;
-        return options;
+        return TaskExecutorCursorOptions(_options.pinConnection);
     };
     for (unsigned int i = 1; i < cursorResponses.size(); ++i) {
         _additionalCursors.push_back(

@@ -36,13 +36,19 @@ package(default_visibility = ["//visibility:public"])
 mongo_cc_library(
     name = "rdkafka",
     srcs = [
-        "dist/src/cJSON.c",
         "dist/src/crc32c.c",
         "dist/src/lz4.c",
         "dist/src/lz4frame.c",
         "dist/src/lz4hc.c",
+        "dist/src/nanopb/pb_common.c",
+        "dist/src/nanopb/pb_decode.c",
+        "dist/src/nanopb/pb_encode.c",
+        "dist/src/opentelemetry/common.pb.c",
+        "dist/src/opentelemetry/metrics.pb.c",
+        "dist/src/opentelemetry/resource.pb.c",
         "dist/src/rdaddr.c",
         "dist/src/rdavl.c",
+        "dist/src/rdbase64.c",
         "dist/src/rdbuf.c",
         "dist/src/rdcrc32.c",
         "dist/src/rddl.c",
@@ -96,6 +102,9 @@ mongo_cc_library(
         "dist/src/rdkafka_ssl.c",
         "dist/src/rdkafka_sticky_assignor.c",
         "dist/src/rdkafka_subscription.c",
+        "dist/src/rdkafka_telemetry.c",
+        "dist/src/rdkafka_telemetry_decode.c",
+        "dist/src/rdkafka_telemetry_encode.c",
         "dist/src/rdkafka_timer.c",
         "dist/src/rdkafka_topic.c",
         "dist/src/rdkafka_transport.c",
@@ -119,13 +128,20 @@ mongo_cc_library(
         ":dist_FAKE_config_h",
         ":dist_config_h",
     ],
-    hdrs = glob(["dist/src/**/*.h"]) + [
+    hdrs = glob(
+        ["dist/src/**/*.h"],
+        ["dist/src/cJSON.h"],
+    ) + [
         "dist/src/lz4.c",  # This file is textually included.
     ],
     copts = [
         "-Wno-array-bounds",
         "-Wno-unused-variable",
+        "-Wno-enum-conversion",
+        "-Wno-format-truncation",
         "-Wno-implicit-fallthrough",
+        "-Wno-implicit-function-declaration",
+        "-Wno-int-conversion",
         "-Wno-unused-but-set-variable",
         "-I$(GENDIR)/src/third_party/librdkafka/dist/FAKE",
         "-U_GNU_SOURCE",
@@ -139,6 +155,7 @@ mongo_cc_library(
     }),
     includes = [
         "dist/src",
+        "dist/src-cpp",
     ],
     linkopts = [
         "-lcurl",
@@ -154,6 +171,7 @@ mongo_cc_library(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     deps = [
+        "//src/third_party/aws-sdk:aws-cjson",
         "//src/third_party/zlib",
         "//src/third_party/zstandard:zstd",
     ],

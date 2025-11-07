@@ -29,12 +29,11 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
+#include "mongo/db/memory_tracking/memory_usage_tracker.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/util/modules.h"
 
-#include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/expression.h"
-#include "mongo/db/pipeline/expression_from_accumulator_quantile.h"
-#include "mongo/util/memory_usage_tracker.h"
+#include <boost/optional.hpp>
 
 namespace mongo {
 
@@ -70,8 +69,8 @@ public:
     size_t getApproximateSize() {
         tassert(5414200,
                 "_memUsageTracker is not set for function",
-                _memUsageTracker.currentMemoryBytes() != 0);
-        return _memUsageTracker.currentMemoryBytes();
+                _memUsageTracker.inUseTrackedMemoryBytes() != 0);
+        return _memUsageTracker.inUseTrackedMemoryBytes();
     }
 
 protected:

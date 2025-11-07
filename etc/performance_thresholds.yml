@@ -12,63 +12,42 @@
 #       - thread_level: {thread_level_value}
 #         metrics:
 #           - name: {name of the metric to check}
-#             value: {Whatever the threshold to check against is}
+#             threshold_limit: {The maximum difference in the metric when compared to the base commit}
 #             bound_direction: {What the threshold direction should be. Must be one of upper or lower}
 #       - thread_level: {thread_level_value}
 #         metrics:
 #           - name: {name of the metric to check}
-#             value: {Whatever the threshold to check against is}
+#             threshold_limit: {The maximum difference in the metric when compared to the base commit}
 #             bound_direction: {What the threshold direction should be. Must be one of upper or lower}
 #   test2:
 #     variant1:
 #       - thread_level: {thread_level_value}
 #         metrics:
 #           - name: {name of the metric to check}
-#             value: {Whatever the threshold to check against is}
+#             threshold_limit: {The maximum difference in the metric when compared to the base commit}
 #             bound_direction: {What the threshold direction should be. Must be one of upper or lower}
 #       - thread_level: {thread_level_value}
 #         metrics:
 #           - name: {name of the metric to check}
-#             value: {Whatever the threshold to check against is}
+#             threshold_limit: {The maximum difference in the metric when compared to the base commit}
 #             bound_direction: {What the threshold direction should be. Must be one of upper or lower}
 #
 #
 #
 #
-#     Bound direction upper means that the value reported by the test must be BELOW the threshold value.
-#     Bound direction lower means that the value reported by the test must be ABOVE the threshold value.
-#
+#     Bound direction upper means that the value reported by the test must be BELOW the base commit plus the threshold limit.
+#     Bound direction lower means that the value reported by the test must be ABOVE the base commit minus the threshold limit.
+#     I.e. if the base commit has a value of 100 and the threshold limit is 10, then:
+#       - For upper bound direction, the value reported by the test must be less than or equal to 110.
+#       - For lower bound direction, the value reported by the test must be greater than or equal to 90.
 #
 ########################################################################################################
 
 tests:
-  ServiceEntryPointRouterRoleBenchmarkFixture/BM_SEP_PING:
+  CrudBenchmarkFixture/BM_FIND_ONE:
     al2023-arm64-sep-benchmark:
-      # The current suggested method for raising these values is to run the benchmark a few times in patches, get the
-      # means of these metrics in them, and then multiply them by 1.002 (+ .2%). Please make sure the new values
-      # are above the maximum values reported in those patches to prevent any future flakiness.
       - thread_level: 1
         metrics:
           - name: instructions_per_iteration_mean
-            value: 20616
-            bound_direction: upper
-      - thread_level: 32
-        metrics:
-          - name: instructions_per_iteration_mean
-            value: 20642
-            bound_direction: upper
-  ServiceEntryPointShardRoleBenchmarkFixture/BM_SEP_PING:
-    al2023-arm64-sep-benchmark:
-      # The current suggested method for raising these values is to run the benchmark a few times in patches, get the
-      # means of these metrics in them, and then multiply them by 1.002 (+ .2%). Please make sure the new values
-      # are above the maximum values reported in those patches to prevent any future flakiness.
-      - thread_level: 1
-        metrics:
-          - name: instructions_per_iteration_mean
-            value: 23154
-            bound_direction: upper
-      - thread_level: 32
-        metrics:
-          - name: instructions_per_iteration_mean
-            value: 23184
+            threshold_limit: 600
             bound_direction: upper

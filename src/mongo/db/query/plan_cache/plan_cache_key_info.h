@@ -29,17 +29,19 @@
 
 #pragma once
 
-#include <boost/container_hash/hash.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <string>
-#include <utility>
-
 #include "mongo/base/string_data.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/canonical_query_encoder.h"
 #include "mongo/db/query/query_settings/query_settings_gen.h"
 #include "mongo/db/query/query_settings/query_settings_hash.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <utility>
+
+#include <boost/container_hash/hash.hpp>
 
 namespace mongo {
 /**
@@ -48,12 +50,12 @@ namespace mongo {
 class PlanCacheKeyInfo {
 public:
     PlanCacheKeyInfo(CanonicalQuery::QueryShapeString shapeString,
-                     std::string indexabilityString,
+                     const std::string& indexabilityString,
                      query_settings::QuerySettings querySettings)
         : _lengthOfQueryShape{shapeString.size()}, _querySettings{std::move(querySettings)} {
         _key = std::move(shapeString);
         _key += indexabilityString;
-    };
+    }
 
     CanonicalQuery::QueryShapeString getQueryShape() const {
         return std::string(_key, 0, _lengthOfQueryShape);

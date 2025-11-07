@@ -148,6 +148,9 @@ __posix_sync(WT_SESSION_IMPL *session, int fd, const char *name, const char *fun
 {
     WT_DECL_RET;
 
+    if (F_ISSET(&S2C(session)->disaggregated_storage, WT_DISAGG_NO_SYNC))
+        return (0);
+
 #if defined(F_FULLFSYNC)
     /*
      * OS X fsync documentation: "Note that while fsync() will flush all data from the host to the
@@ -313,9 +316,7 @@ __posix_fs_remove(
 
 #ifdef __linux__
     /* Flush the backing directory to guarantee the remove. */
-    WT_RET(__wt_log_printf(session, "REMOVE: posix_directory_sync %s", name));
     WT_RET(__posix_directory_sync(session, name));
-    WT_RET(__wt_log_printf(session, "REMOVE: DONE posix_directory_sync %s", name));
 #endif
     return (0);
 }
@@ -355,9 +356,7 @@ __posix_fs_rename(WT_FILE_SYSTEM *file_system, WT_SESSION *wt_session, const cha
      * not provide the guarantee or only provide the guarantee with specific mount options. Flush
      * both of the from/to directories until it's a performance problem.
      */
-    WT_RET(__wt_log_printf(session, "RENAME: posix_directory_sync %s", from));
     WT_RET(__posix_directory_sync(session, from));
-    WT_RET(__wt_log_printf(session, "RENAME: DONE posix_directory_sync %s", from));
 
     /*
      * In almost all cases, we're going to be renaming files in the same directory, we can at least
@@ -566,10 +565,10 @@ __posix_file_read_mmap(
       file_handle->name, pfh->fd, offset, len, (void *)pfh->mmap_buf, pfh->mmap_size);
 
     /* Indicate that we might be using the mapped area */
-    (void)__wt_atomic_addv32(&pfh->mmap_usecount, 1);
+    (void)__wt_atomic_add_uint32_v(&pfh->mmap_usecount, 1);
     /* Check after incrementing use count if we raced a resizing thread. */
     if (pfh->mmap_resizing) {
-        (void)__wt_atomic_subv32(&pfh->mmap_usecount, 1);
+        (void)__wt_atomic_sub_uint32_v(&pfh->mmap_usecount, 1);
         goto use_syscall;
     }
 
@@ -585,7 +584,7 @@ __posix_file_read_mmap(
     }
 
     /* Signal that we are done using the mapped buffer. */
-    (void)__wt_atomic_subv32(&pfh->mmap_usecount, 1);
+    (void)__wt_atomic_sub_uint32_v(&pfh->mmap_usecount, 1);
 
     if (mmap_success)
         return (0);
@@ -625,6 +624,9 @@ __posix_file_sync_nowait(WT_FILE_HANDLE *file_handle, WT_SESSION *wt_session)
 
     session = (WT_SESSION_IMPL *)wt_session;
     pfh = (WT_FILE_HANDLE_POSIX *)file_handle;
+
+    if (F_ISSET(&S2C(session)->disaggregated_storage, WT_DISAGG_NO_SYNC))
+        return (0);
 
     /* See comment in __posix_sync(): sync cannot be retried or fail. */
     WT_SYSCALL(sync_file_range(pfh->fd, (off64_t)0, (off64_t)0, SYNC_FILE_RANGE_WRITE), ret);
@@ -728,10 +730,10 @@ __posix_file_write_mmap(
         goto use_syscall;
 
     /* Indicate that we might be using the mapped area */
-    (void)__wt_atomic_addv32(&pfh->mmap_usecount, 1);
+    (void)__wt_atomic_add_uint32_v(&pfh->mmap_usecount, 1);
     /* Check after incrementing use count if we raced a resizing thread. */
     if (pfh->mmap_resizing) {
-        (void)__wt_atomic_subv32(&pfh->mmap_usecount, 1);
+        (void)__wt_atomic_sub_uint32_v(&pfh->mmap_usecount, 1);
         goto use_syscall;
     }
 
@@ -747,7 +749,7 @@ __posix_file_write_mmap(
     }
 
     /* Signal that we are done using the mapped buffer. */
-    (void)__wt_atomic_subv32(&pfh->mmap_usecount, 1);
+    (void)__wt_atomic_sub_uint32_v(&pfh->mmap_usecount, 1);
 
     if (mmap_success)
         return (0);
@@ -885,18 +887,18 @@ __posix_open_file(WT_FILE_SYSTEM *file_system, WT_SESSION *wt_session, const cha
 
     /* Create/Open the file. */
     WT_SYSCALL_RETRY(((pfh->fd = open(name, f, mode)) == -1 ? -1 : 0), ret);
-    if (ret != 0)
+    if (ret != 0) {
+        if (F_ISSET(session, WT_SESSION_QUIET_OPEN_FILE))
+            WT_ERR(ret);
         WT_ERR_MSG(session, ret, "%s: handle-open: open", name);
+    }
 
 #ifdef __linux__
     /*
      * Durability: some filesystems require a directory sync to be confident the file will appear.
      */
-    if (LF_ISSET(WT_FS_OPEN_DURABLE)) {
-        WT_ERR(__wt_log_printf(session, "OPEN/CREATE: posix_directory_sync %s", name));
+    if (LF_ISSET(WT_FS_OPEN_DURABLE))
         WT_ERR(__posix_directory_sync(session, name));
-        WT_ERR(__wt_log_printf(session, "OPEN/CREATE: DONE posix_directory_sync %s", name));
-    }
 #endif
 
     WT_ERR(__posix_open_file_cloexec(session, pfh->fd, name));
@@ -1076,7 +1078,7 @@ wait:
     while (pfh->mmap_resizing == 1)
         __wt_spin_backoff(&yield_count, &sleep_usec);
 
-    if (__wt_atomic_casv32(&pfh->mmap_resizing, 0, 1) == false)
+    if (__wt_atomic_cas_uint32_v(&pfh->mmap_resizing, 0, 1) == false)
         goto wait;
 
     *remap = true;
@@ -1105,7 +1107,7 @@ __wti_posix_release_without_remap(WT_FILE_HANDLE *file_handle)
         return;
 
     /* Signal that we are done resizing the buffer */
-    (void)__wt_atomic_subv32(&pfh->mmap_resizing, 1);
+    (void)__wt_atomic_sub_uint32_v(&pfh->mmap_resizing, 1);
 }
 
 /*
@@ -1134,5 +1136,5 @@ __wti_posix_remap_resize_file(WT_FILE_HANDLE *file_handle, WT_SESSION *wt_sessio
     WT_STAT_CONN_INCRV(session, block_remap_file_resize, 1);
 
     /* Signal that we are done resizing the buffer */
-    (void)__wt_atomic_subv32(&pfh->mmap_resizing, 1);
+    (void)__wt_atomic_sub_uint32_v(&pfh->mmap_resizing, 1);
 }

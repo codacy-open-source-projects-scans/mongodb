@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -47,6 +42,14 @@
 #include "mongo/db/pipeline/percentile_algo.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/db/sorter/sorter.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 /**
@@ -60,13 +63,8 @@ public:
 
     static constexpr auto kName = "$percentile"_sd;
     const char* getOpName() const override {
-        return kName.rawData();
+        return kName.data();
     }
-
-    /**
-     * Blocks the percentile methods that aren't supported yet.
-     */
-    static Status validatePercentileMethod(StringData method);
 
     /**
      * Parsing and creating the accumulator. A separate accumulator object is created per group.
@@ -78,10 +76,6 @@ public:
     static boost::intrusive_ptr<Expression> parseExpression(ExpressionContext* expCtx,
                                                             BSONElement elem,
                                                             VariablesParseState vps);
-
-    static boost::intrusive_ptr<AccumulatorState> create(ExpressionContext* expCtx,
-                                                         const std::vector<double>& ps,
-                                                         PercentileMethodEnum method);
 
     /**
      * Necessary for supporting $percentile as window functions and/or as expression.
@@ -146,6 +140,8 @@ public:
         return _method;
     }
 
+    std::unique_ptr<PercentileAlgorithm> createPercentileAlgorithm(PercentileMethodEnum method);
+
 protected:
     std::vector<double> _percentiles;
     std::unique_ptr<PercentileAlgorithm> _algo;
@@ -160,7 +156,7 @@ class AccumulatorMedian : public AccumulatorPercentile {
 public:
     static constexpr auto kName = "$median"_sd;
     const char* getOpName() const final {
-        return kName.rawData();
+        return kName.data();
     }
 
     /**
@@ -173,10 +169,6 @@ public:
     static boost::intrusive_ptr<Expression> parseExpression(ExpressionContext* expCtx,
                                                             BSONElement elem,
                                                             VariablesParseState vps);
-
-    static boost::intrusive_ptr<AccumulatorState> create(ExpressionContext* expCtx,
-                                                         const std::vector<double>& unused,
-                                                         PercentileMethodEnum method);
 
     /**
      * We are matching the signature of the AccumulatorPercentile for the purpose of using

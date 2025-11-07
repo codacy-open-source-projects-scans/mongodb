@@ -27,22 +27,22 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <memory>
-#include <utility>
-
+#include "mongo/db/transaction/transaction_metrics_observer.h"
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_stats.h"
 #include "mongo/db/transaction/server_transactions_metrics.h"
-#include "mongo/db/transaction/transaction_metrics_observer.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/db/write_concern_options.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+
+#include <cstdint>
+#include <memory>
+#include <utility>
 
 namespace mongo {
 
@@ -187,11 +187,13 @@ void TransactionMetricsObserver::onAbort(OperationContext* opCtx,
 void TransactionMetricsObserver::onTransactionOperation(
     OperationContext* opCtx,
     OpDebug::AdditiveMetrics additiveMetrics,
+    long long prepareReadConflicts,
     const SingleThreadedStorageMetrics& storageMetrics,
     bool isPrepared) {
     // Add the latest operation stats to the aggregate OpDebug::AdditiveMetrics and StorageMetrics
     // objects stored in the SingleTransactionStats instance on the TransactionMetricsObserver.
     _singleTransactionStats.getOpDebug()->additiveMetrics.add(additiveMetrics);
+    _singleTransactionStats.incrementPrepareReadConflicts(prepareReadConflicts);
     _singleTransactionStats.getTransactionStorageMetrics() += storageMetrics;
 
     // If there are valid storage statistics for this operation, put those in the

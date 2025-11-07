@@ -6,7 +6,8 @@
  * ]
  */
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {extractUUIDFromObject} from "jstests/libs/uuid_util.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const dbName = "test";
 const collName = "coll";
@@ -17,8 +18,8 @@ const secondIndexName = "second";
 function addTestDocuments(db) {
     let size = 100;
     jsTest.log("Creating " + size + " test documents.");
-    var bulk = db.getCollection(collName).initializeUnorderedBulkOp();
-    for (var i = 0; i < size; ++i) {
+    let bulk = db.getCollection(collName).initializeUnorderedBulkOp();
+    for (let i = 0; i < size; ++i) {
         bulk.insert({i: i, j: i * i});
     }
     assert.commandWorked(bulk.execute());
@@ -33,9 +34,9 @@ const replSet = new ReplSetTest({
                 priority: 0,
                 votes: 0,
             },
-            slowms: 30000,  // Don't log slow operations on secondary. See SERVER-44821.
+            slowms: 30000, // Don't log slow operations on secondary. See SERVER-44821.
         },
-    ]
+    ],
 });
 const nodes = replSet.startSet();
 replSet.initiate();
@@ -50,8 +51,7 @@ addTestDocuments(primaryDB);
 replSet.awaitReplication();
 
 // Build and finish the first index.
-assert.commandWorked(primaryDB.runCommand(
-    {createIndexes: collName, indexes: [{key: {i: 1}, name: firstIndexName}]}));
+assert.commandWorked(primaryDB.runCommand({createIndexes: collName, indexes: [{key: {i: 1}, name: firstIndexName}]}));
 replSet.awaitReplication();
 
 // Start hanging index builds on the secondary.
@@ -60,30 +60,29 @@ IndexBuildTest.pauseIndexBuilds(secondary);
 // Build and hang on the second index. This should be run in the background if we pause index
 // builds on the primary because the createIndexes command will block.
 const coll = primaryDB.getCollection(collName);
-const createIdx =
-    IndexBuildTest.startIndexBuild(primary, coll.getFullName(), {j: 1}, {name: secondIndexName});
+const createIdx = IndexBuildTest.startIndexBuild(primary, coll.getFullName(), {j: 1}, {name: secondIndexName});
 
 // Wait for index builds to start on the secondary.
 const opId = IndexBuildTest.waitForIndexBuildToStart(secondaryDB);
-jsTestLog('Index builds started on secondary. Op ID of one of the builds: ' + opId);
+jsTestLog("Index builds started on secondary. Op ID of one of the builds: " + opId);
 
 // Retry until the oplog applier is done with the entry, and the index is visible to listIndexes.
 // waitForIndexBuildToStart does not ensure this.
-var res;
-var indexes;
+let res;
+let indexes;
 assert.soon(
-    function() {
+    function () {
         // Check the listIndexes() output.
-        res = assert.commandWorked(
-            secondaryDB.runCommand({listIndexes: collName, includeBuildUUIDs: true}));
+        res = assert.commandWorked(secondaryDB.runCommand({listIndexes: collName, includeBuildUUIDs: true}));
         indexes = res.cursor.firstBatch;
         return 3 == indexes.length;
     },
-    function() {
+    function () {
         return tojson(res);
-    });
+    },
+);
 
-jsTest.log(indexes);
+jsTest.log("indexes: " + JSON.stringify(indexes));
 
 assert.eq(indexes[0].name, "_id_");
 assert.eq(indexes[1].name, "first");
@@ -94,5 +93,7 @@ assert(indexes[2].hasOwnProperty("buildUUID"));
 // Allow the replica set to finish the index build.
 IndexBuildTest.resumeIndexBuilds(secondary);
 createIdx();
+
+replSet.awaitReplication();
 
 replSet.stopSet();

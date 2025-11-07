@@ -27,18 +27,19 @@
 #
 
 global:
+    mod_visibility: pub
     cpp_namespace: "mongo"
     cpp_includes:
         - "mongo/db/server_options.h"
         - "mongo/db/server_options_base.h"
     configs:
-        section: 'General options'
-        source: [ cli, ini, yaml ]
+        section: "General options"
+        source: [cli, ini, yaml]
         initializer:
             register: addClusterAuthModeServerOption
 
 configs:
-    'security.clusterAuthMode':
+    "security.clusterAuthMode":
         description: >-
             Authentication mode used for cluster authentication. Alternatives are
             (keyFile|sendKeyFile|sendX509|x509)

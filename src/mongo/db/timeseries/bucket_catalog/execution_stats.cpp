@@ -31,142 +31,287 @@
 
 #include "mongo/db/server_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/platform/compiler.h"
+
+#include <limits>
 
 namespace mongo::timeseries::bucket_catalog {
+namespace {
+constexpr long long kNumActiveBucketsSentinel = std::numeric_limits<long long>::min();
+
+/**
+ * Adds 'increment' to 'atomicValue' with conditions.
+ * No-op if 'atomicValue' is already set to the sentinel value.
+ * 'increment' can be negative but the result of the addition has to be non-negative.
+ */
+long long addFloored(AtomicWord<long long>& atomicValue, long long increment) {
+    if (MONGO_unlikely(!increment)) {
+        return static_cast<long long>(0);
+    }
+
+    long long current = atomicValue.load();
+    long long result = 0;
+    long long actualIncrement = increment;
+
+    do {
+        if (current == kNumActiveBucketsSentinel) {
+            // No-op if a sentinel value was already set.
+            return static_cast<long long>(0);
+        }
+        // Result cannot be negative.
+        result = std::max(static_cast<long long>(0), current + increment);
+        actualIncrement = result - current;
+    } while (!atomicValue.compareAndSwap(&current, result));
+
+    return actualIncrement;
+}
+}  // namespace
 
 void ExecutionStatsController::incNumActiveBuckets(long long increment) {
-    _collectionStats->numActiveBuckets.fetchAndAddRelaxed(increment);
-    _globalStats->numActiveBuckets.fetchAndAddRelaxed(increment);
+    // Increments the global stats if the collection stats are modified.
+    if (auto actualIncrement = addFloored(_collectionStats->numActiveBuckets, increment)) {
+        dassert(_globalStats != nullptr);
+        tassert(10645100, "numActiveBuckets overflowed", increment == actualIncrement);
+        _globalStats->numActiveBuckets.fetchAndAddRelaxed(increment);
+    }
 }
 
 void ExecutionStatsController::decNumActiveBuckets(long long decrement) {
-    _collectionStats->numActiveBuckets.fetchAndSubtractRelaxed(decrement);
-    _globalStats->numActiveBuckets.fetchAndSubtractRelaxed(decrement);
+    // Decrements the global and collection stats with the same value.
+    if (auto actualIncrement = addFloored(_collectionStats->numActiveBuckets, -decrement)) {
+        dassert(_globalStats != nullptr);
+        addFloored(_globalStats->numActiveBuckets, actualIncrement);
+    }
 }
 
 void ExecutionStatsController::incNumBucketInserts(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketInserts.fetchAndAddRelaxed(increment);
     _globalStats->numBucketInserts.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketUpdates(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketUpdates.fetchAndAddRelaxed(increment);
     _globalStats->numBucketUpdates.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketsOpenedDueToMetadata(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketsOpenedDueToMetadata.fetchAndAddRelaxed(increment);
     _globalStats->numBucketsOpenedDueToMetadata.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketsClosedDueToCount(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketsClosedDueToCount.fetchAndAddRelaxed(increment);
     _globalStats->numBucketsClosedDueToCount.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketsClosedDueToSchemaChange(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketsClosedDueToSchemaChange.fetchAndAddRelaxed(increment);
     _globalStats->numBucketsClosedDueToSchemaChange.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketsClosedDueToSize(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketsClosedDueToSize.fetchAndAddRelaxed(increment);
     _globalStats->numBucketsClosedDueToSize.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketsClosedDueToCachePressure(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketsClosedDueToCachePressure.fetchAndAddRelaxed(increment);
     _globalStats->numBucketsClosedDueToCachePressure.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketsClosedDueToTimeForward(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketsClosedDueToTimeForward.fetchAndAddRelaxed(increment);
     _globalStats->numBucketsClosedDueToTimeForward.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketsClosedDueToMemoryThreshold(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketsClosedDueToMemoryThreshold.fetchAndAddRelaxed(increment);
     _globalStats->numBucketsClosedDueToMemoryThreshold.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketsClosedDueToReopening(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketsClosedDueToReopening.fetchAndAddRelaxed(increment);
     _globalStats->numBucketsClosedDueToReopening.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketsArchivedDueToMemoryThreshold(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketsArchivedDueToMemoryThreshold.fetchAndAddRelaxed(increment);
     _globalStats->numBucketsArchivedDueToMemoryThreshold.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketsArchivedDueToTimeBackward(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketsArchivedDueToTimeBackward.fetchAndAddRelaxed(increment);
     _globalStats->numBucketsArchivedDueToTimeBackward.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumCompressedBucketsConvertedToUnsorted(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numCompressedBucketsConvertedToUnsorted.fetchAndAddRelaxed(increment);
     _globalStats->numCompressedBucketsConvertedToUnsorted.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketsFrozen(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketsFrozen.fetchAndAddRelaxed(increment);
     _globalStats->numBucketsFrozen.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumCommits(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numCommits.fetchAndAddRelaxed(increment);
     _globalStats->numCommits.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumWaits(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numWaits.fetchAndAddRelaxed(increment);
     _globalStats->numWaits.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumMeasurementsCommitted(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numMeasurementsCommitted.fetchAndAddRelaxed(increment);
     _globalStats->numMeasurementsCommitted.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketsReopened(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketsReopened.fetchAndAddRelaxed(increment);
     _globalStats->numBucketsReopened.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketsKeptOpenDueToLargeMeasurements(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketsKeptOpenDueToLargeMeasurements.fetchAndAddRelaxed(increment);
     _globalStats->numBucketsKeptOpenDueToLargeMeasurements.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketFetchesFailed(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketFetchesFailed.fetchAndAddRelaxed(increment);
     _globalStats->numBucketFetchesFailed.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketQueriesFailed(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketQueriesFailed.fetchAndAddRelaxed(increment);
     _globalStats->numBucketQueriesFailed.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketsFetched(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketsFetched.fetchAndAddRelaxed(increment);
     _globalStats->numBucketsFetched.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumBucketsQueried(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numBucketsQueried.fetchAndAddRelaxed(increment);
     _globalStats->numBucketsQueried.fetchAndAddRelaxed(increment);
 }
 
-void ExecutionStatsController::incNumBucketReopeningsFailed(long long increment) {
-    _collectionStats->numBucketReopeningsFailed.fetchAndAddRelaxed(increment);
-    _globalStats->numBucketReopeningsFailed.fetchAndAddRelaxed(increment);
+void ExecutionStatsController::incNumBucketReopeningsFailedDueToEraMismatch(long long increment) {
+    dassert(_globalStats != nullptr);
+    _collectionStats->numBucketReopeningsFailedDueToEraMismatch.fetchAndAddRelaxed(increment);
+    _globalStats->numBucketReopeningsFailedDueToEraMismatch.fetchAndAddRelaxed(increment);
+}
+
+void ExecutionStatsController::incNumBucketReopeningsFailedDueToMalformedIdField(
+    long long increment) {
+    dassert(_globalStats != nullptr);
+    _collectionStats->numBucketReopeningsFailedDueToMalformedIdField.fetchAndAddRelaxed(increment);
+    _globalStats->numBucketReopeningsFailedDueToMalformedIdField.fetchAndAddRelaxed(increment);
+}
+
+void ExecutionStatsController::incNumBucketReopeningsFailedDueToHashCollision(long long increment) {
+    dassert(_globalStats != nullptr);
+    _collectionStats->numBucketReopeningsFailedDueToHashCollision.fetchAndAddRelaxed(increment);
+    _globalStats->numBucketReopeningsFailedDueToHashCollision.fetchAndAddRelaxed(increment);
+}
+
+void ExecutionStatsController::incNumBucketReopeningsFailedDueToMarkedFrozen(long long increment) {
+    dassert(_globalStats != nullptr);
+    _collectionStats->numBucketReopeningsFailedDueToMarkedFrozen.fetchAndAddRelaxed(increment);
+    _globalStats->numBucketReopeningsFailedDueToMarkedFrozen.fetchAndAddRelaxed(increment);
+}
+
+void ExecutionStatsController::incNumBucketReopeningsFailedDueToValidator(long long increment) {
+    dassert(_globalStats != nullptr);
+    _collectionStats->numBucketReopeningsFailedDueToValidator.fetchAndAddRelaxed(increment);
+    _globalStats->numBucketReopeningsFailedDueToValidator.fetchAndAddRelaxed(increment);
+}
+
+void ExecutionStatsController::incNumBucketReopeningsFailedDueToMarkedClosed(long long increment) {
+    dassert(_globalStats != nullptr);
+    _collectionStats->numBucketReopeningsFailedDueToMarkedClosed.fetchAndAddRelaxed(increment);
+    _globalStats->numBucketReopeningsFailedDueToMarkedClosed.fetchAndAddRelaxed(increment);
+}
+
+void ExecutionStatsController::incNumBucketReopeningsFailedDueToMinMaxCalculation(
+    long long increment) {
+    dassert(_globalStats != nullptr);
+    _collectionStats->numBucketReopeningsFailedDueToMinMaxCalculation.fetchAndAddRelaxed(increment);
+    _globalStats->numBucketReopeningsFailedDueToMinMaxCalculation.fetchAndAddRelaxed(increment);
+}
+
+void ExecutionStatsController::incNumBucketReopeningsFailedDueToSchemaGeneration(
+    long long increment) {
+    dassert(_globalStats != nullptr);
+    _collectionStats->numBucketReopeningsFailedDueToSchemaGeneration.fetchAndAddRelaxed(increment);
+    _globalStats->numBucketReopeningsFailedDueToSchemaGeneration.fetchAndAddRelaxed(increment);
+}
+
+void ExecutionStatsController::incNumBucketReopeningsFailedDueToUncompressedTimeColumn(
+    long long increment) {
+    dassert(_globalStats != nullptr);
+    _collectionStats->numBucketReopeningsFailedDueToUncompressedTimeColumn.fetchAndAddRelaxed(
+        increment);
+    _globalStats->numBucketReopeningsFailedDueToUncompressedTimeColumn.fetchAndAddRelaxed(
+        increment);
+}
+
+void ExecutionStatsController::incNumBucketReopeningsFailedDueToCompressionFailure(
+    long long increment) {
+    dassert(_globalStats != nullptr);
+    _collectionStats->numBucketReopeningsFailedDueToCompressionFailure.fetchAndAddRelaxed(
+        increment);
+    _globalStats->numBucketReopeningsFailedDueToCompressionFailure.fetchAndAddRelaxed(increment);
+}
+
+void ExecutionStatsController::incNumBucketReopeningsFailedDueToWriteConflict(long long increment) {
+    dassert(_globalStats != nullptr);
+    _collectionStats->numBucketReopeningsFailedDueToWriteConflict.fetchAndAddRelaxed(increment);
+    _globalStats->numBucketReopeningsFailedDueToWriteConflict.fetchAndAddRelaxed(increment);
 }
 
 void ExecutionStatsController::incNumDuplicateBucketsReopened(long long increment) {
+    dassert(_globalStats != nullptr);
     _collectionStats->numDuplicateBucketsReopened.fetchAndAddRelaxed(increment);
     _globalStats->numDuplicateBucketsReopened.fetchAndAddRelaxed(increment);
+}
+
+void ExecutionStatsController::incNumBucketDocumentsTooLargeInsert(long long increment) {
+    dassert(_globalStats != nullptr);
+    _collectionStats->numBucketDocumentsTooLargeInsert.fetchAndAddRelaxed(increment);
+    _globalStats->numBucketDocumentsTooLargeInsert.fetchAndAddRelaxed(increment);
+}
+
+void ExecutionStatsController::incNumBucketDocumentsTooLargeUpdate(long long increment) {
+    dassert(_globalStats != nullptr);
+    _collectionStats->numBucketDocumentsTooLargeUpdate.fetchAndAddRelaxed(increment);
+    _globalStats->numBucketDocumentsTooLargeUpdate.fetchAndAddRelaxed(increment);
 }
 
 void appendExecutionStatsToBuilder(const ExecutionStats& stats, BSONObjBuilder& builder) {
@@ -211,8 +356,33 @@ void appendExecutionStatsToBuilder(const ExecutionStats& stats, BSONObjBuilder& 
     builder.appendNumber("numBucketsQueried", stats.numBucketsQueried.load());
     builder.appendNumber("numBucketFetchesFailed", stats.numBucketFetchesFailed.load());
     builder.appendNumber("numBucketQueriesFailed", stats.numBucketQueriesFailed.load());
-    builder.appendNumber("numBucketReopeningsFailed", stats.numBucketReopeningsFailed.load());
+    builder.appendNumber("numBucketReopeningsFailedDueToEraMismatch",
+                         stats.numBucketReopeningsFailedDueToEraMismatch.load());
+    builder.appendNumber("numBucketReopeningsFailedDueToMalformedIdField",
+                         stats.numBucketReopeningsFailedDueToMalformedIdField.load());
+    builder.appendNumber("numBucketReopeningsFailedDueToHashCollision",
+                         stats.numBucketReopeningsFailedDueToHashCollision.load());
+    builder.appendNumber("numBucketReopeningsFailedDueToMarkedFrozen",
+                         stats.numBucketReopeningsFailedDueToMarkedFrozen.load());
+    builder.appendNumber("numBucketReopeningsFailedDueToValidator",
+                         stats.numBucketReopeningsFailedDueToValidator.load());
+    builder.appendNumber("numBucketReopeningsFailedDueToMarkedClosed",
+                         stats.numBucketReopeningsFailedDueToMarkedClosed.load());
+    builder.appendNumber("numBucketReopeningsFailedDueToMinMaxCalculation",
+                         stats.numBucketReopeningsFailedDueToMinMaxCalculation.load());
+    builder.appendNumber("numBucketReopeningsFailedDueToSchemaGeneration",
+                         stats.numBucketReopeningsFailedDueToSchemaGeneration.load());
+    builder.appendNumber("numBucketReopeningsFailedDueToUncompressedTimeColumn",
+                         stats.numBucketReopeningsFailedDueToUncompressedTimeColumn.load());
+    builder.appendNumber("numBucketReopeningsFailedDueToCompressionFailure",
+                         stats.numBucketReopeningsFailedDueToCompressionFailure.load());
+    builder.appendNumber("numBucketReopeningsFailedDueToWriteConflict",
+                         stats.numBucketReopeningsFailedDueToWriteConflict.load());
     builder.appendNumber("numDuplicateBucketsReopened", stats.numDuplicateBucketsReopened.load());
+    builder.appendNumber("numBucketDocumentsTooLargeInsert",
+                         stats.numBucketDocumentsTooLargeInsert.load());
+    builder.appendNumber("numBucketDocumentsTooLargeUpdate",
+                         stats.numBucketDocumentsTooLargeUpdate.load());
 }
 
 void addCollectionExecutionCounters(ExecutionStatsController& stats,
@@ -246,16 +416,42 @@ void addCollectionExecutionCounters(ExecutionStatsController& stats,
     stats.incNumBucketsQueried(collStats.numBucketsQueried.load());
     stats.incNumBucketFetchesFailed(collStats.numBucketFetchesFailed.load());
     stats.incNumBucketQueriesFailed(collStats.numBucketQueriesFailed.load());
-    stats.incNumBucketReopeningsFailed(collStats.numBucketReopeningsFailed.load());
+    stats.incNumBucketReopeningsFailedDueToEraMismatch(
+        collStats.numBucketReopeningsFailedDueToEraMismatch.load());
+    stats.incNumBucketReopeningsFailedDueToMalformedIdField(
+        collStats.numBucketReopeningsFailedDueToMalformedIdField.load());
+    stats.incNumBucketReopeningsFailedDueToHashCollision(
+        collStats.numBucketReopeningsFailedDueToHashCollision.load());
+    stats.incNumBucketReopeningsFailedDueToMarkedFrozen(
+        collStats.numBucketReopeningsFailedDueToMarkedFrozen.load());
+    stats.incNumBucketReopeningsFailedDueToValidator(
+        collStats.numBucketReopeningsFailedDueToValidator.load());
+    stats.incNumBucketReopeningsFailedDueToMarkedClosed(
+        collStats.numBucketReopeningsFailedDueToMarkedClosed.load());
+    stats.incNumBucketReopeningsFailedDueToMinMaxCalculation(
+        collStats.numBucketReopeningsFailedDueToMinMaxCalculation.load());
+    stats.incNumBucketReopeningsFailedDueToSchemaGeneration(
+        collStats.numBucketReopeningsFailedDueToSchemaGeneration.load());
+    stats.incNumBucketReopeningsFailedDueToUncompressedTimeColumn(
+        collStats.numBucketReopeningsFailedDueToUncompressedTimeColumn.load());
+    stats.incNumBucketReopeningsFailedDueToCompressionFailure(
+        collStats.numBucketReopeningsFailedDueToCompressionFailure.load());
+    stats.incNumBucketReopeningsFailedDueToWriteConflict(
+        collStats.numBucketReopeningsFailedDueToWriteConflict.load());
     stats.incNumDuplicateBucketsReopened(collStats.numDuplicateBucketsReopened.load());
+    stats.incNumBucketDocumentsTooLargeInsert(collStats.numBucketDocumentsTooLargeInsert.load());
+    stats.incNumBucketDocumentsTooLargeUpdate(collStats.numBucketDocumentsTooLargeUpdate.load());
 }
 
 void addCollectionExecutionGauges(ExecutionStats& stats, const ExecutionStats& collStats) {
     stats.numActiveBuckets.fetchAndAdd(collStats.numActiveBuckets.load());
 }
 
-void removeCollectionExecutionGauges(ExecutionStats& stats, const ExecutionStats& collStats) {
-    stats.numActiveBuckets.fetchAndSubtract(collStats.numActiveBuckets.load());
+void removeCollectionExecutionGauges(ExecutionStats& stats, ExecutionStats& collStats) {
+    // Set the collection stats to a sentinel value to prevent modifications by concurrent threads
+    // which are still holding the shared pointer.
+    auto collNumActiveBuckets = collStats.numActiveBuckets.swap(kNumActiveBucketsSentinel);
+    stats.numActiveBuckets.fetchAndSubtract(collNumActiveBuckets);
 }
 
 }  // namespace mongo::timeseries::bucket_catalog

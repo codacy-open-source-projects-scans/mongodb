@@ -27,22 +27,21 @@
  *    it in the license file.
  */
 
-#include <memory>
+#include "mongo/crypto/fle_stats.h"
 
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/crypto/fle_stats.h"
+#include "mongo/bson/json.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/testing_options_gen.h"
 #include "mongo/util/tick_source_mock.h"
+
+#include <memory>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -73,19 +72,19 @@ public:
     OperationContext* opCtx;
 
     CompactStats zeroStats = CompactStats::parse(
-        IDLParserContext("compactStats"),
         BSON("ecoc" << BSON("deleted" << 0 << "read" << 0) << "esc"
-                    << BSON("deleted" << 0 << "inserted" << 0 << "read" << 0 << "updated" << 0)));
+                    << BSON("deleted" << 0 << "inserted" << 0 << "read" << 0 << "updated" << 0)),
+        IDLParserContext("compactStats"));
 
     CompactStats compactStats = CompactStats::parse(
-        IDLParserContext("compactStats"),
         BSON("ecoc" << BSON("deleted" << 1 << "read" << 1) << "esc"
-                    << BSON("deleted" << 1 << "inserted" << 1 << "read" << 1 << "updated" << 1)));
+                    << BSON("deleted" << 1 << "inserted" << 1 << "read" << 1 << "updated" << 1)),
+        IDLParserContext("compactStats"));
 
     CleanupStats cleanupStats = CleanupStats::parse(
-        IDLParserContext("cleanupStats"),
         BSON("ecoc" << BSON("deleted" << 1 << "read" << 1) << "esc"
-                    << BSON("deleted" << 1 << "inserted" << 1 << "read" << 1 << "updated" << 1)));
+                    << BSON("deleted" << 1 << "inserted" << 1 << "read" << 1 << "updated" << 1)),
+        IDLParserContext("cleanupStats"));
 
     std::unique_ptr<TickSourceMock<Milliseconds>> tickSource;
     std::unique_ptr<FLEStatusSection> instance;
@@ -94,7 +93,7 @@ public:
 };
 
 TEST_F(FLEStatsTest, NoopStats) {
-    ASSERT_FALSE(instance->includeByDefault());
+    ASSERT_TRUE(instance->includeByDefault());
 
     auto obj = instance->generateSection(opCtx, BSONElement());
     ASSERT_TRUE(obj.hasField("compactStats"));
@@ -137,7 +136,7 @@ TEST_F(FLEStatsTest, BinaryEmuStatsAreEmptyWithoutTesting) {
         tracker.recordSuboperation();
     }
 
-    ASSERT_FALSE(instance->includeByDefault());
+    ASSERT_TRUE(instance->includeByDefault());
 
     auto obj = instance->generateSection(opCtx, BSONElement());
     ASSERT_TRUE(obj.hasField("compactStats"));
@@ -170,6 +169,124 @@ TEST_F(FLEStatsTest, BinaryEmuStatsArePopulatedWithTesting) {
     ASSERT_EQ(1, obj["emuBinaryStats"]["suboperations"].Long());
     ASSERT_EQ(100, obj["emuBinaryStats"]["totalMillis"].Long());
 }
+
+TEST_F(FLEStatsTest, IndexTypeStats) {
+    struct IndexTypeCounters {
+        int64_t equality = 0;
+        int64_t unindexed = 0;
+        int64_t range = 0;
+        int64_t rangePreview = 0;
+        int64_t substringPreview = 0;
+        int64_t suffixPreview = 0;
+        int64_t prefixPreview = 0;
+    };
+
+    auto assertCounters = [this](const IndexTypeCounters& expected) {
+        auto obj = instance->generateSection(opCtx, BSONElement());
+        auto actual = FLEIndexTypeStats::parse(obj["indexTypeStats"].Obj());
+        ASSERT_EQ(actual.getEquality(), expected.equality);
+        ASSERT_EQ(actual.getUnindexed(), expected.unindexed);
+        ASSERT_EQ(actual.getRange(), expected.range);
+        ASSERT_EQ(actual.getRangePreview(), expected.rangePreview);
+        ASSERT_EQ(actual.getSubstringPreview(), expected.substringPreview);
+        ASSERT_EQ(actual.getSuffixPreview(), expected.suffixPreview);
+        ASSERT_EQ(actual.getPrefixPreview(), expected.prefixPreview);
+    };
+
+    const auto buildConfig = [](const StringMap<int64_t>& spec) {
+        EncryptedFieldConfig efc;
+        std::vector<EncryptedField> fields;
+        const auto keyId = UUID::gen();
+
+        for (auto& [indexType, count] : spec) {
+            if (indexType == "unindexed") {
+                for (auto i = count; i > 0; i--) {
+                    fields.emplace_back(keyId, indexType);
+                }
+            } else if (indexType == "multi") {
+                for (auto i = count; i > 0; i--) {
+                    fields.emplace_back(keyId, indexType);
+
+                    std::vector<QueryTypeConfig> queries;
+                    queries.push_back(
+                        QueryTypeConfig::parse(fromjson(R"({"queryType": "suffixPreview"})")));
+                    queries.push_back(
+                        QueryTypeConfig::parse(fromjson(R"({"queryType": "prefixPreview"})")));
+
+                    fields.back().setQueries(
+                        std::variant<std::vector<QueryTypeConfig>, QueryTypeConfig>(
+                            std::move(queries)));
+                }
+            } else {
+                for (auto i = count; i > 0; i--) {
+                    fields.emplace_back(keyId, indexType);
+                    auto qtc =
+                        QueryTypeConfig::parse(fromjson("{\"queryType\": \"" + indexType + "\"}"));
+                    fields.back().setQueries(
+                        std::variant<std::vector<QueryTypeConfig>, QueryTypeConfig>(
+                            std::move(qtc)));
+                }
+            }
+        }
+        efc.setFields(std::move(fields));
+        return efc;
+    };
+
+    ASSERT_TRUE(instance->includeByDefault());
+
+    IndexTypeCounters expected;
+    assertCounters(expected);
+
+    auto efc1 = buildConfig({{"unindexed", 4}, {"equality", 2}, {"multi", 3}});
+    instance->updateIndexTypeStatsOnRegisterCollection(efc1);
+    expected.unindexed++;
+    expected.equality++;
+    expected.suffixPreview++;
+    expected.prefixPreview++;
+    assertCounters(expected);
+
+    auto efc2 = buildConfig({{"range", 3}, {"rangePreview", 1}, {"substringPreview", 2}});
+    instance->updateIndexTypeStatsOnRegisterCollection(efc2);
+    expected.range++;
+    expected.rangePreview++;
+    expected.substringPreview++;
+    assertCounters(expected);
+
+    auto efc3 = buildConfig({{"suffixPreview", 1}, {"multi", 1}});
+    instance->updateIndexTypeStatsOnRegisterCollection(efc3);
+    expected.suffixPreview++;
+    expected.prefixPreview++;
+    assertCounters(expected);
+
+    instance->updateIndexTypeStatsOnDeregisterCollection(efc2);
+    expected.range--;
+    expected.rangePreview--;
+    expected.substringPreview--;
+    assertCounters(expected);
+
+    instance->updateIndexTypeStatsOnRegisterCollection(efc3);
+    expected.suffixPreview++;
+    expected.prefixPreview++;
+    assertCounters(expected);
+
+    instance->updateIndexTypeStatsOnDeregisterCollection(efc3);
+    expected.suffixPreview--;
+    expected.prefixPreview--;
+    assertCounters(expected);
+
+    instance->updateIndexTypeStatsOnDeregisterCollection(efc1);
+    expected.unindexed--;
+    expected.equality--;
+    expected.suffixPreview--;
+    expected.prefixPreview--;
+    assertCounters(expected);
+
+    instance->updateIndexTypeStatsOnDeregisterCollection(efc3);
+    expected.suffixPreview--;
+    expected.prefixPreview--;
+    assertCounters(expected);
+}
+
 
 }  // namespace
 }  // namespace mongo

@@ -31,9 +31,11 @@
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
+#include "mongo/db/version_context.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 
-namespace mongo {
+namespace MONGO_MOD_PUB mongo {
 
 class ServiceContext;
 
@@ -111,7 +113,8 @@ StatusWith<int> validateConfigForInitiate(ReplicationCoordinatorExternalState* e
  *
  * Returns an indicative error on validation failure.
  */
-Status validateConfigForReconfig(const ReplSetConfig& oldConfig,
+Status validateConfigForReconfig(const VersionContext& vCtx,
+                                 const ReplSetConfig& oldConfig,
                                  const ReplSetConfig& newConfig,
                                  bool force,
                                  bool allowSplitHorizonIP);
@@ -131,4 +134,4 @@ StatusWith<int> validateConfigForHeartbeatReconfig(
     HostAndPort ownHost,
     ServiceContext* ctx);
 }  // namespace repl
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

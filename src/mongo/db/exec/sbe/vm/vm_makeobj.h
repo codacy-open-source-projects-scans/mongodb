@@ -29,6 +29,8 @@
 
 #pragma once
 
+#include "mongo/util/modules.h"
+
 #ifndef MONGO_SBE_VM_MAKEOBJ_H_WHITELIST
 // This file contains a usage of anonymous namespaces which are very bad to have in headers since
 // they can lead to ODR violations. Unfortunately when removed, it leads to a significant
@@ -40,11 +42,9 @@
 //  * This must be the last header included
 //  * The #define MONGO_SBE_VM_MAKEOBJ_H_WHITELIST must be after all other headers
 //
-// Using #warning rather than #error to play nicely with opening this header in  clangd.
+// Using #warning rather than #error to play nicely with opening this header in clangd.
 #warning "vm_makeobj.h is only allowed to be included in whitelisted cpp files. See above comment"
 #endif
-
-#include <limits>
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -54,6 +54,8 @@
 #include "mongo/db/exec/sbe/vm/makeobj_writers.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/platform/compiler.h"
+
+#include <limits>
 
 namespace mongo::sbe::vm {
 namespace {  // NOLINT(google-build-namespaces) See WHITELIST comment above.
@@ -146,7 +148,7 @@ private:
         using Value = value::Value;
 
         const auto& fields = spec->fields;
-        const auto* actions = !spec->actions.empty() ? &spec->actions[0] : nullptr;
+        const auto* actions = spec->getActionsData();
 
         const bool isClosed = spec->fieldsScopeIsClosed();
         const bool recordVisits = !spec->mandatoryFields.empty();
@@ -356,7 +358,9 @@ private:
         size_t argIdx = lambdaArg.argIdx;
         auto [_, lamTag, lamVal] = getArg(argIdx);
 
-        tassert(7103506, "Expected arg to be LocalLambda", lamTag == value::TypeTags::LocalLambda);
+        tassert(7103506,
+                "Expected arg to be LocalLambda",
+                lamTag == value::TypeTags::LocalOneArgLambda);
         int64_t lamPos = value::bitcastTo<int64_t>(lamVal);
 
         auto [outputOwned, outputTag, outputVal] = invokeLambda(lamPos, tag, val);

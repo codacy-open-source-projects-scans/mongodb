@@ -27,11 +27,13 @@
  *    it in the license file.
  */
 
-#include "mongo/transport/message_compressor_base.h"
+#pragma once
 
+#include "mongo/transport/message_compressor_base.h"
+#include "mongo/util/modules.h"
 namespace mongo {
 
-class NoopMessageCompressor final : public MessageCompressorBase {
+class MONGO_MOD_PUBLIC NoopMessageCompressor final : public MessageCompressorBase {
 public:
     NoopMessageCompressor() : MessageCompressorBase(MessageCompressor::kNoop) {}
 

@@ -35,13 +35,17 @@
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/storage_options.h"
 
+#include <algorithm>
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 namespace mongo::sbe {
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // Class LookupHashTableIter
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void LookupHashTableIter::initSearchArray() {
-    invariant(_outerKeyIsArray);
+    tassert(11093505, "Outer key is not an array", _outerKeyIsArray);
     HashTableType::const_iterator hashTableMatchIter;
 
     value::ArrayEnumerator enumerator(_outerKeyTag, _outerKeyVal);
@@ -70,7 +74,7 @@ void LookupHashTableIter::initSearchArray() {
 }  // LookupHashTableIter::initSearchArray
 
 void LookupHashTableIter::initSearchScalar() {
-    invariant(!_outerKeyIsArray);
+    tassert(11093506, "Outer key is not a scalar", !_outerKeyIsArray);
     HashTableType::const_iterator hashTableMatchIter;
 
     _iterProbeKey.reset(0, false, _outerKeyTag, _outerKeyVal);
@@ -152,10 +156,10 @@ std::tuple<bool, value::TypeTags, value::Value> LookupHashTable::normalizeString
 }
 
 bool LookupHashTable::shouldCheckDiskSpace() {
-    _spilledBytesSinceLastCheck += _hashLookupStats.spilledBuffBytesOverAllRecords +
-        _hashLookupStats.spilledHtBytesOverAllRecords - _totalSpilledBytes;
-    _totalSpilledBytes = _hashLookupStats.spilledBuffBytesOverAllRecords +
-        _hashLookupStats.spilledHtBytesOverAllRecords;
+    long long currentTotalSpilledBytes = _hashLookupStats.spillingBuffStats.getSpilledBytes() +
+        _hashLookupStats.spillingHtStats.getSpilledBytes();
+    _spilledBytesSinceLastCheck += currentTotalSpilledBytes - _totalSpilledBytes;
+    _totalSpilledBytes = currentTotalSpilledBytes;
 
     if (_spilledBytesSinceLastCheck > kMaxSpilledBytesForDiskSpaceCheck) {
         _spilledBytesSinceLastCheck = 0;
@@ -208,7 +212,9 @@ void LookupHashTable::addHashTableEntry(value::SlotAccessor* keyAccessor, size_t
             key.reset(0, true, tagKey, valKey);
 
             auto [it, inserted] = _memoryHt->try_emplace(std::move(key));
-            invariant(inserted);
+            tassert(11094720,
+                    "Failed to emplace materialized key into the hash table (key already exists)",
+                    inserted);
             htIt = it;
             htIt->second.push_back(valueIndex);
             _computedTotalMemUsage = newMemUsage;
@@ -225,13 +231,10 @@ void LookupHashTable::addHashTableEntry(value::SlotAccessor* keyAccessor, size_t
     } else {
         // The key is already present in '_memoryHt' so the memory will only grow by one size_t. If
         // we reach the memory limit, the key/value in '_memoryHt' will be evicted from memory and
-        // spilled to
-        // '_recordStoreHt' along with the new index.
-        const long long newMemUsage = _computedTotalMemUsage + sizeof(size_t);
-        if (newMemUsage <= _memoryUseInBytesBeforeSpill) {
-            htIt->second.push_back(valueIndex);
-            _computedTotalMemUsage = newMemUsage;
-        } else {
+        // spilled to '_recordStoreHt' along with the new index.
+        htIt->second.push_back(valueIndex);
+        _computedTotalMemUsage += sizeof(size_t);
+        if (_computedTotalMemUsage > _memoryUseInBytesBeforeSpill) {
             if (!hasSpilledHtToDisk()) {
                 makeTemporaryRecordStore();
             }
@@ -247,6 +250,8 @@ void LookupHashTable::addHashTableEntry(value::SlotAccessor* keyAccessor, size_t
             _memoryHt->erase(htIt);
         }
     }
+    _hashLookupStats.peakTrackedMemBytes = std::max(_hashLookupStats.peakTrackedMemBytes,
+                                                    static_cast<uint64_t>(_computedTotalMemUsage));
 }  // LookupHashTable::addHashTableEntry
 
 void LookupHashTable::spillBufferedValueToDisk(SpillingStore* rs,
@@ -265,16 +270,18 @@ void LookupHashTable::spillBufferedValueToDisk(SpillingStore* rs,
 
     rs->upsertToRecordStore(_opCtx, rid, buf, false);
 
-    _hashLookupStats.spilledBuffRecords++;
     // Add size of record ID + size of buffer.
     int64_t spillToDiskBytes = sizeof(size_t) + buf.len();
-    _hashLookupStats.spilledBuffBytesOverAllRecords += spillToDiskBytes;
 
     auto& opDebug = CurOp::get(_opCtx)->debug();
     opDebug.hashLookupSpillToDisk += 1;
     opDebug.hashLookupSpillToDiskBytes += spillToDiskBytes;
-    lookupPushdownCounters.incrementLookupCountersPerSpilling(1 /* spillToDisk */,
-                                                              spillToDiskBytes);
+
+    auto spilledDataStorageIncrease = _hashLookupStats.spillingBuffStats.updateSpillingStats(
+        1, spillToDiskBytes, 1, _recordStoreBuf->storageSize(_opCtx));
+    lookupPushdownCounters.incrementPerSpilling(
+        1 /* spills */, spillToDiskBytes, 1, spilledDataStorageIncrease);
+    _recordStoreBuf->updateSpillStorageStatsForOperation(_opCtx);
 }
 
 size_t LookupHashTable::bufferValueOrSpill(value::MaterializedRow& value) {
@@ -282,6 +289,8 @@ size_t LookupHashTable::bufferValueOrSpill(value::MaterializedRow& value) {
     if (!hasSpilledBufToDisk() && newMemUsage <= _memoryUseInBytesBeforeSpill) {
         _buffer.emplace_back(std::move(value));
         _computedTotalMemUsage = newMemUsage;
+        _hashLookupStats.peakTrackedMemBytes = std::max(
+            _hashLookupStats.peakTrackedMemBytes, static_cast<uint64_t>(_computedTotalMemUsage));
     } else {
         if (!hasSpilledBufToDisk()) {
             makeTemporaryRecordStore();
@@ -307,16 +316,14 @@ int64_t LookupHashTable::writeIndicesToRecordStore(SpillingStore* rs,
     auto [rid, typeBits] = serializeKeyForRecordStore(key);
 
     rs->upsertToRecordStore(_opCtx, rid, buf, typeBits, update);
+
+    int64_t spilledBytes = value.size() * sizeof(size_t);
     if (!update) {
-        _hashLookupStats.spilledHtRecords++;
         // Add the size of key (which comprises of the memory usage for the key + its type bits),
         // as well as the size of one integer to store the length of indices vector in the value.
-        _hashLookupStats.spilledHtBytesOverAllRecords +=
-            rid.memUsage() + typeBits.getSize() + sizeof(size_t);
+        spilledBytes += rid.memUsage() + typeBits.getSize() + sizeof(size_t);
     }
     // Add the size of indices vector used in the hash-table value to the accounting.
-    int64_t spilledBytes = value.size() * sizeof(size_t);
-    _hashLookupStats.spilledHtBytesOverAllRecords += spilledBytes;
     return spilledBytes;
 }
 
@@ -336,12 +343,11 @@ void LookupHashTable::spillIndicesToRecordStore(SpillingStore* rs,
     auto valFromRs = readIndicesFromRecordStore(rs, tagKeyColl, valKeyColl);
 
     auto update = false;
+    int64_t alreadySpilledBytes = 0;
     if (valFromRs) {
+        alreadySpilledBytes = valFromRs->size() * sizeof(size_t);
         valFromRs->insert(valFromRs->end(), value.begin(), value.end());
         update = true;
-        // As we're updating these records, we'd remove the old size from the accounting. The new
-        // size is added back to the accounting in the call to 'writeIndicesToRecordStore' below.
-        _hashLookupStats.spilledHtBytesOverAllRecords -= value.size();
     } else {
         valFromRs = value;
     }
@@ -349,11 +355,22 @@ void LookupHashTable::spillIndicesToRecordStore(SpillingStore* rs,
     auto spillToDiskBytes =
         writeIndicesToRecordStore(rs, tagKeyColl, valKeyColl, *valFromRs, update);
 
+    tassert(9956400,
+            str::stream() << "Total spilled to disk bytes " << spillToDiskBytes
+                          << " is smaller than already existing bytes on disk "
+                          << alreadySpilledBytes,
+            spillToDiskBytes >= alreadySpilledBytes);
+    spillToDiskBytes -= alreadySpilledBytes;
+
     auto& opDebug = CurOp::get(_opCtx)->debug();
     opDebug.hashLookupSpillToDisk += 1;
     opDebug.hashLookupSpillToDiskBytes += spillToDiskBytes;
-    lookupPushdownCounters.incrementLookupCountersPerSpilling(1 /* spillToDisk */,
-                                                              spillToDiskBytes);
+
+    auto spilledDataStorageIncrease = _hashLookupStats.spillingHtStats.updateSpillingStats(
+        1 /*spills*/, spillToDiskBytes, update ? 0 : 1, _recordStoreHt->storageSize(_opCtx));
+    lookupPushdownCounters.incrementPerSpilling(
+        1 /* spills */, spillToDiskBytes, update ? 0 : 1, spilledDataStorageIncrease);
+    _recordStoreHt->updateSpillStorageStatsForOperation(_opCtx);
 }
 
 void LookupHashTable::makeTemporaryRecordStore() {
@@ -402,12 +419,23 @@ boost::optional<std::pair<value::TypeTags, value::Value>> LookupHashTable::getVa
 }  // HashLookupUnwindStage::getValueAtIndex
 
 void LookupHashTable::reset(bool fromClose) {
-    _memoryUseInBytesBeforeSpill = internalQuerySBELookupApproxMemoryUseInBytesBeforeSpill.load();
+    _memoryUseInBytesBeforeSpill =
+        loadMemoryLimit(StageMemoryLimit::QuerySBELookupApproxMemoryUseInBytesBeforeSpill);
     _memoryHt = boost::none;
+    _computedTotalMemUsage = 0;
+
     if (_recordStoreHt) {
+        if (_opCtx) {
+            _hashLookupStats.spillingHtStats.updateSpilledDataStorageSize(
+                _recordStoreHt->storageSize(_opCtx));
+        }
         _recordStoreHt.reset(nullptr);
     }
     if (_recordStoreBuf) {
+        if (_opCtx) {
+            _hashLookupStats.spillingBuffStats.updateSpilledDataStorageSize(
+                _recordStoreBuf->storageSize(_opCtx));
+        }
         _recordStoreBuf.reset(nullptr);
     }
 
@@ -425,21 +453,34 @@ void LookupHashTable::reset(bool fromClose) {
     _totalSpilledBytes = 0;
 }
 
-void LookupHashTable::doSaveState(bool relinquishCursor) {
-    if (_recordStoreHt) {
-        _recordStoreHt->saveState();
+void LookupHashTable::forceSpill() {
+    if (!_memoryHt) {
+        LOGV2_DEBUG(9916001, 2, "HashLookupStage has finished its execution");
+        return;
     }
-    if (_recordStoreBuf) {
-        _recordStoreBuf->saveState();
-    }
-}
 
-void LookupHashTable::doRestoreState(bool relinquishCursor) {
-    if (_recordStoreHt) {
-        _recordStoreHt->restoreState();
+    if (!hasSpilledHtToDisk()) {
+        makeTemporaryRecordStore();
     }
-    if (_recordStoreBuf) {
-        _recordStoreBuf->restoreState();
+
+    // Every record in the buffer of the inner collection is assigned an index. This index is
+    // used to associate records of the inner collection to those of the outer collection. When
+    // a buffer record is spilled, the index is stored with it. Since the index is increasing as
+    // we read, the first record still in the buffer has index 0.
+    for (size_t spilledValueId = 0; spilledValueId < _buffer.size(); ++spilledValueId) {
+        spillBufferedValueToDisk(_recordStoreBuf.get(), spilledValueId, _buffer[spilledValueId]);
     }
+    _buffer.clear();
+    _buffer.shrink_to_fit();
+
+    for (const auto& [key, value] : *_memoryHt) {
+        auto [tagKey, valKey] = key.getViewOfValue(0);
+        spillIndicesToRecordStore(_recordStoreHt.get(), tagKey, valKey, value);
+    }
+    _memoryHt.reset();
+    _computedTotalMemUsage = 0;
+
+    // Initialise the _memoryHt again to make sure it is valid;
+    init();
 }
 }  // namespace mongo::sbe

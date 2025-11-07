@@ -27,34 +27,34 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
+#include "mongo/db/matcher/expression_text.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/fts/fts_language.h"
 #include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/fts/fts_util.h"
 #include "mongo/db/index/fts_access_method.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/matcher/expression_text.h"
-#include "mongo/db/shard_role.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace mongo {
 
@@ -69,7 +69,7 @@ const FTSAccessMethod* validateFTSIndex(OperationContext* opCtx, const Namespace
             // only trying to safely grab the index metadata. Callers are expected to validate that
             // we obtain the correct shard version, storage snapshot, etc. with their own lock
             // acquisitions.
-            AcquisitionPrerequisites::kPretendUnsharded,
+            PlacementConcern::kPretendUnsharded,
             repl::ReadConcernArgs::get(opCtx),
             AcquisitionPrerequisites::kRead));
 
@@ -92,7 +92,6 @@ const FTSAccessMethod* validateFTSIndex(OperationContext* opCtx, const Namespace
     uassert(ErrorCodes::IndexNotFound,
             "more than one text index found for $text query",
             idxMatches.size() < 2);
-    invariant(idxMatches.size() == 1);
 
     const IndexDescriptor* index = idxMatches[0];
     const FTSAccessMethod* fam = static_cast<const FTSAccessMethod*>(

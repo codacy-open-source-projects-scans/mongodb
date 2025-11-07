@@ -27,14 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <list>
-#include <map>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -43,14 +35,20 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_planner_test_fixture.h"
 #include "mongo/db/query/query_planner_test_lib.h"
-#include "mongo/db/query/query_solution.h"
-#include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace {
 using namespace mongo;
@@ -73,8 +71,7 @@ protected:
     /*
      * Builds a pipeline from raw input.
      */
-    std::unique_ptr<Pipeline, PipelineDeleter> buildTestPipeline(
-        const std::vector<BSONObj>& rawPipeline) {
+    std::unique_ptr<Pipeline> buildTestPipeline(const std::vector<BSONObj>& rawPipeline) {
         expCtx->addResolvedNamespaces({kSecondaryNamespace});
         return Pipeline::parse(rawPipeline, expCtx);
     }
@@ -167,7 +164,7 @@ TEST_F(QueryPlannerPipelinePushdownTest, PushdownOfOneGroupWithMultipleAccumulat
 
 TEST_F(QueryPlannerPipelinePushdownTest, PushdownOfASingleLookup) {
     const std::vector<BSONObj> rawPipeline = {
-        fromjson("{$lookup: {from: '" + kSecondaryNamespace.coll().toString() +
+        fromjson("{$lookup: {from: '" + std::string{kSecondaryNamespace.coll()} +
                  "', localField: 'x', foreignField: 'y', as: 'out'}}"),
     };
     auto pipeline = buildTestPipeline(rawPipeline);
@@ -194,9 +191,9 @@ TEST_F(QueryPlannerPipelinePushdownTest, PushdownOfASingleLookup) {
 
 TEST_F(QueryPlannerPipelinePushdownTest, PushdownOfTwoLookups) {
     const std::vector<BSONObj> rawPipeline = {
-        fromjson("{$lookup: {from: '" + kSecondaryNamespace.coll().toString() +
+        fromjson("{$lookup: {from: '" + std::string{kSecondaryNamespace.coll()} +
                  "', localField: 'x', foreignField: 'y', as: 'out'}}"),
-        fromjson("{$lookup: {from: '" + kSecondaryNamespace.coll().toString() +
+        fromjson("{$lookup: {from: '" + std::string{kSecondaryNamespace.coll()} +
                  "', localField: 'a', foreignField: 'b', as: 'c'}}"),
     };
     auto pipeline = buildTestPipeline(rawPipeline);
@@ -226,10 +223,10 @@ TEST_F(QueryPlannerPipelinePushdownTest, PushdownOfTwoLookups) {
 
 TEST_F(QueryPlannerPipelinePushdownTest, PushdownOfTwoLookupsAndTwoGroups) {
     const std::vector<BSONObj> rawPipeline = {
-        fromjson("{$lookup: {from: '" + kSecondaryNamespace.coll().toString() +
+        fromjson("{$lookup: {from: '" + std::string{kSecondaryNamespace.coll()} +
                  "', localField: 'x', foreignField: 'y', as: 'out'}}"),
         fromjson("{$group: {_id: '$out', count: {$sum: '$x'}}}"),
-        fromjson("{$lookup: {from: '" + kSecondaryNamespace.coll().toString() +
+        fromjson("{$lookup: {from: '" + std::string{kSecondaryNamespace.coll()} +
                  "', localField: 'a', foreignField: 'b', as: 'c'}}"),
         fromjson("{$group: {_id: '$c', count: {$min: '$count'}}}"),
     };

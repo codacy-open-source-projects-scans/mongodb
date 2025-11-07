@@ -29,15 +29,26 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/flat_hash_set.h>
-#include <absl/hash/hash.h>
-#include <absl/meta/type_traits.h>
-#include <absl/strings/string_view.h>
+#include "mongo/base/string_data.h"
+#include "mongo/db/exec/sbe/stages/stages.h"
+#include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/exec/trial_period_utils.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
+#include "mongo/db/query/multiple_collection_accessor.h"
+#include "mongo/db/query/plan_yield_policy_sbe.h"
+#include "mongo/db/query/stage_builder/sbe/analysis.h"
+#include "mongo/db/query/stage_builder/sbe/builder_data.h"
+#include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
+#include "mongo/db/query/stage_builder/stage_builder.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/str.h"
+
 #include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
 #include <cstddef>
 #include <functional>
 #include <iterator>
@@ -45,34 +56,15 @@
 #include <string>
 #include <type_traits>
 #include <utility>
-#include <variant>
 #include <vector>
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/ordering.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/exec/sbe/expressions/expression.h"
-#include "mongo/db/exec/sbe/stages/collection_helpers.h"
-#include "mongo/db/exec/sbe/stages/plan_stats.h"
-#include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/exec/trial_period_utils.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/canonical_query.h"
-#include "mongo/db/query/multiple_collection_accessor.h"
-#include "mongo/db/query/plan_yield_policy_sbe.h"
-#include "mongo/db/query/query_solution.h"
-#include "mongo/db/query/shard_filterer_factory_interface.h"
-#include "mongo/db/query/stage_builder/sbe/analysis.h"
-#include "mongo/db/query/stage_builder/sbe/builder_data.h"
-#include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
-#include "mongo/db/query/stage_builder/sbe/type_signature.h"
-#include "mongo/db/query/stage_builder/stage_builder.h"
-#include "mongo/db/storage/key_string/key_string.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/flat_hash_set.h>
+#include <absl/hash/hash.h>
+#include <absl/meta/type_traits.h>
+#include <absl/strings/string_view.h>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo::stage_builder {
 
@@ -109,7 +101,7 @@ void prepareSlotBasedExecutableTree(OperationContext* opCtx,
                                     RemoteCursorMap* remoteCursors = nullptr);
 
 std::pair<SbStage, PlanStageData> buildSearchMetadataExecutorSBE(OperationContext* opCtx,
-                                                                 const CanonicalQuery& cq,
+                                                                 const ExpressionContext& expCtx,
                                                                  size_t remoteCursorId,
                                                                  RemoteCursorMap* remoteCursors,
                                                                  PlanYieldPolicySBE* yieldPolicy);
@@ -155,7 +147,7 @@ public:
     struct NameHasher {
         using is_transparent = void;
         size_t operator()(const UnownedSlotName& p) const noexcept {
-            auto h{std::pair{p.first, absl::string_view{p.second.rawData(), p.second.size()}}};
+            auto h{std::pair{p.first, absl::string_view{p.second.data(), p.second.size()}}};
             return absl::Hash<decltype(h)>{}(h);
         }
     };
@@ -237,8 +229,6 @@ public:
 
     PlanStageSlots(PlanStageSlots&& other) noexcept : _data(std::move(other._data)) {}
 
-    ~PlanStageSlots() noexcept = default;
-
     PlanStageSlots& operator=(const PlanStageSlots& other) {
         if (this != &other) {
             _data = cloneData(other._data);
@@ -262,7 +252,9 @@ public:
     // this PlanStageSlots does not have a mapping for 'name'.
     SbSlot get(const UnownedSlotName& name) const {
         auto it = _data->slotNameToIdMap.find(name);
-        invariant(it != _data->slotNameToIdMap.end());
+        tassert(11051830,
+                str::stream() << "PlanStageSlots does not have a mapping for name " << name.second,
+                it != _data->slotNameToIdMap.end());
         return it->second;
     }
 
@@ -379,7 +371,6 @@ public:
         tassert(8428000, "Expected result object to be set", hasResultObj());
 
         auto it = _data->slotNameToIdMap.find(kResult);
-        invariant(it != _data->slotNameToIdMap.end());
 
         return it->second;
     }
@@ -413,7 +404,9 @@ public:
         tassert(8428001, "Expected ResultInfo to be set", hasResultInfo());
 
         auto it = _data->slotNameToIdMap.find(kResult);
-        invariant(it != _data->slotNameToIdMap.end());
+        tassert(11051829,
+                "slotNameToIdMap is missing the 'result' mapping",
+                it != _data->slotNameToIdMap.end());
 
         return it->second;
     }
@@ -485,6 +478,10 @@ public:
     // appear in list produced by calling 'getRequiredNamesInOrder(reqs)'.
     void clearNonRequiredSlots(const PlanStageReqs& reqs, bool saveResultObj = true);
 
+    const SlotNameMap& getSlotNameToIdMap() const {
+        return _data->slotNameToIdMap;
+    }
+
 private:
     template <typename T>
     SbSlotVector getSlotsByNameImpl(const T& names) const {
@@ -505,6 +502,9 @@ private:
 
     std::unique_ptr<Data> _data;
 };  // class PlanStageSlots
+
+std::ostream& operator<<(std::ostream& os, const PlanStageSlots::SlotType& slotType);
+std::ostream& operator<<(std::ostream& os, const PlanStageSlots& slots);
 
 /**
  * The PlanStageReqs class is used by SlotBasedStageBuilder to represent the context and parent's
@@ -528,15 +528,6 @@ public:
 
         boost::optional<FieldSet> trackedFieldSet;
         boost::optional<FieldEffects> resultInfoEffects;
-
-        // When we're in the middle of building a special union sub-tree implementing a tailable
-        // cursor collection scan, this flag will be set to true. Otherwise this flag will be false.
-        bool isBuildingUnionForTailableCollScan{false};
-
-        // When we're in the middle of building a special union sub-tree implementing a tailable
-        // cursor collection scan, this flag indicates whether we're currently building an anchor or
-        // resume branch. At all other times, this flag will be false.
-        bool isTailableCollScanResumeBranch{false};
 
         // When we are processing a stage that can work on top of block values, this flag instruct
         // the child stage not to insert a BlockToRow stage to convert the block values into scalar
@@ -567,8 +558,6 @@ public:
 
     PlanStageReqs(PlanStageReqs&& other) noexcept : _data(std::move(other._data)) {}
 
-    ~PlanStageReqs() noexcept = default;
-
     PlanStageReqs& operator=(const PlanStageReqs& other) {
         if (this != &other) {
             _data = cloneData(other._data);
@@ -589,6 +578,11 @@ public:
         // by the code handling each block-enabled stage.
         copy.setCanProcessBlockValues(false);
         return copy;
+    }
+
+    // Returns the number of slots requested.
+    bool size() const {
+        return _data->slotNameSet.size();
     }
 
     // Returns true if this PlanStageReqs has an explicit requirement for 'name'.
@@ -673,6 +667,12 @@ public:
     // order.
     std::vector<std::string> getSortKeys() const {
         return getOfType(kSortKey);
+    }
+
+    // Returns a list of all strings N where 'has({kPathExpr, N})' is true, sorted in lexicographic
+    // order.
+    std::vector<std::string> getPathExprs() const {
+        return getOfType(kPathExpr);
     }
 
     // Returns a FieldSet containing all strings N where 'has({kField, N})' is true plus all
@@ -775,24 +775,6 @@ public:
         return *this;
     }
 
-    bool getIsBuildingUnionForTailableCollScan() const {
-        return _data->isBuildingUnionForTailableCollScan;
-    }
-
-    PlanStageReqs& setIsBuildingUnionForTailableCollScan(bool b) {
-        _data->isBuildingUnionForTailableCollScan = b;
-        return *this;
-    }
-
-    bool getIsTailableCollScanResumeBranch() const {
-        return _data->isTailableCollScanResumeBranch;
-    }
-
-    PlanStageReqs& setIsTailableCollScanResumeBranch(bool b) {
-        _data->isTailableCollScanResumeBranch = b;
-        return *this;
-    }
-
     bool getCanProcessBlockValues() const {
         return _data->canProcessBlockValues;
     }
@@ -818,6 +800,10 @@ public:
     PlanStageReqs& setHasLimit(bool b) {
         _data->hasLimit = b;
         return *this;
+    }
+
+    const PlanStageSlots::SlotNameSet& getSlotNameSet() const {
+        return _data->slotNameSet;
     }
 
 private:
@@ -847,6 +833,8 @@ private:
 
     std::unique_ptr<Data> _data;
 };  // class PlanStageReqs
+
+std::ostream& operator<<(std::ostream& os, const PlanStageReqs& reqs);
 
 struct ProjectionPlan {
     PlanStageReqs childReqs;
@@ -1025,8 +1013,9 @@ private:
      * foreign collection, where the $lookup result array is empty and thus its materialization is
      * not a performance or memory problem.
      */
-    std::pair<SbStage, PlanStageSlots> buildOnlyUnwind(const UnwindNode* un,
+    std::pair<SbStage, PlanStageSlots> buildOnlyUnwind(const UnwindNode::UnwindSpec& un,
                                                        const PlanStageReqs& reqs,
+                                                       PlanNodeId nodeId,
                                                        SbStage& stage,
                                                        PlanStageSlots& outputs,
                                                        SbSlot childResultSlot,
@@ -1037,6 +1026,10 @@ private:
 
     std::pair<SbStage, PlanStageSlots> buildProjection(const QuerySolutionNode* root,
                                                        const PlanStageReqs& reqs);
+
+
+    std::pair<SbStage, PlanStageSlots> buildExtractFieldPathsStage(const QuerySolutionNode* root,
+                                                                   const PlanStageReqs& reqs);
 
     std::pair<SbStage, PlanStageSlots> buildOr(const QuerySolutionNode* root,
                                                const PlanStageReqs& reqs);
@@ -1055,9 +1048,6 @@ private:
 
     std::pair<SbStage, PlanStageSlots> buildAndSorted(const QuerySolutionNode* root,
                                                       const PlanStageReqs& reqs);
-
-    std::pair<SbStage, PlanStageSlots> makeUnionForTailableCollScan(const QuerySolutionNode* root,
-                                                                    const PlanStageReqs& reqs);
 
     std::pair<SbStage, PlanStageSlots> buildShardFilter(const QuerySolutionNode* root,
                                                         const PlanStageReqs& reqs);
@@ -1087,11 +1077,30 @@ private:
         PlanStageSlots childOutputs,
         const GroupNode* groupNode);
 
+    std::tuple<SbStage, std::vector<std::string>, SbSlotVector, PlanStageSlots> buildGroupImplBlock(
+        SbStage stage,
+        const PlanStageReqs& reqs,
+        const PlanStageSlots& childOutputs,
+        const GroupNode* groupNode,
+        bool& blockSucceeded);
+
+    std::tuple<SbStage, std::vector<std::string>, SbSlotVector, PlanStageSlots>
+    buildGroupImplScalar(SbStage stage,
+                         const PlanStageReqs& reqs,
+                         PlanStageSlots& childOutputs,
+                         const GroupNode* groupNode);
+
     std::pair<SbStage, PlanStageSlots> buildEqLookup(const QuerySolutionNode* root,
                                                      const PlanStageReqs& reqs);
 
     std::pair<SbStage, PlanStageSlots> buildEqLookupUnwind(const QuerySolutionNode* root,
                                                            const PlanStageReqs& reqs);
+
+    std::pair<SbStage, PlanStageSlots> buildNestedLoopJoinEmbeddingNode(
+        const QuerySolutionNode* root, const PlanStageReqs& reqs);
+
+    std::pair<SbStage, PlanStageSlots> buildHashJoinEmbeddingNode(const QuerySolutionNode* root,
+                                                                  const PlanStageReqs& reqs);
 
     std::pair<SbStage, PlanStageSlots> buildUnpackTsBucket(const QuerySolutionNode* root,
                                                            const PlanStageReqs& reqs);

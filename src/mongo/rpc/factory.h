@@ -29,19 +29,20 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/db/client.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/protocol.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
 
 /**
  * Utilities to construct the correct concrete rpc class based on what the remote server
  * supports, and what the client has been configured to do.
  */
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 class Message;
 
 namespace rpc {
@@ -64,4 +65,4 @@ OpMsgRequest opMsgRequestFromAnyProtocol(const Message& unownedMessage, Client* 
 std::unique_ptr<ReplyBuilderInterface> makeReplyBuilder(Protocol protocol);
 
 }  // namespace rpc
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

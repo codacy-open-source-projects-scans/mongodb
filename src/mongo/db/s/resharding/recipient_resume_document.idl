@@ -33,12 +33,13 @@
 # our writes.
 
 global:
+    mod_visibility: private
     cpp_namespace: "mongo"
 
 imports:
     - "mongo/db/basic_types.idl"
     - "mongo/s/resharding/common_types.idl"
-    - "mongo/s/sharding_types.idl"
+    - "mongo/db/sharding_environment/sharding_types.idl"
     - "mongo/util/net/hostandport.idl"
 
 structs:
@@ -51,7 +52,7 @@ structs:
             shardId:
                 type: shard_id
                 description: "Shard identifier for the donor shard"
-        
+
     ReshardingRecipientResumeData:
         description: Represents the resume data for a particular donor shard for this recipient.
         generate_comparison_operators: false
@@ -76,3 +77,11 @@ structs:
                     but empty, all data for this shard has already been cloned.
                 optional: true
                 type: object
+            documentsCopied:
+                type: long
+                description: The number of documents cloned from this shard.
+                optional: true
+            bytesCopied:
+                type: long
+                description: The number of bytes for the documents cloned from this shard.
+                optional: true

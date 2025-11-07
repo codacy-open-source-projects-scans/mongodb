@@ -33,13 +33,6 @@
  * copy a database (export/import basically)
  */
 
-#include <list>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
@@ -47,6 +40,14 @@
 #include "mongo/client/dbclient_base.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/util/modules.h"
+
+#include <list>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace mongo {
 
@@ -133,9 +134,16 @@ private:
     DBClientBase* getConn() {
         return _conn.get();
     }
+
+    /**
+     * Returns true if we should use raw data operations during cloning.
+     * If available, they must be used in order to clone viewless timeseries collections.
+     * TODO(SERVER-101595): This method always returns true once 9.0 becomes lastLTS.
+     */
+    bool shouldUseRawDataOperations(const VersionContext& vCtx);
 };
 
-class Cloner {
+class MONGO_MOD_PUBLIC Cloner {
 
 public:
     Cloner(std::unique_ptr<ClonerImpl> clonerImpl) : _clonerImpl(std::move(clonerImpl)) {}

@@ -28,15 +28,7 @@
  */
 
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/s/balancer/cluster_statistics_impl.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -47,23 +39,30 @@
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/client.h"
+#include "mongo/db/global_catalog/ddl/shard_util.h"
+#include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime_with.h"
 #include "mongo/db/repl/read_concern_level.h"
-#include "mongo/db/s/balancer/cluster_statistics_impl.h"
-#include "mongo/db/s/config/sharding_catalog_manager.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/random.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/shard_util.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -80,13 +79,13 @@ StatusWith<std::vector<ShardStatistics>> ClusterStatisticsImpl::getStats(Operati
     //
     // TODO: skip unresponsive shards and mark information as stale.
     const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
-    auto shardsStatus =
-        catalogClient->getAllShards(opCtx, repl::ReadConcernLevel::kMajorityReadConcern);
-    if (!shardsStatus.isOK()) {
-        return shardsStatus.getStatus();
+    std::vector<ShardType> shards;
+    try {
+        shards =
+            catalogClient->getAllShards(opCtx, repl::ReadConcernLevel::kMajorityReadConcern).value;
+    } catch (const DBException& ex) {
+        return ex.toStatus();
     }
-
-    auto& shards = shardsStatus.getValue().value;
 
     auto client = opCtx->getClient();
     std::shuffle(shards.begin(), shards.end(), client->getPrng().urbg());

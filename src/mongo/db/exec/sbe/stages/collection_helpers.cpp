@@ -27,27 +27,23 @@
  *    it in the license file.
  */
 
-#include <boost/cstdint.hpp>
-#include <memory>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/exec/sbe/stages/collection_helpers.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/exec/sbe/stages/collection_helpers.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+
 namespace mongo::sbe {
 
-void CollectionRef::getConsistentCollection(OperationContext* opCtx,
-                                            const DatabaseName& dbName,
-                                            const UUID& collUuid) {
+CollectionPtr CollectionRef::getConsistentCollection(OperationContext* opCtx,
+                                                     const DatabaseName& dbName,
+                                                     const UUID& collUuid) {
     auto timestamp = shard_role_details::getRecoveryUnit(opCtx)->getPointInTimeReadTimestamp();
-    _collPtr.emplace(CollectionCatalog::get(opCtx)->establishConsistentCollection(
-        opCtx, NamespaceStringOrUUID{dbName, collUuid}, timestamp));
+    return CollectionPtr{CollectionCatalog::get(opCtx)->establishConsistentCollection(
+        opCtx, NamespaceStringOrUUID{dbName, collUuid}, timestamp)};
 }
 
 void CollectionRef::acquireCollection(OperationContext* opCtx,
@@ -57,12 +53,20 @@ void CollectionRef::acquireCollection(OperationContext* opCtx,
     // with the storage engine snapshot from which we are reading) has been stashed on the
     // 'OperationContext'. Either way, this means that the UUID must still exist in our view of the
     // collection catalog.
-    getConsistentCollection(opCtx, dbName, collUuid);
-    tassert(
-        5071000, str::stream() << "Collection uuid " << collUuid << " does not exist", getPtr());
+    if (!isAcquisition()) {
+        tassert(
+            9367600, "'_coll' should not be initialized prior to 'acquireCollection()'", !(*this));
+        CollectionPtr collPtr = getConsistentCollection(opCtx, dbName, collUuid);
 
-    _collName = getPtr()->ns();
-    _catalogEpoch = CollectionCatalog::get(opCtx)->getEpoch();
+        // Perform any work that might throw before updating '_collPtr', because in the event an
+        // exception is thrown we don't want '_collPtr' to be holding a CollectionPtr.
+        tassert(
+            5071000, str::stream() << "Collection uuid " << collUuid << " does not exist", collPtr);
+
+        _collName = collPtr->ns();
+        _catalogEpoch = CollectionCatalog::get(opCtx)->getEpoch();
+        _collPtr.emplace(std::move(collPtr));
+    }
 }
 
 void CollectionRef::restoreCollection(OperationContext* opCtx,
@@ -76,18 +80,23 @@ void CollectionRef::restoreCollection(OperationContext* opCtx,
     // collection has been renamed, then the resulting collection object should have a different
     // name from the original '_collName'. In either scenario, we throw a 'QueryPlanKilled' error
     // and terminate the query.
-    getConsistentCollection(opCtx, dbName, collUuid);
-    if (!getPtr()) {
+    CollectionPtr collPtr = getConsistentCollection(opCtx, dbName, collUuid);
+
+    // Perform any work that might throw before updating '_collPtr', because in the event an
+    // exception is thrown we don't want '_collPtr' to be holding a CollectionPtr.
+    if (!collPtr) {
         PlanYieldPolicy::throwCollectionDroppedError(collUuid);
     }
 
-    if (*_collName != getPtr()->ns()) {
-        PlanYieldPolicy::throwCollectionRenamedError(*_collName, getPtr()->ns(), collUuid);
+    if (*_collName != collPtr->ns()) {
+        PlanYieldPolicy::throwCollectionRenamedError(*_collName, collPtr->ns(), collUuid);
     }
 
     uassert(ErrorCodes::QueryPlanKilled,
             "the catalog was closed and reopened",
             CollectionCatalog::get(opCtx)->getEpoch() == *_catalogEpoch);
+
+    _collPtr.emplace(std::move(collPtr));
 }
 
 }  // namespace mongo::sbe

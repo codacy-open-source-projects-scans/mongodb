@@ -30,10 +30,28 @@
 #pragma once
 
 #include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/logv2/log.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::shape_helpers {
+
+template <typename T, typename Request, typename... Args>
+StatusWith<std::unique_ptr<T>> tryMakeShape(Request&& request, Args&&... args) {
+    try {
+        return std::make_unique<T>(std::forward<Request>(request), std::forward<Args>(args)...);
+    } catch (const DBException& ex) {
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+        LOGV2_WARNING(8472507,
+                      "Failed to compute query shape",
+                      "command"_attr = redact(request.toBSON()).toString(),
+                      "error"_attr = ex.toString());
+#undef MONGO_LOGV2_DEFAULT_COMPONENT
+        return ex.toStatus();
+    }
+}
 
 int64_t inline optionalObjSize(boost::optional<BSONObj> optionalObj) {
     if (!optionalObj)
@@ -90,11 +108,19 @@ size_t containerSize(const Container& container) {
  * contains field names. It is possible that this hint doesn't actually represent an index, but we
  * can't detect that here.
  */
-BSONObj extractHintShape(BSONObj hintObj, const SerializationOptions& opts);
-BSONObj extractMinOrMaxShape(BSONObj obj, const SerializationOptions& opts);
+BSONObj extractHintShape(const BSONObj& hintObj, const SerializationOptions& opts);
+BSONObj extractMinOrMaxShape(const BSONObj& obj, const SerializationOptions& opts);
 
 void appendNamespaceShape(BSONObjBuilder& bob,
                           const NamespaceString& nss,
                           const SerializationOptions& opts);
 
+/**
+ * Evaluates the 'deferredShape' and computes a QueryShapeHash if both the shape and the client
+ * are eligible. If not eligible, returns boost::none.
+ */
+boost::optional<query_shape::QueryShapeHash> computeQueryShapeHash(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const query_shape::DeferredQueryShape& deferredShape,
+    const NamespaceString& nss);
 }  // namespace mongo::shape_helpers

@@ -38,6 +38,66 @@
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr.hpp>
 // IWYU pragma: no_include "cxxabi.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/client/read_preference.h"
+#include "mongo/db/client.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/catalog_cache/routing_information_cache.h"
+#include "mongo/db/global_catalog/chunk.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/ddl/shard_util.h"
+#include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/global_catalog/type_collection.h"
+#include "mongo/db/global_catalog/type_shard.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/s/balancer/actions_stream_policy.h"
+#include "mongo/db/s/balancer/auto_merger_policy.h"
+#include "mongo/db/s/balancer/balancer_commands_scheduler.h"
+#include "mongo/db/s/balancer/balancer_commands_scheduler_impl.h"
+#include "mongo/db/s/balancer/balancer_defragmentation_policy.h"
+#include "mongo/db/s/balancer/cluster_statistics_impl.h"
+#include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/sharding_config_server_parameters_gen.h"
+#include "mongo/db/sharding_environment/sharding_logging.h"
+#include "mongo/db/topology/shard_registry.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/write_concern_options.h"
+#include "mongo/executor/scoped_task_executor.h"
+#include "mongo/executor/task_executor_pool.h"
+#include "mongo/logv2/log.h"
+#include "mongo/platform/random.h"
+#include "mongo/s/balancer_configuration.h"
+#include "mongo/s/request_types/balancer_collection_status_gen.h"
+#include "mongo/s/request_types/migration_secondary_throttle_options.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
+#include "mongo/util/debug_util.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/future.h"
+#include "mongo/util/future_impl.h"
+#include "mongo/util/pcre.h"
+#include "mongo/util/scopeguard.h"
+#include "mongo/util/testing_proctor.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/timer.h"
+#include "mongo/util/version.h"
+
 #include <algorithm>
 #include <cmath>
 #include <iterator>
@@ -51,69 +111,6 @@
 #include <utility>
 #include <variant>
 #include <vector>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/client/read_preference.h"
-#include "mongo/db/client.h"
-#include "mongo/db/database_name.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/repl/read_concern_level.h"
-#include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/balancer/actions_stream_policy.h"
-#include "mongo/db/s/balancer/auto_merger_policy.h"
-#include "mongo/db/s/balancer/balancer_commands_scheduler.h"
-#include "mongo/db/s/balancer/balancer_commands_scheduler_impl.h"
-#include "mongo/db/s/balancer/balancer_defragmentation_policy.h"
-#include "mongo/db/s/balancer/cluster_statistics_impl.h"
-#include "mongo/db/s/config/sharding_catalog_manager.h"
-#include "mongo/db/s/sharding_config_server_parameters_gen.h"
-#include "mongo/db/s/sharding_logging.h"
-#include "mongo/db/server_feature_flags_gen.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/db/write_concern_options.h"
-#include "mongo/executor/scoped_task_executor.h"
-#include "mongo/executor/task_executor_pool.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/platform/random.h"
-#include "mongo/s/balancer_configuration.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/request_types/balancer_collection_status_gen.h"
-#include "mongo/s/request_types/migration_secondary_throttle_options.h"
-#include "mongo/s/routing_information_cache.h"
-#include "mongo/s/shard_util.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/idle_thread_block.h"
-#include "mongo/util/debug_util.h"
-#include "mongo/util/decorable.h"
-#include "mongo/util/future.h"
-#include "mongo/util/future_impl.h"
-#include "mongo/util/pcre.h"
-#include "mongo/util/scopeguard.h"
-#include "mongo/util/testing_proctor.h"
-#include "mongo/util/time_support.h"
-#include "mongo/util/timer.h"
-#include "mongo/util/version.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -418,7 +415,6 @@ void enqueueChunkMigrations(OperationContext* opCtx,
         shardSvrRequest.setMaxChunkSizeBytes(maxChunkSizeBytes);
         shardSvrRequest.setFromShard(migrateInfo.from);
         shardSvrRequest.setCollectionTimestamp(migrateInfo.version.getTimestamp());
-        shardSvrRequest.setEpoch(migrateInfo.version.epoch());
         shardSvrRequest.setForceJumbo(migrateInfo.forceJumbo);
         const auto [secondaryThrottle, wc] =
             getSecondaryThrottleAndWriteConcern(balancerConfig->getSecondaryThrottle());
@@ -564,7 +560,7 @@ class BalancerWarning {
 public:
     BalancerWarning() = default;
 
-    void warnIfRequired(OperationContext* opCtx, BalancerSettingsType::BalancerMode balancerMode) {
+    void warnIfRequired(OperationContext* opCtx, BalancerModeEnum balancerMode) {
         if (Date_t::now() - _lastDrainingShardsCheckTime < kDrainingShardsCheckInterval &&
             MONGO_likely(!forceBalancerWarningChecks.shouldFail())) {
             return;
@@ -578,7 +574,7 @@ public:
             return;
         }
 
-        if (balancerMode == BalancerSettingsType::BalancerMode::kOff) {
+        if (balancerMode == BalancerModeEnum::kOff) {
             LOGV2_WARNING(
                 6434000,
                 "Draining of removed shards cannot be completed because the balancer is disabled",
@@ -700,7 +696,7 @@ void Balancer::onShutdown() {
 void Balancer::onBecomeArbiter() {
     // The Balancer is only active on config servers, and arbiters are not permitted in config
     // server replica sets.
-    MONGO_UNREACHABLE;
+    MONGO_UNREACHABLE_TASSERT(10083512);
 }
 
 void Balancer::initiate(OperationContext* opCtx) {
@@ -750,52 +746,87 @@ void Balancer::joinCurrentRound(OperationContext* opCtx) {
     });
 }
 
-Status Balancer::moveRange(OperationContext* opCtx,
-                           const NamespaceString& nss,
-                           const ConfigsvrMoveRange& request,
-                           bool issuedByRemoteUser) {
+void Balancer::moveRange(OperationContext* opCtx,
+                         const NamespaceString& nss,
+                         const ConfigsvrMoveRange& request,
+                         bool issuedByRemoteUser) {
     const auto catalogClient = ShardingCatalogManager::get(opCtx)->localCatalogClient();
     auto coll =
         catalogClient->getCollection(opCtx, nss, repl::ReadConcernLevel::kMajorityReadConcern);
 
-    if (coll.getUnsplittable())
-        return {ErrorCodes::NamespaceNotSharded,
-                str::stream() << "Can't execute moveRange on unsharded collection "
-                              << nss.toStringForErrorMsg()};
+    uassert(ErrorCodes::NamespaceNotSharded,
+            str::stream() << "Can't execute moveRange on unsharded collection "
+                          << nss.toStringForErrorMsg(),
+            !coll.getUnsplittable());
 
     const auto maxChunkSize = getMaxChunkSizeBytes(opCtx, coll);
 
-    const auto fromShardId = [&]() {
-        const auto cm = uassertStatusOK(getPlacementInfoForShardedCollection(opCtx, nss));
-        if (request.getMin()) {
-            const auto& chunk = cm.findIntersectingChunkWithSimpleCollation(*request.getMin());
-            return chunk.getShardId();
-        } else {
-            return getChunkForMaxBound(cm, *request.getMax()).getShardId();
-        }
-    }();
+    sharding::router::CollectionRouter router{opCtx->getServiceContext(), nss};
+    router.routeWithRoutingContext(
+        opCtx, "moveRange"_sd, [&](OperationContext* opCtx, RoutingContext& unusedRoutingCtx) {
+            unusedRoutingCtx.skipValidation();
 
-    ShardsvrMoveRange shardSvrRequest(nss);
-    shardSvrRequest.setDbName(DatabaseName::kAdmin);
-    shardSvrRequest.setMoveRangeRequestBase(request.getMoveRangeRequestBase());
-    shardSvrRequest.setMaxChunkSizeBytes(maxChunkSize);
-    shardSvrRequest.setFromShard(fromShardId);
-    shardSvrRequest.setCollectionTimestamp(coll.getTimestamp());
-    shardSvrRequest.setEpoch(coll.getEpoch());
-    const auto [secondaryThrottle, wc] =
-        getSecondaryThrottleAndWriteConcern(request.getSecondaryThrottle());
-    shardSvrRequest.setSecondaryThrottle(secondaryThrottle);
-    shardSvrRequest.setForceJumbo(request.getForceJumbo());
+            const auto cm = uassertStatusOK(getPlacementInfoForShardedCollection(opCtx, nss));
 
-    auto response =
-        _commandScheduler->requestMoveRange(opCtx, shardSvrRequest, wc, issuedByRemoteUser)
-            .getNoThrow(opCtx);
-    return processManualMigrationOutcome(opCtx,
-                                         request.getMin(),
-                                         request.getMax(),
-                                         nss,
-                                         shardSvrRequest.getToShard(),
-                                         std::move(response));
+            // Check if the 'min' and 'max' parameters match the shardKey pattern.
+            const boost::optional<BSONObj>& minBound = request.getMin();
+            const boost::optional<BSONObj>& maxBound = request.getMax();
+            uassert(ErrorCodes::InvalidOptions,
+                    str::stream() << "The 'min' bound " << *minBound
+                                  << " is not valid for shard key pattern "
+                                  << cm.getShardKeyPattern().toBSON(),
+                    !minBound.has_value() || cm.getShardKeyPattern().isShardKey(*minBound));
+            uassert(ErrorCodes::InvalidOptions,
+                    str::stream() << "The 'max' bound " << *maxBound
+                                  << " is not valid for shard key pattern "
+                                  << cm.getShardKeyPattern().toBSON(),
+                    !maxBound.has_value() || cm.getShardKeyPattern().isShardKey(*maxBound));
+
+            // If both min and max are provided, check that the given range is covered by a single
+            // chunk.
+            if (minBound && maxBound) {
+                const auto chunkRange =
+                    ChunkRange(cm.getShardKeyPattern().normalizeShardKey(*minBound),
+                               cm.getShardKeyPattern().normalizeShardKey(*maxBound));
+                const auto& chunkWithMin = cm.findIntersectingChunkWithSimpleCollation(*minBound);
+
+                uassert(11089203,
+                        str::stream() << "Range with bounds " << chunkRange.toString()
+                                      << " is not contained within a single chunk.",
+                        chunkWithMin.getRange().covers(chunkRange));
+            }
+
+            // Get the donor shard.
+            const auto fromShardId = [&]() {
+                if (minBound.has_value()) {
+                    const auto& chunk = cm.findIntersectingChunkWithSimpleCollation(*minBound);
+                    return chunk.getShardId();
+                } else {
+                    return getChunkForMaxBound(cm, *maxBound).getShardId();
+                }
+            }();
+
+            ShardsvrMoveRange shardSvrRequest(nss);
+            shardSvrRequest.setDbName(DatabaseName::kAdmin);
+            shardSvrRequest.setMoveRangeRequestBase(request.getMoveRangeRequestBase());
+            shardSvrRequest.setMaxChunkSizeBytes(maxChunkSize);
+            shardSvrRequest.setFromShard(fromShardId);
+            shardSvrRequest.setCollectionTimestamp(cm.getVersion().getTimestamp());
+            const auto [secondaryThrottle, wc] =
+                getSecondaryThrottleAndWriteConcern(request.getSecondaryThrottle());
+            shardSvrRequest.setSecondaryThrottle(secondaryThrottle);
+            shardSvrRequest.setForceJumbo(request.getForceJumbo());
+
+            auto response =
+                _commandScheduler->requestMoveRange(opCtx, shardSvrRequest, wc, issuedByRemoteUser)
+                    .getNoThrow(opCtx);
+            uassertStatusOK(processManualMigrationOutcome(opCtx,
+                                                          request.getMin(),
+                                                          request.getMax(),
+                                                          nss,
+                                                          shardSvrRequest.getToShard(),
+                                                          std::move(response)));
+        });
 }
 
 void Balancer::report(OperationContext* opCtx, BSONObjBuilder* builder) {
@@ -805,7 +836,7 @@ void Balancer::report(OperationContext* opCtx, BSONObjBuilder* builder) {
     const auto mode = balancerConfig->getBalancerMode();
 
     stdx::lock_guard<stdx::mutex> scopedLock(_mutex);
-    builder->append("mode", BalancerSettingsType::kBalancerModes[mode]);
+    builder->append("mode", BalancerMode_serializer(mode));
     builder->append("inBalancerRound", _inBalancerRound);
     builder->append("numBalancerRounds", _numBalancerRounds);
     builder->append("term", repl::ReplicationCoordinator::get(opCtx)->getTerm());
@@ -893,10 +924,11 @@ void Balancer::_consumeActionStreamLoop() {
         auto activeStreams = [&]() -> std::vector<ActionsStreamPolicy*> {
             auto balancerConfig = Grid::get(opCtx.get())->getBalancerConfiguration();
             std::vector<ActionsStreamPolicy*> streams;
-            if (balancerConfig->shouldBalanceForAutoMerge() && _autoMergerPolicy->isEnabled()) {
+            if (balancerConfig->shouldBalanceForAutoMerge(opCtx.get()) &&
+                _autoMergerPolicy->isEnabled()) {
                 streams.push_back(_autoMergerPolicy.get());
             }
-            if (balancerConfig->shouldBalance()) {
+            if (balancerConfig->shouldBalance(opCtx.get())) {
                 streams.push_back(_defragmentationPolicy.get());
             }
             return streams;
@@ -1003,10 +1035,8 @@ void Balancer::_mainThread() {
         _joinCond.notify_all();
     });
 
-    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
     ThreadClient threadClient("Balancer",
-                              getGlobalServiceContext()->getService(ClusterRole::ShardServer),
-                              ClientOperationKillableByStepdown{false});
+                              getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
     auto opCtx = threadClient->makeOperationContext();
     auto shardingContext = Grid::get(opCtx.get());
@@ -1065,7 +1095,7 @@ void Balancer::_mainThread() {
             // Warn before we skip the iteration due to balancing being disabled.
             balancerWarning.warnIfRequired(opCtx.get(), balancerConfig->getBalancerMode());
 
-            if (!balancerConfig->shouldBalance() || _terminationRequested()) {
+            if (!balancerConfig->shouldBalance(opCtx.get()) || _terminationRequested()) {
                 _autoMergerPolicy->disable(opCtx.get());
 
                 LOGV2_DEBUG(21859, 1, "Skipping balancing round because balancing is disabled");
@@ -1073,7 +1103,7 @@ void Balancer::_mainThread() {
                 continue;
             }
 
-            if (balancerConfig->shouldBalanceForAutoMerge()) {
+            if (balancerConfig->shouldBalanceForAutoMerge(opCtx.get())) {
                 _autoMergerPolicy->enable(opCtx.get());
             }
 
@@ -1292,13 +1322,13 @@ bool Balancer::_checkOIDs(OperationContext* opCtx) {
         }
         const auto s = std::move(shardStatus.getValue());
 
-        auto result = uassertStatusOK(
-            s->runCommandWithFixedRetryAttempts(opCtx,
-                                                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                                DatabaseName::kAdmin,
-                                                BSON("features" << 1),
-                                                Seconds(30),
-                                                Shard::RetryPolicy::kIdempotent));
+        auto result =
+            uassertStatusOK(s->runCommand(opCtx,
+                                          ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                          DatabaseName::kAdmin,
+                                          BSON("features" << 1),
+                                          Seconds(30),
+                                          Shard::RetryPolicy::kIdempotent));
         uassertStatusOK(result.commandStatus);
         BSONObj f = std::move(result.response);
 
@@ -1313,25 +1343,24 @@ bool Balancer::_checkOIDs(OperationContext* opCtx) {
                       "firstShardId"_attr = shardId,
                       "secondShardId"_attr = oids[x]);
 
-                result = uassertStatusOK(s->runCommandWithFixedRetryAttempts(
-                    opCtx,
-                    ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                    DatabaseName::kAdmin,
-                    BSON("features" << 1 << "oidReset" << 1),
-                    Seconds(30),
-                    Shard::RetryPolicy::kIdempotent));
+                result = uassertStatusOK(
+                    s->runCommand(opCtx,
+                                  ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                  DatabaseName::kAdmin,
+                                  BSON("features" << 1 << "oidReset" << 1),
+                                  Seconds(30),
+                                  Shard::RetryPolicy::kIdempotent));
                 uassertStatusOK(result.commandStatus);
 
                 auto otherShardStatus = shardingContext->shardRegistry()->getShard(opCtx, oids[x]);
                 if (otherShardStatus.isOK()) {
-                    result = uassertStatusOK(
-                        otherShardStatus.getValue()->runCommandWithFixedRetryAttempts(
-                            opCtx,
-                            ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                            DatabaseName::kAdmin,
-                            BSON("features" << 1 << "oidReset" << 1),
-                            Seconds(30),
-                            Shard::RetryPolicy::kIdempotent));
+                    result = uassertStatusOK(otherShardStatus.getValue()->runCommand(
+                        opCtx,
+                        ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                        DatabaseName::kAdmin,
+                        BSON("features" << 1 << "oidReset" << 1),
+                        Seconds(30),
+                        Shard::RetryPolicy::kIdempotent));
                     uassertStatusOK(result.commandStatus);
                 }
 
@@ -1385,7 +1414,8 @@ Balancer::MigrationStats Balancer::_doMigrations(OperationContext* opCtx,
     auto balancerConfig = Grid::get(opCtx)->getBalancerConfiguration();
 
     // If the balancer was disabled since we started this round, don't start new chunk moves
-    if (const bool terminating = _terminationRequested(), enabled = balancerConfig->shouldBalance();
+    if (const bool terminating = _terminationRequested(),
+        enabled = balancerConfig->shouldBalance(opCtx);
         terminating || !enabled) {
         LOGV2_DEBUG(21870,
                     1,
@@ -1428,7 +1458,7 @@ void Balancer::_onActionsStreamPolicyStateUpdate() {
 }
 
 void Balancer::notifyPersistedBalancerSettingsChanged(OperationContext* opCtx) {
-    if (!Grid::get(opCtx)->getBalancerConfiguration()->shouldBalanceForAutoMerge()) {
+    if (!Grid::get(opCtx)->getBalancerConfiguration()->shouldBalanceForAutoMerge(opCtx)) {
         _autoMergerPolicy->disable(opCtx);
     }
 

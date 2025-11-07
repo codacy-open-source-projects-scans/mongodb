@@ -28,6 +28,7 @@
  */
 
 #include "mongo/db/exec/sbe/values/util.h"
+#include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
 
 namespace mongo {
@@ -48,7 +49,9 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAddToSet(ArityTy
     }
     value::ValueGuard guard{tagAgg, valAgg};
 
-    invariant(ownAgg && tagAgg == value::TypeTags::ArraySet);
+    tassert(11086805,
+            "Unexpected type of Agg parameter",
+            ownAgg && tagAgg == value::TypeTags::ArraySet);
     auto arr = value::getArraySetView(valAgg);
 
     // Push back the value. Note that array will ignore Nothing.
@@ -60,19 +63,29 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAddToSet(ArityTy
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinAddToSetCapped(ArityType arity) {
-    auto [tagNewElem, valNewElem] = moveOwnedFromStack(1);
-    value::ValueGuard guardNewElem{tagNewElem, valNewElem};
-    auto [_, tagSizeCap, valSizeCap] = getFromStack(2);
+    auto [tagAccumulatorState, valAccumulatorState] = moveOwnedFromStack(0);
+    value::ValueGuard guardAccumulatorState{tagAccumulatorState, valAccumulatorState};
 
+    auto [ownedNewElem, tagNewElem, valNewElem] = moveFromStack(1);
+    value::ValueGuard guardNewElem{ownedNewElem, tagNewElem, valNewElem};
+
+    auto [_ownedSizeCap, tagSizeCap, valSizeCap] = getFromStack(2);
+
+    // Return the unmodified accumulator state when the size cap is malformed.
     if (tagSizeCap != value::TypeTags::NumberInt32) {
-        auto [ownArr, tagArr, valArr] = getFromStack(0);
-        topStack(false, value::TypeTags::Nothing, 0);
-        return {ownArr, tagArr, valArr};
+        guardAccumulatorState.reset();
+        return {true, tagAccumulatorState, valAccumulatorState};
     }
 
+    guardAccumulatorState.reset();
     guardNewElem.reset();
-    return addToSetCappedImpl(
-        tagNewElem, valNewElem, value::bitcastTo<int32_t>(valSizeCap), nullptr /*collator*/);
+    return addToSetCappedImpl(tagAccumulatorState,
+                              valAccumulatorState,
+                              ownedNewElem,
+                              tagNewElem,
+                              valNewElem,
+                              value::bitcastTo<int32_t>(valSizeCap),
+                              nullptr /*collator*/);
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollAddToSet(ArityType arity) {
@@ -98,7 +111,10 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollAddToSet(Ari
     }
     value::ValueGuard guard{tagAgg, valAgg};
 
-    invariant(ownAgg && tagAgg == value::TypeTags::ArraySet);
+
+    tassert(11086804,
+            "Unexpected type of Agg parameter",
+            ownAgg && tagAgg == value::TypeTags::ArraySet);
     auto arr = value::getArraySetView(valAgg);
 
     // Push back the value. Note that array will ignore Nothing.
@@ -111,80 +127,85 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollAddToSet(Ari
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollAddToSetCapped(
     ArityType arity) {
-    auto [_1, tagColl, valColl] = getFromStack(1);
-    auto [tagNewElem, valNewElem] = moveOwnedFromStack(2);
-    value::ValueGuard guardNewElem{tagNewElem, valNewElem};
-    auto [_2, tagSizeCap, valSizeCap] = getFromStack(3);
+    auto [tagAccumulatorState, valAccumulatorState] = moveOwnedFromStack(0);
+    value::ValueGuard guardAccumulatorState{tagAccumulatorState, valAccumulatorState};
 
-    // If the collator is Nothing or if it's some unexpected type, don't push back the value
-    // and just return the accumulator.
-    if (tagColl != value::TypeTags::collator || tagSizeCap != value::TypeTags::NumberInt32) {
-        auto [ownArr, tagArr, valArr] = getFromStack(0);
-        topStack(false, value::TypeTags::Nothing, 0);
-        return {ownArr, tagArr, valArr};
+    auto [_ownedCollator, tagCollator, valCollator] = getFromStack(1);
+
+    auto [ownedNewElem, tagNewElem, valNewElem] = moveFromStack(2);
+    value::ValueGuard guardNewElem{ownedNewElem, tagNewElem, valNewElem};
+
+    auto [_ownedSizeCap, tagSizeCap, valSizeCap] = getFromStack(3);
+
+    // Return the unmodified accumulator state when the collator or size cap is malformed.
+    if (tagCollator != value::TypeTags::collator || tagSizeCap != value::TypeTags::NumberInt32) {
+        guardAccumulatorState.reset();
+        return {true, tagAccumulatorState, valAccumulatorState};
     }
 
+    guardAccumulatorState.reset();
     guardNewElem.reset();
-    return addToSetCappedImpl(tagNewElem,
+    return addToSetCappedImpl(tagAccumulatorState,
+                              valAccumulatorState,
+                              ownedNewElem,
+                              tagNewElem,
                               valNewElem,
                               value::bitcastTo<int32_t>(valSizeCap),
-                              value::getCollatorView(valColl));
+                              value::getCollatorView(valCollator));
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetUnionCapped(ArityType arity) {
-    auto [newElemTag, newElemVal] = moveOwnedFromStack(1);
+    auto [tagAccumulatorState, valAccumulatorState] = moveOwnedFromStack(0);
+    value::ValueGuard guardAccumulatorState{tagAccumulatorState, valAccumulatorState};
 
-    // Note that we do not call 'reset()' on the guard below, as 'setUnionAccumImpl' assumes that
-    // callers will manage the memory associated with 'newElemTag/Val'. See the comment on
-    // 'setUnionAccumImpl' for more details.
-    value::ValueGuard newElemGuard{newElemTag, newElemVal};
-    auto [_, sizeCapTag, sizeCapVal] = getFromStack(2);
+    auto [tagNewSetMembers, valNewSetMembers] = moveOwnedFromStack(1);
+    value::ValueGuard guardNewSetMembers{tagNewSetMembers, valNewSetMembers};
 
-    if (sizeCapTag != value::TypeTags::NumberInt32) {
-        auto [arrOwned, arrTag, arrVal] = getFromStack(0);
-        topStack(false, value::TypeTags::Nothing, 0);
-        return {arrOwned, arrTag, arrVal};
+    auto [_, tagSizeCap, valSizeCap] = getFromStack(2);
+
+    // Return the unmodified accumulator state when the size cap is malformed.
+    if (tagSizeCap != value::TypeTags::NumberInt32) {
+        guardAccumulatorState.reset();
+        return {true, tagAccumulatorState, valAccumulatorState};
     }
 
-    auto [accOwned, accTag, accVal] = getFromStack(0);
-
-    return setUnionAccumImpl(newElemTag,
-                             newElemVal,
-                             value::bitcastTo<int32_t>(sizeCapVal),
-                             accOwned,
-                             accTag,
-                             accVal,
+    guardAccumulatorState.reset();
+    guardNewSetMembers.reset();
+    return setUnionAccumImpl(tagAccumulatorState,
+                             valAccumulatorState,
+                             tagNewSetMembers,
+                             valNewSetMembers,
+                             value::bitcastTo<int32_t>(valSizeCap),
                              nullptr /*collator*/);
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollSetUnionCapped(
     ArityType arity) {
-    auto [_1, collTag, collVal] = getFromStack(1);
-    auto [newElemTag, newElemVal] = moveOwnedFromStack(2);
+    auto [tagAccumulatorState, valAccumulatorState] = moveOwnedFromStack(0);
+    value::ValueGuard guardAccumulatorState{tagAccumulatorState, valAccumulatorState};
 
-    // Note that we do not call 'reset()' on the guard below, as 'setUnionAccumImpl' assumes that
-    // callers will manage the memory associated with 'newElemTag/Val'. See the comment on
-    // 'setUnionAccumImpl' for more details.
-    value::ValueGuard newElemGuard{newElemTag, newElemVal};
-    auto [_2, sizeCapTag, sizeCapVal] = getFromStack(3);
+    auto [_ownedCollator, tagCollator, valCollator] = getFromStack(1);
 
-    // If the collator is Nothing or if it's some unexpected type, don't push back the value and
-    // just return the accumulator.
-    if (collTag != value::TypeTags::collator || sizeCapTag != value::TypeTags::NumberInt32) {
+    auto [tagNewSetMembers, valNewSetMembers] = moveOwnedFromStack(2);
+    value::ValueGuard guardNewSetMembers{tagNewSetMembers, valNewSetMembers};
+
+    auto [_ownedSizeCap, tagSizeCap, valSizeCap] = getFromStack(3);
+
+    // Return the unmodified accumulator state when the size cap or collator is malformed.
+    if (tagCollator != value::TypeTags::collator || tagSizeCap != value::TypeTags::NumberInt32) {
         auto [arrOwned, arrTag, arrVal] = getFromStack(0);
         topStack(false, value::TypeTags::Nothing, 0);
         return {arrOwned, arrTag, arrVal};
     }
 
-    auto [accOwned, accTag, accVal] = getFromStack(0);
-
-    return setUnionAccumImpl(newElemTag,
-                             newElemVal,
-                             value::bitcastTo<int32_t>(sizeCapVal),
-                             accOwned,
-                             accTag,
-                             accVal,
-                             value::getCollatorView(collVal));
+    guardAccumulatorState.reset();
+    guardNewSetMembers.reset();
+    return setUnionAccumImpl(tagAccumulatorState,
+                             valAccumulatorState,
+                             tagNewSetMembers,
+                             valNewSetMembers,
+                             value::bitcastTo<int32_t>(valSizeCap),
+                             value::getCollatorView(valCollator));
 }
 
 namespace {
@@ -201,8 +222,7 @@ FastTuple<bool, value::TypeTags, value::Value> setUnion(
         auto argVal = argVals[idx];
 
         value::arrayForEach(argTag, argVal, [&](value::TypeTags elTag, value::Value elVal) {
-            auto [copyTag, copyVal] = value::copyValue(elTag, elVal);
-            resView->push_back(copyTag, copyVal);
+            resView->push_back_clone(elTag, elVal);
         });
     }
     resGuard.reset();
@@ -247,8 +267,7 @@ FastTuple<bool, value::TypeTags, value::Value> setIntersection(
     for (auto&& [item, counter] : intersectionMap) {
         if (counter == argVals.size()) {
             auto [elTag, elVal] = item;
-            auto [copyTag, copyVal] = value::copyValue(elTag, elVal);
-            resView->push_back(copyTag, copyVal);
+            resView->push_back_clone(elTag, elVal);
         }
     }
 
@@ -256,10 +275,15 @@ FastTuple<bool, value::TypeTags, value::Value> setIntersection(
     return {true, resTag, resVal};
 }
 
-value::ValueSetType valueToSetHelper(value::TypeTags tag,
-                                     value::Value value,
-                                     const CollatorInterface* collator) {
+/**
+ * Helper function that creates a set useful to quickly search through a dataset and then it is
+ * destroyed.
+ */
+value::ValueSetType valueToShallowSetHelper(value::TypeTags tag,
+                                            value::Value value,
+                                            const CollatorInterface* collator) {
     value::ValueSetType setValues(0, value::ValueHash(collator), value::ValueEq(collator));
+    setValues.reserve(getArraySize(tag, value));
     value::arrayForEach(tag, value, [&](value::TypeTags elemTag, value::Value elemVal) {
         setValues.insert({elemTag, elemVal});
     });
@@ -276,14 +300,20 @@ FastTuple<bool, value::TypeTags, value::Value> setDifference(
     value::ValueGuard resGuard{resTag, resVal};
     auto resView = value::getArraySetView(resVal);
 
-    auto setValuesSecondArg = valueToSetHelper(rhsTag, rhsVal, collator);
-
-    value::arrayForEach(lhsTag, lhsVal, [&](value::TypeTags elTag, value::Value elVal) {
-        if (setValuesSecondArg.count({elTag, elVal}) == 0) {
-            auto [copyTag, copyVal] = value::copyValue(elTag, elVal);
-            resView->push_back(copyTag, copyVal);
-        }
-    });
+    auto process =
+        [&resView](value::TypeTags lhsTag, value::Value lhsVal, const value::ValueSetType& rhsSet) {
+            value::arrayForEach(lhsTag, lhsVal, [&](value::TypeTags elTag, value::Value elVal) {
+                if (rhsSet.count({elTag, elVal}) == 0) {
+                    resView->push_back_clone(elTag, elVal);
+                }
+            });
+        };
+    if (rhsTag == value::TypeTags::ArraySet &&
+        value::getArraySetView(rhsVal)->values().hash_function().getCollator() == collator) {
+        process(lhsTag, lhsVal, value::getArraySetView(rhsVal)->values());
+    } else {
+        process(lhsTag, lhsVal, valueToShallowSetHelper(rhsTag, rhsVal, collator));
+    }
 
     resGuard.reset();
     return {true, resTag, resVal};
@@ -293,11 +323,20 @@ FastTuple<bool, value::TypeTags, value::Value> setEquals(
     const std::vector<value::TypeTags>& argTags,
     const std::vector<value::Value>& argVals,
     const CollatorInterface* collator = nullptr) {
-    auto setValuesFirstArg = valueToSetHelper(argTags[0], argVals[0], collator);
+    auto setValuesFirstArg = valueToShallowSetHelper(argTags[0], argVals[0], collator);
 
     for (size_t idx = 1; idx < argVals.size(); ++idx) {
-        auto setValuesOtherArg = valueToSetHelper(argTags[idx], argVals[idx], collator);
-        if (setValuesFirstArg != setValuesOtherArg) {
+        bool matches = false;
+        if (argTags[idx] == value::TypeTags::ArraySet &&
+            value::getArraySetView(argVals[idx])->values().hash_function().getCollator() ==
+                collator) {
+            matches = setValuesFirstArg == value::getArraySetView(argVals[idx])->values();
+        } else {
+            matches =
+                setValuesFirstArg == valueToShallowSetHelper(argTags[idx], argVals[idx], collator);
+        }
+
+        if (!matches) {
             return {false, value::TypeTags::Boolean, false};
         }
     }
@@ -316,20 +355,29 @@ FastTuple<bool, value::TypeTags, value::Value> setIsSubset(
         return {false, value::TypeTags::Nothing, 0};
     }
 
-    auto setValuesSecondArg = valueToSetHelper(rhsTag, rhsVal, collator);
-
     bool isSubset = true;
-    value::arrayAny(lhsTag, lhsVal, [&](value::TypeTags elTag, value::Value elVal) {
-        isSubset = (setValuesSecondArg.count({elTag, elVal}) > 0);
-        return !isSubset;
-    });
+    auto process = [&isSubset](value::TypeTags lhsTag,
+                               value::Value lhsVal,
+                               const value::ValueSetType& rhsSet) {
+        value::arrayAny(lhsTag, lhsVal, [&](value::TypeTags elTag, value::Value elVal) {
+            isSubset = (rhsSet.count({elTag, elVal}) > 0);
+            return !isSubset;
+        });
+    };
+
+    if (rhsTag == value::TypeTags::ArraySet &&
+        value::getArraySetView(rhsVal)->values().hash_function().getCollator() == collator) {
+        process(lhsTag, lhsVal, value::getArraySetView(rhsVal)->values());
+    } else {
+        process(lhsTag, lhsVal, valueToShallowSetHelper(rhsTag, rhsVal, collator));
+    }
 
     return {false, value::TypeTags::Boolean, isSubset};
 }
 }  // namespace
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollSetUnion(ArityType arity) {
-    invariant(arity >= 1);
+    tassert(11080016, "Unexpected arity value", arity >= 1);
 
     auto [_, collTag, collVal] = getFromStack(0);
     if (collTag != value::TypeTags::collator) {
@@ -370,7 +418,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetUnion(ArityTy
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollSetIntersection(
     ArityType arity) {
-    invariant(arity >= 1);
+    tassert(11080015, "Unexpected arity value", arity >= 1);
 
     auto [_, collTag, collVal] = getFromStack(0);
     if (collTag != value::TypeTags::collator) {
@@ -411,7 +459,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetIntersection(
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollSetDifference(ArityType arity) {
-    invariant(arity == 3);
+    tassert(11080014, "Unexpected arity value", arity == 3);
 
     auto [_, collTag, collVal] = getFromStack(0);
     if (collTag != value::TypeTags::collator) {
@@ -429,7 +477,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollSetDifferenc
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollSetEquals(ArityType arity) {
-    invariant(arity >= 3);
+    tassert(11080013, "Unexpected arity value", arity >= 3);
 
     auto [_, collTag, collVal] = getFromStack(0);
     if (collTag != value::TypeTags::collator) {
@@ -467,7 +515,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCollSetIsSubset(
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetDifference(ArityType arity) {
-    invariant(arity == 2);
+    tassert(11080012, "Unexpected arity value", arity == 2);
 
     auto [lhsOwned, lhsTag, lhsVal] = getFromStack(0);
     auto [rhsOwned, rhsTag, rhsVal] = getFromStack(1);
@@ -480,7 +528,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetDifference(Ar
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetEquals(ArityType arity) {
-    invariant(arity >= 2);
+    tassert(11080011, "Unexpected arity value", arity >= 2);
 
     std::vector<value::TypeTags> argTags;
     std::vector<value::Value> argVals;
@@ -508,7 +556,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetIsSubset(Arit
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSetToArray(ArityType arity) {
-    invariant(arity == 1);
+    tassert(11080010, "Unexpected arity value", arity == 1);
 
     auto [owned, tag, val] = getFromStack(0);
 

@@ -28,61 +28,46 @@
  */
 
 
-#include <absl/container/inlined_vector.h>
-#include <absl/container/node_hash_map.h>
-#include <algorithm>
-#include <bitset>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <cstddef>
-#include <deque>
-#include <iterator>
-#include <map>
-#include <string_view>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/stage_builder/sbe/gen_index_scan.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
-#include "mongo/db/exec/sbe/stages/branch.h"
-#include "mongo/db/exec/sbe/stages/filter.h"
-#include "mongo/db/exec/sbe/stages/ix_scan.h"
-#include "mongo/db/exec/sbe/stages/loop_join.h"
-#include "mongo/db/exec/sbe/stages/project.h"
-#include "mongo/db/exec/sbe/stages/unique.h"
-#include "mongo/db/exec/sbe/stages/unwind.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
-#include "mongo/db/matcher/match_expression_dependencies.h"
-#include "mongo/db/pipeline/dependencies.h"
-#include "mongo/db/query/index_bounds_builder.h"
-#include "mongo/db/query/index_entry.h"
-#include "mongo/db/query/interval.h"
-#include "mongo/db/query/interval_evaluation_tree.h"
-#include "mongo/db/query/optimizer/algebra/polyvalue.h"
+#include "mongo/db/query/algebra/polyvalue.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/dependency_analysis/match_expression_dependencies.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
+#include "mongo/db/query/compiler/optimizer/index_bounds_builder/interval_evaluation_tree.h"
+#include "mongo/db/query/compiler/physical_model/interval/interval.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/db/query/stage_builder/sbe/gen_filter.h"
-#include "mongo/db/query/stage_builder/sbe/gen_index_scan.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr_helpers.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/id_generator.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <bitset>
+#include <cstddef>
+#include <deque>
+#include <iterator>
+#include <map>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -95,13 +80,11 @@ namespace {
  * returned through the relevant '*KeyInclusive' parameter. Returns 'false' otherwise.
  */
 bool canBeDecomposedIntoSingleIntervals(const std::vector<OrderedIntervalList>& intervalLists,
-                                        bool* lowKeyInclusive,
-                                        bool* highKeyInclusive) {
-    invariant(lowKeyInclusive);
-    invariant(highKeyInclusive);
+                                        bool& lowKeyInclusive,
+                                        bool& highKeyInclusive) {
 
-    *lowKeyInclusive = true;
-    *highKeyInclusive = true;
+    lowKeyInclusive = true;
+    highKeyInclusive = true;
 
     size_t listNum = 0;
 
@@ -125,8 +108,8 @@ bool canBeDecomposedIntoSingleIntervals(const std::vector<OrderedIntervalList>& 
     }
 
     // Set the inclusivity from the non-point interval.
-    *lowKeyInclusive = intervalLists[listNum].intervals[0].startInclusive;
-    *highKeyInclusive = intervalLists[listNum].intervals[0].endInclusive;
+    lowKeyInclusive = intervalLists[listNum].intervals[0].startInclusive;
+    highKeyInclusive = intervalLists[listNum].intervals[0].endInclusive;
 
     // And after the non-point interval we can have any number of "all values" intervals.
     for (++listNum; listNum < intervalLists.size(); ++listNum) {
@@ -173,7 +156,7 @@ std::vector<std::pair<BSONObj, BSONObj>> decomposeIntoSingleIntervals(
     const std::vector<OrderedIntervalList>& intervalLists,
     bool lowKeyInclusive,
     bool highKeyInclusive) {
-    invariant(intervalLists.size() > 0);
+    tassert(11051801, "Expecting non-empty intervalLists vector", intervalLists.size() > 0);
 
     // Appends the 'interval' bounds to the low and high keys and return the updated keys.
     // Inclusivity of each bound is set through the relevant '*KeyInclusive' parameter.
@@ -661,10 +644,11 @@ generateSingleIntervalIndexScanAndSlotsImpl(StageBuilderState& state,
     // return EOF. This does not apply when the interval is a point interval, since the interval
     // should always exist in that case.
     if (shouldRegisterLowHighKeyInRuntimeEnv && !isPointInterval) {
-        stage = b.makeConstFilter(std::move(stage),
-                                  b.makeBinaryOp(sbe::EPrimBinary::logicAnd,
-                                                 b.makeFunction("exists", lowKeyExpr.clone()),
-                                                 b.makeFunction("exists", highKeyExpr.clone())));
+        stage =
+            b.makeConstFilter(std::move(stage),
+                              b.makeBooleanOpTree(abt::Operations::And,
+                                                  b.makeFunction("exists", lowKeyExpr.clone()),
+                                                  b.makeFunction("exists", highKeyExpr.clone())));
     }
 
     return {std::move(stage),
@@ -711,7 +695,7 @@ PlanStageReqs computeReqsForIndexScan(const PlanStageReqs& reqs,
         // and add these fields to 'ixScanReqs'.
         if (filter) {
             DepsTracker deps;
-            match_expression::addDependencies(filter, &deps);
+            dependency_analysis::addDependencies(filter, &deps);
             for (auto&& elt : keyPattern) {
                 if (deps.fields.count(elt.fieldName())) {
                     StringData name = elt.fieldNameStringData();
@@ -936,7 +920,11 @@ std::pair<SbStage, PlanStageSlots> generateIndexScanImpl(StageBuilderState& stat
     }
 
     if (ixn->shouldDedup) {
-        stage = b.makeUnique(std::move(stage), outputs.get(PlanStageSlots::kRecordId));
+        if (collection->isClustered()) {
+            stage = b.makeUnique(std::move(stage), outputs.get(PlanStageSlots::kRecordId));
+        } else {
+            stage = b.makeUniqueRoaring(std::move(stage), outputs.get(PlanStageSlots::kRecordId));
+        }
     }
 
     if (ixn->filter) {
@@ -980,7 +968,7 @@ IndexIntervals makeIntervalsFromIndexBounds(const IndexBounds& bounds,
                 bounds, &lowKey, &lowKeyInclusive, &highKey, &highKeyInclusive)) {
             return {{lowKey, highKey}};
         } else if (canBeDecomposedIntoSingleIntervals(
-                       bounds.fields, &lowKeyInclusive, &highKeyInclusive)) {
+                       bounds.fields, lowKeyInclusive, highKeyInclusive)) {
             return decomposeIntoSingleIntervals(bounds.fields, lowKeyInclusive, highKeyInclusive);
         } else {
             // Index bounds cannot be represented as valid low/high keys.
@@ -995,8 +983,8 @@ IndexIntervals makeIntervalsFromIndexBounds(const IndexBounds& bounds,
         LOGV2_DEBUG(4742906,
                     5,
                     "Generated interval [lowKey, highKey]",
-                    "lowKey"_attr = lowKey,
-                    "highKey"_attr = highKey);
+                    "lowKey"_attr = redact(lowKey),
+                    "highKey"_attr = redact(highKey));
         result.push_back(makeKeyStringPair(
             lowKey, lowKeyInclusive, highKey, highKeyInclusive, version, ordering, forward));
     }
@@ -1130,7 +1118,11 @@ std::pair<SbStage, PlanStageSlots> generateIndexScanWithDynamicBoundsImpl(
     }
 
     if (ixn->shouldDedup) {
-        stage = b.makeUnique(std::move(stage), outputs.get(PlanStageSlots::kRecordId));
+        if (collection->isClustered()) {
+            stage = b.makeUnique(std::move(stage), outputs.get(PlanStageSlots::kRecordId));
+        } else {
+            stage = b.makeUniqueRoaring(std::move(stage), outputs.get(PlanStageSlots::kRecordId));
+        }
     }
 
     if (ixn->filter) {

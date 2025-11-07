@@ -267,7 +267,15 @@ __cursor_valid_insert(WT_CURSOR_BTREE *cbt, WT_ITEM *key, bool *valid, bool chec
             return (0);
     }
 
-    WT_RET(__wt_txn_read_upd_list(session, cbt, cbt->ins->upd));
+    if (CUR2BT(cbt)->type == BTREE_ROW) {
+        WT_ITEM tmp_key;
+        tmp_key.data = WT_INSERT_KEY(cbt->ins);
+        tmp_key.size = WT_INSERT_KEY_SIZE(cbt->ins);
+        WT_RET(__wt_txn_read_upd_list(session, cbt, &tmp_key, WT_RECNO_OOB, cbt->ins->upd));
+    } else
+        WT_RET(
+          __wt_txn_read_upd_list(session, cbt, NULL, WT_INSERT_RECNO(cbt->ins), cbt->ins->upd));
+
     *valid =
       cbt->upd_value->type != WT_UPDATE_INVALID && cbt->upd_value->type != WT_UPDATE_TOMBSTONE;
     return (0);
@@ -650,18 +658,7 @@ __wt_btcur_search_prepared(WT_CURSOR *cursor, WT_UPDATE **updp)
     F_CLR(&cbt->iface, WT_CURSTD_KEY_ONLY);
     /*
      * The following assertion relies on the fact that for every prepared update there must be an
-     * associated key. However this is only true if we pin the page to prevent eviction. By calling
-     * into the standard search function we avoid releasing our hazard pointer between update chain
-     * resolutions. It also depends on sorting the transaction modifications by key, if we didn't do
-     * that we would unpin the page between searches and later come back to the same key. We rely on
-     * resolving all updates for a single key in sequence.
-     *
-     * This is a complex scenario, suppose we have two updates to the same key by our transaction,
-     * and are resolving the prepared updates. The first pass resolves the update chain, now if we
-     * let eviction run it could evict the page and it will treat the update chain as a regular non
-     * prepared update chain. If we were rolling back the transaction the key may not exist after
-     * eviction, similarly if we wrote a globally visible tombstone. Thus our second attempt at
-     * resolution would fail as it wouldn't find a key.
+     * associated key and we only resolve the same key once.
      */
     WT_ASSERT_ALWAYS(
       CUR2S(cursor), ret == 0, "A valid key must exist when resolving prepared updates.");
@@ -680,6 +677,14 @@ __wt_btcur_search_prepared(WT_CURSOR *cursor, WT_UPDATE **updp)
             upd = cbt->ref->page->modify->mod_row_update[cbt->slot];
         break;
     case BTREE_COL_FIX:
+        /*
+         * Any update must be in the insert list and we want the most recent update (any update
+         * attempted after the prepare would have failed).
+         */
+        if (cbt->ins != NULL)
+            upd = cbt->ins->upd;
+
+        break;
     case BTREE_COL_VAR:
         /*
          * Any update must be in the insert list and we want the most recent update (any update
@@ -687,6 +692,7 @@ __wt_btcur_search_prepared(WT_CURSOR *cursor, WT_UPDATE **updp)
          */
         if (cbt->ins != NULL)
             upd = cbt->ins->upd;
+
         break;
     }
 
@@ -706,7 +712,7 @@ __cursor_reposition_timing_stress(WT_SESSION_IMPL *session)
     conn = S2C(session);
 
     if (FLD_ISSET(conn->timing_stress_flags, WT_TIMING_STRESS_EVICT_REPOSITION) &&
-      __wt_random(&session->rnd) % 10 == 0)
+      __wt_random(&session->rnd_random) % 10 == 0)
         return (true);
 
     return (false);

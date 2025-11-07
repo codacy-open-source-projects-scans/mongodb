@@ -4,6 +4,7 @@
 
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {getUUIDFromConfigCollections} from "jstests/libs/uuid_util.js";
+import {ShardVersioningUtil} from "jstests/sharding/libs/shard_versioning_util.js";
 
 TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 // Test deliberately keeps range deletion in pending state.
@@ -22,19 +23,18 @@ function setup() {
         // hours). For this test, we need a shorter election timeout because it relies on nodes
         // running an election when they do not detect an active primary. Therefore, we are setting
         // the electionTimeoutMillis to its default value.
-        initiateWithDefaultElectionTimeout: true
+        initiateWithDefaultElectionTimeout: true,
     });
 
     // Create a sharded collection with two chunks: [-inf, 50), [50, inf)
-    assert.commandWorked(
-        st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+    assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
     assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {x: 1}}));
     assert.commandWorked(st.s.adminCommand({split: ns, middle: {x: 50}}));
 
     return st;
 }
 
-function writeRangeDeletionTask(collectionUuid, shardConn, pending, numOrphans) {
+function writeRangeDeletionTask(collectionUuid, shardConn, pending, numOrphans, shardVersion) {
     let deletionTask = {
         _id: UUID(),
         nss: ns,
@@ -42,11 +42,11 @@ function writeRangeDeletionTask(collectionUuid, shardConn, pending, numOrphans) 
         donorShardId: "unused",
         numOrphanDocs: numOrphans,
         range: {min: {x: 50}, max: {x: MaxKey}},
-        whenToClean: "now"
+        whenToClean: "now",
+        preMigrationShardVersion: shardVersion,
     };
 
-    if (pending)
-        deletionTask.pending = true;
+    if (pending) deletionTask.pending = true;
 
     let deletionsColl = shardConn.getCollection(rangeDeletionNs);
 
@@ -55,16 +55,16 @@ function writeRangeDeletionTask(collectionUuid, shardConn, pending, numOrphans) 
 }
 
 (() => {
-    jsTestLog(
-        "Test normal case where the pending field has been removed and the orphans are deleted");
+    jsTestLog("Test normal case where the pending field has been removed and the orphans are deleted");
     let st = setup();
 
     let testDB = st.s.getDB(dbName);
     let testColl = testDB.foo;
 
     // Move chunk [50, inf) to shard1.
-    assert.commandWorked(st.s.adminCommand(
-        {moveChunk: ns, find: {x: 50}, to: st.shard1.shardName, _waitForDelete: true}));
+    assert.commandWorked(
+        st.s.adminCommand({moveChunk: ns, find: {x: 50}, to: st.shard1.shardName, _waitForDelete: true}),
+    );
 
     let shard0Coll = st.shard0.getCollection(ns);
 
@@ -90,7 +90,8 @@ function writeRangeDeletionTask(collectionUuid, shardConn, pending, numOrphans) 
     assert.eq(shard1Coll.find().itcount(), expectedNumDocsShard1);
 
     const collectionUuid = getUUIDFromConfigCollections(st.s, ns);
-    writeRangeDeletionTask(collectionUuid, st.shard0, false, orphanCount);
+    const shardVersion = ShardVersioningUtil.getShardVersion(st.shard0, ns, true /* waitForRefresh */);
+    writeRangeDeletionTask(collectionUuid, st.shard0, false, orphanCount, shardVersion);
 
     // Step down current primary.
     let originalShard0Primary = st.rs0.getPrimary();
@@ -116,8 +117,9 @@ function writeRangeDeletionTask(collectionUuid, shardConn, pending, numOrphans) 
     let testColl = testDB.foo;
 
     // Move chunk [50, inf) to shard1.
-    assert.commandWorked(st.s.adminCommand(
-        {moveChunk: ns, find: {x: 50}, to: st.shard1.shardName, _waitForDelete: true}));
+    assert.commandWorked(
+        st.s.adminCommand({moveChunk: ns, find: {x: 50}, to: st.shard1.shardName, _waitForDelete: true}),
+    );
 
     let shard0Coll = st.shard0.getCollection(ns);
 
@@ -129,7 +131,8 @@ function writeRangeDeletionTask(collectionUuid, shardConn, pending, numOrphans) 
     }
 
     const collectionUuid = getUUIDFromConfigCollections(st.s, ns);
-    writeRangeDeletionTask(collectionUuid, st.shard0, true, orphanCount);
+    const shardVersion = ShardVersioningUtil.getShardVersion(st.shard0, ns, true /* waitForRefresh */);
+    writeRangeDeletionTask(collectionUuid, st.shard0, true, orphanCount, shardVersion);
 
     const expectedNumDocsTotal = 0;
     const expectedNumDocsShard0 = 0;

@@ -27,17 +27,17 @@
  *    it in the license file.
  */
 
-#include <benchmark/benchmark.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/record_store_test_harness.h"
 #include "mongo/logv2/log_domain_global.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/unittest/unittest.h"
+
+#include <benchmark/benchmark.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -58,16 +58,22 @@ struct Fixture {
     Fixture(Direction direction, int nToInsert, bool capped = false)
         : nToInsert(nToInsert),
           harness(newRecordStoreHarnessHelper()),
-          rs(harness->newRecordStore("ns", CollectionOptions{.capped = capped})),
+          rs(harness->newRecordStore("ns", RecordStore::Options{.isCapped = capped})),
           opCtx(harness->newOperationContext()),
-          cursor(rs->getCursor(opCtx.get(), direction == kForward)) {
+          cursor(rs->getCursor(opCtx.get(),
+                               *shard_role_details::getRecoveryUnit(opCtx.get()),
+                               direction == kForward)) {
         char data[] = "data";
         int inserted = 0;
         auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
         while (inserted < nToInsert) {
             StorageWriteTransaction txn(ru);
             for (int i = 0; i < 100; i++) {
-                ASSERT_OK(rs->insertRecord(opCtx.get(), data, strlen(data), Timestamp()));
+                ASSERT_OK(rs->insertRecord(opCtx.get(),
+                                           *shard_role_details::getRecoveryUnit(opCtx.get()),
+                                           data,
+                                           strlen(data),
+                                           Timestamp()));
                 inserted++;
             }
             txn.commit();
@@ -87,13 +93,14 @@ void BM_RecordStoreSeek(benchmark::State& state,
                         Direction direction,
                         SeekableRecordCursor::BoundInclusion boundInclusion) {
     Fixture fix(direction, 100'000);
+    auto& ru = *shard_role_details::getRecoveryUnit(fix.opCtx.get());
     for (auto _ : state) {
         fix.cursor->seek(RecordId(50'000), boundInclusion);
 
         state.PauseTiming();
         fix.itemsProcessed += 1;
         fix.cursor->saveUnpositioned();
-        fix.cursor->restore();
+        fix.cursor->restore(ru);
         state.ResumeTiming();
     }
     state.SetItemsProcessed(fix.itemsProcessed);
@@ -152,10 +159,11 @@ void BM_RecordStoreAdvance(benchmark::State& state, Direction direction) {
 
 void BM_RecordStoreSaveRestore(benchmark::State& state) {
     Fixture fix(kForward, 100'000);
+    auto& ru = *shard_role_details::getRecoveryUnit(fix.opCtx.get());
     for (auto _ : state) {
         fix.cursor->seekExact(RecordId(1));
         fix.cursor->save();
-        fix.cursor->restore();
+        fix.cursor->restore(ru);
         fix.itemsProcessed += 1;
     }
     state.SetItemsProcessed(fix.itemsProcessed);

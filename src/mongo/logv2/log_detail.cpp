@@ -29,23 +29,24 @@
 
 
 #include <algorithm>
+#include <cerrno>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <new>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <variant>
+
 #include <boost/log/attributes/attribute_value.hpp>
 #include <boost/log/attributes/attribute_value_impl.hpp>
 #include <boost/log/attributes/attribute_value_set.hpp>
 #include <boost/log/core/record.hpp>
 #include <boost/smart_ptr/intrusive_ref_counter.hpp>
-#include <cerrno>
-#include <cstddef>
-#include <cstdint>
-#include <deque>
+#include <fmt/args.h>
 #include <fmt/format.h>
-#include <functional>
-#include <new>
-#include <string>
-#include <string_view>
-#include <system_error>
-#include <utility>
-#include <variant>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 
 #ifdef _WIN32
@@ -95,9 +96,9 @@ bool loggingInProgress() {
 void signalSafeWriteToStderr(StringData message) {
     while (!message.empty()) {
 #if defined(_WIN32)
-        auto ret = _write(_fileno(stderr), message.rawData(), message.size());
+        auto ret = _write(_fileno(stderr), message.data(), message.size());
 #else
-        auto ret = write(STDERR_FILENO, message.rawData(), message.size());
+        auto ret = write(STDERR_FILENO, message.data(), message.size());
 #endif
         if (ret == -1) {
             if (lastPosixError() == posixError(EINTR)) {
@@ -119,10 +120,19 @@ GetTenantIDFn& getTenantID() {
     static StaticImmortal<GetTenantIDFn> fn;
     return *fn;
 }
+LogCounterCallback& getLogCounterCallback() {
+    static StaticImmortal<LogCounterCallback> fn{[]() {
+    }};
+    return *fn;
+}
 }  // namespace
 
 void setGetTenantIDCallback(GetTenantIDFn&& fn) {
     getTenantID() = std::move(fn);
+}
+
+void setLogCounterCallback(LogCounterCallback cb) {
+    getLogCounterCallback() = std::move(cb);
 }
 
 struct UnstructuredValueExtractor {
@@ -203,28 +213,55 @@ static void checkUniqueAttrs(int32_t id, const TypeErasedAttributeStorage& attrs
         StringData sep;
         std::string msg;
         for (auto&& a : attrs) {
-            msg.append(format(FMT_STRING(R"({}"{}")"), sep, a.name));
+            msg.append(fmt::format(R"({}"{}")", sep, a.name));
             sep = ","_sd;
         }
-        uasserted(4793301, format(FMT_STRING("LOGV2 (id={}) attribute collision: [{}]"), id, msg));
+        uasserted(4793301, fmt::format("LOGV2 (id={}) attribute collision: [{}]", id, msg));
     }
 }
 
-void doSafeLog(int32_t id,
-               LogSeverity const& severity,
-               LogOptions const& options,
-               StringData message,
-               TypeErasedAttributeStorage const& attrs) {
-
-    signalSafeWriteToStderr(
-        format(FMT_STRING("{}({}): {}\n"), severity.toStringData(), id, message));
+static void doSafeLog(StringData reason,
+                      int32_t id,
+                      LogSeverity const& severity,
+                      LogOptions const& options,
+                      StringData message,
+                      TypeErasedAttributeStorage const& attrs) {
+    std::string s;
+    s += fmt::format("SafeLog: {{\n");
+    s += fmt::format("    reason: {:?},\n", reason);
+    s += fmt::format("    loggingDepth: {},\n", loggingDepth);
+    s += fmt::format("    t: {:?},\n", Date_t::now().toString());
+    s += fmt::format("    severity: {:?},\n", severity.toStringData());
+    s += fmt::format("    id: {},\n", id);
+    s += fmt::format("    ctx: {:?},\n", getThreadName());
+    s += fmt::format("    message: {:?},\n", message);
+    if (!attrs.empty()) {
+        s += fmt::format("    attrs: {{\n");
+        attrs.apply([&]<typename T>(StringData name, const T& val) {
+            s += fmt::format("        {{\n");
+            s += fmt::format("            name: {:?},\n", name);
+            s += fmt::format("            type: {:?},\n", demangleName(typeid(T)));
+            if constexpr (std::is_integral_v<T>) {
+                s += fmt::format("            value: {},\n", val);
+            } else if constexpr (std::is_convertible_v<T, StringData>) {
+                s += fmt::format("            value: {:?},\n", StringData{val});
+            } else {
+                s += fmt::format("            value: {:?},\n", "<unsupported>");
+            }
+            s += fmt::format("        }},\n");
+        });
+        s += fmt::format("    }},\n");
+    }
+    s += fmt::format("}}\n");
+    signalSafeWriteToStderr(s);
 }
 
 void _doLogImpl(int32_t id,
                 LogSeverity const& severity,
                 LogOptions const& options,
                 StringData message,
-                TypeErasedAttributeStorage const& attrs) {
+                TypeErasedAttributeStorage const& attrs,
+                bool devStacktraces = false) {
     dassert(options.component() != LogComponent::kNumLogComponents);
     // TestingProctor isEnabled cannot be called before it has been
     // initialized. But log statements occurring earlier than that still need
@@ -254,6 +291,13 @@ void _doLogImpl(int32_t id,
                 new boost::log::attributes::attribute_value_impl<TypeErasedAttributeStorage>(
                     attrs)));
 
+#ifdef MONGO_CONFIG_DEV_STACKTRACE
+        record.attribute_values().insert(
+            attributes::devStacktrace(),
+            boost::log::attribute_value(
+                new boost::log::attributes::attribute_value_impl<bool>(devStacktraces)));
+#endif
+
         if (auto fn = getTenantID()) {
             auto tenant = fn();
             if (!tenant.empty()) {
@@ -265,6 +309,7 @@ void _doLogImpl(int32_t id,
         }
 
         source.push_record(std::move(record));
+        getLogCounterCallback()();
     }
 }
 
@@ -272,9 +317,10 @@ void doLogImpl(int32_t id,
                LogSeverity const& severity,
                LogOptions const& options,
                StringData message,
-               TypeErasedAttributeStorage const& attrs) {
+               TypeErasedAttributeStorage const& attrs,
+               bool devStacktraces) {
     if (loggingInProgress()) {
-        doSafeLog(id, severity, options, message, attrs);
+        doSafeLog("Logging in Progress", id, severity, options, message, attrs);
         return;
     }
 
@@ -284,7 +330,7 @@ void doLogImpl(int32_t id,
     };
 
     try {
-        _doLogImpl(id, severity, options, message, attrs);
+        _doLogImpl(id, severity, options, message, attrs, devStacktraces);
     } catch (const fmt::format_error& ex) {
         _doLogImpl(4638200,
                    LogSeverity::Error(),
@@ -292,9 +338,9 @@ void doLogImpl(int32_t id,
                    "Exception during log"_sd,
                    AttributeStorage{"original_msg"_attr = message, "what"_attr = ex.what()});
 
-        invariant(!kDebugBuild, format(FMT_STRING("Exception during log: {}"), ex.what()));
+        invariant(!kDebugBuild, fmt::format("Exception during log: {}", ex.what()));
     } catch (...) {
-        doSafeLog(id, severity, options, message, attrs);
+        doSafeLog("Exception while creating log record", id, severity, options, message, attrs);
         throw;
     }
 }
@@ -307,8 +353,7 @@ void doUnstructuredLogImpl(LogSeverity const& severity,  // NOLINT
     UnstructuredValueExtractor extractor;
     extractor.reserve(attrs.size());
     attrs.apply(extractor);
-    auto formatted =
-        fmt::vformat(std::string_view{message.rawData(), message.size()}, extractor.args());
+    auto formatted = fmt::vformat(toStdStringViewForInterop(message), extractor.args());
 
     doLogImpl(0, severity, options, formatted, TypeErasedAttributeStorage());
 }

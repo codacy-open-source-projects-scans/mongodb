@@ -31,41 +31,33 @@
  * This file contains tests for mongo/db/query/plan_cache/plan_cache.h
  */
 
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <fmt/format.h>
-#include <memory>
-#include <type_traits>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/plan_cache/plan_cache.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_mock.h"
 #include "mongo/db/exec/index_path_projection.h"
 #include "mongo/db/exec/plan_cache_util.h"
-#include "mongo/db/field_ref.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/wildcard_key_generator.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback_noop.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_mock.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role_mock.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/canonical_query_test_util.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/index_entry.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
-#include "mongo/db/query/plan_cache/plan_cache.h"
 #include "mongo/db/query/plan_cache/plan_cache_indexability.h"
 #include "mongo/db/query/plan_cache/plan_cache_key_factory.h"
 #include "mongo/db/query/plan_cache/plan_cache_key_info.h"
@@ -76,21 +68,20 @@
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_planner_test_lib.h"
 #include "mongo/db/query/query_request_helper.h"
-#include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/query_test_service_context.h"
-#include "mongo/db/query/stage_types.h"
 #include "mongo/db/service_context.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+
+#include <boost/cstdint.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -113,7 +104,7 @@ protected:
         }
         str::stream ss;
         ss << "Canonical query should be cacheable: " << query.toString();
-        FAIL(ss);
+        FAIL(std::string(ss));
     }
 
     void assertShouldNotCacheQuery(const CanonicalQuery& query) {
@@ -122,7 +113,7 @@ protected:
         }
         str::stream ss;
         ss << "Canonical query should not be cacheable: " << query.toString();
-        FAIL(ss);
+        FAIL(std::string(ss));
     }
 
     void assertShouldNotCacheQuery(const BSONObj& query) {
@@ -159,7 +150,7 @@ std::pair<IndexEntry, std::unique_ptr<WildcardProjection>> makeWildcardEntry(BSO
         WildcardKeyGenerator::createProjectionExecutor(keyPattern, {}));
     return {IndexEntry(keyPattern,
                        IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                       IndexDescriptor::kLatestIndexVersion,
+                       IndexConfig::kLatestIndexVersion,
                        false,  // multikey
                        {},
                        {},
@@ -328,6 +319,15 @@ TEST_F(PlanCacheTest, ShouldNotCacheQueryExplain) {
 TEST_F(PlanCacheTest, ShouldNotCacheQueryTriviallyFalse) {
     std::unique_ptr<CanonicalQuery> cq(canonicalize("{$alwaysFalse: 1}"));
     ASSERT_TRUE(cq->getPrimaryMatchExpression()->isTriviallyFalse());
+    assertShouldNotCacheQuery(*cq);
+}
+
+TEST_F(PlanCacheTest, ShouldNotCacheIfCachingDisabled) {
+    bool oldDisablePlanCache = internalQueryDisablePlanCache.load();
+    ON_BLOCK_EXIT(
+        [oldDisablePlanCache] { internalQueryDisablePlanCache.store(oldDisablePlanCache); });
+    internalQueryDisablePlanCache.store(true);
+    std::unique_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
     assertShouldNotCacheQuery(*cq);
 }
 
@@ -939,14 +939,14 @@ class CachePlanSelectionTest : public unittest::Test {
 protected:
     void setUp() override {
         params.mainCollectionInfo.options = QueryPlannerParams::INCLUDE_COLLSCAN;
-        addIndex(BSON("_id" << 1), IndexConstants::kIdIndexName.toString());
+        addIndex(BSON("_id" << 1), std::string{IndexConstants::kIdIndexName});
     }
 
     void addIndex(BSONObj keyPattern, const std::string& indexName, bool multikey = false) {
         params.mainCollectionInfo.indexes.push_back(
             IndexEntry(keyPattern,
                        IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                       IndexDescriptor::kLatestIndexVersion,
+                       IndexConfig::kLatestIndexVersion,
                        multikey,
                        {},
                        {},
@@ -963,7 +963,7 @@ protected:
         params.mainCollectionInfo.indexes.push_back(
             IndexEntry(keyPattern,
                        IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                       IndexDescriptor::kLatestIndexVersion,
+                       IndexConfig::kLatestIndexVersion,
                        multikey,
                        {},
                        {},
@@ -979,7 +979,7 @@ protected:
     void addIndex(BSONObj keyPattern, const std::string& indexName, CollatorInterface* collator) {
         IndexEntry entry(keyPattern,
                          IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                         IndexDescriptor::kLatestIndexVersion,
+                         IndexConfig::kLatestIndexVersion,
                          false,
                          {},
                          {},
@@ -1145,7 +1145,7 @@ protected:
         ss << "expected " << numMatches << " matches for solution " << solnJson << " but got "
            << matches << " instead. all solutions generated: " << '\n';
         dumpSolutions(ss);
-        FAIL(ss);
+        FAIL(std::string(ss));
     }
 
     /**
@@ -1223,7 +1223,7 @@ protected:
         ss << "Could not find a match for solution " << solnJson
            << " All solutions generated: " << '\n';
         dumpSolutions(ss);
-        FAIL(ss);
+        FAIL(std::string(ss));
 
         return nullptr;
     }
@@ -1242,7 +1242,7 @@ protected:
             ss << "Expected solution " << solnJson
                << " did not match true solution: " << trueSoln->toString()
                << ". Reason: " << matchStatus.reason() << '\n';
-            FAIL(ss);
+            FAIL(std::string(ss));
         }
     }
 
@@ -1322,9 +1322,7 @@ TEST_F(CachePlanSelectionTest, EqualityIndexScanWithTrailingFields) {
 //
 
 TEST_F(CachePlanSelectionTest, Basic2DSphereNonNear) {
-    addIndex(BSON("a"
-                  << "2dsphere"),
-             "a_2dsphere");
+    addIndex(BSON("a" << "2dsphere"), "a_2dsphere");
     BSONObj query;
 
     query = fromjson(
@@ -1339,9 +1337,7 @@ TEST_F(CachePlanSelectionTest, Basic2DSphereNonNear) {
 }
 
 TEST_F(CachePlanSelectionTest, Basic2DSphereGeoNear) {
-    addIndex(BSON("a"
-                  << "2dsphere"),
-             "a_2dsphere");
+    addIndex(BSON("a" << "2dsphere"), "a_2dsphere");
     BSONObj query;
 
     query = fromjson("{a: {$nearSphere: [0,0], $maxDistance: 0.31 }}");
@@ -1382,12 +1378,8 @@ TEST_F(CachePlanSelectionTest, TwoDSphereNoGeoPred) {
 }
 
 TEST_F(CachePlanSelectionTest, Or2DSphereNonNear) {
-    addIndex(BSON("a"
-                  << "2dsphere"),
-             "a_2dsphere");
-    addIndex(BSON("b"
-                  << "2dsphere"),
-             "b_2dsphere");
+    addIndex(BSON("a" << "2dsphere"), "a_2dsphere");
+    addIndex(BSON("b" << "2dsphere"), "b_2dsphere");
     BSONObj query = fromjson(
         "{$or: [ {a: {$geoIntersects: {$geometry: {type: 'Point', coordinates: [10.0, 10.0]}}}},"
         " {b: {$geoWithin: { $centerSphere: [[ 10, 20 ], 0.01 ] } }} ]}");
@@ -1402,9 +1394,8 @@ TEST_F(CachePlanSelectionTest, Or2DSphereNonNear) {
 // Regression test for SERVER-24320. Tests that the PlanCacheIndexTree has the same sort order as
 // the MatchExpression used to generate the plan cache key.
 TEST_F(CachePlanSelectionTest, AndWithinPolygonWithinCenterSphere) {
-    addIndex(BSON("a"
-                  << "2dsphere"
-                  << "b" << 1),
+    addIndex(BSON("a" << "2dsphere"
+                      << "b" << 1),
              "a_2dsphere_b_2dsphere");
 
     BSONObj query = fromjson(
@@ -1634,6 +1625,9 @@ TEST_F(CachePlanSelectionTest, CachedPlanForCompoundMultikeyIndexCanCompoundBoun
 
 TEST_F(CachePlanSelectionTest,
        CachedPlanForSelfIntersectionOfMultikeyIndexPointRangesCannotIntersectBounds) {
+    // Enable a merge sort based index intersection plan to be generated.
+    RAIIServerParameterControllerForTest truncateFeatureFlag{
+        "internalQueryPlannerEnableSortIndexIntersection", true};
     params.mainCollectionInfo.options =
         QueryPlannerParams::NO_TABLE_SCAN | QueryPlannerParams::INDEX_INTERSECTION;
 
@@ -1677,6 +1671,9 @@ TEST_F(CachePlanSelectionTest,
 
 
 TEST_F(CachePlanSelectionTest, CachedPlanForIntersectionOfMultikeyIndexesWhenUsingElemMatch) {
+    // Enable a merge sort based index intersection plan to be generated.
+    RAIIServerParameterControllerForTest truncateFeatureFlag{
+        "internalQueryPlannerEnableSortIndexIntersection", true};
     params.mainCollectionInfo.options =
         QueryPlannerParams::NO_TABLE_SCAN | QueryPlannerParams::INDEX_INTERSECTION;
 
@@ -1709,7 +1706,7 @@ TEST_F(CachePlanSelectionTest, CachedPlanForIntersectionWithNonMultikeyIndexCanI
     addIndex(BSON("a.b" << 1), "a.b_1", multikey);
     addIndex(BSON("a.c" << 1), "a.c_1", !multikey);
 
-    BSONObj query = fromjson("{'a.b': 2, 'a.c': {$gte: 0, $lt: 10}}}}");
+    BSONObj query = fromjson("{'a.b': 2, 'a.c': {$gte: 0, $lt: 10}}");
     runQuery(query);
 
     assertPlanCacheRecoversSolution(
@@ -1724,9 +1721,7 @@ TEST_F(CachePlanSelectionTest, CachedPlanForIntersectionWithNonMultikeyIndexCanI
 //
 
 TEST_F(CachePlanSelectionTest, GeoNear2DNotCached) {
-    addIndex(BSON("a"
-                  << "2d"),
-             "a_2d");
+    addIndex(BSON("a" << "2d"), "a_2d");
     runQuery(fromjson("{a: {$near: [0,0], $maxDistance:0.3 }}"));
     assertNotCached("{geoNear2d: {a: '2d'}}");
 }
@@ -1770,9 +1765,7 @@ TEST_F(CachePlanSelectionTest, HintValidNotCached) {
 //
 
 TEST_F(CachePlanSelectionTest, Basic2DNonNearNotCached) {
-    addIndex(BSON("a"
-                  << "2d"),
-             "a_2d");
+    addIndex(BSON("a" << "2d"), "a_2d");
     BSONObj query;
 
     // Polygon
@@ -1797,12 +1790,8 @@ TEST_F(CachePlanSelectionTest, Basic2DNonNearNotCached) {
 }
 
 TEST_F(CachePlanSelectionTest, Or2DNonNearNotCached) {
-    addIndex(BSON("a"
-                  << "2d"),
-             "a_2d");
-    addIndex(BSON("b"
-                  << "2d"),
-             "b_2d");
+    addIndex(BSON("a" << "2d"), "a_2d");
+    addIndex(BSON("b" << "2d"), "b_2d");
     BSONObj query = fromjson(
         "{$or: [ {a : { $within : { $polygon : [[0,0], [2,0], [4,0]] } }},"
         " {b : { $within : { $center : [[ 5, 5 ], 7 ] } }} ]}");
@@ -1824,12 +1813,10 @@ TEST_F(CachePlanSelectionTest, MatchingCollation) {
         fromjson("{find: 'testns', filter: {x: 'foo'}, collation: {locale: 'mock_reverse_string'}, "
                  "'$db': 'test'}"));
 
-    assertPlanCacheRecoversSolution(BSON("x"
-                                         << "bar"),
+    assertPlanCacheRecoversSolution(BSON("x" << "bar"),
                                     BSONObj(),
                                     BSONObj(),
-                                    BSON("locale"
-                                         << "mock_reverse_string"),
+                                    BSON("locale" << "mock_reverse_string"),
                                     "{fetch: {node: {ixscan: {pattern: {x: 1}}}}}");
 }
 
@@ -2162,6 +2149,27 @@ TEST_F(PlanCacheTest, PlanCacheMaxSizeParameterCanBeZero) {
     ASSERT_EQ(0U, planCache.size());
 }
 
+//
+// QS hashing.
+//
+
+TEST_F(CachePlanSelectionTest,
+       RecoveredSolutionWithMatchExpressionHasTheSameTaggedMatchExpressionHash) {
+    addIndex(BSON("x" << 1), "x_1");
+    addIndex(BSON("y" << 1), "y_1");
+
+    // Pick any match expression query.
+    auto query = BSON("x" << 5 << "y" << 1);
+    runQuery(query);
+
+    auto bestSoln =
+        firstMatchingSolution("{fetch: {filter: {x: 5}, node: {ixscan: {pattern: {y: 1}}}}}");
+    ASSERT_NE(0, bestSoln->taggedMatchExpressionHash);
+
+    auto planSoln = planQueryFromCache(query, {}, {}, {}, *bestSoln);
+    ASSERT_EQ(bestSoln->taggedMatchExpressionHash, planSoln->taggedMatchExpressionHash);
+}
+
 /**
  * Tests specifically for SBE plan cache.
  */
@@ -2170,20 +2178,25 @@ protected:
     void setUp() override {
         _queryTestServiceContext = std::make_unique<QueryTestServiceContext>();
         _operationContext = _queryTestServiceContext->makeOperationContext();
-        _collection = std::make_unique<CollectionMock>(_nss);
-        _collectionPtr = CollectionPtr(_collection.get());
+        auto collection = std::make_shared<CollectionMock>(_nss);
+        auto catalog = CollectionCatalog::get(_operationContext.get());
+        catalog->onCreateCollection(_operationContext.get(), collection);
+        auto consistentColl = catalog->establishConsistentCollection(
+            _operationContext.get(), _nss, boost::none /* readTimestamp */);
+        _collectionAcq =
+            std::make_unique<CollectionAcquisition>(shard_role_mock::acquireCollectionMocked(
+                _operationContext.get(), _nss, consistentColl));
     }
 
     void tearDown() override {
-        _collectionPtr.reset();
-        _collection.reset();
+        _collectionAcq.reset();
         _operationContext.reset();
         _queryTestServiceContext.reset();
     }
 
     sbe::PlanCacheKey makeSbeKey(const CanonicalQuery& cq) {
         ASSERT_TRUE(cq.isSbeCompatible());
-        return plan_cache_key_factory::make<sbe::PlanCacheKey>(cq, _collectionPtr);
+        return plan_cache_key_factory::make<sbe::PlanCacheKey>(cq, *_collectionAcq);
     }
 
     /**
@@ -2212,8 +2225,6 @@ protected:
                     staticSize + keyRepresentationSize + additionalCollectionSize);
     }
 
-private:
-    static const NamespaceString _nss;
 
     std::unique_ptr<CanonicalQuery> makeCQ(const BSONObj& query,
                                            const BSONObj& sort,
@@ -2252,11 +2263,12 @@ private:
                                  .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     }
 
+private:
+    static const NamespaceString _nss;
     std::unique_ptr<QueryTestServiceContext> _queryTestServiceContext;
 
     ServiceContext::UniqueOperationContext _operationContext;
-    std::unique_ptr<Collection> _collection;
-    CollectionPtr _collectionPtr;
+    std::unique_ptr<CollectionAcquisition> _collectionAcq;
 };
 
 const NamespaceString SbePlanCacheTest::_nss(
@@ -2272,5 +2284,21 @@ TEST_F(SbePlanCacheTest, SBEPlanCacheBudgetTest) {
         "{a: 1, b: 1}", "{a: -1}", "{_id: 0, a: 1}", "{locale: 'mock_reverse_string'}");
 }
 
+TEST_F(SbePlanCacheTest, SBEPlanCacheKeyMakeAndCompare) {
+    std::unique_ptr<CanonicalQuery> cq1 = makeCQ("{a: 5}", "{}", "{_id: 1, a: 1}", "{}");
+    cq1->setSbeCompatible(true);
+    auto sbeKey1 = makeSbeKey(*cq1);
+    std::unique_ptr<CanonicalQuery> cq2 = makeCQ("{a: 5}", "{}", "{_id: 0, a: 1}", "{}");
+    cq2->setSbeCompatible(true);
+    auto sbeKey2 = makeSbeKey(*cq2);
+    ASSERT_NE(sbeKey1, sbeKey2);
+    ASSERT_NE(sbeKey1.planCacheKeyHash(), sbeKey2.planCacheKeyHash());
+}
+
+TEST_F(SbePlanCacheTest, SBEPlanCacheUpdateSize) {
+    ASSERT_OK(plan_cache_util::onPlanCacheSizeUpdate("10%"));
+    ASSERT_OK(plan_cache_util::onPlanCacheSizeUpdate("5MB"));
+    ASSERT_NOT_OK(plan_cache_util::onPlanCacheSizeUpdate("10&"));
+}
 }  // namespace
 }  // namespace mongo

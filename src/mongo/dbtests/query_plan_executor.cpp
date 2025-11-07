@@ -35,9 +35,6 @@
 
 #include <boost/container/small_vector.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -46,27 +43,27 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/exec/collection_scan.h"
+#include "mongo/db/exec/classic/collection_scan.h"
+#include "mongo/db/exec/classic/fetch.h"
+#include "mongo/db/exec/classic/index_scan.h"
+#include "mongo/db/exec/classic/plan_stage.h"
+#include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/collection_scan_common.h"
-#include "mongo/db/exec/fetch.h"
-#include "mongo/db/exec/index_scan.h"
-#include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/exec/working_set.h"
-#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_executor_factory.h"
@@ -76,10 +73,12 @@
 #include "mongo/db/query/tailable_mode_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <boost/move/utility_core.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
@@ -123,7 +122,7 @@ public:
      * capable of executing a simple collection scan.
      */
     unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeCollScanExec(
-        const CollectionPtr* coll,
+        const CollectionAcquisition& coll,
         BSONObj& filterObj,
         PlanYieldPolicy::YieldPolicy yieldPolicy = PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
         TailableModeEnum tailableMode = TailableModeEnum::kNormal) {
@@ -166,10 +165,10 @@ public:
      * over the specified index with the specified bounds.
      */
     unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeIndexScanExec(
-        Database* db, const CollectionPtr* coll, BSONObj& indexSpec, int start, int end) {
+        Database* db, const CollectionAcquisition& coll, BSONObj& indexSpec, int start, int end) {
         // Build the index scan stage.
         auto descriptor = getIndex(db, indexSpec);
-        IndexScanParams ixparams(&_opCtx, *coll, descriptor);
+        IndexScanParams ixparams(&_opCtx, coll.getCollectionPtr(), descriptor);
         ixparams.bounds.isSimpleRange = true;
         ixparams.bounds.startKey = BSON("" << start);
         ixparams.bounds.endKey = BSON("" << end);
@@ -206,7 +205,8 @@ protected:
 
 private:
     const IndexDescriptor* getIndex(Database* db, const BSONObj& obj) {
-        CollectionPtr collection(
+        // TODO(SERVER-103403): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
+        CollectionPtr collection = CollectionPtr::CollectionPtr_UNSAFE(
             CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss));
         std::vector<const IndexDescriptor*> indexes;
         collection->getIndexCatalog()->findIndexesByKeyPattern(
@@ -230,25 +230,38 @@ TEST_F(PlanExecutorTest, DropIndexScanAgg) {
     BSONObj indexSpec = BSON("a" << 1);
     addIndex(indexSpec);
 
-    CollectionPtr collection = ctx.getCollection();
+    auto outerExec = [&]() {
+        const auto collection = ctx.getCollection();
 
-    // Create the aggregation pipeline.
-    std::vector<BSONObj> rawPipeline = {fromjson("{$match: {a: {$gte: 7, $lte: 10}}}")};
+        // Create the aggregation pipeline.
+        std::vector<BSONObj> rawPipeline = {fromjson("{$match: {a: {$gte: 7, $lte: 10}}}")};
 
-    // Create an "inner" plan executor and register it with the cursor manager so that it can
-    // get notified when the collection is dropped.
-    unique_ptr<PlanExecutor, PlanExecutor::Deleter> innerExec(
-        makeIndexScanExec(ctx.db(), &collection, indexSpec, 7, 10));
+        // Create an "inner" plan executor and register it with the cursor manager so that it can
+        // get notified when the collection is dropped.
+        unique_ptr<PlanExecutor, PlanExecutor::Deleter> innerExec(
+            makeIndexScanExec(ctx.db(), collection, indexSpec, 7, 10));
 
-    // Wrap the "inner" plan executor in a DocumentSourceCursor and add it as the first source
-    // in the pipeline.
-    innerExec->saveState();
-    MultipleCollectionAccessor collections(collection);
-    auto cursorSource = DocumentSourceCursor::create(
-        collections, std::move(innerExec), _expCtx, DocumentSourceCursor::CursorType::kRegular);
-    auto pipeline = Pipeline::create({cursorSource}, _expCtx);
+        // Wrap the "inner" plan executor in a DocumentSourceCursor and add it as the first source
+        // in the pipeline.
+        innerExec->saveState();
+        MultipleCollectionAccessor collections(collection);
+        auto transactionResourcesStasher =
+            make_intrusive<ShardRoleTransactionResourcesStasherForPipeline>();
+        auto catalogResourceHandle =
+            make_intrusive<DSCursorCatalogResourceHandle>(transactionResourcesStasher);
+        auto cursorSource =
+            DocumentSourceCursor::create(collections,
+                                         std::move(innerExec),
+                                         catalogResourceHandle,
+                                         _expCtx,
+                                         DocumentSourceCursor::CursorType::kRegular);
+        auto pipeline = Pipeline::create({cursorSource}, _expCtx);
 
-    auto outerExec = plan_executor_factory::make(_expCtx, std::move(pipeline));
+        // Stash the ShardRole resources.
+        stashTransactionResourcesFromOperationContext(&_opCtx, transactionResourcesStasher.get());
+
+        return plan_executor_factory::make(_expCtx, std::move(pipeline));
+    }();
 
     dropCollection();
 
@@ -266,8 +279,8 @@ TEST_F(PlanExecutorTest, ShouldReportErrorIfExceedsTimeLimitDuringYield) {
 
     BSONObj filterObj = fromjson("{_id: {$gt: 0}}");
 
-    CollectionPtr coll = ctx.getCollection();
-    auto exec = makeCollScanExec(&coll, filterObj, PlanYieldPolicy::YieldPolicy::ALWAYS_TIME_OUT);
+    auto coll = ctx.getCollection();
+    auto exec = makeCollScanExec(coll, filterObj, PlanYieldPolicy::YieldPolicy::ALWAYS_TIME_OUT);
 
     BSONObj resultObj;
     ASSERT_THROWS_CODE_AND_WHAT(exec->getNext(&resultObj, nullptr),
@@ -283,8 +296,8 @@ TEST_F(PlanExecutorTest, ShouldReportErrorIfKilledDuringYieldButIsTailableAndAwa
 
     BSONObj filterObj = fromjson("{_id: {$gt: 0}}");
 
-    CollectionPtr coll = ctx.getCollection();
-    auto exec = makeCollScanExec(&coll,
+    auto coll = ctx.getCollection();
+    auto exec = makeCollScanExec(coll,
                                  filterObj,
                                  PlanYieldPolicy::YieldPolicy::ALWAYS_TIME_OUT,
                                  TailableModeEnum::kTailableAndAwaitData);
@@ -303,8 +316,8 @@ TEST_F(PlanExecutorTest, ShouldNotSwallowExceedsTimeLimitDuringYieldButIsTailabl
 
     BSONObj filterObj = fromjson("{_id: {$gt: 0}}");
 
-    CollectionPtr coll = ctx.getCollection();
-    auto exec = makeCollScanExec(&coll,
+    auto coll = ctx.getCollection();
+    auto exec = makeCollScanExec(coll,
                                  filterObj,
                                  PlanYieldPolicy::YieldPolicy::ALWAYS_TIME_OUT,
                                  TailableModeEnum::kTailable);
@@ -323,9 +336,8 @@ TEST_F(PlanExecutorTest, ShouldReportErrorIfKilledDuringYield) {
 
     BSONObj filterObj = fromjson("{_id: {$gt: 0}}");
 
-    CollectionPtr coll = ctx.getCollection();
-    auto exec =
-        makeCollScanExec(&coll, filterObj, PlanYieldPolicy::YieldPolicy::ALWAYS_MARK_KILLED);
+    auto coll = ctx.getCollection();
+    auto exec = makeCollScanExec(coll, filterObj, PlanYieldPolicy::YieldPolicy::ALWAYS_MARK_KILLED);
 
     BSONObj resultObj;
     ASSERT_THROWS_CODE_AND_WHAT(exec->getNext(&resultObj, nullptr),
@@ -389,8 +401,8 @@ TEST_F(PlanExecutorSnapshotTest, SnapshotControl) {
 
     BSONObj filterObj = fromjson("{a: {$gte: 2}}");
 
-    CollectionPtr coll = ctx.getCollection();
-    auto exec = makeCollScanExec(&coll, filterObj);
+    auto coll = ctx.getCollection();
+    auto exec = makeCollScanExec(coll, filterObj);
 
     BSONObj objOut;
     ASSERT_EQUALS(PlanExecutor::ADVANCED, exec->getNext(&objOut, nullptr));
@@ -414,8 +426,8 @@ TEST_F(PlanExecutorSnapshotTest, SnapshotTest) {
     addIndex(indexSpec);
 
     BSONObj filterObj = fromjson("{a: {$gte: 2}}");
-    CollectionPtr coll = ctx.getCollection();
-    auto exec = makeIndexScanExec(ctx.db(), &coll, indexSpec, 2, 5);
+    const auto coll = ctx.getCollection();
+    auto exec = makeIndexScanExec(ctx.db(), coll, indexSpec, 2, 5);
 
     BSONObj objOut;
     ASSERT_EQUALS(PlanExecutor::ADVANCED, exec->getNext(&objOut, nullptr));

@@ -27,47 +27,40 @@
  *    it in the license file.
  */
 
-// IWYU pragma: no_include "ext/alloc_traits.h"
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <fmt/format.h>
-#include <limits>
-#include <ostream>
-#include <utility>
+#include "mongo/db/op_observer/op_observer_impl.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/dbclient_cursor.h"
-#include "mongo/db/catalog/collection_options_gen.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/import_collection_oplog_entry_gen.h"
-#include "mongo/db/catalog/local_oplog_info.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/clustered_collection_util.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options_gen.h"
+#include "mongo/db/local_catalog/create_collection.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/import_collection_oplog_entry_gen.h"
+#include "mongo/db/local_catalog/local_oplog_info.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/batched_write_context.h"
 #include "mongo/db/op_observer/change_stream_pre_images_op_observer.h"
 #include "mongo/db/op_observer/find_and_modify_images_op_observer.h"
-#include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/op_observer/operation_logger_impl.h"
@@ -85,39 +78,49 @@
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/oplog_interface.h"
 #include "mongo/db/repl/oplog_interface_local.h"
+#include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
+#include "mongo/db/repl/truncate_range_oplog_entry_gen.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/session/session.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
+#include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <ostream>
+#include <utility>
+
+#include <boost/cstdint.hpp>
+#include <boost/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -283,12 +286,16 @@ protected:
             WriteUnitOfWork wunit(opCtx);
             AutoGetCollection collRaii(opCtx, nss, MODE_X);
             if (collRaii) {
-                invariant(collRaii.getWritableCollection(opCtx)->truncate(opCtx));
+                CollectionWriter writer{opCtx, collRaii};
+                invariant(writer.getWritableCollection(opCtx)->truncate(opCtx));
             } else {
                 auto db = collRaii.ensureDbExists(opCtx);
                 CollectionOptions opts;
                 if (uuid) {
                     opts.uuid = uuid;
+                }
+                if (nss == clusteredNss) {
+                    opts.clusteredIndex = clustered_util::makeDefaultClusteredIdIndex();
                 }
                 invariant(db->createCollection(opCtx, nss, opts));
             }
@@ -301,7 +308,7 @@ protected:
         reset(opCtx, NamespaceString::kRsOplogNamespace);
         reset(opCtx, NamespaceString::kSessionTransactionsTableNamespace);
         reset(opCtx, NamespaceString::kConfigImagesNamespace);
-        reset(opCtx, NamespaceString::makePreImageCollectionNSS(boost::none));
+        reset(opCtx, NamespaceString::kChangeStreamPreImagesNamespace);
     }
 
     // Assert that the oplog has the expected number of entries, and return them
@@ -356,51 +363,56 @@ protected:
 
     bool didWriteImageEntryToSideCollection(OperationContext* opCtx,
                                             const LogicalSessionId& sessionId) {
-        AutoGetCollection sideCollection(opCtx, NamespaceString::kConfigImagesNamespace, MODE_IS);
+        auto coll = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
+                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         repl::ReadConcernArgs::get(opCtx),
+                                         AcquisitionPrerequisites::kRead),
+            MODE_IS);
         const auto imageEntry = Helpers::findOneForTesting(opCtx,
-                                                           sideCollection.getCollection(),
+                                                           coll,
                                                            BSON("_id" << sessionId.toBSON()),
                                                            /*invariantOnError=*/false);
         return !imageEntry.isEmpty();
     }
 
-    bool didWriteDeletedDocToPreImagesCollection(OperationContext* opCtx,
-                                                 const ChangeStreamPreImageId preImageId) {
-        AutoGetCollection preImagesCollection(
-            opCtx, NamespaceString::makePreImageCollectionNSS(boost::none), LockMode::MODE_IS);
-        const auto preImage = Helpers::findOneForTesting(opCtx,
-                                                         preImagesCollection.getCollection(),
-                                                         BSON("_id" << preImageId.toBSON()),
-                                                         /*invariantOnError=*/false);
-        return !preImage.isEmpty();
-    }
-
     repl::ImageEntry getImageEntryFromSideCollection(OperationContext* opCtx,
                                                      const LogicalSessionId& sessionId) {
-        AutoGetCollection sideCollection(opCtx, NamespaceString::kConfigImagesNamespace, MODE_IS);
+        auto sideCollection = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest(NamespaceString::kConfigImagesNamespace,
+                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         repl::ReadConcernArgs::get(opCtx),
+                                         AcquisitionPrerequisites::kRead),
+            MODE_IS);
         auto doc = Helpers::findOneForTesting(opCtx,
-                                              sideCollection.getCollection(),
+                                              sideCollection,
                                               BSON("_id" << sessionId.toBSON()),
                                               /*invariantOnError=*/false);
         ASSERT_FALSE(doc.isEmpty())
             << "Change stream pre-image not found: " << sessionId.toBSON()
-            << " (pre-images collection: " << sideCollection->ns().toStringForErrorMsg() << ")";
-        return repl::ImageEntry::parse(IDLParserContext("image entry"), doc);
+            << " (pre-images collection: " << sideCollection.nss().toStringForErrorMsg() << ")";
+        return repl::ImageEntry::parse(doc, IDLParserContext("image entry"));
     }
 
     SessionTxnRecord getTxnRecord(OperationContext* opCtx, const LogicalSessionId& sessionId) {
-        AutoGetCollection configTransactions(
-            opCtx, NamespaceString::kSessionTransactionsTableNamespace, MODE_IS);
-
+        auto configTransactions = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest(NamespaceString::kSessionTransactionsTableNamespace,
+                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         repl::ReadConcernArgs::get(opCtx),
+                                         AcquisitionPrerequisites::kRead),
+            MODE_IS);
         auto doc = Helpers::findOneForTesting(opCtx,
-                                              configTransactions.getCollection(),
+                                              configTransactions,
                                               BSON("_id" << sessionId.toBSON()),
                                               /*invariantOnError=*/false);
         ASSERT_FALSE(doc.isEmpty())
             << "Transaction not found for session: " << sessionId.toBSON()
-            << "(transactions collection: " << configTransactions->ns().toStringForErrorMsg()
+            << "(transactions collection: " << configTransactions.nss().toStringForErrorMsg()
             << ")";
-        return SessionTxnRecord::parse(IDLParserContext("txn record"), doc);
+        return SessionTxnRecord::parse(doc, IDLParserContext("txn record"));
     }
 
     /**
@@ -412,17 +424,37 @@ protected:
     ChangeStreamPreImage getChangeStreamPreImage(OperationContext* opCtx,
                                                  const ChangeStreamPreImageId& preImageId,
                                                  BSONObj* container) {
-        AutoGetCollection preImagesCollection(
-            opCtx, NamespaceString::makePreImageCollectionNSS(boost::none), LockMode::MODE_IS);
+        auto preImagesCollection = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest(NamespaceString::kChangeStreamPreImagesNamespace,
+                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         repl::ReadConcernArgs::get(opCtx),
+                                         AcquisitionPrerequisites::kRead),
+            MODE_IS);
         *container = Helpers::findOneForTesting(opCtx,
-                                                preImagesCollection.getCollection(),
+                                                preImagesCollection,
                                                 BSON("_id" << preImageId.toBSON()),
                                                 /*invariantOnError=*/false);
         ASSERT_FALSE(container->isEmpty())
             << "Change stream pre-image not found: " << preImageId.toBSON()
-            << " (pre-images collection: " << preImagesCollection->ns().toStringForErrorMsg()
+            << " (pre-images collection: " << preImagesCollection.nss().toStringForErrorMsg()
             << ")";
-        return ChangeStreamPreImage::parse(IDLParserContext("pre-image"), *container);
+        return ChangeStreamPreImage::parse(*container, IDLParserContext("pre-image"));
+    }
+
+    std::vector<IndexBuildInfo> makeSpecs(OperationContext* opCtx,
+                                          const std::vector<std::string>& keys) {
+        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+        std::vector<IndexBuildInfo> indexes;
+        for (size_t i = 0; i < keys.size(); ++i) {
+            const auto& keyName = keys[i];
+            IndexBuildInfo indexBuildInfo(
+                BSON("v" << 2 << "key" << BSON(keyName << 1) << "name" << (keyName + "_1")),
+                fmt::format("index-{}", i + 1));
+            indexBuildInfo.setInternalIdents(*storageEngine, VersionContext::getDecoration(opCtx));
+            indexes.push_back(std::move(indexBuildInfo));
+        }
+        return indexes;
     }
 
     const NamespaceString nss =
@@ -437,6 +469,8 @@ protected:
     const NamespaceString nss3 =
         NamespaceString::createNamespaceString_forTest(boost::none, "testDB3", "testColl3");
     const UUID uuid3{UUID::gen()};
+    const NamespaceString clusteredNss = NamespaceString::createNamespaceString_forTest(
+        TenantId(OID::gen()), "testDB", "clusteredColl");
 
     const TenantId kTenantId = TenantId(OID::gen());
     const NamespaceString kNssUnderTenantId = NamespaceString::createNamespaceString_forTest(
@@ -456,6 +490,252 @@ private:
     }
 };
 
+// Test suite targeting 'onCreateCollection()' behavior.
+class OpObserverOnCreateCollectionTest : public OpObserverTest {
+protected:
+    // Validates that local catalog identifier information is replicated in the 'o2' field of an
+    // 'create' oplog entry iff the server supports replicating local catalog identifiers.
+    void validateReplicatedCatalogIdentifier(OperationContext* opCtx,
+                                             const OplogEntry& oplogEntry,
+                                             const CreateCollCatalogIdentifier& catalogIdentifier,
+                                             bool catalogReplicationEnabled) {
+        ASSERT_EQ(repl::CommandTypeEnum::kCreate, oplogEntry.getCommandType());
+        const auto o2 = oplogEntry.getObject2();
+
+        // The o2 field exclusively holds replicated catalog information.
+        ASSERT_EQ(catalogReplicationEnabled, o2.has_value());
+        if (!o2.has_value()) {
+            return;
+        }
+
+        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+        ASSERT_EQ(catalogIdentifier.catalogId,
+                  RecordId::deserializeToken(o2->getField("catalogId")));
+        auto identUniqueTag = storageEngine->getCollectionIdentUniqueTag(
+            catalogIdentifier.ident, oplogEntry.getNss().dbName());
+        ASSERT_EQ(identUniqueTag, o2->getStringField("ident"));
+
+        bool expectIdIndexIdent = catalogIdentifier.idIndexIdent.has_value();
+        ASSERT_EQ(expectIdIndexIdent, o2->hasField("idIndexIdent"));
+        if (expectIdIndexIdent) {
+            auto idIndexIdentUniqueTag = storageEngine->getIndexIdentUniqueTag(
+                *catalogIdentifier.idIndexIdent, oplogEntry.getNss().dbName());
+            ASSERT_EQ(idIndexIdentUniqueTag, o2->getStringField("idIndexIdent"));
+        }
+    }
+
+    CreateCollCatalogIdentifier newCatalogIdentifier(OperationContext* opCtx,
+                                                     const DatabaseName& dbName,
+                                                     bool includeIdIndexIdent) {
+        CreateCollCatalogIdentifier catalogIdentifier;
+        catalogIdentifier.catalogId = RecordId(100);
+        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+        catalogIdentifier.ident = storageEngine->generateNewCollectionIdent(dbName);
+        if (includeIdIndexIdent) {
+            catalogIdentifier.idIndexIdent = storageEngine->generateNewIndexIdent(dbName);
+        }
+        return catalogIdentifier;
+    }
+
+    // Tests the oplog entry generated from 'onCreateCollection'. Simulates the creation of a
+    // non-clustered collection.
+    void testOnCreateCollBasic(bool catalogReplicationEnabled,
+                               bool viewless = false,
+                               bool viewlessParam = false) {
+        gFeatureFlagMarkTimeseriesEventsInOplog.setForServerParameter(viewlessParam);
+        RAIIServerParameterControllerForTest replicateLocalCatalogInfoController(
+            "featureFlagReplicateLocalCatalogIdentifiers", catalogReplicationEnabled);
+
+        auto opCtxWrapper = cc().makeOperationContext();
+        auto opCtx = opCtxWrapper.get();
+
+        // Simulate catalog information for a normal collection with a standard '_id_' index.
+        ASSERT_TRUE(nss.isReplicated());
+        auto catalogIdentifier =
+            newCatalogIdentifier(opCtx, nss.dbName(), true /* includeIdIndexIdent */);
+        CollectionOptions options{.uuid = uuid};
+
+        OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
+        {
+            // Generate the create oplog entry.
+            AutoGetCollection autoColl(opCtx, nss, MODE_X);
+            WriteUnitOfWork wuow(opCtx);
+            opObserver.onCreateCollection(opCtx,
+                                          nss,
+                                          options,
+                                          BSON("v" << 2 << "key" << BSON("_id_" << 1) << "name"
+                                                   << "_id_") /* idIndex */,
+                                          repl::getNextOpTime(opCtx),
+                                          catalogIdentifier,
+                                          false /* fromMigrate*/,
+                                          viewless);
+            wuow.commit();
+        }
+
+        const auto oplogEntryBSON = getSingleOplogEntry(opCtx);
+        const auto oplogEntry = assertGet(OplogEntry::parse(oplogEntryBSON));
+        validateReplicatedCatalogIdentifier(
+            opCtx, oplogEntry, catalogIdentifier, catalogReplicationEnabled);
+        bool isTimeseries = oplogEntryBSON.getBoolField("isTimeseries");
+        ASSERT_EQ(viewless && viewlessParam, isTimeseries);
+    }
+
+    void testOnCreateCollClustered(bool catalogReplicationEnabled) {
+        RAIIServerParameterControllerForTest replicateLocalCatalogInfoController(
+            "featureFlagReplicateLocalCatalogIdentifiers", catalogReplicationEnabled);
+
+        auto opCtxWrapper = cc().makeOperationContext();
+        auto opCtx = opCtxWrapper.get();
+
+        CollectionOptions clusteredCollectionOptions{
+            .uuid = uuid, .clusteredIndex = clustered_util::makeDefaultClusteredIdIndex()};
+
+        // Simulate catalog information for clustered collection - clustered collections don't have
+        // an explicit '_id_' index table.
+        ASSERT_TRUE(nss.isReplicated());
+        auto catalogIdentifier =
+            newCatalogIdentifier(opCtx, nss.dbName(), false /* includeIdIndexIdent */);
+        ASSERT_FALSE(catalogIdentifier.idIndexIdent.has_value());
+
+        OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
+        {
+            // Generate the create oplog entry.
+            AutoGetCollection autoColl(opCtx, nss, MODE_X);
+            WriteUnitOfWork wuow(opCtx);
+            opObserver.onCreateCollection(opCtx,
+                                          nss,
+                                          clusteredCollectionOptions,
+                                          BSONObj() /* idIndex */,
+                                          repl::getNextOpTime(opCtx),
+                                          catalogIdentifier,
+                                          false /* fromMigrate*/);
+            wuow.commit();
+        }
+
+        const auto oplogEntryBSON = getSingleOplogEntry(opCtx);
+        const auto oplogEntry = assertGet(OplogEntry::parse(oplogEntryBSON));
+        validateReplicatedCatalogIdentifier(
+            opCtx, oplogEntry, catalogIdentifier, catalogReplicationEnabled);
+    }
+
+    // Tests that the presences or absence of a 'CreateCollCatalogIdentifier' passed into
+    // 'OpObserverImpl::onCreateCollection()' is valid for an unreplicated collection.
+    //
+    // While many unreplicated collections are persisted in the catalog, it is also valid to issue
+    // 'onCreateCollection()' for a collection not persisted in the local catalog, provided it is
+    // unreplicated. One real-world example is a virtual collection - but for simplicity the test
+    // generates a local collection as they are unreplicated by default.
+    // - 'catalogReplicationEnabled': Whether to enable the
+    // 'featureFlagReplicateLocalCatalogIdentifiers'.
+    // - 'isPersistedInLocalCatalog': Whether or not to simulate the unreplicated collection as a
+    // collection persisted in the local catalog.
+    void testOnCreateUnreplicatedCollection(bool catalogReplicationEnabled,
+                                            bool isPersistedInLocalCatalog) {
+        RAIIServerParameterControllerForTest replicateLocalCatalogInfoController(
+            "featureFlagReplicateLocalCatalogIdentifiers", catalogReplicationEnabled);
+        OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
+        auto opCtx = cc().makeOperationContext();
+
+        const NamespaceString localNSS = NamespaceString::makeLocalCollection(
+            "unreplicated_local_collection"_sd + UUID::gen().toString());
+        ASSERT_FALSE(localNSS.isReplicated());
+        ASSERT_TRUE(repl::ReplicationCoordinator::get(opCtx.get())
+                        ->isOplogDisabledFor(opCtx.get(), localNSS));
+
+        boost::optional<CreateCollCatalogIdentifier> catalogIdentifier;
+        if (isPersistedInLocalCatalog) {
+            catalogIdentifier = newCatalogIdentifier(
+                opCtx.get(), localNSS.dbName(), false /* includeIdIndexIdent */);
+        }
+
+        {
+            AutoGetCollection autoColl(opCtx.get(), localNSS, MODE_X);
+            WriteUnitOfWork wuow(opCtx.get());
+            opObserver.onCreateCollection(opCtx.get(),
+                                          localNSS,
+                                          CollectionOptions{},
+                                          BSONObj() /* idIndex */,
+                                          repl::OpTime() /* createOpTime */,
+                                          catalogIdentifier /* createCollCatalogIdentifier */,
+                                          false /* fromMigrate*/);
+            wuow.commit();
+        }
+
+        // No oplog entry generated.
+        getNOplogEntries(opCtx.get(), 0);
+    }
+};
+
+TEST_F(OpObserverOnCreateCollectionTest, BasicReplicatedCatalogIdentifiersEnabled) {
+    testOnCreateCollBasic(true /* catalogReplicationEnabled */);
+}
+TEST_F(OpObserverOnCreateCollectionTest, BasicReplicatedCatalogIdentifiersDisabled) {
+    testOnCreateCollBasic(false /* catalogReplicationEnabled */);
+}
+TEST_F(OpObserverOnCreateCollectionTest,
+       BasicReplicatedCatalogIdentifiersEnabledWithTimeseriesParamOff) {
+    testOnCreateCollBasic(
+        true /* catalogReplicationEnabled */, true /* viewless */, false /* viewlessParam */);
+}
+TEST_F(OpObserverOnCreateCollectionTest,
+       BasicReplicatedCatalogIdentifiersDisabledWithTimeseriesParamOff) {
+    testOnCreateCollBasic(
+        false /* catalogReplicationEnabled */, true /* viewless */, false /* viewlessParam */);
+}
+TEST_F(OpObserverOnCreateCollectionTest,
+       BasicReplicatedCatalogIdentifiersEnabledWithTimeseriesParamOn) {
+    testOnCreateCollBasic(
+        true /* catalogReplicationEnabled */, true /* viewless */, true /* viewlessParam */);
+}
+TEST_F(OpObserverOnCreateCollectionTest,
+       BasicReplicatedCatalogIdentifiersDisabledWithTimeseriesParamOn) {
+    testOnCreateCollBasic(
+        false /* catalogReplicationEnabled */, true /* viewless */, true /* viewlessParam */);
+}
+
+TEST_F(OpObserverOnCreateCollectionTest, ClusteredReplicatedCatalogIdentifiersEnabled) {
+    testOnCreateCollClustered(true /* catalogReplicationEnabled */);
+}
+TEST_F(OpObserverOnCreateCollectionTest, ClusteredReplicatedCatalogIdentifiersDisabled) {
+    testOnCreateCollClustered(false /* catalogReplicationEnabled */);
+}
+
+TEST_F(OpObserverOnCreateCollectionTest, CatalogIdentifierForUnreplicatedCollection) {
+    testOnCreateUnreplicatedCollection(true /* catalogReplicationEnabled */,
+                                       true /* isPersistedInLocalCatalog */);
+    testOnCreateUnreplicatedCollection(false /* catalogReplicationEnabled */,
+                                       true /* isPersistedInLocalCatalog */);
+}
+
+TEST_F(OpObserverOnCreateCollectionTest, UnreplicatedCollectionNotInLocalCatalog) {
+    testOnCreateUnreplicatedCollection(true /* catalogReplicationEnabled */,
+                                       false /* isPersistedInLocalCatalog */);
+    testOnCreateUnreplicatedCollection(false /* catalogReplicationEnabled */,
+                                       false /* isPersistedInLocalCatalog */);
+}
+
+DEATH_TEST_F(OpObserverOnCreateCollectionTest, CrashIfNoReplicatedCatalogIdentifier, "invariant") {
+    // Invariant only enforced when replicated local catalog identifiers are required for
+    // replication correctness.
+    RAIIServerParameterControllerForTest replicateLocalCatalogInfoController(
+        "featureFlagReplicateLocalCatalogIdentifiers", true);
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
+    auto opCtx = cc().makeOperationContext();
+
+    ASSERT_TRUE(nss.isReplicated());
+    AutoGetCollection autoColl(opCtx.get(), nss, MODE_X);
+    WriteUnitOfWork wuow(opCtx.get());
+    opObserver.onCreateCollection(opCtx.get(),
+                                  nss,
+                                  CollectionOptions{.uuid = UUID::gen()},
+                                  BSON("v" << 2 << "key" << BSON("_id_" << 1) << "name"
+                                           << "_id_") /* idIndex */,
+                                  repl::getNextOpTime(opCtx.get()),
+                                  boost::none /* createCollCatalogIdentifier */,
+                                  false /* fromMigrate*/);
+    wuow.commit();
+}
+
 TEST_F(OpObserverTest, StartIndexBuildExpectedOplogEntry) {
     OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
     auto opCtx = cc().makeOperationContext();
@@ -463,20 +743,14 @@ TEST_F(OpObserverTest, StartIndexBuildExpectedOplogEntry) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest(boost::none, "test.coll");
     UUID indexBuildUUID = UUID::gen();
 
-    BSONObj specX = BSON("key" << BSON("x" << 1) << "name"
-                               << "x_1"
-                               << "v" << 2);
-    BSONObj specA = BSON("key" << BSON("a" << 1) << "name"
-                               << "a_1"
-                               << "v" << 2);
-    std::vector<BSONObj> specs = {specX, specA};
+    auto indexes = makeSpecs(opCtx.get(), {"x", "a"});
 
     // Write to the oplog.
     {
         AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
         WriteUnitOfWork wunit(opCtx.get());
         opObserver.onStartIndexBuild(
-            opCtx.get(), nss, uuid, indexBuildUUID, specs, false /*fromMigrate*/);
+            opCtx.get(), nss, uuid, indexBuildUUID, indexes, false /*fromMigrate*/);
         wunit.commit();
     }
 
@@ -485,8 +759,8 @@ TEST_F(OpObserverTest, StartIndexBuildExpectedOplogEntry) {
     startIndexBuildBuilder.append("startIndexBuild", nss.coll());
     indexBuildUUID.appendToBuilder(&startIndexBuildBuilder, "indexBuildUUID");
     BSONArrayBuilder indexesArr(startIndexBuildBuilder.subarrayStart("indexes"));
-    indexesArr.append(specX);
-    indexesArr.append(specA);
+    indexesArr.append(indexes[0].spec);
+    indexesArr.append(indexes[1].spec);
     indexesArr.done();
     BSONObj startIndexBuildCmd = startIndexBuildBuilder.done();
 
@@ -516,7 +790,32 @@ TEST_F(OpObserverTest, CommitIndexBuildExpectedOplogEntry) {
         AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
         WriteUnitOfWork wunit(opCtx.get());
         opObserver.onCommitIndexBuild(
-            opCtx.get(), nss, uuid, indexBuildUUID, specs, false /*fromMigrate*/);
+            opCtx.get(), nss, uuid, indexBuildUUID, specs, {}, false /*fromMigrate*/);
+        opObserver.onCommitIndexBuild(opCtx.get(),
+                                      nss,
+                                      uuid,
+                                      indexBuildUUID,
+                                      specs,
+                                      {boost::none, BSON("a" << "value")},
+                                      false /*fromMigrate*/);
+        ASSERT_THROWS_CODE(opObserver.onCommitIndexBuild(opCtx.get(),
+                                                         nss,
+                                                         uuid,
+                                                         indexBuildUUID,
+                                                         specs,
+                                                         {boost::none},
+                                                         false /*fromMigrate*/),
+                           DBException,
+                           11084600);
+        ASSERT_THROWS_CODE(opObserver.onCommitIndexBuild(opCtx.get(),
+                                                         nss,
+                                                         uuid,
+                                                         indexBuildUUID,
+                                                         specs,
+                                                         {boost::none, boost::none, boost::none},
+                                                         false /*fromMigrate*/),
+                           DBException,
+                           11084600);
         wunit.commit();
     }
 
@@ -528,12 +827,17 @@ TEST_F(OpObserverTest, CommitIndexBuildExpectedOplogEntry) {
     indexesArr.append(specX);
     indexesArr.append(specA);
     indexesArr.done();
-    BSONObj commitIndexBuildCmd = commitIndexBuildBuilder.done();
 
     // Ensure the commitIndexBuild fields were correctly set.
-    auto oplogEntry = getSingleOplogEntry(opCtx.get());
-    auto o = oplogEntry.getObjectField("o");
-    ASSERT_BSONOBJ_EQ(commitIndexBuildCmd, o);
+    auto oplogEntries = getNOplogEntries(opCtx.get(), 2);
+    ASSERT_BSONOBJ_EQ(commitIndexBuildBuilder.asTempObj(), oplogEntries[0].getObjectField("o"));
+
+    BSONArrayBuilder multikeyArrBuilder(commitIndexBuildBuilder.subarrayStart("multikey"));
+    multikeyArrBuilder.appendNull();
+    multikeyArrBuilder.append(BSON("a" << "value"));
+    multikeyArrBuilder.done();
+
+    ASSERT_BSONOBJ_EQ(commitIndexBuildBuilder.asTempObj(), oplogEntries[1].getObjectField("o"));
 }
 
 TEST_F(OpObserverTest, AbortIndexBuildExpectedOplogEntry) {
@@ -583,6 +887,119 @@ TEST_F(OpObserverTest, AbortIndexBuildExpectedOplogEntry) {
 
     // Should be able to extract a Status from the 'cause' field.
     ASSERT_EQUALS(cause, getStatusFromCommandResult(o.getObjectField("cause")));
+}
+
+TEST_F(OpObserverTest, checkIsTimeseriesOnReplLogUpdate) {
+    RAIIServerParameterControllerForTest viewlessController(
+        "featureFlagCreateViewlessTimeseriesCollections", true);
+    RAIIServerParameterControllerForTest viewlessController2(
+        "featureFlagMarkTimeseriesEventsInOplog", true);
+
+    NamespaceString curNss = NamespaceString::createNamespaceString_forTest("test.tsColl");
+
+    auto opCtx = cc().makeOperationContext();
+    auto tsOptions = TimeseriesOptions("t");
+    CreateCommand cmd = CreateCommand(curNss);
+    cmd.getCreateCollectionRequest().setTimeseries(std::move(tsOptions));
+    uassertStatusOK(createCollection(opCtx.get(), cmd));
+
+    const auto criteria = BSON("_id" << 0 << "data"
+                                     << "original"
+                                     << "timestamp" << Date_t::now());
+    const auto preImageDoc = criteria;
+    CollectionUpdateArgs updateArgs{preImageDoc};
+    updateArgs.criteria = criteria;
+    updateArgs.updatedDoc = BSON("_id" << 0 << "data"
+                                       << "original"
+                                       << "timestamp" << Date_t::now());
+    updateArgs.update = BSON("$set" << BSON("data" << "x"));
+
+    WriteUnitOfWork wuow(opCtx.get());
+    AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
+    AutoGetCollection autoColl(opCtx.get(), curNss, MODE_X);
+    OplogUpdateEntryArgs update(&updateArgs, *autoColl);
+
+    OpObserverRegistry opObserver;
+    opObserver.addObserver(
+        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
+
+    opObserver.onUpdate(opCtx.get(), update);
+    wuow.commit();
+
+    auto oplogEntry = getSingleOplogEntry(opCtx.get());
+    bool isTimeseries = oplogEntry.getBoolField("isTimeseries");
+    ASSERT(isTimeseries);
+}
+
+TEST_F(OpObserverTest, checkIsTimeseriesOnReplLogDelete) {
+    RAIIServerParameterControllerForTest viewlessController(
+        "featureFlagCreateViewlessTimeseriesCollections", true);
+    RAIIServerParameterControllerForTest viewlessController2(
+        "featureFlagMarkTimeseriesEventsInOplog", true);
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
+    auto opCtx = cc().makeOperationContext();
+
+    NamespaceString curNss = NamespaceString::createNamespaceString_forTest("test.tsColl");
+    auto tsOptions = TimeseriesOptions("t");
+
+    CreateCommand cmd = CreateCommand(curNss);
+    cmd.getCreateCollectionRequest().setTimeseries(std::move(tsOptions));
+    uassertStatusOK(createCollection(opCtx.get(), cmd));
+
+    AutoGetCollection autoColl(opCtx.get(), curNss, MODE_X);
+    WriteUnitOfWork wunit(opCtx.get());
+    OplogDeleteEntryArgs args;
+    auto doc = BSON("_id" << 0 << "data"
+                          << "original"
+                          << "timestamp" << Date_t::now());
+    const auto& documentKey = getDocumentKey(*autoColl, doc);
+    opObserver.onDelete(opCtx.get(), *autoColl, kUninitializedStmtId, doc, documentKey, args);
+
+    auto oplogEntry = getSingleOplogEntry(opCtx.get());
+    wunit.commit();
+
+    bool isTimeseries = oplogEntry.getBoolField("isTimeseries");
+    ASSERT(isTimeseries);
+}
+
+TEST_F(OpObserverTest, checkIsTimeseriesOnInserts) {
+    RAIIServerParameterControllerForTest viewlessController(
+        "featureFlagCreateViewlessTimeseriesCollections", true);
+    RAIIServerParameterControllerForTest viewlessController2(
+        "featureFlagMarkTimeseriesEventsInOplog", true);
+
+    NamespaceString curNss = NamespaceString::createNamespaceString_forTest("test.tsColl");
+    auto opCtx = cc().makeOperationContext();
+    auto tsOptions = TimeseriesOptions("t");
+    CreateCommand cmd = CreateCommand(curNss);
+    cmd.getCreateCollectionRequest().setTimeseries(std::move(tsOptions));
+    uassertStatusOK(createCollection(opCtx.get(), cmd));
+
+    const auto criteria = BSON("_id" << 0 << "data"
+                                     << "original"
+                                     << "timestamp" << Date_t::now());
+    std::vector<InsertStatement> insert;
+    insert.emplace_back(criteria);
+
+    WriteUnitOfWork wuow(opCtx.get());
+    AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
+    AutoGetCollection autoColl(opCtx.get(), curNss, MODE_X);
+
+    OpObserverRegistry opObserver;
+    opObserver.addObserver(
+        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
+    opObserver.onInserts(opCtx.get(),
+                         *autoColl,
+                         insert.begin(),
+                         insert.end(),
+                         /*recordIds=*/{},
+                         /*fromMigrate=*/std::vector<bool>(insert.size(), false),
+                         /*defaultFromMigrate=*/false);
+    wuow.commit();
+
+    auto oplogEntry = getSingleOplogEntry(opCtx.get());
+    bool isTimeseries = oplogEntry.getBoolField("isTimeseries");
+    ASSERT(isTimeseries);
 }
 
 TEST_F(OpObserverTest, CollModWithCollectionOptionsAndTTLInfo) {
@@ -695,8 +1112,7 @@ TEST_F(OpObserverTest, OnUpdateCheckExistenceForDiffInsert) {
     updateArgs.criteria = criteria;
     updateArgs.updatedDoc = BSON("_id" << 0 << "data"
                                        << "x");
-    updateArgs.update = BSON("$set" << BSON("data"
-                                            << "x"));
+    updateArgs.update = BSON("$set" << BSON("data" << "x"));
     updateArgs.mustCheckExistenceForInsertOperations = true;
 
     auto opCtx = cc().makeOperationContext();
@@ -751,7 +1167,7 @@ TEST_F(OpObserverTest, OnDropCollectionReturnsDropOpTime) {
     ASSERT_EQUALS(repl::ReplClientInfo::forClient(&cc()).getLastOp(), dropOpTime);
 }
 
-TEST_F(OpObserverTest, OnDropCollectionInlcudesTenantId) {
+TEST_F(OpObserverTest, OnDropCollectionIncludesTenantId) {
     RAIIServerParameterControllerForTest multitenancyController("multitenancySupport", true);
     RAIIServerParameterControllerForTest featureFlagController("featureFlagRequireTenantID", true);
     OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
@@ -804,7 +1220,8 @@ TEST_F(OpObserverTest, OnRenameCollectionReturnsRenameOpTime) {
                                       dropTargetUuid,
                                       0U,
                                       stayTemp,
-                                      /*markFromMigrate=*/false);
+                                      /*markFromMigrate=*/false,
+                                      /*isTimeseries*/ false);
         renameOpTime = OpObserver::Times::get(opCtx.get()).reservedOpTimes.front();
         wunit.commit();
     }
@@ -847,7 +1264,8 @@ TEST_F(OpObserverTest, OnRenameCollectionIncludesTenantIdFeatureFlagOff) {
                                       dropTargetUuid,
                                       0U,
                                       stayTemp,
-                                      /*markFromMigrate=*/false);
+                                      /*markFromMigrate=*/false,
+                                      /*isTimeseries*/ false);
         wunit.commit();
     }
 
@@ -890,7 +1308,8 @@ TEST_F(OpObserverTest, OnRenameCollectionIncludesTenantIdFeatureFlagOn) {
                                       dropTargetUuid,
                                       0U,
                                       stayTemp,
-                                      /*markFromMigrate=*/false);
+                                      /*markFromMigrate=*/false,
+                                      /*isTimeseries*/ false);
         wunit.commit();
     }
 
@@ -923,8 +1342,15 @@ TEST_F(OpObserverTest, OnRenameCollectionOmitsDropTargetFieldIfDropTargetUuidIsN
     {
         AutoGetDb autoDb(opCtx.get(), sourceNss.dbName(), MODE_X);
         WriteUnitOfWork wunit(opCtx.get());
-        opObserver.onRenameCollection(
-            opCtx.get(), sourceNss, targetNss, uuid, {}, 0U, stayTemp, /*markFromMigrate=*/false);
+        opObserver.onRenameCollection(opCtx.get(),
+                                      sourceNss,
+                                      targetNss,
+                                      uuid,
+                                      {},
+                                      0U,
+                                      stayTemp,
+                                      /*markFromMigrate=*/false,
+                                      /*isTimeseries*/ false);
         wunit.commit();
     }
 
@@ -964,8 +1390,7 @@ TEST_F(OpObserverTest, ImportCollectionOplogEntry) {
     // A dummy invalid catalog entry. We do not need a valid catalog entry for this test.
     auto catalogEntry = BSON("ns" << nss.ns_forTest() << "ident"
                                   << "collection-7-1792004489479993697");
-    auto storageMetadata = BSON("storage"
-                                << "metadata");
+    auto storageMetadata = BSON("storage" << "metadata");
     bool isDryRun = false;
 
     // Write to the oplog.
@@ -979,7 +1404,8 @@ TEST_F(OpObserverTest, ImportCollectionOplogEntry) {
                                       dataSize,
                                       catalogEntry,
                                       storageMetadata,
-                                      isDryRun);
+                                      isDryRun,
+                                      /*isTimeseries*/ false);
         wunit.commit();
     }
 
@@ -1007,8 +1433,7 @@ TEST_F(OpObserverTest, ImportCollectionOplogEntryIncludesTenantId) {
     // A dummy invalid catalog entry. We do not need a valid catalog entry for this test.
     auto catalogEntry = BSON("ns" << nss.ns_forTest() << "ident"
                                   << "collection-7-1792004489479993697");
-    auto storageMetadata = BSON("storage"
-                                << "metadata");
+    auto storageMetadata = BSON("storage" << "metadata");
     bool isDryRun = false;
 
     // Write to the oplog.
@@ -1022,7 +1447,8 @@ TEST_F(OpObserverTest, ImportCollectionOplogEntryIncludesTenantId) {
                                       dataSize,
                                       catalogEntry,
                                       storageMetadata,
-                                      isDryRun);
+                                      isDryRun,
+                                      /*isTimeseries*/ false);
         wunit.commit();
     }
 
@@ -1083,8 +1509,7 @@ TEST_F(OpObserverTest, SingleStatementUpdateTestIncludesTenantId) {
     updateArgs.criteria = criteria;
     updateArgs.updatedDoc = BSON("_id" << 0 << "data"
                                        << "x");
-    updateArgs.update = BSON("$set" << BSON("data"
-                                            << "x"));
+    updateArgs.update = BSON("$set" << BSON("data" << "x"));
 
     auto opCtx = cc().makeOperationContext();
     WriteUnitOfWork wuow(opCtx.get());
@@ -1132,6 +1557,96 @@ TEST_F(OpObserverTest, SingleStatementDeleteTestIncludesTenantId) {
     ASSERT_EQ(nss, entry.getNss());
     ASSERT_EQ(*nss.tenantId(), *entry.getTid());
     ASSERT_EQ(uuid, *entry.getUuid());
+}
+
+TEST_F(OpObserverTest, EntriesIncludeVersionContextDecoration) {
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
+    auto opCtx = cc().makeOperationContext();
+    // (Generic FCV reference): used for testing, should exist across LTS binary versions
+    auto expectedVCtx = VersionContext{multiversion::GenericFCV::kLastContinuous};
+    auto dbName = DatabaseName::createDatabaseName_forTest(boost::none, "test");
+
+    // Write to the oplog.
+    {
+        VersionContext::ScopedSetDecoration scopedVersionContext(opCtx.get(), expectedVCtx);
+        AutoGetDb autoDb(opCtx.get(), dbName, MODE_X);
+        WriteUnitOfWork wunit(opCtx.get());
+        opObserver.onDropDatabase(opCtx.get(), dbName, /*markFromMigrate=*/false);
+        wunit.commit();
+    }
+
+    // Ensure that the versionContext field was correctly set.
+    auto oplogEntry = getSingleOplogEntry(opCtx.get());
+    auto vCtxBSON = oplogEntry.getObjectField(repl::OplogEntryBase::kVersionContextFieldName);
+    ASSERT_BSONOBJ_EQ(vCtxBSON, expectedVCtx.toBSON());
+}
+
+TEST_F(OpObserverTest, TruncateRangeIsReplicated) {
+    auto opCtxWrapper = cc().makeOperationContext();
+    auto opCtx = opCtxWrapper.get();
+    reset(opCtx, clusteredNss);
+
+    AutoGetCollection autoColl(opCtx, clusteredNss, MODE_IX);
+
+    opObserverRegistry()->addObserver(
+        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
+
+    {
+        // Tests that truncateRange() does not throw in unreplicated mode
+        repl::UnreplicatedWritesBlock uwb(opCtx);
+        WriteUnitOfWork wuow(opCtx);
+        // featureFlagUseReplicatedTruncatesForDeletions is ignored
+        {
+            RAIIServerParameterControllerForTest featureFlagScope{
+                "featureFlagUseReplicatedTruncatesForDeletions", true};
+            collection_internal::truncateRange(
+                opCtx, *autoColl, RecordId("a"), RecordId("b"), 1, 1);
+        }
+        {
+            RAIIServerParameterControllerForTest featureFlagScope{
+                "featureFlagUseReplicatedTruncatesForDeletions", false};
+            collection_internal::truncateRange(
+                opCtx, *autoColl, RecordId("a"), RecordId("b"), 1, 1);
+        }
+        wuow.commit();
+        // No oplog entry generated.
+        getNOplogEntries(opCtx, 0);
+    }
+
+    {
+        // Tests that with feature flag disabled, the OpObserver would throw
+        RAIIServerParameterControllerForTest featureFlagScope{
+            "featureFlagUseReplicatedTruncatesForDeletions", false};
+        WriteUnitOfWork wuow(opCtx);
+        ASSERT_THROWS_CODE(collection_internal::truncateRange(
+                               opCtx, *autoColl, RecordId("a"), RecordId("b"), 1, 1),
+                           DBException,
+                           ErrorCodes::IllegalOperation);
+        wuow.commit();
+        // No oplog entry generated.
+        getNOplogEntries(opCtx, 0);
+    }
+
+    {
+        RAIIServerParameterControllerForTest featureFlagScope{
+            "featureFlagUseReplicatedTruncatesForDeletions", true};
+        WriteUnitOfWork wuow(opCtx);
+        collection_internal::truncateRange(opCtx, *autoColl, RecordId("a"), RecordId("b"), 1, 1);
+        wuow.commit();
+    }
+
+    const auto oplogEntryBSON = getSingleOplogEntry(opCtx);
+    const auto oplogEntry = assertGet(OplogEntry::parse(oplogEntryBSON));
+
+    ASSERT(oplogEntry.isCommand());
+    ASSERT_EQ(oplogEntry.getNss().db_forTest(), clusteredNss.db_forTest());
+    ASSERT_EQ(oplogEntry.getNss().coll(), "$cmd");
+    ASSERT_EQ(oplogEntry.getUuid(), autoColl->uuid());
+
+    const auto& o = oplogEntry.getObject();
+    TruncateRangeOplogEntry objectEntry(
+        std::string(autoColl->ns().coll()), RecordId("a"), RecordId("b"), 1, 1);
+    ASSERT_BSONOBJ_EQ(o, objectEntry.toBSON());
 }
 
 /**
@@ -1382,7 +1897,7 @@ protected:
 
         auto txnRecordObj = cursor->next();
         auto txnRecord =
-            SessionTxnRecord::parse(IDLParserContext("SessionEntryWritten"), txnRecordObj);
+            SessionTxnRecord::parse(txnRecordObj, IDLParserContext("SessionEntryWritten"));
         ASSERT(!cursor->more());
         ASSERT_EQ(session()->getSessionId(), txnRecord.getSessionId());
         ASSERT_EQ(txnNum, txnRecord.getTxnNum());
@@ -1418,7 +1933,7 @@ protected:
 
         auto txnRecordObj = cursor->next();
         auto txnRecord =
-            SessionTxnRecord::parse(IDLParserContext("SessionEntryWritten"), txnRecordObj);
+            SessionTxnRecord::parse(txnRecordObj, IDLParserContext("SessionEntryWritten"));
         ASSERT(!cursor->more());
         ASSERT_EQ(session()->getSessionId(), txnRecord.getSessionId());
         if (!startOpTime) {
@@ -1429,6 +1944,25 @@ protected:
         }
     }
 };
+
+TEST_F(OpObserverTransactionTest, checkIsTimeseriesOnMultiDocTransaction) {
+    RAIIServerParameterControllerForTest viewlessController(
+        "featureFlagMarkTimeseriesEventsInOplog", true);
+
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+    txnParticipant.unstashTransactionResources(opCtx(), "delete");
+
+    NamespaceString curNss = NamespaceString::createNamespaceString_forTest("test.tsColl");
+    WriteUnitOfWork wuow(opCtx());
+
+    auto tsOptions = TimeseriesOptions("t");
+    CreateCommand cmd = CreateCommand(curNss);
+    cmd.getCreateCollectionRequest().setTimeseries(std::move(tsOptions));
+    ASSERT_THROWS_CODE(createCollection(opCtx(), cmd),
+                       AssertionException,
+                       ErrorCodes::OperationNotSupportedInTransaction);
+    wuow.commit();
+}
 
 TEST_F(OpObserverTransactionTest, TransactionalPrepareTest) {
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -1460,8 +1994,7 @@ TEST_F(OpObserverTransactionTest, TransactionalPrepareTest) {
     updateArgs2.stmtIds = {1};
     updateArgs2.updatedDoc = BSON("_id" << 0 << "data"
                                         << "y");
-    updateArgs2.update = BSON("$set" << BSON("data"
-                                             << "y"));
+    updateArgs2.update = BSON("$set" << BSON("data" << "y"));
     OplogUpdateEntryArgs update2(&updateArgs2, *autoColl2);
     opObserver().onUpdate(opCtx(), update2);
 
@@ -1483,28 +2016,24 @@ TEST_F(OpObserverTransactionTest, TransactionalPrepareTest) {
     OplogEntry oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
     auto o = oplogEntry.getObject();
     auto oExpected = BSON(
-        "applyOps" << BSON_ARRAY(BSON("op"
-                                      << "i"
-                                      << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
-                                      << BSON("_id" << 0 << "data"
-                                                    << "x")
-                                      << "o2" << BSON("_id" << 0))
-                                 << BSON("op"
-                                         << "i"
-                                         << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
-                                         << BSON("_id" << 1 << "data"
-                                                       << "y")
-                                         << "o2" << BSON("_id" << 1))
-                                 << BSON("op"
-                                         << "u"
-                                         << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
-                                         << BSON("$set" << BSON("data"
-                                                                << "y"))
-                                         << "o2" << BSON("_id" << 0))
-                                 << BSON("op"
-                                         << "d"
-                                         << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
-                                         << BSON("_id" << 0)))
+        "applyOps" << BSON_ARRAY(
+                          BSON("op" << "i"
+                                    << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
+                                    << BSON("_id" << 0 << "data"
+                                                  << "x")
+                                    << "o2" << BSON("_id" << 0))
+                          << BSON("op" << "i"
+                                       << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
+                                       << BSON("_id" << 1 << "data"
+                                                     << "y")
+                                       << "o2" << BSON("_id" << 1))
+                          << BSON("op" << "u"
+                                       << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
+                                       << BSON("$set" << BSON("data" << "y")) << "o2"
+                                       << BSON("_id" << 0))
+                          << BSON("op" << "d"
+                                       << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
+                                       << BSON("_id" << 0)))
                    << "prepare" << true);
     ASSERT_BSONOBJ_EQ(oExpected, o);
     ASSERT(oplogEntry.shouldPrepare());
@@ -1572,10 +2101,9 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedCommitTest) {
         OplogEntry oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
         auto o = oplogEntry.getObject();
         auto oExpected =
-            BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                               << "i"
-                                               << "ns" << nss.toString_forTest() << "ui" << uuid
-                                               << "o" << doc << "o2" << docKey))
+            BSON("applyOps" << BSON_ARRAY(BSON("op" << "i"
+                                                    << "ns" << nss.toString_forTest() << "ui"
+                                                    << uuid << "o" << doc << "o2" << docKey))
                             << "prepare" << true);
         ASSERT_BSONOBJ_EQ(oExpected, o);
         ASSERT(oplogEntry.shouldPrepare());
@@ -1637,10 +2165,9 @@ TEST_F(OpObserverTransactionTest, TransactionalPreparedAbortTest) {
         OplogEntry oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
         auto o = oplogEntry.getObject();
         auto oExpected =
-            BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                               << "i"
-                                               << "ns" << nss.toString_forTest() << "ui" << uuid
-                                               << "o" << doc << "o2" << docKey))
+            BSON("applyOps" << BSON_ARRAY(BSON("op" << "i"
+                                                    << "ns" << nss.toString_forTest() << "ui"
+                                                    << uuid << "o" << doc << "o2" << docKey))
                             << "prepare" << true);
         ASSERT_BSONOBJ_EQ(oExpected, o);
         ASSERT(oplogEntry.shouldPrepare());
@@ -1890,31 +2417,28 @@ TEST_F(OpObserverTransactionTest, TransactionalInsertTest) {
     checkCommonFields(oplogEntryObj);
     OplogEntry oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
     auto o = oplogEntry.getObject();
-    auto oExpected = BSON(
-        "applyOps" << BSON_ARRAY(BSON("op"
-                                      << "i"
-                                      << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
-                                      << BSON("_id" << 0 << "data"
-                                                    << "x")
-                                      << "o2" << BSON("_id" << 0))
-                                 << BSON("op"
-                                         << "i"
-                                         << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
-                                         << BSON("_id" << 1 << "data"
-                                                       << "y")
-                                         << "o2" << BSON("_id" << 1))
-                                 << BSON("op"
-                                         << "i"
-                                         << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
-                                         << BSON("_id" << 2 << "data"
-                                                       << "z")
-                                         << "o2" << BSON("_id" << 2))
-                                 << BSON("op"
-                                         << "i"
-                                         << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
-                                         << BSON("_id" << 3 << "data"
-                                                       << "w")
-                                         << "o2" << BSON("_id" << 3))));
+    auto oExpected =
+        BSON("applyOps" << BSON_ARRAY(
+                 BSON("op" << "i"
+                           << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
+                           << BSON("_id" << 0 << "data"
+                                         << "x")
+                           << "o2" << BSON("_id" << 0))
+                 << BSON("op" << "i"
+                              << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
+                              << BSON("_id" << 1 << "data"
+                                            << "y")
+                              << "o2" << BSON("_id" << 1))
+                 << BSON("op" << "i"
+                              << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
+                              << BSON("_id" << 2 << "data"
+                                            << "z")
+                              << "o2" << BSON("_id" << 2))
+                 << BSON("op" << "i"
+                              << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
+                              << BSON("_id" << 3 << "data"
+                                            << "w")
+                              << "o2" << BSON("_id" << 3))));
     ASSERT_BSONOBJ_EQ(oExpected, o);
     ASSERT(!oplogEntry.shouldPrepare());
     ASSERT_FALSE(oplogEntryObj.hasField("prepare"));
@@ -1969,30 +2493,26 @@ TEST_F(OpObserverTransactionTest, TransactionalInsertTestIncludesTenantId) {
     OplogEntry oplogEntry = assertGet(OplogEntry::parse(oplogEntryObj));
     auto o = oplogEntry.getObject();
 
-    auto oExpected =
-        BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                           << "i"
+    auto oExpected = BSON(
+        "applyOps" << BSON_ARRAY(BSON("op" << "i"
                                            << "tid" << nss1.tenantId().value() << "ns"
                                            << nss1.toString_forTest() << "ui" << uuid1 << "o"
                                            << BSON("_id" << 0 << "data"
                                                          << "x")
                                            << "o2" << BSON("_id" << 0))
-                                      << BSON("op"
-                                              << "i"
+                                 << BSON("op" << "i"
                                               << "tid" << nss1.tenantId().value() << "ns"
                                               << nss1.toString_forTest() << "ui" << uuid1 << "o"
                                               << BSON("_id" << 1 << "data"
                                                             << "y")
                                               << "o2" << BSON("_id" << 1))
-                                      << BSON("op"
-                                              << "i"
+                                 << BSON("op" << "i"
                                               << "tid" << nss2.tenantId().value() << "ns"
                                               << nss2.toString_forTest() << "ui" << uuid2 << "o"
                                               << BSON("_id" << 2 << "data"
                                                             << "z")
                                               << "o2" << BSON("_id" << 2))
-                                      << BSON("op"
-                                              << "i"
+                                 << BSON("op" << "i"
                                               << "tid" << nss2.tenantId().value() << "ns"
                                               << nss2.toString_forTest() << "ui" << uuid2 << "o"
                                               << BSON("_id" << 3 << "data"
@@ -2021,8 +2541,7 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTest) {
     updateArgs1.stmtIds = {0};
     updateArgs1.updatedDoc = BSON("_id" << 0 << "data"
                                         << "x");
-    updateArgs1.update = BSON("$set" << BSON("data"
-                                             << "x"));
+    updateArgs1.update = BSON("$set" << BSON("data" << "x"));
     OplogUpdateEntryArgs update1(&updateArgs1, *autoColl1);
 
     const auto criteria2 = BSON("_id" << 1);
@@ -2032,8 +2551,7 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTest) {
     updateArgs2.stmtIds = {1};
     updateArgs2.updatedDoc = BSON("_id" << 1 << "data"
                                         << "y");
-    updateArgs2.update = BSON("$set" << BSON("data"
-                                             << "y"));
+    updateArgs2.update = BSON("$set" << BSON("data" << "y"));
     OplogUpdateEntryArgs update2(&updateArgs2, *autoColl2);
 
     opObserver().onUpdate(opCtx(), update1);
@@ -2044,19 +2562,14 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTest) {
     auto oplogEntry = getSingleOplogEntry(opCtx());
     checkCommonFields(oplogEntry);
     auto o = oplogEntry.getObjectField("o");
-    auto oExpected = BSON(
-        "applyOps" << BSON_ARRAY(BSON("op"
-                                      << "u"
-                                      << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
-                                      << BSON("$set" << BSON("data"
-                                                             << "x"))
-                                      << "o2" << BSON("_id" << 0))
-                                 << BSON("op"
-                                         << "u"
-                                         << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
-                                         << BSON("$set" << BSON("data"
-                                                                << "y"))
-                                         << "o2" << BSON("_id" << 1))));
+    auto oExpected =
+        BSON("applyOps" << BSON_ARRAY(
+                 BSON("op" << "u"
+                           << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
+                           << BSON("$set" << BSON("data" << "x")) << "o2" << BSON("_id" << 0))
+                 << BSON("op" << "u"
+                              << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
+                              << BSON("$set" << BSON("data" << "y")) << "o2" << BSON("_id" << 1))));
     ASSERT_BSONOBJ_EQ(oExpected, o);
     ASSERT_FALSE(oplogEntry.hasField("prepare"));
     ASSERT_FALSE(oplogEntry.getBoolField("prepare"));
@@ -2080,8 +2593,7 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTestIncludesTenantId) {
     updateArgs1.stmtIds = {0};
     updateArgs1.updatedDoc = BSON("_id" << 0 << "data"
                                         << "x");
-    updateArgs1.update = BSON("$set" << BSON("data"
-                                             << "x"));
+    updateArgs1.update = BSON("$set" << BSON("data" << "x"));
     OplogUpdateEntryArgs update1(&updateArgs1, *autoColl1);
 
     const auto criteria2 = BSON("_id" << 1);
@@ -2091,8 +2603,7 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTestIncludesTenantId) {
     updateArgs2.stmtIds = {1};
     updateArgs2.updatedDoc = BSON("_id" << 1 << "data"
                                         << "y");
-    updateArgs2.update = BSON("$set" << BSON("data"
-                                             << "y"));
+    updateArgs2.update = BSON("$set" << BSON("data" << "y"));
     OplogUpdateEntryArgs update2(&updateArgs2, *autoColl2);
 
     opObserver().onUpdate(opCtx(), update1);
@@ -2108,20 +2619,15 @@ TEST_F(OpObserverTransactionTest, TransactionalUpdateTestIncludesTenantId) {
     auto o = oplogEntry.getObject();
 
     auto oExpected =
-        BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                           << "u"
-                                           << "tid" << nss1.tenantId().value() << "ns"
-                                           << nss1.toString_forTest() << "ui" << uuid1 << "o"
-                                           << BSON("$set" << BSON("data"
-                                                                  << "x"))
-                                           << "o2" << BSON("_id" << 0))
-                                      << BSON("op"
-                                              << "u"
-                                              << "tid" << nss2.tenantId().value() << "ns"
-                                              << nss2.toString_forTest() << "ui" << uuid2 << "o"
-                                              << BSON("$set" << BSON("data"
-                                                                     << "y"))
-                                              << "o2" << BSON("_id" << 1))));
+        BSON("applyOps" << BSON_ARRAY(
+                 BSON("op" << "u"
+                           << "tid" << nss1.tenantId().value() << "ns" << nss1.toString_forTest()
+                           << "ui" << uuid1 << "o" << BSON("$set" << BSON("data" << "x")) << "o2"
+                           << BSON("_id" << 0))
+                 << BSON("op" << "u"
+                              << "tid" << nss2.tenantId().value() << "ns" << nss2.toString_forTest()
+                              << "ui" << uuid2 << "o" << BSON("$set" << BSON("data" << "y")) << "o2"
+                              << BSON("_id" << 1))));
     ASSERT_BSONOBJ_EQ(oExpected, o);
 
     // This test assumes that the top level tenantId matches the tenantId in the first entry
@@ -2155,14 +2661,12 @@ TEST_F(OpObserverTransactionTest, TransactionalDeleteTest) {
     checkCommonFields(oplogEntry);
     auto o = oplogEntry.getObjectField("o");
     auto oExpected =
-        BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                           << "d"
-                                           << "ns" << nss1.toString_forTest() << "ui" << uuid1
-                                           << "o" << BSON("_id" << 0))
-                                      << BSON("op"
-                                              << "d"
-                                              << "ns" << nss2.toString_forTest() << "ui" << uuid2
-                                              << "o" << BSON("_id" << 1))));
+        BSON("applyOps" << BSON_ARRAY(BSON("op" << "d"
+                                                << "ns" << nss1.toString_forTest() << "ui" << uuid1
+                                                << "o" << BSON("_id" << 0))
+                                      << BSON("op" << "d"
+                                                   << "ns" << nss2.toString_forTest() << "ui"
+                                                   << uuid2 << "o" << BSON("_id" << 1))));
     ASSERT_BSONOBJ_EQ(oExpected, o);
     ASSERT_FALSE(oplogEntry.hasField("prepare"));
     ASSERT_FALSE(oplogEntry.getBoolField("prepare"));
@@ -2200,16 +2704,13 @@ TEST_F(OpObserverTransactionTest, TransactionalDeleteTestIncludesTenantId) {
     auto o = oplogEntry.getObject();
 
     auto oExpected =
-        BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                           << "d"
-                                           << "tid" << nss1.tenantId().value() << "ns"
-                                           << nss1.toString_forTest() << "ui" << uuid1 << "o"
-                                           << BSON("_id" << 0))
-                                      << BSON("op"
-                                              << "d"
-                                              << "tid" << nss2.tenantId().value() << "ns"
-                                              << nss2.toString_forTest() << "ui" << uuid2 << "o"
-                                              << BSON("_id" << 1))));
+        BSON("applyOps" << BSON_ARRAY(
+                 BSON("op" << "d"
+                           << "tid" << nss1.tenantId().value() << "ns" << nss1.toString_forTest()
+                           << "ui" << uuid1 << "o" << BSON("_id" << 0))
+                 << BSON("op" << "d"
+                              << "tid" << nss2.tenantId().value() << "ns" << nss2.toString_forTest()
+                              << "ui" << uuid2 << "o" << BSON("_id" << 1))));
     ASSERT_BSONOBJ_EQ(oExpected, o);
 
     // This test assumes that the top level tenantId matches the tenantId in the first entry
@@ -2244,8 +2745,7 @@ protected:
         updateArgs.stmtIds = {0};
         updateArgs.updatedDoc = BSON("_id" << 0 << "data"
                                            << "x");
-        updateArgs.update = BSON("$set" << BSON("data"
-                                                << "x"));
+        updateArgs.update = BSON("$set" << BSON("data" << "x"));
         updateArgs.storeDocOption = CollectionUpdateArgs::StoreDocOption::PostImage;
 
         AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
@@ -2276,8 +2776,7 @@ protected:
         CollectionUpdateArgs updateArgs{preImageDoc};
         updateArgs.criteria = criteria;
         updateArgs.stmtIds = {0};
-        updateArgs.update = BSON("$set" << BSON("data"
-                                                << "x"));
+        updateArgs.update = BSON("$set" << BSON("data" << "x"));
         updateArgs.storeDocOption = CollectionUpdateArgs::StoreDocOption::PreImage;
 
         AutoGetCollection autoColl(opCtx(), nss, MODE_IX);
@@ -2344,7 +2843,7 @@ public:
     }
 
 protected:
-    void commit() final{};
+    void commit() final {};
 
     BSONObj assertGetSingleOplogEntry() final {
         return getSingleOplogEntry(opCtx());
@@ -2816,6 +3315,7 @@ TEST_F(OpObserverTest, TestFundamentalOnInsertsOutputs) {
             if (!testCase.isRetryableWrite) {
                 ASSERT_FALSE(entry.getSessionId());
                 ASSERT_FALSE(entry.getTxnNumber());
+                ASSERT(!entry.getIsTimeseries());
                 ASSERT_EQ(0, entry.getStatementIds().size());
                 continue;
             }
@@ -3005,8 +3505,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdate) {
         const auto preImageDoc = criteria;
         CollectionUpdateArgs collUpdateArgs{preImageDoc};
         collUpdateArgs.criteria = criteria;
-        collUpdateArgs.update = BSON("fieldToUpdate"
-                                     << "valueToUpdate");
+        collUpdateArgs.update = BSON("fieldToUpdate" << "valueToUpdate");
         auto args = OplogUpdateEntryArgs(&collUpdateArgs, *autoColl);
         opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, args);
     }
@@ -3035,6 +3534,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdate) {
         ASSERT(0 ==
                innerEntry.getObject().woCompare(BSON("_id" << 0 << "data"
                                                            << "x")));
+        ASSERT(!innerEntry.getIsTimeseries());
     }
     {
         const auto innerEntry = innerEntries[1];
@@ -3042,15 +3542,103 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdate) {
         ASSERT(innerEntry.getOpType() == repl::OpTypeEnum::kDelete);
         ASSERT(innerEntry.getNss() == _nss);
         ASSERT(0 == innerEntry.getObject().woCompare(BSON("_id" << 1)));
+        ASSERT(!innerEntry.getIsTimeseries());
     }
     {
         const auto innerEntry = innerEntries[2];
         ASSERT(innerEntry.getCommandType() == OplogEntry::CommandType::kNotCommand);
         ASSERT(innerEntry.getOpType() == repl::OpTypeEnum::kUpdate);
         ASSERT(innerEntry.getNss() == _nss);
-        ASSERT(0 ==
-               innerEntry.getObject().woCompare(BSON("fieldToUpdate"
-                                                     << "valueToUpdate")));
+        ASSERT(0 == innerEntry.getObject().woCompare(BSON("fieldToUpdate" << "valueToUpdate")));
+        ASSERT(!innerEntry.getIsTimeseries());
+    }
+}
+
+TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateOnViewlessTimeseries) {
+    RAIIServerParameterControllerForTest viewlessController(
+        "featureFlagCreateViewlessTimeseriesCollections", true);
+    RAIIServerParameterControllerForTest viewlessController2(
+        "featureFlagMarkTimeseriesEventsInOplog", true);
+    NamespaceString curNss = NamespaceString::createNamespaceString_forTest("test.tsColl");
+
+    auto opCtxRaii = cc().makeOperationContext();
+    OperationContext* opCtx = opCtxRaii.get();
+    reset(opCtx, NamespaceString::kRsOplogNamespace);
+
+    auto tsOptions = TimeseriesOptions("t");
+    CreateCommand cmd = CreateCommand(curNss);
+    cmd.getCreateCollectionRequest().setTimeseries(std::move(tsOptions));
+    uassertStatusOK(createCollection(opCtx, cmd));
+    reset(opCtx, NamespaceString::kRsOplogNamespace);
+
+    AutoGetCollection autoColl(opCtx, curNss, MODE_IX);
+    auto& bwc = BatchedWriteContext::get(opCtx);
+    ASSERT(!bwc.writesAreBatched());
+    WriteUnitOfWork wuow(opCtx, WriteUnitOfWork::kGroupForTransaction);
+    ASSERT(bwc.writesAreBatched());
+
+    auto doc = BSON("_id" << 0 << "data"
+                          << "original"
+                          << "timestamp" << Date_t::now());
+    auto doc2 = BSON("_id" << 1 << "data"
+                           << "original"
+                           << "timestamp" << Date_t::now());
+
+    // (0) Insert
+    {
+        std::vector<InsertStatement> insert;
+        insert.emplace_back(doc);
+        insert.emplace_back(doc2);
+        opCtx->getServiceContext()->getOpObserver()->onInserts(
+            opCtx,
+            *autoColl,
+            insert.begin(),
+            insert.end(),
+            /*recordIds=*/{},
+            /*fromMigrate=*/std::vector<bool>(insert.size(), false),
+            /*defaultFromMigrate=*/false);
+    }
+    // (1) Delete
+    {
+        OplogDeleteEntryArgs args;
+        const auto& documentKey = getDocumentKey(*autoColl, doc);
+        opCtx->getServiceContext()->getOpObserver()->onDelete(
+            opCtx, *autoColl, kUninitializedStmtId, doc, documentKey, args);
+    }
+    // (2) Update
+    {
+        const auto criteria = BSON("_id" << 0 << "data"
+                                         << "original"
+                                         << "timestamp" << Date_t::now());
+        const auto preImageDoc = doc;
+        CollectionUpdateArgs collUpdateArgs{preImageDoc};
+        collUpdateArgs.criteria = criteria;
+        collUpdateArgs.update = BSON("fieldToUpdate" << "valueToUpdate");
+        auto args = OplogUpdateEntryArgs(&collUpdateArgs, *autoColl);
+        opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, args);
+    }
+    wuow.commit();
+
+    std::vector<BSONObj> oplogs = getNOplogEntries(opCtx, 1);
+    auto lastOplogEntry = oplogs.back();
+    auto lastOplogEntryParsed = assertGet(OplogEntry::parse(oplogs.back()));
+
+    ASSERT(lastOplogEntryParsed.getCommandType() == OplogEntry::CommandType::kApplyOps);
+    std::vector<repl::OplogEntry> innerEntries;
+    repl::ApplyOps::extractOperationsTo(
+        lastOplogEntryParsed, lastOplogEntryParsed.getEntry().toBSON(), &innerEntries);
+    ASSERT_EQ(innerEntries.size(), 4);
+
+    std::vector<repl::OpTypeEnum> expectedOpTypes = {repl::OpTypeEnum::kInsert,
+                                                     repl::OpTypeEnum::kInsert,
+                                                     repl::OpTypeEnum::kDelete,
+                                                     repl::OpTypeEnum::kUpdate};
+
+    for (size_t i = 0; i < innerEntries.size(); ++i) {
+        const auto& innerEntry = innerEntries[i];
+        ASSERT(innerEntry.getCommandType() == OplogEntry::CommandType::kNotCommand);
+        ASSERT(innerEntry.getOpType() == expectedOpTypes[i]);
+        ASSERT(innerEntry.getIsTimeseries() == true);
     }
 }
 
@@ -3101,8 +3689,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) 
         const auto preImageDoc = criteria;
         CollectionUpdateArgs collUpdateArgs{preImageDoc};
         collUpdateArgs.criteria = criteria;
-        collUpdateArgs.update = BSON("fieldToUpdate"
-                                     << "valueToUpdate");
+        collUpdateArgs.update = BSON("fieldToUpdate" << "valueToUpdate");
         auto args = OplogUpdateEntryArgs(&collUpdateArgs, *autoColl);
         opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, args);
     }
@@ -3158,9 +3745,7 @@ TEST_F(BatchedWriteOutputsTest, TestApplyOpsInsertDeleteUpdateIncludesTenantId) 
 
         ASSERT(innerEntry.getTid().has_value());
         ASSERT(*innerEntry.getTid() == *_nssWithTid.tenantId());
-        ASSERT(0 ==
-               innerEntry.getObject().woCompare(BSON("fieldToUpdate"
-                                                     << "valueToUpdate")));
+        ASSERT(0 == innerEntry.getObject().woCompare(BSON("fieldToUpdate" << "valueToUpdate")));
     }
 }
 
@@ -3820,8 +4405,6 @@ protected:
             ChangeStreamPreImage preImage = getChangeStreamPreImage(opCtx, preImageId, &container);
             ASSERT_BSONOBJ_EQ(_deletedDoc, preImage.getPreImage());
             ASSERT_EQ(deleteOplogEntry.getWallClockTime(), preImage.getOperationTime());
-        } else {
-            ASSERT_FALSE(didWriteDeletedDocToPreImagesCollection(opCtx, preImageId));
         }
     }
 
@@ -3887,6 +4470,7 @@ TEST_F(OnDeleteOutputsTest, TestNonTransactionFundamentalOnDeleteOutputs) {
         auto deleteOplogEntry = assertGet(OplogEntry::parse(oplogs.back()));
         checkSideCollectionIfNeeded(opCtx, testCase, deleteEntryArgs, oplogs, deleteOplogEntry);
         checkChangeStreamImagesIfNeeded(opCtx, testCase, deleteEntryArgs, deleteOplogEntry);
+        ASSERT(!deleteOplogEntry.getIsTimeseries());
     }
 }
 
@@ -3986,12 +4570,12 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionSingleStatementTest) {
     ASSERT_EQ(repl::OpTime(), *oplogEntry.getPrevWriteOpTimeInTransaction());
 
     // The implicit commit oplog entry.
-    auto oExpected = BSON("applyOps" << BSON_ARRAY(BSON(
-                              "op"
-                              << "i"
-                              << "ns" << nss.toString_forTest() << "ui" << uuid << "o"
-                              << BSON("_id" << 0 << "a" << std::string(BSONObjMaxUserSize, 'a'))
-                              << "o2" << BSON("_id" << 0))));
+    auto oExpected =
+        BSON("applyOps" << BSON_ARRAY(
+                 BSON("op" << "i"
+                           << "ns" << nss.toString_forTest() << "ui" << uuid << "o"
+                           << BSON("_id" << 0 << "a" << std::string(BSONObjMaxUserSize, 'a'))
+                           << "o2" << BSON("_id" << 0))));
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntry.getObject());
 }
 
@@ -4037,38 +4621,34 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertTest) {
         ASSERT_LT(expectedPrevWriteOpTime.getTimestamp(), oplogEntry.getTimestamp());
         expectedPrevWriteOpTime = repl::OpTime{oplogEntry.getTimestamp(), *oplogEntry.getTerm()};
     }
-    auto oExpected =
-        BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                           << "i"
+    auto oExpected = BSON(
+        "applyOps" << BSON_ARRAY(BSON("op" << "i"
                                            << "ns" << nss1.toString_forTest() << "ui" << uuid1
                                            << "o" << BSON("_id" << 0) << "o2" << BSON("_id" << 0)))
-                        << "partialTxn" << true);
+                   << "partialTxn" << true);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[0].getObject());
 
-    oExpected =
-        BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                           << "i"
+    oExpected = BSON(
+        "applyOps" << BSON_ARRAY(BSON("op" << "i"
                                            << "ns" << nss1.toString_forTest() << "ui" << uuid1
                                            << "o" << BSON("_id" << 1) << "o2" << BSON("_id" << 1)))
-                        << "partialTxn" << true);
+                   << "partialTxn" << true);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[1].getObject());
 
-    oExpected =
-        BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                           << "i"
+    oExpected = BSON(
+        "applyOps" << BSON_ARRAY(BSON("op" << "i"
                                            << "ns" << nss2.toString_forTest() << "ui" << uuid2
                                            << "o" << BSON("_id" << 2) << "o2" << BSON("_id" << 2)))
-                        << "partialTxn" << true);
+                   << "partialTxn" << true);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[2].getObject());
 
     // This should be the implicit commit oplog entry, indicated by the absence of the
     // 'partialTxn' field.
-    oExpected =
-        BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                           << "i"
+    oExpected = BSON(
+        "applyOps" << BSON_ARRAY(BSON("op" << "i"
                                            << "ns" << nss2.toString_forTest() << "ui" << uuid2
                                            << "o" << BSON("_id" << 3) << "o2" << BSON("_id" << 3)))
-                        << "count" << 4);
+                   << "count" << 4);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[3].getObject());
 }
 
@@ -4087,8 +4667,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdateTest) {
     updateArgs1.stmtIds = {0};
     updateArgs1.updatedDoc = BSON("_id" << 0 << "data"
                                         << "x");
-    updateArgs1.update = BSON("$set" << BSON("data"
-                                             << "x"));
+    updateArgs1.update = BSON("$set" << BSON("data" << "x"));
     OplogUpdateEntryArgs update1(&updateArgs1, *autoColl1);
 
     const auto criteria2 = BSON("_id" << 1);
@@ -4098,8 +4677,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdateTest) {
     updateArgs2.stmtIds = {1};
     updateArgs2.updatedDoc = BSON("_id" << 1 << "data"
                                         << "y");
-    updateArgs2.update = BSON("$set" << BSON("data"
-                                             << "y"));
+    updateArgs2.update = BSON("$set" << BSON("data" << "y"));
     OplogUpdateEntryArgs update2(&updateArgs2, *autoColl2);
 
     opObserver().onUpdate(opCtx(), update1);
@@ -4121,26 +4699,22 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdateTest) {
         expectedPrevWriteOpTime = repl::OpTime{oplogEntry.getTimestamp(), *oplogEntry.getTerm()};
     }
 
-    auto oExpected = BSON(
-        "applyOps" << BSON_ARRAY(BSON("op"
-                                      << "u"
-                                      << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
-                                      << BSON("$set" << BSON("data"
-                                                             << "x"))
-                                      << "o2" << BSON("_id" << 0)))
-                   << "partialTxn" << true);
+    auto oExpected =
+        BSON("applyOps" << BSON_ARRAY(BSON("op" << "u"
+                                                << "ns" << nss1.toString_forTest() << "ui" << uuid1
+                                                << "o" << BSON("$set" << BSON("data" << "x"))
+                                                << "o2" << BSON("_id" << 0)))
+                        << "partialTxn" << true);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[0].getObject());
 
     // This should be the implicit commit oplog entry, indicated by the absence of the
     // 'partialTxn' field.
-    oExpected = BSON(
-        "applyOps" << BSON_ARRAY(BSON("op"
-                                      << "u"
-                                      << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
-                                      << BSON("$set" << BSON("data"
-                                                             << "y"))
-                                      << "o2" << BSON("_id" << 1)))
-                   << "count" << 2);
+    oExpected =
+        BSON("applyOps" << BSON_ARRAY(BSON("op" << "u"
+                                                << "ns" << nss2.toString_forTest() << "ui" << uuid2
+                                                << "o" << BSON("$set" << BSON("data" << "y"))
+                                                << "o2" << BSON("_id" << 1)))
+                        << "count" << 2);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[1].getObject());
 }
 
@@ -4179,20 +4753,19 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalDeleteTest) {
         expectedPrevWriteOpTime = repl::OpTime{oplogEntry.getTimestamp(), *oplogEntry.getTerm()};
     }
 
-    auto oExpected = BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                                        << "d"
-                                                        << "ns" << nss1.toString_forTest() << "ui"
-                                                        << uuid1 << "o" << BSON("_id" << 0)))
-                                     << "partialTxn" << true);
+    auto oExpected =
+        BSON("applyOps" << BSON_ARRAY(BSON("op" << "d"
+                                                << "ns" << nss1.toString_forTest() << "ui" << uuid1
+                                                << "o" << BSON("_id" << 0)))
+                        << "partialTxn" << true);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[0].getObject());
 
     // This should be the implicit commit oplog entry, indicated by the absence of the
     // 'partialTxn' field.
     oExpected = oExpected =
-        BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                           << "d"
-                                           << "ns" << nss2.toString_forTest() << "ui" << uuid2
-                                           << "o" << BSON("_id" << 1)))
+        BSON("applyOps" << BSON_ARRAY(BSON("op" << "d"
+                                                << "ns" << nss2.toString_forTest() << "ui" << uuid2
+                                                << "o" << BSON("_id" << 1)))
                         << "count" << 2);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[1].getObject());
 }
@@ -4247,36 +4820,32 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalInsertPrepareTest) {
         expectedPrevWriteOpTime = repl::OpTime{oplogEntry.getTimestamp(), *oplogEntry.getTerm()};
     }
 
-    auto oExpected =
-        BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                           << "i"
+    auto oExpected = BSON(
+        "applyOps" << BSON_ARRAY(BSON("op" << "i"
                                            << "ns" << nss1.toString_forTest() << "ui" << uuid1
                                            << "o" << BSON("_id" << 0) << "o2" << BSON("_id" << 0)))
-                        << "partialTxn" << true);
+                   << "partialTxn" << true);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[0].getObject());
 
-    oExpected =
-        BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                           << "i"
+    oExpected = BSON(
+        "applyOps" << BSON_ARRAY(BSON("op" << "i"
                                            << "ns" << nss1.toString_forTest() << "ui" << uuid1
                                            << "o" << BSON("_id" << 1) << "o2" << BSON("_id" << 1)))
-                        << "partialTxn" << true);
+                   << "partialTxn" << true);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[1].getObject());
 
-    oExpected =
-        BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                           << "i"
+    oExpected = BSON(
+        "applyOps" << BSON_ARRAY(BSON("op" << "i"
                                            << "ns" << nss2.toString_forTest() << "ui" << uuid2
                                            << "o" << BSON("_id" << 2) << "o2" << BSON("_id" << 2)))
-                        << "partialTxn" << true);
+                   << "partialTxn" << true);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[2].getObject());
 
-    oExpected =
-        BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                           << "i"
+    oExpected = BSON(
+        "applyOps" << BSON_ARRAY(BSON("op" << "i"
                                            << "ns" << nss2.toString_forTest() << "ui" << uuid2
                                            << "o" << BSON("_id" << 3) << "o2" << BSON("_id" << 3)))
-                        << "prepare" << true << "count" << 4);
+                   << "prepare" << true << "count" << 4);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[3].getObject());
 
     assertTxnRecord(txnNum(), prepareOpTime, DurableTxnStateEnum::kPrepared);
@@ -4297,8 +4866,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdatePrepareTest) {
     updateArgs1.stmtIds = {0};
     updateArgs1.updatedDoc = BSON("_id" << 0 << "data"
                                         << "x");
-    updateArgs1.update = BSON("$set" << BSON("data"
-                                             << "x"));
+    updateArgs1.update = BSON("$set" << BSON("data" << "x"));
     OplogUpdateEntryArgs update1(&updateArgs1, *autoColl1);
 
     const auto criteria2 = BSON("_id" << 1);
@@ -4308,8 +4876,7 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdatePrepareTest) {
     updateArgs2.stmtIds = {1};
     updateArgs2.updatedDoc = BSON("_id" << 1 << "data"
                                         << "y");
-    updateArgs2.update = BSON("$set" << BSON("data"
-                                             << "y"));
+    updateArgs2.update = BSON("$set" << BSON("data" << "y"));
     OplogUpdateEntryArgs update2(&updateArgs2, *autoColl2);
 
     opObserver().onUpdate(opCtx(), update1);
@@ -4336,24 +4903,20 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalUpdatePrepareTest) {
         expectedPrevWriteOpTime = repl::OpTime{oplogEntry.getTimestamp(), *oplogEntry.getTerm()};
     }
 
-    auto oExpected = BSON(
-        "applyOps" << BSON_ARRAY(BSON("op"
-                                      << "u"
-                                      << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
-                                      << BSON("$set" << BSON("data"
-                                                             << "x"))
-                                      << "o2" << BSON("_id" << 0)))
-                   << "partialTxn" << true);
+    auto oExpected =
+        BSON("applyOps" << BSON_ARRAY(BSON("op" << "u"
+                                                << "ns" << nss1.toString_forTest() << "ui" << uuid1
+                                                << "o" << BSON("$set" << BSON("data" << "x"))
+                                                << "o2" << BSON("_id" << 0)))
+                        << "partialTxn" << true);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[0].getObject());
 
-    oExpected = BSON(
-        "applyOps" << BSON_ARRAY(BSON("op"
-                                      << "u"
-                                      << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
-                                      << BSON("$set" << BSON("data"
-                                                             << "y"))
-                                      << "o2" << BSON("_id" << 1)))
-                   << "prepare" << true << "count" << 2);
+    oExpected =
+        BSON("applyOps" << BSON_ARRAY(BSON("op" << "u"
+                                                << "ns" << nss2.toString_forTest() << "ui" << uuid2
+                                                << "o" << BSON("$set" << BSON("data" << "y"))
+                                                << "o2" << BSON("_id" << 1)))
+                        << "prepare" << true << "count" << 2);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[1].getObject());
 
     assertTxnRecord(txnNum(), prepareOpTime, DurableTxnStateEnum::kPrepared);
@@ -4399,17 +4962,16 @@ TEST_F(OpObserverMultiEntryTransactionTest, TransactionalDeletePrepareTest) {
         expectedPrevWriteOpTime = repl::OpTime{oplogEntry.getTimestamp(), *oplogEntry.getTerm()};
     }
 
-    auto oExpected = BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                                        << "d"
-                                                        << "ns" << nss1.toString_forTest() << "ui"
-                                                        << uuid1 << "o" << BSON("_id" << 0)))
-                                     << "partialTxn" << true);
+    auto oExpected =
+        BSON("applyOps" << BSON_ARRAY(BSON("op" << "d"
+                                                << "ns" << nss1.toString_forTest() << "ui" << uuid1
+                                                << "o" << BSON("_id" << 0)))
+                        << "partialTxn" << true);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[0].getObject());
 
-    oExpected = BSON("applyOps" << BSON_ARRAY(BSON("op"
-                                                   << "d"
-                                                   << "ns" << nss2.toString_forTest() << "ui"
-                                                   << uuid2 << "o" << BSON("_id" << 1)))
+    oExpected = BSON("applyOps" << BSON_ARRAY(BSON("op" << "d"
+                                                        << "ns" << nss2.toString_forTest() << "ui"
+                                                        << uuid2 << "o" << BSON("_id" << 1)))
                                 << "prepare" << true << "count" << 2);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[1].getObject());
 
@@ -4616,23 +5178,20 @@ TEST_F(OpObserverMultiEntryTransactionTest, UnpreparedTransactionPackingTest) {
         ASSERT_LT(expectedPrevWriteOpTime.getTimestamp(), oplogEntry.getTimestamp());
         expectedPrevWriteOpTime = repl::OpTime{oplogEntry.getTimestamp(), *oplogEntry.getTerm()};
     }
-    auto oExpected = BSON(
-        "applyOps" << BSON_ARRAY(BSON("op"
-                                      << "i"
-                                      << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
-                                      << BSON("_id" << 0) << "o2" << BSON("_id" << 0))
-                                 << BSON("op"
-                                         << "i"
-                                         << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
-                                         << BSON("_id" << 1) << "o2" << BSON("_id" << 1))
-                                 << BSON("op"
-                                         << "i"
-                                         << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
-                                         << BSON("_id" << 2) << "o2" << BSON("_id" << 2))
-                                 << BSON("op"
-                                         << "i"
-                                         << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
-                                         << BSON("_id" << 3) << "o2" << BSON("_id" << 3))));
+    auto oExpected =
+        BSON("applyOps" << BSON_ARRAY(
+                 BSON("op" << "i"
+                           << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
+                           << BSON("_id" << 0) << "o2" << BSON("_id" << 0))
+                 << BSON("op" << "i"
+                              << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
+                              << BSON("_id" << 1) << "o2" << BSON("_id" << 1))
+                 << BSON("op" << "i"
+                              << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
+                              << BSON("_id" << 2) << "o2" << BSON("_id" << 2))
+                 << BSON("op" << "i"
+                              << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
+                              << BSON("_id" << 3) << "o2" << BSON("_id" << 3))));
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[0].getObject());
 }
 
@@ -4679,24 +5238,21 @@ TEST_F(OpObserverMultiEntryTransactionTest, PreparedTransactionPackingTest) {
     ASSERT_LT(expectedPrevWriteOpTime.getTimestamp(), oplogEntry.getTimestamp());
     expectedPrevWriteOpTime = repl::OpTime{oplogEntry.getTimestamp(), *oplogEntry.getTerm()};
 
-    auto oExpected = BSON(
-        "applyOps" << BSON_ARRAY(BSON("op"
-                                      << "i"
-                                      << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
-                                      << BSON("_id" << 0) << "o2" << BSON("_id" << 0))
-                                 << BSON("op"
-                                         << "i"
+    auto oExpected =
+        BSON("applyOps" << BSON_ARRAY(
+                               BSON("op" << "i"
                                          << "ns" << nss1.toString_forTest() << "ui" << uuid1 << "o"
-                                         << BSON("_id" << 1) << "o2" << BSON("_id" << 1))
-                                 << BSON("op"
-                                         << "i"
-                                         << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
-                                         << BSON("_id" << 2) << "o2" << BSON("_id" << 2))
-                                 << BSON("op"
-                                         << "i"
-                                         << "ns" << nss2.toString_forTest() << "ui" << uuid2 << "o"
-                                         << BSON("_id" << 3) << "o2" << BSON("_id" << 3)))
-                   << "prepare" << true);
+                                         << BSON("_id" << 0) << "o2" << BSON("_id" << 0))
+                               << BSON("op" << "i"
+                                            << "ns" << nss1.toString_forTest() << "ui" << uuid1
+                                            << "o" << BSON("_id" << 1) << "o2" << BSON("_id" << 1))
+                               << BSON("op" << "i"
+                                            << "ns" << nss2.toString_forTest() << "ui" << uuid2
+                                            << "o" << BSON("_id" << 2) << "o2" << BSON("_id" << 2))
+                               << BSON("op" << "i"
+                                            << "ns" << nss2.toString_forTest() << "ui" << uuid2
+                                            << "o" << BSON("_id" << 3) << "o2" << BSON("_id" << 3)))
+                        << "prepare" << true);
     ASSERT_BSONOBJ_EQ(oExpected, oplogEntries[0].getObject());
 
     txnParticipant.unstashTransactionResources(opCtx(), "abortTransaction");
@@ -4897,13 +5453,7 @@ TEST_F(OpObserverTest, MagicRestoreNoOplog) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest(boost::none, "test.coll");
     UUID indexBuildUUID = UUID::gen();
 
-    BSONObj specX = BSON("key" << BSON("x" << 1) << "name"
-                               << "x_1"
-                               << "v" << 2);
-    BSONObj specA = BSON("key" << BSON("a" << 1) << "name"
-                               << "a_1"
-                               << "v" << 2);
-    std::vector<BSONObj> specs = {specX, specA};
+    auto indexes = makeSpecs(opCtx.get(), {"x", "a"});
 
     storageGlobalParams.magicRestore = true;
 
@@ -4912,7 +5462,7 @@ TEST_F(OpObserverTest, MagicRestoreNoOplog) {
         AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
         WriteUnitOfWork wunit(opCtx.get());
         opObserver.onStartIndexBuild(
-            opCtx.get(), nss, uuid, indexBuildUUID, specs, false /*fromMigrate*/);
+            opCtx.get(), nss, uuid, indexBuildUUID, indexes, false /*fromMigrate*/);
         wunit.commit();
     }
 
@@ -4921,13 +5471,444 @@ TEST_F(OpObserverTest, MagicRestoreNoOplog) {
     storageGlobalParams.magicRestore = false;
 }
 
-class OpObserverServerlessTest : public OpObserverTest {
-private:
-    // Need to set serverless.
-    repl::ReplSettings createReplSettings() override {
-        return repl::createServerlessReplSettings();
+TEST_F(OpObserverTest, OnCreateIndexReplicateLocalCatalogIdentifiers) {
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
+    auto opCtx = cc().makeOperationContext();
+
+    auto nss = NamespaceString::createNamespaceString_forTest("test.coll");
+    auto indexes = makeSpecs(opCtx.get(), {"a"});
+
+    for (bool enable : {false, true}) {
+        RAIIServerParameterControllerForTest replicatedLocalCatalogIdentifiers(
+            "featureFlagReplicateLocalCatalogIdentifiers", enable);
+        AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
+        WriteUnitOfWork wunit(opCtx.get());
+        opObserver.onCreateIndex(opCtx.get(), nss, UUID::gen(), indexes[0], false);
+        wunit.commit();
     }
-};
+
+    auto oplogEntries = getNOplogEntries(opCtx.get(), 2);
+    auto disabledEntry = assertGet(OplogEntry::parse(oplogEntries[0]));
+    auto enabledEntry = assertGet(OplogEntry::parse(oplogEntries[1]));
+
+    auto expectedO = BSON("createIndexes" << "coll"
+                                          << "v" << 2 << "key" << BSON("a" << 1) << "name"
+                                          << "a_1");
+    ASSERT_BSONOBJ_EQ(disabledEntry.getObject(), expectedO);
+    ASSERT_BSONOBJ_EQ(enabledEntry.getObject(), expectedO);
+    ASSERT_FALSE(disabledEntry.getObject2());
+    auto enabledO2 = enabledEntry.getObject2();
+    ASSERT(enabledO2);
+    ASSERT_BSONOBJ_EQ(*enabledO2, BSON("indexIdent" << "1"));
+}
+
+TEST_F(OpObserverTest, OnCreateIndexTimeseriesFlag) {
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
+    auto opCtx = cc().makeOperationContext();
+
+    auto nss = NamespaceString::createNamespaceString_forTest("test.coll");
+    auto indexes = makeSpecs(opCtx.get(), {"a"});
+
+    for (bool timeseries : {false, true}) {
+        RAIIServerParameterControllerForTest replicatedLocalCatalogIdentifiers(
+            "featureFlagReplicateLocalCatalogIdentifiers", true);
+        AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
+        WriteUnitOfWork wunit(opCtx.get());
+        opObserver.onCreateIndex(opCtx.get(), nss, UUID::gen(), indexes[0], false, timeseries);
+        wunit.commit();
+    }
+
+    auto oplogEntries = getNOplogEntries(opCtx.get(), 2);
+    ASSERT_FALSE(oplogEntries[0].getBoolField("isTimeseries"));
+    ASSERT_TRUE(oplogEntries[1].getBoolField("isTimeseries"));
+}
+
+TEST_F(OpObserverTest, OnCreateIndexIncludesIndexIdent) {
+    RAIIServerParameterControllerForTest replicatedLocalCatalogIdentifiers(
+        "featureFlagReplicateLocalCatalogIdentifiers", true);
+
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
+    auto opCtx = cc().makeOperationContext();
+
+    auto nss = NamespaceString::createNamespaceString_forTest("test.coll");
+    auto indexes = makeSpecs(opCtx.get(), {"a", "a"});
+
+    {
+        AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
+        WriteUnitOfWork wunit(opCtx.get());
+        opObserver.onCreateIndex(opCtx.get(), nss, UUID::gen(), indexes[0], false);
+        opObserver.onCreateIndex(opCtx.get(), nss, UUID::gen(), indexes[1], false);
+        wunit.commit();
+    }
+
+    auto oplogEntries = getNOplogEntries(opCtx.get(), 2);
+    auto entry1 = assertGet(OplogEntry::parse(oplogEntries[0]));
+    auto entry2 = assertGet(OplogEntry::parse(oplogEntries[1]));
+
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    auto indexIdentUniqueTag0 =
+        storageEngine->getIndexIdentUniqueTag(indexes[0].indexIdent, nss.dbName());
+    auto indexIdentUniqueTag1 =
+        storageEngine->getIndexIdentUniqueTag(indexes[1].indexIdent, nss.dbName());
+
+    ASSERT_BSONOBJ_EQ(*entry1.getObject2(), BSON("indexIdent" << indexIdentUniqueTag0));
+    ASSERT_BSONOBJ_EQ(*entry2.getObject2(), BSON("indexIdent" << indexIdentUniqueTag1));
+}
+
+TEST_F(OpObserverTest, OnStartIndexBuildIncludesIndexIdent) {
+    RAIIServerParameterControllerForTest replicatedLocalCatalogIdentifiers(
+        "featureFlagReplicateLocalCatalogIdentifiers", true);
+
+    OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
+    auto opCtx = cc().makeOperationContext();
+
+    auto nss = NamespaceString::createNamespaceString_forTest("test.coll");
+    auto indexes = makeSpecs(opCtx.get(), {"a", "a"});
+
+    {
+        AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
+        WriteUnitOfWork wunit(opCtx.get());
+        {
+            RAIIServerParameterControllerForTest replicatedLocalCatalogIdentifiers(
+                "featureFlagReplicateLocalCatalogIdentifiers", true);
+            opObserver.onStartIndexBuild(
+                opCtx.get(), nss, UUID::gen(), UUID::gen(), {indexes[0]}, false);
+        }
+        {
+            RAIIServerParameterControllerForTest replicatedLocalCatalogIdentifiers(
+                "featureFlagReplicateLocalCatalogIdentifiers", false);
+            opObserver.onStartIndexBuild(
+                opCtx.get(), nss, UUID::gen(), UUID::gen(), {indexes[1]}, false);
+        }
+        wunit.commit();
+    }
+
+    auto oplogEntries = getNOplogEntries(opCtx.get(), 2);
+    auto entry1 = assertGet(OplogEntry::parse(oplogEntries[0]));
+    auto entry2 = assertGet(OplogEntry::parse(oplogEntries[1]));
+
+    ASSERT_TRUE(entry1.getObject2());
+    auto o2 = entry1.getObject2();
+    auto indexesElem = o2->getField("indexes");
+    auto indexesElemVec = indexesElem.Array();
+    ASSERT_EQ(indexesElemVec.size(), 1);
+    auto indexElemObj = indexesElemVec[0].Obj();
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    auto indexIdentUniqueTag =
+        storageEngine->getIndexIdentUniqueTag(indexes[0].indexIdent, nss.dbName());
+    ASSERT_EQ(indexElemObj.getField("indexIdent").str(), indexIdentUniqueTag);
+    ASSERT_FALSE(entry2.getObject2());
+}
+
+TEST_F(OpObserverTest, OnContainerInsert) {
+    auto opCtx = cc().makeOperationContext();
+    Lock::GlobalLock lock{opCtx.get(), LockMode::MODE_IX};
+
+    auto ident = "ident";
+    int64_t key1 = 100;
+    std::string key2 = "stuff";
+    std::string value1 = "things";
+    std::string value2 = "other things";
+
+    OpObserverImpl opObserver{std::make_unique<OperationLoggerImpl>()};
+    opObserver.onContainerInsert(opCtx.get(), nss, uuid, ident, key1, value1);
+    opObserver.onContainerInsert(opCtx.get(), nss, uuid, ident, key2, value2);
+
+    auto entries = getNOplogEntries(opCtx.get(), 2);
+    auto entry1 = assertGet(OplogEntry::parse(entries[0]));
+    auto entry2 = assertGet(OplogEntry::parse(entries[1]));
+
+    ASSERT_EQ(entry1.getOpType(), repl::OpTypeEnum::kContainerInsert);
+    ASSERT_EQ(entry2.getOpType(), repl::OpTypeEnum::kContainerInsert);
+    ASSERT_EQ(entry1.getEntry().getContainer(), StringData{ident});
+    ASSERT_EQ(entry2.getEntry().getContainer(), StringData{ident});
+
+    auto entry1Object = entry1.getObject();
+    ASSERT_EQ(entry1Object.nFields(), 2);
+    auto entry1Key = entry1Object["k"];
+    ASSERT_EQ(entry1Key.type(), BSONType::numberLong);
+    ASSERT_EQ(entry1Key.numberLong(), key1);
+    auto entry1Value = entry1Object["v"];
+    ASSERT_EQ(entry1Value.type(), BSONType::binData);
+    ASSERT_EQ(entry1Value.binDataType(), BinDataType::BinDataGeneral);
+    int entry1ValueBinDataLength;
+    auto entry1ValueBinData = entry1Value.binData(entry1ValueBinDataLength);
+    ASSERT_EQ(std::string(entry1ValueBinData, entry1ValueBinDataLength), value1);
+
+    auto entry2Object = entry2.getObject();
+    ASSERT_EQ(entry2Object.nFields(), 2);
+    auto entry2Key = entry2Object["k"];
+    ASSERT_EQ(entry2Key.type(), BSONType::binData);
+    int entry2KeyBinDataLength;
+    auto entry2KeyBinData = entry2Key.binData(entry2KeyBinDataLength);
+    ASSERT_EQ(std::string(entry2KeyBinData, entry2KeyBinDataLength), key2);
+    auto entry2Value = entry2Object["v"];
+    ASSERT_EQ(entry2Value.type(), BSONType::binData);
+    ASSERT_EQ(entry2Value.binDataType(), BinDataType::BinDataGeneral);
+    int entry2ValueBinDataLength;
+    auto entry2ValueBinData = entry2Value.binData(entry2ValueBinDataLength);
+    ASSERT_EQ(std::string(entry2ValueBinData, entry2ValueBinDataLength), value2);
+}
+
+TEST_F(OpObserverTest, OnContainerDelete) {
+    auto opCtx = cc().makeOperationContext();
+    Lock::GlobalLock lock{opCtx.get(), LockMode::MODE_IX};
+
+    auto ident = "ident";
+    int64_t key1 = 100;
+    std::string key2 = "stuff";
+
+    OpObserverImpl opObserver{std::make_unique<OperationLoggerImpl>()};
+    opObserver.onContainerDelete(opCtx.get(), nss, uuid, ident, key1);
+    opObserver.onContainerDelete(opCtx.get(), nss, uuid, ident, key2);
+
+    auto entries = getNOplogEntries(opCtx.get(), 2);
+    auto entry1 = assertGet(OplogEntry::parse(entries[0]));
+    auto entry2 = assertGet(OplogEntry::parse(entries[1]));
+
+    ASSERT_EQ(entry1.getOpType(), repl::OpTypeEnum::kContainerDelete);
+    ASSERT_EQ(entry2.getOpType(), repl::OpTypeEnum::kContainerDelete);
+    ASSERT_EQ(entry1.getEntry().getContainer(), StringData{ident});
+    ASSERT_EQ(entry2.getEntry().getContainer(), StringData{ident});
+
+    auto entry1Object = entry1.getObject();
+    ASSERT_EQ(entry1Object.nFields(), 1);
+    auto entry1Key = entry1Object["k"];
+    ASSERT_EQ(entry1Key.type(), BSONType::numberLong);
+    ASSERT_EQ(entry1Key.numberLong(), key1);
+
+    auto entry2Object = entry2.getObject();
+    ASSERT_EQ(entry2Object.nFields(), 1);
+    auto entry2Key = entry2Object["k"];
+    ASSERT_EQ(entry2Key.type(), BSONType::binData);
+    int entry2KeyBinDataLength;
+    auto entry2KeyBinData = entry2Key.binData(entry2KeyBinDataLength);
+    ASSERT_EQ(std::string(entry2KeyBinData, entry2KeyBinDataLength), key2);
+}
+
+TEST_F(BatchedWriteOutputsTest, OnContainerInsertBatched) {
+    auto opCtx = cc().makeOperationContext();
+    Lock::GlobalLock lock{opCtx.get(), LockMode::MODE_IX};
+    WriteUnitOfWork wuow{opCtx.get(), WriteUnitOfWork::OplogEntryGroupType::kGroupForTransaction};
+
+    auto ident = "ident";
+    int64_t key1 = 100;
+    std::string key2 = "stuff";
+    std::string value1 = "things";
+    std::string value2 = "other things";
+
+    opCtx->getServiceContext()->getOpObserver()->onContainerInsert(
+        opCtx.get(), _nss, uuid, ident, key1, value1);
+    opCtx->getServiceContext()->getOpObserver()->onContainerInsert(
+        opCtx.get(), _nss, uuid, ident, key2, value2);
+
+    wuow.commit();
+
+    auto entry = assertGet(OplogEntry::parse(getNOplogEntries(opCtx.get(), 1)[0]));
+    ASSERT_EQ(entry.getOpType(), repl::OpTypeEnum::kCommand);
+    ASSERT_EQ(entry.getCommandType(), OplogEntry::CommandType::kApplyOps);
+
+    std::vector<repl::OplogEntry> innerEntries;
+    repl::ApplyOps::extractOperationsTo(entry, entry.getEntry().toBSON(), &innerEntries);
+    ASSERT_EQ(innerEntries.size(), 2);
+
+    ASSERT_EQ(innerEntries[0].getOpType(), repl::OpTypeEnum::kContainerInsert);
+    ASSERT_EQ(innerEntries[1].getOpType(), repl::OpTypeEnum::kContainerInsert);
+    ASSERT_EQ(innerEntries[0].getEntry().getContainer(), StringData{ident});
+    ASSERT_EQ(innerEntries[1].getEntry().getContainer(), StringData{ident});
+
+    auto entry1Object = innerEntries[0].getObject();
+    ASSERT_EQ(entry1Object.nFields(), 2);
+    auto entry1Key = entry1Object["k"];
+    ASSERT_EQ(entry1Key.type(), BSONType::numberLong);
+    ASSERT_EQ(entry1Key.numberLong(), key1);
+    auto entry1Value = entry1Object["v"];
+    ASSERT_EQ(entry1Value.type(), BSONType::binData);
+    ASSERT_EQ(entry1Value.binDataType(), BinDataType::BinDataGeneral);
+    int entry1ValueBinDataLength;
+    auto entry1ValueBinData = entry1Value.binData(entry1ValueBinDataLength);
+    ASSERT_EQ(std::string(entry1ValueBinData, entry1ValueBinDataLength), value1);
+
+    auto entry2Object = innerEntries[1].getObject();
+    ASSERT_EQ(entry2Object.nFields(), 2);
+    auto entry2Key = entry2Object["k"];
+    ASSERT_EQ(entry2Key.type(), BSONType::binData);
+    int entry2KeyBinDataLength;
+    auto entry2KeyBinData = entry2Key.binData(entry2KeyBinDataLength);
+    ASSERT_EQ(std::string(entry2KeyBinData, entry2KeyBinDataLength), key2);
+    auto entry2Value = entry2Object["v"];
+    ASSERT_EQ(entry2Value.type(), BSONType::binData);
+    ASSERT_EQ(entry2Value.binDataType(), BinDataType::BinDataGeneral);
+    int entry2ValueBinDataLength;
+    auto entry2ValueBinData = entry2Value.binData(entry2ValueBinDataLength);
+    ASSERT_EQ(std::string(entry2ValueBinData, entry2ValueBinDataLength), value2);
+}
+
+TEST_F(BatchedWriteOutputsTest, OnContainerDeleteBatched) {
+    auto opCtx = cc().makeOperationContext();
+    Lock::GlobalLock lock{opCtx.get(), LockMode::MODE_IX};
+    WriteUnitOfWork wuow{opCtx.get(), WriteUnitOfWork::OplogEntryGroupType::kGroupForTransaction};
+
+    auto ident = "ident";
+    int64_t key1 = 100;
+    std::string key2 = "stuff";
+
+    opCtx->getServiceContext()->getOpObserver()->onContainerDelete(
+        opCtx.get(), _nss, uuid, ident, key1);
+    opCtx->getServiceContext()->getOpObserver()->onContainerDelete(
+        opCtx.get(), _nss, uuid, ident, key2);
+
+    wuow.commit();
+
+    auto entry = assertGet(OplogEntry::parse(getNOplogEntries(opCtx.get(), 1)[0]));
+    ASSERT_EQ(entry.getOpType(), repl::OpTypeEnum::kCommand);
+    ASSERT_EQ(entry.getCommandType(), OplogEntry::CommandType::kApplyOps);
+
+    std::vector<repl::OplogEntry> innerEntries;
+    repl::ApplyOps::extractOperationsTo(entry, entry.getEntry().toBSON(), &innerEntries);
+    ASSERT_EQ(innerEntries.size(), 2);
+
+    ASSERT_EQ(innerEntries[0].getOpType(), repl::OpTypeEnum::kContainerDelete);
+    ASSERT_EQ(innerEntries[1].getOpType(), repl::OpTypeEnum::kContainerDelete);
+    ASSERT_EQ(innerEntries[0].getEntry().getContainer(), StringData{ident});
+    ASSERT_EQ(innerEntries[1].getEntry().getContainer(), StringData{ident});
+
+    auto entry1Object = innerEntries[0].getObject();
+    ASSERT_EQ(entry1Object.nFields(), 1);
+    auto entry1Key = entry1Object["k"];
+    ASSERT_EQ(entry1Key.type(), BSONType::numberLong);
+    ASSERT_EQ(entry1Key.numberLong(), key1);
+
+    auto entry2Object = innerEntries[1].getObject();
+    ASSERT_EQ(entry2Object.nFields(), 1);
+    auto entry2Key = entry2Object["k"];
+    ASSERT_EQ(entry2Key.type(), BSONType::binData);
+    int entry2KeyBinDataLength;
+    auto entry2KeyBinData = entry2Key.binData(entry2KeyBinDataLength);
+    ASSERT_EQ(std::string(entry2KeyBinData, entry2KeyBinDataLength), key2);
+}
+
+TEST_F(BatchedWriteOutputsTest, OnContainerInsertDeleteBatchedWithInsertDeleteUpdate) {
+    auto opCtx = cc().makeOperationContext();
+    reset(opCtx.get(), _nss);
+    reset(opCtx.get(), NamespaceString::kRsOplogNamespace);
+    AutoGetCollection coll{opCtx.get(), _nss, LockMode::MODE_IX};
+    WriteUnitOfWork wuow{opCtx.get(), WriteUnitOfWork::OplogEntryGroupType::kGroupForTransaction};
+
+    auto ident = "ident";
+    int64_t key1 = 100;
+    std::string key2 = "stuff";
+    std::string value1 = "things";
+    std::string value2 = "other things";
+
+    opCtx->getServiceContext()->getOpObserver()->onContainerInsert(
+        opCtx.get(), _nss, uuid, ident, key1, value1);
+    opCtx->getServiceContext()->getOpObserver()->onContainerDelete(
+        opCtx.get(), _nss, uuid, ident, key2);
+    {
+        std::vector<InsertStatement> insert;
+        insert.emplace_back(BSON("_id" << 0));
+        opCtx->getServiceContext()->getOpObserver()->onInserts(
+            opCtx.get(),
+            *coll,
+            insert.begin(),
+            insert.end(),
+            {},
+            std::vector<bool>(insert.size(), false),
+            false);
+    }
+    {
+        auto doc = BSON("_id" << 1);
+        opCtx->getServiceContext()->getOpObserver()->onDelete(opCtx.get(),
+                                                              *coll,
+                                                              kUninitializedStmtId,
+                                                              doc,
+                                                              getDocumentKey(*coll, doc),
+                                                              OplogDeleteEntryArgs{});
+    }
+    {
+        auto doc = BSON("_id" << 2);
+        CollectionUpdateArgs collUpdateArgs{doc};
+        collUpdateArgs.criteria = doc;
+        collUpdateArgs.update = BSON("a" << 2);
+        opCtx->getServiceContext()->getOpObserver()->onUpdate(
+            opCtx.get(), OplogUpdateEntryArgs{&collUpdateArgs, *coll});
+    }
+
+    wuow.commit();
+
+    auto entry = assertGet(OplogEntry::parse(getNOplogEntries(opCtx.get(), 1)[0]));
+    ASSERT_EQ(entry.getOpType(), repl::OpTypeEnum::kCommand);
+    ASSERT_EQ(entry.getCommandType(), OplogEntry::CommandType::kApplyOps);
+
+    std::vector<repl::OplogEntry> innerEntries;
+    repl::ApplyOps::extractOperationsTo(entry, entry.getEntry().toBSON(), &innerEntries);
+    ASSERT_EQ(innerEntries.size(), 5);
+
+    ASSERT_EQ(innerEntries[0].getOpType(), repl::OpTypeEnum::kContainerInsert);
+    ASSERT_EQ(innerEntries[1].getOpType(), repl::OpTypeEnum::kContainerDelete);
+    ASSERT_EQ(innerEntries[0].getEntry().getContainer(), StringData{ident});
+    ASSERT_EQ(innerEntries[1].getEntry().getContainer(), StringData{ident});
+
+    auto entry1Object = innerEntries[0].getObject();
+    ASSERT_EQ(entry1Object.nFields(), 2);
+    auto entry1Key = entry1Object["k"];
+    ASSERT_EQ(entry1Key.type(), BSONType::numberLong);
+    ASSERT_EQ(entry1Key.numberLong(), key1);
+    auto entry1Value = entry1Object["v"];
+    ASSERT_EQ(entry1Value.type(), BSONType::binData);
+    ASSERT_EQ(entry1Value.binDataType(), BinDataType::BinDataGeneral);
+    int entry1ValueBinDataLength;
+    auto entry1ValueBinData = entry1Value.binData(entry1ValueBinDataLength);
+    ASSERT_EQ(std::string(entry1ValueBinData, entry1ValueBinDataLength), value1);
+
+    auto entry2Object = innerEntries[1].getObject();
+    ASSERT_EQ(entry2Object.nFields(), 1);
+    auto entry2Key = entry2Object["k"];
+    ASSERT_EQ(entry2Key.type(), BSONType::binData);
+    int entry2KeyBinDataLength;
+    auto entry2KeyBinData = entry2Key.binData(entry2KeyBinDataLength);
+    ASSERT_EQ(std::string(entry2KeyBinData, entry2KeyBinDataLength), key2);
+
+    ASSERT_EQ(innerEntries[2].getOpType(), repl::OpTypeEnum::kInsert);
+    ASSERT_BSONOBJ_EQ(innerEntries[2].getObject(), BSON("_id" << 0));
+    ASSERT_EQ(innerEntries[3].getOpType(), repl::OpTypeEnum::kDelete);
+    ASSERT_BSONOBJ_EQ(innerEntries[3].getObject(), BSON("_id" << 1));
+    ASSERT_EQ(innerEntries[4].getOpType(), repl::OpTypeEnum::kUpdate);
+    ASSERT_BSONOBJ_EQ(innerEntries[4].getObject(), BSON("a" << 2));
+}
+
+TEST_F(OpObserverTransactionTest, OnContainerInsert) {
+    TransactionParticipant::get(opCtx()).unstashTransactionResources(opCtx(), "insert");
+
+    auto ident = "ident";
+    int64_t key1 = 100;
+    std::string key2 = "stuff";
+    std::string value1 = "things";
+    std::string value2 = "other things";
+
+    OpObserverImpl opObserver{std::make_unique<OperationLoggerImpl>()};
+    ASSERT_THROWS_CODE(opObserver.onContainerInsert(opCtx(), nss, uuid, ident, key1, value1),
+                       DBException,
+                       10942700);
+    ASSERT_THROWS_CODE(opObserver.onContainerInsert(opCtx(), nss, uuid, ident, key2, value2),
+                       DBException,
+                       10942700);
+}
+
+TEST_F(OpObserverTransactionTest, OnContainerDelete) {
+    TransactionParticipant::get(opCtx()).unstashTransactionResources(opCtx(), "delete");
+
+    auto ident = "ident";
+    int64_t key1 = 100;
+    std::string key2 = "stuff";
+
+    OpObserverImpl opObserver{std::make_unique<OperationLoggerImpl>()};
+    ASSERT_THROWS_CODE(
+        opObserver.onContainerDelete(opCtx(), nss, uuid, ident, key1), DBException, 10942702);
+    ASSERT_THROWS_CODE(
+        opObserver.onContainerDelete(opCtx(), nss, uuid, ident, key2), DBException, 10942702);
+}
 
 }  // namespace
 }  // namespace mongo

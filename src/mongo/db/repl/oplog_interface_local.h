@@ -29,13 +29,14 @@
 
 #pragma once
 
-#include <memory>
-#include <string>
-
 #include "mongo/db/repl/oplog_interface.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/transaction/transaction_history_iterator.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <memory>
+#include <string>
 
 namespace mongo {
 
@@ -47,7 +48,7 @@ namespace repl {
  * Scans local oplog collection in reverse natural order.
  */
 
-class OplogInterfaceLocal : public OplogInterface {
+class MONGO_MOD_PUB OplogInterfaceLocal : public OplogInterface {
 public:
     OplogInterfaceLocal(OperationContext* opCtx);
     std::string toString() const override;

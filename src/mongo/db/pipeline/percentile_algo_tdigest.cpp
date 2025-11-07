@@ -27,18 +27,18 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <iostream>
-#include <memory>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/db/pipeline/percentile_algo_tdigest.h"
+
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
+
+#include <algorithm>
+#include <iostream>
+#include <memory>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -76,6 +76,10 @@ TDigest::TDigest(int64_t negInfCount,
 long TDigest::memUsageBytes() const {
     return sizeof(TDigest) + _buffer.capacity() * sizeof(double) +
         _centroids.capacity() * sizeof(Centroid);
+}
+
+void TDigest::spill() {
+    MONGO_UNREACHABLE_TASSERT(9299403);
 }
 
 void TDigest::incorporate(double input) {

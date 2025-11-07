@@ -29,14 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
@@ -56,7 +48,7 @@
 #include "mongo/db/repl/repl_set_heartbeat_response.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/split_horizon.h"
+#include "mongo/db/repl/split_horizon/split_horizon.h"
 #include "mongo/db/repl/split_prepare_session_manager.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/sync_source_selector.h"
@@ -72,9 +64,19 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
 #include "mongo/util/interruptible.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -84,18 +86,11 @@ struct ConnectionPoolStats;
 
 namespace repl {
 
-inline repl::ReplSettings createServerlessReplSettings() {
-    repl::ReplSettings settings;
-    settings.setOplogSizeBytes(5 * 1024 * 1024);
-    settings.setServerlessMode();
-    return settings;
-}
-
 /**
  * A mock ReplicationCoordinator.  Currently it is extremely simple and exists solely to link
  * into dbtests.
  */
-class ReplicationCoordinatorMock : public ReplicationCoordinator {
+class MONGO_MOD_OPEN ReplicationCoordinatorMock : public ReplicationCoordinator {
     ReplicationCoordinatorMock(const ReplicationCoordinatorMock&) = delete;
     ReplicationCoordinatorMock& operator=(const ReplicationCoordinatorMock&) = delete;
 
@@ -159,12 +154,14 @@ public:
 
     bool canAcceptWritesForDatabase(OperationContext* opCtx, const DatabaseName& dbName) override;
 
+    MONGO_MOD_USE_REPLACEMENT(ReplicationCoordinatorMock::canAcceptWritesForDatabase)
     bool canAcceptWritesForDatabase_UNSAFE(OperationContext* opCtx,
                                            const DatabaseName& dbName) override;
 
     bool canAcceptWritesFor(OperationContext* opCtx,
                             const NamespaceStringOrUUID& nsOrUUID) override;
 
+    MONGO_MOD_USE_REPLACEMENT(ReplicationCoordinatorMock::canAcceptWritesFor)
     bool canAcceptWritesFor_UNSAFE(OperationContext* opCtx,
                                    const NamespaceStringOrUUID& nsOrUUID) override;
 
@@ -180,6 +177,7 @@ public:
     Status checkCanServeReadsFor(OperationContext* opCtx,
                                  const NamespaceString& ns,
                                  bool secondaryOk) override;
+    MONGO_MOD_USE_REPLACEMENT(ReplicationCoordinatorMock::checkCanServeReadsFor)
     Status checkCanServeReadsFor_UNSAFE(OperationContext* opCtx,
                                         const NamespaceString& ns,
                                         bool secondaryOk) override;
@@ -225,8 +223,6 @@ public:
                                        boost::optional<Date_t> deadline) override;
     Status awaitTimestampCommitted(OperationContext* opCtx, Timestamp ts) override;
     OID getElectionId() override;
-
-    virtual OID getMyRID() const;
 
     int getMyId() const override;
 
@@ -293,8 +289,6 @@ public:
     Status processReplSetReconfig(OperationContext* opCtx,
                                   const ReplSetReconfigArgs& args,
                                   BSONObjBuilder* resultObj) override;
-
-    BSONObj getLatestReconfig();
 
     Status doReplSetReconfig(OperationContext* opCtx,
                              GetNewConfigFn getNewConfig,
@@ -402,8 +396,6 @@ public:
                               const BSONObj& cmdObj,
                               OnRemoteCmdScheduledFn onRemoteCmdScheduled,
                               OnRemoteCmdCompleteFn onRemoteCmdComplete)>;
-    void setRunCmdOnPrimaryAndAwaitResponseFunction(
-        RunCmdOnPrimaryAndAwaitResponseFunction runCmdFunction);
 
     /**
      * Always allow writes even if this node is a writable primary. Used by sharding unit tests.
@@ -526,6 +518,8 @@ private:
     Date_t _myLastDurableWallTime;
     OpTime _myLastAppliedOpTime;
     Date_t _myLastAppliedWallTime;
+    OpTime _lastCommittedOpTime;
+    Date_t _lastCommittedWallTime;
     OpTime _currentCommittedSnapshotOpTime;
     BSONObj _latestReconfig;
 

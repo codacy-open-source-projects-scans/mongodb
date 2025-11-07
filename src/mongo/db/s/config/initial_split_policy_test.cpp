@@ -28,16 +28,7 @@
  */
 
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-#include <iterator>
-#include <list>
-#include <set>
-#include <string>
+#include "mongo/db/s/config/initial_split_policy.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -47,20 +38,29 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/oid.h"
+#include "mongo/db/global_catalog/ddl/create_collection_coordinator.h"
+#include "mongo/db/global_catalog/type_shard.h"
+#include "mongo/db/global_catalog/type_tags.h"
 #include "mongo/db/logical_time.h"
-#include "mongo/db/s/config/config_server_test_fixture.h"
-#include "mongo/db/s/config/initial_split_policy.h"
-#include "mongo/db/s/create_collection_coordinator.h"
-#include "mongo/db/vector_clock.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/catalog/type_tags.h"
-#include "mongo/s/client/shard_registry.h"
+#include "mongo/db/sharding_environment/config_server_test_fixture.h"
+#include "mongo/db/topology/shard_registry.h"
+#include "mongo/db/vector_clock/vector_clock.h"
 #include "mongo/stdx/unordered_map.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/time_support.h"
+
+#include <iterator>
+#include <list>
+#include <set>
+#include <string>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -68,6 +68,8 @@ namespace mongo {
 namespace {
 
 using unittest::assertGet;
+
+const ShardId primaryShard{"primaryShard"};
 
 /**
  * Asserts that the given vectors of BSON objects are equal
@@ -116,38 +118,48 @@ int getNumberOfChunksOnShard(const std::vector<ChunkType>& chunks, const ShardId
     });
 }
 
-/**
- * Calls calculateHashedSplitPoints according to the given arguments
- * and asserts that calculated split points match with the expected split points.
- */
-void checkCalculatedHashedSplitPoints(const std::vector<BSONObj>& expectedSplitPoints,
-                                      const ShardKeyPattern& shardKeyPattern,
-                                      size_t numShards) {
-    SplitPointsBasedSplitPolicy policy(shardKeyPattern, numShards);
-    assertBSONObjVectorsAreEqual(expectedSplitPoints, policy.getSplitPoints());
-}
+class CalculateHashedSplitPointsTest : public ConfigServerTestFixture {
+public:
+    /**
+     * Calls calculateHashedSplitPoints according to the given arguments
+     * and asserts that calculated split points match with the expected split points.
+     */
+    void checkCalculatedHashedSplitPoints(const std::vector<BSONObj>& expectedSplitPoints,
+                                          const ShardKeyPattern& shardKeyPattern,
+                                          const std::vector<ShardId>& availableShardIds) {
+        SplitPointsBasedSplitPolicy policy(availableShardIds);
 
-TEST(CalculateHashedSplitPointsTest, HashedPrefixEvenNumberShards) {
+        const SplitPolicyParams splitParams{UUID::gen(), availableShardIds.front()};
+        policy.createFirstChunks(operationContext(), shardKeyPattern, splitParams);
+
+        assertBSONObjVectorsAreEqual(expectedSplitPoints, policy.getSplitPoints());
+    }
+};
+
+TEST_F(CalculateHashedSplitPointsTest, HashedPrefixEvenNumberShards) {
+    const std::vector<ShardId> availableShardIds{
+        ShardId("shard0"), ShardId("shard1"), ShardId("shard2"), ShardId("shard3")};
     const std::vector<BSONObj> expectedSplitPoints = {
         BSON("x" << -4611686018427387902LL), BSON("x" << 0), BSON("x" << 4611686018427387902LL)};
-    checkCalculatedHashedSplitPoints(expectedSplitPoints,
-                                     ShardKeyPattern(BSON("x"
-                                                          << "hashed")),
-                                     4);
+    checkCalculatedHashedSplitPoints(
+        expectedSplitPoints, ShardKeyPattern(BSON("x" << "hashed")), availableShardIds);
 }
 
-TEST(CalculateHashedSplitPointsTest, HashedPrefixUnevenNumberShards) {
+TEST_F(CalculateHashedSplitPointsTest, HashedPrefixUnevenNumberShards) {
+    const std::vector<ShardId> availableShardIds{ShardId("shard0"),
+                                                 ShardId("shard1"),
+                                                 ShardId("shard2"),
+                                                 ShardId("shard3"),
+                                                 ShardId("shard4")};
     const std::vector<BSONObj> expectedSplitPoints = {BSON("x" << -5534023222112865483LL),
                                                       BSON("x" << -1844674407370955161LL),
                                                       BSON("x" << 1844674407370955161LL),
                                                       BSON("x" << 5534023222112865483LL)};
-    checkCalculatedHashedSplitPoints(expectedSplitPoints,
-                                     ShardKeyPattern(BSON("x"
-                                                          << "hashed")),
-                                     5);
+    checkCalculatedHashedSplitPoints(
+        expectedSplitPoints, ShardKeyPattern(BSON("x" << "hashed")), availableShardIds);
 }
 
-TEST(CalculateHashedSplitPointsTest, HashedSuffix) {
+TEST(SimpleCalculateHashedSplitPointsTest, HashedSuffix) {
     auto shardKeyPattern = ShardKeyPattern(BSON("x.a" << 1 << "y.b" << 1 << "z.c"
                                                       << "hashed"));
     const auto preDefinedPrefix = fromjson("{'x.a': {p: 1}, 'y.b': 'val'}");
@@ -160,7 +172,7 @@ TEST(CalculateHashedSplitPointsTest, HashedSuffix) {
         InitialSplitPolicy::calculateHashedSplitPoints(shardKeyPattern, preDefinedPrefix, 4));
 }
 
-TEST(CalculateHashedSplitPointsTest, HashedInfix) {
+TEST(SimpleCalculateHashedSplitPointsTest, HashedInfix) {
     auto shardKeyPattern = ShardKeyPattern(BSON("x.a" << 1 << "y.b"
                                                       << "hashed"
                                                       << "z.c" << 1 << "a" << 1));
@@ -328,8 +340,7 @@ public:
 private:
     const NamespaceString _nss = NamespaceString::createNamespaceString_forTest("test.foo");
     const UUID _uuid{UUID::gen()};
-    const ShardKeyPattern _shardKeyPattern = ShardKeyPattern(BSON("x"
-                                                                  << "hashed"));
+    const ShardKeyPattern _shardKeyPattern = ShardKeyPattern(BSON("x" << "hashed"));
     const std::string _shardName = "testShard";
     const Timestamp _timeStamp{Date_t::now()};
 };
@@ -437,8 +448,7 @@ public:
     }
 
 private:
-    const ShardKeyPattern _shardKeyPattern = ShardKeyPattern(BSON("x"
-                                                                  << "hashed"));
+    const ShardKeyPattern _shardKeyPattern = ShardKeyPattern(BSON("x" << "hashed"));
     const std::string _zoneName = "zoneName";
     const std::string _shardKey = "x";
 };
@@ -467,11 +477,8 @@ TEST_F(SingleChunkPerTagSplitPolicyTest, PredefinedZonesSpanDoNotSpanFromMinToMa
     };
     const std::vector<TagsType> tags = {makeTag(expectedChunkRanges[1], zoneName("0"))};
 
-    const auto generatedChunks = generateInitialZoneChunks(kShards,
-                                                           tags,
-                                                           ShardKeyPattern(BSON("x"
-                                                                                << "hashed")),
-                                                           shardId("0"));
+    const auto generatedChunks = generateInitialZoneChunks(
+        kShards, tags, ShardKeyPattern(BSON("x" << "hashed")), shardId("0"));
 
     assertChunkRangesMatch(expectedChunkRanges, generatedChunks);
     ASSERT_EQ(shardId("0"), generatedChunks[1].getShard());  // corresponds to a zone
@@ -705,7 +712,6 @@ public:
         const std::vector<TagsType>& tags,
         boost::optional<size_t> numInitialChunk = boost::none,
         bool isCollEmpty = true) {
-        ShardId primaryShard("doesntMatter");
 
         PresplitHashedZonesSplitPolicy splitPolicy(
             operationContext(), shardKeyPattern, tags, isCollEmpty);
@@ -845,9 +851,8 @@ TEST_F(PresplitHashedZonesChunksTest, WithHashedPrefix) {
         ShardType(shardId("2").toString(), "rs1/shard1:123", {zoneName("0")})};
     setupShards(kShards);
     shardRegistry()->reload(operationContext());
-    auto shardKeyPattern = ShardKeyPattern(BSON("x"
-                                                << "hashed"
-                                                << "y" << 1));
+    auto shardKeyPattern = ShardKeyPattern(BSON("x" << "hashed"
+                                                    << "y" << 1));
     const auto zoneRange =
         ChunkRange(BSON("x" << MINKEY << "y" << MINKEY), BSON("x" << MAXKEY << "y" << MAXKEY));
     const std::vector<TagsType> tags = {makeTag(zoneRange, zoneName("0"))};
@@ -867,12 +872,10 @@ TEST_F(PresplitHashedZonesChunksTest, SingleZone) {
     shardRegistry()->reload(operationContext());
     auto shardKeyPattern = ShardKeyPattern(BSON("x" << 1 << "y"
                                                     << "hashed"));
-    const auto zoneRange = ChunkRange(BSON("x"
-                                           << "UK"
-                                           << "y" << MINKEY),
-                                      BSON("x"
-                                           << "US"
-                                           << "y" << MINKEY));
+    const auto zoneRange = ChunkRange(BSON("x" << "UK"
+                                               << "y" << MINKEY),
+                                      BSON("x" << "US"
+                                               << "y" << MINKEY));
     const std::vector<TagsType> tags = {makeTag(zoneRange, zoneName("0"))};
 
     std::vector<ChunkRange> expectedChunkRanges =
@@ -895,38 +898,32 @@ TEST_F(PresplitHashedZonesChunksTest, WithMultipleZonesContiguous) {
                                                           << "hashed"
                                                           << "suffix" << 1));
     const std::vector<TagsType> tags = {
-        makeTag(ChunkRange(BSON("country"
-                                << "IE"
-                                << "city"
-                                << "Dublin"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY),
-                           BSON("country"
-                                << "UK"
-                                << "city"
-                                << "London"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY)),
+        makeTag(ChunkRange(BSON("country" << "IE"
+                                          << "city"
+                                          << "Dublin"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "UK"
+                                          << "city"
+                                          << "London"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY)),
                 zoneName("0")),
-        makeTag(ChunkRange(BSON("country"
-                                << "UK"
-                                << "city"
-                                << "London"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY),
-                           BSON("country"
-                                << "US"
-                                << "city"
-                                << "NewYork"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY)),
+        makeTag(ChunkRange(BSON("country" << "UK"
+                                          << "city"
+                                          << "London"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "US"
+                                          << "city"
+                                          << "NewYork"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY)),
                 zoneName("1")),
-        makeTag(
-            ChunkRange(BSON("country"
-                            << "US"
-                            << "city"
-                            << "NewYork"
-                            << "hashedField" << MINKEY << "suffix" << MINKEY),
-                       BSON("country"
-                            << "US"
-                            << "city" << MAXKEY << "hashedField" << MINKEY << "suffix" << MINKEY)),
-            zoneName("2"))};
+        makeTag(ChunkRange(BSON("country" << "US"
+                                          << "city"
+                                          << "NewYork"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "US"
+                                          << "city" << MAXKEY << "hashedField" << MINKEY << "suffix"
+                                          << MINKEY)),
+                zoneName("2"))};
 
     // This should have 5 chunks, 1 for each zone and 2 boundaries.
     std::vector<ChunkRange> expectedChunkRanges =
@@ -958,27 +955,23 @@ TEST_F(PresplitHashedZonesChunksTest, MultipleContiguousZonesWithEachZoneHavingM
                                                           << "hashed"
                                                           << "suffix" << 1));
     const std::vector<TagsType> tags = {
-        makeTag(ChunkRange(BSON("country"
-                                << "IE"
-                                << "city"
-                                << "Dublin"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY),
-                           BSON("country"
-                                << "UK"
-                                << "city"
-                                << "London"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY)),
+        makeTag(ChunkRange(BSON("country" << "IE"
+                                          << "city"
+                                          << "Dublin"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "UK"
+                                          << "city"
+                                          << "London"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY)),
                 zoneName("0")),
-        makeTag(ChunkRange(BSON("country"
-                                << "UK"
-                                << "city"
-                                << "London"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY),
-                           BSON("country"
-                                << "US"
-                                << "city"
-                                << "Los Angeles"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY)),
+        makeTag(ChunkRange(BSON("country" << "UK"
+                                          << "city"
+                                          << "London"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "US"
+                                          << "city"
+                                          << "Los Angeles"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY)),
                 zoneName("1"))};
 
     // This should have 7 chunks, 3 for zone0, 2 for zone1 and 2 boundaries.
@@ -1011,36 +1004,30 @@ TEST_F(PresplitHashedZonesChunksTest, MultipleZonesWithGaps) {
                                                           << "hashed"
                                                           << "suffix" << 1));
     const std::vector<TagsType> tags = {
-        makeTag(ChunkRange(BSON("country"
-                                << "IE"
-                                << "city"
-                                << "Dublin"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY),
-                           BSON("country"
-                                << "UK"
-                                << "city" << MINKEY << "hashedField" << MINKEY << "suffix"
-                                << "SomeValue")),
+        makeTag(ChunkRange(BSON("country" << "IE"
+                                          << "city"
+                                          << "Dublin"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "UK"
+                                          << "city" << MINKEY << "hashedField" << MINKEY << "suffix"
+                                          << "SomeValue")),
                 zoneName("0")),
-        makeTag(ChunkRange(BSON("country"
-                                << "UK"
-                                << "city"
-                                << "London"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY),
-                           BSON("country"
-                                << "US"
-                                << "city" << MINKEY << "hashedField" << 100LL << "suffix"
-                                << "someValue")),
+        makeTag(ChunkRange(BSON("country" << "UK"
+                                          << "city"
+                                          << "London"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "US"
+                                          << "city" << MINKEY << "hashedField" << 100LL << "suffix"
+                                          << "someValue")),
                 zoneName("1")),
-        makeTag(
-            ChunkRange(BSON("country"
-                            << "US"
-                            << "city"
-                            << "NewYork"
-                            << "hashedField" << MINKEY << "suffix" << MINKEY),
-                       BSON("country"
-                            << "US"
-                            << "city" << MAXKEY << "hashedField" << MINKEY << "suffix" << MINKEY)),
-            zoneName("2"))};
+        makeTag(ChunkRange(BSON("country" << "US"
+                                          << "city"
+                                          << "NewYork"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "US"
+                                          << "city" << MAXKEY << "hashedField" << MINKEY << "suffix"
+                                          << MINKEY)),
+                zoneName("2"))};
 
     // This should have 7 chunks, 1 for each zone (3), 2 gaps and 2 boundaries.
     std::vector<ChunkRange> expectedChunkRanges =
@@ -1075,49 +1062,41 @@ TEST_F(PresplitHashedZonesChunksTest, MultipleContiguousZonesWithEachShardHaving
 
     // No gap between the zone ranges.
     const std::vector<TagsType> tags = {
-        makeTag(ChunkRange(BSON("country"
-                                << "IE"
-                                << "city"
-                                << "Dublin"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY),
-                           BSON("country"
-                                << "UK"
-                                << "city"
-                                << "London"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY)),
+        makeTag(ChunkRange(BSON("country" << "IE"
+                                          << "city"
+                                          << "Dublin"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "UK"
+                                          << "city"
+                                          << "London"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY)),
                 zoneName("0")),
-        makeTag(ChunkRange(BSON("country"
-                                << "UK"
-                                << "city"
-                                << "London"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY),
-                           BSON("country"
-                                << "US"
-                                << "city"
-                                << "Los Angeles"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY)),
+        makeTag(ChunkRange(BSON("country" << "UK"
+                                          << "city"
+                                          << "London"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "US"
+                                          << "city"
+                                          << "Los Angeles"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY)),
                 zoneName("1")),
-        makeTag(ChunkRange(BSON("country"
-                                << "US"
-                                << "city"
-                                << "Los Angeles"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY),
-                           BSON("country"
-                                << "US"
-                                << "city"
-                                << "New York"
-                                << "hashedField" << MINKEY << "suffix" << MINKEY)),
+        makeTag(ChunkRange(BSON("country" << "US"
+                                          << "city"
+                                          << "Los Angeles"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "US"
+                                          << "city"
+                                          << "New York"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY)),
                 zoneName("2")),
-        makeTag(
-            ChunkRange(BSON("country"
-                            << "US"
-                            << "city"
-                            << "New York"
-                            << "hashedField" << MINKEY << "suffix" << MINKEY),
-                       BSON("country"
-                            << "US"
-                            << "city" << MAXKEY << "hashedField" << MINKEY << "suffix" << MINKEY)),
-            zoneName("3"))};
+        makeTag(ChunkRange(BSON("country" << "US"
+                                          << "city"
+                                          << "New York"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "US"
+                                          << "city" << MAXKEY << "hashedField" << MINKEY << "suffix"
+                                          << MINKEY)),
+                zoneName("3"))};
 
     // This should have 7 chunks, 5 for all zones and 2 boundaries.
     std::vector<ChunkRange> expectedChunkRanges =
@@ -1157,56 +1136,46 @@ TEST_F(PresplitHashedZonesChunksTest, OneLargeZoneAndOtherSmallZonesSharingASing
 
     // With gaps after each zone ranges.
     const std::vector<TagsType> tags = {
-        makeTag(
-            ChunkRange(BSON("country"
-                            << "country1"
-                            << "city"
-                            << "city1"
-                            << "hashedField" << MINKEY << "suffix" << MINKEY),
-                       BSON("country"
-                            << "country2"
-                            << "city" << MINKEY << "hashedField" << MINKEY << "suffix" << MINKEY)),
-            zoneName("0")),
-        makeTag(
-            ChunkRange(BSON("country"
-                            << "country2"
-                            << "city"
-                            << "city2"
-                            << "hashedField" << MINKEY << "suffix" << MINKEY),
-                       BSON("country"
-                            << "country3"
-                            << "city" << MINKEY << "hashedField" << MINKEY << "suffix" << MINKEY)),
-            zoneName("1")),
-        makeTag(
-            ChunkRange(BSON("country"
-                            << "country3"
-                            << "city"
-                            << "city3"
-                            << "hashedField" << MINKEY << "suffix" << MINKEY),
-                       BSON("country"
-                            << "country4"
-                            << "city" << MINKEY << "hashedField" << MINKEY << "suffix" << MINKEY)),
-            zoneName("2")),
-        makeTag(
-            ChunkRange(BSON("country"
-                            << "country4"
-                            << "city"
-                            << "city4"
-                            << "hashedField" << MINKEY << "suffix" << MINKEY),
-                       BSON("country"
-                            << "country5"
-                            << "city" << MAXKEY << "hashedField" << MINKEY << "suffix" << MINKEY)),
-            zoneName("3")),
-        makeTag(
-            ChunkRange(BSON("country"
-                            << "country6"  // Skip country 5.
-                            << "city"
-                            << "city5"
-                            << "hashedField" << MINKEY << "suffix" << MINKEY),
-                       BSON("country"
-                            << "country7"
-                            << "city" << MAXKEY << "hashedField" << MINKEY << "suffix" << MINKEY)),
-            zoneName("4"))};
+        makeTag(ChunkRange(BSON("country" << "country1"
+                                          << "city"
+                                          << "city1"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "country2"
+                                          << "city" << MINKEY << "hashedField" << MINKEY << "suffix"
+                                          << MINKEY)),
+                zoneName("0")),
+        makeTag(ChunkRange(BSON("country" << "country2"
+                                          << "city"
+                                          << "city2"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "country3"
+                                          << "city" << MINKEY << "hashedField" << MINKEY << "suffix"
+                                          << MINKEY)),
+                zoneName("1")),
+        makeTag(ChunkRange(BSON("country" << "country3"
+                                          << "city"
+                                          << "city3"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "country4"
+                                          << "city" << MINKEY << "hashedField" << MINKEY << "suffix"
+                                          << MINKEY)),
+                zoneName("2")),
+        makeTag(ChunkRange(BSON("country" << "country4"
+                                          << "city"
+                                          << "city4"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "country5"
+                                          << "city" << MAXKEY << "hashedField" << MINKEY << "suffix"
+                                          << MINKEY)),
+                zoneName("3")),
+        makeTag(ChunkRange(BSON("country" << "country6"  // Skip country 5.
+                                          << "city"
+                                          << "city5"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "country7"
+                                          << "city" << MAXKEY << "hashedField" << MINKEY << "suffix"
+                                          << MINKEY)),
+                zoneName("4"))};
 
     // This should have 15 chunks, 9 for all zones, 4 gap and 2 boundaries.
     std::vector<ChunkRange> expectedChunkRanges =
@@ -1249,56 +1218,46 @@ TEST_F(PresplitHashedZonesChunksTest, InterweavingZones) {
 
     // With gaps after each zone ranges.
     const std::vector<TagsType> tags = {
-        makeTag(
-            ChunkRange(BSON("country"
-                            << "country1"
-                            << "city"
-                            << "city1"
-                            << "hashedField" << MINKEY << "suffix" << MINKEY),
-                       BSON("country"
-                            << "country2"
-                            << "city" << MINKEY << "hashedField" << MINKEY << "suffix" << MINKEY)),
-            zoneName("0")),
-        makeTag(
-            ChunkRange(BSON("country"
-                            << "country2"
-                            << "city"
-                            << "city2"
-                            << "hashedField" << MINKEY << "suffix" << MINKEY),
-                       BSON("country"
-                            << "country3"
-                            << "city" << MINKEY << "hashedField" << MINKEY << "suffix" << MINKEY)),
-            zoneName("1")),
-        makeTag(
-            ChunkRange(BSON("country"
-                            << "country3"
-                            << "city"
-                            << "city3"
-                            << "hashedField" << MINKEY << "suffix" << MINKEY),
-                       BSON("country"
-                            << "country4"
-                            << "city" << MINKEY << "hashedField" << MINKEY << "suffix" << MINKEY)),
-            zoneName("2")),
-        makeTag(
-            ChunkRange(BSON("country"
-                            << "country4"
-                            << "city"
-                            << "city4"
-                            << "hashedField" << MINKEY << "suffix" << MINKEY),
-                       BSON("country"
-                            << "country5"
-                            << "city" << MAXKEY << "hashedField" << MINKEY << "suffix" << MINKEY)),
-            zoneName("0")),
-        makeTag(
-            ChunkRange(BSON("country"
-                            << "country6"
-                            << "city"
-                            << "city5"
-                            << "hashedField" << MINKEY << "suffix" << MINKEY),
-                       BSON("country"
-                            << "country7"
-                            << "city" << MAXKEY << "hashedField" << MINKEY << "suffix" << MINKEY)),
-            zoneName("1"))};
+        makeTag(ChunkRange(BSON("country" << "country1"
+                                          << "city"
+                                          << "city1"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "country2"
+                                          << "city" << MINKEY << "hashedField" << MINKEY << "suffix"
+                                          << MINKEY)),
+                zoneName("0")),
+        makeTag(ChunkRange(BSON("country" << "country2"
+                                          << "city"
+                                          << "city2"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "country3"
+                                          << "city" << MINKEY << "hashedField" << MINKEY << "suffix"
+                                          << MINKEY)),
+                zoneName("1")),
+        makeTag(ChunkRange(BSON("country" << "country3"
+                                          << "city"
+                                          << "city3"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "country4"
+                                          << "city" << MINKEY << "hashedField" << MINKEY << "suffix"
+                                          << MINKEY)),
+                zoneName("2")),
+        makeTag(ChunkRange(BSON("country" << "country4"
+                                          << "city"
+                                          << "city4"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "country5"
+                                          << "city" << MAXKEY << "hashedField" << MINKEY << "suffix"
+                                          << MINKEY)),
+                zoneName("0")),
+        makeTag(ChunkRange(BSON("country" << "country6"
+                                          << "city"
+                                          << "city5"
+                                          << "hashedField" << MINKEY << "suffix" << MINKEY),
+                           BSON("country" << "country7"
+                                          << "city" << MAXKEY << "hashedField" << MINKEY << "suffix"
+                                          << MINKEY)),
+                zoneName("1"))};
 
     // This should have 13 chunks, 7 for all zones, 4 gaps and 2 boundaries.
     std::vector<ChunkRange> expectedChunkRanges = buildExpectedChunkRanges(
@@ -1340,12 +1299,10 @@ TEST_F(PresplitHashedZonesChunksTest, FailsWhenCollectionNotEmpty) {
     shardRegistry()->reload(operationContext());
     auto shardKeyPattern = ShardKeyPattern(BSON("x" << 1 << "y"
                                                     << "hashed"));
-    const auto zoneRange = ChunkRange(BSON("x"
-                                           << "UK"
-                                           << "y" << MINKEY),
-                                      BSON("x"
-                                           << "US"
-                                           << "y" << MINKEY));
+    const auto zoneRange = ChunkRange(BSON("x" << "UK"
+                                               << "y" << MINKEY),
+                                      BSON("x" << "US"
+                                               << "y" << MINKEY));
     ASSERT_THROWS_CODE(
         PresplitHashedZonesSplitPolicy(
             operationContext(), shardKeyPattern, {makeTag(zoneRange, zoneName("1"))}, false),
@@ -1357,12 +1314,10 @@ TEST_F(PresplitHashedZonesChunksTest, FailsWhenShardKeyNotHashed) {
     setupShards({ShardType(shardId("0").toString(), "rs0/shard0:123", {zoneName("1")})});
     shardRegistry()->reload(operationContext());
     auto shardKeyPattern = ShardKeyPattern(BSON("x" << 1 << "y" << 1));
-    const auto zoneRange = ChunkRange(BSON("x"
-                                           << "UK"
-                                           << "y" << MINKEY),
-                                      BSON("x"
-                                           << "US"
-                                           << "y" << MINKEY));
+    const auto zoneRange = ChunkRange(BSON("x" << "UK"
+                                               << "y" << MINKEY),
+                                      BSON("x" << "US"
+                                               << "y" << MINKEY));
     ASSERT_THROWS_CODE(
         PresplitHashedZonesSplitPolicy(
             operationContext(), shardKeyPattern, {makeTag(zoneRange, zoneName("1"))}, true),
@@ -1492,8 +1447,7 @@ TEST_F(PresplitHashedZonesChunksTest, WithAvailableShards) {
         ShardType(kAllShardsIds[1].toString(), "rs1/shard1:123", {})};
     setupShards(kAllShards);
     shardRegistry()->reload(operationContext());
-    auto shardKeyPattern = ShardKeyPattern(BSON("x"
-                                                << "hashed"));
+    auto shardKeyPattern = ShardKeyPattern(BSON("x" << "hashed"));
     const auto zoneRange = ChunkRange(BSON("x" << MINKEY), BSON("x" << MAXKEY));
     const std::vector<TagsType> tags = {makeTag(zoneRange, zoneName("0"))};
 
@@ -1523,8 +1477,7 @@ TEST_F(PresplitHashedZonesChunksTest, CannotCreateChunkDistribution) {
     const std::vector<ShardId> kAvailableShardIds{shardId("0"), shardId("1"), shardId("2")};
     setupShards(kAllShards);
     shardRegistry()->reload(operationContext());
-    auto shardKeyPattern = ShardKeyPattern(BSON("x"
-                                                << "hashed"));
+    auto shardKeyPattern = ShardKeyPattern(BSON("x" << "hashed"));
     const auto zoneRange = ChunkRange(BSON("x" << MINKEY), BSON("x" << MAXKEY));
     const std::vector<TagsType> tags = {makeTag(zoneRange, zoneName("0"))};
 
@@ -1551,8 +1504,7 @@ TEST_F(PresplitHashedZonesChunksTest, ChunkDistributionWillIgnoreShardNotInAvaia
     const std::vector<ShardId> kAvailableShards{shardId("1"), shardId("2"), shardId("3")};
     setupShards(kAllShards);
     shardRegistry()->reload(operationContext());
-    auto shardKeyPattern = ShardKeyPattern(BSON("x"
-                                                << "hashed"));
+    auto shardKeyPattern = ShardKeyPattern(BSON("x" << "hashed"));
     const auto zoneRange = ChunkRange(BSON("x" << MINKEY), BSON("x" << MAXKEY));
     const std::vector<TagsType> tags = {makeTag(zoneRange, zoneName("0"))};
 
@@ -1589,10 +1541,6 @@ public:
         return next;
     }
 
-    Pipeline* getPipeline_forTest() override {
-        return nullptr;
-    }
-
 private:
     std::list<BSONObj> _toReturn;
 };
@@ -1619,7 +1567,6 @@ public:
         const std::vector<ShardType>& shardList,
         const std::vector<ChunkRange>& expectedChunkRanges,
         const std::vector<boost::optional<ShardId>>& expectedShardIds) {
-        const ShardId primaryShard("doesntMatter");
 
         const auto shardCollectionConfig = splitPolicy->createFirstChunks(
             operationContext(), shardKeyPattern, {UUID::gen(), primaryShard});
@@ -1667,9 +1614,8 @@ public:
     void checkGeneratedInitialSplitPoints(SamplingBasedSplitPolicy* splitPolicy,
                                           const ShardKeyPattern& shardKeyPattern,
                                           const std::vector<ChunkRange>& expectedChunkRanges) {
-        const ShardId primaryShard("doesntMatter");
-        const auto splitPoints = splitPolicy->createFirstSplitPoints(
-            operationContext(), shardKeyPattern, {UUID::gen(), primaryShard});
+        const auto splitPoints =
+            splitPolicy->createFirstSplitPoints(operationContext(), shardKeyPattern);
 
         const auto expectedNumSplitPoints = expectedChunkRanges.size() - 1;
         ASSERT_EQ(splitPoints.size(), expectedNumSplitPoints);
@@ -1731,8 +1677,7 @@ TEST_F(SamplingBasedInitSplitTest, NoZones) {
 
 TEST_F(SamplingBasedInitSplitTest, HashedShardKey) {
     const NamespaceString ns = NamespaceString::createNamespaceString_forTest("foo", "bar");
-    const ShardKeyPattern shardKey(BSON("y"
-                                        << "hashed"));
+    const ShardKeyPattern shardKey(BSON("y" << "hashed"));
 
     std::vector<ShardType> shardList;
     shardList.emplace_back(
@@ -2096,7 +2041,7 @@ TEST_F(SamplingBasedInitSplitTest, ZonesHasIncompatibleShardKey) {
     {
         auto initSplitPolicy = makeInitialSplitPolicy(
             numInitialChunks, zones, mockSamples, boost::none /* availableShardIds */);
-        ASSERT_THROWS(initSplitPolicy->createFirstSplitPoints(operationContext(), shardKey, params),
+        ASSERT_THROWS(initSplitPolicy->createFirstSplitPoints(operationContext(), shardKey),
                       DBException);
     }
 }
@@ -2132,7 +2077,7 @@ TEST_F(SamplingBasedInitSplitTest, InsufficientSamples) {
                                                       boost::none /* zones */,
                                                       mockSamples,
                                                       boost::none /* availableShardIds */);
-        ASSERT_THROWS(initSplitPolicy->createFirstSplitPoints(operationContext(), shardKey, params),
+        ASSERT_THROWS(initSplitPolicy->createFirstSplitPoints(operationContext(), shardKey),
                       DBException);
     }
 }
@@ -2167,7 +2112,7 @@ TEST_F(SamplingBasedInitSplitTest, ZeroInitialChunks) {
                                                       boost::none /* zones */,
                                                       mockSamples,
                                                       boost::none /* availableShardIds */);
-        ASSERT_THROWS(initSplitPolicy->createFirstSplitPoints(operationContext(), shardKey, params),
+        ASSERT_THROWS(initSplitPolicy->createFirstSplitPoints(operationContext(), shardKey),
                       DBException);
     }
 }
@@ -2264,8 +2209,6 @@ public:
                                          const std::vector<ShardKeyRange>& shardDistribution,
                                          const std::vector<ChunkRange>& expectedChunkRanges,
                                          const std::vector<ShardId>& expectedShardIds) {
-        const ShardId primaryShard("doesntMatter");
-
         const auto shardCollectionConfig = splitPolicy->createFirstChunks(
             operationContext(), shardKeyPattern, {UUID::gen(), primaryShard});
 
@@ -2388,6 +2331,39 @@ TEST_F(ShardDistributionInitSplitTest, InterleaveWithZones) {
                                     shardDistribution,
                                     expectedChunkRanges,
                                     expectedShardForEachChunk);
+}
+
+TEST_F(ShardDistributionInitSplitTest, ThrowIfContainsDrainingShard) {
+    const NamespaceString ns = NamespaceString::createNamespaceString_forTest("foo", "bar");
+    const ShardKeyPattern shardKey(BSON("y" << 1));
+
+    ShardType kShard0{shardId("0").toString(), "rs0/fakeShard0:123"};
+    ShardType kShard1{shardId("1").toString(), "rs1/fakeShard1:123"};
+    kShard1.setDraining(true);
+
+    std::vector<ShardType> shardList;
+    shardList.emplace_back(kShard0);
+    shardList.emplace_back(kShard1);
+
+    setupShards(shardList);
+    shardRegistry()->reload(operationContext());
+
+    std::vector<TagsType> zones;
+    ShardKeyRange range0(shardId("0"));
+    range0.setMin(BSON("y" << MINKEY));
+    range0.setMax(BSON("y" << 0));
+    ShardKeyRange range1(shardId("1"));
+    range1.setMin(BSON("y" << 0));
+    range1.setMax(BSON("y" << MAXKEY));
+    std::vector<ShardKeyRange> shardDistribution = {range0, range1};
+
+    const SplitPolicyParams params{UUID::gen(), primaryShard};
+
+    std::unique_ptr<ShardDistributionSplitPolicy> splitPolicy =
+        makeInitialSplitPolicy(shardDistribution, zones);
+    ASSERT_THROWS_CODE(splitPolicy->createFirstChunks(operationContext(), shardKey, params),
+                       DBException,
+                       ErrorCodes::ShardNotFound);
 }
 
 }  // namespace

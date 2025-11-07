@@ -38,10 +38,13 @@ namespace mongo {
  */
 class ServiceEntryPointRouterRole final : public ServiceEntryPoint {
 public:
-    static Future<DbResponse> handleRequestImpl(OperationContext* opCtx, const Message& request);
+    static Future<DbResponse> handleRequestImpl(OperationContext* opCtx,
+                                                const Message& request,
+                                                Date_t started);
 
     Future<DbResponse> handleRequest(OperationContext* opCtx,
-                                     const Message& request) noexcept final;
+                                     const Message& request,
+                                     Date_t started) final;
 };
 
 }  // namespace mongo

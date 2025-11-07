@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <functional>
-#include <memory>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -42,9 +37,12 @@
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
-#include "mongo/db/matcher/match_details.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/util/str.h"
+
+#include <functional>
+#include <memory>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -61,16 +59,6 @@ public:
     ~InternalSchemaStrLengthMatchExpression() override {}
 
     virtual Validator getComparator() const = 0;
-
-    bool matchesSingleElement(const BSONElement& elem,
-                              MatchDetails* details = nullptr) const final {
-        if (elem.type() != BSONType::String) {
-            return false;
-        }
-
-        auto len = str::lengthInUTF8CodePoints(elem.valueStringData());
-        return getComparator()(len);
-    };
 
     void debugString(StringBuilder& debug, int indentationLevel) const final;
 
@@ -89,12 +77,6 @@ public:
     }
 
 private:
-    ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) {
-            return expression;
-        };
-    }
-
     StringData _name;
     long long _strLen = 0;
 };

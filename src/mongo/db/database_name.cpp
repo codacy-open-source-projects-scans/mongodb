@@ -28,13 +28,13 @@
  */
 
 
-#include "database_name.h"
+#include "mongo/db/database_name.h"
 
 #include <boost/container_hash/hash.hpp>
 
 namespace mongo {
 size_t hash_value(const DatabaseName& dbn) {
-    return boost::hash<std::string_view>{}(
-        std::string_view{dbn.view().substr(0, dbn.sizeWithTenant() + DatabaseName::kDataOffset)});
+    return boost::hash<std::string_view>{}(toStdStringViewForInterop(
+        dbn.view().substr(0, dbn.sizeWithTenant() + DatabaseName::kDataOffset)));
 }
 }  // namespace mongo

@@ -27,10 +27,10 @@
  *    it in the license file.
  */
 
-#include "mongo/base/string_data.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/util/clock_source_mock.h"
+
+#include "mongo/base/string_data.h"
+#include "mongo/unittest/unittest.h"
 
 namespace mongo {
 namespace {

@@ -1,8 +1,10 @@
 // Tests query settings impact on the queries when 'queryFramework' is set.
 // @tags: [
+//   # TODO SERVER-98659 Investigate why this test is failing on
+//   # 'sharding_kill_stepdown_terminate_jscore_passthrough'.
+//   does_not_support_stepdowns,
 //   directly_against_shardsvrs_incompatible,
 //   simulate_atlas_proxy_incompatible,
-//   requires_fcv_80,
 // ]
 //
 
@@ -19,7 +21,7 @@ qsutils.removeAllQuerySettings();
 // when query settings specify only query engine version.
 const indexKeyPattern = {
     a: 1,
-    b: 1
+    b: 1,
 };
 assert.commandWorked(coll.createIndexes([{a: 1}, indexKeyPattern, {a: 1, b: 1, c: 1}]));
 

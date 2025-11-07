@@ -1,21 +1,24 @@
 // @tags: [
-//   requires_getmore
+//   requires_getmore,
+//   # This test relies on query commands returning specific batch-sized responses.
+//   assumes_no_implicit_cursor_exhaustion,
 // ]
 
 // Tests that explicitly invoke the find and getMore commands.
-var cmdRes;
-var cursorId;
-var collName = 'find_getmore_cmd';
-var coll = db[collName];
+let cmdRes;
+let cursorId;
+let collName = "find_getmore_cmd";
+let coll = db[collName];
 
-const findCommandBatchSize = assert.commandWorked(db.adminCommand(
-    {getParameter: 1, internalQueryFindCommandBatchSize: 1}))["internalQueryFindCommandBatchSize"];
+const findCommandBatchSize = assert.commandWorked(
+    db.adminCommand({getParameter: 1, internalQueryFindCommandBatchSize: 1}),
+)["internalQueryFindCommandBatchSize"];
 
 // The limit should be less than the find command batch size but at least 1.
 const kLimit = Math.min(10, Math.max(1, findCommandBatchSize - 1));
 
 coll.drop();
-for (var i = 0; i < findCommandBatchSize + 50; i++) {
+for (let i = 0; i < findCommandBatchSize + 50; i++) {
     assert.commandWorked(coll.insert({a: i}));
 }
 

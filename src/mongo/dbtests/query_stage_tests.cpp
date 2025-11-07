@@ -34,30 +34,25 @@
 
 #include <boost/container/small_vector.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/exec/index_scan.h"
-#include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/exec/working_set.h"
-#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/exec/classic/index_scan.h"
+#include "mongo/db/exec/classic/plan_stage.h"
+#include "mongo/db/exec/classic/working_set.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/matcher/expression.h"
-#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/index_bounds.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_executor_factory.h"
 #include "mongo/db/query/plan_yield_policy.h"
@@ -65,10 +60,12 @@
 #include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <boost/move/utility_core.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 /**
  * This file tests db/exec/index_scan.cpp
@@ -104,8 +101,13 @@ public:
     }
 
     int countResults(const IndexScanParams& params, BSONObj filterObj = BSONObj()) {
-        AutoGetCollectionForReadCommand ctx(&_opCtx,
-                                            NamespaceString::createNamespaceString_forTest(ns()));
+        const auto collection = acquireCollection(
+            &_opCtx,
+            CollectionAcquisitionRequest(NamespaceString::createNamespaceString_forTest(ns()),
+                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         repl::ReadConcernArgs::get(&_opCtx),
+                                         AcquisitionPrerequisites::kRead),
+            MODE_IS);
 
         StatusWithMatchExpression statusWithMatcher =
             MatchExpressionParser::parse(filterObj, _expCtx);
@@ -114,13 +116,13 @@ public:
 
         auto ws = std::make_unique<WorkingSet>();
         auto ix = std::make_unique<IndexScan>(
-            _expCtx.get(), &ctx.getCollection(), params, ws.get(), filterExpr.get());
+            _expCtx.get(), collection, params, ws.get(), filterExpr.get());
 
         auto statusWithPlanExecutor =
             plan_executor_factory::make(_expCtx,
                                         std::move(ws),
                                         std::move(ix),
-                                        &ctx.getCollection(),
+                                        collection,
                                         PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                         QueryPlannerParams::DEFAULT);
         ASSERT_OK(statusWithPlanExecutor.getStatus());
@@ -138,19 +140,29 @@ public:
     }
 
     const IndexDescriptor* getIndex(const BSONObj& obj) {
-        AutoGetCollectionForReadCommand collection(
-            &_opCtx, NamespaceString::createNamespaceString_forTest(ns()));
+        const auto collection = acquireCollection(
+            &_opCtx,
+            CollectionAcquisitionRequest(NamespaceString::createNamespaceString_forTest(ns()),
+                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         repl::ReadConcernArgs::get(&_opCtx),
+                                         AcquisitionPrerequisites::kRead),
+            MODE_IS);
         std::vector<const IndexDescriptor*> indexes;
-        collection->getIndexCatalog()->findIndexesByKeyPattern(
+        collection.getCollectionPtr()->getIndexCatalog()->findIndexesByKeyPattern(
             &_opCtx, obj, IndexCatalog::InclusionPolicy::kReady, &indexes);
         return indexes.empty() ? nullptr : indexes[0];
     }
 
     IndexScanParams makeIndexScanParams(OperationContext* opCtx,
                                         const IndexDescriptor* descriptor) {
-        AutoGetCollectionForReadCommand collection(
-            &_opCtx, NamespaceString::createNamespaceString_forTest(ns()));
-        IndexScanParams params(opCtx, *collection, descriptor);
+        const auto collection = acquireCollection(
+            &_opCtx,
+            CollectionAcquisitionRequest(NamespaceString::createNamespaceString_forTest(ns()),
+                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         repl::ReadConcernArgs::get(&_opCtx),
+                                         AcquisitionPrerequisites::kRead),
+            MODE_IS);
+        IndexScanParams params(opCtx, collection.getCollectionPtr(), descriptor);
         params.bounds.isSimpleRange = true;
         params.bounds.endKey = BSONObj();
         params.bounds.boundInclusion = BoundInclusion::kIncludeBothStartAndEndKeys;

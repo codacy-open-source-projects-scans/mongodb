@@ -29,8 +29,6 @@
 
 #pragma once
 
-#include <vector>
-
 #include "mongo/db/baton.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
@@ -40,6 +38,8 @@
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/waitable.h"
+
+#include <vector>
 
 namespace mongo {
 
@@ -54,7 +54,7 @@ public:
 
     ~DefaultBaton() override;
 
-    void schedule(Task func) noexcept override;
+    void schedule(Task func) override;
 
     Future<void> waitUntil(Date_t expiration, const CancellationToken& token) override;
 
@@ -69,7 +69,7 @@ private:
         size_t id;
         Promise<void> promise;
     };
-    void detachImpl() noexcept override;
+    void detachImpl() override;
 
     using Job = unique_function<void(stdx::unique_lock<stdx::mutex>)>;
 
@@ -87,6 +87,8 @@ private:
      * should never throw.
      */
     void _safeExecute(stdx::unique_lock<stdx::mutex> lk, Job job);
+
+    void _notify(stdx::unique_lock<stdx::mutex>) noexcept;
 
     stdx::mutex _mutex;
     stdx::condition_variable _cv;

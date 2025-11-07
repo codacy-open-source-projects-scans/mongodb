@@ -27,26 +27,21 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/local_catalog/db_raii.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/profile_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/analyze_shard_key_cmd_util.h"
 #include "mongo/db/s/analyze_shard_key_util.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/analyze_shard_key_cmd_gen.h"
@@ -54,6 +49,12 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -91,6 +92,14 @@ public:
                     !request().getSampleRate() || !request().getSampleSize());
 
             const auto& nss = ns();
+
+            AutoStatsTracker statsTracker(opCtx,
+                                          nss,
+                                          Top::LockType::ReadLocked,
+                                          AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                                          DatabaseProfileSettings::get(opCtx->getServiceContext())
+                                              .getDatabaseProfileLevel(nss.dbName()));
+
             const auto& key = request().getKey();
             uassertStatusOK(validateNamespace(nss));
             const auto collUuid = uassertStatusOK(validateCollectionOptions(opCtx, nss));

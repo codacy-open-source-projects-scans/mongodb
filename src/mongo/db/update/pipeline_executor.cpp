@@ -27,20 +27,16 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_set.h>
-#include <boost/move/utility_core.hpp>
-#include <list>
-#include <typeinfo>
-
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/update/pipeline_executor.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/mutable/document.h"
-#include "mongo/bson/mutable/element.h"
+#include "mongo/db/exec/agg/pipeline_builder.h"
+#include "mongo/db/exec/agg/queue_stage.h"
 #include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/mutable_bson/document.h"
+#include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_queue.h"
@@ -50,12 +46,17 @@
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/update/document_diff_calculator.h"
 #include "mongo/db/update/object_replace_executor.h"
-#include "mongo/db/update/pipeline_executor.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
+
+#include <list>
+#include <typeinfo>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -70,11 +71,10 @@ PipelineExecutor::PipelineExecutor(const boost::intrusive_ptr<ExpressionContext>
     // "Resolve" involved namespaces into a map. We have to populate this map so that any
     // $lookups, etc. will not fail instantiation. They will not be used for execution as these
     // stages are not allowed within an update context.
-    LiteParsedPipeline liteParsedPipeline(
-        NamespaceString::makeDummyNamespace(expCtx->getNamespaceString().tenantId()), pipeline);
-    StringMap<ResolvedNamespace> resolvedNamespaces;
+    LiteParsedPipeline liteParsedPipeline(expCtx->getNamespaceString(), pipeline);
+    ResolvedNamespaceMap resolvedNamespaces;
     for (const auto& nss : liteParsedPipeline.getInvolvedNamespaces()) {
-        resolvedNamespaces.try_emplace(nss.coll(), nss, std::vector<BSONObj>{});
+        resolvedNamespaces.try_emplace(nss, nss, std::vector<BSONObj>{});
     }
 
     if (constants) {
@@ -93,7 +93,7 @@ PipelineExecutor::PipelineExecutor(const boost::intrusive_ptr<ExpressionContext>
     _expCtx->stopExpressionCounters();
 
     // Validate the update pipeline.
-    for (auto&& stage : _pipeline->getSources()) {
+    for (const auto& stage : _pipeline->getSources()) {
         auto stageConstraints = stage->constraints();
         uassert(ErrorCodes::InvalidOptions,
                 str::stream() << stage->getSourceName()
@@ -110,15 +110,17 @@ PipelineExecutor::PipelineExecutor(const boost::intrusive_ptr<ExpressionContext>
     }
 
     _pipeline->addInitialSource(DocumentSourceQueue::create(expCtx));
+    _execPipeline = exec::agg::buildPipeline(_pipeline->freeze());
 }
 
 UpdateExecutor::ApplyResult PipelineExecutor::applyUpdate(ApplyParams applyParams) const {
     const auto originalDoc = applyParams.element.getDocument().getObject();
-
-    DocumentSourceQueue* queueStage = static_cast<DocumentSourceQueue*>(_pipeline->peekFront());
+    auto* queueStage =
+        dynamic_cast<exec::agg::QueueStage*>(_execPipeline->getStages().front().get());
+    tassert(10817001, "expected the first stage in the pipeline to be a QueueStage", queueStage);
     queueStage->emplace_back(Document{originalDoc});
 
-    const auto transformedDoc = _pipeline->getNext()->toBson();
+    const auto transformedDoc = _execPipeline->getNext()->toBson();
     const auto transformedDocHasIdField = transformedDoc.hasField(kIdFieldName);
 
     // Replace the pre-image document in applyParams with the post image we got from running the

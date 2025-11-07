@@ -29,10 +29,10 @@
 
 #pragma once
 
-#include <shared_mutex>
-
 #include "mongo/db/operation_context.h"
 #include "mongo/db/s/replica_set_endpoint_feature_flag.h"
+
+#include <shared_mutex>
 
 namespace mongo {
 namespace replica_set_endpoint {
@@ -68,7 +68,7 @@ public:
      * Returns true if this mongod supports replica set endpoint, meaning it is part of
      * a single-shard cluster consisting of config shard with router role.
      */
-    bool supportsReplicaSetEndpoint();
+    bool supportsReplicaSetEndpoint(const VersionContext& vCtx);
 
 private:
     mutable std::shared_mutex _mutex;  // NOLINT

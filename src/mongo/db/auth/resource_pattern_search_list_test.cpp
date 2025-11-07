@@ -27,19 +27,17 @@
  *    it in the license file.
  */
 
+#include "mongo/db/auth/resource_pattern_search_list.h"
+
+#include "mongo/db/database_name.h"
+#include "mongo/db/tenant_id.h"
+#include "mongo/logv2/log.h"
+#include "mongo/unittest/unittest.h"
+
 #include <set>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-
-#include "mongo/db/auth/resource_pattern_search_list.h"
-#include "mongo/db/database_name.h"
-#include "mongo/db/tenant_id.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 

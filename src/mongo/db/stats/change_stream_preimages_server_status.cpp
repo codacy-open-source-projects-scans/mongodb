@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -36,11 +34,13 @@
 #include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/change_stream_pre_image_util.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
-#include "mongo/db/change_stream_serverless_helpers.h"
-#include "mongo/db/commands/server_status.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/commands/server_status/server_status.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/version_context.h"
+
+#include <memory>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kFTDC
 
@@ -48,8 +48,7 @@ namespace mongo {
 namespace {
 
 void appendPreImagesCollectionStats(OperationContext* opCtx, BSONObjBuilder* result) {
-    const auto preImagesCollectionNamespace =
-        NamespaceString::makePreImageCollectionNSS(boost::none /** tenantId */);
+    const auto& preImagesCollectionNamespace = NamespaceString::kChangeStreamPreImagesNamespace;
     // Hold reference to the catalog for collection lookup without locks to be safe.
     auto catalog = CollectionCatalog::get(opCtx);
     auto preImagesColl = catalog->lookupCollectionByNamespace(opCtx, preImagesCollectionNamespace);
@@ -82,7 +81,7 @@ void appendPreImagesCollectionStats(OperationContext* opCtx, BSONObjBuilder* res
     ScopedAdmissionPriority<ExecutionAdmissionContext> skipAdmissionControl(
         opCtx, AdmissionContext::Priority::kExempt);
     Lock::GlobalLock lk(opCtx, MODE_IS, Date_t::now(), Lock::InterruptBehavior::kLeaveUnlocked, [] {
-        Lock::GlobalLockSkipOptions options;
+        Lock::GlobalLockOptions options;
         options.skipRSTLLock = true;
         return options;
     }());
@@ -123,13 +122,8 @@ public:
             ChangeStreamPreImagesCollectionManager::get(opCtx).getPurgingJobStats();
         builder.append("purgingJob", jobStats.toBSON());
 
-        if (!change_stream_serverless_helpers::isChangeCollectionsModeActive()) {
-            // Only report pre-images collection specific metrics in single tenant environments.
-            // Multi-tenant environments would have the aggregate result of all the tenants (one
-            // pre-images collection per tenant), making it difficult to pinpoint where the metrics
-            // values come from.
-            appendPreImagesCollectionStats(opCtx, &builder);
-        }
+        // Report pre-images collection specific metrics.
+        appendPreImagesCollectionStats(opCtx, &builder);
 
         return builder.obj();
     }

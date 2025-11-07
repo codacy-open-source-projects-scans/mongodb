@@ -29,19 +29,23 @@
 
 #pragma once
 
-#include <algorithm>
-#include <fmt/format.h>
-#include <memory>
-#include <string>
-#include <tuple>
-#include <typeinfo>
-#include <utility>
+// IWYU pragma: private, include "mongo/unittest/unittest.h"
+// IWYU pragma: friend "mongo/unittest/.*"
 
 #include "mongo/base/string_data.h"
 #include "mongo/stdx/type_traits.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/stringify.h"
 #include "mongo/util/optional_util.h"
+
+#include <algorithm>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <typeinfo>
+#include <utility>
+
+#include <fmt/format.h>
 
 /**
  * This file defines infrastructure used in the ASSERT_THAT system.
@@ -126,15 +130,15 @@ std::string matchTupleMessage(const MTuple& ms,
                               const std::array<MatchResult, N>& arr,
                               stringify::Joiner&& joiner = {}) {
     if constexpr (I == std::tuple_size_v<MTuple>) {
-        return format(FMT_STRING("failed: [{}]"), std::string{joiner});
+        return fmt::format("failed: [{}]", std::string{joiner});
     } else {
         auto&& ri = arr[I];
         if (!ri) {
-            joiner(format(FMT_STRING("{}:({}{}{})"),
-                          I,
-                          std::get<I>(ms).describe(),
-                          ri.message().empty() ? "" : ":",
-                          ri.message()));
+            joiner(fmt::format("{}:({}{}{})",
+                               I,
+                               std::get<I>(ms).describe(),
+                               ri.message().empty() ? "" : ":",
+                               ri.message()));
         }
         return matchTupleMessage<MTuple, N, I + 1>(ms, arr, std::move(joiner));
     }
@@ -144,11 +148,11 @@ template <typename E, typename M>
 struct MatchAssertion {
     MatchAssertion(const E& e, const M& m, const char* eStr) : mr{m.match(e)} {
         if (!mr) {
-            msg = format(FMT_STRING("value: {}, actual: {}{}, expected: {}"),
-                         eStr,
-                         stringify::invoke(e),
-                         mr.message().empty() ? "" : format(FMT_STRING(", {}"), mr.message()),
-                         m.describe());
+            msg = fmt::format("value: {}, actual: {}{}, expected: {}",
+                              eStr,
+                              stringify::invoke(e),
+                              mr.message().empty() ? "" : fmt::format(", {}", mr.message()),
+                              m.describe());
         }
     }
 

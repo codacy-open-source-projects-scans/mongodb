@@ -27,17 +27,6 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <cstring>
-#include <limits>
-#include <string_view>
-
-#include <absl/container/inlined_vector.h>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/numeric/conversion/converter_policies.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -52,9 +41,14 @@
 #include "mongo/db/exec/sbe/vm/vm_printer.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/platform/decimal128.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/golden_test.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/represent_as.h"
+
+#include <cstdint>
+#include <cstring>
+#include <limits>
+
 
 namespace mongo::sbe {
 
@@ -508,9 +502,9 @@ TEST(SBEVM, CodeFragmentPrintStable) {
     code.appendFillEmpty(vm::Instruction::Null);
     code.appendFillEmpty(vm::Instruction::False);
     code.appendFillEmpty(vm::Instruction::True);
-    code.appendTraverseP(0xAA, vm::Instruction::Nothing);
-    code.appendTraverseP(0xAA, vm::Instruction::Int32One);
-    code.appendTraverseF(0xBB, vm::Instruction::True);
+    code.appendTraverseP(0xAA, 1, vm::Instruction::Nothing);
+    code.appendTraverseP(0xAA, 1, vm::Instruction::Int32One);
+    code.appendTraverseF(0xBB, 1, vm::Instruction::True);
     code.appendGetField({}, "Hello world!"_sd);
     code.appendAdd({}, {});
 

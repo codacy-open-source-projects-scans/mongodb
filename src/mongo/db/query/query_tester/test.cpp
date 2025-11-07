@@ -27,24 +27,59 @@
  *    it in the license file.
  */
 
-#include "test.h"
+#include "mongo/db/query/query_tester/test.h"
 
-#include <fstream>
-#include <thread>
-
-#include "command_helpers.h"
 #include "mongo/base/string_data_comparator.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/json.h"
+#include "mongo/db/query/query_tester/command_helpers.h"
 #include "mongo/db/query/util/jparse_util.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/shell/shell_utils.h"
+#include "mongo/util/pcre.h"
+
+#include <fstream>
+#include <thread>
 
 namespace mongo::query_tester {
 namespace {
 // If a line begins with a mode string, it is a test.
 bool isTestLine(const std::string& line) {
     return line.starts_with(":");
+}
+
+BSONObj makeExplainCommand(const BSONObj& initialCommand) {
+    auto explainCommandBuilder = BSONObjBuilder{};
+    // Extract 'apiVersion' and 'apiStrict' properties and remove 'writeConcern' from the inner
+    // command object.
+    BSONObjBuilder innerCommandBuilder{explainCommandBuilder.subobjStart("explain")};
+    for (const auto& element : initialCommand) {
+        const auto propName = element.fieldNameStringData();
+        if (propName == "writeConcern") {
+            continue;
+        }
+        if (propName == "apiVersion" || propName == "apiStrict") {
+            //  'apiVersion' and 'apiStrict' only make sense on the root of the command.
+            explainCommandBuilder.append(element);
+        } else {
+            // Add the rest of the fields to the inner command body.
+            innerCommandBuilder.append(element);
+        }
+    }
+    // Append cursor object in case of aggregation.
+    if (initialCommand.firstElementFieldNameStringData() == "aggregate" &&
+        !initialCommand.hasField("cursor")) {
+        innerCommandBuilder.append("cursor", BSONObj());
+    }
+    innerCommandBuilder.doneFast();
+    // Run the explain with the 'queryPlanner' verbosity.
+    explainCommandBuilder.append("verbosity", "queryPlanner");
+    return explainCommandBuilder.obj();
+}
+
+std::string overrideOptionToTestTypeString(const OverrideOption overrideOption) {
+    uassert(10387102, "Unexpected override type", overrideOption == OverrideOption::QueryShapeHash);
+    return ":queryShapeHash";
 }
 
 BSONObj toBSONObj(const std::vector<BSONObj>& objs) {
@@ -55,6 +90,10 @@ BSONObj toBSONObj(const std::vector<BSONObj>& objs) {
 }  // namespace
 
 std::vector<BSONObj> Test::getAllResults(DBClientConnection* const conn, const BSONObj& result) {
+    // Early exit in case of explain result.
+    if (result.hasField("explainVersion")) {
+        return {result};
+    }
     const auto actualResult = getResultsFromCommandResponse(result, _testNum);
     const auto id = result.getField("cursor").embeddedObject()["id"].Long();
 
@@ -90,6 +129,10 @@ std::string Test::getTestLine() const {
 
 size_t Test::getTestNum() const {
     return _testNum;
+}
+
+boost::optional<std::string> Test::getErrorMessage() const {
+    return _errorMessage;
 }
 
 std::vector<std::string> Test::normalize(const std::vector<BSONObj>& objs,
@@ -159,17 +202,20 @@ NormalizationOptsSet Test::parseResultType(const std::string& type) {
              NormalizationOpts::kSortArrays | NormalizationOpts::kNormalizeNumerics},
         {":sortFull",
          NormalizationOpts::kSortResults | NormalizationOpts::kSortBSON |
-             NormalizationOpts::kSortArrays},
+             NormalizationOpts::kSortArrays | NormalizationOpts::kRoundFloatingPointNumerics},
         {":sortBSONNormalizeNumerics",
          NormalizationOpts::kSortResults | NormalizationOpts::kSortBSON |
              NormalizationOpts::kNormalizeNumerics},
-        {":sortBSON", NormalizationOpts::kSortResults | NormalizationOpts::kSortBSON},
+        {":sortBSON",
+         NormalizationOpts::kSortResults | NormalizationOpts::kSortBSON |
+             NormalizationOpts::kRoundFloatingPointNumerics},
         {":sortResultsNormalizeNumerics",
          NormalizationOpts::kSortResults | NormalizationOpts::kNormalizeNumerics},
         {":normalizeNumerics", NormalizationOpts::kNormalizeNumerics},
         {":normalizeNulls", NormalizationOpts::kConflateNullAndMissing},
         {":sortResults", NormalizationOpts::kSortResults},
-        {":results", NormalizationOpts::kResults}};
+        {":results", NormalizationOpts::kResults},
+        {":queryShapeHash", NormalizationOpts::kExplain | NormalizationOpts::kQueryShapeHash}};
 
     if (auto it = kTypeMap.find(type); it != kTypeMap.end()) {
         return it->second;
@@ -178,7 +224,11 @@ NormalizationOptsSet Test::parseResultType(const std::string& type) {
     }
 }
 
-Test Test::parseTest(std::fstream& fs, const ModeOption mode, const size_t testNum) {
+Test Test::parseTest(std::fstream& fs,
+                     const ModeOption mode,
+                     const bool optimizationsOff,
+                     const size_t nextTestNum,
+                     const OverrideOption overrideOption) {
     auto lineFromFile = std::string{};
     tassert(9670404,
             "Expected file to be open and ready for reading, but it wasn't",
@@ -187,17 +237,18 @@ Test Test::parseTest(std::fstream& fs, const ModeOption mode, const size_t testN
     auto preQueryComments = std::vector<std::string>{};
     auto postQueryComments = std::vector<std::string>{};
     auto postTestComments = std::vector<std::string>{};
+    auto localTestNum = nextTestNum;
 
-    const auto [testLine, testName] = [&fs, &preQueryComments, &lineFromFile, &testNum]()
+    const auto [testLine,
+                testName] = [&fs, &preQueryComments, &lineFromFile, &nextTestNum, &localTestNum]()
         -> std::tuple<std::string, boost::optional<std::string>> {
         // First line can either be "# NAME" or test. Comments are skipped.
         if (isTestLine(lineFromFile)) {
             return {lineFromFile, boost::none};
         } else {
-            auto testN = size_t{};
             auto testName = boost::optional<std::string>{};
             auto iss = std::istringstream{lineFromFile};
-            iss >> testN;
+            iss >> localTestNum;
             if (iss.eof()) {
                 testName = boost::none;
             } else {
@@ -206,15 +257,16 @@ Test Test::parseTest(std::fstream& fs, const ModeOption mode, const size_t testN
                 testName = testNameString;
             }
             uassert(9670451, "Non-test line should be either a '#' or a '# NAME'", iss.eof());
-            uassert(9670440,
-                    str::stream{} << "Expected test number (" << testNum
-                                  << ") and read test number (" << testN << ") do not match.",
-                    testN == testNum);
+            uassert(9948600,
+                    str::stream{} << "testNum must be written in monotonically increasing order. "
+                                     "Expected to be at least "
+                                  << nextTestNum << ", but got " << localTestNum,
+                    localTestNum >= nextTestNum);
             // The first token should be a number. For now ignore and assume it lines
             // up with the number passed in. firstLine.front();
             preQueryComments = readLine(fs, lineFromFile);
             uassert(9670423,
-                    str::stream{} << "Expected test line for test #" << testNum << " but got "
+                    str::stream{} << "Expected test line for test #" << localTestNum << " but got "
                                   << lineFromFile,
                     isTestLine(lineFromFile));
             return {lineFromFile, testName};
@@ -239,7 +291,7 @@ Test Test::parseTest(std::fstream& fs, const ModeOption mode, const size_t testN
                 auto sd = StringData{lineFromFile};
                 {
                     auto endDocument = sd.rfind("}");
-                    if (endDocument == std::string_view::npos) {
+                    if (endDocument == std::string::npos) {
                         continue;
                     }
                     // Count offset of endDocument from the end, but still include the '}'
@@ -248,7 +300,7 @@ Test Test::parseTest(std::fstream& fs, const ModeOption mode, const size_t testN
                 }
                 {
                     auto startDocument = sd.find("{");
-                    if (startDocument == std::string_view::npos) {
+                    if (startDocument == std::string::npos) {
                         continue;
                     }
                     sd.remove_prefix(startDocument);
@@ -259,45 +311,94 @@ Test Test::parseTest(std::fstream& fs, const ModeOption mode, const size_t testN
             }
         }
         uassert(9670406,
-                str::stream{} << "Expected results but found none for testNum " << testNum,
+                str::stream{} << "Expected results but found none for testNum " << localTestNum,
                 !expectedResult.empty());
 
         if (intraResultSetCommentLineCount > 0) {
             std::cout << applyBrown() << "Warning: we ignored " << intraResultSetCommentLineCount
                       << " lines of intra-result set comments for test "
                       // Print test name or a backspace.
-                      << testNum << " " << testName.value_or("\b") << "." << applyReset()
+                      << localTestNum << " " << testName.value_or("\b") << "." << applyReset()
                       << std::endl;
         }
 
         return Test(testLine,
-                    testNum,
+                    optimizationsOff,
+                    localTestNum,
                     testName,
                     std::move(preTestComments),
                     std::move(preQueryComments),
                     std::move(postQueryComments),
                     std::move(postTestComments),
-                    std::move(expectedResult));
+                    std::move(expectedResult),
+                    overrideOption);
     } else {
         // There is a newline at the end of every test case.
         postQueryComments = readAndAssertNewline(fs, "End of single test without results");
         return Test(testLine,
-                    testNum,
+                    optimizationsOff,
+                    localTestNum,
                     testName,
                     std::move(preTestComments),
                     std::move(preQueryComments),
                     std::move(postQueryComments),
-                    std::move(postTestComments));
+                    std::move(postTestComments),
+                    {} /* expectedResult */,
+                    overrideOption);
+    }
+}
+
+void Test::parseTestQueryLine() {
+    // Override the test type if the override flag was passed.
+    if (_overrideOption != OverrideOption::None) {
+        _testLine = _testLine.replace(
+            0, _testLine.find(' '), overrideOptionToTestTypeString(_overrideOption));
+    }
+    // First word is test type.
+    const auto endTestType = _testLine.find(' ');
+    _testType = parseResultType(_testLine.substr(0, endTestType));
+
+    auto queryline = _testLine.substr(endTestType + 1, _testLine.size());
+
+    // If we are running with no optimizations we need to block lowering to find from agg.
+    if (_optimizationsOff) {
+        const auto containsTextOrGeo =
+            pcre::Regex("\\$(text|geoIntersects|geoWithin|near|nearSphere|geoNear|documents)");
+
+        // Some operators require indexes and can't be run with inhibit optimizations.
+        if (!containsTextOrGeo.match(queryline)) {
+            const auto pipelineStart = pcre::Regex("pipeline\"?[ \t]*:[ \t]*\\[");
+            const auto stopOptimization = "{\"$_internalInhibitOptimization\": {}},";
+            pipelineStart.substitute(stopOptimization, &queryline, pcre::SUBSTITUTE_GLOBAL);
+        }
+    }
+
+    // The rest of the string is the query.
+    try {
+        _query = fromFuzzerJson(queryline);
+    } catch (AssertionException& ex) {
+        _errorMessage = ex.reason();
+        ex.addContext(str::stream{} << "Failed to read test number " << _testNum);
+        throw;
     }
 }
 
 void Test::runTestAndRecord(DBClientConnection* const conn, const ModeOption mode) {
-    // Populate _normalizedResult so that git diff operates on normalized result sets.
-    _normalizedResult = normalize(mode == ModeOption::Normalize
-                                      ? _expectedResult
-                                      // Run test
-                                      : getAllResults(conn, runCommand(conn, _db, _query)),
-                                  _testType);
+    try {
+        const auto command = shell_utils::isSet(_testType, shell_utils::NormalizationOpts::kExplain)
+            ? makeExplainCommand(_query)
+            : _query;
+        // Populate _normalizedResult so that git diff operates on normalized result sets.
+        _normalizedResult = normalize(mode == ModeOption::Normalize
+                                          ? _expectedResult
+                                          // Run test
+                                          : getAllResults(conn, runCommand(conn, _db, command)),
+                                      _testType);
+    } catch (AssertionException& ex) {
+        _errorMessage = ex.reason();
+        ex.addContext(str::stream{} << "Error when executing query " << _testNum);
+        throw;
+    }
 }
 
 void Test::setDB(const std::string& db) {
@@ -318,7 +419,32 @@ ModeOption stringToModeOption(const std::string& modeString) {
     }
 }
 
-void Test::writeToStream(std::fstream& fs, const WriteOutOptions resultOpt) const {
+OverrideOption stringToOverrideOption(const std::string& overrideString) {
+    static const auto kStringToOverrideOptionMap = std::map<std::string, OverrideOption>{
+        {"queryShapeHash", OverrideOption::QueryShapeHash},
+    };
+
+    if (auto itr = kStringToOverrideOptionMap.find(overrideString);
+        itr != kStringToOverrideOptionMap.end()) {
+        return itr->second;
+    }
+    uasserted(10387100, "Invalid override option: " + overrideString);
+}
+
+boost::optional<std::string> overrideOptionToExtensionPrefix(const OverrideOption overrideOption) {
+    switch (overrideOption) {
+        case OverrideOption::None:
+            return boost::none;
+        case OverrideOption::QueryShapeHash:
+            return std::string{".queryShapeHash"};
+        default:
+            MONGO_UNREACHABLE;
+    }
+}
+
+void Test::writeToStream(std::fstream& fs,
+                         const WriteOutOptions resultOpt,
+                         const boost::optional<std::string>& errorMsg) const {
     tassert(9670452,
             "Expected file to be open and ready for writing, but it wasn't",
             fs.is_open() && fs.good());
@@ -353,34 +479,29 @@ void Test::writeToStream(std::fstream& fs, const WriteOutOptions resultOpt) cons
         }
     }();
 
-    // This helps guard against WriteOutOptions that might get added but not handled.
-    switch (resultOpt) {
-        case WriteOutOptions::kOnelineResult: {
-            // Print out just the array.
-            fs << LineResult<std::string>{resultRef};
-            break;
-        }
-        case WriteOutOptions::kResult: {
-            // Print out each result in the result set on its own line.
-            fs << ArrayResult<std::string>{resultRef};
-            break;
-        }
-        default: {
-            uasserted(9670436, "Writeout is not supported for that --out argument.");
+    if (errorMsg) {
+        fs << errorMsg.get() << std::endl;
+    } else {
+        // This helps guard against WriteOutOptions that might get added but not handled.
+        switch (resultOpt) {
+            case WriteOutOptions::kOnelineResult: {
+                // Print out just the array.
+                fs << LineResult<std::string>{resultRef};
+                break;
+            }
+            case WriteOutOptions::kResult: {
+                // Print out each result in the result set on its own line.
+                fs << ArrayResult<std::string>{resultRef};
+                break;
+            }
+            default: {
+                uasserted(9670436, "Writeout is not supported for that --out argument.");
+            }
         }
     }
 
     for (const auto& comment : _comments.postTest) {
         fs << comment << std::endl;
     }
-}
-
-void Test::parseTestQueryLine() {
-    // First word is test type.
-    const auto endTestType = _testLine.find(' ');
-    _testType = parseResultType(_testLine.substr(0, endTestType));
-
-    // The rest of the string is the query.
-    _query = fromFuzzerJson(_testLine.substr(endTestType + 1, _testLine.size()));
 }
 }  // namespace mongo::query_tester

@@ -29,6 +29,30 @@
 
 #pragma once
 
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/repl/apply_ops_gen.h"
+#include "mongo/db/repl/oplog_entry_gen.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/db/repl/optime_base_gen.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/tenant_id.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
+#include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -41,36 +65,23 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/repl/apply_ops_gen.h"
-#include "mongo/db/repl/oplog_entry_gen.h"
-#include "mongo/db/repl/optime.h"
-#include "mongo/db/repl/optime_base_gen.h"
-#include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/db/tenant_id.h"
-#include "mongo/idl/idl_parser.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
-#include "mongo/util/time_support.h"
-#include "mongo/util/uuid.h"
-
 namespace mongo {
-namespace repl {
+namespace MONGO_MOD_PUB repl {
 
 /**
  * The first oplog entry is a no-op with this message in its "msg" field.
  */
 constexpr auto kInitiatingSetMsg = "initiating set"_sd;
+
+/**
+ * Field name of the newPrimaryMsg within the 'o' field in the new term no-op oplog entry.
+ */
+constexpr StringData kNewPrimaryMsgField = "msg"_sd;
+
+/**
+ * Message string passed in the new term no-op oplog entry after a primary has stepped up.
+ */
+constexpr StringData kNewPrimaryMsg = "new primary"_sd;
 
 /**
  * A parsed DurableReplOperation along with information about the operation that should only exist
@@ -93,15 +104,15 @@ public:
         kPreImagesCollection,
     };
 
-    static ReplOperation parse(const IDLParserContext& ctxt, const BSONObj& bsonObject) {
+    static ReplOperation parse(const BSONObj& bsonObject, const IDLParserContext& ctxt) {
         ReplOperation o;
-        o.parseProtected(ctxt, bsonObject);
+        o.parseProtected(bsonObject, ctxt);
         return o;
     }
 
-    static ReplOperation parseOwned(const IDLParserContext& ctxt, const BSONObj&& bsonObject) {
+    static ReplOperation parseOwned(const BSONObj&& bsonObject, const IDLParserContext& ctxt) {
         ReplOperation o;
-        o.parseProtected(ctxt, bsonObject);
+        o.parseProtected(bsonObject, ctxt);
         o.setAnchor(bsonObject);
         return o;
     }
@@ -262,26 +273,31 @@ public:
     static ReplOperation makeInsertOperation(const NamespaceString& nss,
                                              UUID uuid,
                                              const BSONObj& docToInsert,
-                                             const BSONObj& docKey);
+                                             const BSONObj& docKey,
+                                             boost::optional<bool> isTimeseries = false);
     static ReplOperation makeUpdateOperation(NamespaceString nss,
                                              UUID uuid,
                                              const BSONObj& update,
-                                             const BSONObj& criteria);
+                                             const BSONObj& criteria,
+                                             boost::optional<bool> isTimeseries = false);
     static ReplOperation makeDeleteOperation(const NamespaceString& nss,
                                              UUID uuid,
-                                             const BSONObj& docToDelete);
+                                             const BSONObj& docToDelete,
+                                             boost::optional<bool> isTimeseries = false);
 
-    static ReplOperation makeCreateCommand(NamespaceString nss,
-                                           const mongo::CollectionOptions& options,
-                                           const BSONObj& idIndex);
-
-    static ReplOperation makeCreateIndexesCommand(NamespaceString nss,
-                                                  const UUID& uuid,
-                                                  const BSONObj& indexDoc);
-
-    static BSONObj makeCreateCollCmdObj(const NamespaceString& collectionName,
+    /**
+     * Generates the 'o' field of a 'create' OplogEntry.
+     */
+    static BSONObj makeCreateCollObject(const NamespaceString& collectionName,
                                         const mongo::CollectionOptions& options,
                                         const BSONObj& idIndex);
+
+    /**
+     * Attaches local catalog identifiers into the 'o2' field of a 'create' OplogEntry.
+     */
+    static BSONObj makeCreateCollObject2(const RecordId& catalogId,
+                                         StringData ident,
+                                         const boost::optional<StringData>& idIndexIdents);
 
     static StatusWith<MutableOplogEntry> parse(const BSONObj& object);
 
@@ -323,6 +339,10 @@ public:
 
     void setObject2(boost::optional<BSONObj> value) & {
         getDurableReplOperation().setObject2(std::move(value));
+    }
+
+    void setIsTimeseries() & {
+        getDurableReplOperation().setIsTimeseries(true);
     }
 
     void setRecordId(RecordId rid) & {
@@ -387,6 +407,10 @@ public:
         getDurableReplOperation().setCheckExistenceForDiffInsert(true);
     }
 
+    void setVersionContext(boost::optional<VersionContext> value) {
+        getDurableReplOperation().setVersionContext(std::move(value));
+    }
+
     /**
      * Same as setFromMigrate but only set when it is true.
      */
@@ -418,6 +442,30 @@ public:
     ReplOperation toReplOperation() const noexcept;
 };
 
+struct DurableOplogEntryParams {
+    OpTime opTime;
+    OpTypeEnum opType;
+    NamespaceString nss;
+    boost::optional<StringData> container;
+    boost::optional<UUID> uuid;
+    boost::optional<bool> fromMigrate;
+    boost::optional<bool> checkExistenceForDiffInsert;
+    boost::optional<VersionContext> versionContext;
+    int version;
+    BSONObj oField;
+    boost::optional<BSONObj> o2Field;
+    OperationSessionInfo sessionInfo;
+    boost::optional<bool> isUpsert;
+    Date_t wallClockTime;
+    std::vector<StmtId> statementIds;
+    boost::optional<OpTime> prevWriteOpTimeInTransaction;
+    boost::optional<OpTime> preImageOpTime;
+    boost::optional<OpTime> postImageOpTime;
+    boost::optional<ShardId> destinedRecipient;
+    boost::optional<Value> idField;
+    boost::optional<RetryImageEnum> needsRetryImage;
+};
+
 /**
  * A parsed oplog entry that privately inherits from the MutableOplogEntry.
  * This class is immutable. All setters are hidden.
@@ -427,9 +475,11 @@ public:
     // Make field names accessible.
     using MutableOplogEntry::k_idFieldName;
     using MutableOplogEntry::kCheckExistenceForDiffInsertFieldName;
+    using MutableOplogEntry::kContainerFieldName;
     using MutableOplogEntry::kDestinedRecipientFieldName;
     using MutableOplogEntry::kDurableReplOperationFieldName;
     using MutableOplogEntry::kFromMigrateFieldName;
+    using MutableOplogEntry::kIsTimeseriesFieldName;
     using MutableOplogEntry::kMultiOpTypeFieldName;
     using MutableOplogEntry::kNssFieldName;
     using MutableOplogEntry::kObject2FieldName;
@@ -448,15 +498,18 @@ public:
     using MutableOplogEntry::kTxnNumberFieldName;
     using MutableOplogEntry::kUpsertFieldName;
     using MutableOplogEntry::kUuidFieldName;
+    using MutableOplogEntry::kVersionContextFieldName;
     using MutableOplogEntry::kVersionFieldName;
     using MutableOplogEntry::kWallClockTimeFieldName;
 
     // Make serialize() and getters accessible.
     using MutableOplogEntry::get_id;
     using MutableOplogEntry::getCheckExistenceForDiffInsert;
+    using MutableOplogEntry::getContainer;
     using MutableOplogEntry::getDestinedRecipient;
     using MutableOplogEntry::getDurableReplOperation;
     using MutableOplogEntry::getFromMigrate;
+    using MutableOplogEntry::getIsTimeseries;
     using MutableOplogEntry::getMultiOpType;
     using MutableOplogEntry::getNeedsRetryImage;
     using MutableOplogEntry::getNss;
@@ -476,13 +529,12 @@ public:
     using MutableOplogEntry::getUpsert;
     using MutableOplogEntry::getUuid;
     using MutableOplogEntry::getVersion;
+    using MutableOplogEntry::getVersionContext;
     using MutableOplogEntry::getWallClockTime;
     using MutableOplogEntry::serialize;
 
     // Make helper functions accessible.
     using MutableOplogEntry::getOpTime;
-    using MutableOplogEntry::makeCreateCommand;
-    using MutableOplogEntry::makeCreateIndexesCommand;
     using MutableOplogEntry::makeDeleteOperation;
     using MutableOplogEntry::makeInsertOperation;
     using MutableOplogEntry::makeUpdateOperation;
@@ -498,6 +550,7 @@ public:
                       const boost::optional<UUID>& uuid,
                       const boost::optional<bool>& fromMigrate,
                       const boost::optional<bool>& checkExistenceForDiffInsert,
+                      const boost::optional<VersionContext>& versionContext,
                       int version,
                       const BSONObj& oField,
                       const boost::optional<BSONObj>& o2Field,
@@ -511,6 +564,8 @@ public:
                       const boost::optional<ShardId>& destinedRecipient,
                       const boost::optional<Value>& idField,
                       const boost::optional<RetryImageEnum>& needsRetryImage);
+
+    explicit DurableOplogEntry(const DurableOplogEntryParams& p);
 
     // DEPRECATED: This constructor can throw. Use static parse method instead.
     explicit DurableOplogEntry(BSONObj raw);
@@ -612,10 +667,21 @@ public:
     bool isSingleOplogEntryTransactionWithCommand() const;
 
     /**
+     * Returns whether the oplog entry represents the new Primary Noop Entry.
+     */
+    bool isNewPrimaryNoop() const;
+
+    /**
      * Returns true if the oplog entry is for a CRUD operation.
      */
     static bool isCrudOpType(OpTypeEnum opType);
     bool isCrudOpType() const;
+
+    /**
+     * Returns true if the oplog entry is for a container operation.
+     */
+    static bool isContainerOpType(OpTypeEnum opType);
+    bool isContainerOpType() const;
 
     /**
      * Returns true if the oplog entry is for an Update or Delete operation.
@@ -702,11 +768,13 @@ public:
     static constexpr auto kFromMigrateFieldName = DurableOplogEntry::kFromMigrateFieldName;
     static constexpr auto kCheckExistenceForDiffInsertFieldName =
         DurableOplogEntry::kCheckExistenceForDiffInsertFieldName;
+    static constexpr auto kVersionContextFieldName = DurableOplogEntry::kVersionContextFieldName;
     static constexpr auto kMultiOpTypeFieldName = DurableOplogEntry::kMultiOpTypeFieldName;
     static constexpr auto kTidFieldName = DurableOplogEntry::kTidFieldName;
     static constexpr auto kNssFieldName = DurableOplogEntry::kNssFieldName;
     static constexpr auto kObject2FieldName = DurableOplogEntry::kObject2FieldName;
     static constexpr auto kObjectFieldName = DurableOplogEntry::kObjectFieldName;
+    static constexpr auto kIsTimeseriesFieldName = DurableOplogEntry::kIsTimeseriesFieldName;
     static constexpr auto kOperationSessionInfoFieldName =
         DurableOplogEntry::kOperationSessionInfoFieldName;
     static constexpr auto kOplogVersion = DurableOplogEntry::kOplogVersion;
@@ -763,8 +831,10 @@ public:
     const boost::optional<mongo::TenantId>& getTid() const;
     const mongo::NamespaceString& getNss() const;
     const boost::optional<mongo::UUID>& getUuid() const;
+    boost::optional<StringData> getContainer() const;
     const mongo::BSONObj& getObject() const;
     const boost::optional<mongo::BSONObj>& getObject2() const;
+    boost::optional<bool> getIsTimeseries() const;
     boost::optional<bool> getUpsert() const;
     const boost::optional<mongo::repl::OpTime>& getPreImageOpTime() const;
     const boost::optional<mongo::ShardId>& getDestinedRecipient() const;
@@ -774,6 +844,7 @@ public:
     std::int64_t getVersion() const;
     boost::optional<bool> getFromMigrate() const&;
     bool getCheckExistenceForDiffInsert() const&;
+    const boost::optional<VersionContext>& getVersionContext() const;
     const boost::optional<mongo::repl::OpTime>& getPrevWriteOpTimeInTransaction() const&;
     const boost::optional<mongo::repl::OpTime>& getPostImageOpTime() const&;
     boost::optional<MultiOplogEntryType> getMultiOpType() const&;
@@ -791,6 +862,7 @@ public:
     bool isTerminalApplyOps() const;
     bool isSingleOplogEntryTransaction() const;
     bool isSingleOplogEntryTransactionWithCommand() const;
+    bool isNewPrimaryNoop() const;
 
     /**
      * Returns whether this oplog entry contains a DDL operation. Used to determine whether to
@@ -850,6 +922,7 @@ public:
 
 
     bool isCrudOpType() const;
+    bool isContainerOpType() const;
     bool isUpdateOrDelete() const;
     bool isIndexCommandType() const;
     bool shouldPrepare() const;
@@ -858,6 +931,7 @@ public:
     BSONObj getObjectContainingDocumentKey() const;
     OplogEntry::CommandType getCommandType() const;
     int getRawObjSizeBytes() const;
+    const BSONObj& getRaw() const;
 
 private:
     DurableOplogEntry _entry;
@@ -925,5 +999,5 @@ bool operator==(const OplogEntry& lhs, const OplogEntry& rhs);
 
 std::ostream& operator<<(std::ostream& s, const ReplOperation& o);
 
-}  // namespace repl
+}  // namespace MONGO_MOD_PUB repl
 }  // namespace mongo

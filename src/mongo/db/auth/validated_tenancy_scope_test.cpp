@@ -27,15 +27,6 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <memory>
-#include <set>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -64,10 +55,18 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/service_entry_point_shard_role.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+#include <set>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -120,13 +119,12 @@ protected:
     std::string makeSecurityToken(const UserName& userName,
                                   ValidatedTenancyScope::TenantProtocol protocol =
                                       ValidatedTenancyScope::TenantProtocol::kDefault) {
-        return auth::ValidatedTenancyScopeFactory::create(
-                   userName,
-                   "secret"_sd,
-                   protocol,
-                   auth::ValidatedTenancyScopeFactory::TokenForTestingTag{})
-            .getOriginalToken()
-            .toString();
+        return std::string{auth::ValidatedTenancyScopeFactory::create(
+                               userName,
+                               "secret"_sd,
+                               protocol,
+                               auth::ValidatedTenancyScopeFactory::TokenForTestingTag{})
+                               .getOriginalToken()};
     }
 
     ServiceContext::UniqueClient client;

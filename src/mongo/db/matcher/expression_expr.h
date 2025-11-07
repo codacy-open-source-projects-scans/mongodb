@@ -29,15 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -45,20 +36,27 @@
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/matcher/expression.h"
-#include "mongo/db/matcher/expression_tree.h"
 #include "mongo/db/matcher/expression_visitor.h"
-#include "mongo/db/matcher/match_details.h"
-#include "mongo/db/matcher/matchable.h"
-#include "mongo/db/matcher/rewrite_expr.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_walker.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/rewrites/matcher/rewrite_expr.h"
 #include "mongo/db/query/expression_walker.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/string_map.h"
+
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -76,18 +74,6 @@ public:
                         const boost::intrusive_ptr<ExpressionContext>& expCtx,
                         clonable_ptr<ErrorAnnotation> annotation = nullptr);
 
-    bool matchesSingleElement(const BSONElement& e, MatchDetails* details = nullptr) const final {
-        MONGO_UNREACHABLE;
-    }
-
-    bool matches(const MatchableDocument* doc, MatchDetails* details = nullptr) const final;
-
-    /**
-     * Evaluates the aggregation expression of this match expression on document 'doc' and returns
-     * the result.
-     */
-    Value evaluateExpression(const MatchableDocument* doc) const;
-
     std::unique_ptr<MatchExpression> clone() const final;
 
     void debugString(StringBuilder& debug, int indentationLevel = 0) const final {
@@ -101,6 +87,8 @@ public:
                    bool includePath = true) const final;
 
     bool isTriviallyTrue() const final;
+
+    bool isTriviallyFalse() const final;
 
     bool equivalent(const MatchExpression* other) const final;
 
@@ -118,7 +106,19 @@ public:
 
     void resetChild(size_t, MatchExpression*) override {
         MONGO_UNREACHABLE;
-    };
+    }
+
+    const boost::optional<RewriteExpr::RewriteResult>& getRewriteResult() const {
+        return _rewriteResult;
+    }
+
+    boost::optional<RewriteExpr::RewriteResult>& getRewriteResult() {
+        return _rewriteResult;
+    }
+
+    void setRewriteResult(boost::optional<RewriteExpr::RewriteResult> result) {
+        _rewriteResult = std::move(result);
+    }
 
     std::vector<std::unique_ptr<MatchExpression>>* getChildVector() final {
         return nullptr;
@@ -171,8 +171,6 @@ public:
     }
 
 private:
-    ExpressionOptimizerFunc getOptimizer() const final;
-
     void _doSetCollator(const CollatorInterface* collator) final;
 
     boost::intrusive_ptr<ExpressionContext> _expCtx;

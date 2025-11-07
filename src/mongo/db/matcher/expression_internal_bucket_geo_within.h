@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <cstddef>
-#include <memory>
-#include <s2cellid.h>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -44,13 +37,19 @@
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/geo/geometry_container.h"
-#include "mongo/db/geo/geoparser.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_visitor.h"
-#include "mongo/db/matcher/match_details.h"
-#include "mongo/db/matcher/matchable.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <s2cellid.h>
 
 namespace mongo {
 
@@ -70,12 +69,10 @@ namespace mongo {
  *       field: "location"
  *  }}
  *
- * The document to match should be a bucket document in an underlying system.buckets.collection
- * collection. Note that the 'field' value, "location", does not reflect the path in the matching
- * document but the path in the document in the corresponding timeseries collection, because the
- * document schma between the timeseries collection and the underlying bucket collection is
- * different.
- *
+ * The document to match should be a raw timeseries bucket document. Note that the 'field' value,
+ * "location", does not reflect the path in the matching document but the path in the document in
+ * the corresponding timeseries collection, because the document schema for raw timeseries buckets
+ * is different.
  */
 class InternalBucketGeoWithinMatchExpression final : public MatchExpression {
 public:
@@ -98,20 +95,6 @@ public:
 
     MatchCategory getCategory() const final {
         return MatchCategory::kLeaf;
-    }
-
-    /**
-     * The input matches if the bucket document, 'doc', may contain any geo field that is within
-     * 'withinRegion'.
-     *  - If false, the bucket must not contain any point that is within 'withinRegion'.
-     *  - If true, the bucket may or may not contain points that are within the region. The bucket
-     * will go through the subsequent "unpack" stage so as to check each point in the bucket in an
-     * equivalent $geoWithin operator individually. Always returns true for any bucket containing
-     * objects not of type Point.
-     */
-    bool matches(const MatchableDocument* doc, MatchDetails* details) const final;
-    bool matchesSingleElement(const BSONElement& element, MatchDetails* details) const final {
-        return false;
     }
 
     void serialize(BSONObjBuilder* builder,
@@ -161,17 +144,6 @@ public:
     }
 
 private:
-    ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) {
-            return expression;
-        };
-    }
-
-    /**
-     * Helper function for matches() and matchesSingleElement().
-     */
-    bool _matchesBSONObj(const BSONObj& obj) const;
-
     std::shared_ptr<GeometryContainer> _geoContainer;
     std::string _indexField;
     FieldRef _fieldRef;

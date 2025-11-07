@@ -29,31 +29,27 @@
 
 #pragma once
 
-#include <deque>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
-#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/stdx/unordered_set.h"
+
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -70,7 +66,8 @@ public:
     class LiteParsed final : public LiteParsedDocumentSource {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
-                                                 const BSONElement& spec) {
+                                                 const BSONElement& spec,
+                                                 const LiteParserOptions& options) {
             return std::make_unique<LiteParsed>(spec.fieldName(), nss);
         }
 
@@ -97,11 +94,13 @@ public:
     const char* getSourceName() const final;
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kListCatalog;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         StageConstraints constraints(StreamType::kStreaming,
                                      PositionRequirement::kFirst,
                                      HostTypeRequirement::kAnyShard,
@@ -112,8 +111,8 @@ public:
                                      UnionRequirement::kAllowed);
 
         constraints.isIndependentOfAnyCollection =
-            pExpCtx->getNamespaceString().isCollectionlessAggregateNS();
-        constraints.requiresInputDocSource = false;
+            getExpCtx()->getNamespaceString().isCollectionlessAggregateNS();
+        constraints.setConstraintsForNoInputSources();
         return constraints;
     }
 
@@ -128,9 +127,6 @@ public:
 
 private:
     DocumentSourceListCatalog(const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
-    GetNextResult doGetNext() final;
-
-    boost::optional<std::deque<BSONObj>> _catalogDocs;
 };
 
 }  // namespace mongo

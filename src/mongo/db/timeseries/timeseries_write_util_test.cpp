@@ -29,23 +29,12 @@
 
 #include <boost/cstdint.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-#include <boost/date_time/posix_time/posix_time.hpp>
-#include <boost/date_time/posix_time/time_parsers.hpp>
-#include <boost/move/utility_core.hpp>
-#include <cstdint>
-#include <string>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/unordered_fields_bsonobj_comparator.h"
-#include "mongo/db/catalog/catalog_test_fixture.h"
-#include "mongo/db/catalog/create_collection.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/storage/snapshot.h"
@@ -56,26 +45,28 @@
 #include "mongo/db/timeseries/bucket_compression.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_options.h"
+#include "mongo/db/timeseries/timeseries_test_fixture.h"
 #include "mongo/db/timeseries/timeseries_write_util.h"
 #include "mongo/db/timeseries/write_ops/measurement.h"
 #include "mongo/db/timeseries/write_ops/timeseries_write_ops_utils_internal.h"
-#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/logv2/log.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <cstdint>
+#include <string>
+
+#include <boost/date_time/posix_time/posix_time.hpp>
+#include <boost/date_time/posix_time/time_parsers.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 namespace mongo::timeseries {
 namespace {
 
-const std::string testDbName = "db_timeseries_write_util_test";
-const TimeseriesOptions kTimeseriesOptions("time");
-
-class TimeseriesWriteUtilTest : public CatalogTestFixture {
+class TimeseriesWriteUtilTest : public TimeseriesTestFixture {
 protected:
-    using CatalogTestFixture::setUp;
-
     std::shared_ptr<bucket_catalog::WriteBatch> generateBatch(
         const UUID& uuid, bucket_catalog::BucketMetadata bucketMetadata) {
         OID oid = OID::createFromString("629e1e680958e279dc29a517"_sd);
@@ -90,7 +81,7 @@ protected:
             bucket_catalog::BucketKey{uuid, std::move(bucketMetadata)},
             opId,
             stats,
-            kTimeseriesOptions.getTimeField());
+            _timeField);
     }
 
     std::shared_ptr<bucket_catalog::WriteBatch> generateBatch(const UUID& uuid) {
@@ -110,9 +101,6 @@ private:
 };
 
 TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromWriteBatch) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "db_timeseries_write_util_test", "MakeNewBucketFromWriteBatch");
-
     // Builds a write batch.
     auto batch = generateBatch(UUID::gen());
     const std::vector<BSONObj> measurements = {
@@ -124,8 +112,9 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromWriteBatch) {
     batch->max = fromjson(R"({"time":{"$date":"2022-06-06T15:34:30.000Z"},"a":3,"b":3})");
 
     // Makes the new document for write.
-    auto newDoc = timeseries::write_ops_utils::makeNewDocumentForWrite(ns, batch, /*metadata=*/{})
-                      .uncompressedBucket;
+    auto newDoc =
+        timeseries::write_ops_utils::makeNewDocumentForWrite(_nsNoMeta, batch, /*metadata=*/{})
+            .uncompressedBucket;
 
     // Checks the measurements are stored in the bucket format.
     const BSONObj bucketDoc = fromjson(
@@ -143,9 +132,6 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromWriteBatch) {
 }
 
 TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromWriteBatchWithMeta) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "db_timeseries_write_util_test", "MakeNewBucketFromWriteBatchWithMeta");
-
     // Builds a write batch.
     auto batch = generateBatch(UUID::gen());
     const std::vector<BSONObj> measurements = {
@@ -158,7 +144,7 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromWriteBatchWithMeta) {
     auto metadata = fromjson(R"({"meta":{"tag":1}})");
 
     // Makes the new document for write.
-    auto newDoc = timeseries::write_ops_utils::makeNewDocumentForWrite(ns, batch, metadata)
+    auto newDoc = timeseries::write_ops_utils::makeNewDocumentForWrite(_ns1, batch, metadata)
                       .uncompressedBucket;
 
     // Checks the measurements are stored in the bucket format.
@@ -178,9 +164,6 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromWriteBatchWithMeta) {
 }
 
 TEST_F(TimeseriesWriteUtilTest, MakeNewCompressedBucketFromWriteBatch) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "db_timeseries_write_util_test", "MakeNewCompressedBucketFromWriteBatch");
-
     // Builds a write batch with out-of-order time to verify that bucket compression sorts by time.
     auto batch = generateBatch(UUID::gen());
     const std::vector<BSONObj> measurements = {
@@ -193,7 +176,7 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewCompressedBucketFromWriteBatch) {
 
     // Makes the new compressed document for write.
     auto bucketDoc =
-        timeseries::write_ops_utils::makeNewDocumentForWrite(ns, batch, /*metadata=*/{});
+        timeseries::write_ops_utils::makeNewDocumentForWrite(_nsNoMeta, batch, /*metadata=*/{});
 
     // makeNewDocumentForWrite() can return the uncompressed bucket if an error was encountered
     // during compression. Check that compression was successful.
@@ -221,9 +204,6 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewCompressedBucketFromWriteBatch) {
 }
 
 TEST_F(TimeseriesWriteUtilTest, MakeNewCompressedBucketFromWriteBatchWithMeta) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "db_timeseries_write_util_test", "MakeNewCompressedBucketFromWriteBatchWithMeta");
-
     // Builds a write batch with out-of-order time to verify that bucket compression sorts by time.
     auto batch = generateBatch(UUID::gen());
     const std::vector<BSONObj> measurements = {
@@ -236,7 +216,7 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewCompressedBucketFromWriteBatchWithMeta) {
     auto metadata = fromjson(R"({"meta":{"tag":1}})");
 
     // Makes the new compressed document for write.
-    auto bucketDoc = timeseries::write_ops_utils::makeNewDocumentForWrite(ns, batch, metadata);
+    auto bucketDoc = timeseries::write_ops_utils::makeNewDocumentForWrite(_ns1, batch, metadata);
 
     // makeNewDocumentForWrite() can return the uncompressed bucket if an error was encountered
     // during compression. Check that compression was successful.
@@ -265,8 +245,6 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewCompressedBucketFromWriteBatchWithMeta) {
 }
 
 TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromMeasurements) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "db_timeseries_write_util_test", "MakeNewBucketFromMeasurements");
     UUID uuid = UUID::gen();
     OID oid = OID::createFromString("629e1e680958e279dc29a517"_sd);
     TimeseriesOptions options("time");
@@ -277,7 +255,7 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromMeasurements) {
         fromjson(R"({"time":{"$date":"2022-06-06T15:33:30.000Z"},"a":3,"b":3})")};
 
     // Makes the new document for write.
-    auto newDoc = timeseries::write_ops_utils::makeNewDocumentForWrite(ns,
+    auto newDoc = timeseries::write_ops_utils::makeNewDocumentForWrite(_nsNoMeta,
                                                                        uuid,
                                                                        oid,
                                                                        measurements,
@@ -303,8 +281,6 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromMeasurements) {
 }
 
 TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromMeasurementsWithMeta) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "db_timeseries_write_util_test", "MakeNewBucketFromMeasurementsWithMeta");
     UUID uuid = UUID::gen();
     OID oid = OID::createFromString("629e1e680958e279dc29a517"_sd);
     TimeseriesOptions options("time");
@@ -318,7 +294,7 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromMeasurementsWithMeta) {
     // Makes the new document for write.
     auto newDoc =
         timeseries::write_ops_utils::makeNewDocumentForWrite(
-            ns, uuid, oid, measurements, metadata, options, /*comparator=*/nullptr, boost::none)
+            _ns1, uuid, oid, measurements, metadata, options, /*comparator=*/nullptr, boost::none)
             .uncompressedBucket;
 
     // Checks the measurements are stored in the bucket format.
@@ -338,14 +314,11 @@ TEST_F(TimeseriesWriteUtilTest, MakeNewBucketFromMeasurementsWithMeta) {
 }
 
 /**
- * Test that makeTimeseriesCompressedDiffUpdateOp returns the expected diff object when
+ * Test that makeTimeseriesCompressedDiffUpdateOpFromBatch returns the expected diff object when
  * inserting measurements into a compressed bucket, and that out-of-order
  * measurements cause a bucket to upgraded to a v3 bucket.
  */
-TEST_F(TimeseriesWriteUtilTest, MakeTimeseriesCompressedDiffUpdateOp) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "db_timeseries_write_util_test", "MakeTimeseriesCompressedDiffUpdateOp");
-
+TEST_F(TimeseriesWriteUtilTest, MakeTimeseriesCompressedDiffUpdateOpFromBatch) {
     // Builds a write batch for an update and sets the decompressed field of the batch.
     auto batch = generateBatch(UUID::gen());
     const std::vector<BSONObj> measurements = {
@@ -367,11 +340,10 @@ TEST_F(TimeseriesWriteUtilTest, MakeTimeseriesCompressedDiffUpdateOp) {
                     "a":{"0":1,"1":2,"2":3},
                     "b":{"0":1,"1":2,"2":3}}})");
 
-    const auto preImageCompressionResult =
-        timeseries::compressBucket(uncompressedPreImage,
-                                   kTimeseriesOptions.getTimeField(),
-                                   ns,
-                                   /*validateCompression=*/true);
+    const auto preImageCompressionResult = timeseries::compressBucket(uncompressedPreImage,
+                                                                      _timeField,
+                                                                      _nsNoMeta,
+                                                                      /*validateCompression=*/true);
     ASSERT_TRUE(preImageCompressionResult.compressedBucket);
 
     batch->numPreviouslyCommittedMeasurements = 3;
@@ -390,8 +362,8 @@ TEST_F(TimeseriesWriteUtilTest, MakeTimeseriesCompressedDiffUpdateOp) {
                  "b":{"o":6,"d":{"$binary":"gCsAEAAUABAAAA==","$type":"00"}}}}
         })");
 
-    auto request = write_ops_utils::makeTimeseriesCompressedDiffUpdateOp(
-        operationContext(), batch, ns.makeTimeseriesBucketsNamespace());
+    auto request = write_ops_utils::makeTimeseriesCompressedDiffUpdateOpFromBatch(
+        _opCtx, batch, _nsNoMeta.makeTimeseriesBucketsNamespace());
     auto& updates = request.getUpdates();
 
     ASSERT_EQ(updates.size(), 1);
@@ -402,14 +374,11 @@ TEST_F(TimeseriesWriteUtilTest, MakeTimeseriesCompressedDiffUpdateOp) {
 }
 
 /**
- * Test that makeTimeseriesCompressedDiffUpdateOp returns the expected diff object when
+ * Test that makeTimeseriesCompressedDiffUpdateOpFromBatch returns the expected diff object when
  * inserting measurements with meta fields into a compressed bucket, and that out-of-order
  * measurements cause a bucket to upgraded to a v3 bucket.
  */
-TEST_F(TimeseriesWriteUtilTest, MakeTimeseriesCompressedDiffUpdateOpWithMeta) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "db_timeseries_write_util_test", "MakeTimeseriesCompressedDiffUpdateOpWithMeta");
-
+TEST_F(TimeseriesWriteUtilTest, MakeTimeseriesCompressedDiffUpdateOpFromBatchWithMeta) {
     const BSONObj uncompressedPreImage = fromjson(
         R"({"_id":{"$oid":"629e1e680958e279dc29a517"},
             "control":{"version":1,"min":{"time":{"$date":"2022-06-06T15:34:31.000Z"},"a":1,"b":1},
@@ -438,11 +407,10 @@ TEST_F(TimeseriesWriteUtilTest, MakeTimeseriesCompressedDiffUpdateOpWithMeta) {
     batch->measurements = {measurements.begin(), measurements.end()};
     auto metadata = fromjson(R"({"meta":{"tag":1}})");
 
-    const auto preImageCompressionResult =
-        timeseries::compressBucket(uncompressedPreImage,
-                                   kTimeseriesOptions.getTimeField(),
-                                   ns,
-                                   /*validateCompression=*/true);
+    const auto preImageCompressionResult = timeseries::compressBucket(uncompressedPreImage,
+                                                                      _timeField,
+                                                                      _nsNoMeta,
+                                                                      /*validateCompression=*/true);
     ASSERT_TRUE(preImageCompressionResult.compressedBucket);
 
     batch->numPreviouslyCommittedMeasurements = 3;
@@ -461,8 +429,8 @@ TEST_F(TimeseriesWriteUtilTest, MakeTimeseriesCompressedDiffUpdateOpWithMeta) {
                  "b":{"o":6,"d":{"$binary":"gCsAEAAUABAAAA==","$type":"00"}}}}
         })");
 
-    auto request = write_ops_utils::makeTimeseriesCompressedDiffUpdateOp(
-        operationContext(), batch, ns.makeTimeseriesBucketsNamespace());
+    auto request = write_ops_utils::makeTimeseriesCompressedDiffUpdateOpFromBatch(
+        _opCtx, batch, _nsNoMeta.makeTimeseriesBucketsNamespace());
     auto& updates = request.getUpdates();
 
     ASSERT_EQ(updates.size(), 1);
@@ -474,15 +442,6 @@ TEST_F(TimeseriesWriteUtilTest, MakeTimeseriesCompressedDiffUpdateOpWithMeta) {
 }
 
 TEST_F(TimeseriesWriteUtilTest, PerformAtomicDelete) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "db_timeseries_write_util_test", "PerformAtomicDelete");
-    auto opCtx = operationContext();
-    ASSERT_OK(createCollection(opCtx,
-                               ns.dbName(),
-                               BSON("create" << ns.coll() << "timeseries"
-                                             << BSON("timeField"
-                                                     << "time"))));
-
     // Inserts a bucket document.
     const BSONObj bucketDoc = ::mongo::fromjson(
         R"({"_id":{"$oid":"629e1e680958e279dc29a517"},
@@ -496,18 +455,19 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicDelete) {
     OID bucketId = OID::createFromString("629e1e680958e279dc29a517"_sd);
     auto recordId = record_id_helpers::keyForOID(bucketId);
 
-    AutoGetCollection bucketsColl(opCtx, ns.makeTimeseriesBucketsNamespace(), LockMode::MODE_IX);
+    AutoGetCollection bucketsColl(
+        _opCtx, _nsNoMeta.makeTimeseriesBucketsNamespace(), LockMode::MODE_IX);
     {
-        WriteUnitOfWork wunit{opCtx};
+        WriteUnitOfWork wunit{_opCtx};
         ASSERT_OK(collection_internal::insertDocument(
-            opCtx, *bucketsColl, InsertStatement{bucketDoc}, nullptr));
+            _opCtx, *bucketsColl, InsertStatement{bucketDoc}, nullptr));
         wunit.commit();
     }
 
     // Deletes the bucket document.
     {
         mongo::write_ops::DeleteOpEntry deleteEntry(BSON("_id" << bucketId), false);
-        mongo::write_ops::DeleteCommandRequest op(ns.makeTimeseriesBucketsNamespace(),
+        mongo::write_ops::DeleteCommandRequest op(_nsNoMeta.makeTimeseriesBucketsNamespace(),
                                                   {deleteEntry});
 
         mongo::write_ops::WriteCommandRequestBase base;
@@ -517,8 +477,8 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicDelete) {
         op.setWriteCommandRequestBase(std::move(base));
 
         ASSERT_DOES_NOT_THROW(
-            performAtomicWrites(opCtx,
-                                bucketsColl.getCollection(),
+            performAtomicWrites(_opCtx,
+                                *bucketsColl,
                                 recordId,
                                 std::variant<mongo::write_ops::UpdateCommandRequest,
                                              mongo::write_ops::DeleteCommandRequest>{op},
@@ -531,21 +491,12 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicDelete) {
     // Checks the document is removed.
     {
         Snapshotted<BSONObj> doc;
-        bool found = bucketsColl->findDoc(opCtx, recordId, &doc);
+        bool found = bucketsColl->findDoc(_opCtx, recordId, &doc);
         ASSERT_FALSE(found);
     }
 }
 
 TEST_F(TimeseriesWriteUtilTest, PerformAtomicUpdate) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "db_timeseries_write_util_test", "PerformAtomicUpdate");
-    auto opCtx = operationContext();
-    ASSERT_OK(createCollection(opCtx,
-                               ns.dbName(),
-                               BSON("create" << ns.coll() << "timeseries"
-                                             << BSON("timeField"
-                                                     << "time"))));
-
     // Inserts a bucket document.
     const BSONObj bucketDoc = ::mongo::fromjson(
         R"({"_id":{"$oid":"629e1e680958e279dc29a517"},
@@ -559,11 +510,12 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicUpdate) {
     OID bucketId = OID::createFromString("629e1e680958e279dc29a517"_sd);
     auto recordId = record_id_helpers::keyForOID(bucketId);
 
-    AutoGetCollection bucketsColl(opCtx, ns.makeTimeseriesBucketsNamespace(), LockMode::MODE_IX);
+    AutoGetCollection bucketsColl(
+        _opCtx, _nsNoMeta.makeTimeseriesBucketsNamespace(), LockMode::MODE_IX);
     {
-        WriteUnitOfWork wunit{opCtx};
+        WriteUnitOfWork wunit{_opCtx};
         ASSERT_OK(collection_internal::insertDocument(
-            opCtx, *bucketsColl, InsertStatement{bucketDoc}, nullptr));
+            _opCtx, *bucketsColl, InsertStatement{bucketDoc}, nullptr));
         wunit.commit();
     }
 
@@ -579,7 +531,8 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicUpdate) {
     {
         mongo::write_ops::UpdateModification u(replaceDoc);
         mongo::write_ops::UpdateOpEntry update(BSON("_id" << bucketId), std::move(u));
-        mongo::write_ops::UpdateCommandRequest op(ns.makeTimeseriesBucketsNamespace(), {update});
+        mongo::write_ops::UpdateCommandRequest op(_nsNoMeta.makeTimeseriesBucketsNamespace(),
+                                                  {update});
 
         mongo::write_ops::WriteCommandRequestBase base;
         base.setBypassDocumentValidation(true);
@@ -588,8 +541,8 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicUpdate) {
         op.setWriteCommandRequestBase(std::move(base));
 
         ASSERT_DOES_NOT_THROW(
-            performAtomicWrites(opCtx,
-                                bucketsColl.getCollection(),
+            performAtomicWrites(_opCtx,
+                                *bucketsColl,
                                 recordId,
                                 std::variant<mongo::write_ops::UpdateCommandRequest,
                                              mongo::write_ops::DeleteCommandRequest>{op},
@@ -602,7 +555,7 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicUpdate) {
     // Checks the document is updated.
     {
         Snapshotted<BSONObj> doc;
-        bool found = bucketsColl->findDoc(opCtx, recordId, &doc);
+        bool found = bucketsColl->findDoc(_opCtx, recordId, &doc);
 
         ASSERT_TRUE(found);
         UnorderedFieldsBSONObjComparator comparator;
@@ -611,15 +564,6 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicUpdate) {
 }
 
 TEST_F(TimeseriesWriteUtilTest, PerformAtomicDeleteAndInsert) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "db_timeseries_write_util_test", "PerformAtomicDeleteAndInsert");
-    auto opCtx = operationContext();
-    ASSERT_OK(createCollection(opCtx,
-                               ns.dbName(),
-                               BSON("create" << ns.coll() << "timeseries"
-                                             << BSON("timeField"
-                                                     << "time"))));
-
     // Inserts a bucket document.
     const BSONObj bucketDoc1 = ::mongo::fromjson(
         R"({"_id":{"$oid":"629e1e680958e279dc29a517"},
@@ -633,11 +577,12 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicDeleteAndInsert) {
     OID bucketId1 = bucketDoc1["_id"].OID();
     auto recordId1 = record_id_helpers::keyForOID(bucketId1);
 
-    AutoGetCollection bucketsColl(opCtx, ns.makeTimeseriesBucketsNamespace(), LockMode::MODE_IX);
+    AutoGetCollection bucketsColl(
+        _opCtx, _nsNoMeta.makeTimeseriesBucketsNamespace(), LockMode::MODE_IX);
     {
-        WriteUnitOfWork wunit{opCtx};
+        WriteUnitOfWork wunit{_opCtx};
         ASSERT_OK(collection_internal::insertDocument(
-            opCtx, *bucketsColl, InsertStatement{bucketDoc1}, nullptr));
+            _opCtx, *bucketsColl, InsertStatement{bucketDoc1}, nullptr));
         wunit.commit();
     }
 
@@ -659,20 +604,20 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicDeleteAndInsert) {
     auto recordId2 = record_id_helpers::keyForOID(bucketId2);
     {
         mongo::write_ops::DeleteOpEntry deleteEntry(BSON("_id" << bucketId1), false);
-        mongo::write_ops::DeleteCommandRequest deleteOp(ns.makeTimeseriesBucketsNamespace(),
+        mongo::write_ops::DeleteCommandRequest deleteOp(_nsNoMeta.makeTimeseriesBucketsNamespace(),
                                                         {deleteEntry});
         mongo::write_ops::WriteCommandRequestBase base;
         base.setBypassDocumentValidation(true);
         base.setStmtIds(std::vector<StmtId>{kUninitializedStmtId});
         deleteOp.setWriteCommandRequestBase(base);
 
-        mongo::write_ops::InsertCommandRequest insertOp(ns.makeTimeseriesBucketsNamespace(),
+        mongo::write_ops::InsertCommandRequest insertOp(_nsNoMeta.makeTimeseriesBucketsNamespace(),
                                                         {bucketDoc2});
         insertOp.setWriteCommandRequestBase(base);
 
         ASSERT_DOES_NOT_THROW(
-            performAtomicWrites(opCtx,
-                                bucketsColl.getCollection(),
+            performAtomicWrites(_opCtx,
+                                *bucketsColl,
                                 recordId1,
                                 std::variant<mongo::write_ops::UpdateCommandRequest,
                                              mongo::write_ops::DeleteCommandRequest>{deleteOp},
@@ -685,10 +630,10 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicDeleteAndInsert) {
     // Checks document1 is removed and document2 is added.
     {
         Snapshotted<BSONObj> doc;
-        bool found = bucketsColl->findDoc(opCtx, recordId1, &doc);
+        bool found = bucketsColl->findDoc(_opCtx, recordId1, &doc);
         ASSERT_FALSE(found);
 
-        found = bucketsColl->findDoc(opCtx, recordId2, &doc);
+        found = bucketsColl->findDoc(_opCtx, recordId2, &doc);
         ASSERT_TRUE(found);
         UnorderedFieldsBSONObjComparator comparator;
         ASSERT_EQ(0, comparator.compare(doc.value(), bucketDoc2));
@@ -696,15 +641,6 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicDeleteAndInsert) {
 }
 
 TEST_F(TimeseriesWriteUtilTest, PerformAtomicUpdateAndInserts) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "db_timeseries_write_util_test", "PerformAtomicUpdateAndInserts");
-    auto opCtx = operationContext();
-    ASSERT_OK(createCollection(opCtx,
-                               ns.dbName(),
-                               BSON("create" << ns.coll() << "timeseries"
-                                             << BSON("timeField"
-                                                     << "time"))));
-
     // Inserts a bucket document.
     const BSONObj bucketDoc1 = ::mongo::fromjson(
         R"({"_id":{"$oid":"629e1e680958e279dc29a517"},
@@ -719,11 +655,12 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicUpdateAndInserts) {
     OID bucketId1 = bucketDoc1["_id"].OID();
     auto recordId1 = record_id_helpers::keyForOID(bucketId1);
 
-    AutoGetCollection bucketsColl(opCtx, ns.makeTimeseriesBucketsNamespace(), LockMode::MODE_IX);
+    AutoGetCollection bucketsColl(
+        _opCtx, _nsNoMeta.makeTimeseriesBucketsNamespace(), LockMode::MODE_IX);
     {
-        WriteUnitOfWork wunit{opCtx};
+        WriteUnitOfWork wunit{_opCtx};
         ASSERT_OK(collection_internal::insertDocument(
-            opCtx, *bucketsColl, InsertStatement{bucketDoc1}, nullptr));
+            _opCtx, *bucketsColl, InsertStatement{bucketDoc1}, nullptr));
         wunit.commit();
     }
 
@@ -767,23 +704,23 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicUpdateAndInserts) {
     {
         mongo::write_ops::UpdateModification u(replaceDoc);
         mongo::write_ops::UpdateOpEntry update(BSON("_id" << bucketId1), std::move(u));
-        mongo::write_ops::UpdateCommandRequest updateOp(ns.makeTimeseriesBucketsNamespace(),
+        mongo::write_ops::UpdateCommandRequest updateOp(_nsNoMeta.makeTimeseriesBucketsNamespace(),
                                                         {update});
         mongo::write_ops::WriteCommandRequestBase base;
         base.setBypassDocumentValidation(true);
         base.setStmtIds(std::vector<StmtId>{kUninitializedStmtId});
         updateOp.setWriteCommandRequestBase(base);
 
-        mongo::write_ops::InsertCommandRequest insertOp1(ns.makeTimeseriesBucketsNamespace(),
+        mongo::write_ops::InsertCommandRequest insertOp1(_nsNoMeta.makeTimeseriesBucketsNamespace(),
                                                          {bucketDoc2});
         insertOp1.setWriteCommandRequestBase(base);
-        mongo::write_ops::InsertCommandRequest insertOp2(ns.makeTimeseriesBucketsNamespace(),
+        mongo::write_ops::InsertCommandRequest insertOp2(_nsNoMeta.makeTimeseriesBucketsNamespace(),
                                                          {bucketDoc3});
         insertOp2.setWriteCommandRequestBase(base);
 
         ASSERT_DOES_NOT_THROW(
-            performAtomicWrites(opCtx,
-                                bucketsColl.getCollection(),
+            performAtomicWrites(_opCtx,
+                                *bucketsColl,
                                 recordId1,
                                 std::variant<mongo::write_ops::UpdateCommandRequest,
                                              mongo::write_ops::DeleteCommandRequest>{updateOp},
@@ -796,31 +733,22 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicUpdateAndInserts) {
     // Checks document1 is updated and document2 and document3 are added.
     {
         Snapshotted<BSONObj> doc;
-        bool found = bucketsColl->findDoc(opCtx, recordId1, &doc);
+        bool found = bucketsColl->findDoc(_opCtx, recordId1, &doc);
         ASSERT_TRUE(found);
         UnorderedFieldsBSONObjComparator comparator;
         ASSERT_EQ(0, comparator.compare(doc.value(), replaceDoc));
 
-        found = bucketsColl->findDoc(opCtx, recordId2, &doc);
+        found = bucketsColl->findDoc(_opCtx, recordId2, &doc);
         ASSERT_TRUE(found);
         ASSERT_EQ(0, comparator.compare(doc.value(), bucketDoc2));
 
-        found = bucketsColl->findDoc(opCtx, recordId3, &doc);
+        found = bucketsColl->findDoc(_opCtx, recordId3, &doc);
         ASSERT_TRUE(found);
         ASSERT_EQ(0, comparator.compare(doc.value(), bucketDoc3));
     }
 }
 
 TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserDelete) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "db_timeseries_write_util_test", "PerformAtomicWritesForUserDelete");
-    auto opCtx = operationContext();
-    ASSERT_OK(createCollection(opCtx,
-                               ns.dbName(),
-                               BSON("create" << ns.coll() << "timeseries"
-                                             << BSON("timeField"
-                                                     << "time"))));
-
     // Inserts a bucket document.
     const BSONObj uncompressedDoc = ::mongo::fromjson(
         R"({"_id":{"$oid":"66e1d884953633cfd2c479f2"},
@@ -834,8 +762,8 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserDelete) {
                     "b":{"0":1,"1":2,"2":3}}})");
 
     CompressionResult compressionResult = compressBucket(uncompressedDoc,
-                                                         kTimeseriesOptions.getTimeField(),
-                                                         ns,
+                                                         _timeField,
+                                                         _nsNoMeta,
                                                          /*validateDecompression*/ true);
     const BSONObj& bucketDoc = compressionResult.compressedBucket.value();
     auto minTime = bucketDoc.getObjectField(kBucketControlFieldName)
@@ -845,11 +773,12 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserDelete) {
     OID bucketId = bucketDoc["_id"].OID();
     auto recordId = record_id_helpers::keyForOID(bucketId);
 
-    AutoGetCollection bucketsColl(opCtx, ns.makeTimeseriesBucketsNamespace(), LockMode::MODE_IX);
+    AutoGetCollection bucketsColl(
+        _opCtx, _nsNoMeta.makeTimeseriesBucketsNamespace(), LockMode::MODE_IX);
     {
-        WriteUnitOfWork wunit{opCtx};
+        WriteUnitOfWork wunit{_opCtx};
         ASSERT_OK(collection_internal::insertDocument(
-            opCtx, *bucketsColl, InsertStatement{bucketDoc}, nullptr));
+            _opCtx, *bucketsColl, InsertStatement{bucketDoc}, nullptr));
         wunit.commit();
     }
 
@@ -857,8 +786,8 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserDelete) {
     // should check that the minTime of the bucket does not get changed in spite of this.
     {
         ASSERT_DOES_NOT_THROW(performAtomicWritesForDelete(
-            opCtx,
-            bucketsColl.getCollection(),
+            _opCtx,
+            *bucketsColl,
             recordId,
             {::mongo::fromjson(R"({"time":{"$date":"2024-09-11T17:53:18.428Z"},"a":3,"b":3})")},
             /*fromMigrate=*/false,
@@ -888,20 +817,20 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserDelete) {
                                             .getObjectField("time")
                                             .getField("0")
                                             .Date(),
-                                        kTimeseriesOptions);
+                                        _getTimeseriesOptions(_nsNoMeta));
         auto controlMinTime = uncompressedReplaceDoc.getObjectField(kBucketControlFieldName)
                                   .getObjectField(kBucketControlMinFieldName)
                                   .getField("time")
                                   .Date();
         ASSERT_NE(remainingMeasurementMinTime, controlMinTime);
         CompressionResult compressionResult = compressBucket(uncompressedReplaceDoc,
-                                                             kTimeseriesOptions.getTimeField(),
-                                                             ns,
+                                                             _timeField,
+                                                             _nsNoMeta,
                                                              /*validateDecompression*/ true);
         const BSONObj& replaceDoc = compressionResult.compressedBucket.value();
 
         Snapshotted<BSONObj> doc;
-        bool found = bucketsColl->findDoc(opCtx, recordId, &doc);
+        bool found = bucketsColl->findDoc(_opCtx, recordId, &doc);
 
         ASSERT_TRUE(found);
         UnorderedFieldsBSONObjComparator comparator;
@@ -910,8 +839,8 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserDelete) {
 
     // Deletes the last measurement from the bucket.
     {
-        ASSERT_DOES_NOT_THROW(performAtomicWritesForDelete(opCtx,
-                                                           bucketsColl.getCollection(),
+        ASSERT_DOES_NOT_THROW(performAtomicWritesForDelete(_opCtx,
+                                                           *bucketsColl,
                                                            recordId,
                                                            {},
                                                            /*fromMigrate=*/false,
@@ -922,21 +851,12 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserDelete) {
     // Checks the document is removed.
     {
         Snapshotted<BSONObj> doc;
-        bool found = bucketsColl->findDoc(opCtx, recordId, &doc);
+        bool found = bucketsColl->findDoc(_opCtx, recordId, &doc);
         ASSERT_FALSE(found);
     }
 }
 
 TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserUpdate) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "db_timeseries_write_util_test", "PerformAtomicWritesForUserUpdate");
-    auto opCtx = operationContext();
-    ASSERT_OK(createCollection(opCtx,
-                               ns.dbName(),
-                               BSON("create" << ns.coll() << "timeseries"
-                                             << BSON("timeField"
-                                                     << "time"))));
-
     // Inserts a bucket document.
     const BSONObj bucketDoc = ::mongo::fromjson(
         R"({"_id":{"$oid":"629e1e680958e279dc29a517"},
@@ -951,11 +871,12 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserUpdate) {
     auto minTime =
         bucketDoc.getObjectField("control").getObjectField("min").getField("time").Date();
 
-    AutoGetCollection bucketsColl(opCtx, ns.makeTimeseriesBucketsNamespace(), LockMode::MODE_IX);
+    AutoGetCollection bucketsColl(
+        _opCtx, _nsNoMeta.makeTimeseriesBucketsNamespace(), LockMode::MODE_IX);
     {
-        WriteUnitOfWork wunit{opCtx};
+        WriteUnitOfWork wunit{_opCtx};
         ASSERT_OK(collection_internal::insertDocument(
-            opCtx, *bucketsColl, InsertStatement{bucketDoc}, nullptr));
+            _opCtx, *bucketsColl, InsertStatement{bucketDoc}, nullptr));
         wunit.commit();
     }
 
@@ -967,8 +888,8 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserUpdate) {
         bucket_catalog::BucketCatalog sideBucketCatalog{
             1, getTimeseriesIdleBucketExpiryMemoryUsageThresholdBytes};
         ASSERT_DOES_NOT_THROW(performAtomicWritesForUpdate(
-            opCtx,
-            bucketsColl.getCollection(),
+            _opCtx,
+            *bucketsColl,
             recordId,
             unchangedMeasurements,
             {::mongo::fromjson(R"({"time":{"$date":"2022-06-06T15:34:30.000Z"},"a":10,"b":10})"),
@@ -977,8 +898,6 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserUpdate) {
             /*fromMigrate=*/false,
             /*stmtId=*/kUninitializedStmtId,
             &bucketIds,
-            /*compressAndWriteBucketFunc=*/
-            nullptr,
             minTime));
         ASSERT_EQ(bucketIds.size(), 1);
     }
@@ -994,26 +913,17 @@ TEST_F(TimeseriesWriteUtilTest, PerformAtomicWritesForUserUpdate) {
                     "a":{"$binary":"EAACAAAAAA==","$type":"07"},
                     "b":{"$binary":"EAACAAAAAA==","$type":"07"}}})");
         Snapshotted<BSONObj> doc;
-        bool found = bucketsColl->findDoc(opCtx, recordId, &doc);
+        bool found = bucketsColl->findDoc(_opCtx, recordId, &doc);
 
         ASSERT_TRUE(found);
         UnorderedFieldsBSONObjComparator comparator;
         ASSERT_EQ(0, comparator.compare(doc.value(), replaceDoc));
 
-        ASSERT_EQ(2, bucketsColl->numRecords(opCtx));
+        ASSERT_EQ(2, bucketsColl->numRecords(_opCtx));
     }
 }
 
 TEST_F(TimeseriesWriteUtilTest, TrackInsertedBuckets) {
-    NamespaceString ns = NamespaceString::createNamespaceString_forTest(
-        "db_timeseries_write_util_test", "TrackInsertedBuckets");
-    auto opCtx = operationContext();
-    ASSERT_OK(createCollection(opCtx,
-                               ns.dbName(),
-                               BSON("create" << ns.coll() << "timeseries"
-                                             << BSON("timeField"
-                                                     << "time"))));
-
     // Inserts a bucket document.
     const BSONObj bucketDoc = ::mongo::fromjson(
         R"({"_id":{"$oid":"629e1e680958e279dc29a517"},
@@ -1029,11 +939,12 @@ TEST_F(TimeseriesWriteUtilTest, TrackInsertedBuckets) {
     auto minTime =
         bucketDoc.getObjectField("control").getObjectField("min").getField("time").Date();
 
-    AutoGetCollection bucketsColl(opCtx, ns.makeTimeseriesBucketsNamespace(), LockMode::MODE_IX);
+    AutoGetCollection bucketsColl(
+        _opCtx, _nsNoMeta.makeTimeseriesBucketsNamespace(), LockMode::MODE_IX);
     {
-        WriteUnitOfWork wunit{opCtx};
+        WriteUnitOfWork wunit{_opCtx};
         ASSERT_OK(collection_internal::insertDocument(
-            opCtx, *bucketsColl, InsertStatement{bucketDoc}, nullptr));
+            _opCtx, *bucketsColl, InsertStatement{bucketDoc}, nullptr));
         wunit.commit();
     }
 
@@ -1048,8 +959,8 @@ TEST_F(TimeseriesWriteUtilTest, TrackInsertedBuckets) {
             ::mongo::fromjson(R"({"time":{"$date":"2022-06-06T15:34:30.000Z"},"a":3,"b":3})")};
 
         ASSERT_DOES_NOT_THROW(performAtomicWritesForUpdate(
-            opCtx,
-            bucketsColl.getCollection(),
+            _opCtx,
+            *bucketsColl,
             recordId,
             unchangedMeasurements,
             {::mongo::fromjson(R"({"time":{"$date":"2022-06-06T15:34:30.000Z"},"a":10,"b":10})")},
@@ -1057,8 +968,6 @@ TEST_F(TimeseriesWriteUtilTest, TrackInsertedBuckets) {
             /*fromMigrate=*/false,
             /*stmtId=*/kUninitializedStmtId,
             &bucketIds,
-            /*compressAndWriteBucketFunc=*/
-            nullptr,
             minTime));
         ASSERT_EQ(bucketIds.size(), 1);
     }
@@ -1069,8 +978,8 @@ TEST_F(TimeseriesWriteUtilTest, TrackInsertedBuckets) {
             ::mongo::fromjson(R"({"time":{"$date":"2022-06-06T15:34:30.000Z"},"a":3,"b":3})")};
 
         ASSERT_DOES_NOT_THROW(performAtomicWritesForUpdate(
-            opCtx,
-            bucketsColl.getCollection(),
+            _opCtx,
+            *bucketsColl,
             recordId,
             unchangedMeasurements,
             {::mongo::fromjson(R"({"time":{"$date":"2022-06-06T15:34:30.000Z"},"a":20,"b":20})")},
@@ -1078,8 +987,6 @@ TEST_F(TimeseriesWriteUtilTest, TrackInsertedBuckets) {
             /*fromMigrate=*/false,
             /*stmtId=*/kUninitializedStmtId,
             &bucketIds,
-            /*compressAndWriteBucketFunc=*/
-            nullptr,
             minTime));
         ASSERT_EQ(bucketIds.size(), 1);
     }
@@ -1089,8 +996,8 @@ TEST_F(TimeseriesWriteUtilTest, TrackInsertedBuckets) {
         std::vector<BSONObj> unchangedMeasurements{};
 
         ASSERT_DOES_NOT_THROW(performAtomicWritesForUpdate(
-            opCtx,
-            bucketsColl.getCollection(),
+            _opCtx,
+            *bucketsColl,
             recordId,
             unchangedMeasurements,
             {::mongo::fromjson(
@@ -1099,103 +1006,9 @@ TEST_F(TimeseriesWriteUtilTest, TrackInsertedBuckets) {
             /*fromMigrate=*/false,
             /*stmtId=*/kUninitializedStmtId,
             &bucketIds,
-            /*compressAndWriteBucketFunc=*/
-            nullptr,
             minTime));
         ASSERT_EQ(bucketIds.size(), 2);
     }
-}
-
-TEST_F(TimeseriesWriteUtilTest, SortMeasurementsOnTimeField) {
-    const BSONObj metaField = fromjson(R"({"meta":{"tag":1}})");
-
-    // The meta field should be filtered by the sorting process.
-    const std::vector<BSONObj> measurements = {
-        fromjson(R"({"time":{"$date":"2022-06-06T15:34:50.000Z"},"meta":{"tag":1},"a":1,"b":1})"),
-        fromjson(R"({"time":{"$date":"2022-06-07T15:34:30.000Z"},"meta":{"tag":1},"a":2,"b":2})"),
-        fromjson(R"({"time":{"$date":"2022-06-06T15:34:30.000Z"},"meta":{"tag":1},"a":3,"b":3})")};
-
-    auto batch =
-        generateBatch(UUID::gen(),
-                      {bucket_catalog::getTrackingContext(
-                           _trackingContexts, bucket_catalog::TrackingScope::kOpenBucketsByKey),
-                       metaField.getField("meta"),
-                       boost::none});
-    batch->measurements = {measurements.begin(), measurements.end()};
-    batch->min = fromjson(R"({"time":{"$date":"2022-06-06T15:34:00.000Z"},"a":1,"b":1})");
-    batch->max = fromjson(R"({"time":{"$date":"2022-06-06T15:34:30.000Z"},"a":3,"b":3})");
-    batch->timeField = kTimeseriesOptions.getTimeField();
-
-    std::vector<timeseries::write_ops_utils::details::Measurement> testMeasurements =
-        timeseries::write_ops_utils::sortMeasurementsOnTimeField(batch);
-
-    const std::vector<BSONObj> sortedMeasurements = {
-        fromjson(R"({"time":{"$date":"2022-06-06T15:34:30.000Z"},"a":3,"b":3})"),
-        fromjson(R"({"time":{"$date":"2022-06-06T15:34:50.000Z"},"a":1,"b":1})"),
-        fromjson(R"({"time":{"$date":"2022-06-07T15:34:30.000Z"},"a":2,"b":2})")};
-
-    const std::vector<BSONObj> sortedTimeFields = {
-        fromjson(R"({"time":{"$date":"2022-06-06T15:34:30.000Z"}})"),
-        fromjson(R"({"time":{"$date":"2022-06-06T15:34:50.000Z"}})"),
-        fromjson(R"({"time":{"$date":"2022-06-07T15:34:30.000Z"}})")};
-
-    ASSERT_EQ(testMeasurements.size(), sortedMeasurements.size());
-    for (size_t i = 0; i < sortedMeasurements.size(); ++i) {
-        timeseries::write_ops_utils::details::Measurement m;
-        m.timeField = sortedTimeFields[i].getField("time");
-        m.dataFields.push_back(sortedMeasurements[i].getField("time"));
-        m.dataFields.push_back(sortedMeasurements[i].getField("a"));
-        m.dataFields.push_back(sortedMeasurements[i].getField("b"));
-        ASSERT_EQ(m, testMeasurements[i]);
-    }
-}
-
-TEST_F(TimeseriesWriteUtilTest, SortMeasurementsOnTimeFieldExtendedRange) {
-    const BSONObj metaField = fromjson(R"({"meta":{"tag":1}})");
-
-    // TODO SERVER-94228: Support ISO 8601 date parsing and formatting of dates prior to 1970.
-    static constexpr auto epoch = boost::posix_time::ptime(boost::gregorian::date(1970, 1, 1));
-    auto parse = [](const std::string& input) {
-        auto ptime = boost::posix_time::from_iso_extended_string(input);
-        return (ptime - epoch).total_milliseconds();
-    };
-
-    // Two measurements in reverse order at different side of the epoch
-    const std::vector<BSONObj> measurements = {
-        fromjson(fmt::format(
-            R"({{"time":{{"$date":{{"$numberLong": "{}"}}}},"meta":{{"tag":1}},"a":1,"b":1}})",
-            parse("1970-01-01T00:15:00.001"))),
-        fromjson(fmt::format(
-            R"({{"time":{{"$date":{{"$numberLong": "{}"}}}},"meta":{{"tag":1}},"a":2,"b":2}})",
-            parse("1969-12-31T23:30:30.001")))};
-
-    auto batch =
-        generateBatch(UUID::gen(),
-                      {bucket_catalog::getTrackingContext(
-                           _trackingContexts, bucket_catalog::TrackingScope::kOpenBucketsByKey),
-                       metaField.getField("meta"),
-                       boost::none});
-    batch->measurements = {measurements.begin(), measurements.end()};
-    batch->min = measurements[1];
-    batch->max = measurements[0];
-    batch->timeField = kTimeseriesOptions.getTimeField();
-
-    std::vector<timeseries::write_ops_utils::details::Measurement> testMeasurements =
-        timeseries::write_ops_utils::sortMeasurementsOnTimeField(batch);
-
-    ASSERT_EQ(testMeasurements.size(), measurements.size());
-
-    auto compare = [&](int inputIdx, int outputIdx) {
-        timeseries::write_ops_utils::details::Measurement m;
-        m.timeField = measurements[inputIdx].getField("time");
-        m.dataFields.push_back(measurements[inputIdx].getField("time"));
-        m.dataFields.push_back(measurements[inputIdx].getField("a"));
-        m.dataFields.push_back(measurements[inputIdx].getField("b"));
-        ASSERT_EQ(m, testMeasurements[outputIdx]);
-    };
-
-    compare(1, 0);
-    compare(0, 1);
 }
 
 }  // namespace

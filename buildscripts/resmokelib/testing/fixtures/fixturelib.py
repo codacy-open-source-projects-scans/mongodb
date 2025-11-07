@@ -149,7 +149,6 @@ class _FixtureConfig(object):
             LAST_LTS_MONGOS_BINARY,
         )
 
-        # pylint: disable=invalid-name
         self.MONGOD_EXECUTABLE = config.MONGOD_EXECUTABLE
         self.DEFAULT_MONGOD_EXECUTABLE = config.DEFAULT_MONGOD_EXECUTABLE
         self.MONGOD_SET_PARAMETERS = config.MONGOD_SET_PARAMETERS
@@ -168,6 +167,7 @@ class _FixtureConfig(object):
         self.NO_JOURNAL = config.NO_JOURNAL
         self.STORAGE_ENGINE = config.STORAGE_ENGINE
         self.STORAGE_ENGINE_CACHE_SIZE = config.STORAGE_ENGINE_CACHE_SIZE
+        self.STORAGE_ENGINE_CACHE_SIZE_PCT = config.STORAGE_ENGINE_CACHE_SIZE_PCT
         self.MOZJS_JS_GC_ZEAL = config.MOZJS_JS_GC_ZEAL
         self.WT_COLL_CONFIG = config.WT_COLL_CONFIG
         self.WT_ENGINE_CONFIG = config.WT_ENGINE_CONFIG
@@ -190,3 +190,4 @@ class _FixtureConfig(object):
         self.DOCKER_COMPOSE_BUILD_IMAGES = config.DOCKER_COMPOSE_BUILD_IMAGES
         self.NOOP_MONGO_D_S_PROCESSES = config.NOOP_MONGO_D_S_PROCESSES
         self.CONFIG_FUZZER_ENCRYPTION_OPTS = config.CONFIG_FUZZER_ENCRYPTION_OPTS
+        self.LOAD_ALL_EXTENSIONS = config.LOAD_ALL_EXTENSIONS

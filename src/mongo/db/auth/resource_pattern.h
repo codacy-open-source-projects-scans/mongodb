@@ -29,14 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-#include <iosfwd>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/auth/action_type_gen.h"
@@ -44,6 +36,15 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/util/assert_util.h"
+
+#include <iosfwd>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -143,11 +144,11 @@ public:
      * "<dbName>.system.buckets.<collectionName>"
      */
     static ResourcePattern forExactSystemBucketsCollection(const NamespaceString& nss) {
-        using namespace fmt::literals;
         uassert(ErrorCodes::InvalidNamespace,
-                "Invalid namespace '{}.system.buckets.{}'"_format(
-                    nss.dbName().toStringForErrorMsg(), nss.coll()),
-                !nss.coll().startsWith("system.buckets."));
+                fmt::format("Invalid namespace '{}.system.buckets.{}'",
+                            nss.dbName().toStringForErrorMsg(),
+                            nss.coll()),
+                !nss.coll().starts_with("system.buckets."));
         return ResourcePattern(MatchTypeEnum::kMatchExactSystemBucketResource, nss);
     }
 

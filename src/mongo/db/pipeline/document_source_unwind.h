@@ -29,33 +29,31 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/db/exec/agg/unwind_processor.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/document_internal.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/document_source_limit.h"
+#include "mongo/db/pipeline/document_source_sort.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/pipeline/stage_constraints.h"
+#include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
+
 #include <cstddef>
 #include <memory>
 #include <set>
 #include <string>
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/exec/document_value/document_internal.h"
-#include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/pipeline/dependencies.h"
-#include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/document_source_limit.h"
-#include "mongo/db/pipeline/document_source_sort.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/field_path.h"
-#include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/pipeline/stage_constraints.h"
-#include "mongo/db/pipeline/unwind_processor.h"
-#include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/query_shape/serialization_options.h"
 
 namespace mongo {
 
@@ -66,8 +64,10 @@ public:
     // virtuals from DocumentSource
     const char* getSourceName() const final;
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kUnwind;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
@@ -77,7 +77,7 @@ public:
      */
     GetModPathsReturn getModifiedPaths() const final;
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         StageConstraints constraints(StreamType::kStreaming,
                                      PositionRequirement::kNone,
                                      HostTypeRequirement::kNone,
@@ -112,20 +112,16 @@ public:
         const boost::optional<std::string>& includeArrayIndex,
         bool strict = false);
 
-    UnwindProcessor* getUnwindProcessor() {
-        return _unwindProcessor.get_ptr();
-    }
-
     const std::string& getUnwindPath() const {
-        return _unwindProcessor->getUnwindFullPath();
+        return _unwindPath.fullPath();
     }
 
     bool preserveNullAndEmptyArrays() const {
-        return _unwindProcessor->getPreserveNullAndEmptyArrays();
+        return _preserveNullAndEmptyArrays;
     }
 
     const boost::optional<FieldPath>& indexPath() const {
-        return _unwindProcessor->getIndexPath();
+        return _indexPath;
     }
 
     SbeCompatibility sbeCompatibility() const {
@@ -136,17 +132,18 @@ protected:
     /**
      * Attempts to swap with a subsequent $sort stage if the $sort is on a different field.
      */
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) final;
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) final;
 
 private:
+    friend std::unique_ptr<exec::agg::UnwindProcessor> createUnwindProcessorFromDocumentSource(
+        const boost::intrusive_ptr<DocumentSourceUnwind>& ds);
+
     DocumentSourceUnwind(const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
                          const FieldPath& fieldPath,
                          bool includeNullIfEmptyOrMissing,
                          const boost::optional<FieldPath>& includeArrayIndex,
                          bool strict);
-
-    GetNextResult doGetNext() final;
 
     // Checks if a sort is eligible to be moved before the unwind.
     bool canPushSortBack(const DocumentSourceSort* sort) const;
@@ -154,8 +151,11 @@ private:
     // Checks if a limit is eligible to be moved before the unwind.
     bool canPushLimitBack(const DocumentSourceLimit* limit) const;
 
-    // Helper class instance to execute unwind logic.
-    boost::optional<UnwindProcessor> _unwindProcessor;
+    // 'UnwindProcessor' constructor args.
+    const FieldPath _unwindPath;
+    bool _preserveNullAndEmptyArrays;
+    const boost::optional<FieldPath> _indexPath;
+    bool _strict;
 
     // If preserveNullAndEmptyArrays is true and unwind is followed by a limit, we can duplicate
     // the limit before the unwind. We only want to do this if we've found a limit smaller than the

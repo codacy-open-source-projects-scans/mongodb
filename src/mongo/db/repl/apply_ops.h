@@ -27,7 +27,7 @@
  *    it in the license file.
  */
 
-#include <vector>
+#pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
@@ -38,8 +38,11 @@
 #include "mongo/db/repl/apply_ops_gen.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <vector>
+
+namespace MONGO_MOD_PUB mongo {
 class BSONObjBuilder;
 class OperationContext;
 
@@ -70,4 +73,4 @@ Status applyApplyOpsOplogEntry(OperationContext* opCtx,
                                const OplogEntry& entry,
                                repl::OplogApplication::Mode oplogApplicationMode);
 }  // namespace repl
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

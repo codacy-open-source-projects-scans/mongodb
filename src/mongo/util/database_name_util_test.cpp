@@ -27,19 +27,18 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/util/database_name_util.h"
 
 #include "mongo/bson/oid.h"
 #include "mongo/db/database_name.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/database_name_util.h"
 #include "mongo/util/str.h"
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -362,11 +361,10 @@ TEST(DatabaseNameUtilTest, ParseFailPointData) {
                                                                     multitenancy);
         // Test fail point data has tenantId
         {
-            auto fpData = BSON("a"
-                               << "1"
-                               << "db"
-                               << "myDb"
-                               << "tenantId" << tid);
+            auto fpData = BSON("a" << "1"
+                                   << "db"
+                                   << "myDb"
+                                   << "tenantId" << tid);
             if (multitenancy) {
                 auto dbName = DatabaseNameUtil::parseFailPointData(fpData, "db"_sd);
                 ASSERT_EQ(DatabaseName::createDatabaseName_forTest(tid, "myDb"), dbName);
@@ -390,17 +388,15 @@ TEST(DatabaseNameUtilTest, ParseFailPointData) {
         }
         // Test fail point data has no tenantId
         {
-            auto fpData = BSON("b"
-                               << "2"
-                               << "db"
-                               << "myDb");
+            auto fpData = BSON("b" << "2"
+                                   << "db"
+                                   << "myDb");
             const auto dbName = DatabaseNameUtil::parseFailPointData(fpData, "db"_sd);
             ASSERT_EQ(DatabaseName::createDatabaseName_forTest(boost::none, "myDb"), dbName);
         }
         // Test fail point data only has db
         {
-            auto fpData = BSON("db"
-                               << "myDb");
+            auto fpData = BSON("db" << "myDb");
             const auto dbName = DatabaseNameUtil::parseFailPointData(fpData, "db"_sd);
             ASSERT_EQ(DatabaseName::createDatabaseName_forTest(boost::none, "myDb"), dbName);
         }

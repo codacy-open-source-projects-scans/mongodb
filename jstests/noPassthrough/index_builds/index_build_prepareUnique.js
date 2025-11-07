@@ -4,12 +4,14 @@
  *
  *  @tags: [
  *  requires_replication,
+ *  # TODO SERVER-111867: Remove once primary-driven index builds support side writes.
+ *  primary_driven_index_builds_incompatible,
  * ]
  */
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const rst = new ReplSetTest({nodes: 1});
 rst.startSet();
@@ -28,8 +30,7 @@ assert.commandWorked(coll.insert({a: 123}));
 
 // Waits after the side write tracker is installed.
 const fp = configureFailPoint(primary, "hangAfterSettingUpIndexBuild");
-const awaitIndexBuild =
-    IndexBuildTest.startIndexBuild(primary, coll.getFullName(), {a: 1}, {prepareUnique: true});
+const awaitIndexBuild = IndexBuildTest.startIndexBuild(primary, coll.getFullName(), {a: 1}, {prepareUnique: true});
 
 fp.wait();
 // Inserts the document with the duplicate key.
@@ -41,6 +42,7 @@ awaitIndexBuild();
 // Confirms the index has duplicate keys and cannot be converted to unique.
 assert.commandFailedWithCode(
     db.runCommand({collMod: collName, index: {keyPattern: {a: 1}, unique: true}}),
-    ErrorCodes.CannotConvertIndexToUnique);
+    ErrorCodes.CannotConvertIndexToUnique,
+);
 
 rst.stopSet();

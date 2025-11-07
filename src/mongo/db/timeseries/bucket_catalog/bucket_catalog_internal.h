@@ -29,49 +29,44 @@
 
 #pragma once
 
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <utility>
-#include <variant>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/oid.h"
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_identifiers.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_state_registry.h"
-#include "mongo/db/timeseries/bucket_catalog/closed_bucket.h"
 #include "mongo/db/timeseries/bucket_catalog/execution_stats.h"
-#include "mongo/db/timeseries/bucket_catalog/reopening.h"
 #include "mongo/db/timeseries/bucket_catalog/rollover.h"
 #include "mongo/db/timeseries/bucket_catalog/write_batch.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/util/concurrency/with_lock.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+
 namespace mongo::timeseries::bucket_catalog::internal {
-
 /**
- * Mode enum to control whether bucket retrieval methods will create new buckets if no suitable
- * bucket exists.
+ * Function that should run validation against the bucket to ensure it's a proper bucket document.
+ * Typically, this should execute Collection::checkValidation.
  */
-enum class AllowBucketCreation { kYes, kNo };
+using BucketDocumentValidator =
+    std::function<std::pair<Collection::SchemaValidationResult, Status>(const BSONObj&)>;
 
-/**
- * Mode to signal to 'removeBucket' what's happening to the bucket, and how to handle the bucket
- * state change.
- */
-enum class RemovalMode {
-    kClose,    // Normal closure, pending compression
-    kArchive,  // Archive bucket, no state change
-    kAbort,    // Bucket is being cleared, possibly due to error, erase state
+enum class MONGO_MOD_PARENT_PRIVATE StageInsertBatchResult {
+    Success,
+    RolloverNeeded,
+    NoMeasurementsStaged,
 };
 
 /**
@@ -86,27 +81,15 @@ enum class IgnoreBucketState { kYes, kNo };
 enum class BucketPrepareAction { kPrepare, kUnprepare };
 
 /**
- * Mode enum to control whether getReopeningCandidate() will allow query-based
- * reopening of buckets when attempting to accommodate a new measurement.
+ * Mode enum to let us know what the isBucketStateEligibleForInsertsAndCleanup returns.
  */
-enum class AllowQueryBasedReopening { kAllow, kDisallow };
+enum class BucketStateForInsertAndCleanup { kNoState, kInsertionConflict, kEligibleForInsert };
 
 /**
  * Maps bucket identifier to the stripe that is responsible for it.
  */
 StripeNumber getStripeNumber(const BucketCatalog& catalog, const BucketKey& key);
 StripeNumber getStripeNumber(const BucketCatalog& catalog, const BucketId& bucketId);
-
-/**
- * Extracts the information from the input 'doc' that is used to map the document to a bucket.
- */
-StatusWith<std::pair<BucketKey, Date_t>> extractBucketingParameters(
-    tracking::Context&,
-    const UUID& collectionUUID,
-    const StringDataComparator* comparator,
-    const TimeseriesOptions& options,
-    const BSONObj& doc);
-
 
 /**
  * Retrieve a bucket for read-only use.
@@ -136,89 +119,91 @@ Bucket* useBucketAndChangePreparedState(BucketStateRegistry& registry,
                                         BucketPrepareAction prepare);
 
 /**
- * Retrieve the open bucket for write use if one exists. If none exists and 'mode' is set to kYes,
- * then we will create a new bucket.
+ * Retrieve all open buckets from 'stripe' given a bucket key.
  */
-Bucket* useBucket(BucketCatalog& catalog,
-                  Stripe& stripe,
-                  WithLock stripeLock,
-                  InsertContext& info,
-                  AllowBucketCreation mode,
-                  const Date_t& time,
-                  const StringDataComparator* comparator);
+std::vector<Bucket*> findOpenBuckets(Stripe& stripe,
+                                     WithLock stripeLock,
+                                     const BucketKey& bucketKey);
 
 /**
- * Retrieve a previously closed bucket for write use if one exists in the catalog. Considers buckets
- * that are pending closure or archival but which are still eligible to receive new measurements.
+ * Returns kEligibleForInsert if a given bucket's state is eligible for new inserts. If the bucket
+ * has no state, returns kNoState. Returns kInsertionConflict and cleans up the bucket from the
+ * catalog if we have an insertion conflict.
  */
-Bucket* useAlternateBucket(BucketCatalog& catalog,
-                           Stripe& stripe,
-                           WithLock stripeLock,
-                           InsertContext& info,
-                           const Date_t& time);
+BucketStateForInsertAndCleanup isBucketStateEligibleForInsertsAndCleanup(BucketCatalog& catalog,
+                                                                         Stripe& stripe,
+                                                                         WithLock stripeLock,
+                                                                         Bucket* bucket);
 
 /**
- * Given a bucket to reopen, performs validation and constructs the in-memory representation of the
- * bucket. If specified, 'expectedKey' is matched against the key extracted from the document to
- * validate that the bucket is expected (i.e. to help resolve hash collisions for archived buckets).
- * Does *not* hand ownership of the bucket to the catalog.
+ * Rollover 'bucket' according to 'reason' and will update rollover stats if the bucket does not
+ * contain uncommitted measurements. Mark the bucket's 'rolloverReason' otherwise.
+ */
+void rollover(BucketCatalog& catalog,
+              Stripe& stripe,
+              WithLock stripeLock,
+              Bucket& bucket,
+              RolloverReason reason);
+
+/**
+ * Perform archived-based reopening and returns the fetched bucket document.
+ * Increments statistics accordingly.
+ */
+BSONObj reopenFetchedBucket(OperationContext* opCtx,
+                            const Collection* bucketsColl,
+                            const OID& bucketId,
+                            ExecutionStatsController& stats);
+
+/**
+ * Perform query-based reopening and returns the fetched bucket document if the supporting index
+ * exists.
+ * Increments statistics accordingly.
+ */
+BSONObj reopenQueriedBucket(OperationContext* opCtx,
+                            const Collection* bucketsColl,
+                            const TimeseriesOptions& options,
+                            const std::vector<BSONObj>& pipeline,
+                            ExecutionStatsController& stats);
+
+using CompressAndWriteBucketFunc =
+    std::function<void(OperationContext*, const BucketId&, const NamespaceString&, StringData)>;
+
+/**
+ * Compress and write the bucket document to storage with 'compressAndWriteBucketFunc'. Return the
+ * error status and freeze the bucket if the compression fails.
+ */
+Status compressAndWriteBucket(OperationContext* opCtx,
+                              BucketCatalog& catalog,
+                              const Collection* bucketsColl,
+                              const BucketId& uncompressedBucketId,
+                              StringData timeField,
+                              const CompressAndWriteBucketFunc& compressAndWriteBucketFunc);
+
+/**
+ * Given a compressed bucket to reopen, performs validation and constructs the in-memory
+ * representation of the bucket. Does *not* hand ownership of the bucket to the catalog.
  */
 StatusWith<tracking::unique_ptr<Bucket>> rehydrateBucket(BucketCatalog& catalog,
-                                                         ExecutionStatsController& stats,
-                                                         const UUID& collectionUUID,
-                                                         const StringDataComparator* comparator,
+                                                         const BSONObj& bucketDoc,
+                                                         const BucketKey& bucketKey,
                                                          const TimeseriesOptions& options,
-                                                         const BucketToReopen& bucketToReopen,
                                                          uint64_t catalogEra,
-                                                         const BucketKey* expectedKey);
+                                                         const StringDataComparator* comparator,
+                                                         const BucketDocumentValidator& validator,
+                                                         ExecutionStatsController& stats);
 
 /**
  * Given a rehydrated 'bucket', passes ownership of that bucket to the catalog, marking the bucket
  * as open.
  */
-StatusWith<std::reference_wrapper<Bucket>> reopenBucket(BucketCatalog& catalog,
-                                                        Stripe& stripe,
-                                                        WithLock stripeLock,
-                                                        ExecutionStatsController& stats,
-                                                        const BucketKey& key,
-                                                        tracking::unique_ptr<Bucket>&& bucket,
-                                                        std::uint64_t targetEra,
-                                                        ClosedBuckets& closedBuckets);
-
-/**
- * Check to see if 'insert' can use existing bucket rather than reopening a candidate bucket. If
- * true, chances are the caller raced with another thread to reopen the same bucket, but if false,
- * there might be another bucket that had been cleared, or that has the same _id in a different
- * namespace.
- */
-StatusWith<std::reference_wrapper<Bucket>> reuseExistingBucket(BucketCatalog& catalog,
-                                                               Stripe& stripe,
-                                                               WithLock stripeLock,
-                                                               ExecutionStatsController& stats,
-                                                               const BucketKey& key,
-                                                               Bucket& existingBucket,
-                                                               std::uint64_t targetEra);
-
-/**
- * Given an already-selected 'bucket', inserts 'doc' to the bucket if possible. If not, and 'mode'
- * is set to 'kYes', we will create a new bucket and insert into that bucket. If `existingBucket`
- * was selected via `useAlternateBucket`, then the previous bucket returned by `useBucket` should be
- * passed in as `excludedBucket`.
- */
-std::variant<std::shared_ptr<WriteBatch>, RolloverReason> insertIntoBucket(
+StatusWith<std::reference_wrapper<Bucket>> loadBucketIntoCatalog(
     BucketCatalog& catalog,
     Stripe& stripe,
     WithLock stripeLock,
-    const BSONObj& doc,
-    OperationId,
-    AllowBucketCreation mode,
-    InsertContext& insertContext,
-    Bucket& existingBucket,
-    const Date_t& time,
-    uint64_t storageCacheSizeBytes,
-    const StringDataComparator* comparator,
-    Bucket* excludedBucket = nullptr,
-    boost::optional<RolloverAction> excludedAction = boost::none);
+    ExecutionStatsController& stats,
+    const BucketKey& key,
+    tracking::unique_ptr<Bucket>&& bucket,
+    std::uint64_t targetEra);
 
 /**
  * Wait for other batches to finish so we can prepare 'batch'
@@ -228,14 +213,22 @@ void waitToCommitBatch(BucketStateRegistry& registry,
                        const std::shared_ptr<WriteBatch>& batch);
 
 /**
- * Removes the given bucket from the bucket catalog's internal data structures.
+ * Removes the given bucket from the bucket catalog's internal data structures,
+ * including statistics.
  */
 void removeBucket(BucketCatalog& catalog,
                   Stripe& stripe,
                   WithLock stripeLock,
                   Bucket& bucket,
-                  ExecutionStatsController& stats,
-                  RemovalMode mode);
+                  ExecutionStatsController& stats);
+
+/**
+ * Removes the given bucket from the bucket catalog's internal data structures.
+ */
+void removeBucketWithoutStats(BucketCatalog& catalog,
+                              Stripe& stripe,
+                              WithLock stripeLock,
+                              Bucket& bucket);
 
 /**
  * Archives the given bucket, minimizing the memory footprint but retaining the necessary
@@ -245,37 +238,57 @@ void archiveBucket(BucketCatalog& catalog,
                    Stripe& stripe,
                    WithLock stripeLock,
                    Bucket& bucket,
-                   ExecutionStatsController& stats,
-                   ClosedBuckets& closedBuckets);
+                   ExecutionStatsController& stats);
 
 /**
- * Identifies a previously archived bucket that may be able to accommodate the measurement
- * represented by 'info', if one exists.
+ * Identifies a previously archived bucket that may be able to accommodate a measurement with
+ * 'time', if one exists.
  */
-boost::optional<OID> findArchivedCandidate(
-    BucketCatalog& catalog, Stripe& stripe, WithLock stripeLock, InsertContext& info, Date_t time);
+boost::optional<OID> findArchivedCandidate(BucketCatalog& catalog,
+                                           Stripe& stripe,
+                                           WithLock stripeLock,
+                                           const BucketKey& bucketKey,
+                                           const TimeseriesOptions& options,
+                                           const Date_t& time);
 
 /**
  * Calculates the bucket max size constrained by the cache size and the cardinality of active
  * buckets. Returns a pair of the effective value that respects the absolute bucket max and min
  * sizes and the raw value.
  */
+MONGO_MOD_PARENT_PRIVATE
 std::pair<int32_t, int32_t> getCacheDerivedBucketMaxSize(uint64_t storageCacheSizeBytes,
-                                                         uint32_t workloadCardinality);
+                                                         int64_t workloadCardinality);
 
 /**
- * Identifies a previously archived bucket that may be able to accommodate the measurement
- * represented by 'info', if one exists. Otherwise returns a pipeline to use for query-based
- * reopening if allowed.
+ * Returns an archived bucket eligible for new insert with 'time'.
  */
-InsertResult getReopeningContext(BucketCatalog& catalog,
-                                 Stripe& stripe,
-                                 WithLock stripeLock,
-                                 InsertContext& info,
-                                 uint64_t catalogEra,
-                                 AllowQueryBasedReopening allowQueryBasedReopening,
-                                 const Date_t& time,
-                                 uint64_t storageCacheSizeBytes);
+boost::optional<OID> getArchiveReopeningCandidate(BucketCatalog& catalog,
+                                                  Stripe& stripe,
+                                                  WithLock stripeLock,
+                                                  const BucketKey& bucketKey,
+                                                  const TimeseriesOptions& options,
+                                                  const Date_t& time);
+
+/**
+ * Returns an aggregation pipeline to reopen a bucket with 'time' using 'bucketKey' and 'options'.
+ */
+std::vector<BSONObj> getQueryReopeningCandidate(BucketCatalog& catalog,
+                                                Stripe& stripe,
+                                                WithLock stripeLock,
+                                                const BucketKey& bucketKey,
+                                                const TimeseriesOptions& options,
+                                                uint64_t storageCacheSizeBytes,
+                                                const Date_t& time);
+
+/**
+ * Returns a prepared write batch matching the specified 'key' if one exists, by searching the set
+ * of open buckets associated with 'key'.
+ */
+std::shared_ptr<WriteBatch> findPreparedBatch(const Stripe& stripe,
+                                              WithLock stripeLock,
+                                              const BucketKey& key,
+                                              const boost::optional<OID>& oid);
 
 /**
  * Aborts 'batch', and if the corresponding bucket still exists, proceeds to abort any other
@@ -289,8 +302,7 @@ void abort(BucketCatalog& catalog,
 
 /**
  * Aborts any unprepared batches for the given bucket, then removes the bucket if there is no
- * prepared batch. If 'batch' is non-null, it is assumed that the caller has commit rights for that
- * batch.
+ * prepared batch.
  */
 void abort(BucketCatalog& catalog,
            Stripe& stripe,
@@ -318,8 +330,7 @@ void expireIdleBuckets(BucketCatalog& catalog,
                        Stripe& stripe,
                        WithLock stripeLock,
                        const UUID& collectionUUID,
-                       ExecutionStatsController& collectioStats,
-                       ClosedBuckets& closedBuckets);
+                       ExecutionStatsController& collectionStats);
 
 /**
  * Generates an OID for the bucket _id field, setting the timestamp portion to a value determined by
@@ -335,47 +346,36 @@ void resetBucketOIDCounter();
 /**
  * Allocates a new bucket and adds it to the catalog.
  */
+MONGO_MOD_PARENT_PRIVATE
 Bucket& allocateBucket(BucketCatalog& catalog,
                        Stripe& stripe,
                        WithLock stripeLock,
-                       InsertContext& info,
+                       const BucketKey& key,
+                       const TimeseriesOptions& timeseriesOptions,
                        const Date_t& time,
-                       const StringDataComparator* comparator);
+                       const StringDataComparator* comparator,
+                       ExecutionStatsController& stats);
 
 /**
- * Close the existing, full bucket and open a new one for the same metadata.
- *
- * Writes information about the closed bucket to the 'info' parameter. Optionally, if `bucket` was
- * selected via `useAlternateBucket`, pass the current open bucket as `additionalBucket` to mark for
- * archival and preserve the invariant of only one open bucket per key.
+ * Determines if and why 'bucket' needs to be rolled over to accommodate 'doc'.
+ * Will also update the bucket catalog stats incNumBucketsKeptOpenDueToLargeMeasurements as
+ * appropriate.
  */
-Bucket& rollover(BucketCatalog& catalog,
-                 Stripe& stripe,
-                 WithLock stripeLock,
-                 Bucket& bucket,
-                 InsertContext& info,
-                 RolloverAction action,
-                 const Date_t& time,
-                 const StringDataComparator* comparator,
-                 Bucket* additionalBucket,
-                 boost::optional<RolloverAction> additionalAction);
+MONGO_MOD_PARENT_PRIVATE
+RolloverReason determineRolloverReason(const BSONObj& doc,
+                                       const TimeseriesOptions& timeseriesOptions,
+                                       int64_t numberOfActiveBuckets,
+                                       const Sizes& sizesToBeAdded,
+                                       const Date_t& time,
+                                       uint64_t storageCacheSizeBytes,
+                                       const StringDataComparator* comparator,
+                                       Bucket& bucket,
+                                       ExecutionStatsController& stats);
 
 /**
- * Determines if 'bucket' needs to be rolled over to accommodate 'doc'. If so, determines whether
- * to archive or close 'bucket'.
+ * Updates the stats based on the RolloverReason.
  */
-std::pair<RolloverAction, RolloverReason> determineRolloverAction(
-    TrackingContexts&,
-    const BSONObj& doc,
-    InsertContext& info,
-    Bucket& bucket,
-    uint32_t numberOfActiveBuckets,
-    Bucket::NewFieldNames& newFieldNamesToBeInserted,
-    Sizes& sizesToBeAdded,
-    AllowBucketCreation mode,
-    const Date_t& time,
-    uint64_t storageCacheSizeBytes,
-    const StringDataComparator* comparator);
+void updateRolloverStats(ExecutionStatsController& stats, RolloverReason reason);
 
 /**
  * Retrieves or initializes the execution stats for the given namespace, for writing.
@@ -403,20 +403,6 @@ std::vector<tracking::shared_ptr<ExecutionStats>> releaseExecutionStatsFromBucke
     BucketCatalog& catalog, std::span<const UUID> collectionUUIDs);
 
 /**
- * Retrieves the execution stats from the side bucket catalog.
- * Assumes the side bucket catalog has the stats of one collection.
- */
-std::pair<UUID, tracking::shared_ptr<ExecutionStats>> getSideBucketCatalogCollectionStats(
-    BucketCatalog& sideBucketCatalog);
-
-/**
- * Merges the execution stats of a collection into the bucket catalog.
- */
-void mergeExecutionStatsToBucketCatalog(BucketCatalog& catalog,
-                                        tracking::shared_ptr<ExecutionStats> collStats,
-                                        const UUID& collectionUUID);
-
-/**
  * Generates a status with code TimeseriesBucketCleared and an appropriate error message.
  */
 Status getTimeseriesBucketClearedError(const OID& oid);
@@ -428,20 +414,68 @@ void closeOpenBucket(BucketCatalog& catalog,
                      Stripe& stripe,
                      WithLock stripeLock,
                      Bucket& bucket,
-                     ExecutionStatsController& stats,
-                     ClosedBuckets& closedBuckets);
-/**
- * Close an open bucket, setting the state appropriately and removing it from the catalog.
- */
-void closeOpenBucket(BucketCatalog& catalog,
-                     Stripe& stripe,
-                     WithLock stripeLock,
-                     Bucket& bucket,
-                     ExecutionStatsController& stats,
-                     boost::optional<ClosedBucket>& closedBucket);
+                     ExecutionStatsController& stats);
+
 /**
  * Close an archived bucket, setting the state appropriately and removing it from the catalog.
  */
-void closeArchivedBucket(BucketCatalog& catalog, const BucketId& bucketId);
+void closeArchivedBucket(BucketCatalog& catalog,
+                         const BucketId& bucketId,
+                         ExecutionStatsController& stats);
 
+/**
+ * Inserts measurements into the provided eligible bucket. On success of all measurements being
+ * inserted into the provided bucket, returns true. Otherwise, returns false.
+ * Also increments `currentPosition` to one past the index of the last measurement inserted.
+ */
+MONGO_MOD_PARENT_PRIVATE
+StageInsertBatchResult stageInsertBatchIntoEligibleBucket(BucketCatalog& catalog,
+                                                          OperationId opId,
+                                                          const StringDataComparator* comparator,
+                                                          BatchedInsertContext& batch,
+                                                          Stripe& stripe,
+                                                          WithLock stripeLock,
+                                                          uint64_t storageCacheSizeBytes,
+                                                          Bucket& eligibleBucket,
+                                                          size_t& currentPosition,
+                                                          std::shared_ptr<WriteBatch>& writeBatch);
+
+/**
+ * Given an already-selected 'bucket', inserts the measurement in 'batchedInsertTuple' to the bucket
+ * if possible.
+ * Returns true if successfully inserted.
+ * Returns false if 'bucket' needs to be rolled over. Marks its 'rolloverReason' accordingly.
+ */
+bool tryToInsertIntoBucketWithoutRollover(BucketCatalog& catalog,
+                                          Stripe& stripe,
+                                          WithLock stripeLock,
+                                          const BatchedInsertTuple& batchedInsertTuple,
+                                          OperationId opId,
+                                          const TimeseriesOptions& timeseriesOptions,
+                                          const StripeNumber& stripeNumber,
+                                          uint64_t storageCacheSizeBytes,
+                                          const StringDataComparator* comparator,
+                                          Bucket& bucket,
+                                          ExecutionStatsController& stats,
+                                          std::shared_ptr<WriteBatch>& writeBatch);
+
+/**
+ * Given a bucket 'bucket', a measurement 'doc', and the 'writeBatch', updates the 'writeBatch'
+ * corresponding to the inputted bucket as well as the bucket itself to reflect the addition of the
+ * measurement. This includes updating the batch/bucket estimated sizes and the bucket's schema.
+ * We also store the index of the measurement in the original user batch, for retryability and
+ * error-handling.
+ */
+void addMeasurementToBatchAndBucket(BucketCatalog& catalog,
+                                    const BSONObj& measurement,
+                                    const UserBatchIndex& index,
+                                    OperationId opId,
+                                    const TimeseriesOptions& timeseriesOptions,
+                                    const StripeNumber& stripeNumber,
+                                    const StringDataComparator* comparator,
+                                    const Sizes& sizesToBeAdded,
+                                    bool isNewlyOpenedBucket,
+                                    const Bucket::NewFieldNames& newFieldNamesToBeInserted,
+                                    Bucket& bucket,
+                                    std::shared_ptr<WriteBatch>& writeBatch);
 }  // namespace mongo::timeseries::bucket_catalog::internal

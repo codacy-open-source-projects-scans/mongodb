@@ -27,19 +27,19 @@
  *    it in the license file.
  */
 
-#include <string>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/auth/oauth_discovery_factory.h"
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/auth/oauth_discovery_factory.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/http_client_mock.h"
+
+#include <string>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 namespace {
@@ -194,8 +194,8 @@ TEST_F(OAuthDiscoveryFactoryFixture, IssuerAndJWKSUriMustBeSecure) {
             // All other endpoints are permitted to not be https since the server will not directly
             // use them.
             OAuthAuthorizationServerMetadata precomputedMetadata =
-                OAuthAuthorizationServerMetadata::parse(IDLParserContext("metadata"),
-                                                        splicedMetadata);
+                OAuthAuthorizationServerMetadata::parse(splicedMetadata,
+                                                        IDLParserContext("metadata"));
             ASSERT_EQ(precomputedMetadata, factory.acquire("https://idp.example"));
         }
     }
@@ -214,7 +214,7 @@ TEST_F(OAuthDiscoveryFactoryFixture, EndpointMayBeInsecureLocalhostUnderTest) {
             return builder.obj();
         }();
         OAuthAuthorizationServerMetadata precomputedMetadata =
-            OAuthAuthorizationServerMetadata::parse(IDLParserContext("metadata"), splicedMetadata);
+            OAuthAuthorizationServerMetadata::parse(splicedMetadata, IDLParserContext("metadata"));
 
         std::unique_ptr<MockHttpClient> client = std::make_unique<MockHttpClient>();
         client->expect(

@@ -29,7 +29,8 @@
 
 #include "mongo/db/query/query_stats/key.h"
 
-#include "mongo/db/query/query_stats/query_stats_helpers.h"
+#include "mongo/client/read_preference.h"
+#include "mongo/db/query/query_shape/shape_helpers.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 
 namespace mongo::query_stats {
@@ -208,8 +209,8 @@ void UniversalKeyComponents::appendTo(BSONObjBuilder& bob, const SerializationOp
 }
 Key::Key(OperationContext* opCtx,
          std::unique_ptr<query_shape::Shape> queryShape,
-         boost::optional<BSONObj> hint,
-         boost::optional<repl::ReadConcernArgs> readConcern,
+         const boost::optional<BSONObj>& hint,
+         const boost::optional<repl::ReadConcernArgs>& readConcern,
          bool hasMaxTimeMS,
          query_shape::CollectionType collectionType)
     : _universalComponents(

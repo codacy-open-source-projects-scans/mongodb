@@ -28,8 +28,52 @@
  */
 
 
+#include "mongo/db/repl/transaction_oplog_application.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/client.h"
+#include "mongo/db/commands/txn_cmds_gen.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/index_builds/repl_index_build_state.h"
+#include "mongo/db/local_catalog/document_validation.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/op_observer/op_observer.h"
+#include "mongo/db/query/find_command.h"
+#include "mongo/db/repl/apply_ops_command_info.h"
+#include "mongo/db/repl/oplog_entry_gen.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/timestamp_block.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/session/internal_session_pool.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/session/logical_session_id_helpers.h"
+#include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/session/session_txn_record_gen.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
+#include "mongo/db/storage/exceptions.h"
+#include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/transaction/transaction_history_iterator.h"
+#include "mongo/db/transaction/transaction_participant.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/logv2/log.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/scopeguard.h"
+
 #include <algorithm>
-#include <boost/optional.hpp>
 #include <cstdint>
 #include <iterator>
 #include <memory>
@@ -39,53 +83,8 @@
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
+#include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/document_validation.h"
-#include "mongo/db/client.h"
-#include "mongo/db/commands/txn_cmds_gen.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/dbdirectclient.h"
-#include "mongo/db/index_builds/index_builds_coordinator.h"
-#include "mongo/db/index_builds/repl_index_build_state.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer/op_observer.h"
-#include "mongo/db/query/find_command.h"
-#include "mongo/db/repl/apply_ops_command_info.h"
-#include "mongo/db/repl/oplog_entry_gen.h"
-#include "mongo/db/repl/optime.h"
-#include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/repl/timestamp_block.h"
-#include "mongo/db/repl/transaction_oplog_application.h"
-#include "mongo/db/server_options.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/session/internal_session_pool.h"
-#include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/session/logical_session_id_helpers.h"
-#include "mongo/db/session/session_catalog_mongod.h"
-#include "mongo/db/session/session_txn_record_gen.h"
-#include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction/transaction_history_iterator.h"
-#include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/idl/idl_parser.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/platform/compiler.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/fail_point.h"
-#include "mongo/util/scopeguard.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -182,6 +181,7 @@ Status _applyOperationsForTransaction(OperationContext* opCtx,
 
     const bool allowCollectionCreatinInPreparedTransactions =
         feature_flags::gCreateCollectionInPreparedTransactions.isEnabled(
+            VersionContext::getDecoration(opCtx),
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
     // Apply each the operations via repl::applyOperation.
     for (const auto& op : txnOps) {
@@ -196,13 +196,21 @@ Status _applyOperationsForTransaction(OperationContext* opCtx,
                 invariant(!op.isCommand());
             }
 
-            auto coll = acquireCollection(
-                opCtx,
-                CollectionAcquisitionRequest(op.getNss(),
-                                             AcquisitionPrerequisites::kPretendUnsharded,
-                                             repl::ReadConcernArgs::get(opCtx),
-                                             AcquisitionPrerequisites::kWrite),
-                MODE_IX);
+            // VersionContext fixes a FCV snapshot over the opCtx, making FCV-gated feature
+            // flags checks in secondaries behave as they did on the primary, thus ensuring
+            // correct application even if the FCV changed due to a concurrent setFCV.
+            boost::optional<VersionContext::ScopedSetDecoration> scopedVersionContext;
+            if (op.getVersionContext()) {
+                scopedVersionContext.emplace(opCtx, *op.getVersionContext());
+            }
+
+            auto coll =
+                acquireCollection(opCtx,
+                                  CollectionAcquisitionRequest(op.getNss(),
+                                                               PlacementConcern::kPretendUnsharded,
+                                                               repl::ReadConcernArgs::get(opCtx),
+                                                               AcquisitionPrerequisites::kWrite),
+                                  MODE_IX);
             const bool isDataConsistent = true;
             auto status = [&] {
                 if (op.isCommand()) {
@@ -299,7 +307,10 @@ Status _applyTransactionFromOplogChain(OperationContext* opCtx,
     Status status = Status::OK();
 
     repl::writeConflictRetryWithLimit(
-        opCtx, "replaying prepared transaction", NamespaceString(dbName), [&] {
+        opCtx,
+        "replaying prepared transaction",
+        NamespaceString(dbName),
+        [&] {
             WriteUnitOfWork wunit(opCtx);
 
             // We might replay a prepared transaction behind oldest timestamp.
@@ -307,7 +318,11 @@ Status _applyTransactionFromOplogChain(OperationContext* opCtx,
             invariant(!shard_role_details::getRecoveryUnit(opCtx)->isActive());
             RecoveryUnit::OpenSnapshotOptions openSnapshotOptions{.roundUpPreparedTimestamps =
                                                                       true};
-            Lock::GlobalLock globalLock(opCtx, MODE_IX);
+            Lock::GlobalLock globalLock(
+                opCtx,
+                MODE_IX,
+                Lock::GlobalLockOptions{.explicitIntent =
+                                            rss::consensus::IntentRegistry::Intent::LocalWrite});
             allocateSnapshotWithConsistentCatalog(opCtx, openSnapshotOptions);
 
             status = _applyOperationsForTransaction(opCtx, ops, mode);
@@ -323,7 +338,8 @@ Status _applyTransactionFromOplogChain(OperationContext* opCtx,
                 shard_role_details::getRecoveryUnit(opCtx)->setDurableTimestamp(durableTimestamp);
                 wunit.commit();
             }
-        });
+        },
+        mode == repl::OplogApplication::Mode::kSecondary);
 
     return status;
 }
@@ -384,7 +400,7 @@ Status applyCommitTransaction(OperationContext* opCtx,
                               const ApplierOperation& op,
                               repl::OplogApplication::Mode mode) {
     IDLParserContext ctx("commitTransaction");
-    auto commitCommand = CommitTransactionOplogObject::parse(ctx, op->getObject());
+    auto commitCommand = CommitTransactionOplogObject::parse(op->getObject(), ctx);
     auto commitTimestamp = *commitCommand.getCommitTimestamp();
 
     switch (mode) {
@@ -625,7 +641,10 @@ Status _applyPrepareTransaction(OperationContext* opCtx,
     }
 
     return repl::writeConflictRetryWithLimit(
-        opCtx, "applying prepare transaction", prepareOp.getNss(), [&] {
+        opCtx,
+        "applying prepare transaction",
+        prepareOp.getNss(),
+        [&] {
             // The write on transaction table may be applied concurrently, so refreshing
             // state from disk may read that write, causing starting a new transaction
             // on an existing txnNumber. Thus, we start a new transaction without
@@ -711,7 +730,8 @@ Status _applyPrepareTransaction(OperationContext* opCtx,
 
             txnParticipant.stashTransactionResources(opCtx);
             return Status::OK();
-        });
+        },
+        mode == repl::OplogApplication::Mode::kSecondary);
 }
 
 /**
@@ -816,8 +836,7 @@ void reconstructPreparedTransactions(OperationContext* opCtx, repl::OplogApplica
 
     DBDirectClient client(opCtx);
     FindCommandRequest findRequest{NamespaceString::kSessionTransactionsTableNamespace};
-    findRequest.setFilter(BSON("state"
-                               << "prepared"));
+    findRequest.setFilter(BSON("state" << "prepared"));
     const auto cursor = client.find(std::move(findRequest));
 
     // Iterate over each entry in the transactions table that has a prepared
@@ -825,7 +844,7 @@ void reconstructPreparedTransactions(OperationContext* opCtx, repl::OplogApplica
     while (cursor->more()) {
         const auto txnRecordObj = cursor->next();
         const auto txnRecord = SessionTxnRecord::parse(
-            IDLParserContext("recovering prepared transaction"), txnRecordObj);
+            txnRecordObj, IDLParserContext("recovering prepared transaction"));
 
         invariant(txnRecord.getState() == DurableTxnStateEnum::kPrepared);
 

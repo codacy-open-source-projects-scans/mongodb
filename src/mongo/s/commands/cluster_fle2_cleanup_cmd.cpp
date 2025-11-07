@@ -27,11 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <set>
-
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -46,19 +41,24 @@
 #include "mongo/db/commands/fle2_cleanup_gen.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/generic_argument_util.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/async_requests_sender.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+#include <set>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 namespace {
@@ -116,39 +116,40 @@ Cmd::Reply Cmd::Invocation::typedRun(OperationContext* opCtx) {
     }
 
     auto nss = request().getNamespace();
-    const auto dbInfo =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nss.dbName()));
-
     auto req = request();
     generic_argument_util::setMajorityWriteConcern(req, &opCtx->getWriteConcern());
 
-    // Rewrite command verb to _shardSvrCleanupStructuredEnccryptionData.
-    auto cmd = req.toBSON();
-    BSONObjBuilder reqBuilder;
-    for (const auto& elem : cmd) {
-        if (elem.fieldNameStringData() == Request::kCommandName) {
-            reqBuilder.appendAs(elem, "_shardsvrCleanupStructuredEncryptionData");
-        } else {
-            reqBuilder.append(elem);
-        }
-    }
+    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
+    return router.route(
+        opCtx,
+        Request::kCommandName,
+        [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
+            // Rewrite command verb to _shardSvrCleanupStructuredEnccryptionData.
+            auto cmd = req.toBSON();
+            BSONObjBuilder reqBuilder;
+            for (const auto& elem : cmd) {
+                if (elem.fieldNameStringData() == Request::kCommandName) {
+                    reqBuilder.appendAs(elem, "_shardsvrCleanupStructuredEncryptionData");
+                } else {
+                    reqBuilder.append(elem);
+                }
+            }
 
-    auto response =
-        uassertStatusOK(executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
-                            opCtx,
-                            nss.dbName(),
-                            dbInfo,
-                            CommandHelpers::filterCommandRequestForPassthrough(reqBuilder.obj()),
-                            ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                            Shard::RetryPolicy::kIdempotent)
-                            .swResponse);
+            auto response = uassertStatusOK(
+                executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
+                    opCtx,
+                    nss.dbName(),
+                    dbInfo,
+                    CommandHelpers::filterCommandRequestForPassthrough(reqBuilder.obj()),
+                    ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                    Shard::RetryPolicy::kIdempotent)
+                    .swResponse);
 
-    BSONObjBuilder result;
-    CommandHelpers::filterCommandReplyForPassthrough(response.data, &result);
-
-    auto reply = result.obj();
-    uassertStatusOK(getStatusFromCommandResult(reply));
-    return Reply::parse(IDLParserContext{Request::kCommandName}, reply.removeField("ok"_sd));
+            auto reply = CommandHelpers::filterCommandReplyForPassthrough(response.data);
+            uassertStatusOK(getStatusFromCommandResult(reply));
+            return Reply::parse(reply.removeField("ok"_sd),
+                                IDLParserContext{Request::kCommandName});
+        });
 }
 
 }  // namespace

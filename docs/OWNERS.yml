@@ -1,26 +1,38 @@
 version: 1.0.0
 filters:
-  - "bazel.md":
-    approvers:
-      - 10gen/devprod-build
-  - "build_system_reference.md":
-    approvers:
-      - 10gen/devprod-build
-  - "build_system.md":
-    approvers:
-      - 10gen/devprod-build
   - "building.md":
     approvers:
       - 10gen/devprod-build
-  - "poetry_execution.md":
+  - "change_streams.md":
+    approvers:
+      - 10gen/query-execution-change-streams
+  - "cpp_style.md":
+    approvers:
+      - 10gen/server-programmability
+  - "devcontainer-setup.md":
     approvers:
       - 10gen/devprod-correctness
+  - "devcontainer/**":
+    approvers:
+      - 10gen/devprod-correctness
+  - "exception_architecture.md":
+    approvers:
+      - 10gen/server-programmability
+  - "golden_data_test_framework.md":
+    approvers:
+      - 10gen/query-optimization
+  - "idl.md":
+    approvers:
+      - 10gen/server-programmability
   - "linting.md":
     approvers:
       - 10gen/devprod-build
   - "owners/**":
     approvers:
       - 10gen/devprod-correctness
-  - "golden_data_test_framework.md":
+  - "poetry_execution.md":
     approvers:
-      - 10gen/query-optimization-golden-test
+      - 10gen/devprod-correctness
+  - "server_parameters.md":
+    approvers:
+      - 10gen/server-programmability

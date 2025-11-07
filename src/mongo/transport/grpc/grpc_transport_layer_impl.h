@@ -29,21 +29,23 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <memory>
-
 #include "mongo/transport/client_transport_observer.h"
+#include "mongo/transport/grpc/client.h"
 #include "mongo/transport/grpc/grpc_transport_layer.h"
 #include "mongo/transport/grpc/reactor.h"
+#include "mongo/transport/grpc/server.h"
+#include "mongo/transport/grpc_connection_stats_gen.h"
 #include "mongo/transport/session_manager.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+
+#include <boost/optional.hpp>
 
 namespace mongo::transport::grpc {
 
-class Client;
-class Server;
-
-class GRPCTransportLayerImpl : public GRPCTransportLayer {
+class MONGO_MOD_NEEDS_REPLACEMENT GRPCTransportLayerImpl : public GRPCTransportLayer {
 public:
     // Note that passing `nullptr` for {sessionManager} will disallow ingress usage.
     GRPCTransportLayerImpl(ServiceContext* svcCtx,
@@ -56,7 +58,7 @@ public:
      * sessionManager->startSession().
      *
      * Note that this TransportLayer will throw during `setup()`
-     * if no tlsCertificateKeyFile is available.
+     * if no tlsCertificateKeyFile is available when ingress mode is set.
      */
     static std::unique_ptr<GRPCTransportLayerImpl> createWithConfig(
         ServiceContext*,
@@ -73,6 +75,8 @@ public:
 
     void stopAcceptingSessions() override;
 
+    std::shared_ptr<Client> createGRPCClient(BSONObj clientMetadata) override;
+
     StatusWith<std::shared_ptr<Session>> connectWithAuthToken(
         HostAndPort peer,
         ConnectSSLMode sslMode,
@@ -84,6 +88,25 @@ public:
         ConnectSSLMode sslMode,
         Milliseconds timeout,
         const boost::optional<TransientSSLParams>& transientSSLParams = boost::none) override;
+
+    Future<std::shared_ptr<Session>> asyncConnectWithAuthToken(
+        HostAndPort peer,
+        ConnectSSLMode sslMode,
+        const ReactorHandle& reactor,
+        Milliseconds timeout,
+        std::shared_ptr<ConnectionMetrics> connectionMetrics,
+        const CancellationToken& token = CancellationToken::uncancelable(),
+        boost::optional<std::string> authToken = boost::none) override;
+
+    Future<std::shared_ptr<Session>> asyncConnect(
+        HostAndPort peer,
+        ConnectSSLMode sslMode,
+        const ReactorHandle& reactor,
+        Milliseconds timeout,
+        std::shared_ptr<ConnectionMetrics> connectionMetrics,
+        std::shared_ptr<const SSLConnectionContext> transientSSLContext) override;
+
+    void appendStatsForServerStatus(BSONObjBuilder* bob) const override;
 
 #ifdef MONGO_CONFIG_SSL
     Status rotateCertificates(std::shared_ptr<SSLManagerInterface> manager,
@@ -125,9 +148,20 @@ private:
     mutable stdx::mutex _mutex;
     bool _isShutdown = false;
 
-    std::shared_ptr<Client> _client;
+    // This default client is used in synchronous networking (DBClientGRPCStream). Asynchronous
+    // networking uses the client returned by createGRPCClient.
+    std::shared_ptr<Client> _defaultClient;
     std::unique_ptr<Server> _server;
     ServiceContext* const _svcCtx;
+
+    // Callers that acquire a client through createGRPCClient should be responsible for all actions
+    // related to the client, but we still need access to all clients to fit into some of the
+    // existing TransportLayer abstractions (ie, rotateCertificates must operate on all clients).
+    struct ClientEntry {
+        std::weak_ptr<Client> client;
+        std::list<ClientEntry>::iterator iter;
+    };
+    std::list<ClientEntry> _clients;
 
     /**
      * The GRPCTransportLayer starts an egress reactor on an _ioThread that is provided to
@@ -137,6 +171,14 @@ private:
      */
     stdx::thread _ioThread;
     std::shared_ptr<GRPCReactor> _egressReactor;
+
+    GRPCClient::Options _clientOptions;
+
+    /**
+     * The filepath for the grpc unix domain socket. This value gets populated after a call to
+     * setup() only when _options.useUnixDomainSockets is true.
+     */
+    std::string _unixSockPath;
 
     // Invalidated after setup().
     std::vector<std::unique_ptr<Service>> _services;

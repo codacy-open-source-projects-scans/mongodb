@@ -29,26 +29,21 @@
 
 #include "mongo/executor/split_timer.h"
 
-#include <array>
-#include <fmt/format.h>
-#include <string>
-
 #include "mongo/base/string_data.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/assert_that.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/unittest/matcher.h"
-#include "mongo/unittest/matcher_core.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/tick_source.h"
 #include "mongo/util/tick_source_mock.h"
+
+#include <array>
+#include <string>
+
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
 
 namespace m = unittest::match;
-using namespace fmt::literals;
 
 /** Match that `x` converts to `true` and that `*x` matches `m`. */
 template <typename M>
@@ -57,7 +52,7 @@ public:
     explicit WhenDereferenced(M&& m) : _m{std::move(m)} {}
 
     std::string describe() const {
-        return "WhenDereferenced({})"_format(_m.describe());
+        return fmt::format("WhenDereferenced({})", _m.describe());
     }
 
     template <typename X>
@@ -78,7 +73,7 @@ public:
     explicit WhenBool(M&& m) : _m{std::move(m)} {}
 
     std::string describe() const {
-        return "WhenBool({})"_format(_m.describe());
+        return fmt::format("WhenBool({})", _m.describe());
     }
 
     template <typename X>

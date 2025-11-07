@@ -28,12 +28,6 @@
  */
 
 
-#include <memory>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -55,8 +49,6 @@
 #include "mongo/db/service_context.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
@@ -65,6 +57,12 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/time_support.h"
+
+#include <memory>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplicationElection
 
@@ -125,7 +123,7 @@ public:
 };
 
 void ReplicationCoordinatorImpl::cancelElection_forTest() {
-    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    stdx::lock_guard lk(_mutex);
     invariant(_electionState);
     _electionState->cancel(lk);
 }
@@ -255,7 +253,7 @@ void ReplicationCoordinatorImpl::ElectionState::start(WithLock lk, StartElection
 
 void ReplicationCoordinatorImpl::ElectionState::_processDryRunResult(
     long long originalTerm, StartElectionReasonEnum reason) {
-    stdx::lock_guard<stdx::mutex> lk(_repl->_mutex);
+    stdx::lock_guard lk(_repl->_mutex);
     LoseElectionDryRunGuardV1 lossGuard(_repl);
     invariant(_voteRequester != nullptr);
 
@@ -380,7 +378,7 @@ void ReplicationCoordinatorImpl::ElectionState::_writeLastVoteForMyElection(
         LOGV2(4825601, "Hang due to hangInWritingLastVoteForDryRun failpoint");
         hangInWritingLastVoteForDryRun.pauseWhileSet();
     }
-    stdx::lock_guard<stdx::mutex> lk(_repl->_mutex);
+    stdx::lock_guard lk(_repl->_mutex);
     LoseElectionDryRunGuardV1 lossGuard(_repl);
     if (status == ErrorCodes::CallbackCanceled) {
         LOGV2(6015301, "Callback for storing last vote got cancelled");
@@ -435,7 +433,7 @@ void ReplicationCoordinatorImpl::ElectionState::_requestVotesForRealElection(
 
 void ReplicationCoordinatorImpl::ElectionState::_onVoteRequestComplete(
     long long newTerm, StartElectionReasonEnum reason) {
-    stdx::lock_guard<stdx::mutex> lk(_repl->_mutex);
+    stdx::lock_guard lk(_repl->_mutex);
     LoseElectionGuardV1 lossGuard(_repl);
     invariant(_voteRequester != nullptr);
 

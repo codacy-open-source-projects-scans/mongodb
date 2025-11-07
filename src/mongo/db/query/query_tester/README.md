@@ -1,6 +1,8 @@
 # QueryTester
 
-**QueryTester** is a test harness designed to streamline E2E logic testing of MongoDB queries. It validates query results by executing them against a live MongoDB instance (i.e. `mongod`, `mongos`, or any system that implements the MongoDB wire protocol) and comparing the output to pre-defined expected results.
+## Overview
+
+**QueryTester** is a test harness designed to streamline E2E logic testing of MongoDB queries. It validates query results by executing them against a live MongoDB instance (e.g. `mongod`, `mongos`, or any system that implements the MongoDB wire protocol) and comparing the output to pre-defined expected results.
 
 QueryTester is ideal for small, reproducible test cases that verify query behavior with minimal setup. This tool follows a focused paradigm, exclusively supporting queries and DML operations with configurable settings. Support for passthroughs may be added in the future.
 
@@ -10,10 +12,10 @@ Each QueryTester use case expects three files to work together: a `.test`, a `.r
 
 ## Getting Started
 
-You can compile the tester using the following ninja command:
+You can compile the tester using the following command:
 
 ```sh
-ninja install-mongotest
+bazel build install-mongotest
 ```
 
 ## Running Tests
@@ -23,10 +25,10 @@ The tester expects a mongod/mongos to be running, and will execute tests against
 To run a single test for the first time, try using the following command from the root of the mongo repo:
 
 ```sh
-mongotest -t <QueryTesterDir>/sampleTests/testA.test --drop --load --mode compare
+mongotest -t <QueryTesterDir>/tests/manual_tests/example/testA.test --drop --load --mode compare
 ```
 
-This will run testA and verify the results are correct, assuming that `testA.results` exists.
+This will run `testA` and verify the results are correct, assuming that `testA.results` exists.
 
 To perform other operations, consult the table below.
 
@@ -44,15 +46,17 @@ To perform other operations, consult the table below.
 | --load                           | Builds indexes and inserts documents into the collections needed by the specified test files. If not specified assumes the collection state is correct                                                                                                                                                                                                                                                                                                                                                |
 | --minimal-index                  | Only create the minimal set of indices necessary, currently just geospatial and text indices.                                                                                                                                                                                                                                                                                                                                                                                                         |
 | --mode [run, compare, normalize] | Specify whether to just run the tests, to also compare results (default), or only check that results are normalized. Just running is useful to generate result files. In 'run' mode tests will not fail unless a command fails.                                                                                                                                                                                                                                                                       |
+| --opt-off                        | Disables optimizations (always) and pushing down to the find layer (when possible). Mostly used for generating an initial results file for differential, multiversion testing. This flag requires `--enableTestCommands=true` to be passed to the MongoD.                                                                                                                                                                                                                                             |
 | --out [result, oneline]          | Only available in non-compare modes. **Result:** Generate a new '.results' file from the file being run, with each result in a test's result set appearing on a separate line. Will overwrite existing `.results` files. **Oneline:** Generate a new '.results' file from the file being run, with a test's entire result set appearing on one line. Will overwrite existing `.results` files. All of these apply to every file being run, and will add test numbers to tests if not already present. |
 | --populateAndExit                | Drops current data and loads documents and indexes per specification in the `*.test` file. No tests are run. `--drop` and `--load` are implicitly applied.                                                                                                                                                                                                                                                                                                                                            |
 | --diff [plain, word]             | Specify the type of diff to use when displaying result set differences. Defaults to word-based diff with color if not specified. It is recommended to use the default (`word`) if the terminal `query_tester` is being run in supports ANSI color codes for easier to read output. `plain` uses line based diff with no color.                                                                                                                                                                        |
+| --override [queryShapeHash]      | (Optional) Specify what override to use when running a test. When providing the `queryShapeHash` override, it uses the existing corpus of tests but runs explain of the original command instead, extracting the queryShapeHash and asserting that they match the corresponding `file.queryShapeHash.results` file.                                                                                                                                                                                   |
 
 ## File types and formats
 
 ### .test
 
-See sampleTests/testA.test. The file format is as follows:
+See `tests/manual_tests/example/testA.test`. The file format is as follows:
 First line must be the testName (matching the filename without the extension).
 Second line is the database to run the test against.
 Third line is a list of collection files to load. All collections are expected to be in a `collections` directory somewhere along the path to the test file.
@@ -86,11 +90,12 @@ The template is as follows:
 | :normalizeNulls               | Null, undefined, and missing will be considered the same. All documents in each set must appear in the other.                                                                                                            |
 | :normalizeNonNull             | Combination of :sortFull and :normalizeNumerics. All documents in each set must appear in the other.                                                                                                                     |
 | :normalizeFull                | Combination of :sortFull, :normalizeNumerics, and :normalizeNulls. All documents in each set must appear in the other. This is the widest normalization setting.                                                         |
+| :queryShapeHash               | Runs the given query as an explain command, extracts the queryShapeHash and asserts that it is the same as the as expected.                                                                                              |
 | :explain                      | Not yet implemented. We will eventually support some form of the explain command.                                                                                                                                        |
 
 ### .results
 
-See `sampleTests/testA.results`.
+See `tests/manual_tests/example/testA.results`.
 These have the same format as .test files above, with the exception that each test must be followed by a line with the expected documents. These are allowed to be on multiple lines, and a result array is read as the line after the test until the next newline.
 
 The template is as follows:
@@ -109,9 +114,11 @@ The template is as follows:
 ... further tests and results
 ```
 
+Some files have a `.queryShapeHash.results` extension. These are the expected results for the queryShapeHash test type, and they only contain the queryShapeHash, as in the `tests/manual_tests/example/testQueryShapeHash.queryShapeHash.results` example.
+
 ### .coll
 
-See `sampleTests/basic.coll`.
+See `tests/manual_tests/example/basic.coll`.
 These files are split into two sections divided by an empty line.
 Above the empty line are index definitions, one per line. They can be of the form:
 
@@ -147,3 +154,7 @@ Comments in input `.test` and `.results` files will be persisted in the output a
 For files containing result set output, comments interleaved between result set lines will be
 **ignored** and absent from the output file (see `normalizedCommentsTest.pre` and
 `normalizedCommentsTest.results` for an example).
+
+---
+
+[Return to Cover Page](../README_QO.md)

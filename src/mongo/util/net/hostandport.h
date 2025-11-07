@@ -29,16 +29,17 @@
 
 #pragma once
 
-#include <fmt/format.h>
+#include "mongo/bson/util/builder.h"
+#include "mongo/db/tenant_id.h"
+#include "mongo/util/modules.h"
+
 #include <iosfwd>
 #include <string>
 
 #include <boost/optional.hpp>
+#include <fmt/format.h>
 
-#include "mongo/bson/util/builder.h"
-#include "mongo/db/tenant_id.h"
-
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 
 class Status;
 template <typename T>
@@ -191,7 +192,7 @@ void HostAndPort::_appendToPolymorphicFunc(F f) const {
     _appendToVisitor(visitor);
 }
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo
 
 namespace fmt {
 template <>
@@ -201,7 +202,7 @@ struct formatter<mongo::HostAndPort> {
         return ctx.begin();
     }
     template <typename FormatContext>
-    auto format(const mongo::HostAndPort& hp, FormatContext& ctx) {
+    auto format(const mongo::HostAndPort& hp, FormatContext& ctx) const {
         auto&& it = ctx.out();
         hp._appendToPolymorphicFunc([&](const auto& v) { it = fmt::format_to(it, "{}", v); });
         return it;

@@ -29,13 +29,14 @@
 
 #pragma once
 
-#include <cstdint>
-
 #include "mongo/base/static_assert.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <cstdint>
+
+namespace MONGO_MOD_PUBLIC mongo {
 class ServiceContext;
 class Client;
 class ClientLock;
@@ -62,13 +63,13 @@ public:
 
     OperationIdManager();
 
-    static OperationIdManager& get(ServiceContext*) noexcept;
+    static OperationIdManager& get(ServiceContext*);
 
     /**
      * Issues the next OperationId from the client's lease. May acquire a lock on client's
      * `ServiceContext` if the client has exhausted it's lease.
      */
-    OperationId issueForClient(Client*) noexcept;
+    OperationId issueForClient(Client*);
 
     /**
      * Finds the client that holds the lease containing the OperationId -- the id itself will not
@@ -99,4 +100,4 @@ private:
     size_t _leaseStartBitMask = ~(kDefaultLeaseSize - 1);
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

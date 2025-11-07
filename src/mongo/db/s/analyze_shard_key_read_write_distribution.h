@@ -29,12 +29,28 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/commands/query_cmd/bulk_write_gen.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/global_catalog/shard_key_pattern_query_util.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
+#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/write_ops/write_ops_gen.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/s/analyze_shard_key_cmd_gen.h"
+#include "mongo/s/analyze_shard_key_common_gen.h"
+#include "mongo/s/analyze_shard_key_documents_gen.h"
+#include "mongo/s/analyze_shard_key_server_parameters_gen.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
+
 #include <algorithm>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
 #include <cstdint>
 #include <functional>
 #include <iterator>
@@ -43,27 +59,11 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/commands/query_cmd/bulk_write_gen.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
-#include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/write_ops/write_ops_gen.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/platform/basic.h"
-#include "mongo/s/analyze_shard_key_cmd_gen.h"
-#include "mongo/s/analyze_shard_key_common_gen.h"
-#include "mongo/s/analyze_shard_key_documents_gen.h"
-#include "mongo/s/analyze_shard_key_server_parameters_gen.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/collection_routing_info_targeter.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/s/shard_key_pattern_query_util.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace analyze_shard_key {
@@ -145,7 +145,7 @@ protected:
     void _incrementMetricsForQuery(const QueryTargetingInfo& info);
 
     const ChunkManager& _getChunkManager() const {
-        return _targeter.getRoutingInfo().cm;
+        return _targeter.getRoutingInfo().getChunkManager();
     }
 
     const ShardKeyPattern& _getShardKeyPattern() const {

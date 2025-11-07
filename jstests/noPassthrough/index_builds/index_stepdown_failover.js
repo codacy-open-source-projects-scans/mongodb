@@ -2,11 +2,14 @@
  * Confirms that index builds on a stepped down primary are not aborted and will
  * wait for a commitIndexBuild from the new primary before committing.
  * @tags: [
+ *   # Though secondaries will wait, in progress primary driven index builds
+ *   # are aborted on step up by the new primary.
+ *   primary_driven_index_builds_incompatible_due_to_abort_on_step_up,
  *   requires_replication,
  * ]
  */
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const rst = new ReplSetTest({
     // We want at least two electable nodes.
@@ -16,8 +19,8 @@ const nodes = rst.startSet();
 rst.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
 const primary = rst.getPrimary();
-const testDB = primary.getDB('test');
-const coll = testDB.getCollection('test');
+const testDB = primary.getDB("test");
+const coll = testDB.getCollection("test");
 
 assert.commandWorked(coll.insert({a: 1}));
 
@@ -30,12 +33,11 @@ const secondary = rst.getSecondary();
 const secondaryDB = secondary.getDB(testDB.getName());
 const secondaryColl = secondaryDB.getCollection(coll.getName());
 IndexBuildTest.waitForIndexBuildToStart(secondaryDB);
-const indexMap = IndexBuildTest.assertIndexesSoon(
-    secondaryColl, 2, ["_id_"], ["a_1"], {includeBuildUUIDs: true});
-const indexBuildUUID = indexMap['a_1'].buildUUID;
+const indexMap = IndexBuildTest.assertIndexesSoon(secondaryColl, 2, ["_id_"], ["a_1"], {includeBuildUUIDs: true});
+const indexBuildUUID = indexMap["a_1"].buildUUID;
 
 // Index build should be present in the config.system.indexBuilds collection.
-assert(primary.getCollection('config.system.indexBuilds').findOne({_id: indexBuildUUID}));
+assert(primary.getCollection("config.system.indexBuilds").findOne({_id: indexBuildUUID}));
 
 const newPrimary = rst.getSecondary();
 const newPrimaryDB = secondaryDB;
@@ -46,7 +48,7 @@ const newPrimaryColl = secondaryColl;
 // the index build will continue in the background.
 assert.commandWorked(primary.adminCommand({replSetStepDown: 60, force: true}));
 const exitCode = createIdx({checkExitSuccess: false});
-assert.neq(0, exitCode, 'expected shell to exit abnormally due to index build being terminated');
+assert.neq(0, exitCode, "expected shell to exit abnormally due to index build being terminated");
 checkLog.containsJson(primary, 20444);
 
 // Unblock the index build on the old primary during the collection scanning phase.
@@ -61,13 +63,13 @@ rst.stepUp(newPrimary);
 // A new index should be present on the old primary after processing the commitIndexBuild oplog
 // entry from the new primary.
 IndexBuildTest.waitForIndexBuildToStop(testDB);
-IndexBuildTest.assertIndexes(coll, 2, ['_id_', 'a_1']);
+IndexBuildTest.assertIndexes(coll, 2, ["_id_", "a_1"]);
 
 // Check that index was created on the new primary.
 IndexBuildTest.waitForIndexBuildToStop(newPrimaryDB);
-IndexBuildTest.assertIndexes(newPrimaryColl, 2, ['_id_', 'a_1']);
+IndexBuildTest.assertIndexes(newPrimaryColl, 2, ["_id_", "a_1"]);
 
 // Index build should be removed from the config.system.indexBuilds collection.
-assert.isnull(newPrimary.getCollection('config.system.indexBuilds').findOne({_id: indexBuildUUID}));
+assert.isnull(newPrimary.getCollection("config.system.indexBuilds").findOne({_id: indexBuildUUID}));
 
 rst.stopSet();

@@ -28,31 +28,32 @@
  */
 
 
-#include <csignal>
-#include <exception>
-#include <fmt/format.h>
-#include <string>
+#include "mongo/util/signal_handlers_synchronous.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/atomic.h"
+#include "mongo/stdx/thread.h"
 #include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/fixed_string.h"
 #include "mongo/util/quick_exit.h"
-#include "mongo/util/signal_handlers_synchronous.h"
 #include "mongo/util/str.h"
+
+#include <csignal>
+#include <exception>
+#include <string>
+
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 
 namespace mongo {
 namespace {
-using namespace fmt::literals;
 
 // Tests of signals that should be ignored raise each signal twice, to ensure that the handler isn't
 // reset.
@@ -69,9 +70,11 @@ using namespace fmt::literals;
 
 #ifdef __linux__
 // The si_code field is always SI_TKILL when using raise
-#define DUMP_SIGINFO(SIGNUM)                                                                    \
-    DEATH_TEST(DumpSiginfoTest, SIGNUM##_, "Dumping siginfo (si_code={}): "_format(SI_TKILL)) { \
-        ASSERT_EQ(0, raise(SIGNUM));                                                            \
+#define DUMP_SIGINFO(SIGNUM)                                                               \
+    DEATH_TEST(DumpSiginfoTest,                                                            \
+               SIGNUM##_,                                                                  \
+               fmt::format("Dumping siginfo (si_code={}): ", fmt::underlying(SI_TKILL))) { \
+        ASSERT_EQ(0, raise(SIGNUM));                                                       \
     }
 #else
 #define DUMP_SIGINFO(SIGNUM)
@@ -268,7 +271,7 @@ DEATH_TEST_F(MallocFreeOStreamGuardTest, WithBlockedSignal, "[survived][sig<0>][
     auto h0 = handlerCount.load();
     blockSignal(sig<0>, false);
     while (handlerCount.load() == h0)
-        std::this_thread::yield();
+        stdx::this_thread::yield();
 }
 
 class BlockInsideSignalHandlerTest : public MallocFreeOStreamGuardTest {

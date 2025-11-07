@@ -16,34 +16,18 @@ SUITE_HIERARCHY = {
     # Concurrency suites
     "concurrency": {},
     "concurrency_compute_mode": {},
-    "concurrency_embedded_router_causal_consistency_and_balancer": {
-        "concurrency_embedded_router_causal_consistency": {}
-    },
-    "concurrency_embedded_router_clusterwide_ops_add_remove_shards": {},
-    "concurrency_embedded_router_local_read_write_multi_stmt_txn_with_balancer": {
-        "concurrency_embedded_router_local_read_write_multi_stmt_txn": {}
-    },
-    "concurrency_embedded_router_multi_stmt_txn_with_balancer": {
-        # concurrency_embedded_multi_stmt_txn is not considered a superset in terms
-        # of complexity of concurrency_embedded_router_replication because multi_stmt_txns
-        # are not a superset feature of regular operations.
-        "concurrency_embedded_router_multi_stmt_txn": {}
-    },
-    "concurrency_embedded_router_replication_with_balancer": {
-        "concurrency_embedded_router_replication": {},
-    },
     "concurrency_multitenancy_replication_with_atlas_proxy": {},
     "simulate_crash_concurrency_replication": {},
     "concurrency_sharded_replication_with_balancer_and_config_transitions_and_add_remove_shard": {
-        "concurrency_sharded_with_balancer_and_auto_bootstrap": {},
+        "concurrency_sharded_with_balancer_and_config_shard": {},
         "concurrency_sharded_replication_with_balancer": {},
     },
     "concurrency_sharded_replication_with_balancer_and_config_transitions": {
         # The auto_bootstrap suites maintain a static config shard and so the config_transitions
         # suite is a superset of it because it also transitions the config shard to a dedicated
         # replica set.
-        "concurrency_sharded_with_balancer_and_auto_bootstrap": {
-            "concurrency_sharded_with_auto_bootstrap": {}
+        "concurrency_sharded_with_balancer_and_config_shard": {
+            "concurrency_sharded_with_config_shard": {}
         },
         "concurrency_sharded_replication_with_balancer": {"concurrency_sharded_replication": {}},
     },
@@ -53,7 +37,7 @@ SUITE_HIERARCHY = {
     "concurrency_sharded_local_read_write_multi_stmt_txn_with_balancer": {
         "concurrency_sharded_local_read_write_multi_stmt_txn": {}
     },
-    "concurrency_sharded_multi_stmt_txn_with_balancer_and_config_transitions": {
+    "concurrency_sharded_multi_stmt_txn_with_balancer_and_config_transitions_and_add_remove_shard": {
         "concurrency_sharded_multi_stmt_txn_with_balancer": {
             "concurrency_sharded_multi_stmt_txn": {}
         }
@@ -61,7 +45,7 @@ SUITE_HIERARCHY = {
     "concurrency_sharded_multi_stmt_txn_stepdown_terminate_kill_primary": {
         "concurrency_sharded_multi_stmt_txn": {}
     },
-    "concurrency_sharded_stepdown_terminate_kill_primary_with_balancer_and_config_transitions": {
+    "concurrency_sharded_stepdown_terminate_kill_primary_with_balancer_and_config_transitions_and_add_remove_shard": {
         "concurrency_sharded_stepdown_terminate_kill_primary_with_balancer": {
             # The stepdown suite is not considered a superset of concurrency_sharded_replication
             # because the stepdown suite uses retryable writes whereas the vanilla suite does not.
@@ -76,10 +60,24 @@ SUITE_HIERARCHY = {
     "concurrency_replication_for_export_import": {},
     "concurrency_replication_multi_stmt_txn": {},
     "concurrency_replication_multi_stmt_txn_with_replica_set_endpoint": {},
-    "concurrency_replication_with_replica_set_endpoint": {},
     "concurrency_replication": {},
     "concurrency_sharded_initial_sync": {"concurrency_sharded_causal_consistency": {}},
     # JScore passthrough suites
+    "replica_sets_reconfig_kill_stepdown_terminate_jscore_passthrough": {
+        # The reconfig stepdown suite is not considered a superset of replica_sets_reconfig_jscore_passthrough suite because the stepdown suite uses retryable writes whereas the vanilla suite does not. Therefore the commands being sent to the server are fundamentally different.
+        "replica_sets_reconfig_jscore_stepdown_passthrough": {},
+        "replica_sets_reconfig_kill_primary_jscore_passthrough": {},
+    },
+    "replica_sets_multi_stmt_txn_kill_stepdown_terminate_jscore_passthrough": {
+        "replica_sets_multi_stmt_txn_terminate_primary_jscore_passthrough": {},
+        "replica_sets_multi_stmt_txn_stepdown_jscore_passthrough": {},
+        "replica_sets_multi_stmt_txn_kill_primary_jscore_passthrough": {},
+        "replica_sets_multi_stmt_txn_jscore_passthrough": {},
+    },
+    "replica_sets_initsync_logical_fcbis_jscore_passthrough": {
+        "replica_sets_fcbis_jscore_passthrough": {},
+        "replica_sets_initsync_jscore_passthrough": {},
+    },
 }
 
 

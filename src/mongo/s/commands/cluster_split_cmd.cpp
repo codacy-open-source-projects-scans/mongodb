@@ -27,13 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -48,33 +41,37 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/field_parser.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/chunk.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/ddl/shard_util.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/global_catalog/shard_key_pattern_query_util.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/global_catalog/type_chunk_range.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/topology/shard_registry.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog/type_chunk_range.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/s/shard_key_pattern_query_util.h"
-#include "mongo/s/shard_util.h"
-#include "mongo/s/shard_version.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -97,16 +94,16 @@ BSONObj selectMedianKey(OperationContext* opCtx,
     cmd.append("keyPattern", shardKeyPattern.toBSON());
     chunkRange.serialize(&cmd);
     cmd.appendBool("force", true);
-    cri.getShardVersion(shardId).serialize(ShardVersion::kShardVersionField, &cmd);
+    appendShardVersion(cmd, cri.getShardVersion(shardId));
 
     auto shard = uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, shardId));
 
-    auto cmdResponse = uassertStatusOK(
-        shard->runCommandWithFixedRetryAttempts(opCtx,
-                                                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                                                DatabaseName::kAdmin,
-                                                cmd.obj(),
-                                                Shard::RetryPolicy::kIdempotent));
+    auto cmdResponse =
+        uassertStatusOK(shard->runCommand(opCtx,
+                                          ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                          DatabaseName::kAdmin,
+                                          cmd.obj(),
+                                          Shard::RetryPolicy::kIdempotent));
 
     uassertStatusOK(cmdResponse.commandStatus);
 
@@ -226,7 +223,7 @@ public:
 
         boost::optional<Chunk> chunk;
 
-        const auto& cm = cri.cm;
+        const auto& cm = cri.getChunkManager();
 
         if (!find.isEmpty()) {
             // find

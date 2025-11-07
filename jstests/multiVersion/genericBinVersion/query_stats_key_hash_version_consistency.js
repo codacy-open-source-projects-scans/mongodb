@@ -1,19 +1,17 @@
 /**
  * Tests that query stats key hashes are consistent across versions.
- * TODO SERVER-93204 Add queryShapeHash to this test.
  */
 import "jstests/multiVersion/libs/multi_rs.js";
 
 import {
     getQueryStatsFindCmd,
     getQueryStatsKeyHashes,
-    getQueryStatsServerParameters
+    getQueryStatsServerParameters,
 } from "jstests/libs/query/query_stats_utils.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
 const rst = new ReplSetTest({
-    nodes:
-        {n1: {binVersion: "last-lts"}, n2: {binVersion: "last-lts"}, n3: {binVersion: "last-lts"}}
+    nodes: {n1: {binVersion: "last-lts"}, n2: {binVersion: "last-lts"}, n3: {binVersion: "last-lts"}},
 });
 
 // Turn on the collecting of query stats metrics.
@@ -41,7 +39,7 @@ assert.eq(preUpgradeEntries.length, 4, tojson(preUpgradeEntries));
 const preUpgradeKeyHashes = getQueryStatsKeyHashes(preUpgradeEntries);
 
 // Upgrade to the latest.
-rst.upgradeSet({binVersion: 'latest'});
+rst.upgradeSet({binVersion: "latest"});
 conn = rst.getPrimary();
 coll = conn.getDB("test")[collName];
 
@@ -51,9 +49,10 @@ runQueries();
 const postUpgradeEntries = getQueryStatsFindCmd(conn, {collName, transformIdentifiers: false});
 assert.eq(postUpgradeEntries.length, 4, tojson(postUpgradeEntries));
 const postUpgradeKeyHashes = getQueryStatsKeyHashes(postUpgradeEntries);
-assert.sameMembers(postUpgradeKeyHashes,
-                   preUpgradeKeyHashes,
-                   `preUpgradeEntries = ${tojson(preUpgradeEntries)}, postUpgradeEntries = ${
-                       tojson(postUpgradeEntries)}`);
+assert.sameMembers(
+    postUpgradeKeyHashes,
+    preUpgradeKeyHashes,
+    `preUpgradeEntries = ${tojson(preUpgradeEntries)}, postUpgradeEntries = ${tojson(postUpgradeEntries)}`,
+);
 
 rst.stopSet();

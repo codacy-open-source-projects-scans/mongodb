@@ -28,30 +28,23 @@
  */
 
 
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <initializer_list>
-#include <string>
-#include <tuple>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/s/resharding/resharding_data_replication.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/basic_types_gen.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/s/resharding/resharding_collection_cloner.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
-#include "mongo/db/s/resharding/resharding_data_replication.h"
 #include "mongo/db/s/resharding/resharding_donor_oplog_iterator.h"
 #include "mongo/db/s/resharding/resharding_future_util.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier.h"
@@ -60,15 +53,22 @@
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_txn_cloner.h"
 #include "mongo/db/s/resharding/resharding_util.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
-#include "mongo/s/shard_key_pattern.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/future_util.h"
+
+#include <initializer_list>
+#include <string>
+#include <tuple>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
 
@@ -108,6 +108,9 @@ std::unique_ptr<ReshardingCollectionCloner> ReshardingDataReplication::_makeColl
     const ShardId& myShardId,
     Timestamp cloneTimestamp,
     bool relaxed) {
+    // If verification is enabled, the cloner should store the progress since the per-donor and
+    // total number of documents will be needed for the verification.
+    bool storeProgress = metadata.getPerformVerification();
     return std::make_unique<ReshardingCollectionCloner>(
         metrics,
         metadata.getReshardingUUID(),
@@ -117,6 +120,7 @@ std::unique_ptr<ReshardingCollectionCloner> ReshardingDataReplication::_makeColl
         myShardId,
         cloneTimestamp,
         metadata.getTempReshardingNss(),
+        storeProgress,
         relaxed);
 }
 
@@ -285,14 +289,9 @@ std::unique_ptr<ReshardingDataReplicationInterface> ReshardingDataReplication::m
 
     std::shared_ptr<executor::TaskExecutor> collectionClonerExecutor;
     if (!cloningDone) {
-        if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-            resharding::data_copy::ensureCollectionExists(
-                opCtx,
-                NamespaceString::kRecipientReshardingResumeDataNamespace,
-                CollectionOptions{});
-            collectionClonerExecutor = _makeCollectionClonerExecutor(donorShards.size());
-        }
+        resharding::data_copy::ensureCollectionExists(
+            opCtx, NamespaceString::kRecipientReshardingResumeDataNamespace, CollectionOptions{});
+        collectionClonerExecutor = _makeCollectionClonerExecutor(donorShards.size());
         collectionCloner =
             _makeCollectionCloner(metrics, metadata, myShardId, cloneTimestamp, relaxed);
         txnCloners = _makeTxnCloners(metadata, donorShards);
@@ -340,6 +339,15 @@ ReshardingDataReplication::ReshardingDataReplication(
 
 void ReshardingDataReplication::startOplogApplication() {
     ensureFulfilledPromise(_startOplogApplication);
+    for (auto& fetcher : _oplogFetchers) {
+        fetcher->onStartingOplogApplication();
+    }
+}
+
+void ReshardingDataReplication::prepareForCriticalSection() {
+    for (auto& fetcher : _oplogFetchers) {
+        fetcher->prepareForCriticalSection();
+    }
 }
 
 SharedSemiFuture<void> ReshardingDataReplication::awaitCloningDone() {
@@ -463,7 +471,7 @@ std::vector<SharedSemiFuture<void>> ReshardingDataReplication::_runOplogFetchers
 
     for (const auto& fetcher : _oplogFetchers) {
         oplogFetcherFutures.emplace_back(
-            fetcher->schedule(_oplogFetcherExecutor, cancelToken, opCtxFactory).share());
+            fetcher->schedule(_oplogFetcherExecutor, cancelToken).share());
     }
 
     return oplogFetcherFutures;
@@ -539,10 +547,16 @@ ReshardingDonorOplogId ReshardingDataReplication::getOplogFetcherResumeId(
     Timestamp minFetchTimestamp) {
     invariant(!shard_role_details::getLocker(opCtx)->isLocked());
 
-    AutoGetCollection coll(opCtx, oplogBufferNss, MODE_IS);
-    if (coll) {
+    const auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest{oplogBufferNss,
+                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     repl::ReadConcernArgs::get(opCtx),
+                                     AcquisitionPrerequisites::kRead},
+        MODE_IS);
+    if (coll.exists()) {
         auto highestOplogBufferId =
-            resharding::data_copy::findDocWithHighestInsertedId(opCtx, *coll);
+            resharding::data_copy::findDocWithHighestInsertedId(opCtx, coll);
 
         if (highestOplogBufferId) {
             auto oplogEntry = repl::OplogEntry{highestOplogBufferId->toBson()};
@@ -550,8 +564,8 @@ ReshardingDonorOplogId ReshardingDataReplication::getOplogFetcherResumeId(
                 return ReshardingOplogFetcher::kFinalOpAlreadyFetched;
             }
 
-            return ReshardingDonorOplogId::parse(IDLParserContext{"getOplogFetcherResumeId"},
-                                                 oplogEntry.get_id()->getDocument().toBson());
+            return ReshardingDonorOplogId::parse(oplogEntry.get_id()->getDocument().toBson(),
+                                                 IDLParserContext{"getOplogFetcherResumeId"});
         }
     }
 

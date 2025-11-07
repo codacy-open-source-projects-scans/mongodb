@@ -8,78 +8,77 @@
 //   # The aggregation stage $currentOp cannot run with a readConcern other than 'local'
 //   assumes_read_concern_unchanged,
 //   does_not_support_repeated_reads,
-//   does_not_support_stepdowns,
 //   # Uses $where operator
 //   requires_scripting,
 //   uses_multiple_connections,
 //   uses_parallel_shell,
+//   requires_getmore,
+//   # The count operation can't be retried, otherwise we may get a timeout waiting for the parallel
+//   # shell to finish.
+//   does_not_support_stepdowns,
+//   assumes_balancer_off,
 // ]
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
-var t = db.jstests_count_plan_summary;
+let t = db.jstests_count_plan_summary;
 t.drop();
+t.insert({x: 1});
 
-for (var i = 0; i < 1000; i++) {
-    t.insert({x: 1});
+function setPostCommandFailpoint({mode, options}) {
+    FixtureHelpers.runCommandOnEachPrimary({
+        db: db.getSiblingDB("admin"),
+        cmdObj: {configureFailPoint: "waitAfterCommandFinishesExecution", data: options, mode: mode},
+    });
 }
 
-// Mock a long-running count operation by sleeping for each of
-// the documents in the collection.
-var awaitShell = startParallelShell(() => {
+setPostCommandFailpoint({mode: "alwaysOn", options: {commands: ["count"]}});
+let awaitShell = startParallelShell(() => {
     jsTest.log("Starting long-running count in parallel shell");
-    db.jstests_count_plan_summary.find({x: 1, $where: 'sleep(100); return true;'}).count();
+    db.jstests_count_plan_summary.find({x: 1}).count();
     jsTest.log("Finished long-running count in parallel shell");
 });
-
-// Find the count op in db.currentOp() and check for the plan summary.
-assert.soon(function() {
-    var currentCountOps =
-        db.getSiblingDB("admin")
+try {
+    // Find the count op in db.currentOp() and check for the plan summary.
+    assert.soon(function () {
+        let currentCountOps = db
+            .getSiblingDB("admin")
             .aggregate([
                 {$currentOp: {}},
                 {
                     $match: {
                         $and: [
                             {"command.count": t.getName()},
-                            // On the replica set endpoint, currentOp reports both router and shard
-                            // operations. So filter out one of them.
-                            TestData.testingReplicaSetEndpoint ? {role: "ClusterRole{shard}"}
-                                                               : {role: {$exists: false}}
-                        ]
-                    }
+                            // On the replica set endpoint, currentOp reports both router and
+                            // shard operations. So filter out one of them.
+                            TestData.testingReplicaSetEndpoint
+                                ? {role: "ClusterRole{shard}"}
+                                : {role: {$exists: false}},
+                        ],
+                    },
                 },
                 {$limit: 1},
             ])
             .toArray();
 
-    if (currentCountOps.length !== 1) {
-        jsTest.log("Still didn't find count operation in the currentOp log.");
-        return false;
-    }
+        if (currentCountOps.length !== 1) {
+            jsTest.log("Still didn't find count operation in the currentOp log.");
+            return false;
+        }
 
-    var countOp = currentCountOps[0];
-    if (!("planSummary" in countOp)) {
-        jsTest.log("Count op does not yet contain planSummary.");
+        let countOp = currentCountOps[0];
+        if (!("planSummary" in countOp)) {
+            jsTest.log.info("Count op does not yet contain planSummary.", {countOp});
+            return false;
+        }
+
+        // There are no indices, so the planSummary should be "COLLSCAN".
+        jsTest.log("Found count op with planSummary:");
         printjson(countOp);
-        return false;
-    }
+        assert.eq("COLLSCAN", countOp.planSummary, "wrong planSummary string");
 
-    // There are no indices, so the planSummary should be "COLLSCAN".
-    jsTest.log("Found count op with planSummary:");
-    printjson(countOp);
-    assert.eq("COLLSCAN", countOp.planSummary, "wrong planSummary string");
-
-    // Kill the op so that the test won't run for a long time.
-    db.killOp(countOp.opid);
-
-    return true;
-}, "Did not find count operation in current operation log");
-
-var exitCode = awaitShell({checkExitSuccess: false});
-
-// Suites that remove shards in the background can trigger migrations during draining.
-// This can make killOp commands overlap with a concurrent placement version mismatch,
-// such that the given operation is getting retried and completed, instead of being terminated.
-if (!TestData.shardsAddedRemoved) {
-    assert.neq(
-        0, exitCode, "Expected shell to exit abnormally due to JS execution being terminated");
+        return true;
+    }, "Did not find count operation in current operation log");
+} finally {
+    setPostCommandFailpoint({mode: "off", options: {}});
 }
+let exitCode = awaitShell();

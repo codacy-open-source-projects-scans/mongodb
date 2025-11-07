@@ -29,19 +29,13 @@
 
 #include "mongo/db/op_observer/fallback_op_observer.h"
 
-#include <memory>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/views_for_database.h"
 #include "mongo/db/keys_collection_document_gen.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/views_for_database.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/op_observer/batched_write_context.h"
 #include "mongo/db/op_observer/op_observer_util.h"
@@ -52,7 +46,6 @@
 #include "mongo/db/session/session_killer.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/db/views/util.h"
 #include "mongo/db/views/view_catalog_helpers.h"
 #include "mongo/idl/idl_parser.h"
@@ -60,6 +53,13 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/namespace_string_util.h"
+
+#include <memory>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -122,7 +122,7 @@ void FallbackOpObserver::onInserts(OperationContext* opCtx,
     } else if (nss == NamespaceString::kExternalKeysCollectionNamespace) {
         for (auto it = first; it != last; it++) {
             auto externalKey =
-                ExternalKeysCollectionDocument::parse(IDLParserContext("externalKey"), it->doc);
+                ExternalKeysCollectionDocument::parse(it->doc, IDLParserContext("externalKey"));
             shard_role_details::getRecoveryUnit(opCtx)->onCommit(
                 [this, externalKey = std::move(externalKey)](OperationContext* opCtx,
                                                              boost::optional<Timestamp>) mutable {
@@ -196,7 +196,8 @@ repl::OpTime FallbackOpObserver::onDropCollection(OperationContext* opCtx,
                                                   const NamespaceString& collectionName,
                                                   const UUID& uuid,
                                                   std::uint64_t numRecords,
-                                                  bool markFromMigrate) {
+                                                  bool markFromMigrate,
+                                                  bool isTimeseries) {
     if (collectionName.isSystemDotJavascript()) {
         Scope::storedFuncMod(opCtx);
     } else if (collectionName.isSystemDotViews()) {

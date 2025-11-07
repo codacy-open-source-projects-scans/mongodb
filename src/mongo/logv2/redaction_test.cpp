@@ -30,11 +30,6 @@
 
 #include "mongo/logv2/redaction.h"
 
-#include <initializer_list>
-#include <iostream>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonmisc.h"
@@ -43,10 +38,13 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
 #include "mongo/logv2/log_util.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <initializer_list>
+#include <iostream>
+#include <utility>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -132,9 +130,7 @@ TEST(RedactBSONTest, BasicBSON) {
                    BSONStringPair(BSON("" << 1), "{ : \"###\" }"),
                    BSONStringPair(BSON("a" << 1), "{ a: \"###\" }"),
                    BSONStringPair(BSON("a" << 1.0), "{ a: \"###\" }"),
-                   BSONStringPair(BSON("a"
-                                       << "a"),
-                                  "{ a: \"###\" }"),
+                   BSONStringPair(BSON("a" << "a"), "{ a: \"###\" }"),
                    BSONStringPair(BSON("a" << 1 << "b"
                                            << "str"),
                                   "{ a: \"###\", b: \"###\" }"),

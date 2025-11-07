@@ -29,13 +29,15 @@
 
 #pragma once
 
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
-namespace mongo::logv2 {
+#include <string>
+
+namespace mongo {
+namespace MONGO_MOD_PUBLIC logv2 {
 
 /** Describes the service (i.e. shard/router) a log line is associated with. */
 enum class LogService {
@@ -104,4 +106,5 @@ inline StringData getNameForLog(LogService logService) {
 /** Appends the full name returned by toStringData(). */
 std::ostream& operator<<(std::ostream& os, LogService service);
 
-}  // namespace mongo::logv2
+}  // namespace MONGO_MOD_PUBLIC logv2
+}  // namespace mongo

@@ -16,7 +16,7 @@
 # Our workspace setup requires a specific version of poetry to be
 # installed, this script automates the pip install of that version.
 
-poetry_version='1.8.3'
+poetry_version='2.0.0'
 
 allow_no_venv=0
 python_optarg=""
@@ -40,7 +40,7 @@ while getopts p:fin opt; do
     esac
 done
 
-run () {
+run() {
     echo "$@"
     if [[ "${dry_run}" == 1 ]]; then
         return
@@ -75,19 +75,21 @@ fi
 pip_opts=()
 if [[ "${allow_no_venv}" != 1 ]]; then
     # Exploit pip's own enforcement of virtualenv.
-    pip_opts+=('--require-virtualenv')
+    pip_opts+=(--require-virtualenv)
 fi
-run "${py3}" -m pip install "${pip_opts[@]}" "poetry==${poetry_version}"
+
+# check if poetry should be installed via pip
+need_poetry_install=0 # 0 = no, 1 = yes
+if ! "${py3}" -m pip show poetry &>/dev/null; then
+    echo "Poetry not found in this interpreter, installing via pip." >&2
+    need_poetry_install=1
+fi
+
+# we'll need to use pip this time around
+if ((need_poetry_install)); then
+    run "${py3}" -m pip install "${pip_opts[@]}" -r poetry_requirements.txt
+fi
 
 run env \
     PYTHON_KEYRING_BACKEND="keyring.backends.null.Keyring" \
-    "${py3}" -m poetry install --no-root --sync
-
-# poetry will install cryptography in an isolated build environment
-# to conform to pep517, however this doesn't work for the old cryptography
-# version on these platforms, and ends up not building required shared libraries.
-# Here we go behing poetry's back and install with pip
-if uname -a | grep -q 's390x\|ppc64le'; then
-    "${py3}" -m pip uninstall -y cryptography==2.3
-    "${py3}" -m pip install cryptography==2.3
-fi
+    "${py3}" -m poetry sync --no-root

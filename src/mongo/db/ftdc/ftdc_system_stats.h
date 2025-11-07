@@ -28,12 +28,13 @@
  */
 #pragma once
 
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/ftdc/collector.h"
 #include "mongo/db/ftdc/controller.h"
+#include "mongo/util/modules.h"
+
+#include <string>
 
 namespace mongo {
 

@@ -29,13 +29,8 @@
 
 #include "mongo/db/exec/sbe/stages/union.h"
 
-#include <absl/container/inlined_vector.h>
-#include <absl/container/node_hash_map.h>
 #include <fmt/format.h>
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <algorithm>
-#include <utility>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -43,6 +38,9 @@
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <utility>
 
 namespace mongo::sbe {
 UnionStage::UnionStage(PlanStage::Vector inputStages,
@@ -55,12 +53,16 @@ UnionStage::UnionStage(PlanStage::Vector inputStages,
       _outputVals{std::move(outputVals)} {
     _children = std::move(inputStages);
 
-    invariant(_children.size() > 0);
-    invariant(_children.size() == _inputVals.size());
-    invariant(std::all_of(
-        _inputVals.begin(), _inputVals.end(), [size = _outputVals.size()](const auto& slots) {
-            return slots.size() == size;
-        }));
+    tassert(11094703, "Expecting non-empty list of input stages", _children.size() > 0);
+    tassert(11094702,
+            "Expecting number of input values to match the number of input stages",
+            _children.size() == _inputVals.size());
+    tassert(11094701,
+            "Expect the length of all input slot vectors to match the length of output slot vector",
+            std::all_of(
+                _inputVals.begin(),
+                _inputVals.end(),
+                [size = _outputVals.size()](const auto& slots) { return slots.size() == size; }));
 }
 
 std::unique_ptr<PlanStage> UnionStage::clone() const {
@@ -198,7 +200,6 @@ const SpecificStats* UnionStage::getSpecificStats() const {
 }
 
 std::vector<DebugPrinter::Block> UnionStage::debugPrint() const {
-    using namespace fmt::literals;
     auto ret = PlanStage::debugPrint();
 
     ret.emplace_back(DebugPrinter::Block("[`"));
@@ -212,7 +213,7 @@ std::vector<DebugPrinter::Block> UnionStage::debugPrint() const {
 
     ret.emplace_back(DebugPrinter::Block::cmdIncIndent);
     for (size_t childNum = 0; childNum < _children.size(); childNum++) {
-        DebugPrinter::addKeyword(ret, "branch{}"_format(childNum));
+        DebugPrinter::addKeyword(ret, fmt::format("branch{}", childNum));
 
         ret.emplace_back(DebugPrinter::Block("[`"));
         for (size_t idx = 0; idx < _inputVals[childNum].size(); idx++) {

@@ -31,8 +31,9 @@ global:
 
 configs:
     "net.compression.compressors":
-        description: 'Comma-separated list of compressors to use for network messages'
-        source: [ cli, ini, yaml ]
+        mod_visibility: public
+        description: "Comma-separated list of compressors to use for network messages"
+        source: [cli, ini, yaml]
         arg_vartype: String
         short_name: networkMessageCompressors
         default: disabled

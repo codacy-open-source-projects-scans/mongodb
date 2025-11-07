@@ -20,8 +20,8 @@
  *   does_not_support_stepdowns,
  * ]
  */
-export const $config = (function() {
-    var data = {
+export const $config = (function () {
+    let data = {
         mapper: function mapper() {
             emit(this.key, 1);
         },
@@ -30,12 +30,12 @@ export const $config = (function() {
             // drops to occur during different phases of the mapReduce.
             return 1;
         },
-        numDocs: 250
+        numDocs: 250,
     };
 
-    var states = (function() {
+    let states = (function () {
         function dropColl(db, collName) {
-            var mapReduceDb = db.getSiblingDB(this.mapReduceDBName);
+            let mapReduceDb = db.getSiblingDB(this.mapReduceDBName);
 
             // We don't check the return value of drop() because the collection
             // might not exist due to a drop() in another thread.
@@ -43,14 +43,14 @@ export const $config = (function() {
         }
 
         function dropDB(db, collName) {
-            var mapReduceDb = db.getSiblingDB(this.mapReduceDBName);
+            let mapReduceDb = db.getSiblingDB(this.mapReduceDBName);
 
             // Concurrent dropDatabase calls can result in transient errors.
             mapReduceDb.dropDatabase();
         }
 
         function mapReduce(db, collName) {
-            var mapReduceDb = db.getSiblingDB(this.mapReduceDBName);
+            let mapReduceDb = db.getSiblingDB(this.mapReduceDBName);
 
             // Try to ensure that some documents have been inserted before running
             // the mapReduce command.  Although it's possible for the documents to
@@ -58,22 +58,22 @@ export const $config = (function() {
             // running on non-empty collections by virtue of the number of
             // iterations and threads in this workload.
             try {
-                var bulk = mapReduceDb[collName].initializeUnorderedBulkOp();
-                for (var i = 0; i < this.numDocs; ++i) {
+                let bulk = mapReduceDb[collName].initializeUnorderedBulkOp();
+                for (let i = 0; i < this.numDocs; ++i) {
                     bulk.insert({key: Random.randInt(10000)});
                 }
-                var res = bulk.execute();
+                let res = bulk.execute();
                 assert.commandWorked(res);
             } catch (ex) {
                 assert.eq(true, ex instanceof BulkWriteError, tojson(ex));
                 assert.writeErrorWithCode(ex, ErrorCodes.DatabaseDropPending);
             }
 
-            var options = {
+            let options = {
                 finalize: function finalize(key, reducedValue) {
                     return reducedValue;
                 },
-                out: collName + '_out'
+                out: collName + "_out",
             };
 
             try {
@@ -87,14 +87,14 @@ export const $config = (function() {
         return {dropColl: dropColl, dropDB: dropDB, mapReduce: mapReduce};
     })();
 
-    var transitions = {
+    let transitions = {
         dropColl: {mapReduce: 1},
         dropDB: {mapReduce: 1},
-        mapReduce: {mapReduce: 0.7, dropDB: 0.05, dropColl: 0.25}
+        mapReduce: {mapReduce: 0.7, dropDB: 0.05, dropColl: 0.25},
     };
 
     function setup(db, collName, cluster) {
-        this.mapReduceDBName = db.getName() + 'map_reduce_drop';
+        this.mapReduceDBName = db.getName() + "map_reduce_drop";
     }
 
     return {
@@ -103,7 +103,7 @@ export const $config = (function() {
         data: data,
         setup: setup,
         states: states,
-        startState: 'mapReduce',
+        startState: "mapReduce",
         transitions: transitions,
     };
 })();

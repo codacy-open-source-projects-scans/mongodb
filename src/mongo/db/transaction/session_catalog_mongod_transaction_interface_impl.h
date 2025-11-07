@@ -29,21 +29,22 @@
 
 #pragma once
 
-#include <vector>
-
 #include "mongo/db/operation_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod_transaction_interface.h"
 #include "mongo/db/session/session_txn_record_gen.h"
+#include "mongo/util/modules.h"
+
+#include <vector>
 
 namespace mongo {
 
 /**
  * Facade around the TransactionParticipant class in the db/transaction library.
  */
-class MongoDSessionCatalogTransactionInterfaceImpl
+class MONGO_MOD_PUB MongoDSessionCatalogTransactionInterfaceImpl
     : public MongoDSessionCatalogTransactionInterface {
     MongoDSessionCatalogTransactionInterfaceImpl(
         const MongoDSessionCatalogTransactionInterfaceImpl&) = delete;
@@ -57,6 +58,8 @@ public:
     bool isTransactionPrepared(const ObservableSession& session) override;
 
     bool isTransactionInProgress(OperationContext* opCtx) override;
+
+    std::string transactionStateDescriptor(OperationContext* opCtx) override;
 
     void refreshTransactionFromStorageIfNeeded(OperationContext* opCtx) override;
 

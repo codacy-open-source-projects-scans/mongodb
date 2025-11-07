@@ -29,20 +29,17 @@
 
 #pragma once
 
-#include <memory>
-#include <utility>
-#include <variant>
-#include <vector>
-
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/query/yield_policy_callbacks_impl.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
-#include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <variant>
+#include <vector>
 
 namespace mongo {
 
@@ -59,7 +56,6 @@ public:
         ClockSource* clockSource,
         int yieldFrequency,
         Milliseconds yieldPeriod,
-        std::variant<const Yieldable*, YieldThroughAcquisitions> yieldable,
         std::unique_ptr<YieldPolicyCallbacks> callbacks = nullptr);
 
     /**
@@ -83,24 +79,16 @@ private:
                        ClockSource* clockSource,
                        int yieldFrequency,
                        Milliseconds yieldPeriod,
-                       std::variant<const Yieldable*, YieldThroughAcquisitions> yieldable,
                        std::unique_ptr<YieldPolicyCallbacks> callbacks);
 
     void saveState(OperationContext* opCtx) override;
 
-    void restoreState(OperationContext* opCtx, const Yieldable* yieldable) override;
-
-    // TODO SERVER-59620: Remove this.
-    bool useExperimentalCommitTxnBehavior() const override {
-        return _useExperimentalCommitTxnBehavior;
-    }
+    void restoreState(OperationContext* opCtx,
+                      const Yieldable* yieldable,
+                      RestoreContext::RestoreType restoreType) override;
 
     // The list of plans registered to yield when the configured policy triggers a yield.
     std::vector<sbe::PlanStage*> _yieldingPlans;
-
-    // Whether the experimental behavior which commits transactions across yields instead of
-    // aborting them, should be used.
-    bool _useExperimentalCommitTxnBehavior;
 };
 
 }  // namespace mongo

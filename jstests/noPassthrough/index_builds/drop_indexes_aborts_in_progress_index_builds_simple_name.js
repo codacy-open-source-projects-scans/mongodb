@@ -9,9 +9,11 @@
  * in-progress.
  * @tags: [
  *   requires_replication,
+ *   # TODO SERVER-111867: Remove once primary-driven index builds support side writes.
+ *   primary_driven_index_builds_incompatible,
  * ]
  */
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 import {SecondaryReadsTest} from "jstests/replsets/libs/secondary_reads_test.js";
 
 const dbName = jsTestName();
@@ -38,8 +40,9 @@ assert.commandWorked(testDB.getCollection(collName).insert({a: 1}));
 IndexBuildTest.pauseIndexBuilds(testDB.getMongo());
 IndexBuildTest.pauseIndexBuilds(secondaryReadsTest.getSecondaryDB().getMongo());
 
-const awaitIndexBuild = IndexBuildTest.startIndexBuild(
-    testDB.getMongo(), coll.getFullName(), {a: 1}, {}, [ErrorCodes.IndexBuildAborted]);
+const awaitIndexBuild = IndexBuildTest.startIndexBuild(testDB.getMongo(), coll.getFullName(), {a: 1}, {}, [
+    ErrorCodes.IndexBuildAborted,
+]);
 IndexBuildTest.waitForIndexBuildToScanCollection(testDB, collName, "a_1");
 IndexBuildTest.waitForIndexBuildToStart(secondaryReadsTest.getSecondaryDB(), collName, "a_1");
 
@@ -56,12 +59,14 @@ pauseAwait();
 
 // Do a bunch of reads on the 'collName' collection on the secondary.
 // No errors should be encountered on the secondary.
-let readFn = function() {
+let readFn = function () {
     for (let x = 0; x < TestData.nOps; x++) {
-        assert.commandWorked(db.runCommand({
-            find: TestData.collName,
-            filter: {a: x},
-        }));
+        assert.commandWorked(
+            db.runCommand({
+                find: TestData.collName,
+                filter: {a: x},
+            }),
+        );
         // Sleep a bit to make these reader threads less CPU intensive.
         sleep(60);
     }

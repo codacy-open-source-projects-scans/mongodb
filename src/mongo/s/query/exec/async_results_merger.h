@@ -29,17 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <future>
-#include <memory>
-#include <queue>
-#include <set>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -48,18 +37,40 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
+#include "mongo/db/query/client_cursor/release_memory_gen.h"
 #include "mongo/db/query/query_stats/data_bearing_node_metrics.h"
 #include "mongo/db/query/tailable_mode_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/s/query/exec/async_results_merger_params_gen.h"
 #include "mongo/s/query/exec/cluster_query_result.h"
-#include "mongo/stdx/future.h"
+#include "mongo/s/query/exec/next_high_watermark_determining_strategy.h"
+#include "mongo/s/query/exec/shard_tag.h"
+#include "mongo/s/transaction_router.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/stdx/unordered_set.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/future.h"
+#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
-#include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <deque>
+#include <memory>
+#include <queue>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <absl/container/btree_set.h>
+#include <absl/container/inlined_vector.h>
+#include <boost/intrusive_ptr.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -85,10 +96,8 @@ class CursorResponse;
  * Without a sort, we are ready to return results as soon as we have *any* response from a remote.
  *
  * On any error, the caller is responsible for shutting down the ARM using the kill() method.
- *
- * Does not throw exceptions.
  */
-class AsyncResultsMerger {
+class AsyncResultsMerger : public std::enable_shared_from_this<AsyncResultsMerger> {
     AsyncResultsMerger(const AsyncResultsMerger&) = delete;
     AsyncResultsMerger& operator=(const AsyncResultsMerger&) = delete;
 
@@ -101,8 +110,24 @@ public:
     static const BSONObj kWholeSortKeySortPattern;
 
     /**
+     * Helper type for storing the additional transaction participants extracted from a shard
+     * response. We need to first buffer the metadata about additional transaction participants when
+     * we receive an async response in the network thread. This is because the async callback that
+     * runs in the network thread cannot access the OperationContext nor the transaction router in a
+     * safe way. The buffered metadata will be processed whenever the 'AsyncResultsMerger' is
+     * detached from the OperationContext or when the next ready event is consumed.
+     */
+    struct RemoteResponse {
+        ShardId shardId;
+        TransactionRouter::ParsedParticipantResponseMetadata parsedMetadata;
+    };
+
+    /**
+     * Factory function to create an 'AsyncResultsMerger' instance. Calling this method is the only
+     * allowed way to create an 'AsyncResultsMerger'.
+     *
      * Takes ownership of the cursors from ClusterClientCursorParams by storing their cursorIds and
-     * the hosts on which they exist in _remotes.
+     * the hosts on which they exist in '_remotes'.
      *
      * Additionally copies each remote's first batch of results, if one exists, into that remote's
      * docBuffer. If a sort is specified in the ClusterClientCursorParams, places the remotes with
@@ -110,19 +135,20 @@ public:
      *
      * The TaskExecutor* must remain valid for the lifetime of the ARM.
      *
-     * If 'opCtx' may be deleted before this AsyncResultsMerger, the caller must call
+     * If 'opCtx' may be deleted before this AsyncResultsMerger finishes, the caller must call
      * detachFromOperationContext() before deleting 'opCtx', and call reattachToOperationContext()
      * with a new, valid OperationContext before the next use.
      */
-    AsyncResultsMerger(OperationContext* opCtx,
-                       std::shared_ptr<executor::TaskExecutor> executor,
-                       AsyncResultsMergerParams params);
+    static std::shared_ptr<AsyncResultsMerger> create(
+        OperationContext* opCtx,
+        std::shared_ptr<executor::TaskExecutor> executor,
+        AsyncResultsMergerParams params);
 
     /**
      * In order to be destroyed, either the ARM must have been kill()'ed or all cursors must have
      * been exhausted. This is so that any unexhausted cursors are cleaned up by the ARM.
      */
-    ~AsyncResultsMerger();
+    virtual ~AsyncResultsMerger();
 
     /**
      * Returns a const reference to the parameters.
@@ -154,6 +180,24 @@ public:
      * detachFromOperationContext() before 'opCtx' is deleted.
      */
     void reattachToOperationContext(OperationContext* opCtx);
+
+    /**
+     * Checks if the 'proposed' high water mark is greater or equal to 'current' high water mark,
+     * w.r.t. to the 'sortKeyPattern'. Returns true if 'proposed' compares greater or equal to
+     * 'current', false otherwise.
+     */
+    static bool checkHighWaterMarkIsMonotonicallyIncreasing(const BSONObj& current,
+                                                            const BSONObj& proposed,
+                                                            const BSONObj& sortKeyPattern);
+
+    /**
+     * Checks if the 'proposed' high water mark is less or equal to 'current' high water mark,
+     * w.r.t. to the 'sortKeyPattern'. Returns true if 'proposed' compares less or equal to
+     * 'current', false otherwise.
+     */
+    static bool checkHighWaterMarkIsMonotonicallyDecreasing(const BSONObj& current,
+                                                            const BSONObj& proposed,
+                                                            const BSONObj& sortKeyPattern);
 
     /**
      * Returns true if there is no need to schedule remote work in order to take the next action.
@@ -226,11 +270,24 @@ public:
      */
     Status scheduleGetMores();
 
+    Status releaseMemory();
+
     /**
      * Adds the specified shard cursors to the set of cursors to be merged.  The results from the
      * new cursors will be returned as normal through nextReady().
      */
-    void addNewShardCursors(std::vector<RemoteCursor>&& newCursors);
+    void addNewShardCursors(std::vector<RemoteCursor>&& newCursors,
+                            const ShardTag& tag = ShardTag::kDefault);
+
+    /**
+     * Closes and removes all cursors belonging to any of the specified shardIds. All in-flight
+     * requests to any of these remote cursors will be canceled and discarded.
+     * All results from the to-be closed remotes that have already been received by this
+     * 'AsyncResultsMerger' but have not been consumed will be kept. They can be consumed normally
+     * via the 'nextReady()' method.
+     * Closing remote cursors is only supported for tailable, awaitData cursors.
+     */
+    void closeShardCursors(const stdx::unordered_set<ShardId>& shardIds, const ShardTag& tag);
 
     /**
      * Returns true if the cursor was opened with 'allowPartialResults:true' and results are not
@@ -244,12 +301,86 @@ public:
     std::size_t getNumRemotes() const;
 
     /**
+     * Returns true if we have a cursor established for the specified shard and shard tag, false
+     * otherwise.
+     */
+    bool hasCursorForShard_forTest(const ShardId& shardId,
+                                   const ShardTag& tag = ShardTag::kDefault) const;
+
+    /**
+     * Returns the number of buffered remote responses.
+     */
+    std::size_t numberOfBufferedRemoteResponses_forTest() const;
+
+    /**
      * For sorted tailable cursors, returns the most recent available sort key. This guarantees that
      * we will never return any future results which precede this key. If no results are ready to be
      * returned, this method may cause the high water mark to advance to the lowest promised sortkey
      * received from the shards. Returns an empty BSONObj if no such sort key is available.
      */
     BSONObj getHighWaterMark();
+
+    /**
+     * Sets the initial high watermark to return when no cursors are tracked. It is not allowed to
+     * call this method with a high water mark with a timestamp earlier than the current high water
+     * mark.
+     */
+    void setInitialHighWaterMark(const BSONObj& highWaterMark);
+
+    /**
+     * Sets the current high water mark of the 'AsyncResultsMerger'. Notably this allows to set the
+     * high water mark to a timestamp earlier than the current high water mark.
+     */
+    void setHighWaterMark(const BSONObj& highWaterMark);
+
+    /**
+     * Sets the strategy to determine the next high water mark.
+     * Assumes that the 'AsyncResultsMerger' is in tailable, awaitData mode.
+     */
+    void setNextHighWaterMarkDeterminingStrategy(
+        NextHighWaterMarkDeterminingStrategyPtr nextHighWaterMarkDeterminingStrategy);
+
+    /**
+     * Enables an undo mode in which the effects of the last 'nextReady()' call can be partially
+     * reverted. In this mode, the 'AsyncResultsMerger' keeps track of the last result that was
+     * returned by a call to 'nextReady()'. The effects of fetching the last result via
+     * 'nextReady()' can then be "undone" by calling 'undoNextReady()'.
+     */
+    void enableUndoNextReadyMode();
+
+    /**
+     * Disables the undo mode. Also clears a buffered undo result.
+     */
+    void disableUndoNextReadyMode();
+
+    /**
+     * Partially "undoes" the effects of the last 'nextReady()' call, by putting the last returned
+     * result back into the 'AsyncResultMerger's document buffer for the shard it was originally
+     * pulled from. For sorted mergers, it will also put back the result back into the merge queue
+     * and restore the high water mark.
+     *
+     * This method can only be called if a result was previously returned via 'nextReady()' while
+     * the undo mode was enabled. Calling it otherwise will tassert. As the 'AsyncResultsMerger'
+     * only buffers the single last returned result in 'nextReady()', it is forbidden to call
+     * 'undoNextReady()' repeatedly unless another call to 'nextReady()' has been made. If this
+     * assumption is violated, this method will tassert.
+     *
+     * Calling this method will not restore the following properties of the 'AsyncResultsMerger' to
+     * their state during the last call to 'nextReady()':
+     * - the set of open remote cursors
+     * - the list of transaction participants
+     *
+     * It is forbidden to call this method if the undo is performed for a result that was produced
+     * by a remote cursor that has been closed since the last call to 'nextReady()'. If this
+     * assumption is violated, this method will tassert.
+     */
+    void undoNextReady();
+
+    /**
+     * Returns if this 'AsyncResultsMerger' compares the whole sort key, based on the initial setup
+     * parameters.
+     */
+    bool getCompareWholeSortKey() const;
 
     /**
      * Starts shutting down this ARM by canceling all pending requests and scheduling killCursors
@@ -265,7 +396,7 @@ public:
      * currently attached. This is so that a killing thread may call this method with its own
      * operation context.
      */
-    stdx::shared_future<void> kill(OperationContext* opCtx);
+    SharedSemiFuture<void> kill(OperationContext* opCtx);
 
     /**
      * Returns remote metrics aggregated in this ARM without reseting the local counts.
@@ -281,29 +412,54 @@ public:
      */
     query_stats::DataBearingNodeMetrics takeMetrics();
 
+    /**
+     * Returns the sort key out of the $sortKey metadata field in 'obj'. The sort key should be
+     * formatted as an array with one value per field of the sort pattern:
+     *  {..., $sortKey: [<firstSortKeyComponent>, <secondSortKeyComponent>, ...], ...}
+     *
+     * This function returns the sort key not as an array, but as the equivalent BSONObj:
+     *   {"0": <firstSortKeyComponent>, "1": <secondSortKeyComponent>}
+     *
+     * The return value is allowed to omit the key names, so the caller should not rely on the key
+     * names being present. That is, the return value could consist of an object such as
+     *   {"": <firstSortKeyComponent>, "": <secondSortKeyComponent>}
+     *
+     * If 'compareWholeSortKey' is true, then the value inside the $sortKey is directly interpreted
+     * as a single-element sort key. For example, given the document
+     *   {..., $sortKey: <value>, ...}
+     * and 'compareWholeSortKey'=true, this function will return
+     *   {"": <value>}
+     */
+    static BSONObj extractSortKey(const BSONObj& obj, bool compareWholeSortKey);
+
 private:
     /**
-     * Contains the original response received by the shard. This is necessary for processing
-     * additional transaction participants.
+     * Constructor is private. All 'AsyncResultsMerger' objects are supposed to be created via the
+     * static 'create()' factory function.
      */
-    struct RemoteResponse {
-        RemoteResponse(ShardId shardId, BSONObj originalResponse)
-            : shardId(std::move(shardId)), originalResponse(std::move(originalResponse)) {}
-
-        ShardId shardId;
-        BSONObj originalResponse;
-    };
+    AsyncResultsMerger(OperationContext* opCtx,
+                       std::shared_ptr<executor::TaskExecutor> executor,
+                       AsyncResultsMergerParams params);
 
     /**
-     * We instantiate one of these per remote host. It contains the buffer of results we've
-     * retrieved from the host but not yet returned, as well as the cursor id, and any error
-     * reported from the remote.
+     * One 'RemoteCursorData' instance is instantiated per remote host. A 'RemoteCursorData'
+     * contains the buffer of results that have been retrieved from the host but not yet returned,
+     * as well as the cursor id, and any error reported by the remote.
      */
-    struct RemoteCursorData {
-        RemoteCursorData(HostAndPort hostAndPort,
+    struct RemoteCursorData : public RefCountable {
+        /**
+         * Type used for the internal ids of RemoteCursorData objects.
+         */
+        using IdType = long long;
+
+        RemoteCursorData(IdType id,
+                         HostAndPort hostAndPort,
                          NamespaceString cursorNss,
                          CursorId establishedCursorId,
-                         bool partialResultsReturned);
+                         ShardId shardId,
+                         const ShardTag& tag,
+                         bool partialResultsReturned,
+                         Shard::OwnerRetryStrategy retryStrategy);
 
         /**
          * Returns the resolved host and port on which the remote cursor resides.
@@ -321,14 +477,24 @@ private:
          */
         bool exhausted() const;
 
+        /**
+         * Cleans up the RemoteCursor internals after receiving more data failed.
+         */
+        void cleanUpFailedBatch(Status status, bool allowPartialResults);
+
+        /**
+         * Internal id of the RemoteCursorData object. The id is guaranteed to be unique for
+         * different 'RemoteCursorData' objects managed by the same 'AsyncResultsMerger', and can be
+         * used for comparison purposes. The id is not necessarily unique across different
+         * 'AsyncResultsMerger' instances.
+         */
+        const IdType id;
+
         // Used when merging tailable awaitData cursors in sorted order. In order to return any
         // result to the client we have to know that no shard will ever return anything that sorts
         // before it. This object represents a promise from the remote that it will never return a
         // result with a sort key lower than this.
         boost::optional<BSONObj> promisedMinSortKey;
-
-        // True if this remote is eligible to provide a high water mark sort key; false otherwise.
-        bool eligibleForHighWaterMark = false;
 
         // The cursor id for the remote cursor. If a remote cursor is not yet exhausted, this member
         // will be set to a valid non-zero cursor id. If a remote cursor is now exhausted, this
@@ -337,22 +503,38 @@ private:
 
         // The namespace this cursor belongs to - note this may be different than the namespace of
         // the operation if there is a view.
-        NamespaceString cursorNss;
+        const NamespaceString cursorNss;
 
         // The exact host in the shard on which the cursor resides. Can be empty if this merger has
         // 'allowPartialResults' set to true and initial cursor establishment failed on this shard.
-        HostAndPort shardHostAndPort;
+        const HostAndPort shardHostAndPort;
 
         // The identity of the shard which the cursor belongs to.
-        ShardId shardId;
+        const ShardId shardId;
+
+        // The shard tag associated with this cursor.
+        const ShardTag tag;
+
+        // True if this remote is eligible to provide a high water mark sort key; false otherwise.
+        bool eligibleForHighWaterMark = false;
 
         // This flag is set if the connection to the remote shard was lost or never established in
         // the first place or the connection is interrupted due to MaxTimeMSExpired.
         // Only applicable if the 'allowPartialResults' option is enabled.
         bool partialResultsReturned = false;
 
+        // If set to 'true', the cursor on this shard has been invalidated.
+        bool invalidated = false;
+
+        // Set to 'true' once the remote cursor was closed via a call to 'closeShardCursors()'.
+        // Cannot flip back from 'true' to 'false'.
+        bool closed = false;
+
         // The buffer of results that have been retrieved but not yet returned to the caller.
-        std::queue<ClusterQueryResult> docBuffer;
+        std::deque<BSONObj> docBuffer;
+
+        // Set to 'true' when at least one request is outstanding.
+        bool outstandingRequest = false;
 
         // Is valid if there is currently a pending request to this remote.
         executor::TaskExecutor::CallbackHandle cbHandle;
@@ -361,41 +543,50 @@ private:
         // the command result contained an error.
         Status status = Status::OK();
 
-        // Count of fetched docs during ARM processing of the current batch. Used to reduce the
-        // batchSize in getMore when mongod returned less docs than the requested batchSize.
-        long long fetchedCount = 0;
-
-        // If set to 'true', the cursor on this shard has been invalidated.
-        bool invalidated = false;
+        // Holds the retry strategy responsible for retrying failed requests.
+        Shard::OwnerRetryStrategy retryStrategy;
     };
+
+    using RemoteCursorPtr = boost::intrusive_ptr<RemoteCursorData>;
+
+    /**
+     * The type that is returned by the internal helper functions for 'nextReady()'.
+     * In case the undo mode is disabled, only the 'ClusterQueryResult' part will be populated. In
+     * case undo mode is enabled, the 'RemoteCursorPtr' part contains the remote from which the
+     * result was fetched, and the BSONObj contains the high water mark.
+     */
+    using NextReadyResult = std::tuple<ClusterQueryResult, RemoteCursorPtr, BSONObj>;
 
     class MergingComparator {
     public:
-        MergingComparator(const std::vector<RemoteCursorData>& remotes,
-                          const BSONObj& sort,
-                          bool compareWholeSortKey)
-            : _remotes(remotes), _sort(sort), _compareWholeSortKey(compareWholeSortKey) {}
+        MergingComparator(const BSONObj& sort, bool compareWholeSortKey)
+            : _sort(sort), _compareWholeSortKey(compareWholeSortKey) {}
 
-        bool operator()(const size_t& lhs, const size_t& rhs);
+        bool operator()(const RemoteCursorPtr& lhs, const RemoteCursorPtr& rhs) const;
 
     private:
-        const std::vector<RemoteCursorData>& _remotes;
-
-        const BSONObj _sort;
+        BSONObj _sort;
 
         // When '_compareWholeSortKey' is true, $sortKey is a scalar value, rather than an object.
         // We extract the sort key {$sortKey: <value>}. The sort key pattern '_sort' is verified to
         // be {$sortKey: 1}.
-        const bool _compareWholeSortKey;
+        bool _compareWholeSortKey;
     };
 
-    using MinSortKeyRemoteIdPair = std::pair<BSONObj, size_t>;
+    using MinSortKeyRemotePair = std::pair<BSONObj, RemoteCursorPtr>;
 
+    /**
+     * Custom comparator type used by 'AsyncResultsMerger::_promisedMinSortKeys'.
+     */
     class PromisedMinSortKeyComparator {
     public:
         PromisedMinSortKeyComparator(BSONObj sort) : _sort(std::move(sort)) {}
 
-        bool operator()(const MinSortKeyRemoteIdPair& lhs, const MinSortKeyRemoteIdPair& rhs) const;
+        // The copy constructor needs to be declared noexcept because 'absl::btree_set' requires the
+        // set's comparator type to be nothrow-copy-constructible.
+        PromisedMinSortKeyComparator(const PromisedMinSortKeyComparator&) noexcept = default;
+
+        bool operator()(const MinSortKeyRemotePair& lhs, const MinSortKeyRemotePair& rhs) const;
 
     private:
         BSONObj _sort;
@@ -404,22 +595,54 @@ private:
     enum LifecycleState { kAlive, kKillStarted, kKillComplete };
 
     /**
+     * Ensures that the high watermark token in 'proposed' compares equal or higher to the high
+     * watermark token in 'proposed', compared to the internal sort key pattern. Tasserts if this
+     * assumption is violated.
+     */
+    void _ensureHighWaterMarkIsMonotonicallyIncreasing(const BSONObj& current,
+                                                       const BSONObj& proposed,
+                                                       StringData context) const;
+
+    /**
+     * Ensures that the high watermark token in 'proposed' compares equal or less to the high
+     * watermark token in 'proposed', compared to the internal sort key pattern. Tasserts if this
+     * assumption is violated.
+     */
+    void _ensureHighWaterMarkIsMonotonicallyDecreasing(const BSONObj& current,
+                                                       const BSONObj& proposed,
+                                                       StringData context) const;
+
+    /**
+     * Internal helper function to set the high water mark. If 'mustBeMonotonicallyIncreasing' is
+     * set to 'true', will validate that the timestamp contained in the high water mark is not be
+     * less than that of the current high water mark contained in '_highWaterMark'. If
+     * 'mustBeMonotonicallyIncreasing' is set to 'false', will validate that the timestamp contained
+     * in the high water mark will not be greater than that of the current high water mark.
+     */
+    void _setHighWaterMark(const BSONObj& highWaterMark,
+                           StringData context,
+                           bool mustBeMonotonicallyIncreasing);
+
+    /**
      * Parses the find or getMore command response object to a CursorResponse.
      *
      * Returns a non-OK response if the response fails to parse or if there is a cursor id mismatch.
      */
     static StatusWith<CursorResponse> _parseCursorResponse(const BSONObj& responseObj,
-                                                           const RemoteCursorData& remote);
+                                                           CursorId expectedCursorId);
 
     /**
      * Helper to create the getMore command asking the remote node for another batch of results.
-     *
-     * The 'remoteIndex' gives the position of the remote node from which we are retrieving the
-     * batch in '_remotes'.
      */
     BSONObj _makeRequest(WithLock,
-                         size_t remoteIndex,
-                         const ServerGlobalParams::FCVSnapshot& fcvSnapshot);
+                         const RemoteCursorData& remote,
+                         const ServerGlobalParams::FCVSnapshot& fcvSnapshot) const;
+
+    /**
+     * Updates the internal high water mark with the passed value, using the configured next high
+     * watermark determining strategy.
+     */
+    void _updateHighWaterMark(const BSONObj& value);
 
     /**
      * Checks whether or not the remote cursors are all exhausted.
@@ -430,29 +653,43 @@ private:
     // Helpers for ready().
     //
 
-    bool _ready(WithLock);
-    bool _readySorted(WithLock);
-    bool _readySortedTailable(WithLock);
-    bool _readyUnsorted(WithLock);
+    bool _ready(WithLock) const;
+    bool _readySorted(WithLock) const;
+    bool _readySortedTailable(WithLock) const;
+    bool _readyUnsorted(WithLock) const;
 
     //
     // Helpers for nextReady().
     //
 
-    ClusterQueryResult _nextReadySorted(WithLock);
-    ClusterQueryResult _nextReadyUnsorted(WithLock);
+    NextReadyResult _nextReadySorted(WithLock);
+    NextReadyResult _nextReadyUnsorted(WithLock);
 
     using CbData = executor::TaskExecutor::RemoteCommandCallbackArgs;
     using CbResponse = executor::TaskExecutor::ResponseStatus;
 
     /**
-     * When nextEvent() schedules remote work, the callback uses this function to process results.
-     *
-     * 'remoteIndex' is the position of the relevant remote node in '_remotes', and therefore
-     * indicates which node the response came from and where the new result documents should be
-     * buffered.
+     * Builds a remote cursor object from the 'RemoteCursor' and 'ShardTag' objects.
      */
-    void _handleBatchResponse(WithLock, CbData const&, size_t remoteIndex);
+    RemoteCursorPtr _buildRemote(WithLock lk, const RemoteCursor& rc, const ShardTag& tag);
+
+    /**
+     * When nextEvent() schedules remote work, the callback uses this function to process
+     * results.
+     */
+    void _handleBatchResponse(WithLock lk,
+                              CbData const&,
+                              StatusWith<CursorResponse>& response,
+                              const RemoteCursorPtr& remote);
+
+    /**
+     * Schedules a killCursors request for the remote if the remote still has a cursor open.
+     * This is a fire-and-forget attempt to close the remote cursor. We are not blocking until
+     * the remote cursor is actually closed.
+     */
+    void _scheduleKillCursorForRemote(WithLock lk,
+                                      OperationContext* opCtx,
+                                      const RemoteCursorPtr& remote);
 
     /**
      * Cleans up if the remote cursor was killed while waiting for a response.
@@ -462,25 +699,29 @@ private:
     /**
      * Cleans up after remote query failure.
      */
-    void _cleanUpFailedBatch(WithLock lk, Status status, size_t remoteIndex);
+    void _cleanUpFailedBatch(WithLock, Status status, RemoteCursorData& remote);
 
     /**
      * Processes results from a remote query.
      */
-    void _processBatchResults(WithLock, CbResponse const&, size_t remoteIndex);
+    void _processBatchResults(WithLock lk,
+                              const CursorResponse& cursorResponse,
+                              const RemoteCursorPtr& remote);
 
     /**
      * Adds the batch of results to the RemoteCursorData. Returns false if there was an error
      * parsing the batch.
      */
-    bool _addBatchToBuffer(WithLock, size_t remoteIndex, const CursorResponse& response);
+    bool _addBatchToBuffer(WithLock lk,
+                           const RemoteCursorPtr& remote,
+                           const CursorResponse& response);
 
     /**
-     * If there is a valid unsignaled event that has been requested via nextEvent() and there are
-     * buffered results that are ready to return, signals that event.
+     * If there is a valid unsignaled event that has been requested via nextEvent() and there
+     * are buffered results that are ready to return, signals that event.
      *
-     * Invalidates the current event, as we must signal the event exactly once and we only keep a
-     * handle to a valid event if it is unsignaled.
+     * Invalidates the current event, as we must signal the event exactly once and we only keep
+     * a handle to a valid event if it is unsignaled.
      */
     void _signalCurrentEventIfReady(WithLock);
 
@@ -499,12 +740,23 @@ private:
      * If a promisedMinSortKey has been received from all remotes, returns the lowest such key.
      * Otherwise, returns boost::none.
      */
-    boost::optional<MinSortKeyRemoteIdPair> _getMinPromisedSortKey(WithLock);
+    boost::optional<MinSortKeyRemotePair> _getMinPromisedSortKey(WithLock) const;
 
     /**
      * Schedules a getMore on any remote hosts which we need another batch from.
      */
     Status _scheduleGetMores(WithLock);
+
+    /**
+     * Schedules a getMore on all remote hosts passed in the 'remotes' vector.
+     */
+    Status _scheduleGetMoresForRemotes(WithLock lk,
+                                       OperationContext* opCtx,
+                                       const std::vector<RemoteCursorPtr>& remotes);
+
+    Status _sendRequestWithRetries(WithLock,
+                                   const executor::RemoteCommandRequest& request,
+                                   const RemoteCursorPtr& remote);
 
     /**
      * Schedules a killCursors command to be run on all remote hosts that have open cursors.
@@ -517,9 +769,12 @@ private:
     bool _shouldKillRemote(WithLock, const RemoteCursorData& remote);
 
     /**
-     * Updates the given remote's metadata (e.g. the cursor id) based on information in 'response'.
+     * Updates the given remote's metadata (e.g. the cursor id) based on information in
+     * 'response'.
      */
-    void _updateRemoteMetadata(WithLock, size_t remoteIndex, const CursorResponse& response);
+    void _updateRemoteMetadata(WithLock,
+                               const RemoteCursorPtr& remote,
+                               const CursorResponse& response);
 
     /**
      * Returns true if the given batch is eligible to provide a high water mark resume token for the
@@ -528,59 +783,140 @@ private:
     bool _checkHighWaterMarkEligibility(WithLock,
                                         BSONObj newMinSortKey,
                                         const RemoteCursorData& remote,
-                                        const CursorResponse& response);
+                                        const CursorResponse& response) const;
 
     /**
      * Sets the initial value of the high water mark sort key, if applicable.
      */
-    void _setInitialHighWaterMark();
+    void _determineInitialHighWaterMark();
 
     /**
-     * Process additional participants received in the responses if necessary.
+     * Processes additional participants received in the responses if necessary.
      */
     void _processAdditionalTransactionParticipants(OperationContext* opCtx);
 
+    /**
+     * Removes a remote from the _promisedMinSortKeys set, if already present in there.
+     */
+    void _removeRemoteFromPromisedMinSortKeys(WithLock lk, const RemoteCursorPtr& remote);
+
+    /**
+     * Rebuilds the merge queue for the remaining remotes. This is supposed to be called internally
+     * after closing cursors.
+     */
+    void _rebuildMergeQueueFromRemainingRemotes(WithLock lk);
+
+    /**
+     * Cancels any potential in-flight callback for the remote.
+     */
+    void _cancelCallbackForRemote(WithLock lk, const RemoteCursorPtr& remote);
 
     OperationContext* _opCtx;
     std::shared_ptr<executor::TaskExecutor> _executor;
-    const AsyncResultsMergerParams _params;
-    TailableModeEnum _tailableMode;
 
-    // Must be acquired before accessing any data members (other than _params, which is read-only).
+    const AsyncResultsMergerParams _params;
+    const TailableModeEnum _tailableMode;
+
+    // Must be acquired before accessing any non-const data members.
     mutable stdx::mutex _mutex;
 
     // Metrics aggregated from remote cursors.
     query_stats::DataBearingNodeMetrics _metrics;
 
-    // Data tracking the state of our communication with each of the remote nodes.
-    std::vector<RemoteCursorData> _remotes;
-    // List of pending responses to be processed for additional participants.
+    /**
+     * Id for the next created 'RemoteCursorData' object to be managed by this 'AsyncResultsMerger'
+     * instance. Id values are guaranteed to be unique for all 'RemoteCursorData' instances managed
+     * by the same 'AsyncResultsMerger'.
+     *
+     * Currently the generated ids are only used when there are multiple remote cursors which have a
+     * next buffered document that compares equal. In this case we need another attribute to break
+     * ties for a deterministic sort order, and we use the internal id for this. This is better
+     * than comparing the pointers of the objects, as the pointer values are less predictable
+     * for example in unit tests.
+     */
+    RemoteCursorData::IdType _nextId = 0;
+
+    /**
+     * Default inline allocation size for the '_remotes' vector. Should be enough for small-size
+     * deployments to never allocate memory on the heap for storing the pointers of remotes.
+     */
+    static constexpr auto kDefaultRemotesContainerSize = 8;
+
+    /**
+     * The container tracking all currently active remotes. Additional remotes can be added to the
+     * container via 'addNewShardCursors()', and remotes can be removed via 'closeShardCursors()'.
+     */
+    absl::InlinedVector<RemoteCursorPtr, kDefaultRemotesContainerSize> _remotes;
+
+    /**
+     * List of pending responses to be processed for additional participants. Remote responses are
+     * buffered here until they are processed in 'nextReady()' or 'detachedFromOperationContext()'.
+     */
     std::queue<RemoteResponse> _remoteResponses;
 
-    // The top of this priority queue is the index into '_remotes' for the remote host that has the
-    // next document to return, according to the sort order. Used only if there is a sort.
-    std::priority_queue<size_t, std::vector<size_t>, MergingComparator> _mergeQueue;
+    /**
+     * The top of this priority queue is the remote host that has the next document to return,
+     * according to the sort order. Used only if there is a sort.
+     *
+     * Note that the priority queue can contain remotes which have already been removed via a call
+     * to 'closeShardCursors()', if there are still buffered and unprocessed responses for that
+     * remote.
+     */
+    std::priority_queue<RemoteCursorPtr,
+                        absl::InlinedVector<RemoteCursorPtr, kDefaultRemotesContainerSize>,
+                        MergingComparator>
+        _mergeQueue;
 
-    // The index into '_remotes' for the remote from which we are currently retrieving results.
-    // Used only if there is *not* a sort.
+    /**
+     * The index into the '_remotes' vector for the remote from which we are currently retrieving
+     * results. Used only if there is *not* a sort. This is used to implement a sort of round-robin
+     * pulling from multiple remotes. The algorithm does not guarantee any strict order, and when
+     * removing a remote, it may start from node 0 again. This is fine however if no particular sort
+     * order was requested.
+     */
     size_t _gettingFromRemote = 0;
 
+    /**
+     * Overall status of this 'AsyncResultsMerger'. Will be updated to a non-OK status if any of the
+     * remotes returns a non-OK status, and will never transition back from non-OK to OK.
+     */
     Status _status = Status::OK();
 
     executor::TaskExecutor::EventHandle _currentEvent;
 
-    // For tailable cursors, set to true if the next result returned from nextReady() should be
-    // boost::none.
-    bool _eofNext = false;
-
     boost::optional<Milliseconds> _awaitDataTimeout;
 
-    // An ordered set of (promisedMinSortKey, remoteIndex) pairs received from the shards. The first
-    // element in the set will be the lowest sort key across all shards.
-    std::set<MinSortKeyRemoteIdPair, PromisedMinSortKeyComparator> _promisedMinSortKeys;
+    /**
+     * An ordered set of (promisedMinSortKey, remote) pairs received from the shards. The first
+     * element in the set will be the lowest sort key across all shards.
+     * We use the lowest of these keys as a high watermark.
+     */
+    absl::btree_set<MinSortKeyRemotePair, PromisedMinSortKeyComparator> _promisedMinSortKeys;
 
-    // For sorted tailable cursors, records the current high-water-mark sort key. Empty otherwise.
+    // For sorted tailable cursors, records the current high-water-mark sort key. Empty
+    // otherwise.
     BSONObj _highWaterMark;
+
+    // Strategy for determining the next high watermark in tailable, awaitData mode. Not used in
+    // other modes.
+    NextHighWaterMarkDeterminingStrategyPtr _nextHighWaterMarkDeterminingStrategy;
+
+    // For tailable cursors, set to true if the next result returned from nextReady() should be
+    // boost::none. Can only ever be true for 'TailableModeEnum::kTailable' cursors, but not for
+    // other cursor types.
+    bool _eofNext = false;
+
+    /**
+     * True if the undo mode is enabled and the results merger stores the last returned result of
+     * 'nextReady()' so it can be undone later.
+     */
+    bool _undoModeEnabled = false;
+
+    /**
+     * State required to undo a previous invocation of the function 'nextReady()'. Will only be
+     * populated if '_undoModeEnabled' is true and a call to 'nextReady()' has been performed.
+     */
+    boost::optional<NextReadyResult> _stateForNextReadyCallUndo;
 
     //
     // Killing
@@ -590,26 +926,26 @@ private:
 
     // Handles the promise/future mechanism used to cleanly shut down the ARM. This avoids race
     // conditions in cases where the underlying TaskExecutor is simultaneously being torn down.
-    struct KillCompletePromiseFuture {
-        KillCompletePromiseFuture() : _future(_promise.get_future()){};
-
-        // Multiple calls to kill() can be made and each must return a future that will be notified
-        // when the ARM has been cleaned up.
-        stdx::shared_future<void> getFuture() {
-            return _future;
+    struct CompletePromiseFuture {
+        // Multiple calls to the method that creates the promise (i.e., kill()) can be made and each
+        // must return a future that will be notified when the ARM has been cleaned up.
+        SharedSemiFuture<void> getFuture() {
+            return _promise.getFuture();
         }
 
-        // Called by the ARM when all outstanding requests have run. Notifies all threads waiting on
-        // shared futures that the ARM has been cleaned up.
+        // Called by the ARM when all outstanding requests have run. Notifies all threads
+        // waiting on shared futures that the ARM has been cleaned up.
         void signalFutures() {
-            _promise.set_value();
+            _promise.emplaceValue();
         }
 
     private:
-        stdx::promise<void> _promise;
-        stdx::shared_future<void> _future;
+        SharedPromise<void> _promise;
     };
-    boost::optional<KillCompletePromiseFuture> _killCompleteInfo;
+
+    boost::optional<CompletePromiseFuture> _killCompleteInfo;
+
+    CancellationSource _cancellationSource;
 };
 
 }  // namespace mongo

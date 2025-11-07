@@ -29,16 +29,17 @@
 
 #include "mongo/db/query/query_stats/query_stats_on_parameter_change.h"
 
-#include <climits>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
-
+#include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/db/client.h"
 #include "mongo/db/query/util/memory_util.h"
 #include "mongo/db/service_context.h"
+
+#include <climits>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
 
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -82,16 +83,33 @@ Status validateQueryStatsStoreSize(const std::string& str, const boost::optional
     return memory_util::MemorySize::parse(str).getStatus();
 }
 
-Status onQueryStatsSamplingRateUpdate(int samplingRate) {
+Status onQueryStatsRateLimiterUpdateImpl() {
     // The client is nullptr if the parameter is supplied from the command line. In this case, we
     // ignore the update event, the parameter will be processed when initializing the service
     // context.
     if (auto client = Client::getCurrent()) {
         auto&& [serviceCtx, updater] = getUpdater(*client);
-        updater->updateSamplingRate(serviceCtx, samplingRate < 0 ? INT_MAX : samplingRate);
+        updater->updateRateLimiter(serviceCtx);
     }
 
     return Status::OK();
+}
+
+Status onQueryStatsRateLimitUpdate(int) {
+    return onQueryStatsRateLimiterUpdateImpl();
+}
+
+Status onQueryStatsSamplingRateUpdate(double) {
+    return onQueryStatsRateLimiterUpdateImpl();
+}
+
+Status validateQueryStatsWriteCmdSampleRate(const double& value, const boost::optional<TenantId>&) {
+    if (value == 0.0 || value == 1.0) {
+        return Status::OK();
+    }
+
+    return Status(ErrorCodes::Error{11204700},
+                  "Query stats write command sample rate should be either 0.0 or 1.0");
 }
 
 const Decorable<ServiceContext>::Decoration<std::unique_ptr<OnParamChangeUpdater>>

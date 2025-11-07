@@ -27,18 +27,7 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/none.hpp>
-#include <limits>
-#include <map>
-#include <mutex>
-#include <ostream>
-#include <set>
-#include <tuple>
-#include <type_traits>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/client/streamable_replica_set_monitor.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/timestamp.h"
@@ -51,16 +40,26 @@
 #include "mongo/client/sdam/server_description.h"
 #include "mongo/client/sdam/topology_description.h"
 #include "mongo/client/sdam/topology_manager.h"
-#include "mongo/client/streamable_replica_set_monitor.h"
 #include "mongo/client/streamable_replica_set_monitor_discovery_time_processor.h"
 #include "mongo/client/streamable_replica_set_monitor_query_processor.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <limits>
+#include <map>
+#include <mutex>
+#include <ostream>
+#include <set>
+#include <tuple>
+#include <type_traits>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -324,6 +323,33 @@ SemiFuture<HostAndPort> StreamableReplicaSetMonitor::getHostOrRefresh(
         .semi();
 }
 
+SemiFuture<HostAndPort> StreamableReplicaSetMonitor::getAtLeastOneHostOrRefresh(
+    const ReadPreferenceSetting& criteria,
+    const stdx::unordered_set<HostAndPort>& deprioritizedServers,
+    const CancellationToken& cancelToken) {
+    return getHostsOrRefresh(criteria, {}, cancelToken)
+        .thenRunOn(_executor)
+        .then([self = shared_from_this(),
+               deprioritizedServers](const std::vector<HostAndPort>& result) -> HostAndPort {
+            invariant(!result.empty());
+            // We do a random shuffle when we get the hosts so we can just pick the first one
+            if (!deprioritizedServers.empty()) {
+                const auto notDeprioritized = [&](const HostAndPort& server) {
+                    return !deprioritizedServers.contains(server);
+                };
+
+                if (auto it = std::ranges::find_if(result, notDeprioritized); it != result.end()) {
+                    return *it;
+                }
+                // All available servers are in deprioritizedServers set, fallback to first server
+            }
+            // Return first server (either no deprioritized servers specified, or all servers are
+            // deprioritized)
+            return result[0];
+        })
+        .semi();
+}
+
 std::vector<HostAndPort> StreamableReplicaSetMonitor::_extractHosts(
     const std::vector<ServerDescriptionPtr>& serverDescriptions) {
     std::vector<HostAndPort> result;
@@ -494,11 +520,13 @@ void StreamableReplicaSetMonitor::_failedHost(const HostAndPort& host,
 
     _doErrorActions(
         host,
+        status.reason(),
         _errorHandler->computeErrorActions(host, status, stage, isApplicationOperation, bson));
 }
 
 void StreamableReplicaSetMonitor::_doErrorActions(
     const HostAndPort& host,
+    const StringData reason,
     const StreamableReplicaSetMonitorErrorHandler::ErrorActions& errorActions) const {
     {
         stdx::lock_guard lock(_mutex);
@@ -506,7 +534,8 @@ void StreamableReplicaSetMonitor::_doErrorActions(
             return;
 
         if (errorActions.dropConnections)
-            _connectionManager->dropConnections(host);
+            _connectionManager->dropConnections(
+                host, Status(ErrorCodes::PooledConnectionsDropped, reason));
 
         if (errorActions.requestImmediateCheck && _serverDiscoveryMonitor)
             _serverDiscoveryMonitor->requestImmediateCheck();
@@ -575,7 +604,6 @@ std::string StreamableReplicaSetMonitor::getServerAddress() const {
             output << ",";
     }
 
-    auto result = output.str();
     return output.str();
 }
 

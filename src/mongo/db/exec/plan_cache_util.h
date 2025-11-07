@@ -29,27 +29,26 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <functional>
-#include <memory>
-#include <utility>
-#include <vector>
-
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/exec/plan_stage.h"
+#include "mongo/db/exec/classic/plan_stage.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collection_query_info.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_cache/plan_cache.h"
 #include "mongo/db/query/plan_cache/plan_cache_debug_info.h"
 #include "mongo/db/query/plan_ranker.h"
 #include "mongo/db/query/plan_ranking_decision.h"
-#include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/stage_builder/sbe/builder_data.h"
+
+#include <memory>
+#include <utility>
+#include <vector>
+
 
 namespace mongo {
 class MultiPlanStage;
@@ -77,7 +76,7 @@ plan_cache_debug_info::DebugInfoSBE buildDebugInfo(const QuerySolution* solution
  */
 void updateClassicPlanCacheFromClassicCandidatesForSbeExecution(
     OperationContext* opCtx,
-    const CollectionPtr& collection,
+    const CollectionAcquisition& collection,
     const CanonicalQuery& query,
     NumReads numReads,
     std::unique_ptr<plan_ranker::PlanRankingDecision> ranking,
@@ -90,7 +89,7 @@ void updateClassicPlanCacheFromClassicCandidatesForSbeExecution(
  */
 void updateClassicPlanCacheFromClassicCandidatesForClassicExecution(
     OperationContext* opCtx,
-    const CollectionPtr& collection,
+    const CollectionAcquisition& collection,
     const CanonicalQuery& query,
     std::unique_ptr<plan_ranker::PlanRankingDecision> ranking,
     std::vector<plan_ranker::CandidatePlan>& candidates);
@@ -147,7 +146,7 @@ struct NoopPlanCacheWriter {
  */
 struct ClassicPlanCacheWriter {
     ClassicPlanCacheWriter(OperationContext* opCtx,
-                           const VariantCollectionPtrOrAcquisition& collection,
+                           const CollectionAcquisition& collection,
                            bool executeInSbe)
         : _opCtx(opCtx), _collection(collection), _executeInSbe(executeInSbe) {}
 
@@ -158,7 +157,7 @@ struct ClassicPlanCacheWriter {
 
 protected:
     OperationContext* _opCtx;
-    VariantCollectionPtrOrAcquisition _collection;
+    CollectionAcquisition _collection;
     bool _executeInSbe;
 };
 
@@ -193,7 +192,7 @@ public:
 
     ConditionalClassicPlanCacheWriter(Mode planCachingMode,
                                       OperationContext* opCtx,
-                                      const VariantCollectionPtrOrAcquisition& collection,
+                                      const CollectionAcquisition& collection,
                                       bool executeInSbe)
         : ClassicPlanCacheWriter(opCtx, collection, executeInSbe),
           _planCachingMode{planCachingMode} {}
@@ -212,6 +211,8 @@ protected:
     const Mode _planCachingMode;
 };
 
-NumReads computeNumReadsFromWorks(const PlanStageStats& stats,
+// This function computes the value of the "reads" metric for the winning plan using the specified
+// 'stats'. This function will always return a positive value.
+NumReads computeNumReadsFromStats(const PlanStageStats& stats,
                                   const plan_ranker::PlanRankingDecision& ranking);
 }  // namespace mongo::plan_cache_util

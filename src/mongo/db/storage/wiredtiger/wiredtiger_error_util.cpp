@@ -27,17 +27,19 @@
  *    it in the license file.
  */
 
-#include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
-
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/exception_util_gen.h"
+#include "mongo/db/storage/exceptions.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_global_options_gen.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_session.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWiredTiger
 
 namespace mongo {
 
 namespace {
+static constexpr auto kTransactionTooLargeForCache =
+    "transaction is too large and will not fit in the storage engine cache"_sd;
 /**
  * Configured WT cache is deemed insufficient for a transaction when its dirty bytes in cache
  * exceed a certain threshold on the proportion of total cache which is used by transaction.
@@ -46,7 +48,7 @@ namespace {
  * transaction is considered too large.
  */
 bool cacheIsInsufficientForTransaction(WT_SESSION* session, double threshold) {
-    StatusWith<int64_t> txnDirtyBytes = WiredTigerUtil::getStatisticsValue(
+    StatusWith<int64_t> txnDirtyBytes = WiredTigerUtil::getStatisticsValue_DoNotUse(
         session, "statistics:session", "", WT_STAT_SESSION_TXN_BYTES_DIRTY);
     if (!txnDirtyBytes.isOK()) {
         tasserted(6190900,
@@ -54,7 +56,7 @@ bool cacheIsInsufficientForTransaction(WT_SESSION* session, double threshold) {
                                 << txnDirtyBytes.getStatus());
     }
 
-    StatusWith<int64_t> cacheDirtyBytes = WiredTigerUtil::getStatisticsValue(
+    StatusWith<int64_t> cacheDirtyBytes = WiredTigerUtil::getStatisticsValue_DoNotUse(
         session, "statistics:", "", WT_STAT_CONN_CACHE_BYTES_DIRTY_LEAF);
     if (!cacheDirtyBytes.isOK()) {
         tasserted(6190901,
@@ -90,45 +92,42 @@ bool txnExceededCacheThreshold(int64_t txnDirtyBytes, int64_t cacheDirtyBytes, d
     return txnBytesDirtyOverCacheBytesDirty > threshold;
 }
 
-bool rollbackReasonWasCachePressure(const char* reason) {
-    return reason &&
-        (strncmp(WT_TXN_ROLLBACK_REASON_OLDEST_FOR_EVICTION,
-                 reason,
-                 sizeof(WT_TXN_ROLLBACK_REASON_OLDEST_FOR_EVICTION)) == 0 ||
-         strncmp(WT_TXN_ROLLBACK_REASON_CACHE_OVERFLOW,
-                 reason,
-                 sizeof(WT_TXN_ROLLBACK_REASON_CACHE_OVERFLOW)) == 0);
+bool rollbackReasonWasCachePressure(int sub_level_err) {
+    return sub_level_err == WT_CACHE_OVERFLOW || sub_level_err == WT_OLDEST_FOR_EVICTION;
 }
 
 void throwCachePressureExceptionIfAppropriate(bool txnTooLargeEnabled,
-                                              bool temporarilyUnavailableEnabled,
                                               bool cacheIsInsufficientForTransaction,
                                               const char* reason,
                                               StringData prefix,
                                               int retCode) {
     if (txnTooLargeEnabled && cacheIsInsufficientForTransaction) {
         throwTransactionTooLargeForCache(
-            generateContextStrStream(prefix, WT_TXN_ROLLBACK_REASON_TOO_LARGE_FOR_CACHE, retCode)
+            generateContextStrStream(prefix, kTransactionTooLargeForCache, retCode)
             << " (" << reason << ")");
     }
-
-    if (temporarilyUnavailableEnabled) {
-        throwTemporarilyUnavailableException(generateContextStrStream(prefix, reason, retCode));
-    }
+    throwTemporarilyUnavailableException(generateContextStrStream(prefix, reason, retCode));
 }
 
 void throwAppropriateException(bool txnTooLargeEnabled,
-                               bool temporarilyUnavailableEnabled,
                                WT_SESSION* session,
                                double cacheThreshold,
-                               const char* reason,
                                StringData prefix,
                                int retCode) {
-    if ((txnTooLargeEnabled || temporarilyUnavailableEnabled) &&
-        rollbackReasonWasCachePressure(reason)) {
+
+    // These values are initialized by WT_SESSION::get_last_error and should only be accessed if the
+    // session is not null.
+    int err = 0;
+    int sub_level_err = WT_NONE;
+    const char* reason = "";
+
+    if (session) {
+        session->get_last_error(session, &err, &sub_level_err, &reason);
+    }
+
+    if (rollbackReasonWasCachePressure(sub_level_err)) {
         throwCachePressureExceptionIfAppropriate(
             txnTooLargeEnabled,
-            temporarilyUnavailableEnabled,
             cacheIsInsufficientForTransaction(session, cacheThreshold),
             reason,
             prefix,
@@ -138,6 +137,19 @@ void throwAppropriateException(bool txnTooLargeEnabled,
     throwWriteConflictException(prefix);
 }
 
+void dumpErrorLog() {
+    int ret = wiredtiger_dump_error_log([](const char* message) -> int {
+        LOGV2(11131000, "WiredTiger dump error log", "message"_attr = message);
+        return 0;
+    });
+
+    if (ret == 0) {
+        return;
+    }
+
+    LOGV2(11131001, "WiredTiger dump error log failed", "ret"_attr = ret);
+}
+
 Status wtRCToStatus_slow(int retCode, WT_SESSION* session, StringData prefix) {
     if (retCode == 0)
         return Status::OK();
@@ -145,22 +157,25 @@ Status wtRCToStatus_slow(int retCode, WT_SESSION* session, StringData prefix) {
     if (retCode == WT_ROLLBACK) {
         double cacheThreshold = gTransactionTooLargeForCacheThreshold.load();
         bool txnTooLargeEnabled = cacheThreshold < 1.0;
-        bool temporarilyUnavailableEnabled = gEnableTemporarilyUnavailableExceptions.load();
-        const char* reason = session ? session->get_rollback_reason(session) : "";
 
-        throwAppropriateException(txnTooLargeEnabled,
-                                  temporarilyUnavailableEnabled,
-                                  session,
-                                  cacheThreshold,
-                                  reason,
-                                  prefix,
-                                  retCode);
+        throwAppropriateException(txnTooLargeEnabled, session, cacheThreshold, prefix, retCode);
     }
 
     // Don't abort on WT_PANIC when repairing, as the error will be handled at a higher layer.
     fassert(28559, retCode != WT_PANIC || storageGlobalParams.repair);
 
-    auto s = generateContextStrStream(prefix, wiredtiger_strerror(retCode), retCode);
+    int err = 0;
+    int subLevelErr = WT_NONE;
+    const char* reason = "";
+    const char* strerror = wiredtiger_strerror(retCode);
+
+    if (session) {
+        session->get_last_error(session, &err, &subLevelErr, &reason);
+    }
+
+    // Combine the sublevel err context with the generic context
+    std::string errContext = std::string(strerror) + (reason ? " - " : "") + reason;
+    auto s = generateContextStrStream(prefix, errContext.c_str(), retCode);
 
     if (retCode == EINVAL) {
         return Status(ErrorCodes::BadValue, s);
@@ -171,11 +186,21 @@ Status wtRCToStatus_slow(int retCode, WT_SESSION* session, StringData prefix) {
     if (retCode == EBUSY) {
         return Status(ErrorCodes::ObjectIsBusy, s);
     }
+    if (retCode == EEXIST) {
+        return Status(ErrorCodes::ObjectAlreadyExists, s);
+    }
+    if (retCode == ENOENT) {
+        return Status(ErrorCodes::NoSuchKey, s);
+    }
 
     uassert(ErrorCodes::ExceededMemoryLimit, s, retCode != WT_CACHE_FULL);
 
-    // TODO convert specific codes rather than just using UNKNOWN_ERROR for everything.
     return Status(ErrorCodes::UnknownError, s);
+}
+
+Status wtRCToStatus_slow(int retCode, WiredTigerSession& session, StringData prefix) {
+    return session.with(
+        [retCode, prefix](WT_SESSION* s) { return wtRCToStatus_slow(retCode, s, prefix); });
 }
 
 }  // namespace mongo

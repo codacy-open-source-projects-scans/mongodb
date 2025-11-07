@@ -29,19 +29,19 @@
 
 #include "mongo/db/index/s2_key_generator.h"
 
-#include <s2cellid.h>
-#include <s2regioncoverer.h>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/db/geo/geometry_container.h"
-#include "mongo/db/query/bson/dotted_path_support.h"
+#include "mongo/db/query/bson/multikey_dotted_path_support.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_dotted_path_support.h"
+
+#include <s2cellid.h>
+#include <s2regioncoverer.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
 
 namespace mongo::index2dsphere {
-namespace dps = ::mongo::dotted_path_support;
+namespace mdps = ::mongo::multikey_dotted_path_support;
 
 MONGO_FAIL_POINT_DEFINE(relaxIndexMaxNumGeneratedKeysPerDocument);
 
@@ -90,7 +90,7 @@ Status S2GetKeysForElement(const BSONElement& element,
     }
     geoContainer.projectInto(SPHERE);
 
-    invariant(geoContainer.hasS2Region());
+    tassert(9911905, "", geoContainer.hasS2Region());
 
     coverer.GetCovering(geoContainer.getS2Region(), out);
     return Status::OK();
@@ -337,7 +337,7 @@ bool getS2OneLiteralKey(const BSONElement& elt,
                         SortedDataIndexAccessMethod::GetKeysContext context,
                         Ordering ordering,
                         size_t maxKeys) {
-    if (Array == elt.type()) {
+    if (BSONType::array == elt.type()) {
         getS2LiteralKeysArray(
             elt.Obj(), collator, keysToAdd, out, keyStringVersion, context, ordering, maxKeys);
         return true;
@@ -416,7 +416,7 @@ void getS2Keys(SharedBufferFragmentBuilder& pooledBufferBuilder,
     bool haveGeoField = false;
 
     if (multikeyPaths) {
-        invariant(multikeyPaths->empty());
+        tassert(9911909, "", multikeyPaths->empty());
         multikeyPaths->resize(keyPattern.nFields());
     }
 
@@ -458,7 +458,7 @@ void getS2Keys(SharedBufferFragmentBuilder& pooledBufferBuilder,
                 // look for these cases and ignore those measurements if we find them.
                 for (auto it = fieldElements.begin(); it != fieldElements.end();) {
                     decltype(it) next = std::next(it);
-                    if (it->isNull() || Undefined == it->type() ||
+                    if (it->isNull() || BSONType::undefined == it->type() ||
                         (it->isABSONObj() && 0 == it->Obj().nFields())) {
                         fieldElements.erase(it);
                     }
@@ -481,11 +481,11 @@ void getS2Keys(SharedBufferFragmentBuilder& pooledBufferBuilder,
                                                                               ordering,
                                                                               maxNumKeys);
             } else {
-                dps::extractAllElementsAlongPath(obj,
-                                                 keyElem.fieldName(),
-                                                 fieldElements,
-                                                 expandArrayOnTrailingField,
-                                                 arrayComponents);
+                mdps::extractAllElementsAlongPath(obj,
+                                                  keyElem.fieldName(),
+                                                  fieldElements,
+                                                  expandArrayOnTrailingField,
+                                                  arrayComponents);
 
                 if (IndexNames::GEO_2DSPHERE == keyElem.str()) {
                     if (params.indexVersion >= S2_INDEX_VERSION_2) {
@@ -498,7 +498,7 @@ void getS2Keys(SharedBufferFragmentBuilder& pooledBufferBuilder,
                         if (1 == fieldElements.size()) {
                             BSONElement elt = *fieldElements.begin();
                             // Get the :null and :undefined cases.
-                            if (elt.isNull() || Undefined == elt.type()) {
+                            if (elt.isNull() || BSONType::undefined == elt.type()) {
                                 fieldElements.clear();
                             } else if (elt.isABSONObj()) {
                                 // And this is the :[] case.
@@ -539,12 +539,12 @@ void getS2Keys(SharedBufferFragmentBuilder& pooledBufferBuilder,
 
             // We expect there to be the missing field element present in the keys if data is
             // missing.  So, this should be non-empty.
-            invariant(!updatedKeysToAdd.empty());
+            tassert(9911906, "", !updatedKeysToAdd.empty());
 
             if (multikeyPaths && lastPathComponentCausesIndexToBeMultikey) {
                 const size_t pathLengthOfThisField =
                     FieldRef{keyElem.fieldNameStringData()}.numParts();
-                invariant(pathLengthOfThisField > 0);
+                tassert(9911907, "", pathLengthOfThisField > 0);
                 (*multikeyPaths)[posInIdx].insert(pathLengthOfThisField - 1);
             }
 
@@ -565,7 +565,7 @@ void getS2Keys(SharedBufferFragmentBuilder& pooledBufferBuilder,
         }
     }
 
-    invariant(keys->empty());
+    tassert(9911908, "", keys->empty());
     auto keysSequence = keys->extract_sequence();
     for (auto& ks : keysToAdd) {
         if (id) {

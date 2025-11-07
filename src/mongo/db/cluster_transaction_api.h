@@ -37,30 +37,28 @@
 #include "mongo/rpc/message.h"
 #include "mongo/s/service_entry_point_router_role.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::txn_api::details {
 
 /**
  * Behaviors for running cluster commands from a non-router process, ie mongod.
  */
-class ClusterSEPTransactionClientBehaviors : public SEPTransactionClientBehaviors {
+class MONGO_MOD_PUB ClusterSEPTransactionClientBehaviors : public SEPTransactionClientBehaviors {
 public:
-    ClusterSEPTransactionClientBehaviors(OperationContext* opCtx);
+    ClusterSEPTransactionClientBehaviors(ServiceContext* service) {}
 
     BSONObj maybeModifyCommand(BSONObj cmdObj) const override;
 
     Future<DbResponse> handleRequest(OperationContext* opCtx,
-                                     const Message& request) const override;
+                                     const Message& request,
+                                     Date_t started) const override;
 
     bool runsClusterOperations() const override {
         // Cluster commands will attach appropriate shard versions for any targeted namespaces, so
         // it is safe to use this client within a caller's operation with shard versions.
         return true;
     }
-
-private:
-    // Flag to check if routing capabilities are enabled.
-    bool _isRouterEnabled = false;
 };
 
 }  // namespace mongo::txn_api::details

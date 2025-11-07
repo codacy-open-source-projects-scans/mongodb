@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -46,10 +39,10 @@
 #include "mongo/db/commands/query_cmd/bulk_write_gen.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbmessage.h"
+#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/resource_yielder.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
@@ -66,10 +59,21 @@
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/functional.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/time_support.h"
 
-namespace mongo::txn_api {
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
+namespace mongo {
+namespace MONGO_MOD_PUB txn_api {
+
 namespace details {
 class TxnHooks;
 class TransactionWithRetries;
@@ -106,12 +110,21 @@ struct CommitResult {
 };
 
 /**
+ * Encapsulates the command status and write concern error from a response to an abortTransaction
+ * command.
+ */
+struct AbortResult {
+    Status cmdStatus;
+    WriteConcernErrorDetail wcError;
+};
+
+/**
  * Interface for the “backend” of an internal transaction responsible for executing commands.
  * Intended to be overriden and customized for different use cases.
  */
 class TransactionClient {
 public:
-    virtual ~TransactionClient(){};
+    virtual ~TransactionClient() {};
 
     /**
      * Called by the transaction that owns this transaction client to install hooks for attaching
@@ -227,11 +240,9 @@ public:
                                std::shared_ptr<executor::InlineExecutor> executor,
                                std::unique_ptr<TransactionClient> txnClient = nullptr);
     /**
-     * Returns a bundle with the commit command status and write concern error, if any. Any error
-     * prior to receiving a response from commit (e.g. an interruption or a user assertion in the
-     * given callback) will result in a non-ok StatusWith. Note that abort errors are not returned
-     * because an abort will only happen implicitly when another error has occurred, and that
-     * original error is returned instead.
+     * Returns a bundle with the transaction command status and write concern error, if any. Note
+     * that abort errors are not returned because an abort will only happen implicitly when another
+     * error has occurred, and that original error is returned instead.
      *
      * Will yield resources on the given opCtx before running if a resourceYielder was provided in
      * the constructor and unyield after running. Unyield will always be attempted if yield
@@ -263,7 +274,7 @@ private:
  * Contains implementation details for the above API. Classes in this namespace should not be used
  * directly.
  */
-namespace details {
+namespace MONGO_MOD_PRIVATE details {
 
 /**
  * Customization point for behaviors different in the default SEPTransactionClient and the one for
@@ -283,19 +294,13 @@ public:
      * Returns a future with the result of running the given request.
      */
     virtual Future<DbResponse> handleRequest(OperationContext* opCtx,
-                                             const Message& request) const = 0;
+                                             const Message& request,
+                                             Date_t started) const = 0;
 
     /**
      * Returns if the client is eligible to run cluster operations.
      */
     virtual bool runsClusterOperations() const = 0;
-
-    Service* getService() {
-        return _service;
-    }
-
-protected:
-    Service* _service;
 };
 
 /**
@@ -304,16 +309,13 @@ protected:
  */
 class DefaultSEPTransactionClientBehaviors : public SEPTransactionClientBehaviors {
 public:
-    DefaultSEPTransactionClientBehaviors(OperationContext* opCtx) {
-        _service = opCtx->getService();
-    }
-
     BSONObj maybeModifyCommand(BSONObj cmdObj) const override {
         return cmdObj;
     }
 
     Future<DbResponse> handleRequest(OperationContext* opCtx,
-                                     const Message& request) const override;
+                                     const Message& request,
+                                     Date_t started) const override;
 
     bool runsClusterOperations() const override {
         return false;
@@ -324,7 +326,7 @@ public:
  * Default transaction client that runs given commands through the local process service entry
  * point.
  */
-class SEPTransactionClient : public TransactionClient {
+class MONGO_MOD_PUB SEPTransactionClient : public TransactionClient {
 public:
     SEPTransactionClient(OperationContext* opCtx,
                          std::shared_ptr<executor::InlineExecutor> inlineExecutor,
@@ -453,10 +455,10 @@ public:
 
     /**
      * Used by the transaction runner to abort the transaction. Returns a future with a non-OK
-     * status if there was an error sending the command, a non-ok command result, or a write concern
-     * error.
+     * status if there was an error sending the command, otherwise returns a future with a bundle
+     * with the command and write concern statuses.
      */
-    SemiFuture<void> abort();
+    SemiFuture<AbortResult> abort();
 
     /**
      * Handles the given transaction result based on where the transaction is in its lifecycle and
@@ -676,7 +678,7 @@ public:
      * Schedules the necessary work to clean up the transacton, assuming it needs cleanup. Callers
      * can wait for cleanup by waiting on the returned future.
      */
-    SemiFuture<void> cleanUp();
+    SemiFuture<AbortResult> cleanUp();
 
 private:
     // Helper methods for running a transaction.
@@ -687,12 +689,13 @@ private:
     /**
      * Attempts to abort the active internal transaction, logging on errors after swallowing them.
      */
-    ExecutorFuture<void> _bestEffortAbort();
+    ExecutorFuture<AbortResult> _bestEffortAbort();
 
     std::shared_ptr<Transaction> _internalTxn;
     std::shared_ptr<executor::InlineExecutor::SleepableExecutor> _executor;
     CancellationToken _token;
 };
 
-}  // namespace details
-}  // namespace mongo::txn_api
+}  // namespace MONGO_MOD_PRIVATE details
+}  // namespace MONGO_MOD_PUB txn_api
+}  // namespace mongo

@@ -29,20 +29,6 @@
 
 #pragma once
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <map>
-#include <memory>
-#include <string>
-#include <tuple>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -50,12 +36,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/commands/server_status.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
+#include "mongo/db/commands/server_status/server_status.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/index_builds/active_index_builds.h"
 #include "mongo/db/index_builds/commit_quorum_options.h"
@@ -65,10 +46,15 @@
 #include "mongo/db/index_builds/rebuild_indexes.h"
 #include "mongo/db/index_builds/repl_index_build_state.h"
 #include "mongo/db/index_builds/resumable_index_builds_gen.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/replication_state_transition_lock_guard.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/disk_space_monitor.h"
 #include "mongo/db/tenant_id.h"
@@ -85,11 +71,28 @@
 #include "mongo/util/string_map.h"
 #include "mongo/util/uuid.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
 
 class OperationContext;
 class ServiceContext;
 enum class RepairData;
+struct IndexBuildInfo;
+
 /**
  * This is a coordinator for all things index builds. Index builds can be externally affected,
  * notified, waited upon and aborted through this interface. Index build results are returned to
@@ -112,6 +115,7 @@ public:
      * Contains additional information required by 'startIndexBuild()'.
      */
     struct IndexBuildOptions {
+        IndexBuildMethodEnum indexBuildMethod{IndexBuildMethodEnum::kHybrid};
         boost::optional<CommitQuorumOptions> commitQuorum;
         ApplicationMode applicationMode = ApplicationMode::kNormal;
         boost::optional<repl::OpTime> startIndexBuildOpTime;
@@ -185,7 +189,7 @@ public:
         OperationContext* opCtx,
         const DatabaseName& dbName,
         const UUID& collectionUUID,
-        const std::vector<BSONObj>& specs,
+        const std::vector<IndexBuildInfo>& indexes,
         const UUID& buildUUID,
         IndexBuildProtocol protocol,
         IndexBuildOptions indexBuildOptions) = 0;
@@ -205,7 +209,7 @@ public:
         OperationContext* opCtx,
         const DatabaseName& dbName,
         const UUID& collectionUUID,
-        const std::vector<BSONObj>& specs,
+        const std::vector<IndexBuildInfo>& indexes,
         const UUID& buildUUID,
         const ResumeIndexInfo& resumeInfo) = 0;
 
@@ -258,9 +262,8 @@ public:
      * Waits for all index builds to stop.
      *
      * This should only be called when certain the server will not start any new index builds --
-     * i.e. after a call to setNewIndexBuildsBlocked -- and potentially after aborting all index
-     * builds that can be aborted -- i.e. using abortAllIndexBuildsWithReason -- to avoid an
-     * excessively long wait.
+     * potentially after aborting all index builds that can be aborted -- i.e. using
+     * abortAllIndexBuildsWithReason -- to avoid an excessively long wait.
      */
     void waitForAllIndexBuildsToStop(OperationContext* opCtx);
 
@@ -331,7 +334,7 @@ public:
     bool abortIndexBuildByBuildUUID(OperationContext* opCtx,
                                     const UUID& buildUUID,
                                     IndexBuildAction signalAction,
-                                    std::string reason);
+                                    Status abortStatus);
     /**
      * Aborts an index build by its index name(s). This will only abort in-progress index builds if
      * all of the indexes are specified that a single builder is building together. When an
@@ -344,23 +347,22 @@ public:
                                                       std::string reason);
 
     /**
+     * Aborts all in progress index builds with the specified status.
+     *
+     * May throw if InterruptedDueToReplStateChange, but suppresses other exceptions.
+     */
+    void abortAllTwoPhaseIndexBuildsForStepUp(OperationContext* opCtx, Status abortStatus);
+
+    /**
      * Signals all of the index builds to abort and then waits until the index builds are no longer
      * running. The provided 'reason' will be used in the error message that the index builders
      * return to their callers.
      *
      * Does not require holding locks.
      *
-     * Does not stop new index builds from starting. If required, caller must make that guarantee
-     * with a call to setNewIndexBuildsBlocked.
+     * Does not stop new index builds from starting.
      */
     void abortAllIndexBuildsWithReason(OperationContext* opCtx, const std::string& reason);
-
-    /**
-     * Blocks or unblocks new index builds from starting. When blocking is enabled, new index builds
-     * will not immediately start and instead wait until a call to unblock is made. Concurrent calls
-     * to this function are not supported.
-     */
-    void setNewIndexBuildsBlocked(bool newValue, boost::optional<std::string> reason = boost::none);
 
     /**
      * Returns true if there is an index builder building the given index names on a collection.
@@ -482,10 +484,9 @@ public:
     void appendBuildInfo(const UUID& buildUUID, BSONObjBuilder* builder) const;
 
     /**
-     * Returns an Action for the DiskSpaceMonitor that kills all index builds when the disk space
-     * drops below a certain threshold.
+     * Registers kill index build action with the input DiskSpaceMonitor.
      */
-    std::unique_ptr<DiskSpaceMonitor::Action> makeKillIndexBuildOnLowDiskSpaceAction();
+    void registerKillIndexBuildAction(DiskSpaceMonitor& diskMonitor);
 
     //
     // Helper functions for creating indexes that do not have to be managed by the
@@ -494,7 +495,8 @@ public:
 
     /**
      * Creates the specified index without yielding locks.
-     * Assumes the caller has collection MODE_X lock.
+     * The caller must ensure exclusive access to the collection either by holding a MODE_X lock on
+     * the collection or the collection must be uncommitted. Generates a new ident for the index.
      * Throws exception on error.
      */
     void createIndex(OperationContext* opCtx,
@@ -504,18 +506,32 @@ public:
                      bool fromMigrate);
 
     /**
+     * Creates the specified index with an already generated ident without yielding locks.
+     * The caller must ensure exclusive access to the collection either by holding a MODE_X lock on
+     * the collection or the collection must be uncommitted. Throws exception on error.
+     */
+    void createIndex(OperationContext* opCtx,
+                     UUID collectionUUID,
+                     const IndexBuildInfo& indexBuildInfo,
+                     IndexBuildsManager::IndexConstraints indexConstraints);
+
+    /**
      * Creates the specified indexes on an empty collection without yielding locks.
      * Assumes we are enclosed in a WriteUnitOfWork and the caller has exclusive access to the
-     * collection. For two phase index builds, writes both startIndexBuild and commitIndexBuild
-     * oplog entries on success. No two phase index build oplog entries, including abortIndexBuild,
-     * will be written on failure. Throws exception on error.
+     * collection. This always writes one-phase createIndex oplog entries on success, and no oplog
+     * entries will be written on failure. Throws exception on error.
      *
-     * This function doesn't apply the default collation because this function is called in
-     * different cases where we want to make an index with a non-default collator.
+     * This function does not modify the supplied specs, including filtering out existing indexes or
+     * adding default collation. If that is needed the caller should call prepareSpecListForCreate()
+     * first.
      */
     static void createIndexesOnEmptyCollection(OperationContext* opCtx,
                                                CollectionWriter& collection,
                                                const std::vector<BSONObj>& specs,
+                                               bool fromMigrate);
+    static void createIndexesOnEmptyCollection(OperationContext* opCtx,
+                                               CollectionWriter& collection,
+                                               std::span<const IndexBuildInfo> indexes,
                                                bool fromMigrate);
 
     void sleepIndexBuilds_forTestOnly(bool sleep);
@@ -523,18 +539,23 @@ public:
     void verifyNoIndexBuilds_forTestOnly() const;
 
     /**
-     * Helper function that adds collation defaults to 'indexSpecs', as well as filtering out
-     * existing indexes (ready or building) and checking uniqueness constraints are compatible with
-     * sharding.
+     * Preprocesses a list of index specs and idents to normalize them and remove any indexes which
+     * already exist in the ready state. Collation defaults are added to each spec if needed,
+     * uniqueness constraints are checked for compatiblity with sharding if applicable, and entries
+     * are removed from both the specs and idents list if the an index with the same spec already
+     * exists. A non-ready index with the same spec is an error.
      *
-     * Produces final specs to use for an index build, if the result is non-empty.
+     * Produces final specs and idents to use for an index build. The two returned vectors will
+     * always have the same length. If they are empty, all indexes requested already exist and no
+     * index build is required.
      *
      * This function throws on error. Expects caller to have exclusive access to `collection`.
      */
-    static std::vector<BSONObj> prepareSpecListForCreate(OperationContext* opCtx,
-                                                         const CollectionPtr& collection,
-                                                         const NamespaceString& nss,
-                                                         const std::vector<BSONObj>& indexSpecs);
+    static std::vector<IndexBuildInfo> prepareSpecListForCreate(
+        OperationContext* opCtx,
+        const CollectionPtr& collection,
+        const NamespaceString& nss,
+        const std::vector<IndexBuildInfo>& indexes);
 
     /**
      * Returns total number of indexes in collection, including unfinished/in-progress indexes.
@@ -554,9 +575,18 @@ private:
      */
     Status _startIndexBuildForRecovery(OperationContext* opCtx,
                                        CollectionWriter& collWriter,
-                                       const std::vector<BSONObj>& specs,
+                                       std::vector<IndexBuildInfo> indexes,
                                        const UUID& buildUUID,
                                        IndexBuildProtocol protocol);
+
+    /**
+     * Restarts the specified index build that is currently not running. Uses
+     * ApplicationMode::kStartupRepair to avoid generating any oplog entries for this operation.
+     */
+    void _restartIndexBuild(OperationContext* opCtx,
+                            const UUID& collUUID,
+                            const UUID& buildUUID,
+                            const std::vector<IndexBuildInfo>& indexes);
 
     /**
      * Removes the in-memory and durable state of the passed in indexes in preparation of rebuilding
@@ -572,12 +602,13 @@ private:
                                         IndexBuildAction signalAction,
                                         const std::string& reason);
 
-protected:
-    void _waitIfNewIndexBuildsBlocked(OperationContext* opCtx,
-                                      const UUID& collectionUUID,
-                                      const std::vector<BSONObj>& specs,
-                                      const UUID& buildUUID);
+    void _createIndex(OperationContext* opCtx,
+                      CollectionWriter& collection,
+                      const IndexBuildInfo& indexBuildInfo,
+                      IndexBuildsManager::IndexConstraints indexConstraints,
+                      bool fromMigrate);
 
+protected:
     /**
      * Acquire the collection MODE_X lock (and other locks up the hierarchy) as usual, with a
      * timeout. On timeout, all locks are released. If 'retry' is true, keeps retrying until
@@ -621,7 +652,7 @@ protected:
     _filterSpecsAndRegisterBuild(OperationContext* opCtx,
                                  const DatabaseName& dbName,
                                  const UUID& collectionUUID,
-                                 const std::vector<BSONObj>& specs,
+                                 const std::vector<IndexBuildInfo>& indexes,
                                  const UUID& buildUUID,
                                  IndexBuildProtocol protocol);
 
@@ -654,7 +685,7 @@ protected:
     Status _setUpIndexBuildForTwoPhaseRecovery(OperationContext* opCtx,
                                                const DatabaseName& dbName,
                                                const UUID& collectionUUID,
-                                               const std::vector<BSONObj>& specs,
+                                               const std::vector<IndexBuildInfo>& indexes,
                                                const UUID& buildUUID);
     /**
      * Reconstructs the in-memory state of the index build so that it can be resumed from the phase
@@ -663,7 +694,7 @@ protected:
     Status _setUpResumeIndexBuild(OperationContext* opCtx,
                                   const DatabaseName& dbName,
                                   const UUID& collectionUUID,
-                                  const std::vector<BSONObj>& specs,
+                                  const std::vector<IndexBuildInfo>& indexes,
                                   const UUID& buildUUID,
                                   const ResumeIndexInfo& resumeInfo);
 
@@ -675,7 +706,7 @@ protected:
     void _runIndexBuild(OperationContext* opCtx,
                         const UUID& buildUUID,
                         const IndexBuildOptions& indexBuildOptions,
-                        const boost::optional<ResumeIndexInfo>& resumeInfo) noexcept;
+                        const boost::optional<ResumeIndexInfo>& resumeInfo);
 
     /**
      * Acquires locks and runs index build. Throws on error.
@@ -687,14 +718,15 @@ protected:
                              const boost::optional<ResumeIndexInfo>& resumeInfo);
 
     /**
-     * Resumes the index build from the phase that it was in when the node cleanly shut down. By the
-     * time this function is called, the in-memory state of the index build should already have been
-     * reconstructed.
+     * Resumes a kHybrid index build from the phase that it was in when the node cleanly shut down.
+     * By the time this function is called, the in-memory state of the index build should already
+     * have been reconstructed.
+     * TODO(SERVER-109664): Rename it to _resumeTwoPhaseIndexBuildFromPhase().
      */
-    void _resumeIndexBuildFromPhase(OperationContext* opCtx,
-                                    std::shared_ptr<ReplIndexBuildState> replState,
-                                    const IndexBuildOptions& indexBuildOptions,
-                                    const ResumeIndexInfo& resumeInfo);
+    void _resumeHybridIndexBuildFromPhase(OperationContext* opCtx,
+                                          std::shared_ptr<ReplIndexBuildState> replState,
+                                          const IndexBuildOptions& indexBuildOptions,
+                                          const ResumeIndexInfo& resumeInfo);
 
     /**
      * Cleans up the index build after a failure. If a shutdown happens during clean-up, defaults to
@@ -710,7 +742,6 @@ protected:
      * allows handling shutdown errors during the clean-up itself, in _cleanUpAfterFailure.
      */
     void _cleanUpSinglePhaseAfterNonShutdownFailure(OperationContext* opCtx,
-                                                    const CollectionPtr& collection,
                                                     std::shared_ptr<ReplIndexBuildState> replState,
                                                     const IndexBuildOptions& indexBuildOptions);
 
@@ -719,7 +750,6 @@ protected:
      * handling shutdown errors during the clean-up itself, in _cleanUpAfterFailure.
      */
     void _cleanUpTwoPhaseAfterNonShutdownFailure(OperationContext* opCtx,
-                                                 const CollectionPtr& collection,
                                                  std::shared_ptr<ReplIndexBuildState> replState,
                                                  const IndexBuildOptions& indexBuildOptions);
 
@@ -750,11 +780,20 @@ protected:
         OperationContext* opCtx, std::shared_ptr<ReplIndexBuildState> replState);
 
     /**
-     * Modularizes the _indexBuildsManager calls part of _runIndexBuildInner. Throws on error.
+     * Builds an index using kHybrid index build method. Modularizes the _indexBuildsManager calls
+     * part of _runIndexBuildInner. Throws on error.
+     * TODO(SERVER-109664): Rename it to _buildTwoPhaseIndex().
      */
-    void _buildIndex(OperationContext* opCtx,
-                     std::shared_ptr<ReplIndexBuildState> replState,
-                     const IndexBuildOptions& indexBuildOptions);
+    void _buildHybridIndex(OperationContext* opCtx,
+                           std::shared_ptr<ReplIndexBuildState> replState,
+                           const IndexBuildOptions& indexBuildOptions);
+
+    /**
+     * Builds an index using kPrimaryDriven index build method.
+     */
+    void _buildPrimaryDrivenIndex(OperationContext* opCtx,
+                                  std::shared_ptr<ReplIndexBuildState> replState,
+                                  const IndexBuildOptions& indexBuildOptions);
 
     /**
      * First phase is the collection scan and insertion of the keys into the sorter.
@@ -769,17 +808,12 @@ protected:
      */
     void _insertSortedKeysIntoIndexForResume(OperationContext* opCtx,
                                              std::shared_ptr<ReplIndexBuildState> replState);
-    CollectionPtr _setUpForScanCollectionAndInsertSortedKeysIntoIndex(
-        OperationContext* opCtx, std::shared_ptr<ReplIndexBuildState> replState);
 
     /**
      * Third phase is catching up on all the writes that occurred during the first two phases.
      */
     void _insertKeysFromSideTablesWithoutBlockingWrites(
         OperationContext* opCtx, std::shared_ptr<ReplIndexBuildState> replState);
-    void _insertKeysFromSideTablesBlockingWrites(OperationContext* opCtx,
-                                                 std::shared_ptr<ReplIndexBuildState> replState,
-                                                 const IndexBuildOptions& indexBuildOptions);
 
     /**
      * Reads the commit ready members list for index build UUID in 'replState' from
@@ -827,7 +861,7 @@ protected:
     /**
      * Drains the side-writes table periodically while waiting for the IndexBuildAction to be ready.
      */
-    virtual IndexBuildAction _drainSideWritesUntilNextActionIsAvailable(
+    virtual IndexBuildAction _waitForNextIndexBuildAction(
         OperationContext* opCtx, std::shared_ptr<ReplIndexBuildState> replState) = 0;
 
     /**
@@ -895,7 +929,7 @@ protected:
         OperationContext* opCtx,
         CollectionWriter& collection,
         const UUID& buildUUID,
-        RepairData repair) noexcept;
+        RepairData repair);
 
     /**
      * Looks up active index build by UUID. Returns NoSuchKey if the build does not exist.
@@ -920,21 +954,11 @@ protected:
 
     // The thread spawned during step-up to verify the builds.
     stdx::thread _stepUpThread;
-
-    // Manages _newIndexBuildsBlocked.
-    mutable stdx::mutex _newIndexBuildsBlockedMutex;
-    // Condition signalled to indicate new index builds are unblocked.
-    stdx::condition_variable _newIndexBuildsBlockedCV;
-    // Protected by _newIndexBuildsBlockedMutex.
-    bool _newIndexBuildsBlocked = false;
-    // Reason for blocking new index builds.
-    boost::optional<std::string> _blockReason;
 };
 
 // These fail points are used to control index build progress. Declared here to be shared
 // temporarily between createIndexes command and IndexBuildsCoordinator.
 extern FailPoint hangAfterIndexBuildFirstDrain;
-extern FailPoint hangAfterIndexBuildSecondDrain;
 extern FailPoint hangAfterIndexBuildDumpsInsertsFromBulk;
 
 }  // namespace mongo

@@ -27,21 +27,22 @@
  *    it in the license file.
  */
 
-#include <string>
-#include <vector>
+#include "mongo/transport/grpc/mock_client.h"
 
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/rpc/message.h"
-#include "mongo/transport/grpc/mock_client.h"
 #include "mongo/transport/grpc/mock_wire_version_provider.h"
 #include "mongo/transport/grpc/test_fixtures.h"
 #include "mongo/transport/grpc/util.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/unittest/log_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/uuid.h"
+
+#include <string>
+#include <vector>
 
 namespace mongo::transport::grpc {
 
@@ -51,8 +52,17 @@ public:
         return HostAndPort("localhost", 1234);
     }
 
-    virtual void setUp() override {
+    void setUp() override {
         _reactor = std::make_shared<GRPCReactor>();
+        _ioThread = stdx::thread([&]() {
+            _reactor->run();
+            _reactor->drain();
+        });
+    }
+
+    void tearDown() override {
+        _reactor->stop();
+        _ioThread.join();
     }
 
     const std::shared_ptr<GRPCReactor>& getReactor() {
@@ -61,6 +71,10 @@ public:
 
 private:
     std::shared_ptr<GRPCReactor> _reactor;
+    stdx::thread _ioThread;
+
+    unittest::MinimumLoggedSeverityGuard logSeverityGuardNetwork{logv2::LogComponent::kNetwork,
+                                                                 logv2::LogSeverity::Debug(4)};
 };
 
 TEST_F(MockClientTest, MockConnect) {
@@ -82,11 +96,14 @@ TEST_F(MockClientTest, MockConnect) {
     };
 
     auto clientThreadBody = [&](MockClient& client, auto& monitor) {
-        client.start(getServiceContext());
+        client.start();
 
         for (auto& addr : addresses) {
-            auto session = client.connect(
-                addr, getReactor(), CommandServiceTestFixtures::kDefaultConnectTimeout, {});
+            auto session =
+                client
+                    .connect(
+                        addr, getReactor(), CommandServiceTestFixtures::kDefaultConnectTimeout, {})
+                    .get();
             ON_BLOCK_EXIT([&] { session->end(); });
             ASSERT_TRUE(session->isConnected());
 
@@ -101,7 +118,66 @@ TEST_F(MockClientTest, MockConnect) {
         }
     };
 
-    CommandServiceTestFixtures::runWithMockServers(addresses, serverHandler, clientThreadBody);
+    CommandServiceTestFixtures::runWithMockServers(
+        addresses, getServiceContext(), serverHandler, clientThreadBody);
+}
+
+TEST_F(MockClientTest, ConnectTimeout) {
+    auto serverHandler = [&](HostAndPort local, std::shared_ptr<IngressSession> session) {
+    };
+
+    auto clientThreadBody = [&](Client& client, auto& monitor) {
+        client.start();
+        FailPointEnableBlock fp("grpcHangOnStreamEstablishment");
+        auto status =
+            client.connect(defaultServerAddress(), getReactor(), Milliseconds(5), {}).getNoThrow();
+        fp->waitForTimesEntered(fp.initialTimesEntered() + 1);
+        ASSERT_NOT_OK(status);
+        ASSERT_EQ(status.getStatus().code(), ErrorCodes::ExceededTimeLimit);
+    };
+
+    CommandServiceTestFixtures::runWithMockServers(
+        {defaultServerAddress()}, getServiceContext(), serverHandler, clientThreadBody);
+}
+
+TEST_F(MockClientTest, ConnectCancelled) {
+    auto serverHandler = [&](HostAndPort local, std::shared_ptr<IngressSession> session) {
+    };
+
+    auto clientThreadBody = [&](Client& client, auto& monitor) {
+        CancellationSource cancelSource;
+        client.start();
+        FailPointEnableBlock fp("grpcHangOnStreamEstablishment");
+        auto connectFut = client.connect(
+            defaultServerAddress(), getReactor(), Minutes(30), {}, cancelSource.token());
+        fp->waitForTimesEntered(fp.initialTimesEntered() + 1);
+        cancelSource.cancel();
+        auto status = connectFut.getNoThrow();
+        ASSERT_NOT_OK(status);
+        ASSERT_EQ(status.getStatus().code(), ErrorCodes::CallbackCanceled);
+    };
+
+    CommandServiceTestFixtures::runWithMockServers(
+        {defaultServerAddress()}, getServiceContext(), serverHandler, clientThreadBody);
+}
+
+TEST_F(MockClientTest, ConnectCancelledByShutdown) {
+    auto serverHandler = [&](HostAndPort local, std::shared_ptr<IngressSession> session) {
+    };
+
+    auto clientThreadBody = [&](Client& client, auto& monitor) {
+        client.start();
+        FailPointEnableBlock fp("grpcHangOnStreamEstablishment");
+        auto connectFut = client.connect(defaultServerAddress(), getReactor(), Minutes(30), {});
+        fp->waitForTimesEntered(fp.initialTimesEntered() + 1);
+        client.shutdown();
+        auto status = connectFut.getNoThrow();
+        ASSERT_NOT_OK(status);
+        ASSERT_EQ(status.getStatus().code(), ErrorCodes::ShutdownInProgress);
+    };
+
+    CommandServiceTestFixtures::runWithMockServers(
+        {defaultServerAddress()}, getServiceContext(), serverHandler, clientThreadBody);
 }
 
 TEST_F(MockClientTest, MockAuthToken) {
@@ -112,18 +188,20 @@ TEST_F(MockClientTest, MockAuthToken) {
     };
 
     auto clientThreadBody = [&](MockClient& client, auto& monitor) {
-        client.start(getServiceContext());
+        client.start();
         Client::ConnectOptions options;
         options.authToken = kAuthToken;
-        auto session = client.connect(defaultServerAddress(),
-                                      getReactor(),
-                                      CommandServiceTestFixtures::kDefaultConnectTimeout,
-                                      options);
+        auto session = client
+                           .connect(defaultServerAddress(),
+                                    getReactor(),
+                                    CommandServiceTestFixtures::kDefaultConnectTimeout,
+                                    options)
+                           .get();
         ASSERT_OK(session->finish());
     };
 
     CommandServiceTestFixtures::runWithMockServers(
-        {defaultServerAddress()}, serverHandler, clientThreadBody);
+        {defaultServerAddress()}, getServiceContext(), serverHandler, clientThreadBody);
 }
 
 TEST_F(MockClientTest, MockNoAuthToken) {
@@ -132,16 +210,18 @@ TEST_F(MockClientTest, MockNoAuthToken) {
     };
 
     auto clientThreadBody = [&](MockClient& client, auto& monitor) {
-        client.start(getServiceContext());
-        auto session = client.connect(defaultServerAddress(),
-                                      getReactor(),
-                                      CommandServiceTestFixtures::kDefaultConnectTimeout,
-                                      {});
+        client.start();
+        auto session = client
+                           .connect(defaultServerAddress(),
+                                    getReactor(),
+                                    CommandServiceTestFixtures::kDefaultConnectTimeout,
+                                    {})
+                           .get();
         ASSERT_OK(session->finish());
     };
 
     CommandServiceTestFixtures::runWithMockServers(
-        {defaultServerAddress()}, serverHandler, clientThreadBody);
+        {defaultServerAddress()}, getServiceContext(), serverHandler, clientThreadBody);
 }
 
 TEST_F(MockClientTest, MockClientShutdown) {
@@ -163,14 +243,16 @@ TEST_F(MockClientTest, MockClientShutdown) {
 
     auto clientThreadBody = [&](MockClient& client, auto& monitor) {
         mongo::Client::initThread("MockClientShutdown", getGlobalServiceContext()->getService());
-        client.start(getServiceContext());
+        client.start();
 
         std::vector<std::shared_ptr<EgressSession>> sessions;
         for (int i = 0; i < kNumRpcs; i++) {
-            sessions.push_back(client.connect(defaultServerAddress(),
-                                              getReactor(),
-                                              CommandServiceTestFixtures::kDefaultConnectTimeout,
-                                              {}));
+            sessions.push_back(client
+                                   .connect(defaultServerAddress(),
+                                            getReactor(),
+                                            CommandServiceTestFixtures::kDefaultConnectTimeout,
+                                            {})
+                                   .get());
         }
 
         Notification<void> shutdownFinished;
@@ -197,7 +279,7 @@ TEST_F(MockClientTest, MockClientShutdown) {
     };
 
     CommandServiceTestFixtures::runWithMockServers(
-        {defaultServerAddress()}, serverHandler, clientThreadBody);
+        {defaultServerAddress()}, getServiceContext(), serverHandler, clientThreadBody);
 }
 
 TEST_F(MockClientTest, MockClientMetadata) {
@@ -212,22 +294,27 @@ TEST_F(MockClientTest, MockClientMetadata) {
     };
 
     auto clientThreadBody = [&](MockClient& client, auto& monitor) {
-        client.start(getServiceContext());
+        client.start();
         clientId.set(client.id());
-        auto session = client.connect(defaultServerAddress(),
-                                      getReactor(),
-                                      CommandServiceTestFixtures::kDefaultConnectTimeout,
-                                      {});
+        auto session = client
+                           .connect(defaultServerAddress(),
+                                    getReactor(),
+                                    CommandServiceTestFixtures::kDefaultConnectTimeout,
+                                    {})
+                           .get();
         ASSERT_OK(session->finish());
     };
 
-    CommandServiceTestFixtures::runWithMockServers(
-        {defaultServerAddress()}, serverHandler, clientThreadBody, metadataDoc);
+    CommandServiceTestFixtures::runWithMockServers({defaultServerAddress()},
+                                                   getServiceContext(),
+                                                   serverHandler,
+                                                   clientThreadBody,
+                                                   metadataDoc);
 }
 
 TEST_F(MockClientTest, WireVersionGossipping) {
     auto wvProvider = std::make_shared<MockWireVersionProvider>();
-    const auto kServerMaxWireVersion = 24;
+    const auto kServerMaxWireVersion = util::constants::kMinimumWireVersion + 1;
     wvProvider->setClusterMaxWireVersion(kServerMaxWireVersion);
 
     auto serverHandler = [&](HostAndPort local, std::shared_ptr<IngressSession> session) {
@@ -239,14 +326,16 @@ TEST_F(MockClientTest, WireVersionGossipping) {
     };
 
     auto clientThreadBody = [&](MockClient& client, auto& monitor) {
-        client.start(getServiceContext());
+        client.start();
         ASSERT_EQ(client.getClusterMaxWireVersion(), util::constants::kMinimumWireVersion);
 
         auto runTest = [&](int initialWireVersion, int updatedWireVersion) {
-            auto session = client.connect(defaultServerAddress(),
-                                          getReactor(),
-                                          CommandServiceTestFixtures::kDefaultConnectTimeout,
-                                          {});
+            auto session = client
+                               .connect(defaultServerAddress(),
+                                        getReactor(),
+                                        CommandServiceTestFixtures::kDefaultConnectTimeout,
+                                        {})
+                               .get();
             ASSERT_EQ(client.getClusterMaxWireVersion(), initialWireVersion);
             ASSERT_OK(session->sinkMessage(makeUniqueMessage()));
             ASSERT_EQ(client.getClusterMaxWireVersion(), initialWireVersion);
@@ -261,6 +350,7 @@ TEST_F(MockClientTest, WireVersionGossipping) {
     };
 
     CommandServiceTestFixtures::runWithMockServers({defaultServerAddress()},
+                                                   getServiceContext(),
                                                    serverHandler,
                                                    clientThreadBody,
                                                    makeClientMetadataDocument(),

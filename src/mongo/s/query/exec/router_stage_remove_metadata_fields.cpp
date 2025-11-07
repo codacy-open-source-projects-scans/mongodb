@@ -27,19 +27,20 @@
  *    it in the license file.
  */
 
-#include <utility>
-
-#include <absl/container/flat_hash_set.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/s/query/exec/router_stage_remove_metadata_fields.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/s/query/exec/router_stage_remove_metadata_fields.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
+
+#include <utility>
+
+#include <absl/container/flat_hash_set.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -47,13 +48,15 @@ RouterStageRemoveMetadataFields::RouterStageRemoveMetadataFields(
     OperationContext* opCtx, std::unique_ptr<RouterExecStage> child, StringDataSet metadataFields)
     : RouterExecStage(opCtx, std::move(child)), _metaFields(std::move(metadataFields)) {
     for (auto&& fieldName : _metaFields) {
-        invariant(fieldName[0] == '$');  // We use this information to optimize next().
+        tassert(11052352,
+                fmt::format("Expected a $-prefixed metadata field but got {}", fieldName),
+                fieldName[0] == '$');  // We use this information to optimize next().
     }
 }
 
 StatusWith<ClusterQueryResult> RouterStageRemoveMetadataFields::next() {
     auto childResult = getChildStage()->next();
-    if (!childResult.isOK() || !childResult.getValue().getResult()) {
+    if (!childResult.isOK() || childResult.getValue().isEOF()) {
         return childResult;
     }
 

@@ -29,9 +29,6 @@
 
 #include "mongo/rpc/write_concern_error_detail.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/error_extra_info.h"
 #include "mongo/base/string_data.h"
@@ -43,12 +40,20 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
 
 using std::string;
 
 WriteConcernErrorDetail::WriteConcernErrorDetail() {
     clear();
+}
+
+WriteConcernErrorDetail::WriteConcernErrorDetail(Status status) {
+    clear();
+    setStatus(std::move(status));
 }
 
 bool WriteConcernErrorDetail::isValid(string* errMsg) const {
@@ -89,7 +94,7 @@ bool WriteConcernErrorDetail::parseBSON(const BSONObj& source, string* errMsg) {
         errMsg = &dummy;
 
     try {
-        auto wce = WriteConcernError::parse(IDLParserContext{"writeConcernError"}, source);
+        auto wce = WriteConcernError::parse(source, IDLParserContext{"writeConcernError"});
         _status = Status(ErrorCodes::Error(wce.getCode()), wce.getErrmsg(), source);
         if ((_isErrInfoSet = wce.getErrInfo().has_value())) {
             _errInfo = wce.getErrInfo().value().getOwned();
@@ -162,7 +167,7 @@ WriteConcernErrorDetail getWriteConcernErrorDetail(const BSONElement& wcErrorEle
 
 std::unique_ptr<WriteConcernErrorDetail> getWriteConcernErrorDetailFromBSONObj(const BSONObj& obj) {
     BSONElement wcErrorElem;
-    Status status = bsonExtractTypedField(obj, "writeConcernError", Object, &wcErrorElem);
+    Status status = bsonExtractTypedField(obj, "writeConcernError", BSONType::object, &wcErrorElem);
     if (!status.isOK()) {
         if (status == ErrorCodes::NoSuchKey) {
             return nullptr;

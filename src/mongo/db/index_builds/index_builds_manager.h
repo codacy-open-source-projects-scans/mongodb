@@ -29,27 +29,18 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <functional>
-#include <map>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/index_builds/index_build_interceptor.h"
 #include "mongo/db/index_builds/multi_index_block.h"
 #include "mongo/db/index_builds/rebuild_indexes.h"
 #include "mongo/db/index_builds/repl_index_build_state.h"
 #include "mongo/db/index_builds/resumable_index_builds_gen.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/index_catalog.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
@@ -57,12 +48,23 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/uuid.h"
 
+#include <functional>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
 
 class Collection;
 class CollectionPtr;
 class OperationContext;
 class ServiceContext;
+struct IndexBuildInfo;
 
 enum IndexBuildRecoveryState { Building, Verifying, Committing };
 
@@ -90,8 +92,14 @@ public:
         SetupOptions();
         IndexConstraints indexConstraints = IndexConstraints::kEnforce;
         IndexBuildProtocol protocol = IndexBuildProtocol::kSinglePhase;
-        IndexBuildMethod method = IndexBuildMethod::kHybrid;
+        IndexBuildMethodEnum method = IndexBuildMethodEnum::kHybrid;
         bool forRecovery = false;
+        // Indicates whether this node should produce any table writes during the index build. When
+        // this is false, it means that this node is a secondary and is only applying writes
+        // received from the primary via the oplog.
+        // TODO(SERVER-111304): We might be able to remove this field by not creating an instance of
+        // IndexBuildInterceptor on a standby in case of primary driven index builds.
+        bool generateTableWrites{true};
     };
 
     IndexBuildsManager() = default;
@@ -103,7 +111,7 @@ public:
     using OnInitFn = MultiIndexBlock::OnInitFn;
     Status setUpIndexBuild(OperationContext* opCtx,
                            CollectionWriter& collection,
-                           const std::vector<BSONObj>& specs,
+                           const std::vector<IndexBuildInfo>& indexes,
                            const UUID& buildUUID,
                            OnInitFn onInit,
                            SetupOptions options = {},
@@ -119,12 +127,13 @@ public:
      * Runs the scanning/insertion phase of the index build..
      */
     Status startBuildingIndex(OperationContext* opCtx,
-                              const CollectionPtr& collection,
+                              const DatabaseName& dbName,
+                              const UUID& collectionUUID,
                               const UUID& buildUUID,
                               const boost::optional<RecordId>& resumeAfterRecordId = boost::none);
 
     Status resumeBuildingIndexFromBulkLoadPhase(OperationContext* opCtx,
-                                                const CollectionPtr& collection,
+                                                const CollectionAcquisition& collection,
                                                 const UUID& buildUUID);
 
     /**
@@ -135,7 +144,7 @@ public:
      */
     StatusWith<std::pair<long long, long long>> startBuildingIndexForRecovery(
         OperationContext* opCtx,
-        const CollectionPtr& coll,
+        const CollectionAcquisition& coll,
         const UUID& buildUUID,
         RepairData repair);
 

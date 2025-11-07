@@ -27,30 +27,19 @@
  *    it in the license file.
  */
 
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/inlined_vector.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/ordering.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
+#include "mongo/db/exec/sbe/sbe_plan_stage_test.h"
 #include "mongo/db/exec/sbe/stages/branch.h"
 #include "mongo/db/exec/sbe/stages/bson_scan.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
 #include "mongo/db/exec/sbe/stages/exchange.h"
 #include "mongo/db/exec/sbe/stages/filter.h"
 #include "mongo/db/exec/sbe/stages/hash_agg.h"
+#include "mongo/db/exec/sbe/stages/hash_agg_accumulator.h"
 #include "mongo/db/exec/sbe/stages/hash_join.h"
 #include "mongo/db/exec/sbe/stages/ix_scan.h"
 #include "mongo/db/exec/sbe/stages/limit_skip.h"
@@ -63,18 +52,25 @@
 #include "mongo/db/exec/sbe/stages/sorted_merge.h"
 #include "mongo/db/exec/sbe/stages/spool.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/exec/sbe/stages/traverse.h"
 #include "mongo/db/exec/sbe/stages/union.h"
 #include "mongo/db/exec/sbe/stages/unique.h"
 #include "mongo/db/exec/sbe/stages/unwind.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/query/stage_types.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/storage/key_string/key_string.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/id_generator.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
 
 namespace mongo::sbe {
 
@@ -151,16 +147,19 @@ TEST_F(PlanSizeTest, Filter) {
 }
 
 TEST_F(PlanSizeTest, HashAgg) {
-    auto stage = makeS<HashAggStage>(mockS(),
-                                     mockSV(),
-                                     makeAggExprVector(generateSlotId(), mockE(), mockE()),
-                                     makeSV(),
-                                     true,
-                                     generateSlotId(),
-                                     false,
-                                     makeSlotExprPairVec(),
-                                     nullptr /* yieldPolicy */,
-                                     kEmptyPlanNodeId);
+    auto stage = makeS<HashAggStage>(
+        mockS(),
+        mockSV(),
+        makeHashAggAccumulatorList(std::make_unique<CompiledHashAggAccumulator>(
+                                       generateSlotId(), generateSlotId(), mockE(), mockE()),
+                                   std::make_unique<ArithmeticAverageHashAggAccumulatorTerminal>(
+                                       generateSlotId(), generateSlotId(), mockE(), boost::none)),
+        makeSV(),
+        true,
+        generateSlotId(),
+        false,
+        nullptr /* yieldPolicy */,
+        kEmptyPlanNodeId);
     assertPlanSize(*stage);
 }
 
@@ -275,7 +274,6 @@ TEST_F(PlanSizeTest, Scan) {
                                        generateSlotId() /* indexIdSlot */,
                                        generateSlotId() /* indexKeySlot */,
                                        generateSlotId() /* indexKeyPatternSlot */,
-                                       boost::none /* oplogTsSlot */,
                                        std::vector<std::string>{"field"} /* scanFieldNames */,
                                        mockSV() /* scanFieldSlots */,
                                        generateSlotId() /* seekRecordIdSlot */,
@@ -285,6 +283,25 @@ TEST_F(PlanSizeTest, Scan) {
                                        nullptr /* yieldPolicy */,
                                        kEmptyPlanNodeId /* nodeId */,
                                        ScanCallbacks());
+    assertPlanSize(*stage);
+}
+
+TEST_F(PlanSizeTest, ParallelScan) {
+    auto collUuid = UUID::parse("00000000-0000-0000-0000-000000000000").getValue();
+    auto stage =
+        makeS<sbe::ParallelScanStage>(collUuid,
+                                      DatabaseName(),
+                                      generateSlotId() /* recordSlot */,
+                                      generateSlotId() /* recordIdSlot */,
+                                      generateSlotId() /* snapshotIdSlot */,
+                                      generateSlotId() /* indexIdSlot */,
+                                      generateSlotId() /* indexKeySlot */,
+                                      generateSlotId() /* indexKeyPatternSlot */,
+                                      std::vector<std::string>{"field"} /* scanFieldNames */,
+                                      mockSV() /* scanFieldSlots */,
+                                      nullptr /* yieldPolicy */,
+                                      kEmptyPlanNodeId /* nodeId */,
+                                      ScanCallbacks());
     assertPlanSize(*stage);
 }
 
@@ -334,20 +351,6 @@ TEST_F(PlanSizeTest, SpoolLazyProducer) {
 TEST_F(PlanSizeTest, SpoolConsumer) {
     auto stage =
         makeS<SpoolConsumerStage<true>>(1, mockSV(), nullptr /* yieldPolicy */, kEmptyPlanNodeId);
-    assertPlanSize(*stage);
-}
-
-TEST_F(PlanSizeTest, Traverse) {
-    auto stage = makeS<TraverseStage>(mockS(),
-                                      mockS(),
-                                      generateSlotId(),
-                                      generateSlotId(),
-                                      generateSlotId(),
-                                      mockSV(),
-                                      nullptr,
-                                      nullptr,
-                                      kEmptyPlanNodeId,
-                                      boost::none);
     assertPlanSize(*stage);
 }
 

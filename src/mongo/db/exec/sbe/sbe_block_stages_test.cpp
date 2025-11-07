@@ -31,12 +31,6 @@
  * This file contains tests for sbe::TsBlockToCellBlockStage and sbe::BlockToRowStage.
  */
 
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <tuple>
-#include <vector>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/exec/sbe/sbe_plan_stage_test.h"
@@ -48,10 +42,15 @@
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
 #include "mongo/db/timeseries/bucket_compression.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/unittest/unittest.h"
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <vector>
 
 namespace mongo::sbe {
-using namespace fmt::literals;
 class BlockStagesTest : public PlanStageTestFixture {
 protected:
     BSONObj compressBucket(const BSONObj& bucket) {
@@ -89,11 +88,10 @@ protected:
 
         auto bitmapSlot = generateSlotId();
 
-        std::vector<value::CellBlock::PathRequest> pathRequests;
+        std::vector<value::PathRequest> pathRequests;
         for (const auto& cellPath : cellPaths) {
-            pathRequests.emplace_back(value::CellBlock::PathRequest(
-                value::CellBlock::PathRequestType::kFilter,
-                {value::CellBlock::Get{cellPath}, value::CellBlock::Id{}}));
+            pathRequests.emplace_back(value::PathRequest(value::PathRequestType::kFilter,
+                                                         {value::Get{cellPath}, value::Id{}}));
         }
 
         auto tsBucketStage = makeS<TsBucketToCellBlockStage>(std::move(input),
@@ -102,7 +100,7 @@ protected:
                                                              blockSlots,
                                                              metaSlot,
                                                              bitmapSlot,
-                                                             tsOptions.getTimeField().toString(),
+                                                             std::string{tsOptions.getTimeField()},
                                                              1 /*nodeId*/);
 
         return {std::move(tsBucketStage), std::move(blockSlots), bitmapSlot, metaSlot};
@@ -165,7 +163,8 @@ protected:
             if (metaAccessor) {
                 auto metaTagVal = metaAccessor->getViewOfValue();
                 auto expectedTagVal = bson::convertFrom<true>(expectedData[i]["tag"]);
-                ASSERT_THAT(expectedTagVal, ValueEq(metaTagVal)) << "for {}th 'tag'"_format(i);
+                ASSERT_THAT(expectedTagVal, ValueEq(metaTagVal))
+                    << fmt::format("for {}th 'tag'", i);
             }
 
             // Verifies rows.
@@ -174,15 +173,15 @@ protected:
                 auto expectedTagVal = bson::convertFrom<true>(expectedData[i][cellPaths[j]]);
 
                 ASSERT_THAT(expectedTagVal, ValueEq(actualTagVal))
-                    << "for {}th path '{}'"_format(i, cellPaths[j]);
+                    << fmt::format("for {}th path '{}'", i, cellPaths[j]);
             }
 
             if (i == yieldAfter) {
                 // Yields after 'yieldAfter'th (0-based) documents. Calling saveState() and
                 // restoreState() here is to emulate what happens when the lock is yielded and
                 // unyielded.
-                blockToRow->saveState(false);
-                blockToRow->restoreState(false);
+                blockToRow->saveState();
+                blockToRow->restoreState();
             }
         }
         ASSERT_EQ(expectedData.size(), i);
@@ -227,7 +226,7 @@ const BSONObj bucketWithMeta1 = fromjson(R"(
     "control" : {"version" : 1},
     "meta" : "A",
     "data" : {
-        "_id" : {"0" : 0}, "f" : {"0" : 0}, "time" : {"0" : {$date: "2023-06-30T16:47:09.512Z"}}}
+        "_id" : {"0" : 0}, "f" : {"0" : 0}, "time" : {"0" : {$date: "2023-06-30T16:47:09.512Z"}}
     }
 })");
 
@@ -251,8 +250,8 @@ TEST_F(BlockStagesTest, TsBucketToCellBlockStageTest) {
     // Builds a TsBucketToCellBlock stage on top of an imaginary buckets collection.
     std::vector<std::string> cellPaths{{"time"}, {"_id"}, {"f"}};
     auto tsOptions =
-        TimeseriesOptions::parse(IDLParserContext{"BlockStagesTest::TsBucketToCellBlockStageTest"},
-                                 fromjson(R"({timeField: "time", metaField: "tag"})"));
+        TimeseriesOptions::parse(fromjson(R"({timeField: "time", metaField: "tag"})"),
+                                 IDLParserContext{"BlockStagesTest::TsBucketToCellBlockStageTest"});
     auto [tsBucketStage, blockSlots, bitmapSlot, metaSlot] =
         generateTsBucketToCellBlockOnVirtualScan(
             BSON_ARRAY(bucketWithMeta1 << bucketWithMeta2), tsOptions, cellPaths);
@@ -294,8 +293,8 @@ const auto bucketsWithSameSchemaMeasurements = BSON_ARRAY(bucketWithMeta1 << buc
 const auto cellPathsForBucketsWithSameSchemaMeasurements =
     std::vector<std::string>{{"time"}, {"_id"}, {"f"}};
 const auto tsOptionsForBucketsWithSameSchemaMeasurements = TimeseriesOptions::parse(
-    IDLParserContext{"BlockStagesTest::UnpackTwoBucketsWithSameSchemaMeasurements"},
-    fromjson(R"({timeField: "time", metaField: "tag"})"));
+    fromjson(R"({timeField: "time", metaField: "tag"})"),
+    IDLParserContext{"BlockStagesTest::UnpackTwoBucketsWithSameSchemaMeasurements"});
 const auto expectedDataForBucketsWithSameSchemaMeasurements = std::vector{
     fromjson(R"({"_id" : 0, "tag" : "A", "time" : {$date: "2023-06-30T16:47:09.512Z"}, "f" : 0})"),
     fromjson(
@@ -360,8 +359,8 @@ const BSONObj bucketWithNoMeta = fromjson(R"(
 const auto cellPathsForBucketWithNoMeta = std::vector<std::string>{{"foo"}, {"time"}};
 // No 'meta' field for 'tsOptions' parameter.
 const auto tsOptionsForBucketWithNoMeta =
-    TimeseriesOptions::parse(IDLParserContext{"BlockStagesTest::UnpackBucketWithNoMeta"},
-                             fromjson(R"({timeField: "time"})"));
+    TimeseriesOptions::parse(fromjson(R"({timeField: "time"})"),
+                             IDLParserContext{"BlockStagesTest::UnpackBucketWithNoMeta"});
 const auto expectedDataForBucketWithNoMeta = std::vector{
     fromjson(R"({"time" : {$date: "2023-07-05T19:59:28.339Z"}, "foo" : "A"})"),
     fromjson(R"({"time" : {$date: "2023-07-05T19:59:38.396Z"}, "foo" : "A"})"),
@@ -420,8 +419,8 @@ const BSONObj bucketWithOneMissingField = fromjson(R"(
 // of measurements in a bucket from the time field.
 const auto cellPathsForBucketWithOneMissingField = std::vector<std::string>{{"_id"}};
 const auto tsOptionsForBucketWithOneMissingField =
-    TimeseriesOptions::parse(IDLParserContext{"BlockStagesTest::UnpackBucketWithOneMissingField"},
-                             fromjson(R"({timeField: "time"})"));
+    TimeseriesOptions::parse(fromjson(R"({timeField: "time"})"),
+                             IDLParserContext{"BlockStagesTest::UnpackBucketWithOneMissingField"});
 const auto expectedDataForBucketWithOneMissingField = std::vector{
     fromjson(R"({})"),
     fromjson(R"({"_id" : 1})"),
@@ -484,8 +483,8 @@ const BSONObj bucketWithOneMissingFieldAndCount = fromjson(R"(
 })");
 const auto cellPathsForBucketWithOneMissingFieldAndCount = std::vector<std::string>{{"_id"}};
 const auto tsOptionsForBucketWithOneMissingFieldAndCount = TimeseriesOptions::parse(
-    IDLParserContext{"BlockStagesTest::UnpackBucketWithOneMissingFieldAndCount"},
-    fromjson(R"({timeField: "time"})"));
+    fromjson(R"({timeField: "time"})"),
+    IDLParserContext{"BlockStagesTest::UnpackBucketWithOneMissingFieldAndCount"});
 const auto expectedDataForBucketWithOneMissingFieldAndCount = std::vector{
     fromjson(R"({})"),
     fromjson(R"({"_id" : 1})"),
@@ -529,8 +528,8 @@ const BSONObj bucketWithMultipleMissingFields = fromjson(R"(
 const auto cellPathsForBucketWithMultipleMissingFields =
     std::vector<std::string>{{"time"}, {"_id"}, {"f"}, {"g"}};
 const auto tsOptionsForBucketWithMultipleMissingFields = TimeseriesOptions::parse(
-    IDLParserContext{"BlockStagesTest::UnpackBucketWithMultipleMissingFields"},
-    fromjson(R"({timeField: "time", metaField: "tag"})"));
+    fromjson(R"({timeField: "time", metaField: "tag"})"),
+    IDLParserContext{"BlockStagesTest::UnpackBucketWithMultipleMissingFields"});
 const auto expectedDataForBucketWithMultipleMissingFields = std::vector{
     // The 1st document is missing the '_id' field.
     fromjson(R"({"tag" : "A", "time" : {$date: "2023-06-30T21:29:00.568Z"}, "f" : 0, "g" : 100})"),
@@ -588,8 +587,8 @@ const BSONObj bucketLeadingToEmptyBlock = fromjson(R"(
 const auto cellPathsForBucketLeadingToEmptyBlock =
     std::vector<std::string>{{"time"}, {"_id"}, {"absent_field"}};
 const auto tsOptionsForBucketLeadingToEmptyBlock =
-    TimeseriesOptions::parse(IDLParserContext{"BlockStagesTest::UnpackBucketLeadingToEmptyBlock"},
-                             fromjson(R"({timeField: "time", metaField: "tag"})"));
+    TimeseriesOptions::parse(fromjson(R"({timeField: "time", metaField: "tag"})"),
+                             IDLParserContext{"BlockStagesTest::UnpackBucketLeadingToEmptyBlock"});
 const auto expectedDataForBucketLeadingToEmptyBlock = std::vector{
     fromjson(R"({"_id" : 0, "tag" : "A", "time" : {$date: "2023-06-30T21:29:00.568Z"}})"),
 };
@@ -627,8 +626,8 @@ const BSONObj bucketWithArrayField = fromjson(R"(
 })");
 const auto cellPathsForBucketWithArrayField = std::vector<std::string>{{"time"}, {"_id"}, {"f"}};
 const auto tsOptionsForBucketWithArrayField =
-    TimeseriesOptions::parse(IDLParserContext{"BlockStagesTest::UnpackBucketWithArrayField"},
-                             fromjson(R"({timeField: "time", metaField: "tag"})"));
+    TimeseriesOptions::parse(fromjson(R"({timeField: "time", metaField: "tag"})"),
+                             IDLParserContext{"BlockStagesTest::UnpackBucketWithArrayField"});
 const auto expectedDataForBucketWithArrayField = std::vector{
     fromjson(
         R"({"time" : {$date: "2023-07-06T02:21:11.454Z"}, "tag" : "A", "_id" : 0, "f" : [1, 2, 3]})"),
@@ -693,8 +692,8 @@ const BSONObj bucketWithObjectField = fromjson(R"(
 })");
 const auto cellPathsForBucketWithObjectField = std::vector<std::string>{{"time"}, {"_id"}, {"f"}};
 const auto tsOptionsForBucketWithObjectField =
-    TimeseriesOptions::parse(IDLParserContext{"BlockStagesTest::UnpackBucketWithObjectField"},
-                             fromjson(R"({timeField: "time", metaField: "tag"})"));
+    TimeseriesOptions::parse(fromjson(R"({timeField: "time", metaField: "tag"})"),
+                             IDLParserContext{"BlockStagesTest::UnpackBucketWithObjectField"});
 const auto expectedDataForBucketWithObjectField = std::vector{
     fromjson(R"(
 {"time" : {$date: "2023-07-06T02:36:53.999Z"}, "tag" : "A", "_id" : 0, "f" : {"a" : 0, "b" : 0}}
@@ -806,15 +805,14 @@ void BlockStagesTest::testBlockToBitmap(
             auto tagVal = accessor->getViewOfValue();
             auto expectedTagVal = expected.getAt(i);
 
-            ASSERT_THAT(tagVal, ValueEq(expectedTagVal)) << "for {}th 'tag'"_format(i);
+            ASSERT_THAT(tagVal, ValueEq(expectedTagVal)) << fmt::format("for {}th 'tag'", i);
 
             // Test out saveState() and restoreState() for 50% of the documents (the first document,
             // the third document, the fifth document, and so on).
             if (yield && (i % 2 == 0)) {
-                const bool relinquishCursor = true;
                 const bool disableSlotAccess = true;
-                blockToRowPtr->saveState(relinquishCursor, disableSlotAccess);
-                blockToRowPtr->restoreState(relinquishCursor);
+                blockToRowPtr->saveState(disableSlotAccess);
+                blockToRowPtr->restoreState();
             }
         }
     };

@@ -27,14 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/smart_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <mutex>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/repl/replication_coordinator_mock.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -42,17 +35,25 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/client.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/repl/hello_response.h"
+#include "mongo/db/repl/hello/hello_response.h"
 #include "mongo/db/repl/isself.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/replica_set_aware_service.h"
-#include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/session/internal_session_pool.h"
 #include "mongo/db/storage/snapshot_manager.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/future_impl.h"
+
+#include <mutex>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace repl {
@@ -176,11 +177,6 @@ void ReplicationCoordinatorMock::setAwaitReplicationReturnValueFunction(
     _awaitReplicationReturnValueFunction = std::move(returnValueFunction);
 }
 
-void ReplicationCoordinatorMock::setRunCmdOnPrimaryAndAwaitResponseFunction(
-    RunCmdOnPrimaryAndAwaitResponseFunction runCmdFunction) {
-    _runCmdOnPrimaryAndAwaitResponseFn = std::move(runCmdFunction);
-}
-
 SharedSemiFuture<void> ReplicationCoordinatorMock::awaitReplicationAsyncNoWTimeout(
     const OpTime& opTime, const WriteConcernOptions& writeConcern) {
     auto opCtx = cc().makeOperationContext();
@@ -254,14 +250,21 @@ void ReplicationCoordinatorMock::_setMyLastAppliedOpTimeAndWallTime(
     _myLastAppliedOpTime = opTimeAndWallTime.opTime;
     _myLastAppliedWallTime = opTimeAndWallTime.wallTime;
 
-    if (_updateCommittedSnapshot) {
-        _setCurrentCommittedSnapshotOpTime(lk, opTimeAndWallTime.opTime);
+    if (!_updateCommittedSnapshot) {
+        return;
+    }
 
-        if (auto storageEngine = _service->getStorageEngine()) {
-            if (auto snapshotManager = storageEngine->getSnapshotManager()) {
-                snapshotManager->setCommittedSnapshot(opTimeAndWallTime.opTime.getTimestamp());
-            }
+    if (auto storageEngine = _service->getStorageEngine()) {
+        // Use the "all durable" timestamp for the committed snapshot rather than the one provided.
+        // This ensures that we never set the committed snapshot to a timestamp that contains oplog
+        // holes.
+        auto allDurable = storageEngine->getAllDurableTimestamp();
+        _setCurrentCommittedSnapshotOpTime(lk, {allDurable, opTimeAndWallTime.opTime.getTerm()});
+        if (auto snapshotManager = storageEngine->getSnapshotManager()) {
+            snapshotManager->setCommittedSnapshot(allDurable);
         }
+    } else {
+        _setCurrentCommittedSnapshotOpTime(lk, opTimeAndWallTime.opTime);
     }
 }
 
@@ -410,10 +413,6 @@ OID ReplicationCoordinatorMock::getElectionId() {
     return OID();
 }
 
-OID ReplicationCoordinatorMock::getMyRID() const {
-    return OID();
-}
-
 int ReplicationCoordinatorMock::getMyId() const {
     return 0;
 }
@@ -509,7 +508,11 @@ void ReplicationCoordinatorMock::processReplSetGetConfig(BSONObjBuilder* result,
 void ReplicationCoordinatorMock::processReplSetMetadata(const rpc::ReplSetMetadata& replMetadata) {}
 
 void ReplicationCoordinatorMock::advanceCommitPoint(
-    const OpTimeAndWallTime& committedOptimeAndWallTime, bool fromSyncSource) {}
+    const OpTimeAndWallTime& committedOptimeAndWallTime, bool fromSyncSource) {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    _lastCommittedOpTime = committedOptimeAndWallTime.opTime;
+    _lastCommittedWallTime = committedOptimeAndWallTime.wallTime;
+}
 
 void ReplicationCoordinatorMock::cancelAndRescheduleElectionTimeout() {}
 
@@ -550,12 +553,6 @@ Status ReplicationCoordinatorMock::processReplSetReconfig(OperationContext* opCt
     stdx::lock_guard<stdx::mutex> lg(_mutex);
     _latestReconfig = args.newConfigObj;
     return Status::OK();
-}
-
-BSONObj ReplicationCoordinatorMock::getLatestReconfig() {
-    stdx::lock_guard<stdx::mutex> lg(_mutex);
-
-    return _latestReconfig;
 }
 
 Status ReplicationCoordinatorMock::doReplSetReconfig(OperationContext* opCtx,
@@ -653,11 +650,13 @@ ChangeSyncSourceAction ReplicationCoordinatorMock::shouldChangeSyncSourceOnError
 }
 
 OpTime ReplicationCoordinatorMock::getLastCommittedOpTime() const {
-    return OpTime();
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    return _lastCommittedOpTime;
 }
 
 OpTimeAndWallTime ReplicationCoordinatorMock::getLastCommittedOpTimeAndWallTime() const {
-    return {OpTime(), Date_t()};
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    return {_lastCommittedOpTime, _lastCommittedWallTime};
 }
 
 Status ReplicationCoordinatorMock::processReplSetRequestVotes(
@@ -728,7 +727,7 @@ Status ReplicationCoordinatorMock::waitForPrimaryMajorityReadsAvailable(
 WriteConcernOptions ReplicationCoordinatorMock::populateUnsetWriteConcernOptionsSyncMode(
     WriteConcernOptions wc) {
     if (wc.syncMode == WriteConcernOptions::SyncMode::UNSET) {
-        if (wc.isMajority()) {
+        if (wc.isMajority() && getWriteConcernMajorityShouldJournal()) {
             wc.syncMode = WriteConcernOptions::SyncMode::JOURNAL;
         } else {
             wc.syncMode = WriteConcernOptions::SyncMode::NONE;
@@ -810,7 +809,14 @@ std::shared_ptr<const HelloResponse> ReplicationCoordinatorMock::awaitHelloRespo
     response->setIsWritablePrimary(true);
     response->setIsSecondary(false);
     if (config.getNumMembers() > 0) {
-        response->setMe(config.getMemberAt(0).getHostAndPort());
+        for (auto i = 0; i < config.getNumMembers(); ++i) {
+            auto hnp = config.getMemberAt(i).getHostAndPort();
+            response->addHost(hnp);
+            if (i == 0) {
+                response->setMe(hnp);
+                response->setPrimary(hnp);
+            }
+        }
     } else {
         response->setMe(HostAndPort::parseThrowing("localhost:27017"));
     }

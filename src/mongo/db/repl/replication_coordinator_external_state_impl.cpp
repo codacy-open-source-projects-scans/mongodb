@@ -34,42 +34,43 @@
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "cxxabi.h"
-#include <functional>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/flow_control.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/drop_collection.h"
-#include "mongo/db/catalog/local_oplog_info.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
-#include "mongo/db/change_stream_serverless_helpers.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/commands/rwc_defaults_commands_gen.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
+#include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/drop_collection.h"
+#include "mongo/db/local_catalog/local_oplog_info.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
+#include "mongo/db/query/query_feature_flags_gen.h"
+#include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/read_write_concern_defaults_gen.h"
 #include "mongo/db/repl/always_allow_non_local_writes.h"
 #include "mongo/db/repl/bgsync.h"
@@ -90,57 +91,40 @@
 #include "mongo/db/repl/replication_metrics.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/storage_interface.h"
-#include "mongo/db/s/config/index_on_config.h"
-#include "mongo/db/s/config/sharding_catalog_manager.h"
-#include "mongo/db/s/drop_agg_temp_collections.h"
-#include "mongo/db/s/migration_util.h"
-#include "mongo/db/s/periodic_sharded_index_consistency_checker.h"
-#include "mongo/db/s/range_deletion_task_gen.h"
-#include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
-#include "mongo/db/s/shard_filtering_metadata_refresh.h"
-#include "mongo/db/s/sharding_initialization_mongod.h"
-#include "mongo/db/s/sharding_ready.h"
-#include "mongo/db/s/sharding_util.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/session_catalog_mongod.h"
-#include "mongo/db/shard_role.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/sharding_initialization_mongod.h"
+#include "mongo/db/sharding_environment/sharding_ready.h"
 #include "mongo/db/storage/control/journal_flusher.h"
-#include "mongo/db/storage/flow_control.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/snapshot_manager.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/system_index.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/db/vector_clock.h"
-#include "mongo/db/vector_clock_metadata_hook.h"
-#include "mongo/db/vector_clock_mutable.h"
-#include "mongo/db/write_block_bypass.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/db/topology/shard_registry.h"
+#include "mongo/db/topology/sharding_state.h"
+#include "mongo/db/user_write_block/write_block_bypass.h"
+#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/vector_clock/vector_clock_metadata_hook.h"
+#include "mongo/db/version_context.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/cluster_identity_loader.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/shard_version.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
-#include "mongo/s/sharding_state.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/service_entry_point.h"
-#include "mongo/transport/session.h"
 #include "mongo/transport/session_manager.h"
 #include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/assert_util.h"
@@ -152,15 +136,17 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
 
-using namespace fmt::literals;
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
 namespace mongo {
 namespace repl {
 namespace {
 
-MONGO_FAIL_POINT_DEFINE(dropPendingCollectionReaperHang);
 MONGO_FAIL_POINT_DEFINE(skipDurableTimestampUpdates);
 
 // The maximum size of the oplog write buffer is set to 256MB.
@@ -262,8 +248,7 @@ void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
     auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
     invariant(storageEngine);
 
-    const auto useOplogWriter = feature_flags::gReduceMajorityWriteLatency.isEnabled(
-        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+    const auto useOplogWriter = feature_flags::gReduceMajorityWriteLatency.isEnabled();
     const auto applyBufferSize =
         useOplogWriter ? kOplogApplyBufferSize : kOplogApplyBufferSizeLegacy;
 
@@ -304,9 +289,7 @@ void ReplicationCoordinatorExternalStateImpl::startSteadyStateReplication(
             replCoord,
             _storageInterface,
             _replicationProcess->getConsistencyMarkers(),
-            &noopOplogWriterObserver,
-            OplogWriter::Options(false /* skipWritesToOplogColl */,
-                                 true /* skipWritesToChangeColl */));
+            OplogWriter::Options(false /* skipWritesToOplogColl */));
     }
 
     _oplogApplier = std::make_unique<OplogApplierImpl>(
@@ -506,10 +489,9 @@ void ReplicationCoordinatorExternalStateImpl::shutdown(OperationContext* opCtx) 
     LOGV2_DEBUG(21308, 1, "Stopping noop writer");
     _noopWriter->stopWritingPeriodicNoops();
 
-    // We must wait for _taskExecutor outside of _threadMutex, since _taskExecutor is used to
-    // run the dropPendingCollectionReaper, which takes database locks. It is safe to access
-    // _taskExecutor outside of _threadMutex because once _startedThreads is set to true, the
-    // _taskExecutor pointer never changes.
+    // We should wait for _taskExecutor outside of _threadMutex, in case some of its task would take
+    // data base locks. It is safe to access _taskExecutor outside of _threadMutex because once
+    // _startedThreads is set to true, the _taskExecutor pointer never changes.
     _taskExecutor->join();
 
     // The oplog truncate after point must be cleared, if we are still primary for shutdown, so
@@ -615,7 +597,8 @@ void ReplicationCoordinatorExternalStateImpl::onApplierDrainComplete(OperationCo
 }
 
 OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationContext* opCtx) {
-    invariant(shard_role_details::getLocker(opCtx)->isRSTLExclusive());
+    invariant(shard_role_details::getLocker(opCtx)->isRSTLExclusive() ||
+              gFeatureFlagIntentRegistration.isEnabled());
     invariant(ExecutionAdmissionContext::get(opCtx).getPriority() ==
                   AdmissionContext::Priority::kExempt,
               "Replica Set state changes are critical to the cluster and should not be throttled");
@@ -653,9 +636,7 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
             AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
             WriteUnitOfWork wuow(opCtx);
             opCtx->getClient()->getServiceContext()->getOpObserver()->onOpMessage(
-                opCtx,
-                BSON(ReplicationCoordinator::newPrimaryMsgField
-                     << ReplicationCoordinator::newPrimaryMsg));
+                opCtx, BSON(kNewPrimaryMsgField << kNewPrimaryMsg));
             wuow.commit();
         });
     // As far as the storage system is concerned, we're still secondary here, and will be until we
@@ -684,8 +665,6 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
     // Enable write blocking bypass to allow dropping tmp collections when user writes are blocked.
     WriteBlockBypass::get(opCtx).set(true);
 
-    _shardingOnTransitionToPrimaryHook(opCtx, replCoord->getTerm());
-
     _dropAllTempCollections(opCtx);
 
     IndexBuildsCoordinator::get(opCtx)->onStepUp(opCtx);
@@ -700,10 +679,21 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
         }
     });
 
-    // Create the pre-images collection if it doesn't exist yet in the non-serverless environment.
-    if (!change_stream_serverless_helpers::isChangeCollectionsModeActive()) {
-        ChangeStreamPreImagesCollectionManager::get(opCtx).createPreImagesCollection(
-            opCtx, boost::none /* tenantId */);
+    // Create the pre-images collection if it doesn't exist yet.
+    ChangeStreamPreImagesCollectionManager::get(opCtx).createPreImagesCollection(opCtx);
+
+    // Ensure that 'queryShapeRepresentativeQueries' collection exists only:
+    // - in plain replica sets or
+    // - on configsvr in sharded cluster deployments.
+    auto role = ShardingState::get(opCtx)->pollClusterRole();
+    const bool isConfigsvr = role && role->has(ClusterRole::ConfigServer);
+    const bool isReplSet = !role.has_value();
+    if (::mongo::feature_flags::gFeatureFlagPQSBackfill.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
+        (isConfigsvr || isReplSet)) {
+        query_settings::QuerySettingsService::get(opCtx)
+            .createQueryShapeRepresentativeQueriesCollection(opCtx);
     }
 
     serverGlobalParams.validateFeaturesAsPrimary.store(true);
@@ -725,7 +715,8 @@ StatusWith<BSONObj> ReplicationCoordinatorExternalStateImpl::loadLocalConfigDocu
                         opCtx, NamespaceString::kSystemReplSetNamespace, config)) {
                     return StatusWith<BSONObj>(
                         ErrorCodes::NoMatchingDocument,
-                        "Did not find replica set configuration document in {}"_format(
+                        fmt::format(
+                            "Did not find replica set configuration document in {}",
                             NamespaceString::kSystemReplSetNamespace.toStringForErrorMsg()));
                 }
                 return StatusWith<BSONObj>(config);
@@ -763,9 +754,8 @@ Status ReplicationCoordinatorExternalStateImpl::storeLocalConfigDocument(Operati
                     // committed snapshot is dropped after a force reconfig that changes the config
                     // content or a safe reconfig that changes writeConcernMajorityJournalDefault.
                     WriteUnitOfWork wuow(opCtx);
-                    auto msgObj = BSON("msg"
-                                       << "Reconfig set"
-                                       << "version" << config["version"]);
+                    auto msgObj = BSON("msg" << "Reconfig set"
+                                             << "version" << config["version"]);
                     _service->getOpObserver()->onOpMessage(opCtx, msgObj);
                     wuow.commit();
                 }
@@ -991,35 +981,8 @@ void ReplicationCoordinatorExternalStateImpl::closeConnections() {
 }
 
 void ReplicationCoordinatorExternalStateImpl::onStepDownHook() {
-    _shardingOnStepDownHook();
     stopNoopWriter();
     _stopAsyncUpdatesOfAndClearOplogTruncateAfterPoint();
-}
-
-void ReplicationCoordinatorExternalStateImpl::_shardingOnStepDownHook() {
-    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-        PeriodicShardedIndexConsistencyChecker::get(_service).onStepDown();
-        TransactionCoordinatorService::get(_service)->interrupt();
-    }
-    if (ShardingState::get(_service)->enabled()) {
-        if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-            // Called earlier for config servers.
-            TransactionCoordinatorService::get(_service)->interrupt();
-        }
-
-        // TODO SERVER-84243: replace with cache for filtering metadata
-        FilteringMetadataCache::get(_service)->onStepDown();
-    }
-    if (auto validator = LogicalTimeValidator::get(_service)) {
-        auto opCtx = cc().getOperationContext();
-
-        if (opCtx != nullptr) {
-            validator->enableKeyGenerator(opCtx, false);
-        } else {
-            auto opCtxPtr = cc().makeOperationContext();
-            validator->enableKeyGenerator(opCtxPtr.get(), false);
-        }
-    }
 }
 
 void ReplicationCoordinatorExternalStateImpl::_stopAsyncUpdatesOfAndClearOplogTruncateAfterPoint() {
@@ -1059,184 +1022,6 @@ void ReplicationCoordinatorExternalStateImpl::_stopAsyncUpdatesOfAndClearOplogTr
     // We can clear the oplogTruncateAfterPoint because we know there are no user writes during
     // stepdown and therefore presently no oplog holes.
     _replicationProcess->getConsistencyMarkers()->setOplogTruncateAfterPoint(opCtx, Timestamp());
-}
-
-void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook(
-    OperationContext* opCtx, long long term) {
-    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-        Status status = ShardingCatalogManager::get(opCtx)->initializeConfigDatabaseIfNeeded(opCtx);
-        if (!status.isOK() && status != ErrorCodes::AlreadyInitialized) {
-            // If the node is shutting down or it lost quorum just as it was becoming primary,
-            // don't run the sharding onStepUp machinery. The onStepDown counterpart to these
-            // methods is already idempotent, so the machinery will remain in the stepped down
-            // state.
-            if (ErrorCodes::isShutdownError(status.code()) ||
-                ErrorCodes::isNotPrimaryError(status.code())) {
-                return;
-            }
-            fassertFailedWithStatus(
-                40184,
-                status.withContext("Failed to initialize config database on config server's "
-                                   "first transition to primary"));
-        }
-
-        if (status.isOK()) {
-            // Load the clusterId into memory. Use local readConcern, since we can't use
-            // majority/snapshot readConcern in drain mode because the global lock prevents
-            // replication. This is safe, since if the clusterId write is rolled back, any writes
-            // that depend on it will also be rolled back.
-            //
-            // Since we *just* wrote the cluster ID to the config.version document (via the call
-            // to ShardingCatalogManager::initializeConfigDatabaseIfNeeded above), this read can
-            // only meaningfully fail if the node is shutting down.
-            status = ClusterIdentityLoader::get(opCtx)->loadClusterId(
-                opCtx,
-                ShardingCatalogManager::get(opCtx)->localCatalogClient(),
-                repl::ReadConcernLevel::kLocalReadConcern);
-
-            if (ErrorCodes::isShutdownError(status.code())) {
-                return;
-            }
-            fassert(40217, status);
-        }
-
-        if (auto validator = LogicalTimeValidator::get(_service)) {
-            validator->enableKeyGenerator(opCtx, true);
-        }
-
-        PeriodicShardedIndexConsistencyChecker::get(_service).onStepUp(_service);
-        TransactionCoordinatorService::get(_service)->initializeIfNeeded(opCtx, term);
-
-        // TODO SERVER-84243: replace with cache for filtering metadata
-        FilteringMetadataCache::get(_service)->onStepUp();
-
-        ShardingCatalogManager::get(opCtx)->scheduleAsyncUnblockDDLCoordinators(opCtx);
-    }
-    if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
-        if (ShardingState::get(opCtx)->enabled()) {
-            VectorClockMutable::get(opCtx)->recoverDirect(opCtx);
-
-            if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-                // Called earlier for config servers.
-                TransactionCoordinatorService::get(_service)->initializeIfNeeded(opCtx, term);
-                FilteringMetadataCache::get(opCtx)->onStepUp();
-            }
-
-            const auto configsvrConnStr =
-                Grid::get(opCtx)->shardRegistry()->getConfigShard()->getConnString();
-            ShardingInitializationMongoD::get(opCtx)->updateShardIdentityConfigString(
-                opCtx, configsvrConnStr);
-
-            // Note, these must be done after the configTime is recovered via
-            // VectorClockMutable::recoverDirect above, because they may trigger filtering metadata
-            // refreshes which should use the recovered configTime.
-            migrationutil::resumeMigrationCoordinationsOnStepUp(opCtx);
-            migrationutil::resumeMigrationRecipientsOnStepUp(opCtx);
-
-            const bool scheduleAsyncRefresh = true;
-            resharding::clearFilteringMetadata(opCtx, scheduleAsyncRefresh);
-
-            // Schedule a drop of the temporary collections used by aggregations ($out
-            // specifically).
-            dropAggTempCollections(opCtx);
-        }
-
-        // The code above will only be executed after a stepdown happens, however the code below
-        // needs to be executed also on startup, and the enabled check might fail in shards during
-        // startup. Create uuid index on config.rangeDeletions if needed
-        const auto minKeyFieldName =
-            RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMinFieldName;
-        const auto maxKeyFieldName =
-            RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMaxFieldName;
-        Status indexStatus = createIndexOnConfigCollection(
-            opCtx,
-            NamespaceString::kRangeDeletionNamespace,
-            BSON(RangeDeletionTask::kCollectionUuidFieldName << 1 << minKeyFieldName << 1
-                                                             << maxKeyFieldName << 1),
-            false);
-        if (!indexStatus.isOK()) {
-            // If the node is shutting down or it lost quorum just as it was becoming primary,
-            // don't run the sharding onStepUp machinery. The onStepDown counterpart to these
-            // methods is already idempotent, so the machinery will remain in the stepped down
-            // state.
-            if (ErrorCodes::isShutdownError(indexStatus.code()) ||
-                ErrorCodes::isNotPrimaryError(indexStatus.code())) {
-                return;
-            }
-            fassertFailedWithStatus(
-                64285,
-                indexStatus.withContext("Failed to create index on config.rangeDeletions on "
-                                        "shard's first transition to primary"));
-        }
-
-        // (Ignore FCV check): TODO(SERVER-75389): add why FCV is ignored here.
-        if (mongo::feature_flags::gGlobalIndexesShardingCatalog.isEnabledAndIgnoreFCVUnsafe()) {
-            // Create indexes in config.shard.indexes if needed.
-            indexStatus = sharding_util::createShardingIndexCatalogIndexes(
-                opCtx, NamespaceString::kShardIndexCatalogNamespace);
-            if (!indexStatus.isOK()) {
-                // If the node is shutting down or it lost quorum just as it was becoming primary,
-                // don't run the sharding onStepUp machinery. The onStepDown counterpart to these
-                // methods is already idempotent, so the machinery will remain in the stepped down
-                // state.
-                if (ErrorCodes::isShutdownError(indexStatus.code()) ||
-                    ErrorCodes::isNotPrimaryError(indexStatus.code())) {
-                    return;
-                }
-                fassertFailedWithStatus(
-                    6280501,
-                    indexStatus.withContext(
-                        str::stream()
-                        << "Failed to create index on "
-                        << NamespaceString::kShardIndexCatalogNamespace.toStringForErrorMsg()
-                        << " on shard's first transition to primary"));
-            }
-
-            // Create indexes in config.shard.collections if needed.
-            indexStatus = sharding_util::createShardCollectionCatalogIndexes(opCtx);
-            if (!indexStatus.isOK()) {
-                // If the node is shutting down or it lost quorum just as it was becoming primary,
-                // don't run the sharding onStepUp machinery. The onStepDown counterpart to these
-                // methods is already idempotent, so the machinery will remain in the stepped down
-                // state.
-                if (ErrorCodes::isShutdownError(indexStatus.code()) ||
-                    ErrorCodes::isNotPrimaryError(indexStatus.code())) {
-                    return;
-                }
-                fassertFailedWithStatus(
-                    6711907,
-                    indexStatus.withContext(
-                        str::stream()
-                        << "Failed to create index on "
-                        << NamespaceString::kShardCollectionCatalogNamespace.toStringForErrorMsg()
-                        << " on shard's first transition to primary"));
-            }
-        }
-    }
-    if (serverGlobalParams.clusterRole.has(ClusterRole::None)) {  // unsharded
-        if (auto validator = LogicalTimeValidator::get(_service)) {
-            validator->enableKeyGenerator(opCtx, true);
-        }
-    }
-
-    if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
-        !ShardingState::get(opCtx)->enabled()) {
-        // Note this must be called after the config server has created the cluster ID and also
-        // after the onStepUp logic for the shard role because this triggers sharding state
-        // initialization which will transition some components into the "primary" state, like
-        // the TransactionCoordinatorService, and they would fail if the onStepUp logic
-        // attempted the same transition.
-        const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-        // TODO: SERVER-82965 Remove condition after v8.0 becomes last-lts.
-        if (!serverGlobalParams.doAutoBootstrapSharding ||
-            gFeatureFlagAllMongodsAreSharded.isEnabled(fcvSnapshot)) {
-            ShardingCatalogManager::get(opCtx)->installConfigShardIdentityDocument(opCtx);
-        }
-
-        if (gFeatureFlagAllMongodsAreSharded.isEnabled(fcvSnapshot)) {
-            ShardingReady::get(opCtx)->scheduleTransitionToConfigShard(opCtx);
-        }
-    }
 }
 
 void ReplicationCoordinatorExternalStateImpl::signalApplierToChooseNewSyncSource() {
@@ -1302,9 +1087,7 @@ void ReplicationCoordinatorExternalStateImpl::_dropAllTempCollections(OperationC
     // lock upgrade when removing the temporary collections.
     Lock::GlobalLock lk(opCtx, MODE_IX);
 
-    StorageEngine* storageEngine = _service->getStorageEngine();
-    std::vector<DatabaseName> dbNames = storageEngine->listDatabases();
-
+    std::vector<DatabaseName> dbNames = catalog::listDatabases();
     for (const auto& dbName : dbNames) {
         // The local db is special because it isn't replicated. It is cleared at startup even on
         // replica set members.
@@ -1312,7 +1095,13 @@ void ReplicationCoordinatorExternalStateImpl::_dropAllTempCollections(OperationC
             continue;
 
         LOGV2_DEBUG(21309, 2, "Removing temporary collections", logAttrs(dbName));
-        Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
+        Lock::DBLock dbLock(
+            opCtx,
+            dbName,
+            MODE_IX,
+            Date_t::max(),
+            Lock::DBLockSkipOptions{
+                false, false, false, rss::consensus::IntentRegistry::Intent::LocalWrite});
         clearTempCollections(opCtx, dbName);
     }
 }
@@ -1372,13 +1161,14 @@ std::size_t ReplicationCoordinatorExternalStateImpl::getOplogFetcherInitialSyncM
     return oplogFetcherInitialSyncMaxFetcherRestarts.load();
 }
 
-JournalListener::Token ReplicationCoordinatorExternalStateImpl::getToken(OperationContext* opCtx) {
+std::unique_ptr<JournalListener::Token> ReplicationCoordinatorExternalStateImpl::getToken(
+    OperationContext* opCtx) {
     // If in state PRIMARY, the oplogTruncateAfterPoint must be used for the Durable timestamp
     // in order to avoid majority confirming any writes that could later be truncated.
     if (auto truncatePoint = repl::ReplicationProcess::get(opCtx)
                                  ->getConsistencyMarkers()
                                  ->refreshOplogTruncateAfterPointIfPrimary(opCtx)) {
-        return {*truncatePoint, true /*isPrimary*/};
+        return std::make_unique<ReplDurabilityToken>(*truncatePoint, true /*isPrimary*/);
     }
 
     // All other repl states use the 'lastWritten'.
@@ -1393,26 +1183,28 @@ JournalListener::Token ReplicationCoordinatorExternalStateImpl::getToken(Operati
     // divergent 'lastWritten' value is present. The JournalFlusher will start up again in
     // ROLLBACK and never transition from non-ROLLBACK to ROLLBACK with a divergent
     // 'lastWritten' value.
-    return {repl::ReplicationCoordinator::get(_service)->getMyLastWrittenOpTimeAndWallTime(
-                /*rollbackSafe=*/true),
-            false /*isPrimary*/};
+    return std::make_unique<ReplDurabilityToken>(
+        repl::ReplicationCoordinator::get(_service)->getMyLastWrittenOpTimeAndWallTime(
+            /*rollbackSafe=*/true),
+        false /*isPrimary*/);
 }
 
-void ReplicationCoordinatorExternalStateImpl::onDurable(const JournalListener::Token& token) {
+void ReplicationCoordinatorExternalStateImpl::onDurable(const JournalListener::Token& t) {
     if (MONGO_unlikely(skipDurableTimestampUpdates.shouldFail())) {
         return;
     }
-    // The second value in the token means whether this token was acquired when this node was a
+    auto& token = dynamic_cast<const ReplDurabilityToken&>(t);
+    // The isPrimary value in the token means whether this token was acquired when this node was a
     // primary. On primary, the lastWritten OpTime is updated by the storage transaction's
     // onCommit() hook, which has a chance to be called later than this onDurable(). In that case,
     // we want to advance lastWritten here as well to maintain the property that lastWritten >=
     // lastDurable. However, on secondary, we should always have lastWritten being advanced first.
-    if (token.second) {
+    if (token.isPrimary) {
         repl::ReplicationCoordinator::get(_service)
-            ->setMyLastDurableAndLastWrittenOpTimeAndWallTimeForward(token.first);
+            ->setMyLastDurableAndLastWrittenOpTimeAndWallTimeForward(token.opTimeAndWallTime);
     } else {
         repl::ReplicationCoordinator::get(_service)->setMyLastDurableOpTimeAndWallTimeForward(
-            token.first);
+            token.opTimeAndWallTime);
     }
 }
 
@@ -1442,8 +1234,8 @@ bool ReplicationCoordinatorExternalStateImpl::isCWWCSetOnConfigShard(
     OperationContext* opCtx) const {
     GetDefaultRWConcern configsvrRequest;
     configsvrRequest.setDbName(DatabaseName::kAdmin);
-    auto cmdResponse = uassertStatusOK(
-        Grid::get(opCtx)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
+    auto cmdResponse =
+        uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getConfigShard()->runCommand(
             opCtx,
             ReadPreferenceSetting(ReadPreference::PrimaryOnly),
             DatabaseName::kAdmin,

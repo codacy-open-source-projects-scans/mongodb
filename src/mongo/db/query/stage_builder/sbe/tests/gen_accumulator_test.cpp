@@ -28,12 +28,10 @@
  */
 
 #include <algorithm>
-#include <boost/smart_ptr.hpp>
 #include <climits>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <fmt/printf.h>  // IWYU pragma: keep
 #include <iterator>
 #include <limits>
 #include <numeric>
@@ -42,11 +40,10 @@
 #include <tuple>
 #include <utility>
 
-#include <absl/container/inlined_vector.h>
-#include <absl/container/node_hash_map.h>
-#include <boost/none.hpp>
+#include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
+#include <fmt/printf.h>  // IWYU pragma: keep
 // IWYU pragma: no_include "format.h"
 
 #include "mongo/base/error_codes.h"
@@ -72,19 +69,16 @@
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/db/query/query_solution.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/shard_filterer_factory_interface.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/db/query/stage_builder/sbe/gen_accumulator.h"
 #include "mongo/db/query/stage_builder/sbe/tests/sbe_builder_test_fixture.h"
 #include "mongo/db/storage/key_string/key_string.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/decimal128.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
@@ -185,7 +179,7 @@ protected:
                                  const mongo::BSONArray& expectedValue,
                                  std::unique_ptr<CollatorInterface> collator = nullptr) {
         auto [resultsTag, resultsVal] =
-            getResultsForAggregation(fromjson(groupSpec.rawData()), inputDocs, std::move(collator));
+            getResultsForAggregation(fromjson(groupSpec.data()), inputDocs, std::move(collator));
         sbe::value::ValueGuard resultGuard{resultsTag, resultsVal};
 
         auto [sortedResultsTag, sortedResultsVal] = sortResults(resultsTag, resultsVal);
@@ -236,7 +230,7 @@ protected:
 
         // Run the accumulator.
         auto [resultsTag, resultsVal] =
-            getResultsForAggregation(fromjson(groupSpec.rawData()), inputDocs, std::move(collator));
+            getResultsForAggregation(fromjson(groupSpec.data()), inputDocs, std::move(collator));
         ValueGuard resultGuard{resultsTag, resultsVal};
         ASSERT_EQ(resultsTag, TypeTags::Array);
 
@@ -349,10 +343,7 @@ TEST_F(SbeStageBuilderGroupTest, TestIdEmptyString) {
                                        BSON_ARRAY(BSON("a" << 1 << "b" << 2)),
                                        BSON_ARRAY(BSON("a" << 2 << "b" << 3))};
 
-    runGroupAggregationTest(R"({_id: ""})",
-                            docs,
-                            BSON_ARRAY(BSON("_id"
-                                            << "")));
+    runGroupAggregationTest(R"({_id: ""})", docs, BSON_ARRAY(BSON("_id" << "")));
 }
 
 TEST_F(SbeStageBuilderGroupTest, TestIdConstString) {
@@ -360,10 +351,7 @@ TEST_F(SbeStageBuilderGroupTest, TestIdConstString) {
                                        BSON_ARRAY(BSON("a" << 1 << "b" << 2)),
                                        BSON_ARRAY(BSON("a" << 2 << "b" << 3))};
 
-    runGroupAggregationTest(R"({_id: "abc"})",
-                            docs,
-                            BSON_ARRAY(BSON("_id"
-                                            << "abc")));
+    runGroupAggregationTest(R"({_id: "abc"})", docs, BSON_ARRAY(BSON("_id" << "abc")));
 }
 
 TEST_F(SbeStageBuilderGroupTest, TestIdNumericConst) {
@@ -1445,29 +1433,27 @@ TEST_F(SbeStageBuilderGroupTest, ConcatArraysAccumulatorTranslationWithCollation
                                        BSON_ARRAY(fromjson("{a: [\"r\", \"s\", \"t\"]}"))};
     runArrayOutputAccumulatorTest("{_id: null, x: {$concatArrays: '$a'}}",
                                   docs,
-                                  BSON_ARRAY("l"
-                                             << "m"
-                                             << "n"
-                                             << "o"
-                                             << "p"
-                                             << "q"
-                                             << "r"
-                                             << "s"
-                                             << "t"));
+                                  BSON_ARRAY("l" << "m"
+                                                 << "n"
+                                                 << "o"
+                                                 << "p"
+                                                 << "q"
+                                                 << "r"
+                                                 << "s"
+                                                 << "t"));
 
-    runArrayOutputAccumulatorTest("{_id: null, x: {$concatArrays: '$a'}}",
-                                  docs,
-                                  BSON_ARRAY("l"
-                                             << "m"
-                                             << "n"
-                                             << "o"
-                                             << "p"
-                                             << "q"
-                                             << "r"
-                                             << "s"
-                                             << "t"),
-                                  std::make_unique<CollatorInterfaceMock>(
-                                      CollatorInterfaceMock::MockType::kAlwaysEqual));
+    runArrayOutputAccumulatorTest(
+        "{_id: null, x: {$concatArrays: '$a'}}",
+        docs,
+        BSON_ARRAY("l" << "m"
+                       << "n"
+                       << "o"
+                       << "p"
+                       << "q"
+                       << "r"
+                       << "s"
+                       << "t"),
+        std::make_unique<CollatorInterfaceMock>(CollatorInterfaceMock::MockType::kAlwaysEqual));
 }
 
 TEST_F(SbeStageBuilderGroupTest, PushAccumulatorTranslationNoDocs) {
@@ -1594,15 +1580,12 @@ TEST_F(SbeStageBuilderGroupTest, MergeObjectsAccumulatorTranslationIntersectingD
     auto docs =
         std::vector<BSONArray>{BSON_ARRAY(BSON("_id" << 1 << "a" << BSON("c" << 1 << "d" << 1))),
                                BSON_ARRAY(BSON("_id" << 1 << "a" << BSON("b" << 1 << "d" << 4))),
-                               BSON_ARRAY(BSON("_id" << 1 << "a"
-                                                     << BSON("c"
-                                                             << "hello")))};
+                               BSON_ARRAY(BSON("_id" << 1 << "a" << BSON("c" << "hello")))};
     runGroupAggregationTest("{_id: null, x: {$mergeObjects: '$a'}}",
                             docs,
                             BSON_ARRAY(BSON("_id" << BSONNULL << "x"
-                                                  << BSON("c"
-                                                          << "hello"
-                                                          << "d" << 4 << "b" << 1))));
+                                                  << BSON("c" << "hello"
+                                                              << "d" << 4 << "b" << 1))));
 }
 
 TEST_F(SbeStageBuilderGroupTest, MergeObjectsAccumulatorTranslationIntersectingEmbeddedDocs) {
@@ -1701,8 +1684,7 @@ TEST_F(SbeStageBuilderGroupTest, StdDevPopAccumulatorTranslationIncorrectType) {
     std::vector<double> values = {75, 100};
     auto docs = std::vector<BSONArray>{BSON_ARRAY(BSON("a" << values[0])),
                                        BSON_ARRAY(BSON("a" << values[1])),
-                                       BSON_ARRAY(BSON("a"
-                                                       << "hello"))};
+                                       BSON_ARRAY(BSON("a" << "hello"))};
     runGroupAggregationTest(
         "{_id: null, x: {$stdDevPop: '$a'}}",
         docs,
@@ -1713,8 +1695,7 @@ TEST_F(SbeStageBuilderGroupTest, StdDevSampAccumulatorTranslationIncorrectType) 
     std::vector<double> values = {75, 100};
     auto docs = std::vector<BSONArray>{BSON_ARRAY(BSON("a" << values[0])),
                                        BSON_ARRAY(BSON("a" << values[1])),
-                                       BSON_ARRAY(BSON("a"
-                                                       << "hello"))};
+                                       BSON_ARRAY(BSON("a" << "hello"))};
     runGroupAggregationTest(
         "{_id: null, x: {$stdDevSamp: '$a'}}",
         docs,
@@ -1948,11 +1929,8 @@ TEST_F(SbeStageBuilderGroupTest, MultiAccumulatorInvalidDynamicN) {
     const std::vector<std::string> inputFieldMultiAccumulators{
         "$firstN", "$lastN", "$maxN", "$minN"};
     const std::vector<std::string> outputFieldMultiAccumulators{"$topN", "$bottomN"};
-    const std::vector<BSONObj> testCases{BSON("n"
-                                              << "string"),
-                                         BSON("n" << 4.2),
-                                         BSON("n" << -1),
-                                         BSON("n" << 0)};
+    const std::vector<BSONObj> testCases{
+        BSON("n" << "string"), BSON("n" << 4.2), BSON("n" << -1), BSON("n" << 0)};
     for (const auto& acc : inputFieldMultiAccumulators) {
         for (const auto& testCase : testCases) {
             auto docs = std::vector<BSONArray>{BSON_ARRAY(BSON("a" << 11 << "n1" << testCase))};
@@ -2151,52 +2129,40 @@ TEST_F(SbeStageBuilderGroupTest, MinMaxNAccumulatorWithDifferentNumericTypes) {
 }
 
 TEST_F(SbeStageBuilderGroupTest, MinMaxNAccumulatorWithStrings) {
-    auto docs = std::vector<BSONArray>{BSON_ARRAY(BSON("a"
-                                                       << "az")),
-                                       BSON_ARRAY(BSON("a"
-                                                       << "by")),
-                                       BSON_ARRAY(BSON("a"
-                                                       << "cx")),
-                                       BSON_ARRAY(BSON("a"
-                                                       << "dw"))};
+    auto docs = std::vector<BSONArray>{BSON_ARRAY(BSON("a" << "az")),
+                                       BSON_ARRAY(BSON("a" << "by")),
+                                       BSON_ARRAY(BSON("a" << "cx")),
+                                       BSON_ARRAY(BSON("a" << "dw"))};
     runGroupAggregationTest("{_id: null, x: {$maxN: {input: '$a', n: 3}}}",
                             docs,
                             BSON_ARRAY(BSON("_id" << BSONNULL << "x"
-                                                  << BSON_ARRAY("dw"
-                                                                << "cx"
-                                                                << "by"))));
+                                                  << BSON_ARRAY("dw" << "cx"
+                                                                     << "by"))));
     runGroupAggregationTest("{_id: null, x: {$minN: {input: '$a', n: 3}}}",
                             docs,
                             BSON_ARRAY(BSON("_id" << BSONNULL << "x"
-                                                  << BSON_ARRAY("az"
-                                                                << "by"
-                                                                << "cx"))));
+                                                  << BSON_ARRAY("az" << "by"
+                                                                     << "cx"))));
 }
 
 TEST_F(SbeStageBuilderGroupTest, MinMaxNAccumulatorCollation) {
-    auto docs = std::vector<BSONArray>{BSON_ARRAY(BSON("a"
-                                                       << "az")),
-                                       BSON_ARRAY(BSON("a"
-                                                       << "by")),
-                                       BSON_ARRAY(BSON("a"
-                                                       << "cx")),
-                                       BSON_ARRAY(BSON("a"
-                                                       << "dw"))};
+    auto docs = std::vector<BSONArray>{BSON_ARRAY(BSON("a" << "az")),
+                                       BSON_ARRAY(BSON("a" << "by")),
+                                       BSON_ARRAY(BSON("a" << "cx")),
+                                       BSON_ARRAY(BSON("a" << "dw"))};
     runGroupAggregationTest(
         "{_id: null, x: {$maxN: {input: '$a', n: 3}}}",
         docs,
         BSON_ARRAY(BSON("_id" << BSONNULL << "x"
-                              << BSON_ARRAY("az"
-                                            << "by"
-                                            << "cx"))),
+                              << BSON_ARRAY("az" << "by"
+                                                 << "cx"))),
         std::make_unique<CollatorInterfaceMock>(CollatorInterfaceMock::MockType::kReverseString));
     runGroupAggregationTest(
         "{_id: null, x: {$minN: {input: '$a', n: 3}}}",
         docs,
         BSON_ARRAY(BSON("_id" << BSONNULL << "x"
-                              << BSON_ARRAY("dw"
-                                            << "cx"
-                                            << "by"))),
+                              << BSON_ARRAY("dw" << "cx"
+                                                 << "by"))),
         std::make_unique<CollatorInterfaceMock>(CollatorInterfaceMock::MockType::kReverseString));
 }
 
@@ -2254,7 +2220,7 @@ class AccumulatorSBEIncompatible final : public AccumulatorState {
 public:
     static constexpr auto kName = "$incompatible"_sd;
     const char* getOpName() const final {
-        return kName.rawData();
+        return kName.data();
     }
     explicit AccumulatorSBEIncompatible(ExpressionContext* expCtx) : AccumulatorState(expCtx) {}
     void processInternal(const Value& input, bool merging) final {}
@@ -2317,13 +2283,8 @@ TEST_F(SbeStageBuilderGroupTest, SbeGroupCompatibleFlag) {
 
 TEST_F(SbeStageBuilderGroupTest, SbeIncompatibleExpressionInGroup) {
     std::vector<std::string> testCases = {
-        R"(_id: {$and: ["$a", true]})",
-        R"(_id: {$or: ["$a", false]})",
-        R"(_id: null, x: {$sum: {$and: ["$a", true]}})",
-        R"(_id: null, x: {$sum: {$or: ["$a", false]}})",
-        R"(_id: null, x: {$sum: {$add: ["$b", {$and: ["$a", true]}]}})",
-        R"(_id: null, x: {$sum: {$add: ["$b", {$or: ["$a", false]}]}})",
-    };
+        R"(_id: null, x: {$sum: {$convert: {to: 'int', input: '$_id', onError: 'NULL'}}})",
+        R"(_id: {$map: {input: '$_id', as: 'y', in: {z: {$sum: ['$$y', 1]}}}})"};
 
     boost::intrusive_ptr<ExpressionContext> expCtx(new ExpressionContextForTest());
     for (const auto& testCase : testCases) {
@@ -2367,7 +2328,8 @@ public:
                  nullptr /* sortSpecMap */,
                  _expCtx,
                  false /* needsMerge */,
-                 false /* allowDiskUse */} {}
+                 false /* allowDiskUse */,
+                 _expCtx->getIfrContext()} {}
 
     AccumulationStatement makeAccumulationStatement(StringData accumName) {
         return makeAccumulationStatement(BSON("unused" << BSON(accumName << "unused")));
@@ -2510,12 +2472,12 @@ public:
         auto resultArr = sbe::value::getArrayView(resultVal);
 
         for (auto&& elt : bsonArray) {
-            ASSERT(elt.type() == BSONType::Array);
+            ASSERT(elt.type() == BSONType::array);
 
             BSONObjIterator arrayIt{elt.embeddedObject()};
             ASSERT_TRUE(arrayIt.more());
             auto firstElt = arrayIt.next();
-            ASSERT(firstElt.type() == BSONType::Array);
+            ASSERT(firstElt.type() == BSONType::array);
             BSONArray partialBsonArr{firstElt.embeddedObject()};
 
             ASSERT_TRUE(arrayIt.more());
@@ -2612,7 +2574,7 @@ public:
         auto arr = sbe::value::getArrayView(arrVal);
 
         for (auto&& element : arrayOfArrays) {
-            ASSERT(element.type() == BSONType::Array);
+            ASSERT(element.type() == BSONType::array);
             auto [tag, val] =
                 makeOnePartialAggregate(aggFuncName, BSONArray{element.embeddedObject()});
             arr->push_back(tag, val);
@@ -2777,12 +2739,10 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsMinWithCollation) 
     auto compiledExpr = compileAggExpression(*expr, &_aggAccessor);
 
     // The strings in reverse have the opposite ordering as compared to forwards.
-    auto inputValues = BSON_ARRAY("az"
-                                  << "by"
-                                  << "cx");
-    auto expectedAggStates = BSON_ARRAY("az"
-                                        << "by"
-                                        << "cx");
+    auto inputValues = BSON_ARRAY("az" << "by"
+                                       << "cx");
+    auto expectedAggStates = BSON_ARRAY("az" << "by"
+                                             << "cx");
     aggregateAndAssertResults(inputValues, expectedAggStates, compiledExpr.get());
 }
 
@@ -2814,12 +2774,10 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsMaxWithCollation) 
     auto compiledExpr = compileAggExpression(*expr, &_aggAccessor);
 
     // The strings in reverse have the opposite ordering as compared to forwards.
-    auto inputValues = BSON_ARRAY("cx"
-                                  << "by"
-                                  << "az");
-    auto expectedAggStates = BSON_ARRAY("cx"
-                                        << "by"
-                                        << "az");
+    auto inputValues = BSON_ARRAY("cx" << "by"
+                                       << "az");
+    auto expectedAggStates = BSON_ARRAY("cx" << "by"
+                                             << "az");
     aggregateAndAssertResults(inputValues, expectedAggStates, compiledExpr.get());
 }
 
@@ -2920,24 +2878,18 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsAddToSetWithCollat
     auto compiledExpr = compileAggExpression(*expr, &_aggAccessor);
 
     auto [inputValuesTag, inputValuesVal] =
-        makeArrayAccumVal(BSON_ARRAY(BSON_ARRAY(BSON_ARRAY("foo"
-                                                           << "bar")
-                                                << 10)
-                                     << BSON_ARRAY(BSON_ARRAY("FOO"
-                                                              << "BAR"
-                                                              << "baz")
+        makeArrayAccumVal(BSON_ARRAY(BSON_ARRAY(BSON_ARRAY("foo" << "bar") << 10)
+                                     << BSON_ARRAY(BSON_ARRAY("FOO" << "BAR"
+                                                                    << "baz")
                                                    << 20)),
                           Accumulator::kAddToSet);
 
     // These strings end up as big strings copied out of the BSON array, so the size accounts for
     // the value itself, the type tag, the 4-byte size of the string, and the string itself.
     auto [expectedTag, expectedVal] =
-        makeArrayAccumVal(BSON_ARRAY(BSON_ARRAY(BSON_ARRAY("bar"
-                                                           << "foo")
-                                                << 18)
-                                     << BSON_ARRAY(BSON_ARRAY("bar"
-                                                              << "baz"
-                                                              << "foo")
+        makeArrayAccumVal(BSON_ARRAY(BSON_ARRAY(BSON_ARRAY("bar" << "foo") << 18)
+                                     << BSON_ARRAY(BSON_ARRAY("bar" << "baz"
+                                                                    << "foo")
                                                    << 27)),
                           Accumulator::kAddToSet);
     aggregateAndAssertResults(
@@ -3005,24 +2957,18 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsSetUnionWithCollat
     auto compiledExpr = compileAggExpression(*expr, &_aggAccessor);
 
     auto [inputValuesTag, inputValuesVal] =
-        makeArrayAccumVal(BSON_ARRAY(BSON_ARRAY(BSON_ARRAY("foo"
-                                                           << "bar")
-                                                << 10)
-                                     << BSON_ARRAY(BSON_ARRAY("FOO"
-                                                              << "BAR"
-                                                              << "baz")
+        makeArrayAccumVal(BSON_ARRAY(BSON_ARRAY(BSON_ARRAY("foo" << "bar") << 10)
+                                     << BSON_ARRAY(BSON_ARRAY("FOO" << "BAR"
+                                                                    << "baz")
                                                    << 20)),
                           Accumulator::kAddToSet);
 
     // These strings end up as big strings copied out of the BSON array, so the size accounts for
     // the value itself, the type tag, the 4-byte size of the string, and the string itself.
     auto [expectedTag, expectedVal] =
-        makeArrayAccumVal(BSON_ARRAY(BSON_ARRAY(BSON_ARRAY("bar"
-                                                           << "foo")
-                                                << 18)
-                                     << BSON_ARRAY(BSON_ARRAY("bar"
-                                                              << "baz"
-                                                              << "foo")
+        makeArrayAccumVal(BSON_ARRAY(BSON_ARRAY(BSON_ARRAY("bar" << "foo") << 18)
+                                     << BSON_ARRAY(BSON_ARRAY("bar" << "baz"
+                                                                    << "foo")
                                                    << 27)),
                           Accumulator::kAddToSet);
     aggregateAndAssertResults(
@@ -3121,8 +3067,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsDoubleDoubleSum) {
     // A field path expression is needed so that the merging expression is constructed to combine
     // DoubleDouble summations rather than doing a simple sum. The actual field name "foo" is
     // irrelevant because the values are fed into the merging expression by the test fixture.
-    auto accStatement = makeAccumulationStatement(BSON("unused" << BSON("$sum"
-                                                                        << "$foo")));
+    auto accStatement = makeAccumulationStatement(BSON("unused" << BSON("$sum" << "$foo")));
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     aggregateAndAssertResults(inputTag, inputVal, expectedTag, expectedVal, compiledExpr.get());
@@ -3144,8 +3089,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsDoubleDoubleSumInf
     // A field path expression is needed so that the merging expression is constructed to combine
     // DoubleDouble summations rather than doing a simple sum. The actual field name "foo" is
     // irrelevant because the values are fed into the merging expression by the test fixture.
-    auto accStatement = makeAccumulationStatement(BSON("unused" << BSON("$sum"
-                                                                        << "$foo")));
+    auto accStatement = makeAccumulationStatement(BSON("unused" << BSON("$sum" << "$foo")));
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     aggregateAndAssertResults(inputTag, inputVal, expectedTag, expectedVal, compiledExpr.get());
@@ -3166,8 +3110,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsDoubleDoubleSumMix
     // A field path expression is needed so that the merging expression is constructed to combine
     // DoubleDouble summations rather than doing a simple sum. The actual field name "foo" is
     // irrelevant because the values are fed into the merging expression by the test fixture.
-    auto accStatement = makeAccumulationStatement(BSON("unused" << BSON("$sum"
-                                                                        << "$foo")));
+    auto accStatement = makeAccumulationStatement(BSON("unused" << BSON("$sum" << "$foo")));
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     aggregateAndAssertResults(inputTag, inputVal, expectedTag, expectedVal, compiledExpr.get());
@@ -3188,8 +3131,7 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsDoubleDoubleSumLar
     // A field path expression is needed so that the merging expression is constructed to combine
     // DoubleDouble summations rather than doing a simple sum. The actual field name "foo" is
     // irrelevant because the values are fed into the merging expression by the test fixture.
-    auto accStatement = makeAccumulationStatement(BSON("unused" << BSON("$sum"
-                                                                        << "$foo")));
+    auto accStatement = makeAccumulationStatement(BSON("unused" << BSON("$sum" << "$foo")));
     auto compiledExpr = compileSingleInputNoCollator(accStatement);
 
     aggregateAndAssertResults(inputTag, inputVal, expectedTag, expectedVal, compiledExpr.get());
@@ -3395,31 +3337,25 @@ TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsMaxN) {
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsMinNCollator) {
     testCombinePartialAggsMultiAccumulator<true>("aggMinN",
-                                                 BSON_ARRAY(BSON_ARRAY("az"
-                                                                       << "cx"
-                                                                       << "ev")
+                                                 BSON_ARRAY(BSON_ARRAY("az" << "cx"
+                                                                            << "ev")
                                                             << 0ll << 3ll << 24 << 1024 << true),
-                                                 BSON_ARRAY(BSON_ARRAY("by"
-                                                                       << "dw"
-                                                                       << "fu")
+                                                 BSON_ARRAY(BSON_ARRAY("by" << "dw"
+                                                                            << "fu")
                                                             << 0ll << 3ll << 24 << 1024 << true),
-                                                 BSON_ARRAY("fu"
-                                                            << "ev"
-                                                            << "dw"));
+                                                 BSON_ARRAY("fu" << "ev"
+                                                                 << "dw"));
 }
 
 TEST_F(SbeStageBuilderGroupAggCombinerTest, CombinePartialAggsMaxNCollator) {
     testCombinePartialAggsMultiAccumulator<true>("aggMaxN",
-                                                 BSON_ARRAY(BSON_ARRAY("ev"
-                                                                       << "cx"
-                                                                       << "az")
+                                                 BSON_ARRAY(BSON_ARRAY("ev" << "cx"
+                                                                            << "az")
                                                             << 0ll << 3ll << 24 << 1024 << true),
-                                                 BSON_ARRAY(BSON_ARRAY("fu"
-                                                                       << "dw"
-                                                                       << "by")
+                                                 BSON_ARRAY(BSON_ARRAY("fu" << "dw"
+                                                                            << "by")
                                                             << 0ll << 3ll << 24 << 1024 << true),
-                                                 BSON_ARRAY("az"
-                                                            << "by"
-                                                            << "cx"));
+                                                 BSON_ARRAY("az" << "by"
+                                                                 << "cx"));
 }
 }  // namespace mongo

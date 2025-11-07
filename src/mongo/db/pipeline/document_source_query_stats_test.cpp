@@ -27,29 +27,26 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-
-#include <boost/none.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/document_source_query_stats.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/document_source_query_stats.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/query/query_shape/shape_helpers.h"
 #include "mongo/db/query/query_stats/find_key.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
+
+#include <boost/none.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
@@ -73,8 +70,14 @@ public:
         fcr->setFilter(filter.getOwned());
         auto parsedFind =
             uassertStatusOK(parsed_find_command::parse(getExpCtx(), {std::move(fcr)}));
-        return std::make_unique<query_stats::FindKey>(
-            getExpCtx(), *parsedFind, query_shape::CollectionType::kCollection);
+
+        auto statusWithShape =
+            shape_helpers::tryMakeShape<query_shape::FindCmdShape>(*parsedFind, getExpCtx());
+
+        return std::make_unique<query_stats::FindKey>(getExpCtx(),
+                                                      *parsedFind->findCommandRequest,
+                                                      std::move(statusWithShape.getValue()),
+                                                      query_shape::CollectionType::kCollection);
     }
 
     QueryStatsStore& setUpQueryStatsStore(unsigned numPartitions = 1) {
@@ -85,11 +88,11 @@ public:
 
     // Calls getNext() on the document source and validates the result. Returns the field name of
     // the filter.
-    static std::string getNextAndValidateResult(boost::intrusive_ptr<DocumentSource> source,
+    static std::string getNextAndValidateResult(boost::intrusive_ptr<exec::agg::Stage> stage,
                                                 const StringMap<std::string>& keyHashes,
                                                 const StringMap<std::string>& shapeHashes,
                                                 bool shouldValidateFilterDataType = true) {
-        auto result = source->getNext();
+        auto result = stage->getNext();
         ASSERT_TRUE(result.isAdvanced());
         const auto& doc = result.getDocument();
 
@@ -99,9 +102,7 @@ public:
         auto filterObj = filter.getDocument().toBson().firstElement();
         ASSERT_TRUE(keyHashes.contains(filterObj.fieldNameStringData()));
         if (shouldValidateFilterDataType) {
-            ASSERT_BSONOBJ_EQ(filterObj.Obj(),
-                              BSON("$eq"
-                                   << "?number"));
+            ASSERT_BSONOBJ_EQ(filterObj.Obj(), BSON("$eq" << "?number"));
         }
 
         ASSERT_EQ(keyHashes.find(filterObj.fieldNameStringData())->second,
@@ -254,6 +255,7 @@ TEST_F(DocumentSourceQueryStatsTest, GetNextOverMultiplePartitions) {
 
     const auto source =
         DocumentSourceQueryStats::createFromBson(kQueryStatsStage.firstElement(), getExpCtx());
+    auto stage = exec::agg::buildStage(source);
 
     // We check the actual hardcoded hash values so that we will know if a change is made
     // that changes the key and/or shape hash.
@@ -266,11 +268,11 @@ TEST_F(DocumentSourceQueryStatsTest, GetNextOverMultiplePartitions) {
         {"c", "A7443DD02A7DA19E4F6E6BEBA912BC61C7B968FD3154D2074684AD50B3E7958C"}};
 
     StringSet filters;
-    filters.emplace(getNextAndValidateResult(source, keyHashes, shapeHashes));
-    filters.emplace(getNextAndValidateResult(source, keyHashes, shapeHashes));
-    filters.emplace(getNextAndValidateResult(source, keyHashes, shapeHashes));
+    filters.emplace(getNextAndValidateResult(stage, keyHashes, shapeHashes));
+    filters.emplace(getNextAndValidateResult(stage, keyHashes, shapeHashes));
+    filters.emplace(getNextAndValidateResult(stage, keyHashes, shapeHashes));
 
-    ASSERT_TRUE(source->getNext().isEOF());
+    ASSERT_TRUE(stage->getNext().isEOF());
 
     // We should see three unique filters.
     ASSERT_EQ(filters.size(), 3);
@@ -284,6 +286,7 @@ TEST_F(DocumentSourceQueryStatsTest, GetNextTransformIdentifiers) {
 
     const auto source = DocumentSourceQueryStats::createFromBson(
         kQueryStatsStageWithTransformIdentifiers.firstElement(), getExpCtx());
+    auto stage = exec::agg::buildStage(source);
 
     // We check the actual hardcoded hash values so that we will know if a change is made
     // that changes the key and/or shape hash. Note that filter field names will be transformed.
@@ -298,25 +301,29 @@ TEST_F(DocumentSourceQueryStatsTest, GetNextTransformIdentifiers) {
          "71CEB83D63C9329D53E6ADDD8D48540E63B2ED4804302A45239EE8049301C21D"}};
 
     StringSet filters;
-    filters.emplace(getNextAndValidateResult(source, keyHashes, shapeHashes));
-    filters.emplace(getNextAndValidateResult(source, keyHashes, shapeHashes));
+    filters.emplace(getNextAndValidateResult(stage, keyHashes, shapeHashes));
+    filters.emplace(getNextAndValidateResult(stage, keyHashes, shapeHashes));
 
-    ASSERT_TRUE(source->getNext().isEOF());
+    ASSERT_TRUE(stage->getNext().isEOF());
 
     // We should see two unique filters.
     ASSERT_EQ(filters.size(), 2);
 }
 
-DEATH_TEST_REGEX_F(DocumentSourceQueryStatsTest,
-                   GetNextKeyFailsToReParse,
-                   "Tripwire assertion.*7349401") {
+TEST_F(DocumentSourceQueryStatsTest, GetNextKeyFailsToReParse) {
     // Manually construct a match expression that will successfully be constructed and serialized,
     // but be unable to re-parse the serialized representative value.
     auto parsedFind = uassertStatusOK(parsed_find_command::parse(
         getExpCtx(), {std::make_unique<FindCommandRequest>(kDefaultTestNss)}));
     parsedFind->filter = std::make_unique<LTEMatchExpression>("a"_sd, Value(BSONRegEx(".*")));
-    auto findKey = std::make_unique<query_stats::FindKey>(
-        getExpCtx(), *parsedFind, query_shape::CollectionType::kCollection);
+
+    auto statusWithShape =
+        shape_helpers::tryMakeShape<query_shape::FindCmdShape>(*parsedFind, getExpCtx());
+
+    auto findKey = std::make_unique<query_stats::FindKey>(getExpCtx(),
+                                                          *parsedFind->findCommandRequest,
+                                                          std::move(statusWithShape.getValue()),
+                                                          query_shape::CollectionType::kCollection);
 
     // Populate the query stats store with an entry that fails to re-parse.
     auto& queryStatsStore = setUpQueryStatsStore();
@@ -329,8 +336,9 @@ DEATH_TEST_REGEX_F(DocumentSourceQueryStatsTest,
     if (!kDebugBuild) {
         const auto source =
             DocumentSourceQueryStats::createFromBson(kQueryStatsStage.firstElement(), getExpCtx());
+        auto stage = exec::agg::buildStage(source);
         // We should absorb the error and skip the record.
-        ASSERT_TRUE(source->getNext().isEOF());
+        ASSERT_TRUE(stage->getNext().isEOF());
     }
 
     // Now make sure that errors are propagated when the knob is set.
@@ -338,8 +346,9 @@ DEATH_TEST_REGEX_F(DocumentSourceQueryStatsTest,
 
     const auto source =
         DocumentSourceQueryStats::createFromBson(kQueryStatsStage.firstElement(), getExpCtx());
-    // This should hit our tripwire assertion.
-    ASSERT_THROWS(source->getNext(), DBException);
+    auto stage = exec::agg::buildStage(source);
+    // This should raise an user assertion.
+    ASSERT_THROWS_CODE(stage->getNext(), DBException, ErrorCodes::QueryStatsFailedToRecord);
 }
 
 TEST_F(DocumentSourceQueryStatsTest, DataTypeHashConsistency) {
@@ -349,9 +358,7 @@ TEST_F(DocumentSourceQueryStatsTest, DataTypeHashConsistency) {
     // at this first parse-and-serialize step.)
     auto& queryStatsStore = setUpQueryStatsStore();
     queryStatsStore.put(0, QueryStatsEntry{makeFindKeyFromQuery(BSON("number" << 5))});
-    queryStatsStore.put(1,
-                        QueryStatsEntry{makeFindKeyFromQuery(BSON("string"
-                                                                  << "hello"))});
+    queryStatsStore.put(1, QueryStatsEntry{makeFindKeyFromQuery(BSON("string" << "hello"))});
     queryStatsStore.put(
         2, QueryStatsEntry{makeFindKeyFromQuery(BSON("obj" << BSON("c" << BSONObj())))});
     queryStatsStore.put(
@@ -380,6 +387,7 @@ TEST_F(DocumentSourceQueryStatsTest, DataTypeHashConsistency) {
 
     const auto source =
         DocumentSourceQueryStats::createFromBson(kQueryStatsStage.firstElement(), getExpCtx());
+    auto stage = exec::agg::buildStage(source);
 
     // We check the actual hardcoded hash values so that we will know if a change is made
     // that changes the key and/or shape hash.
@@ -423,10 +431,10 @@ TEST_F(DocumentSourceQueryStatsTest, DataTypeHashConsistency) {
     StringSet filters;
     for (size_t i = 0; i < keyHashes.size(); ++i) {
         filters.emplace(getNextAndValidateResult(
-            source, keyHashes, shapeHashes, false /* shouldValidateFilterDataType */));
+            stage, keyHashes, shapeHashes, false /* shouldValidateFilterDataType */));
     }
 
-    ASSERT_TRUE(source->getNext().isEOF());
+    ASSERT_TRUE(stage->getNext().isEOF());
     ASSERT_EQ(filters.size(), keyHashes.size());
 }
 

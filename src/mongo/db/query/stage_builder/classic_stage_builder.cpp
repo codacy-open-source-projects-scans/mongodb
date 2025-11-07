@@ -32,63 +32,55 @@
 #include <utility>
 #include <vector>
 
-#include <boost/container/small_vector.hpp>
+
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 // IWYU pragma: no_include "boost/move/detail/iterator_to_raw_pointer.hpp"
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/exec/and_hash.h"
-#include "mongo/db/exec/and_sorted.h"
-#include "mongo/db/exec/collection_scan.h"
+#include "mongo/db/exec/classic/and_hash.h"
+#include "mongo/db/exec/classic/and_sorted.h"
+#include "mongo/db/exec/classic/collection_scan.h"
+#include "mongo/db/exec/classic/count_scan.h"
+#include "mongo/db/exec/classic/distinct_scan.h"
+#include "mongo/db/exec/classic/eof.h"
+#include "mongo/db/exec/classic/fetch.h"
+#include "mongo/db/exec/classic/geo_near.h"
+#include "mongo/db/exec/classic/index_scan.h"
+#include "mongo/db/exec/classic/limit.h"
+#include "mongo/db/exec/classic/merge_sort.h"
+#include "mongo/db/exec/classic/mock_stage.h"
+#include "mongo/db/exec/classic/or.h"
+#include "mongo/db/exec/classic/projection.h"
+#include "mongo/db/exec/classic/return_key.h"
+#include "mongo/db/exec/classic/shard_filter.h"
+#include "mongo/db/exec/classic/skip.h"
+#include "mongo/db/exec/classic/sort.h"
+#include "mongo/db/exec/classic/sort_key_generator.h"
+#include "mongo/db/exec/classic/text_match.h"
+#include "mongo/db/exec/classic/text_or.h"
 #include "mongo/db/exec/collection_scan_common.h"
-#include "mongo/db/exec/count_scan.h"
-#include "mongo/db/exec/distinct_scan.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/exec/eof.h"
-#include "mongo/db/exec/fetch.h"
-#include "mongo/db/exec/geo_near.h"
-#include "mongo/db/exec/index_scan.h"
-#include "mongo/db/exec/limit.h"
-#include "mongo/db/exec/merge_sort.h"
-#include "mongo/db/exec/mock_stage.h"
-#include "mongo/db/exec/or.h"
-#include "mongo/db/exec/projection.h"
-#include "mongo/db/exec/return_key.h"
-#include "mongo/db/exec/shard_filter.h"
-#include "mongo/db/exec/skip.h"
-#include "mongo/db/exec/sort.h"
-#include "mongo/db/exec/sort_key_generator.h"
-#include "mongo/db/exec/text_match.h"
-#include "mongo/db/exec/text_or.h"
-#include "mongo/db/fts/fts_query_impl.h"
-#include "mongo/db/fts/fts_spec.h"
+#include "mongo/db/exec/matcher/matcher.h"
 #include "mongo/db/index/fts_access_method.h"
-#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/index_bounds.h"
-#include "mongo/db/query/index_entry.h"
-#include "mongo/db/query/record_id_bound.h"
-#include "mongo/db/query/sort_pattern.h"
 #include "mongo/db/query/stage_builder/classic_stage_builder.h"
-#include "mongo/db/query/stage_types.h"
-#include "mongo/db/record_id.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
+
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -115,7 +107,7 @@ std::unique_ptr<PlanStage> ClassicStageBuilder::build(const QuerySolutionNode* r
                 params.minRecord = csn->minRecord;
                 params.maxRecord = csn->maxRecord;
                 params.requestResumeToken = csn->requestResumeToken;
-                params.resumeAfterRecordId = csn->resumeAfterRecordId;
+                params.resumeScanPoint = csn->resumeScanPoint;
                 params.stopApplyingFilterAfterFirstMatch = csn->stopApplyingFilterAfterFirstMatch;
                 params.boundInclusion = csn->boundInclusion;
                 return std::make_unique<CollectionScan>(
@@ -226,10 +218,12 @@ std::unique_ptr<PlanStage> ClassicStageBuilder::build(const QuerySolutionNode* r
             case STAGE_PROJECTION_SIMPLE: {
                 auto pn = static_cast<const ProjectionNodeSimple*>(root);
                 auto childStage = build(pn->children[0].get());
+                auto* proj = _cq.getProj();
+                tassert(10853300, "'getProj()' must not return null", proj);
                 return std::make_unique<ProjectionStageSimple>(
                     _cq.getExpCtxRaw(),
                     _cq.getFindCommandRequest().getProjection(),
-                    _cq.getProj(),
+                    proj,
                     _ws,
                     std::move(childStage));
             }
@@ -342,7 +336,7 @@ std::unique_ptr<PlanStage> ClassicStageBuilder::build(const QuerySolutionNode* r
                 tassert(5432202,
                         str::stream() << "no index named '" << node->index.identifier.catalogName
                                       << "' found in catalog",
-                        catalog);
+                        desc);
                 auto fam =
                     static_cast<const FTSAccessMethod*>(catalog->getEntry(desc)->accessMethod());
                 tassert(5432203, "access method for index is not defined", fam);
@@ -368,7 +362,7 @@ std::unique_ptr<PlanStage> ClassicStageBuilder::build(const QuerySolutionNode* r
                 const ShardingFilterNode* fn = static_cast<const ShardingFilterNode*>(root);
                 auto childStage = build(fn->children[0].get());
 
-                auto shardFilterer = _collection.getShardingFilter(_opCtx);
+                auto shardFilterer = _collection.getShardingFilter();
                 invariant(
                     shardFilterer,
                     "Attempting to use shard filter when there's no shard filter available for "
@@ -387,7 +381,7 @@ std::unique_ptr<PlanStage> ClassicStageBuilder::build(const QuerySolutionNode* r
 
                 std::unique_ptr<ShardFiltererImpl> shardFilterer;
                 if (dn->isShardFiltering) {
-                    auto shardingFilter = _collection.getShardingFilter(_opCtx);
+                    auto shardingFilter = _collection.getShardingFilter();
                     tassert(
                         9245806,
                         "Attempting to use shard filter when there's no shard filter available for "
@@ -458,11 +452,11 @@ std::unique_ptr<PlanStage> ClassicStageBuilder::build(const QuerySolutionNode* r
                     BSONObjIterator arrIt{arr};
                     invariant(arrIt.more());
                     auto firstElt = arrIt.next();
-                    invariant(firstElt.type() == BSONType::Object);
+                    invariant(firstElt.type() == BSONType::object);
                     invariant(!arrIt.more());
                     BSONObj doc = firstElt.embeddedObject();
 
-                    if (vsn->filter && !vsn->filter->matchesBSON(doc)) {
+                    if (vsn->filter && !exec::matcher::matchesBSON(vsn->filter.get(), doc)) {
                         mockStage->enqueueStateCode(PlanStage::NEED_TIME);
                     } else {
                         auto wsID = _ws->allocate();
@@ -483,11 +477,15 @@ std::unique_ptr<PlanStage> ClassicStageBuilder::build(const QuerySolutionNode* r
             case STAGE_EQ_LOOKUP_UNWIND:
             case STAGE_GROUP:
             case STAGE_IDHACK:
+            case STAGE_INDEXED_NESTED_LOOP_JOIN_EMBEDDING_NODE:
+            case STAGE_INDEX_PROBE_NODE:
+            case STAGE_HASH_JOIN_EMBEDDING_NODE:
             case STAGE_MATCH:
             case STAGE_REPLACE_ROOT:
             case STAGE_MOCK:
             case STAGE_MULTI_ITERATOR:
             case STAGE_MULTI_PLAN:
+            case STAGE_NESTED_LOOP_JOIN_EMBEDDING_NODE:
             case STAGE_QUEUED_DATA:
             case STAGE_RECORD_STORE_FAST_COUNT:
             case STAGE_SAMPLE_FROM_TIMESERIES_BUCKET:
@@ -503,7 +501,9 @@ std::unique_ptr<PlanStage> ClassicStageBuilder::build(const QuerySolutionNode* r
             case STAGE_UNWIND:
             case STAGE_SEARCH:
             case STAGE_WINDOW: {
-                LOGV2_WARNING(4615604, "Can't build exec tree for node", "node"_attr = *root);
+                LOGV2_WARNING(4615604,
+                              "Can't build exec tree for node",
+                              "node"_attr = redact(root->toString()));
             }
         }
         MONGO_UNREACHABLE;

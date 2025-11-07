@@ -12,22 +12,24 @@
  *   requires_persistence,
  *   # TODO (SERVER-91251): Run this with stepdowns on TSAN.
  *   tsan_incompatible,
+ *   # This test relies on default timeseries parameters for countDocuments.
+ *   does_not_support_config_fuzzer,
  * ]
  */
 import {ChunkHelper} from "jstests/concurrency/fsm_workload_helpers/chunks.js";
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
+import {getTimeseriesCollForDDLOps} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+import {getRawOperationSpec, getTimeseriesCollForRawOps} from "jstests/libs/raw_operation_utils.js";
 
-export const $config = (function() {
+export const $config = (function () {
     // This test manually shards the collection.
     TestData.shardCollectionProbability = 0;
 
-    const timeField = 'ts';
-    const metaField = 'meta';
+    const timeField = "ts";
+    const metaField = "meta";
 
-    const shardKeys = [
-        {'meta.x': 1},
-        {'meta.y': 1},
-    ];
+    const shardKeys = [{"meta.x": 1}, {"meta.y": 1}];
 
     const data = {
         shardKey: shardKeys[0],
@@ -38,25 +40,33 @@ export const $config = (function() {
         return {x: Math.floor(Math.random() * range), y: Math.floor(Math.random() * range)};
     }
 
-    const iterations = 50;
+    const iterations = 100;
     const numInitialDocs = 5000;
     const kMaxReshardingExecutions = 4;
 
     function executeReshardTimeseries(db, collName, newShardKey) {
-        print(`Started Resharding Timeseries Collection ${collName}. New Shard Key ${
-            tojson(newShardKey)}`);
+        print(`Started Resharding Timeseries Collection ${collName}. New Shard Key ${tojson(newShardKey)}`);
 
         let ns = db + "." + collName;
         let reshardCollectionCmd = {reshardCollection: ns, key: newShardKey, numInitialChunks: 1};
         if (TestData.runningWithShardStepdowns) {
-            assert.commandWorkedOrFailedWithCode(db.adminCommand(reshardCollectionCmd),
-                                                 [ErrorCodes.SnapshotUnavailable]);
+            const isVerificationFeatureFlagEnabled = FeatureFlagUtil.isEnabled(db, "ReshardingVerification");
+            if (isVerificationFeatureFlagEnabled) {
+                // TODO (SERVER-101249): Re-enable resharding verification in
+                // timeseries_reshard_with_inserts.js when running in stepdown suites
+                // 'performVerification' defaults to true when the feature flag is enabled.
+                // Currently, in a suite with stepdown, this test hangs when performing resharding
+                // verification.
+                reshardCollectionCmd.performVerification = false;
+            }
+            assert.commandWorkedOrFailedWithCode(db.adminCommand(reshardCollectionCmd), [
+                ErrorCodes.SnapshotUnavailable,
+            ]);
         } else {
             assert.commandWorked(db.adminCommand(reshardCollectionCmd));
         }
 
-        print(`Finished Resharding Timeseries Collection ${collName}. New Shard Key ${
-            tojson(newShardKey)}`);
+        print(`Finished Resharding Timeseries Collection ${collName}. New Shard Key ${tojson(newShardKey)}`);
     }
 
     const states = {
@@ -70,9 +80,14 @@ export const $config = (function() {
                 });
             }
 
-            retryOnRetryableError(() => {
-                TimeseriesTest.assertInsertWorked(db[collName].insert(docs));
-            }, 100 /* numRetries */, undefined /* sleepMs */, [ErrorCodes.NoProgressMade]);
+            retryOnRetryableError(
+                () => {
+                    TimeseriesTest.assertInsertWorked(db[collName].insert(docs));
+                },
+                100 /* numRetries */,
+                undefined /* sleepMs */,
+                [ErrorCodes.NoProgressMade],
+            );
 
             print(`Finished Inserting documents.`);
         },
@@ -95,22 +110,30 @@ export const $config = (function() {
 
     const transitions = {
         reshardTimeseries: {insert: 1},
-        insert: {insert: .85, reshardTimeseries: .15},
+        insert: {insert: 0.85, reshardTimeseries: 0.15},
     };
 
     function setup(db, collName, cluster) {
         db[collName].drop();
 
-        assert.commandWorked(db.createCollection(
-            collName, {timeseries: {metaField: metaField, timeField: timeField}}));
-        cluster.shardCollection(db[collName], {'meta.x': 1}, false);
+        assert.commandWorked(db.createCollection(collName, {timeseries: {metaField: metaField, timeField: timeField}}));
+        cluster.shardCollection(db[collName], {"meta.x": 1}, false);
 
         const shards = Object.keys(cluster.getSerializedCluster().shards);
-        const bucketNss = 'system.buckets.' + collName;
-        ChunkHelper.splitChunkAt(db, bucketNss, {'meta.x': 5});
+        ChunkHelper.splitChunkAt(db, getTimeseriesCollForDDLOps(db, db[collName]).getName(), {"meta.x": 5});
 
-        ChunkHelper.moveChunk(db, bucketNss, [{'meta.x': MinKey}, {'meta.x': 5}], shards[0]);
-        ChunkHelper.moveChunk(db, bucketNss, [{'meta.x': 5}, {'meta.x': MaxKey}], shards[1]);
+        ChunkHelper.moveChunk(
+            db,
+            getTimeseriesCollForDDLOps(db, db[collName]).getName(),
+            [{"meta.x": MinKey}, {"meta.x": 5}],
+            shards[0],
+        );
+        ChunkHelper.moveChunk(
+            db,
+            getTimeseriesCollForDDLOps(db, db[collName]).getName(),
+            [{"meta.x": 5}, {"meta.x": MaxKey}],
+            shards[1],
+        );
 
         const bulk = db[collName].initializeUnorderedBulkOp();
         for (let i = 0; i < numInitialDocs; ++i) {
@@ -124,16 +147,16 @@ export const $config = (function() {
         let res = bulk.execute();
         assert.commandWorked(res);
         assert.eq(numInitialDocs, res.nInserted);
-        assert.eq(100, db[bucketNss].countDocuments({}));
+        assert.eq(100, getTimeseriesCollForRawOps(db, db[collName]).countDocuments({}, getRawOperationSpec(db)));
     }
 
     return {
         threadCount: 20,
         iterations: iterations,
-        startState: 'reshardTimeseries',
+        startState: "reshardTimeseries",
         states: states,
         transitions: transitions,
         setup: setup,
-        data: data
+        data: data,
     };
 })();

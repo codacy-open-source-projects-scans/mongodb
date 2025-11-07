@@ -29,16 +29,10 @@
 
 #include "mongo/executor/async_rpc.h"
 
-#include <boost/smart_ptr.hpp>
-#include <string>
-#include <tuple>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/task_executor.h"
+#include "mongo/logv2/log.h"
 #include "mongo/rpc/metadata.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/database_name_util.h"
@@ -47,6 +41,16 @@
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <string>
+#include <tuple>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+
+// TODO(SERVER-98556): kTest debug statements for the purpose of helping with diagnosing BFs.
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo::async_rpc {
 namespace detail {
@@ -69,12 +73,13 @@ public:
         CancellationToken token,
         OperationContext* opCtx,
         Targeter* targeter,
+        const TargetingMetadata& targetingMetadata,
         const DatabaseName& dbName,
         BSONObj cmdBSON,
         BatonHandle baton,
         boost::optional<UUID> clientOperationKey) final {
         auto proxyExec = std::make_shared<ProxyingExecutor>(exec, baton);
-        return targeter->resolve(token)
+        return targeter->resolve(token, targetingMetadata)
             .thenRunOn(proxyExec)
             .then([dbName,
                    cmdBSON,
@@ -82,11 +87,9 @@ public:
                    exec = std::move(exec),
                    token,
                    baton = std::move(baton),
-                   clientOperationKey](std::vector<HostAndPort> targets) {
-                invariant(targets.size(),
-                          "Successful targeting implies there are hosts to target.");
+                   clientOperationKey](const HostAndPort& target) {
                 executor::RemoteCommandRequest executorRequest(
-                    targets[0],
+                    target,
                     dbName,
                     cmdBSON,
                     rpc::makeEmptyMetadata(),
@@ -120,6 +123,9 @@ public:
                     .unsafeToInlineFuture()
                     .then(
                         [exec, callbackHandle = std::move(swCallbackHandle.getValue())]() mutable {
+                            // TODO(SERVER-98556): Debug statement for the purpose of helping with
+                            // diagnosing BFs.
+                            LOGV2_DEBUG(9771000, 1, "Cancellation recognized in async_rpc");
                             exec->cancel(callbackHandle);
                         })
                     .getAsync([](auto) {});
@@ -140,6 +146,13 @@ public:
                     if (extraInfo->isLocal()) {
                         targeter->onRemoteCommandError(r.target, extraInfo->asLocal()).get();
                     } else {
+                        // TODO(SERVER-98556): Debug statement for the purpose of helping with
+                        // diagnosing BFs.
+                        LOGV2_DEBUG(9771003,
+                                    1,
+                                    "Remote error occured in async_rpc",
+                                    "status"_attr =
+                                        extraInfo->asRemote().getRemoteCommandResult().toString());
                         targeter
                             ->onRemoteCommandError(r.target,
                                                    extraInfo->asRemote().getRemoteCommandResult())

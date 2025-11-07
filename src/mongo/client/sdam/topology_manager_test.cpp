@@ -29,14 +29,6 @@
 #include "mongo/client/sdam/topology_manager.h"
 
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <string>
-#include <utility>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -46,11 +38,18 @@
 #include "mongo/client/sdam/server_description.h"
 #include "mongo/client/sdam/topology_description.h"
 #include "mongo/rpc/topology_version_gen.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/system_clock_source.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -83,9 +82,8 @@ protected:
                                                   .append("minWireVersion", 2)
                                                   .append("maxWireVersion", 10)
                                                   .appendArray("hosts",
-                                                               BSON_ARRAY("foo:1234"
-                                                                          << "bar:1234"
-                                                                          << "baz:1234"))
+                                                               BSON_ARRAY("foo:1234" << "bar:1234"
+                                                                                     << "baz:1234"))
 
                                                   .obj();
 };

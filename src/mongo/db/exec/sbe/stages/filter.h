@@ -34,6 +34,7 @@
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::sbe {
 /**
@@ -200,6 +201,10 @@ public:
 protected:
     bool shouldOptimizeSaveState(size_t) const final {
         return true;
+    }
+
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {
+        return;
     }
 
 private:

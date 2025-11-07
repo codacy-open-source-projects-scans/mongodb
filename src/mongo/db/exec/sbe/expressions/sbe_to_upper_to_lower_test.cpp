@@ -27,10 +27,6 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <memory>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -42,8 +38,11 @@
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/platform/decimal128.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <cstdint>
+#include <memory>
+#include <string>
 
 namespace mongo::sbe {
 
@@ -82,8 +81,7 @@ TEST_F(SBEToUpperToLowerTest, BasicToUpper) {
     runAndAssertExpression(compiledExpr.get(), "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456789");
 
     // BSONString test.
-    auto bsonStringObj = BSON("string"
-                              << "hello");
+    auto bsonStringObj = BSON("string" << "hello");
     auto bsonStringVal = value::bitcastFrom<const char*>(bsonStringObj["string"].value());
     toUpperAccessor.reset(value::TypeTags::bsonString, bsonStringVal);
     runAndAssertExpression(compiledExpr.get(), "HELLO");
@@ -150,8 +148,7 @@ TEST_F(SBEToUpperToLowerTest, BasicToLower) {
     runAndAssertExpression(compiledExpr.get(), "abcdefghijklmnopqrstuvwxyz123456789");
 
     // BSONString test.
-    auto bsonStringObj = BSON("string"
-                              << "HELLO");
+    auto bsonStringObj = BSON("string" << "HELLO");
     auto bsonStringVal = value::bitcastFrom<const char*>(bsonStringObj["string"].value());
     toLowerAccessor.reset(value::TypeTags::bsonString, bsonStringVal);
     runAndAssertExpression(compiledExpr.get(), "hello");

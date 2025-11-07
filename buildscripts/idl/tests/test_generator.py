@@ -456,6 +456,25 @@ class TestGenerator(testcase.IDLTestcase):
         expected = dedent("BSONObj _anchorObj;")
         self.assertNotIn(expected, header)
 
+    def test_server_parameter_constant_name(self) -> None:
+        """Test generation of constants of server parameter names."""
+        header, _ = self.assert_generate(
+            self.view_test_common_types
+            + dedent("""
+        server_parameters:
+                testServerParameter:
+                    description: "Test server parameter"
+                    set_at: ["startup", "runtime"]
+                    redact: false
+                    cpp_varname: testParameter
+        """)
+        )
+
+        expected = dedent(
+            'constexpr inline auto kTestServerParameterName = "testServerParameter"_sd;'
+        )
+        self.assertIn(expected, header)
+
     def test_command_view_type_generates_anchor(self) -> None:
         """Test anchor generation on command with view parameter."""
         header, _ = self.assert_generate(
@@ -682,8 +701,8 @@ class TestGenerator(testcase.IDLTestcase):
         """)
         )
 
-        expectedParserContext = "IDLParserContext tempContext\(kVariantFieldFieldName.*\)"
-        expectedCastedObject = "NestedStruct::parse\(tempContext.*\)"
+        expectedParserContext = "IDLParserContext tempContext\(.*kVariantFieldFieldName.*\)"
+        expectedCastedObject = "NestedStruct::parse\(localObject, tempContext.*\)"
 
         self.assertRegex(source, expectedParserContext)
         self.assertRegex(source, expectedCastedObject)
@@ -876,35 +895,6 @@ class TestGenerator(testcase.IDLTestcase):
             ],
         )
 
-    def test_chained_struct(self) -> None:
-        """Test generation of 'chained_types:' and 'chained_struct:' tag."""
-        header, source = self.assert_generate_with_basic_types(
-            dedent(
-                """
-            types:
-                ChainedType:
-                    bson_serialization_type: chain
-                    description: "An Chain Type to test chaining"
-                    cpp_type: "mongo::ChainedType"
-                    serializer: mongo::ChainedType::serializeToBSON
-                    deserializer: mongo::ChainedType::parseFromBSON
-                    is_view: false
-            structs:
-                ChainedStruct:
-                    description: Test struct with chained type.
-                    strict: false
-                    chained_types:
-                        ChainedType: ChainedType
-            """
-            )
-        )
-        self.assertStringsInFile(
-            header,
-            [
-                "mongo::ChainedType _chainedType;",
-            ],
-        )
-
     def test_enum(self) -> None:
         """Test generation of enum fields."""
         header, _ = self.assert_generate_with_basic_types(
@@ -1024,8 +1014,102 @@ class TestGenerator(testcase.IDLTestcase):
             header,
             [
                 "mongo::VariantStruct _variantStruct;",
-                "const std::variant<std::string, std::int32_t, bool>& getField1() const { return _variantStruct.getField1(); }",
+                "const std::variant<std::string, std::int32_t, bool>& getField1() const { return getVariantStruct().getField1(); }",
             ],
+        )
+
+    def test_nested_chained_structs(self) -> None:
+        """Test that nested chained structs generate the right setters and getters."""
+        header, source = self.assert_generate_with_basic_types(
+            dedent(
+                """
+            structs:
+                NestedChainedBase:
+                    description: "Base struct for testing nested chains"
+                    fields:
+                        base_field: int
+                NestedChainedBottom:
+                    description: "Bottom struct for nested chaining"
+                    chained_structs:
+                        NestedChainedBase: NestedChainedBase
+                    fields:
+                        bottom_field: int
+                NestedChainedMiddle:
+                    description: "Middle struct for nested chaining"
+                    chained_structs:
+                        NestedChainedBottom: NestedChainedBottom
+                    fields:
+                        middle_field: string
+                NestedChainedTop:
+                    description: "Top struct for nested chaining"
+                    chained_structs:
+                        NestedChainedMiddle: NestedChainedMiddle
+                    fields:
+                        top_field: bool
+            """
+            )
+        )
+        self.assertStringsInFile(
+            header,
+            [
+                "mongo::NestedChainedBase& getNestedChainedBase() { return getNestedChainedBottom().getNestedChainedBase();",
+                "void setNestedChainedBase(mongo::NestedChainedBase value) {\n        getNestedChainedBottom().setNestedChainedBase(std::move(value));",
+                "void setBase_field(std::int32_t value) {\n        getNestedChainedBase().setBase_field(std::move(value));",
+                "mongo::NestedChainedBottom& getNestedChainedBottom() { return getNestedChainedMiddle().getNestedChainedBottom();",
+                "void setNestedChainedBottom(mongo::NestedChainedBottom value) {\n        getNestedChainedMiddle().setNestedChainedBottom(std::move(value));",
+            ],
+        )
+        self.assertStringsInFile(
+            source,
+            [
+                "getNestedChainedBase().setBase_field(element._numberInt());",
+                "getNestedChainedBottom().setBottom_field(element._numberInt());",
+                "getNestedChainedMiddle().setMiddle_field(element.str());",
+                "_top_field = element.boolean();",
+            ],
+        )
+
+        header, source = self.assert_generate_with_basic_types(
+            dedent(
+                """
+            structs:
+                NestedChainedNoInlineBase:
+                    description: "Base struct for testing nested chains without inline"
+                    strict: false
+                    fields:
+                        base_field: int
+                NestedChainedNoInlineBottom:
+                    description: "Top struct for nested chaining without inline"
+                    inline_chained_structs: false
+                    strict: false
+                    chained_structs:
+                        NestedChainedNoInlineBase: NestedChainedNoInlineBase
+                    fields:
+                        bottom_field: string
+                NestedChainedNoInlineTop:
+                    description: "Top struct for nested chaining without inline"
+                    strict: false
+                    inline_chained_structs: false
+                    chained_structs:
+                        NestedChainedNoInlineBottom: NestedChainedNoInlineBottom
+                    fields:
+                        top_field: bool
+            """
+            )
+        )
+        self.assertStringsInFile(
+            header,
+            [
+                "mongo::NestedChainedNoInlineBase& getNestedChainedNoInlineBase() { return getNestedChainedNoInlineBottom().getNestedChainedNoInlineBase();",
+                "void setNestedChainedNoInlineBase(mongo::NestedChainedNoInlineBase value) {\n        getNestedChainedNoInlineBottom().setNestedChainedNoInlineBase(std::move(value));",
+                "mongo::NestedChainedNoInlineBottom& getNestedChainedNoInlineBottom() { return _nestedChainedNoInlineBottom;",
+            ],
+        )
+
+        # Inline setters/getters not generated.
+        self.assertStringNotInFile(
+            header,
+            "void setBase_field(std::int32_t value) {\n        getNestedChainedNoInlineBase().setBase_field(std::move(value));",
         )
 
     def test_callback_validators(self) -> None:
@@ -1201,7 +1285,7 @@ class TestGenerator(testcase.IDLTestcase):
             source,
             [
                 "for (auto&& sequence : request.sequences)",
-                "values.emplace_back(mongo::BasicStruct::parse(tempContext, sequenceObject, dctx));",
+                "values.emplace_back(mongo::BasicStruct::parse(sequenceObject, tempContext, dctx));",
             ],
         )
 
@@ -1277,6 +1361,284 @@ class TestGenerator(testcase.IDLTestcase):
                         class TestCommandNameCmdVersion1Gen : public TypedCommand<Derived> {
                        """),
                 "using Request = APIv1Command;",
+            ],
+        )
+
+    def test_binary_compatible_feature_flag_disabled_by_default(self) -> None:
+        """Test generation of a disabled by default binary-compatible feature flag"""
+        header, source = self.assert_generate_with_basic_types(
+            dedent(
+                """
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    default: false
+                    fcv_gated: false
+            """
+            )
+        )
+        self.assertStringsInFile(
+            header,
+            ["mongo::BinaryCompatibleFeatureFlag gToaster;"],
+        )
+        self.assertStringsInFile(
+            source,
+            [
+                "mongo::BinaryCompatibleFeatureFlag gToaster{false};",
+                '<FeatureFlagServerParameter>("featureFlagToaster", &gToaster);',
+            ],
+        )
+
+    def test_binary_compatible_feature_flag_enabled_by_default(self) -> None:
+        """Test generation of an enabled by default binary-compatible feature flag"""
+        header, source = self.assert_generate_with_basic_types(
+            dedent(
+                """
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    default: true
+                    fcv_gated: false
+            """
+            )
+        )
+        self.assertStringsInFile(
+            header,
+            ["mongo::BinaryCompatibleFeatureFlag gToaster;"],
+        )
+        self.assertStringsInFile(
+            source,
+            [
+                "mongo::BinaryCompatibleFeatureFlag gToaster{true};",
+                '<FeatureFlagServerParameter>("featureFlagToaster", &gToaster);',
+            ],
+        )
+
+    def test_fcv_gated_feature_flag_disabled_on_all_versions_by_default(self) -> None:
+        """Test generation of an FCV-gated feature flag disabled by default for all versions"""
+        header, source = self.assert_generate_with_basic_types(
+            dedent(
+                """
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    default: false
+                    fcv_gated: true
+            """
+            )
+        )
+        self.assertStringsInFile(
+            header,
+            ["mongo::FCVGatedFeatureFlag gToaster;"],
+        )
+        self.assertStringsInFile(
+            source,
+            [
+                'mongo::FCVGatedFeatureFlag gToaster{false, ""_sd};',
+                '<FeatureFlagServerParameter>("featureFlagToaster", &gToaster);',
+            ],
+        )
+
+    def test_fcv_gated_feature_flag_enabled_since_version(self) -> None:
+        """Test generation of an FCV-gated feature flag enabled since a specified version"""
+        header, source = self.assert_generate_with_basic_types(
+            dedent(
+                """
+            feature_flags:
+                featureFlagToaster:
+                    description: >
+                      Make toast
+                      (Enable on transitional FCV): Lorem ipsum dolor sit amet
+                    cpp_varname: gToaster
+                    default: true
+                    version: 123
+                    fcv_gated: true
+            """
+            )
+        )
+        self.assertStringsInFile(
+            header,
+            ["mongo::FCVGatedFeatureFlag gToaster;"],
+        )
+        self.assertStringsInFile(
+            source,
+            [
+                'mongo::FCVGatedFeatureFlag gToaster{true, "123"_sd};',
+                '<FeatureFlagServerParameter>("featureFlagToaster", &gToaster);',
+            ],
+        )
+
+    def test_fcv_gated_feature_flag_disabled_on_all_versions_by_default_with_enable_on_transitional_fcv(
+        self,
+    ) -> None:
+        """Test generation of an FCV-gated feature flag that specifies to transition on kUpgrading"""
+        header, source = self.assert_generate_with_basic_types(
+            dedent(
+                """
+            feature_flags:
+                featureFlagToaster:
+                    description: >
+                      Make toast
+                      (Enable on transitional FCV): Lorem ipsum dolor sit amet
+                    cpp_varname: gToaster
+                    default: true
+                    version: 123
+                    fcv_gated: true
+                    enable_on_transitional_fcv_UNSAFE: true
+            """
+            )
+        )
+        self.assertStringsInFile(
+            header,
+            ["mongo::FCVGatedFeatureFlag gToaster;"],
+        )
+        self.assertStringsInFile(
+            source,
+            [
+                'mongo::FCVGatedFeatureFlag gToaster{true, "123"_sd, true};',
+                '<FeatureFlagServerParameter>("featureFlagToaster", &gToaster);',
+            ],
+        )
+
+    def test_fcv_gated_feature_flag_disabled_on_all_versions_by_default_with_enable_on_transitional_fcv_false(
+        self,
+    ) -> None:
+        """Test that the generation of an FCV-gated feature flag that specifies enable_on_transitional_fcv_UNSAFE: false is equivalent to the default"""
+        header, source = self.assert_generate_with_basic_types(
+            dedent(
+                """
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    default: true
+                    version: 123
+                    fcv_gated: true
+                    enable_on_transitional_fcv_UNSAFE: false
+            """
+            )
+        )
+        self.assertStringsInFile(
+            header,
+            ["mongo::FCVGatedFeatureFlag gToaster;"],
+        )
+        self.assertStringsInFile(
+            source,
+            [
+                'mongo::FCVGatedFeatureFlag gToaster{true, "123"_sd};',
+                '<FeatureFlagServerParameter>("featureFlagToaster", &gToaster);',
+            ],
+        )
+
+    def test_legacy_context_unaware_fcv_gated_feature_flag(self) -> None:
+        """Test generation of an FCV-gated feature flag that uses the legacy feature flag API"""
+        header, source = self.assert_generate_with_basic_types(
+            dedent(
+                """
+            feature_flags:
+                featureFlagLegacyAPIToaster:
+                    description: "Make toast"
+                    cpp_varname: gLegacyAPIToaster
+                    default: true
+                    version: 123
+                    fcv_gated: true
+                    fcv_context_unaware: true
+            """
+            )
+        )
+        self.assertStringsInFile(
+            header,
+            ["mongo::LegacyContextUnawareFCVGatedFeatureFlag gLegacyAPIToaster;"],
+        )
+        self.assertStringsInFile(
+            source,
+            [
+                'mongo::LegacyContextUnawareFCVGatedFeatureFlag gLegacyAPIToaster{true, "123"_sd};',
+                '<FeatureFlagServerParameter>("featureFlagLegacyAPIToaster", &gLegacyAPIToaster);',
+            ],
+        )
+
+    def test_in_development_incremental_feature_rollout_flag(self) -> None:
+        """Test generation of an Incremental Feature Rollout (IFR) feature flag"""
+        header, source = self.assert_generate_with_basic_types(
+            dedent(
+                """
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    incremental_rollout_phase: in_development
+                    fcv_gated: false
+            """
+            )
+        )
+        self.assertStringsInFile(
+            header,
+            ["mongo::IncrementalRolloutFeatureFlag gToaster;"],
+        )
+        self.assertStringsInFile(
+            source,
+            [
+                "mongo::IncrementalRolloutFeatureFlag gToaster{"
+                + '"featureFlagToaster"_sd, RolloutPhase::inDevelopment, false};',
+                '<FeatureFlagServerParameter>("featureFlagToaster", &gToaster);',
+            ],
+        )
+
+    def test_rollout_incremental_feature_rollout_flag(self) -> None:
+        """Test generation of an Incremental Feature Rollout (IFR) feature flag"""
+        header, source = self.assert_generate_with_basic_types(
+            dedent(
+                """
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    incremental_rollout_phase: rollout
+                    fcv_gated: false
+            """
+            )
+        )
+        self.assertStringsInFile(
+            header,
+            ["mongo::IncrementalRolloutFeatureFlag gToaster;"],
+        )
+        self.assertStringsInFile(
+            source,
+            [
+                "mongo::IncrementalRolloutFeatureFlag gToaster{"
+                + '"featureFlagToaster"_sd, RolloutPhase::rollout, true};',
+                '<FeatureFlagServerParameter>("featureFlagToaster", &gToaster);',
+            ],
+        )
+
+    def test_released_incremental_feature_rollout_flag(self) -> None:
+        """Test generation of an Incremental Feature Rollout (IFR) feature flag"""
+        header, source = self.assert_generate_with_basic_types(
+            dedent(
+                """
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    incremental_rollout_phase: released
+                    fcv_gated: false
+            """
+            )
+        )
+        self.assertStringsInFile(
+            header,
+            ["mongo::IncrementalRolloutFeatureFlag gToaster;"],
+        )
+        self.assertStringsInFile(
+            source,
+            [
+                "mongo::IncrementalRolloutFeatureFlag gToaster{"
+                + '"featureFlagToaster"_sd, RolloutPhase::released, true};',
+                '<FeatureFlagServerParameter>("featureFlagToaster", &gToaster);',
             ],
         )
 

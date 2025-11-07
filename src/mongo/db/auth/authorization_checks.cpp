@@ -27,12 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <memory>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/auth/authorization_checks.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -41,19 +36,27 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
-#include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/auth/validated_tenancy_scope.h"
-#include "mongo/db/catalog/document_validation.h"
-#include "mongo/db/commands/create_gen.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/local_catalog/ddl/coll_mod_gen.h"
+#include "mongo/db/local_catalog/ddl/create_gen.h"
+#include "mongo/db/local_catalog/document_validation.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace auth {
@@ -82,7 +85,8 @@ Status checkAuthForCreateOrModifyView(OperationContext* opCtx,
         boost::none,
         serializationContext);
 
-    auto statusWithPrivs = getPrivilegesForAggregate(authzSession, viewOnNs, request, isMongos);
+    auto statusWithPrivs =
+        getPrivilegesForAggregate(opCtx, authzSession, viewOnNs, request, isMongos);
     PrivilegeVector privileges = uassertStatusOK(statusWithPrivs);
     if (!authzSession->isAuthorizedForPrivileges(privileges)) {
         return Status(ErrorCodes::Unauthorized, "unauthorized");
@@ -226,6 +230,25 @@ Status checkAuthForKillCursors(AuthorizationSession* authSession,
                   str::stream() << "not authorized to kill cursor on " << ns.toStringForErrorMsg());
 }
 
+Status checkAuthForReleaseMemory(AuthorizationSession* authSession, const NamespaceString& ns) {
+    // Check whether the user is authorised to release memory in the cluster level.
+    if (authSession->isAuthorizedForActionsOnResource(
+            ResourcePattern::forClusterResource(ns.tenantId()),
+            ActionType::releaseMemoryAnyCursor)) {
+        return Status::OK();
+    }
+
+    // Check whether the user is authorised to release memory in the database or collection level.
+    if (authSession->isAuthorizedForActionsOnResource(
+            CommandHelpers::resourcePatternForNamespace(ns), ActionType::releaseMemoryAnyCursor)) {
+        return Status::OK();
+    }
+
+    return Status(ErrorCodes::Unauthorized,
+                  str::stream() << "not authorized to release cursor memory on "
+                                << ns.toStringForErrorMsg());
+}
+
 Status checkAuthForCreate(OperationContext* opCtx,
                           AuthorizationSession* authSession,
                           const CreateCommand& cmd,
@@ -290,8 +313,8 @@ Status checkAuthForCollMod(OperationContext* opCtx,
     // enabled, users must specify both "viewOn" and "pipeline" together. This prevents a user from
     // exposing more information in the original underlying namespace by only changing "pipeline",
     // or looking up more information via the original pipeline by only changing "viewOn".
-    const bool hasViewOn = cmdObj.hasField("viewOn");
-    const bool hasPipeline = cmdObj.hasField("pipeline");
+    const bool hasViewOn = cmdObj.hasField(CollMod::kViewOnFieldName);
+    const bool hasPipeline = cmdObj.hasField(CollMod::kPipelineFieldName);
     if (hasViewOn != hasPipeline) {
         return Status(
             ErrorCodes::InvalidOptions,
@@ -299,16 +322,27 @@ Status checkAuthForCollMod(OperationContext* opCtx,
     }
     if (hasViewOn) {
         NamespaceString viewOnNs(NamespaceStringUtil::deserialize(
-            ns.dbName(), cmdObj["viewOn"].checkAndGetStringData()));
-        auto viewPipeline = BSONArray(cmdObj["pipeline"].Obj());
+            ns.dbName(), cmdObj[CollMod::kViewOnFieldName].checkAndGetStringData()));
+        auto viewPipeline = BSONArray(cmdObj[CollMod::kPipelineFieldName].Obj());
         return checkAuthForCreateOrModifyView(
             opCtx, authSession, ns, viewOnNs, viewPipeline, isMongos, serializationContext);
+    }
+
+    // This parameter is only for internal use on FCV upgrade. Reject user-initiated commands, as
+    // they are problematic, e.g. by creating incompatible oplog entries in mixed-version clusters.
+    if (cmdObj.hasField(CollMod::k_removeLegacyTimeseriesBucketingParametersHaveChangedFieldName)) {
+        return Status(
+            ErrorCodes::Unauthorized,
+            str::stream()
+                << CollMod::k_removeLegacyTimeseriesBucketingParametersHaveChangedFieldName
+                << " is an invalid collMod parameter");
     }
 
     return Status::OK();
 }
 
-StatusWith<PrivilegeVector> getPrivilegesForAggregate(AuthorizationSession* authSession,
+StatusWith<PrivilegeVector> getPrivilegesForAggregate(OperationContext* opCtx,
+                                                      AuthorizationSession* authSession,
                                                       const NamespaceString& nss,
                                                       const AggregateCommandRequest& request,
                                                       bool isMongos) {
@@ -350,6 +384,14 @@ StatusWith<PrivilegeVector> getPrivilegesForAggregate(AuthorizationSession* auth
         PrivilegeVector currentPrivs = liteParsedDocSource->requiredPrivileges(
             isMongos, request.getBypassDocumentValidation().value_or(false));
         Privilege::addPrivilegesToPrivilegeVector(&privileges, currentPrivs);
+        if (gFeatureFlagMandatoryAuthzChecks.isEnabledUseLatestFCVWhenUninitialized(
+                VersionContext::getDecoration(opCtx),
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            invariant((!(liteParsedDocSource->requiresAuthzChecks() && currentPrivs.empty())),
+                      "Must specify authorization checks for this stage: " +
+                          pipelineStage.firstElementFieldNameStringData() +
+                          " or manually opt out by overriding requiresAuthzChecks to false");
+        }
     }
     return privileges;
 }

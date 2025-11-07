@@ -36,19 +36,16 @@
 #include <algorithm>
 #include <memory>
 #include <set>
-#include <type_traits>
 #include <utility>
 
 #include <absl/container/node_hash_map.h>
 #include <absl/meta/type_traits.h>
+#include <absl/strings/str_split.h>
 // IWYU pragma: no_include "boost/container/detail/flat_tree.hpp"
 #include <boost/container/flat_set.hpp>
 #include <boost/container/small_vector.hpp>
 #include <boost/container/vector.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
@@ -56,22 +53,19 @@
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/exec/index_path_projection.h"
 #include "mongo/db/field_ref.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index/wildcard_key_generator.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
+#include "mongo/db/query/compiler/rewrites/matcher/expression_optimizer.h"
 #include "mongo/db/query/index_tag.h"
-#include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/intrusive_counter.h"
+#include "mongo/unittest/golden_test.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/str.h"
-#include "mongo/util/text.h"  // IWYU pragma: keep
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 using namespace mongo;
 
@@ -90,7 +84,7 @@ unique_ptr<MatchExpression> parseMatchExpression(const BSONObj& obj, bool should
     ASSERT_TRUE(status.isOK());
     auto expr = std::move(status.getValue());
     if (shouldNormalize) {
-        expr = MatchExpression::normalize(std::move(expr));
+        expr = normalizeMatchExpression(std::move(expr));
     }
     return expr;
 }
@@ -143,14 +137,14 @@ void testGetFields(const char* query,
 
     // Verify results
     // First, check that results contain a superset of expected fields.
-    vector<string> expectedFields = StringSplitter::split(expectedFieldsStr, ",");
+    vector<string> expectedFields = absl::StrSplit(expectedFieldsStr, ",", absl::SkipEmpty());
     for (vector<string>::const_iterator i = expectedFields.begin(); i != expectedFields.end();
          i++) {
         if (fields[*i].isSparse != sparseSupported) {
             str::stream ss;
             ss << "getFields(query=" << query << ", prefix=" << prefix << "): unable to find " << *i
                << " in result: " << toString(fields.begin(), fields.end());
-            FAIL(ss);
+            FAIL(std::string(ss));
         }
     }
 
@@ -161,7 +155,7 @@ void testGetFields(const char* query,
            << "): unexpected fields in result. expected: "
            << toString(expectedFields.begin(), expectedFields.end())
            << ". actual: " << toString(fields.begin(), fields.end());
-        FAIL(ss);
+        FAIL(std::string(ss));
     }
 }
 
@@ -229,7 +223,7 @@ void findRelevantTaggedNodePathsAndIndices(MatchExpression* root,
             str::stream ss;
             ss << "tag is not instance of RelevantTag. tree: " << root->debugString()
                << "; tag: " << buf.str();
-            FAIL(ss);
+            FAIL(std::string(ss));
         }
         paths->push_back(r->path);
         for (auto const& index : r->first) {
@@ -250,7 +244,7 @@ void findRelevantTaggedNodePathsAndIndices(MatchExpression* root,
 IndexEntry buildSimpleIndexEntry(const BSONObj& kp) {
     return {kp,
             IndexNames::nameToType(IndexNames::findPluginName(kp)),
-            IndexDescriptor::kLatestIndexVersion,
+            IndexConfig::kLatestIndexVersion,
             false,
             {},
             {},
@@ -300,19 +294,19 @@ void testRateIndices(const char* query,
            << "): expected indices did not match actual indices. expected: "
            << toString(expectedIndices.begin(), expectedIndices.end())
            << ". actual: " << toString(actualIndices.begin(), actualIndices.end());
-        FAIL(ss);
+        FAIL(std::string(ss));
     }
 
     // Compare with expected list of paths.
     // First verify number of paths retrieved.
-    vector<string> expectedPaths = StringSplitter::split(expectedPathsStr, ",");
+    vector<string> expectedPaths = absl::StrSplit(expectedPathsStr, ",", absl::SkipEmpty());
     if (paths.size() != expectedPaths.size()) {
         str::stream ss;
         ss << "rateIndices(query=" << query << ", prefix=" << prefix
            << "): unexpected number of tagged nodes found. expected: "
            << toString(expectedPaths.begin(), expectedPaths.end())
            << ". actual: " << toString(paths.begin(), paths.end());
-        FAIL(ss);
+        FAIL(std::string(ss));
     }
 
     // Next, check that value and order of each element match between the two lists.
@@ -327,7 +321,7 @@ void testRateIndices(const char* query,
            << "): unexpected path found. expected: " << *j << " "
            << toString(expectedPaths.begin(), expectedPaths.end()) << ". actual: " << *i << " "
            << toString(paths.begin(), paths.end());
-        FAIL(ss);
+        FAIL(std::string(ss));
     }
 }
 
@@ -1164,8 +1158,9 @@ auto makeIndexEntry(BSONObj keyPattern,
                     MultikeyPaths multiKeyPaths,
                     std::set<FieldRef> multiKeyPathSet = {},
                     BSONObj infoObj = BSONObj()) {
+    auto indexType = IndexNames::nameToType(IndexNames::findPluginName(keyPattern));
 
-    auto wcProj = keyPattern.firstElement().fieldNameStringData().endsWith("$**"_sd)
+    auto wcProj = indexType
         ? std::make_unique<WildcardProjection>(WildcardKeyGenerator::createProjectionExecutor(
               keyPattern, infoObj.getObjectField("wildcardProjection")))
         : std::unique_ptr<WildcardProjection>(nullptr);
@@ -1175,8 +1170,8 @@ auto makeIndexEntry(BSONObj keyPattern,
             return !entry.empty();
         });
     return std::make_pair(IndexEntry(keyPattern,
-                                     IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                                     IndexDescriptor::kLatestIndexVersion,
+                                     indexType,
+                                     IndexConfig::kLatestIndexVersion,
                                      multiKey,
                                      multiKeyPaths,
                                      multiKeyPathSet,
@@ -1197,6 +1192,28 @@ TEST(QueryPlannerIXSelectTest, InternalExprEqCannotUseMultiKeyIndex) {
     std::set<size_t> expectedIndices;
     testRateIndices(
         "{a: {$_internalExprEq: 1}}", "", kSimpleCollator, indices, "a", expectedIndices);
+}
+
+TEST(QueryPlannerIXSelectTest, InternalExprEqUnderNotCannotUseMultiKeyIndex) {
+    auto entry = makeIndexEntry(BSON("a" << 1), {{0U}});
+    std::vector<IndexEntry> indices;
+    indices.push_back(entry.first);
+    std::set<size_t> expectedIndices;
+    testRateIndices(
+        "{a: {$not: {$_internalExprEq: 1}}}", "", kSimpleCollator, indices, "a", expectedIndices);
+}
+
+TEST(QueryPlannerIXSelectTest, InternalEqHashedKeyUnderRequiresHashedIndex) {
+    auto entry = makeIndexEntry(BSON("a" << 1), {{0U}});
+    std::vector<IndexEntry> indices;
+    indices.push_back(entry.first);
+    std::set<size_t> expectedIndices;
+    testRateIndices("{a: {$not: {$_internalEqHash: NumberLong(2)}}}",
+                    "",
+                    kSimpleCollator,
+                    indices,
+                    "a",
+                    expectedIndices);
 }
 
 TEST(QueryPlannerIXSelectTest, InternalExprEqCanUseNonMultikeyFieldOfMultikeyIndex) {
@@ -1228,8 +1245,7 @@ TEST(QueryPlannerIXSelectTest, InternalExprEqCanUseNonMultikeyIndexWithNoPathLev
 }
 
 TEST(QueryPlannerIXSelectTest, InternalExprEqCanUseHashedIndex) {
-    auto entry = buildSimpleIndexEntry(BSON("a"
-                                            << "hashed"));
+    auto entry = buildSimpleIndexEntry(BSON("a" << "hashed"));
     std::vector<IndexEntry> indices;
     indices.push_back(entry);
     std::set<size_t> expectedIndices = {0};
@@ -1249,9 +1265,8 @@ TEST(QueryPlannerIXSelectTest, InternalExprEqCannotUseTextIndexPrefix) {
 }
 
 TEST(QueryPlannerIXSelectTest, InternalExprEqCanUseTextIndexSuffix) {
-    auto entry = buildSimpleIndexEntry(BSON("_fts"
-                                            << "text"
-                                            << "_ftsx" << 1 << "a" << 1));
+    auto entry = buildSimpleIndexEntry(BSON("_fts" << "text"
+                                                   << "_ftsx" << 1 << "a" << 1));
     std::vector<IndexEntry> indices;
     indices.push_back(entry);
     std::set<size_t> expectedIndices = {0};
@@ -1365,24 +1380,21 @@ TEST(QueryPlannerIXSelectTest,
 }
 
 TEST(QueryPlannerIXSelectTest, HashedIndexShouldNotBeRelevantForNotPredicate) {
-    auto entry = buildSimpleIndexEntry(BSON("a"
-                                            << "hashed"));
+    auto entry = buildSimpleIndexEntry(BSON("a" << "hashed"));
     entry.type = IndexType::INDEX_HASHED;
     std::set<size_t> expectedIndices = {};
     testRateIndices("{a: {$ne: 4}}", "", kSimpleCollator, {entry}, "a,a", expectedIndices);
 }
 
 TEST(QueryPlannerIXSelectTest, HashedIndexShouldNotBeRelevantForNotEqualsNullPredicate) {
-    auto entry = buildSimpleIndexEntry(BSON("a"
-                                            << "hashed"));
+    auto entry = buildSimpleIndexEntry(BSON("a" << "hashed"));
     entry.type = IndexType::INDEX_HASHED;
     std::set<size_t> expectedIndices = {};
     testRateIndices("{a: {$ne: null}}", "", kSimpleCollator, {entry}, "a,a", expectedIndices);
 }
 
 TEST(QueryPlannerIXSelectTest, HashedSparseIndexShouldNotBeRelevantForExistsFalse) {
-    auto entry = buildSimpleIndexEntry(BSON("a"
-                                            << "hashed"));
+    auto entry = buildSimpleIndexEntry(BSON("a" << "hashed"));
     entry.type = IndexType::INDEX_HASHED;
     entry.sparse = true;
     std::set<size_t> expectedIndices = {};
@@ -1390,8 +1402,7 @@ TEST(QueryPlannerIXSelectTest, HashedSparseIndexShouldNotBeRelevantForExistsFals
 }
 
 TEST(QueryPlannerIXSelectTest, HashedSparseIndexShouldNotBeRelevantForEqualsNull) {
-    auto entry = buildSimpleIndexEntry(BSON("a"
-                                            << "hashed"));
+    auto entry = buildSimpleIndexEntry(BSON("a" << "hashed"));
     entry.type = IndexType::INDEX_HASHED;
     entry.sparse = true;
     std::set<size_t> expectedIndices = {};
@@ -1399,8 +1410,7 @@ TEST(QueryPlannerIXSelectTest, HashedSparseIndexShouldNotBeRelevantForEqualsNull
 }
 
 TEST(QueryPlannerIXSelectTest, HashedNonSparseIndexShouldBeRelevantForExistsFalse) {
-    auto entry = buildSimpleIndexEntry(BSON("a"
-                                            << "hashed"));
+    auto entry = buildSimpleIndexEntry(BSON("a" << "hashed"));
     entry.type = IndexType::INDEX_HASHED;
     entry.sparse = false;
     std::set<size_t> expectedIndices = {0};
@@ -1408,8 +1418,7 @@ TEST(QueryPlannerIXSelectTest, HashedNonSparseIndexShouldBeRelevantForExistsFals
 }
 
 TEST(QueryPlannerIXSelectTest, HashedSparseIndexShouldBeRelevantForExistsTrue) {
-    auto entry = buildSimpleIndexEntry(BSON("a"
-                                            << "hashed"));
+    auto entry = buildSimpleIndexEntry(BSON("a" << "hashed"));
     entry.type = IndexType::INDEX_HASHED;
     entry.sparse = true;
     std::set<size_t> expectedIndices = {0};
@@ -1489,8 +1498,7 @@ TEST(QueryPlannerIXSelectTest, CanUseIndexWithSimpleCollatorForNonPrefixRegexFil
 TEST(QueryPlannerIXSelectTest, GeoPredicateCanOnlyUse2dsphereIndex) {
     std::vector<IndexEntry> indices;
     auto btreeEntry = buildSimpleIndexEntry(BSON("loc" << 1));
-    auto twodSphereEntry = buildSimpleIndexEntry(BSON("loc"
-                                                      << "2dsphere"));
+    auto twodSphereEntry = buildSimpleIndexEntry(BSON("loc" << "2dsphere"));
     indices.push_back(btreeEntry);
     indices.push_back(twodSphereEntry);
     std::set<size_t> expectedIndices = {1};
@@ -1506,8 +1514,7 @@ TEST(QueryPlannerIXSelectTest, GeoPredicateCanOnlyUse2dsphereIndex) {
 TEST(QueryPlannerIXSelectTest, GeoPredicateUnderNotCannotUse2dsphereIndex) {
     std::vector<IndexEntry> indices;
     auto btreeEntry = buildSimpleIndexEntry(BSON("loc" << 1));
-    auto twodSphereEntry = buildSimpleIndexEntry(BSON("loc"
-                                                      << "2dsphere"));
+    auto twodSphereEntry = buildSimpleIndexEntry(BSON("loc" << "2dsphere"));
     indices.push_back(btreeEntry);
     indices.push_back(twodSphereEntry);
     // There are no expectedIndices. The $geoWithin under $not cannot use the 2dsphere index.
@@ -1825,7 +1832,7 @@ TEST(QueryPlannerIXSelectTest, SparseIndexCannotBeUsedInALookup) {
         BSON("$**" << 1), {}, {}, BSON("wildcardProjection" << BSON("_id" << 1 << "subpath" << 1)));
     IndexEntry sparseIndex(BSON("abc" << 1),
                            INDEX_BTREE,
-                           IndexDescriptor::kLatestIndexVersion,
+                           IndexConfig::kLatestIndexVersion,
                            false,
                            {},    /* multiKeyPaths */
                            {},    /* multiKeyPathSet */
@@ -1902,6 +1909,221 @@ TEST(QueryPlannerIXSelectTest, SparseIndexSupportedDoesNotTraverse) {
         parseMatchExpression(fromjson("{x: 5, y: null}")).get(), inElemMatch));
     ASSERT_TRUE(QueryPlannerIXSelect::nodeIsSupportedBySparseIndex(
         parseMatchExpression(fromjson("{x: {$ne: null}}")).get(), inElemMatch));
+}
+
+unittest::GoldenTestConfig goldenTestConfig{"src/mongo/db/query/test_output"};
+
+/**
+ * This function prints the expanded compound wildcard indices (CWI) along with their key patterns
+ * and positions to the output stream.
+ */
+void printExpandedCWIsWithPositions(const std::vector<IndexEntry>& indices, std::ostream& os) {
+    os << "The expanded CWIs:" << std::endl;
+    size_t i = 0;
+    for (const auto& index : indices) {
+        os << (i++) << ": " << index.toString() << std::endl;
+    }
+    os << std::endl;
+}
+
+TEST(QueryPlannerIXSelectTest, StripInvalidCWIAssignmentsBasic) {
+    mongo::unittest::GoldenTestContext ctx(&goldenTestConfig);
+    auto& os = ctx.outStream();
+
+    auto query = fromjson("{x: 10}");
+    auto me = parseMatchExpression(query);
+    auto entry = makeIndexEntry(
+        BSON("x" << 1 << "$**" << 1), {}, {}, BSON("wildcardProjection" << BSON("x" << 0)));
+
+    // "x" and "y" may not all appear in 'query', as if 'query' were a subtree in a larger query.
+    RelevantFieldIndexMap fields = {{"x", {true}}, {"y", {true}}};
+    std::vector<IndexEntry> indices = QueryPlannerIXSelect::expandIndexes(fields, {entry.first});
+    printExpandedCWIsWithPositions(indices, os);
+
+    QueryPlannerIXSelect::rateIndices(me.get(), "", indices, {});
+    os << "The expression assigned with the CWIs by rateIndices:" << std::endl
+       << me->debugString() << std::endl;
+
+    // Test that the CWI (index 0) is stripped. The CWI is considered invalid because the predicate
+    // does not involve with the expanded wildcard field "y".
+    QueryPlannerIXSelect::stripInvalidAssignments(me.get(), indices);
+    os << "Test that the invalid CWI assignment is stripped:" << std::endl << me->debugString();
+}
+
+TEST(QueryPlannerIXSelectTest, StripInvalidCWIAssignmentsDoNotStripAssignedWildcardField) {
+    mongo::unittest::GoldenTestContext ctx(&goldenTestConfig);
+    auto& os = ctx.outStream();
+
+    auto query = fromjson("{y: 10}");
+    auto me = parseMatchExpression(query);
+    auto entry = makeIndexEntry(
+        BSON("x" << 1 << "$**" << 1), {}, {}, BSON("wildcardProjection" << BSON("x" << 0)));
+
+    // "x" and "y" may not all appear in 'query', as if 'query' were a subtree in a larger query.
+    RelevantFieldIndexMap fields = {{"x", {true}}, {"y", {true}}};
+    std::vector<IndexEntry> indices = QueryPlannerIXSelect::expandIndexes(fields, {entry.first});
+    printExpandedCWIsWithPositions(indices, os);
+
+    QueryPlannerIXSelect::rateIndices(me.get(), "", indices, {});
+    os << "The expression assigned with the CWIs by rateIndices:" << std::endl
+       << me->debugString() << std::endl;
+
+    // Test that the CWI assignment still remains as the predicate {y: 10} involves with the
+    // wildcard field "y" and may have index bounds on the expanded wildcard field.
+    QueryPlannerIXSelect::stripInvalidAssignments(me.get(), indices);
+    os << "Test that the valid CWI assignments still remain:" << std::endl << me->debugString();
+}
+
+TEST(QueryPlannerIXSelectTest, StripInvalidCWIAssignmentsInAnd) {
+    mongo::unittest::GoldenTestContext ctx(&goldenTestConfig);
+    auto& os = ctx.outStream();
+
+    auto query = fromjson("{$and: [{x: 1}, {z: 1}]}");
+    auto me = parseMatchExpression(query);
+    auto entry = makeIndexEntry(
+        BSON("x" << 1 << "$**" << 1), {}, {}, BSON("wildcardProjection" << BSON("x" << 0)));
+
+    // "x" and "y" may not all appear in 'query', as if 'query' were a subtree in a larger query.
+    RelevantFieldIndexMap fields = {{"x", {true}}, {"y", {true}}};
+    std::vector<IndexEntry> indices = QueryPlannerIXSelect::expandIndexes(fields, {entry.first});
+    printExpandedCWIsWithPositions(indices, os);
+
+    QueryPlannerIXSelect::rateIndices(me.get(), "", indices, {});
+    os << "The expression assigned with the CWIs by rateIndices:" << std::endl
+       << me->debugString() << std::endl;
+
+    // Test that all the CWI (index 0) assignments are stripped. They are considered invalid because
+    // none of the assigned predicates under $and involve the expanded wildcard field "y".
+    QueryPlannerIXSelect::stripInvalidAssignments(me.get(), indices);
+    os << "Test that the invalid CWI assignment is stripped:" << std::endl << me->debugString();
+}
+
+TEST(QueryPlannerIXSelectTest, StripInvalidCWIAssignmentsDoNotStripIfAnyChildHasWildcardField) {
+    mongo::unittest::GoldenTestContext ctx(&goldenTestConfig);
+    auto& os = ctx.outStream();
+
+    auto query = fromjson("{$and: [{x: 1}, {y: 1}]}");
+    auto me = parseMatchExpression(query);
+    auto entry = makeIndexEntry(
+        BSON("x" << 1 << "$**" << 1), {}, {}, BSON("wildcardProjection" << BSON("x" << 0)));
+
+    RelevantFieldIndexMap fields = {{"x", {true}}, {"y", {true}}};
+    std::vector<IndexEntry> indices = QueryPlannerIXSelect::expandIndexes(fields, {entry.first});
+    printExpandedCWIsWithPositions(indices, os);
+
+    QueryPlannerIXSelect::rateIndices(me.get(), "", indices, {});
+    os << "The expression assigned with the CWIs by rateIndices:" << std::endl
+       << me->debugString() << std::endl;
+
+    // Test that the CWI (index 0) assignments still remain. They are considered valid because one
+    // of the predicates under the $and is assigned to the wildcard field "y". So
+    // we should not strip the assignments from the predicates under $and.
+    QueryPlannerIXSelect::stripInvalidAssignments(me.get(), indices);
+    os << "Test that the valid CWI assignments still remain:" << std::endl << me->debugString();
+}
+
+TEST(QueryPlannerIXSelectTest, StripInvalidCWIAssignmentsInOr) {
+    mongo::unittest::GoldenTestContext ctx(&goldenTestConfig);
+    auto& os = ctx.outStream();
+
+    auto query = fromjson("{$or: [{x: 1}, {y: 1}]}");
+    auto me = parseMatchExpression(query);
+    auto entry = makeIndexEntry(
+        BSON("x" << 1 << "$**" << 1), {}, {}, BSON("wildcardProjection" << BSON("x" << 0)));
+
+    RelevantFieldIndexMap fields = {{"x", {true}}, {"y", {true}}};
+    std::vector<IndexEntry> indices = QueryPlannerIXSelect::expandIndexes(fields, {entry.first});
+    printExpandedCWIsWithPositions(indices, os);
+
+    QueryPlannerIXSelect::rateIndices(me.get(), "", indices, {});
+    os << "The expression assigned with the CWIs by rateIndices:" << std::endl
+       << me->debugString() << std::endl;
+
+    // Test that the invalid CWI assignment is stripped. The CWI assignment on the branch {x: 1} is
+    // considered invalid because, unlike $and, $or is not conjunctive. Thus, only the assignment on
+    // {y: 1} remains.
+    QueryPlannerIXSelect::stripInvalidAssignments(me.get(), indices);
+    os << "Test that the invalid CWI assignment is stripped:" << std::endl << me->debugString();
+}
+
+TEST(QueryPlannerIXSelectTest, StripInvalidCWIAssignmentsNestedOr) {
+    mongo::unittest::GoldenTestContext ctx(&goldenTestConfig);
+    auto& os = ctx.outStream();
+
+    auto query = fromjson("{x: 1, $or: [{y: 1}]}");
+    auto me = parseMatchExpression(query);
+    auto entry = makeIndexEntry(
+        BSON("x" << 1 << "$**" << 1), {}, {}, BSON("wildcardProjection" << BSON("x" << 0)));
+
+    RelevantFieldIndexMap fields = {{"x", {true}}, {"y", {true}}};
+    std::vector<IndexEntry> indices = QueryPlannerIXSelect::expandIndexes(fields, {entry.first});
+    printExpandedCWIsWithPositions(indices, os);
+
+    QueryPlannerIXSelect::rateIndices(me.get(), "", indices, {});
+    os << "The expression assigned with the CWIs by rateIndices:" << std::endl
+       << me->debugString() << std::endl;
+
+    // Test that all the CWI (index 0) assignments are stripped. They are considered invalid because
+    // none of the assigned predicates under $and involve the expanded wildcard field "y".
+    QueryPlannerIXSelect::stripInvalidAssignments(me.get(), indices);
+    os << "Test that the invalid CWI assignment is stripped:" << std::endl << me->debugString();
+}
+
+TEST(QueryPlannerIXSelectTest, StripInvalidCWIAssignmentsInElemMatchObject) {
+    mongo::unittest::GoldenTestContext ctx(&goldenTestConfig);
+    auto& os = ctx.outStream();
+
+    auto query = fromjson("{$and: [{x: 1}, {y: {$elemMatch: {z: 1}}}]}");
+    auto me = parseMatchExpression(query);
+    auto entry = makeIndexEntry(BSON("x" << 1 << "y.$**" << 1), {});
+
+    RelevantFieldIndexMap fields = {{"x", {true}}, {"y.z", {true}}};
+    std::vector<IndexEntry> indices = QueryPlannerIXSelect::expandIndexes(fields, {entry.first});
+    printExpandedCWIsWithPositions(indices, os);
+
+    QueryPlannerIXSelect::rateIndices(me.get(), "", indices, {});
+    os << "The expression assigned with the CWIs by rateIndices:" << std::endl
+       << me->debugString() << std::endl;
+
+    // Test that the CWI (index 0) assignments still remain. They are considered valid because one
+    // of the predicates under a conjunctive node, $elemMatch, involves the wildcard field "y.z". So
+    // we should not strip the assignments from any of the predicates.
+    QueryPlannerIXSelect::stripInvalidAssignments(me.get(), indices);
+    os << "Test that the valid CWI assignments still remain:" << std::endl << me->debugString();
+}
+
+TEST(QueryPlannerIXSelectTest, StripInvalidCWIAssignmentsInNestedQuery) {
+    mongo::unittest::GoldenTestContext ctx(&goldenTestConfig);
+    auto& os = ctx.outStream();
+
+    auto query = fromjson(
+        "{$and: [{x: 1},"
+        "        {$and: [{z: 1},"
+        "                {y: {$elemMatch: {$gt: 1}}}]},"
+        "        {$or: [{x: 42},"
+        "               {$and: [{x: 1},"
+        "                       {y: 1}]}]}]}");
+
+    auto me = parseMatchExpression(query);
+    auto entry = makeIndexEntry(
+        BSON("x" << 1 << "$**" << 1), {}, {}, BSON("wildcardProjection" << BSON("x" << 0)));
+
+    RelevantFieldIndexMap fields = {{"x", {true}}, {"y", {true}}};
+    std::vector<IndexEntry> indices = QueryPlannerIXSelect::expandIndexes(fields, {entry.first});
+    printExpandedCWIsWithPositions(indices, os);
+
+    QueryPlannerIXSelect::rateIndices(me.get(), "", indices, {});
+    os << "The expression assigned with the CWIs by rateIndices:" << std::endl
+       << me->debugString() << std::endl;
+
+    // Test that the invalid CWI assignment is stripped. The CWI assignment on the {x: 42} is
+    // considered invalid because it does not involve the wildcard field "y" and is not under a
+    // conjunctive node such as $and.
+    //
+    // The rest of the assignments are considered valid because they are under a conjunctive node
+    // and are siblings with either {y: {$elemMatch: {$gt: 1}} or {y: 1}.
+    QueryPlannerIXSelect::stripInvalidAssignments(me.get(), indices);
+    os << "Test that the invalid CWI assignment is stripped:" << std::endl << me->debugString();
 }
 
 }  // namespace

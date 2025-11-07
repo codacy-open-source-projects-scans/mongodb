@@ -29,20 +29,20 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <list>
-
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_catalog.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/util/modules.h"
 
-/**
- * Namespace for helper functions converting index spec schema between time-series collection and
- * underlying buckets collection.
- */
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+
+MONGO_MOD_PUBLIC;
+
 namespace mongo::timeseries {
 
 /**
@@ -75,7 +75,7 @@ boost::optional<BSONObj> createBucketsShardKeyIndexFromBucketsShardKeySpec(
  * time-series specifications provided in 'timeseriesOptions'. Returns boost::none if the
  * buckets index is not supported on a time-series collection.
  *
- * Copies and modifies the 'key' field of the buckets index, but otherwises copies all of the fields
+ * Copies and modifies the 'key' field of the buckets index, but otherwise copies all of the fields
  * over unaltered.
  */
 boost::optional<BSONObj> createTimeseriesIndexFromBucketsIndex(
@@ -84,10 +84,10 @@ boost::optional<BSONObj> createTimeseriesIndexFromBucketsIndex(
 /**
  * Returns a list of time-series collection index specs equivalent to the given 'bucketsIndexSpecs'
  * using the time-series specifications provided in 'timeseriesOptions'. If any of the buckets
- * indexes is not supported on a time-series collection, it will be ommitted from the results.
+ * indexes is not supported on a time-series collection, it will be omitted from the results.
  */
-std::list<BSONObj> createTimeseriesIndexesFromBucketsIndexes(
-    const TimeseriesOptions& timeseriesOptions, const std::list<BSONObj>& bucketsIndexes);
+std::vector<BSONObj> createTimeseriesIndexesFromBucketsIndexes(
+    const TimeseriesOptions& timeseriesOptions, const std::vector<BSONObj>& bucketsIndexes);
 
 /**
  * Returns true if the original index specification should be included when creating an index on the

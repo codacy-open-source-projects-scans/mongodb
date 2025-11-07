@@ -19,10 +19,10 @@ let mock_ocsp = new MockOCSPServer("", 20);
 mock_ocsp.start();
 
 const ocsp_options = {
-    sslMode: "requireSSL",
-    sslPEMKeyFile: OCSP_SERVER_CERT,
-    sslCAFile: OCSP_CA_PEM,
-    sslAllowInvalidHostnames: "",
+    tlsMode: "requireTLS",
+    tlsCertificateKeyFile: OCSP_SERVER_CERT,
+    tlsCAFile: OCSP_CA_PEM,
+    tlsAllowInvalidHostnames: "",
     setParameter: {
         "ocspEnabled": "true",
     },
@@ -54,8 +54,7 @@ assertClientConnectFails(conn, OCSP_REVOKED);
 MongoRunner.stopMongod(conn);
 
 // have the server refresh its response every 10 seconds
-Object.extend(ocsp_options,
-              {setParameter: {ocspEnabled: true, ocspValidationRefreshPeriodSecs: 10}});
+Object.extend(ocsp_options, {setParameter: {ocspEnabled: true, ocspValidationRefreshPeriodSecs: 10}});
 assert.doesNotThrow(() => {
     conn = MongoRunner.runMongod(ocsp_options);
 });
@@ -99,10 +98,10 @@ MongoRunner.stopMongod(conn);
 // Make sure that the refresh period is set to a very large value so that we can
 // make sure that the period defined by the mock OCSP responder overrides it.
 let ocsp_options_high_refresh = {
-    sslMode: "requireSSL",
-    sslPEMKeyFile: OCSP_SERVER_CERT,
-    sslCAFile: OCSP_CA_PEM,
-    sslAllowInvalidHostnames: "",
+    tlsMode: "requireTLS",
+    tlsCertificateKeyFile: OCSP_SERVER_CERT,
+    tlsCAFile: OCSP_CA_PEM,
+    tlsAllowInvalidHostnames: "",
     setParameter: {
         "ocspEnabled": "true",
         "ocspStaplingRefreshPeriodSecs": 300000,

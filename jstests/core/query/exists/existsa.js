@@ -1,5 +1,8 @@
 /**
  * Tests that sparse indexes are disallowed for $exists:false queries.
+ *  @tags: [
+ *    requires_getmore,
+ *  ]
  */
 const coll = db.jstests_existsa;
 coll.drop();
@@ -9,7 +12,7 @@ assert.commandWorked(coll.insert({a: 1}));
 assert.commandWorked(coll.insert({a: {x: 1}, b: 1}));
 
 let indexKeySpec = {};
-let indexKeyField = '';
+let indexKeyField = "";
 
 /** Configure testing of an index { <indexKeyField>:1 }. */
 function setIndex(_indexKeyField) {
@@ -18,7 +21,7 @@ function setIndex(_indexKeyField) {
     indexKeySpec[indexKeyField] = 1;
     coll.createIndex(indexKeySpec, {sparse: true});
 }
-setIndex('a');
+setIndex("a");
 
 /** @return count when hinting the index to use. */
 function hintedCount(query) {
@@ -62,7 +65,7 @@ assertMissing({a: {$not: {$exists: true}}});
 assertMissing({$and: [{a: {$exists: false}}]});
 assertMissing({$or: [{a: {$exists: false}}]});
 assertMissing({$nor: [{a: {$exists: true}}]});
-assertMissing({'a.x': {$exists: false}}, 2, 1);
+assertMissing({"a.x": {$exists: false}}, 2, 1);
 
 // Currently a sparse index is disallowed even if the $exists:false query is on a different
 // field.
@@ -76,20 +79,20 @@ assertExists({a: {$exists: true}});
 
 // Nested $exists queries match the proper number of documents and disallow the sparse index.
 assertExistsUnindexed({$nor: [{a: {$exists: false}}]});
-assertExistsUnindexed({$nor: [{'a.x': {$exists: false}}]}, 1);
+assertExistsUnindexed({$nor: [{"a.x": {$exists: false}}]}, 1);
 assertExistsUnindexed({a: {$not: {$exists: false}}});
 
 // Nested $exists queries disallow the sparse index in some cases where it is not strictly
 // necessary to do so.  (Descriptive tests.)
-assertExistsUnindexed({$nor: [{b: {$exists: false}}]}, 1);  // Unindexed field.
-assertExists({$or: [{a: {$exists: true}}]});                // $exists:true not $exists:false.
+assertExistsUnindexed({$nor: [{b: {$exists: false}}]}, 1); // Unindexed field.
+assertExists({$or: [{a: {$exists: true}}]}); // $exists:true not $exists:false.
 
 // Behavior is similar with $elemMatch.
 coll.drop();
 assert.commandWorked(coll.insert({a: [{}]}));
 assert.commandWorked(coll.insert({a: [{b: 1}]}));
 assert.commandWorked(coll.insert({a: [{b: [1]}]}));
-setIndex('a.b');
+setIndex("a.b");
 
 assertMissing({a: {$elemMatch: {b: {$exists: false}}}});
 
@@ -97,8 +100,8 @@ assertMissing({a: {$elemMatch: {b: {$exists: false}}}});
 assertExists({a: {$elemMatch: {b: {$exists: true}}}});
 
 // A $not within $elemMatch should not attempt to use a sparse index for $exists:false.
-assertExistsUnindexed({'a.b': {$elemMatch: {$not: {$exists: false}}}}, 1);
-assertExistsUnindexed({'a.b': {$elemMatch: {$gt: 0, $not: {$exists: false}}}}, 1);
+assertExistsUnindexed({"a.b": {$elemMatch: {$not: {$exists: false}}}}, 1);
+assertExistsUnindexed({"a.b": {$elemMatch: {$gt: 0, $not: {$exists: false}}}}, 1);
 
 // A non sparse index will not be disallowed.
 coll.drop();

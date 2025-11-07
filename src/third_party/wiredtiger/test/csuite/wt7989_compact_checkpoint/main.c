@@ -263,7 +263,7 @@ thread_func_checkpoint(void *arg)
 
     testutil_check(td->conn->open_session(td->conn, NULL, NULL, &session));
 
-    __wt_random_init_seed((WT_SESSION_IMPL *)session, &rnd);
+    __wt_random_init((WT_SESSION_IMPL *)session, &rnd);
 
     if (!td->stress_test) {
         /* Wait until both checkpoint and compact threads are ready to go. */
@@ -301,7 +301,7 @@ thread_wait(void)
 {
     uint64_t ready_counter_local;
 
-    (void)__wt_atomic_add64(&ready_counter, 1);
+    (void)__wt_atomic_add_uint64(&ready_counter, 1);
     for (;; __wt_yield()) {
         WT_ACQUIRE_READ_WITH_BARRIER(ready_counter_local, ready_counter);
         if (ready_counter_local >= 2) {
@@ -321,7 +321,7 @@ populate(WT_SESSION *session, const char *uri)
     WT_RAND_STATE rnd;
     uint64_t i, str_len, val;
 
-    __wt_random_init_seed((WT_SESSION_IMPL *)session, &rnd);
+    __wt_random_init((WT_SESSION_IMPL *)session, &rnd);
 
     str_len = sizeof(data_str) / sizeof(data_str[0]);
     for (i = 0; i < str_len - 1; i++)

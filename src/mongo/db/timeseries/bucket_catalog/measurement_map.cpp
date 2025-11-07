@@ -28,6 +28,7 @@
  */
 
 #include "mongo/db/timeseries/bucket_catalog/measurement_map.h"
+
 #include "mongo/bson/column/bsoncolumn.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
@@ -40,24 +41,23 @@ namespace mongo::timeseries::bucket_catalog {
 
 MeasurementMap::MeasurementMap(tracking::Context& trackingContext)
     : _trackingContext(trackingContext),
-      _builders(
-          tracking::makeStringMap<BSONColumnBuilder<tracking::Allocator<void>>>(_trackingContext)) {
-}
+      _builders(tracking::makeStringMap<BuilderWithCount>(_trackingContext)) {}
 
 void MeasurementMap::initBuilders(BSONObj bucketDataDocWithCompressedBuilders,
                                   size_t numMeasurements) {
     for (auto&& [key, columnValue] : bucketDataDocWithCompressedBuilders) {
         str::stream errMsg;
-        errMsg << "Compressed bucket contains uncompressed data field: " << key.toString();
+        errMsg << "Compressed bucket contains uncompressed data field: " << key;
         massert(8830600, errMsg, columnValue.isBinData(BinDataType::Column));
 
         int binLength = 0;
         const char* binData = columnValue.binData(binLength);
 
         _compressedSize += binLength;
-        _builders.emplace(tracking::make_string(_trackingContext, key.data(), key.size()),
-                          BSONColumnBuilder<tracking::Allocator<void>>(
-                              binData, binLength, _trackingContext.get().makeAllocator<void>()));
+        _builders.try_emplace(tracking::make_string(_trackingContext, key.data(), key.size()),
+                              BSONColumnBuilder<tracking::Allocator<void>>(
+                                  binData, binLength, _trackingContext.get().makeAllocator<void>()),
+                              numMeasurements);
     }
     _measurementCount = numMeasurements;
     if (TestingProctor::instance().isEnabled()) {
@@ -73,7 +73,8 @@ void MeasurementMap::initBuilders(BSONObj bucketDataDocWithCompressedBuilders,
             }
             [[maybe_unused]] auto diff = builderToCompareTo.intermediate();
             auto it = _builders.find(key);
-            bool isInternalStateCorrect = it->second.isInternalStateIdentical(builderToCompareTo);
+            bool isInternalStateCorrect =
+                it->second.builder.isInternalStateIdentical(builderToCompareTo);
             if (!isInternalStateCorrect) {
                 LOGV2_OPTIONS(
                     10402,
@@ -94,7 +95,7 @@ MeasurementMap::intermediate(int32_t& compressedSizeDelta) {
     std::vector<std::pair<StringData, BSONColumnBuilder<tracking::Allocator<void>>::BinaryDiff>>
         intermediates;
     for (auto& entry : _builders) {
-        auto& builder = entry.second;
+        auto& builder = entry.second.builder;
         auto diff = builder.intermediate();
 
         _compressedSize += (diff.offset() + diff.size());
@@ -106,52 +107,47 @@ MeasurementMap::intermediate(int32_t& compressedSizeDelta) {
     return intermediates;
 }
 
-void MeasurementMap::_insertNewKey(StringData key,
-                                   const BSONElement& elem,
-                                   BSONColumnBuilder<tracking::Allocator<void>> builder) {
-    builder.append(elem);
+void MeasurementMap::_insertNewKey(StringData key, const BSONElement& elem, size_t count) {
+    BSONColumnBuilder<tracking::Allocator<void>> columnBuilder(
+        count, _trackingContext.get().makeAllocator<void>());
+    columnBuilder.append(elem);
     _builders.try_emplace(tracking::make_string(_trackingContext, key.data(), key.size()),
-                          std::move(builder));
+                          std::move(columnBuilder),
+                          count + 1 /* account for the append above */);
 }
 
-void MeasurementMap::_fillSkipsInMissingFields(const std::set<StringData>& fieldsSeen) {
-    // Fill in skips for any fields that existed in prior measurements in this bucket, but
-    // weren't in this measurement.
-    for (auto& entry : _builders) {
-        if (fieldsSeen.contains(entry.first.c_str())) {
+void MeasurementMap::insertOne(const BSONObj& measurement, boost::optional<StringData> metaField) {
+    for (const auto& elem : measurement) {
+        StringData key = elem.fieldNameStringData();
+        // Skip the meta field values because they aren't stored in a BSONColumn.
+        if (key == metaField) {
             continue;
         }
-        entry.second.skip();
-    }
-}
-
-void MeasurementMap::insertOne(const std::vector<BSONElement>& oneMeasurementDataFields) {
-    std::set<StringData> fieldsSeen;
-
-    for (const auto& elem : oneMeasurementDataFields) {
-        StringData key = elem.fieldNameStringData();
-        fieldsSeen.insert(key);
 
         auto builderIt = _builders.find(key);
         if (builderIt == _builders.end()) {
-            BSONColumnBuilder<tracking::Allocator<void>> columnBuilder{
-                _trackingContext.get().makeAllocator<void>()};
-            for (size_t i = 0; i < _measurementCount; ++i) {
-                columnBuilder.skip();
-            }
-            _insertNewKey(key, elem, std::move(columnBuilder));
+            _insertNewKey(key, elem, _measurementCount);
         } else {
-            builderIt->second.append(elem);
+            builderIt->second.builder.append(elem);
+            ++builderIt->second.count;
         }
     }
-    _measurementCount++;
-    _fillSkipsInMissingFields(fieldsSeen);
+    // Increment our total measurement count
+    ++_measurementCount;
+    // Perform a second pass over our builders and perform a skip for the ones that did not get an
+    // element appended to them in the first pass above.
+    for (auto&& entry : _builders) {
+        if (entry.second.count < _measurementCount) {
+            entry.second.builder.skip();
+            ++entry.second.count;
+        }
+    }
 }
 
 Timestamp MeasurementMap::timeOfLastMeasurement(StringData key) const {
     auto it = _builders.find(key);
     invariant(it != _builders.end());
-    return it->second.last().timestamp();
+    return it->second.builder.last().timestamp();
 }
 
 }  // namespace mongo::timeseries::bucket_catalog

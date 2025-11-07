@@ -29,14 +29,15 @@
 
 #pragma once
 
+#include "mongo/rpc/message.h"
+#include "mongo/rpc/reply_interface.h"
+#include "mongo/util/modules.h"
+
 #include <memory>
 #include <utility>
 
-#include "mongo/rpc/message.h"
-#include "mongo/rpc/reply_interface.h"
-
 namespace mongo {
-namespace rpc {
+namespace MONGO_MOD_PUBLIC rpc {
 
 /**
  * A wrapper around an owned message that includes access to an associated ReplyInterface.
@@ -77,5 +78,5 @@ private:
 
 using UniqueReply = UniqueMessage<ReplyInterface>;
 
-}  // namespace rpc
+}  // namespace MONGO_MOD_PUBLIC rpc
 }  // namespace mongo

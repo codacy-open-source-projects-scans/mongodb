@@ -29,10 +29,6 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <memory>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/config.h"  // IWYU pragma: keep
@@ -41,6 +37,12 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/transport/transport_layer_manager.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <vector>
+
+#include <boost/optional.hpp>
 
 #ifdef MONGO_CONFIG_SSL
 #include "mongo/util/net/ssl_manager.h"
@@ -49,7 +51,7 @@
 namespace mongo::transport {
 class ClientTransportObserver;
 
-class TransportLayerManagerImpl final : public TransportLayerManager {
+class MONGO_MOD_NEEDS_REPLACEMENT TransportLayerManagerImpl final : public TransportLayerManager {
     TransportLayerManagerImpl(const TransportLayerManagerImpl&) = delete;
     TransportLayerManagerImpl& operator=(const TransportLayerManagerImpl&) = delete;
 
@@ -67,6 +69,12 @@ public:
     void appendStatsForFTDC(BSONObjBuilder& bob) const override;
     void stopAcceptingSessions() override;
 
+    static std::unique_ptr<TransportLayerManager> make(
+        ServiceContext* svcCtx,
+        bool isUseGrpc,
+        std::shared_ptr<ClientTransportObserver> observer = nullptr);
+
+
     /*
      * This initializes a TransportLayerManager with the global configuration of the server.
      *
@@ -81,7 +89,7 @@ public:
         ServiceContext* ctx,
         bool useEgressGRPC = false,
         boost::optional<int> loadBalancerPort = {},
-        boost::optional<int> routerPort = {},
+        boost::optional<int> maintenancePort = {},
         std::shared_ptr<ClientTransportObserver> observer = nullptr);
 
     static std::unique_ptr<TransportLayerManager> makeDefaultEgressTransportLayer();

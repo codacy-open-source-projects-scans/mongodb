@@ -1,52 +1,63 @@
 // Test background index creation
-// @tags: [SERVER-40561]
+// @tags: [
+//      SERVER-40561,
+//      # TODO SERVER-111867: Remove once primary-driven index builds support side writes.
+//      primary_driven_index_builds_incompatible,
+// ]
 
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const conn = MongoRunner.runMongod();
 assert.neq(null, conn, "mongod failed to start.");
 var db = conn.getDB("test");
-var baseName = jsTestName();
+let baseName = jsTestName();
 
-var parallel = function() {
+let parallel = function () {
     return db[baseName + "_parallelStatus"];
 };
 
-var resetParallel = function() {
+let resetParallel = function () {
     parallel().drop();
 };
 
 // Return the PID to call `waitpid` on for clean shutdown.
-var doParallel = function(work) {
+let doParallel = function (work) {
     resetParallel();
     print("doParallel: " + work);
     return startMongoProgramNoConnect(
         "mongo",
         "--eval",
         work + "; db." + baseName + "_parallelStatus.save( {done:1} );",
-        db.getMongo().host);
+        db.getMongo().host,
+    );
 };
 
-var doneParallel = function() {
+let doneParallel = function () {
     return !!parallel().findOne();
 };
 
-var waitParallel = function() {
-    assert.soon(function() {
-        return doneParallel();
-    }, "parallel did not finish in time", 300000, 1000);
+let waitParallel = function () {
+    assert.soon(
+        function () {
+            return doneParallel();
+        },
+        "parallel did not finish in time",
+        300000,
+        1000,
+    );
 };
 
-var size = 400 * 1000;
-var bgIndexBuildPid;
-while (1) {  // if indexing finishes before we can run checks, try indexing w/ more data
+let size = 400 * 1000;
+let bgIndexBuildPid;
+while (1) {
+    // if indexing finishes before we can run checks, try indexing w/ more data
     print("size: " + size);
 
-    var fullName = "db." + baseName;
+    let fullName = "db." + baseName;
     var t = db[baseName];
     t.drop();
 
-    var bulk = db[jsTestName()].initializeUnorderedBulkOp();
+    let bulk = db[jsTestName()].initializeUnorderedBulkOp();
     for (var i = 0; i < size; ++i) {
         bulk.insert({i: i});
     }
@@ -59,24 +70,24 @@ while (1) {  // if indexing finishes before we can run checks, try indexing w/ m
         print("wait for indexing to start");
         IndexBuildTest.waitForIndexBuildToStart(db);
         print("started.");
-        sleep(1000);  // there is a race between when the index build shows up in curop and
+        sleep(1000); // there is a race between when the index build shows up in curop and
         // when it first attempts to grab a write lock.
         assert.eq(size, t.count());
         assert.eq(100, t.findOne({i: 100}).i);
-        var q = t.find();
-        for (i = 0; i < 120; ++i) {  // getmore
+        let q = t.find();
+        for (i = 0; i < 120; ++i) {
+            // getmore
             q.next();
             assert(q.hasNext(), "no next");
         }
-        var ex = t.find({i: 100}).limit(-1).explain("executionStats");
+        let ex = t.find({i: 100}).limit(-1).explain("executionStats");
         printjson(ex);
-        assert(ex.executionStats.totalKeysExamined < 1000,
-               "took too long to find 100: " + tojson(ex));
+        assert(ex.executionStats.totalKeysExamined < 1000, "took too long to find 100: " + tojson(ex));
 
-        assert.commandWorked(t.remove({i: 40}, true));      // table scan
-        assert.commandWorked(t.update({i: 10}, {i: -10}));  // should scan 10
+        assert.commandWorked(t.remove({i: 40}, true)); // table scan
+        assert.commandWorked(t.update({i: 10}, {i: -10})); // should scan 10
 
-        var id = t.find().hint({$natural: -1}).next()._id;
+        let id = t.find().hint({$natural: -1}).next()._id;
 
         assert.commandWorked(t.update({_id: id}, {i: -2}));
         assert.commandWorked(t.save({i: -50}));

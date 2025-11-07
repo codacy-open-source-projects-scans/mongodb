@@ -14,6 +14,8 @@
  *   requires_capped,
  *   # Uses $out, which is non-retryable.
  *   requires_non_retryable_writes,
+ *   requires_getmore,
+ *   uses_getmore_outside_of_transaction,
  * ]
  */
 
@@ -24,18 +26,14 @@ import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {isMongos} from "jstests/concurrency/fsm_workload_helpers/server_types.js";
 import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/query/agg/agg_base.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
-    // Use a smaller document size, but more iterations. The smaller documents will ensure each
-    // operation is faster, giving us time to do more operations and thus increasing the likelihood
-    // that any two operations will be happening concurrently.
-    $config.data.docSize = 1000;
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
     $config.iterations = 100;
 
-    $config.data.outputCollName = 'agg_out';  // Use the workload name as the collection name
-                                              // because it is assumed to be unique.
+    $config.data.outputCollName = "agg_out"; // Use the workload name as the collection name
+    // because it is assumed to be unique.
 
-    $config.data.indexSpecs = [{rand: -1, randInt: 1}, {randInt: -1}, {flag: 1}, {padding: 'text'}];
-    $config.data.shardKey = {_id: 'hashed'};
+    $config.data.indexSpecs = [{rand: -1, randInt: 1}, {randInt: -1}, {flag: 1}, {padding: "text"}];
+    $config.data.shardKey = {_id: "hashed"};
 
     // We'll use document validation so that we can change the collection options in the middle of
     // an $out, to test that the $out stage will notice this and error. This validator is not very
@@ -73,7 +71,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         const res = db[collName].runCommand({
             aggregate: collName,
             pipeline: [{$match: {flag: true}}, {$out: this.outputCollName}],
-            cursor: {}
+            cursor: {},
         });
 
         const allowedErrorCodes = [
@@ -95,6 +93,11 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
             // When running in suites with random migrations $out can fail copying the indexes due
             // to a resharding operation in progress
             ErrorCodes.ReshardCollectionInProgress,
+            // A cluster toplogy change (for example, a replica set step down/step up or a
+            // movePrimary) will cause $out's temporary collection to be dropped part way through.
+            // $out will detect this when it sees that the UUID of the temporary collection has
+            // changed across inserts and throw a CollectionUUIDMismatch error.
+            ErrorCodes.CollectionUUIDMismatch,
         ];
         assert.commandWorkedOrFailedWithCode(res, allowedErrorCodes);
 
@@ -111,11 +114,13 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
      * dropped an index.
      */
     $config.states.createIndexes = function createIndexes(db, unusedCollName) {
-        for (var i = 0; i < this.indexSpecs; ++i) {
+        for (let i = 0; i < this.indexSpecs; ++i) {
             const indexSpecs = this.indexSpecs[i];
             jsTestLog(`Running createIndex: coll=${this.outputCollName} indexSpec=${indexSpecs}`);
-            assert.commandWorkedOrFailedWithCode(db[this.outputCollName].createIndex(indexSpecs),
-                                                 ErrorCodes.MovePrimaryInProgress);
+            assert.commandWorkedOrFailedWithCode(
+                db[this.outputCollName].createIndex(indexSpecs),
+                ErrorCodes.MovePrimaryInProgress,
+            );
         }
     };
 
@@ -134,23 +139,23 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
     $config.states.collMod = function collMod(db, unusedCollName) {
         if (Random.rand() < 0.5) {
             // Change the validation level.
-            const validationLevels = ['off', 'strict', 'moderate'];
+            const validationLevels = ["off", "strict", "moderate"];
             const newValidationLevel = validationLevels[Random.randInt(validationLevels.length)];
-            jsTestLog(`Running collMod: coll=${this.outputCollName} validationLevel=${
-                newValidationLevel}`);
+            jsTestLog(`Running collMod: coll=${this.outputCollName} validationLevel=${newValidationLevel}`);
 
             assert.commandWorkedOrFailedWithCode(
                 db.runCommand({collMod: this.outputCollName, validationLevel: newValidationLevel}),
-                [ErrorCodes.ConflictingOperationInProgress, ErrorCodes.MovePrimaryInProgress]);
+                [ErrorCodes.ConflictingOperationInProgress, ErrorCodes.MovePrimaryInProgress],
+            );
         } else {
             // Change the validation action.
-            const validationAction = Random.rand() > 0.5 ? 'warn' : 'error';
-            jsTestLog(`Running collMod: coll=${this.outputCollName} validationAction=${
-                validationAction}`);
+            const validationAction = Random.rand() > 0.5 ? "warn" : "error";
+            jsTestLog(`Running collMod: coll=${this.outputCollName} validationAction=${validationAction}`);
 
             assert.commandWorkedOrFailedWithCode(
                 db.runCommand({collMod: this.outputCollName, validationAction: validationAction}),
-                [ErrorCodes.ConflictingOperationInProgress, ErrorCodes.MovePrimaryInProgress]);
+                [ErrorCodes.ConflictingOperationInProgress, ErrorCodes.MovePrimaryInProgress],
+            );
         }
     };
 
@@ -161,19 +166,26 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         const toShard = this.shards[Random.randInt(this.shards.length)];
         jsTestLog(`Running movePrimary: db=${db} to=${toShard}`);
 
+        let expectedErrorCodes = [
+            // Caused by a concurrent movePrimary operation on the same database but a
+            // different destination shard.
+            ErrorCodes.ConflictingOperationInProgress,
+            // Due to a stepdown of the donor during the cloning phase, the movePrimary
+            // operation failed. It is not automatically recovered, but any orphaned data on
+            // the recipient has been deleted.
+            7120202,
+            // In the FSM tests, there is a chance that there are still some User
+            // collections left to clone. This occurs when a MovePrimary joins an already
+            // existing MovePrimary command that has purposefully triggered a failpoint.
+            9046501,
+        ];
+        if (TestData.hasRandomShardsAddedRemoved) {
+            expectedErrorCodes.push(ErrorCodes.ShardNotFound);
+        }
         assert.commandWorkedOrFailedWithCode(
-            db.adminCommand({movePrimary: db.getName(), to: toShard}), [
-                // Caused by a concurrent movePrimary operation on the same database but a different
-                // destination shard.
-                ErrorCodes.ConflictingOperationInProgress,
-                // The cloning phase has failed (e.g. as a result of a stepdown). When a failure
-                // occurs at this phase, the movePrimary operation does not recover.
-                7120202,
-                // In the FSM tests, there is a chance that there are still some User collections
-                // left to clone. This occurs when a MovePrimary joins an already existing
-                // MovePrimary command that has purposefully triggered a failpoint.
-                9046501,
-            ]);
+            db.adminCommand({movePrimary: db.getName(), to: toShard}),
+            expectedErrorCodes,
+        );
     };
 
     /*
@@ -184,17 +196,14 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         const namespace = `${db}.${collName}`;
         jsTestLog(`Running untrackUnshardedCollection: ns=${namespace}`);
         if (isMongos(db)) {
-            assert.commandWorkedOrFailedWithCode(
-                db.adminCommand({untrackUnshardedCollection: namespace}), [
-                    // Handles the case where the collection is not located on its primary
-                    ErrorCodes.OperationFailed,
-                    // Handles the case where the collection is sharded
-                    ErrorCodes.InvalidNamespace,
-                    // Handles the case where the collection/db does not exist
-                    ErrorCodes.NamespaceNotFound,
-                    //  TODO (SERVER-96072) remove this error once the command is backported.
-                    ErrorCodes.CommandNotFound,
-                ]);
+            assert.commandWorkedOrFailedWithCode(db.adminCommand({untrackUnshardedCollection: namespace}), [
+                // Handles the case where the collection is not located on its primary
+                ErrorCodes.OperationFailed,
+                // Handles the case where the collection is sharded
+                ErrorCodes.InvalidNamespace,
+                // Handles the case where the collection/db does not exist
+                ErrorCodes.NamespaceNotFound,
+            ]);
         }
     };
 
@@ -204,12 +213,11 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
      */
     $config.states.convertToCapped = function convertToCapped(db, unusedCollName) {
         jsTestLog(`Running convertToCapped: coll=${this.outputCollName}`);
-        assert.commandWorkedOrFailedWithCode(
-            db.runCommand({convertToCapped: this.outputCollName, size: 100000}), [
-                ErrorCodes.MovePrimaryInProgress,
-                ErrorCodes.NamespaceNotFound,
-                ErrorCodes.NamespaceCannotBeSharded,
-            ]);
+        assert.commandWorkedOrFailedWithCode(db.runCommand({convertToCapped: this.outputCollName, size: 100000}), [
+            ErrorCodes.MovePrimaryInProgress,
+            ErrorCodes.NamespaceNotFound,
+            ErrorCodes.NamespaceCannotBeSharded,
+        ]);
     };
 
     /**
@@ -224,8 +232,9 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
             assert.commandWorked(db.adminCommand({enableSharding: db.getName()}));
 
             try {
-                assert.commandWorked(db.adminCommand(
-                    {shardCollection: db[this.outputCollName].getFullName(), key: this.shardKey}));
+                assert.commandWorked(
+                    db.adminCommand({shardCollection: db[this.outputCollName].getFullName(), key: this.shardKey}),
+                );
             } catch (e) {
                 const exceptionCode = e.code;
                 if (exceptionCode) {
@@ -244,11 +253,15 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
      * Calls the super class' setup but using our own database.
      */
     $config.setup = function setup(db, collName, cluster) {
+        // Use a smaller document size, but more iterations. The smaller documents will ensure each
+        // operation is faster, giving us time to do more operations and thus increasing the
+        // likelihood that any two operations will be happening concurrently.
+        this.docSize = 1000;
         $super.setup.apply(this, [db, collName, cluster]);
 
         // `shardCollection()` requires a shard key index to be in place on the output collection,
         // as we may be sharding a non-empty collection.
-        assert.commandWorked(db[this.outputCollName].createIndex({_id: 'hashed'}));
+        assert.commandWorked(db[this.outputCollName].createIndex({_id: "hashed"}));
 
         if (isMongos(db)) {
             this.shards = Object.keys(cluster.getSerializedCluster().shards);

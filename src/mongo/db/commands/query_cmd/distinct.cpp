@@ -28,19 +28,6 @@
  */
 
 
-#include <boost/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <cstddef>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -55,28 +42,32 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/validated_tenancy_scope_factory.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/query_cmd/run_aggregate.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/scoped_collection_metadata.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/pipeline/expression_context_diagnostic_printer.h"
 #include "mongo/db/profile_settings.h"
-#include "mongo/db/query/bson/dotted_path_support.h"
+#include "mongo/db/query/bson/multikey_dotted_path_support.h"
 #include "mongo/db/query/canonical_distinct.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/client_cursor/collect_query_stats_mongod.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/collection_query_info.h"
-#include "mongo/db/query/command_diagnostic_printer.h"
+#include "mongo/db/query/collection_index_usage_tracker_decoration.h"
 #include "mongo/db/query/explain.h"
+#include "mongo/db/query/explain_diagnostic_printer.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/find_common.h"
@@ -84,27 +75,27 @@
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_planner_params.h"
-#include "mongo/db/query/query_settings/query_settings_utils.h"
+#include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/query/query_shape/distinct_cmd_shape.h"
 #include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/query_stats/distinct_key.h"
 #include "mongo/db/query/query_stats/query_stats.h"
+#include "mongo/db/query/shard_key_diagnostic_printer.h"
+#include "mongo/db/query/timeseries/timeseries_translation.h"
 #include "mongo/db/query/view_response_formatter.h"
+#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/query_analysis_writer.h"
-#include "mongo/db/s/scoped_collection_metadata.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_role.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/timeseries/timeseries_request_util.h"
+#include "mongo/db/version_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_builder_interface.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
@@ -113,6 +104,17 @@
 #include "mongo/util/decorable.h"
 #include "mongo/util/future.h"
 #include "mongo/util/serialization_context.h"
+
+#include <cstddef>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -134,8 +136,8 @@ std::unique_ptr<CanonicalQuery> parseDistinctCmd(
         : SerializationContext::stateCommandRequest();
 
     auto distinctCommand = std::make_unique<DistinctCommandRequest>(DistinctCommandRequest::parse(
-        IDLParserContext("distinctCommandRequest", vts, nss.tenantId(), serializationContext),
-        cmdObj));
+        cmdObj,
+        IDLParserContext("distinctCommandRequest", vts, nss.tenantId(), serializationContext)));
 
     // Start the query planning timer right after parsing.
     CurOp::get(opCtx)->beginQueryPlanningTimer();
@@ -143,7 +145,7 @@ std::unique_ptr<CanonicalQuery> parseDistinctCmd(
     // Forbid users from passing 'querySettings' explicitly.
     uassert(7923000,
             "BSON field 'querySettings' is an unknown field",
-            query_settings::utils::allowQuerySettingsFromClient(opCtx->getClient()) ||
+            query_settings::allowQuerySettingsFromClient(opCtx->getClient()) ||
                 !distinctCommand->getQuerySettings().has_value());
 
     auto expCtx = ExpressionContextBuilder{}
@@ -157,32 +159,43 @@ std::unique_ptr<CanonicalQuery> parseDistinctCmd(
                                        extensionsCallback,
                                        MatchExpressionParser::kAllowAllSpecialFeatures);
 
+    // Compute QueryShapeHash and record it in CurOp.
+    query_shape::DeferredQueryShape deferredShape{[&]() {
+        return shape_helpers::tryMakeShape<query_shape::DistinctCmdShape>(*parsedDistinct, expCtx);
+    }};
+    auto queryShapeHash = CurOp::get(opCtx)->debug().ensureQueryShapeHash(
+        opCtx, [&]() { return shape_helpers::computeQueryShapeHash(expCtx, deferredShape, nss); });
+
+    // Perform the query settings lookup and attach it to 'expCtx'.
+    auto& querySettingsService = query_settings::QuerySettingsService::get(opCtx);
+    auto querySettings = querySettingsService.lookupQuerySettingsWithRejectionCheck(
+        expCtx, queryShapeHash, nss, parsedDistinct->distinctCommandRequest->getQuerySettings());
+    expCtx->setQuerySettingsIfNotPresent(std::move(querySettings));
+
     // We do not collect queryStats on explain for distinct.
     if (feature_flags::gFeatureFlagQueryStatsCountDistinct.isEnabled(
+            VersionContext::getDecoration(opCtx),
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
         !verbosity.has_value()) {
         query_stats::registerRequest(opCtx, nss, [&]() {
+            uassertStatusOKWithContext(deferredShape->getStatus(), "Failed to compute query shape");
             return std::make_unique<query_stats::DistinctKey>(
-                expCtx, *parsedDistinct, collOrViewAcquisition.getCollectionType());
+                expCtx,
+                *parsedDistinct->distinctCommandRequest,
+                std::move(deferredShape->getValue()),
+                collOrViewAcquisition.getCollectionType());
         });
 
-        if (parsedDistinct->distinctCommandRequest->getIncludeQueryStatsMetrics() &&
-            feature_flags::gFeatureFlagQueryStatsDataBearingNodes.isEnabled(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        if (parsedDistinct->distinctCommandRequest->getIncludeQueryStatsMetrics()) {
             CurOp::get(opCtx)->debug().queryStatsInfo.metricsRequested = true;
         }
     }
 
-    // TODO: SERVER-73632 Remove feature flag for PM-635.
-    // Query settings will only be looked up on mongos and therefore should be part of command body
-    // on mongod if present.
-    expCtx->setQuerySettingsIfNotPresent(
-        query_settings::lookupQuerySettingsForDistinct(expCtx, *parsedDistinct, nss));
     return parsed_distinct_command::parseCanonicalQuery(
         std::move(expCtx), std::move(parsedDistinct), nullptr);
 }
 
-namespace dps = dotted_path_support;
+namespace mdps = multikey_dotted_path_support;
 
 namespace {
 // This function might create a classic or SBE plan executor. It relies on some assumptions that are
@@ -278,6 +291,34 @@ std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> createExecutorForDistinctCo
     return uassertStatusOK(
         getExecutorFind(opCtx, collections, std::move(cqWithoutProjection), yieldPolicy));
 }
+
+template <class NamespaceType>
+BSONObj translateCmdObjForRawData(OperationContext* opCtx,
+                                  const BSONObj& cmdObj,
+                                  NamespaceType& ns,
+                                  boost::optional<CollectionOrViewAcquisition>& collectionOrView,
+                                  const std::function<CollectionOrViewAcquisition()>& acquire) {
+    if (OptionalBool::parseFromBSON(cmdObj[DistinctCommandRequest::kRawDataFieldName])) {
+        const auto vts = auth::ValidatedTenancyScope::get(opCtx);
+        const auto serializationContext = vts != boost::none
+            ? SerializationContext::stateCommandRequest(vts->hasTenantId(), vts->isFromAtlasProxy())
+            : SerializationContext::stateCommandRequest();
+
+        auto [isTimeseriesViewRequest, translatedNs] = timeseries::isTimeseriesViewRequest(
+            opCtx,
+            DistinctCommandRequest::parse(
+                cmdObj,
+                IDLParserContext{"rawData", vts, ns.dbName().tenantId(), serializationContext}));
+        if (isTimeseriesViewRequest) {
+            ns = translatedNs;
+            collectionOrView = acquire();
+            return rewriteCommandForRawDataOperation<DistinctCommandRequest>(cmdObj,
+                                                                             translatedNs.coll());
+        }
+    }
+
+    return cmdObj;
+}
 }  // namespace
 
 class DistinctCommand : public BasicCommand {
@@ -286,6 +327,10 @@ public:
 
     std::string help() const override {
         return "{ distinct : 'collection name' , key : 'a.b' , query : {} }";
+    }
+
+    bool enableDiagnosticPrintingOnFailure() const final {
+        return true;
     }
 
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
@@ -312,6 +357,10 @@ public:
                                                  repl::ReadConcernLevel level,
                                                  bool isImplicitDefault) const override {
         return ReadConcernSupportResult::allSupportedAndDefaultPermitted();
+    }
+
+    bool supportsRawData() const override {
+        return true;
     }
 
     bool isSubjectToIngressAdmissionControl() const override {
@@ -353,9 +402,8 @@ public:
             return auth::checkAuthForFind(authSession, nsOrUUID.nss(), hasTerm);
         }
 
-        const auto resolvedNss =
-            CollectionCatalog::get(opCtx)->resolveNamespaceStringFromDBNameAndUUID(
-                opCtx, nsOrUUID.dbName(), nsOrUUID.uuid());
+        const auto resolvedNss = shard_role_nocheck::resolveNssWithoutAcquisition(
+            opCtx, nsOrUUID.dbName(), nsOrUUID.uuid());
         return auth::checkAuthForFind(authSession, resolvedNss, hasTerm);
     }
 
@@ -372,10 +420,10 @@ public:
                    ExplainOptions::Verbosity verbosity,
                    rpc::ReplyBuilderInterface* replyBuilder) const override {
         const DatabaseName dbName = request.parseDbName();
-        const BSONObj& cmdObj = request.body;
+        const BSONObj& originalCmdObj = request.body;
         // Acquire locks. The RAII object is optional, because in the case of a view, the locks
         // need to be released.
-        const auto nss = CommandHelpers::parseNsCollectionRequired(dbName, cmdObj);
+        auto nss = CommandHelpers::parseNsCollectionRequired(dbName, originalCmdObj);
 
         AutoStatsTracker tracker(opCtx,
                                  nss,
@@ -384,10 +432,17 @@ public:
                                  DatabaseProfileSettings::get(opCtx->getServiceContext())
                                      .getDatabaseProfileLevel(nss.dbName()));
 
-        const auto acquisitionRequest = CollectionOrViewAcquisitionRequest::fromOpCtx(
-            opCtx, nss, AcquisitionPrerequisites::kRead);
-        boost::optional<CollectionOrViewAcquisition> collectionOrView =
-            acquireCollectionOrViewMaybeLockFree(opCtx, acquisitionRequest);
+        auto acquire = [&] {
+            return acquireCollectionOrViewMaybeLockFree(
+                opCtx,
+                CollectionOrViewAcquisitionRequest::fromOpCtx(
+                    opCtx, nss, AcquisitionPrerequisites::kRead));
+        };
+        boost::optional<CollectionOrViewAcquisition> collectionOrView = acquire();
+
+        auto cmdObj =
+            translateCmdObjForRawData(opCtx, originalCmdObj, nss, collectionOrView, acquire);
+
         const CollatorInterface* defaultCollator = collectionOrView->getCollectionPtr()
             ? collectionOrView->getCollectionPtr()->getDefaultCollator()
             : nullptr;
@@ -400,40 +455,51 @@ public:
                                                defaultCollator,
                                                verbosity);
 
-        if (collectionOrView->isView()) {
+        // Create an RAII object that prints useful information about the ExpressionContext in the
+        // case of a tassert or crash.
+        ScopedDebugInfo expCtxDiagnostics(
+            "ExpCtxDiagnostics",
+            diagnostic_printers::ExpressionContextPrinter{canonicalQuery->getExpCtx()});
+
+        if (collectionOrView->isView() ||
+            timeseries::requiresViewlessTimeseriesTranslation(opCtx, *collectionOrView)) {
             // Relinquish locks. The aggregation command will re-acquire them.
             collectionOrView.reset();
-            runDistinctOnView(opCtx, std::move(canonicalQuery), verbosity, replyBuilder);
+            runDistinctAsAgg(opCtx, std::move(canonicalQuery), verbosity, replyBuilder);
             return Status::OK();
         }
+
+        // Create an RAII object that prints the collection's shard key in the case of a tassert or
+        // crash.
+        auto collShardingDescription = collectionOrView->getCollection().getShardingDescription();
+        ScopedDebugInfo shardKeyDiagnostics("ShardKeyDiagnostics",
+                                            diagnostic_printers::ShardKeyDiagnosticPrinter{
+                                                collShardingDescription.isSharded()
+                                                    ? collShardingDescription.getKeyPattern()
+                                                    : BSONObj()});
 
         auto executor = createExecutorForDistinctCommand(
             opCtx, std::move(canonicalQuery), collectionOrView->getCollection());
         SerializationContext serializationCtx = request.getSerializationContext();
         auto bodyBuilder = replyBuilder->getBodyBuilder();
+
+        ScopedDebugInfo explainDiagnostics(
+            "explainDiagnostics", diagnostic_printers::ExplainDiagnosticPrinter{executor.get()});
         Explain::explainStages(executor.get(),
-                               collectionOrView->getCollectionPtr(),
+                               collectionOrView->getCollection(),
                                verbosity,
                                BSONObj(),
                                SerializationContext::stateCommandReply(serializationCtx),
-                               cmdObj,
+                               originalCmdObj,
                                &bodyBuilder);
         return Status::OK();
     }
 
     bool runWithReplyBuilder(OperationContext* opCtx,
                              const DatabaseName& dbName,
-                             const BSONObj& cmdObj,
+                             const BSONObj& originalCmdObj,
                              rpc::ReplyBuilderInterface* replyBuilder) override {
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
-
-        // Capture diagnostics for tassert and invariant failures that may occur during query
-        // parsing, planning or execution. No work is done on the hot-path, all computation of
-        // these diagnostics is done lazily during failure handling. This line just creates an
-        // RAII object which holds references to objects on this stack frame, which will be used
-        // to print diagnostics in the event of a tassert or invariant.
-        ScopedDebugInfo distinctCmdDiagnostics("commandDiagnostics",
-                                               command_diagnostics::Printer{opCtx});
 
         // Acquire locks and resolve possible UUID. The RAII object is optional, because in the case
         // of a view, the locks need to be released.
@@ -452,15 +518,21 @@ public:
                             DatabaseProfileSettings::get(opCtx->getServiceContext())
                                 .getDatabaseProfileLevel(nss.dbName()));
         };
-        auto const nssOrUUID = CommandHelpers::parseNsOrUUID(dbName, cmdObj);
+        auto nssOrUUID = CommandHelpers::parseNsOrUUID(dbName, originalCmdObj);
+
         if (nssOrUUID.isNamespaceString()) {
             initializeTracker(nssOrUUID.nss());
         }
-        const auto acquisitionRequest = CollectionOrViewAcquisitionRequest::fromOpCtx(
-            opCtx, nssOrUUID, AcquisitionPrerequisites::kRead);
+        auto acquire = [&] {
+            return acquireCollectionOrViewMaybeLockFree(
+                opCtx,
+                CollectionOrViewAcquisitionRequest::fromOpCtx(
+                    opCtx, nssOrUUID, AcquisitionPrerequisites::kRead));
+        };
+        boost::optional<CollectionOrViewAcquisition> collectionOrView = acquire();
 
-        boost::optional<CollectionOrViewAcquisition> collectionOrView =
-            acquireCollectionOrViewMaybeLockFree(opCtx, acquisitionRequest);
+        auto cmdObj =
+            translateCmdObjForRawData(opCtx, originalCmdObj, nssOrUUID, collectionOrView, acquire);
         const auto nss = collectionOrView->nss();
 
         if (!tracker) {
@@ -499,6 +571,12 @@ public:
                                                {});
         const CanonicalDistinct& canonicalDistinct = *canonicalQuery->getDistinct();
 
+        // Create an RAII object that prints useful information about the ExpressionContext in the
+        // case of a tassert or crash.
+        ScopedDebugInfo expCtxDiagnostics(
+            "ExpCtxDiagnostics",
+            diagnostic_printers::ExpressionContextPrinter{canonicalQuery->getExpCtx()});
+
         if (canonicalDistinct.isMirrored()) {
             const auto& invocation = CommandInvocation::get(opCtx);
             invocation->markMirrored();
@@ -515,13 +593,23 @@ public:
                 .getAsync([](auto) {});
         }
 
-        if (collectionOrView->isView()) {
+        if (collectionOrView->isView() ||
+            timeseries::requiresViewlessTimeseriesTranslation(opCtx, *collectionOrView)) {
             // Relinquish locks. The aggregation command will re-acquire them.
             collectionOrView.reset();
-            runDistinctOnView(
+            runDistinctAsAgg(
                 opCtx, std::move(canonicalQuery), boost::none /* verbosity */, replyBuilder);
             return true;
         }
+
+        // Create an RAII object that prints the collection's shard key in the case of a tassert or
+        // crash.
+        auto collShardingDescription = collectionOrView->getCollection().getShardingDescription();
+        ScopedDebugInfo shardKeyDiagnostics("ShardKeyDiagnostics",
+                                            diagnostic_printers::ShardKeyDiagnosticPrinter{
+                                                collShardingDescription.isSharded()
+                                                    ? collShardingDescription.getKeyPattern()
+                                                    : BSONObj()});
 
         // Check whether we are allowed to read from this node after acquiring our locks.
         auto replCoord = repl::ReplicationCoordinator::get(opCtx);
@@ -543,6 +631,9 @@ public:
 
         const int kMaxResponseSize = BSONObjMaxUserSize - 4096;
 
+        // Capture diagnostics to be logged in the case of a failure.
+        ScopedDebugInfo explainDiagnostics(
+            "explainDiagnostics", diagnostic_printers::ExplainDiagnosticPrinter{executor.get()});
         try {
             size_t listApproxBytes = 0;
             BSONObj obj;
@@ -553,7 +644,7 @@ public:
                 // available to us without this.  If a collection scan is providing the data, we may
                 // have to expand an array.
                 BSONElementSet elts;
-                dps::extractAllElementsAlongPath(obj, key, elts);
+                mdps::extractAllElementsAlongPath(obj, key, elts);
 
                 for (BSONElementSet::iterator it = elts.begin(); it != elts.end(); ++it) {
                     BSONElement elt = *it;
@@ -581,9 +672,11 @@ public:
                           "Plan executor error during distinct command",
                           "error"_attr = exception.toStatus(),
                           "stats"_attr = redact(stats),
-                          "cmd"_attr = cmdObj);
+                          "cmd"_attr = redact(cmdObj));
 
-            exception.addContext("Executor error during distinct command");
+            exception.addContext(str::stream()
+                                 << "Executor error during distinct command on namespace: "
+                                 << nss.toStringForErrorMsg());
             throw;
         }
 
@@ -595,7 +688,11 @@ public:
         auto&& explainer = executor->getPlanExplainer();
         explainer.getSummaryStats(&stats);
         if (collection) {
-            CollectionQueryInfo::get(collection).notifyOfQuery(opCtx, collection, stats);
+            CollectionIndexUsageTrackerDecoration::recordCollectionIndexUsage(
+                collection.get(),
+                stats.collectionScans,
+                stats.collectionScansNonTailable,
+                stats.indexesUsed);
         }
 
         curOp->debug().setPlanSummaryMetrics(std::move(stats));
@@ -654,25 +751,21 @@ public:
         return true;
     }
 
-    void runDistinctOnView(OperationContext* opCtx,
-                           std::unique_ptr<CanonicalQuery> canonicalQuery,
-                           boost::optional<ExplainOptions::Verbosity> verbosity,
-                           rpc::ReplyBuilderInterface* replyBuilder) const {
+    void runDistinctAsAgg(OperationContext* opCtx,
+                          std::unique_ptr<CanonicalQuery> canonicalQuery,
+                          boost::optional<ExplainOptions::Verbosity> verbosity,
+                          rpc::ReplyBuilderInterface* replyBuilder) const {
         const auto& nss = canonicalQuery->nss();
         const auto& dbName = nss.dbName();
         const auto& vts = auth::ValidatedTenancyScope::get(opCtx);
-        const auto viewAggCmd =
-            OpMsgRequestBuilder::create(
-                vts,
-                dbName,
-                uassertStatusOK(parsed_distinct_command::asAggregation(*canonicalQuery)))
-                .body;
         const auto serializationContext = vts != boost::none
             ? SerializationContext::stateCommandRequest(vts->hasTenantId(), vts->isFromAtlasProxy())
             : SerializationContext::stateCommandRequest();
-        auto viewAggRequest = aggregation_request_helper::parseFromBSON(
-            viewAggCmd, vts, verbosity, serializationContext);
-        viewAggRequest.setQuerySettings(canonicalQuery->getExpCtx()->getQuerySettings());
+
+        auto distinctAggRequest = parsed_distinct_command::asAggregation(
+            *canonicalQuery, verbosity, serializationContext);
+
+        distinctAggRequest.setQuerySettings(canonicalQuery->getExpCtx()->getQuerySettings());
 
         auto curOp = CurOp::get(opCtx);
 
@@ -681,31 +774,32 @@ public:
         auto ownedQueryStatsKey = std::move(curOp->debug().queryStatsInfo.key);
         curOp->debug().queryStatsInfo.disableForSubqueryExecution = true;
 
-        // If running explain distinct on view, then aggregate is executed without privilege checks
+        // If running explain distinct as agg, then aggregate is executed without privilege checks
         // and without response formatting.
         if (verbosity) {
             uassertStatusOK(runAggregate(opCtx,
-                                         viewAggRequest,
-                                         {viewAggRequest},
-                                         viewAggCmd,
+                                         distinctAggRequest,
+                                         {distinctAggRequest},
+                                         distinctAggRequest.toBSON(),
                                          PrivilegeVector(),
-                                         replyBuilder,
-                                         {} /* usedExternalDataSources */));
+                                         verbosity,
+                                         replyBuilder));
             return;
         }
 
         const auto privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(AuthorizationSession::get(opCtx->getClient()),
-                                            viewAggRequest.getNamespace(),
-                                            viewAggRequest,
+            auth::getPrivilegesForAggregate(opCtx,
+                                            AuthorizationSession::get(opCtx->getClient()),
+                                            distinctAggRequest.getNamespace(),
+                                            distinctAggRequest,
                                             false /* isMongos */));
         uassertStatusOK(runAggregate(opCtx,
-                                     viewAggRequest,
-                                     {viewAggRequest},
-                                     viewAggCmd,
+                                     distinctAggRequest,
+                                     {distinctAggRequest},
+                                     distinctAggRequest.toBSON(),
                                      privileges,
-                                     replyBuilder,
-                                     {} /* usedExternalDataSources */));
+                                     verbosity,
+                                     replyBuilder));
 
         // Copy the result from the aggregate command.
         auto resultBuilder = replyBuilder->getBodyBuilder();
@@ -739,6 +833,7 @@ public:
             keyBob.append("query", 1);
             keyBob.append("hint", 1);
             keyBob.append("collation", 1);
+            keyBob.append("rawData", 1);
             keyBob.append("shardVersion", 1);
             keyBob.append("databaseVersion", 1);
             return keyBob.obj();

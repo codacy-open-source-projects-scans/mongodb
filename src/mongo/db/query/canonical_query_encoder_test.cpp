@@ -29,17 +29,6 @@
 
 #include "mongo/db/query/canonical_query_encoder.h"
 
-#include <list>
-#include <memory>
-#include <ostream>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -47,8 +36,6 @@
 #include "mongo/bson/json.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/basic_types.h"
-#include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -57,18 +44,24 @@
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/canonical_query_test_util.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
-#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/projection_policies.h"
 #include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/repl/read_concern_level.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/golden_test.h"
 #include "mongo/unittest/golden_test_base.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <memory>
+#include <ostream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
@@ -76,7 +69,7 @@ namespace {
 using std::unique_ptr;
 
 static const NamespaceString foreignNss =
-    NamespaceString::createNamespaceString_forTest("testdb.foreigncoll");
+    NamespaceString::createNamespaceString_forTest("test.foreigncoll");
 
 unittest::GoldenTestConfig goldenTestConfig{"src/mongo/db/test_output/query"};
 
@@ -199,6 +192,12 @@ protected:
                    << ", allowDiskUse=" << findCommand->getAllowDiskUse()
                    << ", returnKey=" << findCommand->getReturnKey()
                    << ", requestResumeToken=" << findCommand->getRequestResumeToken();
+            if (!findCommand->getResumeAfter().isEmpty()) {
+                stream << ", resumeAfter=1";
+            }
+            if (!findCommand->getStartAt().isEmpty()) {
+                stream << ", startAt=1";
+            }
         }
         if (isCountLike) {
             stream << ", isCountLike=true";
@@ -442,10 +441,9 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeyRegexDependsOnFlags) {
 
     // Test that only valid regex flags contribute to the plan cache key encoding.
     testComputeKey(gctx,
-                   BSON("a" << BSON("$regex"
-                                    << "abc"
-                                    << "$options"
-                                    << "imxsu")),
+                   BSON("a" << BSON("$regex" << "abc"
+                                             << "$options"
+                                             << "imxsu")),
                    {},
                    {});
     testComputeKey(gctx, "{a: /abc/im}", "{}", "{}");
@@ -581,8 +579,8 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeySBE) {
     // Generated cache keys should be treated as opaque to the user.
 
     // SBE must be enabled in order to generate SBE plan cache keys.
-    RAIIServerParameterControllerForTest controllerSBE("internalQueryFrameworkControl",
-                                                       "trySbeEngine");
+    RAIIServerParameterControllerForTest sbeFullController("featureFlagSbeFull", true);
+
     testComputeSBEKey(gctx, "{}", "{}", "{}");
     testComputeSBEKey(gctx, "{$or: [{a: 1}, {b: 2}]}", "{}", "{}");
     testComputeSBEKey(gctx, "{a: 1}", "{}", "{}");
@@ -641,11 +639,19 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeySBE) {
     findCommand = std::make_unique<FindCommandRequest>(nss);
     findCommand->setMax(mongo::fromjson("{ a : 1 }"));
     testComputeSBEKey(gctx, "{a: 1}", "{a: 1}", "{}", std::move(findCommand));
+
     findCommand = std::make_unique<FindCommandRequest>(nss);
     findCommand->setRequestResumeToken(true);
     // "hint" must be {$natural:1} if 'requestResumeToken' is enabled.
     findCommand->setHint(fromjson("{$natural: 1}"));
     findCommand->setResumeAfter(mongo::fromjson("{ $recordId: NumberLong(1) }"));
+    testComputeSBEKey(gctx, "{a: 1}", "{}", "{}", std::move(findCommand));
+
+
+    findCommand = std::make_unique<FindCommandRequest>(nss);
+    findCommand->setRequestResumeToken(true);
+    findCommand->setHint(fromjson("{$natural: 1}"));
+    findCommand->setStartAt(mongo::fromjson("{ $recordId: NumberLong(1) }"));
     testComputeSBEKey(gctx, "{a: 1}", "{}", "{}", std::move(findCommand));
 
     findCommand = std::make_unique<FindCommandRequest>(nss);
@@ -659,8 +665,7 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeySBE) {
 TEST_F(CanonicalQueryEncoderTest, ComputeKeySBEWithPipeline) {
     unittest::GoldenTestContext gctx(&goldenTestConfig);
     // SBE must be enabled in order to generate SBE plan cache keys.
-    RAIIServerParameterControllerForTest controllerSBE("internalQueryFrameworkControl",
-                                                       "trySbeEngine");
+    RAIIServerParameterControllerForTest sbeFullController("featureFlagSbeFull", true);
 
 
     auto getLookupBson = [](StringData localField, StringData foreignField, StringData asField) {
@@ -689,8 +694,7 @@ TEST_F(CanonicalQueryEncoderTest, ComputeKeySBEWithPipeline) {
 TEST_F(CanonicalQueryEncoderTest, ComputeKeySBEWithReadConcern) {
     unittest::GoldenTestContext gctx(&goldenTestConfig);
     // SBE must be enabled in order to generate SBE plan cache keys.
-    RAIIServerParameterControllerForTest controllerSBE("internalQueryFrameworkControl",
-                                                       "trySbeEngine");
+    RAIIServerParameterControllerForTest sbeFullController("featureFlagSbeFull", true);
 
     // Find command without read concern.
     auto findCommand = std::make_unique<FindCommandRequest>(nss);

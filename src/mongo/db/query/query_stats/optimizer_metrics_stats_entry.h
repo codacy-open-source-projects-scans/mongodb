@@ -30,12 +30,12 @@
 #pragma once
 
 #include "mongo/bson/bsonobjbuilder.h"
-#include <algorithm>
-#include <cstdint>
-#include <memory>
-
 #include "mongo/db/query/query_stats/aggregated_metric.h"
 #include "mongo/db/query/query_stats/supplemental_metrics_stats.h"
+#include "mongo/util/modules.h"
+
+#include <cstdint>
+#include <memory>
 
 namespace mongo::query_stats {
 

@@ -21,6 +21,7 @@ import requests
 from docker.client import DockerClient
 from docker.models.containers import Container
 from docker.models.images import Image
+from retry.api import retry_call
 from simple_report import Report, Result
 
 root = logging.getLogger()
@@ -248,6 +249,16 @@ VERSIONS_TO_SKIP: Set[str] = set(
 )
 DISABLED_TESTS: Set[Tuple[str, str]] = set()
 
+VALID_TAR_DIRECTORY_ARCHITECTURES = [
+    "linux-aarch64",
+    "linux-x86_64",
+    "linux-ppc64le",
+    "linux-s390x",
+    "macos-aarch64",
+    "macos-x86_64",
+    "windows-x86_64",
+]
+
 
 @dataclasses.dataclass
 class Test:
@@ -349,7 +360,7 @@ def run_test(test: Test, client: DockerClient) -> Result:
             "yum -y install yum-utils epel-release",
             "yum-config-manager --enable epel",
         ]
-    if test.os_name.startswith("debian92"):
+    if test.os_name.startswith("debian92") or test.os_name.startswith("debian10"):
         # Adapted from https://stackoverflow.com/questions/76094428/debian-stretch-repositories-404-not-found
         # Debian92 renamed its repos to archive
         # The first two sed commands are to replace debian92's sources list to archive repo
@@ -422,15 +433,33 @@ def run_test(test: Test, client: DockerClient) -> Result:
 
 
 logging.info("Attempting to download current mongo releases json")
-r = requests.get("https://downloads.mongodb.org/current.json")
+r = retry_call(
+    requests.get,
+    fargs=["https://downloads.mongodb.org/current.json"],
+    fkwargs={"timeout": 30},
+    tries=5,
+    delay=5,
+)
 current_releases = r.json()
 
 logging.info("Attempting to download current mongo tools releases json")
-r = requests.get("https://downloads.mongodb.org/tools/db/release.json")
+r = retry_call(
+    requests.get,
+    fargs=["https://downloads.mongodb.org/tools/db/release.json"],
+    fkwargs={"timeout": 30},
+    tries=5,
+    delay=5,
+)
 current_tools_releases = r.json()
 
 logging.info("Attempting to download current mongosh releases json")
-r = requests.get("https://s3.amazonaws.com/info-mongodb-com/com-download-center/mongosh.json")
+r = retry_call(
+    requests.get,
+    fargs=["https://downloads.mongodb.com/compass/mongosh.json"],
+    fkwargs={"timeout": 30},
+    tries=5,
+    delay=5,
+)
 mongosh_releases = r.json()
 
 
@@ -481,13 +510,13 @@ def get_mongosh_package(arch_name: str, os_name: str) -> Optional[str]:
     if arch_name == "aarch64":
         arch_name = "arm64"
     if arch_name in ("x86_64", "amd64"):
-        arch_name = "x64"
+        arch_name = "x86_64"
     pkg_ext = "rpm"
     if "debian" in os_name or "ubuntu" in os_name:
         pkg_ext = "deb"
-    for platform_type in mongosh_releases["versions"][0]["platform"]:
-        if platform_type["os"] == pkg_ext and platform_type["arch"] == arch_name:
-            return platform_type["download_link"]
+    for platform_type in mongosh_releases["versions"][0]["downloads"]:
+        if platform_type["distro"] == pkg_ext and platform_type["arch"] == arch_name:
+            return platform_type["archive"]["url"]
     return None
 
 
@@ -503,6 +532,34 @@ def get_edition_alias(edition_name: str) -> str:
     if edition_name in ("base", "targeted"):
         return "org"
     return edition_name
+
+
+def validate_top_level_directory(tar_name: str):
+    command = f"tar -tf {tar_name} | head -n 1 | awk -F/ '{{print $1}}'"
+    proc = subprocess.run(command, capture_output=True, shell=True, text=True)
+    top_level_directory = proc.stdout.strip()
+    if all(os_arch not in top_level_directory for os_arch in VALID_TAR_DIRECTORY_ARCHITECTURES):
+        raise Exception(
+            f"Found an unexpected os-arch pairing as the top level directory. Top level directory: {top_level_directory}"
+        )
+
+
+def validate_enterprise(sources_text, edition, binfile):
+    if edition != "enterprise" and edition != "atlas":
+        if "src/mongo/db/modules/enterprise" in sources_text:
+            raise Exception(f"Found enterprise code in {edition} binary {binfile}.")
+    else:
+        if "src/mongo/db/modules/enterprise" not in sources_text:
+            raise Exception(f"Failed to find enterprise code in {edition} binary {binfile}.")
+
+
+def validate_atlas(sources_text, edition, binfile):
+    if edition != "atlas":
+        if "/modules/atlas/" in sources_text:
+            raise Exception(f"Found atlas code in {edition} binary {binfile}.")
+    else:
+        if "/modules/enterprise/" not in sources_text:
+            raise Exception(f"Failed to find atlas code in {edition} binary {binfile}.")
 
 
 arches: Set[str] = set()
@@ -644,21 +701,12 @@ if args.command == "branch":
             )
         )
 
+        validate_top_level_directory("mongo-binaries.tgz")
+
         if not args.skip_enterprise_check:
             logging.info(
                 "Checking the source files used to build the binaries, use --skip-enterprise-check to skip this check."
             )
-
-            if args.edition != "enterprise":
-                exception_msg = "Found enterprise code in non-enterprise binary {binfile}."
-
-                def validate_binaries(sources_text):
-                    return "src/mongo/db/modules/enterprise" not in sources_text
-            else:
-                exception_msg = "Failed to find enterprise code in enterprise binary {binfile}."
-
-                def validate_binaries(sources_text):
-                    return "src/mongo/db/modules/enterprise" in sources_text
 
             os.makedirs("dist-test", exist_ok=True)
 
@@ -690,7 +738,7 @@ if args.command == "branch":
             for binfile in bins_to_check:
                 p = subprocess.run(
                     [
-                        "/opt/mongodbtoolchain/v4/bin/gdb",
+                        "/opt/mongodbtoolchain/v5/bin/gdb",
                         "--batch",
                         "--nx",
                         "--command=gdb_commands.txt",
@@ -701,8 +749,9 @@ if args.command == "branch":
                 )
                 output_text = p.stdout + p.stderr
                 logging.info(output_text)
-                if not validate_binaries(output_text):
-                    raise Exception(exception_msg.format(binfile=binfile))
+
+                validate_enterprise(output_text, args.edition, binfile)
+                validate_atlas(output_text, args.edition, binfile)
 
                 if p.returncode != 0:
                     raise Exception("GDB process exited non-zero!")

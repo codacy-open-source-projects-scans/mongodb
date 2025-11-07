@@ -64,11 +64,14 @@ __rts_check(WT_SESSION_IMPL *session)
      * A new cursor may be positioned or a transaction may start after we return from this call and
      * callers should be aware of this limitation.
      */
-    if (cookie.ret_cursor_active)
-        WT_RET_MSG(session, EBUSY, "rollback_to_stable illegal with active file cursors");
+    if (cookie.ret_cursor_active) {
+        ret = EBUSY;
+        WT_TRET(__wt_verbose_dump_sessions(session, true));
+        WT_RET_MSG(session, ret, "rollback_to_stable illegal with active file cursors");
+    }
     if (cookie.ret_txn_active) {
         ret = EBUSY;
-        WT_TRET(__wt_verbose_dump_txn(session));
+        WT_TRET(__wt_verbose_dump_sessions(session, false));
         WT_RET_MSG(session, ret, "rollback_to_stable illegal with active transactions");
     }
     return (0);
@@ -133,7 +136,7 @@ __rollback_to_stable_int(WT_SESSION_IMPL *session, bool no_ckpt)
 
     WT_ASSERT_ALWAYS(session,
       (txn_global->has_pinned_timestamp ||
-        !__wt_atomic_loadbool(&txn_global->has_oldest_timestamp)),
+        !__wt_atomic_load_bool_relaxed(&txn_global->has_oldest_timestamp)),
       "Database has no pinned timestamp but an oldest timestamp. Pinned timestamp is required to "
       "find out the global visibility/obsolete of an update.");
 

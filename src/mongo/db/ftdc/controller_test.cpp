@@ -29,14 +29,6 @@
 
 #include <boost/filesystem/path.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <cmath>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <vector>
-
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -48,11 +40,18 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/temp_dir.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source.h"
+
+#include <cmath>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -95,6 +94,17 @@ private:
     bool _released = false;
     uint64_t _progress = 0;
     uint64_t _limit = 1;
+};
+
+class MockFailCollector : public FTDCCollectorInterface {
+public:
+    void collect(OperationContext*, BSONObjBuilder&) final {
+        throw std::logic_error("MockFailController");
+    }
+
+    std::string name() const final {
+        return "MockFailCollector";
+    }
 };
 
 class MockCollector : public FTDCCollectorInterface {
@@ -176,9 +186,6 @@ public:
 
 class MockPeriodicMetadataCollector : public MockCollector {
 public:
-    explicit MockPeriodicMetadataCollector(UseMultiServiceSchema multiServiceSchema)
-        : _multiService(std::move(multiServiceSchema)) {}
-
     void generateDocument(BSONObjBuilder& builder, std::uint32_t counter) final {
         builder.append("name", "joeconfig");
         builder.append("key3", static_cast<int32_t>(10 * counter + 2));
@@ -204,7 +211,6 @@ public:
     }
 
 private:
-    bool _multiService;
     boost::filesystem::path _dir;
     size_t _numFiles = 1;
 
@@ -236,6 +242,18 @@ std::vector<BSONObj> insertNewSchemaDocuments(const std::vector<BSONObj>& docs, 
     return newDocs;
 }
 
+class MockLargeDataCollector : public MockCollector {
+public:
+    MockLargeDataCollector(int32_t largeDataSize) : _largeDataSize(largeDataSize) {}
+
+    void generateDocument(BSONObjBuilder& builder, std::uint32_t counter) final {
+        builder.append("testingDataLarge", std::string(_largeDataSize, 'a'));
+    }
+
+private:
+    int32_t _largeDataSize = 0;
+};
+
 /**
  * Used to sync the flow of the FTDCController with its test. FTDCController calls onStartLoop() at
  * the start of each collection loop and it will block until the test calls
@@ -262,16 +280,13 @@ public:
     }
 
 protected:
-    void setUpControllerAndCheckpoint(
-        FTDCConfig config,
-        UseMultiServiceSchema multiServiceSchema = UseMultiServiceSchema{false}) {
+    void setUpControllerAndCheckpoint(FTDCConfig config) {
         createDirectoryClean(_dir);
 
         auto env = std::make_unique<MockControllerEnv>();
         _checkpoint = &env->loopCheckpoint;
 
-        _controller =
-            std::make_unique<FTDCController>(_dir, config, multiServiceSchema, std::move(env));
+        _controller = std::make_unique<FTDCController>(_dir, config, std::move(env));
     }
 
     void startController() {
@@ -293,12 +308,12 @@ protected:
         _checkpoint->wait();
     }
 
-    void testPeriodicCollector(UseMultiServiceSchema multiServiceSchema,
-                               bool enabled,
-                               std::unique_ptr<MockCollector> collector);
-    void testRotateCollector(UseMultiServiceSchema multiServiceSchema,
-                             int numRotations,
-                             std::unique_ptr<MockCollector> collector);
+    void testPeriodicCollector(bool enabled, std::unique_ptr<MockCollector> collector);
+    void testRotateCollector(int numRotations, std::unique_ptr<MockCollector> collector);
+
+    FTDCController* controller() {
+        return _controller.get();
+    }
 
 private:
     uint64_t _metadataCaptureFrequency;
@@ -313,8 +328,7 @@ auto toMetadataCollector(MockCollector* collector) {
 }
 
 // Test a run of the controller with a single periodicCollector and the data it logs to log file
-void FTDCControllerTest::testPeriodicCollector(UseMultiServiceSchema multiServiceSchema,
-                                               bool enabled,
+void FTDCControllerTest::testPeriodicCollector(bool enabled,
                                                std::unique_ptr<MockCollector> collector) {
     FTDCConfig config;
     config.enabled = enabled;
@@ -323,15 +337,15 @@ void FTDCControllerTest::testPeriodicCollector(UseMultiServiceSchema multiServic
     config.maxFileSizeBytes = FTDCConfig::kMaxFileSizeBytesDefault;
     config.maxDirectorySizeBytes = FTDCConfig::kMaxDirectorySizeBytesDefault;
 
-    setUpControllerAndCheckpoint(config, multiServiceSchema);
+    setUpControllerAndCheckpoint(config);
 
     uint64_t numCollections = 3;
 
     auto collectorPtr = collector.get();
     if (toMetadataCollector(collectorPtr)) {
-        _controller->addPeriodicMetadataCollector(std::move(collector), ClusterRole::None);
+        _controller->addPeriodicMetadataCollector(std::move(collector));
     } else {
-        _controller->addPeriodicCollector(std::move(collector), ClusterRole::None);
+        _controller->addPeriodicCollector(std::move(collector));
     }
 
     _controller->start(getClient()->getService());
@@ -342,7 +356,7 @@ void FTDCControllerTest::testPeriodicCollector(UseMultiServiceSchema multiServic
     }
     _checkpoint->wait();
 
-    // Wait for numCollections samples to have occured
+    // Wait for numCollections samples to have occurred
     LOGV2_DEBUG(9129201, 0, "Collecting");
     auto collectUntilDocCount = [&](auto& collectorPtr, size_t docs) {
         while (collectorPtr->getDocs().size() < docs)
@@ -357,10 +371,6 @@ void FTDCControllerTest::testPeriodicCollector(UseMultiServiceSchema multiServic
                toMetadataCollector(collectorPtr) ? numCollections
                                                  : numCollections / _metadataCaptureFrequency);
 
-    if (multiServiceSchema) {
-        docs = insertNewSchemaDocuments(docs, "common");
-    }
-
     auto files = scanDirectory(_dir);
     ASSERT_EQUALS(files.size(), 1);
 
@@ -370,15 +380,14 @@ void FTDCControllerTest::testPeriodicCollector(UseMultiServiceSchema multiServic
     ValidateDocumentListByType(files, {}, docs, metaDocs, FTDCValidationMode::kStrict);
 }
 
-void FTDCControllerTest::testRotateCollector(UseMultiServiceSchema multiServiceSchema,
-                                             int numRotations,
+void FTDCControllerTest::testRotateCollector(int numRotations,
                                              std::unique_ptr<MockCollector> collector) {
     FTDCConfig config;
     config.period = Milliseconds(100);
-    setUpControllerAndCheckpoint(config, multiServiceSchema);
+    setUpControllerAndCheckpoint(config);
 
     auto collectorPtr = collector.get();
-    _controller->addOnRotateCollector(std::move(collector), ClusterRole::ShardServer);
+    _controller->addOnRotateCollector(std::move(collector));
 
     startController();
     for (int i = numRotations; i--;) {
@@ -394,80 +403,35 @@ void FTDCControllerTest::testRotateCollector(UseMultiServiceSchema multiServiceS
     auto docs = collectorPtr->getDocs();
     ASSERT_EQUALS(docs.size(), expectedNumFiles);
 
-    if (multiServiceSchema) {
-        docs = insertNewSchemaDocuments(docs, "shard");
-    }
-
     auto files = scanDirectory(_dir);
     ASSERT_EQUALS(files.size(), expectedNumFiles);
 
     ValidateDocumentListByType(files, docs, {}, {}, FTDCValidationMode::kStrict);
 }
 
-TEST_F(FTDCControllerTest, TestPeriodicStartingEnabledWithMultiversion) {
-    testPeriodicCollector(
-        UseMultiServiceSchema{true}, true, std::make_unique<MockPeriodicCollector>());
+TEST_F(FTDCControllerTest, TestPeriodicStartingEnabled) {
+    testPeriodicCollector(true, std::make_unique<MockPeriodicCollector>());
 }
 
-TEST_F(FTDCControllerTest, TestMetadataStartingEnabledWithMultiversion) {
+TEST_F(FTDCControllerTest, TestMetadataStartingEnabled) {
     setMetadataCaptureFrequency(3);
-    UseMultiServiceSchema multiServiceSchema{true};
-    testPeriodicCollector(multiServiceSchema,
-                          true,
-                          std::make_unique<MockPeriodicMetadataCollector>(multiServiceSchema));
+    testPeriodicCollector(true, std::make_unique<MockPeriodicMetadataCollector>());
 }
 
-TEST_F(FTDCControllerTest, TestPeriodicStartingEnabledWithoutMultiversion) {
-    testPeriodicCollector(
-        UseMultiServiceSchema{false}, true, std::make_unique<MockPeriodicCollector>());
+TEST_F(FTDCControllerTest, TestPeriodicStartingDisabled) {
+    testPeriodicCollector(false, std::make_unique<MockPeriodicCollector>());
 }
 
-TEST_F(FTDCControllerTest, TestMetadataStartingEnabledWithoutMultiversion) {
+TEST_F(FTDCControllerTest, TestMetadataStartingDisabled) {
     setMetadataCaptureFrequency(3);
-    UseMultiServiceSchema multiServiceSchema{false};
-    testPeriodicCollector(multiServiceSchema,
-                          true,
-                          std::make_unique<MockPeriodicMetadataCollector>(multiServiceSchema));
+    testPeriodicCollector(false, std::make_unique<MockPeriodicMetadataCollector>());
 }
 
-TEST_F(FTDCControllerTest, TestPeriodicStartingDisabledWithMultiversion) {
-    testPeriodicCollector(
-        UseMultiServiceSchema{true}, false, std::make_unique<MockPeriodicCollector>());
+TEST_F(FTDCControllerTest, TestRotate1) {
+    testRotateCollector(1, std::make_unique<MockRotateCollector>());
 }
-
-TEST_F(FTDCControllerTest, TestMetadataStartingDisabledWithMultiversion) {
-    setMetadataCaptureFrequency(3);
-    UseMultiServiceSchema multiServiceSchema{true};
-    testPeriodicCollector(multiServiceSchema,
-                          false,
-                          std::make_unique<MockPeriodicMetadataCollector>(multiServiceSchema));
-}
-
-TEST_F(FTDCControllerTest, TestPeriodicStartingDisabledWithoutMultiversion) {
-    testPeriodicCollector(
-        UseMultiServiceSchema{false}, false, std::make_unique<MockPeriodicCollector>());
-}
-
-TEST_F(FTDCControllerTest, TestMetadataStartingDisabledWithoutMultiversion) {
-    setMetadataCaptureFrequency(3);
-    UseMultiServiceSchema multiServiceSchema{false};
-    testPeriodicCollector(multiServiceSchema,
-                          false,
-                          std::make_unique<MockPeriodicMetadataCollector>(multiServiceSchema));
-}
-
-TEST_F(FTDCControllerTest, TestRotate1WithMultiversion) {
-    testRotateCollector(UseMultiServiceSchema{true}, 1, std::make_unique<MockRotateCollector>());
-}
-TEST_F(FTDCControllerTest, TestRotate20WithMultiversion) {
-    testRotateCollector(UseMultiServiceSchema{true}, 20, std::make_unique<MockRotateCollector>());
-}
-
-TEST_F(FTDCControllerTest, TestRotate1WithoutMultiversion) {
-    testRotateCollector(UseMultiServiceSchema{false}, 1, std::make_unique<MockRotateCollector>());
-}
-TEST_F(FTDCControllerTest, TestRotate20WithoutMultiversion) {
-    testRotateCollector(UseMultiServiceSchema{false}, 20, std::make_unique<MockRotateCollector>());
+TEST_F(FTDCControllerTest, TestRotate20) {
+    testRotateCollector(20, std::make_unique<MockRotateCollector>());
 }
 
 // Test we can start and stop the controller in quick succession, make sure it succeeds without
@@ -497,6 +461,41 @@ DEATH_TEST_REGEX_F(FTDCControllerTest,
     startController();
 
     // Do a single sample collection to ensure we run through FTDCController::doLoop() and die.
+    doCollection();
+}
+
+DEATH_TEST_REGEX_F(FTDCControllerTest,
+                   LogAndTerminateWhenExceptionThrown,
+                   "9761500.*MockFailCollector.*size") {
+    FTDCConfig config;
+    config.period = Milliseconds(100);
+    setUpControllerAndCheckpoint(config);
+
+    auto collector = std::make_unique<MockFailCollector>();
+    controller()->addPeriodicCollector(std::move(collector));
+
+    startController();
+
+    // Do a single sample collection to ensure we run through FTDCController::doLoop() and die.
+    doCollection();
+}
+
+DEATH_TEST_REGEX_F(FTDCControllerTest,
+                   LogAndTerminateWhenLargeDataCollectionFails,
+                   "10630200.*FTDC Entry.*name.*size") {
+    FTDCConfig config;
+    config.period = Milliseconds(100);
+    setUpControllerAndCheckpoint(config);
+
+    auto collector1 = std::make_unique<MockLargeDataCollector>(50 * 1024 * 1024);
+    auto collector2 = std::make_unique<MockLargeDataCollector>(60 * 1024 * 1024);
+    auto collector3 = std::make_unique<MockLargeDataCollector>(70 * 1024 * 1024);
+    controller()->addPeriodicCollector(std::move(collector1));
+    controller()->addPeriodicCollector(std::move(collector2));
+    controller()->addPeriodicCollector(std::move(collector3));
+
+    startController();
+
     doCollection();
 }
 

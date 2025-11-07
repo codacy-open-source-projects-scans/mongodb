@@ -31,41 +31,32 @@
  * This file contains tests for mongo/db/query/get_executor.h
  */
 
-#include <absl/container/node_hash_map.h>
-#include <algorithm>
-#include <string>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj_comparator_interface.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/db/catalog/collection_mock.h"
 #include "mongo/db/exec/index_path_projection.h"
-#include "mongo/db/exec/projection_executor.h"
 #include "mongo/db/exec/projection_executor_builder.h"
-#include "mongo/db/field_ref.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_names.h"
+#include "mongo/db/local_catalog/collection_mock.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_parser.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_policies.h"
 #include "mongo/db/query/distinct_access.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/get_executor.h"
-#include "mongo/db/query/plan_cache/classic_plan_cache.h"
-#include "mongo/db/query/projection_parser.h"
-#include "mongo/db/query/projection_policies.h"
 #include "mongo/db/query/query_settings.h"
 #include "mongo/db/query/query_settings_decoration.h"
 #include "mongo/db/service_context_test_fixture.h"
-#include "mongo/stdx/type_traits.h"
 #include "mongo/stdx/unordered_set.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/intrusive_counter.h"
+#include "mongo/unittest/unittest.h"
+
+#include <string>
+#include <utility>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
@@ -107,8 +98,11 @@ protected:
                                        stdx::unordered_set<std::string> indexNames,
                                        stdx::unordered_set<std::string> expectedFilteredNames) {
         // Create collection.
-        auto collection = std::make_unique<CollectionMock>(nss);
-        auto collectionPtr = CollectionPtr(collection.get());
+        std::shared_ptr<Collection> collection = std::make_shared<CollectionMock>(nss);
+        auto catalog = CollectionCatalog::get(_opCtx.get());
+        catalog->onCreateCollection(_opCtx.get(), collection);
+        auto collectionPtr = CollectionPtr(catalog->establishConsistentCollection(
+            _opCtx.get(), nss, boost::none /* readTimestamp */));
 
         // Retrieve query settings decoration.
         auto& querySettings = *QuerySettingsDecoration::get(collectionPtr->getSharedDecorations());
@@ -141,7 +135,7 @@ protected:
 IndexEntry buildSimpleIndexEntry(const BSONObj& kp, const std::string& indexName) {
     return {kp,
             IndexNames::nameToType(IndexNames::findPluginName(kp)),
-            IndexDescriptor::kLatestIndexVersion,
+            IndexConfig::kLatestIndexVersion,
             false,
             {},
             {},
@@ -163,7 +157,7 @@ IndexEntry buildWildcardIndexEntry(const BSONObj& kp,
                                    const std::string& indexName) {
     return {kp,
             IndexNames::nameToType(IndexNames::findPluginName(kp)),
-            IndexDescriptor::kLatestIndexVersion,
+            IndexConfig::kLatestIndexVersion,
             false,
             {},
             {},
@@ -292,28 +286,44 @@ TEST_F(QueryPlannerParamsTest, isComponentOfPathMultikeyNoMetadata) {
     BSONObj indexKey = BSON("a" << 1 << "b.c" << -1);
     MultikeyPaths multikeyInfo = {};
 
-    ASSERT_TRUE(isAnyComponentOfPathMultikey(indexKey, true, multikeyInfo, "a"));
-    ASSERT_TRUE(isAnyComponentOfPathMultikey(indexKey, true, multikeyInfo, "b.c"));
+    ASSERT_TRUE(isAnyComponentOfPathOrProjectionMultikey(indexKey, true, multikeyInfo, "a"));
+    ASSERT_TRUE(isAnyComponentOfPathOrProjectionMultikey(indexKey, true, multikeyInfo, "b.c"));
 
-    ASSERT_FALSE(isAnyComponentOfPathMultikey(indexKey, false, multikeyInfo, "a"));
-    ASSERT_FALSE(isAnyComponentOfPathMultikey(indexKey, false, multikeyInfo, "b.c"));
+    ASSERT_FALSE(isAnyComponentOfPathOrProjectionMultikey(indexKey, false, multikeyInfo, "a"));
+    ASSERT_FALSE(isAnyComponentOfPathOrProjectionMultikey(indexKey, false, multikeyInfo, "b.c"));
 }
 
 TEST_F(QueryPlannerParamsTest, isComponentOfPathMultikeyWithMetadata) {
     BSONObj indexKey = BSON("a" << 1 << "b.c" << -1);
     MultikeyPaths multikeyInfo = {{}, {1}};
 
-    ASSERT_FALSE(isAnyComponentOfPathMultikey(indexKey, true, multikeyInfo, "a"));
-    ASSERT_TRUE(isAnyComponentOfPathMultikey(indexKey, true, multikeyInfo, "b.c"));
+    ASSERT_FALSE(isAnyComponentOfPathOrProjectionMultikey(indexKey, true, multikeyInfo, "a"));
+    ASSERT_TRUE(isAnyComponentOfPathOrProjectionMultikey(indexKey, true, multikeyInfo, "b.c"));
 }
 
 TEST_F(QueryPlannerParamsTest, isComponentOfPathMultikeyWithEmptyMetadata) {
     BSONObj indexKey = BSON("a" << 1 << "b.c" << -1);
 
-
     MultikeyPaths multikeyInfoAllPathsScalar = {{}, {}};
-    ASSERT_FALSE(isAnyComponentOfPathMultikey(indexKey, false, multikeyInfoAllPathsScalar, "a"));
-    ASSERT_FALSE(isAnyComponentOfPathMultikey(indexKey, false, multikeyInfoAllPathsScalar, "b.c"));
+    ASSERT_FALSE(
+        isAnyComponentOfPathOrProjectionMultikey(indexKey, false, multikeyInfoAllPathsScalar, "a"));
+    ASSERT_FALSE(isAnyComponentOfPathOrProjectionMultikey(
+        indexKey, false, multikeyInfoAllPathsScalar, "b.c"));
+}
+
+TEST_F(QueryPlannerParamsTest, isComponentOfProjectionMultikeyWithMetadata) {
+    BSONObj indexKey = BSON("a" << 1 << "b.c" << -1);
+    MultikeyPaths multikeyInfo = {{}, {1}};
+
+    ASSERT_FALSE(isAnyComponentOfPathOrProjectionMultikey(indexKey, true, multikeyInfo, "a"));
+
+    OrderedPathSet projectionFields = {"b.c"};
+    ASSERT_TRUE(isAnyComponentOfPathOrProjectionMultikey(
+        indexKey, true, multikeyInfo, "a", projectionFields, false));
+    ASSERT_FALSE(isAnyComponentOfPathOrProjectionMultikey(
+        indexKey, true, multikeyInfo, "a", projectionFields, true));
+    ASSERT_TRUE(isAnyComponentOfPathOrProjectionMultikey(
+        indexKey, true, multikeyInfo, "b.c", projectionFields, false));
 }
 
 }  // namespace

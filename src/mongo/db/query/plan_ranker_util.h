@@ -29,10 +29,14 @@
 
 #pragma once
 
-#include <algorithm>
-
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/query/plan_explainer_factory.h"
 #include "mongo/db/query/plan_ranker.h"
+#include "mongo/util/modules.h"
+
+#include <algorithm>
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 // Forward declarations.
 namespace mongo::sbe::plan_ranker {
@@ -63,16 +67,21 @@ inline std::vector<std::pair<double, size_t>>::iterator findTopTiedPlans(
  */
 struct TieBreakingScores {
     TieBreakingScores(bool isPlanTied, double score)
-        : isPlanTied(isPlanTied), score(score), docsExaminedBonus(0.0), indexPrefixBonus(0.0) {}
+        : isPlanTied(isPlanTied),
+          score(score),
+          docsExaminedBonus(0.0),
+          indexPrefixBonus(0.0),
+          distinctScanBonus(0.0) {}
 
     double getTotalBonus() const {
-        return docsExaminedBonus + indexPrefixBonus;
+        return docsExaminedBonus + indexPrefixBonus + distinctScanBonus;
     }
 
     const bool isPlanTied;
     const double score;
     double docsExaminedBonus;
     double indexPrefixBonus;
+    double distinctScanBonus;
 };
 
 /**
@@ -132,6 +141,24 @@ void calcIndexPrefixHeuristicBonus(
 }
 
 /**
+ * Boost the score of distinct scan plans in case of a tie.
+ */
+template <typename PlanStageType, typename ResultType, typename Data>
+void calcDistinctScanBonus(
+    const std::vector<std::pair<double, size_t>>& scoresAndCandidateIndices,
+    size_t numberOfTiedPlans,
+    const std::vector<BaseCandidatePlan<PlanStageType, ResultType, Data>>& candidates,
+    std::vector<TieBreakingScores>& scores) {
+
+    for (size_t i = 0; i < numberOfTiedPlans; ++i) {
+        const size_t candidateIndex = scoresAndCandidateIndices[i].second;
+        if (candidates[candidateIndex].solution->hasNode(STAGE_DISTINCT_SCAN)) {
+            scores[candidateIndex].distinctScanBonus += kBonusEpsilon;
+        }
+    }
+}
+
+/**
  * Apply tie-breaking hearistics and update candidate plan scores.
  */
 template <typename PlanStageType, typename ResultType, typename Data>
@@ -158,10 +185,25 @@ void addTieBreakingHeuristicsBonuses(
         calcIndexPrefixHeuristicBonus(
             scoresAndCandidateIndices, numberOfTiedPlans, candidates, scores);
 
+        calcDistinctScanBonus(scoresAndCandidateIndices, numberOfTiedPlans, candidates, scores);
+
         // Log tie breaking bonuses.
         for (const auto& score : scores) {
-            log_detail::logTieBreaking(
-                score.score, score.docsExaminedBonus, score.indexPrefixBonus, score.isPlanTied);
+            LOGV2_DEBUG(
+                8027500, 2, "Tie breaking heuristics", "formula"_attr = [&]() {
+                    StringBuilder sb;
+                    sb << "isPlanTied: " << score.isPlanTied << ". finalScore("
+                       << str::convertDoubleToString(score.score + score.docsExaminedBonus +
+                                                     score.indexPrefixBonus)
+                       << ") = score(" << str::convertDoubleToString(score.score)
+                       << ") + docsExaminedBonus("
+                       << str::convertDoubleToString(score.docsExaminedBonus)
+                       << ") + indexPrefixBonus("
+                       << str::convertDoubleToString(score.indexPrefixBonus)
+                       << ") + distinctScanBonus("
+                       << str::convertDoubleToString(score.distinctScanBonus);
+                    return sb.str();
+                }());
         }
 
         for (auto& scoreAndIndex : scoresAndCandidateIndices) {
@@ -179,7 +221,8 @@ void addTieBreakingHeuristicsBonuses(
  */
 template <typename PlanStageType, typename ResultType, typename Data>
 StatusWith<std::unique_ptr<PlanRankingDecision>> pickBestPlan(
-    const std::vector<BaseCandidatePlan<PlanStageType, ResultType, Data>>& candidates) {
+    const std::vector<BaseCandidatePlan<PlanStageType, ResultType, Data>>& candidates,
+    const CanonicalQuery& cq) {
     invariant(!candidates.empty());
     // A plan that hits EOF is automatically scored above
     // its peers. If multiple plans hit EOF during the same
@@ -189,6 +232,7 @@ StatusWith<std::unique_ptr<PlanRankingDecision>> pickBestPlan(
 
     // Get stat trees from each plan.
     std::vector<std::unique_ptr<PlanStageStats>> statTrees;
+    statTrees.reserve(candidates.size());
     for (size_t i = 0; i < candidates.size(); ++i) {
         statTrees.push_back(candidates[i].root->getStats());
     }
@@ -205,19 +249,26 @@ StatusWith<std::unique_ptr<PlanRankingDecision>> pickBestPlan(
             candidates[i].root, candidates[i].solution->_enumeratorExplainInfo);
 
         if (candidates[i].status.isOK()) {
-            log_detail::logScoringPlan([&]() { return candidates[i].solution->toString(); },
-                                       [&]() {
-                                           auto&& [stats, _] = explainer->getWinningPlanStats(
-                                               ExplainOptions::Verbosity::kExecStats);
-                                           return stats.jsonString(ExtendedRelaxedV2_0_0, true);
-                                       },
-                                       [&]() { return explainer->getPlanSummary(); },
-                                       i,
-                                       statTrees[i]->common.isEOF);
-            double score = makePlanScorer()->calculateScore(statTrees[i].get());
-            log_detail::logScore(score);
+            LOGV2_DEBUG(20956,
+                        5,
+                        "Scoring plan",
+                        "planIndex"_attr = i,
+                        "querySolution"_attr = redact(candidates[i].solution->toString()),
+                        "stats"_attr = redact([&]() {
+                            auto&& [stats, _] = explainer->getWinningPlanStats(
+                                ExplainOptions::Verbosity::kExecStats);
+                            return stats.jsonString(ExtendedRelaxedV2_0_0, true);
+                        }()));
+            LOGV2_DEBUG(20957,
+                        2,
+                        "Scoring query plan",
+                        "planSummary"_attr = explainer->getPlanSummary(),
+                        "planHitEOF"_attr = statTrees[i]->common.isEOF);
+
+            double score = makePlanScorer()->calculateScore(statTrees[i].get(), cq);
+            LOGV2_DEBUG(20958, 5, "Basic plan score", "score"_attr = score);
             if (statTrees[i]->common.isEOF) {
-                log_detail::logEOFBonus(eofBonus);
+                LOGV2_DEBUG(20959, 5, "Adding EOF bonus to score", "eofBonus"_attr = eofBonus);
                 score += 1;
             }
 
@@ -230,7 +281,10 @@ StatusWith<std::unique_ptr<PlanRankingDecision>> pickBestPlan(
             documentsExamined.push_back(stats.totalDocsExamined);
         } else {
             failed.push_back(i);
-            log_detail::logFailedPlan([&] { return explainer->getPlanSummary(); });
+            LOGV2_DEBUG(20960,
+                        2,
+                        "Not scoring a plan because the plan failed",
+                        "planSummary"_attr = explainer->getPlanSummary());
         }
     }
 
@@ -280,3 +334,5 @@ StatusWith<std::unique_ptr<PlanRankingDecision>> pickBestPlan(
     return StatusWith<std::unique_ptr<PlanRankingDecision>>(std::move(why));
 }
 }  // namespace mongo::plan_ranker
+
+#undef MONGO_LOGV2_DEFAULT_COMPONENT

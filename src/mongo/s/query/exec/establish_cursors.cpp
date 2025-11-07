@@ -29,16 +29,6 @@
 
 #include "mongo/s/query/exec/establish_cursors.h"
 
-#include <set>
-#include <string>
-#include <tuple>
-
-#include <absl/container/flat_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -48,36 +38,46 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/client/remote_command_retry_scheduler.h"
-#include "mongo/db/catalog/collection_uuid_mismatch_info.h"
 #include "mongo/db/client.h"
+#include "mongo/db/local_catalog/collection_uuid_mismatch_info.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/client_cursor/kill_cursors_gen.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/executor/async_multicaster.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
 #include "mongo/s/async_requests_sender.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
 #include "mongo/s/multi_statement_transaction_requests_sender.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/uuid.h"
 
+#include <set>
+#include <string>
+#include <tuple>
+#include <utility>
+
+#include <absl/container/flat_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
-
 namespace mongo {
+
+MONGO_FAIL_POINT_DEFINE(throwDuringCursorResponseValidation);
 
 namespace {
 
@@ -89,12 +89,14 @@ constexpr StringData kOperationKeyField = "clientOperationKey"_sd;
 class CursorEstablisher {
 public:
     CursorEstablisher(OperationContext* opCtx,
+                      RoutingContext* routingCtx,
                       std::shared_ptr<executor::TaskExecutor> executor,
                       const NamespaceString& nss,
                       bool allowPartialResults,
                       std::vector<OperationKey> providedOpKeys,
                       AsyncRequestsSender::ShardHostMap designatedHostsMap)
         : _opCtx(opCtx),
+          _routingCtx(routingCtx),
           _executor{std::move(executor)},
           _nss(nss),
           _allowPartialResults(allowPartialResults),
@@ -110,16 +112,11 @@ public:
                       Shard::RetryPolicy retryPolicy);
 
     /**
-     * Wait for a single response via the RequestSender.
-     */
-    void waitForResponse() noexcept;
-
-    /**
      * Wait for all responses via the RequestSender.
      */
-    void waitForResponses() noexcept {
+    void waitForResponses() {
         while (!_ars->done()) {
-            waitForResponse();
+            _waitForResponse();
         }
     }
 
@@ -130,7 +127,7 @@ public:
     void checkForFailedRequests();
 
     /**
-     * Take all cursors currently tracked by the CursorEstablsher.
+     * Take all cursors currently tracked by the CursorEstablisher.
      */
     std::vector<RemoteCursor> takeCursors() {
         return std::exchange(_remoteCursors, {});
@@ -142,9 +139,14 @@ public:
                                std::set<HostAndPort> remotes) noexcept;
 
 private:
+    /**
+     * Wait for a single response via the RequestSender.
+     */
+    void _waitForResponse();
+
     void _handleFailure(const boost::optional<AsyncRequestsSender::Response>& response,
                         Status status,
-                        bool isInterruption = false) noexcept;
+                        bool isInterruption = false);
     bool _canSkipForPartialResults(const AsyncRequestsSender::Response& response,
                                    const Status& status);
 
@@ -152,9 +154,10 @@ private:
      * Favors interruption/unyield failures > UUID mismatch error with actual ns > UUID mismatch
      * error > other errors > retargeting errors
      */
-    void _prioritizeFailures(Status newError, bool isInterruption) noexcept;
+    void _prioritizeFailures(Status newError, bool isInterruption);
 
     OperationContext* const _opCtx;
+    RoutingContext* _routingCtx;
     const std::shared_ptr<executor::TaskExecutor> _executor;
     const NamespaceString _nss;
     const bool _allowPartialResults;
@@ -179,6 +182,11 @@ void CursorEstablisher::sendRequests(const ReadPreferenceSetting& readPref,
                                      Shard::RetryPolicy retryPolicy) {
     // Construct the requests
     std::vector<AsyncRequestsSender::Request> requests;
+    requests.reserve(remotes.size());
+
+    // Make sure there is enough room in '_remotesToClean' so that inserting a cursor into the clean
+    // up list later cannot throw an OOM exception.
+    _remotesToClean.reserve(remotes.size());
 
     // TODO SERVER-47261 management of the opKey should move to the ARS.
     for (const auto& remote : remotes) {
@@ -192,6 +200,13 @@ void CursorEstablisher::sendRequests(const ReadPreferenceSetting& readPref,
             requests.emplace_back(remote.shardId, newCmd.obj());
         }
     }
+
+    tassert(9282602,
+            "Invalid number of objects in CursorEstablisher",
+            requests.size() == remotes.size());
+    tassert(9282603,
+            "Invalid _remotesToClean capacity in CursorEstablisher",
+            _remotesToClean.capacity() == remotes.size());
 
     if (shouldLog(MONGO_LOGV2_DEFAULT_COMPONENT, logv2::LogSeverity::Debug(3))) {
         logv2::DynamicAttributes attrs;
@@ -217,16 +232,34 @@ void CursorEstablisher::sendRequests(const ReadPreferenceSetting& readPref,
                  readPref,
                  retryPolicy,
                  _designatedHostsMap);
+
+    if (_routingCtx && _routingCtx->hasNss(_nss)) {
+        _routingCtx->onRequestSentForNss(_nss);
+    }
 }
 
-void CursorEstablisher::waitForResponse() noexcept {
+void CursorEstablisher::_waitForResponse() {
     boost::optional<AsyncRequestsSender::Response> maybeResponse;
     BSONObj responseData;
     try {
-        // TODO SERVER-92826: This call can throw and skip adding to _remotesToClean below.
-        maybeResponse = _ars->next();
-        if (maybeResponse->shardHostAndPort)
+        // Fetch the next response, without validating it yet.
+        maybeResponse = _ars->nextResponse();
+        uassert(
+            9282600, "Response in CursorEstablisher must have a value", maybeResponse.has_value());
+        if (maybeResponse->shardHostAndPort) {
+            // Add cursor to our cleanup list. This should not throw, as we reserved enough capacity
+            // ahead of time in 'sendRequests()'.
             _remotesToClean.push_back(*maybeResponse->shardHostAndPort);
+        }
+
+        // Intentionally throw a 'FailedToParse' exception here in case the fail point is active.
+        uassert(ErrorCodes::FailedToParse,
+                str::stream() << "Hit failpoint '" << throwDuringCursorResponseValidation.getName()
+                              << "'",
+                !throwDuringCursorResponseValidation.shouldFail());
+
+        // Validate the response. If this throws, we still have the cursor in the cleanup list.
+        _ars->validateResponse(*maybeResponse, false /* forMergeCursors */);
         responseData = uassertStatusOK(std::move(maybeResponse->swResponse)).data;
     } catch (const DBException& ex) {
         _handleFailure(maybeResponse, ex.toStatus(), /* isInterruption */ true);
@@ -304,7 +337,6 @@ void CursorEstablisher::checkForFailedRequests() {
             txnRouter.onViewResolutionError(_opCtx, _nss);
         }
     }
-
     if (_remotesToClean.empty()) {
         // If we don't have any remotes to clean, throw early.
         uassertStatusOK(*_maybeFailure);
@@ -323,9 +355,9 @@ void CursorEstablisher::checkForFailedRequests() {
     uassertStatusOK(*_maybeFailure);
 }
 
-void CursorEstablisher::_prioritizeFailures(Status newError, bool isInterruption) noexcept {
-    invariant(!newError.isOK());
-    invariant(!_maybeFailure->isOK());
+void CursorEstablisher::_prioritizeFailures(Status newError, bool isInterruption) {
+    tassert(11052339, "Expected error", !newError.isOK());
+    tassert(11052340, "Expected failure", !_maybeFailure->isOK());
 
     // Prefer interruptions above all else.
     if (_wasInterrupted) {
@@ -356,7 +388,7 @@ void CursorEstablisher::_prioritizeFailures(Status newError, bool isInterruption
 
     // Favor 'CollectionUUIDMismatchError' that has a non empty 'actualNamespace'.
     auto errorInfo = _maybeFailure->extraInfo<CollectionUUIDMismatchInfo>();
-    invariant(errorInfo);
+    tassert(11052341, "Expected extraInfo of type CollectionUUIDMismatchInfo", errorInfo);
     if (!errorInfo->actualCollection()) {
         _maybeFailure = std::move(newError);
     }
@@ -365,7 +397,7 @@ void CursorEstablisher::_prioritizeFailures(Status newError, bool isInterruption
 void CursorEstablisher::_handleFailure(
     const boost::optional<AsyncRequestsSender::Response>& response,
     Status status,
-    bool isInterruption) noexcept {
+    bool isInterruption) {
     LOGV2_DEBUG(
         8846900, 3, "Experienced a failure while establishing cursors", "error"_attr = status);
     if (_wasInterrupted) {
@@ -457,9 +489,7 @@ void CursorEstablisher::killOpOnShards(ServiceContext* srvCtx,
  */
 BSONObj appendReadPreferenceNearest(BSONObj cmdObj) {
     BSONObjBuilder cmdWithReadPrefBob(std::move(cmdObj));
-    cmdWithReadPrefBob.append("$readPreference",
-                              BSON("mode"
-                                   << "nearest"));
+    cmdWithReadPrefBob.append("$readPreference", BSON("mode" << "nearest"));
     return cmdWithReadPrefBob.obj();
 }
 
@@ -480,10 +510,12 @@ std::vector<RemoteCursor> establishCursors(OperationContext* opCtx,
                                            const ReadPreferenceSetting readPref,
                                            const std::vector<AsyncRequestsSender::Request>& remotes,
                                            bool allowPartialResults,
+                                           RoutingContext* routingCtx,
                                            Shard::RetryPolicy retryPolicy,
                                            std::vector<OperationKey> providedOpKeys,
                                            AsyncRequestsSender::ShardHostMap designatedHostsMap) {
     auto establisher = CursorEstablisher(opCtx,
+                                         routingCtx,
                                          executor,
                                          nss,
                                          allowPartialResults,
@@ -547,6 +579,7 @@ std::pair<std::vector<HostAndPort>, StringMap<ShardId>> getHostInfos(
 
 std::vector<RemoteCursor> establishCursorsOnAllHosts(
     OperationContext* opCtx,
+    RoutingContext& routingCtx,
     std::shared_ptr<executor::TaskExecutor> executor,
     const NamespaceString& nss,
     const std::set<ShardId>& shardIds,
@@ -563,9 +596,7 @@ std::vector<RemoteCursor> establishCursorsOnAllHosts(
     // primary or secondary.
     BSONObjBuilder newCmd(std::move(cmdObj));
     appendOpKey(opKey, &newCmd);
-    newCmd.append("$readPreference",
-                  BSON("mode"
-                       << "nearest"));
+    newCmd.append("$readPreference", BSON("mode" << "nearest"));
 
     executor::AsyncMulticaster::Options options;
     options.maxConcurrency = internalQueryAggMulticastMaxConcurrency;
@@ -575,6 +606,11 @@ std::vector<RemoteCursor> establishCursorsOnAllHosts(
                                   newCmd.obj(),
                                   opCtx,
                                   Milliseconds(internalQueryAggMulticastTimeoutMS));
+
+    if (routingCtx.hasNss(nss)) {
+        routingCtx.onRequestSentForNss(nss);
+    }
+
     std::vector<RemoteCursor> remoteCursors;
     std::set<HostAndPort> remotesToClean;
 

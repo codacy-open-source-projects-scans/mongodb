@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/filesystem.hpp>
-
 #include "mongo/base/init.h"
 #include "mongo/base/initializer.h"
 #include "mongo/base/status.h"
@@ -40,9 +38,9 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_engine_lock_file.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/logv2/log.h"
-#include "mongo/s/sharding_state.h"
 #include "mongo/transport/service_executor.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/transport/transport_layer_manager_impl.h"
@@ -64,6 +62,8 @@
 #include "mongo/util/text.h"
 #include "mongo/util/version.h"
 #include "mongo/util/version/releases.h"
+
+#include <boost/filesystem.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
@@ -269,8 +269,8 @@ int CryptDMain(int argc, char** argv) {
         &serverGlobalParams,
         serviceContext,
         false /* useEgressGRPC */,
-        boost::none,
-        boost::none,
+        boost::none /* loadBalancerPort */,
+        boost::none /* maintenancePort */,
         std::make_unique<ClientObserverCryptD>());
     serviceContext->setTransportLayerManager(std::move(tl));
 

@@ -29,15 +29,16 @@
 
 #pragma once
 
+#include "mongo/bson/bsonobj.h"
+#include "mongo/scripting/mozjs/base.h"
+#include "mongo/scripting/mozjs/wraptype.h"
+#include "mongo/util/modules.h"
+
+#include <tuple>
+
 #include <js/Class.h>
 #include <js/PropertySpec.h>
 #include <js/TypeDecls.h>
-#include <tuple>
-
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/scripting/mozjs/base.h"
-#include "mongo/scripting/mozjs/wraptype.h"
 
 namespace mongo {
 namespace mozjs {

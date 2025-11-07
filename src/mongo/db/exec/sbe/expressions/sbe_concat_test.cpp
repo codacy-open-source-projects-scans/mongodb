@@ -27,14 +27,6 @@
  *    it in the license file.
  */
 
-#include <cstddef>
-#include <cstdint>
-#include <initializer_list>
-#include <limits>
-#include <memory>
-#include <string>
-#include <utility>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -45,8 +37,15 @@
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <initializer_list>
+#include <limits>
+#include <memory>
+#include <string>
+#include <utility>
 
 namespace mongo::sbe {
 class SBEConcatTest : public EExpressionTestFixture {
@@ -117,10 +116,8 @@ TEST_F(SBEConcatTest, ComputesStringConcat) {
     slotAccessor2.reset(bigStringTag2, bigStringVal2);
     runAndAssertExpression(compiledExpr.get(), "Make sure that this is a long string.");
 
-    auto bsonString1 = BSON("key"
-                            << "bson ");
-    auto bsonString2 = BSON("key"
-                            << "string");
+    auto bsonString1 = BSON("key" << "bson ");
+    auto bsonString2 = BSON("key" << "string");
     auto bsonStringVal1 = value::bitcastFrom<const char*>(bsonString1["key"].value());
     auto bsonStringVal2 = value::bitcastFrom<const char*>(bsonString2["key"].value());
     slotAccessor1.reset(value::TypeTags::bsonString, bsonStringVal1);
@@ -144,8 +141,7 @@ TEST_F(SBEConcatTest, ComputesManyStringsConcat) {
                                                              makeE<EVariable>(argSlot4)));
     auto compiledExpr = compileExpression(*concatExpr);
 
-    auto bsonString = BSON("key"
-                           << "Test ");
+    auto bsonString = BSON("key" << "Test ");
     auto bsonStringVal = value::bitcastFrom<const char*>(bsonString["key"].value());
     auto [tag2, val2] = value::makeNewString("for ");
     auto [tag3, val3] = value::makeNewString("many strings ");

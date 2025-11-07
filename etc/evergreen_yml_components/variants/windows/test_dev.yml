@@ -40,6 +40,8 @@ variables:
     large_distro_name: windows-2022-large
     push_path: windows
     push_bucket: downloads.10gen.com
+    push_bucket_new: cdn-origin-mongodb-server-enterprise
+    push_role_arn: arn:aws:iam::119629040606:role/s3-access.cdn-origin-mongodb-server-enterprise
     push_name: windows
     push_arch: x86_64-enterprise
     test_flags: --excludeWithAnyTags=incompatible_with_windows_tls
@@ -56,23 +58,22 @@ buildvariants:
       exe: ".exe"
       ext: zip
       additional_package_targets: >-
-        archive-mongocryptd
+        archive-mongocryptd-stripped
         archive-mongocryptd-debug
-        msi
+        //src/mongo/installer/msi:mongodb-win32-x86_64-windows
       content_type: application/zip
-      compile_flags: >-
-        --ssl
-        MONGO_DISTMOD=windows
-        -j$(bc <<< "$(grep -c '^processor' /proc/cpuinfo) / 1.5")
-        --win-version-min=win10
-      num_scons_link_jobs_available: 0.1
+      bazel_compile_flags: >-
+        --define=MONGO_DISTMOD=windows
       python: "/cygdrive/c/python/python310/python.exe"
-      scons_cache_scope: shared
       compile_variant: *windows-compile-required
     tasks:
-      - name: compile_ninja_quick_TG
       - name: compile_test_serial_no_unittests_TG
-      - name: compile_test_parallel_unittest_stream_TG
+        distros:
+          - windows-2022-xxxlarge-compile
+      - name: run_bazel_compiledb
+      - name: run_unit_tests_no_sandbox_TG
+        distros:
+          - windows-2022-xxxlarge-compile
       - name: .development_critical .requires_compile_variant !.requires_large_host !.incompatible_development_variant !.incompatible_windows !.stitch .requires_execution_on_windows_patch_build
       - name: .development_critical .requires_compile_variant .requires_large_host !.incompatible_development_variant !.incompatible_windows !.stitch .requires_execution_on_windows_patch_build
         distros:
@@ -81,8 +82,8 @@ buildvariants:
       - name: .release_critical .requires_compile_variant .requires_large_host !.incompatible_development_variant !.incompatible_windows !.stitch .requires_execution_on_windows_patch_build
         distros:
           - windows-2022-xxlarge
-      - name: .default .requires_compile_variant !.requires_large_host !.incompatible_development_variant .requires_execution_on_windows_patch_build
-      - name: .default .requires_compile_variant .requires_large_host !.incompatible_development_variant .requires_execution_on_windows_patch_build
+      - name: .default .requires_compile_variant !.requires_large_host !.incompatible_development_variant !.incompatible_windows .requires_execution_on_windows_patch_build
+      - name: .default .requires_compile_variant .requires_large_host !.incompatible_development_variant !.incompatible_windows .requires_execution_on_windows_patch_build
         distros:
           - windows-2022-xxlarge
 
@@ -102,18 +103,22 @@ buildvariants:
       - name: .release_critical .requires_compile_variant .requires_large_host !.incompatible_development_variant !.incompatible_windows !.stitch !.requires_execution_on_windows_patch_build
         distros:
           - windows-2022-xxlarge
-      - name: .default .requires_compile_variant !.requires_large_host !.incompatible_development_variant !.requires_execution_on_windows_patch_build
-      - name: .default .requires_compile_variant .requires_large_host !.incompatible_development_variant !.requires_execution_on_windows_patch_build
+      - name: .default .requires_compile_variant !.requires_large_host !.incompatible_development_variant !.incompatible_windows !.requires_execution_on_windows_patch_build
+      - name: .default .requires_compile_variant .requires_large_host !.incompatible_development_variant !.incompatible_windows !.requires_execution_on_windows_patch_build
         distros:
           - windows-2022-xxlarge
       # server_selection_json_test & server_discovery_and_monitoring_json_test depend on this
       - name: compile_unittest_libaries_TG
+      - name: run_bazel_TG
+      - name: hydrate_all_headers_TG
+        distros:
+          - windows-2022-xxxlarge-compile
 
   - <<: *windows_compile_variant_dependency
     name: enterprise-windows-all-feature-flags-required
     display_name: "! Enterprise Windows Server 2022 (all feature flags) essential tasks"
     tags: ["required", "forbid_tasks_tagged_with_experimental"]
-    cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
+    cron: "0 1,5,9,13,17,21 * * *" # From the ${project_required_suggested_cron} parameter
     run_on:
       - windows-2022-small
     expansions: &windows_essential_expansions
@@ -151,7 +156,7 @@ buildvariants:
     name: enterprise-windows-all-feature-flags-non-essential
     display_name: "* Enterprise Windows Server 2022 (all feature flags) non-essential tasks"
     tags: ["suggested"]
-    cron: "0 */4 * * *" # From the ${project_required_suggested_cron} parameter
+    cron: "0 1,5,9,13,17,21 * * *" # From the ${project_required_suggested_cron} parameter
     run_on:
       - windows-2022-small
     expansions:

@@ -3,22 +3,18 @@
  * read concern level 'available' and afterClusterTime specified should error because they ensure
  * contradictory things. A secondary request with afterClusterTime specified and no read concern
  * level should default to 'local' read concern level, using the shard version protocol.
- * @tags: [
- *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
- *    embedded_router_incompatible,
- * ]
  */
 import {profilerHasSingleMatchingEntryOrThrow} from "jstests/libs/profiler.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 // Set the secondaries to priority 0 to prevent the primaries from stepping down.
 let rsOpts = {nodes: [{}, {rsConfig: {priority: 0}}]};
-let st =
-    new ShardingTest({mongos: 2, shards: {rs0: rsOpts, rs1: rsOpts}, causallyConsistent: true});
-let dbName = 'test', collName = 'foo', ns = 'test.foo';
+let st = new ShardingTest({mongos: 2, shards: {rs0: rsOpts, rs1: rsOpts}, causallyConsistent: true});
+let dbName = "test",
+    collName = "foo",
+    ns = "test.foo";
 
-assert.commandWorked(
-    st.s0.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+assert.commandWorked(st.s0.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
 
 assert.commandWorked(st.s0.adminCommand({shardCollection: ns, key: {x: 1}}));
 assert.commandWorked(st.s0.adminCommand({split: ns, middle: {x: 0}}));
@@ -30,14 +26,16 @@ jsTest.log("do insert from stale mongos to make it load the routing table before
 assert.commandWorked(staleMongos.getCollection(ns).insert({x: 1}));
 
 jsTest.log("do moveChunk from fresh mongos");
-assert.commandWorked(freshMongos.adminCommand({
-    moveChunk: ns,
-    find: {x: 0},
-    to: st.shard1.shardName,
-    secondaryThrottle: true,
-    _waitForDelete: true,
-    writeConcern: {w: 2},
-}));
+assert.commandWorked(
+    freshMongos.adminCommand({
+        moveChunk: ns,
+        find: {x: 0},
+        to: st.shard1.shardName,
+        secondaryThrottle: true,
+        _waitForDelete: true,
+        writeConcern: {w: 2},
+    }),
+);
 
 // Turn on system profiler on secondaries to collect data on all future operations on the db.
 let donorShardSecondary = st.rs0.getSecondary();
@@ -49,21 +47,22 @@ assert.commandWorked(recipientShardSecondary.getDB(dbName).setProfilingLevel(2))
 // storage level.
 jsTest.log("Do a secondary read from stale mongos with afterClusterTime and level 'available'");
 const staleMongosDB = staleMongos.getDB(dbName);
-assert.commandFailedWithCode(staleMongosDB.runCommand({
-    count: collName,
-    query: {x: 1},
-    $readPreference: {mode: "secondary"},
-    readConcern:
-        {'afterClusterTime': staleMongosDB.getSession().getOperationTime(), 'level': 'available'}
-}),
-                             ErrorCodes.InvalidOptions);
+assert.commandFailedWithCode(
+    staleMongosDB.runCommand({
+        count: collName,
+        query: {x: 1},
+        $readPreference: {mode: "secondary"},
+        readConcern: {"afterClusterTime": staleMongosDB.getSession().getOperationTime(), "level": "available"},
+    }),
+    ErrorCodes.InvalidOptions,
+);
 
 jsTest.log("Do a secondary read from stale mongos with afterClusterTime and no level");
 let res = staleMongosDB.runCommand({
     count: collName,
     query: {x: 1},
     $readPreference: {mode: "secondary"},
-    readConcern: {'afterClusterTime': staleMongosDB.getSession().getOperationTime()},
+    readConcern: {"afterClusterTime": staleMongosDB.getSession().getOperationTime()},
 });
 assert(res.ok);
 assert.eq(1, res.n, tojson(res));
@@ -79,8 +78,8 @@ profilerHasSingleMatchingEntryOrThrow({
         "command.shardVersion": {"$exists": true},
         "command.$readPreference": {"mode": "secondary"},
         "command.readConcern.afterClusterTime": {"$exists": true},
-        "errCode": ErrorCodes.StaleConfig
-    }
+        "errCode": ErrorCodes.StaleConfig,
+    },
 });
 
 // Finally, the command is retried on the recipient shard and succeeds.
@@ -93,8 +92,8 @@ profilerHasSingleMatchingEntryOrThrow({
         "command.shardVersion": {"$exists": true},
         "command.$readPreference": {"mode": "secondary"},
         "command.readConcern.afterClusterTime": {"$exists": true},
-        "errCode": {"$exists": false}
-    }
+        "errCode": {"$exists": false},
+    },
 });
 
 st.stop();

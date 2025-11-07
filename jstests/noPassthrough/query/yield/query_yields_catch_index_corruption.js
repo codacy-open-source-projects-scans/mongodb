@@ -13,24 +13,17 @@ replSet.initiate();
 const primary = replSet.getPrimary();
 
 let db = primary.getDB(dbName);
-assert.commandWorked(db.adminCommand({
-    configureFailPoint: "skipUnindexingDocumentWhenDeleted",
-    mode: "alwaysOn",
-    data: {indexName: "a_1_b_1"}
-}));
+assert.commandWorked(
+    db.adminCommand({
+        configureFailPoint: "skipUnindexingDocumentWhenDeleted",
+        mode: "alwaysOn",
+        data: {indexName: "a_1_b_1"},
+    }),
+);
 
 let coll = db.getCollection(collName);
 assert.commandWorked(db.createCollection(collName, {writeConcern: {w: "majority"}}));
 assert.commandWorked(coll.createIndex({a: 1, b: 1}));
-
-// Ensure the health log entry is written out after data corruption is detected.
-function assertAddsHealthLogEntry(fn) {
-    const beforeCount = primary.getDB("local").getCollection("system.healthlog").count();
-    fn();
-    assert.soon(() => {
-        return primary.getDB("local").getCollection("system.healthlog").count() > beforeCount;
-    }, "Health log entry was not written out");
-}
 
 // Corrupt the collection by inserting a document and then deleting it without deleting its index
 // entry (thanks to the "skipUnindexingDocumentWhenDeleted" failpoint).
@@ -60,14 +53,14 @@ function createDanglingIndexEntry(doc) {
             if (!oplogDocId.equals(docId)) {
                 return false;
             }
-            jsTestLog('Found oplog entry for corrupted index entry: ' + tojson(oplogDoc));
-            if (oplogDoc.op === 'd') {
+            jsTestLog("Found oplog entry for corrupted index entry: " + tojson(oplogDoc));
+            if (oplogDoc.op === "d") {
                 foundDelete = true;
-            } else if (oplogDoc.op === 'i') {
+            } else if (oplogDoc.op === "i") {
                 foundInsert = true;
             }
             return foundDelete && foundInsert;
-        }
+        },
     });
 
     // A query that accesses the now dangling index entry should fail with a
@@ -75,31 +68,26 @@ function createDanglingIndexEntry(doc) {
     // prepare conflicts by default and that exempts them from checking this assertion. Only writes
     // and reads in multi-document transactions enforce prepare conflicts and should encounter this
     // assertion.
-    assertAddsHealthLogEntry(() => assert.commandFailedWithCode(coll.update(doc, {$set: {c: 1}}),
-                                                                ErrorCodes.DataCorruptionDetected));
+    assert.commandFailedWithCode(coll.update(doc, {$set: {c: 1}}), ErrorCodes.DataCorruptionDetected);
 
-    assertAddsHealthLogEntry(() => {
-        const session = db.getMongo().startSession();
-        const sessionDB = session.getDatabase(dbName);
-        session.startTransaction();
+    const session = db.getMongo().startSession();
+    const sessionDB = session.getDatabase(dbName);
+    session.startTransaction();
 
-        assert.throwsWithCode(() => {
-            sessionDB[collName].find(doc).toArray();
-        }, ErrorCodes.DataCorruptionDetected);
-        session.abortTransaction_forTesting();
-    });
+    assert.throwsWithCode(() => {
+        sessionDB[collName].find(doc).toArray();
+    }, ErrorCodes.DataCorruptionDetected);
+    session.abortTransaction_forTesting();
 
     // Check that reads going through the express path also fail.
-    assertAddsHealthLogEntry(() => {
-        const session = db.getMongo().startSession();
-        const sessionDB = session.getDatabase(dbName);
-        session.startTransaction();
+    const session2 = db.getMongo().startSession();
+    const session2DB = session2.getDatabase(dbName);
+    session2.startTransaction();
 
-        assert.throwsWithCode(() => {
-            sessionDB[collName].findOne({a: 1}).toArray();
-        }, ErrorCodes.DataCorruptionDetected);
-        session.abortTransaction_forTesting();
-    });
+    assert.throwsWithCode(() => {
+        session2DB[collName].findOne({a: 1}).toArray();
+    }, ErrorCodes.DataCorruptionDetected);
+    session2.abortTransaction_forTesting();
 }
 
 createDanglingIndexEntry({a: 1, b: 1});

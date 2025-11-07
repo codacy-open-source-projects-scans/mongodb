@@ -27,15 +27,15 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional.hpp>
+#include "mongo/util/cancellation.h"
+
+#include "mongo/base/string_data.h"
+#include "mongo/unittest/unittest.h"
+
 #include <memory>
 
 #include <boost/move/utility_core.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/cancellation.h"
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -96,7 +96,9 @@ TEST(CancelTest,
      DestroyingACopyOfACancellationSourceDoesNotSetErrorOnCancellationFutureFromOriginalSource) {
     CancellationSource source;
     auto token = source.token();
-    { auto copy = source; }
+    {
+        auto copy = source;
+    }
     ASSERT_FALSE(token.onCancel().isReady());
 }
 

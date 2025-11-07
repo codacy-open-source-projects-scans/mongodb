@@ -29,16 +29,25 @@
 
 #pragma once
 
-#include <bitset>
-#include <boost/intrusive_ptr.hpp>
-#include <variant>
-
 #include "mongo/base/static_assert.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/util/intrusive_counter.h"
 
+#include <type_traits>
+
+#include <boost/intrusive_ptr.hpp>
+
 namespace mongo {
+
+/**
+ * The following concept is used in several Document APIs that accept templated field name
+ * parameters by value. By using this concept we disallow passing potentially expensive-to-copy
+ * 'std::string' parameters for these APIs.
+ */
+template <typename T>
+concept AnyFieldNameTypeButStdString = (!std::is_same_v<T, std::string>);
+
 /** Helper class to make the position in a document abstract
  *  Warning: This is NOT guaranteed to be the ordered position.
  *           eg. the first field may not be at Position(0)
@@ -126,8 +135,8 @@ public:
 
     // Round number or pointer up to N-byte boundary. No change if already aligned.
     template <typename T>
-    static T align(T size) {
-        const intmax_t ALIGNMENT = 8;  // must be power of 2 and <= 16 (malloc alignment)
+    constexpr static T align(T size) {
+        constexpr intmax_t ALIGNMENT = 8;  // must be power of 2 and <= 16 (malloc alignment)
         // Can't use c++ cast because of conversion between intmax_t and both ints and pointers
         return (T)(((intmax_t)(size) + (ALIGNMENT - 1)) & ~(ALIGNMENT - 1));
     }
@@ -276,36 +285,49 @@ private:
 /**
  * Type that bundles the hashed field name along with the actual string so that hashing can be done
  * outside of inserts and lookups and re-used across calls.
+ *
+ * We opt to store uint32_t instead of size_t for hash and length since:
+ *   - hash collisions on field names are unlikely
+ *   - field names are not going to exceed UINT_MAX
+ *   - this gives us a measurable performance benefit.
  */
 class HashedFieldName {
 public:
-    explicit HashedFieldName(StringData sd, std::size_t hash) : _sd(sd), _hash(hash) {}
-    explicit HashedFieldName(std::pair<StringData, std::size_t> pair)
-        : _sd(pair.first), _hash(pair.second) {}
+    using SizeType = uint32_t;
+
+    explicit HashedFieldName(StringData sd, SizeType hash)
+        : _str(sd.data()), _sz(sd.size()), _hash(hash) {
+        uassert(1065170, "Field name too large", sd.size() < std::numeric_limits<uint32_t>::max());
+    }
+    explicit HashedFieldName(std::pair<StringData, SizeType> pair)
+        : HashedFieldName(pair.first, pair.second) {}
 
     StringData key() const {
-        return _sd;
+        return {_str, _sz};
     }
 
-    std::size_t hash() const {
+    SizeType hash() const {
         return _hash;
     }
 
-    std::size_t size() const {
-        return _sd.size();
+    SizeType size() const {
+        return _sz;
     }
 
-    inline size_t copy(char* dest, size_t len) const {
-        return _sd.copy(dest, len);
+    inline SizeType copy(char* dest, SizeType len) const {
+        const auto count = std::min(len, _sz);
+        std::memcpy(dest, _str, count);
+        return count;
     }
 
-    constexpr const char* rawData() const noexcept {
-        return _sd.rawData();
+    constexpr const char* data() const noexcept {
+        return _str;
     }
 
 private:
-    StringData _sd;
-    std::size_t _hash;
+    const char* _str;
+    SizeType _sz;
+    SizeType _hash;
 };
 
 inline bool operator==(HashedFieldName lhs, StringData rhs) {
@@ -327,20 +349,20 @@ struct FieldNameHasher {
     // This using directive activates heterogeneous lookup in the hash table
     using is_transparent = void;
 
-    std::size_t operator()(StringData sd) const {
+    HashedFieldName::SizeType operator()(StringData sd) const {
         // Use the default absl string hasher.
-        return absl::Hash<absl::string_view>{}(absl::string_view(sd.rawData(), sd.size()));
+        return absl::Hash<absl::string_view>{}(absl::string_view(sd.data(), sd.size()));
     }
 
-    std::size_t operator()(const std::string& s) const {
+    HashedFieldName::SizeType operator()(const std::string& s) const {
         return operator()(StringData(s));
     }
 
-    std::size_t operator()(const char* s) const {
+    HashedFieldName::SizeType operator()(const char* s) const {
         return operator()(StringData(s));
     }
 
-    std::size_t operator()(HashedFieldName key) const {
+    HashedFieldName::SizeType operator()(HashedFieldName key) const {
         return key.hash();
     }
 
@@ -405,16 +427,13 @@ public:
         return Position(_usedBytes);
     }
 
-    enum class LookupPolicy {
-        // When looking up a field check the cache only.
-        kCacheOnly,
-        // Look up in a cache and when not found search the unrelying BSON.
-        kCacheAndBSON
-    };
+    /// Returns the position of the named field in the cache or Position()
+    template <typename T>
+    Position findFieldInCache(T requested) const;
 
     /// Returns the position of the named field or Position()
     template <typename T>
-    Position findField(T field, LookupPolicy policy) const;
+    Position findField(T field) const;
 
     // Document uses these
     const ValueElement& getField(Position pos) const {
@@ -423,14 +442,14 @@ public:
     }
 
     Value getField(StringData name) const {
-        Position pos = findField(name, LookupPolicy::kCacheAndBSON);
+        Position pos = findField(name);
         if (!pos.found())
             return Value();
         return getField(pos).val;
     }
 
     Value getField(HashedFieldName field) const {
-        Position pos = findField(field, LookupPolicy::kCacheAndBSON);
+        Position pos = findField(field);
         if (!pos.found())
             return Value();
         return getField(pos).val;
@@ -443,9 +462,17 @@ public:
         return *(_firstElement->plusBytes(pos.index));
     }
 
-    Value& getField(StringData name, LookupPolicy policy) {
+    Value& getFieldOrCreate(StringData name) {
         _modified = true;
-        Position pos = findField(name, policy);
+        Position pos = findField(name);
+        if (!pos.found())
+            return appendField(name, ValueElement::Kind::kMaybeInserted);
+        return getField(pos).val;
+    }
+
+    Value& getFieldCacheOnlyOrCreate(StringData name) {
+        _modified = true;
+        Position pos = findFieldInCache(name);
         if (!pos.found())
             return appendField(name, ValueElement::Kind::kMaybeInserted);
         return getField(pos).val;
@@ -455,7 +482,7 @@ public:
      * Retrieves the given field from the cache. Returns a boost::none if the field does not exist.
      */
     boost::optional<Value> getFieldCacheOnly(StringData name) const {
-        Position pos = findField(name, LookupPolicy::kCacheOnly);
+        Position pos = findFieldInCache(name);
         if (pos.found()) {
             return getField(pos).val;
         }
@@ -580,7 +607,7 @@ public:
         _metadataFields = std::move(metadata);
     }
 
-    template <typename T>
+    template <AnyFieldNameTypeButStdString T>
     static unsigned hashKey(T name) {
         return FieldNameHasher()(name);
     }
@@ -646,15 +673,11 @@ private:
         MONGO_UNREACHABLE;
     }
 
-    /// Returns the position of the named field in the cache or Position()
-    template <typename T>
-    Position findFieldInCache(T name) const;
-
     /// Allocates space in _cache. Copies existing data if there is any.
     void alloc(unsigned newSize);
 
     /// Call after adding field to _cache and increasing _numFields
-    template <typename T>
+    template <AnyFieldNameTypeButStdString T>
     void addFieldToHashTable(T field, Position pos);
 
     // assumes _hashTabMask is (power of two) - 1
@@ -675,7 +698,7 @@ private:
         memset(static_cast<void*>(_hashTab), -1, hashTabBytes());
     }
 
-    template <typename T>
+    template <AnyFieldNameTypeButStdString T>
     unsigned bucketForKey(T field) const {
         return hashKey(field) & _hashTabMask;
     }
@@ -732,8 +755,6 @@ private:
     // released by a call to 'releaseMetadata()'.
     mutable bool _haveLazyLoadedMetadata = false;
 
-    mutable DocumentMetadataFields _metadataFields;
-
     // True if this storage was constructed from BSON with metadata. Serializing this object using
     // the 'toBson()' method will omit (strip) the metadata fields.
     bool _bsonHasMetadata{false};
@@ -741,6 +762,8 @@ private:
     // This flag is set to true anytime the storage returns a mutable field. It is used to optimize
     // a conversion to BSON; i.e. if there are not any modifications we can directly return _bson.
     bool _modified{false};
+
+    mutable DocumentMetadataFields _metadataFields;
 
     size_t _snapshottedSize{0};
 

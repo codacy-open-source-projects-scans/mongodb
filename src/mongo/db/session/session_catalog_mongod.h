@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <memory>
-#include <string>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
@@ -43,14 +37,21 @@
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod_transaction_interface.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
 class SessionsCollection;
 
-class MongoDSessionCatalog {
+class MONGO_MOD_PUB MongoDSessionCatalog {
     MongoDSessionCatalog(const MongoDSessionCatalog&) = delete;
     MongoDSessionCatalog& operator=(const MongoDSessionCatalog&) = delete;
 
@@ -204,7 +205,7 @@ private:
  * it for later access by the command. The session is installed at construction time and is removed
  * at destruction.
  */
-class MongoDOperationContextSession : public MongoDSessionCatalog::Session {
+class MONGO_MOD_PRIVATE MongoDOperationContextSession : public MongoDSessionCatalog::Session {
     MongoDOperationContextSession(const MongoDOperationContextSession&) = delete;
     MongoDOperationContextSession& operator=(const MongoDOperationContextSession&) = delete;
 
@@ -291,7 +292,6 @@ public:
 
 private:
     OperationContextSession _operationContextSession;
-    OperationContext* const _opCtx;
 };
 
 }  // namespace mongo

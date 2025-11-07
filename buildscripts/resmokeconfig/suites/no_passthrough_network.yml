@@ -5,7 +5,7 @@ description: |
   parameters. Most tests by default are able to run in "passthrough" suites.
   NoPassthrough is an exception, where tests here only run in the exact
   configuration predefined in the tests themselves. This variant runs the
-  noPassthroughs in the architecture/ folder.
+  noPassthroughs in the network/ folder.
 
 selector:
   roots:

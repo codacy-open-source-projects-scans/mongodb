@@ -29,17 +29,19 @@
 
 #pragma once
 
-#include <atomic>  // NOLINT
-#include <boost/intrusive_ptr.hpp>
-#include <cstdlib>
-
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util_core.h"
+#include "mongo/util/modules_incompletely_marked_header.h"
+
+#include <atomic>  // NOLINT
+#include <cstdlib>
+
+#include <boost/intrusive_ptr.hpp>
 
 namespace mongo {
 
 /// This is an alternative base class to the above ones (will replace them eventually)
-class RefCountable {
+class MONGO_MOD_OPEN RefCountable {
     RefCountable(const RefCountable&) = delete;
     RefCountable& operator=(const RefCountable&) = delete;
 
@@ -59,8 +61,15 @@ public:
      * object.
      */
     void threadUnsafeIncRefCountTo(uint32_t count) const {
+        MONGO_COMPILER_DIAGNOSTIC_PUSH
+        MONGO_COMPILER_DIAGNOSTIC_WORKAROUND_ATOMIC_READ
         dassert(_count.load(std::memory_order_relaxed) == (count - 1));
+        MONGO_COMPILER_DIAGNOSTIC_POP
+
+        MONGO_COMPILER_DIAGNOSTIC_PUSH
+        MONGO_COMPILER_DIAGNOSTIC_WORKAROUND_ATOMIC_WRITE
         _count.store(count, std::memory_order_relaxed);
+        MONGO_COMPILER_DIAGNOSTIC_POP
     }
 
     friend void intrusive_ptr_add_ref(const RefCountable* ptr) {

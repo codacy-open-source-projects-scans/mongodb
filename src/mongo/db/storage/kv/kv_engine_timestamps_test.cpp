@@ -27,24 +27,19 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/storage/kv/kv_engine.h"
@@ -54,10 +49,15 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/snapshot_manager.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -70,12 +70,10 @@ public:
     class Operation {
     public:
         Operation() = default;
-        Operation(ServiceContext::UniqueClient client, RecoveryUnit* ru)
+        Operation(ServiceContext::UniqueClient client, std::unique_ptr<RecoveryUnit> ru)
             : _client(std::move(client)), _opCtx(_client->makeOperationContext()) {
             shard_role_details::setRecoveryUnit(
-                _opCtx.get(),
-                std::unique_ptr<RecoveryUnit>(ru),
-                WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
+                _opCtx.get(), std::move(ru), WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
         }
 
 
@@ -124,7 +122,11 @@ public:
 
     RecordId insertRecord(OperationContext* opCtx, std::string contents = "abcd") {
         Lock::GlobalLock globalLock(opCtx, MODE_IX);
-        auto id = rs->insertRecord(opCtx, contents.c_str(), contents.length() + 1, _counter);
+        auto id = rs->insertRecord(opCtx,
+                                   *shard_role_details::getRecoveryUnit(opCtx),
+                                   contents.c_str(),
+                                   contents.length() + 1,
+                                   _counter);
         ASSERT_OK(id);
         return id.getValue();
     }
@@ -143,7 +145,11 @@ public:
         Lock::GlobalLock globalLock(op, MODE_IX);
         WriteUnitOfWork wuow(op);
         ASSERT_OK(shard_role_details::getRecoveryUnit(op.get())->setTimestamp(_counter));
-        ASSERT_OK(rs->updateRecord(op, id, contents.c_str(), contents.length() + 1));
+        ASSERT_OK(rs->updateRecord(op,
+                                   *shard_role_details::getRecoveryUnit(op.get()),
+                                   id,
+                                   contents.c_str(),
+                                   contents.length() + 1));
         wuow.commit();
     }
 
@@ -152,7 +158,7 @@ public:
         Lock::GlobalLock globalLock(op, MODE_IX);
         WriteUnitOfWork wuow(op);
         ASSERT_OK(shard_role_details::getRecoveryUnit(op.get())->setTimestamp(_counter));
-        rs->deleteRecord(op, id);
+        rs->deleteRecord(op, *shard_role_details::getRecoveryUnit(op.get()), id);
         wuow.commit();
     }
 
@@ -161,7 +167,7 @@ public:
      */
     int itCountOn(OperationContext* opCtx) {
         Lock::GlobalLock globalLock(opCtx, MODE_IS);
-        auto cursor = rs->getCursor(opCtx);
+        auto cursor = rs->getCursor(opCtx, *shard_role_details::getRecoveryUnit(opCtx));
         int count = 0;
         while (auto record = cursor->next()) {
             count++;
@@ -187,7 +193,7 @@ public:
 
     boost::optional<Record> readRecordOn(OperationContext* op, RecordId id) {
         Lock::GlobalLock globalLock(op, MODE_IS);
-        auto cursor = rs->getCursor(op);
+        auto cursor = rs->getCursor(op, *shard_role_details::getRecoveryUnit(op));
         auto record = cursor->seekExact(id);
         if (record)
             record->data.makeOwned();
@@ -229,11 +235,13 @@ public:
 
         auto op = makeOperation();
         WriteUnitOfWork wuow(op);
-        std::string ns = "a.b";
-        ASSERT_OK(engine->createRecordStore(
-            NamespaceString::createNamespaceString_forTest(ns), ns, CollectionOptions()));
-        rs = engine->getRecordStore(
-            op, NamespaceString::createNamespaceString_forTest(ns), ns, CollectionOptions());
+        const auto nss = NamespaceString::createNamespaceString_forTest("a.b");
+        const auto ident = "collection-ident";
+        RecordStore::Options options;
+        auto& provider =
+            rss::ReplicatedStorageService::get(getGlobalServiceContext()).getPersistenceProvider();
+        ASSERT_OK(engine->createRecordStore(provider, nss, ident, options));
+        rs = engine->getRecordStore(op, nss, ident, options, UUID::gen());
         ASSERT(rs);
     }
 

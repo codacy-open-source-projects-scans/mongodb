@@ -37,6 +37,33 @@
 // IWYU pragma: no_include "boost/predef/hardware/simd/x86/versions.h"
 // IWYU pragma: no_include "ext/alloc_traits.h"
 // IWYU pragma: no_include "emmintrin.h"
+#include "mongo/base/data_type_endian.h"
+#include "mongo/base/data_view.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/ordering.h"
+#include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/exec/sbe/values/key_string_entry.h"
+#include "mongo/db/exec/shard_filterer.h"
+#include "mongo/db/fts/fts_matcher.h"
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/query/bson_typemask.h"
+#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
+#include "mongo/db/query/datetime/date_time_support.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/storage/key_string/key_string.h"
+#include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/platform/bits.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/platform/decimal128.h"
+#include "mongo/platform/endian.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/pcre.h"
+#include "mongo/util/represent_as.h"
+#include "mongo/util/shared_buffer.h"
+#include "mongo/util/str.h"
+
 #include <algorithm>
 #include <array>
 #include <bitset>
@@ -51,33 +78,6 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-
-#include "mongo/base/data_type_endian.h"
-#include "mongo/base/data_view.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/bson/ordering.h"
-#include "mongo/config.h"  // IWYU pragma: keep
-#include "mongo/db/exec/sbe/values/key_string_entry.h"
-#include "mongo/db/exec/shard_filterer.h"
-#include "mongo/db/fts/fts_matcher.h"
-#include "mongo/db/matcher/expression.h"
-#include "mongo/db/query/bson_typemask.h"
-#include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/datetime/date_time_support.h"
-#include "mongo/db/query/index_bounds.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/storage/key_string/key_string.h"
-#include "mongo/db/storage/sorted_data_interface.h"
-#include "mongo/platform/bits.h"
-#include "mongo/platform/compiler.h"
-#include "mongo/platform/decimal128.h"
-#include "mongo/platform/endian.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/pcre.h"
-#include "mongo/util/represent_as.h"
-#include "mongo/util/shared_buffer.h"
-#include "mongo/util/str.h"
 
 namespace mongo {
 /**
@@ -197,7 +197,8 @@ enum class TypeTags : uint8_t {
     bsonCodeWScope,
 
     // Local lambda value
-    LocalLambda,
+    LocalOneArgLambda,
+    LocalTwoArgLambda,
 
     // The index key string.
     keyString,
@@ -460,6 +461,103 @@ private:
     Value _value;
 };
 
+/**
+ * A value which behaves like a view or an owned value depending on 'owned' flag provided at
+ * runtime.
+ */
+class TagValueMaybeOwned {
+public:
+    static TagValueMaybeOwned fromRaw(FastTuple<bool, TypeTags, Value> tv) {
+        auto [o, t, v] = tv;
+        return TagValueMaybeOwned(o, t, v);
+    }
+
+    static TagValueMaybeOwned fromRaw(bool owned, TypeTags t, Value v) {
+        return TagValueMaybeOwned(owned, t, v);
+    }
+
+    TagValueMaybeOwned() : _owned(false), _tag(TypeTags::Nothing), _value(0) {}
+
+    TagValueMaybeOwned(TagValueMaybeOwned&& o) {
+        _tag = o._tag;
+        _value = o._value;
+        _owned = o._owned;
+        o.disownAndClear();
+    }
+
+    ~TagValueMaybeOwned() {
+        release();
+    }
+
+    TagValueMaybeOwned& operator=(TagValueMaybeOwned&& o) {
+        if (&o != this) {
+            release();
+            _tag = o._tag;
+            _value = o._value;
+            _owned = o._owned;
+            o.disownAndClear();
+        }
+        return *this;
+    }
+
+    TagValueMaybeOwned(const TagValueMaybeOwned&) = delete;
+
+    TagValueMaybeOwned& operator=(const TagValueMaybeOwned&) = delete;
+
+    std::pair<TypeTags, Value> raw() const {
+        return {_tag, _value};
+    }
+
+    FastTuple<bool, TypeTags, Value> releaseToRaw() {
+        FastTuple<bool, TypeTags, Value> ret{_owned, _tag, _value};
+        disownAndClear();
+        return ret;
+    }
+
+    TypeTags tag() const {
+        return _tag;
+    }
+    Value value() const {
+        return _value;
+    }
+
+    /**
+     * Relinquishes ownership and sets the stored tag/value to Nothing.
+     */
+    void disownAndClear() {
+        _tag = TypeTags::Nothing;
+        _value = 0;
+        _owned = false;
+    }
+
+    void makeView() {
+        _owned = false;
+    }
+
+    void makeOwned() {
+        if (!_owned) {
+            std::tie(_tag, _value) = value::copyValue(_tag, _value);
+            _owned = true;
+        }
+    }
+
+private:
+    TagValueMaybeOwned(bool owned, TypeTags t, Value v) : _owned(owned), _tag(t), _value(v) {}
+
+    void release() {
+        if (_owned) {
+            releaseValue(_tag, _value);
+        }
+    }
+
+    bool _owned;
+    TypeTags _tag;
+    Value _value;
+};
+
+static_assert(sizeof(TagValueMaybeOwned) <= 16ULL,
+              "TagValueMaybeOwned should not be larger than 16 bytes");
+
 class ValueVectorGuard {
 public:
     MONGO_COMPILER_ALWAYS_INLINE ValueVectorGuard(std::vector<TypeTags>& tags,
@@ -675,6 +773,21 @@ public:
 
     std::pair<iterator, bool> insert(const T& value) {
         return _values.insert(value);
+    }
+
+    /**
+     * Specialized insert operation that can seek the value and, if it is not present in the set,
+     * invoke the keyConstructor function to provide the actual data to be inserted. It assumes that
+     * the data to be inserted is identical to the key that has been searched.
+     * The main purpose is to allow a copy-on-insert operation.
+     */
+    std::pair<iterator, bool> insert_lazy(const T& value, std::function<T()> keyConstructor) {
+        bool inserted = false;
+        auto it = _values.lazy_emplace(value, [&](const SetType::constructor& ctor) {
+            inserted = true;
+            ctor(keyConstructor());
+        });
+        return {it, inserted};
     }
 
     bool contains(const T& key) const {
@@ -1111,6 +1224,14 @@ public:
         return push_back(val.first, val.second);
     }
 
+    /**
+     * If the value cannot be found in the set, insert a copy.
+     *
+     * Returns true if the value was newly inserted, otherwise returns false to indicate that
+     * an equal value was already present in the set.
+     */
+    bool push_back_clone(TypeTags tag, Value val);
+
     auto& values() const noexcept {
         return _values;
     }
@@ -1534,7 +1655,7 @@ inline CellBlock* getCellBlock(Value v) {
 
 inline bool canUseSmallString(StringData input) {
     auto length = input.size();
-    auto ptr = input.rawData();
+    auto ptr = input.data();
     auto end = ptr + length;
     return length <= kSmallStringMaxLength && std::find(ptr, end, '\0') == end;
 }
@@ -1548,14 +1669,14 @@ inline std::pair<TypeTags, Value> makeSmallString(StringData input) {
 
     Value smallString{0};
     auto buf = getRawStringView(TypeTags::StringSmall, smallString);
-    tassert(9462500, "'input.rawData()' can't be a nullptr", input.rawData());
-    memcpy(buf, input.rawData(), input.size());
+    tassert(9462500, "'input.data()' can't be a nullptr", input.data());
+    memcpy(buf, input.data(), input.size());
     return {TypeTags::StringSmall, smallString};
 }
 
 inline std::pair<TypeTags, Value> makeBigString(StringData input) {
     auto len = input.size();
-    auto ptr = input.rawData();
+    auto ptr = input.data();
 
     invariant(len < static_cast<uint32_t>(std::numeric_limits<int32_t>::max()));
 
@@ -1589,6 +1710,14 @@ inline std::pair<TypeTags, Value> makeNewArraySet(const CollatorInterface* colla
     auto a = new ArraySet(collator);
     return {TypeTags::ArraySet, reinterpret_cast<Value>(a)};
 }
+
+/**
+ * Variant of makeNewArraySet that initializes the set using the data in the provided value. Throws
+ * an error if the value is not a type of array.
+ */
+std::pair<TypeTags, Value> makeNewArraySet(TypeTags tag,
+                                           Value value,
+                                           const CollatorInterface* collator = nullptr);
 
 inline std::pair<TypeTags, Value> makeNewArrayMultiSet(
     const CollatorInterface* collator = nullptr) {
@@ -2096,7 +2225,7 @@ inline FastTuple<bool, value::TypeTags, value::Value> numericConvLossless(
             return {false, value::TypeTags::Nothing, 0};
         }
         default:
-            MONGO_UNREACHABLE
+            MONGO_UNREACHABLE_TASSERT(11122923);
     }
 }
 
@@ -2134,7 +2263,7 @@ public:
             _objectCurrent = bson + 4;
             _objectEnd = bson + ConstDataView(bson).read<LittleEndian<uint32_t>>();
         } else {
-            MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE_TASSERT(11122924);
         }
     }
     std::pair<TypeTags, Value> getViewOfValue() const;
@@ -2202,7 +2331,7 @@ public:
                     _fieldNameSize = strlen(_arrayCurrent + 1);
                 }
             } else {
-                MONGO_UNREACHABLE;
+                MONGO_UNREACHABLE_TASSERT(11122925);
             }
 
             for (size_t i = 0; !atEnd() && i < index; i++) {

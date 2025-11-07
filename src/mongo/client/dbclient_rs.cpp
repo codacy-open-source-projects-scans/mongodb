@@ -29,17 +29,6 @@
 
 #include "mongo/client/dbclient_rs.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr.hpp>
-#include <cstddef>
-#include <memory>
-#include <ostream>
-#include <set>
-#include <type_traits>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonelement.h"
@@ -54,13 +43,21 @@
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/auth/sasl_command_constants.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/future.h"
 #include "mongo/util/str.h"
+
+#include <cstddef>
+#include <memory>
+#include <ostream>
+#include <set>
+#include <type_traits>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -117,7 +114,7 @@ DBClientReplicaSet::DBClientReplicaSet(const string& name,
                                        const ClientAPIVersionParameters* apiParameters)
     : DBClientBase(apiParameters),
       _setName(name),
-      _applicationName(applicationName.toString()),
+      _applicationName(std::string{applicationName}),
       _so_timeout(so_timeout),
       _uri(std::move(uri)) {
     if (_uri.isValid()) {
@@ -148,6 +145,10 @@ string DBClientReplicaSet::getServerAddress() const {
         return str::stream() << _setName << "/";
     }
     return _rsm->getServerAddress();
+}
+
+string DBClientReplicaSet::getLocalAddress() const {
+    MONGO_UNIMPLEMENTED;
 }
 
 HostAndPort DBClientReplicaSet::getSuspectedPrimaryHostAndPort() const {
@@ -209,7 +210,7 @@ bool DBClientReplicaSet::isStillConnected() {
 namespace {
 
 bool _isSecondaryCommand(StringData commandName, const BSONObj& commandArgs) {
-    if (_secOkCmdList.count(commandName.toString())) {
+    if (_secOkCmdList.count(std::string{commandName})) {
         return true;
     }
     if (commandName == "mapReduce" || commandName == "mapreduce") {
@@ -645,7 +646,7 @@ DBClientConnection* DBClientReplicaSet::selectNodeUsingTags(
     // the current one and release it back to the pool.
     resetSecondaryOkConn();
 
-    _lastReadPref = readPref;
+    _lastReadPref = std::move(readPref);
     _lastSecondaryOkHost = selectedNode;
 
     // Primary connection is special because it is the only connection that is

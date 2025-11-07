@@ -10,18 +10,18 @@
  *   incompatible_with_concurrency_simultaneous,
  * ]
  */
-export const $config = (function() {
-    var states = {
+export const $config = (function () {
+    let states = {
         reIndex: function reIndex(db, collName) {
-            var res = db[collName].reIndex();
+            let res = db[collName].reIndex();
             assert.commandWorked(res);
         },
     };
 
-    var transitions = {reIndex: {reIndex: 1}};
+    let transitions = {reIndex: {reIndex: 1}};
 
     function setup(db, collName, cluster) {
-        for (var i = 0; i < 1000; ++i) {
+        for (let i = 0; i < 1000; ++i) {
             db[collName].insert({_id: i});
         }
         // Log traces for each WriteConflictException encountered in case they are not handled
@@ -34,21 +34,20 @@ export const $config = (function() {
         */
 
         // Set up failpoint to trigger WriteConflictException during write operations.
-        assert.commandWorked(db.adminCommand(
-            {configureFailPoint: 'WTWriteConflictException', mode: {activationProbability: 0.5}}));
+        assert.commandWorked(
+            db.adminCommand({configureFailPoint: "WTWriteConflictException", mode: {activationProbability: 0.5}}),
+        );
     }
 
     function teardown(db, collName, cluster) {
-        assert.commandWorked(
-            db.adminCommand({configureFailPoint: 'WTWriteConflictException', mode: "off"}));
-        assert.commandWorked(
-            db.adminCommand({setParameter: 1, traceWriteConflictExceptions: false}));
+        assert.commandWorked(db.adminCommand({configureFailPoint: "WTWriteConflictException", mode: "off"}));
+        assert.commandWorked(db.adminCommand({setParameter: 1, traceWriteConflictExceptions: false}));
     }
 
     return {
         threadCount: 2,
         iterations: 5,
-        startState: 'reIndex',
+        startState: "reIndex",
         states: states,
         transitions: transitions,
         setup: setup,

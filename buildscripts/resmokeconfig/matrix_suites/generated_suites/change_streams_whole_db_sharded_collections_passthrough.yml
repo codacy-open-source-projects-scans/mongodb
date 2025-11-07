@@ -21,12 +21,12 @@ executor:
       global_vars:
         TestData:
           defaultReadConcernLevel: null
+      setShellParameter: defaultFindReplicaSetHostTimeoutMS=120000
   fixture:
     class: ShardedClusterFixture
     mongod_options:
       bind_ip_all: ""
       set_parameters:
-        coordinateCommitReturnImmediatelyAfterPersistingDecision: true
         enableTestCommands: 1
         periodicNoopIntervalSecs: 1
         writePeriodicNoops: true
@@ -46,6 +46,7 @@ selector:
     - jstests/change_streams/metadata_notifications.js
   exclude_with_any_tags:
     - assumes_write_concern_unchanged
+    - do_not_run_in_whole_db_passthrough
     - assumes_against_mongod_not_mongos
     - assumes_unsharded_collection
     - assumes_no_implicit_collection_creation_on_get_collection

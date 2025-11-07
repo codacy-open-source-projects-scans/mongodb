@@ -29,11 +29,7 @@
 
 #include "mongo/db/pipeline/split_pipeline.h"
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source_group.h"
-#include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_project.h"
 #include "mongo/db/pipeline/document_source_sequential_document_cache.h"
 #include "mongo/db/pipeline/document_source_skip.h"
@@ -41,6 +37,9 @@
 #include "mongo/db/pipeline/document_source_unwind.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/semantic_analysis.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace sharded_agg_helpers {
@@ -61,8 +60,8 @@ boost::optional<BSONObj> getOwnedOrNone(boost::optional<BSONObj> obj) {
  * obviously unnecessary $limit to a shard's pipeline.
  */
 boost::optional<long long> getPipelineLimit(Pipeline* pipeline) {
-    for (auto source_it = pipeline->getSources().rbegin();
-         source_it != pipeline->getSources().rend();
+    for (auto source_it = pipeline->getSources().crbegin();
+         source_it != pipeline->getSources().crend();
          ++source_it) {
         const auto source = source_it->get();
 
@@ -100,9 +99,10 @@ boost::optional<long long> getPipelineLimit(Pipeline* pipeline) {
  */
 class PipelineSplitter {
 public:
-    PipelineSplitter(std::unique_ptr<Pipeline, PipelineDeleter> pipelineToSplit,
+    PipelineSplitter(std::unique_ptr<Pipeline> pipelineToSplit,
                      boost::optional<OrderedPathSet> shardKeyPaths)
-        : _splitPipeline(
+        : _isTranslated(pipelineToSplit->isTranslated()),
+          _splitPipeline(
               SplitPipeline::mergeOnlyWithEmptyShardsPipeline(std::move(pipelineToSplit))),
 
           _initialShardKeyPaths(std::move(shardKeyPaths)) {}
@@ -115,7 +115,11 @@ public:
      * shards pipeline, until a stage needs to be split.
      */
     PipelineSplitter& split() {
-        _prepopulateTextScoreMetadata();
+        // Before splitting the pipeline, we need to do dependency analysis to validate if we have
+        // text score metadata. This is because the planner will not have any way of knowing
+        // whether the split half provides this metadata after shards are targeted, because the
+        // shard executing the merging half only sees a $mergeCursors stage.
+        _splitPipeline.mergePipeline->validateMetaDependencies();
 
         // We will move stages one by one from the merging half to the shards, as possible.
         _findSplitPoint();
@@ -132,8 +136,17 @@ public:
         _limitFieldsSentFromShardsToMerger();
 
         _abandonCacheIfSentToShards();
-        _splitPipeline.shardsPipeline->setSplitState(Pipeline::SplitState::kSplitForShards);
-        _splitPipeline.mergePipeline->setSplitState(Pipeline::SplitState::kSplitForMerge);
+        _splitPipeline.shardsPipeline->setSplitState(PipelineSplitState::kSplitForShards);
+        _splitPipeline.mergePipeline->setSplitState(PipelineSplitState::kSplitForMerge);
+
+        if (_isTranslated) {
+            if (!_splitPipeline.shardsPipeline->isTranslated()) {
+                _splitPipeline.shardsPipeline->setTranslated();
+            }
+            if (!_splitPipeline.mergePipeline->isTranslated()) {
+                _splitPipeline.mergePipeline->setTranslated();
+            }
+        }
 
         return *this;
     };
@@ -150,7 +163,7 @@ private:
      * Checks if any document sources remain in the merge pipeline.
      */
     bool _mergePipeHasNext() const {
-        return !_splitPipeline.mergePipeline->getSources().empty();
+        return !_splitPipeline.mergePipeline->empty();
     }
 
     /**
@@ -300,7 +313,7 @@ private:
 
         tassert(5363800,
                 "Expected non-empty shardPipe consisting of at least a $sort stage",
-                !_splitPipeline.shardsPipeline->getSources().empty());
+                !_splitPipeline.shardsPipeline->empty());
         if (!dynamic_cast<DocumentSourceSort*>(
                 _splitPipeline.shardsPipeline->getSources().back().get())) {
             // Expected last stage on the shards to be a $sort.
@@ -336,8 +349,7 @@ private:
      * generated per-shard, so we don't need to preserve this sort order at the merge stage.
      */
     void _moveGroupFollowingSortFromMergerToShards() {
-        if (_splitPipeline.shardsPipeline->getSources().empty() ||
-            _splitPipeline.mergePipeline->getSources().empty()) {
+        if (_splitPipeline.shardsPipeline->empty() || _splitPipeline.mergePipeline->empty()) {
             return;
         }
 
@@ -371,7 +383,7 @@ private:
      * unwind.
      */
     void _moveFinalUnwindFromShardsToMerger() {
-        while (!_splitPipeline.shardsPipeline->getSources().empty() &&
+        while (!_splitPipeline.shardsPipeline->empty() &&
                dynamic_cast<DocumentSourceUnwind*>(
                    _splitPipeline.shardsPipeline->getSources().back().get())) {
             _splitPipeline.mergePipeline->addInitialSource(
@@ -436,7 +448,7 @@ private:
      */
     void _limitFieldsSentFromShardsToMerger() {
         DepsTracker mergeDeps(
-            _splitPipeline.mergePipeline->getDependencies(DepsTracker::kNoMetadata));
+            _splitPipeline.mergePipeline->getDependencies(DepsTracker::NoMetadataValidation()));
         if (mergeDeps.needWholeDocument)
             return;  // the merge needs all fields, so nothing we can do.
 
@@ -454,7 +466,7 @@ private:
         // 2) Optimization IS NOT applied immediately following a $project or $group since it would
         //    add an unnecessary project (and therefore a deep-copy).
         for (auto&& source : _splitPipeline.shardsPipeline->getSources()) {
-            DepsTracker dt(DepsTracker::kNoMetadata);
+            DepsTracker dt;
             if (source->getDependencies(&dt) & DepsTracker::State::EXHAUSTIVE_FIELDS)
                 return;
         }
@@ -462,21 +474,7 @@ private:
         boost::intrusive_ptr<DocumentSource> project = DocumentSourceProject::createFromBson(
             BSON("$project" << mergeDeps.toProjectionWithoutMetadata()).firstElement(),
             _splitPipeline.shardsPipeline->getContext());
-        _splitPipeline.shardsPipeline->pushBack(project);
-    }
-
-    /**
-     * Before splitting the pipeline, we need to do dependency analysis to validate if we have
-     * text score metadata. This is because the planner will not have any way of knowing
-     * whether the split half provides this metadata after shards are targeted, because the
-     * shard executing the merging half only sees a $mergeCursors stage.
-     */
-    void _prepopulateTextScoreMetadata() const {
-        auto queryObj = _splitPipeline.mergePipeline->getInitialQuery();
-        auto unavailableMetadata = DocumentSourceMatch::isTextQuery(queryObj)
-            ? DepsTracker::kNoMetadata
-            : DepsTracker::kOnlyTextScore;
-        (void)_splitPipeline.mergePipeline->getDependencies(unavailableMetadata);
+        _splitPipeline.shardsPipeline->pushBack(std::move(project));
     }
 
     /**
@@ -493,6 +491,8 @@ private:
         }
     }
 
+    bool _isTranslated;
+
     // Output.
     SplitPipeline _splitPipeline;
 
@@ -500,7 +500,7 @@ private:
     boost::optional<OrderedPathSet> _initialShardKeyPaths;
 };
 
-SplitPipeline SplitPipeline::split(std::unique_ptr<Pipeline, PipelineDeleter> pipelineToSplit,
+SplitPipeline SplitPipeline::split(std::unique_ptr<Pipeline> pipelineToSplit,
                                    boost::optional<OrderedPathSet> shardKeyPaths) {
     return PipelineSplitter(std::move(pipelineToSplit), std::move(shardKeyPaths)).split().release();
 }

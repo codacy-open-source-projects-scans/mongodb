@@ -28,56 +28,25 @@
  */
 
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/s/resharding/document_source_resharding_add_resume_id.h"
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/repl/oplog_entry.h"
-#include "mongo/db/s/resharding/document_source_resharding_add_resume_id.h"
-#include "mongo/db/s/resharding/donor_oplog_id_gen.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
 namespace mongo {
-
-namespace {
-/**
- * Generates the _id field for the given oplog entry document. If the document corresponds to an
- * applyOps oplog entry for a committed transaction, it should have the commit timestamp for the
- * transaction attached to it, and the generated _id will be {clusterTime: <transaction commit
- * timestamp>, ts: <applyOps optime.ts>}. For all other documents, the generated _id will be
- * {clusterTime: <optime.ts>, ts: <optime.ts>}.
- */
-Document appendId(Document inputDoc) {
-    auto eventTime = inputDoc.getField(repl::OplogEntry::kTimestampFieldName);
-    tassert(6387801,
-            "'ts' field is not a BSON Timestamp",
-            eventTime.getType() == BSONType::bsonTimestamp);
-    auto commitTxnTs = inputDoc.getField(CommitTransactionOplogObject::kCommitTimestampFieldName);
-    tassert(6387802,
-            str::stream() << "'" << CommitTransactionOplogObject::kCommitTimestampFieldName
-                          << "' field is not a BSON Timestamp",
-            commitTxnTs.missing() || commitTxnTs.getType() == BSONType::bsonTimestamp);
-
-    MutableDocument doc{inputDoc};
-    doc.remove(CommitTransactionOplogObject::kCommitTimestampFieldName);
-    doc.setField(repl::OplogEntry::k_idFieldName,
-                 Value{Document{{ReshardingDonorOplogId::kClusterTimeFieldName,
-                                 commitTxnTs.missing() ? eventTime.getTimestamp()
-                                                       : commitTxnTs.getTimestamp()},
-                                {ReshardingDonorOplogId::kTsFieldName, eventTime.getTimestamp()}}});
-    return doc.freeze();
-}
-}  // namespace
 
 REGISTER_INTERNAL_DOCUMENT_SOURCE(_addReshardingResumeId,
                                   LiteParsedDocumentSourceInternal::parse,
                                   DocumentSourceReshardingAddResumeId::createFromBson,
                                   true);
+ALLOCATE_DOCUMENT_SOURCE_ID(_addReshardingResumeId, DocumentSourceReshardingAddResumeId::id)
 
 boost::intrusive_ptr<DocumentSourceReshardingAddResumeId>
 DocumentSourceReshardingAddResumeId::create(const boost::intrusive_ptr<ExpressionContext>& expCtx) {
@@ -89,7 +58,7 @@ DocumentSourceReshardingAddResumeId::createFromBson(
     const BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
     uassert(6387803,
             str::stream() << "the '" << kStageName << "' spec must be an empty object",
-            elem.type() == BSONType::Object && elem.Obj().isEmpty());
+            elem.type() == BSONType::object && elem.Obj().isEmpty());
     return new DocumentSourceReshardingAddResumeId(expCtx);
 }
 
@@ -98,16 +67,18 @@ DocumentSourceReshardingAddResumeId::DocumentSourceReshardingAddResumeId(
     : DocumentSource(kStageName, expCtx) {}
 
 StageConstraints DocumentSourceReshardingAddResumeId::constraints(
-    Pipeline::SplitState pipeState) const {
-    return StageConstraints(StreamType::kStreaming,
-                            PositionRequirement::kNone,
-                            HostTypeRequirement::kAnyShard,
-                            DiskUseRequirement::kNoDiskUse,
-                            FacetRequirement::kNotAllowed,
-                            TransactionRequirement::kNotAllowed,
-                            LookupRequirement::kNotAllowed,
-                            UnionRequirement::kNotAllowed,
-                            ChangeStreamRequirement::kDenylist);
+    PipelineSplitState pipeState) const {
+    StageConstraints constraints(StreamType::kStreaming,
+                                 PositionRequirement::kNone,
+                                 HostTypeRequirement::kAnyShard,
+                                 DiskUseRequirement::kNoDiskUse,
+                                 FacetRequirement::kNotAllowed,
+                                 TransactionRequirement::kNotAllowed,
+                                 LookupRequirement::kNotAllowed,
+                                 UnionRequirement::kNotAllowed,
+                                 ChangeStreamRequirement::kDenylist);
+    constraints.consumesLogicalCollectionData = false;
+    return constraints;
 }
 
 Value DocumentSourceReshardingAddResumeId::serialize(const SerializationOptions& opts) const {
@@ -115,30 +86,15 @@ Value DocumentSourceReshardingAddResumeId::serialize(const SerializationOptions&
 }
 
 DepsTracker::State DocumentSourceReshardingAddResumeId::getDependencies(DepsTracker* deps) const {
-    deps->fields.insert(repl::OplogEntry::kTimestampFieldName.toString());
-    deps->fields.insert(CommitTransactionOplogObject::kCommitTimestampFieldName.toString());
+    deps->fields.insert(std::string{repl::OplogEntry::kTimestampFieldName});
+    deps->fields.insert(std::string{CommitTransactionOplogObject::kCommitTimestampFieldName});
     return DepsTracker::State::SEE_NEXT;
 }
 
 DocumentSource::GetModPathsReturn DocumentSourceReshardingAddResumeId::getModifiedPaths() const {
     return {GetModPathsReturn::Type::kFiniteSet,
-            {repl::OplogEntry::k_idFieldName.toString(),
-             CommitTransactionOplogObject::kCommitTimestampFieldName.toString()},
+            {std::string{repl::OplogEntry::k_idFieldName},
+             std::string{CommitTransactionOplogObject::kCommitTimestampFieldName}},
             {}};
-}
-
-DocumentSource::GetNextResult DocumentSourceReshardingAddResumeId::doGetNext() {
-    uassert(6387804,
-            str::stream() << kStageName << " cannot be executed from router",
-            !pExpCtx->getInRouter());
-
-    // Get the next input document.
-    auto input = pSource->getNext();
-    if (!input.isAdvanced()) {
-        return input;
-    }
-
-    auto doc = input.releaseDocument();
-    return appendId(doc);
 }
 }  // namespace mongo

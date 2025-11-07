@@ -27,14 +27,6 @@
  *    it in the license file.
  */
 
-#include <vector>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -47,12 +39,15 @@
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
+
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
-using boost::intrusive_ptr;
 using std::vector;
 
 REGISTER_ACCUMULATOR(addToSet, genericParseSingleExpressionAccumulator<AccumulatorAddToSet>);
@@ -66,7 +61,8 @@ void AccumulatorAddToSet::processInternal(const Value& input, bool merging) {
             uassert(
                 ErrorCodes::ExceededMemoryLimit,
                 str::stream() << "$addToSet used too much memory and cannot spill to disk. Used: "
-                              << _memUsageTracker.currentMemoryBytes() << " bytes. Memory limit: "
+                              << _memUsageTracker.inUseTrackedMemoryBytes()
+                              << " bytes. Memory limit: "
                               << _memUsageTracker.maxAllowedMemoryUsageBytes() << " bytes",
                 _memUsageTracker.withinMemoryLimit());
         }
@@ -79,7 +75,7 @@ void AccumulatorAddToSet::processInternal(const Value& input, bool merging) {
         // If we're merging, we need to take apart the arrays we receive and put their elements into
         // the array we are collecting.  If we didn't, then we'd get an array of arrays, with one
         // array from each merge source.
-        invariant(input.getType() == Array);
+        assertMergingInputType(input, BSONType::array);
 
         for (auto&& val : input.getArray()) {
             addValue(val);
@@ -102,9 +98,4 @@ void AccumulatorAddToSet::reset() {
     _set = getExpressionContext()->getValueComparator().makeFlatUnorderedValueSet();
     _memUsageTracker.set(sizeof(*this));
 }
-
-intrusive_ptr<AccumulatorState> AccumulatorAddToSet::create(ExpressionContext* const expCtx) {
-    return new AccumulatorAddToSet(expCtx, boost::none);
-}
-
 }  // namespace mongo

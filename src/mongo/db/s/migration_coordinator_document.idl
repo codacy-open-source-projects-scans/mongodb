@@ -36,9 +36,9 @@ global:
 
 imports:
     - "mongo/db/basic_types.idl"
-    - "mongo/s/sharding_types.idl"
-    - "mongo/s/chunk_range.idl"
-    - "mongo/s/chunk_version.idl"
+    - "mongo/db/sharding_environment/sharding_types.idl"
+    - "mongo/db/global_catalog/chunk_range.idl"
+    - "mongo/db/versioning_protocol/chunk_version.idl"
     - "mongo/db/session/logical_session_id.idl"
 
 enums:
@@ -52,9 +52,10 @@ enums:
 types:
     MigrationSessionId:
         bson_serialization_type: string
-        description: "The migration session id is the legacy unique identifier for a particular
-                      moveChunk command and is exchanged as part of all communication between the
-                      donor and recipient shards."
+        description:
+            "The migration session id is the legacy unique identifier for a particular
+            moveChunk command and is exchanged as part of all communication between the
+            donor and recipient shards."
         cpp_type: "mongo::MigrationSessionId"
         deserializer: "mongo::MigrationSessionId::fromString"
         serializer: "mongo::MigrationSessionId::toString"
@@ -64,7 +65,7 @@ structs:
     migrationCoordinatorDocument:
         description: "Represents an in-progress migration on the migration donor."
         generate_comparison_operators: false
-        strict: true
+        strict: false
         fields:
             _id:
                 type: uuid
@@ -96,9 +97,18 @@ structs:
                 description: "The range being migrated."
             preMigrationChunkVersion:
                 type: ChunkVersion
-                description: "The data placement, at the start of the migration, of the chunk being 
-                             moved."
+                description:
+                    "The data placement, at the start of the migration, of the chunk being
+                    moved."
             decision:
                 type: Decision
                 description: "Enumeration that defines whether the migration committed or aborted."
+                optional: true
+            transfersFirstCollectionChunkToRecipient:
+                type: bool
+                description:
+                    "A true value marks the fact that the migration will cause the recipient to
+                    start owning data for the parent collection once committed.
+                    This field (marked as optional for backwards compatibility) is used to compose
+                    the legacy 'migrateChunkToNewShard' op entry when the operation is successful."
                 optional: true

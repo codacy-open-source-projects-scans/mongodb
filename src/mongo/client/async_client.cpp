@@ -28,15 +28,7 @@
  */
 
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <memory>
-#include <ratio>
-#include <type_traits>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/client/async_client.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -46,23 +38,20 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
-#include "mongo/client/async_client.h"
 #include "mongo/client/authenticate.h"
 #include "mongo/client/internal_auth.h"
 #include "mongo/client/sasl_client_authenticate.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/auth/sasl_command_constants.h"
 #include "mongo/db/auth/validated_tenancy_scope.h"
-#include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/connection_health_metrics_parameter_gen.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/egress_connection_closer_manager.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
 #include "mongo/logv2/log_severity_suppressor.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/factory.h"
@@ -81,6 +70,16 @@
 #include "mongo/util/str.h"
 #include "mongo/util/version.h"
 
+#include <memory>
+#include <ratio>
+#include <type_traits>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -94,6 +93,8 @@ auto& totalTimeForEgressConnectionAcquiredToWireMicros =
     *MetricBuilder<Counter64>{"network.totalTimeForEgressConnectionAcquiredToWireMicros"};
 }  // namespace
 
+MONGO_FAIL_POINT_DEFINE(asyncConnectReturnsConnectionError);
+
 Future<std::shared_ptr<AsyncDBClient>> AsyncDBClient::connect(
     const HostAndPort& peer,
     transport::ConnectSSLMode sslMode,
@@ -103,6 +104,9 @@ Future<std::shared_ptr<AsyncDBClient>> AsyncDBClient::connect(
     Milliseconds timeout,
     std::shared_ptr<ConnectionMetrics> connectionMetrics,
     std::shared_ptr<const transport::SSLConnectionContext> transientSSLContext) {
+    if (MONGO_unlikely(asyncConnectReturnsConnectionError.shouldFail())) {
+        return Status{ErrorCodes::ConnectionError, "Failing asyncConnect due to fail-point"};
+    }
     return tl
         ->asyncConnect(peer,
                        sslMode,
@@ -149,13 +153,13 @@ void AsyncDBClient::_parseHelloResponse(BSONObj request,
     uassert(50786,
             "Expected OP_MSG response to 'hello'",
             response->getProtocol() == rpc::Protocol::kOpMsg);
-    auto wireSpec = WireSpec::getWireSpec(_svcCtx).get();
+    auto outgoing = WireSpec::getWireSpec(_svcCtx).getOutgoing();
     auto responseBody = response->getCommandReply();
     uassertStatusOK(getStatusFromCommandResult(responseBody));
 
     auto replyWireVersion =
         uassertStatusOK(wire_version::parseWireVersionFromHelloReply(responseBody));
-    auto validateStatus = wire_version::validateWireVersion(wireSpec->outgoing, replyWireVersion);
+    auto validateStatus = wire_version::validateWireVersion(outgoing, replyWireVersion);
     if (!validateStatus.isOK()) {
         LOGV2_WARNING(
             23741, "Remote host has incompatible wire version", "error"_attr = validateStatus);
@@ -167,7 +171,7 @@ void AsyncDBClient::_parseHelloResponse(BSONObj request,
     auto& egressConnectionCloserManager = executor::EgressConnectionCloserManager::get(_svcCtx);
     // Mark outgoing connection to keep open so it can be kept open on FCV upgrade if it is
     // not to a server with a lower binary version.
-    if (replyWireVersion.maxWireVersion >= wireSpec->outgoing.maxWireVersion) {
+    if (replyWireVersion.maxWireVersion >= outgoing.maxWireVersion) {
         pauseBeforeMarkKeepOpen.pauseWhileSet();
         egressConnectionCloserManager.setKeepOpen(_peer, true);
     } else {
@@ -196,9 +200,8 @@ Future<void> AsyncDBClient::authenticate(const BSONObj& params) {
     // We will only have a valid clientName if SSL is enabled.
     std::string clientName;
 #ifdef MONGO_CONFIG_SSL
-    auto& sslManager = _session->getSSLManager();
-    if (sslManager) {
-        clientName = sslManager->getSSLConfiguration().clientSubjectName.toString();
+    if (auto sslConfig = _session->getSSLConfiguration()) {
+        clientName = sslConfig->clientSubjectName.toString();
     }
 #endif
 
@@ -215,9 +218,8 @@ Future<void> AsyncDBClient::authenticateInternal(
     // We will only have a valid clientName if SSL is enabled.
     std::string clientName;
 #ifdef MONGO_CONFIG_SSL
-    auto& sslManager = _session->getSSLManager();
-    if (sslManager) {
-        clientName = sslManager->getSSLConfiguration().clientSubjectName.toString();
+    if (auto sslConfig = _session->getSSLConfiguration()) {
+        clientName = sslConfig->clientSubjectName.toString();
     }
 #endif
 
@@ -299,6 +301,8 @@ Future<void> AsyncDBClient::_call(Message request,
                                   int32_t msgId,
                                   const BatonHandle& baton,
                                   const CancellationToken& token) {
+    networkCounter.hitLogicalOut(NetworkCounter::ConnectionType::kEgress, request.size());
+
     auto swm = _compressorManager.compressMessage(request);
     if (!swm.isOK()) {
         return swm.getStatus();
@@ -308,7 +312,8 @@ Future<void> AsyncDBClient::_call(Message request,
     request.header().setId(msgId);
     request.header().setResponseToMsgId(0);
 #ifdef MONGO_CONFIG_SSL
-    if (!SSLPeerInfo::forSession(_session).isTLS()) {
+    auto sslPeerInfo = SSLPeerInfo::forSession(_session);
+    if (!(sslPeerInfo && sslPeerInfo->isTLS())) {
         OpMsg::appendChecksum(&request);
     }
 #else
@@ -335,11 +340,14 @@ Future<Message> AsyncDBClient::_waitForResponse(boost::optional<int32_t> msgId,
                         "sessionId"_attr = _session->id(),
                         "msgId"_attr = response.header().getId(),
                         "responseTo"_attr = response.header().getResponseToMsgId());
-            if (response.operation() == dbCompressed) {
-                return _compressorManager.decompressMessage(response);
-            } else {
-                return response;
+            StatusWith<Message> swMessage = (response.operation() == dbCompressed)
+                ? _compressorManager.decompressMessage(response)
+                : response;
+            if (swMessage.isOK()) {
+                networkCounter.hitLogicalIn(NetworkCounter::ConnectionType::kEgress,
+                                            swMessage.getValue().size());
             }
+            return swMessage;
         });
 }
 

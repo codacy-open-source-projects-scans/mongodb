@@ -29,22 +29,10 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonelement_comparator.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -55,14 +43,24 @@
 #include "mongo/db/matcher/expression_path.h"
 #include "mongo/db/matcher/expression_visitor.h"
 #include "mongo/db/matcher/in_list_data.h"
-#include "mongo/db/matcher/match_details.h"
 #include "mongo/db/matcher/path.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/util/make_data_structure.h"
-#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/pcre.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -200,7 +198,6 @@ public:
      * BSONObj backing 'elem' outlives this MatchExpression.
      */
     void setData(BSONElement elem) {
-        // TODO SERVER-50629: Ensure that the _backingBSON is consistent with the new element.
         _rhs = elem;
     }
 
@@ -214,7 +211,7 @@ public:
      * in the hotpath.
      */
     void setBackingBSON(const BSONObj& obj) {
-        invariant(obj.isOwned());
+        tassert(11052408, "The backing obj must be owned", obj.isOwned());
         _backingBSON = obj;
         _backingBSONIsSet = true;
     }
@@ -258,12 +255,6 @@ protected:
     const CollatorInterface* _collator = nullptr;
 
 private:
-    ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) {
-            return expression;
-        };
-    }
-
     void setData(boost::optional<StringData>& path, BSONElement elem) {
         _rhs = elem;
     }
@@ -312,8 +303,6 @@ public:
                               const CollatorInterface* collator = nullptr);
 
     ~ComparisonMatchExpression() override = default;
-
-    bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 };
 
 class EqualityMatchExpression final : public ComparisonMatchExpression {
@@ -330,7 +319,7 @@ public:
                             clonable_ptr<ErrorAnnotation> annotation = nullptr,
                             const CollatorInterface* collator = nullptr)
         : ComparisonMatchExpression(EQ, path, rhs, std::move(annotation), collator) {
-        invariant(!rhs.eoo());
+        tassert(11052409, "rhs cannot be eoo", !rhs.eoo());
     }
 
     StringData name() const final {
@@ -374,7 +363,7 @@ public:
                        const BSONElement& rhs,
                        clonable_ptr<ErrorAnnotation> annotation = nullptr)
         : ComparisonMatchExpression(LTE, path, rhs, std::move(annotation)) {
-        invariant(!rhs.eoo());
+        tassert(11052410, "rhs cannot be eoo", !rhs.eoo());
     }
 
     StringData name() const final {
@@ -418,7 +407,7 @@ public:
                       const BSONElement& rhs,
                       clonable_ptr<ErrorAnnotation> annotation = nullptr)
         : ComparisonMatchExpression(LT, path, rhs, std::move(annotation)) {
-        invariant(!rhs.eoo());
+        tassert(11052411, "rhs cannot be eoo", !rhs.eoo());
     }
 
     StringData name() const final {
@@ -450,7 +439,7 @@ public:
     }
 
     bool isLTMaxKey() const final {
-        return _rhs.type() == BSONType::MaxKey;
+        return _rhs.type() == BSONType::maxKey;
     }
 };
 
@@ -467,7 +456,7 @@ public:
                       const BSONElement& rhs,
                       clonable_ptr<ErrorAnnotation> annotation = nullptr)
         : ComparisonMatchExpression(GT, path, rhs, std::move(annotation)) {
-        invariant(!rhs.eoo());
+        tassert(11052412, "rhs cannot be eoo", !rhs.eoo());
     }
 
     StringData name() const final {
@@ -499,7 +488,7 @@ public:
     }
 
     bool isGTMinKey() const final {
-        return _rhs.type() == BSONType::MinKey;
+        return _rhs.type() == BSONType::minKey;
     }
 };
 
@@ -515,7 +504,7 @@ public:
                        const BSONElement& rhs,
                        clonable_ptr<ErrorAnnotation> annotation = nullptr)
         : ComparisonMatchExpression(GTE, path, rhs, std::move(annotation)) {
-        invariant(!rhs.eoo());
+        tassert(11052413, "rhs cannot be eoo", !rhs.eoo());
     }
 
     StringData name() const final {
@@ -586,8 +575,6 @@ public:
         return e;
     }
 
-    bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
-
     void debugString(StringBuilder& debug, int indentationLevel) const override;
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
@@ -605,6 +592,10 @@ public:
     }
     const std::string& getFlags() const {
         return _flags;
+    }
+
+    const pcre::Regex* getRegex() const {
+        return _re.get();
     }
 
     void acceptVisitor(MatchExpressionMutableVisitor* visitor) final {
@@ -632,12 +623,6 @@ public:
     }
 
 private:
-    ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) {
-            return expression;
-        };
-    }
-
     void _init();
 
     std::string _regex;
@@ -669,8 +654,6 @@ public:
         }
         return m;
     }
-
-    bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 
     void debugString(StringBuilder& debug, int indentationLevel) const override;
 
@@ -712,12 +695,6 @@ public:
     }
 
 private:
-    ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) {
-            return expression;
-        };
-    }
-
     long long _divisor;
     long long _remainder;
 
@@ -739,8 +716,6 @@ public:
         return e;
     }
 
-    bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
-
     void debugString(StringBuilder& debug, int indentationLevel) const override;
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
@@ -755,13 +730,6 @@ public:
 
     void acceptVisitor(MatchExpressionConstVisitor* visitor) const final {
         visitor->visit(this);
-    }
-
-private:
-    ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) {
-            return expression;
-        };
     }
 };
 
@@ -778,8 +746,6 @@ public:
                                std::shared_ptr<InListData> equalities);
 
     std::unique_ptr<MatchExpression> clone() const final;
-
-    bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 
     void debugString(StringBuilder& debug, int indentationLevel) const override;
 
@@ -894,6 +860,9 @@ public:
     bool equalitiesHasSingleElement() const {
         return _equalities->hasSingleElement();
     }
+    bool equalitiesIsEmpty() const {
+        return _equalities->elementsIsEmpty();
+    }
 
     void acceptVisitor(MatchExpressionMutableVisitor* visitor) final {
         visitor->visit(this);
@@ -942,8 +911,6 @@ private:
         }
     }
 
-    ExpressionOptimizerFunc getOptimizer() const final;
-
     // A helper to serialize to something like {$in: "?array<?number>"} or similar, depending on
     // 'opts' and whether we have a mixed-type $in or not.
     void serializeToShape(BSONObjBuilder* bob, const SerializationOptions& opts) const;
@@ -980,8 +947,6 @@ public:
                                     uint32_t bitMaskLen,
                                     clonable_ptr<ErrorAnnotation> annotation);
     ~BitTestMatchExpression() override {}
-
-    bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 
     void debugString(StringBuilder& debug, int indentationLevel) const override;
 
@@ -1022,32 +987,6 @@ public:
     }
 
 private:
-    ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) {
-            return expression;
-        };
-    }
-
-    /**
-     * Performs bit test using bit positions on 'eValue' and returns whether or not the bit test
-     * passes.
-     */
-    bool performBitTest(long long eValue) const;
-
-    /**
-     * Performs bit test using bit positions on 'eBinary' with length (in bytes) 'eBinaryLen' and
-     * returns whether or not the bit test passes.
-     */
-    bool performBitTest(const char* eBinary, uint32_t eBinaryLen) const;
-
-    /**
-     * Helper function for performBitTest(...).
-     *
-     * needFurtherBitTests() determines if the result of a bit-test ('isBitSet') is enough
-     * information to skip the rest of the bit tests.
-     **/
-    bool needFurtherBitTests(bool isBitSet) const;
-
     // Vector of bit positions to test, with bit position 0 being the least significant bit.
     // Used to perform bit tests against BinData.
     std::vector<uint32_t> _bitPositions;

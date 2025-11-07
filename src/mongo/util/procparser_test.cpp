@@ -30,9 +30,10 @@
 
 #include <array>
 #include <cerrno>
-#include <fcntl.h>
 #include <map>
 #include <system_error>
+
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <boost/filesystem/operations.hpp>
@@ -43,10 +44,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/procparser.h"
 #include "mongo/util/string_map.h"
@@ -54,8 +52,6 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
-
-using namespace fmt::literals;
 
 namespace {
 
@@ -872,26 +868,26 @@ public:
 
 TEST_F(FTDCProcSysFsFileNr, TestSuccess) {
     parseSysFsFileNr(procparser::FileNrKey::kMaxFileHandles, "1 0 2\n");
-    ASSERT_EQ(uint64Map.at(procparser::kMaxFileHandlesKey.toString()), 2);
-    ASSERT(!contains(uint64Map, procparser::kFileHandlesInUseKey.toString()));
+    ASSERT_EQ(uint64Map.at(std::string{procparser::kMaxFileHandlesKey}), 2);
+    ASSERT(!contains(uint64Map, std::string{procparser::kFileHandlesInUseKey}));
 }
 
 TEST_F(FTDCProcSysFsFileNr, TestSuccess2) {
     parseSysFsFileNr(procparser::FileNrKey::kFileHandlesInUse, "1 0 2\n");
-    ASSERT_EQ(uint64Map.at(procparser::kFileHandlesInUseKey.toString()), 1);
-    ASSERT(!contains(uint64Map, procparser::kMaxFileHandlesKey.toString()));
+    ASSERT_EQ(uint64Map.at(std::string{procparser::kFileHandlesInUseKey}), 1);
+    ASSERT(!contains(uint64Map, std::string{procparser::kMaxFileHandlesKey}));
 }
 
 TEST_F(FTDCProcSysFsFileNr, TestOnlyParseUpToWhatWeNeed) {
     parseSysFsFileNr(procparser::FileNrKey::kFileHandlesInUse, "1 0\n");
-    ASSERT_EQ(uint64Map.at(procparser::kFileHandlesInUseKey.toString()), 1);
-    ASSERT(!contains(uint64Map, procparser::kMaxFileHandlesKey.toString()));
+    ASSERT_EQ(uint64Map.at(std::string{procparser::kFileHandlesInUseKey}), 1);
+    ASSERT(!contains(uint64Map, std::string{procparser::kMaxFileHandlesKey}));
 }
 
 TEST_F(FTDCProcSysFsFileNr, TestOnlyParseUpToWhatWeNeed2) {
     parseSysFsFileNr(procparser::FileNrKey::kFileHandlesInUse, "1\n");
-    ASSERT_EQ(uint64Map.at(procparser::kFileHandlesInUseKey.toString()), 1);
-    ASSERT(!contains(uint64Map, procparser::kMaxFileHandlesKey.toString()));
+    ASSERT_EQ(uint64Map.at(std::string{procparser::kFileHandlesInUseKey}), 1);
+    ASSERT(!contains(uint64Map, std::string{procparser::kMaxFileHandlesKey}));
 }
 
 TEST_F(FTDCProcSysFsFileNr, TestFailure) {
@@ -921,7 +917,7 @@ TEST_F(FTDCProcSysFsFileNr, TestFile) {
 class FTDCProcPressure : public BaseProcTest {
 public:
     bool isPSISupported(StringData filename) {
-        int fd = open(filename.toString().c_str(), 0);
+        int fd = open(std::string{filename}.c_str(), 0);
         if (fd == -1) {
             return false;
         }
@@ -1134,10 +1130,10 @@ TEST_F(FTDCProcNetstat, TestLocalSockstat) {
     LOGV2(4840200, "Parsed local /net/proc/sockstat file", "obj"_attr = obj);
 
     for (auto&& [category, nodes] : testKeys) {
-        ASSERT(obj[category].isABSONObj()) << ", category={}"_format(category);
+        ASSERT(obj[category].isABSONObj()) << fmt::format(", category={}", category);
         for (auto&& node : nodes) {
             ASSERT(obj[category][node].isNumber())
-                << ", category={}, node={}"_format(category, node);
+                << fmt::format(", category={}, node={}", category, node);
         }
     }
 }

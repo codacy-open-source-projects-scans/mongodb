@@ -15,6 +15,8 @@
  *    step-up from ocurring.
  *
  * @tags: [
+ *   # TODO(SERVER-109702): Evaluate if a primary-driven index build compatible test should be created.
+ *   requires_commit_quorum,
  *   uses_prepare_transaction,
  *   uses_transactions,
  * ]
@@ -22,7 +24,7 @@
 import {PrepareHelpers} from "jstests/core/txns/libs/prepare_helpers.js";
 import {kDefaultWaitForFailPointTimeout} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 import {waitForState} from "jstests/replsets/rslib.js";
 
 const dbName = "test";
@@ -39,23 +41,29 @@ const primaryColl = primaryDB[collName];
 assert.commandWorked(primaryColl.insert({_id: 1, x: 1}));
 
 // Clear the log.
-assert.commandWorked(primary.adminCommand({clearLog: 'global'}));
+assert.commandWorked(primary.adminCommand({clearLog: "global"}));
 
 // Enable fail point which makes hybrid index build to hang.
-const failPoint = "hangAfterIndexBuildSecondDrain";
-let res =
-    assert.commandWorked(primary.adminCommand({configureFailPoint: failPoint, mode: "alwaysOn"}));
+const failPoint = "hangIndexBuildAfterSignalPrimaryForCommitReadiness";
+let res = assert.commandWorked(primary.adminCommand({configureFailPoint: failPoint, mode: "alwaysOn"}));
 let timesEntered = res.count;
 
 const indexThread = IndexBuildTest.startIndexBuild(
-    primary, primaryColl.getFullName(), {x: 1}, {}, ErrorCodes.InterruptedDueToReplStateChange);
+    primary,
+    primaryColl.getFullName(),
+    {x: 1},
+    {},
+    ErrorCodes.InterruptedDueToReplStateChange,
+);
 
 jsTestLog("Waiting for index build to hit failpoint");
-assert.commandWorked(primary.adminCommand({
-    waitForFailPoint: failPoint,
-    timesEntered: timesEntered + 1,
-    maxTimeMS: kDefaultWaitForFailPointTimeout
-}));
+assert.commandWorked(
+    primary.adminCommand({
+        waitForFailPoint: failPoint,
+        timesEntered: timesEntered + 1,
+        maxTimeMS: kDefaultWaitForFailPointTimeout,
+    }),
+);
 
 jsTestLog("Start txn");
 const session = primary.startSession();

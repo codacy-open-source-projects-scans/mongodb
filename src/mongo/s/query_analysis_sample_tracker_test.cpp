@@ -29,24 +29,23 @@
 
 #include "mongo/s/query_analysis_sample_tracker.h"
 
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <string>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/uuid.h"
+
+#include <string>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -116,8 +115,8 @@ void QueryAnalysisSampleTrackerTest::testRefreshConfigIncrementAndReport() {
     tracker.reportForCurrentOp(&ops);
     ASSERT_EQ(1, ops.size());
     auto parsedOp = CollectionSampleCountersCurrentOp::parse(
-        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"),
-        ops[0]);
+        ops[0],
+        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"));
     ASSERT_EQ(parsedOp.getDesc(), kCurrentOpDescFieldValue);
     ASSERT_EQ(parsedOp.getNs(), nss0);
     ASSERT_EQ(parsedOp.getCollUuid(), collUuid0);
@@ -136,8 +135,8 @@ void QueryAnalysisSampleTrackerTest::testRefreshConfigIncrementAndReport() {
     BSONObj serverStatus;
     serverStatus = tracker.reportForServerStatus();
     auto parsedServerStatus = QueryAnalysisServerStatus::parse(
-        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"),
-        serverStatus);
+        serverStatus,
+        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"));
     ASSERT_EQ(parsedServerStatus.getActiveCollections(), 1);
     ASSERT_EQ(parsedServerStatus.getTotalCollections(), 1);
     ASSERT_EQ(parsedServerStatus.getTotalSampledReadsCount(), 0);
@@ -160,8 +159,8 @@ void QueryAnalysisSampleTrackerTest::testRefreshConfigIncrementAndReport() {
     tracker.reportForCurrentOp(&ops);
     ASSERT_EQ(2, ops.size());
     parsedOp = CollectionSampleCountersCurrentOp::parse(
-        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"),
-        ops[0]);
+        ops[0],
+        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"));
     ASSERT_EQ(parsedOp.getDesc(), kCurrentOpDescFieldValue);
     ASSERT_EQ(parsedOp.getNs(), nss0);
     ASSERT_EQ(parsedOp.getCollUuid(), collUuid0);
@@ -176,8 +175,8 @@ void QueryAnalysisSampleTrackerTest::testRefreshConfigIncrementAndReport() {
         ASSERT_EQ(*(parsedOp.getSampledWritesBytes()), 0L);
     }
     parsedOp = CollectionSampleCountersCurrentOp::parse(
-        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"),
-        ops[1]);
+        ops[1],
+        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"));
     ASSERT_EQ(parsedOp.getNs(), nss1);
     ASSERT_EQ(parsedOp.getCollUuid(), collUuid1);
     if (supportsSampling) {
@@ -194,8 +193,8 @@ void QueryAnalysisSampleTrackerTest::testRefreshConfigIncrementAndReport() {
     // Verify server status, two active collections.
     serverStatus = tracker.reportForServerStatus();
     parsedServerStatus = QueryAnalysisServerStatus::parse(
-        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"),
-        serverStatus);
+        serverStatus,
+        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"));
     ASSERT_EQ(parsedServerStatus.getActiveCollections(), 2);
     ASSERT_EQ(parsedServerStatus.getTotalCollections(), 2);
     ASSERT_EQ(parsedServerStatus.getTotalSampledReadsCount(), 0);
@@ -231,8 +230,8 @@ void QueryAnalysisSampleTrackerTest::testRefreshConfigIncrementAndReport() {
     tracker.reportForCurrentOp(&ops);
     ASSERT_EQ(2, ops.size());
     parsedOp = CollectionSampleCountersCurrentOp::parse(
-        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"),
-        ops[0]);
+        ops[0],
+        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"));
     ASSERT_EQ(parsedOp.getNs(), nss0);
     ASSERT_EQ(parsedOp.getCollUuid(), collUuid0);
     if (supportsSampling) {
@@ -246,8 +245,8 @@ void QueryAnalysisSampleTrackerTest::testRefreshConfigIncrementAndReport() {
         ASSERT_EQ(*(parsedOp.getSampledWritesBytes()), sampledQueryDocSizeBytes);
     }
     parsedOp = CollectionSampleCountersCurrentOp::parse(
-        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"),
-        ops[1]);
+        ops[1],
+        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"));
     ASSERT_EQ(parsedOp.getNs(), nss1);
     ASSERT_EQ(parsedOp.getCollUuid(), collUuid1);
     if (supportsSampling) {
@@ -264,8 +263,8 @@ void QueryAnalysisSampleTrackerTest::testRefreshConfigIncrementAndReport() {
     // Verify server status, two active collections.
     serverStatus = tracker.reportForServerStatus();
     parsedServerStatus = QueryAnalysisServerStatus::parse(
-        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"),
-        serverStatus);
+        serverStatus,
+        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"));
     ASSERT_EQ(parsedServerStatus.getActiveCollections(), 2);
     ASSERT_EQ(parsedServerStatus.getTotalCollections(), 2);
     ASSERT_EQ(parsedServerStatus.getTotalSampledReadsCount(), 3);
@@ -285,8 +284,8 @@ void QueryAnalysisSampleTrackerTest::testRefreshConfigIncrementAndReport() {
     tracker.reportForCurrentOp(&ops);
     ASSERT_EQ(1, ops.size());
     parsedOp = CollectionSampleCountersCurrentOp::parse(
-        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"),
-        ops[0]);
+        ops[0],
+        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"));
     ASSERT_EQ(parsedOp.getNs(), nss0);
     ASSERT_EQ(parsedOp.getCollUuid(), collUuid0);
     if (supportsSampling) {
@@ -303,8 +302,8 @@ void QueryAnalysisSampleTrackerTest::testRefreshConfigIncrementAndReport() {
     // Verify server status, one active configuration.
     serverStatus = tracker.reportForServerStatus();
     parsedServerStatus = QueryAnalysisServerStatus::parse(
-        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"),
-        serverStatus);
+        serverStatus,
+        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"));
     ASSERT_EQ(parsedServerStatus.getActiveCollections(), 1);
     ASSERT_EQ(parsedServerStatus.getTotalCollections(), 2);
     ASSERT_EQ(parsedServerStatus.getTotalSampledReadsCount(), 3);
@@ -327,8 +326,8 @@ void QueryAnalysisSampleTrackerTest::testRefreshConfigIncrementAndReport() {
     tracker.reportForCurrentOp(&ops);
     ASSERT_EQ(2, ops.size());
     parsedOp = CollectionSampleCountersCurrentOp::parse(
-        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"),
-        ops[0]);
+        ops[0],
+        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"));
     ASSERT_EQ(parsedOp.getDesc(), kCurrentOpDescFieldValue);
     ASSERT_EQ(parsedOp.getNs(), nss0);
     ASSERT_EQ(parsedOp.getCollUuid(), collUuid0);
@@ -343,8 +342,8 @@ void QueryAnalysisSampleTrackerTest::testRefreshConfigIncrementAndReport() {
         ASSERT_EQ(parsedOp.getSampledWritesBytes(), sampledQueryDocSizeBytes);
     }
     parsedOp = CollectionSampleCountersCurrentOp::parse(
-        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"),
-        ops[1]);
+        ops[1],
+        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"));
     ASSERT_EQ(parsedOp.getDesc(), kCurrentOpDescFieldValue);
     ASSERT_EQ(parsedOp.getNs(), nss1);
     ASSERT_EQ(parsedOp.getCollUuid(), collUuid1);
@@ -362,8 +361,8 @@ void QueryAnalysisSampleTrackerTest::testRefreshConfigIncrementAndReport() {
     // Verify server status, two active collections.
     serverStatus = tracker.reportForServerStatus();
     parsedServerStatus = QueryAnalysisServerStatus::parse(
-        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"),
-        serverStatus);
+        serverStatus,
+        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"));
     ASSERT_EQ(parsedServerStatus.getActiveCollections(), 2);
     ASSERT_EQ(parsedServerStatus.getTotalCollections(), 2);
     ASSERT_EQ(parsedServerStatus.getTotalSampledReadsCount(), 3);
@@ -387,8 +386,8 @@ void QueryAnalysisSampleTrackerTest::testRefreshConfigIncrementAndReport() {
     tracker.reportForCurrentOp(&ops);
     ASSERT_EQ(1, ops.size());
     parsedOp = CollectionSampleCountersCurrentOp::parse(
-        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"),
-        ops[0]);
+        ops[0],
+        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"));
     ASSERT_EQ(parsedOp.getDesc(), kCurrentOpDescFieldValue);
     ASSERT_EQ(parsedOp.getNs(), nss0);
     ASSERT_EQ(parsedOp.getCollUuid(), collUuid0After);
@@ -406,8 +405,8 @@ void QueryAnalysisSampleTrackerTest::testRefreshConfigIncrementAndReport() {
     // Verify server status, one active collection.
     serverStatus = tracker.reportForServerStatus();
     parsedServerStatus = QueryAnalysisServerStatus::parse(
-        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"),
-        serverStatus);
+        serverStatus,
+        IDLParserContext("QueryAnalysisSampleTrackerTest.RefreshConfigIncrementAndReport_TEST"));
     ASSERT_EQ(parsedServerStatus.getActiveCollections(), 1);
     ASSERT_EQ(parsedServerStatus.getTotalCollections(), 2);
     ASSERT_EQ(parsedServerStatus.getTotalSampledReadsCount(), 3);
@@ -428,7 +427,7 @@ TEST_F(QueryAnalysisSampleTrackerTest, RefreshConfigIncrementAndReportMongos) {
 TEST_F(QueryAnalysisSampleTrackerTest, RefreshConfigIncrementAndReportShardSvrMongod) {
     ON_BLOCK_EXIT([&] { serverGlobalParams.clusterRole = ClusterRole::None; });
 
-    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::RouterServer};
+    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
     testRefreshConfigIncrementAndReport();
 }
 

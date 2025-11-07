@@ -32,6 +32,8 @@
 
 namespace mongo {
 
+MONGO_FAIL_POINT_DEFINE(sleepBeforeCurrentDateEvaluation);
+
 namespace {
 
 /**
@@ -120,7 +122,7 @@ boost::optional<int> evaluateIso8601Flag(const Expression* iso8601,
     uassert(40521,
             str::stream() << "iso8601 must evaluate to a bool, found "
                           << typeName(iso8601Output.getType()),
-            iso8601Output.getType() == BSONType::Bool);
+            iso8601Output.getType() == BSONType::boolean);
 
     return iso8601Output.getBool();
 }
@@ -144,7 +146,7 @@ TimeUnit parseTimeUnit(const Value& value, StringData expressionName) {
     uassert(5439013,
             str::stream() << expressionName << " requires 'unit' to be a string, but got "
                           << typeName(value.getType()),
-            BSONType::String == value.getType());
+            BSONType::string == value.getType());
     return addContextToAssertionException([&]() { return parseTimeUnit(value.getStringData()); },
                                           expressionName,
                                           " parameter 'unit' value parsing failed"_sd);
@@ -154,7 +156,7 @@ DayOfWeek parseDayOfWeek(const Value& value, StringData expressionName, StringDa
     uassert(5439015,
             str::stream() << expressionName << " requires '" << parameterName
                           << "' to be a string, but got " << typeName(value.getType()),
-            BSONType::String == value.getType());
+            BSONType::string == value.getType());
     uassert(5439016,
             str::stream() << expressionName << " parameter '" << parameterName
                           << "' value cannot be recognized as a day of a week: "
@@ -167,7 +169,7 @@ boost::optional<TimeZone> makeTimeZone(const TimeZoneDatabase* tzdb,
                                        const Document& root,
                                        const Expression* timeZone,
                                        Variables* variables) {
-    invariant(tzdb);
+    tassert(11103500, "Expected non-null TimeZoneDatabase", tzdb);
 
     if (!timeZone) {
         return mongo::TimeZoneDatabase::utcZone();
@@ -182,7 +184,7 @@ boost::optional<TimeZone> makeTimeZone(const TimeZoneDatabase* tzdb,
     uassert(40517,
             str::stream() << "timezone must evaluate to a string, found "
                           << typeName(timeZoneId.getType()),
-            timeZoneId.getType() == BSONType::String);
+            timeZoneId.getType() == BSONType::string);
 
     return tzdb->getTimeZone(timeZoneId.getStringData());
 }
@@ -283,7 +285,7 @@ Value evaluate(const ExpressionDateFromString& expr, const Document& root, Varia
                     str::stream() << "$dateFromString requires that 'format' be a string, found: "
                                   << typeName(formatValue.getType()) << " with value "
                                   << formatValue.toString(),
-                    formatValue.getType() == BSONType::String);
+                    formatValue.getType() == BSONType::string);
 
             TimeZone::validateFromStringFormat(formatValue.getStringData());
         }
@@ -309,7 +311,7 @@ Value evaluate(const ExpressionDateFromString& expr, const Document& root, Varia
                 str::stream() << "$dateFromString requires that 'dateString' be a string, found: "
                               << typeName(dateString.getType()) << " with value "
                               << dateString.toString(),
-                dateString.getType() == BSONType::String);
+                dateString.getType() == BSONType::string);
 
         const auto dateTimeString = dateString.getStringData();
 
@@ -397,7 +399,7 @@ Value evaluate(const ExpressionDateToString& expr, const Document& root, Variabl
                     str::stream() << "$dateToString requires that 'format' be a string, found: "
                                   << typeName(formatValue.getType()) << " with value "
                                   << formatValue.toString(),
-                    formatValue.getType() == BSONType::String);
+                    formatValue.getType() == BSONType::string);
 
             TimeZone::validateToStringFormat(formatValue.getStringData());
         }
@@ -644,7 +646,7 @@ Value evaluate(const ExpressionTsSecond& expr, const Document& root, Variables* 
     uassert(5687301,
             str::stream() << " Argument to " << expr.getOpName() << " must be a timestamp, but is "
                           << typeName(operand.getType()),
-            operand.getType() == BSONType::bsonTimestamp);
+            operand.getType() == BSONType::timestamp);
 
     return Value(static_cast<long long>(operand.getTimestamp().getSecs()));
 }
@@ -659,7 +661,7 @@ Value evaluate(const ExpressionTsIncrement& expr, const Document& root, Variable
     uassert(5687302,
             str::stream() << " Argument to " << expr.getOpName() << " must be a timestamp, but is "
                           << typeName(operand.getType()),
-            operand.getType() == BSONType::bsonTimestamp);
+            operand.getType() == BSONType::timestamp);
 
     return Value(static_cast<long long>(operand.getTimestamp().getInc()));
 }
@@ -790,6 +792,14 @@ Value evaluate(const ExpressionYear& expr, const Document& root, Variables* vari
         });
 }
 
+Value evaluate(const ExpressionCurrentDate&, const Document&, Variables*) {
+    if (MONGO_unlikely(sleepBeforeCurrentDateEvaluation.shouldFail())) {
+        sleepBeforeCurrentDateEvaluation.execute(
+            [&](const BSONObj& data) { sleepmillis(data["ms"].numberInt()); });
+    }
+
+    return Value(Date_t::now());
+}
 
 }  // namespace exec::expression
 }  // namespace mongo

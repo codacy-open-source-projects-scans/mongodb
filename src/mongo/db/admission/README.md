@@ -120,17 +120,19 @@ E --> H
 
 ## Admission Priority
 
-Associated with every operation is an admission priority, stored as a part of the
-[AdmissionContext](https://github.com/mongodb/mongo/blob/r6.3.0-rc0/src/mongo/util/concurrency/admission_context.h#L40).
-By default, operations are 'normal' priority.
+As operations gets admitted through execution control and ingress admission, they get tickets from
+those queues. Associated with every ticket is an admission priority for that admission. By default,
+tickets have 'normal' priority. For ingress admission, operations created by a process-internal
+client are exempted when performing the ingress admission check. For execution control, exemption
+must be set explicitly.
 
 In the Flow Control ticketing system, operations of 'immediate' priority bypass ticket acquisition
 regardless of ticket availability. Tickets that are not 'immediate' priority must throttle when
 there are no tickets available in both Flow Control and Execution Control.
 
-Flow Control is only concerned whether an operation is 'immediate' priority and does not
-differentiate between 'normal' and 'low' priorities. The current version of Execution Control relies
-on admission priority to administer tickets when the server is under load.
+Flow Control is only concerned whether an operation is 'immediate' priority.
+The current version of Execution Control only takes into account if the priority is exempt or not,
+as exempt priority is the only one beside normal priority.
 
 **AdmissionContext::Priority**
 
@@ -139,59 +141,124 @@ on admission priority to administer tickets when the server is under load.
   prepared transactions).
 - `kNormal` - An operation that should be throttled when the server is under load. If an operation
   is throttled, it will not affect availability or observability. Most operations, both user and
-  internal, should use this priority unless they qualify as 'kLow' or 'kExempt' priority.
-- `kLow` - Reserved for background tasks that have no other operations dependent on them. The
-  operation will be throttled under load and make significantly less progress compared to operations
-  of higher priorities in the Execution Control.
+  internal, should use this priority unless they qualify as 'kExempt' priority.
 
 [See AdmissionContext::Priority for more
-details](https://github.com/mongodb/mongo/blob/r7.0.0-rc0/src/mongo/util/concurrency/admission_context.h#L45-L67).
+details](https://github.com/mongodb/mongo/blob/r8.0.9/src/mongo/util/concurrency/admission_context.h#L49-L71).
 
-### How to Set Admission Priority
+### How to Exempt an Operation
 
-The preferred method for setting an operation's priority is through the RAII type
-[ScopedAdmissionPriorityForLock](https://github.com/mongodb/mongo/blob/r7.0.0-rc0/src/mongo/db/concurrency/locker.h#L747).
+Some operation may need to be exempt from execution control. In the cases where an operation must
+be explicitly set as exempt, use the RAII type
+[ScopedAdmissionPriority](https://github.com/mongodb/mongo/blob/r8.0.9/src/mongo/util/concurrency/admission_context.h#L136).
 
 ```
-ScopedAdmissionPriorityForLock priority(shard_role_details::getLocker(opCtx), AdmissionContext::Priority::kLow);
+ScopedAdmissionPriority<ExecutionAdmissionContext> priority(opCtx, AdmissionContext::Priority::kExempt);
 ```
 
-Since the GlobalLock may be acquired and released multiple times throughout an operation's lifetime,
-it's important to limit the scope of reprioritization to prevent unintentional side-effects.
-However, if there is a special circumstance where the RAII cannot possibly be used, the priority can
-be set directly through
-[Locker::setAdmissionPriority()](https://github.com/mongodb/mongo/blob/r7.0.0-rc0/src/mongo/db/concurrency/locker.h#L525).
+# RateLimiter
 
-### Developer Guidelines for Declaring Low Admission Priority
+The `RateLimiter` is not an admission mechanism by itself, but rather a component upon which other admission mechanisms are built. It's implemented as a thin wrapper around [Folly's implementation](https://github.com/mongodb/mongo/blob/e28dc659a386bd80f31bdc01175303c3a043d2c9/src/third_party/folly/dist/folly/TokenBucket.h) of a [Token Bucket](https://en.wikipedia.org/wiki/Token_bucket). In this implementation, the token bucket doesn't actually get "refilled" by a background thread or job. Instead, at each acquisition it atomically calculates whether or not a token is available based on the known refill rate and capacity last time a token was acquired.
 
-Developers must evaluate the consequences of each low priority operation from falling too far
-behind, and should try to implement safeguards to avoid any undesirable behaviors for excessive
-delays in low priority operations.
+`RateLimiter` supports two forms of token acquisition: `tryAcquireToken`, which returns whether a token was acquired or not immediately, and `acquireToken`, which supports queueing up to a configurable maxQueueDepth, with support for interruptibility provided through `OperationContext`. The queuing itself is implemented by "borrowing" tokens from the bucket and sleeping until the time at which that "borrow" would have been a valid token acquisition. (e.g. if the bucket is at 0 capacity with a refill rate of 1 token/s, the thread would borrow 1 token, making the capacity -1, and then sleep for 1s, at which point the bucket has returned to 0 tokens).
 
-Whenever possible, an operation should dynamically choose when to be deprioritized or
-re-prioritized. More specifically, all low-priority candidates should assess the impact of
-deprioritizing their operation with respect to the state of the system before taking the GlobalLock
-with low priority.
+# Session Establishment Rate Limiter
 
-For example, since TTL deletes can be an expensive background task, they should default to low
-priority. However, it's important they don't fall too far behind TTL inserts - otherwise, there is a
-risk of unbounded collection growth. To remedy this issue, TTL deletes on a collection [are
-reprioritized](https://github.com/mongodb/mongo/blob/d1a0e34e1e67d4a2b23104af2512d14290b25e5f/src/mongo/db/ttl.idl#L96)
-to normal priority if they can't catch up after n-sub-passes.
+The `SessionEstablishmentRateLimiter` places a limit on the number of connections the server (either mongod or mongos) will establish per second. If the rate of attempted establishments exceeds the configured rate, such establishments will queue until either the remote client disconnects or the front of the queue is reached. If the length of the queue reaches the max configured queue depth (if any), the establishment will be rejected and the connection closed.
 
-Examples of Deprioritized Operations:
+## Code structure and Components
 
-- [TTL
-  deletes](https://github.com/mongodb/mongo/blob/0ceb784512f81f77f0bc55001f83ca77d1aa1d84/src/mongo/db/ttl.cpp#L488)
-- [Persisting sampled queries for analyze shard
-  key](https://github.com/mongodb/mongo/blob/0ef2c68f58ea20c2dde99e5ce3ea10b79e18453d/src/mongo/db/commands/write_commands.cpp#L295)
-- [Unbounded Index
-  Scans](https://github.com/mongodb/mongo/blob/0ef2c68f58ea20c2dde99e5ce3ea10b79e18453d/src/mongo/db/query/planner_access.cpp#L1913)
-- [Unbounded Collection
-  Scans](https://github.com/mongodb/mongo/blob/0ef2c68f58ea20c2dde99e5ce3ea10b79e18453d/src/mongo/db/query/planner_analysis.cpp#L1254)
-- Index Builds
-  [(1)](https://github.com/mongodb/mongo/blob/0ef2c68f58ea20c2dde99e5ce3ea10b79e18453d/src/mongo/db/index_builds_coordinator.cpp#L3064),
-  [(2)](https://github.com/mongodb/mongo/blob/0ef2c68f58ea20c2dde99e5ce3ea10b79e18453d/src/mongo/db/index_builds_coordinator.cpp#L3105)
+Each `SessionManager` owns an instance of `SessionEstablishmentRateLimiter`, which is a thin wrapper around a `RateLimiter`.
+
+## Configuration
+
+The `SessionEstablishmentRateLimiter` is controlled by the following server parameters:
+
+- `ingressConnectionEstablishmentRateLimiterEnabled` (bool, default: false): determines whether the rate limiter is enabled or not. Set at startup and runtime.
+- `ingressConnectionEstablishmentRatePerSec` (int32_t, default: INT_MAX): the number of new connections that will be allowed to establish per second. Set at startup and runtime.
+- `ingressConnectionEstablishmentBurstCapacitySecs` (double, default: DBL_MAX): Describes how many seconds worth of unutilized rate limit can be stored away for use during periods where the rate limit is temporarily exceeded. Set at startup and runtime.
+- `ingressConnectionEstablishmentMaxQueueDepth` (int32, default: 0): the maximum size of the connection establishment queue, after which the server will begin rejecting new connections. The default is 0, which means that the server will reject all connections that would queue. Set at startup and runtime.
+- `ingressConnectionEstablishmentRateLimiterBypass` (document, default: {}): a document containing a list of CIDR ranges to be exempted from the max establishing limits. Set at startup and runtime.
+
+## Admission Token Acquisition
+
+During the first iteration of a `SessionWorkflow`, the session thread will attempt to acquire an admission token by invoking `SessionEstablishmentRateLimiter::throttleIfNeeded` if `ingressConnectionEstablishmentRateLimiterEnabled` is true. If the remote IP address is not included in one of the ranges specified in `ingressConnectionEstablishmentRateLimiterBypass`, the thread will attempt to acquire a token. If there is capacity in the underlying token bucket, the thread will receive a token and proceed with the initial loop of the `SessionWorkflow`. Otherwise, if the queue has not exceeded `ingressConnectionEstablishmentMaxQueueDepth`, the thread will block until it receives one or the blocking is interrupted by shutdown or the remote client disconnecting.
+
+## Metrics
+
+The following metrics were introduced to `serverStatus`:
+
+```json
+"queues.ingressSessionEstablishment": {
+    "addedToQueue": 20,
+    "removedFromQueue": 10,
+    "interruptedInQueue": 5
+    "rejectedAdmissions": 10,
+    "exemptedAdmissions": 5,
+    "successfulAdmissions": 1000,
+    "attemptedAdmissions": 1100,
+    "averageTimeQueuedMicros": 10,
+    "totalAvailableTokens": 0,
+}
+
+"metrics.network": {
+    "averageTimeToCompletedTLSHandshakeMicros": 23235,
+    "averageTimeToCompletedHelloMicros": 35435,
+    "averageTimeToCompletedAuthMicros": 45645,
+}
+
+"connections": {
+    "queuedForEstablishment": 10,
+    "establishmentRateLimit": {
+        "rejected": 5,
+        "exempted": 5,
+        "interruptedDueToClientDisconnect": 7
+    },
+}
+```
+
+# Ingress Request Rate Limiting
+
+The `IngressRequestRateLimiter` places a limit on the number of requests that the server (either mongod or mongos) will allow to enter the system per second. Requests that do not receive admission will be rejected with an error response containing the SystemOverloaded error label. This serves two purposes: it prevents the server from being overwhelmed with more requests than it can process, and it also acts as a form of backpressure. In the future, clients such as drivers and mongos will use this backpressure to inform their retry policies and routing decisions to relieve pressure on the system. The point of admission is placed early in the command path (just [after reading the message](https://github.com/mongodb/mongo/blob/da002b73138c7c8b2da57ab10520776de3192978/src/mongo/transport/session_workflow.cpp#L782-L786) from the transport session in `SessionWorkflow`) to make rejection as cheap as possible.
+
+## Differences with the Data-Node Ingress Admission Controller
+
+While the `IngressRequestRateLimiter` has a similar objective to the `IngressAdmissionController`, it attempts to achieve it in a fundamentally different manner. The `IngressAdmissionController` is implemented as a ticket holder, which limits the maximum concurrency of the system by requiring each running thread to acquire a ticket before proceeding. Threads that cannot receive a ticket will block until they can do so. The `IngressRequestRateLimiter` instead limits how many requests _are allowed to enter_ the system _per unit of time_, rather than how many threads can _be proceeding at any given point in time_. This difference allows it to compose well with other existing concurrency limiters deeper in the system, such as the connection pools in mongos or execution control in mongod, by controlling the length of their queues. This is important because rejecting work up front and keeping the queues short allows the server to preserve availability without sacrificing the latency of every request, which would be required if instead all requests were admitted and then queued endlessly when approaching maximum load. Requests that are not admitted can instead either queue client side until they are more likely to succeed in a retry, saving server resources, or be retried immediately on a different server that would be able service it quickly.
+
+## Code Structure and Components
+
+The [`IngressRequestRateLimiter`](https://github.com/mongodb/mongo/blob/e28dc659a386bd80f31bdc01175303c3a043d2c9/src/mongo/db/admission/ingress_request_rate_limiter.h) is stored as a decoration on `ServiceContext`. It is implemented as a thin wrapper around a [`RateLimiter`](https://github.com/mongodb/mongo/blob/e28dc659a386bd80f31bdc01175303c3a043d2c9/src/mongo/db/admission/rate_limiter.h).
+
+## Configuration
+
+The rate limiter is controlled by the following server parameters:
+
+- `ingressRequestRateLimiterEnabled` (bool, default: false): Determines if the rate limiter is enabled at all.
+- `ingressRequestAdmissionRatePerSec` (int32, default: INT32_MAX): The number of new requests that will be admitted per second once the burst capacity is consumed. On a technical level, this controls the refill rate of the underlying token bucket.
+- `ingressRequestAdmissionBurstCapacitySecs` (double, default: DBL_MAX): Describes how many seconds worth of unutilized rate limit can be stored away to admit additional ingress requests during periods where the rate limit is temporarily exceeded. On a technical level, this describes the capacity of the underlying token bucket in terms of the rate limit.
+- `ingressRequestRateLimiterExemptions` (document, default: {}): A document containing a list of CIDR ranges to be exempted from ingress request rate limiting. Acceptable values here follow the same format as the `maxIncomingConnectionsOverride`.
+
+## Admission Token Acquisition
+
+Session threads attempt to acquire an admission token in the `SessionWorkflow` immediately after reading a message from the ingress session if `ingressRequestRateLimiterEnabled` is true and the thread is not exempt from ingress request rate limiting. A thread can be exempt under the following circumstances:
+
+- The remote IP address is included in one of the ranges specified in `ingressRequestRateLimiterExemptions`.
+- Auth is enabled and the ingress session has not been authenticated yet.
+  - This exemption is to prevent unauthenticated clients from consuming all of the rate limiter tokens, causing unavailability.
+
+Because token acquisition currently only takes place in the `SessionWorkflow`, all internal requests are not subject to rate limiting.
+
+If the thread is not considered exempt, it will attempt to acquire a token from the rate limiter. If it is able to do so, it proceeds as normal. Otherwise, the request is rejected with an error labeled with `SystemOverloaded`. Clients will observe this label and interpret the server as being overloaded, modifying their routing and retry logic accordingly.
+
+## Metrics
+
+The following `serverStatus` metrics are emitted by the `IngressRequestRateLimiter` in the `network.ingressRequestRateLimiter` section:
+
+- `attemptedAdmissions`: the total number of requests that attempted to acquire an admission token, excluding exemptions.
+- `successfulAdmissions`: the total number of requests that successfully were admitted into the system, excluding exemptions.
+- `rejectedAdmissions`: the total number of requests that were rejected by the rate limiter.
+- `exemptedAdmissions`: the total number of requests that bypassed the rate limiter due to one of the conditions described above.
+- `totalAvailableTokens`: the current capacity of the underlying token bucket.
 
 # Data-Node Ingress Admission Control
 
@@ -270,12 +337,12 @@ are expected to fall under this category**.
 To apply admission control selectively, override `isSubjectToIngressAdmissionControl` and implement
 selective logic to determine [when it should be applied][subjectAdmissionFind].
 
-[initiateCommand]: https://github.com/10gen/mongo/blob/a86c7f5de2a5de4d2f49e40e8970754ec6a5ba6c/src/mongo/db/service_entry_point_shard_role.cpp#L1588
-[admissionServerParam]: https://github.com/10gen/mongo/blob/291b72ec4a8364208d7633d881cddc98787832b8/src/mongo/db/service_entry_point_shard_role.cpp#L1804
-[admissionPriority]: https://github.com/10gen/mongo/blob/291b72ec4a8364208d7633d881cddc98787832b8/src/mongo/db/service_entry_point_shard_role.cpp#L1809
-[tryAcquire]: https://github.com/10gen/mongo/blob/0ed24f52f011fc16cd968368ace216fe7e747723/src/mongo/util/concurrency/ticketholder.cpp#L130
-[subjectAdmissionExTrue]: https://github.com/10gen/mongo/blob/0ed24f52f011fc16cd968368ace216fe7e747723/src/mongo/db/commands/query_cmd/bulk_write.cpp#L1311
-[subjectAdmissionFind]: https://github.com/10gen/mongo/blob/0ed24f52f011fc16cd968368ace216fe7e747723/src/mongo/db/commands/query_cmd/find_cmd.cpp#L385
-[subjectVirtualFalse]: https://github.com/10gen/mongo/blob/0ed24f52f011fc16cd968368ace216fe7e747723/src/mongo/db/commands.h#L956
-[ticketRelease]: https://github.com/10gen/mongo/blob/0ed24f52f011fc16cd968368ace216fe7e747723/src/mongo/db/service_entry_point_shard_role.cpp#L519
-[ingressACidl]: https://github.com/10gen/mongo/blob/cbb6b8543feeb6e110f646bbeb44d8779d838db1/src/mongo/db/admission/ingress_admission_control.idl#L43
+[initiateCommand]: https://github.com/mongodb/mongo/blob/a86c7f5de2a5de4d2f49e40e8970754ec6a5ba6c/src/mongo/db/service_entry_point_shard_role.cpp#L1588
+[admissionServerParam]: https://github.com/mongodb/mongo/blob/291b72ec4a8364208d7633d881cddc98787832b8/src/mongo/db/service_entry_point_shard_role.cpp#L1804
+[admissionPriority]: https://github.com/mongodb/mongo/blob/291b72ec4a8364208d7633d881cddc98787832b8/src/mongo/db/service_entry_point_shard_role.cpp#L1809
+[tryAcquire]: https://github.com/mongodb/mongo/blob/0ed24f52f011fc16cd968368ace216fe7e747723/src/mongo/util/concurrency/ticketholder.cpp#L130
+[subjectAdmissionExTrue]: https://github.com/mongodb/mongo/blob/0ed24f52f011fc16cd968368ace216fe7e747723/src/mongo/db/commands/query_cmd/bulk_write.cpp#L1311
+[subjectAdmissionFind]: https://github.com/mongodb/mongo/blob/0ed24f52f011fc16cd968368ace216fe7e747723/src/mongo/db/commands/query_cmd/find_cmd.cpp#L385
+[subjectVirtualFalse]: https://github.com/mongodb/mongo/blob/0ed24f52f011fc16cd968368ace216fe7e747723/src/mongo/db/commands.h#L956
+[ticketRelease]: https://github.com/mongodb/mongo/blob/0ed24f52f011fc16cd968368ace216fe7e747723/src/mongo/db/service_entry_point_shard_role.cpp#L519
+[ingressACidl]: https://github.com/mongodb/mongo/blob/cbb6b8543feeb6e110f646bbeb44d8779d838db1/src/mongo/db/admission/ingress_admission_control.idl#L43

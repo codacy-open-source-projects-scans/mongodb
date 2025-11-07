@@ -28,11 +28,6 @@
  */
 
 
-#include <algorithm>
-#include <cstddef>
-#include <string>
-#include <utility>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -40,13 +35,15 @@
 #include "mongo/bson/json.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/shared_buffer.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <string>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -82,7 +79,7 @@ TEST(Decimal128BSONTest, TestsConstructingDecimalWithBsonDump) {
 
     while (it.more()) {
         BSONElement testCase = it.next();
-        if (testCase.type() == Object) {
+        if (testCase.type() == BSONType::object) {
             BSONObj b = testCase.Obj();
             BSONElement desc = b.getField("description");
             BSONElement bson = b.getField("bson");

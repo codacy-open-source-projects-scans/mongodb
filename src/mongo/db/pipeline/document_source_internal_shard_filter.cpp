@@ -28,26 +28,19 @@
  */
 
 
+#include "mongo/db/pipeline/document_source_internal_shard_filter.h"
+
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/shard_filterer_impl.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
+#include "mongo/util/assert_util.h"
+
 #include <iterator>
 #include <list>
 #include <utility>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/db/pipeline/document_source_internal_shard_filter.h"
-
-#include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/exec/shard_filterer_impl.h"
-#include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/s/operation_sharding_state.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/util/assert_util_core.h"
-
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
-
 
 namespace mongo {
 
@@ -55,6 +48,8 @@ namespace mongo {
 // This DocumentSource is not registered and can only be created as part of expansions for other
 // DocumentSources.
 //
+
+ALLOCATE_DOCUMENT_SOURCE_ID(_internalShardFilter, DocumentSourceInternalShardFilter::id)
 
 boost::intrusive_ptr<DocumentSourceInternalShardFilter>
 DocumentSourceInternalShardFilter::buildIfNecessary(
@@ -79,36 +74,8 @@ DocumentSourceInternalShardFilter::DocumentSourceInternalShardFilter(
     std::unique_ptr<ShardFilterer> shardFilterer)
     : DocumentSource(kStageName, pExpCtx), _shardFilterer(std::move(shardFilterer)) {}
 
-DocumentSource::GetNextResult DocumentSourceInternalShardFilter::doGetNext() {
-    auto next = pSource->getNext();
-    invariant(_shardFilterer);
-    for (; next.isAdvanced(); next = pSource->getNext()) {
-        const auto belongsRes = _shardFilterer->documentBelongsToMe(next.getDocument().toBson());
-        if (belongsRes == ShardFilterer::DocumentBelongsResult::kBelongs) {
-            return next;
-        }
-
-        if (belongsRes == ShardFilterer::DocumentBelongsResult::kNoShardKey) {
-            LOGV2_WARNING(23870,
-                          "no shard key found in document {next_getDocument_toBson} for shard key "
-                          "pattern {shardFilterer_getKeyPattern}, document may have been inserted "
-                          "manually into shard",
-                          "next_getDocument_toBson"_attr = redact(next.getDocument().toBson()),
-                          "shardFilterer_getKeyPattern"_attr = _shardFilterer->getKeyPattern());
-        }
-
-        // For performance reasons, a streaming stage must not keep references to documents across
-        // calls to getNext(). Such stages must retrieve a result from their child and then release
-        // it (or return it) before asking for another result. Failing to do so can result in extra
-        // work, since the Document/Value library must copy data on write when that data has a
-        // refcount above one.
-        next.releaseDocument();
-    }
-    return next;
-}
-
-Pipeline::SourceContainer::iterator DocumentSourceInternalShardFilter::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator DocumentSourceInternalShardFilter::doOptimizeAt(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     invariant(*itr == this);
 
     if (_shardFilterer->isCollectionSharded()) {

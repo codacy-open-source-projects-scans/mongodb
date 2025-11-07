@@ -30,53 +30,55 @@
 
 #include <boost/date_time/posix_time/posix_time_types.hpp>
 // IWYU pragma: no_include "boost/date_time/gregorian_calendar.ipp"
-#include <algorithm>
-#include <boost/date_time/posix_time/posix_time_duration.hpp>
-#include <boost/date_time/posix_time/posix_time_io.hpp>
-#include <boost/date_time/posix_time/ptime.hpp>
-#include <boost/date_time/time_duration.hpp>
-#include <boost/iterator/iterator_traits.hpp>
-#include <boost/operators.hpp>
-#include <cstdio>
-#include <deque>
-#include <iterator>
-#include <mutex>
-#include <sstream>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/bson_extract.h"
-#include "mongo/db/namespace_string.h"
+#include "mongo/db/generic_argument_util.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/s/balancer_configuration.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/grid.h"
+#include "mongo/s/balancer_feature_flag_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <cstdio>
+#include <deque>
+#include <iterator>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/date_time/gregorian/gregorian.hpp>
+#include <boost/date_time/posix_time/posix_time_duration.hpp>
+#include <boost/date_time/posix_time/posix_time_io.hpp>
+#include <boost/date_time/posix_time/ptime.hpp>
+#include <boost/date_time/time_duration.hpp>
+#include <boost/iterator/iterator_traits.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/operators.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 
 namespace mongo {
 namespace {
+const std::array<std::string, 7> kDaysOfWeek = {
+    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 
-// parses time of day in "hh:mm" format assuming 'hh' is 00-23
+// Parses time of day in "hh:mm" format assuming 'hh' is 00-23.
 bool toPointInTime(const std::string& str, boost::posix_time::ptime* timeOfDay) {
     int hh = 0;
     int mm = 0;
@@ -84,7 +86,7 @@ bool toPointInTime(const std::string& str, boost::posix_time::ptime* timeOfDay) 
         return false;
     }
 
-    // verify that time is well formed
+    // Verify that time is well formed.
     if ((hh / 24) || (mm / 60)) {
         return false;
     }
@@ -102,68 +104,67 @@ const char kMode[] = "mode";
 const char kActiveWindow[] = "activeWindow";
 const char kWaitForDelete[] = "_waitForDelete";
 const char kAttemptToBalanceJumboChunks[] = "attemptToBalanceJumboChunks";
+const char kActiveWindowDOW[] = "activeWindowDOW";
+const char kDay[] = "day";
+const char kStart[] = "start";
+const char kStop[] = "stop";
+
+bool isValidDayOfWeek(const std::string& dayStr) {
+    return std::find(kDaysOfWeek.begin(), kDaysOfWeek.end(), dayStr) != kDaysOfWeek.end();
+}
+
+std::string getDayOfWeekString(const boost::gregorian::date& date) {
+    return kDaysOfWeek[date.day_of_week()];
+}
 
 }  // namespace
 
-const char BalancerSettingsType::kKey[] = "balancer";
-const std::vector<std::string> BalancerSettingsType::kBalancerModes = {"full", "off"};
+const std::vector<std::string> balancerModes = {"full", "off"};
 const BSONObj BalancerSettingsType::kSchema =
-    BSON("properties" << BSON("_id" << BSON("enum" << BSON_ARRAY(BalancerSettingsType::kKey))
-                                    << kMode << BSON("enum" << kBalancerModes) << kStopped
-                                    << BSON("bsonType"
-                                            << "bool")
-                                    << kActiveWindow
-                                    << BSON("bsonType"
-                                            << "object"
-                                            << "required"
-                                            << BSON_ARRAY("start"
-                                                          << "stop"))
-                                    << "_secondaryThrottle"
-                                    << BSON("oneOf" << BSON_ARRAY(BSON("bsonType"
-                                                                       << "bool")
-                                                                  << BSON("bsonType"
-                                                                          << "object")))
-                                    << kWaitForDelete
-                                    << BSON("bsonType"
-                                            << "bool")
-                                    << kAttemptToBalanceJumboChunks
-                                    << BSON("bsonType"
-                                            << "bool"))
-                      << "additionalProperties" << false);
+    BSON("properties"
+         << BSON("_id" << BSON("enum" << BSON_ARRAY(BalancerConfiguration::kBalancerSettingKey))
+                       << kMode << BSON("enum" << balancerModes) << kStopped
+                       << BSON("bsonType" << "bool") << kActiveWindow
+                       << BSON("bsonType" << "object"
+                                          << "required" << BSON_ARRAY("start" << "stop"))
+                       << kActiveWindowDOW << BSON("bsonType" << "array") << "_secondaryThrottle"
+                       << BSON("oneOf" << BSON_ARRAY(BSON("bsonType" << "bool")
+                                                     << BSON("bsonType" << "object")))
+                       << kWaitForDelete << BSON("bsonType" << "bool")
+                       << kAttemptToBalanceJumboChunks << BSON("bsonType" << "bool"))
+         << "additionalProperties" << false);
 
 const char ChunkSizeSettingsType::kKey[] = "chunksize";
 const uint64_t ChunkSizeSettingsType::kDefaultMaxChunkSizeBytes{128 * 1024 * 1024};
 const BSONObj ChunkSizeSettingsType::kSchema = BSON(
     "properties" << BSON("_id" << BSON("enum" << BSON_ARRAY(ChunkSizeSettingsType::kKey)) << kValue
-                               << BSON("bsonType"
-                                       << "number"
-                                       << "minimum" << 1 << "maximum" << 1024))
+                               << BSON("bsonType" << "number"
+                                                  << "minimum" << 1 << "maximum" << 1024))
                  << "additionalProperties" << false);
 
 const char AutoMergeSettingsType::kKey[] = "automerge";
 
 BalancerConfiguration::BalancerConfiguration()
-    : _balancerSettings(BalancerSettingsType::createDefault()),
+    : _balancerSettings(BalancerConfiguration::createDefaultSettings()),
       _maxChunkSizeBytes(ChunkSizeSettingsType::kDefaultMaxChunkSizeBytes),
       _shouldAutoMerge(true) {}
 
 BalancerConfiguration::~BalancerConfiguration() = default;
 
-BalancerSettingsType::BalancerMode BalancerConfiguration::getBalancerMode() const {
+BalancerModeEnum BalancerConfiguration::getBalancerMode() const {
     stdx::lock_guard<stdx::mutex> lk(_balancerSettingsMutex);
     return _balancerSettings.getMode();
 }
 
-Status BalancerConfiguration::setBalancerMode(OperationContext* opCtx,
-                                              BalancerSettingsType::BalancerMode mode) {
+Status BalancerConfiguration::setBalancerMode(OperationContext* opCtx, BalancerModeEnum mode) {
     auto updateStatus = Grid::get(opCtx)->catalogClient()->updateConfigDocument(
         opCtx,
         NamespaceString::kConfigSettingsNamespace,
-        BSON("_id" << BalancerSettingsType::kKey),
-        BSON("$set" << BSON(kStopped << (mode == BalancerSettingsType::kOff) << kMode
-                                     << BalancerSettingsType::kBalancerModes[mode])),
+        BSON("_id" << kBalancerSettingKey),
+        BSON("$set" << BSON(kStopped << (mode == BalancerModeEnum::kOff) << kMode
+                                     << BalancerMode_serializer(mode))),
         true,
-        ShardingCatalogClient::kMajorityWriteConcern);
+        defaultMajorityWriteConcernDoNotUse());
 
     Status refreshStatus = refreshAndCheck(opCtx);
     if (!refreshStatus.isOK()) {
@@ -173,7 +174,7 @@ Status BalancerConfiguration::setBalancerMode(OperationContext* opCtx,
     if (!updateStatus.isOK() && (getBalancerMode() != mode)) {
         return updateStatus.getStatus().withContext(str::stream()
                                                     << "Failed to set the balancer mode to "
-                                                    << BalancerSettingsType::kBalancerModes[mode]);
+                                                    << BalancerMode_serializer(mode));
     }
 
     return Status::OK();
@@ -186,7 +187,7 @@ Status BalancerConfiguration::changeAutoMergeSettings(OperationContext* opCtx, b
         BSON("_id" << AutoMergeSettingsType::kKey),
         BSON("$set" << BSON(kEnabled << enable)),
         true,
-        ShardingCatalogClient::kMajorityWriteConcern);
+        defaultMajorityWriteConcernDoNotUse());
 
     Status refreshStatus = refreshAndCheck(opCtx);
     if (!refreshStatus.isOK()) {
@@ -201,56 +202,59 @@ Status BalancerConfiguration::changeAutoMergeSettings(OperationContext* opCtx, b
     return Status::OK();
 }
 
-bool BalancerConfiguration::shouldBalance() const {
+bool BalancerConfiguration::shouldBalance(OperationContext* opCtx) const {
     stdx::lock_guard<stdx::mutex> lk(_balancerSettingsMutex);
-    if (_balancerSettings.getMode() != BalancerSettingsType::kFull) {
+    if (_balancerSettings.getMode() != BalancerModeEnum::kFull) {
         return false;
     }
 
-    return _balancerSettings.isTimeInBalancingWindow(boost::posix_time::second_clock::local_time());
+    return isTimeInBalancingWindow(opCtx, boost::posix_time::second_clock::local_time());
 }
 
-bool BalancerConfiguration::shouldBalanceForAutoMerge() const {
+bool BalancerConfiguration::shouldBalanceForAutoMerge(OperationContext* opCtx) const {
     stdx::lock_guard<stdx::mutex> lk(_balancerSettingsMutex);
-    if (_balancerSettings.getMode() == BalancerSettingsType::kOff || !shouldAutoMerge()) {
+    if (_balancerSettings.getMode() == BalancerModeEnum::kOff || !shouldAutoMerge()) {
         return false;
     }
 
-    return _balancerSettings.isTimeInBalancingWindow(boost::posix_time::second_clock::local_time());
+    return isTimeInBalancingWindow(opCtx, boost::posix_time::second_clock::local_time());
 }
 
 MigrationSecondaryThrottleOptions BalancerConfiguration::getSecondaryThrottle() const {
     stdx::lock_guard<stdx::mutex> lk(_balancerSettingsMutex);
-    return _balancerSettings.getSecondaryThrottle();
+    if (auto throttle = _balancerSettings.get_secondaryThrottle()) {
+        return *throttle;
+    }
+    return MigrationSecondaryThrottleOptions::create(MigrationSecondaryThrottleOptions::kDefault);
 }
 
 bool BalancerConfiguration::waitForDelete() const {
     stdx::lock_guard<stdx::mutex> lk(_balancerSettingsMutex);
-    return _balancerSettings.waitForDelete();
+    return _balancerSettings.get_waitForDelete();
 }
 
 bool BalancerConfiguration::attemptToBalanceJumboChunks() const {
     stdx::lock_guard<stdx::mutex> lk(_balancerSettingsMutex);
-    return _balancerSettings.attemptToBalanceJumboChunks();
+    return _balancerSettings.getAttemptToBalanceJumboChunks();
 }
 
 Status BalancerConfiguration::refreshAndCheck(OperationContext* opCtx) {
     try {
         Lock::ExclusiveLock settingsRefreshLock(opCtx, _settingsRefreshMutex);
 
-        // Balancer configuration
+        // Balancer configuration.
         Status balancerSettingsStatus = _refreshBalancerSettings(opCtx);
         if (!balancerSettingsStatus.isOK()) {
             return balancerSettingsStatus.withContext("Failed to refresh the balancer settings");
         }
 
-        // Chunk size settings
+        // Chunk size settings.
         Status chunkSizeStatus = _refreshChunkSizeSettings(opCtx);
         if (!chunkSizeStatus.isOK()) {
             return chunkSizeStatus.withContext("Failed to refresh the chunk sizes settings");
         }
 
-        // Global auto merge settings
+        // Global auto merge settings.
         Status autoMergeStatus = _refreshAutoMergeSettings(opCtx);
         if (!autoMergeStatus.isOK()) {
             return autoMergeStatus.withContext("Failed to refresh the autoMerge settings");
@@ -264,12 +268,12 @@ Status BalancerConfiguration::refreshAndCheck(OperationContext* opCtx) {
 }
 
 Status BalancerConfiguration::_refreshBalancerSettings(OperationContext* opCtx) {
-    BalancerSettingsType settings = BalancerSettingsType::createDefault();
+    BalancerSettings settings = BalancerConfiguration::createDefaultSettings();
 
     auto settingsObjStatus =
-        Grid::get(opCtx)->catalogClient()->getGlobalSettings(opCtx, BalancerSettingsType::kKey);
+        Grid::get(opCtx)->catalogClient()->getGlobalSettings(opCtx, kBalancerSettingKey);
     if (settingsObjStatus.isOK()) {
-        auto settingsStatus = BalancerSettingsType::fromBSON(settingsObjStatus.getValue());
+        auto settingsStatus = getSettingsFromBSON(opCtx, settingsObjStatus.getValue());
         if (!settingsStatus.isOK()) {
             return settingsStatus.getStatus();
         }
@@ -338,147 +342,169 @@ Status BalancerConfiguration::_refreshAutoMergeSettings(OperationContext* opCtx)
     return Status::OK();
 }
 
-BalancerSettingsType::BalancerSettingsType()
-    : _secondaryThrottle(
-          MigrationSecondaryThrottleOptions::create(MigrationSecondaryThrottleOptions::kDefault)) {}
-
-BalancerSettingsType BalancerSettingsType::createDefault() {
-    return BalancerSettingsType();
+BalancerSettings BalancerConfiguration::createDefaultSettings() {
+    return BalancerSettings();
 }
 
-StatusWith<BalancerSettingsType> BalancerSettingsType::fromBSON(const BSONObj& obj) {
-    BalancerSettingsType settings;
+StatusWith<BalancerSettings> BalancerConfiguration::getSettingsFromBSON(OperationContext* opCtx,
+                                                                        const BSONObj& obj) {
+
+    BalancerSettings settings;
+    try {
+        IDLParserContext ctxt("BalancerSettings");
+        settings = BalancerSettings::parse(obj, ctxt);
+    } catch (const DBException& ex) {
+        return ex.toStatus();
+    }
 
     {
-        bool stopped;
-        Status status = bsonExtractBooleanFieldWithDefault(obj, kStopped, false, &stopped);
-        if (!status.isOK())
-            return status;
-        if (stopped) {
-            settings._mode = kOff;
-        } else {
-            std::string modeStr;
-            status = bsonExtractStringFieldWithDefault(obj, kMode, kBalancerModes[kFull], &modeStr);
-            if (!status.isOK())
-                return status;
-            auto it = std::find(std::begin(kBalancerModes), std::end(kBalancerModes), modeStr);
-            if (it == std::end(kBalancerModes)) {
-                LOGV2_WARNING(
-                    7575700,
-                    "Balancer turned off because currently set balancing mode is not valid",
-                    "currentMode"_attr = modeStr,
-                    "supportedModes"_attr = kBalancerModes);
-                settings._mode = kOff;
+        if (settings.getStopped()) {
+            settings.setMode(BalancerModeEnum::kOff);
+        }
+    }
+
+    // Handle activeWindowDOW and activeWindow logic
+    {
+        bool shouldValidateActiveWindow = true;
+        const auto& activeWindowDOW = settings.getActiveWindowDOW();
+
+        if (activeWindowDOW && !activeWindowDOW->empty()) {
+            // DOW settings exist, check feature flag.
+            bool balancerDOWWindowEnabled = feature_flags::gFeatureFlagBalancerWindowDOW.isEnabled(
+                VersionContext::getDecoration(opCtx),
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+
+            if (balancerDOWWindowEnabled) {
+                // Feature flag enabled, validate DOW settings.
+                for (const auto& window : *activeWindowDOW) {
+                    boost::posix_time::ptime startTime, stopTime;
+                    if (!toPointInTime(std::string(window.getStart()), &startTime) ||
+                        !toPointInTime(std::string(window.getStop()), &stopTime)) {
+                        return Status(ErrorCodes::BadValue,
+                                      "time format must be \"hh:mm\" in activeWindowDOW");
+                    }
+
+                    // Check that start and stop designate different time points.
+                    if (startTime == stopTime) {
+                        return Status(ErrorCodes::BadValue,
+                                      "start and stop times must be different in activeWindowDOW");
+                    }
+                }
+                shouldValidateActiveWindow = false;
             } else {
-                settings._mode = static_cast<BalancerMode>(it - std::begin(kBalancerModes));
+                LOGV2_WARNING(8248700, "Ignoring activeWindowDOW settings for versions under 8.3");
+            }
+        }
+
+        // Validate activeWindow settings if DOW wasn't successfully processed
+        // (either DOW doesn't exist or feature flag is disabled).
+        if (shouldValidateActiveWindow) {
+            const auto& activeWindow = settings.getActiveWindow();
+            if (activeWindow) {
+                // IDL already parsed the start/stop strings, now validate time format
+                boost::posix_time::ptime startTime, stopTime;
+                if (!toPointInTime(std::string(activeWindow->getStart()), &startTime) ||
+                    !toPointInTime(std::string(activeWindow->getStop()), &stopTime)) {
+                    return Status(ErrorCodes::BadValue,
+                                  "activeWindow format is { start: \"hh:mm\" , stop: \"hh:mm\" }");
+                }
+
+                // Check that start and stop designate different time points.
+                if (startTime == stopTime) {
+                    return Status(ErrorCodes::BadValue, "start and stop times must be different");
+                }
             }
         }
     }
 
     {
-        BSONElement activeWindowElem;
-        Status status = bsonExtractTypedField(obj, kActiveWindow, Object, &activeWindowElem);
-        if (status.isOK()) {
-            const BSONObj balancingWindowObj = activeWindowElem.Obj();
-            if (balancingWindowObj.isEmpty()) {
-                return Status(ErrorCodes::BadValue, "activeWindow not specified");
-            }
-
-            // Check if both 'start' and 'stop' are present
-            const std::string start = balancingWindowObj.getField("start").str();
-            const std::string stop = balancingWindowObj.getField("stop").str();
-
-            if (start.empty() || stop.empty()) {
-                return Status(ErrorCodes::BadValue,
-                              str::stream()
-                                  << "must specify both start and stop of balancing window: "
-                                  << balancingWindowObj);
-            }
-
-            // Check that both 'start' and 'stop' are valid time-of-day
-            boost::posix_time::ptime startTime;
-            boost::posix_time::ptime stopTime;
-            if (!toPointInTime(start, &startTime) || !toPointInTime(stop, &stopTime)) {
-                return Status(ErrorCodes::BadValue,
-                              str::stream() << kActiveWindow << " format is "
-                                            << " { start: \"hh:mm\" , stop: \"hh:mm\" }");
-            }
-
-            // Check that start and stop designate different time points
-            if (startTime == stopTime) {
-                return Status(ErrorCodes::BadValue,
-                              str::stream() << "start and stop times must be different");
-            }
-
-            settings._activeWindowStart = startTime;
-            settings._activeWindowStop = stopTime;
-        } else if (status != ErrorCodes::NoSuchKey) {
-            return status;
+        if (!settings.get_secondaryThrottle()) {
+            settings.set_secondaryThrottle(
+                boost::make_optional(MigrationSecondaryThrottleOptions::create(
+                    MigrationSecondaryThrottleOptions::kDefault)));
         }
-    }
-
-    {
-        auto secondaryThrottleStatus =
-            MigrationSecondaryThrottleOptions::createFromBalancerConfig(obj);
-        if (!secondaryThrottleStatus.isOK()) {
-            return secondaryThrottleStatus.getStatus();
-        }
-
-        settings._secondaryThrottle = std::move(secondaryThrottleStatus.getValue());
-    }
-
-    {
-        bool waitForDelete;
-        Status status =
-            bsonExtractBooleanFieldWithDefault(obj, kWaitForDelete, false, &waitForDelete);
-        if (!status.isOK())
-            return status;
-
-        settings._waitForDelete = waitForDelete;
-    }
-
-    {
-        bool attemptToBalanceJumboChunks;
-        Status status = bsonExtractBooleanFieldWithDefault(
-            obj, kAttemptToBalanceJumboChunks, false, &attemptToBalanceJumboChunks);
-        if (!status.isOK())
-            return status;
-
-        settings._attemptToBalanceJumboChunks = attemptToBalanceJumboChunks;
     }
 
     return settings;
 }
 
-bool BalancerSettingsType::isTimeInBalancingWindow(const boost::posix_time::ptime& now) const {
-    invariant(!_activeWindowStart == !_activeWindowStop);
 
-    if (!_activeWindowStart) {
-        return true;
-    }
-
+bool BalancerConfiguration::isTimeInBalancingWindow(OperationContext* opCtx,
+                                                    const boost::posix_time::ptime& now) const {
     auto timeToString = [](const boost::posix_time::ptime& time) {
         std::ostringstream ss;
         ss << time;
         return ss.str();
     };
+
+    bool balancerDOWWindowEnabled = feature_flags::gFeatureFlagBalancerWindowDOW.isEnabled(
+        VersionContext::getDecoration(opCtx),
+        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+
+    const auto& activeWindowDOW = _balancerSettings.getActiveWindowDOW();
+    if (balancerDOWWindowEnabled && activeWindowDOW && !activeWindowDOW->empty()) {
+        std::string currentDayOfWeek = getDayOfWeekString(now.date());
+
+        // Check if the current time is in any of the day-specific windows.
+        for (const auto& window : *activeWindowDOW) {
+            std::string windowDayOfWeek = std::string(DayOfWeek_serializer(window.getDay()));
+            if (windowDayOfWeek == currentDayOfWeek) {
+                boost::posix_time::ptime startTime, stopTime;
+                toPointInTime(std::string(window.getStart()), &startTime);
+                toPointInTime(std::string(window.getStop()), &stopTime);
+                boost::posix_time::ptime windowStartForToday(now.date(), startTime.time_of_day());
+                boost::posix_time::ptime windowStopForToday(now.date(), stopTime.time_of_day());
+
+                LOGV2_DEBUG(10806100,
+                            1,
+                            "inBalancingWindow",
+                            "now"_attr = timeToString(now),
+                            "activeWindowStart"_attr = timeToString(windowStartForToday),
+                            "activeWindowStop"_attr = timeToString(windowStopForToday),
+                            "dayOfWeek"_attr = currentDayOfWeek);
+
+                if (windowStopForToday > windowStartForToday) {
+                    if (now >= windowStartForToday && now <= windowStopForToday) {
+                        return true;
+                    }
+                } else {
+                    if (now >= windowStartForToday || now <= windowStopForToday) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    const auto& activeWindow = _balancerSettings.getActiveWindow();
+    if (!activeWindow) {
+        return true;
+    }
+
+    boost::posix_time::ptime activeWindowStart, activeWindowStop;
+    if (!toPointInTime(std::string(activeWindow->getStart()), &activeWindowStart) ||
+        !toPointInTime(std::string(activeWindow->getStop()), &activeWindowStop)) {
+        return true;
+    }
+
     LOGV2_DEBUG(24094,
                 1,
                 "inBalancingWindow",
                 "now"_attr = timeToString(now),
-                "activeWindowStart"_attr = timeToString(*_activeWindowStart),
-                "activeWindowStop"_attr = timeToString(*_activeWindowStop));
+                "activeWindowStart"_attr = timeToString(activeWindowStart),
+                "activeWindowStop"_attr = timeToString(activeWindowStop));
 
-    if (*_activeWindowStop > *_activeWindowStart) {
-        if ((now >= *_activeWindowStart) && (now <= *_activeWindowStop)) {
+    if (activeWindowStop > activeWindowStart) {
+        if ((now >= activeWindowStart) && (now <= activeWindowStop)) {
             return true;
         }
-    } else if (*_activeWindowStart > *_activeWindowStop) {
-        if ((now >= *_activeWindowStart) || (now <= *_activeWindowStop)) {
+    } else if (activeWindowStart > activeWindowStop) {
+        if ((now >= activeWindowStart) || (now <= activeWindowStop)) {
             return true;
         }
     } else {
-        MONGO_UNREACHABLE;
+        MONGO_UNREACHABLE_TASSERT(10083533);
     }
 
     return false;

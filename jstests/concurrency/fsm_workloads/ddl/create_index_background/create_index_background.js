@@ -10,6 +10,8 @@
  * isn't guaranteed to be true when they are run in parallel with other workloads. Therefore
  * it can't be run in concurrency simultaneous suites.
  * @tags: [
+ *   # TODO(SERVER-110840): Primary-driven index builds don't support draining side writes yet.
+ *   primary_driven_index_builds_incompatible,
  *   assumes_balancer_off,
  *   creates_background_indexes,
  *   requires_getmore,
@@ -18,8 +20,8 @@
  */
 import {isMongos} from "jstests/concurrency/fsm_workload_helpers/server_types.js";
 
-export const $config = (function() {
-    var data = {
+export const $config = (function () {
+    let data = {
         nDocumentsToSeed: 500,
         nDocumentsToCreate: 100,
         nDocumentsToRead: 100,
@@ -27,8 +29,8 @@ export const $config = (function() {
         nDocumentsToDelete: 50,
         getHighestX: function getHighestX(coll, tid) {
             // Find highest value of x.
-            var highest = 0;
-            var cursor = coll.find({tid: tid}).sort({x: -1}).limit(-1);
+            let highest = 0;
+            let cursor = coll.find({tid: tid}).sort({x: -1}).limit(-1);
             highest = cursor.next().x;
             return highest;
         },
@@ -45,34 +47,38 @@ export const $config = (function() {
         extendUpdateExpr: function extendUpdateExpr(update) {
             // Only relevant for extended workloads.
             return update;
-        }
+        },
     };
 
-    var states = (function() {
+    let states = (function () {
         function init(db, collName) {
             // Add thread-specific documents
-            var bulk = db[collName].initializeUnorderedBulkOp();
-            for (var i = 0; i < this.nDocumentsToSeed; ++i) {
+            let bulk = db[collName].initializeUnorderedBulkOp();
+            for (let i = 0; i < this.nDocumentsToSeed; ++i) {
                 const doc = {x: i, tid: this.tid};
                 bulk.insert(this.extendDocument(doc));
             }
-            var res = bulk.execute();
+            let res = bulk.execute();
             assert.commandWorked(res);
             assert.eq(this.nDocumentsToSeed, res.nInserted, tojson(res));
 
             // In the first thread create the background index.
             if (this.tid === 0) {
-                var coll = db[collName];
+                let coll = db[collName];
                 // Before creating the background index make sure insert or update
                 // CRUD operations are active.
-                assert.soon(function() {
-                    return coll.find({crud: {$exists: true}}).itcount() > 0;
-                }, 'No documents with "crud" field have been inserted or updated', 60 * 1000);
+                assert.soon(
+                    function () {
+                        return coll.find({crud: {$exists: true}}).itcount() > 0;
+                    },
+                    'No documents with "crud" field have been inserted or updated',
+                    60 * 1000,
+                );
 
                 let createOptions = {};
                 let filter = this.getPartialFilterExpression();
                 if (filter !== undefined) {
-                    createOptions['partialFilterExpression'] = filter;
+                    createOptions["partialFilterExpression"] = filter;
                 }
 
                 res = coll.createIndex(this.getIndexSpec(), createOptions);
@@ -82,53 +88,52 @@ export const $config = (function() {
 
         function createDocs(db, collName) {
             // Insert documents with an increasing value of index x.
-            var coll = db[collName];
-            var res;
-            var count = coll.find({tid: this.tid}).itcount();
+            let coll = db[collName];
+            let res;
+            let count = coll.find({tid: this.tid}).itcount();
 
-            var highest = this.getHighestX(coll, this.tid);
-            for (var i = 0; i < this.nDocumentsToCreate; ++i) {
+            let highest = this.getHighestX(coll, this.tid);
+            for (let i = 0; i < this.nDocumentsToCreate; ++i) {
                 const doc = {x: i + highest + 1, tid: this.tid, crud: 1};
                 res = coll.insert(this.extendDocument(doc));
                 assert.commandWorked(res);
                 assert.eq(res.nInserted, 1, tojson(res));
             }
-            assert.eq(coll.find({tid: this.tid}).itcount(),
-                      this.nDocumentsToCreate + count,
-                      'createDocs itcount mismatch');
+            assert.eq(
+                coll.find({tid: this.tid}).itcount(),
+                this.nDocumentsToCreate + count,
+                "createDocs itcount mismatch",
+            );
         }
 
         function readDocs(db, collName) {
             // Read random documents from the collection on index x.
-            var coll = db[collName];
-            var res;
-            var count = coll.find({tid: this.tid}).itcount();
-            assert.gte(
-                count, this.nDocumentsToRead, 'readDocs not enough documents for tid ' + this.tid);
+            let coll = db[collName];
+            let res;
+            let count = coll.find({tid: this.tid}).itcount();
+            assert.gte(count, this.nDocumentsToRead, "readDocs not enough documents for tid " + this.tid);
 
-            var highest = this.getHighestX(coll, this.tid);
-            for (var i = 0; i < this.nDocumentsToRead; ++i) {
+            let highest = this.getHighestX(coll, this.tid);
+            for (let i = 0; i < this.nDocumentsToRead; ++i) {
                 // Do randomized reads on index x. A document is not guaranteed
                 // to match the randomized 'x' predicate.
                 res = coll.find({x: Random.randInt(highest), tid: this.tid}).itcount();
                 assert.contains(res, [0, 1], tojson(res));
             }
-            assert.eq(coll.find({tid: this.tid}).itcount(), count, 'readDocs itcount mismatch');
+            assert.eq(coll.find({tid: this.tid}).itcount(), count, "readDocs itcount mismatch");
         }
 
         function updateDocs(db, collName) {
             // Update random documents from the collection on index x.
             // Since an update requires a shard key, do not run in a sharded cluster.
             if (!isMongos(db)) {
-                var coll = db[collName];
-                var res;
-                var count = coll.find({tid: this.tid}).itcount();
-                assert.gte(count,
-                           this.nDocumentsToUpdate,
-                           'updateDocs not enough documents for tid ' + this.tid);
+                let coll = db[collName];
+                let res;
+                let count = coll.find({tid: this.tid}).itcount();
+                assert.gte(count, this.nDocumentsToUpdate, "updateDocs not enough documents for tid " + this.tid);
 
-                var highest = this.getHighestX(coll, this.tid);
-                for (var i = 0; i < this.nDocumentsToUpdate; ++i) {
+                let highest = this.getHighestX(coll, this.tid);
+                for (let i = 0; i < this.nDocumentsToUpdate; ++i) {
                     // Do randomized updates on index x. A document is not guaranteed
                     // to match the randomized 'x' predicate.
 
@@ -141,32 +146,31 @@ export const $config = (function() {
                     assert.contains(res.nMatched, [0, 1], tojson(res));
                     assert.eq(res.nUpserted, 0, tojson(res));
                 }
-                assert.eq(
-                    coll.find({tid: this.tid}).itcount(), count, 'updateDocs itcount mismatch');
+                assert.eq(coll.find({tid: this.tid}).itcount(), count, "updateDocs itcount mismatch");
             }
         }
 
         function deleteDocs(db, collName) {
             // Remove random documents from the collection on index x.
-            var coll = db[collName];
-            var res;
-            var count = coll.find({tid: this.tid}).itcount();
+            let coll = db[collName];
+            let res;
+            let count = coll.find({tid: this.tid}).itcount();
 
             // Set the maximum number of documents we can delete to ensure that there
             // are documents to read or update after deleteDocs completes.
             // Return from this state if there are not enough documents in the collection
             // with this.tid.
 
-            var minDocsToKeep = Math.max(this.nDocumentsToRead, this.nDocumentsToUpdate);
+            let minDocsToKeep = Math.max(this.nDocumentsToRead, this.nDocumentsToUpdate);
             // nDeleteDocs is the number of documents that can be deleted during this state.
-            var nDeleteDocs = Math.min(count - minDocsToKeep, this.nDocumentsToDelete);
+            let nDeleteDocs = Math.min(count - minDocsToKeep, this.nDocumentsToDelete);
             if (nDeleteDocs < 0) {
                 return;
             }
 
-            var highest = this.getHighestX(coll, this.tid);
-            var nActualDeletes = 0;
-            for (var i = 0; i < nDeleteDocs; ++i) {
+            let highest = this.getHighestX(coll, this.tid);
+            let nActualDeletes = 0;
+            for (let i = 0; i < nDeleteDocs; ++i) {
                 // Do randomized deletes on index x. A document is not guaranteed
                 // to match the randomized 'x' predicate.
                 res = coll.remove({x: Random.randInt(highest), tid: this.tid});
@@ -174,9 +178,7 @@ export const $config = (function() {
                 assert.contains(res.nRemoved, [0, 1], tojson(res));
                 nActualDeletes += res.nRemoved;
             }
-            assert.eq(coll.find({tid: this.tid}).itcount(),
-                      count - nActualDeletes,
-                      'deleteDocs itcount mismatch');
+            assert.eq(coll.find({tid: this.tid}).itcount(), count - nActualDeletes, "deleteDocs itcount mismatch");
         }
 
         return {
@@ -184,11 +186,11 @@ export const $config = (function() {
             createDocs: createDocs,
             readDocs: readDocs,
             updateDocs: updateDocs,
-            deleteDocs: deleteDocs
+            deleteDocs: deleteDocs,
         };
     })();
 
-    var transitions = {
+    let transitions = {
         init: {createDocs: 1},
         createDocs: {createDocs: 0.25, readDocs: 0.25, updateDocs: 0.25, deleteDocs: 0.25},
         readDocs: {createDocs: 0.25, readDocs: 0.25, updateDocs: 0.25, deleteDocs: 0.25},
@@ -196,18 +198,18 @@ export const $config = (function() {
         deleteDocs: {createDocs: 0.25, readDocs: 0.25, updateDocs: 0.25, deleteDocs: 0.25},
     };
 
-    var internalQueryExecYieldIterations;
-    var internalQueryExecYieldPeriodMS;
+    let internalQueryExecYieldIterations;
+    let internalQueryExecYieldPeriodMS;
 
     function setup(db, collName, cluster) {
-        var nSetupDocs = this.nDocumentsToSeed * 50;
-        var coll = db[collName];
+        let nSetupDocs = this.nDocumentsToSeed * 50;
+        let coll = db[collName];
 
-        var res = coll.createIndex({tid: 1});
+        let res = coll.createIndex({tid: 1});
         assert.commandWorked(res, tojson(res));
 
-        var bulk = coll.initializeUnorderedBulkOp();
-        for (var i = 0; i < nSetupDocs; ++i) {
+        let bulk = coll.initializeUnorderedBulkOp();
+        for (let i = 0; i < nSetupDocs; ++i) {
             bulk.insert({x: i});
         }
         res = bulk.execute();
@@ -215,8 +217,8 @@ export const $config = (function() {
         assert.eq(nSetupDocs, res.nInserted, tojson(res));
 
         // Increase the following parameters to reduce the number of yields.
-        cluster.executeOnMongodNodes(function(db) {
-            var res;
+        cluster.executeOnMongodNodes(function (db) {
+            let res;
             res = db.adminCommand({setParameter: 1, internalQueryExecYieldIterations: 100000});
             assert.commandWorked(res);
             internalQueryExecYieldIterations = res.was;
@@ -228,13 +230,16 @@ export const $config = (function() {
     }
 
     function teardown(db, collName, cluster) {
-        cluster.executeOnMongodNodes(function(db) {
-            assert.commandWorked(db.adminCommand({
-                setParameter: 1,
-                internalQueryExecYieldIterations: internalQueryExecYieldIterations
-            }));
-            assert.commandWorked(db.adminCommand(
-                {setParameter: 1, internalQueryExecYieldPeriodMS: internalQueryExecYieldPeriodMS}));
+        cluster.executeOnMongodNodes(function (db) {
+            assert.commandWorked(
+                db.adminCommand({
+                    setParameter: 1,
+                    internalQueryExecYieldIterations: internalQueryExecYieldIterations,
+                }),
+            );
+            assert.commandWorked(
+                db.adminCommand({setParameter: 1, internalQueryExecYieldPeriodMS: internalQueryExecYieldPeriodMS}),
+            );
         });
     }
 

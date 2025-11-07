@@ -30,18 +30,6 @@
 
 #include "mongo/db/session/session_catalog_mongod.h"
 
-#include <absl/container/node_hash_set.h>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -51,22 +39,23 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/admission/execution_admission_context.h"
-#include "mongo/db/catalog/clustered_collection_util.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/create_indexes_gen.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/index_builds/index_builds_manager.h"
 #include "mongo/db/internal_transactions_feature_flag_gen.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/clustered_collection_util.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/ddl/create_indexes_gen.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
@@ -84,16 +73,25 @@
 #include "mongo/db/session/sessions_collection.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/str.h"
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <utility>
+
+#include <absl/container/node_hash_set.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTransaction
 
@@ -150,7 +148,7 @@ void killSessionTokens(OperationContext* opCtx,
          sessionKillTokens = std::move(sessionKillTokens)](auto status) mutable {
             invariant(status);
 
-            // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+            // TODO(SERVER-111754): Please revisit if this thread could be made killable.
             ThreadClient tc("Kill-Sessions",
                             service->getService(ClusterRole::ShardServer),
                             ClientOperationKillableByStepdown{false});
@@ -355,7 +353,7 @@ int removeExpiredTransactionSessionsFromDisk(
     int numReaped = 0;
     while (cursor->more()) {
         auto transactionSession = SessionsCollectionFetchResultIndividualResult::parse(
-            IDLParserContext{"TransactionSession"}, cursor->next());
+            cursor->next(), IDLParserContext{"TransactionSession"});
         const auto transactionSessionId = transactionSession.get_id();
 
         if (expiredTransactionSessionIdsStillInUse.find(transactionSessionId) !=
@@ -383,6 +381,7 @@ void createTransactionTable(OperationContext* opCtx) {
     // Because we only have one partial index on this collection, the performance benefit outweighs
     // that cost.
     if (feature_flags::gFeatureFlagClusteredConfigTransactions.isEnabled(
+            VersionContext::getDecoration(opCtx),
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot()))
         options.clusteredIndex = clustered_util::makeDefaultClusteredIdIndex();
     auto storageInterface = repl::StorageInterface::get(opCtx);
@@ -477,8 +476,8 @@ void abortInProgressTransactions(OperationContext* opCtx,
         LOGV2_DEBUG(21977, 3, "Aborting in-progress transactions on stepup.");
     }
     while (cursor->more()) {
-        auto txnRecord = SessionTxnRecord::parse(IDLParserContext("abort-in-progress-transactions"),
-                                                 cursor->next());
+        auto txnRecord = SessionTxnRecord::parse(
+            cursor->next(), IDLParserContext("abort-in-progress-transactions"));
 
         // Synchronize with killOps to make this unkillable.
         {
@@ -537,7 +536,7 @@ void MongoDSessionCatalog::set(ServiceContext* service,
 
 BSONObj MongoDSessionCatalog::getConfigTxnPartialIndexSpec() {
     NewIndexSpec index;
-    index.setV(int(IndexDescriptor::kLatestIndexVersion));
+    index.setV(int(IndexConfig::kLatestIndexVersion));
     index.setKey(BSON(
         SessionTxnRecord::kParentSessionIdFieldName
         << 1
@@ -553,6 +552,7 @@ MongoDSessionCatalog::MongoDSessionCatalog(
     : _ti(std::move(ti)) {}
 
 void MongoDSessionCatalog::onStepUp(OperationContext* opCtx) {
+    LOGV2(11148203, "Starting MongoDSessionCatalog::onStepUp.");
     // Invalidate sessions that could have a retryable write on it, so that we can refresh from disk
     // in case the in-memory state was out of sync.
     const auto catalog = SessionCatalog::get(opCtx);
@@ -632,11 +632,11 @@ void MongoDSessionCatalog::observeDirectWriteToConfigTransactions(OperationConte
                                  SessionCatalog::KillToken sessionKillToken)
             : _ti(ti), _sessionKillToken(std::move(sessionKillToken)) {}
 
-        void commit(OperationContext* opCtx, boost::optional<Timestamp>) override {
+        void commit(OperationContext* opCtx, boost::optional<Timestamp>) noexcept override {
             rollback(opCtx);
         }
 
-        void rollback(OperationContext* opCtx) override {
+        void rollback(OperationContext* opCtx) noexcept override {
             std::vector<SessionCatalog::KillToken> sessionKillTokenVec;
             sessionKillTokenVec.emplace_back(std::move(_sessionKillToken));
             killSessionTokens(opCtx, _ti, std::move(sessionKillTokenVec));
@@ -650,7 +650,7 @@ void MongoDSessionCatalog::observeDirectWriteToConfigTransactions(OperationConte
     const auto catalog = SessionCatalog::get(opCtx);
 
     const auto lsid =
-        LogicalSessionId::parse(IDLParserContext("lsid"), singleSessionDoc["_id"].Obj());
+        LogicalSessionId::parse(singleSessionDoc["_id"].Obj(), IDLParserContext("lsid"));
     catalog->scanSession(lsid, [&, ti = _ti.get()](const ObservableSession& session) {
         uassert(ErrorCodes::PreparedTransactionInProgress,
                 str::stream() << "Cannot modify the entry for session " << lsid.getId()
@@ -784,12 +784,25 @@ MongoDOperationContextSessionWithoutRefresh::MongoDOperationContextSessionWithou
 MongoDOperationContextSessionWithoutRefresh::~MongoDOperationContextSessionWithoutRefresh() {
     // A session on secondaries should never be checked back in with a TransactionParticipant that
     // isn't prepared, aborted, or committed.
-    invariant(!_ti->isTransactionInProgress(_opCtx));
+    if (_ti->isTransactionInProgress(_opCtx)) {
+        auto state = _ti->transactionStateDescriptor(_opCtx);
+        auto txnNum = _opCtx->getTxnNumber().get_value_or(TxnNumber(-1));
+        auto txnRetries = _opCtx->getTxnRetryCounter().get_value_or(-1);
+        auto opId = _opCtx->getOpID();
+        auto sessionId = _opCtx->getClient()->session()->id();
+        auto lsid = _opCtx->getLogicalSessionId();
+        auto clientAddress = _opCtx->getClient()->clientAddress(true);
+        invariant(!_ti->isTransactionInProgress(_opCtx),
+                  str::stream() << "state: " << state << " txnNum: " << txnNum
+                                << " txnRetries: " << txnRetries << " opId: " << opId
+                                << " lsid: " << lsid << " sessionId: " << sessionId
+                                << " clientAddress: " << clientAddress);
+    }
 }
 
 MongoDOperationContextSessionWithoutOplogRead::MongoDOperationContextSessionWithoutOplogRead(
     OperationContext* opCtx, MongoDSessionCatalogTransactionInterface* ti)
-    : _operationContextSession(opCtx), _opCtx(opCtx) {
+    : _operationContextSession(opCtx) {
     invariant(!opCtx->getClient()->isInDirectClient());
 
     ti->refreshTransactionFromStorageIfNeededNoOplogEntryFetch(opCtx);

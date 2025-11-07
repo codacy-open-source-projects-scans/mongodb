@@ -28,14 +28,7 @@
  */
 
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
-#include <algorithm>
-#include <list>
-#include <memory>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/document_source_facet.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -44,16 +37,23 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/pipeline/document_source_facet.h"
 #include "mongo/db/pipeline/document_source_tee_consumer.h"
+#include "mongo/db/pipeline/explain_util.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/pipeline/tee_buffer.h"
 #include "mongo/db/query/allowed_contexts.h"
-#include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <list>
+#include <memory>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -67,13 +67,14 @@ DocumentSourceFacet::DocumentSourceFacet(std::vector<FacetPipeline> facetPipelin
                                          size_t bufferSizeBytes,
                                          size_t maxOutputDocBytes)
     : DocumentSource(kStageName, expCtx),
-      _teeBuffer(TeeBuffer::create(facetPipelines.size(), bufferSizeBytes)),
       _facets(std::move(facetPipelines)),
+      _execStatsWrapper(std::make_shared<DSFacetExecStatsWrapper>()),
+      _bufferSizeBytes(bufferSizeBytes),
       _maxOutputDocSizeBytes(maxOutputDocBytes) {
     for (size_t facetId = 0; facetId < _facets.size(); ++facetId) {
         auto& facet = _facets[facetId];
         facet.pipeline->addInitialSource(
-            DocumentSourceTeeConsumer::create(pExpCtx, facetId, _teeBuffer, kTeeConsumerStageName));
+            DocumentSourceTeeConsumer::create(expCtx, facetId, kTeeConsumerStageName));
     }
 }
 
@@ -88,7 +89,7 @@ vector<pair<string, vector<BSONObj>>> extractRawPipelines(const BSONElement& ele
     uassert(40169,
             str::stream() << "the $facet specification must be a non-empty object, but found: "
                           << elem,
-            elem.type() == BSONType::Object && !elem.embeddedObject().isEmpty());
+            elem.type() == BSONType::object && !elem.embeddedObject().isEmpty());
 
     vector<pair<string, vector<BSONObj>>> rawFacetPipelines;
     for (auto&& facetElem : elem.embeddedObject()) {
@@ -99,7 +100,7 @@ vector<pair<string, vector<BSONObj>>> extractRawPipelines(const BSONElement& ele
         uassert(40170,
                 str::stream() << "arguments to $facet must be arrays, " << facetName << " is type "
                               << typeName(facetElem.type()),
-                facetElem.type() == BSONType::Array);
+                facetElem.type() == BSONType::array);
 
         vector<BSONObj> rawPipeline;
         for (auto&& subPipeElem : facetElem.Obj()) {
@@ -107,11 +108,11 @@ vector<pair<string, vector<BSONObj>>> extractRawPipelines(const BSONElement& ele
                     str::stream() << "elements of arrays in $facet spec must be non-empty objects, "
                                   << facetName << " argument contained an element of type "
                                   << typeName(subPipeElem.type()) << ": " << subPipeElem,
-                    subPipeElem.type() == BSONType::Object);
+                    subPipeElem.type() == BSONType::object);
             rawPipeline.push_back(subPipeElem.embeddedObject());
         }
 
-        rawFacetPipelines.emplace_back(facetName.toString(), std::move(rawPipeline));
+        rawFacetPipelines.emplace_back(std::string{facetName}, std::move(rawPipeline));
     }
     return rawFacetPipelines;
 }
@@ -148,7 +149,7 @@ std::string getStageNameNotAllowedInFacet(const DocumentSource& source,
 }  // namespace
 
 std::unique_ptr<DocumentSourceFacet::LiteParsed> DocumentSourceFacet::LiteParsed::parse(
-    const NamespaceString& nss, const BSONElement& spec) {
+    const NamespaceString& nss, const BSONElement& spec, const LiteParserOptions& options) {
     std::vector<LiteParsedPipeline> liteParsedPipelines;
 
     for (auto&& rawPipeline : extractRawPipelines(spec)) {
@@ -163,6 +164,7 @@ REGISTER_DOCUMENT_SOURCE(facet,
                          DocumentSourceFacet::LiteParsed::parse,
                          DocumentSourceFacet::createFromBson,
                          AllowedWithApiStrict::kAlways);
+ALLOCATE_DOCUMENT_SOURCE_ID(facet, DocumentSourceFacet::id)
 
 intrusive_ptr<DocumentSourceFacet> DocumentSourceFacet::create(
     std::vector<FacetPipeline> facetPipelines,
@@ -173,62 +175,23 @@ intrusive_ptr<DocumentSourceFacet> DocumentSourceFacet::create(
         std::move(facetPipelines), expCtx, bufferSizeBytes, maxOutputDocBytes);
 }
 
-void DocumentSourceFacet::setSource(DocumentSource* source) {
-    _teeBuffer->setSource(source);
-}
-
-void DocumentSourceFacet::doDispose() {
-    for (auto&& facet : _facets) {
-        facet.pipeline.get_deleter().dismissDisposal();
-        facet.pipeline->dispose(pExpCtx->getOperationContext());
-    }
-}
-
-DocumentSource::GetNextResult DocumentSourceFacet::doGetNext() {
-    if (_done) {
-        return GetNextResult::makeEOF();
-    }
-
-    const size_t maxBytes = _maxOutputDocSizeBytes;
-    auto ensureUnderMemoryLimit = [usedBytes = 0ul, &maxBytes](long long additional) mutable {
-        usedBytes += additional;
-        uassert(4031700,
-                str::stream() << "document constructed by $facet is " << usedBytes
-                              << " bytes, which exceeds the limit of " << maxBytes << " bytes",
-                usedBytes <= maxBytes);
-    };
-
-    vector<vector<Value>> results(_facets.size());
-    bool allPipelinesEOF = false;
-    while (!allPipelinesEOF) {
-        allPipelinesEOF = true;  // Set this to false if any pipeline isn't EOF.
-        for (size_t facetId = 0; facetId < _facets.size(); ++facetId) {
-            const auto& pipeline = _facets[facetId].pipeline;
-            auto next = pipeline->getSources().back()->getNext();
-            for (; next.isAdvanced(); next = pipeline->getSources().back()->getNext()) {
-                ensureUnderMemoryLimit(next.getDocument().getApproximateSize());
-                results[facetId].emplace_back(next.releaseDocument());
-            }
-            allPipelinesEOF = allPipelinesEOF && next.isEOF();
-            accumulatePipelinePlanSummaryStats(*pipeline, _stats.planSummaryStats);
-        }
-    }
-
-    MutableDocument resultDoc;
-    for (size_t facetId = 0; facetId < _facets.size(); ++facetId) {
-        resultDoc[_facets[facetId].name] = Value(std::move(results[facetId]));
-    }
-
-    _done = true;  // We will only ever produce one result.
-    return resultDoc.freeze();
-}
-
 Value DocumentSourceFacet::serialize(const SerializationOptions& opts) const {
     MutableDocument serialized;
-    for (auto&& facet : _facets) {
-        serialized[opts.serializeFieldPathFromString(facet.name)] =
-            Value(opts.verbosity ? facet.pipeline->writeExplainOps(opts)
-                                 : facet.pipeline->serialize(opts));
+    for (size_t facetId = 0; facetId < _facets.size(); ++facetId) {
+        auto&& facet = _facets[facetId];
+        if (opts.isSerializingForExplain()) {
+            bool canAddExecPipelineExplain =
+                opts.verbosity >= ExplainOptions::Verbosity::kExecStats &&
+                _execStatsWrapper->isStatsProviderAttached();
+            auto explain = canAddExecPipelineExplain
+                ? mergeExplains(facet.pipeline->writeExplainOps(opts),
+                                _execStatsWrapper->getExecStats(facetId, opts))
+                : facet.pipeline->writeExplainOps(opts);
+            serialized[opts.serializeFieldPathFromString(facet.name)] = Value(std::move(explain));
+        } else {
+            serialized[opts.serializeFieldPathFromString(facet.name)] =
+                Value(facet.pipeline->serialize(opts));
+        }
     }
     return Value(Document{{"$facet", serialized.freezeToValue()}});
 }
@@ -244,31 +207,31 @@ void DocumentSourceFacet::addInvolvedCollections(
 
 intrusive_ptr<DocumentSource> DocumentSourceFacet::optimize() {
     for (auto&& facet : _facets) {
-        facet.pipeline->optimizePipeline();
+        pipeline_optimization::optimizePipeline(*facet.pipeline);
     }
     return this;
 }
 
-void DocumentSourceFacet::detachFromOperationContext() {
+void DocumentSourceFacet::detachSourceFromOperationContext() {
     for (auto&& facet : _facets) {
         facet.pipeline->detachFromOperationContext();
     }
 }
 
-void DocumentSourceFacet::reattachToOperationContext(OperationContext* opCtx) {
+void DocumentSourceFacet::reattachSourceToOperationContext(OperationContext* opCtx) {
     for (auto&& facet : _facets) {
         facet.pipeline->reattachToOperationContext(opCtx);
     }
 }
 
-bool DocumentSourceFacet::validateOperationContext(const OperationContext* opCtx) const {
-    return getContext()->getOperationContext() == opCtx &&
+bool DocumentSourceFacet::validateSourceOperationContext(const OperationContext* opCtx) const {
+    return getExpCtx()->getOperationContext() == opCtx &&
         std::all_of(_facets.begin(), _facets.end(), [opCtx](const auto& f) {
                return f.pipeline->validateOperationContext(opCtx);
            });
 }
 
-StageConstraints DocumentSourceFacet::constraints(Pipeline::SplitState state) const {
+StageConstraints DocumentSourceFacet::constraints(PipelineSplitState state) const {
     // Currently we don't split $facet to have a merger part and a shards part (see SERVER-24154).
     // This means that if any stage in any of the $facet pipelines needs to run on router, then the
     // entire $facet stage must run there.
@@ -283,9 +246,9 @@ StageConstraints DocumentSourceFacet::constraints(Pipeline::SplitState state) co
     // will be the $facet's final HostTypeRequirement.
     for (auto fi = _facets.begin(); fi != _facets.end() && host != kDefinitiveHost; fi++) {
         const auto& sources = fi->pipeline->getSources();
-        for (auto si = sources.begin(); si != sources.end() && host != kDefinitiveHost; si++) {
+        for (auto si = sources.cbegin(); si != sources.cend() && host != kDefinitiveHost; si++) {
             const auto subConstraints = (*si)->constraints(state);
-            const auto hostReq = subConstraints.resolvedHostTypeRequirement(pExpCtx);
+            const auto hostReq = subConstraints.resolvedHostTypeRequirement(getExpCtx());
 
             if (hostReq != HostTypeRequirement::kNone) {
                 host = hostReq;
@@ -325,33 +288,13 @@ StageConstraints DocumentSourceFacet::constraints(Pipeline::SplitState state) co
     return constraints;
 }
 
-bool DocumentSourceFacet::usedDisk() {
-    for (auto&& facet : _facets) {
-        if (facet.pipeline->usedDisk()) {
-            _stats.planSummaryStats.usedDisk = true;
-            break;
-        }
-    }
-    return _stats.planSummaryStats.usedDisk;
-}
-
 DepsTracker::State DocumentSourceFacet::getDependencies(DepsTracker* deps) const {
     for (auto&& facet : _facets) {
-        auto subDepsTracker = facet.pipeline->getDependencies(deps->getUnavailableMetadata());
+        auto subDepsTracker = facet.pipeline->getDependencies(deps->getAvailableMetadata());
 
         deps->fields.insert(subDepsTracker.fields.begin(), subDepsTracker.fields.end());
-
         deps->needWholeDocument = deps->needWholeDocument || subDepsTracker.needWholeDocument;
-
-        // If the subpipeline needs any search metadata, the top level pipeline must know to
-        // generate it.
-        deps->searchMetadataDeps() |= subDepsTracker.searchMetadataDeps();
-
-        // The text score is the only type of metadata that could be needed by $facet.
-        deps->setNeedsMetadata(
-            DocumentMetadataFields::kTextScore,
-            deps->getNeedsMetadata(DocumentMetadataFields::kTextScore) ||
-                subDepsTracker.getNeedsMetadata(DocumentMetadataFields::kTextScore));
+        deps->setNeedsMetadata(subDepsTracker.metadataDeps());
 
         if (deps->needWholeDocument && deps->getNeedsMetadata(DocumentMetadataFields::kTextScore)) {
             break;
@@ -381,8 +324,8 @@ intrusive_ptr<DocumentSource> DocumentSourceFacet::createFromBson(
 
         auto pipeline =
             Pipeline::parseFacetPipeline(rawFacet.second, expCtx, [](const Pipeline& pipeline) {
-                auto sources = pipeline.getSources();
-                std::for_each(sources.begin(), sources.end(), [](auto& stage) {
+                const auto& sources = pipeline.getSources();
+                for (auto& stage : sources) {
                     auto stageConstraints = stage->constraints();
                     if (!stageConstraints.isAllowedInsideFacetStage()) {
                         uasserted(40600,
@@ -394,7 +337,7 @@ intrusive_ptr<DocumentSource> DocumentSourceFacet::createFromBson(
                     invariant(stageConstraints.requiredPosition ==
                               StageConstraints::PositionRequirement::kNone);
                     invariant(!stageConstraints.isIndependentOfAnyCollection);
-                });
+                }
             });
 
         // These checks potentially require that we check the catalog to determine where our data

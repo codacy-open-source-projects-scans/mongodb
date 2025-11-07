@@ -29,20 +29,22 @@
 
 #pragma once
 
-#include <functional>
-#include <memory>
-#include <queue>
-
-#include <boost/filesystem.hpp>
-
 #include "mongo/db/dbmessage.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/logv2/log.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/transport_layer_mock.h"
 #include "mongo/unittest/join_thread.h"
 #include "mongo/unittest/temp_dir.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/ssl_options.h"
+
+#include <functional>
+#include <memory>
+#include <queue>
+
+#include <boost/filesystem.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -76,7 +78,7 @@ private:
 
 using unittest::JoinThread;
 
-struct SessionThread {
+struct MONGO_MOD_NEEDS_REPLACEMENT SessionThread {
     struct StopException {};
 
     explicit SessionThread(std::shared_ptr<transport::Session> s)
@@ -116,9 +118,9 @@ private:
     JoinThread _thread;  // Appears after the members _run uses.
 };
 
-class InlineReactor : public Reactor {
+class MONGO_MOD_NEEDS_REPLACEMENT InlineReactor : public Reactor {
 public:
-    void run() noexcept override {}
+    void run() override {}
     void stop() override {}
 
     void drain() override {
@@ -144,7 +146,7 @@ public:
 
 class NoopReactor : public Reactor {
 public:
-    void run() noexcept override {}
+    void run() override {}
     void stop() override {}
 
     void drain() override {
@@ -180,7 +182,7 @@ private:
     ReactorHandle _mockReactor = std::make_unique<NoopReactor>();
 };
 
-class MockSessionManager : public SessionManager {
+class MONGO_MOD_NEEDS_REPLACEMENT MockSessionManager : public SessionManager {
 public:
     MockSessionManager() = default;
     explicit MockSessionManager(std::function<void(SessionThread&)> onStartSession)
@@ -217,6 +219,10 @@ public:
         return _sessions->size();
     }
 
+    std::vector<std::pair<SessionId, std::string>> getOpenSessionIDs() const override {
+        return {};
+    }
+
     void setOnStartSession(std::function<void(SessionThread&)> cb) {
         _onStartSession = std::move(cb);
     }
@@ -236,7 +242,8 @@ public:
     ServiceEntryPointUnimplemented() = default;
 
     Future<DbResponse> handleRequest(OperationContext* opCtx,
-                                     const Message& request) noexcept override {
+                                     const Message& request,
+                                     Date_t started) override {
         MONGO_UNREACHABLE;
     }
 };
@@ -250,20 +257,26 @@ public:
         boost::filesystem::path filePathPEM(directoryPath / "server_pem.pem");
         _filePathCA = filePathCA.string();
         _filePathPEM = filePathPEM.string();
+        _filePathClientPEM = boost::filesystem::path(directoryPath / "client.pem").string();
     }
 
     StringData getCAFile() const {
-        return _filePathPEM;
+        return _filePathCA;
     }
 
     StringData getPEMKeyFile() const {
-        return _filePathCA;
+        return _filePathPEM;
+    }
+
+    StringData getClientPEMKeyFile() const {
+        return _filePathClientPEM;
     }
 
 private:
     std::unique_ptr<unittest::TempDir> _dir;
     std::string _filePathCA;
     std::string _filePathPEM;
+    std::string _filePathClientPEM;
 };
 
 /**
@@ -274,11 +287,13 @@ private:
  */
 inline std::unique_ptr<TempCertificatesDir> copyCertsToTempDir(std::string caFile,
                                                                std::string pemFile,
+                                                               std::string clientPemFile,
                                                                std::string directoryPrefix) {
     auto tempDir = std::make_unique<TempCertificatesDir>(directoryPrefix);
 
-    boost::filesystem::copy_file(caFile, tempDir->getCAFile().toString());
-    boost::filesystem::copy_file(pemFile, tempDir->getPEMKeyFile().toString());
+    boost::filesystem::copy_file(caFile, std::string{tempDir->getCAFile()});
+    boost::filesystem::copy_file(pemFile, std::string{tempDir->getPEMKeyFile()});
+    boost::filesystem::copy_file(clientPemFile, std::string{tempDir->getClientPEMKeyFile()});
 
     return tempDir;
 };
@@ -305,6 +320,41 @@ private:
     std::string _sslCAFile;
     std::string _sslPEMKeyFile;
     int _sslMode;
+};
+
+struct NetworkConnectionStats {
+    int logicalBytesIn;
+    int logicalBytesOut;
+    int physicalBytesIn;
+    int physicalBytesOut;
+    int numRequests;
+
+    static NetworkConnectionStats get(NetworkCounter::ConnectionType type) {
+        BSONObjBuilder bob;
+        networkCounter.append(bob);
+        BSONObj metrics = bob.obj();
+        if (type == NetworkCounter::ConnectionType::kEgress) {
+            metrics = metrics.getField("egress").Obj().getOwned();
+        }
+
+        NetworkConnectionStats stats;
+        stats.logicalBytesIn = metrics["bytesIn"].numberInt();
+        stats.logicalBytesOut = metrics["bytesOut"].numberInt();
+        stats.physicalBytesIn = metrics["physicalBytesIn"].numberInt();
+        stats.physicalBytesOut = metrics["physicalBytesOut"].numberInt();
+        stats.numRequests = metrics["numRequests"].numberInt();
+        return stats;
+    }
+
+    NetworkConnectionStats getDifference(NetworkConnectionStats other) {
+        NetworkConnectionStats diff;
+        diff.logicalBytesIn = logicalBytesIn - other.logicalBytesIn;
+        diff.logicalBytesOut = logicalBytesOut - other.logicalBytesOut;
+        diff.physicalBytesIn = physicalBytesIn - other.physicalBytesIn;
+        diff.physicalBytesOut = physicalBytesOut - other.physicalBytesOut;
+        diff.numRequests = numRequests - other.numRequests;
+        return diff;
+    }
 };
 
 }  // namespace mongo::transport::test

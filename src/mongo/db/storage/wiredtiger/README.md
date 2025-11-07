@@ -34,16 +34,16 @@ the data files.
 To avoid taking unnecessary checkpoints on an idle server, WiredTiger will only take checkpoints for
 the following scenarios:
 
-- When the [stable timestamp](../repl/README.md#replication-timestamp-glossary) is greater than or
-  equal to the [initial data timestamp](../repl/README.md#replication-timestamp-glossary), we take a
+- When the [stable timestamp](../../repl/README.md#replication-timestamp-glossary) is greater than or
+  equal to the [initial data timestamp](../../repl/README.md#replication-timestamp-glossary), we take a
   stable checkpoint, which is a durable view of the data at a particular timestamp. This is for
   steady-state replication.
-- The [initial data timestamp](../repl/README.md#replication-timestamp-glossary) is not set, so we
+- The [initial data timestamp](../../repl/README.md#replication-timestamp-glossary) is not set, so we
   must take a full checkpoint. This is when there is no consistent view of the data, such as during
   initial sync.
 
 Not only does checkpointing provide us with durability for the database, but it also enables us to
-take [backups of the data](#file-system-backups).
+take [backups of the data](../../storage/README.md#file-system-backups).
 
 When WiredTiger takes a checkpoint, it uses the
 [`stable_timestamp`](https://github.com/mongodb/mongo/blob/87de9a0cb1/src/mongo/db/storage/wiredtiger/wiredtiger_kv_engine.cpp#L2011 "Github") (effectively a `read_timestamp`) for what data should be persisted in the checkpoint.
@@ -99,7 +99,7 @@ threads are restarted, and two-phase index builds are resumed.
 See [here](https://source.wiredtiger.com/develop/arch-rts.html) for WiredTiger's architecture guide
 on rollback-to-stable.
 
-See [here](../repl/README.md#rollback-recover-to-a-timestamp-rtt) for more information on what
+See [here](../../repl/README.md#rollback-recover-to-a-timestamp-rtt) for more information on what
 happens in the replication layer during rollback-to-stable.
 
 ## Repair
@@ -120,7 +120,7 @@ MongoDB repair attempts to address the following forms of corruption:
 - Missing WiredTiger data files
   - Includes all collections, `_mdb_catalog`, and `sizeStorer`
 - Index inconsistencies
-  - Validate [repair mode](#repair-mode) attempts to fix index inconsistencies to avoid a full index
+  - Validate [repair mode](../../validate/README.md#repair-mode) attempts to fix index inconsistencies to avoid a full index
     rebuild.
   - Indexes are rebuilt on collections after they have been salvaged or if they fail validation and
     validate repair mode is unable to fix all errors.
@@ -208,13 +208,19 @@ The oplog collection can be truncated both at the front end (most recent entries
 be deleted when new writes increase the collection size past the cap. MongoDB using the WiredTiger
 storage engine with `--replSet` handles oplog collection deletion specially via
 OplogTruncateMarkers, an oplog specific implementation of the
-[CollectionTruncateMarkers](#collectionTruncateMarkers) mechanism, ignoring the generic capped
+[CollectionTruncateMarkers](../README.md#collectionTruncateMarkers) mechanism, ignoring the generic capped
 collection deletion mechanism. The front of the oplog may be truncated back to a particular
 timestamp during replication startup recovery or replication rollback.
 
 A new truncate marker is created when the in-progress marker segment contains more than the minimum
 bytes needed to complete the segment; and the oldest truncate marker's oplog is deleted when the
 oplog size exceeds its cap size setting.
+
+Oplog sampling operates in two modes: asynchronous and synchronous. By default, it uses asynchronous mode, where oplog sampling and initial marker generation happen in the background as part of the OplogCapMaintainer thread. This setup ensures that startup is not blocked and oplog reads and writes are available during tartup. Until the initial marker generation is complete, no new truncate markers can be created for these new oplog writes.
+
+Asynchronous mode offers better performance, allowing faster startups and restarts while improving overall node availability. One potential trade-off to consider is the possible increased disk usage.
+
+You can switch between asynchronous and synchronous modes by adjusting the OplogSamplingAsyncEnabled server parameter.
 
 Oplog sampling and marker generation is skipped when using `--restore` or `--magicRestore`.
 
@@ -232,6 +238,22 @@ WiredTiger `OplogTruncateMarkers` obey an `oplogMinRetentionHours` configurable 
 `oplogMinRetentionHours` is active, the WT `OplogTruncateMarkers` will only truncate the oplog if a
 truncate marker (a sequential range of oplog) is not within the minimum time range required to
 remain.
+
+## Oplog Hole Truncation
+
+MongoDB maintains an `oplogTruncateAfterPoint` timestamp while in `PRIMARY` and `SECONDARY`
+replication modes to track persisted oplog holes. Replication startup recovery uses the
+`oplogTruncateAfterPoint` timestamp, if one is found to be set, to truncate all oplog entries after
+that point. On clean shutdown, there are no oplog writes and the `oplogTruncateAfterPoint` is
+cleared. On unclean shutdown, however, parallel writes can be active and therefore oplog holes can
+exist. MongoDB allows secondaries to read their sync source's oplog as soon as there are no
+_in-memory_ oplog holes, ensuring data consistency on the secondaries. Primaries, therefore, can
+allow oplog entries to be replicated and then lose that data themselves, in an unclean shutdown,
+before the replicated oplog entries become persisted. Primaries use the `oplogTruncateAfterPoint`
+to continually track oplog holes on disk in order to eliminate them after an unclean shutdown.
+Additionally, secondaries apply batches of oplog entries out of order and similarly must use the
+`oplogTruncateAfterPoint` to track batch boundaries in order to avoid unknown oplog holes after an
+unclean shutdown.
 
 # Error Handling
 
@@ -318,6 +340,100 @@ oplog.
 - `ops.key-hex` and `ops.value-bson` are specific to the pretty printing tool used.
 
 [copy-on-write]: https://en.wikipedia.org/wiki/Copy-on-write
+
+# Cache-Pressure Monitor
+
+## Eviction and Application-threads
+
+Wiredtiger tries to keep cache utilization within acceptable ranges. The
+process of removing data from the cache (sometimes by writing it to disk) is
+called "eviction". Eviction occurs depending on whether the cache's size
+exceeds certain "trigger" and "target" limits set by the user:
+
+- `cache < target` : no eviction occurs
+- `target <= cache < trigger` : only internal threads will perform eviction.
+- `cache >= trigger` : wiredtiger will block application threads from performing
+  their work until cache returns to acceptable ranges. This is often called
+  "recruitment" because, rather than leave the threads idle, they too are used
+  to perform eviction.
+
+## Cache-Pressure and Stalls
+
+Recruiting application threads is associated with periods of unavailability in
+the presence of large, long-running transactions.
+
+- Until a transaction finishes, its state is held in-memory and it can not be
+  evicted. If enough of these transactions fill the cache, none will be
+  evicted and none will make progress (wiredtiger will have recruited them).
+- When transactions are committed or aborted, wiredtiger uses that time to
+  perform some eviction. This causes unexpected latency increases for many
+  operations, and is particularly problematic during shutdown/stepdown as they
+  can't complete in a timely fashion.
+
+## Monitoring
+
+To alleviate these problems, the server has mechanisms to detect cache-pressure
+and remediate it.
+
+Wiredtiger's implememntation is the `WiredTigerCachePressureMonitor`. This
+monitor queries internal wiredtiger stats to determine:
+
+- if the triggers have been reached or exceeded
+- how long since we have made any commits/progress
+- how much time is being spent by application threads in eviction
+
+If all of the above metrics exceed an allowed limit, a cache-pressure situation
+is flagged.
+
+Outside of the storage engine, mongo maintains a thread to perdiodically check
+for cache-pressure and act on it, called the
+`PeriodicThreadToRollbackUnderCachePressure`. This thread queries wiredtiger
+for cache-pressure and, if detected, aborts the oldest transactions until the
+cache-pressure goes away.
+
+## Interrupting Eviction
+
+Operations in wiredtiger normally can't be controlled by the mongod process
+once it calls a wiredtiger API. This would usually mean we are unable to abort
+operations recruited for eviction, in spite of the above monitor.
+
+To solve this, wiredtiger has functionality to periodically query whether a
+given application thread should stop evicting, if the
+`WT_EVENT_HANDLER.handle_general` returns nonzero for a `WT_EVENT_EVICTION`
+event, then wiredtiger will pull that application thread out of eviction early,
+either returning normally (for optional kinds of eviction) or erroring (if the
+eviction was a mandatory prerequisite for that thread's operation).
+
+This functionality is needed to allow both cache-pressure aborts and
+idle-session aborts to roll-back active transactions.
+
+## Detection and Tuning
+
+Cache-pressure detection is not a "one-size-fits-all" solution for end users.
+Depending on their workload, how spiky it is, and how many large/long transactions
+they use, they may require different configuration to detect/remediate
+cache-pressure as it appears for them.
+
+Mongod provides several mechanisms for configuring the cache-pressure
+mechanism:
+
+- CachePressureEvictionStallThresholdProportion controls how much our
+  application threads' time is allowed to count towards eviction before we
+  decide to call it "cache-pressure". Lower values make the monitor more likely
+  to decide that we are in cache-pressure.
+- CachePressureExponentiallyDecayingMovingAverageAlphaValue controls how
+  susceptible the monitor is to mis-detecting cache-pressure when the number of
+  read/write tickets varies a lot. Lower values smooth-out the monitor's view
+  of tickets.
+- CachePressureEvictionStallDetectionWindowSeconds controls how much time the
+  monitor will wait while under cache-pressure before allowing rollbacks to
+  take place. Lower values make the monitor more responsive.
+- CachePressureQueryPeriodMilliseconds controls the frequency that we check for
+  cache-pressure. Lower values increase the frequency of checking.
+- CachePressureAbortSessionKillLimitPerBatch controls how many transactions
+  per-second can be aborted when under cache-pressure. Lower values limit the
+  number (i.e. they cause cache-pressure events to either involve fewer aborts
+  or take longer to remediate).
 
 # Table of MongoDB <-> WiredTiger <-> Log version numbers
 

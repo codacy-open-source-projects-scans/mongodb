@@ -28,6 +28,29 @@
  */
 
 
+#include "mongo/db/s/resharding/resharding_oplog_batch_applier.h"
+
+#include "mongo/base/status.h"
+#include "mongo/db/client.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role_loop.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/repl/intent_guard.h"
+#include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/s/resharding/resharding_data_copy_util.h"
+#include "mongo/db/s/resharding/resharding_future_util.h"
+#include "mongo/db/s/resharding/resharding_oplog_application.h"
+#include "mongo/db/s/resharding/resharding_oplog_session_application.h"
+#include "mongo/db/s/resharding/resharding_util.h"
+#include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
+#include "mongo/db/versioning_protocol/shard_version_factory.h"
+#include "mongo/logv2/log.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/functional.h"
+#include "mongo/util/future_util.h"
+
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -36,30 +59,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/status.h"
-#include "mongo/db/client.h"
-#include "mongo/db/s/operation_sharding_state.h"
-#include "mongo/db/s/resharding/resharding_data_copy_util.h"
-#include "mongo/db/s/resharding/resharding_future_util.h"
-#include "mongo/db/s/resharding/resharding_oplog_application.h"
-#include "mongo/db/s/resharding/resharding_oplog_batch_applier.h"
-#include "mongo/db/s/resharding/resharding_oplog_session_application.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/index_version.h"
-#include "mongo/s/shard_version.h"
-#include "mongo/s/shard_version_factory.h"
-#include "mongo/s/sharding_index_catalog_cache.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/functional.h"
-#include "mongo/util/future_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
 
@@ -93,6 +92,11 @@ SemiFuture<void> ReshardingOplogBatchApplier::applyBatch(
                        const auto& oplogEntry = *chainCtx->batch[i];
                        auto opCtx = factory.makeOperationContext(&cc());
 
+                       boost::optional<rss::consensus::WriteIntentGuard> writeGuard;
+                       if (gFeatureFlagIntentRegistration.isEnabled()) {
+                           writeGuard.emplace(opCtx.get());
+                       }
+
                        if constexpr (IsForSessionApplication) {
                            auto conflictingTxnCompletionFuture =
                                _sessionApplication.tryApplyOperation(opCtx.get(), oplogEntry);
@@ -102,27 +106,24 @@ SemiFuture<void> ReshardingOplogBatchApplier::applyBatch(
                                    std::move(*conflictingTxnCompletionFuture), cancelToken);
                            }
                        } else {
-                           resharding::data_copy::withOneStaleConfigRetry(opCtx.get(), [&] {
+                           if (resharding::isProgressMarkOplogAfterOplogApplicationStarted(
+                                   oplogEntry)) {
+                               continue;
+                           }
+
+                           shard_role_loop::withStaleShardRetry(opCtx.get(), [&]() {
                                // ReshardingOpObserver depends on the collection metadata being
                                // known when processing writes to the temporary resharding
                                // collection. We attach placement version IGNORED to the write
                                // operations and retry once on a StaleConfig error to allow the
                                // collection metadata information to be recovered.
-                               auto [_, sii] = uassertStatusOK(
-                                   Grid::get(opCtx.get())
-                                       ->catalogCache()
-                                       ->getCollectionRoutingInfo(opCtx.get(),
-                                                                  _crudApplication.getOutputNss()));
                                ScopedSetShardRole scopedSetShardRole(
                                    opCtx.get(),
                                    _crudApplication.getOutputNss(),
-                                   ShardVersionFactory::make(
-                                       ChunkVersion::IGNORED(),
-                                       sii ? boost::make_optional(sii->getCollectionIndexes())
-                                           : boost::none) /* shardVersion */,
+                                   ShardVersionFactory::make(ChunkVersion::IGNORED()),
                                    boost::none /* databaseVersion */);
                                uassertStatusOK(
-                                   _crudApplication.applyOperation(opCtx.get(), sii, oplogEntry));
+                                   _crudApplication.applyOperation(opCtx.get(), oplogEntry));
                            });
                        }
                    }

@@ -27,15 +27,6 @@
  *    it in the license file.
  */
 
-#include <cstddef>
-#include <functional>
-#include <initializer_list>
-#include <memory>
-#include <string>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -67,9 +58,17 @@
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/service_entry_point_shard_role.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/password_digest.h"
+
+#include <cstddef>
+#include <functional>
+#include <initializer_list>
+#include <memory>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 namespace {
@@ -150,19 +149,17 @@ SaslConversation::SaslConversation(std::string mech)
     ASSERT_OK(
         authzBackend->insert(opCtx.get(),
                              NamespaceString::createNamespaceString_forTest("admin.system.users"),
-                             BSON("_id"
-                                  << "test.andy"
-                                  << "user"
-                                  << "andy"
-                                  << "db"
-                                  << "test"
-                                  << "credentials" << creds << "roles" << BSONArray()),
+                             BSON("_id" << "test.andy"
+                                        << "user"
+                                        << "andy"
+                                        << "db"
+                                        << "test"
+                                        << "credentials" << creds << "roles" << BSONArray()),
                              BSONObj()));
 }
 
 void SaslConversation::assertConversationFailure() {
     std::string clientMessage;
-    std::string serverMessage;
     Status clientStatus(ErrorCodes::InternalError, "");
     StatusWith<std::string> serverResponse("");
     do {

@@ -29,14 +29,14 @@
 
 #pragma once
 
-#include <cstdint>
-
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/with_lock.h"
+
+#include <cstdint>
 
 namespace mongo {
 
@@ -64,21 +64,26 @@ public:
     WiredTigerOplogManager() = default;
     ~WiredTigerOplogManager() = default;
 
-    /*
-     * Initializes the oplog read timestamp with the highest oplog timestamp and saves the oplog
-     * pointer for notifying capped waiters.
+    /**
+     * Starts the oplog manager, initializing the oplog read timestamp with the highest oplog
+     * timestamp.
      */
-    void initialize(OperationContext* opCtx, RecordStore* oplogRecordStore);
+    void start(OperationContext*, const KVEngine&, RecordStore& oplog, bool isReplSet);
+
+    /**
+     * Stops the oplog manager.
+     */
+    void stop();
 
     /**
      * Updates the oplog read timestamp if the visibility timestamp is behind the provided
      * `commitTimestamp`, and notifies any capped waiters on the oplog if the visibility point is
      * advanced.
      *
-     * Callers must ensure this call is not concurrenct with a call to `initialize`, as this is not
+     * Callers must ensure this call is not concurrent with a call to `initialize`, as this is not
      * thread-safe.
      */
-    void triggerOplogVisibilityUpdate(KVEngine* engine, Timestamp commitTimestamp);
+    void triggerOplogVisibilityUpdate();
 
     /**
      * Waits for all committed writes at this time to become visible (that is, until no holes exist
@@ -101,17 +106,46 @@ public:
     std::uint64_t getOplogReadTimestamp() const;
     void setOplogReadTimestamp(Timestamp ts);
 
+    /**
+     * Returns an empty string if `initialize` hasn't been called.
+     */
+    StringData getIdent() const;
+
 private:
+    enum class VisibilityUpdateResult {
+        NotUpdated,
+        Updated,
+        Stopped,
+    };
+    VisibilityUpdateResult _updateVisibility(stdx::unique_lock<stdx::mutex>&,
+                                             const KVEngine&,
+                                             const RecordStore::Capped& oplog);
+
     void _setOplogReadTimestamp(WithLock, uint64_t newTimestamp);
+
+    std::string _oplogIdent;
 
     AtomicWord<unsigned long long> _oplogReadTimestamp{0};
 
-    RecordStore* _oplogRecordStore = nullptr;
+    stdx::thread _oplogVisibilityThread;
+
+    // Signaled to trigger the oplog visibility thread to run.
+    mutable stdx::condition_variable _oplogVisibilityThreadCV;
 
     // Signaled when oplog visibility has been updated.
     mutable stdx::condition_variable _oplogEntriesBecameVisibleCV;
 
     // Protects the state below.
     mutable stdx::mutex _oplogVisibilityStateMutex;
+
+    // Whether this oplog manager is currently running.
+    bool _running = false;
+
+    // Whether an oplog to oplog visibility is being triggered.
+    bool _triggerOplogVisibilityUpdate = false;
+
+    // The number of operations waiting for more of the oplog to become visible, to avoid update
+    // delays for batching.
+    int64_t _opsWaitingForOplogVisibilityUpdate = 0;
 };
 }  // namespace mongo

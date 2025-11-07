@@ -29,39 +29,31 @@
 
 #include "mongo/db/pipeline/document_source_change_stream_split_large_event.h"
 
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/pipeline/change_stream_helpers.h"
+#include "mongo/db/pipeline/lite_parsed_document_source.h"
+#include "mongo/db/query/allowed_contexts.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
+
 #include <algorithm>
 #include <iterator>
 #include <list>
 #include <utility>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/db/commands/server_status_metric.h"
-#include "mongo/db/exec/document_value/document_metadata_fields.h"
-#include "mongo/db/pipeline/change_stream_helpers.h"
-#include "mongo/db/pipeline/change_stream_split_event_helpers.h"
-#include "mongo/db/pipeline/document_source_change_stream_check_resumability.h"
-#include "mongo/db/pipeline/lite_parsed_document_source.h"
-#include "mongo/db/query/allowed_contexts.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
-#include "mongo/util/str.h"
-
 namespace mongo {
-namespace {
-auto& changeStreamsLargeEventsSplitCounter =
-    *MetricBuilder<Counter64>{"changeStreams.largeEventsSplit"};
-}
+
 REGISTER_DOCUMENT_SOURCE(changeStreamSplitLargeEvent,
                          LiteParsedDocumentSourceDefault::parse,
                          DocumentSourceChangeStreamSplitLargeEvent::createFromBson,
                          AllowedWithApiStrict::kNeverInVersion1);
+ALLOCATE_DOCUMENT_SOURCE_ID(changeStreamSplitLargeEvent,
+                            DocumentSourceChangeStreamSplitLargeEvent::id)
 
 boost::intrusive_ptr<DocumentSourceChangeStreamSplitLargeEvent>
 DocumentSourceChangeStreamSplitLargeEvent::create(
@@ -81,7 +73,7 @@ DocumentSourceChangeStreamSplitLargeEvent::createFromBson(
     // We expect an empty object spec for this stage.
     uassert(7182800,
             "$changeStreamSplitLargeEvent spec should be an empty object",
-            rawSpec.type() == BSONType::Object && rawSpec.Obj().isEmpty());
+            rawSpec.type() == BSONType::object && rawSpec.Obj().isEmpty());
 
     // If there is no change stream spec set on the expression context, then this cannot be a change
     // stream pipeline. Pipeline validation will catch this issue later during parsing.
@@ -105,7 +97,7 @@ Value DocumentSourceChangeStreamSplitLargeEvent::serialize(const SerializationOp
 }
 
 StageConstraints DocumentSourceChangeStreamSplitLargeEvent::constraints(
-    Pipeline::SplitState pipeState) const {
+    PipelineSplitState pipeState) const {
     StageConstraints constraints{StreamType::kStreaming,
                                  PositionRequirement::kCustom,
                                  HostTypeRequirement::kAnyShard,
@@ -118,6 +110,7 @@ StageConstraints DocumentSourceChangeStreamSplitLargeEvent::constraints(
 
     // The user cannot specify multiple split stages in the pipeline.
     constraints.canAppearOnlyOnceInPipeline = true;
+    constraints.consumesLogicalCollectionData = false;
     return constraints;
 }
 
@@ -127,89 +120,8 @@ DocumentSource::GetModPathsReturn DocumentSourceChangeStreamSplitLargeEvent::get
     return {GetModPathsReturn::Type::kAllPaths, {}, {}};
 }
 
-DocumentSource::GetNextResult DocumentSourceChangeStreamSplitLargeEvent::doGetNext() {
-    // If we've already queued up some fragments, return them.
-    if (!_splitEventQueue.empty()) {
-        return _popFromQueue();
-    }
-
-    auto input = pSource->getNext();
-
-    // If the next result is EOF return, it as-is.
-    if (!input.isAdvanced()) {
-        return input;
-    }
-
-    // Process the event to see if it is within the size limit. We have to serialize the document to
-    // perform this check, but the helper will also produce a new 'Document' which - if it is small
-    // enough to be returned - will not need to be re-serialized by the plan executor.
-    auto [eventDoc, eventBsonSize] = change_stream_split_event::processChangeEventBeforeSplit(
-        input.getDocument(),
-        this->pExpCtx->getNeedsMerge() || this->pExpCtx->getForPerShardCursor());
-
-    // Make sure to leave some space for the postBatchResumeToken in the cursor response object.
-    size_t tokenSize = eventDoc.metadata().getSortKey().getDocument().toBson().objsize();
-
-    // If we are resuming from a split event, check whether this is it. If so, extract the fragment
-    // number from which we are resuming. Otherwise, we have already scanned past the resume point,
-    // which implies that it may be on another shard. Continue to split this event without skipping.
-    size_t skipFragments = _handleResumeAfterSplit(eventDoc, eventBsonSize + tokenSize);
-
-    // Before proceeding, check whether the event is small enough to be returned as-is.
-    if (eventBsonSize + tokenSize <= kBSONObjMaxChangeEventSize) {
-        return std::move(eventDoc);
-    }
-
-    // Split the event into N appropriately-sized fragments.
-    _splitEventQueue = change_stream_split_event::splitChangeEvent(
-        eventDoc, kBSONObjMaxChangeEventSize - tokenSize, skipFragments);
-
-    // If the user is resuming from a split event but supplied a pipeline which produced a different
-    // split, we cannot reproduce the split point. Check if we're about to swallow all fragments.
-    uassert(ErrorCodes::ChangeStreamFatalError,
-            "Attempted to resume from a split event, but the resumed stream produced a different "
-            "split. Ensure that the pipeline used to resume is the same as the original",
-            !(skipFragments > 0 && _splitEventQueue.empty()));
-    tassert(7182804,
-            "Unexpected empty fragment queue after splitting a change stream event",
-            !_splitEventQueue.empty());
-
-    // Increment the ServerStatus counter to indicate that we have split a change event.
-    changeStreamsLargeEventsSplitCounter.increment();
-
-    // Return the first element from the queue of fragments.
-    return _popFromQueue();
-}
-
-Document DocumentSourceChangeStreamSplitLargeEvent::_popFromQueue() {
-    auto nextFragment = std::move(_splitEventQueue.front());
-    _splitEventQueue.pop();
-    return nextFragment;
-}
-
-size_t DocumentSourceChangeStreamSplitLargeEvent::_handleResumeAfterSplit(const Document& eventDoc,
-                                                                          size_t eventBsonSize) {
-    if (!_resumeAfterSplit) {
-        return 0;
-    }
-    using DSCSCR = DocumentSourceChangeStreamCheckResumability;
-    auto resumeStatus = DSCSCR::compareAgainstClientResumeToken(eventDoc, *_resumeAfterSplit);
-    tassert(7182805,
-            "Observed unexpected event before resume point",
-            resumeStatus != DSCSCR::ResumeStatus::kCheckNextDoc);
-    uassert(ErrorCodes::ChangeStreamFatalError,
-            "Attempted to resume from a split event fragment, but the event in the resumed "
-            "stream was not large enough to be split",
-            resumeStatus != DSCSCR::ResumeStatus::kNeedsSplit ||
-                eventBsonSize > kBSONObjMaxChangeEventSize);
-    auto fragmentNum =
-        (resumeStatus == DSCSCR::ResumeStatus::kNeedsSplit ? *_resumeAfterSplit->fragmentNum : 0);
-    _resumeAfterSplit.reset();
-    return fragmentNum;
-}
-
-Pipeline::SourceContainer::iterator DocumentSourceChangeStreamSplitLargeEvent::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator DocumentSourceChangeStreamSplitLargeEvent::doOptimizeAt(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     // Helper to determine whether the iterator has reached its final position in the pipeline.
     // Checks whether $changeStreamSplitLargeEvent should move ahead of the given stage.
     auto shouldMoveAheadOf = [](const auto& stagePtr) {
@@ -229,8 +141,8 @@ Pipeline::SourceContainer::iterator DocumentSourceChangeStreamSplitLargeEvent::d
 
 void DocumentSourceChangeStreamSplitLargeEvent::validatePipelinePosition(
     bool alreadyOptimized,
-    Pipeline::SourceContainer::const_iterator pos,
-    const Pipeline::SourceContainer& container) const {
+    DocumentSourceContainer::const_iterator pos,
+    const DocumentSourceContainer& container) const {
 
     // The $changeStreamSplitLargeEvent stage must be the final stage in the pipeline before
     // optimization.

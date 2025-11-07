@@ -29,19 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <iostream>
-#include <map>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -50,8 +37,9 @@
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_stats.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_stats.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/update_request.h"
@@ -71,17 +59,33 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/transaction/transaction_metrics_observer.h"
 #include "mongo/db/transaction/transaction_operations.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/mutable_observer_registry.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
+
+class TickSource;
 
 /**
  * Reason a transaction was terminated.
@@ -100,7 +104,7 @@ enum class TerminationCause {
  * Active transactions are protected by the locking subsystem, so we must hold at least a
  * Global intent lock before calling this function to start a transaction.
  */
-void allocateSnapshotWithConsistentCatalog(
+MONGO_MOD_PUB void allocateSnapshotWithConsistentCatalog(
     OperationContext* opCtx, const RecoveryUnit::OpenSnapshotOptions& openSnapshotOptions);
 
 /**
@@ -111,7 +115,7 @@ void allocateSnapshotWithConsistentCatalog(
  * Its methods are split in two groups with distinct read/write and concurrency control rules. See
  * the comments below for more information.
  */
-class TransactionParticipant {
+class MONGO_MOD_PUB TransactionParticipant {
     struct PrivateState;
     struct ObservableState;
 
@@ -207,6 +211,8 @@ class TransactionParticipant {
 
 public:
     static inline MutableObserverRegistry<int32_t> observeTransactionLifetimeLimitSeconds;
+    static inline MutableObserverRegistry<int32_t> observeCachePressureQueryPeriodMilliseconds;
+
 
     TransactionParticipant();
 
@@ -215,13 +221,13 @@ public:
 
     ~TransactionParticipant();
 
-    enum class TransactionActions { kNone, kStart, kContinue, kStartOrContinue };
+    enum class MONGO_MOD_PUB TransactionActions { kNone, kStart, kContinue, kStartOrContinue };
 
     /**
      * Holds state for a snapshot read or multi-statement transaction in between network
      * operations.
      */
-    class TxnResources {
+    class MONGO_MOD_PRIVATE TxnResources {
     public:
         enum class StashStyle { kPrimary, kSecondary };
 
@@ -229,7 +235,9 @@ public:
          * Stashes transaction state from 'opCtx' in the newly constructed TxnResources.
          * Caller must hold the Client lock associated with opCtx, attested by WithLock.
          */
-        TxnResources(WithLock, OperationContext* opCtx, StashStyle stashStyle) noexcept;
+        TxnResources(ClientLock& clientLock,
+                     OperationContext* opCtx,
+                     StashStyle stashStyle) noexcept;
         ~TxnResources();
 
         // Rule of 5: because we have a class-defined destructor, we need to explicitly specify
@@ -268,7 +276,7 @@ public:
             return _readConcernArgs;
         }
 
-        void setNoEvictionAfterRollback();
+        void setNoEvictionAfterCommitOrRollback();
 
     private:
         bool _released = false;
@@ -288,7 +296,7 @@ public:
      *  recovery unit back onto the `opCtx` and restoring the locker state relevant to the original
      *  WUOW.
      */
-    class SideTransactionBlock {
+    class MONGO_MOD_PUB SideTransactionBlock {
     public:
         SideTransactionBlock(OperationContext* opCtx);
         ~SideTransactionBlock();
@@ -300,14 +308,15 @@ public:
         OperationContext* _opCtx;
     };  // class SideTransactionBlock
 
-    using CommittedStatementTimestampMap = absl::flat_hash_map<StmtId, repl::OpTime>;
+    using CommittedStatementTimestampMap MONGO_MOD_PRIVATE =
+        absl::flat_hash_map<StmtId, repl::OpTime>;
 
     static const BSONObj kDeadEndSentinel;
 
     /**
      * Class used by observers to examine the state of a TransactionParticipant.
      */
-    class Observer {
+    class MONGO_MOD_PUB Observer {
     public:
         explicit Observer(const ObservableSession& session);
 
@@ -341,6 +350,11 @@ public:
         bool expiredAsOf(Date_t when) const;
 
         /**
+         * Returns the duration of the transaction.
+         */
+        Microseconds getDuration(TickSource* tickSource) const;
+
+        /**
          * Returns if this TransactionParticipant instance can be reaped. Always true unless there
          * is an open transaction on this session.
          */
@@ -356,7 +370,7 @@ public:
          */
         bool transactionIsOpen() const {
             return o().txnState.isOpen();
-        };
+        }
 
         bool transactionIsCommitted() const {
             return o().txnState.isCommitted();
@@ -380,6 +394,10 @@ public:
 
         bool transactionIsInRetryableWriteMode() const {
             return o().txnState.isInRetryableWriteMode();
+        }
+
+        std::string transactionStateDescriptor() const {
+            return o().txnState.toString();
         }
 
         const absl::flat_hash_set<NamespaceString>& affectedNamespaces() const {
@@ -459,7 +477,7 @@ public:
      * Class used by a thread that has checked out the TransactionParticipant's session to observe
      * and modify the transaction participant.
      */
-    class Participant : public Observer {
+    class MONGO_MOD_PUB Participant : public Observer {
     public:
         // Indicates whether the future lock requests should have timeouts.
         enum class MaxLockTimeout { kNotAllowed, kAllowed };
@@ -674,7 +692,7 @@ public:
         /*
          * Aborts the transaction, releasing transaction resources.
          */
-        void abortTransaction(OperationContext* opCtx);
+        void abortTransaction(OperationContext* opCtx, Status overwrittenStatus = Status::OK());
 
         /**
          * Adds a stored operation to the list of stored operations for the current multi-document
@@ -800,32 +818,11 @@ public:
         // concurrency control rules.
         //
 
-        std::string getTransactionInfoForLogForTest(
-            OperationContext* opCtx,
-            const SingleThreadedLockStats* lockStats,
-            bool committed,
-            const APIParameters& apiParameters,
-            const repl::ReadConcernArgs& readConcernArgs) const {
-
-            TerminationCause terminationCause =
-                committed ? TerminationCause::kCommitted : TerminationCause::kAborted;
-            return _transactionInfoForLog(
-                opCtx, lockStats, terminationCause, apiParameters, readConcernArgs);
-        }
-
-        BSONObj getTransactionInfoBSONForLogForTest(
-            OperationContext* opCtx,
-            const SingleThreadedLockStats* lockStats,
-            bool committed,
-            const APIParameters& apiParameters,
-            const repl::ReadConcernArgs& readConcernArgs) const {
-
-            TerminationCause terminationCause =
-                committed ? TerminationCause::kCommitted : TerminationCause::kAborted;
-            return _transactionInfoBSONForLog(
-                opCtx, lockStats, terminationCause, apiParameters, readConcernArgs);
-        }
-
+        BSONObj getTransactionInfoForLogForTest(OperationContext* opCtx,
+                                                const SingleThreadedLockStats* lockStats,
+                                                bool committed,
+                                                const APIParameters& apiParameters,
+                                                const repl::ReadConcernArgs& readConcernArgs) const;
 
         SingleTransactionStats& getSingleTransactionStatsForTest() {
             return _tp->_o.transactionMetricsObserver.getSingleTransactionStats();
@@ -927,8 +924,6 @@ public:
         // sessions.
         boost::optional<repl::OpTime> _checkStatementExecutedSelf(StmtId stmtId) const;
 
-        UpdateRequest _makeUpdateRequest(const SessionTxnRecord& sessionTxnRecord) const;
-
         void _registerUpdateCacheOnCommit(OperationContext* opCtx,
                                           std::vector<StmtId> stmtIdsWritten,
                                           const repl::OpTime& lastStmtIdWriteTs);
@@ -1004,35 +999,20 @@ public:
             const std::string& cmdName) const;
 
         // Logs the transaction information if it has run slower than the global parameter slowMS.
-        // The transaction must be committed or aborted when this function is called.
+        // The transaction must be committed or aborted when this function is called. Defers logging
+        // details to `_transactionInfoForLog`.
         void _logSlowTransaction(OperationContext* opCtx,
                                  const SingleThreadedLockStats* lockStats,
                                  TerminationCause terminationCause,
                                  APIParameters apiParameters,
                                  repl::ReadConcernArgs readConcernArgs);
 
-        // This method returns a string with information about a slow transaction. The format of the
-        // logging string produced should match the format used for slow operation logging. A
-        // transaction must be completed (committed or aborted) and a valid LockStats reference must
-        // be passed in order for this method to be called.
-        std::string _transactionInfoForLog(OperationContext* opCtx,
-                                           const SingleThreadedLockStats* lockStats,
-                                           TerminationCause terminationCause,
-                                           APIParameters apiParameters,
-                                           repl::ReadConcernArgs readConcernArgs) const;
-
         void _transactionInfoForLog(OperationContext* opCtx,
                                     const SingleThreadedLockStats* lockStats,
                                     TerminationCause terminationCause,
                                     APIParameters apiParameters,
                                     repl::ReadConcernArgs readConcernArgs,
-                                    logv2::DynamicAttributes* pAttrs) const;
-
-        BSONObj _transactionInfoBSONForLog(OperationContext* opCtx,
-                                           const SingleThreadedLockStats* lockStats,
-                                           TerminationCause terminationCause,
-                                           APIParameters apiParameters,
-                                           repl::ReadConcernArgs readConcernArgs) const;
+                                    logv2::DynamicAttributes& attrs) const;
 
         // Bumps up the transaction number and transaction retry counter of this transaction and
         // performs the necessary cleanup.
@@ -1302,6 +1282,9 @@ private:
         // locks can automatically get freed.
         bool inShutdown{false};
 
+        // Overrides the thrown status in '_checkIsCommandValidWithTxnState' if not-OK.
+        Status overwrittenStatus{Status::OK()};
+
         // Holds oplog data for operations which have been applied in the current multi-document
         // transaction.
         TransactionOperations transactionOperations;
@@ -1351,7 +1334,7 @@ private:
  * The catalog can only exist as a decoration on the Session object and can only be accessed and
  * modified by the thread which has the session checked-out.
  */
-class RetryableWriteTransactionParticipantCatalog {
+class MONGO_MOD_PRIVATE RetryableWriteTransactionParticipantCatalog {
 public:
     RetryableWriteTransactionParticipantCatalog() = default;
     ~RetryableWriteTransactionParticipantCatalog() = default;
@@ -1443,7 +1426,7 @@ private:
  * it, as a single max-length operation should be able to be packed into an "applyOps"
  * entry.
  */
-std::size_t getMaxNumberOfTransactionOperationsInSingleOplogEntry();
+MONGO_MOD_PUB std::size_t getMaxNumberOfTransactionOperationsInSingleOplogEntry();
 
 /**
  * Returns maximum size (bytes) of operations to pack into a single oplog entry,
@@ -1452,6 +1435,6 @@ std::size_t getMaxNumberOfTransactionOperationsInSingleOplogEntry();
  * Refer to getMaxNumberOfTransactionOperationsInSingleOplogEntry() comments for a
  * description on packing transaction operations into "applyOps" entries.
  */
-std::size_t getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes();
+MONGO_MOD_PUB std::size_t getMaxSizeOfTransactionOperationsInSingleOplogEntryBytes();
 
 }  // namespace mongo

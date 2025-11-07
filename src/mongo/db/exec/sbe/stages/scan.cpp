@@ -27,15 +27,7 @@
  *    it in the license file.
  */
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/inlined_vector.h>
-#include <absl/meta/type_traits.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <cstring>
-#include <set>
+#include "mongo/db/exec/sbe/stages/scan.h"
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
@@ -46,19 +38,21 @@
 #include "mongo/db/client.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
-#include "mongo/db/exec/sbe/stages/scan.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/repl/optime.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/storage/record_data.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 #include "mongo/util/str.h"
+
+#include <cstdint>
+#include <cstring>
+#include <set>
+
+#include <boost/optional/optional.hpp>
 
 namespace {
 MONGO_FAIL_POINT_DEFINE(hangScanGetNext);
@@ -77,7 +71,6 @@ ScanStage::ScanStage(UUID collUuid,
                      boost::optional<value::SlotId> indexIdentSlot,
                      boost::optional<value::SlotId> indexKeySlot,
                      boost::optional<value::SlotId> indexKeyPatternSlot,
-                     boost::optional<value::SlotId> oplogTsSlot,
                      std::vector<std::string> scanFieldNames,
                      value::SlotVector scanFieldSlots,
                      boost::optional<value::SlotId> seekRecordIdSlot,
@@ -105,7 +98,6 @@ ScanStage::ScanStage(UUID collUuid,
                                               indexIdentSlot,
                                               indexKeySlot,
                                               indexKeyPatternSlot,
-                                              oplogTsSlot,
                                               scanFieldNames,
                                               scanFieldSlots,
                                               seekRecordIdSlot,
@@ -116,9 +108,12 @@ ScanStage::ScanStage(UUID collUuid,
                                               useRandomCursor)),
       _includeScanStartRecordId(includeScanStartRecordId),
       _includeScanEndRecordId(includeScanEndRecordId) {
-    invariant(!seekRecordIdSlot || forward);
-    // We cannot use a random cursor if we are seeking or requesting a reverse scan.
-    invariant(!useRandomCursor || (!seekRecordIdSlot && forward));
+    tassert(11094716,
+            "seekRecordIdSlot field may only be used with forward scan",
+            !seekRecordIdSlot || forward);
+    tassert(11094715,
+            "Cannot use a random cursor if we are seeking or requesting a reverse scan",
+            !useRandomCursor || (!seekRecordIdSlot && forward));
 }  // ScanStage regular constructor
 
 /**
@@ -159,12 +154,6 @@ void ScanStage::prepare(CompileCtx& ctx) {
         uassert(4822815,
                 str::stream() << "duplicate field: " << _state->scanFieldSlots[idx],
                 insertedRename);
-
-        if (_state->oplogTsSlot &&
-            _state->scanFieldNames[idx] == repl::OpTime::kTimestampFieldName) {
-            // Oplog scans only: cache a pointer to the "ts" field accessor for fast access.
-            _tsFieldAccessor = accessorPtr;
-        }
     }
 
     if (_state->seekRecordIdSlot) {
@@ -195,11 +184,7 @@ void ScanStage::prepare(CompileCtx& ctx) {
         _indexKeyPatternAccessor = ctx.getAccessor(*(_state->indexKeyPatternSlot));
     }
 
-    if (_state->oplogTsSlot) {
-        _oplogTsAccessor = ctx.getRuntimeEnvAccessor(*(_state->oplogTsSlot));
-    }
-
-    tassert(5709600, "'_coll' should not be initialized prior to 'acquireCollection()'", !_coll);
+    // No-op if using acquisition.
     _coll.acquireCollection(_opCtx, _state->dbName, _state->collUuid);
 }
 
@@ -212,10 +197,6 @@ value::SlotAccessor* ScanStage::getAccessor(CompileCtx& ctx, value::SlotId slot)
         return &_recordIdAccessor;
     }
 
-    if (_state->oplogTsSlot && *(_state->oplogTsSlot) == slot) {
-        return _oplogTsAccessor;
-    }
-
     if (auto it = _scanFieldAccessorsMap.find(slot); it != _scanFieldAccessorsMap.end()) {
         return it->second;
     }
@@ -223,7 +204,7 @@ value::SlotAccessor* ScanStage::getAccessor(CompileCtx& ctx, value::SlotId slot)
     return ctx.getAccessor(slot);
 }
 
-void ScanStage::doSaveState(bool relinquishCursor) {
+void ScanStage::doSaveState() {
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
     if (slotsAccessible()) {
         if (_state->recordSlot &&
@@ -239,20 +220,18 @@ void ScanStage::doSaveState(bool relinquishCursor) {
     }
 #endif
 
-    if (relinquishCursor) {
-        if (_state->recordSlot) {
-            prepareForYielding(_recordAccessor, slotsAccessible());
-        }
-        if (_state->recordIdSlot) {
-            // TODO: SERVER-72054
-            // RecordId are currently (incorrectly) accessed after EOF, therefore we must treat them
-            // as always accessible rather than invalidate them when slots are disabled. We should
-            // use slotsAccessible() instead of true, once the bug is fixed.
-            prepareForYielding(_recordIdAccessor, true);
-        }
-        for (auto& accessor : _scanFieldAccessors) {
-            prepareForYielding(accessor, slotsAccessible());
-        }
+    if (_state->recordSlot) {
+        prepareForYielding(_recordAccessor, slotsAccessible());
+    }
+    if (_state->recordIdSlot) {
+        // TODO: SERVER-72054
+        // RecordId are currently (incorrectly) accessed after EOF, therefore we must treat them
+        // as always accessible rather than invalidate them when slots are disabled. We should
+        // use slotsAccessible() instead of true, once the bug is fixed.
+        prepareForYielding(_recordIdAccessor, true);
+    }
+    for (auto& accessor : _scanFieldAccessors) {
+        prepareForYielding(accessor, slotsAccessible());
     }
 
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
@@ -261,50 +240,33 @@ void ScanStage::doSaveState(bool relinquishCursor) {
     }
 #endif
 
-    if (auto cursor = getActiveCursor(); cursor != nullptr && relinquishCursor) {
+    if (auto cursor = getActiveCursor(); cursor != nullptr) {
         cursor->save();
-    }
-
-    if (auto cursor = getActiveCursor()) {
-        cursor->setSaveStorageCursorOnDetachFromOperationContext(!relinquishCursor);
     }
 
     _indexCatalogEntryMap.clear();
     _coll.reset();
 }
 
-void ScanStage::doRestoreState(bool relinquishCursor) {
+void ScanStage::doRestoreState() {
     invariant(_opCtx);
-    invariant(!_coll);
 
-    // If this stage has not been prepared, then yield recovery is a no-op.
-    if (!_coll.getCollName()) {
-        return;
+    if (!_coll.isAcquisition()) {
+        // If this stage has not been prepared, then yield recovery is a no-op.
+        if (!_coll.getCollName()) {
+            return;
+        }
+        _coll.restoreCollection(_opCtx, _state->dbName, _state->collUuid);
     }
 
-    _coll.restoreCollection(_opCtx, _state->dbName, _state->collUuid);
-
     if (auto cursor = getActiveCursor(); cursor != nullptr) {
-        if (relinquishCursor) {
-            const auto tolerateCappedCursorRepositioning = false;
-            const bool couldRestore = cursor->restore(tolerateCappedCursorRepositioning);
-            uassert(
-                ErrorCodes::CappedPositionLost,
+        const auto tolerateCappedCursorRepositioning = false;
+        const bool couldRestore = cursor->restore(*shard_role_details::getRecoveryUnit(_opCtx),
+                                                  tolerateCappedCursorRepositioning);
+        uassert(ErrorCodes::CappedPositionLost,
                 str::stream()
                     << "CollectionScan died due to position in capped collection being deleted. ",
                 couldRestore);
-        } else if (_coll.getPtr()->isCapped()) {
-            // We cannot check for capped position lost here, as it requires us to reposition the
-            // cursor, which would free the underlying value and break the contract of
-            // restoreState(fullSave=false). So we defer the capped collection position lost check
-            // to the following getNext() call by setting this flag.
-            //
-            // The intention in this codepath is to retain a valid and positioned cursor across
-            // query yields / getMore commands. However, it is safe to reposition the cursor in
-            // getNext() and we must reset the cursor for capped collections in order to check for
-            // CappedPositionLost errors.
-            _needsToCheckCappedPositionLost = true;
-        }
     }
 
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
@@ -390,7 +352,8 @@ void ScanStage::scanResetState(bool reOpen) {
             }
         }
     } else {
-        _randomCursor = _coll.getPtr()->getRecordStore()->getRandomCursor(_opCtx);
+        _randomCursor = _coll.getPtr()->getRecordStore()->getRandomCursor(
+            _opCtx, *shard_role_details::getRecoveryUnit(_opCtx));
     }
 
     _firstGetNext = true;
@@ -416,12 +379,13 @@ void ScanStage::open(bool reOpen) {
     // first time ever, or this stage is being opened for the first time after calling close().
     tassert(5071004, "first open to ScanStage but reOpen=true", !reOpen && !_open);
     tassert(5071005, "ScanStage is not open but has a cursor", !getActiveCursor());
+    if (!_coll.isAcquisition()) {
+        // We need to re-acquire '_coll' in this case and make some validity checks (the collection
+        // has not been dropped, renamed, etc).
+        _coll.restoreCollection(_opCtx, _state->dbName, _state->collUuid);
 
-    // We need to re-acquire '_coll' in this case and make some validity checks (the collection has
-    // not been dropped, renamed, etc).
-    _coll.restoreCollection(_opCtx, _state->dbName, _state->collUuid);
-
-    tassert(5959701, "restoreCollection() unexpectedly returned null in ScanStage", _coll);
+        tassert(5959701, "restoreCollection() unexpectedly returned null in ScanStage", _coll);
+    }
 
     if (_state->scanCallbacks.scanOpenCallback) {
         _state->scanCallbacks.scanOpenCallback(_opCtx, _coll.getPtr());
@@ -429,6 +393,10 @@ void ScanStage::open(bool reOpen) {
 
     scanResetState(reOpen);
     _open = true;
+}
+
+void ScanStage::doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) {
+    _coll.setCollAcquisition(mca.getCollectionAcquisitionFromUuid(_state->collUuid));
 }
 
 PlanState ScanStage::getNext() {
@@ -448,20 +416,8 @@ PlanState ScanStage::getNext() {
     disableSlotAccess();
 
     // This call to checkForInterrupt() may result in a call to save() or restore() on the entire
-    // PlanStage tree if a yield occurs. It's important that we call checkForInterrupt() before
-    // checking '_needsToCheckCappedPositionLost' since a call to restoreState() may set
-    // '_needsToCheckCappedPositionLost'.
+    // PlanStage tree if a yield occurs.
     checkForInterruptAndYield(_opCtx);
-
-    if (_needsToCheckCappedPositionLost) {
-        _cursor->save();
-        if (!_cursor->restore(false /* do not tolerate capped position lost */)) {
-            uasserted(ErrorCodes::CappedPositionLost,
-                      "CollectionScan died due to position in capped collection being deleted. ");
-        }
-
-        _needsToCheckCappedPositionLost = false;
-    }
 
     // Optimized so the most common case has as short a codepath as possible. Info on bounds edge
     // enforcement:
@@ -496,6 +452,7 @@ PlanState ScanStage::getNext() {
                                      "the collection: "
                                   << _seekRecordId);
                 }
+
                 doSeekExact = true;
                 nextRecord = _cursor->seekExact(_seekRecordId);
             } else if (_minRecordIdAccessor && _state->forward) {
@@ -620,18 +577,6 @@ PlanState ScanStage::getNext() {
                     }
                 }
                 bsonElement = bson::advance(bsonElement, field.size());
-            }
-        }
-
-        if (_oplogTsAccessor) {
-            // Oplog scans only: if _oplogTsAccessor is set, the value of the "ts" field, if
-            // it exists in the document, will be copied to this slot for use by the clustered scan
-            // EOF filter above this stage and/or because the query asked for the latest "ts" value.
-            tassert(7097200, "Expected _tsFieldAccessor to be defined", _tsFieldAccessor);
-            auto [tag, val] = _tsFieldAccessor->getViewOfValue();
-            if (tag != value::TypeTags::Nothing) {
-                auto&& [copyTag, copyVal] = value::copyValue(tag, val);
-                _oplogTsAccessor->reset(true, copyTag, copyVal);
             }
         }
     }
@@ -777,8 +722,6 @@ std::vector<DebugPrinter::Block> ScanStage::debugPrint() const {
 
     ret.emplace_back(_state->forward ? "true" : "false");
 
-    ret.emplace_back(_oplogTsAccessor ? "true" : "false");
-
     return ret;
 }
 
@@ -818,7 +761,9 @@ ParallelScanStage::ParallelScanStage(UUID collUuid,
       _scanFieldNames(scanFieldNames),
       _scanFieldSlots(scanFieldSlots),
       _scanCallbacks(callbacks) {
-    invariant(_scanFieldNames.size() == _scanFieldSlots.size());
+    tassert(11094714,
+            "Expecting number of scan fields to match the number of scan slots",
+            _scanFieldNames.size() == _scanFieldSlots.size());
 }
 
 ParallelScanStage::ParallelScanStage(const std::shared_ptr<ParallelState>& state,
@@ -849,7 +794,9 @@ ParallelScanStage::ParallelScanStage(const std::shared_ptr<ParallelState>& state
       _scanFieldNames(scanFieldNames),
       _scanFieldSlots(scanFieldSlots),
       _scanCallbacks(callbacks) {
-    invariant(_scanFieldNames.size() == _scanFieldSlots.size());
+    tassert(11094713,
+            "Expecting number of scan fields to match the number of scan slots",
+            _scanFieldNames.size() == _scanFieldSlots.size());
 }
 
 std::unique_ptr<PlanStage> ParallelScanStage::clone() const {
@@ -898,7 +845,7 @@ void ParallelScanStage::prepare(CompileCtx& ctx) {
         _indexKeyPatternAccessor = ctx.getAccessor(*_indexKeyPatternSlot);
     }
 
-    tassert(5709601, "'_coll' should not be initialized prior to 'acquireCollection()'", !_coll);
+    // No-op if using acquisition.
     _coll.acquireCollection(_opCtx, _dbName, _collUuid);
 }
 
@@ -918,7 +865,7 @@ value::SlotAccessor* ParallelScanStage::getAccessor(CompileCtx& ctx, value::Slot
     return ctx.getAccessor(slot);
 }
 
-void ParallelScanStage::doSaveState(bool relinquishCursor) {
+void ParallelScanStage::doSaveState() {
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
     _lastReturned.clear();
     if (slotsAccessible()) {
@@ -956,19 +903,19 @@ void ParallelScanStage::doSaveState(bool relinquishCursor) {
     _coll.reset();
 }
 
-void ParallelScanStage::doRestoreState(bool relinquishCursor) {
+void ParallelScanStage::doRestoreState() {
     invariant(_opCtx);
-    invariant(!_coll);
 
-    // If this stage has not been prepared, then yield recovery is a no-op.
-    if (!_coll.getCollName()) {
-        return;
+    if (!_coll.isAcquisition()) {
+        // If this stage has not been prepared, then yield recovery is a no-op.
+        if (!_coll.getCollName()) {
+            return;
+        }
+        _coll.restoreCollection(_opCtx, _dbName, _collUuid);
     }
 
-    _coll.restoreCollection(_opCtx, _dbName, _collUuid);
-
-    if (_cursor && relinquishCursor) {
-        const bool couldRestore = _cursor->restore();
+    if (_cursor) {
+        const bool couldRestore = _cursor->restore(*shard_role_details::getRecoveryUnit(_opCtx));
         uassert(ErrorCodes::CappedPositionLost,
                 str::stream()
                     << "CollectionScan died due to position in capped collection being deleted. ",
@@ -1011,7 +958,7 @@ void ParallelScanStage::open(bool reOpen) {
     invariant(_opCtx);
     invariant(!reOpen, "parallel scan is not restartable");
 
-    if (!_coll) {
+    if (!_coll.isAcquisition()) {
         // we're being opened after 'close()'. we need to re-acquire '_coll' in this case and
         // make some validity checks (the collection has not been dropped, renamed, etc.).
         tassert(5071013, "ParallelScanStage is not open but have _cursor", !_cursor);
@@ -1028,7 +975,8 @@ void ParallelScanStage::open(bool reOpen) {
                 if (ranges > 1024) {
                     ranges = 1024;
                 }
-                auto randomCursor = _coll.getPtr()->getRecordStore()->getRandomCursor(_opCtx);
+                auto randomCursor = _coll.getPtr()->getRecordStore()->getRandomCursor(
+                    _opCtx, *shard_role_details::getRecoveryUnit(_opCtx));
                 invariant(randomCursor);
                 std::set<RecordId> rids;
                 while (ranges--) {
@@ -1053,7 +1001,7 @@ void ParallelScanStage::open(bool reOpen) {
 }
 
 boost::optional<Record> ParallelScanStage::nextRange() {
-    invariant(_cursor);
+    tassert(11093507, "Cursor must be created", _cursor);
     _currentRange = _state->currentRange.fetchAndAdd(1);
     if (_currentRange < _state->ranges.size()) {
         _range = _state->ranges[_currentRange];
@@ -1069,6 +1017,10 @@ value::OwnedValueAccessor* ParallelScanStage::getFieldAccessor(StringData name) 
         return &_scanFieldAccessors[pos];
     }
     return nullptr;
+}
+
+void ParallelScanStage::doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) {
+    _coll.setCollAcquisition(mca.getCollectionAcquisitionFromUuid(_collUuid));
 }
 
 PlanState ParallelScanStage::getNext() {

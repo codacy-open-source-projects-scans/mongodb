@@ -29,12 +29,6 @@
 
 #include "mongo/db/cluster_transaction_api.h"
 
-#include <fmt/format.h>
-#include <string>
-
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -44,31 +38,22 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/string_map.h"
 
+#include <string>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <fmt/format.h>
+
 namespace mongo::txn_api::details {
 
-ClusterSEPTransactionClientBehaviors::ClusterSEPTransactionClientBehaviors(
-    OperationContext* opCtx) {
-    _service = opCtx->getService();
-    _isRouterEnabled = opCtx->getServiceContext()->getService(ClusterRole::RouterServer);
-
-    if (_isRouterEnabled) {
-        invariant(_service->role().hasExclusively(ClusterRole::RouterServer));
-    }
-}
-
 BSONObj ClusterSEPTransactionClientBehaviors::maybeModifyCommand(BSONObj cmdObj) const {
-    if (!_isRouterEnabled) {
-        return cluster::cmd::translations::replaceCommandNameWithClusterCommandName(cmdObj);
-    }
-    return cmdObj;
+    return cluster::cmd::translations::replaceCommandNameWithClusterCommandName(cmdObj);
 }
 
-Future<DbResponse> ClusterSEPTransactionClientBehaviors::handleRequest(
-    OperationContext* opCtx, const Message& request) const {
-    if (!_isRouterEnabled) {
-        return ServiceEntryPointRouterRole::handleRequestImpl(opCtx, request);
-    }
-    return _service->getServiceEntryPoint()->handleRequest(opCtx, request);
+Future<DbResponse> ClusterSEPTransactionClientBehaviors::handleRequest(OperationContext* opCtx,
+                                                                       const Message& request,
+                                                                       Date_t started) const {
+    return ServiceEntryPointRouterRole::handleRequestImpl(opCtx, request, started);
 }
 
 }  // namespace mongo::txn_api::details

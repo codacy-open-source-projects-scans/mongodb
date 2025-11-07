@@ -6,6 +6,8 @@
  * isn't guaranteed to be true when they are run in parallel with other workloads. Therefore
  * it can't be run in concurrency simultaneous suites.
  * @tags: [
+ *   # TODO(SERVER-109667): Primary-driven index builds don't support draining side writes yet.
+ *   primary_driven_index_builds_incompatible,
  *   assumes_balancer_off,
  *   creates_background_indexes,
  *   requires_getmore,
@@ -13,24 +15,22 @@
  * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
-import {
-    $config as $baseConfig
-} from "jstests/concurrency/fsm_workloads/ddl/create_index_background/create_index_background.js";
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/ddl/create_index_background/create_index_background.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
     const fieldName = "isIndexed";
 
-    $config.data.getIndexSpec = function() {
+    $config.data.getIndexSpec = function () {
         return {[fieldName]: 1};
     };
 
-    $config.data.getPartialFilterExpression = function() {
+    $config.data.getPartialFilterExpression = function () {
         return {[fieldName]: 1};
     };
 
     $config.data.extendUpdateExpr = function extendUpdateExpr(updateExpr) {
         // Set the field so that it may change whether or not it still applies to the partial index.
-        updateExpr['$set'] = {[fieldName]: Random.randInt(2)};
+        updateExpr["$set"] = {[fieldName]: Random.randInt(2)};
         return updateExpr;
     };
 

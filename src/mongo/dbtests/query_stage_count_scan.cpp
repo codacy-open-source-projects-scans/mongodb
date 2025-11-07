@@ -27,35 +27,35 @@
  *    it in the license file.
  */
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/client.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/exec/classic/count_scan.h"
+#include "mongo/db/exec/classic/plan_stage.h"
+#include "mongo/db/exec/classic/working_set.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/service_context.h"
+#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/intrusive_counter.h"
+
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/client.h"
-#include "mongo/db/dbdirectclient.h"
-#include "mongo/db/exec/count_scan.h"
-#include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/exec/working_set.h"
-#include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/query/plan_executor.h"
-#include "mongo/db/service_context.h"
-#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/intrusive_counter.h"
 
 namespace mongo {
 namespace QueryStageCountScan {
@@ -101,7 +101,8 @@ public:
     }
 
     CollectionPtr getCollection() {
-        return CollectionPtr(
+        // TODO(SERVER-103403): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
+        return CollectionPtr::CollectionPtr_UNSAFE(
             CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, ns()));
     }
 
@@ -113,9 +114,9 @@ public:
     }
 
     CountScanParams makeCountScanParams(OperationContext* opCtx,
-                                        const CollectionPtr& collection,
+                                        const CollectionAcquisition& collection,
                                         const IndexDescriptor* descriptor) {
-        return {opCtx, collection, descriptor};
+        return {opCtx, collection.getCollectionPtr(), descriptor};
     }
 
     static NamespaceString ns() {
@@ -150,7 +151,7 @@ public:
         // Add an index on a:1
         addIndex(BSON("a" << 1));
 
-        const CollectionPtr coll = ctx.getCollection();
+        const auto coll = ctx.getCollection();
 
         // Set up the count stage
         auto params = makeCountScanParams(&_opCtx, coll, getIndex(ctx.db(), BSON("a" << 1)));
@@ -160,7 +161,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(_expCtx.get(), &coll, params, &ws);
+        CountScan count(_expCtx.get(), coll, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(2, numCounted);
@@ -183,7 +184,7 @@ public:
         // Add an index
         addIndex(BSON("a" << 1));
 
-        const CollectionPtr coll = ctx.getCollection();
+        const auto coll = ctx.getCollection();
 
         // Set up the count stage
         auto params = makeCountScanParams(&_opCtx, coll, getIndex(ctx.db(), BSON("a" << 1)));
@@ -193,7 +194,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(_expCtx.get(), &coll, params, &ws);
+        CountScan count(_expCtx.get(), coll, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(5, numCounted);
@@ -216,7 +217,7 @@ public:
         // Add an index
         addIndex(BSON("a" << 1));
 
-        const CollectionPtr coll = ctx.getCollection();
+        const auto coll = ctx.getCollection();
 
         // Set up the count stage
         auto params = makeCountScanParams(&_opCtx, coll, getIndex(ctx.db(), BSON("a" << 1)));
@@ -226,7 +227,7 @@ public:
         params.endKeyInclusive = false;
 
         WorkingSet ws;
-        CountScan count(_expCtx.get(), &coll, params, &ws);
+        CountScan count(_expCtx.get(), coll, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(3, numCounted);
@@ -245,7 +246,7 @@ public:
         insert(BSON("a" << 2));
         addIndex(BSON("a" << 1));
 
-        const CollectionPtr coll = ctx.getCollection();
+        const auto coll = ctx.getCollection();
 
         // Set up count, and run
         auto params = makeCountScanParams(&_opCtx, coll, getIndex(ctx.db(), BSON("a" << 1)));
@@ -255,7 +256,7 @@ public:
         params.endKeyInclusive = false;
 
         WorkingSet ws;
-        CountScan count(_expCtx.get(), &coll, params, &ws);
+        CountScan count(_expCtx.get(), coll, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(0, numCounted);
@@ -275,7 +276,7 @@ public:
         insert(BSON("a" << 3));
         addIndex(BSON("a" << 1));
 
-        const CollectionPtr coll = ctx.getCollection();
+        const auto coll = ctx.getCollection();
 
         // Set up count, and run
         auto params = makeCountScanParams(&_opCtx, coll, getIndex(ctx.db(), BSON("a" << 1)));
@@ -285,7 +286,7 @@ public:
         params.endKeyInclusive = false;
 
         WorkingSet ws;
-        CountScan count(_expCtx.get(), &coll, params, &ws);
+        CountScan count(_expCtx.get(), coll, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(0, numCounted);
@@ -306,7 +307,7 @@ public:
         insert(BSON("a" << 4));
         addIndex(BSON("a" << 1));
 
-        const CollectionPtr coll = ctx.getCollection();
+        const auto coll = ctx.getCollection();
 
         // Set up count, and run
         auto params = makeCountScanParams(&_opCtx, coll, getIndex(ctx.db(), BSON("a" << 1)));
@@ -316,7 +317,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(_expCtx.get(), &coll, params, &ws);
+        CountScan count(_expCtx.get(), coll, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(0, numCounted);
@@ -338,7 +339,7 @@ public:
         }
         addIndex(BSON("a" << 1));
 
-        const CollectionPtr coll = ctx.getCollection();
+        const auto coll = ctx.getCollection();
 
         // Set up count stage
         auto params = makeCountScanParams(&_opCtx, coll, getIndex(ctx.db(), BSON("a" << 1)));
@@ -348,7 +349,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(_expCtx.get(), &coll, params, &ws);
+        CountScan count(_expCtx.get(), coll, params, &ws);
         WorkingSetID wsid;
 
         int numCounted = 0;
@@ -365,9 +366,8 @@ public:
         static_cast<PlanStage*>(&count)->saveState();
 
         // Recover from yield
-        auto c = getCollection();
-
-        static_cast<PlanStage*>(&count)->restoreState(&coll);
+        RestoreContext restoreCtx(nullptr);
+        static_cast<PlanStage*>(&count)->restoreState(restoreCtx);
 
         // finish counting
         while (PlanStage::IS_EOF != countState) {
@@ -394,7 +394,7 @@ public:
         }
         addIndex(BSON("a" << 1));
 
-        const CollectionPtr coll = ctx.getCollection();
+        const auto coll = ctx.getCollection();
 
         // Set up count stage
         auto params = makeCountScanParams(&_opCtx, coll, getIndex(ctx.db(), BSON("a" << 1)));
@@ -404,7 +404,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(_expCtx.get(), &coll, params, &ws);
+        CountScan count(_expCtx.get(), coll, params, &ws);
         WorkingSetID wsid;
 
         int numCounted = 0;
@@ -426,7 +426,8 @@ public:
         // Remove remaining objects
         remove(BSON("a" << GTE << 5));
 
-        static_cast<PlanStage*>(&count)->restoreState(&coll);
+        RestoreContext restoreCtx(nullptr);
+        static_cast<PlanStage*>(&count)->restoreState(restoreCtx);
 
         // finish counting
         while (PlanStage::IS_EOF != countState) {
@@ -453,7 +454,7 @@ public:
         }
         addIndex(BSON("a" << 1));
 
-        const CollectionPtr coll = ctx.getCollection();
+        const auto coll = ctx.getCollection();
 
         // Set up count stage
         auto params = makeCountScanParams(&_opCtx, coll, getIndex(ctx.db(), BSON("a" << 1)));
@@ -463,7 +464,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(_expCtx.get(), &coll, params, &ws);
+        CountScan count(_expCtx.get(), coll, params, &ws);
         WorkingSetID wsid;
 
         int numCounted = 0;
@@ -486,9 +487,8 @@ public:
         insert(BSON("a" << 6.5));
 
         // Recover from yield
-        auto c = getCollection();
-
-        static_cast<PlanStage*>(&count)->restoreState(&coll);
+        RestoreContext restoreCtx(nullptr);
+        static_cast<PlanStage*>(&count)->restoreState(restoreCtx);
 
         // finish counting
         while (PlanStage::IS_EOF != countState) {
@@ -519,7 +519,7 @@ public:
         remove(BSON("a" << 1 << "b" << 3));
         remove(BSON("a" << 1 << "b" << 4));
 
-        const CollectionPtr coll = ctx.getCollection();
+        const auto coll = ctx.getCollection();
 
         // Ensure that count does not include unused keys
         auto params = makeCountScanParams(&_opCtx, coll, getIndex(ctx.db(), BSON("a" << 1)));
@@ -529,7 +529,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(_expCtx.get(), &coll, params, &ws);
+        CountScan count(_expCtx.get(), coll, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(7, numCounted);
@@ -553,7 +553,7 @@ public:
         // Mark key at end position as 'unused' by deleting
         remove(BSON("a" << 1 << "b" << 9));
 
-        const CollectionPtr coll = ctx.getCollection();
+        const auto coll = ctx.getCollection();
 
         // Run count and check
         auto params = makeCountScanParams(&_opCtx, coll, getIndex(ctx.db(), BSON("a" << 1)));
@@ -563,7 +563,7 @@ public:
         params.endKeyInclusive = true;  // yes?
 
         WorkingSet ws;
-        CountScan count(_expCtx.get(), &coll, params, &ws);
+        CountScan count(_expCtx.get(), coll, params, &ws);
 
         int numCounted = runCount(&count);
         ASSERT_EQUALS(9, numCounted);
@@ -584,7 +584,7 @@ public:
         }
         addIndex(BSON("a" << 1));
 
-        const CollectionPtr coll = ctx.getCollection();
+        const auto coll = ctx.getCollection();
 
         // Set up count stage
         auto params = makeCountScanParams(&_opCtx, coll, getIndex(ctx.db(), BSON("a" << 1)));
@@ -594,7 +594,7 @@ public:
         params.endKeyInclusive = true;
 
         WorkingSet ws;
-        CountScan count(_expCtx.get(), &coll, params, &ws);
+        CountScan count(_expCtx.get(), coll, params, &ws);
         WorkingSetID wsid;
 
         int numCounted = 0;
@@ -614,8 +614,8 @@ public:
         remove(BSON("a" << 1 << "b" << 5));
 
         // Recover from yield
-        auto c = getCollection();
-        static_cast<PlanStage*>(&count)->restoreState(&coll);
+        RestoreContext restoreCtx(nullptr);
+        static_cast<PlanStage*>(&count)->restoreState(restoreCtx);
 
         // finish counting
         while (PlanStage::IS_EOF != countState) {

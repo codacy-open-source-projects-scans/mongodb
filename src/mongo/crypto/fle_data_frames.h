@@ -32,7 +32,6 @@
 #include "mongo/base/data_range.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/crypto/symmetric_crypto.h"
-#include "mongo/db/matcher/schema/encrypt_schema_gen.h"
 #include "mongo/util/uuid.h"
 
 namespace mongo {
@@ -101,7 +100,7 @@ public:
         //      - either a 1 or a 2 depending on whether the iv is provided.
         // associatedData[1-16] = the uuid in bytes
         // associatedData[17] = the bson type
-        if (BSONType::BinData == type) {
+        if (BSONType::binData == type) {
             BinDataType subType = BSONElement::binDataType(plaintext.data(), plaintext.length());
             uassert(6409402,
                     "Encrypting already encrypted data prohibited",
@@ -117,7 +116,7 @@ public:
         _data[17] = static_cast<uint8_t>(type);
     }
 
-    FLEEncryptionFrame() : _plaintext(ConstDataRange(nullptr, 0)){};
+    FLEEncryptionFrame() : _plaintext(ConstDataRange(nullptr, 0)) {};
 
     ConstDataRange get() const& {
         return ConstDataRange(_data);
@@ -143,7 +142,7 @@ public:
     uint8_t* getCiphertextMutable() && = delete;
 
     FleAlgorithmInt getFLEAlgorithmType() {
-        return FleAlgorithmInt_parse(IDLParserContext("root"), _data[0]);
+        return FleAlgorithmInt_parse(_data[0], IDLParserContext("root"));
     }
 
     size_t getDataLength() const {
@@ -211,7 +210,7 @@ public:
 
 private:
     FleAlgorithmInt getFLEAlgorithmType() const {
-        return FleAlgorithmInt_parse(IDLParserContext("root"), *_data.data<uint8_t>());
+        return FleAlgorithmInt_parse(*_data.data<uint8_t>(), IDLParserContext("root"));
     }
 
     size_t getDataLength() const {

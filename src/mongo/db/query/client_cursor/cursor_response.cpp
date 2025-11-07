@@ -28,22 +28,21 @@
  */
 
 
-#include <boost/type_traits/decay.hpp>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/client_cursor/cursor_response.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/client_cursor/cursor_response_gen.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/str.h"
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/type_traits/decay.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -85,8 +84,7 @@ void CursorResponseBuilder::done(CursorId cursorId,
                                  const NamespaceString& cursorNamespace,
                                  boost::optional<CursorMetrics> metrics,
                                  const SerializationContext& serializationContext) {
-    invariant(_active);
-
+    tassert(11177212, "done() can only be called on an active CursorResponseBuilder", _active);
     _batch.reset();
     if (!_postBatchResumeToken.isEmpty()) {
         _cursorObject->append(kPostBatchResumeTokenField, _postBatchResumeToken);
@@ -180,12 +178,12 @@ std::vector<StatusWith<CursorResponse>> CursorResponse::parseFromBSONMany(
     BSONElement cursorsElt = cmdResponse[kCursorsField];
 
     // If there is not "cursors" array then treat it as a single cursor response
-    if (cursorsElt.type() != BSONType::Array) {
+    if (cursorsElt.type() != BSONType::array) {
         cursors.push_back(parseFromBSON(cmdResponse));
     } else {
         BSONObj cursorsObj = cursorsElt.embeddedObject();
         for (BSONElement elt : cursorsObj) {
-            if (elt.type() != BSONType::Object) {
+            if (elt.type() != BSONType::object) {
                 cursors.push_back({ErrorCodes::BadValue,
                                    str::stream()
                                        << "Cursors array element contains non-object element: "
@@ -216,16 +214,14 @@ StatusWith<CursorResponse> CursorResponse::parseFromBSON(
                   *tenantId, auth::ValidatedTenancyScopeFactory::TrustedForInnerOpMsgRequestTag{}))
             : boost::none;
         IDLParserContext idlCtx("CursorResponse", vts, tenantId, serializationContext);
-        response = AnyCursorResponse::parse(idlCtx, cmdResponse);
+        response = AnyCursorResponse::parse(cmdResponse, idlCtx);
     } catch (const DBException& e) {
         return e.toStatus();
     }
 
-    const auto& cursor = response.getCursor();
-
-    auto maybeBatch = cursor.getFirstBatch();
-    if (!maybeBatch)
-        maybeBatch = cursor.getNextBatch();
+    // Take non-const references to the cursor data here so that we do not need to copy it.
+    auto& cursor = response.getCursor();
+    auto& maybeBatch = cursor.getFirstBatch() ? cursor.getFirstBatch() : cursor.getNextBatch();
 
     // IDL verifies that exactly one of these fields is present
     tassert(

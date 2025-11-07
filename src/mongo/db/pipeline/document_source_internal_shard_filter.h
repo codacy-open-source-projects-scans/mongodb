@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <memory>
-#include <set>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -43,13 +36,21 @@
 #include "mongo/db/exec/exec_shard_filter_policy.h"
 #include "mongo/db/exec/shard_filterer.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <set>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -60,9 +61,6 @@ namespace mongo {
 class DocumentSourceInternalShardFilter final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$_internalShardFilter"_sd;
-
-    static boost::intrusive_ptr<DocumentSource> createFromBson(
-        BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     /**
      * Examines the state of the OperationContext (attached to 'expCtx') to determine if this
@@ -76,14 +74,16 @@ public:
                                       std::unique_ptr<ShardFilterer> shardFilterer);
 
     const char* getSourceName() const override {
-        return kStageName.rawData();
+        return kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kInternalShardFilter;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const override {
+    StageConstraints constraints(PipelineSplitState pipeState) const override {
         return StageConstraints(StreamType::kStreaming,
                                 PositionRequirement::kNone,
                                 HostTypeRequirement::kAnyShard,
@@ -102,8 +102,8 @@ public:
         return boost::none;
     }
 
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) override;
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) override;
 
     DepsTracker::State getDependencies(DepsTracker* deps) const override {
         // This stage doesn't use any variables.
@@ -123,9 +123,10 @@ public:
     }
 
 private:
-    GetNextResult doGetNext() override;
+    friend boost::intrusive_ptr<mongo::exec::agg::Stage> internalShardFilterToStageFn(
+        const boost::intrusive_ptr<DocumentSource>& documentSource);
 
-    std::unique_ptr<ShardFilterer> _shardFilterer;
+    std::shared_ptr<ShardFilterer> _shardFilterer;
 };
 
 inline ExecShardFilterPolicy buildExecShardFilterPolicy(

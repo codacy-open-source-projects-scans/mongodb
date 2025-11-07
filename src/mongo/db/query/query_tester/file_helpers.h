@@ -27,14 +27,18 @@
  *    it in the license file.
  */
 
-#include <boost/container_hash/hash.hpp>
+#pragma once
+
+#include "mongo/util/modules.h"
+
 #include <filesystem>
 #include <limits>
 #include <optional>
 #include <ostream>
 #include <string>
-#include <string_view>
 #include <vector>
+
+#include <boost/container_hash/hash.hpp>
 
 #ifdef _WIN32
 #include <io.h>
@@ -44,12 +48,13 @@
 #include <unistd.h>
 #endif
 
+#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 
 namespace mongo::query_tester {
-static constexpr auto kFeatureExtractorDir = std::string_view{"/home/ubuntu/feature-extractor"};
+static constexpr auto kFeatureExtractorDir = "/home/ubuntu/feature-extractor"_sd;
 static constexpr auto kShellMaxLen = std::numeric_limits<size_t>::max();
-static constexpr auto kShellTimeout = Milliseconds{60 * 60 * 1000};  // 1 hour
+static constexpr Milliseconds kShellTimeout = Hours{1};
 
 enum class DiffStyle { kPlain, kWord };
 enum class ErrorLogLevel { kSimple, kVerbose, kExtractFeatures };
@@ -71,9 +76,14 @@ struct CollectionSpec {
     const std::string rawString;
 };
 
+inline bool isTerminal() {
+    static const bool isTerminal = isatty(STDOUT_FILENO) != 0;
+    return isTerminal;
+}
+
 class ConditionalColor {
 public:
-    explicit ConditionalColor(std::string_view colorCode) : _colorCode(colorCode) {}
+    explicit ConditionalColor(StringData colorCode) : _colorCode(colorCode) {}
 
     friend std::ostream& operator<<(std::ostream& os, const ConditionalColor& cc) {
         if (isTerminal()) {
@@ -83,12 +93,7 @@ public:
     }
 
 private:
-    static inline bool isTerminal() {
-        static const bool isTerminal = isatty(STDOUT_FILENO) != 0;
-        return isTerminal;
-    }
-
-    std::string_view _colorCode;
+    StringData _colorCode;
 };
 
 template <typename T, bool Multiline>
@@ -141,7 +146,8 @@ ConditionalColor applyRed();
 ConditionalColor applyReset();
 ConditionalColor applyYellow();
 
-void displayFailingQueryFeatures(const std::filesystem::path&);
+StatusWith<std::string> executeShellCmd(const std::string& cmd);
+
 std::string getBaseNameFromFilePath(const std::filesystem::path&);
 /**
  * Extracts the test numbers associated with failing queries from hunk headers in the git diff
@@ -155,16 +161,18 @@ std::string getMongoRepoRoot();
  */
 std::string gitDiff(const std::filesystem::path&, const std::filesystem::path&, DiffStyle);
 
-inline bool isTerminal() {
-    static const bool isTerminal = isatty(STDOUT_FILENO) != 0;
-    return isTerminal;
-}
-
+bool matchesPrefix(const std::string& key);
 void printFailureSummary(const std::vector<std::filesystem::path>& failedTestFiles,
                          size_t failedQueryCount,
                          size_t totalTestsRun);
 std::vector<std::string> readAndAssertNewline(std::fstream&, const std::string& context);
 std::vector<std::string> readLine(std::fstream&, std::string& lineFromFile);
+/**
+ * A feature is of the format <FeatureCategory>:<Feature> (ex: Operator:$accumulator) or
+ * <FeatureCategory>.<Feature> (ex: IndexProperty.isUnique). This function splits the feature
+ * struture on either a ":" or "." delimiter depending on its format.
+ */
+std::pair<std::string, std::string> splitFeature(const std::string& feature);
 DiffStyle stringToDiffStyle(const std::string&);
 WriteOutOptions stringToWriteOutOpt(const std::string& opt);
 CollectionSpec toCollectionSpec(const std::string&);

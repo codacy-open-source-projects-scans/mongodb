@@ -27,25 +27,27 @@
  *    it in the license file.
  */
 
-#include <set>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/auth/auth_op_observer.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/audit.h"
-#include "mongo/db/auth/auth_op_observer.h"
 #include "mongo/db/auth/authorization_manager.h"
-#include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog_entry.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/db/rss/replicated_storage_service.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/namespace_string_util.h"
+
+#include <set>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
@@ -106,21 +108,38 @@ void AuthOpObserver::onDelete(OperationContext* opCtx,
         ->notifyDDLOperation(opCtx, "d", coll->ns(), documentId, nullptr);
 }
 
-void AuthOpObserver::onCreateCollection(OperationContext* opCtx,
-                                        const CollectionPtr& coll,
-                                        const NamespaceString& collectionName,
-                                        const CollectionOptions& options,
-                                        const BSONObj& idIndex,
-                                        const OplogSlot& createOpTime,
-                                        bool fromMigrate) {
+void AuthOpObserver::onCreateCollection(
+    OperationContext* opCtx,
+    const NamespaceString& collectionName,
+    const CollectionOptions& options,
+    const BSONObj& idIndex,
+    const OplogSlot& createOpTime,
+    const boost::optional<CreateCollCatalogIdentifier>& createCollCatalogIdentifier,
+    bool fromMigrate,
+    bool isTimeseries) {
     const auto cmdNss = collectionName.getCommandNS();
 
     const auto cmdObj =
-        repl::MutableOplogEntry::makeCreateCollCmdObj(collectionName, options, idIndex);
+        repl::MutableOplogEntry::makeCreateCollObject(collectionName, options, idIndex);
+
+    BSONObj o2;
+    if (createCollCatalogIdentifier.has_value() &&
+        shouldReplicateLocalCatalogIdentifiers(
+            rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider())) {
+        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+        auto identUniqueTag = storageEngine->getCollectionIdentUniqueTag(
+            createCollCatalogIdentifier->ident, collectionName.dbName());
+        auto idIndexIdentUniqueTag = createCollCatalogIdentifier->idIndexIdent
+            ? boost::optional<StringData>(storageEngine->getIndexIdentUniqueTag(
+                  *createCollCatalogIdentifier->idIndexIdent, collectionName.dbName()))
+            : boost::none;
+        o2 = repl::MutableOplogEntry::makeCreateCollObject2(
+            createCollCatalogIdentifier->catalogId, identUniqueTag, idIndexIdentUniqueTag);
+    }
 
     dassert(opCtx->getService()->role().has(ClusterRole::ShardServer));
     AuthorizationManager::get(opCtx->getService())
-        ->notifyDDLOperation(opCtx, "c", cmdNss, cmdObj, nullptr);
+        ->notifyDDLOperation(opCtx, "c", cmdNss, cmdObj, &o2);
 }
 
 void AuthOpObserver::onCollMod(OperationContext* opCtx,
@@ -128,7 +147,8 @@ void AuthOpObserver::onCollMod(OperationContext* opCtx,
                                const UUID& uuid,
                                const BSONObj& collModCmd,
                                const CollectionOptions& oldCollOptions,
-                               boost::optional<IndexCollModInfo> indexInfo) {
+                               boost::optional<IndexCollModInfo> indexInfo,
+                               bool isTimeseries) {
     const auto cmdNss = nss.getCommandNS();
 
     // Create the 'o' field object.
@@ -154,7 +174,8 @@ repl::OpTime AuthOpObserver::onDropCollection(OperationContext* opCtx,
                                               const NamespaceString& collectionName,
                                               const UUID& uuid,
                                               std::uint64_t numRecords,
-                                              bool markFromMigrate) {
+                                              bool markFromMigrate,
+                                              bool isTimeseries) {
     const auto cmdNss = collectionName.getCommandNS();
     const auto cmdObj = BSON("drop" << collectionName.coll());
 
@@ -169,7 +190,8 @@ void AuthOpObserver::onDropIndex(OperationContext* opCtx,
                                  const NamespaceString& nss,
                                  const UUID& uuid,
                                  const std::string& indexName,
-                                 const BSONObj& indexInfo) {
+                                 const BSONObj& indexInfo,
+                                 bool isTimeseries) {
     const auto cmdNss = nss.getCommandNS();
     const auto cmdObj = BSON("dropIndexes" << nss.coll() << "index" << indexName);
 
@@ -208,7 +230,8 @@ void AuthOpObserver::onRenameCollection(OperationContext* const opCtx,
                                         const boost::optional<UUID>& dropTargetUUID,
                                         std::uint64_t numRecords,
                                         bool stayTemp,
-                                        bool markFromMigrate) {
+                                        bool markFromMigrate,
+                                        bool isTimeseries) {
     postRenameCollection(opCtx, fromCollection, toCollection, uuid, dropTargetUUID, stayTemp);
 }
 
@@ -219,7 +242,8 @@ void AuthOpObserver::onImportCollection(OperationContext* opCtx,
                                         long long dataSize,
                                         const BSONObj& catalogEntry,
                                         const BSONObj& storageMetadata,
-                                        bool isDryRun) {
+                                        bool isDryRun,
+                                        bool isTimeseries) {
 
     dassert(opCtx->getService()->role().has(ClusterRole::ShardServer));
     AuthorizationManager::get(opCtx->getService())

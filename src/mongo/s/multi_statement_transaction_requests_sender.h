@@ -29,28 +29,38 @@
 
 #pragma once
 
-#include <memory>
-#include <vector>
-
 #include "mongo/client/read_preference.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/s/async_requests_sender.h"
-#include "mongo/s/client/shard.h"
+#include "mongo/s/transaction_router.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <vector>
 
 namespace mongo {
 
 namespace transaction_request_sender_details {
-std::vector<AsyncRequestsSender::Request> attachTxnDetails(
+MONGO_MOD_PUB std::vector<AsyncRequestsSender::Request> attachTxnDetails(
     OperationContext* opCtx, const std::vector<AsyncRequestsSender::Request>& requests);
 
-void processReplyMetadata(OperationContext* opCtx,
-                          const AsyncRequestsSender::Response& response,
-                          bool forAsyncGetMore = false);
-void processReplyMetadataForAsyncGetMore(OperationContext* opCtx,
-                                         const ShardId& shardId,
-                                         const BSONObj& responseBson);
+MONGO_MOD_PUB void processReplyMetadata(OperationContext* opCtx,
+                                        const AsyncRequestsSender::Response& response,
+                                        bool forAsyncGetMore = false);
+
+/**
+ * Process metadata for an asynchronous getMore reply of type 'ParsedParticipantResponseMetadata'.
+ * This will add additional transaction participants to the transaction router in case the reply
+ * contains additional participants in its metadata.
+ */
+MONGO_MOD_PUB void processReplyMetadataForAsyncGetMore(
+    OperationContext* opCtx,
+    const ShardId& shardId,
+    const TransactionRouter::ParsedParticipantResponseMetadata& parsedResponse);
+
 }  // namespace transaction_request_sender_details
 
 /**
@@ -58,7 +68,7 @@ void processReplyMetadataForAsyncGetMore(OperationContext* opCtx,
  * remote requests and also perform multi-statement transaction related post processing when
  * receiving responses.
  */
-class MultiStatementTransactionRequestsSender {
+class MONGO_MOD_PUB MultiStatementTransactionRequestsSender {
 public:
     /**
      * Constructs a new MultiStatementTransactionRequestsSender. The OperationContext* and
@@ -75,9 +85,25 @@ public:
 
     ~MultiStatementTransactionRequestsSender();
 
-    bool done();
+    bool done() const;
 
+    /**
+     * Fetches the next response and validates it.
+     * Internally calls 'nextResponse()', then 'validateResponse()'. Throws if the response is not
+     * valid.
+     */
     AsyncRequestsSender::Response next(bool forMergeCursors = false);
+
+    /**
+     * Fetches the next response, without validating it.
+     */
+    AsyncRequestsSender::Response nextResponse();
+
+    /**
+     * Validates a received response. Throws if the response is not valid.
+     */
+    void validateResponse(const AsyncRequestsSender::Response& response,
+                          bool forMergeCursors) const;
 
     void stopRetrying();
 

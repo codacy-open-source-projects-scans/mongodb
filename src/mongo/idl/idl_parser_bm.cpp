@@ -27,11 +27,7 @@
  *    it in the license file.
  */
 
-#include <array>
-#include <benchmark/benchmark.h>
-#include <cstddef>
-#include <cstdint>
-#include <vector>
+#include "mongo/idl/idl_parser.h"
 
 #include "mongo/base/data_range.h"
 #include "mongo/base/data_type_endian.h"
@@ -42,11 +38,17 @@
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/idl/command_generic_argument.h"
-#include "mongo/idl/idl_parser.h"
 #include "mongo/idl/idl_parser_bm_gen.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/uuid.h"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+#include <benchmark/benchmark.h>
 
 namespace mongo {
 namespace {
@@ -55,14 +57,11 @@ namespace {
 BSONObj getFindDocWithDb() {
     auto u = UUID::parse("d4965626-a298-4b09-b80b-8d98d17d02d2").getValue();
 
-    return BSON("find"
-                << "usertable"
-                << "filter"
-                << BSON("_id"
-                        << "user4409142221109489457")
-                << "limit" << 1 << "singleBatch" << true << "$db"
-                << "ycsb"
-                << "lsid" << BSON("id" << u));
+    return BSON("find" << "usertable"
+                       << "filter" << BSON("_id" << "user4409142221109489457") << "limit" << 1
+                       << "singleBatch" << true << "$db"
+                       << "ycsb"
+                       << "lsid" << BSON("id" << u));
 }
 
 // $clusterTime
@@ -81,7 +80,7 @@ void BM_FIND_ONE_BSON(benchmark::State& state) {
 
     for (auto _ : state) {
         // This code gets timed
-        FindCommandRequestBase::parse(IDLParserContext("foo"), doc);
+        FindCommandRequestBase::parse(doc, IDLParserContext("foo"));
     }
 }
 
@@ -91,13 +90,10 @@ void BM_FIND_ONE_OP_MSG(benchmark::State& state) {
     // Perform setup here
     auto u = UUID::parse("d4965626-a298-4b09-b80b-8d98d17d02d2").getValue();
 
-    BSONObj doc = BSON("find"
-                       << "usertable"
-                       << "filter"
-                       << BSON("_id"
-                               << "user4409142221109489457")
-                       << "limit" << 1 << "singleBatch" << true << "lsid" << BSON("id" << u)
-                       << "$clusterTime" << getClusterTime());
+    BSONObj doc = BSON("find" << "usertable"
+                              << "filter" << BSON("_id" << "user4409142221109489457") << "limit"
+                              << 1 << "singleBatch" << true << "lsid" << BSON("id" << u)
+                              << "$clusterTime" << getClusterTime());
 
     auto request = OpMsgRequestBuilder::create(
         auth::ValidatedTenancyScope::kNotRequired /* db is not tenanted */,
@@ -106,7 +102,7 @@ void BM_FIND_ONE_OP_MSG(benchmark::State& state) {
 
     for (auto _ : state) {
         // This code gets timed
-        FindCommandRequestBase::parse(IDLParserContext("foo"), request);
+        FindCommandRequestBase::parse(request, IDLParserContext("foo"));
     }
 }
 
@@ -124,18 +120,17 @@ char field_bytes[] = {0x34, 0x27, 0x33, 0x27, 0x32, 0x26, 0x26, 0x2d, 0x3b, 0x21
 
 // YCSB insert
 BSONObj getInsertDoc() {
-    return BSON("_id"
-                << "user2996592682669871081"
-                << "field1" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
-                << "field0" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
-                << "field7" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
-                << "field6" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
-                << "field9" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
-                << "field8" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
-                << "field3" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
-                << "field2" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
-                << "field5" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
-                << "field4" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral));
+    return BSON("_id" << "user2996592682669871081"
+                      << "field1" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
+                      << "field0" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
+                      << "field7" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
+                      << "field6" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
+                      << "field9" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
+                      << "field8" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
+                      << "field3" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
+                      << "field2" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
+                      << "field5" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral)
+                      << "field4" << BSONBinData(field_bytes, sizeof(field_bytes), BinDataGeneral));
 }
 
 
@@ -143,15 +138,15 @@ void BM_INSERT_ONE_BSON(benchmark::State& state) {
     // Perform setup here
     auto u = UUID::parse("d4965626-a298-4b09-b80b-8d98d17d02d2").getValue();
 
-    BSONObj doc = BSON("insert"
-                       << "usertable"
-                       << "documents" << BSON_ARRAY(getInsertDoc()) << "ordered" << true << "$db"
-                       << "ycsb"
-                       << "lsid" << BSON("id" << u) << "$clusterTime" << getClusterTime());
+    BSONObj doc =
+        BSON("insert" << "usertable"
+                      << "documents" << BSON_ARRAY(getInsertDoc()) << "ordered" << true << "$db"
+                      << "ycsb"
+                      << "lsid" << BSON("id" << u) << "$clusterTime" << getClusterTime());
 
     for (auto _ : state) {
         // This code gets timed
-        write_ops::InsertCommandRequest::parse(IDLParserContext("foo"), doc);
+        write_ops::InsertCommandRequest::parse(doc, IDLParserContext("foo"));
     }
 }
 
@@ -162,10 +157,9 @@ void BM_INSERT_ONE_OP_MSG(benchmark::State& state) {
     // Perform setup here
     auto u = UUID::parse("d4965626-a298-4b09-b80b-8d98d17d02d2").getValue();
 
-    BSONObj doc = BSON("insert"
-                       << "usertable"
-                       << "ordered" << true << "lsid" << BSON("id" << u) << "$clusterTime"
-                       << getClusterTime());
+    BSONObj doc = BSON("insert" << "usertable"
+                                << "ordered" << true << "lsid" << BSON("id" << u) << "$clusterTime"
+                                << getClusterTime());
 
     auto request = OpMsgRequestBuilder::create(
         auth::ValidatedTenancyScope::kNotRequired /* db is not tenanted */,
@@ -175,7 +169,7 @@ void BM_INSERT_ONE_OP_MSG(benchmark::State& state) {
 
     for (auto _ : state) {
         // This code gets timed
-        write_ops::InsertCommandRequest::parse(IDLParserContext("foo"), request);
+        write_ops::InsertCommandRequest::parse(request, IDLParserContext("foo"));
     }
 }
 
@@ -183,9 +177,7 @@ BENCHMARK(BM_INSERT_ONE_OP_MSG)->Arg(10)->Arg(100)->Unit(benchmark::kNanosecond)
 
 // YCSB updateOne
 BSONObj getUpdateDoc() {
-    return BSON("q" << BSON("_id"
-                            << "user4409142221109489457")
-                    << "u"
+    return BSON("q" << BSON("_id" << "user4409142221109489457") << "u"
                     << BSON("$set" << BSON("field3" << BSONBinData(
                                                field_bytes, sizeof(field_bytes), BinDataGeneral)))
                     << "multi" << false << "upsert" << false);
@@ -196,15 +188,14 @@ void BM_UPDATE_ONE_BSON(benchmark::State& state) {
     // Perform setup here
     auto u = UUID::parse("d4965626-a298-4b09-b80b-8d98d17d02d2").getValue();
 
-    BSONObj doc = BSON("update"
-                       << "usertable"
-                       << "updates" << BSON_ARRAY(getUpdateDoc()) << "$db"
-                       << "ycsb"
-                       << "lsid" << BSON("id" << u) << "$clusterTime" << getClusterTime());
+    BSONObj doc = BSON("update" << "usertable"
+                                << "updates" << BSON_ARRAY(getUpdateDoc()) << "$db"
+                                << "ycsb"
+                                << "lsid" << BSON("id" << u) << "$clusterTime" << getClusterTime());
 
     for (auto _ : state) {
         // This code gets timed
-        write_ops::UpdateCommandRequest::parse(IDLParserContext("foo"), doc);
+        write_ops::UpdateCommandRequest::parse(doc, IDLParserContext("foo"));
     }
 }
 
@@ -215,9 +206,8 @@ void BM_UPDATE_ONE_OP_MSG(benchmark::State& state) {
     // Perform setup here
     auto u = UUID::parse("d4965626-a298-4b09-b80b-8d98d17d02d2").getValue();
 
-    BSONObj doc = BSON("update"
-                       << "usertable"
-                       <<
+    BSONObj doc = BSON("update" << "usertable"
+                                <<
 
 
                        "lsid" << BSON("id" << u) << "$clusterTime" << getClusterTime());
@@ -230,7 +220,7 @@ void BM_UPDATE_ONE_OP_MSG(benchmark::State& state) {
 
     for (auto _ : state) {
         // This code gets timed
-        write_ops::UpdateCommandRequest::parse(IDLParserContext("foo"), request);
+        write_ops::UpdateCommandRequest::parse(request, IDLParserContext("foo"));
     }
 }
 
@@ -240,7 +230,7 @@ BENCHMARK(BM_UPDATE_ONE_OP_MSG)->Arg(10)->Arg(100)->Unit(benchmark::kNanosecond)
 void BM_IS_GENERIC_ARG(benchmark::State& state) {
     // Perform setup here
     auto arg = "lsid"_sd;
-    int i = 0;
+    [[maybe_unused]] int i = 0;
 
     for (auto _ : state) {
         // This code gets timed
@@ -258,7 +248,7 @@ void BM_API_VERSION_BSON(benchmark::State& state) {
 
     for (auto _ : state) {
         // This code gets timed
-        APIParametersFromClient::parse(IDLParserContext("foo"), doc);
+        APIParametersFromClient::parse(doc, IDLParserContext("foo"));
     }
 }
 
@@ -273,7 +263,7 @@ void BM_LSID_SIMPLE_BSON(benchmark::State& state) {
 
     for (auto _ : state) {
         // This code gets timed
-        OperationSessionInfoFromClient::parse(IDLParserContext("foo"), doc);
+        OperationSessionInfoFromClient::parse(doc, IDLParserContext("foo"));
     }
 }
 
@@ -295,7 +285,7 @@ void BM_LSID_TXN_BSON(benchmark::State& state) {
 
     for (auto _ : state) {
         // This code gets timed
-        OperationSessionInfoFromClient::parse(IDLParserContext("foo"), doc);
+        OperationSessionInfoFromClient::parse(doc, IDLParserContext("foo"));
     }
 }
 
@@ -315,7 +305,7 @@ void BM_ARRAY_BSON(benchmark::State& state) {
 
     for (auto _ : state) {
         // This code gets timed
-        benchmark::DoNotOptimize(idl::test::OneArray::parse(IDLParserContext("test"), doc));
+        benchmark::DoNotOptimize(idl::test::OneArray::parse(doc, IDLParserContext("test")));
         totalBytes += doc.objsize();
     }
     state.SetBytesProcessed(totalBytes);
@@ -333,7 +323,7 @@ void BM_CHECK_AND_ASSERT_TYPES(benchmark::State& state) {
     for (auto _ : state) {
         // This code gets timed
         benchmark::DoNotOptimize(
-            write_ops::WriteCommandRequestBase::parse(IDLParserContext("test"), request));
+            write_ops::WriteCommandRequestBase::parse(request, IDLParserContext("test")));
     }
 }
 
@@ -359,7 +349,7 @@ void BM_ArrayOfStringEnum10(benchmark::State& state) {
 
     size_t totalBytes = 0;
     for (auto _ : state) {
-        benchmark::DoNotOptimize(t::ArrayOfHasStringEnum10::parse(IDLParserContext("test"), doc));
+        benchmark::DoNotOptimize(t::ArrayOfHasStringEnum10::parse(doc, IDLParserContext("test")));
         totalBytes += doc.objsize();
     }
     state.SetBytesProcessed(totalBytes);

@@ -29,24 +29,9 @@
 
 #pragma once
 
-#include <boost/functional/hash.hpp>
-#include <boost/intrusive_ptr.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstring>
-#include <initializer_list>
-#include <iosfwd>
-#include <string>
-#include <typeinfo>
-#include <utility>
-#include <variant>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/base/string_data_comparator.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -60,6 +45,21 @@
 #include "mongo/util/bufreader.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/string_map.h"
+
+#include <cstring>
+#include <initializer_list>
+#include <iosfwd>
+#include <string>
+#include <type_traits>
+#include <typeinfo>
+#include <utility>
+#include <vector>
+
+#include <boost/functional/hash.hpp>
+#include <boost/intrusive_ptr.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 class BSONObj;
@@ -122,11 +122,15 @@ public:
     static constexpr StringData metaFieldSearchScore = "$searchScore"_sd;
     static constexpr StringData metaFieldSearchHighlights = "$searchHighlights"_sd;
     static constexpr StringData metaFieldSearchScoreDetails = "$searchScoreDetails"_sd;
+    static constexpr StringData metaFieldSearchRootDocumentId = "$searchRootDocumentId"_sd;
     static constexpr StringData metaFieldSearchSortValues = "$searchSortValues"_sd;
     static constexpr StringData metaFieldIndexKey = "$indexKey"_sd;
     static constexpr StringData metaFieldVectorSearchScore = "$vectorSearchScore"_sd;
     static constexpr StringData metaFieldSearchSequenceToken = "$searchSequenceToken"_sd;
     static constexpr StringData metaFieldScore = "$score"_sd;
+    static constexpr StringData metaFieldScoreDetails = "$scoreDetails"_sd;
+    static constexpr StringData metaFieldStream = "$stream"_sd;
+    static constexpr StringData metaFieldChangeStreamControlEvent = "$changeStreamControlEvent"_sd;
 
     static const StringDataSet allMetadataFieldNames;
 
@@ -146,7 +150,7 @@ public:
      * auto document = Document{{"hello", "world"}, {"number", 1}};
      */
     Document(std::initializer_list<std::pair<StringData, ImplicitValue>> initializerList);
-    Document(std::vector<std::pair<StringData, Value>> fields);
+    Document(const std::vector<std::pair<StringData, Value>>& fields);
 
     void swap(Document& rhs) {
         _storage.swap(rhs._storage);
@@ -162,11 +166,11 @@ public:
      * Note that this method does *not* traverse nested documents and arrays, use getNestedField()
      * instead.
      */
-    template <typename T>
+    template <AnyFieldNameTypeButStdString T>
     Value operator[](T key) const {
         return getField(key);
     }
-    template <typename T>
+    template <AnyFieldNameTypeButStdString T>
     Value getField(T key) const {
         return storage().getField(key);
     }
@@ -256,6 +260,17 @@ public:
                        const Document& rhs,
                        const StringDataComparator* stringComparator);
 
+    /**
+     * Merge two documents.
+     * Sub-documents with the same key are merged together, otherwise the value in 'rhs' overwrites
+     * the one in 'lhs'.
+     *
+     * Note: Arrays are treated as non-object types, but that can be changed if needed.
+     *
+     * @returns a new document resulting after the merge.
+     */
+    static Document deepMerge(const Document& lhs, const Document& rhs);
+
     std::string toString() const;
 
     friend std::ostream& operator<<(std::ostream& out, const Document& doc) {
@@ -300,6 +315,15 @@ public:
     }
 
     /**
+     * Validates that the size of the document as a BSON object does not exceed maxSize limit, and
+     * throws BSONObjectTooLarge otherwise.
+     */
+    static void validateDocumentBSONSize(const BSONObj& docBSONObj, int maxSize) {
+        uassertStatusOK(
+            docBSONObj.validateBSONObjSize(maxSize).addContext("Serializing Document failed"));
+    }
+
+    /**
      * Serializes this document to the BSONObj under construction in 'builder'. Metadata is not
      * included. Throws a AssertionException if 'recursionLevel' exceeds the maximum allowable
      * depth.
@@ -314,7 +338,9 @@ public:
 
         BSONObjBuilder bb;
         toBson(&bb);
-        return bb.obj<BSONTraits>();
+        BSONObj docBSONObj = bb.obj<BSONTraits>();
+        validateDocumentBSONSize(docBSONObj, BSONTraits::MaxSize);
+        return docBSONObj;
     }
 
     /**
@@ -339,7 +365,9 @@ public:
 
         BSONObjBuilder bb;
         toBsonWithMetaData(&bb);
-        return bb.obj<BSONTraits>();
+        BSONObj docBSONObj = bb.obj<BSONTraits>();
+        validateDocumentBSONSize(docBSONObj, BSONTraits::MaxSize);
+        return docBSONObj;
     }
 
     /**
@@ -350,13 +378,17 @@ public:
     static Document fromBsonWithMetaData(const BSONObj& bson);
 
     // Support BSONObjBuilder and BSONArrayBuilder "stream" API
-    friend BSONObjBuilder& operator<<(BSONObjBuilderValueStream& builder, const Document& d);
+    friend void appendToBson(BSONObjBuilder& builder, StringData fieldName, const Document& doc) {
+        BSONObjBuilder subobj(builder.subobjStart(fieldName));
+        doc.toBson(&subobj);
+        subobj.doneFast();
+    }
 
     /** Return the abstract Position of a field, suitable to pass to operator[] or getField().
      *  This can potentially save time if you need to refer to a field multiple times.
      */
     Position positionOf(StringData fieldName) const {
-        return storage().findField(fieldName, DocumentStorage::LookupPolicy::kCacheAndBSON);
+        return storage().findField(fieldName);
     }
 
     /** Clone a document.
@@ -515,7 +547,7 @@ private:
 
     /// Used by MutableDocument(MutableValue)
     const RefCountable*& getDocPtr() {
-        if (_val.getType() != Object || _val._storage.genericRCPtr == nullptr) {
+        if (_val.getType() != BSONType::object || _val._storage.genericRCPtr == nullptr) {
             // If the current value isn't an object we replace it with a Object-typed Value.
             // Note that we can't just use Document() here because that is a NULL pointer and
             // Value doesn't refcount NULL pointers. This led to a memory leak (SERVER-10554)
@@ -629,10 +661,10 @@ public:
         getField(key) = std::move(val);
     }
     MutableValue getField(StringData key) {
-        return MutableValue(storage().getField(key, DocumentStorage::LookupPolicy::kCacheOnly));
+        return MutableValue(storage().getFieldCacheOnlyOrCreate(key));
     }
     MutableValue getFieldNonLeaf(StringData key) {
-        return MutableValue(storage().getField(key, DocumentStorage::LookupPolicy::kCacheAndBSON));
+        return MutableValue(storage().getFieldOrCreate(key));
     }
 
     /// Update field by Position. Must already be a valid Position.
@@ -876,8 +908,6 @@ class DocumentStream {
     // and ValueStream taking a Value.
     class ValueStream {
     public:
-        ValueStream(DocumentStream& builder) : builder(builder) {}
-
         DocumentStream& operator<<(const Value& val) {
             builder._md[name] = val;
             return builder;
@@ -889,16 +919,13 @@ class DocumentStream {
             return *this << Value(val);
         }
 
-        StringData name;
         DocumentStream& builder;
+        StringData name;
     };
 
 public:
-    DocumentStream() : _stream(*this) {}
-
-    ValueStream& operator<<(StringData name) {
-        _stream.name = name;
-        return _stream;
+    ValueStream operator<<(StringData name) {
+        return ValueStream{*this, name};
     }
 
     Document done() {
@@ -906,7 +933,6 @@ public:
     }
 
 private:
-    ValueStream _stream;
     MutableDocument _md;
 };
 

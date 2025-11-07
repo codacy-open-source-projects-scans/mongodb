@@ -79,6 +79,51 @@ variables:
           resmoke_jobs_max: 1
           suite: benchmark_suite
 
+  # THIS HAS COPIES IN
+  # - etc/evergreen_yml_components/tasks/resmoke/server_divisions/clusters_and_integrations/tasks.yml
+  # - etc/evergreen_yml_components/tasks/resmoke/server_divisions/durable_transactions_and_availability/tasks.yml
+  # - etc/evergreen_yml_components/tasks/resmoke/server_divisions/query/tasks.yml
+  # - etc/evergreen_yml_components/tasks/resmoke/non_server_teams/tasks.yml
+  # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
+  - &jstestfuzz_config_vars
+    is_jstestfuzz: true
+    num_files: 15
+    num_tasks: 5 # Upperbound by `max_sub_suites` specified through the variant with each task still running `num_files` files.
+    # It is error prone to require each fuzzer-related Evergreen task to need to override the
+    # resmoke_args variable. However, the resmoke_args variable must be defined as a string in the
+    # task generation configuration to satisfy mongodb/mongo-task-generator. We therefore specify an
+    # empty string for the variable to reflect there are no additional arguments provided to resmoke
+    # by default for the fuzzer-related tasks.
+    resmoke_args: ""
+    resmoke_jobs_max: 1
+    should_shuffle: false
+    continue_on_failure: false
+    # Terminate the function when there has been no output to stdout for 30 minutes. E.g. when something is stuck in an infinite loop.
+    # resmoke.py writes the test output to logkeeper and only writes to stdout when starting the next test.
+    # resmoke.py not producing output on stdout means that the test is still running and presumably not going to finish.
+    # Note that timeout_secs is different from exec_timeout_secs, which applies to a task and times out regardless of whether output has been written to stdout.
+    timeout_secs: 1800
+
+  # Used for tests that invoke 'resmoke.py --suites=jstestfuzz*'.
+  # THIS HAS COPIES IN
+  # - etc/evergreen_yml_components/tasks/resmoke/server_divisions/clusters_and_integrations/tasks.yml
+  # - etc/evergreen_yml_components/tasks/resmoke/server_divisions/durable_transactions_and_availability/tasks.yml
+  # - etc/evergreen_yml_components/tasks/resmoke/server_divisions/query/tasks.yml
+  # - etc/evergreen_yml_components/tasks/resmoke/non_server_teams/tasks.yml
+  # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
+  - &jstestfuzz_template
+    name: jstestfuzz_template
+    exec_timeout_secs: 14400 # Time out the task if it runs for more than 4 hours.
+    depends_on:
+      - name: version_gen
+        variant: generate-tasks-for-version
+        # This is added because of EVG-18211.
+        # Without this we are adding extra dependencies on evergreen and it is causing strain
+        omit_generated_tasks: true
+      - archive_dist_test
+    commands:
+      - func: "generate resmoke tasks"
+
 ################################################
 #                    Tasks                     #
 ################################################
@@ -86,46 +131,14 @@ tasks:
   ## pretty_printer ##
   - <<: *task_template
     name: run_pretty_printer_tests
-    tags:
-      [
-        "assigned_to_jira_team_devprod_build",
-        "development_critical_single_variant",
-      ]
+    tags: ["assigned_to_jira_team_devprod_build", "auxiliary"]
     depends_on:
       - archive_dist_test_debug
     commands:
-      - func: "git get project and add git tag"
-      - func: "f_expansions_write"
-      - func: "kill processes"
-      - func: "cleanup environment"
-      - func: "set up venv"
-      - func: "upload pip requirements"
-      - func: "configure evergreen api credentials"
-      - func: "do setup"
-        vars:
-          extraction_change_dir: build/install/
-      - command: s3.get
-        params:
-          aws_key: ${aws_key}
-          aws_secret: ${aws_secret}
-          remote_file: ${mongo_debugsymbols}
-          bucket: mciuploads
-          local_file: src/mongo-debugsymbols.tgz
-          optional: true
-      - command: subprocess.exec
-        params:
-          binary: bash
-          args:
-            - "src/evergreen/run_python_script.sh"
-            - "evergreen/functions/binaries_extract.py"
-            - "--tarball=mongo-debugsymbols.tgz"
-            - "--extraction-command=${decompress}"
-            - "--change-dir=build/install/"
-            - "--move-output=build/install/dist-test/pretty_printer_tests.txt:build/"
       - func: "run tests"
         vars:
           suite: pretty-printer-tests
-          install_dir: build/install/dist-test/bin
+          install_dir: bazel-bin/install/bin
           exec_timeout_secs: 1800 # 30 min timeout.
 
   - name: buildscripts_test
@@ -147,6 +160,14 @@ tasks:
       - func: "run tests"
         vars:
           resmoke_jobs_max: 1
+
+  - name: check_workstation_setup_script
+    tags: ["assigned_to_jira_team_devprod_correctness", "auxiliary"]
+    depends_on: []
+    commands:
+      - func: "do pre workstation setup"
+      - func: "get engflow creds"
+      - func: "set up then check workstation script"
 
   - <<: *gen_burn_in_task_template
     name: burn_in_tags_gen
@@ -212,7 +233,12 @@ tasks:
       ]
     commands:
       - func: "do setup"
+        vars:
+          extraction_change_dir: bazel-bin/install/
+          decompress: tar --strip-components=1 -zxvf
       - func: "run tests"
+        vars:
+          resmoke_jobs_max: 1
 
   - <<: *task_template
     name: resmoke_validation_tests
@@ -225,9 +251,6 @@ tasks:
       - name: archive_dist_test
     commands:
       - func: "do setup"
-        vars:
-          extraction_change_dir: build/install/
-          move_outputs: "--move-output=build/install/dist-test/pretty_printer_tests.txt:build/"
       - func: "run tests"
 
   - <<: *gen_task_template
@@ -239,6 +262,14 @@ tasks:
         "requires_compile_variant",
         "requires_execution_on_windows_patch_build",
       ]
+    depends_on:
+      - name: version_gen
+        variant: generate-tasks-for-version
+        # This is added because of EVG-18211.
+        # Without this we are adding extra dependencies on evergreen and it is causing strain
+        omit_generated_tasks: true
+      - name: archive_dist_test
+      - name: archive_dist_test_debug
     commands:
       - func: "generate resmoke tasks"
         vars:
@@ -256,30 +287,171 @@ tasks:
           exec_timeout_secs: 18000 # 5 hour timeout.
           resmoke_jobs_max: 1
 
-  - <<: *task_template
-    name: streams
-    tags: ["assigned_to_jira_team_streams", "default"]
+  - <<: *gen_task_template
+    name: streams_gen
+    tags: ["assigned_to_jira_team_streams", "default", "streams_release_test"]
     commands:
-      - func: "do setup"
-      - func: "run tests"
+      - func: "generate resmoke tasks"
+        vars:
+          fallback_num_sub_suites: 2
 
-  - <<: *task_template
-    name: streams_kafka
-    tags: ["assigned_to_jira_team_streams", "experimental"]
+  - <<: *gen_task_template
+    name: streams_kafka_gen
+    tags:
+      ["assigned_to_jira_team_streams", "experimental", "streams_release_test"]
     commands:
-      - func: "do setup"
-      - func: "run tests"
+      - func: "generate resmoke tasks"
+        vars:
+          fallback_num_sub_suites: 2
+          resmoke_jobs_max: 1
 
   - <<: *task_template
     name: streams_kafka_gwproxy
-    tags: ["assigned_to_jira_team_streams", "experimental"]
+    tags:
+      ["assigned_to_jira_team_streams", "experimental", "streams_release_test"]
+    commands:
+      - command: ec2.assume_role
+        params:
+          role_arn: "arn:aws:iam::664315256653:role/streams-evergreen-ecr-access-ro"
+      - func: "do setup"
+      - func: "run tests with aws credentials"
+
+  - <<: *task_template
+    name: streams_kafka_benchmark
+    tags:
+      ["assigned_to_jira_team_streams", "experimental", "streams_release_test"]
     commands:
       - func: "do setup"
       - func: "run tests"
 
   - <<: *task_template
     name: streams_https
-    tags: ["assigned_to_jira_team_streams", "default"]
+    tags: ["assigned_to_jira_team_streams", "default", "streams_release_test"]
     commands:
       - func: "do setup"
       - func: "run tests"
+
+  - <<: *task_template
+    name: streams_lambda
+    tags:
+      ["assigned_to_jira_team_streams", "experimental", "streams_release_test"]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
+
+  - <<: *task_template
+    name: streams_s3
+    tags:
+      ["assigned_to_jira_team_streams", "experimental", "streams_release_test"]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
+
+  - <<: *task_template
+    name: streams_kinesis
+    tags:
+      ["assigned_to_jira_team_streams", "experimental", "streams_release_test"]
+    commands:
+      - func: "do setup"
+      - func: "run tests"
+
+  - <<: *gen_task_template
+    name: streams_aspio_gen
+    tags:
+      [
+        "assigned_to_jira_team_streams",
+        "default",
+        "streams_release_test",
+        "requires_extra_system_deps",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          fallback_num_sub_suites: 2
+          resmoke_jobs_max: 1
+
+  - name: streams_build_only_gen
+    tags: ["assigned_to_jira_team_streams", "auxiliary"]
+    depends_on:
+      - name: version_gen
+        variant: generate-tasks-for-version
+        # This is added because of EVG-18211.
+        # Without this we are adding extra dependencies on evergreen and it is causing strain
+        omit_generated_tasks: true
+    commands:
+      - func: "streams build"
+
+  - name: streams_build_and_push_gen
+    tags: ["assigned_to_jira_team_streams", "auxiliary"]
+    depends_on:
+      - name: version_gen
+        variant: generate-tasks-for-version
+        # This is added because of EVG-18211.
+        # Without this we are adding extra dependencies on evergreen and it is causing strain
+        omit_generated_tasks: true
+      # Update with all gen tasks to depend on here and the display name in evergreen_gen_streams_build_and_push_task.py
+      - name: streams_gen
+      - name: streams_kafka_gen
+      - name: streams_aspio_gen
+    commands:
+      - func: "streams build and push"
+
+  # Temporary task running the jscore suite as a bazel target. To be removed with SERVER-103537.
+  - name: bazel_test_jscore
+    tags:
+      [
+        "assigned_to_jira_team_devprod_correctness",
+        "development_critical_single_variant",
+      ]
+    depends_on:
+      - name: archive_dist_test
+    commands:
+      - func: "do setup"
+      - func: "run resmoke tests via bazel"
+        vars:
+          suite: //buildscripts/resmokeconfig:core
+          compiling_for_test: true
+          bazel_args: >-
+            --workspace_status_command="bazel/resmoke/workspace_status.sh"
+            --test_sharding_strategy=forced=16
+            --test_arg=--testTimeout=960
+            --test_timeout=1500
+          # Timeouts are 16 minutes for individual tests, the same as the default idle timeout.
+          # The bazel test timeout is 25 minutes, slightly shorter than the 30 minute commit queue
+          # timeout, so that it will timeout before the task would.
+
+  # Experimental task running the jstestfuzz suite bazel target. To be removed with SERVER-103537.
+  - <<: *jstestfuzz_template
+    name: bazel_jstestfuzz_gen
+    tags: ["assigned_to_jira_team_devprod_correctness", "experimental"]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          <<: *jstestfuzz_config_vars
+          num_files: 8
+          num_tasks: 2
+          jstestfuzz_vars: --jsTestsDir ../jstests
+          suite: //buildscripts/resmokeconfig:jstestfuzz
+          npm_command: jstestfuzz
+          bazel_args: >-
+            --workspace_status_command="bazel/resmoke/workspace_status.sh"
+
+  # Experimental task running the multiversion sanity check bazel targets. To be removed with SERVER-103537.
+  - <<: *gen_task_template
+    name: bazel_multiversion_sanity_check_gen
+    tags:
+      [
+        "assigned_to_jira_team_devprod_correctness",
+        "experimental",
+        "multiversion",
+        "future_git_tag_incompatible",
+      ]
+    commands:
+      - func: "generate resmoke tasks"
+        vars:
+          bazel_args: >-
+            --workspace_status_command="bazel/resmoke/workspace_status.sh"
+      - func: "initialize multiversion tasks"
+        vars:
+          //buildscripts/resmokeconfig:bazel_multiversion_sanity_check_last_continuous_new_new_old: last_continuous
+          //buildscripts/resmokeconfig:bazel_multiversion_sanity_check_last_lts_new_new_old: last_lts

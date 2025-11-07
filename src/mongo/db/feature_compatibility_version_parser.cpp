@@ -27,71 +27,154 @@
  *    it in the license file.
  */
 
-#include <fmt/format.h>
+#include "mongo/db/feature_compatibility_version_parser.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/feature_compatibility_version_document_gen.h"
 #include "mongo/db/feature_compatibility_version_documentation.h"
-#include "mongo/db/feature_compatibility_version_parser.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/version/releases.h"
 
+#include <fmt/format.h>
+#include <fmt/ostream.h>
+
 namespace mongo {
 
+namespace {
+
 using GenericFCV = multiversion::GenericFCV;
+using FCV = multiversion::FeatureCompatibilityVersion;
 
-multiversion::FeatureCompatibilityVersion FeatureCompatibilityVersionParser::parseVersion(
-    StringData versionString) {
-    if (versionString == multiversion::toString(GenericFCV::kLastLTS)) {
-        return GenericFCV::kLastLTS;
-    }
-    if (versionString == multiversion::toString(GenericFCV::kLastContinuous)) {
-        return GenericFCV::kLastContinuous;
-    }
-    if (versionString == multiversion::toString(GenericFCV::kLatest)) {
-        return GenericFCV::kLatest;
+template <typename T, std::size_t N>
+class UniqueArray {
+public:
+    using const_iterator = typename std::array<T, N>::const_iterator;
+
+    constexpr const_iterator begin() const {
+        return array.cbegin();
     }
 
+    constexpr const_iterator end() const {
+        return array.cbegin() + size;
+    }
+
+    constexpr bool contains(const T& value) const {
+        return std::find(this->begin(), this->end(), value) != this->end();
+    }
+
+    constexpr void insertIfUnique(const T& value) {
+        if (!this->contains(value)) {
+            array[size++] = value;
+        }
+    }
+
+private:
+    std::array<T, N> array{};
+    std::size_t size = 0;
+};
+
+template <typename T, std::size_t N>
+constexpr UniqueArray<T, N> makeValidVersions(const std::array<T, N>& arr) {
+    UniqueArray<T, N> result;
+    for (const auto& item : arr) {
+        // When kLastContinuous == kLastLTS some values can be aliases,
+        // and others like kUpgradingFromLastLTSToLastContinuous become invalid.
+        if (item != FCV::kInvalid) {
+            result.insertIfUnique(item);
+        }
+    }
+    return result;
+}
+
+constexpr UniqueArray validOfcvVersions =
+    makeValidVersions(std::array{GenericFCV::kLatest,
+                                 GenericFCV::kLastContinuous,
+                                 GenericFCV::kLastLTS,
+                                 GenericFCV::kUpgradingFromLastLTSToLatest,
+                                 GenericFCV::kDowngradingFromLatestToLastLTS,
+                                 GenericFCV::kUpgradingFromLastContinuousToLatest,
+                                 GenericFCV::kDowngradingFromLatestToLastContinuous,
+                                 GenericFCV::kUpgradingFromLastLTSToLastContinuous});
+
+constexpr UniqueArray validFcvVersions = makeValidVersions(
+    std::array{GenericFCV::kLatest, GenericFCV::kLastContinuous, GenericFCV::kLastLTS});
+
+/*
+ * Helper used to parse the `versionString` against the `validVersions`
+ */
+template <std::size_t N>
+StatusWith<FCV> parseVersion(const UniqueArray<FCV, N>& validVersions, StringData versionString) {
+    try {
+        const auto version = multiversion::parseVersion(versionString);
+        if (validVersions.contains(version)) {
+            return version;
+        }
+    } catch (const ExceptionFor<ErrorCodes::BadValue>&) {
+    }
+
+    // Create a comma-separated list of valid versions
+    std::ostringstream validVersionsStream;
+    StringData sep;
+    for (const auto& ver : validVersions) {
+        validVersionsStream << sep << "'" << toString(ver) << "'";
+        sep = ", ";
+    }
+
+    return Status{ErrorCodes::BadValue,
+                  str::stream() << "Invalid feature compatibility version value '" << versionString
+                                << "'. Expected one of the following versions: '"
+                                << validVersionsStream.str()};
+}
+
+}  // namespace
+
+FCV FeatureCompatibilityVersionParser::parseVersionForOfcvString(StringData versionString) {
+    return uassertStatusOK(parseVersion(validOfcvVersions, versionString));
+}
+
+FCV FeatureCompatibilityVersionParser::parseVersionForFcvString(StringData versionString) {
+    const auto version = parseVersion(validFcvVersions, versionString);
+    if (version.isOK()) {
+        return version.getValue();
+    }
     uasserted(4926900,
-              str::stream() << "Invalid feature compatibility version value '" << versionString
-                            << "'; expected '" << multiversion::toString(GenericFCV::kLastLTS)
-                            << "' or '" << multiversion::toString(GenericFCV::kLastContinuous)
-                            << "' or '" << multiversion::toString(GenericFCV::kLatest) << "'. See "
+              str::stream() << version.getStatus().reason() << ". See "
                             << feature_compatibility_version_documentation::compatibilityLink()
                             << ".");
 }
 
-multiversion::FeatureCompatibilityVersion
-FeatureCompatibilityVersionParser::parseVersionForFeatureFlags(StringData versionString) {
+FCV FeatureCompatibilityVersionParser::parseVersionForFeatureFlags(StringData versionString) {
     return multiversion::parseVersionForFeatureFlags(versionString);
 }
 
-StringData FeatureCompatibilityVersionParser::serializeVersion(
-    multiversion::FeatureCompatibilityVersion version) {
-    invariant(version == GenericFCV::kLastLTS || version == GenericFCV::kLastContinuous ||
-                  version == GenericFCV::kLatest,
-              "Invalid feature compatibility version value");
-
+StringData FeatureCompatibilityVersionParser::serializeVersionForOfcvString(FCV version) {
+    invariant(validOfcvVersions.contains(version),
+              str::stream() << "Invalid feature compatibility version value: "
+                            << multiversion::toString(version));
     return multiversion::toString(version);
 }
 
-StringData FeatureCompatibilityVersionParser::serializeVersionForFeatureFlags(
-    multiversion::FeatureCompatibilityVersion version) {
+StringData FeatureCompatibilityVersionParser::serializeVersionForFcvString(FCV version) {
+    invariant(validFcvVersions.contains(version),
+              str::stream() << "Invalid feature compatibility version value: "
+                            << multiversion::toString(version));
+    return multiversion::toString(version);
+}
+
+StringData FeatureCompatibilityVersionParser::serializeVersionForFeatureFlags(FCV version) {
     if (multiversion::isStandardFCV(version)) {
         return multiversion::toString(version);
     }
-
     uasserted(ErrorCodes::BadValue,
-              fmt::format("Invalid FCV version {} for feature flag.", version));
+              fmt::format("Invalid FCV version {} for feature flag.", fmt::underlying(version)));
 }
 
-Status FeatureCompatibilityVersionParser::validatePreviousVersionField(
-    multiversion::FeatureCompatibilityVersion version) {
+Status FeatureCompatibilityVersionParser::validatePreviousVersionField(FCV version) {
     if (version == GenericFCV::kLatest) {
         return Status::OK();
     }
@@ -99,11 +182,10 @@ Status FeatureCompatibilityVersionParser::validatePreviousVersionField(
                   "when present, 'previousVersion' field must be the latest binary version");
 }
 
-StatusWith<multiversion::FeatureCompatibilityVersion> FeatureCompatibilityVersionParser::parse(
+StatusWith<FCV> FeatureCompatibilityVersionParser::parse(
     const BSONObj& featureCompatibilityVersionDoc) {
     try {
-        auto fcvDoc = FeatureCompatibilityVersionDocument::parse(
-            IDLParserContext("FeatureCompatibilityVersionParser"), featureCompatibilityVersionDoc);
+        auto fcvDoc = FeatureCompatibilityVersionDocument::parse(featureCompatibilityVersionDoc);
         auto version = fcvDoc.getVersion();
         auto targetVersion = fcvDoc.getTargetVersion();
         auto previousVersion = fcvDoc.getPreviousVersion();

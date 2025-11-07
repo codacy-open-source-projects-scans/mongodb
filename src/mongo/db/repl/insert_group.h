@@ -30,14 +30,15 @@
 
 #pragma once
 
-#include <functional>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry_or_grouped_inserts.h"
+#include "mongo/util/modules.h"
+
+#include <functional>
+#include <vector>
 
 namespace mongo {
 namespace repl {

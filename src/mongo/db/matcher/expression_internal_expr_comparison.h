@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <memory>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
@@ -41,9 +36,13 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_visitor.h"
-#include "mongo/db/matcher/match_details.h"
 #include "mongo/db/matcher/path.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -79,41 +78,11 @@ public:
                                         Value(value),
                                         ElementPath::LeafArrayBehavior::kNoTraversal,
                                         ElementPath::NonLeafArrayBehavior::kMatchSubpath) {
-        invariant(_rhs.type() != BSONType::Undefined);
-        invariant(_rhs.type() != BSONType::Array);
+        tassert(11052405, "_rhs cannot be undefined", _rhs.type() != BSONType::undefined);
+        tassert(11052406, "_rhs cannot be an array", _rhs.type() != BSONType::array);
     }
 
     ~InternalExprComparisonMatchExpression() override = default;
-
-    bool matchesSingleElement(const BSONElement& elem, MatchDetails* details) const final {
-        // We use NonLeafArrayBehavior::kMatchSubpath traversal in
-        // InternalExprComparisonMatchExpression. This means matchesSinglElement() will be called
-        // when an array is found anywhere along the patch we are matching against. When this
-        // occurs, we return 'true' and depend on the corresponding ExprMatchExpression node to
-        // filter properly.
-        if (elem.type() == BSONType::Array) {
-            return true;
-        }
-
-        auto comp = elem.woCompare(_rhs, BSONElement::ComparisonRulesSet(0), _collator);
-
-        switch (matchType()) {
-            case INTERNAL_EXPR_GT:
-                return comp > 0;
-            case INTERNAL_EXPR_GTE:
-                return comp >= 0;
-            case INTERNAL_EXPR_LT:
-                return comp < 0;
-            case INTERNAL_EXPR_LTE:
-                return comp <= 0;
-            case INTERNAL_EXPR_EQ:
-                return comp == 0;
-            default:
-                // This is a comparison match expression, so it must be either a $eq, $lt, $lte, $gt
-                // or $gte expression.
-                MONGO_UNREACHABLE_TASSERT(3994308);
-        }
-    };
 
     std::unique_ptr<MatchExpression> clone() const final {
         auto clone = std::make_unique<T>(path(), _rhs);

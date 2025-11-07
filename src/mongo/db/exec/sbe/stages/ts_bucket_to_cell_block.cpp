@@ -29,33 +29,30 @@
 
 #include "mongo/db/exec/sbe/stages/ts_bucket_to_cell_block.h"
 
-#include <cstddef>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/bson.h"
-#include "mongo/db/exec/sbe/values/scalar_mono_cell_block.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/ts_block.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
+
+#include <cstddef>
+#include <string>
 
 namespace mongo::sbe {
-TsBucketToCellBlockStage::TsBucketToCellBlockStage(
-    std::unique_ptr<PlanStage> input,
-    value::SlotId bucketSlot,
-    std::vector<value::CellBlock::PathRequest> pathReqs,
-    value::SlotVector blocksOut,
-    boost::optional<value::SlotId> metaOut,
-    value::SlotId bitmapOutSlotId,
-    const std::string& timeField,
-    PlanNodeId nodeId,
-    bool participateInTrialRunTracking)
+TsBucketToCellBlockStage::TsBucketToCellBlockStage(std::unique_ptr<PlanStage> input,
+                                                   value::SlotId bucketSlot,
+                                                   std::vector<value::PathRequest> pathReqs,
+                                                   value::SlotVector blocksOut,
+                                                   boost::optional<value::SlotId> metaOut,
+                                                   value::SlotId bitmapOutSlotId,
+                                                   const std::string& timeField,
+                                                   PlanNodeId nodeId,
+                                                   bool participateInTrialRunTracking)
     : PlanStage("ts_bucket_to_cellblock"_sd,
                 nullptr /* yieldPolicy */,
                 nodeId,
@@ -216,7 +213,7 @@ size_t TsBucketToCellBlockStage::estimateCompileTimeSize() const {
     return size;
 }
 
-void TsBucketToCellBlockStage::doSaveState(bool) {
+void TsBucketToCellBlockStage::doSaveState() {
     if (!slotsAccessible()) {
         return;
     }
@@ -230,11 +227,15 @@ void TsBucketToCellBlockStage::doSaveState(bool) {
         auto [cpyTag, cpyVal] = value::copyValue(cellBlockTag, cellBlockVal);
         _blocksOutAccessor[i].reset(true, cpyTag, cpyVal);
     }
+
+    if (_metaOutSlotId) {
+        prepareForYielding(_metaOutAccessor, slotsAccessible());
+    }
 }
 
 void TsBucketToCellBlockStage::initCellBlocks() {
     auto [bucketTag, bucketVal] = _bucketAccessor->getViewOfValue();
-    invariant(bucketTag == value::TypeTags::bsonObject);
+    tassert(11093509, "Expected bsonObject tag type", bucketTag == value::TypeTags::bsonObject);
 
     BSONObj bucketObj(value::getRawPointerView(bucketVal));
     if (_metaOutSlotId) {
@@ -245,7 +246,9 @@ void TsBucketToCellBlockStage::initCellBlocks() {
 
     auto [nMeasurements, tsBlocks, cellBlocks] = _pathExtractor.extractCellBlocks(bucketObj);
     _tsBlockStorage = std::move(tsBlocks);
-    invariant(cellBlocks.size() == _blocksOutAccessor.size());
+    tassert(11093510,
+            "Number of cell blocks doesn't match the number of accessors",
+            cellBlocks.size() == _blocksOutAccessor.size());
     for (size_t i = 0; i < cellBlocks.size(); ++i) {
         _blocksOutAccessor[i].reset(true,
                                     value::TypeTags::cellBlock,

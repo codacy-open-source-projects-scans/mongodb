@@ -29,9 +29,6 @@
 
 #include "mongo/db/auth/authorization_session_test_fixture.h"
 
-#include <boost/none.hpp>
-#include <vector>
-
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -50,8 +47,12 @@
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_entry_point_shard_role.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <vector>
+
+#include <boost/none.hpp>
 
 namespace mongo {
 
@@ -77,7 +78,6 @@ void AuthorizationSessionTestFixture::setUp() {
     sessionState = localSessionState.get();
     authzSession =
         std::make_unique<AuthorizationSessionForTest>(std::move(localSessionState), _client.get());
-    authzSession->startContractTracking();
 
     credentials =
         BSON("SCRAM-SHA-1" << scram::Secrets<SHA1Block>::generateCredentials(

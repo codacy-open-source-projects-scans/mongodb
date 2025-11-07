@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -47,8 +42,14 @@
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/rs_local_client.h"
+#include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/db/write_concern_options.h"
-#include "mongo/s/client/shard.h"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 

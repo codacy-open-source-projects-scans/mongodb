@@ -43,7 +43,7 @@ VirtualScanStage::VirtualScanStage(PlanNodeId planNodeId,
       _outField(out),
       _arrTag(arrTag),
       _arrVal(arrVal) {
-    invariant(value::isArray(arrTag));
+    tassert(11094700, "expect arr parameter to be an array", value::isArray(arrTag));
 }
 
 VirtualScanStage::~VirtualScanStage() {
@@ -106,7 +106,9 @@ PlanState VirtualScanStage::getNext() {
     _index++;
 
     // Depends on whether the last call was to getNext() or open()/doSaveState().
-    invariant(_releaseIndex == _index - 1 || _releaseIndex == _index - 2);
+    tassert(11093511,
+            "Unexpected value of releaseIndex",
+            _releaseIndex == _index - 1 || _releaseIndex == _index - 2);
 
     // We don't want to release at _index-1, since this is the data we're in the process of
     // returning, but data at any prior index is allowed to be freed.
@@ -161,12 +163,10 @@ size_t VirtualScanStage::estimateCompileTimeSize() const {
     return sizeof(*this);
 }
 
-void VirtualScanStage::doSaveState(bool relinquishCursor) {
-    if (relinquishCursor) {
-        for (; _releaseIndex < _index; ++_releaseIndex) {
-            auto [tagElem, valueElem] = _values.at(_releaseIndex);
-            value::releaseValue(tagElem, valueElem);
-        }
+void VirtualScanStage::doSaveState() {
+    for (; _releaseIndex < _index; ++_releaseIndex) {
+        auto [tagElem, valueElem] = _values.at(_releaseIndex);
+        value::releaseValue(tagElem, valueElem);
     }
 }
 }  // namespace mongo::sbe

@@ -29,7 +29,17 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/exec/mutable_bson/const_element.h"
+#include "mongo/db/exec/mutable_bson/element.h"
+#include "mongo/db/field_ref.h"
+#include "mongo/db/update/log_builder_interface.h"
+#include "mongo/db/update/runtime_update_path.h"
+#include "mongo/db/update/update_leaf_node.h"
+#include "mongo/db/update/update_node.h"
+#include "mongo/util/assert_util.h"
+
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -37,16 +47,7 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/mutable/const_element.h"
-#include "mongo/bson/mutable/element.h"
-#include "mongo/db/field_ref.h"
-#include "mongo/db/update/log_builder_interface.h"
-#include "mongo/db/update/runtime_update_path.h"
-#include "mongo/db/update/update_leaf_node.h"
-#include "mongo/db/update/update_node.h"
-#include "mongo/util/assert_util.h"
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -97,7 +98,7 @@ protected:
             size_t inserted;
         };
 
-        ModifyResult(){};
+        ModifyResult() {};
         ModifyResult(ModifyResult::Type type) : type(type) {}
 
         Type type;
@@ -214,7 +215,7 @@ protected:
         FieldRef* currentPath,
         std::map<std::string, std::vector<std::pair<std::string, BSONObj>>>*
             operatorOrientedUpdates) const override {
-        (*operatorOrientedUpdates)[operatorName().toString()].emplace_back(
+        (*operatorOrientedUpdates)[std::string{operatorName()}].emplace_back(
             currentPath->dottedField(), operatorValue());
     }
 

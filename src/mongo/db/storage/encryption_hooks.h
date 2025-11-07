@@ -29,28 +29,23 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/data_protector.h"
+#include "mongo/util/modules.h"
+
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/db/database_name.h"
-
-namespace boost {
-namespace filesystem {
-class path;
-}  // namespace filesystem
-}  // namespace boost
+#include <boost/filesystem/path.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
-class DataProtector;
-class ServiceContext;
-
-class EncryptionHooks {
+class MONGO_MOD_OPEN EncryptionHooks {
 public:
     static void set(ServiceContext* service, std::unique_ptr<EncryptionHooks> custHooks);
 
@@ -94,11 +89,8 @@ public:
      * This key is persistent across process restarts. Otherwise, an ephemeral key that is only
      * consistent for the duration of the process will be generated and used for encryption.
      */
-    virtual Status protectTmpData(const uint8_t* in,
-                                  size_t inLen,
-                                  uint8_t* out,
-                                  size_t outLen,
-                                  size_t* resultLen,
+    virtual Status protectTmpData(ConstDataRange in,
+                                  DataRange* out,
                                   boost::optional<DatabaseName> dbName);
 
     /**
@@ -108,11 +100,8 @@ public:
      * restart had occurred after encryption. Otherwise, an ephemeral key that can only decrypt data
      * encrypted earlier in the current process's lifetime will be used.
      */
-    virtual Status unprotectTmpData(const uint8_t* in,
-                                    size_t inLen,
-                                    uint8_t* out,
-                                    size_t outLen,
-                                    size_t* resultLen,
+    virtual Status unprotectTmpData(ConstDataRange in,
+                                    DataRange* out,
                                     boost::optional<DatabaseName> dbName);
 
     /**

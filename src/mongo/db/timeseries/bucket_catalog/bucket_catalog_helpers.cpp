@@ -29,13 +29,6 @@
 
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog_helpers.h"
 
-#include <boost/container/small_vector.hpp>
-#include <boost/container/vector.hpp>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsontypes.h"
@@ -51,6 +44,12 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/str.h"
+
+#include <boost/container/small_vector.hpp>
+#include <boost/container/vector.hpp>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -142,15 +141,13 @@ std::vector<BSONObj> generateReopeningPipeline(const Date_t& time,
                  time, metadata, controlMinTimePath, maxDataTimeFieldPath, bucketMaxSpanSeconds)));
 
     // Stage 2: Add an observable field for the bucket document size.
-    pipeline.push_back(BSON("$set" << BSON("object_size" << BSON("$bsonSize"
-                                                                 << "$$ROOT"))));
+    pipeline.push_back(BSON("$set" << BSON("object_size" << BSON("$bsonSize" << "$$ROOT"))));
 
     // Stage 3: Restrict bucket documents exceeding the max bucket size.
     pipeline.push_back(BSON("$match" << BSON("object_size" << BSON("$lt" << bucketMaxSize))));
 
     // Stage 4: Unset the document size field.
-    pipeline.push_back(BSON("$unset"
-                            << "object_size"));
+    pipeline.push_back(BSON("$unset" << "object_size"));
 
     // Stage 5: Restrict the aggregation to one document.
     pipeline.push_back(BSON("$limit" << 1));
@@ -194,7 +191,7 @@ StatusWith<Schema> generateSchemaFromBucketDoc(tracking::Context& trackingContex
 
 StatusWith<Date_t> extractTime(const BSONObj& doc, StringData timeFieldName) {
     auto timeElem = doc[timeFieldName];
-    if (!timeElem || BSONType::Date != timeElem.type()) {
+    if (!timeElem || BSONType::date != timeElem.type()) {
         return {ErrorCodes::BadValue,
                 str::stream() << "'" << timeFieldName << "' must be present and contain a "
                               << "valid BSON UTC datetime value"};
@@ -228,7 +225,7 @@ StatusWith<std::pair<Date_t, BSONElement>> extractTimeAndMeta(const BSONObj& doc
         }
     }
 
-    if (!timeElem || BSONType::Date != timeElem.type()) {
+    if (!timeElem || BSONType::date != timeElem.type()) {
         return {ErrorCodes::BadValue,
                 str::stream() << "'" << timeFieldName << "' must be present and contain a "
                               << "valid BSON UTC datetime value"};
@@ -241,11 +238,9 @@ StatusWith<std::pair<Date_t, BSONElement>> extractTimeAndMeta(const BSONObj& doc
 void handleDirectWrite(RecoveryUnit& ru,
                        BucketCatalog& bucketCatalog,
                        const TimeseriesOptions& options,
-                       const StringDataComparator* comparator,
                        const UUID& collectionUUID,
                        const BSONObj& bucket) {
-    const BucketId bucketId =
-        extractBucketId(bucketCatalog, options, comparator, collectionUUID, bucket);
+    const BucketId bucketId = extractBucketId(bucketCatalog, options, collectionUUID, bucket);
 
     // First notify the BucketCatalog that we intend to start a direct write, so we can conflict
     // with any already-prepared operation, and also block bucket reopening if it's enabled.

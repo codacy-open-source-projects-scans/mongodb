@@ -8,67 +8,68 @@
  *   # Timeseries do not support multi-document transactions with inserts.
  *   does_not_support_transactions,
  *   # Kill operations do not propagate for writes on mongos.
- *   assumes_unsharded_collection
+ *   assumes_unsharded_collection,
  * ]
  */
 
-export const $config = (function() {
-    const timeFieldName = 'time';
-    const metaFieldName = 'tag';
+export const $config = (function () {
+    // The test takes an extended period of time specifically on Windows debug variants.
+    const buildInfo = getBuildInfo();
+    const skipTest = buildInfo.debug && buildInfo.buildEnvironment.target_os === "windows";
+
+    const timeFieldName = "time";
+    const metaFieldName = "tag";
 
     function getCollectionName(collName) {
         return jsTestName() + "_" + collName;
     }
 
-    const insert = function(db, collName, ordered) {
+    const insert = function (db, collName, ordered) {
         const docs = [];
         for (let i = 0; i < 1000; ++i) {
             docs.push({[timeFieldName]: ISODate(), [metaFieldName]: i % 10});
         }
         // TODO (SERVER-44673): Use assert.commandWorkedOrFailedWithCode without special handling.
         const res = db.runCommand({insert: collName, documents: docs, ordered: ordered});
-        if (res.hasOwnProperty('writeErrors')) {
+        if (res.hasOwnProperty("writeErrors")) {
             for (const writeError of res.writeErrors) {
                 assert.eq(writeError.code, ErrorCodes.Interrupted, tojson(res));
             }
-        } else if (res.hasOwnProperty('writeConcernError')) {
+        } else if (res.hasOwnProperty("writeConcernError")) {
             assert.eq(res.writeConcernError.code, ErrorCodes.Interrupted, tojson(res));
         } else {
             // TODO (SERVER-85548): Clean up error codes
-            assert.commandWorkedOrFailedWithCode(
-                res, [ErrorCodes.Interrupted, 8555700, 8555701], tojson(res));
+            assert.commandWorkedOrFailedWithCode(res, [ErrorCodes.Interrupted, 8555700, 8555701], tojson(res));
         }
     };
 
     const states = {
-        init: function(db, collName) {},
+        init: function (db, collName) {},
 
-        insertOrdered: function(db, collNameSuffix) {
+        insertOrdered: function (db, collNameSuffix) {
             let collName = getCollectionName(collNameSuffix);
             insert(db, collName, true);
         },
 
-        insertUnordered: function(db, collNameSuffix) {
+        insertUnordered: function (db, collNameSuffix) {
             let collName = getCollectionName(collNameSuffix);
             insert(db, collName, false);
         },
 
-        killInsert: function(db, collNameSuffix) {
+        killInsert: function (db, collNameSuffix) {
             let collName = getCollectionName(collNameSuffix);
-            const inprog =
-                assert.commandWorked(db.currentOp({ns: db[collName].getFullName(), op: 'insert'}))
-                    .inprog;
+            const inprog = assert.commandWorked(db.currentOp({ns: db[collName].getFullName(), op: "insert"})).inprog;
             if (inprog.length) {
-                assert.commandWorked(
-                    db.adminCommand({killOp: 1, op: inprog[Random.randInt(inprog.length)].opid}));
+                assert.commandWorked(db.adminCommand({killOp: 1, op: inprog[Random.randInt(inprog.length)].opid}));
             }
         },
     };
 
-    const setup = function(db, collNameSuffix) {
+    const setup = function (db, collNameSuffix) {
         let collName = getCollectionName(collNameSuffix);
-        assert.commandWorked(db.createCollection(
-            collName, {timeseries: {timeField: timeFieldName, metaField: metaFieldName}}));
+        assert.commandWorked(
+            db.createCollection(collName, {timeseries: {timeField: timeFieldName, metaField: metaFieldName}}),
+        );
     };
 
     const standardTransition = {
@@ -86,7 +87,7 @@ export const $config = (function() {
 
     return {
         threadCount: 10,
-        iterations: 0,  // TODO SERVER-80143: Re-enable with 100 iterations.
+        iterations: skipTest ? 0 : 100,
         setup: setup,
         states: states,
         transitions: transitions,

@@ -29,24 +29,11 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <list>
-#include <memory>
-#include <set>
-#include <string>
-#include <type_traits>
-#include <utility>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/exclusion_projection_executor.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
@@ -54,9 +41,22 @@
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/transformer_interface.h"
 #include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <list>
+#include <memory>
+#include <set>
+#include <string>
+#include <type_traits>
+#include <utility>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -77,8 +77,10 @@ public:
     // virtuals from DocumentSource
     const char* getSourceName() const final;
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kSingleDocumentTransformation;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
     boost::intrusive_ptr<DocumentSource> optimize() final;
@@ -86,7 +88,7 @@ public:
     DepsTracker::State getDependencies(DepsTracker* deps) const final;
     void addVariableRefs(std::set<Variables::Id>* refs) const final;
     GetModPathsReturn getModifiedPaths() const final;
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final;
+    StageConstraints constraints(PipelineSplitState pipeState) const final;
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
         return boost::none;
@@ -104,7 +106,7 @@ public:
     }
 
     SingleDocumentTransformationProcessor* getTransformationProcessor() {
-        return _transformationProcessor.get_ptr();
+        return _transformationProcessor.get();
     }
 
     /**
@@ -144,19 +146,21 @@ public:
     }
 
 protected:
-    GetNextResult doGetNext() final;
-    void doDispose() final;
-
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) final;
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) final;
 
 private:
-    Pipeline::SourceContainer::iterator maybeCoalesce(
-        Pipeline::SourceContainer::iterator itr,
-        Pipeline::SourceContainer* container,
+    friend boost::intrusive_ptr<exec::agg::Stage>
+    documentSourceSingleDocumentTransformationToStageFn(
+        const boost::intrusive_ptr<DocumentSource>&);
+
+    DocumentSourceContainer::iterator maybeCoalesce(
+        DocumentSourceContainer::iterator itr,
+        DocumentSourceContainer* container,
         DocumentSourceSingleDocumentTransformation* nextSingleDocTransform);
 
-    boost::optional<SingleDocumentTransformationProcessor> _transformationProcessor;
+    // TODO SERVER-105521: Check if we can change from 'std::shared_ptr' to 'std::unique_ptr'.
+    std::shared_ptr<SingleDocumentTransformationProcessor> _transformationProcessor;
 
     projection_executor::ExclusionNode& getExclusionNode();
 
@@ -166,6 +170,7 @@ private:
     // Set to true if this transformation stage can be run on the collectionless namespace.
     bool _isIndependentOfAnyCollection;
 
+    // TODO SERVER-105521: Check if we can remove this and use just the '_transformationProcessor'.
     // Cached stage options in case this DocumentSource is disposed before serialized (e.g. explain
     // with a sort which will auto-dispose of the pipeline).
     Document _cachedStageOptions;

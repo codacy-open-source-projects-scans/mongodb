@@ -1,24 +1,44 @@
-load("@npm//:prettier/package_json.bzl", prettier = "bin")
-
-# TODO: SERVER-82329 eslint binary should almost exactly mirror prettier binary
-# To update prettier change the version in package.json
-# Run `pnpm install`
-# Commit changes
-prettier.prettier_binary(
-    name = "prettier",
-    # Allow the binary to be run outside bazel
-    # See more details about this by commenting this out and running `bazel run //:format`
-    env = {"BAZEL_BINDIR": "."},
-)
+load("@aspect_rules_lint//format:defs.bzl", "format_multirun", "format_test")
 
 py_binary(
-    name = "format",
-    srcs = ["format.py"],
+    name = "rules_lint_format_wrapper",
+    srcs = ["rules_lint_format_wrapper.py"],
     args = [
         "--prettier",
-        "$(location :prettier)",
+        "$(location //:prettier)",
+        "--rules-lint-format",
+        "$(location :rules_lint_format)",
+        "--rules-lint-format-check",
+        "$(location :rules_lint_format.check)",
     ],
-    data = [":prettier"],
-    main = "format.py",
+    data = [
+        ":rules_lint_format",
+        ":rules_lint_format.check",
+        "//:prettier",
+        "@shfmt",
+    ],
+    env = {
+        "SHFMT_PATH": "$(rootpath @shfmt//:shfmt)",
+    },
+    main = "rules_lint_format_wrapper.py",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts:bazel_custom_formatter",
+    ],
+)
+
+format_multirun(
+    name = "rules_lint_format",
+    c = "//:clang_format",
+    cc = "//:clang_format",
+    css = "//:prettier",
+    graphql = "//:prettier",
+    html = "//:prettier",
+    javascript = "//:prettier",
+    markdown = "//:prettier",
+    python = "@aspect_rules_lint//format:ruff",
+    shell = "@shfmt//:shfmt",
+    sql = "//:prettier",
+    starlark = "@buildifier_prebuilt//:buildifier",
     visibility = ["//visibility:public"],
 )

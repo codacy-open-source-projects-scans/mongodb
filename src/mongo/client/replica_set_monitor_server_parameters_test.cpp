@@ -27,11 +27,12 @@
  *    it in the license file.
  */
 
+#include "mongo/client/replica_set_monitor_server_parameters.h"
+
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/replica_set_monitor_protocol_test_util.h"
-#include "mongo/client/replica_set_monitor_server_parameters.h"
 #include "mongo/db/service_context.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 
 namespace mongo {
 namespace {

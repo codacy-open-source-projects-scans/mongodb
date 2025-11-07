@@ -27,13 +27,7 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/container/flat_set.hpp>
-#include <boost/container/small_vector.hpp>
-#include <boost/container/vector.hpp>
-#include <ostream>
-#include <string>
-#include <util/math/mathutil.h>
+#include "mongo/db/index/s2_key_generator.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -45,18 +39,23 @@
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index/s2_common.h"
-#include "mongo/db/index/s2_key_generator.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/shared_buffer_fragment.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <ostream>
+#include <string>
+
+#include <boost/container/flat_set.hpp>
+#include <boost/container/small_vector.hpp>
+#include <boost/container/vector.hpp>
+#include <util/math/mathutil.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -116,8 +115,8 @@ bool areKeysetsEqual(const KeyStringSet& expectedKeys, const KeyStringSet& actua
 void assertMultikeyPathsEqual(const MultikeyPaths& expectedMultikeyPaths,
                               const MultikeyPaths& actualMultikeyPaths) {
     if (expectedMultikeyPaths != actualMultikeyPaths) {
-        FAIL(str::stream() << "Expected: " << dumpMultikeyPaths(expectedMultikeyPaths)
-                           << ", Actual: " << dumpMultikeyPaths(actualMultikeyPaths));
+        FAIL(std::string(str::stream() << "Expected: " << dumpMultikeyPaths(expectedMultikeyPaths)
+                                       << ", Actual: " << dumpMultikeyPaths(actualMultikeyPaths)));
     }
 }
 
@@ -127,13 +126,11 @@ struct S2KeyGeneratorTest : public unittest::Test {
     long long getCellID(int x, int y, bool multiPoint = false) {
         BSONObj obj;
         if (multiPoint) {
-            obj = BSON("a" << BSON("type"
-                                   << "MultiPoint"
-                                   << "coordinates" << BSON_ARRAY(BSON_ARRAY(x << y))));
+            obj = BSON("a" << BSON("type" << "MultiPoint"
+                                          << "coordinates" << BSON_ARRAY(BSON_ARRAY(x << y))));
         } else {
-            obj = BSON("a" << BSON("type"
-                                   << "Point"
-                                   << "coordinates" << BSON_ARRAY(x << y)));
+            obj = BSON("a" << BSON("type" << "Point"
+                                          << "coordinates" << BSON_ARRAY(x << y)));
         }
         BSONObj keyPattern = fromjson("{a: '2dsphere'}");
         BSONObj infoObj = fromjson("{key: {a: '2dsphere'}, '2dsphereIndexVersion': 3}");
@@ -330,9 +327,8 @@ TEST_F(S2KeyGeneratorTest, CollationAppliedToNonGeoStringFieldBeforeGeoField) {
                              Ordering::make(BSONObj()));
 
     key_string::HeapBuilder keyString(key_string::Version::kLatestVersion,
-                                      BSON(""
-                                           << "gnirts"
-                                           << "" << getCellID(0, 0)),
+                                      BSON("" << "gnirts"
+                                              << "" << getCellID(0, 0)),
                                       Ordering::make(BSONObj()));
     KeyStringSet expectedKeys{keyString.release()};
 
@@ -362,10 +358,9 @@ TEST_F(S2KeyGeneratorTest, CollationAppliedToAllNonGeoStringFields) {
                              Ordering::make(BSONObj()));
 
     key_string::HeapBuilder keyString(key_string::Version::kLatestVersion,
-                                      BSON(""
-                                           << "gnirts"
-                                           << "" << getCellID(0, 0) << ""
-                                           << "2gnirts"),
+                                      BSON("" << "gnirts"
+                                              << "" << getCellID(0, 0) << ""
+                                              << "2gnirts"),
                                       Ordering::make(BSONObj()));
     KeyStringSet expectedKeys{keyString.release()};
 
@@ -543,9 +538,7 @@ TEST_F(S2KeyGeneratorTest, CollationAppliedToStringsInNestedObjects) {
                              Ordering::make(BSONObj()));
 
     key_string::HeapBuilder keyString(key_string::Version::kLatestVersion,
-                                      BSON("" << getCellID(0, 0) << ""
-                                              << BSON("c"
-                                                      << "gnirts")),
+                                      BSON("" << getCellID(0, 0) << "" << BSON("c" << "gnirts")),
                                       Ordering::make(BSONObj()));
     KeyStringSet expectedKeys{keyString.release()};
 

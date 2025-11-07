@@ -76,10 +76,13 @@ class TestTask(unittest.TestCase):
         task_dict = {
             "name": "compile",
             "depends_on": [],
-            "commands": [{"func": "fetch source"}, {"func": "run a task that passes"},
-                         {"func": "run a function with an arg", "vars": {"foobar": "TESTING: ONE"}},
-                         {"func": "run a function with an arg", "vars": {"foobar": "TESTING: TWO"}}]
-        }  # yapf: disable
+            "commands": [
+                {"func": "fetch source"},
+                {"func": "run a task that passes"},
+                {"func": "run a function with an arg", "vars": {"foobar": "TESTING: ONE"}},
+                {"func": "run a function with an arg", "vars": {"foobar": "TESTING: TWO"}},
+            ],
+        }
         task = _evergreen.Task(task_dict)
 
         self.assertEqual("compile", task.name)
@@ -281,11 +284,8 @@ class TestTask(unittest.TestCase):
     def test_tags_with_no_tags(self):
         task_dict = {
             "name": "jsCore",
-            "commands": [{
-                "func": "run tests",
-                "vars": {"resmoke_args": "--suites=core"}
-            }]
-        }  # yapf: disable
+            "commands": [{"func": "run tests", "vars": {"resmoke_args": "--suites=core"}}],
+        }
         task = _evergreen.Task(task_dict)
 
         self.assertEqual(0, len(task.tags))
@@ -294,11 +294,8 @@ class TestTask(unittest.TestCase):
         task_dict = {
             "name": "jsCore",
             "tags": ["tag 0", "tag 1", "tag 2"],
-            "commands": [{
-                "func": "run tests",
-                "vars": {"resmoke_args": "--suites=core"}
-            }]
-        }  # yapf: disable
+            "commands": [{"func": "run tests", "vars": {"resmoke_args": "--suites=core"}}],
+        }
         task = _evergreen.Task(task_dict)
 
         tag_set = task.tags
@@ -397,7 +394,7 @@ class TestTask(unittest.TestCase):
         task = _evergreen.Task(task_dict)
 
         with self.assertRaises(TypeError):
-            task.generated_task_name  # pylint: disable=pointless-statement
+            task.generated_task_name
 
     def test_generate_task_name(self):
         task_name = "jsCore_gen"
@@ -481,7 +478,7 @@ class TestVariant(unittest.TestCase):
     def test_expansion(self):
         variant_ubuntu = self.conf.get_variant("ubuntu")
         self.assertEqual(
-            "--param=value --ubuntu --enableEnterpriseTests=off",
+            "--param=value --ubuntu --modules=none",
             variant_ubuntu.expansion("test_flags"),
         )
         self.assertEqual(None, variant_ubuntu.expansion("not_a_valid_expansion_name"))
@@ -489,7 +486,7 @@ class TestVariant(unittest.TestCase):
     def test_expansions(self):
         variant_ubuntu = self.conf.get_variant("ubuntu")
         self.assertEqual(
-            {"test_flags": "--param=value --ubuntu --enableEnterpriseTests=off"},
+            {"test_flags": "--param=value --ubuntu --modules=none"},
             variant_ubuntu.expansions,
         )
 
@@ -521,9 +518,7 @@ class TestVariant(unittest.TestCase):
 
     def test_test_flags(self):
         variant_ubuntu = self.conf.get_variant("ubuntu")
-        self.assertEqual(
-            "--param=value --ubuntu --enableEnterpriseTests=off", variant_ubuntu.test_flags
-        )
+        self.assertEqual("--param=value --ubuntu --modules=none", variant_ubuntu.test_flags)
 
         variant_osx = self.conf.get_variant("osx-108")
         self.assertIsNone(variant_osx.test_flags)
@@ -554,7 +549,7 @@ class TestVariant(unittest.TestCase):
         resmoke_task = variant_ubuntu.get_task("resmoke_task")
         self.assertEqual(
             {
-                "resmoke_task": "--suites=resmoke_task --storageEngine=wiredTiger --param=value --ubuntu --enableEnterpriseTests=off"
+                "resmoke_task": "--suites=resmoke_task --storageEngine=wiredTiger --param=value --ubuntu --modules=none"
             },
             resmoke_task.combined_suite_to_resmoke_args_map,
         )
@@ -562,9 +557,7 @@ class TestVariant(unittest.TestCase):
         # Check combined_suite_to_resmoke_args_map when the task doesn't have resmoke_args.
         passing_task = variant_ubuntu.get_task("passing_test")
         self.assertEqual(
-            {
-                "passing_test": "--suites=passing_test --param=value --ubuntu --enableEnterpriseTests=off"
-            },
+            {"passing_test": "--suites=passing_test --param=value --ubuntu --modules=none"},
             passing_task.combined_suite_to_resmoke_args_map,
         )
 

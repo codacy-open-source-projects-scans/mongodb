@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -43,9 +38,14 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_visitor.h"
-#include "mongo/db/matcher/match_details.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstddef>
+#include <memory>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -66,8 +66,6 @@ public:
                                     clonable_ptr<ErrorAnnotation> annotation = nullptr);
 
     std::unique_ptr<MatchExpression> clone() const final;
-
-    bool matchesSingleElement(const BSONElement&, MatchDetails*) const final;
 
     void debugString(StringBuilder& debug, int indentationLevel) const final;
 
@@ -97,17 +95,15 @@ public:
         visitor->visit(this);
     }
 
-    BSONElement getRhsElem() const {
+    const BSONElement& getRhsElem() const {
         return _rhsElem;
     }
 
-private:
-    ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) {
-            return expression;
-        };
+    const UnorderedFieldsBSONElementComparator& getComparator() const {
+        return _eltCmp;
     }
 
+private:
     UnorderedFieldsBSONElementComparator _eltCmp;
     BSONElement _rhsElem;
 };

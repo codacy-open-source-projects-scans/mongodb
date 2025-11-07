@@ -27,12 +27,13 @@
  *    it in the license file.
  */
 
-#include <benchmark/benchmark.h>
-
 #include "mongo/db/profile_filter.h"
+
 #include "mongo/db/profile_filter_impl.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/util/processinfo.h"
+
+#include <benchmark/benchmark.h>
 
 namespace mongo {
 namespace {
@@ -67,8 +68,7 @@ static void BM_ProfileFilter_GetSettingsDefault(benchmark::State& state) {
 static void BM_ProfileFilter_GetSettingsNonDefault(benchmark::State& state) {
     const DatabaseName testDB = DatabaseName::createDatabaseName_forTest(boost::none, "testdb");
     if (state.thread_index == 0) {
-        settings.setDatabaseProfileSettings(testDB,
-                                            {1, std::shared_ptr<ProfileFilterImpl>(nullptr)});
+        settings.setDatabaseProfileSettings(testDB, {1, nullptr, Milliseconds(5000)});
     }
 
     for (auto keepRunning : state) {
@@ -83,8 +83,7 @@ static void BM_ProfileFilter_SetClear(benchmark::State& state) {
     }
 
     for (auto keepRunning : state) {
-        settings.setDatabaseProfileSettings(testDB,
-                                            {1, std::shared_ptr<ProfileFilterImpl>(nullptr)});
+        settings.setDatabaseProfileSettings(testDB, {1, nullptr, Milliseconds(5000)});
         settings.clearDatabaseProfileSettings(testDB);
         benchmark::ClobberMemory();
     }

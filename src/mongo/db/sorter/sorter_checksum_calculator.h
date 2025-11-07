@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/db/sorter/sorter_gen.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -45,6 +46,7 @@ public:
     size_t checksum() const {
         return _checksum;
     }
+
     SorterChecksumVersion version() const {
         return _version;
     }

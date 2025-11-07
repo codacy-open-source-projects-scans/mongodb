@@ -40,8 +40,8 @@ const equivalentErrorCodesList = [
     [28714, 4903710, 7157710],
     [28761, 4903708, 7157708],
     [
-        28765,   4903700, 4903702, 4903703, 4903704, 4903705, 4903707, 4903709, 4822870, 4995501,
-        4995502, 7157700, 7157702, 7157703, 7157704, 7157705, 7157707, 7157709, 7157800, 7157802
+        28765, 4903700, 4903702, 4903703, 4903704, 4903705, 4903707, 4903709, 4822870, 4995501, 4995502, 7157700,
+        7157702, 7157703, 7157704, 7157705, 7157707, 7157709, 7157800, 7157802,
     ],
     [28766, 4903706, 7157706],
     [3040501, 5155201],
@@ -61,6 +61,7 @@ const equivalentErrorCodesList = [
     [34452, 5155702],
     [34453, 5155702],
     [34454, 5155703],
+    [34468, 5156500],
     [40066, 4934200, 7158303],
     [40085, 5155402, 7158202],
     [40086, 5155400, 7158203],
@@ -72,38 +73,11 @@ const equivalentErrorCodesList = [
     [40096, 5075303, 5075305, 7158003, 7158005, 9711600],
     [40097, 5075304, 5075306, 7158004, 7158006, 9711601],
     [40400, 5911200],
-    [
-        40485,
-        4997704,
-        4997906,
-        4998201,
-        5075307,
-        5166505,
-        5166602,
-        7157903,
-        7157909,
-        7157913,
-        7157920,
-        5157903,
-        5157901
-    ],
+    [40485, 4997704, 4997906, 4998201, 5075307, 5166505, 5166602, 7157903, 7157909, 7157913, 7157920, 5157903, 5157901],
     [40515, 4848979, 7157917],
     [
-        40517,
-        40533,
-        4848980,
-        4997701,
-        4997905,
-        4998200,
-        5157900,
-        5157902,
-        5166504,
-        5166601,
-        7157902,
-        7157908,
-        7157912,
-        7157918,
-        7157919
+        40517, 40533, 4848980, 4997701, 4997905, 4998200, 5157900, 5157902, 5166504, 5166601, 7157902, 7157908, 7157912,
+        7157918, 7157919,
     ],
     [40521, 4997702, 7157914],
     [40522, 4997700, 7157911],
@@ -125,9 +99,10 @@ const equivalentErrorCodesList = [
     [51156, 5073403],
     [51246, 5291401],
     [51247, 5291402],
-    [51744, 5154400, 7158302],
-    [51745, 5154400, 7158302],
-    [51746, 5154400, 7158302],
+    [10503902, 51744, 5154400, 7158302],
+    [10503901, 51745, 5154400, 7158302],
+    [10503903, 5154400, 7158302],
+    [10503904, 51746, 5154400, 7158302],
     [5166306, 5166502, 7157923],
     [5166307, 5166500, 5166501, 5439102, 5439012, 7157921, 7157922, 7157932],
     [5166403, 5166603, 7157904],
@@ -152,13 +127,13 @@ const equivalentErrorCodesList = [
     [5439105, 5439018, 7003906, 7157939, 7157940],
     [5439106, 5439015, 7003909, 7157941, 7157943],
     [5439107, 5439016, 7003910, 7157942, 7157944],
-    [17042, 5126900, 7158100],
-    [17043, 5126900, 7158101],
-    [17044, 5126900, 7158100],
-    [17046, 5126900, 7158100],
-    [17047, 5126900, 7158101],
-    [17048, 5126900, 7158101],
-    [17049, 5126900, 7158101],
+    [17042, 5126900, 7158100, 7158101],
+    [17043, 5126900, 7158100, 7158101],
+    [17044, 5126900, 7158100, 7158101],
+    [17046, 5126900, 7158100, 7158101],
+    [17047, 5126900, 7158100, 7158101],
+    [17048, 5126900, 7158100, 7158101],
+    [17049, 5126900, 7158100, 7158101],
     [51081, 5155300],
     [51080, 5155302],
     [31109, 5155301],
@@ -215,7 +190,7 @@ const equivalentErrorCodesList = [
 // This map is generated based on the contents of 'equivalentErrorCodesList'. This map should _not_
 // be modified. If you need to change which error codes are considered equivalent to each other, you
 // should modify 'equivalentErrorCodesList' above.
-const equivalentErrorCodesMap = function() {
+const equivalentErrorCodesMap = (function () {
     let mapOfSets = {};
     for (const arr of equivalentErrorCodesList) {
         for (const errorCode1 of arr) {
@@ -241,9 +216,9 @@ const equivalentErrorCodesMap = function() {
     }
 
     return mapOfLists;
-}();
+})();
 
-const lookupEquivalentErrorCodes = function(errorCodes) {
+const lookupEquivalentErrorCodes = function (errorCodes) {
     if (errorCodes === assert._kAnyErrorCode) {
         return errorCodes;
     }
@@ -267,33 +242,37 @@ const lookupEquivalentErrorCodes = function(errorCodes) {
 
 // Override the assert.commandFailedWithCode() function.
 const assertCommandFailedWithCodeOriginal = assert.commandFailedWithCode;
-assert.commandFailedWithCode = function(res, expectedCode, msg) {
+assert.commandFailedWithCode = function (res, expectedCode, msg) {
     return assertCommandFailedWithCodeOriginal(res, lookupEquivalentErrorCodes(expectedCode), msg);
 };
 
 // Override the assert.writeErrorWithCode() function.
 const assertWriteErrorWithCodeOriginal = assert.writeErrorWithCode;
-assert.writeErrorWithCode = function(res, expectedCode, msg) {
+assert.writeErrorWithCode = function (res, expectedCode, msg) {
     return assertWriteErrorWithCodeOriginal(res, lookupEquivalentErrorCodes(expectedCode), msg);
 };
 
 // Override the assert.throwsWithCode() function.
 const assertThrowsWithCodeOriginal = assert.throwsWithCode;
-assert.throwsWithCode = function(func, expectedCode, params, msg) {
-    return assertThrowsWithCodeOriginal(
-        func, lookupEquivalentErrorCodes(expectedCode), params, msg);
+assert.throwsWithCode = function (func, expectedCode, params, msg) {
+    return assertThrowsWithCodeOriginal(func, lookupEquivalentErrorCodes(expectedCode), params, msg);
 };
 
 // NOTE: Consider using 'assert.commandFailedWithCode' and 'assert.writeErrorWithCode' instead.
 // This function should be only used when error code does not come from command. For instance, when
 // validating explain output, which includes error code in the execution stats.
-assert.errorCodeEq = function(actualErrorCode, expectedErrorCodes, msg) {
+assert.errorCodeEq = function (actualErrorCode, expectedErrorCodes, msg) {
     if (expectedErrorCodes === assert._kAnyErrorCode) {
         return;
     }
 
     const equivalentErrorCodes = lookupEquivalentErrorCodes(expectedErrorCodes);
-    assert(equivalentErrorCodes.includes(actualErrorCode),
-           actualErrorCode + " not found in the list of expected error codes: " +
-               tojson(equivalentErrorCodes) + ": " + msg);
+    assert(
+        equivalentErrorCodes.includes(actualErrorCode),
+        actualErrorCode +
+            " not found in the list of expected error codes: " +
+            tojson(equivalentErrorCodes) +
+            ": " +
+            msg,
+    );
 };

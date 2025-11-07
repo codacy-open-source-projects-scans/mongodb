@@ -3,7 +3,8 @@
  * use a distinct scan. Reproduces BF-35249.
  *
  * @tags: [
- *   featureFlagShardFilteringDistinctScan
+ *   featureFlagShardFilteringDistinctScan,
+ *   requires_fcv_82
  * ]
  */
 import {ShardingTest} from "jstests/libs/shardingtest.js";
@@ -20,8 +21,8 @@ assert.commandWorked(st.s.adminCommand({shardCollection: coll.getFullName(), key
 const pipeline = [
     {$match: {nss: {$ne: ""}}},
     {$group: {_id: "$nss", placement: {$top: {output: "$$CURRENT", sortBy: {"timestamp": -1}}}}},
-    {$match: {_id: {$not: {$regex: /^[^.]+\.system\.resharding\..+$/}}}}
+    {$match: {_id: {$not: {$regex: /^[^.]+\.system\.resharding\..+$/}}}},
 ];
-assert.commandWorked(st.s.getDB('config').placementHistory.explain().aggregate(pipeline));
+assert.commandWorked(st.s.getDB("config").placementHistory.explain().aggregate(pipeline));
 
 st.stop();

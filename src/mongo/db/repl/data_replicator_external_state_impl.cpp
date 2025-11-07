@@ -28,14 +28,11 @@
  */
 
 
-#include <cstddef>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/repl/data_replicator_external_state_impl.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
-#include "mongo/db/repl/data_replicator_external_state_impl.h"
 #include "mongo/db/repl/oplog_applier_impl.h"
 #include "mongo/db/repl/oplog_buffer_blocking_queue.h"
 #include "mongo/db/repl/oplog_buffer_collection.h"
@@ -45,9 +42,11 @@
 #include "mongo/db/repl/replication_coordinator_external_state.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstddef>
+
+#include <boost/move/utility_core.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -192,15 +191,6 @@ StatusWith<LastVote> DataReplicatorExternalStateImpl::loadLocalLastVoteDocument(
 
 JournalListener* DataReplicatorExternalStateImpl::getReplicationJournalListener() {
     return _replicationCoordinatorExternalState->getReplicationJournalListener();
-}
-
-ReplicationCoordinator* DataReplicatorExternalStateImpl::getReplicationCoordinator() const {
-    return _replicationCoordinator;
-}
-
-ReplicationCoordinatorExternalState*
-DataReplicatorExternalStateImpl::getReplicationCoordinatorExternalState() const {
-    return _replicationCoordinatorExternalState;
 }
 
 }  // namespace repl

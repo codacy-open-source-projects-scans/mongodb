@@ -27,13 +27,7 @@
  *    it in the license file.
  */
 
-#include <exception>
-#include <fmt/format.h>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
+#include "mongo/db/repair.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -41,37 +35,42 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/catalog/document_validation.h"
-#include "mongo/db/catalog/validate/collection_validation.h"
-#include "mongo/db/catalog/validate/validate_results.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/index_builds/rebuild_indexes.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_catalog_helper.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/document_validation.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/repair.h"
 #include "mongo/db/repl/oplog.h"
-#include "mongo/db/repl_set_member_in_standalone_mode.h"
+#include "mongo/db/repl/repl_set_member_in_standalone_mode.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_repair_observer.h"
-#include "mongo/db/storage/storage_util.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/validate/collection_validation.h"
+#include "mongo/db/validate/validate_results.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#include <exception>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 namespace mongo {
 
-using namespace fmt::literals;
 
 Status rebuildIndexesForNamespace(OperationContext* opCtx,
                                   const NamespaceString& nss,
@@ -200,7 +199,7 @@ Status repairDatabase(OperationContext* opCtx, StorageEngine* engine, const Data
     auto databaseHolder = DatabaseHolder::get(opCtx);
     databaseHolder->close(opCtx, dbName);
 
-    // Sucessfully re-opening the db is necessary for repairCollections.
+    // Successfully re-opening the db is necessary for repairCollections.
     openDbAndRepairIndexSpec(opCtx, dbName);
 
     auto status = repairCollections(opCtx, engine, dbName);
@@ -232,20 +231,37 @@ Status repairCollection(OperationContext* opCtx,
     LOGV2(21027, "Repairing collection", logAttrs(nss));
 
     Status status = Status::OK();
+    RecordId catalogId;
     {
         auto collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
-        status = engine->repairRecordStore(opCtx, collection->getCatalogId(), nss);
+        catalogId = collection->getCatalogId();
+        status = engine->repairRecordStore(opCtx, catalogId, nss);
+    }
+
+    bool dataModified = status.code() == ErrorCodes::DataModifiedByRepair;
+    if (status.isOK() || dataModified) {
+        // When in repair mode, initCollectionObject() constructed the Collection object with null
+        // RecordStore. After repairing, re-initialize the collection with a valid RecordStore.
+        CollectionCatalog::write(opCtx, [&](CollectionCatalog& catalog) {
+            auto uuid = catalog.lookupUUIDByNSS(opCtx, nss).value();
+            catalog.deregisterCollection(opCtx, uuid, /*commitTime*/ boost::none);
+        });
+
+        // When repairing a record store, keep the existing behavior of not installing a minimum
+        // visible timestamp.
+        catalog::initCollectionObject(opCtx, engine, catalogId, nss, false, Timestamp::min());
     }
 
     // If data was modified during repairRecordStore, we know to rebuild indexes without needing
     // to run an expensive collection validation.
-    if (status.code() == ErrorCodes::DataModifiedByRepair) {
+    if (dataModified) {
         invariant(StorageRepairObserver::get(opCtx->getServiceContext())->isDataInvalidated(),
-                  "Collection '{}' ({})"_format(toStringForLogging(nss),
-                                                CollectionCatalog::get(opCtx)
-                                                    ->lookupCollectionByNamespace(opCtx, nss)
-                                                    ->uuid()
-                                                    .toString()));
+                  fmt::format("Collection '{}' ({})",
+                              toStringForLogging(nss),
+                              CollectionCatalog::get(opCtx)
+                                  ->lookupCollectionByNamespace(opCtx, nss)
+                                  ->uuid()
+                                  .toString()));
 
         // If we are a replica set member in standalone mode and we have unfinished indexes,
         // drop them before rebuilding any completed indexes. Since we have already made
@@ -300,7 +316,7 @@ Status repairCollection(OperationContext* opCtx,
         return status;
     }
 
-    // Serialize valdiate result for logging in which tenant prefix is expected.
+    // Serialize validate result for logging in which tenant prefix is expected.
     const SerializationContext serializationCtx(SerializationContext::Source::Command,
                                                 SerializationContext::CallerType::Reply,
                                                 SerializationContext::Prefix::IncludePrefix);

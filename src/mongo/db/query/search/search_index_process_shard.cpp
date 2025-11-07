@@ -29,9 +29,10 @@
 
 #include "mongo/db/query/search/search_index_process_shard.h"
 
-#include "mongo/db/catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/views/view_catalog_helpers.h"
+
 #include <boost/optional/optional.hpp>
 
 
@@ -46,46 +47,40 @@ ServiceContext::ConstructorActionRegisterer SearchIndexProcessShardImplementatio
         }
     }};
 
-boost::optional<UUID> SearchIndexProcessShard::fetchCollectionUUID(OperationContext* opCtx,
-                                                                   const NamespaceString& nss) {
-    return CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, nss);
-}
 
-UUID SearchIndexProcessShard::fetchCollectionUUIDOrThrow(OperationContext* opCtx,
-                                                         const NamespaceString& nss) {
-    auto optUuid = fetchCollectionUUID(opCtx, nss);
-    uassert(ErrorCodes::NamespaceNotFound,
-            str::stream() << "Collection '" << nss.toStringForErrorMsg() << "' does not exist.",
-            optUuid);
-    return optUuid.get();
-}
-
-std::pair<boost::optional<UUID>, boost::optional<NamespaceString>>
+std::pair<boost::optional<UUID>, boost::optional<ResolvedView>>
 SearchIndexProcessShard::fetchCollectionUUIDAndResolveView(OperationContext* opCtx,
-                                                           const NamespaceString& nss) {
-
-    auto catalog = CollectionCatalog::get(opCtx);
+                                                           const NamespaceString& nss,
+                                                           bool failOnTsColl) {
+    auto catalog = CollectionCatalog::get(opCtx);  // NOLINT TODO: SERVER-104335 Remove this.
+    auto coll = catalog->lookupCollectionByNamespace(opCtx, nss);
     auto view = catalog->lookupView(opCtx, nss);
+
+    uassert(10840701,
+            "search index commands are not allowed on timeseries collections",
+            !(failOnTsColl &&
+              ((coll && coll->isTimeseriesCollection()) || (view && view->timeseries()))));
+
     if (!view) {
         return std::make_pair(catalog->lookupUUIDByNSS(opCtx, nss), boost::none);
     } else {
-        auto resolvedNamespace =
-            view_catalog_helpers::findSourceCollectionNamespace(opCtx, catalog, nss);
+        auto resolvedView =
+            view_catalog_helpers::resolveView(opCtx, catalog, nss, boost::none).getValue();
 
-        return std::make_pair(catalog->lookupUUIDByNSS(opCtx, resolvedNamespace),
-                              boost::make_optional(resolvedNamespace));
+        return std::make_pair(catalog->lookupUUIDByNSS(opCtx, resolvedView.getNamespace()),
+                              boost::make_optional(resolvedView));
     }
 }
 
-std::pair<UUID, boost::optional<NamespaceString>>
+std::pair<UUID, boost::optional<ResolvedView>>
 SearchIndexProcessShard::fetchCollectionUUIDAndResolveViewOrThrow(OperationContext* opCtx,
                                                                   const NamespaceString& nss) {
-    auto uuidResolvdNssPair = fetchCollectionUUIDAndResolveView(opCtx, nss);
+    auto uuidResolvedViewPair = fetchCollectionUUIDAndResolveView(opCtx, nss);
     uassert(ErrorCodes::NamespaceNotFound,
             str::stream() << "Collection '" << nss.toStringForErrorMsg() << "' does not exist.",
-            uuidResolvdNssPair.first);
+            uuidResolvedViewPair.first);
 
-    return std::make_pair(*uuidResolvdNssPair.first, uuidResolvdNssPair.second);
+    return std::make_pair(*uuidResolvedViewPair.first, uuidResolvedViewPair.second);
 }
 
 }  // namespace mongo

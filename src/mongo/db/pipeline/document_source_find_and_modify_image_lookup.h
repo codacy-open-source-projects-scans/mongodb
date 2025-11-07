@@ -29,23 +29,24 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <set>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/pipeline_split_state.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+
+#include <set>
+
+#include <boost/none.hpp>
+#include <boost/none_t.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -80,39 +81,32 @@ public:
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final;
+    StageConstraints constraints(PipelineSplitState pipeState) const final;
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
         return boost::none;
     }
 
     const char* getSourceName() const override {
-        return DocumentSourceFindAndModifyImageLookup::kStageName.rawData();
+        return DocumentSourceFindAndModifyImageLookup::kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kFindAndModifyImageLookup;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
-protected:
-    DocumentSource::GetNextResult doGetNext() override;
+    bool getIncludeCommitTransactionTimestamp() const {
+        return _includeCommitTransactionTimestamp;
+    }
 
 private:
     DocumentSourceFindAndModifyImageLookup(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                            bool includeCommitTransactionTimestamp);
 
-    // Downconverts 'findAndModify' or 'applyOps' entries with 'needsRetryImage'. If an oplog entry
-    // document has 'needsRetryImage' set, we downconvert and stash the document as
-    // '_stashedDownconvertedDoc' and then forge a no-op pre- or post-image document and return it.
-    Document _downConvertIfNeedsRetryImage(Document inputDoc);
-
     // Set to true if the input oplog entry documents can have a transaction commit timestamp
     // attached to it.
     bool _includeCommitTransactionTimestamp;
-
-    // Represents the stashed downconverted 'findAndModify' or 'applyOps' oplog entry document.
-    // This indicates that the previous document emitted was a forged pre- or post-image.
-    boost::optional<Document> _stashedDownconvertedDoc;
 };
-
 }  // namespace mongo

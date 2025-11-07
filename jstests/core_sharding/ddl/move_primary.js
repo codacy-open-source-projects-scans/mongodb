@@ -4,15 +4,17 @@
  * @tags: [
  *   requires_2_or_more_shards,
  *   does_not_support_stepdowns,
+ *   # Expects databases to be in specific places
+ *   assumes_stable_shard_list,
  * ]
  */
 
-import {getRandomShardName} from 'jstests/libs/sharded_cluster_fixture_helpers.js';
+import {getRandomShardName} from "jstests/libs/sharded_cluster_fixture_helpers.js";
 
-const testDB = db.getSiblingDB('test_db');
+const testDB = db.getSiblingDB("test_db");
 testDB.dropDatabase();
 
-const coll = testDB['coll'];
+const coll = testDB["coll"];
 
 const N = 250;
 

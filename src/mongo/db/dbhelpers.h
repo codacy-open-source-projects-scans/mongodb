@@ -29,23 +29,18 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/update_result.h"
 #include "mongo/db/record_id.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <memory>
 
-class Collection;
-class CollectionPtr;
-class Database;
-class OperationContext;
-class FindCommandRequest;
-class CollectionAcquisition;
-
+namespace MONGO_MOD_PUBLIC mongo {
 /**
  * db helpers are helper functions and classes that let us easily manipulate the local
  * database instance in-proc.
@@ -62,7 +57,7 @@ struct Helpers {
      * node does not need to be primary or secondary.
      */
     static bool findOne(OperationContext* opCtx,
-                        const CollectionPtr& collection,
+                        const CollectionAcquisition& collection,
                         const BSONObj& query,
                         BSONObj& result);
 
@@ -71,7 +66,7 @@ struct Helpers {
      * Otherwise the empty BSONObj will be returned.
      */
     static BSONObj findOneForTesting(OperationContext* opCtx,
-                                     const CollectionPtr& collection,
+                                     const CollectionAcquisition& collection,
                                      const BSONObj& query,
                                      bool invariantOnError = true);
 
@@ -80,10 +75,10 @@ struct Helpers {
      * document, or a null RecordId if no such document exists.
      */
     static RecordId findOne(OperationContext* opCtx,
-                            const CollectionPtr& collection,
+                            const CollectionAcquisition& collection,
                             const BSONObj& query);
     static RecordId findOne(OperationContext* opCtx,
-                            const CollectionPtr& collection,
+                            const CollectionAcquisition& collection,
                             std::unique_ptr<FindCommandRequest> qr);
 
     /**
@@ -164,6 +159,13 @@ struct Helpers {
                          const CollectionAcquisition& coll,
                          const BSONObj& doc);
 
+    /**
+     * Deletes document from collection 'coll' via RecordId 'rid'.
+     */
+    static void deleteByRid(OperationContext* opCtx,
+                            const CollectionAcquisition& coll,
+                            RecordId rid);
+
     // TODO: this should be somewhere else probably
     /* Takes object o, and returns a new object with the
      * same field elements but the names stripped out.
@@ -204,4 +206,4 @@ struct Helpers {
                                       BSONObj& result);
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

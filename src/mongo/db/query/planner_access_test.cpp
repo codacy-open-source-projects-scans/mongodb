@@ -27,12 +27,7 @@
  *    it in the license file.
  */
 
-#include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/query/planner_access.h"
-#include "mongo/db/query/record_id_bound.h"
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -43,9 +38,13 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/index_tag.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/intrusive_counter.h"
+#include "mongo/db/query/record_id_bound.h"
+#include "mongo/unittest/unittest.h"
+
+#include <memory>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
@@ -176,10 +175,16 @@ TEST(PlannerAccessTest, SimplifyFilterInequalities) {
     // Where there is no bound provided in the query, handleRIDRangeScan will still set coarse
     // bounds based on the datatype, but the full filter remains present.
     // These are the expected coarse bounds for numeric and string types.
-    Bound minNum = {BSONObjBuilder().appendMinForType("", BSONType::NumberInt).obj(), true};
-    Bound maxNum = {BSONObjBuilder().appendMaxForType("", BSONType::NumberInt).obj(), true};
-    Bound minStr = {BSONObjBuilder().appendMinForType("", BSONType::String).obj(), true};
-    Bound maxStr = {BSONObjBuilder().appendMaxForType("", BSONType::String).obj(), true};
+    Bound minNum = {
+        BSONObjBuilder().appendMinForType("", stdx::to_underlying(BSONType::numberInt)).obj(),
+        true};
+    Bound maxNum = {
+        BSONObjBuilder().appendMaxForType("", stdx::to_underlying(BSONType::numberInt)).obj(),
+        true};
+    Bound minStr = {
+        BSONObjBuilder().appendMinForType("", stdx::to_underlying(BSONType::string)).obj(), true};
+    Bound maxStr = {
+        BSONObjBuilder().appendMaxForType("", stdx::to_underlying(BSONType::string)).obj(), true};
 
     testSimplify("{_id:{$gt: 2}}", "{}", {2}, {maxNum});
     testSimplify("{_id:{$lt: 4}}", "{}", {minNum}, {4});
@@ -258,7 +263,9 @@ TEST(PlannerAccessTest, SimplifyFilterDisjunctionsNotAffected) {
                  {},
                  {});
 
-    Bound minNum = {BSONObjBuilder().appendMinForType("", BSONType::NumberInt).obj(), true};
+    Bound minNum = {
+        BSONObjBuilder().appendMinForType("", stdx::to_underlying(BSONType::numberInt)).obj(),
+        true};
     // Nested disjunction.
     // The child of the top level conjunction _is_ seen, so a coarse lower bound will be set.
     testSimplify("{$and: [{$or: [{_id:{$gt: 2}}, {_id:{$lte: 3}}]}, {_id:{$lt: 4}}]}",

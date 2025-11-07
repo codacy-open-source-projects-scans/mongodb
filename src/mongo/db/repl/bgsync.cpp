@@ -32,14 +32,6 @@
 
 #include <cstddef>
 // IWYU pragma: no_include "cxxabi.h"
-#include <chrono>
-#include <exception>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -48,11 +40,11 @@
 #include "mongo/client/dbclient_connection.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
-#include "mongo/db/commands/server_status_metric.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/data_replicator_external_state_impl.h"
 #include "mongo/db/repl/member_state.h"
@@ -64,18 +56,14 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_external_state.h"
 #include "mongo/db/repl/replication_process.h"
-#include "mongo/db/repl/rollback_source_impl.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/sync_source_selector.h"
+#include "mongo/db/replication_state_transition_lock_guard.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/shutdown_in_progress_quiesce_info.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/metadata/oplog_query_metadata.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
@@ -85,6 +73,14 @@
 #include "mongo/util/str.h"
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/time_support.h"
+
+#include <chrono>
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -536,7 +532,7 @@ void BackgroundSync::_produce() {
                 logLevel,
                 "Scheduling fetcher to read remote oplog",
                 "syncSource"_attr = source,
-                "lastOpTimeFetched"_attr = oplogFetcher->getLastOpTimeFetched_forTest());
+                "lastOpTimeFetched"_attr = oplogFetcher->getLastOpTimeFetched());
     auto scheduleStatus = oplogFetcher->startup();
     if (!scheduleStatus.isOK()) {
         LOGV2_WARNING(21119,
@@ -933,7 +929,7 @@ OpTime BackgroundSync::_readLastAppliedOpTime(OperationContext* opCtx) {
             // This can happen when we are to do an initial sync.
             return OpTime();
         }
-    } catch (const ExceptionForCat<ErrorCategory::ShutdownError>&) {
+    } catch (const ExceptionFor<ErrorCategory::ShutdownError>&) {
         throw;
     } catch (const DBException& ex) {
         LOGV2_FATAL(18904,

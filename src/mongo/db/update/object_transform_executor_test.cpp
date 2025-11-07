@@ -27,24 +27,22 @@
  *    it in the license file.
  */
 
-#include <boost/none.hpp>
-#include <boost/none_t.hpp>
-#include <memory>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/update/object_transform_executor.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/json.h"
-#include "mongo/bson/mutable/algorithm.h"
-#include "mongo/bson/mutable/document.h"
-#include "mongo/bson/mutable/element.h"
-#include "mongo/db/update/object_transform_executor.h"
+#include "mongo/db/exec/mutable_bson/algorithm.h"
+#include "mongo/db/exec/mutable_bson/document.h"
+#include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/update/update_node_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+
+#include <boost/none.hpp>
+#include <boost/none_t.hpp>
 
 namespace mongo {
 namespace {

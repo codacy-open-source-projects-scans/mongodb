@@ -1,18 +1,13 @@
 version: 1.0.0
 filters:
-  # Like match expressions in general, QO owns parsing, validation, and optimization of JSON Schema
-  # but QE owns JSON Schema execution. Therefore, we give ownership to the entire query team.
   - "*":
     approvers:
-      - 10gen/query
+      - 10gen/query-optimization
   - "OWNERS.yml":
     approvers:
       - 10gen/query-execution-staff-leads
       - 10gen/query-optimization-staff-leads
       - 10gen/query-integration-staff-leads
-  - "encrypt_keyword*":
-    approvers:
-      - 10gen/query-integration-fle
   - "encrypt_schema*":
     approvers:
-      - 10gen/query-integration-fle
+      - 10gen/query-integration-features

@@ -27,17 +27,10 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
+
 #include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <memory>
-#include <string>
-#include <system_error>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -48,6 +41,10 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/router_role_api/router_role.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
@@ -57,24 +54,24 @@
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
+#include "mongo/db/versioning_protocol/shard_version_factory.h"
+#include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/index_version.h"
 #include "mongo/s/query/exec/sharded_agg_test_fixture.h"
-#include "mongo/s/router_role.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/s/shard_version.h"
-#include "mongo/s/shard_version_factory.h"
-#include "mongo/s/stale_exception.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 namespace mongo {
 namespace {
@@ -95,28 +92,33 @@ TEST_F(DispatchShardPipelineTest, DoesNotSplitPipelineIfTargetingOneShard) {
     };
     auto pipeline = Pipeline::create(
         {parseStage(stages[0]), parseStage(stages[1]), parseStage(stages[2])}, expCtx());
-    const Document serializedCommand = aggregation_request_helper::serializeToCommandDoc(
-        expCtx(), AggregateCommandRequest(expCtx()->getNamespaceString(), stages));
+    const auto serializedCommand =
+        Document(AggregateCommandRequest(expCtx()->getNamespaceString(), stages).toBSON());
     const auto pipelineDataSource = PipelineDataSource::kNormal;
     const bool eligibleForSampling = false;
 
-    auto future = launchAsync([&] {
-        auto results = sharded_agg_helpers::dispatchShardPipeline(serializedCommand,
-                                                                  pipelineDataSource,
-                                                                  eligibleForSampling,
-                                                                  std::move(pipeline),
-                                                                  boost::none /*explain*/);
-        ASSERT_EQ(results.remoteCursors.size(), 1UL);
-        ASSERT(!results.splitPipeline);
-    });
+    routing_context_utils::withValidatedRoutingContext(
+        operationContext(), std::vector{kTestAggregateNss}, [&](RoutingContext& routingCtx) {
+            auto future = launchAsync([&] {
+                auto results = sharded_agg_helpers::dispatchShardPipeline(routingCtx,
+                                                                          serializedCommand,
+                                                                          pipelineDataSource,
+                                                                          eligibleForSampling,
+                                                                          std::move(pipeline),
+                                                                          boost::none /*explain*/,
+                                                                          kTestAggregateNss);
+                ASSERT_EQ(results.remoteCursors.size(), 1UL);
+                ASSERT(!results.splitPipeline);
+            });
 
-    onCommand([&](const executor::RemoteCommandRequest& request) {
-        ASSERT_EQ(request.target, HostAndPort(shards[1].getHost()));
-        return CursorResponse(kTestAggregateNss, CursorId{0}, std::vector<BSONObj>{})
-            .toBSON(CursorResponse::ResponseType::InitialResponse);
-    });
+            onCommand([&](const executor::RemoteCommandRequest& request) {
+                ASSERT_EQ(request.target, HostAndPort(shards[1].getHost()));
+                return CursorResponse(kTestAggregateNss, CursorId{0}, std::vector<BSONObj>{})
+                    .toBSON(CursorResponse::ResponseType::InitialResponse);
+            });
 
-    future.default_timed_get();
+            future.default_timed_get();
+        });
 }
 
 TEST_F(DispatchShardPipelineTest, DoesSplitPipelineIfMatchSpansTwoShards) {
@@ -130,31 +132,36 @@ TEST_F(DispatchShardPipelineTest, DoesSplitPipelineIfMatchSpansTwoShards) {
     };
     auto pipeline = Pipeline::create(
         {parseStage(stages[0]), parseStage(stages[1]), parseStage(stages[2])}, expCtx());
-    const Document serializedCommand = aggregation_request_helper::serializeToCommandDoc(
-        expCtx(), AggregateCommandRequest(expCtx()->getNamespaceString(), stages));
+    const auto serializedCommand =
+        Document(AggregateCommandRequest(expCtx()->getNamespaceString(), stages).toBSON());
     const auto pipelineDataSource = PipelineDataSource::kNormal;
     const bool eligibleForSampling = false;
 
-    auto future = launchAsync([&] {
-        auto results = sharded_agg_helpers::dispatchShardPipeline(serializedCommand,
-                                                                  pipelineDataSource,
-                                                                  eligibleForSampling,
-                                                                  std::move(pipeline),
-                                                                  boost::none /*explain*/);
-        ASSERT_EQ(results.remoteCursors.size(), 2UL);
-        ASSERT(bool(results.splitPipeline));
-    });
+    routing_context_utils::withValidatedRoutingContext(
+        operationContext(), std::vector{kTestAggregateNss}, [&](RoutingContext& routingCtx) {
+            auto future = launchAsync([&] {
+                auto results = sharded_agg_helpers::dispatchShardPipeline(routingCtx,
+                                                                          serializedCommand,
+                                                                          pipelineDataSource,
+                                                                          eligibleForSampling,
+                                                                          std::move(pipeline),
+                                                                          boost::none /*explain*/,
+                                                                          kTestAggregateNss);
+                ASSERT_EQ(results.remoteCursors.size(), 2UL);
+                ASSERT(bool(results.splitPipeline));
+            });
 
-    onCommand([&](const executor::RemoteCommandRequest& request) {
-        return CursorResponse(kTestAggregateNss, CursorId{0}, std::vector<BSONObj>{})
-            .toBSON(CursorResponse::ResponseType::InitialResponse);
-    });
-    onCommand([&](const executor::RemoteCommandRequest& request) {
-        return CursorResponse(kTestAggregateNss, CursorId{0}, std::vector<BSONObj>{})
-            .toBSON(CursorResponse::ResponseType::InitialResponse);
-    });
+            onCommand([&](const executor::RemoteCommandRequest& request) {
+                return CursorResponse(kTestAggregateNss, CursorId{0}, std::vector<BSONObj>{})
+                    .toBSON(CursorResponse::ResponseType::InitialResponse);
+            });
+            onCommand([&](const executor::RemoteCommandRequest& request) {
+                return CursorResponse(kTestAggregateNss, CursorId{0}, std::vector<BSONObj>{})
+                    .toBSON(CursorResponse::ResponseType::InitialResponse);
+            });
 
-    future.default_timed_get();
+            future.default_timed_get();
+        });
 }
 
 TEST_F(DispatchShardPipelineTest, DispatchShardPipelineRetriesOnNetworkError) {
@@ -168,40 +175,46 @@ TEST_F(DispatchShardPipelineTest, DispatchShardPipelineRetriesOnNetworkError) {
     };
     auto pipeline = Pipeline::create(
         {parseStage(stages[0]), parseStage(stages[1]), parseStage(stages[2])}, expCtx());
-    const Document serializedCommand = aggregation_request_helper::serializeToCommandDoc(
-        expCtx(), AggregateCommandRequest(expCtx()->getNamespaceString(), stages));
+    const auto serializedCommand =
+        Document(AggregateCommandRequest(expCtx()->getNamespaceString(), stages).toBSON());
     const auto pipelineDataSource = PipelineDataSource::kNormal;
     const bool eligibleForSampling = false;
-    auto future = launchAsync([&] {
-        // Shouldn't throw.
-        auto results = sharded_agg_helpers::dispatchShardPipeline(serializedCommand,
-                                                                  pipelineDataSource,
-                                                                  eligibleForSampling,
-                                                                  std::move(pipeline),
-                                                                  boost::none /*explain*/);
-        ASSERT_EQ(results.remoteCursors.size(), 2UL);
-        ASSERT(bool(results.splitPipeline));
-    });
 
-    // Mock out responses, one success, one error.
-    onCommand([&](const executor::RemoteCommandRequest& request) {
-        return CursorResponse(kTestAggregateNss, CursorId{0}, std::vector<BSONObj>{})
-            .toBSON(CursorResponse::ResponseType::InitialResponse);
-    });
-    HostAndPort unreachableShard;
-    onCommand([&](const executor::RemoteCommandRequest& request) {
-        unreachableShard = request.target;
-        return Status{ErrorCodes::HostUnreachable, "Mock error: Couldn't find host"};
-    });
+    routing_context_utils::withValidatedRoutingContext(
+        operationContext(), std::vector{kTestAggregateNss}, [&](RoutingContext& routingCtx) {
+            auto future = launchAsync([&] {
+                // Shouldn't throw.
+                auto results = sharded_agg_helpers::dispatchShardPipeline(routingCtx,
+                                                                          serializedCommand,
+                                                                          pipelineDataSource,
+                                                                          eligibleForSampling,
+                                                                          std::move(pipeline),
+                                                                          boost::none /*explain*/,
+                                                                          kTestAggregateNss);
+                ASSERT_EQ(results.remoteCursors.size(), 2UL);
+                ASSERT(bool(results.splitPipeline));
+            });
 
-    // That error should be retried, but only the one on that shard.
-    onCommand([&](const executor::RemoteCommandRequest& request) {
-        // Test that it's retrying to the shard we failed earlier.
-        ASSERT_EQ(request.target, unreachableShard);
-        return CursorResponse(kTestAggregateNss, CursorId{0}, std::vector<BSONObj>{})
-            .toBSON(CursorResponse::ResponseType::InitialResponse);
-    });
-    future.default_timed_get();
+            // Mock out responses, one success, one error.
+            onCommand([&](const executor::RemoteCommandRequest& request) {
+                return CursorResponse(kTestAggregateNss, CursorId{0}, std::vector<BSONObj>{})
+                    .toBSON(CursorResponse::ResponseType::InitialResponse);
+            });
+            HostAndPort unreachableShard;
+            onCommand([&](const executor::RemoteCommandRequest& request) {
+                unreachableShard = request.target;
+                return Status{ErrorCodes::HostUnreachable, "Mock error: Couldn't find host"};
+            });
+
+            // That error should be retried, but only the one on that shard.
+            onCommand([&](const executor::RemoteCommandRequest& request) {
+                // Test that it's retrying to the shard we failed earlier.
+                ASSERT_EQ(request.target, unreachableShard);
+                return CursorResponse(kTestAggregateNss, CursorId{0}, std::vector<BSONObj>{})
+                    .toBSON(CursorResponse::ResponseType::InitialResponse);
+            });
+            future.default_timed_get();
+        });
 }
 
 // Test that this helper is not responsible for retrying StaleConfig errors. This should happen at a
@@ -217,35 +230,40 @@ TEST_F(DispatchShardPipelineTest, DispatchShardPipelineDoesNotRetryOnStaleConfig
     };
     auto pipeline = Pipeline::create(
         {parseStage(stages[0]), parseStage(stages[1]), parseStage(stages[2])}, expCtx());
-    const Document serializedCommand = aggregation_request_helper::serializeToCommandDoc(
-        expCtx(), AggregateCommandRequest(expCtx()->getNamespaceString(), stages));
+    const auto serializedCommand =
+        Document(AggregateCommandRequest(expCtx()->getNamespaceString(), stages).toBSON());
     const auto pipelineDataSource = PipelineDataSource::kNormal;
     const bool eligibleForSampling = false;
 
-    auto future = launchAsync([&] {
-        ASSERT_THROWS_CODE(sharded_agg_helpers::dispatchShardPipeline(serializedCommand,
-                                                                      pipelineDataSource,
-                                                                      eligibleForSampling,
-                                                                      std::move(pipeline),
-                                                                      boost::none /*explain*/),
-                           AssertionException,
-                           ErrorCodes::StaleConfig);
-    });
+    routing_context_utils::withValidatedRoutingContext(
+        operationContext(), std::vector{kTestAggregateNss}, [&](RoutingContext& routingCtx) {
+            auto future = launchAsync([&] {
+                ASSERT_THROWS_CODE(
+                    sharded_agg_helpers::dispatchShardPipeline(routingCtx,
+                                                               serializedCommand,
+                                                               pipelineDataSource,
+                                                               eligibleForSampling,
+                                                               std::move(pipeline),
+                                                               boost::none /*explain*/,
+                                                               kTestAggregateNss),
+                    AssertionException,
+                    ErrorCodes::StaleConfig);
+            });
 
-    // Mock out an error response.
-    onCommand([&](const executor::RemoteCommandRequest& request) {
-        OID epoch{OID::gen()};
-        Timestamp timestamp{1, 0};
-        return createErrorCursorResponse(
-            {StaleConfigInfo(
-                 kTestAggregateNss,
-                 ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
-                                           boost::optional<CollectionIndexes>(boost::none)),
-                 boost::none,
-                 ShardId{"0"}),
-             "Mock error: shard version mismatch"});
-    });
-    future.default_timed_get();
+            // Mock out an error response.
+            onCommand([&](const executor::RemoteCommandRequest& request) {
+                OID epoch{OID::gen()};
+                Timestamp timestamp{1, 0};
+                return createErrorCursorResponse(
+                    {StaleConfigInfo(
+                         kTestAggregateNss,
+                         ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0})),
+                         boost::none,
+                         ShardId{"0"}),
+                     "Mock error: shard version mismatch"});
+            });
+            future.default_timed_get();
+        });
 }
 
 TEST_F(DispatchShardPipelineTest, WrappedDispatchDoesRetryOnStaleConfigError) {
@@ -259,23 +277,25 @@ TEST_F(DispatchShardPipelineTest, WrappedDispatchDoesRetryOnStaleConfigError) {
     };
     auto pipeline = Pipeline::create(
         {parseStage(stages[0]), parseStage(stages[1]), parseStage(stages[2])}, expCtx());
-    const Document serializedCommand = aggregation_request_helper::serializeToCommandDoc(
-        expCtx(), AggregateCommandRequest(expCtx()->getNamespaceString(), stages));
+    const auto serializedCommand =
+        Document(AggregateCommandRequest(expCtx()->getNamespaceString(), stages).toBSON());
     const auto pipelineDataSource = PipelineDataSource::kNormal;
     const bool eligibleForSampling = false;
     auto future = launchAsync([&] {
         // Shouldn't throw.
         sharding::router::CollectionRouter router(getServiceContext(), kTestAggregateNss);
-        auto results = router.route(operationContext(),
-                                    "dispatch shard pipeline"_sd,
-                                    [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) {
-                                        return sharded_agg_helpers::dispatchShardPipeline(
-                                            serializedCommand,
-                                            pipelineDataSource,
-                                            eligibleForSampling,
-                                            pipeline->clone(),
-                                            boost::none /*explain*/);
-                                    });
+        auto results = router.routeWithRoutingContext(
+            operationContext(),
+            "dispatch shard pipeline"_sd,
+            [&](OperationContext* opCtx, RoutingContext& routingCtx) {
+                return sharded_agg_helpers::dispatchShardPipeline(routingCtx,
+                                                                  serializedCommand,
+                                                                  pipelineDataSource,
+                                                                  eligibleForSampling,
+                                                                  pipeline->clone(),
+                                                                  boost::none /*explain*/,
+                                                                  kTestAggregateNss);
+            });
         ASSERT_EQ(results.remoteCursors.size(), 1UL);
         ASSERT(!bool(results.splitPipeline));
     });
@@ -288,12 +308,10 @@ TEST_F(DispatchShardPipelineTest, WrappedDispatchDoesRetryOnStaleConfigError) {
     // namespace, then mock out a successful response.
     onCommand([&](const executor::RemoteCommandRequest& request) {
         return createErrorCursorResponse(
-            {StaleConfigInfo(
-                 kTestAggregateNss,
-                 ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0}),
-                                           boost::optional<CollectionIndexes>(boost::none)),
-                 boost::none,
-                 ShardId{"0"}),
+            {StaleConfigInfo(kTestAggregateNss,
+                             ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0})),
+                             boost::none,
+                             ShardId{"0"}),
              "Mock error: shard version mismatch"});
     });
 
@@ -314,9 +332,6 @@ TEST_F(DispatchShardPipelineTest, WrappedDispatchDoesRetryOnStaleConfigError) {
 
     expectCollectionAndChunksAggregation(
         kTestAggregateNss, epoch, timestamp, uuid, shardKeyPattern, {chunk1, chunk2});
-
-    expectCollectionAndIndexesAggregation(
-        kTestAggregateNss, epoch, timestamp, uuid, shardKeyPattern, boost::none, {});
 
     // That error should be retried, but only the one on that shard.
     onCommand([&](const executor::RemoteCommandRequest& request) {

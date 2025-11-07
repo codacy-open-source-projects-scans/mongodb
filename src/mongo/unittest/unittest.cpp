@@ -29,12 +29,9 @@
 
 
 #include <algorithm>
-#include <boost/smart_ptr.hpp>
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
-#include <fmt/format.h>
-#include <fmt/printf.h>  // IWYU pragma: keep
 #include <functional>
 #include <iostream>
 #include <iterator>
@@ -46,14 +43,11 @@
 
 #include <boost/exception/exception.hpp>
 #include <boost/log/core/core.hpp>
+#include <boost/smart_ptr.hpp>
+#include <fmt/format.h>
+#include <fmt/printf.h>  // IWYU pragma: keep
 // IWYU pragma: no_include "boost/log/detail/attachable_sstream_buf.hpp"
 // IWYU pragma: no_include "boost/log/detail/locking_ptr.hpp"
-#include <boost/log/sinks/unlocked_frontend.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/shared_ptr.hpp>
-#include <boost/thread/exceptions.hpp>
-
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -65,11 +59,7 @@
 #include "mongo/logv2/bson_formatter.h"
 #include "mongo/logv2/domain_filter.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
 #include "mongo/logv2/log_capture_backend.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_manager.h"
-#include "mongo/logv2/log_truncation.h"
 #include "mongo/logv2/plain_formatter.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
@@ -78,21 +68,23 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/exit_code.h"
-#include "mongo/util/pcre.h"
 #include "mongo/util/signal_handlers_synchronous.h"
 #include "mongo/util/stacktrace.h"
+#include "mongo/util/string_map.h"
 #include "mongo/util/timer.h"
 #include "mongo/util/version/releases.h"
+
+#include <boost/log/sinks/unlocked_frontend.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/shared_ptr.hpp>
+#include <boost/thread/exceptions.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 
 namespace mongo::unittest {
 namespace {
-
-bool stringContains(const std::string& haystack, const std::string& needle) {
-    return haystack.find(needle) != std::string::npos;
-}
 
 /** Each map key is owned by its corresponding Suite object. */
 auto& suitesMap() {
@@ -102,8 +94,8 @@ auto& suitesMap() {
 
 }  // namespace
 
-bool searchRegex(const std::string& pattern, const std::string& string) {
-    return !!pcre::Regex(pattern).matchView(string);
+bool searchRegex(const pcre::Regex& pattern, const std::string& string) {
+    return pattern && !!pattern.matchView(string);
 }
 
 class Result {
@@ -128,9 +120,11 @@ public:
 
     std::string toString() const {
         std::ostringstream ss;
-        using namespace fmt::literals;
-        ss << "{:<40s} | tests: {:4d} | fails: {:4d} | time secs: {:6.3f}\n"
-              ""_format(_name, _tests, _fails.size(), _millis * 1e-3);
+        ss << fmt::format("{:<40s} | tests: {:4d} | fails: {:4d} | time secs: {:6.3f}\n",
+                          _name,
+                          _tests,
+                          _fails.size(),
+                          _millis * 1e-3);
 
         for (const auto& i : _messages) {
             ss << "\t" << i << '\n';
@@ -207,62 +201,31 @@ struct UnitTestEnvironment {
     Test* const test;
 };
 
-class CaptureLogs {
-public:
-    ~CaptureLogs() {
-        stopCapturingLogMessagesIfNeeded();
-    }
-    void startCapturingLogMessages();
-    void stopCapturingLogMessages();
-    void stopCapturingLogMessagesIfNeeded();
-    const synchronized_value<std::vector<std::string>>& getCapturedTextFormatLogMessages() const {
-        return _capturedLogMessages;
-    }
-    std::vector<BSONObj> getCapturedBSONFormatLogMessages() const;
-    int64_t countTextFormatLogLinesContaining(const std::string& needle);
-    int64_t countBSONFormatLogLinesIsSubset(const BSONObj& needle);
-    void printCapturedTextFormatLogLines() const;
-
-private:
-    class Listener : public logv2::LogLineListener {
-    public:
-        explicit Listener(synchronized_value<std::vector<std::string>>* sv) : _sv(sv) {}
-        void accept(const std::string& line) override {
-            (***_sv).push_back(line);
-        }
-
-    private:
-        synchronized_value<std::vector<std::string>>* _sv;
-    };
-
-    bool _isCapturingLogMessages{false};
-
-    // Captures Plain Text Log
-    synchronized_value<std::vector<std::string>> _capturedLogMessages;
-
-    // Captured BSON
-    synchronized_value<std::vector<std::string>> _capturedBSONLogMessages;
-
-    // Capture Sink for Plain Text
-    boost::shared_ptr<boost::log::sinks::unlocked_sink<logv2::LogCaptureBackend>> _captureSink;
-
-    // Capture Sink for BSON
-    boost::shared_ptr<boost::log::sinks::unlocked_sink<logv2::LogCaptureBackend>> _captureBSONSink;
-};
-
-static CaptureLogs* getCaptureLogs() {
-    static CaptureLogs* captureLogs = new CaptureLogs();
-    return captureLogs;
-}
-
 }  // namespace
 
-
-Test::Test() {}
-
-Test::~Test() {
-    getCaptureLogs()->stopCapturingLogMessagesIfNeeded();
+void Test::_ensureSuiteHomogeneity(const TestInfo* testInfo) {
+    // Keep the first seen TestInfo for each suite name.
+    static auto&& bySuite = *new std::map<StringData, const TestInfo*>{};
+    if (auto [at, ok] = bySuite.try_emplace(testInfo->suiteName(), testInfo); !ok) {
+        const TestInfo* otherInfo = at->second;
+        if (testInfo->baseTypeInfo() != otherInfo->baseTypeInfo()) {
+            LOGV2_FATAL_NOTRACE(10963900,
+                                "All tests in a suite must have the same base type. "
+                                "Cannot mix TEST and TEST_F in the same suite.",
+                                "suite"_attr = testInfo->suiteName(),
+                                "test"_attr = testInfo->testName(),
+                                "file"_attr = testInfo->file(),
+                                "line"_attr = testInfo->line(),
+                                "otherTest"_attr = otherInfo->testName(),
+                                "otherFile"_attr = otherInfo->file(),
+                                "otherLine"_attr = otherInfo->line());
+        }
+    }
 }
+
+Test::Test() = default;
+
+Test::~Test() = default;
 
 void Test::run() {
     UnitTestEnvironment environment(this);
@@ -276,150 +239,6 @@ void Test::run() {
     } catch (const FixtureExceptionForTesting&) {
         return;
     }
-}
-
-namespace {
-
-void CaptureLogs::startCapturingLogMessages() {
-    invariant(!_isCapturingLogMessages);
-    (**_capturedLogMessages).clear();
-    (**_capturedBSONLogMessages).clear();
-
-    if (!_captureSink) {
-        _captureSink = logv2::LogCaptureBackend::create(
-            std::make_unique<Listener>(&_capturedLogMessages), true);
-        _captureSink->set_filter(
-            logv2::AllLogsFilter(logv2::LogManager::global().getGlobalDomain()));
-        _captureSink->set_formatter(logv2::PlainFormatter());
-
-        _captureBSONSink = logv2::LogCaptureBackend::create(
-            std::make_unique<Listener>(&_capturedBSONLogMessages), false);
-
-        _captureBSONSink->set_filter(
-            logv2::AllLogsFilter(logv2::LogManager::global().getGlobalDomain()));
-        _captureBSONSink->set_formatter(logv2::BSONFormatter());
-    }
-    _captureSink->locked_backend()->setEnabled(true);
-    _captureBSONSink->locked_backend()->setEnabled(true);
-    boost::log::core::get()->add_sink(_captureSink);
-    boost::log::core::get()->add_sink(_captureBSONSink);
-    _isCapturingLogMessages = true;
-}
-
-void CaptureLogs::stopCapturingLogMessages() {
-    invariant(_isCapturingLogMessages);
-    // These sinks can still emit messages after they are detached
-    // from the log core. Disable them first to prevent that race.
-    _captureSink->locked_backend()->setEnabled(false);
-    _captureBSONSink->locked_backend()->setEnabled(false);
-    boost::log::core::get()->remove_sink(_captureSink);
-    boost::log::core::get()->remove_sink(_captureBSONSink);
-
-    _isCapturingLogMessages = false;
-}
-
-void CaptureLogs::stopCapturingLogMessagesIfNeeded() {
-    if (_isCapturingLogMessages) {
-        stopCapturingLogMessages();
-    }
-}
-
-std::vector<BSONObj> CaptureLogs::getCapturedBSONFormatLogMessages() const {
-    std::vector<BSONObj> objs;
-    auto logLinesLockGuard = *_capturedBSONLogMessages;
-    std::transform(logLinesLockGuard->cbegin(),
-                   logLinesLockGuard->cend(),
-                   std::back_inserter(objs),
-                   [](const std::string& str) { return BSONObj(str.c_str()); });
-    return objs;
-}
-void CaptureLogs::printCapturedTextFormatLogLines() const {
-    LOGV2(23054,
-          "****************************** Captured Lines (start) *****************************");
-    auto logLinesLockGuard = *getCapturedTextFormatLogMessages();
-    for (const auto& line : *logLinesLockGuard) {
-        LOGV2(23055, "{line}", "line"_attr = line);
-    }
-    LOGV2(23056,
-          "****************************** Captured Lines (end) ******************************");
-}
-
-int64_t CaptureLogs::countTextFormatLogLinesContaining(const std::string& needle) {
-    auto msgs = *getCapturedTextFormatLogMessages();
-    return std::count_if(msgs->begin(), msgs->end(), [&](const std::string& s) {
-        return stringContains(s, needle);
-    });
-}
-
-bool isSubset(BSONObj haystack, BSONObj needle) {
-    for (const auto& element : needle) {
-        auto foundElement = haystack[element.fieldNameStringData()];
-        if (foundElement.eoo()) {
-            return false;
-        }
-
-        // Only validate if an element exists if it is marked as undefined.
-        if (element.type() == Undefined) {
-            continue;
-        }
-
-        if (foundElement.canonicalType() != element.canonicalType()) {
-            return false;
-        }
-
-        switch (element.type()) {
-            case Object:
-                if (!isSubset(foundElement.Obj(), element.Obj())) {
-                    return false;
-                }
-                return true;
-            case Array:
-                // not supported
-                invariant(false);
-                // This annotation shouldn't really be needed because
-                // `invariantFailed` is annotated to be `noreturn`,
-                // but clang 12 doesn't seem to be able to capitalize
-                // on that fact to see that we are not actually
-                // falling through.
-                [[fallthrough]];
-            default:
-                if (SimpleBSONElementComparator::kInstance.compare(foundElement, element) != 0) {
-                    return false;
-                }
-        }
-    }
-
-    return true;
-}
-
-int64_t CaptureLogs::countBSONFormatLogLinesIsSubset(const BSONObj& needle) {
-    const auto& msgs = getCapturedBSONFormatLogMessages();
-    return std::count_if(
-        msgs.begin(), msgs.end(), [&](const BSONObj s) { return isSubset(s, needle); });
-}
-
-}  // namespace
-
-void Test::startCapturingLogMessages() {
-    getCaptureLogs()->startCapturingLogMessages();
-}
-void Test::stopCapturingLogMessages() {
-    getCaptureLogs()->stopCapturingLogMessages();
-}
-std::vector<std::string> Test::getCapturedTextFormatLogMessages() const {
-    return getCaptureLogs()->getCapturedTextFormatLogMessages().get();
-}
-std::vector<BSONObj> Test::getCapturedBSONFormatLogMessages() const {
-    return getCaptureLogs()->getCapturedBSONFormatLogMessages();
-}
-int64_t Test::countTextFormatLogLinesContaining(const std::string& needle) {
-    return getCaptureLogs()->countTextFormatLogLinesContaining(needle);
-}
-int64_t Test::countBSONFormatLogLinesIsSubset(const BSONObj& needle) {
-    return getCaptureLogs()->countBSONFormatLogLinesIsSubset(needle);
-}
-void Test::printCapturedTextFormatLogLines() const {
-    getCaptureLogs()->printCapturedTextFormatLogLines();
 }
 
 Suite::Suite(ConstructorEnable, std::string name) : _name(std::move(name)) {}
@@ -620,7 +439,7 @@ TestAssertionFailureException::TestAssertionFailureException(std::string file,
                                                              std::string message)
     : _file(std::move(file)), _line(line), _message(std::move(message)) {
     std::ostringstream ostream;
-    printStackTrace(ostream);
+    printStructuredStackTrace(ostream);
     _stacktrace = ostream.str();
 }
 

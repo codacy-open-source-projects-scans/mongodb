@@ -27,8 +27,7 @@
  *    it in the license file.
  */
 
-#include <fmt/format.h>
-#include <memory>
+#pragma once
 
 #include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
@@ -36,6 +35,10 @@
 #include "mongo/transport/session.h"
 #include "mongo/transport/session_manager.h"
 #include "mongo/transport/session_manager_common.h"
+
+#include <memory>
+
+#include <fmt/format.h>
 
 namespace mongo::transport {
 

@@ -29,19 +29,17 @@
 
 #include "mongo/db/repl/collection_bulk_loader_impl.h"
 
-#include <cstddef>
-#include <utility>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/index/index_access_method.h"
+#include "mongo/db/index_builds/index_builds_common.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
@@ -49,52 +47,77 @@
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/destructor_guard.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/processinfo.h"
 #include "mongo/util/shared_buffer_fragment.h"
+
+#include <cstddef>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
 namespace mongo {
 namespace repl {
 
+namespace {
+size_t getIndexBuildMemoryLimit() {
+    const double memPct = initialSyncIndexBuildMemoryPercentage.load();
+    const size_t memMinBytes =
+        static_cast<size_t>(initialSyncIndexBuildMemoryMinMB.load()) * 1024 * 1024;
+    const size_t memMaxBytes =
+        static_cast<size_t>(initialSyncIndexBuildMemoryMaxMB.load()) * 1024 * 1024;
+
+    ProcessInfo pi;
+    size_t memSizeMB = pi.getMemSizeMB();
+    size_t memLimitBytes = (memPct / 100.0) * memSizeMB * 1024 * 1024;
+
+    // The min and max are not validated relative to each other, so if the min is greater than the
+    // max, just bound to the maximum.
+    if (memMinBytes > memMaxBytes) {
+        return std::min(memLimitBytes, memMaxBytes);
+    }
+
+    return std::clamp(memLimitBytes, memMinBytes, memMaxBytes);
+}
+
+}  // namespace
+
 CollectionBulkLoaderImpl::CollectionBulkLoaderImpl(ServiceContext::UniqueClient client,
                                                    ServiceContext::UniqueOperationContext opCtx,
-                                                   const NamespaceString& nss,
-                                                   const BSONObj& idIndexSpec)
+                                                   const NamespaceString& nss)
     : _client{std::move(client)},
       _opCtx{std::move(opCtx)},
       _acquisition(
           acquireCollectionForLocalCatalogOnlyWithPotentialDataLoss(_opCtx.get(), nss, MODE_X)),
       _nss{nss},
       _idIndexBlock(std::make_unique<MultiIndexBlock>()),
-      _secondaryIndexesBlock(std::make_unique<MultiIndexBlock>()),
-      _idIndexSpec(idIndexSpec.getOwned()) {
+      _secondaryIndexesBlock(std::make_unique<MultiIndexBlock>()) {
     invariant(_opCtx);
 }
 
 CollectionBulkLoaderImpl::~CollectionBulkLoaderImpl() {
     AlternativeClientRegion acr(_client);
-    DESTRUCTOR_GUARD({ _releaseResources(); })
+    try {
+        _releaseResources();
+    } catch (...) {
+        reportFailedDestructor(MONGO_SOURCE_LOCATION());
+    }
 }
 
-Status CollectionBulkLoaderImpl::init(const std::vector<BSONObj>& secondaryIndexSpecs) {
-    return _runTaskReleaseResourcesOnFailure([&secondaryIndexSpecs, this]() -> Status {
+Status CollectionBulkLoaderImpl::init(const BSONObj& idIndexSpec,
+                                      const std::vector<BSONObj>& secondaryIndexSpecs) {
+    return _runTaskReleaseResourcesOnFailure([&] {
         // This method is called during initial sync of a replica set member, so we can safely tell
         // the index builders to build in the foreground instead of using the hybrid approach. The
         // member won't be available to be queried by anyone until it's caught up with the primary.
         // The only reason to do this is to force the index document insertion to not yield the
         // locks as yielding a MODE_X/MODE_S lock isn't allowed.
-        _secondaryIndexesBlock->setIndexBuildMethod(IndexBuildMethod::kForeground);
-        _idIndexBlock->setIndexBuildMethod(IndexBuildMethod::kForeground);
+        _secondaryIndexesBlock->setIndexBuildMethod(IndexBuildMethodEnum::kForeground);
+        _idIndexBlock->setIndexBuildMethod(IndexBuildMethodEnum::kForeground);
+        auto storageEngine = _opCtx->getServiceContext()->getStorageEngine();
         return writeConflictRetry(
-            _opCtx.get(),
-            "CollectionBulkLoader::init",
-            _acquisition.nss(),
-            [&secondaryIndexSpecs, this] {
+            _opCtx.get(), "CollectionBulkLoader::init", _acquisition.nss(), [&] {
                 CollectionWriter collWriter(_opCtx.get(), &_acquisition);
                 WriteUnitOfWork wuow(_opCtx.get());
                 // All writes in CollectionBulkLoaderImpl should be unreplicated.
@@ -105,14 +128,33 @@ Status CollectionBulkLoaderImpl::init(const std::vector<BSONObj>& secondaryIndex
                     collWriter.getWritableCollection(_opCtx.get())->getIndexCatalog();
                 auto specs = indexCatalog->removeExistingIndexesNoChecks(
                     _opCtx.get(), collWriter.get(), secondaryIndexSpecs);
+                auto totalIndexBuildsIncludingIdIndex =
+                    specs.size() + (idIndexSpec.isEmpty() ? 0 : 1);
+                auto maxInitialSyncIndexBuildMemoryUsageBytes = getIndexBuildMemoryLimit();
+                LOGV2(10658900,
+                      "Collection cloner index build memory usage",
+                      "totalLimitMB"_attr =
+                          maxInitialSyncIndexBuildMemoryUsageBytes / (1024 * 1024),
+                      "numIndexes"_attr = totalIndexBuildsIncludingIdIndex);
                 if (specs.size()) {
                     _secondaryIndexesBlock->ignoreUniqueConstraint();
+
+                    auto indexes = toIndexBuildInfoVec(specs,
+                                                       *storageEngine,
+                                                       collWriter->ns().dbName(),
+                                                       VersionContext::getDecoration(_opCtx.get()));
+                    auto maxSecondaryIndexMemoryUsageBytes =
+                        maxInitialSyncIndexBuildMemoryUsageBytes /
+                        totalIndexBuildsIncludingIdIndex * specs.size();
                     auto status = _secondaryIndexesBlock
                                       ->init(_opCtx.get(),
                                              collWriter,
-                                             specs,
+                                             indexes,
                                              MultiIndexBlock::kNoopOnInitFn,
-                                             MultiIndexBlock::InitMode::InitialSync)
+                                             MultiIndexBlock::InitMode::InitialSync,
+                                             /*resumeInfo=*/{},
+                                             /*generateTableWrites=*/true,
+                                             maxSecondaryIndexMemoryUsageBytes)
                                       .getStatus();
                     if (!status.isOK()) {
                         return status;
@@ -120,12 +162,22 @@ Status CollectionBulkLoaderImpl::init(const std::vector<BSONObj>& secondaryIndex
                 } else {
                     _secondaryIndexesBlock.reset();
                 }
-                if (!_idIndexSpec.isEmpty()) {
+                if (!idIndexSpec.isEmpty()) {
+                    IndexBuildInfo idIndexBuildInfo(idIndexSpec,
+                                                    *storageEngine,
+                                                    collWriter->ns().dbName(),
+                                                    VersionContext::getDecoration(_opCtx.get()));
+                    auto maxIdIndexMemoryUsageBytes =
+                        maxInitialSyncIndexBuildMemoryUsageBytes / totalIndexBuildsIncludingIdIndex;
                     auto status = _idIndexBlock
                                       ->init(_opCtx.get(),
                                              collWriter,
-                                             _idIndexSpec,
-                                             MultiIndexBlock::kNoopOnInitFn)
+                                             {idIndexBuildInfo},
+                                             MultiIndexBlock::kNoopOnInitFn,
+                                             MultiIndexBlock::InitMode::InitialSync,
+                                             boost::none,
+                                             /*generateTableWrites=*/true,
+                                             maxIdIndexMemoryUsageBytes)
                                       .getStatus();
                     if (!status.isOK()) {
                         return status;
@@ -140,113 +192,59 @@ Status CollectionBulkLoaderImpl::init(const std::vector<BSONObj>& secondaryIndex
     });
 }
 
-Status CollectionBulkLoaderImpl::_insertDocumentsForUncappedCollection(
-    const std::vector<BSONObj>::const_iterator begin,
-    const std::vector<BSONObj>::const_iterator end,
-    ParseRecordIdAndDocFunc fn) {
-    auto iter = begin;
-    while (iter != end) {
-        std::vector<RecordId> locs;
-        Status status = writeConflictRetry(
-            _opCtx.get(), "CollectionBulkLoaderImpl/insertDocumentsUncapped", _nss, [&] {
-                WriteUnitOfWork wunit(_opCtx.get());
-                auto insertIter = iter;
-                int bytesInBlock = 0;
-                locs.clear();
-
-                auto onRecordInserted = [&](const RecordId& location) {
-                    locs.emplace_back(location);
-                    return Status::OK();
-                };
-
-                while (insertIter != end && bytesInBlock < collectionBulkLoaderBatchSizeInBytes) {
-                    const auto& [replRid, doc] = fn(*insertIter++);
-                    bytesInBlock += doc.objsize();
-                    // This version of insert will not update any indexes.
-                    auto status = collection_internal::insertDocumentForBulkLoader(
-                        _opCtx.get(),
-                        _acquisition.getCollectionPtr(),
-                        doc,
-                        replRid,
-                        onRecordInserted);
-                    if (!status.isOK()) {
-                        return status;
-                    }
-                }
-
-                wunit.commit();
+Status CollectionBulkLoaderImpl::insertDocuments(std::span<BSONObj> objs,
+                                                 ParseRecordIdAndDocFunc fn) {
+    UnreplicatedWritesBlock uwb(_opCtx.get());
+    return _runTaskReleaseResourcesOnFailure([&] {
+        auto iter = objs.begin();
+        while (iter != objs.end()) {
+            std::vector<RecordId> locs;
+            auto onRecordInserted = [&](const RecordId& location) {
+                locs.emplace_back(location);
                 return Status::OK();
-            });
+            };
 
-        if (!status.isOK()) {
-            return status;
-        }
+            Status status = writeConflictRetry(
+                _opCtx.get(), "CollectionBulkLoaderImpl/insertDocuments", _nss, [&] {
+                    WriteUnitOfWork wunit(_opCtx.get());
+                    auto insertIter = iter;
+                    int bytesInBlock = 0;
+                    locs.clear();
 
-        // Inserts index entries into the external sorter. This will not update pre-existing
-        // indexes. Wrap this in a WUOW since the index entry insertion may modify the durable
-        // record store which can throw a write conflict exception.
-        status = writeConflictRetry(_opCtx.get(), "_addDocumentToIndexBlocks", _nss, [&] {
-            WriteUnitOfWork wunit(_opCtx.get());
-            for (size_t index = 0; index < locs.size(); ++index) {
+                    while (insertIter != objs.end() &&
+                           bytesInBlock < collectionBulkLoaderBatchSizeInBytes) {
+                        const auto& [replRid, doc] = fn(*insertIter++);
+                        bytesInBlock += doc.objsize();
+                        // Insert the documents without updating indexes because we're building the
+                        // indexes separately via the bulk builder.
+                        auto status = collection_internal::insertDocumentForBulkLoader(
+                            _opCtx.get(),
+                            _acquisition.getCollectionPtr(),
+                            doc,
+                            replRid,
+                            onRecordInserted);
+                        if (!status.isOK()) {
+                            return status;
+                        }
+                    }
+
+                    wunit.commit();
+                    return Status::OK();
+                });
+
+            if (!status.isOK()) {
+                return status;
+            }
+
+            // Insert index entries into the external sorter for bulk building.
+            for (auto& loc : locs) {
                 const auto& [_, doc] = fn(*iter++);
-                status = _addDocumentToIndexBlocks(doc, locs.at(index));
-                if (!status.isOK()) {
+                if (auto status = _addDocumentToIndexBlocks(doc, loc); !status.isOK()) {
                     return status;
                 }
             }
-            wunit.commit();
-            return Status::OK();
-        });
-
-        if (!status.isOK()) {
-            return status;
         }
-    }
-    return Status::OK();
-}
-
-Status CollectionBulkLoaderImpl::_insertDocumentsForCappedCollection(
-    const std::vector<BSONObj>::const_iterator begin,
-    const std::vector<BSONObj>::const_iterator end,
-    ParseRecordIdAndDocFunc fn) {
-    for (auto iter = begin; iter != end; ++iter) {
-        RecordId rid;
-        BSONObj doc;
-        std::tie(rid, doc) = fn(*iter);
-
-        invariant(rid.isNull(),
-                  str::stream() << "Expected null recordId to be returned by parser but was "
-                                << rid);
-        Status status = writeConflictRetry(
-            _opCtx.get(), "CollectionBulkLoaderImpl/insertDocumentsCapped", _nss, [&] {
-                WriteUnitOfWork wunit(_opCtx.get());
-                // For capped collections, we use regular insertDocument, which
-                // will update pre-existing indexes.
-                auto status = collection_internal::insertDocument(
-                    _opCtx.get(), _acquisition.getCollectionPtr(), InsertStatement(doc), nullptr);
-                if (!status.isOK()) {
-                    return status;
-                }
-                wunit.commit();
-                return Status::OK();
-            });
-        if (!status.isOK()) {
-            return status;
-        }
-    }
-    return Status::OK();
-}
-
-Status CollectionBulkLoaderImpl::insertDocuments(const std::vector<BSONObj>::const_iterator begin,
-                                                 const std::vector<BSONObj>::const_iterator end,
-                                                 ParseRecordIdAndDocFunc fn) {
-    return _runTaskReleaseResourcesOnFailure([&] {
-        UnreplicatedWritesBlock uwb(_opCtx.get());
-        if (_idIndexBlock || _secondaryIndexesBlock) {
-            return _insertDocumentsForUncappedCollection(begin, end, fn);
-        } else {
-            return _insertDocumentsForCappedCollection(begin, end, fn);
-        }
+        return Status::OK();
     });
 }
 
@@ -259,8 +257,7 @@ Status CollectionBulkLoaderImpl::commit() {
         // Commit before deleting dups, so the dups will be removed from secondary indexes when
         // deleted.
         if (_secondaryIndexesBlock) {
-            auto status = _secondaryIndexesBlock->dumpInsertsFromBulk(
-                _opCtx.get(), _acquisition.getCollectionPtr());
+            auto status = _secondaryIndexesBlock->dumpInsertsFromBulk(_opCtx.get(), _acquisition);
             if (!status.isOK()) {
                 return status;
             }
@@ -293,7 +290,7 @@ Status CollectionBulkLoaderImpl::commit() {
         if (_idIndexBlock) {
             // Do not do inside a WriteUnitOfWork (required by dumpInsertsFromBulk).
             auto status = _idIndexBlock->dumpInsertsFromBulk(
-                _opCtx.get(), _acquisition.getCollectionPtr(), [&](const RecordId& rid) {
+                _opCtx.get(), _acquisition, [&](const RecordId& rid) {
                     writeConflictRetry(
                         _opCtx.get(), "CollectionBulkLoaderImpl::commit", _nss, [this, &rid] {
                             WriteUnitOfWork wunit(_opCtx.get());
@@ -304,13 +301,14 @@ Status CollectionBulkLoaderImpl::commit() {
                             // the document after committing the index, it's possible that the we
                             // may unindex a record with the same key but a different RecordId.
                             _acquisition.getCollectionPtr()->getRecordStore()->deleteRecord(
-                                _opCtx.get(), rid);
+                                _opCtx.get(),
+                                *shard_role_details::getRecoveryUnit(_opCtx.get()),
+                                rid);
 
                             auto indexIt =
                                 _acquisition.getCollectionPtr()
                                     ->getIndexCatalog()
-                                    ->getIndexIterator(_opCtx.get(),
-                                                       IndexCatalog::InclusionPolicy::kReady);
+                                    ->getIndexIterator(IndexCatalog::InclusionPolicy::kReady);
                             while (auto entry = indexIt->next()) {
                                 if (entry->descriptor()->isIdIndex()) {
                                     continue;
@@ -333,7 +331,7 @@ Status CollectionBulkLoaderImpl::commit() {
                                     options,
                                     nullptr /* numDeleted */,
                                     // Initial sync can build an index over a collection with
-                                    // duplicates, so we need to check the RecordId of the docuemnt
+                                    // duplicates, so we need to check the RecordId of the document
                                     // we are unindexing. See SERVER-17487 for more details.
                                     CheckRecordId::On);
                             }

@@ -27,14 +27,7 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <iostream>
-#include <string>
-#include <string_view>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/idl/server_parameter_specialized_test.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/parse_number.h"
@@ -50,16 +43,20 @@
 #include "mongo/db/logical_time.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/idl/server_parameter_specialized_test.h"
 #include "mongo/idl/server_parameter_specialized_test_gen.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/assert_that.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/unittest/matcher.h"
-#include "mongo/unittest/matcher_core.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdint>
+#include <iostream>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace test {
@@ -83,10 +80,10 @@ void ASSERT_APPENDED_VALUE(ServerParameter* sp, Validator validator) {
 
 void ASSERT_APPENDED_INT(ServerParameter* sp, long exp) {
     ASSERT_APPENDED_VALUE(sp, [&exp](const BSONElement& elem) {
-        if (elem.type() == NumberInt) {
+        if (elem.type() == BSONType::numberInt) {
             ASSERT_EQ(elem.Int(), exp);
         } else {
-            ASSERT_EQ(elem.type(), NumberLong);
+            ASSERT_EQ(elem.type(), BSONType::numberLong);
             ASSERT_EQ(elem.Long(), exp);
         }
     });
@@ -94,14 +91,14 @@ void ASSERT_APPENDED_INT(ServerParameter* sp, long exp) {
 
 void ASSERT_APPENDED_STRING(ServerParameter* sp, StringData exp) {
     ASSERT_APPENDED_VALUE(sp, [&exp](const BSONElement& elem) {
-        ASSERT_EQ(elem.type(), String);
+        ASSERT_EQ(elem.type(), BSONType::string);
         ASSERT_EQ(elem.String(), exp);
     });
 }
 
 void ASSERT_APPENDED_OBJECT(ServerParameter* sp, const BSONObj& exp) {
     ASSERT_APPENDED_VALUE(sp, [&exp](const BSONElement& elem) {
-        ASSERT_EQ(elem.type(), Object);
+        ASSERT_EQ(elem.type(), BSONType::object);
 
         UnorderedFieldsBSONObjComparator comparator;
         ASSERT(comparator.evaluate(elem.Obj() == exp));
@@ -127,10 +124,21 @@ TEST(SpecializedServerParameter, dummy) {
     ASSERT_APPENDED_STRING(dsp, "Dummy Value");
     ASSERT_OK(dsp->setFromString("new value", boost::none));
     ASSERT_NOT_OK(dsp->set(BSON("" << BSON_ARRAY("bar")).firstElement(), boost::none));
-    ASSERT_OK(dsp->set(BSON(""
-                            << "bar")
-                           .firstElement(),
-                       boost::none));
+    ASSERT_OK(dsp->set(BSON("" << "bar").firstElement(), boost::none));
+}
+
+// specializedDummy
+
+void SpecializedDeprecatedServerParameter::append(OperationContext*,
+                                                  BSONObjBuilder* b,
+                                                  StringData name,
+                                                  const boost::optional<TenantId>&) {
+    *b << name << "Dummy Value";
+}
+
+Status SpecializedDeprecatedServerParameter::setFromString(StringData value,
+                                                           const boost::optional<TenantId>&) {
+    return Status::OK();
 }
 
 // specializedWithCtor
@@ -154,7 +162,7 @@ void SpecializedConstructorServerParameter::append(OperationContext*,
 
 Status SpecializedConstructorServerParameter::setFromString(StringData value,
                                                             const boost::optional<TenantId>&) {
-    gSCSP = value.toString();
+    gSCSP = std::string{value};
     return Status::OK();
 }
 
@@ -203,7 +211,7 @@ void SpecializedWithStringValueServerParameter::append(OperationContext*,
 
 Status SpecializedWithStringValueServerParameter::setFromString(StringData value,
                                                                 const boost::optional<TenantId>&) {
-    _data = value.toString();
+    _data = std::string{value};
     return Status::OK();
 }
 
@@ -282,23 +290,19 @@ Status SpecializedMultiValueServerParameter::setFromString(StringData value,
 TEST(SpecializedServerParameter, multiValue) {
     auto* edsp = getServerParameter("specializedWithMultiValue");
     ASSERT_APPENDED_OBJECT(edsp,
-                           BSON("value"
-                                << "start value"
-                                << "flag" << true));
+                           BSON("value" << "start value"
+                                        << "flag" << true));
     ASSERT_OK(edsp->setFromString("second value", boost::none));
     ASSERT_APPENDED_OBJECT(edsp,
-                           BSON("value"
-                                << "second value"
-                                << "flag" << false));
-    ASSERT_OK(edsp->set(BSON("" << BSON("value"
-                                        << "third value"
-                                        << "flag" << true))
+                           BSON("value" << "second value"
+                                        << "flag" << false));
+    ASSERT_OK(edsp->set(BSON("" << BSON("value" << "third value"
+                                                << "flag" << true))
                             .firstElement(),
                         boost::none));
     ASSERT_APPENDED_OBJECT(edsp,
-                           BSON("value"
-                                << "third value"
-                                << "flag" << true));
+                           BSON("value" << "third value"
+                                        << "flag" << true));
 }
 
 // specializedWithCtorAndValue
@@ -335,7 +339,7 @@ std::string gSWO = "Initial Value";
 }  // namespace
 
 Status SpecializedWithOptions::setFromString(StringData value, const boost::optional<TenantId>&) {
-    gSWO = value.toString();
+    gSWO = std::string{value};
     return Status::OK();
 }
 
@@ -351,6 +355,7 @@ TEST(SpecializedServerParameter, withOptions) {
     ASSERT_OK(dswo->setFromString("third value", boost::none));
     ASSERT_EQ(gSWO, "third value");
     ASSERT_APPENDED_STRING(dswo, "###");
+    ASSERT(dswo->getIsDeprecated());
 }
 
 // specializedRuntimeOnly
@@ -367,7 +372,7 @@ Status SpecializedRuntimeOnly::setFromString(StringData value, const boost::opti
 Status SpecializedRedactedSettable::setFromString(StringData value,
                                                   const boost::optional<TenantId>&) {
     std::cout << "Setting to: " << value << "\n";
-    _data = value.toString();
+    _data = std::string{value};
     return Status::OK();
 }
 
@@ -391,7 +396,7 @@ TEST(SpecializedServerParameter, SpecializedRedactedSettable) {
     };
 
     ASSERT_OK(store("", "hello"));
-    ASSERT_THAT(load(), BSONObjHas(BSONElementIs(Eq(sp->name()), Eq(String), Eq("###"))))
+    ASSERT_THAT(load(), BSONObjHas(BSONElementIs(Eq(sp->name()), Eq(BSONType::string), Eq("###"))))
         << "value redacted by append";
     ASSERT_THAT(dataMember, Eq("hello")) << "value preseved in _data member";
 
@@ -561,7 +566,7 @@ TEST(SpecializedServerParameter, clusterServerParameter) {
 
     // Assert that the parameter can be appended to a builder.
     builder.resetToEmpty();
-    specializedCsp->append(nullptr, &builder, kSpecializedCSPName.toString(), boost::none);
+    specializedCsp->append(nullptr, &builder, std::string{kSpecializedCSPName}, boost::none);
     auto obj = builder.asTempObj();
     ASSERT_EQ(obj.nFields(), 4);
     ASSERT_EQ(obj["_id"_sd].String(), kSpecializedCSPName);
@@ -582,13 +587,21 @@ TEST(SpecializedServerParameter, clusterServerParameter) {
     // Assert that the parameter can be reset to its defaults.
     builder.resetToEmpty();
     ASSERT_OK(specializedCsp->reset(boost::none));
-    specializedCsp->append(nullptr, &builder, kSpecializedCSPName.toString(), boost::none);
+    specializedCsp->append(nullptr, &builder, std::string{kSpecializedCSPName}, boost::none);
     obj = builder.asTempObj();
     ASSERT_EQ(obj.nFields(), 4);
     ASSERT_EQ(obj["_id"_sd].String(), kSpecializedCSPName);
     ASSERT_EQ(obj["clusterParameterTime"_sd].timestamp(), LogicalTime().asTimestamp());
     ASSERT_EQ(obj["strData"_sd].String(), "default");
     ASSERT_EQ(obj["intData"_sd].Int(), 30);
+}
+
+TEST_F(DeprecatedServerParameterTest, SpecializedIsDeprecated) {
+    testParameterIsDeprecated("specializedDeprecated");
+}
+
+TEST_F(DeprecatedServerParameterTest, SpecializedWarnsOnce) {
+    testSetParameterWarnsOnce("specializedDeprecated", "dummy");
 }
 
 }  // namespace test

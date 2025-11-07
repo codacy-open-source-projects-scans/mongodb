@@ -29,11 +29,6 @@
 
 #include <boost/none.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <memory>
-#include <mutex>
-#include <thread>
-#include <utility>
-
 #include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
@@ -42,9 +37,13 @@
 #include "mongo/scripting/mozjs/proxyscope.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
-#include "mongo/util/destructor_guard.h"
 #include "mongo/util/functional.h"
 #include "mongo/util/interruptible.h"
+
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <utility>
 
 namespace mongo {
 namespace mozjs {
@@ -67,7 +66,12 @@ MozJSProxyScope::MozJSProxyScope(MozJSScriptEngine* engine)
 }
 
 MozJSProxyScope::~MozJSProxyScope() {
-    DESTRUCTOR_GUARD(kill(); shutdownThread(););
+    try {
+        kill();
+        shutdownThread();
+    } catch (...) {
+        reportFailedDestructor(MONGO_SOURCE_LOCATION());
+    }
 }
 
 void MozJSProxyScope::init(const BSONObj* data) {
@@ -308,39 +312,40 @@ void MozJSProxyScope::runWithoutInterruptionExceptAtGlobalShutdown(Closure&& clo
 }
 
 void MozJSProxyScope::runOnImplThread(unique_function<void()> f) {
-    stdx::unique_lock<stdx::mutex> lk(_mutex);
-    _function = std::move(f);
+    {
+        stdx::unique_lock<stdx::mutex> lk(_mutex);
+        _function = std::move(f);
 
-    invariant(_state == State::Idle);
-    _state = State::ProxyRequest;
-
-    lk.unlock();
-    _implCondvar.notify_one();
-    lk.lock();
-
-    Interruptible* interruptible = _opCtx ? _opCtx : Interruptible::notInterruptible();
-
-    auto pred = [&] {
-        return _state == State::ImplResponse;
-    };
-
-    try {
-        interruptible->waitForConditionOrInterrupt(_proxyCondvar, lk, pred);
-    } catch (const DBException& ex) {
-        _implScope->kill();
-        _proxyCondvar.wait(lk, pred);
-
-        // update _status after the wait, otherwise it would get overwritten in implThread
-        _status = ex.toStatus();
+        invariant(_state == State::Idle);
+        _state = State::ProxyRequest;
     }
+    _implCondvar.notify_one();
 
-    _state = State::Idle;
+    Status status = Status::OK();
+    {
+        stdx::unique_lock<stdx::mutex> lk(_mutex);
 
-    // Clear the _status state and throw it if necessary
-    auto status = std::move(_status);
+        Interruptible* interruptible = _opCtx ? _opCtx : Interruptible::notInterruptible();
 
-    // Can validate the status outside the lock
-    lk.unlock();
+        auto pred = [&] {
+            return _state == State::ImplResponse;
+        };
+
+        try {
+            interruptible->waitForConditionOrInterrupt(_proxyCondvar, lk, pred);
+        } catch (const DBException& ex) {
+            _implScope->kill();
+            _proxyCondvar.wait(lk, pred);
+
+            // update _status after the wait, otherwise it would get overwritten in implThread
+            _status = ex.toStatus();
+        }
+
+        _state = State::Idle;
+
+        // Clear the _status state and throw it if necessary
+        status = std::move(_status);
+    }
 
     uassertStatusOK(status);
 }
@@ -394,28 +399,37 @@ void MozJSProxyScope::implThread(MozJSProxyScope* proxy) {
     const ScopeGuard unbindImplScope([&proxy] { proxy->_implScope = nullptr; });
 
     while (true) {
-        stdx::unique_lock<stdx::mutex> lk(proxy->_mutex);
         {
-            MONGO_IDLE_THREAD_BLOCK;
-            proxy->_implCondvar.wait(lk, [proxy] {
-                return proxy->_state == State::ProxyRequest || proxy->_state == State::Shutdown;
-            });
+            stdx::unique_lock<stdx::mutex> lk(proxy->_mutex);
+            {
+                MONGO_IDLE_THREAD_BLOCK;
+                proxy->_implCondvar.wait(lk, [proxy] {
+                    return proxy->_state == State::ProxyRequest || proxy->_state == State::Shutdown;
+                });
+            }
+
+            if (proxy->_state == State::Shutdown)
+                break;
         }
 
-        if (proxy->_state == State::Shutdown)
-            break;
-
+        Status capturedStatus = Status::OK();
+        bool hadException = false;
         try {
-            lk.unlock();
-            const ScopeGuard unlockGuard([&] { lk.lock(); });
             proxy->_function();
         } catch (...) {
-            proxy->_status = exceptionToStatus();
+            capturedStatus = exceptionToStatus();
+            hadException = true;
         }
 
-        proxy->_state = State::ImplResponse;
+        {
+            stdx::unique_lock<stdx::mutex> lk(proxy->_mutex);
 
-        lk.unlock();
+            if (hadException) {
+                proxy->_status = std::move(capturedStatus);
+            }
+
+            proxy->_state = State::ImplResponse;
+        }
         proxy->_proxyCondvar.notify_one();
     }
 }

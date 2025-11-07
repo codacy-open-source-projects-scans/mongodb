@@ -29,14 +29,6 @@
 
 #include "mongo/crypto/jws_validated_token.h"
 
-#include <boost/optional.hpp>
-#include <cstddef>
-#include <memory>
-#include <type_traits>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/json.h"
@@ -46,6 +38,14 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <memory>
+#include <type_traits>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo::crypto {
 namespace {
@@ -114,17 +114,17 @@ Status JWSValidatedToken::validate(JWKManager* keyMgr) const {
 }
 
 JWSValidatedToken::JWSValidatedToken(JWKManager* keyMgr, StringData token)
-    : _originalToken(token.toString()) {
+    : _originalToken(std::string{token}) {
     auto tokenSplit = parseSignedToken(token);
 
     auto headerString = base64url::decode(tokenSplit.header);
     _headerBSON = fromjson(headerString);
-    _header = JWSHeader::parse(IDLParserContext("JWSHeader"), _headerBSON);
+    _header = JWSHeader::parse(_headerBSON, IDLParserContext("JWSHeader"));
     uassert(7095401, "Unknown type of token", !_header.getType() || _header.getType() == "JWT"_sd);
 
     auto bodyString = base64url::decode(tokenSplit.body);
     _bodyBSON = fromjson(bodyString);
-    _body = JWT::parse(IDLParserContext("JWT"), _bodyBSON);
+    _body = JWT::parse(_bodyBSON, IDLParserContext("JWT"));
 
     uassertStatusOK(validate(keyMgr));
 };
@@ -133,10 +133,10 @@ StatusWith<IssuerAudiencePair> JWSValidatedToken::extractIssuerAndAudienceFromCo
     StringData token) try {
     auto tokenSplit = parseSignedToken(token);
     auto payload = fromjson(base64url::decode(tokenSplit.body));
-    auto jwt = JWT::parse(IDLParserContext{"JWT"}, payload);
+    auto jwt = JWT::parse(payload, IDLParserContext{"JWT"});
 
     IssuerAudiencePair pair;
-    pair.issuer = jwt.getIssuer().toString();
+    pair.issuer = std::string{jwt.getIssuer()};
 
     auto& audience = jwt.getAudience();
     if (std::holds_alternative<std::string>(audience)) {

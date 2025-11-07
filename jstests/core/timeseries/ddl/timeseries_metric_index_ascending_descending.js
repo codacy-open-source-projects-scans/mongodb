@@ -8,8 +8,13 @@
  *   requires_timeseries,
  * ]
  */
+import {
+    createRawTimeseriesIndex,
+    getTimeseriesCollForRawOps,
+    kRawOperationSpec,
+} from "jstests/core/libs/raw_operation_utils.js";
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
-import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+import {isShardedTimeseries} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 
 TimeseriesTest.run((insert) => {
     const collName = jsTestName();
@@ -22,34 +27,31 @@ TimeseriesTest.run((insert) => {
         {_id: 0, [timeFieldName]: ISODate(), [metaFieldName]: {tag: "a"}, x: 1},
         {_id: 1, [timeFieldName]: ISODate(), [metaFieldName]: {tag: "b"}, x: 2},
         {_id: 2, [timeFieldName]: ISODate(), [metaFieldName]: {tag: "c"}, "x.y": 3},
-        {_id: 3, [timeFieldName]: ISODate(), [metaFieldName]: {tag: "d"}, x: {y: 4}}
+        {_id: 3, [timeFieldName]: ISODate(), [metaFieldName]: {tag: "d"}, x: {y: 4}},
     ];
 
-    const setup = function(keyForCreate) {
+    const setup = function (keyForCreate) {
         const coll = db.getCollection(collName);
-        const bucketsColl = db.getCollection("system.buckets." + collName);
         coll.drop();
 
-        jsTestLog("Setting up collection: " + coll.getFullName() +
-                  " with index: " + tojson(keyForCreate));
+        jsTestLog("Setting up collection: " + coll.getFullName() + " with index: " + tojson(keyForCreate));
 
-        assert.commandWorked(db.createCollection(
-            coll.getName(), {timeseries: {timeField: timeFieldName, metaField: metaFieldName}}));
+        assert.commandWorked(
+            db.createCollection(coll.getName(), {timeseries: {timeField: timeFieldName, metaField: metaFieldName}}),
+        );
 
         const numUserIndexesBefore = coll.getIndexes().length;
-        const numBucketIndexesBefore = bucketsColl.getIndexes().length;
+        const numBucketIndexesBefore = getTimeseriesCollForRawOps(coll).getIndexes(kRawOperationSpec).length;
 
         // Insert data on the time-series collection and index it.
         assert.commandWorked(insert(coll, docs), "failed to insert docs: " + tojson(docs));
-        assert.commandWorked(coll.createIndex(keyForCreate),
-                             "failed to create index: " + tojson(keyForCreate));
+        assert.commandWorked(coll.createIndex(keyForCreate), "failed to create index: " + tojson(keyForCreate));
 
         assert.eq(numUserIndexesBefore + 1, coll.getIndexes().length);
-        assert.eq(numBucketIndexesBefore + 1, bucketsColl.getIndexes().length);
+        assert.eq(numBucketIndexesBefore + 1, getTimeseriesCollForRawOps(coll).getIndexes(kRawOperationSpec).length);
     };
 
     const coll = db.getCollection(collName);
-    const bucketsColl = db.getCollection("system.buckets." + collName);
 
     const testIndex = (userKeyPattern, bucketsKeyPattern) => {
         setup(userKeyPattern);
@@ -75,40 +77,37 @@ TimeseriesTest.run((insert) => {
     assert.commandWorked(coll.createIndex({"x.y": 1}));
     const docsWithArrays = [
         {_id: 4, [timeFieldName]: ISODate(), [metaFieldName]: {tag: "d"}, x: {y: [true]}},
-        {_id: 5, [timeFieldName]: ISODate(), [metaFieldName]: {tag: "d"}, x: [{y: false}]}
+        {_id: 5, [timeFieldName]: ISODate(), [metaFieldName]: {tag: "d"}, x: [{y: false}]},
     ];
     assert.commandFailedWithCode(coll.insert(docsWithArrays[0]), 5930501);
     assert.commandFailedWithCode(coll.insert(docsWithArrays[1]), 5930501);
     assert.commandWorked(coll.dropIndex({"x.y": 1}));
 
-    // Create indexes on the buckets collection that do not map to any user indexes. The server must
-    // not crash when handling the reverse mapping of these.
-    assert.commandWorked(bucketsColl.createIndex({"control.min.x.y": 1}));
-    assert.commandWorked(bucketsColl.createIndex({"control.min.x.y": 1, "control.min.y.x": 1}));
-    assert.commandWorked(bucketsColl.createIndex({"control.max.x.y": 1}));
-    assert.commandWorked(bucketsColl.createIndex({"control.max.x.y": 1, "control.max.y.x": 1}));
-    assert.commandWorked(bucketsColl.createIndex({"control.max.x.y": 1, "control.min.x.y": 1}));
-    assert.commandWorked(bucketsColl.createIndex({"control.min.x.y": -1, "control.max.x.y": 1}));
-    assert.commandWorked(bucketsColl.createIndex({"control.min.x.y": -1, "control.max.x.y": -1}));
-    assert.commandWorked(bucketsColl.createIndex({"control.max.x.y": 1, "control.min.x.y": -1}));
+    // Create raw indexes over the bucket documents that do not map to any user indexes.
+    // The server must not crash when handling the reverse mapping of these.
+    assert.commandWorked(createRawTimeseriesIndex(coll, {"control.min.x.y": 1}));
+    assert.commandWorked(createRawTimeseriesIndex(coll, {"control.min.x.y": 1, "control.min.y.x": 1}));
+    assert.commandWorked(createRawTimeseriesIndex(coll, {"control.max.x.y": 1}));
+    assert.commandWorked(createRawTimeseriesIndex(coll, {"control.max.x.y": 1, "control.max.y.x": 1}));
+    assert.commandWorked(createRawTimeseriesIndex(coll, {"control.max.x.y": 1, "control.min.x.y": 1}));
+    assert.commandWorked(createRawTimeseriesIndex(coll, {"control.min.x.y": -1, "control.max.x.y": 1}));
+    assert.commandWorked(createRawTimeseriesIndex(coll, {"control.min.x.y": -1, "control.max.x.y": -1}));
+    assert.commandWorked(createRawTimeseriesIndex(coll, {"control.max.x.y": 1, "control.min.x.y": -1}));
 
-    assert.commandWorked(bucketsColl.createIndex({"data.x": 1}));
-    assert.commandWorked(bucketsColl.createIndex({"control.min.x.y": 1, "data.x": 1}));
-    assert.commandWorked(bucketsColl.createIndex({"data.x": 1, "control.min.x.y": 1}));
+    assert.commandWorked(createRawTimeseriesIndex(coll, {"data.x": 1}));
+    assert.commandWorked(createRawTimeseriesIndex(coll, {"control.min.x.y": 1, "data.x": 1}));
+    assert.commandWorked(createRawTimeseriesIndex(coll, {"data.x": 1, "control.min.x.y": 1}));
 
     // The first two-thirds of the below compound indexes represent {"x.y" : 1} and {"x.y" : -1}.
-    assert.commandWorked(
-        bucketsColl.createIndex({"control.min.x.y": 1, "control.max.x.y": 1, "data.x": 1}));
-    assert.commandWorked(
-        bucketsColl.createIndex({"control.max.x.y": -1, "control.min.x.y": -1, "data.x": 1}));
+    assert.commandWorked(createRawTimeseriesIndex(coll, {"control.min.x.y": 1, "control.max.x.y": 1, "data.x": 1}));
+    assert.commandWorked(createRawTimeseriesIndex(coll, {"control.max.x.y": -1, "control.min.x.y": -1, "data.x": 1}));
 
-    // There are more indexes for sharded collections because it includes the shard key index. When
-    // time-series scalability improvements are enabled, the {meta: 1, time: 1} index gets built by
-    // default on the time-series bucket collection.
-    const numExtraIndexes = (FixtureHelpers.isSharded(bucketsColl) ? 1 : 0) + 1;
+    // An index on {metaField, timeField} gets built by default on time-series collections.
+    // There are more indexes for sharded collections because it also includes the shard key index.
+    const numExtraIndexes = (isShardedTimeseries(coll) ? 1 : 0) + 1;
 
     const userIndexes = coll.getIndexes();
     assert.eq(numExtraIndexes, userIndexes.length, tojson(userIndexes));
-    const bucketIndexes = bucketsColl.getIndexes();
+    const bucketIndexes = getTimeseriesCollForRawOps(coll).getIndexes(kRawOperationSpec);
     assert.eq(13 + numExtraIndexes, bucketIndexes.length, tojson(bucketIndexes));
 });

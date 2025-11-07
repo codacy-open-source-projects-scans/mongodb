@@ -27,12 +27,15 @@
  *    it in the license file.
  */
 
+#pragma once
+
+#include "mongo/db/query/query_tester/test.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/util/modules.h"
+
 #include <fstream>
 #include <string>
 #include <vector>
-
-#include "mongo/stdx/unordered_map.h"
-#include "test.h"
 
 namespace mongo::query_tester {
 
@@ -54,10 +57,16 @@ inline constexpr auto kTmpFailureFile = "tmp_failed_queries";
 
 class QueryFile {
 public:
-    QueryFile(std::filesystem::path filePath)
+    QueryFile(std::filesystem::path filePath,
+              const bool optimizationsOff,
+              const OverrideOption overrideOption = OverrideOption::None)
         : _filePath(filePath),
-          _expectedPath(std::filesystem::path{filePath}.replace_extension(".results")),
-          _actualPath(std::filesystem::path{filePath}.replace_extension(".actual")),
+          _optimizationsOff(optimizationsOff),
+          _overrideOption(overrideOption),
+          _expectedPath(std::filesystem::path{filePath}.replace_extension(
+              overrideOptionToExtensionPrefix(_overrideOption).get_value_or("") + ".results")),
+          _actualPath(std::filesystem::path{filePath}.replace_extension(
+              overrideOptionToExtensionPrefix(_overrideOption).get_value_or("") + ".actual")),
           _failedQueryCount(0) {}
 
     // Delete certain constructors to avoid accidental I/O races.
@@ -73,6 +82,7 @@ public:
     const std::vector<CollectionSpec>& getCollectionsNeeded() const;
     size_t getFailedQueryCount() const;
     size_t getTestsRun() const;
+    const std::string& getQuery(size_t testNum) const;
 
     /**
      * Loads or drops then loads the collections needed for the test files depending on the passed
@@ -82,17 +92,39 @@ public:
                          bool dropData,
                          bool loadData,
                          bool createAllIndices,
+                         bool ignoreIndexFailures,
                          const std::set<CollectionSpec>& prevFileCollections) const;
 
+    void assertTestNumExists(size_t testNum) const;
+
+    /**
+     * Given a featureSet containing a testNum and its corresponding feature information, group the
+     * features into higher-level categories and print each individual feature under its category.
+     * The output will look like:
+     *
+     * Query Features:
+     *    Category 1:
+     *       - Feature
+     *       - Feature
+     *    Category 2:
+     *       - Feature
+     *       - Feature
+     *    ... and so on
+     */
+    void displayFeaturesByCategory(const BSONElement& featureSet) const;
+    /**
+     * Parse a feature file into a BSONObj and process features for each testNum by category.
+     */
+    void parseFeatureFileToBson(const std::filesystem::path& queryFeaturesFile) const;
     /**
      * Print out failed test numbers and their corresponding queries. Optionally, with the -v
      * (verbose) flag set, also extract and print out metadata about common features across failed
      * queries for an enriched debugging experience.
      */
+    void printFailedTestFileHeader() const;
     void printAndExtractFailedQueries(const std::set<size_t>& failedTestNums) const;
     void printFailedQueries(const std::set<size_t>& failedTestNums) const;
-    void printFailedQueriesHelper(const std::set<size_t>& failedTestNums,
-                                  std::fstream* fs = nullptr) const;
+
     bool readInEntireFile(ModeOption, size_t = kMinTestNum, size_t = kMaxTestNum);
     void runTestFile(DBClientConnection*, ModeOption);
 
@@ -116,6 +148,8 @@ public:
 
     bool writeOutAndNumber(std::fstream&, WriteOutOptions);
 
+    std::filesystem::path writeOutFailedQueries(const std::set<size_t>& failedTestNums) const;
+
     template <bool IncludeComments>
     void writeOutHeader(std::fstream&) const;
 
@@ -125,7 +159,9 @@ protected:
     std::vector<CollectionSpec> _collectionsNeeded;
     std::string _databaseNeeded;
     std::vector<Test> _tests;
-    size_t _testsRun;
+    size_t _testsRun = 0;
+    const bool _optimizationsOff;
+    const OverrideOption _overrideOption;
     std::filesystem::path _expectedPath;
     std::filesystem::path _actualPath;
     struct {

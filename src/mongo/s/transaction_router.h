@@ -29,14 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -52,23 +44,33 @@
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/session_catalog.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/stats/single_transaction_stats.h"
 #include "mongo/s/async_requests_sender.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/tick_source.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
 /**
  * Keeps track of the transaction state. A session is in use when it is being used by a request.
  */
-class TransactionRouter {
+class MONGO_MOD_PUB TransactionRouter {
     struct PrivateState;
     struct ObservableState;
 
@@ -103,7 +105,7 @@ public:
      * cannot be changed without restarting the transactions that may have already been begun on
      * every participant, i.e. clearing the current participant list.
      */
-    struct SharedTransactionOptions {
+    struct MONGO_MOD_PRIVATE SharedTransactionOptions {
         // Set for all distributed transactions.
         TxnNumberAndRetryCounter txnNumberAndRetryCounter;
         APIParameters apiParameters;
@@ -127,7 +129,8 @@ public:
         Participant(bool isCoordinator,
                     StmtId stmtIdCreatedAt,
                     ReadOnly inReadOnly,
-                    SharedTransactionOptions sharedOptions);
+                    SharedTransactionOptions sharedOptions,
+                    bool isSubRouter = false);
 
         /**
          * Attaches necessary fields if this is participating in a multi statement transaction.
@@ -139,22 +142,34 @@ public:
                                         bool hasTxnCreatedAnyDatabase) const;
 
         // True if the participant has been chosen as the coordinator for its transaction
-        const bool isCoordinator{false};
+        bool isCoordinator{false};
 
         // Is updated to kReadOnly or kNotReadOnly based on the readOnly field in the participant's
         // responses to statements.
-        const ReadOnly readOnly{ReadOnly::kUnset};
+        ReadOnly readOnly{ReadOnly::kUnset};
 
         // Returns the shared transaction options this participant was created with
-        const SharedTransactionOptions sharedOptions;
+        SharedTransactionOptions sharedOptions;
 
         // The highest statement id of the request during which this participant was created.
-        const StmtId stmtIdCreatedAt;
+        StmtId stmtIdCreatedAt;
+
+        // True if this participant operates as a subrouter in the transaction.
+        bool isSubRouter{false};
+    };
+
+    /**
+     * Struct containing the parsed response status and the metadata containing potential additional
+     * transaction participants.
+     */
+    struct ParsedParticipantResponseMetadata {
+        Status status;
+        TxnResponseMetadata txnResponseMetadata;
     };
 
     // Container for timing stats for the current transaction. Includes helpers for calculating some
     // metrics like transaction duration.
-    struct TimingStats {
+    struct MONGO_MOD_PRIVATE TimingStats {
         /**
          * Returns the duration of the transaction. The transaction start time must have been set
          * before this can be called.
@@ -397,12 +412,22 @@ public:
                                         const BSONObj& cmdObj);
 
         /**
+         * Parse the transaction metadata from the response.
+         * This can be used to extract just the response status and the response metadata containing
+         * transaction participants, so it can be stored elsewhere for further processing. This is
+         * advantageous to storing the complete, unparsed response in memory because the status and
+         * transaction participants metadata will typically be much smaller.
+         */
+        static ParsedParticipantResponseMetadata parseParticipantResponseMetadata(
+            const BSONObj& responseObj);
+
+        /**
          * Processes the transaction metadata in the response from the participant if the response
          * indicates the operation succeeded.
          */
         void processParticipantResponse(OperationContext* opCtx,
                                         const ShardId& shardId,
-                                        const BSONObj& responseObj,
+                                        const ParsedParticipantResponseMetadata& parsedMetadata,
                                         bool forAsyncGetMore = false);
 
         /**
@@ -487,9 +512,10 @@ public:
 
         /**
          * If this router is a sub-router and the txnNumber and retryCounter match that on the
-         * opCtx, returns a map containing {participantShardId : readOnly} for each participant
-         * added by this router. It's possible that readOnly is not set if either an error occured
-         * before receiving a response from a particular shard, or a shard returned an error.
+         * opCtx, returns a map containing {participantShardId : readOnly} for each
+         * participant added by this router. It's possible that readOnly is not set if either an
+         * error occured before receiving a response from a particular shard, or a shard returned an
+         * error.
          *
          * Returns boost::none if this router is not a sub-router, or if the txnNumber or
          * retryCounter on this router do not match that on the opCtx.
@@ -545,7 +571,7 @@ public:
          * Returns the participant for this transaction or nullptr if the specified shard is not
          * participant of this transaction.
          */
-        const Participant* getParticipant(const ShardId& shard);
+        boost::optional<TransactionRouter::Participant> getParticipant(const ShardId& shard);
 
         /**
          * Returns the statement id of the latest received command for this transaction.
@@ -658,15 +684,17 @@ public:
         /**
          * Creates a new participant for the shard.
          */
-        TransactionRouter::Participant& _createParticipant(OperationContext* opCtx,
-                                                           const ShardId& shard);
+        TransactionRouter::Participant _createParticipant(OperationContext* opCtx,
+                                                          const ShardId& shard);
 
         /**
-         * Sets the new readOnly value for the current participant on the shard.
+         * Updates the participant in place by removing the old participant and adding a new updated
+         * one.
          */
-        void _setReadOnlyForParticipant(OperationContext* opCtx,
-                                        const ShardId& shard,
-                                        Participant::ReadOnly readOnly);
+        void _updateParticipant(OperationContext* opCtx,
+                                const ShardId& shard,
+                                boost::optional<Participant::ReadOnly> readOnly,
+                                boost::optional<bool> isSubRouter);
 
         /**
          * Updates relevant metrics when the router receives an explicit abort from the client.

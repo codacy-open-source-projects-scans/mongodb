@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -43,8 +38,15 @@
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_or_grouped_inserts.h"
 #include "mongo/stdx/unordered_map.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <cstdint>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUB mongo {
 class CollatorInterface;
 
 class OpCounters;
@@ -55,7 +57,7 @@ namespace repl {
  * Caches per-collection properties which are relevant for oplog application, so that they don't
  * have to be retrieved repeatedly for each op.
  */
-class CachedCollectionProperties {
+class MONGO_MOD_PRIVATE CachedCollectionProperties {
 public:
     struct CollectionProperties {
         bool isCapped = false;
@@ -73,7 +75,7 @@ private:
 /**
  * This class contains some static methods common to ordinary oplog application.
  */
-class OplogApplierUtils {
+class MONGO_MOD_PARENT_PRIVATE OplogApplierUtils {
 public:
     /*
      * Returns the hash of the oplog entry based on the namespace string (and document
@@ -221,13 +223,6 @@ public:
                                           CachedCollectionProperties* collPropertiesCache);
 
     /**
-     * Returns the namespace string for this oplogEntry; if it has a UUID it looks up the
-     * corresponding namespace and returns it, otherwise it returns the oplog entry 'nss'.  If
-     * there is a UUID and no namespace with that ID is found, throws NamespaceNotFound.
-     */
-    static NamespaceString parseUUIDOrNs(OperationContext* opCtx, const OplogEntry& oplogEntry);
-
-    /**
      * If the oplog entry has a UUID, returns the UUID with the database from 'nss'.  Otherwise
      * returns 'nss'
      */
@@ -259,4 +254,4 @@ public:
 };
 
 }  // namespace repl
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

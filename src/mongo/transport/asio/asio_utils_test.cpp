@@ -29,12 +29,11 @@
 
 #include "mongo/transport/asio/asio_utils.h"
 
-#include <asio.hpp>
-
-#include "mongo/unittest/assert_that.h"
+#include "mongo/transport/asio/asio_socket_test_util.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/assert_util.h"
 #include "mongo/util/time_support.h"
+
+#include <asio.hpp>
 
 namespace mongo::transport {
 namespace {
@@ -44,7 +43,7 @@ using namespace unittest::match;
 template <typename Stream>
 void writeToSocketAndPollForResponse(Stream& writeSocket, Stream& readSocket, StringData data) {
     // Write our payload to our socket.
-    asio::write(writeSocket, asio::const_buffer(data.rawData(), data.size()));
+    asio::write(writeSocket, asio::const_buffer(data.data(), data.size()));
 
     // Poll the other end of the connection for data before returning. Wait up to a second for data
     // to appear.
@@ -54,6 +53,15 @@ void writeToSocketAndPollForResponse(Stream& writeSocket, Stream& readSocket, St
             FAIL("Data was not successfully transmitted across socket pair in time");
         }
     }
+}
+
+template <typename Stream>
+void peekEmptySocket(Stream& readSocket) {
+    const auto bufferSize = 10;
+    auto inBuffer = std::make_unique<char[]>(bufferSize);
+    const auto bytesRead =
+        peekASIOStream(readSocket, asio::mutable_buffer(inBuffer.get(), bufferSize));
+    ASSERT_EQ(bytesRead, 0);
 }
 
 template <typename Stream>
@@ -85,65 +93,88 @@ void peekPastBuffer(Stream& writeSocket, Stream& readSocket, StringData data) {
 }
 
 #ifdef ASIO_HAS_LOCAL_SOCKETS
-auto prepareUnixSocketPair(asio::io_context& io_context) {
-    asio::local::stream_protocol::socket writeSocket(io_context);
-    asio::local::stream_protocol::socket readSocket(io_context);
-    asio::local::connect_pair(writeSocket, readSocket);
-    readSocket.non_blocking(true);
 
-    return std::pair(std::move(writeSocket), std::move(readSocket));
+TEST(ASIOUtils, PeekEmptySocketUnixBlocking) {
+    UnixSocketPair socks;
+    auto& readSocket = socks.clientSocket();
+
+    peekEmptySocket(readSocket);
 }
 
-TEST(ASIOUtils, PeekAvailableBytes) {
-    asio::io_context io_context;
-    auto [writeSocket, readSocket] = prepareUnixSocketPair(io_context);
+TEST(ASIOUtils, PeekEmptySocketUnixNonBlocking) {
+    UnixSocketPair socks;
+    auto& readSocket = socks.clientSocket();
+    readSocket.non_blocking(true);
+
+    peekEmptySocket(readSocket);
+}
+
+TEST(ASIOUtils, PeekAvailableBytesUnixBlocking) {
+    UnixSocketPair socks;
+    auto& writeSocket = socks.serverSocket();
+    auto& readSocket = socks.clientSocket();
 
     peekAllSubstrings(writeSocket, readSocket, "example"_sd);
 }
 
-TEST(ASIOUtils, PeekPastAvailableBytes) {
-    asio::io_context io_context;
-    auto [writeSocket, readSocket] = prepareUnixSocketPair(io_context);
+TEST(ASIOUtils, PeekAvailableBytesUnixNonBlocking) {
+    UnixSocketPair socks;
+    auto& writeSocket = socks.serverSocket();
+    auto& readSocket = socks.clientSocket();
+    readSocket.non_blocking(true);
+
+    peekAllSubstrings(writeSocket, readSocket, "example"_sd);
+}
+
+TEST(ASIOUtils, PeekPastAvailableBytesUnixBlocking) {
+    UnixSocketPair socks;
+    auto& writeSocket = socks.serverSocket();
+    auto& readSocket = socks.clientSocket();
+
+    peekPastBuffer(writeSocket, readSocket, "example"_sd);
+}
+
+TEST(ASIOUtils, PeekPastAvailableBytesUnixNonBlocking) {
+    UnixSocketPair socks;
+    auto& writeSocket = socks.serverSocket();
+    auto& readSocket = socks.clientSocket();
+    readSocket.non_blocking(true);
 
     peekPastBuffer(writeSocket, readSocket, "example"_sd);
 }
 #endif  // ASIO_HAS_LOCAL_SOCKETS
 
-auto prepareTCPSocketPair(asio::io_context& io_context) {
-    // Make a local loopback connection on an arbitrary ephemeral port.
-    asio::ip::tcp::endpoint ep(asio::ip::make_address("127.0.0.1"), 0);
-    asio::ip::tcp::acceptor acceptor(io_context, ep.protocol());
-    {
-        std::error_code ec;
-        acceptor.bind(ep, ec);
-        uassertStatusOK(errorCodeToStatus(ec, "prepareTCPSocketPair bind"));
-    }
-    acceptor.listen();
-
-    asio::ip::tcp::socket readSocket(io_context, ep.protocol());
-    readSocket.connect(acceptor.local_endpoint());
-    asio::ip::tcp::socket writeSocket(io_context);
-    acceptor.accept(writeSocket);
-    writeSocket.non_blocking(false);
-    // Set no_delay so that our output doesn't get buffered in a kernel buffer.
-    writeSocket.set_option(asio::ip::tcp::no_delay(true));
-    readSocket.non_blocking(true);
-
-    return std::pair(std::move(writeSocket), std::move(readSocket));
+TEST(ASIOUtils, PeekEmptySocketTCPBlocking) {
+    TCPSocketPair sockets;
+    peekEmptySocket(sockets.clientSocket());
 }
 
-TEST(ASIOUtils, PeekAvailableBytesTCP) {
-    asio::io_context io_context;
-    auto [writeSocket, readSocket] = prepareTCPSocketPair(io_context);
-
-    peekAllSubstrings(writeSocket, readSocket, "example"_sd);
+TEST(ASIOUtils, PeekEmptySocketTCPNonBlocking) {
+    TCPSocketPair sockets;
+    sockets.clientSocket().non_blocking(true);
+    peekEmptySocket(sockets.clientSocket());
 }
 
-TEST(ASIOUtils, PeekPastAvailableBytesTCP) {
-    asio::io_context io_context;
-    auto [writeSocket, readSocket] = prepareTCPSocketPair(io_context);
+TEST(ASIOUtils, PeekAvailableBytesTCPBlocking) {
+    TCPSocketPair sockets;
+    peekAllSubstrings(sockets.serverSocket(), sockets.clientSocket(), "example"_sd);
+}
 
-    peekPastBuffer(writeSocket, readSocket, "example"_sd);
+TEST(ASIOUtils, PeekAvailableBytesTCPNonBlocking) {
+    TCPSocketPair sockets;
+    sockets.clientSocket().non_blocking(true);
+    peekAllSubstrings(sockets.serverSocket(), sockets.clientSocket(), "example"_sd);
+}
+
+TEST(ASIOUtils, PeekPastAvailableBytesTCPBlocking) {
+    TCPSocketPair sockets;
+    peekPastBuffer(sockets.serverSocket(), sockets.clientSocket(), "example"_sd);
+}
+
+TEST(ASIOUtils, PeekPastAvailableBytesTCPNonBlocking) {
+    TCPSocketPair sockets;
+    sockets.clientSocket().non_blocking(true);
+    peekPastBuffer(sockets.serverSocket(), sockets.clientSocket(), "example"_sd);
 }
 }  // namespace
 }  // namespace mongo::transport

@@ -29,11 +29,9 @@
 
 #pragma once
 
-#include <cstddef>
-#include <vector>
-
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
@@ -42,11 +40,13 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/s/collection_metadata.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/transaction/transaction_operations.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <vector>
 
 namespace mongo {
 

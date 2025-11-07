@@ -29,6 +29,9 @@
 
 #pragma once
 
+// IWYU pragma: private, include "mongo/unittest/unittest.h"
+// IWYU pragma: friend "mongo/unittest/.*"
+
 #include "mongo/base/string_data.h"
 
 namespace mongo::unittest {
@@ -37,20 +40,31 @@ namespace mongo::unittest {
  */
 class TestInfo {
 public:
-    TestInfo(StringData suiteName, StringData testName, StringData file, unsigned int line)
-        : _suiteName(suiteName), _testName(testName), _file(file), _line(line) {}
+    constexpr TestInfo(StringData suiteName,
+                       StringData testName,
+                       StringData file,
+                       unsigned int line,
+                       const std::type_info* baseTypeInfo = nullptr)
+        : _suiteName(suiteName),
+          _testName(testName),
+          _file(file),
+          _line(line),
+          _baseTypeInfo(baseTypeInfo) {}
 
-    StringData suiteName() const {
+    constexpr StringData suiteName() const {
         return _suiteName;
     }
-    StringData testName() const {
+    constexpr StringData testName() const {
         return _testName;
     }
-    StringData file() const {
+    constexpr StringData file() const {
         return _file;
     }
-    unsigned int line() const {
+    constexpr unsigned int line() const {
         return _line;
+    }
+    constexpr const std::type_info* baseTypeInfo() const {
+        return _baseTypeInfo;
     }
 
 private:
@@ -58,5 +72,6 @@ private:
     StringData _testName;
     StringData _file;
     unsigned int _line;
+    const std::type_info* _baseTypeInfo{};
 };
 }  // namespace mongo::unittest

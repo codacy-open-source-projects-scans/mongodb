@@ -26,22 +26,23 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#include <boost/move/utility_core.hpp>
-#include <cstddef>
-#include <limits>
-#include <ostream>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/storage/index_entry_comparison.h"
 
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/util/hex.h"
+#include "mongo/util/overloaded_visitor.h"
 #include "mongo/util/str.h"
-#include "mongo/util/text.h"  // IWYU pragma: keep
+#include "mongo/util/text.h"
+
+#include <cstddef>
+#include <limits>
+#include <ostream>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -117,9 +118,8 @@ int IndexEntryComparison::compare(const IndexKeyEntry& lhs, const IndexKeyEntry&
     return lhs.loc.compare(rhs.loc);  // is supposed to ignore ordering
 }
 
-StringData IndexEntryComparison::makeKeyStringFromSeekPointForSeek(const IndexSeekPoint& seekPoint,
-                                                                   bool isForward,
-                                                                   key_string::Builder& builder) {
+std::span<const char> IndexEntryComparison::makeKeyStringFromSeekPointForSeek(
+    const IndexSeekPoint& seekPoint, bool isForward, key_string::Builder& builder) {
     const bool inclusive = seekPoint.firstExclusive < 0;
     const auto discriminator = isForward == inclusive ? key_string::Discriminator::kExclusiveBefore
                                                       : key_string::Discriminator::kExclusiveAfter;
@@ -145,11 +145,12 @@ StringData IndexEntryComparison::makeKeyStringFromSeekPointForSeek(const IndexSe
     return builder.finishAndGetBuffer(discriminator);
 }
 
-StringData IndexEntryComparison::makeKeyStringFromBSONKeyForSeek(const BSONObj& bsonKey,
-                                                                 Ordering ord,
-                                                                 bool isForward,
-                                                                 bool inclusive,
-                                                                 key_string::Builder& builder) {
+std::span<const char> IndexEntryComparison::makeKeyStringFromBSONKeyForSeek(
+    const BSONObj& bsonKey,
+    Ordering ord,
+    bool isForward,
+    bool inclusive,
+    key_string::Builder& builder) {
     return makeKeyStringFromBSONKey(bsonKey,
                                     ord,
                                     isForward == inclusive
@@ -158,10 +159,11 @@ StringData IndexEntryComparison::makeKeyStringFromBSONKeyForSeek(const BSONObj& 
                                     builder);
 }
 
-StringData IndexEntryComparison::makeKeyStringFromBSONKey(const BSONObj& bsonKey,
-                                                          Ordering ord,
-                                                          key_string::Discriminator discrim,
-                                                          key_string::Builder& builder) {
+std::span<const char> IndexEntryComparison::makeKeyStringFromBSONKey(
+    const BSONObj& bsonKey,
+    Ordering ord,
+    key_string::Discriminator discrim,
+    key_string::Builder& builder) {
     builder.resetToKey(bsonKey, ord, discrim);
     return builder.finishAndGetBuffer();
 }
@@ -220,7 +222,7 @@ Status buildDupKeyErrorStatus(const BSONObj& key,
         //
         // If the string in the key is invalid UTF-8, then we hex encode it before adding it to the
         // error message so that the driver can assume valid UTF-8 when reading the reply.
-        const bool shouldHexEncode = keyValueElem.type() == BSONType::String &&
+        const bool shouldHexEncode = keyValueElem.type() == BSONType::string &&
             (hasCollation || !isValidUTF8(keyValueElem.valueStringData()));
 
         if (shouldHexEncode) {
@@ -261,30 +263,9 @@ Status buildDupKeyErrorStatus(const key_string::Value& keyString,
                               const BSONObj& keyPattern,
                               const BSONObj& indexCollation,
                               const Ordering& ordering) {
-    const BSONObj key = key_string::toBson(
-        keyString.getBuffer(), keyString.getSize(), ordering, keyString.getTypeBits());
+    const BSONObj key = key_string::toBson(keyString.getView(), ordering, keyString.getTypeBits());
 
     return buildDupKeyErrorStatus(key, collectionNamespace, indexName, keyPattern, indexCollation);
 }
 
-Status buildDupKeyErrorStatus(OperationContext* opCtx,
-                              const key_string::Value& keyString,
-                              const Ordering& ordering,
-                              const IndexDescriptor* desc) {
-    const BSONObj key = key_string::toBson(
-        keyString.getBuffer(), keyString.getSize(), ordering, keyString.getTypeBits());
-    return buildDupKeyErrorStatus(opCtx, key, desc);
-}
-
-Status buildDupKeyErrorStatus(OperationContext* opCtx,
-                              const BSONObj& key,
-                              const IndexDescriptor* desc) {
-    NamespaceString nss;
-    invariant(desc);
-    // In testing this may be nullptr, and being a bit more lenient during error handling is OK.
-    if (desc->getEntry())
-        nss = desc->getEntry()->getNSSFromCatalog(opCtx);
-    return buildDupKeyErrorStatus(
-        key, nss, desc->indexName(), desc->keyPattern(), desc->collation());
-}
 }  // namespace mongo

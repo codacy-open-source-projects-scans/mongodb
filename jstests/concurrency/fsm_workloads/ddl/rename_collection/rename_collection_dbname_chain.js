@@ -10,31 +10,31 @@
  *     assumes_unsharded_collection,
  * ]
  */
-export const $config = (function() {
-    var data = {
+export const $config = (function () {
+    let data = {
         // Use the workload name as a prefix for the collection name,
         // since the workload name is assumed to be unique.
-        prefix: jsTestName()
+        prefix: jsTestName(),
     };
 
-    var states = (function() {
+    let states = (function () {
         function uniqueDBName(prefix, tid, num) {
-            return prefix + tid + '_' + num;
+            return prefix + tid + "_" + num;
         }
 
         function init(db, collName) {
             this.fromDBName = db.getName() + uniqueDBName(this.prefix, this.tid, 0);
             this.num = 1;
-            var fromDB = db.getSiblingDB(this.fromDBName);
+            let fromDB = db.getSiblingDB(this.fromDBName);
             assert.commandWorked(fromDB.createCollection(collName));
         }
 
         function rename(db, collName) {
-            var toDBName = db.getName() + uniqueDBName(this.prefix, this.tid, this.num++);
-            var renameCommand = {
-                renameCollection: this.fromDBName + '.' + collName,
-                to: toDBName + '.' + collName,
-                dropTarget: false
+            let toDBName = db.getName() + uniqueDBName(this.prefix, this.tid, this.num++);
+            let renameCommand = {
+                renameCollection: this.fromDBName + "." + collName,
+                to: toDBName + "." + collName,
+                dropTarget: false,
             };
 
             assert.commandWorked(db.adminCommand(renameCommand));
@@ -49,7 +49,7 @@ export const $config = (function() {
         return {init: init, rename: rename};
     })();
 
-    var transitions = {init: {rename: 1}, rename: {rename: 1}};
+    let transitions = {init: {rename: 1}, rename: {rename: 1}};
 
     return {
         threadCount: 10,

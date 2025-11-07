@@ -1,3 +1,5 @@
+import {DiscoverTopology} from "jstests/libs/discover_topology.js";
+import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 /**
  * Contains helper functions for testing server parameters on start up and via get/setParameter.
  */
@@ -7,10 +9,10 @@
  * connection to retrieve the current setting of that server parameter.
  */
 export function getParameter(conn, field) {
-    var q = {getParameter: 1};
+    let q = {getParameter: 1};
     q[field] = 1;
 
-    var ret = assert.commandWorked(conn.getDB("admin").runCommand(q));
+    let ret = assert.commandWorked(conn.getDB("admin").runCommand(q));
     return ret[field];
 }
 
@@ -18,15 +20,23 @@ export function getParameter(conn, field) {
  * Calls setParameter on 'conn' server connection, setting server parameter 'field' to 'value'.
  */
 export function setParameter(conn, field, value) {
-    var cmd = {setParameter: 1};
+    let cmd = {setParameter: 1};
     cmd[field] = value;
     return conn.adminCommand(cmd);
 }
 
-export function setParameterOnAllHosts(hostList, field, value) {
+/**
+ * Helper for setting a server parameter on all non-config-server hosts.
+ */
+export function setParameterOnAllNonConfigNodes(conn, field, value) {
+    assert(
+        !(TestData.addRemoveShard || TestData.hasRandomShardsAddedRemoved),
+        "Cannot safely execute setParameterOnAllNonConfigNodes in a test suite where the cluster topology is unstable (e.g., shards are being added or removed). Please add the assumes_stable_shard_list tag to the test to exclude it from this specific suite.",
+    );
+    const hostList = DiscoverTopology.findNonConfigNodes(conn);
     for (let host of hostList) {
-        const conn = new Mongo(host);
-        assert.commandWorked(setParameter(conn, field, value));
+        const hostConn = new Mongo(host);
+        assert.commandWorked(setParameter(hostConn, field, value));
     }
 }
 
@@ -42,40 +52,40 @@ export function setParameterOnAllHosts(hostList, field, value) {
  * 'lowerOutOfBounds' and 'upperOutOfBounds' should be the invalid values below and above the lowest
  * and highest valid values, respectively.
  */
-export function testNumericServerParameter(parameterName,
-                                           isStartupParameter,
-                                           isRuntimeParameter,
-                                           defaultValue,
-                                           nonDefaultValidValue,
-                                           hasLowerBound,
-                                           lowerOutOfBounds,
-                                           hasUpperBound,
-                                           upperOutOfBounds) {
-    jsTest.log("Checking that '" + parameterName + "' defaults to '" + defaultValue +
-               "' on startup");
+export function testNumericServerParameter(
+    parameterName,
+    isStartupParameter,
+    isRuntimeParameter,
+    defaultValue,
+    nonDefaultValidValue,
+    hasLowerBound,
+    lowerOutOfBounds,
+    hasUpperBound,
+    upperOutOfBounds,
+) {
+    jsTest.log("Checking that '" + parameterName + "' defaults to '" + defaultValue + "' on startup");
     let conn1 = MongoRunner.runMongod({});
     assert(conn1);
     assert.eq(getParameter(conn1, parameterName), defaultValue);
 
     if (isRuntimeParameter) {
-        jsTest.log("Checking that '" + parameterName + "' can be set at runtime to '" +
-                   nonDefaultValidValue + "'");
+        jsTest.log("Checking that '" + parameterName + "' can be set at runtime to '" + nonDefaultValidValue + "'");
         assert.commandWorked(setParameter(conn1, parameterName, nonDefaultValidValue));
         assert.eq(getParameter(conn1, parameterName), nonDefaultValidValue);
 
         if (hasLowerBound) {
-            jsTest.log("Checking that '" + parameterName + "' cannot be set below bounds to '" +
-                       lowerOutOfBounds + "'");
-            assert.commandFailedWithCode(setParameter(conn1, parameterName, lowerOutOfBounds),
-                                         ErrorCodes.BadValue);
+            jsTest.log(
+                "Checking that '" + parameterName + "' cannot be set below bounds to '" + lowerOutOfBounds + "'",
+            );
+            assert.commandFailedWithCode(setParameter(conn1, parameterName, lowerOutOfBounds), ErrorCodes.BadValue);
             assert.eq(getParameter(conn1, parameterName), nonDefaultValidValue);
         }
 
         if (hasUpperBound) {
-            jsTest.log("Checking that '" + parameterName + "' cannot be set above bounds to '" +
-                       upperOutOfBounds + "'");
-            assert.commandFailedWithCode(setParameter(conn1, parameterName, upperOutOfBounds),
-                                         ErrorCodes.BadValue);
+            jsTest.log(
+                "Checking that '" + parameterName + "' cannot be set above bounds to '" + upperOutOfBounds + "'",
+            );
+            assert.commandFailedWithCode(setParameter(conn1, parameterName, upperOutOfBounds), ErrorCodes.BadValue);
             assert.eq(getParameter(conn1, parameterName), nonDefaultValidValue);
         }
     }
@@ -83,33 +93,51 @@ export function testNumericServerParameter(parameterName,
     MongoRunner.stopMongod(conn1);
 
     if (isStartupParameter) {
-        jsTest.log("Checking that '" + parameterName + "' can be set to '" + nonDefaultValidValue +
-                   "' on startup");
-        let conn2 =
-            MongoRunner.runMongod({setParameter: parameterName + "=" + nonDefaultValidValue});
+        jsTest.log("Checking that '" + parameterName + "' can be set to '" + nonDefaultValidValue + "' on startup");
+        let conn2 = MongoRunner.runMongod({setParameter: parameterName + "=" + nonDefaultValidValue});
         assert(conn2);
         assert.eq(getParameter(conn2, parameterName), nonDefaultValidValue);
         MongoRunner.stopMongod(conn2);
 
         if (hasLowerBound) {
-            jsTest.log("Checking that '" + parameterName + "' cannot be set below bounds to '" +
-                       lowerOutOfBounds + "' on startup");
+            jsTest.log(
+                "Checking that '" +
+                    parameterName +
+                    "' cannot be set below bounds to '" +
+                    lowerOutOfBounds +
+                    "' on startup",
+            );
             assert.throws(
                 () => MongoRunner.runMongod({setParameter: parameterName + "=" + lowerOutOfBounds}),
                 [],
-                "expected mongod to fail to startup with an invalid '" + parameterName + "'" +
-                    " server parameter setting '" + lowerOutOfBounds + "'.");
+                "expected mongod to fail to startup with an invalid '" +
+                    parameterName +
+                    "'" +
+                    " server parameter setting '" +
+                    lowerOutOfBounds +
+                    "'.",
+            );
         }
 
         if (hasUpperBound) {
-            jsTest.log("Checking that '" + parameterName + "' cannot be set above bounds to '" +
-                       upperOutOfBounds + "' on startup");
-            let conn4 =
-                MongoRunner.runMongod({setParameter: parameterName + "=" + upperOutOfBounds});
-            assert.eq(null,
-                      conn4,
-                      "expected mongod to fail to startup with an invalid '" + parameterName + "'" +
-                          " server parameter setting '" + upperOutOfBounds + "'.");
+            jsTest.log(
+                "Checking that '" +
+                    parameterName +
+                    "' cannot be set above bounds to '" +
+                    upperOutOfBounds +
+                    "' on startup",
+            );
+            let conn4 = MongoRunner.runMongod({setParameter: parameterName + "=" + upperOutOfBounds});
+            assert.eq(
+                null,
+                conn4,
+                "expected mongod to fail to startup with an invalid '" +
+                    parameterName +
+                    "'" +
+                    " server parameter setting '" +
+                    upperOutOfBounds +
+                    "'.",
+            );
         }
     }
 }

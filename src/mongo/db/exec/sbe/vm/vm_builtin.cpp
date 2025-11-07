@@ -30,7 +30,7 @@
 #include "mongo/db/exec/sbe/vm/vm_builtin.h"
 
 #include "mongo/db/exec/sbe/vm/vm.h"
-#include "mongo/util/assert_util.h"  // MONGO_UNREACHABLE
+#include "mongo/util/assert_util.h"  // MONGO_UNREACHABLE_TASSERT
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -175,6 +175,8 @@ std::string builtinToString(Builtin b) {
             return "concat";
         case Builtin::concatArrays:
             return "concatArrays";
+        case Builtin::zipArrays:
+            return "zipArrays";
         case Builtin::aggConcatArraysCapped:
             return "aggConcatArraysCapped";
         case Builtin::concatArraysCapped:
@@ -621,8 +623,10 @@ std::string builtinToString(Builtin b) {
             return "cellFoldValues_P";
         case Builtin::cellBlockGetFlatValuesBlock:
             return "cellBlockGetFlatValuesBlock";
+        case Builtin::currentDate:
+            return "currentDate";
         default:
-            MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE_TASSERT(11122946);
     }
 }  // builtinToString
 
@@ -796,6 +800,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinConcat(arity);
         case Builtin::concatArrays:
             return builtinConcatArrays(arity);
+        case Builtin::zipArrays:
+            return builtinZipArrays(arity);
         case Builtin::aggConcatArraysCapped:
             return builtinAggConcatArraysCapped(arity);
         case Builtin::concatArraysCapped:
@@ -1215,9 +1221,11 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::dispatchBuiltin(Builtin
             return builtinCellFoldValues_P(arity);
         case Builtin::cellBlockGetFlatValuesBlock:
             return builtinCellBlockGetFlatValuesBlock(arity);
+        case Builtin::currentDate:
+            return builtinCurrentDate(arity);
     }
 
-    MONGO_UNREACHABLE;
+    MONGO_UNREACHABLE_TASSERT(11122947);
 }  // ByteCode::dispatchBuiltin
 
 }  // namespace vm

@@ -27,12 +27,7 @@
  *    it in the license file.
  */
 
-#include <iosfwd>
-#include <memory>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/query/plan_cache/plan_cache_key_info.h"
 
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonmisc.h"
@@ -43,21 +38,23 @@
 #include "mongo/db/index/wildcard_key_generator.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/matcher/expression.h"
-#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
-#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/canonical_query_test_util.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/db/query/index_entry.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
 #include "mongo/db/query/plan_cache/plan_cache_indexability.h"
 #include "mongo/db/query/plan_cache/plan_cache_key_factory.h"
-#include "mongo/db/query/plan_cache/plan_cache_key_info.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/intrusive_counter.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/str.h"
+
+#include <iosfwd>
+#include <memory>
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -107,7 +104,7 @@ unique_ptr<MatchExpression> parseMatchExpression(const BSONObj& obj) {
         str::stream ss;
         ss << "failed to parse query: " << obj.toString()
            << ". Reason: " << status.getStatus().toString();
-        FAIL(ss);
+        FAIL(std::string(ss));
     }
 
     return std::move(status.getValue());
@@ -135,7 +132,6 @@ std::pair<CoreIndexInfo, std::unique_ptr<WildcardProjection>> makeWildcardUpdate
 void assertPlanCacheKeysUnequalDueToDiscriminators(const PlanCacheKeyInfo& a,
                                                    const PlanCacheKeyInfo& b) {
     ASSERT_EQ(a.getQueryShapeStringData(), b.getQueryShapeStringData());
-    ASSERT_EQ(a.getIndexabilityDiscriminators().size(), b.getIndexabilityDiscriminators().size());
     ASSERT_NE(a.getIndexabilityDiscriminators(), b.getIndexabilityDiscriminators());
 
     // Should always have the begin and end delimiters.
@@ -145,8 +141,8 @@ void assertPlanCacheKeysUnequalDueToDiscriminators(const PlanCacheKeyInfo& a,
 }  // namespace
 
 TEST_F(PlanCacheKeyInfoTest, EqualityOperator) {
-    unique_ptr<CanonicalQuery> cqEqZero(canonicalize("{a: 0}}"));
-    unique_ptr<CanonicalQuery> cqEqOne(canonicalize("{a: 1}}"));
+    unique_ptr<CanonicalQuery> cqEqZero(canonicalize("{a: 0}"));
+    unique_ptr<CanonicalQuery> cqEqOne(canonicalize("{a: 1}"));
 
     NamespaceSpec nsSpec;
     nsSpec.setDb(makeDbName("db"));
@@ -216,9 +212,9 @@ TEST_F(PlanCacheKeyInfoTest, ComputeKeySparseIndex) {
                       true,                          // sparse
                       IndexEntry::Identifier{""})};  // name
 
-    unique_ptr<CanonicalQuery> cqEqNumber(canonicalize("{a: 0}}"));
-    unique_ptr<CanonicalQuery> cqEqString(canonicalize("{a: 'x'}}"));
-    unique_ptr<CanonicalQuery> cqEqNull(canonicalize("{a: null}}"));
+    unique_ptr<CanonicalQuery> cqEqNumber(canonicalize("{a: 0}"));
+    unique_ptr<CanonicalQuery> cqEqString(canonicalize("{a: 'x'}"));
+    unique_ptr<CanonicalQuery> cqEqNull(canonicalize("{a: null}"));
 
     // 'cqEqNumber' and 'cqEqString' get the same key, since both are compatible with this
     // index.
@@ -283,7 +279,8 @@ TEST_F(PlanCacheKeyInfoTest, ComputeKeyPartialIndexConjunction) {
     ASSERT_EQ(makeKey(*conjSingleField, indexCores).getIndexabilityDiscriminators(), "(1)");
 
     unique_ptr<CanonicalQuery> conjSingleFieldNoMatch(canonicalize("{f: {$gt: 2, $lt: 11}}"));
-    ASSERT_EQ(makeKey(*conjSingleFieldNoMatch, indexCores).getIndexabilityDiscriminators(), "(0)");
+    ASSERT_EQ(makeKey(*conjSingleFieldNoMatch, indexCores).getIndexabilityDiscriminators(),
+              "(000)");
 
     // Note that these queries get optimized to a single $in over 'f'.
     unique_ptr<CanonicalQuery> disjSingleFieldBothSatisfy(
@@ -319,23 +316,85 @@ TEST_F(PlanCacheKeyInfoTest, ComputeKeyPartialIndexDisjunction) {
     ASSERT_EQ(makeKey(*conjSingleFieldMatch, indexCores).getIndexabilityDiscriminators(), "(1)");
 
     unique_ptr<CanonicalQuery> conjSingleFieldNoMatch(canonicalize("{f: {$gt: 2, $lt: 10}}"));
-    ASSERT_EQ(makeKey(*conjSingleFieldNoMatch, indexCores).getIndexabilityDiscriminators(), "(0)");
+    ASSERT_EQ(makeKey(*conjSingleFieldNoMatch, indexCores).getIndexabilityDiscriminators(),
+              "(000)");
 
     unique_ptr<CanonicalQuery> conjSingleFieldOverlap(canonicalize("{f: {$gt: 2, $lt: 12}}"));
-    ASSERT_EQ(makeKey(*conjSingleFieldOverlap, indexCores).getIndexabilityDiscriminators(), "(0)");
+    ASSERT_EQ(makeKey(*conjSingleFieldOverlap, indexCores).getIndexabilityDiscriminators(),
+              "(000)");
 
-    // Although this query is technically a subset of the partial filter, the logic to determine
-    // such ('isSubsetOf' in the code) is conservative in how it compares certain shapes of
-    // expression trees.
     unique_ptr<CanonicalQuery> disjSingleFieldBothSatisfy(
         canonicalize("{$or: [{f: {$eq: -1}}, {f: {$gt: 10}}]}"));
     ASSERT_EQ(makeKey(*disjSingleFieldBothSatisfy, indexCores).getIndexabilityDiscriminators(),
-              "(0)");
+              "(1)");
 
+    // Gets rewritten to {f: {$in: [2, 11]}}
     unique_ptr<CanonicalQuery> disjSingleFieldNotSubset(
         canonicalize("{$or: [{f: {$eq: 2}}, {f: {$eq: 11}}]}"));
     ASSERT_EQ(makeKey(*disjSingleFieldNotSubset, indexCores).getIndexabilityDiscriminators(),
               "(0)");
+
+    unique_ptr<CanonicalQuery> disjSingleFieldOneDisjunctSatisfies(
+        canonicalize("{$or: [{f: {$eq: 2}}, {f: {$gt: 10}}]}"));
+    ASSERT_EQ(
+        makeKey(*disjSingleFieldOneDisjunctSatisfies, indexCores).getIndexabilityDiscriminators(),
+        "(001)");
+}
+
+TEST_F(PlanCacheKeyInfoTest, PartialIndexQueryElemMatch) {
+    auto filterObj = fromjson("{$or: [{'f.a': 1}, {'f.a': {$gt: 2}}]}");
+    unique_ptr<MatchExpression> filterExpr(parseMatchExpression(filterObj));
+
+    const auto keyPattern = BSON("a" << 1);
+    const std::vector<CoreIndexInfo> indexCores = {
+        CoreIndexInfo(keyPattern,
+                      IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
+                      false,                       // sparse
+                      IndexEntry::Identifier{""},  // name
+                      filterExpr.get())};          // filterExpr
+
+    {
+        unique_ptr<CanonicalQuery> nonElemMatch(
+            canonicalize("{$or: [{'f.a': 1}, {'f.a': {$gt: 2}}]}"));
+        ASSERT_EQ(makeKey(*nonElemMatch, indexCores).getIndexabilityDiscriminators(), "(1)");
+    }
+
+    {
+        unique_ptr<CanonicalQuery> nonElemMatchSingleMatch(
+            canonicalize("{$or: [{'f.a': 1}, {'f.a': {$gt: 0}}]}"));
+        ASSERT_EQ(makeKey(*nonElemMatchSingleMatch, indexCores).getIndexabilityDiscriminators(),
+                  "(010)");
+    }
+
+    {
+        // Verify that we don't mark $elemMatch as eligible even when its children are identical to
+        // the filter.
+        unique_ptr<CanonicalQuery> elemMatch(
+            canonicalize("{f: {$elemMatch: {$or: [{a: 1}, {a: {$gt: 2}}]}}}"));
+        ASSERT_EQ(makeKey(*elemMatch, indexCores).getIndexabilityDiscriminators(), "(0000)");
+    }
+}
+
+TEST_F(PlanCacheKeyInfoTest, PartialIndexQueryNegation) {
+    auto filterObj = fromjson("{a: 1}");
+    unique_ptr<MatchExpression> filterExpr(parseMatchExpression(filterObj));
+
+    const auto keyPattern = BSON("a" << 1);
+    const std::vector<CoreIndexInfo> indexCores = {
+        CoreIndexInfo(keyPattern,
+                      IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
+                      false,                       // sparse
+                      IndexEntry::Identifier{""},  // name
+                      filterExpr.get())};          // filterExpr
+
+    {
+        unique_ptr<CanonicalQuery> nor(canonicalize("{$nor: [{a: 1}]}"));
+        ASSERT_EQ(makeKey(*nor, indexCores).getIndexabilityDiscriminators(), "(00)<1><1>");
+    }
+    {
+        unique_ptr<CanonicalQuery> notcq(canonicalize("{a: {$ne: 1}}"));
+        ASSERT_EQ(makeKey(*notcq, indexCores).getIndexabilityDiscriminators(), "(00)<1><1>");
+    }
 }
 
 TEST_F(PlanCacheKeyInfoTest, ComputeKeyPartialIndexNestedDisjunction) {
@@ -716,7 +775,7 @@ TEST_F(PlanCacheKeyInfoTest,
         // bits for the "x" predicate (the first pertaining to the partialFilterExpression, the
         // second around applicability to the wildcard index) and one discriminator bit for "y".
         ASSERT_EQ(compatibleKey.getIndexabilityDiscriminators(), "(1)<1><1>");
-        ASSERT_EQ(incompatibleKey.getIndexabilityDiscriminators(), "(0)<1><1>");
+        ASSERT_EQ(incompatibleKey.getIndexabilityDiscriminators(), "(000)<1><1>");
     }
 
     // $eq:null predicates cannot be assigned to a wildcard index. Make sure that this is
@@ -770,7 +829,7 @@ TEST_F(PlanCacheKeyInfoTest,
         // compatible with the partial filter expression, leading to one of the 'y' bits being set
         // to zero.
         auto key = makeKey(*canonicalize("{x: {$eq: 1}, y: {$eq: -2}, z: {$eq: 3}}"), indexCores);
-        ASSERT_EQ(key.getIndexabilityDiscriminators(), "(0)<1><1><1>");
+        ASSERT_EQ(key.getIndexabilityDiscriminators(), "(0000)<1><1><1>");
     }
 }
 
@@ -797,7 +856,7 @@ TEST_F(PlanCacheKeyInfoTest,
         // Similar to the previous case, except with an 'x' predicate that is incompatible with the
         // partial filter expression.
         auto key = makeKey(*canonicalize("{x: {$eq: -1}, y: {$eq: 2}, z: {$eq: 3}}"), indexCores);
-        ASSERT_EQ(key.getIndexabilityDiscriminators(), "(0)<1>");
+        ASSERT_EQ(key.getIndexabilityDiscriminators(), "(0000)<1>");
     }
 
     {
@@ -829,12 +888,12 @@ TEST_F(PlanCacheKeyInfoTest,
         // Here, the predicate on "x.y" is not compatible with the partial filter expression.
         auto key =
             makeKey(*canonicalize("{x: {$eq: 1}, y: {$eq: 2}, 'x.y': {$eq: -3}}"), indexCores);
-        ASSERT_EQ(key.getIndexabilityDiscriminators(), "(0)<1><1><1>");
+        ASSERT_EQ(key.getIndexabilityDiscriminators(), "(0000)<1><1><1>");
     }
 }
 
 TEST_F(PlanCacheKeyInfoTest, StableKeyDoesNotChangeAcrossIndexCreation) {
-    unique_ptr<CanonicalQuery> cq(canonicalize("{a: 0}}"));
+    unique_ptr<CanonicalQuery> cq(canonicalize("{a: 0}"));
     const auto preIndexKey = makeKey(*cq);
     const auto preIndexStableKey = preIndexKey.getQueryShape();
     ASSERT_EQ(preIndexKey.getIndexabilityDiscriminators(), "");

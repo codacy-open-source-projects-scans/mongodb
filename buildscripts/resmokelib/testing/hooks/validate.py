@@ -11,6 +11,7 @@ import pymongo.mongo_client
 from pymongo.collection import Collection
 from pymongo.database import Database
 
+from buildscripts.resmokelib.testing.fixtures import replicaset, shardedcluster
 from buildscripts.resmokelib.testing.fixtures.external import ExternalFixture
 from buildscripts.resmokelib.testing.fixtures.interface import build_client
 from buildscripts.resmokelib.testing.fixtures.standalone import MongoDFixture
@@ -26,13 +27,11 @@ class ValidateCollections(jsfile.PerClusterDataConsistencyHook):
 
     IS_BACKGROUND = False
 
-    def __init__(  # pylint: disable=super-init-not-called
-        self, hook_logger, fixture, shell_options=None, use_legacy_validate=False
-    ):
+    def __init__(self, hook_logger, fixture, shell_options=None, use_legacy_validate=False):
         """Initialize ValidateCollections."""
         description = "Full collection validation"
         js_filename = os.path.join("jstests", "hooks", "run_validate_collections.js")
-        jsfile.JSHook.__init__(  # pylint: disable=non-parent-init-called
+        jsfile.JSHook.__init__(
             self, hook_logger, fixture, js_filename, description, shell_options=shell_options
         )
         self.use_legacy_validate = use_legacy_validate
@@ -107,11 +106,22 @@ class ValidateCollectionsTestCase(jsfile.DynamicJSTestCase):
                             f"Internal error while trying to validate node: {node.get_driver_connection_url()}"
                         )
 
-                if not all(
-                    future.result() is True for future in concurrent.futures.as_completed(futures)
-                ):
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    raise RuntimeError("collection validation failed")
+                for future in concurrent.futures.as_completed(futures):
+                    exception = future.exception()
+                    if exception is not None:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        raise RuntimeError(
+                            "Collection validation raised an exception."
+                        ) from exception
+                    result = future.result()
+                    if result is not True:
+                        raise RuntimeError("Collection validation failed.")
+
+            # Perform inter-node validation.
+            if isinstance(self.fixture, replicaset.ReplicaSetFixture) or isinstance(
+                self.fixture, shardedcluster.ShardedClusterFixture
+            ):
+                self.fixture.internode_validation()
         except:
             self.logger.exception("Uncaught exception while validating collections")
             raise
@@ -190,9 +200,11 @@ def validate_database(
             "skipValidationOnInvalidViewDefinitions", False
         )
         skipValidationOnNamespaceNotFound = test_data.get("skipValidationOnNamespaceNotFound", True)
+        # TODO (SERVER-112502): Remove this and always set "full" to true.
+        doesNotSupportWTVerify = test_data.get("doesNotSupportWTVerify", False)
 
         validate_opts = {
-            "full": True,
+            "full": not doesNotSupportWTVerify,
             # TODO (SERVER-24266): Always enforce fast counts, once they are always accurate
             "enforceFastCount": not skipEnforceFastCountOnValidate,
         }
@@ -218,6 +230,9 @@ def validate_database(
             while time.time() - start_time < timeout:
                 try:
                     return db.list_collection_names(filter=filter)
+                except pymongo.errors.AutoReconnect:
+                    self.logger.info("AutoReconnect exception thrown, retrying...")
+                    time.sleep(0.1)
                 except pymongo.errors.OperationFailure as ex:
                     # Error code 314 is 'ObjectIsBusy'
                     # https://www.mongodb.com/docs/manual/reference/error-codes/
@@ -256,14 +271,14 @@ def validate_collection(
     skipValidationOnNamespaceNotFound: bool,
     logger: logging.Logger,
 ):
+    logger.info(f"Trying to validate collection {coll_name} in database {db.name}")
+
     validate_cmd = {"validate": coll_name}
     validate_cmd.update(validate_opts)
     ret = db.command(validate_cmd, check=False)
 
     ok = "ok" in ret and ret["ok"]
     valid = "valid" in ret and ret["valid"]
-
-    logger.info(f"Trying to validate collection {coll_name} in database {db.name}")
 
     if not ok or not valid:
         if (

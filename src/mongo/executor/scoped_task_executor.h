@@ -29,16 +29,18 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <memory>
-
 #include "mongo/base/status.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <memory>
+
+#include <boost/optional.hpp>
+
+namespace MONGO_MOD_PUB mongo {
 
 class OperationContext;
 
@@ -110,9 +112,9 @@ private:
     std::shared_ptr<TaskExecutor> _executor;
 };
 
-extern FailPoint ScopedTaskExecutorHangBeforeSchedule;
-extern FailPoint ScopedTaskExecutorHangExitBeforeSchedule;
-extern FailPoint ScopedTaskExecutorHangAfterSchedule;
+MONGO_MOD_FILE_PRIVATE extern FailPoint ScopedTaskExecutorHangBeforeSchedule;
+MONGO_MOD_FILE_PRIVATE extern FailPoint ScopedTaskExecutorHangExitBeforeSchedule;
+MONGO_MOD_FILE_PRIVATE extern FailPoint ScopedTaskExecutorHangAfterSchedule;
 
 }  // namespace executor
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

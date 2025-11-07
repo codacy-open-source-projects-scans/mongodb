@@ -27,15 +27,6 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -47,10 +38,18 @@
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/views/view.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <algorithm>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -108,7 +107,7 @@ TEST(ViewDefinitionTest, CopyAssignmentOperatorProperlyClonesAllFields) {
 
 DEATH_TEST_REGEX(ViewDefinitionTest,
                  SetViewOnFailsIfNewViewOnNotInSameDatabaseAsView,
-                 R"#(Invariant failure.*_viewNss.isEqualDb(viewOnNss)#") {
+                 R"#(Invariant failure.*_viewNss\.isEqualDb\(viewOnNss\))#") {
     ViewDefinition viewDef(
         viewNss.dbName(), viewNss.coll(), backingNss.coll(), samplePipeline, nullptr);
     NamespaceString badViewOn =

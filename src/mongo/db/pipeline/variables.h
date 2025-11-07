@@ -29,19 +29,6 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/node_hash_map.h>
-#include <algorithm>
-#include <cstdint>
-#include <functional>
-#include <iterator>
-#include <map>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -52,6 +39,17 @@
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/string_map.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <functional>
+#include <iterator>
+#include <map>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace mongo {
 class Expression;
@@ -114,6 +112,15 @@ public:
     static constexpr auto kIsMapReduceId = Id(-6);
     static constexpr auto kSearchMetaId = Id(-7);
     static constexpr auto kUserRolesId = Id(-8);
+
+    static constexpr StringData kRootName = "ROOT"_sd;
+    static constexpr StringData kRemoveName = "REMOVE"_sd;
+    static constexpr StringData kNowName = "NOW"_sd;
+    static constexpr StringData kClusterTimeName = "CLUSTER_TIME"_sd;
+    static constexpr StringData kJsScopeName = "JS_SCOPE"_sd;
+    static constexpr StringData kIsMapReduceName = "IS_MR"_sd;
+    static constexpr StringData kSearchMetaName = "SEARCH_META"_sd;
+    static constexpr StringData kUserRolesName = "USER_ROLES"_sd;
 
     // Map from builtin var name to reserved id number.
     static const StringMap<Id> kBuiltinVarNameToId;
@@ -187,9 +194,14 @@ public:
     void setDefaultRuntimeConstants(OperationContext* opCtx);
 
     /**
-     * Seed let parameters with the given BSONObj.
+     * Seed let parameters with the given BSONObj. The 'exprRequirementsValidator' is a callback
+     * function to validate that the 'let' parameter expressions don't have any dependencies on
+     * the input documents or metadata.
      */
-    void seedVariablesWithLetParameters(ExpressionContext* expCtx, BSONObj letParameters);
+    void seedVariablesWithLetParameters(
+        ExpressionContext* expCtx,
+        BSONObj letParameters,
+        std::function<bool(const Expression* expr)> exprRequirementsValidator);
 
     /**
      * Serializes this Variables object to a BSONObj, according to the top level field names of

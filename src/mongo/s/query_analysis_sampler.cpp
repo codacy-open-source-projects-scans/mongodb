@@ -27,18 +27,7 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <cmath>
-#include <limits>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/s/query_analysis_sampler.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -46,31 +35,41 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/analyze_shard_key_role.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
+#include "mongo/s/analyze_shard_key_server_parameters_gen.h"
 #include "mongo/s/query_analysis_client.h"
 #include "mongo/s/query_analysis_sample_tracker.h"
-#include "mongo/s/query_analysis_sampler.h"
 #include "mongo/s/refresh_query_analyzer_configuration_cmd_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/net/socket_utils.h"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -110,12 +109,12 @@ StatusWith<std::vector<CollectionQueryAnalyzerConfiguration>> executeRefreshComm
     if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer) ||
         serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
         const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
-        auto swResponse = configShard->runCommandWithFixedRetryAttempts(
-            opCtx,
-            ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-            DatabaseName::kAdmin,
-            cmd.toBSON(),
-            Shard::RetryPolicy::kIdempotent);
+        auto swResponse =
+            configShard->runCommand(opCtx,
+                                    ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                    DatabaseName::kAdmin,
+                                    cmd.toBSON(),
+                                    Shard::RetryPolicy::kIdempotent);
         if (auto status = Shard::CommandResponse::getEffectiveStatus(swResponse); !status.isOK()) {
             return status;
         }
@@ -131,7 +130,7 @@ StatusWith<std::vector<CollectionQueryAnalyzerConfiguration>> executeRefreshComm
     }
 
     auto response = RefreshQueryAnalyzerConfigurationResponse::parse(
-        IDLParserContext("configurationRefresher"), resObj);
+        resObj, IDLParserContext("configurationRefresher"));
     return response.getConfigurations();
 }
 

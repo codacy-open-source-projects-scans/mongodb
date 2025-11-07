@@ -4,19 +4,24 @@
 // expected behavior is verified.
 import {TLSTest} from "jstests/libs/ssl_test.js";
 function testCombination(tlsMode, sslShell, shouldSucceed) {
-    jsTest.log("TESTING: tlsMode = " + tlsMode + ", sslShell = " +
-               (sslShell ? "true"
-                         : "false" +
-                        " (should " + (shouldSucceed ? "" : "not ") + "succeed)"));
+    jsTest.log(
+        "TESTING: tlsMode = " +
+            tlsMode +
+            ", sslShell = " +
+            (sslShell ? "true" : "false" + " (should " + (shouldSucceed ? "" : "not ") + "succeed)"),
+    );
 
-    var serverOptionOverrides = {tlsMode: tlsMode, setParameter: {enableTestCommands: 1}};
+    let serverOptionOverrides = {tlsMode: tlsMode, setParameter: {enableTestCommands: 1}};
 
-    var clientOptions =
-        sslShell ? TLSTest.prototype.defaultTLSClientOptions : TLSTest.prototype.noTLSClientOptions;
+    let clientOptions = sslShell ? TLSTest.prototype.defaultTLSClientOptions : TLSTest.prototype.noTLSClientOptions;
 
-    var fixture = new TLSTest(serverOptionOverrides, clientOptions);
+    let fixture = new TLSTest(serverOptionOverrides, clientOptions);
 
-    assert.eq(shouldSucceed, fixture.connectWorked());
+    if (shouldSucceed) {
+        assert(fixture.connectWorked());
+    } else {
+        assert(fixture.connectFails());
+    }
 }
 
 testCombination("disabled", false, true);

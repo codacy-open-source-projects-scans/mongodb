@@ -1,20 +1,25 @@
 /**
  * Tests that write operations are accepted and result in correct indexing behavior for each phase
  * of hybrid index builds.
+ *
+ * @tags: [
+ *   # TODO SERVER-111867: Remove once primary-driven index builds support side writes.
+ *   primary_driven_index_builds_incompatible,
+ * ]
  */
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 
 let conn = MongoRunner.runMongod();
-let testDB = conn.getDB('test');
+let testDB = conn.getDB("test");
 
 let totalDocs = 0;
-let crudOpsForPhase = function(coll, phase) {
+let crudOpsForPhase = function (coll, phase) {
     let bulk = coll.initializeUnorderedBulkOp();
 
     // Create 1000 documents in a specific range for this phase.
     for (let i = 0; i < 1000; i++) {
-        bulk.insert({i: (phase * 1000) + i});
+        bulk.insert({i: phase * 1000 + i});
     }
     totalDocs += 1000;
 
@@ -26,7 +31,7 @@ let crudOpsForPhase = function(coll, phase) {
     // Update 50 documents.
     // For example, if phase is 2, documents [100, 150) will be updated to [-100, -150).
     let start = (phase - 1) * 100;
-    for (let j = start; j < (100 * phase) - 50; j++) {
+    for (let j = start; j < 100 * phase - 50; j++) {
         bulk.find({i: j}).update({$set: {i: -j}});
     }
     // Delete 25 documents.
@@ -43,19 +48,20 @@ crudOpsForPhase(testDB.hybrid, 0);
 assert.eq(totalDocs, testDB.hybrid.count());
 
 // Hang the build after the first document.
-const collScanFailPoint = configureFailPoint(
-    testDB, "hangIndexBuildDuringCollectionScanPhaseBeforeInsertion", {fieldsToMatch: {i: 1}});
+const collScanFailPoint = configureFailPoint(testDB, "hangIndexBuildDuringCollectionScanPhaseBeforeInsertion", {
+    fieldsToMatch: {i: 1},
+});
 
 // Start the background build.
-let bgBuild = startParallelShell(function() {
+let bgBuild = startParallelShell(function () {
     assert.commandWorked(db.hybrid.createIndex({i: 1}));
 }, conn.port);
 
 checkLog.containsJson(conn, 20386, {
     where: "before",
-    doc: function(doc) {
+    doc: function (doc) {
         return doc.i === 1;
-    }
+    },
 });
 
 // Phase 1: Collection scan and external sort
@@ -74,8 +80,9 @@ insertDumpFailPoint.wait();
 // Do some updates, inserts and deletes after the bulk builder has finished.
 
 // Hang after yielding
-const yieldFailPoint = configureFailPoint(
-    testDB, "hangDuringIndexBuildDrainYield", {namespace: testDB.hybrid.getFullName()});
+const yieldFailPoint = configureFailPoint(testDB, "hangDuringIndexBuildDrainYield", {
+    namespace: testDB.hybrid.getFullName(),
+});
 
 // Enable pause after first drain.
 const firstDrainFailPoint = configureFailPoint(testDB, "hangAfterIndexBuildFirstDrain");
@@ -95,27 +102,24 @@ yieldFailPoint.off();
 // Wait for first drain to finish.
 firstDrainFailPoint.wait();
 
-// Phase 3: Second drain
-// Enable pause after second drain.
-const secondDrainFailPoint = configureFailPoint(testDB, "hangAfterIndexBuildSecondDrain");
+// Enable pause after voting commit.
+const hangAfterVoteCommit = configureFailPoint(testDB, "hangIndexBuildBeforeSignalPrimaryForCommitReadiness");
 
 // Add inserts that must be consumed in the second drain.
 crudOpsForPhase(testDB.hybrid, 3);
 assert.eq(totalDocs, testDB.hybrid.count());
 
-// Allow second drain to start.
+// Allow the commit readiness signal to be sent, and wait until it has been sent.
 firstDrainFailPoint.off();
+hangAfterVoteCommit.wait();
 
-// Wait for second drain to finish.
-secondDrainFailPoint.wait();
-
-// Phase 4: Final drain and commit.
+// Phase 3: Final drain and commit.
 // Add inserts that must be consumed in the final drain.
 crudOpsForPhase(testDB.hybrid, 4);
 assert.eq(totalDocs, testDB.hybrid.count());
 
 // Allow final drain to start.
-secondDrainFailPoint.off();
+hangAfterVoteCommit.off();
 
 // Wait for build to complete.
 bgBuild();

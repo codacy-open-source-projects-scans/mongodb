@@ -29,39 +29,34 @@
 
 #include "mongo/db/service_context_d_test_fixture.h"
 
-#include <type_traits>
-
-#include "mongo/db/auth/authorization_backend_interface.h"
-#include "mongo/db/auth/authorization_backend_mock.h"
-#include "mongo/db/auth/authorization_client_handle_shard.h"
-#include "mongo/db/auth/authorization_manager_impl.h"
-#include "mongo/db/auth/authorization_router_impl.h"
-#include "mongo/db/auth/authorization_router_impl_for_test.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_impl.h"
-#include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/catalog/database_holder_impl.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/index_builds/index_builds_coordinator_mongod.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog_helper.h"
+#include "mongo/db/local_catalog/collection_impl.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/database_holder_impl.h"
+#include "mongo/db/local_catalog/ddl/replica_set_ddl_tracker.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state_factory_shard.h"
+#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_state_factory_mock.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
-#include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/s/collection_sharding_state_factory_shard.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_entry_point_shard_role.h"
 #include "mongo/db/storage/control/storage_control.h"
-#include "mongo/db/storage/recovery_unit_noop.h"
 #include "mongo/db/storage/storage_engine.h"
-#include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/storage/storage_options.h"
-#include "mongo/s/sharding_state.h"
+#include "mongo/db/topology/sharding_state.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/periodic_runner.h"
 #include "mongo/util/periodic_runner_factory.h"
+
+#include <type_traits>
 
 namespace mongo {
 
@@ -119,6 +114,10 @@ MongoDScopedGlobalServiceContextForTest::MongoDScopedGlobalServiceContextForTest
       _journalListener(std::move(options._journalListener)) {
     auto serviceContext = getServiceContext();
 
+    for (auto& observer : options._clientObservers) {
+        serviceContext->registerClientObserver(std::move(observer));
+    }
+
     auto setupClient = serviceContext->getService()->makeClient("MongoDSCTestCtor");
     AlternativeClientRegion acr(setupClient);
 
@@ -157,25 +156,19 @@ MongoDScopedGlobalServiceContextForTest::MongoDScopedGlobalServiceContextForTest
     _opObserverRegistry = observerRegistry.get();
     serviceContext->setOpObserver(std::move(observerRegistry));
 
+    ReplicaSetDDLTracker::create(serviceContext);
+
     // Set up the periodic runner to allow background job execution for tests that require it.
     auto runner = makePeriodicRunner(serviceContext);
     serviceContext->setPeriodicRunner(std::move(runner));
 
     storageGlobalParams.dbpath = _tempDir.path();
 
-    storageGlobalParams.ephemeral = options._ephemeral;
+    storageGlobalParams.inMemory = options._inMemory;
 
     // Since unit tests start in their own directories, by default skip lock file and metadata file
     // for faster startup.
-    {
-        auto initializeStorageEngineOpCtx = serviceContext->makeOperationContext(&cc());
-        shard_role_details::setRecoveryUnit(initializeStorageEngineOpCtx.get(),
-                                            std::make_unique<RecoveryUnitNoop>(),
-                                            WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
-
-        initializeStorageEngine(initializeStorageEngineOpCtx.get(), options._initFlags);
-    }
-
+    catalog::startUpStorageEngineAndCollectionCatalog(serviceContext, &cc(), options._initFlags);
     StorageControl::startStorageControls(serviceContext, true /*forTestOnly*/);
 
     DatabaseHolder::set(serviceContext, std::make_unique<DatabaseHolderImpl>());
@@ -185,6 +178,8 @@ MongoDScopedGlobalServiceContextForTest::MongoDScopedGlobalServiceContextForTest
     }
     CollectionShardingStateFactory::set(
         serviceContext, std::make_unique<CollectionShardingStateFactoryShard>(serviceContext));
+    DatabaseShardingStateFactory::set(serviceContext,
+                                      std::make_unique<DatabaseShardingStateFactoryMock>());
     serviceContext->getStorageEngine()->notifyStorageStartupRecoveryComplete();
 
     if (options._indexBuildsCoordinator) {
@@ -197,6 +192,8 @@ MongoDScopedGlobalServiceContextForTest::MongoDScopedGlobalServiceContextForTest
     if (_journalListener) {
         serviceContext->getStorageEngine()->setJournalListener(_journalListener.get());
     }
+
+    serviceContext->notifyStorageStartupRecoveryComplete();
 }
 
 MongoDScopedGlobalServiceContextForTest::~MongoDScopedGlobalServiceContextForTest() {
@@ -206,6 +203,7 @@ MongoDScopedGlobalServiceContextForTest::~MongoDScopedGlobalServiceContextForTes
 
     IndexBuildsCoordinator::get(opCtx.get())->shutdown(opCtx.get());
     CollectionShardingStateFactory::clear(getServiceContext());
+    DatabaseShardingStateFactory::clear(getServiceContext());
 
     {
         Lock::GlobalLock glk(opCtx.get(), MODE_X);
@@ -213,13 +211,14 @@ MongoDScopedGlobalServiceContextForTest::~MongoDScopedGlobalServiceContextForTes
         databaseHolder->closeAll(opCtx.get());
     }
 
-    shutdownGlobalStorageEngineCleanly(getServiceContext());
+    catalog::shutDownCollectionCatalogAndGlobalStorageEngineCleanly(getServiceContext(),
+                                                                    true /* memLeakAllowed */);
 
     std::swap(storageGlobalParams.engine, _stashedStorageParams.engine);
     std::swap(storageGlobalParams.engineSetByUser, _stashedStorageParams.engineSetByUser);
     std::swap(storageGlobalParams.repair, _stashedStorageParams.repair);
 
-    storageGlobalParams.reset();
+    storageGlobalParams.reset_forTest();
 }
 
 }  // namespace mongo

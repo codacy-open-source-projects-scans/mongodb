@@ -27,19 +27,6 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/smart_ptr.hpp>
-#include <cstdint>
-#include <memory>
-#include <mutex>
-#include <random>
-#include <tuple>
-#include <utility>
-#include <vector>
-
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
@@ -65,15 +52,13 @@
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/duration.h"
@@ -81,6 +66,19 @@
 #include "mongo/util/future_impl.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/timer.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <random>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/smart_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kProcessHealth
 
@@ -265,12 +263,13 @@ void ConfigServerHealthObserver::_runSmokeReadShardsCommand(std::shared_ptr<Chec
         findOneShardResponse = Grid::get(ctx->opCtx.get())
                                    ->shardRegistry()
                                    ->getConfigShard()
-                                   ->runCommand(ctx->opCtx.get(),
-                                                readPref,
-                                                NamespaceString::kConfigsvrShardsNamespace.dbName(),
-                                                findCmdBuilder.done(),
-                                                kServerRequestTimeout,
-                                                Shard::RetryPolicy::kNoRetry);
+                                   ->runCommandWithIndefiniteRetries(
+                                       ctx->opCtx.get(),
+                                       readPref,
+                                       NamespaceString::kConfigsvrShardsNamespace.dbName(),
+                                       findCmdBuilder.done(),
+                                       kServerRequestTimeout,
+                                       Shard::RetryPolicy::kNoRetry);
     } catch (const DBException& exc) {
         findOneShardResponse = StatusWith<Shard::CommandResponse>(exc.toStatus());
     }

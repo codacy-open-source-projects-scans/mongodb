@@ -31,7 +31,7 @@
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/commands/server_status.h"
+#include "mongo/db/commands/server_status/server_status.h"
 #include "mongo/db/operation_context.h"
 
 namespace mongo {
@@ -43,6 +43,8 @@ class WiredTigerKVEngine;
  */
 class WiredTigerServerStatusSection : public ServerStatusSection {
 public:
+    static constexpr StringData kServerStatusSectionName = "wiredTiger"_sd;
+
     using ServerStatusSection::ServerStatusSection;
     bool includeByDefault() const override;
     BSONObj generateSection(OperationContext* opCtx,

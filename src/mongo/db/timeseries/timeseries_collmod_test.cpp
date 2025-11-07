@@ -27,51 +27,48 @@
  *    it in the license file.
  */
 
-#include "mongo/db/catalog/create_collection.h"
-#include "mongo/db/coll_mod_gen.h"
-#include "mongo/db/commands/create_gen.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/repl/replication_coordinator_mock.h"
-#include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/timeseries/timeseries_collmod.h"
+
+#include "mongo/db/local_catalog/create_collection.h"
+#include "mongo/db/local_catalog/ddl/coll_mod_gen.h"
+#include "mongo/db/local_catalog/ddl/create_gen.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/repl/replication_coordinator_mock.h"
+#include "mongo/db/timeseries/timeseries_test_fixture.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
 namespace {
 
-class TimeseriesCollmodTest : public ServiceContextMongoDTest {
+class TimeseriesCollmodTest : public timeseries::TimeseriesTestFixture {
 protected:
     void setUp() override {
         // Set up mongod.
-        ServiceContextMongoDTest::setUp();
-
-        auto service = getServiceContext();
+        timeseries::TimeseriesTestFixture::setUp();
 
         // Set up required state for the replication coordinator.
+        auto service = _opCtx->getServiceContext();
+
         auto replCoord = std::make_unique<repl::ReplicationCoordinatorMock>(service);
         ASSERT_OK(replCoord->setFollowerMode(repl::MemberState::RS_PRIMARY));
         repl::ReplicationCoordinator::set(service, std::move(replCoord));
+        repl::createOplog(_opCtx);
     }
+    NamespaceString testNss = NamespaceString::createNamespaceString_forTest("test.curColl");
 };
 
-ServiceContext::UniqueOperationContext makeOpCtx() {
-    auto opCtx = cc().makeOperationContext();
-    repl::createOplog(opCtx.get());
-    return opCtx;
-}
 
 // Collmods with timeseries options should be correctly translated to timeseries buckets
 TEST_F(TimeseriesCollmodTest, TimeseriesCollModCommandTranslation) {
-    auto timeseriesOptions = TimeseriesOptions("t");
+    auto timeseriesOptions = TimeseriesOptions(std::string{_timeField});
     auto collModTimeseries = CollModTimeseries();
 
     // Set all of the fields that makeTimeseriesBucketsCollModCommand transfers over to something
     // retrievable in the returned CollMod
     collModTimeseries.setGranularity(BucketGranularityEnum::Seconds);
-    auto testNss = NamespaceString::createNamespaceString_forTest("test.curColl");
-    CollMod collModCmd(testNss);
-    collModCmd.setValidator(BSON("a"
-                                 << "1"));
+    CollMod collModCmd(_ns1);
+    collModCmd.setValidator(BSON("a" << "1"));
     collModCmd.setValidationLevel(ValidationLevelEnum::strict);
     collModCmd.setValidationAction(ValidationActionEnum::errorAndLog);
     collModCmd.setViewOn("test.view"_sd);
@@ -90,9 +87,7 @@ TEST_F(TimeseriesCollmodTest, TimeseriesCollModCommandTranslation) {
         timeseries::makeTimeseriesBucketsCollModCommand(timeseriesOptions, collModCmd);
 
     ASSERT(collModBuckets);
-    ASSERT((*collModBuckets->getValidator())
-               .binaryEqual(BSON("a"
-                                 << "1")));
+    ASSERT((*collModBuckets->getValidator()).binaryEqual(BSON("a" << "1")));
     ASSERT_EQ(*(collModBuckets->getValidationLevel()), ValidationLevelEnum::strict);
     ASSERT_EQ(*(collModBuckets->getValidationAction()), ValidationActionEnum::errorAndLog);
     ASSERT_EQ(collModBuckets->getViewOn(), "test.view"_sd);
@@ -110,9 +105,8 @@ TEST_F(TimeseriesCollmodTest, TimeseriesCollModIndexTranslation) {
     auto timeseriesIndexSpec = BSON("tm" << 1);
     BSONObj expectedTranslation = BSON("control.min.tm" << 1 << "control.max.tm" << 1);
 
-    auto testNss = NamespaceString::createNamespaceString_forTest("test.curColl");
-    CollMod collModCmd(testNss);
-    auto timeseriesOptions = TimeseriesOptions("t");
+    CollMod collModCmd(_ns1);
+    auto timeseriesOptions = TimeseriesOptions(std::string{_timeField});
     auto collModTimeseries = CollModTimeseries();
     auto collModIndex = CollModIndex();
     collModIndex.setKeyPattern(timeseriesIndexSpec);
@@ -128,9 +122,8 @@ TEST_F(TimeseriesCollmodTest, TimeseriesCollModIndexTranslation) {
 TEST_F(TimeseriesCollmodTest, TimeseriesCollModBadIndex) {
     auto badIndex = BSON("$hint" << BSON("field" << 1));
 
-    auto testNss = NamespaceString::createNamespaceString_forTest("test.curColl");
     CollMod collModCmd(testNss);
-    auto timeseriesOptions = TimeseriesOptions("t");
+    auto timeseriesOptions = TimeseriesOptions(std::string{_timeField});
     auto collModTimeseries = CollModTimeseries();
     auto collModIndex = CollModIndex();
     collModIndex.setKeyPattern(badIndex);
@@ -148,48 +141,41 @@ TEST_F(TimeseriesCollmodTest, TimeseriesCollModBadIndex) {
 
 // If view translation is required, a new Collmod pointer should be returned
 TEST_F(TimeseriesCollmodTest, TimeseriesCollModViewTranslation) {
-    auto timeseriesOptions = TimeseriesOptions("t");
+    auto timeseriesOptions = TimeseriesOptions(std::string{_timeField});
     auto collModTimeseries = CollModTimeseries();
 
     // Modify the timeseries options to trigger a change
     collModTimeseries.setGranularity(BucketGranularityEnum::Minutes);
 
-    auto testNss = NamespaceString::createNamespaceString_forTest("test.curColl");
-    CollMod collModCmd(testNss);
+    CollMod collModCmd(_ns1);
     collModCmd.setTimeseries(collModTimeseries);
 
     auto collModView = timeseries::makeTimeseriesViewCollModCommand(timeseriesOptions, collModCmd);
 
     ASSERT(collModView);
     ASSERT((*collModView->getPipeline())[0].binaryEqual(
-        BSON("$_internalUnpackBucket" << BSON("timeField"
-                                              << "t"
-                                              << "bucketMaxSpanSeconds" << 86400))));
+        BSON("$_internalUnpackBucket"
+             << BSON("timeField" << _timeField << "bucketMaxSpanSeconds" << 86400))));
 }
 
 // Checks that view translation is skipped if the command does not have a timeseries mod
 TEST_F(TimeseriesCollmodTest, TimeseriesCollmodViewTranslationNoTimeseriesMod) {
-    auto timeseriesOptions = TimeseriesOptions("t");
-
-    auto testNss = NamespaceString::createNamespaceString_forTest("test.curColl");
+    auto timeseriesOptions = TimeseriesOptions(std::string{_timeField});
     CollMod collModCmd(testNss);
-
     auto collModView = timeseries::makeTimeseriesViewCollModCommand(timeseriesOptions, collModCmd);
-
     ASSERT(!collModView);
 }
 
 // If the timeseries options are invalid, a null pointer should be returned
 TEST_F(TimeseriesCollmodTest, TimeseriesCollModViewTranslationInvalidMod) {
-    auto timeseriesOptions = TimeseriesOptions("t");
+    auto timeseriesOptions = TimeseriesOptions(std::string{_timeField});
     auto collModTimeseries = CollModTimeseries();
 
     // There is an internal check that prevents these options from being edited at the same time.
     collModTimeseries.setGranularity(BucketGranularityEnum::Seconds);
     collModTimeseries.setBucketRoundingSeconds(boost::optional<std::int32_t>{10});
 
-    auto testNss = NamespaceString::createNamespaceString_forTest("test.curColl");
-    CollMod collModCmd(testNss);
+    CollMod collModCmd(_ns1);
     collModCmd.setTimeseries(collModTimeseries);
 
     auto collModView = timeseries::makeTimeseriesViewCollModCommand(timeseriesOptions, collModCmd);
@@ -198,24 +184,25 @@ TEST_F(TimeseriesCollmodTest, TimeseriesCollModViewTranslationInvalidMod) {
 
 // Check that timeseries options are correctly translated to a new CollMod.
 TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslation) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagTSBucketingParametersUnchanged", true);
+
     auto collModTimeseries = CollModTimeseries();
-    auto opCtx = makeOpCtx();
     // Create a command that requires timeseries translation.
     collModTimeseries.setGranularity(BucketGranularityEnum::Minutes);
-    auto testNss = NamespaceString::createNamespaceString_forTest("test.curColl");
     CollMod collModCmd(testNss);
     collModCmd.setTimeseries(collModTimeseries);
 
     // Create an existing collection with timeseries options.
-    auto timeseriesOptions = TimeseriesOptions("t");
+    auto timeseriesOptions = TimeseriesOptions(std::string{_timeField});
     timeseriesOptions.setBucketRoundingSeconds(1000);
     timeseriesOptions.setBucketMaxSpanSeconds(1000);
     CreateCommand cmd = CreateCommand(testNss);
     cmd.getCreateCollectionRequest().setTimeseries(std::move(timeseriesOptions));
-    uassertStatusOK(createCollection(opCtx.get(), cmd));
+    uassertStatusOK(createCollection(_opCtx, cmd));
 
     auto status = timeseries::processCollModCommandWithTimeSeriesTranslation(
-        opCtx.get(), testNss, collModCmd, false, nullptr);
+        _opCtx, testNss, collModCmd, false, nullptr);
 
     ASSERT_OK(status);
     // Editing timeseries options sets a flag in the collection that we can check.
@@ -223,10 +210,10 @@ TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslation) {
         NamespaceString::createNamespaceString_forTest("test.system.buckets.curColl");
     {
         const auto collectionAcquisition = acquireCollection(
-            opCtx.get(),
+            _opCtx,
             CollectionAcquisitionRequest(bucketsColl,
                                          PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
-                                         repl::ReadConcernArgs::get(opCtx.get()),
+                                         repl::ReadConcernArgs::get(_opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
         // Assert the bucketing parameters have changed on the collection.
@@ -234,45 +221,45 @@ TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslation) {
         ASSERT_TRUE(
             *collectionAcquisition.getCollectionPtr()->timeseriesBucketingParametersHaveChanged());
     }
+    _addNsToValidate(testNss);
 }
 
 // If timeseries translation and view translation are both required, both should be executed.
 TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslationAndView) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagTSBucketingParametersUnchanged", true);
+
     auto collModTimeseries = CollModTimeseries();
-    auto opCtx = makeOpCtx();
     // Create a command that requires timeseries translation.
     collModTimeseries.setGranularity(BucketGranularityEnum::Minutes);
-    auto testNss = NamespaceString::createNamespaceString_forTest("test.curColl");
     CollMod collModCmd(testNss);
     collModCmd.setTimeseries(collModTimeseries);
 
     // Create an existing collection with timeseries options.
-    auto timeseriesOptions = TimeseriesOptions("t");
+    auto timeseriesOptions = TimeseriesOptions(std::string{_timeField});
     timeseriesOptions.setBucketRoundingSeconds(100);
     timeseriesOptions.setBucketMaxSpanSeconds(100);
     CreateCommand cmd = CreateCommand(testNss);
     cmd.getCreateCollectionRequest().setTimeseries(std::move(timeseriesOptions));
-    uassertStatusOK(createCollection(opCtx.get(), cmd));
+    uassertStatusOK(createCollection(_opCtx, cmd));
 
-    auto viewPrior = CollectionCatalog::get(opCtx.get())
-                         ->lookupViewWithoutValidatingDurable(opCtx.get(), testNss);
+    auto viewPrior =
+        CollectionCatalog::get(_opCtx)->lookupViewWithoutValidatingDurable(_opCtx, testNss);
     ASSERT(viewPrior);
     ASSERT(viewPrior->pipeline()[0].binaryEqual(
-        BSON("$_internalUnpackBucket" << BSON("timeField"
-                                              << "t"
-                                              << "bucketMaxSpanSeconds" << 100))));
+        BSON("$_internalUnpackBucket"
+             << BSON("timeField" << _timeField << "bucketMaxSpanSeconds" << 100))));
 
     auto status = timeseries::processCollModCommandWithTimeSeriesTranslation(
-        opCtx.get(), testNss, collModCmd, true, nullptr);
+        _opCtx, testNss, collModCmd, true, nullptr);
 
-    auto viewAfter = CollectionCatalog::get(opCtx.get())
-                         ->lookupViewWithoutValidatingDurable(opCtx.get(), testNss);
+    auto viewAfter =
+        CollectionCatalog::get(_opCtx)->lookupViewWithoutValidatingDurable(_opCtx, testNss);
     ASSERT(viewAfter);
     // A bucket granularity of minutes results in the pipeline being updated to 86400 seconds.
     ASSERT(viewAfter->pipeline()[0].binaryEqual(
-        BSON("$_internalUnpackBucket" << BSON("timeField"
-                                              << "t"
-                                              << "bucketMaxSpanSeconds" << 86400))));
+        BSON("$_internalUnpackBucket"
+             << BSON("timeField" << _timeField << "bucketMaxSpanSeconds" << 86400))));
 
     // View translation is successful if this function returns OK.
     ASSERT_OK(status);
@@ -281,10 +268,10 @@ TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslationAndV
         NamespaceString::createNamespaceString_forTest("test.system.buckets.curColl");
     {
         const auto collectionAcquisition = acquireCollection(
-            opCtx.get(),
+            _opCtx,
             CollectionAcquisitionRequest(bucketsColl,
                                          PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
-                                         repl::ReadConcernArgs::get(opCtx.get()),
+                                         repl::ReadConcernArgs::get(_opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
         // Assert the bucketing parameters have changed on the collection.
@@ -292,36 +279,36 @@ TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslationAndV
         ASSERT_TRUE(
             *collectionAcquisition.getCollectionPtr()->timeseriesBucketingParametersHaveChanged());
     }
+    _addNsToValidate(testNss);
 }
 
 // Collmod processing will proceed normally on a non timeseries collection.
 TEST_F(TimeseriesCollmodTest, ProcessCollModCommandWithTimeseriesTranslationNotTimeseries) {
-    auto timeseriesOptions = TimeseriesOptions("t");
+    auto timeseriesOptions = TimeseriesOptions(std::string{_timeField});
     auto collModTimeseries = CollModTimeseries();
-    auto opCtx = makeOpCtx();
 
     // Create a non timeseries collection.
-    auto testNss = NamespaceString::createNamespaceString_forTest("test.curColl");
     CollMod collModCmd(testNss);
     CreateCommand cmd = CreateCommand(testNss);
-    uassertStatusOK(createCollection(opCtx.get(), cmd));
+    uassertStatusOK(createCollection(_opCtx, cmd));
 
     BSONObjBuilder result;
     auto status = timeseries::processCollModCommandWithTimeSeriesTranslation(
-        opCtx.get(), testNss, collModCmd, false, &result);
+        _opCtx, testNss, collModCmd, false, &result);
     ASSERT_OK(status);
     // Enforce no spurious timeseries changes.
     {
         const auto collectionAcquisition = acquireCollection(
-            opCtx.get(),
+            _opCtx,
             CollectionAcquisitionRequest(testNss,
                                          PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
-                                         repl::ReadConcernArgs::get(opCtx.get()),
+                                         repl::ReadConcernArgs::get(_opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
         ASSERT_TRUE(collectionAcquisition.exists());
         ASSERT_FALSE(collectionAcquisition.getCollectionPtr()->getTimeseriesOptions());
     }
+    _addNsToValidate(testNss);
 }
 
 }  // namespace

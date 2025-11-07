@@ -4,12 +4,15 @@ import argparse
 import collections
 import os
 import os.path
+import platform
 import random
 import shlex
+import statistics
 import subprocess
 import sys
 import textwrap
 import time
+from abc import ABC, abstractmethod
 from logging import Logger
 from typing import List, Optional
 
@@ -35,12 +38,14 @@ from buildscripts.resmokelib.plugin import PluginInterface, Subcommand
 from buildscripts.resmokelib.run import (
     generate_multiversion_exclude_tags,
     list_tags,
-    runtime_recorder,
 )
 from buildscripts.resmokelib.suitesconfig import get_suite_files
 from buildscripts.resmokelib.testing.docker_cluster_image_builder import build_images
 from buildscripts.resmokelib.testing.suite import Suite
+from buildscripts.resmokelib.utils import runtime_recorder
 from buildscripts.resmokelib.utils.dictionary import get_dict_value
+from buildscripts.util.download_utils import get_s3_client
+from buildscripts.util.teststats import HistoricTaskData
 
 _INTERNAL_OPTIONS_TITLE = "Internal Options"
 _MONGODB_SERVER_OPTIONS_TITLE = "MongoDB Server Options"
@@ -101,7 +106,9 @@ class TestRunner(Subcommand):
             elif self.__command == "generate-matrix-suites":
                 suitesconfig.generate()
             elif config.DRY_RUN == "tests":
-                self.dry_run()
+                self.dry_run(only_included=False)
+            elif config.DRY_RUN == "included-tests":
+                self.dry_run(only_included=True)
             else:
                 self.run_tests()
         finally:
@@ -147,7 +154,7 @@ class TestRunner(Subcommand):
                     ):
                         tag_docs[tag_name] = doc
 
-                    if suite_name in config.SUITE_FILES:  # pylint: disable=unsupported-membership-test
+                    if suite_name in config.SUITE_FILES:
                         out_tag_names.append(tag_name)
 
         if config.SUITE_FILES == [config.DEFAULTS["suite_files"]]:
@@ -162,7 +169,6 @@ class TestRunner(Subcommand):
         generate_multiversion_exclude_tags.generate_exclude_yaml(
             config.MULTIVERSION_BIN_VERSION,
             config.EXCLUDE_TAGS_FILE_PATH,
-            config.EXPANSIONS_FILE,
             self._resmoke_logger,
         )
 
@@ -180,15 +186,18 @@ class TestRunner(Subcommand):
                 memberships[test] = test_membership[test]
         return memberships
 
-    def dry_run(self):
+    def dry_run(self, only_included=False):
         """List which tests would run and which tests would be excluded in a resmoke invocation."""
         suites = self._get_suites()
         for suite in suites:
             self._shuffle_tests(suite)
             sb = ["Tests that would be run in suite {}".format(suite.get_display_name())]
             sb.extend(suite.tests or ["(no tests)"])
-            sb.append("Tests that would be excluded from suite {}".format(suite.get_display_name()))
-            sb.extend(suite.excluded or ["(no tests)"])
+            if not only_included:
+                sb.append(
+                    "Tests that would be excluded from suite {}".format(suite.get_display_name())
+                )
+                sb.extend(suite.excluded or ["(no tests)"])
             self._exec_logger.info("\n".join(sb))
 
     def run_tests(self):
@@ -294,7 +303,6 @@ class TestRunner(Subcommand):
         set_parameters - A string consisting with a key of being the parameter being fuzzed and the value being the fuzzed parameter value.
                         e.g.:
                         analyzeShardKeySplitPointExpirationSecs: 50
-                        chunkMigrationConcurrency: 4
                         ...
                         mirrorReads:
                             samplingRate: 0.25
@@ -302,7 +310,7 @@ class TestRunner(Subcommand):
         Output:
         A string that can be used for an argument to --mongo(d/s)SetParameters
         e.g.:
-        '{analyzeShardKeySplitPointExpirationSecs: 216, chunkMigrationConcurrency: 4, ..., mirrorReads: {samplingRate: 0.25}}'
+        '{analyzeShardKeySplitPointExpirationSecs: 216, ..., mirrorReads: {samplingRate: 0.25}}'
         """
 
         def format_item(key, value):
@@ -326,16 +334,15 @@ class TestRunner(Subcommand):
         set_parameters - A string consisting with a key of being the parameter being fuzzed and the value being the fuzzed parameter value.
                          e.g.:
                          analyzeShardKeySplitPointExpirationSecs: 50
-                         chunkMigrationConcurrency: 4
                          ...
 
         Output:
         e.g.:
         analyzeShardKeySplitPointExpirationSecs: 216, 50: 1, max: 300
-        chunkMigrationConcurrency: 4, min: 1, max: 16, options: [1, 4, 16]
+        min: 1, max: 16, options: [1, 4, 16]
         ...
         """
-        from buildscripts.resmokelib.config_fuzzer_limits import (
+        from buildscripts.resmokelib.generate_fuzz_config.config_fuzzer_limits import (
             config_fuzzer_extra_configs,
             config_fuzzer_params,
         )
@@ -380,7 +387,9 @@ class TestRunner(Subcommand):
         debug_mode.slow_checkpoint: false
         eviction_checkpoint_target: 4, min: 1, max: 99
         """
-        from buildscripts.resmokelib.config_fuzzer_wt_limits import config_fuzzer_params
+        from buildscripts.resmokelib.generate_fuzz_config.config_fuzzer_wt_limits import (
+            config_fuzzer_params,
+        )
 
         # check_limit_dict checks if a parameter is in a dictionary that may have the parameter's mins and maxes (limits).
         def check_limit_dict(limit_dict, param_name):
@@ -493,7 +502,16 @@ class TestRunner(Subcommand):
 
         # We don't need to return the resmoke invocation if we aren't running on evergreen.
         if not config.EVERGREEN_TASK_ID:
-            print("Skipping local invocation because evergreen task id was not provided.")
+            self._resmoke_logger.info(
+                "Skipping local invocation because evergreen task id was not provided."
+            )
+            return
+
+        if not os.path.exists(config.EVERGREEN_PROJECT_CONFIG_PATH):
+            self._resmoke_logger.warning(
+                "Skipping local invocation because the Evergreen config '%s' does not exist.",
+                config.EVERGREEN_PROJECT_CONFIG_PATH,
+            )
             return
 
         evg_conf = parse_evergreen_file(config.EVERGREEN_PROJECT_CONFIG_PATH)
@@ -694,6 +712,22 @@ class TestRunner(Subcommand):
                 parent_resmoke_ctime = proc.environ().get("RESMOKE_PARENT_CTIME")
                 if not parent_resmoke_pid:
                     continue
+                if platform.system() == "Darwin":
+                    # On macOS, 'psutil.Process.environ' gives non-sensical output if the calling process
+                    # does not have permission/entitlement to do so. Refer to the doc for psutil at
+                    # https://psutil.readthedocs.io/en/stable/#psutil.Process.environ.
+                    # Worst case, it returns the environment variables of a different process,
+                    # which may unluckily contain RESMOKE_PARENT_PROCESS. To avoid attempting to kill arbitrary
+                    # processes, double-check the environment against the results from 'ps'. Double-check rather
+                    # than use ps for all processes because the subprocess handling is slower in the common case
+                    # where there are no rogue resmoke processes.
+                    cmd = ["ps", "-E", str(proc.pid)]
+                    ps_proc = subprocess.run(cmd, capture_output=True)
+                    if (
+                        f"RESMOKE_PARENT_PROCESS={parent_resmoke_pid}"
+                        not in ps_proc.stdout.decode()
+                    ):
+                        continue
                 if psutil.pid_exists(int(parent_resmoke_pid)):
                     # Double check `parent_resmoke_pid` is really a rooting resmoke process. Having
                     # the RESMOKE_PARENT_PROCESS environment variable proves it is a process which
@@ -783,7 +817,7 @@ class TestRunner(Subcommand):
 
     @TRACER.start_as_current_span("run.__init__._execute_suite")
     def _execute_suite(self, suite: Suite) -> bool:
-        """Execute Fa suite and return True if interrupted, False otherwise."""
+        """Execute a suite and return True if interrupted, False otherwise."""
         execute_suite_span = trace.get_current_span()
         execute_suite_span.set_attributes(attributes=suite.get_suite_otel_attributes())
         self._shuffle_tests(suite)
@@ -855,7 +889,7 @@ class TestRunner(Subcommand):
                 }
             )
             return True
-        except:  # pylint: disable=bare-except
+        except:
             self._exec_logger.exception(
                 "Encountered an error when running %ss of suite %s.",
                 suite.test_kind,
@@ -880,10 +914,93 @@ class TestRunner(Subcommand):
         )
         return False
 
+    class ShuffleStrategy(ABC):
+        @abstractmethod
+        def shuffle(self, tests):
+            pass
+
+    class RandomShuffle(ShuffleStrategy):
+        """A completely random shuffle."""
+
+        def shuffle(self, tests):
+            random.shuffle(tests)
+            return tests
+
+    class LongestFirstPartialShuffle(ShuffleStrategy):
+        """
+        A partial shuffle that prioritizes starting longer running tests earlier.
+
+        For an illustration of typical shuffling results, see the test for this
+        in buildscripts/tests/resmokelib/run/test_shuffle_tests.py
+        """
+
+        def __init__(self, historic_task_data: HistoricTaskData):
+            self.runtimes_historic = {}
+            for result in historic_task_data.historic_test_results:
+                self.runtimes_historic[result.test_name] = result.avg_duration
+
+        def shuffle(self, tests):
+            """
+            Performs a weighted_shuffle, where tests with a higher weight are more likely to be started earlier.
+            The weight is determined by how many standard deviations above the mean runtime a particular test is.
+            All tests below the mean or without historic data are equal weighted.
+            """
+            total, mean, stdev = self.compute_stats(tests)
+            if not total:
+                # Zero tests had historic runtime information
+                return TestRunner.RandomShuffle().shuffle(tests)
+            arr = []
+            for test in tests:
+                if test in self.runtimes_historic:
+                    stdevs_above_mean = (self.runtimes_historic[test] - mean) / stdev
+                    weight = max(
+                        stdevs_above_mean * len(tests), 1
+                    )  # max(_, 1) ensures positive, non-zero weight.
+                else:
+                    weight = 1
+                arr.append((test, weight))
+            return self.weighted_shuffle(arr)
+
+        def compute_stats(self, tests):
+            total = 0
+            runtimes = []
+            for test in tests:
+                if not isinstance(test, str):
+                    # `test` is itself many tests, in parallel_fsm_workload_test suites
+                    return None, None, None
+                if test in self.runtimes_historic:
+                    total += self.runtimes_historic[test]
+                    runtimes.append(self.runtimes_historic[test])
+            if len(runtimes) < 2:
+                # There is not enough tests with historic data to compute stdev
+                return None, None, None
+            mean = statistics.mean(runtimes)
+            stdev = statistics.stdev(runtimes)
+            return total, mean, stdev
+
+        def weighted_shuffle(self, arr):
+            """Shuffle an array of tuples (element, weight). Weights should be positive, non-zero."""
+            for i, _ in enumerate(arr):
+                v = self.weighted_index_choice(arr[i:])
+                arr[i + v], arr[i] = arr[i], arr[i + v]
+            return [test for test, _ in arr]
+
+        def weighted_index_choice(self, arr):
+            total_weight = sum(weight for _, weight in arr)
+            choice = random.random() * total_weight
+            i = 0
+            cur = 0
+            while True:
+                weight = arr[i][1]
+                cur += weight
+                if choice <= cur:
+                    return i
+                i += 1
+
     def _shuffle_tests(self, suite: Suite):
         """Shuffle the tests if the shuffle cli option was set."""
         random.seed(config.RANDOM_SEED)
-        if not config.SHUFFLE:
+        if not config.SHUFFLE_STRATEGY:
             return
         self._exec_logger.info(
             "Shuffling order of tests for %ss in suite %s. The seed is %d.",
@@ -891,9 +1008,8 @@ class TestRunner(Subcommand):
             suite.get_display_name(),
             config.RANDOM_SEED,
         )
-        random.shuffle(suite.tests)
+        suite.tests = config.SHUFFLE_STRATEGY.shuffle(suite.tests)
 
-    # pylint: disable=inconsistent-return-statements
     def _get_suites(self) -> List[Suite]:
         """Return the list of suites for this resmoke invocation."""
         try:
@@ -940,11 +1056,29 @@ class TestRunner(Subcommand):
     def _setup_archival(self):
         """Set up the archival feature if enabled in the cli options."""
         if config.ARCHIVE_FILE:
+            match config.ARCHIVE_MODE:
+                case "s3":
+                    base_path = "{}/{}/{}/datafiles/{}-".format(
+                        config.EVERGREEN_PROJECT_NAME,
+                        config.EVERGREEN_VARIANT_NAME,
+                        config.EVERGREEN_REVISION,
+                        config.EVERGREEN_TASK_ID,
+                    )
+                    archive_strategy = utils.archival.ArchiveToS3(
+                        config.ARCHIVE_BUCKET, base_path, get_s3_client(), self._exec_logger
+                    )
+                case "directory":
+                    archive_strategy = utils.archival.ArchiveToDirectory(
+                        config.ARCHIVE_DIRECTORY, self._exec_logger
+                    )
+                case "test_archival":
+                    archive_strategy = utils.archival.TestArchival(self._exec_logger)
             self._archive = utils.archival.Archival(
                 archival_json_file=config.ARCHIVE_FILE,
                 limit_size_mb=config.ARCHIVE_LIMIT_MB,
                 limit_files=config.ARCHIVE_LIMIT_TESTS,
                 logger=self._exec_logger,
+                archive_strategy=archive_strategy,
             )
 
     def _exit_archival(self):
@@ -1186,10 +1320,24 @@ class RunPlugin(PluginInterface):
         )
 
         parser.add_argument(
+            "--testTimeout",
+            dest="test_timeout",
+            help="Timeout for execution of a single test, in seconds.",
+        )
+
+        parser.add_argument(
             "--dbtest",
             dest="dbtest_executable",
             metavar="PATH",
             help="The path to the dbtest executable for resmoke to use.",
+        )
+
+        parser.add_argument(
+            "--multiversionDir",
+            dest="multiversion_dirs",
+            action="append",
+            metavar="MULTIVERSION_DIR",
+            help="Directory to search for multiversion binaries. Can be specified multiple times.",
         )
 
         parser.add_argument(
@@ -1337,7 +1485,7 @@ class RunPlugin(PluginInterface):
             "--dryRun",
             action="store",
             dest="dry_run",
-            choices=("off", "tests"),
+            choices=("off", "tests", "included-tests"),
             metavar="MODE",
             help=(
                 "Instead of running the tests, outputs the tests that would be run"
@@ -1377,6 +1525,18 @@ class RunPlugin(PluginInterface):
             metavar="{key1: value1, key2: value2, ..., keyN: valueN}",
             help=(
                 "Passes one or more --setParameter options to all mongocryptd processes"
+                " started by resmoke.py. The argument is specified as bracketed YAML -"
+                " i.e. JSON with support for single quoted and unquoted keys."
+            ),
+        )
+
+        parser.add_argument(
+            "--setShellParameters",
+            dest="mongo_set_parameters",
+            action="append",
+            metavar="{key1: value1, key2: value2, ..., keyN: valueN}",
+            help=(
+                "Passes one or more --setParameter options to all mongo shell processes"
                 " started by resmoke.py. The argument is specified as bracketed YAML -"
                 " i.e. JSON with support for single quoted and unquoted keys."
             ),
@@ -1508,11 +1668,11 @@ class RunPlugin(PluginInterface):
         parser.add_argument(
             "--shuffle",
             action="store_const",
-            const="on",
+            const="random",
             dest="shuffle",
             help=(
                 "Randomizes the order in which tests are executed. This is equivalent"
-                " to specifying --shuffleMode=on."
+                " to specifying --shuffleMode=random."
             ),
         )
 
@@ -1520,10 +1680,12 @@ class RunPlugin(PluginInterface):
             "--shuffleMode",
             action="store",
             dest="shuffle",
-            choices=("on", "off", "auto"),
-            metavar="ON|OFF|AUTO",
+            choices=("random", "longest-first", "off", "auto"),
+            metavar="random|longest-first|off|auto",
             help=(
                 "Controls whether to randomize the order in which tests are executed."
+                " The longest-first option requires historic runtime information via the evergreen"
+                " project/variant/task name, otherwise fallsback to completely random."
                 " Defaults to auto when not supplied. auto enables randomization in"
                 " all cases except when the number of jobs requested is 1."
             ),
@@ -1580,6 +1742,24 @@ class RunPlugin(PluginInterface):
             help="Have resmoke redirect all output to FILE. Additionally, stdout will contain lines that typically indicate that the test is making progress, or an error has happened. If `mrlog` is in the path it will be used. `tee` and `egrep` must be in the path.",
         )
 
+        # TODO-99797: Change the default value or remove this parameter completely when the
+        # depandent tools are ready to accept the new format.
+        parser.add_argument(
+            "--logFormat",
+            dest="log_format",
+            choices=("json", "plain"),
+            default="plain",
+            help="Resmoke output log format. Defaults to '%(default)s'.",
+        )
+
+        parser.add_argument(
+            "--logLevel",
+            dest="log_level",
+            choices=("ERROR", "WARNING", "INFO", "DEBUG"),
+            default="INFO",
+            help="Resmoke output log severity level. Defaults to '%(default)s'.",
+        )
+
         parser.add_argument(
             "--runAllFeatureFlagTests",
             dest="run_all_feature_flag_tests",
@@ -1603,7 +1783,7 @@ class RunPlugin(PluginInterface):
             dest="additional_feature_flags",
             action="append",
             metavar="featureFlag1, featureFlag2, ...",
-            help="Additional feature flags",
+            help="Additional feature flags to enable, even if they would be disabled by --disableUnreleasedIFRFlags.",
         )
 
         parser.add_argument(
@@ -1616,10 +1796,17 @@ class RunPlugin(PluginInterface):
 
         parser.add_argument(
             "--disableFeatureFlags",
-            dest="disable_feature_flags",
+            dest="excluded_feature_flags",
             action="append",
             metavar="featureFlag1, featureFlag2, ...",
-            help="Disable tests with certain feature flags",
+            help="Explicitly disable feature flags, even if they wouold be enabled by --runAllFeatureFlagTests.",
+        )
+
+        parser.add_argument(
+            "--disableUnreleasedIFRFlags",
+            dest="disable_unreleased_ifr_flags",
+            action="store_true",
+            help="Explicitly disable Incremental Rollout Feature (IFR) flags in the 'in_development' or 'rollout' state, even if they would be enabled by --runAllFeatureFlagTests.",
         )
 
         parser.add_argument(
@@ -1632,6 +1819,64 @@ class RunPlugin(PluginInterface):
             dest="tag_files",
             metavar="TAG_FILES",
             help="One or more YAML files that associate tests and tags.",
+        )
+
+        parser.add_argument(
+            "--enableEvergreenApiTestSelection",
+            dest="enable_evergreen_api_test_selection",
+            action="store_true",
+            help="Enable test selection using the Evergreen API",
+        )
+
+        parser.add_argument(
+            "--evergreenTestSelectionStrategy",
+            dest="test_selection_strategies_array",
+            action="append",
+            help="Specify test selection strategy. Can be specified multiple times.",
+        )
+
+        parser.add_argument(
+            "--mochagrep",
+            dest="mocha_grep",
+            type=str,
+            metavar="REGEX",
+            help="Regex to filter mocha-style tests to run.",
+        )
+
+        parser.add_argument(
+            "--noValidateSelectorPaths",
+            dest="validate_selector_paths",
+            action="store_false",
+            help="Skip validating that all paths in suite config selectors are valid.",
+        )
+
+        parser.add_argument(
+            "--shardIndex", dest="shard_index", help="The shard index of the shard to run."
+        )
+
+        parser.add_argument("--shardCount", dest="shard_count", help="The total shard count.")
+
+        parser.add_argument(
+            "--historicTestRuntimes",
+            dest="historic_test_runtimes",
+            help='JSON containing historic test runtime, like [{"test_name": test.js, "avg_duration_pass": 1.4}]',
+        )
+        parser.add_argument(
+            "--mongoVersionFile",
+            dest="mongo_version_file",
+            help="A YAML file containing the current `mongo_version`",
+        )
+        parser.add_argument(
+            "--releasesFile",
+            dest="releases_file",
+            help="An explicit releases YAML, if you do not want resmoke to fetch the latest one automatically.",
+        )
+        parser.add_argument(
+            "--modules",
+            dest="modules",
+            type=str,
+            help="Comma separated list of modules enabled, by default all modules that exist on dist will be enabled.",
+            default="default",
         )
 
         configure_resmoke.add_otel_args(parser)
@@ -1709,16 +1954,6 @@ class RunPlugin(PluginInterface):
         )
 
         mongodb_server_options.add_argument(
-            "--enableEnterpriseTests",
-            action="store",
-            dest="enable_enterprise_tests",
-            default="on",
-            choices=("on", "off"),
-            metavar="ON|OFF",
-            help=("Enable or disable enterprise tests. Defaults to 'on'."),
-        )
-
-        mongodb_server_options.add_argument(
             "--storageEngine",
             dest="storage_engine",
             metavar="ENGINE",
@@ -1730,6 +1965,14 @@ class RunPlugin(PluginInterface):
             dest="storage_engine_cache_size_gb",
             metavar="CONFIG",
             help="Sets the storage engine cache size configuration" " setting for all mongod's.",
+        )
+
+        mongodb_server_options.add_argument(
+            "--storageEngineCacheSizePct",
+            dest="storage_engine_cache_size_pct",
+            metavar="CONFIG",
+            help="Sets the storage engine cache size configuration as a percentage"
+            " setting for all mongod's.",
         )
 
         mongodb_server_options.add_argument(
@@ -1804,11 +2047,9 @@ class RunPlugin(PluginInterface):
         mongodb_server_options.add_argument(
             "--fuzzMongodConfigs",
             dest="fuzz_mongod_configs",
-            help="Randomly chooses mongod parameters that were not specified. Use 'stress' to fuzz "
-            "all configs including stressful storage configurations that may significantly "
-            "slow down the server. Use 'normal' to only fuzz non-stressful configurations. ",
+            help="Randomly chooses mongod parameters that were not specified.",
             metavar="MODE",
-            choices=("normal", "stress"),
+            choices=("normal"),
         )
 
         mongodb_server_options.add_argument(
@@ -1858,10 +2099,10 @@ class RunPlugin(PluginInterface):
         )
 
         mongodb_server_options.add_argument(
-            "--embeddedRouter",
-            dest="embedded_router",
-            metavar="CONFIG",
-            help="If set, uses embedded routers instead of dedicated mongos.",
+            "--loadAllExtensions",
+            dest="load_all_extensions",
+            action="store_true",
+            help="Loads all available test extensions in the server upon startup.",
         )
 
         internal_options = parser.add_argument_group(
@@ -1889,11 +2130,6 @@ class RunPlugin(PluginInterface):
         #     Marks the resmoke process as a child of a parent resmoke process, meaning that"
         #     it was started by a shell process which itself was started by a top-level"
         #     resmoke process. This is used to ensure the hang-analyzer is called properly."
-        #
-        # `test_archival`:
-        #     Allows unit testing of resmoke's archival feature where we write out the names
-        #     of the files to be archived, instead of doing the actual archival, which can
-        #     be time and resource intensive.
         #
         # `test_analysis`:
         #     When specified, the hang-analyzer writes out the pids it will analyze without
@@ -1939,6 +2175,25 @@ class RunPlugin(PluginInterface):
             ),
         )
 
+        internal_options.add_argument(
+            "--pauseAfterPopulate",
+            dest="pause_after_populate",
+            action="store_true",
+            help=(
+                "Sets TestData.pauseAfterPopulate so that golden tests can pause after data population"
+                " to allow for easier debugging"
+            ),
+        )
+
+        internal_options.add_argument(
+            "--resmokeModulesPath",
+            dest="resmoke_modules_path",
+            type=str,
+            help=(
+                "Sets the path to the resmoke modules config to allow testing different configurations."
+            ),
+        )
+
         evergreen_options = parser.add_argument_group(
             title=_EVERGREEN_ARGUMENT_TITLE,
             description=(
@@ -1960,7 +2215,7 @@ class RunPlugin(PluginInterface):
             dest="archive_limit_mb",
             metavar="ARCHIVE_LIMIT_MB",
             help=(
-                "Sets the limit (in MB) for archived files to S3. A value of 0"
+                "Sets the limit (in MB) for archived files. A value of 0"
                 " indicates there is no limit."
             ),
         )
@@ -1971,9 +2226,27 @@ class RunPlugin(PluginInterface):
             dest="archive_limit_tests",
             metavar="ARCHIVE_LIMIT_TESTS",
             help=(
-                "Sets the maximum number of tests to archive to S3. A value"
+                "Sets the maximum number of tests to archive. A value"
                 " of 0 indicates there is no limit."
             ),
+        )
+
+        evergreen_options.add_argument(
+            "--archiveMode",
+            dest="archive_mode",
+            choices=("s3", "directory", "test_archival"),
+            metavar="MODE",
+            help=(
+                "Where to store archived data files on failures - uploaded to s3 during execution, "
+                "to a directory, or write the names of the files to archive for testing archival behavior."
+            ),
+        )
+
+        evergreen_options.add_argument(
+            "--archiveDirectory",
+            dest="archive_directory",
+            metavar="DIR",
+            help=("Directory where to store archives when a test/hook fails."),
         )
 
         evergreen_options.add_argument(
@@ -2214,6 +2487,13 @@ class RunPlugin(PluginInterface):
             dest="exclude_tags_file_path",
             help="Where to output the generated tags.",
         )
+        parser.add_argument(
+            "--multiversionDir",
+            dest="multiversion_dirs",
+            action="append",
+            metavar="MULTIVERSION_DIR",
+            help="Directory to search for multiversion binaries. Can be specified multiple times.",
+        )
 
 
 def to_local_args(input_args: Optional[List[str]] = None):
@@ -2229,7 +2509,7 @@ def to_local_args(input_args: Optional[List[str]] = None):
 
     (parser, parsed_args) = main_parser.parse(input_args)
 
-    if parsed_args.command != "run":
+    if parsed_args["command"] != "run":
         raise TypeError(
             f"to_local_args can only be called for the 'run' subcommand. Instead was called on '{parsed_args.command}'"
         )
@@ -2237,16 +2517,12 @@ def to_local_args(input_args: Optional[List[str]] = None):
     # If --originSuite was specified, then we replace the value of --suites with it. This is done to
     # avoid needing to have engineers learn about the test suites generated by the
     # evergreen_generate_resmoke_tasks.py script.
-    origin_suite = getattr(parsed_args, "origin_suite", None)
+    origin_suite = parsed_args.get("origin_suite", None)
     if origin_suite is not None:
-        setattr(parsed_args, "suite_files", origin_suite)
+        parsed_args["suite_files"] = origin_suite
 
     # The top-level parser has one subparser that contains all subcommand parsers.
-    command_subparser = [
-        action
-        for action in parser._actions  # pylint: disable=protected-access
-        if action.dest == "command"
-    ][0]
+    command_subparser = [action for action in parser._actions if action.dest == "command"][0]
 
     run_parser = command_subparser.choices.get("run")
 
@@ -2270,11 +2546,11 @@ def to_local_args(input_args: Optional[List[str]] = None):
             return f"'{option_name}={option_value}'"
 
     # Trim the argument namespace of any args we don't want to return.
-    for group in run_parser._action_groups:  # pylint: disable=protected-access
+    for group in run_parser._action_groups:
         arg_dests_visited = set()
-        for action in group._group_actions:  # pylint: disable=protected-access
+        for action in group._group_actions:
             arg_dest = action.dest
-            arg_value = getattr(parsed_args, arg_dest, None)
+            arg_value = parsed_args.get(arg_dest, None)
 
             # Some arguments, such as --shuffle and --shuffleMode, update the same dest variable.
             # To not print out multiple arguments that will update the same dest, we will skip once
@@ -2286,7 +2562,7 @@ def to_local_args(input_args: Optional[List[str]] = None):
 
             # If the arg doesn't exist in the parsed namespace, skip.
             # This is mainly for "--help".
-            if not hasattr(parsed_args, arg_dest):
+            if arg_dest not in parsed_args:
                 continue
             # Skip any evergreen centric args.
             elif group.title in [
@@ -2304,12 +2580,12 @@ def to_local_args(input_args: Optional[List[str]] = None):
                 arg_name = action.option_strings[-1]
 
                 # If an option has the same value as the default, we don't need to specify it.
-                if getattr(parsed_args, arg_dest, None) == action.default:
+                if parsed_args.get(arg_dest, None) == action.default:
                     continue
                 # These are arguments that take no value.
                 elif action.nargs == 0:
                     other_local_args.append(arg_name)
-                elif isinstance(action, argparse._AppendAction):  # pylint: disable=protected-access
+                elif isinstance(action, argparse._AppendAction):
                     args = [format_option(arg_name, elem) for elem in arg_value]
                     other_local_args.extend(args)
                 else:

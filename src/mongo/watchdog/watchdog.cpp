@@ -30,7 +30,6 @@
 
 #include "mongo/watchdog/watchdog.h"
 
-#include <boost/align.hpp>  // IWYU pragma: keep
 #include <cerrno>
 #include <cstring>
 #include <mutex>
@@ -38,6 +37,7 @@
 #include <system_error>
 #include <utility>
 
+#include <boost/align.hpp>  // IWYU pragma: keep
 #include <boost/align/align_up.hpp>
 // IWYU pragma: no_include "boost/align/detail/aligned_alloc_posix.hpp"
 #include <boost/filesystem/operations.hpp>
@@ -46,6 +46,7 @@
 
 #ifndef _WIN32
 #include <fcntl.h>
+
 #include <sys/stat.h>
 #endif
 
@@ -55,8 +56,6 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/process_id.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
@@ -86,7 +85,7 @@ const auto getWatchdogMonitorInterface =
 }  // namespace
 
 WatchdogPeriodicThread::WatchdogPeriodicThread(Milliseconds period, StringData threadName)
-    : _period(period), _enabled(true), _threadName(threadName.toString()) {}
+    : _period(period), _enabled(true), _threadName(std::string{threadName}) {}
 
 void WatchdogPeriodicThread::start() {
     {
@@ -695,9 +694,9 @@ constexpr StringData DirectoryCheck::kProbeFileNameExt;
 void DirectoryCheck::run(OperationContext* opCtx) {
     // Ensure we have unique file names if multiple processes share the same logging directory
     boost::filesystem::path file = _directory;
-    file /= kProbeFileName.toString();
+    file /= std::string{kProbeFileName};
     file += ProcessId::getCurrent().toString();
-    file += kProbeFileNameExt.toString();
+    file += std::string{kProbeFileNameExt};
 
     checkFile(opCtx, file);
 

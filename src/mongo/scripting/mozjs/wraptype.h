@@ -29,18 +29,20 @@
 
 #pragma once
 
-#include <cstddef>
-#include <js/PropertyAndElement.h>
-#include <js/ValueArray.h>
-#include <js/Wrapper.h>
-
-#include <jsapi.h>
-#include <type_traits>
-
 #include "mongo/scripting/mozjs/base.h"
 #include "mongo/scripting/mozjs/exception.h"
 #include "mongo/scripting/mozjs/objectwrapper.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <type_traits>
+
+#include <jsapi.h>
+
+#include <js/PropertyAndElement.h>
+#include <js/ValueArray.h>
+#include <js/Wrapper.h>
 
 // The purpose of this class is to take in specially crafted types and generate
 // a wrapper which installs the type, along with any useful life cycle methods
@@ -74,21 +76,20 @@
 
 #define MONGO_ATTACH_JS_FUNCTION(name) MONGO_ATTACH_JS_FUNCTION_WITH_FLAGS(name, 0)
 
-#define MONGO_ATTACH_JS_CONSTRAINED_METHOD(name, ...)                                            \
-    {                                                                                            \
-        JSFunctionSpec::Name(#name),                                                             \
-            JSNativeWrapper(smUtils::wrapConstrainedMethod<Functions::name, false, __VA_ARGS__>, \
-                            nullptr),                                                            \
-            0, 0, nullptr                                                                        \
-    }
+#define MONGO_ATTACH_JS_CONSTRAINED_METHOD(name, ...)                                     \
+    {JSFunctionSpec::Name(#name),                                                         \
+     JSNativeWrapper(smUtils::wrapConstrainedMethod<Functions::name, false, __VA_ARGS__>, \
+                     nullptr),                                                            \
+     0,                                                                                   \
+     0,                                                                                   \
+     nullptr}
 
-#define MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(name, ...)                                  \
-    {                                                                                           \
-        JSFunctionSpec::Name(#name),                                                            \
-            JSNativeWrapper(smUtils::wrapConstrainedMethod<Functions::name, true, __VA_ARGS__>, \
-                            nullptr),                                                           \
-            0, 0, nullptr                                                                       \
-    }
+#define MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(name, ...)                                     \
+    {JSFunctionSpec::Name(#name),                                                                  \
+     JSNativeWrapper(smUtils::wrapConstrainedMethod<Functions::name, true, __VA_ARGS__>, nullptr), \
+     0,                                                                                            \
+     0,                                                                                            \
+     nullptr}
 
 namespace mongo {
 namespace mozjs {
@@ -232,7 +233,7 @@ void trace(JSTracer* trc, JSObject* obj) {
 }  // namespace smUtils
 
 template <typename T>
-class WrapType : public T {
+class MONGO_MOD_PUB WrapType : public T {
 public:
     WrapType(JSContext* context)
         : _context(context),
@@ -524,7 +525,12 @@ private:
         static const JSPropertySpec properties[2] = {
             JS_STRING_SYM_PS(toStringTag, T::className, JSPROP_READONLY), JS_PS_END};
 
-        JS_DefineProperties(_context, _proto, properties);
+        if (JS_DefineProperties(_context, _proto, properties)) {
+            return;
+        }
+
+        throwCurrentJSException(
+            _context, ErrorCodes::JSInterpreterFailure, "Failed to define properties");
     }
 
     // This is for inheriting from something other than Object

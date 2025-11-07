@@ -27,17 +27,6 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_set.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-#include <set>
-#include <string>
-#include <type_traits>
-#include <utility>
-
 #include "mongo/db/auth/authorization_backend_local.h"
 
 #include "mongo/base/error_codes.h"
@@ -56,10 +45,10 @@
 #include "mongo/db/auth/user_document_parser.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/commands/user_management_commands_gen.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
@@ -68,8 +57,6 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/rpc/op_msg_rpc_impls.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
@@ -78,12 +65,23 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
+#include <set>
+#include <string>
+#include <type_traits>
+#include <utility>
+
+#include <absl/container/node_hash_set.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
 
 namespace mongo::auth {
-using namespace fmt::literals;
 
 using ResolvedRoleData = AuthorizationBackendInterface::ResolvedRoleData;
 using ResolveRoleOption = AuthorizationBackendInterface::ResolveRoleOption;
@@ -92,10 +90,13 @@ Status AuthorizationBackendLocal::findOne(OperationContext* opCtx,
                                           const NamespaceString& nss,
                                           const BSONObj& query,
                                           BSONObj* result) {
-    AutoGetCollectionForReadCommandMaybeLockFree ctx(opCtx, nss);
+    auto collection = acquireCollectionMaybeLockFree(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(
+            opCtx, nss, AcquisitionPrerequisites::OperationType::kRead));
 
     BSONObj found;
-    if (Helpers::findOne(opCtx, ctx.getCollection(), query, found)) {
+    if (Helpers::findOne(opCtx, collection, query, found)) {
         *result = found.getOwned();
         return Status::OK();
     }
@@ -124,8 +125,11 @@ Status query(OperationContext* opCtx,
 }
 
 bool hasOne(OperationContext* opCtx, const NamespaceString& nss, const BSONObj& query) {
-    AutoGetCollectionForReadCommandMaybeLockFree ctx(opCtx, nss);
-    return !Helpers::findOne(opCtx, ctx.getCollection(), query).isNull();
+    auto collection = acquireCollectionMaybeLockFree(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(
+            opCtx, nss, AcquisitionPrerequisites::OperationType::kRead));
+    return !Helpers::findOne(opCtx, collection, query).isNull();
 }
 
 }  // namespace
@@ -179,7 +183,7 @@ void serializeResolvedRoles(BSONObjBuilder* user,
         BSONArrayBuilder arBuilder(user->subarrayStart("inheritedAuthenticationRestrictions"));
         if (roleDoc) {
             auto ar = roleDoc.value()["authenticationRestrictions"];
-            if ((ar.type() == Array) && (ar.Obj().nFields() > 0)) {
+            if ((ar.type() == BSONType::array) && (ar.Obj().nFields() > 0)) {
                 arBuilder.append(ar);
             }
         }
@@ -210,8 +214,9 @@ std::vector<RoleName> filterAndMapRole(BSONObjBuilder* builder,
 
     for (const auto& elem : role) {
         if (elem.fieldNameStringData() == kRolesFieldName) {
-            uassert(
-                ErrorCodes::BadValue, "Invalid roles field, expected array", elem.type() == Array);
+            uassert(ErrorCodes::BadValue,
+                    "Invalid roles field, expected array",
+                    elem.type() == BSONType::array);
             for (const auto& roleName : elem.Obj()) {
                 subRoles.push_back(RoleName::parseFromBSON(roleName, tenant));
             }
@@ -284,26 +289,17 @@ Status AuthorizationBackendLocal::makeRoleNotFoundStatus(
     return {ErrorCodes::RoleNotFound, sb.str()};
 }
 
-AuthorizationBackendLocal::RolesLocks::RolesLocks(OperationContext* opCtx,
-                                                  const boost::optional<TenantId>& tenant) {
-    if (!storageGlobalParams.disableLockFreeReads) {
-        _readLockFree = std::make_unique<AutoReadLockFree>(opCtx);
-    } else {
-        _adminLock = std::make_unique<Lock::DBLock>(opCtx, DatabaseName::kAdmin, LockMode::MODE_IS);
-        _rolesLock =
-            std::make_unique<Lock::CollectionLock>(opCtx, rolesNSS(tenant), LockMode::MODE_S);
-    }
+AuthorizationBackendLocal::RolesSnapshot::RolesSnapshot(OperationContext* opCtx) {
+    _readLockFree = std::make_unique<AutoReadLockFree>(opCtx);
 }
 
-AuthorizationBackendLocal::RolesLocks::~RolesLocks() {
+AuthorizationBackendLocal::RolesSnapshot::~RolesSnapshot() {
     _readLockFree.reset(nullptr);
-    _rolesLock.reset(nullptr);
-    _adminLock.reset(nullptr);
 }
 
-AuthorizationBackendLocal::RolesLocks AuthorizationBackendLocal::_lockRoles(
-    OperationContext* opCtx, const boost::optional<TenantId>& tenant) {
-    return AuthorizationBackendLocal::RolesLocks(opCtx, tenant);
+AuthorizationBackendLocal::RolesSnapshot AuthorizationBackendLocal::_snapshotRoles(
+    OperationContext* opCtx) {
+    return AuthorizationBackendLocal::RolesSnapshot(opCtx);
 }
 
 Status AuthorizationBackendLocal::rolesExist(OperationContext* opCtx,
@@ -368,7 +364,7 @@ StatusWith<ResolvedRoleData> AuthorizationBackendLocal::resolveRoles(
 
             BSONElement elem;
             if ((processRoles || walkIndirect) && (elem = roleDoc["roles"])) {
-                if (elem.type() != Array) {
+                if (elem.type() != BSONType::array) {
                     return {ErrorCodes::BadValue,
                             str::stream()
                                 << "Invalid 'roles' field in role document '" << role
@@ -389,18 +385,18 @@ StatusWith<ResolvedRoleData> AuthorizationBackendLocal::resolveRoles(
             }
 
             if (processPrivs && (elem = roleDoc["privileges"])) {
-                if (elem.type() != Array) {
+                if (elem.type() != BSONType::array) {
                     return {ErrorCodes::UnsupportedFormat,
                             str::stream()
                                 << "Invalid 'privileges' field in role document '" << role << "'"};
                 }
                 for (const auto& privElem : elem.Obj()) {
-                    if (privElem.type() != Object) {
+                    if (privElem.type() != BSONType::object) {
                         return {ErrorCodes::UnsupportedFormat,
-                                "Expected privilege document as object, got {}"_format(
-                                    typeName(privElem.type()))};
+                                fmt::format("Expected privilege document as object, got {}",
+                                            typeName(privElem.type()))};
                     }
-                    auto pp = auth::ParsedPrivilege::parse(idlctx, privElem.Obj());
+                    auto pp = auth::ParsedPrivilege::parse(privElem.Obj(), idlctx);
                     Privilege::addPrivilegeToPrivilegeVector(
                         &inheritedPrivileges,
                         Privilege::resolvePrivilegeWithTenant(role.tenantId(), pp));
@@ -408,7 +404,7 @@ StatusWith<ResolvedRoleData> AuthorizationBackendLocal::resolveRoles(
             }
 
             if (processRests && (elem = roleDoc["authenticationRestrictions"])) {
-                if (elem.type() != Array) {
+                if (elem.type() != BSONType::array) {
                     return {ErrorCodes::UnsupportedFormat,
                             str::stream()
                                 << "Invalid 'authenticationRestrictions' field in role document '"
@@ -446,7 +442,7 @@ void handleAuthLocalGetSubRolesFailPoint(const std::vector<RoleName>& directRole
     }
 
     IDLParserContext ctx("authLocalGetSubRoles");
-    auto delay = AuthLocalGetSubRolesFailPoint::parse(ctx, sfp.getData()).getResolveRolesDelayMS();
+    auto delay = AuthLocalGetSubRolesFailPoint::parse(sfp.getData(), ctx).getResolveRolesDelayMS();
 
     if (delay <= 0) {
         return;
@@ -473,7 +469,7 @@ StatusWith<User> AuthorizationBackendLocal::getUserObject(
     const UserRequest* request = user.getUserRequest();
     const UserName& userName = request->getUserName();
 
-    auto rolesLock = _lockRoles(opCtx, userName.tenantId());
+    auto RolesSnapshot = _snapshotRoles(opCtx);
 
     // Set ResolveRoleOption to mine all information from role tree.
     auto options = ResolveRoleOption::kAllInfo();
@@ -545,7 +541,7 @@ Status AuthorizationBackendLocal::getUserDescription(
     std::vector<RoleName> directRoles;
     BSONObjBuilder resultBuilder;
 
-    auto rolesLock = _lockRoles(opCtx, userName.tenantId());
+    auto RolesSnapshot = _snapshotRoles(opCtx);
 
     auto options = ResolveRoleOption::kAllInfo();
     bool hasExternalRoles = userReq.getRoles().has_value();
@@ -800,13 +796,13 @@ std::vector<BSONObj> AuthorizationBackendLocal::performNoPrivilegeNoRestrictions
     pipeline.push_back(BSON("$sort" << BSON("user" << 1 << "db" << 1)));
 
     // Rewrite the credentials object into an array of its fieldnames.
-    pipeline.push_back(BSON(
-        "$addFields" << BSON("mechanisms" << BSON("$map" << BSON("input" << BSON("$objectToArray"
-                                                                                 << "$credentials")
-                                                                         << "as"
-                                                                         << "cred"
-                                                                         << "in"
-                                                                         << "$$cred.k")))));
+    pipeline.push_back(
+        BSON("$addFields" << BSON(
+                 "mechanisms" << BSON(
+                     "$map" << BSON("input" << BSON("$objectToArray" << "$credentials") << "as"
+                                            << "cred"
+                                            << "in"
+                                            << "$$cred.k")))));
 
     // Authentication restrictions are only rendered in the single user case.
     BSONArrayBuilder fieldsToRemoveBuilder;

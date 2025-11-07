@@ -32,21 +32,19 @@
 #include <boost/move/utility_core.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "cxxabi.h"
-#include <algorithm>
-#include <mutex>
-#include <string>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/db/index_builds/active_index_builds.h"
 #include "mongo/db/index_builds/index_builds_manager.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#include <algorithm>
+#include <mutex>
+#include <string>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -221,11 +219,10 @@ Status ActiveIndexBuilds::registerIndexBuild(
     };
     auto collIndexBuilds = _filterIndexBuilds_inlock(lk, pred);
     for (const auto& existingIndexBuild : collIndexBuilds) {
-        for (const auto& name : replIndexBuildState->indexNames) {
-            if (existingIndexBuild->indexNames.end() !=
-                std::find(existingIndexBuild->indexNames.begin(),
-                          existingIndexBuild->indexNames.end(),
-                          name)) {
+        for (const auto& name : toIndexNames(replIndexBuildState->getIndexes())) {
+            auto existingIndexNames = toIndexNames(existingIndexBuild->getIndexes());
+            if (existingIndexNames.end() !=
+                std::find(existingIndexNames.begin(), existingIndexNames.end(), name)) {
                 return existingIndexBuild->onConflictWithNewIndexBuild(*replIndexBuildState, name);
             }
         }

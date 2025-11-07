@@ -28,49 +28,55 @@
  */
 
 
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/index_builds/index_build_block.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/aggregated_index_usage_tracker.h"
 #include "mongo/db/audit.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/index_key_validate.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_index_usage_tracker.h"
-#include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/index_builds/index_build_block.h"
+#include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index_names.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/durable_catalog.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/index_key_validate.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collection_index_usage_tracker_decoration.h"
 #include "mongo/db/query/collection_query_info.h"
-#include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/storage/durable_catalog.h"
-#include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/db/ttl/ttl_collection_cache.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
+
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
 
-
 namespace mongo {
+
+namespace {
+
+bool isBackgroundBuilding(IndexBuildMethodEnum method) {
+    return method == IndexBuildMethodEnum::kHybrid ||
+        method == IndexBuildMethodEnum::kPrimaryDriven;
+}
+
+}  // namespace
+
 
 IndexBuildBlock::IndexBuildBlock(const NamespaceString& nss,
                                  const BSONObj& spec,
-                                 IndexBuildMethod method,
+                                 IndexBuildMethodEnum method,
                                  boost::optional<UUID> indexBuildUUID)
     : _nss(nss), _spec(spec.getOwned()), _method(method), _buildUUID(indexBuildUUID) {}
 
@@ -84,8 +90,10 @@ void IndexBuildBlock::_completeInit(OperationContext* opCtx, Collection* collect
     // Register this index with the CollectionQueryInfo to regenerate the cache. This way, updates
     // occurring while an index is being build in the background will be aware of whether or not
     // they need to modify any indexes.
-    auto desc = getEntry(opCtx, CollectionPtr(collection))->descriptor();
+    // TODO(SERVER-103400): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
+    auto desc = getEntry(opCtx, CollectionPtr::CollectionPtr_UNSAFE(collection))->descriptor();
     CollectionQueryInfo::get(collection).rebuildIndexData(opCtx, collection);
+    CollectionIndexUsageTrackerDecoration::write(collection).unregisterIndex(desc->indexName());
     CollectionIndexUsageTrackerDecoration::write(collection)
         .registerIndex(desc->indexName(),
                        desc->keyPattern(),
@@ -94,40 +102,38 @@ void IndexBuildBlock::_completeInit(OperationContext* opCtx, Collection* collect
 
 Status IndexBuildBlock::initForResume(OperationContext* opCtx,
                                       Collection* collection,
-                                      const IndexStateInfo& stateInfo,
-                                      IndexBuildPhaseEnum phase) {
-
-    _indexName = _spec.getStringField("name").toString();
+                                      const IndexBuildInfo& indexBuildInfo,
+                                      IndexBuildPhaseEnum phase,
+                                      bool generateTableWrites) {
+    _indexBuildInfo = indexBuildInfo;
     auto writableEntry = collection->getIndexCatalog()->getWritableEntryByName(
         opCtx,
-        _indexName,
+        getIndexName(),
         IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished);
 
     uassert(4945000,
             "Index catalog entry not found while attempting to resume index build",
             writableEntry);
-    uassert(
-        4945001, "Cannot resume a non-hybrid index build", _method == IndexBuildMethod::kHybrid);
+    uassert(4945001,
+            "Cannot resume a non-hybrid index build",
+            _method == IndexBuildMethodEnum::kHybrid);
 
     if (phase == IndexBuildPhaseEnum::kBulkLoad) {
         // A bulk cursor can only be opened on a fresh table, so we drop the table that was created
         // before shutdown and recreate it.
-        auto status = DurableCatalog::get(opCtx)->dropAndRecreateIndexIdentForResume(
+        auto collectionOptions = collection->getCollectionOptions();
+        auto status = durable_catalog::dropAndRecreateIndexIdentForResume(
             opCtx,
             collection->ns(),
             collection->getCollectionOptions(),
-            writableEntry->descriptor(),
+            writableEntry->descriptor()->toIndexConfig(),
             writableEntry->getIdent());
         if (!status.isOK())
             return status;
     }
 
-    _indexBuildInterceptor =
-        std::make_unique<IndexBuildInterceptor>(opCtx,
-                                                writableEntry,
-                                                stateInfo.getSideWritesTable(),
-                                                stateInfo.getDuplicateKeyTrackerTable(),
-                                                stateInfo.getSkippedRecordTrackerTable());
+    _indexBuildInterceptor = std::make_unique<IndexBuildInterceptor>(
+        opCtx, writableEntry, indexBuildInfo, /*resume=*/true, generateTableWrites);
     writableEntry->setIndexBuildInterceptor(_indexBuildInterceptor.get());
 
     _completeInit(opCtx, collection);
@@ -135,7 +141,11 @@ Status IndexBuildBlock::initForResume(OperationContext* opCtx,
     return Status::OK();
 }
 
-Status IndexBuildBlock::init(OperationContext* opCtx, Collection* collection, bool forRecovery) {
+Status IndexBuildBlock::init(OperationContext* opCtx,
+                             Collection* collection,
+                             const IndexBuildInfo& indexBuildInfo,
+                             bool forRecovery,
+                             bool generateTableWrites) {
     // Being in a WUOW means all timestamping responsibility can be pushed up to the caller.
     invariant(shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
 
@@ -143,13 +153,13 @@ Status IndexBuildBlock::init(OperationContext* opCtx, Collection* collection, bo
     BSONObj keyPattern = _spec.getObjectField("key");
     auto descriptor = IndexDescriptor(IndexNames::findPluginName(keyPattern), _spec);
 
-    _indexName = descriptor.indexName();
+    _indexBuildInfo = indexBuildInfo;
 
-    // Since the index build block is being initialized, the index build for _indexName is
-    // beginning. Accordingly, emit an audit event indicating this.
+    // Since the index build block is being initialized, the index build is beginning. Accordingly,
+    // emit an audit event indicating this.
     audit::logCreateIndex(opCtx->getClient(),
                           &_spec,
-                          _indexName,
+                          getIndexName(),
                           collection->ns(),
                           "IndexBuildStarted",
                           ErrorCodes::OK);
@@ -157,23 +167,18 @@ Status IndexBuildBlock::init(OperationContext* opCtx, Collection* collection, bo
     if (!forRecovery) {
         // Setup on-disk structures. We skip this during startup recovery for unfinished indexes as
         // everything is already in-place.
-        Status status = collection->prepareForIndexBuild(opCtx, &descriptor, _buildUUID);
+        Status status = collection->prepareForIndexBuild(
+            opCtx, &descriptor, _indexBuildInfo->indexIdent, _buildUUID);
         if (!status.isOK())
             return status;
     }
 
-    auto indexCatalog = collection->getIndexCatalog();
-    IndexCatalogEntry* indexCatalogEntry = nullptr;
-    if (forRecovery) {
-        indexCatalogEntry = indexCatalog->getWritableEntryByName(
-            opCtx, _indexName, IndexCatalog::InclusionPolicy::kUnfinished);
-    } else {
-        indexCatalogEntry = indexCatalog->createIndexEntry(
-            opCtx, collection, std::move(descriptor), CreateIndexEntryFlags::kNone);
-    }
-
-    if (_method == IndexBuildMethod::kHybrid) {
-        _indexBuildInterceptor = std::make_unique<IndexBuildInterceptor>(opCtx, indexCatalogEntry);
+    if (isBackgroundBuilding(_method)) {
+        auto indexCatalog = collection->getIndexCatalog();
+        auto indexCatalogEntry = indexCatalog->getWritableEntryByName(
+            opCtx, getIndexName(), IndexCatalog::InclusionPolicy::kUnfinished);
+        _indexBuildInterceptor = std::make_unique<IndexBuildInterceptor>(
+            opCtx, indexCatalogEntry, *_indexBuildInfo, /*resume=*/false, generateTableWrites);
         indexCatalogEntry->setIndexBuildInterceptor(_indexBuildInterceptor.get());
     }
 
@@ -193,20 +198,19 @@ void IndexBuildBlock::fail(OperationContext* opCtx, Collection* collection) {
     // Audit that the index build is being aborted.
     audit::logCreateIndex(opCtx->getClient(),
                           &_spec,
-                          _indexName,
+                          getIndexName(),
                           collection->ns(),
                           "IndexBuildAborted",
                           ErrorCodes::IndexBuildAborted);
 
-    auto indexCatalogEntry = getWritableEntry(opCtx, collection);
-    if (indexCatalogEntry) {
-        invariant(
-            collection->getIndexCatalog()->dropIndexEntry(opCtx, collection, indexCatalogEntry));
+    if (auto indexCatalogEntry = getWritableEntry(opCtx, collection)) {
         if (_indexBuildInterceptor) {
             indexCatalogEntry->setIndexBuildInterceptor(nullptr);
         }
+        invariant(
+            collection->getIndexCatalog()->dropIndexEntry(opCtx, collection, indexCatalogEntry));
     } else {
-        collection->getIndexCatalog()->deleteIndexFromDisk(opCtx, collection, _indexName);
+        collection->getIndexCatalog()->deleteIndexFromDisk(opCtx, collection, getIndexName());
     }
 }
 
@@ -235,14 +239,14 @@ void IndexBuildBlock::success(OperationContext* opCtx, Collection* collection) {
     // Before committing the index build, optimistically audit that the index build has succeeded.
     audit::logCreateIndex(opCtx->getClient(),
                           &_spec,
-                          _indexName,
+                          getIndexName(),
                           collection->ns(),
                           "IndexBuildSucceeded",
                           ErrorCodes::OK);
 
     shard_role_details::getRecoveryUnit(opCtx)->onCommit(
         [svcCtx,
-         indexName = _indexName,
+         indexName = getIndexName(),
          spec = _spec,
          ident = indexCatalogEntry->getIdent(),
          coll = collection,
@@ -279,7 +283,7 @@ const IndexCatalogEntry* IndexBuildBlock::getEntry(OperationContext* opCtx,
                                                    const CollectionPtr& collection) const {
     auto descriptor = collection->getIndexCatalog()->findIndexByName(
         opCtx,
-        _indexName,
+        getIndexName(),
         IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished);
 
     return descriptor->getEntry();
@@ -289,8 +293,38 @@ IndexCatalogEntry* IndexBuildBlock::getWritableEntry(OperationContext* opCtx,
                                                      Collection* collection) {
     return collection->getIndexCatalog()->getWritableEntryByName(
         opCtx,
-        _indexName,
+        getIndexName(),
         IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished);
+}
+
+Status IndexBuildBlock::buildEmptyIndex(OperationContext* opCtx,
+                                        Collection* collection,
+                                        const IndexBuildInfo& indexBuildInfo) {
+    IndexBuildBlock indexBuildBlock(
+        collection->ns(), indexBuildInfo.spec, IndexBuildMethodEnum::kForeground, boost::none);
+    if (auto status = indexBuildBlock.init(opCtx,
+                                           collection,
+                                           indexBuildInfo,
+                                           /*forRecovery=*/false,
+                                           /*generateTableWrites=*/true);
+        !status.isOK()) {
+        return status;
+    }
+
+    // sanity checks, etc...
+    IndexCatalogEntry* entry = indexBuildBlock.getWritableEntry(opCtx, collection);
+    invariant(entry);
+    IndexDescriptor* descriptor = entry->descriptor();
+    invariant(descriptor);
+
+    if (auto status = entry->accessMethod()->initializeAsEmpty(); !status.isOK())
+        return status;
+    indexBuildBlock.success(opCtx, collection);
+
+    // sanity check
+    invariant(collection->isIndexReady(descriptor->indexName()));
+
+    return Status::OK();
 }
 
 }  // namespace mongo

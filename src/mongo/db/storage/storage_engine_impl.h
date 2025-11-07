@@ -29,8 +29,30 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/ident.h"
+#include "mongo/db/storage/journal_listener.h"
+#include "mongo/db/storage/key_format.h"
+#include "mongo/db/storage/kv/kv_drop_pending_ident_reaper.h"
+#include "mongo/db/storage/kv/kv_engine.h"
+#include "mongo/db/storage/mdb_catalog.h"
+#include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/storage/temporary_record_store.h"
+#include "mongo/db/tenant_id.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/util/uuid.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -42,35 +64,12 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/database_name.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/storage/durable_catalog.h"
-#include "mongo/db/storage/ident.h"
-#include "mongo/db/storage/journal_listener.h"
-#include "mongo/db/storage/key_format.h"
-#include "mongo/db/storage/kv/kv_drop_pending_ident_reaper.h"
-#include "mongo/db/storage/kv/kv_engine.h"
-#include "mongo/db/storage/record_store.h"
-#include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/storage/storage_engine.h"
-#include "mongo/db/storage/storage_engine_interface.h"
-#include "mongo/db/storage/temporary_record_store.h"
-#include "mongo/db/tenant_id.h"
-#include "mongo/stdx/mutex.h"
-#include "mongo/util/periodic_runner.h"
-#include "mongo/util/uuid.h"
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
-class DurableCatalog;
+class MDBCatalog;
 class KVEngine;
 
 struct StorageEngineOptions {
@@ -81,10 +80,11 @@ struct StorageEngineOptions {
     bool lockFileCreatedByUncleanShutdown = false;
 };
 
-class StorageEngineImpl final : public StorageEngineInterface, public StorageEngine {
+class StorageEngineImpl final : public StorageEngine {
 public:
     StorageEngineImpl(OperationContext* opCtx,
                       std::unique_ptr<KVEngine> engine,
+                      std::unique_ptr<KVEngine> spillEngine,
                       StorageEngineOptions options = StorageEngineOptions());
 
     ~StorageEngineImpl() override;
@@ -93,25 +93,23 @@ public:
 
     void notifyReplStartupRecoveryComplete(RecoveryUnit&) override;
 
-    RecoveryUnit* newRecoveryUnit() override;
+    void setInStandaloneMode() override;
 
-    std::vector<DatabaseName> listDatabases(
-        boost::optional<TenantId> tenantId = boost::none) const override;
+    std::unique_ptr<RecoveryUnit> newRecoveryUnit() override;
 
     bool supportsCappedCollections() const override {
         return _supportsCappedCollections;
     }
-
-    Status dropDatabase(OperationContext* opCtx, const DatabaseName& dbName) override;
-    Status dropCollectionsWithPrefix(OperationContext* opCtx,
-                                     const DatabaseName& dbName,
-                                     const std::string& collectionNamePrefix) override;
 
     void flushAllFiles(OperationContext* opCtx, bool callerHoldsReadLock) override;
 
     Status beginBackup() override;
 
     void endBackup() override;
+
+    Timestamp getBackupCheckpointTimestamp() override;
+
+    BSONObj getStatus(OperationContext* opCtx) const override;
 
     Status disableIncrementalBackup() override;
 
@@ -130,7 +128,14 @@ public:
                              RecordId catalogId,
                              const NamespaceString& nss) override;
 
+    std::unique_ptr<SpillTable> makeSpillTable(OperationContext* opCtx,
+                                               KeyFormat keyFormat,
+                                               int64_t thresholdBytes) override;
+
+    void dropSpillTable(RecoveryUnit& ru, StringData ident) override;
+
     std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStore(OperationContext* opCtx,
+                                                                   StringData ident,
                                                                    KeyFormat keyFormat) override;
 
     std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStoreForResumableIndexBuild(
@@ -139,7 +144,13 @@ public:
     std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStoreFromExistingIdent(
         OperationContext* opCtx, StringData ident, KeyFormat keyFormat) override;
 
-    void cleanShutdown(ServiceContext* svcCtx) override;
+    void cleanShutdown(ServiceContext* svcCtx, bool memLeakAllowed) override;
+
+    void setLastMaterializedLsn(uint64_t lsn) override;
+
+    void setRecoveryCheckpointMetadata(StringData checkpointMetadata) override;
+
+    void promoteToLeader() override;
 
     void setStableTimestamp(Timestamp stableTimestamp, bool force = false) override;
 
@@ -176,148 +187,11 @@ public:
 
     bool supportsReadConcernSnapshot() const final;
 
-    bool supportsOplogTruncateMarkers() const final;
-
-    void clearDropPendingState(OperationContext* opCtx) final;
+    Status immediatelyCompletePendingDrop(OperationContext* opCtx, StringData ident) final;
 
     SnapshotManager* getSnapshotManager() const final;
 
     void setJournalListener(JournalListener* jl) final;
-
-    /**
-     * A TimestampMonitor is used to listen for any changes in the timestamps implemented by the
-     * storage engine and to notify any registered listeners upon changes to these timestamps.
-     *
-     * The monitor follows the same lifecycle as the storage engine, started when the storage
-     * engine starts and stopped when the storage engine stops.
-     *
-     * The PeriodicRunner must be started before the Storage Engine is started, and the Storage
-     * Engine must be shutdown after the PeriodicRunner is shutdown.
-     */
-    class TimestampMonitor {
-    public:
-        /**
-         * Timestamps that can be listened to for changes.
-         */
-        enum class TimestampType { kCheckpoint, kOldest, kStable, kMinOfCheckpointAndOldest };
-
-        /**
-         * A TimestampListener is used to listen for changes in a given timestamp and to execute the
-         * user-provided callback to the change with a custom user-provided callback.
-         *
-         * The TimestampListener must be registered in the TimestampMonitor in order to be notified
-         * of timestamp changes and react to changes for the duration it's part of the monitor.
-         *
-         * Listeners expected to run in standalone mode should handle Timestamp::min() notifications
-         * appropriately.
-         */
-        class TimestampListener {
-        public:
-            // Caller must ensure that the lifetime of the variables used in the callback are valid.
-            using Callback = std::function<void(OperationContext* opCtx, Timestamp timestamp)>;
-
-            /**
-             * A TimestampListener saves a 'callback' that will be executed whenever the specified
-             * 'type' timestamp changes. The 'callback' function will be passed the new 'type'
-             * timestamp.
-             */
-            TimestampListener(TimestampType type, Callback callback)
-                : _type(type), _callback(std::move(callback)) {}
-
-            /**
-             * Executes the appropriate function with the callback of the listener with the new
-             * timestamp.
-             */
-            void notify(OperationContext* opCtx, Timestamp newTimestamp) {
-                if (_type == TimestampType::kCheckpoint)
-                    _onCheckpointTimestampChanged(opCtx, newTimestamp);
-                else if (_type == TimestampType::kOldest)
-                    _onOldestTimestampChanged(opCtx, newTimestamp);
-                else if (_type == TimestampType::kStable)
-                    _onStableTimestampChanged(opCtx, newTimestamp);
-                else if (_type == TimestampType::kMinOfCheckpointAndOldest)
-                    _onMinOfCheckpointAndOldestTimestampChanged(opCtx, newTimestamp);
-            }
-
-            TimestampType getType() const {
-                return _type;
-            }
-
-        private:
-            void _onCheckpointTimestampChanged(OperationContext* opCtx, Timestamp newTimestamp) {
-                _callback(opCtx, newTimestamp);
-            }
-
-            void _onOldestTimestampChanged(OperationContext* opCtx, Timestamp newTimestamp) {
-                _callback(opCtx, newTimestamp);
-            }
-
-            void _onStableTimestampChanged(OperationContext* opCtx, Timestamp newTimestamp) {
-                _callback(opCtx, newTimestamp);
-            }
-
-            void _onMinOfCheckpointAndOldestTimestampChanged(OperationContext* opCtx,
-                                                             Timestamp newTimestamp) {
-                _callback(opCtx, newTimestamp);
-            }
-
-            // Timestamp type this listener monitors.
-            TimestampType _type;
-
-            // Function to execute when the timestamp changes.
-            Callback _callback;
-        };
-
-        /**
-         * Starts monitoring timestamp changes in the background with an initial listener.
-         */
-        TimestampMonitor(KVEngine* engine, PeriodicRunner* runner);
-
-        ~TimestampMonitor();
-
-        /**
-         * Adds a new listener to the monitor if it isn't already registered. A listener can only be
-         * bound to one type of timestamp at a time.
-         */
-        void addListener(TimestampListener* listener);
-
-        /**
-         * Remove a listener.
-         */
-        void removeListener(TimestampListener* listener);
-
-        bool isRunning_forTestOnly() const {
-            return _running;
-        }
-
-    private:
-        /**
-         * Monitor changes in timestamps and to notify the listeners on change. Notifies all
-         * listeners on Timestamp::min() in order to support standalone mode that is untimestamped.
-         */
-        void _startup();
-
-        KVEngine* _engine;
-        bool _running = false;
-        bool _shuttingDown = false;
-
-        // Periodic runner that the timestamp monitor schedules its job on.
-        PeriodicRunner* _periodicRunner;
-
-        // Protects access to _listeners below.
-        stdx::mutex _monitorMutex;
-        std::vector<TimestampListener*> _listeners;
-
-        // This should remain as the last member variable so that its destructor gets executed first
-        // when the class instance is being deconstructed. This causes the PeriodicJobAnchor to stop
-        // the PeriodicJob, preventing us from accessing any destructed variables if this were to
-        // run during the destruction of this class instance.
-        PeriodicJobAnchor _job;
-    };
-
-    StorageEngine* getStorageEngine() override {
-        return this;
-    }
 
     KVEngine* getEngine() override {
         return _engine.get();
@@ -327,16 +201,26 @@ public:
         return _engine.get();
     }
 
-    void addDropPendingIdent(
-        const std::variant<Timestamp, StorageEngine::CheckpointIteration>& dropTime,
-        std::shared_ptr<Ident> ident,
-        DropIdentCallback&& onDrop) override;
+    KVEngine* getSpillEngine() override {
+        return _spillEngine.get();
+    }
 
-    void dropIdentsOlderThan(OperationContext* opCtx, const Timestamp& ts) override;
+    const KVEngine* getSpillEngine() const override {
+        return _spillEngine.get();
+    }
+
+    void dropIdent(RecoveryUnit& ru, StringData ident) override;
+    void addDropPendingIdent(const DropTime& dropTime,
+                             std::shared_ptr<Ident> ident,
+                             DropIdentCallback&& onDrop) override;
+    void dropUnknownIdent(RecoveryUnit& ru,
+                          const Timestamp& stableTimestamp,
+                          StringData ident) override;
 
     std::shared_ptr<Ident> markIdentInUse(StringData ident) override;
 
-    void startTimestampMonitor() override;
+    void startTimestampMonitor(
+        std::initializer_list<TimestampMonitor::TimestampListener*> listeners) override;
 
     void checkpoint() override;
 
@@ -345,44 +229,48 @@ public:
     bool hasDataBeenCheckpointed(
         StorageEngine::CheckpointIteration checkpointIteration) const override;
 
-    StatusWith<ReconcileResult> reconcileCatalogAndIdents(
-        OperationContext* opCtx, Timestamp stableTs, LastShutdownState lastShutdownState) override;
-
     std::string getFilesystemPathForDb(const DatabaseName& dbName) const override;
 
-    DurableCatalog* getCatalog() override;
+    MDBCatalog* getMDBCatalog() override;
 
-    const DurableCatalog* getCatalog() const override;
+    const MDBCatalog* getMDBCatalog() const override;
 
     /**
-     * When loading after an unclean shutdown, this performs cleanup on the DurableCatalog.
+     * When loading after an unclean shutdown, this performs cleanup on the MDBCatalog.
      */
-    void loadCatalog(OperationContext* opCtx,
-                     boost::optional<Timestamp> stableTs,
-                     LastShutdownState lastShutdownState) final;
+    void loadMDBCatalog(OperationContext* opCtx, LastShutdownState lastShutdownState) final;
 
-    void closeCatalog(OperationContext* opCtx) final;
+    void closeMDBCatalog(OperationContext* opCtx) final;
 
     TimestampMonitor* getTimestampMonitor() const {
         return _timestampMonitor.get();
     }
 
-    std::set<std::string> getDropPendingIdents() const override {
-        return _dropPendingIdentReaper.getAllIdentNames();
-    }
+    void stopTimestampMonitor() override;
+
+    void restartTimestampMonitor() override;
 
     size_t getNumDropPendingIdents() const override {
         return _dropPendingIdentReaper.getNumIdents();
     }
 
-    int64_t sizeOnDiskForDb(OperationContext* opCtx, const DatabaseName& dbName) override;
+    std::string generateNewCollectionIdent(
+        const DatabaseName& dbName,
+        const boost::optional<StringData>& optIdentUniqueTag) const override;
+    std::string generateNewIndexIdent(
+        const DatabaseName& dbName,
+        const boost::optional<StringData>& optIdentUniqueTag) const override;
 
-    bool isUsingDirectoryPerDb() const override {
-        return _options.directoryPerDB;
+    StringData getCollectionIdentUniqueTag(StringData ident,
+                                           const DatabaseName& dbName) const override;
+    StringData getIndexIdentUniqueTag(StringData ident, const DatabaseName& dbName) const override;
+
+    bool storesFilesInDbPath() const override {
+        return !_options.directoryForIndexes && !_options.directoryPerDB;
     }
 
-    bool isUsingDirectoryForIndexes() const override {
-        return _options.directoryForIndexes;
+    int64_t getIdentSize(RecoveryUnit& ru, StringData ident) const final {
+        return _engine->getIdentSize(ru, ident);
     }
 
     StatusWith<Timestamp> pinOldestTimestamp(RecoveryUnit&,
@@ -406,6 +294,13 @@ public:
 
     bool waitUntilUnjournaledWritesDurable(OperationContext* opCtx, bool stableCheckpoint) override;
 
+    BSONObj setFlagToStorageOptions(const BSONObj& storageEngineOptions,
+                                    StringData flagName,
+                                    boost::optional<bool> flagValue) const override;
+
+    boost::optional<bool> getFlagFromStorageOptions(const BSONObj& storageEngineOptions,
+                                                    StringData flagName) const override;
+
     BSONObj getSanitizedStorageOptionsForSecondaryReplication(
         const BSONObj& options) const override;
 
@@ -413,22 +308,18 @@ public:
 
     Status autoCompact(RecoveryUnit&, const AutoCompactOptions& options) override;
 
+    bool underCachePressure(int concurrentOpOuts) override;
+
+    size_t getCacheSizeMB() override;
+
+    bool hasOngoingLiveRestore() override;
+
 private:
     using CollIter = std::list<std::string>::iterator;
 
-    void _initCollection(OperationContext* opCtx,
-                         RecordId catalogId,
-                         const NamespaceString& nss,
-                         bool forRepair,
-                         Timestamp minValidTs);
-
-    Status _dropCollections(OperationContext* opCtx,
-                            const std::vector<UUID>& toDrop,
-                            const std::string& collectionNamePrefix = "");
-
     /**
      * When called in a repair context (_options.forRepair=true), attempts to recover a collection
-     * whose entry is present in the DurableCatalog, but missing from the KVEngine. Returns an
+     * whose entry is present in the MDBCatalog, but missing from the KVEngine. Returns an
      * error Status if called outside of a repair context or the implementation of
      * KVEngine::recoverOrphanedIdent returns an error other than DataModifiedByRepair.
      *
@@ -446,7 +337,7 @@ private:
      * the given catalog entry.
      */
     void _checkForIndexFiles(OperationContext* opCtx,
-                             const DurableCatalog::EntryIdentifier& entry,
+                             const MDBCatalog::EntryIdentifier& entry,
                              std::vector<std::string>& identsKnownToStorageEngine) const;
 
     void _dumpCatalog(OperationContext* opCtx);
@@ -458,21 +349,13 @@ private:
     void _onMinOfCheckpointAndOldestTimestampChanged(OperationContext* opCtx,
                                                      const Timestamp& timestamp);
 
-    /**
-     * Returns whether the given ident is an internal ident and if it should be dropped or used to
-     * resume an index build.
-     */
-    bool _handleInternalIdent(OperationContext* opCtx,
-                              const std::string& ident,
-                              LastShutdownState lastShutdownState,
-                              ReconcileResult* reconcileResult,
-                              std::set<std::string>* internalIdentsToKeep,
-                              std::set<std::string>* allInternalIdents);
-
-    class RemoveDBChange;
-
+    // Main KVEngine instance used for all user tables.
     // This must be the first member so it is destroyed last.
     std::unique_ptr<KVEngine> _engine;
+
+    // KVEngine instance that is used for creating SpillTables.
+    std::unique_ptr<KVEngine> _spillEngine;
+    Atomic<long long> _spillTableDropRetries{0};
 
     const StorageEngineOptions _options;
 
@@ -482,17 +365,19 @@ private:
     // Listener for min of checkpoint and oldest timestamp changes.
     TimestampMonitor::TimestampListener _minOfCheckpointAndOldestTimestampListener;
 
-    // Listener for cleanup of CollectionCatalog when oldest timestamp advances.
-    TimestampMonitor::TimestampListener _collectionCatalogCleanupTimestampListener;
-
     const bool _supportsCappedCollections;
 
     std::unique_ptr<RecordStore> _catalogRecordStore;
-    std::unique_ptr<DurableCatalog> _catalog;
+    std::unique_ptr<MDBCatalog> _catalog;
 
     // Flag variable that states if the storage engine is in backup mode.
     bool _inBackupMode = false;
 
     std::unique_ptr<TimestampMonitor> _timestampMonitor;
+
+    // Stores a copy of the TimestampMonitor's listeners when temporarily stopping the monitor.
+    std::vector<TimestampMonitor::TimestampListener*> _listeners;
+
+    friend class StorageEngineTest;
 };
 }  // namespace mongo

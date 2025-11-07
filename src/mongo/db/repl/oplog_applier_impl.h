@@ -30,14 +30,11 @@
 
 #pragma once
 
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/repl/initial_syncer.h"
+#include "mongo/db/repl/initial_sync/initial_syncer.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_applier.h"
 #include "mongo/db/repl/oplog_buffer.h"
@@ -49,10 +46,14 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/session_update_tracker.h"
 #include "mongo/db/repl/storage_interface.h"
+#include "mongo/db/replication_state_transition_lock_guard.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <vector>
+
+namespace MONGO_MOD_PUB mongo {
 namespace repl {
 
 /**
@@ -134,8 +135,6 @@ private:
 
     StorageInterface* const _storageInterface;
 
-    ReplicationConsistencyMarkers* const _consistencyMarkers;
-
     std::unique_ptr<OplogWriter> _oplogWriter;
 
 protected:
@@ -148,10 +147,11 @@ protected:
      * This function has been marked as virtual to allow certain unit tests to skip oplog
      * application.
      */
-    virtual Status applyOplogBatchPerWorker(OperationContext* opCtx,
-                                            std::vector<ApplierOperation>* ops,
-                                            WorkerMultikeyPathInfo* workerMultikeyPathInfo,
-                                            bool isDataConsistent);
+    MONGO_MOD_FILE_PRIVATE virtual Status applyOplogBatchPerWorker(
+        OperationContext* opCtx,
+        std::vector<ApplierOperation>* ops,
+        WorkerMultikeyPathInfo* workerMultikeyPathInfo,
+        bool isDataConsistent);
 };
 
 /**
@@ -163,4 +163,4 @@ Status applyOplogEntryOrGroupedInserts(OperationContext* opCtx,
                                        bool isDataConsistent);
 
 }  // namespace repl
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

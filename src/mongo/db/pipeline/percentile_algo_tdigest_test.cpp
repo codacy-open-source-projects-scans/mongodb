@@ -27,15 +27,20 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include <cstdlib>
+#include <ctime>
+
 #include <boost/random/exponential_distribution.hpp>
 #include <boost/random/normal_distribution.hpp>
 #include <boost/random/uniform_real_distribution.hpp>
 #include <boost/random/weibull_distribution.hpp>
-#include <cstdlib>
-#include <ctime>
 // IWYU pragma: no_include "ext/alloc_traits.h"
+#include "mongo/base/string_data.h"
+#include "mongo/db/pipeline/percentile_algo.h"
+#include "mongo/db/pipeline/percentile_algo_tdigest.h"
+#include "mongo/logv2/log.h"
+#include "mongo/unittest/unittest.h"
+
 #include <algorithm>
 #include <iostream>
 #include <iterator>
@@ -45,15 +50,6 @@
 #include <random>
 #include <string>
 #include <utility>
-
-#include "mongo/base/string_data.h"
-#include "mongo/db/pipeline/percentile_algo.h"
-#include "mongo/db/pipeline/percentile_algo_tdigest.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 

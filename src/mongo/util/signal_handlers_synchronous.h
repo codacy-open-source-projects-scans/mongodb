@@ -29,16 +29,26 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
+#include "mongo/platform/compiler.h"
+#include "mongo/util/dynamic_catch.h"
+
 #include <functional>
 #include <iosfwd>
 #include <typeinfo>
 #include <vector>
 
-#include "mongo/platform/compiler.h"
-#include "mongo/util/dynamic_catch.h"
+#include <boost/optional.hpp>
 
 namespace mongo {
+/**
+ * Sets the appropriate state to enable/disable diagnostic logging based on `newVal`.
+ */
+void setDiagnosticLoggingInSignalHandlers(bool newVal);
+
+/**
+ * Restores the default signal handlers and ends the process.
+ */
+void endProcessWithSignal(int signalNum);
 
 /**
  * Sets up handlers for synchronous events, like segv, abort, terminate and malloc-failure.

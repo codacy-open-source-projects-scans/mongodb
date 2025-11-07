@@ -27,16 +27,7 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_map.h>
-#include <array>
-#include <boost/container/vector.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <map>
-#include <utility>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/fts/fts_index_format.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -44,15 +35,25 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonelement_comparator_interface.h"
-#include "mongo/db/fts/fts_index_format.h"
 #include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/query/bson/dotted_path_support.h"
+#include "mongo/db/query/bson/multikey_dotted_path_support.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/md5.h"
 #include "mongo/util/murmur3.h"
 #include "mongo/util/str.h"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <map>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/container/vector.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -63,7 +64,7 @@ namespace fts {
 using std::string;
 using std::vector;
 
-namespace dps = ::mongo::dotted_path_support;
+namespace mdps = ::mongo::multikey_dotted_path_support;
 
 namespace {
 BSONObj nullObj;
@@ -99,7 +100,7 @@ BSONElement extractNonFTSKeyElement(const BSONObj& obj, StringData path) {
     BSONElementSet indexedElements;
     const bool expandArrayOnTrailingField = true;
     MultikeyComponents arrayComponents;
-    dps::extractAllElementsAlongPath(
+    mdps::extractAllElementsAlongPath(
         obj, path, indexedElements, expandArrayOnTrailingField, &arrayComponents);
 
     if (MONGO_unlikely(enableCompoundTextIndexes.shouldFail())) {
@@ -217,7 +218,7 @@ void FTSIndexFormat::_appendIndexKey(KeyStringBuilder& keyString,
         if (term.size() <= termKeyPrefixLengthV3) {
             keyString.appendString(term);
         } else {
-            string keySuffix = md5simpledigest(term);
+            string keySuffix = md5simpledigest_deprecated(term);
             invariant(termKeySuffixLengthV3 == keySuffix.size());
             keyString.appendString(term.substr(0, termKeyPrefixLengthV3) + keySuffix);
         }

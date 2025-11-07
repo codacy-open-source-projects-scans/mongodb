@@ -31,6 +31,7 @@
 
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -89,6 +90,14 @@ public:
             case MatchExpression::GEO_NEAR:
             case MatchExpression::INTERNAL_BUCKET_GEO_WITHIN:
                 return true;
+            case MatchExpression::INTERNAL_EXPR_EQ:
+            case MatchExpression::INTERNAL_EXPR_LT:
+            case MatchExpression::INTERNAL_EXPR_GTE:
+                // Inexact bounds can't be inverted. These comparisons produce inexact bounds due to
+                // the lack of type bracketing and indexes not distinguishing between null and
+                // missing.
+                return !isExactBoundsGenerating(
+                    static_cast<const ComparisonMatchExpressionBase*>(me)->getData());
             default:
                 return false;
         }
@@ -191,21 +200,21 @@ public:
      */
     static bool isExactBoundsGenerating(BSONElement elt) {
         switch (elt.type()) {
-            case BSONType::NumberLong:
-            case BSONType::NumberDouble:
-            case BSONType::NumberInt:
-            case BSONType::NumberDecimal:
-            case BSONType::String:
-            case BSONType::Bool:
-            case BSONType::Date:
-            case BSONType::bsonTimestamp:
-            case BSONType::jstOID:
-            case BSONType::BinData:
-            case BSONType::Object:
-            case BSONType::Code:
-            case BSONType::CodeWScope:
-            case BSONType::MinKey:
-            case BSONType::MaxKey:
+            case BSONType::numberLong:
+            case BSONType::numberDouble:
+            case BSONType::numberInt:
+            case BSONType::numberDecimal:
+            case BSONType::string:
+            case BSONType::boolean:
+            case BSONType::date:
+            case BSONType::timestamp:
+            case BSONType::oid:
+            case BSONType::binData:
+            case BSONType::object:
+            case BSONType::code:
+            case BSONType::codeWScope:
+            case BSONType::minKey:
+            case BSONType::maxKey:
                 return true;
             default:
                 return false;
@@ -241,6 +250,12 @@ public:
             ime->hasEmptyArray();
     }
 
+    static bool nodeIsNegationOrElemMatchObj(const MatchExpression* node) {
+        return (node->matchType() == MatchExpression::NOT ||
+                node->matchType() == MatchExpression::NOR ||
+                node->matchType() == MatchExpression::ELEM_MATCH_OBJECT);
+    }
+
 private:
     /**
      * Returns true if 'me' is "sargable" but is not a negation and
@@ -249,23 +264,31 @@ private:
      * Used as a helper for nodeCanUseIndexOnOwnField().
      */
     static bool isIndexOnOwnFieldTypeNode(const MatchExpression* me) {
-        return me->matchType() == MatchExpression::LTE || me->matchType() == MatchExpression::LT ||
-            me->matchType() == MatchExpression::EQ || me->matchType() == MatchExpression::GT ||
-            me->matchType() == MatchExpression::GTE || me->matchType() == MatchExpression::REGEX ||
-            me->matchType() == MatchExpression::MOD ||
-            me->matchType() == MatchExpression::MATCH_IN ||
-            me->matchType() == MatchExpression::TYPE_OPERATOR ||
-            me->matchType() == MatchExpression::GEO ||
-            me->matchType() == MatchExpression::INTERNAL_BUCKET_GEO_WITHIN ||
-            me->matchType() == MatchExpression::GEO_NEAR ||
-            me->matchType() == MatchExpression::EXISTS ||
-            me->matchType() == MatchExpression::TEXT ||
-            me->matchType() == MatchExpression::INTERNAL_EXPR_EQ ||
-            me->matchType() == MatchExpression::INTERNAL_EXPR_GT ||
-            me->matchType() == MatchExpression::INTERNAL_EXPR_GTE ||
-            me->matchType() == MatchExpression::INTERNAL_EXPR_LT ||
-            me->matchType() == MatchExpression::INTERNAL_EXPR_LTE ||
-            me->matchType() == MatchExpression::INTERNAL_EQ_HASHED_KEY;
+        switch (me->matchType()) {
+            case MatchExpression::LTE:
+            case MatchExpression::LT:
+            case MatchExpression::EQ:
+            case MatchExpression::GT:
+            case MatchExpression::GTE:
+            case MatchExpression::REGEX:
+            case MatchExpression::MOD:
+            case MatchExpression::MATCH_IN:
+            case MatchExpression::TYPE_OPERATOR:
+            case MatchExpression::GEO:
+            case MatchExpression::INTERNAL_BUCKET_GEO_WITHIN:
+            case MatchExpression::GEO_NEAR:
+            case MatchExpression::EXISTS:
+            case MatchExpression::TEXT:
+            case MatchExpression::INTERNAL_EXPR_EQ:
+            case MatchExpression::INTERNAL_EXPR_GT:
+            case MatchExpression::INTERNAL_EXPR_GTE:
+            case MatchExpression::INTERNAL_EXPR_LT:
+            case MatchExpression::INTERNAL_EXPR_LTE:
+            case MatchExpression::INTERNAL_EQ_HASHED_KEY:
+                return true;
+            default:
+                return false;
+        }
     }
 };
 

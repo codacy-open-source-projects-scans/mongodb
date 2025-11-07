@@ -29,22 +29,11 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <deque>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/backup_block.h"
@@ -54,6 +43,16 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/storage/storage_engine.h"
+
+#include <cstdint>
+#include <deque>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -67,33 +66,37 @@ public:
     DevNullKVEngine();
     ~DevNullKVEngine() override;
 
-    RecoveryUnit* newRecoveryUnit() override;
+    std::unique_ptr<RecoveryUnit> newRecoveryUnit() override;
 
-    Status createRecordStore(const NamespaceString& nss,
+    Status createRecordStore(const rss::PersistenceProvider&,
+                             const NamespaceString& nss,
                              StringData ident,
-                             const CollectionOptions& options,
-                             KeyFormat keyFormat = KeyFormat::Long) override {
+                             const RecordStore::Options& options) override {
         return Status::OK();
     }
 
     std::unique_ptr<RecordStore> getRecordStore(OperationContext* opCtx,
                                                 const NamespaceString& nss,
                                                 StringData ident,
-                                                const CollectionOptions& options) override;
+                                                const RecordStore::Options& options,
+                                                boost::optional<UUID> uuid) override;
 
-    std::unique_ptr<RecordStore> getTemporaryRecordStore(OperationContext* opCtx,
+    std::unique_ptr<RecordStore> getTemporaryRecordStore(RecoveryUnit& ru,
                                                          StringData ident,
                                                          KeyFormat keyFormat) override;
 
-    std::unique_ptr<RecordStore> makeTemporaryRecordStore(OperationContext* opCtx,
+    std::unique_ptr<RecordStore> makeTemporaryRecordStore(RecoveryUnit& ru,
                                                           StringData ident,
                                                           KeyFormat keyFormat) override;
 
-    Status createSortedDataInterface(RecoveryUnit&,
-                                     const NamespaceString& nss,
-                                     const CollectionOptions& collOptions,
-                                     StringData ident,
-                                     const IndexDescriptor* desc) override {
+    Status createSortedDataInterface(
+        const rss::PersistenceProvider&,
+        RecoveryUnit&,
+        const NamespaceString& nss,
+        const UUID& uuid,
+        StringData ident,
+        const IndexConfig& indexConfig,
+        const boost::optional<mongo::BSONObj>& storageEngineOptions) override {
         return Status::OK();
     }
 
@@ -101,14 +104,15 @@ public:
         return Status::OK();
     }
 
-    std::unique_ptr<SortedDataInterface> getSortedDataInterface(
-        OperationContext* opCtx,
-        const NamespaceString& nss,
-        const CollectionOptions& collOptions,
-        StringData ident,
-        const IndexDescriptor* desc) override;
+    std::unique_ptr<SortedDataInterface> getSortedDataInterface(OperationContext* opCtx,
+                                                                RecoveryUnit& ru,
+                                                                const NamespaceString& nss,
+                                                                const UUID& uuid,
+                                                                StringData ident,
+                                                                const IndexConfig& config,
+                                                                KeyFormat keyFormat) override;
 
-    Status dropIdent(RecoveryUnit* ru,
+    Status dropIdent(RecoveryUnit& ru,
                      StringData ident,
                      bool identHasSizeInfo,
                      const StorageEngine::DropIdentCallback& onDrop) override {
@@ -116,10 +120,6 @@ public:
     }
 
     void dropIdentForImport(Interruptible&, RecoveryUnit&, StringData ident) override {}
-
-    bool supportsDirectoryPerDB() const override {
-        return false;
-    }
 
     bool isEphemeral() const override {
         return true;
@@ -141,7 +141,7 @@ public:
         return std::vector<std::string>();
     }
 
-    void cleanShutdown() override {}
+    void cleanShutdown(bool memLeakAllowed) override {}
 
     void setJournalListener(JournalListener* jl) override {}
 
@@ -163,6 +163,10 @@ public:
         const StorageEngine::BackupOptions& options) override;
 
     void endNonBlockingBackup() override {}
+
+    Timestamp getBackupCheckpointTimestamp() override {
+        return Timestamp(0, 0);
+    }
 
     StatusWith<std::deque<std::string>> extendBackupCursor() override;
 
@@ -198,17 +202,58 @@ public:
         return true;
     }
 
+    StatusWith<Timestamp> pinOldestTimestamp(RecoveryUnit&,
+                                             const std::string& requestingServiceName,
+                                             Timestamp requestedTimestamp,
+                                             bool roundUpIfTooOld) override {
+        return Timestamp(0, 0);
+    }
+
+    void unpinOldestTimestamp(const std::string& requestingServiceName) override {}
+
+    bool underCachePressure(int concurrentOpOuts) override {
+        return false;
+    }
+
+    BSONObj setFlagToStorageOptions(const BSONObj& storageEngineOptions,
+                                    StringData flagName,
+                                    boost::optional<bool> flagValue) const override {
+        return storageEngineOptions;
+    }
+
+    boost::optional<bool> getFlagFromStorageOptions(const BSONObj& storageEngineOptions,
+                                                    StringData flagName) const override {
+        return boost::none;
+    }
+
     void dump() const override {}
 
+    Status insertIntoIdent(RecoveryUnit& ru,
+                           StringData ident,
+                           IdentKey key,
+                           std::span<const char> value) override {
+        return Status::OK();
+    }
+
+    StatusWith<UniqueBuffer> getFromIdent(RecoveryUnit& ru,
+                                          StringData ident,
+                                          IdentKey key) override {
+        return Status::OK();
+    }
+
+    Status deleteFromIdent(RecoveryUnit& ru, StringData ident, IdentKey key) override {
+        return Status::OK();
+    }
+
     // This sets the results of the backup cursor for unit tests.
-    void setBackupBlocks_forTest(std::deque<BackupBlock> newBackupBlocks) {
+    void setBackupBlocks_forTest(std::deque<KVBackupBlock> newBackupBlocks) {
         _mockBackupBlocks = std::move(newBackupBlocks);
     }
 
 private:
     std::shared_ptr<void> _catalogInfo;
     int _cachePressureForTest;
-    std::deque<BackupBlock> _mockBackupBlocks;
+    std::deque<KVBackupBlock> _mockBackupBlocks;
     boost::filesystem::path _engineDbPath;
 };
 }  // namespace mongo

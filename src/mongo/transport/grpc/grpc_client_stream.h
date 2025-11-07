@@ -29,9 +29,9 @@
 
 #pragma once
 
-#include <grpcpp/support/async_stream.h>
-
 #include "mongo/transport/grpc/client_stream.h"
+
+#include <grpcpp/support/async_stream.h>
 
 namespace mongo::transport::grpc {
 
@@ -55,6 +55,10 @@ public:
 
     void writesDone(GRPCReactor::CompletionQueueEntry* tag) override {
         _stream->WritesDone(tag);
+    }
+
+    void startCall(GRPCReactor::CompletionQueueEntry* tag) override {
+        _stream->StartCall(tag);
     }
 
 private:

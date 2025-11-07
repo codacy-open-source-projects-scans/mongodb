@@ -28,30 +28,26 @@
  */
 
 
-#include "signal_handlers.h"
-#include <csignal>
-#include <cstdlib>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
 #include "mongo/logv2/log_util.h"
 #include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/barrier.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/signal_handlers.h"
 
+#include <csignal>
+#include <cstdlib>
+#include <string>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
 namespace {
-using namespace fmt::literals;
 
 constexpr auto kTestLogTag = "test"_sd;
 
@@ -73,8 +69,7 @@ public:
         });
     }
 
-    bool checkCapturedTextFormatLogMessagesForSubstr(std::string substr) const {
-        auto logs = getCapturedTextFormatLogMessages();
+    bool checkLinesContains(auto&& logs, std::string substr) const {
         return std::count_if(logs.begin(), logs.end(), [&](const auto& log) {
             return log.find(substr) != std::string::npos;
         });
@@ -91,12 +86,13 @@ private:
 // We use a death test here because the asynchronous signal processing thread runs as detached
 // thread, so we kill the process in which it spawns so the thread doesn't live in other tests.
 DEATH_TEST_F(LogRotateSignalTest, LogRotateSignal, "Ending LogRotateSignalTest") {
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     kill(getpid(), SIGUSR1);
     waitUntilLogRotatorCalled();
-    stopCapturingLogMessages();
-    ASSERT(checkCapturedTextFormatLogMessagesForSubstr("Log rotation initiated"));
-    ASSERT(checkCapturedTextFormatLogMessagesForSubstr("Test log rotator called"));
+    logs.stop();
+    auto&& lines = logs.getText();
+    ASSERT(checkLinesContains(lines, "Log rotation initiated"));
+    ASSERT(checkLinesContains(lines, "Test log rotator called"));
     LOGV2_FATAL(9706300, "Ending LogRotateSignalTest");
 }
 

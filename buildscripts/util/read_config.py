@@ -30,7 +30,7 @@ def get_config_value(attrib, cmd_line_options, config_file_data, required=False,
     return default
 
 
-def read_config_file(config_file):
+def read_config_file(config_file) -> dict:
     """
     Read the yaml config file specified.
 
@@ -39,7 +39,7 @@ def read_config_file(config_file):
     """
     config_file_data = {}
     if config_file:
-        with open(config_file) as file_handle:
+        with open(config_file, encoding="utf8") as file_handle:
             config_file_data = yaml.safe_load(file_handle)
 
     return config_file_data

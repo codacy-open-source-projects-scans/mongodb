@@ -27,14 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <string>
-#include <type_traits>
-#include <utility>
+#include "mongo/db/query/write_ops/write_ops_exec.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -45,33 +38,40 @@
 #include "mongo/bson/unordered_fields_bsonobj_comparator.h"
 #include "mongo/crypto/sha256_block.h"
 #include "mongo/db/basic_types.h"
-#include "mongo/db/catalog/catalog_test_fixture.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/create_collection.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/generic_argument_util.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/catalog_test_fixture.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/create_collection.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/query/write_ops/write_ops.h"
-#include "mongo/db/query/write_ops/write_ops_exec.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/timeseries/timeseries_request_util.h"
 #include "mongo/db/write_concern_idl.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/rpc/metadata/impersonated_user_metadata_gen.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdint>
+#include <string>
+#include <type_traits>
+#include <utility>
+
+#include <boost/cstdint.hpp>
+#include <boost/none.hpp>
+
 
 namespace mongo {
 namespace {
@@ -346,6 +346,50 @@ TEST_F(WriteOpsExecTest, TestDeleteRequestSizeEstimationLogic) {
     ASSERT(write_ops::verifySizeEstimate(deleteReq));
 }
 
+TEST_F(WriteOpsExecTest, InsertFailsIfTimeseriesCollectionCreatedDuringInsert) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagCreateViewlessTimeseriesCollections", true);
+    NamespaceString ns =
+        NamespaceString::createNamespaceString_forTest("db_write_ops_exec_test", "insertColl");
+    auto opCtx = operationContext();
+    write_ops::InsertCommandRequest insertCmdReq(ns);
+    BSONObj docToInsert(fromjson(R"({"t":{"$date":"2022-06-06T15:34:00.000Z"}, "x":1})"));
+    insertCmdReq.setDocuments({docToInsert});
+    // At this point, our collection does not exist, so we proceed to the normal insert path.
+    auto [preConditions, _] = timeseries::getCollectionPreConditionsAndIsTimeseriesLogicalRequest(
+        opCtx, ns, insertCmdReq, /*expectedUUID=*/boost::none);
+    ASSERT_FALSE(preConditions.isTimeseriesCollection());
+    ASSERT_FALSE(preConditions.exists());
+    // After this check, a concurrent operation could create a time-series collection with the same
+    // namespace.
+    auto tsOptions = TimeseriesOptions("t");
+    CreateCommand cmd = CreateCommand(ns);
+    cmd.getCreateCollectionRequest().setTimeseries(std::move(tsOptions));
+    ASSERT_OK(createCollection(opCtx, cmd));
+
+    write_ops_exec::LastOpFixer lastOpFixer(opCtx);
+    write_ops_exec::WriteResult out;
+    std::vector<InsertStatement> batch;
+    for (auto&& doc : insertCmdReq.getDocuments()) {
+        batch.emplace_back(std::vector<StmtId>{0}, doc);
+    }
+
+    // Now when we try to insert into the collection "ns", we should fail because we detect that a
+    // time-series collection was created with this same namespace. This prevents us from writing to
+    // the time-series collection as if it were a normal collection, which would result in a
+    // collection that has both bucket documents and regular documents.
+    ASSERT_THROWS_CODE(insertBatchAndHandleErrors(opCtx,
+                                                  insertCmdReq.getNamespace(),
+                                                  preConditions,
+                                                  insertCmdReq.getOrdered(),
+                                                  batch,
+                                                  OperationSource::kStandard,
+                                                  &lastOpFixer,
+                                                  &out),
+                       DBException,
+                       10685100);
+}
+
 class OpObserverMock : public OpObserverNoop {
 public:
     ~OpObserverMock() override {
@@ -391,9 +435,7 @@ public:
 class WriteOpsExecOplogTest : public CatalogTestFixture {
 public:
     explicit WriteOpsExecOplogTest(Options options = {})
-        : CatalogTestFixture(options.useReplSettings(true)),
-          _replicateVectoredInsertsTransactionally(
-              "featureFlagReplicateVectoredInsertsTransactionally", true) {}
+        : CatalogTestFixture(options.useReplSettings(true)) {}
 
 protected:
     void setUp() override {
@@ -406,7 +448,6 @@ protected:
     }
 
     OpObserverMock* _opObserverMock;
-    RAIIServerParameterControllerForTest _replicateVectoredInsertsTransactionally;
 };
 
 
@@ -418,7 +459,8 @@ TEST_F(WriteOpsExecOplogTest, VerifySingleInsertOplogDoesntBatch) {
     write_ops::InsertCommandRequest insertCmdReq(ns);
     BSONObj docToInsert(fromjson("{_id: 0, foo: 1}"));
     insertCmdReq.setDocuments({docToInsert});
-    auto result = write_ops_exec::performInserts(opCtx, insertCmdReq, OperationSource::kStandard);
+    auto result = write_ops_exec::performInserts(
+        opCtx, insertCmdReq, /*preConditions=*/boost::none, OperationSource::kStandard);
     ASSERT_EQ(1, result.results.size());
     ASSERT_EQ(1, unittest::assertGet(result.results[0]).getN());
 
@@ -437,7 +479,8 @@ TEST_F(WriteOpsExecOplogTest, VerifyMultiInsertOplogDoesBatch) {
     std::vector<BSONObj> docsToInsert{
         fromjson("{_id: 0, foo: 1}"), fromjson("{_id: 1, bar: 1}"), fromjson("{_id: 2, baz: 1}")};
     insertCmdReq.setDocuments(docsToInsert);
-    auto result = write_ops_exec::performInserts(opCtx, insertCmdReq, OperationSource::kStandard);
+    auto result = write_ops_exec::performInserts(
+        opCtx, insertCmdReq, /*preConditions=*/boost::none, OperationSource::kStandard);
     ASSERT_EQ(3, result.results.size());
     ASSERT_EQ(1, unittest::assertGet(result.results[0]).getN());
     ASSERT_EQ(1, unittest::assertGet(result.results[1]).getN());
@@ -465,7 +508,8 @@ TEST_F(WriteOpsExecOplogTest, VerifyMultiInsertCappedOplogDoesntBatch) {
     std::vector<BSONObj> docsToInsert{
         fromjson("{_id: 0, foo: 1}"), fromjson("{_id: 1, bar: 1}"), fromjson("{_id: 2, baz: 1}")};
     insertCmdReq.setDocuments(docsToInsert);
-    auto result = write_ops_exec::performInserts(opCtx, insertCmdReq, OperationSource::kStandard);
+    auto result = write_ops_exec::performInserts(
+        opCtx, insertCmdReq, /*preConditions=*/boost::none, OperationSource::kStandard);
     ASSERT_EQ(3, result.results.size());
     ASSERT_EQ(1, unittest::assertGet(result.results[0]).getN());
     ASSERT_EQ(1, unittest::assertGet(result.results[1]).getN());
@@ -492,7 +536,8 @@ TEST_F(WriteOpsExecOplogTest, VerifyMultiInsertMultipleBatches) {
                                       fromjson("{_id: 2, baz: 1}"),
                                       fromjson("{_id: 3, bif: 1}")};
     insertCmdReq.setDocuments(docsToInsert);
-    auto result = write_ops_exec::performInserts(opCtx, insertCmdReq, OperationSource::kStandard);
+    auto result = write_ops_exec::performInserts(
+        opCtx, insertCmdReq, /*preConditions=*/boost::none, OperationSource::kStandard);
     ASSERT_EQ(4, result.results.size());
     ASSERT_EQ(1, unittest::assertGet(result.results[0]).getN());
     ASSERT_EQ(1, unittest::assertGet(result.results[1]).getN());
@@ -521,7 +566,8 @@ TEST_F(WriteOpsExecOplogTest, VerifyMultiInsertBatchedAndUnbatched) {
     std::vector<BSONObj> docsToInsert{
         fromjson("{_id: 0, foo: 1}"), fromjson("{_id: 1, bar: 1}"), fromjson("{_id: 2, baz: 1}")};
     insertCmdReq.setDocuments(docsToInsert);
-    auto result = write_ops_exec::performInserts(opCtx, insertCmdReq, OperationSource::kStandard);
+    auto result = write_ops_exec::performInserts(
+        opCtx, insertCmdReq, /*preConditions=*/boost::none, OperationSource::kStandard);
     ASSERT_EQ(3, result.results.size());
     ASSERT_EQ(1, unittest::assertGet(result.results[0]).getN());
     ASSERT_EQ(1, unittest::assertGet(result.results[1]).getN());

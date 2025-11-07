@@ -35,17 +35,6 @@
  * rather parameters should be defined in .idl files.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <functional>
-#include <map>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -57,12 +46,26 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/str.h"
 #include "mongo/util/version/releases.h"
+
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_SERVER_PARAMETER_REGISTER(name) \
     MONGO_INITIALIZER_GENERAL(                \
@@ -73,7 +76,7 @@ namespace mongo {
 /**
  * How and when a given Server Parameter may be set/modified.
  */
-enum class ServerParameterType {
+enum class MONGO_MOD_PUB ServerParameterType {
     /**
      * May not be set at any time.
      * Used as a means to read out current state, similar to ServerStatus.
@@ -107,15 +110,20 @@ enum class ServerParameterType {
     kClusterWide,
 };
 
-class FeatureFlag;
-class ServerParameterSet;
+class MONGO_MOD_PUB OperationContext;
 
-class OperationContext;
+class MONGO_MOD_OPEN ServerParameter {
+private:
+    enum class EnableState {
+        enabled,
 
-template <typename U>
-using TenantIdMap = std::map<boost::optional<TenantId>, U>;
+        // Disabled but may become enabled in the future.
+        disabled,
 
-class ServerParameter {
+        // Disabled and can never become enabled or even enter the 'disabled' state.
+        prohibited,
+    };
+
 public:
     using Map = std::map<std::string, std::unique_ptr<ServerParameter>, std::less<>>;
 
@@ -161,6 +169,10 @@ public:
                         StringData name,
                         const boost::optional<TenantId>& tenantId) = 0;
 
+    virtual void appendDetails(OperationContext* opCtx,
+                               BSONObjBuilder* detailsBuilder,
+                               const boost::optional<TenantId>& tenantId) {}
+
     virtual void appendSupportingRoundtrip(OperationContext* opCtx,
                                            BSONObjBuilder* b,
                                            StringData name,
@@ -177,8 +189,10 @@ public:
         return validate(BSON("" << newValueObj).firstElement(), tenantId);
     }
 
-    // This base implementation calls `setFromString(coerceToString(newValueElement))`.
-    // Derived classes may customize the behavior by specifying `override_set` in IDL.
+    /**
+     * This base implementation calls `setFromString(coerceToString(newValueElement))`.
+     * Derived classes may customize the behavior by specifying `override_set` in IDL.
+     */
     virtual Status set(const BSONElement& newValueElement,
                        const boost::optional<TenantId>& tenantId);
 
@@ -222,109 +236,187 @@ public:
         return LogicalTime::kUninitialized;
     }
 
+    /**
+     * Returns true if the parameter should be advertised as an Incremental Feature Rollout (IFR)
+     * flag.
+     */
+    virtual bool isForIncrementalFeatureRollout() const {
+        return false;
+    }
+
     bool isTestOnly() const {
-        stdx::lock_guard lk(_mutex);
         return _testOnly;
     }
 
+    /**
+     * Mark this parameter as "test only." For thread safety, this method should only be called as
+     * part of a `ServerParameter`'s initialization.
+     */
     void setTestOnly() {
-        stdx::lock_guard lk(_mutex);
         _testOnly = true;
     }
 
     bool isRedact() const {
-        stdx::lock_guard lk(_mutex);
         return _redact;
     }
 
+    /**
+     * Mark this parameter as "redacted" for the purposes of logging. For thread safety, this method
+     * should only be called as part of a `ServerParameter`'s initialization.
+     */
     void setRedact() {
-        stdx::lock_guard lk(_mutex);
         _redact = true;
     }
 
-    bool isOmittedInFTDC() {
-        stdx::lock_guard lk(_mutex);
+    bool isOmittedInFTDC() const {
         return _isOmittedInFTDC;
     }
 
+    /**
+     * Mark this parameter as one that should not be recorded in FTDC. For thread safety, this
+     * method should only be called as part of a `ServerParameter`'s initialization.
+     */
     void setOmitInFTDC() {
-        stdx::lock_guard lk(_mutex);
         _isOmittedInFTDC = true;
     }
 
-private:
-    enum DisableState { Enabled = 0, TemporarilyDisabled = 1, PermanentlyDisabled = 2 };
+    /**
+     * User-initiated operations (e.g. CLI parsing or commands)
+     * that name a deprecated server parameter must emit a warning,
+     * so such code will call this function before applying such
+     * operations, giving deprecated parameters an opportunity to
+     * emit a warning. If the parameter is not deprecated, the
+     * function does nothing. Implementations are expected to ensure
+     * that such warnings are emitted only once per server parameter.
+     */
+    virtual void warnIfDeprecated(StringData action);
 
-public:
-    void disable(bool permanent) {
-        stdx::lock_guard lk(_mutex);
-        if (_disableState != DisableState::PermanentlyDisabled) {
-            _disableState =
-                permanent ? DisableState::PermanentlyDisabled : DisableState::TemporarilyDisabled;
-        }
+    void disable(bool permanent);
+
+    /**
+     * Enables the parameter unless it has been permanently disabled. Returns whether the
+     * parameter is enabled after the operation completes.
+     */
+    bool enable();
+
+    bool isEnabled() const {
+        const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+        return isEnabledOnVersion(
+            fcvSnapshot.isVersionInitialized()
+                ? fcvSnapshot.getVersion()
+                : multiversion::FeatureCompatibilityVersion::kUnsetDefaultLastLTSBehavior);
     }
 
-    void enable() {
-        stdx::lock_guard lk(_mutex);
-        if (_disableState == DisableState::TemporarilyDisabled) {
-            _disableState = DisableState::Enabled;
-        }
+    /**
+     * Returns whether this server parameter would be enabled with the given FCV.
+     */
+    bool isEnabledOnVersion(const multiversion::FeatureCompatibilityVersion& targetFCV) const {
+        return isEnabledOnVersion(_state.load(), targetFCV);
     }
 
-    bool isEnabled() const;
+    /**
+     * This overload of `isEnabledOnVersion()` does not read any `ServerParameter` state that can be
+     * modified by another thread but instead reads its state from the caller-provided `state`
+     * snapshot. The snapshotted state allows the caller to make multiple calls without the risk of
+     * inconsistent results caused by concurrent calls to the `disable()` or `enable()` methods.
+     *
+     * Use the `getState()` method to obtain the snapshot.
+     */
+    bool isEnabledOnVersion(EnableState state,
+                            const multiversion::FeatureCompatibilityVersion& targetFCV) const {
+        return state == EnableState::enabled && _meetsFCVAndFlagRequirements(targetFCV);
+    }
 
-    // Return whether this server parameter would be enabled with the given FCV
-    bool isEnabledOnVersion(const multiversion::FeatureCompatibilityVersion& targetFCV) const;
+    /**
+     * Returns whether this server parameter is compatible with the given FCV, regardless of if
+     * it is temporarily disabled.
+     */
+    bool canBeEnabledOnVersion(const multiversion::FeatureCompatibilityVersion& targetFCV) const {
+        return canBeEnabledOnVersion(_state.load(), targetFCV);
+    }
 
-    // Return whether this server parameter is compatible with the given FCV, regardless of if it is
-    // temporarily disabled
-    bool canBeEnabledOnVersion(const multiversion::FeatureCompatibilityVersion& targetFCV) const;
+    /**
+     * This overload of `canBeEnabledOnVersion()` does not read any `ServerParameter` state that can
+     * be modified by another thread but instead reads its state from the caller-provided `state`
+     * snapshot. The snapshotted state allows the caller to make multiple calls without the risk of
+     * inconsistent results caused by concurrent calls to the `disable()` or `enable()` methods.
+     *
+     * Use the `getState()` method to obtain the snapshot.
+     */
+    bool canBeEnabledOnVersion(EnableState state,
+                               const multiversion::FeatureCompatibilityVersion& targetFCV) const {
+        return state != EnableState::prohibited && _meetsFCVAndFlagRequirements(targetFCV);
+    }
 
-    void setFeatureFlag(FeatureFlag* featureFlag) {
-        stdx::lock_guard lk(_mutex);
+    /**
+     * Mark this parameter as dependent on `featureFlag`, making it only enabled when `featureFlag`
+     * is enabled. For thread safety, this method should only be called as part of a
+     * `ServerParameter`'s initialization.
+     */
+    void setFeatureFlag(ParameterGatingFeatureFlag* featureFlag) {
         _featureFlag = featureFlag;
     }
 
+    /**
+     * Set a minimum Feature Compatibility Version (FCV) requirement for this parameter to be
+     * enabled. For thread safety, this method should only be called as part of a
+     * `ServerParameter`'s initialization.
+     */
     void setMinFCV(const multiversion::FeatureCompatibilityVersion& minFCV) {
-        stdx::lock_guard lk(_mutex);
         _minFCV = minFCV;
     }
 
-protected:
-    virtual bool _isEnabledOnVersion(
-        const multiversion::FeatureCompatibilityVersion& targetFCV) const;
-
-    bool featureFlagIsDisabledOnVersion(
-        const multiversion::FeatureCompatibilityVersion& targetFCV) const;
-
-    bool minFCVIsLessThanOrEqualToVersion(
-        const multiversion::FeatureCompatibilityVersion& fcv) const {
-        stdx::lock_guard lk(_mutex);
-        return !_minFCV || fcv >= *_minFCV;
+    EnableState getState() const {
+        return _state.load();
     }
 
+    /**
+     * Called during process initialization before the ServerParameter gets registered with the
+     * global ServerParameterSet singleton.
+     */
+    virtual void onRegistrationWithProcessGlobalParameterList() {}
+
+    void setIsDeprecated(bool isDeprecated) {
+        _isDeprecated = isDeprecated;
+    }
+
+    bool getIsDeprecated() const {
+        return _isDeprecated;
+    }
+
+protected:
     // Helper for translating setParameter values from BSON to string.
     StatusWith<std::string> _coerceToString(const BSONElement&);
 
 private:
+    /**
+     * Returns true unless there is a minimum FCV requirement that is not met by the `targetFCV`
+     * value or a feature flag condition on a flag that is disabled for the `targetFCV` value.
+     */
+    bool _meetsFCVAndFlagRequirements(
+        const multiversion::FeatureCompatibilityVersion& targetFCV) const {
+        return (!_minFCV || targetFCV >= *_minFCV) &&
+            (!_featureFlag || _featureFlag->isServerParameterEnabled(targetFCV));
+    }
+
     std::string _name;
     ServerParameterType _type;
 
-    mutable stdx::mutex _mutex;
-
+    std::once_flag _warnDeprecatedOnce;
+    bool _isDeprecated = false;
     bool _testOnly = false;
     bool _redact = false;
     bool _isOmittedInFTDC = false;
-    FeatureFlag* _featureFlag = nullptr;
-    boost::optional<multiversion::FeatureCompatibilityVersion> _minFCV = boost::none;
+    ParameterGatingFeatureFlag* _featureFlag = nullptr;
+    boost::optional<multiversion::FeatureCompatibilityVersion> _minFCV;
 
     // Tracks whether a parameter is enabled, temporarily disabled, or permanently disabled. This is
     // used when disabling (permanently) test-only parameters, and when enabling/disabling
     // (temporarily) cluster parameters on the mongos based on the cluster's FCV.
-    DisableState _disableState = DisableState::Enabled;
+    Atomic<EnableState> _state = EnableState::enabled;
 };
 
-class ServerParameterSet {
+class MONGO_MOD_PUB ServerParameterSet {
 public:
     using Map = ServerParameter::Map;
 
@@ -378,12 +470,12 @@ private:
     Map _map;
 };
 
-void registerServerParameter(std::unique_ptr<ServerParameter>);
+MONGO_MOD_PUB void registerServerParameter(std::unique_ptr<ServerParameter>);
 
 /**
  * Proxy instance for deprecated aliases of set parameters.
  */
-class IDLServerParameterDeprecatedAlias : public ServerParameter {
+class MONGO_MOD_PUB IDLServerParameterDeprecatedAlias : public ServerParameter {
 public:
     IDLServerParameterDeprecatedAlias(StringData name, ServerParameter* sp);
 
@@ -395,15 +487,19 @@ public:
     Status set(const BSONElement& newValueElement, const boost::optional<TenantId>& tenantId) final;
     Status setFromString(StringData str, const boost::optional<TenantId>& tenantId) final;
 
+    /**
+     * This function generates "deprecated" warning log message.
+     * Once per server parameter.
+     */
+    void warnIfDeprecated(StringData action) final;
+
 private:
     std::once_flag _warnOnce;
     ServerParameter* _sp;
 };
 
-namespace idl_server_parameter_detail {
-
 template <typename T>
-inline StatusWith<T> coerceFromString(StringData str) {
+MONGO_MOD_PUB inline StatusWith<T> coerceFromString(StringData str) {
     T value;
     Status status = NumberParser{}(str, &value);
     if (!status.isOK()) {
@@ -413,7 +509,7 @@ inline StatusWith<T> coerceFromString(StringData str) {
 }
 
 template <>
-inline StatusWith<bool> coerceFromString<bool>(StringData str) {
+MONGO_MOD_PUB inline StatusWith<bool> coerceFromString<bool>(StringData str) {
     if ((str == "1") || (str == "true")) {
         return true;
     }
@@ -424,17 +520,18 @@ inline StatusWith<bool> coerceFromString<bool>(StringData str) {
 }
 
 template <>
-inline StatusWith<std::string> coerceFromString<std::string>(StringData str) {
-    return str.toString();
+MONGO_MOD_PUB inline StatusWith<std::string> coerceFromString<std::string>(StringData str) {
+    return std::string{str};
 }
 
 template <>
-inline StatusWith<std::vector<std::string>> coerceFromString<std::vector<std::string>>(
-    StringData str) {
+MONGO_MOD_PUB inline StatusWith<std::vector<std::string>>
+coerceFromString<std::vector<std::string>>(StringData str) {
     std::vector<std::string> v;
-    str::splitStringDelim(str.toString(), &v, ',');
+    str::splitStringDelim(std::string{str}, &v, ',');
     return v;
 }
 
-}  // namespace idl_server_parameter_detail
+template <typename U>
+using TenantIdMap MONGO_MOD_PUB = std::map<boost::optional<TenantId>, U>;
 }  // namespace mongo

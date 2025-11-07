@@ -31,23 +31,23 @@
  * Unit tests of the builtin roles psuedo-collection.
  */
 
-#include <boost/optional.hpp>
-#include <vector>
-
-#include <absl/container/node_hash_set.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
+#include "mongo/db/auth/builtin_roles.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/auth_name.h"
-#include "mongo/db/auth/builtin_roles.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/database_name_util.h"
+
+#include <vector>
+
+#include <absl/container/node_hash_set.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -73,6 +73,7 @@ TEST(BuiltinRoles, BuiltinRolesOnlyOnAppropriateDatabases) {
     ASSERT(!auth::isBuiltinRole(RoleName("root", "test")));
     ASSERT(!auth::isBuiltinRole(RoleName("__system", "test")));
     ASSERT(!auth::isBuiltinRole(RoleName("MyRole", "test")));
+    ASSERT(!auth::isBuiltinRole(RoleName("searchCoordinator", "test")));
 
     ASSERT(auth::isBuiltinRole(RoleName("read", "admin")));
     ASSERT(auth::isBuiltinRole(RoleName("readWrite", "admin")));
@@ -89,6 +90,7 @@ TEST(BuiltinRoles, BuiltinRolesOnlyOnAppropriateDatabases) {
     ASSERT(auth::isBuiltinRole(RoleName("__system", "admin")));
     ASSERT(auth::isBuiltinRole(RoleName("directShardOperations", "admin")));
     ASSERT(!auth::isBuiltinRole(RoleName("MyRole", "admin")));
+    ASSERT(auth::isBuiltinRole(RoleName("searchCoordinator", "admin")));
 }
 
 TEST(BuiltinRoles, getBuiltinRolesForDB) {
@@ -127,6 +129,7 @@ TEST(BuiltinRoles, addPrivilegesForBuiltinRole) {
         ActionType::listCollections,
         ActionType::listIndexes,
         ActionType::listSearchIndexes,
+        ActionType::performRawDataOperations,
         ActionType::planCacheRead,
     });
 

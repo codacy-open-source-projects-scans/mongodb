@@ -4,6 +4,8 @@
  * @tags: [
  *   assumes_balancer_off,
  *   does_not_support_stepdowns,
+ *   # This test requires strict control over the tracking state of un/sharded collections.
+ *   assumes_unsharded_collection,
  *   requires_fcv_70,
  * ]
  */
@@ -11,10 +13,10 @@ import {
     setParameterOpts,
     testExistingShardedCollection,
     testExistingUnshardedCollection,
-    testNonExistingCollection
+    testNonExistingCollection,
 } from "jstests/sharding/analyze_shard_key/libs/analyze_shard_key_common_tests.js";
 
-const shardNames = db.adminCommand({listShards: 1}).shards.map(shard => shard._id);
+const shardNames = db.adminCommand({listShards: 1}).shards.map((shard) => shard._id);
 
 {
     const dbName = db.getName();
@@ -26,8 +28,7 @@ const shardNames = db.adminCommand({listShards: 1}).shards.map(shard => shard._i
     testNonExistingCollection(dbName, testCases);
     testExistingUnshardedCollection(dbName, mongos, testCases);
     if (shardNames.length < 2) {
-        print(jsTestName() +
-              " testExistingShardedCollection will not run; at least 2 shards are required.");
+        print(jsTestName() + " testExistingShardedCollection will not run; at least 2 shards are required.");
     } else {
         testExistingShardedCollection(dbName, mongos, testCases);
     }

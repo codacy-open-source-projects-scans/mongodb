@@ -46,8 +46,9 @@ structs:
             tempNs:
                 cpp_name: tempReshardingNss
                 type: namespacestring
-                description: "The namespace of the temporary resharding collection that exists on
-                              recipient shards."
+                description:
+                    "The namespace of the temporary resharding collection that exists on
+                    recipient shards."
             reshardingKey:
                 type: KeyPattern
             recipientShardIds:
@@ -94,8 +95,9 @@ structs:
                     are inconsistent among shards."
 
     TypeCollectionReshardingFields:
-        description: "Resharding-related fields meant to be stored in a config.collections
-                      document."
+        description:
+            "Resharding-related fields meant to be stored in a config.collections
+            document."
         # Use strict:false to avoid complications around upgrade/downgrade. This isn't technically
         # required for resharding because durable state from all resharding operations is cleaned up
         # before the upgrade or downgrade can complete.
@@ -124,11 +126,13 @@ structs:
                 description: "Start time of the operation."
                 optional: true
             provenance:
-                type: Provenance
+                type: ReshardingProvenance
                 description: "The source operation that called this resharding operation."
                 optional: true
-            implicitlyCreateIndex:
-                type: bool
-                description: "Whether to create an index on the shard key pattern if the shard key
-                              does not already have a support index."
-                default: true
+            performVerification:
+                type: optionalBool
+                description: "Whether to perform data comparison verification."
+            telemetryContext:
+                type: object_owned
+                optional: true
+                description: "Tracing context for this resharding operation."

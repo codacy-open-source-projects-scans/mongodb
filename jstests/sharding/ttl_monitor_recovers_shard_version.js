@@ -12,27 +12,26 @@
 
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
-var st = new ShardingTest({
+let st = new ShardingTest({
     mongos: 1,
     shards: 1,
     rs: {
         nodes: 1,
         // Reducing the TTL Monitor sleep
-        setParameter: {ttlMonitorSleepSecs: 5}
-    }
+        setParameter: {ttlMonitorSleepSecs: 5},
+    },
 });
-var kDbName = 'db';
-var kCollName = 'foo';
+let kDbName = "db";
+let kCollName = "foo";
 
-var mongos = st.s0;
+let mongos = st.s0;
 
 assert.commandWorked(mongos.adminCommand({enableSharding: kDbName}));
 
-var ns = kDbName + '.' + kCollName;
+let ns = kDbName + "." + kCollName;
 
 assert.commandWorked(mongos.adminCommand({shardCollection: ns, key: {a: 1}}));
-assert.commandWorked(
-    mongos.getDB(kDbName)[kCollName].createIndex({b: 1}, {expireAfterSeconds: 20}));
+assert.commandWorked(mongos.getDB(kDbName)[kCollName].createIndex({b: 1}, {expireAfterSeconds: 20}));
 
 for (let i = 0; i < 20; ++i) {
     mongos.getDB(kDbName)[kCollName].insert({a: i, b: new Date()});

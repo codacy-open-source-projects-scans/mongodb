@@ -27,8 +27,7 @@
  *    it in the license file.
  */
 
-#include <memory>
-
+#include "mongo/s/commands/query_cmd/cluster_explain.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -38,17 +37,22 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/connection_string.h"
+#include "mongo/db/pipeline/sharded_agg_helpers.h"
 #include "mongo/db/query/explain_common.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/raw_data_operation.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/idl/command_generic_argument.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/commands/query_cmd/cluster_explain.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -91,8 +95,8 @@ bool appendToArrayIfRoom(BSONArrayBuilder* arrayBuilder, const BSONElement& toAp
     // Unless 'arrayBuilder' has already exceeded the max BSON user size, add a warning
     // indicating that data has been truncated.
     if (arrayBuilder->len() < BSONObjMaxUserSize) {
-        arrayBuilder->append(BSON("warning"
-                                  << "output truncated due to nearing BSON max user size"));
+        arrayBuilder->append(
+            BSON("warning" << "output truncated due to nearing BSON max user size"));
     }
 
     return false;
@@ -137,12 +141,13 @@ BSONObj ClusterExplain::wrapAsExplain(const BSONObj& cmdObj,
     // https://www.mongodb.com/docs/manual/reference/command/explain/.
     // The "readConcern" parameter will also be propagated out of the inner command as the final
     // explain command inherits readConcern from the inner command invocation.
+    // Another exception is the "rawData" field, which must be passed along in the inner command.
     BSONObjBuilder explainBuilder = out.subobjStart("explain");
     BSONElement commentField;
     BSONElement readConcernField;
     for (auto&& elem : cmdObj) {
         const auto& fieldName = elem.fieldNameStringData();
-        if (!isGenericArgument(fieldName)) {
+        if (!isGenericArgument(fieldName) || fieldName == kRawDataFieldName) {
             explainBuilder.append(elem);
         } else if (fieldName == "comment"_sd) {
             commentField = elem;
@@ -175,6 +180,7 @@ void ClusterExplain::validateShardResponses(
 
     // Count up the number of shards that have execution stats and all plan execution level
     // information.
+    size_t numShardsQueryPlanner = 0;
     size_t numShardsExecStats = 0;
     size_t numShardsAllPlansStats = 0;
 
@@ -185,10 +191,20 @@ void ClusterExplain::validateShardResponses(
 
         auto responseData = response.swResponse.getValue().data;
 
-        uassert(ErrorCodes::OperationFailed,
-                str::stream() << "Explain command on shard " << response.shardId
-                              << " failed, caused by: " << responseData,
-                responseData["queryPlanner"].type() == Object);
+        if (const auto& shardQueryPlanner = responseData["queryPlanner"]) {
+            uassert(ErrorCodes::OperationFailed,
+                    str::stream() << "Explain command on shard " << response.shardId
+                                  << " failed, caused by: " << responseData,
+                    shardQueryPlanner.type() == BSONType::object);
+            numShardsQueryPlanner++;
+        } else {
+            uassert(ErrorCodes::OperationFailed,
+                    fmt::format("Explain command response from shard '{}' does not contain neither "
+                                "'queryPlanner' field nor 'stages' field. Response: {}",
+                                response.shardId.toString(),
+                                responseData.toString()),
+                    responseData.hasField("stages"));
+        }
 
         if (responseData.hasField("executionStats")) {
             numShardsExecStats++;
@@ -198,6 +214,11 @@ void ClusterExplain::validateShardResponses(
             }
         }
     }
+
+    uassert(ErrorCodes::InternalError,
+            str::stream() << "Only " << numShardsQueryPlanner << "/" << shardResponses.size()
+                          << " had top level queryPlanner explain information.",
+            numShardsQueryPlanner == 0 || numShardsQueryPlanner == shardResponses.size());
 
     // Either all shards should have execution stats info, or none should.
     uassert(ErrorCodes::InternalError,
@@ -228,6 +249,15 @@ void ClusterExplain::buildPlannerInfo(OperationContext* opCtx,
                                       const vector<AsyncRequestsSender::Response>& shardResponses,
                                       const char* mongosStageName,
                                       BSONObjBuilder* out) {
+    const auto& firstShardResponseData = shardResponses[0].swResponse.getValue().data;
+
+    if (firstShardResponseData.hasField("stages")) {
+        // Explain output is from an aggregation execution.
+        // Use the aggregation helper to merge shards output into the upstream response.
+        sharded_agg_helpers::mergeExplainOutputFromShards(shardResponses, out);
+        return;
+    }
+
     BSONObjBuilder queryPlannerBob(out->subobjStart("queryPlanner"));
 
     BSONObjBuilder winningPlanBob(queryPlannerBob.subobjStart("winningPlan"));
@@ -263,7 +293,9 @@ void ClusterExplain::buildPlannerInfo(OperationContext* opCtx,
 void ClusterExplain::buildExecStats(const vector<AsyncRequestsSender::Response>& shardResponses,
                                     const char* mongosStageName,
                                     long long millisElapsed,
-                                    BSONObjBuilder* out) {
+                                    BSONObjBuilder* out,
+                                    boost::optional<int64_t> limit,
+                                    boost::optional<int64_t> skip) {
     auto firstShardResponseData = shardResponses[0].swResponse.getValue().data;
     if (!firstShardResponseData.hasField("executionStats")) {
         // The shards don't have execution stats info. Bail out without adding anything
@@ -274,15 +306,18 @@ void ClusterExplain::buildExecStats(const vector<AsyncRequestsSender::Response>&
     BSONObjBuilder executionStatsBob(out->subobjStart("executionStats"));
 
     // Collect summary stats from the shards.
-    long long nReturned = 0;
+    auto multipleShards = shardResponses.size() > 1;
+    long long totalNReturned = 0;
     long long keysExamined = 0;
     long long docsExamined = 0;
     long long totalChildMillis = 0;
+    long long totalNCounted = 0;
+    auto appendNCounted = false;
     for (size_t i = 0; i < shardResponses.size(); i++) {
         auto responseData = shardResponses[i].swResponse.getValue().data;
         BSONObj execStats = responseData["executionStats"].Obj();
         if (execStats.hasField("nReturned")) {
-            nReturned += execStats["nReturned"].numberLong();
+            totalNReturned += execStats["nReturned"].numberLong();
         }
         if (execStats.hasField("totalKeysExamined")) {
             keysExamined += execStats["totalKeysExamined"].numberLong();
@@ -293,10 +328,33 @@ void ClusterExplain::buildExecStats(const vector<AsyncRequestsSender::Response>&
         if (execStats.hasField("executionTimeMillis")) {
             totalChildMillis += execStats["executionTimeMillis"].numberLong();
         }
+        if (execStats.hasField("executionStages")) {
+            BSONObj stage = execStats["executionStages"].Obj();
+            if (stage.hasField("nCounted")) {
+                totalNCounted += stage["nCounted"].numberLong();
+                appendNCounted = true;
+            }
+        }
     }
 
     // Fill in top-level stats.
-    executionStatsBob.appendNumber("nReturned", nReturned);
+    long long finalNReturned = totalNReturned;
+    // If the query has targeted multiple shards, the overall nReturned value should reflect the
+    // final limit + skip that are applied router-side on the results returned from the shards. The
+    // same is true for the nCounted value for the count command.
+    if (multipleShards) {
+        if (skip) {
+            finalNReturned = std::max(finalNReturned - *skip, 0LL);
+            totalNCounted = std::max(totalNCounted - *skip, 0LL);
+        }
+
+        if (limit) {
+            finalNReturned = std::min(finalNReturned, static_cast<long long>(*limit));
+            totalNCounted = std::min(totalNCounted, static_cast<long long>(*limit));
+        }
+    }
+
+    executionStatsBob.appendNumber("nReturned", finalNReturned);
     executionStatsBob.appendNumber("executionTimeMillis", millisElapsed);
     executionStatsBob.appendNumber("totalKeysExamined", keysExamined);
     executionStatsBob.appendNumber("totalDocsExamined", docsExamined);
@@ -306,7 +364,18 @@ void ClusterExplain::buildExecStats(const vector<AsyncRequestsSender::Response>&
 
     // Info for the root mongos stage.
     executionStagesBob.append("stage", mongosStageName);
-    executionStatsBob.appendNumber("nReturned", nReturned);
+    executionStatsBob.appendNumber("nReturned", finalNReturned);
+    if (appendNCounted) {
+        executionStatsBob.appendNumber("nCounted", totalNCounted);
+    }
+    if (multipleShards) {
+        if (limit) {
+            executionStatsBob.appendNumber("limitAmount", static_cast<long long>(*limit));
+        }
+        if (skip) {
+            executionStatsBob.appendNumber("skipAmount", static_cast<long long>(*skip));
+        }
+    }
     executionStatsBob.appendNumber("executionTimeMillis", millisElapsed);
     executionStatsBob.appendNumber("totalKeysExamined", keysExamined);
     executionStatsBob.appendNumber("totalDocsExamined", docsExamined);
@@ -394,7 +463,9 @@ Status ClusterExplain::buildExplainResult(
     const char* mongosStageName,
     long long millisElapsed,
     const BSONObj& command,
-    BSONObjBuilder* out) {
+    BSONObjBuilder* out,
+    boost::optional<int64_t> limit,
+    boost::optional<int64_t> skip) {
     // Explain only succeeds if all shards support the explain command.
     try {
         ClusterExplain::validateShardResponses(shardResponses);
@@ -403,7 +474,7 @@ Status ClusterExplain::buildExplainResult(
     }
 
     buildPlannerInfo(expCtx->getOperationContext(), shardResponses, mongosStageName, out);
-    buildExecStats(shardResponses, mongosStageName, millisElapsed, out);
+    buildExecStats(shardResponses, mongosStageName, millisElapsed, out, limit, skip);
     explain_common::generateQueryShapeHash(expCtx->getOperationContext(), out);
     explain_common::generateServerInfo(out);
     explain_common::generateServerParameters(expCtx, out);

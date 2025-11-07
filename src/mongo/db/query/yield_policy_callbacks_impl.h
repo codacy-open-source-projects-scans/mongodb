@@ -32,6 +32,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -47,10 +48,11 @@ public:
     ~YieldPolicyCallbacksImpl() override = default;
 
     void duringYield(OperationContext*) const override;
-    void handledWriteConflict(OperationContext*) const override;
     void preCheckInterruptOnly(OperationContext*) const override;
 
 private:
+    void _tryLogLongRunningQueries(OperationContext*) const;
+
     NamespaceString _nss;
 };
 

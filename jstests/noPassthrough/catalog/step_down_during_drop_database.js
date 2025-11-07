@@ -21,8 +21,8 @@ let testDB = primary.getDB(dbName);
 
 const size = 5;
 jsTest.log("Creating " + size + " test documents.");
-var bulk = testDB.getCollection(collName).initializeUnorderedBulkOp();
-for (var i = 0; i < size; ++i) {
+let bulk = testDB.getCollection(collName).initializeUnorderedBulkOp();
+for (let i = 0; i < size; ++i) {
     bulk.insert({i: i});
 }
 assert.commandWorked(bulk.execute());
@@ -37,9 +37,11 @@ const awaitShell = startParallelShell(() => {
 }, testDB.getMongo().port);
 
 // Ensure the dropDatabase command has begun before stepping down.
-checkLog.contains(primary,
-                  "dropDatabase - fail point dropDatabaseHangAfterAllCollectionsDrop " +
-                      "enabled. Blocking until fail point is disabled");
+checkLog.contains(
+    primary,
+    "dropDatabase - fail point dropDatabaseHangAfterAllCollectionsDrop " +
+        "enabled. Blocking until fail point is disabled",
+);
 
 assert.commandWorked(testDB.adminCommand({replSetStepDown: 60, force: true}));
 replSet.awaitSecondaryNodes(null, [primary]);

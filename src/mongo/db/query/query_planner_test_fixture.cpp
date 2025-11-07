@@ -28,40 +28,33 @@
  */
 
 
-#include <algorithm>
-#include <boost/container/vector.hpp>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <cstdint>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/query/query_planner_test_fixture.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/field_ref.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/projection_policies.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner.h"
-#include "mongo/db/query/query_planner_test_fixture.h"
 #include "mongo/db/query/query_planner_test_lib.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/unittest/unittest.h"
+
+#include <algorithm>
+
+#include <boost/container/vector.hpp>
+#include <boost/cstdint.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -73,7 +66,6 @@ void QueryPlannerTest::setUp() {
     nss = NamespaceString::createNamespaceString_forTest("test.collection");
     opCtx = serviceContext.makeOperationContext();
     expCtx = ExpressionContextBuilder{}.opCtx(opCtx.get()).ns(nss).build();
-    internalQueryPlannerEnableHashIntersection.store(true);
     params.mainCollectionInfo.options = QueryPlannerParams::INCLUDE_COLLSCAN;
     addIndex(BSON("_id" << 1));
 }
@@ -90,7 +82,7 @@ void QueryPlannerTest::addIndex(BSONObj keyPattern, bool multikey) {
     params.mainCollectionInfo.indexes.push_back(
         {keyPattern,
          IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-         IndexDescriptor::kLatestIndexVersion,
+         IndexConfig::kLatestIndexVersion,
          multikey,
          {},
          {},
@@ -109,7 +101,7 @@ void QueryPlannerTest::addIndex(BSONObj keyPattern, bool multikey, bool sparse) 
     params.mainCollectionInfo.indexes.push_back(
         {keyPattern,
          IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-         IndexDescriptor::kLatestIndexVersion,
+         IndexConfig::kLatestIndexVersion,
          multikey,
          {},
          {},
@@ -132,7 +124,7 @@ void QueryPlannerTest::addIndex(
     params.mainCollectionInfo.indexes.push_back(
         {keyPattern,
          IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-         IndexDescriptor::kLatestIndexVersion,
+         IndexConfig::kLatestIndexVersion,
          multikey,
          {},
          {},
@@ -149,7 +141,7 @@ void QueryPlannerTest::addIndex(BSONObj keyPattern, BSONObj infoObj) {
     params.mainCollectionInfo.indexes.push_back(
         {keyPattern,
          IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-         IndexDescriptor::kLatestIndexVersion,
+         IndexConfig::kLatestIndexVersion,
          false,  // multikey
          {},
          {},
@@ -166,7 +158,7 @@ void QueryPlannerTest::addIndex(BSONObj keyPattern, MatchExpression* filterExpr)
     params.mainCollectionInfo.indexes.push_back(
         {keyPattern,
          IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-         IndexDescriptor::kLatestIndexVersion,
+         IndexConfig::kLatestIndexVersion,
          false,  // multikey
          {},
          {},
@@ -194,7 +186,7 @@ void QueryPlannerTest::addIndex(BSONObj keyPattern, const MultikeyPaths& multike
     const BSONObj infoObj;
     IndexEntry entry(keyPattern,
                      type,
-                     IndexDescriptor::kLatestIndexVersion,
+                     IndexConfig::kLatestIndexVersion,
                      multikey,
                      {},
                      {},
@@ -219,7 +211,7 @@ void QueryPlannerTest::addIndex(BSONObj keyPattern, const CollatorInterface* col
     const BSONObj infoObj;
     IndexEntry entry(keyPattern,
                      type,
-                     IndexDescriptor::kLatestIndexVersion,
+                     IndexConfig::kLatestIndexVersion,
                      multikey,
                      {},
                      {},
@@ -241,12 +233,12 @@ void QueryPlannerTest::addIndex(BSONObj keyPattern,
     const bool sparse = false;
     const bool unique = false;
     const bool multikey = false;
-    const auto name = indexName.toString();
+    const auto name = std::string{indexName};
     const MatchExpression* filterExpr = nullptr;
     const BSONObj infoObj;
     IndexEntry entry(keyPattern,
                      type,
-                     IndexDescriptor::kLatestIndexVersion,
+                     IndexConfig::kLatestIndexVersion,
                      multikey,
                      {},
                      {},
@@ -272,7 +264,7 @@ void QueryPlannerTest::addIndex(BSONObj keyPattern,
     const BSONObj infoObj;
     IndexEntry entry(keyPattern,
                      type,
-                     IndexDescriptor::kLatestIndexVersion,
+                     IndexConfig::kLatestIndexVersion,
                      multikey,
                      {},
                      {},
@@ -544,7 +536,7 @@ void QueryPlannerTest::assertNumSolutions(size_t expectSolutions) const {
        << " instead. Run with --verbose=vv to see reasons for mismatch. Solutions generated: "
        << '\n';
     dumpSolutions(ss);
-    FAIL(ss);
+    FAIL(std::string(ss));
 }
 
 size_t QueryPlannerTest::numSolutionMatches(const std::string& solnJson) const {
@@ -574,7 +566,7 @@ void QueryPlannerTest::assertSolutionExists(const std::string& solnJson, size_t 
        << " instead. Run with --verbose=vv to see reasons for mismatch. All solutions generated: "
        << '\n';
     dumpSolutions(ss);
-    FAIL(ss);
+    FAIL(std::string(ss));
 }
 
 void QueryPlannerTest::assertSolutionDoesntExist(const std::string& solnJson) const {
@@ -598,7 +590,7 @@ void QueryPlannerTest::assertHasOneSolutionOf(const std::vector<std::string>& so
        << " instead. Run with --verbose=vv to see reasons for mismatch. All solutions generated: "
        << '\n';
     dumpSolutions(ss);
-    FAIL(ss);
+    FAIL(std::string(ss));
 }
 
 void QueryPlannerTest::assertNoSolutions() const {
@@ -619,8 +611,8 @@ std::unique_ptr<MatchExpression> QueryPlannerTest::parseMatchExpression(
 
     StatusWithMatchExpression status = MatchExpressionParser::parse(obj, expCtx);
     if (!status.isOK()) {
-        FAIL(str::stream() << "failed to parse query: " << obj.toString()
-                           << ". Reason: " << status.getStatus().toString());
+        FAIL(std::string(str::stream() << "failed to parse query: " << obj.toString()
+                                       << ". Reason: " << status.getStatus().toString()));
     }
     return std::move(status.getValue());
 }

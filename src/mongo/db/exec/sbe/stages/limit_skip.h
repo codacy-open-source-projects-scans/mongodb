@@ -29,19 +29,20 @@
 
 #pragma once
 
-#include <cstddef>
-#include <memory>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/query/stage_types.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <memory>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo::sbe {
 /**
@@ -84,6 +85,10 @@ protected:
         return true;
     }
 
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {
+        return;
+    }
+
 private:
     boost::optional<int64_t> _runLimitOrSkipCode(const vm::CodeFragment* code);
 
@@ -98,7 +103,6 @@ private:
     boost::optional<int64_t> _limit;
     boost::optional<int64_t> _skip;
     int64_t _current;
-    bool _isEOF;
     LimitSkipStats _specificStats;
 };
 }  // namespace mongo::sbe

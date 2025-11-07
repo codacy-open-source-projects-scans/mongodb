@@ -27,17 +27,7 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <cstdint>
-#include <fmt/format.h>
-#include <memory>
-#include <utility>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/explain.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -47,10 +37,10 @@
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/matcher/expression.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/plan_executor_pipeline.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/explain.h"
 #include "mongo/db/query/explain_common.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_cache/plan_cache.h"
@@ -62,15 +52,24 @@
 #include "mongo/db/query/plan_ranking_decision.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
-#include "mongo/db/query/query_knob_configuration.h"
 #include "mongo/db/query/query_settings.h"
 #include "mongo/db/query/query_settings_decoration.h"
-#include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
+
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -88,7 +87,7 @@ namespace {
  */
 void generatePlannerInfo(PlanExecutor* exec,
                          const BSONObj& cmd,
-                         const MultipleCollectionAccessor& collections,
+                         const Explain::PlannerContext& plannerContext,
                          BSONObj extraInfo,
                          const SerializationContext& serializationContext,
                          BSONObjBuilder* out) {
@@ -96,25 +95,6 @@ void generatePlannerInfo(PlanExecutor* exec,
 
     plannerBob.append("namespace",
                       NamespaceStringUtil::serialize(exec->nss(), serializationContext));
-
-    boost::optional<uint32_t> planCacheShapeHash;
-    boost::optional<uint32_t> planCacheKeyHash;
-    const auto& mainCollection = collections.getMainCollection();
-    if (auto* cq = exec->getCanonicalQuery(); mainCollection && cq) {
-        if (cq->isSbeCompatible() && cq->isUsingSbePlanCache() &&
-            feature_flags::gFeatureFlagSbeFull.isEnabled(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-            const auto planCacheKeyInfo =
-                plan_cache_key_factory::make(*exec->getCanonicalQuery(), collections);
-            planCacheKeyHash = planCacheKeyInfo.planCacheKeyHash();
-            planCacheShapeHash = planCacheKeyInfo.planCacheShapeHash();
-        } else {
-            const auto planCacheKeyInfo = plan_cache_key_factory::make<PlanCacheKey>(
-                *exec->getCanonicalQuery(), mainCollection);
-            planCacheKeyHash = planCacheKeyInfo.planCacheKeyHash();
-            planCacheShapeHash = planCacheKeyInfo.planCacheShapeHash();
-        }
-    }
 
     // In general we should have a canonical query, but sometimes we may avoid creating a canonical
     // query as an optimization (specifically, the update system does not canonicalize for idhack
@@ -137,24 +117,19 @@ void generatePlannerInfo(PlanExecutor* exec,
             plannerBob.append("querySettings", querySettingsBSON);
             plannerBob.append("indexFilterSet", false);
         } else {
-            const bool existsMatchingIndexFilter = [&]() {
-                if (!mainCollection) {
-                    return false;
-                }
-                const auto* indexFilters =
-                    QuerySettingsDecoration::get(mainCollection->getSharedDecorations());
-                return indexFilters->getAllowedIndicesFilter(*query).has_value();
-            }();
-            plannerBob.append("indexFilterSet", existsMatchingIndexFilter);
+            plannerBob.append("indexFilterSet", plannerContext.indexFilterSet);
         }
     }
 
-    if (planCacheShapeHash) {
-        plannerBob.append("planCacheShapeHash", zeroPaddedHex(*planCacheShapeHash));
+    if (plannerContext.planCacheShapeHash) {
+        // TODO SERVER-93305: Remove deprecated 'queryHash' usages.
+        std::string planCacheShapeHashStr = zeroPaddedHex(*plannerContext.planCacheShapeHash);
+        plannerBob.append("queryHash", planCacheShapeHashStr);
+        plannerBob.append("planCacheShapeHash", planCacheShapeHashStr);
     }
 
-    if (planCacheKeyHash) {
-        plannerBob.append("planCacheKey", zeroPaddedHex(*planCacheKeyHash));
+    if (plannerContext.planCacheKeyHash) {
+        plannerBob.append("planCacheKey", zeroPaddedHex(*plannerContext.planCacheKeyHash));
     }
 
     if (exec->getOpCtx() != nullptr) {
@@ -248,18 +223,6 @@ void generateSinglePlanExecutionInfo(const PlanExplainer::PlanStatsDetails& deta
     out->append("executionStages", stats);
 }
 
-void generateOperationMetrics(PlanExecutor* exec, BSONObjBuilder* out) {
-    if (ResourceConsumption::isMetricsProfilingEnabled()) {
-        auto& metricsCollector = ResourceConsumption::MetricsCollector::get(exec->getOpCtx());
-        if (metricsCollector.hasCollectedMetrics()) {
-            BSONObjBuilder metricsBuilder(out->subobjStart("operationMetrics"));
-            auto& metrics = metricsCollector.getMetrics();
-            metrics.toBsonNonZeroFields(&metricsBuilder);
-            metricsBuilder.doneFast();
-        }
-    }
-}
-
 /**
  * Adds the "executionStats" field to out. Assumes that the PlanExecutor has already been executed
  * to the point of reaching EOF. Also assumes that verbosity >= kExecStats.
@@ -325,7 +288,6 @@ void generateExecutionInfo(PlanExecutor* exec,
         }
         allPlansBob.doneFast();
     }
-    generateOperationMetrics(exec, &execBob);
     execBob.doneFast();
 }
 
@@ -352,7 +314,10 @@ BSONObj explainVersionToBson(const PlanExplainer::ExplainVersion& version) {
 
 template <typename EntryType>
 void appendBasicPlanCacheEntryInfoToBSON(const EntryType& entry, BSONObjBuilder* out) {
-    out->append("planCacheShapeHash", zeroPaddedHex(entry.planCacheShapeHash));
+    // TODO SERVER-93305: Remove deprecated 'queryHash' usages.
+    std::string planCacheShapeHashStr = zeroPaddedHex(entry.planCacheShapeHash);
+    out->append("queryHash", planCacheShapeHashStr);
+    out->append("planCacheShapeHash", planCacheShapeHashStr);
     out->append("planCacheKey", zeroPaddedHex(entry.planCacheKey));
     out->append("isActive", entry.isActive);
     out->append("works",
@@ -377,6 +342,27 @@ void Explain::explainStages(PlanExecutor* exec,
                             const SerializationContext& serializationContext,
                             const BSONObj& command,
                             BSONObjBuilder* out) {
+    auto collInfo = Explain::makePlannerContext(*exec, collections);
+    Explain::explainStages(exec,
+                           collInfo,
+                           verbosity,
+                           executePlanStatus,
+                           winningPlanTrialStats,
+                           extraInfo,
+                           serializationContext,
+                           command,
+                           out);
+}
+
+void Explain::explainStages(PlanExecutor* exec,
+                            const Explain::PlannerContext& plannerContext,
+                            ExplainOptions::Verbosity verbosity,
+                            Status executePlanStatus,
+                            boost::optional<PlanExplainer::PlanStatsDetails> winningPlanTrialStats,
+                            BSONObj extraInfo,
+                            const SerializationContext& serializationContext,
+                            const BSONObj& command,
+                            BSONObjBuilder* out) {
     //
     // Use the stats trees to produce explain BSON.
     //
@@ -385,7 +371,7 @@ void Explain::explainStages(PlanExecutor* exec,
     out->appendElements(explainVersionToBson(explainer.getVersion()));
 
     if (verbosity >= ExplainOptions::Verbosity::kQueryPlanner) {
-        generatePlannerInfo(exec, command, collections, extraInfo, serializationContext, out);
+        generatePlannerInfo(exec, command, plannerContext, extraInfo, serializationContext, out);
     }
 
     if (verbosity >= ExplainOptions::Verbosity::kExecStats) {
@@ -393,6 +379,7 @@ void Explain::explainStages(PlanExecutor* exec,
     }
 
     explain_common::generateQueryShapeHash(exec->getOpCtx(), out);
+    explain_common::generatePeakTrackedMemBytes(exec->getOpCtx(), out);
     explain_common::appendIfRoom(command, "command", out);
 }
 
@@ -419,12 +406,13 @@ void Explain::explainPipeline(PlanExecutor* exec,
     *out << "stages" << Value(pipelineExec->writeExplainOps(verbosity));
 
     explain_common::generateQueryShapeHash(exec->getOpCtx(), out);
+    explain_common::generatePeakTrackedMemBytes(exec->getOpCtx(), out);
     explain_common::generateServerInfo(out);
 
-    auto* cq = exec->getCanonicalQuery();
+    auto* cq = pipelineExec->getCanonicalQuery();
     const auto& expCtx = cq
         ? cq->getExpCtx()
-        : ExpressionContext::makeBlankExpressionContext(exec->getOpCtx(), exec->nss());
+        : makeBlankExpressionContext(pipelineExec->getOpCtx(), pipelineExec->nss());
     explain_common::generateServerParameters(expCtx, out);
     explain_common::appendIfRoom(command, "command", out);
 }
@@ -470,26 +458,9 @@ void Explain::explainStages(PlanExecutor* exec,
 
     explain_common::generateServerInfo(out);
     auto* cq = exec->getCanonicalQuery();
-    const auto& expCtx = cq
-        ? cq->getExpCtx()
-        : ExpressionContext::makeBlankExpressionContext(exec->getOpCtx(), exec->nss());
+    const auto& expCtx =
+        cq ? cq->getExpCtx() : makeBlankExpressionContext(exec->getOpCtx(), exec->nss());
     explain_common::generateServerParameters(expCtx, out);
-}
-
-void Explain::explainStages(PlanExecutor* exec,
-                            const CollectionPtr& collection,
-                            ExplainOptions::Verbosity verbosity,
-                            BSONObj extraInfo,
-                            const SerializationContext& serializationContext,
-                            const BSONObj& command,
-                            BSONObjBuilder* out) {
-    explainStages(exec,
-                  MultipleCollectionAccessor(collection),
-                  verbosity,
-                  extraInfo,
-                  serializationContext,
-                  command,
-                  out);
 }
 
 void Explain::explainStages(PlanExecutor* exec,
@@ -526,6 +497,9 @@ void Explain::planCacheEntryToBSON(const PlanCacheEntry& entry, BSONObjBuilder* 
             shapeBuilder.append("projection", createdFromQuery.projection);
             if (!createdFromQuery.collation.isEmpty()) {
                 shapeBuilder.append("collation", createdFromQuery.collation);
+            }
+            if (!createdFromQuery.distinct.isEmpty()) {
+                shapeBuilder.append("distinct", createdFromQuery.distinct);
             }
         }
 
@@ -575,4 +549,48 @@ void Explain::planCacheEntryToBSON(const sbe::PlanCacheEntry& entry, BSONObjBuil
     out->append("estimatedSizeBytes", static_cast<long long>(entry.estimatedEntrySizeBytes));
     out->append("solutionHash", static_cast<long long>(entry.cachedPlan->solutionHash));
 }
+
+Explain::PlannerContext Explain::makePlannerContext(const PlanExecutor& exec,
+                                                    const MultipleCollectionAccessor& collections) {
+    const bool mainCollExists = collections.hasMainCollection();
+
+    boost::optional<uint32_t> planCacheKeyHash;
+    boost::optional<uint32_t> planCacheShapeHash;
+
+    if (auto* cq = exec.getCanonicalQuery(); mainCollExists && cq) {
+        if (cq->isSbeCompatible() && cq->isUsingSbePlanCache() &&
+            feature_flags::gFeatureFlagSbeFull.isEnabled()) {
+            const auto planCacheKeyInfo =
+                plan_cache_key_factory::make(*exec.getCanonicalQuery(), collections);
+            planCacheKeyHash = planCacheKeyInfo.planCacheKeyHash();
+            planCacheShapeHash = planCacheKeyInfo.planCacheShapeHash();
+        } else {
+            const auto planCacheKeyInfo = plan_cache_key_factory::make<PlanCacheKey>(
+                *exec.getCanonicalQuery(), collections.getMainCollectionAcquisition());
+            planCacheKeyHash = planCacheKeyInfo.planCacheKeyHash();
+            planCacheShapeHash = planCacheKeyInfo.planCacheShapeHash();
+        }
+    }
+
+    // If there exists a matching index filter, set 'indexFilterSet' to false if query settings
+    // set, as they have higher priority.
+    bool indexFilterSet = false;
+    if (auto query = exec.getCanonicalQuery()) {
+        auto& querySettings = query->getExpCtx()->getQuerySettings();
+        if (auto querySettingsBSON = querySettings.toBSON(); !querySettingsBSON.isEmpty()) {
+            indexFilterSet = false;
+        } else {
+            indexFilterSet = [&]() {
+                if (!mainCollExists) {
+                    return false;
+                }
+                const auto* indexFilters = QuerySettingsDecoration::get(
+                    collections.getMainCollection()->getSharedDecorations());
+                return indexFilters->getAllowedIndicesFilter(*query).has_value();
+            }();
+        }
+    }
+    return {mainCollExists, planCacheShapeHash, planCacheKeyHash, indexFilterSet};
+}
+
 }  // namespace mongo

@@ -3,14 +3,13 @@
  */
 
 import {isClusterNode, isMongos} from "jstests/concurrency/fsm_workload_helpers/server_types.js";
-import {DiscoverTopology, Topology} from "jstests/libs/discover_topology.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
 export function getParameter(adminDb, field) {
-    var q = {getParameter: 1};
+    let q = {getParameter: 1};
     q[field] = 1;
 
-    var ret = adminDb.runCommand(q);
+    let ret = adminDb.runCommand(q);
     return ret[field];
 }
 
@@ -20,60 +19,71 @@ export function setParameter(adminDb, obj) {
 }
 
 /**
- * Returns whether the FTDC file format should follow the new format or not.
+ * `has(obj, "foo", "bar", "baz")` returns whether `obj.foo.bar.baz` exists.
  */
-export function hasMultiserviceFTDCSchema(adminDb) {
-    return FeatureFlagUtil.isPresentAndEnabled(adminDb, "MultiServiceLogAndFTDCFormat") &&
-        (isMongos(adminDb) || isClusterNode(adminDb));
+function has(object, ...properties) {
+    if (properties.length === 0) {
+        return true;
+    }
+    const [prop, ...rest] = properties;
+    return object.hasOwnProperty(prop) && has(object[prop], ...rest);
+}
+
+/**
+ * Returns an array of predicate functions used by `verifyGetDiagnosticData` to
+ * determine whether the response returned for "getDiagnosticData" is as
+ * expected.
+ */
+function getCriteriaForGetDiagnosticData(data) {
+    let criteria = [];
+
+    criteria.push(() => has(data, "start"));
+    criteria.push(() => has(data, "serverStatus"));
+    criteria.push(() => has(data, "end"));
+
+    return criteria;
 }
 
 /**
  * Verify that getDiagnosticData is working correctly.
  */
-export function verifyGetDiagnosticData(adminDb, logData = true, assumeMultiserviceSchema = false) {
-    // We need to retry a few times if run this test immediately after mongod is started as FTDC may
-    // not have run yet.
-    var foundGoodDocument = false;
-
-    for (var i = 0; i < 60 && foundGoodDocument == false; ++i) {
-        var result = adminDb.runCommand("getDiagnosticData");
+export function verifyGetDiagnosticData(adminDb, logData = true) {
+    const maxAttempts = 60;
+    const retryMillis = 500;
+    // We need to retry a few times in case we're running this test immediately
+    // after mongod is started. FTDC may not have run yet, or some collectors
+    // might have timed out initially and so be missing from the response.
+    for (let attempt = 1; ; ++attempt) {
+        const result = adminDb.runCommand("getDiagnosticData");
         assert.commandWorked(result);
-
-        var data = result.data;
-
-        if (!data.hasOwnProperty("start")) {
-            // Wait a little longer for FTDC to start
-            jsTestLog("Running getDiagnosticData: " + tojson(result));
-
-            sleep(500);
-        } else {
-            // Check for a few common properties to ensure we got data
-            if (hasMultiserviceFTDCSchema(adminDb) || assumeMultiserviceSchema ||
-                TestData.testingReplicaSetEndpoint) {
-                const hasKnownData =
-                    (data.hasOwnProperty("shard") && data.shard.hasOwnProperty("serverStatus")) ||
-                    (data.hasOwnProperty("router") && data.router.hasOwnProperty("connPoolStats"));
-                assert(hasKnownData,
-                       "does not have 'shard.serverStatus' nor 'router.connPoolStats' in '" +
-                           tojson(data) + "'");
-            } else {
-                assert(data.hasOwnProperty("serverStatus"),
-                       "does not have 'serverStatus' in '" + tojson(data) + "'");
-            }
-
-            assert(data.hasOwnProperty("end"), "does not have 'end' in '" + tojson(data) + "'");
-
-            foundGoodDocument = true;
+        const data = result.data;
+        const criteria = getCriteriaForGetDiagnosticData(data);
+        // results :: {[some predicate]: bool result, ...}
+        const results = criteria.reduce((results, predicate) => {
+            results[predicate.toString()] = predicate();
+            return results;
+        }, {});
+        if (Object.values(results).indexOf(false) === -1) {
+            // all predicates are satisfied
             if (logData) {
-                jsTestLog("Got good getDiagnosticData: " + tojson(result));
+                jsTestLog("getDiagnosticData response met all criteria: " + tojson({criteria: results}));
             }
+            return data;
         }
+
+        assert(
+            attempt < maxAttempts,
+            `getDiagnosticData response failed to satisfy criteria after ${maxAttempts} attempts: ` +
+                tojson({criteria: results, data}),
+        );
+
+        jsTestLog(
+            `getDiagnosticData response did not satisfy one or more criteria. Trying again in ${
+                retryMillis
+            } milliseconds (attempt ${attempt}/${maxAttempts}). Criteria: ` + tojson(results),
+        );
+        sleep(retryMillis);
     }
-
-    assert(foundGoodDocument,
-           "getDiagnosticData failed to return a non-empty command, is FTDC running?");
-
-    return data;
 }
 
 /**
@@ -81,7 +91,7 @@ export function verifyGetDiagnosticData(adminDb, logData = true, assumeMultiserv
  */
 export function verifyCommonFTDCParameters(adminDb, isEnabled) {
     // Are we running against MongoS?
-    var isMongos = ("isdbgrid" == adminDb.runCommand("ismaster").msg);
+    let isMongos = "isdbgrid" == adminDb.runCommand("ismaster").msg;
 
     // Check the defaults are correct
     //
@@ -92,15 +102,7 @@ export function verifyCommonFTDCParameters(adminDb, isEnabled) {
     // Verify the defaults are as we documented them
     assert.eq(getparam("diagnosticDataCollectionEnabled"), isEnabled);
     assert.eq(getparam("diagnosticDataCollectionPeriodMillis"), 1000);
-
-    const topology = DiscoverTopology.findConnectedNodes(adminDb.getMongo());
-    if (topology.type === Topology.kShardedCluster &&
-        FeatureFlagUtil.isPresentAndEnabled(adminDb, "MultiServiceLogAndFTDCFormat") && !isMongos) {
-        assert.eq(getparam("diagnosticDataCollectionDirectorySizeMB"), 400);
-    } else {
-        assert.eq(getparam("diagnosticDataCollectionDirectorySizeMB"), 200);
-    }
-
+    assert.eq(getparam("diagnosticDataCollectionDirectorySizeMB"), 250);
     assert.eq(getparam("diagnosticDataCollectionFileSizeMB"), 10);
     assert.eq(getparam("diagnosticDataCollectionSamplesPerChunk"), 300);
     assert.eq(getparam("diagnosticDataCollectionSamplesPerInterimUpdate"), 10);
@@ -137,18 +139,20 @@ export function verifyCommonFTDCParameters(adminDb, isEnabled) {
 
     // Reset
     assert.commandWorked(setparam({"diagnosticDataCollectionFileSizeMB": 10}));
-    assert.commandWorked(setparam({"diagnosticDataCollectionDirectorySizeMB": 200}));
+    assert.commandWorked(setparam({"diagnosticDataCollectionDirectorySizeMB": 250}));
     assert.commandWorked(setparam({"diagnosticDataCollectionPeriodMillis": 1000}));
     assert.commandWorked(setparam({"diagnosticDataCollectionSamplesPerChunk": 300}));
     assert.commandWorked(setparam({"diagnosticDataCollectionSamplesPerInterimUpdate": 10}));
 }
 
 export function waitFailedToStart(pid, exitCode) {
-    assert.soon(function() {
-        return !checkProgram(pid).alive;
-    }, `Failed to wait for ${pid} to die`, 30 * 1000);
+    assert.soon(
+        function () {
+            return !checkProgram(pid).alive;
+        },
+        `Failed to wait for ${pid} to die`,
+        30 * 1000,
+    );
 
-    assert.eq(exitCode,
-              checkProgram(pid).exitCode,
-              `Failed to wait for ${pid} to die with exit code ${exitCode}`);
+    assert.eq(exitCode, checkProgram(pid).exitCode, `Failed to wait for ${pid} to die with exit code ${exitCode}`);
 }

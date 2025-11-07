@@ -12,6 +12,7 @@ import psutil
 
 from buildscripts.resmokelib import config, parser, reportfile, testing
 from buildscripts.resmokelib.flags import HANG_ANALYZER_CALLED
+from buildscripts.resmokelib.utils.self_test_fakes import test_analysis
 
 _IS_WINDOWS = sys.platform == "win32"
 if _IS_WINDOWS:
@@ -22,7 +23,7 @@ if _IS_WINDOWS:
 def register(logger, suites, start_time):
     """Register an event object to wait for signal, or a signal handler for SIGUSR1."""
 
-    def _handle_sigusr1(signum, frame):  # pylint: disable=unused-argument
+    def _handle_sigusr1(signum, frame):
         """Signal handler for SIGUSR1.
 
         The handler will dump the stacks of all threads and write out the report file and
@@ -110,7 +111,7 @@ def _dump_stacks(logger, header_msg):
     sb = []
     sb.append(header_msg)
 
-    frames = sys._current_frames()  # pylint: disable=protected-access
+    frames = sys._current_frames()
     sb.append("Total threads: %d" % (len(frames)))
     sb.append("")
 
@@ -140,17 +141,7 @@ def _analyze_pids(logger, pids):
     # If 'test_analysis' is specified, we will just write the pids out to a file and kill them
     # Instead of running analysis. This option will only be specified in resmoke selftests.
     if "test_analysis" in config.INTERNAL_PARAMS:
-        with open(os.path.join(config.DBPATH_PREFIX, "test_analysis.txt"), "w") as analysis_file:
-            analysis_file.write("\n".join([str(pid) for pid in pids]))
-            for pid in pids:
-                try:
-                    proc = psutil.Process(pid)
-                    logger.info("Killing process pid %d", pid)
-                    proc.kill()
-                except psutil.NoSuchProcess:
-                    # Process has already terminated.
-                    pass
-
+        test_analysis(logger, pids)
         return
 
     # See hang-analyzer argument options here:

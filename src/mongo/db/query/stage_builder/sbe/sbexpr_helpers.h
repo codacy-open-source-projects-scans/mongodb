@@ -29,25 +29,25 @@
 
 #pragma once
 
-#include "mongo/db/exec/sbe/abt/abt_lower.h"
 #include "mongo/db/exec/sbe/stages/loop_join.h"
 #include "mongo/db/exec/sbe/stages/scan.h"
+#include "mongo/db/exec/sbe/stages/window.h"
 #include "mongo/db/exec/sbe/values/cell_interface.h"
-#include "mongo/db/query/stage_builder/sbe/gen_abt_helpers.h"
-#include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
+#include "mongo/db/query/stage_builder/sbe/builder_state.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::stage_builder {
-inline void makeSbExprOptSbSlotVecHelper(SbExprOptSbSlotVector& result) {}
+inline void makeSbExprOptSbSlotVecHelper(SbExprOptSlotVector& result) {}
 
 template <typename... Ts>
-inline void makeSbExprOptSbSlotVecHelper(SbExprOptSbSlotVector& result, SbExpr expr, Ts&&... rest) {
+inline void makeSbExprOptSbSlotVecHelper(SbExprOptSlotVector& result, SbExpr expr, Ts&&... rest) {
     result.emplace_back(std::move(expr), boost::none);
     makeSbExprOptSbSlotVecHelper(result, std::forward<Ts>(rest)...);
 }
 
 template <typename... Ts>
-inline void makeSbExprOptSbSlotVecHelper(SbExprOptSbSlotVector& result,
+inline void makeSbExprOptSbSlotVecHelper(SbExprOptSlotVector& result,
                                          std::pair<SbExpr, sbe::value::SlotId> p,
                                          Ts&&... rest) {
     result.emplace_back(std::move(p.first), boost::make_optional(SbSlot{p.second}));
@@ -55,7 +55,7 @@ inline void makeSbExprOptSbSlotVecHelper(SbExprOptSbSlotVector& result,
 }
 
 template <typename... Ts>
-inline void makeSbExprOptSbSlotVecHelper(SbExprOptSbSlotVector& result,
+inline void makeSbExprOptSbSlotVecHelper(SbExprOptSlotVector& result,
                                          std::pair<SbExpr, SbSlot> p,
                                          Ts&&... rest) {
     result.emplace_back(std::move(p.first), boost::make_optional(p.second));
@@ -63,7 +63,7 @@ inline void makeSbExprOptSbSlotVecHelper(SbExprOptSbSlotVector& result,
 }
 
 template <typename... Ts>
-inline void makeSbExprOptSbSlotVecHelper(SbExprOptSbSlotVector& result,
+inline void makeSbExprOptSbSlotVecHelper(SbExprOptSlotVector& result,
                                          std::pair<SbExpr, boost::optional<sbe::value::SlotId>> p,
                                          Ts&&... rest) {
     result.emplace_back(std::move(p.first),
@@ -72,7 +72,7 @@ inline void makeSbExprOptSbSlotVecHelper(SbExprOptSbSlotVector& result,
 }
 
 template <typename... Ts>
-inline void makeSbExprOptSbSlotVecHelper(SbExprOptSbSlotVector& result,
+inline void makeSbExprOptSbSlotVecHelper(SbExprOptSlotVector& result,
                                          std::pair<SbExpr, boost::optional<SbSlot>> p,
                                          Ts&&... rest) {
     result.emplace_back(std::move(p.first), p.second);
@@ -81,7 +81,7 @@ inline void makeSbExprOptSbSlotVecHelper(SbExprOptSbSlotVector& result,
 
 template <typename... Ts>
 auto makeSbExprOptSbSlotVec(Ts&&... pack) {
-    SbExprOptSbSlotVector v;
+    SbExprOptSlotVector v;
     if constexpr (sizeof...(pack) > 0) {
         v.reserve(sizeof...(Ts));
         makeSbExprOptSbSlotVecHelper(v, std::forward<Ts>(pack)...);
@@ -131,7 +131,7 @@ struct SbScanBounds {
  */
 class SbExprBuilder {
 public:
-    using CaseValuePair = SbExpr::CaseValuePair;
+    using CaseValuePair = SbExprPair;
 
     SbExprBuilder(StageBuilderState& state) : _state(state) {}
 
@@ -153,11 +153,9 @@ public:
 
     SbExpr makeNot(SbExpr e);
 
-    SbExpr makeUnaryOp(sbe::EPrimUnary::Op unaryOp, SbExpr e);
-    SbExpr makeUnaryOp(optimizer::Operations unaryOp, SbExpr e);
-
-    SbExpr makeBinaryOp(sbe::EPrimBinary::Op unaryOp, SbExpr lhs, SbExpr rhs);
-    SbExpr makeBinaryOp(optimizer::Operations unaryOp, SbExpr lhs, SbExpr rhs);
+    SbExpr makeUnaryOp(abt::Operations unaryOp, SbExpr e);
+    SbExpr makeBinaryOp(abt::Operations binaryOp, SbExpr lhs, SbExpr rhs);
+    SbExpr makeNaryOp(abt::Operations naryOp, SbExpr::Vector args);
 
     SbExpr makeConstant(sbe::value::TypeTags tag, sbe::value::Value val);
     SbExpr makeNothingConstant();
@@ -182,15 +180,39 @@ public:
     SbExpr makeLet(sbe::FrameId frameId, SbExpr::Vector binds, SbExpr expr);
 
     SbExpr makeLocalLambda(sbe::FrameId frameId, SbExpr expr);
+    SbExpr makeLocalLambda2(sbe::FrameId frameId, SbExpr expr);
 
     SbExpr makeNumericConvert(SbExpr expr, sbe::value::TypeTags tag);
 
     SbExpr makeFail(ErrorCodes::Error error, StringData errorMessage);
 
+    /**
+     * Check if expression returns Nothing and return 'altExpr' if so. Otherwise, return the
+     * expression.
+     */
     SbExpr makeFillEmpty(SbExpr expr, SbExpr altExpr);
+
+    /**
+     * Check if expression returns Nothing and return boolean false if so. Otherwise, return the
+     * expression.
+     */
     SbExpr makeFillEmptyFalse(SbExpr expr);
+
+    /**
+     * Check if expression returns Nothing and return boolean true if so. Otherwise, return the
+     * expression.
+     */
     SbExpr makeFillEmptyTrue(SbExpr expr);
+
+    /**
+     * Check if expression returns Nothing and return null if so. Otherwise, return the expression.
+     */
     SbExpr makeFillEmptyNull(SbExpr expr);
+
+    /**
+     * Check if expression returns Nothing and return undefined if so. Otherwise, return the
+     * expression.
+     */
     SbExpr makeFillEmptyUndefined(SbExpr expr);
 
     SbExpr makeIfNullExpr(SbExpr::Vector values);
@@ -203,53 +225,62 @@ public:
     SbExpr generateNullMissingOrUndefined(SbVar var);
     SbExpr generateNonStringCheck(SbVar var);
     SbExpr generateNonTimestampCheck(SbVar var);
+
+    /**
+     * Generates an expression that checks if the input expression is negative assuming that it has
+     * already been verified to have numeric type and to not be NaN.
+     */
     SbExpr generateNegativeCheck(SbVar var);
+
     SbExpr generateNonPositiveCheck(SbVar var);
     SbExpr generateNonNumericCheck(SbVar var);
     SbExpr generateLongLongMinCheck(SbVar var);
     SbExpr generateNonArrayCheck(SbVar var);
     SbExpr generateNonObjectCheck(SbVar var);
     SbExpr generateNullishOrNotRepresentableInt32Check(SbVar var);
+
+    /**
+     * Generates an expression that checks if the input expression is NaN _assuming that_ it has
+     * already been verified to be numeric.
+     */
     SbExpr generateNaNCheck(SbVar var);
+
     SbExpr generateInfinityCheck(SbVar var);
+
+    /**
+     * Generates an expression to check the given variable is a number between -20 and 100
+     * inclusive, and is a whole number.
+     */
     SbExpr generateInvalidRoundPlaceArgCheck(SbVar var);
 
+    /**
+     * Convert a list of case/value pairs into a chain of "If" expressions, with the final else
+     * case evaluating to the 'defaultCase' expression.
+     */
     SbExpr buildMultiBranchConditional(SbExpr defaultCase) {
         return defaultCase;
     }
 
     template <typename... Ts>
-    SbExpr buildMultiBranchConditional(SbExpr::CaseValuePair headCase, Ts... rest) {
+    SbExpr buildMultiBranchConditional(SbExprPair headCase, Ts... rest) {
         return makeIf(std::move(headCase.first),
                       std::move(headCase.second),
                       buildMultiBranchConditional(std::forward<Ts>(rest)...));
     }
 
-    SbExpr buildMultiBranchConditionalFromCaseValuePairs(
-        std::vector<SbExpr::CaseValuePair> caseValPairs, SbExpr defaultVal) {
-        SbExpr result = std::move(defaultVal);
-
-        for (size_t i = caseValPairs.size(); i > 0;) {
-            --i;
-            result = makeIf(std::move(caseValPairs[i].first),
-                            std::move(caseValPairs[i].second),
-                            std::move(result));
-        }
-
-        return result;
-    }
+    /**
+     * Converts a std::vector of case/value pairs into a chain of "If" expressions in the
+     * same manner as the buildMultiBranchConditional() method.
+     */
+    SbExpr buildMultiBranchConditionalFromCaseValuePairs(std::vector<SbExprPair> caseValPairs,
+                                                         SbExpr defaultVal);
 
     /**
-     * Creates a balanced boolean binary expression tree from given collection of leaf expression.
+     * Creates a boolean expression tree from given collection of leaf expressions.
      */
-    SbExpr makeBalancedBooleanOpTree(sbe::EPrimBinary::Op logicOp, SbExpr::Vector leaves) {
-        return stage_builder::makeBalancedBooleanOpTree(logicOp, std::move(leaves), _state);
-    }
+    SbExpr makeBooleanOpTree(abt::Operations logicOp, SbExpr::Vector leaves);
 
-    SbExpr makeBalancedBooleanOpTree(optimizer::Operations logicOp, SbExpr::Vector leaves) {
-        return stage_builder::makeBalancedBooleanOpTree(
-            getEPrimBinaryOp(logicOp), std::move(leaves), _state);
-    }
+    SbExpr makeBooleanOpTree(abt::Operations logicOp, SbExpr lhs, SbExpr rhs);
 
     std::unique_ptr<sbe::EExpression> lower(SbExpr& e, const VariableTypes* varTypes = nullptr) {
         return e.lower(_state, varTypes);
@@ -272,7 +303,7 @@ public:
     std::vector<sbe::value::SlotVector> lower(const std::vector<SbSlotVector>& sbSlotVectors,
                                               const VariableTypes* varTypes = nullptr);
 
-    sbe::SlotExprPairVector lower(SbExprSbSlotVector& sbSlotSbExprVec,
+    sbe::SlotExprPairVector lower(SbExprSlotVector& sbSlotSbExprVec,
                                   const VariableTypes* varTypes = nullptr);
 
     sbe::WindowStage::Window lower(SbWindow& sbWindow, const VariableTypes* varTypes = nullptr);
@@ -431,7 +462,7 @@ public:
     }
 
     inline std::pair<SbStage, SbSlotVector> makeProject(SbStage stage,
-                                                        SbExprOptSbSlotVector projects) {
+                                                        SbExprOptSlotVector projects) {
         return makeProject(VariableTypes{}, std::move(stage), std::move(projects));
     }
 
@@ -457,11 +488,13 @@ public:
 
     std::pair<SbStage, SbSlotVector> makeProject(const VariableTypes& varTypes,
                                                  SbStage stage,
-                                                 SbExprOptSbSlotVector projects);
+                                                 SbExprOptSlotVector projects);
 
     SbStage makeUnique(SbStage stage, SbSlot key);
 
     SbStage makeUnique(SbStage stage, const SbSlotVector& keys);
+
+    SbStage makeUniqueRoaring(SbStage stage, SbSlot key);
 
     SbStage makeSort(SbStage stage,
                      const SbSlotVector& orderBy,
@@ -487,65 +520,31 @@ public:
                      size_t memoryLimit);
 
     std::tuple<SbStage, SbSlotVector, SbSlotVector> makeHashAgg(
-        SbStage stage,
-        const SbSlotVector& groupBySlots,
-        SbAggExprVector sbAggExprs,
-        boost::optional<sbe::value::SlotId> collatorSlot,
-        SbExprSbSlotVector mergingExprs) {
-        return makeHashAgg(VariableTypes{},
-                           std::move(stage),
-                           groupBySlots,
-                           std::move(sbAggExprs),
-                           collatorSlot,
-                           std::move(mergingExprs));
-    }
-
-    std::tuple<SbStage, SbSlotVector, SbSlotVector> makeHashAgg(
         const VariableTypes& varTypes,
         SbStage stage,
-        const SbSlotVector& groupBySlots,
-        SbAggExprVector sbAggExprs,
-        boost::optional<sbe::value::SlotId> collatorSlot,
-        SbExprSbSlotVector mergingExprs);
-
-    std::tuple<SbStage, SbSlotVector, SbSlotVector> makeBlockHashAgg(
-        SbStage stage,
-        const SbSlotVector& groupBySlots,
-        SbAggExprVector sbAggExprs,
-        SbSlot selectivityBitmapSlot,
-        const SbSlotVector& blockAccArgSlots,
-        SbSlot bitmapInternalSlot,
-        const SbSlotVector& accumulatorDataSlots,
-        SbExprSbSlotVector mergingExprs) {
-        return makeBlockHashAgg(VariableTypes{},
-                                std::move(stage),
-                                groupBySlots,
-                                std::move(sbAggExprs),
-                                selectivityBitmapSlot,
-                                blockAccArgSlots,
-                                bitmapInternalSlot,
-                                accumulatorDataSlots,
-                                std::move(mergingExprs));
-    }
+        const SbSlotVector& gbs,
+        const SbHashAggAccumulatorVector& accumulatorList,
+        boost::optional<sbe::value::SlotId> collatorSlot);
 
     std::tuple<SbStage, SbSlotVector, SbSlotVector> makeBlockHashAgg(
         const VariableTypes& varTypes,
         SbStage stage,
         const SbSlotVector& groupBySlots,
-        SbAggExprVector sbAggExprs,
+        SbBlockAggExprVector sbBlockAggExprs,
         SbSlot selectivityBitmapSlot,
         const SbSlotVector& blockAccArgSbSlots,
         SbSlot bitmapInternalSlot,
         const SbSlotVector& accumulatorDataSbSlots,
-        SbExprSbSlotVector mergingExprs);
+        SbExprSlotVector mergingExprs);
 
-    std::tuple<SbStage, SbSlotVector> makeAggProject(SbStage stage, SbAggExprVector sbAggExprs) {
-        return makeAggProject(VariableTypes{}, std::move(stage), std::move(sbAggExprs));
+    std::tuple<SbStage, SbSlotVector> makeAggProject(SbStage stage,
+                                                     SbBlockAggExprVector sbBlockAggExprs) {
+        return makeAggProject(VariableTypes{}, std::move(stage), std::move(sbBlockAggExprs));
     }
 
     std::tuple<SbStage, SbSlotVector> makeAggProject(const VariableTypes& varTypes,
                                                      SbStage stage,
-                                                     SbAggExprVector sbAggExprs);
+                                                     SbBlockAggExprVector sbBlockAggExprs);
 
     SbStage makeWindow(SbStage stage,
                        const SbSlotVector& currSlots,
@@ -574,13 +573,12 @@ public:
                                                    SbSlot inputSlot,
                                                    bool preserveNullAndEmptyArrays);
 
-    std::tuple<SbStage, SbSlot, boost::optional<SbSlot>, SbSlotVector, SbSlotVector>
-    makeTsBucketToCellBlock(SbStage stage,
-                            SbSlot bucketSlot,
-                            bool reqMeta,
-                            const std::vector<sbe::value::CellBlock::PathRequest>& topLevelReqs,
-                            const std::vector<sbe::value::CellBlock::PathRequest>& traverseReqs,
-                            const std::string& timeField);
+    std::tuple<SbStage, SbSlot, SbSlotVector, SbSlotVector> makeTsBucketToCellBlock(
+        SbStage stage,
+        SbSlot bucketSlot,
+        const std::vector<sbe::value::PathRequest>& topLevelReqs,
+        const std::vector<sbe::value::PathRequest>& traverseReqs,
+        const std::string& timeField);
 
     std::pair<SbStage, SbSlotVector> makeBlockToRow(SbStage stage,
                                                     const SbSlotVector& blockSlots,
@@ -645,7 +643,7 @@ public:
                                               SbSlot localKeySlot,
                                               SbSlot foreignKeySlot,
                                               SbSlot foreignRecordSlot,
-                                              SbAggExpr sbAggExpr,
+                                              SbBlockAggExpr sbBlockAggExpr,
                                               boost::optional<SbSlot> optOutputSlot,
                                               boost::optional<sbe::value::SlotId> collatorSlot) {
         return makeHashLookup(VariableTypes{},
@@ -654,7 +652,7 @@ public:
                               localKeySlot,
                               foreignKeySlot,
                               foreignRecordSlot,
-                              std::move(sbAggExpr),
+                              std::move(sbBlockAggExpr),
                               optOutputSlot,
                               collatorSlot);
     }
@@ -665,7 +663,7 @@ public:
                                               SbSlot localKeySlot,
                                               SbSlot foreignKeySlot,
                                               SbSlot foreignRecordSlot,
-                                              SbAggExpr sbAggExpr,
+                                              SbBlockAggExpr sbBlockAggExpr,
                                               boost::optional<SbSlot> optOutputSlot,
                                               boost::optional<sbe::value::SlotId> collatorSlot);
 
@@ -717,5 +715,20 @@ protected:
     SbSlotVector allocateOutSlotsForMergeStage(const std::vector<SbSlotVector>& slots);
 
     PlanNodeId _nodeId;
+
+private:
+    bool useIncreasedSpilling(bool allowDiskUse,
+                              SbeHashAggIncreasedSpillingModeEnum forceIncreasedSpillingMode) {
+        switch (forceIncreasedSpillingMode) {
+            case SbeHashAggIncreasedSpillingModeEnum::kAlways:
+                return true;
+            case SbeHashAggIncreasedSpillingModeEnum::kNever:
+                return false;
+            case SbeHashAggIncreasedSpillingModeEnum::kInDebug:
+                return kDebugBuild && allowDiskUse;
+            default:
+                tasserted(9915702, "Unknown forceIncreasedSpillingMode");
+        }
+    }
 };
 }  // namespace mongo::stage_builder

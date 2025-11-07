@@ -4,6 +4,8 @@
  * from the same phase to completion when the node is started back up.
  *
  * @tags: [
+ *   # Primary-driven index builds aren't resumable.
+ *   primary_driven_index_builds_incompatible,
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   requires_replication,
@@ -11,12 +13,11 @@
  */
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {ResumableIndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {ResumableIndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const dbName = "test";
 
-const rst = new ReplSetTest(
-    {nodes: 1, nodeOptions: {setParameter: {maxIndexBuildMemoryUsageMegabytes: 50}}});
+const rst = new ReplSetTest({nodes: 1, nodeOptions: {setParameter: {maxIndexBuildMemoryUsageMegabytes: 50}}});
 rst.startSet();
 rst.initiate();
 
@@ -37,6 +38,7 @@ ResumableIndexBuildTest.run(
     [{name: "hangIndexBuildDuringBulkLoadPhase", logIdWithIndexName: 4924400}],
     50,
     ["bulk load"],
-    [{skippedPhaseLogID: 20391}]);
+    [{skippedPhaseLogID: 20391}],
+);
 
 rst.stopSet();

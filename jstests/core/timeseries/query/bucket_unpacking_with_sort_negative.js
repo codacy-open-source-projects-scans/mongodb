@@ -3,33 +3,30 @@
  * results to be created. This test is focused on negative scenarios when the rewrite doesn't occur.
  *
  * @tags: [
- *     # Explain of a resolved view must be executed by mongos.
- *     directly_against_shardsvrs_incompatible,
- *     # This complicates aggregation extraction.
- *     do_not_wrap_aggregations_in_facets,
- *     # Refusing to run a test that issues an aggregation command with explain because it may
- *     # return incomplete results if interrupted by a stepdown.
- *     does_not_support_stepdowns,
- *     # We need a timeseries collection.
- *     requires_timeseries,
- *     # TODO (SERVER-88539) the timeseries setup runs a migration. Remove the upgrade-downgrade
- *     # incompatible tag once migrations  work during downgrade.
- *     cannot_run_during_upgrade_downgrade,
- *     requires_getmore,
+ * # Explain of a resolved view must be executed by mongos.
+ * directly_against_shardsvrs_incompatible,
+ * # This complicates aggregation extraction.
+ * do_not_wrap_aggregations_in_facets,
+ * # Refusing to run a test that issues an aggregation command with explain because it may
+ * # return incomplete results if interrupted by a stepdown.
+ * does_not_support_stepdowns,
+ * # We need a timeseries collection.
+ * requires_timeseries,
+ * requires_getmore,
  * ]
  */
 import {
     backwardIxscan,
     runDoesntRewriteTest,
     runRewritesTest,
-    setupColl
+    setupColl,
 } from "jstests/core/timeseries/libs/timeseries_sort_util.js";
 
 const collName = jsTestName();
 const coll = db[collName];
-const metaCollName = jsTestName() + '_meta';
+const metaCollName = jsTestName() + "_meta";
 const metaColl = db[metaCollName];
-const metaCollSubFieldsName = jsTestName() + '_meta_sub';
+const metaCollSubFieldsName = jsTestName() + "_meta_sub";
 const metaCollSubFields = db[metaCollSubFieldsName];
 const subFields = ["a", "b"];
 
@@ -133,9 +130,7 @@ for (let m = -1; m < 2; m++) {
                     }
                 }
 
-                if (sort)
-                    runRewritesTest(
-                        sort, createIndex, hint, backwardIxscan, usesMeta ? metaColl : coll);
+                if (sort) runRewritesTest(sort, createIndex, hint, backwardIxscan, usesMeta ? metaColl : coll);
             }
         }
     }
@@ -149,8 +144,7 @@ runDoesntRewriteTest({m: 1}, {m: 1}, {m: 1}, metaColl);
 
 // Test mismatched meta paths don't produce the optimization.
 runDoesntRewriteTest({m: 1, t: 1}, {"m.a": 1, t: 1}, {"m.a": 1, t: 1}, metaCollSubFields);
-runDoesntRewriteTest(
-    {"m.b": 1, t: 1}, {"m.a": 1, "m.b": 1, t: 1}, {"m.a": 1, "m.b": 1, t: 1}, metaCollSubFields);
+runDoesntRewriteTest({"m.b": 1, t: 1}, {"m.a": 1, "m.b": 1, t: 1}, {"m.a": 1, "m.b": 1, t: 1}, metaCollSubFields);
 runDoesntRewriteTest({"m.a": 1, t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaCollSubFields);
 runDoesntRewriteTest({"m.a": 1, "m.b": 1, t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaCollSubFields);
 // Test matched meta-subpaths with mismatched directions don't produce the optimization.
@@ -158,41 +152,34 @@ runDoesntRewriteTest({"m.a": 1, t: -1}, {"m.a": 1, t: 1}, {"m.a": 1, t: 1}, meta
 
 // Test intermediary projections that exclude the sorted fields don't produce the optimizaiton.
 runDoesntRewriteTest({t: 1}, null, {$natural: 1}, metaColl, [{$project: {t: 0}}]);
-runDoesntRewriteTest({t: 1}, null, {$natural: 1}, metaColl, [{$unset: 't'}]);
+runDoesntRewriteTest({t: 1}, null, {$natural: 1}, metaColl, [{$unset: "t"}]);
 runDoesntRewriteTest({t: 1}, null, {$natural: 1}, metaColl, [{$set: {t: {$const: 5}}}]);
 runDoesntRewriteTest({t: 1}, null, {$natural: 1}, metaColl, [{$set: {t: "$m.junk"}}]);
 
 runDoesntRewriteTest({m: 1, t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaColl, [{$project: {m: 0}}]);
-runDoesntRewriteTest({m: 1, t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaColl, [{$unset: 'm'}]);
-runDoesntRewriteTest(
-    {m: 1, t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaColl, [{$set: {m: {$const: 5}}}]);
+runDoesntRewriteTest({m: 1, t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaColl, [{$unset: "m"}]);
+runDoesntRewriteTest({m: 1, t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaColl, [{$set: {m: {$const: 5}}}]);
 runDoesntRewriteTest({m: 1, t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaColl, [{$set: {m: "$m.junk"}}]);
 
 runDoesntRewriteTest({m: 1, t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaColl, [{$project: {t: 0}}]);
 
 runDoesntRewriteTest({m: 1, t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaColl, [{$project: {a: 1}}]);
 
-runDoesntRewriteTest({m: 1, t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaColl, [{$project: {'m.a': 0}}]);
+runDoesntRewriteTest({m: 1, t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaColl, [{$project: {"m.a": 0}}]);
 
-runDoesntRewriteTest({'m.a': 1, t: 1}, {'m.a': 1, t: 1}, {'m.a': 1, t: 1}, metaCollSubFields, [
-    {$project: {'m': 0}}
-]);
+runDoesntRewriteTest({"m.a": 1, t: 1}, {"m.a": 1, t: 1}, {"m.a": 1, t: 1}, metaCollSubFields, [{$project: {"m": 0}}]);
 
 // The predicate must be an equality.
-runDoesntRewriteTest(
-    {t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaColl, [{$match: {m: {$gte: 5, $lte: 6}}}]);
-runDoesntRewriteTest(
-    {t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaColl, [{$match: {m: {$in: [4, 5, 6]}}}]);
+runDoesntRewriteTest({t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaColl, [{$match: {m: {$gte: 5, $lte: 6}}}]);
+runDoesntRewriteTest({t: 1}, {m: 1, t: 1}, {m: 1, t: 1}, metaColl, [{$match: {m: {$in: [4, 5, 6]}}}]);
 // The index must not be multikey.
-runDoesntRewriteTest({t: 1}, {'m.array': 1, t: 1}, {'m.array': 1, t: 1}, metaCollSubFields, [
-    {$match: {'m.array': 123}}
+runDoesntRewriteTest({t: 1}, {"m.array": 1, t: 1}, {"m.array": 1, t: 1}, metaCollSubFields, [
+    {$match: {"m.array": 123}},
 ]);
 // Even if the multikey component is a trailing field, for simplicity we are not handling it.
-runDoesntRewriteTest({t: 1},
-                     {'m.a': 1, t: 1, 'm.array': 1},
-                     {'m.a': 1, t: 1, 'm.array': 1},
-                     metaCollSubFields,
-                     [{$match: {'m.a': 7}}]);
+runDoesntRewriteTest({t: 1}, {"m.a": 1, t: 1, "m.array": 1}, {"m.a": 1, t: 1, "m.array": 1}, metaCollSubFields, [
+    {$match: {"m.a": 7}},
+]);
 
 // Test that a pipeline with the renamed time field by $addFields or $project will not be rewritten.
 // In this case, the new 't' fields hide the timeField 't' and so the $sort that follows the

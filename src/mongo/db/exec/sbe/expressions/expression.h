@@ -29,9 +29,16 @@
 
 #pragma once
 
-#include <absl/container/inlined_vector.h>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/db/exec/sbe/slots_provider.h"
+#include "mongo/db/exec/sbe/util/debug_print.h"
+#include "mongo/db/exec/sbe/values/slot.h"
+#include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/exec/sbe/vm/vm.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -40,14 +47,8 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
-#include "mongo/db/exec/sbe/abt/slots_provider.h"
-#include "mongo/db/exec/sbe/util/debug_print.h"
-#include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/exec/sbe/vm/vm.h"
-#include "mongo/util/assert_util_core.h"
+#include <absl/container/inlined_vector.h>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace sbe {
@@ -119,7 +120,7 @@ protected:
      */
     void validateNodes() {
         for (auto& node : _nodes) {
-            invariant(node);
+            tassert(11093404, "Unexpected empty node in expression", node);
         }
     }
 
@@ -143,14 +144,14 @@ struct AggExprPair {
     std::unique_ptr<EExpression> agg;
 };
 
-struct AggExprTuple {
+struct BlockAggExprTuple {
     std::unique_ptr<EExpression> init;
     std::unique_ptr<EExpression> blockAgg;
     std::unique_ptr<EExpression> agg;
 };
 
 using AggExprVector = std::vector<std::pair<value::SlotId, AggExprPair>>;
-using AggExprTupleVector = std::vector<std::pair<value::SlotId, AggExprTuple>>;
+using BlockAggExprTupleVector = std::vector<std::pair<value::SlotId, BlockAggExprTuple>>;
 
 template <typename T, typename... Args>
 inline std::unique_ptr<EExpression> makeE(Args&&... args) {
@@ -160,6 +161,15 @@ inline std::unique_ptr<EExpression> makeE(Args&&... args) {
 template <typename... Ts>
 inline auto makeEs(Ts&&... pack) {
     EExpression::Vector exprs;
+
+    (exprs.emplace_back(std::forward<Ts>(pack)), ...);
+
+    return exprs;
+}
+
+template <typename... Ts>
+inline auto makeVEs(Ts&&... pack) {
+    std::vector<std::unique_ptr<EExpression>> exprs;
 
     (exprs.emplace_back(std::forward<Ts>(pack)), ...);
 
@@ -236,6 +246,9 @@ auto makeSlotExprPairVec(Ts&&... pack) {
     return v;
 }
 
+/**
+ * Used only by unit tests. Expects input arguments in threes: (slotId, initExpr, accExpr).
+ */
 template <typename... Ts>
 auto makeAggExprVector(Ts&&... pack) {
     AggExprVector v;
@@ -317,23 +330,59 @@ private:
 };
 
 /**
- * This is a binary primitive (builtin) operation.
+ * This is a n-ary primitive (builtin) operation.
  */
-class EPrimBinary final : public EExpression {
+class EPrimNary final : public EExpression {
 public:
     enum Op {
         // Logical operations. These operations are short-circuiting.
         logicAnd,
         logicOr,
 
+        // Math operations.
+        add,
+        mul,
+    };
+
+    EPrimNary(Op op, std::vector<std::unique_ptr<EExpression>> args) : _op(op) {
+        tassert(10217100, "Expected at least two operands", args.size() >= 2);
+        _nodes.reserve(args.size());
+        for (auto&& arg : args) {
+            _nodes.emplace_back(std::move(arg));
+        }
+        validateNodes();
+    }
+
+    std::unique_ptr<EExpression> clone() const override;
+
+    vm::CodeFragment compileDirect(CompileCtx& ctx) const override;
+
+    std::vector<DebugPrinter::Block> debugPrint() const override;
+
+    size_t estimateSize() const final;
+
+private:
+    Op _op;
+};
+
+/**
+ * This is a binary primitive (builtin) operation.
+ */
+class EPrimBinary final : public EExpression {
+public:
+    enum Op {
+        // Logical operations. These operations are short-circuiting.
+        logicAnd,  // TODO: remove with SERVER-100579
+        logicOr,   // TODO: remove with SERVER-100579
+
         // Nothing-handling operation. This is short-circuiting like logicOr,
         // but it checks Nothing / non-Nothing instead of false / true.
         fillEmpty,
 
         // Math operations.
-        add,
+        add,  // TODO: remove with SERVER-100579
         sub,
-        mul,
+        mul,  // TODO: remove with SERVER-100579
         div,
 
         // Comparison operations. These operations support taking a third "collator" arg.
@@ -357,7 +406,7 @@ public:
         _nodes.emplace_back(std::move(rhs));
 
         if (collator) {
-            invariant(isComparisonOp(_op));
+            tassert(11093405, "Operation is not a comparison", isComparisonOp(_op));
             _nodes.emplace_back(std::move(collator));
         }
 
@@ -459,6 +508,69 @@ public:
 };
 
 /**
+ * This is a multi-conditional (a.k.a. if-then-elif-...-else) expression.
+ */
+class ESwitch final : public EExpression {
+public:
+    /**
+     * Create a Switch multi-conditional expression by providing a flat list of expressions. These
+     * are taken as pairs of (condition, thenBranch) followed by a final 'default' expression.
+     */
+    ESwitch(std::vector<std::unique_ptr<sbe::EExpression>> nodes) {
+        // Enforce that the list is not empty and contains an odd number of expressions.
+        // When it contains a single expression, it represents a switch where only the 'default'
+        // branch is present.
+        tassert(10130700,
+                "switch created with a wrong number of expressions",
+                nodes.size() > 1 && ((nodes.size() - 1) % 2) == 0);
+        _nodes.reserve(nodes.size());
+        for (auto&& n : nodes) {
+            _nodes.emplace_back(std::move(n));
+        }
+        validateNodes();
+    }
+
+    std::unique_ptr<EExpression> clone() const override;
+
+    vm::CodeFragment compileDirect(CompileCtx& ctx) const override;
+
+    std::vector<DebugPrinter::Block> debugPrint() const override;
+
+    size_t estimateSize() const final;
+
+    /**
+     * Computes the number of pairs (condition, thenBranch) contained in the flat list of
+     * expressions. i.e. exclude the final 'default' expression, then divide by two.
+     */
+    size_t getNumBranches() const {
+        return (_nodes.size() - 1) / 2;
+    }
+
+    /**
+     * Extract from the flat list of expressions the expression representing the idx-th condition.
+     */
+    const EExpression* getCondition(size_t idx) const {
+        return _nodes[idx * 2].get();
+    }
+
+    /**
+     * Extract from the flat list of expressions the expression representing the idx-th branch, i.e.
+     * right after the idx-th condition.
+     */
+    const EExpression* getThenBranch(size_t idx) const {
+        return _nodes[idx * 2 + 1].get();
+    }
+
+    /**
+     * Extract from the flat list of expressions the expression representing the default branch,
+     * i.e. the last item of the list.
+     */
+    const EExpression* getDefault() const {
+        return _nodes.back().get();
+    }
+};
+
+/**
  * This is a let expression that can be used to define local variables.
  */
 class ELocalBind final : public EExpression {
@@ -487,13 +599,17 @@ private:
  */
 class ELocalLambda final : public EExpression {
 public:
-    ELocalLambda(FrameId frameId, std::unique_ptr<EExpression> body) : _frameId(frameId) {
+    ELocalLambda(FrameId frameId, std::unique_ptr<EExpression> body, size_t numArguments = 1)
+        : _frameId(frameId), _numArguments(numArguments) {
         _nodes.emplace_back(std::move(body));
         validateNodes();
     }
 
     std::unique_ptr<EExpression> clone() const override;
 
+    size_t numArguments() const {
+        return _numArguments;
+    }
     vm::CodeFragment compileDirect(CompileCtx& ctx) const override;
     vm::CodeFragment compileBodyDirect(CompileCtx& ctx) const;
     std::vector<DebugPrinter::Block> debugPrint() const override;
@@ -502,6 +618,7 @@ public:
 
 private:
     FrameId _frameId;
+    size_t _numArguments;
 };
 
 /**
@@ -546,9 +663,9 @@ public:
     ENumericConvert(std::unique_ptr<EExpression> source, value::TypeTags target) : _target(target) {
         _nodes.emplace_back(std::move(source));
         validateNodes();
-        invariant(
-            target == value::TypeTags::NumberInt32 || target == value::TypeTags::NumberInt64 ||
-            target == value::TypeTags::NumberDouble || target == value::TypeTags::NumberDecimal);
+        tassert(11096700,
+                str::stream() << "expect numeric target type but the target is " << target,
+                value::isNumber(target));
     }
 
     std::unique_ptr<EExpression> clone() const override;

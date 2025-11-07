@@ -3,14 +3,16 @@
  * replica set, a sharded cluster, etc.
  */
 import {isMongos} from "jstests/concurrency/fsm_workload_helpers/server_types.js";
+import {DiscoverTopology} from "jstests/libs/discover_topology.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
-export var FixtureHelpers = (function() {
+export var FixtureHelpers = (function () {
     function _getHostStringForReplSet(connectionToNodeInSet) {
         const isMaster = assert.commandWorked(connectionToNodeInSet.getDB("test").isMaster());
         assert(
             isMaster.hasOwnProperty("setName"),
-            "Attempted to get replica set connection to a node that is not part of a replica set");
+            "Attempted to get replica set connection to a node that is not part of a replica set",
+        );
         return isMaster.setName + "/" + isMaster.hosts.join(",");
     }
 
@@ -27,6 +29,13 @@ export var FixtureHelpers = (function() {
             replicas = [new ReplSetTest(_getHostStringForReplSet(db.getMongo()))];
         }
         return replicas;
+    }
+
+    /**
+     * Returns the config server connection string.
+     */
+    function getConfigServerConnString(routerConn) {
+        return assert.commandWorked(routerConn.adminCommand({getShardMap: 1})).map.config;
     }
 
     /**
@@ -54,8 +63,7 @@ export var FixtureHelpers = (function() {
      * sharded.
      */
     function isSharded(coll) {
-        const collEntry =
-            coll.getDB().getSiblingDB("config").collections.findOne({_id: coll.getFullName()});
+        const collEntry = coll.getDB().getSiblingDB("config").collections.findOne({_id: coll.getFullName()});
         if (collEntry === null) {
             return false;
         }
@@ -67,8 +75,7 @@ export var FixtureHelpers = (function() {
      * unsplittable.
      */
     function isUnsplittable(coll) {
-        const collEntry =
-            coll.getDB().getSiblingDB("config").collections.findOne({_id: coll.getFullName()});
+        const collEntry = coll.getDB().getSiblingDB("config").collections.findOne({_id: coll.getFullName()});
         if (collEntry === null) {
             return false;
         }
@@ -90,21 +97,19 @@ export var FixtureHelpers = (function() {
      */
     function getShardsOwningDataForCollection(coll) {
         if (isSharded(coll) || isUnsplittable(coll)) {
-            const res = db.getSiblingDB('config')
-                .collections
-                .aggregate([
+            const res = db
+                .getSiblingDB("config")
+                .collections.aggregate([
                     {$match: {_id: coll.getFullName()}},
                     {
-                        $lookup:
-                            {from: 'chunks', localField: 'uuid', foreignField: 'uuid', as: 'chunks'}
+                        $lookup: {from: "chunks", localField: "uuid", foreignField: "uuid", as: "chunks"},
                     },
-                    {$group: {_id: '$chunks.shard'}}
+                    {$group: {_id: "$chunks.shard"}},
                 ])
                 .toArray();
             return res.map((x) => x._id).flat();
         } else {
-            const dbMetadata =
-                db.getSiblingDB('config').databases.findOne({_id: coll.getDB().getName()});
+            const dbMetadata = db.getSiblingDB("config").databases.findOne({_id: coll.getDB().getName()});
             return dbMetadata ? [dbMetadata.primary] : [];
         }
     }
@@ -136,8 +141,7 @@ export var FixtureHelpers = (function() {
     }
 
     function getTopologyTime(db) {
-        const shards =
-            db.getSiblingDB('config').shards.find({}).sort({'topologyTime': -1}).limit(1).toArray();
+        const shards = db.getSiblingDB("config").shards.find({}).sort({"topologyTime": -1}).limit(1).toArray();
         if (!shards.length) {
             // In case we are on a replicaset config.shards is empty
             return Timestamp();
@@ -156,16 +160,11 @@ export var FixtureHelpers = (function() {
             // shard.
             return 1;
         }
-        const collMetadata =
-            db.getSiblingDB("config").collections.findOne({_id: coll.getFullName()});
+        const collMetadata = db.getSiblingDB("config").collections.findOne({_id: coll.getFullName()});
         if (collMetadata.timestamp) {
-            return db.getSiblingDB("config")
-                .chunks.distinct("shard", {uuid: collMetadata.uuid})
-                .length;
+            return db.getSiblingDB("config").chunks.distinct("shard", {uuid: collMetadata.uuid}).length;
         } else {
-            return db.getSiblingDB("config")
-                .chunks.distinct("shard", {ns: coll.getFullName()})
-                .length;
+            return db.getSiblingDB("config").chunks.distinct("shard", {ns: coll.getFullName()}).length;
         }
     }
 
@@ -193,12 +192,10 @@ export var FixtureHelpers = (function() {
             const shardObjs = db.getSiblingDB("config").shards.find().sort({_id: 1}).toArray();
 
             for (let shardObj of shardObjs) {
-                connList = connList.concat(
-                    getRequestedConns(new Mongo(shardObj.host, undefined, {gRPC: false})));
+                connList = connList.concat(getRequestedConns(new Mongo(shardObj.host, undefined, {gRPC: false})));
             }
         } else {
-            connList = getRequestedConns(
-                new Mongo(db.getMongo().host, undefined, {gRPC: db.getMongo().isGRPC()}));
+            connList = getRequestedConns(new Mongo(db.getMongo().host, undefined, {gRPC: db.getMongo().isGRPC()}));
         }
 
         return connList.map((conn) => func(conn.getDB(db.getName())));
@@ -214,7 +211,7 @@ export var FixtureHelpers = (function() {
         return mapOnEachShardNode({
             db,
             func: (primaryDb) => assert.commandWorked(primaryDb.runCommand(cmdObj)),
-            primaryNodeOnly
+            primaryNodeOnly,
         });
     }
 
@@ -235,7 +232,7 @@ export var FixtureHelpers = (function() {
         }
         const configDB = db.getSiblingDB("config");
         let shardConn = null;
-        configDB.databases.find().forEach(function(dbObj) {
+        configDB.databases.find().forEach(function (dbObj) {
             if (dbObj._id === db.getName()) {
                 const shardObj = configDB.shards.findOne({_id: dbObj.primary});
                 shardConn = new Mongo(shardObj.host, undefined, {gRPC: false});
@@ -266,7 +263,7 @@ export var FixtureHelpers = (function() {
      */
     function isReplSet(db) {
         const primaryInfo = db.isMaster();
-        return primaryInfo.hasOwnProperty('setName');
+        return primaryInfo.hasOwnProperty("setName");
     }
 
     /**
@@ -292,6 +289,7 @@ export var FixtureHelpers = (function() {
         runCommandOnAllShards: runCommandOnAllShards,
         runCommandOnEachPrimary: runCommandOnEachPrimary,
         getAllReplicas: getAllReplicas,
+        getConfigServerConnString: getConfigServerConnString,
         getPrimaries: getPrimaries,
         getSecondaries: getSecondaries,
         getPrimaryForNodeHostingDatabase: getPrimaryForNodeHostingDatabase,

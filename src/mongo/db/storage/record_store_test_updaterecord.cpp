@@ -27,12 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <cstddef>
-#include <memory>
-#include <ostream>
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -42,14 +36,20 @@
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/record_store_test_harness.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <cstddef>
+#include <memory>
+#include <ostream>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 namespace {
 
 // Insert a record and try to update it.
-TEST(RecordStoreTestHarness, UpdateRecord) {
+TEST(RecordStoreTest, UpdateRecord) {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     std::unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
 
@@ -63,7 +63,11 @@ TEST(RecordStoreTestHarness, UpdateRecord) {
         {
             StorageWriteTransaction txn(ru);
             StatusWith<RecordId> res =
-                rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, Timestamp());
+                rs->insertRecord(opCtx.get(),
+                                 *shard_role_details::getRecoveryUnit(opCtx.get()),
+                                 data.c_str(),
+                                 data.size() + 1,
+                                 Timestamp());
             ASSERT_OK(res.getStatus());
             loc = res.getValue();
             txn.commit();
@@ -78,7 +82,7 @@ TEST(RecordStoreTestHarness, UpdateRecord) {
         auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
         {
             StorageWriteTransaction txn(ru);
-            Status res = rs->updateRecord(opCtx.get(), loc, data.c_str(), data.size() + 1);
+            Status res = rs->updateRecord(opCtx.get(), ru, loc, data.c_str(), data.size() + 1);
             ASSERT_OK(res);
 
             txn.commit();
@@ -88,7 +92,8 @@ TEST(RecordStoreTestHarness, UpdateRecord) {
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
-            RecordData record = rs->dataFor(opCtx.get(), loc);
+            RecordData record =
+                rs->dataFor(opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()), loc);
             ASSERT_EQUALS(data.size() + 1, static_cast<size_t>(record.size()));
             ASSERT_EQUALS(data, record.data());
         }
@@ -96,7 +101,7 @@ TEST(RecordStoreTestHarness, UpdateRecord) {
 }
 
 // Insert multiple records and try to update them.
-TEST(RecordStoreTestHarness, UpdateMultipleRecords) {
+TEST(RecordStoreTest, UpdateMultipleRecords) {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     std::unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
 
@@ -114,7 +119,11 @@ TEST(RecordStoreTestHarness, UpdateMultipleRecords) {
 
             StorageWriteTransaction txn(ru);
             StatusWith<RecordId> res =
-                rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, Timestamp());
+                rs->insertRecord(opCtx.get(),
+                                 *shard_role_details::getRecoveryUnit(opCtx.get()),
+                                 data.c_str(),
+                                 data.size() + 1,
+                                 Timestamp());
             ASSERT_OK(res.getStatus());
             locs[i] = res.getValue();
             txn.commit();
@@ -132,7 +141,7 @@ TEST(RecordStoreTestHarness, UpdateMultipleRecords) {
             std::string data = ss.str();
 
             StorageWriteTransaction txn(ru);
-            Status res = rs->updateRecord(opCtx.get(), locs[i], data.c_str(), data.size() + 1);
+            Status res = rs->updateRecord(opCtx.get(), ru, locs[i], data.c_str(), data.size() + 1);
             ASSERT_OK(res);
 
             txn.commit();
@@ -146,7 +155,8 @@ TEST(RecordStoreTestHarness, UpdateMultipleRecords) {
             ss << "update record-" << i;
             std::string data = ss.str();
 
-            RecordData record = rs->dataFor(opCtx.get(), locs[i]);
+            RecordData record = rs->dataFor(
+                opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()), locs[i]);
             ASSERT_EQUALS(data.size() + 1, static_cast<size_t>(record.size()));
             ASSERT_EQUALS(data, record.data());
         }

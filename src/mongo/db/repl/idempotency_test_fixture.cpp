@@ -27,43 +27,36 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
+#include "mongo/db/repl/idempotency_test_fixture.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/validate/collection_validation.h"
-#include "mongo/db/catalog/validate/validate_results.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
-#include "mongo/db/query/index_bounds.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/repl/idempotency_test_fixture.h"
-#include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/oplog_entry_test_helpers.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/db/validate/collection_validation.h"
+#include "mongo/db/validate/validate_results.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/md5.h"
-#include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 namespace repl {
@@ -140,7 +133,7 @@ CollectionState::CollectionState(CollectionOptions collectionOptions_,
     : collectionOptions(std::move(collectionOptions_)),
       indexSpecs(std::move(indexSpecs_)),
       dataHash(std::move(dataHash_)),
-      exists(true){};
+      exists(true) {}
 
 bool operator==(const CollectionState& lhs, const CollectionState& rhs) {
     if (!lhs.exists || !rhs.exists) {
@@ -156,10 +149,6 @@ bool operator==(const CollectionState& lhs, const CollectionState& rhs) {
     bool dataHashEqual = lhs.dataHash == rhs.dataHash;
     bool existsEqual = lhs.exists == rhs.exists;
     return collectionOptionsEqual && indexSpecsEqual && dataHashEqual && existsEqual;
-}
-
-bool operator!=(const CollectionState& lhs, const CollectionState& rhs) {
-    return !(lhs == rhs);
 }
 
 std::ostream& operator<<(std::ostream& stream, const CollectionState& state) {
@@ -223,11 +212,7 @@ void IdempotencyTest::testOpsAreIdempotent(std::vector<OplogEntry> ops, Sequence
 }
 
 OplogEntry IdempotencyTest::createCollection(UUID uuid) {
-    return makeCreateCollectionOplogEntry(nextOpTime(), _nss, BSON("uuid" << uuid));
-}
-
-OplogEntry IdempotencyTest::dropCollection() {
-    return makeCommandOplogEntry(nextOpTime(), _nss, BSON("drop" << _nss.coll()));
+    return makeCreateCollectionOplogEntry(_opCtx.get(), nextOpTime(), _nss, uuid);
 }
 
 OplogEntry IdempotencyTest::insert(const BSONObj& obj) {
@@ -242,18 +227,17 @@ OplogEntry IdempotencyTest::update(IdType _id, const BSONObj& obj) {
 OplogEntry IdempotencyTest::buildIndex(const BSONObj& indexSpec,
                                        const BSONObj& options,
                                        const UUID& uuid) {
-    BSONObjBuilder bob;
-    bob.append("createIndexes", _nss.coll());
-    bob.append("v", 2);
-    bob.append("key", indexSpec);
-    bob.append("name", std::string(indexSpec.firstElementFieldName()) + "_index");
-    bob.appendElementsUnique(options);
-    return makeCommandOplogEntry(nextOpTime(), _nss, bob.obj(), uuid);
+    return makeCreateIndexOplogEntry(nextOpTime(),
+                                     _nss,
+                                     fmt::format("{}_index", indexSpec.firstElementFieldName()),
+                                     indexSpec,
+                                     uuid,
+                                     options);
 }
 
 OplogEntry IdempotencyTest::dropIndex(const std::string& indexName, const UUID& uuid) {
     auto cmd = BSON("dropIndexes" << _nss.coll() << "index" << indexName);
-    return makeCommandOplogEntry(nextOpTime(), _nss, cmd, uuid);
+    return makeCommandOplogEntry(nextOpTime(), _nss, cmd, boost::none /* object2 */, uuid);
 }
 
 OplogEntry IdempotencyTest::prepare(LogicalSessionId lsid,
@@ -264,16 +248,14 @@ OplogEntry IdempotencyTest::prepare(LogicalSessionId lsid,
     OperationSessionInfo info;
     info.setSessionId(lsid);
     info.setTxnNumber(txnNum);
-    return makeOplogEntry(nextOpTime(),
-                          OpTypeEnum::kCommand,
-                          _nss.getCommandNS(),
-                          BSON("applyOps" << ops << "prepare" << true),
-                          boost::none /* o2 */,
-                          info /* sessionInfo */,
-                          Date_t::min() /* wallClockTime -- required but not checked */,
-                          {stmtId},
-                          boost::none /* uuid */,
-                          prevOpTime);
+    return makeCommandOplogEntryWithSessionInfoAndStmtIds(
+        nextOpTime(),
+        _nss,
+        BSON("applyOps" << ops << "prepare" << true),
+        lsid,
+        txnNum,
+        {stmtId},
+        prevOpTime);
 }
 
 OplogEntry IdempotencyTest::commitUnprepared(LogicalSessionId lsid,
@@ -318,23 +300,21 @@ OplogEntry IdempotencyTest::partialTxn(LogicalSessionId lsid,
     OperationSessionInfo info;
     info.setSessionId(lsid);
     info.setTxnNumber(txnNum);
-    return makeOplogEntry(nextOpTime(),
-                          OpTypeEnum::kCommand,
-                          _nss.getCommandNS(),
-                          BSON("applyOps" << ops << "partialTxn" << true),
-                          boost::none /* o2 */,
-                          info /* sessionInfo */,
-                          Date_t::min() /* wallClockTime -- required but not checked */,
-                          {stmtId},
-                          boost::none /* uuid */,
-                          prevOpTime);
+    return makeCommandOplogEntryWithSessionInfoAndStmtIds(
+        nextOpTime(),
+        _nss,
+        BSON("applyOps" << ops << "partialTxn" << true),
+        lsid,
+        txnNum,
+        {stmtId},
+        prevOpTime);
 }
 
-std::string IdempotencyTest::computeDataHash(const CollectionPtr& collection) {
-    auto desc = collection->getIndexCatalog()->findIdIndex(_opCtx.get());
+std::string IdempotencyTest::computeDataHash(const CollectionAcquisition& collection) {
+    auto desc = collection.getCollectionPtr()->getIndexCatalog()->findIdIndex(_opCtx.get());
     ASSERT_TRUE(desc);
     auto exec = InternalPlanner::indexScan(_opCtx.get(),
-                                           &collection,
+                                           collection,
                                            desc,
                                            BSONObj(),
                                            BSONObj(),
@@ -344,17 +324,17 @@ std::string IdempotencyTest::computeDataHash(const CollectionPtr& collection) {
                                            InternalPlanner::IXSCAN_FETCH);
     ASSERT(nullptr != exec.get());
     md5_state_t st;
-    md5_init_state(&st);
+    md5_init_state_deprecated(&st);
 
     PlanExecutor::ExecState state;
     BSONObj obj;
     while (PlanExecutor::ADVANCED == (state = exec->getNext(&obj, nullptr))) {
         obj = this->canonicalizeDocumentForDataHash(obj);
-        md5_append(&st, (const md5_byte_t*)obj.objdata(), obj.objsize());
+        md5_append_deprecated(&st, (const md5_byte_t*)obj.objdata(), obj.objsize());
     }
     ASSERT_EQUALS(PlanExecutor::IS_EOF, state);
     md5digest d;
-    md5_finish(&st, d);
+    md5_finish_deprecated(&st, d);
     return digestToString(d);
 }
 
@@ -378,13 +358,20 @@ std::vector<CollectionState> IdempotencyTest::validateAllCollections() {
     return collStates;
 }
 
+CollectionAcquisition getCollectionForRead(OperationContext* opCtx, const NamespaceString& nss) {
+    return acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest(nss,
+                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     repl::ReadConcernArgs::get(opCtx),
+                                     mongo::AcquisitionPrerequisites::kRead),
+        MODE_IS);
+}
+
 CollectionState IdempotencyTest::validate(const NamespaceString& nss) {
     auto collUUID = [&]() -> boost::optional<UUID> {
-        AutoGetCollectionForReadCommand autoColl(_opCtx.get(), _nss);
-        if (const auto& collection = autoColl.getCollection()) {
-            return collection->uuid();
-        }
-        return boost::none;
+        auto coll = getCollectionForRead(_opCtx.get(), _nss);
+        return coll.exists() ? boost::make_optional(coll.uuid()) : boost::none;
     }();
 
     if (collUUID) {
@@ -394,9 +381,9 @@ CollectionState IdempotencyTest::validate(const NamespaceString& nss) {
     }
 
     {
-        AutoGetCollectionForReadCommand collection(_opCtx.get(), _nss);
+        auto collection = getCollectionForRead(_opCtx.get(), _nss);
 
-        if (!collection) {
+        if (!collection.exists()) {
             // Return a mostly default initialized CollectionState struct with exists set to false
             // to indicate an unfound Collection (or a view).
             return kCollectionDoesNotExist;
@@ -417,16 +404,17 @@ CollectionState IdempotencyTest::validate(const NamespaceString& nss) {
         ASSERT_TRUE(validateResults.isValid());
     }
 
-    AutoGetCollectionForReadCommand collection(_opCtx.get(), _nss);
+    auto collection = getCollectionForRead(_opCtx.get(), _nss);
+    const auto& collectionPtr = collection.getCollectionPtr();
 
-    std::string dataHash = computeDataHash(collection.getCollection());
+    std::string dataHash = computeDataHash(collection);
 
-    auto collectionOptions = collection->getCollectionOptions();
+    auto collectionOptions = collectionPtr->getCollectionOptions();
     std::vector<std::string> allIndexes;
     BSONObjSet indexSpecs = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
-    collection->getAllIndexes(&allIndexes);
+    collectionPtr->getAllIndexes(&allIndexes);
     for (auto const& index : allIndexes) {
-        indexSpecs.insert(collection->getIndexSpec(index));
+        indexSpecs.insert(collectionPtr->getIndexSpec(index));
     }
     ASSERT_EQUALS(indexSpecs.size(), allIndexes.size());
 
@@ -460,9 +448,8 @@ template OplogEntry IdempotencyTest::update<int>(int _id, const BSONObj& obj);
 template OplogEntry IdempotencyTest::update<const char*>(char const* _id, const BSONObj& obj);
 
 BSONObj makeInsertApplyOpsEntry(const NamespaceString& nss, const UUID& uuid, const BSONObj& doc) {
-    return BSON("op"
-                << "i"
-                << "ns" << nss.toString_forTest() << "ui" << uuid << "o" << doc);
+    return BSON("op" << "i"
+                     << "ns" << nss.toString_forTest() << "ui" << uuid << "o" << doc);
 }
 }  // namespace repl
 }  // namespace mongo

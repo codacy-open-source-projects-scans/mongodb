@@ -28,12 +28,11 @@
  */
 
 
-#include <memory>
-#include <utility>
-
 #include "mongo/db/logical_session_cache_factory_mongod.h"
+
+#include "mongo/db/global_catalog/ddl/sessions_collection_config_server.h"
+#include "mongo/db/global_catalog/ddl/sessions_collection_sharded.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/s/sessions_collection_config_server.h"
 #include "mongo/db/session/logical_session_cache_impl.h"
 #include "mongo/db/session/service_liaison_impl.h"
 #include "mongo/db/session/service_liaison_shard.h"
@@ -42,9 +41,11 @@
 #include "mongo/db/session/sessions_collection_rs.h"
 #include "mongo/db/session/sessions_collection_standalone.h"
 #include "mongo/s/session_catalog_router.h"
-#include "mongo/s/sessions_collection_sharded.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/time_support.h"
+
+#include <memory>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
@@ -72,17 +73,11 @@ std::unique_ptr<LogicalSessionCache> makeLogicalSessionCacheD(LogicalSessionCach
         MONGO_UNREACHABLE;
     }();
 
-    auto reapSessionsOlderThanFn = [isRouterServer](OperationContext* opCtx,
-                                                    SessionsCollection& sessionsCollection,
-                                                    Date_t possiblyExpired) {
-        int shardReapedSessions = MongoDSessionCatalog::get(opCtx)->reapSessionsOlderThan(
+    auto reapSessionsOlderThanFn = [](OperationContext* opCtx,
+                                      SessionsCollection& sessionsCollection,
+                                      Date_t possiblyExpired) {
+        return MongoDSessionCatalog::get(opCtx)->reapSessionsOlderThan(
             opCtx, sessionsCollection, possiblyExpired);
-
-        int routerReapedSessions = isRouterServer ? RouterSessionCatalog::reapSessionsOlderThan(
-                                                        opCtx, sessionsCollection, possiblyExpired)
-                                                  : 0;
-
-        return shardReapedSessions + routerReapedSessions;
     };
 
     return std::make_unique<LogicalSessionCacheImpl>(

@@ -29,9 +29,6 @@
 
 #pragma once
 
-#include <functional>
-#include <tuple>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -41,6 +38,10 @@
 #include "mongo/db/database_name.h"
 #include "mongo/idl/generic_argument_gen.h"
 #include "mongo/rpc/op_msg.h"
+#include "mongo/util/modules.h"
+
+#include <functional>
+#include <tuple>
 
 namespace mongo {
 class BSONObj;
@@ -51,8 +52,8 @@ class StringData;
 /**
  * Utilities for dealing with what used to be called metadata.
  */
-namespace rpc {
-
+namespace MONGO_MOD_PUBLIC rpc {
+class ImpersonatedClientSessionGuard;
 /**
  * Returns an empty metadata object.
  */
@@ -63,7 +64,8 @@ BSONObj makeEmptyMetadata();
  */
 void readRequestMetadata(OperationContext* opCtx,
                          const GenericArguments& requestArgs,
-                         bool cmdRequiresAuth);
+                         bool cmdRequiresAuth,
+                         boost::optional<ImpersonatedClientSessionGuard>& clientSessionGuard);
 
 /**
  * A legacy command object and a corresponding query flags bitfield. The legacy command object
@@ -100,5 +102,5 @@ using RequestMetadataWriter =
 using ReplyMetadataReader = std::function<Status(
     OperationContext* opCtx, const BSONObj& replyMetadata, StringData sourceHost)>;
 
-}  // namespace rpc
+}  // namespace MONGO_MOD_PUBLIC rpc
 }  // namespace mongo

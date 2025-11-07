@@ -20,11 +20,9 @@
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {isMongod} from "jstests/concurrency/fsm_workload_helpers/server_types.js";
-import {
-    $config as $baseConfig
-} from "jstests/concurrency/fsm_workloads/query/findAndModify/findAndModify_remove_queue.js";
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/query/findAndModify/findAndModify_remove_queue.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
     // Use the workload name as the database name, since the workload name is assumed to be
     // unique.
     $config.data.uniqueDBName = jsTestName();
@@ -37,42 +35,42 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         return [];
     };
 
-    $config.data.opName = 'modified';
+    $config.data.opName = "modified";
 
     $config.data.validateResult = function validateResult(db, collName, res) {
         assert.commandWorked(res);
 
-        var doc = res.value;
+        let doc = res.value;
         if (isMongod(db)) {
             // Storage engines should automatically retry the operation, and thus should never
             // return null.
-            assert.neq(doc, null, 'findAndModify should have found a matching document');
+            assert.neq(doc, null, "findAndModify should have found a matching document");
         }
         if (doc !== null) {
             this.saveDocId(db, collName, doc._id);
         }
     };
 
-    $config.states = (function() {
+    $config.states = (function () {
         // Avoid removing documents that were already updated.
         function remove(db, collName) {
-            var res = db.runCommand({
+            let res = db.runCommand({
                 findAndModify: db[collName].getName(),
                 query: {counter: 0},
                 sort: {rand: -1},
-                remove: true
+                remove: true,
             });
             this.validateResult(db, collName, res);
         }
 
         function update(db, collName) {
             // Update the counter field to avoid matching the same document again.
-            var res = db.runCommand({
+            let res = db.runCommand({
                 findAndModify: db[collName].getName(),
                 query: {counter: 0},
                 sort: {rand: -1},
                 update: {$inc: {counter: 1}},
-                new: false
+                new: false,
             });
             this.validateResult(db, collName, res);
         }

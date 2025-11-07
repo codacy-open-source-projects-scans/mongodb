@@ -37,8 +37,9 @@ imports:
 
 structs:
     DonorShardEntry:
-        description: "Represents a donor shard for a particular resharding operation on the
-                      coordinator."
+        description:
+            "Represents a donor shard for a particular resharding operation on the
+            coordinator."
         generate_comparison_operators: false
         # Use strict:false to avoid complications around upgrade/downgrade. This isn't technically
         # required for resharding because durable state from all resharding operations is cleaned up
@@ -49,10 +50,21 @@ structs:
             # We intentionally have the mutable state nested in a subobject to make it easy to
             # overwrite with a single $set.
             mutableState: DonorShardContext
+            documentsToCopy:
+                type: long
+                description:
+                    "The number of documents to copy from this donor in the 'cloning'
+                    state."
+                optional: true
+            documentsFinal:
+                type: long
+                description: "The number of documents on this donor in the 'blocking-writes' state."
+                optional: true
 
     RecipientShardEntry:
-        description: "Represents a recipient shard for a particular resharding operation on the
-                      coordinator."
+        description:
+            "Represents a recipient shard for a particular resharding operation on the
+            coordinator."
         generate_comparison_operators: false
         # Use strict:false to avoid complications around upgrade/downgrade. This isn't technically
         # required for resharding because durable state from all resharding operations is cleaned up
@@ -69,20 +81,20 @@ structs:
         strict: false
         fields:
             operationRuntime:
-                    type: ReshardingMetricsTimeInterval
-                    description: >-
-                        The time interval of the entire resharding operation on the coordinator.
-                    optional: true            
+                type: ReshardingMetricsTimeInterval
+                description: >-
+                    The time interval of the entire resharding operation on the coordinator.
+                optional: true
             documentCopy:
-                    type: ReshardingMetricsTimeInterval
-                    description: >-
-                        The time interval that it takes to clone documents on this coordinator.
-                    optional: true
+                type: ReshardingMetricsTimeInterval
+                description: >-
+                    The time interval that it takes to clone documents on this coordinator.
+                optional: true
             oplogApplication:
-                    type: ReshardingMetricsTimeInterval
-                    description: >-
-                        The time interval that it takes to apply oplog entries on this coordinator.
-                    optional: true
+                type: ReshardingMetricsTimeInterval
+                description: >-
+                    The time interval that it takes to apply oplog entries on this coordinator.
+                optional: true
 
     ReshardingCoordinatorDocument:
         description: "Represents a resharding operation on the coordinator."
@@ -122,15 +134,6 @@ structs:
                     Mapping of chunk ranges to be used as the initial split output. This is only
                     for testing purposes.
                 optional: true
-            active:
-                type: bool
-                # TODO(SERVER-77873): Deprecated by the resharding improvements project, and should
-                # be removed with that feature flag.
-                description: >-
-                    Dummy field that always has the same value (true) to have a unique
-                    index on in order to prevent multiple resharding operations from being active at
-                    the same time.
-                default: true
             metrics:
                 type: ReshardingCoordinatorMetrics
                 description: "Metrics related to the coordinator."
@@ -149,7 +152,7 @@ structs:
                 optional: true
             sourceKey:
                 type: object_owned
-                description:  >-
+                description: >-
                     The shard key of the collection before resharding
                     (defined as optional for retro compatibility).
                 optional: true
@@ -176,4 +179,17 @@ structs:
             criticalSectionExpiresAt:
                 type: date
                 description: "When to timeout after the critical session is initiated."
+                optional: true
+            numSamplesPerChunk:
+                type: long
+                description: "The number of documents to sample on new chunks"
+                optional: true
+            demoMode:
+                type: optionalBool
+                description: >-
+                    "When set to true, overrides reshardingMinimumOperationDurationMillis
+                    and reshardingDelayBeforeRemainingOperationTimeQueryMillis values to 0
+                    for quick demo of reshardCollection operation"
+            telemetryContext:
+                type: object_owned
                 optional: true

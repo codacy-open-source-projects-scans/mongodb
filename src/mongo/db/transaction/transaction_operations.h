@@ -29,14 +29,6 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <functional>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -47,8 +39,18 @@
 #include "mongo/db/transaction/integer_interval_set.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <functional>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -60,7 +62,7 @@ extern FailPoint hangAfterLoggingApplyOpsForTransaction;
  * Provides methods for exporting ReplOperations in one or more applyOps oplog entries.
  * Concurrency control for this class is maintained by the TransactionParticipant.
  */
-class TransactionOperations {
+class MONGO_MOD_PUB TransactionOperations {
 public:
     using TransactionOperation = repl::ReplOperation;
     using CollectionUUIDs = stdx::unordered_set<UUID, UUID::Hash>;

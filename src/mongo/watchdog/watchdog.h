@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <boost/filesystem/path.hpp>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/atomic_word.h"
@@ -43,8 +36,17 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/filesystem/path.hpp>
+
+namespace MONGO_MOD_PUBLIC mongo {
 
 class OperationContext;
 class ServiceContext;
@@ -116,7 +118,7 @@ private:
  * - sleep(period)
  * - callback
  */
-class WatchdogPeriodicThread {
+class MONGO_MOD_OPEN WatchdogPeriodicThread {
 public:
     WatchdogPeriodicThread(Milliseconds period, StringData threadName);
     virtual ~WatchdogPeriodicThread() = default;
@@ -345,7 +347,7 @@ public:
     /**
      * Gets whether checks are paused or not. For testing purposes only.
      */
-    virtual bool getShouldRunChecks_forTest() = 0;
+    MONGO_MOD_PUBLIC virtual bool getShouldRunChecks_forTest() = 0;
 };
 
 
@@ -444,4 +446,4 @@ private:
     WatchdogMonitorThread _watchdogMonitorThread;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

@@ -29,19 +29,6 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <functional>
-#include <iostream>
-#include <list>
-#include <memory>
-#include <mutex>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/db/baton.h"
@@ -59,10 +46,26 @@
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/hierarchical_acquisition.h"
+#include "mongo/util/modules_incompletely_marked_header.h"
+#include "mongo/util/observable_mutex.h"
 #include "mongo/util/periodic_runner.h"
 #include "mongo/util/synchronized_value.h"
 #include "mongo/util/tick_source.h"
 #include "mongo/util/uuid.h"
+
+#include <cstdint>
+#include <functional>
+#include <iostream>
+#include <list>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -187,7 +190,8 @@ public:
  * This is for internal use by `ServiceContext`. Avoid using it to lock `ServiceContext` as it will
  * block normal server operations.
  */
-using ServiceContextLock = service_context_detail::ObjectLock<ServiceContext, stdx::mutex>;
+using ServiceContextLock =
+    service_context_detail::ObjectLock<ServiceContext, ObservableMutex<stdx::mutex>>;
 
 /**
  * Classes that implement this interface can receive notification on killOp.
@@ -195,7 +199,7 @@ using ServiceContextLock = service_context_detail::ObjectLock<ServiceContext, st
  * See registerKillOpListener() for more information,
  * including limitations on the lifetime of registered listeners.
  */
-class KillOpListenerInterface {
+class MONGO_MOD_OPEN KillOpListenerInterface {
 public:
     KillOpListenerInterface(const KillOpListenerInterface&) = delete;
     KillOpListenerInterface& operator=(const KillOpListenerInterface&) = delete;
@@ -342,7 +346,8 @@ private:
  *   If the thread has to be unkillable, a comment must be left explaining the reason. This will
  *   help future diagnosability.
  *
- * TODO(SERVER-74658): Remove this type if all theads are found to be killable.
+ * TODO(SERVER-111753 SERVER-111754 SERVER-111755): Remove this type if all theads are
+ * found to be killable.
  */
 enum class ClientOperationKillableByStepdown : bool {};
 
@@ -588,7 +593,7 @@ public:
      * Signal all OperationContext(s) that they have been killed except the ones belonging to the
      * excluded clients.
      */
-    void setKillAllOperations(const std::set<std::string>& excludedClients = {});
+    void setKillAllOperations(std::function<bool(const StringData)> excludedClientPredicate = {});
 
     /**
      * Reset the operation kill state after a killAllOperations.
@@ -618,7 +623,7 @@ public:
      * ServiceContext. Also, "opCtx" should never be deleted before this method returns. Finally,
      * the thread invoking this method must not hold the client and the service context locks.
      */
-    void delistOperation(OperationContext* opCtx) noexcept;
+    void delistOperation(OperationContext* opCtx);
 
     /**
      * Kills the operation "opCtx" with the code "killCode", if opCtx has not already been killed,
@@ -631,7 +636,7 @@ public:
      */
     void killAndDelistOperation(
         OperationContext* opCtx,
-        ErrorCodes::Error killError = ErrorCodes::OperationIsKilledAndDelisted) noexcept;
+        ErrorCodes::Error killError = ErrorCodes::OperationIsKilledAndDelisted);
 
     /**
      * Registers a listener to be notified each time an op is killed.
@@ -811,9 +816,9 @@ private:
      * operations are shortly deleted, this method should only be called after killing an operation
      * or in its destructor.
      */
-    void _delistOperation(OperationContext* opCtx) noexcept;
+    void _delistOperation(OperationContext* opCtx);
 
-    stdx::mutex _mutex;
+    ObservableMutex<stdx::mutex> _mutex;
 
     /**
      * The periodic runner.

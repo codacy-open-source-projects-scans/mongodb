@@ -31,23 +31,21 @@ import logging
 import os
 import shutil
 import sys
-from subprocess import check_output
+from subprocess import CalledProcessError, check_output
 from typing import List
 
 from packaging.version import Version
+from retry import retry
 
 # Get relative imports to work when the package is not installed on the PYTHONPATH.
 if __name__ == "__main__" and __package__ is None:
     sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-# pylint: disable=wrong-import-position
 from buildscripts.resmokelib.multiversionconstants import (
     LAST_CONTINUOUS_FCV,
     LAST_LTS_FCV,
     LATEST_FCV,
 )
-
-# pylint: enable=wrong-import-position
 
 LOGGER_NAME = "checkout-idl"
 LOGGER = logging.getLogger(LOGGER_NAME)
@@ -107,6 +105,11 @@ def get_tags() -> List[str]:
     return list(gen_tags())
 
 
+@retry(tries=3, delay=5)
+def _show_with_retry(tag: str, path: str):
+    return check_output(["git", "show", f"{tag}:{path}"])
+
+
 def make_idl_directories(tags: List[str], destination: str) -> None:
     """For each tag, construct a source tree containing only its IDL files."""
     LOGGER.info("Clearing destination directory '%s'", destination)
@@ -119,7 +122,12 @@ def make_idl_directories(tags: List[str], destination: str) -> None:
             if not path.endswith(".idl"):
                 continue
 
-            contents = check_output(["git", "show", f"{tag}:{path}"]).decode()
+            try:
+                contents = _show_with_retry(tag, path).decode()
+            except CalledProcessError as e:
+                LOGGER.error("Failed to run git show command after multiple retries: %s", str(e))
+                raise e
+
             output_path = os.path.join(directory, path)
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             with open(output_path, "w+") as fd:

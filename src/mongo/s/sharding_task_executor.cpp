@@ -28,12 +28,7 @@
  */
 
 
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/s/sharding_task_executor.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -45,19 +40,23 @@
 #include "mongo/db/logical_time.h"
 #include "mongo/db/operation_time_tracker.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/executor/connection_pool_stats.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/sharding_task_executor.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/scopeguard.h"
+
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT mongo::logv2::LogComponent::kSharding
 
@@ -155,8 +154,11 @@ StatusWith<TaskExecutor::CallbackHandle> ShardingTaskExecutor::scheduleRemoteCom
             // BSONObj must outlive BSONElement. See BSONElement, BSONObj::getField().
             auto lsidObj = lsidElem.Obj();
             if (auto lsidUIDElem = lsidObj.getField(LogicalSessionFromClient::kUidFieldName)) {
-                invariant(SHA256Block::fromBinData(lsidUIDElem._binDataVector()) ==
-                          request.opCtx->getLogicalSessionId()->getUid());
+                tassert(10090100,
+                        "User digest in the logical session ID from opCtx does not match with the "
+                        "command request",
+                        SHA256Block::fromBinData(lsidUIDElem._binDataVector()) ==
+                            request.opCtx->getLogicalSessionId()->getUid());
                 return newRequest;
             }
 
@@ -233,7 +235,7 @@ StatusWith<TaskExecutor::CallbackHandle> ShardingTaskExecutor::scheduleRemoteCom
         invariant(timeTracker);
         auto operationTime = args.response.data[kOperationTimeField];
         if (!operationTime.eoo()) {
-            invariant(operationTime.type() == BSONType::bsonTimestamp);
+            invariant(operationTime.type() == BSONType::timestamp);
             timeTracker->updateOperationTime(LogicalTime(operationTime.timestamp()));
         }
     };
@@ -265,8 +267,8 @@ void ShardingTaskExecutor::appendConnectionStats(ConnectionPoolStats* stats) con
     _executor->appendConnectionStats(stats);
 }
 
-void ShardingTaskExecutor::dropConnections(const HostAndPort& hostAndPort) {
-    _executor->dropConnections(hostAndPort);
+void ShardingTaskExecutor::dropConnections(const HostAndPort& target, const Status& status) {
+    _executor->dropConnections(target, status);
 }
 
 void ShardingTaskExecutor::appendNetworkInterfaceStats(BSONObjBuilder& bob) const {

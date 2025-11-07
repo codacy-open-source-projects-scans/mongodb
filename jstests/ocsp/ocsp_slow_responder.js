@@ -9,11 +9,11 @@ if (determineSSLProvider() !== "windows") {
     quit();
 }
 
-var ocsp_options = {
-    sslMode: "requireSSL",
-    sslPEMKeyFile: OCSP_SERVER_CERT,
-    sslCAFile: OCSP_CA_PEM,
-    sslAllowInvalidHostnames: "",
+let ocsp_options = {
+    tlsMode: "requireTLS",
+    tlsCertificateKeyFile: OCSP_SERVER_CERT,
+    tlsCAFile: OCSP_CA_PEM,
+    tlsAllowInvalidHostnames: "",
     setParameter: {
         "failpoint.disableStapling": "{'mode':'alwaysOn'}",
         "ocspEnabled": "true",
@@ -27,16 +27,14 @@ clearOCSPCache();
 let mock_ocsp = new MockOCSPServer("", 1, undefined, 3);
 mock_ocsp.start();
 
-var conn = null;
+let conn = null;
 
 assert.doesNotThrow(() => {
     conn = MongoRunner.runMongod(ocsp_options);
 });
 
 const WARN_ID = 4780400;
-assert.eq(true,
-          checkLog.checkContainsOnceJson(conn, WARN_ID, {}),
-          'Expected log ID ' + WARN_ID + ' was not found');
+assert.eq(true, checkLog.checkContainsOnceJson(conn, WARN_ID, {}), "Expected log ID " + WARN_ID + " was not found");
 
 MongoRunner.stopMongod(conn);
 

@@ -13,53 +13,50 @@
  *     assumes_balancer_off,
  * ]
  */
-import {
-    assertWorkedOrFailedHandleTxnErrors
-} from "jstests/concurrency/fsm_workload_helpers/assert_handle_fail_in_transaction.js";
+import {assertWorkedOrFailedHandleTxnErrors} from "jstests/concurrency/fsm_workload_helpers/assert_handle_fail_in_transaction.js";
 
-export const $config = (function() {
-    var data = {
+export const $config = (function () {
+    let data = {
         prefix: "create_index_background_unique_",
         numDocsToLoad: 5000,
         iterationCount: 0,
-        getCollectionNameForThread: function(threadId) {
+        getCollectionNameForThread: function (threadId) {
             return this.prefix + threadId.toString();
         },
         // Allows tests that inherit from this one to specify options other than the default.
-        getCollectionOptions: function() {
+        getCollectionOptions: function () {
             return {};
         },
-        buildvariableSizedDoc: function(uniquePrefix) {
+        buildvariableSizedDoc: function (uniquePrefix) {
             const indexedVal = uniquePrefix + Array(Random.randInt(1000)).toString();
             const doc = {x: indexedVal};
             return doc;
         },
     };
 
-    var states = (function() {
+    let states = (function () {
         function buildIndex(db, collName) {
             this.iterationCount++;
 
             const res = db.runCommand({
                 createIndexes: this.getCollectionNameForThread(this.tid),
-                indexes: [{key: {x: 1}, name: "x_1", unique: true}]
+                indexes: [{key: {x: 1}, name: "x_1", unique: true}],
             });
             // Multi-statement Transactions can fail with SnapshotUnavailable if there are
             // pending catalog changes as of the transaction start (see SERVER-43018).
-            assertWorkedOrFailedHandleTxnErrors(res,
-                                                [
-                                                    ErrorCodes.IndexBuildAborted,
-                                                    ErrorCodes.IndexBuildAlreadyInProgress,
-                                                    ErrorCodes.SnapshotUnavailable,
-                                                    ErrorCodes.SnapshotTooOld,
-                                                    ErrorCodes.NoMatchingDocument,
-                                                    ErrorCodes.NotWritablePrimary,
-                                                ],
-                                                [
-                                                    ErrorCodes.IndexBuildAborted,
-                                                    ErrorCodes.NoMatchingDocument,
-                                                    ErrorCodes.NotWritablePrimary,
-                                                ]);
+            assertWorkedOrFailedHandleTxnErrors(
+                res,
+                [
+                    ErrorCodes.IndexBuildAborted,
+                    ErrorCodes.IndexBuildAlreadyInProgress,
+                    ErrorCodes.SnapshotUnavailable,
+                    ErrorCodes.SnapshotTooOld,
+                    ErrorCodes.NoMatchingDocument,
+                    ErrorCodes.NotWritablePrimary,
+                    ErrorCodes.FailedToSatisfyReadPreference,
+                ],
+                [ErrorCodes.IndexBuildAborted, ErrorCodes.NoMatchingDocument, ErrorCodes.NotWritablePrimary],
+            );
         }
 
         function dropIndex(db, collName) {
@@ -71,8 +68,7 @@ export const $config = (function() {
                 return;
             }
 
-            assert.commandWorked(db.runCommand(
-                {dropIndexes: this.getCollectionNameForThread(this.tid), index: "x_1"}));
+            assert.commandWorked(db.runCommand({dropIndexes: this.getCollectionNameForThread(this.tid), index: "x_1"}));
         }
 
         return {
@@ -81,7 +77,7 @@ export const $config = (function() {
         };
     })();
 
-    var transitions = {
+    let transitions = {
         buildIndex: {dropIndex: 1.0},
         dropIndex: {buildIndex: 1.0},
     };
@@ -90,7 +86,7 @@ export const $config = (function() {
         for (let j = 0; j < this.threadCount; ++j) {
             const collectionName = this.getCollectionNameForThread(j);
             assert.commandWorked(db.createCollection(collectionName, this.getCollectionOptions()));
-            var bulk = db[collectionName].initializeUnorderedBulkOp();
+            let bulk = db[collectionName].initializeUnorderedBulkOp();
 
             // Preload documents for each thread's collection. This ensures that the index build and
             // drop have meaningful work to do.
@@ -108,7 +104,7 @@ export const $config = (function() {
         iterations: 11,
         data: data,
         states: states,
-        startState: 'buildIndex',
+        startState: "buildIndex",
         transitions: transitions,
         setup: setup,
     };

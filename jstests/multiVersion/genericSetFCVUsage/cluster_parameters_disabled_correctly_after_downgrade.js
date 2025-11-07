@@ -5,7 +5,9 @@
 // Note: Enabling new feature flags which aren't yet default-enabled will break this test,
 // because such feature flags do not have a minimum FCV set and therefore will not be
 // disabled when lowering the FCV, causing an incompatibility.
-// @tags: [all_feature_flags_incompatible]
+// @tags: [
+//   all_feature_flags_incompatible,
+// ]
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
@@ -16,7 +18,9 @@ const ignoredParams = [
     "testStrClusterParameter",
     "testMinFcvClusterParameter",
     "cwspTestNeedsFeatureFlagBlender",
-    "cwspTestNeedsLatestFCV"
+    "cwspTestNeedsLatestFCV",
+    // TODO(SERVER-110006): Remove this exception when 9.0 becomes last LTS
+    "ddlLockOptimisticRecoveryWaitTimeout",
 ];
 
 // The maxAnchorCompactionSize field was added in 7.1.
@@ -30,7 +34,7 @@ function cleanFleCompactionOptions(param) {
 // that parameter in any valid FCV version to remove any version inconsistencies between FCVs.
 // If a cluster parameter is changed between versions, a new entry should be added to this map.
 const changedParamsMap = {
-    'fleCompactionOptions': cleanFleCompactionOptions
+    "fleCompactionOptions": cleanFleCompactionOptions,
 };
 
 // Cluster parameters which changed between versions will not be equal when we compare them later.
@@ -47,15 +51,15 @@ function runTest(fcvVersion, binaryVersion) {
     // version.
     let newCPs, oldCPs;
     {
-        const rst = new ReplSetTest({nodes: [{binVersion: 'latest'}]});
+        const rst = new ReplSetTest({nodes: [{binVersion: "latest"}]});
         rst.startSet();
         rst.initiate();
         const conn = rst.getPrimary();
-        const db = conn.getDB('admin');
+        const db = conn.getDB("admin");
 
         db.runCommand({setFeatureCompatibilityVersion: fcvVersion, confirm: true});
 
-        newCPs = assert.commandWorked(db.runCommand({getClusterParameter: '*'})).clusterParameters;
+        newCPs = assert.commandWorked(db.runCommand({getClusterParameter: "*"})).clusterParameters;
 
         rst.stopSet();
     }
@@ -65,15 +69,15 @@ function runTest(fcvVersion, binaryVersion) {
         rst.startSet();
         rst.initiate();
         const conn = rst.getPrimary();
-        const db = conn.getDB('admin');
+        const db = conn.getDB("admin");
 
-        oldCPs = assert.commandWorked(db.runCommand({getClusterParameter: '*'})).clusterParameters;
+        oldCPs = assert.commandWorked(db.runCommand({getClusterParameter: "*"})).clusterParameters;
 
         rst.stopSet();
     }
 
-    newCPs = newCPs.filter(param => !ignoredParams.includes(param._id));
-    oldCPs = oldCPs.filter(param => !ignoredParams.includes(param._id));
+    newCPs = newCPs.filter((param) => !ignoredParams.includes(param._id));
+    oldCPs = oldCPs.filter((param) => !ignoredParams.includes(param._id));
 
     for (let cp of newCPs) {
         removeVersionInconsistencies(cp);
@@ -85,10 +89,17 @@ function runTest(fcvVersion, binaryVersion) {
     newCPs.sort(bsonWoCompare);
     oldCPs.sort(bsonWoCompare);
 
-    assert.eq(bsonWoCompare(newCPs, oldCPs),
-              0,
-              "Cluster parameters on new binary not equal to those on old binary\nNew: " +
-                  tojson(newCPs) + "\nOld: " + tojson(oldCPs));
+    // Filter out "changeStreams" server parameter from old version, as it got removed in v8.3.
+    oldCPs = oldCPs.filter((cp) => cp._id !== "changeStreams");
+
+    assert.eq(
+        bsonWoCompare(newCPs, oldCPs),
+        0,
+        "Cluster parameters on new binary not equal to those on old binary\nNew: " +
+            tojson(newCPs) +
+            "\nOld: " +
+            tojson(oldCPs),
+    );
 }
 
 jsTest.log("Running test on lastLTS...");

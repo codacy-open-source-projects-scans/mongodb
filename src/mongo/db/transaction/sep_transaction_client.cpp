@@ -42,9 +42,6 @@
 
 
 namespace mongo {
-using namespace fmt::literals;
-
-
 namespace txn_api {
 namespace {
 
@@ -68,17 +65,19 @@ SyncTransactionWithRetries::SyncTransactionWithRetries(
           opCtx,
           _sleepExec,
           opCtx->getCancellationToken(),
-          txnClient
-              ? std::move(txnClient)
-              : std::make_unique<details::SEPTransactionClient>(
-                    opCtx,
-                    inlineExecutor,
-                    _sleepExec,
-                    _cleanupExecutor,
-                    std::make_unique<details::DefaultSEPTransactionClientBehaviors>(opCtx)))) {
+          txnClient ? std::move(txnClient)
+                    : std::make_unique<details::SEPTransactionClient>(
+                          opCtx,
+                          inlineExecutor,
+                          _sleepExec,
+                          _cleanupExecutor,
+                          std::make_unique<details::DefaultSEPTransactionClientBehaviors>()))) {
     // Callers should always provide a yielder when using the API with a session checked out,
     // otherwise commands run by the API won't be able to check out that session.
-    invariant(!OperationContextSession::get(opCtx) || _resourceYielder);
+    invariant(!OperationContextSession::get(opCtx) || _resourceYielder,
+              str::stream() << "session is not checked out by the opCtx: "
+                            << !OperationContextSession::get(opCtx)
+                            << ", yielder is not provided: " << !_resourceYielder);
 }
 
 StatusWith<CommitResult> SyncTransactionWithRetries::runNoThrow(OperationContext* opCtx,
@@ -104,6 +103,7 @@ StatusWith<CommitResult> SyncTransactionWithRetries::runNoThrow(OperationContext
     repl::ReplClientInfo::forClient(opCtx->getClient())
         .setLastProxyWriteTimestampForward(_txn->getOperationTime().asTimestamp());
 
+    boost::optional<AbortResult> cleanupAbortResult;
     if (_txn->needsCleanup()) {
         // Schedule cleanup on an out of line executor so it runs even if the transaction was
         // cancelled. Attempt to wait for cleanup so it appears synchronous for most callers, but
@@ -111,16 +111,19 @@ StatusWith<CommitResult> SyncTransactionWithRetries::runNoThrow(OperationContext
         //
         // Also schedule after getting the transaction's operation time so the best effort abort
         // can't unnecessarily advance it.
-        ExecutorFuture<void>(_cleanupExecutor)
-            .then([txn = _txn, inlineExecutor = _inlineExecutor]() mutable {
-                Notification<void> mayReturnFromCleanup;
-                auto cleanUpFuture = txn->cleanUp().unsafeToInlineFuture().tapAll(
-                    [&](auto&&) { mayReturnFromCleanup.set(); });
-                runFutureInline(inlineExecutor.get(), mayReturnFromCleanup);
-                return cleanUpFuture;
-            })
-            .getNoThrow(opCtx)
-            .ignore();
+        auto abortResult = ExecutorFuture<void>(_cleanupExecutor)
+                               .then([txn = _txn, inlineExecutor = _inlineExecutor]() mutable {
+                                   Notification<void> mayReturnFromCleanup;
+                                   auto cleanUpFuture =
+                                       txn->cleanUp().unsafeToInlineFuture().tapAll(
+                                           [&](auto&&) { mayReturnFromCleanup.set(); });
+                                   runFutureInline(inlineExecutor.get(), mayReturnFromCleanup);
+                                   return cleanUpFuture;
+                               })
+                               .getNoThrow(opCtx);
+        if (abortResult.isOK()) {
+            cleanupAbortResult = abortResult.getValue();
+        }
     }
 
     auto unyieldStatus = _resourceYielder ? _resourceYielder->unyieldNoThrow(opCtx) : Status::OK();
@@ -134,7 +137,16 @@ StatusWith<CommitResult> SyncTransactionWithRetries::runNoThrow(OperationContext
             // presumably more meaningful error the caller was interrupted with.
             return interruptStatus;
         }
-        return txnResult;
+
+        // TODO SERVER-99035: Use a more general TxnResult struct instead of CommitResult.
+        //
+        // We include the write concern error from the cleanup abort to ensure that the client
+        // is informed of any replication issues with the speculative snapshot that the internal
+        // transaction operated on, even if the transaction has failed and the commit
+        // (which would normally provide a write concern error) did not occur.
+        return StatusWith(CommitResult{txnResult.getStatus(),
+                                       cleanupAbortResult ? cleanupAbortResult->wcError
+                                                          : WriteConcernErrorDetail()});
     } else if (!unyieldStatus.isOK()) {
         return unyieldStatus;
     }
@@ -153,19 +165,23 @@ void primeInternalClient(Client* client) {
     }
 }
 
-Future<DbResponse> DefaultSEPTransactionClientBehaviors::handleRequest(
-    OperationContext* opCtx, const Message& request) const {
-    return _service->getServiceEntryPoint()->handleRequest(opCtx, request);
+Future<DbResponse> DefaultSEPTransactionClientBehaviors::handleRequest(OperationContext* opCtx,
+                                                                       const Message& request,
+                                                                       Date_t started) const {
+    auto serviceEntryPoint = opCtx->getService()->getServiceEntryPoint();
+    return serviceEntryPoint->handleRequest(opCtx, request, started);
 }
 
 ExecutorFuture<BSONObj> SEPTransactionClient::_runCommand(const DatabaseName& dbName,
                                                           BSONObj cmdObj) const {
     invariant(_hooks, "Transaction metadata hooks must be injected before a command can be run");
 
+    Date_t started = _serviceContext->getFastClockSource()->now();
+
     BSONObjBuilder cmdBuilder(_behaviors->maybeModifyCommand(std::move(cmdObj)));
     _hooks->runRequestHook(&cmdBuilder);
 
-    auto client = _behaviors->getService()->makeClient("SEP-internal-txn-client");
+    auto client = _serviceContext->getService()->makeClient("SEP-internal-txn-client");
 
     AlternativeClientRegion clientRegion(client);
 
@@ -188,7 +204,7 @@ ExecutorFuture<BSONObj> SEPTransactionClient::_runCommand(const DatabaseName& db
     }();
     auto opMsgRequest = OpMsgRequestBuilder::create(vts, dbName, cmdBuilder.obj());
     auto requestMessage = opMsgRequest.serialize();
-    return _behaviors->handleRequest(cancellableOpCtx.get(), requestMessage)
+    return _behaviors->handleRequest(cancellableOpCtx.get(), requestMessage, started)
         .thenRunOn(_executor)
         .then([this](DbResponse dbResponse) {
             // NOTE: The API uses this method to run commit and abort, so be careful about adding
@@ -297,7 +313,7 @@ ExecutorFuture<BulkWriteCommandReply> SEPTransactionClient::_runCRUDOp(
             uassertStatusOK(getStatusFromCommandResult(reply));
 
             IDLParserContext ctx("BulkWriteCommandReply");
-            auto response = BulkWriteCommandReply::parse(ctx, reply);
+            auto response = BulkWriteCommandReply::parse(reply, ctx);
 
             // TODO (SERVER-80794): Support iterating through the cursor for internal transactions.
             uassert(7934200,
@@ -362,7 +378,7 @@ ExecutorFuture<std::vector<BSONObj>> SEPTransactionClient::_exhaustiveFind(
 
                        GetMoreCommandRequest getMoreRequest(
                            cursorResponse->getCursorId(),
-                           cursorResponse->getNSS().coll().toString());
+                           std::string{cursorResponse->getNSS().coll()});
                        getMoreRequest.setBatchSize(batchSize);
 
                        return runCommand(cursorResponse->getNSS().dbName(), getMoreRequest.toBSON())

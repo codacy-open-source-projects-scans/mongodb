@@ -27,19 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <fmt/format.h>
-#include <memory>
-#include <mutex>
-#include <set>
-#include <utility>
-#include <vector>
-
-#include <absl/container/node_hash_set.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/query/client_cursor/cursor_manager.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -50,17 +38,15 @@
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/user_name.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/client.h"
-#include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/exec/queued_data_stage.h"
-#include "mongo/db/exec/working_set.h"
+#include "mongo/db/exec/classic/plan_stage.h"
+#include "mongo/db/exec/classic/queued_data_stage.h"
+#include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/client_cursor/clientcursor.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
-#include "mongo/db/query/client_cursor/cursor_manager.h"
 #include "mongo/db/query/client_cursor/cursor_server_params.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_executor_factory.h"
@@ -73,15 +59,25 @@
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/stdx/unordered_set.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -98,14 +94,14 @@ protected:
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> makeFakePlanExecutor(
         OperationContext* opCtx) {
         // Create a mock ExpressionContext.
-        auto expCtx = ExpressionContextBuilder{}.opCtx(opCtx).ns(kTestNss).build();
+        auto expCtx = make_intrusive<ExpressionContextForTest>(opCtx, kTestNss);
         auto workingSet = std::make_unique<WorkingSet>();
         auto queuedDataStage = std::make_unique<QueuedDataStage>(expCtx.get(), workingSet.get());
         return unittest::assertGet(
             plan_executor_factory::make(expCtx,
                                         std::move(workingSet),
                                         std::move(queuedDataStage),
-                                        &CollectionPtr::null,
+                                        boost::none,
                                         PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                         QueryPlannerParams::DEFAULT,
                                         kTestNss));
@@ -323,7 +319,7 @@ TEST_F(CursorManagerTest, MarkedAsKilledCursorsShouldBeDeletedOnCursorPin) {
 
     // Pinning the cursor should fail with the same error code that interrupted the OpCtx. The
     // cursor should no longer be present in the manager.
-    ASSERT_EQ(_cursorManager.pinCursor(_opCtx.get(), cursorId).getStatus(),
+    ASSERT_EQ(_cursorManager.pinCursor(_opCtx.get(), cursorId, "getMore").getStatus(),
               ErrorCodes::InternalError);
     ASSERT_EQ(0UL, _cursorManager.numCursors());
 }
@@ -398,7 +394,8 @@ TEST_F(CursorManagerTest, UsingACursorShouldUpdateTimeOfLastUse) {
     clock->advance(Milliseconds(1));
 
     // Touch the cursor with id 'usedCursorId' to advance its time of last use.
-    _cursorManager.pinCursor(_opCtx.get(), usedCursorId).status_with_transitional_ignore();
+    _cursorManager.pinCursor(_opCtx.get(), usedCursorId, "getMore")
+        .status_with_transitional_ignore();
 
     // We should be able to time out the unused cursor, but the one we used should stay alive.
     ASSERT_EQ(2UL, _cursorManager.numCursors());
@@ -860,6 +857,62 @@ TEST_F(CursorManagerTestBase, CursorLifespanHistogramCorrectlyUpdated) {
 
     // Just make sure the smallest bucket counter is unchanged.
     ASSERT_EQUALS(countForLt1Second, cursorStats().lifespanLessThan1Second.get());
+}
+
+/**
+ * Test that an attempt to kill a pinned cursor succeeds with a passing auth check.
+ */
+TEST_F(CursorManagerTest, KillCursorWithPassingAuthCheckSucceeds) {
+    OperationContext* const pinningOpCtx = _opCtx.get();
+
+    auto cursorPin = _cursorManager.registerCursor(
+        pinningOpCtx,
+        {makeFakePlanExecutor(),
+         kTestNss,
+         {},
+         APIParameters(),
+         {},
+         repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+         BSONObj(),
+         PrivilegeVector()});
+
+    auto cursorId = cursorPin.getCursor()->cursorid();
+    cursorPin.release();
+
+    auto pinCheck = [&](const ClientCursor& cc) {
+        uassertStatusOK(Status::OK());
+    };
+    ASSERT_OK(_cursorManager.killCursorWithAuthCheck(_opCtx.get(), cursorId, pinCheck));
+}
+
+/**
+ * Test that an attempt to kill fails due to an auth check.
+ */
+TEST_F(CursorManagerTest, KillCursorWithFailingAuthCheckFails) {
+    OperationContext* const pinningOpCtx = _opCtx.get();
+
+    auto cursorPin = _cursorManager.registerCursor(
+        pinningOpCtx,
+        {makeFakePlanExecutor(),
+         kTestNss,
+         {},
+         APIParameters(),
+         {},
+         repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern),
+         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+         BSONObj(),
+         PrivilegeVector()});
+
+    auto cursorId = cursorPin.getCursor()->cursorid();
+    cursorPin.release();
+
+    auto pinCheck = [&](const ClientCursor& cc) {
+        uassertStatusOK(Status(ErrorCodes::Unauthorized, "Unauthorized"));
+    };
+    ASSERT_THROWS_CODE(_cursorManager.killCursorWithAuthCheck(_opCtx.get(), cursorId, pinCheck),
+                       DBException,
+                       ErrorCodes::Unauthorized);
 }
 
 }  // namespace

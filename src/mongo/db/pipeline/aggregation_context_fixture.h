@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/bson/json.h"
+#include "mongo/db/exec/agg/mock_stage.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_graph_lookup.h"
 #include "mongo/db/pipeline/document_source_internal_split_pipeline.h"
@@ -39,6 +40,7 @@
 #include "mongo/db/pipeline/document_source_out.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/semantic_analysis.h"
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
 #include "mongo/db/service_context_test_fixture.h"
@@ -59,11 +61,19 @@ public:
         bool requiresTimeseriesExtendedRangeSupport = false;
     };
 
-    AggregationContextFixture()
-        : AggregationContextFixture(NamespaceString::createNamespaceString_forTest(
-              boost::none, "unittests", "pipeline_test")) {}
+    AggregationContextFixture(std::unique_ptr<ScopedGlobalServiceContextForTest>
+                                  scopedGlobalServiceContextForTest = nullptr)
+        : AggregationContextFixture(
+              NamespaceString::createNamespaceString_forTest(boost::none, "test", "pipeline_test"),
+              std::move(scopedGlobalServiceContextForTest)) {}
 
-    explicit AggregationContextFixture(NamespaceString nss) {
+    explicit AggregationContextFixture(NamespaceString nss,
+                                       std::unique_ptr<ScopedGlobalServiceContextForTest>
+                                           scopedGlobalServiceContextForTest = nullptr)
+        : ServiceContextTest(
+              scopedGlobalServiceContextForTest
+                  ? std::move(scopedGlobalServiceContextForTest)
+                  : std::make_unique<ScopedGlobalServiceContextForTest>(shouldSetupTL)) {
         _opCtx = makeOperationContext();
         _expCtx = make_intrusive<ExpressionContextForTest>(_opCtx.get(), nss);
         _expCtx->setTempDir(_tempDir.path());
@@ -126,8 +136,12 @@ public:
     }
 
     // Start of functions that are used for making parts of the sources for making a pipeline.
-    boost::intrusive_ptr<DocumentSourceMock> mockStage() {
-        return DocumentSourceMock::createForTest(_expCtx);
+    boost::intrusive_ptr<DocumentSourceMock> mockSource() {
+        return DocumentSourceMock::createForTest({}, _expCtx);
+    }
+
+    boost::intrusive_ptr<exec::agg::MockStage> mockStage() {
+        return exec::agg::MockStage::createForTest({}, _expCtx);
     }
 
     boost::intrusive_ptr<DocumentSourceDeferredMergeSort> mockDeferredSortStage() {
@@ -174,13 +188,12 @@ public:
     }
     // End of functions that are used for making parts of the sources for making a pipeline.
 
-    std::unique_ptr<Pipeline, PipelineDeleter> makePipeline(
-        const Pipeline::SourceContainer& sources) {
+    std::unique_ptr<Pipeline> makePipeline(const DocumentSourceContainer& sources) {
         return Pipeline::create(sources, _expCtx);
     }
 
     sharded_agg_helpers::SplitPipeline makeAndSplitPipeline(
-        const Pipeline::SourceContainer& sources) {
+        const DocumentSourceContainer& sources) {
         auto pipeline = makePipeline(sources);
         return sharded_agg_helpers::SplitPipeline::split(std::move(pipeline));
     }
@@ -191,15 +204,15 @@ public:
         size_t mergePipelineSize,
         const BSONObj& shardCursorSortSpec) {
         // Verify that we've split the pipeline at the SplitPipeline stage, not on the deferred.
-        ASSERT_EQ(splitPipeline.shardsPipeline->getSources().size(), shardsPipelineSize);
-        ASSERT_EQ(splitPipeline.mergePipeline->getSources().size(), mergePipelineSize);
+        ASSERT_EQ(splitPipeline.shardsPipeline->size(), shardsPipelineSize);
+        ASSERT_EQ(splitPipeline.mergePipeline->size(), mergePipelineSize);
 
         // Verify the sort is correct.
         ASSERT(splitPipeline.shardCursorsSortSpec);
         ASSERT_BSONOBJ_EQ(splitPipeline.shardCursorsSortSpec.value(), shardCursorSortSpec);
     }
 
-    void trackPipelineRenames(const std::unique_ptr<Pipeline, PipelineDeleter>& pipeline,
+    void trackPipelineRenames(const std::unique_ptr<Pipeline>& pipeline,
                               const mongo::OrderedPathSet& pathsOfInterest,
                               Tracking dir) {
         const auto& stages = pipeline->getSources();
@@ -215,10 +228,9 @@ public:
         }
     }
 
-    void trackPipelineRenamesOnEmptyRange(
-        const std::unique_ptr<Pipeline, PipelineDeleter>& pipeline,
-        const mongo::OrderedPathSet& pathsOfInterest,
-        Tracking dir) {
+    void trackPipelineRenamesOnEmptyRange(const std::unique_ptr<Pipeline>& pipeline,
+                                          const mongo::OrderedPathSet& pathsOfInterest,
+                                          Tracking dir) {
         const auto& stages = pipeline->getSources();
         auto renames = (dir == Tracking::forwards)
             ? semantic_analysis::renamedPaths(stages.cbegin(), stages.cbegin(), pathsOfInterest)
@@ -229,6 +241,19 @@ public:
         ASSERT_EQ(nameMap.size(), pathsOfInterest.size());
         for (const auto& p : pathsOfInterest) {
             ASSERT_EQ(nameMap[p], p);
+        }
+    }
+
+    void makePipelineOptimizeAssertNoRewrites(
+        boost::intrusive_ptr<mongo::ExpressionContextForTest> expCtx,
+        std::vector<BSONObj> expectedStages) {
+        auto optimizedPipeline = Pipeline::parse(expectedStages, expCtx);
+        pipeline_optimization::optimizePipeline(*optimizedPipeline);
+        auto optimizedSerialized = optimizedPipeline->serializeToBson();
+
+        ASSERT_EQ(expectedStages.size(), optimizedSerialized.size());
+        for (size_t i = 0; i < expectedStages.size(); i++) {
+            ASSERT_BSONOBJ_EQ(expectedStages[i], optimizedSerialized[i]);
         }
     }
 
@@ -243,7 +268,8 @@ private:
 // A custom-deleter which disposes a DocumentSource when it goes out of scope.
 struct DocumentSourceDeleter {
     void operator()(DocumentSource* docSource) {
-        docSource->dispose();
+        auto& stage = dynamic_cast<exec::agg::Stage&>(*docSource);
+        stage.dispose();
         delete docSource;
     }
 };

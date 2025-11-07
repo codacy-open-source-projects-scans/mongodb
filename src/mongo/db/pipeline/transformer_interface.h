@@ -30,8 +30,8 @@
 #pragma once
 
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/explain_options.h"
 
 namespace mongo {
@@ -59,8 +59,8 @@ public:
     virtual Document applyTransformation(const Document& input) const = 0;
     virtual TransformerType getType() const = 0;
     virtual void optimize() = 0;
-    virtual Pipeline::SourceContainer::iterator doOptimizeAt(
-        Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) = 0;
+    virtual DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                           DocumentSourceContainer* container) = 0;
     virtual DepsTracker::State addDependencies(DepsTracker* deps) const = 0;
     virtual void addVariableRefs(std::set<Variables::Id>* refs) const = 0;
     virtual DocumentSource::GetModPathsReturn getModifiedPaths() const = 0;
@@ -69,14 +69,6 @@ public:
      * Method used by optimize() to check if stage is a no-op.
      */
     virtual bool isNoop() const {
-        return false;
-    }
-
-    /**
-     * Method used to toggle the 'noFieldModifications' stage constraint. True only if guaranteed
-     * this transformation will not modify any document fields (although it may modify metadata).
-     */
-    virtual bool noFieldModifications() const {
         return false;
     }
 

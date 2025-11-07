@@ -27,17 +27,13 @@
  *    it in the license file.
  */
 
-#include <absl/meta/type_traits.h>
-
-#include <absl/container/node_hash_set.h>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/pipeline/lite_parsed_pipeline.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/api_parameters.h"
-#include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/server_options.h"
@@ -46,15 +42,14 @@
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
 
+
 namespace mongo {
 
-ReadConcernSupportResult LiteParsedPipeline::supportsReadConcern(
-    repl::ReadConcernLevel level,
-    bool isImplicitDefault,
-    boost::optional<ExplainOptions::Verbosity> explain) const {
+ReadConcernSupportResult LiteParsedPipeline::supportsReadConcern(repl::ReadConcernLevel level,
+                                                                 bool isImplicitDefault,
+                                                                 bool explain) const {
     // Start by assuming that we will support both readConcern and cluster-wide default.
     ReadConcernSupportResult result = ReadConcernSupportResult::allSupportedAndDefaultPermitted();
-
     // 2. Determine whether the default read concern must be denied for any pipeline-global reasons.
     if (explain) {
         result.defaultReadConcernPermit = {
@@ -86,8 +81,7 @@ ReadConcernSupportResult LiteParsedPipeline::sourcesSupportReadConcern(
     return result;
 }
 
-void LiteParsedPipeline::assertSupportsMultiDocumentTransaction(
-    boost::optional<ExplainOptions::Verbosity> explain) const {
+void LiteParsedPipeline::assertSupportsMultiDocumentTransaction(bool explain) const {
     uassert(ErrorCodes::OperationNotSupportedInTransaction,
             "Operation not permitted in transaction :: caused by :: Explain for the aggregate "
             "command cannot run within a multi-document transaction",
@@ -98,8 +92,7 @@ void LiteParsedPipeline::assertSupportsMultiDocumentTransaction(
     }
 }
 
-void LiteParsedPipeline::assertSupportsReadConcern(
-    OperationContext* opCtx, boost::optional<ExplainOptions::Verbosity> explain) const {
+void LiteParsedPipeline::assertSupportsReadConcern(OperationContext* opCtx, bool explain) const {
     const auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
     auto readConcernSupport = supportsReadConcern(
         readConcernArgs.getLevel(), readConcernArgs.isImplicitDefault(), explain);
@@ -114,7 +107,7 @@ void LiteParsedPipeline::assertSupportsReadConcern(
 void LiteParsedPipeline::verifyIsSupported(
     OperationContext* opCtx,
     const std::function<bool(OperationContext*, const NamespaceString&)> isSharded,
-    const boost::optional<ExplainOptions::Verbosity> explain) const {
+    bool explain) const {
     // Verify litePipe can be run in a transaction.
     const bool inMultiDocumentTransaction = opCtx->inMultiDocumentTransaction();
     if (inMultiDocumentTransaction) {
@@ -144,9 +137,16 @@ void LiteParsedPipeline::tickGlobalStageCounters() const {
 
 void LiteParsedPipeline::validate(const OperationContext* opCtx,
                                   bool performApiVersionChecks) const {
+    for (auto stage_it = _stageSpecs.begin(); stage_it != _stageSpecs.end(); stage_it++) {
+        const auto& stage = *stage_it;
+        // TODO SERVER-101722: Re-implement this validation with a more generic
+        // StageConstraints-like validation.
+        uassert(10170100,
+                "$rankFusion/$scoreFusion can only be the first stage of an aggregation pipeline.",
+                !((stage_it != _stageSpecs.begin()) && stage->isHybridSearchStage() &&
+                  !isRunningAgainstView_ForHybridSearch()));
 
-    for (auto&& stage : _stageSpecs) {
-        const auto& stageName = stage->getParseTimeName();
+        const auto& stageName = (*stage_it)->getParseTimeName();
         const auto& stageInfo = LiteParsedDocumentSource::getInfo(stageName);
 
         // Validate that the stage is API version compatible.
@@ -168,6 +168,24 @@ void LiteParsedPipeline::validate(const OperationContext* opCtx,
 
         for (auto&& subPipeline : stage->getSubPipelines()) {
             subPipeline.validate(opCtx, performApiVersionChecks);
+        }
+    }
+}
+
+void LiteParsedPipeline::checkStagesAllowedInViewDefinition() const {
+    for (auto stage_it = _stageSpecs.begin(); stage_it != _stageSpecs.end(); stage_it++) {
+        const auto& stage = *stage_it;
+
+        uassert(ErrorCodes::OptionNotSupportedOnView,
+                "$rankFusion and $scoreFusion is currently unsupported in a view definition",
+                !stage->isHybridSearchStage());
+
+        uassert(ErrorCodes::OptionNotSupportedOnView,
+                "$score is currently unsupported in a view definition",
+                !(stage->getParseTimeName() == "$score"));
+
+        for (auto&& subPipeline : stage->getSubPipelines()) {
+            subPipeline.checkStagesAllowedInViewDefinition();
         }
     }
 }

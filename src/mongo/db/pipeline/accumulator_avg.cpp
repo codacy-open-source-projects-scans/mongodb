@@ -27,11 +27,6 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <vector>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -46,12 +41,13 @@
 #include "mongo/db/pipeline/window_function/window_function_expression.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/summation.h"
 
-namespace mongo {
+#include <cstdint>
+#include <vector>
 
-using boost::intrusive_ptr;
+
+namespace mongo {
 
 template <>
 Value ExpressionFromAccumulator<AccumulatorAvg>::evaluate(const Document& root,
@@ -77,7 +73,7 @@ Value serializePartialSum(BSONType nonDecimalTotalType,
 void AccumulatorAvg::processInternal(const Value& input, bool merging) {
     if (merging) {
         // We expect an object that contains both a partial sum and a count.
-        MONGO_verify(input.getType() == Object);
+        assertMergingInputType(input, BSONType::object);
 
         auto partialSumVal = input[stage_builder::partialSumName];
         tassert(6422700, "'ps' field must be present", !partialSumVal.missing());
@@ -103,32 +99,28 @@ void AccumulatorAvg::processInternal(const Value& input, bool merging) {
 
     // Keep the nonDecimalTotal's type so that the type information can be serialized too for
     // 'toBeMerged' scenarios.
-    if (input.getType() != NumberDecimal) {
+    if (input.getType() != BSONType::numberDecimal) {
         _nonDecimalTotalType = Value::getWidestNumeric(_nonDecimalTotalType, input.getType());
     }
 
     switch (input.getType()) {
-        case NumberDecimal:
+        case BSONType::numberDecimal:
             _decimalTotal = _decimalTotal.add(input.getDecimal());
             break;
-        case NumberLong:
+        case BSONType::numberLong:
             // Avoid summation using double as that loses precision.
             _nonDecimalTotal.addLong(input.getLong());
             break;
-        case NumberInt:
+        case BSONType::numberInt:
             _nonDecimalTotal.addInt(input.getInt());
             break;
-        case NumberDouble:
+        case BSONType::numberDouble:
             _nonDecimalTotal.addDouble(input.getDouble());
             break;
         default:
             MONGO_UNREACHABLE;
     }
     _count++;
-}
-
-intrusive_ptr<AccumulatorState> AccumulatorAvg::create(ExpressionContext* const expCtx) {
-    return new AccumulatorAvg(expCtx);
 }
 
 Decimal128 AccumulatorAvg::_getDecimalTotal() const {
@@ -146,7 +138,7 @@ Value AccumulatorAvg::getValue(bool toBeMerged) {
     if (_count == 0)
         return Value(BSONNULL);
 
-    if (_totalType == NumberDecimal)
+    if (_totalType == BSONType::numberDecimal)
         return Value(_getDecimalTotal().divide(Decimal128(static_cast<int64_t>(_count))));
 
     return Value(_nonDecimalTotal.getDouble() / static_cast<double>(_count));
@@ -159,8 +151,8 @@ AccumulatorAvg::AccumulatorAvg(ExpressionContext* const expCtx)
 }
 
 void AccumulatorAvg::reset() {
-    _totalType = NumberInt;
-    _nonDecimalTotalType = NumberInt;
+    _totalType = BSONType::numberInt;
+    _nonDecimalTotalType = BSONType::numberInt;
     _nonDecimalTotal = {};
     _decimalTotal = {};
     _count = 0;

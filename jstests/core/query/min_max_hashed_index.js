@@ -1,5 +1,8 @@
 /*
  * Check that min() and max() work with a hashed index.
+ * @tags: [
+ *   requires_getmore,
+ * ]
  */
 const coll = db.min_max_hashed_index;
 coll.drop();
@@ -9,6 +12,5 @@ const minWithNormalIndex = coll.find({}, {_id: 0}).min({a: -Infinity}).hint({a: 
 assert.eq(minWithNormalIndex, [{a: "test"}]);
 
 assert.commandWorked(coll.createIndex({a: "hashed"}));
-const minWithHashedIndex =
-    coll.find({}, {_id: 0}).min({a: -Infinity}).hint({a: "hashed"}).toArray();
+const minWithHashedIndex = coll.find({}, {_id: 0}).min({a: -Infinity}).hint({a: "hashed"}).toArray();
 assert.eq(minWithHashedIndex, [{a: "test"}]);

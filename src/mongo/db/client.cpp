@@ -31,23 +31,25 @@
    to an open socket (or logical connection if pooling on sockets) from a client.
 */
 
-#include <boost/container_hash/extensions.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <mutex>
-#include <string>
+#include "mongo/db/client.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/operation_cpu_timer.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/logv2/log_service.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <mutex>
+#include <string>
+
+#include <boost/functional/hash.hpp>
 
 namespace mongo {
 namespace {
@@ -65,10 +67,6 @@ int64_t generateSeed(const std::string& desc) {
     boost::hash_combine(seed, Date_t::now().asInt64());
     boost::hash_combine(seed, desc);
     return seed;
-}
-
-bool checkIfRouterClient(const std::shared_ptr<transport::Session>& session) {
-    return session && session->isFromRouterPort();
 }
 
 // In a normal server process, this will be overridden by AuthorizationSessionImpl
@@ -90,7 +88,7 @@ void Client::initThread(StringData desc,
     if (session) {
         fullDesc = str::stream() << desc << session->id();
     } else {
-        fullDesc = desc.toString();
+        fullDesc = std::string{desc};
     }
 
     setThreadName(fullDesc);
@@ -133,7 +131,6 @@ Client::Client(std::string desc,
       _connectionId(_session ? _session->id() : 0),
       _operationKillable(killable),
       _prng(generateSeed(_desc)),
-      _isRouterClient(checkIfRouterClient(_session)),
       _uuid(UUID::gen()),
       _tags(kPending) {}
 
@@ -190,7 +187,7 @@ bool Client::hasAnyActiveCurrentOp() const {
     return false;
 }
 
-void Client::setKilled() noexcept {
+void Client::setKilled() {
     ClientLock lk(this);
     _killed.store(true);
     if (_opCtx) {
@@ -262,14 +259,6 @@ Client::TagMask Client::getTags() const {
 }
 
 int Client::getLocalPort() const {
-    if (_service->role().hasExclusively(ClusterRole::RouterServer) &&
-        serverGlobalParams.routerPort) {
-        if (_opCtx && _opCtx->routedByReplicaSetEndpoint()) {
-            // This is a client connected to the replica set endpoint so return the shard/main port.
-            return serverGlobalParams.port;
-        }
-        return serverGlobalParams.routerPort.value();
-    }
     return serverGlobalParams.port;
 }
 

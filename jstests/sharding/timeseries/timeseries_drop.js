@@ -7,14 +7,19 @@
  */
 
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
+import {
+    areViewlessTimeseriesEnabled,
+    getTimeseriesBucketsColl,
+    getTimeseriesCollForDDLOps,
+} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 Random.setRandomSeed();
 
-const dbName = 'testDB';
-const collName = 'testColl';
-const timeField = 'time';
-const metaField = 'hostid';
+const dbName = "testDB";
+const collName = "testColl";
+const timeField = "time";
+const metaField = "hostid";
 
 // Connections.
 const st = new ShardingTest({shards: 2, rs: {nodes: 2}});
@@ -22,7 +27,7 @@ const mongos = st.s0;
 
 // Databases.
 const mainDB = mongos.getDB(dbName);
-const configDB = mongos.getDB('config');
+const configDB = mongos.getDB("config");
 
 // Helpers.
 let currentId = 0;
@@ -31,11 +36,13 @@ function generateId() {
 }
 
 function generateBatch(size) {
-    return TimeseriesTest.generateHosts(size).map((host, index) => Object.assign(host, {
-        _id: generateId(),
-        [metaField]: index,
-        [timeField]: ISODate(`20${index}0-01-01`),
-    }));
+    return TimeseriesTest.generateHosts(size).map((host, index) =>
+        Object.assign(host, {
+            _id: generateId(),
+            [metaField]: index,
+            [timeField]: ISODate(`20${index}0-01-01`),
+        }),
+    );
 }
 
 function ensureCollectionExists(collName, db) {
@@ -57,17 +64,18 @@ function runTest(getShardKey, performChunkSplit) {
     assert.commandWorked(mongos.adminCommand({enableSharding: dbName}));
 
     // Create timeseries collection.
-    assert.commandWorked(mainDB.createCollection(
-        collName, {timeseries: {timeField: timeField, metaField: metaField}}));
+    assert.commandWorked(mainDB.createCollection(collName, {timeseries: {timeField: timeField, metaField: metaField}}));
     const coll = mainDB.getCollection(collName);
 
     // Shard timeseries collection.
     const shardKey = getShardKey(1, 1);
     assert.commandWorked(coll.createIndex(shardKey));
-    assert.commandWorked(mongos.adminCommand({
-        shardCollection: `${dbName}.${collName}`,
-        key: shardKey,
-    }));
+    assert.commandWorked(
+        mongos.adminCommand({
+            shardCollection: coll.getFullName(),
+            key: shardKey,
+        }),
+    );
 
     // Insert initial set of documents.
     const numDocs = 8;
@@ -85,46 +93,56 @@ function runTest(getShardKey, performChunkSplit) {
             splitPoint[`control.min.${timeField}`] = firstBatch[splitIndex][timeField];
         }
 
-        assert.commandWorked(mongos.adminCommand(
-            {split: `${dbName}.system.buckets.${collName}`, middle: splitPoint}));
+        assert.commandWorked(
+            mongos.adminCommand({split: getTimeseriesCollForDDLOps(mainDB, coll).getFullName(), middle: splitPoint}),
+        );
 
         // Ensure that currently both chunks reside on the primary shard.
-        let counts = st.chunkCounts(`system.buckets.${collName}`, dbName);
+        let counts = st.chunkCounts(collName, dbName);
         const primaryShard = st.getPrimaryShard(dbName);
         assert.eq(2, counts[primaryShard.shardName], counts);
 
         // Move one of the chunks into the second shard.
         const otherShard = st.getOther(primaryShard);
-        assert.commandWorked(mongos.adminCommand({
-            movechunk: `${dbName}.system.buckets.${collName}`,
-            find: splitPoint,
-            to: otherShard.name,
-            _waitForDelete: true
-        }));
+        assert.commandWorked(
+            mongos.adminCommand({
+                movechunk: getTimeseriesCollForDDLOps(mainDB, coll).getFullName(),
+                find: splitPoint,
+                to: otherShard.name,
+                _waitForDelete: true,
+            }),
+        );
 
         // Ensure that each shard owns one chunk.
-        counts = st.chunkCounts(`system.buckets.${collName}`, dbName);
+        counts = st.chunkCounts(collName, dbName);
         assert.eq(1, counts[primaryShard.shardName], counts);
         assert.eq(1, counts[otherShard.shardName], counts);
     }
 
-    // Confirm it's illegal to directly drop the ticket-series buckets collection.
-    assert.commandFailedWithCode(mainDB.runCommand({drop: `system.buckets.${collName}`}),
-                                 ErrorCodes.IllegalOperation);
-    ensureCollectionExists(collName, mainDB);
-    ensureCollectionExists(`system.buckets.${collName}`, mainDB);
+    // TODO SERVER-101784 remove this check once only viewless timeseries exist.
+    // TODO SERVER-107138 update once drop on the buckets namespace fails on FCV 9.0.
+    if (!areViewlessTimeseriesEnabled(mainDB)) {
+        // Confirm it's illegal to directly drop the time-series buckets collection.
+        assert.commandFailedWithCode(
+            mainDB.runCommand({drop: getTimeseriesBucketsColl(collName)}),
+            ErrorCodes.IllegalOperation,
+        );
+        ensureCollectionExists(collName, mainDB);
+        ensureCollectionExists(getTimeseriesBucketsColl(collName), mainDB);
+    }
 
     // Drop the time-series collection.
     assert(coll.drop());
 
-    // Ensure that both time-series view and time-series buckets collections do not exist according
-    // to mongos and both shards.
+    // Ensure that the time-series collection doesn't exist according to mongos and shards.
     ensureCollectionDoesNotExist(collName);
-    ensureCollectionDoesNotExist(`system.buckets.${collName}`);
 
-    // Ensure that the time-series buckets collection gets deleted from the config database as well.
-    assert.eq([],
-              configDB.collections.find({_id: `${dbName}.system.buckets.${collName}`}).toArray());
+    // TODO SERVER-101784 remove this check once only viewless timeseries exist.
+    // Ensure that the time-series buckets collection doesn't exist according to mongos and shards.
+    ensureCollectionDoesNotExist(getTimeseriesBucketsColl(collName));
+
+    // Ensure that the time-series collection gets deleted from the config database.
+    assert.eq([], configDB.collections.find({_id: getTimeseriesCollForDDLOps(mainDB, coll).getFullName()}).toArray());
 }
 
 try {

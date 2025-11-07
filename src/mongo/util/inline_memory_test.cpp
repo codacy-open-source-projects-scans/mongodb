@@ -29,21 +29,20 @@
 
 #include "mongo/util/inline_memory.h"
 
-#include <fmt/format.h>
-#include <list>
-#include <utility>
-
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
+#include <list>
+#include <utility>
+
+#include <fmt/format.h>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo::inline_memory {
 namespace {
-
-using namespace fmt::literals;
 
 class MonotonicBufferResourceTest : public unittest::Test {
 public:
@@ -80,12 +79,11 @@ public:
 
     std::vector<std::tuple<void*, size_t, size_t>> upstreamAllocations;
     std::vector<std::tuple<void*, size_t, size_t>> upstreamDeallocations;
-    MockResource<> mockResource{[&](void* p, size_t sz, size_t al) {
-                                    upstreamAllocations.push_back({p, sz, al});
-                                },
-                                [&](void* p, size_t sz, size_t al) {
-                                    upstreamDeallocations.push_back({p, sz, al});
-                                }};
+    MockResource<> mockResource{
+        [&](void* p, size_t sz, size_t al) { upstreamAllocations.push_back({p, sz, al}); },
+        [&](void* p, size_t sz, size_t al) {
+            upstreamDeallocations.push_back({p, sz, al});
+        }};
 };
 
 TEST_F(MonotonicBufferResourceTest, UpstreamAllocationsReduced) {
@@ -149,8 +147,7 @@ template <size_t N, typename F>
 void templateForEachSize(F f) {
     [&]<size_t... I>(std::index_sequence<I...>) {
         (f(std::integral_constant<size_t, I>{}), ...);
-    }
-    (std::make_index_sequence<N>{});
+    }(std::make_index_sequence<N>{});
 }
 
 template <typename Sequence>

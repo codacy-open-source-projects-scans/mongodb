@@ -13,12 +13,10 @@ import "jstests/libs/override_methods/retry_on_killed_session.js";
 
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {killSession} from "jstests/concurrency/fsm_workload_helpers/kill_session.js";
-import {
-    $config as $baseConfig
-} from
-    "jstests/concurrency/fsm_workloads/txns/internal_transactions/internal_transactions_unsharded.js";
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/txns/internal_transactions/internal_transactions_unsharded.js";
+import {KilledSessionUtil} from "jstests/libs/killed_session_util.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
     $config.data.retryOnKilledSession = true;
 
     // Insert initial documents during setup instead of the init state, otherwise the insert could
@@ -44,18 +42,20 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         [$super.data.executionContextTypes.kClientTransaction]: false,
     };
 
+    // Threads only begin killing sessions once every thread has finished init(), where a thread
+    // will decrement killCountdownLatch.
+    $config.data.killCountdown = new CountDownLatch($config.threadCount);
+
     $config.data.runInternalTransaction = function runInternalTransaction(
-        defaultDb, collName, executionCtxType, crudOp) {
+        defaultDb,
+        collName,
+        executionCtxType,
+        crudOp,
+    ) {
         try {
             $super.data.runInternalTransaction.apply(this, arguments);
         } catch (e) {
-            if (e.code == ErrorCodes.Interrupted) {
-                // For the client retryable write case, interrupt errors should be handled by
-                // retry_on_killed_session.js.
-                assert.neq(executionCtxType, this.executionContextTypes.kClientRetryableWrite);
-                // For the client transaction case, interrupt errors should be handled by the
-                // withTxnAndAutoRetry wrapper.
-                assert.neq(executionCtxType, this.executionContextTypes.kClientTransaction);
+            if (KilledSessionUtil.hasKilledSessionError(e) || KilledSessionUtil.hasKilledSessionWCError(e)) {
                 return;
             }
             if (e.code == ErrorCodes.NoSuchTransaction) {
@@ -78,27 +78,36 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         }
     };
 
-    $config.states.killSession = function(db, collName) {
+    $config.states.killSession = function (db, collName) {
+        if ($config.data.killCountdown.getCount() > 0) {
+            return;
+        }
         return killSession(db, collName);
     };
 
     $config.teardown = function teardown(db, collName, cluster) {
         $super.teardown.apply(this, arguments);
 
-        let currOps = db.getSiblingDB("admin")
-                          .aggregate([
-                              {
-                                  "$currentOp": {
-                                      "allUsers": true,
-                                      "idleConnections": true,
-                                      "idleSessions": true,
-                                  }
-                              },
-                              {$match: {transaction: {$exists: true}}},
-                          ])
-                          .toArray();
+        let currOps = db
+            .getSiblingDB("admin")
+            .aggregate([
+                {
+                    "$currentOp": {
+                        "allUsers": true,
+                        "idleConnections": true,
+                        "idleSessions": true,
+                    },
+                },
+                {$match: {transaction: {$exists: true}}},
+            ])
+            .toArray();
 
         jsTest.log(`Current ops with transactions:\n${tojson(currOps)}`);
+    };
+
+    $config.states.init = function init(db, collName) {
+        $super.states.init.apply(this, arguments);
+        $config.data.killCountdown.countDown();
     };
 
     $config.transitions = {
@@ -114,7 +123,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
             internalTransactionForUpdate: 0.2,
             internalTransactionForDelete: 0.2,
             internalTransactionForFindAndModify: 0.2,
-            verifyDocuments: 0.2
+            verifyDocuments: 0.2,
         },
         internalTransactionForInsert: {
             killSession: 0.4,
@@ -122,7 +131,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
             internalTransactionForUpdate: 0.12,
             internalTransactionForDelete: 0.12,
             internalTransactionForFindAndModify: 0.12,
-            verifyDocuments: 0.12
+            verifyDocuments: 0.12,
         },
         internalTransactionForUpdate: {
             killSession: 0.4,
@@ -130,7 +139,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
             internalTransactionForUpdate: 0.12,
             internalTransactionForDelete: 0.12,
             internalTransactionForFindAndModify: 0.12,
-            verifyDocuments: 0.12
+            verifyDocuments: 0.12,
         },
         internalTransactionForDelete: {
             killSession: 0.4,
@@ -138,7 +147,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
             internalTransactionForUpdate: 0.12,
             internalTransactionForDelete: 0.12,
             internalTransactionForFindAndModify: 0.12,
-            verifyDocuments: 0.12
+            verifyDocuments: 0.12,
         },
         internalTransactionForFindAndModify: {
             killSession: 0.4,
@@ -146,7 +155,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
             internalTransactionForUpdate: 0.12,
             internalTransactionForDelete: 0.12,
             internalTransactionForFindAndModify: 0.12,
-            verifyDocuments: 0.12
+            verifyDocuments: 0.12,
         },
         verifyDocuments: {
             killSession: 0.4,
@@ -154,8 +163,8 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
             internalTransactionForUpdate: 0.12,
             internalTransactionForDelete: 0.12,
             internalTransactionForFindAndModify: 0.12,
-            verifyDocuments: 0.12
-        }
+            verifyDocuments: 0.12,
+        },
     };
 
     return $config;

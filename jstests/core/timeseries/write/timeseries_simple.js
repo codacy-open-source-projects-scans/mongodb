@@ -1,5 +1,5 @@
 /**
- * Tests inserting sample data into the time-series buckets collection.
+ * Tests inserting sample data into a time-series collection.
  * This test is for the simple case of only one measurement per bucket.
  * @tags: [
  *   # This test depends on certain writes ending up in the same bucket. Stepdowns
@@ -7,20 +7,20 @@
  *   does_not_support_stepdowns,
  *   # We need a timeseries collection.
  *   requires_timeseries,
+ *   # This test relies on the bucket size/count being the default values, which can be fuzzed by
+ *   # the config fuzzer.
+ *   does_not_support_config_fuzzer
  * ]
  */
+import {getTimeseriesCollForRawOps} from "jstests/core/libs/raw_operation_utils.js";
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 
 TimeseriesTest.run((insert) => {
     const coll = db[jsTestName()];
-    const bucketsColl = db.getCollection('system.buckets.' + coll.getName());
-
     coll.drop();
 
-    const timeFieldName = 'time';
-    assert.commandWorked(
-        db.createCollection(coll.getName(), {timeseries: {timeField: timeFieldName}}));
-    assert.contains(bucketsColl.getName(), db.getCollectionNames());
+    const timeFieldName = "time";
+    assert.commandWorked(db.createCollection(coll.getName(), {timeseries: {timeField: timeFieldName}}));
     if (TestData.runningWithBalancer) {
         // In suites running moveCollection in the background, it is possible to hit the issue
         // described by SERVER-89349 which will result in more bucket documents being created.
@@ -73,18 +73,22 @@ TimeseriesTest.run((insert) => {
         const t = ISODate();
         const doc = Object.assign({_id: i, [timeFieldName]: t}, host.fields);
 
-        jsTestLog('Inserting doc into time-series collection: ' + i + ': ' + tojson(doc));
+        jsTestLog("Inserting doc into time-series collection: " + i + ": " + tojson(doc));
         let start = new Date();
         assert.commandWorked(insert(coll, doc));
-        jsTestLog('Insertion took ' + ((new Date()).getTime() - start.getTime()) +
-                  ' ms. Retrieving doc from view: ' + i);
+        jsTestLog("Insertion took " + (new Date().getTime() - start.getTime()) + " ms. Retrieving doc: " + i);
         start = new Date();
         const docFromView = coll.findOne({_id: doc._id});
-        assert(docFromView,
-               'inserted doc missing from time-series view: ' + i + ': ' + tojson(doc));
-        jsTestLog('Doc retrieval took ' + ((new Date()).getTime() - start.getTime()) +
-                  ' ms. Doc fetched from view: ' + i + ': ' + tojson(docFromView));
-        assert.docEq(doc, docFromView, 'Invalid document retrieved from view: ' + i);
+        assert(docFromView, "inserted doc missing from time-series collection: " + i + ": " + tojson(doc));
+        jsTestLog(
+            "Doc retrieval took " +
+                (new Date().getTime() - start.getTime()) +
+                " ms. Fetched doc: " +
+                i +
+                ": " +
+                tojson(docFromView),
+        );
+        assert.docEq(doc, docFromView, "Invalid doc retrieved: " + i);
 
         // Update expected control min/max and data in bucket.
         Object.keys(doc).forEach((key) => {
@@ -98,26 +102,24 @@ TimeseriesTest.run((insert) => {
         });
     }
 
-    // Check view.
-    const viewDocs = coll.find().toArray();
-    assert.eq(numDocs, viewDocs.length, viewDocs);
+    // Check measurements.
+    const userDocs = coll.find().toArray();
+    assert.eq(numDocs, userDocs.length, userDocs);
 
-    // Check bucket collection.
-    const bucketDocs = bucketsColl.find().toArray();
+    // Check buckets.
+    const bucketDocs = getTimeseriesCollForRawOps(coll).find().rawData().toArray();
     assert.eq(1, bucketDocs.length, bucketDocs);
     const bucketDoc = bucketDocs[0];
     TimeseriesTest.decompressBucket(bucketDoc);
 
-    jsTestLog('Bucket collection document: ' + tojson(bucketDoc));
-    assert.docEq(expectedBucketDoc.control.min,
-                 bucketDoc.control.min,
-                 'invalid min in bucket: ' + tojson(bucketDoc));
-    assert.docEq(expectedBucketDoc.control.max,
-                 bucketDoc.control.max,
-                 'invalid max in bucket: ' + tojson(bucketDoc));
+    jsTestLog("Bucket document: " + tojson(bucketDoc));
+    assert.docEq(expectedBucketDoc.control.min, bucketDoc.control.min, "invalid min in bucket: " + tojson(bucketDoc));
+    assert.docEq(expectedBucketDoc.control.max, bucketDoc.control.max, "invalid max in bucket: " + tojson(bucketDoc));
     Object.keys(expectedBucketDoc.data).forEach((key) => {
-        assert.docEq(expectedBucketDoc.data[key],
-                     bucketDoc.data[key],
-                     'invalid bucket data for field ' + key + ': ' + tojson(bucketDoc));
+        assert.docEq(
+            expectedBucketDoc.data[key],
+            bucketDoc.data[key],
+            "invalid bucket data for field " + key + ": " + tojson(bucketDoc),
+        );
     });
 });

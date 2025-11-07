@@ -31,22 +31,19 @@
  * This file contains a test framework for testing sbe::PlanStages.
  */
 
+#include "mongo/db/exec/sbe/sbe_plan_stage_test.h"
+
+#include "mongo/db/exec/sbe/stages/virtual_scan.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/logv2/log.h"
+#include "mongo/unittest/unittest.h"
+
 #include <cstddef>
 #include <ostream>
 
-#include <absl/container/inlined_vector.h>
-#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/exec/sbe/sbe_plan_stage_test.h"
-#include "mongo/db/exec/sbe/stages/virtual_scan.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/unittest/assert.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -174,10 +171,9 @@ std::pair<value::TypeTags, value::Value> PlanStageTestFixture::getAllResults(
         // Test out saveState() and restoreState() for 50% of the documents (the first document,
         // the third document, the fifth document, and so on).
         if (i % 2 == 0) {
-            const bool relinquishCursor = true;
             const bool disableSlotAccess = true;
-            stage->saveState(relinquishCursor, disableSlotAccess);
-            stage->restoreState(relinquishCursor);
+            stage->saveState(disableSlotAccess);
+            stage->restoreState();
         }
     }
 
@@ -186,7 +182,7 @@ std::pair<value::TypeTags, value::Value> PlanStageTestFixture::getAllResults(
 }
 
 std::pair<value::TypeTags, value::Value> PlanStageTestFixture::getAllResultsMulti(
-    PlanStage* stage, std::vector<value::SlotAccessor*> accessors) {
+    PlanStage* stage, std::vector<value::SlotAccessor*> accessors, bool forceSpill) {
     // Allocate an SBE array to hold the results.
     auto [resultsTag, resultsVal] = value::makeNewArray();
     value::ValueGuard resultsGuard{resultsTag, resultsVal};
@@ -210,10 +206,17 @@ std::pair<value::TypeTags, value::Value> PlanStageTestFixture::getAllResultsMult
         // Test out saveState() and restoreState() for 50% of the documents (the first document,
         // the third document, the fifth document, and so on).
         if (j % 2 == 0) {
-            const bool relinquishCursor = true;
             const bool disableSlotAccess = true;
-            stage->saveState(relinquishCursor, disableSlotAccess);
-            stage->restoreState(relinquishCursor);
+            stage->saveState(disableSlotAccess);
+            stage->restoreState();
+        }
+
+        if (forceSpill && resultsView->size() % 3 == 0) {
+            // check the forceSpill stage
+            stage->forceSpill(nullptr /*yieldPolicy*/);
+            if (stage->getMemoryTracker()) {
+                ASSERT_EQ(stage->getMemoryTracker()->inUseTrackedMemoryBytes(), 0);
+            }
         }
     }
 
@@ -260,7 +263,9 @@ std::pair<value::TypeTags, value::Value> PlanStageTestFixture::runTestMulti(
     size_t numInputSlots,
     value::TypeTags inputTag,
     value::Value inputVal,
-    const MakeStageFn<value::SlotVector>& makeStageMulti) {
+    const MakeStageFn<value::SlotVector>& makeStageMulti,
+    bool forceSpill,
+    const AssertStageStatsFn& assertStageStats) {
     auto ctx = makeCompileCtx();
 
     // Generate a mock scan from `input` with multiple output slots.
@@ -274,7 +279,11 @@ std::pair<value::TypeTags, value::Value> PlanStageTestFixture::runTestMulti(
     auto resultAccessors = prepareTree(ctx.get(), stage.get(), outputSlots);
 
     // Get all the results produced by the PlanStage we want to test.
-    return getAllResultsMulti(stage.get(), resultAccessors);
+    auto results = getAllResultsMulti(stage.get(), resultAccessors, forceSpill);
+    if (assertStageStats) {
+        assertStageStats(stage->getSpecificStats());
+    }
+    return results;
 }
 
 
@@ -283,11 +292,14 @@ void PlanStageTestFixture::runTestMulti(int32_t numInputSlots,
                                         value::Value inputVal,
                                         value::TypeTags expectedTag,
                                         value::Value expectedVal,
-                                        const MakeStageFn<value::SlotVector>& makeStageMulti) {
+                                        const MakeStageFn<value::SlotVector>& makeStageMulti,
+                                        bool forceSpill,
+                                        const AssertStageStatsFn& assertStageStats) {
     // Set up a ValueGuard to ensure `expected` gets released.
     value::ValueGuard expectedGuard{expectedTag, expectedVal};
 
-    auto [resultsTag, resultsVal] = runTestMulti(numInputSlots, inputTag, inputVal, makeStageMulti);
+    auto [resultsTag, resultsVal] = runTestMulti(
+        numInputSlots, inputTag, inputVal, makeStageMulti, forceSpill, assertStageStats);
     value::ValueGuard resultGuard{resultsTag, resultsVal};
 
     // Compare the results produced with the expected output and assert that they match.

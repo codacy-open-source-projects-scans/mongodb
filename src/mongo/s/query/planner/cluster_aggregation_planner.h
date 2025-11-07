@@ -29,34 +29,37 @@
 
 #pragma once
 
-#include <absl/container/node_hash_map.h>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <functional>
-#include <memory>
-#include <utility>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/exec/agg/exec_pipeline.h"
 #include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/database_version.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/s/query/exec/cluster_client_cursor_guard.h"
 #include "mongo/s/query/exec/cluster_client_cursor_impl.h"
 #include "mongo/s/query/exec/cluster_client_cursor_params.h"
 #include "mongo/s/query/planner/cluster_aggregate.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/uuid.h"
+
+#include <functional>
+#include <memory>
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace cluster_aggregation_planner {
@@ -68,11 +71,12 @@ namespace cluster_aggregation_planner {
  * RouterStagePipeline will remove an expensive conversion from BSONObj -> Document for each result.
  */
 ClusterClientCursorGuard buildClusterCursor(OperationContext* opCtx,
-                                            std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
+                                            std::unique_ptr<Pipeline> pipeline,
                                             ClusterClientCursorParams&&);
 
 /**
- *  Returns the collation for aggregation targeting 'nss' with the following semantics:
+ *  Returns the collation and if the collation matches the collection's collation for aggregation
+ * targeting 'nss' with the following semantics:
  *  - Return 'collation' if the aggregation is collectionless.
  *  - If 'nss' is tracked, we return 'collation' if it is non-empty. If it is empty, we return the
  * collection default collation if there is one and the simple collation otherwise.
@@ -85,11 +89,12 @@ ClusterClientCursorGuard buildClusterCursor(OperationContext* opCtx,
  * unsharded collections are tracked in the sharding catalog as unsplittable along with their
  * collation.
  */
-BSONObj getCollation(OperationContext* opCtx,
-                     const boost::optional<ChunkManager>& cm,
-                     const NamespaceString& nss,
-                     const BSONObj& collation,
-                     bool requiresCollationForParsingUnshardedAggregate);
+std::pair<BSONObj, ExpressionContextCollationMatchesDefault> getCollation(
+    OperationContext* opCtx,
+    const boost::optional<CollectionRoutingInfo>& cri,
+    const NamespaceString& nss,
+    const BSONObj& collation,
+    bool requiresCollationForParsingUnshardedAggregate);
 
 /**
  * This structure contains information for targeting an aggregation pipeline in a sharded cluster.
@@ -100,7 +105,8 @@ struct AggregationTargeter {
      * 'executionNss'.
      */
     static AggregationTargeter make(OperationContext* opCtx,
-                                    std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
+                                    std::unique_ptr<Pipeline> pipeline,
+                                    const NamespaceString& execNss,
                                     boost::optional<CollectionRoutingInfo> cri,
                                     sharded_agg_helpers::PipelineDataSource pipelineDataSource,
                                     bool perShardCursor);
@@ -111,8 +117,7 @@ struct AggregationTargeter {
         kSpecificShardOnly,
     } policy;
 
-    std::unique_ptr<Pipeline, PipelineDeleter> pipeline;
-    boost::optional<CollectionRoutingInfo> cri;
+    std::unique_ptr<Pipeline> pipeline;
 };
 
 /**
@@ -121,7 +126,7 @@ struct AggregationTargeter {
  */
 Status runPipelineOnMongoS(const ClusterAggregate::Namespaces& namespaces,
                            long long batchSize,
-                           std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
+                           std::unique_ptr<Pipeline> pipeline,
                            BSONObjBuilder* result,
                            const PrivilegeVector& privileges,
                            bool requestQueryStatsFromRemotes);
@@ -133,6 +138,7 @@ Status runPipelineOnMongoS(const ClusterAggregate::Namespaces& namespaces,
  * query sampling enabled and the rate-limited sampler successfully generates a sample id for it.
  */
 Status dispatchPipelineAndMerge(OperationContext* opCtx,
+                                RoutingContext& routingCtx,
                                 AggregationTargeter targeter,
                                 Document serializedCommand,
                                 long long batchSize,
@@ -149,6 +155,7 @@ Status dispatchPipelineAndMerge(OperationContext* opCtx,
  * mongod.
  */
 Status runPipelineOnSpecificShardOnly(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                      RoutingContext& routingCtx,
                                       const ClusterAggregate::Namespaces& namespaces,
                                       boost::optional<ExplainOptions::Verbosity> explain,
                                       Document serializedCommand,

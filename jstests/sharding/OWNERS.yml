@@ -3,6 +3,9 @@ filters:
   - "auto_split_vector_basic.js":
     approvers:
       - 10gen/server-cluster-scalability
+  - "drop_indexes_participant*":
+    approvers:
+      - 10gen/server-catalog-and-routing-ddl
   - "*fsync_lock*":
     approvers:
       - 10gen/server-cluster-scalability
@@ -12,9 +15,19 @@ filters:
   - "*migration_coordinator*":
     approvers:
       - 10gen/server-cluster-scalability
+  - "migration_fails_with_spurious_documents.js":
+    approvers:
+      - 10gen/server-cluster-scalability
   - "move_primary_clone.js":
     approvers:
       - 10gen/server-cluster-scalability
+  - "/OWNERS.yml":
+    approvers:
+      - 10gen/server-catalog-and-routing
+      - 10gen/server-cluster-scalability
+  - "proxy_protocol_connect.js":
+    approvers:
+      - 10gen/server-security
   - "*range*deleter*":
     approvers:
       - 10gen/server-cluster-scalability
@@ -23,16 +36,100 @@ filters:
       - 10gen/server-cluster-scalability
   - "*retryable_write*":
     approvers:
-      - 10gen/server-cluster-scalability
+      - 10gen/server-transactions
   - "*transaction*":
     approvers:
-      - 10gen/server-cluster-scalability
+      - 10gen/server-transactions
   - "*txn*":
     approvers:
-      - 10gen/server-cluster-scalability
+      - 10gen/server-transactions
   - "*_with_id_without_shard_key*":
     approvers:
       - "10gen/server-cluster-scalability"
   - "*zone*":
     approvers:
       - 10gen/server-cluster-scalability
+  - "add_shard_*":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology
+  - "custom_write_concern.js":
+    approvers:
+      - 10gen/server-catalog-and-routing
+  - "shard_unsplittable_collection.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-ddl
+  - "create_unsplittable_collection.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-ddl
+  - "list_cluster_catalog*":
+    approvers:
+      - 10gen/server-catalog-and-routing-ddl
+  - "check_metadata*":
+    approvers:
+      - 10gen/server-catalog-and-routing-ddl
+  - "*direct_shard*":
+    approvers:
+      - 10gen/server-catalog-and-routing-shard-catalog
+  - "start_shard_draining*":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology
+  - "shard_draining_status_test.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology
+  - "replica_set_to_csrs_promotion.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology
+  - "replica_set_promotion_demotion.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology
+  - "stop_shard_draining_test.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology
+  - "commit_shard_removal_test.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology
+  - "validate_collection*.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-shard-catalog
+  - "add_and_remove_shard_serializes_with_ddl.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology
+  - "direct_shard_connection_ddls_on_replicaset.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology
+  - "transition_to_dedicated_config_server.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology
+  - "direct_shard_connection_ddls_during_promotion_to_*.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology
+  - "incompatible_shard_key_indexes.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-shard-catalog
+  - "all_commands_direct_shard_connection_auth.js":
+    approvers:
+      - 10gen/server-catalog-and-routing
+  - "database_versioning_all_commands.js":
+    approvers:
+      - 10gen/server-catalog-and-routing
+  - "read_write_concern_defaults_application.js":
+    approvers:
+      - 10gen/server-catalog-and-routing
+  - "safe_secondary_reads_drop_recreate.js":
+    approvers:
+      - 10gen/server-catalog-and-routing
+  - "safe_secondary_reads_single_migration_waitForDelete.js":
+    approvers:
+      - 10gen/server-catalog-and-routing
+  - "startup_with_all_configs_down.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology
+  - "safe_secondary_reads_causal_consistency.js":
+    approvers:
+      - 10gen/server-cluster-scalability
+  - "remove_shard_*.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-routing-and-topology
+  - "reporting_compound_wildcard_index_prefixed_by_shard_key.js":
+    approvers:
+      - 10gen/server-catalog-and-routing-ddl

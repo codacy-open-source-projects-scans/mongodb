@@ -29,19 +29,8 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
@@ -60,6 +49,17 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -84,7 +84,8 @@ public:
     class LiteParsed final : public LiteParsedDocumentSource {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
-                                                 const BSONElement& spec);
+                                                 const BSONElement& spec,
+                                                 const LiteParserOptions& options);
 
         LiteParsed(std::string parseTimeName,
                    const boost::optional<TenantId>& tenantId,
@@ -111,6 +112,10 @@ public:
             }
 
             return PrivilegeVector();
+        }
+
+        bool requiresAuthzChecks() const override {
+            return false;
         }
 
         bool isInitialSource() const final {
@@ -148,11 +153,13 @@ public:
 
     const char* getSourceName() const final;
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kCurrentOp;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         bool showLocalOps =
             _showLocalOpsOnMongoS.value_or(kDefaultLocalOpsMode) == LocalOpsMode::kLocalMongosOps;
         HostTypeRequirement hostTypeRequirement;
@@ -174,7 +181,7 @@ public:
             (showLocalOps ? UnionRequirement::kNotAllowed : UnionRequirement::kAllowed));
 
         constraints.isIndependentOfAnyCollection = true;
-        constraints.requiresInputDocSource = false;
+        constraints.setConstraintsForNoInputSources();
         return constraints;
     }
 
@@ -190,6 +197,9 @@ public:
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
 
 private:
+    friend boost::intrusive_ptr<exec::agg::Stage> documentSourceCurrentOpToStageFn(
+        const boost::intrusive_ptr<const DocumentSource>& documentSource);
+
     DocumentSourceCurrentOp(const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
                             boost::optional<ConnMode> includeIdleConnections,
                             boost::optional<SessionMode> includeIdleSessions,
@@ -202,25 +212,20 @@ private:
           _includeIdleConnections(includeIdleConnections),
           _includeIdleSessions(includeIdleSessions),
           _includeOpsFromAllUsers(includeOpsFromAllUsers),
-          _showLocalOpsOnMongoS(showLocalOpsOnMongoS),
           _truncateOps(truncateOps),
           _idleCursors(idleCursors),
+          _showLocalOpsOnMongoS(showLocalOpsOnMongoS),
           _targetAllNodes(targetAllNodes) {}
 
-    GetNextResult doGetNext() final;
-
+    // shared with exec::agg::CurrentOpStage
     boost::optional<ConnMode> _includeIdleConnections;
     boost::optional<SessionMode> _includeIdleSessions;
     boost::optional<UserMode> _includeOpsFromAllUsers;
-    boost::optional<LocalOpsMode> _showLocalOpsOnMongoS;
     boost::optional<TruncationMode> _truncateOps;
     boost::optional<CursorMode> _idleCursors;
 
+    boost::optional<LocalOpsMode> _showLocalOpsOnMongoS;
     boost::optional<bool> _targetAllNodes;
-    std::string _shardName;
-
-    std::vector<BSONObj> _ops;
-    std::vector<BSONObj>::iterator _opsIter;
 };
 
 }  // namespace mongo

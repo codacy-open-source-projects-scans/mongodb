@@ -29,10 +29,19 @@
 
 #pragma once
 
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/base/checked_cast.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/exec/mutable_bson/document.h"
+#include "mongo/db/exec/mutable_bson/element.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/itoa.h"
+#include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
+#include "mongo/util/str.h"
+#include "mongo/util/string_map.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
@@ -43,18 +52,9 @@
 #include <variant>
 #include <vector>
 
-#include "mongo/base/checked_cast.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/mutable/document.h"
-#include "mongo/bson/mutable/element.h"
-#include "mongo/util/assert_util_core.h"
-#include "mongo/util/itoa.h"
-#include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
-#include "mongo/util/str.h"
-#include "mongo/util/string_map.h"
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/optional/optional.hpp>
 
 // This file contains classes for serializing document diffs to a format that can be stored in the
 // oplog. Any code/machinery which manipulates document diffs should do so through these classes.
@@ -136,6 +136,14 @@ public:
     boost::optional<BSONElement> nextBinary();
     boost::optional<std::pair<StringData, std::variant<DocumentDiffReader, ArrayDiffReader>>>
     nextSubDiff();
+    /**
+     * Calls all of the above 'next*' methods.
+     */
+    using Modification =
+        std::variant<StringData,
+                     BSONElement,
+                     std::pair<StringData, std::variant<DocumentDiffReader, ArrayDiffReader>>>;
+    boost::optional<Modification> next();
 
 private:
     Diff _diff;
@@ -170,7 +178,7 @@ enum class NodeType {
  * Base class to represents a node in the diff tree.
  */
 struct Node {
-    virtual ~Node(){};
+    virtual ~Node() {};
     virtual NodeType type() const = 0;
 };
 
@@ -253,7 +261,7 @@ public:
     private:
         size_t _size;
     };
-    InternalNode(size_t size = 0) : sizeTracker(size){};
+    InternalNode(size_t size = 0) : sizeTracker(size) {};
 
     // Returns an unowned pointer to the newly added child.
     virtual Node* addChild(StringData fieldName, std::unique_ptr<Node> node) = 0;
@@ -275,7 +283,7 @@ public:
     using ModificationEntries = std::vector<std::pair<StringData, E>>;
 
     DocumentSubDiffNode(size_t size = 0)
-        : InternalNode(size + doc_diff::kSizeOfEmptyDocumentDiffBuilder){};
+        : InternalNode(size + doc_diff::kSizeOfEmptyDocumentDiffBuilder) {};
 
     Node* addChild(StringData fieldName, std::unique_ptr<Node> node) override;
 
@@ -347,13 +355,13 @@ private:
  */
 class DocumentInsertionNode : public InternalNode {
 public:
-    DocumentInsertionNode() : InternalNode(0){};
+    DocumentInsertionNode() : InternalNode(0) {};
 
     Node* addChild(StringData fieldName, std::unique_ptr<Node> node) override {
         invariant(node->type() == NodeType::kInsert || node->type() == NodeType::kDocumentInsert);
 
         auto* nodePtr = node.get();
-        auto result = children.insert({fieldName.toString(), std::move(node)});
+        auto result = children.insert({std::string{fieldName}, std::move(node)});
         invariant(result.second);
         inserts.push_back({result.first->first, nodePtr});
         return nodePtr;
@@ -389,7 +397,7 @@ private:
  */
 class ArrayNode : public InternalNode {
 public:
-    ArrayNode() : InternalNode(doc_diff::kSizeOfEmptyArrayDiffBuilder){};
+    ArrayNode() : InternalNode(doc_diff::kSizeOfEmptyArrayDiffBuilder) {};
 
     Node* addChild(size_t idx, std::unique_ptr<Node> node) {
         sizeTracker.addEntry(1 /* modification type */ +

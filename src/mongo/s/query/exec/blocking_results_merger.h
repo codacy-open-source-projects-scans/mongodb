@@ -29,26 +29,31 @@
 
 #pragma once
 
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/query/query_stats/data_bearing_node_metrics.h"
+#include "mongo/db/query/tailable_mode_gen.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/executor/task_executor.h"
+#include "mongo/s/query/exec/async_results_merger.h"
+#include "mongo/s/query/exec/async_results_merger_params_gen.h"
+#include "mongo/s/query/exec/cluster_query_result.h"
+#include "mongo/s/query/exec/next_high_watermark_determining_strategy.h"
+#include "mongo/s/query/exec/router_exec_stage.h"
+#include "mongo/s/query/exec/shard_tag.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/unordered_set.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
+
 #include <cstddef>
 #include <functional>
 #include <memory>
 #include <utility>
 #include <vector>
-
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/query/query_stats/data_bearing_node_metrics.h"
-#include "mongo/db/query/tailable_mode_gen.h"
-#include "mongo/db/resource_yielder.h"
-#include "mongo/executor/task_executor.h"
-#include "mongo/s/query/exec/async_results_merger.h"
-#include "mongo/s/query/exec/async_results_merger_params_gen.h"
-#include "mongo/s/query/exec/cluster_query_result.h"
-#include "mongo/s/query/exec/router_exec_stage.h"
-#include "mongo/stdx/condition_variable.h"
-#include "mongo/util/duration.h"
 
 namespace mongo {
 
@@ -63,6 +68,8 @@ public:
                           std::shared_ptr<executor::TaskExecutor> executor,
                           std::unique_ptr<ResourceYielder> resourceYielder);
 
+    ~BlockingResultsMerger();
+
     /**
      * Returns a const reference to the AsyncResultsMergerParams owned by the AsyncResultsMerger.
      */
@@ -73,36 +80,107 @@ public:
      */
     StatusWith<ClusterQueryResult> next(OperationContext*);
 
+    Status releaseMemory();
+
     Status setAwaitDataTimeout(Milliseconds awaitDataTimeout) {
-        return _arm.setAwaitDataTimeout(awaitDataTimeout);
+        return _arm->setAwaitDataTimeout(awaitDataTimeout);
     }
 
     void reattachToOperationContext(OperationContext* opCtx) {
-        _arm.reattachToOperationContext(opCtx);
+        _arm->reattachToOperationContext(opCtx);
     }
 
     void detachFromOperationContext() {
-        _arm.detachFromOperationContext();
+        _arm->detachFromOperationContext();
     }
 
     bool remotesExhausted() const {
-        return _arm.remotesExhausted();
+        return _arm->remotesExhausted();
     }
 
     bool partialResultsReturned() const {
-        return _arm.partialResultsReturned();
+        return _arm->partialResultsReturned();
     }
 
     std::size_t getNumRemotes() const {
-        return _arm.getNumRemotes();
+        return _arm->getNumRemotes();
     }
 
+    /**
+     * Enables buffering of the last returned result in the underlying 'AsyncResultsMerger'. This is
+     * used by v2 change stream readers.
+     */
+    void enableUndoNextMode() {
+        _arm->enableUndoNextReadyMode();
+    }
+
+    /**
+     * Disables buffering of the last returned result in the underlying 'AsyncResultsMerger'. This
+     * is used by v2 change stream readers.
+     */
+    void disableUndoNextMode() {
+        _arm->disableUndoNextReadyMode();
+    }
+
+    /**
+     * Undoes the effect of fetching the last returned result via 'next()' from the underlying
+     * 'AsyncResultsMerger'. For a more detailed description refer to the code comments for
+     * 'AsyncResultsMerger::undoNextReady()'. This is used by v2 change stream readers.
+     */
+    void undoNext() {
+        _arm->undoNextReady();
+    }
+
+    /**
+     * Makes the underlying 'AsyncResultsMerger' recognize change stream control events. This is
+     * used by v2 change stream readers.
+     */
+    void recognizeControlEvents();
+
+    /**
+     * Returns the current high water mark from the underlying 'AsyncResultsMerger'.
+     */
     BSONObj getHighWaterMark() {
-        return _arm.getHighWaterMark();
+        return _arm->getHighWaterMark();
     }
 
-    void addNewShardCursors(std::vector<RemoteCursor>&& newCursors) {
-        _arm.addNewShardCursors(std::move(newCursors));
+    /**
+     * Sets the initial high watermark to return when no cursors are tracked.
+     */
+    void setInitialHighWaterMark(const BSONObj& highWaterMark);
+
+    /**
+     * Sets the current high water mark of the underlying 'AsyncResultsMerger'. Notably this allows
+     * to set the high water mark to a timestamp earlier than the current high water mark.
+     */
+    void setHighWaterMark(const BSONObj& highWaterMark) {
+        _arm->setHighWaterMark(highWaterMark);
+    }
+
+    void addNewShardCursors(std::vector<RemoteCursor>&& newCursors,
+                            const ShardTag& tag = ShardTag::kDefault) {
+        _arm->addNewShardCursors(std::move(newCursors), tag);
+    }
+
+    /**
+     * Closes and removes all cursors belonging to any of the specified shardIds. All in-flight
+     * requests to any of these remote cursors will be canceled and discarded.
+     * All results from the to-be closed remotes that have already been received but have not been
+     * consumed will be kept. They can be consumed normally.
+     * Closing remote cursors is only supported for tailable, awaitData cursors.
+     */
+    void closeShardCursors(const stdx::unordered_set<ShardId>& shardIds, const ShardTag& tag) {
+        _arm->closeShardCursors(shardIds, tag);
+    }
+
+    /**
+     * Sets the strategy to determine the next high water mark.
+     * Assumes that the 'AsyncResultsMerger' is in tailable, awaitData mode.
+     */
+    void setNextHighWaterMarkDeterminingStrategy(
+        NextHighWaterMarkDeterminingStrategyPtr nextHighWaterMarkDeterminingStrategy) {
+        _arm->setNextHighWaterMarkDeterminingStrategy(
+            std::move(nextHighWaterMarkDeterminingStrategy));
     }
 
     /**
@@ -112,7 +190,7 @@ public:
     void kill(OperationContext* opCtx);
 
     query_stats::DataBearingNodeMetrics takeMetrics() {
-        return _arm.takeMetrics();
+        return _arm->takeMetrics();
     }
 
 private:
@@ -135,7 +213,7 @@ private:
     StatusWith<executor::TaskExecutor::EventHandle> getNextEvent();
 
     /**
-     * Call the waitFn and return the result, yielding resources while waiting if necessary.
+     * Calls the waitFn and return the result, yielding resources while waiting if necessary.
      * 'waitFn' may not throw.
      */
     StatusWith<stdx::cv_status> doWaiting(
@@ -151,7 +229,11 @@ private:
     // exceeded. When this happens, we use '_leftoverEventFromLastTimeout' to remember the old event
     // and pick back up waiting for it on the next call to 'next()'.
     executor::TaskExecutor::EventHandle _leftoverEventFromLastTimeout;
-    AsyncResultsMerger _arm;
+
+    // The 'AsyncResultsMerger' is fully owned by this 'BlockingResultsMerger', but we need a
+    // shared_ptr to keep the ARM alive and valid until all of its async requests have been
+    // processed successfully.
+    std::shared_ptr<AsyncResultsMerger> _arm;
 
     // Provides interface for yielding and "unyielding" resources while waiting for results from
     // the network. A value of nullptr implies that no such yielding or unyielding is necessary.

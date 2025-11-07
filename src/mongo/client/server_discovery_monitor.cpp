@@ -29,20 +29,6 @@
 
 #include "mongo/client/server_discovery_monitor.h"
 
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <algorithm>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <iterator>
-#include <ratio>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -58,12 +44,24 @@
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
+
+#include <algorithm>
+#include <iterator>
+#include <ratio>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -296,7 +294,7 @@ StatusWith<TaskExecutor::CallbackHandle> SingleServerDiscoveryMonitor::_schedule
                 auto responseTopologyVersion = result.response.data.getField("topologyVersion");
                 if (responseTopologyVersion) {
                     self->_topologyVersion = TopologyVersion::parse(
-                        IDLParserContext("TopologyVersion"), responseTopologyVersion.Obj());
+                        responseTopologyVersion.Obj(), IDLParserContext("TopologyVersion"));
                 } else {
                     self->_topologyVersion = boost::none;
                 }
@@ -352,7 +350,7 @@ StatusWith<TaskExecutor::CallbackHandle> SingleServerDiscoveryMonitor::_schedule
                 auto responseTopologyVersion = result.response.data.getField("topologyVersion");
                 if (responseTopologyVersion) {
                     self->_topologyVersion = TopologyVersion::parse(
-                        IDLParserContext("TopologyVersion"), responseTopologyVersion.Obj());
+                        responseTopologyVersion.Obj(), IDLParserContext("TopologyVersion"));
                 } else {
                     self->_topologyVersion = boost::none;
                 }

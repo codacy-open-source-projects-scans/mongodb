@@ -29,15 +29,17 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <memory>
-
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/query/query_stats/data_bearing_node_metrics.h"
 #include "mongo/s/query/exec/cluster_query_result.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
+
+#include <memory>
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 
@@ -72,6 +74,13 @@ public:
      */
     virtual StatusWith<ClusterQueryResult> next() = 0;
 
+    virtual Status releaseMemory() {
+        tassert(9745608,
+                "router stage should have a child or provide alternative implementation",
+                _child);
+        return _child->releaseMemory();
+    }
+
     /**
      * Must be called before destruction to abandon a not-yet-exhausted plan. May block waiting for
      * responses from remote hosts.
@@ -81,7 +90,9 @@ public:
      * operation context.
      */
     virtual void kill(OperationContext* opCtx) {
-        invariant(_child);  // The default implementation forwards to the child stage.
+        tassert(11052344,
+                "router stage should have a child or provide alternative implementation",
+                _child);  // The default implementation forwards to the child stage.
         _child->kill(opCtx);
     }
 
@@ -97,15 +108,19 @@ public:
      * Returns the number of remote hosts involved in this execution plan.
      */
     virtual std::size_t getNumRemotes() const {
-        invariant(_child);  // The default implementation forwards to the child stage.
+        tassert(11052345,
+                "router stage should have a child or provide alternative implementation",
+                _child);  // The default implementation forwards to the child stage.
         return _child->getNumRemotes();
     }
 
     /**
      * Returns whether or not all the remote cursors are exhausted.
      */
-    virtual bool remotesExhausted() {
-        invariant(_child);  // The default implementation forwards to the child stage.
+    virtual bool remotesExhausted() const {
+        tassert(11052346,
+                "router stage should have a child or provide alternative implementation",
+                _child);  // The default implementation forwards to the child stage.
         return _child->remotesExhausted();
     }
 

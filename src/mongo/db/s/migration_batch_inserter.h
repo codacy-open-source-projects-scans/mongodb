@@ -29,16 +29,12 @@
 
 #pragma once
 
-#include <algorithm>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/cancelable_operation_context.h"
-#include "mongo/db/catalog/document_validation.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/local_catalog/document_validation.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/write_ops_exec.h"
@@ -48,15 +44,20 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/migration_session_id.h"
 #include "mongo/db/s/range_deletion_util.h"
-#include "mongo/db/s/sharding_runtime_d_params_gen.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/sharding_runtime_d_params_gen.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/log.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/grid.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/ticketholder.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <memory>
+#include <string>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -115,7 +116,6 @@ public:
                            const UUID& collectionUuid,
                            std::shared_ptr<MigrationCloningProgressSharedState> migrationProgress,
                            const UUID& migrationId,
-                           int threadCount,
                            TicketHolder* secondaryThrottleTicket)
         : _outerOpCtx{outerOpCtx},
           _innerOpCtx{innerOpCtx},
@@ -126,7 +126,6 @@ public:
           _collectionUuid{collectionUuid},
           _migrationProgress{migrationProgress},
           _migrationId{migrationId},
-          _threadCount{threadCount},
           _secondaryThrottleTicket{secondaryThrottleTicket} {}
 
     static void onCreateThread(const std::string& threadName);
@@ -141,7 +140,6 @@ private:
     UUID _collectionUuid;
     std::shared_ptr<MigrationCloningProgressSharedState> _migrationProgress;
     UUID _migrationId;
-    int _threadCount;
     TicketHolder* _secondaryThrottleTicket;
 };
 

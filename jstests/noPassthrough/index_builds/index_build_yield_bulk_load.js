@@ -1,8 +1,13 @@
 /*
  * This test ensures an index build can yield during bulk load phase.
+ *
+ * @tags: [
+ *   # TODO (SERVER-109947): Remove this exclusion once primary-driven index builds load the index after scanning.
+ *   primary_driven_index_builds_incompatible,
+ * ]
  */
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const mongodOptions = {};
 const conn = MongoRunner.runMongod(mongodOptions);
@@ -21,16 +26,15 @@ for (let i = 0; i < 3; i++) {
 }
 
 // Make the index build bulk load yield often.
-assert.commandWorked(
-    conn.adminCommand({setParameter: 1, internalIndexBuildBulkLoadYieldIterations: 1}));
+assert.commandWorked(conn.adminCommand({setParameter: 1, internalIndexBuildBulkLoadYieldIterations: 1}));
 
 jsTestLog("Enable hangDuringIndexBuildBulkLoadYield fail point");
-let failpoint = configureFailPoint(
-    testDB, "hangDuringIndexBuildBulkLoadYield", {namespace: coll.getFullName()});
+let failpoint = configureFailPoint(testDB, "hangDuringIndexBuildBulkLoadYield", {namespace: coll.getFullName()});
 
 jsTestLog("Create index");
-const awaitIndex = IndexBuildTest.startIndexBuild(
-    testDB.getMongo(), coll.getFullName(), {x: 1}, {}, [ErrorCodes.IndexBuildAborted]);
+const awaitIndex = IndexBuildTest.startIndexBuild(testDB.getMongo(), coll.getFullName(), {x: 1}, {}, [
+    ErrorCodes.IndexBuildAborted,
+]);
 
 // Wait until index build (bulk load phase) yields.
 jsTestLog("Wait for the index build to yield and hang");

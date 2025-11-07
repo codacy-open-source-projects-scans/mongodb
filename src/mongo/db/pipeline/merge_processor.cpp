@@ -81,6 +81,7 @@ BatchedCommandGenerator makeUpdateCommandGenerator() {
 std::vector<write_ops::UpdateOpEntry> constructUpdateEntries(
     MongoProcessInterface::BatchedObjects&& batch, UpsertType upsert, bool multi) {
     std::vector<write_ops::UpdateOpEntry> updateEntries;
+    updateEntries.reserve(batch.size());
     for (auto&& obj : batch) {
         write_ops::UpdateOpEntry entry;
         auto&& [q, u, c] = obj;
@@ -309,7 +310,7 @@ MergeProcessor::MergeProcessor(const boost::intrusive_ptr<ExpressionContext>& ex
         variableValidation::validateNameForUserWrite(varName);
 
         _letVariables.emplace_back(
-            varName.toString(),
+            std::string{varName},
             Expression::parseOperand(expCtx.get(), varElem, expCtx->variablesParseState),
             // Variable::Id is set to INT64_MIN as it is not needed for processing $merge stage.
             // The '_letVariables' are evaluated in resolveLetVariablesIfNeeded(), serialized into
@@ -358,25 +359,25 @@ void MergeProcessor::flush(const NamespaceString& outputNs,
 
 BSONObj MergeProcessor::_extractMergeOnFieldsFromDoc(
     const Document& doc, const std::set<FieldPath>& mergeOnFields) const {
-    using namespace fmt::literals;
     MutableDocument result;
     for (const auto& field : mergeOnFields) {
         Value value{doc};
         for (size_t i = 0; i < field.getPathLength(); ++i) {
             value = value.getDocument().getField(field.getFieldName(i));
-            uassert(51185,
-                    "$merge write error: 'on' field '{}' is an array"_format(field.fullPath()),
-                    !value.isArray());
+            uassert(
+                51185,
+                fmt::format("$merge write error: 'on' field '{}' is an array", field.fullPath()),
+                !value.isArray());
             if (i + 1 < field.getPathLength() && !value.isObject()) {
                 value = Value();
                 break;
             }
         }
-        uassert(
-            51132,
-            "$merge write error: 'on' field '{}' cannot be missing, null or undefined if supporting index is sparse"_format(
-                field.fullPath()),
-            _allowMergeOnNullishValues || !value.nullish());
+        uassert(51132,
+                fmt::format("$merge write error: 'on' field '{}' cannot be missing, null or "
+                            "undefined if supporting index is sparse",
+                            field.fullPath()),
+                _allowMergeOnNullishValues || !value.nullish());
         if (value.nullish()) {
             result.addField(field.fullPath(), Value(BSONNULL));
         } else {

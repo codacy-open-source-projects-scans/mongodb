@@ -27,76 +27,61 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <cstdint>
-#include <deque>
-#include <iterator>
-#include <limits>
-#include <memory>
-#include <string>
-#include <utility>
-#include <variant>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/crypto/encryption_fields_gen.h"
-#include "mongo/db/catalog/catalog_test_fixture.h"
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/change_stream_options_gen.h"
-#include "mongo/db/change_stream_options_manager.h"
 #include "mongo/db/change_stream_pre_image_test_helpers.h"
 #include "mongo/db/change_stream_pre_image_util.h"
 #include "mongo/db/change_stream_pre_images_collection_manager.h"
-#include "mongo/db/change_stream_pre_images_truncate_markers_per_nsUUID.h"
-#include "mongo/db/change_stream_serverless_helpers.h"
-#include "mongo/db/change_streams_cluster_parameter_gen.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/catalog_test_fixture.h"
+#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/op_observer/operation_logger_impl.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/change_stream_expired_pre_image_remover.h"
 #include "mongo/db/pipeline/change_stream_preimage_gen.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/server_parameter.h"
-#include "mongo/db/server_parameter_with_storage.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/storage/collection_truncate_markers.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/tenant_id.h"
-#include "mongo/db/timeseries/timeseries_gen.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -119,8 +104,8 @@ TEST_F(ChangeStreamPreImageExpirationPolicyTest,
     setChangeStreamOptionsToManager(opCtx.get(), *changeStreamOptions.get());
 
     auto currentTime = Date_t::now();
-    auto receivedExpireAfterSeconds = change_stream_pre_image_util::getPreImageOpTimeExpirationDate(
-        opCtx.get(), boost::none /** tenantId **/, currentTime);
+    auto receivedExpireAfterSeconds =
+        change_stream_pre_image_util::getPreImageOpTimeExpirationDate(opCtx.get(), currentTime);
     ASSERT(receivedExpireAfterSeconds);
     ASSERT_EQ(*receivedExpireAfterSeconds, currentTime - Seconds(expireAfterSeconds));
 }
@@ -129,8 +114,8 @@ TEST_F(ChangeStreamPreImageExpirationPolicyTest, getPreImageOpTimeExpirationDate
     auto opCtx = cc().makeOperationContext();
 
     auto currentTime = Date_t::now();
-    auto receivedExpireAfterSeconds = change_stream_pre_image_util::getPreImageOpTimeExpirationDate(
-        opCtx.get(), boost::none /** tenantId **/, currentTime);
+    auto receivedExpireAfterSeconds =
+        change_stream_pre_image_util::getPreImageOpTimeExpirationDate(opCtx.get(), currentTime);
     ASSERT_FALSE(receivedExpireAfterSeconds);
 }
 
@@ -141,8 +126,8 @@ TEST_F(ChangeStreamPreImageExpirationPolicyTest, getPreImageOpTimeExpirationDate
     setChangeStreamOptionsToManager(opCtx.get(), *changeStreamOptions.get());
 
     auto currentTime = Date_t::now();
-    auto receivedExpireAfterSeconds = change_stream_pre_image_util::getPreImageOpTimeExpirationDate(
-        opCtx.get(), boost::none /** tenantId **/, currentTime);
+    auto receivedExpireAfterSeconds =
+        change_stream_pre_image_util::getPreImageOpTimeExpirationDate(opCtx.get(), currentTime);
     ASSERT_FALSE(receivedExpireAfterSeconds);
 }
 }  // namespace
@@ -176,11 +161,10 @@ protected:
 
     // Populates the pre-images collection with 'numRecords'. Generates pre-images with Timestamps 1
     // millisecond apart starting at 'startOperationTime'.
-    void prePopulatePreImagesCollection(boost::optional<TenantId> tenantId,
-                                        const NamespaceString& nss,
+    void prePopulatePreImagesCollection(const NamespaceString& nss,
                                         int64_t numRecords,
                                         Date_t startOperationTime) {
-        auto preImagesCollectionNss = NamespaceString::makePreImageCollectionNSS(tenantId);
+        auto preImagesCollectionNss = NamespaceString::kChangeStreamPreImagesNamespace;
         auto opCtx = operationContext();
         auto nsUUID = CollectionCatalog::get(opCtx)
                           ->lookupCollectionByNamespace(operationContext(), nss)
@@ -201,7 +185,7 @@ protected:
         AutoGetCollection preImagesCollectionRaii(opCtx, preImagesCollectionNss, MODE_IX);
         ASSERT(preImagesCollectionRaii);
         WriteUnitOfWork wuow(opCtx);
-        auto& changeStreamPreImagesCollection = preImagesCollectionRaii.getCollection();
+        auto& changeStreamPreImagesCollection = *preImagesCollectionRaii;
 
         auto status = collection_internal::insertDocuments(opCtx,
                                                            changeStreamPreImagesCollection,
@@ -212,8 +196,8 @@ protected:
     };
 
     // Inserts a pre-image into the pre-images collection. The pre-image inserted has a 'ts' of
-    // 'preImageTS', and an 'operationTime' of either (1) 'preImageOperationTime', when explicitly
-    // specified, or (2) a 'Date_t' derived from the 'preImageTS'.
+    // 'preImageTS', and an 'operationTime' of either (1) 'preImageOperationTime', when
+    // explicitly specified, or (2) a 'Date_t' derived from the 'preImageTS'.
     void insertPreImage(NamespaceString nss,
                         Timestamp preImageTS,
                         boost::optional<Date_t> preImageOperationTime = boost::none) {
@@ -222,7 +206,7 @@ protected:
         auto& manager = ChangeStreamPreImagesCollectionManager::get(getServiceContext());
         WriteUnitOfWork wuow(opCtx);
         auto image = generatePreImage(uuid, preImageTS, preImageOperationTime);
-        manager.insertPreImage(opCtx, boost::none, image);
+        manager.insertPreImage(opCtx, image);
         wuow.commit();
     }
 
@@ -250,18 +234,6 @@ protected:
         invariantStatusOK(optionsManager.setOptions(opCtx, options));
     }
 
-    void setExpirationTime(const TenantId& tenantId, Seconds seconds) {
-        auto* clusterParameters = ServerParameterSet::getClusterParameterSet();
-        auto* changeStreamsParam =
-            clusterParameters
-                ->get<ClusterParameterWithStorage<ChangeStreamsClusterParameterStorage>>(
-                    "changeStreams");
-
-        auto oldSettings = changeStreamsParam->getValue(tenantId);
-        oldSettings.setExpireAfterSeconds(seconds.count());
-        changeStreamsParam->setValue(oldSettings, tenantId).ignore();
-    }
-
     void setUp() override {
         CatalogTestFixture::setUp();
         ChangeStreamOptionsManager::create(getServiceContext());
@@ -274,7 +246,7 @@ protected:
             std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
 
         auto& manager = ChangeStreamPreImagesCollectionManager::get(getServiceContext());
-        manager.createPreImagesCollection(operationContext(), boost::none);
+        manager.createPreImagesCollection(operationContext());
 
         invariantStatusOK(storageInterface()->createCollection(
             operationContext(), kPreImageEnabledCollection, CollectionOptions{}));
@@ -295,11 +267,6 @@ protected:
         // Verify the Timestamp is set accordingly.
         ASSERT_EQ(replCoord->getMyLastAppliedOpTimeAndWallTime().opTime.getTimestamp(),
                   targetTimestamp);
-    }
-
-    // A 'boost::none' tenantId implies a single tenant environment.
-    boost::optional<TenantId> nullTenantId() {
-        return boost::none;
     }
 };
 
@@ -370,35 +337,9 @@ TEST_F(PreImagesRemoverTest, RecordIdToPreImageTimstampRetrieval) {
     }
 }
 
-// TODO SERVER-70591: Remove this test as the feature flag will be removed.
-TEST_F(PreImagesRemoverTest, EnsureNoMoreInternalScansWithCollectionScans) {
-    RAIIServerParameterControllerForTest truncateFeatureFlag{
-        "featureFlagUseUnreplicatedTruncatesForDeletions", false};
-
-    auto clock = clockSource();
-    insertPreImage(kPreImageEnabledCollection, Timestamp{clock->now()});
-    clock->advance(Milliseconds{1});
-    insertPreImage(kPreImageEnabledCollection, Timestamp{clock->now()});
-
-    setExpirationTime(Seconds{1});
-    // Verify that expiration works as expected.
-    auto passStats = performPass(Milliseconds{2000});
-    ASSERT_EQ(passStats["totalPass"].numberLong(), 1);
-    ASSERT_EQ(passStats["docsDeleted"].numberLong(), 2);
-    ASSERT_EQ(passStats["scannedInternalCollections"].numberLong(), 1);
-
-    // Assert that internal scans do not occur in the old collection scan approach.
-    passStats = performPass(Milliseconds{2000});
-    ASSERT_EQ(passStats["totalPass"].numberLong(), 2);
-    ASSERT_EQ(passStats["docsDeleted"].numberLong(), 2);
-    ASSERT_EQ(passStats["scannedInternalCollections"].numberLong(), 1);
-}
-
 TEST_F(PreImagesRemoverTest, EnsureNoMoreInternalScansWithTruncates) {
     RAIIServerParameterControllerForTest minBytesPerMarker{
         "preImagesCollectionTruncateMarkersMinBytes", 1};
-    RAIIServerParameterControllerForTest truncateFeatureFlag{
-        "featureFlagUseUnreplicatedTruncatesForDeletions", true};
 
     auto clock = clockSource();
     insertPreImage(kPreImageEnabledCollection, Timestamp{clock->now()});
@@ -436,14 +377,10 @@ TEST_F(PreImagesRemoverTest, EnsureNoMoreInternalScansWithTruncates) {
 }
 
 TEST_F(PreImagesRemoverTest, EnsureAllDocsEventualyTruncatedFromPrePopulatedCollection) {
-    RAIIServerParameterControllerForTest truncateFeatureFlag{
-        "featureFlagUseUnreplicatedTruncatesForDeletions", true};
-
     auto clock = clockSource();
     auto startOperationTime = clock->now();
     auto numRecords = 1000;
-    prePopulatePreImagesCollection(
-        nullTenantId(), kPreImageEnabledCollection, numRecords, startOperationTime);
+    prePopulatePreImagesCollection(kPreImageEnabledCollection, numRecords, startOperationTime);
 
     // Advance the clock to align with the most recent pre-image inserted.
     clock->advance(Milliseconds{numRecords});
@@ -460,9 +397,6 @@ TEST_F(PreImagesRemoverTest, EnsureAllDocsEventualyTruncatedFromPrePopulatedColl
 }
 
 TEST_F(PreImagesRemoverTest, RemoverPassWithTruncateOnEmptyCollection) {
-    RAIIServerParameterControllerForTest truncateFeatureFlag{
-        "featureFlagUseUnreplicatedTruncatesForDeletions", true};
-
     setExpirationTime(Seconds{1});
 
     auto passStats = performPass(Milliseconds{0});
@@ -472,18 +406,14 @@ TEST_F(PreImagesRemoverTest, RemoverPassWithTruncateOnEmptyCollection) {
 }
 
 TEST_F(PreImagesRemoverTest, TruncatesAreOnlyAfterAllDurable) {
-    RAIIServerParameterControllerForTest truncateFeatureFlag{
-        "featureFlagUseUnreplicatedTruncatesForDeletions", true};
     RAIIServerParameterControllerForTest minBytesPerMarkerController{
         "preImagesCollectionTruncateMarkersMinBytes", 1};
 
     auto clock = clockSource();
     auto startOperationTime = clock->now();
     auto numRecordsBeforeAllDurableTimestamp = 1000;
-    prePopulatePreImagesCollection(nullTenantId(),
-                                   kPreImageEnabledCollection,
-                                   numRecordsBeforeAllDurableTimestamp,
-                                   startOperationTime);
+    prePopulatePreImagesCollection(
+        kPreImageEnabledCollection, numRecordsBeforeAllDurableTimestamp, startOperationTime);
 
     // Advance the clock to align with the most recent pre-image inserted.
     clock->advance(Milliseconds{numRecordsBeforeAllDurableTimestamp});
@@ -509,6 +439,94 @@ TEST_F(PreImagesRemoverTest, TruncatesAreOnlyAfterAllDurable) {
     ASSERT_EQ(passStats["totalPass"].numberLong(), 1);
     ASSERT_EQ(passStats["docsDeleted"].numberLong(), numRecordsBeforeAllDurableTimestamp);
     ASSERT_EQ(passStats["scannedInternalCollections"].numberLong(), 1);
+}
+
+/**
+ * Tests the conditions under which the ChangeStreamExpiredPreImagesRemoverService starts
+ * periodic pre-image removal.
+ */
+class PreImagesRemoverServiceTest : service_context_test::WithSetupTransportLayer,
+                                    public CatalogTestFixture {
+protected:
+    void setUp() override {
+        CatalogTestFixture::setUp();
+        // Simulates a standard server startup.
+        preImageRemoverService(operationContext())->onStartup(operationContext());
+    }
+
+    void tearDown() override {
+        // Guarantee the pre-image removal job, if initialized, is shutdown so there is no active
+        // client during ServiceContext destruction.
+        preImageRemoverService(operationContext())->onShutdown();
+        CatalogTestFixture::tearDown();
+    }
+
+    ChangeStreamExpiredPreImagesRemoverService* preImageRemoverService(OperationContext* opCtx) {
+        return ChangeStreamExpiredPreImagesRemoverService::get(opCtx);
+    }
+};
+
+TEST_F(PreImagesRemoverServiceTest, PeriodicJobStartsWithRollbackFalse) {
+    auto opCtx = operationContext();
+    auto preImageRemoverService = ChangeStreamExpiredPreImagesRemoverService::get(opCtx);
+
+    ASSERT_FALSE(preImageRemoverService->startedPeriodicJob_forTest());
+
+    preImageRemoverService->onConsistentDataAvailable(
+        opCtx, false /* isMajority */, false /* isRollback */);
+
+    ASSERT_TRUE(preImageRemoverService->startedPeriodicJob_forTest());
+}
+
+TEST_F(PreImagesRemoverServiceTest, PeriodicJobDoesNotStartWhenRollbackTrue) {
+    auto opCtx = operationContext();
+    auto preImageRemoverService = ChangeStreamExpiredPreImagesRemoverService::get(opCtx);
+
+    ASSERT_FALSE(preImageRemoverService->startedPeriodicJob_forTest());
+
+    preImageRemoverService->onConsistentDataAvailable(
+        opCtx, false /* isMajority */, true /* isRollback */);
+    ASSERT_FALSE(preImageRemoverService->startedPeriodicJob_forTest());
+
+    // Test a second call doesn't start up the periodic remover, since 'isRollback' true may be
+    // called multiple times throughout the lifetime of the mongod.
+    preImageRemoverService->onConsistentDataAvailable(
+        opCtx, false /* isMajority */, true /* isRollback */);
+    ASSERT_FALSE(preImageRemoverService->startedPeriodicJob_forTest());
+}
+
+TEST_F(PreImagesRemoverServiceTest, PeriodicJobOnSecondary) {
+    auto opCtx = operationContext();
+    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+    ASSERT_OK(replCoord->setFollowerMode(repl::MemberState::RS_SECONDARY));
+
+    auto preImageRemoverService = ChangeStreamExpiredPreImagesRemoverService::get(opCtx);
+
+    ASSERT_FALSE(preImageRemoverService->startedPeriodicJob_forTest());
+
+    preImageRemoverService->onConsistentDataAvailable(
+        opCtx, false /* isMajority */, true /* isRollback */);
+    ASSERT_FALSE(preImageRemoverService->startedPeriodicJob_forTest());
+
+    preImageRemoverService->onConsistentDataAvailable(
+        opCtx, false /* isMajority */, false /* isRollback */);
+    ASSERT_TRUE(preImageRemoverService->startedPeriodicJob_forTest());
+}
+
+TEST_F(PreImagesRemoverServiceTest, PeriodicJobDoesntStartOnStandalone) {
+    auto opCtx = operationContext();
+    repl::ReplicationCoordinator::set(getServiceContext(),
+                                      std::make_unique<repl::ReplicationCoordinatorMock>(
+                                          getServiceContext(), repl::ReplSettings()));
+
+    auto preImageRemoverService = ChangeStreamExpiredPreImagesRemoverService::get(opCtx);
+
+    ASSERT_FALSE(preImageRemoverService->startedPeriodicJob_forTest());
+
+    preImageRemoverService->onConsistentDataAvailable(
+        opCtx, false /* isMajority */, false /* isRollback */);
+
+    ASSERT_FALSE(preImageRemoverService->startedPeriodicJob_forTest());
 }
 
 }  // namespace mongo

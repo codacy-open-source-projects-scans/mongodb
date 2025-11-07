@@ -6,12 +6,19 @@
  * to complete the index builds. The expectation is that these values are close to each other.
  *
  * @tags: [
+ *   # While secondaries do not build indexes and do not drain side writes, this test specifically
+ *   # fails due to in-progress index builds being aborted on step up.
+ *   # TODO SERVER-111896 - This test may also not be relevant for primary driven index builds overall.
+ *   primary_driven_index_builds_incompatible_due_to_abort_on_step_up,
  *   requires_replication,
+ *   # TODO SERVER-111867: Remove once primary-driven index builds support side writes.
+ *   primary_driven_index_builds_incompatible,
  * ]
  *
  */
+
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const replSet = new ReplSetTest({
     nodes: [
@@ -23,7 +30,7 @@ const replSet = new ReplSetTest({
                 votes: 0,
             },
         },
-    ]
+    ],
 });
 
 replSet.startSet();
@@ -31,11 +38,11 @@ replSet.initiate();
 
 const primary = replSet.getPrimary();
 
-const dbName = 'test';
+const dbName = "test";
 const primaryDB = primary.getDB(dbName);
 const coll = primaryDB.test;
 
-let insertDocs = function(numDocs) {
+let insertDocs = function (numDocs) {
     const bulk = coll.initializeUnorderedBulkOp();
     for (let i = 0; i < numDocs; i++) {
         bulk.insert({a: i, b: i});
@@ -60,7 +67,7 @@ checkLog.containsJson(secondary, 3856203);
 // the expectation is that the secondary will intercept and drain these writes as they are
 // replicated from primary.
 insertDocs(50000);
-// "index build: drained side writes"
+
 checkLog.containsJson(secondary, 20689);
 
 // Record how long it takes for the index build to complete from this point onward.
@@ -82,5 +89,5 @@ jsTestLog("these values should be similar:");
 jsTestLog("elapsed on primary: " + (primaryEnd - start));
 jsTestLog("elapsed on secondary: " + (secondaryEnd - start));
 
-IndexBuildTest.assertIndexes(coll, 2, ['_id_', 'a_1_b_1']);
+IndexBuildTest.assertIndexes(coll, 2, ["_id_", "a_1_b_1"]);
 replSet.stopSet();

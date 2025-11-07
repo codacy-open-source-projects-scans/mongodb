@@ -28,10 +28,7 @@
  */
 
 
-#include <string>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/auth/user_cache_invalidator_job.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -42,21 +39,23 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/auth/authorization_manager.h"
-#include "mongo/db/auth/user_cache_invalidator_job.h"
 #include "mongo/db/auth/user_cache_invalidator_job_parameters_gen.h"
 #include "mongo/db/client.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
+
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
@@ -92,8 +91,9 @@ StatusWith<OIDorTimestamp> getCurrentCacheGeneration(OperationContext* opCtx) {
         if (cacheGenerationElem)
             return OIDorTimestamp(cacheGenerationElem.OID());
 
-        uassert(
-            4664501, "Must include 'authInfoOpTime'", authInfoOpTimeElem.type() == bsonTimestamp);
+        uassert(4664501,
+                "Must include 'authInfoOpTime'",
+                authInfoOpTimeElem.type() == BSONType::timestamp);
         return authInfoOpTimeElem.timestamp();
     } catch (const DBException& e) {
         return e.toStatus();
@@ -107,39 +107,6 @@ std::string oidOrTimestampToString(const OIDorTimestamp& oidOrTimestamp) {
         return get<Timestamp>(oidOrTimestamp).toString();
     }
     MONGO_UNREACHABLE;
-}
-
-/**
- * TODO: SERVER-86458 - remove.
- *
- * RAII type for making the OperationContext it is instantiated with use the router service util it
- * goes out of scope.
- */
-class ScopedSetRouterService {
-public:
-    ScopedSetRouterService(OperationContext* opCtx);
-    ~ScopedSetRouterService();
-
-private:
-    OperationContext* const _opCtx;
-    Service* const _originalService;
-};
-
-ScopedSetRouterService::ScopedSetRouterService(OperationContext* opCtx)
-    : _opCtx(opCtx), _originalService(opCtx->getService()) {
-    // Verify that the opCtx is not using the router service already.
-    ClientLock lk(_opCtx->getClient());
-
-    auto service = opCtx->getServiceContext()->getService(ClusterRole::RouterServer);
-    invariant(service);
-    _opCtx->getClient()->setService(service);
-}
-
-ScopedSetRouterService::~ScopedSetRouterService() {
-    // Verify that the opCtx is still using the router service.
-    ClientLock lk(_opCtx->getClient());
-    invariant(_opCtx->getService()->role().has(ClusterRole::RouterServer));
-    _opCtx->getClient()->setService(_originalService);
 }
 
 }  // namespace
@@ -178,8 +145,8 @@ void UserCacheInvalidator::initialize(OperationContext* opCtx) {
 
 void UserCacheInvalidator::start(ServiceContext* serviceCtx, OperationContext* opCtx) {
     // UserCacheInvalidator should only run on a router.
-    invariant(serverGlobalParams.clusterRole.has(ClusterRole::RouterServer));
-    ScopedSetRouterService guard(opCtx);
+    invariant(opCtx->getService()->role().has(ClusterRole::RouterServer));
+
     auto invalidator =
         std::make_unique<UserCacheInvalidator>(AuthorizationManager::get(opCtx->getService()));
     invalidator->initialize(opCtx);
@@ -214,7 +181,7 @@ void UserCacheInvalidator::stop(ServiceContext* serviceCtx) {
 
 void UserCacheInvalidator::run() try {
     auto opCtx = cc().makeOperationContext();
-    ScopedSetRouterService guard(opCtx.get());
+    invariant(opCtx->getService()->role().has(ClusterRole::RouterServer));
 
     // Get current cache generation from the config server.
     auto swCurrentGeneration = getCurrentCacheGeneration(opCtx.get());

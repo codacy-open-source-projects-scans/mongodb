@@ -27,29 +27,28 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/matcher/expression_expr.h"
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
-#include "mongo/db/matcher/expression_expr.h"
+#include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/matcher/expression_internal_eq_hashed_key.h"
 #include "mongo/db/matcher/expression_tree.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/util/fail_point.h"
+
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
-
-MONGO_FAIL_POINT_DEFINE(ExprMatchExpressionMatchesReturnsFalseOnException);
 
 ExprMatchExpression::ExprMatchExpression(boost::intrusive_ptr<Expression> expr,
                                          const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -64,32 +63,6 @@ ExprMatchExpression::ExprMatchExpression(BSONElement elem,
     : ExprMatchExpression(Expression::parseOperand(expCtx.get(), elem, expCtx->variablesParseState),
                           expCtx,
                           std::move(annotation)) {}
-
-bool ExprMatchExpression::matches(const MatchableDocument* doc, MatchDetails* details) const {
-    if (_rewriteResult && _rewriteResult->matchExpression() &&
-        !_rewriteResult->matchExpression()->matches(doc, details)) {
-        return false;
-    }
-    try {
-        return evaluateExpression(doc).coerceToBool();
-    } catch (const DBException&) {
-        if (MONGO_unlikely(ExprMatchExpressionMatchesReturnsFalseOnException.shouldFail())) {
-            return false;
-        }
-
-        throw;
-    }
-}
-
-Value ExprMatchExpression::evaluateExpression(const MatchableDocument* doc) const {
-    Document document(doc->toBSON());
-
-    // 'Variables' is not thread safe, and ExprMatchExpression may be used in a validator which
-    // processes documents from multiple threads simultaneously. Hence we make a copy of the
-    // 'Variables' object per-caller.
-    Variables variables = _expCtx->variables;
-    return _expression->evaluate(document, &variables);
-}
 
 void ExprMatchExpression::serialize(BSONObjBuilder* out,
                                     const SerializationOptions& opts,
@@ -120,7 +93,9 @@ void ExprMatchExpression::_doSetCollator(const CollatorInterface* collator) {
     // has a single CollatorInterface, and since that collator is kept on the ExpressionContext,
     // the collator pointer that we're propagating throughout the MatchExpression tree must match
     // the one inside the ExpressionContext.
-    invariant(collator == _expCtx->getCollator());
+    tassert(11052404,
+            "The MatchExpression collator must match the ExpressionContext one",
+            collator == _expCtx->getCollator());
     if (_rewriteResult && _rewriteResult->matchExpression()) {
         _rewriteResult->matchExpression()->setCollator(collator);
     }
@@ -128,12 +103,7 @@ void ExprMatchExpression::_doSetCollator(const CollatorInterface* collator) {
 
 
 std::unique_ptr<MatchExpression> ExprMatchExpression::clone() const {
-    // TODO SERVER-31003: Replace Expression clone via serialization with Expression::clone().
-    BSONObjBuilder bob;
-    bob << "" << _expression->serialize();
-    boost::intrusive_ptr<Expression> clonedExpr = Expression::parseOperand(
-        _expCtx.get(), bob.obj().firstElement(), _expCtx->variablesParseState);
-
+    boost::intrusive_ptr<Expression> clonedExpr = _expression->clone();
     auto clone =
         std::make_unique<ExprMatchExpression>(std::move(clonedExpr), _expCtx, _errorAnnotation);
     if (_rewriteResult) {
@@ -147,92 +117,8 @@ bool ExprMatchExpression::isTriviallyTrue() const {
     return exprConst && exprConst->getValue().coerceToBool();
 }
 
-namespace {
-
-// Return nullptr on failure.
-std::unique_ptr<MatchExpression> attemptToRewriteEqHash(ExprMatchExpression& expr) {
-    auto childExpr = expr.getExpression();
-
-    // Looking for:
-    //                     $eq
-    //    $toHashedIndexKey   {$const: NumberLong(?)}
-    //           "$a"
-    //
-    // Where "a" can be any field path and ? can be any number.
-    if (auto eq = dynamic_cast<ExpressionCompare*>(childExpr.get());
-        eq && eq->getOp() == ExpressionCompare::CmpOp::EQ) {
-        const auto& children = eq->getChildren();
-        tassert(7281406, "should have 2 $eq children", children.size() == 2ul);
-
-        auto eqFirst = children[0].get();
-        auto eqSecond = children[1].get();
-        if (auto hashingExpr = dynamic_cast<ExpressionToHashedIndexKey*>(eqFirst)) {
-            // Matched $toHashedIndexKey - keep going.
-            tassert(7281407,
-                    "should have 1 $toHashedIndexKey child",
-                    hashingExpr->getChildren().size() == 1ul);
-            auto hashChild = hashingExpr->getChildren()[0].get();
-
-            if (auto fieldPath = dynamic_cast<ExpressionFieldPath*>(hashChild);
-                fieldPath && !fieldPath->isVariableReference() && !fieldPath->isROOT()) {
-                auto path = fieldPath->getFieldPathWithoutCurrentPrefix();
-
-                // Matched "$a" in the example above! Now look for the constant long:
-                if (auto constant = dynamic_cast<ExpressionConstant*>(eqSecond);
-                    constant && constant->getValue().getType() == BSONType::NumberLong) {
-                    long long hashTarget = constant->getValue().getLong();
-                    return std::make_unique<InternalEqHashedKey>(path.fullPath(), hashTarget);
-                }
-            }
-        }
-    }
-    return nullptr;
-}
-}  // namespace
-
-MatchExpression::ExpressionOptimizerFunc ExprMatchExpression::getOptimizer() const {
-    return [](std::unique_ptr<MatchExpression> expression) {
-        auto& exprMatchExpr = static_cast<ExprMatchExpression&>(*expression);
-
-        //  $expr expressions can't take advantage of indexes. We attempt to rewrite the expressions
-        //  as a conjunction of internal match expressions, so the query planner can use the
-        //  internal match expressions to potentially generate an index scan.
-        // Exiting early prevents additional calls to optimize from performing additional rewrites
-        // and adding duplicate MatchExpression sub-trees to the tree.
-        if (exprMatchExpr._rewriteResult) {
-            return expression;
-        }
-
-        exprMatchExpr._expression = exprMatchExpr._expression->optimize();
-        if (auto successfulEqHashRewrite = attemptToRewriteEqHash(exprMatchExpr)) {
-            return successfulEqHashRewrite;
-        }
-
-        exprMatchExpr._rewriteResult =
-            RewriteExpr::rewrite(exprMatchExpr._expression, exprMatchExpr._expCtx->getCollator());
-
-        if (exprMatchExpr._rewriteResult->matchExpression()) {
-            // If '_expression' can be rewritten to a MatchExpression, we will return a $and node
-            // with both the original ExprMatchExpression and the MatchExpression rewrite as
-            // children. The rewritten expression might not be equivalent to the original one so we
-            // still have to keep the latter for correctness.
-            auto andMatch = std::make_unique<AndMatchExpression>();
-            andMatch->add(exprMatchExpr._rewriteResult->releaseMatchExpression());
-            andMatch->add(std::move(expression));
-            // Re-optimize the new AND in order to make sure that any AND children are absorbed.
-            // The Boolean simplifier is disabled since we don't want to simplify sub-expressions,
-            // but simplify the whole expression instead.
-            expression =
-                MatchExpression::optimize(std::move(andMatch), /* enableSimplification */ false);
-        }
-
-        // Replace trivially true expression with an empty AND since the planner doesn't always
-        // check for 'isTriviallyTrue()'.
-        if (expression->isTriviallyTrue()) {
-            expression = std::make_unique<AndMatchExpression>();
-        }
-
-        return expression;
-    };
+bool ExprMatchExpression::isTriviallyFalse() const {
+    auto exprConst = dynamic_cast<ExpressionConstant*>(_expression.get());
+    return exprConst && !exprConst->getValue().coerceToBool();
 }
 }  // namespace mongo

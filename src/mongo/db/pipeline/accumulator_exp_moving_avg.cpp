@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -37,11 +35,9 @@
 #include "mongo/db/pipeline/window_function/window_function_expression.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
+
 
 namespace mongo {
-
-using boost::intrusive_ptr;
 
 REGISTER_STABLE_WINDOW_FUNCTION(expMovingAvg,
                                 mongo::window_function::ExpressionExpMovingAvg::parse);
@@ -51,7 +47,7 @@ void AccumulatorExpMovingAvg::processInternal(const Value& input, bool merging) 
     if (!input.numeric()) {
         return;
     }
-    if (input.getType() == BSONType::NumberDecimal) {
+    if (input.getType() == BSONType::numberDecimal) {
         _isDecimal = true;
     }
     auto decimalVal = input.coerceToDecimal();
@@ -62,11 +58,6 @@ void AccumulatorExpMovingAvg::processInternal(const Value& input, bool merging) 
         _currentResult = decimalVal.multiply(_alpha).add(
             _currentResult.multiply(Decimal128(1).subtract(_alpha)));
     }
-}
-
-intrusive_ptr<AccumulatorState> AccumulatorExpMovingAvg::create(ExpressionContext* const expCtx,
-                                                                Decimal128 alpha) {
-    return new AccumulatorExpMovingAvg(expCtx, alpha);
 }
 
 Value AccumulatorExpMovingAvg::getValue(bool toBeMerged) {

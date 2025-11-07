@@ -29,9 +29,31 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/storage/collection_truncate_markers.h"
+#include "mongo/db/storage/container.h"
+#include "mongo/db/storage/damage_vector.h"
+#include "mongo/db/storage/key_format.h"
+#include "mongo/db/storage/record_data.h"
+#include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/record_store_base.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_container.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_cursor.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_size_storer.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
+#include "mongo/db/validate/validate_results.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/uuid.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -39,33 +61,12 @@
 #include <string>
 #include <variant>
 #include <vector>
+
 #include <wiredtiger.h>
 
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/validate/validate_results.h"
-#include "mongo/db/collection_crud/capped_visibility.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/stats/resource_consumption_metrics.h"
-#include "mongo/db/storage/collection_truncate_markers.h"
-#include "mongo/db/storage/damage_vector.h"
-#include "mongo/db/storage/key_format.h"
-#include "mongo/db/storage/record_data.h"
-#include "mongo/db/storage/record_store.h"
-#include "mongo/db/storage/record_store_base.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_cursor.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_size_storer.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/util/fail_point.h"
-#include "mongo/util/uuid.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 /**
  * Either executes the specified operation and returns it's value or randomly throws a write
@@ -84,15 +85,49 @@
 namespace mongo {
 
 class RecoveryUnit;
-class WiredTigerSessionCache;
+class SpillWiredTigerKVEngine;
+class WiredTigerConnection;
+class WiredTigerKVEngine;
 class WiredTigerSizeStorer;
-class WiredTigerOplogData;
-class WiredTigerOplogTruncateMarkers;
 
 class WiredTigerRecordStore : public RecordStoreBase {
 public:
     class Capped;
     class Oplog;
+
+    // Encapsulates configuration parameters to configure a WiredTiger table.
+    struct WiredTigerTableConfig {
+        // This specifies the value for the key_format configuration parameter.
+        KeyFormat keyFormat{KeyFormat::Long};
+        // This specifies the value for the log.enabled configuration parameter.
+        bool logEnabled{true};
+        // This specifies the value for the block_compressor configuration parameter.
+        std::string blockCompressor{"snappy"};
+        // Any additional configuration parameters for WT_SESSION::create() in the configuration
+        // string format.
+        std::string extraCreateOptions;
+    };
+
+    struct Params {
+        boost::optional<UUID> uuid;
+        std::string ident;
+        // Canonical engine name to use for retrieving options
+        std::string engineName;
+        KeyFormat keyFormat;
+        // Whether or not to allow writes to overwrite existing records with the same RecordId.
+        bool overwrite;
+        // True if WiredTiger is logging updates to this table.
+        bool isLogged;
+        // TODO (SERVER-57482): Remove special handling of skipping "wiredtiger_calc_modify()".
+        // True if force to update with the full document, and false otherwise.
+        bool forceUpdateWithFullDocument;
+        // True if the storage engine is an in-memory storage engine
+        bool inMemory;
+        WiredTigerSizeStorer* sizeStorer;
+        bool tracksSizeAdjustments;
+    };
+
+    typedef std::variant<int64_t, WiredTigerItem> CursorKey;
 
     /**
      * Parses collections options for wired tiger configuration string for table creation.
@@ -103,46 +138,41 @@ public:
 
     /**
      * Creates a configuration string suitable for 'config' parameter in WT_SESSION::create().
-     * It is possible for 'ns' to be an empty string, in the case of internal-only temporary tables.
-     * Configuration string is constructed from:
-     *     built-in defaults
-     *     storageEngine.wiredTiger.configString in 'options'
-     *     'extraStrings'
-     * Performs simple validation on the supplied parameters.
-     * Returns error status if validation fails.
-     * Note that even if this function returns an OK status, WT_SESSION:create() may still
-     * fail with the constructed configuration string.
+     * It is possible for 'tableName' to be an empty string, in the case of internal-only temporary
+     * tables. Configuration string is constructed from the parameters of 'wtTableConfig', with
+     * extra settings when 'isOplog' is true.
      */
-    static StatusWith<std::string> generateCreateString(const std::string& engineName,
-                                                        StringData tableName,
-                                                        StringData ident,
-                                                        const CollectionOptions& options,
-                                                        StringData extraStrings,
-                                                        KeyFormat keyFormat,
-                                                        bool loggingEnabled,
-                                                        bool isOplog = false);
+    static std::string generateCreateString(
+        StringData tableName,
+        const WiredTigerRecordStore::WiredTigerTableConfig& wtTableConfig,
+        bool isOplog = false);
 
-    struct Params {
-        boost::optional<UUID> uuid;
-        std::string ident;
-        std::string engineName;
-        KeyFormat keyFormat;
-        bool overwrite;
-        bool isEphemeral;
-        bool isLogged;
-        bool isChangeCollection;
-        WiredTigerSizeStorer* sizeStorer;
-        bool tracksSizeAdjustments;
-        bool forceUpdateWithFullDocument;
-    };
-
-    WiredTigerRecordStore(WiredTigerKVEngine* kvEngine, WiredTigerRecoveryUnit&, Params params);
+    WiredTigerRecordStore(WiredTigerKVEngineBase* kvEngine, WiredTigerRecoveryUnit&, Params params);
 
     ~WiredTigerRecordStore() override;
 
-    const char* name() const override;
+    const char* name() const override {
+        return _engineName.c_str();
+    }
 
-    KeyFormat keyFormat() const override;
+    KeyFormat keyFormat() const override {
+        return std::visit(OverloadedVisitor(
+                              [](const WiredTigerIntegerKeyedContainer& v) -> KeyFormat {
+                                  return KeyFormat::Long;
+                              },
+                              [](const WiredTigerStringKeyedContainer& v) -> KeyFormat {
+                                  return KeyFormat::String;
+                              }),
+                          _container);
+    }
+
+    StringData getURI() const {
+        return std::visit([](const auto& v) -> StringData { return v.uri(); }, _container);
+    }
+
+    uint64_t tableId() const {
+        return std::visit([](const auto& v) -> uint64_t { return v.tableId(); }, _container);
+    }
 
     long long dataSize() const override;
 
@@ -160,12 +190,14 @@ public:
                              std::set<Timestamp>* recordTimestamps) const override;
 
     std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext* opCtx,
+                                                    RecoveryUnit& ru,
                                                     bool forward = true) const override;
 
-    std::unique_ptr<RecordCursor> getRandomCursor(OperationContext* opCtx) const override;
+    std::unique_ptr<RecordCursor> getRandomCursor(OperationContext* opCtx,
+                                                  RecoveryUnit& ru) const override;
 
     bool compactSupported() const override {
-        return !_isEphemeral;
+        return !_inMemory;
     }
 
     void validate(RecoveryUnit& ru,
@@ -182,9 +214,10 @@ public:
 
     void updateStatsAfterRepair(long long numRecords, long long dataSize) override;
 
-    RecordId getLargestKey(OperationContext* opCtx) const override;
+    RecordId getLargestKey(OperationContext* opCtx, RecoveryUnit& ru) const override;
 
     void reserveRecordIds(OperationContext* opCtx,
+                          RecoveryUnit& ru,
                           std::vector<RecordId>* out,
                           size_t nRecords) override;
 
@@ -192,22 +225,12 @@ public:
 
     RecordStore::Oplog* oplog() override;
 
-    const std::string& getURI() const {
-        return _uri;
-    }
-
-    uint64_t tableId() const {
-        return _tableId;
-    }
-
-    Timestamp getPinnedOplog() const;
-
     /*
      * Check the size information for this RecordStore. This function opens a cursor on the
      * RecordStore to determine if it is empty. If it is empty, it will mark the collection as
      * needing size adjustment as a result of a rollback or storage recovery event.
      */
-    void checkSize(OperationContext* opCtx);
+    void checkSize(OperationContext* opCtx, RecoveryUnit& ru);
 
     void setSizeStorer(WiredTigerSizeStorer* ss) {
         _sizeStorer = ss;
@@ -223,36 +246,95 @@ public:
      */
     void setDataSize(long long dataSize);
 
-    typedef std::variant<int64_t, WiredTigerItem> CursorKey;
+    RecordStore::RecordStoreContainer getContainer() override;
 
 protected:
-    void _deleteRecord(OperationContext*, const RecordId&) override;
+    // Encapsulates statistics for an operation performed on this RecordStore instance.
+    struct OpStats {
+        int64_t keyLength{0};
+        int64_t oldValueLength{0};
+        int64_t newValueLength{0};
+    };
+
+    /**
+     * Deletes the specified record from this WiredTiger table. Resets 'opStats' before populating
+     * it with statistics corresponding to this operation.
+     */
+    void wtDeleteRecord(OperationContext*,
+                        WiredTigerRecoveryUnit& wtRu,
+                        const RecordId&,
+                        OpStats& opStats);
+
+    /**
+     * Inserts the given record into this WiredTiger table. Returns error if the record could not be
+     * inserted due to errors like duplicate key error. Resets 'opStats' before populating it with
+     * statistics corresponding to this operation.
+     */
+    Status wtInsertRecord(OperationContext*,
+                          WiredTigerRecoveryUnit& wtRu,
+                          WT_CURSOR* c,
+                          const Record& record,
+                          OpStats& opStats);
+
+    /**
+     * Updates the given record in this WiredTiger table. Resets 'opStats' before populating it with
+     * statistics corresponding to this operation.
+     */
+    Status wtUpdateRecord(OperationContext* opCtx,
+                          WiredTigerRecoveryUnit& wtRu,
+                          const RecordId& id,
+                          const char* data,
+                          int len,
+                          OpStats& opStats);
+
+    /**
+     * Deletes all records in this WiredTiger table.
+     */
+    void wtTruncate(OperationContext* opCtx, WiredTigerRecoveryUnit& wtRu);
+
+    /**
+     * Deletes all Records in the range [minRecordId, maxRecordId].
+     */
+    void wtRangeTruncate(WiredTigerRecoveryUnit& wtRu,
+                         const RecordId& minRecordId = RecordId(),
+                         const RecordId& maxRecordId = RecordId());
+
+    /**
+     * Compacts this WiredTiger table to attempt to reduce its storage space.
+     */
+    StatusWith<int64_t> wtCompact(OperationContext* opCtx,
+                                  WiredTigerRecoveryUnit& wtRu,
+                                  const CompactOptions& options);
+
+    void _deleteRecord(OperationContext*, RecoveryUnit&, const RecordId&) override;
 
     Status _insertRecords(OperationContext*,
+                          RecoveryUnit&,
                           std::vector<Record>*,
                           const std::vector<Timestamp>&) override;
 
-    Status _updateRecord(OperationContext*, const RecordId&, const char* data, int len) override;
+    Status _updateRecord(
+        OperationContext*, RecoveryUnit&, const RecordId&, const char* data, int len) override;
 
     StatusWith<RecordData> _updateWithDamages(OperationContext*,
+                                              RecoveryUnit&,
                                               const RecordId&,
                                               const RecordData&,
                                               const char* damageSource,
                                               const DamageVector&) override;
 
-    Status _truncate(OperationContext*) override;
+    Status _truncate(OperationContext*, RecoveryUnit&) override;
 
     Status _rangeTruncate(OperationContext*,
+                          RecoveryUnit&,
                           const RecordId& minRecordId = RecordId(),
                           const RecordId& maxRecordId = RecordId(),
                           int64_t hintDataSizeIncrement = 0,
                           int64_t hintNumRecordsIncrement = 0) override;
 
-    StatusWith<int64_t> _compact(OperationContext*, const CompactOptions&) override;
+    StatusWith<int64_t> _compact(OperationContext*, RecoveryUnit&, const CompactOptions&) override;
 
-    virtual Status _checkUpdateSize(int64_t oldSize, int64_t newSize);
-
-    long long _reserveIdBlock(OperationContext* opCtx, size_t nRecords);
+    long long _reserveIdBlock(OperationContext* opCtx, RecoveryUnit& ru, size_t nRecords);
 
     /**
      * Adjusts the record count and data size metadata for this record store. The function consults
@@ -282,7 +364,7 @@ protected:
      * immediately before operations that may need this Recordid. This is to support lazily
      * initializing the value instead of all at once during startup.
      */
-    void _initNextIdIfNeeded(OperationContext* opCtx);
+    void _initNextIdIfNeeded(OperationContext* opCtx, RecoveryUnit& ru);
 
     /**
      * Updates the in-memory largest known RecordId field to ensure that recordIds
@@ -292,28 +374,14 @@ protected:
      * TODO (SERVER-88375): Remove all code related to the record store having to keep track
      * of the largest recordId seen.
      */
-    void _updateLargestRecordId(OperationContext* opCtx, long long largestSeen);
+    void _updateLargestRecordId(OperationContext* opCtx, RecoveryUnit& ru, long long largestSeen);
 
-    const std::string _uri;
-    const uint64_t _tableId;  // not persisted
-
-    // Canonical engine name to use for retrieving options
     const std::string _engineName;
-    // The format of this RecordStore's RecordId keys.
-    const KeyFormat _keyFormat;
-    // Whether or not to allow writes to overwrite existing records with the same RecordId.
+    std::variant<WiredTigerIntegerKeyedContainer, WiredTigerStringKeyedContainer> _container;
     const bool _overwrite;
-    // True if the storage engine is an in-memory storage engine
-    const bool _isEphemeral;
-    // True if WiredTiger is logging updates to this table
     const bool _isLogged;
-    // True if the namespace of this record store starts with "config.system.change_collection", and
-    // false otherwise.
-    const bool _isChangeCollection;
-
-    // TODO (SERVER-57482): Remove special handling of skipping "wiredtiger_calc_modify()".
-    // True if force to update with the full document, and false otherwise.
     const bool _forceUpdateWithFullDocument;
+    const bool _inMemory;
 
     // Protects initialization of the _nextIdNum.
     mutable stdx::mutex _initNextIdMutex;
@@ -322,7 +390,11 @@ protected:
     WiredTigerSizeStorer* _sizeStorer;  // not owned, can be NULL
     std::shared_ptr<WiredTigerSizeStorer::SizeInfo> _sizeInfo;
     bool _tracksSizeAdjustments;
-    WiredTigerKVEngine* _kvEngine;  // not owned.
+    WiredTigerKVEngineBase* _kvEngine;  // not owned.
+
+private:
+    std::variant<WiredTigerIntegerKeyedContainer, WiredTigerStringKeyedContainer> _makeContainer(
+        Params& params);
 };
 
 class WiredTigerRecordStore::Capped : public WiredTigerRecordStore, public RecordStoreBase::Capped {
@@ -330,6 +402,7 @@ public:
     Capped(WiredTigerKVEngine*, WiredTigerRecoveryUnit&, Params);
 
     std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext*,
+                                                    RecoveryUnit&,
                                                     bool forward = true) const override;
 
     int64_t storageSize(RecoveryUnit&,
@@ -339,30 +412,26 @@ public:
     RecordStore::Capped* capped() override;
 
 private:
-    void _truncateAfter(OperationContext*,
-                        const RecordId&,
-                        bool inclusive,
-                        const AboutToDeleteRecordCallback&) override;
+    TruncateAfterResult _truncateAfter(OperationContext*,
+                                       RecoveryUnit&,
+                                       const RecordId&,
+                                       bool inclusive) override;
 
-    virtual void _handleTruncateAfter(WiredTigerRecoveryUnit&,
-                                      WT_SESSION*,
-                                      const RecordId& lastKeptId,
-                                      const RecordId& firstRemovedId,
-                                      int64_t recordsRemoved,
-                                      int64_t bytesRemoved);
+    virtual void _handleTruncateAfter(WiredTigerRecoveryUnit&, const RecordId& lastKeptId);
 };
 
 class WiredTigerRecordStore::Oplog final : public WiredTigerRecordStore::Capped,
-                                           public RecordStore::Oplog {
+                                           public RecordStoreBase::Oplog {
 public:
     struct Params {
         UUID uuid;
         std::string ident;
         std::string engineName;
-        bool isEphemeral;
+        bool inMemory;
         int64_t oplogMaxSize;
         WiredTigerSizeStorer* sizeStorer;
         bool tracksSizeAdjustments;
+        bool isLogged;
         bool forceUpdateWithFullDocument;
     };
 
@@ -371,6 +440,7 @@ public:
     ~Oplog() override;
 
     std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext*,
+                                                    RecoveryUnit&,
                                                     bool forward = true) const override;
 
     void validate(RecoveryUnit&,
@@ -381,47 +451,41 @@ public:
 
     RecordStore::Oplog* oplog() override;
 
-    bool selfManagedTruncation() const override;
-
-    std::shared_ptr<CollectionTruncateMarkers> getCollectionTruncateMarkers() override;
-
     Status updateSize(long long size) override;
 
+    int64_t getMaxSize() const override;
+
     std::unique_ptr<SeekableRecordCursor> getRawCursor(OperationContext* opCtx,
+                                                       RecoveryUnit& ru,
                                                        bool forward) const override;
 
     StatusWith<Timestamp> getLatestTimestamp(RecoveryUnit&) const override;
 
     StatusWith<Timestamp> getEarliestTimestamp(RecoveryUnit&) override;
 
-    int64_t getMaxSize() const;
-
-    void setTruncateMarkers(std::shared_ptr<WiredTigerOplogTruncateMarkers> markers);
-
 private:
     Status _insertRecords(OperationContext*,
+                          RecoveryUnit&,
                           std::vector<Record>*,
                           const std::vector<Timestamp>&) override;
 
-    Status _truncate(OperationContext*) override;
+    void _handleTruncateAfter(WiredTigerRecoveryUnit&, const RecordId& lastKeptId) override;
 
-    Status _checkUpdateSize(int64_t oldSize, int64_t newSize) override;
-
-    void _handleTruncateAfter(WiredTigerRecoveryUnit&,
-                              WT_SESSION*,
-                              const RecordId& lastKeptId,
-                              const RecordId& firstRemovedId,
-                              int64_t recordsRemoved,
-                              int64_t bytesRemoved) override;
-
-    std::unique_ptr<WiredTigerOplogData> _oplog;
+    AtomicWord<int64_t> _maxSize;
 };
 
-class WiredTigerRecordStoreCursor : public SeekableRecordCursor {
+class WiredTigerRecordStoreCursorBase : public SeekableRecordCursor {
 public:
-    WiredTigerRecordStoreCursor(OperationContext* opCtx,
-                                const WiredTigerRecordStore& rs,
-                                bool forward);
+    WiredTigerRecordStoreCursorBase(OperationContext* opCtx,
+                                    RecoveryUnit& ru,
+                                    const WiredTigerRecordStore& rs,
+                                    bool forward);
+
+    /**
+     * Initialize the cursor. We use this separate method for initialization to avoid calling
+     * virtual methods in the constuctor.
+     */
+    void init();
 
     boost::optional<Record> next() override;
 
@@ -433,7 +497,7 @@ public:
 
     void saveUnpositioned() override;
 
-    bool restore(bool tolerateCappedRepositioning = true) override;
+    bool restore(RecoveryUnit& ru, bool tolerateCappedRepositioning = true) override;
 
     void detachFromOperationContext() override;
 
@@ -441,13 +505,6 @@ public:
 
     void setSaveStorageCursorOnDetachFromOperationContext(bool saveCursor) override {
         _saveStorageCursorOnDetachFromOperationContext = saveCursor;
-    }
-
-    /**
-     *  Returns the checkpoint ID for checkpoint cursors, otherwise 0.
-     */
-    uint64_t getCheckpointId() const override {
-        return _cursor->getCheckpointId();
     }
 
 protected:
@@ -490,7 +547,7 @@ protected:
     const uint64_t _tableId;
     RecordId _lastReturnedId;  // If null, need to seek to first/last record.
     OperationContext* _opCtx;
-    ResourceConsumption::MetricsCollector* _metrics = nullptr;
+    RecoveryUnit* _ru;
     const std::string _uri;
     const std::string _ident;
     boost::optional<WiredTigerCursor> _cursor;
@@ -512,6 +569,18 @@ private:
 };
 
 /**
+ * The sole purpose of this class is to take a constructor param of type WiredTigerRecordStore and
+ * thus ensure that only WiredTigerRecordStore attempts to create an instance of this class.
+ */
+class WiredTigerRecordStoreCursor : public WiredTigerRecordStoreCursorBase {
+public:
+    WiredTigerRecordStoreCursor(OperationContext* opCtx,
+                                RecoveryUnit& ru,
+                                const WiredTigerRecordStore& rs,
+                                bool forward);
+};
+
+/**
  * WiredTigerCappedCursorBase is an abstract class for a capped cursors. Derived classes must
  * implement a few "visibility" functions to ensure Records are returned correctly following a set
  * of implementation rules.
@@ -521,6 +590,7 @@ private:
 class WiredTigerCappedCursorBase : public WiredTigerRecordStoreCursor {
 public:
     WiredTigerCappedCursorBase(OperationContext* opCtx,
+                               RecoveryUnit& ru,
                                const WiredTigerRecordStore& rs,
                                bool forward);
 
@@ -532,23 +602,25 @@ public:
 
     void save() override;
 
-    bool restore(bool tolerateCappedRepositioning = true) override;
+    bool restore(RecoveryUnit& ru, bool tolerateCappedRepositioning = true) override;
 
 protected:
     /**
      * Initialize any state required to enforce visibility constraints on this cursor.
      */
-    virtual void initVisibility(OperationContext* opCtx) = 0;
+    virtual void initVisibility() {};
 
     /**
      * Returns true if a RecordId should be visible to this cursor.
      */
-    virtual bool isVisible(const RecordId& id) = 0;
+    virtual bool isVisible(const RecordId& id) {
+        return true;
+    };
 
     /**
      * Reset any visibility state on the cursor.
      */
-    virtual void resetVisibility() = 0;
+    virtual void resetVisibility() {};
 };
 
 /**
@@ -556,19 +628,12 @@ protected:
  *
  * Note: forward cursors respect visibility rules, reverse cursors do not.
  */
-class WiredTigerStandardCappedCursor : public WiredTigerCappedCursorBase {
+class WiredTigerStandardCappedCursor final : public WiredTigerCappedCursorBase {
 public:
     WiredTigerStandardCappedCursor(OperationContext* opCtx,
+                                   RecoveryUnit& ru,
                                    const WiredTigerRecordStore& rs,
                                    bool forward);
-
-protected:
-    void initVisibility(OperationContext* opCtx) override;
-    bool isVisible(const RecordId& id) override;
-    void resetVisibility() override;
-
-private:
-    boost::optional<CappedVisibilitySnapshot> _cappedSnapshot;
 };
 
 /**
@@ -576,15 +641,18 @@ private:
  *
  * Note: forward cursors respect visibility rules, reverse cursors do not.
  */
-class WiredTigerOplogCursor : public WiredTigerCappedCursorBase {
+class WiredTigerOplogCursor final : public WiredTigerCappedCursorBase {
 public:
-    WiredTigerOplogCursor(OperationContext* opCtx, const WiredTigerRecordStore& rs, bool forward);
+    WiredTigerOplogCursor(OperationContext* opCtx,
+                          RecoveryUnit& ru,
+                          const WiredTigerRecordStore& rs,
+                          bool forward);
 
     boost::optional<Record> next() override;
     boost::optional<Record> seek(const RecordId& start, BoundInclusion boundInclusion) override;
 
 protected:
-    void initVisibility(OperationContext* opCtx) override;
+    void initVisibility() override;
     bool isVisible(const RecordId& id) override;
     void resetVisibility() override;
 

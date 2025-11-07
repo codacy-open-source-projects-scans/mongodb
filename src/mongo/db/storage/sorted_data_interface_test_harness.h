@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <functional>
-#include <initializer_list>
-#include <memory>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -48,6 +42,13 @@
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/storage/test_harness_helper.h"
 
+#include <functional>
+#include <initializer_list>
+#include <memory>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
 
 const BSONObj key0 = BSON("" << 0);
@@ -57,11 +58,9 @@ const BSONObj key3 = BSON("" << 3);
 const BSONObj key4 = BSON("" << 4);
 const BSONObj key5 = BSON("" << 5);
 const BSONObj key6 = BSON("" << 6);
-const BSONObj key7 = BSON(""
-                          << "\x00");
+const BSONObj key7 = BSON("" << "\x00");
 
-const BSONObj key8 = BSON(""
-                          << "\xff");
+const BSONObj key8 = BSON("" << "\xff");
 
 const BSONObj compoundKey1a = BSON("" << 1 << ""
                                       << "a");
@@ -123,9 +122,10 @@ public:
 };
 
 void registerSortedDataInterfaceHarnessHelperFactory(
-    std::function<std::unique_ptr<SortedDataInterfaceHarnessHelper>()> factory);
+    std::function<std::unique_ptr<SortedDataInterfaceHarnessHelper>(int32_t cacheSizeMB)> factory);
 
-std::unique_ptr<SortedDataInterfaceHarnessHelper> newSortedDataInterfaceHarnessHelper();
+std::unique_ptr<SortedDataInterfaceHarnessHelper> newSortedDataInterfaceHarnessHelper(
+    int32_t cacheSizeMB = 64);
 
 key_string::Value makeKeyString(SortedDataInterface* sorted,
                                 BSONObj bsonKey,

@@ -54,8 +54,29 @@ QueryKnobConfiguration::QueryKnobConfiguration(const query_settings::QuerySettin
             ->get<SamplingConfidenceInterval>("samplingConfidenceInterval")
             ->_data.get();
 
+    _samplingCEMethod = ServerParameterSet::getNodeParameterSet()
+                            ->get<SamplingCEMethod>("internalQuerySamplingCEMethod")
+                            ->_data.get();
+
+    _numChunksForChunkBasedSampling = internalQueryNumChunksForChunkBasedSampling.load();
+    _samplingMarginOfError = samplingMarginOfError.load();
+
+    _sbeHashAggIncreasedSpillingMode =
+        ServerParameterSet::getNodeParameterSet()
+            ->get<SbeHashAggIncreasedSpillingMode>(
+                "internalQuerySlotBasedExecutionHashAggIncreasedSpilling")
+            ->_data.get();
+
     _planEvaluationMaxResults = internalQueryPlanEvaluationMaxResults.loadRelaxed();
+    _plannerMaxIndexedSolutions = internalQueryPlannerMaxIndexedSolutions.loadRelaxed();
+    _planEvaluationCollFraction = internalQueryPlanEvaluationCollFraction.load();
+    _planTotalEvaluationCollFraction = internalQueryPlanTotalEvaluationCollFraction.load();
     _maxScansToExplodeValue = static_cast<size_t>(internalQueryMaxScansToExplode.loadRelaxed());
+    _internalQuerySpillingMinAvailableDiskSpaceBytes =
+        static_cast<int64_t>(internalQuerySpillingMinAvailableDiskSpaceBytes.loadRelaxed());
+
+    _isJoinOrderingEnabled = internalEnableJoinOptimization.load();
+    _randomJoinOrderSeed = internalRandomJoinOrderSeed.load();
 }
 
 QueryFrameworkControlEnum QueryKnobConfiguration::getInternalQueryFrameworkControlForOp() const {
@@ -69,6 +90,32 @@ QueryPlanRankerModeEnum QueryKnobConfiguration::getPlanRankerMode() const {
 SamplingConfidenceIntervalEnum QueryKnobConfiguration::getConfidenceInterval() const {
     return _samplingConfidenceInterval;
 }
+
+SamplingCEMethodEnum QueryKnobConfiguration::getInternalQuerySamplingCEMethod() const {
+    return _samplingCEMethod;
+}
+
+size_t QueryKnobConfiguration::getRandomJoinOrderSeed() const {
+    return _randomJoinOrderSeed;
+}
+
+bool QueryKnobConfiguration::isJoinOrderingEnabled() const {
+    return _isJoinOrderingEnabled;
+}
+
+double QueryKnobConfiguration::getSamplingMarginOfError() const {
+    return _samplingMarginOfError;
+}
+
+int64_t QueryKnobConfiguration::getNumChunksForChunkBasedSampling() const {
+    return _numChunksForChunkBasedSampling;
+}
+
+SbeHashAggIncreasedSpillingModeEnum QueryKnobConfiguration::getSbeHashAggIncreasedSpillingMode()
+    const {
+    return _sbeHashAggIncreasedSpillingMode;
+}
+
 
 bool QueryKnobConfiguration::getSbeDisableGroupPushdownForOp() const {
     return _sbeDisableGroupPushdownValue;
@@ -90,6 +137,18 @@ size_t QueryKnobConfiguration::getPlanEvaluationMaxResultsForOp() const {
     return _planEvaluationMaxResults;
 }
 
+size_t QueryKnobConfiguration::getPlannerMaxIndexedSolutions() const {
+    return _plannerMaxIndexedSolutions;
+}
+
+double QueryKnobConfiguration::getPlanEvaluationCollFraction() const {
+    return _planEvaluationCollFraction;
+}
+
+double QueryKnobConfiguration::getPlanTotalEvaluationCollFraction() const {
+    return _planTotalEvaluationCollFraction;
+}
+
 size_t QueryKnobConfiguration::getMaxScansToExplodeForOp() const {
     return _maxScansToExplodeValue;
 }
@@ -103,6 +162,10 @@ bool QueryKnobConfiguration::canPushDownFullyCompatibleStages() const {
             return true;
     }
     MONGO_UNREACHABLE;
+}
+
+int64_t QueryKnobConfiguration::getInternalQuerySpillingMinAvailableDiskSpaceBytes() const {
+    return _internalQuerySpillingMinAvailableDiskSpaceBytes;
 }
 
 }  // namespace mongo

@@ -29,18 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <span>
-#include <string>
-#include <type_traits>
-#include <utility>
-#include <variant>
-#include <vector>
-
 #include "mongo/base/data_range.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -59,6 +47,19 @@
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
 #include "mongo/util/version/releases.h"
+
+#include <cstdint>
+#include <span>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -354,7 +355,7 @@ public:
      * Throws an exception if the BSON element's type is wrong.
      */
     bool checkAndAssertBinDataType(const BSONElement& element, BinDataType type) const {
-        if (MONGO_likely(element.type() == BinData && element.binDataType() == type)) {
+        if (MONGO_likely(element.type() == BSONType::binData && element.binDataType() == type)) {
             return true;
         }
 
@@ -581,9 +582,9 @@ namespace idl {
  * encountered.
  */
 template <typename T>
-T parseApiStrict(const IDLParserContext& ctx, const BSONObj& cmdObj) {
+T parseApiStrict(const BSONObj& cmdObj, const IDLParserContext& ctx) {
     DeserializationContext dctx;
-    auto cmd = T::parse(ctx, cmdObj, &dctx);
+    auto cmd = T::parse(cmdObj, ctx, &dctx);
     dctx.validateApiStrict();
     return cmd;
 }
@@ -594,9 +595,9 @@ T parseApiStrict(const IDLParserContext& ctx, const BSONObj& cmdObj) {
  * thrown.
  */
 template <typename T>
-T parseCommandDocument(const IDLParserContext& ctx, const BSONObj& cmdObj) {
+T parseCommandDocument(const BSONObj& cmdObj, const IDLParserContext& ctx) {
     DeserializationContext dctx;
-    auto cmd = T::parse(ctx, cmdObj, &dctx);
+    auto cmd = T::parse(cmdObj, ctx, &dctx);
     if (cmd.getGenericArguments().getApiStrict().value_or(false)) {
         dctx.validateApiStrict();
     }
@@ -609,9 +610,9 @@ T parseCommandDocument(const IDLParserContext& ctx, const BSONObj& cmdObj) {
  * thrown.
  */
 template <typename T>
-T parseCommandRequest(const IDLParserContext& ctx, const OpMsgRequest& req) {
+T parseCommandRequest(const OpMsgRequest& req, const IDLParserContext& ctx) {
     DeserializationContext dctx;
-    auto cmd = T::parse(ctx, req, &dctx);
+    auto cmd = T::parse(req, ctx, &dctx);
     if (cmd.getGenericArguments().getApiStrict().value_or(false)) {
         dctx.validateApiStrict();
     }

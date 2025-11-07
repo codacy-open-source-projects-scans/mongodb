@@ -37,7 +37,7 @@ _VERSIONS = {}  # type: ignore
 # interface.py and fixturelib API establishes forward-compatibility of fixture files.
 # If the informal API becomes heavily used and needs forward-compatibility,
 # consider adding it to the formal API.
-class APIVersion(object, metaclass=registry.make_registry_metaclass(_VERSIONS)):  # pylint: disable=invalid-metaclass
+class APIVersion(object, metaclass=registry.make_registry_metaclass(_VERSIONS)):
     """Class storing fixture API version info."""
 
     REGISTERED_NAME = "APIVersion"
@@ -74,7 +74,7 @@ class TeardownMode(Enum):
     ABORT = 6
 
 
-class Fixture(object, metaclass=registry.make_registry_metaclass(_FIXTURES)):  # pylint: disable=invalid-metaclass
+class Fixture(object, metaclass=registry.make_registry_metaclass(_FIXTURES)):
     """Base class for all fixtures."""
 
     # Error response codes copied from mongo/base/error_codes.yml.
@@ -139,7 +139,7 @@ class Fixture(object, metaclass=registry.make_registry_metaclass(_FIXTURES)):  #
         """
 
         try:
-            self._do_teardown(mode=mode)
+            self._do_teardown(finished=finished, mode=mode)
         finally:
             if finished:
                 for handler in self.logger.handlers:
@@ -147,7 +147,7 @@ class Fixture(object, metaclass=registry.make_registry_metaclass(_FIXTURES)):  #
                     # want the logs to eventually get flushed.
                     self.fixturelib.close_loggers(handler)
 
-    def _do_teardown(self, mode=None):  # noqa
+    def _do_teardown(self, finished=False, mode=None):  # noqa
         """Destroy the fixture.
 
         This method must be implemented by subclasses.
@@ -187,8 +187,10 @@ class Fixture(object, metaclass=registry.make_registry_metaclass(_FIXTURES)):  #
             "get_internal_connection_string must be implemented by Fixture subclasses"
         )
 
-    def get_shell_connection_string(self):
+    def get_shell_connection_string(self, use_grpc=False):
         """Return the connection string to be used by the mongo shell process executing a jstest.
+
+        Specify use_grpc=True to get a connection string with the gRPC port.
 
         This is NOT a driver connection string, but a connection string of the format
         expected by the mongo::ConnectionString class.
@@ -537,4 +539,4 @@ def build_client(node, auth_options=None, read_preference=pymongo.ReadPreference
 
 
 # Represents a row in a node info table.
-NodeInfo = namedtuple("NodeInfo", ["full_name", "name", "port", "pid", "router_port"])
+NodeInfo = namedtuple("NodeInfo", ["full_name", "name", "port", "pid"])

@@ -29,20 +29,19 @@
 
 #include "mongo/util/hex.h"
 
-#include <algorithm>
-#include <cstddef>
-#include <fmt/format.h>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/ctype.h"
 
+#include <algorithm>
+#include <cstddef>
+#include <string>
+
+#include <fmt/format.h>
+
 namespace mongo {
 
 namespace {
-
-using namespace fmt::literals;
 
 constexpr StringData kHexUpper = "0123456789ABCDEF"_sd;
 constexpr StringData kHexLower = "0123456789abcdef"_sd;
@@ -75,7 +74,7 @@ unsigned char decodeDigit(unsigned char c) {
     if (c >= 'A' && c <= 'F')
         return c - 'A' + 10;
     uasserted(ErrorCodes::FailedToParse,
-              "The character \\x{:02x} failed to parse from hex."_format(c));
+              fmt::format("The character \\x{:02x} failed to parse from hex.", c));
 }
 
 unsigned char decodePair(StringData c) {

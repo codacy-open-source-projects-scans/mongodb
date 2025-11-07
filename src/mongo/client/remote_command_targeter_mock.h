@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <memory>
-#include <set>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/client/connection_string.h"
@@ -45,6 +39,12 @@
 #include "mongo/util/cancellation.h"
 #include "mongo/util/future.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <memory>
+#include <set>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 
@@ -69,13 +69,15 @@ public:
      * Returns ErrorCodes::InternalError if setFindHostReturnValue was never called.
      */
     SemiFuture<HostAndPort> findHost(const ReadPreferenceSetting& readPref,
-                                     const CancellationToken& cancelToken) override;
+                                     const CancellationToken& cancelToken,
+                                     const TargetingMetadata& targetingMetadata) override;
 
     SemiFuture<std::vector<HostAndPort>> findHosts(const ReadPreferenceSetting& readPref,
                                                    const CancellationToken& cancelToken) override;
 
     StatusWith<HostAndPort> findHost(OperationContext* opCtx,
-                                     const ReadPreferenceSetting& readPref) override;
+                                     const ReadPreferenceSetting& readPref,
+                                     const TargetingMetadata& targetingMetadata) override;
 
     /**
      * Adds host to a set of hosts marked down, otherwise a no-op.

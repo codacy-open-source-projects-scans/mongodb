@@ -29,15 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <random>
-#include <vector>
-
 #include "mongo/base/status_with.h"
 #include "mongo/crypto/sha256_block.h"
 #include "mongo/db/operation_context.h"
@@ -52,9 +43,20 @@
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/hierarchical_acquisition.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 
-namespace mongo {
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <random>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUB mongo {
 
 /**
  * The SessionKiller enforces a single thread for session killing for any given Service.
@@ -128,8 +130,8 @@ public:
      * This is the api for killSessions commands to invoke the killer.  It blocks until the kill is
      * finished, or until it fails (times out on all nodes in mongos).
      */
-    std::shared_ptr<Result> kill(OperationContext* opCtx,
-                                 const KillAllSessionsByPatternSet& toKill);
+    MONGO_MOD_PRIVATE std::shared_ptr<Result> kill(OperationContext* opCtx,
+                                                   const KillAllSessionsByPatternSet& toKill);
 
 private:
     /**
@@ -160,4 +162,4 @@ private:
     bool _inShutdown = false;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

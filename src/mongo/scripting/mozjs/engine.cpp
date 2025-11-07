@@ -27,31 +27,31 @@
  *    it in the license file.
  */
 
-#include <absl/meta/type_traits.h>
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <fmt/format.h>
-#include <js-config.h>
-#include <js/Initialization.h>
-#include <utility>
-#include <vector>
+#include "mongo/scripting/mozjs/engine.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/scripting/mozjs/engine.h"
 #include "mongo/scripting/mozjs/engine_gen.h"
 #include "mongo/scripting/mozjs/implscope.h"
 #include "mongo/scripting/mozjs/proxyscope.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstdint>
+#include <utility>
+#include <vector>
+
+#include <js-config.h>
+
+#include <absl/meta/type_traits.h>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+#include <js/Initialization.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -78,8 +78,7 @@ void ScriptEngine::setup(ExecutionEnvironment environment) {
 }
 
 std::string ScriptEngine::getInterpreterVersionString() {
-    using namespace fmt::literals;
-    return "MozJS-{}"_format(MOZJS_MAJOR_VERSION);
+    return fmt::format("MozJS-{}", MOZJS_MAJOR_VERSION);
 }
 
 namespace mozjs {
@@ -123,14 +122,6 @@ void MozJSScriptEngine::interruptAll(ServiceContextLock& svcCtxLock) {
             (*opCtx)[operationMozJSScopeDecoration]->kill();
         }
     }
-}
-
-void MozJSScriptEngine::enableJIT(bool value) {
-    gDisableJavaScriptJIT.store(!value);
-}
-
-bool MozJSScriptEngine::isJITEnabled() const {
-    return !gDisableJavaScriptJIT.load();
 }
 
 void MozJSScriptEngine::enableJavaScriptProtection(bool value) {

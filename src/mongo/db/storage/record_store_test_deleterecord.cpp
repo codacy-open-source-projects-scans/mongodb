@@ -27,23 +27,20 @@
  *    it in the license file.
  */
 
+#include "mongo/base/status_with.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/record_store_test_harness.h"
+#include "mongo/unittest/death_test.h"
+#include "mongo/unittest/unittest.h"
+
 #include <memory>
 #include <ostream>
 #include <string>
 
 #include <boost/move/utility_core.hpp>
-
-#include "mongo/base/status_with.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/health_log_interface.h"
-#include "mongo/db/catalog/health_log_mock.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/storage/record_store.h"
-#include "mongo/db/storage/record_store_test_harness.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
 
 
 namespace mongo {
@@ -54,7 +51,7 @@ using std::stringstream;
 using std::unique_ptr;
 
 // Insert a record and try to delete it.
-TEST(RecordStoreTestHarness, DeleteRecord) {
+TEST(RecordStoreTest, DeleteRecord) {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
 
@@ -68,7 +65,11 @@ TEST(RecordStoreTestHarness, DeleteRecord) {
         {
             StorageWriteTransaction txn(ru);
             StatusWith<RecordId> res =
-                rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, Timestamp());
+                rs->insertRecord(opCtx.get(),
+                                 *shard_role_details::getRecoveryUnit(opCtx.get()),
+                                 data.c_str(),
+                                 data.size() + 1,
+                                 Timestamp());
             ASSERT_OK(res.getStatus());
             loc = res.getValue();
             txn.commit();
@@ -83,7 +84,7 @@ TEST(RecordStoreTestHarness, DeleteRecord) {
 
         {
             StorageWriteTransaction txn(ru);
-            rs->deleteRecord(opCtx.get(), loc);
+            rs->deleteRecord(opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()), loc);
             txn.commit();
         }
     }
@@ -92,7 +93,7 @@ TEST(RecordStoreTestHarness, DeleteRecord) {
 }
 
 // Insert multiple records and try to delete them.
-TEST(RecordStoreTestHarness, DeleteMultipleRecords) {
+TEST(RecordStoreTest, DeleteMultipleRecords) {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
 
@@ -110,7 +111,11 @@ TEST(RecordStoreTestHarness, DeleteMultipleRecords) {
 
             StorageWriteTransaction txn(ru);
             StatusWith<RecordId> res =
-                rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, Timestamp());
+                rs->insertRecord(opCtx.get(),
+                                 *shard_role_details::getRecoveryUnit(opCtx.get()),
+                                 data.c_str(),
+                                 data.size() + 1,
+                                 Timestamp());
             ASSERT_OK(res.getStatus());
             locs[i] = res.getValue();
             txn.commit();
@@ -124,7 +129,8 @@ TEST(RecordStoreTestHarness, DeleteMultipleRecords) {
         auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
         {
             StorageWriteTransaction txn(ru);
-            rs->deleteRecord(opCtx.get(), locs[i]);
+            rs->deleteRecord(
+                opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()), locs[i]);
             txn.commit();
         }
     }
@@ -133,16 +139,9 @@ TEST(RecordStoreTestHarness, DeleteMultipleRecords) {
 }
 
 // Delete a non-existent record and expect it to crash with a log message.
-DEATH_TEST_REGEX(RecordStoreTestHarness,
-                 DeleteNonExistentRecord,
-                 "Record to be deleted not found") {
+DEATH_TEST_REGEX(RecordStoreTest, DeleteNonExistentRecord, "Record to be deleted not found") {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
-
-    // Start a HealthLogMock for deleteRecord() to log to.
-    auto serviceContext = harnessHelper->serviceContext();
-    HealthLogInterface::set(serviceContext, std::make_unique<HealthLogMock>());
-    HealthLogInterface::get(serviceContext)->startup();
 
     string data = "my record";
     RecordId loc;
@@ -151,7 +150,11 @@ DEATH_TEST_REGEX(RecordStoreTestHarness,
         auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
         StorageWriteTransaction txn(ru);
         StatusWith<RecordId> res =
-            rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, Timestamp());
+            rs->insertRecord(opCtx.get(),
+                             *shard_role_details::getRecoveryUnit(opCtx.get()),
+                             data.c_str(),
+                             data.size() + 1,
+                             Timestamp());
         ASSERT_OK(res.getStatus());
         loc = res.getValue();
         txn.commit();
@@ -163,7 +166,9 @@ DEATH_TEST_REGEX(RecordStoreTestHarness,
 
         StorageWriteTransaction txn(ru);
         // Should crash with a log message.
-        rs->deleteRecord(opCtx.get(), RecordId(loc.getLong() + 1));
+        rs->deleteRecord(opCtx.get(),
+                         *shard_role_details::getRecoveryUnit(opCtx.get()),
+                         RecordId(loc.getLong() + 1));
         MONGO_UNREACHABLE;
     }
 }

@@ -29,13 +29,8 @@
 
 #pragma once
 
-#include <absl/container/node_hash_map.h>
-#include <boost/optional/optional.hpp>
-#include <mutex>
-#include <string>
-#include <vector>
-
 #include "mongo/base/string_data.h"
+#include "mongo/db/global_catalog/type_mongos.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replica_set_aware_service.h"
@@ -43,12 +38,18 @@
 #include "mongo/s/analyze_shard_key_common_gen.h"
 #include "mongo/s/analyze_shard_key_documents_gen.h"
 #include "mongo/s/analyze_shard_key_role.h"
-#include "mongo/s/catalog/type_mongos.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/periodic_runner.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/time_support.h"
+
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace analyze_shard_key {
@@ -72,7 +73,8 @@ public:
      */
     class Sampler {
     public:
-        Sampler(std::string name, Date_t lastPingTime) : _name(name), _lastPingTime(lastPingTime){};
+        Sampler(std::string name, Date_t lastPingTime)
+            : _name(name), _lastPingTime(lastPingTime) {};
 
         std::string getName() const {
             return _name;
@@ -121,9 +123,9 @@ public:
      * On a sharded cluster, creates, updates and deletes the sampler for the mongos with the given
      * config.mongos document.
      */
-    void onSamplerInsert(const MongosType& doc);
-    void onSamplerUpdate(const MongosType& doc);
-    void onSamplerDelete(const MongosType& doc);
+    virtual void onSamplerInsert(const MongosType& doc);
+    virtual void onSamplerUpdate(const MongosType& doc);
+    virtual void onSamplerDelete(const MongosType& doc);
 
     /**
      * Given the average number of queries that a sampler executes, returns the new query analyzer
@@ -184,6 +186,7 @@ private:
      * Returns the minimum last ping time for a sampler to be considered as active.
      */
     Date_t _getMinLastPingTime();
+    Date_t _getMinLastPingTime(Date_t now);
 
     mutable stdx::mutex _mutex;
 
@@ -191,5 +194,13 @@ private:
     StringMap<Sampler> _samplers;
 };
 
+class QueryAnalysisCoordinatorFactory {
+public:
+    QueryAnalysisCoordinatorFactory() = default;
+    virtual ~QueryAnalysisCoordinatorFactory() = default;
+    virtual QueryAnalysisCoordinator* getQueryAnalysisCoordinator(OperationContext* opCtx) {
+        return QueryAnalysisCoordinator::get(opCtx);
+    }
+};
 }  // namespace analyze_shard_key
 }  // namespace mongo

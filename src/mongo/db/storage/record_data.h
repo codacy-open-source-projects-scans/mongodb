@@ -29,14 +29,14 @@
 
 #pragma once
 
-#include <type_traits>
-
 #include "mongo/bson/bsonobj.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/shared_buffer.h"
 
-namespace mongo {
+#include <type_traits>
 
-// TODO: Does this need to have move support?
+namespace MONGO_MOD_PUBLIC mongo {
+
 /**
  * A replacement for the Record class. This class represents data in a record store.
  * The _ownedData attribute is used to manage memory ownership.
@@ -61,7 +61,7 @@ public:
      * Returns true if this owns its own memory, and false otherwise
      */
     bool isOwned() const {
-        return _ownedData.get();
+        return _size == 0 || _ownedData.get();
     }
 
     SharedBuffer releaseBuffer() {
@@ -103,4 +103,4 @@ private:
 MONGO_STATIC_ASSERT(std::is_nothrow_move_constructible_v<RecordData>);
 MONGO_STATIC_ASSERT(std::is_nothrow_move_assignable_v<RecordData>);
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

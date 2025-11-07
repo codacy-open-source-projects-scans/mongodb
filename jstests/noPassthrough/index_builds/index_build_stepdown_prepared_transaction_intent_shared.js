@@ -15,15 +15,21 @@
  *    stepdown by holding the RSTL in MODE_IX.
  *
  * @tags: [
+ *   # TODO SERVER-111896 - Investigate whether this test is relevant / correct for primary driven
+ *   # index builds.
+ *   # This test may fail only because primary driven index builds are aborted when a new primary steps up.
+ *   primary_driven_index_builds_incompatible_due_to_abort_on_step_up,
  *   uses_prepare_transaction,
  *   uses_transactions,
+ *   # TODO SERVER-111867: Remove once primary-driven index builds support side writes.
+ *   primary_driven_index_builds_incompatible,
  * ]
  */
 import {PrepareHelpers} from "jstests/core/txns/libs/prepare_helpers.js";
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {funWithArgs} from "jstests/libs/parallel_shell_helpers.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 import {waitForState} from "jstests/replsets/rslib.js";
 
 const dbName = "test";
@@ -43,16 +49,18 @@ assert.commandWorked(primaryColl.insert({x: 1}));
 // Enable fail point which makes hybrid index build hang before taking locks for commit.
 const hangBeforeCommit = configureFailPoint(primaryDB, "hangIndexBuildBeforeCommit");
 
-const indexName = 'myidx';
-const indexThread = IndexBuildTest.startIndexBuild(primary,
-                                                   primaryColl.getFullName(),
-                                                   {x: 1},
-                                                   {name: indexName},
-                                                   ErrorCodes.InterruptedDueToReplStateChange);
+const indexName = "myidx";
+const indexThread = IndexBuildTest.startIndexBuild(
+    primary,
+    primaryColl.getFullName(),
+    {x: 1},
+    {name: indexName},
+    ErrorCodes.InterruptedDueToReplStateChange,
+);
 
 // Get opId and ensure it is the one for the above index build.
 const filter = {
-    "desc": {$regex: /IndexBuildsCoordinatorMongod-*/}
+    "desc": {$regex: /IndexBuildsCoordinatorMongod-*/},
 };
 const opId = IndexBuildTest.waitForIndexBuildToStart(primaryDB, collName, indexName, filter);
 
@@ -72,27 +80,37 @@ PrepareHelpers.prepareTransaction(session);
 // Wait the index build to enqueue MODE_X collection lock.
 hangBeforeCommit.off();
 assert.soonNoExcept(() => {
-    const result = primary.getDB("admin")
-                       .aggregate([{$currentOp: {idleConnections: true}}, {$match: filter}])
-                       .toArray();
+    const result = primary
+        .getDB("admin")
+        .aggregate([{$currentOp: {idleConnections: true}}, {$match: filter}])
+        .toArray();
     assert(result.length === 1, tojson(result));
     return result[0].waitingForLock;
 });
 
 jsTestLog("Run operation taking MODE_IS lock");
-const otherCommandThread =
-    startParallelShell(funWithArgs(function(dbName, collName) {
-                           assert.commandWorked(db.runCommand({
-                               validateDBMetadata: 1,
-                               db: dbName,
-                               collection: collName,
-                               apiParameters: {version: "1", strict: true}
-                           }));
-                       }, primaryDB.getName(), primaryColl.getName()), primary.port);
+const otherCommandThread = startParallelShell(
+    funWithArgs(
+        function (dbName, collName) {
+            assert.commandWorked(
+                db.runCommand({
+                    validateDBMetadata: 1,
+                    db: dbName,
+                    collection: collName,
+                    apiParameters: {version: "1", strict: true},
+                }),
+            );
+        },
+        primaryDB.getName(),
+        primaryColl.getName(),
+    ),
+    primary.port,
+);
 
 const curopValidateDb = () => {
     const filterValidateDB = {"command.validateDBMetadata": 1};
-    return primary.getDB("admin")
+    return primary
+        .getDB("admin")
         .aggregate([{$currentOp: {idleConnections: true}}, {$match: filterValidateDB}])
         .toArray();
 };
@@ -101,11 +119,16 @@ const curopValidateDb = () => {
 // part is required to reproduce the deadlock, but if the deadlock is fixed the operation is
 // expected to succeed.
 try {
-    assert.soonNoExcept(() => {
-        const result = curopValidateDb();
-        assert(result.length === 1, tojson(result));
-        return result[0].waitingForLock;
-    }, "Failed to wait for validateDBMetadata to take locks", 10000, {runHangAnalyzer: false});
+    assert.soonNoExcept(
+        () => {
+            const result = curopValidateDb();
+            assert(result.length === 1, tojson(result));
+            return result[0].waitingForLock;
+        },
+        "Failed to wait for validateDBMetadata to take locks",
+        10000,
+        {runHangAnalyzer: false},
+    );
 } catch (e) {
     // If the deadlock is fixed, we don't expect to find the operation, as it will have acquired
     // locks and completed.
@@ -138,8 +161,7 @@ IndexBuildTest.waitForIndexBuildToStop(newPrimary.getDB(dbName), collName, index
 IndexBuildTest.waitForIndexBuildToStop(primary.getDB(dbName), collName, indexName);
 rst.awaitReplication();
 
-IndexBuildTest.assertIndexes(
-    newPrimary.getDB(dbName).getCollection(collName), 2, ["_id_", indexName], []);
+IndexBuildTest.assertIndexes(newPrimary.getDB(dbName).getCollection(collName), 2, ["_id_", indexName], []);
 IndexBuildTest.assertIndexes(primaryColl, 2, ["_id_", indexName], []);
 
 rst.stopSet();

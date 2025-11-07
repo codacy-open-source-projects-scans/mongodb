@@ -27,13 +27,15 @@
  *    it in the license file.
  */
 
-#include <fmt/format.h>
-#include <string>
+#include "mongo/util/hierarchical_acquisition.h"
 
 #include "mongo/platform/source_location.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/hierarchical_acquisition.h"
+#include "mongo/unittest/unittest.h"
+
+#include <iterator>
+#include <string>
+
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -42,9 +44,8 @@ using namespace hierarchical_acquisition_detail;
 
 struct Context {
     friend std::string toString(Context context) {
-        using namespace fmt::literals;
-        return R"({{"level": {}, "sourceLocation": "{}"}})"_format(context.index,
-                                                                   context.loc.toString());
+        return fmt::format(
+            R"({{"level": {}, "sourceLocation": "{}"}})", context.index, context.loc);
     }
 
     friend std::ostream& operator<<(std::ostream& os, const Context& context) {
@@ -52,7 +53,7 @@ struct Context {
     }
 
     Level::IndexType index;
-    SourceLocationHolder loc;
+    SourceLocation loc;
 };
 
 #define MONGO_MAKE_CONTEXT(index)      \

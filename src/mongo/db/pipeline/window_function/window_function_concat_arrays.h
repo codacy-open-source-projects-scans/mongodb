@@ -29,8 +29,10 @@
 
 #pragma once
 
-#include "mongo/db/pipeline/memory_token_container_util.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/window_function/window_function.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -43,7 +45,7 @@ public:
     }
 
     explicit WindowFunctionConcatArrays(ExpressionContext* const expCtx)
-        : WindowFunctionState(expCtx) {
+        : WindowFunctionState(expCtx, internalQueryMaxConcatArraysBytes.load()) {
         _memUsageTracker.set(sizeof(*this));
     }
 
@@ -61,6 +63,13 @@ public:
         _count += value.getArrayLength();
         _values.emplace_back(SimpleMemoryUsageToken{value.getApproximateSize(), &_memUsageTracker},
                              std::move(value));
+        uassert(ErrorCodes::ExceededMemoryLimit,
+                str::stream() << "$concatArrays used too much memory and spilling to disk will not "
+                                 "reduce memory usage. Used: "
+                              << _memUsageTracker.inUseTrackedMemoryBytes()
+                              << " bytes. Memory limit: "
+                              << _memUsageTracker.maxAllowedMemoryUsageBytes() << " bytes",
+                _memUsageTracker.withinMemoryLimit());
     }
 
     void remove(Value value) override {

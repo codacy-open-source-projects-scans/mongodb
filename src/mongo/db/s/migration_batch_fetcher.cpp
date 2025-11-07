@@ -29,32 +29,30 @@
 
 #include "mongo/db/s/migration_batch_fetcher.h"
 
-#include <functional>
-#include <mutex>
-#include <utility>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/cancelable_operation_context.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/s/migration_batch_mock_inserter.h"
-#include "mongo/db/s/sharding_runtime_d_params_gen.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
+#include "mongo/db/sharding_environment/sharding_runtime_d_params_gen.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/timer.h"
+
+#include <functional>
+#include <mutex>
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -105,16 +103,14 @@ MigrationBatchFetcher<Inserter>::MigrationBatchFetcher(
     const UUID& migrationId,
     const UUID& collectionId,
     std::shared_ptr<MigrationCloningProgressSharedState> migrationProgress,
-    bool parallelFetchingSupported,
     int maxBufferedSizeBytesPerThread)
     : _nss{std::move(nss)},
-      _chunkMigrationConcurrency{1},
       _sessionId{std::move(sessionId)},
       _inserterWorkers{[&]() {
           ThreadPool::Options options;
           options.poolName = "ChunkMigrationInserters";
-          options.minThreads = _chunkMigrationConcurrency;
-          options.maxThreads = _chunkMigrationConcurrency;
+          options.minThreads = 1;
+          options.maxThreads = 1;
           options.onCreateThread = Inserter::onCreateThread;
           return std::make_unique<ThreadPool>(options);
       }()},
@@ -128,32 +124,24 @@ MigrationBatchFetcher<Inserter>::MigrationBatchFetcher(
       _collectionUuid(collectionId),
       _migrationId{migrationId},
       _writeConcern{writeConcern},
-      _isParallelFetchingSupported{parallelFetchingSupported},
       _secondaryThrottleTicket(outerOpCtx->getServiceContext(),
                                1,
                                false /* trackPeakUsed */,
                                TicketHolder::kDefaultMaxQueueDepth),
       _bufferSizeTracker(maxBufferedSizeBytesPerThread) {
-    // (Ignore FCV check): This feature flag doesn't have any upgrade/downgrade concerns.
-    if (mongo::feature_flags::gConcurrencyInChunkMigration.isEnabledAndIgnoreFCVUnsafe() &&
-        chunkMigrationConcurrency.load() > 1) {
-        LOGV2_INFO(9532401,
-                   "The ChunkMigrationConcurrency setting has been deprecated and is now fixed at "
-                   "a value of 1");
-    }
-
     _inserterWorkers->startup();
 }
 
 template <typename Inserter>
 BSONObj MigrationBatchFetcher<Inserter>::_fetchBatch(OperationContext* opCtx) {
-    auto commandResponse = uassertStatusOKWithContext(
-        _fromShard->runCommand(opCtx,
-                               ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                               DatabaseName::kAdmin,
-                               _migrateCloneRequest,
-                               Shard::RetryPolicy::kNoRetry),
-        "_migrateClone failed: ");
+    auto commandResponse =
+        uassertStatusOKWithContext(_fromShard->runCommandWithIndefiniteRetries(
+                                       opCtx,
+                                       ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                                       DatabaseName::kAdmin,
+                                       _migrateCloneRequest,
+                                       Shard::RetryPolicy::kStrictlyNotIdempotent),
+                                   "_migrateClone failed: ");
 
     uassertStatusOKWithContext(Shard::CommandResponse::getEffectiveStatus(commandResponse),
                                "_migrateClone failed: ");
@@ -163,19 +151,16 @@ BSONObj MigrationBatchFetcher<Inserter>::_fetchBatch(OperationContext* opCtx) {
 
 template <typename Inserter>
 void MigrationBatchFetcher<Inserter>::fetchAndScheduleInsertion() {
-    auto numFetchers = _isParallelFetchingSupported ? _chunkMigrationConcurrency : 1;
     auto fetchersThreadPool = [&]() {
         ThreadPool::Options options;
         options.poolName = "ChunkMigrationFetchers";
-        options.minThreads = numFetchers;
-        options.maxThreads = numFetchers;
+        options.minThreads = 1;
+        options.maxThreads = 1;
         options.onCreateThread = onCreateThread;
         return std::make_unique<ThreadPool>(options);
     }();
     fetchersThreadPool->startup();
-    for (int i = 0; i < numFetchers; ++i) {
-        fetchersThreadPool->schedule([this](Status status) { this->_runFetcher(); });
-    }
+    fetchersThreadPool->schedule([this](Status status) { this->_runFetcher(); });
 
     fetchersThreadPool->shutdown();
     fetchersThreadPool->join();
@@ -235,7 +220,6 @@ void MigrationBatchFetcher<Inserter>::_runFetcher() try {
                           _collectionUuid,
                           _migrationProgress,
                           _migrationId,
-                          _chunkMigrationConcurrency,
                           &_secondaryThrottleTicket};
 
         _inserterWorkers->schedule([this,

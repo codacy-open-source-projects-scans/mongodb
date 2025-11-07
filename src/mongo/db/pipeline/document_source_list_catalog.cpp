@@ -29,12 +29,6 @@
 
 #include "mongo/db/pipeline/document_source_list_catalog.h"
 
-#include <fmt/format.h>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/auth/action_set.h"
@@ -44,12 +38,13 @@
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/version_context.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
+
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -59,9 +54,10 @@ REGISTER_DOCUMENT_SOURCE(listCatalog,
                          DocumentSourceListCatalog::LiteParsed::parse,
                          DocumentSourceListCatalog::createFromBson,
                          AllowedWithApiStrict::kNeverInVersion1);
+ALLOCATE_DOCUMENT_SOURCE_ID(listCatalog, DocumentSourceListCatalog::id)
 
 const char* DocumentSourceListCatalog::getSourceName() const {
-    return kStageName.rawData();
+    return kStageName.data();
 }
 
 PrivilegeVector DocumentSourceListCatalog::LiteParsed::requiredPrivileges(
@@ -86,30 +82,6 @@ PrivilegeVector DocumentSourceListCatalog::LiteParsed::requiredPrivileges(
     }
 }
 
-DocumentSource::GetNextResult DocumentSourceListCatalog::doGetNext() {
-    if (!_catalogDocs) {
-        if (pExpCtx->getNamespaceString().isCollectionlessAggregateNS()) {
-            _catalogDocs =
-                pExpCtx->getMongoProcessInterface()->listCatalog(pExpCtx->getOperationContext());
-        } else if (auto catalogDoc = pExpCtx->getMongoProcessInterface()->getCatalogEntry(
-                       pExpCtx->getOperationContext(),
-                       pExpCtx->getNamespaceString(),
-                       pExpCtx->getUUID())) {
-            _catalogDocs = {{std::move(*catalogDoc)}};
-        } else {
-            _catalogDocs.emplace();
-        }
-    }
-
-    if (!_catalogDocs->empty()) {
-        Document doc{_catalogDocs->front()};
-        _catalogDocs->pop_front();
-        return doc;
-    }
-
-    return GetNextResult::makeEOF();
-}
-
 DocumentSourceListCatalog::DocumentSourceListCatalog(
     const intrusive_ptr<ExpressionContext>& pExpCtx)
     : DocumentSource(kStageName, pExpCtx) {}
@@ -118,7 +90,7 @@ intrusive_ptr<DocumentSource> DocumentSourceListCatalog::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& pExpCtx) {
     uassert(6200600,
             "The $listCatalog stage specification must be an empty object",
-            elem.type() == Object && elem.Obj().isEmpty());
+            elem.type() == BSONType::object && elem.Obj().isEmpty());
 
     const NamespaceString& nss = pExpCtx->getNamespaceString();
 
@@ -130,6 +102,7 @@ intrusive_ptr<DocumentSource> DocumentSourceListCatalog::createFromBson(
     uassert(ErrorCodes::QueryFeatureNotAllowed,
             fmt::format("The {} aggregation stage is not enabled", kStageName),
             feature_flags::gDocumentSourceListCatalog.isEnabled(
+                VersionContext::getDecoration(pExpCtx->getOperationContext()),
                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
 
     return new DocumentSourceListCatalog(pExpCtx);

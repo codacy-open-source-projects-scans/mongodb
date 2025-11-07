@@ -29,8 +29,29 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/client/read_preference.h"
+#include "mongo/db/client.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/executor/task_executor.h"
+#include "mongo/executor/task_executor_pool.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/with_lock.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/future.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/net/hostandport.h"
+#include "mongo/util/out_of_line_executor.h"
+#include "mongo/util/scopeguard.h"
+#include "mongo/util/time_support.h"
+
 #include <cstddef>
 #include <functional>
 #include <list>
@@ -39,27 +60,8 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/client/read_preference.h"
-#include "mongo/db/client.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/executor/task_executor.h"
-#include "mongo/executor/task_executor_pool.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/stdx/condition_variable.h"
-#include "mongo/stdx/mutex.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/with_lock.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/future.h"
-#include "mongo/util/net/hostandport.h"
-#include "mongo/util/out_of_line_executor.h"
-#include "mongo/util/scopeguard.h"
-#include "mongo/util/time_support.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -87,20 +89,19 @@ public:
      * set with its result.
      */
     template <class Callable>
-    Future<FutureContinuationResult<Callable, OperationContext*>> scheduleWork(
-        Callable&& task) noexcept {
+    Future<FutureContinuationResult<Callable, OperationContext*>> scheduleWork(Callable&& task) {
         return scheduleWorkIn(Milliseconds(0), std::forward<Callable>(task));
     }
 
     template <class Callable>
     Future<FutureContinuationResult<Callable, OperationContext*>> scheduleWorkIn(
-        Milliseconds millis, Callable&& task) noexcept {
+        Milliseconds millis, Callable&& task) {
         return scheduleWorkAt(_executor->now() + millis, std::forward<Callable>(task));
     }
 
     template <class Callable>
-    Future<FutureContinuationResult<Callable, OperationContext*>> scheduleWorkAt(
-        Date_t when, Callable&& task) noexcept {
+    Future<FutureContinuationResult<Callable, OperationContext*>> scheduleWorkAt(Date_t when,
+                                                                                 Callable&& task) {
         using ReturnType = FutureContinuationResult<Callable, OperationContext*>;
         auto pf = makePromiseFuture<ReturnType>();
         auto taskCompletionPromise = std::make_shared<Promise<ReturnType>>(std::move(pf.promise));
@@ -111,7 +112,7 @@ public:
             auto scheduledWorkHandle = uassertStatusOK(_executor->scheduleWorkAt(
                 when,
                 [this, task = std::forward<Callable>(task), taskCompletionPromise](
-                    const executor::TaskExecutor::CallbackArgs& args) mutable noexcept {
+                    const executor::TaskExecutor::CallbackArgs& args) mutable {
                     taskCompletionPromise->setWith([&] {
                         {
                             stdx::lock_guard lk(_mutex);
@@ -119,10 +120,8 @@ public:
                             uassertStatusOK(args.status);
                         }
 
-                        // TODO(SERVER-74658): Please revisit if this thread could be made killable.
                         ThreadClient tc("TransactionCoordinator",
-                                        _serviceContext->getService(ClusterRole::ShardServer),
-                                        ClientOperationKillableByStepdown{false});
+                                        _serviceContext->getService(ClusterRole::ShardServer));
 
                         auto uniqueOpCtxIter = [&] {
                             stdx::lock_guard lk(_mutex);

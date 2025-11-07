@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-#include <vector>
-
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -44,9 +38,15 @@
 #include "mongo/db/matcher/expression_array.h"
 #include "mongo/db/matcher/expression_visitor.h"
 #include "mongo/db/matcher/expression_with_placeholder.h"
-#include "mongo/db/matcher/match_details.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstddef>
+#include <memory>
+#include <vector>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -67,25 +67,6 @@ public:
     void debugString(StringBuilder& debug, int indentationLevel) const final;
 
     bool equivalent(const MatchExpression* expr) const final;
-
-    /**
-     * Matches 'array' if the element at '_index' matches '_expression', or if its size is less than
-     * '_index'.
-     */
-    bool matchesArray(const BSONObj& array, MatchDetails* details) const final {
-        BSONElement element;
-        auto iterator = BSONObjIterator(array);
-
-        // Skip ahead to the element we want, bailing early if there aren't enough elements.
-        for (auto i = 0LL; i <= _index; ++i) {
-            if (!iterator.more()) {
-                return true;
-            }
-            element = iterator.next();
-        }
-
-        return _expression->matchesBSONElement(element, details);
-    }
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
                                        const SerializationOptions& opts = {},
@@ -129,9 +110,11 @@ public:
         return _expression.get();
     }
 
-private:
-    ExpressionOptimizerFunc getOptimizer() const final;
+    ExpressionWithPlaceholder* getExpression() {
+        return _expression.get();
+    }
 
+private:
     long long _index = 0;
     std::unique_ptr<ExpressionWithPlaceholder> _expression;
 };

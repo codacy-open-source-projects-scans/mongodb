@@ -4,16 +4,27 @@
  * includes a metric for peak memory usage across the entire stage, including each individual
  * function as well as any other internal state.
  *
- * @tags: [assumes_against_mongod_not_mongos]
+ * TODO: Once SERVER-111899 is done and feature flag QueryMemoryTracking is removed, the
+ * "multiversion_incompatible" tag can be removed, assuming that there is no further explain
+ * output changes based on feature flags in the future.
+ *
+ * @tags: [
+ *    multiversion_incompatible,
+ *    assumes_against_mongod_not_mongos
+ * ]
  */
 import {getAggPlanStages} from "jstests/libs/query/analyze_plan.js";
+import {
+    getTotalMemoryUsageFromStageExplainOutput,
+    assertExplainMemoryTracking,
+} from "jstests/aggregation/extras/window_function_helpers.js";
 
 const coll = db[jsTestName()];
 coll.drop();
-const bigStr = Array(1025).toString();  // 1KB of ','
+const bigStr = Array(1025).toString(); // 1KB of ','
 const nDocs = 1000;
 const nPartitions = 50;
-// Size was found through logging in 'SpillableCache' class.
+// Size was found through logging in 'SpillableDeque' class.
 const docSize = 1292;
 
 let bulk = coll.initializeUnorderedBulkOp();
@@ -31,8 +42,7 @@ assert.commandWorked(bulk.execute());
  * - 'verbosity' indicates the explain verbosity used.
  */
 function checkExplainResult(pipeline, expectedFunctionMemUsages, expectedTotalMemUsage, verbosity) {
-    const stages =
-        getAggPlanStages(coll.explain(verbosity).aggregate(pipeline), "$_internalSetWindowFields");
+    const stages = getAggPlanStages(coll.explain(verbosity).aggregate(pipeline), "$_internalSetWindowFields");
     for (let stage of stages) {
         assert(stage.hasOwnProperty("$_internalSetWindowFields"), stage);
 
@@ -45,23 +55,29 @@ function checkExplainResult(pipeline, expectedFunctionMemUsages, expectedTotalMe
                 if (expectedFunctionMemUsages.hasOwnProperty(field)) {
                     // The estimates being passed in are as close as possible to accurate. Leave 10%
                     // wiggle room for variants that use different amounts of memory.
-                    assert.gte(maxFunctionMemUsages[field],
-                               expectedFunctionMemUsages[field] * .9,
-                               "mismatch for function '" + field + "': " + tojson(stage));
-                    assert.lt(maxFunctionMemUsages[field],
-                              2.2 * expectedFunctionMemUsages[field],
-                              "mismatch for function '" + field + "': " + tojson(stage));
+                    assert.gte(
+                        maxFunctionMemUsages[field],
+                        expectedFunctionMemUsages[field] * 0.9,
+                        "mismatch for function '" + field + "': " + tojson(stage),
+                    );
+                    assert.lt(
+                        maxFunctionMemUsages[field],
+                        2.2 * expectedFunctionMemUsages[field],
+                        "mismatch for function '" + field + "': " + tojson(stage),
+                    );
                 }
             }
-            assert.gt(stage["maxTotalMemoryUsageBytes"],
-                      expectedTotalMemUsage * .9,
-                      "Incorrect total mem usage: " + tojson(stage));
-            assert.lt(stage["maxTotalMemoryUsageBytes"],
-                      2.2 * expectedTotalMemUsage,
-                      "Incorrect total mem usage: " + tojson(stage));
+
+            // TODO: Once SERVER-111899 is done and feature flag QueryMemoryTracking is removed, remove this assertion.
+            assertExplainMemoryTracking(stage);
+
+            const totalMemoryUsage = getTotalMemoryUsageFromStageExplainOutput(stage);
+            assert.gt(totalMemoryUsage, expectedTotalMemUsage * 0.9, "Incorrect total mem usage: " + tojson(stage));
+            assert.lt(totalMemoryUsage, 2.2 * expectedTotalMemUsage, "Incorrect total mem usage: " + tojson(stage));
         } else {
             assert(!stage.hasOwnProperty("maxFunctionMemoryUsageBytes"), stage);
             assert(!stage.hasOwnProperty("maxTotalMemoryUsageBytes"), stage);
+            assert(!stage.hasOwnProperty("peakTrackedMemBytes"), stage);
         }
     }
 }
@@ -69,20 +85,17 @@ function checkExplainResult(pipeline, expectedFunctionMemUsages, expectedTotalMe
 (function testQueryPlannerVerbosity() {
     const pipeline = [
         {
-            $setWindowFields:
-                {output: {count: {$sum: 1}, push: {$push: "$bigStr"}, set: {$addToSet: "$bigStr"}}}
+            $setWindowFields: {output: {count: {$sum: 1}, push: {$push: "$bigStr"}, set: {$addToSet: "$bigStr"}}},
         },
     ];
-    const stages = getAggPlanStages(coll.explain("queryPlanner").aggregate(pipeline),
-                                    "$_internalSetWindowFields");
+    const stages = getAggPlanStages(coll.explain("queryPlanner").aggregate(pipeline), "$_internalSetWindowFields");
     checkExplainResult(stages, {}, 0, "queryPlanner");
 })();
 
 (function testUnboundedMemUsage() {
     let pipeline = [
         {
-            $setWindowFields:
-                {output: {count: {$sum: 1}, push: {$push: "$bigStr"}, set: {$addToSet: "$bigStr"}}}
+            $setWindowFields: {output: {count: {$sum: 1}, push: {$push: "$bigStr"}, set: {$addToSet: "$bigStr"}}},
         },
     ];
 
@@ -90,7 +103,7 @@ function checkExplainResult(pipeline, expectedFunctionMemUsages, expectedTotalMe
     // each function. For the default [unbounded, unbounded] window type, each function uses memory
     // usage comparable to it's $group counterpart.
     let expectedFunctionMemUsages = {
-        count: 72,
+        count: 176,
         push: nDocs * 1024,
         set: 1024,
     };
@@ -110,17 +123,17 @@ function checkExplainResult(pipeline, expectedFunctionMemUsages, expectedTotalMe
         {
             $setWindowFields: {
                 partitionBy: "$key",
-                output: {count: {$sum: 1}, push: {$push: "$bigStr"}, set: {$addToSet: "$bigStr"}}
-            }
+                output: {count: {$sum: 1}, push: {$push: "$bigStr"}, set: {$addToSet: "$bigStr"}},
+            },
         },
     ];
     expectedFunctionMemUsages = {
-        count: 72,
-        push: (nDocs / nPartitions) * 1056 + 56,  // 56 constant state size. Uses 1056 per document.
-        set: 1144,                                // 1024 for the string, rest is constant state.
+        count: 176,
+        push: (nDocs / nPartitions) * 1056 + 56, // 56 constant state size. Uses 1056 per document.
+        set: 1144, // 1024 for the string, rest is constant state.
     };
     // Add one document for the NextPartitionState structure.
-    expectedTotal = ((nDocs / nPartitions) + 1) * docSize;
+    expectedTotal = (nDocs / nPartitions + 1) * docSize;
     for (let func in expectedFunctionMemUsages) {
         expectedTotal += expectedFunctionMemUsages[func];
     }
@@ -137,8 +150,8 @@ function checkExplainResult(pipeline, expectedFunctionMemUsages, expectedTotalMe
         {
             $setWindowFields: {
                 sortBy: {_id: 1},
-                output: {runningSum: {$sum: "$_id", window: {documents: [0, 9]}}}
-            }
+                output: {runningSum: {$sum: "$_id", window: {documents: [0, 9]}}},
+            },
         },
     ];
     const expectedFunctionMemUsages = {
@@ -161,8 +174,8 @@ function checkExplainResult(pipeline, expectedFunctionMemUsages, expectedTotalMe
         {
             $setWindowFields: {
                 sortBy: {_id: 1},
-                output: {runningSum: {$sum: "$_id", window: {documents: [-5, 4]}}}
-            }
+                output: {runningSum: {$sum: "$_id", window: {documents: [-5, 4]}}},
+            },
         },
     ];
     expectedTotal = (windowSize / 2) * docSize;
@@ -179,8 +192,8 @@ function checkExplainResult(pipeline, expectedFunctionMemUsages, expectedTotalMe
             $setWindowFields: {
                 partitionBy: "$key",
                 sortBy: {_id: 1},
-                output: {runningSum: {$sum: "$_id", window: {documents: [-5, 4]}}}
-            }
+                output: {runningSum: {$sum: "$_id", window: {documents: [-5, 4]}}},
+            },
         },
     ];
 
@@ -194,8 +207,8 @@ function checkExplainResult(pipeline, expectedFunctionMemUsages, expectedTotalMe
         {
             $setWindowFields: {
                 sortBy: {_id: 1},
-                output: {pushArray: {$push: "$bigStr", window: {range: [-10, 9]}}}
-            }
+                output: {pushArray: {$push: "$bigStr", window: {range: [-10, 9]}}},
+            },
         },
     ];
     // The memory usage is doubled since both the executor and the function state have copies of the

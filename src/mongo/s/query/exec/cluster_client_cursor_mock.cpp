@@ -28,14 +28,15 @@
  */
 
 
-#include <boost/none.hpp>
+#include "mongo/s/query/exec/cluster_client_cursor_mock.h"
+
+#include "mongo/util/assert_util.h"
+
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/s/query/exec/cluster_client_cursor_mock.h"
-#include "mongo/util/assert_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -52,14 +53,14 @@ ClusterClientCursorMock::~ClusterClientCursorMock() {
 }
 
 StatusWith<ClusterQueryResult> ClusterClientCursorMock::next() {
-    invariant(!_killed);
+    tassert(11052322, "Expected cursor not killed", !_killed);
 
     if (_resultsQueue.empty()) {
         _remotesExhausted = true;
         return {ClusterQueryResult()};
     }
 
-    auto out = _resultsQueue.front();
+    auto out = std::move(_resultsQueue.front());
     _resultsQueue.pop();
 
     if (!out.isOK()) {
@@ -79,15 +80,15 @@ const PrivilegeVector& ClusterClientCursorMock::getOriginatingPrivileges() const
 }
 
 bool ClusterClientCursorMock::partialResultsReturned() const {
-    MONGO_UNREACHABLE;
+    MONGO_UNREACHABLE_TASSERT(11052359);
 }
 
 std::size_t ClusterClientCursorMock::getNumRemotes() const {
-    MONGO_UNREACHABLE;
+    MONGO_UNREACHABLE_TASSERT(11052360);
 }
 
 BSONObj ClusterClientCursorMock::getPostBatchResumeToken() const {
-    MONGO_UNREACHABLE;
+    MONGO_UNREACHABLE_TASSERT(11052361);
 }
 
 long long ClusterClientCursorMock::getNumReturnedSoFar() const {
@@ -110,6 +111,10 @@ boost::optional<uint32_t> ClusterClientCursorMock::getPlanCacheShapeHash() const
     return boost::none;
 }
 
+boost::optional<query_shape::QueryShapeHash> ClusterClientCursorMock::getQueryShapeHash() const {
+    return boost::none;
+}
+
 boost::optional<std::size_t> ClusterClientCursorMock::getQueryStatsKeyHash() const {
     return boost::none;
 }
@@ -125,6 +130,10 @@ void ClusterClientCursorMock::kill(OperationContext* opCtx) {
     }
 }
 
+Status ClusterClientCursorMock::releaseMemory() {
+    return Status::OK();
+}
+
 bool ClusterClientCursorMock::isTailable() const {
     return false;
 }
@@ -133,15 +142,15 @@ bool ClusterClientCursorMock::isTailableAndAwaitData() const {
     return false;
 }
 
-void ClusterClientCursorMock::queueResult(const ClusterQueryResult& result) {
-    _resultsQueue.push({result});
+void ClusterClientCursorMock::queueResult(ClusterQueryResult&& result) {
+    _resultsQueue.push({std::move(result)});
 }
 
-bool ClusterClientCursorMock::remotesExhausted() {
+bool ClusterClientCursorMock::remotesExhausted() const {
     return _remotesExhausted;
 }
 
-bool ClusterClientCursorMock::hasBeenKilled() {
+bool ClusterClientCursorMock::hasBeenKilled() const {
     return _killed;
 }
 
@@ -150,7 +159,7 @@ void ClusterClientCursorMock::queueError(Status status) {
 }
 
 Status ClusterClientCursorMock::setAwaitDataTimeout(Milliseconds awaitDataTimeout) {
-    MONGO_UNREACHABLE;
+    MONGO_UNREACHABLE_TASSERT(11052362);
 }
 
 boost::optional<LogicalSessionId> ClusterClientCursorMock::getLsid() const {

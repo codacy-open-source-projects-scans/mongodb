@@ -29,13 +29,14 @@
 
 #pragma once
 
-#include <bit>
-
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/util/spilling.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
+#include "mongo/util/modules.h"
+
+#include <bit>
 
 namespace mongo::sbe {
 
@@ -106,9 +107,11 @@ public:
     const SpecificStats* getSpecificStats() const final;
     size_t estimateCompileTimeSize() const final;
 
+
 protected:
-    void doSaveState(bool relinquishCursor) override;
-    void doRestoreState(bool relinquishCursor) override;
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {
+        return;
+    }
 
 private:
     /**
@@ -190,6 +193,12 @@ private:
      * Spill all the in memory rows inside the window buffer.
      */
     void spill();
+
+    void doForceSpill() final {
+        doRestoreState();
+        spill();
+        doSaveState();
+    }
 
     const value::SlotVector _currSlots;
     const value::SlotVector _boundTestingSlots;
@@ -273,7 +282,6 @@ private:
     static const long _batchSize = 1000;
     std::vector<Record> _records;
     std::vector<SharedBuffer> _recordBuffers;
-    std::vector<Timestamp> _recordTimestamps;
 
     /**
      * A memory estimator for the window state. Incrementally calculate the linear regression of the
@@ -384,7 +392,8 @@ private:
     // The memory size for each window accumulator state.
     std::vector<std::vector<WindowStateMemoryEstimator>> _windowStateMemoryEstimators;
     // Memory threshold before spilling.
-    const size_t _memoryThreshold = internalDocumentSourceSetWindowFieldsMaxMemoryBytes.load();
+    const size_t _memoryThreshold =
+        loadMemoryLimit(StageMemoryLimit::DocumentSourceSetWindowFieldsMaxMemoryBytes);
 
     // The failpoint counter to force spilling, incremented for every window function update,
     // every document.

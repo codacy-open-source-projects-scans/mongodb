@@ -29,9 +29,6 @@
 
 #include "mongo/db/pipeline/document_source_list_cluster_catalog.h"
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
@@ -43,15 +40,18 @@
 #include "mongo/db/pipeline/document_source_project.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/allowed_contexts.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/s/balancer_configuration.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstddef>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
 using boost::intrusive_ptr;
 using std::list;
-using namespace fmt::literals;
 
 class ListClusterCatalogPipelineBuilder {
 public:
@@ -98,7 +98,7 @@ list<intrusive_ptr<DocumentSource>> DocumentSourceListClusterCatalog::createFrom
 
     uassert(9621302,
             str::stream() << kStageName << " must take an object but found: " << elem,
-            elem.type() == BSONType::Object);
+            elem.type() == BSONType::object);
     /**
      * Compose the pipeline to generate an entry for each existing collection and its related
      * sharding informations.
@@ -177,8 +177,8 @@ list<intrusive_ptr<DocumentSource>> DocumentSourceListClusterCatalog::createFrom
         } })");
 
 
-    auto specs = mongo::DocumentSourceListClusterCatalogSpec::parse(IDLParserContext(kStageName),
-                                                                    elem.embeddedObject());
+    auto specs = mongo::DocumentSourceListClusterCatalogSpec::parse(elem.embeddedObject(),
+                                                                    IDLParserContext(kStageName));
     if (specs.getShards()) {
         // Add a lookup stage to join with config.chunks
         pipeline.addStage<DocumentSourceLookUp>(R"({
@@ -209,13 +209,15 @@ list<intrusive_ptr<DocumentSource>> DocumentSourceListClusterCatalog::createFrom
                       $cond: {  
                            if: "$tracked",  
                            then: {$first: "$matchingShards.shards"},  
-                           else: {$concatArrays: [["$primary"]]}  
-                       }  
-                   }  
+                           else: {$cond: ["$primary", ["$primary"], []]}
+                       }
+                   }
                }  
            })");
     }
 
+    // TODO (SERVER-61033) balancingEnabled should stop depening on `permitMigrations`.
+    // TODO (SERVER-61033) Remove balancingEnabledReason field.
     if (specs.getBalancingConfiguration()) {
         const auto maxChunkSizeInMb = getDefaultMaxChunkSize(expCtx->getOperationContext());
         pipeline.addStage<DocumentSourceAddFields>(R"({
@@ -224,7 +226,20 @@ list<intrusive_ptr<DocumentSource>> DocumentSourceListClusterCatalog::createFrom
                     $cond: {
                         if: "$sharded",
                         then: {
-                            $ne: [ "$firstTrackedCollectionInfo.noBalance", true]
+                            $and:[
+                                {$not: {$ifNull: ["$firstTrackedCollectionInfo.noBalance", false]}},
+                                {$ifNull: ["$firstTrackedCollectionInfo.permitMigrations", true]}
+                            ]
+                        },
+                        else: "$$REMOVE"
+                    }
+                },
+                "balancingEnabledReason": {
+                    $cond: {
+                        if: "$sharded",
+                        then: {
+                            "enableBalancing": {$not: {$ifNull: ["$firstTrackedCollectionInfo.noBalance", false]}},
+                            "allowMigrations": {$ifNull: ["$firstTrackedCollectionInfo.permitMigrations", true]}
                         },
                         else: "$$REMOVE"
                     }

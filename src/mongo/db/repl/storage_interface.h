@@ -30,8 +30,25 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/index/multikey_paths.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/repl/collection_bulk_loader.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/key_string/key_string.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/uuid.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <iosfwd>
@@ -39,29 +56,13 @@
 #include <string>
 #include <vector>
 
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/query/index_bounds.h"
-#include "mongo/db/repl/collection_bulk_loader.h"
-#include "mongo/db/repl/oplog.h"
-#include "mongo/db/repl/optime.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/storage/key_string/key_string.h"
-#include "mongo/util/uuid.h"
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace repl {
 
-struct TimestampedBSONObj {
+struct MONGO_MOD_PUB TimestampedBSONObj {
     BSONObj obj;
     Timestamp timestamp;
 };
@@ -78,7 +79,7 @@ struct TimestampedBSONObj {
  *      * Drop a collection
  *      * Insert documents into a collection
  */
-class StorageInterface {
+class MONGO_MOD_PUB StorageInterface {
     StorageInterface(const StorageInterface&) = delete;
     StorageInterface& operator=(const StorageInterface&) = delete;
 
@@ -477,14 +478,6 @@ public:
      * Returns whether the storage engine can provide a recovery timestamp.
      */
     virtual bool supportsRecoveryTimestamp(ServiceContext* serviceCtx) const = 0;
-
-    /**
-     * Responsible for initializing independent processes for replication that manage
-     * and interact with the storage layer.
-     *
-     * Initializes the OplogCapMaintainerThread to control deletion of oplog truncate markers.
-     */
-    virtual void initializeStorageControlsForReplication(ServiceContext* serviceCtx) const = 0;
 
     /**
      * Returns the stable timestamp that the storage engine recovered to on startup. If the

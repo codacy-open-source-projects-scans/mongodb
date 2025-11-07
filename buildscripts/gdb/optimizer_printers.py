@@ -1,4 +1,4 @@
-"""GDB Pretty-printers for types in mongo::optimizer."""
+"""GDB Pretty-printers for types in mongo::abt."""
 
 import os
 import sys
@@ -11,7 +11,7 @@ if not gdb:
     sys.path.insert(0, str(Path(os.path.abspath(__file__)).parent.parent.parent))
     from buildscripts.gdb.mongo import lookup_type
 
-OPTIMIZER_NS = "mongo::optimizer"
+ABT_NS = "mongo::abt"
 
 # Tracks the indentation for Op* tree types.
 operator_indent_level = 0
@@ -22,7 +22,7 @@ def strip_namespace(value):
 
 
 class StrongStringAliasPrinter(object):
-    """Pretty-printer for mongo::optimizer::StrongStringAlias."""
+    """Pretty-printer for mongo::abt::StrongStringAlias."""
 
     def __init__(self, val):
         """Initialize StrongStringAliasPrinter."""
@@ -235,6 +235,17 @@ class BinaryOpPrinter(FixedArityNodePrinter):
         return "BinaryOp[{}]".format(strip_namespace(self.val["_op"]))
 
 
+class NaryOpPrinter(DynamicArityNodePrinter):
+    """Pretty-printer for NaryOp."""
+
+    def __init__(self, val):
+        """Initialize NaryOpPrinter."""
+        super().__init__(val, 0, "NaryOp")
+
+    def to_string(self):
+        return "NaryOp[{}]".format(strip_namespace(self.val["_op"]))
+
+
 class BlackholePrinter(FixedArityNodePrinter):
     """Pretty-printer for Blackhole."""
 
@@ -259,6 +270,14 @@ class LetPrinter(FixedArityNodePrinter):
         super().__init__(val, 2, "Let")
 
 
+class MultiLetPrinter(DynamicArityNodePrinter):
+    """Pretty-printer for MultiLet."""
+
+    def __init__(self, val):
+        """Initialize MultiLetPrinter."""
+        super().__init__(val, 0, "MultiLet")
+
+
 class LambdaAbstractionPrinter(FixedArityNodePrinter):
     """Pretty-printer for LambdaAbstraction."""
 
@@ -267,15 +286,12 @@ class LambdaAbstractionPrinter(FixedArityNodePrinter):
         super().__init__(val, 1, "LambdaAbstraction")
 
     def to_string(self):
-        return "LambdaAbstraction[{}]".format(self.val["_varName"])
-
-
-class LambdaApplicationPrinter(FixedArityNodePrinter):
-    """Pretty-printer for LambdaApplication."""
-
-    def __init__(self, val):
-        """Initialize LambdaApplicationPrinter."""
-        super().__init__(val, 2, "LambdaApplication")
+        res = "LambdaAbstraction[{"
+        bindings = Vector(self.val["_varNames"])
+        for name in bindings:
+            res += str(name) + " "
+        res += "}]"
+        return res
 
 
 class SourcePrinter(FixedArityNodePrinter):
@@ -284,6 +300,14 @@ class SourcePrinter(FixedArityNodePrinter):
     def __init__(self, val):
         """Initialize SourcePrinter."""
         super().__init__(val, 0, "Source")
+
+
+class SwitchPrinter(DynamicArityNodePrinter):
+    """Pretty-printer for Switch."""
+
+    def __init__(self, val):
+        """Initialize SwitchPrinter."""
+        super().__init__(val, 0, "Switch")
 
 
 class ReferencesPrinter(DynamicArityNodePrinter):
@@ -336,7 +360,7 @@ class PolyValuePrinter(object):
         # of ControlBlockVTable<T, Ts...>::ConcreteType where T is the template argument derived
         # from the _tag member variable.
         poly_type = self.val.type.template_argument(self.tag)
-        dynamic_type = f"{OPTIMIZER_NS}::algebra::ControlBlockVTable<{poly_type.name}, "
+        dynamic_type = f"mongo::algebra::ControlBlockVTable<{poly_type.name}, "
         dynamic_type += self.type_set
         dynamic_type += "::ConcreteType"
         return dynamic_type
@@ -361,9 +385,7 @@ def register_optimizer_printers(pp):
     """Registers a number of pretty printers related to the CQF optimizer."""
 
     # Utility types within the optimizer.
-    pp.add(
-        "StrongStringAlias", f"{OPTIMIZER_NS}::StrongStringAlias", True, StrongStringAliasPrinter
-    )
+    pp.add("StrongStringAlias", f"{ABT_NS}::StrongStringAlias", True, StrongStringAliasPrinter)
 
     # Add the sub-printers for each of the possible ABT types.
     # This is the set of known ABT variants that GDB is aware of. When adding to this list, ensure
@@ -378,23 +400,25 @@ def register_optimizer_printers(pp):
         "Variable",
         "UnaryOp",
         "BinaryOp",
+        "NaryOp",
         "If",
         "Let",
+        "MultiLet",
         "LambdaAbstraction",
-        "LambdaApplication",
         "FunctionCall",
         "Source",
+        "Switch",
         "References",
         "ExpressionBinder",
     ]
     for abt_type in abt_type_set:
         pp.add(
             abt_type,
-            f"{OPTIMIZER_NS}::{abt_type}",
+            f"{ABT_NS}::{abt_type}",
             False,
             getattr(sys.modules[__name__], abt_type + "Printer"),
         )
 
     # Add the generic PolyValue printer which determines the exact type at runtime and attempts to
     # invoke the printer for that type.
-    pp.add("PolyValue", OPTIMIZER_NS + "::algebra::PolyValue", True, PolyValuePrinter)
+    pp.add("PolyValue", "mongo::algebra::PolyValue", True, PolyValuePrinter)

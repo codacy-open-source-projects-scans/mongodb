@@ -29,20 +29,19 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
 #include "mongo/db/exec/plan_stats.h"
+#include "mongo/db/exec/plan_stats_visitor.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
+#include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/query/tree_walker.h"
+#include "mongo/util/modules.h"
 
 #include <cstddef>
 #include <cstdint>
-#include <list>
 #include <memory>
 
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/db/exec/plan_stats_visitor.h"
-#include "mongo/db/query/plan_summary_stats.h"
-#include "mongo/db/query/stage_types.h"
-#include "mongo/db/query/tree_walker.h"
 
 namespace mongo::sbe {
 struct CommonStats {
@@ -56,7 +55,7 @@ struct CommonStats {
 
     const StringData stageType;
 
-    // An identifier for the node, or zero if the idenfier was not provided. Useful for displaying
+    // An identifier for the node, or zero if the identifier was not provided. Useful for displaying
     // debug output such as explain.
     //
     // These identifiers are not necessarily unique. For example, they can be used by code
@@ -184,6 +183,8 @@ struct UniqueStats : public SpecificStats {
 
     size_t dupsTested = 0;
     size_t dupsDropped = 0;
+
+    uint64_t peakTrackedMemBytes = 0;
 };
 
 struct BranchStats final : public SpecificStats {
@@ -290,15 +291,10 @@ struct HashAggStats : public SpecificStats {
     }
 
     bool usedDisk{false};
-    // The number of times that the entire hash table was spilled.
-    long long spills{0};
-    // The number of individual records spilled to disk.
-    long long spilledRecords{0};
-    // The number of total bytes spilled to disk.
-    long long spilledBytes{0};
-    // An estimate, in bytes, of the size of the final spill table after all spill events have taken
-    // place.
-    long long spilledDataStorageSize{0};
+    SpillingStats spillingStats;
+
+    // The maximum amount of memory that was used.
+    uint64_t peakTrackedMemBytes = 0u;
 };
 
 struct BlockHashAggStats : public HashAggStats {
@@ -351,19 +347,18 @@ struct HashLookupStats : public SpecificStats {
         visitor->visit(this);
     }
 
-    long long getSpilledRecords() const {
-        return spilledHtRecords + spilledBuffRecords;
-    }
-
-    long long getSpilledBytesApprox() const {
-        return spilledHtBytesOverAllRecords + spilledBuffBytesOverAllRecords;
+    SpillingStats getTotalSpillingStats() const {
+        SpillingStats stats = spillingHtStats;
+        stats.accumulate(spillingBuffStats);
+        return stats;
     }
 
     bool usedDisk{false};
-    long long spilledHtRecords{0};
-    long long spilledHtBytesOverAllRecords{0};
-    long long spilledBuffRecords{0};
-    long long spilledBuffBytesOverAllRecords{0};
+    SpillingStats spillingHtStats;
+    SpillingStats spillingBuffStats;
+
+    // The maximum amount of memory that was used.
+    uint64_t peakTrackedMemBytes = 0u;
 };
 
 struct WindowStats : public SpecificStats {
@@ -385,15 +380,10 @@ struct WindowStats : public SpecificStats {
 
     // Whether the window buffer was spilled.
     bool usedDisk{false};
-    // The number of times that the entire window buffer was spilled.
-    long long spills{0};
-    // The number of bytes that the entire window buffer was spilled.
-    long long spilledBytes{0};
-    // The number of individual records spilled to disk.
-    long long spilledRecords{0};
-    // An estimate, in bytes, of the size of the final spill table after all spill events have taken
-    // place.
-    long long spilledDataStorageSize{0};
+    SpillingStats spillingStats;
+
+    // The maximum amount of memory that was used.
+    uint64_t peakTrackedMemBytes = 0u;
 };
 
 /**

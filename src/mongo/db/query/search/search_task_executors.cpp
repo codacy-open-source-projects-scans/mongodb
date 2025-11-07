@@ -27,21 +27,21 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
 
-#include "search_task_executors.h"
+#include "mongo/db/query/search/search_task_executors.h"
 
-#include <utility>
-
+#include "mongo/db/query/search/mongot_options.h"
+#include "mongo/db/query/search/search_index_options.h"
 #include "mongo/executor/connection_pool_controllers.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/network_interface_thread_pool.h"
+#include "mongo/executor/pinned_connection_task_executor_registry.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 
-#include "mongot_options.h"
-#include "search_index_options.h"
+#include <memory>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kExecutor
 
@@ -52,7 +52,6 @@ namespace executor {
 namespace {
 
 ConnectionPool::Options makeMongotConnPoolOptions() {
-    // TODO SERVER-97158: Set singleUseConnections flag if using egress grpc
     ConnectionPool::Options mongotOptions;
     mongotOptions.skipAuthentication = globalMongotParams.skipAuthToMongot;
     mongotOptions.controllerFactory = [] {
@@ -66,33 +65,44 @@ ConnectionPool::Options makeMongotConnPoolOptions() {
 
 struct State {
     State() {
-        transport::TransportProtocol protocol = globalMongotParams.useGRPC
-            ? transport::TransportProtocol::GRPC
-            : transport::TransportProtocol::MongoRPC;
+        constexpr StringData kMongotExecutorName = "MongotExecutor";
+        constexpr StringData kSearchIndexManagementExecutorName = "SearchIndexMgmtExecutor";
 
-        // Make the MongotExecutor and associated NetworkInterface.
-        auto mongotExecutorNetworkInterface = makeNetworkInterface(
-            "MongotExecutor", nullptr, nullptr, makeMongotConnPoolOptions(), protocol);
+        std::unique_ptr<NetworkInterface> mongotExecutorNetworkInterface;
+        std::unique_ptr<NetworkInterface> searchIdxNetworkInterface;
+
+        if (globalMongotParams.useGRPC) {
+#ifdef MONGO_CONFIG_GRPC
+            mongotExecutorNetworkInterface = makeNetworkInterfaceGRPC(kMongotExecutorName);
+            searchIdxNetworkInterface =
+                makeNetworkInterfaceGRPC(kSearchIndexManagementExecutorName);
+#else
+            MONGO_UNREACHABLE;
+#endif
+        } else {
+            mongotExecutorNetworkInterface = makeNetworkInterface(
+                kMongotExecutorName, nullptr, nullptr, makeMongotConnPoolOptions());
+
+            // Make a separate search index management NetworkInterface that's independently
+            // configurable.
+            ConnectionPool::Options searchIndexPoolOptions;
+            searchIndexPoolOptions.skipAuthentication =
+                globalSearchIndexParams.skipAuthToSearchIndexServer;
+            searchIdxNetworkInterface = makeNetworkInterface(kSearchIndexManagementExecutorName,
+                                                             nullptr,
+                                                             nullptr,
+                                                             std::move(searchIndexPoolOptions));
+        }
+
         auto mongotThreadPool =
             std::make_unique<NetworkInterfaceThreadPool>(mongotExecutorNetworkInterface.get());
         mongotExecutor = ThreadPoolTaskExecutor::create(std::move(mongotThreadPool),
                                                         std::move(mongotExecutorNetworkInterface));
 
-        // Make a separate searchIndexMgmtExecutor that's independently configurable.
-        // TODO SERVER-97158: Set singleUseConnections flag if using egress grpc
-        ConnectionPool::Options searchIndexPoolOptions;
-        searchIndexPoolOptions.skipAuthentication =
-            globalSearchIndexParams.skipAuthToSearchIndexServer;
-        std::shared_ptr<NetworkInterface> searchIdxNI =
-            makeNetworkInterface("SearchIndexMgmtExecutor",
-                                 nullptr,
-                                 nullptr,
-                                 std::move(searchIndexPoolOptions),
-                                 protocol);
         auto searchIndexThreadPool =
-            std::make_unique<NetworkInterfaceThreadPool>(searchIdxNI.get());
-        searchIndexMgmtExecutor = ThreadPoolTaskExecutor::create(std::move(searchIndexThreadPool),
-                                                                 std::move(searchIdxNI));
+            std::make_unique<NetworkInterfaceThreadPool>(searchIdxNetworkInterface.get());
+        searchIndexMgmtExecutor = ThreadPoolTaskExecutor::create(
+            std::move(searchIndexThreadPool), std::move(searchIdxNetworkInterface));
     }
 
     auto getMongotExecutorPtr() {
@@ -110,15 +120,6 @@ struct State {
 };
 
 const auto getExecutorHolder = ServiceContext::declareDecoration<State>();
-
-ServiceContext::ConstructorActionRegisterer searchExecutorsCAR{
-    "SearchTaskExecutors",
-    [](ServiceContext* service) {},
-    [](ServiceContext* service) {
-        // Destruction implicitly performs the needed shutdown and join()
-        getExecutorHolder(service).mongotExecutor.reset();
-        getExecutorHolder(service).searchIndexMgmtExecutor.reset();
-    }};
 
 }  // namespace
 
@@ -143,6 +144,29 @@ void startupSearchExecutorsIfNeeded(ServiceContext* svc) {
     if (!globalSearchIndexParams.host.empty()) {
         LOGV2_INFO(8267401, "Starting up search index management task executor.");
         getSearchIndexManagementTaskExecutor(svc)->startup();
+    }
+}
+
+void shutdownSearchExecutorsIfNeeded(ServiceContext* svc) {
+    auto& state = getExecutorHolder(svc);
+    if (!globalMongotParams.host.empty()) {
+        LOGV2_INFO(10026102, "Shutting down mongot task executor.");
+        // The underlying mongot TaskExecutor must outlive any PinnedConnectionTaskExecutor that
+        // uses it, so we must drain PCTEs first and then shut down the mongot executor.
+        shutdownPinnedExecutors(svc, state.mongotExecutor);
+        // Deleting the executor will also call shutdown() and join(), but might as well call them
+        // explicitly here.
+        state.mongotExecutor->shutdown();
+        state.mongotExecutor->join();
+        state.mongotExecutor.reset();
+    }
+
+    if (!globalSearchIndexParams.host.empty()) {
+        LOGV2_INFO(10026103, "Shutting down search index management task executor.");
+        shutdownPinnedExecutors(svc, state.searchIndexMgmtExecutor);
+        state.searchIndexMgmtExecutor->shutdown();
+        state.searchIndexMgmtExecutor->join();
+        state.searchIndexMgmtExecutor.reset();
     }
 }
 

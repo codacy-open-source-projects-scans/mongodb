@@ -29,52 +29,35 @@
 
 #include "mongo/db/repl/rollback_impl.h"
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/node_hash_map.h>
-#include <absl/container/node_hash_set.h>
-#include <absl/meta/type_traits.h>
-#include <algorithm>
-#include <boost/cstdint.hpp>
-#include <boost/filesystem/path.hpp>
-#include <boost/none.hpp>
-#include <cstdint>
-#include <fmt/format.h>
-#include <limits>
-#include <memory>
-#include <mutex>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/client/dbclient_cursor.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/drop_collection.h"
-#include "mongo/db/catalog/import_collection_oplog_entry_gen.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/global_catalog/type_shard_identity.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/drop_collection.h"
+#include "mongo/db/local_catalog/import_collection_oplog_entry_gen.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
+#include "mongo/db/repl/intent_registry.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
@@ -90,7 +73,8 @@
 #include "mongo/db/repl/split_prepare_session_manager.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
-#include "mongo/db/s/type_shard_identity.h"
+#include "mongo/db/replication_state_transition_lock_guard.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_recovery.h"
 #include "mongo/db/service_context.h"
@@ -98,22 +82,19 @@
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
-#include "mongo/db/shard_role.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/remove_saver.h"
 #include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/transaction/transaction_history_iterator.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/s/shard_version.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
@@ -122,12 +103,28 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <utility>
+
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/node_hash_map.h>
+#include <absl/container/node_hash_set.h>
+#include <absl/meta/type_traits.h>
+#include <boost/cstdint.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplicationRollback
 
 namespace mongo {
 namespace repl {
-
-using namespace fmt::literals;
 
 MONGO_FAIL_POINT_DEFINE(rollbackHangAfterTransitionToRollback);
 MONGO_FAIL_POINT_DEFINE(rollbackToTimestampHangCommonPointBeforeReplCommitPoint);
@@ -242,7 +239,7 @@ RollbackImpl::~RollbackImpl() {
 }
 
 Status RollbackImpl::runRollback(OperationContext* opCtx) {
-    _rollbackStats.startTime = opCtx->getServiceContext()->getFastClockSource()->now();
+    _rollbackStats.startTime = opCtx->fastClockSource().now();
 
     auto status = _transitionToRollback(opCtx);
     if (!status.isOK()) {
@@ -384,15 +381,26 @@ Status RollbackImpl::_transitionToRollback(OperationContext* opCtx) {
     LOGV2(21593, "Transition to ROLLBACK");
     {
         rollbackHangBeforeTransitioningToRollback.pauseWhileSet(opCtx);
-        ReplicationStateTransitionLockGuard rstlLock(
-            opCtx, MODE_X, ReplicationStateTransitionLockGuard::EnqueueOnly());
+
+        boost::optional<rss::consensus::ReplicationStateTransitionGuard> rstGuard;
+        boost::optional<repl::ReplicationStateTransitionLockGuard> rstlLock;
+        if (gFeatureFlagIntentRegistration.isEnabled()) {
+            rstGuard.emplace(rss::consensus::IntentRegistry::get(opCtx)
+                                 .killConflictingOperations(
+                                     rss::consensus::IntentRegistry::InterruptionType::Rollback,
+                                     opCtx,
+                                     0 /* no timeout */)
+                                 .get());
+        }
+        rstlLock.emplace(opCtx, MODE_X, ReplicationStateTransitionLockGuard::EnqueueOnly());
 
         // Kill all user operations to ensure we can successfully acquire the RSTL. Since the node
         // must be a secondary, this is only killing readers, whose connections will be closed
         // shortly regardless.
         _killAllUserOperations(opCtx);
-
-        rstlLock.waitForLockUntil(Date_t::max());
+        if (rstlLock) {
+            rstlLock->waitForLockUntil(Date_t::max());
+        }
 
         auto status = _replicationCoordinator->setFollowerModeRollback(opCtx);
         if (!status.isOK()) {
@@ -420,12 +428,7 @@ void RollbackImpl::_stopAndWaitForIndexBuilds(OperationContext* opCtx) {
         IndexBuildsCoordinator::get(opCtx)->stopIndexBuildsForRollback(opCtx);
 
     // Get a list of all databases.
-    StorageEngine* storageEngine = opCtx->getServiceContext()->getStorageEngine();
-    std::vector<DatabaseName> dbs;
-    {
-        Lock::GlobalLock lk(opCtx, MODE_IS);
-        dbs = storageEngine->listDatabases();
-    }
+    std::vector<DatabaseName> dbs = catalog::listDatabases();
 
     // Wait for all background operations to complete by waiting on each database. Single-phase
     // index builds are not stopped before rollback, so we must wait for these index builds to
@@ -495,12 +498,7 @@ RollbackImpl::_namespacesAndUUIDsForOp(const OplogEntry& oplogEntry) {
                 }
                 break;
             }
-            case OplogEntry::CommandType::kDropDatabase: {
-                // There is no specific namespace to save for a drop database operation.
-                break;
-            }
             case OplogEntry::CommandType::kDbCheck:
-            case OplogEntry::CommandType::kModifyCollectionShardingIndexCatalog:
             case OplogEntry::CommandType::kCreate:
             case OplogEntry::CommandType::kDrop:
             case OplogEntry::CommandType::kImportCollection:
@@ -509,7 +507,8 @@ RollbackImpl::_namespacesAndUUIDsForOp(const OplogEntry& oplogEntry) {
             case OplogEntry::CommandType::kStartIndexBuild:
             case OplogEntry::CommandType::kAbortIndexBuild:
             case OplogEntry::CommandType::kCommitIndexBuild:
-            case OplogEntry::CommandType::kCollMod: {
+            case OplogEntry::CommandType::kCollMod:
+            case OplogEntry::CommandType::kTruncateRange: {
                 // For all other command types, we should be able to parse the collection name from
                 // the first command argument.
                 try {
@@ -520,8 +519,12 @@ RollbackImpl::_namespacesAndUUIDsForOp(const OplogEntry& oplogEntry) {
                 }
                 break;
             }
+            case OplogEntry::CommandType::kDropDatabase:
             case OplogEntry::CommandType::kCommitTransaction:
-            case OplogEntry::CommandType::kAbortTransaction: {
+            case OplogEntry::CommandType::kAbortTransaction:
+            case OplogEntry::CommandType::kCreateDatabaseMetadata:
+            case OplogEntry::CommandType::kDropDatabaseMetadata: {
+                // There is no specific namespace to save for these operations.
                 break;
             }
             case OplogEntry::CommandType::kApplyOps:
@@ -540,20 +543,26 @@ void RollbackImpl::_restoreTxnsTableEntryFromRetryableWrites(OperationContext* o
     // Query for retryable writes oplog entries with a non-null 'prevWriteOpTime' value
     // less than or equal to the 'stableTimestamp'. This query intends to include no-op
     // retryable writes oplog entries that have been applied through a migration process.
-    const auto filter = BSON("op" << BSON("$in" << BSON_ARRAY("i"
-                                                              << "u"
-                                                              << "d")));
+    const auto filter = BSON("op" << BSON("$in" << BSON_ARRAY("i" << "u"
+                                                                  << "d")));
     // We use the 'fromMigrate' field to differentiate migrated retryable writes entries from
     // transactions entries.
-    const auto filterFromMigration = BSON("op"
-                                          << "n"
-                                          << "fromMigrate" << true);
+    const auto filterFromMigration = BSON("op" << "n"
+                                               << "fromMigrate" << true);
+    // We batch inserts into a single applyOps oplog entry with an internal array of operations as
+    // inserts, and set the 'multiOpType' flag. The stmtId then becomes an internal parameter for
+    // the array of batched operations, so we should not look for it in the outer document.
+    const auto filterForVectorInsertsApplyOps =
+        BSON("op" << "c"
+                  << "multiOpType" << repl::MultiOplogEntryType::kApplyOpsAppliedSeparately);
     FindCommandRequest findRequest{NamespaceString::kRsOplogNamespace};
-    findRequest.setFilter(BSON("ts" << BSON("$gt" << stableTimestamp) << "txnNumber"
-                                    << BSON("$exists" << true) << "stmtId"
-                                    << BSON("$exists" << true) << "prevOpTime.ts"
-                                    << BSON("$gte" << Timestamp(1, 0) << "$lte" << stableTimestamp)
-                                    << "$or" << BSON_ARRAY(filter << filterFromMigration)));
+    findRequest.setFilter(BSON(
+        "ts" << BSON("$gt" << stableTimestamp) << "txnNumber" << BSON("$exists" << true) << "$or"
+             << BSON_ARRAY(BSON("stmtId" << BSON("$exists" << true))
+                           << filterForVectorInsertsApplyOps)
+             << "prevOpTime.ts" << BSON("$gte" << Timestamp(1, 0) << "$lte" << stableTimestamp)
+             << "$or"
+             << BSON_ARRAY(filter << filterFromMigration << filterForVectorInsertsApplyOps)));
     auto cursor = client->find(std::move(findRequest));
     while (cursor->more()) {
         auto doc = cursor->next();
@@ -566,7 +575,8 @@ void RollbackImpl::_restoreTxnsTableEntryFromRetryableWrites(OperationContext* o
         const auto txnNumber = *opSessionInfo.getTxnNumber();
         const auto wallClockTime = entry.getWallClockTime();
 
-        invariant(!prevWriteOpTime.isNull() && prevWriteOpTime.getTimestamp() <= stableTimestamp);
+        invariant(!prevWriteOpTime.isNull());
+        invariant(prevWriteOpTime.getTimestamp() <= stableTimestamp);
         // This is a retryable writes oplog entry with a non-null 'prevWriteOpTime' value that
         // is less than or equal to the 'stableTimestamp'.
         LOGV2(5530501,
@@ -598,7 +608,7 @@ void RollbackImpl::_restoreTxnsTableEntryFromRetryableWrites(OperationContext* o
                                       nss,
                                       PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
                                       repl::ReadConcernArgs::get(opCtx),
-                                      AcquisitionPrerequisites::kWrite),
+                                      AcquisitionPrerequisites::kUnreplicatedWrite),
                                   MODE_IX);
             auto filter = BSON(SessionTxnRecord::kSessionIdFieldName << sessionId.toBSON());
             UnreplicatedWritesBlock uwb(opCtx);
@@ -774,12 +784,18 @@ void RollbackImpl::_correctRecordStoreCounts(OperationContext* opCtx) {
                   "Scanning collection to fix collection count",
                   logAttrs(nss),
                   "uuid"_attr = uuid.toString());
-            AutoGetCollectionForRead collToScan(opCtx, nss);
-            invariant(coll == collToScan.getCollection().get(),
+            const auto collToScan =
+                acquireCollection(opCtx,
+                                  CollectionAcquisitionRequest(nss,
+                                                               PlacementConcern::kPretendUnsharded,
+                                                               repl::ReadConcernArgs::get(opCtx),
+                                                               AcquisitionPrerequisites::kRead),
+                                  MODE_IS);
+            invariant(coll == collToScan.getCollectionPtr().get(),
                       str::stream() << "Catalog returned invalid collection: "
                                     << nss.toStringForErrorMsg() << " (" << uuid.toString() << ")");
             auto exec = getCollectionScanExecutor(opCtx,
-                                                  collToScan.getCollection(),
+                                                  collToScan,
                                                   PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                                   CollectionScanDirection::kForward);
             long long countFromScan = 0;
@@ -1017,7 +1033,7 @@ Status RollbackImpl::_processRollbackOp(OperationContext* opCtx, const OplogEntr
             _newCounts.erase(oplogEntry.getUuid().value());
         } else if (oplogEntry.getCommandType() == OplogEntry::CommandType::kImportCollection) {
             auto importEntry = mongo::ImportCollectionOplogEntry::parse(
-                IDLParserContext("importCollectionOplogEntry"), oplogEntry.getObject());
+                oplogEntry.getObject(), IDLParserContext("importCollectionOplogEntry"));
             // Nothing to roll back if this is a dryRun.
             if (!importEntry.getDryRun()) {
                 const auto& catalogEntry = importEntry.getCatalogEntry();
@@ -1162,8 +1178,8 @@ StatusWith<RollBackLocalOperations::RollbackCommonPoint> RollbackImpl::_findComm
     // each oplog entry up until the common point. We only need the Timestamp of the common point
     // for the oplog truncate after point. Along the way, we save some information about the
     // rollback ops.
-    auto commonPointSW =
-        syncRollBackLocalOperations(*_localOplog, *_remoteOplog, onLocalOplogEntryFn);
+    auto commonPointSW = syncRollBackLocalOperations(
+        *_localOplog, *_remoteOplog, onLocalOplogEntryFn, shouldCreateDataFiles());
     if (!commonPointSW.isOK()) {
         return commonPointSW.getStatus();
     }
@@ -1185,12 +1201,12 @@ StatusWith<RollBackLocalOperations::RollbackCommonPoint> RollbackImpl::_findComm
     }
 
     // Rollback common point should be >= the replication commit point.
-    invariant(commonPointOpTime.getTimestamp() >= lastCommittedOpTime.getTimestamp());
-    invariant(commonPointOpTime >= lastCommittedOpTime);
+    fassert(5007100, commonPointOpTime.getTimestamp() >= lastCommittedOpTime.getTimestamp());
+    fassert(5007101, commonPointOpTime >= lastCommittedOpTime);
 
     // Rollback common point should be >= the committed snapshot optime.
-    invariant(commonPointOpTime.getTimestamp() >= committedSnapshot.getTimestamp());
-    invariant(commonPointOpTime >= committedSnapshot);
+    fassert(5007102, commonPointOpTime.getTimestamp() >= committedSnapshot.getTimestamp());
+    fassert(5007103, commonPointOpTime >= committedSnapshot);
 
     // Rollback common point should be >= the stable timestamp.
     invariant(stableTimestamp);
@@ -1353,13 +1369,6 @@ Timestamp RollbackImpl::_recoverToStableTimestamp(OperationContext* opCtx) {
     // Recover to the stable timestamp while holding the global exclusive lock. This may throw,
     // which the caller must handle.
     Lock::GlobalWrite globalWrite(opCtx);
-
-    // Reset the drop pending reaper state prior to recovering to the stable timestamp, which
-    // re-opens the catalog and can add drop pending idents. This prevents collisions with idents
-    // already registered with the reaper.
-    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
-    storageEngine->clearDropPendingState(opCtx);
-
     return _storageInterface->recoverToStableTimestamp(opCtx);
 }
 
@@ -1404,10 +1413,15 @@ void RollbackImpl::_transitionFromRollbackToSecondary(OperationContext* opCtx) {
 }
 
 void RollbackImpl::_checkForAllIdIndexes(OperationContext* opCtx) {
-    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
-    std::vector<DatabaseName> dbNames = storageEngine->listDatabases();
+    std::vector<DatabaseName> dbNames = catalog::listDatabases();
     for (const auto& dbName : dbNames) {
-        Lock::DBLock dbLock(opCtx, dbName, MODE_X);
+        Lock::DBLock dbLock(
+            opCtx,
+            dbName,
+            MODE_X,
+            Date_t::max(),
+            Lock::DBLockSkipOptions{
+                false, false, false, rss::consensus::IntentRegistry::Intent::LocalWrite});
         checkForIdIndexes(opCtx, dbName);
     }
 }
@@ -1415,7 +1429,7 @@ void RollbackImpl::_checkForAllIdIndexes(OperationContext* opCtx) {
 void RollbackImpl::_summarizeRollback(OperationContext* opCtx) const {
     logv2::DynamicAttributes attrs;
     attrs.add("startTime", _rollbackStats.startTime);
-    auto now = opCtx->getServiceContext()->getFastClockSource()->now();
+    auto now = opCtx->fastClockSource().now();
     attrs.add("endTime", now);
     auto syncSource = _remoteOplog->hostAndPort().toString();
     attrs.add("syncSource", syncSource);

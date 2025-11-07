@@ -6,10 +6,10 @@
  */
 
 export function indexedNoindex($config, $super) {
-    $config.setup = function(db, collName, cluster) {
+    $config.setup = function (db, collName, cluster) {
         $super.setup.apply(this, arguments);
 
-        var res = db[collName].dropIndex(this.getIndexSpec());
+        let res = db[collName].dropIndex(this.getIndexSpec());
         assert.commandWorked(res);
     };
 

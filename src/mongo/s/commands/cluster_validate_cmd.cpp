@@ -27,18 +27,11 @@
  *    it in the license file.
  */
 
-
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
@@ -46,23 +39,24 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/global_catalog/router_role_api/router_role.h"
+#include "mongo/db/local_catalog/ddl/create_indexes_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/timeseries/timeseries_commands_conversion_helper.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/async_requests_sender.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+#include <vector>
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 namespace mongo {
 namespace {
@@ -101,78 +95,113 @@ public:
 
     bool run(OperationContext* opCtx,
              const DatabaseName& dbName,
-             const BSONObj& cmdObj,
+             const BSONObj& providedCmdObj,
              BSONObjBuilder& output) override {
-        const NamespaceString nss(parseNs(dbName, cmdObj));
+        const NamespaceString nss(parseNs(dbName, providedCmdObj));
 
-        const auto cri =
-            uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
-        auto results = scatterGatherVersionedTargetByRoutingTable(
-            opCtx,
-            nss.dbName(),
-            nss,
-            cri,
-            applyReadWriteConcern(
-                opCtx, this, CommandHelpers::filterCommandRequestForPassthrough(cmdObj)),
-            ReadPreferenceSetting::get(opCtx),
-            Shard::RetryPolicy::kIdempotent,
-            {} /*query*/,
-            {} /*collation*/,
-            boost::none /*letParameters*/,
-            boost::none /*runtimeConstants*/);
+        sharding::router::CollectionRouter router{opCtx->getServiceContext(), nss};
+        return router.routeWithRoutingContext(
+            opCtx, getName(), [&](OperationContext* opCtx, RoutingContext& unusedRoutingCtx) {
+                // The CollectionRouter is not capable of implicitly translate the namespace
+                // to a timeseries buckets collection, which is required in this command.
+                // Hence, we'll use the CollectionRouter to handle StaleConfig errors but
+                // will ignore its RoutingContext. Instead, we'll use a
+                // CollectionRoutingInfoTargeter object to properly get the RoutingContext
+                // when the collection is timeseries.
+                // TODO (SPM-3830) Use the RoutingContext provided by the CollectionRouter
+                // once all timeseries collections become viewless.
+                unusedRoutingCtx.skipValidation();
 
-        Status firstFailedShardStatus = Status::OK();
-        bool isValid = true;
-        BSONObjBuilder rawResBuilder;
+                // Clear the `result` BSON builder since this lambda function may be retried
+                // if the router cache is stale.
+                output.resetToEmpty();
 
-        for (const auto& cmdResult : results) {
-            const auto& shardId = cmdResult.shardId;
+                auto targeter = CollectionRoutingInfoTargeter(opCtx, nss);
+                auto routingInfo = targeter.getRoutingInfo();
+                auto cmdObj = [&]() {
+                    if (targeter.timeseriesNamespaceNeedsRewrite(nss)) {
+                        return timeseries::makeTimeseriesCommand(
+                            providedCmdObj,
+                            nss,
+                            getName(),
+                            CreateIndexesCommand::kIsTimeseriesNamespaceFieldName);
+                    }
+                    return providedCmdObj;
+                }();
 
-            const auto& swResponse = cmdResult.swResponse;
-            if (!swResponse.isOK()) {
-                rawResBuilder.append(shardId.toString(),
-                                     BSON("error" << swResponse.getStatus().toString()));
-                if (firstFailedShardStatus.isOK())
-                    firstFailedShardStatus = swResponse.getStatus();
-                continue;
-            }
+                return routing_context_utils::runAndValidate(
+                    targeter.getRoutingCtx(), [&](RoutingContext& routingCtx) {
+                        auto results = scatterGatherVersionedTargetByRoutingTable(
+                            opCtx,
+                            routingCtx,
+                            targeter.getNS(),
+                            applyReadWriteConcern(
+                                opCtx,
+                                this,
+                                CommandHelpers::filterCommandRequestForPassthrough(cmdObj)),
+                            ReadPreferenceSetting::get(opCtx),
+                            Shard::RetryPolicy::kIdempotent,
+                            {} /*query*/,
+                            {} /*collation*/,
+                            boost::none /*letParameters*/,
+                            boost::none /*runtimeConstants*/);
 
-            const auto& response = swResponse.getValue();
-            if (!response.isOK()) {
-                rawResBuilder.append(shardId.toString(),
-                                     BSON("error" << response.status.toString()));
-                if (firstFailedShardStatus.isOK())
-                    firstFailedShardStatus = response.status;
-                continue;
-            }
+                        Status firstFailedShardStatus = Status::OK();
+                        bool isValid = true;
+                        BSONObjBuilder rawResBuilder;
 
-            rawResBuilder.append(shardId.toString(), response.data);
+                        for (const auto& cmdResult : results) {
+                            const auto& shardId = cmdResult.shardId;
 
-            const auto status = getStatusFromCommandResult(response.data);
-            if (!status.isOK()) {
-                if (firstFailedShardStatus.isOK())
-                    firstFailedShardStatus = status;
-                continue;
-            }
+                            const auto& swResponse = cmdResult.swResponse;
+                            if (!swResponse.isOK()) {
+                                rawResBuilder.append(
+                                    shardId.toString(),
+                                    BSON("error" << swResponse.getStatus().toString()));
+                                if (firstFailedShardStatus.isOK())
+                                    firstFailedShardStatus = swResponse.getStatus();
+                                continue;
+                            }
 
-            if (!response.data["valid"].trueValue()) {
-                isValid = false;
-            }
-        }
-        rawResBuilder.done();
+                            const auto& response = swResponse.getValue();
+                            if (!response.isOK()) {
+                                rawResBuilder.append(shardId.toString(),
+                                                     BSON("error" << response.status.toString()));
+                                if (firstFailedShardStatus.isOK())
+                                    firstFailedShardStatus = response.status;
+                                continue;
+                            }
 
-        if (firstFailedShardStatus.isOK()) {
-            if (!cri.cm.isSharded()) {
-                CommandHelpers::filterCommandReplyForPassthrough(
-                    results[0].swResponse.getValue().data, &output);
-            } else {
-                output.appendBool("valid", isValid);
-            }
-        }
-        output.append("raw", rawResBuilder.obj());
+                            rawResBuilder.append(shardId.toString(), response.data);
 
-        uassertStatusOK(firstFailedShardStatus);
-        return true;
+                            const auto status = getStatusFromCommandResult(response.data);
+                            if (!status.isOK()) {
+                                if (firstFailedShardStatus.isOK())
+                                    firstFailedShardStatus = status;
+                                continue;
+                            }
+
+                            if (!response.data["valid"].trueValue()) {
+                                isValid = false;
+                            }
+                        }
+                        rawResBuilder.done();
+
+                        if (firstFailedShardStatus.isOK()) {
+                            if (!routingCtx.getCollectionRoutingInfo(targeter.getNS())
+                                     .isSharded()) {
+                                CommandHelpers::filterCommandReplyForPassthrough(
+                                    results[0].swResponse.getValue().data, &output);
+                            } else {
+                                output.appendBool("valid", isValid);
+                            }
+                        }
+                        output.append("raw", rawResBuilder.obj());
+
+                        uassertStatusOK(firstFailedShardStatus);
+                        return true;
+                    });
+            });
     }
 };
 MONGO_REGISTER_COMMAND(ValidateCmd).forRouter();

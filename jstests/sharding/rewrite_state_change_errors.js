@@ -9,17 +9,12 @@
  *
  * This behavior can be overridden by adding the bool `allowRewriteStateChange`
  * to the failpoint's configuration object.
- *
- * @tags: [
- *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
- *    embedded_router_incompatible,
- * ]
  */
 
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
-var st = new ShardingTest({shards: 1, mongos: 1});
-var mongos = st.s;
+let st = new ShardingTest({shards: 1, mongos: 1});
+let mongos = st.s;
 var db = mongos.getDB("test");
 
 const doesRewrite = ErrorCodes.probeMongosRewrite(mongos);
@@ -27,22 +22,21 @@ const doesRewrite = ErrorCodes.probeMongosRewrite(mongos);
 const injected = ErrorCodes.ShutdownInProgress;
 
 function merge(x, y) {
-    for (const k in y)
-        x[k] = y[k];
+    for (const k in y) x[k] = y[k];
 }
 
 function runInsertScenarios(injectCodeField, extractCode, message) {
     for (const testCase of [
-             [{}, false, "Not rewritten by default."],
-             [{allowRewriteStateChange: false}, false, "Explicitly disallowing rewrites."],
-             [{allowRewriteStateChange: true}, true, "Explicitly allowing rewrites."],
+        [{}, false, "Not rewritten by default."],
+        [{allowRewriteStateChange: false}, false, "Explicitly disallowing rewrites."],
+        [{allowRewriteStateChange: true}, true, "Explicitly allowing rewrites."],
     ]) {
         const [allowConfigFields, rewriteAllowed, desc] = testCase;
         const summary = message + ": " + desc;
 
         jsTestLog(summary);
 
-        var fpData = {failCommands: ["insert"]};
+        let fpData = {failCommands: ["insert"]};
 
         injectCodeField(fpData, injected);
         merge(fpData, allowConfigFields);
@@ -56,20 +50,29 @@ function runInsertScenarios(injectCodeField, extractCode, message) {
         assert.eq(
             extractCode(res),
             rewriteAllowed ? ErrorCodes.doMongosRewrite(mongos, injected, doesRewrite) : injected,
-            summary + ": " + tojson(testCase) + ": " + tojson(res));
+            summary + ": " + tojson(testCase) + ": " + tojson(res),
+        );
     }
 }
 
-runInsertScenarios((obj, ec) => {
-    obj.errorCode = ec;
-}, res => res.code, "Injected errorCode");
+runInsertScenarios(
+    (obj, ec) => {
+        obj.errorCode = ec;
+    },
+    (res) => res.code,
+    "Injected errorCode",
+);
 
 // The code site where failCommand controls the injection of writeConcernError
 // is separated from the place where failCommand controls the injection of
 // more basic command errors, so it is tested separately here.
 
-runInsertScenarios((obj, ec) => {
-    obj.writeConcernError = {code: ec, errmsg: "Injected by failCommand"};
-}, res => res.writeConcernError.code, "Injected writeConcernError");
+runInsertScenarios(
+    (obj, ec) => {
+        obj.writeConcernError = {code: ec, errmsg: "Injected by failCommand"};
+    },
+    (res) => res.writeConcernError.code,
+    "Injected writeConcernError",
+);
 
 st.stop();

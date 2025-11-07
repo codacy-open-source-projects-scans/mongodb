@@ -12,11 +12,11 @@ if (jsTest.options().storageEngine !== "inMemory") {
 
 // Start a 2-node replica set with no journal.
 // Allows testing immediate write concern failures and wc application failures
-var rst = new ReplSetTest({nodes: 2});
+let rst = new ReplSetTest({nodes: 2});
 rst.startSet();
 rst.initiate();
-var mongod = rst.getPrimary();
-var coll = mongod.getCollection("test.bulk_api_wc");
+let mongod = rst.getPrimary();
+let coll = mongod.getCollection("test.bulk_api_wc");
 
 // Create a unique index, legacy writes validate too early to use invalid documents for write error
 // testing
@@ -32,7 +32,7 @@ coll.remove({});
 var bulk = coll.initializeOrderedBulkOp();
 bulk.insert({a: 1});
 bulk.insert({a: 2});
-assert.throws(function() {
+assert.throws(function () {
     bulk.execute({j: true});
 });
 
@@ -42,7 +42,7 @@ coll.remove({});
 var bulk = coll.initializeOrderedBulkOp();
 bulk.insert({a: 1});
 bulk.insert({a: 2});
-assert.throws(function() {
+assert.throws(function () {
     bulk.execute({x: 1});
 });
 
@@ -53,8 +53,8 @@ var bulk = coll.initializeOrderedBulkOp();
 bulk.insert({a: 1});
 bulk.insert({a: 2});
 bulk.insert({a: 2});
-result = assert.throws(function() {
-    bulk.execute({w: 'invalid'});
+result = assert.throws(function () {
+    bulk.execute({w: "invalid"});
 });
 assert.eq(result.nInserted, 2);
 assert.eq(result.getWriteErrors()[0].index, 2);
@@ -72,8 +72,8 @@ var bulk = coll.initializeUnorderedBulkOp();
 bulk.insert({a: 1});
 bulk.insert({a: 2});
 bulk.insert({a: 2});
-var result = assert.throws(function() {
-    bulk.execute({w: 'invalid'});
+var result = assert.throws(function () {
+    bulk.execute({w: "invalid"});
 });
 assert.eq(result.nInserted, 2);
 assert.eq(result.getWriteErrors()[0].index, 2);
@@ -88,7 +88,7 @@ var bulk = coll.initializeUnorderedBulkOp();
 bulk.insert({a: 1});
 bulk.insert({a: 2});
 bulk.insert({a: 2});
-var result = assert.throws(function() {
+var result = assert.throws(function () {
     bulk.execute({w: 3, wtimeout: 1});
 });
 assert.eq(result.nInserted, 2);
@@ -104,8 +104,8 @@ bulk.insert({a: 1});
 bulk.insert({a: 2});
 bulk.find({a: 3}).upsert().updateOne({a: 3});
 bulk.insert({a: 3});
-var result = assert.throws(function() {
-    bulk.execute({w: 'invalid'});
+var result = assert.throws(function () {
+    bulk.execute({w: "invalid"});
 });
 assert.eq(result.nInserted, 2);
 assert.eq(result.nUpserted, 1);

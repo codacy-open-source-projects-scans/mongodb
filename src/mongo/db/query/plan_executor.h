@@ -29,84 +29,38 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <exception>
-#include <string>
-#include <variant>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/plan_stats.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_catalog/scoped_collection_metadata.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/plan_explainer.h"
-#include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/query/query_stats/data_bearing_node_metrics.h"
 #include "mongo/db/query/restore_context.h"
 #include "mongo/db/query/write_ops/update_result.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/s/scoped_collection_metadata.h"
-#include "mongo/db/shard_role.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
+
+#include <exception>
+#include <string>
+#include <variant>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
-
-// TODO: SERVER-76397 Remove this once we use CollectionAcquisition everywhere.
-class VariantCollectionPtrOrAcquisition {
-public:
-    VariantCollectionPtrOrAcquisition(const CollectionPtr* collectionPtr)
-        : _collectionPtrOrAcquisition(collectionPtr) {}
-    VariantCollectionPtrOrAcquisition(CollectionAcquisition collection)
-        : _collectionPtrOrAcquisition(collection) {}
-
-    const std::variant<const CollectionPtr*, CollectionAcquisition>& get() {
-        return _collectionPtrOrAcquisition;
-    };
-
-    const CollectionPtr& getCollectionPtr() const;
-
-    bool isCollectionPtr() const {
-        return holds_alternative<const CollectionPtr*>(_collectionPtrOrAcquisition);
-    }
-
-    bool isAcquisition() const {
-        return holds_alternative<CollectionAcquisition>(_collectionPtrOrAcquisition);
-    }
-
-    const CollectionAcquisition& getAcquisition() const {
-        return std::get<CollectionAcquisition>(_collectionPtrOrAcquisition);
-    }
-
-    boost::optional<ScopedCollectionFilter> getShardingFilter(OperationContext* opCtx) const;
-
-    const NamespaceString& nss() const {
-        return std::visit([](const auto& choice) -> const NamespaceString& { return nss(choice); },
-                          _collectionPtrOrAcquisition);
-    }
-
-private:
-    static const NamespaceString& nss(const CollectionPtr* collectionPtr) {
-        return (*collectionPtr)->ns();
-    }
-
-    static const NamespaceString& nss(const CollectionAcquisition& acquisition) {
-        return acquisition.nss();
-    }
-
-    std::variant<const CollectionPtr*, CollectionAcquisition> _collectionPtrOrAcquisition;
-};
 
 /**
  * If a getMore command specified a lastKnownCommittedOpTime (as secondaries do), we want to stop
@@ -148,7 +102,7 @@ extern const OperationContext::Decoration<PlanExecutorShardingState> planExecuto
  * Executes a plan. Calls work() on a plan until a result is produced. Stops when the plan is
  * EOF or if the plan errors.
  */
-class PlanExecutor {
+class MONGO_MOD_PUBLIC PlanExecutor {
 public:
     enum ExecState {
         // Successfully returned the next document and/or record id.
@@ -351,7 +305,7 @@ public:
      * See getNextBatch() below for use.
      */
     using AppendBSONObjFn =
-        std::function<bool(const BSONObj& obj, const BSONObj& pbrt, const size_t numAppended)>;
+        std::function<bool(const BSONObj& obj, const BSONObj& pbrt, size_t numAppended)>;
 
     /**
      * Looping version of getNext() which appends BSONObjs produced by the execution plan up to the
@@ -371,7 +325,7 @@ public:
      * PlanExecutor use Document/Value as their runtime value format. These implementations will
      * typically just convert the BSON to Document on behalf of the caller.
      */
-    virtual ExecState getNextDocument(Document* objOut, RecordId* dlOut) = 0;
+    virtual ExecState getNextDocument(Document& objOut) = 0;
 
     /**
      * Returns 'true' if the plan is done producing results (or writing), 'false' otherwise.
@@ -379,7 +333,7 @@ public:
      * Tailable cursors are a possible exception to this: they may have further results even if
      * isEOF() returns true.
      */
-    virtual bool isEOF() = 0;
+    virtual bool isEOF() const = 0;
 
     /**
      * If this plan executor was constructed to execute a count implementation, e.g. it was obtained
@@ -471,6 +425,13 @@ public:
     virtual void dispose(OperationContext* opCtx) = 0;
 
     /**
+     * Forces all stages in the execution plan that are able to spill their data. Accepts a custom
+     * yield policy, because it can be called on an executor in a "saved" state without calling
+     * restoreState(). Can be nullptr if executor acquires locks internally.
+     */
+    virtual void forceSpill(PlanYieldPolicy* yieldPolicy) = 0;
+
+    /**
      * Stash the BSONObj so that it gets returned from the PlanExecutor a subsequent call to
      * getNext(). Implementations should NOT support returning stashed BSON objects using
      * 'getNextDocument()'. Only 'getNext()' should return the stashed BSON objects.
@@ -483,7 +444,7 @@ public:
     virtual void stashResult(const BSONObj& obj) = 0;
 
     virtual bool isMarkedAsKilled() const = 0;
-    virtual Status getKillStatus() = 0;
+    virtual Status getKillStatus() const = 0;
 
     virtual bool isDisposed() const = 0;
 
@@ -510,13 +471,6 @@ public:
      * query execution.
      */
     virtual const PlanExplainer& getPlanExplainer() const = 0;
-
-    /*
-     * Virtual methods to enable using save/restore logic that stashes the RecoveryUnit on the
-     * ClientCursor for future getMore commands in order to retain valid and positioned cursors.
-     */
-    virtual void enableSaveRecoveryUnitAcrossCommandsIfSupported() = 0;
-    virtual bool isSaveRecoveryUnitAcrossCommandsEnabled() const = 0;
 
     /**
      * For queries that have multiple executors, this can be used to differentiate between them.
@@ -550,14 +504,7 @@ public:
     /**
      * Sets whether the executor needs to return owned data.
      */
-    virtual void setReturnOwnedData(bool returnOwnedData){};
-
-    /** TODO: SERVER-76397 Remove this once we use acquisitions everywhere.
-     *
-     * Returns whether the plan executor uses shard role acquisitions or the legacy
-     * CollectionPtr/AutoGet approach.
-     */
-    virtual bool usesCollectionAcquisitions() const = 0;
+    virtual void setReturnOwnedData(bool returnOwnedData) {};
 
     virtual bool isUsingDistinctScan() const {
         return false;

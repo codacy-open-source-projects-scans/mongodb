@@ -323,6 +323,17 @@ MONGOCRYPT_EXPORT
 bool mongocrypt_setopt_retry_kms(mongocrypt_t *crypt, bool enable);
 
 /**
+ * Enable support for multiple collection schemas. Required to support $lookup.
+ *
+ * @param[in] crypt The @ref mongocrypt_t object.
+ * @pre @ref mongocrypt_init has not been called on @p crypt.
+ * @returns A boolean indicating success. If false, an error status is set.
+ * Retrieve it with @ref mongocrypt_ctx_status
+ */
+MONGOCRYPT_EXPORT
+bool mongocrypt_setopt_enable_multiple_collinfo(mongocrypt_t *crypt);
+
+/**
  * Configure an AWS KMS provider on the @ref mongocrypt_t object.
  *
  * This has been superseded by the more flexible:
@@ -701,6 +712,8 @@ bool mongocrypt_ctx_setopt_algorithm(mongocrypt_ctx_t *ctx, const char *algorith
 // DEPRECATED: support "RangePreview" has been removed in favor of "range".
 #define MONGOCRYPT_ALGORITHM_RANGEPREVIEW_DEPRECATED_STR "RangePreview"
 #define MONGOCRYPT_ALGORITHM_RANGE_STR "Range"
+/// NOTE: "textPreview" is experimental only and may be removed in a future non-major release.
+#define MONGOCRYPT_ALGORITHM_TEXTPREVIEW_STR "textPreview"
 
 /**
  * Identify the AWS KMS master key to use for creating a data key.
@@ -1520,6 +1533,34 @@ MONGOCRYPT_EXPORT
 bool mongocrypt_ctx_setopt_algorithm_range(mongocrypt_ctx_t *ctx, mongocrypt_binary_t *opts);
 
 /**
+ * Set options for explicit encryption with the "textPreview" algorithm.
+ *
+ * NOTE: "textPreview" is experimental only and may be removed in a future non-major release.
+ * @p opts is a BSON document of the form:
+ * {
+ *   "caseSensitive": bool,
+ * . "diacriticSensitive": bool,
+ * . "prefix": Optional{
+ * .   "strMaxQueryLength": Int32,
+ * .   "strMinQueryLength": Int32,
+ * . },
+ * . "suffix": Optional{
+ * .   "strMaxQueryLength": Int32,
+ * .   "strMinQueryLength": Int32,
+ * . },
+ * . "substring": Optional{
+ * .   "strMaxLength": Int32,
+ * .   "strMaxQueryLength": Int32,
+ * .   "strMinQueryLength": Int32,
+ * . },
+ * }
+ *
+ * "prefix" and "suffix" can both be set.
+ */
+MONGOCRYPT_EXPORT
+bool mongocrypt_ctx_setopt_algorithm_text(mongocrypt_ctx_t *ctx, mongocrypt_binary_t *opts);
+
+/**
  * Set the expiration time for the data encryption key cache. Defaults to 60 seconds if not set.
  *
  * @param[in] ctx The @ref mongocrypt_ctx_t object.
@@ -1534,5 +1575,11 @@ bool mongocrypt_setopt_key_expiration(mongocrypt_t *crypt, uint64_t cache_expira
 // DEPRECATED: Support "rangePreview" has been removed in favor of "range".
 #define MONGOCRYPT_QUERY_TYPE_RANGEPREVIEW_DEPRECATED_STR "rangePreview"
 #define MONGOCRYPT_QUERY_TYPE_RANGE_STR "range"
+/// NOTE: "substringPreview" is experimental and may be removed in a future non-major release.
+#define MONGOCRYPT_QUERY_TYPE_SUBSTRINGPREVIEW_STR "substringPreview"
+/// NOTE: "suffixPreview" is experimental and may be removed in a future non-major release.
+#define MONGOCRYPT_QUERY_TYPE_SUFFIXPREVIEW_STR "suffixPreview"
+/// NOTE: "prefixPreview" is experimental and may be removed in a future non-major release.
+#define MONGOCRYPT_QUERY_TYPE_PREFIXPREVIEW_STR "prefixPreview"
 
 #endif /* MONGOCRYPT_H */

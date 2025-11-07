@@ -29,15 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <utility>
-#include <variant>
-#include <vector>
-
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonelementvalue.h"
 #include "mongo/bson/bsonobj.h"
@@ -46,14 +37,24 @@
 #include "mongo/bson/column/simple8b_builder.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/platform/int128.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace bsoncolumn {
 /**
- * Deconstructed BSONElement without type and fieldname in the contigous buffer.
+ * Deconstructed BSONElement without type and fieldname in the contiguous buffer.
  */
 struct Element {
-    Element() : type(EOO), size(0) {}
+    Element() : type(BSONType::eoo), size(0) {}
     Element(BSONElement elem) : value(elem.value()), type(elem.type()), size(elem.valuesize()) {}
     Element(const BSONObj& obj, BSONType t) : value(obj.objdata()), type(t), size(obj.objsize()) {}
     Element(BSONType t, BSONElementValue v, int s) : value(v), type(t), size(s) {}
@@ -128,6 +129,14 @@ struct EncodingState {
 
         // Initializes this encoder to uncompressed element to allow for future delta calculations.
         void initialize(Element elem);
+
+        // Appends multiple skips to simple8b builder, should only be called as first thing appended
+        template <class F>
+        void prefillWithSkips(size_t numSkips,
+                              BSONType type,
+                              allocator_aware::BufBuilder<Allocator>& buffer,
+                              ptrdiff_t& controlByteOffset,
+                              F controlBlockWriter);
 
         // Calculates and appends delta for this element compared to last.
         template <class F>
@@ -233,6 +242,10 @@ struct EncodingState {
     explicit EncodingState(const Allocator&);
 
     template <class F>
+    void prefillWithSkips(size_t numSkips,
+                          allocator_aware::BufBuilder<Allocator>& buffer,
+                          F controlBlockWriter);
+    template <class F>
     void append(Element elem,
                 allocator_aware::BufBuilder<Allocator>& buffer,
                 F controlBlockWriter,
@@ -256,9 +269,6 @@ struct EncodingState {
                                    F controlBlockWriter,
                                    const Allocator&);
     void _initializeFromPrevious(const Allocator&);
-    template <class F>
-    ptrdiff_t _incrementSimple8bCount(allocator_aware::BufBuilder<Allocator>& buffer,
-                                      F controlBlockWriter);
 
     // Encoders for 64bit and 128bit types.
     std::variant<Encoder64, Encoder128> _encoder;
@@ -278,7 +288,7 @@ struct EncodingState {
  * Class to build BSON Subtype 7 (Column) binaries.
  */
 template <class Allocator = std::allocator<void>>
-class BSONColumnBuilder {
+class MONGO_MOD_PUBLIC BSONColumnBuilder {
 public:
     template <typename A = Allocator>
     BSONColumnBuilder() : BSONColumnBuilder{A{}} {}
@@ -294,6 +304,11 @@ public:
      * finalize() may not be used after this constructor.
      */
     BSONColumnBuilder(const char* binary, int size, const Allocator& = {});
+
+    /**
+     * BSONColumnBuilder pre-initialized with a given number of skips.
+     */
+    explicit BSONColumnBuilder(size_t numPrefixSkips, const Allocator& = {});
 
     /**
      * Appends a BSONElement to this BSONColumnBuilder.
@@ -420,14 +435,14 @@ private:
      * Internal state of the BSONColumnBuilder. Can be copied to restore a previous state after
      * finalize.
      */
-    struct InternalState {
+    struct MONGO_MOD_FILE_PRIVATE InternalState {
         explicit InternalState(const Allocator&);
 
         MONGO_COMPILER_NO_UNIQUE_ADDRESS Allocator allocator;
 
         using Regular = bsoncolumn::EncodingState<Allocator>;
 
-        struct SubObjState {
+        struct MONGO_MOD_FILE_PRIVATE SubObjState {
             using ControlBlock = std::pair<ptrdiff_t, size_t>;
             using ControlBlockAllocator =
                 typename std::allocator_traits<Allocator>::template rebind_alloc<ControlBlock>;
@@ -460,7 +475,7 @@ private:
             InterleavedControlBlockWriter controlBlockWriter();
         };
 
-        struct Interleaved {
+        struct MONGO_MOD_FILE_PRIVATE Interleaved {
             enum class Mode {
                 // The reference object is being determined. New sub fields are attempted to be
                 // merged in to the existing reference object candidate.
@@ -484,7 +499,7 @@ private:
             // Reference object that is used to match object hierarchy to encoding states. Appending
             // objects for sub-object compression need to check their hierarchy against this object.
             allocator_aware::SharedBuffer<Allocator> referenceSubObj;
-            BSONType referenceSubObjType = BSONType::EOO;
+            BSONType referenceSubObjType = BSONType::eoo;
 
             // Buffered BSONObj when determining reference object. Will be compressed when this is
             // complete and we transition into kSubObjAppending.
@@ -503,7 +518,7 @@ private:
         int lastBufLength = 0;
         // Finalized state of last control byte written out by the previous intermediate() call.
         uint8_t lastControl;
-        uint8_t lastControlOffset = 0;
+        uint16_t lastControlOffset = 0;
     };
 
     // Internal helper to perform reopen/initialization of this class from a BSONColumn binary.

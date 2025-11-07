@@ -1,7 +1,7 @@
 load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
 load("@bazel_tools//tools/build_defs/cc:action_names.bzl", "ACTION_NAMES")
-load("//bazel/config:configs.bzl", "developer_dir_provider")
-load("//bazel:mongo_src_rules.bzl", "write_target")
+load("//bazel/config:configs.bzl", "sdkroot_provider")
+load("//bazel:utils.bzl", "write_target")
 
 def generate_config_header_impl(ctx):
     cc_toolchain = find_cpp_toolchain(ctx)
@@ -72,7 +72,6 @@ def generate_config_header_impl(ctx):
             ctx.attr.template.files,
             ctx.attr.checks.files,
         ] + additional_inputs_depsets),
-        env = {"DEVELOPER_DIR": ctx.attr._developer_dir[developer_dir_provider].path},
         arguments = [
                         generator_script,  # bazel/config/mongo_config_header.py
                         "--output-path",
@@ -93,7 +92,7 @@ def generate_config_header_impl(ctx):
                         "--compiler-args",
                         " ".join(compiler_flags),
                         "--env-vars",
-                        json.encode(env_flags),
+                        json.encode(env_flags | {"SDKROOT": ctx.attr._sdkroot[sdkroot_provider].path}),
                     ],
     )
 
@@ -141,7 +140,7 @@ generate_config_header_rule = rule(
             allow_single_file = True,
         ),
         "_cc_toolchain": attr.label(default = "@bazel_tools//tools/cpp:current_cc_toolchain"),
-        "_developer_dir": attr.label(default = "//bazel/config:developer_dir"),
+        "_sdkroot": attr.label(default = "//bazel/config:sdkroot"),
     },
     fragments = ["cpp"],
     toolchains = ["@bazel_tools//tools/cpp:toolchain_type", "@bazel_tools//tools/python:toolchain_type"],
@@ -149,11 +148,6 @@ generate_config_header_rule = rule(
 )
 
 def generate_config_header(name, tags = [], **kwargs):
-    write_target(
-        name = name + "_gen_source_tag",
-        target_name = name,
-        tags = ["scons_link_lists"],
-    )
     generate_config_header_rule(
         name = name,
         tags = tags + ["gen_source"],

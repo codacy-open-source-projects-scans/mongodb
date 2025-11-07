@@ -27,10 +27,7 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/logical_time_validator.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -38,17 +35,20 @@
 #include "mongo/db/keys_collection_client_sharded.h"
 #include "mongo/db/keys_collection_manager.h"
 #include "mongo/db/logical_time.h"
-#include "mongo/db/logical_time_validator.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/s/config/config_server_test_fixture.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/sharding_environment/config_server_test_fixture.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/signed_logical_time.h"
 #include "mongo/db/time_proof_service.h"
-#include "mongo/db/vector_clock_mutable.h"
-#include "mongo/s/grid.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/db/vector_clock/vector_clock_mutable.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
+
+#include <memory>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {

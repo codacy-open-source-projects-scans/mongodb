@@ -27,12 +27,7 @@
  *    it in the license file.
  */
 
-#include <absl/container/inlined_vector.h>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <cstring>
-#include <map>
+#include "mongo/db/exec/sbe/stages/makeobj.h"
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
@@ -41,10 +36,15 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
-#include "mongo/db/exec/sbe/stages/makeobj.h"
 #include "mongo/db/exec/sbe/values/bson.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/shared_buffer.h"
+
+#include <cstdint>
+#include <cstring>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo::sbe {
 template <typename O>
@@ -70,8 +70,12 @@ MakeObjStageBase<O>::MakeObjStageBase(std::unique_ptr<PlanStage> input,
       _forceNewObject(forceNewObject),
       _returnOldObject(returnOldObject) {
     _children.emplace_back(std::move(input));
-    invariant(_projectVars.size() == _projectFields.size());
-    invariant(static_cast<bool>(rootSlot) == static_cast<bool>(fieldBehavior));
+    tassert(11094718,
+            "Expecting number of project variables to match the number of project fields",
+            _projectVars.size() == _projectFields.size());
+    tassert(11094717,
+            "Expecting 'fieldBehavior' field specified when 'rootSlot' is also specified",
+            static_cast<bool>(rootSlot) == static_cast<bool>(fieldBehavior));
 }
 
 template <typename O>
@@ -598,11 +602,7 @@ size_t MakeObjStageBase<O>::estimateCompileTimeSize() const {
 }
 
 template <typename O>
-void MakeObjStageBase<O>::doSaveState(bool relinquishCursor) {
-    if (!relinquishCursor) {
-        return;
-    }
-
+void MakeObjStageBase<O>::doSaveState() {
     prepareForYielding(_obj, slotsAccessible());
 }
 

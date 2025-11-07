@@ -27,10 +27,7 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/rpc/metadata/client_metadata.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
@@ -40,12 +37,14 @@
 #include "mongo/db/client.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/process_id.h"
-#include "mongo/rpc/metadata/client_metadata.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/testing_proctor.h"
+
+#include <memory>
+#include <string>
+
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -180,10 +179,9 @@ TEST(ClientMetadataTest, TestRequiredOnlyFields) {
 
 // Positive: test with app_name spelled wrong fields
 TEST(ClientMetadataTest, TestWithAppNameSpelledWrong) {
-    ASSERT_DOC_OK(kApplication << BSON("extra"
-                                       << "1")
-                               << kDriver << BSON(kName << "n1" << kVersion << "v1")
-                               << kOperatingSystem << BSON(kType << kUnknown));
+    ASSERT_DOC_OK(kApplication << BSON("extra" << "1") << kDriver
+                               << BSON(kName << "n1" << kVersion << "v1") << kOperatingSystem
+                               << BSON(kType << kUnknown));
 }
 
 // Positive: test with empty application document

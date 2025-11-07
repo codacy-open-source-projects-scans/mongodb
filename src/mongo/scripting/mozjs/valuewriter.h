@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <cstdint>
-#include <functional>
-#include <js/RootingAPI.h>
-#include <js/TypeDecls.h>
-#include <jsapi.h>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -46,6 +39,16 @@
 #include "mongo/scripting/engine.h"
 #include "mongo/scripting/mozjs/jsstringwrapper.h"
 #include "mongo/scripting/mozjs/objectwrapper.h"
+#include "mongo/util/modules.h"
+
+#include <cstdint>
+#include <functional>
+#include <string>
+
+#include <jsapi.h>
+
+#include <js/RootingAPI.h>
+#include <js/TypeDecls.h>
 
 namespace mongo {
 namespace mozjs {
@@ -56,7 +59,7 @@ namespace mozjs {
  * originalBSON is a hack to keep integer types in their original type when
  * they're read out, manipulated in js and saved back.
  */
-class ValueWriter {
+class MONGO_MOD_PUB ValueWriter {
 public:
     ValueWriter(JSContext* cx, JS::HandleValue value);
 

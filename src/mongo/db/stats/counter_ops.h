@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/platform/atomic_word.h"
+
 #include <cstdint>
 
 namespace mongo {
@@ -72,10 +73,6 @@ static void add(int64_t& counter, const AtomicWord<long long>& value) {
 
 static void add(AtomicWord<long long>& counter, int64_t value) {
     counter.addAndFetch(value);
-}
-
-static void add(AtomicWord<long long>& counter, const AtomicWord<long long>& value) {
-    counter.addAndFetch(value.load());
 }
 
 };  // namespace counter_ops

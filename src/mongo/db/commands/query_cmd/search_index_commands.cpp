@@ -26,67 +26,43 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#include <tuple>
-
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/query_cmd/search_index_commands_gen.h"
 #include "mongo/db/generic_argument_util.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/query/search/search_index_command_testing_helper.h"
 #include "mongo/db/query/search/search_index_common.h"
 #include "mongo/db/query/search/search_index_process_interface.h"
+#include "mongo/db/query/search/search_index_view_validation.h"
+#include "mongo/db/version_context.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
+
+#include <tuple>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 namespace mongo {
 
 namespace {
-template <typename CommandType>
-std::tuple<const UUID, const NamespaceString, boost::optional<StringData>>
-retrieveCollectionUUIDAndResolveView(OperationContext* opCtx, CommandType& cmd) {
-    const auto& currentOperationNss = cmd.getNamespace();
-    auto role = opCtx->getService()->role();
-    // TODO SERVER-93637 remove the separate logic for sharded vs unsharded once sharded
-    // views can support all search commands.
-    if (role.hasExclusively(ClusterRole::ShardServer)) {
-        // If the index management command is being run on a view, this call will return the
-        // underlying source collection UUID and NSS. If not, it will just return a UUID.
-        auto collUUIDresolvedNSSpair =
-            SearchIndexProcessInterface::get(opCtx)->fetchCollectionUUIDAndResolveViewOrThrow(
-                opCtx, currentOperationNss);
-        // If the query is on a normal collection, the source collection will be the same as
-        // the current NS.
-        auto sourceCollectionNss = currentOperationNss;
-        boost::optional<StringData> viewNss;
-        auto collUUID = collUUIDresolvedNSSpair.first;
-        if (auto resolvedNss = collUUIDresolvedNSSpair.second) {
-            // The request is on a view! Therefore, currentOperationNss refers to the view
-            // NS and resolvedNss refers to the underlying source collection.
-            sourceCollectionNss = *resolvedNss;
-            viewNss.emplace(currentOperationNss.coll());
-        }
-        return std::make_tuple(collUUID, sourceCollectionNss, viewNss);
-    } else if (role.hasExclusively(ClusterRole::RouterServer)) {
-        auto collectionUUID = SearchIndexProcessInterface::get(opCtx)->fetchCollectionUUIDOrThrow(
-            opCtx, currentOperationNss);
-        // Run the search index command against the remote search index management server.
-        return std::make_tuple(collectionUUID, currentOperationNss, boost::none);
-    }
-    MONGO_UNREACHABLE;
-}
 
 template <typename CommandType>
 BSONObj retrieveSearchIndexManagerResponseHelper(OperationContext* opCtx, CommandType& cmd) {
-    const auto [collUUID, resolvedNss, viewName] = retrieveCollectionUUIDAndResolveView(opCtx, cmd);
+    const auto& currentOperationNss = cmd.getNamespace();
+    const auto [collUUID, resolvedNss, view] =
+        uassertStatusOKWithContext(retrieveCollectionUUIDAndResolveView(opCtx, currentOperationNss),
+                                   "Error retrieving collection UUID and view info");
 
-    search_index_testing_helper::_replicateSearchIndexCommandOnAllMongodsForTesting(
-        opCtx, resolvedNss, cmd.toBSON(), viewName);
+    if (view) {
+        // Ensure that the view definition can be used with search indexes.
+        search_index_view_validation::validate(*view);
+    }
 
     // Run the search index command against the remote search index management server.
-    return getSearchIndexManagerResponse(opCtx, resolvedNss, collUUID, cmd.toBSON(), viewName);
+    auto searchIndexManagerResponse =
+        getSearchIndexManagerResponse(opCtx, resolvedNss, collUUID, cmd.toBSON(), view);
+
+    return searchIndexManagerResponse;
 }
 
 }  // namespace
@@ -148,7 +124,7 @@ public:
             BSONObj manageSearchIndexResponse =
                 retrieveSearchIndexManagerResponseHelper(opCtx, cmd);
 
-            return CreateSearchIndexesReply::parseOwned(ctx, std::move(manageSearchIndexResponse));
+            return CreateSearchIndexesReply::parseOwned(std::move(manageSearchIndexResponse), ctx);
         }
 
     private:
@@ -223,7 +199,7 @@ public:
             BSONObj manageSearchIndexResponse =
                 retrieveSearchIndexManagerResponseHelper(opCtx, cmd);
 
-            return DropSearchIndexReply::parseOwned(ctx, std::move(manageSearchIndexResponse));
+            return DropSearchIndexReply::parseOwned(std::move(manageSearchIndexResponse), ctx);
         }
 
     private:
@@ -303,7 +279,7 @@ public:
             IDLParserContext ctx("UpdateSearchIndexReply Parser");
             BSONObj manageSearchIndexResponse =
                 retrieveSearchIndexManagerResponseHelper(opCtx, cmd);
-            return UpdateSearchIndexReply::parseOwned(ctx, std::move(manageSearchIndexResponse));
+            return UpdateSearchIndexReply::parseOwned(std::move(manageSearchIndexResponse), ctx);
         }
 
     private:
@@ -419,16 +395,11 @@ public:
                     "Cannot set both 'name' and 'id'.",
                     !(cmd.getName() && cmd.getId()));
 
-            const auto& nss = cmd.getNamespace();
-
-            auto collectionUUID =
-                SearchIndexProcessInterface::get(opCtx)->fetchCollectionUUIDOrThrow(opCtx, nss);
-
             BSONObj manageSearchIndexResponse =
-                getSearchIndexManagerResponse(opCtx, nss, collectionUUID, cmd.toBSON());
+                retrieveSearchIndexManagerResponseHelper(opCtx, cmd);
 
             IDLParserContext ctx("ListSearchIndexesReply Parser");
-            return ListSearchIndexesReply::parseOwned(ctx, std::move(manageSearchIndexResponse));
+            return ListSearchIndexesReply::parseOwned(std::move(manageSearchIndexResponse), ctx);
         }
 
     private:

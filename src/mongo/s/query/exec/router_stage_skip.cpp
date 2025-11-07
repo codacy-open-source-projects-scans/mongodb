@@ -28,12 +28,13 @@
  */
 
 
+#include "mongo/s/query/exec/router_stage_skip.h"
+
+#include "mongo/util/assert_util.h"
+
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
-
-#include "mongo/s/query/exec/router_stage_skip.h"
-#include "mongo/util/assert_util_core.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -44,7 +45,7 @@ RouterStageSkip::RouterStageSkip(OperationContext* opCtx,
                                  std::unique_ptr<RouterExecStage> child,
                                  long long skip)
     : RouterExecStage(opCtx, std::move(child)), _skip(skip) {
-    invariant(skip > 0);
+    tassert(11052353, "Expected positive value for skip", skip > 0);
 }
 
 StatusWith<ClusterQueryResult> RouterStageSkip::next() {

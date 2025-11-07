@@ -29,16 +29,6 @@
 
 #include "mongo/db/pipeline/process_interface/shardsvr_process_interface.h"
 
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <fmt/format.h>
-#include <typeinfo>
-#include <utility>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -46,34 +36,34 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/generic_argument_util.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/ddl/cluster_ddl.h"
+#include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/global_catalog/router_role_api/router_role.h"
+#include "mongo/db/global_catalog/type_database_gen.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
 #include "mongo/db/pipeline/document_source_merge.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
+#include "mongo/db/topology/shard_registry.h"
+#include "mongo/db/topology/sharding_state.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
+#include "mongo/db/versioning_protocol/shard_version_factory.h"
+#include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/async_requests_sender.h"
-#include "mongo/s/catalog/type_database_gen.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/cluster_ddl.h"
 #include "mongo/s/cluster_write.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/index_version.h"
 #include "mongo/s/query/exec/document_source_merge_cursors.h"
-#include "mongo/s/request_types/sharded_ddl_commands_gen.h"
-#include "mongo/s/router_role.h"
-#include "mongo/s/shard_version.h"
-#include "mongo/s/shard_version_factory.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
-#include "mongo/s/sharding_index_catalog_cache.h"
-#include "mongo/s/sharding_state.h"
-#include "mongo/s/stale_exception.h"
 #include "mongo/s/write_ops/batch_write_exec.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
@@ -81,11 +71,17 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/str.h"
 
+#include <typeinfo>
+#include <utility>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
-
-using namespace fmt::literals;
 
 namespace {
 
@@ -124,9 +120,11 @@ void writeToLocalShard(OperationContext* opCtx,
 }  // namespace
 
 bool ShardServerProcessInterface::isSharded(OperationContext* opCtx, const NamespaceString& nss) {
-    const auto [cm, _] =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
-    return cm.isSharded();
+    // The RoutingContext is acquired and disposed of without validating the routing tables against
+    // a shard here because this isSharded() check is only used for distributed query planning
+    // optimizations; it doesn't affect query correctness.
+    auto routingCtx = uassertStatusOK(getRoutingContext(opCtx, {nss}));
+    return routingCtx->getCollectionRoutingInfo(nss).isSharded();
 }
 
 void ShardServerProcessInterface::checkRoutingInfoEpochOrThrow(
@@ -136,34 +134,24 @@ void ShardServerProcessInterface::checkRoutingInfoEpochOrThrow(
     auto* catalogCache = Grid::get(expCtx->getOperationContext())->catalogCache();
 
     auto receivedVersion = [&] {
-        // Since we are only checking the epoch, don't advance the time in store of the index cache
-        auto currentShardingIndexCatalogInfo =
-            uassertStatusOK(
-                catalogCache->getCollectionRoutingInfo(expCtx->getOperationContext(), nss))
-                .sii;
-
         // Mark the cache entry routingInfo for the 'nss' if the entry is staler than
         // 'targetCollectionPlacementVersion'.
-        auto ignoreIndexVersion = ShardVersionFactory::make(
-            targetCollectionPlacementVersion,
-            currentShardingIndexCatalogInfo
-                ? boost::make_optional(currentShardingIndexCatalogInfo->getCollectionIndexes())
-                : boost::none);
+        auto ignoreIndexVersion = ShardVersionFactory::make(targetCollectionPlacementVersion);
 
         catalogCache->onStaleCollectionVersion(nss, ignoreIndexVersion);
         return ignoreIndexVersion;
     }();
 
     auto wantedVersion = [&] {
+        // TODO SERVER-95749 Avoid forced collection cache refresh and validate RoutingContext,
+        // throwing if stale.
         auto routingInfo = uassertStatusOK(
             catalogCache->getCollectionRoutingInfo(expCtx->getOperationContext(), nss));
-        auto foundVersion = routingInfo.cm.hasRoutingTable() ? routingInfo.cm.getVersion()
-                                                             : ChunkVersion::UNSHARDED();
+        auto foundVersion = routingInfo.hasRoutingTable()
+            ? routingInfo.getCollectionVersion().placementVersion()
+            : ChunkVersion::UNSHARDED();
 
-        auto ignoreIndexVersion = ShardVersionFactory::make(
-            foundVersion,
-            routingInfo.sii ? boost::make_optional(routingInfo.sii->getCollectionIndexes())
-                            : boost::none);
+        auto ignoreIndexVersion = ShardVersionFactory::make(foundVersion);
         return ignoreIndexVersion;
     }();
 
@@ -182,7 +170,7 @@ boost::optional<Document> ShardServerProcessInterface::lookupSingleDocument(
     boost::optional<BSONObj> readConcern) {
     // We only want to retrieve the one document that corresponds to 'documentKey', so we
     // ignore collation when computing which shard to target.
-    MakePipelineOptions opts;
+    pipeline_factory::MakePipelineOptions opts;
     opts.shardTargetingPolicy = ShardTargetingPolicy::kForceTargetingWithSimpleCollation;
     opts.readConcern = std::move(readConcern);
 
@@ -249,17 +237,20 @@ StatusWith<MongoProcessInterface::UpdateResult> ShardServerProcessInterface::upd
     return {{response.getN(), response.getNModified()}};
 }
 
-BSONObj ShardServerProcessInterface::preparePipelineAndExplain(
-    Pipeline* ownedPipeline, ExplainOptions::Verbosity verbosity) {
-    auto firstStage = ownedPipeline->peekFront();
+BSONObj ShardServerProcessInterface::finalizePipelineAndExplain(
+    std::unique_ptr<Pipeline> pipeline,
+    ExplainOptions::Verbosity verbosity,
+    std::function<void(Pipeline* pipeline)> optimizePipeline) {
+    auto firstStage = pipeline->peekFront();
     // We don't want to send an internal stage to the shards.
     if (firstStage &&
         (typeid(*firstStage) == typeid(DocumentSourceMerge) ||
          typeid(*firstStage) == typeid(DocumentSourceMergeCursors) ||
          typeid(*firstStage) == typeid(DocumentSourceCursor))) {
-        ownedPipeline->popFront();
+        pipeline->popFront();
     }
-    return sharded_agg_helpers::targetShardsForExplain(ownedPipeline);
+    return sharded_agg_helpers::finalizePipelineAndTargetShardsForExplain(std::move(pipeline),
+                                                                          optimizePipeline);
 }
 
 void ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
@@ -269,7 +260,7 @@ void ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
     bool dropTarget,
     bool stayTemp,
     const BSONObj& originalCollectionOptions,
-    const std::list<BSONObj>& originalIndexes) {
+    const std::vector<BSONObj>& originalIndexes) {
     sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), sourceNs.dbName());
     router.route(opCtx,
                  "ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged",
@@ -287,7 +278,7 @@ void ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
                          cdb,
                          newCmdObj,
                          ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                         Shard::RetryPolicy::kNoRetry);
+                         Shard::RetryPolicy::kStrictlyNotIdempotent);
                      uassertStatusOKWithContext(response.swResponse,
                                                 str::stream() << "failed while running command "
                                                               << newCmdObj);
@@ -303,11 +294,30 @@ void ShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
 
 BSONObj ShardServerProcessInterface::getCollectionOptions(OperationContext* opCtx,
                                                           const NamespaceString& nss) {
+    return _getCollectionOptions(opCtx, nss);
+}
+
+BSONObj ShardServerProcessInterface::_getCollectionOptions(OperationContext* opCtx,
+                                                           const NamespaceString& nss,
+                                                           bool runOnPrimary) {
     if (nss.isNamespaceAlwaysUntracked()) {
         return getCollectionOptionsLocally(opCtx, nss);
     };
 
-    const auto response = _runListCollectionsCommandOnAShardedCluster(opCtx, nss);
+    const auto response = _runListCollectionsCommandOnAShardedCluster(
+        opCtx,
+        nss,
+
+        {// For viewless timeseries collections, fetch the raw collection options.
+         // This is consistent with the other implementations of this method, which fetch the
+         // collection options from the catalog without undergoing any timeseries translation.
+         // (Note that for all other collection types, this parameter has no effect.)
+         .rawData = gFeatureFlagAllBinariesSupportRawDataOperations.isEnabled(
+             VersionContext::getDecoration(opCtx),
+             serverGlobalParams.featureCompatibility.acquireFCVSnapshot()),
+         // Some collections (for example temp collections) only exist on the replica set primary so
+         // we may need to run on the primary to get the options.
+         .runOnPrimary = runOnPrimary});
     if (response.empty()) {
         return BSONObj{};
     }
@@ -329,6 +339,13 @@ BSONObj ShardServerProcessInterface::getCollectionOptions(OperationContext* opCt
     return BSONObj{};
 }
 
+UUID ShardServerProcessInterface::fetchCollectionUUIDFromPrimary(OperationContext* opCtx,
+                                                                 const NamespaceString& nss) {
+    const auto options = _getCollectionOptions(opCtx, nss, /*runOnPrimary*/ true);
+    auto uuid = UUID::parse(options["uuid"_sd]);
+    return uassertStatusOK(uuid);
+}
+
 query_shape::CollectionType ShardServerProcessInterface::getCollectionType(
     OperationContext* opCtx, const NamespaceString& nss) {
 
@@ -336,7 +353,7 @@ query_shape::CollectionType ShardServerProcessInterface::getCollectionType(
         return getCollectionTypeLocally(opCtx, nss);
     };
 
-    const auto response = _runListCollectionsCommandOnAShardedCluster(opCtx, nss);
+    const auto response = _runListCollectionsCommandOnAShardedCluster(opCtx, nss, {});
     if (response.empty()) {
         return query_shape::CollectionType::kNonExistent;
     }
@@ -359,23 +376,21 @@ query_shape::CollectionType ShardServerProcessInterface::getCollectionType(
     MONGO_UNREACHABLE_TASSERT(9072003);
 }
 
-std::list<BSONObj> ShardServerProcessInterface::getIndexSpecs(OperationContext* opCtx,
-                                                              const NamespaceString& ns,
-                                                              bool includeBuildUUIDs) {
+std::vector<BSONObj> ShardServerProcessInterface::getIndexSpecs(OperationContext* opCtx,
+                                                                const NamespaceString& ns,
+                                                                bool includeBuildUUIDs) {
     sharding::router::CollectionRouter router(opCtx->getServiceContext(), ns);
-    return router.route(
+    return router.routeWithRoutingContext(
         opCtx,
         "ShardServerProcessInterface::getIndexSpecs",
-        [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) -> std::list<BSONObj> {
+        [&](OperationContext* opCtx, RoutingContext& routingCtx) -> std::vector<BSONObj> {
             StatusWith<Shard::QueryResponse> response =
-                loadIndexesFromAuthoritativeShard(opCtx, ns, cri);
+                loadIndexesFromAuthoritativeShard(opCtx, routingCtx, ns);
             if (response.getStatus().code() == ErrorCodes::NamespaceNotFound) {
                 return {};
             }
             uassertStatusOK(response);
-            std::vector<BSONObj>& indexes = response.getValue().docs;
-            return {std::make_move_iterator(indexes.begin()),
-                    std::make_move_iterator(indexes.end())};
+            return response.getValue().docs;
         });
 }
 
@@ -388,14 +403,14 @@ std::vector<BSONObj> ShardServerProcessInterface::runListCollections(OperationCo
                                                                      const DatabaseName& db,
                                                                      bool addPrimaryShard) {
     return _runListCollectionsCommandOnAShardedCluster(
-        opCtx, NamespaceStringUtil::deserialize(db, ""), addPrimaryShard);
+        opCtx, NamespaceStringUtil::deserialize(db, ""), {.addPrimaryShard = addPrimaryShard});
 }
 
 void ShardServerProcessInterface::_createCollectionCommon(OperationContext* opCtx,
                                                           const DatabaseName& dbName,
                                                           const BSONObj& cmdObj,
                                                           boost::optional<ShardId> dataShard) {
-    cluster::createDatabase(opCtx, dbName);
+    cluster::createDatabase(opCtx, dbName, dataShard);
 
     // TODO (SERVER-77915): Remove the FCV check and keep only the 'else' branch
     if (!feature_flags::g80CollectionCreationPath.isEnabled(
@@ -436,7 +451,7 @@ void ShardServerProcessInterface::_createCollectionCommon(OperationContext* opCt
         // internal command will skip the apiVersionCheck. However in case of view, the create
         // command might run an aggregation. Having those fields propagated guarantees the api
         // version check will keep working within the aggregation framework.
-        auto request = ShardsvrCreateCollectionRequest::parse(IDLParserContext("create"), cmdObj);
+        auto request = ShardsvrCreateCollectionRequest::parse(cmdObj, IDLParserContext("create"));
 
         ShardsvrCreateCollection shardsvrCollCommand(nss);
         request.setUnsplittable(true);
@@ -470,7 +485,7 @@ void ShardServerProcessInterface::createTempCollection(OperationContext* opCtx,
         NamespaceString(NamespaceString::kAggTempCollections),
         std::vector<BSONObj>({BSON(
             "_id" << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()))})});
-    writeToLocalShard(opCtx, bcr, generic_argument_util::kMajorityWriteConcern);
+    writeToLocalShard(opCtx, bcr, defaultMajorityWriteConcernDoNotUse());
 
     // Create the collection. Note we don't set the 'temp: true' option. The temporary-ness comes
     // from having registered on kAggTempCollections.
@@ -483,11 +498,11 @@ void ShardServerProcessInterface::createTempCollection(OperationContext* opCtx,
 void ShardServerProcessInterface::createIndexesOnEmptyCollection(
     OperationContext* opCtx, const NamespaceString& ns, const std::vector<BSONObj>& indexSpecs) {
     sharding::router::CollectionRouter router(opCtx->getServiceContext(), ns);
-    router.route(
+    router.routeWithRoutingContext(
         opCtx,
-        "copying index for empty collection {}"_format(
-            NamespaceStringUtil::serialize(ns, SerializationContext::stateDefault())),
-        [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) {
+        fmt::format("copying index for empty collection {}",
+                    NamespaceStringUtil::serialize(ns, SerializationContext::stateDefault())),
+        [&](OperationContext* opCtx, RoutingContext& routingCtx) {
             BSONObjBuilder cmdBuilder;
             cmdBuilder.append("createIndexes", ns.coll());
             cmdBuilder.append("indexes", indexSpecs);
@@ -496,12 +511,11 @@ void ShardServerProcessInterface::createIndexesOnEmptyCollection(
             auto cmdObj = cmdBuilder.obj();
             auto shardResponses = scatterGatherVersionedTargetByRoutingTable(
                 opCtx,
-                ns.dbName(),
+                routingCtx,
                 ns,
-                cri,
                 cmdObj,
                 ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                Shard::RetryPolicy::kNoRetry,
+                Shard::RetryPolicy::kStrictlyNotIdempotent,
                 BSONObj() /*query*/,
                 BSONObj() /*collation*/,
                 boost::none /*letParameters*/,
@@ -573,7 +587,7 @@ void ShardServerProcessInterface::dropTempCollection(OperationContext* opCtx,
         {write_ops::DeleteOpEntry(BSON("_id" << NamespaceStringUtil::serialize(
                                            nss, SerializationContext::stateDefault())),
                                   false /* multi */)}});
-    writeToLocalShard(opCtx, std::move(bcr), generic_argument_util::kMajorityWriteConcern);
+    writeToLocalShard(opCtx, std::move(bcr), defaultMajorityWriteConcernDoNotUse());
 }
 
 void ShardServerProcessInterface::createTimeseriesView(OperationContext* opCtx,
@@ -597,8 +611,8 @@ boost::optional<TimeseriesOptions> ShardServerProcessInterface::_getTimeseriesOp
     if (!timeseries || !timeseries.isABSONObj()) {
         return boost::none;
     }
-    return TimeseriesOptions::parseOwned(IDLParserContext("TimeseriesOptions"),
-                                         timeseries.Obj().getOwned());
+    return TimeseriesOptions::parseOwned(timeseries.Obj().getOwned(),
+                                         IDLParserContext("TimeseriesOptions"));
 }
 
 Status ShardServerProcessInterface::insertTimeseries(
@@ -611,27 +625,43 @@ Status ShardServerProcessInterface::insertTimeseries(
         expCtx, ns, std::move(insertCommand), wc, targetEpoch);
 }
 
-std::unique_ptr<Pipeline, PipelineDeleter> ShardServerProcessInterface::preparePipelineForExecution(
-    Pipeline* ownedPipeline,
+std::unique_ptr<Pipeline> ShardServerProcessInterface::finalizeAndMaybePreparePipelineForExecution(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    std::unique_ptr<Pipeline> pipeline,
+    bool attachCursorAfterOptimizing,
+    std::function<void(Pipeline* pipeline)> optimizePipeline,
+    ShardTargetingPolicy shardTargetingPolicy,
+    boost::optional<BSONObj> readConcern,
+    bool shouldUseCollectionDefaultCollator) {
+    return sharded_agg_helpers::finalizeAndMaybePreparePipelineForExecution(
+        expCtx,
+        std::move(pipeline),
+        attachCursorAfterOptimizing,
+        optimizePipeline,
+        shardTargetingPolicy,
+        readConcern,
+        shouldUseCollectionDefaultCollator);
+}
+
+std::unique_ptr<Pipeline> ShardServerProcessInterface::preparePipelineForExecution(
+    std::unique_ptr<Pipeline> pipeline,
     ShardTargetingPolicy shardTargetingPolicy,
     boost::optional<BSONObj> readConcern) {
     return sharded_agg_helpers::preparePipelineForExecution(
-        ownedPipeline, shardTargetingPolicy, std::move(readConcern));
+        std::move(pipeline), shardTargetingPolicy, std::move(readConcern));
 }
 
-std::unique_ptr<Pipeline, PipelineDeleter> ShardServerProcessInterface::preparePipelineForExecution(
+std::unique_ptr<Pipeline> ShardServerProcessInterface::preparePipelineForExecution(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const AggregateCommandRequest& aggRequest,
-    Pipeline* pipeline,
+    std::unique_ptr<Pipeline> pipeline,
     boost::optional<BSONObj> shardCursorsSortSpec,
     ShardTargetingPolicy shardTargetingPolicy,
     boost::optional<BSONObj> readConcern,
     bool shouldUseCollectionDefaultCollator) {
-    std::unique_ptr<Pipeline, PipelineDeleter> targetPipeline(
-        pipeline, PipelineDeleter(expCtx->getOperationContext()));
     return sharded_agg_helpers::targetShardsAndAddMergeCursors(
         expCtx,
-        std::make_pair(aggRequest, std::move(targetPipeline)),
+        std::make_pair(aggRequest, std::move(pipeline)),
         shardCursorsSortSpec,
         shardTargetingPolicy,
         std::move(readConcern),

@@ -27,22 +27,23 @@
  *    it in the license file.
  */
 
-#include <boost/optional.hpp>
-#include <cstddef>
-#include <new>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/matcher/expression_with_placeholder.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/matcher/expression_path.h"
-#include "mongo/db/matcher/expression_with_placeholder.h"
 #include "mongo/util/pcre.h"
 #include "mongo/util/static_immortal.h"
 #include "mongo/util/str.h"
+
+#include <cstddef>
+#include <new>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -110,7 +111,7 @@ StatusWith<std::unique_ptr<ExpressionWithPlaceholder>> ExpressionWithPlaceholder
 
     boost::optional<std::string> placeholder;
     if (statusWithId.getValue()) {
-        placeholder = statusWithId.getValue()->toString();
+        placeholder = std::string{*statusWithId.getValue()};
         if (!matchesPlaceholderPattern(*placeholder)) {
             return Status(ErrorCodes::BadValue,
                           str::stream() << "The top-level field name must be an alphanumeric "
@@ -124,16 +125,17 @@ StatusWith<std::unique_ptr<ExpressionWithPlaceholder>> ExpressionWithPlaceholder
     return {std::move(exprWithPlaceholder)};
 }
 
-void ExpressionWithPlaceholder::optimizeFilter() {
-    // The Boolean simplifier is disabled since we don't want to simplify sub-expressions, but
-    // simplify the whole expression instead.
-    _filter = MatchExpression::optimize(std::move(_filter), /* enableSimplification */ false);
+void ExpressionWithPlaceholder::resetFilter(MatchExpression* filter) {
+    _filter.reset(filter);
 
+    // When the filter is reset we potentially can get a totally different expression where a
+    // placeholder field is different from the original one, so we need to recompute it whenever
+    // we reset the filter.
     auto newPlaceholder = parseTopLevelFieldName(_filter.get());
     invariant(newPlaceholder.getStatus());
 
     if (newPlaceholder.getValue()) {
-        _placeholder = newPlaceholder.getValue()->toString();
+        _placeholder = std::string{*newPlaceholder.getValue()};
         dassert(matchesPlaceholderPattern(*_placeholder));
     } else {
         _placeholder = boost::none;

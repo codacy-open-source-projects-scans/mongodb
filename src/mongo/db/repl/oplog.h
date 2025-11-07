@@ -29,14 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <functional>
-#include <iosfwd>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -54,11 +46,21 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/storage/record_store.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 
-namespace mongo {
+#include <cstddef>
+#include <functional>
+#include <iosfwd>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUB mongo {
 class Collection;
 class CollectionPtr;
 class Database;
@@ -108,9 +110,17 @@ public:
 };
 
 namespace repl {
+namespace internal {
+MONGO_MOD_NEEDS_REPLACEMENT Status
+insertDocumentsForOplog(OperationContext* opCtx,
+                        const CollectionPtr& oplogCollection,
+                        std::vector<Record>* records,
+                        const std::vector<Timestamp>& timestamps);
+}  // namespace internal
+
 class ReplSettings;
 
-struct OplogLink {
+struct MONGO_MOD_PRIVATE OplogLink {
     OplogLink() = default;
 
     OpTime prevOpTime;
@@ -240,6 +250,9 @@ public:
                                                const mongo::NamespaceString& nss,
                                                const mongo::BSONObj& oplogEntry,
                                                const std::string& errorMsg);
+
+    // Extracts the namespace from a command oplog entry object.
+    static NamespaceString extractNsFromCmd(DatabaseName dbName, const BSONObj& cmdObj);
 };
 
 inline std::ostream& operator<<(std::ostream& s, OplogApplication::Mode mode) {
@@ -272,6 +285,16 @@ Status applyOperation_inlock(OperationContext* opCtx,
                              IncrementOpsAppliedStatsFn incrementOpsAppliedStats = {});
 
 /**
+ * Apply a container insert or delete operation. The caller must hold a MODE_IX lock on the
+ * namespace the container belongs to. Only container ops are allowed.
+ *
+ * Returns OK on success, or the the failure status reported by the storage engine.
+ */
+Status applyContainerOperation_inlock(OperationContext* opCtx,
+                                      const ApplierOperation& op,
+                                      OplogApplication::Mode oplogApplicationMode);
+
+/**
  * Take a command op and apply it locally
  * Used for applying from an oplog and for applyOps command.
  * Returns failure status if the op that could not be applied.
@@ -300,6 +323,7 @@ void signalOplogWaiters();
  */
 void createIndexForApplyOps(OperationContext* opCtx,
                             const BSONObj& indexSpec,
+                            const boost::optional<BSONObj>& indexMetadata,
                             const NamespaceString& indexNss,
                             OplogApplication::Mode mode);
 
@@ -331,9 +355,15 @@ template <typename F>
 auto writeConflictRetryWithLimit(OperationContext* opCtx,
                                  StringData opStr,
                                  const NamespaceStringOrUUID& nssOrUUID,
-                                 F&& f) {
-    return writeConflictRetry(opCtx, opStr, nssOrUUID, f, repl::writeConflictRetryLimit);
+                                 F&& f,
+                                 bool dump = false) {
+    return writeConflictRetry(opCtx,
+                              opStr,
+                              nssOrUUID,
+                              f,
+                              repl::writeConflictRetryLimit.loadRelaxed(),
+                              dump ? repl::writeConflictRetryCountForDumpState.loadRelaxed() : 0);
 }
 
 }  // namespace repl
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

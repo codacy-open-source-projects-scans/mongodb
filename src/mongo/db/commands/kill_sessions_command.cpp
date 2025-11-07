@@ -27,14 +27,6 @@
  *    it in the license file.
  */
 
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <absl/container/node_hash_set.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -59,6 +51,14 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/read_through_cache.h"
+
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_set.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -112,6 +112,10 @@ public:
         return Status::OK();
     }
 
+    bool requiresAuthzChecks() const override {
+        return false;
+    }
+
     /**
      * Should ignore the lsid attached to this command in order to prevent it from killing itself.
      */
@@ -124,7 +128,7 @@ public:
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         IDLParserContext ctx("KillSessionsCmd");
-        auto ksc = KillSessionsCmdFromClient::parse(ctx, cmdObj);
+        auto ksc = KillSessionsCmdFromClient::parse(cmdObj, ctx);
 
         KillAllSessionsByPatternSet patterns;
 

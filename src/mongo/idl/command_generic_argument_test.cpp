@@ -27,19 +27,17 @@
  *    it in the license file.
  */
 
+#include "mongo/idl/command_generic_argument.h"
+
+#include "mongo/unittest/unittest.h"
+
 #include <array>
 #include <memory>
 
 #include <fmt/format.h>
 
-#include "mongo/idl/command_generic_argument.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-
 namespace mongo {
 namespace test {
-
-using namespace fmt::literals;
 
 // A copy of the generic command arguments and reply fields from before they were moved to IDL in
 // SERVER-51848. We will test that the IDL definitions match these old C++ definitions.
@@ -64,7 +62,6 @@ static constexpr std::array<SpecialArgRecord, 35> specials{{
     {"$client"_sd,                           1, 0, 1, 0},
     {"$configServerState"_sd,                1, 1, 1, 1},
     {"$db"_sd,                               1, 0, 1, 0},
-    {"allowImplicitCollectionCreation"_sd,   1, 0, 1, 0},
     {"$oplogQueryData"_sd,                   1, 1, 1, 1},
     {"$queryOptions"_sd,                     1, 0, 0, 0},
     {"$readPreference"_sd,                   1, 0, 1, 0},
@@ -91,29 +88,38 @@ static constexpr std::array<SpecialArgRecord, 35> specials{{
     {"maxTimeMSOpOnly"_sd,                   1, 0, 1, 0},
     {"$configTime"_sd,                       1, 1, 1, 1},
     {"ok"_sd,                                0, 1, 0, 0},
-    {"$topologyTime"_sd,                     1, 1, 1, 1}}};
+    {"$topologyTime"_sd,                     1, 1, 1, 1},
+    {"$traceCtx"_sd,                         1, 0, 0, 0}}};
 // clang-format on
 
 TEST(CommandGenericArgument, AllGenericArgumentsAndReplyFields) {
     for (const auto& record : specials) {
         if (isGenericArgument(record.name) != record.isGenericArgument) {
-            FAIL("isGenericArgument('{}') should be {}, but it's {}"_format(
-                record.name, record.isGenericArgument, isGenericArgument(record.name)));
+            FAIL(fmt::format("isGenericArgument('{}') should be {}, but it's {}",
+                             record.name,
+                             record.isGenericArgument,
+                             isGenericArgument(record.name)));
         }
 
         if (isGenericReply(record.name) != record.isGenericReply) {
-            FAIL("isGenericReply('{}') should be {}, but it's {}"_format(
-                record.name, record.isGenericReply, isGenericReply(record.name)));
+            FAIL(fmt::format("isGenericReply('{}') should be {}, but it's {}",
+                             record.name,
+                             record.isGenericReply,
+                             isGenericReply(record.name)));
         }
 
         if (shouldForwardToShards(record.name) == record.stripFromRequest) {
-            FAIL("shouldForwardToShards('{}') should be {}, but it's {}"_format(
-                record.name, !record.stripFromRequest, shouldForwardToShards(record.name)));
+            FAIL(fmt::format("shouldForwardToShards('{}') should be {}, but it's {}",
+                             record.name,
+                             !record.stripFromRequest,
+                             shouldForwardToShards(record.name)));
         }
 
         if (shouldForwardFromShards(record.name) == record.stripFromReply) {
-            FAIL("shouldForwardFromShards('{}') should be {}, but it's {}"_format(
-                record.name, !record.stripFromReply, shouldForwardFromShards(record.name)));
+            FAIL(fmt::format("shouldForwardFromShards('{}') should be {}, but it's {}",
+                             record.name,
+                             !record.stripFromReply,
+                             shouldForwardFromShards(record.name)));
         }
     }
 }

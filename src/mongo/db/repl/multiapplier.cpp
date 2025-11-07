@@ -29,17 +29,16 @@
 
 #include <boost/move/utility_core.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <memory>
-#include <mutex>
-#include <ostream>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/db/client.h"
 #include "mongo/db/repl/multiapplier.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/destructor_guard.h"
+
+#include <memory>
+#include <mutex>
+#include <ostream>
+#include <utility>
 
 namespace mongo {
 namespace repl {
@@ -59,7 +58,12 @@ MultiApplier::MultiApplier(executor::TaskExecutor* executor,
 }
 
 MultiApplier::~MultiApplier() {
-    DESTRUCTOR_GUARD(shutdown(); join(););
+    try {
+        shutdown();
+        join();
+    } catch (...) {
+        reportFailedDestructor(MONGO_SOURCE_LOCATION());
+    }
 }
 
 bool MultiApplier::isActive() const {

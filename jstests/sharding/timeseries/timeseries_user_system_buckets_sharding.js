@@ -18,22 +18,17 @@
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
-var st = new ShardingTest({shards: 2});
-assert.commandWorked(
-    st.s0.adminCommand({enableSharding: 'test', primaryShard: st.shard1.shardName}));
+let st = new ShardingTest({shards: 2});
+assert.commandWorked(st.s0.adminCommand({enableSharding: "test", primaryShard: st.shard1.shardName}));
 
-// TODO SERVER-87189 Remove this helper as starting from 8.0 we always pass from the coordinator to
-// create a collection.
-const isTrackUnshardedCollectionsEnabled = FeatureFlagUtil.isPresentAndEnabled(
-    st.s.getDB('admin'), "TrackUnshardedCollectionsUponCreation");
 const tsOptions = {
     timeField: "timestamp",
-    metaField: "metadata"
+    metaField: "metadata",
 };
 
 const tsOptions2 = {
     timeField: "timestamp",
-    metaField: "metadata2"
+    metaField: "metadata2",
 };
 
 const kDbName = "test";
@@ -55,8 +50,7 @@ function createFailed(collName, tsOptions, errorCode) {
     if (Object.keys(tsOptions).length === 0) {
         assert.commandFailedWithCode(db.createCollection(collName), errorCode);
     } else {
-        assert.commandFailedWithCode(db.createCollection(collName, {timeseries: tsOptions}),
-                                     errorCode);
+        assert.commandFailedWithCode(db.createCollection(collName, {timeseries: tsOptions}), errorCode);
     }
 }
 
@@ -65,8 +59,7 @@ function shardCollectionWorked(collName, tsOptions = {}) {
     if (Object.keys(tsOptions).length === 0) {
         assert.commandWorked(st.s.adminCommand({shardCollection: nss, key: {x: 1}}));
     } else {
-        assert.commandWorked(
-            st.s.adminCommand({shardCollection: nss, key: {timestamp: 1}, timeseries: tsOptions}));
+        assert.commandWorked(st.s.adminCommand({shardCollection: nss, key: {timestamp: 1}, timeseries: tsOptions}));
     }
     return db.getCollection(collName);
 }
@@ -74,19 +67,18 @@ function shardCollectionWorked(collName, tsOptions = {}) {
 function shardCollectionFailed(collName, tsOptions, errorCode) {
     let nss = kDbName + "." + collName;
     if (Object.keys(tsOptions).length === 0) {
-        assert.commandFailedWithCode(st.s.adminCommand({shardCollection: nss, key: {x: 1}}),
-                                     errorCode);
+        assert.commandFailedWithCode(st.s.adminCommand({shardCollection: nss, key: {x: 1}}), errorCode);
     } else {
         assert.commandFailedWithCode(
             st.s.adminCommand({shardCollection: nss, key: {timestamp: 1}, timeseries: tsOptions}),
-            errorCode);
+            errorCode,
+        );
     }
 }
 
 function runTest(testCase, minRequiredVersion = null) {
     if (minRequiredVersion) {
-        const res =
-            st.s.getDB("admin").system.version.find({_id: "featureCompatibilityVersion"}).toArray();
+        const res = st.s.getDB("admin").system.version.find({_id: "featureCompatibilityVersion"}).toArray();
         if (MongoRunner.compareBinVersions(res[0].version, minRequiredVersion) < 0) {
             return;
         }
@@ -111,7 +103,8 @@ function runTest(testCase, minRequiredVersion = null) {
         },
         // Before 8.1 the shardCollection used to work instead of returning error.
         // TODO BACKPORT-19383 remove the minRequiredVersion
-        "8.1" /*minRequiredVersion*/);
+        "8.1" /*minRequiredVersion*/,
+    );
 }
 
 // Case prexisting collection: timeseries.
@@ -143,8 +136,7 @@ function runTest(testCase, minRequiredVersion = null) {
         shardCollectionFailed(kColl, {}, 5914001);
     });
 
-    jsTest.log(
-        "Case collection: bucket timeseries / collection: sharded timeseries different options.");
+    jsTest.log("Case collection: bucket timeseries / collection: sharded timeseries different options.");
     runTest(() => {
         createWorked(kBucket, tsOptions);
         shardCollectionFailed(kColl, tsOptions2, [ErrorCodes.InvalidOptions]);
@@ -158,7 +150,7 @@ function runTest(testCase, minRequiredVersion = null) {
         },
         // TODO BACKPORT-19329 On 7.0 this test case used to cause a primary node crash.
         // TODO (SERVER-88975): Remove temporary restriction requiring FCV 8.0+.
-        "8.0"  // minRequiredVersion
+        "8.0", // minRequiredVersion
     );
 }
 
@@ -179,13 +171,9 @@ function runTest(testCase, minRequiredVersion = null) {
     jsTest.log("Case collection: sharded standard / collection: bucket timeseries.");
     runTest(() => {
         shardCollectionWorked(kColl);
-        if (isTrackUnshardedCollectionsEnabled) {
-            createFailed(kBucket, tsOptions, ErrorCodes.NamespaceExists);
-        } else {
-            // TODO SERVER-85855 creating a bucket timeseries when the main namespace already exists
-            // and is not timeseries should fail
-            createWorked(kBucket, tsOptions);
-        }
+        // TODO SERVER-85855 creating a bucket timeseries when the main namespace already exists
+        // and is not timeseries should fail
+        createWorked(kBucket, tsOptions);
     });
 
     jsTest.log("Case collection: sharded standard / collection: sharded standard.");
@@ -216,7 +204,7 @@ function runTest(testCase, minRequiredVersion = null) {
             createWorked(kColl, tsOptions);
         },
         // On 7.0 this test case used to wrongly fail with NamespaceExists.
-        "7.1"  // minRequiredVersion
+        "7.1", // minRequiredVersion
     );
 
     jsTest.log("Case collection: sharded timeseries / collection: timeseries with different opts.");
@@ -232,7 +220,7 @@ function runTest(testCase, minRequiredVersion = null) {
             createWorked(kBucket, tsOptions);
         },
         // Creation of bucket namespace is not idempotent before 8.0 (SERVER-89827)
-        "8.0"  // minRequiredVersion
+        "8.0", // minRequiredVersion
     );
 
     jsTest.log("Case collection: sharded timeseries / collection: sharded standard.");
@@ -247,18 +235,16 @@ function runTest(testCase, minRequiredVersion = null) {
         shardCollectionWorked(kColl, tsOptions);
     });
 
-    jsTest.log(
-        "Creation of unsharded bucket collections without timeseries options is not permitted.");
+    jsTest.log("Creation of unsharded bucket collections without timeseries options is not permitted.");
     runTest(
         () => {
             createFailed(kBucket, {}, ErrorCodes.IllegalOperation);
         },
         // TODO BACKPORT-20546: Remove minRequired version once the backport is completed.
-        "8.1"  // minRequiredVersion
+        "8.1", // minRequiredVersion
     );
 
-    jsTest.log(
-        "Creation of sharded bucket collections without timeseries options is not permitted.");
+    jsTest.log("Creation of sharded bucket collections without timeseries options is not permitted.");
     runTest(() => {
         shardCollectionFailed(kBucket, {}, 5731501);
     });

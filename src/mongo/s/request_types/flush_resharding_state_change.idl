@@ -29,6 +29,7 @@
 # _flushReshardingStateChange IDL File
 
 global:
+    mod_visibility: private
     cpp_namespace: "mongo"
 
 imports:
@@ -44,7 +45,7 @@ commands:
         type: namespacestring
         reply_type: OkReply
         fields:
-          reshardingUUID:
-            type: uuid
-            optional: false
-            description: "The UUID for this resharding operation"
+            reshardingUUID:
+                type: uuid
+                optional: false
+                description: "The UUID for this resharding operation"

@@ -29,6 +29,9 @@
 
 #pragma once
 
+#include "mongo/util/modules.h"
+
+MONGO_MOD_PARENT_PRIVATE;
 namespace mongo::timeseries::bucket_catalog {
 
 /**
@@ -54,5 +57,10 @@ enum class RolloverReason {
                      // the bucket larger than the dynamic size limit
     kSize,  // Adding this measurement would make the bucket larger than the normal size limit
 };
+
+/**
+ * Returns the RolloverAction based on the RolloverReason.
+ */
+RolloverAction getRolloverAction(RolloverReason reason);
 
 }  // namespace mongo::timeseries::bucket_catalog

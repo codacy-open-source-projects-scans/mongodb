@@ -27,8 +27,7 @@
  *    it in the license file.
  */
 
-#include <string>
-#include <vector>
+#pragma once
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -38,7 +37,6 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/shutdown_gen.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
@@ -47,6 +45,9 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/ntservice.h"
+
+#include <string>
+#include <vector>
 
 namespace mongo {
 Status stepDownForShutdown(OperationContext* opCtx,

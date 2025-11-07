@@ -31,8 +31,9 @@
 
 #include "mongo/base/status.h"
 #include "mongo/util/future_util.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+namespace MONGO_MOD_PUB mongo {
 namespace primary_only_service_helpers {
 
 using RetryabilityPredicate = std::function<bool(const Status&)>;
@@ -51,8 +52,16 @@ const auto kDefaultRetryabilityPredicate = [](const Status& status) {
         status == ErrorCodes::FailedToSatisfyReadPreference ||
         status.isA<ErrorCategory::CursorInvalidatedError>() || status == ErrorCodes::Interrupted ||
         status.isA<ErrorCategory::CancellationError>() ||
+        status.isA<ErrorCategory::ExceededTimeLimitError>() ||
         status.isA<ErrorCategory::NotPrimaryError>() ||
-        status.isA<ErrorCategory::NetworkTimeoutError>();
+        status.isA<ErrorCategory::NetworkTimeoutError>() ||
+        status == ErrorCodes::ShardingStateNotInitialized;
+};
+
+const auto kRetryabilityPredicateIncludeWriteConcernTimeout = [](const Status& status) {
+    // Retry on write concern errors, which are not retriable errors, but may be retryable
+    // in the context of a primary-only service.
+    return kDefaultRetryabilityPredicate(status) || status == ErrorCodes::WriteConcernTimeout;
 };
 
 const auto kAlwaysRetryPredicate = [](const Status& status) {
@@ -145,4 +154,4 @@ private:
 };
 
 }  // namespace primary_only_service_helpers
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

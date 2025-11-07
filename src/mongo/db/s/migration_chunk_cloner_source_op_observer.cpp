@@ -29,36 +29,36 @@
 
 #include "mongo/db/s/migration_chunk_cloner_source_op_observer.h"
 
+#include "mongo/base/checked_cast.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/db/global_catalog/chunk.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/router_role_api/sharding_write_router.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/local_catalog/collection_operation_source.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
+#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_state.h"
+#include "mongo/db/op_observer/op_observer_util.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/s/migration_chunk_cloner_source.h"
+#include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/topology/sharding_state.h"
+#include "mongo/db/transaction/transaction_participant.h"
+#include "mongo/logv2/log.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/decorable.h"
+
 #include <memory>
 #include <string>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/checked_cast.h"
-#include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
-#include "mongo/db/catalog/collection_operation_source.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/op_observer/op_observer_util.h"
-#include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
-#include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/s/database_sharding_state.h"
-#include "mongo/db/s/migration_chunk_cloner_source.h"
-#include "mongo/db/s/sharding_write_router.h"
-#include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/s/chunk.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/decorable.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -88,13 +88,7 @@ void MigrationChunkClonerSourceOpObserver::assertNoMovePrimaryInProgress(
         return;
     }
 
-    // TODO SERVER-58222: evaluate whether this is safe or whether acquiring the lock can block.
-    AllowLockAcquisitionOnTimestampedUnitOfWork allowLockAcquisition(
-        shard_role_details::getLocker(opCtx));
-    Lock::DBLock dblock(opCtx, nss.dbName(), MODE_IS);
-
-    const auto scopedDss =
-        DatabaseShardingState::assertDbLockedAndAcquireShared(opCtx, nss.dbName());
+    const auto scopedDss = DatabaseShardingState::acquire(opCtx, nss.dbName());
     if (scopedDss->isMovePrimaryInProgress()) {
         LOGV2(4908600, "assertNoMovePrimaryInProgress", logAttrs(nss));
 
@@ -166,7 +160,7 @@ void MigrationChunkClonerSourceOpObserver::onInserts(
 
     auto* const css = shardingWriteRouter->getCss();
     css->checkShardVersionOrThrow(opCtx);
-    DatabaseShardingState::assertMatchingDbVersion(opCtx, nss.dbName());
+    DatabaseShardingState::acquire(opCtx, nss.dbName())->checkDbVersionOrThrow(opCtx);
 
     auto* const csr = checked_cast<CollectionShardingRuntime*>(css);
     auto metadata = csr->getCurrentMetadataIfKnown();
@@ -237,7 +231,7 @@ void MigrationChunkClonerSourceOpObserver::onUpdate(OperationContext* opCtx,
 
     auto* const css = shardingWriteRouter->getCss();
     css->checkShardVersionOrThrow(opCtx);
-    DatabaseShardingState::assertMatchingDbVersion(opCtx, nss.dbName());
+    DatabaseShardingState::acquire(opCtx, nss.dbName())->checkDbVersionOrThrow(opCtx);
 
     auto* const csr = checked_cast<CollectionShardingRuntime*>(css);
     auto metadata = csr->getCurrentMetadataIfKnown();
@@ -284,7 +278,7 @@ void MigrationChunkClonerSourceOpObserver::onDelete(OperationContext* opCtx,
     ShardingWriteRouter shardingWriteRouter(opCtx, nss);
     auto* const css = shardingWriteRouter.getCss();
     css->checkShardVersionOrThrow(opCtx);
-    DatabaseShardingState::assertMatchingDbVersion(opCtx, nss.dbName());
+    DatabaseShardingState::acquire(opCtx, nss.dbName())->checkDbVersionOrThrow(opCtx);
 
     auto* const csr = checked_cast<CollectionShardingRuntime*>(css);
     auto metadata = csr->getCurrentMetadataIfKnown();

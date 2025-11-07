@@ -27,16 +27,6 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -49,19 +39,21 @@
 #include "mongo/crypto/fle_crypto_types.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/crypto/fle_stats_gen.h"
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/fle_crud.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/count_command_gen.h"
@@ -73,7 +65,6 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/resource_yielder.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/session.h"
 #include "mongo/db/session/session_catalog.h"
@@ -94,6 +85,16 @@
 #include "mongo/util/decorable.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -248,7 +249,7 @@ private:
 
         key_string::Builder builder(key_string::Version::kLatestVersion);
         builder.appendBinData(BSONBinData(block.data(), block.size(), BinDataType::BinDataGeneral));
-        auto recordId = RecordId(builder.getBuffer(), builder.getSize());
+        auto recordId = RecordId(builder.getView());
 
         incrementRead();
         return _cursor->seekExact(recordId);
@@ -322,7 +323,8 @@ private:
 
         incrementRead();
 
-        auto loc = _indexCursor->seekExact(kb.finishAndGetBuffer());
+        auto& ru = *shard_role_details::getRecoveryUnit(_opCtx);
+        auto loc = _indexCursor->seekExact(ru, kb.finishAndGetBuffer());
         if (!loc) {
             return boost::none;
         }
@@ -422,8 +424,27 @@ processFLEFindAndModifyHelper(OperationContext* opCtx,
         "Encrypted index operations are only supported on replica sets",
         repl::ReplicationCoordinator::get(opCtx->getServiceContext())->getSettings().isReplSet());
 
+    // TODO: SERVER-103506 remove this once TypedCommands can handle write concern errors better
+    auto onErrorWithWCE = [&opCtx](const WriteConcernErrorDetail& wce) {
+        // When a FLE2 findAndModify in mongod encounters a write error, the internal transaction
+        // that tried to perform the encrypted writes may abort with a write concern error.
+        // In such cases, the internal write concern error is lost because only the write error
+        // gets thrown up to the command dispatch layer. Moreover, since the internal transaction's
+        // writes were conducted under a different Client, the command's opCtx's Client's lastOpTime
+        // never gets advanced, and so the command dispatch skips waiting for write concern.
+        // Here, we set the opCtx's Client's lastOpTime to the system lastOpTime to indicate the
+        // need to wait for write concern again at the command dispatch layer.
+        if (!opCtx->inMultiDocumentTransaction()) {
+            repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
+        }
+    };
+
     auto reply = processFindAndModifyRequest<write_ops::FindAndModifyCommandReply>(
-        opCtx, findAndModifyRequest, &getTransactionWithRetriesForMongoD);
+        opCtx,
+        findAndModifyRequest,
+        &getTransactionWithRetriesForMongoD,
+        processFindAndModify,
+        onErrorWithWCE);
 
     return reply;
 }
@@ -460,11 +481,10 @@ void processFLECountD(OperationContext* opCtx,
     fle::processCountCommand(opCtx, nss, &countCommand, &getTransactionWithRetriesForMongoD);
 }
 
-std::unique_ptr<Pipeline, PipelineDeleter> processFLEPipelineD(
-    OperationContext* opCtx,
-    NamespaceString nss,
-    const EncryptionInformation& encryptInfo,
-    std::unique_ptr<Pipeline, PipelineDeleter> toRewrite) {
+std::unique_ptr<Pipeline> processFLEPipelineD(OperationContext* opCtx,
+                                              NamespaceString nss,
+                                              const EncryptionInformation& encryptInfo,
+                                              std::unique_ptr<Pipeline> toRewrite) {
     return fle::processPipeline(
         opCtx, nss, encryptInfo, std::move(toRewrite), &getTransactionWithRetriesForMongoD);
 }
@@ -513,26 +533,29 @@ std::vector<std::vector<FLEEdgeCountInfo>> getTagsFromStorage(
     auto opStr = "getTagsFromStorage"_sd;
     return writeConflictRetry(
         opCtx, opStr, nsOrUUID, [&]() -> std::vector<std::vector<FLEEdgeCountInfo>> {
-            AutoGetCollectionForReadMaybeLockFree autoColl(opCtx, nsOrUUID);
+            const auto collectionAcquisition = acquireCollectionMaybeLockFree(
+                opCtx,
+                CollectionAcquisitionRequest::fromOpCtx(
+                    opCtx, nsOrUUID, AcquisitionPrerequisites::kRead));
 
-            const auto& collection = autoColl.getCollection();
+            const auto& collectionPtr = collectionAcquisition.getCollectionPtr();
 
             // If there is no collection, run through the algorithm with a special reader that only
             // returns empty documents. This simplifies the implementation of other readers.
-            if (!collection) {
+            if (!collectionAcquisition.exists()) {
                 MissingCollectionReader reader;
                 return ESCCollection::getTags(reader, escDerivedFromDataTokens, type);
             }
 
             // numRecords is signed so guard against negative numbers
-            auto docCountSigned = collection->numRecords(opCtx);
+            auto docCountSigned = collectionPtr->numRecords(opCtx);
             uint64_t docCount = docCountSigned < 0 ? 0 : static_cast<uint64_t>(docCountSigned);
 
-            std::unique_ptr<SeekableRecordCursor> cursor = collection->getCursor(opCtx, true);
+            std::unique_ptr<SeekableRecordCursor> cursor = collectionPtr->getCursor(opCtx, true);
 
             // If clustered collection, we have simpler searches
-            if (collection->isClustered() &&
-                collection->getClusteredInfo()
+            if (collectionPtr->isClustered() &&
+                collectionPtr->getClusteredInfo()
                         ->getIndexSpec()
                         .getKey()
                         .firstElement()
@@ -546,7 +569,7 @@ std::vector<std::vector<FLEEdgeCountInfo>> getTagsFromStorage(
 
             // Non-clustered case, we need to look a index entry in _id index and then the
             // collection
-            auto indexCatalog = collection->getIndexCatalog();
+            auto indexCatalog = collectionPtr->getIndexCatalog();
 
             const IndexDescriptor* indexDescriptor = indexCatalog->findIndexByName(
                 opCtx, IndexConstants::kIdIndexName, IndexCatalog::InclusionPolicy::kReady);
@@ -566,7 +589,8 @@ std::vector<std::vector<FLEEdgeCountInfo>> getTagsFromStorage(
             auto indexCatalogEntry = indexDescriptor->getEntry()->shared_from_this();
 
             auto sdi = indexCatalogEntry->accessMethod()->asSortedData();
-            auto indexCursor = sdi->newCursor(opCtx, true);
+            auto indexCursor =
+                sdi->newCursor(opCtx, *shard_role_details::getRecoveryUnit(opCtx), true);
 
             StorageEngineIndexCollectionReader reader(opCtx,
                                                       docCount,

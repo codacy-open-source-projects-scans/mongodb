@@ -29,49 +29,36 @@
 
 #include "mongo/db/query/timeseries/bucket_spec.h"
 
-#include <algorithm>
-#include <boost/cstdint.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <s2cellid.h>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/checked_cast.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/oid.h"
-#include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_algo.h"
-#include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/matcher/expression_expr.h"
 #include "mongo/db/matcher/expression_geo.h"
 #include "mongo/db/matcher/expression_internal_bucket_geo_within.h"
-#include "mongo/db/matcher/expression_internal_expr_comparison.h"
 #include "mongo/db/matcher/expression_leaf.h"
-#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/expression_tree.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
-#include "mongo/db/matcher/rewrite_expr.h"
-#include "mongo/db/pipeline/expression.h"
-#include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
+#include "mongo/db/query/compiler/rewrites/matcher/expression_optimizer.h"
+#include "mongo/db/query/compiler/rewrites/matcher/rewrite_expr.h"
 #include "mongo/db/query/timeseries/bucket_level_comparison_predicate_generator.h"
 #include "mongo/db/query/timeseries/bucket_level_id_predicate_generator.h"
-#include "mongo/db/query/util/make_data_structure.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
-#include "mongo/util/intrusive_counter.h"
-#include "mongo/util/str.h"
-#include "mongo/util/time_support.h"
+
+#include <algorithm>
+#include <cstddef>
+
+#include <s2cellid.h>
+
+#include <boost/cstdint.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -174,7 +161,7 @@ BucketSpec::BucketPredicate BucketSpec::createPredicatesOnBucketLevelField(
             return handleIneligible(policy, matchExpr, "cannot handle an excluded meta field");
 
         if (auto looseResult = expression::copyExpressionAndApplyRenames(
-                matchExpr, {{bucketSpec.metaField().value(), kBucketMetaFieldName.toString()}});
+                matchExpr, {{bucketSpec.metaField().value(), std::string{kBucketMetaFieldName}}});
             looseResult) {
             auto tightResult = looseResult->clone();
             return {std::move(looseResult), std::move(tightResult)};
@@ -436,8 +423,8 @@ BucketSpec::splitOutMetaOnlyPredicate(std::unique_ptr<MatchExpression> expr,
 
     return expression::splitMatchExpressionBy(
         std::move(expr),
-        {metaField->toString()},
-        {{metaField->toString(), kBucketMetaFieldName.toString()}},
+        {std::string{*metaField}},
+        {{std::string{*metaField}, std::string{kBucketMetaFieldName}}},
         expression::isOnlyDependentOn);
 }
 
@@ -461,8 +448,8 @@ BucketSpec::SplitPredicates BucketSpec::getPushdownPredicates(
     std::unique_ptr<MatchExpression> bucketMetricPred = nullptr;
     if (residualPred) {
         BucketSpec bucketSpec{
-            tsOptions.getTimeField().toString(),
-            metaField.map([](StringData s) { return s.toString(); }),
+            std::string{tsOptions.getTimeField()},
+            metaField.map([](StringData s) { return std::string{s}; }),
             // Since we are operating on a collection, not a query-result,
             // there are no inclusion/exclusion projections we need to apply
             // to the buckets before unpacking. So we can use default values
@@ -485,13 +472,13 @@ BucketSpec::SplitPredicates BucketSpec::getPushdownPredicates(
             bool changed = generateBucketLevelIdPredicates(
                 *expCtx, bucketSpec, *tsOptions.getBucketMaxSpanSeconds(), bucketMetricPred.get());
             if (changed) {
-                bucketMetricPred = MatchExpression::normalize(std::move(bucketMetricPred));
+                bucketMetricPred = normalizeMatchExpression(std::move(bucketMetricPred));
             }
         }
         if (bucketPredicate.rewriteProvidesExactMatchPredicate) {
             residualPred = nullptr;
         } else {
-            residualPred = MatchExpression::normalize(std::move(residualPred));
+            residualPred = normalizeMatchExpression(std::move(residualPred));
         }
     }
 
@@ -545,9 +532,9 @@ BucketSpec::BucketSpec(BucketSpec&& other)
 }
 
 BucketSpec::BucketSpec(const TimeseriesOptions& tsOptions)
-    : BucketSpec(tsOptions.getTimeField().toString(),
+    : BucketSpec(std::string{tsOptions.getTimeField()},
                  tsOptions.getMetaField()
-                     ? boost::optional<string>(tsOptions.getMetaField()->toString())
+                     ? boost::optional<string>(std::string{*tsOptions.getMetaField()})
                      : boost::none) {}
 
 BucketSpec& BucketSpec::operator=(const BucketSpec& other) {
@@ -590,7 +577,7 @@ const std::string& BucketSpec::timeField() const {
 }
 
 HashedFieldName BucketSpec::timeFieldHashed() const {
-    invariant(_timeFieldHashed->key().rawData() == _timeField.data());
+    invariant(_timeFieldHashed->key().data() == _timeField.data());
     invariant(_timeFieldHashed->key() == _timeField);
     return *_timeFieldHashed;
 }

@@ -29,22 +29,6 @@
 
 #include "mongo/scripting/mozjs/mongo.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <initializer_list>
-#include <js/Object.h>
-#include <js/PropertyDescriptor.h>
-#include <memory>
-#include <string>
-#include <utility>
-
-#include <js/CallArgs.h>
-#include <js/PropertySpec.h>
-#include <js/RootingAPI.h>
-#include <js/TracingAPI.h>
-#include <js/TypeDecls.h>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -91,6 +75,22 @@
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
 
+#include <initializer_list>
+#include <memory>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <js/CallArgs.h>
+#include <js/Object.h>
+#include <js/PropertyDescriptor.h>
+#include <js/PropertySpec.h>
+#include <js/RootingAPI.h>
+#include <js/TracingAPI.h>
+#include <js/TypeDecls.h>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 namespace mongo {
@@ -127,6 +127,7 @@ const JSFunctionSpec MongoBase::methods[] = {
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(_startSession, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(_setOIDCIdPAuthCallback, MongoExternalInfo),
     MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(_refreshAccessToken, MongoExternalInfo),
+    MONGO_ATTACH_JS_CONSTRAINED_METHOD_NO_PROTO(getShellPort, MongoExternalInfo),
     JS_FS_END,
 };
 
@@ -369,7 +370,6 @@ namespace {
  */
 template <typename Params, typename MakeRequest>
 void doRunCommand(JSContext* cx, JS::CallArgs args, MakeRequest makeRequest) {
-    using namespace fmt::literals;
     uassert(ErrorCodes::BadValue,
             str::stream() << Params::kCommandName << " needs 4 args",
             args.length() >= 4);
@@ -395,7 +395,7 @@ void doRunCommand(JSContext* cx, JS::CallArgs args, MakeRequest makeRequest) {
         }
     } else {
         uassert(ErrorCodes::BadValue,
-                "The token parameter to {} must be a string"_format(Params::kCommandName),
+                fmt::format("The token parameter to {} must be a string", Params::kCommandName),
                 tokenArg.isUndefined());
     }
 
@@ -469,7 +469,7 @@ void MongoBase::Functions::find::call(JSContext* cx, JS::CallArgs args) {
     const bool isExhaust = ValueWriter(cx, args.get(2)).toBoolean();
 
     FindCommandRequest findCmdRequest =
-        FindCommandRequest::parse(IDLParserContext("FindCommandRequest"), cmdObj);
+        FindCommandRequest::parse(cmdObj, IDLParserContext("FindCommandRequest"));
     ReadPreferenceSetting readPref;
     if (!readPreference.isEmpty()) {
         readPref = uassertStatusOK(ReadPreferenceSetting::fromInnerBSON(readPreference));
@@ -537,7 +537,7 @@ void MongoBase::Functions::setAutoEncryption::call(JSContext* cx, JS::CallArgs a
     std::shared_ptr<DBClientWithAutoEncryption> kvClient;
     JS::RootedObject keyvaultConn(cx);
     if (args.length() > 1 && !args.get(1).isUndefined()) {
-        uassert(7760001,
+        uassert(7760002,
                 str::stream() << "the second parameter to setAutoEncryption() must be an object",
                 args.get(1).isObject());
         keyvaultConn.set(args.get(1).toObjectOrNull());
@@ -746,8 +746,7 @@ void MongoExternalInfo::construct(JSContext* cx, JS::CallArgs args) {
         uassert(4938000,
                 str::stream() << "the 'options' parameter to Mongo() must be an object",
                 args.get(2).isObject());
-        mongoShellOptions = MongoShellOptions::parse(IDLParserContext("MongoShellOptions"_sd),
-                                                     ValueWriter(cx, args.get(2)).toBSON());
+        mongoShellOptions = MongoShellOptions::parse(ValueWriter(cx, args.get(2)).toBSON());
     }
 
     ClientAPIVersionParameters apiParameters;
@@ -773,11 +772,11 @@ void MongoExternalInfo::construct(JSContext* cx, JS::CallArgs args) {
         const auto& tlsOpts = mongoShellOptions.getTls();
 
         TLSCredentials tlsCredentials;
-        tlsCredentials.tlsPEMKeyFile = tlsOpts->getCertificateKeyFile().value_or("").toString();
+        tlsCredentials.tlsPEMKeyFile = std::string{tlsOpts->getCertificateKeyFile().value_or("")};
         tlsCredentials.tlsPEMKeyPassword =
-            tlsOpts->getCertificateKeyFilePassword().value_or("").toString();
-        tlsCredentials.tlsCAFile = tlsOpts->getCAFile().value_or("").toString();
-        tlsCredentials.tlsCRLFile = tlsOpts->getCRLFile().value_or("").toString();
+            std::string{tlsOpts->getCertificateKeyFilePassword().value_or("")};
+        tlsCredentials.tlsCAFile = std::string{tlsOpts->getCAFile().value_or("")};
+        tlsCredentials.tlsCRLFile = std::string{tlsOpts->getCRLFile().value_or("")};
         tlsCredentials.tlsAllowInvalidHostnames = tlsOpts->getAllowInvalidHostnames();
         tlsCredentials.tlsAllowInvalidCertificates = tlsOpts->getAllowInvalidCertificates();
 
@@ -786,7 +785,7 @@ void MongoExternalInfo::construct(JSContext* cx, JS::CallArgs args) {
             uassertStatusOK(
                 parseCertificateSelector(&tlsCredentials.tlsCertificateSelector,
                                          "tls.certificateSelector",
-                                         tlsOpts->getCertificateSelector().value().toString()));
+                                         std::string{tlsOpts->getCertificateSelector().value()}));
         }
 #endif  // MONGO_CONFIG_SSL_CERTIFICATE_SELECTORS
 
@@ -816,11 +815,7 @@ void MongoExternalInfo::construct(JSContext* cx, JS::CallArgs args) {
                    transientSSLParams,
                    &errcode));
     if (!conn.get()) {
-        if (MONGO_unlikely(transientSSLParams)) {
-            uasserted(errcode, errmsg);
-        } else {
-            uasserted(ErrorCodes::InternalError, errmsg);
-        }
+        uasserted(errcode, errmsg);
     }
     // Make the DBClientBase not throw on a StaleConfig error since the shell cannot handle this
     // error and for transactions throwing this error from inside DBClientBase makes the error lose
@@ -980,6 +975,12 @@ void MongoExternalInfo::Functions::_forgetReplSet::call(JSContext* cx, JS::CallA
     ReplicaSetMonitorManager::get()->removeMonitor(rsName);
 
     args.rval().setUndefined();
+}
+
+void MongoBase::Functions::getShellPort::call(JSContext* cx, JS::CallArgs args) {
+    auto conn = getConnection(args);
+    HostAndPort hostAndPort{conn->getLocalAddress()};
+    args.rval().setInt32(hostAndPort.port());
 }
 
 }  // namespace mozjs

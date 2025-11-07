@@ -31,12 +31,6 @@
 #include <boost/numeric/conversion/converter_policies.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <algorithm>
-#include <cmath>
-#include <iterator>
-#include <limits>
-#include <memory>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement_comparator.h"
 #include "mongo/bson/bsonmisc.h"
@@ -49,14 +43,15 @@
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/path.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/platform/decimal128.h"
-#include "mongo/platform/overflow_arithmetic.h"
-#include "mongo/stdx/unordered_set.h"
+#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/pcre.h"
 #include "mongo/util/pcre_util.h"
-#include "mongo/util/represent_as.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <cmath>
+#include <memory>
 
 namespace mongo {
 
@@ -73,7 +68,7 @@ ComparisonMatchExpressionBase::ComparisonMatchExpressionBase(
       _backingBSONIsSet(false),
       _collator(collator) {
     setData(path, std::move(rhs));
-    invariant(!_rhs.eoo());
+    tassert(11052407, "rhs cannot be eoo", !_rhs.eoo());
 }
 
 // Instantiate above constructor for 'Value&&' and 'const BSONElement&' types.
@@ -136,7 +131,7 @@ ComparisonMatchExpression::ComparisonMatchExpression(MatchType type,
                                     std::move(annotation),
                                     collator) {
     uassert(
-        ErrorCodes::BadValue, "cannot compare to undefined", _rhs.type() != BSONType::Undefined);
+        ErrorCodes::BadValue, "cannot compare to undefined", _rhs.type() != BSONType::undefined);
 
     switch (matchType()) {
         case LT:
@@ -162,103 +157,6 @@ template ComparisonMatchExpression::ComparisonMatchExpression(MatchType,
                                                               clonable_ptr<ErrorAnnotation>,
                                                               const CollatorInterface*);
 
-bool ComparisonMatchExpression::matchesSingleElement(const BSONElement& e,
-                                                     MatchDetails* details) const {
-    if (e.type() != _rhs.type()) {
-        const auto ect = e.canonicalType();
-        const auto rct = _rhs.canonicalType();
-        if (ect != rct) {
-            // We can't call 'compareElements' on elements of different canonical types.  Usually
-            // elements with different canonical types should never match any comparison, but there
-            // are a few exceptions, handled here.
-
-            // jstNULL and missing are treated the same.
-            if (ect + rct == 5) {
-                // At this point we know null (RHS) is being compared to either EOO (missing) or
-                // undefined.
-                return e.eoo() && (matchType() == EQ || matchType() == LTE || matchType() == GTE);
-            }
-            if (_rhs.type() == MaxKey || _rhs.type() == MinKey) {
-                switch (matchType()) {
-                    // LT and LTE need no distinction here because the two elements that we are
-                    // comparing do not even have the same canonical type and are thus not equal
-                    // (i.e.the case where we compare MinKey against MinKey would not reach this
-                    // switch statement at all).  The same reasoning follows for the lack of
-                    // distinction between GTE and GT.
-                    case LT:
-                    case LTE:
-                        return _rhs.type() == MaxKey;
-                    case EQ:
-                        return false;
-                    case GT:
-                    case GTE:
-                        return _rhs.type() == MinKey;
-                    default:
-                        // This is a comparison match expression, so it must be either
-                        // a $lt, $lte, $gt, $gte, or equality expression.
-                        MONGO_UNREACHABLE;
-                }
-            }
-            return false;
-        }
-    }
-
-    if (matchType() == EQ) {
-        if (!_collator && e.type() == String) {
-            // We know from above that _rhs must also be a String (or Symbol which has the same
-            // representation) so if they have different value sizes, they must be different
-            // strings. We can only stop here with the default collator, since other collators may
-            // consider different length strings as equal.
-            if (e.valuesize() != _rhs.valuesize())
-                return false;
-        }
-    } else {
-        // Special case handling for NaN. NaN is equal to NaN but otherwise always compares to
-        // false. This follows the normal comparison rules (where NaN is less than all numbers) for
-        // EQ, so we only need to do this for other comparison types.
-        const bool lhsIsNan =  //
-            (((e.type() == NumberDouble) && (std::isnan(e._numberDouble())))) ||
-            ((e.type() == NumberDecimal) && (e._numberDecimal().isNaN()));
-        const bool rhsIsNan =
-            (((_rhs.type() == NumberDouble) && (std::isnan(_rhs._numberDouble()))) ||
-             ((_rhs.type() == NumberDecimal) && (_rhs._numberDecimal().isNaN())));
-        if (lhsIsNan || rhsIsNan) {
-            bool bothNaN = lhsIsNan && rhsIsNan;
-            switch (matchType()) {
-                case LT:
-                case GT:
-                    return false;
-                case LTE:
-                case GTE:
-                    return bothNaN;
-                default:
-                    // This is a comparison match expression, so it must be either
-                    // a $lt, $lte, $gt, $gte, or equality expression.
-                    fassertFailed(17448);
-            }
-        }
-    }
-
-    int x = BSONElement::compareElements(
-        e, _rhs, BSONElement::ComparisonRules::kConsiderFieldName, _collator);
-    switch (matchType()) {
-        case LT:
-            return x < 0;
-        case LTE:
-            return x <= 0;
-        case EQ:
-            return x == 0;
-        case GT:
-            return x > 0;
-        case GTE:
-            return x >= 0;
-        default:
-            // This is a comparison match expression, so it must be either
-            // a $lt, $lte, $gt, $gte, or equality expression.
-            fassertFailed(16828);
-    }
-}
-
 constexpr StringData EqualityMatchExpression::kName;
 constexpr StringData LTMatchExpression::kName;
 constexpr StringData LTEMatchExpression::kName;
@@ -269,7 +167,12 @@ const std::set<char> RegexMatchExpression::kValidRegexFlags = {'i', 'm', 's', 'x
 
 std::unique_ptr<pcre::Regex> RegexMatchExpression::makeRegex(const std::string& regex,
                                                              const std::string& flags) {
-    return std::make_unique<pcre::Regex>(regex, pcre_util::flagsToOptions(flags));
+    return std::make_unique<pcre::Regex>(
+        regex,
+        pcre_util::flagsToOptions(flags),
+        pcre::Limits{
+            .heapLimitKB = static_cast<uint32_t>(internalQueryRegexHeapLimitKB.loadRelaxed()),
+            .matchLimit = static_cast<uint32_t>(internalQueryRegexMatchLimit.loadRelaxed())});
 }
 
 RegexMatchExpression::RegexMatchExpression(boost::optional<StringData> path,
@@ -277,8 +180,8 @@ RegexMatchExpression::RegexMatchExpression(boost::optional<StringData> path,
                                            StringData options,
                                            clonable_ptr<ErrorAnnotation> annotation)
     : LeafMatchExpression(REGEX, path, std::move(annotation)),
-      _regex(regex.toString()),
-      _flags(options.toString()),
+      _regex(std::string{regex}),
+      _flags(std::string{options}),
       _re(makeRegex(_regex, _flags)) {
 
     uassert(ErrorCodes::BadValue,
@@ -299,18 +202,6 @@ bool RegexMatchExpression::equivalent(const MatchExpression* other) const {
     const RegexMatchExpression* realOther = static_cast<const RegexMatchExpression*>(other);
     return path() == realOther->path() && _regex == realOther->_regex &&
         _flags == realOther->_flags;
-}
-
-bool RegexMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails* details) const {
-    switch (e.type()) {
-        case String:
-        case Symbol:
-            return !!_re->matchView(e.valueStringData());
-        case RegEx:
-            return _regex == e.regex() && _flags == e.regexFlags();
-        default:
-            return false;
-    }
 }
 
 void RegexMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
@@ -354,45 +245,6 @@ ModMatchExpression::ModMatchExpression(boost::optional<StringData> path,
     uassert(ErrorCodes::BadValue, "divisor cannot be 0", divisor != 0);
 }
 
-bool ModMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails* details) const {
-    if (!e.isNumber())
-        return false;
-    long long dividend;
-    if (e.type() == BSONType::NumberDouble) {
-        auto dividendDouble = e.Double();
-
-        // If dividend is NaN or Infinity, then there is no match.
-        if (!std::isfinite(dividendDouble)) {
-            return false;
-        }
-        auto dividendLong = representAs<long long>(std::trunc(dividendDouble));
-
-        // If the dividend value cannot be represented as a 64-bit integer, then we return false.
-        if (!dividendLong) {
-            return false;
-        }
-        dividend = *dividendLong;
-    } else if (e.type() == BSONType::NumberDecimal) {
-        auto dividendDecimal = e.Decimal();
-
-        // If dividend is NaN or Infinity, then there is no match.
-        if (!dividendDecimal.isFinite()) {
-            return false;
-        }
-        auto dividendLong =
-            representAs<long long>(dividendDecimal.round(Decimal128::kRoundTowardZero));
-
-        // If the dividend value cannot be represented as a 64-bit integer, then we return false.
-        if (!dividendLong) {
-            return false;
-        }
-        dividend = *dividendLong;
-    } else {
-        dividend = e.numberLong();
-    }
-    return overflow::safeMod(dividend, _divisor) == _remainder;
-}
-
 void ModMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
     _debugAddSpace(debug, indentationLevel);
     debug << path() << " mod " << _divisor << " % x == " << _remainder;
@@ -421,11 +273,6 @@ bool ModMatchExpression::equivalent(const MatchExpression* other) const {
 ExistsMatchExpression::ExistsMatchExpression(boost::optional<StringData> path,
                                              clonable_ptr<ErrorAnnotation> annotation)
     : LeafMatchExpression(EXISTS, path, std::move(annotation)) {}
-
-bool ExistsMatchExpression::matchesSingleElement(const BSONElement& e,
-                                                 MatchDetails* details) const {
-    return !e.eoo();
-}
 
 void ExistsMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
     _debugAddSpace(debug, indentationLevel);
@@ -481,23 +328,6 @@ std::unique_ptr<MatchExpression> InMatchExpression::clone() const {
     return ime;
 }
 
-bool InMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails* details) const {
-    // When an $in has a null, it adopts the same semantics as {$eq:null}. Namely, in addition to
-    // matching literal null values, the $in should match missing.
-    if (hasNull() && e.eoo()) {
-        return true;
-    }
-    if (contains(e)) {
-        return true;
-    }
-    for (auto&& regex : _regexes) {
-        if (regex->matchesSingleElement(e, details)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 void InMatchExpression::debugString(StringBuilder& debug, int indentationLevel) const {
     _debugAddSpace(debug, indentationLevel);
     debug << path() << " $in ";
@@ -535,7 +365,7 @@ void InMatchExpression::serializeToShape(BSONObjBuilder* bob,
 void InMatchExpression::appendSerializedRightHandSide(BSONObjBuilder* bob,
                                                       const SerializationOptions& opts,
                                                       bool includePath) const {
-    if (opts.literalPolicy != LiteralSerializationPolicy::kUnchanged) {
+    if (!opts.isKeepingLiteralsUnchanged()) {
         serializeToShape(bob, opts);
         return;
     }
@@ -606,47 +436,6 @@ Status InMatchExpression::addRegex(std::unique_ptr<RegexMatchExpression> expr) {
     return Status::OK();
 }
 
-MatchExpression::ExpressionOptimizerFunc InMatchExpression::getOptimizer() const {
-    return [](std::unique_ptr<MatchExpression> expression) -> std::unique_ptr<MatchExpression> {
-        // NOTE: We do not recursively call optimize() on the RegexMatchExpression children in the
-        // _regexes list. We assume that optimize() on a RegexMatchExpression is a no-op.
-        auto& ime = static_cast<InMatchExpression&>(*expression);
-        auto& regexes = ime._regexes;
-        auto collator = ime.getCollator();
-
-        if (regexes.size() == 1 && ime._equalities->elementsIsEmpty()) {
-            // Simplify IN of exactly one regex to be a regex match.
-            auto& childRe = regexes.front();
-            invariant(!childRe->getTag());
-
-            auto simplifiedExpression = std::make_unique<RegexMatchExpression>(
-                expression->path(), childRe->getString(), childRe->getFlags());
-            if (expression->getTag()) {
-                simplifiedExpression->setTag(expression->getTag()->clone());
-            }
-            return simplifiedExpression;
-        } else if (ime._equalities->hasSingleElement() && regexes.empty()) {
-            // Simplify IN of exactly one equality to be an EqualityMatchExpression.
-            BSONObj obj(BSON(expression->path() << *(ime._equalities->getElements().begin())));
-            auto simplifiedExpression =
-                std::make_unique<EqualityMatchExpression>(expression->path(), obj.firstElement());
-            simplifiedExpression->setBackingBSON(obj);
-
-            simplifiedExpression->setCollator(collator);
-            if (expression->getTag()) {
-                simplifiedExpression->setTag(expression->getTag()->clone());
-            }
-
-            return simplifiedExpression;
-        } else if (regexes.empty() && ime._equalities->elementsIsEmpty()) {
-            // Empty IN is always false
-            return std::make_unique<AlwaysFalseMatchExpression>();
-        }
-
-        return expression;
-    };
-}
-
 // -----------
 
 BitTestMatchExpression::BitTestMatchExpression(MatchType type,
@@ -706,122 +495,6 @@ BitTestMatchExpression::BitTestMatchExpression(MatchType type,
             }
         }
     }
-}
-
-bool BitTestMatchExpression::needFurtherBitTests(bool isBitSet) const {
-    const MatchType mt = matchType();
-
-    return (isBitSet && (mt == BITS_ALL_SET || mt == BITS_ANY_CLEAR)) ||
-        (!isBitSet && (mt == BITS_ALL_CLEAR || mt == BITS_ANY_SET));
-}
-
-bool BitTestMatchExpression::performBitTest(long long eValue) const {
-    const MatchType mt = matchType();
-
-    switch (mt) {
-        case BITS_ALL_SET:
-            return (eValue & _bitMask) == _bitMask;
-        case BITS_ALL_CLEAR:
-            return (~eValue & _bitMask) == _bitMask;
-        case BITS_ANY_SET:
-            return eValue & _bitMask;
-        case BITS_ANY_CLEAR:
-            return ~eValue & _bitMask;
-        default:
-            MONGO_UNREACHABLE;
-    }
-}
-
-bool BitTestMatchExpression::performBitTest(const char* eBinary, uint32_t eBinaryLen) const {
-    const MatchType mt = matchType();
-
-    // Test each bit position.
-    for (auto bitPosition : _bitPositions) {
-        bool isBitSet;
-        if (bitPosition >= eBinaryLen * 8) {
-            // If position to test is longer than the data to test against, zero-extend.
-            isBitSet = false;
-        } else {
-            // Map to byte position and bit position within that byte. Note that byte positions
-            // start at position 0 in the char array, and bit positions start at the least
-            // significant bit.
-            int bytePosition = bitPosition / 8;
-            int bit = bitPosition % 8;
-            char byte = eBinary[bytePosition];
-
-            isBitSet = byte & (1 << bit);
-        }
-
-        if (!needFurtherBitTests(isBitSet)) {
-            // If we can skip the rest fo the tests, that means we succeeded with _ANY_ or failed
-            // with _ALL_.
-            return mt == BITS_ANY_SET || mt == BITS_ANY_CLEAR;
-        }
-    }
-
-    // If we finished all the tests, that means we succeeded with _ALL_ or failed with _ANY_.
-    return mt == BITS_ALL_SET || mt == BITS_ALL_CLEAR;
-}
-
-bool BitTestMatchExpression::matchesSingleElement(const BSONElement& e,
-                                                  MatchDetails* details) const {
-    // Validate 'e' is a number or a BinData.
-    if (!e.isNumber() && e.type() != BSONType::BinData) {
-        return false;
-    }
-
-    if (e.type() == BSONType::BinData) {
-        int eBinaryLen;  // Length of eBinary (in bytes).
-        const char* eBinary = e.binData(eBinaryLen);
-        return performBitTest(eBinary, eBinaryLen);
-    }
-
-    invariant(e.isNumber());
-
-    if (e.type() == BSONType::NumberDouble) {
-        double eDouble = e.numberDouble();
-
-        // NaN doubles are rejected.
-        if (std::isnan(eDouble)) {
-            return false;
-        }
-
-        // Integral doubles that are too large or small to be represented as a 64-bit signed
-        // integer are treated as 0. We use 'kLongLongMaxAsDouble' because if we just did
-        // eDouble > 2^63-1, it would be compared against 2^63. eDouble=2^63 would not get caught
-        // that way.
-        if (eDouble >= BSONElement::kLongLongMaxPlusOneAsDouble ||
-            eDouble < std::numeric_limits<long long>::min()) {
-            return false;
-        }
-
-        // This checks if e is an integral double.
-        if (eDouble != static_cast<double>(static_cast<long long>(eDouble))) {
-            return false;
-        }
-    } else if (e.type() == BSONType::NumberDecimal) {
-        Decimal128 eDecimal = e.numberDecimal();
-
-        // NaN NumberDecimals are rejected.
-        if (eDecimal.isNaN()) {
-            return false;
-        }
-
-        // NumberDecimals that are too large or small to be represented as a 64-bit signed
-        // integer are treated as 0.
-        if (eDecimal > Decimal128(std::numeric_limits<long long>::max()) ||
-            eDecimal < Decimal128(std::numeric_limits<long long>::min())) {
-            return false;
-        }
-
-        // This checks if e is an integral NumberDecimal.
-        if (eDecimal != eDecimal.round(Decimal128::kRoundTowardZero)) {
-            return false;
-        }
-    }
-
-    long long eValue = e.numberLong();
-    return performBitTest(eValue);
 }
 
 std::string BitTestMatchExpression::name() const {

@@ -27,6 +27,39 @@
  *    it in the license file.
  */
 
+#include "mongo/db/repl/primary_only_service.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/db/client.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/repl/primary_only_service_test_fixture.h"
+#include "mongo/db/repl/repl_server_parameters_gen.h"
+#include "mongo/db/repl/wait_for_majority_service.h"
+#include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/executor/network_connection_hook.h"
+#include "mongo/executor/network_interface_factory.h"
+#include "mongo/executor/thread_pool_task_executor.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/rpc/metadata/egress_metadata_hook_list.h"
+#include "mongo/rpc/metadata/metadata_hook.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/stdx/type_traits.h"
+#include "mongo/unittest/death_test.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/future.h"
+#include "mongo/util/future_impl.h"
+#include "mongo/util/future_util.h"
+#include "mongo/util/time_support.h"
+
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -37,40 +70,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status_with.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/db/client.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/dbdirectclient.h"
-#include "mongo/db/repl/primary_only_service.h"
-#include "mongo/db/repl/primary_only_service_test_fixture.h"
-#include "mongo/db/repl/repl_server_parameters_gen.h"
-#include "mongo/db/repl/wait_for_majority_service.h"
-#include "mongo/db/service_context_d_test_fixture.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/executor/network_connection_hook.h"
-#include "mongo/executor/network_interface_factory.h"
-#include "mongo/executor/thread_pool_task_executor.h"
-#include "mongo/platform/compiler.h"
-#include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/rpc/metadata/egress_metadata_hook_list.h"
-#include "mongo/rpc/metadata/metadata_hook.h"
-#include "mongo/stdx/thread.h"
-#include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/concurrency/thread_pool.h"
-#include "mongo/util/fail_point.h"
-#include "mongo/util/future.h"
-#include "mongo/util/future_impl.h"
-#include "mongo/util/future_util.h"
-#include "mongo/util/time_support.h"
 
 using namespace mongo;
 using namespace mongo::repl;
@@ -326,7 +325,7 @@ private:
         BSONObj result;
         client.runCommand(nss.dbName(),
                           BSON("createIndexes"
-                               << nss.coll().toString() << "indexes"
+                               << nss.coll() << "indexes"
                                << BSON_ARRAY(BSON("key" << BSON("x" << 1) << "name"
                                                         << "TestTTLIndex"
                                                         << "expireAfterSeconds" << 100000))),
@@ -799,11 +798,10 @@ TEST_F(PrimaryOnlyServiceTest, ReportServerStatusInfo) {
         BSONObjBuilder resultBuilder;
         _registry->reportServiceInfoForServerStatus(&resultBuilder);
 
-        ASSERT_BSONOBJ_EQ(
-            BSON("primaryOnlyServices" << BSON("TestService" << BSON("state"
-                                                                     << "rebuilding"
+        ASSERT_BSONOBJ_EQ(BSON("primaryOnlyServices"
+                               << BSON("TestService" << BSON("state" << "rebuilding"
                                                                      << "numInstances" << 0))),
-            resultBuilder.obj());
+                          resultBuilder.obj());
     }
 
     // Make sure the instance doesn't complete.
@@ -818,11 +816,10 @@ TEST_F(PrimaryOnlyServiceTest, ReportServerStatusInfo) {
         BSONObjBuilder resultBuilder;
         _registry->reportServiceInfoForServerStatus(&resultBuilder);
 
-        ASSERT_BSONOBJ_EQ(
-            BSON("primaryOnlyServices" << BSON("TestService" << BSON("state"
-                                                                     << "running"
+        ASSERT_BSONOBJ_EQ(BSON("primaryOnlyServices"
+                               << BSON("TestService" << BSON("state" << "running"
                                                                      << "numInstances" << 1))),
-            resultBuilder.obj());
+                          resultBuilder.obj());
     }
 
     auto instance2 =
@@ -832,11 +829,10 @@ TEST_F(PrimaryOnlyServiceTest, ReportServerStatusInfo) {
         BSONObjBuilder resultBuilder;
         _registry->reportServiceInfoForServerStatus(&resultBuilder);
 
-        ASSERT_BSONOBJ_EQ(
-            BSON("primaryOnlyServices" << BSON("TestService" << BSON("state"
-                                                                     << "running"
+        ASSERT_BSONOBJ_EQ(BSON("primaryOnlyServices"
+                               << BSON("TestService" << BSON("state" << "running"
                                                                      << "numInstances" << 2))),
-            resultBuilder.obj());
+                          resultBuilder.obj());
     }
 
     TestServiceHangDuringInitialization.setMode(FailPoint::off);
@@ -1225,11 +1221,11 @@ TEST_F(PrimaryOnlyServiceTest, PrimaryOnlyServiceLogSlowServices) {
     stepDown();
 
     // First test a stepUp with no hanging. We shouldn't log anything.
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     stepUp();
-    stopCapturingLogMessages();
-    ASSERT_EQ(0, countTextFormatLogLinesContaining(slowSingleServiceStepUpCompleteMsg));
-    ASSERT_EQ(0, countTextFormatLogLinesContaining(slowTotalTimeStepUpCompleteMsg));
+    logs.stop();
+    ASSERT_EQ(0, logs.countTextContaining(slowSingleServiceStepUpCompleteMsg));
+    ASSERT_EQ(0, logs.countTextContaining(slowTotalTimeStepUpCompleteMsg));
 
     // Reset thresholds.
     repl::slowServiceOnStepUpCompleteThresholdMS.store(oldSlowServiceOnStepUpCompleteThresholdMS);
@@ -1256,16 +1252,16 @@ TEST_F(PrimaryOnlyServiceTest, PrimaryOnlyServiceLogSlowServices) {
     };
 
     // Hang for long enough to generate a message about the single service being slow.
-    startCapturingLogMessages();
+    logs.start();
     doStepUpWithHang(repl::slowServiceOnStepUpCompleteThresholdMS.load() + 1);
-    stopCapturingLogMessages();
-    ASSERT_EQ(1, countTextFormatLogLinesContaining(slowSingleServiceStepUpCompleteMsg));
+    logs.stop();
+    ASSERT_EQ(1, logs.countTextContaining(slowSingleServiceStepUpCompleteMsg));
 
     // Hang for long enough to generate a message about the total time being slow.
-    startCapturingLogMessages();
+    logs.start();
     doStepUpWithHang(repl::slowTotalOnStepUpCompleteThresholdMS.load() + 1);
-    stopCapturingLogMessages();
-    ASSERT_EQ(1, countTextFormatLogLinesContaining(slowTotalTimeStepUpCompleteMsg));
+    logs.stop();
+    ASSERT_EQ(1, logs.countTextContaining(slowTotalTimeStepUpCompleteMsg));
 }
 
 TEST_F(PrimaryOnlyServiceTest, RebuildServiceFailsShouldSetStateFromRebuilding) {

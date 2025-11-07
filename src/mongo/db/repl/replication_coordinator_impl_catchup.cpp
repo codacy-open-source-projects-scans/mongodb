@@ -30,8 +30,8 @@
 
 #include "mongo/db/repl/replication_coordinator_impl.h"
 #include "mongo/db/repl/replication_metrics.h"
-#include "mongo/db/vector_clock.h"
-#include "mongo/db/vector_clock_mutable.h"
+#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/vector_clock/vector_clock_mutable.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/time_support.h"
@@ -45,7 +45,7 @@ namespace repl {
 
 
 boost::optional<Date_t> ReplicationCoordinatorImpl::getCatchupTakeover_forTest() const {
-    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    stdx::lock_guard lk(_mutex);
     if (!_catchupTakeoverCbh.isValid()) {
         return boost::none;
     }
@@ -84,7 +84,7 @@ void ReplicationCoordinatorImpl::CatchupState::start(WithLock lk) {
         if (!cbData.status.isOK()) {
             return;
         }
-        stdx::lock_guard<stdx::mutex> lk(*mutex);
+        stdx::lock_guard lk(*mutex);
         // Check whether the callback has been cancelled while holding mutex.
         if (cbData.myHandle.isCanceled()) {
             return;
@@ -186,9 +186,10 @@ void ReplicationCoordinatorImpl::CatchupState::signalHeartbeatUpdate(WithLock lk
               "latestKnownOpTime"_attr = (pair.second ? (*pair.second).toString() : "unknown"));
     }
 
-    auto targetOpTimeCB = [this, &lk](Status status) {
+    auto targetOpTimeCB = [this](Status status) {
         // Double check the target time since stepdown may signal us too.
-        const auto myLastApplied = _repl->_getMyLastAppliedOpTime(lk);
+        const auto myLastApplied = _repl->_getMyLastAppliedOpTime(
+            WithLock::withoutLock() /* We hold _mutex when we execute this. */);
         if (_targetOpTime <= myLastApplied) {
             LOGV2(21368,
                   "Caught up to the latest known optime successfully after becoming primary",
@@ -197,7 +198,8 @@ void ReplicationCoordinatorImpl::CatchupState::signalHeartbeatUpdate(WithLock lk
             // Report the number of ops applied during catchup in replSetGetStatus once the primary
             // is caught up.
             ReplicationMetrics::get(getGlobalServiceContext()).setNumCatchUpOps(_numCatchUpOps);
-            abort(lk, PrimaryCatchUpConclusionReason::kSucceeded);
+            abort(WithLock::withoutLock() /* We hold _mutex when we execute this. */,
+                  PrimaryCatchUpConclusionReason::kSucceeded);
         }
     };
     auto pf = makePromiseFuture<void>();
@@ -211,7 +213,7 @@ void ReplicationCoordinatorImpl::CatchupState::incrementNumCatchUpOps(WithLock, 
 }
 
 Status ReplicationCoordinatorImpl::abortCatchupIfNeeded(PrimaryCatchUpConclusionReason reason) {
-    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    stdx::lock_guard lk(_mutex);
     if (_catchupState) {
         _catchupState->abort(lk, reason);
         return Status::OK();
@@ -220,7 +222,7 @@ Status ReplicationCoordinatorImpl::abortCatchupIfNeeded(PrimaryCatchUpConclusion
 }
 
 void ReplicationCoordinatorImpl::incrementNumCatchUpOpsIfCatchingUp(long numOps) {
-    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    stdx::lock_guard lk(_mutex);
     if (_catchupState) {
         _catchupState->incrementNumCatchUpOps(lk, numOps);
     }
@@ -275,6 +277,10 @@ ReplicationCoordinatorImpl::_updateMemberStateFromTopologyCoordinator(WithLock l
         serverGlobalParams.validateFeaturesAsPrimary.store(false);
         result = (newState.removed() || newState.rollback()) ? kActionRollbackOrRemoved
                                                              : kActionSteppedDown;
+
+        // Waiter lists should be empty on rollback/stepdown.
+        invariant(replicationWaiterListMetric.get() == 0);
+        invariant(opTimeWaiterListMetric.get() == 0);
     } else {
         result = kActionFollowerModeStateChange;
     }

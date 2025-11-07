@@ -20,44 +20,22 @@
  */
 
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
-import {
-    $config as $baseConfig
-} from "jstests/concurrency/fsm_workloads/crud/random_ddl_crud_operations.js";
+import {handleRandomSetFCVErrors} from "jstests/concurrency/fsm_workload_helpers/fcv/handle_setFCV_errors.js";
+import {assertSetFCVSoon} from "jstests/concurrency/fsm_workload_helpers/query/assert_fcv_reset_soon.js";
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/crud/random_ddl_crud_operations.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
-    $config.states.setFCV = function(db, collName, connCache) {
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
+    $config.states.setFCV = function (db, collName, connCache) {
         const fcvValues = [lastLTSFCV, lastContinuousFCV, latestFCV];
         const targetFCV = fcvValues[Random.randInt(3)];
-        jsTestLog('setFCV to ' + targetFCV);
+        jsTestLog("setFCV to " + targetFCV);
         try {
-            assert.commandWorked(
-                db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}));
+            assert.commandWorked(db.adminCommand({setFeatureCompatibilityVersion: targetFCV, confirm: true}));
         } catch (e) {
-            if (e.code === 5147403) {
-                // Invalid fcv transition (e.g lastContinuous -> lastLTS)
-                jsTestLog('setFCV: Invalid transition');
-                return;
-            }
-            if (e.code === 7428200) {
-                // Cannot upgrade FCV if a previous FCV downgrade stopped in the middle of cleaning
-                // up internal server metadata.
-                assert.eq(latestFCV, targetFCV);
-                jsTestLog(
-                    'setFCV: Cannot upgrade FCV if a previous FCV downgrade stopped in the middle \
-                    of cleaning up internal server metadata');
-                return;
-            }
-            if (e.code === 12587) {
-                // Cannot downgrade FCV that requires a collMod command when index builds are
-                // concurrently taking place.
-                jsTestLog(
-                    'setFCV: Cannot downgrade the FCV that requires a collMod command when index \
-                    builds are concurrently running');
-                return;
-            }
+            if (handleRandomSetFCVErrors(e, targetFCV)) return;
             throw e;
         }
-        jsTestLog('setFCV state finished');
+        jsTestLog("setFCV state finished");
     };
 
     $config.transitions = {
@@ -66,12 +44,11 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         CRUD: {create: 0.23, CRUD: 0.23, drop: 0.23, rename: 0.23, setFCV: 0.08},
         drop: {create: 0.23, CRUD: 0.23, drop: 0.23, rename: 0.23, setFCV: 0.08},
         rename: {create: 0.23, CRUD: 0.23, drop: 0.23, rename: 0.23, setFCV: 0.08},
-        setFCV: {create: 0.23, CRUD: 0.23, drop: 0.23, rename: 0.23, setFCV: 0.08}
+        setFCV: {create: 0.23, CRUD: 0.23, drop: 0.23, rename: 0.23, setFCV: 0.08},
     };
 
-    $config.teardown = function(db, collName, cluster) {
-        assert.commandWorked(
-            db.adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+    $config.teardown = function (db, collName, cluster) {
+        assertSetFCVSoon(db, latestFCV);
     };
 
     return $config;

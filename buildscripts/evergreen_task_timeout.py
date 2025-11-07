@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import re
 import shlex
 import sys
 from datetime import timedelta
@@ -17,33 +18,39 @@ import structlog
 import yaml
 from pydantic import BaseModel
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from buildscripts.ciconfig.evergreen import EvergreenProjectConfig, parse_evergreen_file
 from buildscripts.resmoke_proxy.resmoke_proxy import ResmokeProxyService
 from buildscripts.timeouts.timeout_service import TimeoutParams, TimeoutService
 from buildscripts.util.cmdutils import enable_logging
+from buildscripts.util.expansions import get_expansion
 from buildscripts.util.taskname import determine_task_base_name
-from evergreen import EvergreenApi, RetryingEvergreenApi
 
 LOGGER = structlog.get_logger(__name__)
 DEFAULT_TIMEOUT_OVERRIDES = "etc/evergreen_timeouts.yml"
 DEFAULT_EVERGREEN_CONFIG = "etc/evergreen.yml"
 DEFAULT_EVERGREEN_AUTH_CONFIG = "~/.evergreen.yml"
-COMMIT_QUEUE_ALIAS = "__commit_queue"
+COMMIT_QUEUE_EXPANSION = "is_commit_queue"
 IGNORED_SUITES = {
     "integration_tests_replset",
     "integration_tests_replset_ssl_auth",
     "integration_tests_sharded",
     "integration_tests_standalone",
     "integration_tests_standalone_audit",
+    "integration_tests_standalone_grpc",
     "mongos_test",
     "server_selection_json_test",
     "sdam_json_test",
 }
 HISTORY_LOOKBACK = timedelta(weeks=2)
 
-COMMIT_QUEUE_TIMEOUT = timedelta(minutes=20)
+COMMIT_QUEUE_TIMEOUT = timedelta(minutes=30)
 DEFAULT_REQUIRED_BUILD_TIMEOUT = timedelta(hours=1, minutes=20)
 DEFAULT_NON_REQUIRED_BUILD_TIMEOUT = timedelta(hours=2)
+
+# An idle timeout will expire in the presence of an exceptionally long running test in a resmoke task.
+# This helps prevent the introduction of new long-running tests in required build variants.
+MAXIMUM_REQUIRED_BUILD_IDLE_TIMEOUT = timedelta(minutes=16)
 
 
 class TimeoutOverride(BaseModel):
@@ -93,7 +100,7 @@ class TimeoutOverrides(BaseModel):
     @classmethod
     def from_yaml_file(cls, file_path: Path) -> "TimeoutOverrides":
         """Read the timeout overrides from the given file."""
-        with open(file_path) as file_handler:
+        with open(file_path, encoding="utf8") as file_handler:
             return cls(**yaml.safe_load(file_handler))
 
     def _lookup_override(self, build_variant: str, task_name: str) -> Optional[TimeoutOverride]:
@@ -109,7 +116,7 @@ class TimeoutOverrides(BaseModel):
         overrides = [
             override
             for override in self.overrides.get(build_variant, [])
-            if override.task == task_name
+            if re.search(override.task, task_name)
         ]
         if overrides:
             if len(overrides) > 1:
@@ -167,7 +174,7 @@ def output_timeout(
         output["timeout_secs"] = math.ceil(idle_timeout.total_seconds())
 
     if output_file:
-        with open(output_file, "w") as outfile:
+        with open(output_file, "w", encoding="utf8") as outfile:
             yaml.dump(output, stream=outfile, default_flow_style=False)
 
     yaml.dump(output, stream=sys.stdout, default_flow_style=False)
@@ -231,6 +238,15 @@ class TaskTimeoutOrchestrator:
             determined_timeout = override
 
         elif (
+            get_expansion(COMMIT_QUEUE_EXPANSION)  # commit queue patch
+        ):
+            LOGGER.info(
+                "Overriding commit-queue timeout",
+                exec_timeout_secs=COMMIT_QUEUE_TIMEOUT.total_seconds(),
+            )
+            determined_timeout = COMMIT_QUEUE_TIMEOUT
+
+        elif (
             self._is_required_build_variant(variant)
             and determined_timeout > DEFAULT_REQUIRED_BUILD_TIMEOUT
         ):
@@ -239,13 +255,6 @@ class TaskTimeoutOrchestrator:
                 exec_timeout_secs=DEFAULT_REQUIRED_BUILD_TIMEOUT.total_seconds(),
             )
             determined_timeout = DEFAULT_REQUIRED_BUILD_TIMEOUT
-
-        elif evg_alias == COMMIT_QUEUE_ALIAS:
-            LOGGER.info(
-                "Overriding commit-queue timeout",
-                exec_timeout_secs=COMMIT_QUEUE_TIMEOUT.total_seconds(),
-            )
-            determined_timeout = COMMIT_QUEUE_TIMEOUT
 
         # The timeout needs to be at least as large as the idle timeout.
         if idle_timeout and determined_timeout.total_seconds() < idle_timeout.total_seconds():
@@ -286,6 +295,15 @@ class TaskTimeoutOrchestrator:
         elif override is not None:
             LOGGER.info("Overriding configured timeout", idle_timeout_secs=override.total_seconds())
             determined_timeout = override
+
+        if self._is_required_build_variant(variant) and (
+            determined_timeout is None or determined_timeout > MAXIMUM_REQUIRED_BUILD_IDLE_TIMEOUT
+        ):
+            LOGGER.info(
+                "Overriding required-builder idle timeout",
+                idle_timeout_secs=MAXIMUM_REQUIRED_BUILD_IDLE_TIMEOUT.total_seconds(),
+            )
+            determined_timeout = MAXIMUM_REQUIRED_BUILD_IDLE_TIMEOUT
 
         return determined_timeout
 
@@ -397,7 +415,16 @@ class TaskTimeoutOrchestrator:
 
 
 def main():
-    """Determine the timeout value a task should use in evergreen."""
+    """
+    Determine the timeout value a task should use in evergreen.
+
+    The timeouts are set based on (in order or precedence):
+    1. The timeouts listed in the --timeout-overrides file, (default etc/evergreen_timeouts.yml)
+    2. Restricted to a hard-coded maximum execution timeout if the task is part of a commit queue patch.
+    3. Restricted to a hard-coded maximum timeout if the task is run on a default build variant.
+    4. An estimate from historic runtime information of the tests in the task, if task history exists.
+    5. A hard-coded default timeout.
+    """
     parser = argparse.ArgumentParser(description=main.__doc__)
 
     parser.add_argument(
@@ -451,12 +478,6 @@ def main():
         help="File containing timeout overrides to use.",
     )
     parser.add_argument(
-        "--evg-api-config",
-        dest="evg_api_config",
-        default=DEFAULT_EVERGREEN_AUTH_CONFIG,
-        help="Evergreen API config file.",
-    )
-    parser.add_argument(
         "--evg-project-config",
         dest="evg_project_config",
         default=DEFAULT_EVERGREEN_CONFIG,
@@ -479,19 +500,19 @@ def main():
     LOGGER.info("Determining timeouts", cli_args=options)
 
     def dependencies(binder: inject.Binder) -> None:
-        binder.bind(
-            EvergreenApi,
-            RetryingEvergreenApi.get_api(config_file=os.path.expanduser(options.evg_api_config)),
-        )
         binder.bind(TimeoutOverrides, timeout_overrides)
+        LOGGER.info(
+            "Evaluating Evergreen project YAML", evg_project_config=options.evg_project_config
+        )
         binder.bind(
             EvergreenProjectConfig,
             parse_evergreen_file(os.path.expanduser(options.evg_project_config)),
         )
+        LOGGER.info("Configuring resmoke proxy")
         binder.bind(
             ResmokeProxyService,
             ResmokeProxyService(
-                run_options=f"--installDir={shlex.quote(options.install_dir)} {options.test_flags}"
+                run_options=f"--installDir={shlex.quote(options.install_dir)} {options.test_flags or ''}",
             ),
         )
 

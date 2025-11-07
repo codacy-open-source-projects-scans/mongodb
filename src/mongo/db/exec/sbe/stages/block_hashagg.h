@@ -29,15 +29,14 @@
 
 #pragma once
 
-#include <absl/hash/hash.h>
-
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/stages/hashagg_base.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
-#include "mongo/stdx/unordered_map.h"
+#include "mongo/util/modules.h"
+
 
 namespace mongo {
 namespace sbe {
@@ -53,6 +52,8 @@ namespace sbe {
  *     childStage
  */
 class BlockHashAggStage final : public HashAggBaseStage<BlockHashAggStage> {
+    friend class HashAggBaseStage<BlockHashAggStage>;
+
 public:
     BlockHashAggStage(std::unique_ptr<PlanStage> input,
                       value::SlotVector groupSlotIds,
@@ -60,7 +61,7 @@ public:
                       value::SlotVector blockDataInSlotIds,
                       value::SlotVector accumulatorDataSlotIds,
                       value::SlotId accumulatorBitsetSlotId,
-                      AggExprTupleVector aggs,
+                      BlockAggExprTupleVector aggs,
                       bool allowDiskUse,
                       SlotExprPairVector mergingExprs,
                       PlanYieldPolicy* yieldPolicy,
@@ -78,11 +79,11 @@ public:
 
     std::unique_ptr<PlanStageStats> getStats(bool includeDebugInfo) const final;
     const SpecificStats* getSpecificStats() const final;
-    HashAggStats* getHashAggStats();
+    BlockHashAggStats* getHashAggStats();
     std::vector<DebugPrinter::Block> debugPrint() const final;
     size_t estimateCompileTimeSize() const final;
 
-    void doSaveState(bool relinquishCursor) override {
+    void doSaveState() override {
         // We don't need to store this across yields, as we resize it each time.
         _compoundKeys.clear();
     }
@@ -98,6 +99,33 @@ public:
     static const size_t kMaxNumPartitionsForTokenizedPath = 5;
     // TODO SERVER-85731: Determine what block size is optimal.
     static constexpr size_t kBlockOutSize = 128;
+
+protected:
+    // Set the in memory data iterator to the next record that should be returned.
+    void setIteratorToNextRecord() {
+        if (_htIt == _ht->end()) {
+            _htIt = _ht->begin();
+        } else {
+            ++_htIt;
+        }
+    }
+
+    // The stage has spilled to disk. Results will be returned from there.
+    void switchToDisk() {
+        tassert(9915600,
+                "_recordStore should have been initialised before switching to reading from disk",
+                _recordStore);
+
+        // Establish a cursor, positioned at the beginning of the record store.
+        _rsCursor = _recordStore->getCursor(_opCtx);
+
+        // Callers will be obtaining the results from the spill table, so set the
+        // 'SwitchAccessors' so that they refer to the rows recovered from the record store
+        // under the hood.
+        for (auto&& aggAccessor : _rowAggAccessors) {
+            aggAccessor->setIndex(1);
+        }
+    }
 
 private:
     /*
@@ -195,7 +223,7 @@ private:
      * input the block accumulator reads from, and is also the output that the row accumulator
      * writes to.
      */
-    AggExprTupleVector _aggs;
+    BlockAggExprTupleVector _aggs;
 
     SlotExprPairVector _mergingExprs;
 

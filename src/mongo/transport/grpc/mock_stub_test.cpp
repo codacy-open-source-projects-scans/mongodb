@@ -27,21 +27,21 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <vector>
+#include "mongo/transport/grpc/mock_stub.h"
 
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/rpc/message.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/grpc/mock_client_context.h"
-#include "mongo/transport/grpc/mock_stub.h"
 #include "mongo/transport/grpc/test_fixtures.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/thread_assertion_monitor.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/producer_consumer_queue.h"
 #include "mongo/util/scopeguard.h"
+
+#include <memory>
+#include <vector>
 
 namespace mongo::transport::grpc {
 
@@ -83,11 +83,11 @@ public:
                     auto clientMessage = makeUniqueMessage();
                     MockClientContext ctx;
                     ctx.addMetadataEntry(
-                        util::constants::kWireVersionKey.toString(),
+                        std::string{util::constants::kWireVersionKey},
                         std::to_string(WireSpec::getWireSpec(getGlobalServiceContext())
-                                           .get()
-                                           ->incomingExternalClient.maxWireVersion));
-                    ctx.addMetadataEntry(util::constants::kAuthenticationTokenKey.toString(),
+                                           .getIncomingExternalClient()
+                                           .maxWireVersion));
+                    ctx.addMetadataEntry(std::string{util::constants::kAuthenticationTokenKey},
                                          "my-token");
                     auto stream = makeStream(ctx);
                     ASSERT_TRUE(stream->syncWrite(getReactor(), clientMessage.sharedBuffer()));
@@ -112,7 +112,7 @@ public:
         auto th = stdx::thread([&, promise = std::move(clientStreamPf.promise)]() mutable {
             promise.setWith([&] {
                 auto stub = makeStub();
-                return stub.unauthenticatedCommandStream(&ctx);
+                return stub.unauthenticatedCommandStream(&ctx, getReactor());
             });
         });
         ON_BLOCK_EXIT([&th] { th.join(); });
@@ -128,20 +128,22 @@ private:
 
 TEST_F(MockStubTest, ConcurrentStreamsAuth) {
     auto stub = makeStub();
-    runEchoTest([&](auto& ctx) { return stub.authenticatedCommandStream(&ctx); });
+    runEchoTest([&](auto& ctx) { return stub.authenticatedCommandStream(&ctx, getReactor()); });
 }
 
 TEST_F(MockStubTest, ConcurrentStreamsNoAuth) {
     auto stub = makeStub();
-    runEchoTest([&](auto& ctx) { return stub.unauthenticatedCommandStream(&ctx); });
+    runEchoTest([&](auto& ctx) { return stub.unauthenticatedCommandStream(&ctx, getReactor()); });
 }
 
 TEST_F(MockStubTest, ConcurrentStubsAuth) {
-    runEchoTest([&](auto& ctx) { return makeStub().authenticatedCommandStream(&ctx); });
+    runEchoTest(
+        [&](auto& ctx) { return makeStub().authenticatedCommandStream(&ctx, getReactor()); });
 }
 
 TEST_F(MockStubTest, ConcurrentStubsNoAuth) {
-    runEchoTest([&](auto& ctx) { return makeStub().unauthenticatedCommandStream(&ctx); });
+    runEchoTest(
+        [&](auto& ctx) { return makeStub().unauthenticatedCommandStream(&ctx, getReactor()); });
 }
 
 TEST_F(MockStubTest, RPCReturn) {

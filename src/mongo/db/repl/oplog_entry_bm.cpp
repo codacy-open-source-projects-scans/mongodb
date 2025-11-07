@@ -27,14 +27,14 @@
  *    it in the license file.
  */
 
-#include <random>
-
-#include <benchmark/benchmark.h>
+#include "mongo/db/repl/oplog_entry.h"
 
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
-#include "mongo/db/repl/oplog_entry.h"
-#include "mongo/unittest/unittest.h"
+
+#include <random>
+
+#include <benchmark/benchmark.h>
 
 namespace mongo {
 namespace repl {
@@ -43,12 +43,10 @@ namespace {
 BSONObj createOplogEntryWithNStatementIds(int numStmtIds) {
     const NamespaceString nss =
         NamespaceString::createNamespaceString_forTest(boost::none, "test", "coll");
-    const BSONObj oplogEntryWithNoStmtId = BSON("op"
-                                                << "c"
-                                                << "ns" << nss.ns_forTest() << "o"
-                                                << BSON("applyOps" << 1 << "_id" << 1) << "v" << 2
-                                                << "ts" << Timestamp(0, 0) << "t" << 0LL << "wall"
-                                                << Date_t());
+    const BSONObj oplogEntryWithNoStmtId =
+        BSON("op" << "c"
+                  << "ns" << nss.ns_forTest() << "o" << BSON("applyOps" << 1 << "_id" << 1) << "v"
+                  << 2 << "ts" << Timestamp(0, 0) << "t" << 0LL << "wall" << Date_t());
     BSONObjBuilder bob(oplogEntryWithNoStmtId);
     if (numStmtIds == 1) {
         bob.append("stmtId", int32_t(99));

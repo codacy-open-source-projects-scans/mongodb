@@ -31,9 +31,6 @@
  * Defines a shell command for hashing a BSONElement value
  */
 
-#include <iosfwd>
-#include <string>
-
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -45,6 +42,9 @@
 #include "mongo/db/hasher.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
+
+#include <iosfwd>
+#include <string>
 
 namespace mongo {
 
@@ -69,6 +69,10 @@ public:
                                  const DatabaseName&,
                                  const BSONObj&) const override {
         return Status::OK();
+    }
+
+    bool requiresAuthzChecks() const override {
+        return false;
     }
 
     std::string help() const override {
@@ -100,7 +104,7 @@ public:
                     result, false /* ok */, "seed must be a number" /* errmsg */);
                 return false;
             }
-            seed = cmdObj["seed"].numberInt();
+            seed = cmdObj["seed"].safeNumberInt();
         }
         result.append("seed", seed);
 

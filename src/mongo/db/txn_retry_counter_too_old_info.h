@@ -29,23 +29,24 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/error_extra_info.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
 
 namespace mongo {
 
-class TxnRetryCounterTooOldInfo final : public ErrorExtraInfo {
+class MONGO_MOD_PUB TxnRetryCounterTooOldInfo final : public ErrorExtraInfo {
 public:
     static constexpr auto code = ErrorCodes::TxnRetryCounterTooOld;
 
     explicit TxnRetryCounterTooOldInfo(const TxnRetryCounter txnRetryCounter)
-        : _txnRetryCounter(txnRetryCounter){};
+        : _txnRetryCounter(txnRetryCounter) {};
 
     const auto& getTxnRetryCounter() const {
         return _txnRetryCounter;

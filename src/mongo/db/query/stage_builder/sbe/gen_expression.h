@@ -29,17 +29,18 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-
-#include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr.h"
+#include "mongo/util/modules.h"
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo::stage_builder {
 
 struct StageBuilderState;
 class PlanStageSlots;
+class PlanStageReqs;
 
 /**
  * Translates an input Expression into an SBE SbExpr. 'rootSlot' should either be boost::none or

@@ -27,9 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/client_cursor/cursor_response.h"
 
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
@@ -38,14 +36,14 @@
 #include "mongo/bson/oid.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/pipeline/resume_token.h"
-#include "mongo/db/query/client_cursor/cursor_response.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/op_msg_rpc_impls.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/namespace_string_util.h"
+
+#include <boost/none.hpp>
+
 
 namespace mongo {
 
@@ -60,7 +58,18 @@ static const BSONObj basicMetricsObj = fromjson(R"({
     hasSortStage: true,
     usedDisk: true,
     fromMultiPlanner: true,
-    fromPlanCache: true
+    fromPlanCache: true,
+    cpuNanos: {"$numberLong": "18"},
+    delinquentAcquisitions: {"$numberLong": "0"},
+    totalAcquisitionDelinquencyMillis: {"$numberLong": "0"},
+    maxAcquisitionDelinquencyMillis: {"$numberLong": "0"},
+    numInterruptChecks: {"$numberLong": "0"},
+    overdueInterruptApproxMaxMillis: {"$numberLong": "0"},
+    nMatched: {"$numberLong": "0"},
+    nUpserted: {"$numberLong": "0"},
+    nModified: {"$numberLong": "0"},
+    nDeleted: {"$numberLong": "0"},
+    nInserted: {"$numberLong": "0"}
 })");
 
 static const std::string defaultNssStr = "db.coll";
@@ -180,10 +189,9 @@ TEST(CursorResponseTest, parseFromBSONIdFieldMissing) {
 
 TEST(CursorResponseTest, parseFromBSONIdFieldWrongType) {
     StatusWith<CursorResponse> result = CursorResponse::parseFromBSON(
-        BSON("cursor" << BSON("id"
-                              << "123"
-                              << "ns" << defaultNssStr << "nextBatch"
-                              << BSON_ARRAY(BSON("_id" << 1) << BSON("_id" << 2)))
+        BSON("cursor" << BSON("id" << "123"
+                                   << "ns" << defaultNssStr << "nextBatch"
+                                   << BSON_ARRAY(BSON("_id" << 1) << BSON("_id" << 2)))
                       << "ok" << 1));
     ASSERT_NOT_OK(result.getStatus());
 }
@@ -311,6 +319,17 @@ TEST(CursorResponseTest, parseFromBSONCursorMetrics) {
     ASSERT_TRUE(metrics.getUsedDisk());
     ASSERT_TRUE(metrics.getFromMultiPlanner());
     ASSERT_TRUE(metrics.getFromPlanCache());
+    ASSERT_EQ(metrics.getCpuNanos(), 18);
+    ASSERT_EQ(metrics.getDelinquentAcquisitions(), 0);
+    ASSERT_EQ(metrics.getTotalAcquisitionDelinquencyMillis(), 0);
+    ASSERT_EQ(metrics.getMaxAcquisitionDelinquencyMillis(), 0);
+    ASSERT_EQ(metrics.getNumInterruptChecks(), 0);
+    ASSERT_EQ(metrics.getOverdueInterruptApproxMaxMillis(), 0);
+    ASSERT_EQ(metrics.getNMatched(), 0);
+    ASSERT_EQ(metrics.getNUpserted(), 0);
+    ASSERT_EQ(metrics.getNModified(), 0);
+    ASSERT_EQ(metrics.getNDeleted(), 0);
+    ASSERT_EQ(metrics.getNInserted(), 0);
 }
 
 TEST(CursorResponseTest, parseFromBSONCursorMetricsWrongType) {
@@ -344,7 +363,14 @@ TEST(CursorResponseTest, parseFromBSONCursorMetricsIncomplete) {
                                    CursorMetrics::kHasSortStageFieldName,
                                    CursorMetrics::kUsedDiskFieldName,
                                    CursorMetrics::kFromMultiPlannerFieldName,
-                                   CursorMetrics::kFromPlanCacheFieldName};
+                                   CursorMetrics::kFromPlanCacheFieldName,
+                                   CursorMetrics::kCpuNanosFieldName,
+                                   CursorMetrics::kNumInterruptChecksFieldName,
+                                   CursorMetrics::kNMatchedFieldName,
+                                   CursorMetrics::kNUpsertedFieldName,
+                                   CursorMetrics::kNModifiedFieldName,
+                                   CursorMetrics::kNDeletedFieldName,
+                                   CursorMetrics::kNInsertedFieldName};
     for (auto fieldName : fields) {
         auto badMetrics = metrics.copy().removeField(fieldName);
         auto badCursor = makeCursorBSON(badMetrics);
@@ -502,7 +528,7 @@ TEST(CursorResponseTest, roundTripThroughCursorResponseBuilderWithMetrics) {
     BSONObj testDoc = BSON("_id" << 1);
     BSONObj metricsDoc = basicMetricsObj;
 
-    auto metrics = CursorMetrics::parse(IDLParserContext("CursorMetrics"), metricsDoc);
+    auto metrics = CursorMetrics::parse(metricsDoc, IDLParserContext("CursorMetrics"));
 
     BSONObj expectedBody =
         BSON("cursor" << BSON("firstBatch" << BSON_ARRAY(testDoc) << "id" << CursorId(123) << "ns"
@@ -860,7 +886,7 @@ TEST_F(CursorResponseBuilderTest, buildInitialResponseEmptyBatch) {
     // This doesn't appear in the parsed response, so check it directly in the BSON
     auto cursorElt = responseBson["cursor"];
     ASSERT_FALSE(cursorElt.eoo());
-    ASSERT_EQ(cursorElt.type(), BSONType::Object);
+    ASSERT_EQ(cursorElt.type(), BSONType::object);
     auto cursorObj = cursorElt.Obj();
     ASSERT_TRUE(cursorObj.hasField("firstBatch"));
     ASSERT_FALSE(cursorObj.hasField("nextBatch"));
@@ -882,7 +908,7 @@ TEST_F(CursorResponseBuilderTest, buildSubsequentResponseEmptyBatch) {
     // This doesn't appear in the parsed response, so check it directly in the BSON
     auto cursorElt = responseObj["cursor"];
     ASSERT_FALSE(cursorElt.eoo());
-    ASSERT_EQ(cursorElt.type(), BSONType::Object);
+    ASSERT_EQ(cursorElt.type(), BSONType::object);
     auto cursorObj = cursorElt.Obj();
     ASSERT_FALSE(cursorObj.hasField("firstBatch"));
     ASSERT_TRUE(cursorObj.hasField("nextBatch"));
@@ -925,7 +951,14 @@ TEST_F(CursorResponseBuilderTest, buildResponseWithAllKnownFields) {
                           false /* hasSortStage */,
                           true /* usedDisk */,
                           true /* fromMultiPlanner */,
-                          false /* fromPlanCache */);
+                          false /* fromPlanCache */,
+                          -1 /* cpuNanos */,
+                          15 /* numInterruptChecks */,
+                          1 /* nMatched */,
+                          0 /* nUpserted */,
+                          1 /* nModified */,
+                          0 /* nDeleted */,
+                          0 /* nInserted */);
 
     auto pbrToken = BSON("n" << 1);
     builder.setPostBatchResumeToken(pbrToken);
@@ -954,6 +987,17 @@ TEST_F(CursorResponseBuilderTest, buildResponseWithAllKnownFields) {
     ASSERT_TRUE(parsedMetrics->getUsedDisk());
     ASSERT_TRUE(parsedMetrics->getFromMultiPlanner());
     ASSERT_FALSE(parsedMetrics->getFromPlanCache());
+    ASSERT_EQ(parsedMetrics->getCpuNanos(), -1);
+    ASSERT_EQ(parsedMetrics->getDelinquentAcquisitions(), 0);
+    ASSERT_EQ(parsedMetrics->getTotalAcquisitionDelinquencyMillis(), 0);
+    ASSERT_EQ(parsedMetrics->getMaxAcquisitionDelinquencyMillis(), 0);
+    ASSERT_EQ(parsedMetrics->getNumInterruptChecks(), 15);
+    ASSERT_EQ(parsedMetrics->getOverdueInterruptApproxMaxMillis(), 0);
+    ASSERT_EQ(parsedMetrics->getNMatched(), 1);
+    ASSERT_EQ(parsedMetrics->getNUpserted(), 0);
+    ASSERT_EQ(parsedMetrics->getNModified(), 1);
+    ASSERT_EQ(parsedMetrics->getNDeleted(), 0);
+    ASSERT_EQ(parsedMetrics->getNInserted(), 0);
 
     ASSERT_TRUE(response.getPartialResultsReturned());
     ASSERT_TRUE(response.getInvalidated());

@@ -27,11 +27,7 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <fmt/format.h>
-#include <new>
-#include <utility>
+#include "mongo/util/uuid.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -43,13 +39,17 @@
 #include "mongo/util/hex.h"
 #include "mongo/util/static_immortal.h"
 #include "mongo/util/synchronized_value.h"
-#include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <new>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 
 namespace {
-
-using namespace fmt::literals;
 
 synchronized_value<SecureRandom>& uuidGen() {
     static StaticImmortal<synchronized_value<SecureRandom>> uuidGen;
@@ -68,7 +68,7 @@ StatusWith<UUID> UUID::parse(BSONElement from) {
 
 StatusWith<UUID> UUID::parse(StringData s) {
     if (!isUUIDString(s)) {
-        return {ErrorCodes::InvalidUUID, "Invalid UUID string: {}"_format(s)};
+        return {ErrorCodes::InvalidUUID, fmt::format("Invalid UUID string: {}", s)};
     }
 
     UUIDStorage uuid;
@@ -134,18 +134,12 @@ BSONObj UUID::toBSON() const {
 }
 
 std::string UUID::toString() const {
-    return "{}-{}-{}-{}-{}"_format(hexblob::encodeLower(&_uuid[0], 4),
-                                   hexblob::encodeLower(&_uuid[4], 2),
-                                   hexblob::encodeLower(&_uuid[6], 2),
-                                   hexblob::encodeLower(&_uuid[8], 2),
-                                   hexblob::encodeLower(&_uuid[10], 6));
-}
-
-template <>
-BSONObjBuilder& BSONObjBuilderValueStream::operator<<<UUID>(UUID value) {
-    value.appendToBuilder(_builder, _fieldName);
-    _fieldName = StringData();
-    return *_builder;
+    return fmt::format("{}-{}-{}-{}-{}",
+                       hexblob::encodeLower(&_uuid[0], 4),
+                       hexblob::encodeLower(&_uuid[4], 2),
+                       hexblob::encodeLower(&_uuid[6], 2),
+                       hexblob::encodeLower(&_uuid[8], 2),
+                       hexblob::encodeLower(&_uuid[10], 6));
 }
 
 }  // namespace mongo

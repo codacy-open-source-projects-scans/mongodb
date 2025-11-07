@@ -35,6 +35,7 @@
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/time_support.h"
+
 #include <string>
 
 namespace mongo::async_rpc {
@@ -77,8 +78,7 @@ public:
     }
 
     BSONObj toBSON() const final {
-        return BSON("retryPolicyType"
-                    << "NeverRetryPolicy");
+        return BSON("retryPolicyType" << "NeverRetryPolicy");
     }
 };
 

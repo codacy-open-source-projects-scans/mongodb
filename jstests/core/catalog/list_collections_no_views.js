@@ -8,12 +8,15 @@
  *   assumes_superuser_permissions,
  *   # applyOps is not retryable.
  *   requires_non_retryable_commands,
+ *   # Antithesis can inject a fault while an invalid view still exists, which causes validation
+ *   # failures in hooks, as they leave the database in a broken state where listCollections fails.
+ *   antithesis_incompatible,
  * ]
  */
-let mydb = db.getSiblingDB('list_collections_no_views');
+let mydb = db.getSiblingDB("list_collections_no_views");
 
-assert.commandWorked(mydb.createCollection('foo'));
-assert.commandWorked(mydb.createView('bar', 'foo', []));
+assert.commandWorked(mydb.createCollection("foo"));
+assert.commandWorked(mydb.createView("bar", "foo", []));
 
 let all = mydb.runCommand({listCollections: 1});
 assert.commandWorked(all);
@@ -33,27 +36,29 @@ let allExpected = [
     },
 ];
 
-assert.eq(allExpected,
-          all.cursor.firstBatch
-              .map(function(c) {
-                  return {name: c.name, type: c.type};
-              })
-              .sort(function(c1, c2) {
-                  if (c1.name > c2.name) {
-                      return 1;
-                  }
+assert.eq(
+    allExpected,
+    all.cursor.firstBatch
+        .map(function (c) {
+            return {name: c.name, type: c.type};
+        })
+        .sort(function (c1, c2) {
+            if (c1.name > c2.name) {
+                return 1;
+            }
 
-                  if (c1.name < c2.name) {
-                      return -1;
-                  }
+            if (c1.name < c2.name) {
+                return -1;
+            }
 
-                  return 0;
-              }));
+            return 0;
+        }),
+);
 
 // TODO (SERVER-25493): {type: {$exists: false}} is needed for versions <= 3.2
 let collOnlyCommand = {
     listCollections: 1,
-    filter: {$or: [{type: 'collection'}, {type: {$exists: false}}]}
+    filter: {$or: [{type: "collection"}, {type: {$exists: false}}]},
 };
 
 let collOnly = mydb.runCommand(collOnlyCommand);
@@ -70,75 +75,87 @@ let collOnlyExpected = [
     },
 ];
 
-assert.eq(collOnlyExpected,
-          collOnly.cursor.firstBatch
-              .map(function(c) {
-                  return {name: c.name, type: c.type};
-              })
-              .sort(function(c1, c2) {
-                  if (c1.name > c2.name) {
-                      return 1;
-                  }
+assert.eq(
+    collOnlyExpected,
+    collOnly.cursor.firstBatch
+        .map(function (c) {
+            return {name: c.name, type: c.type};
+        })
+        .sort(function (c1, c2) {
+            if (c1.name > c2.name) {
+                return 1;
+            }
 
-                  if (c1.name < c2.name) {
-                      return -1;
-                  }
+            if (c1.name < c2.name) {
+                return -1;
+            }
 
-                  return 0;
-              }));
+            return 0;
+        }),
+);
 
-let viewOnly = mydb.runCommand({listCollections: 1, filter: {type: 'view'}});
+let viewOnly = mydb.runCommand({listCollections: 1, filter: {type: "view"}});
 assert.commandWorked(viewOnly);
-let viewOnlyExpected = [{
-    "name": "bar",
-    "type": "view",
-}];
+let viewOnlyExpected = [
+    {
+        "name": "bar",
+        "type": "view",
+    },
+];
 
-assert.eq(viewOnlyExpected,
-          viewOnly.cursor.firstBatch
-              .map(function(c) {
-                  return {name: c.name, type: c.type};
-              })
-              .sort(function(c1, c2) {
-                  if (c1.name > c2.name) {
-                      return 1;
-                  }
+assert.eq(
+    viewOnlyExpected,
+    viewOnly.cursor.firstBatch
+        .map(function (c) {
+            return {name: c.name, type: c.type};
+        })
+        .sort(function (c1, c2) {
+            if (c1.name > c2.name) {
+                return 1;
+            }
 
-                  if (c1.name < c2.name) {
-                      return -1;
-                  }
+            if (c1.name < c2.name) {
+                return -1;
+            }
 
-                  return 0;
-              }));
+            return 0;
+        }),
+);
 
-assert.commandWorked(db.adminCommand({
-    applyOps: [{
-        op: "i",
-        ns: mydb.getName() + ".system.views",
-        o: {_id: "invalid_view_def", invalid: NumberLong(1000)}
-    }]
-}));
+assert.commandWorked(
+    db.adminCommand({
+        applyOps: [
+            {
+                op: "i",
+                ns: mydb.getName() + ".system.views",
+                o: {_id: "invalid_view_def", invalid: NumberLong(1000)},
+            },
+        ],
+    }),
+);
 
 let collOnlyInvalidView = mydb.runCommand(collOnlyCommand);
-assert.eq(collOnlyExpected,
-          collOnlyInvalidView.cursor.firstBatch
-              .map(function(c) {
-                  return {name: c.name, type: c.type};
-              })
-              .sort(function(c1, c2) {
-                  if (c1.name > c2.name) {
-                      return 1;
-                  }
+assert.eq(
+    collOnlyExpected,
+    collOnlyInvalidView.cursor.firstBatch
+        .map(function (c) {
+            return {name: c.name, type: c.type};
+        })
+        .sort(function (c1, c2) {
+            if (c1.name > c2.name) {
+                return 1;
+            }
 
-                  if (c1.name < c2.name) {
-                      return -1;
-                  }
+            if (c1.name < c2.name) {
+                return -1;
+            }
 
-                  return 0;
-              }));
+            return 0;
+        }),
+);
 
 assert.commandFailed(mydb.runCommand({listCollections: 1}));
-assert.commandFailed(mydb.runCommand({listCollections: 1, filter: {type: 'view'}}));
+assert.commandFailed(mydb.runCommand({listCollections: 1, filter: {type: "view"}}));
 
 // Fix database state for end of test validation and burn-in tests
 mydb.dropDatabase();

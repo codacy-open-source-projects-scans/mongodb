@@ -27,19 +27,10 @@
  *    it in the license file.
  */
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <functional>
-#include <sstream>
-#include <vector>
-
-#include <absl/container/inlined_vector.h>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/exec/sbe/expressions/expression.h"
 
 #include "mongo/bson/ordering.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
-#include "mongo/db/exec/sbe/expressions/expression.h"
-#include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/util/print_options.h"
@@ -49,9 +40,14 @@
 #include "mongo/db/exec/sbe/vm/vm_instruction.h"
 #include "mongo/db/exec/sbe/vm/vm_types.h"
 #include "mongo/db/query/datetime/date_time_support.h"
-#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <functional>
+#include <sstream>
+#include <vector>
+
 
 namespace mongo {
 namespace sbe {
@@ -200,16 +196,14 @@ std::vector<DebugPrinter::Block> EVariable::debugPrint() const {
     return ret;
 }
 
-std::unique_ptr<EExpression> EPrimBinary::clone() const {
-    if (_nodes.size() == 2) {
-        return std::make_unique<EPrimBinary>(_op, _nodes[0]->clone(), _nodes[1]->clone());
-    } else {
-        invariant(_nodes.size() == 3);
-        return std::make_unique<EPrimBinary>(
-            _op, _nodes[0]->clone(), _nodes[1]->clone(), _nodes[2]->clone());
+std::unique_ptr<EExpression> EPrimNary::clone() const {
+    std::vector<std::unique_ptr<EExpression>> args;
+    args.reserve(_nodes.size());
+    for (auto& arg : _nodes) {
+        args.emplace_back(arg->clone());
     }
+    return std::make_unique<EPrimNary>(_op, std::move(args));
 }
-
 
 /*
  * Given a vector of clauses named [lhs1,...,lhsN-1, rhs], and a boolean isDisjunctive to indicate
@@ -240,9 +234,8 @@ std::unique_ptr<EExpression> EPrimBinary::clone() const {
  * @true:     push true
  * @end:
  */
-vm::CodeFragment buildShortCircuitCode(CompileCtx& ctx,
-                                       const std::vector<const EExpression*>& clauses,
-                                       bool isDisjunction) {
+template <typename Vector>
+vm::CodeFragment buildShortCircuitCode(CompileCtx& ctx, const Vector& clauses, bool isDisjunction) {
     return withNewLabels(ctx, [&](vm::LabelId endLabel, vm::LabelId resultLabel) {
         // Build code fragment for all but the last clause, which is used for the final result
         // branch.
@@ -275,16 +268,95 @@ vm::CodeFragment buildShortCircuitCode(CompileCtx& ctx,
 
         // Only one of `finalClause` or `resultBranch` will execute, so the stack size adjustment
         // should only be made one time here, rather than one adjustment for each CodeFragment.
-        code.append(std::move(finalClause), std::move(resultBranch));
+        code.append({std::move(finalClause), std::move(resultBranch)});
         code.appendLabel(endLabel);
         return code;
     });
 }
 
+vm::CodeFragment EPrimNary::compileDirect(CompileCtx& ctx) const {
+    if (_op == EPrimNary::logicAnd || _op == EPrimNary::logicOr) {
+        return buildShortCircuitCode(ctx, _nodes, _op == EPrimNary::logicOr /*isDisjunction*/);
+    }
+
+    vm::CodeFragment code;
+    vm::Instruction::Parameter lhsParam, rhsParam;
+
+    lhsParam = appendParameter(code, ctx, _nodes[0].get());
+
+    auto appendInstr = [&](vm::Instruction::Parameter lhsParam,
+                           vm::Instruction::Parameter rhsParam) {
+        switch (_op) {
+            case EPrimNary::add:
+                code.appendAdd(lhsParam, rhsParam);
+                break;
+            case EPrimNary::mul:
+                code.appendMul(lhsParam, rhsParam);
+                break;
+            default:
+                MONGO_UNREACHABLE_TASSERT(11122900);
+        }
+    };
+
+    for (size_t idx = 1; idx < _nodes.size(); ++idx) {
+        rhsParam = appendParameter(code, ctx, _nodes[idx].get());
+        appendInstr(lhsParam, rhsParam);
+        lhsParam = {};
+    }
+
+    return code;
+}
+
+std::vector<DebugPrinter::Block> EPrimNary::debugPrint() const {
+    std::vector<DebugPrinter::Block> ret;
+
+    ret.emplace_back("(`");
+    for (size_t i = 0; i < _nodes.size(); i++) {
+        DebugPrinter::addBlocks(ret, _nodes[i]->debugPrint());
+        if (i != _nodes.size() - 1) {
+            switch (_op) {
+                case EPrimNary::logicAnd:
+                    ret.emplace_back("&&");
+                    break;
+                case EPrimNary::logicOr:
+                    ret.emplace_back("||");
+                    break;
+                case EPrimNary::add:
+                    ret.emplace_back("+");
+                    break;
+                case EPrimNary::mul:
+                    ret.emplace_back("*");
+                    break;
+                default:
+                    MONGO_UNREACHABLE_TASSERT(11122901);
+            }
+        }
+    }
+    ret.emplace_back("`)");
+
+    return ret;
+}
+
+size_t EPrimNary::estimateSize() const {
+    return sizeof(*this) + size_estimator::estimate(_nodes);
+}
+
+std::unique_ptr<EExpression> EPrimBinary::clone() const {
+    if (_nodes.size() == 2) {
+        return std::make_unique<EPrimBinary>(_op, _nodes[0]->clone(), _nodes[1]->clone());
+    } else {
+        tassert(11093400,
+                "Unexpected number of nodes in binary primitive operation",
+                _nodes.size() == 3);
+        return std::make_unique<EPrimBinary>(
+            _op, _nodes[0]->clone(), _nodes[1]->clone(), _nodes[2]->clone());
+    }
+}
+
 vm::CodeFragment EPrimBinary::compileDirect(CompileCtx& ctx) const {
     const bool hasCollatorArg = (_nodes.size() == 3);
 
-    invariant(!hasCollatorArg || isComparisonOp(_op));
+    tassert(11093401, "Operation is not a comparison", !hasCollatorArg || isComparisonOp(_op));
 
     if (_op == EPrimBinary::logicAnd) {
         auto clauses = collectAndClauses();
@@ -381,13 +453,13 @@ vm::CodeFragment EPrimBinary::compileDirect(CompileCtx& ctx) const {
                            : code.appendCmp3w(lhsParam, rhsParam);
             break;
         default:
-            MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE_TASSERT(11122902);
     }
     return code;
 }
 
 std::vector<const EExpression*> EPrimBinary::collectOrClauses() const {
-    invariant(_op == EPrimBinary::Op::logicOr);
+    tassert(11093402, "Unexpected operation type", _op == EPrimBinary::Op::logicOr);
 
     auto expandPredicate = [](const EExpression* expr) {
         const EPrimBinary* binaryExpr = expr->as<EPrimBinary>();
@@ -413,7 +485,7 @@ std::vector<DebugPrinter::Block> EPrimBinary::debugPrint() const {
     bool hasCollatorArg = (_nodes.size() == 3);
     std::vector<DebugPrinter::Block> ret;
 
-    invariant(!hasCollatorArg || isComparisonOp(_op));
+    tassert(11093403, "Operation is not a comparison", !hasCollatorArg || isComparisonOp(_op));
 
     ret.emplace_back("(`");
     DebugPrinter::addBlocks(ret, _nodes[0]->debugPrint());
@@ -463,7 +535,7 @@ std::vector<DebugPrinter::Block> EPrimBinary::debugPrint() const {
             ret.emplace_back("<=>");
             break;
         default:
-            MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE_TASSERT(11122903);
     }
 
     if (hasCollatorArg) {
@@ -493,14 +565,14 @@ vm::CodeFragment EPrimUnary::compileDirect(CompileCtx& ctx) const {
     auto param = appendParameter(code, ctx, _nodes[0].get());
 
     switch (_op) {
-        case negate:
+        case EPrimUnary::negate:
             code.appendNegate(param);
             break;
         case EPrimUnary::logicNot:
             code.appendNot(param);
             break;
         default:
-            MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE_TASSERT(11122904);
     }
     return code;
 }
@@ -516,7 +588,7 @@ std::vector<DebugPrinter::Block> EPrimUnary::debugPrint() const {
             ret.emplace_back("!");
             break;
         default:
-            MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE_TASSERT(11122905);
     }
 
     ret.emplace_back("`(`");
@@ -708,6 +780,7 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
     {"round", BuiltinFn{[](size_t n) { return n == 1 || n == 2; }, vm::Builtin::round, false}},
     {"concat", BuiltinFn{kAnyNumberOfArgs, vm::Builtin::concat, false}},
     {"concatArrays", BuiltinFn{kAnyNumberOfArgs, vm::Builtin::concatArrays, false}},
+    {"zipArrays", BuiltinFn{[](size_t n) { return n >= 2; }, vm::Builtin::zipArrays, false}},
     {"aggConcatArraysCapped",
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::aggConcatArraysCapped, true}},
     {"isMember", BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::isMember, false}},
@@ -1065,6 +1138,7 @@ static stdx::unordered_map<std::string, BuiltinFn> kBuiltinFunctions = {
      BuiltinFn{[](size_t n) { return n == 2; }, vm::Builtin::cellFoldValues_P, false}},
     {"cellBlockGetFlatValuesBlock",
      BuiltinFn{[](size_t n) { return n == 1; }, vm::Builtin::cellBlockGetFlatValuesBlock, false}},
+    {"currentDate", BuiltinFn{[](size_t n) { return n == 0; }, vm::Builtin::currentDate, false}},
 };
 
 /**
@@ -1108,7 +1182,11 @@ void generatorCommon(vm::CodeFragment& code,
                      const EExpression::Vector& nodes,
                      bool aggregate) {
 
-    invariant(nodes.size() == arity);
+    tassert(11096701,
+            str::stream()
+                << "Expect arity to match the number of nodes in expression but we have arity "
+                << arity << " and nodes " << nodes.size(),
+            nodes.size() == arity);
 
     if (aggregate) {
         code.appendAccessVal(ctx.accumulator);
@@ -1182,6 +1260,7 @@ vm::CodeFragment generateTraverseP(CompileCtx& ctx, const EExpression::Vector& n
                 code.appendLabel(afterBodyLabel);
                 code.append(nodes[0]->compileDirect(ctx));
                 code.appendTraverseP(bodyPosition,
+                                     lambda->numArguments(),
                                      tag == value::TypeTags::Nothing ? vm::Instruction::Nothing
                                                                      : vm::Instruction::Int32One);
                 return code;
@@ -1210,6 +1289,7 @@ vm::CodeFragment generateTraverseF(CompileCtx& ctx, const EExpression::Vector& n
             code.appendLabel(afterBodyLabel);
             code.append(nodes[0]->compileDirect(ctx));
             code.appendTraverseF(bodyPosition,
+                                 lambda->numArguments(),
                                  value::bitcastTo<bool>(val) ? vm::Instruction::True
                                                              : vm::Instruction::False);
             return code;
@@ -1402,7 +1482,7 @@ vm::CodeFragment EIf::compileDirect(CompileCtx& ctx) const {
      *            cond
      *            jumpNothing @end
      *            jumpTrue @then
-     * @else:     elseBranch
+     *            elseBranch
      *            jump @end
      * @then:     thenBranch
      * @end:
@@ -1425,7 +1505,7 @@ vm::CodeFragment EIf::compileDirect(CompileCtx& ctx) const {
         thenCodeBranch.append(_nodes[1]->compileDirect(ctx));
 
         // Combine the branches
-        code.append(std::move(elseCodeBranch), std::move(thenCodeBranch));
+        code.append({std::move(elseCodeBranch), std::move(thenCodeBranch)});
         code.appendLabel(endLabel);
         return code;
     });
@@ -1456,6 +1536,104 @@ std::vector<DebugPrinter::Block> EIf::debugPrint() const {
 }
 
 size_t EIf::estimateSize() const {
+    return sizeof(*this) + size_estimator::estimate(_nodes);
+}
+
+std::unique_ptr<EExpression> ESwitch::clone() const {
+    std::vector<std::unique_ptr<EExpression>> nodes;
+    nodes.reserve(_nodes.size());
+    for (auto&& n : _nodes) {
+        nodes.push_back(n->clone());
+    }
+    return std::make_unique<ESwitch>(std::move(nodes));
+}
+
+vm::CodeFragment ESwitch::compileDirect(CompileCtx& ctx) const {
+    /*
+     * Compile if-then-elif-...-else into following bytecode:
+     *            cond1
+     *            jumpNothing @end
+     *            jumpTrue @then1
+     *            cond2
+     *            jumpNothing @end
+     *            jumpTrue @then2
+     *            elseBranch
+     *            jump @end
+     * @then1:    thenBranch1
+     *            jump @end
+     * @then2:    thenBranch2
+     * @end:
+     */
+
+    auto endLabel = ctx.newLabelId();
+    size_t numBranches = getNumBranches();
+    std::vector<vm::LabelId> labels;
+    labels.reserve(numBranches);
+    for (size_t i = 0; i < numBranches; i++) {
+        labels.push_back(ctx.newLabelId());
+    }
+    std::vector<vm::CodeFragment> fragments;
+    fragments.reserve(numBranches + 1);
+
+    vm::CodeFragment mainCode;
+    for (size_t i = 0; i < numBranches; i++) {
+        // Compile the condition
+        auto code = getCondition(i)->compileDirect(ctx);
+        // Compile the jumps
+        code.appendLabelJumpNothing(endLabel);
+        code.appendLabelJumpTrue(labels[i]);
+        mainCode.append(std::move(code));
+    }
+    // Compile else-branch
+    fragments.emplace_back(getDefault()->compileDirect(ctx));
+    fragments.back().appendLabelJump(endLabel);
+    // Compile then-branch
+    for (size_t i = 0; i < numBranches; i++) {
+        vm::CodeFragment thenCodeBranch;
+        thenCodeBranch.appendLabel(labels[i]);
+        thenCodeBranch.append(getThenBranch(i)->compileDirect(ctx));
+        if (i < numBranches - 1) {
+            thenCodeBranch.appendLabelJump(endLabel);
+        }
+        fragments.emplace_back(std::move(thenCodeBranch));
+    }
+
+    mainCode.append(std::move(fragments));
+    mainCode.appendLabel(endLabel);
+
+    for (size_t i = 0; i < numBranches; i++) {
+        mainCode.removeLabel(labels[i]);
+    }
+    mainCode.removeLabel(endLabel);
+    return mainCode;
+}
+
+std::vector<DebugPrinter::Block> ESwitch::debugPrint() const {
+    std::vector<DebugPrinter::Block> ret;
+
+    ret.emplace_back(DebugPrinter::Block::cmdIncIndent);
+
+    for (size_t i = 0; i < getNumBranches(); i++) {
+        // Print the condition.
+        DebugPrinter::addKeyword(ret, i == 0 ? "if" : "elif");
+        DebugPrinter::addBlocks(ret, getCondition(i)->debugPrint());
+        DebugPrinter::addNewLine(ret);
+
+        // Print thenBranch.
+        DebugPrinter::addKeyword(ret, "then");
+        DebugPrinter::addBlocks(ret, getThenBranch(i)->debugPrint());
+        DebugPrinter::addNewLine(ret);
+    }
+    // Print elseBranch.
+    DebugPrinter::addKeyword(ret, "else");
+    DebugPrinter::addBlocks(ret, getDefault()->debugPrint());
+
+    ret.emplace_back(DebugPrinter::Block::cmdDecIndent);
+
+    return ret;
+}
+
+size_t ESwitch::estimateSize() const {
     return sizeof(*this) + size_estimator::estimate(_nodes);
 }
 
@@ -1528,18 +1706,17 @@ size_t ELocalBind::estimateSize() const {
 }
 
 std::unique_ptr<EExpression> ELocalLambda::clone() const {
-    return std::make_unique<ELocalLambda>(_frameId, _nodes.back()->clone());
+    return std::make_unique<ELocalLambda>(_frameId, _nodes.back()->clone(), _numArguments);
 }
 
 vm::CodeFragment ELocalLambda::compileBodyDirect(CompileCtx& ctx) const {
     // Compile the body first so we know its size.
     auto inner = _nodes.back()->compileDirect(ctx);
     vm::CodeFragment body;
-
     // Declare the frame containing lambda variable.
-    // The variable is expected to be already on the stack so declare the frame just below the
+    // The variables are expected to be already on the stack so declare the frame just below the
     // current top of the stack.
-    body.declareFrame(_frameId, -1);
+    body.declareFrame(_frameId, -(int)_numArguments);
 
     // Make sure the stack is sufficiently large.
     body.appendAllocStack(inner.maxStackSize());
@@ -1571,7 +1748,7 @@ vm::CodeFragment ELocalLambda::compileDirect(CompileCtx& ctx) const {
 
         // Push the lambda value on the stack
         code.appendLabel(afterBodyLabel);
-        code.appendLocalLambda(bodyPosition);
+        code.appendLocalLambda(bodyPosition, _numArguments);
 
         return code;
     });
@@ -1582,7 +1759,9 @@ std::vector<DebugPrinter::Block> ELocalLambda::debugPrint() const {
 
     DebugPrinter::addKeyword(ret, "lambda");
     ret.emplace_back("`(`");
-    DebugPrinter::addIdentifier(ret, _frameId, 0);
+    for (size_t i = 0; i < _numArguments; i++) {
+        DebugPrinter::addIdentifier(ret, _frameId, i);
+    }
     ret.emplace_back("`)");
     ret.emplace_back("{");
     DebugPrinter::addBlocks(ret, _nodes.back()->debugPrint());
@@ -1671,7 +1850,7 @@ std::vector<DebugPrinter::Block> ENumericConvert::debugPrint() const {
             ret.emplace_back("decimal");
             break;
         default:
-            MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE_TASSERT(11122906);
     }
 
     ret.emplace_back("`)");

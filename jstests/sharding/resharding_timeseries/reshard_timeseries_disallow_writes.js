@@ -5,150 +5,173 @@
  *   requires_fcv_80,
  * ]
  */
+import {getRawOperationSpec, getTimeseriesCollForRawOps} from "jstests/libs/raw_operation_utils.js";
 import {ReshardingTest} from "jstests/sharding/libs/resharding_test_fixture.js";
 
 const reshardingTest = new ReshardingTest({numDonors: 2, numRecipients: 2, reshardInPlace: false});
 reshardingTest.setup();
 
-const dbName = "test";
-const collName = "foo";
-const ns = dbName + "." + collName;
+const ns = "test.foo";
 
 const timeseriesInfo = {
-    timeField: 'ts',
-    metaField: 'meta'
+    timeField: "ts",
+    metaField: "meta",
 };
 
 const donorShardNames = reshardingTest.donorShardNames;
 
-const timeseriesCollection = reshardingTest.createShardedCollection({
+const coll = reshardingTest.createShardedCollection({
     ns: ns,
-    shardKeyPattern: {'meta.x': 1},
+    shardKeyPattern: {"meta.x": 1},
     chunks: [
-        {min: {'meta.x': MinKey}, max: {'meta.x': 0}, shard: donorShardNames[0]},
-        {min: {'meta.x': 0}, max: {'meta.x': MaxKey}, shard: donorShardNames[1]},
+        {min: {"meta.x": MinKey}, max: {"meta.x": 0}, shard: donorShardNames[0]},
+        {min: {"meta.x": 0}, max: {"meta.x": MaxKey}, shard: donorShardNames[1]},
     ],
     collOptions: {
         timeseries: timeseriesInfo,
-    }
+    },
 });
+const db = coll.getDB();
 
-assert.commandWorked(
-    timeseriesCollection.insert({data: 1, ts: new Date(), meta: {x: -1, y: -1, z: 0}}));
-assert.commandWorked(timeseriesCollection.createIndexes(
-    [{indexToDropDuringResharding: 1}, {indexToDropAfterResharding: 1}]));
-
-const bucketsCollName = "system.buckets.foo";
-const bucketsColl = reshardingTest._st.s.getDB("test").getCollection('system.buckets.foo');
+assert.commandWorked(coll.insert({data: 1, ts: new Date(), meta: {x: -1, y: -1, z: 0}}));
+assert.commandWorked(coll.createIndexes([{indexToDropDuringResharding: 1}, {indexToDropAfterResharding: 1}]));
 
 const recipientShardNames = reshardingTest.recipientShardNames;
 reshardingTest.withReshardingInBackground(
     {
-        newShardKeyPattern: {'meta.y': 1},
+        newShardKeyPattern: {"meta.y": 1},
         newChunks: [
-            {min: {'meta.y': MinKey}, max: {'meta.y': 0}, shard: recipientShardNames[0]},
-            {min: {'meta.y': 0}, max: {'meta.y': MaxKey}, shard: recipientShardNames[1]},
+            {min: {"meta.y": MinKey}, max: {"meta.y": 0}, shard: recipientShardNames[0]},
+            {min: {"meta.y": 0}, max: {"meta.y": MaxKey}, shard: recipientShardNames[1]},
         ],
     },
     () => {},
     {
         postCheckConsistencyFn: () => {
             jsTestLog("Attempting insert");
-            let res = timeseriesCollection.runCommand({
-                insert: collName,
+            let res = coll.runCommand({
+                insert: coll.getName(),
                 documents: [{data: 3, ts: new Date(), meta: {x: -2, y: -2}}],
-                maxTimeMS: 3000
+                maxTimeMS: 3000,
             });
             assert(ErrorCodes.isExceededTimeLimitError(res.writeErrors[0].code));
 
-            res = bucketsColl.runCommand({
-                insert: bucketsCollName,
+            res = getTimeseriesCollForRawOps(db, coll).runCommand({
+                insert: getTimeseriesCollForRawOps(db, coll).getName(),
                 documents: [{data: 3, ts: new Date(), meta: {x: -2, y: -2}}],
-                maxTimeMS: 3000
+                maxTimeMS: 3000,
+                ...getRawOperationSpec(db),
             });
             assert(ErrorCodes.isExceededTimeLimitError(res.writeErrors[0].code));
 
             jsTestLog("Attempting update");
-            res = timeseriesCollection.runCommand({
-                update: collName,
-                updates: [{q: {'meta.x': -1}, u: {$set: {'meta.x': -15}}, multi: true}],
-                maxTimeMS: 3000
+            res = coll.runCommand({
+                update: coll.getName(),
+                updates: [{q: {"meta.x": -1}, u: {$set: {"meta.x": -15}}, multi: true}],
+                maxTimeMS: 3000,
             });
             assert(ErrorCodes.isExceededTimeLimitError(res.writeErrors[0].code));
 
-            res = bucketsColl.runCommand({
-                update: bucketsCollName,
-                updates: [{q: {'meta.x': -1}, u: {$set: {'meta.x': -15}}, multi: true}],
-                maxTimeMS: 3000
+            res = getTimeseriesCollForRawOps(db, coll).runCommand({
+                update: getTimeseriesCollForRawOps(db, coll).getName(),
+                updates: [{q: {"meta.x": -1}, u: {$set: {"meta.x": -15}}, multi: true}],
+                maxTimeMS: 3000,
+                ...getRawOperationSpec(db),
             });
             assert(ErrorCodes.isExceededTimeLimitError(res.writeErrors[0].code));
 
             jsTestLog("Attempting delete");
-            res = timeseriesCollection.runCommand(
-                {delete: collName, deletes: [{q: {'meta.x': -1}, limit: 1}], maxTimeMS: 3000});
+            res = coll.runCommand({
+                delete: coll.getName(),
+                deletes: [{q: {"meta.x": -1}, limit: 1}],
+                maxTimeMS: 3000,
+            });
             assert(ErrorCodes.isExceededTimeLimitError(res.writeErrors[0].code));
 
-            res = bucketsColl.runCommand({
-                delete: bucketsCollName,
-                deletes: [{q: {'meta.x': -1}, limit: 1}],
-                maxTimeMS: 3000
+            res = getTimeseriesCollForRawOps(db, coll).runCommand({
+                delete: getTimeseriesCollForRawOps(db, coll).getName(),
+                deletes: [{q: {"meta.x": -1}, limit: 1}],
+                maxTimeMS: 3000,
+                ...getRawOperationSpec(db),
             });
             assert(ErrorCodes.isExceededTimeLimitError(res.writeErrors[0].code));
 
             jsTestLog("Attempting createIndex");
-            res = timeseriesCollection.runCommand({
-                createIndexes: collName,
-                indexes: [{key: {'meta.z': 1}, name: "metaz_0"}],
-                maxTimeMS: 3000
+            res = coll.runCommand({
+                createIndexes: coll.getName(),
+                indexes: [{key: {"meta.z": 1}, name: "metaz_0"}],
+                maxTimeMS: 3000,
             });
             assert(ErrorCodes.isExceededTimeLimitError(res.code));
 
             jsTestLog("Attempting collMod");
             // The collMod is serialized with the resharding command, so we explicitly add an
             // timeout to the command so that it doesn't get blocked and timeout the test.
-            res = timeseriesCollection.runCommand({collMod: collName, maxTimeMS: 3000});
+            res = coll.runCommand({collMod: coll.getName(), maxTimeMS: 3000});
             assert(ErrorCodes.isExceededTimeLimitError(res.code));
 
             jsTestLog("Attempting drop index");
-            res = timeseriesCollection.runCommand(
-                {dropIndexes: collName, index: {indexToDropDuringResharding: 1}, maxTimeMS: 3000});
+            res = coll.runCommand({
+                dropIndexes: coll.getName(),
+                index: {indexToDropDuringResharding: 1},
+                maxTimeMS: 3000,
+            });
             assert(ErrorCodes.isExceededTimeLimitError(res.code));
 
             assert.soon(() => {
-                let ops = reshardingTest._st.s.getDB('admin')
-                              .aggregate([
-                                  {$currentOp: {}},
-                                  {$match: {"command._shardsvrDropIndexes": collName}}
-                              ])
-                              .toArray();
+                let ops = reshardingTest._st.s
+                    .getDB("admin")
+                    .aggregate([{$currentOp: {}}, {$match: {"command._shardsvrDropIndexes": coll.getName()}}])
+                    .toArray();
                 return ops.length == 0;
             });
 
             jsTestLog("Completed operations");
         },
         afterReshardingFn: () => {
-            jsTestLog("Join possible ongoing collMod command");
-            assert.commandWorked(timeseriesCollection.runCommand("collMod"));
-        }
-    });
+            // The ShardingDDLCoordinator will automatically retry any retriable DDLs, and
+            // ExceededTimeLimit is considered retriable. If a DDL fails with this code, it will be
+            // queued to rerun once the resharding releases the locks. We need to join any
+            // in-progress retries and accept IndexNotFound for dropIndexes since the index may have
+            // already been dropped by the retry.
+
+            jsTestLog("Join possible ongoing collMod and dropIndexes commands");
+            assert.commandWorked(coll.runCommand("collMod"));
+
+            // TODO SERVER-107420: Remove IndexNotFound from acceptable dropIndexes errors once 9.0
+            // becomes LTS
+            assert.commandWorkedOrFailedWithCode(
+                coll.runCommand({
+                    dropIndexes: coll.getName(),
+                    index: {indexToDropDuringResharding: 1},
+                }),
+                ErrorCodes.IndexNotFound,
+            );
+        },
+    },
+);
 
 jsTestLog("Verify that writes succeed after resharding operation has completed");
 
-assert.commandWorked(timeseriesCollection.runCommand(
-    {insert: collName, documents: [{data: 3, ts: new Date(), meta: {x: -2, y: -2}}]}));
-
-assert.commandWorked(timeseriesCollection.runCommand(
-    {update: collName, updates: [{q: {'meta.x': -1}, u: {$set: {'meta.x': -15}}, multi: true}]}));
+assert.commandWorked(
+    coll.runCommand({insert: coll.getName(), documents: [{data: 3, ts: new Date(), meta: {x: -2, y: -2}}]}),
+);
 
 assert.commandWorked(
-    timeseriesCollection.runCommand({delete: collName, deletes: [{q: {'meta.x': -1}, limit: 1}]}));
+    coll.runCommand({
+        update: coll.getName(),
+        updates: [{q: {"meta.x": -1}, u: {$set: {"meta.x": -15}}, multi: true}],
+    }),
+);
 
-assert.commandWorked(timeseriesCollection.runCommand(
-    {createIndexes: collName, indexes: [{key: {'meta.z': 1}, name: "metaz_0"}]}));
+assert.commandWorked(coll.runCommand({delete: coll.getName(), deletes: [{q: {"meta.x": -1}, limit: 1}]}));
 
-assert.commandWorked(timeseriesCollection.runCommand({collMod: collName}));
+assert.commandWorked(
+    coll.runCommand({createIndexes: coll.getName(), indexes: [{key: {"meta.z": 1}, name: "metaz_0"}]}),
+);
 
-assert.commandWorked(timeseriesCollection.runCommand(
-    {dropIndexes: collName, index: {indexToDropDuringResharding: 1}}));
+assert.commandWorked(coll.runCommand({collMod: coll.getName()}));
+
+assert.commandWorked(coll.runCommand({dropIndexes: coll.getName(), index: {indexToDropAfterResharding: 1}}));
 
 reshardingTest.teardown();

@@ -28,6 +28,11 @@
  */
 
 
+#include <jsapi.h>
+#include <jscustomallocator.h>
+#include <jsfriendapi.h>
+#include <jspubtd.h>
+
 #include <absl/container/node_hash_map.h>
 #include <absl/meta/type_traits.h>
 #include <boost/move/utility_core.hpp>
@@ -55,30 +60,14 @@
 #include <js/TypeDecls.h>
 #include <js/Value.h>
 #include <js/friend/ErrorMessages.h>
-#include <jsapi.h>
-#include <jscustomallocator.h>
-#include <jsfriendapi.h>
-#include <jspubtd.h>
 #include <mozilla/Utf8.h>
 // IWYU pragma: no_include "cxxabi.h"
-#include <algorithm>
-#include <iostream>
-#include <memory>
-#include <mutex>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/operation_context.h"
 #include "mongo/logv2/constants.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_options.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/logv2/log_tag.h"
-#include "mongo/logv2/log_truncation.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/platform/stack_locator.h"
 #include "mongo/scripting/deadline_monitor.h"
@@ -93,6 +82,11 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <algorithm>
+#include <iostream>
+#include <memory>
+#include <mutex>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
@@ -101,6 +95,7 @@ namespace mongo {
 namespace JSFiles {
 extern const JSFile types;
 extern const JSFile assert;
+extern const JSFile assert_global;
 }  // namespace JSFiles
 
 namespace mozjs {
@@ -136,6 +131,10 @@ const int kStackChunkSize = 8192;
  */
 constexpr size_t kMaxErrorStringSize = logv2::constants::kDefaultMaxAttributeOutputSizeKB * 1024;
 
+const StringData kTestDataFieldName = "TestData";
+const StringData kLogFormatFieldName = "logFormat";
+const StringData kExtraAttrFieldName = "extraAttr";
+
 /**
  * Runtime's can race on first creation (on some function statics), so we just
  * serialize the initial Runtime creation.
@@ -145,6 +144,81 @@ bool gFirstRuntimeCreated = false;
 
 bool closeToMaxMemory() {
     return mongo::sm::get_total_bytes() > (kInterruptGCThreshold * mongo::sm::get_max_bytes());
+}
+
+/**
+ * Splits the given string into a BSONArray of strings based on the given delimiter.
+ */
+BSONArray splitToBSONArray(const std::string& str, const char delimiter) {
+    BSONArrayBuilder builder;
+    std::string tmp;
+    std::stringstream ss(str);
+    while (getline(ss, tmp, delimiter)) {
+        builder.append(tmp);
+    }
+    return builder.arr();
+}
+
+/**
+ * Reads 'logFormat' setting from the global 'TestData' object when present.
+ */
+bool isLogFormatJson(MozJSScriptEngine* engine,
+                     JSContext* context,
+                     const JS::HandleObject& global) {
+    return (engine->executionEnvironment() == ExecutionEnvironment::TestRunner &&
+            ObjectWrapper(context, global)
+                    .getObject(kTestDataFieldName.data())
+                    .getStringField(kLogFormatFieldName) == "json");
+}
+
+/**
+ * Logs the given status either as plain text or as JSON depending on the 'plainShell' parameter.
+ */
+void logStatus(const Status& status, bool plainShell) {
+    if (plainShell) {
+        str::stream ss;
+        ss << redact(status.reason());
+        if (auto extraInfo = status.extraInfo<JSExceptionInfo>()) {
+            if (!extraInfo->extraAttr.isEmpty()) {
+                ss << " : " << extraInfo->extraAttr;
+            }
+            ss << " :\n" << extraInfo->stack;
+        }
+
+        LOGV2_INFO_OPTIONS(
+            10077200,
+            logv2::LogOptions(logv2::LogTag::kPlainShell, logv2::LogTruncation::Disabled),
+            "{jsError}",
+            "jsError"_attr = std::string(ss));
+    } else {
+        // Collect status data into log entry attributes.
+        logv2::DynamicAttributes attrs;
+        attrs.add("errmsg", redact(status.reason()));
+        attrs.add("code", status.code());
+        if (auto codeString = status.codeString(); !codeString.empty()) {
+            attrs.addDeepCopy("codeName", std::move(codeString));
+        }
+        if (auto extraInfo = status.extraInfo<JSExceptionInfo>()) {
+            attrs.add("originalError", extraInfo->originalError);
+            if (!extraInfo->stack.empty()) {
+                // By default stack is one multi-line string, so we're adding some minimal
+                // formatting here for the convenience.
+                attrs.add("stack", splitToBSONArray(extraInfo->stack, '\n'));
+            }
+            if (!extraInfo->extraAttr.isEmpty()) {
+                attrs.add("extra", extraInfo->extraAttr);
+            }
+        }
+        if (status.reason().starts_with(ErrorMessage::kUncaughtException.data())) {
+            LOGV2_ERROR(10004100, "uncaught exception", attrs);
+        } else if (status.reason().starts_with(ErrorMessage::kOutOfMemory.data())) {
+            LOGV2_ERROR(10004101, "out of memory exception", attrs);
+        } else if (status.reason().starts_with(ErrorMessage::kUnknownError.data())) {
+            LOGV2_ERROR(10004102, "unknown error", attrs);
+        } else {
+            LOGV2_ERROR(10004103, "mongo exception", attrs);
+        }
+    }
 }
 }  // namespace
 
@@ -266,7 +340,7 @@ bool MozJSImplScope::_interruptCallback(JSContext* cx) {
     }();
 
     if (scope->_hasOutOfMemoryException) {
-        status = Status(ErrorCodes::JSInterpreterFailure, "Out of memory");
+        status = Status(ErrorCodes::JSInterpreterFailure, ErrorMessage::kOutOfMemory);
     }
 
     if (!status.isOK())
@@ -380,47 +454,24 @@ MozJSImplScope::MozRuntime::MozRuntime(const MozJSScriptEngine* engine,
             JS_NewContext(kMaxBytesBeforeGC), [](JSContext* ptr) { JS_DestroyContext(ptr); });
         uassert(ErrorCodes::JSInterpreterFailure, "Failed to initialize JSContext", _context);
 
-        // We turn on a variety of optimizations if the jit is enabled
-        if (engine->isJITEnabled()) {
-            if (!gFirstRuntimeCreated) {
-                // The process-wide baseline JIT is enabled as part of creating the first JS
-                // runtime. If JIT is later disabled for a specific JS runtime, then the ION JIT
-                // engine gets disabled, but the baseline JIT is still enabled.
-                JS_SetGlobalJitCompilerOption(_context.get(), JSJITCOMPILER_BASELINE_ENABLE, 1);
-                JS_SetGlobalJitCompilerOption(
-                    _context.get(), JSJITCOMPILER_BASELINE_INTERPRETER_ENABLE, 1);
-                JS_SetGlobalJitCompilerOption(_context.get(), JSJITCOMPILER_ION_ENABLE, 1);
-            }
-            JS::ContextOptionsRef(_context.get())
-                .setAsmJS(true)
-                .setThrowOnAsmJSValidationFailure(true)
-                .setWasmBaseline(true)
-                .setWasmIon(true)
-                .setAsyncStack(false);
-        } else {
-            if (!gFirstRuntimeCreated) {
-                // The process-wide baseline JIT is disabled as part of creating the first JS
-                // runtime. If JIT is later enabled for a specific JS runtime, then the ION JIT
-                // engine gets enabled.
-                JS_SetGlobalJitCompilerOption(_context.get(), JSJITCOMPILER_BASELINE_ENABLE, 0);
-                JS_SetGlobalJitCompilerOption(
-                    _context.get(), JSJITCOMPILER_BASELINE_INTERPRETER_ENABLE, 0);
-                JS_SetGlobalJitCompilerOption(_context.get(), JSJITCOMPILER_ION_ENABLE, 0);
-            }
-            JS::ContextOptionsRef(_context.get())
-                .setAsmJS(false)
-                .setThrowOnAsmJSValidationFailure(false)
-                .setWasmBaseline(false)
-                .setDisableIon()
-                .setWasmIon(false)
-                .setAsyncStack(false);
-        }
-
         if (!gFirstRuntimeCreated) {
+            // The process-wide baseline JIT is disabled as part of creating the first JS
+            // runtime.
+            JS_SetGlobalJitCompilerOption(_context.get(), JSJITCOMPILER_BASELINE_ENABLE, 0);
+            JS_SetGlobalJitCompilerOption(
+                _context.get(), JSJITCOMPILER_BASELINE_INTERPRETER_ENABLE, 0);
+            JS_SetGlobalJitCompilerOption(_context.get(), JSJITCOMPILER_ION_ENABLE, 0);
             // If this is the first one, hold the lock until after the first
             // one's done
             gFirstRuntimeCreated = true;
         }
+        JS::ContextOptionsRef(_context.get())
+            .setAsmJS(false)
+            .setThrowOnAsmJSValidationFailure(false)
+            .setWasmBaseline(false)
+            .setDisableIon()
+            .setWasmIon(false)
+            .setAsyncStack(false);
 
         uassert(ErrorCodes::JSInterpreterFailure,
                 "UseInternalJobQueues",
@@ -488,7 +539,6 @@ MozJSImplScope::MozJSImplScope(MozJSScriptEngine* engine, boost::optional<int> j
       _generation(0),
       _requireOwnedObjects(false),
       _hasOutOfMemoryException(false),
-      _inReportError(false),
       _binDataProto(_context),
       _bsonProto(_context),
       _codeProto(_context),
@@ -540,6 +590,7 @@ MozJSImplScope::MozJSImplScope(MozJSScriptEngine* engine, boost::optional<int> j
         JS_FireOnNewGlobalObject(_context, _global);
 
         execSetup(JSFiles::assert);
+        execSetup(JSFiles::assert_global);
         execSetup(JSFiles::types);
 
         if (_engine->executionEnvironment() == ExecutionEnvironment::Server) {
@@ -619,8 +670,6 @@ auto MozJSImplScope::_runSafely(ImplScopeFunction&& functionToRun) -> decltype(f
             reasonWithStack << extraInfo->originalError.reason() << " :\n" << extraInfo->stack;
             _status = extraInfo->originalError.withReason(reasonWithStack);
         }
-
-        _error = _status.reason();
 
         // Clear the status state
         auto status = std::move(_status);
@@ -794,7 +843,7 @@ BSONObj MozJSImplScope::callThreadArgs(const BSONObj& args) {
     auto firstElem = args.firstElement();
 
     // The first argument must be the thread start function
-    if (firstElem.type() != mongo::Code)
+    if (firstElem.type() != BSONType::code)
         uasserted(ErrorCodes::BadValue, "first thread argument must be a function");
 
     getScope(_context)->newFunction(firstElem.valueStringData(), &function);
@@ -970,14 +1019,11 @@ bool shouldTryExecAsModule(JSContext* cx, const std::string& name, bool success)
         return true;
     }
 
+    // Try as a module if it's a syntax error. We can't do much more introspection from here,
+    // since these can be indistinguishable from syntax errors either caused by not loading
+    // as a module, or generic syntax errors regardless of scripts/modules.
     const JSClass* syntaxError = js::ProtoKeyToClass(JSProto_SyntaxError);
-    if (!JS_InstanceOf(cx, obj, syntaxError, nullptr)) {
-        return false;
-    }
-
-    return report->errorNumber == JSMSG_IMPORT_DECL_AT_TOP_LEVEL ||
-        report->errorNumber == JSMSG_EXPORT_DECL_AT_TOP_LEVEL ||
-        report->errorNumber == JSMSG_AWAIT_OUTSIDE_ASYNC_OR_MODULE;
+    return JS_InstanceOf(cx, obj, syntaxError, nullptr);
 }
 
 bool MozJSImplScope::exec(StringData code,
@@ -993,7 +1039,7 @@ bool MozJSImplScope::exec(StringData code,
 
         JS::SourceText<mozilla::Utf8Unit> srcBuf;
         bool success =
-            srcBuf.init(_context, code.rawData(), code.size(), JS::SourceOwnership::Borrowed);
+            srcBuf.init(_context, code.data(), code.size(), JS::SourceOwnership::Borrowed);
         if (_checkErrorState(success, reportError, assertOnError)) {
             return false;
         }
@@ -1179,86 +1225,14 @@ bool MozJSImplScope::_checkErrorState(bool success, bool reportError, bool asser
     }
 
     if (_status.isOK()) {
-        JS::RootedValue excn(_context);
-        if (JS_GetPendingException(_context, &excn)) {
-            // It's possible that we have an uncaught exception for OOM, which is reported on the
-            // exception status of the JSContext. We must check for this OOM exception before
-            // clearing the pending exception. This function checks both the status on the JSContext
-            // as well as the message string of the exception being provided.
-            const auto isThrowingOOM = JS_IsThrowingOutOfMemoryException(_context, excn);
-
-            // The pending JS exception needs to be cleared before we call ValueWriter below to
-            // print the exception. ValueWriter::toStringData() may call back into the Interpret,
-            // which asserts that we don't have an exception pending in DEBUG builds.
-            JS_ClearPendingException(_context);
-
-            if (excn.isObject()) {
-                str::stream ss;
-                // Exceptions originating from C++ should not get the "uncaught exception: " prefix.
-                // These exceptions thrown from mongo are represented as MongoStatusInfo, so we
-                // exclude MongoStatusInfo from having the prefix.
-                if (!getProto<MongoStatusInfo>().instanceOf(excn)) {
-                    ss << "uncaught exception: ";
-                }
-                JSStringWrapper jsstr;
-                ss << str::UTF8SafeTruncation(ValueWriter(_context, excn).toStringData(&jsstr),
-                                              kMaxErrorStringSize);
-                auto stackStr = ObjectWrapper(_context, excn).getString(InternedString::stack);
-                auto status =
-                    jsExceptionToStatus(_context, excn, ErrorCodes::JSInterpreterFailure, ss);
-                auto fnameStr = ObjectWrapper(_context, excn).getString(InternedString::fileName);
-                auto lineNum =
-                    ObjectWrapper(_context, excn).getNumberInt(InternedString::lineNumber);
-                auto colNum =
-                    ObjectWrapper(_context, excn).getNumberInt(InternedString::columnNumber);
-
-                if (stackStr.empty()) {
-                    // The JavaScript Error objects resulting from C++ exceptions may not always
-                    // have a
-                    // non-empty "stack" property. We instead use the line and column numbers of
-                    // where
-                    // in the JavaScript code the C++ function was called from.
-                    str::stream ss;
-                    ss << "@" << fnameStr << ":" << lineNum << ":" << colNum << "\n";
-                    stackStr = ss;
-                }
-                _status = Status(JSExceptionInfo(std::move(stackStr), status), ss);
-
-            } else {
-                str::stream ss;
-                JSStringWrapper jsstr;
-
-                if (isThrowingOOM) {
-                    _status = Status(ErrorCodes::JSInterpreterFailure, "Out of memory");
-                } else {
-                    ss << "uncaught exception: "
-                       << str::UTF8SafeTruncation(ValueWriter(_context, excn).toStringData(&jsstr),
-                                                  kMaxErrorStringSize);
-                    _status = Status(ErrorCodes::UnknownError, ss);
-                }
-            }
-        } else {
-            _status = Status(ErrorCodes::UnknownError, "Unknown Failure from JSInterpreter");
-        }
+        _status = _checkForPendingException();
     }
     // We always unconditionally clear any pending exception, as this method _checkErrorState is
     // expected to report and clear the errors before returning.
     JS_ClearPendingException(_context);
 
-    if (auto extraInfo = _status.extraInfo<JSExceptionInfo>()) {
-        str::stream reasonWithStack;
-        reasonWithStack << _status.reason() << " :\n" << extraInfo->stack;
-        _error = reasonWithStack;
-    } else {
-        _error = _status.reason();
-    }
-
     if (reportError)
-        LOGV2_INFO_OPTIONS(
-            20163,
-            logv2::LogOptions(logv2::LogTag::kPlainShell, logv2::LogTruncation::Disabled),
-            "{jsError}",
-            "jsError"_attr = redact(_error));
+        logStatus(_status, !isLogFormatJson(_engine, _context, _global));
 
     // Clear the status state
     auto status = std::move(_status);
@@ -1271,6 +1245,58 @@ bool MozJSImplScope::_checkErrorState(bool success, bool reportError, bool asser
     return true;
 }
 
+Status MozJSImplScope::_checkForPendingException() {
+    JS::RootedValue excn(_context);
+
+    if (!JS_GetPendingException(_context, &excn)) {
+        return Status(ErrorCodes::UnknownError, ErrorMessage::kUnknownError);
+    }
+
+    // It's possible that we have an uncaught exception for OOM, which is reported on the exception
+    // status of the JSContext. We must check for this OOM exception before clearing the pending
+    // exception. This function checks both the status on the JSContext as well as the message
+    // string of the exception being provided.
+    const auto isThrowingOOM = JS_IsThrowingOutOfMemoryException(_context, excn);
+    if (isThrowingOOM) {
+        return Status(ErrorCodes::JSInterpreterFailure, ErrorMessage::kOutOfMemory);
+    }
+
+    // The pending JS exception needs to be cleared before we call ValueWriter below to print the
+    // exception. ValueWriter::toString() may call back into the Interpret, which asserts that we
+    // don't have an exception pending in DEBUG builds.
+    JS_ClearPendingException(_context);
+
+    str::stream ss;
+    if (excn.isObject()) {
+        // Exceptions originating from C++ should not get the "uncaught exception: " prefix. These
+        // exceptions thrown from mongo are represented as MongoStatusInfo, so we exclude
+        // MongoStatusInfo from having the prefix.
+        if (!getProto<MongoStatusInfo>().instanceOf(excn)) {
+            ss << ErrorMessage::kUncaughtException << ": ";
+        }
+        ss << str::UTF8SafeTruncation(ValueWriter(_context, excn).toString(), kMaxErrorStringSize);
+        auto status = jsExceptionToStatus(_context, excn, ErrorCodes::JSInterpreterFailure, ss);
+
+        ObjectWrapper errorObj(_context, excn);
+        auto stackStr = errorObj.getString(InternedString::stack);
+        if (stackStr.empty()) {
+            // The JavaScript Error objects resulting from C++ exceptions may not always have a
+            // non-empty "stack" property. We instead use the line and column numbers of where in
+            // the JavaScript code the C++ function was called from.
+            auto fnameStr = errorObj.getString(InternedString::fileName);
+            auto lineNum = errorObj.getNumberInt(InternedString::lineNumber);
+            auto colNum = errorObj.getNumberInt(InternedString::columnNumber);
+            stackStr = str::stream() << "@" << fnameStr << ":" << lineNum << ":" << colNum << "\n";
+        }
+        // Extract 'extraAttr' object property that might be present in case of an assertion error.
+        auto extraAttrObj = errorObj.getObject(kExtraAttrFieldName.data());
+        return Status(JSExceptionInfo(std::move(stackStr), status, std::move(extraAttrObj)), ss);
+    }
+
+    ss << ErrorMessage::kUncaughtException << ": "
+       << str::UTF8SafeTruncation(ValueWriter(_context, excn).toString(), kMaxErrorStringSize);
+    return Status(ErrorCodes::UnknownError, ss);
+}
 
 void MozJSImplScope::setCompileOptions(JS::CompileOptions* co) {}
 

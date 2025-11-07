@@ -28,18 +28,16 @@
  */
 
 
-#include <algorithm>
-
+#include "mongo/db/repl/replica_set_aware_service.h"
 
 #include "mongo/db/repl/repl_server_parameters_gen.h"
-#include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/timer.h"
+
+#include <algorithm>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -135,7 +133,7 @@ void ReplicaSetAwareServiceRegistry::onStepUpComplete(OperationContext* opCtx, l
             LOGV2(6699602,
                   "Duration spent in ReplicaSetAwareServiceRegistry::onStepUpComplete "
                   "for all services exceeded slowTotalOnStepUpCompleteThresholdMS",
-                  "thresholdMills"_attr = threshold,
+                  "thresholdMillis"_attr = threshold,
                   "durationMillis"_attr = timeSpent);
         }
     });
@@ -152,7 +150,7 @@ void ReplicaSetAwareServiceRegistry::onStepUpComplete(OperationContext* opCtx, l
                 LOGV2(6699603,
                       "Duration spent in ReplicaSetAwareServiceRegistry::onStepUpComplete "
                       "for service exceeded slowServiceOnStepUpCompleteThresholdMS",
-                      "thresholdMills"_attr = threshold,
+                      "thresholdMillis"_attr = threshold,
                       "durationMillis"_attr = timeSpent,
                       "serviceName"_attr = service->getServiceName());
             }
@@ -165,7 +163,19 @@ void ReplicaSetAwareServiceRegistry::onStepUpComplete(OperationContext* opCtx, l
 
 void ReplicaSetAwareServiceRegistry::onStepDown() {
     std::for_each(_services.begin(), _services.end(), [](ReplicaSetAwareInterface* service) {
+        Timer t{};
         service->onStepDown();
+
+        auto timeSpent = t.millis();
+        auto threshold = repl::slowServiceOnStepDownThresholdMS.load();
+        if (timeSpent > threshold) {
+            LOGV2(10594201,
+                  "Duration spent in ReplicaSetAwareServiceRegistry::onStepDown "
+                  "for service exceeded slowServiceOnStepDownThresholdMS",
+                  "thresholdMillis"_attr = threshold,
+                  "durationMillis"_attr = timeSpent,
+                  "serviceName"_attr = service->getServiceName());
+        }
     });
 }
 

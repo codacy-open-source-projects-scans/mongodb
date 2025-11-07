@@ -29,13 +29,6 @@
 
 #include "mongo/db/error_labels.h"
 
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/api_parameters.h"
@@ -51,6 +44,12 @@
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/string_map.h"
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -75,6 +74,19 @@ bool ErrorLabelBuilder::isTransientTransactionError() const {
     return _code && _sessionOptions.getTxnNumber() && _sessionOptions.getAutocommit() &&
         mongo::isTransientTransactionError(
                _code.value(), _wcCode != boost::none, _isCommitOrAbort());
+}
+
+bool hasTransientTransactionErrorLabel(const ErrorReply& reply) {
+    auto errorLabels = reply.getErrorLabels();
+    if (!errorLabels) {
+        return false;
+    }
+    for (auto& label : errorLabels.value()) {
+        if (label == ErrorLabel::kTransientTransaction) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool ErrorLabelBuilder::isRetryableWriteError() const {
@@ -178,6 +190,12 @@ bool ErrorLabelBuilder::isResumableChangeStreamError() const {
     return swLitePipe.isOK() && swLitePipe.getValue().hasChangeStream();
 }
 
+bool ErrorLabelBuilder::isOperationIdempotent() const {
+    // TODO: SERVER-108898 When OperationContext support marking an operation as idempotent, check
+    //       for idempotency to apply the error label
+    return false;
+}
+
 bool ErrorLabelBuilder::isErrorWithNoWritesPerformed() const {
     if (!_code && !_wcCode) {
         return false;
@@ -209,6 +227,8 @@ void ErrorLabelBuilder::build(BSONArrayBuilder& labels) const {
                 // SERVER-66479 and DRIVERS-2327).
                 labels << ErrorLabel::kNoWritesPerformed;
             }
+        } else if (isOperationIdempotent()) {
+            labels << ErrorLabel::kRetryableError;
         }
     }
 
@@ -219,6 +239,10 @@ void ErrorLabelBuilder::build(BSONArrayBuilder& labels) const {
         labels << ErrorLabel::kResumableChangeStream;
     } else if (isNonResumableChangeStreamError()) {
         labels << ErrorLabel::kNonResumableChangeStream;
+    }
+
+    if (isSystemOverloadedError()) {
+        labels << ErrorLabel::kSystemOverloadedError;
     }
 
 #ifdef MONGO_CONFIG_STREAMS

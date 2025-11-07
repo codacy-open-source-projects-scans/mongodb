@@ -28,18 +28,7 @@
  */
 
 
-#include <absl/container/flat_hash_set.h>
-#include <algorithm>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstdint>
-#include <memory>
-#include <type_traits>
+#include "mongo/db/s/transaction_coordinator_util.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -57,6 +46,7 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/generic_argument_util.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
@@ -64,19 +54,14 @@
 #include "mongo/db/repl/change_stream_oplog_notification.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/s/transaction_coordinator_futures_util.h"
-#include "mongo/db/s/transaction_coordinator_util.h"
 #include "mongo/db/s/transaction_coordinator_worker_curop_repository.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/reply_interface.h"
@@ -90,6 +75,20 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <type_traits>
+
+#include <absl/container/flat_hash_set.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTransaction
 
@@ -276,7 +275,10 @@ void PrepareVoteConsensus::registerVote(const PrepareResponse& vote) {
 }
 
 CoordinatorCommitDecision PrepareVoteConsensus::decision() const {
-    invariant(_numShards == _numCommitVotes + _numAbortVotes + _numNoVotes);
+    invariant(_numShards == _numCommitVotes + _numAbortVotes + _numNoVotes,
+              str::stream() << "numShards: " << _numShards << ", numCommitVotes: "
+                            << _numCommitVotes << ", numAbortVotes: " << _numAbortVotes
+                            << ", numNoVotes: " << _numNoVotes);
 
     CoordinatorCommitDecision decision;
     if (_numCommitVotes == _numShards) {
@@ -301,7 +303,7 @@ Future<PrepareVoteConsensus> sendPrepare(ServiceContext* service,
     prepareTransaction.setLsid(generic_argument_util::toLogicalSessionFromClient(lsid));
     prepareTransaction.setTxnNumber(txnNumberAndRetryCounter.getTxnNumber());
     prepareTransaction.setAutocommit(false);
-    prepareTransaction.setWriteConcern(generic_argument_util::kMajorityWriteConcern);
+    prepareTransaction.setWriteConcern(defaultMajorityWriteConcernDoNotUse());
     if (auto txnRetryCounter = txnNumberAndRetryCounter.getTxnRetryCounter();
         txnRetryCounter && !isDefaultTxnRetryCounter(*txnRetryCounter)) {
         prepareTransaction.setTxnRetryCounter(*txnRetryCounter);
@@ -521,7 +523,7 @@ Future<void> sendCommit(ServiceContext* service,
     commitTransaction.setLsid(generic_argument_util::toLogicalSessionFromClient(lsid));
     commitTransaction.setTxnNumber(txnNumberAndRetryCounter.getTxnNumber());
     commitTransaction.setAutocommit(false);
-    commitTransaction.setWriteConcern(generic_argument_util::kMajorityWriteConcern);
+    commitTransaction.setWriteConcern(defaultMajorityWriteConcernDoNotUse());
     if (auto txnRetryCounter = txnNumberAndRetryCounter.getTxnRetryCounter();
         txnRetryCounter && !isDefaultTxnRetryCounter(*txnRetryCounter)) {
         commitTransaction.setTxnRetryCounter(*txnRetryCounter);
@@ -565,7 +567,7 @@ Future<void> sendAbort(ServiceContext* service,
     abortTransaction.setLsid(generic_argument_util::toLogicalSessionFromClient(lsid));
     abortTransaction.setTxnNumber(txnNumberAndRetryCounter.getTxnNumber());
     abortTransaction.setAutocommit(false);
-    abortTransaction.setWriteConcern(generic_argument_util::kMajorityWriteConcern);
+    abortTransaction.setWriteConcern(defaultMajorityWriteConcernDoNotUse());
     if (auto txnRetryCounter = txnNumberAndRetryCounter.getTxnRetryCounter();
         txnRetryCounter && !isDefaultTxnRetryCounter(*txnRetryCounter)) {
         abortTransaction.setTxnRetryCounter(*txnRetryCounter);
@@ -713,8 +715,8 @@ std::vector<TransactionCoordinatorDocument> readAllCoordinatorDocs(OperationCont
     while (coordinatorDocsCursor->more()) {
         // TODO (SERVER-38307): Try/catch around parsing the document and skip the document if it
         // fails to parse.
-        auto nextDecision = TransactionCoordinatorDocument::parse(IDLParserContext(""),
-                                                                  coordinatorDocsCursor->next());
+        auto nextDecision = TransactionCoordinatorDocument::parse(coordinatorDocsCursor->next(),
+                                                                  IDLParserContext(""));
         allCoordinatorDocs.push_back(nextDecision);
     }
 
@@ -771,7 +773,7 @@ Future<PrepareResponse> sendPrepareToShard(ServiceContext* service,
 
                     if (status.isOK()) {
                         auto reply =
-                            PrepareReply::parse(IDLParserContext("PrepareReply"), response.data);
+                            PrepareReply::parse(response.data, IDLParserContext("PrepareReply"));
                         if (!reply.getPrepareTimestamp()) {
                             Status abortStatus(ErrorCodes::Error(50993),
                                                str::stream()
@@ -915,8 +917,18 @@ Future<void> sendDecisionToShard(ServiceContext* service,
                                 "command"_attr = commandObj,
                                 "shardId"_attr = shardId);
 
-                    if (ErrorCodes::isVoteAbortError(status.code())) {
-                        // Interpret voteAbort errors as an ack.
+                    if (ErrorCodes::isTwoPhaseDecisionAckError(status.code())) {
+                        // Interpret these errors as a successful ack.
+                        LOGV2_DEBUG(
+                            10613800,
+                            3,
+                            "Coordinator shard received an error from a shard which will be "
+                            "interpreted as a successful acknowledgment.",
+                            "sessionId"_attr = lsid,
+                            "txnNumberAndRetryCounter"_attr = txnNumberAndRetryCounter,
+                            "status"_attr = status,
+                            "command"_attr = commandObj,
+                            "shardId"_attr = shardId);
                         status = Status::OK();
                     }
 

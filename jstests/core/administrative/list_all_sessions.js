@@ -9,6 +9,10 @@
 //   no_selinux,
 //   # $listSession is not supported in serverless.
 //   command_not_supported_in_serverless,
+//   requires_getmore,
+//   # Runs the refreshLogicalSessionCacheNow command which requires sharding to be fully
+//   # initialized
+//   assumes_sharding_initialized,
 // ]
 
 // Basic tests for the $listSessions {allUsers:true} aggregation stage.
@@ -17,13 +21,12 @@ import {assertErrorCode} from "jstests/aggregation/extras/utils.js";
 
 const admin = db.getSiblingDB("admin");
 const config = db.getSiblingDB("config");
-const pipeline = [{'$listSessions': {allUsers: true}}];
+const pipeline = [{"$listSessions": {allUsers: true}}];
 function listSessions() {
     return config.system.sessions.aggregate(pipeline);
 }
 function listSessionsWithFilter(filter) {
-    return config.system.sessions.aggregate(
-        [{'$listSessions': {allUsers: true}}, {$match: filter}]);
+    return config.system.sessions.aggregate([{"$listSessions": {allUsers: true}}, {$match: filter}]);
 }
 
 // Get current log level.
@@ -36,18 +39,18 @@ try {
     assert.commandWorked(admin.runCommand({refreshLogicalSessionCacheNow: 1}));
 
     // Ensure that the cache now contains the session and is visible by admin.
-    assert.soon(function() {
+    assert.soon(function () {
         const resultArray = listSessions().toArray();
         if (resultArray.length < 1) {
             return false;
         }
         const resultArrayMine = resultArray
-                                    .map(function(sess) {
-                                        return sess._id.id;
-                                    })
-                                    .filter(function(id) {
-                                        return 0 == bsonWoCompare({x: id}, {x: myid});
-                                    });
+            .map(function (sess) {
+                return sess._id.id;
+            })
+            .filter(function (id) {
+                return 0 == bsonWoCompare({x: id}, {x: myid});
+            });
         return resultArrayMine.length == 1;
     }, "Failed to locate session in collection");
 

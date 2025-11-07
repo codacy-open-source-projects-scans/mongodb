@@ -30,15 +30,20 @@
 #include "mongo/db/query/stage_builder/sbe/sbexpr_helpers.h"
 
 #include "mongo/db/exec/sbe/stages/agg_project.h"
+#include "mongo/db/exec/sbe/stages/block_hashagg.h"
 #include "mongo/db/exec/sbe/stages/block_to_row.h"
 #include "mongo/db/exec/sbe/stages/branch.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
+#include "mongo/db/exec/sbe/stages/filter.h"
+#include "mongo/db/exec/sbe/stages/hash_agg.h"
+#include "mongo/db/exec/sbe/stages/hash_agg_accumulator.h"
 #include "mongo/db/exec/sbe/stages/hash_join.h"
 #include "mongo/db/exec/sbe/stages/hash_lookup.h"
 #include "mongo/db/exec/sbe/stages/hash_lookup_unwind.h"
 #include "mongo/db/exec/sbe/stages/ix_scan.h"
 #include "mongo/db/exec/sbe/stages/limit_skip.h"
 #include "mongo/db/exec/sbe/stages/merge_join.h"
+#include "mongo/db/exec/sbe/stages/project.h"
 #include "mongo/db/exec/sbe/stages/sort.h"
 #include "mongo/db/exec/sbe/stages/sorted_merge.h"
 #include "mongo/db/exec/sbe/stages/ts_bucket_to_cell_block.h"
@@ -46,18 +51,24 @@
 #include "mongo/db/exec/sbe/stages/unique.h"
 #include "mongo/db/exec/sbe/stages/unwind.h"
 #include "mongo/db/exec/sbe/stages/virtual_scan.h"
-#include "mongo/db/query/stage_builder/sbe/abt_holder_impl.h"
+#include "mongo/db/query/stage_builder/sbe/abt_defs.h"
+#include "mongo/db/query/stage_builder/sbe/abt_lower.h"
 #include "mongo/db/query/stage_builder/sbe/builder_data.h"
+#include "mongo/db/query/stage_builder/sbe/sbexpr.h"
+#include "mongo/util/overloaded_visitor.h"
+
+#include <memory>
+#include <variant>
 
 namespace mongo::stage_builder {
 namespace {
-inline optimizer::ABT extractABT(SbExpr& e) {
-    return abt::unwrap(e.extractABT());
+inline abt::ABT extractABT(SbExpr& e) {
+    return e.extractABT();
 }
 
-inline optimizer::ABTVector extractABT(SbExpr::Vector& exprs) {
+inline abt::ABTVector extractABT(SbExpr::Vector& exprs) {
     // Convert the SbExpr vector to an ABT vector.
-    optimizer::ABTVector abtExprs;
+    abt::ABTVector abtExprs;
     abtExprs.reserve(exprs.size());
 
     for (auto& e : exprs) {
@@ -67,50 +78,17 @@ inline optimizer::ABTVector extractABT(SbExpr::Vector& exprs) {
     return abtExprs;
 }
 
-inline optimizer::Operations getOptimizerOp(sbe::EPrimUnary::Op op) {
-    switch (op) {
-        case sbe::EPrimUnary::negate:
-            return optimizer::Operations::Neg;
-        case sbe::EPrimUnary::logicNot:
-            return optimizer::Operations::Not;
-        default:
-            MONGO_UNREACHABLE;
-    }
-}
+inline std::vector<std::pair<abt::ABT, abt::ABT>> extractABT(std::vector<SbExprPair>& exprPairs) {
+    // Convert the SbExprPair vector to a pair<ABT,ABT> vector.
+    std::vector<std::pair<abt::ABT, abt::ABT>> abtExprPairs;
 
-inline optimizer::Operations getOptimizerOp(sbe::EPrimBinary::Op op) {
-    switch (op) {
-        case sbe::EPrimBinary::eq:
-            return optimizer::Operations::Eq;
-        case sbe::EPrimBinary::neq:
-            return optimizer::Operations::Neq;
-        case sbe::EPrimBinary::greater:
-            return optimizer::Operations::Gt;
-        case sbe::EPrimBinary::greaterEq:
-            return optimizer::Operations::Gte;
-        case sbe::EPrimBinary::less:
-            return optimizer::Operations::Lt;
-        case sbe::EPrimBinary::lessEq:
-            return optimizer::Operations::Lte;
-        case sbe::EPrimBinary::add:
-            return optimizer::Operations::Add;
-        case sbe::EPrimBinary::sub:
-            return optimizer::Operations::Sub;
-        case sbe::EPrimBinary::fillEmpty:
-            return optimizer::Operations::FillEmpty;
-        case sbe::EPrimBinary::logicAnd:
-            return optimizer::Operations::And;
-        case sbe::EPrimBinary::logicOr:
-            return optimizer::Operations::Or;
-        case sbe::EPrimBinary::cmp3w:
-            return optimizer::Operations::Cmp3w;
-        case sbe::EPrimBinary::div:
-            return optimizer::Operations::Div;
-        case sbe::EPrimBinary::mul:
-            return optimizer::Operations::Mult;
-        default:
-            MONGO_UNREACHABLE;
+    abtExprPairs.reserve(exprPairs.size());
+
+    for (auto& p : exprPairs) {
+        abtExprPairs.emplace_back(extractABT(p.first), extractABT(p.second));
     }
+
+    return abtExprPairs;
 }
 }  // namespace
 
@@ -118,6 +96,8 @@ sbe::EExpression::Vector SbExprBuilder::lower(SbExpr::Vector& sbExprs,
                                               const VariableTypes* varTypes) {
     // Convert the SbExpr vector to an EExpression vector.
     sbe::EExpression::Vector exprs;
+    exprs.reserve(sbExprs.size());
+
     for (auto& e : sbExprs) {
         exprs.emplace_back(lower(e, varTypes));
     }
@@ -148,7 +128,7 @@ std::vector<sbe::value::SlotVector> SbExprBuilder::lower(
     return slotVectors;
 }
 
-sbe::SlotExprPairVector SbExprBuilder::lower(SbExprSbSlotVector& sbSlotSbExprVec,
+sbe::SlotExprPairVector SbExprBuilder::lower(SbExprSlotVector& sbSlotSbExprVec,
                                              const VariableTypes* varTypes) {
     sbe::SlotExprPairVector slotExprVec;
     slotExprVec.reserve(sbSlotSbExprVec.size());
@@ -188,93 +168,123 @@ std::vector<sbe::WindowStage::Window> SbExprBuilder::lower(std::vector<SbWindow>
 }
 
 SbExpr SbExprBuilder::makeNot(SbExpr e) {
-    return abt::wrap(stage_builder::makeNot(extractABT(e)));
+    return makeUnaryOp(abt::Operations::Not, std::move(e));
 }
 
-SbExpr SbExprBuilder::makeUnaryOp(sbe::EPrimUnary::Op unaryOp, SbExpr e) {
-    return abt::wrap(stage_builder::makeUnaryOp(getOptimizerOp(unaryOp), extractABT(e)));
+SbExpr SbExprBuilder::makeUnaryOp(abt::Operations unaryOp, SbExpr e) {
+    return abt::make<abt::UnaryOp>(unaryOp, extractABT(e));
 }
 
-SbExpr SbExprBuilder::makeUnaryOp(optimizer::Operations unaryOp, SbExpr e) {
-    return abt::wrap(stage_builder::makeUnaryOp(unaryOp, extractABT(e)));
+SbExpr SbExprBuilder::makeBinaryOp(abt::Operations binaryOp, SbExpr lhs, SbExpr rhs) {
+    return abt::make<abt::BinaryOp>(binaryOp, extractABT(lhs), extractABT(rhs));
 }
 
-SbExpr SbExprBuilder::makeBinaryOp(sbe::EPrimBinary::Op binaryOp, SbExpr lhs, SbExpr rhs) {
-    return abt::wrap(
-        stage_builder::makeBinaryOp(getOptimizerOp(binaryOp), extractABT(lhs), extractABT(rhs)));
-}
+SbExpr SbExprBuilder::makeNaryOp(abt::Operations naryOp, SbExpr::Vector args) {
+    tassert(10199700, "Expected at least one argument", !args.empty());
 
-SbExpr SbExprBuilder::makeBinaryOp(optimizer::Operations binaryOp, SbExpr lhs, SbExpr rhs) {
-    return makeBinaryOp(getEPrimBinaryOp(binaryOp), std::move(lhs), std::move(rhs));
+    if (feature_flags::gFeatureFlagSbeUpgradeBinaryTrees.checkEnabled()) {
+        return abt::make<abt::NaryOp>(naryOp, extractABT(args));
+    } else {
+        return std::accumulate(std::make_move_iterator(args.begin() + 1),
+                               std::make_move_iterator(args.end()),
+                               std::move(args.front()),
+                               [&](auto&& acc, auto&& ex) -> SbExpr {
+                                   return makeBinaryOp(naryOp, std::move(acc), std::move(ex));
+                               });
+    }
 }
 
 SbExpr SbExprBuilder::makeConstant(sbe::value::TypeTags tag, sbe::value::Value val) {
-    return abt::wrap(optimizer::make<optimizer::Constant>(tag, val));
+    return abt::make<abt::Constant>(tag, val);
 }
 
 SbExpr SbExprBuilder::makeNothingConstant() {
-    return abt::wrap(optimizer::Constant::nothing());
+    return abt::Constant::nothing();
 }
 
 SbExpr SbExprBuilder::makeNullConstant() {
-    return abt::wrap(optimizer::Constant::null());
+    return abt::Constant::null();
 }
 
 SbExpr SbExprBuilder::makeBoolConstant(bool boolVal) {
-    return abt::wrap(optimizer::Constant::boolean(boolVal));
+    return abt::Constant::boolean(boolVal);
 }
 
 SbExpr SbExprBuilder::makeInt32Constant(int32_t num) {
-    return abt::wrap(optimizer::Constant::int32(num));
+    return abt::Constant::int32(num);
 }
 
 SbExpr SbExprBuilder::makeInt64Constant(int64_t num) {
-    return abt::wrap(optimizer::Constant::int64(num));
+    return abt::Constant::int64(num);
 }
 
 SbExpr SbExprBuilder::makeDoubleConstant(double num) {
-    return abt::wrap(optimizer::Constant::fromDouble(num));
+    return abt::Constant::fromDouble(num);
 }
 
 SbExpr SbExprBuilder::makeDecimalConstant(const Decimal128& num) {
-    return abt::wrap(optimizer::Constant::fromDecimal(num));
+    return abt::Constant::fromDecimal(num);
 }
 
 SbExpr SbExprBuilder::makeStrConstant(StringData str) {
-    return abt::wrap(optimizer::Constant::str(str));
+    return abt::Constant::str(str);
 }
 
 SbExpr SbExprBuilder::makeUndefinedConstant() {
-    return abt::wrap(optimizer::make<optimizer::Constant>(sbe::value::TypeTags::bsonUndefined, 0));
+    return abt::make<abt::Constant>(sbe::value::TypeTags::bsonUndefined, 0);
 }
 
 SbExpr SbExprBuilder::makeFunction(StringData name, SbExpr::Vector args) {
-    return abt::wrap(stage_builder::makeABTFunction(name, extractABT(args)));
+    return abt::make<abt::FunctionCall>(std::string{name}, extractABT(args));
 }
 
 SbExpr SbExprBuilder::makeIf(SbExpr condExpr, SbExpr thenExpr, SbExpr elseExpr) {
-    return abt::wrap(
-        stage_builder::makeIf(extractABT(condExpr), extractABT(thenExpr), extractABT(elseExpr)));
+    return abt::make<abt::If>(extractABT(condExpr), extractABT(thenExpr), extractABT(elseExpr));
 }
 
 SbExpr SbExprBuilder::makeLet(sbe::FrameId frameId, SbExpr::Vector binds, SbExpr expr) {
-    return abt::wrap(stage_builder::makeLet(frameId, extractABT(binds), extractABT(expr)));
+    if (!feature_flags::gFeatureFlagSbeUpgradeBinaryTrees.checkEnabled()) {
+        for (size_t idx = binds.size(); idx > 0;) {
+            --idx;
+            expr = abt::make<abt::Let>(
+                SbVar(frameId, idx).toProjectionName(), extractABT(binds[idx]), extractABT(expr));
+        }
+
+        return expr;
+    } else {
+        std::vector<abt::ProjectionName> bindNames;
+        bindNames.reserve(binds.size());
+        for (size_t idx = 0; idx < binds.size(); ++idx) {
+            bindNames.emplace_back(SbVar(frameId, idx).toProjectionName());
+        }
+
+        binds.emplace_back(std::move(expr));
+        return abt::make<abt::MultiLet>(std::move(bindNames), extractABT(binds));
+    }
 }
 
 SbExpr SbExprBuilder::makeLocalLambda(sbe::FrameId frameId, SbExpr expr) {
-    return abt::wrap(stage_builder::makeLocalLambda(frameId, extractABT(expr)));
+    return abt::make<abt::LambdaAbstraction>(SbVar(frameId, 0).toProjectionName(),
+                                             extractABT(expr));
+}
+
+SbExpr SbExprBuilder::makeLocalLambda2(sbe::FrameId frameId, SbExpr expr) {
+    return abt::make<abt::LambdaAbstraction>(SbVar(frameId, 0).toProjectionName(),
+                                             SbVar(frameId, 1).toProjectionName(),
+                                             extractABT(expr));
 }
 
 SbExpr SbExprBuilder::makeNumericConvert(SbExpr expr, sbe::value::TypeTags tag) {
-    return abt::wrap(stage_builder::makeNumericConvert(extractABT(expr), tag));
+    return makeFunction(
+        "convert"_sd, std::move(expr), makeInt32Constant(static_cast<int32_t>(tag)));
 }
 
 SbExpr SbExprBuilder::makeFail(ErrorCodes::Error error, StringData errorMessage) {
-    return abt::wrap(stage_builder::makeABTFail(error, errorMessage));
+    return makeFunction("fail"_sd, makeInt32Constant(error), makeStrConstant(errorMessage));
 }
 
 SbExpr SbExprBuilder::makeFillEmpty(SbExpr expr, SbExpr altExpr) {
-    return makeBinaryOp(sbe::EPrimBinary::fillEmpty, std::move(expr), std::move(altExpr));
+    return makeBinaryOp(abt::Operations::FillEmpty, std::move(expr), std::move(altExpr));
 }
 
 SbExpr SbExprBuilder::makeFillEmptyFalse(SbExpr expr) {
@@ -294,85 +304,161 @@ SbExpr SbExprBuilder::makeFillEmptyUndefined(SbExpr expr) {
 }
 
 SbExpr SbExprBuilder::makeIfNullExpr(SbExpr::Vector values) {
-    return abt::wrap(stage_builder::makeIfNullExpr(extractABT(values), _state.frameIdGenerator));
+    tassert(6987505, "Expected 'values' to be non-empty", values.size() > 0);
+
+    size_t idx = values.size() - 1;
+    auto expr = std::move(values[idx]);
+
+    while (idx > 0) {
+        --idx;
+
+        auto frameId = _state.frameId();
+        SbVar var{frameId, 0};
+
+        expr = makeLet(frameId,
+                       SbExpr::makeSeq(std::move(values[idx])),
+                       makeIf(generateNullMissingOrUndefined(var), std::move(expr), var));
+    }
+
+    return expr;
 }
 
 SbExpr SbExprBuilder::generateNullOrMissing(SbExpr expr) {
-    return makeBinaryOp(sbe::EPrimBinary::fillEmpty,
-                        makeFunction("typeMatch",
-                                     std::move(expr),
-                                     makeInt32Constant(getBSONTypeMask(BSONType::jstNULL))),
-                        makeBoolConstant(true));
+    return makeFillEmptyTrue(makeFunction(
+        "typeMatch", std::move(expr), makeInt32Constant(getBSONTypeMask(BSONType::null))));
 }
 
 SbExpr SbExprBuilder::generateNullMissingOrUndefined(SbExpr expr) {
-    return makeBinaryOp(sbe::EPrimBinary::fillEmpty,
-                        makeFunction("typeMatch",
-                                     std::move(expr),
-                                     makeInt32Constant(getBSONTypeMask(BSONType::jstNULL) |
-                                                       getBSONTypeMask(BSONType::Undefined))),
-                        makeBoolConstant(true));
+    return makeFillEmptyTrue(makeFunction(
+        "typeMatch",
+        std::move(expr),
+        makeInt32Constant(getBSONTypeMask(BSONType::null) | getBSONTypeMask(BSONType::undefined))));
 }
 
 SbExpr SbExprBuilder::generatePositiveCheck(SbExpr expr) {
-    return abt::wrap(stage_builder::generateABTPositiveCheck(extractABT(expr)));
+    return makeBinaryOp(abt::Operations::Gt, std::move(expr), makeInt32Constant(0));
 }
 
 SbExpr SbExprBuilder::generateNullOrMissing(SbVar var) {
-    return abt::wrap(stage_builder::generateABTNullOrMissing(var.getABTName()));
+    return makeFillEmptyTrue(
+        makeFunction("typeMatch"_sd, var, makeInt32Constant(getBSONTypeMask(BSONType::null))));
 }
 
 SbExpr SbExprBuilder::generateNullMissingOrUndefined(SbVar var) {
-    return abt::wrap(stage_builder::generateABTNullMissingOrUndefined(var.getABTName()));
+    return makeFillEmptyTrue(makeFunction(
+        "typeMatch"_sd,
+        var,
+        makeInt32Constant(getBSONTypeMask(BSONType::null) | getBSONTypeMask(BSONType::undefined))));
 }
 
 SbExpr SbExprBuilder::generateNonStringCheck(SbVar var) {
-    return abt::wrap(stage_builder::generateABTNonStringCheck(var.getABTName()));
+    return makeNot(makeFunction("isString"_sd, var));
 }
 
 SbExpr SbExprBuilder::generateNonTimestampCheck(SbVar var) {
-    return abt::wrap(stage_builder::generateABTNonTimestampCheck(var.getABTName()));
+    return makeNot(makeFunction("isTimestamp"_sd, var));
 }
 
 SbExpr SbExprBuilder::generateNegativeCheck(SbVar var) {
-    return abt::wrap(stage_builder::generateABTNegativeCheck(var.getABTName()));
+    return makeBinaryOp(abt::Operations::And,
+                        makeNot(makeFunction("isNaN"_sd, var)),
+                        makeBinaryOp(abt::Operations::Lt, var, makeInt32Constant(0)));
 }
 
 SbExpr SbExprBuilder::generateNonPositiveCheck(SbVar var) {
-    return abt::wrap(stage_builder::generateABTNonPositiveCheck(var.getABTName()));
+    return makeBinaryOp(abt::Operations::Lte, var, makeInt32Constant(0));
 }
 
 SbExpr SbExprBuilder::generateNonNumericCheck(SbVar var) {
-    return abt::wrap(stage_builder::generateABTNonNumericCheck(var.getABTName()));
+    return makeNot(makeFunction("isNumber"_sd, var));
 }
 
 SbExpr SbExprBuilder::generateLongLongMinCheck(SbVar var) {
-    return abt::wrap(stage_builder::generateABTLongLongMinCheck(var.getABTName()));
+    return makeBinaryOp(
+        abt::Operations::And,
+        makeFunction("typeMatch"_sd, var, makeInt32Constant(getBSONTypeMask(BSONType::numberLong))),
+        makeBinaryOp(
+            abt::Operations::Eq, var, makeInt64Constant(std::numeric_limits<int64_t>::min())));
 }
 
 SbExpr SbExprBuilder::generateNonArrayCheck(SbVar var) {
-    return abt::wrap(stage_builder::generateABTNonArrayCheck(var.getABTName()));
+    return makeNot(makeFunction("isArray"_sd, var));
 }
 
 SbExpr SbExprBuilder::generateNonObjectCheck(SbVar var) {
-    return abt::wrap(stage_builder::generateABTNonObjectCheck(var.getABTName()));
+    return makeNot(makeFunction("isObject"_sd, var));
 }
 
 SbExpr SbExprBuilder::generateNullishOrNotRepresentableInt32Check(SbVar var) {
-    return abt::wrap(
-        stage_builder::generateABTNullishOrNotRepresentableInt32Check(var.getABTName()));
+    return makeBinaryOp(
+        abt::Operations::Or,
+        generateNullMissingOrUndefined(var),
+        makeNot(makeFunction("exists"_sd,
+                             makeFunction("convert"_sd,
+                                          var,
+                                          makeInt32Constant(static_cast<int32_t>(
+                                              sbe::value::TypeTags::NumberInt32))))));
 }
 
 SbExpr SbExprBuilder::generateNaNCheck(SbVar var) {
-    return abt::wrap(stage_builder::generateABTNaNCheck(var.getABTName()));
+    return makeFunction("isNaN"_sd, var);
 }
 
 SbExpr SbExprBuilder::generateInfinityCheck(SbVar var) {
-    return abt::wrap(stage_builder::generateABTInfinityCheck(var.getABTName()));
+    return makeFunction("isInfinity"_sd, var);
 }
 
 SbExpr SbExprBuilder::generateInvalidRoundPlaceArgCheck(SbVar var) {
-    return abt::wrap(stage_builder::generateInvalidRoundPlaceArgCheck(var.getABTName()));
+    return makeBooleanOpTree(
+        abt::Operations::Or,
+        SbExpr::makeSeq(
+            // We can perform our numerical test with trunc. trunc will return nothing if we pass a
+            // non-number to it. We return true if the comparison returns nothing, or if
+            // var != trunc(var), indicating this is not a whole number.
+            makeFillEmptyTrue(makeBinaryOp(abt::Operations::Neq, var, makeFunction("trunc", var))),
+            makeBinaryOp(abt::Operations::Lt, var, makeInt32Constant(-20)),
+            makeBinaryOp(abt::Operations::Gt, var, makeInt32Constant(100))));
+}
+
+SbExpr SbExprBuilder::buildMultiBranchConditionalFromCaseValuePairs(
+    std::vector<SbExprPair> caseValPairs, SbExpr defaultVal) {
+    if (!feature_flags::gFeatureFlagSbeUpgradeBinaryTrees.checkEnabled()) {
+        return std::accumulate(
+            std::make_reverse_iterator(std::make_move_iterator(caseValPairs.end())),
+            std::make_reverse_iterator(std::make_move_iterator(caseValPairs.begin())),
+            std::move(defaultVal),
+            [&](auto&& expression, auto&& caseValuePair) {
+                return buildMultiBranchConditional(std::move(caseValuePair), std::move(expression));
+            });
+    } else {
+        return abt::make<abt::Switch>(extractABT(caseValPairs), extractABT(defaultVal));
+    }
+}
+
+SbExpr SbExprBuilder::makeBooleanOpTree(abt::Operations logicOp, SbExpr::Vector leaves) {
+    tassert(10668302, "Expected at least one expression", !leaves.empty());
+
+    if (leaves.size() == 1) {
+        return std::move(leaves[0]);
+    }
+
+    if ((logicOp == abt::Operations::And || logicOp == abt::Operations::Or) &&
+        feature_flags::gFeatureFlagSbeUpgradeBinaryTrees.checkEnabled()) {
+        return makeNaryOp(logicOp, std::move(leaves));
+    }
+
+    auto builder = [&](SbExpr lhs, SbExpr rhs) {
+        return makeBinaryOp(logicOp, std::move(lhs), std::move(rhs));
+    };
+
+    return SbExpr::makeBalancedTree(builder, std::move(leaves));
+}
+
+SbExpr SbExprBuilder::makeBooleanOpTree(abt::Operations logicOp, SbExpr lhs, SbExpr rhs) {
+    SbExpr::Vector leaves;
+    leaves.emplace_back(std::move(lhs));
+    leaves.emplace_back(std::move(rhs));
+    return makeBooleanOpTree(logicOp, std::move(leaves));
 }
 
 std::tuple<SbStage, SbSlot, SbSlot, SbSlotVector> SbBuilder::makeScan(
@@ -403,7 +489,6 @@ std::tuple<SbStage, SbSlot, SbSlot, SbSlotVector> SbBuilder::makeScan(
                                                 lower(indexInfoSlots.indexIdentSlot),
                                                 lower(indexInfoSlots.indexKeySlot),
                                                 lower(indexInfoSlots.indexKeyPatternSlot),
-                                                lower(oplogTsSlot),
                                                 std::move(scanFieldNames),
                                                 lower(scanFieldSlots),
                                                 lower(seekSlot),
@@ -545,7 +630,7 @@ SbStage SbBuilder::makeConstFilter(const VariableTypes& varTypes, SbStage stage,
 
 std::pair<SbStage, SbSlotVector> SbBuilder::makeProject(const VariableTypes& varTypes,
                                                         SbStage stage,
-                                                        SbExprOptSbSlotVector projects) {
+                                                        SbExprOptSlotVector projects) {
     sbe::SlotExprPairVector slotExprPairs;
     SbSlotVector outSlots;
 
@@ -586,6 +671,10 @@ SbStage SbBuilder::makeUnique(SbStage stage, const SbSlotVector& keys) {
     return sbe::makeS<sbe::UniqueStage>(std::move(stage), lower(keys), _nodeId);
 }
 
+SbStage SbBuilder::makeUniqueRoaring(SbStage stage, SbSlot key) {
+    return sbe::makeS<sbe::UniqueRoaringStage>(std::move(stage), key.getId(), _nodeId);
+}
+
 SbStage SbBuilder::makeSort(const VariableTypes& varTypes,
                             SbStage stage,
                             const SbSlotVector& orderBy,
@@ -608,15 +697,17 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> SbBuilder::makeHashAgg(
     const VariableTypes& varTypes,
     SbStage stage,
     const SbSlotVector& gbs,
-    SbAggExprVector sbAggExprs,
-    boost::optional<sbe::value::SlotId> collatorSlot,
-    SbExprSbSlotVector mergingExprs) {
+    const SbHashAggAccumulatorVector& accumulatorList,
+    boost::optional<sbe::value::SlotId> collatorSlot) {
     // In debug builds or when we explicitly set the query knob, we artificially force frequent
     // spilling. This makes sure that our tests exercise the spilling algorithm and the associated
     // logic for merging partial aggregates which otherwise would require large data sizes to
     // exercise.
-    const bool forceIncreasedSpilling = _state.allowDiskUse &&
-        (kDebugBuild || internalQuerySlotBasedExecutionHashAggForceIncreasedSpilling.load());
+
+    const bool forceIncreasedSpilling = useIncreasedSpilling(
+        _state.allowDiskUse,
+        _state.expCtx->getQueryKnobConfiguration().getSbeHashAggIncreasedSpillingMode());
+
 
     // For normal (non-block) HashAggStage, the group by "out" slots are the same as the incoming
     // group by slots.
@@ -634,28 +725,44 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> SbBuilder::makeHashAgg(
         }
     }
 
-    sbe::AggExprVector aggExprsVec;
+    std::vector<std::unique_ptr<sbe::HashAggAccumulator>> loweredAccumulatorList;
     SbSlotVector aggOutSlots;
-    for (auto& [sbAggExpr, optSbSlot] : sbAggExprs) {
-        auto sbSlot = optSbSlot ? *optSbSlot : SbSlot{_state.slotId()};
-        aggOutSlots.emplace_back(sbSlot);
+    for (auto& sbAccumulator : accumulatorList) {
+        auto outSlot = sbAccumulator.outSlot ? *sbAccumulator.outSlot : SbSlot{_state.slotId()};
+        aggOutSlots.emplace_back(outSlot);
 
-        auto exprPair = sbe::AggExprPair{sbAggExpr.init.lower(_state, &varTypes),
-                                         sbAggExpr.agg.lower(_state, &varTypes)};
+        auto loweredAccumlator = std::visit(
+            OverloadedVisitor{
+                [&](const SbHashAggCompiledAccumulator& implementation)
+                    -> std::unique_ptr<sbe::HashAggAccumulator> {
+                    return std::make_unique<sbe::CompiledHashAggAccumulator>(
+                        outSlot.getId(),
+                        sbAccumulator.spillSlot.getId(),
+                        implementation.agg.clone().lower(_state, &varTypes),
+                        implementation.merge.clone().lower(_state, &varTypes),
+                        implementation.init.clone().lower(_state, &varTypes));
+                },
+                [&]<class Implementation>(
+                    const SbHashAggSinglePurposeScalarAccumulator<Implementation>& implementation)
+                    -> std::unique_ptr<sbe::HashAggAccumulator> {
+                    return std::make_unique<Implementation>(
+                        outSlot.getId(),
+                        sbAccumulator.spillSlot.getId(),
+                        implementation.transform.clone().lower(_state, &varTypes),
+                        collatorSlot);
+                }},
+            sbAccumulator.implementation);
 
-        aggExprsVec.emplace_back(std::pair(sbSlot.getId(), std::move(exprPair)));
+        loweredAccumulatorList.emplace_back(std::move(loweredAccumlator));
     }
-
-    sbe::SlotExprPairVector mergingExprsVec = lower(mergingExprs);
 
     stage = sbe::makeS<sbe::HashAggStage>(std::move(stage),
                                           std::move(groupBySlots),
-                                          std::move(aggExprsVec),
+                                          std::move(loweredAccumulatorList),
                                           sbe::value::SlotVector{},
                                           true /* optimized close */,
                                           collatorSlot,
                                           _state.allowDiskUse,
-                                          std::move(mergingExprsVec),
                                           _state.yieldPolicy,
                                           _nodeId,
                                           true /* participateInTrialRunTracking */,
@@ -668,36 +775,37 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> SbBuilder::makeBlockHashAgg(
     const VariableTypes& varTypes,
     SbStage stage,
     const SbSlotVector& gbs,
-    SbAggExprVector sbAggExprs,
+    SbBlockAggExprVector SbBlockAggExprs,
     SbSlot selectivityBitmapSlot,
     const SbSlotVector& blockAccArgSbSlots,
     SbSlot bitmapInternalSlot,
     const SbSlotVector& accumulatorDataSbSlots,
-    SbExprSbSlotVector mergingExprs) {
+    SbExprSlotVector mergingExprs) {
     tassert(8448607, "Expected at least one group by slot to be provided", gbs.size() > 0);
 
     const auto selectivityBitmapSlotId = selectivityBitmapSlot.getId();
 
-    sbe::AggExprTupleVector aggs;
+    sbe::BlockAggExprTupleVector aggs;
     SbSlotVector aggOutSlots;
 
-    for (auto& [sbAggExpr, optSbSlot] : sbAggExprs) {
+    for (auto& [sbBlockAggExpr, optSbSlot] : SbBlockAggExprs) {
         auto sbSlot = optSbSlot ? *optSbSlot : SbSlot{_state.slotId()};
         sbSlot.setTypeSignature(TypeSignature::kBlockType.include(TypeSignature::kAnyScalarType));
 
         aggOutSlots.emplace_back(sbSlot);
 
         std::unique_ptr<sbe::EExpression> init, blockAgg, agg;
-        if (sbAggExpr.init) {
-            init = sbAggExpr.init.lower(_state, &varTypes);
+        if (sbBlockAggExpr.init) {
+            init = sbBlockAggExpr.init.lower(_state, &varTypes);
         }
-        if (sbAggExpr.blockAgg) {
-            blockAgg = sbAggExpr.blockAgg.lower(_state, &varTypes);
+        if (sbBlockAggExpr.blockAgg) {
+            blockAgg = sbBlockAggExpr.blockAgg.lower(_state, &varTypes);
         }
-        agg = sbAggExpr.agg.lower(_state, &varTypes);
+        agg = sbBlockAggExpr.agg.lower(_state, &varTypes);
 
-        aggs.emplace_back(sbSlot.getId(),
-                          sbe::AggExprTuple{std::move(init), std::move(blockAgg), std::move(agg)});
+        aggs.emplace_back(
+            sbSlot.getId(),
+            sbe::BlockAggExprTuple{std::move(init), std::move(blockAgg), std::move(agg)});
     }
 
     // Copy unique slot IDs from 'gbs' to 'groupBySlots'.
@@ -716,8 +824,9 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> SbBuilder::makeBlockHashAgg(
     sbe::value::SlotVector accumulatorDataSlots = lower(accumulatorDataSbSlots);
     sbe::SlotExprPairVector mergingExprsVec = lower(mergingExprs);
 
-    const bool forceIncreasedSpilling = _state.allowDiskUse &&
-        (kDebugBuild || internalQuerySlotBasedExecutionHashAggForceIncreasedSpilling.load());
+    const bool forceIncreasedSpilling = useIncreasedSpilling(
+        _state.allowDiskUse,
+        _state.expCtx->getQueryKnobConfiguration().getSbeHashAggIncreasedSpillingMode());
 
     stage = sbe::makeS<sbe::BlockHashAggStage>(std::move(stage),
                                                std::move(groupBySlots),
@@ -750,16 +859,16 @@ std::tuple<SbStage, SbSlotVector, SbSlotVector> SbBuilder::makeBlockHashAgg(
 
 std::tuple<SbStage, SbSlotVector> SbBuilder::makeAggProject(const VariableTypes& varTypes,
                                                             SbStage stage,
-                                                            SbAggExprVector sbAggExprs) {
+                                                            SbBlockAggExprVector sbBlockAggExprs) {
     sbe::AggExprVector aggExprsVec;
     SbSlotVector aggOutSlots;
 
-    for (auto& [sbAggExpr, optSbSlot] : sbAggExprs) {
+    for (auto& [sbBlockAggExpr, optSbSlot] : sbBlockAggExprs) {
         auto sbSlot = optSbSlot ? *optSbSlot : SbSlot{_state.slotId()};
         aggOutSlots.emplace_back(sbSlot);
 
-        auto exprPair = sbe::AggExprPair{sbAggExpr.init.lower(_state, &varTypes),
-                                         sbAggExpr.agg.lower(_state, &varTypes)};
+        auto exprPair = sbe::AggExprPair{sbBlockAggExpr.init.lower(_state, &varTypes),
+                                         sbBlockAggExpr.agg.lower(_state, &varTypes)};
 
         aggExprsVec.emplace_back(std::pair(sbSlot.getId(), std::move(exprPair)));
     }
@@ -802,16 +911,13 @@ std::tuple<SbStage, SbSlot, SbSlot> SbBuilder::makeUnwind(SbStage stage,
     return {std::move(stage), unwindOutputSlot, indexOutputSlot};
 }
 
-std::tuple<SbStage, SbSlot, boost::optional<SbSlot>, SbSlotVector, SbSlotVector>
-SbBuilder::makeTsBucketToCellBlock(
+std::tuple<SbStage, SbSlot, SbSlotVector, SbSlotVector> SbBuilder::makeTsBucketToCellBlock(
     SbStage stage,
     SbSlot bucketSlot,
-    bool reqMeta,
-    const std::vector<sbe::value::CellBlock::PathRequest>& topLevelReqs,
-    const std::vector<sbe::value::CellBlock::PathRequest>& traverseReqs,
+    const std::vector<sbe::value::PathRequest>& topLevelReqs,
+    const std::vector<sbe::value::PathRequest>& traverseReqs,
     const std::string& timeField) {
     const auto bitmapSlot = SbSlot{_state.slotId()};
-    auto metaSlot = reqMeta ? boost::make_optional(SbSlot{_state.slotId()}) : boost::none;
 
     SbSlotVector topLevelSlots;
     topLevelSlots.reserve(topLevelReqs.size());
@@ -851,13 +957,12 @@ SbBuilder::makeTsBucketToCellBlock(
                                                             lower(bucketSlot),
                                                             allReqs,
                                                             std::move(allCellSlots),
-                                                            lower(metaSlot),
+                                                            boost::none,  // metaSlot.
                                                             lower(bitmapSlot),
                                                             timeField,
                                                             _nodeId);
 
-    return {
-        std::move(stage), bitmapSlot, metaSlot, std::move(topLevelSlots), std::move(traverseSlots)};
+    return {std::move(stage), bitmapSlot, std::move(topLevelSlots), std::move(traverseSlots)};
 }
 
 std::pair<SbStage, SbSlotVector> SbBuilder::makeBlockToRow(SbStage stage,
@@ -986,12 +1091,12 @@ std::pair<SbStage, SbSlot> SbBuilder::makeHashLookup(
     SbSlot localKeySlot,
     SbSlot foreignKeySlot,
     SbSlot foreignRecordSlot,
-    SbAggExpr sbAggExpr,
+    SbBlockAggExpr sbBlockAggExpr,
     boost::optional<SbSlot> optOutputSlot,
     boost::optional<sbe::value::SlotId> collatorSlot) {
     auto outputSlot = optOutputSlot ? *optOutputSlot : SbSlot{_state.slotId()};
 
-    sbe::SlotExprPair agg{outputSlot.getId(), sbAggExpr.agg.lower(_state, &varTypes)};
+    sbe::SlotExprPair agg{outputSlot.getId(), sbBlockAggExpr.agg.lower(_state, &varTypes)};
 
     SbStage stage = sbe::makeS<sbe::HashLookupStage>(std::move(localStage),
                                                      std::move(foreignStage),

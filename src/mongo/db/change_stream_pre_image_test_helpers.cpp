@@ -50,16 +50,15 @@ void appendPreImageRecordIdAndTS(const RecordId& rid,
 }  // namespace
 namespace change_stream_pre_image_test_helper {
 
-void createPreImagesCollection(OperationContext* opCtx, boost::optional<TenantId> tenantId) {
-    ChangeStreamPreImagesCollectionManager::get(opCtx).createPreImagesCollection(opCtx, tenantId);
+void createPreImagesCollection(OperationContext* opCtx) {
+    ChangeStreamPreImagesCollectionManager::get(opCtx).createPreImagesCollection(opCtx);
 }
 
 void insertDirectlyToPreImagesCollection(OperationContext* opCtx,
-                                         boost::optional<TenantId> tenantId,
                                          const ChangeStreamPreImage& preImage) {
     const auto preImagesAcq = acquireCollection(
         opCtx,
-        CollectionAcquisitionRequest(NamespaceString::makePreImageCollectionNSS(tenantId),
+        CollectionAcquisitionRequest(NamespaceString::kChangeStreamPreImagesNamespace,
                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kWrite),
@@ -152,13 +151,9 @@ PreImagesTruncateMarkersPerNsUUID::InitialSetOfMarkers makeInitialSetOfMarkers(
             creationMethod};
 }
 
-PreImagesTruncateMarkersPerNsUUID makeEmptyTruncateMarkers(boost::optional<TenantId> tenantId,
-                                                           const UUID& nsUUID,
+PreImagesTruncateMarkersPerNsUUID makeEmptyTruncateMarkers(const UUID& nsUUID,
                                                            int64_t minBytesPerMarker) {
-    return {tenantId,
-            nsUUID,
-            PreImagesTruncateMarkersPerNsUUID::InitialSetOfMarkers{},
-            minBytesPerMarker};
+    return {nsUUID, PreImagesTruncateMarkersPerNsUUID::InitialSetOfMarkers{}, minBytesPerMarker};
 }
 
 void updateMarkers(const ChangeStreamPreImage& preImage,
@@ -205,11 +200,10 @@ int64_t bytes(const ChangeStreamPreImage& preImage) {
     return preImage.toBSON().objsize();
 }
 
-CollectionAcquisition acquirePreImagesCollectionForRead(OperationContext* opCtx,
-                                                        boost::optional<TenantId> tenantId) {
+CollectionAcquisition acquirePreImagesCollectionForRead(OperationContext* opCtx) {
     return acquireCollection(
         opCtx,
-        CollectionAcquisitionRequest(NamespaceString::makePreImageCollectionNSS(tenantId),
+        CollectionAcquisitionRequest(NamespaceString::kChangeStreamPreImagesNamespace,
                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
                                      repl::ReadConcernArgs::get(opCtx),
                                      AcquisitionPrerequisites::kRead),

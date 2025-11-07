@@ -28,21 +28,18 @@
  */
 
 
-#include <boost/move/utility_core.hpp>
-#include <cstdint>
-#include <mutex>
-#include <utility>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/document_source_exchange.h"
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/hasher.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/document_source_exchange.h"
+#include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_mock.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/process_interface/stub_mongo_process_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -51,16 +48,20 @@
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/idl/idl_parser.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/random.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdint>
+#include <mutex>
+#include <utility>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -124,13 +125,17 @@ protected:
         _executor.reset();
     }
 
+    static const size_t strValLen = 27;
+
     auto getMockSource(int cnt) {
-        auto source = DocumentSourceMock::createForTest(getExpCtx());
+        std::vector<Document> docs;
+        docs.reserve(cnt);
+        std::string strVal{strValLen, 'a'};
 
         for (int i = 0; i < cnt; ++i)
-            source->emplace_back(Document{{"a", i}, {"b", "aaaaaaaaaaaaaaaaaaaaaaaaaaa"_sd}});
+            docs.emplace_back(Document{{"a", i}, {"b", strVal}});
 
-        return source;
+        return DocumentSourceMock::createForTest(std::move(docs), getExpCtx());
     }
 
     static auto getNewSeed() {
@@ -142,22 +147,23 @@ protected:
 
     auto getRandomMockSource(size_t cnt, int64_t seed) {
         PseudoRandom prng(seed);
+        std::vector<Document> docs;
+        docs.reserve(cnt);
 
-        auto source = DocumentSourceMock::createForTest(getExpCtx());
-
+        std::string strVal{strValLen, 'a'};
         for (size_t i = 0; i < cnt; ++i)
-            source->emplace_back(Document{{"a", static_cast<int>(prng.nextInt32() % cnt)},
-                                          {"b", "aaaaaaaaaaaaaaaaaaaaaaaaaaa"_sd}});
+            docs.emplace_back(
+                Document{{"a", static_cast<int>(prng.nextInt32() % cnt)}, {"b", strVal}});
 
-        return source;
+        return DocumentSourceMock::createForTest(std::move(docs), getExpCtx());
     }
 
     auto parseSpec(const BSONObj& spec) {
         IDLParserContext ctx("internalExchange");
-        return ExchangeSpec::parse(ctx, spec);
+        return ExchangeSpec::parse(spec, ctx);
     }
 
-    auto createNProducers(size_t nConsumers, boost::intrusive_ptr<Exchange> ex) {
+    auto createNProducers(size_t nConsumers, boost::intrusive_ptr<exec::agg::Exchange> ex) {
         std::vector<ThreadInfo> threads;
         for (size_t idx = 0; idx < nConsumers; ++idx) {
             ServiceContext::UniqueClient client =
@@ -193,7 +199,8 @@ TEST_F(DocumentSourceExchangeTest, SimpleExchange1Consumer) {
     // the opCtx in order to pass it to the getNext call below, which will re-attach the pipeline to
     // the provided opCtx.
     auto opCtx = getOpCtx();
-    boost::intrusive_ptr<Exchange> ex = new Exchange(spec, Pipeline::create({source}, getExpCtx()));
+    boost::intrusive_ptr<exec::agg::Exchange> ex =
+        new exec::agg::Exchange(opCtx, spec, Pipeline::create({source}, getExpCtx()));
     auto input = ex->getNext(opCtx, 0, nullptr);
 
     size_t docs = 0;
@@ -217,13 +224,14 @@ TEST_F(DocumentSourceExchangeTest, SimpleExchangeNConsumer) {
     spec.setConsumers(nConsumers);
     spec.setBufferSize(1024);
 
-    boost::intrusive_ptr<Exchange> ex = new Exchange(spec, Pipeline::create({source}, getExpCtx()));
+    boost::intrusive_ptr<exec::agg::Exchange> ex =
+        new exec::agg::Exchange(getOpCtx(), spec, Pipeline::create({source}, getExpCtx()));
 
     std::vector<ThreadInfo> threads = createNProducers(nConsumers, ex);
     std::vector<executor::TaskExecutor::CallbackHandle> handles;
 
     for (size_t id = 0; id < nConsumers; ++id) {
-        DocumentSourceExchange* docSourceExchange = threads[id].documentSourceExchange.get();
+        auto docSourceExchange = exec::agg::buildStage(threads[id].documentSourceExchange);
         auto handle = _executor->scheduleWork([docSourceExchange, id, nDocs, nConsumers](
                                                   const executor::TaskExecutor::CallbackArgs& cb) {
             PseudoRandom prng(getNewSeed());
@@ -246,6 +254,77 @@ TEST_F(DocumentSourceExchangeTest, SimpleExchangeNConsumer) {
         _executor->wait(h);
 }
 
+TEST_F(DocumentSourceExchangeTest, SimpleExchangeNConsumerMemoryTracking) {
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagQueryMemoryTracking",
+                                                               true);
+    // Create a pipeline that uses group, which will track memory.
+    const size_t nInputDocs = 500;
+    const size_t nOutputDocs = 250;
+    const size_t nConsumers = 5;
+    ASSERT_EQ(nOutputDocs % nConsumers, 0u);
+
+    const auto mock = getMockSource(nInputDocs);
+    BSONObj groupBson = fromjson(fmt::format(R"({{$group: {{
+        _id: {{$mod: ["$a",  {}]}},
+        v: {{$push: "$b"}}
+    }}}})",
+                                             nOutputDocs));
+    auto group = DocumentSourceGroup::createFromBson(groupBson["$group"], getExpCtx());
+
+    ExchangeSpec spec;
+    spec.setPolicy(ExchangePolicyEnum::kRoundRobin);
+    spec.setConsumers(nConsumers);
+    spec.setBufferSize(1024);
+
+    boost::intrusive_ptr<exec::agg::Exchange> ex =
+        new exec::agg::Exchange(getOpCtx(), spec, Pipeline::create({mock, group}, getExpCtx()));
+
+    std::vector<ThreadInfo> threads = createNProducers(nConsumers, ex);
+    std::vector<executor::TaskExecutor::CallbackHandle> handles;
+
+    for (size_t id = 0; id < nConsumers; ++id) {
+        auto docSourceExchange = exec::agg::buildStage(threads[id].documentSourceExchange);
+        auto handle = _executor->scheduleWork([docSourceExchange, id, nInputDocs, nConsumers](
+                                                  const executor::TaskExecutor::CallbackArgs& cb) {
+            PseudoRandom prng(getNewSeed());
+
+            auto input = docSourceExchange->getNext();
+
+            size_t docs = 0;
+
+            for (; input.isAdvanced(); input = docSourceExchange->getNext()) {
+                sleepmillis(prng.nextInt32() % 20 + 1);
+                ++docs;
+            }
+            ASSERT_EQ(docs, nOutputDocs / nConsumers);
+
+            // Disposed is actually called twice for the group stage, once from the group stage
+            // when EOF is hit, and once here (recursively). Calling it again here ensures that
+            // consumer 0 will propagate memory stats up to CurOp.
+            docSourceExchange->dispose();
+
+            if (id == 0) {
+                // If this is consumer 0, then its CurOp will contain the memory statistics for
+                // the subpipeline.
+                OperationContext* opCtx = docSourceExchange->getContext()->getOperationContext();
+                CurOp* curOp = CurOp::get(opCtx);
+                // There may be platform differences in the amount of memory usage, so just
+                // assert a reasonable lower bound.
+                ASSERT_GT(curOp->getPeakTrackedMemoryBytes(),
+                          static_cast<int64_t>(strValLen * nInputDocs));
+                // Dispose has been called, so the group stage will have set its in-use metric
+                // back to zero.
+                ASSERT_EQ(curOp->getInUseTrackedMemoryBytes(), 0);
+            }
+        });
+
+        handles.emplace_back(std::move(handle.getValue()));
+    }
+
+    for (auto& h : handles)
+        _executor->wait(h);
+}
+
 TEST_F(DocumentSourceExchangeTest, ExchangeNConsumerEarlyout) {
     const size_t nDocs = 500;
     auto source = getMockSource(500);
@@ -259,13 +338,14 @@ TEST_F(DocumentSourceExchangeTest, ExchangeNConsumerEarlyout) {
     spec.setConsumers(nConsumers);
     spec.setBufferSize(1024);
 
-    boost::intrusive_ptr<Exchange> ex = new Exchange(spec, Pipeline::create({source}, getExpCtx()));
+    boost::intrusive_ptr<exec::agg::Exchange> ex =
+        new exec::agg::Exchange(getOpCtx(), spec, Pipeline::create({source}, getExpCtx()));
 
     std::vector<ThreadInfo> threads = createNProducers(nConsumers, ex);
     std::vector<executor::TaskExecutor::CallbackHandle> handles;
 
     for (size_t id = 0; id < nConsumers; ++id) {
-        DocumentSourceExchange* docSourceExchange = threads[id].documentSourceExchange.get();
+        auto docSourceExchange = exec::agg::buildStage(threads[id].documentSourceExchange);
         auto handle = _executor->scheduleWork([docSourceExchange, id, nDocs, nConsumers](
                                                   const executor::TaskExecutor::CallbackArgs& cb) {
             PseudoRandom prng(getNewSeed());
@@ -308,13 +388,14 @@ TEST_F(DocumentSourceExchangeTest, BroadcastExchangeNConsumer) {
     spec.setConsumers(nConsumers);
     spec.setBufferSize(1024);
 
-    boost::intrusive_ptr<Exchange> ex = new Exchange(spec, Pipeline::create({source}, getExpCtx()));
+    boost::intrusive_ptr<exec::agg::Exchange> ex =
+        new exec::agg::Exchange(getOpCtx(), spec, Pipeline::create({source}, getExpCtx()));
 
     std::vector<ThreadInfo> threads = createNProducers(nConsumers, ex);
     std::vector<executor::TaskExecutor::CallbackHandle> handles;
 
     for (size_t id = 0; id < nConsumers; ++id) {
-        DocumentSourceExchange* docSourceExchange = threads[id].documentSourceExchange.get();
+        auto docSourceExchange = exec::agg::buildStage(threads[id].documentSourceExchange);
         auto handle = _executor->scheduleWork(
             [docSourceExchange, id, nDocs](const executor::TaskExecutor::CallbackArgs& cb) {
                 size_t docs = 0;
@@ -354,14 +435,14 @@ TEST_F(DocumentSourceExchangeTest, RangeExchangeNConsumer) {
     spec.setConsumers(nConsumers);
     spec.setBufferSize(1024);
 
-    boost::intrusive_ptr<Exchange> ex =
-        new Exchange(std::move(spec), Pipeline::create({source}, getExpCtx()));
+    boost::intrusive_ptr<exec::agg::Exchange> ex = new exec::agg::Exchange(
+        getOpCtx(), std::move(spec), Pipeline::create({source}, getExpCtx()));
 
     std::vector<ThreadInfo> threads = createNProducers(nConsumers, ex);
     std::vector<executor::TaskExecutor::CallbackHandle> handles;
 
     for (size_t id = 0; id < nConsumers; ++id) {
-        DocumentSourceExchange* docSourceExchange = threads[id].documentSourceExchange.get();
+        auto docSourceExchange = exec::agg::buildStage(threads[id].documentSourceExchange);
         auto handle = _executor->scheduleWork([docSourceExchange, id, nDocs, nConsumers](
                                                   const executor::TaskExecutor::CallbackArgs& cb) {
             size_t docs = 0;
@@ -416,14 +497,14 @@ TEST_F(DocumentSourceExchangeTest, RangeShardingExchangeNConsumer) {
     spec.setConsumers(nConsumers);
     spec.setBufferSize(1024);
 
-    boost::intrusive_ptr<Exchange> ex =
-        new Exchange(std::move(spec), Pipeline::create({source}, getExpCtx()));
+    boost::intrusive_ptr<exec::agg::Exchange> ex = new exec::agg::Exchange(
+        getOpCtx(), std::move(spec), Pipeline::create({source}, getExpCtx()));
 
     std::vector<ThreadInfo> threads = createNProducers(nConsumers, ex);
     std::vector<executor::TaskExecutor::CallbackHandle> handles;
 
     for (size_t id = 0; id < nConsumers; ++id) {
-        DocumentSourceExchange* docSourceExchange = threads[id].documentSourceExchange.get();
+        auto docSourceExchange = exec::agg::buildStage(threads[id].documentSourceExchange);
         auto handle = _executor->scheduleWork([docSourceExchange, id, nDocs, nConsumers](
                                                   const executor::TaskExecutor::CallbackArgs& cb) {
             size_t docs = 0;
@@ -469,8 +550,8 @@ TEST_F(DocumentSourceExchangeTest, RangeRandomExchangeNConsumer) {
     spec.setConsumers(nConsumers);
     spec.setBufferSize(1024);
 
-    boost::intrusive_ptr<Exchange> ex =
-        new Exchange(std::move(spec), Pipeline::create({source}, getExpCtx()));
+    boost::intrusive_ptr<exec::agg::Exchange> ex = new exec::agg::Exchange(
+        getOpCtx(), std::move(spec), Pipeline::create({source}, getExpCtx()));
 
     std::vector<ThreadInfo> threads = createNProducers(nConsumers, ex);
     std::vector<executor::TaskExecutor::CallbackHandle> handles;
@@ -478,7 +559,7 @@ TEST_F(DocumentSourceExchangeTest, RangeRandomExchangeNConsumer) {
     AtomicWord<size_t> processedDocs{0};
 
     for (size_t id = 0; id < nConsumers; ++id) {
-        DocumentSourceExchange* docSourceExchange = threads[id].documentSourceExchange.get();
+        auto docSourceExchange = exec::agg::buildStage(threads[id].documentSourceExchange);
         auto handle = _executor->scheduleWork([docSourceExchange, id, &processedDocs](
                                                   const executor::TaskExecutor::CallbackArgs& cb) {
             PseudoRandom prng(getNewSeed());
@@ -537,8 +618,8 @@ TEST_F(DocumentSourceExchangeTest, RandomExchangeNConsumerResourceYielding) {
     // the locks held in a transaction.
     stdx::mutex artificalGlobalMutex;
 
-    boost::intrusive_ptr<Exchange> ex =
-        new Exchange(std::move(spec), Pipeline::create({source}, getExpCtx()));
+    boost::intrusive_ptr<exec::agg::Exchange> ex = new exec::agg::Exchange(
+        getOpCtx(), std::move(spec), Pipeline::create({source}, getExpCtx()));
     std::vector<ThreadInfo> threads;
 
     for (size_t idx = 0; idx < nConsumers; ++idx) {
@@ -565,27 +646,27 @@ TEST_F(DocumentSourceExchangeTest, RandomExchangeNConsumerResourceYielding) {
 
     for (size_t id = 0; id < nConsumers; ++id) {
         ThreadInfo* threadInfo = &threads[id];
-        auto handle = _executor->scheduleWork([threadInfo, &processedDocs](
-                                                  const executor::TaskExecutor::CallbackArgs& cb) {
-            DocumentSourceExchange* docSourceExchange = threadInfo->documentSourceExchange.get();
-            const auto getNext = [docSourceExchange, threadInfo]() {
-                // Will acquire 'artificalGlobalMutex'. Within getNext() it will be released and
-                // reacquired by the MutexYielder if the Exchange has to block.
-                threadInfo->yielder->getLock().lock();
-                auto res = docSourceExchange->getNext();
-                threadInfo->yielder->getLock().unlock();
-                return res;
-            };
+        auto handle = _executor->scheduleWork(
+            [threadInfo, &processedDocs](const executor::TaskExecutor::CallbackArgs& cb) {
+                auto docSourceExchange = exec::agg::buildStage(threadInfo->documentSourceExchange);
+                const auto getNext = [docSourceExchange, threadInfo]() {
+                    // Will acquire 'artificalGlobalMutex'. Within getNext() it will be released and
+                    // reacquired by the MutexYielder if the Exchange has to block.
+                    threadInfo->yielder->getLock().lock();
+                    auto res = docSourceExchange->getNext();
+                    threadInfo->yielder->getLock().unlock();
+                    return res;
+                };
 
-            for (auto input = getNext(); input.isAdvanced(); input = getNext()) {
-                // This helps randomizing thread scheduling forcing different threads to load
-                // buffers. The sleep API is inherently imprecise so we cannot guarantee 100%
-                // reproducibility.
-                PseudoRandom prng(getNewSeed());
-                sleepmillis(prng.nextInt32() % 50 + 1);
-                processedDocs.fetchAndAdd(1);
-            }
-        });
+                for (auto input = getNext(); input.isAdvanced(); input = getNext()) {
+                    // This helps randomizing thread scheduling forcing different threads to load
+                    // buffers. The sleep API is inherently imprecise so we cannot guarantee 100%
+                    // reproducibility.
+                    PseudoRandom prng(getNewSeed());
+                    sleepmillis(prng.nextInt32() % 50 + 1);
+                    processedDocs.fetchAndAdd(1);
+                }
+            });
 
         handles.emplace_back(std::move(handle.getValue()));
     }
@@ -612,21 +693,20 @@ TEST_F(DocumentSourceExchangeTest, RangeRandomHashExchangeNConsumer) {
 
     ExchangeSpec spec;
     spec.setPolicy(ExchangePolicyEnum::kKeyRange);
-    spec.setKey(BSON("a"
-                     << "hashed"));
+    spec.setKey(BSON("a" << "hashed"));
     spec.setBoundaries(boundaries);
     spec.setConsumers(nConsumers);
     spec.setBufferSize(1024);
 
-    boost::intrusive_ptr<Exchange> ex =
-        new Exchange(std::move(spec), Pipeline::create({source}, getExpCtx()));
+    boost::intrusive_ptr<exec::agg::Exchange> ex = new exec::agg::Exchange(
+        getOpCtx(), std::move(spec), Pipeline::create({source}, getExpCtx()));
 
     std::vector<ThreadInfo> threads = createNProducers(nConsumers, ex);
     std::vector<executor::TaskExecutor::CallbackHandle> handles;
     AtomicWord<size_t> processedDocs{0};
 
     for (size_t id = 0; id < nConsumers; ++id) {
-        auto docSourceExchange = threads[id].documentSourceExchange.get();
+        auto docSourceExchange = exec::agg::buildStage(threads[id].documentSourceExchange);
         auto handle = _executor->scheduleWork([docSourceExchange, id, &processedDocs](
                                                   const executor::TaskExecutor::CallbackArgs& cb) {
             PseudoRandom prng(getNewSeed());
@@ -655,115 +735,173 @@ TEST_F(DocumentSourceExchangeTest, RangeRandomHashExchangeNConsumer) {
 }
 
 TEST_F(DocumentSourceExchangeTest, RejectNoConsumers) {
-    BSONObj spec = BSON("policy"
-                        << "broadcast"
-                        << "consumers" << 0);
+    const size_t nDocs = 500;
+
+    auto source = getMockSource(nDocs);
+
+    BSONObj spec = BSON("policy" << "broadcast"
+                                 << "consumers" << 0);
     ASSERT_THROWS_CODE(
-        Exchange(parseSpec(spec), Pipeline::create({}, getExpCtx())), AssertionException, 50901);
+        exec::agg::Exchange(getOpCtx(), parseSpec(spec), Pipeline::create({source}, getExpCtx())),
+        AssertionException,
+        50901);
 }
 
 TEST_F(DocumentSourceExchangeTest, RejectInvalidKey) {
-    BSONObj spec = BSON("policy"
-                        << "broadcast"
-                        << "consumers" << 1 << "key" << BSON("a" << 2));
+    const size_t nDocs = 500;
+
+    auto source = getMockSource(nDocs);
+
+    BSONObj spec = BSON("policy" << "broadcast"
+                                 << "consumers" << 1 << "key" << BSON("a" << 2));
     ASSERT_THROWS_CODE(
-        Exchange(parseSpec(spec), Pipeline::create({}, getExpCtx())), AssertionException, 50896);
+        exec::agg::Exchange(getOpCtx(), parseSpec(spec), Pipeline::create({source}, getExpCtx())),
+        AssertionException,
+        50896);
 }
 
 TEST_F(DocumentSourceExchangeTest, RejectInvalidKeyHashExpected) {
-    BSONObj spec = BSON("policy"
-                        << "broadcast"
-                        << "consumers" << 1 << "key"
-                        << BSON("a"
-                                << "nothash"));
+    const size_t nDocs = 500;
+
+    auto source = getMockSource(nDocs);
+
+    BSONObj spec = BSON("policy" << "broadcast"
+                                 << "consumers" << 1 << "key" << BSON("a" << "nothash"));
     ASSERT_THROWS_CODE(
-        Exchange(parseSpec(spec), Pipeline::create({}, getExpCtx())), AssertionException, 50895);
+        exec::agg::Exchange(getOpCtx(), parseSpec(spec), Pipeline::create({source}, getExpCtx())),
+        AssertionException,
+        50895);
 }
 
 TEST_F(DocumentSourceExchangeTest, RejectInvalidKeyWrongType) {
-    BSONObj spec = BSON("policy"
-                        << "broadcast"
-                        << "consumers" << 1 << "key" << BSON("a" << true));
+    const size_t nDocs = 500;
+
+    auto source = getMockSource(nDocs);
+
+    BSONObj spec = BSON("policy" << "broadcast"
+                                 << "consumers" << 1 << "key" << BSON("a" << true));
     ASSERT_THROWS_CODE(
-        Exchange(parseSpec(spec), Pipeline::create({}, getExpCtx())), AssertionException, 50897);
+        exec::agg::Exchange(getOpCtx(), parseSpec(spec), Pipeline::create({source}, getExpCtx())),
+        AssertionException,
+        50897);
 }
 
 TEST_F(DocumentSourceExchangeTest, RejectInvalidKeyEmpty) {
-    BSONObj spec = BSON("policy"
-                        << "broadcast"
-                        << "consumers" << 1 << "key" << BSON("" << 1));
+    const size_t nDocs = 500;
+
+    auto source = getMockSource(nDocs);
+
+    BSONObj spec = BSON("policy" << "broadcast"
+                                 << "consumers" << 1 << "key" << BSON("" << 1));
     ASSERT_THROWS_CODE(
-        Exchange(parseSpec(spec), Pipeline::create({}, getExpCtx())), AssertionException, 40352);
+        exec::agg::Exchange(getOpCtx(), parseSpec(spec), Pipeline::create({source}, getExpCtx())),
+        AssertionException,
+        40352);
 }
 
 TEST_F(DocumentSourceExchangeTest, RejectInvalidBoundaries) {
-    BSONObj spec = BSON("policy"
-                        << "keyRange"
-                        << "consumers" << 1 << "key" << BSON("a" << 1) << "boundaries"
-                        << BSON_ARRAY(BSON("a" << MAXKEY) << BSON("a" << MINKEY)) << "consumerIds"
-                        << BSON_ARRAY(0));
+    const size_t nDocs = 500;
+
+    auto source = getMockSource(nDocs);
+
+    BSONObj spec = BSON("policy" << "keyRange"
+                                 << "consumers" << 1 << "key" << BSON("a" << 1) << "boundaries"
+                                 << BSON_ARRAY(BSON("a" << MAXKEY) << BSON("a" << MINKEY))
+                                 << "consumerIds" << BSON_ARRAY(0));
     ASSERT_THROWS_CODE(
-        Exchange(parseSpec(spec), Pipeline::create({}, getExpCtx())), AssertionException, 50893);
+        exec::agg::Exchange(getOpCtx(), parseSpec(spec), Pipeline::create({source}, getExpCtx())),
+        AssertionException,
+        50893);
 }
 
 TEST_F(DocumentSourceExchangeTest, RejectInvalidBoundariesMissingMin) {
-    BSONObj spec = BSON("policy"
-                        << "keyRange"
-                        << "consumers" << 1 << "key" << BSON("a" << 1) << "boundaries"
-                        << BSON_ARRAY(BSON("a" << 0) << BSON("a" << MAXKEY)) << "consumerIds"
-                        << BSON_ARRAY(0));
+    const size_t nDocs = 500;
+
+    auto source = getMockSource(nDocs);
+
+    BSONObj spec = BSON("policy" << "keyRange"
+                                 << "consumers" << 1 << "key" << BSON("a" << 1) << "boundaries"
+                                 << BSON_ARRAY(BSON("a" << 0) << BSON("a" << MAXKEY))
+                                 << "consumerIds" << BSON_ARRAY(0));
     ASSERT_THROWS_CODE(
-        Exchange(parseSpec(spec), Pipeline::create({}, getExpCtx())), AssertionException, 50958);
+        exec::agg::Exchange(getOpCtx(), parseSpec(spec), Pipeline::create({source}, getExpCtx())),
+        AssertionException,
+        50958);
 }
 
 TEST_F(DocumentSourceExchangeTest, RejectInvalidBoundariesMissingMax) {
-    BSONObj spec = BSON("policy"
-                        << "keyRange"
-                        << "consumers" << 1 << "key" << BSON("a" << 1) << "boundaries"
-                        << BSON_ARRAY(BSON("a" << MINKEY) << BSON("a" << 0)) << "consumerIds"
-                        << BSON_ARRAY(0));
+    const size_t nDocs = 500;
+
+    auto source = getMockSource(nDocs);
+
+    BSONObj spec = BSON("policy" << "keyRange"
+                                 << "consumers" << 1 << "key" << BSON("a" << 1) << "boundaries"
+                                 << BSON_ARRAY(BSON("a" << MINKEY) << BSON("a" << 0))
+                                 << "consumerIds" << BSON_ARRAY(0));
     ASSERT_THROWS_CODE(
-        Exchange(parseSpec(spec), Pipeline::create({}, getExpCtx())), AssertionException, 50959);
+        exec::agg::Exchange(getOpCtx(), parseSpec(spec), Pipeline::create({source}, getExpCtx())),
+        AssertionException,
+        50959);
 }
 
 TEST_F(DocumentSourceExchangeTest, RejectInvalidBoundariesAndConsumerIds) {
-    BSONObj spec = BSON("policy"
-                        << "keyRange"
-                        << "consumers" << 2 << "key" << BSON("a" << 1) << "boundaries"
-                        << BSON_ARRAY(BSON("a" << MINKEY) << BSON("a" << MAXKEY)) << "consumerIds"
-                        << BSON_ARRAY(0 << 1));
+    const size_t nDocs = 500;
+
+    auto source = getMockSource(nDocs);
+
+    BSONObj spec = BSON("policy" << "keyRange"
+                                 << "consumers" << 2 << "key" << BSON("a" << 1) << "boundaries"
+                                 << BSON_ARRAY(BSON("a" << MINKEY) << BSON("a" << MAXKEY))
+                                 << "consumerIds" << BSON_ARRAY(0 << 1));
     ASSERT_THROWS_CODE(
-        Exchange(parseSpec(spec), Pipeline::create({}, getExpCtx())), AssertionException, 50900);
+        exec::agg::Exchange(getOpCtx(), parseSpec(spec), Pipeline::create({source}, getExpCtx())),
+        AssertionException,
+        50900);
 }
 
 TEST_F(DocumentSourceExchangeTest, RejectInvalidPolicyBoundaries) {
-    BSONObj spec = BSON("policy"
-                        << "roundrobin"
-                        << "consumers" << 1 << "key" << BSON("a" << 1) << "boundaries"
-                        << BSON_ARRAY(BSON("a" << MINKEY) << BSON("a" << MAXKEY)) << "consumerIds"
-                        << BSON_ARRAY(0));
+    const size_t nDocs = 500;
+
+    auto source = getMockSource(nDocs);
+
+    BSONObj spec = BSON("policy" << "roundrobin"
+                                 << "consumers" << 1 << "key" << BSON("a" << 1) << "boundaries"
+                                 << BSON_ARRAY(BSON("a" << MINKEY) << BSON("a" << MAXKEY))
+                                 << "consumerIds" << BSON_ARRAY(0));
     ASSERT_THROWS_CODE(
-        Exchange(parseSpec(spec), Pipeline::create({}, getExpCtx())), AssertionException, 50899);
+        exec::agg::Exchange(getOpCtx(), parseSpec(spec), Pipeline::create({source}, getExpCtx())),
+        AssertionException,
+        50899);
 }
 
 TEST_F(DocumentSourceExchangeTest, RejectInvalidConsumerIds) {
-    BSONObj spec = BSON("policy"
-                        << "keyRange"
-                        << "consumers" << 1 << "key" << BSON("a" << 1) << "boundaries"
-                        << BSON_ARRAY(BSON("a" << MINKEY) << BSON("a" << MAXKEY)) << "consumerIds"
-                        << BSON_ARRAY(1));
+    const size_t nDocs = 500;
+
+    auto source = getMockSource(nDocs);
+
+    BSONObj spec = BSON("policy" << "keyRange"
+                                 << "consumers" << 1 << "key" << BSON("a" << 1) << "boundaries"
+                                 << BSON_ARRAY(BSON("a" << MINKEY) << BSON("a" << MAXKEY))
+                                 << "consumerIds" << BSON_ARRAY(1));
     ASSERT_THROWS_CODE(
-        Exchange(parseSpec(spec), Pipeline::create({}, getExpCtx())), AssertionException, 50894);
+        exec::agg::Exchange(getOpCtx(), parseSpec(spec), Pipeline::create({source}, getExpCtx())),
+        AssertionException,
+        50894);
 }
 
 TEST_F(DocumentSourceExchangeTest, RejectInvalidMissingKeys) {
-    BSONObj spec = BSON("policy"
-                        << "keyRange"
-                        << "consumers" << 1 << "boundaries"
-                        << BSON_ARRAY(BSON("a" << MINKEY) << BSON("a" << MAXKEY)) << "consumerIds"
-                        << BSON_ARRAY(0));
+    const size_t nDocs = 500;
+
+    auto source = getMockSource(nDocs);
+
+    BSONObj spec = BSON("policy" << "keyRange"
+                                 << "consumers" << 1 << "boundaries"
+                                 << BSON_ARRAY(BSON("a" << MINKEY) << BSON("a" << MAXKEY))
+                                 << "consumerIds" << BSON_ARRAY(0));
     ASSERT_THROWS_CODE(
-        Exchange(parseSpec(spec), Pipeline::create({}, getExpCtx())), AssertionException, 50967);
+        exec::agg::Exchange(getOpCtx(), parseSpec(spec), Pipeline::create({source}, getExpCtx())),
+        AssertionException,
+        50967);
 }
 
 TEST_F(DocumentSourceExchangeTest, QueryShape) {
@@ -775,7 +913,8 @@ TEST_F(DocumentSourceExchangeTest, QueryShape) {
     spec.setPolicy(ExchangePolicyEnum::kRoundRobin);
     spec.setConsumers(1);
     spec.setBufferSize(1024);
-    boost::intrusive_ptr<Exchange> ex = new Exchange(spec, Pipeline::create({source}, getExpCtx()));
+    boost::intrusive_ptr<exec::agg::Exchange> ex =
+        new exec::agg::Exchange(getOpCtx(), spec, Pipeline::create({source}, getExpCtx()));
     boost::intrusive_ptr<DocumentSourceExchange> stage =
         new DocumentSourceExchange(getExpCtx(), ex, 0, nullptr);
 

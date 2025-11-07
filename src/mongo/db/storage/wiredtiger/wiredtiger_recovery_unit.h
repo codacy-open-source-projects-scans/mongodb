@@ -29,30 +29,34 @@
 
 #pragma once
 
-#include <absl/container/inlined_vector.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <memory>
-#include <stack>
-#include <vector>
-#include <wiredtiger.h>
-
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_begin_transaction_block.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_connection.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_cursor.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_oplog_manager.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_session.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_snapshot_manager.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_stats.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/timer.h"
+
+#include <cstdint>
+#include <memory>
+#include <stack>
+#include <vector>
+
+#include <wiredtiger.h>
+
+#include <absl/container/inlined_vector.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -63,17 +67,25 @@ extern AtomicWord<std::int64_t> snapshotTooOldErrorCount;
 
 class WiredTigerRecoveryUnit final : public RecoveryUnit {
 public:
-    WiredTigerRecoveryUnit(WiredTigerSessionCache* sc);
+    WiredTigerRecoveryUnit(WiredTigerConnection* connection);
 
     /**
      * It's expected a consumer would want to call the constructor that simply takes a
-     * `WiredTigerSessionCache`. That constructor accesses the `WiredTigerKVEngine` to find the
+     * `WiredTigerConnection`. That constructor accesses the `WiredTigerKVEngine` to find the
      * `WiredTigerOplogManager`. However, unit tests construct `WiredTigerRecoveryUnits` with a
-     * `WiredTigerSessionCache` that do not have a valid `WiredTigerKVEngine`. This constructor is
+     * `WiredTigerConnection` that do not have a valid `WiredTigerKVEngine`. This constructor is
      * expected to only be useful in those cases.
      */
-    WiredTigerRecoveryUnit(WiredTigerSessionCache* sc, WiredTigerOplogManager* oplogManager);
+    WiredTigerRecoveryUnit(WiredTigerConnection* sc, WiredTigerOplogManager* oplogManager);
     ~WiredTigerRecoveryUnit() override;
+
+    static WiredTigerRecoveryUnit& get(RecoveryUnit& ru) {
+        return checked_cast<WiredTigerRecoveryUnit&>(ru);
+    }
+
+    static WiredTigerRecoveryUnit* get(RecoveryUnit* ru) {
+        return checked_cast<WiredTigerRecoveryUnit*>(ru);
+    }
 
     void prepareUnitOfWork() override;
 
@@ -116,6 +128,12 @@ public:
 
     void allowOneUntimestampedWrite() override {
         invariant(!_isActive());
+        // In the case we're already allowing all timestamp writes we do not make the assertions
+        // stricter. This would otherwise break the relaxed assumptions being set at layers above.
+        if (_untimestampedWriteAssertionLevel ==
+            RecoveryUnit::UntimestampedWriteAssertionLevel::kSuppressAlways) {
+            return;
+        }
         _untimestampedWriteAssertionLevel =
             RecoveryUnit::UntimestampedWriteAssertionLevel::kSuppressOnce;
     }
@@ -159,9 +177,21 @@ public:
 
     void setCacheMaxWaitTimeout(Milliseconds) override;
 
+    size_t getCacheDirtyBytes() override;
+
     // ---- WT STUFF
 
+    WiredTigerConnection* getConnection() {
+        return _connection;
+    }
+
     WiredTigerSession* getSession();
+
+    /**
+     * Returns a session without starting a new WT txn on the session. Will not close any already
+     * running session.
+     */
+    WiredTigerSession* getSessionNoTxn();
 
     /**
      * Enter a period of wait or computation during which there are no WT calls.
@@ -169,40 +199,14 @@ public:
      */
     void beginIdle();
 
-    /**
-     * Returns a session without starting a new WT txn on the session. Will not close any already
-     * running session.
-     */
-
-    WiredTigerSession* getSessionNoTxn();
-
-    WiredTigerSessionCache* getSessionCache() {
-        return _sessionCache;
-    }
-
     void assertInActiveTxn() const;
 
-    /**
-     * This function must be called when a write operation is performed on the active transaction
-     * for the first time.
-     *
-     * Must be reset when the active transaction is either committed or rolled back.
-     */
-    void setTxnModified();
+    void setTxnModified() override;
 
     boost::optional<int64_t> getOplogVisibilityTs() override;
     void setOplogVisibilityTs(boost::optional<int64_t> oplogVisibilityTs) override;
 
-    static WiredTigerRecoveryUnit& get(RecoveryUnit& ru) {
-        return checked_cast<WiredTigerRecoveryUnit&>(ru);
-    }
-
-    static WiredTigerRecoveryUnit* get(RecoveryUnit* ru) {
-        return checked_cast<WiredTigerRecoveryUnit*>(ru);
-    }
-
-    bool gatherWriteContextForDebugging() const;
-    void storeWriteContextForDebugging(const BSONObj& info);
+    void setOperationContext(OperationContext* opCtx) override;
 
 private:
     void doBeginUnitOfWork() override;
@@ -210,6 +214,8 @@ private:
     void doAbortUnitOfWork() override;
 
     void doAbandonSnapshot() override;
+
+    void _setIsolation(Isolation) override;
 
     void _abort();
     void _commit();
@@ -233,7 +239,7 @@ private:
     /**
      * Starts a transaction at the lastApplied timestamp stored in '_readAtTimestamp'. Sets
      * '_readAtTimestamp' to the actual timestamp used by the storage engine in case rounding
-     * occured.
+     * occurred.
      */
     void _beginTransactionAtLastAppliedTimestamp();
 
@@ -250,9 +256,9 @@ private:
      */
     void _updateMultiTimestampConstraint(Timestamp timestamp);
 
-    WiredTigerSessionCache* _sessionCache;  // not owned
+    WiredTigerConnection* _connection;      // not owned
     WiredTigerOplogManager* _oplogManager;  // not owned
-    UniqueWiredTigerSession _unique_session;
+    WiredTigerManagedSession _managedSession;
     WiredTigerSession* _session = nullptr;
     bool _isTimestamped = false;
 
@@ -294,8 +300,6 @@ private:
     // this timestamp if they want to avoid missing any entries in the oplog that may not yet have
     // committed ('holes'). @see WiredTigerOplogManager::getOplogReadTimestamp
     boost::optional<int64_t> _oplogVisibleTs = boost::none;
-    bool _gatherWriteContextForDebugging = false;
-    std::vector<BSONObj> _writeContextForDebugging;
 
     WiredTigerStats _sessionStatsAfterLastOperation;
 
@@ -304,5 +308,11 @@ private:
     // Detects any attempt to reconfigure options used by an open transaction.
     OpenSnapshotOptions _optionsUsedToOpenSnapshot;
 };
+
+// Constructs a WiredTigerCursor::Params instance from the given params and returns it.
+WiredTigerCursor::Params getWiredTigerCursorParams(WiredTigerRecoveryUnit& wtRu,
+                                                   uint64_t tableID,
+                                                   bool allowOverwrite = false,
+                                                   bool random = false);
 
 }  // namespace mongo

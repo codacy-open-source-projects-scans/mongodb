@@ -27,13 +27,9 @@
  *    it in the license file.
  */
 
-#include <chrono>
-#include <filesystem>
-#include <iostream>
-#include <limits>
-#include <memory>
-#include <vector>
-
+#include "mongo/db/query/query_tester/command_helpers.h"
+#include "mongo/db/query/query_tester/mock_version_info.h"
+#include "mongo/db/query/query_tester/testfile.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/platform/random.h"
@@ -44,14 +40,18 @@
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/version.h"
 
-#include "mock_version_info.h"
-#include "testfile.h"
+#include <chrono>
+#include <filesystem>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <vector>
 
 namespace mongo::query_tester {
 namespace {
 struct TestSpec {
     TestSpec(std::filesystem::path path, size_t low = kMinTestNum, size_t high = kMaxTestNum)
-        : testPath(path), startTest(low), endTest(high){};
+        : testPath(path), startTest(low), endTest(high) {};
 
     // Validate that this test conforms to our expectations about filesystem things.
     void validate(ModeOption mode) const {
@@ -125,27 +125,40 @@ int runTestProgram(const std::vector<TestSpec> testsToRun,
                    const bool dropData,
                    const bool loadData,
                    const bool createAllIndices,
+                   const bool ignoreIndexFailures,
                    const WriteOutOptions outOpt,
                    const ModeOption mode,
+                   const bool optimizationsOff,
                    const bool populateAndExit,
                    const ErrorLogLevel errorLogLevel,
-                   const DiffStyle diffStyle) {
+                   const DiffStyle diffStyle,
+                   const OverrideOption overrideOption) {
     // Run the tests.
     auto versionInfo = MockVersionInfo{};
     auto conn = buildConn(uriString, &versionInfo, mode);
+
+    // Append _id to setWindowFields sort to make queries deterministic.
+    auto deterministicSetWindowFields =
+        fromFuzzerJson("{setParameter: 1, internalQueryAppendIdToSetWindowFieldsSort: true}");
+    runCommandAssertOK(conn.get(), deterministicSetWindowFields, "admin");
+
     // Track collections loaded in the previous test file.
     auto prevFileCollections = std::set<CollectionSpec>{};
     auto failedTestFiles = std::vector<std::filesystem::path>{};
     auto failedQueryCount = size_t{0};
     auto totalTestsRun = size_t{0};
     for (const auto& [testPath, startRange, endRange] : testsToRun) {
-        auto currFile = query_tester::QueryFile(testPath);
+        auto currFile = query_tester::QueryFile(testPath, optimizationsOff, overrideOption);
 
         // Treat data load errors as failures, too.
         try {
             currFile.readInEntireFile(mode, startRange, endRange);
-            currFile.loadCollections(
-                conn.get(), dropData, loadData, createAllIndices, prevFileCollections);
+            currFile.loadCollections(conn.get(),
+                                     dropData,
+                                     loadData,
+                                     createAllIndices,
+                                     ignoreIndexFailures,
+                                     prevFileCollections);
         } catch (const std::exception& exception) {
             std::cerr << std::endl
                       << testPath.string() << std::endl
@@ -203,25 +216,13 @@ int runTestProgram(const std::vector<TestSpec> testsToRun,
                 << std::endl;
         } else {
             printFailureSummary(failedTestFiles, failedQueryCount, totalTestsRun);
-        }
 
-        if (errorLogLevel == ErrorLogLevel::kExtractFeatures) {
-            const auto pyCmd = std::stringstream{}
-                << "python3 src/mongo/db/query/query_tester/scripts/extract_pickle_to_json.py "
-                << getMongoRepoRoot() << " " << kFeatureExtractorDir << " " << kTmpFailureFile;
-            const auto queryFeaturesFile =
-                std::filesystem::path{(std::stringstream{} << "src/mongo/db/query/query_tester/"
-                                                           << kTmpFailureFile << ".json")
-                                          .str()};
-            if (shellExec(pyCmd.str(), kShellTimeout, kShellMaxLen, true).isOK()) {
-                displayFailingQueryFeatures(queryFeaturesFile);
-            } else {
-                exitWithError(1, "failed to extract pickle file to json for feature processing.");
+            if (errorLogLevel == ErrorLogLevel::kVerbose) {
+                std::cout
+                    << "Tests failed! Run test locally with --extractFeatures for more details."
+                    << std::endl;
             }
-
-            std::filesystem::remove(queryFeaturesFile);
         }
-
         return 1;
     }
 }
@@ -249,8 +250,9 @@ void printHelpString() {
          "specified with the load argument or "
          "no documents will exist in the test collections."},
         {"--extractFeatures",
-         "Extracts metadata about most common features across failed queries for an enriched "
-         "debugging experience."},
+         "Extracts syntax, query planner, and execution stats metadata for failed queries for an "
+         "enriched debugging experience."},
+        {"--ignore-index-failures", "Creates indices while ignoring index creation failures."},
         {"--load",
          "Load all collections specified in relevant test files. If "
          "not specified will assume data "
@@ -262,6 +264,9 @@ void printHelpString() {
          "[run, compare, normalize]. Specify whether to just run and record "
          "results; expect all test files to specify results (default); or ensure that "
          "output results are correctly normalized."},
+        {"--opt-off",
+         "Disables optimizations and pushing down to the find layer if queries don't require an "
+         "index to be run."},
         {"--out",
          "[result, oneline]. Write out results for each test file after running "
          "tests in run or normalize mode. Results files end in `.results` "
@@ -287,7 +292,8 @@ void printHelpString() {
         {"-t",
          "Test. This should be followed by a test name. This can appear "
          "multiple times to run multiple tests."},
-        {"-v (verbose)", "Appends a summary of failing queries to an unsuccessful test file run."}};
+        {"-v (verbose)", "Appends a summary of failing queries to an unsuccessful test file run."},
+        {"--override", "Follow with the test type override. Optional"}};
     for (const auto& [key, val] : kHelpMap) {
         std::cout << key << ": " << val << std::endl;
     }
@@ -303,13 +309,16 @@ int queryTesterMain(const int argc, const char** const argv) {
     auto createAllIndices = true;
     auto dropOpt = false;
     auto extractFeatures = false;
+    auto ignoreIndexFailures = false;
     auto loadOpt = false;
     auto mongoURIString = boost::optional<std::string>{};
     auto mode = ModeOption::Compare;  // Default.
+    auto optimizationsOff = false;
     auto outOpt = WriteOutOptions::kNone;
     auto populateAndExit = false;
     auto verbose = false;
     auto diffStyle = DiffStyle::kWord;
+    auto overrideOption = OverrideOption::None;
     for (auto argNum = size_t{1}; argNum < parsedArgs.size(); ++argNum) {
         // Same order as in the help menu.
         if (parsedArgs[argNum] == "--diff") {
@@ -320,6 +329,8 @@ int queryTesterMain(const int argc, const char** const argv) {
             dropOpt = true;
         } else if (parsedArgs[argNum] == "--extractFeatures") {
             extractFeatures = true;
+        } else if (parsedArgs[argNum] == "--ignore-index-failures") {
+            ignoreIndexFailures = true;
         } else if (parsedArgs[argNum] == "--load") {
             loadOpt = true;
         } else if (parsedArgs[argNum] == "--minimal-index") {
@@ -328,6 +339,8 @@ int queryTesterMain(const int argc, const char** const argv) {
             assertNextArgExists(parsedArgs, argNum, "--mode");
             mode = stringToModeOption(parsedArgs[argNum + 1]);
             ++argNum;
+        } else if (parsedArgs[argNum] == "--opt-off") {
+            optimizationsOff = true;
         } else if (parsedArgs[argNum] == "--out") {
             assertNextArgExists(parsedArgs, argNum, "--out");
             outOpt = stringToWriteOutOpt(parsedArgs[argNum + 1]);
@@ -376,6 +389,10 @@ int queryTesterMain(const int argc, const char** const argv) {
             expectingNumAt = argNum + 1;
         } else if (parsedArgs[argNum] == "-v") {
             verbose = true;
+        } else if (parsedArgs[argNum] == "--override") {
+            assertNextArgExists(parsedArgs, argNum, "--override");
+            overrideOption = stringToOverrideOption(parsedArgs[argNum + 1]);
+            ++argNum;
         } else {
             exitWithError(1, std::string{"Unexpected argument "} + parsedArgs[argNum]);
         }
@@ -424,6 +441,7 @@ int queryTesterMain(const int argc, const char** const argv) {
     }
 
     try {
+        mongo::runGlobalInitializersOrDie(std::vector<std::string>(argv, argv + argc));
         auto serviceContextHolder = ServiceContext::make();
         setGlobalServiceContext(std::move(serviceContextHolder));
         return runTestProgram(std::move(testsToRun),
@@ -431,11 +449,14 @@ int queryTesterMain(const int argc, const char** const argv) {
                               dropOpt,
                               loadOpt,
                               createAllIndices,
+                              ignoreIndexFailures,
                               outOpt,
                               mode,
+                              optimizationsOff,
                               populateAndExit,
                               errorLogLevel,
-                              diffStyle);
+                              diffStyle,
+                              overrideOption);
     } catch (AssertionException& ex) {
         exitWithError(1, ex.reason());
     }

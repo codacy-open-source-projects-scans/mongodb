@@ -33,14 +33,15 @@
  * Parse a memory region into usable pieces.
  */
 
-#include <utility>
-
 #include "mongo/base/data_range.h"
 #include "mongo/base/data_range_cursor.h"
 #include "mongo/base/data_type_terminated.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/platform/strnlen.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
+#include <utility>
 
 namespace mongo {
 
@@ -48,7 +49,7 @@ namespace mongo {
     methods throw the eof exception if the operation would pass the end of the
     buffer with which we are working.
 */
-class BufReader {
+class MONGO_MOD_PUB BufReader {
     BufReader(const BufReader&) = delete;
     BufReader& operator=(const BufReader&) = delete;
 
@@ -62,6 +63,7 @@ public:
 
     /** read in the object specified, and advance buffer pointer */
     template <typename T>
+    requires(isEndiannessSpecified<T>())
     void read(T& t) {
         ConstDataRangeCursor cdrc(_pos, _end);
         cdrc.readAndAdvance(&t);
@@ -78,6 +80,7 @@ public:
 
     /** read in the object specified, but do not advance buffer pointer */
     template <typename T>
+    requires(isEndiannessSpecified<T>())
     void peek(T& t) const {
         ConstDataRange(_pos, _end).readInto(&t);
     }
@@ -126,7 +129,7 @@ public:
     }
 
     void readStr(std::string& s) {
-        s = readCStr().toString();
+        s = std::string{readCStr()};
     }
 
     /**

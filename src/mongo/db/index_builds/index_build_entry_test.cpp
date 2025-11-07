@@ -27,14 +27,6 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <cstddef>
-#include <string>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bson_validate.h"
@@ -42,11 +34,17 @@
 #include "mongo/db/index_builds/commit_quorum_options.h"
 #include "mongo/db/index_builds/index_build_entry_gen.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -133,7 +131,7 @@ TEST(IndexBuildEntryTest, SerializeAndDeserialize) {
     ASSERT_TRUE(validateBSON(obj).isOK());
 
     IDLParserContext ctx("IndexBuildsEntry Parser");
-    IndexBuildEntry rebuiltEntry = IndexBuildEntry::parse(ctx, obj);
+    IndexBuildEntry rebuiltEntry = IndexBuildEntry::parse(obj, ctx);
 
     checkIfEqual(entry, rebuiltEntry);
 }

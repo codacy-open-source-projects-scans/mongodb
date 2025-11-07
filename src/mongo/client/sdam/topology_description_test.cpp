@@ -32,9 +32,6 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <algorithm>
-#include <cstddef>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/oid.h"
@@ -44,12 +41,12 @@
 #include "mongo/client/sdam/topology_description.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/rpc/topology_version_gen.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <algorithm>
+#include <cstddef>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -209,7 +206,7 @@ TEST_F(TopologyDescriptionTestFixture, ShouldNotAllowChangingTheHeartbeatFrequen
 TEST_F(TopologyDescriptionTestFixture,
        ShouldSetWireCompatibilityErrorForMinWireVersionWhenMinWireVersionIsGreater) {
     const auto outgoingMaxWireVersion =
-        WireSpec::getWireSpec(getGlobalServiceContext()).get()->outgoing.maxWireVersion;
+        WireSpec::getWireSpec(getGlobalServiceContext()).getOutgoing().maxWireVersion;
     const auto config = SdamConfiguration(kOneServer, TopologyType::kUnknown);
     const auto topologyDescription = std::make_shared<TopologyDescription>(config);
     const auto serverDescriptionMinVersion = ServerDescriptionBuilder()
@@ -227,7 +224,7 @@ TEST_F(TopologyDescriptionTestFixture,
 TEST_F(TopologyDescriptionTestFixture,
        ShouldSetWireCompatibilityErrorForMinWireVersionWhenMaxWireVersionIsLess) {
     const auto outgoingMinWireVersion =
-        WireSpec::getWireSpec(getGlobalServiceContext()).get()->outgoing.minWireVersion;
+        WireSpec::getWireSpec(getGlobalServiceContext()).getOutgoing().minWireVersion;
     const auto config = SdamConfiguration(kOneServer, TopologyType::kUnknown);
     const auto topologyDescription = std::make_shared<TopologyDescription>(config);
     const auto serverDescriptionMaxVersion = ServerDescriptionBuilder()
@@ -244,7 +241,7 @@ TEST_F(TopologyDescriptionTestFixture,
 
 TEST_F(TopologyDescriptionTestFixture, ShouldNotSetWireCompatibilityErrorWhenServerTypeIsUnknown) {
     const auto outgoingMinWireVersion =
-        WireSpec::getWireSpec(getGlobalServiceContext()).get()->outgoing.minWireVersion;
+        WireSpec::getWireSpec(getGlobalServiceContext()).getOutgoing().minWireVersion;
     const auto config = SdamConfiguration(kOneServer, TopologyType::kUnknown);
     const auto topologyDescription = std::make_shared<TopologyDescription>(config);
     const auto serverDescriptionMaxVersion =

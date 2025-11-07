@@ -29,10 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <string>
-#include <utility>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -41,8 +37,14 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/query/util/deferred.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <string>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUBLIC mongo {
 
 class Client;
 class OperationContext;
@@ -108,7 +110,7 @@ public:
      * - You hold the Client lock.
      * - You are on the Client's thread.
      */
-    static const ClientMetadata* getForClient(Client* client) noexcept;
+    static const ClientMetadata* getForClient(Client* client);
 
     /**
      * Get the ClientMetadata for the OperationContext.
@@ -120,7 +122,7 @@ public:
      * - You hold the Client lock.
      * - You are on the Client's thread.
      */
-    static const ClientMetadata* getForOperation(OperationContext* opCtx) noexcept;
+    static const ClientMetadata* getForOperation(OperationContext* opCtx);
 
     /**
      * Get the prioritized ClientMetadata for the Client.
@@ -132,7 +134,7 @@ public:
      * - You hold the Client lock.
      * - You are on the Client's thread.
      */
-    static const ClientMetadata* get(Client* client) noexcept;
+    static const ClientMetadata* get(Client* client);
 
     /**
      * Set the ClientMetadata for the Client directly.
@@ -258,7 +260,7 @@ public:
      * Write the $client section to request bodies if there is a non-empty client metadata
      * connection with the current client.
      */
-    void writeToMetadata(BSONObjBuilder* builder) const noexcept;
+    void writeToMetadata(BSONObjBuilder* builder) const;
 
     /**
      * Modify the existing client metadata document to include a mongos section.
@@ -282,6 +284,13 @@ public:
      * Return: May be empty.
      */
     StringData getApplicationName() const;
+
+    /**
+     * Get the Driver Name for the client metadata document.
+     *
+     * Return: May be empty.
+     */
+    StringData getDriverName() const;
 
     /**
      * Get the BSON Document of the client metadata document. In the example above in the class
@@ -357,6 +366,7 @@ private:
     // Application Name extracted from the client metadata document.
     // May be empty
     std::string _appName;
+    std::string _driverName;
 
     // See documentWithoutMongosInfo().
     Deferred<BSONObj (*)(const BSONObj&)> _documentWithoutMongosInfo{
@@ -368,4 +378,4 @@ private:
     Deferred<size_t (*)(const BSONObj&)> _hashWithoutMongos{simpleHash};
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

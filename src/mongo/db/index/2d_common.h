@@ -29,11 +29,12 @@
 
 #pragma once
 
-#include <string>
-#include <vector>
-
 #include "mongo/db/geo/hash.h"
 #include "mongo/db/index_names.h"
+#include "mongo/util/modules.h"
+
+#include <string>
+#include <vector>
 
 namespace mongo {
 struct TwoDIndexingParams {

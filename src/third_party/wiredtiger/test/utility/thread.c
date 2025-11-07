@@ -47,7 +47,7 @@ thread_append(void *arg)
     opts = (TEST_OPTS *)arg;
     conn = opts->conn;
 
-    id = __wt_atomic_fetch_addv64(&opts->next_threadid, 1);
+    id = __wt_atomic_fetch_add_uint64_v(&opts->next_threadid, 1);
     testutil_check(conn->open_session(conn, NULL, NULL, &session));
     testutil_check(session->open_cursor(session, opts->uri, NULL, "append", &cursor));
 
@@ -172,13 +172,13 @@ op_bulk_unique(void *arg)
 
     args = (TEST_PER_THREAD_OPTS *)arg;
     opts = args->testopts;
-    __wt_random_init_seed(NULL, &rnd);
+    __wt_random_init(NULL, &rnd);
 
     testutil_check(opts->conn->open_session(opts->conn, NULL, NULL, &session));
 
     /* Generate a unique object name. */
-    testutil_snprintf(
-      new_uri, sizeof(new_uri), "%s.%" PRIu64, opts->uri, __wt_atomic_add64(&opts->unique_id, 1));
+    testutil_snprintf(new_uri, sizeof(new_uri), "%s.%" PRIu64, opts->uri,
+      __wt_atomic_add_uint64(&opts->unique_id, 1));
     testutil_check(session->create(session, new_uri, DEFAULT_TABLE_SCHEMA));
 
     __wt_yield();
@@ -287,13 +287,13 @@ op_create_unique(void *arg)
 
     args = (TEST_PER_THREAD_OPTS *)arg;
     opts = args->testopts;
-    __wt_random_init_seed(NULL, &rnd);
+    __wt_random_init(NULL, &rnd);
 
     testutil_check(opts->conn->open_session(opts->conn, NULL, NULL, &session));
 
     /* Generate a unique object name. */
-    testutil_snprintf(
-      new_uri, sizeof(new_uri), "%s.%" PRIu64, opts->uri, __wt_atomic_add64(&opts->unique_id, 1));
+    testutil_snprintf(new_uri, sizeof(new_uri), "%s.%" PRIu64, opts->uri,
+      __wt_atomic_add_uint64(&opts->unique_id, 1));
     testutil_check(session->create(session, new_uri, DEFAULT_TABLE_SCHEMA));
 
     __wt_yield();
@@ -328,7 +328,7 @@ op_drop(void *arg)
 
     args = (TEST_PER_THREAD_OPTS *)arg;
     opts = args->testopts;
-    __wt_random_init_seed(NULL, &rnd);
+    __wt_random_init(NULL, &rnd);
 
     testutil_check(opts->conn->open_session(opts->conn, NULL, NULL, &session));
 

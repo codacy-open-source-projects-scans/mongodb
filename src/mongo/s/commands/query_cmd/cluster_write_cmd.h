@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -42,6 +36,7 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/query_cmd/update_metrics.h"
 #include "mongo/db/commands/query_cmd/write_commands_common.h"
+#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/operation_context.h"
@@ -54,12 +49,17 @@
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_builder_interface.h"
 #include "mongo/s/async_requests_sender.h"
-#include "mongo/s/multi_statement_transaction_requests_sender.h"
 #include "mongo/s/write_ops/batch_write_exec.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
+
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace mongo {
 
@@ -88,6 +88,10 @@ public:
         return Command::ReadWriteType::kWrite;
     }
 
+    bool enableDiagnosticPrintingOnFailure() const final {
+        return true;
+    }
+
     /**
      * Changes the shard key for the document if the response object contains a
      * WouldChangeOwningShard error. If the original command was sent as a retryable write, starts a
@@ -112,6 +116,7 @@ public:
                                const NamespaceString& nss,
                                const BSONObj& command,
                                BatchItemRef targetingBatchItem,
+                               const CollectionRoutingInfoTargeter& targeter,
                                std::vector<AsyncRequestsSender::Response>* results);
 
     /**
@@ -190,6 +195,10 @@ private:
         return true;
     }
 
+    bool supportsRawData() const override {
+        return true;
+    }
+
     void doCheckAuthorization(OperationContext* opCtx) const final {
         try {
             doCheckAuthorizationHook(AuthorizationSession::get(opCtx->getClient()));
@@ -238,10 +247,13 @@ private:
 
     std::unique_ptr<CommandInvocation> parse(OperationContext* opCtx,
                                              const OpMsgRequest& request) final {
+        auto parsedRequest = BatchedCommandRequest::parseInsert(request);
+        uassert(ErrorCodes::InvalidNamespace,
+                "Cannot specify insert without a real namespace",
+                !parsedRequest.getNS().isCollectionlessAggregateNS());
+
         return std::make_unique<Invocation>(
-            this,
-            request,
-            BatchedCommandRequest::cloneInsertWithIds(BatchedCommandRequest::parseInsert(request)));
+            this, request, BatchedCommandRequest::cloneInsertWithIds(std::move(parsedRequest)));
     }
 
     std::string help() const override {
@@ -295,6 +307,10 @@ private:
     std::unique_ptr<CommandInvocation> parse(OperationContext* opCtx,
                                              const OpMsgRequest& request) final {
         auto parsedRequest = BatchedCommandRequest::parseUpdate(request);
+        uassert(ErrorCodes::InvalidNamespace,
+                "Cannot specify update without a real namespace",
+                !parsedRequest.getNS().isCollectionlessAggregateNS());
+
         if (!opCtx->isCommandForwardedFromRouter()) {
             uassert(51195,
                     "Cannot specify runtime constants option to a mongos",
@@ -317,7 +333,8 @@ private:
     }
 
     UpdateMetrics* getUpdateMetrics() override {
-        invariant(_updateMetrics);
+        tassert(
+            11052600, str::stream() << "Missing UpdateMetrics in " << getName(), _updateMetrics);
         return &*_updateMetrics;
     }
 
@@ -356,8 +373,12 @@ private:
 
     std::unique_ptr<CommandInvocation> parse(OperationContext* opCtx,
                                              const OpMsgRequest& request) final {
-        return std::make_unique<Invocation>(
-            this, request, BatchedCommandRequest::parseDelete(request));
+        auto parsedRequest = BatchedCommandRequest::parseDelete(request);
+        uassert(ErrorCodes::InvalidNamespace,
+                "Cannot specify delete without a real namespace",
+                !parsedRequest.getNS().isCollectionlessAggregateNS());
+
+        return std::make_unique<Invocation>(this, request, std::move(parsedRequest));
     }
 
     std::string help() const override {

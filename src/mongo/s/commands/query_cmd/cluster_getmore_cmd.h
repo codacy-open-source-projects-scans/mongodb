@@ -38,6 +38,7 @@
 #include "mongo/db/stats/counters.h"
 #include "mongo/s/query/exec/cluster_cursor_manager.h"
 #include "mongo/s/query/planner/cluster_find.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -73,11 +74,15 @@ public:
         return true;
     }
 
+    bool enableDiagnosticPrintingOnFailure() const final {
+        return true;
+    }
+
     class Invocation final : public CommandInvocation {
     public:
         Invocation(Command* cmd, const OpMsgRequest& request)
             : CommandInvocation(cmd),
-              _cmd(GetMoreCommandRequest::parse(IDLParserContext{Impl::kName}, request.body)) {}
+              _cmd(GetMoreCommandRequest::parse(request.body, IDLParserContext{Impl::kName})) {}
 
     private:
         NamespaceString ns() const override {
@@ -127,8 +132,8 @@ public:
         }
 
         void validateResult(const BSONObj& replyObj) {
-            CursorGetMoreReply::parse(IDLParserContext{"CursorGetMoreReply"},
-                                      replyObj.removeField("ok"));
+            CursorGetMoreReply::parse(replyObj.removeField("ok"),
+                                      IDLParserContext{"CursorGetMoreReply"});
         }
 
         const GetMoreCommandRequest _cmd;

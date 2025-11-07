@@ -7,6 +7,8 @@
 //  change_stream_does_not_expect_txns,
 //  requires_replication,
 //  requires_majority_read_concern,
+//  # TODO SERVER-101940 - Investigate how to re-enable or re-work the test coverage.
+//  __TEMPORARILY_DISABLED__,
 // ]
 import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
@@ -35,18 +37,18 @@ const rst = new ReplSetTest({nodes: 2, oplogSize: oplogSizeMB, nodeOptions: {syn
 rst.startSet({
     setParameter: {
         expiredChangeStreamPreImageRemovalJobSleepSecs: 1,
-        preImagesCollectionTruncateMarkersMinBytes: 1
-    }
+        preImagesCollectionTruncateMarkersMinBytes: 1,
+    },
 });
 rst.initiate();
-const largeStr = 'abcdefghi'.repeat(4 * 1024);
+const largeStr = "abcdefghi".repeat(4 * 1024);
 const primaryNode = rst.getPrimary();
 const testDB = primaryNode.getDB(jsTestName());
 const localDB = primaryNode.getDB("local");
 
 // Activate more detailed logging for pre-image removal.
 const adminDB = primaryNode.getDB("admin");
-adminDB.setLogLevel(1, 'query');
+adminDB.setLogLevel(1, "query");
 
 // Returns documents from the pre-images collection from 'node'.
 function getPreImages(node) {
@@ -60,8 +62,7 @@ function rollOverCurrentOplog() {
     // Keep populating the oplog as long as the first oplog entry is newer (more recent) than
     // 'lastOplogEntry'. The majority concern guarantees that both nodes of the 2-node replica set
     // have identical oplogs.
-    while (timestampCmp(lastOplogEntry.ts,
-                        getFirstOplogEntry(primaryNode, {readConcern: "majority"}).ts) >= 0) {
+    while (timestampCmp(lastOplogEntry.ts, getFirstOplogEntry(primaryNode, {readConcern: "majority"}).ts) >= 0) {
         assert.commandWorked(testDB.tmp.insert({largeStr}, {writeConcern: {w: "majority"}}));
     }
 }
@@ -98,10 +99,8 @@ function retryOnCappedPositionLostError(func, message) {
     assert.soon(() => getPreImages(primaryNode).length === 0);
 
     // Drop and recreate the collections with pre-images recording.
-    const collA = assertDropAndRecreateCollection(
-        testDB, "collA", {changeStreamPreAndPostImages: {enabled: true}});
-    const collB = assertDropAndRecreateCollection(
-        testDB, "collB", {changeStreamPreAndPostImages: {enabled: true}});
+    const collA = assertDropAndRecreateCollection(testDB, "collA", {changeStreamPreAndPostImages: {enabled: true}});
+    const collB = assertDropAndRecreateCollection(testDB, "collB", {changeStreamPreAndPostImages: {enabled: true}});
 
     // Perform insert and update operations.
     for (const coll of [collA, collB]) {
@@ -134,50 +133,16 @@ function retryOnCappedPositionLostError(func, message) {
             preImages = getPreImages(primaryNode);
             const onlyTwoPreImagesLeft = preImages.length === 2;
             const allPreImagesHaveBiggerTimestamp = preImages.every(
-                preImage => timestampCmp(preImage._id.ts, lastOplogEntryToBeRemoved.ts) === 1);
+                (preImage) => timestampCmp(preImage._id.ts, lastOplogEntryToBeRemoved.ts) === 1,
+            );
             return onlyTwoPreImagesLeft && allPreImagesHaveBiggerTimestamp;
         },
-        () => "Existing pre-images: " + tojson(getPreImages(primaryNode)) +
+        () =>
+            "Existing pre-images: " +
+            tojson(getPreImages(primaryNode)) +
             ", first oplog entry: " +
-            tojson(getFirstOplogEntry(primaryNode, {readConcern: "majority"})));
-
-    // If the feature flag is on, then batched deletes will not be used for deletion. Additionally,
-    // since truncates are not replicated, the number of pre-images on the primary may differ from
-    // that of the secondary.
-    if (!FeatureFlagUtil.isPresentAndEnabled(testDB, "UseUnreplicatedTruncatesForDeletions")) {
-        // Because the pre-images collection is implicitly replicated, validate that writes do not
-        // generate oplog entries, with the exception of deletions.
-        const preimagesNs = 'config.system.preimages';
-        // Multi-deletes are batched base on time before performing the deletion, therefore the
-        // deleted pre-images can span through multiple applyOps oplog entries.
-        //
-        // As pre-images span two collections, the minimum number of batches is 2, as we perform
-        // the range-deletion per collection. The maximum number of batches is 4 (one per single
-        // pre-image removed).
-        const expectedNumberOfBatchesRange = [2, 3, 4];
-        const serverStatusBatches = testDB.serverStatus()['batchedDeletes']['batches'];
-        const serverStatusDocs = testDB.serverStatus()['batchedDeletes']['docs'];
-        assert.contains(serverStatusBatches, expectedNumberOfBatchesRange);
-        assert.eq(serverStatusDocs, preImagesToExpire);
-        assert.contains(
-            retryOnCappedPositionLostError(
-                () =>
-                    localDB.oplog.rs
-                        .find(
-                            {ns: 'admin.$cmd', 'o.applyOps.op': 'd', 'o.applyOps.ns': preimagesNs})
-                        .itcount(),
-                "Failed to fetch oplog entries for pre-image deletes"),
-            expectedNumberOfBatchesRange);
-        assert.eq(0,
-                  retryOnCappedPositionLostError(
-                      () => localDB.oplog.rs.find({op: {'$ne': 'd'}, ns: preimagesNs}).itcount(),
-                      "Failed to fetch all oplog entries except pre-image deletes"));
-
-        // Verify that pre-images collection content on the primary node is the same as on the
-        // secondary.
-        rst.awaitReplication();
-        assert(bsonWoCompare(getPreImages(primaryNode), getPreImages(rst.getSecondary())) === 0);
-    }
+            tojson(getFirstOplogEntry(primaryNode, {readConcern: "majority"})),
+    );
 }
 
 // Increase oplog size on each node to prevent oplog entries from being deleted which removes a

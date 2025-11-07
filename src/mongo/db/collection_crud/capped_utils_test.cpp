@@ -27,24 +27,17 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <ostream>
-#include <string>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/collection_crud/capped_utils.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/crypto/encryption_fields_gen.h"
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/client.h"
-#include "mongo/db/collection_crud/capped_utils.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/member_state.h"
@@ -58,11 +51,17 @@
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <ostream>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
 
 namespace {
 
@@ -112,17 +111,31 @@ ServiceContext::UniqueOperationContext makeOpCtx() {
  * Returns true if collection exists.
  */
 bool collectionExists(OperationContext* opCtx, const NamespaceString& nss) {
-    return static_cast<bool>(AutoGetCollectionForRead(opCtx, nss).getCollection());
+    const auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest(nss,
+                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     repl::ReadConcernArgs::get(opCtx),
+                                     AcquisitionPrerequisites::kRead),
+        MODE_IS);
+    return coll.exists();
 }
 
 /**
  * Returns collection options.
  */
 CollectionOptions getCollectionOptions(OperationContext* opCtx, const NamespaceString& nss) {
-    AutoGetCollectionForRead collection(opCtx, nss);
-    ASSERT_TRUE(collection) << "Unable to get collections options for " << nss.toStringForErrorMsg()
-                            << " because collection does not exist.";
-    return collection->getCollectionOptions();
+    const auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest(nss,
+                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     repl::ReadConcernArgs::get(opCtx),
+                                     AcquisitionPrerequisites::kRead),
+        MODE_IS);
+    ASSERT_TRUE(coll.exists()) << "Unable to get collections options for "
+                               << nss.toStringForErrorMsg()
+                               << " because collection does not exist.";
+    return coll.getCollectionPtr()->getCollectionOptions();
 }
 
 // Size of capped collection to be passed to convertToCapped() which accepts a double.
@@ -134,8 +147,9 @@ TEST_F(CappedUtilsTest, ConvertToCappedReturnsNamespaceNotFoundIfCollectionIsMis
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.t");
     auto opCtx = makeOpCtx();
     ASSERT_FALSE(collectionExists(opCtx.get(), nss));
-    ASSERT_THROWS_CODE(
-        convertToCapped(opCtx.get(), nss, 1000.0), DBException, ErrorCodes::NamespaceNotFound);
+    ASSERT_THROWS_CODE(convertToCapped(opCtx.get(), nss, 1000.0, false /*fromMigrate*/),
+                       DBException,
+                       ErrorCodes::NamespaceNotFound);
 }
 
 TEST_F(CappedUtilsTest, ConvertToCappedUpdatesCollectionOptionsOnSuccess) {
@@ -146,7 +160,7 @@ TEST_F(CappedUtilsTest, ConvertToCappedUpdatesCollectionOptionsOnSuccess) {
     auto options = getCollectionOptions(opCtx.get(), nss);
     ASSERT_FALSE(options.capped);
 
-    convertToCapped(opCtx.get(), nss, cappedCollectionSize);
+    convertToCapped(opCtx.get(), nss, cappedCollectionSize, false /*fromMigrate*/);
     options = getCollectionOptions(opCtx.get(), nss);
     ASSERT_TRUE(options.capped);
     ASSERT_APPROX_EQUAL(cappedCollectionSize, options.cappedSize, 0.001)

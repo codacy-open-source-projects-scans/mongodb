@@ -28,11 +28,12 @@
  */
 
 
-#include <benchmark/benchmark.h>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <iostream>
+
+#include <benchmark/benchmark.h>
 
 // IWYU pragma: no_include "libunwind-x86_64.h"
 
@@ -41,7 +42,6 @@
 #include "mongo/util/stacktrace.h"
 
 #if defined(MONGO_CONFIG_USE_LIBUNWIND)
-#define UNW_LOCAL_ONLY
 #include <libunwind.h>  // IWYU pragma: keep
 #endif
 

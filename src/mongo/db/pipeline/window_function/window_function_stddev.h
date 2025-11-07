@@ -31,6 +31,7 @@
 
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/window_function/window_function.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -38,8 +39,8 @@ class WindowFunctionStdDev : public WindowFunctionState {
 protected:
     explicit WindowFunctionStdDev(ExpressionContext* const expCtx, bool isSamp)
         : WindowFunctionState(expCtx),
-          _sum(AccumulatorSum::create(expCtx)),
-          _m2(AccumulatorSum::create(expCtx)),
+          _sum(make_intrusive<AccumulatorSum>(expCtx)),
+          _m2(make_intrusive<AccumulatorSum>(expCtx)),
           _isSamp(isSamp),
           _count(0),
           _nonfiniteValueCount(0) {
@@ -91,8 +92,8 @@ private:
         // quantity should be 1 if adding value, -1 if removing value
         if (!value.numeric())
             return;
-        if ((value.getType() == NumberDouble && !std::isfinite(value.getDouble())) ||
-            (value.getType() == NumberDecimal && !value.getDecimal().isFinite())) {
+        if ((value.getType() == BSONType::numberDouble && !std::isfinite(value.getDouble())) ||
+            (value.getType() == BSONType::numberDecimal && !value.getDecimal().isFinite())) {
             _nonfiniteValueCount += quantity;
             return;
         }

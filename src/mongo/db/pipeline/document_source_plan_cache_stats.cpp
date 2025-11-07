@@ -27,20 +27,20 @@
  *    it in the license file.
  */
 
-#include <boost/smart_ptr.hpp>
-#include <iterator>
-#include <list>
-
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/document_source_plan_cache_stats.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/pipeline/document_source_plan_cache_stats.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/util/str.h"
+
+#include <iterator>
+#include <list>
+
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -48,13 +48,14 @@ REGISTER_DOCUMENT_SOURCE(planCacheStats,
                          DocumentSourcePlanCacheStats::LiteParsed::parse,
                          DocumentSourcePlanCacheStats::createFromBson,
                          AllowedWithApiStrict::kNeverInVersion1);
+ALLOCATE_DOCUMENT_SOURCE_ID(planCacheStats, DocumentSourcePlanCacheStats::id)
 
 boost::intrusive_ptr<DocumentSource> DocumentSourcePlanCacheStats::createFromBson(
     BSONElement spec, const boost::intrusive_ptr<ExpressionContext>& pExpCtx) {
     uassert(ErrorCodes::FailedToParse,
             str::stream() << kStageName
                           << " value must be an object. Found: " << typeName(spec.type()),
-            spec.type() == BSONType::Object);
+            spec.type() == BSONType::object);
 
     bool allHosts = false;
     BSONObjIterator specIt(spec.embeddedObject());
@@ -85,11 +86,10 @@ DocumentSourcePlanCacheStats::DocumentSourcePlanCacheStats(
 
 void DocumentSourcePlanCacheStats::serializeToArray(std::vector<Value>& array,
                                                     const SerializationOptions& opts) const {
-    if (opts.verbosity) {
+    if (opts.isSerializingForExplain()) {
         tassert(7513100,
                 "$planCacheStats is not equipped to serialize in explain mode with redaction on",
-                !opts.transformIdentifiers &&
-                    opts.literalPolicy == LiteralSerializationPolicy::kUnchanged);
+                opts.isDefaultSerialization());
         array.push_back(Value{Document{
             {kStageName,
              Document{{"match"_sd, _absorbedMatch ? Value{_absorbedMatch->getQuery()} : Value{}},
@@ -102,8 +102,8 @@ void DocumentSourcePlanCacheStats::serializeToArray(std::vector<Value>& array,
     }
 }
 
-Pipeline::SourceContainer::iterator DocumentSourcePlanCacheStats::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator DocumentSourcePlanCacheStats::doOptimizeAt(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     auto itrToNext = std::next(itr);
     if (itrToNext == container->end()) {
         return itrToNext;
@@ -116,50 +116,6 @@ Pipeline::SourceContainer::iterator DocumentSourcePlanCacheStats::doOptimizeAt(
 
     _absorbedMatch = subsequentMatch;
     return container->erase(itrToNext);
-}
-
-DocumentSource::GetNextResult DocumentSourcePlanCacheStats::doGetNext() {
-    if (!_haveRetrievedStats) {
-        const auto matchExpr = _absorbedMatch ? _absorbedMatch->getMatchExpression() : nullptr;
-        _results = pExpCtx->getMongoProcessInterface()->getMatchingPlanCacheEntryStats(
-            pExpCtx->getOperationContext(), pExpCtx->getNamespaceString(), matchExpr);
-
-        _resultsIter = _results.begin();
-        _haveRetrievedStats = true;
-    }
-
-    if (_resultsIter == _results.end()) {
-        return GetNextResult::makeEOF();
-    }
-
-    MutableDocument nextPlanCacheEntry{Document{*_resultsIter++}};
-
-    // Augment each plan cache entry with this node's host and port string.
-    if (_hostAndPort.empty()) {
-        _hostAndPort =
-            pExpCtx->getMongoProcessInterface()->getHostAndPort(pExpCtx->getOperationContext());
-        uassert(31386,
-                "Aggregation request specified 'fromRouter' but unable to retrieve host name "
-                "for $planCacheStats pipeline stage.",
-                !_hostAndPort.empty());
-    }
-    nextPlanCacheEntry.setField("host", Value{_hostAndPort});
-
-    // If we're returning results to mongos, then additionally augment each plan cache entry with
-    // the shard name, for the node from which we're collecting plan cache information.
-    if (pExpCtx->getFromRouter()) {
-        if (_shardName.empty()) {
-            _shardName =
-                pExpCtx->getMongoProcessInterface()->getShardName(pExpCtx->getOperationContext());
-            uassert(31385,
-                    "Aggregation request specified 'fromRouter' but unable to retrieve shard name "
-                    "for $planCacheStats pipeline stage.",
-                    !_shardName.empty());
-        }
-        nextPlanCacheEntry.setField("shard", Value{_shardName});
-    }
-
-    return nextPlanCacheEntry.freeze();
 }
 
 }  // namespace mongo

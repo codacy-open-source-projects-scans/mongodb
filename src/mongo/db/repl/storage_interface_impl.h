@@ -30,6 +30,25 @@
 
 #pragma once
 
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/index/multikey_paths.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/repl/collection_bulk_loader.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/storage_interface.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/key_string/key_string.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/uuid.h"
+
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -37,29 +56,10 @@
 
 #include <boost/optional/optional.hpp>
 
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/query/index_bounds.h"
-#include "mongo/db/repl/collection_bulk_loader.h"
-#include "mongo/db/repl/oplog.h"
-#include "mongo/db/repl/storage_interface.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/storage/key_string/key_string.h"
-#include "mongo/util/uuid.h"
-
 namespace mongo {
 namespace repl {
 
-class StorageInterfaceImpl : public StorageInterface {
+class MONGO_MOD_OPEN StorageInterfaceImpl : public StorageInterface {
     StorageInterfaceImpl(const StorageInterfaceImpl&) = delete;
     StorageInterfaceImpl& operator=(const StorageInterfaceImpl&) = delete;
 
@@ -218,8 +218,6 @@ public:
     bool supportsRecoverToStableTimestamp(ServiceContext* serviceCtx) const override;
 
     bool supportsRecoveryTimestamp(ServiceContext* serviceCtx) const override;
-
-    void initializeStorageControlsForReplication(ServiceContext* serviceCtx) const override;
 
     boost::optional<Timestamp> getRecoveryTimestamp(ServiceContext* serviceCtx) const override;
 

@@ -29,24 +29,30 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/db/database_name.h"
 #include "mongo/db/profile_filter.h"
 #include "mongo/platform/rwmutex.h"
 #include "mongo/stdx/unordered_map.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
 
 
 namespace mongo {
 
 class ServiceContext;
 
-struct ProfileSettings {
-    int level;
+struct MONGO_MOD_PUB ProfileSettings {
+    int level{0};
     std::shared_ptr<const ProfileFilter> filter;  // nullable
+    Milliseconds slowOpInProgressThreshold{0};
 
-    ProfileSettings(int level, std::shared_ptr<ProfileFilter> filter)
-        : level(level), filter(filter) {
+    ProfileSettings(int level,
+                    std::shared_ptr<ProfileFilter> filter,
+                    Milliseconds slowOpInProgressThreshold)
+        : level(level),
+          filter(std::move(filter)),
+          slowOpInProgressThreshold(slowOpInProgressThreshold) {
         // ProfileSettings represents a state, not a request to change the state.
         // -1 is not a valid profiling level: it is only used in requests, to represent
         // leaving the state unchanged.
@@ -55,9 +61,7 @@ struct ProfileSettings {
 
     ProfileSettings() = default;
 
-    bool operator==(const ProfileSettings& other) const {
-        return level == other.level && filter == other.filter;
-    }
+    bool operator==(const ProfileSettings& other) const = default;
 };
 
 /**
@@ -67,7 +71,7 @@ struct ProfileSettings {
  * All functions that modify the profile settings are assumed to be called very infrequently, and
  * thus enable performance optimizations for calls to read-only functions.
  */
-class DatabaseProfileSettings {
+class MONGO_MOD_PUB DatabaseProfileSettings {
 public:
     static DatabaseProfileSettings& get(ServiceContext* svcCtx);
 
@@ -82,6 +86,11 @@ public:
      * Set the global 'ProfileFilter' default.
      */
     void setDefaultFilter(std::shared_ptr<ProfileFilter> filter);
+
+    /**
+     * Set the global 'ProfileFilter' default.
+     */
+    void setDefaultSlowOpInProgressThreshold(Milliseconds slowOpInProgressThreshold);
 
     /**
      * Return the global 'ProfileFilter' default.
@@ -138,6 +147,7 @@ private:
     // on a database.
     std::shared_ptr<ProfileFilter> _defaultProfileFilter;
     int _defaultLevel = 0;
+    Milliseconds _defaultSlowOpInProgressThreshold{5000};
 };
 
 

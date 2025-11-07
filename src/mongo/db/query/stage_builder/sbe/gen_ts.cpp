@@ -27,36 +27,30 @@
  *    it in the license file.
  */
 
-#include "mongo/db/query/stage_builder/sbe/builder.h"
-
-#include <iostream>
-#include <utility>
-#include <vector>
-
-#include "mongo/db/exec/sbe/stages/block_to_row.h"
-#include "mongo/db/exec/sbe/stages/makeobj.h"
-#include "mongo/db/exec/sbe/stages/ts_bucket_to_cell_block.h"
 #include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/exec/sbe/values/cell_interface.h"
 #include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/matcher/match_expression_dependencies.h"
-#include "mongo/db/query/optimizer/explain.h"
-#include "mongo/db/query/query_solution.h"
-#include "mongo/db/query/stage_builder/sbe/abt_holder_impl.h"
+#include "mongo/db/query/compiler/dependency_analysis/match_expression_dependencies.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
+#include "mongo/db/query/stage_builder/sbe/abt_defs.h"
+#include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/db/query/stage_builder/sbe/gen_filter.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr_helpers.h"
 #include "mongo/db/query/stage_builder/sbe/vectorizer.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
-#include "mongo/logv2/log.h"
+
+#include <iostream>
+#include <utility>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo::stage_builder {
 namespace {
 struct CellPathReqsRet {
-    std::vector<sbe::value::CellBlock::PathRequest> topLevelPaths;
-    std::vector<sbe::value::CellBlock::PathRequest> traversePaths;
+    std::vector<sbe::value::PathRequest> topLevelPaths;
+    std::vector<sbe::value::PathRequest> traversePaths;
 };
 
 // The set of fields specified in a bucket spec contains the fields that should be available after
@@ -74,32 +68,32 @@ CellPathReqsRet getCellPathReqs(const UnpackTsBucketNode* unpackNode) {
         if (computedFromMeta.find(field) == computedFromMeta.end()) {
             // For each path requested by the query we generate a 'topLevelPath' version, which is
             // just the value of the top level field, with no traversal.
-            ret.topLevelPaths.emplace_back(sbe::value::CellBlock::PathRequest(
-                sbe::value::CellBlock::kProject,
-                {sbe::value::CellBlock::Get{field}, sbe::value::CellBlock::Id{}}));
+            ret.topLevelPaths.emplace_back(sbe::value::PathRequest(
+                sbe::value::kProject, {sbe::value::Get{field}, sbe::value::Id{}}));
         }
     }
 
     // The event filter must work on top of "traversed" version of the data, which, when accessed,
     // has array elements flattened.
     if (unpackNode->eventFilter) {
-        DepsTracker eventFilterDeps = {};
-        match_expression::addDependencies(unpackNode->eventFilter.get(), &eventFilterDeps);
+        DepsTracker eventFilterDeps;
+        ;
+        dependency_analysis::addDependencies(unpackNode->eventFilter.get(), &eventFilterDeps);
         for (const auto& path : eventFilterDeps.fields) {
-            auto rootField = FieldPath::extractFirstFieldFromDottedPath(path).toString();
+            auto rootField = std::string{FieldPath::extractFirstFieldFromDottedPath(path)};
             // Check that the collected path doesn't start from a metadata field, and that it's one
             // of the fields that the query uses.
             if (fieldSet.find(rootField) != fieldSet.end() &&
                 computedFromMeta.find(rootField) == computedFromMeta.end()) {
 
                 FieldPath fp(path);
-                sbe::value::CellBlock::PathRequest pReq(sbe::value::CellBlock::kFilter);
+                sbe::value::PathRequest pReq(sbe::value::kFilter);
                 for (size_t i = 0; i < fp.getPathLength(); i++) {
-                    pReq.path.insert(pReq.path.end(),
-                                     {sbe::value::CellBlock::Get{fp.getFieldName(i).toString()},
-                                      sbe::value::CellBlock::Traverse{}});
+                    pReq.path.insert(
+                        pReq.path.end(),
+                        {sbe::value::Get{std::string{fp.getFieldName(i)}}, sbe::value::Traverse{}});
                 }
-                pReq.path.emplace_back(sbe::value::CellBlock::Id{});
+                pReq.path.emplace_back(sbe::value::Id{});
                 ret.traversePaths.emplace_back(std::move(pReq));
             }
         }
@@ -178,6 +172,7 @@ std::pair<SbStage, SbSlotVector> buildBlockToRow(SbStage stage,
 
     // Remove all the slots that should not be propagated.
     outputs.clear(PlanStageSlots::kBlockSelectivityBitmap);
+    outputs.clear(PlanStageSlots::kResult);
     for (const auto& name : outputsToRemove) {
         outputs.clear(name);
     }
@@ -258,11 +253,11 @@ SbExpr buildVectorizedExpr(StageBuilderState& state,
         Vectorizer::VariableTypes bindings;
         for (const SbSlot& slot : outputs.getAllSlotsInOrder()) {
             if (auto typeSig = slot.getTypeSignature()) {
-                bindings.emplace(getABTVariableName(slot), std::make_pair(*typeSig, boost::none));
+                bindings.emplace(slot.toProjectionName(), std::make_pair(*typeSig, boost::none));
             }
         }
 
-        auto abt = abt::unwrap(scalarExpression.extractABT());
+        auto abt = scalarExpression.extractABT();
 
         Vectorizer::Tree blockABT = vectorizer.vectorize(abt, bindings, bitmapSlot);
 
@@ -271,7 +266,7 @@ SbExpr buildVectorizedExpr(StageBuilderState& state,
             // the type of the slots, as they are now block variables that are not supported by
             // the type checker. Manually set the type signature of the SbExpr to be whatever
             // was reported by the vectorizer.
-            auto e = SbExpr{abt::wrap(std::move(*blockABT.expr))};
+            auto e = SbExpr{std::move(*blockABT.expr)};
             e.optimize(state);
             e.setTypeSignature(blockABT.typeSignature);
 
@@ -342,10 +337,9 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildUnpackTsBucket(
     // Add a TsBucketToCellBlock stage. Among other things, this stage generates a "default" bitmap
     // of all 1s in to this slot. The bitmap represents which documents are present (1) and which
     // have been filtered (0). This bitmap is carried around until the block_to_row stage.
-    auto [stage, bitmapSlot, metaSlot, topLevelSlots, traverseSlots] =
+    auto [stage, bitmapSlot, topLevelSlots, traverseSlots] =
         b.makeTsBucketToCellBlock(std::move(childStage),
                                   bucketSlot,
-                                  false /* reqMeta */,
                                   topLevelReqs,
                                   traverseReqs,
                                   unpackNode->bucketSpec.timeField());
@@ -372,11 +366,14 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildUnpackTsBucket(
     // simplest case of such pipeline: [{$project: {x: 1}},{$match: {y: 42}}]). We'll stub out the
     // non-produced fields with the 'Nothing' slot.
     {
-        DepsTracker eventFilterDeps = {};
-        match_expression::addDependencies(eventFilter, &eventFilterDeps);
+        DepsTracker eventFilterDeps;
+        dependency_analysis::addDependencies(eventFilter, &eventFilterDeps);
         for (const std::string& eventFilterPath : eventFilterDeps.fields) {
+            if (eventFilterPath.empty()) {
+                continue;
+            }
             const auto& name =
-                std::pair(PlanStageSlots::kField, FieldPath(eventFilterPath).front().toString());
+                std::pair(PlanStageSlots::kField, std::string{FieldPath(eventFilterPath).front()});
             if (!outputs.has(name)) {
                 outputs.set(name, SbSlot{_state.getNothingSlot()});
             }

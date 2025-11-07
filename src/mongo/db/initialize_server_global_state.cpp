@@ -28,15 +28,16 @@
  */
 
 
-#include <boost/filesystem/operations.hpp>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fmt/format.h>
 #include <iostream>
 #include <string>
 #include <system_error>
+
+#include <boost/filesystem/operations.hpp>
+#include <fmt/format.h>
 // IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 
 #ifndef _WIN32
@@ -62,10 +63,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_domain_global.h"
-#include "mongo/logv2/log_manager.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/exit_code.h"
@@ -74,6 +72,7 @@
 #include "mongo/util/str.h"
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/time_support.h"
+
 #include <boost/filesystem/exception.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/move/utility_core.hpp>
@@ -284,14 +283,14 @@ static bool forkServer() {
         croak("closing read side of pipe failed");
     serverGlobalParams.forkReadyFd = readyPipe[1];
 
-    std::cout << format(FMT_STRING("forked process: {}"), getpid()) << std::endl;
+    std::cout << fmt::format("forked process: {}", getpid()) << std::endl;
 
     auto stdioDetach = [](FILE* fp, const char* mode, StringData name) {
         if (!freopen("/dev/null", mode, fp)) {
             int saved = errno;
-            std::cout << format(FMT_STRING("Cannot reassign {} while forking server process: {}"),
-                                name,
-                                strerror(saved))
+            std::cout << fmt::format("Cannot reassign {} while forking server process: {}",
+                                     name,
+                                     strerror(saved))
                       << std::endl;
             return false;
         }
@@ -332,7 +331,7 @@ bool checkAndMoveLogFile(const std::string& absoluteLogpath) {
                                     << "\" should name a file, not a directory.");
         }
 
-        if (!serverGlobalParams.logAppend && boost::filesystem::is_regular(absoluteLogpath)) {
+        if (!serverGlobalParams.logAppend && boost::filesystem::is_regular_file(absoluteLogpath)) {
             std::string renameTarget = absoluteLogpath + "." + terseCurrentTimeForFilename();
             boost::system::error_code ec;
             boost::filesystem::rename(absoluteLogpath, renameTarget, ec);
@@ -375,11 +374,18 @@ MONGO_INITIALIZER_GENERAL(ServerLogRedirection,
 #endif  // defined(_WIN32)
     } else if (!serverGlobalParams.logpath.empty()) {
         fassert(16448, !serverGlobalParams.logWithSyslog);
-        std::string absoluteLogpath =
-            boost::filesystem::absolute(serverGlobalParams.logpath, serverGlobalParams.cwd)
-                .string();
-
-        bool exists = checkAndMoveLogFile(absoluteLogpath);
+        auto [absoluteLogpath, exists] = [&] {
+#ifdef _WIN32
+            constexpr auto kWindowsNUL = "NUL"_sd;
+            if (serverGlobalParams.logpath == kWindowsNUL) {
+                return std::make_tuple(std::string(kWindowsNUL), true);
+            }
+#endif  // defined(_WIN32)
+            std::string absolutePath =
+                boost::filesystem::absolute(serverGlobalParams.logpath, serverGlobalParams.cwd)
+                    .string();
+            return std::make_tuple(absolutePath, checkAndMoveLogFile(absolutePath));
+        }();
 
         lv2Config.consoleEnabled = false;
         lv2Config.fileEnabled = true;
@@ -534,7 +540,7 @@ Status ProcessUMaskServerParameter::setFromString(StringData value,
     }
 
     // Convert base from octal
-    auto vstr = value.toString();
+    auto vstr = std::string{value};
     const char* val = vstr.c_str();
     char* end = nullptr;
 

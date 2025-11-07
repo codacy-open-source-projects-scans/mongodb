@@ -27,29 +27,30 @@
  *    it in the license file.
  */
 
-#include <string>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/update/unset_node.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/json.h"
-#include "mongo/bson/mutable/document.h"
+#include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/update/unset_node.h"
 #include "mongo/db/update/update_executor.h"
 #include "mongo/db/update/update_node_test_fixture.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <string>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
 
 using UnsetNodeTest = UpdateTestFixture;
+using UnsetNodeDeathTest = UnsetNodeTest;
 
-DEATH_TEST_REGEX(UnsetNodeTest,
+DEATH_TEST_REGEX(SimpleUnsetNodeDeathTest,
                  InitFailsForEmptyElement,
                  R"#(Invariant failure.*modExpr.ok\(\))#") {
     auto update = fromjson("{$unset: {}}");
@@ -58,7 +59,7 @@ DEATH_TEST_REGEX(UnsetNodeTest,
     node.init(update["$unset"].embeddedObject().firstElement(), expCtx).transitional_ignore();
 }
 
-DEATH_TEST_REGEX_F(UnsetNodeTest,
+DEATH_TEST_REGEX_F(UnsetNodeDeathTest,
                    ApplyToRootFails,
                    R"#(Invariant failure.*!updateNodeApplyParams.pathTaken.*empty\(\))#") {
     auto update = fromjson("{$unset: {}}");
@@ -70,7 +71,7 @@ DEATH_TEST_REGEX_F(UnsetNodeTest,
     node.apply(getApplyParams(doc.root()), getUpdateNodeApplyParams());
 }
 
-TEST(UnsetNodeTest, InitSucceedsForNonemptyElement) {
+TEST(SimpleUnsetNodeTest, InitSucceedsForNonemptyElement) {
     auto update = fromjson("{$unset: {a: 5}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     UnsetNode node;
@@ -181,7 +182,7 @@ TEST_F(UnsetNodeTest, UnsetNestedPath) {
     UnsetNode node;
     ASSERT_OK(node.init(update["$unset"]["a.b.c"], expCtx));
 
-    mutablebson::Document doc(fromjson("{a: {b: {c: 6}}}}"));
+    mutablebson::Document doc(fromjson("{a: {b: {c: 6}}}"));
     setPathTaken(makeRuntimeUpdatePathForTest("a.b.c"));
     addIndexedPath("a");
     auto result = node.apply(getApplyParams(doc.root()["a"]["b"]["c"]), getUpdateNodeApplyParams());
@@ -200,7 +201,7 @@ TEST_F(UnsetNodeTest, UnsetObject) {
     UnsetNode node;
     ASSERT_OK(node.init(update["$unset"]["a.b"], expCtx));
 
-    mutablebson::Document doc(fromjson("{a: {b: {c: 6}}}}"));
+    mutablebson::Document doc(fromjson("{a: {b: {c: 6}}}"));
     setPathTaken(makeRuntimeUpdatePathForTest("a.b"));
     addIndexedPath("a");
     auto result = node.apply(getApplyParams(doc.root()["a"]["b"]), getUpdateNodeApplyParams());
@@ -374,8 +375,7 @@ TEST_F(UnsetNodeTest, ApplyCannotRemoveRequiredPartOfDBRef) {
     auto result = node.apply(getApplyParams(doc.root()["a"]["$id"]), getUpdateNodeApplyParams());
     ASSERT_FALSE(result.noop);
     ASSERT_FALSE(getIndexAffectedFromLogEntry());
-    auto updated = BSON("a" << BSON("$ref"
-                                    << "c"));
+    auto updated = BSON("a" << BSON("$ref" << "c"));
     ASSERT_EQUALS(updated, doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
 
@@ -396,8 +396,7 @@ TEST_F(UnsetNodeTest, ApplyCanRemoveRequiredPartOfDBRefIfValidateForStorageIsFal
     auto result = node.apply(getApplyParams(doc.root()["a"]["$id"]), getUpdateNodeApplyParams());
     ASSERT_FALSE(result.noop);
     ASSERT_TRUE(getIndexAffectedFromLogEntry());
-    auto updated = BSON("a" << BSON("$ref"
-                                    << "c"));
+    auto updated = BSON("a" << BSON("$ref" << "c"));
     ASSERT_EQUALS(updated, doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
 

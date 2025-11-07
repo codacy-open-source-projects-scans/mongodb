@@ -33,15 +33,6 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <cstdint>
-#include <future>
-#include <new>
-#include <set>
-#include <system_error>
-#include <tuple>
-#include <type_traits>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -51,28 +42,35 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
-#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
-#include "mongo/db/s/shard_server_test_fixture.h"
+#include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/db/update/document_diff_calculator.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/platform/random.h"
 #include "mongo/s/analyze_shard_key_documents_gen.h"
 #include "mongo/s/query_analysis_sample_tracker.h"
 #include "mongo/stdx/future.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/static_immortal.h"
 #include "mongo/util/synchronized_value.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdint>
+#include <future>
+#include <new>
+#include <set>
+#include <system_error>
+#include <tuple>
+#include <type_traits>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -200,6 +198,19 @@ void assertBsonObjEqualUnordered(const BSONObj& lhs, const BSONObj& rhs) {
     ASSERT_EQ(comparator.compare(lhs, rhs), 0);
 }
 
+struct SampledReadQuery {
+    UUID sampleId;
+    BSONObj filter;
+    BSONObj collation;
+};
+
+struct SampledDiff {
+    UUID sampleId;
+    BSONObj preImage;
+    BSONObj postImage;
+    BSONObj diff;
+};
+
 struct QueryAnalysisWriterTest : service_context_test::WithSetupTransportLayer,
                                  public ShardServerTestFixture {
 public:
@@ -225,6 +236,12 @@ public:
     }
 
 protected:
+    // Use mock clock by default to prevent time from advancing during the test which would make
+    // time related checks fail.
+    QueryAnalysisWriterTest(bool useMockClock = true)
+        : ShardServerTestFixture(Options{}.useMockClock(useMockClock),
+                                 false /* setUpMajorityReads */) {}
+
     UUID getCollectionUUID(const NamespaceString& nss) const {
         auto collectionCatalog = CollectionCatalog::get(operationContext());
         return *collectionCatalog->lookupUUIDByNSS(operationContext(), nss);
@@ -236,9 +253,8 @@ protected:
 
     BSONObj makeNonEmptyCollation() {
         int strength = _getRandomInt(5) + 1;
-        return BSON("locale"
-                    << "en_US"
-                    << "strength" << strength);
+        return BSON("locale" << "en_US"
+                             << "strength" << strength);
     }
 
     BSONObj makeLetParameters() {
@@ -252,7 +268,7 @@ protected:
     void assertTTLIndexExists(const NamespaceString& nss, const std::string& name) const {
         DBDirectClient client(operationContext());
         BSONObj result;
-        client.runCommand(nss.dbName(), BSON("listIndexes" << nss.coll().toString()), result);
+        client.runCommand(nss.dbName(), BSON("listIndexes" << nss.coll()), result);
 
         auto indexes = result.getObjectField("cursor").getField("firstBatch").Array();
         auto iter = indexes.begin();
@@ -401,8 +417,7 @@ protected:
     }
 
     void deleteSampledQueryDocuments() const {
-        DBDirectClient client(operationContext());
-        client.remove(NamespaceString::kConfigSampledQueriesNamespace, BSONObj());
+        _deleteConfigDocuments(NamespaceString::kConfigSampledQueriesNamespace);
     }
 
     /**
@@ -417,30 +432,36 @@ protected:
      * Asserts that there is a sampled read query document with the given sample id and that it has
      * the given fields.
      */
-    void assertSampledReadQueryDocument(
-        const UUID& sampleId,
-        const NamespaceString& nss,
-        SampledCommandNameEnum cmdName,
-        const BSONObj& filter,
-        const BSONObj& collation,
-        const boost::optional<BSONObj>& letParameters = boost::none) {
+    void assertSampledReadQueryDocument(const UUID& sampleId,
+                                        const NamespaceString& nss,
+                                        SampledCommandNameEnum cmdName,
+                                        const BSONObj& filter,
+                                        const BSONObj& collation,
+                                        const boost::optional<BSONObj>& letParameters = boost::none,
+                                        const boost::optional<int>& expirationSecs = boost::none) {
         auto doc = _getConfigDocument(NamespaceString::kConfigSampledQueriesNamespace, sampleId);
         auto parsedQueryDoc =
-            SampledQueryDocument::parse(IDLParserContext("QueryAnalysisWriterTest"), doc);
+            SampledQueryDocument::parse(doc, IDLParserContext("QueryAnalysisWriterTest"));
 
         ASSERT_EQ(parsedQueryDoc.getNs(), nss);
         ASSERT_EQ(parsedQueryDoc.getCollectionUuid(), getCollectionUUID(nss));
         ASSERT_EQ(parsedQueryDoc.getSampleId(), sampleId);
         ASSERT(parsedQueryDoc.getCmdName() == cmdName);
-        auto parsedCmd = SampledReadCommand::parse(IDLParserContext("QueryAnalysisWriterTest"),
-                                                   parsedQueryDoc.getCmd());
+        auto parsedCmd = SampledReadCommand::parse(parsedQueryDoc.getCmd(),
+                                                   IDLParserContext("QueryAnalysisWriterTest"));
         ASSERT_BSONOBJ_EQ(parsedCmd.getFilter(), filter);
         ASSERT_BSONOBJ_EQ(parsedCmd.getCollation(), collation);
+
         if (letParameters) {
             ASSERT(parsedCmd.getLet().has_value());
             ASSERT_BSONOBJ_EQ(*parsedCmd.getLet(), *letParameters);
         } else {
             ASSERT(!parsedCmd.getLet().has_value());
+        }
+
+        if (expirationSecs) {
+            ASSERT_EQ(parsedQueryDoc.getExpireAt(),
+                      getServiceContext()->getFastClockSource()->now() + Seconds(*expirationSecs));
         }
     }
 
@@ -452,18 +473,28 @@ protected:
     void assertSampledWriteQueryDocument(const UUID& sampleId,
                                          const NamespaceString& nss,
                                          SampledCommandNameEnum cmdName,
-                                         const CommandRequestType& expectedCmd) {
+                                         const CommandRequestType& expectedCmd,
+                                         const boost::optional<int>& expirationSecs = boost::none) {
         auto doc = _getConfigDocument(NamespaceString::kConfigSampledQueriesNamespace, sampleId);
         auto parsedQueryDoc =
-            SampledQueryDocument::parse(IDLParserContext("QueryAnalysisWriterTest"), doc);
+            SampledQueryDocument::parse(doc, IDLParserContext("QueryAnalysisWriterTest"));
 
         ASSERT_EQ(parsedQueryDoc.getNs(), nss);
         ASSERT_EQ(parsedQueryDoc.getCollectionUuid(), getCollectionUUID(nss));
         ASSERT_EQ(parsedQueryDoc.getSampleId(), sampleId);
         ASSERT(parsedQueryDoc.getCmdName() == cmdName);
-        auto parsedCmd = CommandRequestType::parse(IDLParserContext("QueryAnalysisWriterTest"),
-                                                   parsedQueryDoc.getCmd());
+        auto parsedCmd = CommandRequestType::parse(parsedQueryDoc.getCmd(),
+                                                   IDLParserContext("QueryAnalysisWriterTest"));
         ASSERT_BSONOBJ_EQ(parsedCmd.toBSON(), expectedCmd.toBSON());
+
+        if (expirationSecs) {
+            ASSERT_EQ(parsedQueryDoc.getExpireAt(),
+                      getServiceContext()->getFastClockSource()->now() + Seconds(*expirationSecs));
+        }
+    }
+
+    void deleteSampledDiffDocuments() const {
+        _deleteConfigDocuments(NamespaceString::kConfigSampledQueriesDiffNamespace);
     }
 
     /*
@@ -484,7 +515,7 @@ protected:
         auto doc =
             _getConfigDocument(NamespaceString::kConfigSampledQueriesDiffNamespace, sampleId);
         auto parsedDiffDoc =
-            SampledQueryDiffDocument::parse(IDLParserContext("QueryAnalysisWriterTest"), doc);
+            SampledQueryDiffDocument::parse(doc, IDLParserContext("QueryAnalysisWriterTest"));
 
         ASSERT_EQ(parsedDiffDoc.getNs(), nss);
         ASSERT_EQ(parsedDiffDoc.getCollectionUuid(), getCollectionUUID(nss));
@@ -497,6 +528,22 @@ protected:
      */
     void assertNoSampling(const NamespaceString& nss, const UUID& collUuid);
 
+    /*
+     * Turns on the failpoint to mock an error for the insert statement for the sample with the
+     * given id. Returns the failpoint.
+     */
+    FailPoint* configureMockErrorInsertResponseFailPoint(const UUID& sampleId, int errorIndex) {
+        auto failpoint =
+            globalFailPointRegistry().find("queryAnalysisWriterMockInsertCommandResponse");
+        failpoint->setMode(FailPoint::Mode::alwaysOn,
+                           0,
+                           BSON("_id" << sampleId << "errorDetails"
+                                      << BSON("index" << errorIndex << "code"
+                                                      << ErrorCodes::InternalError << "errmsg"
+                                                      << "Mock error")));
+        return failpoint;
+    }
+
     // Test with both empty and non-empty filter and collation to verify that the
     // QueryAnalysisWriter doesn't require filter or collation to be non-empty.
     const BSONObj emptyFilter{};
@@ -505,8 +552,12 @@ protected:
     const BSONObj let = BSON("x" << 1);
     // Test with EncryptionInformation to verify that QueryAnalysisWriter does not persist the
     // WriteCommandRequestBase fields, especially this sensitive field.
-    const EncryptionInformation encryptionInformation{BSON("foo"
-                                                           << "bar")};
+    const EncryptionInformation encryptionInformation{BSON("foo" << "bar")};
+
+    int oneSecondExpirationSecs = 1;
+    int oneWeekExpirationSecs = 7 * 24 * 3600;
+    int oneMonthExpirationSecs = 30 * 24 * 3600;
+    int oneYearExpirationSecs = 365 * 24 * 3600;
 
 private:
     int32_t _getRandomInt(int32_t max) {
@@ -538,6 +589,14 @@ private:
         auto cursor = client.find(std::move(findRequest));
         ASSERT(cursor->more());
         return cursor->next();
+    }
+
+    /**
+     * Removes all the documents in the config collection 'configNss'.
+     */
+    void _deleteConfigDocuments(const NamespaceString configNss) const {
+        DBDirectClient client(operationContext());
+        client.remove(configNss, {} /* filter */, true /*removeMany=*/);
     }
 
     // This fixture manually flushes sampled queries and diffs.
@@ -674,7 +733,10 @@ TEST_F(QueryAnalysisWriterTest, FindQuery) {
 
     auto testFindCmdCommon = [&](const BSONObj& filter,
                                  const BSONObj& collation,
+                                 int expirationSecs,
                                  const boost::optional<BSONObj>& letParameters = boost::none) {
+        RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
+                                                        expirationSecs};
         auto sampleId = UUID::gen();
 
         writer.addFindQuery(sampleId, nss0, filter, collation, letParameters).get();
@@ -683,65 +745,87 @@ TEST_F(QueryAnalysisWriterTest, FindQuery) {
         ASSERT_EQ(writer.getQueriesCountForTest(), 0);
 
         ASSERT_EQ(getSampledQueryDocumentsCount(nss0), 1);
-        assertSampledReadQueryDocument(
-            sampleId, nss0, SampledCommandNameEnum::kFind, filter, collation, letParameters);
+        assertSampledReadQueryDocument(sampleId,
+                                       nss0,
+                                       SampledCommandNameEnum::kFind,
+                                       filter,
+                                       collation,
+                                       letParameters,
+                                       expirationSecs);
 
         deleteSampledQueryDocuments();
     };
 
-    testFindCmdCommon(makeNonEmptyFilter(), makeNonEmptyCollation());
-    testFindCmdCommon(makeNonEmptyFilter(), emptyCollation);
-    testFindCmdCommon(emptyFilter, makeNonEmptyCollation());
-    testFindCmdCommon(emptyFilter, emptyCollation);
-    testFindCmdCommon(emptyFilter, emptyCollation, makeLetParameters());
+    testFindCmdCommon(makeNonEmptyFilter(), makeNonEmptyCollation(), oneSecondExpirationSecs);
+    testFindCmdCommon(makeNonEmptyFilter(), emptyCollation, oneWeekExpirationSecs);
+    testFindCmdCommon(emptyFilter, makeNonEmptyCollation(), oneMonthExpirationSecs);
+    testFindCmdCommon(emptyFilter, emptyCollation, oneYearExpirationSecs);
+    testFindCmdCommon(emptyFilter, emptyCollation, oneSecondExpirationSecs, makeLetParameters());
 }
 
 TEST_F(QueryAnalysisWriterTest, CountQuery) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
-    auto testCountCmdCommon = [&](const BSONObj& filter, const BSONObj& collation) {
-        auto sampleId = UUID::gen();
+    auto testCountCmdCommon =
+        [&](const BSONObj& filter, const BSONObj& collation, int expirationSecs) {
+            RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
+                                                            expirationSecs};
 
-        writer.addCountQuery(sampleId, nss0, filter, collation).get();
-        ASSERT_EQ(writer.getQueriesCountForTest(), 1);
-        writer.flushQueriesForTest(operationContext());
-        ASSERT_EQ(writer.getQueriesCountForTest(), 0);
+            auto sampleId = UUID::gen();
 
-        ASSERT_EQ(getSampledQueryDocumentsCount(nss0), 1);
-        assertSampledReadQueryDocument(
-            sampleId, nss0, SampledCommandNameEnum::kCount, filter, collation);
+            writer.addCountQuery(sampleId, nss0, filter, collation).get();
+            ASSERT_EQ(writer.getQueriesCountForTest(), 1);
+            writer.flushQueriesForTest(operationContext());
+            ASSERT_EQ(writer.getQueriesCountForTest(), 0);
 
-        deleteSampledQueryDocuments();
-    };
+            ASSERT_EQ(getSampledQueryDocumentsCount(nss0), 1);
+            assertSampledReadQueryDocument(sampleId,
+                                           nss0,
+                                           SampledCommandNameEnum::kCount,
+                                           filter,
+                                           collation,
+                                           boost::none /* letParameters */,
+                                           expirationSecs);
 
-    testCountCmdCommon(makeNonEmptyFilter(), makeNonEmptyCollation());
-    testCountCmdCommon(makeNonEmptyFilter(), emptyCollation);
-    testCountCmdCommon(emptyFilter, makeNonEmptyCollation());
-    testCountCmdCommon(emptyFilter, emptyCollation);
+            deleteSampledQueryDocuments();
+        };
+
+    testCountCmdCommon(makeNonEmptyFilter(), makeNonEmptyCollation(), oneSecondExpirationSecs);
+    testCountCmdCommon(makeNonEmptyFilter(), emptyCollation, oneWeekExpirationSecs);
+    testCountCmdCommon(emptyFilter, makeNonEmptyCollation(), oneMonthExpirationSecs);
+    testCountCmdCommon(emptyFilter, emptyCollation, oneYearExpirationSecs);
 }
 
 TEST_F(QueryAnalysisWriterTest, DistinctQuery) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
-    auto testDistinctCmdCommon = [&](const BSONObj& filter, const BSONObj& collation) {
-        auto sampleId = UUID::gen();
+    auto testDistinctCmdCommon =
+        [&](const BSONObj& filter, const BSONObj& collation, int expirationSecs) {
+            RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
+                                                            expirationSecs};
+            auto sampleId = UUID::gen();
 
-        writer.addDistinctQuery(sampleId, nss0, filter, collation).get();
-        ASSERT_EQ(writer.getQueriesCountForTest(), 1);
-        writer.flushQueriesForTest(operationContext());
-        ASSERT_EQ(writer.getQueriesCountForTest(), 0);
+            writer.addDistinctQuery(sampleId, nss0, filter, collation).get();
+            ASSERT_EQ(writer.getQueriesCountForTest(), 1);
+            writer.flushQueriesForTest(operationContext());
+            ASSERT_EQ(writer.getQueriesCountForTest(), 0);
 
-        ASSERT_EQ(getSampledQueryDocumentsCount(nss0), 1);
-        assertSampledReadQueryDocument(
-            sampleId, nss0, SampledCommandNameEnum::kDistinct, filter, collation);
+            ASSERT_EQ(getSampledQueryDocumentsCount(nss0), 1);
+            assertSampledReadQueryDocument(sampleId,
+                                           nss0,
+                                           SampledCommandNameEnum::kDistinct,
+                                           filter,
+                                           collation,
+                                           boost::none /* letParameters */,
+                                           expirationSecs);
 
-        deleteSampledQueryDocuments();
-    };
+            deleteSampledQueryDocuments();
+        };
 
-    testDistinctCmdCommon(makeNonEmptyFilter(), makeNonEmptyCollation());
-    testDistinctCmdCommon(makeNonEmptyFilter(), emptyCollation);
-    testDistinctCmdCommon(emptyFilter, makeNonEmptyCollation());
-    testDistinctCmdCommon(emptyFilter, emptyCollation);
+    testDistinctCmdCommon(makeNonEmptyFilter(), makeNonEmptyCollation(), oneSecondExpirationSecs);
+    testDistinctCmdCommon(makeNonEmptyFilter(), emptyCollation, oneWeekExpirationSecs);
+    testDistinctCmdCommon(emptyFilter, makeNonEmptyCollation(), oneMonthExpirationSecs);
+    testDistinctCmdCommon(emptyFilter, emptyCollation, oneYearExpirationSecs);
 }
 
 TEST_F(QueryAnalysisWriterTest, AggregateQuery) {
@@ -749,7 +833,10 @@ TEST_F(QueryAnalysisWriterTest, AggregateQuery) {
 
     auto testAggregateCmdCommon = [&](const BSONObj& filter,
                                       const BSONObj& collation,
+                                      int expirationSecs,
                                       const boost::optional<BSONObj>& letParameters = boost::none) {
+        RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
+                                                        expirationSecs};
         auto sampleId = UUID::gen();
 
         writer.addAggregateQuery(sampleId, nss0, filter, collation, letParameters).get();
@@ -758,17 +845,23 @@ TEST_F(QueryAnalysisWriterTest, AggregateQuery) {
         ASSERT_EQ(writer.getQueriesCountForTest(), 0);
 
         ASSERT_EQ(getSampledQueryDocumentsCount(nss0), 1);
-        assertSampledReadQueryDocument(
-            sampleId, nss0, SampledCommandNameEnum::kAggregate, filter, collation, letParameters);
+        assertSampledReadQueryDocument(sampleId,
+                                       nss0,
+                                       SampledCommandNameEnum::kAggregate,
+                                       filter,
+                                       collation,
+                                       letParameters,
+                                       expirationSecs);
 
         deleteSampledQueryDocuments();
     };
 
-    testAggregateCmdCommon(makeNonEmptyFilter(), makeNonEmptyCollation());
-    testAggregateCmdCommon(makeNonEmptyFilter(), emptyCollation);
-    testAggregateCmdCommon(emptyFilter, makeNonEmptyCollation());
-    testAggregateCmdCommon(emptyFilter, emptyCollation);
-    testAggregateCmdCommon(emptyFilter, emptyCollation, makeLetParameters());
+    testAggregateCmdCommon(makeNonEmptyFilter(), makeNonEmptyCollation(), oneSecondExpirationSecs);
+    testAggregateCmdCommon(makeNonEmptyFilter(), emptyCollation, oneWeekExpirationSecs);
+    testAggregateCmdCommon(emptyFilter, makeNonEmptyCollation(), oneMonthExpirationSecs);
+    testAggregateCmdCommon(emptyFilter, emptyCollation, oneYearExpirationSecs);
+    testAggregateCmdCommon(
+        emptyFilter, emptyCollation, oneSecondExpirationSecs, makeLetParameters());
 }
 
 DEATH_TEST_F(QueryAnalysisWriterTest, UpdateQueryNotMarkedForSampling, "invariant") {
@@ -784,6 +877,10 @@ TEST_F(QueryAnalysisWriterTest, UpdateQueriesMarkedForSampling) {
         makeUpdateCommandRequest(nss0, 3, {0, 2} /* markForSampling */);
     ASSERT_EQ(expectedSampledCmds.size(), 2U);
 
+    auto expirationSecs = oneYearExpirationSecs;
+    RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
+                                                    expirationSecs};
+
     writer.addUpdateQuery(operationContext(), originalCmd, 0).get();
     writer.addUpdateQuery(operationContext(), originalCmd, 2).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 2);
@@ -795,7 +892,8 @@ TEST_F(QueryAnalysisWriterTest, UpdateQueriesMarkedForSampling) {
         assertSampledWriteQueryDocument(sampleId,
                                         expectedSampledCmd.getNamespace(),
                                         SampledCommandNameEnum::kUpdate,
-                                        expectedSampledCmd);
+                                        expectedSampledCmd,
+                                        expirationSecs);
     }
 }
 
@@ -812,6 +910,10 @@ TEST_F(QueryAnalysisWriterTest, DeleteQueriesMarkedForSampling) {
         makeDeleteCommandRequest(nss0, 3, {1, 2} /* markForSampling */);
     ASSERT_EQ(expectedSampledCmds.size(), 2U);
 
+    auto expirationSecs = oneYearExpirationSecs;
+    RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
+                                                    expirationSecs};
+
     writer.addDeleteQuery(operationContext(), originalCmd, 1).get();
     writer.addDeleteQuery(operationContext(), originalCmd, 2).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 2);
@@ -823,7 +925,8 @@ TEST_F(QueryAnalysisWriterTest, DeleteQueriesMarkedForSampling) {
         assertSampledWriteQueryDocument(sampleId,
                                         expectedSampledCmd.getNamespace(),
                                         SampledCommandNameEnum::kDelete,
-                                        expectedSampledCmd);
+                                        expectedSampledCmd,
+                                        expirationSecs);
     }
 }
 
@@ -842,6 +945,10 @@ TEST_F(QueryAnalysisWriterTest, FindAndModifyQueryUpdateMarkedForSampling) {
     ASSERT_EQ(expectedSampledCmds.size(), 1U);
     auto [sampleId, expectedSampledCmd] = *expectedSampledCmds.begin();
 
+    auto expirationSecs = oneYearExpirationSecs;
+    RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
+                                                    expirationSecs};
+
     writer.addFindAndModifyQuery(operationContext(), originalCmd).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 1);
     writer.flushQueriesForTest(operationContext());
@@ -851,7 +958,8 @@ TEST_F(QueryAnalysisWriterTest, FindAndModifyQueryUpdateMarkedForSampling) {
     assertSampledWriteQueryDocument(sampleId,
                                     expectedSampledCmd.getNamespace(),
                                     SampledCommandNameEnum::kFindAndModify,
-                                    expectedSampledCmd);
+                                    expectedSampledCmd,
+                                    expirationSecs);
 }
 
 TEST_F(QueryAnalysisWriterTest, FindAndModifyQueryRemoveMarkedForSampling) {
@@ -862,6 +970,10 @@ TEST_F(QueryAnalysisWriterTest, FindAndModifyQueryRemoveMarkedForSampling) {
     ASSERT_EQ(expectedSampledCmds.size(), 1U);
     auto [sampleId, expectedSampledCmd] = *expectedSampledCmds.begin();
 
+    auto expirationSecs = oneYearExpirationSecs;
+    RAIIServerParameterControllerForTest expiration{"queryAnalysisSampleExpirationSecs",
+                                                    expirationSecs};
+
     writer.addFindAndModifyQuery(operationContext(), originalCmd).get();
     ASSERT_EQ(writer.getQueriesCountForTest(), 1);
     writer.flushQueriesForTest(operationContext());
@@ -871,7 +983,8 @@ TEST_F(QueryAnalysisWriterTest, FindAndModifyQueryRemoveMarkedForSampling) {
     assertSampledWriteQueryDocument(sampleId,
                                     expectedSampledCmd.getNamespace(),
                                     SampledCommandNameEnum::kFindAndModify,
-                                    expectedSampledCmd);
+                                    expectedSampledCmd,
+                                    expirationSecs);
 }
 
 TEST_F(QueryAnalysisWriterTest, MultipleQueriesAndCollections) {
@@ -917,7 +1030,8 @@ TEST_F(QueryAnalysisWriterTest, MultipleQueriesAndCollections) {
                                    originalCountCollation);
 }
 
-TEST_F(QueryAnalysisWriterTest, DuplicateQueries) {
+// Test that the QueryAnalysisWriter correctly discards a duplicate query.
+TEST_F(QueryAnalysisWriterTest, RemoveDuplicateQueriesBasic) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
     auto findSampleId = UUID::gen();
@@ -981,17 +1095,179 @@ TEST_F(QueryAnalysisWriterTest, DuplicateQueries) {
                                    originalCountCollation);
 }
 
+// Test that the QueryAnalysisWriter correctly discards a duplicate query even when there is some
+// other error in the same or subsequent insert batch.
+TEST_F(QueryAnalysisWriterTest, RemoveDuplicateQueriesAfterOtherWriteError) {
+    auto& writer = *QueryAnalysisWriter::get(operationContext());
+
+    for (auto batchSize : {2, 3, 5}) {
+        LOGV2(9881701,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "batchSize"_attr = batchSize);
+
+        RAIIServerParameterControllerForTest maxBatchSize{"queryAnalysisWriterMaxBatchSize",
+                                                          batchSize};
+
+        auto sampleId0 = UUID::gen();
+        auto filter0 = makeNonEmptyFilter();
+        auto collation0 = makeNonEmptyCollation();
+
+        writer.addFindQuery(sampleId0, nss0, filter0, collation0, boost::none /* letParameters */)
+            .get();
+        ASSERT_EQ(writer.getQueriesCountForTest(), 1);
+
+        writer.flushQueriesForTest(operationContext());
+        ASSERT_EQ(writer.getQueriesCountForTest(), 0);
+        ASSERT_EQ(getSampledQueryDocumentsCount(nss0), 1);
+        assertSampledReadQueryDocument(
+            sampleId0, nss0, SampledCommandNameEnum::kFind, filter0, collation0);
+
+        auto numQueries = 7;
+        std::vector<SampledReadQuery> expectedSampledCmds;
+        expectedSampledCmds.push_back({sampleId0, filter0, collation0});
+        for (auto i = 1; i < numQueries; i++) {
+            auto sampleId = UUID::gen();
+            auto filter = makeNonEmptyFilter();
+            auto collation = makeNonEmptyCollation();
+
+            writer.addFindQuery(sampleId, nss0, filter, collation, boost::none /* letParameters */)
+                .get();
+            if (i == 2) {
+                // This is a duplicate.
+                writer
+                    .addFindQuery(
+                        sampleId0, nss0, filter0, collation0, boost::none /* letParameters */)
+                    .get();
+            }
+            expectedSampledCmds.push_back({sampleId, filter, collation});
+        }
+        ASSERT_EQ(writer.getQueriesCountForTest(), numQueries);
+
+        // Set a failpoint to mock an error for the insert statement for query2 and then verify that
+        // the duplicate query0 did not get added back. Please note that the queries in the buffer
+        // are flushed from the back.
+        // - When the batch size is 2, query0 is in the same insert batch as query2 (3rd batch).
+        // - When the batch size is 3, query0 is also in the same insert batch as query2 (2nd
+        //   batch).
+        // - When the batch size is 5, query0 is in the insert batch before the one that query2 is
+        //   in (1st batch).
+        auto failingSampleId = expectedSampledCmds[2].sampleId;
+        // The index of the insert statement for query2 depends on the batch size but it is not used
+        // so just set it to a placeholder integer.
+        auto failingIndex = 1;
+        auto failpoint = configureMockErrorInsertResponseFailPoint(failingSampleId, failingIndex);
+
+        writer.flushQueriesForTest(operationContext());
+        auto docs = writer.getQueriesForTest();
+        ASSERT_GT(docs.size(), 0);
+        for (const auto& doc : docs) {
+            auto queryDoc = SampledQueryDocument::parse(
+                doc, IDLParserContext("RemoveDuplicateQueriesOtherWriteError"));
+            ASSERT_NE(queryDoc.getSampleId(), sampleId0);
+        }
+
+        failpoint->setMode(FailPoint::Mode::off);
+        writer.flushQueriesForTest(operationContext());
+        ASSERT_EQ(writer.getQueriesCountForTest(), 0);
+        ASSERT_EQ(getSampledQueryDocumentsCount(nss0), numQueries);
+        for (const auto& [sampleId, filter, collation] : expectedSampledCmds) {
+            assertSampledReadQueryDocument(
+                sampleId, nss0, SampledCommandNameEnum::kFind, filter, collation);
+        }
+
+        deleteSampledQueryDocuments();
+    }
+}
+
+TEST_F(QueryAnalysisWriterTest, RemoveBadQueriesTopLevelError) {
+    auto& writer = *QueryAnalysisWriter::get(operationContext());
+
+    for (const auto& errorCode : QueryAnalysisWriter::kNonRetryableInsertErrorCodes) {
+        if (errorCode == ErrorCodes::DuplicateKey) {
+            // The DuplicateKey error is a write error and is tested separately in other unit tests.
+            continue;
+        }
+
+        LOGV2(9885201,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "errorCode"_attr = errorCode);
+
+        auto sampleId0 = UUID::gen();
+        auto filter0 = makeNonEmptyFilter();
+        auto collation0 = makeNonEmptyCollation();
+
+        writer.addFindQuery(sampleId0, nss0, filter0, collation0, boost::none /* letParameters */)
+            .get();
+        ASSERT_EQ(writer.getQueriesCountForTest(), 1);
+
+        auto failpoint = globalFailPointRegistry().find("failCommand");
+        failpoint->setMode(FailPoint::alwaysOn,
+                           0,
+                           BSON("failCommands" << BSON_ARRAY("insert") << "namespace"
+                                               << NamespaceString::kConfigSampledQueriesNamespace
+                                                      .toStringForErrorMsg()
+                                               << "errorCode" << errorCode << "failInternalCommands"
+                                               << true << "failLocalClients" << true));
+
+        writer.flushQueriesForTest(operationContext());
+        ASSERT_EQ(writer.getQueriesCountForTest(), 0);
+        ASSERT_EQ(getSampledQueryDocumentsCount(nss0), 0);
+
+        failpoint->setMode(FailPoint::off);
+    }
+}
+
+TEST_F(QueryAnalysisWriterTest, RemoveBadQueriesWriteError) {
+    auto& writer = *QueryAnalysisWriter::get(operationContext());
+
+    for (const auto& errorCode : QueryAnalysisWriter::kNonRetryableInsertErrorCodes) {
+        if (errorCode == ErrorCodes::DuplicateKey) {
+            // The DuplicateKey error is a write error and is tested separately in other unit tests.
+            continue;
+        }
+
+        LOGV2(9885202,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "errorCode"_attr = errorCode);
+
+        auto sampleId0 = UUID::gen();
+        auto filter0 = makeNonEmptyFilter();
+        auto collation0 = makeNonEmptyCollation();
+
+        writer.addFindQuery(sampleId0, nss0, filter0, collation0, boost::none /* letParameters */)
+            .get();
+        ASSERT_EQ(writer.getQueriesCountForTest(), 1);
+
+        auto failpoint =
+            globalFailPointRegistry().find("queryAnalysisWriterMockInsertCommandResponse");
+        failpoint->setMode(FailPoint::Mode::alwaysOn,
+                           0,
+                           BSON("_id" << sampleId0 << "errorDetails"
+                                      << BSON("index" << 0 << "code" << errorCode << "errmsg"
+                                                      << "Mock error")));
+
+        writer.flushQueriesForTest(operationContext());
+        ASSERT_EQ(writer.getQueriesCountForTest(), 0);
+
+        failpoint->setMode(FailPoint::off);
+    }
+}
+
 TEST_F(QueryAnalysisWriterTest, QueriesMultipleBatches_MaxBatchSize) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
     RAIIServerParameterControllerForTest maxBatchSize{"queryAnalysisWriterMaxBatchSize", 2};
     auto numQueries = 5;
 
-    std::vector<std::tuple<UUID, BSONObj, BSONObj>> expectedSampledCmds;
+    std::vector<SampledReadQuery> expectedSampledCmds;
     for (auto i = 0; i < numQueries; i++) {
         auto sampleId = UUID::gen();
         auto filter = makeNonEmptyFilter();
         auto collation = makeNonEmptyCollation();
+
         writer.addAggregateQuery(sampleId, nss0, filter, collation, boost::none /* letParameters */)
             .get();
         expectedSampledCmds.push_back({sampleId, filter, collation});
@@ -1011,11 +1287,12 @@ TEST_F(QueryAnalysisWriterTest, QueriesMultipleBatchesFewQueries_MaxBSONObjSize)
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
     auto numQueries = 3;
-    std::vector<std::tuple<UUID, BSONObj, BSONObj>> expectedSampledCmds;
+    std::vector<SampledReadQuery> expectedSampledCmds;
     for (auto i = 0; i < numQueries; i++) {
         auto sampleId = UUID::gen();
         auto filter = BSON(std::string(BSONObjMaxUserSize / 2, 'a') << 1);
         auto collation = makeNonEmptyCollation();
+
         writer.addAggregateQuery(sampleId, nss0, filter, collation, boost::none /* letParameters */)
             .get();
         expectedSampledCmds.push_back({sampleId, filter, collation});
@@ -1035,11 +1312,12 @@ TEST_F(QueryAnalysisWriterTest, QueriesMultipleBatchesManyQueries_MaxBSONObjSize
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
     auto numQueries = 75'000;
-    std::vector<std::tuple<UUID, BSONObj, BSONObj>> expectedSampledCmds;
+    std::vector<SampledReadQuery> expectedSampledCmds;
     for (auto i = 0; i < numQueries; i++) {
         auto sampleId = UUID::gen();
         auto filter = makeNonEmptyFilter();
         auto collation = makeNonEmptyCollation();
+
         writer.addAggregateQuery(sampleId, nss0, filter, collation, boost::none /* letParameters */)
             .get();
         expectedSampledCmds.push_back({sampleId, filter, collation});
@@ -1183,7 +1461,13 @@ TEST_F(QueryAnalysisWriterTest, FlushAfterAddFindAndModifyIfExceedsSizeLimit) {
                                     expectedSampledCmd1);
 }
 
-TEST_F(QueryAnalysisWriterTest, AddQueriesBackAfterWriteError) {
+struct QueryAnalysisWriterTestAfterWriteError : public QueryAnalysisWriterTest {
+protected:
+    // The unit tests in this fixture would hang if mock clock is used.
+    QueryAnalysisWriterTestAfterWriteError() : QueryAnalysisWriterTest(false /* useMockClock */) {}
+};
+
+TEST_F(QueryAnalysisWriterTestAfterWriteError, AddQueriesBackAfterWriteError) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
     auto originalFilter = makeNonEmptyFilter();
@@ -1243,7 +1527,7 @@ TEST_F(QueryAnalysisWriterTest, AddQueriesBackAfterWriteError) {
     }
 }
 
-TEST_F(QueryAnalysisWriterTest, RemoveDuplicatesFromBufferAfterWriteError) {
+TEST_F(QueryAnalysisWriterTestAfterWriteError, RemoveDuplicatesFromBufferAfterWriteError) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
     auto originalFilter = makeNonEmptyFilter();
@@ -1392,7 +1676,8 @@ TEST_F(QueryAnalysisWriterTest, DiffsMultipleQueriesAndCollections) {
     assertDiffDocument(sampleId2, nss1, *doc_diff::computeInlineDiff(preImage2, postImage2));
 }
 
-TEST_F(QueryAnalysisWriterTest, DuplicateDiffs) {
+// Test that the QueryAnalysisWriter correctly discards a duplicate diff.
+TEST_F(QueryAnalysisWriterTest, RemoveDuplicateDiffsBasic) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
     auto collUuid0 = getCollectionUUID(nss0);
@@ -1431,6 +1716,164 @@ TEST_F(QueryAnalysisWriterTest, DuplicateDiffs) {
     assertDiffDocument(sampleId2, nss0, *doc_diff::computeInlineDiff(preImage2, postImage2));
 }
 
+// Test that the QueryAnalysisWriter correctly discards a duplicate diff even when there is some
+// other error in the same or subsequent insert batch.
+TEST_F(QueryAnalysisWriterTest, RemoveDuplicateDiffsAfterOtherWriteError) {
+    auto& writer = *QueryAnalysisWriter::get(operationContext());
+    auto collUuid0 = getCollectionUUID(nss0);
+
+    for (auto batchSize : {2, 3, 5}) {
+        LOGV2(9881702,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "batchSize"_attr = batchSize);
+
+        RAIIServerParameterControllerForTest maxBatchSize{"queryAnalysisWriterMaxBatchSize",
+                                                          batchSize};
+
+        auto sampleId0 = UUID::gen();
+        auto preImage0 = BSON("a0" << 0);
+        auto postImage0 = BSON("a0" << 1);
+        auto diff0 = *doc_diff::computeInlineDiff(preImage0, postImage0);
+
+        writer.addDiff(sampleId0, nss0, collUuid0, preImage0, postImage0).get();
+        ASSERT_EQ(writer.getDiffsCountForTest(), 1);
+
+        writer.flushDiffsForTest(operationContext());
+        ASSERT_EQ(writer.getDiffsCountForTest(), 0);
+        ASSERT_EQ(getDiffDocumentsCount(nss0), 1);
+        assertDiffDocument(sampleId0, nss0, diff0);
+
+        auto numDiffs = 7;
+        std::vector<SampledDiff> expectedSampledDiffs;
+        expectedSampledDiffs.push_back({sampleId0, preImage0, postImage0, diff0});
+        for (auto i = 1; i < numDiffs; i++) {
+            auto sampleId = UUID::gen();
+            auto fieldName = "a" + std::to_string(i);
+            auto preImage = BSON(fieldName << 0);
+            auto postImage = BSON(fieldName << 1);
+            auto diff = *doc_diff::computeInlineDiff(preImage, postImage);
+
+            writer.addDiff(sampleId, nss0, collUuid0, preImage, postImage).get();
+            if (i == 2) {
+                // This is a duplicate.
+                writer.addDiff(sampleId0, nss0, collUuid0, preImage0, postImage0).get();
+            }
+            expectedSampledDiffs.push_back(
+                {sampleId, std::move(preImage), std::move(postImage), std::move(diff)});
+        }
+        ASSERT_EQ(writer.getDiffsCountForTest(), numDiffs);
+
+        // Set a failpoint to mock an error for the insert statement for diff2 and then verify that
+        // the duplicate diff0 did not get added back. Please note that the diffs in the buffer are
+        // flushed from the back.
+        // - When the batch size is 2, diff0 is in the same insert batch as diff2 (3rd batch).
+        // - When the batch size is 3, diff0 is also in the same insert batch as diff2 (2nd batch).
+        // - When the batch size is 5, diff0 is in the insert batch before the one that diff2 is in
+        //   (1st batch).
+        auto failingSampleId = expectedSampledDiffs[2].sampleId;
+        // The index of the insert statement for diff2 depends on the batch size but it is not used
+        // so just set it to a placeholder integer.
+        auto failingIndex = 1;
+        auto failpoint = configureMockErrorInsertResponseFailPoint(failingSampleId, failingIndex);
+
+        writer.flushDiffsForTest(operationContext());
+        auto docs = writer.getDiffsForTest();
+        ASSERT_GT(docs.size(), 0);
+        for (const auto& doc : docs) {
+            auto diffDoc = SampledQueryDiffDocument::parse(
+                doc, IDLParserContext("RemoveDuplicateDiffsAfterOtherWriteError"));
+            ASSERT_NE(diffDoc.getSampleId(), sampleId0);
+        }
+
+        failpoint->setMode(FailPoint::Mode::off);
+        writer.flushDiffsForTest(operationContext());
+        ASSERT_EQ(getDiffDocumentsCount(nss0), numDiffs);
+        for (const auto& [sampleId, _, __, diff] : expectedSampledDiffs) {
+            assertDiffDocument(sampleId, nss0, diff);
+        }
+
+        deleteSampledDiffDocuments();
+    }
+}
+
+TEST_F(QueryAnalysisWriterTest, RemoveBadDiffsTopLevelError) {
+    auto& writer = *QueryAnalysisWriter::get(operationContext());
+    auto collUuid0 = getCollectionUUID(nss0);
+
+    for (auto errorCode : QueryAnalysisWriter::kNonRetryableInsertErrorCodes) {
+        if (errorCode == ErrorCodes::DuplicateKey) {
+            // The DuplicateKey error is a write error and is tested separately in other unit tests.
+            continue;
+        }
+
+        LOGV2(9881703,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "errorCode"_attr = errorCode);
+
+        auto sampleId0 = UUID::gen();
+        auto preImage0 = BSON("a0" << 0);
+        auto postImage0 = BSON("a0" << 1);
+
+        writer.addDiff(sampleId0, nss0, collUuid0, preImage0, postImage0).get();
+        ASSERT_EQ(writer.getDiffsCountForTest(), 1);
+
+        auto failpoint = globalFailPointRegistry().find("failCommand");
+        failpoint->setMode(
+            FailPoint::alwaysOn,
+            0,
+            BSON("failCommands"
+                 << BSON_ARRAY("insert") << "namespace"
+                 << NamespaceString::kConfigSampledQueriesDiffNamespace.toStringForErrorMsg()
+                 << "errorCode" << errorCode << "failInternalCommands" << true << "failLocalClients"
+                 << true));
+
+        writer.flushDiffsForTest(operationContext());
+        ASSERT_EQ(writer.getDiffsCountForTest(), 0);
+        ASSERT_EQ(getDiffDocumentsCount(nss0), 0);
+
+        failpoint->setMode(FailPoint::off);
+    }
+}
+
+TEST_F(QueryAnalysisWriterTest, RemoveBadDiffsWriteError) {
+    auto& writer = *QueryAnalysisWriter::get(operationContext());
+    auto collUuid0 = getCollectionUUID(nss0);
+
+    for (const auto& errorCode : QueryAnalysisWriter::kNonRetryableInsertErrorCodes) {
+        if (errorCode == ErrorCodes::DuplicateKey) {
+            // The DuplicateKey error is a write error and is tested separately in other unit tests.
+            continue;
+        }
+
+        LOGV2(9885204,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "errorCode"_attr = errorCode);
+
+        auto sampleId0 = UUID::gen();
+        auto preImage0 = BSON("a0" << 0);
+        auto postImage0 = BSON("a0" << 1);
+
+        writer.addDiff(sampleId0, nss0, collUuid0, preImage0, postImage0).get();
+        ASSERT_EQ(writer.getDiffsCountForTest(), 1);
+
+        auto failpoint =
+            globalFailPointRegistry().find("queryAnalysisWriterMockInsertCommandResponse");
+        failpoint->setMode(FailPoint::Mode::alwaysOn,
+                           0,
+                           BSON("_id" << sampleId0 << "errorDetails"
+                                      << BSON("index" << 0 << "code" << errorCode << "errmsg"
+                                                      << "Mock error")));
+
+        writer.flushDiffsForTest(operationContext());
+        ASSERT_EQ(writer.getDiffsCountForTest(), 0);
+
+        failpoint->setMode(FailPoint::off);
+    }
+}
+
 TEST_F(QueryAnalysisWriterTest, DiffsMultipleBatches_MaxBatchSize) {
     auto& writer = *QueryAnalysisWriter::get(operationContext());
 
@@ -1438,21 +1881,22 @@ TEST_F(QueryAnalysisWriterTest, DiffsMultipleBatches_MaxBatchSize) {
     auto numDiffs = 5;
     auto collUuid0 = getCollectionUUID(nss0);
 
-    std::vector<std::pair<UUID, BSONObj>> expectedSampledDiffs;
+    std::vector<SampledDiff> expectedSampledDiffs;
     for (auto i = 0; i < numDiffs; i++) {
         auto sampleId = UUID::gen();
         auto preImage = BSON("a" << 0);
         auto postImage = BSON(("a" + std::to_string(i)) << 1);
+        auto diff = *doc_diff::computeInlineDiff(preImage, postImage);
+
         writer.addDiff(sampleId, nss0, collUuid0, preImage, postImage).get();
-        expectedSampledDiffs.push_back(
-            {sampleId, *doc_diff::computeInlineDiff(preImage, postImage)});
+        expectedSampledDiffs.push_back({sampleId, preImage, postImage, diff});
     }
     ASSERT_EQ(writer.getDiffsCountForTest(), numDiffs);
     writer.flushDiffsForTest(operationContext());
     ASSERT_EQ(writer.getDiffsCountForTest(), 0);
 
     ASSERT_EQ(getDiffDocumentsCount(nss0), numDiffs);
-    for (const auto& [sampleId, diff] : expectedSampledDiffs) {
+    for (const auto& [sampleId, _, __, diff] : expectedSampledDiffs) {
         assertDiffDocument(sampleId, nss0, diff);
     }
 }
@@ -1463,21 +1907,22 @@ TEST_F(QueryAnalysisWriterTest, DiffsMultipleBatches_MaxBSONObjSize) {
     auto numDiffs = 3;
     auto collUuid0 = getCollectionUUID(nss0);
 
-    std::vector<std::pair<UUID, BSONObj>> expectedSampledDiffs;
+    std::vector<SampledDiff> expectedSampledDiffs;
     for (auto i = 0; i < numDiffs; i++) {
         auto sampleId = UUID::gen();
         auto preImage = BSON("a" << 0);
         auto postImage = BSON(std::string(BSONObjMaxUserSize / 2, 'a') << 1);
+        auto diff = *doc_diff::computeInlineDiff(preImage, postImage);
+
         writer.addDiff(sampleId, nss0, collUuid0, preImage, postImage).get();
-        expectedSampledDiffs.push_back(
-            {sampleId, *doc_diff::computeInlineDiff(preImage, postImage)});
+        expectedSampledDiffs.push_back({sampleId, preImage, postImage, diff});
     }
     ASSERT_EQ(writer.getDiffsCountForTest(), numDiffs);
     writer.flushDiffsForTest(operationContext());
     ASSERT_EQ(writer.getDiffsCountForTest(), 0);
 
     ASSERT_EQ(getDiffDocumentsCount(nss0), numDiffs);
-    for (const auto& [sampleId, diff] : expectedSampledDiffs) {
+    for (const auto& [sampleId, _, __, diff] : expectedSampledDiffs) {
         assertDiffDocument(sampleId, nss0, diff);
     }
 }

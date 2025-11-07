@@ -27,15 +27,16 @@
  *    it in the license file.
  */
 
+#include "mongo/db/pipeline/search/document_source_vector_search.h"
+
 #include "mongo/bson/json.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/search/document_source_internal_search_id_lookup.h"
-#include "mongo/db/pipeline/search/document_source_vector_search.h"
 #include "mongo/db/query/search/mongot_options.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/unittest/death_test.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 
 
 namespace mongo {
@@ -155,7 +156,7 @@ TEST_F(DocumentSourceVectorSearchTest, UnexpectedArgumentIsSerialized) {
     auto dsVectorSearch =
         DocumentSourceVectorSearch::createFromBson(spec.firstElement(), getExpCtx());
     std::vector<Value> vec;
-    dsVectorSearch.front()->serializeToArray(vec);
+    dsVectorSearch->serializeToArray(vec);
     ASSERT(
         !vec[0].getDocument().getField("$vectorSearch").getDocument().getField("extra").missing());
 }
@@ -172,8 +173,9 @@ TEST_F(DocumentSourceVectorSearchTest, EOFWhenCollDoesNotExist) {
         }
     })");
 
-    auto vectorStage = DocumentSourceVectorSearch::createFromBson(spec.firstElement(), expCtx);
-    ASSERT_TRUE(vectorStage.front()->getNext().isEOF());
+    auto vectorSearch = DocumentSourceVectorSearch::createFromBson(spec.firstElement(), expCtx);
+    auto vectorSearchStage = exec::agg::buildStage(vectorSearch);
+    ASSERT_TRUE(vectorSearchStage->getNext().isEOF());
 }
 
 TEST_F(DocumentSourceVectorSearchTest, HasTheCorrectStagesWhenCreated) {
@@ -202,16 +204,11 @@ TEST_F(DocumentSourceVectorSearchTest, HasTheCorrectStagesWhenCreated) {
         }
     })");
 
-    auto vectorStage = DocumentSourceVectorSearch::createFromBson(spec.firstElement(), expCtx);
+    auto singleVectorStage =
+        DocumentSourceVectorSearch::createFromBson(spec.firstElement(), expCtx);
+    auto vectorStage =
+        dynamic_cast<DocumentSourceVectorSearch*>(singleVectorStage.get())->desugar();
 
-    // TODO: SERVER-85426 take the desugar code out of the if statement--i.e., it should always
-    // happen.
-    // TODO: BACKPORT-22945 (8.0) Ensure that using this feature inside a view definition is not
-    // permitted.
-    if (enableUnionWithVectorSearch.load()) {
-        vectorStage =
-            dynamic_cast<DocumentSourceVectorSearch*>(vectorStage.front().get())->desugar();
-    }
     ASSERT_EQUALS(vectorStage.size(), 2UL);
 
     const auto* vectorSearchStage =
@@ -252,7 +249,7 @@ TEST_F(DocumentSourceVectorSearchTest, RedactsCorrectly) {
                 "index": "HASH<x_index>"
             }
         })",
-        redact(*(vectorStage.front())));
+        redact(*vectorStage));
 }
 
 TEST_F(DocumentSourceVectorSearchTest, EmptyStageRedactsCorrectly) {
@@ -270,7 +267,7 @@ TEST_F(DocumentSourceVectorSearchTest, EmptyStageRedactsCorrectly) {
             "$vectorSearch": {
             }
         })",
-        redact(*(vectorStage.front())));
+        redact(*vectorStage));
 }
 
 TEST_F(DocumentSourceVectorSearchTest, BadInputsRedactCorrectly) {
@@ -292,7 +289,7 @@ TEST_F(DocumentSourceVectorSearchTest, BadInputsRedactCorrectly) {
                 "index":"HASH<>"
             }
         })",
-        redact(*(vectorStage.front())));
+        redact(*vectorStage));
 }
 
 }  // namespace

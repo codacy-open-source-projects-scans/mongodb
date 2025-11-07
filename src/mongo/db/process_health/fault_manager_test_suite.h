@@ -29,20 +29,21 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/db/process_health/fault_manager.h"
 #include "mongo/db/process_health/health_observer_mock.h"
 #include "mongo/db/process_health/health_observer_registration.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/transport/transport_layer_manager_impl.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/tick_source_mock.h"
+
+#include <memory>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -65,7 +66,7 @@ inline std::unique_ptr<FaultManagerConfig> getConfigWithDisabledPeriodicChecks()
  * Test wrapper class for FaultManager that has access to protected methods
  * for testing.
  */
-class FaultManagerTestImpl : public FaultManager {
+class MONGO_MOD_NEEDS_REPLACEMENT FaultManagerTestImpl : public FaultManager {
 public:
     FaultManagerTestImpl(ServiceContext* svcCtx,
                          std::shared_ptr<executor::TaskExecutor> taskExecutor,
@@ -102,12 +103,6 @@ public:
         return getOrCreateFault();
     }
 
-    Fault& getFault() {
-        FaultPtr fault = FaultManager::getFault();
-        invariant(fault);
-        return *(static_cast<Fault*>(fault.get()));
-    }
-
     void progressMonitorCheckTest(std::function<void(std::string cause)> crashCb) {
         progressMonitorCheckForTests(crashCb);
     }
@@ -128,9 +123,9 @@ public:
 /**
  * Test suite for fault manager.
  */
-class FaultManagerTest : service_context_test::WithSetupTransportLayer,
-                         service_context_test::RouterRoleOverride,
-                         public ClockSourceMockServiceContextTest {
+class MONGO_MOD_PUBLIC FaultManagerTest : service_context_test::WithSetupTransportLayer,
+                                          service_context_test::RouterRoleOverride,
+                                          public ClockSourceMockServiceContextTest {
 public:
     void setUp() override {
         HealthObserverRegistration::resetObserverFactoriesForTest();

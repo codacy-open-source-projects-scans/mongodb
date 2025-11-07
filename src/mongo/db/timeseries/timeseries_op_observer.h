@@ -29,20 +29,21 @@
 
 #pragma once
 
-#include <cstdint>
-#include <vector>
-
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
-namespace mongo {
+#include <cstdint>
+#include <vector>
+
+namespace MONGO_MOD_PUBLIC mongo {
 
 /**
  * OpObserver for time-series collections. Notify the Bucket Catalog of events so it can update its
@@ -54,10 +55,9 @@ class TimeSeriesOpObserver final : public OpObserverNoop {
 
 public:
     TimeSeriesOpObserver() = default;
-    ~TimeSeriesOpObserver() override = default;
 
     NamespaceFilters getNamespaceFilters() const final {
-        return {NamespaceFilter::kSystem, NamespaceFilter::kSystem};
+        return {NamespaceFilter::kAll, NamespaceFilter::kAll};
     }
 
     void onInserts(OperationContext* opCtx,
@@ -85,9 +85,10 @@ public:
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
-                                  bool markFromMigrate) final;
+                                  bool markFromMigrate,
+                                  bool isTimeseries) final;
 
     void onReplicationRollback(OperationContext* opCtx, const RollbackObserverInfo& rbInfo) final;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

@@ -27,10 +27,11 @@
  *    it in the license file.
  */
 
+#include "mongo/db/service_context.h"
+
 #include "mongo/db/operation_context.h"
 #include "mongo/db/operation_id.h"
 #include "mongo/db/operation_key_manager.h"
-#include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
@@ -321,7 +322,8 @@ TEST_F(ServiceContextOpContextTest, SetKillAllOperationsExcludedClients) {
         auto opCtxNotExcluded = clientNotExcluded->makeOperationContext();
         auto opCtxExcluded = clientExcluded->makeOperationContext();
 
-        getServiceContext()->setKillAllOperations({"Excluded"});
+        getServiceContext()->setKillAllOperations(
+            [](const StringData threadName) { return threadName == "Excluded"; });
 
         ASSERT_EQUALS(opCtxNotExcluded->getKillStatus(), ErrorCodes::InterruptedAtShutdown);
         ASSERT_THROWS_CODE(

@@ -29,26 +29,24 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/stage_constraints.h"
+#include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/db/query/util/deferred.h"
+#include "mongo/util/modules.h"
+
 #include <deque>
 #include <set>
 #include <utility>
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/pipeline/dependencies.h"
-#include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/pipeline/stage_constraints.h"
-#include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/db/query/util/deferred.h"
 
 namespace mongo {
 
@@ -97,13 +95,15 @@ public:
 
     const char* getSourceName() const override;
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kQueue;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const override;
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const override {
+    StageConstraints constraints(PipelineSplitState pipeState) const override {
         if (_constraintsOverride.has_value()) {
             return *_constraintsOverride;
         }
@@ -116,8 +116,8 @@ public:
                                      TransactionRequirement::kAllowed,
                                      LookupRequirement::kAllowed,
                                      UnionRequirement::kAllowed};
-        constraints.requiresInputDocSource = false;
         constraints.isIndependentOfAnyCollection = true;
+        constraints.setConstraintsForNoInputSources();
         return constraints;
     }
 
@@ -158,22 +158,22 @@ public:
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
 protected:
-    // Documents are always returned starting from the front.
-    GetNextResult doGetNext() override;
-
     DeferredQueue _queue;
 
     // An optional alias name is provided for cases like $documents where we want an error message
     // to indicate the name the user provided, not the internal $queue name.
     boost::optional<StringData> _stageNameOverride = boost::none;
 
-    // An optional value provided for cases like '$querySettings' and '$indexStats' where it's
-    // desireable to serialize the stage as something other than '$queue'.
+    // An optional value provided for cases like '$indexStats' where it's desireable to serialize
+    // the stage as something other than '$queue'.
     boost::optional<Value> _serializeOverride = boost::none;
 
     // An optional 'StageConstraints' override useful for cases such as '$indexStats' where fine
     // grained over the constraints are needed.
     boost::optional<StageConstraints> _constraintsOverride = boost::none;
+
+    friend boost::intrusive_ptr<exec::agg::Stage> documentSourceQueueToStageFn(
+        const boost::intrusive_ptr<DocumentSource>&);
 };
 
 }  // namespace mongo

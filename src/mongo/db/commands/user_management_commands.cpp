@@ -27,23 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/optional.hpp>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <set>
-#include <string>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
-#include <absl/container/node_hash_set.h>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -82,7 +65,6 @@
 #include "mongo/db/auth/user_management_commands_parser.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/query_cmd/run_aggregate.h"
 #include "mongo/db/commands/test_commands_enabled.h"
@@ -91,14 +73,14 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbmessage.h"
+#include "mongo/db/local_executor.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
-#include "mongo/db/pipeline/process_interface/replica_set_node_process_interface.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
@@ -106,21 +88,19 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/db/transaction/transaction_participant_resource_yielder.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/op_msg_rpc_impls.h"
 #include "mongo/rpc/reply_interface.h"
-#include "mongo/s/grid.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_set.h"
@@ -143,6 +123,23 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_set.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
@@ -626,7 +623,7 @@ void buildCredentials(BSONObjBuilder* builder, const UserName& userName, const T
         if (digestPassword) {
             hashedPwd = createPasswordDigest(userName.getUser(), password);
         } else {
-            hashedPwd = password.toString();
+            hashedPwd = std::string{password};
         }
         auto sha1Cred = scram::Secrets<SHA1Block>::generateCredentials(
             hashedPwd, saslGlobalParams.scramSHA1IterationCount.load());
@@ -705,7 +702,7 @@ private:
             : UMCTransactionClient(cmdName),
               _client(opCtx->getServiceContext()
                           ->getService(ClusterRole::ShardServer)
-                          ->makeClient(cmdName.toString())),
+                          ->makeClient(std::string{cmdName})),
               _writeConcern(opCtx->getWriteConcern().toBSON().removeField(
                   ReadWriteConcernProvenanceBase::kSourceFieldName)) {
             _vts = auth::ValidatedTenancyScope::get(opCtx);
@@ -745,8 +742,12 @@ private:
             AlternativeClientRegion altClientRegion(_client);
             auto subOpCtx = serviceContext->makeOperationContext(Client::getCurrent());
             auth::ValidatedTenancyScope::set(subOpCtx.get(), _vts);
-            auto responseMessage =
-                serviceEntryPoint->handleRequest(subOpCtx.get(), requestMessage).get().response;
+            auto responseMessage = serviceEntryPoint
+                                       ->handleRequest(subOpCtx.get(),
+                                                       requestMessage,
+                                                       subOpCtx.get()->fastClockSource().now())
+                                       .get()
+                                       .response;
 
             auto replyObj = rpc::makeReply(&responseMessage)->getCommandReply().getOwned();
             uassertStatusOK(getStatusFromWriteCommandReply(replyObj));
@@ -839,9 +840,7 @@ public:
     void run(OperationContext* opCtx,
              unique_function<Status(UMCTransactionClient&)> txnOpsCallback) final {
         auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
-        auto sleepAndCleanupExecutor = serverGlobalParams.clusterRole.has(ClusterRole::None)
-            ? ReplicaSetNodeProcessInterface::getReplicaSetNodeExecutor(opCtx->getServiceContext())
-            : Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+        auto sleepAndCleanupExecutor = getLocalExecutor(opCtx);
 
         // Constructing a SyncTransactionWithRetries causes it to store the write concern from the
         // supplied OperationContext and then wait for that write concern when running/committing
@@ -974,6 +973,10 @@ public:
     using Request = RequestT;
     using Reply = typename RequestT::Reply;
     using TC = TypedCommand<CmdUMCTyped<RequestT, Params>>;
+
+    bool requiresAuthzChecks() const final {
+        return false;
+    }
 
     class Invocation final : public TC::InvocationBase {
     public:
@@ -1119,7 +1122,7 @@ void trimCredentials(OperationContext* opCtx,
     const auto& credsElem = userObj["credentials"];
     uassert(ErrorCodes::UnsupportedFormat,
             "Unable to trim credentials from a user document with no credentials",
-            credsElem.type() == Object);
+            credsElem.type() == BSONType::object);
 
     const auto& creds = credsElem.Obj();
     queryBuilder->append("credentials", creds);
@@ -1191,10 +1194,10 @@ void CmdUMCTyped<CreateUserCommand>::Invocation::typedRun(OperationContext* opCt
 #ifdef MONGO_CONFIG_SSL
     // An internal caller of 'createUser' won't have a transport session bound to the client.
     // Instead, we should retrieve the SSL manager from the SSLManagerCoordinator.
-    const auto& sslManager = [&]() -> std::shared_ptr<SSLManagerInterface> {
+    auto sslConfig = [&]() -> const SSLConfiguration* {
         const auto& session = opCtx->getClient()->session();
         if (session) {
-            return session->getSSLManager();
+            return session->getSSLConfiguration();
         }
         // If SSL is supported but disabled, the SSLManagerCoordinator will not exist. We should
         // return an empty pointer.
@@ -1202,11 +1205,10 @@ void CmdUMCTyped<CreateUserCommand>::Invocation::typedRun(OperationContext* opCt
         if (!sslCoord) {
             return nullptr;
         }
-        return sslCoord->getSSLManager();
+        return &sslCoord->getSSLManager()->getSSLConfiguration();
     }();
-    if (isExternal && sslManager && sslGlobalParams.clusterAuthX509ExtensionValue.empty() &&
-        sslManager->getSSLConfiguration().isClusterMember(
-            userName.getUser(), boost::none /* clusterExtensionValue */)) {
+    if (isExternal && sslConfig && sslGlobalParams.clusterAuthX509ExtensionValue.empty() &&
+        sslConfig->isClusterMember(userName.getUser(), boost::none /* clusterExtensionValue */)) {
         if (gEnforceUserClusterSeparation) {
             uasserted(ErrorCodes::BadValue,
                       "Cannot create an x.509 user with a subjectname that would be "
@@ -1858,7 +1860,7 @@ void handleUmcTransactionFailpoint() {
     auto fp = umcTransaction.scoped();
     if (fp.isActive()) {
         IDLParserContext ctx("umcTransaction");
-        auto delay = UMCTransactionFailPoint::parse(ctx, fp.getData()).getCommitDelayMS();
+        auto delay = UMCTransactionFailPoint::parse(fp.getData(), ctx).getCommitDelayMS();
         LOGV2(4993100,
               "Sleeping prior to committing UMC transaction",
               "duration"_attr = Milliseconds(delay));

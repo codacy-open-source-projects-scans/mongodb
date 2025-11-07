@@ -41,8 +41,7 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_global_options.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/str.h"
 
 namespace {
@@ -87,11 +86,12 @@ void _testValidateMetadata(const StorageEngine::Factory* factory,
 
     Status status = factory->validateMetadata(metadata, storageOptions);
     if (expectedCode != status.code()) {
-        FAIL(str::stream()
-             << "Unexpected StorageEngine::Factory::validateMetadata result. Expected: "
-             << ErrorCodes::errorString(expectedCode) << " but got " << status.toString()
-             << " instead. metadataOptions: " << metadataOptions << "; directoryPerDB: "
-             << directoryPerDB << "; directoryForIndexes: " << directoryForIndexes);
+        FAIL(std::string(str::stream()
+                         << "Unexpected StorageEngine::Factory::validateMetadata result. Expected: "
+                         << ErrorCodes::errorString(expectedCode) << " but got "
+                         << status.toString() << " instead. metadataOptions: " << metadataOptions
+                         << "; directoryPerDB: " << directoryPerDB
+                         << "; directoryForIndexes: " << directoryForIndexes));
     }
 }
 

@@ -26,38 +26,31 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/commands/query_cmd/map_reduce_agg.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/commands/query_cmd/map_reduce_agg.h"
 #include "mongo/db/commands/query_cmd/map_reduce_gen.h"
 #include "mongo/db/commands/query_cmd/map_reduce_global_variable_scope.h"
 #include "mongo/db/commands/query_cmd/map_reduce_out_options.h"
 #include "mongo/db/commands/query_cmd/mr_common.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/exec/disk_use_options_gen.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/pipeline/expression_context_diagnostic_printer.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/command_diagnostic_printer.h"
+#include "mongo/db/profile_settings.h"
 #include "mongo/db/query/explain.h"
+#include "mongo/db/query/explain_diagnostic_printer.h"
 #include "mongo/db/query/map_reduce_output_format.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_executor_factory.h"
@@ -66,7 +59,6 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/debug_util.h"
@@ -74,6 +66,14 @@
 #include "mongo/util/string_map.h"
 #include "mongo/util/timer.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -86,22 +86,33 @@ Rarely _sampler;
 auto makeExpressionContext(OperationContext* opCtx,
                            const MapReduceCommandRequest& parsedMr,
                            boost::optional<ExplainOptions::Verbosity> verbosity) {
-    // AutoGetCollectionForReadCommand will throw if the sharding version for this connection is
-    // out of date.
-    AutoGetCollectionForReadCommandMaybeLockFree ctx(
-        opCtx,
-        parsedMr.getNamespace(),
-        AutoGetCollection::Options{}.viewMode(auto_get_collection::ViewMode::kViewsPermitted));
+    AutoStatsTracker statsTracker(opCtx,
+                                  parsedMr.getNamespace(),
+                                  Top::LockType::ReadLocked,
+                                  AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                                  DatabaseProfileSettings::get(opCtx->getServiceContext())
+                                      .getDatabaseProfileLevel(parsedMr.getNamespace().dbName()));
+
+    // acquireCollectionOrViewMaybeLockFree will throw if the sharding version for this connection
+    // is out of date.
+    const auto collOrView =
+        acquireCollectionOrViewMaybeLockFree(opCtx,
+                                             CollectionOrViewAcquisitionRequest::fromOpCtx(
+                                                 opCtx,
+                                                 parsedMr.getNamespace(),
+                                                 AcquisitionPrerequisites::kRead,
+                                                 AcquisitionPrerequisites::ViewMode::kCanBeView));
     uassert(ErrorCodes::CommandNotSupportedOnView,
             "mapReduce on a view is not supported",
-            !ctx.getView());
+            !collOrView.isView());
+
+    const auto& coll = collOrView.getCollection();
 
     auto [resolvedCollator, _] = resolveCollator(
-        opCtx, parsedMr.getCollation().get_value_or(BSONObj()), ctx.getCollection());
+        opCtx, parsedMr.getCollation().get_value_or(BSONObj()), coll.getCollectionPtr());
 
     // The UUID of the collection for the execution namespace of this aggregation.
-    auto uuid =
-        ctx.getCollection() ? boost::make_optional(ctx.getCollection()->uuid()) : boost::none;
+    auto uuid = coll.exists() ? boost::make_optional(coll.uuid()) : boost::none;
 
     auto runtimeConstants = Variables::generateRuntimeConstants(opCtx);
     if (parsedMr.getScope()) {
@@ -125,7 +136,7 @@ auto makeExpressionContext(OperationContext* opCtx,
             .collUUID(uuid)
             .explain(verbosity)
             .runtimeConstants(runtimeConstants)
-            .tmpDir(storageGlobalParams.dbpath + "/_tmp")
+            .tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp")
             .build();
     return expCtx;
 }
@@ -137,14 +148,6 @@ bool runAggregationMapReduce(OperationContext* opCtx,
                              const BSONObj& cmd,
                              BSONObjBuilder& result,
                              boost::optional<ExplainOptions::Verbosity> verbosity) {
-    // Capture diagnostics for tassert and invariant failures that may occur during query
-    // parsing, planning or execution. No work is done on the hot-path, all computation of
-    // these diagnostics is done lazily during failure handling. This line just creates an
-    // RAII object which holds references to objects on this stack frame, which will be used
-    // to print diagnostics in the event of a tassert or invariant.
-    ScopedDebugInfo mapReduceCmdDiagnostics("commandDiagnostics",
-                                            command_diagnostics::Printer{opCtx});
-
     if (_sampler.tick()) {
         LOGV2_WARNING(5725801,
                       "The map reduce command is deprecated. For more information, see "
@@ -160,24 +163,27 @@ bool runAggregationMapReduce(OperationContext* opCtx,
         return bab.arr();
     };
 
-    Timer cmdTimer;
-
     const auto& vts = auth::ValidatedTenancyScope::get(opCtx);
     auto sc = vts
         ? SerializationContext::stateCommandRequest(vts->hasTenantId(), vts->isFromAtlasProxy())
         : SerializationContext::stateStorageRequest();
     auto parsedMr = MapReduceCommandRequest::parse(
-        IDLParserContext("mapReduce", vts, dbName.tenantId(), sc), cmd);
+        cmd, IDLParserContext("mapReduce", vts, dbName.tenantId(), sc));
 
     // Start the query planning timer right after parsing.
     auto curop = CurOp::get(opCtx);
     curop->beginQueryPlanningTimer();
 
     auto expCtx = makeExpressionContext(opCtx, parsedMr, verbosity);
+
+    // Create an RAII object that prints useful information about the ExpressionContext in the case
+    // of a tassert or crash.
+    ScopedDebugInfo expCtxDiagnostics("ExpCtxDiagnostics",
+                                      diagnostic_printers::ExpressionContextPrinter{expCtx});
     auto runnablePipeline = [&]() {
         auto pipeline = map_reduce_common::translateFromMR(parsedMr, expCtx);
         return expCtx->getMongoProcessInterface()->attachCursorSourceToPipelineForLocalRead(
-            pipeline.release());
+            std::move(pipeline));
     }();
     auto exec = plan_executor_factory::make(expCtx, std::move(runnablePipeline));
     auto&& explainer = exec->getPlanExplainer();
@@ -188,11 +194,18 @@ bool runAggregationMapReduce(OperationContext* opCtx,
     }
 
     try {
+        // Capture diagnostics to be logged in the case of a failure.
+        ScopedDebugInfo explainDiagnostics(
+            "explainDiagnostics", diagnostic_printers::ExplainDiagnosticPrinter{exec.get()});
+
         auto resultArray = exhaustPipelineIntoBSONArray(exec);
 
         if (expCtx->getExplain()) {
+            auto pipelineExec = dynamic_cast<PlanExecutorPipeline*>(exec.get());
+            tassert(
+                10610100, "The plan executor is not of type 'PlanExecutorPipeline'", pipelineExec);
             Explain::explainPipeline(
-                exec.get(), false /* executePipeline  */, *expCtx->getExplain(), cmd, &result);
+                pipelineExec, false /* executePipeline  */, *expCtx->getExplain(), cmd, &result);
         }
 
         PlanSummaryStats planSummaryStats;
@@ -222,14 +235,16 @@ bool runAggregationMapReduce(OperationContext* opCtx,
             stdx::lock_guard<Client> lk(*opCtx->getClient());
             CurOp::get(opCtx)->setNS(lk, parsedMr.getNamespace());
         }
-
+        uassertStatusOK(
+            result.asTempObj().validateBSONObjSize().addContext("mapReduce command failed"));
         return true;
     } catch (DBException& e) {
         uassert(ErrorCodes::CommandNotSupportedOnView,
                 "mapReduce on a view is not supported",
                 e.code() != ErrorCodes::CommandOnShardedViewNotSupportedOnMongod);
 
-        e.addContext("MapReduce internal error");
+        e.addContext(str::stream() << "Executor error during MapReduce command on namespace: "
+                                   << parsedMr.getNamespace().toStringForErrorMsg());
         throw;
     }
 }

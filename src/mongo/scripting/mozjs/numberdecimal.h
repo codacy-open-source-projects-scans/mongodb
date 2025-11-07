@@ -29,14 +29,15 @@
 
 #pragma once
 
+#include "mongo/platform/decimal128.h"
+#include "mongo/scripting/mozjs/base.h"
+#include "mongo/scripting/mozjs/wraptype.h"
+#include "mongo/util/modules.h"
+
 #include <js/CallArgs.h>
 #include <js/Class.h>
 #include <js/PropertySpec.h>
 #include <js/TypeDecls.h>
-
-#include "mongo/platform/decimal128.h"
-#include "mongo/scripting/mozjs/base.h"
-#include "mongo/scripting/mozjs/wraptype.h"
 
 namespace mongo {
 namespace mozjs {
@@ -47,7 +48,7 @@ namespace mozjs {
  * Wraps a 'Decimal128' as its private member
  */
 
-struct NumberDecimalInfo : public BaseInfo {
+struct MONGO_MOD_PUB NumberDecimalInfo : public BaseInfo {
     enum Slots { Decimal128Slot, NumberDecimalInfoSlotCount };
 
     static void construct(JSContext* cx, JS::CallArgs args);

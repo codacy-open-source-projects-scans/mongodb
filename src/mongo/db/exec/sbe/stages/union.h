@@ -29,17 +29,18 @@
 
 #pragma once
 
-#include <cstddef>
-#include <memory>
-#include <queue>
-#include <vector>
-
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/query/stage_types.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <memory>
+#include <queue>
+#include <vector>
 
 namespace mongo::sbe {
 /**
@@ -80,6 +81,10 @@ public:
 protected:
     bool shouldOptimizeSaveState(size_t idx) const final {
         return _currentStageIndex == idx;
+    }
+
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {
+        return;
     }
 
 private:

@@ -30,20 +30,6 @@
 
 #include "mongo/db/transaction/transaction_api.h"
 
-#include <algorithm>
-#include <boost/cstdint.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <cstdint>
-#include <fmt/format.h>
-#include <memory>
-#include <mutex>
-#include <tuple>
-#include <type_traits>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -55,11 +41,11 @@
 #include "mongo/db/commands/txn_cmds_gen.h"
 #include "mongo/db/error_labels.h"
 #include "mongo/db/generic_argument_util.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/read_write_concern_provenance_base_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/session/internal_session_pool.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/session/session_catalog.h"
@@ -71,9 +57,6 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/op_msg.h"
@@ -86,17 +69,27 @@
 #include "mongo/util/future_impl.h"
 #include "mongo/util/str.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <tuple>
+#include <type_traits>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTransaction
 
 MONGO_FAIL_POINT_DEFINE(overrideTransactionApiMaxRetriesToThree);
+MONGO_FAIL_POINT_DEFINE(pauseAfterTxnStarted);
 
 namespace mongo {
-using namespace fmt::literals;
-
-
 namespace txn_api {
-
-
 namespace details {
 
 void Transaction::TransactionState::transitionTo(StateFlag newState) {
@@ -207,12 +200,16 @@ SemiFuture<CommitResult> Transaction::commit() {
         .semi();
 }
 
-SemiFuture<void> Transaction::abort() {
+SemiFuture<AbortResult> Transaction::abort() {
     return _commitOrAbort(DatabaseName::kAdmin, AbortTransaction::kCommandName)
         .thenRunOn(_executor)
         .then([](BSONObj res) {
-            uassertStatusOK(getStatusFromCommandResult(res));
-            uassertStatusOK(getWriteConcernStatusFromCommandResult(res));
+            auto wcErrorHolder = getWriteConcernErrorDetailFromBSONObj(res);
+            WriteConcernErrorDetail wcError;
+            if (wcErrorHolder) {
+                wcErrorHolder->cloneTo(&wcError);
+            }
+            return AbortResult{getStatusFromCommandResult(res), wcError};
         })
         .semi();
 }
@@ -234,7 +231,7 @@ SemiFuture<BSONObj> Transaction::_commitOrAbort(const DatabaseName& dbName, Stri
             return BSON("ok" << 1);
         }
         uassert(5875902,
-                "Internal transaction not in progress, state: {}"_format(_state.toString()),
+                fmt::format("Internal transaction not in progress, state: {}", _state.toString()),
                 _state.is(TransactionState::kStarted) ||
                     // Allows retrying commit.
                     (_state.isInCommit() && cmdName == CommitTransaction::kCommandName) ||
@@ -266,7 +263,7 @@ SemiFuture<BSONObj> Transaction::_commitOrAbort(const DatabaseName& dbName, Stri
             // concern to avoid double applying a transaction due to a transient NoSuchTransaction
             // error response.
             cmdBuilder.append(WriteConcernOptions::kWriteConcernField,
-                              generic_argument_util::kMajorityWriteConcern.toBSON());
+                              defaultMajorityWriteConcernDoNotUse().toBSON());
         } else {
             cmdBuilder.append(WriteConcernOptions::kWriteConcernField, _writeConcern);
         }
@@ -326,8 +323,8 @@ Transaction::ErrorHandlingStep Transaction::handleError(const StatusWith<CommitR
                                                         int attemptCounter) const noexcept {
     stdx::lock_guard<stdx::mutex> lg(_mutex);
     // Errors aborting are always ignored.
-    invariant(!_state.is(TransactionState::kNeedsCleanup) &&
-              !_state.is(TransactionState::kStartedAbort));
+    invariant(!_state.is(TransactionState::kNeedsCleanup));
+    invariant(!_state.is(TransactionState::kStartedAbort));
 
     LOGV2_DEBUG(5875905,
                 3,
@@ -562,75 +559,77 @@ void Transaction::_primeTransaction(OperationContext* opCtx) {
             "database versions without using router commands",
             !OperationShardingState::isComingFromRouter(opCtx) ||
                 _txnClient->runsClusterOperations());
+    {
+        stdx::lock_guard<stdx::mutex> lg(_mutex);
 
-    stdx::lock_guard<stdx::mutex> lg(_mutex);
+        // Extract session options and infer execution context from client's opCtx.
+        auto clientSession = opCtx->getLogicalSessionId();
+        auto clientTxnNumber = opCtx->getTxnNumber();
+        auto clientInMultiDocumentTransaction = opCtx->inMultiDocumentTransaction();
 
-    // Extract session options and infer execution context from client's opCtx.
-    auto clientSession = opCtx->getLogicalSessionId();
-    auto clientTxnNumber = opCtx->getTxnNumber();
-    auto clientInMultiDocumentTransaction = opCtx->inMultiDocumentTransaction();
+        if (!clientSession) {
+            const auto acquiredSession =
+                InternalSessionPool::get(opCtx)->acquireStandaloneSession(opCtx);
+            _acquiredSessionFromPool = true;
+            _setSessionInfo(lg,
+                            acquiredSession.getSessionId(),
+                            acquiredSession.getTxnNumber(),
+                            {true} /* startTransaction */);
+            _execContext = ExecutionContext::kOwnSession;
+        } else if (!clientTxnNumber) {
+            const auto acquiredSession =
+                InternalSessionPool::get(opCtx)->acquireChildSession(opCtx, *clientSession);
+            _acquiredSessionFromPool = true;
+            _setSessionInfo(lg,
+                            acquiredSession.getSessionId(),
+                            acquiredSession.getTxnNumber(),
+                            {true} /* startTransaction */);
+            _execContext = ExecutionContext::kClientSession;
+        } else if (!clientInMultiDocumentTransaction) {
+            _setSessionInfo(
+                lg,
+                makeLogicalSessionIdWithTxnNumberAndUUID(*clientSession, *clientTxnNumber),
+                0 /* txnNumber */,
+                {true} /* startTransaction */);
+            _execContext = ExecutionContext::kClientRetryableWrite;
+        } else {
+            // Note that we don't want to include startTransaction or any first transaction command
+            // fields because we assume that if we're in a client transaction the component tracking
+            // transactions on the process must have already been started (e.g. TransactionRouter or
+            // TransactionParticipant), so when the API sends commands for this transacion that
+            // component will attach the correct fields if targeting new participants. This assumes
+            // this case always uses a client that runs commands against the local process service
+            // entry point, which we verify with this invariant.
+            invariant(_txnClient->supportsClientTransactionContext());
 
-    if (!clientSession) {
-        const auto acquiredSession =
-            InternalSessionPool::get(opCtx)->acquireStandaloneSession(opCtx);
-        _acquiredSessionFromPool = true;
-        _setSessionInfo(lg,
-                        acquiredSession.getSessionId(),
-                        acquiredSession.getTxnNumber(),
-                        {true} /* startTransaction */);
-        _execContext = ExecutionContext::kOwnSession;
-    } else if (!clientTxnNumber) {
-        const auto acquiredSession =
-            InternalSessionPool::get(opCtx)->acquireChildSession(opCtx, *clientSession);
-        _acquiredSessionFromPool = true;
-        _setSessionInfo(lg,
-                        acquiredSession.getSessionId(),
-                        acquiredSession.getTxnNumber(),
-                        {true} /* startTransaction */);
-        _execContext = ExecutionContext::kClientSession;
-    } else if (!clientInMultiDocumentTransaction) {
-        _setSessionInfo(lg,
-                        makeLogicalSessionIdWithTxnNumberAndUUID(*clientSession, *clientTxnNumber),
-                        0 /* txnNumber */,
-                        {true} /* startTransaction */);
-        _execContext = ExecutionContext::kClientRetryableWrite;
-    } else {
-        // Note that we don't want to include startTransaction or any first transaction command
-        // fields because we assume that if we're in a client transaction the component tracking
-        // transactions on the process must have already been started (e.g. TransactionRouter or
-        // TransactionParticipant), so when the API sends commands for this transacion that
-        // component will attach the correct fields if targeting new participants. This assumes this
-        // case always uses a client that runs commands against the local process service entry
-        // point, which we verify with this invariant.
-        invariant(_txnClient->supportsClientTransactionContext());
+            uassert(6648101,
+                    "Cross-shard internal transactions are not supported when run under a client "
+                    "transaction directly on a shard.",
+                    !_txnClient->runsClusterOperations() ||
+                        serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer));
 
-        uassert(6648101,
-                "Cross-shard internal transactions are not supported when run under a client "
-                "transaction directly on a shard.",
-                !_txnClient->runsClusterOperations() ||
-                    serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer));
+            _setSessionInfo(
+                lg, *clientSession, *clientTxnNumber, boost::none /* startTransaction */);
+            _execContext = ExecutionContext::kClientTransaction;
 
-        _setSessionInfo(lg, *clientSession, *clientTxnNumber, boost::none /* startTransaction */);
-        _execContext = ExecutionContext::kClientTransaction;
+            // Skip directly to the started state since we assume the client already started this
+            // transaction.
+            _state.transitionTo(TransactionState::kStarted);
+        }
+        _sessionInfo.setAutocommit(false);
 
-        // Skip directly to the started state since we assume the client already started this
-        // transaction.
-        _state.transitionTo(TransactionState::kStarted);
+        // Extract non-session options. Strip provenance so it can be correctly inferred for the
+        // generated commands as if it came from an external client.
+        _readConcern = repl::ReadConcernArgs::get(opCtx).toBSONInner().removeField(
+            ReadWriteConcernProvenanceBase::kSourceFieldName);
+        _writeConcern = opCtx->getWriteConcern().toBSON().removeField(
+            ReadWriteConcernProvenanceBase::kSourceFieldName);
+        _apiParameters = APIParameters::get(opCtx);
+
+        if (opCtx->hasDeadline()) {
+            _opDeadline = opCtx->getDeadline();
+        }
     }
-    _sessionInfo.setAutocommit(false);
-
-    // Extract non-session options. Strip provenance so it can be correctly inferred for the
-    // generated commands as if it came from an external client.
-    _readConcern = repl::ReadConcernArgs::get(opCtx).toBSONInner().removeField(
-        ReadWriteConcernProvenanceBase::kSourceFieldName);
-    _writeConcern = opCtx->getWriteConcern().toBSON().removeField(
-        ReadWriteConcernProvenanceBase::kSourceFieldName);
-    _apiParameters = APIParameters::get(opCtx);
-
-    if (opCtx->hasDeadline()) {
-        _opDeadline = opCtx->getDeadline();
-    }
-
     LOGV2_DEBUG(5875901,
                 3,
                 "Started internal transaction",
@@ -639,6 +638,9 @@ void Transaction::_primeTransaction(OperationContext* opCtx) {
                 "writeConcern"_attr = _writeConcern,
                 "APIParameters"_attr = _apiParameters,
                 "execContext"_attr = execContextToString(_execContext));
+    if (MONGO_unlikely(pauseAfterTxnStarted.shouldFail())) {
+        pauseAfterTxnStarted.pauseWhileSet();
+    }
 }
 
 LogicalTime Transaction::getOperationTime() const {

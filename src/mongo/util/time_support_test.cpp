@@ -28,33 +28,32 @@
  */
 
 
+#include "mongo/util/time_support.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/init.h"  // IWYU pragma: keep
+#include "mongo/base/initializer.h"
+#include "mongo/base/status.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/errno_util.h"
+#include "mongo/util/str.h"
+
 #include <cstdlib>
 #include <ctime>
-#include <fmt/format.h>
 #include <memory>
 #include <ostream>
 #include <string>
 #include <system_error>
 #include <vector>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/base/init.h"  // IWYU pragma: keep
-#include "mongo/base/initializer.h"
-#include "mongo/base/status.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/errno_util.h"
-#include "mongo/util/str.h"
-#include "mongo/util/time_support.h"
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 
 namespace mongo {
 namespace {
-
-using namespace fmt::literals;
 
 const bool isTimeTSmall = std::numeric_limits<time_t>::digits == 31;
 
@@ -99,13 +98,12 @@ constexpr Date_t mkDate(DateParts dp) {
 /**
  * To make this test deterministic, we set the time zone to America/New_York.
  */
-#ifdef _WIN32
-char tzEnvString[] = "TZ=EST+5EDT";
-#else
-char tzEnvString[] = "TZ=America/New_York";
-#endif
-
 MONGO_INITIALIZER(SetTimeZoneToEasternForTest)(InitializerContext*) {
+    // Manually specify timezone offsets, for the benefit of the
+    // hermetic test environment. See 'man tzset' for the syntax of TZ.
+    // This says that we are in DST from the second Sunday in March
+    // through the first Sunday in November.
+    static char tzEnvString[] = "TZ=EST+5EDT+4,M3.2.0,M11.1.0";
 #ifdef _WIN32
     int ret = _putenv(tzEnvString);
 #else
@@ -116,6 +114,15 @@ MONGO_INITIALIZER(SetTimeZoneToEasternForTest)(InitializerContext*) {
         uasserted(ErrorCodes::BadValue, errorMessage(ec));
     }
     tzset();
+    // Make sure our hermetic test environment isn't breaking this.
+    // The timezone/_timezone variable is always the offset from UTC
+    // to standard time, whether or not daylight savings is currently
+    // in effect.
+#ifdef _WIN32
+    invariant(_timezone == 5 * 3600);
+#else
+    invariant(timezone == 5 * 3600);
+#endif
 }
 
 static std::string stringstreamDate(void (*formatter)(std::ostream&, Date_t), Date_t date) {
@@ -452,7 +459,7 @@ TEST(TimeParsing, LeapYears) {
     for (int y = 1972; y <= maxYear; y += 4) {
         if (!isLeap(y))
             continue;
-        std::string in = "{:04}-02-29T00:00:00.000Z"_format(y);
+        std::string in = fmt::format("{:04}-02-29T00:00:00.000Z", y);
         StatusWith<Date_t> d = dateFromISOString(in);
         ASSERT_OK(d.getStatus()) << y;
         ASSERT_EQUALS(d.getValue(), mkDate({y, 2, 29})) << y;

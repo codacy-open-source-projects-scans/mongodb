@@ -28,18 +28,6 @@
  */
 
 
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <utility>
-#include <variant>
-#include <vector>
-
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -55,16 +43,14 @@
 #include "mongo/db/commands/generic_servers_gen.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/log_process_details.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_util.h"
 #include "mongo/logv2/ramlog.h"
 #include "mongo/platform/compiler.h"
@@ -76,6 +62,18 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 
@@ -85,6 +83,7 @@ namespace {
 struct AdminOnlyNoTenant {
     static constexpr bool kAdminOnly = true;
     static constexpr bool kAllowedWithSecurityToken = false;
+    static constexpr bool kRequiresAuthzChecks = true;
 };
 
 template <typename RequestT, typename Traits = AdminOnlyNoTenant>
@@ -122,15 +121,20 @@ public:
     typename TC::AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
         return TC::AllowedOnSecondary::kAlways;
     }
+
+    bool requiresAuthzChecks() const override {
+        return Traits::kRequiresAuthzChecks;
+    }
 };
 
-struct AnyDbAllowTenant {
+struct AnyDbAllowTenantRequiresNoAuthz {
     static constexpr bool kAdminOnly = false;
     static constexpr bool kAllowedWithSecurityToken = true;
+    static constexpr bool kRequiresAuthzChecks = false;
 };
 
 // { features: 1 }
-using FeaturesCmd = GenericTC<FeaturesCommand, AnyDbAllowTenant>;
+using FeaturesCmd = GenericTC<FeaturesCommand, AnyDbAllowTenantRequiresNoAuthz>;
 template <>
 void FeaturesCmd::Invocation::doCheckAuthorization(OperationContext* opCtx) const {
     if (request().getOidReset().value_or(false)) {
@@ -142,6 +146,7 @@ void FeaturesCmd::Invocation::doCheckAuthorization(OperationContext* opCtx) cons
                     ActionType::oidReset));
     }
 }
+
 template <>
 FeaturesReply FeaturesCmd::Invocation::typedRun(OperationContext*) {
     FeaturesReply reply;
@@ -159,13 +164,14 @@ FeaturesReply FeaturesCmd::Invocation::typedRun(OperationContext*) {
 }
 MONGO_REGISTER_COMMAND(FeaturesCmd).forRouter().forShard();
 
-struct AnyDbNoTenant {
+struct AnyDbNoTenantRequiresAuthz {
     static constexpr bool kAdminOnly = false;
     static constexpr bool kAllowedWithSecurityToken = false;
+    static constexpr bool kRequiresAuthzChecks = true;
 };
 
 // { hostInfo: 1 }
-using HostInfoCmd = GenericTC<HostInfoCommand, AnyDbNoTenant>;
+using HostInfoCmd = GenericTC<HostInfoCommand, AnyDbNoTenantRequiresAuthz>;
 template <>
 void HostInfoCmd::Invocation::doCheckAuthorization(OperationContext* opCtx) const {
     auto* as = AuthorizationSession::get(opCtx->getClient());
@@ -184,7 +190,7 @@ HostInfoReply HostInfoCmd::Invocation::typedRun(OperationContext* opCtx) {
     ProcessInfo p;
 
     HostInfoSystemReply system;
-    system.setCurrentTime(jsTime());
+    system.setCurrentTime(Date_t::now());
     system.setHostname(prettyHostName(opCtx->getClient()->getLocalPort()));
     system.setCpuAddrSize(static_cast<int>(p.getAddrSize()));
     system.setMemSizeMB(static_cast<long>(p.getSystemMemSizeMB()));
@@ -333,7 +339,7 @@ public:
             hangInGetLog.pauseWhileSet();
         }
 
-        auto request = GetLogCommand::parse(IDLParserContext{"getLog"}, cmdObj);
+        auto request = GetLogCommand::parse(cmdObj, IDLParserContext{"getLog"});
         auto logName = request.getCommandParameter();
         if (logName == "*") {
             std::vector<std::string> names;
@@ -346,7 +352,7 @@ public:
             arr.doneFast();
 
         } else {
-            logv2::RamLog* ramlog = logv2::RamLog::getIfExists(logName.toString());
+            logv2::RamLog* ramlog = logv2::RamLog::getIfExists(std::string{logName});
             uassert(ErrorCodes::OperationFailed,
                     str::stream() << "No log named '" << logName << "'",
                     ramlog != nullptr);
@@ -367,21 +373,28 @@ public:
 };
 MONGO_REGISTER_COMMAND(GetLogCmd).forRouter().forShard();
 
+struct ClearLogCmdTraitsRequiresAuthz {
+    static constexpr bool kAdminOnly = true;
+    static constexpr bool kAllowedWithSecurityToken = false;
+    static constexpr bool kRequiresAuthzChecks = false;
+};
+
 // { clearLog: 'name' }
-using ClearLogCmd = GenericTC<ClearLogCommand>;
+using ClearLogCmd = GenericTC<ClearLogCommand, ClearLogCmdTraitsRequiresAuthz>;
 template <>
 void ClearLogCmd::Invocation::doCheckAuthorization(OperationContext* opCtx) const {
     // We don't perform authorization,
     // so refuse to authorize this when test commands are not enabled.
     invariant(getTestCommandsEnabled());
 }
+
 template <>
 OkReply ClearLogCmd::Invocation::typedRun(OperationContext* opCtx) {
     auto logName = request().getCommandParameter();
     uassert(
         ErrorCodes::InvalidOptions, "Only the 'global' log can be cleared", logName == "global");
 
-    auto log = logv2::RamLog::getIfExists(logName.toString());
+    auto log = logv2::RamLog::getIfExists(std::string{logName});
     invariant(log);
     log->clear();
 

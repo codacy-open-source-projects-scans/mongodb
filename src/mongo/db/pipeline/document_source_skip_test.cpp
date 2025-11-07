@@ -27,16 +27,18 @@
  *    it in the license file.
  */
 
+#include "mongo/db/pipeline/document_source_skip.h"
+
+#include "mongo/db/exec/agg/mock_stage.h"
+#include "mongo/db/exec/agg/skip_stage.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/pipeline/aggregation_context_fixture.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/intrusive_counter.h"
+
 #include <limits>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/document_source_mock.h"
-#include "mongo/db/pipeline/document_source_skip.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 
 namespace mongo {
 namespace {
@@ -44,37 +46,42 @@ namespace {
 // This provides access to getExpCtx(), but we'll use a different name for this test suite.
 using DocumentSourceSkipTest = AggregationContextFixture;
 
+boost::intrusive_ptr<mongo::exec::agg::SkipStage> createForTests(
+    const boost::intrusive_ptr<ExpressionContext>& pExpCtx, long long nToSkip) {
+    return make_intrusive<mongo::exec::agg::SkipStage>("$skip"_sd, pExpCtx, nToSkip);
+}
+
 TEST_F(DocumentSourceSkipTest, ShouldPropagatePauses) {
-    auto skip = DocumentSourceSkip::create(getExpCtx(), 2);
+    auto skipStage = createForTests(getExpCtx(), 2);
     auto mock =
-        DocumentSourceMock::createForTest({Document(),
-                                           DocumentSource::GetNextResult::makePauseExecution(),
-                                           Document(),
-                                           Document(),
-                                           DocumentSource::GetNextResult::makePauseExecution(),
-                                           DocumentSource::GetNextResult::makePauseExecution()},
-                                          getExpCtx());
-    skip->setSource(mock.get());
+        exec::agg::MockStage::createForTest({Document(),
+                                             DocumentSource::GetNextResult::makePauseExecution(),
+                                             Document(),
+                                             Document(),
+                                             DocumentSource::GetNextResult::makePauseExecution(),
+                                             DocumentSource::GetNextResult::makePauseExecution()},
+                                            getExpCtx());
+    skipStage->setSource(mock.get());
 
     // Skip the first document.
-    ASSERT_TRUE(skip->getNext().isPaused());
+    ASSERT_TRUE(skipStage->getNext().isPaused());
 
     // Skip one more, then advance.
-    ASSERT_TRUE(skip->getNext().isAdvanced());
+    ASSERT_TRUE(skipStage->getNext().isAdvanced());
 
-    ASSERT_TRUE(skip->getNext().isPaused());
-    ASSERT_TRUE(skip->getNext().isPaused());
+    ASSERT_TRUE(skipStage->getNext().isPaused());
+    ASSERT_TRUE(skipStage->getNext().isPaused());
 
-    ASSERT_TRUE(skip->getNext().isEOF());
-    ASSERT_TRUE(skip->getNext().isEOF());
-    ASSERT_TRUE(skip->getNext().isEOF());
+    ASSERT_TRUE(skipStage->getNext().isEOF());
+    ASSERT_TRUE(skipStage->getNext().isEOF());
+    ASSERT_TRUE(skipStage->getNext().isEOF());
 }
 
 TEST_F(DocumentSourceSkipTest, SkipsChainedTogetherShouldNotOverFlowWhenOptimizing) {
     // $skip should not optimize if combining the two values of skips would overflow a long long.
     auto skipShort = DocumentSourceSkip::create(getExpCtx(), 1);
     auto skipLong = DocumentSourceSkip::create(getExpCtx(), std::numeric_limits<long long>::max());
-    Pipeline::SourceContainer overflowContainer;
+    DocumentSourceContainer overflowContainer;
     overflowContainer.push_back(skipShort);
     overflowContainer.push_back(skipLong);
     skipShort->doOptimizeAt(overflowContainer.begin(), &overflowContainer);
@@ -87,7 +94,7 @@ TEST_F(DocumentSourceSkipTest, SkipsChainedTogetherShouldNotOverFlowWhenOptimizi
         DocumentSourceSkip::create(getExpCtx(), std::numeric_limits<long long>::max());
     auto secondMaxSkip =
         DocumentSourceSkip::create(getExpCtx(), std::numeric_limits<long long>::max());
-    Pipeline::SourceContainer doubleMaxContainer;
+    DocumentSourceContainer doubleMaxContainer;
     doubleMaxContainer.push_back(firstMaxSkip);
     doubleMaxContainer.push_back(secondMaxSkip);
     firstMaxSkip->doOptimizeAt(doubleMaxContainer.begin(), &doubleMaxContainer);
@@ -98,7 +105,7 @@ TEST_F(DocumentSourceSkipTest, SkipsChainedTogetherShouldNotOverFlowWhenOptimizi
     // $skip should optimize if the two skips will not overflow a long long when combined.
     auto skipFirst = DocumentSourceSkip::create(getExpCtx(), 1);
     auto skipSecond = DocumentSourceSkip::create(getExpCtx(), 1);
-    Pipeline::SourceContainer containerOptimized;
+    DocumentSourceContainer containerOptimized;
     containerOptimized.push_back(skipFirst);
     containerOptimized.push_back(skipSecond);
     skipFirst->doOptimizeAt(containerOptimized.begin(), &containerOptimized);

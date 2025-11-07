@@ -33,35 +33,34 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <algorithm>
-#include <mutex>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/change_stream_pre_image_util.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/repl/apply_ops_gen.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_applier.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
-#include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/truncate_range_oplog_entry_gen.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/log_and_backoff.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <mutex>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -92,6 +91,12 @@ OplogApplierBatch OplogApplierBatcher::getNextBatch(Seconds maxWaitTime) {
         // We intentionally don't care about whether this returns due to signaling or timeout
         // since we do the same thing either way: return whatever is in _ops.
         (void)_cv.wait_for(lk, maxWaitTime.toSystemDuration());
+    }
+
+    // Prevent oplog application while there is an active replication state transition.
+    if (rss::consensus::IntentRegistry::get(cc().getServiceContext()).activeStateTransition()) {
+        // Return an empty batch without touching the batch we have queued up.
+        return OplogApplierBatch();
     }
 
     OplogApplierBatch ops = std::move(_ops);
@@ -153,8 +158,7 @@ StatusWith<OplogApplierBatch> OplogApplierBatcher::getNextApplierBatch(
                   "oplogEntry"_attr = entry.toBSONForLogging());
         }
 
-        if (!feature_flags::gReduceMajorityWriteLatency.isEnabled(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        if (!feature_flags::gReduceMajorityWriteLatency.isEnabled()) {
             // Check for oplog version change.
             if (entry.getVersion() != OplogEntry::kOplogVersion) {
                 static constexpr char message[] = "Unexpected oplog version";
@@ -184,7 +188,8 @@ StatusWith<OplogApplierBatch> OplogApplierBatcher::getNextApplierBatch(
             }
         }
 
-        BatchAction action = _getBatchActionForEntry(entry, batchStats);
+        BatchAction action =
+            _getBatchActionForEntry(ops.empty() ? entry : ops.front(), entry, batchStats);
         switch (action) {
             case BatchAction::kContinueBatch:
                 break;
@@ -239,7 +244,7 @@ StatusWith<OplogApplierBatch> OplogApplierBatcher::getNextApplierBatch(
                         "totalBytes"_attr = batchStats.totalBytes);
             try {
                 _oplogBuffer->waitForDataUntil(batchDeadline, opCtx);
-            } catch (const ExceptionForCat<ErrorCategory::CancellationError>& e) {
+            } catch (const ExceptionFor<ErrorCategory::CancellationError>& e) {
                 LOGV2(6572300,
                       "Cancelled in oplog batching; returning current partial batch.",
                       "error"_attr = e);
@@ -260,15 +265,38 @@ StatusWith<OplogApplierBatch> OplogApplierBatcher::getNextApplierBatch(
  *    operation and thus can be safely batched with other CRUD operations in most cases, unless
  *    it refers to the end of a large transaction (> 16MB) or a transaction that contains DDL
  *    commands, which have to be processed individually (see SERVER-45565).
+ * 3) Ranged truncates on certain collections can be batched due to the their special property,
+ *    assuming that we only truncate up to a known RecordId, not an arbitrarily large non existing
+ *    RecordId. With this assumption, batching is possible for the special collections below:
+ *    a. For the change stream pre-images collection, inserts are implicitly replicated. If we are
+ *       truncating up to a timestamp that is already applied, we can be sure no more inserts could
+ *       fall into the range, and therefore we can safely apply the truncate in the current batch.
+ *       Otherwise, we need to start a new batch, but do not have to apply it individually, because
+ *       we should only be truncating up to a known timestamp, which is lower than the current
+ *       entry's timestamp and any entry after it.
+ *    b. For the oplog collection, since the applier buffer only receives entries already written by
+ *       OplogWriter, assuming we are truncating up to a known timestamp below the current entry's
+ *       timestamp, we can apply the truncate in the current batch since the range will not receive
+ *       more writes.
+ *    c. For all other collections, since they are required to be clustered, we cannot guarantee the
+ *       RecordIds are inserted in an ascending order. Therefore, the truncate has to be processed
+ *       individually.
  */
 OplogApplierBatcher::BatchAction OplogApplierBatcher::_getBatchActionForEntry(
-    const OplogEntry& entry, const BatchStats& batchStats) {
+    const OplogEntry& firstEntryInBatch, const OplogEntry& entry, const BatchStats& batchStats) {
     // Used by non-commit and non-abort entries to cut the batch if it already contains any
     // commit or abort entries.
     auto continueOrStartNewBatch = [&] {
         return batchStats.commitOrAbortOps > 0 ? OplogApplierBatcher::BatchAction::kStartNewBatch
                                                : OplogApplierBatcher::BatchAction::kContinueBatch;
     };
+
+    // We split the batch on the new Primary entry to ensure there is not record ID reuse within
+    // a batch. It can be batched with any subsequent oplog that is batchable as the only
+    // possibility of record ID reuse in between a new Primary start.
+    if (entry.isNewPrimaryNoop()) {
+        return OplogApplierBatcher::BatchAction::kStartNewBatch;
+    }
 
     if (!entry.isCommand()) {
         return entry.getNss().mustBeAppliedInOwnOplogBatch()
@@ -288,6 +316,26 @@ OplogApplierBatcher::BatchAction OplogApplierBatcher::_getBatchActionForEntry(
             return batchStats.commitOrAbortOps == 0
                 ? OplogApplierBatcher::BatchAction::kStartNewBatch
                 : OplogApplierBatcher::BatchAction::kContinueBatch;
+        }
+    }
+
+    if (entry.getCommandType() == OplogEntry::CommandType::kTruncateRange) {
+        const auto& cmd = entry.getObject();
+        const auto& ns = OplogApplication::extractNsFromCmd(entry.getNss().dbName(), cmd);
+        if (ns.isChangeStreamPreImagesCollection()) {
+            auto truncateRangeEntry = TruncateRangeOplogEntry::parse(cmd);
+            const auto& maxRecordId = truncateRangeEntry.getMaxRecordId();
+            auto maxTruncateTimestamp =
+                change_stream_pre_image_util::getPreImageTimestamp(maxRecordId);
+            // Entries in the current batch can be applied concurrently as the truncate. Make sure
+            // applying the current batch does not insert preimages into the truncate range.
+            return maxTruncateTimestamp >= firstEntryInBatch.getTimestamp()
+                ? OplogApplierBatcher::BatchAction::kStartNewBatch
+                : continueOrStartNewBatch();
+        } else if (ns.isOplog()) {
+            return continueOrStartNewBatch();
+        } else {
+            return OplogApplierBatcher::BatchAction::kProcessIndividually;
         }
     }
 
@@ -329,7 +377,8 @@ void OplogApplierBatcher::_consume(OperationContext* opCtx, OplogBuffer* oplogBu
     // for us to consume here. Since our postcondition is already met, it is safe to return
     // successfully.
     BSONObj opToPopAndDiscard;
-    invariant(oplogBuffer->tryPop(opCtx, &opToPopAndDiscard) || _oplogApplier->inShutdown());
+    invariant(oplogBuffer->tryPop(opCtx, &opToPopAndDiscard) || _oplogApplier->inShutdown(),
+              str::stream() << "Oplog Applier in shutdown: " << _oplogApplier->inShutdown());
 }
 
 void OplogApplierBatcher::_run(StorageInterface* storageInterface) {
@@ -344,8 +393,7 @@ void OplogApplierBatcher::_run(StorageInterface* storageInterface) {
 
     while (true) {
         // When featureFlagReduceMajorityWriteLatency is enabled, OplogWriter takes care of this.
-        if (!feature_flags::gReduceMajorityWriteLatency.isEnabled(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        if (!feature_flags::gReduceMajorityWriteLatency.isEnabled()) {
             globalFailPointRegistry().find("rsSyncApplyStop")->pauseWhileSet();
             batchLimits.secondaryDelaySecsLatestTimestamp =
                 _calculateSecondaryDelaySecsLatestTimestamp();
@@ -359,34 +407,44 @@ void OplogApplierBatcher::_run(StorageInterface* storageInterface) {
         // The only case we can get an interruption in this try/catch block is during shutdown since
         // this thread is unkillable by stepdown. Since this OplogApplierBatcher has its own way to
         // handle shutdown, we can just swallow the exception.
-        try {
-            auto opCtx = cc().makeOperationContext();
-            ScopedAdmissionPriority<ExecutionAdmissionContext> admissionPriority(
-                opCtx.get(), AdmissionContext::Priority::kExempt);
+        int retryAttempts = 0;
+        for (;;) {
+            try {
+                auto opCtx = cc().makeOperationContext();
+                ScopedAdmissionPriority<ExecutionAdmissionContext> admissionPriority(
+                    opCtx.get(), AdmissionContext::Priority::kExempt);
 
-            // During storage change operations, we may shut down storage under a global lock
-            // and wait for any storage-using opCtxs to exit, so we will take the global lock here
-            // to block the storage change.
-            Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
+                // During storage change operations, we may shut down storage under a global lock
+                // and wait for any storage-using opCtxs to exit, so we will take the global lock
+                // here to block the storage change.
+                Lock::GlobalLock globalLock(opCtx.get(), MODE_IS);
 
-            // Locks the oplog to check its max size, do this in the UninterruptibleLockGuard.
-            batchLimits.bytes = getBatchLimitOplogBytes(opCtx.get(), storageInterface);
+                // Locks the oplog to check its max size, do this in the UninterruptibleLockGuard.
+                batchLimits.bytes = getBatchLimitOplogBytes(opCtx.get(), storageInterface);
 
-            // When this feature flag is enabled, the oplogBatchDelayMillis is handled in
-            // OplogWriter.
-            auto waitToFillBatch =
-                Milliseconds(feature_flags::gReduceMajorityWriteLatency.isEnabled(
-                                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot())
-                                 ? 0
-                                 : oplogBatchDelayMillis);
-            ops = fassertNoTrace(31004,
-                                 getNextApplierBatch(opCtx.get(), batchLimits, waitToFillBatch));
-        } catch (const ExceptionForCat<ErrorCategory::ShutdownError>& e) {
-            LOGV2_DEBUG(6133400,
-                        1,
-                        "Cancelled getting the global lock in Repl Batcher",
-                        "error"_attr = e.toStatus());
-            invariant(ops.empty());
+                // When this feature flag is enabled, the oplogBatchDelayMillis is handled in
+                // OplogWriter.
+                auto waitToFillBatch = Milliseconds(
+                    feature_flags::gReduceMajorityWriteLatency.isEnabled() ? 0
+                                                                           : oplogBatchDelayMillis);
+                ops = fassertNoTrace(
+                    31004, getNextApplierBatch(opCtx.get(), batchLimits, waitToFillBatch));
+                break;
+            } catch (const ExceptionFor<ErrorCategory::ShutdownError>& e) {
+                LOGV2_DEBUG(6133400,
+                            1,
+                            "Cancelled getting the global lock in Repl Batcher",
+                            "error"_attr = e.toStatus());
+                invariant(ops.empty());
+                break;
+            } catch (const ExceptionFor<ErrorCodes::InterruptedDueToReplStateChange>&) {
+                ++retryAttempts;
+                logAndBackoff(10262303,
+                              MONGO_LOGV2_DEFAULT_COMPONENT,
+                              logv2::LogSeverity::Debug(1),
+                              retryAttempts,
+                              "Retrying oplog batcher until we can declare our intent.");
+            }
         }
 
         // If we don't have anything in the batch, wait a bit for something to appear.

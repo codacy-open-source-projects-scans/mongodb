@@ -27,19 +27,9 @@
  *    it in the license file.
  */
 
-#include <absl/container/flat_hash_map.h>
 #include <boost/container/small_vector.hpp>
 #include <boost/optional.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-#include <algorithm>
-#include <array>
-#include <iterator>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/basic_types.h"
@@ -47,6 +37,7 @@
 #include "mongo/db/exec/inclusion_projection_executor.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/field_ref_set.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/pipeline/document_source_add_fields.h"
 #include "mongo/db/pipeline/document_source_project.h"
@@ -57,12 +48,12 @@
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/window_function/window_function_exec.h"
 #include "mongo/db/query/allowed_contexts.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_policies.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/projection_policies.h"
 #include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/sort_pattern.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/idl_parser.h"
+#include "mongo/logv2/log.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/base64.h"
@@ -71,16 +62,23 @@
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
 
+#include <algorithm>
+#include <iterator>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
 using boost::intrusive_ptr;
 using boost::optional;
 using std::list;
 using SortPatternPart = mongo::SortPattern::SortPatternPart;
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+
 namespace mongo {
 
 namespace {
-MONGO_FAIL_POINT_DEFINE(overrideMemoryLimitForSpill);
-
 /**
  * Does a sort pattern contain a path that has been modified?
  */
@@ -114,15 +112,17 @@ REGISTER_DOCUMENT_SOURCE(_internalSetWindowFields,
                          DocumentSourceInternalSetWindowFields::createFromBson,
                          AllowedWithApiStrict::kAlways);
 
+ALLOCATE_DOCUMENT_SOURCE_ID(_internalSetWindowFields, DocumentSourceInternalSetWindowFields::id)
+
 list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& expCtx) {
     uassert(ErrorCodes::FailedToParse,
             str::stream() << "the " << kStageName
                           << " stage specification must be an object, found "
                           << typeName(elem.type()),
-            elem.type() == BSONType::Object);
+            elem.type() == BSONType::object);
 
-    auto spec = SetWindowFieldsSpec::parse(IDLParserContext(kStageName), elem.embeddedObject());
+    auto spec = SetWindowFieldsSpec::parse(elem.embeddedObject(), IDLParserContext(kStageName));
     auto partitionBy = [&]() -> boost::optional<boost::intrusive_ptr<Expression>> {
         if (auto partitionBy = spec.getPartitionBy())
             return Expression::parseOperand(
@@ -235,7 +235,8 @@ list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::create(
             // Partitioning by a constant, non-array expression is equivalent to not partitioning
             // (putting everything in the same partition).
         } else if (auto exprFieldPath = dynamic_cast<ExpressionFieldPath*>(partitionBy->get());
-                   exprFieldPath && !exprFieldPath->isVariableReference()) {
+                   exprFieldPath && !exprFieldPath->isVariableReference() &&
+                   !exprFieldPath->isROOT()) {
             // ExpressionFieldPath has "CURRENT" as an explicit first component,
             // but for $sort we don't want that.
             simplePartitionBy = exprFieldPath->getFieldPath().tail();
@@ -288,17 +289,30 @@ list<intrusive_ptr<DocumentSource>> document_source_set_window_fields::create(
     }
 
     if (!combined.empty()) {
-        result.push_back(DocumentSourceSort::create(expCtx, SortPattern{std::move(combined)}));
+        // Use the new $rank implementation that depends on sort key metadata if
+        // 1) we are the context of a $rankFusion query, or
+        // 2) the feature flag is enabled
+        // #1 is because $rankFusion was backported to 8.0, and we don't want $rankFusion queries to
+        // fail during an FCV-gated upgrade. #2 is because we still need to preserve FCV-gating for
+        // generic $setWindowFields queries in order to avoid failures during upgrade (this
+        // $setWindowFields feature is *only* enabled for $rankFusion on 8.0, so it is new behavior
+        // on this version).
+        // TODO SERVER-85426 Always generate sort key metadata.
+        bool shouldOutputSortKeyMetadata =
+            expCtx->isHybridSearch() || expCtx->isBasicRankFusionFeatureFlagEnabled();
+        result.push_back(
+            DocumentSourceSort::create(expCtx,
+                                       SortPattern{std::move(combined)},
+                                       // We will rely on this to efficiently compute ranks.
+                                       {.outputSortKeyMetadata = shouldOutputSortKeyMetadata}));
     }
 
     // $_internalSetWindowFields
-    result.push_back(make_intrusive<DocumentSourceInternalSetWindowFields>(
-        expCtx,
-        simplePartitionByExpr,
-        std::move(sortBy),
-        std::move(outputFields),
-        internalDocumentSourceSetWindowFieldsMaxMemoryBytes.load(),
-        sbeCompatibility));
+    result.push_back(make_intrusive<DocumentSourceInternalSetWindowFields>(expCtx,
+                                                                           simplePartitionByExpr,
+                                                                           std::move(sortBy),
+                                                                           std::move(outputFields),
+                                                                           sbeCompatibility));
 
     // $unset
     if (complexPartitionBy) {
@@ -316,7 +330,6 @@ intrusive_ptr<DocumentSource> DocumentSourceInternalSetWindowFields::optimize() 
     if (_partitionBy) {
         _partitionBy = _partitionBy->get()->optimize();
     }
-    _iterator.optimizePartition();
 
     if (_outputFields.size() > 0) {
         // Calculate the new expression SBE compatibility after optimization without overwriting
@@ -356,20 +369,6 @@ Value DocumentSourceInternalSetWindowFields::serialize(const SerializationOption
     MutableDocument out;
     out[getSourceName()] = Value(spec.freeze());
 
-    if (opts.verbosity && *opts.verbosity >= ExplainOptions::Verbosity::kExecStats) {
-        MutableDocument md;
-
-        for (auto&& [fieldName, function] : _executableOutputs) {
-            md[opts.serializeFieldPathFromString(fieldName)] = opts.serializeLiteral(
-                static_cast<long long>(_memoryTracker.maxMemoryBytes(fieldName)));
-        }
-
-        out["maxFunctionMemoryUsageBytes"] = Value(md.freezeToValue());
-        out["maxTotalMemoryUsageBytes"] =
-            opts.serializeLiteral(static_cast<long long>(_memoryTracker.maxMemoryBytes()));
-        out["usedDisk"] = opts.serializeLiteral(_iterator.usedDisk());
-    }
-
     return Value(out.freezeToValue());
 }
 
@@ -379,9 +378,9 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalSetWindowFields::crea
             str::stream() << "the " << kStageName
                           << " stage specification must be an object, found "
                           << typeName(elem.type()),
-            elem.type() == BSONType::Object);
+            elem.type() == BSONType::object);
 
-    auto spec = SetWindowFieldsSpec::parse(IDLParserContext(kStageName), elem.embeddedObject());
+    auto spec = SetWindowFieldsSpec::parse(elem.embeddedObject(), IDLParserContext(kStageName));
     auto partitionBy = [&]() -> boost::optional<boost::intrusive_ptr<Expression>> {
         if (auto partitionBy = spec.getPartitionBy())
             return Expression::parseOperand(
@@ -404,24 +403,11 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalSetWindowFields::crea
         std::min(expCtx->getSbeWindowCompatibility(), expCtx->getSbeCompatibility());
 
     return make_intrusive<DocumentSourceInternalSetWindowFields>(
-        expCtx,
-        partitionBy,
-        sortBy,
-        outputFields,
-        internalDocumentSourceSetWindowFieldsMaxMemoryBytes.load(),
-        sbeCompatibility);
+        expCtx, partitionBy, sortBy, outputFields, sbeCompatibility);
 }
 
-void DocumentSourceInternalSetWindowFields::initialize() {
-    for (auto& wfs : _outputFields) {
-        _executableOutputs[wfs.fieldName] =
-            WindowFunctionExec::create(pExpCtx.get(), &_iterator, wfs, _sortBy, &_memoryTracker);
-    }
-    _init = true;
-}
-
-Pipeline::SourceContainer::iterator DocumentSourceInternalSetWindowFields::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator DocumentSourceInternalSetWindowFields::doOptimizeAt(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     invariant(*itr == this);
 
     if (itr == container->begin()) {
@@ -503,85 +489,6 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalSetWindowFields::doOpt
     if (itr == container->begin())
         return itr;
     return std::prev(itr);
-}
-
-DocumentSource::GetNextResult DocumentSourceInternalSetWindowFields::doGetNext() {
-    if (!_init) {
-        initialize();
-    }
-
-    if (_eof)
-        return DocumentSource::GetNextResult::makeEOF();
-
-    auto curDoc = _iterator.current();
-    if (!curDoc) {
-        if (_iterator.isPaused()) {
-            return DocumentSource::GetNextResult::makePauseExecution();
-        }
-        // The only way we hit this case is if there are no documents, since otherwise _eof will be
-        // set.
-        _eof = true;
-        return DocumentSource::GetNextResult::makeEOF();
-    }
-
-    // Populate the output document with the result from each window function.
-    auto projSpec = std::make_unique<projection_executor::InclusionNode>(
-        ProjectionPolicies{ProjectionPolicies::DefaultIdPolicy::kIncludeId});
-    for (auto&& outputField : _outputFields) {
-        try {
-            // If we hit a uassert while evaluating expressions on user data, delete the temporary
-            // table before aborting the operation.
-            auto& fieldName = outputField.fieldName;
-            projSpec->addExpressionForPath(
-                FieldPath(fieldName),
-                ExpressionConstant::create(pExpCtx.get(),
-                                           _executableOutputs[fieldName]->getNext(*curDoc)));
-        } catch (const DBException&) {
-            _iterator.finalize();
-            throw;
-        }
-
-        bool inMemoryLimit = _memoryTracker.withinMemoryLimit();
-        overrideMemoryLimitForSpill.execute([&](const BSONObj& data) {
-            _numDocsProcessed++;
-            inMemoryLimit = _numDocsProcessed <= data["maxDocsBeforeSpill"].numberInt();
-        });
-
-        if (!inMemoryLimit && _memoryTracker.allowDiskUse()) {
-            // Attempt to spill where possible.
-            _iterator.spillToDisk();
-        }
-        if (!_memoryTracker.withinMemoryLimit()) {
-            _iterator.finalize();
-            uasserted(5414201,
-                      str::stream()
-                          << "Exceeded memory limit in DocumentSourceSetWindowFields, used "
-                          << _memoryTracker.currentMemoryBytes() << " bytes but max allowed is "
-                          << _memoryTracker.maxAllowedMemoryUsageBytes());
-        }
-    }
-
-    // Advance the iterator and handle partition/EOF edge cases.
-    switch (_iterator.advance()) {
-        case PartitionIterator::AdvanceResult::kAdvanced:
-            break;
-        case PartitionIterator::AdvanceResult::kNewPartition:
-            // We've advanced to a new partition, reset the state of every function.
-            for (auto&& [fieldName, function] : _executableOutputs) {
-                function->reset();
-            }
-            break;
-        case PartitionIterator::AdvanceResult::kEOF:
-            _eof = true;
-            _iterator.finalize();
-            break;
-    }
-
-    // Avoid using the factory 'create' on the executor since we don't want to re-parse.
-    auto projExec = std::make_unique<projection_executor::AddFieldsProjectionExecutor>(
-        pExpCtx, std::move(projSpec));
-
-    return projExec->applyProjection(*curDoc);
 }
 
 }  // namespace mongo

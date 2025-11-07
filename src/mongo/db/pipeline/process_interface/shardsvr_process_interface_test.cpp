@@ -27,20 +27,19 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/process_interface/shardsvr_process_interface.h"
 
 #include "mongo/base/shim.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
+#include "mongo/db/exec/agg/queue_stage.h"
+#include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_out.h"
 #include "mongo/db/pipeline/document_source_queue.h"
-#include "mongo/db/pipeline/process_interface/shardsvr_process_interface.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
@@ -48,10 +47,9 @@
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/s/query/exec/sharded_agg_test_fixture.h"
-#include "mongo/s/request_types/sharded_ddl_commands_gen.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/fail_point.h"
+
 
 namespace mongo {
 namespace {
@@ -83,11 +81,15 @@ public:
 };
 
 TEST_F(ShardsvrProcessInterfaceTest, TestInsert) {
+    // We disable any backoff to avoid dealing with network waits.
+    auto _ = FailPointEnableBlock{"setBackoffDelayForTesting", BSON("backoffDelayMs" << 0)};
+
     setupNShards(2);
 
     const NamespaceString kOutNss =
         NamespaceString::createNamespaceString_forTest("unittests-out", "sharded_agg_test");
     auto outStage = DocumentSourceOut::create(kOutNss, expCtx());
+    auto stage = exec::agg::buildStage(outStage);
 
     // Attach a write concern, and make sure it is forwarded below.
     WriteConcernOptions wco{WriteConcernOptions::kMajority,
@@ -96,19 +98,24 @@ TEST_F(ShardsvrProcessInterfaceTest, TestInsert) {
     expCtx()->getOperationContext()->setWriteConcern(wco);
 
     expCtx()->setMongoProcessInterface(std::make_shared<ShardServerProcessInterface>(executor()));
-    auto queue = DocumentSourceQueue::create(expCtx());
-    outStage->setSource(queue.get());
+    auto queueStage = exec::agg::buildStage(DocumentSourceQueue::create(expCtx()));
+    stage->setSource(queueStage.get());
 
-    auto future = launchAsync([&] { ASSERT_TRUE(outStage->getNext().isEOF()); });
+    auto future = launchAsync([&] { ASSERT_TRUE(stage->getNext().isEOF()); });
 
     expectGetDatabase(kOutNss);
 
     // Testing the collection options are propagated.
-    const BSONObj collectionOptions = BSON("validationLevel"
-                                           << "moderate");
+    const BSONObj collectionOptions = BSON("validationLevel" << "moderate");
     const BSONObj listCollectionsResponse = BSON("name" << kOutNss.coll() << "type"
                                                         << "collection"
                                                         << "options" << collectionOptions);
+
+    // Mock a server overloaded response for "listCollections". We expect the process interface to
+    // proceed to retry the request.
+    onCommand([&](const executor::RemoteCommandRequest& request) {
+        return createErrorSystemOverloaded(ErrorCodes::IngressRequestRateLimitExceeded);
+    });
 
     // Mock the response to $out's "listCollections" request.
     onCommand([&](const executor::RemoteCommandRequest& request) {
@@ -158,6 +165,21 @@ TEST_F(ShardsvrProcessInterfaceTest, TestInsert) {
         return res.toBSON();
     });
 
+    // Mock the response to $out's "listCollections" request to get the uuid of the temp collection.
+    auto uuid = UUID::gen();
+    const BSONObj collectionInfo = BSON("readOnly" << false << "uuid" << uuid);
+    const BSONObj listCollectionsGetUUIDResponse =
+        BSON("name" << tempNss.coll() << "type"
+                    << "collection"
+                    << "options" << collectionOptions << "info" << collectionInfo);
+    onCommand([&](const executor::RemoteCommandRequest& request) {
+        ASSERT_EQ("listCollections", request.cmdObj.firstElement().fieldNameStringData());
+        ASSERT_EQ(kOutNss.dbName(), request.dbname);
+        ASSERT_EQ(tempNss.coll(), request.cmdObj["filter"]["name"].valueStringData());
+        return CursorResponse(kTestAggregateNss, CursorId{0}, {listCollectionsGetUUIDResponse})
+            .toBSON(CursorResponse::ResponseType::InitialResponse);
+    });
+
     // Mock the response to $out's "aggregate" request to config server, that is a part of
     // createIndexes.
     onCommand([&](const executor::RemoteCommandRequest& request) {
@@ -180,6 +202,21 @@ TEST_F(ShardsvrProcessInterfaceTest, TestInsert) {
         ASSERT_EQ(1, indexArray.size());
         ASSERT_BSONOBJ_EQ(listIndexesResponse, indexArray.at(0).Obj());
         return BSON("ok" << 1);
+    });
+
+    // Mock the response to $out's "listCollections" request to get the uuid of the temp collection.
+    onCommand([&](const executor::RemoteCommandRequest& request) {
+        ASSERT_EQ("listCollections", request.cmdObj.firstElement().fieldNameStringData());
+        ASSERT_EQ(kOutNss.dbName(), request.dbname);
+        ASSERT_EQ(tempNss.coll(), request.cmdObj["filter"]["name"].valueStringData());
+        return CursorResponse(kTestAggregateNss, CursorId{0}, {listCollectionsGetUUIDResponse})
+            .toBSON(CursorResponse::ResponseType::InitialResponse);
+    });
+
+    // Mock a server overloaded response for what is supposed to be
+    // "internalRenameIfOptionsAndIndexesMatch". We expect the process interface to retry.
+    onCommandForPoolExecutor([&](const executor::RemoteCommandRequest& request) {
+        return createErrorSystemOverloaded(ErrorCodes::IngressRequestRateLimitExceeded);
     });
 
     // Mock the response to $out's "internalRenameIfOptionsAndIndexesMatch" request.

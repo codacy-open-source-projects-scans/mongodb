@@ -121,6 +121,10 @@ outputs. Verifies the output with the expected output that is in the source repo
 
 See: [golden_test.h](../src/mongo/unittest/golden_test.h)
 
+Before running `bazel test`, set up the golden test framework as described in the `Setup` section below.
+This will ensure that the C++ test outputs are written to a location where `buildscripts/golden_test.py`
+can find them so that the `diff` and `accept` functions work as expected.
+
 **Example:**
 
 ```c++
@@ -288,6 +292,24 @@ Get all available commands and options:
 ```bash
 $> buildscripts/golden_test.py --help
 ```
+
+### Update multiple expected files at once
+
+Some tests will run in multiple passthroughs or build variants, so they have multiple expected files.
+
+Whenever the test is updated, all the expected files should be updated together as well.
+
+```bash
+buildscripts/golden_test.py --verbose clean-run-accept jstests/query_golden/NAME_OF_TEST.js
+```
+
+This option uses `resmoke.py find-suites` to determine the passthrough suites a test belongs to and
+runs them.
+
+If the test is found to only belong to the `query_golden_classic` passthrough, it is assumed that
+it can have multiple expected results due to being run under multiple build variants with a different
+`internalQueryFrameworkControl` settings. So the test will be run with various values for
+`internalQueryFrameworkControl`.
 
 # How to diff test results from a non-workstation test run
 

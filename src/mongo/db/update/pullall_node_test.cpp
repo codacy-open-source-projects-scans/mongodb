@@ -27,32 +27,32 @@
  *    it in the license file.
  */
 
-#include <utility>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/update/pullall_node.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
-#include "mongo/bson/mutable/algorithm.h"
-#include "mongo/bson/mutable/document.h"
-#include "mongo/bson/mutable/element.h"
+#include "mongo/db/exec/mutable_bson/algorithm.h"
+#include "mongo/db/exec/mutable_bson/document.h"
+#include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/db/update/pullall_node.h"
 #include "mongo/db/update/update_executor.h"
 #include "mongo/db/update/update_node_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <utility>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
 
 using PullAllNodeTest = UpdateTestFixture;
 
-TEST(PullAllNodeTest, InitWithIntFails) {
+TEST(SimplePullAllNodeTest, InitWithIntFails) {
     auto update = fromjson("{$pullAll: {a: 1}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PullAllNode node;
@@ -61,7 +61,7 @@ TEST(PullAllNodeTest, InitWithIntFails) {
     ASSERT_EQUALS(ErrorCodes::BadValue, status);
 }
 
-TEST(PullAllNodeTest, InitWithStringFails) {
+TEST(SimplePullAllNodeTest, InitWithStringFails) {
     auto update = fromjson("{$pullAll: {a: 'test'}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PullAllNode node;
@@ -70,7 +70,7 @@ TEST(PullAllNodeTest, InitWithStringFails) {
     ASSERT_EQUALS(ErrorCodes::BadValue, status);
 }
 
-TEST(PullAllNodeTest, InitWithObjectFails) {
+TEST(SimplePullAllNodeTest, InitWithObjectFails) {
     auto update = fromjson("{$pullAll: {a: {}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PullAllNode node;
@@ -79,7 +79,7 @@ TEST(PullAllNodeTest, InitWithObjectFails) {
     ASSERT_EQUALS(ErrorCodes::BadValue, status);
 }
 
-TEST(PullAllNodeTest, InitWithBoolFails) {
+TEST(SimplePullAllNodeTest, InitWithBoolFails) {
     auto update = fromjson("{$pullAll: {a: true}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PullAllNode node;

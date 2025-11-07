@@ -29,16 +29,18 @@
 
 #pragma once
 
-#include <limits>
-#include <memory>
-
 #include "mongo/base/status.h"
 #include "mongo/db/client.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/transport/hello_metrics.h"
 #include "mongo/transport/service_executor.h"
 #include "mongo/transport/session.h"
+#include "mongo/transport/session_establishment_rate_limiter.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
+
+#include <limits>
+#include <memory>
 
 namespace mongo {
 class BSONObjBuilder;
@@ -51,7 +53,7 @@ namespace transport {
  * also provides facilities for terminating sessions and attaching handlers that are invoked during
  * different stages of the Sessions' lifecycles.
  */
-class SessionManager {
+class MONGO_MOD_PUBLIC SessionManager {
 private:
     SessionManager(const SessionManager&) = delete;
     SessionManager& operator=(const SessionManager&) = delete;
@@ -87,11 +89,21 @@ public:
      */
     virtual std::size_t numOpenSessions() const = 0;
 
+    virtual std::vector<std::pair<SessionId, std::string>> getOpenSessionIDs() const = 0;
+
     /**
      * Returns the maximum number of sessions that can be open.
      */
     virtual std::size_t maxOpenSessions() const {
         return std::numeric_limits<std::size_t>::max();
+    }
+
+    /**
+     * Returns the rate limiter component used for session establishment. New sessions should call
+     * into this component to ensure they are respecting the configured establishment rate limit.
+     */
+    SessionEstablishmentRateLimiter& getSessionEstablishmentRateLimiter() {
+        return _sessionEstablishmentRateLimiter;
     }
 
     // Stats
@@ -100,7 +112,7 @@ public:
      * Total number of operations created on sessions belonging to this SessionManager.
      */
     std::size_t getTotalOperations() const {
-        return _totalOperations.load();
+        return _opCounters->total.load();
     }
 
     /**
@@ -108,14 +120,18 @@ public:
      * which have begun but not yet completed.
      */
     std::size_t getActiveOperations() const {
-        return _totalOperations.load() - _completedOperations.load();
+        return getTotalOperations() - getCompletedOperations();
     }
 
     /**
      * Total number of completed operations on sessions belonging to this SessionManager.
      */
     std::size_t getCompletedOperations() const {
-        return _completedOperations.load();
+        return _opCounters->completed.load();
+    }
+
+    const auto& getOpCounters() const {
+        return _opCounters;
     }
 
     HelloMetrics helloMetrics;
@@ -123,8 +139,9 @@ public:
 
 protected:
     friend class Session;
-    AtomicWord<std::size_t> _totalOperations{0};
-    AtomicWord<std::size_t> _completedOperations{0};
+    std::shared_ptr<SessionManagerOpCounters> _opCounters =
+        std::make_shared<SessionManagerOpCounters>();
+    SessionEstablishmentRateLimiter _sessionEstablishmentRateLimiter;
 };
 
 }  // namespace transport

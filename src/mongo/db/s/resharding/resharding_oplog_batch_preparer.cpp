@@ -29,14 +29,6 @@
 
 #include "mongo/db/s/resharding/resharding_oplog_batch_preparer.h"
 
-#include <cstddef>
-#include <utility>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/data_range.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement_comparator.h"
@@ -46,6 +38,7 @@
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
+#include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/idl/idl_parser.h"
@@ -53,6 +46,14 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <cstddef>
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -155,9 +156,9 @@ WriterVectors ReshardingOplogBatchPreparer::makeCrudOpWriterVectors(
 
             for (const auto& innerOp : applyOpsInfo.getOperations()) {
                 unrolledOp.setDurableReplOperation(repl::DurableReplOperation::parse(
+                    innerOp,
                     IDLParserContext{
-                        "ReshardingOplogBatchPreparer::makeCrudOpWriterVectors innerOp"},
-                    innerOp));
+                        "ReshardingOplogBatchPreparer::makeCrudOpWriterVectors innerOp"}));
 
                 if (isWouldChangeOwningShardSentinelOplogEntry(unrolledOp)) {
                     continue;
@@ -172,6 +173,15 @@ WriterVectors ReshardingOplogBatchPreparer::makeCrudOpWriterVectors(
                 // `&derivedOp` is guaranteed to remain stable while we append more derived oplog
                 // entries because `derivedOps` is a std::list.
                 _appendCrudOpToWriterVector(&derivedOp, writerVectors);
+            }
+        } else if (resharding::isProgressMarkOplogAfterOplogApplicationStarted(op)) {
+            // This is a progress mark oplog entry created after resharding oplog application has
+            // started. The oplog entry does not need to be applied but is used for calculating the
+            // average time to apply oplog entries. So if
+            // 'reshardingRemainingTimeEstimateBasedOnMovingAverage' is enabled, add the oplog entry
+            // to a random writer.
+            if (resharding::gReshardingRemainingTimeEstimateBasedOnMovingAverage.load()) {
+                _appendOpToWriterVector(absl::HashOf(UUID::gen()), &op, writerVectors);
             }
         } else {
             invariant(repl::OpTypeEnum::kNoop == op.getOpType());
@@ -232,7 +242,7 @@ void unrollApplyOpsAndUpdateSessionTracker(LogicalSessionIdMap<SessionOpsList>& 
 
     for (const auto& innerOp : applyOpsInfo.getOperations()) {
         auto replOp = repl::ReplOperation::parse(
-            IDLParserContext{"unrollApplyOpsAndUpdateSessionTracker innerOp"}, innerOp);
+            innerOp, IDLParserContext{"unrollApplyOpsAndUpdateSessionTracker innerOp"});
         if (replOp.getStatementIds().empty()) {
             // Skip this operation since it is not retryable.
             continue;

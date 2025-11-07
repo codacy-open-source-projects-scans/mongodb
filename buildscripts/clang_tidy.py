@@ -18,8 +18,24 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
-from clang_tidy_vscode import CHECKS_SO
+
+# Get relative imports to work when the package is not installed on the PYTHONPATH.
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from mongo_toolchain import get_mongo_toolchain
 from simple_report import make_report, put_report, try_combine_reports
+
+checks_so = None
+if os.path.exists(".mongo_checks_module_path"):
+    with open(".mongo_checks_module_path") as f:
+        checks_so = f.read().strip()
+
+
+config_file = ""
+for config in ["/tmp/compiledb-bin/.clang-tidy.strict", "bazel-bin/.clang-tidy.strict"]:
+    if os.path.exists(config):
+        config_file = config
+        break
 
 
 def _clang_tidy_executor(
@@ -110,12 +126,13 @@ def _combine_errors(fixes_filename: str, files_to_parse: List[str]) -> int:
                     },
                 )
             )
+            for replacement in fix_data["replacements"]:
+                if replacement.get("FilePath") and os.path.exists(replacement.get("FilePath")):
+                    with open(replacement.get("FilePath"), "rb") as contents:
+                        replacement["FileContentsMD5"] = hashlib.md5(contents.read()).hexdigest()
+
             fix_data["count"] += 1
             fix_data["source_files"].append(fixes["MainSourceFile"])
-            if fix_msg.get("FilePath") and os.path.exists(fix_msg.get("FilePath")):
-                all_fixes[fix["DiagnosticName"]][fix_msg.get("FilePath")]["md5"] = hashlib.md5(
-                    open(fix_msg.get("FilePath"), "rb").read()
-                ).hexdigest()
 
     with open(fixes_filename, "w") as files_file:
         json.dump(all_fixes, files_file, indent=4, sort_keys=True)
@@ -149,7 +166,8 @@ def __dedup_errors(clang_tidy_errors_threads: List[str]) -> str:
 
 
 def _run_tidy(args, parser_defaults):
-    clang_tidy_binary = f"/opt/mongodbtoolchain/{args.clang_tidy_toolchain}/bin/clang-tidy"
+    toolchain = get_mongo_toolchain(version=args.clang_tidy_toolchain)
+    clang_tidy_binary = toolchain.get_tool_path("clang-tidy")
 
     if os.path.exists(args.check_module):
         mongo_tidy_check_module = args.check_module
@@ -163,7 +181,7 @@ def _run_tidy(args, parser_defaults):
         if args.compile_commands == parser_defaults.compile_commands:
             print(
                 f"Could not find compile commands: '{args.compile_commands}', to generate it, use the build command:\n\n"
-                + "python3 buildscripts/scons.py --build-profile=compiledb compiledb\n"
+                + "bazel build compiledb\n"
             )
         else:
             print(f"Could not find compile commands: {args.compile_commands}")
@@ -176,7 +194,7 @@ def _run_tidy(args, parser_defaults):
         if args.clang_tidy_cfg == parser_defaults.clang_tidy_cfg:
             print(
                 f"Could not find config file: '{args.clang_tidy_cfg}', to generate it, use the build command:\n\n"
-                + "python3 buildscripts/scons.py --build-profile=compiledb compiledb\n"
+                + "bazel build compiledb\n"
             )
         else:
             print(f"Could not find config file: {args.clang_tidy_cfg}")
@@ -205,7 +223,6 @@ def _run_tidy(args, parser_defaults):
         if file_doc["file"].startswith("src/mongo/db/modules/enterprise/src/streams/third_party"):
             continue
 
-        # TODO SERVER-49884 Remove this when we no longer check in generated Bison.
         if file_doc["file"].endswith("/parser_gen.cpp"):
             continue
 
@@ -344,7 +361,7 @@ def main():
         "-m",
         "--check-module",
         type=str,
-        default=CHECKS_SO,
+        default=checks_so,
         help="Path to load the custom mongo checks module.",
     )
     parser.add_argument(
@@ -353,9 +370,8 @@ def main():
         default=False,
         help="if this is a test evaluating clang tidy itself.",
     )
-    # TODO: Is there someway to get this without hardcoding this much
-    parser.add_argument("-y", "--clang-tidy-toolchain", type=str, default="v4")
-    parser.add_argument("-f", "--clang-tidy-cfg", type=str, default=".clang-tidy")
+    parser.add_argument("-y", "--clang-tidy-toolchain", type=str, default=None)
+    parser.add_argument("-f", "--clang-tidy-cfg", type=str, default=config_file)
     args = parser.parse_args()
 
     if args.only_process_fixes:

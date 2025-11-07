@@ -29,19 +29,19 @@
 
 #include "mongo/db/query/plan_executor.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/shard_role.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
+
+#include <utility>
+
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -84,17 +84,16 @@ void PlanExecutor::checkFailPointPlanExecAlwaysFails() {
     }
 }
 
-size_t PlanExecutor::getNextBatch(const size_t batchSize, AppendBSONObjFn append) {
+size_t PlanExecutor::getNextBatch(size_t batchSize, AppendBSONObjFn append) {
     // Subclasses may override this in order to provide a more optimized loop.
-    uint64_t numResults = 0;
-    BSONObj obj;
-    PlanExecutor::ExecState state = PlanExecutor::ADVANCED;
     const bool hasAppendFn = static_cast<bool>(append);
+    BSONObj obj;
     BSONObj* objPtr = hasAppendFn ? &obj : nullptr;
 
+    size_t numResults = 0;
+
     while (numResults < batchSize) {
-        state = getNext(objPtr, nullptr);
-        if (state == PlanExecutor::IS_EOF) {
+        if (PlanExecutor::IS_EOF == getNext(objPtr, nullptr)) {
             break;
         }
 
@@ -195,32 +194,6 @@ void PlanExecutor::releaseAllAcquiredResources() {
     // resources.
     detachFromOperationContext();
     reattachToOperationContext(opCtx);
-}
-
-const CollectionPtr& VariantCollectionPtrOrAcquisition::getCollectionPtr() const {
-    return *visit(OverloadedVisitor{
-                      [](const CollectionPtr* collectionPtr) { return collectionPtr; },
-                      [](const CollectionAcquisition& collectionAcquisition) {
-                          return &collectionAcquisition.getCollectionPtr();
-                      },
-                  },
-                  _collectionPtrOrAcquisition);
-}
-
-boost::optional<ScopedCollectionFilter> VariantCollectionPtrOrAcquisition::getShardingFilter(
-    OperationContext* opCtx) const {
-    return visit(
-        OverloadedVisitor{
-            [&](const CollectionPtr* collPtr) -> boost::optional<ScopedCollectionFilter> {
-                auto scopedCss = CollectionShardingState::assertCollectionLockedAndAcquire(
-                    opCtx, collPtr->get()->ns());
-                return scopedCss->getOwnershipFilter(
-                    opCtx, CollectionShardingState::OrphanCleanupPolicy::kDisallowOrphanCleanup);
-            },
-            [](const CollectionAcquisition& acq) -> boost::optional<ScopedCollectionFilter> {
-                return acq.getShardingFilter();
-            }},
-        _collectionPtrOrAcquisition);
 }
 
 }  // namespace mongo

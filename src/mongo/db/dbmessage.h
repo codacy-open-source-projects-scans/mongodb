@@ -29,10 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <cstdio>
-
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
 #include "mongo/base/encoded_value_storage.h"
@@ -42,11 +38,16 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/constants.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/server_options.h"
 #include "mongo/rpc/message.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <cstdint>
+#include <cstdio>
+
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUBLIC mongo {
 
 class OperationContext;
 
@@ -461,4 +462,4 @@ struct DbResponse {
  * Helper to build an error DbResponse for OP_QUERY and OP_GET_MORE.
  */
 DbResponse makeErrorResponseToUnsupportedOpQuery(StringData errorMsg);
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

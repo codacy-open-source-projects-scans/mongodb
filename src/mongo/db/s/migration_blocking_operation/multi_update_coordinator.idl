@@ -32,8 +32,7 @@ global:
 imports:
     - "mongo/db/basic_types.idl"
     - "mongo/db/session/logical_session_id.idl"
-    - "mongo/s/database_version.idl"
-    - "mongo/s/error_status.idl"
+    - "mongo/db/versioning_protocol/database_version.idl"
 
 enums:
     MultiUpdateCoordinatorPhase:
@@ -55,8 +54,12 @@ structs:
         fields:
             _id:
                 type: uuid
-                description: Unique identifier for the operation. 
+                description: Unique identifier for the operation.
                 cpp_name: id
+            databaseVersion:
+                description: Database version of the original request from mongos.
+                type: DatabaseVersion
+                optional: true
             updateCommand:
                 type: object_owned
                 description: The original multi update command that triggered the coordinator.
@@ -64,8 +67,8 @@ structs:
                 cpp_name: nss
                 type: namespacestring
                 description: "The namespace of the collection being updated."
-            isUpsert: 
-                type: bool 
+            isUpsert:
+                type: bool
                 description: "Indicates a multi update with upsert: true."
                 default: false
 
@@ -83,7 +86,7 @@ structs:
                     Stores the result of the underlying update command. By the end of the operation either this field or abortReason will be set.
                 optional: true
             abortReason:
-                type: ErrorStatus
+                type: error_status
                 description: Stores the abort reason in the case of a failure. By the end of the operation either this field or result will be set.
                 optional: true
             lsid:
@@ -97,7 +100,7 @@ structs:
 
     MultiUpdateCoordinatorDocument:
         description: State document for MultiUpdateCoordinator.
-        strict: false        
+        strict: false
         inline_chained_structs: true
         chained_structs:
             MultiUpdateCoordinatorMetadata: metadata

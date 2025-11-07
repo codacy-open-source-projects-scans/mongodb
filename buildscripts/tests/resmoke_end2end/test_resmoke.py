@@ -1,6 +1,7 @@
 """Test resmoke's handling of test/task timeouts and archival."""
 
 import datetime
+import io
 import json
 import logging
 import os
@@ -11,10 +12,12 @@ import sys
 import time
 import unittest
 from shutil import rmtree
+from typing import List
 
 import yaml
 
 from buildscripts.ciconfig.evergreen import parse_evergreen_file
+from buildscripts.idl.gen_all_feature_flag_list import get_all_feature_flags_turned_off_by_default
 from buildscripts.resmokelib import config, core, suitesconfig
 from buildscripts.resmokelib.hang_analyzer.attach_core_analyzer_task import (
     matches_generated_task_pattern,
@@ -28,7 +31,11 @@ class _ResmokeSelftest(unittest.TestCase):
     def setUpClass(cls):
         cls.end2end_root = "buildscripts/tests/resmoke_end2end"
         cls.test_dir = os.path.normpath("/data/db/selftest")
-        cls.resmoke_const_args = ["run", "--dbpathPrefix={}".format(cls.test_dir)]
+        cls.resmoke_const_args = [
+            "run",
+            "--dbpathPrefix={}".format(cls.test_dir),
+            "--skipSymbolization",
+        ]
         cls.suites_root = os.path.join(cls.end2end_root, "suites")
         cls.testfiles_root = os.path.join(cls.end2end_root, "testfiles")
         cls.report_file = os.path.join(cls.test_dir, "reports.json")
@@ -46,7 +53,7 @@ class _ResmokeSelftest(unittest.TestCase):
         rmtree(self.test_dir, ignore_errors=True)
         os.makedirs(self.test_dir, mode=0o755, exist_ok=True)
 
-    def execute_resmoke(self, resmoke_args, **kwargs):  # pylint: disable=unused-argument
+    def execute_resmoke(self, resmoke_args, **kwargs):
         resmoke_process = core.programs.make_process(
             self.logger,
             [sys.executable, "buildscripts/resmoke.py"] + self.resmoke_const_args + resmoke_args,
@@ -78,7 +85,7 @@ class TestArchivalOnFailure(_ResmokeSelftest):
             "--suites=buildscripts/tests/resmoke_end2end/suites/resmoke_selftest_task_failure.yml",
             "--originSuite=resmoke_end2end_tests",
             "--taskId=123",
-            "--internalParam=test_archival",
+            "--archiveMode=test_archival",
             "--repeatTests=2",
             "--jobs=2",
         ]
@@ -98,7 +105,7 @@ class TestArchivalOnFailure(_ResmokeSelftest):
             "--suites=buildscripts/tests/resmoke_end2end/suites/resmoke_selftest_task_failure_no_passthrough.yml",
             "--taskId=123",
             "--originSuite=resmoke_end2end_tests",
-            "--internalParam=test_archival",
+            "--archiveMode=test_archival",
             "--repeatTests=2",
             "--jobs=2",
         ]
@@ -113,7 +120,7 @@ class TestArchivalOnFailure(_ResmokeSelftest):
         # archival should not happen if --taskId is not set.
         resmoke_args = [
             "--suites=buildscripts/tests/resmoke_end2end/suites/resmoke_selftest_task_failure_no_passthrough.yml",
-            "--internalParam=test_archival",
+            "--archiveMode=test_archival",
             "--repeatTests=2",
             "--jobs=2",
         ]
@@ -161,20 +168,21 @@ class TestTimeout(_ResmokeSelftest):
         # Since this test is designed to start remoke, wait for it to be up-and-running, and then
         # kill resmoke, we use a sentinel file to accomplish this.
 
-        # Form sentinel path, and make sure it's absent:
+        # Form sentinel path, remove any leftover version, and create the file that will be removed by the jstest.
         sentinel_path = f"{os.environ.get('TMPDIR') or os.environ.get('TMP_DIR') or '/tmp'}/{sentinel_file}.js.sentinel"
         if os.path.isfile(sentinel_path):
             os.remove(sentinel_path)
+        open(sentinel_path, "w").close()
 
         # Spawn resmoke (async):
         super(TestTimeout, self).execute_resmoke(resmoke_args, **kwargs)
 
-        # Wait for sentinel file to appear; bail if it takes too long:
+        # Wait for sentinel file to disappear; bail if it takes too long:
         started_polling_datetime = datetime.datetime.now()
-        while not os.path.isfile(sentinel_path):
+        while os.path.isfile(sentinel_path):
             time.sleep(0.1)
             if datetime.datetime.now() - started_polling_datetime > datetime.timedelta(minutes=5):
-                self.fail("SUT is not available within 99 seconds; aborting test")
+                self.fail("SUT is not available within 5 minutes; aborting test")
 
         # Kill resmoke:
         self.signal_resmoke()
@@ -188,17 +196,15 @@ class TestTimeout(_ResmokeSelftest):
             "--suites=buildscripts/tests/resmoke_end2end/suites/resmoke_selftest_task_timeout.yml",
             "--taskId=123",
             "--originSuite=resmoke_end2end_tests",
-            "--internalParam=test_archival",
+            "--archiveMode=test_archival",
             "--internalParam=test_analysis",
-            "--repeatTests=2",
-            "--jobs=2",
         ]
         self.execute_resmoke(resmoke_args, sentinel_file="timeout0")
 
-        archival_dirs_to_expect = 4  # 2 tests * 2 mongod
+        archival_dirs_to_expect = 2  # 2 mongod nodes
         self.assert_dir_file_count(self.test_dir, self.archival_file, archival_dirs_to_expect)
 
-        analysis_pids_to_expect = 6  # 2 tests * (2 mongod + 1 mongo)
+        analysis_pids_to_expect = 3  # 2 mongod + 1 mongo
         self.assert_dir_file_count(self.test_dir, self.analysis_file, analysis_pids_to_expect)
 
     def test_task_timeout_no_passthrough(self):
@@ -210,17 +216,15 @@ class TestTimeout(_ResmokeSelftest):
             "--suites=buildscripts/tests/resmoke_end2end/suites/resmoke_selftest_task_timeout_no_passthrough.yml",
             "--taskId=123",
             "--originSuite=resmoke_end2end_tests",
-            "--internalParam=test_archival",
+            "--archiveMode=test_archival",
             "--internalParam=test_analysis",
-            "--repeatTests=2",
-            "--jobs=2",
         ]
         self.execute_resmoke(resmoke_args, sentinel_file="timeout1")
 
-        archival_dirs_to_expect = 8  # (2 tests + 2 stacktrace files) * 2 nodes
+        archival_dirs_to_expect = 4  # 2 mongod nodes + 2 stacktrace files
         self.assert_dir_file_count(self.test_dir, self.archival_file, archival_dirs_to_expect)
 
-        analysis_pids_to_expect = 6  # 2 tests * (2 mongod + 1 mongo)
+        analysis_pids_to_expect = 3  # 2 mongod + 1 mongo
         self.assert_dir_file_count(self.test_dir, self.analysis_file, analysis_pids_to_expect)
 
     # Test scenarios where an resmoke-launched process launches resmoke.
@@ -233,7 +237,7 @@ class TestTimeout(_ResmokeSelftest):
             "--suites=buildscripts/tests/resmoke_end2end/suites/resmoke_selftest_nested_timeout.yml",
             "--taskId=123",
             "--originSuite=resmoke_end2end_tests",
-            "--internalParam=test_archival",
+            "--archiveMode=test_archival",
             "--internalParam=test_analysis",
             "jstests/resmoke_selftest/end2end/timeout/nested/top_level_timeout.js",
         ]
@@ -250,12 +254,46 @@ class TestTimeout(_ResmokeSelftest):
         self.assert_dir_file_count(self.test_dir, self.analysis_file, analysis_pids_to_expect)
 
 
+class TestTestTimeout(_ResmokeSelftest):
+    def test_individual_test_timeout(self):
+        # The --originSuite argument is to trick the resmoke local invocation into passing
+        # because when we pass --taskId into resmoke it thinks that it is being ran in evergreen
+        # and cannot normally find an evergreen task associated with
+        # buildscripts/tests/resmoke_end2end/suites/resmoke_selftest_task_timeout.yml
+        reportFile = os.path.join(self.test_dir, "report.json")
+        resmoke_args = [
+            "--suites=buildscripts/tests/resmoke_end2end/suites/resmoke_test_timeout.yml",
+            "--taskId=123",
+            "--originSuite=resmoke_end2end_tests",
+            "--testTimeout=5",
+            "--internalParam=test_analysis",
+            "--continueOnFailure",
+            f"--reportFile={reportFile}",
+        ]
+        self.execute_resmoke(resmoke_args)
+        self.resmoke_process.wait()
+
+        analysis_pids_to_expect = 2  # 1 tests * (1 mongod + 1 mongo)
+        self.assert_dir_file_count(self.test_dir, "test_analysis.txt", analysis_pids_to_expect)
+
+        with open(reportFile, "r") as f:
+            report = json.load(f)
+        timeout = [test for test in report["results"] if test["status"] == "timeout"]
+        passed = [test for test in report["results"] if test["status"] == "pass"]
+        self.assertEqual(
+            len(timeout), 1, f"Expected one timed out test. Got {timeout}"
+        )  # one jstest
+        self.assertEqual(
+            len(passed), 3, f"Expected 3 passing tests. Got {passed}"
+        )  # one jstest, one fixture setup, one fixture teardown
+
+
 class TestTestSelection(_ResmokeSelftest):
     def parse_reports_json(self):
         with open(self.report_file) as fd:
             return json.load(fd)
 
-    def execute_resmoke(self, resmoke_args):  # pylint: disable=arguments-differ
+    def execute_resmoke(self, resmoke_args):
         resmoke_process = core.programs.make_process(
             self.logger, [sys.executable, "buildscripts/resmoke.py", "run"] + resmoke_args
         )
@@ -400,7 +438,7 @@ class TestSetParameters(_ResmokeSelftest):
     def generate_suite(self, suite_output_path, template_file):
         """Read the template file, substitute the `outputLocation` and rewrite to the file `suite_output_path`."""
 
-        with open(os.path.normpath(template_file), "r") as template_suite_fd:
+        with open(os.path.normpath(template_file), "r", encoding="utf8") as template_suite_fd:
             suite = yaml.safe_load(template_suite_fd)
 
         try:
@@ -550,9 +588,69 @@ class TestSetParameters(_ResmokeSelftest):
         )
 
 
-def execute_resmoke(resmoke_args):
+class TestDiscovery(_ResmokeSelftest):
+    def setUp(self):
+        super(TestDiscovery, self).setUp()
+        self.output = io.StringIO()
+        handler = logging.StreamHandler(self.output)
+        handler.setFormatter(logging.Formatter(fmt="%(message)s"))
+        self.logger.addHandler(handler)
+
+        self.assertIn(
+            "featureFlagToaster",
+            get_all_feature_flags_turned_off_by_default(),
+            "TestDiscovery tests use featureFlagToaster with the assumption that it is turned off by default.",
+        )
+
+        with open(
+            "buildscripts/resmokeconfig/fully_disabled_feature_flags.yml", encoding="utf8"
+        ) as fully_disabled_ffs:
+            self.assertIn(
+                "featureFlagFryer",
+                yaml.safe_load(fully_disabled_ffs),
+                "TestDiscovery tests use featureFlagFryer with the assumption that it is present in fully_disabled_feature_flags.yml.",
+            )
+
+    def execute_resmoke(self, resmoke_args):
+        resmoke_process = core.programs.make_process(
+            self.logger,
+            [sys.executable, "buildscripts/resmoke.py", "test-discovery"] + resmoke_args,
+        )
+        resmoke_process.start()
+        return resmoke_process
+
+    def test_exclude_fully_disabled(self):
+        self.execute_resmoke(
+            ["--suite=buildscripts/tests/resmoke_end2end/suites/resmoke_jstest_tagged.yml"]
+        ).wait()
+        self.assertIn(
+            "buildscripts/tests/resmoke_end2end/testfiles/tagged_with_disabled_feature.js",
+            self.output.getvalue(),
+            "tagged_with_disabled_feature.js should have been included in the discovered tests.",
+        )
+        self.assertNotIn(
+            "buildscripts/tests/resmoke_end2end/testfiles/tagged_with_fully_disabled_feature.js",
+            self.output.getvalue(),
+            "tagged_with_fully_disabled_feature.js should not have been included in the discovered tests.",
+        )
+
+    def test_include_fully_disabled(self):
+        self.execute_resmoke(
+            [
+                "--suite=buildscripts/tests/resmoke_end2end/suites/resmoke_jstest_tagged.yml",
+                "--includeFullyDisabledFeatureTests",
+            ]
+        ).wait()
+        self.assertIn(
+            "buildscripts/tests/resmoke_end2end/testfiles/tagged_with_fully_disabled_feature.js",
+            self.output.getvalue(),
+            "tagged_with_fully_disabled_feature.js should have been included in the discovered tests since --includeFullyDisabledFeatureTests is used.",
+        )
+
+
+def execute_resmoke(resmoke_args: List[str], subcommand: str = "run"):
     return subprocess.run(
-        [sys.executable, "buildscripts/resmoke.py", "run"] + resmoke_args,
+        [sys.executable, "buildscripts/resmoke.py", subcommand] + resmoke_args,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -575,7 +673,7 @@ class TestExceptionExtraction(unittest.TestCase):
         ]
         output = execute_resmoke(resmoke_args).stdout
 
-        expected = "The following tests failed (with exit code):\n        buildscripts/tests/resmoke_end2end/failtestfiles/js_failure.js (253 Failure executing JS file)\n            uncaught exception: Error: [true] != [false] are not equal"
+        expected = "The following tests failed (with exit code):\n        buildscripts/tests/resmoke_end2end/failtestfiles/js_failure.js (253 Failure executing JS file)\n            uncaught exception: Error: [true] and [false] are not equal"
         assert expected in output
 
     def test_resmoke_fixture_error(self):
@@ -682,13 +780,16 @@ class TestEvergreenYML(unittest.TestCase):
 
     def validate_jstestfuzz_selector(self, suite_names):
         for suite_name in suite_names:
-            suite_config = suitesconfig.get_suite(suite_name).get_config()
-            expected_selector = ["jstestfuzz/out/*.js"]
-            self.assertEqual(
-                suite_config["selector"]["roots"],
-                expected_selector,
-                msg=f"The jstestfuzz selector for {suite_name} did not match 'jstestfuzz/out/*.js'",
-            )
+            if not suite_name.startswith(
+                "//"
+            ):  # Ignore suites that are run via bazel. TODO: SERVER-104460
+                suite_config = suitesconfig.get_suite(suite_name).get_config()
+                expected_selector = ["jstestfuzz/out/*.js"]
+                self.assertEqual(
+                    suite_config["selector"]["roots"],
+                    expected_selector,
+                    msg=f"The jstestfuzz selector for {suite_name} did not match 'jstestfuzz/out/*.js'",
+                )
 
     # This test asserts that the jstestfuzz tasks uploads the the URL we expect it to
     # If the remote url changes, also change it in the _log_local_resmoke_invocation method
@@ -742,7 +843,7 @@ class TestEvergreenYML(unittest.TestCase):
             generate_func = task.find_func_command("generate resmoke tasks")
             if (
                 generate_func is None
-                or get_dict_value(generate_func, ["vars", "is_jstestfuzz"]) != "true"
+                or get_dict_value(generate_func, ["vars", "is_jstestfuzz"]) is not True
             ):
                 continue
 
@@ -751,6 +852,24 @@ class TestEvergreenYML(unittest.TestCase):
             self.validate_jstestfuzz_selector(task.get_suite_names())
 
         self.assertNotEqual(0, jstestfuzz_count, msg="Could not find any jstestfuzz tasks")
+
+    # our unittest names need to be correct for the spawnhost script to work.
+    # If you change the unittest names please also change them in the spawnhost script.
+    def test_unittest_name(self):
+        tasks = self.evg_conf.tasks
+        unit_test_string = "unit_test_group"
+        unit_test_tasks = []
+        for task in tasks:
+            # We found at least one unit test task that matched!
+            if unit_test_string in task.name:
+                unit_test_tasks.append(task.name)
+
+        # as of the time of writing this there are 16 different "unit_test_group" task definitions
+        self.assertGreaterEqual(
+            len(unit_test_tasks),
+            16,
+            "Something changed about unittest tasks, please make sure the spawnhost is also updated and update this test after.",
+        )
 
 
 class TestMultiversionConfig(unittest.TestCase):
@@ -766,7 +885,7 @@ class TestMultiversionConfig(unittest.TestCase):
             ],
             check=True,
         )
-        with open(file_name, "r") as file:
+        with open(file_name, "r", encoding="utf8") as file:
             file_contents = file.read()
 
         try:
@@ -811,3 +930,48 @@ class TestValidateCollections(unittest.TestCase):
         expected = "collection validation failed"
         self.assertIn(expected, result.stdout)
         self.assertNotEqual(result.returncode, 0)
+
+
+class TestModules(unittest.TestCase):
+    def test_files_included(self):
+        # this suite uses a fixture and hook from the module so it will fail if they are not loaded
+        # it also uses a
+        resmoke_args = [
+            "--resmokeModulesPath=buildscripts/tests/resmoke_end2end/test_resmoke_modules.yml",
+            "--suite=resmoke_test_module_worked",
+        ]
+
+        result = execute_resmoke(resmoke_args)
+        self.assertEqual(result.returncode, 0)
+
+    def test_jstests_excluded(self):
+        # this first command should not include any of the tests from the module
+        resmoke_args = [
+            "--resmokeModulesPath=buildscripts/tests/resmoke_end2end/test_resmoke_modules.yml",
+            "--modules=none",
+            "--suite=buildscripts/tests/resmoke_end2end/suites/resmoke_test_module_jstests.yml",
+            "--dryRun=included-tests",
+        ]
+
+        result_without_module = execute_resmoke(resmoke_args)
+        self.assertEqual(result_without_module.returncode, 0)
+
+        # this second invocartion should include all of the base jstests and all of the module jstests.
+        resmoke_args = [
+            "--resmokeModulesPath=buildscripts/tests/resmoke_end2end/test_resmoke_modules.yml",
+            "--modules=default",
+            "--suite=buildscripts/tests/resmoke_end2end/suites/resmoke_test_module_jstests.yml",
+            "--dryRun=included-tests",
+        ]
+
+        result_with_module = execute_resmoke(resmoke_args)
+        self.assertEqual(result_with_module.returncode, 0)
+
+        # assert the test is in the list of tests when the module is included
+        self.assertIn(
+            "buildscripts/tests/resmoke_end2end/testfiles/one.js", result_with_module.stdout
+        )
+        # assert the test is not in the list of tests when the module is excluded
+        self.assertNotIn(
+            "buildscripts/tests/resmoke_end2end/testfiles/one.js", result_without_module.stdout
+        )

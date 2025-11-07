@@ -27,20 +27,16 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <set>
-#include <string>
-#include <vector>
+#include "mongo/dbtests/mock/mock_replica_set.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/mutable/mutable_bson_test_utils.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/exec/mutable_bson/mutable_bson_test_utils.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/repl/member_config.h"
@@ -50,10 +46,15 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/dbtests/mock/mock_dbclient_connection.h"
 #include "mongo/dbtests/mock/mock_remote_db_server.h"
-#include "mongo/dbtests/mock/mock_replica_set.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <set>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 
 using mongo::BSONArrayBuilder;
 using mongo::BSONElement;

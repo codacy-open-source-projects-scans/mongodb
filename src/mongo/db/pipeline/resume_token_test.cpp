@@ -30,22 +30,20 @@
 
 #include "mongo/db/pipeline/resume_token.h"
 
-#include <boost/none.hpp>
-#include <limits>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/hex.h"
+
+#include <limits>
+
+#include <boost/none.hpp>
+
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -117,9 +115,8 @@ TEST(ResumeToken, TimestampOnlyTokenShouldRoundTripThroughHexEncoding) {
 }
 
 TEST(ResumeToken, NonDocumentKeyResumeTokenRoundTripsThroughHexEncoding) {
-    auto eventIdentifier = Value(BSON("operationType"
-                                      << "create"
-                                      << "operationDescription" << BSONObj()));
+    auto eventIdentifier = Value(BSON("operationType" << "create"
+                                                      << "operationDescription" << BSONObj()));
     ResumeTokenData resumeTokenDataIn{Timestamp{1001, 3},
                                       ResumeTokenData::kDefaultTokenVersion,
                                       /* txnOpIndex */ 0,
@@ -234,8 +231,8 @@ TEST(ResumeToken, TestMissingTypebitsOptimization) {
     auto rtNoTypeBitsData = ResumeToken::parse(noTypeBitsDoc).getData();
     ASSERT_EQ(hasTypeBitsData, rtHasTypeBitsData);
     ASSERT_EQ(noTypeBitsData, rtNoTypeBitsData);
-    ASSERT_EQ(BSONType::NumberDouble, rtHasTypeBitsData.eventIdentifier["_id"].getType());
-    ASSERT_EQ(BSONType::NumberInt, rtNoTypeBitsData.eventIdentifier["_id"].getType());
+    ASSERT_EQ(BSONType::numberDouble, rtHasTypeBitsData.eventIdentifier["_id"].getType());
+    ASSERT_EQ(BSONType::numberInt, rtNoTypeBitsData.eventIdentifier["_id"].getType());
 }
 
 TEST(ResumeToken, FailsToParseForInvalidTokenFormats) {

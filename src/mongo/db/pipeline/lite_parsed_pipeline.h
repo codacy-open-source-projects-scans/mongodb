@@ -29,14 +29,8 @@
 
 #pragma once
 
-#include <absl/container/node_hash_set.h>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <algorithm>
-#include <functional>
-#include <memory>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/auth/privilege.h"
@@ -49,6 +43,11 @@
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/stdx/unordered_set.h"
+
+#include <algorithm>
+#include <functional>
+#include <memory>
+#include <vector>
 
 namespace mongo {
 
@@ -64,13 +63,20 @@ public:
      * May throw a AssertionException if there is an invalid stage specification, although full
      * validation happens later, during Pipeline construction.
      */
-    LiteParsedPipeline(const AggregateCommandRequest& request)
-        : LiteParsedPipeline(request.getNamespace(), request.getPipeline()) {}
+    LiteParsedPipeline(const AggregateCommandRequest& request,
+                       const bool isRunningAgainstView_ForHybridSearch = false)
+        : LiteParsedPipeline(
+              request.getNamespace(), request.getPipeline(), isRunningAgainstView_ForHybridSearch) {
+    }
 
-    LiteParsedPipeline(const NamespaceString& nss, const std::vector<BSONObj>& pipelineStages) {
+    LiteParsedPipeline(const NamespaceString& nss,
+                       const std::vector<BSONObj>& pipelineStages,
+                       const bool isRunningAgainstView_ForHybridSearch = false,
+                       const LiteParserOptions& options = LiteParserOptions{})
+        : _isRunningAgainstView_ForHybridSearch(isRunningAgainstView_ForHybridSearch) {
         _stageSpecs.reserve(pipelineStages.size());
         for (auto&& rawStage : pipelineStages) {
-            _stageSpecs.push_back(LiteParsedDocumentSource::parse(nss, rawStage));
+            _stageSpecs.push_back(LiteParsedDocumentSource::parse(nss, rawStage, options));
         }
     }
 
@@ -128,10 +134,11 @@ public:
     }
 
     /**
-     * Returns true if the desugared pipeline begins with a $queue stage.
+     * Returns true if the pipeline begins with a stage that generates its own data and should run
+     * once.
      */
-    bool startsWithQueue() const {
-        return !_stageSpecs.empty() && _stageSpecs.front()->startsWithQueue();
+    bool generatesOwnDataOnce() const {
+        return !_stageSpecs.empty() && _stageSpecs.front()->generatesOwnDataOnce();
     }
 
     /**
@@ -146,6 +153,33 @@ public:
      */
     bool hasChangeStream() const {
         return _hasChangeStream.get(_stageSpecs);
+    }
+
+    /**
+     * Returns true if the pipeline has a search stage.
+     */
+    bool hasSearchStage() const {
+        return std::any_of(_stageSpecs.begin(), _stageSpecs.end(), [](auto&& spec) {
+            return spec->isSearchStage();
+        });
+    }
+
+    /**
+     * Returns true iff the pipeline has a $rankFusion or $scoreFusion stage.
+     */
+    bool hasHybridSearchStage() const {
+        return std::any_of(_stageSpecs.begin(), _stageSpecs.end(), [](auto&& spec) {
+            return spec->isHybridSearchStage();
+        });
+    }
+
+    /**
+     * Returns true iff the pipeline has a $score stage.
+     */
+    bool hasScoreStage() const {
+        return std::any_of(_stageSpecs.begin(), _stageSpecs.end(), [](auto&& spec) {
+            return (spec->getParseTimeName() == "$score");
+        });
     }
 
     /**
@@ -189,10 +223,9 @@ public:
     /**
      * Verifies that this pipeline is allowed to run with the specified read concern level.
      */
-    ReadConcernSupportResult supportsReadConcern(
-        repl::ReadConcernLevel level,
-        bool isImplicitDefault,
-        boost::optional<ExplainOptions::Verbosity> explain) const;
+    ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
+                                                 bool isImplicitDefault,
+                                                 bool explain) const;
 
     /**
      * Checks that all of the stages in this pipeline are allowed to run with the specified read
@@ -207,16 +240,14 @@ public:
      * only be called if the caller has determined the current operation is part of a
      * transaction.
      */
-    void assertSupportsMultiDocumentTransaction(
-        boost::optional<ExplainOptions::Verbosity> explain) const;
+    void assertSupportsMultiDocumentTransaction(bool explain) const;
 
     /**
      * Verifies that this pipeline is allowed to run with the read concern from the provided
      * opCtx. Used only when asserting is the desired behavior, otherwise use
      * supportsReadConcern instead.
      */
-    void assertSupportsReadConcern(OperationContext* opCtx,
-                                   boost::optional<ExplainOptions::Verbosity> explain) const;
+    void assertSupportsReadConcern(OperationContext* opCtx, bool explain) const;
 
     /**
      * Perform checks that verify that the LitePipe is valid. Note that this function must be
@@ -225,7 +256,7 @@ public:
      */
     void verifyIsSupported(OperationContext* opCtx,
                            std::function<bool(OperationContext*, const NamespaceString&)> isSharded,
-                           boost::optional<ExplainOptions::Verbosity> explain) const;
+                           bool explain) const;
 
     /**
      * Returns true if the first stage in the pipeline does not require an input source.
@@ -246,10 +277,26 @@ public:
      */
     void validate(const OperationContext* opCtx, bool performApiVersionChecks = true) const;
 
+    /**
+     * Checks that specific stage types are not present in the pipeline that are disallowed
+     * in the definition of a view. Recursively checks sub-pipelines.
+     */
+    void checkStagesAllowedInViewDefinition() const;
+
+    // TODO SERVER-101722: Remove this once the validation is changed.
+    bool isRunningAgainstView_ForHybridSearch() const {
+        return _isRunningAgainstView_ForHybridSearch;
+    }
+
 private:
     // This is logically const - any changes to _stageSpecs will invalidate cached copies of
     // "_hasChangeStream" and "_involvedNamespaces" below.
     std::vector<std::unique_ptr<LiteParsedDocumentSource>> _stageSpecs;
+
+    // This variable specifies whether the pipeline is running on a view's namespace. This is
+    // currently needed for $rankFusion/$scoreFusion positional validation.
+    // TODO SERVER-101722: Remove this once the validation is changed.
+    bool _isRunningAgainstView_ForHybridSearch = false;
 
     Deferred<bool (*)(const decltype(_stageSpecs)&)> _hasChangeStream{[](const auto& stageSpecs) {
         return std::any_of(stageSpecs.begin(), stageSpecs.end(), [](auto&& spec) {

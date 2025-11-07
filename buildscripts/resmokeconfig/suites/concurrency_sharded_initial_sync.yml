@@ -75,7 +75,6 @@ selector:
     # does not preserve the ability to read at the cloneTimestamp in the past
     - jstests/concurrency/fsm_workloads/updateOne_without_shard_key/write_without_shard_key_with_resharding.js
     - jstests/concurrency/fsm_workloads/crud/reshard_collection_crud_ops.js
-    - jstests/concurrency/fsm_workloads/reshard_collection_implicitly_create_index.js
 
   exclude_with_any_tags:
     - requires_standalone
@@ -96,6 +95,9 @@ selector:
     # Because this suite kills / restarts the initial syncing node, if a kill occurs between a read and
     # subsequent getMore on the initial syncing node tests can fail.
     - requires_getmore
+    # implicitly_retry_on_migration_in_progress.js alters find/aggregate commands
+    # so that the whole result set is returned through a single batch
+    - assumes_no_implicit_cursor_exhaustion
 
 executor:
   archive:
@@ -111,6 +113,7 @@ executor:
         await import("jstests/libs/override_methods/set_read_preference_secondary.js");
         await import('jstests/libs/override_methods/enable_causal_consistency_without_read_pref.js');
         await import("jstests/libs/override_methods/implicitly_shard_accessed_collections.js");
+        await import("jstests/libs/override_methods/implicitly_retry_on_migration_in_progress.js");
       global_vars:
         TestData:
           defaultReadPreference:
@@ -120,9 +123,9 @@ executor:
           # and generally retry operations.
           runningWithConfigStepdowns: true
           runningWithShardStepdowns: true
+          killShards: true
           implicitlyShardOnCreateCollectionOnly: true
           useActionPermittedFile: [ContinuousInitialSync]
-          fsmPreOverridesLoadedCallback: import("jstests/libs/override_methods/implicitly_retry_on_migration_in_progress.js");
 
   hooks:
     - class: ContinuousInitialSync
@@ -145,6 +148,7 @@ executor:
       set_parameters:
         enableTestCommands: 1
         queryAnalysisSamplerConfigurationRefreshSecs: 1
+        findShardsOnConfigTimeoutMS: 30000 # giving legroom as this suite is doing initial sync
     shard_options:
       all_nodes_electable: True
       mongod_options:
@@ -176,4 +180,3 @@ executor:
     num_shards: 2
     num_mongos: 2
     enable_balancer: true
-    random_migrations: true

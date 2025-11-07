@@ -29,12 +29,13 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/client.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
 
 #ifdef MONGO_CONFIG_SSL
 #include "mongo/util/net/ssl_manager.h"
@@ -55,7 +56,7 @@ enum class TransportProtocol;
  * The manager must be provided with an immutable list of TransportLayers that it will manage at
  * construction (preferably through factory functions) to obviate the need for synchronization.
  */
-class TransportLayerManager {
+class MONGO_MOD_PUBLIC TransportLayerManager {
     TransportLayerManager(const TransportLayerManager&) = delete;
     TransportLayerManager& operator=(const TransportLayerManager&) = delete;
 

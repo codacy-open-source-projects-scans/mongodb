@@ -29,11 +29,11 @@
 
 #pragma once
 
+#include "mongo/db/exec/sbe/values/value.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
-
-#include "mongo/db/exec/sbe/values/value.h"
 
 namespace mongo::sbe::value {
 /**
@@ -88,8 +88,7 @@ public:
         using ProcessBatchFn =
             void (*)(const ColumnOpFunctorData*, TypeTags, const Value*, TypeTags*, Value*, size_t);
 
-        constexpr MethodTable(ProcessSingleFn processSingleFn,
-                              ProcessBatchFn processBatchFn) noexcept
+        constexpr MethodTable(ProcessSingleFn processSingleFn, ProcessBatchFn processBatchFn)
             : processSingleFn(processSingleFn), processBatchFn(processBatchFn) {}
 
         // processSingleFn() processes a single value.

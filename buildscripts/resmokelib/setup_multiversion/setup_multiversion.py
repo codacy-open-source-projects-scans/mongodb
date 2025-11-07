@@ -124,7 +124,7 @@ class SetupMultiversion(Subcommand):
         self.github_oauth_token = (
             github_oauth_token.replace("token ", "") if github_oauth_token else None
         )
-        with open(config.SETUP_MULTIVERSION_CONFIG) as file_handle:
+        with open(config.SETUP_MULTIVERSION_CONFIG, encoding="utf8") as file_handle:
             raw_yaml = yaml.safe_load(file_handle)
         self.config = config.SetupMultiversionConfig(raw_yaml)
 
@@ -455,13 +455,16 @@ class SetupMultiversion(Subcommand):
             if url is not None:
 
                 def try_download(download_url):
+                    self.logger.info("Downloading '%s'", download_url)
                     tarball = download.download_from_s3(download_url)
+                    self.logger.info("Extracting '%s' in '%s' folder", tarball, install_dir)
                     download.extract_archive(tarball, install_dir)
+                    self.logger.info("Removing tarball '%s'", tarball)
                     os.remove(tarball)
 
                 try:
                     try_download(url)
-                except Exception as err:  # pylint: disable=broad-except
+                except Exception as err:
                     self.logger.warning(
                         "Setting up tarball failed with error, retrying once... error=%s", err
                     )
@@ -511,42 +514,46 @@ class _DownloadOptions(object):
 class SetupMultiversionPlugin(PluginInterface):
     """Integration point for setup-multiversion-mongodb."""
 
-    def parse(self, subcommand, parser, parsed_args, **kwargs):
+    def parse(
+        self,
+        subcommand: str,
+        parser: argparse.ArgumentParser,
+        parsed_args: dict,
+        should_configure_otel: bool = True,
+        **kwargs,
+    ):
         """Parse command-line options."""
         if subcommand != SUBCOMMAND:
             return None
 
-        # Shorthand for brevity.
-        args = parsed_args
-
         download_options = _DownloadOptions(
-            db=args.download_binaries,
-            ds=args.download_symbols,
-            da=args.download_artifacts,
-            dv=args.download_python_venv,
+            db=parsed_args["download_binaries"],
+            ds=parsed_args["download_symbols"],
+            da=parsed_args["download_artifacts"],
+            dv=parsed_args["download_python_venv"],
         )
 
-        if args.use_existing_releases_file:
+        if parsed_args["use_existing_releases_file"]:
             multiversionsetupconstants.USE_EXISTING_RELEASES_FILE = True
 
         return SetupMultiversion(
-            install_dir=args.install_dir,
-            link_dir=args.link_dir,
-            mv_platform=args.platform,
-            edition=args.edition,
-            architecture=args.architecture,
-            use_latest=args.use_latest,
-            versions=args.versions,
-            install_last_lts=args.install_last_lts,
-            variant=args.variant,
-            install_last_continuous=args.install_last_continuous,
+            install_dir=parsed_args["install_dir"],
+            link_dir=parsed_args["link_dir"],
+            mv_platform=parsed_args["platform"],
+            edition=parsed_args["edition"],
+            architecture=parsed_args["architecture"],
+            use_latest=parsed_args["use_latest"],
+            versions=parsed_args["versions"],
+            install_last_lts=parsed_args["install_last_lts"],
+            variant=parsed_args["variant"],
+            install_last_continuous=parsed_args["install_last_continuous"],
             download_options=download_options,
-            evergreen_config=args.evergreen_config,
-            github_oauth_token=args.github_oauth_token,
-            ignore_failed_push=(not args.require_push),
-            evg_versions_file=args.evg_versions_file,
-            debug=args.debug,
-            logger=SetupMultiversion.setup_logger(parsed_args.debug),
+            evergreen_config=parsed_args["evergreen_config"],
+            github_oauth_token=parsed_args["github_oauth_token"],
+            ignore_failed_push=(not parsed_args["require_push"]),
+            evg_versions_file=parsed_args["evg_versions_file"],
+            debug=parsed_args["debug"],
+            logger=SetupMultiversion.setup_logger(parsed_args["debug"]),
         )
 
     @classmethod

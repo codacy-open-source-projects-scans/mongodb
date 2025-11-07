@@ -29,21 +29,20 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
+#include "mongo/base/string_data.h"
+#include "mongo/db/pipeline/accumulation_statement.h"
+#include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
+#include "mongo/db/query/stage_builder/sbe/sbexpr.h"
+#include "mongo/util/modules.h"
+
 #include <memory>
 #include <vector>
 
-#include "mongo/base/string_data.h"
-#include "mongo/db/exec/sbe/expressions/expression.h"
-#include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/accumulation_statement.h"
-#include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
-#include "mongo/util/string_map.h"
+#include <boost/optional/optional.hpp>
 
 namespace mongo::stage_builder {
+const StringData kAccumulatorCountName = "$count"_sd;
+
 class PlanStageSlots;
 
 // This class serves as the base class for all the "AccumInputs" classes used by the build methods.
@@ -74,13 +73,20 @@ class AccumOp {
 public:
     AccumOp(std::string opName);
 
-    AccumOp(StringData opName) : AccumOp(opName.toString()) {}
+    AccumOp(StringData opName) : AccumOp(std::string{opName}) {}
 
     AccumOp(const AccumulationStatement& acc);
 
     StringData getOpName() const {
         return _opName;
     }
+
+    /**
+     * Returns the name of this accumulator, such as "$avg" or "$count". AccumulationStatement does
+     * not save this, and AccumulationStatement.AccumulationExpression.name is not always the
+     * correct name (e.g. it shows "$sum" for a $count accumulator).
+     */
+    static std::string getOpNameForAccStmt(const AccumulationStatement& accStmt);
 
     /**
      * This method returns the number of agg expressions that need to be generated for this
@@ -107,6 +113,37 @@ public:
      * return boost::none.
      */
     bool hasBuildAddBlockAggs() const;
+
+    /**
+     * This method returns true this AccumOp supports buildSinglePurposeAccumulator(), otherwise
+     * returns false.
+     */
+    bool canBuildSinglePurposeAccumulator() const;
+
+    /**
+     * This method generates an expression for a single-purpose accumulator that has native
+     * implementations of accumulator operations instead of "add," "initialize," and "combine" ABT
+     * expressions. Used when the desired output is the final result of accumulation.
+     *
+     * Only call this method after ensuring that canBuildSinglePrposeAccumulator() returns true.
+     */
+    SbHashAggAccumulator buildSinglePurposeAccumulator(StageBuilderState& state,
+                                                       SbExpr inputExpression,
+                                                       std::string fieldName,
+                                                       SbSlot outSlot,
+                                                       SbSlot spillSlot) const;
+
+    /**
+     * Same as buildSinglePurposeAccumulator() but used when the desired result is a partial
+     * aggregate, such as should be produced by shard pipelines whose results are to be merged.
+     *
+     * Only call this method after ensuring that canBuildSinglePrposeAccumulator() returns true.
+     */
+    SbHashAggAccumulator buildSinglePurposeAccumulatorForMerge(StageBuilderState& state,
+                                                               SbExpr inputExpression,
+                                                               std::string fieldName,
+                                                               SbSlot outSlot,
+                                                               SbSlot spillSlot) const;
 
     /**
      * Given one or more input expressions ('input' / 'inputs'), these methods generate the
@@ -181,7 +218,7 @@ private:
 
     // Info about the specific accumulation op named by '_opName'.
     const AccumOpInfo* _opInfo = nullptr;
-};
+};  // class AccumOp
 
 struct AddSingleInput : public AccumInputs {
     AddSingleInput(SbExpr inputExpr) : inputExpr(std::move(inputExpr)) {}

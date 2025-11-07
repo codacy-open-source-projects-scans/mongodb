@@ -29,29 +29,24 @@
 
 #include "mongo/db/pipeline/accumulator_multi.h"
 
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr.hpp>
-#include <iterator>
-#include <memory>
-#include <type_traits>
-
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
 #include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/sort_pattern.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
+
+#include <iterator>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 using FirstLastSense = AccumulatorFirstLastN::Sense;
@@ -147,7 +142,7 @@ void AccumulatorN::processInternal(const Value& input, bool merging) {
     tassert(5787802, "'n' must be initialized", _n);
 
     if (merging) {
-        tassert(5787803, "input must be an array when 'merging' is true", input.isArray());
+        assertMergingInputType(input, BSONType::array);
         const auto& array = input.getArray();
         for (auto&& val : array) {
             _processValue(val);
@@ -212,16 +207,6 @@ AccumulatorN::parseArgs(ExpressionContext* const expCtx,
     return std::make_tuple(n, input);
 }
 
-void AccumulatorN::checkMemUsage() {
-    uassert(ErrorCodes::ExceededMemoryLimit,
-            str::stream() << getOpName()
-                          << " used too much memory and spilling to disk cannot reduce memory "
-                             "consumption any further. Used: "
-                          << _memUsageTracker.currentMemoryBytes() << " bytes. Memory limit: "
-                          << _memUsageTracker.maxAllowedMemoryUsageBytes() << " bytes",
-            _memUsageTracker.withinMemoryLimit());
-}
-
 void AccumulatorN::serializeHelper(const boost::intrusive_ptr<Expression>& initializer,
                                    const boost::intrusive_ptr<Expression>& argument,
                                    const SerializationOptions& options,
@@ -244,16 +229,16 @@ AccumulationExpression AccumulatorMinMaxN::parseMinMaxN(ExpressionContext* const
 
     uassert(5787900,
             str::stream() << "specification must be an object; found " << elem,
-            elem.type() == BSONType::Object);
+            elem.type() == BSONType::object);
     BSONObj obj = elem.embeddedObject();
 
     auto [n, input] = AccumulatorN::parseArgs(expCtx, obj, vps);
 
     auto factory = [expCtx] {
         if constexpr (s == MinMaxSense::kMin) {
-            return AccumulatorMinN::create(expCtx);
+            return make_intrusive<AccumulatorMinN>(expCtx);
         } else {
-            return AccumulatorMaxN::create(expCtx);
+            return make_intrusive<AccumulatorMaxN>(expCtx);
         }
     };
 
@@ -302,19 +287,11 @@ void AccumulatorMinMaxN::reset() {
 }
 
 const char* AccumulatorMinN::getName() {
-    return kName.rawData();
-}
-
-boost::intrusive_ptr<AccumulatorState> AccumulatorMinN::create(ExpressionContext* const expCtx) {
-    return make_intrusive<AccumulatorMinN>(expCtx);
+    return kName.data();
 }
 
 const char* AccumulatorMaxN::getName() {
-    return kName.rawData();
-}
-
-boost::intrusive_ptr<AccumulatorState> AccumulatorMaxN::create(ExpressionContext* const expCtx) {
-    return make_intrusive<AccumulatorMaxN>(expCtx);
+    return kName.data();
 }
 
 AccumulatorFirstLastN::AccumulatorFirstLastN(ExpressionContext* const expCtx, FirstLastSense sense)
@@ -337,16 +314,16 @@ AccumulationExpression AccumulatorFirstLastN::parseFirstLastN(ExpressionContext*
 
     uassert(5787801,
             str::stream() << "specification must be an object; found " << elem,
-            elem.type() == BSONType::Object);
+            elem.type() == BSONType::object);
     auto obj = elem.embeddedObject();
 
     auto [n, input] = AccumulatorN::parseArgs(expCtx, obj, vps);
 
     auto factory = [expCtx] {
         if constexpr (v == Sense::kFirst) {
-            return AccumulatorFirstN::create(expCtx);
+            return make_intrusive<AccumulatorFirstN>(expCtx);
         } else {
-            return AccumulatorLastN::create(expCtx);
+            return make_intrusive<AccumulatorLastN>(expCtx);
         }
     };
 
@@ -413,19 +390,11 @@ Value AccumulatorFirstLastN::getValue(bool toBeMerged) {
 }
 
 const char* AccumulatorFirstN::getName() {
-    return kName.rawData();
-}
-
-boost::intrusive_ptr<AccumulatorState> AccumulatorFirstN::create(ExpressionContext* const expCtx) {
-    return make_intrusive<AccumulatorFirstN>(expCtx);
+    return kName.data();
 }
 
 const char* AccumulatorLastN::getName() {
-    return kName.rawData();
-}
-
-boost::intrusive_ptr<AccumulatorState> AccumulatorLastN::create(ExpressionContext* const expCtx) {
-    return make_intrusive<AccumulatorLastN>(expCtx);
+    return kName.data();
 }
 
 // TODO SERVER-59327 Refactor other operators to use this parse function.
@@ -438,7 +407,7 @@ accumulatorNParseArgs(ExpressionContext* expCtx,
                       const VariablesParseState& vps) {
     uassert(5788001,
             str::stream() << "specification must be an object; found " << elem,
-            elem.type() == BSONType::Object);
+            elem.type() == BSONType::object);
     BSONObj obj = elem.embeddedObject();
 
     // Extract fields from specification object. sortBy and output are not immediately parsed into
@@ -479,10 +448,22 @@ accumulatorNParseArgs(ExpressionContext* expCtx,
         uassert(5788005,
                 str::stream() << "Missing value for '" << AccumulatorN::kFieldNameSortBy << "'",
                 sortBy);
+        uassert(9657900,
+                str::stream() << "Value for '" << AccumulatorN::kFieldNameSortBy
+                              << "' must be a non-empty object",
+                !sortBy->isEmpty());
     }
 
     return {n, *output, sortBy};
 }
+
+template <TopBottomSense sense, bool single>
+AccumulatorTopBottomN<sense, single>::AccumulatorTopBottomN(ExpressionContext* const expCtx,
+                                                            BSONObj sortBy,
+                                                            bool isRemovable)
+    : AccumulatorTopBottomN(expCtx,
+                            std::get<0>(parseAccumulatorTopBottomNSortBy<sense>(expCtx, sortBy)),
+                            isRemovable) {}
 
 template <TopBottomSense sense, bool single>
 AccumulatorTopBottomN<sense, single>::AccumulatorTopBottomN(ExpressionContext* const expCtx,
@@ -524,7 +505,7 @@ AccumulatorTopBottomN<sense, single>::AccumulatorTopBottomN(ExpressionContext* c
 
 template <TopBottomSense sense, bool single>
 const char* AccumulatorTopBottomN<sense, single>::getOpName() const {
-    return AccumulatorTopBottomN<sense, single>::getName().rawData();
+    return AccumulatorTopBottomN<sense, single>::getName().data();
 }
 
 template <TopBottomSense sense, bool single>
@@ -598,7 +579,7 @@ AccumulationExpression AccumulatorTopBottomN<sense, single>::parseTopBottomN(
     ExpressionContext* const expCtx, BSONElement elem, VariablesParseState vps) {
     auto name = AccumulatorTopBottomN<sense, single>::getName();
     const auto [n, output, sortBy] =
-        accumulatorNParseArgs<single>(expCtx, elem, name.rawData(), true, vps);
+        accumulatorNParseArgs<single>(expCtx, elem, name.data(), true, vps);
     auto [sortPattern, sortFieldsExp, hasMeta] =
         parseAccumulatorTopBottomNSortBy<sense>(expCtx, *sortBy);
 
@@ -627,20 +608,6 @@ AccumulationExpression AccumulatorTopBottomN<sense, single>::parseTopBottomN(
     };
 
     return {std::move(n), std::move(argument), std::move(factory), name};
-}
-
-template <TopBottomSense sense, bool single>
-boost::intrusive_ptr<AccumulatorState> AccumulatorTopBottomN<sense, single>::create(
-    ExpressionContext* expCtx, BSONObj sortBy, bool isRemovable) {
-    return make_intrusive<AccumulatorTopBottomN<sense, single>>(
-        expCtx, std::get<0>(parseAccumulatorTopBottomNSortBy<sense>(expCtx, sortBy)), isRemovable);
-}
-
-template <TopBottomSense sense, bool single>
-boost::intrusive_ptr<AccumulatorState> AccumulatorTopBottomN<sense, single>::create(
-    ExpressionContext* expCtx, SortPattern sortPattern) {
-    return make_intrusive<AccumulatorTopBottomN<sense, single>>(
-        expCtx, sortPattern, /* isRemovable */ false);
 }
 
 template <TopBottomSense sense, bool single>
@@ -736,14 +703,14 @@ void AccumulatorTopBottomN<sense, single>::processInternal(const Value& input, b
             // shard because we may need to spill to disk.
             auto doc = input.getDocument();
             auto vals = doc[kFieldNameOutput];
-            tassert(5872600, "Expected 'output' field to contain an array", vals.isArray());
+            assertMergingInputType(vals, BSONType::array);
             for (auto&& val : vals.getArray()) {
                 _processValue(val);
             }
         } else {
-            tasserted(5872602,
-                      "argument to top/bottom processInternal must be an array or an "
-                      "object when merging");
+            uasserted(ErrorCodes::TypeMismatch,
+                      "argument to top/bottom processInternal must be an array or an object when "
+                      "merging");
         }
     } else {
         _processValue(input);

@@ -4,10 +4,7 @@
  * @tags: [
  *  requires_sharding,
  *  requires_fcv_80,
- *  featureFlagReshardingImprovements,
  *  featureFlagMoveCollection,
- *  # TODO (SERVER-87812) Remove multiversion_incompatible tag
- *  multiversion_incompatible,
  * ]
  */
 
@@ -18,8 +15,10 @@ const reshardingTest = new ReshardingTest();
 reshardingTest.setup();
 
 const donorShardNames = reshardingTest.donorShardNames;
-const sourceCollection = reshardingTest.createUnshardedCollection(
-    {ns: "reshardingDb.coll", primaryShardName: donorShardNames[0]});
+const sourceCollection = reshardingTest.createUnshardedCollection({
+    ns: "reshardingDb.coll",
+    primaryShardName: donorShardNames[0],
+});
 
 assert.commandWorked(sourceCollection.insert([{x: 1}, {x: 3}, {x: 3}, {x: 1}]));
 

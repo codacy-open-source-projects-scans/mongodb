@@ -27,19 +27,21 @@
  *    it in the license file.
  */
 
+#include "mongo/executor/connection_pool_stats.h"
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/util/duration.h"
+
 #include <algorithm>
-#include <fmt/ostream.h>
 #include <iosfwd>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/executor/connection_pool_stats.h"
-#include "mongo/util/duration.h"
+#include <fmt/format.h>
+#include <fmt/ostream.h>
 
 namespace mongo {
 namespace executor {
@@ -56,7 +58,9 @@ ConnectionStatsPer::ConnectionStatsPer(size_t nInUse,
                                        size_t nRefreshed,
                                        size_t nWasNeverUsed,
                                        size_t nWasUsedOnce,
-                                       Milliseconds nConnUsageTime)
+                                       Milliseconds nConnUsageTime,
+                                       size_t nRejectedConnectionsCount,
+                                       size_t nPendingRequestsCount)
     : inUse(nInUse),
       available(nAvailable),
       leased(nLeased),
@@ -65,7 +69,9 @@ ConnectionStatsPer::ConnectionStatsPer(size_t nInUse,
       refreshed(nRefreshed),
       wasNeverUsed(nWasNeverUsed),
       wasUsedOnce(nWasUsedOnce),
-      connUsageTime(nConnUsageTime) {}
+      connUsageTime(nConnUsageTime),
+      rejectedRequests(nRejectedConnectionsCount),
+      pendingRequests(nPendingRequestsCount) {}
 
 ConnectionStatsPer::ConnectionStatsPer() = default;
 
@@ -79,7 +85,9 @@ ConnectionStatsPer& ConnectionStatsPer::operator+=(const ConnectionStatsPer& oth
     wasNeverUsed += other.wasNeverUsed;
     wasUsedOnce += other.wasUsedOnce;
     connUsageTime += other.connUsageTime;
+    rejectedRequests += other.rejectedRequests;
     acquisitionWaitTimes += other.acquisitionWaitTimes;
+    pendingRequests += other.pendingRequests;
 
     return *this;
 }
@@ -110,7 +118,9 @@ void ConnectionPoolStats::updateStatsForHost(std::string pool,
     totalWasNeverUsed += newStats.wasNeverUsed;
     totalWasUsedOnce += newStats.wasUsedOnce;
     totalConnUsageTime += newStats.connUsageTime;
+    totalRejectedRequests += newStats.rejectedRequests;
     acquisitionWaitTimes += newStats.acquisitionWaitTimes;
+    totalPendingRequests += newStats.pendingRequests;
 }
 
 void ConnectionPoolStats::appendToBSON(mongo::BSONObjBuilder& result, bool forFTDC) {
@@ -121,11 +131,11 @@ void ConnectionPoolStats::appendToBSON(mongo::BSONObjBuilder& result, bool forFT
     result.appendNumber("totalRefreshing", static_cast<long long>(totalRefreshing));
     result.appendNumber("totalRefreshed", static_cast<long long>(totalRefreshed));
     result.appendNumber("totalWasNeverUsed", static_cast<long long>(totalWasNeverUsed));
-    if (forFTDC) {
-        result.appendNumber("totalWasUsedOnce", static_cast<long long>(totalWasUsedOnce));
-        result.appendNumber("totalConnUsageTimeMillis",
-                            durationCount<Milliseconds>(totalConnUsageTime));
-    }
+    result.appendNumber("totalWasUsedOnce", static_cast<long long>(totalWasUsedOnce));
+    result.appendNumber("totalConnUsageTimeMillis",
+                        durationCount<Milliseconds>(totalConnUsageTime));
+    result.appendNumber("totalRejectedRequests", static_cast<long long>(totalRejectedRequests));
+    result.appendNumber("totalPendingRequests", static_cast<long long>(totalPendingRequests));
 
     if (forFTDC) {
         BSONObjBuilder poolBuilder(result.subobjStart("pools"));
@@ -148,8 +158,8 @@ void ConnectionPoolStats::appendToBSON(mongo::BSONObjBuilder& result, bool forFT
 
     // Process pools stats.
     {
-        if (strategy) {
-            result.append("replicaSetMatchingStrategy", matchingStrategyToString(*strategy));
+        if (matchingStrategy) {
+            result.append("replicaSetMatchingStrategy", *matchingStrategy);
         }
 
         BSONObjBuilder poolBuilder(result.subobjStart("pools"));
@@ -162,6 +172,10 @@ void ConnectionPoolStats::appendToBSON(mongo::BSONObjBuilder& result, bool forFT
             poolInfo.appendNumber("poolRefreshing", static_cast<long long>(stats.refreshing));
             poolInfo.appendNumber("poolRefreshed", static_cast<long long>(stats.refreshed));
             poolInfo.appendNumber("poolWasNeverUsed", static_cast<long long>(stats.wasNeverUsed));
+            poolInfo.appendNumber("poolRejectedRequests",
+                                  static_cast<long long>(stats.rejectedRequests));
+            poolInfo.appendNumber("poolPendingRequests",
+                                  static_cast<long long>(stats.pendingRequests));
             appendHistogram(poolInfo, stats.acquisitionWaitTimes, kAcquisitionWaitTimesKey);
 
             for (const auto& [host, stats] : stats.statsByHost) {
@@ -173,6 +187,10 @@ void ConnectionPoolStats::appendToBSON(mongo::BSONObjBuilder& result, bool forFT
                 hostInfo.appendNumber("refreshing", static_cast<long long>(stats.refreshing));
                 hostInfo.appendNumber("refreshed", static_cast<long long>(stats.refreshed));
                 hostInfo.appendNumber("wasNeverUsed", static_cast<long long>(stats.wasNeverUsed));
+                hostInfo.appendNumber("rejectedRequests",
+                                      static_cast<long long>(stats.rejectedRequests));
+                hostInfo.appendNumber("pendingRequests",
+                                      static_cast<long long>(stats.pendingRequests));
                 appendHistogram(hostInfo, stats.acquisitionWaitTimes, kAcquisitionWaitTimesKey);
             }
         }
@@ -190,6 +208,9 @@ void ConnectionPoolStats::appendToBSON(mongo::BSONObjBuilder& result, bool forFT
             hostInfo.appendNumber("refreshing", static_cast<long long>(stats.refreshing));
             hostInfo.appendNumber("refreshed", static_cast<long long>(stats.refreshed));
             hostInfo.appendNumber("wasNeverUsed", static_cast<long long>(stats.wasNeverUsed));
+            hostInfo.appendNumber("rejectedRequests",
+                                  static_cast<long long>(stats.rejectedRequests));
+            hostInfo.appendNumber("pendingRequests", static_cast<long long>(stats.pendingRequests));
             appendHistogram(hostInfo, stats.acquisitionWaitTimes, kAcquisitionWaitTimesKey);
         }
     }

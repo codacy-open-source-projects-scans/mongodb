@@ -27,13 +27,13 @@
  *    it in the license file.
  */
 
-#include <memory>
+#pragma once
 
 #include "mongo/bson/oid.h"
-#include "mongo/db/repl/hello_gen.h"
+#include "mongo/db/error_labels.h"
+#include "mongo/db/repl/hello/hello_gen.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/executor/async_rpc.h"
-#include "mongo/executor/async_rpc_retry_policy.h"
 #include "mongo/executor/async_rpc_targeter.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/task_executor.h"
@@ -42,11 +42,12 @@
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
 #include "mongo/rpc/topology_version_gen.h"
 #include "mongo/s/session_catalog_router.h"
-#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/log_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
+
+#include <memory>
 
 namespace mongo::async_rpc {
 using executor::NetworkInterface;
@@ -55,29 +56,44 @@ using executor::NetworkTestEnv;
 using executor::ThreadPoolMock;
 using executor::ThreadPoolTaskExecutor;
 
-class TestRetryPolicy : public RetryPolicy {
+class TestRetryStrategy final : public mongo::RetryStrategy {
 public:
-    bool recordAndEvaluateRetry(Status s) final {
+    bool recordFailureAndEvaluateShouldRetry(Status s,
+                                             const boost::optional<HostAndPort>& target,
+                                             std::span<const std::string> errorLabels) override {
         if (_numRetriesPerformed == _maxRetries) {
             return false;
         }
         ++_numRetriesPerformed;
+
+        // Pop and save the next retry delay when we decide to retry
+        if (!_retryDelays.empty()) {
+            _nextRetryDelay = _retryDelays.front();
+            _retryDelays.pop_front();
+        }
+
         return true;
     }
 
-    Milliseconds getNextRetryDelay() final {
-        auto&& out = _retryDelays.front();
-        _retryDelays.pop_front();
-        return out;
+    Milliseconds getNextRetryDelay() const override {
+        return _nextRetryDelay;
+    }
+
+    void recordSuccess(const boost::optional<HostAndPort>& target) override {
+        // Noop, as there's nothing to cleanup on success.
+    }
+
+    void recordBackoff(Milliseconds backoff) override {
+        _totalBackoff += backoff;
+    }
+
+    const TargetingMetadata& getTargetingMetadata() const override {
+        static const TargetingMetadata emptyMetadata{};
+        return emptyMetadata;
     }
 
     void pushRetryDelay(Milliseconds retryDelay) {
         _retryDelays.push_back(retryDelay);
-    }
-
-    BSONObj toBSON() const final {
-        return BSON("retryPolicyType"
-                    << "TestRetryPolicy");
     }
 
     void setMaxNumRetries(int maxRetries) {
@@ -88,9 +104,15 @@ public:
         return _numRetriesPerformed;
     }
 
+    Milliseconds getTotalBackoff() const {
+        return _totalBackoff;
+    }
+
 private:
     int _numRetriesPerformed, _maxRetries = 0;
+    Milliseconds _nextRetryDelay{0};  // Current retry delay
     std::deque<Milliseconds> _retryDelays;
+    Milliseconds _totalBackoff;
 };
 
 class AsyncRPCTestFixture : public ServiceContextTest {
@@ -145,6 +167,40 @@ public:
         return result.obj();
     }
 
+    /**
+     * Generates a retryable error BSONObj command response with the 'SystemOverloaded'
+     * error label.
+     */
+    BSONObj createErrorSystemOverloaded(ErrorCodes::Error errorCode) {
+        BSONObjBuilder bob;
+        bob.append("ok", 0.0);
+        bob.append("code", errorCode);
+        bob.append("errmsg", "overloaded");
+        bob.append("codeName", ErrorCodes::errorString(errorCode));
+        {
+            BSONArrayBuilder arrayBuilder = bob.subarrayStart(kErrorLabelsFieldName);
+            arrayBuilder.append(ErrorLabel::kSystemOverloadedError);
+            arrayBuilder.append(ErrorLabel::kRetryableError);
+        }
+        return bob.obj();
+    }
+
+    Milliseconds advanceUntilReadyRequest() const {
+        using namespace std::literals;
+        auto net = getNetworkInterfaceMock();
+
+        stdx::this_thread::sleep_for(1ms);
+        auto totalWaited = Milliseconds{0};
+        auto _ = executor::NetworkInterfaceMock::InNetworkGuard{net};
+        while (!net->hasReadyRequests()) {
+            auto advance = Milliseconds{10};
+            net->advanceTime(net->now() + advance);
+            totalWaited += advance;
+            stdx::this_thread::sleep_for(100us);
+        }
+        return totalWaited;
+    }
+
     TaskExecutor& getExecutor() const {
         return *_executor;
     }
@@ -157,7 +213,7 @@ public:
         return _net.get();
     }
 
-    void scheduleRequestAndAdvanceClockForRetry(std::shared_ptr<RetryPolicy> retryPolicy,
+    void scheduleRequestAndAdvanceClockForRetry(std::shared_ptr<mongo::RetryStrategy> retryStrategy,
                                                 NetworkTestEnv::OnCommandFunction onCommandFunc,
                                                 Milliseconds advanceBy) {
         auto net = getNetworkInterfaceMock();
@@ -190,7 +246,7 @@ private:
 class FailingTargeter : public Targeter {
 public:
     FailingTargeter(Status errorToFailWith) : _status{errorToFailWith} {}
-    SemiFuture<std::vector<HostAndPort>> resolve(CancellationToken t) final {
+    SemiFuture<HostAndPort> resolve(CancellationToken t, const TargetingMetadata&) final {
         return _status;
     }
 
@@ -216,8 +272,18 @@ public:
         _resolvedHosts = resolvedHosts;
     };
 
-    SemiFuture<std::vector<HostAndPort>> resolve(CancellationToken t) final {
-        return SemiFuture<std::vector<HostAndPort>>::makeReady(_resolvedHosts);
+    SemiFuture<HostAndPort> resolve(CancellationToken t,
+                                    const TargetingMetadata& targetingMetadata) final {
+        const auto notDeprioritized = [&](const HostAndPort& server) {
+            return !targetingMetadata.deprioritizedServers.contains(server);
+        };
+
+        if (auto it = std::ranges::find_if(_resolvedHosts, notDeprioritized);
+            it != _resolvedHosts.end()) {
+            return SemiFuture<HostAndPort>::makeReady(*it);
+        }
+
+        return SemiFuture<HostAndPort>::makeReady(_resolvedHosts.front());
     }
 
     SemiFuture<void> onRemoteCommandError(HostAndPort h, Status s) final {

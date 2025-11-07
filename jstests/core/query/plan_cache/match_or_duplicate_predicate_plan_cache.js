@@ -14,6 +14,7 @@
  *   # If all chunks are moved off of a shard, it can cause the plan cache to miss commands.
  *   assumes_balancer_off,
  *   assumes_unsharded_collection,
+ *   requires_getmore,
  * ]
  */
 
@@ -27,10 +28,16 @@ const docs = [
 assert.commandWorked(coll.insert(docs));
 
 const predicate = {
-    $or: [{_id: 1, foo: 1}, {_id: 1, foo: 999}]
+    $or: [
+        {_id: 1, foo: 1},
+        {_id: 1, foo: 999},
+    ],
 };
 const predicate2 = {
-    $or: [{_id: 2, foo: 2}, {_id: 2, foo: 999}]
+    $or: [
+        {_id: 2, foo: 2},
+        {_id: 2, foo: 999},
+    ],
 };
 
 // This query places an entry in the SBE plan cache.
@@ -42,17 +49,38 @@ coll.getPlanCache().clear();
 
 assert.eq(
     [{_id: null, s: 1}],
-    coll.aggregate([{$match: predicate}, {$group: {_id: null, s: {$sum: "$foo"}}}]).toArray());
+    coll.aggregate([{$match: predicate}, {$group: {_id: null, s: {$sum: "$foo"}}}]).toArray(),
+);
 assert.eq(
     [{_id: null, s: 2}],
-    coll.aggregate([{$match: predicate2}, {$group: {_id: null, s: {$sum: "$foo"}}}]).toArray());
+    coll.aggregate([{$match: predicate2}, {$group: {_id: null, s: {$sum: "$foo"}}}]).toArray(),
+);
 
 // Tests that $or queries eligible for the $or-to-$in rewrite where the constants contain some
 // non-parameterizable constants do not fail. This is a regression test for SERVER-92603.
 
 // No predicates are parameterizable.
-assert.eq([], coll.find({$or: [{_id: 1, foo: true}, {_id: 1, foo: false}]}).toArray());
+assert.eq(
+    [],
+    coll
+        .find({
+            $or: [
+                {_id: 1, foo: true},
+                {_id: 1, foo: false},
+            ],
+        })
+        .toArray(),
+);
 // Some predicates are parameterizable.
 assert.eq(
     [{_id: 1, foo: 1}],
-    coll.find({$or: [{_id: 1, foo: 1}, {_id: 1, foo: true}, {_id: 1, foo: false}]}).toArray());
+    coll
+        .find({
+            $or: [
+                {_id: 1, foo: 1},
+                {_id: 1, foo: true},
+                {_id: 1, foo: false},
+            ],
+        })
+        .toArray(),
+);

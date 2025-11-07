@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
@@ -42,8 +37,14 @@
 #include "mongo/db/session/session_killer.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/hierarchical_acquisition.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/periodic_runner.h"
 #include "mongo/util/time_support.h"
+
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 
@@ -59,7 +60,7 @@ namespace mongo {
  * periodic runner for this mongos. The time will be returned from the
  * system clock.
  */
-class ServiceLiaisonImpl : public ServiceLiaison {
+class MONGO_MOD_PUB ServiceLiaisonImpl : public ServiceLiaison {
 public:
     using GetOpenCursorsFn = unique_function<LogicalSessionIdSet(OperationContext*)>;
 
@@ -67,7 +68,7 @@ public:
 
     ServiceLiaisonImpl(GetOpenCursorsFn getOpenCursorsFn, KillCursorsFn killCursorsFn)
         : _getOpenCursorsFn(std::move(getOpenCursorsFn)),
-          _killCursorsFn(std::move(killCursorsFn)){};
+          _killCursorsFn(std::move(killCursorsFn)) {};
 
     LogicalSessionIdSet getActiveOpSessions() const override;
     LogicalSessionIdSet getOpenCursorSessions(OperationContext* opCtx) const override;

@@ -29,25 +29,21 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-#include <memory>
-
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/exec/delete_stage.h"
+#include "mongo/db/exec/classic/delete_stage.h"
+#include "mongo/db/exec/classic/update_stage.h"
 #include "mongo/db/exec/exec_shard_filter_policy.h"
-#include "mongo/db/exec/update_stage.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/canonical_distinct.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/count_command_gen.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
@@ -55,13 +51,18 @@
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_params.h"
-#include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/write_ops/parsed_delete.h"
 #include "mongo/db/query/write_ops/parsed_update.h"
 #include "mongo/db/record_id.h"
-#include "mongo/db/shard_role.h"
 #include "mongo/db/update/update_driver.h"
 #include "mongo/executor/task_executor_cursor.h"
+
+#include <cstddef>
+#include <memory>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -100,15 +101,13 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind
     size_t plannerOptions = QueryPlannerParams::DEFAULT,
     Pipeline* pipeline = nullptr,
     bool needsMerge = false,
-    QueryMetadataBitSet unavailableMetadata = QueryMetadataBitSet{},
     boost::optional<TraversalPreference> traversalPreference = boost::none,
     ExecShardFilterPolicy = AutomaticShardFiltering{});
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSearchMetadataExecutorSBE(
     OperationContext* opCtx,
-    const MultipleCollectionAccessor& collections,
     const NamespaceString& nss,
-    const CanonicalQuery& cq,
+    const ExpressionContext& expCtx,
     std::unique_ptr<executor::TaskExecutorCursor> metadataCursor);
 
 /**
@@ -132,6 +131,15 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getSearchMetada
  * should return "unwound" values 10, 11, and 12, but {$group: {_id: '$a'}} needs to see the
  * documents for the original [10, 11] and 12 values. Thus, the latter would use the
  * STRICT_DISTINCT_ONLY option to preserve the arrays.
+ *
+ * A third meaning of QueryPlannerParams::STRICT_DISTINCT_ONLY is to indicate we expect to not
+ * perform a distinct scan if its over a sparse index. For example, if the collection has a document
+ * {b: 5} and an index on {a: 1}, the distinct('a') command would return no results since the
+ * distinct command ignores missing fields. If the index {a: 1} was sparse, this would not affect
+ * the results as the sparse index does not cover missing fields. However, {$group: {_id: '$a'}}
+ * should return the result {_id: null} because $group treats missing fields as null. Thus, the
+ * $group would use the STRICT_DISTINCT_ONLY option to ensure that we do not ignore missing fields
+ * by using a distinct scan over a sparse index.
  */
 StatusWith<std::unique_ptr<QuerySolution>> tryGetQuerySolutionForDistinct(
     const MultipleCollectionAccessor& collections,
@@ -160,7 +168,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDist
  */
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCount(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    const CollectionPtr* collection,
+    const CollectionAcquisition& collection,
     std::unique_ptr<ParsedFindCommand> parsedFind,
     const CountCommandRequest& count);
 
@@ -225,7 +233,7 @@ enum class CollectionScanDirection {
 
 std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> getCollectionScanExecutor(
     OperationContext* opCtx,
-    const CollectionPtr& collection,
+    const CollectionAcquisition& collection,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     CollectionScanDirection scanDirection,
     const boost::optional<RecordId>& resumeAfterRecordId = boost::none);

@@ -28,14 +28,6 @@
  */
 #pragma once
 
-#include <boost/smart_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <type_traits>
-#include <utility>
-
 #include "mongo/base/status.h"
 #include "mongo/db/client.h"
 #include "mongo/db/service_context.h"
@@ -45,6 +37,15 @@
 #include "mongo/util/functional.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/out_of_line_executor.h"
+
+#include <memory>
+#include <mutex>
+#include <string>
+#include <type_traits>
+#include <utility>
+
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -76,7 +77,10 @@ public:
             // Hold the lock for as long as the Guard is around. This forces other consumers to
             // queue behind the Guard.
             _strand->_mutex.lock();
+            MONGO_COMPILER_DIAGNOSTIC_PUSH
+            MONGO_COMPILER_DIAGNOSTIC_WORKAROUND_ATOMIC_WRITE
             _strand->_isBound.store(true);
+            MONGO_COMPILER_DIAGNOSTIC_POP
 
             _strand->_setCurrent();
         }
@@ -193,7 +197,7 @@ private:
      *
      * This is only valid to call if no other thread has the Client bound.
      */
-    void _setCurrent() noexcept;
+    void _setCurrent();
 
     /**
      * Release the Client from the current thread.
@@ -201,7 +205,7 @@ private:
      * This is valid to call multiple times on the same thread. It is not valid to mix this with
      * Client::releaseCurrent().
      */
-    void _releaseCurrent() noexcept;
+    void _releaseCurrent();
 
     Client* const _clientPtr;
 

@@ -40,11 +40,21 @@
 
 #pragma once
 
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
-#include <boost/optional.hpp>
+// IWYU pragma: private, include "mongo/unittest/unittest.h"
+// IWYU pragma: friend "mongo/unittest/.*"
+
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/logv2/log_debug.h"
+#include "mongo/logv2/log_detail.h"
+#include "mongo/unittest/test_info.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules_incompletely_marked_header.h"
+#include "mongo/util/optional_util.h"
+#include "mongo/util/str.h"
+#include "mongo/util/synchronized_value.h"
+
 #include <cmath>
-#include <fmt/format.h>
 #include <functional>
 #include <optional>
 #include <sstream>
@@ -54,15 +64,10 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/logv2/log_debug.h"
-#include "mongo/logv2/log_detail.h"
-#include "mongo/unittest/test_info.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/optional_util.h"
-#include "mongo/util/str.h"
-#include "mongo/util/synchronized_value.h"
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/optional.hpp>
+#include <fmt/format.h>
 
 /**
  * Construct a single test, named `TEST_NAME` within the test Suite `SUITE_NAME`.
@@ -103,8 +108,8 @@
     class TEST_TYPE : public TEST_BASE {                                                       \
     private:                                                                                   \
         void _doTest() override;                                                               \
-        static inline const ::mongo::unittest::TestInfo _testInfo{                             \
-            #FIXTURE_NAME, #TEST_NAME, __FILE__, __LINE__};                                    \
+        static constexpr ::mongo::unittest::TestInfo _testInfo{                                \
+            #FIXTURE_NAME, #TEST_NAME, __FILE__, __LINE__, &typeid(TEST_BASE)};                \
         static inline const RegistrationAgent<TEST_TYPE> _agent{&_testInfo};                   \
     };                                                                                         \
     void TEST_TYPE::_doTest()
@@ -192,7 +197,7 @@ private:
  *     };
  *     OldStyleSuiteInitializer<All> all;
  */
-class OldStyleSuiteSpecification {
+class MONGO_MOD_OPEN OldStyleSuiteSpecification {
 public:
     struct SuiteTest {
         std::string name;
@@ -309,7 +314,7 @@ private:
  * Base type for unit test fixtures.  Also, the default fixture type used
  * by the TEST() macro.
  */
-class Test {
+class MONGO_MOD_OPEN Test {
 public:
     Test();
     virtual ~Test();
@@ -346,6 +351,7 @@ protected:
                         UnitTest::TestRunScope trs(testInfo);
                         T{}.run();
                     });
+            _ensureSuiteHomogeneity(_testInfo);
         }
 
         StringData getSuiteName() const {
@@ -370,54 +376,9 @@ protected:
      */
     class FixtureExceptionForTesting : public std::exception {};
 
-    /**
-     * Starts capturing messages logged by code under test.
-     *
-     * Log messages will still also go to their default destination; this
-     * code simply adds an additional sink for log messages.
-     *
-     * Clears any previously captured log lines.
-     */
-    void startCapturingLogMessages();
-
-    /**
-     * Stops capturing log messages logged by code under test.
-     */
-    void stopCapturingLogMessages();
-
-    /**
-     * Gets a vector of strings, one log line per string, captured since
-     * the last call to startCapturingLogMessages() in this test.
-     */
-    std::vector<std::string> getCapturedTextFormatLogMessages() const;
-    std::vector<BSONObj> getCapturedBSONFormatLogMessages() const;
-
-    /**
-     * Returns the number of collected log lines containing "needle".
-     */
-    int64_t countTextFormatLogLinesContaining(const std::string& needle);
-
-    /**
-     * Returns the number of collected log lines where "needle" is a subset of a line.
-     *
-     * Does a Depth-First-Search of a BSON document. Validates each element in "needle" exists in
-     * "haystack". It ignores extra elements in "haystack".
-     *
-     * In example haystack:     { i : 1, a : { b : 1 } },
-     * a valid needles include: { i : 1}  or  {a : { b : 1}}
-     * It will not find { b: 1 } since it does not search recursively for sub-tree matches.
-     *
-     * If a BSON Element is undefined, it simply checks for its existence, not its type or value.
-     * This allows callers to test for the existence of elements in variable length log lines.
-     */
-    int64_t countBSONFormatLogLinesIsSubset(const BSONObj& needle);
-
-    /**
-     * Prints the captured log lines.
-     */
-    void printCapturedTextFormatLogLines() const;
-
 private:
+    static void _ensureSuiteHomogeneity(const TestInfo* testInfo);
+
     /**
      * The test itself.
      */
@@ -428,6 +389,27 @@ private:
  * Return a list of suite names.
  */
 std::vector<std::string> getAllSuiteNames();
+
+/**
+ * Returns the test info of the test currently executing.
+ */
+inline const TestInfo* getTestInfo() {
+    return UnitTest::getInstance()->currentTestInfo();
+}
+
+/**
+ * Returns the suite name of the test currently executing.
+ */
+inline StringData getSuiteName() {
+    return getTestInfo()->suiteName();
+}
+
+/**
+ * Returns the name of the test currently executing.
+ */
+inline StringData getTestName() {
+    return getTestInfo()->testName();
+}
 
 /** Invocation info (used e.g. by death test to exec). */
 struct SpawnInfo {

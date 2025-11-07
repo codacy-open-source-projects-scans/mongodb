@@ -1,6 +1,6 @@
 load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@poetry//:dependencies.bzl", "dependency")
-load("//bazel:mongo_src_rules.bzl", "idl_generator", "mongo_cc_binary", "mongo_cc_library", "mongo_cc_unit_test")
+load("//bazel:mongo_src_rules.bzl", "idl_generator", "mongo_cc_binary", "mongo_cc_library", "mongo_cc_unit_test", "windows_rc")
 load("//bazel/config:render_template.bzl", "render_template")
 
 package(default_visibility = ["//visibility:public"])
@@ -68,20 +68,11 @@ mongo_cc_library(
     ],
     copts = select({
         "@platforms//os:windows": [
-            # See the /Zc:preprocessor comment in third_party/mozjs/SConscript
+            # See the /Zc:preprocessor comment in third_party/mozjs/BUILD.bazel
             "/Zc:preprocessor",
             "/wd5104",
             "/wd5105",
         ],
-        "//conditions:default": [
-            "-Wno-unknown-warning-option",
-            # TODO(SERVER-77205): Review and Possibly Remove '-Wno-deprecated' After Mozjs Update
-            "-Wno-deprecated",
-        ],
-    }),
-    features = select({
-        # TODO(SERVER-59992): Remove -Wno-class-memaccess where possible.
-        "//bazel/config:compiler_type_gcc": ["no_class_memaccess_warning"],
         "//conditions:default": [],
     }),
     deps = [
@@ -175,6 +166,7 @@ mongo_cc_library(
         "//src/mongo/db/auth:security_token_auth",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db/query/collation:collator_icu",
         "//src/mongo/db/query/virtual_collection",
+        "//src/mongo/replay:mongor_lib",
         "//src/mongo/scripting",
         "//src/mongo/transport:message_compressor",  # TODO(SERVER-93876): Remove.
         "//src/mongo/transport/named_pipe",
@@ -215,15 +207,6 @@ mongo_cc_library(
             "/wd5104",
             "/wd5105",
         ],
-        "//conditions:default": [
-            "-Wno-unknown-warning-option",
-            # TODO(SERVER-77205): Review and Possibly Remove '-Wno-deprecated' After Mozjs Update
-            "-Wno-deprecated",
-        ],
-    }),
-    features = select({
-        # TODO(SERVER-59992): Remove -Wno-class-memaccess where possible.
-        "//bazel/config:compiler_type_gcc": ["no_class_memaccess_warning"],
         "//conditions:default": [],
     }),
     target_compatible_with = select({
@@ -239,6 +222,7 @@ mongo_cc_library(
         "//src/mongo/crypto:fle_fields",
         "//src/mongo/crypto:symmetric_crypto",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db:query_expressions",
+        "//src/mongo/db/query/compiler/parsers/matcher/schema:json_schema_parser",
         "//src/mongo/scripting",
         "//src/mongo/shell:shell_options_register",
         "//src/third_party/mozjs",
@@ -289,31 +273,44 @@ render_template(
 
 MONGOJS_CPP_JSFILES = [
     "assert.js",
+    "assert_global.js",
     "bulk_api.js",
+    "bulk_api_global.js",
     "check_log.js",
+    "check_log_global.js",
     "collection.js",
     "crud_api.js",
     "db.js",
+    "db_global.js",
     "explain_query.js",
+    "explain_query_global.js",
     "explainable.js",
+    "explainable_global.js",
     "mongo.js",
     "prelude.js",
     "query.js",
+    "query_global.js",
     "session.js",
+    "session_global.js",
     "types.js",
     "utils.js",
+    "utils_global.js",
     "utils_auth.js",
+    "utils_auth_global.js",
     "utils_sh.js",
+    "utils_sh_global.js",
     ":error_codes_js",
 ]
 
+# Converts core JS file content into CPP structures to be loaded directly
+# into the native binary via bytecode upon startup.
 render_template(
     name = "mongojs_cpp",
     srcs = [
-        "//site_scons/site_tools:jstoh.py",
+        "//buildscripts:jstoh.py",
     ] + MONGOJS_CPP_JSFILES,
     cmd = [
-        "$(location //site_scons/site_tools:jstoh.py)",
+        "$(location //buildscripts:jstoh.py)",
         "$(location mongojs.cpp)",
     ] + [
         "$(location {})".format(file)
@@ -324,20 +321,25 @@ render_template(
 
 MONGO_SERVER_CPP_JS_FILES = [
     "bridge.js",
+    "bridge_global.js",
     "data_consistency_checker.js",
+    "data_consistency_checker_global.js",
     "feature_compatibility_version.js",
+    "feature_compatibility_version_global.js",
     "keyvault.js",
     "servers.js",
+    "servers_global.js",
     "servers_misc.js",
+    "servers_misc_global.js",
 ]
 
 render_template(
     name = "mongo_server_cpp",
     srcs = [
-        "//site_scons/site_tools:jstoh.py",
+        "//buildscripts:jstoh.py",
     ] + MONGO_SERVER_CPP_JS_FILES,
     cmd = [
-        "$(location //site_scons/site_tools:jstoh.py)",
+        "$(location //buildscripts:jstoh.py)",
         "$(location mongo-server.cpp)",
     ] + [
         "$(location {})".format(file)
@@ -392,11 +394,12 @@ mongo_cc_library(
         # please add that library here, as a private library dependency.
         "//src/mongo/client:clientdriver_network",
         "//src/mongo/client:connection_string",
-        "//src/mongo/db/catalog:index_key_validate",
+        "//src/mongo/db/local_catalog:index_key_validate",
         "//src/mongo/db:mongohasher",
         "//src/mongo/db/pipeline:change_stream_error_extra_info",
         "//src/mongo/db/query:command_request_response",
         "//src/mongo/db/query:query_request",
+        "//src/mongo/db/s:remove_shard_exception",
         "//src/mongo/db:server_base",
         "//src/mongo/db:service_context_non_d",
         "//src/mongo/db/session:logical_session_id_helpers",
@@ -479,20 +482,18 @@ mongo_cc_library(
     ],
 )
 
+windows_rc(
+    name = "mongo_res",
+    src = "mongo.rc",
+    icon = "mongo.ico",
+    manifest_in = "mongo.manifest.in",
+)
+
 mongo_cc_binary(
     name = "mongo",
     srcs = [
         "mongo.cpp",
     ],
-    exec_properties = select({
-        "@platforms//cpu:x86_64": {
-            "Pool": "large_mem_x86_64",
-        },
-        "@platforms//cpu:aarch64": {
-            "Pool": "large_memory_arm64",
-        },
-        "//conditions:default": {},
-    }),
     linkopts = select({
         "@platforms//os:linux": [
             "-ldl",
@@ -508,7 +509,6 @@ mongo_cc_binary(
         "dist_test",
         "jstestshell",
     ],
-    #+ env.WindowsResourceFile("mongo.rc"),
     deps = [
         # NOTE: Do not add new deps here unless required by the linker to
         # satisfy symbol dependencies from the files listed above in `sources`. If you need to add a
@@ -516,6 +516,7 @@ mongo_cc_binary(
         # dep of mongos_initializers.
         "mongo_main",
         "//src/mongo/db:server_base",
+        "mongo_res",
     ],
 )
 
@@ -544,6 +545,16 @@ mongo_cc_unit_test(
         "//bazel/config:ssl_enabled": ["kms_test.cpp"],
         "//conditions:default": [],
     }),
-    tags = ["mongo_unittest_third_group"],
+    tags = ["mongo_unittest_fifth_group"],
     deps = ["shell_test_dependencies"],
+)
+
+load("//bazel:mongo_js_rules.bzl", "mongo_js_library")
+
+mongo_js_library(
+    name = "all",
+    srcs = glob([
+        "*.js",
+    ]),
+    visibility = ["//visibility:public"],
 )

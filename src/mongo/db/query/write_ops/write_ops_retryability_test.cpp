@@ -27,16 +27,7 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <fmt/format.h>
-#include <memory>
-#include <utility>
-#include <vector>
-
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/write_ops/write_ops_retryability.h"
 
 #include "mongo/base/data_range.h"
 #include "mongo/base/data_type_endian.h"
@@ -50,7 +41,6 @@
 #include "mongo/db/query/write_ops/write_ops_exec.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
-#include "mongo/db/query/write_ops/write_ops_retryability.h"
 #include "mongo/db/repl/mock_repl_coord_server_fixture.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/optime.h"
@@ -62,14 +52,22 @@
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/session_catalog.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <cstdint>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -108,6 +106,7 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
                                 boost::none,                      // uuid
                                 boost::none,                      // fromMigrate
                                 boost::none,                      // checkExistenceForDiffInsert
+                                boost::none,                      // versionContext
                                 repl::OplogEntry::kOplogVersion,  // version
                                 oField,                           // o
                                 o2Field,                          // o2
@@ -302,7 +301,8 @@ TEST_F(WriteOpsRetryability, OpCountersUpdateSuccess) {
         entry.setUpsert(true);
         return entry;
     }()});
-    write_ops_exec::WriteResult result = write_ops_exec::performUpdates(opCtxRaii.get(), updateOp);
+    write_ops_exec::WriteResult result =
+        write_ops_exec::performUpdates(opCtxRaii.get(), updateOp, /*preConditions=*/boost::none);
     auto globalCommandsCountAfterUpdate = opCounters().getCommand()->load();
     auto globalDeletesCountAfterUpdate = opCounters().getDelete()->load();
     auto globalInsertsCountAfterUpdate = opCounters().getInsert()->load();
@@ -338,7 +338,8 @@ TEST_F(WriteOpsRetryability, OpCountersDeleteSuccess) {
         entry.setMulti(false);
         return entry;
     }()});
-    result = write_ops_exec::performDeletes(opCtxRaii.get(), deleteOp);
+    result =
+        write_ops_exec::performDeletes(opCtxRaii.get(), deleteOp, /*preConditions=*/boost::none);
     auto globalCommandsCountAfterDelete = opCounters().getCommand()->load();
     auto globalDeletesCountAfterDelete = opCounters().getDelete()->load();
     auto globalInsertsCountAfterDelete = opCounters().getInsert()->load();
@@ -457,7 +458,7 @@ TEST_F(WriteOpsRetryability, PerformOrderedInsertsStopsAtBadDoc) {
     ASSERT_EQ(2, result.results.size());
     ASSERT_TRUE(result.results[0].isOK());
     ASSERT_FALSE(result.results[1].isOK());
-    ASSERT_EQ(ErrorCodes::BadValue, result.results[1].getStatus());
+    ASSERT_EQ(ErrorCodes::BSONObjectTooLarge, result.results[1].getStatus());
 }
 
 TEST_F(WriteOpsRetryability, PerformUnorderedInsertsContinuesAtBadDoc) {
@@ -491,7 +492,7 @@ TEST_F(WriteOpsRetryability, PerformUnorderedInsertsContinuesAtBadDoc) {
     ASSERT_TRUE(result.results[0].isOK());
     ASSERT_FALSE(result.results[1].isOK());
     ASSERT_TRUE(result.results[2].isOK());
-    ASSERT_EQ(ErrorCodes::BadValue, result.results[1].getStatus());
+    ASSERT_EQ(ErrorCodes::BSONObjectTooLarge, result.results[1].getStatus());
 }
 
 using FindAndModifyRetryability = MockReplCoordServerFixture;
@@ -507,18 +508,16 @@ TEST_F(FindAndModifyRetryability, BasicUpsertReturnNew) {
     auto insertOplog = makeOplogEntry(repl::OpTime(),             // optime
                                       repl::OpTypeEnum::kInsert,  // op type
                                       kNs,                        // namespace
-                                      BSON("_id"
-                                           << "ID value"
-                                           << "x" << 1));  // o
+                                      BSON("_id" << "ID value"
+                                                 << "x" << 1));  // o
 
     auto result = parseOplogEntryForFindAndModify(opCtx(), request, insertOplog).toBSON();
     ASSERT_BSONOBJ_EQ(BSON("lastErrorObject"
                            << BSON("n" << 1 << "updatedExisting" << false << "upserted"
                                        << "ID value")
                            << "value"
-                           << BSON("_id"
-                                   << "ID value"
-                                   << "x" << 1)),
+                           << BSON("_id" << "ID value"
+                                         << "x" << 1)),
                       result);
 }
 
@@ -531,9 +530,8 @@ TEST_F(FindAndModifyRetryability, BasicUpsertReturnOld) {
     auto insertOplog = makeOplogEntry(repl::OpTime(),             // optime
                                       repl::OpTypeEnum::kInsert,  // op type
                                       kNs,                        // namespace
-                                      BSON("_id"
-                                           << "ID value"
-                                           << "x" << 1));  // o
+                                      BSON("_id" << "ID value"
+                                                 << "x" << 1));  // o
 
     auto result = parseOplogEntryForFindAndModify(opCtx(), request, insertOplog).toBSON();
     ASSERT_BSONOBJ_EQ(BSON("lastErrorObject"

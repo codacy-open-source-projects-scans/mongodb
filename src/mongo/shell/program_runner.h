@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <boost/filesystem/path.hpp>
-#include <iosfwd>
-#include <map>
-#include <mutex>
-#include <string>
-#include <vector>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/process_id.h"
@@ -43,6 +36,14 @@
 #include "mongo/stdx/thread.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
+
+#include <iosfwd>
+#include <map>
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include <boost/filesystem/path.hpp>
 
 namespace mongo::shell_utils {
 class ProgramRunner;
@@ -75,7 +76,10 @@ public:
     ProgramOutputMultiplexer* getProgramOutputMultiplexer();
 
     /** Create a ProgramRunner instance and return a handle to it. */
-    ProgramRunner createProgramRunner(BSONObj args, BSONObj env, bool isMongo);
+    ProgramRunner createProgramRunner(BSONObj args,
+                                      BSONObj env,
+                                      bool isMongo,
+                                      const std::string& loggingPrefix);
 
     bool isPortRegistered(int port) const;
     /** @return pid for a registered port. */
@@ -164,7 +168,11 @@ private:
      *             environment
      * @param isMongo Indicator variable, true if runs as a mongo process.
      */
-    ProgramRunner(BSONObj args, BSONObj env, bool isMongo, ProgramRegistry* registry);
+    ProgramRunner(BSONObj args,
+                  BSONObj env,
+                  bool isMongo,
+                  const std::string& loggingPrefix,
+                  ProgramRegistry* registry);
 
     boost::filesystem::path findProgram(const std::string& prog);
     void launchProcess(int child_stdout);
@@ -174,6 +182,7 @@ private:
                    bool isMongodProgram,
                    bool isMongosProgram,
                    bool isMongotMockProgram,
+                   const std::string& loggingPrefix,
                    const boost::filesystem::path& programName);
     void parseArgs(BSONObj args, bool isMongo, bool isMongodProgram);
 

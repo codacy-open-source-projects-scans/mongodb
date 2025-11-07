@@ -27,11 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/filesystem/path.hpp>
-#include <fmt/format.h>
-#include <memory>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/ftdc/ftdc_mongod.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -39,23 +35,29 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/ftdc/collector.h"
 #include "mongo/db/ftdc/constants.h"
 #include "mongo/db/ftdc/controller.h"
-#include "mongo/db/ftdc/ftdc_mongod.h"
 #include "mongo/db/ftdc/ftdc_mongod_gen.h"
 #include "mongo/db/ftdc/ftdc_mongos.h"
 #include "mongo/db/ftdc/ftdc_server.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/synchronized_value.h"
+
+#include <memory>
+
+#include <boost/filesystem/path.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -88,6 +90,15 @@ public:
 
     void collect(OperationContext* opCtx, BSONObjBuilder& builder) override {
         std::vector<std::string> namespaces = gDiagnosticDataCollectionStatsNamespaces.get();
+
+        auto ru = shard_role_details::getRecoveryUnit(opCtx);
+        if (ru) {
+            // Set the cache max wait timeout very low as we do not want any FTDC
+            // operation to get blocked on cache eviction. 1 is a magic number that
+            // opts
+            // this thread out of all optional eviction without any waiting.
+            ru->setCacheMaxWaitTimeout(Milliseconds(1));
+        }
 
         for (const auto& nsStr : namespaces) {
 
@@ -167,15 +178,12 @@ std::unique_ptr<FTDCCollectorInterface> makeFilteredCollector(
 }
 
 void registerShardCollectors(FTDCController* controller) {
-    const auto role = ClusterRole::ShardServer;
-    registerServerCollectorsForRole(controller, role);
+    registerServerCollectors(controller);
 
     if (auto rc = getGlobalRC(); rc && isRepl(*rc)) {
         // CmdReplSetGetStatus
-        controller->addPeriodicCollector(
-            std::make_unique<FTDCSimpleInternalCommandCollector>(
-                "replSetGetStatus", "replSetGetStatus", DatabaseName::kEmpty, replSetGetStatusObj),
-            role);
+        controller->addPeriodicCollector(std::make_unique<FTDCSimpleInternalCommandCollector>(
+            "replSetGetStatus", "replSetGetStatus", DatabaseName::kEmpty, replSetGetStatusObj));
 
 
         // CollectionStats
@@ -200,26 +208,21 @@ void registerShardCollectors(FTDCController* controller) {
                                               .append("aggregate", spec.coll)
                                               .append("cursor", BSONObj{})
                                               .append("pipeline", pipelineObj)
-                                              .obj())),
-                role);
+                                              .obj())));
         }
     }
 
-    controller->addPeriodicMetadataCollector(
-        std::make_unique<FTDCSimpleInternalCommandCollector>(
-            "getParameter", "getParameter", DatabaseName::kEmpty, getParameterQueryObj),
-        role);
+    controller->addPeriodicMetadataCollector(std::make_unique<FTDCSimpleInternalCommandCollector>(
+        "getParameter", "getParameter", DatabaseName::kEmpty, getParameterQueryObj));
 
     controller->addPeriodicMetadataCollector(
         std::make_unique<FTDCSimpleInternalCommandCollector>("getClusterParameter",
                                                              "getClusterParameter",
                                                              DatabaseName::kEmpty,
-                                                             getClusterParameterQueryObj),
-        role);
+                                                             getClusterParameterQueryObj));
 
     controller->addPeriodicCollector(
-        makeFilteredCollector(isDataStoringNode, std::make_unique<FTDCCollectionStatsCollector>()),
-        role);
+        makeFilteredCollector(isDataStoringNode, std::make_unique<FTDCCollectionStatsCollector>()));
 }
 
 }  // namespace
@@ -229,26 +232,14 @@ void startMongoDFTDC(ServiceContext* serviceContext) {
 
     if (dir.empty()) {
         dir = storageGlobalParams.dbpath;
-        dir /= kFTDCDefaultDirectory.toString();
+        dir /= std::string{kFTDCDefaultDirectory};
     }
 
     std::vector<RegisterCollectorsFunction> registerFns{
         registerShardCollectors,
     };
 
-    // (Ignore FCV check): this feature flag is not FCV-gated.
-    const bool multiServiceFTDCSchema =
-        feature_flags::gMultiServiceLogAndFTDCFormat.isEnabledAndIgnoreFCVUnsafe();
-
-    const UseMultiServiceSchema multiversionSchema{
-        serviceContext->getService(ClusterRole::RouterServer) && multiServiceFTDCSchema};
-
-    if (multiversionSchema) {
-        registerFns.emplace_back(registerRouterCollectors);
-    }
-
-    startFTDC(
-        serviceContext, dir, FTDCStartMode::kStart, std::move(registerFns), multiversionSchema);
+    startFTDC(serviceContext, dir, FTDCStartMode::kStart, std::move(registerFns));
 }
 
 void stopMongoDFTDC() {

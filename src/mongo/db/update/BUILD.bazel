@@ -32,10 +32,10 @@ mongo_cc_library(
     ],
     deps = [
         "//src/mongo:base",
-        "//src/mongo/bson/mutable:mutable_bson",
+        "//src/mongo/bson/dotted_path:dotted_path_support",
         "//src/mongo/db:common",
         "//src/mongo/db/exec/document_value",
-        "//src/mongo/db/query/bson:dotted_path_support",
+        "//src/mongo/db/exec/mutable_bson",
     ],
 )
 
@@ -45,8 +45,6 @@ mongo_cc_library(
         "document_diff_applier.cpp",
         "document_diff_calculator.cpp",
         "document_diff_serialization.cpp",
-        "//src/mongo/util:dynamic_bitset.h",
-        "//src/mongo/util:inlined_storage.h",
     ],
     hdrs = [
         "document_diff_applier.h",
@@ -54,11 +52,15 @@ mongo_cc_library(
         "document_diff_serialization.h",
         "//src/mongo/base:error_codes_header",
     ],
+    private_hdrs = [
+        "//src/mongo/util:dynamic_bitset.h",
+        "//src/mongo/util:inlined_storage.h",
+    ],
     deps = [
         "//src/mongo:base",
-        "//src/mongo/bson/mutable:mutable_bson",
         "//src/mongo/db:common",
         "//src/mongo/db:update_index_data",
+        "//src/mongo/db/exec/mutable_bson",
     ],
 )
 
@@ -86,9 +88,11 @@ mongo_cc_library(
         ":pattern_cmp",  # TODO(SERVER-93876): Remove.
         ":update_document_diff",
         "//src/mongo:base",
-        "//src/mongo/bson/mutable:mutable_bson",
         "//src/mongo/db:common",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db:query_expressions",
+        "//src/mongo/db/exec/mutable_bson",
+        "//src/mongo/db/query/compiler/parsers/matcher:matcher_parser",
+        "//src/mongo/db/query/util:validate_id",
     ],
 )
 
@@ -190,7 +194,7 @@ mongo_cc_library(
         "//src/mongo/db:common",
         "//src/mongo/db:query_expressions",
         "//src/mongo/db:server_base",
-        "//src/mongo/db/query:canonical_query",
+        "//src/mongo/db/query:canonical_query_base",
         "//src/mongo/db/query/write_ops:write_ops_parsers",
     ],
 )
@@ -228,22 +232,22 @@ mongo_cc_unit_test(
         "update_oplog_entry_serialization_test.cpp",
         "update_serialization_test.cpp",
         "v2_log_builder_test.cpp",
-        "//src/mongo/db/update:update_node_test_fixture.h",
     ],
-    tags = ["mongo_unittest_third_group"],
+    private_hdrs = [":update_node_test_fixture.h"],
+    tags = ["mongo_unittest_fifth_group"],
     deps = [
         ":update",
         ":update_common",
         ":update_driver",
         ":update_test_helpers",
-        "//src/mongo/bson/mutable:mutable_bson",
-        "//src/mongo/bson/mutable:mutable_bson_test_utils",
         "//src/mongo/db:query_expressions",
         "//src/mongo/db:service_context_non_d",
         "//src/mongo/db:service_context_test_fixture",
         "//src/mongo/db:vector_clock_trivial",
         "//src/mongo/db/auth:authmocks",
         "//src/mongo/db/exec/document_value:document_value_test_util",
+        "//src/mongo/db/exec/mutable_bson",
+        "//src/mongo/db/exec/mutable_bson:mutable_bson_test_utils",
         "//src/mongo/db/pipeline:expression_context_for_test",
         "//src/mongo/db/query:query_planner",
         "//src/mongo/db/query:query_test_service_context",

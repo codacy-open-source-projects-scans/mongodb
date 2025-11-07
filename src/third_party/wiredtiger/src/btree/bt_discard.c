@@ -41,12 +41,6 @@ __wt_ref_out(WT_SESSION_IMPL *session, WT_REF *ref)
       __wt_hazard_check_assert(session, ref, true),
       "Attempted to free a page with active hazard pointers");
 
-    /* Check we are not evicting an accessible internal page with an active split generation. */
-    WT_ASSERT(session,
-      !F_ISSET(ref, WT_REF_FLAG_INTERNAL) ||
-        F_ISSET(session->dhandle, WT_DHANDLE_DEAD | WT_DHANDLE_EXCLUSIVE) ||
-        !__wt_gen_active(session, WT_GEN_SPLIT, ref->page->pg_intl_split_gen));
-
     __wt_page_out(session, &ref->page);
 }
 
@@ -68,11 +62,34 @@ __wt_page_out(WT_SESSION_IMPL *session, WT_PAGE **pagep)
     *pagep = NULL;
 
     /*
+     * Ensure that we are not evicting a page ahead of the materialization frontier, unless we are
+     * simply discarding the page due to the dhandle being dead or the connection close.
+     *
+     * Here we are using the old_rec_lsn_max. This is because if we have done a dirty eviction, the
+     * new value holds the max lsn that is reloaded to memory. If we have done a clean eviction of
+     * the page that is read from the disk, the old value is the same as the new value. The only
+     * exception is the clean eviction for a page that has been reconciled before. We should use the
+     * new value but we cannot detect this case here.
+     *
+     * FIXME-WT-14720: this check needs a bit more thought. There isn't really an LSN that makes
+     * sense as a comparison point. Scrub eviction leaves the content in the cache, so we won't
+     * issue a read for the page we're evicting. That means we're free to write the page even if
+     * it's ahead of the materialization frontier.
+     */
+
+    if (page->disagg_info != NULL &&
+      !(F_ISSET(session->dhandle, WT_DHANDLE_DEAD) ||
+        F_ISSET_ATOMIC_32(S2C(session), WT_CONN_CLOSING)))
+        if (!__wt_page_materialization_check(session, page->disagg_info->old_rec_lsn_max))
+            WT_STAT_CONN_DSRC_INCR(session, cache_eviction_ahead_of_last_materialized_lsn);
+
+    /*
      * Unless we have a dead handle or we're closing the database, we should never discard a dirty
      * page. We do ordinary eviction from dead trees until sweep gets to them, so we may not in the
      * WT_SYNC_DISCARD loop.
      */
-    if (F_ISSET(session->dhandle, WT_DHANDLE_DEAD) || F_ISSET(S2C(session), WT_CONN_CLOSING))
+    if (F_ISSET(session->dhandle, WT_DHANDLE_DEAD) ||
+      F_ISSET_ATOMIC_32(S2C(session), WT_CONN_CLOSING))
         __wt_page_modify_clear(session, page);
 
     WT_ASSERT_ALWAYS(session, !__wt_page_is_modified(page), "Attempting to discard dirty page");
@@ -94,6 +111,9 @@ __wt_page_out(WT_SESSION_IMPL *session, WT_PAGE **pagep)
         break;
     }
 
+    /* Update the page history information for debugging. */
+    WT_IGNORE_RET(__wt_conn_page_history_track_evict(session, page));
+
     /* Update the cache's information. */
     __wt_evict_page_cache_bytes_decr(session, page);
 
@@ -110,7 +130,7 @@ __wt_page_out(WT_SESSION_IMPL *session, WT_PAGE **pagep)
      * If discarding the page as part of process exit, the application may configure to leak the
      * memory rather than do the work.
      */
-    if (F_ISSET(S2C(session), WT_CONN_LEAK_MEMORY))
+    if (F_ISSET_ATOMIC_32(S2C(session), WT_CONN_LEAK_MEMORY))
         return;
 
     /* Free the page modification information. */
@@ -177,7 +197,8 @@ __free_page_modify(WT_SESSION_IMPL *session, WT_PAGE *page)
              * of the pages not in memory. We will redo reconciliation next time we visit this page.
              */
             __wt_free(session, multi->disk_image);
-            __wt_free(session, multi->addr.addr);
+            __wt_free(session, multi->addr.block_cookie);
+            __wt_free(session, multi->block_meta);
         }
         __wt_free(session, mod->mod_multi);
         break;
@@ -193,7 +214,7 @@ __free_page_modify(WT_SESSION_IMPL *session, WT_PAGE *page)
          * page, it would write the new disk image even it hasn't been instantiated into memory.
          * Therefore, no need to reconcile the page again if it remains clean.
          */
-        __wt_free(session, mod->mod_replace.addr);
+        __wt_free(session, mod->mod_replace.block_cookie);
         __wt_free(session, mod->mod_disk_image);
         break;
     }
@@ -306,7 +327,8 @@ __wt_ref_addr_free(WT_SESSION_IMPL *session, WT_REF *ref)
     }
 
     if (home == NULL || __wt_off_page(home, ref_addr)) {
-        __wti_ref_addr_safe_free(session, ((WT_ADDR *)ref_addr)->addr, ((WT_ADDR *)ref_addr)->size);
+        __wti_ref_addr_safe_free(
+          session, ((WT_ADDR *)ref_addr)->block_cookie, ((WT_ADDR *)ref_addr)->block_cookie_size);
         __wti_ref_addr_safe_free(session, ref_addr, sizeof(WT_ADDR));
     }
 }
@@ -532,4 +554,45 @@ __wt_free_update_list(WT_SESSION_IMPL *session, WT_UPDATE **updp)
         __wt_free(session, upd);
     }
     *updp = NULL;
+}
+
+/*
+ * __wt_free_obsolete_updates --
+ *     Following a globally visible update, free any obsolete updates in the update chain. After a
+ *     globally visible update, no reader finds any updates. It is the responsibility of the caller
+ *     to lock the page before freeing the updates.
+ */
+void
+__wt_free_obsolete_updates(WT_SESSION_IMPL *session, WT_PAGE *page, WT_UPDATE *visible_all_upd)
+{
+    WT_UPDATE *next, *upd;
+    size_t delta_upd_size, size;
+
+    delta_upd_size = size = 0;
+
+    next = visible_all_upd->next;
+
+    /*
+     * No need to use a compare and swap because we have obtained a page lock. The page lock
+     * protects freeing the updates concurrently by other threads. Whereas the reader threads use
+     * transaction visibility to avoid traversing obsolete updates beyond the globally visible
+     * update.
+     */
+    visible_all_upd->next = NULL;
+
+    /* There must be at least a single obsolete update. */
+    WT_ASSERT(session, next != NULL);
+
+    for (upd = next; upd != NULL; upd = next) {
+        next = upd->next;
+        size += WT_UPDATE_MEMSIZE(upd);
+        if (F_ISSET(upd, WT_UPDATE_RESTORED_FROM_DELTA))
+            delta_upd_size += WT_UPDATE_MEMSIZE(upd);
+        __wt_free(session, upd);
+    }
+
+    WT_ASSERT(session, size != 0);
+    __wt_cache_page_inmem_decr(session, page, size);
+    if (delta_upd_size != 0)
+        __wt_cache_page_inmem_decr_delta_updates(session, page, delta_upd_size);
 }

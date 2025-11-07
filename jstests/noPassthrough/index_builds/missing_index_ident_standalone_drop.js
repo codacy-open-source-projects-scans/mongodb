@@ -3,12 +3,14 @@
  * ident, the node can be started as a standalone and the index can be dropped.
  *
  * @tags: [
- *     requires_persistence,
- *     requires_replication,
+ *   # TODO(SERVER-110840): Primary-driven index builds don't support draining side writes yet.
+ *   primary_driven_index_builds_incompatible,
+ *   requires_persistence,
+ *   requires_replication,
  * ]
  */
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
-import {MissingIndexIdent} from "jstests/noPassthrough/libs/missing_index_ident.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
+import {MissingIndexIdent} from "jstests/noPassthrough/libs/index_builds/missing_index_ident.js";
 
 const {replTest, dbpath} = MissingIndexIdent.run();
 
@@ -16,20 +18,20 @@ const standalone = MongoRunner.runMongod({
     dbpath: dbpath,
     noCleanData: true,
 });
-const coll = standalone.getDB('test')[jsTestName()];
+const coll = standalone.getDB("test")[jsTestName()];
 
-IndexBuildTest.assertIndexes(coll, 2, ['_id_', 'a_1']);
-assert.commandWorked(standalone.getDB('test')[jsTestName()].dropIndex('a_1'));
-IndexBuildTest.assertIndexes(coll, 1, ['_id_']);
+IndexBuildTest.assertIndexes(coll, 2, ["_id_", "a_1"]);
+assert.commandWorked(standalone.getDB("test")[jsTestName()].dropIndex("a_1"));
+IndexBuildTest.assertIndexes(coll, 1, ["_id_"]);
 
 // Completing drop for index table immediately.
 checkLog.containsJson(standalone, 6361201, {
-    index: 'a_1',
+    index: "a_1",
     namespace: coll.getFullName(),
 });
 
 MongoRunner.stopMongod(standalone);
 replTest.start(0, undefined, true /* restart */);
-IndexBuildTest.assertIndexes(replTest.getPrimary().getDB('test')[jsTestName()], 1, ['_id_']);
+IndexBuildTest.assertIndexes(replTest.getPrimary().getDB("test")[jsTestName()], 1, ["_id_"]);
 
 replTest.stopSet();

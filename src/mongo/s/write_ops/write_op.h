@@ -29,23 +29,24 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_set.h>
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/router_role_api/ns_targeter.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/query/write_ops/write_ops_parsers.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/s/write_ops/batched_command_request.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/uuid.h"
+
 #include <cstddef>
 #include <memory>
 #include <utility>
 #include <vector>
 
+#include <absl/container/flat_hash_set.h>
 #include <absl/hash/hash.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/db/operation_context.h"
-#include "mongo/db/query/write_ops/write_ops_parsers.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/ns_targeter.h"
-#include "mongo/s/write_ops/batched_command_request.h"
-#include "mongo/util/uuid.h"
 
 namespace mongo {
 
@@ -78,15 +79,26 @@ enum WriteOpState {
     WriteOpState_Error,
 };
 
+/**
+ * The WriteType enum is used to categorize each write based on which approach BatchWriteExec
+ * will use to execute the write.
+ *
+ * Note that the "WithoutShardKeyWithId" type is only used for non-transactional retryable writes
+ * with an "_id" equality.
+ * TODO PM-3673: Make it possible to use "WithoutShardKeyWithId" for non-transactional non-retryable
+ * writes with an "_id" equality as well.
+ */
 enum class WriteType {
     Ordinary,
     TimeseriesRetryableUpdate,
     WithoutShardKeyOrId,
-    // We only categorize non transactional retryable writes into this write type.
-    // TODO: PM-3673 for non-retryable writes.
     WithoutShardKeyWithId,
     MultiWriteBlockingMigrations,
 };
+
+inline bool writeTypeSupportsGrouping(WriteType t) {
+    return t == WriteType::Ordinary || t == WriteType::WithoutShardKeyWithId;
+}
 
 /**
  * State of a write in-progress (to a single shard) which is one part of a larger write
@@ -144,6 +156,13 @@ struct ChildWriteOp {
  */
 class WriteOp {
 public:
+    struct TargetWritesResult {
+        TargetWritesResult() = default;
+
+        std::vector<std::unique_ptr<TargetedWrite>> writes;
+        WriteType writeType = WriteType::Ordinary;
+    };
+
     WriteOp(BatchItemRef itemRef, bool inTxn) : _itemRef(std::move(itemRef)), _inTxn(inTxn) {}
 
     /**
@@ -155,6 +174,11 @@ public:
      * Returns the op's current state.
      */
     WriteOpState getWriteState() const;
+
+    /**
+     * Returns the op's current state as a string.
+     */
+    StringData getWriteStateAsString() const;
 
     /**
      * Returns the op's error.
@@ -187,11 +211,9 @@ public:
      * The ShardTargeter determines the ShardEndpoints to send child writes to, but is not
      * modified by this operation.
      */
-    void targetWrites(OperationContext* opCtx,
-                      const NSTargeter& targeter,
-                      std::vector<std::unique_ptr<TargetedWrite>>* targetedWrites,
-                      bool* useTwoPhaseWriteProtocol = nullptr,
-                      bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr);
+    TargetWritesResult targetWrites(OperationContext* opCtx,
+                                    const NSTargeter& targeter,
+                                    bool enableMultiWriteBlockingMigrations = false);
 
     /**
      * Returns the number of child writes that were last targeted.
@@ -268,7 +290,9 @@ public:
     boost::optional<BulkWriteReplyItem> combineBulkWriteReplyItems(
         std::vector<BulkWriteReplyItem const*> replies);
 
-    const std::vector<ChildWriteOp>& getChildWriteOps_forTest() const;
+    bool hasPendingChildOps() const;
+
+    MONGO_MOD_PRIVATE const std::vector<ChildWriteOp>& getChildWriteOps_forTest() const;
 
 private:
     /**
@@ -319,7 +343,7 @@ private:
     WriteType _writeType{WriteType::Ordinary};
 };
 // First value is write item index in the batch, second value is child write op index
-typedef std::pair<int, int> WriteOpRef;
+typedef std::pair<int, int> ItemIndexChildIndexPair;
 
 /**
  * A write with A) a request targeted at a particular shard endpoint, and B) a response targeted
@@ -330,9 +354,9 @@ typedef std::pair<int, int> WriteOpRef;
  */
 struct TargetedWrite {
     TargetedWrite(const ShardEndpoint& endpoint,
-                  WriteOpRef writeOpRef,
+                  ItemIndexChildIndexPair writeOpRef,
                   boost::optional<UUID> sampleId)
-        : endpoint(endpoint), writeOpRef(writeOpRef), estimatedSizeBytes(0), sampleId(sampleId) {}
+        : endpoint(endpoint), writeOpRef(writeOpRef), sampleId(sampleId) {}
 
     // Where to send the write
     ShardEndpoint endpoint;
@@ -340,11 +364,7 @@ struct TargetedWrite {
     // Where to find the write item and put the response
     // TODO: Could be a more complex handle, shared between write state and networking code if
     // we need to be able to cancel ops.
-    WriteOpRef writeOpRef;
-
-    // An approximation of how large the write is in bytes. Initially 0 but will be set by calling
-    // AssignWriteSizeFn on a write during targetWriteOps.
-    int estimatedSizeBytes;
+    ItemIndexChildIndexPair writeOpRef;
 
     // The unique sample id for the write if it has been chosen for sampling.
     boost::optional<UUID> sampleId;

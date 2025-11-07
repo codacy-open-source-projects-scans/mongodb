@@ -31,13 +31,6 @@
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -64,14 +57,31 @@
 #include "mongo/s/write_ops/batch_write_exec.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
+#include "mongo/util/modules.h"
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUB mongo {
+class OperationContext;
+/**
+ * Callback function to get a SyncTransactionWithRetries with the appropiate Executor
+ */
+using GetTxnCallback =
+    std::function<std::shared_ptr<txn_api::SyncTransactionWithRetries>(OperationContext*)>;
+}  // namespace MONGO_MOD_PUB mongo
 
 namespace mongo {
-class OperationContext;
 
 /**
  * FLE Result enum
  */
-enum class FLEBatchResult {
+enum class MONGO_MOD_PUB FLEBatchResult {
     /**
      * FLE CRUD code decided input document requires FLE processing. Caller should not do any CRUD.
      */
@@ -87,54 +97,53 @@ enum class FLEBatchResult {
 /**
  * Process a batch from mongos.
  */
-FLEBatchResult processFLEBatch(OperationContext* opCtx,
-                               const BatchedCommandRequest& request,
-                               BatchWriteExecStats* stats,
-                               BatchedCommandResponse* response,
-                               boost::optional<OID> targetEpoch);
+MONGO_MOD_PUB FLEBatchResult processFLEBatch(OperationContext* opCtx,
+                                             const BatchedCommandRequest& request,
+                                             BatchedCommandResponse* response);
 
 /**
  * Rewrite a BatchedCommandRequest for explain commands.
  */
-std::unique_ptr<BatchedCommandRequest> processFLEBatchExplain(OperationContext* opCtx,
-                                                              const BatchedCommandRequest& request);
+MONGO_MOD_PUB std::unique_ptr<BatchedCommandRequest> processFLEBatchExplain(
+    OperationContext* opCtx, const BatchedCommandRequest& request);
 
 
 /**
  * Initialize the FLE CRUD subsystem on Mongod.
  */
-void startFLECrud(ServiceContext* serviceContext);
+MONGO_MOD_PUB void startFLECrud(ServiceContext* serviceContext);
 
 /**
  * Stop the FLE CRUD subsystem on Mongod.
  */
-void stopFLECrud();
+MONGO_MOD_PUB void stopFLECrud();
 
 
 /**
  * Process a replica set insert.
  */
-FLEBatchResult processFLEInsert(OperationContext* opCtx,
-                                const write_ops::InsertCommandRequest& insertRequest,
-                                write_ops::InsertCommandReply* insertReply);
+MONGO_MOD_PUB FLEBatchResult processFLEInsert(OperationContext* opCtx,
+                                              const write_ops::InsertCommandRequest& insertRequest,
+                                              write_ops::InsertCommandReply* insertReply);
 
 /**
  * Process a replica set delete.
  */
-write_ops::DeleteCommandReply processFLEDelete(
+MONGO_MOD_PUB write_ops::DeleteCommandReply processFLEDelete(
     OperationContext* opCtx, const write_ops::DeleteCommandRequest& deleteRequest);
 
 /**
  * Rewrite the query within a replica set explain command for delete and update.
  * This concrete function is passed all the parameters directly.
  */
-BSONObj processFLEWriteExplainD(OperationContext* opCtx,
-                                const BSONObj& collation,
-                                const NamespaceString& nss,
-                                const EncryptionInformation& info,
-                                const boost::optional<LegacyRuntimeConstants>& runtimeConstants,
-                                const boost::optional<BSONObj>& letParameters,
-                                const BSONObj& query);
+MONGO_MOD_PUB BSONObj
+processFLEWriteExplainD(OperationContext* opCtx,
+                        const BSONObj& collation,
+                        const NamespaceString& nss,
+                        const EncryptionInformation& info,
+                        const boost::optional<LegacyRuntimeConstants>& runtimeConstants,
+                        const boost::optional<BSONObj>& letParameters,
+                        const BSONObj& query);
 
 /**
  * Rewrite the query within a replica set explain command for delete and update.
@@ -142,10 +151,10 @@ BSONObj processFLEWriteExplainD(OperationContext* opCtx,
  * to the function above.
  */
 template <typename T>
-BSONObj processFLEWriteExplainD(OperationContext* opCtx,
-                                const BSONObj& collation,
-                                const T& request,
-                                const BSONObj& query) {
+MONGO_MOD_PUB BSONObj processFLEWriteExplainD(OperationContext* opCtx,
+                                              const BSONObj& collation,
+                                              const T& request,
+                                              const BSONObj& query) {
 
     return processFLEWriteExplainD(opCtx,
                                    collation,
@@ -159,17 +168,23 @@ BSONObj processFLEWriteExplainD(OperationContext* opCtx,
 /**
  * Process a replica set update.
  */
-write_ops::UpdateCommandReply processFLEUpdate(
+MONGO_MOD_PUB write_ops::UpdateCommandReply processFLEUpdate(
     OperationContext* opCtx, const write_ops::UpdateCommandRequest& updateRequest);
 
 /**
  * Process a findAndModify request from mongos
  */
-FLEBatchResult processFLEFindAndModify(OperationContext* opCtx,
-                                       const BSONObj& cmdObj,
-                                       BSONObjBuilder& result);
+MONGO_MOD_PUB FLEBatchResult
+processFLEFindAndModify(OperationContext* opCtx,
+                        const write_ops::FindAndModifyCommandRequest& request,
+                        StatusWith<write_ops::FindAndModifyCommandReply>& swReply,
+                        boost::optional<WriteConcernErrorDetail>& wceReply);
 
-std::pair<write_ops::FindAndModifyCommandRequest, OpMsgRequest>
+MONGO_MOD_PUB FLEBatchResult processFLEFindAndModify(OperationContext* opCtx,
+                                                     const BSONObj& cmdObj,
+                                                     BSONObjBuilder& result);
+
+MONGO_MOD_PUB std::pair<write_ops::FindAndModifyCommandRequest, OpMsgRequest>
 processFLEFindAndModifyExplainMongos(
     OperationContext* opCtx, const write_ops::FindAndModifyCommandRequest& findAndModifyRequest);
 
@@ -183,64 +198,64 @@ processFLEFindAndModifyHelper(OperationContext* opCtx,
 /**
  * Process a findAndModify request from a replica set.
  */
-write_ops::FindAndModifyCommandReply processFLEFindAndModify(
+MONGO_MOD_PUB write_ops::FindAndModifyCommandReply processFLEFindAndModify(
     OperationContext* opCtx, const write_ops::FindAndModifyCommandRequest& findAndModifyRequest);
 
-std::pair<write_ops::FindAndModifyCommandRequest, OpMsgRequest>
+MONGO_MOD_PUB std::pair<write_ops::FindAndModifyCommandRequest, OpMsgRequest>
 processFLEFindAndModifyExplainMongod(
     OperationContext* opCtx, const write_ops::FindAndModifyCommandRequest& findAndModifyRequest);
 
 /**
  * Process a find command from mongos.
  */
-void processFLEFindS(OperationContext* opCtx,
-                     const NamespaceString& nss,
-                     FindCommandRequest* findCommand);
+MONGO_MOD_PUB void processFLEFindS(OperationContext* opCtx,
+                                   const NamespaceString& nss,
+                                   FindCommandRequest* findCommand);
 
 /**
  * Process a find command from a replica set.
  */
-void processFLEFindD(OperationContext* opCtx,
-                     const NamespaceString& nss,
-                     FindCommandRequest* findCommand);
+MONGO_MOD_PUB void processFLEFindD(OperationContext* opCtx,
+                                   const NamespaceString& nss,
+                                   FindCommandRequest* findCommand);
 
 
 /**
  * Process a find command from mongos.
  */
-void processFLECountS(OperationContext* opCtx,
-                      const NamespaceString& nss,
-                      CountCommandRequest& countCommand);
+MONGO_MOD_PUB void processFLECountS(OperationContext* opCtx,
+                                    const NamespaceString& nss,
+                                    CountCommandRequest& countCommand);
 
 /**
  * Process a find command from a replica set.
  */
-void processFLECountD(OperationContext* opCtx,
-                      const NamespaceString& nss,
-                      CountCommandRequest& countCommand);
+MONGO_MOD_PUB void processFLECountD(OperationContext* opCtx,
+                                    const NamespaceString& nss,
+                                    CountCommandRequest& countCommand);
 
 /**
  * Process a pipeline from mongos.
  */
-std::unique_ptr<Pipeline, PipelineDeleter> processFLEPipelineS(
+MONGO_MOD_PUB std::unique_ptr<Pipeline> processFLEPipelineS(
     OperationContext* opCtx,
     NamespaceString nss,
     const EncryptionInformation& encryptInfo,
-    std::unique_ptr<Pipeline, PipelineDeleter> toRewrite);
+    std::unique_ptr<Pipeline> toRewrite);
 
 /**
  * Process a pipeline from a replica set.
  */
-std::unique_ptr<Pipeline, PipelineDeleter> processFLEPipelineD(
+MONGO_MOD_PUB std::unique_ptr<Pipeline> processFLEPipelineD(
     OperationContext* opCtx,
     NamespaceString nss,
     const EncryptionInformation& encryptInfo,
-    std::unique_ptr<Pipeline, PipelineDeleter> toRewrite);
+    std::unique_ptr<Pipeline> toRewrite);
 
 /**
  * Abstraction layer for FLE
  */
-class FLEQueryInterface : public FLETagQueryInterface {
+class MONGO_MOD_PUB FLEQueryInterface : public FLETagQueryInterface {
 public:
     /**
      * Insert a document into the given collection.
@@ -313,14 +328,12 @@ public:
  * Implementation of the FLE Query interface that exposes the DB operations needed for FLE 2
  * server-side work.
  */
-class FLEQueryInterfaceImpl : public FLEQueryInterface {
+class MONGO_MOD_PUB FLEQueryInterfaceImpl : public FLEQueryInterface {
 public:
     FLEQueryInterfaceImpl(const txn_api::TransactionClient& txnClient, Service* service)
         : _txnClient(txnClient), _service(service) {}
 
     BSONObj getById(const NamespaceString& nss, BSONElement element) final;
-
-    uint64_t countDocuments(const NamespaceString& nss) final;
 
     std::vector<std::vector<FLEEdgeCountInfo>> getTags(
         const NamespaceString& nss,
@@ -367,48 +380,13 @@ private:
 };
 
 /**
- * FLEStateCollectionReader using an FLEQueryInterface.
- */
-class FLEStateCollectionQueryInterfaceReader : public FLEStateCollectionReader {
-public:
-    FLEStateCollectionQueryInterfaceReader(FLEQueryInterface* iface, const NamespaceString& nss)
-        : _query(iface), _nss(nss) {}
-
-    uint64_t getDocumentCount() const override {
-        return _query->countDocuments(_nss);
-    }
-
-    BSONObj getById(PrfBlock block) const override {
-        BSONObjBuilder bob;
-        bob.appendBinData("_id"_sd, block.size(), BinDataType::BinDataGeneral, block.data());
-        auto docs = _query->findDocuments(_nss, bob.obj());
-        _stats.setRead(_stats.getRead() + 1);
-        if (docs.empty()) {
-            return {};
-        }
-        return std::move(docs[0]);
-    }
-
-    ECStats getStats() const override {
-        return _stats;
-    }
-
-private:
-    FLEQueryInterface* _query;
-    NamespaceString _nss;
-    mutable ECStats _stats;
-};
-
-/**
  * FLETagQueryInterface that does not use transaction_api.h to retrieve tags.
  */
-class FLETagNoTXNQuery : public FLETagQueryInterface {
+class MONGO_MOD_PUB FLETagNoTXNQuery : public FLETagQueryInterface {
 public:
     FLETagNoTXNQuery(OperationContext* opCtx);
 
     BSONObj getById(const NamespaceString& nss, BSONElement element) final;
-
-    uint64_t countDocuments(const NamespaceString& nss) final;
 
     std::vector<std::vector<FLEEdgeCountInfo>> getTags(
         const NamespaceString& nss,
@@ -480,12 +458,6 @@ write_ops::FindAndModifyCommandRequest processFindAndModifyExplain(
     FLEQueryInterface* queryImpl,
     const write_ops::FindAndModifyCommandRequest& findAndModifyRequest);
 
-/**
- * Callback function to get a SyncTransactionWithRetries with the appropiate Executor
- */
-using GetTxnCallback =
-    std::function<std::shared_ptr<txn_api::SyncTransactionWithRetries>(OperationContext*)>;
-
 std::pair<FLEBatchResult, write_ops::InsertCommandReply> processInsert(
     OperationContext* opCtx,
     const write_ops::InsertCommandRequest& insertRequest,
@@ -501,32 +473,39 @@ using ProcessFindAndModifyCallback =
                             FLEQueryInterface* queryImpl,
                             const write_ops::FindAndModifyCommandRequest& findAndModifyRequest)>;
 
+// Callback function invoked when a write concern error occurs in addition to a command error.
+using ErrorWithWriteConcernErrorCallback = std::function<void(const WriteConcernErrorDetail&)>;
+
 template <typename ReplyType>
 StatusWith<std::pair<ReplyType, OpMsgRequest>> processFindAndModifyRequest(
     OperationContext* opCtx,
     const write_ops::FindAndModifyCommandRequest& findAndModifyRequest,
     GetTxnCallback getTxns,
-    ProcessFindAndModifyCallback<ReplyType> processCallback = processFindAndModify);
+    ProcessFindAndModifyCallback<ReplyType> processCallback = processFindAndModify,
+    ErrorWithWriteConcernErrorCallback wceCallback = nullptr);
 
 extern template StatusWith<std::pair<write_ops::FindAndModifyCommandReply, OpMsgRequest>>
 processFindAndModifyRequest<write_ops::FindAndModifyCommandReply>(
     OperationContext* opCtx,
     const write_ops::FindAndModifyCommandRequest& findAndModifyRequest,
     GetTxnCallback getTxns,
-    ProcessFindAndModifyCallback<write_ops::FindAndModifyCommandReply> processCallback);
+    ProcessFindAndModifyCallback<write_ops::FindAndModifyCommandReply> processCallback,
+    ErrorWithWriteConcernErrorCallback wceCallback);
 
 extern template StatusWith<std::pair<write_ops::FindAndModifyCommandRequest, OpMsgRequest>>
 processFindAndModifyRequest<write_ops::FindAndModifyCommandRequest>(
     OperationContext* opCtx,
     const write_ops::FindAndModifyCommandRequest& findAndModifyRequest,
     GetTxnCallback getTxns,
-    ProcessFindAndModifyCallback<write_ops::FindAndModifyCommandRequest> processCallback);
+    ProcessFindAndModifyCallback<write_ops::FindAndModifyCommandRequest> processCallback,
+    ErrorWithWriteConcernErrorCallback wceCallback);
 
 write_ops::UpdateCommandReply processUpdate(OperationContext* opCtx,
                                             const write_ops::UpdateCommandRequest& updateRequest,
                                             GetTxnCallback getTxns);
 
-void validateInsertUpdatePayloads(const std::vector<EncryptedField>& fields,
+void validateInsertUpdatePayloads(OperationContext* opCtx,
+                                  const std::vector<EncryptedField>& fields,
                                   const std::vector<EDCServerPayloadInfo>& payload);
 
 /**

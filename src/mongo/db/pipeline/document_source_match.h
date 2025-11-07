@@ -29,41 +29,39 @@
 
 #pragma once
 
-#include <bitset>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <set>
-#include <string>
-#include <type_traits>
-#include <utility>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/client/connpool.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_algo.h"
-#include "mongo/db/matcher/matcher.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/match_processor.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/string_map.h"
+
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
 class DocumentSourceMatch : public DocumentSource {
 public:
+    static bool containsTextOperator(const MatchExpression& expr);
+
     DocumentSourceMatch(std::unique_ptr<MatchExpression> expr,
                         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
@@ -95,7 +93,7 @@ public:
      * 'path', for example: {'path': {$elemMatch: {'subfield': 3}}}
      */
     static boost::intrusive_ptr<DocumentSourceMatch> descendMatchOnPath(
-        MatchExpression* matchExpr,
+        const MatchExpression* matchExpr,
         const std::string& path,
         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
@@ -119,22 +117,22 @@ public:
 
     const char* getSourceName() const override;
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kMatch;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const override {
-        StageConstraints constraints{StreamType::kStreaming,
-                                     PositionRequirement::kNone,
-                                     HostTypeRequirement::kNone,
-                                     DiskUseRequirement::kNoDiskUse,
-                                     FacetRequirement::kAllowed,
-                                     TransactionRequirement::kAllowed,
-                                     LookupRequirement::kAllowed,
-                                     UnionRequirement::kAllowed,
-                                     ChangeStreamRequirement::kAllowlist};
-        constraints.noFieldModifications = true;
-        return constraints;
+    StageConstraints constraints(PipelineSplitState pipeState) const override {
+        return StageConstraints{StreamType::kStreaming,
+                                PositionRequirement::kNone,
+                                HostTypeRequirement::kNone,
+                                DiskUseRequirement::kNoDiskUse,
+                                FacetRequirement::kAllowed,
+                                TransactionRequirement::kAllowed,
+                                LookupRequirement::kAllowed,
+                                UnionRequirement::kAllowed,
+                                ChangeStreamRequirement::kAllowlist};
     }
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const override;
@@ -143,8 +141,8 @@ public:
      * Attempts to combine with any subsequent $match stages, joining the query objects with a
      * $and and flattening top-level $and's in the process.
      */
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) override;
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) override;
 
     DepsTracker::State getDependencies(DepsTracker* deps) const final;
 
@@ -156,7 +154,7 @@ public:
     }
 
     MatchProcessor* getMatchProcessor() {
-        return _matchProcessor.get_ptr();
+        return _matchProcessor.get();
     }
 
     /**
@@ -169,10 +167,12 @@ public:
 
     /**
      * Combines the filter in this $match with the filter of 'other' using a specified join
-     * predicate, updating this match in place. Currently, the join predicate can be "$and" or
-     * "$or".
+     * predicate, updating this match in place. This uses the stages' 'MatchExpression's, as those
+     * are kept up to date during any optimizations. Currently, the join predicate can only be
+     * either 'MatchExpression::MatchType::AND' or 'MatchExpression::MatchType::OR'.
      */
-    void joinMatchWith(boost::intrusive_ptr<DocumentSourceMatch> other, StringData joinPred);
+    void joinMatchWith(boost::intrusive_ptr<DocumentSourceMatch> other,
+                       MatchExpression::MatchType joinPred);
 
 
     bool hasQuery() const override;
@@ -234,18 +234,19 @@ protected:
                         const boost::intrusive_ptr<ExpressionContext>& newExpCtx)
         : DocumentSourceMatch(
               other.serialize().getDocument().toBson().firstElement().embeddedObject(),
-              newExpCtx ? newExpCtx : other.pExpCtx) {}
+              newExpCtx ? newExpCtx : other.getExpCtx()) {}
 
     DocumentSourceMatch(const BSONObj& query,
                         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
-    GetNextResult doGetNext() override;
-
     const BSONObj& getPredicate() const {
-        return _predicate;
+        return _matchProcessor->getPredicate();
     }
 
 private:
+    friend boost::intrusive_ptr<exec::agg::Stage> documentSourceMatchToStageFn(
+        const boost::intrusive_ptr<DocumentSource>& documentSource);
+
     void rebuild(BSONObj predicate, std::unique_ptr<MatchExpression> expr);
 
     DepsTracker::State getDependencies(const MatchExpression* expr, DepsTracker* deps) const;
@@ -255,11 +256,9 @@ private:
                       const StringMap<std::string>& renames,
                       expression::ShouldSplitExprFunc func) &&;
 
-    // TODO(SERVER-48830): Remove need for holding serialized version of the MatchExpression.
-    BSONObj _predicate;
-    bool _isTextQuery{false};
-    boost::optional<MatchProcessor> _matchProcessor;
+    std::shared_ptr<MatchProcessor> _matchProcessor;
     SbeCompatibility _sbeCompatibility{SbeCompatibility::notCompatible};
+    bool _isTextQuery{false};
 };
 
 /**
@@ -285,7 +284,9 @@ public:
 
     virtual Value doSerialize(const SerializationOptions& opts) const {
         return DocumentSourceMatch::serialize(opts);
-    };
+    }
+
+    StageConstraints constraints(PipelineSplitState pipeState) const override;
 
 protected:
     DocumentSourceInternalChangeStreamMatch(const BSONObj& query,
@@ -297,7 +298,7 @@ protected:
         const boost::intrusive_ptr<ExpressionContext>& newExpCtx)
         : DocumentSourceMatch(
               other.serialize().getDocument().toBson().firstElement().embeddedObject(),
-              newExpCtx ? newExpCtx : other.pExpCtx) {}
+              newExpCtx ? newExpCtx : other.getExpCtx()) {}
 };
 
 }  // namespace mongo

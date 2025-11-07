@@ -29,21 +29,10 @@
 
 #pragma once
 
-#include <memory>
-#include <set>
-#include <string>
-#include <tuple>
-#include <vector>
-
-#include <boost/exception/exception.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/client.h"
 #include "mongo/db/field_ref.h"
+#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -52,9 +41,19 @@
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/shard_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <set>
+#include <string>
+#include <tuple>
+#include <vector>
+
+#include <boost/exception/exception.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -159,13 +158,13 @@ public:
      *
      * As written, this function can only be called in a sharded context.
      *
-     * Note that the first overload looks up an instance of 'CatalogCache', while the second takes
+     * Note that the first overload creates an instance of RoutingContext, while the second takes
      * it as a parameter.
      */
     static boost::optional<ShardId> findOwningShard(OperationContext* opCtx,
                                                     const NamespaceString& nss);
     static boost::optional<ShardId> findOwningShard(OperationContext* opCtx,
-                                                    CatalogCache* catalogCache,
+                                                    RoutingContext& routingCtx,
                                                     const NamespaceString& nss);
 
 
@@ -177,7 +176,9 @@ public:
                                        CurrentOpCursorMode cursorMode) const final;
 
     std::vector<FieldPath> collectDocumentKeyFieldsActingAsRouter(
-        OperationContext*, const NamespaceString&) const override;
+        OperationContext*,
+        const NamespaceString&,
+        RoutingContext* routingCtx = nullptr) const override = 0;
 
     void updateClientOperationTime(OperationContext* opCtx) const final;
 
@@ -235,15 +236,25 @@ protected:
     std::vector<DatabaseName> _getAllDatabasesOnAShardedCluster(OperationContext* opCtx,
                                                                 boost::optional<TenantId> tenantId);
 
+    struct RunListCollectionsCommandOptions {
+        // Get the raw collection options (for viewless timeseries collections).
+        bool rawData = false;
+        // Adds a "primary" field to each collection with the primary shard.
+        bool addPrimaryShard = false;
+        // Run the command with primary read preference.
+        bool runOnPrimary = false;
+    };
+
     /**
      * Utility to run a 'listCollections' command on the primary shard corresponding to the database
      * in 'nss'. If the namespace is collectionless, it will return all the collections for the
      * given database. Otherwise, it'll return just the requested collection.
      * This method can only run on a sharded cluster.
      */
-    std::vector<BSONObj> _runListCollectionsCommandOnAShardedCluster(OperationContext* opCtx,
-                                                                     const NamespaceString& nss,
-                                                                     bool addPrimaryShard = false);
+    std::vector<BSONObj> _runListCollectionsCommandOnAShardedCluster(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        const RunListCollectionsCommandOptions& opts);
 };
 
 }  // namespace mongo

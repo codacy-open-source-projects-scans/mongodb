@@ -29,9 +29,6 @@
 
 #pragma once
 
-#include <memory>
-#include <type_traits>
-
 #include "mongo/client/connpool.h"
 #include "mongo/client/dbclient_base.h"
 #include "mongo/client/remote_command_targeter.h"
@@ -40,7 +37,11 @@
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/sessions_collection.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
+
+#include <memory>
+#include <type_traits>
 
 namespace mongo {
 

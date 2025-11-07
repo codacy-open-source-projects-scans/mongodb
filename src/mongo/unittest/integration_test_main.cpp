@@ -28,12 +28,6 @@
  */
 
 
-#include <iostream>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
 #include "mongo/base/status_with.h"
@@ -44,8 +38,6 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/type_traits.h"
 #include "mongo/unittest/framework.h"
 #include "mongo/util/assert_util.h"
@@ -59,6 +51,12 @@
 #include "mongo/util/signal_handlers_synchronous.h"
 #include "mongo/util/testing_proctor.h"
 
+#include <iostream>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 
@@ -70,6 +68,7 @@ ConnectionString fixtureConnectionString{};
 std::string testFilter;
 std::string fileNameFilter;
 std::vector<std::string> testSuites{};
+bool useEgressGRPC;
 
 }  // namespace
 
@@ -78,6 +77,10 @@ namespace unittest {
 
 ConnectionString getFixtureConnectionString() {
     return fixtureConnectionString;
+}
+
+bool shouldUseGRPCEgress() {
+    return useEgressGRPC;
 }
 
 }  // namespace unittest
@@ -134,6 +137,7 @@ MONGO_STARTUP_OPTIONS_STORE(IntegrationTestOptions)(InitializerContext*) {
     uassertStatusOK(storeBaseOptions(env));
 
     std::string connectionString = env["connectionString"].as<std::string>();
+    useEgressGRPC = env["useEgressGRPC"].as<bool>();
 
     env.get("filter", &testFilter).ignore();
     env.get("fileNameFilter", &fileNameFilter).ignore();

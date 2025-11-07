@@ -28,22 +28,24 @@
  */
 
 #include "MongoAssertCheck.h"
+#include "MongoBannedCatalogAccessFromQueryCodeCheck.h"
+#include "MongoBannedNamesCheck.h"
+#include "MongoBypassDatabaseMetadataAccessCheck.h"
 #include "MongoCctypeCheck.h"
-#include "MongoCollectionShardingRuntimeCheck.h"
 #include "MongoConfigHeaderCheck.h"
 #include "MongoCxx20BannedIncludesCheck.h"
 #include "MongoCxx20StdChronoCheck.h"
 #include "MongoFCVConstantCheck.h"
 #include "MongoHeaderBracketCheck.h"
+#include "MongoHeaderIncludePathCheck.h"
+#include "MongoInvariantDDLCoordinatorCheck.h"
 #include "MongoInvariantStatusIsOKCheck.h"
 #include "MongoMacroDefinitionLeaksCheck.h"
 #include "MongoNoUniqueAddressCheck.h"
-#include "MongoPolyFillCheck.h"
 #include "MongoRWMutexCheck.h"
 #include "MongoRandCheck.h"
-#include "MongoStdAtomicCheck.h"
-#include "MongoStdOptionalCheck.h"
 #include "MongoStringDataConstRefCheck.h"
+#include "MongoStringDataStringViewApi.h"
 #include "MongoTraceCheck.h"
 #include "MongoUninterruptibleLockGuardCheck.h"
 #include "MongoUnstructuredLogCheck.h"
@@ -63,30 +65,36 @@ public:
         CheckFactories.registerCheck<MongoUninterruptibleLockGuardCheck>(
             "mongo-uninterruptible-lock-guard-check");
         CheckFactories.registerCheck<MongoHeaderBracketCheck>("mongo-header-bracket-check");
+        CheckFactories.registerCheck<MongoHeaderIncludePathCheck>(
+            "mongo-header-include-path-check");
         CheckFactories.registerCheck<MongoCctypeCheck>("mongo-cctype-check");
         CheckFactories.registerCheck<MongoConfigHeaderCheck>("mongo-config-header-check");
         CheckFactories.registerCheck<MongoCxx20BannedIncludesCheck>(
             "mongo-cxx20-banned-includes-check");
         CheckFactories.registerCheck<MongoCxx20StdChronoCheck>("mongo-cxx20-std-chrono-check");
-        CheckFactories.registerCheck<MongoStdOptionalCheck>("mongo-std-optional-check");
         CheckFactories.registerCheck<MongoVolatileCheck>("mongo-volatile-check");
         CheckFactories.registerCheck<MongoTraceCheck>("mongo-trace-check");
-        CheckFactories.registerCheck<MongoStdAtomicCheck>("mongo-std-atomic-check");
         CheckFactories.registerCheck<MongoAssertCheck>("mongo-assert-check");
         CheckFactories.registerCheck<MongoFCVConstantCheck>("mongo-fcv-constant-check");
         CheckFactories.registerCheck<MongoUnstructuredLogCheck>("mongo-unstructured-log-check");
-        CheckFactories.registerCheck<MongoCollectionShardingRuntimeCheck>(
-            "mongo-collection-sharding-runtime-check");
         CheckFactories.registerCheck<MongoMacroDefinitionLeaksCheck>(
             "mongo-macro-definition-leaks-check");
         CheckFactories.registerCheck<MongoRandCheck>("mongo-rand-check");
-        CheckFactories.registerCheck<MongoPolyFillCheck>("mongo-polyfill-check");
+        CheckFactories.registerCheck<MongoBannedNamesCheck>("mongo-banned-names-check");
         CheckFactories.registerCheck<MongoNoUniqueAddressCheck>("mongo-no-unique-address-check");
         CheckFactories.registerCheck<MongoStringDataConstRefCheck>(
             "mongo-stringdata-const-ref-check");
+        CheckFactories.registerCheck<MongoStringDataStringViewApi>(
+            "mongo-stringdata-stringview-api");
         CheckFactories.registerCheck<MongoRWMutexCheck>("mongo-rwmutex-check");
         CheckFactories.registerCheck<MongoInvariantStatusIsOKCheck>(
             "mongo-invariant-status-is-ok-check");
+        CheckFactories.registerCheck<InvariantDDLCoordinatorCheck>(
+            "mongo-invariant-ddl-coordinator-check");
+        CheckFactories.registerCheck<MongoBypassDatabaseMetadataAccessCheck>(
+            "mongo-bypass-database-metadata-access-check");
+        CheckFactories.registerCheck<MongoBannedCatalogAccessFromQueryCodeCheck>(
+            "mongo-banned-catalog-access-from-query-code-check");
     }
 };
 

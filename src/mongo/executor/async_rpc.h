@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <tuple>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -49,12 +42,12 @@
 #include "mongo/client/remote_command_targeter.h"
 #include "mongo/client/remote_command_targeter_factory_impl.h"
 #include "mongo/db/baton.h"
+#include "mongo/db/global_catalog/type_tags.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/async_rpc_error_info.h"
-#include "mongo/executor/async_rpc_retry_policy.h"
 #include "mongo/executor/async_rpc_targeter.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
@@ -63,7 +56,6 @@
 #include "mongo/logv2/log.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/async_rpc_shard_targeter.h"
-#include "mongo/s/catalog/type_tags.h"
 #include "mongo/transport/baton.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
@@ -74,6 +66,14 @@
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 /**
  * This header provides an API of `sendCommand(...)` functions that can be used to asynchronously
@@ -110,17 +110,22 @@ struct AsyncRPCResponse<void> {
 
 template <typename CommandType>
 struct AsyncRPCOptions {
-    AsyncRPCOptions(const std::shared_ptr<executor::TaskExecutor>& exec,
-                    CancellationToken token,
-                    const CommandType& cmd,
-                    std::shared_ptr<RetryPolicy> retryPolicy = std::make_shared<NeverRetryPolicy>(),
-                    BatonHandle baton = nullptr)
-        : exec{exec}, token{token}, cmd{cmd}, retryPolicy{retryPolicy}, baton{std::move(baton)} {}
+    AsyncRPCOptions(
+        const std::shared_ptr<executor::TaskExecutor>& exec,
+        CancellationToken token,
+        const CommandType& cmd,
+        std::shared_ptr<mongo::RetryStrategy> retryStrategy = std::make_shared<NoRetryStrategy>(),
+        BatonHandle baton = nullptr)
+        : exec{exec},
+          token{token},
+          cmd{cmd},
+          retryStrategy{retryStrategy},
+          baton{std::move(baton)} {}
 
     std::shared_ptr<executor::TaskExecutor> exec;
     CancellationToken token;
     CommandType cmd;
-    std::shared_ptr<RetryPolicy> retryPolicy;
+    std::shared_ptr<mongo::RetryStrategy> retryStrategy;
     BatonHandle baton;
 };
 
@@ -154,6 +159,7 @@ public:
         CancellationToken token,
         OperationContext* opCtx,
         Targeter* targeter,
+        const TargetingMetadata& targetingMetadata,
         const DatabaseName& dbName,
         BSONObj cmdBSON,
         BatonHandle baton,
@@ -163,6 +169,7 @@ public:
         CancellationToken token,
         OperationContext* opCtx,
         Targeter* targeter,
+        const TargetingMetadata& targetingMetadata,
         const DatabaseName& dbName,
         BSONObj cmdBSON,
         boost::optional<UUID> clientOperationKey) {
@@ -170,6 +177,7 @@ public:
                             std::move(token),
                             std::move(opCtx),
                             std::move(targeter),
+                            targetingMetadata,
                             dbName,
                             std::move(cmdBSON),
                             nullptr,
@@ -196,11 +204,14 @@ inline Status makeErrorIfNeeded(TaskExecutor::ResponseStatus r) {
  * Adaptor that allows a RetryPolicy to be used with AsyncTry::withBackoffBetweenIterations.
  */
 struct RetryDelayAsBackoff {
-    RetryDelayAsBackoff(RetryPolicy* policy) : _policy{policy} {}
-    Milliseconds nextSleep() {
-        return _policy->getNextRetryDelay();
+    RetryDelayAsBackoff(mongo::RetryStrategy* strategy) : _strategy{strategy} {}
+    Milliseconds nextSleep() const {
+        // TODO(SERVER-108329): Only record the backoff after the wait for the backoff is done.
+        auto delay = _strategy->getNextRetryDelay();
+        _strategy->recordBackoff(delay);
+        return delay;
     }
-    RetryPolicy* _policy;
+    mongo::RetryStrategy* _strategy;
 };
 
 class ProxyingExecutor : public OutOfLineExecutor,
@@ -245,6 +256,7 @@ ExecutorFuture<AsyncRPCResponse<typename CommandType::Reply>> sendCommandWithRun
                                     options->token,
                                     opCtx,
                                     targeter.get(),
+                                    options->retryStrategy->getTargetingMetadata(),
                                     options->cmd.getDbName(),
                                     cmdBSON,
                                     options->cmd.getGenericArguments().getClientOperationKey());
@@ -252,19 +264,46 @@ ExecutorFuture<AsyncRPCResponse<typename CommandType::Reply>> sendCommandWithRun
     auto resFuture =
         AsyncTry<decltype(tryBody)>(std::move(tryBody))
             .until([options](StatusWith<detail::AsyncRPCInternalResponse> swResponse) {
-                bool shouldStopRetry = options->token.isCanceled() ||
-                    !options->retryPolicy->recordAndEvaluateRetry(swResponse.getStatus());
-                return shouldStopRetry;
+                if (options->token.isCanceled()) {
+                    return true;
+                }
+                auto s = swResponse.getStatus();
+                if (s.isOK()) {
+                    auto successResponse = swResponse.getValue();
+                    options->retryStrategy->recordSuccess(successResponse.targetUsed);
+                    return true;
+                }
+                if (s.code() != ErrorCodes::RemoteCommandExecutionError) {
+                    return true;
+                }
+
+                auto extraInfo = s.extraInfo<AsyncRPCErrorInfo>();
+                auto target = extraInfo->getTargetAttempted();
+                bool shouldRetry = false;
+
+                if (extraInfo->isLocal()) {
+                    shouldRetry = options->retryStrategy->recordFailureAndEvaluateShouldRetry(
+                        extraInfo->asLocal(), target, {});
+                } else if (extraInfo->isRemote()) {
+                    auto errorLabels =
+                        executor::extractErrorLabels(extraInfo->asRemote().getResponseObj());
+                    shouldRetry = options->retryStrategy->recordFailureAndEvaluateShouldRetry(
+                        extraInfo->asRemote().getRemoteCommandResult(), target, errorLabels);
+                }
+
+                return !shouldRetry;
             })
-            .withBackoffBetweenIterations(RetryDelayAsBackoff(options->retryPolicy.get()))
+            // TODO(SERVER-108329): Use withRetryStrategy instead of manually using a retry
+            // strategy inside until.
+            .withBackoffBetweenIterations(RetryDelayAsBackoff(options->retryStrategy.get()))
             .on(proxyExec, CancellationToken::uncancelable());
 
     return std::move(resFuture)
         .then([](detail::AsyncRPCInternalResponse r) -> ReplyType {
-            auto res = CommandType::Reply::parseSharingOwnership(IDLParserContext("AsyncRPCRunner"),
-                                                                 r.response);
+            auto res = CommandType::Reply::parseSharingOwnership(
+                r.response, IDLParserContext("AsyncRPCRunner"));
             auto genericReplyFields = GenericReplyFields::parseSharingOwnership(
-                IDLParserContext("AsyncRPCRunner"), r.response);
+                r.response, IDLParserContext("AsyncRPCRunner"));
             return {res, r.targetUsed, r.elapsed, std::move(genericReplyFields)};
         })
         .unsafeToInlineFuture()

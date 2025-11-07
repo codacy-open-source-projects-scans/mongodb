@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-
 #include "mongo/db/exec/sbe/vm/vm_datetime.h"
 
 #include "mongo/base/string_data.h"
@@ -38,6 +36,8 @@
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdint>
 
 namespace mongo {
 namespace sbe {
@@ -84,7 +84,7 @@ Date_t getDate(value::TypeTags dateTag, value::Value dateVal) {
             return objId.asDateT();
         }
         default:
-            MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE_TASSERT(11122948);
     }
 }
 

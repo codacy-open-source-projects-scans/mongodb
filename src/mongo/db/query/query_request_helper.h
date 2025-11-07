@@ -29,19 +29,12 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/jsobj.h"
+#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
@@ -49,6 +42,13 @@
 #include "mongo/db/query/tailable_mode_gen.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/util/serialization_context.h"
+
+#include <memory>
+#include <string>
+
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -71,11 +71,12 @@ static constexpr auto kNaturalSortField = "$natural";
 Status validateGetMoreCollectionName(StringData collectionName);
 
 /**
- * Returns a non-OK status if '$_resumeAfter' is set to an unexpected value, or the wrong type
- * determined by the collection type.
+ * Returns a non-OK status if '$_resumeAfter' or '$_startAt' is set to an unexpected value, or the
+ * wrong type determined by the collection type.
  */
-Status validateResumeAfter(OperationContext* opCtx,
+Status validateResumeInput(OperationContext* opCtx,
                            const mongo::BSONObj& resumeAfter,
+                           const mongo::BSONObj& startAt,
                            bool isClusteredCollection);
 
 /**

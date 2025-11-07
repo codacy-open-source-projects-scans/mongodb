@@ -218,16 +218,6 @@ def _validate_type_properties(ctxt, idl_type, syntax_type):
                     idl_type, syntax_type, idl_type.name, "deserializer"
                 )
 
-            if idl_type.deserializer is not None and "BSONElement" not in idl_type.deserializer:
-                ctxt.add_not_custom_scalar_serialization_not_supported_error(
-                    idl_type, syntax_type, idl_type.name, bson_type
-                )
-
-            if idl_type.serializer is not None:
-                ctxt.add_not_custom_scalar_serialization_not_supported_error(
-                    idl_type, syntax_type, idl_type.name, bson_type
-                )
-
         if bson_type == "bindata" and isinstance(idl_type, syntax.Type) and idl_type.default:
             ctxt.add_bindata_no_default(idl_type, syntax_type, idl_type.name)
 
@@ -297,7 +287,7 @@ def _compute_field_is_view(resolved_field, ctxt, symbols):
 
 
 def _compute_chained_item_is_view(struct, ctxt, symbols, chained_item):
-    # type: (syntax.Struct, errors.ParserContext, syntax.SymbolTable, Union[syntax.ChainedType, syntax.ChainedStruct]) -> bool
+    # type: (syntax.Struct, errors.ParserContext, syntax.SymbolTable, syntax.ChainedStruct) -> bool
     """Helper to compute is_view of chained types or structs."""
     resolved_chained_item = symbols.resolve_type_from_name(
         ctxt, struct, chained_item.name, chained_item.name
@@ -360,11 +350,6 @@ def _compute_struct_is_view(struct, ctxt, symbols):
         if _compute_field_is_view(resolved_field, ctxt, symbols):
             return True
 
-    if struct.chained_types:
-        for chained_type in struct.chained_types:
-            if _compute_chained_item_is_view(struct, ctxt, symbols, chained_type):
-                return True
-
     if struct.chained_structs:
         for chained_struct in struct.chained_structs:
             if _compute_chained_item_is_view(struct, ctxt, symbols, chained_struct):
@@ -412,6 +397,7 @@ def _bind_struct_common(ctxt, parsed_spec, struct, ast_struct):
     ast_struct.cpp_validator_func = struct.cpp_validator_func
     ast_struct.cpp_name = struct.cpp_name or struct.name
     ast_struct.qualified_cpp_name = _get_struct_qualified_cpp_name(struct)
+    ast_struct.mod_visibility = struct.mod_visibility
     ast_struct.allow_global_collection_name = struct.allow_global_collection_name
     ast_struct.non_const_getter = struct.non_const_getter
     ast_struct.is_command_reply = struct.is_command_reply
@@ -439,18 +425,6 @@ def _bind_struct_common(ctxt, parsed_spec, struct, ast_struct):
     # Validate naming restrictions
     if ast_struct.name.startswith("array<"):
         ctxt.add_array_not_valid_error(ast_struct, "struct", ast_struct.name)
-
-    # Merge chained types as chained fields
-    if struct.chained_types:
-        if ast_struct.strict:
-            ctxt.add_chained_type_no_strict_error(ast_struct, ast_struct.name)
-
-        for chained_type in struct.chained_types:
-            ast_field = _bind_chained_type(ctxt, parsed_spec, ast_struct, chained_type)
-            if ast_field and not _is_duplicate_field(
-                ctxt, chained_type.name, ast_struct.fields, ast_field
-            ):
-                ast_struct.fields.append(ast_field)
 
     # Merge chained structs as a chained struct and ignored fields
     for chained_struct in struct.chained_structs or []:
@@ -1296,39 +1270,8 @@ def _bind_field(ctxt, parsed_spec, field):
     return ast_field
 
 
-def _bind_chained_type(ctxt, parsed_spec, location, chained_type):
-    # type: (errors.ParserContext, syntax.IDLSpec, common.SourceLocation, syntax.ChainedType) -> ast.Field
-    """Bind the specified chained type."""
-    syntax_symbol = parsed_spec.symbols.resolve_type_from_name(
-        ctxt, location, chained_type.name, chained_type.name
-    )
-    if not syntax_symbol:
-        return None
-
-    if not isinstance(syntax_symbol, syntax.Type):
-        ctxt.add_chained_type_not_found_error(location, chained_type.name)
-        return None
-
-    idltype = cast(syntax.Type, syntax_symbol)
-
-    if len(idltype.bson_serialization_type) != 1 or idltype.bson_serialization_type[0] != "chain":
-        ctxt.add_chained_type_wrong_type_error(
-            location, chained_type.name, idltype.bson_serialization_type[0]
-        )
-        return None
-
-    ast_field = ast.Field(location.file_name, location.line, location.column)
-    ast_field.name = idltype.name
-    ast_field.cpp_name = chained_type.cpp_name
-    ast_field.description = idltype.description
-    ast_field.chained = True
-    ast_field.type = _bind_type(idltype)
-
-    return ast_field
-
-
-def _bind_chained_struct(ctxt, parsed_spec, ast_struct, chained_struct):
-    # type: (errors.ParserContext, syntax.IDLSpec, ast.Struct, syntax.ChainedStruct) -> None
+def _bind_chained_struct(ctxt, parsed_spec, ast_struct, chained_struct, nested_chained_parent=None):
+    # type: (errors.ParserContext, syntax.IDLSpec, ast.Struct, syntax.ChainedStruct, ast.Field) -> None
     """Bind the specified chained struct."""
     syntax_symbol = parsed_spec.symbols.resolve_type_from_name(
         ctxt, ast_struct, chained_struct.name, chained_struct.name
@@ -1349,11 +1292,6 @@ def _bind_chained_struct(ctxt, parsed_spec, ast_struct, chained_struct):
             ast_struct, ast_struct.name, chained_struct.name
         )
 
-    if struct.chained_types or struct.chained_structs:
-        ctxt.add_chained_nested_struct_no_nested_error(
-            ast_struct, ast_struct.name, chained_struct.name
-        )
-
     # Configure a field for the chained struct.
     ast_chained_field = ast.Field(ast_struct.file_name, ast_struct.line, ast_struct.column)
     ast_chained_field.name = struct.name
@@ -1361,6 +1299,15 @@ def _bind_chained_struct(ctxt, parsed_spec, ast_struct, chained_struct):
     ast_chained_field.cpp_name = chained_struct.cpp_name
     ast_chained_field.description = struct.description
     ast_chained_field.chained = True
+
+    if struct.chained_structs:
+        for nested_chained_struct in struct.chained_structs or []:
+            _bind_chained_struct(
+                ctxt, parsed_spec, ast_struct, nested_chained_struct, ast_chained_field
+            )
+
+    if nested_chained_parent:
+        ast_chained_field.nested_chained_parent = nested_chained_parent
 
     if not _is_duplicate_field(ctxt, chained_struct.name, ast_struct.fields, ast_chained_field):
         ast_struct.fields.append(ast_chained_field)
@@ -1402,6 +1349,7 @@ def _bind_globals(ctxt, parsed_spec):
             parsed_spec.globals.file_name, parsed_spec.globals.line, parsed_spec.globals.column
         )
         ast_global.cpp_namespace = parsed_spec.globals.cpp_namespace
+        ast_global.mod_visibility = parsed_spec.globals.mod_visibility
         ast_global.cpp_includes = parsed_spec.globals.cpp_includes
 
         if not ast_global.cpp_namespace.startswith("mongo"):
@@ -1461,6 +1409,7 @@ def _bind_enum(ctxt, idl_enum):
     ast_enum.name = idl_enum.name
     ast_enum.description = idl_enum.description
     ast_enum.type = idl_enum.type
+    ast_enum.mod_visibility = idl_enum.mod_visibility
     ast_enum.cpp_namespace = idl_enum.cpp_namespace
 
     enum_type_info = enum_types.get_type_info(idl_enum)
@@ -1519,6 +1468,7 @@ def _bind_server_parameter_class(ctxt, ast_param, param):
     ast_param.cpp_class.data = cls.data
     ast_param.cpp_class.override_ctor = cls.override_ctor
     ast_param.cpp_class.override_validate = cls.override_validate
+    ast_param.cpp_class.override_warn_if_deprecated = cls.override_warn_if_deprecated
 
     # If set_at is cluster, then set must be overridden. Otherwise, use the parsed value.
     ast_param.cpp_class.override_set = True if param.set_at == ["cluster"] else cls.override_set
@@ -1603,6 +1553,7 @@ def _bind_server_parameter(ctxt, param):
     ast_param.redact = param.redact
     ast_param.test_only = param.test_only
     ast_param.deprecated_name = param.deprecated_name
+    ast_param.mod_visibility = param.mod_visibility
 
     # The omit_in_ftdc flag can only be enabled for cluster parameters.
     if param.omit_in_ftdc is not None and param.set_at != ["cluster"]:
@@ -1614,6 +1565,8 @@ def _bind_server_parameter(ctxt, param):
         ctxt.add_server_parameter_required_attr(param, "omit_in_ftdc", "cluster")
 
     ast_param.omit_in_ftdc = param.omit_in_ftdc
+
+    ast_param.is_deprecated = param.is_deprecated
 
     ast_param.set_at = _bind_server_parameter_set_at(ctxt, param)
     if ast_param.set_at is None:
@@ -1628,47 +1581,170 @@ def _bind_server_parameter(ctxt, param):
         return None
 
 
+def _bind_feature_flag_phase(ctxt, param):
+    # type: (errors.ParserContext, syntax.FeatureFlag) -> ast.FeatureFlagRolloutPhase
+    if param.incremental_rollout_phase is None:
+        return ast.FeatureFlagRolloutPhase.NOT_FOR_INCREMENTAL_ROLLOUT
+
+    feature_flag_phase = ast.FeatureFlagRolloutPhase.bind(param.incremental_rollout_phase)
+    if feature_flag_phase is None:
+        ctxt.add_invalid_incremental_rollout_phase_value(param, param.incremental_rollout_phase)
+        return None
+
+    return feature_flag_phase
+
+
+def _is_ifr_feature_flag_enabled_by_default(feature_flag_phase):
+    # type: (ast.FeatureFlagRolloutPhase) -> bool
+    return feature_flag_phase != ast.FeatureFlagRolloutPhase.IN_DEVELOPMENT
+
+
+def _is_ifr_feature_flag_unreleased(feature_flag_phase):
+    # type: (ast.FeatureFlagRolloutPhase) -> bool
+    return (
+        feature_flag_phase == ast.FeatureFlagRolloutPhase.IN_DEVELOPMENT
+        or feature_flag_phase == ast.FeatureFlagRolloutPhase.ROLLOUT
+    )
+
+
+def _bind_ifr_feature_flag_default(ctxt, param, feature_flag_phase):
+    # type: (errors.ParserContext, syntax.FeatureFlag, ast.FeatureFlagRolloutPhase) -> ast.Expression
+
+    # The 'default' value for an IFR flag is determined by its IFR phase. The flag can optionally
+    # specify a default value, but it must match the phase's default value.
+    default_value = (
+        "true" if _is_ifr_feature_flag_enabled_by_default(feature_flag_phase) else "false"
+    )
+    if param.default and param.default.literal != default_value:
+        ctxt.add_invalid_feature_flag_default_value(
+            param.default, str(feature_flag_phase), default_value
+        )
+        return None
+
+    expr_for_default = syntax.Expression(param.file_name, param.line, param.column)
+    expr_for_default.expr = (
+        f'"{param.name}"_sd, RolloutPhase::'
+        f"{feature_flag_phase.to_camel_case_string()}, {default_value}"
+    )
+
+    bound_expr = _bind_expression(expr_for_default)
+    bound_expr.export = False
+    return bound_expr
+
+
+def _bind_non_ifr_feature_flag_default(ctxt, param):
+    # type: (errors.ParserContext, syntax.FeatureFlag) -> ast.Expression
+    expr_for_default = syntax.Expression(
+        param.default.file_name, param.default.line, param.default.column
+    )
+    if param.fcv_gated.literal == "true":
+        expr_for_default.expr = f'{param.default.literal}, "{param.version or ""}"_sd'
+        if param.enable_on_transitional_fcv_UNSAFE:
+            expr_for_default.expr += ", true"
+    else:
+        expr_for_default.expr = param.default.literal
+
+    bound_expr = _bind_expression(expr_for_default)
+    bound_expr.export = False
+    return bound_expr
+
+
+def _bind_feature_flag_cpp_vartype(ctxt, param, feature_flag_phase):
+    # type: (errors.ParserContext, syntax.FeatureFlag, ast.FeatureFlagRolloutPhase) -> str
+    if param.fcv_gated.literal == "true":
+        # FCV flags must not also be IFR flags.
+        if feature_flag_phase != ast.FeatureFlagRolloutPhase.NOT_FOR_INCREMENTAL_ROLLOUT:
+            ctxt.add_illegally_fcv_gated_feature_flag(param)
+            return None
+
+        if param.fcv_context_unaware:
+            return "::mongo::LegacyContextUnawareFCVGatedFeatureFlag"
+        return "::mongo::FCVGatedFeatureFlag"
+    elif feature_flag_phase == ast.FeatureFlagRolloutPhase.NOT_FOR_INCREMENTAL_ROLLOUT:
+        # Non-FCV gated, non IFR flag.
+        return "::mongo::BinaryCompatibleFeatureFlag"
+    else:
+        # IFR flag.
+        return "::mongo::IncrementalRolloutFeatureFlag"
+
+
 def _bind_feature_flags(ctxt, param):
     # type: (errors.ParserContext, syntax.FeatureFlag) -> ast.ServerParameter
     """Bind a FeatureFlag as a serverParameter setting."""
     ast_param = ast.ServerParameter(param.file_name, param.line, param.column)
     ast_param.name = param.name
     ast_param.description = param.description
+    ast_param.mod_visibility = param.mod_visibility
 
-    ast_param.set_at = "ServerParameterType::kStartupOnly"
-
-    ast_param.cpp_vartype = "::mongo::FeatureFlag"
-
-    # Feature flags that default to false must not have a version
-    if param.default.literal == "false" and param.version:
-        ctxt.add_feature_flag_default_false_has_version(param)
+    # Choose the feature flag phase.
+    ast_param.feature_flag_phase = _bind_feature_flag_phase(ctxt, param)
+    if ast_param.feature_flag_phase is None:
         return None
 
-    # Feature flags that default to true and should be FCV gated are required to have a version
-    if (
-        param.default.literal == "true"
-        and param.shouldBeFCVGated.literal == "true"
-        and not param.version
-    ):
-        ctxt.add_feature_flag_default_true_missing_version(param)
-        return None
-
-    # Feature flags that should not be FCV gated must not have a version
-    if param.shouldBeFCVGated.literal == "false" and param.version:
-        ctxt.add_feature_flag_fcv_gated_false_has_version(param)
-        return None
-
-    expr = syntax.Expression(param.default.file_name, param.default.line, param.default.column)
-    expr.expr = '%s, "%s"_sd, %s' % (
-        param.default.literal,
-        param.version if (param.shouldBeFCVGated.literal == "true" and param.version) else "",
-        param.shouldBeFCVGated.literal,
+    # Choose when the feature flag can be set. All features flags can be configured at startup. Only
+    # Incremental Feature Rollout (IFR) flags can be toggled at runtime.
+    ast_param.set_at = (
+        "ServerParameterType::kStartupOnly"
+        if ast_param.feature_flag_phase == ast.FeatureFlagRolloutPhase.NOT_FOR_INCREMENTAL_ROLLOUT
+        else "ServerParameterType::kStartupAndRuntime"
     )
 
-    ast_param.default = _bind_expression(expr)
-    ast_param.default.export = False
+    # Choose the default value for the flag, and also validate the 'version' field.
+    if ast_param.feature_flag_phase != ast.FeatureFlagRolloutPhase.NOT_FOR_INCREMENTAL_ROLLOUT:
+        ast_param.default = _bind_ifr_feature_flag_default(
+            ctxt, param, ast_param.feature_flag_phase
+        )
+        if ast_param.default is None:
+            return None
+
+        # An IFR flag must not specify the 'version' field.
+        if param.version:
+            ctxt.add_ifr_flag_with_version(param)
+            return None
+    elif param.default:
+        ast_param.default = _bind_non_ifr_feature_flag_default(ctxt, param)
+
+        if param.default.literal == "false" and param.version:
+            # Feature flags that default to false must not have a version.
+            ctxt.add_feature_flag_default_false_has_version(param)
+            return None
+
+        if param.fcv_gated.literal == "true":
+            # Feature flags that default to true and should be FCV gated are required to have a
+            # version.
+            if param.default.literal == "true" and not param.version:
+                ctxt.add_feature_flag_default_true_missing_version(param)
+                return None
+
+            if (
+                param.enable_on_transitional_fcv_UNSAFE
+                and "(Enable on transitional FCV):" not in param.description
+            ):
+                ctxt.add_feature_flag_enabled_on_transitional_fcv_missing_safety_explanation(param)
+                return None
+        else:
+            # Feature flags that should not be FCV gated must not have unsupported options.
+            for option_name in (
+                "version",
+                "enable_on_transitional_fcv_UNSAFE",
+                "fcv_context_unaware",
+            ):
+                if getattr(param, option_name):
+                    ctxt.add_feature_flag_fcv_gated_false_has_unsupported_option(param, option_name)
+                    return None
+    else:
+        # Non-IFR flags must specify a 'default' value.
+        ctxt.add_feature_flag_without_default_value(param)
+        return None
+
+    # Choose the cpp_vartype.
+    ast_param.cpp_vartype = _bind_feature_flag_cpp_vartype(
+        ctxt, param, ast_param.feature_flag_phase
+    )
+    if ast_param.cpp_vartype is None:
+        return None
+
     ast_param.cpp_varname = param.cpp_varname
-    ast_param.feature_flag = True
 
     return ast_param
 
@@ -1749,6 +1825,7 @@ def _bind_config_option(ctxt, globals_spec, option):
     node.arg_vartype = option.arg_vartype
     node.cpp_vartype = option.cpp_vartype
     node.cpp_varname = option.cpp_varname
+    node.mod_visibility = option.mod_visibility
     node.condition = _bind_condition(option.condition, condition_for="config")
 
     node.requires = option.requires
@@ -1808,6 +1885,29 @@ def _bind_config_option(ctxt, globals_spec, option):
             return None
 
     return node
+
+
+def is_feature_flag_enabled_by_default(feature_flag):
+    # type: (syntax.FeatureFlag) -> bool
+    """Determine if an idl.FeatureFlag should be enabled by default without validating its syntax"""
+
+    if feature_flag.incremental_rollout_phase:
+        return _is_ifr_feature_flag_enabled_by_default(
+            ast.FeatureFlagRolloutPhase.bind(feature_flag.incremental_rollout_phase)
+        )
+    else:
+        return feature_flag.default.literal == "true"
+
+
+def is_unreleased_incremental_rollout_feature_flag(feature_flag):
+    """Determine if an idl.FeatureFlag is an Incremental Feature Rollout (IFR) flag in the
+    'in_development' or 'rollout' state without validating its syntax.
+    """
+    # type: (syntax.FeatureFlag) -> bool
+
+    return feature_flag.incremental_rollout_phase and _is_ifr_feature_flag_unreleased(
+        ast.FeatureFlagRolloutPhase.bind(feature_flag.incremental_rollout_phase)
+    )
 
 
 def bind(parsed_spec):

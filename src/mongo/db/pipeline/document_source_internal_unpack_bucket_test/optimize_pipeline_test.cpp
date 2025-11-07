@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
@@ -37,13 +34,15 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/util/make_data_structure.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <memory>
+#include <vector>
 
 namespace mongo {
 namespace {
@@ -59,9 +58,9 @@ TEST_F(OptimizePipeline, MixedMatchPushedDown) {
     auto pipeline = Pipeline::parse(
         makeVector(unpack, fromjson("{$match: {myMeta: {$gte: 0, $lte: 5}, a: {$lte: 4}}}")),
         getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // To get the optimized $match from the pipeline, we have to serialize with explain.
     auto stages = pipeline->writeExplainOps(kExplain);
@@ -78,6 +77,8 @@ TEST_F(OptimizePipeline, MixedMatchPushedDown) {
                                "metaField: \"myMeta\", bucketMaxSpanSeconds: 3600, "
                                "eventFilter: { a: { $lte: 4 } } } }"),
                       stages[1].getDocument().toBson());
+
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), pipeline->serializeToBson());
 }
 
 TEST_F(OptimizePipeline, MetaMatchPushedDown) {
@@ -86,15 +87,17 @@ TEST_F(OptimizePipeline, MetaMatchPushedDown) {
         "bucketMaxSpanSeconds: 3600}}");
     auto pipeline =
         Pipeline::parse(makeVector(unpack, fromjson("{$match: {myMeta: {$gte: 0}}}")), getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // The $match on meta is moved before $_internalUnpackBucket and no other optimization is done.
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(2u, serialized.size());
     ASSERT_BSONOBJ_EQ(fromjson("{$match: {meta: {$gte: 0}}}"), serialized[0]);
     ASSERT_BSONOBJ_EQ(unpack, serialized[1]);
+
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), serialized);
 }
 
 TEST_F(OptimizePipeline, MixedMatchOr) {
@@ -111,9 +114,9 @@ TEST_F(OptimizePipeline, MixedMatchOr) {
         "  ]}"
         "]}}");
     auto pipeline = Pipeline::parse(makeVector(unpack, match), getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto stages = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(2u, stages.size());
@@ -141,6 +144,8 @@ TEST_F(OptimizePipeline, MixedMatchOr) {
                                "eventFilter: { $and: [ { x: { $lte: 1 } }, { $or: [ { "
                                "\"myMeta.a\": { $gt: 1 } }, { y: { $lt: 1 } } ] } ] } } }"),
                       stages[1].getDocument().toBson());
+
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), pipeline->serializeToBson());
 }
 
 TEST_F(OptimizePipeline, MixedMatchOnlyMetaMatchPushedDown) {
@@ -151,9 +156,9 @@ TEST_F(OptimizePipeline, MixedMatchOnlyMetaMatchPushedDown) {
         makeVector(unpack,
                    fromjson("{$match: {myMeta: {$gte: 0, $lte: 5}, a: {$type: \"string\"}}}")),
         getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the $match on the metaField but not the predicate on '$a', which is
     // ineligible because of the $type.
@@ -165,6 +170,8 @@ TEST_F(OptimizePipeline, MixedMatchOnlyMetaMatchPushedDown) {
                                "metaField: \"myMeta\", bucketMaxSpanSeconds: 3600, "
                                "eventFilter: { a: { $type: [ 2 ] } } } }"),
                       serialized[1]);
+
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), serialized);
 }
 
 TEST_F(OptimizePipeline, MultipleMatchesPushedDown) {
@@ -175,9 +182,9 @@ TEST_F(OptimizePipeline, MultipleMatchesPushedDown) {
                                                fromjson("{$match: {myMeta: {$gte: 0, $lte: 5}}}"),
                                                fromjson("{$match: {a: {$lte: 4}}}")),
                                     getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down both the $match on the metaField and the predicates on the control field.
     // The created $match stages should be added before $_internalUnpackBucket and merged.
@@ -193,6 +200,8 @@ TEST_F(OptimizePipeline, MultipleMatchesPushedDown) {
                                "metaField: \"myMeta\", bucketMaxSpanSeconds: 3600, "
                                "eventFilter: { a: { $lte: 4 } } } }"),
                       stages[1].getDocument().toBson());
+
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), pipeline->serializeToBson());
 }
 
 TEST_F(OptimizePipeline, MultipleMatchesPushedDownWithSort) {
@@ -204,9 +213,9 @@ TEST_F(OptimizePipeline, MultipleMatchesPushedDownWithSort) {
                                                fromjson("{$sort: {a: 1}}"),
                                                fromjson("{$match: {a: {$lte: 4}}}")),
                                     getExpCtx());
-    ASSERT_EQ(4u, pipeline->getSources().size());
+    ASSERT_EQ(4u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down both the $match on the metaField and the predicates on the control field.
     // The created $match stages should be added before $_internalUnpackBucket and merged.
@@ -223,6 +232,7 @@ TEST_F(OptimizePipeline, MultipleMatchesPushedDownWithSort) {
                                "eventFilter: { a: { $lte: 4 } } } }"),
                       stages[1].getDocument().toBson());
     ASSERT_BSONOBJ_EQ(fromjson("{$sort: {sortKey: {a: 1}}}"), stages[2].getDocument().toBson());
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), pipeline->serializeToBson());
 }
 
 TEST_F(OptimizePipeline, MetaMatchThenCountPushedDown) {
@@ -232,19 +242,20 @@ TEST_F(OptimizePipeline, MetaMatchThenCountPushedDown) {
                    fromjson("{$match: {myMeta: {$eq: 'abc'}}}"),
                    fromjson("{$count: 'foo'}")),
         getExpCtx());
-    ASSERT_EQ(4u, pipeline->getSources().size());  // $count is expanded into $group and $project.
+    ASSERT_EQ(4u, pipeline->size());  // $count is expanded into $group and $project.
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the $match and internalize the empty dependency set.
     auto serialized = pipeline->serializeToBson();
     // The $group is rewritten to make use of '$control.count' and the $unpack stage is removed.
     ASSERT_EQ(3u, serialized.size());
     ASSERT_BSONOBJ_EQ(fromjson("{$match: {meta: {$eq: 'abc'}}}"), serialized[0]);
-    ASSERT_BSONOBJ_EQ(fromjson("{$group: {_id: {$const: null}, foo: { $sum: { $cond: [ { $gte: [ "
-                               "'$control.version', { $const: 2 } ] }, '$control.count', { $size: "
-                               "[ { $objectToArray: ['$data.time']} ] } ] } } } }"),
-                      serialized[1]);
+    ASSERT_BSONOBJ_EQ(
+        fromjson("{$group: {_id: {$const: null}, foo: { $sum: { $cond: [ { $gte: [ "
+                 "'$control.version', { $const: 2 } ] }, '$control.count', { $size: "
+                 "[ { $objectToArray: ['$data.time']} ] } ] } }, $willBeMerged: false } }"),
+        serialized[1]);
     ASSERT_BSONOBJ_EQ(fromjson("{$project: {foo: true, _id: false}}"), serialized[2]);
 }
 
@@ -256,9 +267,9 @@ TEST_F(OptimizePipeline, SortThenMetaMatchPushedDown) {
                                                fromjson("{$sort: {myMeta: -1}}"),
                                                fromjson("{$match: {myMeta: {$eq: 'abc'}}}")),
                                     getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down both the $sort and the $match.
     auto serialized = pipeline->serializeToBson();
@@ -277,9 +288,9 @@ TEST_F(OptimizePipeline, SortThenMixedMatchPushedDown) {
                                    fromjson("{$sort: {myMeta: -1}}"),
                                    fromjson("{$match: {a: {$gte: 5}, myMeta: {$eq: 'abc'}}}")),
                         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down both the $sort and parts of the $match.
     auto serialized = pipeline->serializeToBson();
@@ -300,6 +311,7 @@ TEST_F(OptimizePipeline, SortThenMixedMatchPushedDown) {
                                "metaField: \"myMeta\", bucketMaxSpanSeconds: 3600, "
                                "eventFilter: { a: { $gte: 5 } } } }"),
                       serialized[2]);
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), serialized);
 }
 
 TEST_F(OptimizePipeline, MetaMatchThenSortPushedDown) {
@@ -310,9 +322,9 @@ TEST_F(OptimizePipeline, MetaMatchThenSortPushedDown) {
                                                fromjson("{$match: {myMeta: {$eq: 'abc'}}}"),
                                                fromjson("{$sort: {myMeta: -1}}")),
                                     getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down both the $sort and the entire $match.
     auto serialized = pipeline->serializeToBson();
@@ -329,9 +341,9 @@ TEST_F(OptimizePipeline, MetaMatchThenProjectPushedDown) {
                    fromjson("{$match: {myMeta: {$eq: 'abc'}}}"),
                    fromjson("{$project: {x: 0}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the $match and internalize the $project.
     auto serialized = pipeline->serializeToBson();
@@ -349,9 +361,9 @@ TEST_F(OptimizePipeline, MixedMatchThenProjectPushedDown) {
                    fromjson("{$match: {myMeta: {$eq: 'abc'}, a: {$lte: 4}}}"),
                    fromjson("{$project: {x: 1}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We can push down part of the $match and use dependency analysis on the end of the pipeline.
     auto stages = pipeline->writeExplainOps(kExplain);
@@ -368,6 +380,8 @@ TEST_F(OptimizePipeline, MixedMatchThenProjectPushedDown) {
         stages[1].getDocument().toBson());
     ASSERT_BSONOBJ_EQ(fromjson("{$project: {_id: true, x: true}}"),
                       stages[2].getDocument().toBson());
+
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), pipeline->serializeToBson());
 }
 
 
@@ -378,9 +392,9 @@ TEST_F(OptimizePipeline, ProjectThenMetaMatchPushedDown) {
                    fromjson("{$project: {x: 0}}"),
                    fromjson("{$match: {myMeta: {$eq: 'abc'}}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the $match and internalize the $project.
     auto serialized = pipeline->serializeToBson();
@@ -398,9 +412,9 @@ TEST_F(OptimizePipeline, ProjectThenMixedMatchPushedDown) {
                    fromjson("{$project: {a: 1, myMeta: 1, x: 1}}"),
                    fromjson("{$match: {myMeta: {$eq: 'abc'}, a: {$lte: 4}}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down part of the $match and do dependency analysis on the rest.
     auto stages = pipeline->writeExplainOps(kExplain);
@@ -420,6 +434,8 @@ TEST_F(OptimizePipeline, ProjectThenMixedMatchPushedDown) {
         kComparator.compare(fromjson("{$project: {_id: true, a: true, myMeta: true, x: true}}"),
                             stages[2].getDocument().toBson()),
         0);
+
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), pipeline->serializeToBson());
 }
 
 TEST_F(OptimizePipeline, ProjectWithRenameThenMixedMatchPushedDown) {
@@ -429,9 +445,9 @@ TEST_F(OptimizePipeline, ProjectWithRenameThenMixedMatchPushedDown) {
                    fromjson("{$project: {myMeta: '$y', a: 1}}"),
                    fromjson("{$match: {myMeta: {$gte: 'abc'}, a: {$lte: 4}}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down part of the $match and do dependency analysis on the end of the pipeline.
     auto stages = pipeline->writeExplainOps(kExplain);
@@ -451,6 +467,7 @@ TEST_F(OptimizePipeline, ProjectWithRenameThenMixedMatchPushedDown) {
         stages[1].getDocument().toBson());
     ASSERT_BSONOBJ_EQ(fromjson("{$project: {_id: true, a: true, myMeta: '$y'}}"),
                       stages[2].getDocument().toBson());
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), pipeline->serializeToBson());
 }
 
 TEST_F(OptimizePipeline, ComputedProjectThenMetaMatchPushedDown) {
@@ -460,9 +477,9 @@ TEST_F(OptimizePipeline, ComputedProjectThenMetaMatchPushedDown) {
                    fromjson("{$project: {y: '$myMeta'}}"),
                    fromjson("{$match: {y: {$gte: 'abc'}}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down both the match and the project and internalize the remaining project.
     // Note that the $match substitutes 'y' with 'myMeta', allowing it to be moved before the
@@ -484,9 +501,9 @@ TEST_F(OptimizePipeline, ComputedMetaProjectPushedDown) {
                             "'myMeta', bucketMaxSpanSeconds: 3600}}"),
                    fromjson("{$project: {a: {$sum: ['$myMeta.a', '$myMeta.b']}}}")),
         getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the project.
     auto serialized = pipeline->serializeToBson();
@@ -505,9 +522,9 @@ TEST_F(OptimizePipeline, ComputedShadowingMetaProjectPushedDown) {
                             "'myMeta', bucketMaxSpanSeconds: 3600}}"),
                    fromjson("{$project: {myMeta: {$sum: ['$myMeta.a', '$myMeta.b']}}}")),
         getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the project.
     auto serialized = pipeline->serializeToBson();
@@ -527,9 +544,9 @@ TEST_F(OptimizePipeline, ComputedProjectThenMetaMatchPushedDownWithoutReorder) {
                    fromjson("{$project: {myMeta: {$sum: ['$myMeta.a', '$myMeta.b']}}}"),
                    fromjson("{$match: {myMeta: {$gte: 'abc'}}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should both push down the project and internalize the remaining project, but we can't
     // push down the meta match due to the (now invalid) renaming.
@@ -551,9 +568,9 @@ TEST_F(OptimizePipeline, ComputedProjectThenMatchPushedDown) {
                    fromjson("{$project: {y: {$sum: ['$myMeta.a', '$myMeta.b']}}}"),
                    fromjson("{$match: {y: {$gt: 'abc'}}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the computed project but not the match, because it depends on the newly
     // computed values.
@@ -565,6 +582,7 @@ TEST_F(OptimizePipeline, ComputedProjectThenMatchPushedDown) {
                                "computedMetaProjFields: [ 'y' ]}}"),
                       serialized[1]);
     ASSERT_BSONOBJ_EQ(fromjson("{$match: {y: {$gt: 'abc'}}}"), serialized[2]);
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), serialized);
 }
 
 TEST_F(OptimizePipeline, MetaSortThenProjectPushedDown) {
@@ -574,9 +592,9 @@ TEST_F(OptimizePipeline, MetaSortThenProjectPushedDown) {
                    fromjson("{$sort: {myMeta: -1}}"),
                    fromjson("{$project: {myMeta: 1, x: 1}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the $sort and internalize the $project.
     auto serialized = pipeline->serializeToBson();
@@ -595,9 +613,9 @@ TEST_F(OptimizePipeline, ProjectThenMetaSortPushedDown) {
                    fromjson("{$project: {myMeta: 1, x: 1}}"),
                    fromjson("{$sort: {myMeta: -1}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should internalize the $project and push down the $sort.
     auto serialized = pipeline->serializeToBson();
@@ -616,9 +634,9 @@ TEST_F(OptimizePipeline, ComputedProjectThenSortPushedDown) {
                    fromjson("{$project: {myMeta: '$myMeta.a'}}"),
                    fromjson("{$sort: {myMeta: 1}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the $project and internalize the remaining project, but we can't do the
     // sort pushdown due to the renaming.
@@ -641,9 +659,9 @@ TEST_F(OptimizePipeline, ExclusionProjectThenMatchPushDown) {
                    fromjson("{$project: {'myMeta.a': 0}}"),
                    fromjson("{$match: {'myMeta.b': {$lt: 10}}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the exclusion project on the metaField then push down the $match.
     auto serialized = pipeline->serializeToBson();
@@ -662,9 +680,9 @@ TEST_F(OptimizePipeline, ExclusionProjectThenProjectPushDown) {
                    fromjson("{$project: {myMeta: 0}}"),
                    fromjson("{$project: {myMeta: 1, a: 1, _id: 0}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the exclusion project on the metaField then internalize the remaining
     // project.
@@ -684,9 +702,9 @@ TEST_F(OptimizePipeline, ProjectThenExclusionProjectPushDown) {
                    fromjson("{$project: {myMeta: 1, _id: 0}}"),
                    fromjson("{$project: {myMeta: 0}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should internalize one project then push down the remaining project on the metaField. Note
     // that we can push down an exclusion project on meta even after internalizing either kind of
@@ -706,9 +724,9 @@ TEST_F(OptimizePipeline, ComputedProjectThenProjectPushDown) {
                    fromjson("{$project: {myMeta: '$myMeta.a'}}"),
                    fromjson("{$project: {myMeta: 0}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the $project and internalize the remaining project. We should leave the
     // remaining project in the pipeline.
@@ -723,15 +741,53 @@ TEST_F(OptimizePipeline, ComputedProjectThenProjectPushDown) {
         serialized[2]);
 }
 
+TEST_F(OptimizePipeline, DoubleInclusionMetaProjectPushDown) {
+    auto pipeline = Pipeline::parse(
+        makeVector(fromjson("{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: "
+                            "'myMeta', bucketMaxSpanSeconds: 3600}}"),
+                   fromjson("{$project: {myMeta: 1, _id: 0}}"),
+                   fromjson("{$project: {_id: 0, time: 1}}")),
+        getExpCtx());
+    ASSERT_EQ(3u, pipeline->size());
+
+    pipeline_optimization::optimizePipeline(*pipeline);
+    auto serialized = pipeline->serializeToBson();
+    ASSERT_EQ(2u, serialized.size());
+    ASSERT_BSONOBJ_EQ(
+        fromjson("{$_internalUnpackBucket: { include: ['myMeta'], timeField: 'time', metaField: "
+                 "'myMeta', bucketMaxSpanSeconds: 3600}}"),
+        serialized[0]);
+    ASSERT_BSONOBJ_EQ(fromjson("{$project: {time: true, _id: false}}"), serialized[1]);
+
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), serialized);
+}
+
+TEST_F(OptimizePipeline, ExcludeMetaProjectPushDown) {
+    auto unpackSpec = fromjson(
+        "{$_internalUnpackBucket: { exclude: ['myMeta'], timeField: 'time', metaField: "
+        "'myMeta', bucketMaxSpanSeconds: 3600}}");
+    auto pipeline = Pipeline::parse(
+        makeVector(unpackSpec, fromjson("{$project: {_id: 0, time: 1}}")), getExpCtx());
+    ASSERT_EQ(2u, pipeline->size());
+
+    pipeline_optimization::optimizePipeline(*pipeline);
+    auto serialized = pipeline->serializeToBson();
+    ASSERT_EQ(2u, serialized.size());
+    ASSERT_BSONOBJ_EQ(unpackSpec, serialized[0]);
+    ASSERT_BSONOBJ_EQ(fromjson("{$project: {time: true, _id: false}}"), serialized[1]);
+
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), serialized);
+}
+
 TEST_F(OptimizePipeline, AddFieldsOfShadowingMetaPushedDown) {
     auto pipeline = Pipeline::parse(
         makeVector(fromjson("{$_internalUnpackBucket: { exclude: [], timeField: 'time', metaField: "
                             "'myMeta', bucketMaxSpanSeconds: 3600}}"),
                    fromjson("{$addFields: {myMeta: '$myMeta.a'}}")),
         getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the $addFields and then the $sort.
     auto serialized = pipeline->serializeToBson();
@@ -749,9 +805,9 @@ TEST_F(OptimizePipeline, AddFieldsOfComputedMetaPushedDown) {
                             "'myMeta', bucketMaxSpanSeconds: 3600}}"),
                    fromjson("{$addFields: {a: '$myMeta.a'}}")),
         getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the $addFields and then the $sort.
     auto serialized = pipeline->serializeToBson();
@@ -770,9 +826,9 @@ TEST_F(OptimizePipeline, AddFieldsThenSortPushedDown) {
                    fromjson("{$addFields: {myMeta: '$myMeta.a'}}"),
                    fromjson("{$sort: {myMeta: 1}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the $addFields and then the $sort.
     auto serialized = pipeline->serializeToBson();
@@ -795,7 +851,7 @@ TEST_F(OptimizePipeline, PushDownAddFieldsAndInternalizeProjection) {
     auto pipeline =
         Pipeline::parse(makeVector(unpackSpecObj, addFieldsSpec, projectSpecObj), getExpCtx());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down the $addFields and internalize the $project.
     auto serialized = pipeline->serializeToBson();
@@ -817,7 +873,7 @@ TEST_F(OptimizePipeline, PushDownAddFieldsDoNotInternalizeProjection) {
     auto pipeline =
         Pipeline::parse(makeVector(unpackSpecObj, addFieldsSpec, projectSpecObj), getExpCtx());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should split $addFields and push down the part depending on 'myMeta'. We cannot
     // internalize the $project.
@@ -834,6 +890,7 @@ TEST_F(OptimizePipeline, PushDownAddFieldsDoNotInternalizeProjection) {
         kComparator.compare(fromjson("{$project: {_id: true, x: true, device: true, z: true}}"),
                             serialized[3]),
         0);
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), serialized);
 }
 
 TEST_F(OptimizePipeline, InternalizeProjectAndPushdownAddFields) {
@@ -846,7 +903,7 @@ TEST_F(OptimizePipeline, InternalizeProjectAndPushdownAddFields) {
     auto pipeline =
         Pipeline::parse(makeVector(unpackSpecObj, projectSpecObj, addFieldsSpec), getExpCtx());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should internalize the $project and push down the $addFields.
     auto serialized = pipeline->serializeToBson();
@@ -869,7 +926,7 @@ TEST_F(OptimizePipeline, InternalizeProjectAndPushdownAddFieldsWithShadowingMeta
     auto pipeline =
         Pipeline::parse(makeVector(unpackSpecObj, projectSpecObj, addFieldsSpec), getExpCtx());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should internalize the $project and push down the $addFields.
     auto serialized = pipeline->serializeToBson();
@@ -894,7 +951,7 @@ TEST_F(OptimizePipeline, DoNotSwapAddFieldsIfDependencyIsExcluded) {
         auto pipeline =
             Pipeline::parse(makeVector(unpackSpecObj, projectSpecObj, addFieldsSpec), getExpCtx());
 
-        pipeline->optimizePipeline();
+        pipeline_optimization::optimizePipeline(*pipeline);
 
         // We should internalize the $project but _not_ push down the $addFields because it's field
         // dependency has been excluded. Theoretically we could remove the $addFields for this
@@ -918,7 +975,7 @@ TEST_F(OptimizePipeline, DoNotSwapAddFieldsIfDependencyIsExcluded) {
         auto pipeline =
             Pipeline::parse(makeVector(unpackSpecObj, projectSpecObj, addFieldsSpec), getExpCtx());
 
-        pipeline->optimizePipeline();
+        pipeline_optimization::optimizePipeline(*pipeline);
 
         // We should internalize the $project but _not_ push down the $addFields because it's field
         // dependency has been excluded. Theoretically we could remove the $addFields for this
@@ -941,7 +998,7 @@ TEST_F(OptimizePipeline, PushdownSortAndAddFields) {
                                                fromjson("{$sort: {myMeta: -1}}")),
                                     getExpCtx());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
     // We should push down both $sort and $addFields.
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(3u, serialized.size());
@@ -963,7 +1020,7 @@ TEST_F(OptimizePipeline, PushdownMatchAndAddFields) {
                    fromjson("{$addFields: {newMeta: '$myMeta.b', z: {$add : ['$x', '$y']}}}")),
         getExpCtx());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should push down both the $match and the part of $addFields depending on 'myMeta'.
     auto serialized = pipeline->serializeToBson();
@@ -975,6 +1032,7 @@ TEST_F(OptimizePipeline, PushdownMatchAndAddFields) {
                  "bucketMaxSpanSeconds: 3600, computedMetaProjFields: ['newMeta']}}"),
         serialized[2]);
     ASSERT_BSONOBJ_EQ(fromjson("{$addFields: {z: {$add : ['$x', '$y']}}}"), serialized[3]);
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), serialized);
 }
 
 TEST_F(OptimizePipeline, MatchWithGeoWithinOnMeasurementsPushedDownUsingInternalBucketGeoWithin) {
@@ -985,9 +1043,9 @@ TEST_F(OptimizePipeline, MatchWithGeoWithinOnMeasurementsPushedDownUsingInternal
                             "coordinates: [ [ [ 0, 0 ], [ 3, 6 ], [ 6, 1 ], [ 0, 0 ] ] ]}}}}}")),
         getExpCtx());
 
-    ASSERT_EQ(pipeline->getSources().size(), 2U);
+    ASSERT_EQ(pipeline->size(), 2U);
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(serialized.size(), 2U);
@@ -1005,6 +1063,7 @@ TEST_F(OptimizePipeline, MatchWithGeoWithinOnMeasurementsPushedDownUsingInternal
                  "eventFilter: { loc: { $geoWithin: { $geometry: { type: \"Polygon\", coordinates: "
                  "[ [ [ 0, 0 ], [ 3, 6 ], [ 6, 1 ], [ 0, 0 ] ] ] } } } } } }"),
         serialized[1]);
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), serialized);
 }
 
 TEST_F(OptimizePipeline, MatchWithGeoWithinOnMetaFieldIsPushedDown) {
@@ -1015,9 +1074,9 @@ TEST_F(OptimizePipeline, MatchWithGeoWithinOnMetaFieldIsPushedDown) {
                             "coordinates: [ [ [ 0, 0 ], [ 3, 6 ], [ 6, 1 ], [ 0, 0 ] ] ]}}}}}")),
         getExpCtx());
 
-    ASSERT_EQ(pipeline->getSources().size(), 2U);
+    ASSERT_EQ(pipeline->size(), 2U);
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(serialized.size(), 2U);
@@ -1041,9 +1100,9 @@ TEST_F(OptimizePipeline,
                             "coordinates: [ [ [ 0, 0 ], [ 3, 6 ], [ 6, 1 ], [ 0, 0 ] ] ]}}}}}")),
         getExpCtx());
 
-    ASSERT_EQ(pipeline->getSources().size(), 2U);
+    ASSERT_EQ(pipeline->size(), 2U);
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(serialized.size(), 2U);
@@ -1072,9 +1131,9 @@ TEST_F(OptimizePipeline, MatchWithGeoIntersectsOnMetaFieldIsPushedDown) {
                      "coordinates: [ [ [ 0, 0 ], [ 3, 6 ], [ 6, 1 ], [ 0, 0 ] ] ]}}}}}")),
         getExpCtx());
 
-    ASSERT_EQ(pipeline->getSources().size(), 2U);
+    ASSERT_EQ(pipeline->size(), 2U);
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(serialized.size(), 2U);
@@ -1104,18 +1163,19 @@ TEST_F(OptimizePipeline, StreamingGroupIsEnabledWhenPossible) {
                                                groupSpecObj),
                                     getExpCtx());
 
-    ASSERT_EQ(pipeline->getSources().size(), 4U);
+    ASSERT_EQ(pipeline->size(), 4U);
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(serialized.size(), 4U);
 
     auto streamingGroupSpecObj = fromjson(
         "{$_internalStreamingGroup: {_id: {hour: {$dateTrunc: {date: '$time', unit: {$const: "
-        "'hour'}}}, symbol: '$myMeta.symbol'}, 'sum': {$sum: '$tradeAmount'}, "
-        "'$monotonicIdFields': ['hour']}}");
+        "'hour'}}}, symbol: '$myMeta.symbol'}, 'sum': {$sum: '$tradeAmount'}, '$willBeMerged': "
+        "false, '$monotonicIdFields': ['hour']}}");
     ASSERT_BSONOBJ_EQ(streamingGroupSpecObj, serialized.back());
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), serialized);
 }
 
 TEST_F(OptimizePipeline, StreamingGroupIsNotEnabledWhenTimeFieldIsModified) {
@@ -1124,7 +1184,7 @@ TEST_F(OptimizePipeline, StreamingGroupIsNotEnabledWhenTimeFieldIsModified) {
         "'time', metaField: 'myMeta', bucketMaxSpanSeconds: 3600}}");
     auto groupSpecObj = fromjson(
         "{$group: {_id: {hour: '$time', symbol: '$myMeta.symbol'}, 'sum': {$sum: "
-        "'$tradeAmount'}}}");
+        "'$tradeAmount'}, $willBeMerged: false}}");
     auto pipeline = Pipeline::parse(
         makeVector(unpackSpecObj,
                    fromjson("{$addFields: {'time': {$dateTrunc: {date: '$time', unit: 'hour'}}}}"),
@@ -1132,9 +1192,9 @@ TEST_F(OptimizePipeline, StreamingGroupIsNotEnabledWhenTimeFieldIsModified) {
                    groupSpecObj),
         getExpCtx());
 
-    ASSERT_EQ(pipeline->getSources().size(), 4U);
+    ASSERT_EQ(pipeline->size(), 4U);
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(serialized.size(), 4U);
@@ -1149,9 +1209,9 @@ TEST_F(OptimizePipeline, ComputedMetaProjFieldsAreNotInInclusionProjection) {
                 "'myMeta', bucketMaxSpanSeconds: 3600, computedMetaProjFields: ['time', 'y']}}"),
             fromjson("{$project: {time: 1, x: 1}}")),
         getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // The fields in 'computedMetaProjFields' that are not in the project should be removed.
     auto serialized = pipeline->serializeToBson();
@@ -1161,6 +1221,7 @@ TEST_F(OptimizePipeline, ComputedMetaProjFieldsAreNotInInclusionProjection) {
                  "metaField: "
                  "'myMeta', bucketMaxSpanSeconds: 3600, computedMetaProjFields: ['time']}}"),
         serialized[0]);
+    makePipelineOptimizeAssertNoRewrites(getExpCtx(), serialized);
 }
 
 TEST_F(OptimizePipeline, ComputedMetaProjectFieldsAfterInclusionGetsAddedToIncludes) {
@@ -1171,9 +1232,9 @@ TEST_F(OptimizePipeline, ComputedMetaProjectFieldsAfterInclusionGetsAddedToInclu
                    fromjson("{$project: {myMeta: 1}}"),
                    fromjson("{$addFields: {newMeta: {$toUpper : '$myMeta'}}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(2u, serialized.size());
@@ -1196,9 +1257,9 @@ TEST_F(OptimizePipeline, ShadowingMetaProjectFieldsAfterInclusionGetsAddedToIncl
                    // The new 'myMeta' shadows the original 'myMeta'.
                    fromjson("{$addFields: {myMeta: {$toUpper : '$myMeta'}}}")),
         getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(2u, serialized.size());

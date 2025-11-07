@@ -28,18 +28,7 @@
  */
 
 
-#include <absl/container/flat_hash_set.h>
-#include <algorithm>
-#include <boost/none.hpp>
-#include <boost/smart_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <iterator>
-#include <mutex>
-#include <tuple>
-#include <type_traits>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/s/transaction_coordinator.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
@@ -53,21 +42,17 @@
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/server_transaction_coordinators_metrics.h"
 #include "mongo/db/s/single_transaction_coordinator_stats.h"
-#include "mongo/db/s/transaction_coordinator.h"
 #include "mongo/db/s/transaction_coordinator_metrics_observer.h"
+#include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/s/transaction_coordinator_util.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/vector_clock_mutable.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/vector_clock/vector_clock_mutable.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/clock_source.h"
@@ -76,6 +61,19 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/str.h"
 #include "mongo/util/tick_source.h"
+
+#include <algorithm>
+#include <iterator>
+#include <mutex>
+#include <tuple>
+#include <type_traits>
+
+#include <absl/container/flat_hash_set.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTransaction
 
@@ -120,10 +118,7 @@ ExecutorFuture<void> waitForMajorityWithHangFailpoint(
                 if (!data["useUninterruptibleSleep"].eoo()) {
                     failpoint.pauseWhileSet();
                 } else {
-                    // TODO(SERVER-74658): Please revisit if this thread could be made killable.
-                    ThreadClient tc(failPointName,
-                                    service->getService(ClusterRole::ShardServer),
-                                    ClientOperationKillableByStepdown{false});
+                    ThreadClient tc(failPointName, service->getService(ClusterRole::ShardServer));
                     auto opCtx = tc->makeOperationContext();
                     failpoint.pauseWhileSet(opCtx.get());
                 }
@@ -157,8 +152,7 @@ TransactionCoordinator::TransactionCoordinator(
     const LogicalSessionId& lsid,
     const TxnNumberAndRetryCounter& txnNumberAndRetryCounter,
     std::unique_ptr<txn::AsyncWorkScheduler> scheduler,
-    Date_t deadline,
-    const CancellationToken& cancelToken)
+    Date_t deadline)
     : _serviceContext(operationContext->getServiceContext()),
       _lsid(lsid),
       _txnNumberAndRetryCounter(txnNumberAndRetryCounter),
@@ -166,8 +160,7 @@ TransactionCoordinator::TransactionCoordinator(
       _sendPrepareScheduler(_scheduler->makeChildScheduler()),
       _transactionCoordinatorMetricsObserver(
           std::make_unique<TransactionCoordinatorMetricsObserver>()),
-      _deadline(deadline),
-      _cancelToken(cancelToken) {
+      _deadline(deadline) {
     invariant(_txnNumberAndRetryCounter.getTxnRetryCounter());
 }
 
@@ -251,7 +244,7 @@ void TransactionCoordinator::start(OperationContext* operationContext) {
                 std::move(opTime),
                 _lsid,
                 _txnNumberAndRetryCounter,
-                _cancelToken);
+                _cancellationSource.token());
         })
         .thenRunOn(_scheduler->getExecutor())
         .then([this, self = shared_from_this(), apiParams] {
@@ -367,7 +360,7 @@ void TransactionCoordinator::start(OperationContext* operationContext) {
                                                     std::move(opTime),
                                                     _lsid,
                                                     _txnNumberAndRetryCounter,
-                                                    _cancelToken);
+                                                    _cancellationSource.token());
         })
         .then([this, self = shared_from_this(), apiParams] {
             {
@@ -459,6 +452,16 @@ void TransactionCoordinator::start(OperationContext* operationContext) {
         })
         .getAsync([this, self = shared_from_this(), deadlineFuture = std::move(deadlineFuture)](
                       Status s) mutable {
+            // Prior to initiating the shutdown phases of the TransactionCoordinator lifecycle,
+            // inform our parent service that it can remove its references to this instance. This
+            // must be done strictly after all other logic except the shutdown phases which are
+            // initiated later in this continuation.
+            {
+                stdx::lock_guard<stdx::mutex> lg(_mutex);
+                auto* tcs = TransactionCoordinatorService::get(_serviceContext);
+                tcs->notifyCoordinatorFinished(self);
+            }
+
             // Interrupt this coordinator's scheduler hierarchy and join the deadline task's future
             // in order to guarantee that there are no more threads running within the coordinator.
             _scheduler->shutdown(
@@ -499,7 +502,8 @@ TransactionCoordinator::~TransactionCoordinator() {
 void TransactionCoordinator::runCommit(OperationContext* opCtx, std::vector<ShardId> participants) {
     if (!_reserveKickOffCommitPromise())
         return;
-    invariant(opCtx != nullptr && opCtx->getClient() != nullptr);
+    invariant(opCtx != nullptr);
+    invariant(opCtx->getClient() != nullptr);
     _updateAssociatedClient(opCtx->getClient());
     _participants = std::move(participants);
     _kickOffCommitPromise.emplaceValue();
@@ -539,6 +543,10 @@ void TransactionCoordinator::cancelIfCommitNotYetStarted() {
 
     _kickOffCommitPromise.setError({ErrorCodes::TransactionCoordinatorCanceled,
                                     "Transaction exceeded deadline or newer transaction started"});
+}
+
+void TransactionCoordinator::cancel() {
+    _cancellationSource.cancel();
 }
 
 bool TransactionCoordinator::_reserveKickOffCommitPromise() {

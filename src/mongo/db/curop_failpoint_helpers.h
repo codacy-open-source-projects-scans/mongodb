@@ -27,17 +27,21 @@
  *    it in the license file.
  */
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <functional>
-#include <string>
+#pragma once
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <functional>
+#include <string>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUB mongo {
 
 class CurOpFailpointHelpers {
 public:
@@ -70,4 +74,4 @@ public:
                                           const std::function<void()>& whileWaiting = nullptr,
                                           const NamespaceString& nss = {});
 };
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

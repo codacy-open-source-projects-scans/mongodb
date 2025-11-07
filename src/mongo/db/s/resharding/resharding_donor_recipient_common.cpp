@@ -29,50 +29,36 @@
 
 #include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
 
-#include <absl/container/node_hash_set.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/smart_ptr.hpp>
-#include <fmt/format.h>
-#include <initializer_list>
-#include <string>
-#include <type_traits>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
 #include "mongo/db/keypattern.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
+#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/resharding/resharding_donor_service.h"
 #include "mongo/db/s/resharding/resharding_recipient_service.h"
-#include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
-#include "mongo/db/vector_clock_mutable.h"
+#include "mongo/db/topology/sharding_state.h"
+#include "mongo/db/vector_clock/vector_clock_mutable.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/grid.h"
+#include "mongo/otel/telemetry_context_serialization.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/s/sharding_state.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
@@ -82,6 +68,18 @@
 #include "mongo/util/future_impl.h"
 #include "mongo/util/future_util.h"
 #include "mongo/util/time_support.h"
+
+#include <initializer_list>
+#include <string>
+#include <type_traits>
+#include <utility>
+
+#include <absl/container/node_hash_set.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
 
@@ -93,8 +91,6 @@ using RecipientStateMachine = ReshardingRecipientService::RecipientStateMachine;
 
 namespace {
 MONGO_FAIL_POINT_DEFINE(reshardingInterruptAfterInsertStateMachineDocument);
-
-using namespace fmt::literals;
 
 const Backoff kExponentialBackoff(Seconds(1), Milliseconds::max());
 
@@ -141,7 +137,7 @@ void createReshardingStateMachine(OperationContext* opCtx, const ReshardingDocum
         auto registry = repl::PrimaryOnlyServiceRegistry::get(opCtx->getServiceContext());
         auto service = registry->lookupServiceByName(Service::kServiceName);
         StateMachine::getOrCreate(opCtx, service, doc.toBSON());
-    } catch (const ExceptionForCat<ErrorCategory::NotPrimaryError>&) {
+    } catch (const ExceptionFor<ErrorCategory::NotPrimaryError>&) {
         // resharding::processReshardingFieldsForCollection() is called on both primary and
         // secondary nodes as part of the shard version being refreshed. Due to the RSTL lock not
         // being held throughout the shard version refresh, it is also possible for the node to
@@ -203,7 +199,8 @@ void processReshardingFieldsForDonorCollection(OperationContext* opCtx,
     catalogCache->invalidateCollectionEntry_LINEARIZABLE(
         reshardingFields.getDonorFields()->getTempReshardingNss());
 
-    auto donorDoc = constructDonorDocumentFromReshardingFields(nss, metadata, reshardingFields);
+    auto donorDoc = constructDonorDocumentFromReshardingFields(
+        VersionContext::getDecoration(opCtx), nss, metadata, reshardingFields);
     createReshardingStateMachine<ReshardingDonorService,
                                  DonorStateMachine,
                                  ReshardingDonorDocument>(opCtx, donorDoc);
@@ -260,8 +257,8 @@ void processReshardingFieldsForRecipientCollection(OperationContext* opCtx,
         return;
     }
 
-    auto recipientDoc =
-        constructRecipientDocumentFromReshardingFields(opCtx, nss, metadata, reshardingFields);
+    auto recipientDoc = constructRecipientDocumentFromReshardingFields(
+        VersionContext::getDecoration(opCtx), nss, metadata, reshardingFields);
     createReshardingStateMachine<ReshardingRecipientService,
                                  RecipientStateMachine,
                                  ReshardingRecipientDocument>(opCtx, recipientDoc);
@@ -312,11 +309,16 @@ void verifyValidReshardingFields(const ReshardingFields& reshardingFields) {
 }  // namespace
 
 ReshardingDonorDocument constructDonorDocumentFromReshardingFields(
+    const VersionContext& vCtx,
     const NamespaceString& nss,
     const CollectionMetadata& metadata,
     const ReshardingFields& reshardingFields) {
     DonorShardContext donorCtx;
     donorCtx.setState(DonorStateEnum::kPreparingToDonate);
+
+    if (reshardingFields.getTelemetryContext()) {
+        donorCtx.setTelemetryContext(*reshardingFields.getTelemetryContext());
+    }
 
     auto donorDoc = ReshardingDonorDocument{
         std::move(donorCtx), reshardingFields.getDonorFields()->getRecipientShardIds()};
@@ -330,13 +332,16 @@ ReshardingDonorDocument constructDonorDocumentFromReshardingFields(
                                  reshardingFields.getDonorFields()->getReshardingKey().toBSON());
     commonMetadata.setStartTime(reshardingFields.getStartTime());
     commonMetadata.setProvenance(reshardingFields.getProvenance());
+    resharding::validatePerformVerification(vCtx, reshardingFields.getPerformVerification());
+    commonMetadata.setPerformVerification(reshardingFields.getPerformVerification());
+
     donorDoc.setCommonReshardingMetadata(std::move(commonMetadata));
 
     return donorDoc;
 }
 
 ReshardingRecipientDocument constructRecipientDocumentFromReshardingFields(
-    OperationContext* opCtx,
+    const VersionContext& vCtx,
     const NamespaceString& nss,
     const CollectionMetadata& metadata,
     const ReshardingFields& reshardingFields) {
@@ -347,6 +352,10 @@ ReshardingRecipientDocument constructRecipientDocumentFromReshardingFields(
 
     RecipientShardContext recipientCtx;
     recipientCtx.setState(RecipientStateEnum::kAwaitingFetchTimestamp);
+
+    if (reshardingFields.getTelemetryContext()) {
+        recipientCtx.setTelemetryContext(*reshardingFields.getTelemetryContext());
+    }
 
     auto recipientDoc =
         ReshardingRecipientDocument{std::move(recipientCtx),
@@ -362,9 +371,8 @@ ReshardingRecipientDocument constructRecipientDocumentFromReshardingFields(
                                                    metadata.getShardKeyPattern().toBSON());
     commonMetadata.setStartTime(reshardingFields.getStartTime());
     commonMetadata.setProvenance(reshardingFields.getProvenance());
-    resharding::validateImplicitlyCreateIndex(reshardingFields.getImplicitlyCreateIndex(),
-                                              metadata.getKeyPattern());
-    commonMetadata.setImplicitlyCreateIndex(reshardingFields.getImplicitlyCreateIndex());
+    resharding::validatePerformVerification(vCtx, reshardingFields.getPerformVerification());
+    commonMetadata.setPerformVerification(reshardingFields.getPerformVerification());
 
     ReshardingRecipientMetrics metrics;
     metrics.setApproxDocumentsToCopy(recipientFields->getApproxDocumentsToCopy());
@@ -372,15 +380,21 @@ ReshardingRecipientDocument constructRecipientDocumentFromReshardingFields(
     recipientDoc.setMetrics(std::move(metrics));
 
     recipientDoc.setCommonReshardingMetadata(std::move(commonMetadata));
-    const bool skipCloningAndApplying =
-        resharding::gFeatureFlagReshardingSkipCloningAndApplyingIfApplicable.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
-        !metadata.currentShardHasAnyChunks();
-    recipientDoc.setSkipCloningAndApplying(skipCloningAndApplying);
 
-    recipientDoc.setStoreOplogFetcherProgress(
-        resharding::gFeatureFlagReshardingStoreOplogFetcherProgress.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
+    if (resharding::gFeatureFlagReshardingSkipCloningAndApplyingIfApplicable.isEnabled(
+            vCtx, serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
+        !metadata.currentShardHasAnyChunks()) {
+        recipientDoc.setSkipCloningAndApplying(true);
+    }
+    if (resharding::gFeatureFlagReshardingSkipCloningIfApplicable.isEnabled(
+            vCtx, serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
+        !metadata.currentShardHasAnyChunks()) {
+        recipientDoc.setSkipCloning(true);
+    }
+    if (resharding::gFeatureFlagReshardingStoreOplogFetcherProgress.isEnabled(
+            vCtx, serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        recipientDoc.setStoreOplogFetcherProgress(true);
+    }
 
     recipientDoc.setOplogBatchTaskCount(recipientFields->getOplogBatchTaskCount());
 
@@ -447,10 +461,13 @@ void clearFilteringMetadata(OperationContext* opCtx,
             // new donor shard primaries will refresh from the config server and see the chunk
             // distribution for the ongoing resharding operation.
             catalogCache->invalidateCollectionEntry_LINEARIZABLE(nss);
-            catalogCache->invalidateIndexEntry_LINEARIZABLE(nss);
         }
 
-        AutoGetCollection autoColl(opCtx, nss, MODE_IX);
+        const auto acquisition = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_IX);
+
         CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss)
             ->clearFilteringMetadata(opCtx);
 

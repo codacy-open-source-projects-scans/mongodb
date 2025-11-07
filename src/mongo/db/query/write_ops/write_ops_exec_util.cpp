@@ -30,11 +30,9 @@
 #include "mongo/db/query/write_ops/write_ops_exec_util.h"
 
 #include "mongo/base/error_codes.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 

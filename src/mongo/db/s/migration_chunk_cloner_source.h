@@ -29,9 +29,41 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/client/connection_string.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/op_observer/op_observer_util.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/shard_role_transaction_resources_stasher_for_pipeline.h"
+#include "mongo/db/query/internal_plans.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/db/s/migration_session_id.h"
+#include "mongo/db/s/session_catalog_migration_source.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/snapshot.h"
+#include "mongo/db/write_concern_options.h"
+#include "mongo/s/request_types/move_range_request_gen.h"
+#include "mongo/stdx/condition_variable.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/notification.h"
+#include "mongo/util/concurrency/with_lock.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/net/hostandport.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -42,40 +74,9 @@
 #include <set>
 #include <vector>
 
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/client/connection_string.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer/op_observer_util.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/query/internal_plans.h"
-#include "mongo/db/query/plan_executor.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/repl/oplog_entry.h"
-#include "mongo/db/repl/optime.h"
-#include "mongo/db/s/migration_chunk_cloner_source.h"
-#include "mongo/db/s/migration_session_id.h"
-#include "mongo/db/s/session_catalog_migration_source.h"
-#include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/storage/snapshot.h"
-#include "mongo/db/write_concern_options.h"
-#include "mongo/s/request_types/move_range_request_gen.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/stdx/condition_variable.h"
-#include "mongo/stdx/mutex.h"
-#include "mongo/util/assert_util_core.h"
-#include "mongo/util/concurrency/notification.h"
-#include "mongo/util/concurrency/with_lock.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/net/hostandport.h"
-#include "mongo/util/time_support.h"
-#include "mongo/util/uuid.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -89,7 +90,7 @@ class RecordId;
 
 // Overhead to prevent mods buffers from being too large
 const long long kFixedCommandOverhead = 32 * 1024;
-
+const int kMaxObjectPerChunk{250000};
 /**
  * Used to commit work for LogOpForSharding. Used to keep track of changes in documents that are
  * part of a chunk being migrated.
@@ -104,9 +105,9 @@ public:
                                                const std::vector<repl::ReplOperation>& stmts,
                                                repl::OpTime prepareOrCommitOpTime);
 
-    void commit(OperationContext* opCtx, boost::optional<Timestamp>) override;
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) noexcept override;
 
-    void rollback(OperationContext* opCtx) override{};
+    void rollback(OperationContext* opCtx) noexcept override {};
 
 private:
     const LogicalSessionId _lsid;
@@ -121,9 +122,9 @@ class LogInsertForShardingHandler final : public RecoveryUnit::Change {
 public:
     LogInsertForShardingHandler(NamespaceString nss, BSONObj doc, repl::OpTime opTime);
 
-    void commit(OperationContext* opCtx, boost::optional<Timestamp>) override;
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) noexcept override;
 
-    void rollback(OperationContext* opCtx) override {}
+    void rollback(OperationContext* opCtx) noexcept override {}
 
 private:
     const NamespaceString _nss;
@@ -141,9 +142,9 @@ public:
                                 BSONObj postImageDoc,
                                 repl::OpTime opTime);
 
-    void commit(OperationContext* opCtx, boost::optional<Timestamp>) override;
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) noexcept override;
 
-    void rollback(OperationContext* opCtx) override {}
+    void rollback(OperationContext* opCtx) noexcept override {}
 
 private:
     const NamespaceString _nss;
@@ -159,9 +160,9 @@ class LogDeleteForShardingHandler final : public RecoveryUnit::Change {
 public:
     LogDeleteForShardingHandler(NamespaceString nss, DocumentKey documentKey, repl::OpTime opTime);
 
-    void commit(OperationContext* opCtx, boost::optional<Timestamp>) override;
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) noexcept override;
 
-    void rollback(OperationContext* opCtx) override {}
+    void rollback(OperationContext* opCtx) noexcept override {}
 
 private:
     const NamespaceString _nss;
@@ -179,9 +180,9 @@ public:
     LogRetryableApplyOpsForShardingHandler(std::vector<NamespaceString> namespaces,
                                            std::vector<repl::OpTime> opTimes);
 
-    void commit(OperationContext* opCtx, boost::optional<Timestamp>) override;
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) noexcept override;
 
-    void rollback(OperationContext* opCtx) override{};
+    void rollback(OperationContext* opCtx) noexcept override {};
 
 private:
     std::vector<NamespaceString> _namespaces;
@@ -262,7 +263,7 @@ public:
      *
      * NOTE: Must be called without any locks.
      */
-    void cancelClone(OperationContext* opCtx) noexcept;
+    void cancelClone(OperationContext* opCtx);
 
     /**
      * Notifies this cloner that an insert happened to the collection, which it owns. It is up to
@@ -340,8 +341,15 @@ public:
      * NOTE: Must be called with the collection lock held in at least IS mode.
      */
     Status nextCloneBatch(OperationContext* opCtx,
-                          const CollectionPtr& collection,
+                          boost::optional<CollectionAcquisition> collection,
                           BSONArrayBuilder* arrBuilder);
+
+    /* Whether the cloner has stashed a jumbo chunk state with a query plan, indicating a jumbo
+     * chunk migration is ongoing and it should be continued.*/
+    bool hasOngoingJumboChunkCloning() {
+        return _jumboChunkCloneState.has_value() &&
+            static_cast<bool>(_jumboChunkCloneState->clonerExec) && _forceJumbo;
+    }
 
     /**
      * Called by the recipient shard. Transfers the accummulated local mods from source to
@@ -591,15 +599,15 @@ private:
 
     StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> _getIndexScanExecutor(
         OperationContext* opCtx,
-        const CollectionPtr& collection,
+        const CollectionAcquisition& collection,
         InternalPlanner::IndexScanOptions scanOption);
 
     void _nextCloneBatchFromIndexScan(OperationContext* opCtx,
-                                      const CollectionPtr& collection,
+                                      boost::optional<CollectionAcquisition> collection,
                                       BSONArrayBuilder* arrBuilder);
 
     void _nextCloneBatchFromCloneRecordIds(OperationContext* opCtx,
-                                           const CollectionPtr& collection,
+                                           const CollectionAcquisition& collection,
                                            BSONArrayBuilder* arrBuilder);
 
     /**
@@ -763,6 +771,9 @@ private:
     // False if the move chunk request specified ForceJumbo::kDoNotForce, true otherwise.
     const bool _forceJumbo;
     struct JumboChunkCloneState {
+        std::unique_ptr<TransactionResourcesStasher> transactionResourceStasher =
+            std::make_unique<ShardRoleTransactionResourcesStasherForPipeline>();
+
         // Plan executor for collection scan used to clone docs.
         std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> clonerExec;
 

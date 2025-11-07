@@ -31,6 +31,7 @@
 
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/vm_memory.h"
+#include "mongo/util/modules.h"
 
 #if !defined(MONGO_CONFIG_DEBUG_BUILD)
 #define MONGO_COMPILER_ALWAYS_INLINE_OPT MONGO_COMPILER_ALWAYS_INLINE
@@ -57,7 +58,8 @@ struct Instruction {
         pushMoveVal,
         pushLocalVal,
         pushMoveLocalVal,
-        pushLocalLambda,
+        pushOneArgLambda,
+        pushTwoArgLambda,
         pop,
         swap,
         makeOwn,
@@ -187,7 +189,7 @@ struct Instruction {
         }
 
         MONGO_COMPILER_ALWAYS_INLINE_OPT
-        static FastTuple<bool, bool, int> decodeParam(const uint8_t*& pcPointer) noexcept {
+        static FastTuple<bool, bool, int> decodeParam(const uint8_t*& pcPointer) {
             auto flags = readFromMemory<uint8_t>(pcPointer);
             bool pop = flags & 1u;
             bool moveFrom = flags & 2u;

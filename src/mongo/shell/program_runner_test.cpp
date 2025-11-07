@@ -27,13 +27,11 @@
  *    it in the license file.
  */
 
-#include "mongo/bson/json.h"
-
-#include "mongo/db/wire_version.h"
 #include "mongo/shell/program_runner.h"
 
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/bson/json.h"
+#include "mongo/db/wire_version.h"
+#include "mongo/unittest/unittest.h"
 
 namespace mongo::shell_utils {
 
@@ -55,21 +53,19 @@ protected:
 
 TEST_F(ProgramRunnerTestFixture, ArgumentEscaping) {
 #ifdef _WIN32
-    BSONObj args = BSON_ARRAY("cmd.exe"
-                              << "/C"
-                              << "echo"
-                              << "Hello, \"World\"!"
-                              << "Argument with spaces"
-                              << "!@#$%^&*\\");
+    BSONObj args = BSON_ARRAY("cmd.exe" << "/C"
+                                        << "echo"
+                                        << "Hello, \"World\"!"
+                                        << "Argument with spaces"
+                                        << "!@#$%^&*\\");
 
     std::string expected =
         "\"Hello, \\\"World\\\"!\" \"Argument with spaces\" \"!@#$%^&*\\\\\"\r\n";
 
 #else
-    BSONObj args = BSON_ARRAY("echo"
-                              << "Hello, \"World\"!"
-                              << "Argument with spaces"
-                              << "!@#$%^&*\\");
+    BSONObj args = BSON_ARRAY("echo" << "Hello, \"World\"!"
+                                     << "Argument with spaces"
+                                     << "!@#$%^&*\\");
 
     std::string expected = "Hello, \"World\"! Argument with spaces !@#$%^&*\\\n";
 #endif
@@ -77,7 +73,7 @@ TEST_F(ProgramRunnerTestFixture, ArgumentEscaping) {
     BSONObj env{};
 
     // Create a program runner and start
-    auto runner = registry->createProgramRunner(args, env, true);
+    auto runner = registry->createProgramRunner(args, env, true, "");
     runner.start(true);
 
     // Wait for PID so we can read output

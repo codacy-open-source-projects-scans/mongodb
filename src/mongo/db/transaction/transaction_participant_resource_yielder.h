@@ -29,14 +29,14 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
 #include <memory>
 #include <string>
-
-
-#include "mongo/base/string_data.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/resource_yielder.h"
-#include "mongo/util/assert_util_core.h"
 
 namespace mongo {
 
@@ -44,7 +44,7 @@ namespace mongo {
  * Implementation of ResourceYielder that yields resources checked out in the course of running a
  * local replica set transaction.
  */
-class TransactionParticipantResourceYielder : public ResourceYielder {
+class MONGO_MOD_PUB TransactionParticipantResourceYielder : public ResourceYielder {
 public:
     TransactionParticipantResourceYielder(StringData cmdName) : _cmdName(cmdName) {
         invariant(!cmdName.empty());

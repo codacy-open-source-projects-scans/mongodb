@@ -27,13 +27,14 @@
  *    it in the license file.
  */
 
+#include "mongo/executor/connection_pool_controllers.h"
+
+#include "mongo/util/assert_util.h"
+
 #include <algorithm>
 
 #include <absl/container/node_hash_map.h>
 #include <fmt/format.h>
-
-#include "mongo/executor/connection_pool_controllers.h"
-#include "mongo/util/assert_util_core.h"
 
 namespace mongo::executor {
 namespace {
@@ -53,11 +54,11 @@ void DynamicLimitController::init(executor::ConnectionPool* parent) {
 void DynamicLimitController::addHost(PoolId id, const HostAndPort& host) {
     stdx::lock_guard lk(_mutex);
     auto ret = _poolData.insert({id, {host}});
-    using namespace fmt::literals;
-    invariant(
-        ret.second,
-        "ConnectionPool controller {} received a request to track host {} that was already being tracked."_format(
-            _name, host));
+    invariant(ret.second,
+              fmt::format("ConnectionPool controller {} received a request to track host {} that "
+                          "was already being tracked.",
+                          _name,
+                          host));
 }
 
 DynamicLimitController::HostGroupState DynamicLimitController::updateHost(PoolId id,
@@ -66,7 +67,7 @@ DynamicLimitController::HostGroupState DynamicLimitController::updateHost(PoolId
     auto& data = getOrInvariant(_poolData, id);
     data.target =
         std::clamp(stats.requests + stats.active + stats.leased, _minLoader(), _maxLoader());
-    return {{data.host}, stats.health.isExpired};
+    return {{data.host}, stats.health == ConnectionPool::HostHealth::kExpired};
 }
 
 void DynamicLimitController::removeHost(PoolId id) {

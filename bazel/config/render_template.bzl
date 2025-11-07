@@ -1,4 +1,4 @@
-load("//bazel:mongo_src_rules.bzl", "write_target")
+load("//bazel:utils.bzl", "write_target")
 
 def render_template_impl(ctx):
     python = ctx.toolchains["@bazel_tools//tools/python:toolchain_type"].py3_runtime
@@ -50,11 +50,6 @@ render_template_rule = rule(
 )
 
 def render_template(name, tags = [], **kwargs):
-    write_target(
-        name = name + "_gen_source_tag",
-        target_name = name,
-        tags = ["scons_link_lists"],
-    )
     render_template_rule(
         name = name,
         tags = tags + ["gen_source"],

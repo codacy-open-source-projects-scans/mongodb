@@ -28,10 +28,6 @@
  */
 #pragma once
 
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
@@ -39,120 +35,144 @@
 #include "mongo/db/field_ref.h"
 #include "mongo/util/assert_util.h"
 
+#include <vector>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
 
+/**
+ * Returns whether the supplied BSON type is supported for FLE2 equality indexed encryption.
+ */
 inline bool isFLE2EqualityIndexedSupportedType(BSONType type) {
     switch (type) {
-        case BinData:
-        case Code:
-        case RegEx:
-        case String:
+        case BSONType::binData:
+        case BSONType::code:
+        case BSONType::regEx:
+        case BSONType::string:
 
-        case NumberInt:
-        case NumberLong:
-        case Bool:
-        case bsonTimestamp:
-        case Date:
-        case jstOID:
+        case BSONType::numberInt:
+        case BSONType::numberLong:
+        case BSONType::boolean:
+        case BSONType::timestamp:
+        case BSONType::date:
+        case BSONType::oid:
 
-        case Symbol:
-        case DBRef:
+        case BSONType::symbol:
+        case BSONType::dbRef:
             return true;
 
         // Non-deterministic
-        case CodeWScope:
-        case Array:
-        case Object:
-        case NumberDecimal:
-        case NumberDouble:
+        case BSONType::codeWScope:
+        case BSONType::array:
+        case BSONType::object:
+        case BSONType::numberDecimal:
+        case BSONType::numberDouble:
 
         // Singletons
-        case EOO:
-        case jstNULL:
-        case MaxKey:
-        case MinKey:
-        case Undefined:
+        case BSONType::eoo:
+        case BSONType::null:
+        case BSONType::maxKey:
+        case BSONType::minKey:
+        case BSONType::undefined:
             return false;
         default:
             MONGO_UNREACHABLE;
     }
 }
 
-
+/**
+ * Returns whether the supplied BSON type is supported for FLE2 range indexed encryption.
+ */
 inline bool isFLE2RangeIndexedSupportedType(BSONType type) {
     switch (type) {
-        case NumberInt:
-        case NumberLong:
-        case NumberDecimal:
-        case NumberDouble:
-        case Date:
+        case BSONType::numberInt:
+        case BSONType::numberLong:
+        case BSONType::numberDecimal:
+        case BSONType::numberDouble:
+        case BSONType::date:
             return true;
 
         // Valid for FLE Equality but not for Range.
-        case bsonTimestamp:
-        case Bool:
-        case BinData:
-        case Code:
-        case RegEx:
-        case String:
-        case jstOID:
-        case Symbol:
-        case DBRef:
+        case BSONType::timestamp:
+        case BSONType::boolean:
+        case BSONType::binData:
+        case BSONType::code:
+        case BSONType::regEx:
+        case BSONType::string:
+        case BSONType::oid:
+        case BSONType::symbol:
+        case BSONType::dbRef:
 
         // Non-deterministic
-        case CodeWScope:
-        case Array:
-        case Object:
+        case BSONType::codeWScope:
+        case BSONType::array:
+        case BSONType::object:
 
         // Singletons
-        case EOO:
-        case jstNULL:
-        case MaxKey:
-        case MinKey:
-        case Undefined:
+        case BSONType::eoo:
+        case BSONType::null:
+        case BSONType::maxKey:
+        case BSONType::minKey:
+        case BSONType::undefined:
             return false;
     }
     MONGO_UNREACHABLE;
 }
 
+/**
+ * Returns whether the supplied BSON type is supported for FLE2 unindexed encryption.
+ */
 inline bool isFLE2UnindexedSupportedType(BSONType type) {
     switch (type) {
-        case BinData:
-        case Code:
-        case RegEx:
-        case String:
+        case BSONType::binData:
+        case BSONType::code:
+        case BSONType::regEx:
+        case BSONType::string:
 
-        case NumberInt:
-        case NumberLong:
-        case Bool:
-        case bsonTimestamp:
-        case Date:
-        case jstOID:
+        case BSONType::numberInt:
+        case BSONType::numberLong:
+        case BSONType::boolean:
+        case BSONType::timestamp:
+        case BSONType::date:
+        case BSONType::oid:
 
-        case Array:
-        case Object:
-        case NumberDecimal:
-        case NumberDouble:
+        case BSONType::array:
+        case BSONType::object:
+        case BSONType::numberDecimal:
+        case BSONType::numberDouble:
 
         // Deprecated
-        case Symbol:
-        case CodeWScope:
-        case DBRef:
+        case BSONType::symbol:
+        case BSONType::codeWScope:
+        case BSONType::dbRef:
             return true;
 
         // Singletons
-        case EOO:
-        case jstNULL:
-        case MaxKey:
-        case MinKey:
-        case Undefined:
+        case BSONType::eoo:
+        case BSONType::null:
+        case BSONType::maxKey:
+        case BSONType::minKey:
+        case BSONType::undefined:
             return false;
         default:
             MONGO_UNREACHABLE;
     }
 }
 
-// Wrapper of the three helper functions above. Should be used on FLE type 6, 7, and 9, 14, and 15.
+/**
+ * Returns whether the supplied BSON type is supported for FLE2 substring/suffix/prefix indexed
+ * encryption.
+ */
+inline bool isFLE2TextIndexedSupportedType(BSONType type) {
+    return type == BSONType::string;
+}
+
+/**
+ * Returns whether the supplied BSON type is supported for the encryption algorithm
+ * that corresponds to the given FLE2 blob type.
+ */
 inline bool isFLE2SupportedType(EncryptedBinDataType fleType, BSONType bsonType) {
     switch (fleType) {
         case EncryptedBinDataType::kFLE2UnindexedEncryptedValue:
@@ -164,9 +184,19 @@ inline bool isFLE2SupportedType(EncryptedBinDataType fleType, BSONType bsonType)
         case EncryptedBinDataType::kFLE2RangeIndexedValue:
         case EncryptedBinDataType::kFLE2RangeIndexedValueV2:
             return isFLE2RangeIndexedSupportedType(bsonType);
+        case EncryptedBinDataType::kFLE2TextIndexedValue:
+            return isFLE2TextIndexedSupportedType(bsonType);
         default:
             MONGO_UNREACHABLE;
     }
+}
+
+/**
+ * Returns whether the query type is for substring, suffix, or prefix indexed encryption.
+ */
+inline bool isFLE2TextQueryType(QueryTypeEnum qt) {
+    return qt == QueryTypeEnum::SubstringPreview || qt == QueryTypeEnum::SuffixPreview ||
+        qt == QueryTypeEnum::PrefixPreview;
 }
 
 struct EncryptedFieldMatchResult {
@@ -174,7 +204,47 @@ struct EncryptedFieldMatchResult {
     bool keyIsPrefixOrEqual;
 };
 
+/**
+ * If key is an exact match or a prefix of a path in encryptedFields, returns the matching
+ * FieldRef and true. If there exists a path in encryptedFields that is a prefix of key, returns
+ * the FieldRef for that path and false. Otherwise, returns none.
+ */
 boost::optional<EncryptedFieldMatchResult> findMatchingEncryptedField(
     const FieldRef& key, const std::vector<FieldRef>& encryptedFields);
+
+
+/**
+ * Function to evaluate a QueryTypeConfig that appears under an EncryptedField. Used as a
+ * visitor function when iterating all QueryTypeConfig present in an EncryptedFieldConfig.
+ * A return value of true signals that a condition has been met and iteration may halt.
+ */
+using QueryTypeConfigVisitor = std::function<bool(const EncryptedField&, const QueryTypeConfig&)>;
+
+/**
+ * Function to evaluate an EncryptedField that has no QueryTypeConfig (i.e. unindexed). Used as a
+ * visitor function when iterating all EncryptedField present in an EncryptedFieldConfig.
+ * A return value of true signals that a condition has been met and iteration may halt.
+ */
+using UnindexedEncryptedFieldVisitor = std::function<bool(const EncryptedField&)>;
+
+/**
+ * For each QueryTypeConfig present under the EncryptedField, invokes the visitor function visit.
+ * If the EncryptedField does not have any QueryTypeConfig, invokes the visitor function
+ * onEmptyField. Immediately returns true once visit or onEmptyField has returned true. Returns
+ * false if the visitor functions returned false on all QueryTypeConfig.
+ */
+bool visitQueryTypeConfigs(const EncryptedField& field,
+                           const QueryTypeConfigVisitor& visit,
+                           const UnindexedEncryptedFieldVisitor& onEmptyField = nullptr);
+
+/**
+ * For each QueryTypeConfig present under each EncryptedField in the EncryptedFieldConfig, invokes
+ * the visitor function visit. If an EncryptedField does not have any QueryTypeConfig, invokes the
+ * visitor function onEmptyField. Immediately returns true once visit or onEmptyField has returned
+ * true. Returns false if the visitor functions returned false on all QueryTypeConfig.
+ */
+bool visitQueryTypeConfigs(const EncryptedFieldConfig& efc,
+                           const QueryTypeConfigVisitor& visit,
+                           const UnindexedEncryptedFieldVisitor& onEmptyField = nullptr);
 
 }  // namespace mongo

@@ -1,4 +1,3 @@
-
 function logClusterPorts(st) {
     st.printNodes();
 }
@@ -7,8 +6,7 @@ function isTimeToWake(waitFor) {
         if (waitFor.anyDataIn.findOne() != null) {
             return true;
         } else {
-            jsTestLog(`Put data in ${
-                waitFor.anyDataIn.getFullName()} collection to break this infinite loop.`);
+            jsTestLog(`Put data in ${waitFor.anyDataIn.getFullName()} collection to break this infinite loop.`);
             return false;
         }
     } else {
@@ -27,7 +25,7 @@ function isTimeToWake(waitFor) {
  *
  * Once you have your test hanging, you can use the 'ps' tool to find the process id (pid) of the
  * target node, and then do something like:
- * /opt/mongodbtoolchain/v4/bin/gdb build/install/bin/mongod
+ * /opt/mongodbtoolchain/v4/bin/gdb bazel-bin/install/bin/mongod
  * ...
  * (gdb prompt) attach <pid>
  *

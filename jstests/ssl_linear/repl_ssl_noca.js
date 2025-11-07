@@ -15,7 +15,7 @@ if (HOST_TYPE == "macOS") {
     // Ensure trusted-ca.pem is properly installed on MacOS hosts.
     // (MacOS is the only OS where it is installed outside of this test)
     let exitCode = runProgram("security", "verify-cert", "-c", "./jstests/libs/trusted-client.pem");
-    assert.eq(0, exitCode, 'Check for proper installation of Trusted CA on MacOS host');
+    assert.eq(0, exitCode, "Check for proper installation of Trusted CA on MacOS host");
 }
 if (HOST_TYPE == "windows") {
     assert.eq(0, runProgram(getPython3Binary(), "jstests/ssl_linear/windows_castore_cleanup.py"));
@@ -29,7 +29,7 @@ if (HOST_TYPE == "windows") {
 }
 
 try {
-    var replTest = new ReplSetTest({
+    let replTest = new ReplSetTest({
         name: "TLSTest",
         nodes: 1,
         nodeOptions: {
@@ -43,21 +43,21 @@ try {
 
     replTest.startSet({
         env: {
-            SSL_CERT_FILE: 'jstests/libs/trusted-ca.pem',
+            SSL_CERT_FILE: "jstests/libs/trusted-ca.pem",
         },
     });
 
     replTest.initiate();
 
-    var nodeList = replTest.nodeList().join();
+    let nodeList = replTest.nodeList().join();
 
-    var checkShell = function(url) {
+    let checkShell = function (url) {
         // Should not be able to authenticate with x509.
         // Authenticate call will return 1 on success, 0 on error.
-        var argv = ['mongo', url, '--eval', ('db.runCommand({replSetGetStatus: 1})')];
+        let argv = ["mongo", url, "--eval", "db.runCommand({replSetGetStatus: 1})"];
 
-        if (url.endsWith('&ssl=true')) {
-            argv.push('--tls', '--tlsCertificateKeyFile', 'jstests/libs/trusted-client.pem');
+        if (url.endsWith("&ssl=true")) {
+            argv.push("--tls", "--tlsCertificateKeyFile", "jstests/libs/trusted-client.pem");
         }
 
         if (!_isWindows()) {
@@ -65,26 +65,26 @@ try {
             // system CA. On Windows, this CA will have been added to the user's trusted CA list
             argv.unshift("env", "SSL_CERT_FILE=jstests/libs/trusted-ca.pem");
         }
-        var ret = runMongoProgram(...argv);
+        let ret = runMongoProgram(...argv);
         return ret;
     };
 
     jsTest.log("Testing with no ssl specification...");
-    var noMentionSSLURL = `mongodb://${nodeList}/admin?replicaSet=${replTest.name}`;
+    let noMentionSSLURL = `mongodb://${nodeList}/admin?replicaSet=${replTest.name}`;
     assert.neq(checkShell(noMentionSSLURL), 0, "shell correctly failed to connect without SSL");
 
     jsTest.log("Testing with ssl specified false...");
-    var disableSSLURL = `mongodb://${nodeList}/admin?replicaSet=${replTest.name}&ssl=false`;
+    let disableSSLURL = `mongodb://${nodeList}/admin?replicaSet=${replTest.name}&ssl=false`;
     assert.neq(checkShell(disableSSLURL), 0, "shell correctly failed to connect without SSL");
 
     jsTest.log("Testing with ssl specified true...");
-    var useSSLURL = `mongodb://${nodeList}/admin?replicaSet=${replTest.name}&ssl=true`;
+    let useSSLURL = `mongodb://${nodeList}/admin?replicaSet=${replTest.name}&ssl=true`;
     assert.eq(checkShell(useSSLURL), 0, "successfully connected with SSL");
 
     replTest.stopSet();
 } finally {
     if (_isWindows()) {
-        const ca_thumbprint = cat('jstests/libs/trusted-ca.pem.digest.sha1');
+        const ca_thumbprint = cat("jstests/libs/trusted-ca.pem.digest.sha1");
         runProgram("certutil.exe", "-delstore", "-f", "Root", ca_thumbprint);
         runProgram("certutil.exe", "-delstore", "-user", "-f", "CA", ca_thumbprint);
     }

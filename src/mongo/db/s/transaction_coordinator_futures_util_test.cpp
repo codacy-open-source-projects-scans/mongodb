@@ -27,14 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/none.hpp>
-#include <boost/smart_ptr.hpp>
-#include <numeric>
-#include <set>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/s/transaction_coordinator_futures_util.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -43,25 +36,31 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/client/remote_command_targeter_mock.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/sharding_catalog_client_mock.h"
+#include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/repl/optime_with.h"
 #include "mongo/db/repl/read_concern_level.h"
-#include "mongo/db/s/shard_server_test_fixture.h"
-#include "mongo/db/s/transaction_coordinator_futures_util.h"
+#include "mongo/db/sharding_environment/shard_server_test_fixture.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/sharding_catalog_client_mock.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/barrier.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/str.h"
+
+#include <numeric>
+#include <set>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
 
 namespace mongo {
 namespace txn {
@@ -325,10 +324,10 @@ protected:
         public:
             StaticCatalogClient() = default;
 
-            StatusWith<repl::OpTimeWith<std::vector<ShardType>>> getAllShards(
+            repl::OpTimeWith<std::vector<ShardType>> getAllShards(
                 OperationContext* opCtx,
                 repl::ReadConcernLevel readConcern,
-                bool excludeDraining) override {
+                BSONObj filter) override {
                 std::vector<ShardType> shardTypes;
                 for (const auto& shardId : makeThreeShardIdsList()) {
                     const ConnectionString cs = ConnectionString::forReplicaSet(

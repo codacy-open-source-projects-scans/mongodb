@@ -27,6 +27,15 @@
  *    it in the license file.
  */
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/oid.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/tenant_id.h"
+#include "mongo/util/debugger.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/string_map.h"
+
 #include <iostream>
 #include <memory>
 #include <set>
@@ -36,15 +45,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/oid.h"
-#include "mongo/db/database_name.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/tenant_id.h"
-#include "mongo/util/debugger.h"
-#include "mongo/util/decorable.h"
-#include "mongo/util/string_map.h"
 
 #if defined(__clang__)
 #define clang_optnone __attribute__((optnone))
@@ -105,6 +105,14 @@ public:
     int x = 0;
 };
 
+class IntWrapper {
+public:
+    IntWrapper(int i) : _i(i) {}
+
+private:
+    int _i;
+};
+
 auto intVec = MyDecorable::declareDecoration<std::vector<int>>();
 auto str1 = MyDecorable::declareDecoration<std::string>();
 auto str2 = MyDecorable::declareDecoration<std::string>();
@@ -153,6 +161,12 @@ int clang_optnone main(int argc, char** argv) {
                         mongo::StringMapEq,
                         NonEmptyAlloc<std::string>>
         checkNonEmptyAlloc;
+
+    boost::optional<int> optTypeNone;
+    boost::optional<int> optTypeValue{1};
+
+    boost::optional<IntWrapper> wrappedOptTypeNone;
+    boost::optional<IntWrapper> wrappedOptTypeValue{IntWrapper{1}};
 
     mongo::breakpoint();
 

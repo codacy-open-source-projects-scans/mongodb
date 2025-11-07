@@ -12,11 +12,15 @@
  * and drop any ready indexes even if there are index builds in-progress. To solve this problem, the
  * dropIndexes command cannot drop any ready indexes while there are any in-progress index builds.
  *
- * @tags: [requires_replication]
+ * @tags: [
+ *   # TODO(SERVER-109702): Evaluate if a primary-driven index build compatible test should be created.
+ *   requires_commit_quorum,
+ *   requires_replication,
+ * ]
  */
 import {kDefaultWaitForFailPointTimeout} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const replSet = new ReplSetTest({
     nodes: [
@@ -27,7 +31,7 @@ const replSet = new ReplSetTest({
                 priority: 0,
             },
         },
-    ]
+    ],
 });
 
 replSet.startSet();
@@ -47,8 +51,9 @@ for (let i = 0; i < 5; i++) {
 
 jsTestLog("Starting an index build on {a: 1} and hanging on the primary");
 IndexBuildTest.pauseIndexBuilds(primary);
-let awaitIndexBuild = IndexBuildTest.startIndexBuild(
-    primary, coll.getFullName(), {a: 1}, {}, [ErrorCodes.IndexBuildAborted]);
+let awaitIndexBuild = IndexBuildTest.startIndexBuild(primary, coll.getFullName(), {a: 1}, {}, [
+    ErrorCodes.IndexBuildAborted,
+]);
 IndexBuildTest.waitForIndexBuildToStart(primary.getDB(dbName), coll.getName(), "a_1");
 
 const failPoint = "hangAfterAbortingIndexes";
@@ -58,20 +63,22 @@ let timesEntered = res.count;
 TestData.dbName = dbName;
 TestData.collName = collName;
 
-jsTestLog(
-    "Aborting index build on {a: 1} and hanging dropIndexes while yielding the collection lock");
+jsTestLog("Aborting index build on {a: 1} and hanging dropIndexes while yielding the collection lock");
 let awaitDropIndexes = startParallelShell(() => {
-    assert.commandFailedWithCode(db.getSiblingDB(TestData.dbName)
-                                     .runCommand({dropIndexes: TestData.collName, index: ["a_1"]}),
-                                 ErrorCodes.BackgroundOperationInProgressForNamespace);
+    assert.commandFailedWithCode(
+        db.getSiblingDB(TestData.dbName).runCommand({dropIndexes: TestData.collName, index: ["a_1"]}),
+        ErrorCodes.BackgroundOperationInProgressForNamespace,
+    );
 }, primary.port);
 
 awaitIndexBuild();
-assert.commandWorked(primary.adminCommand({
-    waitForFailPoint: failPoint,
-    timesEntered: timesEntered + 1,
-    maxTimeMS: kDefaultWaitForFailPointTimeout
-}));
+assert.commandWorked(
+    primary.adminCommand({
+        waitForFailPoint: failPoint,
+        timesEntered: timesEntered + 1,
+        maxTimeMS: kDefaultWaitForFailPointTimeout,
+    }),
+);
 
 jsTestLog("Creating the index {a: 1} to completion");
 IndexBuildTest.resumeIndexBuilds(primary);

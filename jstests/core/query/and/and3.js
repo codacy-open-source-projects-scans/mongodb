@@ -5,18 +5,19 @@
 //   requires_scripting,
 //   assumes_read_concern_local,
 //   requires_fcv_80,
+//   requires_getmore,
 // ]
 
 let t = db.jstests_and3;
 t.drop();
 
 t.save({a: 1});
-t.save({a: 'foo'});
+t.save({a: "foo"});
 
 t.createIndex({a: 1});
 
 function checkScanMatch(query, docsExamined, n) {
-    var e = t.find(query).hint({a: 1}).explain("executionStats");
+    let e = t.find(query).hint({a: 1}).explain("executionStats");
     assert.eq(docsExamined, e.executionStats.totalDocsExamined);
     assert.eq(n, e.executionStats.nReturned);
 }
@@ -49,14 +50,14 @@ checkScanMatch({$and: [{$or: [{a: {$not: /a/}}]}]}, 2, 2);
 checkScanMatch({$and: [{$nor: [{a: /o/}]}]}, 2, 1);
 checkScanMatch({$and: [{$nor: [{a: /a/}]}]}, 2, 2);
 
-checkScanMatch({$where: 'this.a==1'}, 2, 1);
-checkScanMatch({$and: [{$where: 'this.a==1'}]}, 2, 1);
+checkScanMatch({$where: "this.a==1"}, 2, 1);
+checkScanMatch({$and: [{$where: "this.a==1"}]}, 2, 1);
 
-checkScanMatch({a: 1, $where: 'this.a==1'}, 1, 1);
-checkScanMatch({a: 1, $and: [{$where: 'this.a==1'}]}, 1, 1);
-checkScanMatch({$and: [{a: 1}, {$where: 'this.a==1'}]}, 1, 1);
-checkScanMatch({$and: [{a: 1, $where: 'this.a==1'}]}, 1, 1);
-checkScanMatch({a: 1, $and: [{a: 1}, {a: 1, $where: 'this.a==1'}]}, 1, 1);
+checkScanMatch({a: 1, $where: "this.a==1"}, 1, 1);
+checkScanMatch({a: 1, $and: [{$where: "this.a==1"}]}, 1, 1);
+checkScanMatch({$and: [{a: 1}, {$where: "this.a==1"}]}, 1, 1);
+checkScanMatch({$and: [{a: 1, $where: "this.a==1"}]}, 1, 1);
+checkScanMatch({a: 1, $and: [{a: 1}, {a: 1, $where: "this.a==1"}]}, 1, 1);
 
 assert.eq(0, t.find({a: 1, $and: [{a: 2}]}).itcount());
 assert.eq(0, t.find({$and: [{a: 1}, {a: 2}]}).itcount());

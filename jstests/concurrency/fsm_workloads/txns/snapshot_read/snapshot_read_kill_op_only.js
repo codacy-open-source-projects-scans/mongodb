@@ -4,21 +4,25 @@
 
  * TODO: SERVER-39939 - Delete this workload.
 
- * @tags: [uses_transactions, state_functions_share_transaction, requires_getmore]
+ * @tags: [
+ *   uses_transactions,
+ *   state_functions_share_transaction,
+ *   requires_getmore,
+ *   # This test relies on query commands returning specific batch-sized responses.
+ *   assumes_no_implicit_cursor_exhaustion,
+ * ]
  */
 
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
-import {
-    $config as $baseConfig
-} from "jstests/concurrency/fsm_workloads/txns/snapshot_read/snapshot_read_kill_operations.js";
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/txns/snapshot_read/snapshot_read_kill_operations.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
     $config.transitions = {
         init: {snapshotFind: 1.0},
         snapshotFind: {incrementTxnNumber: 0.33, killOp: 0.34, snapshotGetMore: 0.33},
         incrementTxnNumber: {snapshotGetMore: 1.0},
         killOp: {snapshotGetMore: 1.0},
-        snapshotGetMore: {snapshotFind: 1.0}
+        snapshotGetMore: {snapshotFind: 1.0},
     };
 
     return $config;

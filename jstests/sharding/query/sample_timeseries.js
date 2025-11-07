@@ -5,16 +5,15 @@
  * ]
  */
 import {documentEq} from "jstests/aggregation/extras/utils.js";
+import {getTimeseriesCollForDDLOps} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 import {planHasStage} from "jstests/libs/query/analyze_plan.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 // Test deliberately inserts orphans.
 TestData.skipCheckOrphans = true;
 
-const dbName = 'test';
-const collName = 'weather';
-const bucketCollName = `system.buckets.${collName}`;
-const bucketCollFullName = `${dbName}.${bucketCollName}`;
+const dbName = "test";
+const collName = "weather";
 
 const st = new ShardingTest({shards: 2, rs: {nodes: 2}});
 const mongos = st.s;
@@ -29,21 +28,26 @@ function generateId() {
     return currentId++;
 }
 
-assert.commandWorked(
-    testDB.adminCommand({enableSharding: dbName, primaryShard: primary.shardName}));
+assert.commandWorked(testDB.adminCommand({enableSharding: dbName, primaryShard: primary.shardName}));
 
 const testColl = testDB[collName];
 
 function defineChunks() {
     function splitAndMove(city, minTime, destination) {
-        assert.commandWorked(st.s.adminCommand(
-            {split: bucketCollFullName, middle: {"meta.city": city, 'control.min.time': minTime}}));
-        assert.commandWorked(st.s.adminCommand({
-            movechunk: bucketCollFullName,
-            find: {"meta.city": city, 'control.min.time': minTime},
-            to: destination.shardName,
-            _waitForDelete: true
-        }));
+        assert.commandWorked(
+            st.s.adminCommand({
+                split: getTimeseriesCollForDDLOps(testDB, testColl).getFullName(),
+                middle: {"meta.city": city, "control.min.time": minTime},
+            }),
+        );
+        assert.commandWorked(
+            st.s.adminCommand({
+                movechunk: getTimeseriesCollForDDLOps(testDB, testColl).getFullName(),
+                find: {"meta.city": city, "control.min.time": minTime},
+                to: destination.shardName,
+                _waitForDelete: true,
+            }),
+        );
     }
 
     // Split the chunks such that we have the following distrubtion.
@@ -58,11 +62,13 @@ function defineChunks() {
 
 function setUpTestColl(generateAdditionalData) {
     assert(testColl.drop());
-    assert.commandWorked(testDB.adminCommand({
-        shardCollection: testColl.getFullName(),
-        timeseries: {timeField: "time", metaField: "location", granularity: "hours"},
-        key: {"location.city": 1, time: 1}
-    }));
+    assert.commandWorked(
+        testDB.adminCommand({
+            shardCollection: testColl.getFullName(),
+            timeseries: {timeField: "time", metaField: "location", granularity: "hours"},
+            key: {"location.city": 1, time: 1},
+        }),
+    );
     defineChunks();
 
     const data = [
@@ -125,7 +131,7 @@ function setUpTestColl(generateAdditionalData) {
             _id: measure._id,
             time: measure.time,
             temperature: measure.temperature,
-            city: measure.location.city
+            city: measure.location.city,
         };
         return acc;
     }, {});
@@ -195,7 +201,7 @@ function testPipeline({pipeline, expectedDocs, expectedCount, shardsTargetedCoun
     if (expectedPlan) {
         // The ARHash plan is probabilistic. We may not always pick the plan. So we run the explain
         // command three times to increase the chance of the plan getting picked.
-        const numInteration = (expectedPlan == arhash) ? 3 : 1;
+        const numInteration = expectedPlan == arhash ? 3 : 1;
         const explainResults = [];
         for (let i = 0; i < numInteration; ++i) {
             explainResults.push(testColl.explain().aggregate(pipeline));
@@ -211,7 +217,7 @@ function testPipeline({pipeline, expectedDocs, expectedCount, shardsTargetedCoun
 
     // Verify profiling output.
     if (shardsTargetedCount > 0) {
-        let filter = {"command.aggregate": bucketCollName};
+        let filter = {"command.aggregate": getTimeseriesCollForDDLOps(testDB, testColl).getName()};
 
         // Filter out any concurrent admin operations.
         if (Object.keys(pipeline[0])[0] == "$match") {
@@ -235,7 +241,7 @@ const projection = {
         temperature: 1,
         city: "$location.city",
         _id: 1,
-    }
+    },
 };
 
 /**
@@ -253,8 +259,14 @@ function runTest({proportion, expectedPlan, generateAdditionalData}) {
     const expectedDocs = setUpTestColl(generateAdditionalData);
 
     let expectedCount = Math.floor(proportion * Object.keys(expectedDocs).length);
-    jsTestLog("Running test with proportion: " + proportion + ", expected count: " + expectedCount +
-              ", expected plan: " + tojson(expectedPlan));
+    jsTestLog(
+        "Running test with proportion: " +
+            proportion +
+            ", expected count: " +
+            expectedCount +
+            ", expected plan: " +
+            tojson(expectedPlan),
+    );
 
     let pipeline = [{$sample: {size: expectedCount}}, projection];
     testPipeline({pipeline, expectedDocs, expectedCount, shardsTargetedCount: 2, expectedPlan});
@@ -325,7 +337,7 @@ function generateOrphanData() {
             location: {city: "Dublin", coordinates: [25, -43]},
             time: ISODate("2021-05-18T08:30:00.000Z"),
             temperature: 42,
-        }
+        },
     ]);
     return {};
 }
@@ -353,7 +365,7 @@ function insertAdditionalData(sparselyPackBucket) {
 
             // Insert one orphan for every 10 measurements to increase the chances the test will
             // fail if we are not filtering out orphans correctly.
-            if (city == "Dublin" && (i % 10 == 0)) {
+            if (city == "Dublin" && i % 10 == 0) {
                 const orphanDoc = {
                     location: {city, coordinates: [25, -43]},
                     time: ISODate("2021-05-18T08:00:00.000Z"),
@@ -383,14 +395,14 @@ runTest({
     generateAdditionalData: () => {
         return insertAdditionalData(false);
     },
-    expectedPlan: arhash
+    expectedPlan: arhash,
 });
 runTest({
     proportion: 0.005,
     generateAdditionalData: () => {
         return insertAdditionalData(true);
     },
-    expectedPlan: topK
+    expectedPlan: topK,
 });
 
 // Top-K plan without the trail stage.
@@ -411,7 +423,7 @@ testPipeline({
     expectedCount: 1001,
     expectedDocs: expectedDocs,
     shardsTargetedCount: 2,
-    expectedPlan: randomCursor
+    expectedPlan: randomCursor,
 });
 
 st.stop();

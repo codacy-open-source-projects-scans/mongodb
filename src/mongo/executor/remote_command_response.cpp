@@ -27,19 +27,21 @@
  *    it in the license file.
  */
 
-#include <boost/optional.hpp>
-#include <fmt/format.h>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/executor/remote_command_response.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/executor/remote_command_response.h"
 #include "mongo/rpc/reply_interface.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+
+#include <algorithm>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace executor {
@@ -67,21 +69,47 @@ RemoteCommandResponse::RemoteCommandResponse(HostAndPort hp,
 }
 
 std::string RemoteCommandResponse::toString() const {
-    return format(FMT_STRING("RemoteResponse -- "
-                             " cmd: {}"
-                             " target: {}"
-                             " status: {}"
-                             " elapsedMicros: {}"
-                             " moreToCome: {}"),
-                  data.toString(),
-                  target.toString(),
-                  status.toString(),
-                  elapsed ? StringData(elapsed->toString()) : "n/a"_sd,
-                  moreToCome);
+    return fmt::format(
+        "RemoteResponse -- "
+        " cmd: {}"
+        " target: {}"
+        " status: {}"
+        " elapsedMicros: {}"
+        " moreToCome: {}",
+        data.toString(),
+        target.toString(),
+        status.toString(),
+        elapsed ? StringData(elapsed->toString()) : "n/a"_sd,
+        moreToCome);
 }
 
 bool RemoteCommandResponse::isOK() const {
     return status.isOK();
+}
+
+std::vector<std::string> extractErrorLabels(BSONObj data) {
+    if (BSONElement errorLabelsElement = data["errorLabels"]; !errorLabelsElement.eoo()) {
+        auto errorLabelsArray = errorLabelsElement.Array();
+
+        std::vector<std::string> errorLabels{};
+        errorLabels.resize(errorLabelsArray.size());
+
+        std::ranges::transform(errorLabelsArray, errorLabels.begin(), [](const BSONElement& data) {
+            return data.String();
+        });
+
+        return errorLabels;
+    }
+
+    return {};
+}
+
+std::vector<std::string> RemoteCommandResponse::getErrorLabels() const {
+    if (!status.isOK()) {
+        return {};
+    }
+
+    return extractErrorLabels(data);
 }
 
 bool RemoteCommandResponse::operator==(const RemoteCommandResponse& rhs) const {

@@ -27,31 +27,32 @@
  *    it in the license file.
  */
 
-#include <string>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/update/pop_node.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/json.h"
-#include "mongo/bson/mutable/document.h"
+#include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/update/pop_node.h"
 #include "mongo/db/update/update_executor.h"
 #include "mongo/db/update/update_node_test_fixture.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/safe_num.h"
+
+#include <string>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
 
 namespace mmb = mongo::mutablebson;
 using PopNodeTest = UpdateTestFixture;
+using PopNodeDeathTest = PopNodeTest;
 
-TEST(PopNodeTest, InitSucceedsPositiveOne) {
+TEST(SimplePopNodeTest, InitSucceedsPositiveOne) {
     auto update = fromjson("{$pop: {a: 1}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PopNode popNode;
@@ -59,7 +60,7 @@ TEST(PopNodeTest, InitSucceedsPositiveOne) {
     ASSERT_FALSE(popNode.popFromFront());
 }
 
-TEST(PopNodeTest, InitSucceedsNegativeOne) {
+TEST(SimplePopNodeTest, InitSucceedsNegativeOne) {
     auto update = fromjson("{$pop: {a: -1}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PopNode popNode;
@@ -67,42 +68,42 @@ TEST(PopNodeTest, InitSucceedsNegativeOne) {
     ASSERT_TRUE(popNode.popFromFront());
 }
 
-TEST(PopNodeTest, InitFailsOnePointOne) {
+TEST(SimplePopNodeTest, InitFailsOnePointOne) {
     auto update = fromjson("{$pop: {a: 1.1}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PopNode popNode;
     ASSERT_EQ(ErrorCodes::FailedToParse, popNode.init(update["$pop"]["a"], expCtx));
 }
 
-TEST(PopNodeTest, InitFailsZero) {
+TEST(SimplePopNodeTest, InitFailsZero) {
     auto update = fromjson("{$pop: {a: 0}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PopNode popNode;
     ASSERT_EQ(ErrorCodes::FailedToParse, popNode.init(update["$pop"]["a"], expCtx));
 }
 
-TEST(PopNodeTest, InitFailsString) {
+TEST(SimplePopNodeTest, InitFailsString) {
     auto update = fromjson("{$pop: {a: 'foo'}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PopNode popNode;
     ASSERT_EQ(ErrorCodes::FailedToParse, popNode.init(update["$pop"]["a"], expCtx));
 }
 
-TEST(PopNodeTest, InitFailsNestedObject) {
+TEST(SimplePopNodeTest, InitFailsNestedObject) {
     auto update = fromjson("{$pop: {a: {b: 1}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PopNode popNode;
     ASSERT_EQ(ErrorCodes::FailedToParse, popNode.init(update["$pop"]["a"], expCtx));
 }
 
-TEST(PopNodeTest, InitFailsNestedArray) {
+TEST(SimplePopNodeTest, InitFailsNestedArray) {
     auto update = fromjson("{$pop: {a: [{b: 1}]}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PopNode popNode;
     ASSERT_EQ(ErrorCodes::FailedToParse, popNode.init(update["$pop"]["a"], expCtx));
 }
 
-TEST(PopNodeTest, InitFailsBool) {
+TEST(SimplePopNodeTest, InitFailsBool) {
     auto update = fromjson("{$pop: {a: true}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PopNode popNode;
@@ -182,7 +183,7 @@ TEST_F(PopNodeTest, ThrowsWhenPathIsBlockedByAScalar) {
         "Cannot use the part (b) of (a.b) to traverse the element ({a: \"foo\"})");
 }
 
-DEATH_TEST_REGEX_F(PopNodeTest,
+DEATH_TEST_REGEX_F(PopNodeDeathTest,
                    NonOkElementWhenPathExistsIsFatal,
                    R"#(Invariant failure.*applyParams.element.ok\(\))#") {
     auto update = fromjson("{$pop: {'a.b': 1}}");

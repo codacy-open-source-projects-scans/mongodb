@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include "math.h"
 #include "test_util.h"
 
 #ifdef HAVE_SETRLIMIT
@@ -89,6 +90,9 @@
 #define REALLOC_MAX_TABLES 5 /* maximum number of tables with realloc_exact and realloc_malloc */
 #define STR(s) #s
 #define XSTR(s) STR(s)
+
+/* Duration of the follower run in disagg switch mode. */
+#define DISAGG_SWITCH_FOLLOWER_OPS_SEC 10
 
 /* Session configuration to enable prefetch. */
 #define SESSION_PREFETCH_CFG_ON "prefetch=(enabled=true)"
@@ -239,11 +243,12 @@ typedef struct {
 
     int trace_retain;
 
-    char *home;        /* Home directory */
-    char *home_backup; /* Backup file name */
-    char *home_config; /* Run CONFIG file path */
-    char *home_key;    /* Key file filename */
-    char *home_stats;  /* Statistics file path */
+    char home[FILENAME_MAX];          /* Home directory */
+    char home_backup[FILENAME_MAX];   /* Backup file name */
+    char home_config[FILENAME_MAX];   /* Run CONFIG file path */
+    char home_key[FILENAME_MAX];      /* Key file filename */
+    char home_page_log[FILENAME_MAX]; /* Page and log service home dir (disagg) */
+    char home_stats[FILENAME_MAX];    /* Statistics file path */
 
     char *config_open; /* Command-line configuration */
 
@@ -255,11 +260,13 @@ typedef struct {
     RWLOCK backup_lock; /* Backup running */
     uint64_t backup_id; /* Block incremental id */
     bool backup_incr;   /* Incremental backup */
+    bool backup_verify; /* Verifying backup */
 
     WT_RAND_STATE data_rnd;  /* Global RNG state for data operations */
     WT_RAND_STATE extra_rnd; /* Global RNG state for extra operations */
 
     uint64_t timestamp;        /* Counter for timestamps */
+    uint64_t prepared_id;      /* Counter for prepared id */
     uint64_t oldest_timestamp; /* Last timestamp used for oldest */
     uint64_t stable_timestamp; /* Last timestamp used for stable */
 
@@ -303,7 +310,12 @@ typedef struct {
 #define PREFIX_LEN_CONFIG_MAX 80
     uint32_t prefix_len_max;
 
+    bool disagg_leader;          /* If disaggregated storage role is configured as a leader. */
+    pid_t follower_pid;          /* For multi-node disagg follower process */
+    uint64_t last_checkpoint_ts; /* Last checkpoint timestamp picked up by follower. */
+
     bool column_store_config;           /* At least one column-store table configured */
+    bool disagg_storage_config;         /* If disaggregated storage is configured */
     bool multi_table_config;            /* If configuring multiple tables */
     bool tiered_storage_config;         /* If tiered storage is configured */
     bool transaction_timestamps_config; /* If transaction timestamps configured on any table */
@@ -397,6 +409,7 @@ typedef struct {
     uint64_t last; /* truncate range */
     WT_ITEM *lastkey, _lastkey;
 
+    bool ignore_prepare;   /* read with ignore_prepare */
     bool repeatable_reads; /* if read ops repeatable */
     bool repeatable_wrap;  /* if circular buffer wrapped */
     uint64_t opid;         /* Operation ID */
@@ -430,6 +443,7 @@ WT_THREAD_RET background_compact(void *);
 WT_THREAD_RET backup(void *);
 WT_THREAD_RET checkpoint(void *);
 WT_THREAD_RET compact(void *);
+WT_THREAD_RET follower(void *);
 WT_THREAD_RET hs_cursor(void *);
 WT_THREAD_RET import(void *);
 WT_THREAD_RET random_kv(void *);
@@ -441,10 +455,16 @@ void config_compat(const char **);
 void config_error(void);
 void config_file(const char *);
 void config_print(bool);
+void config_random_generators(void);
 void config_run(void);
 void config_single(TABLE *, const char *, bool);
 void create_database(const char *home, WT_CONNECTION **connp);
 void cursor_dump_page(WT_CURSOR *, const char *);
+bool disagg_is_mode_switch(void);
+bool disagg_is_multi_node(void);
+void disagg_setup_multi_node(void);
+int disagg_switch_roles(void);
+void disagg_teardown_multi_node(void);
 bool enable_session_prefetch(void);
 void fclose_and_clear(FILE **);
 void key_gen_common(TABLE *, WT_ITEM *, uint64_t, const char *);
@@ -468,10 +488,11 @@ void snap_track(TINFO *, thread_op);
 void table_dump_page(WT_SESSION *, const char *, TABLE *, uint64_t, const char *);
 void table_verify(TABLE *, void *);
 void timestamp_init(void);
-uint64_t timestamp_maximum_committed(void);
+uint64_t timestamp_minimum_committed(void);
 void timestamp_once(WT_SESSION *, bool, bool);
 void replay_adjust_key(TINFO *, uint64_t);
 uint64_t replay_commit_ts(TINFO *);
+uint64_t replay_rollback_ts(TINFO *);
 void replay_committed(TINFO *);
 void replay_end_timed_run(void);
 void replay_loop_begin(TINFO *, bool);
@@ -509,6 +530,7 @@ void wts_open(const char *, WT_CONNECTION **, bool);
 void wts_read_scan(TABLE *, void *);
 void wts_reopen(void);
 void wts_salvage(TABLE *, void *);
+void wts_prepare_discover(WT_CONNECTION *);
 void wts_stats(void);
 void wts_verify(WT_CONNECTION *, bool);
 void wts_verify_mirrored_truncate(TINFO *tinfo);

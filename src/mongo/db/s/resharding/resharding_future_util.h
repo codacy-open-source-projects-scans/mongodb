@@ -29,26 +29,39 @@
 
 #pragma once
 
-#include <utility>
-#include <vector>
-
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/s/primary_only_service_helpers/retrying_cancelable_operation_context_factory.h"
 #include "mongo/db/s/primary_only_service_helpers/with_automatic_retry.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/functional.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/out_of_line_executor.h"
+
+#include <utility>
+#include <vector>
 
 namespace mongo {
 namespace resharding {
 
+using primary_only_service_helpers::kRetryabilityPredicateIncludeWriteConcernTimeout;
+using primary_only_service_helpers::RetryabilityPredicate;
 using primary_only_service_helpers::RetryingCancelableOperationContextFactory;
-using primary_only_service_helpers::WithAutomaticRetry;
+
+const auto kRetryabilityPredicateIncludeLockTimeoutAndWriteConcern = [](const Status& status) {
+    return kRetryabilityPredicateIncludeWriteConcernTimeout(status) ||
+        status == ErrorCodes::LockTimeout;
+};
+
+template <typename BodyCallable>
+primary_only_service_helpers::WithAutomaticRetry<BodyCallable> WithAutomaticRetry(
+    BodyCallable&& body) {
+    return primary_only_service_helpers::WithAutomaticRetry<BodyCallable>(
+        std::move(body), kRetryabilityPredicateIncludeWriteConcernTimeout);
+}
 
 /**
  * Converts a vector of SharedSemiFutures into a vector of ExecutorFutures.

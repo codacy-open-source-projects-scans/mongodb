@@ -29,15 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <functional>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -45,7 +36,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/privilege.h"
-#include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/read_concern_support_result.h"
@@ -55,9 +46,29 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
 
 class LiteParsedPipeline;
+
+struct LiteParserOptions {
+    // Allows the foreign collection of a lookup to be in a different database than the local
+    // collection using "from: {db: ..., coll: ...}" syntax. Currently, this should only be used
+    // for streams since this isn't allowed in MQL beyond some exemptions for internal
+    // collection in the local database. While this flag also exists on expressionContext, we also
+    // need this in the LiteParseContext to correctly throw errors when a non-streams pipeline tries
+    // to use foreign db syntax for $lookup beyond the exempted internal collections during lite
+    // parsing since lite parsing doesn't have an expressionContext.
+    bool allowGenericForeignDbLookup = false;
+};
 
 /**
  * A lightly parsed version of a DocumentSource. It is not executable and not guaranteed to return a
@@ -75,8 +86,8 @@ public:
      * performed, and the BSONElement will be the element whose field name is the name of this stage
      * (e.g. the first and only element in {$limit: 1}).
      */
-    using Parser = std::function<std::unique_ptr<LiteParsedDocumentSource>(const NamespaceString&,
-                                                                           const BSONElement&)>;
+    using Parser = std::function<std::unique_ptr<LiteParsedDocumentSource>(
+        const NamespaceString&, const BSONElement&, const LiteParserOptions&)>;
 
     struct LiteParserInfo {
         Parser parser;
@@ -107,8 +118,10 @@ public:
      * Function that will be used as an alternate parser for a document source that has been
      * disabled.
      */
-    static std::unique_ptr<LiteParsedDocumentSource> parseDisabled(NamespaceString nss,
-                                                                   const BSONElement& spec) {
+    static std::unique_ptr<LiteParsedDocumentSource> parseDisabled(
+        NamespaceString nss,
+        const BSONElement& spec,
+        const LiteParserOptions& options = LiteParserOptions{}) {
         uasserted(
             ErrorCodes::QueryFeatureNotAllowed,
             str::stream() << spec.fieldName()
@@ -128,8 +141,10 @@ public:
      * Extracts the first field name from 'spec', and delegates to the parser that was registered
      * with that field name using registerParser() above.
      */
-    static std::unique_ptr<LiteParsedDocumentSource> parse(const NamespaceString& nss,
-                                                           const BSONObj& spec);
+    static std::unique_ptr<LiteParsedDocumentSource> parse(
+        const NamespaceString& nss,
+        const BSONObj& spec,
+        const LiteParserOptions& options = LiteParserOptions{});
 
     /**
      * Returns the foreign collection(s) referenced by this stage (that is, any collection that
@@ -190,9 +205,10 @@ public:
     }
 
     /**
-     * Returns true if this desugars to a pipeline starting with a $queue stage.
+     * Returns true if this stage is an initial source and should run just once on the entire
+     * cluster.
      */
-    virtual bool startsWithQueue() const {
+    virtual bool generatesOwnDataOnce() const {
         return false;
     }
 
@@ -212,6 +228,20 @@ public:
     }
 
     /**
+     * Returns true if this is a search stage ($search, $vectorSearch, $rankFusion, etc.)
+     */
+    virtual bool isSearchStage() const {
+        return false;
+    }
+
+    /**
+     * Returns true if this is a $rankFusion pipeline
+     */
+    virtual bool isHybridSearchStage() const {
+        return false;
+    }
+
+    /**
      * Returns true if this stage require knowledge of the collection default collation at parse
      * time, false otherwise. This is useful to know as it could save a network request to discern
      * the collation.
@@ -220,6 +250,14 @@ public:
      */
     virtual bool requiresCollationForParsingUnshardedAggregate() const {
         return false;
+    }
+
+    /**
+     * Returns false if aggregation stages manually opt out of mandatory authorization checks, true
+     otherwise. Will enable mandatory authorization checks by default.
+     */
+    virtual bool requiresAuthzChecks() const {
+        return true;
     }
 
     /**
@@ -292,6 +330,13 @@ protected:
     }
 
 private:
+    /**
+     * Give access to 'parserMap' so we can remove a registered parser. unregisterParser_forTest is
+     * only meant to be used in the context of unit tests. This is because the parserMap is not
+     * thread safe, so modifying it at runtime is unsafe.
+     */
+    static void unregisterParser_forTest(const std::string& name);
+
     std::string _parseTimeName;
 };
 
@@ -300,10 +345,11 @@ public:
     /**
      * Creates the default LiteParsedDocumentSource. This should be used with caution. Make sure
      * your stage doesn't need to communicate any special behavior before registering a
-     * DocumentSource using this parser.
+     * DocumentSource using this parser. Additionally, explicitly ensure your stage does not require
+     * authorization checks.
      */
-    static std::unique_ptr<LiteParsedDocumentSourceDefault> parse(const NamespaceString& nss,
-                                                                  const BSONElement& spec) {
+    static std::unique_ptr<LiteParsedDocumentSourceDefault> parse(
+        const NamespaceString& nss, const BSONElement& spec, const LiteParserOptions& options) {
         return std::make_unique<LiteParsedDocumentSourceDefault>(spec.fieldName());
     }
 
@@ -317,6 +363,14 @@ public:
     PrivilegeVector requiredPrivileges(bool isMongos, bool bypassDocumentValidation) const final {
         return {};
     }
+
+    /**
+     * requiresAuthzChecks() is overriden to false because requiredPrivileges() returns an empty
+     * vector and has no authz checks by default.
+     */
+    bool requiresAuthzChecks() const override {
+        return false;
+    }
 };
 
 class LiteParsedDocumentSourceInternal final : public LiteParsedDocumentSource {
@@ -327,8 +381,8 @@ public:
      * stage doesn't need to communicate any special behavior before registering a DocumentSource
      * using this parser.
      */
-    static std::unique_ptr<LiteParsedDocumentSourceInternal> parse(const NamespaceString& nss,
-                                                                   const BSONElement& spec) {
+    static std::unique_ptr<LiteParsedDocumentSourceInternal> parse(
+        const NamespaceString& nss, const BSONElement& spec, const LiteParserOptions& options) {
         return std::make_unique<LiteParsedDocumentSourceInternal>(spec.fieldName());
     }
 

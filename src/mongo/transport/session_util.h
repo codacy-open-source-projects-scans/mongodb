@@ -29,15 +29,9 @@
 
 #pragma once
 
-#include <variant>
-#include <vector>
-
 #include "mongo/util/net/cidr.h"
-#include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/sockaddr.h"
 
 namespace mongo::transport::util {
-bool shouldOverrideMaxConns(const SockAddr& ra,
-                            const SockAddr& la,
-                            const std::vector<std::variant<CIDR, std::string>>& exemptions);
+bool isExemptedByCIDRList(const SockAddr& ra, const SockAddr& la, const CIDRList& exemptions);
 }  // namespace mongo::transport::util

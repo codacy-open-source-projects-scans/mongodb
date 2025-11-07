@@ -80,7 +80,6 @@ import time
 context = Context()
 conn_config =   "cache_size=1G,checkpoint=(wait=60,log_size=2GB),\
                 eviction=(threads_min=12,threads_max=12),log=(enabled=true),session_max=800,\
-                debug_mode=(table_logging=true),\
                 eviction_target=60,statistics=(fast),statistics_log=(wait=1,json)"# explicitly added
 conn = context.wiredtiger_open("create," + conn_config)
 s = conn.open_session("")
@@ -129,7 +128,7 @@ log_table = Table(log_name)
 # Read operation with read_timestamp_lag
 ops = Operation(Operation.OP_SEARCH, tables[0],Key(Key.KEYGEN_PARETO, 0, ParetoOptions(1)))
 ops = txn(ops, 'read_timestamp')
-ops.transaction.read_timestamp_lag = 2
+ops.transaction.read_timestamp_lag = 30
 ops = op_multi_table(ops, tables, False)
 ops = op_log_like(ops, log_table, 0)
 thread0 = Thread(ops)

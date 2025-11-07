@@ -29,7 +29,8 @@
 
 #include "mongo/db/storage/oplog_truncation.h"
 
-#include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/local_catalog/local_oplog_info.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/collection_truncate_markers.h"
@@ -42,7 +43,7 @@ namespace mongo::oplog_truncation {
 RecordId reclaimOplog(OperationContext* opCtx, RecordStore& oplog, RecordId mayTruncateUpTo) {
     RecordId highestTruncated;
     for (auto getNextMarker = true; getNextMarker;) {
-        auto truncateMarkers = oplog.oplog()->getCollectionTruncateMarkers();
+        auto truncateMarkers = LocalOplogInfo::get(opCtx)->getTruncateMarkers();
         auto truncateMarker = truncateMarkers->peekOldestMarkerIfNeeded(opCtx);
         if (!truncateMarker) {
             break;
@@ -54,7 +55,8 @@ RecordId reclaimOplog(OperationContext* opCtx, RecordStore& oplog, RecordId mayT
                 auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
                 StorageWriteTransaction txn(ru);
 
-                auto seekableCursor = oplog.oplog()->getRawCursor(opCtx);
+                auto seekableCursor =
+                    oplog.oplog()->getRawCursor(opCtx, *shard_role_details::getRecoveryUnit(opCtx));
                 auto firstRecordSeekable = seekableCursor->next();
                 if (!firstRecordSeekable) {
                     LOGV2_WARNING(8841100, "The oplog is empty, there is nothing to truncate");
@@ -100,6 +102,7 @@ RecordId reclaimOplog(OperationContext* opCtx, RecordStore& oplog, RecordId mayT
                 }
 
                 auto status = oplog.rangeTruncate(opCtx,
+                                                  *shard_role_details::getRecoveryUnit(opCtx),
                                                   RecordId(),
                                                   truncateMarker->lastRecord,
                                                   -truncateMarker->bytes,

@@ -3,8 +3,6 @@
  *
  * @tags: [
  *   requires_fcv_73,
- *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
- *    embedded_router_incompatible,
  * ]
  */
 
@@ -20,12 +18,11 @@ function assertNoDirectShardConnectionsMetrics(conn) {
 function assertDirectShardConnectionsMetrics(conn, expected) {
     const res = conn.adminCommand({serverStatus: 1});
     assert(res.hasOwnProperty("directShardConnections"), res);
-    assert.eq(res.directShardConnections.current,
-              expected.current,
-              {expected, actual: res.directShardConnections});
-    assert.eq(res.directShardConnections.totalCreated,
-              expected.totalCreated,
-              {expected, actual: res.directShardConnections});
+    assert.eq(res.directShardConnections.current, expected.current, {expected, actual: res.directShardConnections});
+    assert.eq(res.directShardConnections.totalCreated, expected.totalCreated, {
+        expected,
+        actual: res.directShardConnections,
+    });
 }
 
 function assertSoonDirectShardConnectionsMetrics(conn, expected) {
@@ -34,11 +31,15 @@ function assertSoonDirectShardConnectionsMetrics(conn, expected) {
         numTries++;
         const res = conn.adminCommand({serverStatus: 1});
         assert(res.hasOwnProperty("directShardConnections"), res);
-        if (res.directShardConnections.current != expected.current ||
-            res.directShardConnections.totalCreated != expected.totalCreated) {
+        if (
+            res.directShardConnections.current != expected.current ||
+            res.directShardConnections.totalCreated != expected.totalCreated
+        ) {
             if (numTries % 100 == 0) {
-                jsTest.log("Still waiting for direct shard connections metrics " +
-                           tojson({expected, actual: res.directShardConnections}));
+                jsTest.log(
+                    "Still waiting for direct shard connections metrics " +
+                        tojson({expected, actual: res.directShardConnections}),
+                );
             }
             return false;
         }

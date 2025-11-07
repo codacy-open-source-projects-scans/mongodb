@@ -32,11 +32,12 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/session/session_killer.h"
+#include "mongo/util/modules.h"
 
 /**
  * Mongod local kill session / transaction functionality library.
  */
-namespace mongo {
+namespace MONGO_MOD_PUB mongo {
 
 /**
  * Kills all cursors, ops, and transactions on mongod for sessions matching 'matcher'.
@@ -61,6 +62,17 @@ void killAllExpiredTransactions(OperationContext* opCtx,
                                 int64_t* numKills,
                                 int64_t* numTimeOuts);
 
+
+/**
+ * Aborts the oldest transaction when under cache pressure. We filter out prepared, or internal
+ * transactions.
+ */
+void killOldestTransaction(OperationContext* opCtx,
+                           Milliseconds timeout,
+                           int64_t* numKills,
+                           int64_t* numSkips,
+                           int64_t* numTimeOuts);
+
 /**
  * Run during shutdown to kill all in-progress transactions, including those in prepare.
  */
@@ -82,4 +94,4 @@ void yieldLocksForPreparedTransactions(OperationContext* opCtx);
  */
 void invalidateSessionsForStepdown(OperationContext* opCtx);
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

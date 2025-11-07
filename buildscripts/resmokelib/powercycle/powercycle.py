@@ -115,7 +115,7 @@ def exit_handler():
             with open(REPORT_JSON_FILE, "w") as jstream:
                 json.dump(REPORT_JSON, jstream)
             LOGGER.debug("Exit handler: report file contents %s", REPORT_JSON)
-        except:  # pylint: disable=bare-except
+        except:
             pass
 
     if EXIT_YML_FILE:
@@ -124,21 +124,21 @@ def exit_handler():
             with open(EXIT_YML_FILE, "w") as yaml_stream:
                 yaml.safe_dump(EXIT_YML, yaml_stream)
             LOGGER.debug("Exit handler: report file contents %s", EXIT_YML)
-        except:  # pylint: disable=bare-except
+        except:
             pass
 
     LOGGER.debug("Exit handler: Killing processes")
     try:
         Processes.kill_all()
         LOGGER.debug("Exit handler: Killing processes finished")
-    except:  # pylint: disable=bare-except
+    except:
         pass
 
     LOGGER.debug("Exit handler: Cleaning up temporary files")
     try:
         NamedTempFile.delete_all()
         LOGGER.debug("Exit handler: Cleaning up temporary files finished")
-    except:  # pylint: disable=bare-except
+    except:
         pass
 
 
@@ -192,7 +192,7 @@ def register_signal_handler(handler):
         signal.signal(signal_num, handler)
 
 
-def dump_stacks_and_exit(signum, frame):  # pylint: disable=unused-argument
+def dump_stacks_and_exit(signum, frame):
     """Provide a handler that will dump the stacks of all threads."""
     LOGGER.info("Dumping stacks!")
 
@@ -282,9 +282,7 @@ def abs_path(path):
 def symlink_dir(source_dir, dest_dir):
     """Symlink the 'dest_dir' to 'source_dir'."""
     if _IS_WINDOWS:
-        win32file.CreateSymbolicLink(  # pylint: disable=undefined-variable
-            dest_dir, source_dir, win32file.SYMBOLIC_LINK_FLAG_DIRECTORY
-        )  # pylint: disable=undefined-variable
+        win32file.CreateSymbolicLink(dest_dir, source_dir, win32file.SYMBOLIC_LINK_FLAG_DIRECTORY)
     else:
         os.symlink(source_dir, dest_dir)
 
@@ -480,14 +478,12 @@ def chmod_w_file(chmod_file):
         # The os package cannot set the directory to '+w', so we use win32security.
         # See https://stackoverflow.com/
         #       questions/12168110/setting-folder-permissions-in-windows-using-python
-        # pylint: disable=undefined-variable,unused-variable
         user, domain, sec_type = win32security.LookupAccountName("", "Everyone")
         file_sd = win32security.GetFileSecurity(chmod_file, win32security.DACL_SECURITY_INFORMATION)
         dacl = file_sd.GetSecurityDescriptorDacl()
         dacl.AddAccessAllowedAce(win32security.ACL_REVISION, ntsecuritycon.FILE_GENERIC_WRITE, user)
         file_sd.SetSecurityDescriptorDacl(1, dacl, 0)
         win32security.SetFileSecurity(chmod_file, win32security.DACL_SECURITY_INFORMATION, file_sd)
-        # pylint: enable=undefined-variable,unused-variable
     else:
         os.chmod(chmod_file, os.stat(chmod_file) | stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
 
@@ -781,7 +777,7 @@ class LocalToRemoteOperations(object):
         return self.remote_op.access_info()
 
 
-def remote_handler(options, task_config, root_dir):
+def remote_handler(options: dict, task_config, root_dir):
     """Remote operations handler executes all remote operations on the remote host.
 
     These operations are invoked on the remote host's copy of this script.
@@ -790,13 +786,13 @@ def remote_handler(options, task_config, root_dir):
 
     # Set 'root_dir' to absolute path.
     root_dir = abs_path(root_dir)
-    if not options.remote_operations:
+    if not options["remote_operations"]:
         raise ValueError("No remote operation specified.")
 
     print_uptime()
-    LOGGER.info("Operations to perform %s", options.remote_operations)
-    host = options.host if options.host else "localhost"
-    host_port = "{}:{}".format(host, options.port)
+    LOGGER.info("Operations to perform %s", options["remote_operations"])
+    host = options["host"] if options["host"] else "localhost"
+    host_port = "{}:{}".format(host, options["port"])
 
     mongod_options = task_config.mongod_options
     if task_config.repl_set:
@@ -811,14 +807,16 @@ def remote_handler(options, task_config, root_dir):
         bin_dir=bin_dir,
         db_path=db_path,
         log_path=log_path,
-        port=options.port,
+        port=options["port"],
         options=mongod_options,
     )
 
-    mongo_client_opts = get_mongo_client_args(host=host, port=options.port, task_config=task_config)
+    mongo_client_opts = get_mongo_client_args(
+        host=host, port=options["port"], task_config=task_config
+    )
 
     # Perform the sequence of operations specified. If any operation fails then return immediately.
-    for operation in options.remote_operations:
+    for operation in options["remote_operations"]:
         ret = 0
 
         def noop():
@@ -855,7 +853,7 @@ def remote_handler(options, task_config, root_dir):
             return ret
 
         def install_mongod():
-            ret, output = mongod.install(root_dir, options.tarball_url)
+            ret, output = mongod.install(root_dir, options["tarball_url"])
             LOGGER.info(output)
 
             # Create mongod's dbpath, if it does not exist.
@@ -886,9 +884,11 @@ def remote_handler(options, task_config, root_dir):
             ret, output = mongod.start()
             LOGGER.info(output)
             if ret:
-                LOGGER.error("Failed to start mongod on port %d: %s", options.port, output)
+                LOGGER.error("Failed to start mongod on port %d: %s", options["port"], output)
                 return ret
-            LOGGER.info("Started mongod running on port %d pid %s", options.port, mongod.get_pids())
+            LOGGER.info(
+                "Started mongod running on port %d pid %s", options["port"], mongod.get_pids()
+            )
             mongo = pymongo.MongoClient(**mongo_client_opts)
             # Limit retries to a reasonable value
             for _ in range(100):
@@ -919,7 +919,7 @@ def remote_handler(options, task_config, root_dir):
             return wait_for_mongod_shutdown(mongod)
 
         def rsync_data():
-            rsync_dir, new_rsync_dir = options.rsync_dest
+            rsync_dir, new_rsync_dir = options["rsync_dest"]
             ret, output = rsync(
                 powercycle_constants.DB_PATH, rsync_dir, powercycle_constants.RSYNC_EXCLUDE_FILES
             )
@@ -1321,10 +1321,10 @@ def new_resmoke_config(config_file, new_config_file, test_data, eval_str=""):
             "config": {"shell_options": {"eval": eval_str, "global_vars": {"TestData": test_data}}}
         }
     }
-    with open(config_file, "r") as yaml_stream:
+    with open(config_file, "r", encoding="utf8") as yaml_stream:
         config = yaml.safe_load(yaml_stream)
     config.update(new_config)
-    with open(new_config_file, "w") as yaml_stream:
+    with open(new_config_file, "w", encoding="utf8") as yaml_stream:
         yaml.safe_dump(config, yaml_stream)
 
 
@@ -1369,16 +1369,14 @@ def get_remote_python():
     return remote_python
 
 
-def main(parser_actions, options):
+def main(parser_actions, options: dict):
     """Execute Main program."""
 
-    # pylint: disable=global-statement
     global REPORT_JSON
     global REPORT_JSON_FILE
     global REPORT_JSON_SUCCESS
     global EXIT_YML_FILE
     global EXIT_YML
-    # pylint: enable=global-statement
 
     atexit.register(exit_handler)
     register_signal_handler(dump_stacks_and_exit)
@@ -1386,15 +1384,15 @@ def main(parser_actions, options):
     logging.basicConfig(
         format="%(asctime)s %(levelname)s %(message)s",
         level=logging.ERROR,
-        filename=options.log_file,
+        filename=options["log_file"],
     )
-    logging.getLogger(__name__).setLevel(options.log_level.upper())
+    logging.getLogger(__name__).setLevel(options["log_file"].upper())
     logging.Formatter.converter = time.gmtime
 
     LOGGER.info("powercycle invocation: %s", " ".join(sys.argv))
 
-    task_name = re.sub(r"(_[0-9]+)(_[\w-]+)?$", "", options.task_name)
-    task_config = powercycle_config.get_task_config(task_name, options.remote_operation)
+    task_name = re.sub(r"(_[0-9]+)(_[\w-]+)?$", "", options["task_name"])
+    task_config = powercycle_config.get_task_config(task_name, options["remote_operation"])
 
     LOGGER.info("powercycle task config: %s", task_config)
 
@@ -1408,7 +1406,7 @@ def main(parser_actions, options):
 
     # Invoke remote_handler if remote_operation is specified.
     # The remote commands are program args.
-    if options.remote_operation:
+    if options["remote_operation"]:
         ret = remote_handler(options, task_config, root_dir)
         # Exit here since the local operations are performed after this.
         local_exit(ret)
@@ -1497,7 +1495,7 @@ def main(parser_actions, options):
 
     # The remote mongod host comes from the ssh_user_host,
     # which may be specified as user@host.
-    ssh_user_host = options.ssh_user_host
+    ssh_user_host = options["ssh_user_host"]
     _, ssh_host = get_user_host(ssh_user_host)
     mongod_host = ssh_host
 
@@ -1505,7 +1503,7 @@ def main(parser_actions, options):
     # the first occurrence for each parameter, so we have the default connection options follow the
     # user-specified --sshConnection options.
     ssh_connection_options = (
-        f"{options.ssh_connection_options if options.ssh_connection_options else ''}"
+        f"{options['ssh_connection_options'] if options['ssh_connection_options'] else ''}"
         f" {powercycle_constants.DEFAULT_SSH_CONNECTION_OPTIONS}"
     )
     # For remote operations requiring sudo, force pseudo-tty allocation,
@@ -1519,15 +1517,14 @@ def main(parser_actions, options):
         ssh_connection_options=ssh_connection_options,
         ssh_options=ssh_options,
         use_shell=True,
-        access_retry_count=options.ssh_access_retry_count,
+        access_retry_count=options["ssh_access_retry_count"],
     )
     verify_remote_access(local_ops)
 
     # Pass client_args to the remote script invocation.
     client_args = "powercycle run"
-    options_dict = vars(options)
     for action in parser_actions:
-        option_value = options_dict.get(action.dest, None)
+        option_value = options.get(action.dest, None)
         if option_value != action.default:
             # The boolean options do not require the option_value.
             if isinstance(option_value, bool):
@@ -1783,7 +1780,7 @@ def main(parser_actions, options):
             ssh_connection_options=ssh_connection_options,
             ssh_options=ssh_options,
             use_shell=True,
-            access_retry_count=options.ssh_access_retry_count,
+            access_retry_count=options["ssh_access_retry_count"],
         )
         verify_remote_access(local_ops)
         ret, output = call_remote_operation(

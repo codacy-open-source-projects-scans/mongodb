@@ -29,18 +29,18 @@
 
 #pragma once
 
+#include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
+#include "mongo/util/interruptible.h"
+#include "mongo/util/synchronized_value.h"
+#include "mongo/util/time_support.h"
+
 #include <map>
 #include <string>
 
 #include <boost/optional.hpp>
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/support/status.h>
-
-#include "mongo/db/operation_context.h"
-#include "mongo/db/service_context.h"
-#include "mongo/util/interruptible.h"
-#include "mongo/util/synchronized_value.h"
-#include "mongo/util/time_support.h"
 
 namespace mongo::transport::grpc {
 
@@ -81,11 +81,19 @@ public:
             return;
         }
         *statusGuard = std::move(status);
+
+        cancelSource.cancel();
+    }
+
+    SemiFuture<void> onCancel() {
+        return cancelSource.token().onCancel();
     }
 
 private:
     Date_t _deadline;
     synchronized_value<boost::optional<::grpc::Status>> _cancellationStatus;
+
+    CancellationSource cancelSource;
 };
 
 /**

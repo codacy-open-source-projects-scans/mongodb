@@ -31,13 +31,6 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <cstddef>
-#include <memory>
-#include <string>
-#include <system_error>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -50,24 +43,29 @@
 #include "mongo/client/remote_command_targeter_mock.h"
 #include "mongo/db/basic_types_gen.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
+#include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/s/balancer/balancer_commands_scheduler.h"
 #include "mongo/db/s/balancer/balancer_commands_scheduler_impl.h"
-#include "mongo/db/s/config/config_server_test_fixture.h"
-#include "mongo/db/s/config/sharding_catalog_manager.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/config_server_test_fixture.h"
+#include "mongo/db/topology/shard_registry.h"
+#include "mongo/db/versioning_protocol/shard_version_factory.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/index_version.h"
 #include "mongo/s/request_types/move_range_request_gen.h"
-#include "mongo/s/shard_version_factory.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 namespace mongo {
 namespace {
@@ -112,7 +110,7 @@ public:
         shardSvrRequest.setDbName(DatabaseName::kAdmin);
         shardSvrRequest.setMoveRangeRequestBase(base);
         shardSvrRequest.setFromShard(from);
-        shardSvrRequest.setEpoch(OID::gen());
+        shardSvrRequest.setCollectionTimestamp(Timestamp(10));
         shardSvrRequest.setMaxChunkSizeBytes(1024 * 1024);
 
         return shardSvrRequest;
@@ -179,6 +177,7 @@ TEST_F(BalancerCommandsSchedulerTest, SuccessfulMoveRangeCommand) {
         }});
     _scheduler.start(operationContext());
     ShardsvrMoveRange shardsvrRequest(kNss);
+    shardsvrRequest.setCollectionTimestamp(Timestamp(10));
     shardsvrRequest.setDbName(DatabaseName::kAdmin);
     shardsvrRequest.setFromShard(kShardId0);
     shardsvrRequest.setMaxChunkSizeBytes(1024);
@@ -236,16 +235,15 @@ TEST_F(BalancerCommandsSchedulerTest, SuccessfulRequestChunkDataSizeCommand) {
     _scheduler.start(operationContext());
     ChunkType chunk = makeChunk(0, kShardId0);
 
-    auto futureResponse = _scheduler.requestDataSize(
-        operationContext(),
-        kNss,
-        chunk.getShard(),
-        chunk.getRange(),
-        ShardVersionFactory::make(chunk.getVersion(),
-                                  boost::optional<CollectionIndexes>(boost::none)),
-        KeyPattern(BSON("x" << 1)),
-        false /* issuedByRemoteUser */,
-        (kDefaultMaxChunkSizeBytes / 100) * 25 /* maxSize */);
+    auto futureResponse =
+        _scheduler.requestDataSize(operationContext(),
+                                   kNss,
+                                   chunk.getShard(),
+                                   chunk.getRange(),
+                                   ShardVersionFactory::make(chunk.getVersion()),
+                                   KeyPattern(BSON("x" << 1)),
+                                   false /* issuedByRemoteUser */,
+                                   (kDefaultMaxChunkSizeBytes / 100) * 25 /* maxSize */);
     auto swReceivedDataSize = futureResponse.getNoThrow();
     ASSERT_OK(swReceivedDataSize.getStatus());
     auto receivedDataSize = swReceivedDataSize.getValue();
@@ -281,11 +279,12 @@ TEST_F(BalancerCommandsSchedulerTest, SuccessfulMoveCollectionRequest) {
         ASSERT_EQ(1, shardDistributionArray.size());
 
         const auto shardKeyRange = ShardKeyRange::parse(
-            IDLParserContext("BalancerCommandsSchedulerTest"), shardDistributionArray.at(0).Obj());
+            shardDistributionArray.at(0).Obj(), IDLParserContext("BalancerCommandsSchedulerTest"));
         ASSERT_EQ(kShardId0, shardKeyRange.getShard());
 
-        ASSERT_EQ(Provenance_serializer(ProvenanceEnum::kBalancerMoveCollection),
-                  request.cmdObj.getStringField(ShardsvrReshardCollection::kProvenanceFieldName));
+        ASSERT_EQ(
+            ReshardingProvenance_serializer(ReshardingProvenanceEnum::kBalancerMoveCollection),
+            request.cmdObj.getStringField(ShardsvrReshardCollection::kProvenanceFieldName));
 
         return OkReply().toBSON();
     }});

@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -39,6 +37,8 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
+
+#include <string>
 
 namespace mongo {
 namespace {
@@ -65,6 +65,10 @@ public:
                                  const BSONObj&) const override {
         // No explicit privileges required.  Any authenticated user may call.
         return Status::OK();
+    }
+
+    bool requiresAuthzChecks() const final {
+        return false;
     }
 
     bool run(OperationContext* opCtx,

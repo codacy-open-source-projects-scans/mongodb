@@ -29,8 +29,6 @@
 
 #include "mongo/transport/hello_metrics.h"
 
-#include <fmt/format.h>
-
 #include "mongo/db/client.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
@@ -40,8 +38,9 @@
 #include "mongo/transport/session_manager_common_mock.h"
 #include "mongo/transport/transport_layer_manager_impl.h"
 #include "mongo/transport/transport_layer_mock.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <fmt/format.h>
 
 namespace mongo::transport {
 namespace {
@@ -98,44 +97,44 @@ public:
 };
 
 TEST_F(HelloMetricsTest, TwoExhaustHellosIncrementOnce) {
-    InExhaustHello::get(session.get())->setInExhaust(true, "hello"_sd);
+    InExhaustHello::get(session.get())->setInExhaust(InExhaustHello::Command::kHello);
     assertExhaustMetricsEqual(helloExhaustMetrics);
 
-    InExhaustHello::get(session.get())->setInExhaust(true, "hello"_sd);
+    InExhaustHello::get(session.get())->setInExhaust(InExhaustHello::Command::kHello);
     assertExhaustMetricsEqual(helloExhaustMetrics);
 }
 
 TEST_F(HelloMetricsTest, ExhaustMasterDecrementsHello) {
-    InExhaustHello::get(session.get())->setInExhaust(true, "hello"_sd);
+    InExhaustHello::get(session.get())->setInExhaust(InExhaustHello::Command::kHello);
     assertExhaustMetricsEqual(helloExhaustMetrics);
 
-    InExhaustHello::get(session.get())->setInExhaust(true, "isMaster"_sd);
+    InExhaustHello::get(session.get())->setInExhaust(InExhaustHello::Command::kIsMaster);
     assertExhaustMetricsEqual(isMasterExhaustMetrics);
 }
 
 TEST_F(HelloMetricsTest, TwoExhaustMastersIncrementOnce) {
-    InExhaustHello::get(session.get())->setInExhaust(true, "isMaster"_sd);
+    InExhaustHello::get(session.get())->setInExhaust(InExhaustHello::Command::kIsMaster);
     assertExhaustMetricsEqual(isMasterExhaustMetrics);
 
-    InExhaustHello::get(session.get())->setInExhaust(true, "isMaster"_sd);
+    InExhaustHello::get(session.get())->setInExhaust(InExhaustHello::Command::kIsMaster);
     assertExhaustMetricsEqual(isMasterExhaustMetrics);
 }
 
 TEST_F(HelloMetricsTest, ExhaustHelloDecrementsMaster) {
-    InExhaustHello::get(session.get())->setInExhaust(true, "isMaster"_sd);
+    InExhaustHello::get(session.get())->setInExhaust(InExhaustHello::Command::kIsMaster);
     assertExhaustMetricsEqual(isMasterExhaustMetrics);
 
-    InExhaustHello::get(session.get())->setInExhaust(true, "hello"_sd);
+    InExhaustHello::get(session.get())->setInExhaust(InExhaustHello::Command::kHello);
     assertExhaustMetricsEqual(helloExhaustMetrics);
 }
 
 TEST_F(HelloMetricsTest, SessionManagerDecrementsExhaustHelloMetrics) {
-    InExhaustHello::get(session.get())->setInExhaust(true, "hello"_sd);
+    InExhaustHello::get(session.get())->setInExhaust(InExhaustHello::Command::kHello);
     ASSERT_EQ(transportLayer->getSessionManager()->helloMetrics.getNumExhaustHello(), 1);
 
     {
         auto session2 = transportLayer->createSession();
-        InExhaustHello::get(session2.get())->setInExhaust(true, "hello"_sd);
+        InExhaustHello::get(session2.get())->setInExhaust(InExhaustHello::Command::kHello);
         ASSERT_EQ(transportLayer->getSessionManager()->helloMetrics.getNumExhaustHello(), 2);
         ASSERT_DOES_NOT_THROW(transportLayer->deleteSession(session2->id()));
     }
@@ -144,12 +143,12 @@ TEST_F(HelloMetricsTest, SessionManagerDecrementsExhaustHelloMetrics) {
 }
 
 TEST_F(HelloMetricsTest, SessionManagerDecrementsExhaustInMasterMetrics) {
-    InExhaustHello::get(session.get())->setInExhaust(true, "isMaster"_sd);
+    InExhaustHello::get(session.get())->setInExhaust(InExhaustHello::Command::kIsMaster);
     ASSERT_EQ(transportLayer->getSessionManager()->helloMetrics.getNumExhaustIsMaster(), 1);
 
     {
         auto session2 = transportLayer->createSession();
-        InExhaustHello::get(session2.get())->setInExhaust(true, "isMaster"_sd);
+        InExhaustHello::get(session2.get())->setInExhaust(InExhaustHello::Command::kIsMaster);
         ASSERT_EQ(transportLayer->getSessionManager()->helloMetrics.getNumExhaustIsMaster(), 2);
         ASSERT_DOES_NOT_THROW(transportLayer->deleteSession(session2->id()));
     }

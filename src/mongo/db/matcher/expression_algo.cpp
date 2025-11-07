@@ -29,29 +29,16 @@
 
 #include "mongo/db/matcher/expression_algo.h"
 
-#include <algorithm>
-#include <cmath>
-#include <compare>
-#include <cstddef>
-#include <iterator>
-#include <set>
-#include <type_traits>
-
-#include <absl/container/flat_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <s2cellid.h>
-
 #include "mongo/base/checked_cast.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
+#include "mongo/db/exec/matcher/matcher.h"
+#include "mongo/db/exec/matcher/matcher_geo.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/geo/geometry_container.h"
-#include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/matcher/expression_expr.h"
 #include "mongo/db/matcher/expression_geo.h"
@@ -60,12 +47,23 @@
 #include "mongo/db/matcher/expression_path.h"
 #include "mongo/db/matcher/expression_tree.h"
 #include "mongo/db/matcher/expression_type.h"
-#include "mongo/db/matcher/match_expression_dependencies.h"
 #include "mongo/db/matcher/matcher_type_set.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/dependency_analysis/match_expression_dependencies.h"
 #include "mongo/util/assert_util.h"
+
+#include <cmath>
+#include <compare>
+#include <cstddef>
+#include <iterator>
+#include <set>
+#include <type_traits>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -311,7 +309,7 @@ bool _isSubsetOf(const MatchExpression* lhs, const ExistsMatchExpression* rhs) {
         const ComparisonMatchExpression* cme = static_cast<const ComparisonMatchExpression*>(lhs);
         // The CompareMatchExpression constructor prohibits creating a match expression with EOO or
         // Undefined types, so only need to ensure that the value is not of type jstNULL.
-        return cme->getData().type() != jstNULL;
+        return cme->getData().type() != BSONType::null;
     }
 
     switch (lhs->matchType()) {
@@ -339,7 +337,7 @@ bool _isSubsetOf(const MatchExpression* lhs, const ExistsMatchExpression* rhs) {
                 case MatchExpression::EQ: {
                     const ComparisonMatchExpression* cme =
                         static_cast<const ComparisonMatchExpression*>(lhs->getChild(0));
-                    return cme->getData().type() == jstNULL;
+                    return cme->getData().type() == BSONType::null;
                 }
                 case MatchExpression::MATCH_IN: {
                     const InMatchExpression* ime =
@@ -367,6 +365,7 @@ unique_ptr<MatchExpression> createAndOfNodes(std::vector<unique_ptr<MatchExpress
     }
 
     unique_ptr<AndMatchExpression> splitAnd = std::make_unique<AndMatchExpression>();
+    splitAnd->reserve(children->size());
     for (auto&& expr : *children)
         splitAnd->add(std::move(expr));
 
@@ -382,6 +381,7 @@ unique_ptr<MatchExpression> createNorOfNodes(std::vector<unique_ptr<MatchExpress
     }
 
     unique_ptr<NorMatchExpression> splitNor = std::make_unique<NorMatchExpression>();
+    splitNor->reserve(children->size());
     for (auto&& expr : *children)
         splitNor->add(std::move(expr));
 
@@ -479,8 +479,8 @@ std::pair<unique_ptr<MatchExpression>, unique_ptr<MatchExpression>> splitMatchEx
 
 bool pathDependenciesAreExact(StringData key, const MatchExpression* expr) {
     DepsTracker columnDeps;
-    match_expression::addDependencies(expr, &columnDeps);
-    return !columnDeps.needWholeDocument && columnDeps.fields == OrderedPathSet{key.toString()};
+    dependency_analysis::addDependencies(expr, &columnDeps);
+    return !columnDeps.needWholeDocument && columnDeps.fields == OrderedPathSet{std::string{key}};
 }
 
 void addExpr(StringData path,
@@ -532,11 +532,11 @@ std::unique_ptr<MatchExpression> tryAddExpr(StringData path,
  */
 bool canCompareWith(const BSONElement& elem, bool isEQ) {
     const auto type = elem.type();
-    if (type == BSONType::MinKey || type == BSONType::MaxKey) {
+    if (type == BSONType::minKey || type == BSONType::maxKey) {
         // MinKey and MaxKey have special semantics for comparison to objects.
         return false;
     }
-    if (type == BSONType::Array || type == BSONType::Object) {
+    if (type == BSONType::array || type == BSONType::object) {
         return isEQ && elem.Obj().isEmpty();
     }
 
@@ -591,7 +591,7 @@ std::unique_ptr<MatchExpression> splitMatchExpressionForColumns(
             auto sub = checked_cast<const TypeMatchExpression*>(me);
             tassert(6430600,
                     "Not expecting to find EOO in a $type expression",
-                    !sub->typeSet().hasType(BSONType::EOO));
+                    !sub->typeSet().hasType(BSONType::eoo));
             return tryAddExpr(sub->path(), me, out);
         }
 
@@ -675,29 +675,82 @@ std::unique_ptr<MatchExpression> splitMatchExpressionForColumns(
     MONGO_UNREACHABLE;
 }
 
-}  // namespace
-
-namespace expression {
-
-bool hasExistenceOrTypePredicateOnPath(const MatchExpression& expr, StringData path) {
-    if (expr.getCategory() == MatchExpression::MatchCategory::kLeaf) {
-        return ((expr.matchType() == MatchExpression::MatchType::EXISTS ||
-                 expr.matchType() == MatchExpression::MatchType::TYPE_OPERATOR) &&
-                expr.path() == path);
+/**
+ * Return true if any of the paths in 'prefixCandidates' are identical to or an ancestor of any
+ * of the paths in 'testSet'.  The order of the parameters matters -- it's not commutative. It is
+ * important that 'testSet' and 'prefixCandidates' use the same comparator for ordering.
+ */
+template <typename T>
+bool containsDependencyHelper(const std::set<T, PathComparator>& testSet,
+                              const OrderedPathSet& prefixCandidates) {
+    if (testSet.empty()) {
+        return false;
     }
-    for (size_t i = 0; i < expr.numChildren(); i++) {
-        MatchExpression* child = expr.getChild(i);
-        if (hasExistenceOrTypePredicateOnPath(*child, path)) {
+
+    PathComparator pathComparator;
+    auto i2 = testSet.begin();
+    for (const auto& p1 : prefixCandidates) {
+        while (pathComparator(*i2, p1)) {
+            ++i2;
+            if (i2 == testSet.end()) {
+                return false;
+            }
+        }
+        // At this point we know that p1 <= *i2, so it may be identical or a path prefix.
+        if (p1 == *i2 || expression::isPathPrefixOf(p1, *i2)) {
             return true;
         }
     }
     return false;
 }
 
+bool hasPredicateOnPathsHelper(const MatchExpression& expr,
+                               mongo::MatchExpression::MatchType searchType,
+                               const OrderedPathSet& paths,
+                               boost::optional<StringData> parentPath) {
+    // Accumulate the path components from any ancestors with partial paths (eg. $elemMatch) through
+    // the tree to the leaves. Leaf expressions as children of these partial-path expressions will
+    // sometimes have no path and would otherwise fail to be considered here.
+    std::string ownedPath;
+    boost::optional<StringData> fullPath;
+    if (expr.fieldRef()) {
+        if (parentPath) {
+            ownedPath = fmt::format("{}.{}", *parentPath, expr.fieldRef()->dottedField());
+            fullPath = ownedPath;
+        } else {
+            fullPath = expr.fieldRef()->dottedField();
+        }
+    } else {
+        fullPath = parentPath;
+    }
+
+    if (expr.getCategory() == MatchExpression::MatchCategory::kLeaf && fullPath) {
+        return ((expr.matchType() == searchType) &&
+                containsDependencyHelper<StringData>({*fullPath}, paths));
+    }
+    for (size_t i = 0; i < expr.numChildren(); i++) {
+        MatchExpression* child = expr.getChild(i);
+        if (hasPredicateOnPathsHelper(*child, searchType, paths, fullPath)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+namespace expression {
+
+bool hasPredicateOnPaths(const MatchExpression& expr,
+                         mongo::MatchExpression::MatchType searchType,
+                         const OrderedPathSet& paths) {
+    return hasPredicateOnPathsHelper(expr, searchType, paths, boost::none /* parentPath */);
+}
+
 bool isSubsetOf(const MatchExpression* lhs, const MatchExpression* rhs) {
     // lhs is the query and rhs is the index.
-    invariant(lhs);
-    invariant(rhs);
+    tassert(11052402, "lhs must not be null", lhs);
+    tassert(11052403, "rhs must not be null", rhs);
 
     if (lhs->equivalent(rhs)) {
         return true;
@@ -717,7 +770,8 @@ bool isSubsetOf(const MatchExpression* lhs, const MatchExpression* rhs) {
                 return true;
             }
         }
-        return false;
+        // Do not return here and fallthrough to cases below. The LHS may be a $or which requires
+        // its own recursive calls to verify.
     }
 
     if (rhs->matchType() == MatchExpression::AND) {
@@ -763,8 +817,8 @@ bool isSubsetOf(const MatchExpression* lhs, const MatchExpression* rhs) {
         }
 
         GeometryContainer geometry = queryMatchExpression->getGeoContainer();
-        if (GeoMatchExpression::contains(
-                indexMatchExpression->getGeoContainer(), GeoExpression::WITHIN, &geometry)) {
+        if (exec::matcher::geoContains(
+                indexMatchExpression->getGeoContainer(), GeoExpression::WITHIN, geometry)) {
             // The region described by query is within the region captured by the index.
             // For example, a query over the $geometry for the city of Houston is covered by an
             // index over the $geometry for the entire state of texas. Therefore this index can be
@@ -788,7 +842,7 @@ bool isSubsetOf(const MatchExpression* lhs, const MatchExpression* rhs) {
         const auto* indexMatchExpression = static_cast<const GeoMatchExpression*>(rhs);
 
         auto geometryContainer = queryMatchExpression->getGeoExpression().getGeometry();
-        if (indexMatchExpression->matchesGeoContainer(geometryContainer)) {
+        if (exec::matcher::matchesGeoContainer(indexMatchExpression, geometryContainer)) {
             // The region described by query is within the region captured by the index.
             // Therefore this index can be used in a potential solution for this query.
             return true;
@@ -924,25 +978,7 @@ bool hasOnlyRenameableMatchExpressionChildren(const MatchExpression& expr,
 }
 
 bool containsDependency(const OrderedPathSet& testSet, const OrderedPathSet& prefixCandidates) {
-    if (testSet.empty()) {
-        return false;
-    }
-
-    PathComparator pathComparator;
-    auto i2 = testSet.begin();
-    for (const auto& p1 : prefixCandidates) {
-        while (pathComparator(*i2, p1)) {
-            ++i2;
-            if (i2 == testSet.end()) {
-                return false;
-            }
-        }
-        // At this point we know that p1 <= *i2, so it may be identical or a path prefix.
-        if (p1 == *i2 || isPathPrefixOf(p1, *i2)) {
-            return true;
-        }
-    }
-    return false;
+    return containsDependencyHelper(testSet, prefixCandidates);
 }
 
 bool containsOverlappingPaths(const OrderedPathSet& testSet) {
@@ -1051,7 +1087,7 @@ bool isIndependentOfImpl(E&& expr,
         // The whole expression is independent of 'pathSet' if and only if every child is.
         for (int i = 0, numChildren = expr.numChildren(); i < numChildren; ++i) {
             if (!isIndependentOfImpl<E, Args...>(
-                    *expr.getChild(i), pathSet, renames, std::forward<Args>(renameables)...)) {
+                    *expr.getChild(i), pathSet, renames, renameables...)) {
                 return false;
             }
         }
@@ -1075,7 +1111,7 @@ bool isIndependentOfImpl(E&& expr,
     }
 
     auto depsTracker = DepsTracker{};
-    match_expression::addDependencies(&expr, &depsTracker);
+    dependency_analysis::addDependencies(&expr, &depsTracker);
     // Match expressions that generate random numbers can't be safely split out and pushed down.
     if (depsTracker.needRandomGenerator || depsTracker.needWholeDocument) {
         return false;
@@ -1103,7 +1139,8 @@ bool isIndependentOfImpl(E&& expr,
                 // No numeric components.
                 && !pathMatch->elementPath()->fieldRef().hasNumericPathComponents()
                 // Ignores missing fields.
-                && !pathMatch->matchesSingleElement(BSONObj{}.firstElement(), nullptr);
+                &&
+                !exec::matcher::matchesSingleElement(pathMatch, BSONObj{}.firstElement(), nullptr);
         }
 
         // Other cases may be allowable, but haven't been considered and tested yet.
@@ -1120,7 +1157,7 @@ bool isIndependentOfImpl(E&& expr,
                 path = path.substr(0, dotPos);
             }
             if (auto it = truncated.find(path); it == truncated.end()) {
-                truncated.insert(path.toString());
+                truncated.insert(std::string{path});
             }
         }
         return areIndependent(truncated, depsTracker.fields);
@@ -1175,7 +1212,7 @@ bool isOnlyDependentOnImpl(E&& expr,
 
     // Now add the match expression's paths and see if the dependencies are the same.
     auto exprDepsTracker = DepsTracker{};
-    match_expression::addDependencies(&expr, &exprDepsTracker);
+    dependency_analysis::addDependencies(&expr, &exprDepsTracker);
     // Match expressions that generate random numbers can't be safely split out and pushed down.
     if (exprDepsTracker.needRandomGenerator) {
         return false;
@@ -1246,7 +1283,7 @@ void mapOver(MatchExpression* expr, NodeTraversalFunc func, std::string path) {
             path += ".";
         }
 
-        path += expr->path().toString();
+        path += std::string{expr->path()};
     }
 
     for (size_t i = 0; i < expr->numChildren(); i++) {
@@ -1343,7 +1380,7 @@ bool isPathPrefixOf(StringData first, StringData second) {
         return false;
     }
 
-    return second.startsWith(first) && second[first.size()] == '.';
+    return second.starts_with(first) && second[first.size()] == '.';
 }
 
 std::string filterMapToString(const StringMap<std::unique_ptr<MatchExpression>>& filterMap) {

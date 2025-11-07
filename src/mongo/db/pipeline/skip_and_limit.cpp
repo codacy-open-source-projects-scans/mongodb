@@ -27,24 +27,25 @@
  *    it in the license file.
  */
 
+#include "mongo/db/pipeline/skip_and_limit.h"
+
+#include "mongo/base/exact_cast.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
+#include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/document_source_limit.h"
+#include "mongo/db/pipeline/document_source_skip.h"
+#include "mongo/db/pipeline/stage_constraints.h"
+#include "mongo/platform/overflow_arithmetic.h"
+
 #include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstdint>
 #include <iterator>
 #include <limits>
 #include <list>
 
+#include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/exact_cast.h"
-#include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/document_source_limit.h"
-#include "mongo/db/pipeline/document_source_skip.h"
-#include "mongo/db/pipeline/skip_and_limit.h"
-#include "mongo/db/pipeline/stage_constraints.h"
-#include "mongo/platform/overflow_arithmetic.h"
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -78,21 +79,6 @@ SkipThenLimit LimitThenSkip::flip() const {
     return {_skip, boost::none};
 }
 
-namespace {
-
-Pipeline::SourceContainer::iterator eraseAndStich(Pipeline::SourceContainer::iterator itr,
-                                                  Pipeline::SourceContainer* container) {
-    itr = container->erase(itr);
-    // If the removed stage wasn't the last in the pipeline, make sure that the stage followed the
-    // erased stage has a valid pointer to the previous document source.
-    if (itr != container->end()) {
-        (*itr)->setSource(itr != container->begin() ? std::prev(itr)->get() : nullptr);
-    }
-    return itr;
-}
-
-}  // namespace
-
 /**
  * If there are any $limit stages that could be logically swapped forward to the position of the
  * pipeline pointed to by 'itr' without changing the meaning of the query, removes these $limit
@@ -105,8 +91,8 @@ Pipeline::SourceContainer::iterator eraseAndStich(Pipeline::SourceContainer::ite
  * If shouldModifyPipeline is false, this method does not swap any stages but rather just returns
  * the single limit value described above.
  */
-boost::optional<long long> extractLimitForPushdownHelper(Pipeline::SourceContainer::iterator itr,
-                                                         Pipeline::SourceContainer* container,
+boost::optional<long long> extractLimitForPushdownHelper(DocumentSourceContainer::iterator itr,
+                                                         DocumentSourceContainer* container,
                                                          bool shouldModifyPipeline) {
     int64_t skipSum = 0;
     boost::optional<long long> minLimit;
@@ -129,7 +115,7 @@ boost::optional<long long> extractLimitForPushdownHelper(Pipeline::SourceContain
             }
 
             if (shouldModifyPipeline) {
-                itr = eraseAndStich(itr, container);
+                itr = container->erase(itr);
             } else {
                 ++itr;
             }
@@ -143,18 +129,18 @@ boost::optional<long long> extractLimitForPushdownHelper(Pipeline::SourceContain
     return minLimit;
 }
 
-boost::optional<long long> extractLimitForPushdown(Pipeline::SourceContainer::iterator itr,
-                                                   Pipeline::SourceContainer* container) {
+boost::optional<long long> extractLimitForPushdown(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) {
     return extractLimitForPushdownHelper(itr, container, true /* shouldModifyPipeline */);
 }
 
-boost::optional<long long> getUserLimit(Pipeline::SourceContainer::iterator itr,
-                                        Pipeline::SourceContainer* container) {
+boost::optional<long long> getUserLimit(DocumentSourceContainer::iterator itr,
+                                        DocumentSourceContainer* container) {
     return extractLimitForPushdownHelper(itr, container, false /* shouldModifyPipeline */);
 }
 
-boost::optional<long long> extractSkipForPushdown(Pipeline::SourceContainer::iterator itr,
-                                                  Pipeline::SourceContainer* container) {
+boost::optional<long long> extractSkipForPushdown(DocumentSourceContainer::iterator itr,
+                                                  DocumentSourceContainer* container) {
     boost::optional<long long> skipSum;
     while (itr != container->end()) {
         auto nextStage = itr->get();
@@ -167,7 +153,7 @@ boost::optional<long long> extractSkipForPushdown(Pipeline::SourceContainer::ite
         // stages one after another, only total sum of skipped documents matters.
         if (nextSkip && !overflow::add(skipSum.get_value_or(0), nextSkip->getSkip(), &safeSum)) {
             skipSum = safeSum;
-            itr = eraseAndStich(itr, container);
+            itr = container->erase(itr);
         } else if (!nextSkip && !nextStage->constraints().canSwapWithSkippingOrLimitingStage) {
             break;
         } else {

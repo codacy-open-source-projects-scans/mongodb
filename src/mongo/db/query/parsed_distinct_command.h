@@ -29,19 +29,21 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <utility>
-
 #include "mongo/base/status_with.h"
 #include "mongo/db/matcher/expression.h"
-#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/extensions_callback.h"
+#include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/canonical_distinct.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/distinct_command_gen.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -59,6 +61,10 @@ struct ParsedDistinctCommand {
     // they will be useful other than to keep the original BSON values around in-memory to avoid
     // copying large strings and such.
     std::unique_ptr<DistinctCommandRequest> distinctCommandRequest;
+
+    inline BSONObj toBSON() const {
+        return distinctCommandRequest->toBSON();
+    }
 };
 
 namespace parsed_distinct_command {
@@ -88,9 +94,11 @@ std::unique_ptr<ParsedDistinctCommand> parse(
     MatchExpressionParser::AllowedFeatureSet allowedFeatures);
 
 /**
- * Convert the canonical query with a distinct field into an aggregation command.
+ * Convert the canonical query with a distinct field into an aggregation command request.
  */
-StatusWith<BSONObj> asAggregation(const CanonicalQuery& query);
+AggregateCommandRequest asAggregation(const CanonicalQuery& query,
+                                      boost::optional<ExplainOptions::Verbosity> verbosity,
+                                      const SerializationContext& serializationContext);
 
 /**
  * Convert the parsed distinct command into a canonical query with a distinct field.

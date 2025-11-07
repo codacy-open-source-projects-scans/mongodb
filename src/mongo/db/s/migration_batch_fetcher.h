@@ -27,33 +27,28 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
-
 #include "mongo/base/error_extra_info.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
+#include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/repl/optime.h"
 #include "mongo/db/s/migration_batch_inserter.h"
-#include "mongo/db/s/migration_batch_mock_inserter.h"
 #include "mongo/db/s/migration_session_id.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/log.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/grid.h"
-#include "mongo/util/cancellation.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/concurrency/ticketholder.h"
 #include "mongo/util/namespace_string_util.h"
-#include "mongo/util/producer_consumer_queue.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <string>
 
 #pragma once
 
@@ -103,7 +98,6 @@ public:
                           const UUID& migrationId,
                           const UUID& collectionId,
                           std::shared_ptr<MigrationCloningProgressSharedState> migrationInfo,
-                          bool parallelFetchingSupported,
                           int maxBufferedSizeBytesPerThread);
 
     ~MigrationBatchFetcher();
@@ -115,10 +109,6 @@ public:
     // Get inserter thread pool stats.
     ThreadPool::Stats getThreadPoolStats() const {
         return _inserterWorkers->getStats();
-    }
-
-    int getChunkMigrationConcurrency() const {
-        return _chunkMigrationConcurrency;
     }
 
 private:
@@ -152,9 +142,6 @@ private:
 
     NamespaceString _nss;
 
-    // Size of thread pools.
-    int _chunkMigrationConcurrency;
-
     MigrationSessionId _sessionId;
 
     // Inserter thread pool.
@@ -179,9 +166,6 @@ private:
     UUID _migrationId;
 
     WriteConcernOptions _writeConcern;
-
-    // Indicates if source is prepared to service _migrateClone requests in parallel.
-    bool _isParallelFetchingSupported;
 
     TicketHolder _secondaryThrottleTicket;
 

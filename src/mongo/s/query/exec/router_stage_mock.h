@@ -29,16 +29,18 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <queue>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/s/query/exec/cluster_query_result.h"
 #include "mongo/s/query/exec/router_exec_stage.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
+
+#include <queue>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -55,12 +57,12 @@ public:
 
     void kill(OperationContext* opCtx) final;
 
-    bool remotesExhausted() final;
+    bool remotesExhausted() const final;
 
     /**
      * Queues a BSONObj to be returned.
      */
-    void queueResult(const ClusterQueryResult& result);
+    void queueResult(ClusterQueryResult&& result);
 
     /**
      * Queues an error response.

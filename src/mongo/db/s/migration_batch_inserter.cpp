@@ -29,6 +29,36 @@
 
 #include "mongo/db/s/migration_batch_inserter.h"
 
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/cancelable_operation_context.h"
+#include "mongo/db/client.h"
+#include "mongo/db/local_catalog/collection_operation_source.h"
+#include "mongo/db/local_catalog/document_validation.h"
+#include "mongo/db/query/write_ops/single_write_result_gen.h"
+#include "mongo/db/query/write_ops/write_ops_exec.h"
+#include "mongo/db/query/write_ops/write_ops_gen.h"
+#include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/s/range_deletion_util.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/session_catalog.h"
+#include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/sharding_runtime_d_params_gen.h"
+#include "mongo/db/sharding_environment/sharding_statistics.h"
+#include "mongo/db/transaction/transaction_participant.h"
+#include "mongo/executor/task_executor_pool.h"
+#include "mongo/logv2/log.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/out_of_line_executor.h"
+#include "mongo/util/str.h"
+#include "mongo/util/time_support.h"
+
 #include <mutex>
 #include <type_traits>
 #include <vector>
@@ -36,38 +66,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/db/admission/execution_admission_context.h"
-#include "mongo/db/cancelable_operation_context.h"
-#include "mongo/db/catalog/collection_operation_source.h"
-#include "mongo/db/catalog/document_validation.h"
-#include "mongo/db/client.h"
-#include "mongo/db/query/write_ops/single_write_result_gen.h"
-#include "mongo/db/query/write_ops/write_ops_exec.h"
-#include "mongo/db/query/write_ops/write_ops_gen.h"
-#include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/range_deletion_util.h"
-#include "mongo/db/s/sharding_runtime_d_params_gen.h"
-#include "mongo/db/s/sharding_statistics.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/session/session_catalog.h"
-#include "mongo/db/session/session_catalog_mongod.h"
-#include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/executor/task_executor_pool.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/s/grid.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/decorable.h"
-#include "mongo/util/out_of_line_executor.h"
-#include "mongo/util/str.h"
-#include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kShardingMigration
 
@@ -101,7 +99,10 @@ auto runWithoutSession(OperationContext* opCtx, Callable callable) {
     auto retVal = callable();
 
     // The below code can throw, so it cannot run in a scope guard.
-    opCtx->checkForInterrupt();
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        opCtx->checkForInterrupt();
+    }
     checkOutSessionAndVerifyTxnState(opCtx);
 
     return retVal;
@@ -117,7 +118,10 @@ void runWithoutSession(OperationContext* opCtx, Callable callable) {
     callable();
 
     // The below code can throw, so it cannot run in a scope guard.
-    opCtx->checkForInterrupt();
+    {
+        stdx::lock_guard<Client> lk(*opCtx->getClient());
+        opCtx->checkForInterrupt();
+    }
     checkOutSessionAndVerifyTxnState(opCtx);
 }
 }  // namespace
@@ -151,7 +155,10 @@ void MigrationBatchInserter::run(Status status) const try {
             stdx::lock_guard<Client> lk(*_outerOpCtx->getClient());
             _outerOpCtx->checkForInterrupt();
         }
-        opCtx->checkForInterrupt();
+        {
+            stdx::lock_guard<Client> lk(*opCtx->getClient());
+            opCtx->checkForInterrupt();
+        }
     };
 
     auto it = arr.begin();
@@ -184,8 +191,8 @@ void MigrationBatchInserter::run(Status status) const try {
                 opCtx,
                 DocumentValidationSettings::kDisableSchemaValidation |
                     DocumentValidationSettings::kDisableInternalValidation);
-            const auto reply =
-                write_ops_exec::performInserts(opCtx, insertOp, OperationSource::kFromMigrate);
+            const auto reply = write_ops_exec::performInserts(
+                opCtx, insertOp, /*preConditions=*/boost::none, OperationSource::kFromMigrate);
             for (unsigned long i = 0; i < reply.results.size(); ++i) {
                 uassertStatusOKWithContext(
                     reply.results[i],
@@ -208,7 +215,7 @@ void MigrationBatchInserter::run(Status status) const try {
         _migrationProgress->incNumCloned(batchNumCloned);
         _migrationProgress->incNumBytes(batchClonedBytes);
 
-        if (_writeConcern.needToWaitForOtherNodes() && _threadCount == 1) {
+        if (_writeConcern.needToWaitForOtherNodes()) {
             if (auto ticket =
                     _secondaryThrottleTicket->tryAcquire(&ExecutionAdmissionContext::get(opCtx))) {
                 runWithoutSession(_outerOpCtx, [&] {

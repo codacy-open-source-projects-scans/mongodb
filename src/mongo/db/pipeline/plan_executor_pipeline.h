@@ -29,23 +29,17 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <queue>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/db/exec/agg/exec_pipeline.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/explain_util.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/plan_explainer_pipeline.h"
 #include "mongo/db/query/canonical_query.h"
@@ -58,7 +52,14 @@
 #include "mongo/db/record_id.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
-#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <queue>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -79,7 +80,7 @@ public:
     };
 
     PlanExecutorPipeline(boost::intrusive_ptr<ExpressionContext> expCtx,
-                         std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
+                         std::unique_ptr<Pipeline> pipeline,
                          ResumableScanType resumableScanType);
 
     CanonicalQuery* getCanonicalQuery() const override {
@@ -110,17 +111,19 @@ public:
     void restoreState(const RestoreContext&) override {}
 
     void detachFromOperationContext() override {
+        _execPipeline->detachFromOperationContext();
         _pipeline->detachFromOperationContext();
     }
 
     void reattachToOperationContext(OperationContext* opCtx) override {
+        _execPipeline->reattachToOperationContext(opCtx);
         _pipeline->reattachToOperationContext(opCtx);
     }
 
     ExecState getNext(BSONObj* objOut, RecordId* recordIdOut) override;
-    ExecState getNextDocument(Document* docOut, RecordId* recordIdOut) override;
+    ExecState getNextDocument(Document& docOut) override;
 
-    bool isEOF() override;
+    bool isEOF() const override;
 
     // DocumentSource execution is only used for executing aggregation commands, so the interfaces
     // for executing other CRUD operations are not supported.
@@ -138,7 +141,15 @@ public:
     }
 
     void dispose(OperationContext* opCtx) override {
-        _pipeline->dispose(opCtx);
+        _execPipeline->reattachToOperationContext(opCtx);
+        _execPipeline->dispose();
+    }
+
+    void forceSpill(PlanYieldPolicy* yieldPolicy) override {
+        tassert(10450600,
+                "Pipelines acquire locks internally, so yieldPolicy must be nullptr",
+                yieldPolicy == nullptr);
+        _execPipeline->forceSpill();
     }
 
     void stashResult(const BSONObj& obj) override {
@@ -151,13 +162,13 @@ public:
         return !_killStatus.isOK();
     }
 
-    Status getKillStatus() override {
+    Status getKillStatus() const override {
         invariant(isMarkedAsKilled());
         return _killStatus;
     }
 
     bool isDisposed() const override {
-        return _pipeline->isDisposed();
+        return _execPipeline->isDisposed();
     }
 
     Timestamp getLatestOplogTimestamp() const override {
@@ -182,12 +193,9 @@ public:
      */
     std::vector<Value> writeExplainOps(ExplainOptions::Verbosity verbosity) const {
         auto opts = SerializationOptions{.verbosity = verbosity};
-        return _pipeline->writeExplainOps(opts);
-    }
-
-    void enableSaveRecoveryUnitAcrossCommandsIfSupported() override {}
-    bool isSaveRecoveryUnitAcrossCommandsEnabled() const override {
-        return false;
+        return (verbosity >= ExplainOptions::Verbosity::kExecStats)
+            ? mergeExplains(*_pipeline, *_execPipeline, opts)
+            : _pipeline->writeExplainOps(opts);
     }
 
     boost::optional<StringData> getExecutorType() const override {
@@ -196,11 +204,6 @@ public:
     }
 
     PlanExecutor::QueryFramework getQueryFramework() const final;
-
-    bool usesCollectionAcquisitions() const final {
-        // TODO SERVER-78724: Replace this whenever aggregations use shard role acquisitions.
-        return false;
-    }
 
 private:
     /**
@@ -262,7 +265,8 @@ private:
 
     boost::intrusive_ptr<ExpressionContext> _expCtx;
 
-    std::unique_ptr<Pipeline, PipelineDeleter> _pipeline;
+    std::unique_ptr<Pipeline> _pipeline;
+    std::unique_ptr<exec::agg::Pipeline> _execPipeline;
 
     PlanExplainerPipeline _planExplainer;
 

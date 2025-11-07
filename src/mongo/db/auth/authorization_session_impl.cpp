@@ -28,19 +28,7 @@
  */
 
 
-#include "mongo/db/auth/authorization_manager.h"
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <algorithm>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <cstddef>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/auth/authorization_session_impl.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -58,13 +46,13 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/action_type_gen.h"
 #include "mongo/db/auth/auth_name.h"
-#include "mongo/db/auth/authorization_session_impl.h"
+#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authz_session_external_state.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern_search_list.h"
 #include "mongo/db/auth/validated_tenancy_scope.h"
 #include "mongo/db/client.h"
-#include "mongo/db/list_collections_gen.h"
+#include "mongo/db/local_catalog/ddl/list_collections_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
@@ -72,9 +60,8 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
+#include "mongo/rpc/metadata/audit_user_attrs.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
@@ -83,6 +70,19 @@
 #include "mongo/util/read_through_cache.h"
 #include "mongo/util/str.h"
 #include "mongo/util/testing_proctor.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
@@ -117,7 +117,7 @@ MONGO_INITIALIZER(ServerlessPrivilegePermittedMap)(InitializerContext*) try {
         auto matchType = static_cast<MatchTypeEnum>(i);
         auto matchTypeName = MatchType_serializer(matchType);
         auto dataObj = MatchType_get_extra_data(matchType);
-        auto data = MatchTypeExtraData::parse(IDLParserContext{matchTypeName}, dataObj);
+        auto data = MatchTypeExtraData::parse(dataObj, IDLParserContext{matchTypeName});
 
         std::vector<std::string> unknownActions;
         auto actions =
@@ -205,10 +205,10 @@ void AuthorizationSessionImpl::startRequest(OperationContext* opCtx) {
         // For non-security token users, check if expiration has passed and move session into
         // expired state if so.
         if (_authenticatedUser && _expirationTime &&
-            _expirationTime.value() <= opCtx->getServiceContext()->getFastClockSource()->now()) {
+            _expirationTime.value() <= opCtx->fastClockSource().now()) {
             _expiredUserName = std::exchange(_authenticatedUser, boost::none).value()->getName();
             _expirationTime = boost::none;
-            clearImpersonatedUserData();
+            rpc::AuditUserAttrs::resetToAuthenticatedUser(opCtx);
             _updateInternalAuthorizationState();
         }
     }
@@ -220,7 +220,15 @@ void AuthorizationSessionImpl::startContractTracking() {
         return;
     }
 
-    _contract.clear();
+    _contract.enterCommandScope();
+}
+
+void AuthorizationSessionImpl::endContractTracking() {
+    if (!checkContracts()) {
+        return;
+    }
+
+    _contract.exitCommandScope();
 }
 
 Status AuthorizationSessionImpl::addAndAuthorizeUser(OperationContext* opCtx,
@@ -302,9 +310,7 @@ Status AuthorizationSessionImpl::addAndAuthorizeUser(OperationContext* opCtx,
     } else {
         uassert(7070102,
                 "Invalid expiration time specified",
-                !expirationTime ||
-                    expirationTime.value() >
-                        opCtx->getServiceContext()->getFastClockSource()->now());
+                !expirationTime || expirationTime.value() > opCtx->fastClockSource().now());
         _authenticationMode = AuthenticationMode::kConnection;
     }
     _authenticatedUser = std::move(user);
@@ -312,8 +318,8 @@ Status AuthorizationSessionImpl::addAndAuthorizeUser(OperationContext* opCtx,
     _expiredUserName = boost::none;
     _loginTime = Date_t::now();
 
-    // If there are any users and roles in the impersonation data, clear it out.
-    clearImpersonatedUserData();
+    // Reset AuditUserAttrs so that it contains the newly authorized user's information.
+    rpc::AuditUserAttrs::resetToAuthenticatedUser(opCtx);
 
     _updateInternalAuthorizationState();
     return Status::OK();
@@ -353,7 +359,7 @@ void AuthorizationSessionImpl::logoutSecurityTokenUser() {
 
     // Explicitly skip auditing the logout event,
     // security tokens don't represent a permanent login.
-    clearImpersonatedUserData();
+    rpc::AuditUserAttrs::resetToAuthenticatedUser(_client);
     _updateInternalAuthorizationState();
     _loginTime = boost::none;
 }
@@ -380,8 +386,7 @@ void AuthorizationSessionImpl::logoutAllDatabases(StringData reason) {
 
     _loginTime = boost::none;
     _expirationTime = boost::none;
-
-    clearImpersonatedUserData();
+    rpc::AuditUserAttrs::resetToAuthenticatedUser(_client);
     _updateInternalAuthorizationState();
 }
 
@@ -485,7 +490,8 @@ boost::optional<TenantId> AuthorizationSessionImpl::getUserTenantId() const {
 }
 
 bool AuthorizationSessionImpl::isAuthorizedToParseNamespaceElement(const BSONElement& element) {
-    const bool isUUID = element.type() == BinData && element.binDataType() == BinDataType::newUUID;
+    const bool isUUID =
+        element.type() == BSONType::binData && element.binDataType() == BinDataType::newUUID;
     _contract.addAccessCheck(AccessCheckEnum::kIsAuthorizedToParseNamespaceElement);
 
     if (isUUID) {
@@ -593,6 +599,15 @@ StatusWith<PrivilegeVector> AuthorizationSessionImpl::checkAuthorizedToListColle
     const ListCollections& cmd) {
     const auto& dbname = cmd.getDbName();
     _contract.addAccessCheck(AccessCheckEnum::kCheckAuthorizedToListCollections);
+
+    if (cmd.getRawData() &&
+        !AuthorizationSessionImpl::isAuthorizedForActionsOnResource(
+            ResourcePattern::forClusterResource(cmd.getDbName().tenantId()),
+            ActionType::internal)) {
+        return Status(ErrorCodes::Unauthorized,
+                      str::stream() << "Not authorized to list collections with rawData on db: "
+                                    << dbname.toStringForErrorMsg());
+    }
 
     if (cmd.getAuthorizedCollections() && cmd.getNameOnly() &&
         AuthorizationSessionImpl::isAuthorizedForAnyActionOnAnyResourceInDB(dbname)) {
@@ -838,6 +853,7 @@ const ActionSet kClusterActionsQuickList({
     ActionType::advanceClusterTime,
     ActionType::bypassDefaultMaxTimeMS,
     ActionType::bypassWriteBlockingMode,
+    ActionType::impersonate,
     ActionType::internal,
     ActionType::useTenant,
 });
@@ -895,27 +911,20 @@ bool AuthorizationSessionImpl::_isAuthorizedForPrivilege(const Privilege& privil
     });
 }
 
-void AuthorizationSessionImpl::setImpersonatedUserData(const UserName& username,
-                                                       const std::vector<RoleName>& roles) {
-    std::atomic_store(&_impersonatedUserName, std::make_shared<UserName>(username));
-    _impersonatedRoleNames = roles;
-}
-
 bool AuthorizationSessionImpl::isCoauthorizedWithClient(Client* opClient, WithLock opClientLock) {
     _contract.addAccessCheck(AccessCheckEnum::kIsCoauthorizedWithClient);
-    auto getUserName = [](AuthorizationSession* authSession) {
-        if (auto impersonatedUsername = authSession->getImpersonatedUserName()) {
-            return impersonatedUsername;
-        } else {
-            return authSession->getAuthenticatedUserName();
+
+    auto getUserName = [](Client* client) -> boost::optional<UserName> {
+        if (auto auditUserAttrs = rpc::AuditUserAttrs::get(client)) {
+            return auditUserAttrs->getUser();
         }
+        return boost::none;
     };
 
-    if (auto myname = getUserName(this)) {
-        return myname == getUserName(AuthorizationSession::get(opClient));
-    } else {
-        return false;
+    if (auto myName = getUserName(_client)) {
+        return myName == getUserName(opClient);
     }
+    return false;
 }
 
 bool AuthorizationSessionImpl::isCoauthorizedWith(const boost::optional<UserName>& userName) {
@@ -927,36 +936,10 @@ bool AuthorizationSessionImpl::isCoauthorizedWith(const boost::optional<UserName
     return getAuthenticatedUserName() == userName;
 }
 
-boost::optional<UserName> AuthorizationSessionImpl::getImpersonatedUserName() {
-    _contract.addAccessCheck(AccessCheckEnum::kGetImpersonatedUserName);
-
-    if (auto impersonatedUserName = std::atomic_load(&_impersonatedUserName)) {
-        return *impersonatedUserName;
-    }
-    return boost::none;
-}
-
-RoleNameIterator AuthorizationSessionImpl::getImpersonatedRoleNames() {
-    _contract.addAccessCheck(AccessCheckEnum::kGetImpersonatedRoleNames);
-
-    return makeRoleNameIterator(_impersonatedRoleNames.begin(), _impersonatedRoleNames.end());
-}
-
 bool AuthorizationSessionImpl::isUsingLocalhostBypass() {
     _contract.addAccessCheck(AccessCheckEnum::kIsUsingLocalhostBypass);
 
     return _getAuthorizationManager()->isAuthEnabled() && _externalState->shouldAllowLocalhost();
-}
-
-// Clear the vectors of impersonated usernames and roles.
-void AuthorizationSessionImpl::clearImpersonatedUserData() {
-    std::atomic_store(&_impersonatedUserName, {});
-    _impersonatedRoleNames.clear();
-}
-
-
-bool AuthorizationSessionImpl::isImpersonating() const {
-    return std::atomic_load(&_impersonatedUserName) != nullptr;
 }
 
 auto AuthorizationSessionImpl::checkCursorSessionPrivilege(
@@ -1024,49 +1007,14 @@ void AuthorizationSessionImpl::verifyContract(const AuthorizationContract* contr
     // Make a mutable copy so that the common auth checks can be added.
     auto tempContract = *contract;
 
-    // Certain access checks are done by code common to all commands.
-    //
-    // The first two checks are done by initializeOperationSessionInfo
-    tempContract.addAccessCheck(AccessCheckEnum::kIsUsingLocalhostBypass);
-    tempContract.addAccessCheck(AccessCheckEnum::kIsAuthenticated);
-
-    // These checks are done by auditing
-    tempContract.addAccessCheck(AccessCheckEnum::kGetAuthenticatedUserName);
-    tempContract.addAccessCheck(AccessCheckEnum::kGetAuthenticatedRoleNames);
-    tempContract.addAccessCheck(AccessCheckEnum::kGetImpersonatedUserName);
-    tempContract.addAccessCheck(AccessCheckEnum::kGetImpersonatedRoleNames);
-
-    // Since internal sessions are started by the server, the generated authorization contract is
-    // missing the following user access checks, so we add them here to allow commands that spawn
-    // internal sessions to pass this authorization check.
-    tempContract.addAccessCheck(AccessCheckEnum::kGetAuthenticatedUser);
-    tempContract.addAccessCheck(AccessCheckEnum::kLookupUser);
-
-    // "internal" comes from readRequestMetadata and sharded clusters
-    // "advanceClusterTime" is an implicit check in clusters in metadata handling
-    tempContract.addPrivilege(Privilege(ResourcePattern::forClusterResource(boost::none),
-                                        {ActionType::advanceClusterTime, ActionType::internal}));
-
-    // Implicitly checked often to keep mayBypassWriteBlockingMode() fast
-    tempContract.addPrivilege(Privilege(ResourcePattern::forClusterResource(boost::none),
-                                        ActionType::bypassWriteBlockingMode));
-
-    // Operations which do not specify a maxTimeMS check if the defaultMaxTimeMS can be bypassed.
-    tempContract.addPrivilege(Privilege(ResourcePattern::forClusterResource(boost::none),
-                                        ActionType::bypassDefaultMaxTimeMS));
-
-    // Implicitly checked often to keep useTenant checks fast
-    tempContract.addPrivilege(
-        Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::useTenant));
-
-
-    // makeLogicalSessionId checks for impersonate privileges
-    tempContract.addPrivilege(
-        Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::impersonate));
-
-    // Needed for internal sessions started by the server.
-    tempContract.addPrivilege(Privilege(ResourcePattern::forClusterResource(boost::none),
-                                        ActionType::issueDirectShardOperations));
+    // Certain access checks are done by code common to all commands and will be recorded in the
+    // authorizationSession _contract.
+    for (const auto& check : AuthorizationContract::getCommonAccessChecks()) {
+        tempContract.addAccessCheck(check);
+    }
+    for (const auto& privilege : AuthorizationContract::getCommonPrivileges()) {
+        tempContract.addPrivilege(privilege);
+    }
 
     uassert(5452401,
             "Authorization Session contains more authorization checks than permitted by contract.",
@@ -1084,6 +1032,13 @@ void AuthorizationSessionImpl::_updateInternalAuthorizationState() {
             RoleName roleName = roles.next();
             _authenticatedRoleNames.push_back(RoleName(roleName.getRole(), roleName.getDB()));
         }
+    }
+
+    if (auto auditUserAttrs = rpc::AuditUserAttrs::get(_client);
+        !auditUserAttrs || !auditUserAttrs->getIsImpersonating()) {
+        // If we are not impersonating or AuditUserAttrs doesn't exist, reset AuditUserAttrs to the
+        // authenticated user.
+        rpc::AuditUserAttrs::resetToAuthenticatedUser(_client);
     }
 
     // Update cached cluster/any action types for non-tenant resources.
@@ -1106,6 +1061,10 @@ bool AuthorizationSessionImpl::mayBypassWriteBlockingMode() const {
 
 bool AuthorizationSessionImpl::isExpired() const {
     return _expiredUserName.has_value();
+}
+
+const AuthorizationContract& AuthorizationSessionImpl::getAuthorizationContract() const {
+    return _contract;
 }
 
 }  // namespace mongo

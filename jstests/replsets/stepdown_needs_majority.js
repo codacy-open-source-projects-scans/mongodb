@@ -26,7 +26,8 @@ function assertStepDownFailsWithExceededTimeLimit(node) {
     assert.commandFailedWithCode(
         node.adminCommand({replSetStepDown: 5, secondaryCatchUpPeriodSecs: 5}),
         ErrorCodes.ExceededTimeLimit,
-        "step down did not fail with 'ExceededTimeLimit'");
+        "step down did not fail with 'ExceededTimeLimit'",
+    );
 }
 
 function assertStepDownSucceeds(node) {
@@ -40,17 +41,17 @@ function nodeIdStr(repltest, node) {
 //
 // Test setup
 //
-var name = 'stepdown_needs_majority';
-var replTest = new ReplSetTest({name: name, nodes: 5, settings: {chainingAllowed: false}});
+let name = "stepdown_needs_majority";
+let replTest = new ReplSetTest({name: name, nodes: 5, settings: {chainingAllowed: false}});
 
 replTest.startSet();
 replTest.initiate();
 
-var primary = replTest.getPrimary();
-var testDB = primary.getDB('testdb');
-var coll = testDB[name];
-var dummy_doc = {"dummy_key": "dummy_val"};
-var timeout = ReplSetTest.kDefaultTimeoutMS;
+let primary = replTest.getPrimary();
+let testDB = primary.getDB("testdb");
+let coll = testDB[name];
+let dummy_doc = {"dummy_key": "dummy_val"};
+let timeout = ReplSetTest.kDefaultTimeoutMS;
 
 //
 // Block writes to all secondaries
@@ -70,7 +71,7 @@ assertStepDownFailsWithExceededTimeLimit(primary);
 //
 // Re-enable writes to Secondary A and attempt stepdown
 //
-var secondaryA = replTest.getSecondaries()[0];
+let secondaryA = replTest.getSecondaries()[0];
 jsTestLog("Reenabling writes to one secondary (" + nodeIdStr(replTest, secondaryA) + ")");
 restartServerReplication(secondaryA);
 
@@ -83,7 +84,7 @@ assertStepDownFailsWithExceededTimeLimit(primary);
 //
 // Re-enable writes to Secondary B and attempt stepdown
 //
-var secondaryB = replTest.getSecondaries()[1];
+let secondaryB = replTest.getSecondaries()[1];
 jsTestLog("Reenabling writes to another secondary (" + nodeIdStr(replTest, secondaryB) + ")");
 restartServerReplication(secondaryB);
 

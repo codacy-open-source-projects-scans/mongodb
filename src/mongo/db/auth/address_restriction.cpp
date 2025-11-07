@@ -27,6 +27,14 @@
  *    it in the license file.
  */
 
+#include "mongo/db/auth/address_restriction.h"
+
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/auth/address_restriction_gen.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/util/assert_util.h"
+
 #include <exception>
 #include <memory>
 #include <type_traits>
@@ -34,13 +42,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/db/auth/address_restriction.h"
-#include "mongo/db/auth/address_restriction_gen.h"
-#include "mongo/idl/idl_parser.h"
-#include "mongo/util/assert_util.h"
 
 constexpr mongo::StringData mongo::address_restriction_detail::ClientSource::label;
 constexpr mongo::StringData mongo::address_restriction_detail::ClientSource::field;
@@ -51,7 +52,7 @@ constexpr mongo::StringData mongo::address_restriction_detail::ServerAddress::fi
 mongo::StatusWith<mongo::RestrictionSet<>> mongo::parseAddressRestrictionSet(
     const BSONObj& obj) try {
     IDLParserContext ctx("address restriction");
-    const auto ar = Address_restriction::parse(ctx, obj);
+    const auto ar = Address_restriction::parse(obj, ctx);
     std::vector<std::unique_ptr<NamedRestriction>> vec;
 
     const boost::optional<std::vector<StringData>>& client = ar.getClientSource();
@@ -85,7 +86,7 @@ mongo::StatusWith<mongo::SharedRestrictionDocument> mongo::parseAuthenticationRe
 
     document_type::sequence_type doc;
     for (const auto& elem : arr) {
-        if (elem.type() != Object) {
+        if (elem.type() != BSONType::object) {
             return Status(ErrorCodes::UnsupportedFormat,
                           "restriction array sub-documents must be address restriction objects");
         }
@@ -103,17 +104,17 @@ mongo::StatusWith<mongo::SharedRestrictionDocument> mongo::parseAuthenticationRe
 }
 
 mongo::StatusWith<mongo::BSONArray> mongo::getRawAuthenticationRestrictions(
-    const BSONArray& arr) noexcept try {
+    const BSONArray& arr) try {
     BSONArrayBuilder builder;
 
     for (auto const& elem : arr) {
-        if (elem.type() != Object) {
+        if (elem.type() != BSONType::object) {
             return Status(ErrorCodes::UnsupportedFormat,
                           "'authenticationRestrictions' array sub-documents must be address "
                           "restriction objects");
         }
         IDLParserContext ctx("address restriction");
-        auto const ar = Address_restriction::parse(ctx, elem.Obj());
+        auto const ar = Address_restriction::parse(elem.Obj(), ctx);
         if (auto const&& client = ar.getClientSource()) {
             // Validate
             ClientSourceRestriction(client.value());

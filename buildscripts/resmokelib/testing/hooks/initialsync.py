@@ -2,6 +2,7 @@
 
 import os.path
 import random
+import time
 
 import bson
 import bson.errors
@@ -43,7 +44,7 @@ class BackgroundInitialSync(interface.Hook):
         description = "Background Initial Sync"
         interface.Hook.__init__(self, hook_logger, fixture, description)
 
-        self.n = n  # pylint: disable=invalid-name
+        self.n = n
         self.tests_run = 0
         self.random_restarts = 0
         self._shell_options = shell_options
@@ -106,6 +107,9 @@ class BackgroundInitialSyncTestCase(jsfile.DynamicJSTestCase):
                 try:
                     sync_node_conn.admin.command(cmd)
                     break
+                except pymongo.errors.AutoReconnect:
+                    self.logger.info("AutoReconnect exception thrown, retrying...")
+                    time.sleep(0.1)
                 except pymongo.errors.OperationFailure as err:
                     if err.code not in (
                         self.INTERRUPTED_DUE_TO_REPL_STATE_CHANGE,
@@ -163,10 +167,24 @@ class BackgroundInitialSyncTestCase(jsfile.DynamicJSTestCase):
 
     # Restarts initial sync by shutting down the node, clearing its data, and restarting it.
     def __restart_init_sync(self, sync_node):
+        storage_engine = (
+            sync_node.mongo_client().admin.command("serverStatus")["storageEngine"].get("name")
+        )
+        # File copy based initial sync is not supported for in-memory storage engine.
+        if storage_engine == "inMemory":
+            init_sync_method = "logical"
+        else:
+            init_sync_method = random.choice(["logical", "fileCopyBased"])
+
         # Tear down and restart the initial sync node to start initial sync again.
         sync_node.teardown()
 
-        self.logger.info("Starting the initial sync node back up again...")
+        self.logger.info(
+            "Starting the initial sync node back up again with initial sync method {}".format(
+                init_sync_method
+            )
+        )
+        sync_node.mongod_options["set_parameters"]["initialSyncMethod"] = init_sync_method
         sync_node.setup()
         self.logger.info(fixture_interface.create_fixture_table(self.fixture))
         sync_node.await_ready()
@@ -197,7 +215,7 @@ class IntermediateInitialSync(interface.Hook):
         description = "Intermediate Initial Sync"
         interface.Hook.__init__(self, hook_logger, fixture, description)
 
-        self.n = n  # pylint: disable=invalid-name
+        self.n = n
         self.tests_run = 0
 
     def _should_run_after_test(self):
@@ -258,6 +276,9 @@ class IntermediateInitialSyncTestCase(jsfile.DynamicJSTestCase):
             try:
                 sync_node_conn.admin.command(cmd)
                 break
+            except pymongo.errors.AutoReconnect:
+                self.logger.info("AutoReconnect exception thrown, retrying...")
+                time.sleep(0.1)
             except pymongo.errors.OperationFailure as err:
                 if err.code not in (
                     self.INTERRUPTED_DUE_TO_REPL_STATE_CHANGE,

@@ -29,21 +29,20 @@
 
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <mutex>
-#include <utility>
+#include "mongo/transport/service_executor_reserved.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/server_options.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/transport/service_executor_reserved.h"
 #include "mongo/transport/service_executor_utils.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/functional.h"
 #include "mongo/util/out_of_line_executor.h"
+
+#include <mutex>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kExecutor
 
@@ -253,7 +252,8 @@ auto ServiceExecutorReserved::makeTaskRunner() -> std::unique_ptr<TaskRunner> {
             _e->_schedule(std::move(task));
         }
 
-        void runOnDataAvailable(std::shared_ptr<Session> session, Task task) override {
+        void runTaskForSession(std::shared_ptr<Session> session, Task task) override {
+            // Wait for data to become available on session before running task.
             _e->_runOnDataAvailable(std::move(session), std::move(task));
         }
 

@@ -29,14 +29,6 @@
 
 #include "mongo/db/update/path_support.h"
 
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -47,20 +39,26 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
-#include "mongo/bson/mutable/algorithm.h"
-#include "mongo/bson/mutable/const_element.h"
-#include "mongo/bson/mutable/document.h"
+#include "mongo/db/exec/mutable_bson/algorithm.h"
+#include "mongo/db/exec/mutable_bson/const_element.h"
+#include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
-#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace {
 
@@ -222,7 +220,7 @@ TEST_F(SimpleDoc, NotCommonPrefix) {
     ASSERT_OK(firstNewElem);
     ASSERT_EQUALS(firstNewElem.getValue().compareWithElement(root()["b"], nullptr), 0);
     ASSERT_EQUALS(newElem.getFieldName(), "b");
-    ASSERT_EQUALS(newElem.getType(), NumberInt);
+    ASSERT_EQUALS(newElem.getType(), BSONType::numberInt);
     ASSERT_TRUE(newElem.hasValue());
     ASSERT_EQUALS(newElem.getValueInt(), 1);
 
@@ -575,7 +573,7 @@ TEST_F(ArrayDoc, ExcessivePaddingNotRequestedIfArrayAlreadyPadded) {
     for (size_t i = 0; i < 5; ++i) {
         Element arrayA = doc().root().leftChild();
         ASSERT_EQ(arrayA.getFieldName(), "a");
-        ASSERT_EQ(arrayA.getType(), mongo::Array);
+        ASSERT_EQ(arrayA.getType(), mongo::BSONType::array);
         arrayA.appendInt("", 1).transitional_ignore();
     }
 
@@ -643,14 +641,14 @@ static void assertContains(const EqualityMatches& equalities, const BSONObj& wra
 
     EqualityMatches::const_iterator it = equalities.find(path);
     if (it == equalities.end()) {
-        FAIL(stream() << "Equality matches did not contain path \"" << path << "\"");
+        FAIL(std::string(stream() << "Equality matches did not contain path \"" << path << "\""));
     }
 
     BSONElementComparator eltCmp(BSONElementComparator::FieldNamesMode::kIgnore,
                                  &simpleStringDataComparator);
     if (eltCmp.evaluate(it->second->getData() != value)) {
-        FAIL(stream() << "Equality match at path \"" << path << "\" contains value "
-                      << it->second->getData() << ", not value " << value);
+        FAIL(std::string(stream() << "Equality match at path \"" << path << "\" contains value "
+                                  << it->second->getData() << ", not value " << value));
     }
 }
 
@@ -934,20 +932,22 @@ static void assertParent(const EqualityMatches& equalities,
     BSONElement parentEl = findParentEqualityElement(equalities, path, &parentPathPart);
 
     if (parentEl.eoo()) {
-        FAIL(stream() << "Equality matches did not contain parent for \"" << pathStr << "\"");
+        FAIL(std::string(stream() << "Equality matches did not contain parent for \"" << pathStr
+                                  << "\""));
     }
 
     StringData foundParentPath = path.dottedSubstring(0, parentPathPart);
     if (foundParentPath != parentPath) {
-        FAIL(stream() << "Equality match parent at path \"" << foundParentPath
-                      << "\" does not match \"" << parentPath << "\"");
+        FAIL(std::string(stream() << "Equality match parent at path \"" << foundParentPath
+                                  << "\" does not match \"" << parentPath << "\""));
     }
 
     BSONElementComparator eltCmp(BSONElementComparator::FieldNamesMode::kIgnore,
                                  &simpleStringDataComparator);
     if (eltCmp.evaluate(parentEl != value)) {
-        FAIL(stream() << "Equality match parent for \"" << pathStr << "\" at path \"" << parentPath
-                      << "\" contains value " << parentEl << ", not value " << value);
+        FAIL(std::string(stream() << "Equality match parent for \"" << pathStr << "\" at path \""
+                                  << parentPath << "\" contains value " << parentEl
+                                  << ", not value " << value));
     }
 }
 
@@ -966,8 +966,8 @@ static void assertNoParent(const EqualityMatches& equalities, StringData pathStr
 
     if (!parentEl.eoo()) {
         StringData foundParentPath = path.dottedSubstring(0, parentPathPart);
-        FAIL(stream() << "Equality matches contained parent for \"" << pathStr << "\" at \""
-                      << foundParentPath << "\"");
+        FAIL(std::string(stream() << "Equality matches contained parent for \"" << pathStr
+                                  << "\" at \"" << foundParentPath << "\""));
     }
 }
 

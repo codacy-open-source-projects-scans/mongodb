@@ -29,23 +29,16 @@
 
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <cstddef>
-#include <exception>
-#include <mutex>
-#include <vector>
+#include "mongo/util/background.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/background.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/debug_util.h"
@@ -53,6 +46,11 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
+
+#include <cstddef>
+#include <exception>
+#include <mutex>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -80,10 +78,6 @@ private:
     }
 
     void run() override;
-
-    // Returns true if shutdown has been requested.  You must hold _mutex to call this
-    // function.
-    bool _isShutdownRequested() const;
 
     // Runs all registered tasks. You must hold _mutex to call this function.
     void _runTasks();
@@ -324,10 +318,6 @@ void PeriodicTaskRunner::run() {
         }
         _runTasks();
     }
-}
-
-bool PeriodicTaskRunner::_isShutdownRequested() const {
-    return _shutdownRequested;
 }
 
 void PeriodicTaskRunner::_runTasks() {

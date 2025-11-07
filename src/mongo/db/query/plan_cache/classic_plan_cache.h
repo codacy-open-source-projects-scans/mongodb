@@ -29,6 +29,15 @@
 
 #pragma once
 
+#include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/plan_cache/plan_cache.h"
+#include "mongo/db/query/plan_cache/plan_cache_debug_info.h"
+#include "mongo/db/query/plan_cache/plan_cache_key_info.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/container_size_helper.h"
+#include "mongo/util/modules.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -37,15 +46,6 @@
 #include <string>
 #include <utility>
 #include <vector>
-
-
-#include "mongo/db/query/canonical_query.h"
-#include "mongo/db/query/index_entry.h"
-#include "mongo/db/query/plan_cache/plan_cache.h"
-#include "mongo/db/query/plan_cache/plan_cache_debug_info.h"
-#include "mongo/db/query/plan_cache/plan_cache_key_info.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/container_size_helper.h"
 
 namespace mongo {
 
@@ -201,12 +201,12 @@ struct PlanCacheIndexTree {
  * TODO SERVER-90496: Deduplicate this with members in VirtualScanNode.
  */
 struct VirtualScanCacheData {
-    VirtualScanCacheData() : docs({}), hasRecordId(false), indexKeyPattern(BSONObj()){};
+    VirtualScanCacheData() : docs({}), hasRecordId(false), indexKeyPattern(BSONObj()) {};
 
     VirtualScanCacheData(const std::vector<BSONArray>& docs,
                          bool hasRecordId,
                          const BSONObj& keyPattern)
-        : docs(docs), hasRecordId(hasRecordId), indexKeyPattern(keyPattern){};
+        : docs(docs), hasRecordId(hasRecordId), indexKeyPattern(keyPattern) {};
     VirtualScanCacheData(const VirtualScanCacheData& other) = default;
 
     std::vector<BSONArray> docs;
@@ -225,7 +225,8 @@ struct SolutionCacheData {
         : tree(nullptr),
           solnType(USE_INDEX_TAGS_SOLN),
           wholeIXSolnDir(1),
-          indexFilterApplied(false) {}
+          indexFilterApplied(false),
+          solutionHash{0} {}
 
     std::unique_ptr<SolutionCacheData> clone() const;
 

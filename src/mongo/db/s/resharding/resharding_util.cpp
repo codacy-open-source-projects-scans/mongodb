@@ -29,26 +29,24 @@
 
 #include "mongo/db/s/resharding/resharding_util.h"
 
-#include <absl/container/node_hash_map.h>
-#include <algorithm>
-#include <boost/optional.hpp>
-#include <cmath>
-#include <fmt/format.h>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/feature_flag.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/global_catalog/type_tags.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
@@ -58,24 +56,35 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/s/config/sharding_catalog_manager.h"
+#include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/resharding/document_source_resharding_add_resume_id.h"
 #include "mongo/db/s/resharding/document_source_resharding_iterate_transaction.h"
+#include "mongo/db/s/resharding/resharding_noop_o2_field_gen.h"
+#include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog/type_tags.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
+#include "mongo/db/topology/shard_registry.h"
+#include "mongo/otel/telemetry_context_holder.h"
+#include "mongo/otel/telemetry_context_serialization.h"
 #include "mongo/s/resharding/common_types_gen.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
+#include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/future_util.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <cmath>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
 
@@ -97,8 +106,6 @@ Milliseconds estimateRemainingTime(Milliseconds elapsedTime, double elapsedWork,
     return Milliseconds(Milliseconds::rep(std::round(remainingMsec)));
 }
 }  // namespace
-
-using namespace fmt::literals;
 
 BSONObj serializeAndTruncateReshardingErrorIfNeeded(Status originalError) {
     BSONObjBuilder originalBob;
@@ -206,8 +213,8 @@ Timestamp getHighestMinFetchTimestamp(const std::vector<DonorShardEntry>& donorS
     for (auto& donor : donorShards) {
         auto donorFetchTimestamp = donor.getMutableState().getMinFetchTimestamp();
         uassert(4957300,
-                "All donors must have a minFetchTimestamp, but donor {} does not."_format(
-                    StringData{donor.getId()}),
+                fmt::format("All donors must have a minFetchTimestamp, but donor {} does not.",
+                            StringData{donor.getId()}),
                 donorFetchTimestamp.has_value());
         if (maxMinFetchTimestamp < donorFetchTimestamp.value()) {
             maxMinFetchTimestamp = donorFetchTimestamp.value();
@@ -233,22 +240,6 @@ void checkForOverlappingZones(std::vector<ReshardingZoneType>& zones) {
     }
 }
 
-std::vector<BSONObj> buildTagsDocsFromZones(const NamespaceString& tempNss,
-                                            std::vector<ReshardingZoneType>& zones,
-                                            const ShardKeyPattern& shardKey) {
-    std::vector<BSONObj> tags;
-    tags.reserve(zones.size());
-    for (auto& zone : zones) {
-        zone.setMin(shardKey.getKeyPattern().extendRangeBound(zone.getMin(), false));
-        zone.setMax(shardKey.getKeyPattern().extendRangeBound(zone.getMax(), false));
-        ChunkRange range(zone.getMin(), zone.getMax());
-        TagsType tag(tempNss, zone.getZone().toString(), range);
-        tags.push_back(tag.toBSON());
-    }
-
-    return tags;
-}
-
 std::vector<ReshardingZoneType> getZonesFromExistingCollection(OperationContext* opCtx,
                                                                const NamespaceString& sourceNss) {
     std::vector<ReshardingZoneType> zones;
@@ -263,7 +254,7 @@ std::vector<ReshardingZoneType> getZonesFromExistingCollection(OperationContext*
     return zones;
 }
 
-std::unique_ptr<Pipeline, PipelineDeleter> createOplogFetchingPipelineForResharding(
+std::unique_ptr<Pipeline> createOplogFetchingPipelineForResharding(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const ReshardingDonorOplogId& startAfter,
     UUID collUUID,
@@ -274,7 +265,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> createOplogFetchingPipelineForReshard
     const Value EXISTS = V{Doc{{"$exists", true}}};
     const Value DNE = V{Doc{{"$exists", false}}};
 
-    Pipeline::SourceContainer stages;
+    DocumentSourceContainer stages;
     // The node receiving the query verifies continuity of oplog entries (i.e: that the recipient
     // hasn't fallen off the oplog). This stage provides the input timestamp that the donor uses for
     // verification.
@@ -350,6 +341,25 @@ std::unique_ptr<Pipeline, PipelineDeleter> createOplogFetchingPipelineForReshard
         expCtx));
 
     return Pipeline::create(std::move(stages), expCtx);
+}
+
+bool isProgressMarkOplogAfterOplogApplicationStarted(const repl::OplogEntry& oplog) {
+    if (oplog.getOpType() != repl::OpTypeEnum::kNoop) {
+        return false;
+    }
+
+    auto o2Field = oplog.getObject2();
+    if (!o2Field) {
+        return false;
+    }
+
+    if (o2Field->getField(ReshardProgressMarkO2Field::kTypeFieldName).valueStringDataSafe() !=
+        kReshardProgressMarkOpLogType) {
+        return false;
+    }
+    return o2Field
+        ->getField(ReshardProgressMarkO2Field::kCreatedAfterOplogApplicationStartedFieldName)
+        .booleanSafe();
 }
 
 bool isFinalOplog(const repl::OplogEntry& oplog) {
@@ -496,14 +506,14 @@ void validateShardDistribution(const std::vector<ShardKeyRange>& shardDistributi
     }
 }
 
-bool isMoveCollection(const boost::optional<ProvenanceEnum>& provenance) {
+bool isMoveCollection(const boost::optional<ReshardingProvenanceEnum>& provenance) {
     return provenance &&
-        (provenance.get() == ProvenanceEnum::kMoveCollection ||
-         provenance.get() == ProvenanceEnum::kBalancerMoveCollection);
+        (provenance.get() == ReshardingProvenanceEnum::kMoveCollection ||
+         provenance.get() == ReshardingProvenanceEnum::kBalancerMoveCollection);
 }
 
-bool isUnshardCollection(const boost::optional<ProvenanceEnum>& provenance) {
-    return provenance && provenance.get() == ProvenanceEnum::kUnshardCollection;
+bool isUnshardCollection(const boost::optional<ReshardingProvenanceEnum>& provenance) {
+    return provenance && provenance.get() == ReshardingProvenanceEnum::kUnshardCollection;
 }
 
 std::shared_ptr<ThreadPool> makeThreadPoolForMarkKilledExecutor(const std::string& poolName) {
@@ -521,24 +531,228 @@ boost::optional<Status> coordinatorAbortedError() {
                   "Recieved abort from the resharding coordinator"};
 }
 
-void validateImplicitlyCreateIndex(bool implicitlyCreateIndex, const BSONObj& shardKey) {
-    if (!implicitlyCreateIndex) {
-        uassert(
-            ErrorCodes::InvalidOptions,
-            str::stream()
-                << "Can only specify'" << CommonReshardingMetadata::kImplicitlyCreateIndexFieldName
-                << "' when featureFlagHashedShardKeyIndexOptionalUponShardingCollection is "
-                   "enabled",
-            feature_flags::gFeatureFlagHashedShardKeyIndexOptionalUponShardingCollection.isEnabled(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
-
-        auto shardKeyPattern = ShardKeyPattern(shardKey);
-        uassert(ErrorCodes::InvalidOptions,
-                str::stream() << "Can only specify '"
-                              << CommonReshardingMetadata::kImplicitlyCreateIndexFieldName
-                              << "' false when resharding on a hashed shard key",
-                shardKeyPattern.isHashedPattern());
+void validatePerformVerification(const VersionContext& vCtx,
+                                 boost::optional<bool> performVerification) {
+    if (performVerification.has_value()) {
+        validatePerformVerification(vCtx, *performVerification);
     }
+}
+
+void validatePerformVerification(const VersionContext& vCtx, bool performVerification) {
+    uassert(ErrorCodes::InvalidOptions,
+            str::stream() << "Cannot set '"
+                          << CommonReshardingMetadata::kPerformVerificationFieldName
+                          << "' to true when featureFlagReshardingVerification is not enabled",
+            !performVerification ||
+                resharding::gFeatureFlagReshardingVerification.isEnabled(
+                    vCtx, serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
+}
+
+ReshardingCoordinatorDocument createReshardingCoordinatorDoc(
+    OperationContext* opCtx,
+    const ConfigsvrReshardCollection& request,
+    const CollectionType& collEntry,
+    const NamespaceString& nss,
+    const bool& setProvenance) {
+
+    auto coordinatorDoc = ReshardingCoordinatorDocument(
+        std::move(CoordinatorStateEnum::kUnused), {} /* donorShards */, {} /* recipientShards */);
+
+    // Generate the resharding metadata for the ReshardingCoordinatorDocument.
+    auto reshardingUUID = UUID::gen();
+    auto existingUUID = collEntry.getUuid();
+    auto shardKeySpec = request.getKey();
+
+    // moveCollection/unshardCollection are called with _id as the new shard key since
+    // that's an acceptable value for tracked unsharded collections so we can skip this.
+    if (collEntry.getTimeseriesFields() &&
+        (!setProvenance ||
+         (*request.getProvenance() == ReshardingProvenanceEnum::kReshardCollection))) {
+        auto tsOptions = collEntry.getTimeseriesFields().get().getTimeseriesOptions();
+        shardkeyutil::validateTimeseriesShardKey(
+            tsOptions.getTimeField(), tsOptions.getMetaField(), request.getKey());
+        shardKeySpec =
+            uassertStatusOK(timeseries::createBucketsShardKeySpecFromTimeseriesShardKeySpec(
+                tsOptions, request.getKey()));
+    }
+
+    auto tempReshardingNss = resharding::constructTemporaryReshardingNss(nss, collEntry.getUuid());
+
+    auto commonMetadata = CommonReshardingMetadata(std::move(reshardingUUID),
+                                                   nss,
+                                                   std::move(existingUUID),
+                                                   std::move(tempReshardingNss),
+                                                   shardKeySpec);
+    commonMetadata.setStartTime(opCtx->fastClockSource().now());
+    if (request.getReshardingUUID()) {
+        commonMetadata.setUserReshardingUUID(*request.getReshardingUUID());
+    }
+    if (setProvenance && request.getProvenance()) {
+        commonMetadata.setProvenance(*request.getProvenance());
+    }
+
+    coordinatorDoc.setSourceKey(collEntry.getKeyPattern().toBSON());
+    coordinatorDoc.setCommonReshardingMetadata(std::move(commonMetadata));
+    coordinatorDoc.setZones(request.getZones());
+    coordinatorDoc.setPresetReshardedChunks(request.get_presetReshardedChunks());
+    coordinatorDoc.setNumInitialChunks(request.getNumInitialChunks());
+    coordinatorDoc.setShardDistribution(request.getShardDistribution());
+    coordinatorDoc.setForceRedistribution(request.getForceRedistribution());
+    coordinatorDoc.setUnique(request.getUnique());
+    coordinatorDoc.setCollation(request.getCollation());
+
+    auto performVerification = request.getPerformVerification();
+    if (!performVerification.has_value() &&
+        resharding::gFeatureFlagReshardingVerification.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        performVerification = true;
+    }
+    coordinatorDoc.setPerformVerification(performVerification);
+
+    coordinatorDoc.setRecipientOplogBatchTaskCount(request.getRecipientOplogBatchTaskCount());
+    coordinatorDoc.setRelaxed(request.getRelaxed());
+
+    if (!resharding::gfeatureFlagReshardingNumSamplesPerChunk.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        uassert(ErrorCodes::InvalidOptions,
+                "Resharding with numSamplesPerChunk is not enabled, reject numSamplesPerChunk "
+                "parameter",
+                !request.getNumSamplesPerChunk().has_value());
+    }
+    coordinatorDoc.setNumSamplesPerChunk(request.getNumSamplesPerChunk());
+    coordinatorDoc.setDemoMode(request.getDemoMode());
+    auto& telemetryContextHolder = otel::TelemetryContextHolder::get(opCtx);
+    if (telemetryContextHolder.get()) {
+        auto telemetryCtxBSON =
+            otel::TelemetryContextSerializer::toBSON(telemetryContextHolder.get());
+        coordinatorDoc.setTelemetryContext(telemetryCtxBSON);
+    }
+    return coordinatorDoc;
+}
+
+Date_t getCurrentTime() {
+    const auto svcCtx = cc().getServiceContext();
+    return svcCtx->getFastClockSource()->now();
+}
+
+boost::optional<ReshardingCoordinatorDocument> tryGetCoordinatorDoc(OperationContext* opCtx,
+                                                                    const UUID& reshardingUUID) {
+    DBDirectClient client(opCtx);
+    auto doc = client.findOne(
+        NamespaceString::kConfigReshardingOperationsNamespace,
+        BSON(ReshardingCoordinatorDocument::kReshardingUUIDFieldName << reshardingUUID));
+    if (doc.isEmpty()) {
+        return boost::none;
+    }
+    return ReshardingCoordinatorDocument::parse(doc, IDLParserContext("getCoordinatorDoc"));
+}
+
+ReshardingCoordinatorDocument getCoordinatorDoc(OperationContext* opCtx,
+                                                const UUID& reshardingUUID) {
+    auto maybeDoc = tryGetCoordinatorDoc(opCtx, reshardingUUID);
+    uassert(9858105,
+            str::stream() << "Could not find the coordinator document for the resharding operation "
+                          << reshardingUUID.toString(),
+            maybeDoc.has_value());
+    return *maybeDoc;
+}
+
+SemiFuture<void> waitForMajority(const CancellationToken& token,
+                                 const CancelableOperationContextFactory& factory) {
+    auto opCtx = factory.makeOperationContext(&cc());
+    auto client = opCtx->getClient();
+    repl::ReplClientInfo::forClient(client).setLastOpToSystemLastOpTime(opCtx.get());
+    auto opTime = repl::ReplClientInfo::forClient(client).getLastOp();
+    return WaitForMajorityService::get(client->getServiceContext())
+        .waitUntilMajorityForWrite(opTime, token);
+}
+
+ExecutorFuture<void> waitForReplicationOnVotingMembers(
+    std::shared_ptr<executor::TaskExecutor> executor,
+    const CancellationToken& cancelToken,
+    const CancelableOperationContextFactory& factory,
+    std::function<unsigned()> getMaxLagSecs) {
+    return AsyncTry([&factory, getMaxLagSecs] {
+               auto opCtx = factory.makeOperationContext(&cc());
+
+               auto& replClientInfo = repl::ReplClientInfo::forClient(opCtx->getClient());
+               replClientInfo.setLastOpToSystemLastOpTime(opCtx.get());
+               auto lastOpTime = replClientInfo.getLastOp();
+               auto maxLagSecs = getMaxLagSecs();
+
+               auto awaitTimestamp =
+                   Timestamp(std::max(lastOpTime.getTimestamp().getSecs() - maxLagSecs, 0U),
+                             lastOpTime.getTimestamp().getInc());
+               auto awaitTerm = lastOpTime.getTerm();
+               auto awaitOpTime = repl::OpTime(awaitTimestamp, awaitTerm);
+
+               auto replCoord = repl::ReplicationCoordinator::get(opCtx.get());
+               auto numNodes = replCoord->getConfig().getWritableVotingMembersCount();
+               auto waitTimeout =
+                   Seconds(resharding::gReshardingWaitForReplicationTimeoutSeconds.load());
+               WriteConcernOptions writeConcern{
+                   numNodes, WriteConcernOptions::SyncMode::UNSET, waitTimeout};
+
+               LOGV2(10356601,
+                     "Start waiting for replication",
+                     "numNodes"_attr = numNodes,
+                     "waitTimeout"_attr = waitTimeout,
+                     "lastOpTime"_attr = lastOpTime,
+                     "awaitOpTime"_attr = awaitOpTime);
+               auto statusAndDuration =
+                   replCoord->awaitReplication(opCtx.get(), awaitOpTime, writeConcern);
+               LOGV2(10356602,
+                     "Finished waiting for replication",
+                     "status"_attr = statusAndDuration.status,
+                     "duration"_attr = statusAndDuration.duration);
+
+               return statusAndDuration.status;
+           })
+        .until([](Status status) { return status.isOK(); })
+        .withDelayBetweenIterations(
+            Milliseconds(resharding::gReshardingWaitForReplicationIntervalMilliseconds.load()))
+        .on(executor, cancelToken);
+}
+
+Milliseconds getMajorityReplicationLag(OperationContext* opCtx) {
+    const auto& replCoord = repl::ReplicationCoordinator::get(opCtx);
+    const auto lastAppliedWallTime = replCoord->getMyLastAppliedOpTimeAndWallTime().wallTime;
+    const auto lastCommittedWallTime = replCoord->getLastCommittedOpTimeAndWallTime().wallTime;
+
+    if (!lastAppliedWallTime.isFormattable() || !lastCommittedWallTime.isFormattable()) {
+        return Milliseconds(0);
+    }
+    return std::max(Milliseconds(0), lastAppliedWallTime - lastCommittedWallTime);
+}
+
+boost::optional<int> getIndexCount(OperationContext* opCtx,
+                                   const CollectionAcquisition& acquisition) {
+    if (!acquisition.exists()) {
+        return boost::none;
+    }
+    auto& collPtr = acquisition.getCollectionPtr();
+    auto indexCount = collPtr->getIndexCatalog()->numIndexesTotal();
+    if (collPtr->isClustered()) {
+        // There is an implicit 'clustered' index on a clustered collection.
+        // Increment the total index count similar to storage stats:
+        // https://github.com/10gen/mongo/blob/29d8030f8aa7f3bc119081007fb09777daffc591/src/mongo/db/stats/storage_stats.cpp#L249C1-L251C22
+        indexCount += 1;
+    }
+    return indexCount;
+}
+
+double calculateExponentialMovingAverage(double prevAvg, double currVal, double smoothingFactor) {
+    uassert(ErrorCodes::InvalidOptions,
+            str::stream() << "The smoothing factor must be greater than 0 but it is equal to "
+                          << smoothingFactor,
+            smoothingFactor > 0);
+    uassert(ErrorCodes::InvalidOptions,
+            str::stream() << "The smoothing factor must be less than 1 but it is equal to "
+                          << smoothingFactor,
+            smoothingFactor < 1);
+    return (1 - smoothingFactor) * prevAvg + smoothingFactor * currVal;
 }
 
 }  // namespace resharding

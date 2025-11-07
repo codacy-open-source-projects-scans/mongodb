@@ -29,13 +29,14 @@
 
 #include "mongo/db/pipeline/window_function/window_function_integral.h"
 
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/exec/document_value/value_comparator.h"
+#include "mongo/db/exec/expression/evaluate.h"
+
 #include <utility>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
-
-#include "mongo/bson/bsontypes.h"
-#include "mongo/db/exec/document_value/value_comparator.h"
 
 namespace mongo {
 
@@ -48,15 +49,15 @@ Value WindowFunctionIntegral::integralOfTwoPointsByTrapezoidalRule(const Value& 
         return Value(0);
 
 
-    if ((preArr[0].getType() == BSONType::Date && newArr[0].getType() == BSONType::Date) ||
+    if ((preArr[0].getType() == BSONType::date && newArr[0].getType() == BSONType::date) ||
         (preArr[0].numeric() && newArr[0].numeric())) {
         // Now 'newValue' and 'preValue' are either both numeric, or both dates.
         // $subtract on two dates gives us the difference in milliseconds.
-        Value delta = uassertStatusOK(ExpressionSubtract::apply(newArr[0], preArr[0]));
-        Value sumY = uassertStatusOK(ExpressionAdd::apply(newArr[1], preArr[1]));
-        Value integral = uassertStatusOK(ExpressionMultiply::apply(sumY, delta));
+        Value delta = uassertStatusOK(exec::expression::evaluateSubtract(newArr[0], preArr[0]));
+        Value sumY = uassertStatusOK(exec::expression::evaluateAdd(newArr[1], preArr[1]));
+        Value integral = uassertStatusOK(exec::expression::evaluateMultiply(sumY, delta));
 
-        return uassertStatusOK(ExpressionDivide::apply(integral, Value(2.0)));
+        return uassertStatusOK(exec::expression::evaluateDivide(integral, Value(2.0)));
     } else {
         return Value(0);
     }
@@ -67,13 +68,13 @@ void WindowFunctionIntegral::assertValueType(const Value& value) {
             "The input value of $integral window function must be a vector of 2 value, the first "
             "value must be numeric or date type and the second must be numeric.",
             value.isArray() && value.getArray().size() == 2 && value.getArray()[1].numeric() &&
-                (value.getArray()[0].numeric() || value.getArray()[0].getType() == BSONType::Date));
+                (value.getArray()[0].numeric() || value.getArray()[0].getType() == BSONType::date));
 
     const auto& arr = value.getArray();
     if (_unitMillis) {
         uassert(5423901,
                 "$integral with 'unit' expects the sortBy field to be a Date",
-                arr[0].getType() == BSONType::Date);
+                arr[0].getType() == BSONType::date);
     } else {
         uassert(5423902,
                 "$integral (with no 'unit') expects the sortBy field to be numeric",
@@ -123,6 +124,18 @@ void WindowFunctionIntegral::remove(Value value) {
     if (_values.size() > 0) {
         _integral.remove(integralOfTwoPointsByTrapezoidalRule(value, _values.front().value()));
     }
+}
+
+Value WindowFunctionIntegral::getValue(boost::optional<Value> current) const {
+    if (_values.size() == 0)
+        return kDefault;
+    if (_nanCount > 0)
+        return Value(std::numeric_limits<double>::quiet_NaN());
+
+
+    return _unitMillis ? uassertStatusOK(exec::expression::evaluateDivide(_integral.getValue(),
+                                                                          Value(*_unitMillis)))
+                       : _integral.getValue();
 }
 
 }  // namespace mongo

@@ -35,36 +35,33 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <mutex>
-#include <type_traits>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/client/remote_command_targeter.h"
 #include "mongo/db/client.h"
-#include "mongo/db/s/config/sharding_catalog_manager.h"
-#include "mongo/db/s/sharding_util.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
+#include "mongo/db/global_catalog/ddl/sharding_util.h"
+#include "mongo/db/global_catalog/ddl/shardsvr_join_migrations_request_gen.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/async_requests_sender.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/request_types/shardsvr_join_migrations_request_gen.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
+
+#include <mutex>
+#include <type_traits>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -258,7 +255,7 @@ SemiFuture<NumMergedChunks> BalancerCommandsSchedulerImpl::requestMergeAllChunks
             }
 
             return MergeAllChunksOnShardResponse::parse(
-                       IDLParserContext{"MergeAllChunksOnShardResponse"}, remoteResponse.data)
+                       remoteResponse.data, IDLParserContext{"MergeAllChunksOnShardResponse"})
                 .getNumMergedChunks();
         })
         .semi();
@@ -328,7 +325,7 @@ CommandSubmissionResult BalancerCommandsSchedulerImpl::_submit(
         }
 
         const auto shardHostWithStatus = shardWithStatus.getValue()->getTargeter()->findHost(
-            opCtx, ReadPreferenceSetting{ReadPreference::PrimaryOnly});
+            opCtx, ReadPreferenceSetting{ReadPreference::PrimaryOnly}, {});
         if (!shardHostWithStatus.isOK()) {
             return CommandSubmissionResult(params.id, shardHostWithStatus.getStatus());
         }
@@ -404,6 +401,13 @@ void BalancerCommandsSchedulerImpl::_workerThread() {
     Client::initThread("BalancerCommandsScheduler",
                        getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
+    // This worker thread may perform remote request, so that its operation context must be
+    // interruptible. Marking it so here is safe, since the replica set changes are also notified by
+    // the Balancer (a PrimaryOnlyService) and tracked through the _state field (which is checked
+    // right after).
+    auto opCtxHolder = cc().makeOperationContext();
+    opCtxHolder.get()->setAlwaysInterruptAtStepDownOrUp_UNSAFE();
+
     bool stopWorkerRequested = false;
     LOGV2(5847205, "Balancer scheduler thread started");
 
@@ -445,7 +449,6 @@ void BalancerCommandsSchedulerImpl::_workerThread() {
 
         // 2. Serve the picked up requests, submitting their related commands.
         for (auto& submissionInfo : commandsToSubmit) {
-            auto opCtxHolder = cc().makeOperationContext();
             if (submissionInfo.commandInfo) {
                 submissionInfo.commandInfo.get()->attachOperationMetadataTo(opCtxHolder.get());
             }

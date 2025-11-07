@@ -28,8 +28,6 @@
  */
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/inlined_vector.h>
 #include <algorithm>
 #include <cstddef>
 #include <memory>
@@ -38,6 +36,9 @@
 #include <utility>
 #include <vector>
 
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/inlined_vector.h>
+
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 
 #include "mongo/base/string_data.h"
@@ -45,16 +46,14 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
-#include "mongo/db/exec/sbe/stages/block_hashagg.h"
-#include "mongo/db/exec/sbe/stages/hash_agg.h"
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/stages/window.h"
 #include "mongo/db/exec/sbe/values/row.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/query/index_bounds.h"
-#include "mongo/db/query/interval.h"
+#include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
+#include "mongo/db/query/compiler/physical_model/interval/interval.h"
 #include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/util/string_listset.h"
 
@@ -113,7 +112,7 @@ inline size_t estimate(const AggExprPair& expr) {
     return size;
 }
 
-inline size_t estimate(const AggExprTuple& tuple) {
+inline size_t estimate(const BlockAggExprTuple& tuple) {
     size_t size = 0;
 
     if (tuple.init) {

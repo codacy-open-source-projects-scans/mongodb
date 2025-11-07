@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <memory>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -42,9 +37,13 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_visitor.h"
-#include "mongo/db/matcher/match_details.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/platform/decimal128.h"
+
+#include <memory>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -68,8 +67,6 @@ public:
         }
         return m;
     }
-
-    bool matchesSingleElement(const BSONElement& e, MatchDetails* details = nullptr) const final;
 
     void debugString(StringBuilder& debug, int indentationLevel) const final;
 
@@ -95,12 +92,6 @@ public:
     }
 
 private:
-    ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) {
-            return expression;
-        };
-    }
-
     Decimal128 _divisor;
     Decimal128 _remainder;
 };

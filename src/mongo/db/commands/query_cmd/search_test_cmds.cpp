@@ -27,9 +27,9 @@
  *    it in the license file.
  */
 
-#include "mongo/db/query/search/search_task_executors.h"
-
 #include "mongo/db/commands.h"
+#include "mongo/db/query/search/mongot_options.h"
+#include "mongo/db/query/search/search_task_executors.h"
 #include "mongo/executor/connection_pool_stats.h"
 
 namespace mongo {
@@ -48,6 +48,15 @@ public:
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         auto mongotExec = executor::getMongotTaskExecutor(opCtx->getServiceContext());
+        // The metrics reported through appendConnectionPoolStats do not map cleanly to gRPC's
+        // networking concepts, so when gRPC is enabled, we report the metrics separately. This stat
+        // reporting will be revisited in SERVER-100677
+        if (globalMongotParams.useGRPC) {
+            mongotExec->appendNetworkInterfaceStats(result);
+            return true;
+        }
+
+        // TODO SERVER-100677: Unify global connection stats collection.
         executor::ConnectionPoolStats stats{};
         mongotExec->appendConnectionStats(&stats);
         stats.appendToBSON(result);
@@ -71,6 +80,10 @@ public:
                                  const BSONObj&) const override {
         return Status::OK();
     }
+
+    bool requiresAuthzChecks() const override {
+        return false;
+    }
 };
 
 class CmdDropConnectionsToMongot final : public BasicCommand {
@@ -88,7 +101,10 @@ public:
         auto hps = cmdObj["hostAndPort"].Array();
         auto mongotExec = executor::getMongotTaskExecutor(opCtx->getServiceContext());
         for (auto&& hp : hps) {
-            mongotExec->dropConnections(HostAndPort(hp.String()));
+            mongotExec->dropConnections(HostAndPort(hp.String()),
+                                        Status(ErrorCodes::PooledConnectionsDropped,
+                                               "Internal testing command to drop the connections "
+                                               "between the server and mongot"));
         }
         return true;
     }
@@ -109,6 +125,10 @@ public:
                                  const DatabaseName&,
                                  const BSONObj&) const override {
         return Status::OK();
+    }
+
+    bool requiresAuthzChecks() const override {
+        return false;
     }
 };
 

@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <cstddef>
-#include <memory>
-#include <utility>
-#include <vector>
-
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
@@ -45,13 +39,18 @@
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/query/stage_types.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/stdx/condition_variable.h"
-#include "mongo/stdx/future.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <memory>
+#include <utility>
+#include <vector>
+
 
 namespace mongo::sbe {
 class ExchangeConsumer;
@@ -298,6 +297,11 @@ public:
     ExchangePipe* pipe(size_t producerTid);
     size_t estimateCompileTimeSize() const final;
 
+protected:
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {
+        return;
+    }
+
 private:
     ExchangeBuffer* getBuffer(size_t producerId);
     void putBuffer(size_t producerId);
@@ -350,7 +354,12 @@ public:
     // This function should never be executed
     // since ExchangeProducer is not created in compile time.
     size_t estimateCompileTimeSize() const final {
-        MONGO_UNREACHABLE;
+        MONGO_UNREACHABLE_TASSERT(11122908);
+    }
+
+protected:
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {
+        return;
     }
 
 private:

@@ -7,7 +7,6 @@
  *   multiversion_incompatible,
  *   # Cannot compact when using the in-memory storage engine.
  *   requires_persistence,
- *   featureFlagFailOnDirectShardOperations,
  *   requires_fcv_73
  * ]
  */
@@ -46,16 +45,15 @@ const allCommands = {
     _configsvrCommitChunksMerge: {skip: isAnInternalCommand},
     _configsvrCommitChunkMigration: {skip: isAnInternalCommand},
     _configsvrCommitChunkSplit: {skip: isAnInternalCommand},
-    _configsvrCommitIndex: {skip: isAnInternalCommand},
     _configsvrCommitMergeAllChunksOnShard: {skip: isAnInternalCommand},
     _configsvrCommitMovePrimary: {skip: isAnInternalCommand},
     _configsvrCommitRefineCollectionShardKey: {skip: isAnInternalCommand},
     _configsvrCommitReshardCollection: {skip: isAnInternalCommand},
+    _configsvrCommitShardRemoval: {skip: isAnInternalCommand},
     _configsvrConfigureCollectionBalancing: {skip: isAnInternalCommand},
     _configsvrCreateDatabase: {skip: isAnInternalCommand},
-    _configsvrDropIndexCatalogEntry: {skip: isAnInternalCommand},
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: isAnInternalCommand},
-    _configsvrGetHistoricalPlacement: {skip: isAnInternalCommand},  // TODO SERVER-73029 remove
+    _configsvrGetHistoricalPlacement: {skip: isAnInternalCommand}, // TODO SERVER-73029 remove
     _configsvrMoveRange: {skip: isAnInternalCommand},
     _configsvrRemoveChunks: {skip: isAnInternalCommand},
     _configsvrRemoveShard: {skip: isAnInternalCommand},
@@ -68,10 +66,14 @@ const allCommands = {
     _configsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _configsvrSetClusterParameter: {skip: isAnInternalCommand},
     _configsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
+    _configsvrShardDrainingStatus: {skip: isAnInternalCommand},
+    _configsvrStartShardDraining: {skip: isAnInternalCommand},
+    _configsvrStopShardDraining: {skip: isAnInternalCommand},
     _configsvrTransitionFromDedicatedConfigServer: {skip: isAnInternalCommand},
     _configsvrTransitionToDedicatedConfigServer: {skip: isAnInternalCommand},
     _configsvrUpdateZoneKeyRange: {skip: isAnInternalCommand},
     _dropConnectionsToMongot: {skip: isAnInternalCommand},
+    _dropMirrorMaestroConnections: {skip: isAnInternalCommand},
     _flushDatabaseCacheUpdates: {skip: isAnInternalCommand},
     _flushDatabaseCacheUpdatesWithWriteConcern: {skip: isAnInternalCommand},
     _flushReshardingStateChange: {skip: isAnInternalCommand},
@@ -84,6 +86,7 @@ const allCommands = {
     _killOperations: {skip: isAnInternalCommand},
     _mergeAuthzCollections: {skip: isAnInternalCommand},
     _migrateClone: {skip: isAnInternalCommand},
+    _mirrorMaestroConnPoolStats: {skip: isAnInternalCommand},
     _mongotConnPoolStats: {skip: isAnInternalCommand},
     _recvChunkAbort: {skip: isAnInternalCommand},
     _recvChunkCommit: {skip: isAnInternalCommand},
@@ -96,25 +99,28 @@ const allCommands = {
     _shardsvrChangePrimary: {skip: isAnInternalCommand},
     _shardsvrCleanupStructuredEncryptionData: {skip: isAnInternalCommand},
     _shardsvrCleanupReshardCollection: {skip: isAnInternalCommand},
+    _shardsvrCloneAuthoritativeMetadata: {skip: isAnInternalCommand},
     _shardsvrCloneCatalogData: {skip: isAnInternalCommand},
     _shardsvrCompactStructuredEncryptionData: {skip: isAnInternalCommand},
     _shardsvrConvertToCapped: {skip: isAnInternalCommand},
-    _shardsvrRegisterIndex: {skip: isAnInternalCommand},
-    _shardsvrCommitIndexParticipant: {skip: isAnInternalCommand},
+    _shardsvrCommitCreateDatabaseMetadata: {skip: isAnInternalCommand},
+    _shardsvrCommitDropDatabaseMetadata: {skip: isAnInternalCommand},
     _shardsvrCommitReshardCollection: {skip: isAnInternalCommand},
     _shardsvrDropCollection: {skip: isAnInternalCommand},
     _shardsvrCreateCollection: {skip: isAnInternalCommand},
     _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: isAnInternalCommand},
     _shardsvrDropCollectionParticipant: {skip: isAnInternalCommand},
-    _shardsvrDropIndexCatalogEntryParticipant: {skip: isAnInternalCommand},
     _shardsvrDropIndexes: {skip: isAnInternalCommand},
+    _shardsvrDropIndexesParticipant: {skip: isAnInternalCommand},
     _shardsvrCreateCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrCoordinateMultiUpdate: {skip: isAnInternalCommand},
     _shardsvrEndMigrationBlockingOperation: {skip: isAnInternalCommand},
     _shardsvrGetStatsForBalancing: {skip: isAnInternalCommand},
+    _shardsvrCheckCanConnectToConfigServer: {skip: isAnInternalCommand},
     _shardsvrJoinDDLCoordinators: {skip: isAnInternalCommand},
     _shardsvrJoinMigrations: {skip: isAnInternalCommand},
     _shardsvrMergeAllChunksOnShard: {skip: isAnInternalCommand},
+    _shardsvrMergeChunks: {skip: isAnInternalCommand},
     _shardsvrMovePrimary: {skip: isAnInternalCommand},
     _shardsvrMovePrimaryEnterCriticalSection: {skip: isAnInternalCommand},
     _shardsvrMovePrimaryExitCriticalSection: {skip: isAnInternalCommand},
@@ -124,16 +130,20 @@ const allCommands = {
     _shardsvrRenameCollectionParticipant: {skip: isAnInternalCommand},
     _shardsvrRenameCollectionParticipantUnblock: {skip: isAnInternalCommand},
     _shardsvrRenameIndexMetadata: {skip: isAnInternalCommand},
+    _shardsvrReshardingDonorFetchFinalCollectionStats: {skip: isAnInternalCommand},
+    _shardsvrReshardingDonorStartChangeStreamsMonitor: {skip: isAnInternalCommand},
+    _shardsvrResolveView: {skip: isAnInternalCommand},
     _shardsvrRunSearchIndexCommand: {skip: isAnInternalCommand},
+    _shardsvrDrainOngoingDDLOperations: {skip: isAnInternalCommand},
     _shardsvrDropDatabase: {skip: isAnInternalCommand},
     _shardsvrDropDatabaseParticipant: {skip: isAnInternalCommand},
     _shardsvrReshardCollection: {skip: isAnInternalCommand},
     _shardsvrReshardingOperationTime: {skip: isAnInternalCommand},
+    _shardsvrReshardRecipientClone: {skip: isAnInternalCommand},
     _shardsvrRefineCollectionShardKey: {skip: isAnInternalCommand},
     _shardsvrSetAllowMigrations: {skip: isAnInternalCommand},
     _shardsvrSetClusterParameter: {skip: isAnInternalCommand},
     _shardsvrSetUserWriteBlockMode: {skip: isAnInternalCommand},
-    _shardsvrUnregisterIndex: {skip: isAnInternalCommand},
     _shardsvrValidateShardKeyCandidate: {skip: isAnInternalCommand},
     _shardsvrCollMod: {skip: isAnInternalCommand},
     _shardsvrCollModParticipant: {skip: isAnInternalCommand},
@@ -142,6 +152,7 @@ const allCommands = {
     _shardsvrUntrackUnsplittableCollection: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistency: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: isAnInternalCommand},
+    _shardsvrFetchCollMetadata: {skip: isAnInternalCommand},
     streams_startStreamProcessor: {skip: isAnInternalCommand},
     streams_startStreamSample: {skip: isAnInternalCommand},
     streams_stopStreamProcessor: {skip: isAnInternalCommand},
@@ -154,6 +165,7 @@ const allCommands = {
     streams_testOnlyGetFeatureFlags: {skip: isAnInternalCommand},
     streams_writeCheckpoint: {skip: isAnInternalCommand},
     streams_sendEvent: {skip: isAnInternalCommand},
+    streams_updateConnection: {skip: isAnInternalCommand},
     _transferMods: {skip: isAnInternalCommand},
     abortMoveCollection: {
         // Skipping command because it requires testing through a parallel shell.
@@ -175,7 +187,7 @@ const allCommands = {
         skip: requiresMongoS,
     },
     aggregate: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(mongoS.getCollection(fullNs).insert({a: i}));
@@ -192,35 +204,34 @@ const allCommands = {
                 {$limit: 1},
                 {$set: {x: "1"}},
             ],
-            cursor: {}
+            cursor: {},
         },
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
     analyze: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {analyze: collName},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
     analyzeShardKey: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(
-                mongoS.getDB('admin').runCommand({shardCollection: fullNs, key: {_id: 1}}));
+            assert.commandWorked(mongoS.getDB("admin").runCommand({shardCollection: fullNs, key: {_id: 1}}));
             for (let i = 0; i < 1000; i++) {
                 assert.commandWorked(mongoS.getCollection(fullNs).insert({a: i}));
             }
         },
         command: {analyzeShardKey: fullNs, key: {_id: 1}},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
@@ -242,10 +253,9 @@ const allCommands = {
         shouldFail: false,
     },
     autoSplitVector: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(
-                mongoS.getDB('admin').runCommand({shardCollection: fullNs, key: {a: 1}}));
+            assert.commandWorked(mongoS.getDB("admin").runCommand({shardCollection: fullNs, key: {a: 1}}));
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(mongoS.getCollection(fullNs).insert({a: i}));
             }
@@ -255,10 +265,10 @@ const allCommands = {
             keyPattern: {a: 1},
             min: {a: MinKey},
             max: {a: MaxKey},
-            maxChunkSizeBytes: 1024 * 1024
+            maxChunkSizeBytes: 1024 * 1024,
         },
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
@@ -274,19 +284,19 @@ const allCommands = {
     bulkWrite: {
         // TODO SERVER-67711: Remove check when this feature flag is removed.
         checkFeatureFlag: "BulkWriteCommand",
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {
             bulkWrite: 1,
             ops: [
                 {insert: 0, document: {skey: "MongoDB"}},
-                {insert: 0, document: {skey: "MongoDB"}}
+                {insert: 0, document: {skey: "MongoDB"}},
             ],
-            nsInfo: [{ns: fullNs}]
+            nsInfo: [{ns: fullNs}],
         },
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
         isAdminCommand: true,
@@ -294,19 +304,19 @@ const allCommands = {
     changePrimary: {skip: requiresMongoS},
     checkMetadataConsistency: {skip: requiresMongoS},
     checkShardingIndex: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
             const coll = mongoS.getCollection(fullNs);
             coll.createIndex({x: 1, y: 1});
         },
         command: {checkShardingIndex: fullNs, keyPattern: {x: 1, y: 1}},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
-        }
+        },
     },
     cleanupOrphaned: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(mongoS.getCollection(fullNs).insert({a: i}));
@@ -315,7 +325,7 @@ const allCommands = {
         command: {cleanupOrphaned: fullNs},
         isAdminCommand: true,
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
@@ -327,12 +337,12 @@ const allCommands = {
     cleanupStructuredEncryptionData: {skip: "requires additional encrypted collection setup"},
     clearJumboFlag: {skip: requiresMongoS},
     clearLog: {
-        command: {clearLog: 'global'},
+        command: {clearLog: "global"},
         shouldFail: false,
         isAdminCommand: true,
     },
     cloneCollectionAsCapped: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(mongoS.getCollection(fullNs).insert({a: i}));
@@ -341,10 +351,10 @@ const allCommands = {
         command: {
             cloneCollectionAsCapped: collName,
             toCollection: collName + "2",
-            size: 10 * 1024 * 1024
+            size: 10 * 1024 * 1024,
         },
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName + "2"}));
         },
@@ -360,7 +370,7 @@ const allCommands = {
     clusterInsert: {skip: requiresMongoS},
     clusterUpdate: {skip: requiresMongoS},
     collMod: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(mongoS.getCollection(fullNs).insert({a: i}));
@@ -368,31 +378,33 @@ const allCommands = {
         },
         command: {collMod: collName, validator: {}},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
     collStats: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {aggregate: collName, pipeline: [{$collStats: {count: {}}}], cursor: {}},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
     commitReshardCollection: {
         skip: requiresParallelShell,
     },
+    commitShardRemoval: {skip: requiresMongoS},
     commitTransaction: {skip: "requires modifications to users of number of shards"},
+    commitTransitionToDedicatedConfigServer: {skip: requiresMongoS},
     compact: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {compact: collName, force: true},
         shouldFail: false,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
@@ -408,7 +420,7 @@ const allCommands = {
     connPoolSync: {isAdminCommand: true, command: {connPoolSync: 1}, shouldFail: false},
     connectionStatus: {isAdminCommand: true, command: {connectionStatus: 1}, shouldFail: false},
     convertToCapped: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(mongoS.getCollection(fullNs).insert({a: i}));
@@ -416,13 +428,13 @@ const allCommands = {
         },
         command: {convertToCapped: collName, size: 10 * 1024 * 1024},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
     coordinateCommitTransaction: {skip: isAnInternalCommand},
     count: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(mongoS.getCollection(fullNs).insert({a: i}));
@@ -430,7 +442,7 @@ const allCommands = {
         },
         command: {count: collName},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
@@ -440,22 +452,22 @@ const allCommands = {
         shouldFail: true,
     },
     createIndexes: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
             assert.commandWorked(mongoS.getCollection(fullNs).insert({x: 1}));
         },
         command: {createIndexes: collName, indexes: [{key: {x: 1}, name: "foo"}]},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
     createRole: {
         command: {createRole: "foo", privileges: [], roles: []},
         shouldFail: false,
-        teardown: function(mongoS, withDirectConnections) {
+        teardown: function (mongoS, withDirectConnections) {
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropRole: "foo"}));
-        }
+        },
     },
     createSearchIndexes: {
         // Skipping command as it requires additional Mongot mock setup (and is an enterprise
@@ -466,9 +478,9 @@ const allCommands = {
     createUser: {
         command: {createUser: "foo", pwd: "bar", roles: []},
         shouldFail: false,
-        teardown: function(mongoS, withDirectConnections) {
+        teardown: function (mongoS, withDirectConnections) {
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropUser: "foo"}));
-        }
+        },
     },
     currentOp: {
         command: {currentOp: 1},
@@ -476,12 +488,12 @@ const allCommands = {
         isAdminCommand: true,
     },
     dataSize: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {dataSize: fullNs},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
@@ -492,18 +504,17 @@ const allCommands = {
         shouldFail: true,
     },
     delete: {
-        setUp: function(mongoS) {
-            assert.commandWorked(
-                mongoS.getCollection(fullNs).insert({x: 1}, {writeConcern: {w: 1}}));
+        setUp: function (mongoS) {
+            assert.commandWorked(mongoS.getCollection(fullNs).insert({x: 1}, {writeConcern: {w: 1}}));
         },
         command: {delete: collName, deletes: [{q: {x: 1}, limit: 1}]},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
     distinct: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(mongoS.getCollection(fullNs).insert({a: i}));
@@ -511,7 +522,7 @@ const allCommands = {
         },
         command: {distinct: collName, key: "a"},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
@@ -522,27 +533,29 @@ const allCommands = {
     commitShardSplit: {skip: isDeprecated},
     forgetShardSplit: {skip: isDeprecated},
     drop: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {drop: collName},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
-        }
+        },
     },
     dropAllRolesFromDatabase: {
-        setUp: function(mongoS, withDirectConnections) {
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand(
-                {createRole: "foo", privileges: [], roles: []}));
+        setUp: function (mongoS, withDirectConnections) {
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
         },
         command: {dropAllRolesFromDatabase: 1},
         shouldFail: false,
     },
     dropAllUsersFromDatabase: {
-        setUp: function(mongoS, withDirectConnections) {
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand(
-                {createUser: "foo", pwd: "bar", roles: []}));
+        setUp: function (mongoS, withDirectConnections) {
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({createUser: "foo", pwd: "bar", roles: []}),
+            );
         },
         command: {dropAllUsersFromDatabase: 1},
         shouldFail: false,
@@ -555,22 +568,24 @@ const allCommands = {
         shouldFail: true,
     },
     dropIndexes: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
             assert.commandWorked(mongoS.getCollection(fullNs).insert({x: 1}));
-            assert.commandWorked(mongoS.getDB(dbName).runCommand(
-                {createIndexes: collName, indexes: [{key: {x: 1}, name: "foo"}]}));
+            assert.commandWorked(
+                mongoS.getDB(dbName).runCommand({createIndexes: collName, indexes: [{key: {x: 1}, name: "foo"}]}),
+            );
         },
         command: {dropIndexes: collName, index: {x: 1}},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
     dropRole: {
-        setUp: function(mongoS, withDirectConnections) {
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand(
-                {createRole: "foo", privileges: [], roles: []}));
+        setUp: function (mongoS, withDirectConnections) {
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
         },
         command: {dropRole: "foo"},
         shouldFail: false,
@@ -581,31 +596,33 @@ const allCommands = {
         skip: "requires mongot mock setup",
     },
     dropUser: {
-        setUp: function(mongoS, withDirectConnections) {
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand(
-                {createUser: "foo", pwd: "bar", roles: []}));
+        setUp: function (mongoS, withDirectConnections) {
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({createUser: "foo", pwd: "bar", roles: []}),
+            );
         },
         command: {dropUser: "foo"},
-        shouldFail: false
+        shouldFail: false,
     },
     echo: {command: {echo: 1}, shouldFail: false},
     enableSharding: {
         skip: requiresMongoS,
     },
     endSessions: {skip: "tested in startSession"},
+    eseRotateActiveKEK: {skip: "requires additional setup"},
     explain: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {explain: {count: collName}},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
     features: {command: {features: 1}, shouldFail: false},
     filemd5: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             const f = mongoS.getCollection(dbName + ".fs.chunks");
             assert.commandWorked(f.createIndex({files_id: 1, n: 1}));
         },
@@ -613,7 +630,7 @@ const allCommands = {
         shouldFail: true,
     },
     find: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(mongoS.getCollection(fullNs).insert({a: i}));
@@ -621,19 +638,19 @@ const allCommands = {
         },
         command: {find: collName, filter: {a: 1}},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
     findAndModify: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getCollection(fullNs).insert({x: 1}));
         },
         command: {findAndModify: collName, query: {x: 1}, update: {$set: {x: 2}}},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
-        }
+        },
     },
     flushRouterConfig: {isAdminCommand: true, command: {flushRouterConfig: 1}, shouldFail: false},
     fsync: {
@@ -642,9 +659,8 @@ const allCommands = {
         shouldFail: false,
     },
     fsyncUnlock: {
-        setUp: function(mongoS, withDirectConnections) {
-            assert.commandWorked(
-                withDirectConnections.getDB('admin').runCommand({fsync: 1, lock: 1}));
+        setUp: function (mongoS, withDirectConnections) {
+            assert.commandWorked(withDirectConnections.getDB("admin").runCommand({fsync: 1, lock: 1}));
         },
         command: {fsyncUnlock: 1},
         shouldFail: false,
@@ -655,7 +671,7 @@ const allCommands = {
         command: {getAuditConfig: 1},
         shouldFail: false,
     },
-    getChangeStreamState: {skip: "Only supported on serverless"},
+    getChangeStreamState: {skip: isDeprecated}, // Removed in v8.3
     getClusterParameter: {
         isAdminCommand: true,
         command: {getClusterParameter: "changeStreamOptions"},
@@ -669,7 +685,7 @@ const allCommands = {
     getDatabaseVersion: {
         isAdminCommand: true,
         command: {getDatabaseVersion: dbName},
-        shouldFail: true,
+        shouldFail: false,
     },
     getDefaultRWConcern: {skip: requiresMongoS},
     getDiagnosticData: {
@@ -677,6 +693,7 @@ const allCommands = {
         command: {getDiagnosticData: 1},
         shouldFail: false,
     },
+    getESERotateActiveKEKStatus: {skip: "requires additional setup"},
     getLog: {
         isAdminCommand: true,
         command: {getLog: "global"},
@@ -685,8 +702,7 @@ const allCommands = {
     getMore: {
         skip: "requires instantiating a cursor",
     },
-    getParameter:
-        {isAdminCommand: true, command: {getParameter: 1, logLevel: 1}, shouldFail: false},
+    getParameter: {isAdminCommand: true, command: {getParameter: 1, logLevel: 1}, shouldFail: false},
     getQueryableEncryptionCountInfo: {skip: isAnInternalCommand},
     getShardMap: {
         isAdminCommand: true,
@@ -694,70 +710,80 @@ const allCommands = {
         shouldFail: false,
     },
     getShardVersion: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {getShardVersion: fullNs},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
         isAdminCommand: true,
     },
+    getTrafficRecordingStatus: {
+        isAdminCommand: true,
+        command: {getTrafficRecordingStatus: 1},
+        shouldFail: false,
+    },
+    getTransitionToDedicatedConfigServerStatus: {skip: requiresMongoS},
     godinsert: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {godinsert: collName, obj: {_id: 0, a: 0}},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
     grantPrivilegesToRole: {
-        setUp: function(mongoS, withDirectConnections) {
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand(
-                {createRole: "foo", privileges: [], roles: []}));
+        setUp: function (mongoS, withDirectConnections) {
             assert.commandWorked(
-                withDirectConnections.getDB(dbName).runCommand({create: collName}));
+                withDirectConnections.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
+            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({create: collName}));
         },
         command: {
             grantPrivilegesToRole: "foo",
-            privileges: [{resource: {db: dbName, collection: collName}, actions: ["find"]}]
+            privileges: [{resource: {db: dbName, collection: collName}, actions: ["find"]}],
         },
         shouldFail: false,
-        teardown: function(mongoS, withDirectConnections) {
+        teardown: function (mongoS, withDirectConnections) {
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropRole: "foo"}));
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({drop: collName}));
-        }
+        },
     },
     grantRolesToRole: {
-        setUp: function(mongoS, withDirectConnections) {
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand(
-                {createRole: "foo", privileges: [], roles: []}));
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand(
-                {createRole: "bar", privileges: [], roles: []}));
+        setUp: function (mongoS, withDirectConnections) {
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({createRole: "bar", privileges: [], roles: []}),
+            );
         },
         command: {grantRolesToRole: "foo", roles: [{role: "bar", db: dbName}]},
         shouldFail: false,
-        teardown: function(mongoS, withDirectConnections) {
+        teardown: function (mongoS, withDirectConnections) {
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropRole: "foo"}));
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropRole: "bar"}));
-        }
+        },
     },
     grantRolesToUser: {
-        setUp: function(mongoS, withDirectConnections) {
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand(
-                {createRole: "foo", privileges: [], roles: []}));
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand(
-                {createUser: "foo", pwd: "bar", roles: []}));
+        setUp: function (mongoS, withDirectConnections) {
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({createUser: "foo", pwd: "bar", roles: []}),
+            );
         },
         command: {grantRolesToUser: "foo", roles: [{role: "foo", db: dbName}]},
         shouldFail: false,
-        teardown: function(mongoS, withDirectConnections) {
+        teardown: function (mongoS, withDirectConnections) {
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropRole: "foo"}));
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropUser: "foo"}));
-        }
+        },
     },
     hello: {
         isAdminCommand: true,
@@ -769,12 +795,12 @@ const allCommands = {
     exportCollection: {skip: isAnInternalCommand},
     importCollection: {skip: isAnInternalCommand},
     insert: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {insert: collName, documents: [{_id: ObjectId()}]},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
@@ -809,27 +835,28 @@ const allCommands = {
     listDatabases: {
         // List databases will fail if it is run without nameOnly and there are databases other than
         // config/local/admin present. It will not fail with nameOnly set to true.
-        fullScenario: function(mongoS, withDirectConnections, withoutDirectConnections) {
+        fullScenario: function (mongoS, withDirectConnections, withoutDirectConnections) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
 
-            assert.commandWorked(
-                withoutDirectConnections.adminCommand({listDatabases: 1, nameOnly: 1}));
-            assert.commandFailedWithCode(withoutDirectConnections.adminCommand({listDatabases: 1}),
-                                         ErrorCodes.Unauthorized);
+            assert.commandWorked(withoutDirectConnections.adminCommand({listDatabases: 1, nameOnly: 1}));
+            assert.commandFailedWithCode(
+                withoutDirectConnections.adminCommand({listDatabases: 1}),
+                ErrorCodes.Unauthorized,
+            );
 
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
-        }
+        },
     },
     listDatabasesForAllTenants: {
         skip: isAnInternalCommand,
     },
     listIndexes: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {listIndexes: collName},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
@@ -866,17 +893,17 @@ const allCommands = {
         shouldFail: false,
     },
     mapReduce: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {
             mapReduce: collName,
-            map: function() {},
-            reduce: function(key, vals) {},
-            out: {inline: 1}
+            map: function () {},
+            reduce: function (key, vals) {},
+            out: {inline: 1},
         },
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
@@ -903,42 +930,42 @@ const allCommands = {
     },
     ping: {isAdminCommand: true, command: {ping: 1}, shouldFail: false},
     planCacheClear: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {planCacheClear: collName},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
     planCacheClearFilters: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {planCacheClearFilters: collName},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
     planCacheListFilters: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {planCacheListFilters: collName},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
     planCacheSetFilter: {
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {planCacheSetFilter: collName, query: {_id: "A"}, indexes: [{_id: 1}]},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
         },
     },
@@ -947,8 +974,8 @@ const allCommands = {
         isAdminCommand: true,
         command: {profile: 2},
         shouldFail: false,
-        teardown: function(mongoS) {
-            assert.commandWorked(mongoS.getDB('admin').runCommand({profile: 0}));
+        teardown: function (mongoS) {
+            assert.commandWorked(mongoS.getDB("admin").runCommand({profile: 0}));
         },
     },
     reapLogicalSessionCacheNow: {
@@ -969,20 +996,22 @@ const allCommands = {
     reIndex: {
         skip: isDeprecated,
     },
+    releaseMemory: {skip: "requires instantiating a cursor"},
     removeShard: {skip: requiresMongoS},
     removeShardFromZone: {skip: requiresMongoS},
     renameCollection: {
         isAdminCommand: true,
-        setUp: function(mongoS) {
+        setUp: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({create: collName}));
         },
         command: {renameCollection: fullNs, to: fullNs + "2"},
         shouldFail: true,
-        teardown: function(mongoS) {
+        teardown: function (mongoS) {
             assert.commandWorked(mongoS.getDB(dbName).runCommand({drop: collName}));
-        }
+        },
     },
     repairShardedCollectionChunksHistory: {skip: isAnInternalCommand},
+    replicateSearchIndexCommand: {skip: isAnInternalCommand},
     replSetAbortPrimaryCatchUp: {skip: "tested in direct_shard_connection_auth_rs_commands.js"},
     replSetFreeze: {skip: "tested in direct_shard_connection_auth_rs_commands.js"},
     replSetGetConfig: {skip: "tested in direct_shard_connection_auth_rs_commands.js"},
@@ -991,7 +1020,7 @@ const allCommands = {
         isReplSetOnly: true,
         isAdminCommand: true,
         command: {replSetGetStatus: 1},
-        shouldFail: false
+        shouldFail: false,
     },
     replSetHeartbeat: {skip: isAnInternalCommand},
     replSetInitiate: {skip: "must be run before shard is added to the cluster"},
@@ -1017,69 +1046,77 @@ const allCommands = {
     resetPlacementHistory: {skip: requiresMongoS},
     reshardCollection: {skip: requiresMongoS},
     revokePrivilegesFromRole: {
-        setUp: function(mongoS, withDirectConnections) {
+        setUp: function (mongoS, withDirectConnections) {
+            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({create: collName}));
             assert.commandWorked(
-                withDirectConnections.getDB(dbName).runCommand({create: collName}));
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({
-                createRole: "foo",
-                privileges: [{resource: {db: dbName, collection: collName}, actions: ["find"]}],
-                roles: [],
-            }));
+                withDirectConnections.getDB(dbName).runCommand({
+                    createRole: "foo",
+                    privileges: [{resource: {db: dbName, collection: collName}, actions: ["find"]}],
+                    roles: [],
+                }),
+            );
         },
         command: {
             revokePrivilegesFromRole: "foo",
-            privileges: [{resource: {db: dbName, collection: collName}, actions: ["find"]}]
+            privileges: [{resource: {db: dbName, collection: collName}, actions: ["find"]}],
         },
         shouldFail: false,
-        teardown: function(mongoS, withDirectConnections) {
+        teardown: function (mongoS, withDirectConnections) {
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropRole: "foo"}));
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({drop: collName}));
-        }
+        },
     },
     revokeRolesFromRole: {
-        setUp: function(mongoS, withDirectConnections) {
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand(
-                {createRole: "bar", privileges: [], roles: []}));
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({
-                createRole: "foo",
-                privileges: [],
-                roles: [{role: "bar", db: dbName}],
-            }));
+        setUp: function (mongoS, withDirectConnections) {
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({createRole: "bar", privileges: [], roles: []}),
+            );
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({
+                    createRole: "foo",
+                    privileges: [],
+                    roles: [{role: "bar", db: dbName}],
+                }),
+            );
         },
         command: {revokeRolesFromRole: "foo", roles: [{role: "foo", db: dbName}]},
         shouldFail: false,
-        teardown: function(mongoS, withDirectConnections) {
+        teardown: function (mongoS, withDirectConnections) {
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropRole: "foo"}));
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropRole: "bar"}));
-        }
+        },
     },
     revokeRolesFromUser: {
-        setUp: function(mongoS, withDirectConnections) {
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand(
-                {createRole: "foo", privileges: [], roles: []}));
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({
-                createUser: "foo",
-                pwd: "bar",
-                roles: [{role: "foo", db: dbName}],
-            }));
+        setUp: function (mongoS, withDirectConnections) {
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({
+                    createUser: "foo",
+                    pwd: "bar",
+                    roles: [{role: "foo", db: dbName}],
+                }),
+            );
         },
         command: {revokeRolesFromUser: "foo", roles: [{role: "foo", db: dbName}]},
         shouldFail: false,
-        teardown: function(mongoS, withDirectConnections) {
+        teardown: function (mongoS, withDirectConnections) {
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropRole: "foo"}));
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropUser: "foo"}));
-        }
+        },
     },
     rolesInfo: {
-        setUp: function(mongoS, withDirectConnections) {
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand(
-                {createRole: "foo", privileges: [], roles: []}));
+        setUp: function (mongoS, withDirectConnections) {
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
         },
         command: {rolesInfo: 1},
         shouldFail: false,
-        teardown: function(mongoS, withDirectConnections) {
+        teardown: function (mongoS, withDirectConnections) {
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropRole: "foo"}));
-        }
+        },
     },
     rotateCertificates: {skip: "requires additional authentication setup"},
     rotateFTDC: {isAdminCommand: true, command: {rotateFTDC: 1}, shouldFail: false},
@@ -1101,39 +1138,46 @@ const allCommands = {
         command: {setParameter: 1, quiet: 1},
         isAdminCommand: true,
         shouldFail: false,
-        teardown: function(conn) {
-            assert.commandWorked(conn.getDB('admin').runCommand({setParameter: 1, quiet: 0}));
-        }
+        teardown: function (conn) {
+            assert.commandWorked(conn.getDB("admin").runCommand({setParameter: 1, quiet: 0}));
+        },
     },
-    setChangeStreamState: {skip: "requires serverless"},
+    setChangeStreamState: {skip: isDeprecated}, // Removed in v8.3
     setClusterParameter: {skip: requiresMongoS},
     setQuerySettings: {skip: requiresMongoS},
     removeQuerySettings: {skip: requiresMongoS},
     setUserWriteBlockMode: {skip: requiresMongoS},
     shardCollection: {skip: requiresMongoS},
+    shardDrainingStatus: {skip: requiresMongoS},
     shardingState: {isAdminCommand: true, command: {shardingState: 1}, shouldFail: false},
     shutdown: {skip: "requires changes to shards"},
     sleep: {skip: isAnInternalCommand},
     split: {skip: requiresMongoS},
     splitChunk: {skip: isAnInternalCommand},
     splitVector: {skip: isAnInternalCommand},
-    stageDebug: {skip: isAnInternalCommand},
-    startRecordingTraffic: {
+    startRecordingTraffic: {skip: "Renamed to startTrafficRecording"},
+    stopRecordingTraffic: {skip: "Renamed to stopTrafficRecording"},
+    startShardDraining: {skip: requiresMongoS},
+    startTrafficRecording: {
         // Skipping command because it requires an actual file path for recording traffic to.
         skip: "requires an actual file path to record traffic to",
     },
+    startTransitionToDedicatedConfigServer: {skip: requiresMongoS},
     startSession: {
-        fullScenario: function(mongoS, withDirectConnections, withoutDirectConnections) {
+        fullScenario: function (mongoS, withDirectConnections, withoutDirectConnections) {
             const res = withoutDirectConnections.adminCommand({startSession: 1});
             assert.commandWorked(res);
             assert.commandWorked(withoutDirectConnections.adminCommand({endSessions: [res.id]}));
-        }
+        },
     },
-    stopRecordingTraffic: {
+    stopShardDraining: {skip: requiresMongoS},
+    stopTrafficRecording: {
         // Skipping command because it requires an actual file path for recording traffic to.
         skip: "requires an actual file path to record traffic to",
     },
+    stopTransitionToDedicatedConfigServer: {skip: requiresMongoS},
     sysprofile: {skip: isAnInternalCommand},
+    testCommandFeatureFlaggedOnLatestFCV83: {skip: isAnInternalCommand},
     testDeprecation: {skip: isAnInternalCommand},
     testDeprecationInVersion2: {skip: isAnInternalCommand},
     testInternalTransactions: {skip: isAnInternalCommand},
@@ -1153,25 +1197,26 @@ const allCommands = {
     unshardCollection: {skip: requiresMongoS},
     untrackUnshardedCollection: {skip: requiresMongoS},
     update: {
-        setUp: function(conn) {
+        setUp: function (conn) {
             assert.commandWorked(conn.getCollection(fullNs).insert({x: 1}));
         },
         command: {update: collName, updates: [{q: {x: 1}, u: {x: 2}}]},
         shouldFail: true,
-        teardown: function(conn) {
+        teardown: function (conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         },
     },
     updateRole: {
-        setUp: function(mongoS, withDirectConnections) {
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand(
-                {createRole: "foo", privileges: [], roles: []}));
+        setUp: function (mongoS, withDirectConnections) {
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({createRole: "foo", privileges: [], roles: []}),
+            );
         },
         command: {updateRole: "foo", privileges: []},
         shouldFail: false,
-        teardown: function(mongoS, withDirectConnections) {
+        teardown: function (mongoS, withDirectConnections) {
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropRole: "foo"}));
-        }
+        },
     },
     updateSearchIndex: {
         // Skipping command as it requires additional Mongot mock setup (and is an enterprise
@@ -1179,30 +1224,32 @@ const allCommands = {
         skip: "requires mongot mock setup",
     },
     updateUser: {
-        setUp: function(mongoS, withDirectConnections) {
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand(
-                {createUser: "foo", pwd: "bar", roles: []}));
+        setUp: function (mongoS, withDirectConnections) {
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({createUser: "foo", pwd: "bar", roles: []}),
+            );
         },
         command: {updateUser: "foo", pwd: "bar2"},
         shouldFail: false,
-        teardown: function(mongoS, withDirectConnections) {
+        teardown: function (mongoS, withDirectConnections) {
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropUser: "foo"}));
-        }
+        },
     },
     updateZoneKeyRange: {skip: requiresMongoS},
     usersInfo: {
-        setUp: function(mongoS, withDirectConnections) {
-            assert.commandWorked(withDirectConnections.getDB(dbName).runCommand(
-                {createUser: "foo", pwd: "bar", roles: []}));
+        setUp: function (mongoS, withDirectConnections) {
+            assert.commandWorked(
+                withDirectConnections.getDB(dbName).runCommand({createUser: "foo", pwd: "bar", roles: []}),
+            );
         },
         command: {usersInfo: "foo"},
         shouldFail: false,
-        teardown: function(mongoS, withDirectConnections) {
+        teardown: function (mongoS, withDirectConnections) {
             assert.commandWorked(withDirectConnections.getDB(dbName).runCommand({dropUser: "foo"}));
         },
     },
     validate: {
-        setUp: function(conn) {
+        setUp: function (conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({create: collName}));
             for (let i = 0; i < 10; i++) {
                 assert.commandWorked(conn.getCollection(fullNs).insert({a: i}));
@@ -1210,7 +1257,7 @@ const allCommands = {
         },
         command: {validate: collName},
         shouldFail: true,
-        teardown: function(conn) {
+        teardown: function (conn) {
             assert.commandWorked(conn.getDB(dbName).runCommand({drop: collName}));
         },
     },
@@ -1234,7 +1281,7 @@ const allCommands = {
         command: {whatsmyuri: 1},
         isAdminCommand: true,
         shouldFail: false,
-    }
+    },
 };
 
 /**
@@ -1242,7 +1289,7 @@ const allCommands = {
  * If 'code' is null we only check for failure, otherwise we confirm error code matches as
  * well. On assert 'msg' is printed.
  */
-let assertCommandOrWriteFailed = function(res, code, msg) {
+let assertCommandOrWriteFailed = function (res, code, msg) {
     if (res.writeErrors !== undefined) {
         assert.neq(0, res.writeErrors.length, msg);
     } else if (res.code !== null) {
@@ -1252,12 +1299,10 @@ let assertCommandOrWriteFailed = function(res, code, msg) {
     }
 };
 
-let runCommand = function(
-    command, test, mongoS, withDirectConnections, withoutDirectConnections, st) {
+let runCommand = function (command, test, mongoS, withDirectConnections, withoutDirectConnections, st) {
     // Skip command if its feature flag is not enabled.
     if (test.checkFeatureFlag) {
-        if (!FeatureFlagUtil.isPresentAndEnabled(withDirectConnections.getDB('admin'),
-                                                 test.checkFeatureFlag)) {
+        if (!FeatureFlagUtil.isPresentAndEnabled(withDirectConnections.getDB("admin"), test.checkFeatureFlag)) {
             jsTestLog("Skipping " + tojson(command) + " because its feature flag is not enabled.");
             return;
         }
@@ -1266,14 +1311,14 @@ let runCommand = function(
     jsTestLog("Testing " + command);
 
     // If fullScenario is defined, run full setup, command, and teardown in one function.
-    if (typeof (test.fullScenario) === "function") {
+    if (typeof test.fullScenario === "function") {
         test.fullScenario(mongoS, withDirectConnections, withoutDirectConnections);
         return;
     }
 
     // Otherwise run setUp.
     let cmdObj = test.command;
-    if (typeof (test.setUp) === "function") {
+    if (typeof test.setUp === "function") {
         let setUpRes = test.setUp(mongoS, withDirectConnections, withoutDirectConnections);
 
         // For some commands (such as killSessions) the command requires information that is
@@ -1286,30 +1331,26 @@ let runCommand = function(
     }
 
     // Change cmdDb if necessary.
-    let cmdDb = test.isAdminCommand ? withoutDirectConnections.getDB('admin')
-                                    : withoutDirectConnections.getDB(dbName);
+    let cmdDb = test.isAdminCommand ? withoutDirectConnections.getDB("admin") : withoutDirectConnections.getDB(dbName);
 
     jsTestLog("Running command: " + tojson(cmdObj));
     if (test.shouldFail) {
-        assertCommandOrWriteFailed(
-            cmdDb.runCommand(cmdObj), ErrorCodes.Unauthorized, () => tojson(cmdObj));
+        assertCommandOrWriteFailed(cmdDb.runCommand(cmdObj), ErrorCodes.Unauthorized, () => tojson(cmdObj));
     } else {
         assert.commandWorked(cmdDb.runCommand(cmdObj), () => tojson(cmdObj));
     }
 
     // Run test teardown.
-    if (typeof (test.teardown) === "function") {
+    if (typeof test.teardown === "function") {
         test.teardown(mongoS, withDirectConnections, withoutDirectConnections);
     }
 };
 
-let runAllCommands = function(
-    st, mongoS, shardWithDirectConnections, shardWithoutDirectConnections) {
+let runAllCommands = function (st, mongoS, shardWithDirectConnections, shardWithoutDirectConnections) {
     jsTestLog("Running all commands with direct shard connections");
     // First check that the map contains all available commands.
     let commandsList = AllCommandsTest.checkCommandCoverage(mongoS, allCommands);
-    let shardCommandsList =
-        AllCommandsTest.checkCommandCoverage(shardWithDirectConnections, allCommands);
+    let shardCommandsList = AllCommandsTest.checkCommandCoverage(shardWithDirectConnections, allCommands);
     commandsList = new Set(commandsList.concat(shardCommandsList));
 
     for (const command of commandsList) {
@@ -1324,8 +1365,7 @@ let runAllCommands = function(
         }
 
         // Run all commands.
-        runCommand(
-            command, test, mongoS, shardWithDirectConnections, shardWithoutDirectConnections, st);
+        runCommand(command, test, mongoS, shardWithDirectConnections, shardWithoutDirectConnections, st);
     }
 };
 
@@ -1337,39 +1377,35 @@ const userConn = new Mongo(st.shard0.host);
 const userAdminDB = userConn.getDB("admin");
 
 // Establish shard users, one with root privileges and one missing directShardOperations.
-shardAdminDB.createUser({user: "admin", pwd: 'x', roles: ["root"]});
-assert(shardAdminDB.auth("admin", 'x'), "Authentication failed");
+shardAdminDB.createUser({user: "admin", pwd: "x", roles: ["root"]});
+assert(shardAdminDB.auth("admin", "x"), "Authentication failed");
 shardAdminDB.createUser({
     user: "user",
     pwd: "y",
-    roles: [
-        "clusterAdmin",
-        "userAdminAnyDatabase",
-        "dbAdminAnyDatabase",
-        "readWriteAnyDatabase",
-        "backup",
-        "restore"
-    ]
+    roles: ["clusterAdmin", "userAdminAnyDatabase", "dbAdminAnyDatabase", "readWriteAnyDatabase", "backup", "restore"],
 });
 assert(userAdminDB.auth("user", "y"), "Authentication failed");
 
 // Increase verbosity so that we always see the direct connection error/warning
-assert.commandWorked(shardAdminDB.runCommand(
-    {setParameter: 1, logComponentVerbosity: {sharding: {verbosity: 1}, assert: {verbosity: 1}}}));
+assert.commandWorked(
+    shardAdminDB.runCommand({
+        setParameter: 1,
+        logComponentVerbosity: {sharding: {verbosity: 1}, assert: {verbosity: 1}},
+    }),
+);
 
 // Establish mongoS user
 const mongoSConn = st.s;
-const mongosAdminUser = mongoSConn.getDB('admin');
+const mongosAdminUser = mongoSConn.getDB("admin");
 if (!TestData.configShard) {
-    mongosAdminUser.createUser({user: "globalAdmin", pwd: 'a', roles: ["root"]});
+    mongosAdminUser.createUser({user: "globalAdmin", pwd: "a", roles: ["root"]});
     assert(mongosAdminUser.auth("globalAdmin", "a"), "Authentication failed");
 } else {
     assert(mongosAdminUser.auth("admin", "x"), "Authentication failed");
 }
 
 // Setup database with primary shard set
-assert.commandWorked(
-    mongosAdminUser.runCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+assert.commandWorked(mongosAdminUser.runCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
 
 runAllCommands(st, mongoSConn, shardConn, userConn);
 

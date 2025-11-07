@@ -50,8 +50,6 @@
 #include "mongo/db/ftdc/file_manager.h"
 #include "mongo/db/ftdc/file_reader.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
@@ -63,13 +61,8 @@ namespace mongo {
 
 FTDCFileManager::FTDCFileManager(const FTDCConfig* config,
                                  const boost::filesystem::path& path,
-                                 FTDCCollectorCollection* collection,
-                                 UseMultiServiceSchema multiServiceSchema)
-    : _config(config),
-      _writer(_config, multiServiceSchema),
-      _path(path),
-      _rotateCollectors(collection),
-      _multiServiceSchema(multiServiceSchema) {}
+                                 FTDCCollectorCollection* collection)
+    : _config(config), _writer(_config), _path(path), _rotateCollectors(collection) {}
 
 FTDCFileManager::~FTDCFileManager() {
     close().transitional_ignore();
@@ -79,8 +72,7 @@ StatusWith<std::unique_ptr<FTDCFileManager>> FTDCFileManager::create(
     const FTDCConfig* config,
     const boost::filesystem::path& path,
     FTDCCollectorCollection* collection,
-    Client* client,
-    UseMultiServiceSchema multiServiceSchema) {
+    Client* client) {
     const boost::filesystem::path dir = boost::filesystem::absolute(path);
 
     // We don't expect to ever pass "" to create_directories below, but catch
@@ -98,8 +90,8 @@ StatusWith<std::unique_ptr<FTDCFileManager>> FTDCFileManager::create(
         }
     }
 
-    auto mgr = std::unique_ptr<FTDCFileManager>(
-        new FTDCFileManager(config, dir, std::move(collection), multiServiceSchema));
+    auto mgr =
+        std::unique_ptr<FTDCFileManager>(new FTDCFileManager(config, dir, std::move(collection)));
 
     // Enumerate the metrics files
     auto files = mgr->scanDirectory();
@@ -152,11 +144,11 @@ StatusWith<boost::filesystem::path> FTDCFileManager::generateArchiveFileName(
     auto fileName = path;
     fileName /= std::string(kFTDCArchiveFile);
     fileName += std::string(".");
-    fileName += suffix.toString();
+    fileName += std::string{suffix};
 
     if (_previousArchiveFileSuffix != suffix) {
         // If the suffix has changed, reset the uniquifier counter to zero
-        _previousArchiveFileSuffix = suffix.toString();
+        _previousArchiveFileSuffix = std::string{suffix};
         _fileNameUniquifier = 0;
     }
 
@@ -210,17 +202,25 @@ Status FTDCFileManager::openArchiveFile(
         }
     }
 
-    // After the system restarts or a new file has been started,
-    // collect one-time information
-    // This is appened after the file is opened to ensure a user can determine which bson objects
-    // where collected from which server instance.
-    auto sample = _rotateCollectors->collect(client, _multiServiceSchema);
-    if (!std::get<0>(sample).isEmpty()) {
-        Status s = _writer.writeMetadata(std::get<0>(sample), std::get<1>(sample));
+    // After the system restarts or a new file has been started, collect one-time information. This
+    // is appended after the file is opened to ensure a user can determine which bson objects were
+    // collected from which server instance.
+    std::vector<std::pair<std::string, int>> sectionSizes;
+    try {
+        auto sample = _rotateCollectors->collect(client, sectionSizes);
+        if (!std::get<0>(sample).isEmpty()) {
+            Status s = _writer.writeMetadata(std::get<0>(sample), std::get<1>(sample));
 
-        if (!s.isOK()) {
-            return s;
+            if (!s.isOK()) {
+                return s;
+            }
         }
+    } catch (const ExceptionFor<ErrorCodes::BSONObjectTooLarge>&) {
+        for (const auto& entry : sectionSizes) {
+            LOGV2_INFO(
+                10630203, "FTDC Entry", "name"_attr = entry.first, "size"_attr = entry.second);
+        }
+        throw;
     }
 
     return Status::OK();

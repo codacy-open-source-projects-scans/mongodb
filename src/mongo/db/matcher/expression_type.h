@@ -29,19 +29,9 @@
 
 #pragma once
 
-#include <cstddef>
-#include <memory>
-#include <sys/types.h>
-#include <type_traits>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -52,11 +42,19 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_visitor.h"
-#include "mongo/db/matcher/match_details.h"
 #include "mongo/db/matcher/matcher_type_set.h"
 #include "mongo/db/matcher/path.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/idl/idl_parser.h"
+
+#include <cstddef>
+#include <memory>
+#include <type_traits>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <sys/types.h>
 
 namespace mongo {
 
@@ -91,11 +89,6 @@ public:
      */
     virtual StringData name() const = 0;
 
-    bool matchesSingleElement(const BSONElement& elem,
-                              MatchDetails* details = nullptr) const override {
-        return _typeSet.hasType(elem.type());
-    }
-
     void debugString(StringBuilder& debug, int indentationLevel) const final {
         _debugAddSpace(debug, indentationLevel);
         debug << path() << " " << name() << ": " << _typeSet.toBSONArray().toString();
@@ -129,12 +122,6 @@ public:
     }
 
 private:
-    ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) {
-            return expression;
-        };
-    }
-
     // The set of matching types.
     MatcherTypeSet _typeSet;
 };
@@ -246,11 +233,6 @@ public:
         return kName;
     }
 
-    bool matchesSingleElement(const BSONElement& elem,
-                              MatchDetails* details = nullptr) const final {
-        return elem.type() == BSONType::BinData && elem.binDataType() == _binDataSubType;
-    }
-
     std::unique_ptr<MatchExpression> clone() const final {
         auto expr = std::make_unique<InternalSchemaBinDataSubTypeExpression>(
             path(), _binDataSubType, _errorAnnotation);
@@ -269,12 +251,13 @@ public:
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
                                        const SerializationOptions& opts = {},
                                        bool includePath = true) const final {
-        if (opts.literalPolicy == LiteralSerializationPolicy::kUnchanged) {
+        if (opts.isKeepingLiteralsUnchanged()) {
             bob->append(name(), _binDataSubType);
         } else {
             // There is some fancy serialization logic to get the above BSONObjBuilder append to
             // work. We just want to make sure we're doing the same thing here.
-            static_assert(BSONObjAppendFormat<decltype(_binDataSubType)>::value == NumberInt,
+            static_assert(BSONObjAppendFormat<decltype(_binDataSubType)>::value ==
+                              BSONType::numberInt,
                           "Expecting that the BinData sub type should be specified and serialized "
                           "as an int.");
             opts.appendLiteral(bob, name(), static_cast<int>(_binDataSubType));
@@ -307,12 +290,6 @@ public:
     }
 
 private:
-    ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) {
-            return expression;
-        };
-    }
-
     BinDataType _binDataSubType;
 };
 
@@ -350,31 +327,6 @@ public:
 
     MatchCategory getCategory() const final {
         return MatchCategory::kOther;
-    }
-
-    bool matchesSingleElement(const BSONElement& elem,
-                              MatchDetails* details = nullptr) const final {
-        if (elem.type() != BSONType::BinData)
-            return false;
-        if (elem.binDataType() != BinDataType::Encrypt)
-            return false;
-
-        int binDataLen;
-        auto binData = elem.binData(binDataLen);
-        if (static_cast<size_t>(binDataLen) < sizeof(FleBlobHeader))
-            return false;
-
-        auto fleBlobSubType = EncryptedBinDataType_parse(IDLParserContext("subtype"), binData[0]);
-        switch (fleBlobSubType) {
-            case EncryptedBinDataType::kDeterministic:
-            case EncryptedBinDataType::kRandom: {
-                // Verify the type of the encrypted data.
-                auto fleBlob = reinterpret_cast<const FleBlobHeader*>(binData);
-                return typeSet().hasType(static_cast<BSONType>(fleBlob->originalBsonType));
-            }
-            default:
-                return false;
-        }
     }
 
     void acceptVisitor(MatchExpressionMutableVisitor* visitor) final {
@@ -421,39 +373,6 @@ public:
 
     MatchCategory getCategory() const final {
         return MatchCategory::kOther;
-    }
-
-    bool matchesSingleElement(const BSONElement& elem,
-                              MatchDetails* details = nullptr) const final {
-        if (elem.type() != BSONType::BinData)
-            return false;
-        if (elem.binDataType() != BinDataType::Encrypt)
-            return false;
-
-        int binDataLen;
-        auto binData = elem.binData(binDataLen);
-        if (static_cast<size_t>(binDataLen) < sizeof(FleBlobHeader))
-            return false;
-
-        EncryptedBinDataType subTypeByte = static_cast<EncryptedBinDataType>(binData[0]);
-        switch (subTypeByte) {
-            case EncryptedBinDataType::kFLE2EqualityIndexedValue:
-            case EncryptedBinDataType::kFLE2RangeIndexedValue:
-            case EncryptedBinDataType::kFLE2EqualityIndexedValueV2:
-            case EncryptedBinDataType::kFLE2RangeIndexedValueV2:
-            case EncryptedBinDataType::kFLE2UnindexedEncryptedValue:
-            case EncryptedBinDataType::kFLE2UnindexedEncryptedValueV2: {
-                // Verify the type of the encrypted data.
-                if (typeSet().isEmpty()) {
-                    return true;
-                } else {
-                    auto fleBlob = reinterpret_cast<const FleBlobHeader*>(binData);
-                    return typeSet().hasType(static_cast<BSONType>(fleBlob->originalBsonType));
-                }
-            }
-            default:
-                return false;
-        }
     }
 
     void acceptVisitor(MatchExpressionMutableVisitor* visitor) final {

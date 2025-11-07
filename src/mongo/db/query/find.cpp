@@ -28,26 +28,24 @@
  */
 
 
-#include <memory>
-#include <string>
-#include <utility>
+#include "mongo/db/query/find.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
-#include "mongo/db/basic_types.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/client_cursor/clientcursor.h"
 #include "mongo/db/query/client_cursor/collect_query_stats_mongod.h"
-#include "mongo/db/query/collection_query_info.h"
+#include "mongo/db/query/collection_index_usage_tracker_decoration.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/find.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
-#include "mongo/db/query/query_stats/key.h"
 #include "mongo/util/fail_point.h"
+
+#include <memory>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -103,7 +101,11 @@ void endQueryOp(OperationContext* opCtx,
     explainer.getSummaryStats(&summaryStats);
 
     if (collection) {
-        CollectionQueryInfo::get(collection).notifyOfQuery(opCtx, collection, summaryStats);
+        CollectionIndexUsageTrackerDecoration::recordCollectionIndexUsage(
+            collection.get(),
+            summaryStats.collectionScans,
+            summaryStats.collectionScansNonTailable,
+            summaryStats.indexesUsed);
     }
 
     curOp->debug().setPlanSummaryMetrics(std::move(summaryStats));
@@ -113,8 +115,7 @@ void endQueryOp(OperationContext* opCtx,
         collectQueryStatsMongod(opCtx, *cursor);
     } else {
         auto* cq = exec.getCanonicalQuery();
-        const auto& expCtx =
-            cq ? cq->getExpCtx() : ExpressionContext::makeBlankExpressionContext(opCtx, exec.nss());
+        const auto& expCtx = cq ? cq->getExpCtx() : makeBlankExpressionContext(opCtx, exec.nss());
         collectQueryStatsMongod(opCtx, expCtx, std::move(curOp->debug().queryStatsInfo.key));
     }
 

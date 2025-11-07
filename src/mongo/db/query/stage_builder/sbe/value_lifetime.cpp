@@ -29,28 +29,21 @@
 
 #include "mongo/db/query/stage_builder/sbe/value_lifetime.h"
 
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-// IWYU pragma: no_include "ext/alloc_traits.h"
-#include <memory>
-#include <string>
-
 namespace mongo::stage_builder {
 using namespace std::string_literals;
 
-void ValueLifetime::validate(optimizer::ABT& node) {
+void ValueLifetime::validate(abt::ABT& node) {
     node.visit(*this);
 }
 
-ValueLifetime::ValueType ValueLifetime::operator()(optimizer::ABT& node,
-                                                   optimizer::Constant& value) {
+ValueLifetime::ValueType ValueLifetime::operator()(abt::ABT& node, abt::Constant& value) {
     // Treat shallow types that don't require lifetime management as if they were
     // global values.
     return sbe::value::isShallowType(value.get().first) ? ValueType::GlobalValue
                                                         : ValueType::LocalValue;
 }
 
-ValueLifetime::ValueType ValueLifetime::operator()(optimizer::ABT& n, optimizer::Variable& var) {
+ValueLifetime::ValueType ValueLifetime::operator()(abt::ABT& n, abt::Variable& var) {
     auto it = _bindings.find(var.name());
     if (it != _bindings.end()) {
         if (it->second == ValueType::LocalValue) {
@@ -62,13 +55,12 @@ ValueLifetime::ValueType ValueLifetime::operator()(optimizer::ABT& n, optimizer:
     return ValueType::GlobalValue;
 }
 
-ValueLifetime::ValueType ValueLifetime::operator()(optimizer::ABT& n,
-                                                   optimizer::LambdaAbstraction& lambda) {
+ValueLifetime::ValueType ValueLifetime::operator()(abt::ABT& n, abt::LambdaAbstraction& lambda) {
     // The Lambda node returns the value of its 'body' child.
     return lambda.getBody().visit(*this);
 }
 
-ValueLifetime::ValueType ValueLifetime::operator()(optimizer::ABT& n, optimizer::Let& let) {
+ValueLifetime::ValueType ValueLifetime::operator()(abt::ABT& n, abt::Let& let) {
     // Define the new variable with the type of the 'bind' expression type.
     // If the value is a reference, promote it to local value.
     ValueType bindType = let.bind().visit(*this);
@@ -86,12 +78,34 @@ ValueLifetime::ValueType ValueLifetime::operator()(optimizer::ABT& n, optimizer:
     return resultType;
 }
 
-ValueLifetime::ValueType ValueLifetime::operator()(optimizer::ABT& n, optimizer::BinaryOp& op) {
+ValueLifetime::ValueType ValueLifetime::operator()(abt::ABT& n, abt::MultiLet& multiLet) {
+    // Define the new variables with the type of the 'bind' expressions.
+    // If the value is a reference, promote it to local value.
+    for (size_t idx = 0; idx < multiLet.numBinds(); ++idx) {
+        ValueType bindType = multiLet.bind(idx).visit(*this);
+        if (bindType == ValueType::Reference) {
+            wrapNode(multiLet.bind(idx));
+            bindType = ValueType::LocalValue;
+        }
+        _bindings[multiLet.varName(idx)] = bindType;
+    }
+
+    // The MultiLet node returns the value of its 'in' child.
+    ValueType resultType = multiLet.in().visit(*this);
+
+    for (auto&& name : multiLet.varNames()) {
+        _bindings.erase(name);
+    }
+
+    return resultType;
+}
+
+ValueLifetime::ValueType ValueLifetime::operator()(abt::ABT& n, abt::BinaryOp& op) {
 
     ValueType lhs = op.getLeftChild().visit(*this);
     ValueType rhs = op.getRightChild().visit(*this);
     switch (op.op()) {
-        case optimizer::Operations::FillEmpty: {
+        case abt::Operations::FillEmpty: {
             // FillEmpty propagates either side, promote references to be local values.
             if (lhs == rhs) {
                 return lhs;
@@ -110,19 +124,33 @@ ValueLifetime::ValueType ValueLifetime::operator()(optimizer::ABT& n, optimizer:
     return ValueType::LocalValue;
 }
 
-ValueLifetime::ValueType ValueLifetime::operator()(optimizer::ABT& n, optimizer::FunctionCall& op) {
+ValueLifetime::ValueType ValueLifetime::operator()(abt::ABT& n, abt::NaryOp& op) {
+    // Process the arguments, but the logical operation is always going to return a local value.
+    for (auto& node : op.nodes()) {
+        node.visit(*this);
+    }
+    return ValueType::LocalValue;
+}
+
+ValueLifetime::ValueType ValueLifetime::operator()(abt::ABT& n, abt::FunctionCall& op) {
     size_t arity = op.nodes().size();
     if (arity == 3 && (op.name() == "traverseP"s || op.name() == "traverseF"s)) {
         ValueType argType = op.nodes()[0].visit(*this);
 
-        auto lambda = op.nodes()[1].cast<optimizer::LambdaAbstraction>();
+        auto lambda = op.nodes()[1].cast<abt::LambdaAbstraction>();
         // Define the lambda variable with the type of the 'bind' expression type.
-        _bindings[lambda->varName()] = argType;
+        _bindings[lambda->varNames()[0]] = argType;
+        if (lambda->varNames().size() > 1) {
+            _bindings[lambda->varNames()[1]] = ValueType::GlobalValue;
+        }
 
         // Process the lambda knowing that its argument will be exactly the type we got from
         // processing the first argument.
         ValueType lambdaType = op.nodes()[1].visit(*this);
-        _bindings.erase(lambda->varName());
+        _bindings.erase(lambda->varNames()[0]);
+        if (lambda->varNames().size() > 1) {
+            _bindings.erase(lambda->varNames()[1]);
+        }
 
         // If the first argument is an array, the result is always a local value (array of cloned
         // results for traverseP, a boolean value for traverseF). If it is not an array, then the
@@ -157,7 +185,7 @@ ValueLifetime::ValueType ValueLifetime::operator()(optimizer::ABT& n, optimizer:
     return ValueType::LocalValue;
 }
 
-ValueLifetime::ValueType ValueLifetime::operator()(optimizer::ABT& n, optimizer::If& op) {
+ValueLifetime::ValueType ValueLifetime::operator()(abt::ABT& n, abt::If& op) {
     op.getCondChild().visit(*this);
     ValueType thenType = op.getThenChild().visit(*this);
     ValueType elseType = op.getElseChild().visit(*this);
@@ -173,13 +201,40 @@ ValueLifetime::ValueType ValueLifetime::operator()(optimizer::ABT& n, optimizer:
     return ValueType::LocalValue;
 }
 
-void ValueLifetime::wrapNode(optimizer::ABT& node) {
-    optimizer::ABTVector arguments;
-    arguments.push_back(std::exchange(node, optimizer::make<optimizer::Blackhole>()));
-    swapAndUpdate(node, optimizer::make<optimizer::FunctionCall>("makeOwn", std::move(arguments)));
+ValueLifetime::ValueType ValueLifetime::operator()(abt::ABT& n, abt::Switch& op) {
+    std::vector<ValueType> branchTypes;
+    branchTypes.reserve(op.getNumBranches() + 1);
+    for (size_t i = 0; i < op.getNumBranches(); i++) {
+        op.getCondChild(i).visit(*this);
+        branchTypes.emplace_back(op.getThenChild(i).visit(*this));
+    }
+    branchTypes.emplace_back(op.getDefaultChild().visit(*this));
+
+    if (std::all_of(branchTypes.begin(), branchTypes.end(), [&](const ValueType& val) {
+            return val == branchTypes[0];
+        })) {
+        return branchTypes[0];
+    } else {
+        for (size_t i = 0; i < op.getNumBranches(); i++) {
+            if (branchTypes[i] == ValueType::Reference) {
+                wrapNode(op.getThenChild(i));
+            }
+        }
+        if (branchTypes.back() == ValueType::Reference) {
+            wrapNode(op.getDefaultChild());
+        }
+    }
+
+    return ValueType::LocalValue;
 }
 
-void ValueLifetime::swapAndUpdate(optimizer::ABT& n, optimizer::ABT newN) {
+void ValueLifetime::wrapNode(abt::ABT& node) {
+    abt::ABTVector arguments;
+    arguments.push_back(std::exchange(node, abt::make<abt::Blackhole>()));
+    swapAndUpdate(node, abt::make<abt::FunctionCall>("makeOwn", std::move(arguments)));
+}
+
+void ValueLifetime::swapAndUpdate(abt::ABT& n, abt::ABT newN) {
     // Do the swap.
     std::swap(n, newN);
 

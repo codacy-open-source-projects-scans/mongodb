@@ -29,9 +29,12 @@
 
 #include "mongo/db/pipeline/document_source_internal_projection.h"
 
-#include "mongo/db/query/projection_parser.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_parser.h"
 
 namespace mongo {
+
+ALLOCATE_DOCUMENT_SOURCE_ID(_internalProjection, DocumentSourceInternalProjection::id)
+
 namespace {
 ProjectionPolicies lookUpPolicies(InternalProjectionPolicyEnum policiesId) {
     switch (policiesId) {
@@ -56,20 +59,16 @@ DocumentSourceInternalProjection::DocumentSourceInternalProjection(
           pExpCtx, _stageSpec.getSpec(), lookUpPolicies(_stageSpec.getPolicies()))) {}
 
 const char* DocumentSourceInternalProjection::getSourceName() const {
-    return kStageNameInternal.rawData();
+    return kStageNameInternal.data();
 }
 
-Pipeline::SourceContainer::iterator DocumentSourceInternalProjection::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator DocumentSourceInternalProjection::doOptimizeAt(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     invariant(*itr == this);
     return itr;
 }
 
 Value DocumentSourceInternalProjection::serialize(const SerializationOptions& opts) const {
     return Value(Document{{getSourceName(), _stageSpec.toBSON()}});
-}
-
-DocumentSource::GetNextResult DocumentSourceInternalProjection::doGetNext() {
-    tasserted(7824602, "Execution reached non-executable pipeline stage");
 }
 }  // namespace mongo

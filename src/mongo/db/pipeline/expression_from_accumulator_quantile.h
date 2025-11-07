@@ -29,26 +29,27 @@
 
 #pragma once
 
+#include "mongo/base/init.h"  // IWYU pragma: keep
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/pipeline/expression.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_visitor.h"
+#include "mongo/db/pipeline/percentile_algo.h"
+#include "mongo/db/pipeline/percentile_algo_continuous.h"
+#include "mongo/db/pipeline/percentile_algo_discrete.h"
+#include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/safe_num.h"
+
+#include <vector>
+
 #include <boost/intrusive_ptr.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <vector>
-
-#include "mongo/base/init.h"  // IWYU pragma: keep
-#include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/expression_from_accumulator_quantile.h"
-#include "mongo/db/pipeline/expression_visitor.h"
-#include "mongo/db/pipeline/percentile_algo.h"
-#include "mongo/db/pipeline/percentile_algo_discrete.h"
-#include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/util/safe_num.h"
 
 namespace mongo {
 
@@ -56,7 +57,7 @@ template <typename TAccumulator>
 class ExpressionFromAccumulatorQuantile : public Expression {
 public:
     explicit ExpressionFromAccumulatorQuantile(ExpressionContext* const expCtx,
-                                               std::vector<double>& ps,
+                                               const std::vector<double>& ps,
                                                boost::intrusive_ptr<Expression> input,
                                                PercentileMethodEnum method)
         : Expression(expCtx, {input}), _ps(ps), _input(input), _method(method) {
@@ -64,7 +65,7 @@ public:
     }
 
     const char* getOpName() const {
-        return TAccumulator::kName.rawData();
+        return TAccumulator::kName.data();
     }
 
     Value serialize(const SerializationOptions& options = {}) const final {
@@ -93,6 +94,11 @@ public:
 
     PercentileMethodEnum getMethod() const {
         return _method;
+    }
+
+    boost::intrusive_ptr<Expression> clone() const final {
+        return make_intrusive<ExpressionFromAccumulatorQuantile<TAccumulator>>(
+            getExpressionContext(), _ps, cloneChild(0), _method);
     }
 
 private:

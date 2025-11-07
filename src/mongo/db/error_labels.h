@@ -29,9 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -39,6 +36,10 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+
+#include <string>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 static constexpr StringData kErrorLabelsFieldName = "errorLabels"_sd;
@@ -52,6 +53,7 @@ constexpr inline auto kNoWritesPerformed = "NoWritesPerformed"_sd;
 constexpr inline auto kStreamProcessorRetryableError = "StreamProcessorRetryableError"_sd;
 constexpr inline auto kStreamProcessorUserError = "StreamProcessorUserError"_sd;
 constexpr inline auto kSystemOverloadedError = "SystemOverloadedError"_sd;
+constexpr inline auto kRetryableError = "RetryableError"_sd;
 
 }  // namespace ErrorLabel
 
@@ -88,6 +90,7 @@ public:
     bool isStreamProcessorUserError() const;
     bool isStreamProcessorRetryableError() const;
     bool isSystemOverloadedError() const;
+    bool isOperationIdempotent() const;
 
 private:
     bool _isCommitOrAbort() const;
@@ -123,6 +126,12 @@ BSONObj getErrorLabels(OperationContext* opCtx,
 bool isTransientTransactionError(ErrorCodes::Error code,
                                  bool hasWriteConcernError,
                                  bool isCommitOrAbort);
+
+/**
+ * Checks if an error reply has the TransientTransactionError label. We use this in cases where we
+ * want to defer to whether a shard attached the label to an error it gave us.
+ */
+bool hasTransientTransactionErrorLabel(const ErrorReply& reply);
 
 /**
  * Whether a stream processing error is retryable.

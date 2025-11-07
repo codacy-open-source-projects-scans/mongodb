@@ -22,9 +22,10 @@ typedef struct {
 
 #define C_BOOL 0x001u        /* Boolean (true if roll of 1-to-100 is <= CONFIG->min) */
 #define C_IGNORE 0x002u      /* Not a simple randomization, configured specially */
-#define C_STRING 0x004u      /* String (rather than integral) */
-#define C_TABLE 0x008u       /* Value is per table, not global */
-#define C_TYPE_FIX 0x010u    /* Value is only relevant to FLCS */
+#define C_POW2 0x004u        /* Value must be power of 2 */
+#define C_STRING 0x008u      /* String (rather than integral) */
+#define C_TABLE 0x010u       /* Value is per table, not global */
+#define C_TYPE_FIX 0x020u    /* Value is only relevant to FLCS */
 #define C_TYPE_ROW 0x040u    /* Value is only relevant to RS */
 #define C_TYPE_VAR 0x080u    /* Value is only relevant to VLCS */
 #define C_ZERO_NOTSET 0x100u /* Ignore zero values */
@@ -84,6 +85,12 @@ CONFIG configuration_list[] = {
 
 {"backup.incr_granularity", "incremental backup block granularity (KB)", 0x0, 4, 16384, 16384}
 
+{"backup.live_restore", "configure backup live restore recovery", C_BOOL, 25, 0, 0}
+
+{"backup.live_restore_read_size", "live restore read size (KB power of 2)", C_POW2, 1, 16384, 16384}
+
+{"backup.live_restore_threads", "number of live restore worker threads", 0x0, 0, 12, 12}
+
 {"block_cache", "enable the block cache", C_BOOL, 10, 0, 0}
 
 {"block_cache.cache_on_checkpoint", "block cache: cache checkpoint writes", C_BOOL, 30, 0, 0}
@@ -134,6 +141,10 @@ CONFIG configuration_list[] = {
 
 {"cache.eviction_dirty_trigger", "dirty content trigger for eviction", C_IGNORE, 0, 0, 100}
 
+{"cache.eviction_updates_target", "update content target for eviction", C_IGNORE, 0, 0, 100}
+
+{"cache.eviction_updates_trigger", "update content trigger for eviction", C_IGNORE, 0, 0, 100}
+
 {"cache.minimum", "minimum cache size (MB)", C_IGNORE, 0, 0, 100 * 1024}
 
 {"cache.maximum", "maximum cache size (MB)", C_IGNORE, 0, 0, UINT_MAX}
@@ -176,6 +187,22 @@ CONFIG configuration_list[] = {
 
 {"debug.update_restore_evict", "control all dirty page evictions through forcing update restore eviction", C_BOOL, 2, 0, 0}
 
+{"disagg.internal_page_delta", "writing deltas for internal pages", C_BOOL, 95, 0, 0}
+
+{"disagg.leaf_page_delta", "writing deltas for leaf pages", C_BOOL, 95, 0, 0}
+
+{"disagg.multi", "configure multiple nodes (leader & followers) for disaggregated storage", C_IGNORE | C_BOOL , 0, 0, 0}
+
+{"disagg.enabled", "configure disaggregated storage", C_IGNORE | C_BOOL | C_TABLE | C_TYPE_ROW, 0, 0, 0}
+
+{"disagg.layered", "use layered URI for any disaggregated tables", C_BOOL, 100, 1, 0}
+
+{"disagg.mode", "configure mode for disaggregated storage (follower | leader | switch)", C_IGNORE | C_STRING, 0, 0, 0}
+
+{"disagg.page_log", "configure page log for disaggregated storage (off | palm | palite)", C_IGNORE | C_STRING, 0, 0, 0}
+
+{"disagg.page_log.verbose", "set page log verbosity (default=WT_VERBOSE_INFO)", C_IGNORE, 0, 0, WT_VERBOSE_DEBUG_5}
+
 {"disk.checksum", "checksum type (on | off | uncompressed | unencrypted)", C_IGNORE | C_STRING | C_TABLE, 0, 0, 0}
 
 {"disk.data_extend", "configure data file extension", C_BOOL, 5, 0, 0}
@@ -187,6 +214,8 @@ CONFIG configuration_list[] = {
 {"disk.mmap", "configure mmap operations (reads only)", C_BOOL, 90, 0, 0}
 
 {"disk.mmap_all", "configure mmap operations (read and write)", C_BOOL, 5, 0, 0}
+
+{"eviction.evict_use_softptr", "use soft pointers instead of hard hazard pointers in eviction", C_BOOL, 20, 0, 0}
 
 /* Test format can only handle 32 tables so we use a maximum value of 32 here. */
 {"file_manager.close_handle_minimum", "number of handles open before the file manager will look for handles to close", 0x0, 0, 32, 32}
@@ -217,6 +246,10 @@ CONFIG configuration_list[] = {
 {"logging.prealloc", "configure log file pre-allocation", C_BOOL, 50, 0, 0}
 
 {"logging.remove", "configure log file removal", C_BOOL, 50, 0, 0}
+
+{"obsolete_cleanup.method", "obsolete cleanup strategy", C_IGNORE | C_STRING, 0, 0, 0}
+
+{"obsolete_cleanup.wait", "obsolete cleanup interval in seconds", 0x0, 0, 3600, 100000}
 
 {"ops.alter", "configure table alterations", C_BOOL, 10, 0, 0}
 
@@ -256,6 +289,10 @@ CONFIG configuration_list[] = {
 
 {"prefetch", "configure prefetch", C_BOOL, 50, 0, 0}
 
+{"precise_checkpoint", "Precise checkpoint", C_BOOL, 50, 0, 0}
+
+{"preserve_prepared", "Preserve prepared", C_BOOL, 50, 0, 0}
+
 {"quiet", "quiet run (same as -q)", C_BOOL | C_IGNORE, 0, 0, 1}
 
 {"random.data_seed", "set random seed for data operations", 0x0, 0, 0, UINT_MAX}
@@ -272,7 +309,7 @@ CONFIG configuration_list[] = {
 
 {"runs.rows", "number of rows", C_TABLE, 10, M(1), M(100)}
 
-{"runs.source", "data source type (file | table)", C_IGNORE | C_STRING | C_TABLE, 0, 0, 0}
+{"runs.source", "data source type (file | layered | table)", C_IGNORE | C_STRING | C_TABLE, 0, 0, 0}
 
 {"runs.tables", "number of tables", 0x0, 1, 32, V_MAX_TABLES_CONFIG}
 
@@ -305,6 +342,8 @@ CONFIG configuration_list[] = {
 {"stress.failpoint_eviction_split", "stress failpoint eviction split", C_BOOL, 30, 0, 0}
 
 {"stress.failpoint_hs_delete_key_from_ts", "stress failpoint history store delete key from ts", C_BOOL, 30, 0, 0}
+
+{"stress.failpoint_rec_before_wrapup", "stress failpoint reconciliation before wrapup", C_BOOL, 1, 0, 0}
 
 {"stress.hs_checkpoint_delay", "stress history store checkpoint delay", C_BOOL, 2, 0, 0}
 

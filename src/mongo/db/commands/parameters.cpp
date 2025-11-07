@@ -27,17 +27,6 @@
  *    it in the license file.
  */
 
-#include <compare>
-#include <map>
-#include <mutex>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/parse_number.h"
 #include "mongo/base/status.h"
@@ -48,17 +37,16 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
-#include "mongo/bson/mutable/document.h"
-#include "mongo/bson/mutable/element.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/parameters_gen.h"
 #include "mongo/db/commands/parse_log_component_settings.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/exec/mutable_bson/document.h"
+#include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameter.h"
@@ -67,18 +55,24 @@
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/idl/command_generic_argument.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_component_settings.h"
-#include "mongo/logv2/log_manager.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <compare>
+#include <map>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -219,10 +213,10 @@ Status setLogComponentVerbosity(const BSONObj& bsonSettings) {
 }
 
 GetParameterOptions parseGetParameterOptions(BSONElement elem) {
-    if (elem.type() == BSONType::Object) {
-        return GetParameterOptions::parse(IDLParserContext{"getParameter"}, elem.Obj());
+    if (elem.type() == BSONType::object) {
+        return GetParameterOptions::parse(elem.Obj(), IDLParserContext{"getParameter"});
     }
-    if ((elem.type() == BSONType::String) && (elem.valueStringDataSafe() == "*"_sd)) {
+    if ((elem.type() == BSONType::string) && (elem.valueStringDataSafe() == "*"_sd)) {
         GetParameterOptions ret;
         ret.setAllParameters(true);
         return ret;
@@ -282,40 +276,48 @@ public:
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         const auto options = parseGetParameterOptions(cmdObj.firstElement());
-        const bool all = options.getAllParameters();
+
+        bool requireNameMatch = !options.getAllParameters();
+        bool requireIFR = options.getForIncrementalFeatureRollout();
 
         // If the "setAt" option has been set, then only include the parameter in the
         // response if it matches the parameter's settability. If the "setAt" option has
         // been omitted, then include all requested parameters.
         boost::optional<SetAtOptionEnum> setAtOption = options.getSetAt();
-        bool isOptionRequestingRuntime =
-            setAtOption && (setAtOption.value() == SetAtOptionEnum::kRuntime);
-        bool isOptionRequestingStartup =
-            setAtOption && (setAtOption.value() == SetAtOptionEnum::kStartup);
+        bool requireRuntimeSettable = setAtOption && (*setAtOption == SetAtOptionEnum::kRuntime);
+        bool requireStartupSettable = setAtOption && (*setAtOption == SetAtOptionEnum::kStartup);
 
-        int before = result.len();
-
+        bool foundFlag = false;
         const ServerParameter::Map& m = ServerParameterSet::getNodeParameterSet()->getMap();
         for (ServerParameter::Map::const_iterator i = m.begin(); i != m.end(); ++i) {
-            if (i->second->isEnabled() && (all || cmdObj.hasElement(i->first.c_str()))) {
-                if (!setAtOption ||
-                    (isOptionRequestingRuntime && i->second->allowedToChangeAtRuntime()) ||
-                    (isOptionRequestingStartup && i->second->allowedToChangeAtStartup())) {
-                    if (options.getShowDetails()) {
-                        BSONObjBuilder detailBob(result.subobjStart(i->second->name()));
-                        i->second->append(opCtx, &detailBob, "value", boost::none);
-                        detailBob.appendBool("settableAtRuntime",
-                                             i->second->allowedToChangeAtRuntime());
-                        detailBob.appendBool("settableAtStartup",
-                                             i->second->allowedToChangeAtStartup());
-                        detailBob.doneFast();
-                    } else {
-                        i->second->append(opCtx, &result, i->second->name(), boost::none);
-                    }
-                }
+            // Skip any parameters that should be filtered out according to the command options, as
+            // well as any disabled parameters.
+            if (!i->second->isEnabled() ||
+                (requireNameMatch && !cmdObj.hasElement(i->first.c_str())) ||
+                (requireRuntimeSettable && !i->second->allowedToChangeAtRuntime()) ||
+                (requireStartupSettable && !i->second->allowedToChangeAtStartup()) ||
+                (requireIFR && !i->second->isForIncrementalFeatureRollout())) {
+                continue;
             }
+
+            if (requireNameMatch) {
+                i->second->warnIfDeprecated("getParameter");
+            }
+
+            if (options.getShowDetails()) {
+                BSONObjBuilder detailBob(result.subobjStart(i->second->name()));
+                i->second->append(opCtx, &detailBob, "value", boost::none);
+                detailBob.appendBool("settableAtRuntime", i->second->allowedToChangeAtRuntime());
+                detailBob.appendBool("settableAtStartup", i->second->allowedToChangeAtStartup());
+                i->second->appendDetails(opCtx, &detailBob, boost::none);
+                detailBob.doneFast();
+            } else {
+                i->second->append(opCtx, &result, i->second->name(), boost::none);
+            }
+
+            foundFlag = true;
         }
-        uassert(ErrorCodes::InvalidOptions, "no option found to get", before != result.len());
+        uassert(ErrorCodes::InvalidOptions, "no option found to get", foundFlag);
         return true;
     }
 };
@@ -453,6 +455,8 @@ public:
                 result.append(oldValue);
             }
 
+            foundParameter->second->warnIfDeprecated("setParameter");
+
             try {
                 uassertStatusOK(foundParameter->second->set(parameter, boost::none));
             } catch (const DBException& ex) {
@@ -578,7 +582,7 @@ void AutomationServiceDescriptorServerParameter::append(OperationContext*,
 
 Status AutomationServiceDescriptorServerParameter::set(const BSONElement& newValueElement,
                                                        const boost::optional<TenantId>&) {
-    if (newValueElement.type() != String) {
+    if (newValueElement.type() != BSONType::string) {
         return {ErrorCodes::TypeMismatch,
                 "Value for parameter automationServiceDescriptor must be of type 'string'"};
     }
@@ -595,7 +599,7 @@ Status AutomationServiceDescriptorServerParameter::setFromString(StringData str,
 
     {
         const stdx::lock_guard<stdx::mutex> lock(autoServiceDescriptorMutex);
-        autoServiceDescriptorValue = str.toString();
+        autoServiceDescriptorValue = std::string{str};
     }
 
     return Status::OK();

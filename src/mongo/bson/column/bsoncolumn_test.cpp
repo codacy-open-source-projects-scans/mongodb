@@ -27,15 +27,26 @@
  *    it in the license file.
  */
 
-#include "mongo/bson/bsonelement.h"
 #include "mongo/bson/column/bsoncolumn.h"
 
-#include <absl/numeric/int128.h>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes_util.h"
+#include "mongo/bson/column/bson_element_storage.h"
+#include "mongo/bson/column/bsoncolumn_expressions.h"
+#include "mongo/bson/column/bsoncolumn_fuzzer_util.h"
+#include "mongo/bson/column/bsoncolumn_test_util.h"
+#include "mongo/bson/column/bsoncolumnbuilder.h"
+#include "mongo/bson/oid.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/platform/decimal128.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/tracking/context.h"
+
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -43,28 +54,13 @@
 #include <limits>
 #include <string>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/bsontypes_util.h"
-#include "mongo/bson/column/bsoncolumn_expressions.h"
-#include "mongo/bson/column/bsoncolumn_test_util.h"
-#include "mongo/bson/column/bsoncolumnbuilder.h"
-#include "mongo/bson/column/simple8b_builder.h"
-#include "mongo/bson/oid.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/bson/util/bsonobj_traversal.h"
-#include "mongo/bson/util/builder.h"
-#include "mongo/platform/decimal128.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/base64.h"
-#include "mongo/util/time_support.h"
-#include "mongo/util/tracking/context.h"
+#include <absl/numeric/int128.h>
+#include <boost/cstdint.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo::bsoncolumn {
 namespace {
+using namespace mongo::bsoncolumn::internal;
 
 void assertBinaryEqual(BSONBinData finalizedColumn, const BufBuilder& buffer) {
     ASSERT_EQ(finalizedColumn.type, BinDataType::Column);
@@ -408,7 +404,7 @@ public:
 
     static void appendLiteral(BufBuilder& builder, BSONElement elem) {
         // BSON Type byte
-        builder.appendChar(elem.type());
+        builder.appendChar(stdx::to_underlying(elem.type()));
 
         // Null terminator for field name
         builder.appendChar('\0');
@@ -504,7 +500,7 @@ public:
     }
 
     static void appendEOO(BufBuilder& builder) {
-        builder.appendChar(EOO);
+        builder.appendChar(stdx::to_underlying(BSONType::eoo));
     }
 
     static void convertAndAssertSBEEquals(sbe::bsoncolumn::SBEColumnMaterializer::Element& actual,
@@ -565,7 +561,7 @@ public:
                 if (last.eoo()) {
                     // Only skips have been encountered, last() should continue to return EOO
                     ASSERT_TRUE(cb.last().eoo());
-                } else if (last.type() != Object && last.type() != Array) {
+                } else if (last.type() != BSONType::object && last.type() != BSONType::array) {
                     // Empty objects and arrays _may_ be encoded as scalar depending on what else
                     // has been added to the builder. This makes this case difficult to test and we
                     // just test the scalar types instead.
@@ -801,7 +797,7 @@ public:
                 if (iter == _fields.end()) {
                     return {elem.value()};
                 }
-                if (elem.type() != Object) {
+                if (elem.type() != BSONType::object) {
                     return {};
                 }
                 obj = elem.Obj();
@@ -1097,7 +1093,8 @@ public:
         appendEOO(expected);
 
         BSONColumn col(createBSONColumn(expected.buf(), expected.len()));
-        ASSERT_THROWS_CODE(std::distance(col.begin(), col.end()), DBException, 6785500);
+        ASSERT_THROWS_CODE(
+            std::distance(col.begin(), col.end()), DBException, ErrorCodes::InvalidBSONColumn);
     }
 
     const boost::optional<uint64_t> kDeltaForBinaryEqualValues = Simple8bTypeUtil::encodeInt64(0);
@@ -1122,6 +1119,233 @@ protected:
 private:
     std::forward_list<BSONObj> _elementMemory;
 };
+
+TEST_F(BSONColumnTest, FuzzerDiscoveredEdgeCases) {
+    // This test is a collection of binaries produced by the fuzzer that exposed bugs at some point
+    // and contains coverage missing from the tests defined above.
+    std::vector<StringData> binariesBase64 = {
+        // Ends with uncompressed literal. Last value in previous block needs to be set correctly
+        // for doubles.
+        "AQAACQgAAHMA7wkAQP/Q0CfU0NCACvX//////9AA"_sd,
+        // Contains zero deltas after uncompressed string starting with '\0' (unencodable). Ensures
+        // we have special handling for zero deltas that by-pass materialization.
+        "CAAAAgACAAAAAACAAgAAAAAAAAAA"_sd,
+        // Re-scaling double is not possible. Offset to last control byte needs to be cleared so a
+        // new control byte is written by the compressor.
+        "AQAAAAAAAAAAAJHCgLGRkf//DZGRCJEACAAAgDqRsZGRkZGRAA=="_sd,
+        // Re-scaling double is not possible. Offset to last control byte needs to be cleared so a
+        // new control byte is written by the compressor.
+        "CgABAP//////////gAIBAAD7///4AA=="_sd,
+        // Ends with value too large to be encodable in Simple8b block
+        "AQAAAAAjAAAAHAkALV3DRTINAACAd/ce/////xwJAC33Hv////+/AA=="_sd,
+        // Unencodable literal for 128bit types, prevEncoded128 needs to be set to none by
+        // compressor.
+        "DQAUAAAAAAgAAIDx///++AAAAAMAAAAIAACA8f///vj/AAAA"_sd,
+        // Merge of interleaved objects that results in repeated fieldname
+        "fwB/APEPAAAA/wD/////KwAGAAALAJ0qnZ0AAICx87tAc/+/fgQABwAAAP8AAICx88BEjAi/AICxAAIAACQAFgAA"_sd};
+
+    for (auto&& binaryBase64 : binariesBase64) {
+        auto binary = base64::decode(binaryBase64);
+
+        // Validate that our BSONColumnBuilder would construct this exact binary for the input data.
+        // This is required to be able to verify these binary blobs.
+        BSONColumnBuilder builder;
+        BSONColumn column(binary.data(), binary.size());
+        try {
+            for (auto&& elem : column) {
+                builder.append(elem);
+            }
+        } catch (const DBException& ex) {
+            ASSERT_NOT_OK(ex.toStatus());
+            continue;
+        }
+        BSONBinData finalized = builder.finalize();
+        ASSERT_EQ(binary.size(), finalized.length);
+        ASSERT(memcmp(binary.data(), finalized.data, binary.size()) == 0);
+
+        // Validate that reopening BSONColumnBuilder from this binary produces the same state as-if
+        // values were uncompressed and re-appended.
+        verifyColumnReopenFromBinary(binary.data(), binary.size());
+    }
+}
+
+TEST_F(BSONColumnTest, BlockFuzzerDiscoveredEdgeCases) {
+    // This test is a collection of binaries produced by the decompression fuzzer that exposed bugs
+    // in the block-based or iterator API, and contains coverage missing from the tests defined
+    // above. This test validates that the iterator API and the block-based API must produce the
+    // same results.
+    std::vector<StringData> binariesBase64 = {
+        // Iterator API did not cast values to booleans before materializing (SERVER-87779).
+        "CAAAoJb//wD/3ylEAA=="_sd,
+        // Block-based API updated the 'lastValue' when appending EOO elements (SERVER-85860).
+        "CgAKAAoAEwAHAAoACgEAAABQUFBQUFBQUFAAAAAAAACoqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioUFBQUAAAAAAACgAKAAsAEwAKAAoACgAKAAoACgAKAAoACgAKAAoACgAA"_sd,
+        // Block-based API didn't validate the scale index for simple8b blocks (SERVER-87628 and
+        // SERVER-88738).
+        "QAEADP////+SAA=="_sd,
+        "fwBAAwAAAAAAAAAA"_sd,
+        "CgBh/wABemEUAAAAAAAAAAIBAAA="_sd,
+        "BQAvAAAAAABQslBQUFBQUFBQUFAAUFBQUFB5UP7///9QUFBQUFBQUFCBgYGBgYGBgYGBgYGBgYFQbFCpUFBQgVBQUFBQUFBQP1BQUFBQUAAA"_sd,
+        // Block-based Path API doesn't validate the scale index for non-double values
+        // (SERVER-89155).
+        "8AgAAAAIAAAA0Cz/AAAAAAdSAAA="_sd,
+        // The two APIs had different delta values, but both should fail (SERVER-85860 and
+        // SERVER-87873).
+        "BQADAAAAkP8AkJCR///+/4jIfdAmAAAAAAAAAJACAAAAAP8AAAA="_sd,
+        "fwDQYG9tfwAAAAAA"_sd,
+        "CAABwMABwMDAwMDAwH9DwMDAwMDAwMDAwMDAwMDAwMjAwMDAAAAAAA=="_sd,
+        "EwAAAGCvYK+vUgBSUlBQc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3NzFBQUFBQUc3PQ0NDQ0NDQ0NDQr1JSUlBQ0NDQ0NDQ0NDQ0NIYAAAA0NAXlaJ9//8AAA=="_sd,
+        // Block-based API using the table decoders should fail on bad selectors (SERVER-88062).
+        "CwBPpFpaWloAAKD3Af9dXQD/AAA="_sd,
+        // Block-based API had a stack overflow for BinData values (SERVER-88207).
+        "BQAXAAAAMcLCPso9PcJhJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmsMIYAAECAAIAAA=="_sd,
+        "BQAwAAAAAAcAAAAAAAEAAAAAAABAAAAAAAA7Ozs7Ozs7Ozs6Ozs7Ozs7Ozs7Ozs7Ozs7OwD+/4A7OzsA/v+A/wA="_sd,
+        // Block-based API didn't allow non-zero/missing deltas after EOO (SERVER-89150).
+        "8h4AAAD/p/+zSENBMoAB/0hDQzKAAP9IOjCAAP8AAACCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCggA="_sd,
+        // Blockbased API didn't update last to EOO when Iterative API did for interleaved data
+        // (SERVER-89612).
+        "8hQAAAAF+P//////FCgAAAAAAAAABgAIAACBKg7/+///////MP8V/3EAAACBeHFYDAAA/3RhZ3P//wEAAAA="_sd,
+        // Blockbased API doesn't fail an interleaved mode that has leftover data in some decoders
+        // while the iterative version does (SERVER-92150)
+        "8jIAAAAHVvkCAAEAAAAAAgABAAAAAAxTdGNydHVfaWQAAQAAAAABMg5faWQAAQAAAAAA/wD/AP8Aj4+Pj4+Pj4+Pj4+Pj4+Pj4//AP8A/wD/AP8A/wD/AP8A/wCPj4+Pj4+Pj4+PAAD/AP8A/wD/AP8A/wCPj4+Pj4+Pj49vj4+Pj4+Pj/8A/041j4+Pj4+Pj4+Pj48BAFXeV6t2AI+Pj4+Pj4+Pj4+Pj8SPj4+Pj4+Pj4//AP8A/wD/AP8A/wAA"_sd,
+        // Empty interleaved mode produces an assert in block-based API but not iterative
+        // (SERVER-92327)
+        "EAAAYTsB8gcAAAD/AAAAgsj//////////wEH//hB/7KyAP+AAP//AAA="_sd,
+    };
+
+    for (auto&& binaryBase64 : binariesBase64) {
+        auto binary = base64::decode(binaryBase64);
+
+        // Store the results for validation after decompression.
+        boost::intrusive_ptr allocator{new BSONElementStorage()};
+        std::vector<BSONElement> iteratorElems, blockBasedElems;
+        bool blockBasedError = false;
+        bool iteratorError = false;
+
+        // Attempt to decompress using the block-based API.
+        bsoncolumn::BSONColumnBlockBased block(binary.data(), binary.size());
+        try {
+            block.decompress<bsoncolumn::BSONElementMaterializer, std::vector<BSONElement>>(
+                blockBasedElems, allocator);
+        } catch (...) {
+            blockBasedError = true;
+        }
+
+        // Attempt to decompress using the iterator API.
+        BSONColumn column(binary.data(), binary.size());
+        try {
+            for (auto&& elem : column) {
+                iteratorElems.push_back(elem);
+            };
+        } catch (...) {
+            iteratorError = true;
+        }
+
+        // If one API failed, then both APIs must fail.
+        if (iteratorError || blockBasedError) {
+            ASSERT(iteratorError && blockBasedError);
+            continue;
+        }
+
+        // If the APIs succeeded, the results must be the same.
+        ASSERT(iteratorElems.size() == blockBasedElems.size());
+        auto it = iteratorElems.begin();
+        for (auto&& elem : blockBasedElems) {
+            ASSERT(elem.binaryEqualValues(*it));
+            ++it;
+        }
+    }
+}
+
+TEST_F(BSONColumnTest, BuilderFuzzerGenerationDiscoveredEdgeCases) {
+    // This test is a collection of binaries produced by the builder fuzzer that exposed bugs
+    // in the bsoncolumn builder.  To investigate new fuzzer failures, find the base64 encoding
+    // of the fuzzer string in the logs (not to be confused with the column binary itself) and
+    // add it to the binaries vector
+    //
+    // This should look like
+    //
+    // Base64:
+    // <base64 string>
+    //
+    std::vector<StringData> binariesBase64 = {};
+
+    for (auto&& binaryBase64 : binariesBase64) {
+        auto binary = base64::decode(binaryBase64);
+
+        std::forward_list<BSONObj> elementMemory;
+        std::vector<BSONElement> generatedElements;
+
+        // Generate elements from input data
+        const char* ptr = binary.data();
+        const char* end = binary.data() + binary.size();
+        while (ptr < end) {
+            BSONElement element;
+            int repetition;
+            if (!mongo::bsoncolumn::createFuzzedElement(
+                    ptr, end, elementMemory, repetition, element)) {
+                generatedElements.clear();  // Bad input string to element generation
+                break;
+            }
+            if (!bsoncolumn::addFuzzedElements(
+                    ptr, end, elementMemory, element, repetition, generatedElements)) {
+                generatedElements.clear();  // Bad input string to run generation
+                break;
+            }
+        }
+        if (generatedElements.empty())
+            continue;
+
+        // Exercise the builder
+        BSONColumnBuilder builder;
+        for (auto element : generatedElements) {
+            builder.append(element);
+        }
+
+        // Verify decoding gives us original elements
+        auto diff = builder.intermediate();
+        BSONColumn col(diff.data(), diff.size());
+        auto it = col.begin();
+        for (auto elem : generatedElements) {
+            BSONElement other = *it;
+            ASSERT_TRUE(elem.binaryEqualValues(other));
+            ASSERT_TRUE(it.more());
+            ++it;
+        }
+        ASSERT_TRUE(!it.more());
+    }
+}
+
+TEST_F(BSONColumnTest, BuilderFuzzerReopenDiscoveredEdgeCases) {
+    // This test is a collection of binaries produced by the builder fuzzer that exposed bugs
+    // in the bsoncolumn builder outputs.  To investigate new fuzzer failures, find the base64
+    // encoding of the column binary in the logs (not to be confused with the fuzzer string) and add
+    // it to the binaries vector
+    //
+    // This should look like
+    //
+    // Column: <base64 string>
+    //
+    std::vector<StringData> binariesBase64 = {
+        // Pending fix of SERVER-100659
+        "gPz/////////CAAAgP7/////////AQAAAAAAAAAAYI/OxcXFxcXFAQ4AAAAAAAAB7uLi4uLi4gAuHR0dHR2dAI5xcXFxcXEAjnFxcXFxcQCOcXFxcXFxAK6rq6urq2sAzri4uLi4OADOuLi4uLg4AM64uLi4uDgAzri4uLi4OADOuLi4uLg4AM64uLi4uDgAzri4uLi4OADOuLi4uLg4AI9ulpaWlpY2AG5cXFxcXBwAblxcXFxcHABuXFxcXFwcAG5cXFxcXBwAblxcXFxcHABuXFxcXFwcAG5cXFxcXBwAblxcXFxcHABuXFxcXFwcAG5cXFxcXBwAblxcXFxcHABuXFxcXFwcAG5cXFxcXBwAblxcXFxcHABuXFxcXFwcAI9uXFxcXFwcAG5cXFxcXBwA7gsMDAwMHAAuLi4uLi4OAC4uLi4uLg4ALi4uLi4uDgAuLi4uLi4OAC4uLi4uLg4ALi4uLi4uDgAuLi4uLi4OAC4uLi4uLg4ALi4uLi4uDgAuLi4uLi4OAC4uLi4uLg4ALi4uLi4uDgAuLi4uLi4OAI8uLi4uLi4OAC4uLi4uLg4ALi4uLi4uDgAuLi4uLi4OAC4uLi4uLg4ALi4uLi4uDgAuLi4uLi4OAC4uLi4uLg4ALi4uLi4uDgAuLi4uLi4OAC4uLi4uLg4ALi4uLi4uDgAuLi4uLi4OAC4uLi4uLg4ALi4uLi4uDgAuLi4uLi4OAI8uLi4uLi4OAC4uLi4uLg4ALi4uLi4uDgAuLi4uLi4OAC4uLi4uLg4ALi4uLi4uDgAuLi4uLi4OAK6wr6+vrwcALhcXFxcXBwAuFxcXFxcHAC4XFxcXFwcALhcXFxcXBwAuFxcXFxcHAC4XFxcXFwcALhcXFxcXBwAuFxcXFxcHAI8uFxcXFxcHAC4XFxcXFwcALhcXFxcXBwAuFxcXFxcHAC4XFxcXFwcALhcXFxcXBwAuFxcXFxcHAC4XFxcXFwcALhcXFxcXBwAuFxcXFxcHAC4XFxcXFwcALhcXFxcXBwAuFxcXFxcHAC4XFxcXFwcALhcXFxcXBwAuFxcXFxcHAIYuFxcXFxcHAC4XFxcXFwcALhcXFxcXBwAuFxcXFxcHAC4XFxcXFwcALhcXFxcXBwAuFxcXFxcHAAA="_sd,
+    };
+
+    for (auto&& binaryBase64 : binariesBase64) {
+        auto binary = base64::decode(binaryBase64);
+
+        BSONColumnBuilder builder;
+        BSONColumn col(binary.data(), binary.size());
+        for (auto&& elem : col) {
+            builder.append(elem);
+        }
+
+        [[maybe_unused]] auto d = builder.intermediate();
+
+        // Verify binary reopen gives identical state as intermediate
+        BSONColumnBuilder reopen(binary.data(), binary.size());
+        ASSERT_TRUE(builder.isInternalStateIdentical(reopen));
+    }
+}
 
 TEST_F(BSONColumnTest, Empty) {
     BufBuilder expected;
@@ -1153,15 +1377,15 @@ TEST_F(BSONColumnTest, ContainsScalarInt32SimpleCompressed) {
     appendEOO(colBuf);
     BSONColumn col(createBSONColumn(colBuf.buf(), colBuf.len()));
 
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberInt), true);
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberLong), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberDouble), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Array), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::bsonTimestamp), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::String), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Object), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::jstOID), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Bool), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberInt), true);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberLong), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberDouble), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::array), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::timestamp), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::string), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::object), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::oid), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::boolean), false);
 
     verifyBinary(binData, colBuf);
 }
@@ -1187,15 +1411,15 @@ TEST_F(BSONColumnTest, ContainsScalarInt64SimpleCompressed) {
     appendEOO(colBuf);
     BSONColumn col(createBSONColumn(colBuf.buf(), colBuf.len()));
 
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberInt), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberLong), true);
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberDouble), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Array), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::bsonTimestamp), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::String), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Object), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::jstOID), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Bool), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberInt), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberLong), true);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberDouble), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::array), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::timestamp), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::string), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::object), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::oid), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::boolean), false);
 
     verifyBinary(binData, colBuf);
 }
@@ -1222,15 +1446,15 @@ TEST_F(BSONColumnTest, ContainsScalarDoubleSimpleCompressed) {
     appendEOO(colBuf);
     BSONColumn col(createBSONColumn(colBuf.buf(), colBuf.len()));
 
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberInt), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberLong), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberDouble), true);
-    ASSERT_EQ(col.contains_forTest(BSONType::Array), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::bsonTimestamp), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::String), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Object), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::jstOID), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Bool), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberInt), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberLong), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberDouble), true);
+    ASSERT_EQ(col.contains_forTest(BSONType::array), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::timestamp), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::string), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::object), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::oid), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::boolean), false);
 
     verifyBinary(binData, colBuf);
 }
@@ -1257,15 +1481,15 @@ TEST_F(BSONColumnTest, ContainsScalarTimestampSimpleCompressed) {
     appendEOO(colBuf);
     BSONColumn col(createBSONColumn(colBuf.buf(), colBuf.len()));
 
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberInt), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberLong), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberDouble), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Array), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::bsonTimestamp), true);
-    ASSERT_EQ(col.contains_forTest(BSONType::String), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Object), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::jstOID), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Bool), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberInt), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberLong), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberDouble), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::array), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::timestamp), true);
+    ASSERT_EQ(col.contains_forTest(BSONType::string), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::object), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::oid), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::boolean), false);
 
     verifyBinary(binData, colBuf);
 }
@@ -1288,15 +1512,15 @@ TEST_F(BSONColumnTest, ContainsScalarStringSimpleCompressed) {
     appendEOO(colBuf);
     BSONColumn col(createBSONColumn(colBuf.buf(), colBuf.len()));
 
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberInt), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberLong), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberDouble), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Array), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::bsonTimestamp), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::String), true);
-    ASSERT_EQ(col.contains_forTest(BSONType::Object), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::jstOID), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Bool), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberInt), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberLong), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberDouble), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::array), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::timestamp), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::string), true);
+    ASSERT_EQ(col.contains_forTest(BSONType::object), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::oid), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::boolean), false);
 
     verifyBinary(binData, colBuf);
 }
@@ -1328,15 +1552,15 @@ TEST_F(BSONColumnTest, ContainsScalarObjectIDSimpleCompressed) {
     appendEOO(colBuf);
     BSONColumn col(createBSONColumn(colBuf.buf(), colBuf.len()));
 
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberInt), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberLong), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberDouble), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Array), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::bsonTimestamp), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::String), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Object), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::jstOID), true);
-    ASSERT_EQ(col.contains_forTest(BSONType::Bool), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberInt), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberLong), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberDouble), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::array), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::timestamp), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::string), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::object), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::oid), true);
+    ASSERT_EQ(col.contains_forTest(BSONType::boolean), false);
 
     verifyBinary(binData, colBuf);
 }
@@ -1362,15 +1586,15 @@ TEST_F(BSONColumnTest, ContainsScalarBoolSimpleCompressed) {
     appendEOO(colBuf);
     BSONColumn col(createBSONColumn(colBuf.buf(), colBuf.len()));
 
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberInt), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberLong), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::NumberDouble), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Array), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::bsonTimestamp), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::String), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Object), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::jstOID), false);
-    ASSERT_EQ(col.contains_forTest(BSONType::Bool), true);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberInt), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberLong), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::numberDouble), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::array), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::timestamp), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::string), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::object), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::oid), false);
+    ASSERT_EQ(col.contains_forTest(BSONType::boolean), true);
 
     verifyBinary(binData, colBuf);
 }
@@ -2066,6 +2290,96 @@ TEST_F(BSONColumnTest, DoubleScaleDownWithRLEPending) {
         expected, deltaDoubleMemory(elems.begin() + 1, elems.begin() + 31, elems.front()), 1);
     appendSimple8bControl(expected, 0b1001, 0b0000);
     appendSimple8bRLE(expected, 120);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems);
+}
+
+TEST_F(BSONColumnTest, DoubleNoScaleDownAtSkipWithNonZeroRLEPending) {
+    // This test is verifying behavior of skip for the double type when we have pending non-zero
+    // RLE. Doubles are special that the last value in the previous block is tracked and the active
+    // delta being tracked by the compressor can change when it decides to re-scale doubles to
+    // optimally fit. After skip the latest compressor is allowed to scale down as long as there are
+    // no skips in pending values as that require us to maintain the existing state. This can happen
+    // when the skip flushed out pending non-zero RLE that does not evenly fit in Simple8b blocks.
+    static constexpr double kBase = 32.9375;
+    static constexpr double kDelta = 0.09375;
+    std::vector<BSONElement> elems = {
+        // uncompressed
+        createElementDouble(32.8125),
+        // first simple8b to allow for non-zero RLE next
+        createElementDouble(kBase),
+        createElementDouble(kBase + kDelta),
+        // pending non-zero RLE using monotonically increasing value
+        createElementDouble(kBase + kDelta * 2),
+        createElementDouble(kBase + kDelta * 3),
+        // this value will be part of pending RLE but will not fit in the Simple8b when the other
+        // two values are written
+        createElementDouble(kBase + kDelta * 4),
+        BSONElement(),
+        // additional value after skip, test that we have properly calculated state up to this point
+        createElementDouble(33.34375)};
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    // Every simple8b block written will contain a value that requires this scale factor, we can
+    // therefore share a single control block for all simple8b blocks.
+    appendSimple8bControl(expected, 0b1101, 0b0011);
+    appendSimple8bBlocks64(
+        expected, deltaDouble(elems.begin() + 1, elems.end(), elems.front(), 100000000.0), 4);
+    appendEOO(expected);
+
+    auto binData = cb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, elems);
+}
+
+TEST_F(BSONColumnTest, DoubleNoScaleDownAtSkipWithNonZeroRLEPendingWithLessPrecisionLast) {
+    // This test is verifying behavior of skip for the double type when we have pending non-zero
+    // RLE, like 'DoubleNoScaleDownAtSkipWithNonZeroRLEPending' above. The difference here is
+    // that the last value written to simple8b when writing out the pending RLE has fewer decimal
+    // points and could have used a smaller scale factor if written in its own block. We're testing
+    // here that we don't attempt to use this scale factor for the pending values left in the
+    // simple8b builder as they require larger scaling.
+
+    static constexpr double kBase = 42.625;
+    static constexpr double kDelta = 0.03125;
+    std::vector<BSONElement> elems = {
+        // uncompressed
+        createElementDouble(kBase),
+        // first simple8b to allow for non-zero RLE next
+        createElementDouble(kBase + kDelta),
+        createElementDouble(kBase + kDelta * 2),
+        // pending non-zero RLE using monotonically increasing value
+        createElementDouble(kBase + kDelta * 3),
+        // last value to be written in Simple8b when encountering the skip, this has less precision
+        // than the other values. We're testing that we're not attempting to use this scale factor
+        // for the next block.
+        createElementDouble(kBase + kDelta * 4),
+        // this value will be part of pending RLE but will not fit in the Simple8b when the other
+        // two values are written
+        createElementDouble(kBase + kDelta * 5),
+        BSONElement(),
+        // additional value after skip, test that we have properly calculated state up to this point
+        createElementDouble(42.78125)};
+
+    for (auto&& elem : elems) {
+        cb.append(elem);
+    }
+
+    BufBuilder expected;
+    appendLiteral(expected, elems.front());
+    // Every simple8b block written will contain a value that requires this scale factor, we can
+    // therefore share a single control block for all simple8b blocks.
+    appendSimple8bControl(expected, 0b1101, 0b0011);
+    appendSimple8bBlocks64(
+        expected, deltaDouble(elems.begin() + 1, elems.end(), elems.front(), 100000000.0), 4);
     appendEOO(expected);
 
     auto binData = cb.finalize();
@@ -3566,7 +3880,7 @@ TEST_F(BSONColumnTest, BinDataLargerThan16WithNonZeroDelta) {
         std::vector<BSONElement> collection;
         ASSERT_THROWS_CODE(colBlockBased.decompress<BSONElementMaterializer>(collection, allocator),
                            DBException,
-                           8690000);
+                           ErrorCodes::InvalidBSONColumn);
     }
 
     // Verify block-based path decompression throws an error.
@@ -3581,7 +3895,7 @@ TEST_F(BSONColumnTest, BinDataLargerThan16WithNonZeroDelta) {
         ASSERT_THROWS_CODE(
             colBlockBased.decompress<BSONElementMaterializer>(allocator, std::span(testPaths)),
             DBException,
-            8609800);
+            ErrorCodes::InvalidBSONColumn);
     }
 
     // Build a similar BSONColumn that has the delta block not in interleaved mode.
@@ -3599,7 +3913,8 @@ TEST_F(BSONColumnTest, BinDataLargerThan16WithNonZeroDelta) {
 
     // Verify the iterative implementation throws an error.
     BSONColumn col{scalarBinary.buf(), static_cast<size_t>(scalarBinary.len())};
-    ASSERT_THROWS_CODE(std::distance(col.begin(), col.end()), DBException, 8412601);
+    ASSERT_THROWS_CODE(
+        std::distance(col.begin(), col.end()), DBException, ErrorCodes::InvalidBSONColumn);
 
     // Verify non-interleaved block-based decompression throws an error.
     {
@@ -3609,7 +3924,7 @@ TEST_F(BSONColumnTest, BinDataLargerThan16WithNonZeroDelta) {
         std::vector<BSONElement> collection;
         ASSERT_THROWS_CODE(colBlockBased.decompress<BSONElementMaterializer>(collection, allocator),
                            DBException,
-                           8609800);
+                           ErrorCodes::InvalidBSONColumn);
     }
 }
 
@@ -3947,8 +4262,7 @@ TEST_F(BSONColumnTest, ArrayUncompressed) {
 }
 
 TEST_F(BSONColumnTest, ArrayEqual) {
-    auto elemObj = createElementArray(BSON_ARRAY("a"
-                                                 << "b"));
+    auto elemObj = createElementArray(BSON_ARRAY("a" << "b"));
     std::vector<BSONElement> elems = {elemObj, elemObj};
 
     BufBuilder expected;
@@ -3996,6 +4310,59 @@ TEST_F(BSONColumnTest, OnlySkipManyTwoControlBytes) {
     appendEOO(expected);
 
     auto binData = cb.finalize();
+    verifyBinary(binData, expected, false);
+    verifyColumnReopenFromBinary(reinterpret_cast<const char*>(binData.data), binData.length);
+}
+
+TEST_F(BSONColumnTest, BulkSkipConstructor) {
+    size_t num = /*first non-RLE*/ 60 + /*RLE*/ 1920 * 12 + /*non-RLE at end*/ 59;
+    BSONColumnBuilder<> skipCb(num);
+
+    BufBuilder expected;
+    appendSimple8bControl(expected, 0b1000, 0b1111);
+    appendSimple8bBlocks64(
+        expected, std::vector<boost::optional<uint64_t>>(num - 1, boost::none), 16);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlocks64(expected, std::vector<boost::optional<uint64_t>>(1, boost::none), 1);
+    appendEOO(expected);
+
+    auto binData = skipCb.finalize();
+    verifyBinary(binData, expected, false);
+    verifyColumnReopenFromBinary(reinterpret_cast<const char*>(binData.data), binData.length);
+}
+
+TEST_F(BSONColumnTest, BulkSkipConstructorValueAfterSmall) {
+    auto elem = createElementInt32(1);
+    BSONColumnBuilder<> skipCb(1);
+    skipCb.append(elem);
+
+    BufBuilder expected;
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlock64(expected, boost::none);
+    appendLiteral(expected, elem);
+    appendEOO(expected);
+
+    auto binData = skipCb.finalize();
+    verifyBinary(binData, expected);
+    verifyDecompression(binData, {BSONElement(), elem});
+}
+
+TEST_F(BSONColumnTest, BulkSkipConstructorValueAfterLarge) {
+    size_t num = /*first non-RLE*/ 60 + /*RLE*/ 1920 * 12 + /*non-RLE at end*/ 59;
+    auto elem = createElementInt32(1);
+    BSONColumnBuilder<> skipCb(num);
+    skipCb.append(elem);
+
+    BufBuilder expected;
+    appendSimple8bControl(expected, 0b1000, 0b1111);
+    appendSimple8bBlocks64(
+        expected, std::vector<boost::optional<uint64_t>>(num - 1, boost::none), 16);
+    appendSimple8bControl(expected, 0b1000, 0b0000);
+    appendSimple8bBlocks64(expected, std::vector<boost::optional<uint64_t>>(1, boost::none), 1);
+    appendLiteral(expected, elem);
+    appendEOO(expected);
+
+    auto binData = skipCb.finalize();
     verifyBinary(binData, expected, false);
     verifyColumnReopenFromBinary(reinterpret_cast<const char*>(binData.data), binData.length);
 }
@@ -4551,10 +4918,8 @@ TEST_F(BSONColumnTest, RLEFirstInControlWithNonRLEAfterWithoutOverflow) {
 
     elems.push_back(createElementInt64(128));
 
-    int i = 0;
     for (auto&& elem : elems) {
         cb.append(elem);
-        ++i;
     }
 
     BufBuilder expected;
@@ -7855,14 +8220,15 @@ TEST_F(BSONColumnTest, InterleavedEmptySequence) {
         {TestPath{{"x"}}, collection}};
     ASSERT_THROWS_CODE(colBlockBased.decompress<BSONElementMaterializer>(collection, allocator),
                        DBException,
-                       8625732);
+                       ErrorCodes::InvalidBSONColumn);
     ASSERT_THROWS_CODE(
         colBlockBased.decompress<BSONElementMaterializer>(allocator, std::span(testPaths)),
         DBException,
-        8625730);
+        ErrorCodes::InvalidBSONColumn);
 
     BSONColumn col(createBSONColumn(interleavedBinary.buf(), interleavedBinary.len()));
-    ASSERT_THROWS_CODE(std::distance(col.begin(), col.end()), DBException, 9232700);
+    ASSERT_THROWS_CODE(
+        std::distance(col.begin(), col.end()), DBException, ErrorCodes::InvalidBSONColumn);
 }
 
 
@@ -8179,7 +8545,8 @@ TEST_F(BSONColumnTest, InvalidDeltaAfterInterleaved) {
         appendEOO(expected);
 
         BSONColumn col(createBSONColumn(expected.buf(), expected.len()));
-        ASSERT_THROWS_CODE(std::distance(col.begin(), col.end()), DBException, 6785500);
+        ASSERT_THROWS_CODE(
+            std::distance(col.begin(), col.end()), DBException, ErrorCodes::InvalidBSONColumn);
     };
 
     test(appendInterleavedStartLegacy);
@@ -8195,7 +8562,8 @@ TEST_F(BSONColumnTest, InvalidDeltaAfterInterleaved) {
     appendEOO(expected);
 
     BSONColumn col(createBSONColumn(expected.buf(), expected.len()));
-    ASSERT_THROWS_CODE(std::distance(col.begin(), col.end()), DBException, 6785500);
+    ASSERT_THROWS_CODE(
+        std::distance(col.begin(), col.end()), DBException, ErrorCodes::InvalidBSONColumn);
 }
 
 TEST_F(BSONColumnTest, InvalidDelta) {
@@ -8356,9 +8724,8 @@ TEST_F(BSONColumnTest, AppendMinKeyInSubObjAfterMerge) {
 
     BufBuilder expected;
     appendInterleavedStart(expected,
-                           BSON("root" << BSON("a"
-                                               << "asd"
-                                               << "0" << 1)));
+                           BSON("root" << BSON("a" << "asd"
+                                                   << "0" << 1)));
     appendSimple8bControl(expected, 0b1000, 0b0000);
     appendSimple8bBlocks64(expected,
                            {
@@ -8481,9 +8848,8 @@ TEST_F(BSONColumnTest, DecompressMinKeyInSubObjAfterMerge) {
 
     BufBuilder expected;
     appendInterleavedStart(expected,
-                           BSON("root" << BSON("a"
-                                               << "asd"
-                                               << "0" << 1)));
+                           BSON("root" << BSON("a" << "asd"
+                                                   << "0" << 1)));
     appendSimple8bControl(expected, 0b1000, 0b0000);
     appendSimple8bBlocks64(expected,
                            {
@@ -9098,7 +9464,7 @@ TEST_F(BSONColumnTest, LegacyInterleavedPaths) {
     // 'Request for unknown element'
     ASSERT_THROWS_CODE(column.decompress<BSONElementMaterializer>(allocator, std::span(paths)),
                        DBException,
-                       9071200);
+                       ErrorCodes::InvalidBSONColumn);
 
     // Try again with a path that we can support.
     for (auto&& elem : elems) {
@@ -9107,142 +9473,6 @@ TEST_F(BSONColumnTest, LegacyInterleavedPaths) {
 
     auto binData = cb.finalize();
     verifyDecompressPathFast(binData, elems, TestPath{{"b"}});
-}
-
-TEST_F(BSONColumnTest, FuzzerDiscoveredEdgeCases) {
-    // This test is a collection of binaries produced by the fuzzer that exposed bugs at some point
-    // and contains coverage missing from the tests defined above.
-    std::vector<StringData> binariesBase64 = {
-        // Ends with uncompressed literal. Last value in previous block needs to be set correctly
-        // for doubles.
-        "AQAACQgAAHMA7wkAQP/Q0CfU0NCACvX//////9AA"_sd,
-        // Contains zero deltas after uncompressed string starting with '\0' (unencodable). Ensures
-        // we have special handling for zero deltas that by-pass materialization.
-        "CAAAAgACAAAAAACAAgAAAAAAAAAA"_sd,
-        // Re-scaling double is not possible. Offset to last control byte needs to be cleared so a
-        // new control byte is written by the compressor.
-        "AQAAAAAAAAAAAJHCgLGRkf//DZGRCJEACAAAgDqRsZGRkZGRAA=="_sd,
-        // Re-scaling double is not possible. Offset to last control byte needs to be cleared so a
-        // new control byte is written by the compressor.
-        "CgABAP//////////gAIBAAD7///4AA=="_sd,
-        // Ends with value too large to be encodable in Simple8b block
-        "AQAAAAAjAAAAHAkALV3DRTINAACAd/ce/////xwJAC33Hv////+/AA=="_sd,
-        // Unencodable literal for 128bit types, prevEncoded128 needs to be set to none by
-        // compressor.
-        "DQAUAAAAAAgAAIDx///++AAAAAMAAAAIAACA8f///vj/AAAA"_sd,
-        // Merge of interleaved objects that results in repeated fieldname
-        "fwB/APEPAAAA/wD/////KwAGAAALAJ0qnZ0AAICx87tAc/+/fgQABwAAAP8AAICx88BEjAi/AICxAAIAACQAFgAA"_sd};
-
-    for (auto&& binaryBase64 : binariesBase64) {
-        auto binary = base64::decode(binaryBase64);
-
-        // Validate that our BSONColumnBuilder would construct this exact binary for the input data.
-        // This is required to be able to verify these binary blobs.
-        BSONColumnBuilder builder;
-        BSONColumn column(binary.data(), binary.size());
-        try {
-            for (auto&& elem : column) {
-                builder.append(elem);
-            }
-        } catch (const DBException& ex) {
-            ASSERT_NOT_OK(ex.toStatus());
-            continue;
-        }
-        BSONBinData finalized = builder.finalize();
-        ASSERT_EQ(binary.size(), finalized.length);
-        ASSERT(memcmp(binary.data(), finalized.data, binary.size()) == 0);
-
-        // Validate that reopening BSONColumnBuilder from this binary produces the same state as-if
-        // values were uncompressed and re-appended.
-        verifyColumnReopenFromBinary(binary.data(), binary.size());
-    }
-}
-
-TEST_F(BSONColumnTest, BlockFuzzerDiscoveredEdgeCases) {
-    // This test is a collection of binaries produced by the decompression fuzzer that exposed bugs
-    // in the block-based or iterator API, and contains coverage missing from the tests defined
-    // above. This test validates that the iterator API and the block-based API must produce the
-    // same results.
-    std::vector<StringData> binariesBase64 = {
-        // Iterator API did not cast values to booleans before materializing (SERVER-87779).
-        "CAAAoJb//wD/3ylEAA=="_sd,
-        // Block-based API updated the 'lastValue' when appending EOO elements (SERVER-85860).
-        "CgAKAAoAEwAHAAoACgEAAABQUFBQUFBQUFAAAAAAAACoqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioqKioUFBQUAAAAAAACgAKAAsAEwAKAAoACgAKAAoACgAKAAoACgAKAAoACgAA"_sd,
-        // Block-based API didn't validate the scale index for simple8b blocks (SERVER-87628 and
-        // SERVER-88738).
-        "QAEADP////+SAA=="_sd,
-        "fwBAAwAAAAAAAAAA"_sd,
-        "CgBh/wABemEUAAAAAAAAAAIBAAA="_sd,
-        "BQAvAAAAAABQslBQUFBQUFBQUFAAUFBQUFB5UP7///9QUFBQUFBQUFCBgYGBgYGBgYGBgYGBgYFQbFCpUFBQgVBQUFBQUFBQP1BQUFBQUAAA"_sd,
-        // Block-based Path API doesn't validate the scale index for non-double values
-        // (SERVER-89155).
-        "8AgAAAAIAAAA0Cz/AAAAAAdSAAA="_sd,
-        // The two APIs had different delta values, but both should fail (SERVER-85860 and
-        // SERVER-87873).
-        "BQADAAAAkP8AkJCR///+/4jIfdAmAAAAAAAAAJACAAAAAP8AAAA="_sd,
-        "fwDQYG9tfwAAAAAA"_sd,
-        "CAABwMABwMDAwMDAwH9DwMDAwMDAwMDAwMDAwMDAwMjAwMDAAAAAAA=="_sd,
-        "EwAAAGCvYK+vUgBSUlBQc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3NzFBQUFBQUc3PQ0NDQ0NDQ0NDQr1JSUlBQ0NDQ0NDQ0NDQ0NIYAAAA0NAXlaJ9//8AAA=="_sd,
-        // Block-based API using the table decoders should fail on bad selectors (SERVER-88062).
-        "CwBPpFpaWloAAKD3Af9dXQD/AAA="_sd,
-        // Block-based API had a stack overflow for BinData values (SERVER-88207).
-        "BQAXAAAAMcLCPso9PcJhJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmsMIYAAECAAIAAA=="_sd,
-        "BQAwAAAAAAcAAAAAAAEAAAAAAABAAAAAAAA7Ozs7Ozs7Ozs6Ozs7Ozs7Ozs7Ozs7Ozs7OwD+/4A7OzsA/v+A/wA="_sd,
-        // Block-based API didn't allow non-zero/missing deltas after EOO (SERVER-89150).
-        "8h4AAAD/p/+zSENBMoAB/0hDQzKAAP9IOjCAAP8AAACCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCggA="_sd,
-        // Blockbased API didn't update last to EOO when Iterative API did for interleaved data
-        // (SERVER-89612).
-        "8hQAAAAF+P//////FCgAAAAAAAAABgAIAACBKg7/+///////MP8V/3EAAACBeHFYDAAA/3RhZ3P//wEAAAA="_sd,
-        // Blockbased API doesn't fail an interleaved mode that has leftover data in some decoders
-        // while the iterative version does (SERVER-92150)
-        "8jIAAAAHVvkCAAEAAAAAAgABAAAAAAxTdGNydHVfaWQAAQAAAAABMg5faWQAAQAAAAAA/wD/AP8Aj4+Pj4+Pj4+Pj4+Pj4+Pj4//AP8A/wD/AP8A/wD/AP8A/wCPj4+Pj4+Pj4+PAAD/AP8A/wD/AP8A/wCPj4+Pj4+Pj49vj4+Pj4+Pj/8A/041j4+Pj4+Pj4+Pj48BAFXeV6t2AI+Pj4+Pj4+Pj4+Pj8SPj4+Pj4+Pj4//AP8A/wD/AP8A/wAA"_sd,
-        // Empty interleaved mode produces an assert in block-based API but not iterative
-        // (SERVER-92327)
-        "EAAAYTsB8gcAAAD/AAAAgsj//////////wEH//hB/7KyAP+AAP//AAA="_sd,
-    };
-
-    for (auto&& binaryBase64 : binariesBase64) {
-        auto binary = base64::decode(binaryBase64);
-
-        // Store the results for validation after decompression.
-        boost::intrusive_ptr allocator{new BSONElementStorage()};
-        std::vector<BSONElement> iteratorElems, blockBasedElems;
-        bool blockBasedError = false;
-        bool iteratorError = false;
-
-        // Attempt to decompress using the block-based API.
-        bsoncolumn::BSONColumnBlockBased block(binary.data(), binary.size());
-        try {
-            block.decompress<bsoncolumn::BSONElementMaterializer, std::vector<BSONElement>>(
-                blockBasedElems, allocator);
-        } catch (...) {
-            blockBasedError = true;
-        }
-
-        // Attempt to decompress using the iterator API.
-        BSONColumn column(binary.data(), binary.size());
-        try {
-            for (auto&& elem : column) {
-                iteratorElems.push_back(elem);
-            };
-        } catch (...) {
-            iteratorError = true;
-        }
-
-        // If one API failed, then both APIs must fail.
-        if (iteratorError || blockBasedError) {
-            ASSERT(iteratorError && blockBasedError);
-            continue;
-        }
-
-        // If the APIs succeeded, the results must be the same.
-        ASSERT(iteratorElems.size() == blockBasedElems.size());
-        auto it = iteratorElems.begin();
-        for (auto&& elem : blockBasedElems) {
-            ASSERT(elem.binaryEqualValues(*it));
-            ++it;
-        }
-    }
 }
 
 // The large literal emits this on Visual Studio: Fatal error C1091: compiler limit: string exceeds

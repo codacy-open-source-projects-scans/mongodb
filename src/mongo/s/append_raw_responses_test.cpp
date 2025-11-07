@@ -27,17 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <set>
-#include <string>
-#include <tuple>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -51,32 +40,40 @@
 #include "mongo/client/connection_string.h"
 #include "mongo/client/remote_command_targeter_mock.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/sharding_catalog_client_mock.h"
+#include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime_with.h"
 #include "mongo/db/repl/read_concern_level.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
+#include "mongo/db/versioning_protocol/shard_version_factory.h"
+#include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/write_concern_error_detail.h"
 #include "mongo/s/async_requests_sender.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/sharding_catalog_client_mock.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/index_version.h"
-#include "mongo/s/shard_version.h"
-#include "mongo/s/shard_version_factory.h"
-#include "mongo/s/sharding_mongos_test_fixture.h"
-#include "mongo/s/stale_exception.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <set>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -205,10 +202,10 @@ protected:
         public:
             StaticCatalogClient(std::vector<ShardId> shardIds) : _shardIds(std::move(shardIds)) {}
 
-            StatusWith<repl::OpTimeWith<std::vector<ShardType>>> getAllShards(
+            repl::OpTimeWith<std::vector<ShardType>> getAllShards(
                 OperationContext* opCtx,
                 repl::ReadConcernLevel readConcern,
-                bool excludeDraining) override {
+                BSONObj filter) override {
                 std::vector<ShardType> shardTypes;
                 for (const auto& shardId : _shardIds) {
                     const ConnectionString cs = ConnectionString::forReplicaSet(
@@ -242,8 +239,7 @@ protected:
             Timestamp timestamp{1, 0};
             return StaleConfigInfo(
                 NamespaceString::createNamespaceString_forTest("Foo.Bar"),
-                ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
-                                          boost::optional<CollectionIndexes>(boost::none)),
+                ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0})),
                 boost::none,
                 ShardId{"dummy"});
         }(),
@@ -597,10 +593,13 @@ TEST_F(AppendRawResponsesTest, SomeShardsReturnSuccessWithWriteConcernErrorRestR
          makeWriteConcernErrorResponse(kWriteConcernError1Status),
          makeHostAndPort(kShard5)}};
 
-    // The first non-ShardNotFound error is returned, and no writeConcern error is reported at the
-    // top level.
-    runAppendRawResponsesExpect(
-        shardResponses, kError1Status, {kShard3, kShard4, kShard5}, {kShard5});
+    // The first non-ShardNotFound error is returned, and writeConcern error is reported at the top
+    // level.
+    runAppendRawResponsesExpect(shardResponses,
+                                kError1Status,
+                                {kShard3, kShard4, kShard5},
+                                {kShard5},
+                                kWriteConcernError1Status);
 }
 
 TEST_F(AppendRawResponsesTest,
@@ -614,10 +613,14 @@ TEST_F(AppendRawResponsesTest,
          makeWriteConcernErrorResponse(kWriteConcernError1Status),
          makeHostAndPort(kShard5)}};
 
-    // The first non-ShardNotFound error is returned, and no writeConcern error is reported at the
-    // top level.
-    runAppendRawResponsesExpect(
-        shardResponses, kError1Status, {kShard3, kShard4, kShard5}, {kShard5}, Status::OK(), true);
+    // The first non-ShardNotFound error is returned, and writeConcern error is reported at the top
+    // level.
+    runAppendRawResponsesExpect(shardResponses,
+                                kError1Status,
+                                {kShard3, kShard4, kShard5},
+                                {kShard5},
+                                kWriteConcernError1Status,
+                                true);
 }
 
 }  // namespace

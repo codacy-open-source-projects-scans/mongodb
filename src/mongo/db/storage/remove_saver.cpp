@@ -27,32 +27,29 @@
  *    it in the license file.
  */
 
-#include <boost/filesystem/operations.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <fstream>  // IWYU pragma: keep
-#include <utility>
-
-#include <boost/filesystem/path.hpp>
+#include "mongo/db/storage/remove_saver.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/encryption_hooks.h"
-#include "mongo/db/storage/remove_saver.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <fstream>  // IWYU pragma: keep
+#include <utility>
+
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 
-using std::ios_base;
 using std::ofstream;
 using std::string;
 using std::stringstream;
@@ -93,16 +90,16 @@ RemoveSaver::~RemoveSaver() {
 
         size_t protectedSizeMax = encryptionHooks->additionalBytesForProtectedBuffer();
         std::unique_ptr<uint8_t[]> protectedBuffer(new uint8_t[protectedSizeMax]);
+        DataRange outRange(protectedBuffer.get(), protectedSizeMax);
 
-        size_t resultLen;
-        Status status = _protector->finalize(protectedBuffer.get(), protectedSizeMax, &resultLen);
+        Status status = _protector->finalize(&outRange);
         if (!status.isOK()) {
             LOGV2_FATAL(34350,
                         "Unable to finalize DataProtector while closing RemoveSaver",
                         "error"_attr = redact(status));
         }
 
-        _out->write(reinterpret_cast<const char*>(protectedBuffer.get()), resultLen);
+        _out->write(reinterpret_cast<const char*>(protectedBuffer.get()), outRange.length());
         if (_out->fail()) {
             auto ec = lastSystemError();
             LOGV2_FATAL(34351,
@@ -112,22 +109,23 @@ RemoveSaver::~RemoveSaver() {
         }
 
         protectedBuffer.reset(new uint8_t[protectedSizeMax]);
-        status = _protector->finalizeTag(protectedBuffer.get(), protectedSizeMax, &resultLen);
+        outRange = DataRange(protectedBuffer.get(), protectedSizeMax);
+        status = _protector->finalizeTag(&outRange);
         if (!status.isOK()) {
             LOGV2_FATAL(34352,
                         "Unable to get finalizeTag from DataProtector while closing RemoveSaver",
                         "error"_attr = redact(status));
         }
 
-        if (resultLen != _protector->getNumberOfBytesReservedForTag()) {
+        if (outRange.length() != _protector->getNumberOfBytesReservedForTag()) {
             LOGV2_FATAL(34353,
                         "Attempted to write tag of larger size than DataProtector reserved size",
-                        "sizeBytes"_attr = resultLen,
+                        "sizeBytes"_attr = outRange.length(),
                         "reservedBytes"_attr = _protector->getNumberOfBytesReservedForTag());
         }
 
         _out->seekp(0);
-        _out->write(reinterpret_cast<const char*>(protectedBuffer.get()), resultLen);
+        _out->write(reinterpret_cast<const char*>(protectedBuffer.get()), outRange.length());
 
         if (_out->fail()) {
             auto ec = lastSystemError();
@@ -170,16 +168,15 @@ Status RemoveSaver::goingToDelete(const BSONObj& o) {
         size_t protectedSizeMax = dataSize + encryptionHooks->additionalBytesForProtectedBuffer();
         protectedBuffer.reset(new uint8_t[protectedSizeMax]);
 
-        size_t resultLen;
-        Status status = _protector->protect(
-            data, dataSize, protectedBuffer.get(), protectedSizeMax, &resultLen);
+        DataRange outRange(protectedBuffer.get(), protectedSizeMax);
+        Status status = _protector->protect(ConstDataRange(data, dataSize), &outRange);
 
         if (!status.isOK()) {
             return status;
         }
 
         data = protectedBuffer.get();
-        dataSize = resultLen;
+        dataSize = outRange.length();
     }
 
     _out->write(reinterpret_cast<const char*>(data), dataSize);

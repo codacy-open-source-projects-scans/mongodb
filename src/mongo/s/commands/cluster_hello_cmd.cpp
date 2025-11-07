@@ -27,17 +27,6 @@
  *    it in the license file.
  */
 
-#include <functional>
-#include <initializer_list>
-#include <memory>
-#include <set>
-#include <string>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -55,22 +44,22 @@
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/read_concern_support_result.h"
-#include "mongo/db/repl/hello_auth.h"
-#include "mongo/db/repl/hello_gen.h"
+#include "mongo/db/repl/hello/hello_auth.h"
+#include "mongo/db/repl/hello/hello_gen.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/sharding_environment/mongos_hello_response.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/topology/mongos_topology_coordinator.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/metadata/client_metadata.h"
@@ -78,8 +67,6 @@
 #include "mongo/rpc/rewrite_state_change_errors.h"
 #include "mongo/rpc/topology_version_gen.h"
 #include "mongo/s/load_balancer_support.h"
-#include "mongo/s/mongos_hello_response.h"
-#include "mongo/s/mongos_topology_coordinator.h"
 #include "mongo/transport/hello_metrics.h"
 #include "mongo/transport/message_compressor_manager.h"
 #include "mongo/util/assert_util.h"
@@ -90,6 +77,17 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/time_support.h"
+
+#include <functional>
+#include <initializer_list>
+#include <memory>
+#include <set>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -107,7 +105,7 @@ constexpr auto kHelloString = "hello"_sd;
 constexpr auto kCamelCaseIsMasterString = "isMaster"_sd;
 constexpr auto kLowerCaseIsMasterString = "ismaster"_sd;
 const std::string kAutomationServiceDescriptorFieldName =
-    HelloCommandReply::kAutomationServiceDescriptorFieldName.toString();
+    std::string{HelloCommandReply::kAutomationServiceDescriptorFieldName};
 
 class CmdHello : public BasicCommandWithReplyBuilderInterface {
 public:
@@ -167,7 +165,7 @@ public:
 
         CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
 
-        auto cmd = idl::parseCommandDocument<HelloCommand>(IDLParserContext("hello"), cmdObj);
+        auto cmd = idl::parseCommandDocument<HelloCommand>(cmdObj, IDLParserContext("hello"));
 
         routerWaitInHello.execute([&](const BSONObj& args) {
             if (args.hasElement("delayMillis")) {
@@ -201,7 +199,9 @@ public:
             .serverNegotiate(cmd.getCompression(), &result);
 
         auto client = opCtx->getClient();
+        bool isInitialHandshake = false;
         if (ClientMetadata::tryFinalize(client)) {
+            isInitialHandshake = true;
             audit::logClientMetadata(client);
         }
 
@@ -266,7 +266,7 @@ public:
                             static_cast<long long>(MaxMessageSizeBytes));
         result.appendNumber(HelloCommandReply::kMaxWriteBatchSizeFieldName,
                             static_cast<long long>(write_ops::kMaxWriteBatchSize));
-        result.appendDate(HelloCommandReply::kLocalTimeFieldName, jsTime());
+        result.appendDate(HelloCommandReply::kLocalTimeFieldName, Date_t::now());
         result.append(HelloCommandReply::kLogicalSessionTimeoutMinutesFieldName,
                       localLogicalSessionTimeoutMinutes);
         result.appendNumber(HelloCommandReply::kConnectionIdFieldName,
@@ -293,8 +293,7 @@ public:
                     maxAwaitTimeMS);
             invariant(clientTopologyVersion);
 
-            InExhaustHello::get(opCtx->getClient()->session().get())
-                ->setInExhaust(true /* inExhaust */, getName());
+            InExhaustHello::get(opCtx->getClient()->session().get())->setInExhaust(commandType());
 
             if (clientTopologyVersion->getProcessId() ==
                     currentMongosTopologyVersion.getProcessId() &&
@@ -317,7 +316,7 @@ public:
             }
         }
 
-        handleHelloAuth(opCtx, dbName, cmd, &result);
+        handleHelloAuth(opCtx, dbName, cmd, isInitialHandshake, &result);
 
         if (getTestCommandsEnabled()) {
             validateResult(&result);
@@ -330,11 +329,11 @@ public:
         auto ret = result->asTempObj();
         if (ret[ErrorReply::kErrmsgFieldName].eoo()) {
             // Nominal success case, parse the object as-is.
-            HelloCommandReply::parse(IDLParserContext{"hello.reply"}, ret);
+            HelloCommandReply::parse(ret, IDLParserContext{"hello.reply"});
         } else {
             // Something went wrong, still try to parse, but accept a few ignorable fields.
             StringDataSet ignorable({ErrorReply::kCodeFieldName, ErrorReply::kErrmsgFieldName});
-            HelloCommandReply::parse(IDLParserContext{"hello.reply"}, ret.removeFields(ignorable));
+            HelloCommandReply::parse(ret.removeFields(ignorable), IDLParserContext{"hello.reply"});
         }
     }
 
@@ -344,6 +343,10 @@ protected:
 
     virtual bool useLegacyResponseFields() const {
         return false;
+    }
+
+    virtual InExhaustHello::Command commandType() const {
+        return InExhaustHello::Command::kHello;
     }
 };
 MONGO_REGISTER_COMMAND(CmdHello).forRouter();
@@ -359,6 +362,10 @@ public:
 protected:
     bool useLegacyResponseFields() const final {
         return true;
+    }
+
+    InExhaustHello::Command commandType() const final {
+        return InExhaustHello::Command::kIsMaster;
     }
 };
 MONGO_REGISTER_COMMAND(CmdIsMaster).forRouter();

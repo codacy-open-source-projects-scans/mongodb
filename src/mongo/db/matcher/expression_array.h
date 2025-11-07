@@ -29,29 +29,27 @@
 
 #pragma once
 
+#include <cstddef>
+
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <cstddef>
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <memory>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/clonable_ptr.h"
-#include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_path.h"
 #include "mongo/db/matcher/expression_visitor.h"
-#include "mongo/db/matcher/match_details.h"
 #include "mongo/db/matcher/path.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+#include <utility>
+#include <vector>
 
 namespace mongo {
 
@@ -70,15 +68,6 @@ public:
                               ElementPath::NonLeafArrayBehavior::kTraverse,
                               std::move(annotation)) {}
 
-    /**
-     * Returns whether or not the nested array, represented as the object 'anArray', matches.
-     *
-     * 'anArray' must be the nested array at this expression's path.
-     */
-    virtual bool matchesArray(const BSONObj& anArray, MatchDetails* details) const = 0;
-
-    bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
-
     bool equivalent(const MatchExpression* other) const override;
 
     MatchCategory getCategory() const final {
@@ -91,8 +80,6 @@ public:
     ElemMatchObjectMatchExpression(boost::optional<StringData> path,
                                    std::unique_ptr<MatchExpression> sub,
                                    clonable_ptr<ErrorAnnotation> annotation = nullptr);
-
-    bool matchesArray(const BSONObj& anArray, MatchDetails* details) const override;
 
     std::unique_ptr<MatchExpression> clone() const override {
         std::unique_ptr<ElemMatchObjectMatchExpression> e =
@@ -145,8 +132,6 @@ public:
     }
 
 private:
-    ExpressionOptimizerFunc getOptimizer() const final;
-
     std::unique_ptr<MatchExpression> _sub;
 };
 
@@ -159,8 +144,6 @@ public:
                                            clonable_ptr<ErrorAnnotation> annotation = nullptr);
 
     void add(std::unique_ptr<MatchExpression> sub);
-
-    bool matchesArray(const BSONObj& anArray, MatchDetails* details) const override;
 
     std::unique_ptr<MatchExpression> clone() const override {
         std::unique_ptr<ElemMatchValueMatchExpression> e =
@@ -207,8 +190,6 @@ public:
     }
 
 private:
-    ExpressionOptimizerFunc getOptimizer() const final;
-
     bool _arrayElementMatchesAll(const BSONElement& e) const;
 
     std::vector<std::unique_ptr<MatchExpression>> _subs;
@@ -249,8 +230,6 @@ public:
         return nullptr;
     }
 
-    bool matchesArray(const BSONObj& anArray, MatchDetails* details) const override;
-
     void debugString(StringBuilder& debug, int indentationLevel) const override;
 
     void appendSerializedRightHandSide(BSONObjBuilder* bob,
@@ -280,12 +259,6 @@ public:
     }
 
 private:
-    ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) {
-            return expression;
-        };
-    }
-
     int _size;  // >= 0 real, < 0, nothing will match
 
     boost::optional<InputParamId> _inputParamId;

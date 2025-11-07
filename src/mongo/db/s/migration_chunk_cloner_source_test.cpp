@@ -32,17 +32,6 @@
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "cxxabi.h"
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
-#include <deque>
-#include <iterator>
-#include <memory>
-#include <string>
-#include <system_error>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -56,70 +45,80 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/client/remote_command_targeter_mock.h"
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/collection_options_gen.h"
-#include "mongo/db/catalog/create_collection.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/collection_crud/capped_visibility.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/sharding_catalog_client_mock.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/global_catalog/type_collection_common_types_gen.h"
+#include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/matcher/expression_parser.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/collection_options_gen.h"
+#include "mongo/db/local_catalog/create_collection.h"
+#include "mongo/db/local_catalog/durable_catalog_entry.h"
+#include "mongo/db/local_catalog/durable_catalog_entry_metadata.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role_mock.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/change_stream_pre_and_post_images_options_gen.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/optime_with.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
-#include "mongo/db/s/collection_metadata.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/migration_chunk_cloner_source.h"
-#include "mongo/db/s/operation_sharding_state.h"
-#include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/session/session_catalog_mongod.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/db/storage/bson_collection_catalog_entry.h"
-#include "mongo/db/storage/durable_catalog_entry.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/snapshot.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/db/timeseries/timeseries_options.h"
+#include "mongo/db/topology/shard_registry.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/sharding_catalog_client_mock.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/database_version.h"
 #include "mongo/s/request_types/move_range_request_gen.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
-#include "mongo/s/type_collection_common_types_gen.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/uuid.h"
 #include "mongo/util/version/releases.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <iterator>
+#include <memory>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 namespace mongo {
 namespace {
@@ -162,7 +161,7 @@ public:
 
     Status initFromExisting(OperationContext* opCtx,
                             const std::shared_ptr<const Collection>& collection,
-                            const DurableCatalogEntry& catalogEntry,
+                            const durable_catalog::CatalogEntry& catalogEntry,
                             boost::optional<Timestamp> readTimestamp) override {
         MONGO_UNREACHABLE;
     }
@@ -245,13 +244,11 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    Validator parseValidator(OperationContext* opCtx,
-                             const BSONObj& validator,
-                             MatchExpressionParser::AllowedFeatureSet allowedFeatures,
-                             boost::optional<multiversion::FeatureCompatibilityVersion>
-                                 maxFeatureCompatibilityVersion) const override {
-        return _coll->parseValidator(
-            opCtx, validator, allowedFeatures, maxFeatureCompatibilityVersion);
+    Validator parseValidator(
+        OperationContext* opCtx,
+        const BSONObj& validator,
+        MatchExpressionParser::AllowedFeatureSet allowedFeatures) const override {
+        return _coll->parseValidator(opCtx, validator, allowedFeatures);
     }
 
     void setValidator(OperationContext* opCtx, Validator validator) override {
@@ -298,8 +295,16 @@ public:
         return _coll->isTemporary();
     }
 
-    boost::optional<bool> getTimeseriesBucketsMayHaveMixedSchemaData() const override {
-        return _coll->getTimeseriesBucketsMayHaveMixedSchemaData();
+    bool isTimeseriesCollection() const override {
+        return _coll->isTimeseriesCollection();
+    }
+
+    bool isNewTimeseriesWithoutView() const override {
+        return _coll->isNewTimeseriesWithoutView();
+    }
+
+    timeseries::MixedSchemaBucketsState getTimeseriesMixedSchemaBucketsState() const override {
+        return _coll->getTimeseriesMixedSchemaBucketsState();
     }
 
     void setTimeseriesBucketsMayHaveMixedSchemaData(OperationContext* opCtx,
@@ -316,11 +321,15 @@ public:
         MONGO_UNREACHABLE;
     }
 
+    void removeLegacyTimeseriesBucketingParametersHaveChanged(OperationContext* opCtx) override {
+        MONGO_UNREACHABLE;
+    }
+
     bool areTimeseriesBucketsFixed() const override {
-        auto tsOptions = getTimeseriesOptions();
-        boost::optional<bool> parametersChanged = timeseriesBucketingParametersHaveChanged();
-        return parametersChanged.has_value() && !parametersChanged.get() && tsOptions &&
-            tsOptions->getBucketMaxSpanSeconds() == tsOptions->getBucketRoundingSeconds();
+        const auto tsOptions = getTimeseriesOptions();
+        // Assume parameters have changed unless otherwise specified.
+        const auto parametersChanged = timeseriesBucketingParametersHaveChanged().value_or(true);
+        return tsOptions && timeseries::areTimeseriesBucketsFixed(*tsOptions, parametersChanged);
     }
 
     StatusWith<bool> doesTimeseriesBucketsDocContainMixedSchemaData(
@@ -384,7 +393,8 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    std::vector<std::string> repairInvalidIndexOptions(OperationContext* opCtx) override {
+    std::vector<std::string> repairInvalidIndexOptions(OperationContext* opCtx,
+                                                       bool removeDeprecatedFields) override {
         MONGO_UNREACHABLE;
     }
 
@@ -398,6 +408,7 @@ public:
 
     Status prepareForIndexBuild(OperationContext* opCtx,
                                 const IndexDescriptor* spec,
+                                StringData indexIdent,
                                 boost::optional<UUID> buildUUID) override {
         MONGO_UNREACHABLE;
     }
@@ -456,7 +467,7 @@ public:
     }
 
     void replaceMetadata(OperationContext* opCtx,
-                         std::shared_ptr<BSONCollectionCatalogEntry::MetaData> md) override {
+                         std::shared_ptr<durable_catalog::CatalogEntryMetaData> md) override {
         MONGO_UNREACHABLE;
     }
 
@@ -470,29 +481,6 @@ public:
 
     bool isCappedAndNeedsDelete(OperationContext* opCtx) const override {
         return _coll->isCappedAndNeedsDelete(opCtx);
-    }
-
-    bool usesCappedSnapshots() const override {
-        return _coll->usesCappedSnapshots();
-    }
-
-    std::vector<RecordId> reserveCappedRecordIds(OperationContext* opCtx,
-                                                 size_t nIds) const override {
-        return _coll->reserveCappedRecordIds(opCtx, nIds);
-    }
-
-    void registerCappedInserts(OperationContext* opCtx,
-                               const RecordId& minRecord,
-                               const RecordId& maxRecord) const override {
-        return _coll->registerCappedInserts(opCtx, minRecord, maxRecord);
-    }
-
-    CappedVisibilityObserver* getCappedVisibilityObserver() const override {
-        return _coll->getCappedVisibilityObserver();
-    }
-
-    CappedVisibilitySnapshot takeCappedVisibilitySnapshot() const override {
-        return _coll->takeCappedVisibilitySnapshot();
     }
 
     bool areRecordIdsReplicated() const override {
@@ -517,6 +505,10 @@ public:
 
     long long dataSize(OperationContext* opCtx) const override {
         return _coll->dataSize(opCtx);
+    }
+
+    int64_t sizeOnDisk(OperationContext* opCtx, const StorageEngine& storageEngine) const override {
+        return _coll->sizeOnDisk(opCtx, storageEngine);
     }
 
     bool isEmpty(OperationContext* opCtx) const override {
@@ -545,7 +537,7 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    boost::optional<TimeseriesOptions> getTimeseriesOptions() const override {
+    const boost::optional<TimeseriesOptions>& getTimeseriesOptions() const override {
         return _coll->getTimeseriesOptions();
     }
 
@@ -576,7 +568,7 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    void onDeregisterFromCatalog(OperationContext* opCtx) override {
+    void onDeregisterFromCatalog(ServiceContext* svcCtx) override {
         MONGO_UNREACHABLE;
     }
 
@@ -585,6 +577,20 @@ private:
 
     Status _findDocStatus{Status::OK()};
 };
+
+CollectionAcquisition acquireCollection(OperationContext* opCtx,
+                                        const NamespaceString& nss,
+                                        LockMode mode) {
+    auto prerequisites = [&]() {
+        if (mode == MODE_IX || mode == MODE_X)
+            return AcquisitionPrerequisites::kWrite;
+        else
+            return AcquisitionPrerequisites::kRead;
+    }();
+
+    return acquireCollection(
+        opCtx, CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, prerequisites), mode);
+}
 
 class MigrationChunkClonerSourceTest : public ShardServerTestFixture {
 protected:
@@ -689,16 +695,11 @@ protected:
      * the specified initial documents.
      */
     void createShardedCollection(const std::vector<BSONObj>& initialDocs) {
-        {
-            OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
-                unsafeCreateCollection(operationContext());
-            uassertStatusOK(
-                createCollection(operationContext(), kNss.dbName(), BSON("create" << kNss.coll())));
-        }
+        createTestCollection(operationContext(), kNss);
 
         const auto uuid = [&] {
-            AutoGetCollection autoColl(operationContext(), kNss, MODE_IX);
-            return autoColl.getCollection()->uuid();
+            const auto collection = acquireCollection(operationContext(), kNss, MODE_IX);
+            return collection.uuid();
         }();
 
         [&] {
@@ -729,10 +730,7 @@ protected:
                 ->setFilteringMetadata(
                     operationContext(),
                     CollectionMetadata(
-                        ChunkManager(ShardId("dummyShardId"),
-                                     DatabaseVersion(UUID::gen(), Timestamp(1, 1)),
-                                     makeStandaloneRoutingTableHistory(std::move(rt)),
-                                     boost::none),
+                        ChunkManager(makeStandaloneRoutingTableHistory(std::move(rt)), boost::none),
                         ShardId("dummyShardId")));
         }();
 
@@ -746,7 +744,7 @@ protected:
      */
     static ShardsvrMoveRange createMoveRangeRequest(const ChunkRange& chunkRange) {
         ShardsvrMoveRange req(kNss);
-        req.setEpoch(OID::gen());
+        req.setCollectionTimestamp(Timestamp(10));
         req.setFromShard(ShardId(kDonorConnStr.getSetName()));
         req.setMaxChunkSizeBytes(1024);
         req.getMoveRangeRequestBase().setToShard(ShardId(kRecipientConnStr.getSetName()));
@@ -787,10 +785,10 @@ private:
         public:
             StaticCatalogClient() = default;
 
-            StatusWith<repl::OpTimeWith<std::vector<ShardType>>> getAllShards(
+            repl::OpTimeWith<std::vector<ShardType>> getAllShards(
                 OperationContext* opCtx,
                 repl::ReadConcernLevel readConcern,
-                bool excludeDraining) override {
+                BSONObj filter) override {
 
                 ShardType donorShard;
                 donorShard.setName(kDonorConnStr.getSetName());
@@ -839,12 +837,11 @@ TEST_F(MigrationChunkClonerSourceTest, CorrectDocumentsFetched) {
 
     // Ensure the initial clone documents are available
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(2, arrBuilder.arrSize());
 
             const auto arr = arrBuilder.arr();
@@ -854,8 +851,7 @@ TEST_F(MigrationChunkClonerSourceTest, CorrectDocumentsFetched) {
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(0, arrBuilder.arrSize());
         }
     }
@@ -872,7 +868,7 @@ TEST_F(MigrationChunkClonerSourceTest, CorrectDocumentsFetched) {
     // Normally the insert above and the onInsert/onDelete callbacks below will happen under the
     // same lock and write unit of work
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IX);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IX);
 
         WriteUnitOfWork wuow(operationContext());
 
@@ -892,12 +888,11 @@ TEST_F(MigrationChunkClonerSourceTest, CorrectDocumentsFetched) {
     }
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(0, arrBuilder.arrSize());
         }
 
@@ -950,12 +945,11 @@ TEST_F(MigrationChunkClonerSourceTest, RemoveDuplicateDocuments) {
 
     // Ensure the initial clone documents are available
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(2, arrBuilder.arrSize());
 
             const auto arr = arrBuilder.arr();
@@ -965,7 +959,7 @@ TEST_F(MigrationChunkClonerSourceTest, RemoveDuplicateDocuments) {
     }
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IX);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IX);
 
         deleteDocsInShardedCollection(createCollectionDocument(100));
         insertDocsInShardedCollection({createCollectionDocument(100)});
@@ -997,7 +991,7 @@ TEST_F(MigrationChunkClonerSourceTest, RemoveDuplicateDocuments) {
     }
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
         {
             BSONObjBuilder modsBuilder;
             ASSERT_OK(cloner.nextModsBatch(operationContext(), &modsBuilder));
@@ -1044,18 +1038,17 @@ TEST_F(MigrationChunkClonerSourceTest, OneLargeDocumentTransferMods) {
     }
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(1, arrBuilder.arrSize());
         }
     }
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IX);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IX);
         BSONObj insertDoc =
             createSizedCollectionDocument(2, BSONObjMaxUserSize - kFixedCommandOverhead + 2 * 1024);
         insertDocsInShardedCollection({insertDoc});
@@ -1065,7 +1058,7 @@ TEST_F(MigrationChunkClonerSourceTest, OneLargeDocumentTransferMods) {
     }
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
         {
             BSONObjBuilder modsBuilder;
             ASSERT_OK(cloner.nextModsBatch(operationContext(), &modsBuilder));
@@ -1107,19 +1100,18 @@ TEST_F(MigrationChunkClonerSourceTest, ManySmallDocumentsTransferMods) {
     }
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(1, arrBuilder.arrSize());
         }
     }
 
     long long numDocuments = 0;
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IX);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IX);
 
         std::vector<BSONObj> insertDocs;
         long long totalSize = 0;
@@ -1144,7 +1136,7 @@ TEST_F(MigrationChunkClonerSourceTest, ManySmallDocumentsTransferMods) {
     }
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
         {
             BSONObjBuilder modsBuilder;
             ASSERT_OK(cloner.nextModsBatch(operationContext(), &modsBuilder));
@@ -1176,12 +1168,7 @@ TEST_F(MigrationChunkClonerSourceTest, CollectionNotFound) {
 }
 
 TEST_F(MigrationChunkClonerSourceTest, ShardKeyIndexNotFound) {
-    {
-        OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE unsafeCreateCollection(
-            operationContext());
-        uassertStatusOK(
-            createCollection(operationContext(), kNss.dbName(), BSON("create" << kNss.coll())));
-    }
+    createTestCollection(operationContext(), kNss);
 
     const ShardsvrMoveRange req =
         createMoveRangeRequest(ChunkRange(BSON("X" << 100), BSON("X" << 200)));
@@ -1229,19 +1216,17 @@ TEST_F(MigrationChunkClonerSourceTest, FailedToEngageRecipientShard) {
 
     // Ensure that if the recipient tries to fetch some documents, the cloner won't crash
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(2, arrBuilder.arrSize());
         }
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(0, arrBuilder.arrSize());
         }
     }
@@ -1280,12 +1265,11 @@ TEST_F(MigrationChunkClonerSourceTest, CloneFetchThatOverflows) {
 
     // Ensure the initial clone documents are available
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(1, arrBuilder.arrSize());
 
             const auto arr = arrBuilder.arr();
@@ -1294,8 +1278,7 @@ TEST_F(MigrationChunkClonerSourceTest, CloneFetchThatOverflows) {
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(1, arrBuilder.arrSize());
 
             const auto arr = arrBuilder.arr();
@@ -1304,8 +1287,7 @@ TEST_F(MigrationChunkClonerSourceTest, CloneFetchThatOverflows) {
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(1, arrBuilder.arrSize());
 
             const auto arr = arrBuilder.arr();
@@ -1314,8 +1296,7 @@ TEST_F(MigrationChunkClonerSourceTest, CloneFetchThatOverflows) {
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(0, arrBuilder.arrSize());
         }
     }
@@ -1354,13 +1335,15 @@ TEST_F(MigrationChunkClonerSourceTest, CloneShouldNotCrashWhenNextCloneBatchThro
     }
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
-
         {
-            auto collWithFault =
-                std::make_unique<CollectionWithFault>(autoColl.getCollection().get());
-            CollectionPtr collPtrWithFault(collWithFault.get());
-
+            const auto coll = CollectionCatalog::get(operationContext())
+                                  ->lookupCollectionByNamespace(operationContext(), kNss);
+            auto collWithFault = std::make_unique<CollectionWithFault>(coll);
+            // The collection holder is guaranteed to be valid for the lifetime of the test. This
+            // initialization is safe.
+            auto collptr = CollectionPtr::CollectionPtr_UNSAFE(collWithFault.get());
+            auto acquisitionWithFault = shard_role_mock::acquireCollectionMocked(
+                operationContext(), kNss, std::move(collptr));
             // Note: findDoc currently doesn't have any interruption points, this test simulates
             // an exception being thrown while it is being called.
             collWithFault->setFindDocStatus({ErrorCodes::Interrupted, "fake interrupt"});
@@ -1368,11 +1351,12 @@ TEST_F(MigrationChunkClonerSourceTest, CloneShouldNotCrashWhenNextCloneBatchThro
             BSONArrayBuilder arrBuilder;
 
             ASSERT_THROWS_CODE(
-                cloner.nextCloneBatch(operationContext(), collPtrWithFault, &arrBuilder),
+                cloner.nextCloneBatch(operationContext(), acquisitionWithFault, &arrBuilder),
                 DBException,
                 ErrorCodes::Interrupted);
             ASSERT_EQ(0, arrBuilder.arrSize());
         }
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
 
         // The first document was lost and returned an error during nextCloneBatch. This would
         // cause the migration destination to abort, but it is still possible for other
@@ -1380,8 +1364,7 @@ TEST_F(MigrationChunkClonerSourceTest, CloneShouldNotCrashWhenNextCloneBatchThro
         // calls simulate calls from other threads after the first call threw.
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
 
             const auto arr = arrBuilder.arr();
             ASSERT_EQ(2, arrBuilder.arrSize());
@@ -1392,8 +1375,7 @@ TEST_F(MigrationChunkClonerSourceTest, CloneShouldNotCrashWhenNextCloneBatchThro
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
 
             const auto arr = arrBuilder.arr();
             ASSERT_EQ(0, arrBuilder.arrSize());
@@ -1437,7 +1419,7 @@ TEST_F(MigrationChunkClonerSourceTest, CorrectDocumentsFetchedWithDottedShardKey
     insertDocsInShardedCollection({createDoc(210)});
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IX);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IX);
 
         WriteUnitOfWork wuow(operationContext());
 
@@ -1457,12 +1439,11 @@ TEST_F(MigrationChunkClonerSourceTest, CorrectDocumentsFetchedWithDottedShardKey
     }
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(0, arrBuilder.arrSize());
         }
 
@@ -1484,8 +1465,7 @@ TEST_F(MigrationChunkClonerSourceTest, CorrectDocumentsFetchedWithDottedShardKey
 }
 
 TEST_F(MigrationChunkClonerSourceTest, CorrectDocumentsFetchedWithHasheddShardKeyPattern) {
-    const ShardKeyPattern hashedShardKeyPattern(BSON("X"
-                                                     << "hashed"));
+    const ShardKeyPattern hashedShardKeyPattern(BSON("X" << "hashed"));
 
     const ShardsvrMoveRange req = createMoveRangeRequest(
         ChunkRange(BSON("X" << 6000000000000000000ll), BSON("X" << 9003000000000000000ll)));
@@ -1506,7 +1486,7 @@ TEST_F(MigrationChunkClonerSourceTest, CorrectDocumentsFetchedWithHasheddShardKe
     insertDocsInShardedCollection({createCollectionDocument(210)});
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IX);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IX);
 
         WriteUnitOfWork wuow(operationContext());
 
@@ -1533,12 +1513,11 @@ TEST_F(MigrationChunkClonerSourceTest, CorrectDocumentsFetchedWithHasheddShardKe
     }
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(0, arrBuilder.arrSize());
         }
 
@@ -1576,7 +1555,7 @@ TEST_F(MigrationChunkClonerSourceTest, UpdatedDocumentsFetched) {
     insertDocsInShardedCollection({createCollectionDocument(151)});
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IX);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IX);
 
         WriteUnitOfWork wuow(operationContext());
 
@@ -1592,12 +1571,11 @@ TEST_F(MigrationChunkClonerSourceTest, UpdatedDocumentsFetched) {
     }
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(0, arrBuilder.arrSize());
         }
 
@@ -1619,8 +1597,7 @@ TEST_F(MigrationChunkClonerSourceTest, UpdatedDocumentsFetched) {
 }
 
 TEST_F(MigrationChunkClonerSourceTest, UpdatedDocumentsFetchedWithHashedShardKey) {
-    const ShardKeyPattern shardKeyPattern(BSON("X"
-                                               << "hashed"));
+    const ShardKeyPattern shardKeyPattern(BSON("X" << "hashed"));
 
     const ShardsvrMoveRange req = createMoveRangeRequest(
         ChunkRange(BSON("X" << 6000000000000000000ll), BSON("X" << 9003000000000000000ll)));
@@ -1636,7 +1613,7 @@ TEST_F(MigrationChunkClonerSourceTest, UpdatedDocumentsFetchedWithHashedShardKey
     insertDocsInShardedCollection({createCollectionDocument(151)});
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IX);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IX);
 
         WriteUnitOfWork wuow(operationContext());
 
@@ -1659,12 +1636,11 @@ TEST_F(MigrationChunkClonerSourceTest, UpdatedDocumentsFetchedWithHashedShardKey
     }
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(0, arrBuilder.arrSize());
         }
 
@@ -1705,7 +1681,7 @@ TEST_F(MigrationChunkClonerSourceTest, UpdatedDocumentsFetchedWithDottedShardKey
     insertDocsInShardedCollection({createDoc(151)});
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IX);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IX);
 
         WriteUnitOfWork wuow(operationContext());
 
@@ -1719,12 +1695,11 @@ TEST_F(MigrationChunkClonerSourceTest, UpdatedDocumentsFetchedWithDottedShardKey
     }
 
     {
-        AutoGetCollection autoColl(operationContext(), kNss, MODE_IS);
+        const auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
 
         {
             BSONArrayBuilder arrBuilder;
-            ASSERT_OK(
-                cloner.nextCloneBatch(operationContext(), autoColl.getCollection(), &arrBuilder));
+            ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
             ASSERT_EQ(0, arrBuilder.arrSize());
         }
 
@@ -1743,6 +1718,93 @@ TEST_F(MigrationChunkClonerSourceTest, UpdatedDocumentsFetchedWithDottedShardKey
     }
 
     cloner.cancelClone(operationContext());
+}
+
+TEST_F(MigrationChunkClonerSourceTest, JumboChunkIndexScanWithYielding) {
+    std::vector<BSONObj> initialDocs;
+
+    // Insert enough documents to trigger jumbo chunk detection
+    const int kNumDocs = kMaxObjectPerChunk + 5000;  // More than kMaxObjectPerChunk
+    const int kDocSize = 1024;                       // 1KB per document
+    const int kLowerBound = 0;
+    const int kUpperBound = kNumDocs;
+    for (int i = kLowerBound; i < kLowerBound + kNumDocs; i++) {
+        initialDocs.push_back(createSizedCollectionDocument(i, kDocSize));
+    }
+
+    createShardedCollection(initialDocs);
+
+    // Create a move range request with forceJumbo enabled
+    ShardsvrMoveRange req =
+        createMoveRangeRequest(ChunkRange(BSON("X" << kLowerBound), BSON("X" << kUpperBound)));
+    req.setForceJumbo(ForceJumbo::kForceManual);  // Enable jumbo chunk migration
+    req.setMaxChunkSizeBytes(1024 * 1024);        // 1MB max chunk size to ensure jumbo detection
+
+    MigrationChunkClonerSource cloner(operationContext(),
+                                      req,
+                                      WriteConcernOptions(),
+                                      kShardKeyPattern,
+                                      kDonorConnStr,
+                                      kRecipientConnStr.getServers()[0]);
+
+    // Start clone - this should detect jumbo chunk and initialize jumboChunkCloneState
+    {
+        auto futureStartClone = launchAsync([&]() {
+            onCommand([&](const RemoteCommandRequest& request) { return BSON("ok" << true); });
+        });
+
+        auto status = cloner.startClone(operationContext(), UUID::gen(), _lsid, _txnNumber);
+        // The jumbo chunk should be detected but with forceJumbo, it should succeed
+        ASSERT_OK(status);
+        futureStartClone.default_timed_get();
+    }
+    int batchCount = 0;
+    {
+        BSONArrayBuilder arrBuilder;
+        auto collection = acquireCollection(operationContext(), kNss, MODE_IS);
+        ASSERT_OK(cloner.nextCloneBatch(operationContext(), collection, &arrBuilder));
+        ASSERT_TRUE(cloner.hasOngoingJumboChunkCloning());
+    }
+
+    // Keep calling nextCloneBatch until all documents are retrieved
+    while (true) {
+        BSONArrayBuilder arrBuilder;
+        // We don't need to pass an acquisition when cloning a jumbo chunk because it will restore
+        // the resources stashed in the previous nextCloneBatch.
+        ASSERT_OK(cloner.nextCloneBatch(operationContext(), boost::none, &arrBuilder));
+        int docsInBatch = arrBuilder.arrSize();
+        if (docsInBatch == 0) {
+            // No more documents
+            break;
+        }
+
+        batchCount++;
+    }
+
+    // We should have retrieved documents in multiple batches due to size limits
+    ASSERT_GT(batchCount, 1);
+
+    // Commit to destroy cloner.
+    auto futureCommit = launchAsync([&]() {
+        onCommand([&](const RemoteCommandRequest& request) {
+            BSONObjBuilder b;
+            b.append("ns", kNss.toString_forTest());
+            b.append("from", kDonorConnStr.toString());
+            b.append("fromShardId", kDonorConnStr.getSetName());
+            b.append("min", *req.getMin());
+            b.append("max", *req.getMax());
+            b.append("shardKeyPattern", kShardKeyPattern);
+            b.append("supportsCriticalSectionDuringCatchUp"_sd, true);
+            b.append("state", "steady");
+            b.append("sessionId", cloner.getSessionId().toString());
+            return b.obj();
+        });
+
+        // This is the return response for kRecvChunkCommit.
+        onCommand([&](const RemoteCommandRequest& request) { return BSON("ok" << true); });
+    });
+    ASSERT_OK(cloner.commitClone(operationContext()));
+    futureCommit.default_timed_get();
 }
 
 }  // namespace

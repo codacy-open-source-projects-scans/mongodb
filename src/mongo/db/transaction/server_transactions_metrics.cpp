@@ -27,20 +27,21 @@
  *    it in the license file.
  */
 
+#include "mongo/db/transaction/server_transactions_metrics.h"
+
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/commands/server_status/server_status.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/transaction/retryable_writes_stats.h"
+#include "mongo/db/transaction/transactions_stats_gen.h"
+#include "mongo/util/decorable.h"
+
 #include <mutex>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
-
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/db/commands/server_status.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/transaction/retryable_writes_stats.h"
-#include "mongo/db/transaction/server_transactions_metrics.h"
-#include "mongo/db/transaction/transactions_stats_gen.h"
-#include "mongo/util/decorable.h"
 
 namespace mongo {
 namespace {
@@ -198,7 +199,7 @@ public:
         TransactionsStats stats;
 
         bool includeLastCommitted = true;
-        if (configElement.type() == BSONType::Object) {
+        if (configElement.type() == BSONType::object) {
             includeLastCommitted = configElement.Obj()["includeLastCommitted"].trueValue();
         }
 

@@ -27,21 +27,21 @@
  *    it in the license file.
  */
 
+#include "mongo/db/session/internal_session_pool.h"
+
+#include "mongo/base/string_data.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/session/logical_session_id_helpers.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/clock_source.h"
+#include "mongo/util/clock_source_mock.h"
+
 #include <memory>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/db/cluster_role.h"
-#include "mongo/db/server_options.h"
-#include "mongo/db/service_context_test_fixture.h"
-#include "mongo/db/session/internal_session_pool.h"
-#include "mongo/db/session/logical_session_id_helpers.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/clock_source.h"
-#include "mongo/util/clock_source_mock.h"
 
 namespace mongo {
 namespace {
@@ -55,7 +55,7 @@ public:
 
     void setUp() override {
         ServiceContextTest::setUp();
-        serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::RouterServer};
+        serverGlobalParams.clusterRole = ClusterRole::ShardServer;
         _pool = InternalSessionPool::get(getServiceContext());
         _opCtx = makeOperationContext();
     }

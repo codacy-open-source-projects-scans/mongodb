@@ -27,23 +27,14 @@
  *    it in the license file.
  */
 
-#include <deque>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
+#include "mongo/db/exec/agg/mock_stage.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/memory_tracking/memory_usage_tracker.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_mock.h"
@@ -57,11 +48,19 @@
 #include "mongo/db/pipeline/window_function/window_function_integral.h"
 #include "mongo/db/pipeline/window_function/window_function_min_max.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/db/query/sort_pattern.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
-#include "mongo/util/memory_usage_tracker.h"
+
+#include <deque>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
@@ -73,9 +72,9 @@ public:
         std::deque<DocumentSource::GetNextResult> docs,
         const std::string& inputPath,
         WindowBounds::DocumentBased bounds) {
-        _docSource = DocumentSourceMock::createForTest(std::move(docs), getExpCtx());
+        _docStage = exec::agg::MockStage::createForTest(std::move(docs), getExpCtx());
         _iter = std::make_unique<PartitionIterator>(
-            getExpCtx().get(), _docSource.get(), &_tracker, boost::none, boost::none);
+            getExpCtx().get(), _docStage.get(), &_tracker, boost::none, boost::none);
         auto input = ExpressionFieldPath::parse(
             getExpCtx().get(), inputPath, getExpCtx()->variablesParseState);
         std::unique_ptr<WindowFunctionState> maxFunc =
@@ -89,9 +88,9 @@ public:
         const std::string& inputPath,
         const std::string& sortByPath,
         WindowBounds::DocumentBased bounds) {
-        _docSource = DocumentSourceMock::createForTest(std::move(docs), getExpCtx());
+        _docStage = exec::agg::MockStage::createForTest(std::move(docs), getExpCtx());
         _iter = std::make_unique<PartitionIterator>(
-            getExpCtx().get(), _docSource.get(), &_tracker, boost::none, boost::none);
+            getExpCtx().get(), _docStage.get(), &_tracker, boost::none, boost::none);
         auto input = ExpressionFieldPath::parse(
             getExpCtx().get(), inputPath, getExpCtx()->variablesParseState);
         auto sortBy = ExpressionFieldPath::parse(
@@ -114,7 +113,7 @@ public:
     MemoryUsageTracker _tracker{false, 100 * 1024 * 1024 /* default memory limit */};
 
 private:
-    boost::intrusive_ptr<DocumentSourceMock> _docSource;
+    boost::intrusive_ptr<exec::agg::MockStage> _docStage;
     std::unique_ptr<PartitionIterator> _iter;
 };
 
@@ -298,7 +297,7 @@ TEST_F(WindowFunctionExecRemovableDocumentTest, CanResetFunction) {
                                                                     Document{{"a", 2}, {"key", 2}},
                                                                     Document{{"a", 1}, {"key", 2}},
                                                                     Document{{"a", 1}, {"key", 3}}};
-        auto mock = DocumentSourceMock::createForTest(std::move(docs), getExpCtx());
+        auto mock = exec::agg::MockStage::createForTest(std::move(docs), getExpCtx());
         auto key = ExpressionFieldPath::createPathFromString(
             getExpCtx().get(), "key", getExpCtx()->variablesParseState);
         MemoryUsageTracker tracker{false, 100 * 1024 * 1024 /* default memory limit */};
@@ -338,7 +337,7 @@ TEST_F(WindowFunctionExecRemovableDocumentTest, CanResetFunction) {
                                                       Document{{"a", 2}, {"key", 1}},
                                                       Document{{"a", 2}, {"key", 2}},
                                                       Document{{"a", 1}, {"key", 2}}};
-        auto mockTwo = DocumentSourceMock::createForTest(std::move(docsTwo), getExpCtx());
+        auto mockTwo = exec::agg::MockStage::createForTest(std::move(docsTwo), getExpCtx());
         auto keyTwo = ExpressionFieldPath::createPathFromString(
             getExpCtx().get(), "key", getExpCtx()->variablesParseState);
         MemoryUsageTracker tracker{false, 100 * 1024 * 1024 /* default memory limit */};
@@ -372,9 +371,9 @@ TEST_F(WindowFunctionExecRemovableDocumentTest, CanResetFunction) {
 TEST_F(WindowFunctionExecRemovableDocumentTest, InputExpressionAllowedToCreateVariables) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{
         Document{{"a", 1}}, Document{{"a", 2}}, Document{{"a", 3}}};
-    auto docSource = DocumentSourceMock::createForTest(std::move(docs), getExpCtx());
+    auto docStage = exec::agg::MockStage::createForTest(std::move(docs), getExpCtx());
     auto iter = std::make_unique<PartitionIterator>(
-        getExpCtx().get(), docSource.get(), &_tracker, boost::none, boost::none);
+        getExpCtx().get(), docStage.get(), &_tracker, boost::none, boost::none);
     auto filterBSON =
         fromjson("{$filter: {input: [1, 2, 3], as: 'num', cond: {$gte: ['$$num', 2]}}}");
     auto input = ExpressionFilter::parse(

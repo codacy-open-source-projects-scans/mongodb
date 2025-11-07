@@ -27,26 +27,25 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <bitset>
-#include <fmt/format.h>
-#include <limits>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/util/str.h"
 
 #include "mongo/base/string_data.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/ctype.h"
 #include "mongo/util/hex.h"
-#include "mongo/util/str.h"
 #include "mongo/util/str_escape.h"
+
+#include <algorithm>
+#include <bitset>
+#include <limits>
+
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo::str {
 namespace {
 
-using namespace fmt::literals;
 using std::string;
 
 TEST(StringUtilsTest, Simple1) {
@@ -272,6 +271,16 @@ TEST(StringUtilsTest, ConvertDoubleToStringWithProperPrecision) {
     ASSERT_EQUALS(std::string("0.1"), convertDoubleToString(0.1 + 6E-8, 6));
 }
 
+TEST(StringUtilsTest, EqualCaseInsensitive) {
+    ASSERT(str::equalCaseInsensitive(StringData("abc"), "abc"));
+    ASSERT(str::equalCaseInsensitive(StringData("abc"), "ABC"));
+    ASSERT(str::equalCaseInsensitive(StringData("ABC"), "abc"));
+    ASSERT(str::equalCaseInsensitive(StringData("ABC"), "ABC"));
+    ASSERT(str::equalCaseInsensitive(StringData("ABC"), "AbC"));
+    ASSERT(!str::equalCaseInsensitive(StringData("ABC"), "AbCd"));
+    ASSERT(!str::equalCaseInsensitive(StringData("ABC"), "AdC"));
+}
+
 TEST(StringUtilsTest, UTF8SafeTruncation) {
     // Empty string and ASCII works like normal truncation
     ASSERT_EQUALS(UTF8SafeTruncation(""_sd, 10), ""_sd);
@@ -307,7 +316,7 @@ TEST(StringUtilsTest, GetCodePointLength) {
             continue;  // Avoid the invariant on 0b10xx'xxxx continuation bytes.
         if (n == 0)
             n = 1;  // 7-bit single byte code point.
-        ASSERT_EQUALS(getCodePointLength(static_cast<char>(i)), n) << " i:0x{:02x}"_format(i);
+        ASSERT_EQUALS(getCodePointLength(static_cast<char>(i)), n) << fmt::format(" i:0x{:02x}", i);
     }
 }
 

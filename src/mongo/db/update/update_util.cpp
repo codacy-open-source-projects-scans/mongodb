@@ -29,31 +29,31 @@
 
 #include "mongo/db/update/update_util.h"
 
-#include <boost/move/utility_core.hpp>
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/exec/mutable_bson/algorithm.h"
+#include "mongo/db/exec/mutable_bson/const_element.h"
+#include "mongo/db/exec/mutable_bson/element.h"
+#include "mongo/db/field_ref.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
+#include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/query_utils.h"
+#include "mongo/db/query/write_ops/write_ops_parsers.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/str.h"
+
 #include <cstddef>
 #include <map>
 #include <memory>
 #include <vector>
 
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/bson/mutable/algorithm.h"
-#include "mongo/bson/mutable/const_element.h"
-#include "mongo/bson/mutable/element.h"
-#include "mongo/db/field_ref.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
-#include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/query/write_ops/write_ops_parsers.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
-#include "mongo/util/str.h"
 
 namespace mongo {
 namespace update {
@@ -90,7 +90,7 @@ void generateNewDocumentFromSuppliedDoc(OperationContext* opCtx,
 
     // Extract the supplied document from the constants and validate that it is an object.
     auto suppliedDocElt = request->getUpdateConstants()->getField("new"_sd);
-    invariant(suppliedDocElt.type() == BSONType::Object);
+    invariant(suppliedDocElt.type() == BSONType::object);
     auto suppliedDoc = suppliedDocElt.embeddedObject();
 
     // The supplied doc is functionally a replacement update. We need a new driver to apply it.
@@ -127,7 +127,7 @@ void produceDocumentForUpsert(OperationContext* opCtx,
         uassertStatusOK(driver->populateDocumentWithQueryFields(
             *cq->getPrimaryMatchExpression(), immutablePaths, doc));
     } else {
-        fassert(17354, CanonicalQuery::isSimpleIdQuery(request->getQuery()));
+        fassert(17354, isSimpleIdQuery(request->getQuery()));
         // IDHACK path allows for queries of the shape {_id: 123} and {_id: {$eq: 123}}. Neither
         // case will have generated a CanonicalQuery earlier, so we have to figure out which value
         // should be in the created document here, since we cannot insert a document that looks like
@@ -166,7 +166,7 @@ void assertPathsNotArray(const mutablebson::Document& document, const FieldRefSe
                     str::stream() << "After applying the update to the document, the field '"
                                   << (*path).dottedField()
                                   << "' was found to be an array or array descendant.",
-                    !elem.ok() || elem.getType() != BSONType::Array);
+                    !elem.ok() || elem.getType() != BSONType::array);
         }
     }
 }

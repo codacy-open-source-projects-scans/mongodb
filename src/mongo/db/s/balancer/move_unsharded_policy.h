@@ -29,11 +29,13 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <functional>
-
 #include "mongo/db/s/balancer/actions_stream_policy.h"
 #include "mongo/db/s/balancer/balancer_policy.h"
+#include "mongo/util/modules.h"
+
+#include <functional>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -57,7 +59,8 @@ public:
     MigrateInfoVector selectCollectionsToMove(
         OperationContext* opCtx,
         const std::vector<ClusterStatistics::ShardStatistics>& allShards,
-        stdx::unordered_set<ShardId>* availableShards);
+        stdx::unordered_set<ShardId>* availableShards,
+        bool onlyTrackedCollection = false);
 
 private:
     FailPoint* fpBalancerShouldReturnRandomMigrations;

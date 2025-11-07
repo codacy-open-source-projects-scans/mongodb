@@ -27,17 +27,15 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_map.h>
-#include <absl/container/node_hash_set.h>
-#include <absl/meta/type_traits.h>
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
+
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/util/string_map.h"
+
+#include <algorithm>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -56,13 +54,23 @@ void LiteParsedDocumentSource::registerParser(const std::string& name,
                                               Parser parser,
                                               AllowedWithApiStrict allowedWithApiStrict,
                                               AllowedWithClientType allowedWithClientType) {
+    // It's possible an extension stage is being registered to override an existing server stage
+    // (like $vectorSearch), so we should skip re-initializing a counter. We do not assert that
+    // this is legal since we do that validation in DocumentSource::registerParser().
+    if (!parserMap.contains(name)) {
+        // Initialize a counter for this document source to track how many times it is used.
+        aggStageCounters.addMetric(name);
+    }
+
     parserMap[name] = {parser, allowedWithApiStrict, allowedWithClientType};
-    // Initialize a counter for this document source to track how many times it is used.
-    aggStageCounters.addMetric(name);
+}
+
+void LiteParsedDocumentSource::unregisterParser_forTest(const std::string& name) {
+    parserMap.erase(name);
 }
 
 std::unique_ptr<LiteParsedDocumentSource> LiteParsedDocumentSource::parse(
-    const NamespaceString& nss, const BSONObj& spec) {
+    const NamespaceString& nss, const BSONObj& spec, const LiteParserOptions& options) {
     uassert(40323,
             "A pipeline stage specification object must contain exactly one field.",
             spec.nFields() == 1);
@@ -75,7 +83,7 @@ std::unique_ptr<LiteParsedDocumentSource> LiteParsedDocumentSource::parse(
             str::stream() << "Unrecognized pipeline stage name: '" << stageName << "'",
             it != parserMap.end());
 
-    return it->second.parser(nss, specElem);
+    return it->second.parser(nss, specElem, options);
 }
 
 const LiteParsedDocumentSource::LiteParserInfo& LiteParsedDocumentSource::getInfo(

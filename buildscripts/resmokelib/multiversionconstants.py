@@ -12,13 +12,12 @@ from retry import retry
 
 import buildscripts.resmokelib.config as _config
 from buildscripts.resmokelib.multiversion.multiversion_service import (
-    MONGO_VERSION_YAML,
-    RELEASES_YAML,
     MongoReleases,
     MongoVersion,
     MultiversionService,
 )
 from buildscripts.resmokelib.multiversionsetupconstants import USE_EXISTING_RELEASES_FILE
+from buildscripts.util.expansions import get_expansion
 
 LAST_LTS = "last_lts"
 LAST_CONTINUOUS = "last_continuous"
@@ -42,7 +41,7 @@ def generate_mongo_version_file():
         raise ChildProcessError("Failed to run git describe to get the latest tag") from exp
 
     # Write the current MONGO_VERSION to a data file.
-    with open(MONGO_VERSION_YAML, "w") as mongo_version_fh:
+    with open(_config.MONGO_VERSION_FILE, "w") as mongo_version_fh:
         # E.g. res = 'r5.1.0-alpha-597-g8c345c6693\n'
         res = res[1:]  # Remove the leading "r" character.
         mongo_version_fh.write("mongo_version: " + res)
@@ -52,7 +51,7 @@ def generate_mongo_version_file():
 def get_releases_file_from_remote():
     """Get the latest releases.yml from github."""
     try:
-        with open(RELEASES_YAML, "wb") as file:
+        with open(_config.RELEASES_FILE, "wb") as file:
             response = requests.get(MASTER_RELEASES_REMOTE_FILE)
             if response.status_code != http.HTTPStatus.OK:
                 raise RuntimeError(
@@ -70,7 +69,8 @@ def get_releases_file_locally_or_fallback_to_remote():
     """Get the latest releases.yml locally or fallback to getting it from github."""
     if os.path.exists(RELEASES_LOCAL_FILE):
         LOGGER.info(f"Found releases.yml file locally: {RELEASES_LOCAL_FILE}")
-        shutil.copyfile(RELEASES_LOCAL_FILE, RELEASES_YAML)
+        shutil.copyfile(RELEASES_LOCAL_FILE, _config.RELEASES_FILE)
+
     else:
         LOGGER.warning(f"Could not find releases.yml file locally: {RELEASES_LOCAL_FILE}")
         get_releases_file_from_remote()
@@ -78,7 +78,12 @@ def get_releases_file_locally_or_fallback_to_remote():
 
 def generate_releases_file():
     """Generate the releases constants file."""
-    if _config.EVERGREEN_TASK_ID:
+
+    # If we are not in master, we want to grab the releases file from master as a source of truth.
+    # If we are on master in CI, we can grab it locally to accommodate any changes made for testing.
+    # On older versions we use the master releases.yml file to ensure we do not run multiversion
+    # testing against eol versions.
+    if _config.EVERGREEN_TASK_ID and get_expansion("branch_name") != "master":
         get_releases_file_from_remote()
     else:
         get_releases_file_locally_or_fallback_to_remote()
@@ -86,8 +91,12 @@ def generate_releases_file():
 
 def in_git_root_dir():
     """Return True if we are in the root of a git directory."""
-    if call(["git", "branch"], stderr=STDOUT, stdout=DEVNULL) != 0:
-        # We are not in a git directory.
+    try:
+        if call(["git", "branch"], stderr=STDOUT, stdout=DEVNULL) != 0:
+            # We are not in a git directory.
+            return False
+    except FileNotFoundError:
+        # Git is not even installed.
         return False
 
     git_root_dir = os.path.realpath(
@@ -104,7 +113,7 @@ def in_spawn_host():
     return False
 
 
-if in_git_root_dir() and not in_spawn_host():
+if (in_git_root_dir() or "BUILD_WORKSPACE_DIRECTORY" in os.environ) and not in_spawn_host():
     generate_mongo_version_file()
 else:
     LOGGER.info("Skipping generating mongo version file since we're not in the root of a git repo")
@@ -125,8 +134,8 @@ def evg_project_str(version):
 
 
 multiversion_service = MultiversionService(
-    mongo_version=MongoVersion.from_yaml_file(MONGO_VERSION_YAML),
-    mongo_releases=MongoReleases.from_yaml_file(RELEASES_YAML),
+    mongo_version=MongoVersion.from_yaml_file(_config.MONGO_VERSION_FILE),
+    mongo_releases=MongoReleases.from_yaml_file(_config.RELEASES_FILE),
 )
 
 version_constants = multiversion_service.calculate_version_constants()

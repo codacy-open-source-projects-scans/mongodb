@@ -27,12 +27,6 @@
  *    it in the license file.
  */
 
-#include <array>
-#include <benchmark/benchmark.h>
-#include <cstddef>
-#include <cstdint>
-#include <vector>
-
 #include "mongo/base/data_range.h"
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
@@ -40,6 +34,13 @@
 #include "mongo/crypto/fle_crypto_types.h"
 #include "mongo/crypto/sha256_block.h"
 #include "mongo/util/assert_util.h"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+#include <benchmark/benchmark.h>
 
 namespace mongo {
 namespace {
@@ -69,12 +70,35 @@ void BM_HMAC_SHA256(benchmark::State& state) {
 
         // This code gets timed
         for (size_t j = 0; j < N; ++j) {
-            FLEUtil::prf(hmacKey, ++i);
+            HmacContext hmacCtx;
+            FLEUtil::prf(&hmacCtx, hmacKey, ++i);
         }
     }
 }
 
 BENCHMARK(BM_HMAC_SHA256)->Arg(1)->Arg(100)->Arg(1000)->Arg(10000)->Unit(benchmark::kMillisecond);
+
+void BM_HMAC_SHA256_High_Perf(benchmark::State& state) {
+    // Perform setup here
+    uint64_t i = 0;
+
+    uint64_t N = state.range(0);
+
+    HmacContext hmacCtx;
+    for (auto _ : state) {
+        // This code gets timed
+        for (size_t j = 0; j < N; ++j) {
+            FLEUtil::prf(&hmacCtx, hmacKey, ++i);
+        }
+    }
+}
+
+BENCHMARK(BM_HMAC_SHA256_High_Perf)
+    ->Arg(1)
+    ->Arg(100)
+    ->Arg(1000)
+    ->Arg(10000)
+    ->Unit(benchmark::kMillisecond);
 
 
 void BM_SHA256(benchmark::State& state) {

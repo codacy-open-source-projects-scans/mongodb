@@ -14,21 +14,23 @@
  *   requires_fcv_80,
  *   # TODO SERVER-89461 Investigate why test using huge batch size timeout in suites with balancer
  *   assumes_balancer_off,
+ *   multiversion_incompatible,
  * ]
  */
-import {
-    cursorEntryValidator,
-    cursorSizeValidator,
-    summaryFieldsValidator
-} from "jstests/libs/bulk_write_utils.js";
+import {cursorEntryValidator, cursorSizeValidator, summaryFieldsValidator} from "jstests/libs/bulk_write_utils.js";
 
-var coll = db.getCollection("coll");
-var coll1 = db.getCollection("coll1");
+const serverStatus = assert.commandWorked(db.getSiblingDB("admin").runCommand({serverStatus: 1}));
+const currVersion = serverStatus.version;
+const is82OrHigher =
+    MongoRunner.compareBinVersions(MongoRunner.getBinVersionFor(currVersion), MongoRunner.getBinVersionFor("8.2")) >= 1;
+
+let coll = db.getCollection("coll");
+let coll1 = db.getCollection("coll1");
 coll.drop();
 coll1.drop();
 
-var maxWriteBatchSize = db.hello().maxWriteBatchSize;
-var insertOp = {insert: 0, document: {_id: 1, skey: "MongoDB"}};
+let maxWriteBatchSize = db.hello().maxWriteBatchSize;
+let insertOp = {insert: 0, document: {_id: 1, skey: "MongoDB"}};
 
 // Make sure bulkWrite at maxWriteBatchSize is okay
 let ops = [];
@@ -36,7 +38,7 @@ for (var i = 0; i < maxWriteBatchSize; ++i) {
     ops.push(insertOp);
 }
 
-var res = db.adminCommand({
+let res = db.adminCommand({
     bulkWrite: 1,
     ops: ops,
     nsInfo: [{ns: "test.coll"}],
@@ -66,89 +68,99 @@ if (!ErrorCodes.isInterruption(res.code)) {
 }
 
 // Make sure invalid fields are not accepted
-assert.commandFailedWithCode(db.adminCommand({
-    bulkWrite: 1,
-    ops: [{insert: 0, document: {skey: "MongoDB"}}],
-    nsInfo: [{ns: "test.coll"}],
-    cursor: {batchSize: 1024},
-    bypassDocumentValidation: true,
-    ordered: false,
-    fooField: 0
-}),
-                             [ErrorCodes.IDLUnknownField]);
+assert.commandFailedWithCode(
+    db.adminCommand({
+        bulkWrite: 1,
+        ops: [{insert: 0, document: {skey: "MongoDB"}}],
+        nsInfo: [{ns: "test.coll"}],
+        cursor: {batchSize: 1024},
+        bypassDocumentValidation: true,
+        ordered: false,
+        fooField: 0,
+    }),
+    [ErrorCodes.IDLUnknownField],
+);
 
 assert.eq(coll.find().itcount(), 0);
 assert.eq(coll1.find().itcount(), 0);
 
 // Make sure we fail if index out of range of nsInfo
-assert.commandFailedWithCode(db.adminCommand({
-    bulkWrite: 1,
-    ops: [{insert: 2, document: {skey: "MongoDB"}}, {insert: 0, document: {skey: "MongoDB"}}],
-    nsInfo: [{ns: "test.coll"}, {ns: "test.coll1"}]
-}),
-                             [ErrorCodes.BadValue]);
+assert.commandFailedWithCode(
+    db.adminCommand({
+        bulkWrite: 1,
+        ops: [
+            {insert: 2, document: {skey: "MongoDB"}},
+            {insert: 0, document: {skey: "MongoDB"}},
+        ],
+        nsInfo: [{ns: "test.coll"}, {ns: "test.coll1"}],
+    }),
+    [ErrorCodes.BadValue],
+);
 
 assert.eq(coll.find().itcount(), 0);
 assert.eq(coll1.find().itcount(), 0);
 
 // Missing ops
-assert.commandFailedWithCode(db.adminCommand({bulkWrite: 1, nsInfo: [{ns: "mydb.coll"}]}),
-                             [ErrorCodes.IDLFailedToParse]);
+assert.commandFailedWithCode(db.adminCommand({bulkWrite: 1, nsInfo: [{ns: "mydb.coll"}]}), [
+    ErrorCodes.IDLFailedToParse,
+]);
 
 assert.eq(coll.find().itcount(), 0);
 assert.eq(coll1.find().itcount(), 0);
 
 // Missing nsInfo
-assert.commandFailedWithCode(
-    db.adminCommand({bulkWrite: 1, ops: [{insert: 0, document: {skey: "MongoDB"}}]}),
-    [ErrorCodes.IDLFailedToParse]);
+assert.commandFailedWithCode(db.adminCommand({bulkWrite: 1, ops: [{insert: 0, document: {skey: "MongoDB"}}]}), [
+    ErrorCodes.IDLFailedToParse,
+]);
 
 assert.eq(coll.find().itcount(), 0);
 assert.eq(coll1.find().itcount(), 0);
 
 // Test valid arguments with invalid values
-assert.commandFailedWithCode(db.adminCommand({
-    bulkWrite: 1,
-    ops: [{insert: "test", document: {skey: "MongoDB"}}],
-    nsInfo: [{ns: "test.coll"}]
-}),
-                             [ErrorCodes.TypeMismatch]);
+assert.commandFailedWithCode(
+    db.adminCommand({
+        bulkWrite: 1,
+        ops: [{insert: "test", document: {skey: "MongoDB"}}],
+        nsInfo: [{ns: "test.coll"}],
+    }),
+    [ErrorCodes.TypeMismatch],
+);
 
 assert.eq(coll.find().itcount(), 0);
 assert.eq(coll1.find().itcount(), 0);
 
 assert.commandFailedWithCode(
-    db.adminCommand(
-        {bulkWrite: 1, ops: [{insert: 0, document: "test"}], nsInfo: [{ns: "test.coll"}]}),
-    [ErrorCodes.TypeMismatch]);
+    db.adminCommand({bulkWrite: 1, ops: [{insert: 0, document: "test"}], nsInfo: [{ns: "test.coll"}]}),
+    [ErrorCodes.TypeMismatch],
+);
 
 assert.eq(coll.find().itcount(), 0);
 assert.eq(coll1.find().itcount(), 0);
 
 assert.commandFailedWithCode(
-    db.adminCommand(
-        {bulkWrite: 1, ops: [{insert: 0, document: {skey: "MongoDB"}}], nsInfo: ["test"]}),
-    [ErrorCodes.TypeMismatch]);
+    db.adminCommand({bulkWrite: 1, ops: [{insert: 0, document: {skey: "MongoDB"}}], nsInfo: ["test"]}),
+    [ErrorCodes.TypeMismatch],
+);
+
+assert.eq(coll.find().itcount(), 0);
+assert.eq(coll1.find().itcount(), 0);
+
+assert.commandFailedWithCode(db.adminCommand({bulkWrite: 1, ops: "test", nsInfo: [{ns: "test.coll"}]}), [
+    ErrorCodes.TypeMismatch,
+]);
 
 assert.eq(coll.find().itcount(), 0);
 assert.eq(coll1.find().itcount(), 0);
 
 assert.commandFailedWithCode(
-    db.adminCommand({bulkWrite: 1, ops: "test", nsInfo: [{ns: "test.coll"}]}),
-    [ErrorCodes.TypeMismatch]);
+    db.adminCommand({bulkWrite: 1, ops: [{insert: 0, document: {skey: "MongoDB"}}], nsInfo: "test"}),
+    [ErrorCodes.TypeMismatch],
+);
 
 assert.eq(coll.find().itcount(), 0);
 assert.eq(coll1.find().itcount(), 0);
 
-assert.commandFailedWithCode(
-    db.adminCommand(
-        {bulkWrite: 1, ops: [{insert: 0, document: {skey: "MongoDB"}}], nsInfo: "test"}),
-    [ErrorCodes.TypeMismatch]);
-
-assert.eq(coll.find().itcount(), 0);
-assert.eq(coll1.find().itcount(), 0);
-
-var coll2 = db.getCollection("coll2");
+let coll2 = db.getCollection("coll2");
 coll2.drop();
 
 // Test update continues on error with ordered:false.
@@ -161,18 +173,15 @@ res = db.adminCommand({
         {update: 1, filter: {_id: 1}, updateMods: {$set: {skey: "MongoDB2"}}, upsert: true},
     ],
     nsInfo: [{ns: "test.coll2"}, {ns: "test.coll"}],
-    ordered: false
+    ordered: false,
 });
 
 assert.commandWorked(res);
 cursorSizeValidator(res, 2);
-summaryFieldsValidator(
-    res, {nErrors: 1, nInserted: 0, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 1});
+summaryFieldsValidator(res, {nErrors: 1, nInserted: 0, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 1});
 
-cursorEntryValidator(res.cursor.firstBatch[0],
-                     {ok: 0, idx: 0, n: 0, nModified: 0, code: ErrorCodes.ImmutableField});
-cursorEntryValidator(res.cursor.firstBatch[1],
-                     {ok: 1, idx: 1, n: 1, nModified: 0, upserted: {_id: 1}});
+cursorEntryValidator(res.cursor.firstBatch[0], {ok: 0, idx: 0, n: 0, nModified: 0, code: ErrorCodes.ImmutableField});
+cursorEntryValidator(res.cursor.firstBatch[1], {ok: 1, idx: 1, n: 1, nModified: 0, upserted: {_id: 1}});
 coll.drop();
 coll2.drop();
 
@@ -191,24 +200,22 @@ res = db.adminCommand({
 
 assert.commandWorked(res);
 cursorSizeValidator(res, 1);
-summaryFieldsValidator(
-    res, {nErrors: 1, nInserted: 0, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
+summaryFieldsValidator(res, {nErrors: 1, nInserted: 0, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
 
-cursorEntryValidator(res.cursor.firstBatch[0],
-                     {ok: 0, idx: 0, n: 0, nModified: 0, code: ErrorCodes.ImmutableField});
+cursorEntryValidator(res.cursor.firstBatch[0], {ok: 0, idx: 0, n: 0, nModified: 0, code: ErrorCodes.ImmutableField});
 coll.drop();
 coll2.drop();
 
 // Test fixDocumentForInsert works properly by erroring out on >16MB size insert.
-var targetSize = (16 * 1024 * 1024) + 1;
-var doc = {_id: new ObjectId(), value: ''};
+let targetSize = 16 * 1024 * 1024 + 1;
+let doc = {_id: new ObjectId(), value: ""};
 
-var size = Object.bsonsize(doc);
+let size = Object.bsonsize(doc);
 assert.gte(targetSize, size);
 
 // Set 'value' as a string with enough characters to make the whole document 'targetSize'
 // bytes long.
-doc.value = new Array(targetSize - size + 1).join('x');
+doc.value = "x".repeat(targetSize - size);
 assert.eq(targetSize, Object.bsonsize(doc));
 
 // Testing ordered:false continues on with other ops when fixDocumentForInsert fails.
@@ -220,13 +227,12 @@ res = db.adminCommand({
         {insert: 0, document: {_id: 2, skey: "MongoDB2"}},
     ],
     nsInfo: [{ns: "test.coll"}],
-    ordered: false
+    ordered: false,
 });
 
 assert.commandWorked(res);
 cursorSizeValidator(res, 3);
-summaryFieldsValidator(
-    res, {nErrors: 1, nInserted: 2, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
+summaryFieldsValidator(res, {nErrors: 1, nInserted: 2, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
 
 assert.eq(res.cursor.id, 0);
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, n: 1, idx: 0});
@@ -235,11 +241,9 @@ cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, n: 1, idx: 0});
 // In some cases we may see the javascript execution interrupted because it takes longer than
 // our default time limit, so we allow that possibility.
 try {
-    cursorEntryValidator(res.cursor.firstBatch[1],
-                         {ok: 0, n: 0, idx: 1, code: ErrorCodes.BadValue});
+    cursorEntryValidator(res.cursor.firstBatch[1], {ok: 0, n: 0, idx: 1, code: ErrorCodes.BSONObjectTooLarge});
 } catch {
-    cursorEntryValidator(res.cursor.firstBatch[1],
-                         {ok: 0, n: 0, idx: 1, code: ErrorCodes.Interrupted});
+    cursorEntryValidator(res.cursor.firstBatch[1], {ok: 0, n: 0, idx: 1, code: ErrorCodes.Interrupted});
 }
 cursorEntryValidator(res.cursor.firstBatch[2], {ok: 1, n: 1, idx: 2});
 
@@ -254,13 +258,12 @@ res = db.adminCommand({
         {insert: 0, document: {_id: 2, skey: "MongoDB2"}},
     ],
     nsInfo: [{ns: "test.coll"}],
-    ordered: true
+    ordered: true,
 });
 
 assert.commandWorked(res);
 cursorSizeValidator(res, 2);
-summaryFieldsValidator(
-    res, {nErrors: 1, nInserted: 1, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
+summaryFieldsValidator(res, {nErrors: 1, nInserted: 1, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
 
 assert.eq(res.cursor.id, 0);
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, n: 1, idx: 0});
@@ -269,11 +272,9 @@ cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, n: 1, idx: 0});
 // In some cases we may see the javascript execution interrupted because it takes longer than
 // our default time limit, so we allow that possibility.
 try {
-    cursorEntryValidator(res.cursor.firstBatch[1],
-                         {ok: 0, n: 0, idx: 1, code: ErrorCodes.BadValue});
+    cursorEntryValidator(res.cursor.firstBatch[1], {ok: 0, n: 0, idx: 1, code: ErrorCodes.BSONObjectTooLarge});
 } catch {
-    cursorEntryValidator(res.cursor.firstBatch[1],
-                         {ok: 0, n: 0, idx: 1, code: ErrorCodes.Interrupted});
+    cursorEntryValidator(res.cursor.firstBatch[1], {ok: 0, n: 0, idx: 1, code: ErrorCodes.Interrupted});
 }
 
 coll.drop();
@@ -284,15 +285,14 @@ res = db.adminCommand({
     ops: [
         {insert: 0, document: {_id: 1, skey: "MongoDB"}},
         {insert: 0, document: {_id: 1, skey: "MongoDB"}},
-        {insert: 1, document: {skey: "MongoDB"}}
+        {insert: 1, document: {skey: "MongoDB"}},
     ],
-    nsInfo: [{ns: "test.coll"}, {ns: "test.coll1"}]
+    nsInfo: [{ns: "test.coll"}, {ns: "test.coll1"}],
 });
 
 assert.commandWorked(res);
 cursorSizeValidator(res, 2);
-summaryFieldsValidator(
-    res, {nErrors: 1, nInserted: 1, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
+summaryFieldsValidator(res, {nErrors: 1, nInserted: 1, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
 
 assert.eq(res.cursor.id, 0);
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, n: 1, idx: 0});
@@ -312,16 +312,15 @@ res = db.adminCommand({
     ops: [
         {insert: 0, document: {_id: 1, skey: "MongoDB"}},
         {insert: 0, document: {_id: 1, skey: "MongoDB"}},
-        {insert: 1, document: {skey: "MongoDB"}}
+        {insert: 1, document: {skey: "MongoDB"}},
     ],
     nsInfo: [{ns: "test.coll"}, {ns: "test.coll1"}],
-    ordered: false
+    ordered: false,
 });
 
 assert.commandWorked(res);
 cursorSizeValidator(res, 3);
-summaryFieldsValidator(
-    res, {nErrors: 1, nInserted: 2, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
+summaryFieldsValidator(res, {nErrors: 1, nInserted: 2, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
 
 assert.eq(res.cursor.id, 0);
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, n: 1, idx: 0});
@@ -357,44 +356,59 @@ res = db.adminCommand({
         {update: 0, filter: {_id: 1}, updateMods: {$set: {skey: "MongoDB2"}}},
         {update: 0, filter: {_id: 1}, updateMods: {$set: {_id: 2}}},
     ],
-    nsInfo: [{ns: "test.coll"}]
-});
-
-assert.commandWorked(res);
-cursorSizeValidator(res, 3);
-summaryFieldsValidator(
-    res, {nErrors: 1, nInserted: 1, nDeleted: 0, nMatched: 1, nModified: 1, nUpserted: 0});
-
-cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, idx: 0, n: 1});
-cursorEntryValidator(res.cursor.firstBatch[1], {ok: 1, idx: 1, n: 1, nModified: 1});
-cursorEntryValidator(res.cursor.firstBatch[2],
-                     {ok: 0, idx: 2, n: 0, nModified: 0, code: ErrorCodes.ImmutableField});
-coll.drop();
-
-coll.insert({skey: "MongoDB"});
-// Test constants is not supported on non-pipeline update.
-res = db.adminCommand({
-    bulkWrite: 1,
-    ops: [
-        {
-            update: 0,
-            filter: {$expr: {$eq: ["$skey", "MongoDB"]}},
-            updateMods: {skey: "$$targetKey"},
-            constants: {targetKey: "MongoDB2"}
-        },
-    ],
     nsInfo: [{ns: "test.coll"}],
 });
 
 assert.commandWorked(res);
-cursorSizeValidator(res, 1);
-summaryFieldsValidator(
-    res, {nErrors: 1, nInserted: 0, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
+cursorSizeValidator(res, 3);
+summaryFieldsValidator(res, {nErrors: 1, nInserted: 1, nDeleted: 0, nMatched: 1, nModified: 1, nUpserted: 0});
 
-cursorEntryValidator(res.cursor.firstBatch[0], {ok: 0, idx: 0, n: 0, nModified: 0, code: 51198});
-assert.eq(res.cursor.firstBatch[0].errmsg,
-          "Constant values may only be specified for pipeline updates");
+cursorEntryValidator(res.cursor.firstBatch[0], {ok: 1, idx: 0, n: 1});
+cursorEntryValidator(res.cursor.firstBatch[1], {ok: 1, idx: 1, n: 1, nModified: 1});
+cursorEntryValidator(res.cursor.firstBatch[2], {ok: 0, idx: 2, n: 0, nModified: 0, code: ErrorCodes.ImmutableField});
+coll.drop();
 
+coll.insert({skey: "MongoDB"});
+
+// Test constants is not supported on non-pipeline update.
+// In all versions with a value that's present ("MongoDB").
+let keysToTest = ["MongoDB"];
+if (is82OrHigher) {
+    // In 8.2 and higher, also test with a value that's not present ("NotPresent") and that is a
+    // no-op update. 8.2 and higher react with error 51198 ("Constant values may only be specified
+    // for pipeline updates"), but versions before that will not validate the operation and simply
+    // do nothing.
+    keysToTest.push("NotPresent");
+}
+keysToTest.forEach((value) => {
+    res = db.adminCommand({
+        bulkWrite: 1,
+        ops: [
+            {
+                update: 0,
+                filter: {$expr: {$eq: ["$skey", value]}},
+                updateMods: {skey: "$$targetKey"},
+                constants: {targetKey: "MongoDB2"},
+            },
+        ],
+        nsInfo: [{ns: "test.coll"}],
+    });
+
+    assert.commandWorked(res);
+    cursorSizeValidator(res, 1);
+    summaryFieldsValidator(res, {nErrors: 1, nInserted: 0, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
+
+    cursorEntryValidator(res.cursor.firstBatch[0], {ok: 0, idx: 0, n: 0, nModified: 0, code: 51198});
+
+    // TODO SERVER-99035: Re-enable exact match assertion and delete partial match assertion.
+    // Currently the TXN API returns a CommitResult struct which pre-pends "Command error committing
+    // internal transaction" even for transactions that failed before committing. SERVER-99035 will
+    // refactor it so that a general struct is returned instead that will not prepend that message.
+    //
+    // assert.eq(res.cursor.firstBatch[0].errmsg,
+    //           "Constant values may only be specified for pipeline updates");
+    assert(res.cursor.firstBatch[0].errmsg.includes("Constant values may only be specified for pipeline updates"));
+});
 coll.drop();
 
 // Test Upsert = True with UpsertSupplied = True (no match and constants.new is missing)
@@ -410,32 +424,35 @@ res = db.adminCommand({
             constants: {},
         },
     ],
-    nsInfo: [{ns: "test.coll"}]
+    nsInfo: [{ns: "test.coll"}],
 });
 
 assert.commandWorked(res);
 cursorSizeValidator(res, 1);
-summaryFieldsValidator(
-    res, {nErrors: 1, nInserted: 0, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
+summaryFieldsValidator(res, {nErrors: 1, nInserted: 0, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
 
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 0, idx: 0, n: 0, nModified: 0, code: 9});
-assert.eq(res.cursor.firstBatch[0].errmsg,
-          "the parameter 'upsertSupplied' is set to 'true', but no document was supplied");
+assert.eq(
+    res.cursor.firstBatch[0].errmsg,
+    "the parameter 'upsertSupplied' is set to 'true', but no document was supplied",
+);
 
 coll.drop();
 
 // Test errorsOnly with a failure.
 res = db.adminCommand({
     bulkWrite: 1,
-    ops: [{insert: 0, document: {_id: 1}}, {insert: 0, document: {_id: 1}}],
+    ops: [
+        {insert: 0, document: {_id: 1}},
+        {insert: 0, document: {_id: 1}},
+    ],
     nsInfo: [{ns: "test.coll"}],
-    errorsOnly: true
+    errorsOnly: true,
 });
 
 assert.commandWorked(res, "bulkWrite command response: " + tojson(res));
 cursorSizeValidator(res, 1);
-summaryFieldsValidator(
-    res, {nErrors: 1, nInserted: 1, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
+summaryFieldsValidator(res, {nErrors: 1, nInserted: 1, nDeleted: 0, nMatched: 0, nModified: 0, nUpserted: 0});
 
 assert(res.cursor.id == 0, "bulkWrite command response: " + tojson(res));
 cursorEntryValidator(res.cursor.firstBatch[0], {ok: 0, n: 0, idx: 1, code: 11000});
@@ -448,12 +465,10 @@ coll.drop();
 res = db.adminCommand({
     explain: {
         bulkWrite: 1,
-        ops: [
-            {update: 0, filter: {_id: 1}, updateMods: {$set: {skey: "MongoDB2"}}, upsert: true},
-        ],
+        ops: [{update: 0, filter: {_id: 1}, updateMods: {$set: {skey: "MongoDB2"}}, upsert: true}],
         nsInfo: [{ns: "test.coll"}],
-        ordered: false
-    }
+        ordered: false,
+    },
 });
 assert.commandWorked(res);
 
@@ -469,12 +484,10 @@ coll.insert({_id: 1, skey: "MongoDB"});
 res = db.adminCommand({
     explain: {
         bulkWrite: 1,
-        ops: [
-            {update: 0, filter: {_id: 1}, updateMods: {$set: {skey: "MongoDB2"}}},
-        ],
+        ops: [{update: 0, filter: {_id: 1}, updateMods: {$set: {skey: "MongoDB2"}}}],
         nsInfo: [{ns: "test.coll"}],
-        ordered: false
-    }
+        ordered: false,
+    },
 });
 assert.commandWorked(res);
 
@@ -489,12 +502,10 @@ coll.insert({_id: 1});
 res = db.adminCommand({
     explain: {
         bulkWrite: 1,
-        ops: [
-            {delete: 0, filter: {_id: 1}},
-        ],
+        ops: [{delete: 0, filter: {_id: 1}}],
         nsInfo: [{ns: "test.coll"}],
-        ordered: false
-    }
+        ordered: false,
+    },
 });
 assert.commandWorked(res);
 
@@ -509,12 +520,10 @@ coll.insert({_id: 2, skey: "MongoDB"});
 res = db.adminCommand({
     explain: {
         bulkWrite: 1,
-        ops: [
-            {delete: 0, filter: {skey: "MongoDB"}, multi: true},
-        ],
+        ops: [{delete: 0, filter: {skey: "MongoDB"}, multi: true}],
         nsInfo: [{ns: "test.coll"}],
-        ordered: false
-    }
+        ordered: false,
+    },
 });
 assert.commandWorked(res);
 

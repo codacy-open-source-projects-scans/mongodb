@@ -36,11 +36,9 @@
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/executor/task_executor_cursor.h"
 #include "mongo/executor/task_executor_cursor_test_fixture.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/thread_assertion_monitor.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
@@ -115,7 +113,8 @@ public:
             // If we have no starting batchSize or idLookupMetrics, use the default GetMoreStrategy.
             mongotGetMoreStrategy = std::make_unique<MongotTaskExecutorCursorGetMoreStrategy>();
         }
-        return Base::makeTec(rcr, {std::move(mongotGetMoreStrategy)});
+        return Base::makeTec(rcr,
+                             {gPinTaskExecCursorConns.load(), std::move(mongotGetMoreStrategy)});
     }
 
     bool hasReadyRequests() {
@@ -138,8 +137,7 @@ public:
             CursorId cursorId = 1;
             RemoteCommandRequest rcr(HostAndPort("localhost"),
                                      DatabaseName::createDatabaseName_forTest(boost::none, "test"),
-                                     BSON("search"
-                                          << "foo"),
+                                     BSON("search" << "foo"),
                                      opCtx.get());
 
 
@@ -219,8 +217,7 @@ public:
             CursorId cursorId = 1;
             RemoteCommandRequest rcr(HostAndPort("localhost"),
                                      DatabaseName::createDatabaseName_forTest(boost::none, "test"),
-                                     BSON("search"
-                                          << "foo"),
+                                     BSON("search" << "foo"),
                                      opCtx.get());
 
             // Mock lookup id metrics as batches are processed.
@@ -308,8 +305,7 @@ public:
             CursorId cursorId = 1;
             RemoteCommandRequest rcr(HostAndPort("localhost"),
                                      DatabaseName::createDatabaseName_forTest(boost::none, "test"),
-                                     BSON("search"
-                                          << "foo"),
+                                     BSON("search" << "foo"),
                                      opCtx.get());
             // Construction of the TaskExecutorCursor enqueues a request in the
             // NetworkInterfaceMock.
@@ -376,8 +372,7 @@ public:
             CursorId cursorId = 1;
             RemoteCommandRequest rcr(HostAndPort("localhost"),
                                      DatabaseName::createDatabaseName_forTest(boost::none, "test"),
-                                     BSON("search"
-                                          << "foo"),
+                                     BSON("search" << "foo"),
                                      opCtx.get());
             // Construction of the TaskExecutorCursor enqueues a request in the
             // NetworkInterfaceMock.
@@ -444,8 +439,7 @@ public:
             CursorId cursorId = 1;
             RemoteCommandRequest rcr(HostAndPort("localhost"),
                                      DatabaseName::createDatabaseName_forTest(boost::none, "test"),
-                                     BSON("search"
-                                          << "foo"),
+                                     BSON("search" << "foo"),
                                      opCtx.get());
             // Construction of the TaskExecutorCursor enqueues a request in the
             // NetworkInterfaceMock.
@@ -511,8 +505,7 @@ public:
             CursorId cursorId = 1;
             RemoteCommandRequest rcr(HostAndPort("localhost"),
                                      DatabaseName::createDatabaseName_forTest(boost::none, "test"),
-                                     BSON("search"
-                                          << "foo"),
+                                     BSON("search" << "foo"),
                                      opCtx.get());
             // Construction of the TaskExecutorCursor enqueues a request in the
             // NetworkInterfaceMock.
@@ -594,8 +587,7 @@ public:
         CursorId cursorId = 1;
         RemoteCommandRequest rcr(HostAndPort("localhost"),
                                  DatabaseName::createDatabaseName_forTest(boost::none, "test"),
-                                 BSON("search"
-                                      << "foo"),
+                                 BSON("search" << "foo"),
                                  opCtx.get());
         // Use NeedAll bounds to trigger pre-fetching for all batches.
         auto tec = makeMongotCursor(
@@ -645,8 +637,7 @@ public:
             CursorId cursorId = 1;
             RemoteCommandRequest rcr(HostAndPort("localhost"),
                                      DatabaseName::createDatabaseName_forTest(boost::none, "test"),
-                                     BSON("search"
-                                          << "foo"),
+                                     BSON("search" << "foo"),
                                      opCtx.get());
             // Use the default mongot cursor behavior, which should only start pre-fetching after
             // the third batch is received.
@@ -708,8 +699,7 @@ public:
             CursorId cursorId = 1;
             RemoteCommandRequest rcr(HostAndPort("localhost"),
                                      DatabaseName::createDatabaseName_forTest(boost::none, "test"),
-                                     BSON("search"
-                                          << "foo"),
+                                     BSON("search" << "foo"),
                                      opCtx.get());
 
             // Mock lookup id metrics as batches are processed.
@@ -886,6 +876,25 @@ TEST_F(NonPinningMongotCursorTestFixture,
        NonStoredSourceExtractableLimitNotAllDocsFoundInLookupTest) {
     NonStoredSourceExtractableLimitNotAllDocsFoundInLookupTest();
 }
+
+TEST(PinConnectionSettingTest, AlwaysSetWithGRPC) {
+    RAIIServerParameterControllerForTest globalPinConn("pinTaskExecCursorConns", false);
+    RAIIServerParameterControllerForTest grpcForSearch("useGrpcForSearch", true);
+    ASSERT_TRUE(mongot_cursor::shouldPinConnection());
+}
+
+TEST(PinConnectionSettingTest, SetFromPinTaskExecCursorConns) {
+    RAIIServerParameterControllerForTest globalPinConn("pinTaskExecCursorConns", true);
+    RAIIServerParameterControllerForTest grpcForSearch("useGrpcForSearch", false);
+    ASSERT_TRUE(mongot_cursor::shouldPinConnection());
+}
+
+TEST(PinConnectionSettingTest, NeitherParamSet) {
+    RAIIServerParameterControllerForTest globalPinConn("pinTaskExecCursorConns", false);
+    RAIIServerParameterControllerForTest grpcForSearch("useGrpcForSearch", false);
+    ASSERT_FALSE(mongot_cursor::shouldPinConnection());
+}
+
 }  // namespace
 }  // namespace executor
 }  // namespace mongo

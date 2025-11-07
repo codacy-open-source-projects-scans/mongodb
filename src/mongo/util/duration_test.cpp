@@ -27,17 +27,16 @@
  *    it in the license file.
  */
 
-#include <fmt/format.h>
+#include "mongo/util/duration.h"
+
+#include "mongo/unittest/unittest.h"
+
 #include <memory>
 
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/duration.h"
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
-
-using namespace fmt::literals;
 
 // The DurationTestSameType Compare* tests server to check the implementation of the comparison
 // operators as well as the compare() method, and so sometimes must explicitly check ASSERT_FALSE(v1
@@ -262,10 +261,10 @@ auto validateDeduce(In in, Equivalent equivalent) {
             return deduceChronoDuration<Period>(in);
         }
     }();
-    ASSERT((std::is_same_v<decltype(deduced), Equivalent>)) << "expected:{}got:{}"_format(
-        demangleName(typeid(Equivalent)), demangleName(typeid(deduced)));
+    ASSERT((std::is_same_v<decltype(deduced), Equivalent>)) << fmt::format(
+        "expected:{}got:{}", demangleName(typeid(Equivalent)), demangleName(typeid(deduced)));
     ASSERT_EQ(deduced.count(), equivalent.count())
-        << "in:{}, equivalent:{}, deduced:{}"_format(in, equivalent.count(), deduced.count());
+        << fmt::format("in:{}, equivalent:{}, deduced:{}", in, equivalent.count(), deduced.count());
 }
 
 TEST(DeduceChronoDuration, DefaultPeriod) {

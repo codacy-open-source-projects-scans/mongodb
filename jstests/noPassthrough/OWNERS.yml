@@ -18,3 +18,9 @@ filters:
   - "*utf8_paths*":
     approvers:
       - 10gen/server-programmability
+  - "*failcommand*":
+    approvers:
+      - 10gen/server-programmability
+  - "delinquent*":
+    approvers:
+      - 10gen/server-workload-resilience

@@ -5,10 +5,7 @@
  * @tags: [
  *   uses_atclustertime,
  *   requires_fcv_80,
- *   featureFlagReshardingImprovements,
  *   featureFlagUnshardCollection,
- *   # TODO (SERVER-87812) Remove multiversion_incompatible tag
- *   multiversion_incompatible
  * ]
  */
 import {ReshardingTest} from "jstests/sharding/libs/resharding_test_fixture.js";
@@ -25,7 +22,8 @@ const sourceCollection = reshardingTest.createShardedCollection({
 });
 
 const recipientShardNames = reshardingTest.recipientShardNames;
-reshardingTest.withUnshardCollectionInBackground(  //
+reshardingTest.withUnshardCollectionInBackground(
+    //
     {toShard: recipientShardNames[0]},
     () => {
         // We wait until cloneTimestamp has been chosen to guarantee that any subsequent writes will
@@ -44,6 +42,7 @@ reshardingTest.withUnshardCollectionInBackground(  //
 
         reshardingTest.stepUpNewPrimaryOnShard(recipientShardNames[0]);
         assert.commandWorked(sourceCollection.remove({oldKey: 1}, {justOne: true}));
-    });
+    },
+);
 
 reshardingTest.teardown();

@@ -27,12 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <set>
-#include <string>
-#include <tuple>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
@@ -43,16 +37,21 @@
 #include "mongo/db/keys_collection_document_gen.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/s/config/config_server_test_fixture.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/sharding_environment/config_server_test_fixture.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/time_proof_service.h"
-#include "mongo/db/vector_clock.h"
-#include "mongo/db/vector_clock_mutable.h"
-#include "mongo/s/grid.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/vector_clock/vector_clock_mutable.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
+
+#include <memory>
+#include <set>
+#include <string>
+#include <tuple>
+#include <vector>
 
 namespace mongo {
 namespace {

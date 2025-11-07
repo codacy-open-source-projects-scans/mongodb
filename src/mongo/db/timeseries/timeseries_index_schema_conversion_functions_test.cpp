@@ -27,21 +27,21 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <string>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
-#include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -109,14 +109,33 @@ void testBothWaysIndexSpecConversion(const TimeseriesOptions& timeseriesOptions,
 TEST(TimeseriesIndexSchemaConversionTest, OriginalSpecFieldName) {
     TimeseriesOptions timeseriesOptions = makeTimeseriesOptions();
 
+    const auto logicalKeyPattern = BSON("key" << BSON("a" << 1));
+
     BSONObj bucketsIndexSpec =
         BSON(timeseries::kKeyFieldName << BSON("control.min.a" << 1 << "control.max.a" << 1)
-                                       << timeseries::kOriginalSpecFieldName << BSON("abc" << 123));
+                                       << timeseries::kOriginalSpecFieldName << logicalKeyPattern);
 
     auto timeseriesIndexSpecResult =
         timeseries::createTimeseriesIndexFromBucketsIndex(timeseriesOptions, bucketsIndexSpec);
     ASSERT(timeseriesIndexSpecResult);
-    ASSERT_BSONOBJ_EQ(*timeseriesIndexSpecResult, BSON("abc" << 123));
+    ASSERT_BSONOBJ_EQ(*timeseriesIndexSpecResult, logicalKeyPattern);
+}
+
+TEST(TimeseriesIndexSchemaConversionTest, OriginalSpecFieldNameAdditionalProperties) {
+    TimeseriesOptions timeseriesOptions = makeTimeseriesOptions();
+
+    auto logicalKeyPattern = BSON("key" << BSON("a" << 1));
+
+    BSONObj bucketsIndexSpec =
+        BSON(timeseries::kKeyFieldName << BSON("control.min.a" << 1 << "control.max.a" << 1)
+                                       << IndexDescriptor::kHiddenFieldName << true
+                                       << timeseries::kOriginalSpecFieldName << logicalKeyPattern);
+
+    auto timeseriesIndexSpecResult =
+        timeseries::createTimeseriesIndexFromBucketsIndex(timeseriesOptions, bucketsIndexSpec);
+    ASSERT(timeseriesIndexSpecResult);
+    ASSERT_BSONOBJ_EQ(*timeseriesIndexSpecResult,
+                      logicalKeyPattern.addFields(BSON(IndexDescriptor::kHiddenFieldName << true)));
 }
 
 // {} is invalid.
@@ -131,8 +150,7 @@ TEST(TimeseriesIndexSchemaConversionTest, EmptyTimeseriesIndexSpecInvalid) {
 // {$hint: 'abc'} is invalid.
 TEST(TimeseriesIndexSchemaConversionTest, HintTimeseriesIndexSpecInvalid) {
     TimeseriesOptions timeseriesOptions = makeTimeseriesOptions();
-    BSONObj timeseriesIndexSpec = BSON("$hint"
-                                       << "abc");
+    BSONObj timeseriesIndexSpec = BSON("$hint" << "abc");
 
     ASSERT_NOT_OK(timeseries::createBucketsIndexSpecFromTimeseriesIndexSpec(timeseriesOptions,
                                                                             timeseriesIndexSpec));
@@ -409,10 +427,8 @@ TEST(TimeseriesIndexSchemaConversionTest, MixedCompoundMeasurementIndexSpecConve
 // {a: "2sphere"} <=> {data.a: "2dsphere_bucket"}
 TEST(TimeseriesIndexSchemaConversionTest, 2dsphereMeasurementIndexSpecConversion) {
     TimeseriesOptions timeseriesOptions = makeTimeseriesOptions();
-    BSONObj timeseriesIndexSpec = BSON("a"
-                                       << "2dsphere");
-    BSONObj bucketsIndexSpec = BSON("data.a"
-                                    << "2dsphere_bucket");
+    BSONObj timeseriesIndexSpec = BSON("a" << "2dsphere");
+    BSONObj bucketsIndexSpec = BSON("data.a" << "2dsphere_bucket");
 
     testBothWaysIndexSpecConversion(timeseriesOptions, timeseriesIndexSpec, bucketsIndexSpec);
 }

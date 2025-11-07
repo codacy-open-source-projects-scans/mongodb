@@ -29,15 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <list>
-#include <memory>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
@@ -57,13 +48,22 @@
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/database_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/shard_version.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -77,26 +77,37 @@ public:
         return false;
     }
 
-    std::list<BSONObj> getIndexSpecs(OperationContext* opCtx,
-                                     const NamespaceString& ns,
-                                     bool includeBuildUUIDs) override;
+    std::vector<BSONObj> getIndexSpecs(OperationContext* opCtx,
+                                       const NamespaceString& ns,
+                                       bool includeBuildUUIDs) override;
 
-    std::unique_ptr<Pipeline, PipelineDeleter> preparePipelineForExecution(
-        Pipeline* pipeline,
+    std::unique_ptr<Pipeline> finalizeAndMaybePreparePipelineForExecution(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        std::unique_ptr<Pipeline> pipeline,
+        bool attachCursorAfterOptimizing,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
+        ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
+        boost::optional<BSONObj> readConcern = boost::none,
+        bool shouldUseCollectionDefaultCollator = false) override;
+
+    std::unique_ptr<Pipeline> preparePipelineForExecution(
+        std::unique_ptr<Pipeline> pipeline,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none) override;
 
-    std::unique_ptr<Pipeline, PipelineDeleter> preparePipelineForExecution(
+    std::unique_ptr<Pipeline> preparePipelineForExecution(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const AggregateCommandRequest& aggRequest,
-        Pipeline* pipeline,
+        std::unique_ptr<Pipeline> pipeline,
         boost::optional<BSONObj> shardCursorsSortSpec = boost::none,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none,
         bool shouldUseCollectionDefaultCollator = false) override;
 
-    BSONObj preparePipelineAndExplain(Pipeline* ownedPipeline,
-                                      ExplainOptions::Verbosity verbosity) override;
+    BSONObj finalizePipelineAndExplain(
+        std::unique_ptr<Pipeline> pipeline,
+        ExplainOptions::Verbosity verbosity,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr) override;
 
     void checkRoutingInfoEpochOrThrow(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -113,7 +124,9 @@ public:
                                             bool addPrimaryShard) final;
 
     std::vector<FieldPath> collectDocumentKeyFieldsActingAsRouter(
-        OperationContext*, const NamespaceString&) const final;
+        OperationContext*,
+        const NamespaceString&,
+        RoutingContext* routingCtx = nullptr) const final;
 
     boost::optional<Document> lookupSingleDocument(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -149,7 +162,7 @@ public:
         bool dropTarget,
         bool stayTemp,
         const BSONObj& originalCollectionOptions,
-        const std::list<BSONObj>& originalIndexes) override;
+        const std::vector<BSONObj>& originalIndexes) override;
 
     void createCollection(OperationContext* opCtx,
                           const DatabaseName& dbName,

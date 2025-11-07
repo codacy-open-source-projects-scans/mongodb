@@ -5,6 +5,7 @@
 //   # This test expects particular plans, creating unanticipated indexes can lead to generating
 //   # unexpected plans.
 //   assumes_no_implicit_index_creation,
+//   requires_fcv_82,
 // ]
 import {assertCoveredQueryAndCount} from "jstests/libs/query/analyze_plan.js";
 
@@ -17,7 +18,7 @@ assert.commandWorked(coll.insert({a: MaxKey}));
 // Test that queries involving comparison operators with MaxKey are covered.
 const proj = {
     a: 1,
-    _id: 0
+    _id: 0,
 };
 assertCoveredQueryAndCount({collection: coll, query: {a: {$gt: MaxKey}}, project: proj, count: 0});
 assertCoveredQueryAndCount({collection: coll, query: {a: {$gte: MaxKey}}, project: proj, count: 1});

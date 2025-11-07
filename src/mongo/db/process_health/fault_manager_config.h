@@ -28,27 +28,26 @@
  */
 #pragma once
 
-#include <absl/container/node_hash_map.h>
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <ostream>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/process_health/health_monitoring_server_parameters_gen.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/platform/basic.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
-#include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
-#include "mongo/util/hierarchical_acquisition.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/synchronized_value.h"
+
+#include <algorithm>
+#include <ostream>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 
 namespace mongo {
@@ -77,7 +76,15 @@ std::ostream& operator<<(std::ostream& os, const FaultState& state);
 /**
  * Types of health observers available.
  */
-enum class FaultFacetType { kSystem, kMock1, kMock2, kTestObserver, kLdap, kDns, kConfigServer };
+enum class MONGO_MOD_PUBLIC FaultFacetType {
+    kSystem,
+    kMock1,
+    kMock2,
+    kTestObserver,
+    kLdap,
+    kDns,
+    kConfigServer
+};
 static const StringData FaultFacetTypeStrings[] = {
     "systemObserver", "mock1", "mock2", "testObserver", "LDAP", "DNS", "configServer"};
 
@@ -99,7 +106,7 @@ inline std::ostream& operator<<(std::ostream& os, const FaultFacetType& type) {
     return os;
 }
 
-class FaultManagerConfig {
+class MONGO_MOD_PUBLIC FaultManagerConfig {
 public:
     /* Maximum possible jitter added to the time between health checks */
     static auto inline constexpr kPeriodicHealthCheckMaxJitter{Milliseconds{100}};

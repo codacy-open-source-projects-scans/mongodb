@@ -29,6 +29,10 @@
 
 #pragma once
 
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/query/index_tag.h"
+#include "mongo/util/modules.h"
+
 #include <cstddef>
 #include <map>
 #include <memory>
@@ -37,11 +41,7 @@
 #include <utility>
 #include <vector>
 
-#include <absl/container/node_hash_map.h>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/db/matcher/expression.h"
-#include "mongo/db/query/index_tag.h"
 
 namespace mongo {
 namespace plan_enumerator {

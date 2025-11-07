@@ -9,10 +9,10 @@ from typing import Optional
 mongo_path = pathlib.Path(__file__).parents[3]
 sys.path.append(mongo_path)
 
-# pylint: disable=wrong-import-position
 from buildscripts.resmokelib.hang_analyzer.gen_hang_analyzer_tasks import (
     GENERATED_TASK_PREFIX,
     RANDOM_STRING_LENGTH,
+    should_activate_core_analysis_task,
 )
 from buildscripts.resmokelib.utils import evergreen_conn
 from buildscripts.util.read_config import read_config_file
@@ -46,11 +46,7 @@ def maybe_attach_core_analyzer_task(
     build_id = current_task.build_id
     current_task_name: str = current_task.display_name
     build = evg_api.build_by_id(build_id)
-
-    # If the task is a part of a display task, search the parent's execution tasks
-    # If the task has no parent search the whole build variant
-    parent_id = current_task.parent_task_id
-    search_tasks = evg_api.task_by_id(parent_id).execution_tasks if parent_id else build.tasks
+    search_tasks = build.tasks
 
     # The task id uses underscores instead of hyphens
     task_id_search_term = f"{GENERATED_TASK_PREFIX}_{current_task_name.replace('-', '_')}"
@@ -103,10 +99,15 @@ def maybe_attach_core_analyzer_task(
     if not gen_from_cur_execution:
         return
 
+    if should_activate_core_analysis_task(current_task):
+        first_line = "Core analysis is in progress."
+    else:
+        first_line = "Core analysis was not scheduled because only archived fails were detected."
+
     file_lines = [
-        "Core analysis is in progress.",
+        first_line,
         "This file will be overwritten with the results when core analysis is finished.",
-        "You can view core analysis progress at this evergreen task:",
+        "You can view the core analysis task at this here:",
         core_analysis_task_url,
     ]
 

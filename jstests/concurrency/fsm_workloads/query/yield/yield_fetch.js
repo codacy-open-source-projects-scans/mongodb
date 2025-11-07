@@ -4,24 +4,24 @@
  * Intersperse queries which use the FETCH stage with updates and deletes of documents they may
  * match.
  * @tags: [
- *   requires_getmore
+ *   requires_getmore,
+ *   # This test relies on query commands returning specific batch-sized responses.
+ *   assumes_no_implicit_cursor_exhaustion,
  * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
-import {
-    $config as $baseConfig
-} from "jstests/concurrency/fsm_workloads/query/yield/yield_rooted_or.js";
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/query/yield/yield_rooted_or.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
     /*
      * Issue a query that will use the FETCH stage.
      */
     $config.states.query = function fetch(db, collName) {
-        var nMatches = 100;
+        let nMatches = 100;
 
-        var cursor = db[collName].find({c: {$lt: nMatches}}).batchSize(this.batchSize);
+        let cursor = db[collName].find({c: {$lt: nMatches}}).batchSize(this.batchSize);
 
-        var verifier = function fetchVerifier(doc, prevDoc) {
+        let verifier = function fetchVerifier(doc, prevDoc) {
             return doc.c < nMatches;
         };
 

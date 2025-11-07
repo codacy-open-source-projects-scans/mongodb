@@ -27,16 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/cstdint.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <tuple>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/s/session_catalog_migration_source.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -45,13 +36,15 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/dbclient_cursor.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/query/find_command.h"
@@ -64,13 +57,12 @@
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/s/session_catalog_migration.h"
-#include "mongo/db/s/session_catalog_migration_source.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/session/session_txn_record_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/transaction/transaction_history_iterator.h"
 #include "mongo/db/transaction/transaction_participant.h"
@@ -78,8 +70,6 @@
 #include "mongo/db/write_concern_options.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/redaction.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/shard_key_pattern.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/decorable.h"
@@ -88,6 +78,17 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <mutex>
+#include <string>
+#include <tuple>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -109,7 +110,7 @@ boost::optional<repl::OplogEntry> forgeNoopEntryFromImageCollection(
         return boost::none;
     }
 
-    auto image = repl::ImageEntry::parse(IDLParserContext("image entry"), imageObj);
+    auto image = repl::ImageEntry::parse(imageObj, IDLParserContext("image entry"));
     if (image.getTxnNumber() != retryableFindAndModifyOplogEntry.getTxnNumber()) {
         // In our snapshot, fetch the current transaction number for a session. If that transaction
         // number doesn't match what's found on the image lookup, it implies that the image is not
@@ -186,6 +187,7 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
                                 boost::none,                      // uuid
                                 boost::none,                      // fromMigrate
                                 boost::none,                      // checkExistenceForDiffInsert
+                                boost::none,                      // versionContext
                                 repl::OplogEntry::kOplogVersion,  // version
                                 oField,                           // o
                                 o2Field,                          // o2
@@ -305,7 +307,7 @@ void SessionCatalogMigrationSource::init(OperationContext* opCtx,
     boost::optional<LastTxnSession> lastTxnSession;
     while (cursor->more()) {
         auto txnRecord =
-            SessionTxnRecord::parse(IDLParserContext("Session migration cloning"), cursor->next());
+            SessionTxnRecord::parse(cursor->next(), IDLParserContext("Session migration cloning"));
 
         const auto sessionId = txnRecord.getSessionId();
 
@@ -547,9 +549,9 @@ void SessionCatalogMigrationSource::_extractOplogEntriesForRetryableApplyOps(
 
     for (const auto& innerOp : applyOpsInfo.getOperations()) {
         auto replOp = repl::ReplOperation::parse(
+            innerOp,
             IDLParserContext{"SessionOplogIterator::_"
-                             "extractOplogEntriesForInternalTransactionForRetryableWrite"},
-            innerOp);
+                             "extractOplogEntriesForInternalTransactionForRetryableWrite"});
 
         ScopeGuard skippedEntryTracker(
             [this] { _sessionOplogEntriesSkippedSoFarLowerBound.addAndFetch(1); });
@@ -800,10 +802,8 @@ void SessionCatalogMigrationSource::_tryFetchNextNewWriteOplog(stdx::unique_lock
 
         // This applyOps oplog entry corresponds to non-internal transaction prepare/commit,
         // replace it with a dead-end sentinel oplog entry.
-        auto sentinelOplogEntry =
-            makeSentinelOplogEntry(sessionId,
-                                   *nextNewWriteOplog.getTxnNumber(),
-                                   opCtx->getServiceContext()->getFastClockSource()->now());
+        auto sentinelOplogEntry = makeSentinelOplogEntry(
+            sessionId, *nextNewWriteOplog.getTxnNumber(), opCtx->fastClockSource().now());
         _unprocessedNewWriteOplogBuffer.emplace_back(sentinelOplogEntry);
         _newWriteOpTimeList.pop_front();
         _sessionOplogEntriesToBeMigratedSoFar.addAndFetch(1);
@@ -881,7 +881,7 @@ SessionCatalogMigrationSource::SessionOplogIterator::SessionOplogIterator(
           }
           // The SessionCatalogMigrationSource should not try to create a SessionOplogIterator for
           // internal sessions for non-retryable writes.
-          invariant(isParentSessionId(txnRecord.getSessionId()));
+          invariant(isParentSessionId(_record.getSessionId()));
           return _record.getState() ? EntryType::kNonRetryableTransaction
                                     : EntryType::kRetryableWrite;
       }()) {
@@ -938,10 +938,9 @@ boost::optional<repl::OplogEntry> SessionCatalogMigrationSource::SessionOplogIte
                 if (!_record.getState() ||
                     _record.getState().value() == DurableTxnStateEnum::kCommitted ||
                     _record.getState().value() == DurableTxnStateEnum::kPrepared) {
-                    return makeSentinelOplogEntry(
-                        _record.getSessionId(),
-                        _record.getTxnNum(),
-                        opCtx->getServiceContext()->getFastClockSource()->now());
+                    return makeSentinelOplogEntry(_record.getSessionId(),
+                                                  _record.getTxnNum(),
+                                                  opCtx->fastClockSource().now());
                 } else {
                     return boost::none;
                 }

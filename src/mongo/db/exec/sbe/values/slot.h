@@ -29,14 +29,14 @@
 
 #pragma once
 
-#include <type_traits>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/config.h"
 #include "mongo/db/exec/sbe/values/row.h"
 #include "mongo/db/exec/sbe/values/slot_util.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/util/id_generator.h"
+
+#include <type_traits>
 
 namespace mongo::sbe::value {
 /**
@@ -97,6 +97,18 @@ public:
 };
 
 /**
+ * Interface for assigning a value to a slot that can store values of any type and can have
+ * ownership of the stored value.
+ */
+class AssignableSlotAccessor : public SlotAccessor {
+public:
+    /**
+     * Assigns a new value to this slot and releases the previous value if it was owned.
+     */
+    virtual void reset(bool owned, TypeTags tag, Value val) = 0;
+};
+
+/**
  * Accessor for a slot which provides a view of a value that is owned elsewhere.
  */
 class ViewOfValueAccessor final : public SlotAccessor {
@@ -132,7 +144,7 @@ private:
 /**
  * Accessor for a slot which can own the value held by that slot.
  */
-class OwnedValueAccessor final : public SlotAccessor {
+class OwnedValueAccessor final : public AssignableSlotAccessor {
 public:
     OwnedValueAccessor() = default;
 
@@ -200,7 +212,7 @@ public:
         reset(true, tag, val);
     }
 
-    void reset(bool owned, TypeTags tag, Value val) {
+    void reset(bool owned, TypeTags tag, Value val) override {
         release();
 
         _tag = tag;
@@ -284,7 +296,7 @@ private:
 class SwitchAccessor final : public SlotAccessor {
 public:
     SwitchAccessor(std::vector<SlotAccessor*> accessors) : _accessors(std::move(accessors)) {
-        invariant(!_accessors.empty());
+        tassert(11093601, "Vector of SlotAccessor must not be empty", !_accessors.empty());
     }
 
     std::pair<TypeTags, Value> getViewOfValue() const override {
@@ -295,7 +307,7 @@ public:
     }
 
     void setIndex(size_t index) {
-        invariant(index < _accessors.size());
+        tassert(11093602, "Index out of bounds", index < _accessors.size());
         _index = index;
     }
 
@@ -341,7 +353,7 @@ private:
  * T is the type of an iterator pointing to the (key, value) pair of interest.
  */
 template <typename T>
-class MaterializedRowValueAccessor final : public SlotAccessor {
+class MaterializedRowValueAccessor final : public AssignableSlotAccessor {
 public:
     MaterializedRowValueAccessor(T& it, size_t slot) : _it(it), _slot(slot) {}
 
@@ -352,7 +364,7 @@ public:
         return _it->second.copyOrMoveValue(_slot);
     }
 
-    void reset(bool owned, TypeTags tag, Value val) {
+    void reset(bool owned, TypeTags tag, Value val) override {
         _it->second.reset(_slot, owned, tag, val);
     }
 
@@ -366,7 +378,7 @@ private:
  * of type T.
  */
 template <typename T>
-class MaterializedRowAccessor final : public SlotAccessor {
+class MaterializedRowAccessor final : public AssignableSlotAccessor {
 public:
     /**
      * Constructs an accessor for the row with index 'it' inside the given 'container'. Within that
@@ -382,7 +394,7 @@ public:
         return _container[_it].copyOrMoveValue(_slot);
     }
 
-    void reset(bool owned, TypeTags tag, Value val) {
+    void reset(bool owned, TypeTags tag, Value val) override {
         _container[_it].reset(_slot, owned, tag, val);
     }
 
@@ -396,7 +408,7 @@ private:
  * Provides a view of a slot inside a single MaterializedRow.
  */
 template <typename RowType>
-class SingleRowAccessor final : public SlotAccessor {
+class SingleRowAccessor final : public AssignableSlotAccessor {
 public:
     /**
      * Constructs an accessor that gives a view of the value at the given 'slot' of a
@@ -410,7 +422,7 @@ public:
     std::pair<TypeTags, Value> copyOrMoveValue() override {
         return _row.copyOrMoveValue(_slot);
     }
-    void reset(bool owned, TypeTags tag, Value val) {
+    void reset(bool owned, TypeTags tag, Value val) override {
         _row.reset(_slot, owned, tag, val);
     }
 
@@ -471,7 +483,7 @@ void orderedSlotMapTraverse(const SlotMap<T>& map, C callback) {
  * Accessor for a slot which can own the value held by that slot and provides optimized BSONObj
  * access.
  */
-class BSONObjValueAccessor final : public SlotAccessor {
+class BSONObjValueAccessor final : public AssignableSlotAccessor {
 public:
     BSONObjValueAccessor() = default;
 
@@ -540,7 +552,7 @@ public:
     }
 
     BSONObj getOwnedBSONObj() {
-        invariant(_tag == TypeTags::bsonObject);
+        tassert(11093603, "Expected bsonObject tag type", _tag == TypeTags::bsonObject);
         if (!_hasBsonObj) {
             if (!_owned) {
                 std::tie(_tag, _val) = copyValue(_tag, _val);
@@ -564,7 +576,7 @@ public:
         reset(true, tag, val);
     }
 
-    void reset(bool owned, TypeTags tag, Value val) {
+    void reset(bool owned, TypeTags tag, Value val) override {
         release();
 
         _tag = tag;

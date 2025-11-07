@@ -29,10 +29,8 @@
 
 #include "mongo/tools/workload_simulation/simulation.h"
 
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/tools/workload_simulation/simulator_options.h"
 #include "mongo/util/pcre.h"
 
@@ -72,7 +70,7 @@ bool shouldRun(const Simulation& simulation) {
 }  // namespace
 
 Simulation::Simulation(StringData suiteName, StringData workloadName)
-    : _suiteName(suiteName.toString()), _workloadName(workloadName.toString()) {}
+    : _suiteName(std::string{suiteName}), _workloadName(std::string{workloadName}) {}
 
 Simulation::~Simulation() {}
 

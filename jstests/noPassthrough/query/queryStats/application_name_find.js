@@ -13,8 +13,8 @@ let options = {
 
 const conn = MongoRunner.runMongod(options);
 conn.setLogLevel(3, "query");
-const testDB = conn.getDB('test');
-var coll = testDB[jsTestName()];
+const testDB = conn.getDB("test");
+let coll = testDB[jsTestName()];
 coll.drop();
 
 coll.insert({v: 1});

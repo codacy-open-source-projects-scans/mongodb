@@ -29,35 +29,29 @@
 
 #pragma once
 
-#include <boost/filesystem/path.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <deque>
-#include <exception>
-#include <fstream>  // IWYU pragma: keep
-#include <functional>
-#include <iterator>
-#include <memory>
-#include <queue>
-#include <string>
-#include <system_error>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/sorter/sorter_checksum_calculator.h"
 #include "mongo/db/sorter/sorter_gen.h"
 #include "mongo/db/sorter/sorter_stats.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/shared_buffer_fragment.h"
+
+#include <cstddef>
+#include <fstream>
+#include <functional>
+#include <memory>
+#include <queue>
+#include <span>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/filesystem/path.hpp>
+#include <boost/optional.hpp>
 
 /**
  * This is the public API for the Sorter (both in-memory and external)
@@ -105,7 +99,7 @@
  * };
  */
 
-namespace mongo {
+namespace MONGO_MOD_PUB mongo {
 
 /**
  * Runtime options that control the Sorter's behavior
@@ -118,24 +112,21 @@ struct SortOptions {
     size_t maxMemoryUsageBytes;
     static const size_t DefaultMaxMemoryUsageBytes = 64 * 1024 * 1024;
 
-    // Whether we are allowed to spill to disk. If this is false and in-memory exceeds
-    // maxMemoryUsageBytes, we will uassert.
-    bool extSortAllowed;
-
     // In case the sorter spills encrypted data to disk that must be readable even after process
     // restarts, it must encrypt with a persistent key. This key is accessed using the database
     // name that the sorted collection lives in. If encryption is enabled and dbName is boost::none,
     // a temporary key is used.
     boost::optional<DatabaseName> dbName;
 
-    // Directory into which we place a file when spilling to disk. Must be explicitly set if
-    // extSortAllowed is true.
-    std::string tempDir;
+    // Directory into which we place a file when spilling to disk. boost::none means we aren't
+    // allowing external sorting.
+    boost::optional<boost::filesystem::path> tempDir;
 
     // If set, allows us to observe Sorter file handle usage.
     SorterFileStats* sorterFileStats;
 
-    // If set, allows us to observe aggregate Sorter behaviors.
+    // If set, allows us to observe aggregate Sorter behaviors. The lifetime of this object must
+    // exceed that of the Sorter instance; otherwise, it will lead to a user-after-free error.
     SorterTracker* sorterTracker;
 
     // When set, this sorter will own a memory pool that callers should used to allocate memory for
@@ -147,16 +138,19 @@ struct SortOptions {
     // instead of copying.
     bool moveSortedDataIntoIterator;
 
+    // Checksum version to use for spill files. Only applicable if tempDir != boost::none.
+    SorterChecksumVersion checksumVersion = SorterChecksumVersion::v2;
+
     SortOptions()
         : limit(0),
           maxMemoryUsageBytes(DefaultMaxMemoryUsageBytes),
-          extSortAllowed(false),
+          tempDir(boost::none),
           sorterFileStats(nullptr),
           sorterTracker(nullptr),
           useMemPool(false),
           moveSortedDataIntoIterator(false) {}
 
-    // Fluent API to support expressions like SortOptions().Limit(1000).ExtSortAllowed(true)
+    // Fluent API to support expressions like SortOptions().Limit(1000)
 
     SortOptions& Limit(unsigned long long newLimit) {
         limit = newLimit;
@@ -168,13 +162,8 @@ struct SortOptions {
         return *this;
     }
 
-    SortOptions& ExtSortAllowed(bool newExtSortAllowed = true) {
-        extSortAllowed = newExtSortAllowed;
-        return *this;
-    }
-
-    SortOptions& TempDir(const std::string& newTempDir) {
-        tempDir = newTempDir;
+    SortOptions& TempDir(boost::filesystem::path newTempDir) {
+        tempDir = std::move(newTempDir);
         return *this;
     }
 
@@ -202,6 +191,11 @@ struct SortOptions {
         useMemPool = usePool;
         return *this;
     }
+
+    SortOptions& ChecksumVersion(SorterChecksumVersion version) {
+        checksumVersion = version;
+        return *this;
+    }
 };
 
 /**
@@ -224,6 +218,9 @@ public:
     }
     void makeOwned() {}
 };
+
+template <typename Key, typename Value>
+class Sorter;
 
 /**
  * This is the sorted output iterator from the sorting framework.
@@ -257,24 +254,37 @@ public:
     virtual Key nextWithDeferredValue() = 0;
     virtual Value getDeferredValue() = 0;
 
-    virtual const Key& current() = 0;
+    // Returns the next key without advancing the iterator.
+    virtual const Key& peek() = 0;
 
     virtual ~SortIteratorInterface() {}
 
     // Returns an iterator that merges the passed in iterators
     template <typename Comparator>
-    static SortIteratorInterface* merge(
-        const std::vector<std::shared_ptr<SortIteratorInterface>>& iters,
+    static std::unique_ptr<SortIteratorInterface> merge(
+        std::span<std::shared_ptr<SortIteratorInterface>> iters,
         const SortOptions& opts,
         const Comparator& comp);
-
-    // Opens and closes the source of data over which this class iterates, if applicable.
-    virtual void openSource() = 0;
-    virtual void closeSource() = 0;
 
     virtual SorterRange getRange() const {
         invariant(false, "Only FileIterator has ranges");
         MONGO_UNREACHABLE;
+    }
+
+    /**
+     * Returns true iff it is valid to call spill() method on this iterator.
+     */
+    virtual bool spillable() const {
+        return false;
+    }
+
+    /**
+     * Spills not-yet-returned data to disk and returns a new iterator. Invalidates the current
+     * iterator.
+     */
+    [[nodiscard]] virtual std::unique_ptr<SortIteratorInterface<Key, Value>> spill(
+        const SortOptions& opts, const typename Sorter<Key, Value>::Settings& settings) {
+        MONGO_UNREACHABLE_TASSERT(9917200);
     }
 
 protected:
@@ -284,6 +294,12 @@ protected:
 class SorterBase {
 public:
     SorterBase(SorterTracker* sorterTracker = nullptr) : _stats(sorterTracker) {}
+    ~SorterBase() {
+        // After the Sorter is destroyed all memory it holds is gone so we are
+        // setting the memory usage to zero to have it reflected on the sorterTracker
+        // if it was provided.
+        _stats.setMemUsage(0);
+    }
 
     const SorterStats& stats() const {
         return _stats;
@@ -291,6 +307,68 @@ public:
 
 protected:
     SorterStats _stats;
+};
+
+
+/**
+ * Represents the file that a Sorter uses to spill to disk. Supports reading and writing
+ * (append-only).
+ */
+class SorterFile {
+public:
+    SorterFile(boost::filesystem::path path, SorterFileStats* stats);
+    ~SorterFile();
+
+    const boost::filesystem::path& path() const {
+        return _path;
+    }
+
+    /**
+     * Signals that the on-disk storage should not be cleaned up.
+     */
+    void keep() {
+        _keep = true;
+    };
+
+    /**
+     * Reads the requested data from the storage. Cannot write more to the storage once this has
+     * been called.
+     */
+    void read(std::streamoff offset, std::streamsize size, void* out);
+
+
+    /**
+     * Writes the given data to the end of the storage. Cannot be called after reading.
+     */
+    void write(const char* data, std::streamsize size);
+
+    /**
+     * Returns the current offset of the end of the storage. Cannot be called after reading.
+     */
+    std::streamoff currentOffset();
+
+private:
+    void _open();
+
+    /**
+     * Ensures that the file is open and that _offset is set to the end of the file.
+     */
+    void _ensureOpenForWriting();
+
+    // The current offset of the end of the storage if there may be unflushed data, or -1 if the
+    // file either has not yet been opened or has been flushed.
+    std::streamoff _offset = -1;
+
+    std::fstream _file;
+
+    // Whether to keep the on-disk storage even after this in-memory object has been destructed.
+    bool _keep = false;
+
+    // If set, this points to an external metrics holder for tracking storage open/close
+    // activity.
+    SorterFileStats* _stats;
+
+    boost::filesystem::path _path;
 };
 
 /**
@@ -301,12 +379,6 @@ protected:
  * handle deleting the data file used for spills. Otherwise, if done() is called, responsibility for
  * file deletion moves to the returned Iterator object, which must then delete the file upon its own
  * destruction.
- *
- * All users of Sorter implementations must define their own nextFileName() function to generate
- * unique file names for spills to disk. This is necessary because the sorter.cpp file is separately
- * directly included in multiple places, rather than compiled in one place and linked, and so cannot
- * itself provide a globally unique ID for file names. See existing function implementations of
- * nextFileName() for example.
  */
 template <typename Key, typename Value>
 class Sorter : public SorterBase {
@@ -326,91 +398,33 @@ public:
         std::vector<SorterRange> ranges;
     };
 
-    /**
-     * Represents the file that a Sorter uses to spill to disk. Supports reading and writing
-     * (append-only).
-     */
-    class File {
-    public:
-        File(std::string path, SorterFileStats* stats = nullptr);
-
-        ~File();
-
-        const boost::filesystem::path& path() const {
-            return _path;
-        }
-
-        /**
-         * Signals that the on-disk file should not be cleaned up.
-         */
-        void keep() {
-            _keep = true;
-        };
-
-        /**
-         * Reads the requested data from the file. Cannot write more to the file once this has been
-         * called.
-         */
-        void read(std::streamoff offset, std::streamsize size, void* out);
-
-        /**
-         * Writes the given data to the end of the file. Cannot be called after reading.
-         */
-        void write(const char* data, std::streamsize size);
-
-        /**
-         * Returns the current offset of the end of the file. Cannot be called after reading.
-         */
-        std::streamoff currentOffset();
-
-    private:
-        void _open();
-
-        /**
-         * Ensures that the file is open and that _offset is set to the end of the file.
-         */
-        void _ensureOpenForWriting();
-
-        boost::filesystem::path _path;
-        std::fstream _file;
-
-        // The current offset of the end of the file if there may be unflushed data, or -1 if the
-        // file either has not yet been opened or has been flushed.
-        std::streamoff _offset = -1;
-
-        // Whether to keep the on-disk file even after this in-memory object has been destructed.
-        bool _keep = false;
-
-        // If set, this points to an external metrics holder for tracking file open/close activity.
-        SorterFileStats* _stats;
-    };
-
     explicit Sorter(const SortOptions& opts);
 
     /**
      * ExtSort-only constructor. fileName is the base name of a file in the temp directory.
      */
-    Sorter(const SortOptions& opts, const std::string& fileName);
+    Sorter(const SortOptions& opts, std::string fileName);
 
     template <typename Comparator>
-    static Sorter* make(const SortOptions& opts,
-                        const Comparator& comp,
-                        const Settings& settings = Settings());
+    static std::unique_ptr<Sorter> make(const SortOptions& opts,
+                                        const Comparator& comp,
+                                        const Settings& settings = Settings());
 
     template <typename Comparator>
-    static Sorter* makeFromExistingRanges(const std::string& fileName,
-                                          const std::vector<SorterRange>& ranges,
-                                          const SortOptions& opts,
-                                          const Comparator& comp,
-                                          const Settings& settings = Settings());
+    static std::unique_ptr<Sorter> makeFromExistingRanges(std::string fileName,
+                                                          const std::vector<SorterRange>& ranges,
+                                                          const SortOptions& opts,
+                                                          const Comparator& comp,
+                                                          const Settings& settings = Settings());
 
     virtual void add(const Key&, const Value&) = 0;
     virtual void emplace(Key&&, ValueProducer) = 0;
 
     /**
-     * Cannot add more data after calling done().
+     * Finishes inserting data and returns an iterator over the sorted results. Cannot add more data
+     * after calling done().
      */
-    virtual Iterator* done() = 0;
+    virtual std::unique_ptr<Iterator> done() = 0;
 
     /**
      * Pauses loading and returns the iterator that can be used to get the current state. Clients of
@@ -418,8 +432,10 @@ public:
      * read-only mode for storing it to a persistent storage which is used by streaming query use
      * cases. New documents cannot be added until resume is called. The iterator returned is
      * reflecting current in memory state and is not guaranteed to be sorted.
+     *
+     * This cannot be called on sorters which have spilled state to disk.
      */
-    virtual Iterator* pause() = 0;
+    virtual std::unique_ptr<Iterator> pause() = 0;
 
     /**
      * Resumes loading and cleans up internal state created during pause().
@@ -428,6 +444,13 @@ public:
 
     virtual ~Sorter() {}
 
+    /**
+     * Spills all of the sorted data to disk, preserves the temporary file, and then returns
+     * metadata which can be passed to makeFromExistingRanges() to use the spill file later. May be
+     * called before or after calling done().
+     *
+     * Only applicable to sorters with limit = 0.
+     */
     PersistedState persistDataForShutdown();
 
     SharedBufferFragmentBuilder& memPool() {
@@ -435,17 +458,14 @@ public:
         return _memPool.get();
     }
 
-protected:
     virtual void spill() = 0;
 
+protected:
     SortOptions _opts;
 
-    std::shared_ptr<File> _file;
+    std::shared_ptr<SorterFile> _file;
 
     std::vector<std::shared_ptr<Iterator>> _iters;  // Data that has already been spilled.
-    size_t fileIteratorsMaxBytesSize =
-        1 * 1024 * 1024;  // Memory Iterators for spilled data area allowed to use.
-    size_t fileIteratorsMaxNum;
 
     boost::optional<SharedBufferFragmentBuilder> _memPool;
 };
@@ -502,6 +522,11 @@ public:
     // But if _checkInput is false, don't do that check.
     // The output will be in the wrong order but otherwise it should work.
     virtual bool checkInput() const = 0;
+
+    virtual void forceSpill() = 0;
+
+    // Update current bound without adding new item.
+    virtual void setBound(Key key) = 0;
 };
 
 /**
@@ -523,7 +548,7 @@ public:
  * less-or-equal to all future Keys that will be seen in the input.
  */
 template <typename Key, typename Value, typename Comparator, typename BoundMaker>
-class BoundedSorter : public BoundedSorterInterface<Key, Value> {
+class BoundedSorter final : public BoundedSorterInterface<Key, Value> {
 public:
     // 'Comparator' is a 3-way comparison, but std::priority_queue wants a '<' comparison.
     // But also, std::priority_queue is a max-heap, and we want a min-heap.
@@ -585,13 +610,19 @@ public:
         return _checkInput;
     }
 
+    void forceSpill() override {
+        _spill(0 /*maxMemoryUsageBytes*/);
+    }
+
+    void setBound(Key key) override;
+
     const Comparator compare;
     const BoundMaker makeBound;
 
 private:
     using SpillIterator = SortIteratorInterface<Key, Value>;
 
-    void _spill();
+    void _spill(size_t maxMemoryUsageBytes);
 
     bool _checkInput;
 
@@ -600,21 +631,21 @@ private:
     using KV = std::pair<Key, Value>;
     std::priority_queue<KV, std::vector<KV>, Greater> _heap;
 
-    std::shared_ptr<typename Sorter<Key, Value>::File> _file;
-    std::shared_ptr<SpillIterator> _spillIter;
+    std::shared_ptr<SorterFile> _file;
+    std::unique_ptr<SpillIterator> _spillIter;
 
     boost::optional<Key> _min;
     bool _done = false;
 };
 
 /**
- * Appends a pre-sorted range of data to a given file and hands back an Iterator over that file
- * range.
+ * Appends a pre-sorted range of data to a given storage and hands back an Iterator over that
+ * storage range.
  */
 template <typename Key, typename Value>
-class SortedFileWriter {
-    SortedFileWriter(const SortedFileWriter&) = delete;
-    SortedFileWriter& operator=(const SortedFileWriter&) = delete;
+class SortedStorageWriter {
+    SortedStorageWriter(const SortedStorageWriter&) = delete;
+    SortedStorageWriter& operator=(const SortedStorageWriter&) = delete;
 
 public:
     typedef SortIteratorInterface<Key, Value> Iterator;
@@ -622,84 +653,66 @@ public:
                       typename Value::SorterDeserializeSettings>
         Settings;
 
-    explicit SortedFileWriter(const SortOptions& opts,
-                              std::shared_ptr<typename Sorter<Key, Value>::File> file,
-                              const Settings& settings = Settings());
+    explicit SortedStorageWriter(const SortOptions& opts, const Settings& settings);
+    virtual ~SortedStorageWriter() = default;
 
-    void addAlreadySorted(const Key&, const Value&);
+    virtual void addAlreadySorted(const Key&, const Value&) = 0;
 
     /**
-     * Writes any data remaining in the buffer to disk and then closes the file to which data was
+     * Writes any data remaining in the buffer to disk and then closes the storage to which data was
      * written.
      *
      * No more data can be added via addAlreadySorted() after calling done().
      */
-    Iterator* done();
+    virtual std::shared_ptr<Iterator> done() = 0;
+    virtual std::unique_ptr<Iterator> doneUnique() = 0;
 
     /**
-     * The SortedFileWriter organizes data into chunks, with a chunk getting written to the output
-     * file when it exceends a maximum chunks size. A SortedFilerWriter client can produce a short
-     * chunk by manually calling this function.
+     * The SortedStorageWriter organizes data into chunks, with a chunk getting written to the
+     * output storage when it exceeds a maximum chunks size. A SortedStorageWriter client can
+     * produce a short chunk by manually calling this function.
      *
      * If no new data has been added since the last chunk was written, this function is a no-op.
      */
-    void writeChunk();
+    virtual void writeChunk() = 0;
 
-    static std::shared_ptr<Iterator> createFileIteratorForResume(
-        std::shared_ptr<typename Sorter<Key, Value>::File> file,
-        std::streamoff fileStartOffset,
-        std::streamoff fileEndOffset,
-        const Settings& settings,
-        const boost::optional<DatabaseName>& dbName,
-        size_t checksum,
-        SorterChecksumVersion checksumVersion);
-
-private:
-    SorterChecksumVersion _getSorterChecksumVersion() const;
-
+protected:
     const Settings _settings;
-    std::shared_ptr<typename Sorter<Key, Value>::File> _file;
     BufBuilder _buffer;
 
     // Keeps track of the hash of all data objects spilled to disk. Passed to the FileIterator
     // to ensure data has not been corrupted after reading from disk.
     SorterChecksumCalculator _checksumCalculator;
 
+    SortOptions _opts;
+};
+
+template <typename Key, typename Value>
+class SortedFileWriter final : public SortedStorageWriter<Key, Value> {
+public:
+    typedef SortIteratorInterface<Key, Value> Iterator;
+    typedef std::pair<typename Key::SorterDeserializeSettings,
+                      typename Value::SorterDeserializeSettings>
+        Settings;
+
+    explicit SortedFileWriter(const SortOptions& opts,
+                              std::shared_ptr<SorterFile> file,
+                              const Settings& settings = Settings());
+
+    ~SortedFileWriter() override = default;
+
+    void addAlreadySorted(const Key&, const Value&) override;
+
+    std::shared_ptr<Iterator> done() override;
+    std::unique_ptr<Iterator> doneUnique() override;
+
+    void writeChunk() override;
+
+private:
+    std::shared_ptr<SorterFile> _file;
+
     // Tracks where in the file we started writing the sorted data range so that the information can
     // be given to the Iterator in done().
     std::streamoff _fileStartOffset;
-
-    SortOptions _opts;
 };
-}  // namespace mongo
-
-/**
- * #include "mongo/db/sorter/sorter.cpp" and call this in a single translation
- * unit once for each unique set of template parameters.
- */
-#define MONGO_CREATE_SORTER(Key, Value, Comparator)                                            \
-    /* public classes */                                                                       \
-    template class ::mongo::Sorter<Key, Value>;                                                \
-    template class ::mongo::SortIteratorInterface<Key, Value>;                                 \
-    template class ::mongo::SortedFileWriter<Key, Value>;                                      \
-    /* internal classes */                                                                     \
-    template class ::mongo::sorter::NoLimitSorter<Key, Value, Comparator>;                     \
-    template class ::mongo::sorter::LimitOneSorter<Key, Value, Comparator>;                    \
-    template class ::mongo::sorter::TopKSorter<Key, Value, Comparator>;                        \
-    template class ::mongo::sorter::MergeIterator<Key, Value, Comparator>;                     \
-    template class ::mongo::sorter::InMemIterator<Key, Value>;                                 \
-    template class ::mongo::sorter::FileIterator<Key, Value>;                                  \
-    /* factory functions */                                                                    \
-    template ::mongo::SortIteratorInterface<Key, Value>* ::mongo::                             \
-        SortIteratorInterface<Key, Value>::merge<Comparator>(                                  \
-            const std::vector<std::shared_ptr<SortIteratorInterface>>& iters,                  \
-            const SortOptions& opts,                                                           \
-            const Comparator& comp);                                                           \
-    template ::mongo::Sorter<Key, Value>* ::mongo::Sorter<Key, Value>::make<Comparator>(       \
-        const SortOptions& opts, const Comparator& comp, const Settings& settings);            \
-    template ::mongo::Sorter<Key, Value>* ::mongo::Sorter<Key, Value>::makeFromExistingRanges< \
-        Comparator>(const std::string& fileName,                                               \
-                    const std::vector<SorterRange>& ranges,                                    \
-                    const SortOptions& opts,                                                   \
-                    const Comparator& comp,                                                    \
-                    const Settings& settings);
+}  // namespace MONGO_MOD_PUB mongo

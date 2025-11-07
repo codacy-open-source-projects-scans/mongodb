@@ -27,13 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <set>
-#include <string>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -44,8 +37,15 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/query/client_cursor/kill_cursors_gen.h"
-#include "mongo/s/grid.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/s/query/exec/cluster_cursor_manager.h"
+
+#include <memory>
+#include <set>
+#include <string>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -56,19 +56,23 @@ struct ClusterKillCursorsCmd {
                               const NamespaceString& nss,
                               CursorId cursorId) {
         auto const authzSession = AuthorizationSession::get(opCtx->getClient());
-        auto authChecker = [&authzSession,
-                            &nss](const boost::optional<UserName>& userName) -> Status {
+        AuthzCheckFn authChecker = [&authzSession, &nss](AuthzCheckFnInputType userName) -> Status {
             return auth::checkAuthForKillCursors(authzSession, nss, userName);
         };
 
-        return Grid::get(opCtx)->getCursorManager()->checkAuthForKillCursors(
-            opCtx, cursorId, authChecker);
+        return Grid::get(opCtx)->getCursorManager()->checkAuthCursor(opCtx, cursorId, authChecker);
     }
 
     static Status doKillCursor(OperationContext* opCtx,
                                const NamespaceString& nss,
                                CursorId cursorId) {
-        return Grid::get(opCtx)->getCursorManager()->killCursor(opCtx, cursorId);
+        auto const authzSession = AuthorizationSession::get(opCtx->getClient());
+        AuthzCheckFn authChecker = [&authzSession, &nss](AuthzCheckFnInputType userName) -> Status {
+            return auth::checkAuthForKillCursors(authzSession, nss, userName);
+        };
+
+        return Grid::get(opCtx)->getCursorManager()->killCursorWithAuthCheck(
+            opCtx, cursorId, authChecker);
     }
 };
 MONGO_REGISTER_COMMAND(KillCursorsCmdBase<ClusterKillCursorsCmd>).forRouter();

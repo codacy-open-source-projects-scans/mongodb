@@ -27,15 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <stack>
-#include <string>
-#include <tuple>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -47,30 +38,41 @@
 #include "mongo/bson/util/bson_check.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/auth/authorization_session.h"  // IWYU pragma: keep
-#include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/oplog_application_checks.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/local_catalog/document_validation.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/oplog.h"
-#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <cstddef>
+#include <stack>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
 
 bool checkCOperationType(const BSONObj& opObj, const StringData opName) {
     BSONElement opTypeElem = opObj["op"];
-    checkBSONType(BSONType::String, opTypeElem);
+    checkBSONType(BSONType::string, opTypeElem);
     const StringData opType = opTypeElem.checkAndGetStringData();
 
     if (opType == "c"_sd) {
         BSONElement oElem = opObj["o"];
-        checkBSONType(BSONType::Object, oElem);
+        checkBSONType(BSONType::object, oElem);
         BSONObj o = oElem.Obj();
 
         if (o.firstElement().fieldNameStringData() == opName) {
@@ -100,7 +102,7 @@ OplogApplicationValidity validateApplyOpsCommand(const BSONObj& cmdObj) {
     auto operationContainsUUID = [](const BSONObj& opObj) {
         auto anyTopLevelElementIsUUID = [](const BSONObj& opObj) {
             for (const BSONElement& opElement : opObj) {
-                if (opElement.type() == BSONType::BinData &&
+                if (opElement.type() == BSONType::binData &&
                     opElement.binDataType() == BinDataType::newUUID) {
                     return true;
                 }
@@ -112,12 +114,12 @@ OplogApplicationValidity validateApplyOpsCommand(const BSONObj& cmdObj) {
         }
 
         BSONElement opTypeElem = opObj["op"];
-        checkBSONType(BSONType::String, opTypeElem);
+        checkBSONType(BSONType::string, opTypeElem);
         const StringData opType = opTypeElem.checkAndGetStringData();
 
         if (opType == "c"_sd) {
             BSONElement oElem = opObj["o"];
-            checkBSONType(BSONType::Object, oElem);
+            checkBSONType(BSONType::object, oElem);
             BSONObj o = oElem.Obj();
 
             if (anyTopLevelElementIsUUID(o)) {
@@ -129,6 +131,10 @@ OplogApplicationValidity validateApplyOpsCommand(const BSONObj& cmdObj) {
     };
 
     OplogApplicationValidity ret = OplogApplicationValidity::kOk;
+    auto demandAuthorization = [&ret](OplogApplicationValidity oplogApplicationValidity) {
+        // Uses the fact that OplogApplicationValidity is ordered by increasing requirements
+        ret = oplogApplicationValidity > ret ? oplogApplicationValidity : ret;
+    };
 
     // Insert the top level applyOps command into the stack.
     toCheck.emplace(std::make_pair(0, cmdObj));
@@ -139,11 +145,11 @@ OplogApplicationValidity validateApplyOpsCommand(const BSONObj& cmdObj) {
         std::tie(depth, applyOpsObj) = toCheck.top();
         toCheck.pop();
 
-        checkBSONType(BSONType::Array, applyOpsObj.firstElement());
+        checkBSONType(BSONType::array, applyOpsObj.firstElement());
         // Check if the applyOps command is empty. This is probably not something that should
         // happen, so require a superuser to do this.
         if (applyOpsObj.firstElement().Array().empty()) {
-            return OplogApplicationValidity::kNeedsSuperuser;
+            demandAuthorization(OplogApplicationValidity::kNeedsSuperuser);
         }
 
         // createCollection and renameCollection are only allowed to be applied
@@ -151,29 +157,38 @@ OplogApplicationValidity validateApplyOpsCommand(const BSONObj& cmdObj) {
         // of size greater than 1.
         if (applyOpsObj.firstElement().Array().size() > 1) {
             for (const BSONElement& e : applyOpsObj.firstElement().Array()) {
-                checkBSONType(BSONType::Object, e);
+                checkBSONType(BSONType::object, e);
                 auto oplogEntry = e.Obj();
                 if (checkCOperationType(oplogEntry, "create"_sd) ||
                     checkCOperationType(oplogEntry, "renameCollection"_sd)) {
-                    return OplogApplicationValidity::kNeedsSuperuser;
+                    demandAuthorization(OplogApplicationValidity::kNeedsSuperuser);
                 }
             }
         }
 
         // For each applyOps command, iterate the ops.
         for (BSONElement element : applyOpsObj.firstElement().Array()) {
-            checkBSONType(BSONType::Object, element);
+            checkBSONType(BSONType::object, element);
             BSONObj opObj = element.Obj();
+
+            // Applying an entry with using a given FCV requires superuser privileges,
+            // as it may create inconsistencies if it doesn't match the current FCV.
+            if (opObj.hasField(repl::OplogEntryBase::kVersionContextFieldName)) {
+                uassert(
+                    10296501, "versionContext is not allowed inside nested applyOps", depth == 0);
+                demandAuthorization(OplogApplicationValidity::kNeedsSuperuser);
+            }
 
             bool opHasUUIDs = operationContainsUUID(opObj);
 
             // If the op uses any UUIDs at all then the user must possess extra privileges.
-            if (opHasUUIDs && ret == OplogApplicationValidity::kOk)
-                ret = OplogApplicationValidity::kNeedsUseUUID;
+            if (opHasUUIDs) {
+                demandAuthorization(OplogApplicationValidity::kNeedsUseUUID);
+            }
             if (opHasUUIDs && checkCOperationType(opObj, "create"_sd)) {
                 // If the op is 'c' and forces the server to ingest a collection
                 // with a specific, user defined UUID.
-                ret = OplogApplicationValidity::kNeedsForceAndUseUUID;
+                demandAuthorization(OplogApplicationValidity::kNeedsForceAndUseUUID);
             }
 
             if (checkCOperationType(opObj, "dropDatabase"_sd)) {
@@ -194,7 +209,7 @@ OplogApplicationValidity validateApplyOpsCommand(const BSONObj& cmdObj) {
 
                 // Otherwise, if the op contains an applyOps, but we haven't recursed too far:
                 // extract the applyOps command, and insert it into the stack.
-                checkBSONType(BSONType::Object, opObj["o"]);
+                checkBSONType(BSONType::object, opObj["o"]);
                 BSONObj oObj = opObj["o"].Obj();
                 toCheck.emplace(std::make_pair(depth + 1, std::move(oObj)));
             }
@@ -231,6 +246,10 @@ public:
              const DatabaseName& dbName,
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
+
+        ReplicaSetDDLTracker::ScopedReplicaSetDDL scopedReplicaSetDDL(
+            opCtx, std::vector<NamespaceString>{});
+
         validateApplyOpsCommand(cmdObj);
 
         boost::optional<DisableDocumentValidation> maybeDisableValidation;
@@ -274,13 +293,16 @@ public:
                                                << repl::ApplyOps::kOplogApplicationModeFieldName));
         }
 
-        OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE unsafeCreateCollection(
-            opCtx);
+        const auto applyOpsStatus =
+            repl::applyOps(opCtx, dbName, cmdObj, oplogApplicationMode, &result);
 
-        auto applyOpsStatus = CommandHelpers::appendCommandStatusNoThrow(
-            result, repl::applyOps(opCtx, dbName, cmdObj, oplogApplicationMode, &result));
+        if (isStaleShardingMetadataError(applyOpsStatus.code())) {
+            // Set the error on the OperationShardingState so that the shard ServiceEntryPoint can
+            // react to it.
+            OperationShardingState::get(opCtx).setShardingOperationFailedStatus(applyOpsStatus);
+        }
 
-        return applyOpsStatus;
+        return CommandHelpers::appendCommandStatusNoThrow(result, applyOpsStatus);
     }
 };
 MONGO_REGISTER_COMMAND(ApplyOpsCmd).forShard();

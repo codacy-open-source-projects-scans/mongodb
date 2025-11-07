@@ -27,9 +27,32 @@
  *    it in the license file.
  */
 
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/keypattern.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/persistent_task_store.h"
+#include "mongo/db/s/range_deleter_service.h"
+#include "mongo/db/s/range_deleter_service_test.h"
+#include "mongo/db/s/range_deletion_task_gen.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/future.h"
+#include "mongo/util/future_impl.h"
+#include "mongo/util/uuid.h"
+
 #include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
 #include <cstddef>
 #include <map>
 #include <memory>
@@ -38,30 +61,8 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/dbdirectclient.h"
-#include "mongo/db/keypattern.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/persistent_task_store.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
-#include "mongo/db/s/range_deleter_service.h"
-#include "mongo/db/s/range_deleter_service_test.h"
-#include "mongo/db/s/range_deletion_task_gen.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/future.h"
-#include "mongo/util/future_impl.h"
-#include "mongo/util/uuid.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -91,7 +92,8 @@ RangeDeletionTask createRangeDeletionTask(const UUID& collectionUUID,
                                           const BSONObj& max,
                                           CleanWhenEnum whenToClean,
                                           bool pending,
-                                          boost::optional<KeyPattern> keyPattern) {
+                                          boost::optional<KeyPattern> keyPattern,
+                                          const ChunkVersion& shardVersion) {
     RangeDeletionTask rdt;
     rdt.setId(UUID::gen());
     rdt.setNss(RangeDeleterServiceTest::nssWithUuid[collectionUUID]);
@@ -101,6 +103,7 @@ RangeDeletionTask createRangeDeletionTask(const UUID& collectionUUID,
     rdt.setWhenToClean(whenToClean);
     rdt.setPending(pending);
     rdt.setKeyPattern(keyPattern);
+    rdt.setPreMigrationShardVersion(shardVersion);
 
     return rdt;
 }
@@ -111,9 +114,10 @@ std::shared_ptr<RangeDeletionWithOngoingQueries> createRangeDeletionTaskWithOngo
     const BSONObj& max,
     CleanWhenEnum whenToClean,
     bool pending,
-    boost::optional<KeyPattern> keyPattern) {
-    return std::make_shared<RangeDeletionWithOngoingQueries>(
-        createRangeDeletionTask(collectionUUID, min, max, whenToClean, pending, keyPattern));
+    boost::optional<KeyPattern> keyPattern,
+    const ChunkVersion& collectionVersion) {
+    return std::make_shared<RangeDeletionWithOngoingQueries>(createRangeDeletionTask(
+        collectionUUID, min, max, whenToClean, pending, keyPattern, collectionVersion));
 }
 
 SharedSemiFuture<void> registerAndCreatePersistentTask(
@@ -184,6 +188,24 @@ void deleteRangeDeletionTaskDocument(OperationContext* opCtx, UUID rdtId) {
     store.remove(opCtx, BSON(RangeDeletionTask::kIdFieldName << rdtId));
 }
 
+
+range_deletions::detail::CollectionToTasks dumpStateAsMap(OperationContext* opCtx) {
+    // Rehydrate state based on the result of dumpState(). The ordering of the chunk ranges within
+    // the collection arrays is arbitrary, so we need to rebuild the map instead of
+    // comparing BSONObjs with the expected state directly.
+    auto rds = RangeDeleterService::get(opCtx);
+    BSONObj stateBSON = rds->dumpState();
+    range_deletions::detail::CollectionToTasks state;
+    for (const auto& collection : stateBSON) {
+        auto uuid = uassertStatusOK(UUID::parse(collection.fieldName()));
+        auto& tasks = state[uuid];
+        for (const auto& range : collection.Array()) {
+            tasks[ChunkRange::fromBSON(range.Obj())] = nullptr;
+        }
+    }
+    return state;
+}
+
 /**
  * Ensure that `expectedChunkRanges` range deletion tasks are scheduled for collection with UUID
  * `uuidColl`
@@ -191,34 +213,47 @@ void deleteRangeDeletionTaskDocument(OperationContext* opCtx, UUID rdtId) {
 void verifyRangeDeletionTasks(OperationContext* opCtx,
                               UUID uuidColl,
                               std::vector<ChunkRange> expectedChunkRanges) {
-    auto rds = RangeDeleterService::get(opCtx);
-
-    // Get chunk ranges inserted to be deleted by RangeDeleterService
-    BSONObj dumpState = rds->dumpState();
-    BSONElement chunkRangesElem = dumpState.getField(uuidColl.toString());
-    if (!chunkRangesElem.ok() && expectedChunkRanges.size() == 0) {
+    auto state = dumpStateAsMap(opCtx);
+    auto it = state.find(uuidColl);
+    if (it == state.end() && expectedChunkRanges.empty()) {
         return;
     }
-    ASSERT(chunkRangesElem.ok()) << "Expected to find range deletion tasks from collection "
-                                 << uuidColl.toString();
+    ASSERT(it != state.end()) << "Expected to find range deletion tasks from collection "
+                              << uuidColl.toString();
+    const auto& tasks = it->second;
+    ASSERT_EQ(tasks.size(), expectedChunkRanges.size());
+    for (const auto& range : expectedChunkRanges) {
+        ASSERT(tasks.contains(range)) << range.toBSON();
+    }
+}
 
-    const auto chunkRanges = chunkRangesElem.Array();
-    ASSERT_EQ(chunkRanges.size(), expectedChunkRanges.size());
+void verifyProcessingFlag(OperationContext* opCtx,
+                          UUID uuidColl,
+                          const ChunkRange& range,
+                          bool processingExpected) {
+    DBDirectClient client(opCtx);
 
-    // Sort expectedChunkRanges vector to replicate RangeDeleterService dumpState order
-    struct {
-        bool operator()(const ChunkRange& a, const ChunkRange& b) {
-            return a.getMin().woCompare(b.getMin()) < 0;
-        }
-    } RANGES_COMPARATOR;
+    const auto query = BSON(
+        RangeDeletionTask::kCollectionUuidFieldName
+        << uuidColl << RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMinFieldName
+        << range.getMin() << RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMaxFieldName
+        << range.getMax());
 
-    std::sort(expectedChunkRanges.begin(), expectedChunkRanges.end(), RANGES_COMPARATOR);
+    FindCommandRequest findRequest{NamespaceString::kRangeDeletionNamespace};
+    findRequest.setFilter(query);
+    auto doc = client.findOne(std::move(findRequest));
 
-    // Check expectedChunkRanges are exactly the same as the returned ones
-    for (size_t i = 0; i < expectedChunkRanges.size(); ++i) {
-        auto chunkRange = ChunkRange::fromBSON(chunkRanges[i].Obj());
-        ASSERT(chunkRange == expectedChunkRanges[i])
-            << "Expected " << chunkRange.toBSON() << " == " << expectedChunkRanges[i].toBSON();
+    ASSERT(!doc.isEmpty()) << "Chunk '" << query << "' not found";
+
+    if (processingExpected) {
+        ASSERT_EQ(true, doc.getField(RangeDeletionTask::kProcessingFieldName).booleanSafe())
+            << "The `processing` field was expected to be true for that chunk. Chunk doc found: "
+            << doc;
+    } else {
+        ASSERT(!doc.hasField(RangeDeletionTask::kProcessingFieldName))
+            << "The `processing` field was not expected to be present for that chunk. Chunk doc "
+               "found: "
+            << doc;
     }
 }
 

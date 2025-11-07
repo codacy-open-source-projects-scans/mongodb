@@ -27,6 +27,24 @@
  *    it in the license file.
  */
 
+#include "mongo/db/session/sessions_collection.h"
+
+#include "mongo/base/status.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/client/dbclient_base.h"
+#include "mongo/db/local_catalog/ddl/create_indexes_gen.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/session/logical_session_cache_gen.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/sessions_server_parameters_gen.h"
+#include "mongo/db/write_concern_options.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/rpc/get_status_from_command_result_write_util.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/duration.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -36,23 +54,6 @@
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/status.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/util/builder.h"
-#include "mongo/client/dbclient_base.h"
-#include "mongo/db/create_indexes_gen.h"
-#include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/session/logical_session_cache_gen.h"
-#include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/session/sessions_collection.h"
-#include "mongo/db/session/sessions_server_parameters_gen.h"
-#include "mongo/db/write_concern_options.h"
-#include "mongo/idl/idl_parser.h"
-#include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/duration.h"
 
 namespace mongo {
 namespace {
@@ -251,7 +252,7 @@ LogicalSessionIdSet SessionsCollection::_doFindRemoved(
         auto swBatchResult = send(batchWithReadConcernLocal.obj());
 
         auto result = SessionsCollectionFetchResult::parse(
-            IDLParserContext{"SessionsCollectionFetchResult"}, swBatchResult);
+            swBatchResult, IDLParserContext{"SessionsCollectionFetchResult"});
 
         for (const auto& lsid : result.getCursor().getFirstBatch()) {
             removed.erase(lsid.get_id());

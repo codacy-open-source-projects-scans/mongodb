@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/db/query/tree_walker.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 namespace sbe {
@@ -88,6 +89,9 @@ struct SampleFromTimeseriesBucketStats;
 struct SpoolStats;
 struct EofStats;
 struct DocumentSourceIdLookupStats;
+struct DocumentSourceGraphLookupStats;
+struct DocumentSourceBucketAutoStats;
+struct DocumentSourceSetWindowFieldsStats;
 
 /**
  * Visitor pattern for PlanStageStats.
@@ -158,6 +162,12 @@ public:
     virtual void visit(tree_walker::MaybeConstPtr<IsConst, SpoolStats> stats) = 0;
     virtual void visit(tree_walker::MaybeConstPtr<IsConst, EofStats> stats) = 0;
     virtual void visit(tree_walker::MaybeConstPtr<IsConst, DocumentSourceIdLookupStats> stats) = 0;
+    virtual void visit(
+        tree_walker::MaybeConstPtr<IsConst, DocumentSourceGraphLookupStats> stats) = 0;
+    virtual void visit(
+        tree_walker::MaybeConstPtr<IsConst, DocumentSourceBucketAutoStats> stats) = 0;
+    virtual void visit(
+        tree_walker::MaybeConstPtr<IsConst, DocumentSourceSetWindowFieldsStats> stats) = 0;
 };
 
 /**
@@ -221,6 +231,11 @@ struct PlanStatsVisitorBase : public PlanStatsVisitor<IsConst> {
     void visit(tree_walker::MaybeConstPtr<IsConst, SpoolStats> stats) override {}
     void visit(tree_walker::MaybeConstPtr<IsConst, EofStats> stats) override {}
     void visit(tree_walker::MaybeConstPtr<IsConst, DocumentSourceIdLookupStats> stats) override {}
+    void visit(tree_walker::MaybeConstPtr<IsConst, DocumentSourceGraphLookupStats> stats) override {
+    }
+    void visit(tree_walker::MaybeConstPtr<IsConst, DocumentSourceBucketAutoStats> stats) override {}
+    void visit(
+        tree_walker::MaybeConstPtr<IsConst, DocumentSourceSetWindowFieldsStats> stats) override {}
 };
 
 using PlanStatsMutableVisitor = PlanStatsVisitor<false>;

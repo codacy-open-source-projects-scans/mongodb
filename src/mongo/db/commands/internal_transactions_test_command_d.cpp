@@ -27,23 +27,24 @@
  *    it in the license file.
  */
 
-#include <boost/optional.hpp>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/cluster_transaction_api.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/resource_yielder.h"
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/db/transaction/transaction_participant_resource_yielder.h"
 #include "mongo/executor/inline_executor.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/s/commands/internal_transactions_test_command.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -71,7 +72,7 @@ public:
                     sleepInlineExecutor,
                     executor,
                     std::make_unique<txn_api::details::ClusterSEPTransactionClientBehaviors>(
-                        opCtx)));
+                        opCtx->getServiceContext())));
         }
 
         return txn_api::SyncTransactionWithRetries(

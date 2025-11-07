@@ -27,9 +27,23 @@
  *    it in the license file.
  */
 
-#include <absl/hash/hash.h>
+#include "mongo/base/data_range.h"
+#include "mongo/base/init.h"  // IWYU pragma: keep
+#include "mongo/base/initializer.h"
+#include "mongo/base/static_assert.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/commands/server_status/server_status.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/logv2/log.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/util/processinfo.h"
+#include "mongo/util/stacktrace.h"
+#include "mongo/util/tcmalloc_parameters_gen.h"
 
-// IWYU pragma: no_include "cxxabi.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -44,24 +58,7 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/data_range.h"
-#include "mongo/base/init.h"  // IWYU pragma: keep
-#include "mongo/base/initializer.h"
-#include "mongo/base/static_assert.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/config.h"  // IWYU pragma: keep
-#include "mongo/db/commands/server_status.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/stdx/unordered_map.h"
-#include "mongo/util/processinfo.h"
-#include "mongo/util/stacktrace.h"
-#include "mongo/util/tcmalloc_parameters_gen.h"
+#include <absl/hash/hash.h>
 
 #if defined(MONGO_CONFIG_HAVE_HEADER_UNISTD_H)
 #include <unistd.h>
@@ -79,6 +76,7 @@
 #endif
 
 #if defined(_POSIX_VERSION) && defined(MONGO_CONFIG_HAVE_EXECINFO_BACKTRACE)
+#include <cxxabi.h>
 #include <dlfcn.h>
 #include <execinfo.h>
 #endif
@@ -451,7 +449,8 @@ private:
     //
     void _alloc(const void* objPtr, size_t objLen) {
         // still profiling?
-        if (sampleIntervalBytes == 0)
+        size_t nBytes = sampleIntervalBytes;
+        if (nBytes == 0)
             return;
 
         // Sample every sampleIntervalBytes bytes of allocation.
@@ -460,8 +459,7 @@ private:
         // number of samples will be correct.
         size_t lastSample = bytesAllocated.fetch_add(objLen);
         size_t currentSample = lastSample + objLen;
-        size_t accountedLen = sampleIntervalBytes *
-            (currentSample / sampleIntervalBytes - lastSample / sampleIntervalBytes);
+        size_t accountedLen = nBytes * (currentSample / nBytes - lastSample / nBytes);
         if (accountedLen == 0)
             return;
 

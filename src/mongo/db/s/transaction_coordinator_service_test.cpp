@@ -28,15 +28,7 @@
  */
 
 
-#include <boost/cstdint.hpp>
-#include <boost/none.hpp>
-#include <boost/none_t.hpp>
-#include <boost/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/s/transaction_coordinator_service.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -52,21 +44,29 @@
 #include "mongo/db/generic_argument_util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/s/transaction_coordinator_document_gen.h"
-#include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/s/transaction_coordinator_test_fixture.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <cstdint>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/none_t.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -97,28 +97,27 @@ const StatusWith<BSONObj> kPrepareOkButWriteConcernError =
 class TransactionCoordinatorServiceTestFixture : public TransactionCoordinatorTestFixture {
 protected:
     void assertPrepareSentAndRespondWithSuccess() {
-        assertCommandSentAndRespondWith(PrepareTransaction::kCommandName,
-                                        kPrepareOk,
-                                        generic_argument_util::kMajorityWriteConcern);
+        assertCommandSentAndRespondWith(
+            PrepareTransaction::kCommandName, kPrepareOk, defaultMajorityWriteConcernDoNotUse());
     }
 
     void assertPrepareSentAndRespondWithSuccessAndWriteConcernError() {
         assertCommandSentAndRespondWith(PrepareTransaction::kCommandName,
                                         kPrepareOkButWriteConcernError,
-                                        generic_argument_util::kMajorityWriteConcern);
+                                        defaultMajorityWriteConcernDoNotUse());
         advanceClockAndExecuteScheduledTasks();
     }
 
     void assertPrepareSentAndRespondWithNoSuchTransaction() {
         assertCommandSentAndRespondWith(PrepareTransaction::kCommandName,
                                         kNoSuchTransaction,
-                                        generic_argument_util::kMajorityWriteConcern);
+                                        defaultMajorityWriteConcernDoNotUse());
     }
 
     void assertPrepareSentAndRespondWithNoSuchTransactionAndWriteConcernError() {
         assertCommandSentAndRespondWith(PrepareTransaction::kCommandName,
                                         kNoSuchTransactionAndWriteConcernError,
-                                        generic_argument_util::kMajorityWriteConcern);
+                                        defaultMajorityWriteConcernDoNotUse());
         advanceClockAndExecuteScheduledTasks();
     }
 
@@ -126,25 +125,24 @@ protected:
 
     void assertAbortSentAndRespondWithSuccess() {
         assertCommandSentAndRespondWith(
-            "abortTransaction", kOk, generic_argument_util::kMajorityWriteConcern);
+            "abortTransaction", kOk, defaultMajorityWriteConcernDoNotUse());
     }
 
     void assertAbortSentAndRespondWithSuccessAndWriteConcernError() {
-        assertCommandSentAndRespondWith("abortTransaction",
-                                        kOkButWriteConcernError,
-                                        generic_argument_util::kMajorityWriteConcern);
+        assertCommandSentAndRespondWith(
+            "abortTransaction", kOkButWriteConcernError, defaultMajorityWriteConcernDoNotUse());
         advanceClockAndExecuteScheduledTasks();
     }
 
     void assertAbortSentAndRespondWithNoSuchTransaction() {
         assertCommandSentAndRespondWith(
-            "abortTransaction", kNoSuchTransaction, generic_argument_util::kMajorityWriteConcern);
+            "abortTransaction", kNoSuchTransaction, defaultMajorityWriteConcernDoNotUse());
     }
 
     void assertAbortSentAndRespondWithNoSuchTransactionAndWriteConcernError() {
         assertCommandSentAndRespondWith("abortTransaction",
                                         kNoSuchTransactionAndWriteConcernError,
-                                        generic_argument_util::kMajorityWriteConcern);
+                                        defaultMajorityWriteConcernDoNotUse());
         advanceClockAndExecuteScheduledTasks();
     }
 
@@ -152,20 +150,20 @@ protected:
 
     void assertCommitSentAndRespondWithSuccess() {
         assertCommandSentAndRespondWith(
-            CommitTransaction::kCommandName, kOk, generic_argument_util::kMajorityWriteConcern);
+            CommitTransaction::kCommandName, kOk, defaultMajorityWriteConcernDoNotUse());
     }
 
     void assertCommitSentAndRespondWithSuccessAndWriteConcernError() {
         assertCommandSentAndRespondWith(CommitTransaction::kCommandName,
                                         kOkButWriteConcernError,
-                                        generic_argument_util::kMajorityWriteConcern);
+                                        defaultMajorityWriteConcernDoNotUse());
         advanceClockAndExecuteScheduledTasks();
     }
 
     void assertCommitSentAndRespondWithRetryableError() {
         assertCommandSentAndRespondWith(CommitTransaction::kCommandName,
                                         kRetryableError,
-                                        generic_argument_util::kMajorityWriteConcern);
+                                        defaultMajorityWriteConcernDoNotUse());
         advanceClockAndExecuteScheduledTasks();
     }
 

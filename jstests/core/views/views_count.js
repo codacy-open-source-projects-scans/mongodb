@@ -8,10 +8,7 @@
 //   requires_fcv_63,
 // ]
 
-import {getSingleNodeExplain} from "jstests/libs/query/analyze_plan.js";
-import {checkSbeRestrictedOrFullyEnabled} from "jstests/libs/query/sbe_util.js";
-
-const sbeEnabled = checkSbeRestrictedOrFullyEnabled(db);
+import {getEngine, getSingleNodeExplain} from "jstests/libs/query/analyze_plan.js";
 
 const viewsDB = db.getSiblingDB("views_count");
 assert.commandWorked(viewsDB.dropDatabase());
@@ -26,13 +23,16 @@ assert.commandWorked(bulk.execute());
 
 // Create views on the data.
 assert.commandWorked(viewsDB.runCommand({create: "identityView", viewOn: "coll"}));
-assert.commandWorked(viewsDB.runCommand(
-    {create: "greaterThanThreeView", viewOn: "coll", pipeline: [{$match: {x: {$gt: 3}}}]}));
-assert.commandWorked(viewsDB.runCommand({
-    create: "lessThanSevenView",
-    viewOn: "greaterThanThreeView",
-    pipeline: [{$match: {x: {$lt: 7}}}]
-}));
+assert.commandWorked(
+    viewsDB.runCommand({create: "greaterThanThreeView", viewOn: "coll", pipeline: [{$match: {x: {$gt: 3}}}]}),
+);
+assert.commandWorked(
+    viewsDB.runCommand({
+        create: "lessThanSevenView",
+        viewOn: "greaterThanThreeView",
+        pipeline: [{$match: {x: {$lt: 7}}}],
+    }),
+);
 let identityView = viewsDB.getCollection("identityView");
 let greaterThanThreeView = viewsDB.getCollection("greaterThanThreeView");
 let lessThanSevenView = viewsDB.getCollection("lessThanSevenView");
@@ -77,30 +77,32 @@ if (explainPlan.hasOwnProperty("stages")) {
 assert.eq(explainPlan.queryPlanner.namespace, "views_count.coll");
 assert(!explainPlan.hasOwnProperty("executionStats"));
 
-explainPlan =
-    assert.commandWorked(lessThanSevenView.explain("executionStats").count({x: {$gte: 5}}));
+explainPlan = assert.commandWorked(lessThanSevenView.explain("executionStats").count({x: {$gte: 5}}));
 explainPlan = getSingleNodeExplain(explainPlan);
 if (explainPlan.hasOwnProperty("stages")) {
     explainPlan = explainPlan.stages[0].$cursor;
 }
 assert.eq(explainPlan.queryPlanner.namespace, "views_count.coll");
 assert(explainPlan.hasOwnProperty("executionStats"));
-assert.eq(explainPlan.executionStats.nReturned,
-          sbeEnabled ? 1 : 2,  // SBE group push down causes count to be emitted in first stage.
-          tojson(explainPlan));
+assert.eq(
+    explainPlan.executionStats.nReturned,
+    getEngine(explainPlan) === "sbe" ? 1 : 2, // SBE group push down causes count to be emitted in first stage.
+    tojson(explainPlan),
+);
 assert(!explainPlan.executionStats.hasOwnProperty("allPlansExecution"));
 
-explainPlan =
-    assert.commandWorked(lessThanSevenView.explain("allPlansExecution").count({x: {$gte: 5}}));
+explainPlan = assert.commandWorked(lessThanSevenView.explain("allPlansExecution").count({x: {$gte: 5}}));
 explainPlan = getSingleNodeExplain(explainPlan);
 if (explainPlan.hasOwnProperty("stages")) {
     explainPlan = explainPlan.stages[0].$cursor;
 }
 assert.eq(explainPlan.queryPlanner.namespace, "views_count.coll");
 assert(explainPlan.hasOwnProperty("executionStats"));
-assert.eq(explainPlan.executionStats.nReturned,
-          sbeEnabled ? 1 : 2,  // SBE group push down causes count to be emitted in first stage.
-          tojson(explainPlan));
+assert.eq(
+    explainPlan.executionStats.nReturned,
+    getEngine(explainPlan) === "sbe" ? 1 : 2, // SBE group push down causes count to be emitted in first stage.
+    tojson(explainPlan),
+);
 assert(explainPlan.executionStats.hasOwnProperty("allPlansExecution"));
 
 // Count with hint works on a view.
@@ -108,4 +110,5 @@ assert.commandWorked(viewsDB.runCommand({count: "identityView", hint: "_id_"}));
 
 assert.commandFailedWithCode(
     viewsDB.runCommand({count: "identityView", collation: {locale: "en_US"}}),
-    ErrorCodes.OptionNotSupportedOnView);
+    ErrorCodes.OptionNotSupportedOnView,
+);

@@ -29,28 +29,28 @@
 
 #pragma once
 
-#include <cstddef>
-#include <numeric>
-#include <queue>
-#include <vector>
-
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/crypto/fle_crypto.h"
 #include "mongo/crypto/fle_crypto_types.h"
 #include "mongo/crypto/fle_stats_gen.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/commands/fle2_cleanup_gen.h"
 #include "mongo/db/commands/fle2_compact_gen.h"
 #include "mongo/db/fle_crud.h"
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <numeric>
+#include <queue>
+#include <vector>
 
 namespace mongo {
 
-struct EncryptedStateCollectionsNamespaces {
-
+struct MONGO_MOD_PUB EncryptedStateCollectionsNamespaces {
     static StatusWith<EncryptedStateCollectionsNamespaces> createFromDataCollection(
         const Collection& edc);
 
@@ -66,12 +66,14 @@ using FLECleanupESCDeleteQueue = std::priority_queue<PrfBlock>;
 /**
  * Validate a compact request has the right encryption tokens.
  */
-void validateCompactRequest(const CompactStructuredEncryptionData& request, const Collection& edc);
+MONGO_MOD_PUB void validateCompactRequest(const CompactStructuredEncryptionData& request,
+                                          const Collection& edc);
 
 /**
  * Validate a cleanup request has the right encryption tokens.
  */
-void validateCleanupRequest(const CleanupStructuredEncryptionData& request, const Collection& edc);
+MONGO_MOD_PUB void validateCleanupRequest(const CleanupStructuredEncryptionData& request,
+                                          const Collection& edc);
 
 
 void processFLECompactV2(OperationContext* opCtx,
@@ -108,6 +110,7 @@ stdx::unordered_set<ECOCCompactionDocumentV2> getUniqueCompactionDocuments(
  * Used by unit tests.
  */
 void compactOneFieldValuePairV2(FLEQueryInterface* queryImpl,
+                                HmacContext* hmacCtx,
                                 const ECOCCompactionDocumentV2& ecocDoc,
                                 const NamespaceString& escNss,
                                 ECStats* escStats);
@@ -117,6 +120,7 @@ void compactOneFieldValuePairV2(FLEQueryInterface* queryImpl,
  * Performs compaction for Range fields to add additional padding edges.
  */
 void compactOneRangeFieldPad(FLEQueryInterface* queryImpl,
+                             HmacContext* hmacCtx,
                              const NamespaceString& escNss,
                              StringData fieldPath,
                              BSONType fieldType,
@@ -127,6 +131,19 @@ void compactOneRangeFieldPad(FLEQueryInterface* queryImpl,
                              const AnchorPaddingRootToken& anchorPaddingRootToken,
                              ECStats* escStats,
                              std::size_t maxDocsPerInsert = write_ops::kMaxWriteBatchSize);
+
+/**
+ * Performs compaction for text search fields to add additional padding tags.
+ */
+void compactOneTextSearchFieldPad(FLEQueryInterface* queryImpl,
+                                  HmacContext* hmacCtx,
+                                  const NamespaceString& escNss,
+                                  StringData fieldPath,
+                                  std::size_t totalMsize,
+                                  std::size_t uniqueTokens,
+                                  const AnchorPaddingRootToken& anchorPaddingRootToken,
+                                  ECStats* escStats,
+                                  std::size_t maxDocsPerInsert = write_ops::kMaxWriteBatchSize);
 
 /**
  * Performs cleanup of the ESC entries for the encrypted field/value pair
@@ -141,6 +158,7 @@ enum class FLECleanupOneMode {
 };
 
 std::vector<PrfBlock> cleanupOneFieldValuePair(FLEQueryInterface* queryImpl,
+                                               HmacContext* hmacCtx,
                                                const ECOCCompactionDocumentV2& ecocDoc,
                                                const NamespaceString& escNss,
                                                std::size_t maxAnchorListLength,

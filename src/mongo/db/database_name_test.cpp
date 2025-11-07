@@ -29,21 +29,18 @@
 
 #include "mongo/db/database_name.h"
 
-#include <absl/container/node_hash_map.h>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/unordered_map.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -195,18 +192,17 @@ TEST(DatabaseNameTest, DatabaseValidNames) {
 TEST(DatabaseNameTest, CheckDatabaseNameLogAttrs) {
     TenantId tenantId(OID::gen());
     DatabaseName dbWithTenant = DatabaseName::createDatabaseName_forTest(tenantId, "myLongDbName");
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     LOGV2(7448500, "Msg db:", logAttrs(dbWithTenant));
 
     ASSERT_EQUALS(1,
-                  countBSONFormatLogLinesIsSubset(
+                  logs.countBSONContainingSubset(
                       BSON("attr" << BSON("db" << dbWithTenant.toStringWithTenantId_forTest()))));
 
     LOGV2(7448501, "Msg database:", "database"_attr = dbWithTenant);
     ASSERT_EQUALS(1,
-                  countBSONFormatLogLinesIsSubset(BSON(
+                  logs.countBSONContainingSubset(BSON(
                       "attr" << BSON("database" << dbWithTenant.toStringWithTenantId_forTest()))));
-    stopCapturingLogMessages();
 }
 
 TEST(DatabaseNameTest, EmptyDbString) {

@@ -29,19 +29,6 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <compare>
-#include <cstddef>
-#include <iosfwd>
-#include <memory>
-#include <string>
-#include <tuple>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -54,11 +41,26 @@
 #include "mongo/db/repl/repl_set_config_gen.h"
 #include "mongo/db/repl/repl_set_tag.h"
 #include "mongo/db/write_concern_options.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
+
+#include <compare>
+#include <cstddef>
+#include <iosfwd>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <vector>
+
+#include <absl/container/flat_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -71,7 +73,7 @@ namespace repl {
  *
  * This can be used to compare two ReplSetConfig objects to determine which is logically newer.
  */
-class ConfigVersionAndTerm {
+class MONGO_MOD_PUB ConfigVersionAndTerm {
 public:
     ConfigVersionAndTerm() : _version(0), _term(OpTime::kUninitializedTerm) {}
     ConfigVersionAndTerm(long long version, long long term) : _version(version), _term(term) {}
@@ -134,7 +136,7 @@ using ReplSetConfigPtr = std::shared_ptr<ReplSetConfig>;
  * to get a mutable copy, mutate it, and use the ReplSetConfig(MutableReplSetConfig&&) constructor
  * to get a usable immutable config from it.
  */
-class MutableReplSetConfig : public ReplSetConfigBase {
+class MONGO_MOD_PUB MutableReplSetConfig : public ReplSetConfigBase {
 public:
     ReplSetConfigSettings& getMutableSettings() {
         invariant(ReplSetConfigBase::getSettings());
@@ -169,7 +171,7 @@ protected:
 /**
  * Representation of the configuration information about a particular replica set.
  */
-class ReplSetConfig : private MutableReplSetConfig {
+class MONGO_MOD_PUB ReplSetConfig : private MutableReplSetConfig {
 public:
     typedef std::vector<MemberConfig>::const_iterator MemberIterator;
 
@@ -362,12 +364,6 @@ public:
      * HostAndPort in the config, or -1 if there is no member with that address.
      */
     int findMemberIndexByHostAndPort(const HostAndPort& hap) const;
-
-    /**
-     * Returns a MemberConfig index position corresponding to the member with the given
-     * _id in the config, or -1 if there is no member with that address.
-     */
-    int findMemberIndexByConfigId(int configId) const;
 
     /**
      * Gets the default write concern for the replica set described by this configuration.

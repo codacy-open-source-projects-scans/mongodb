@@ -29,6 +29,22 @@
 
 #pragma once
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/local_catalog/virtual_collection_options.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/storage/damage_vector.h"
+#include "mongo/db/storage/key_format.h"
+#include "mongo/db/storage/record_data.h"
+#include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/stub_container.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/uuid.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -37,22 +53,9 @@
 
 #include <boost/optional/optional.hpp>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/virtual_collection_options.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/storage/damage_vector.h"
-#include "mongo/db/storage/key_format.h"
-#include "mongo/db/storage/record_data.h"
-#include "mongo/db/storage/record_store.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/uuid.h"
+namespace MONGO_MOD_PUB mongo {
 
-namespace mongo {
-class ExternalRecordStore : public RecordStore {
+class MONGO_MOD_PUB ExternalRecordStore : public RecordStore {
 public:
     ExternalRecordStore(boost::optional<UUID> uuid, const VirtualCollectionOptions& vopts);
 
@@ -77,7 +80,7 @@ public:
         return nullptr;
     }
 
-    const std::string& getIdent() const final {
+    StringData getIdent() const final {
         unimplementedTasserted();
         static std::string ident;
         return ident;
@@ -107,28 +110,37 @@ public:
         return 0ULL;
     }
 
-    RecordData dataFor(OperationContext*, const RecordId&) const final {
+    RecordData dataFor(OperationContext*, RecoveryUnit&, const RecordId&) const final {
         unimplementedTasserted();
         return {};
     }
 
-    bool findRecord(OperationContext*, const RecordId&, RecordData*) const final {
+    bool findRecord(OperationContext*, RecoveryUnit&, const RecordId&, RecordData*) const final {
         unimplementedTasserted();
         return false;
     }
 
-    void deleteRecord(OperationContext* opCtx, const RecordId& dl) final {
+    void deleteRecord(OperationContext* opCtx, RecoveryUnit&, const RecordId& dl) final {
         unimplementedTasserted();
     }
 
     Status insertRecords(OperationContext*,
+                         RecoveryUnit&,
                          std::vector<Record>*,
                          const std::vector<Timestamp>&) final {
         unimplementedTasserted();
         return {ErrorCodes::Error::UnknownError, "Unknown error"};
     }
 
+    StatusWith<RecordId> insertRecord(
+        OperationContext*, RecoveryUnit&, const char* data, int len, Timestamp) final {
+        unimplementedTasserted();
+        return {ErrorCodes::Error::UnknownError, "Unknown error"};
+    }
+
     StatusWith<RecordId> insertRecord(OperationContext*,
+                                      RecoveryUnit&,
+                                      const RecordId&,
                                       const char* data,
                                       int len,
                                       Timestamp) final {
@@ -136,13 +148,8 @@ public:
         return {ErrorCodes::Error::UnknownError, "Unknown error"};
     }
 
-    StatusWith<RecordId> insertRecord(
-        OperationContext*, const RecordId&, const char* data, int len, Timestamp) final {
-        unimplementedTasserted();
-        return {ErrorCodes::Error::UnknownError, "Unknown error"};
-    }
-
-    Status updateRecord(OperationContext*, const RecordId&, const char* data, int len) final {
+    Status updateRecord(
+        OperationContext*, RecoveryUnit&, const RecordId&, const char* data, int len) final {
         unimplementedTasserted();
         return {ErrorCodes::Error::UnknownError, "Unknown error"};
     }
@@ -152,6 +159,7 @@ public:
     }
 
     StatusWith<RecordData> updateWithDamages(OperationContext* opCtx,
+                                             RecoveryUnit&,
                                              const RecordId& loc,
                                              const RecordData& oldRec,
                                              const char* damageSource,
@@ -165,19 +173,22 @@ public:
     }
 
     std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext* opCtx,
+                                                    RecoveryUnit& ru,
                                                     bool forward = true) const final;
 
-    std::unique_ptr<RecordCursor> getRandomCursor(OperationContext* opCtx) const final {
+    std::unique_ptr<RecordCursor> getRandomCursor(OperationContext* opCtx,
+                                                  RecoveryUnit& ru) const final {
         unimplementedTasserted();
         return nullptr;
     }
 
-    Status truncate(OperationContext*) final {
+    Status truncate(OperationContext*, RecoveryUnit&) final {
         unimplementedTasserted();
         return {ErrorCodes::Error::UnknownError, "Unknown error"};
     }
 
     Status rangeTruncate(OperationContext*,
+                         RecoveryUnit&,
                          const RecordId& minRecordId = RecordId(),
                          const RecordId& maxRecordId = RecordId(),
                          int64_t hintDataSizeIncrement = 0,
@@ -190,7 +201,7 @@ public:
         return false;
     }
 
-    StatusWith<int64_t> compact(OperationContext*, const CompactOptions&) final {
+    StatusWith<int64_t> compact(OperationContext*, RecoveryUnit&, const CompactOptions&) final {
         unimplementedTasserted();
         return {ErrorCodes::Error::UnknownError, "Unknown error"};
     }
@@ -205,12 +216,15 @@ public:
 
     void appendAllCustomStats(RecoveryUnit&, BSONObjBuilder*, double scale) const final {}
 
-    RecordId getLargestKey(OperationContext*) const final {
+    RecordId getLargestKey(OperationContext*, RecoveryUnit&) const final {
         unimplementedTasserted();
         return {};
     }
 
-    void reserveRecordIds(OperationContext*, std::vector<RecordId>*, size_t numRecords) final {
+    void reserveRecordIds(OperationContext*,
+                          RecoveryUnit&,
+                          std::vector<RecordId>*,
+                          size_t numRecords) final {
         unimplementedTasserted();
     }
 
@@ -226,11 +240,16 @@ public:
         return nullptr;
     }
 
+    RecordStore::RecordStoreContainer getContainer() override;
+
 private:
     void unimplementedTasserted() const {
         MONGO_UNIMPLEMENTED_TASSERT(6968600);
     }
 
+    std::variant<StubIntegerKeyedContainer, StubStringKeyedContainer> _makeContainer();
+
     VirtualCollectionOptions _vopts;
+    std::variant<StubIntegerKeyedContainer, StubStringKeyedContainer> _container;
 };
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

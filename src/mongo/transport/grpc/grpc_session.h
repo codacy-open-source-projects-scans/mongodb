@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <memory>
-#include <string>
-
-#include <boost/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/rpc/metadata/client_metadata.h"
@@ -47,11 +42,19 @@
 #include "mongo/util/cancellation.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_util.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/net/ssl_types.h"
 #include "mongo/util/shared_buffer.h"
 #include "mongo/util/synchronized_value.h"
 #include "mongo/util/uuid.h"
 
-namespace mongo::transport::grpc {
+#include <memory>
+#include <string>
+
+#include <boost/optional.hpp>
+
+namespace mongo::transport {
+namespace MONGO_MOD_PARENT_PRIVATE grpc {
 
 /**
  * Captures the common semantics for ingress and egress gRPC sessions.
@@ -85,19 +88,23 @@ class GRPCSession : public Session {
 public:
     explicit GRPCSession(TransportLayer* tl, HostAndPort remote);
 
-    virtual ~GRPCSession();
+    ~GRPCSession() override = default;
 
-    const HostAndPort& remote() const {
+    const HostAndPort& remote() const override {
         return _remote;
     }
 
-    StatusWith<Message> sourceMessage() noexcept override;
+    const HostAndPort& local() const override {
+        return _local;
+    }
 
-    Status sinkMessage(Message m) noexcept override;
+    StatusWith<Message> sourceMessage() override;
 
-    Future<Message> asyncSourceMessage(const BatonHandle&) noexcept final;
+    Status sinkMessage(Message m) override;
 
-    Future<void> asyncSinkMessage(Message m, const BatonHandle&) noexcept final;
+    Future<Message> asyncSourceMessage(const BatonHandle&) final;
+
+    Future<void> asyncSinkMessage(Message m, const BatonHandle&) final;
 
     void cancelAsyncOperations(const BatonHandle&) final {
         _cancelAsyncOperations();
@@ -150,9 +157,15 @@ public:
      * For ingress sessions, we do not distinguish between load-balanced and non-load-balanced
      * streams. Egress sessions never originate from load-balancers.
      */
-    bool isFromLoadBalancer() const final {
+    bool isConnectedToLoadBalancerPort() const final {
         return false;
     }
+
+    bool isLoadBalancerPeer() const final {
+        return false;
+    }
+
+    void setisLoadBalancerPeer(bool helloHasLoadBalancedOption) final;
 
     /**
      * All gRPC sessions are considered bound to the operation state.
@@ -162,21 +175,13 @@ public:
     }
 
     /**
-     * Runs the provided callback when destroying the session.
-     * Not synchronized, thus not safe to call once the session is visible to other threads.
-     */
-    void setCleanupCallback(std::function<void(const GRPCSession&)> callback) {
-        _cleanupCallback.emplace(std::move(callback));
-    }
-
-    /**
      * The following APIs are not implemented for both ingress and egress gRPC sessions.
      */
-    Status waitForData() noexcept final {
+    Status waitForData() final {
         MONGO_UNIMPLEMENTED;
     }
 
-    Future<void> asyncWaitForData() noexcept final {
+    Future<void> asyncWaitForData() final {
         MONGO_UNIMPLEMENTED;
     }
 
@@ -185,13 +190,12 @@ public:
     }
 
 #ifdef MONGO_CONFIG_SSL
-    const std::shared_ptr<SSLManagerInterface>& getSSLManager() const final {
+    const SSLConfiguration* getSSLConfiguration() const override {
         MONGO_UNIMPLEMENTED;
     }
 #endif
 
-    bool shouldOverrideMaxConns(
-        const std::vector<std::variant<CIDR, std::string>>& exemptions) const override {
+    bool isExemptedByCIDRList(const CIDRList& exemptions) const override {
         return false;
     }
 
@@ -237,9 +241,8 @@ private:
     TransportLayer* const _tl;
 
     const HostAndPort _remote;
+    HostAndPort _local;
     RestrictionEnvironment _restrictionEnvironment;
-
-    boost::optional<std::function<void(const GRPCSession&)>> _cleanupCallback;
 };
 
 /**
@@ -295,11 +298,11 @@ public:
                    boost::optional<std::string> authToken,
                    boost::optional<StringData> encodedClientMetadata);
 
-    ~IngressSession();
+    ~IngressSession() override;
 
-    StatusWith<Message> _readFromStream() noexcept override;
+    StatusWith<Message> _readFromStream() override;
 
-    Status _writeToStream(Message message) noexcept override;
+    Status _writeToStream(Message message) override;
 
     boost::optional<UUID> getRemoteClientId() const {
         return _remoteClientId;
@@ -344,15 +347,15 @@ public:
 
     // IngressSession does not support asynchronous operations.
 
-    Future<Message> _asyncReadFromStream() override final {
+    Future<Message> _asyncReadFromStream() final {
         MONGO_UNIMPLEMENTED;
     }
 
-    Future<void> _asyncWriteToStream(Message m) override final {
+    Future<void> _asyncWriteToStream(Message m) final {
         MONGO_UNIMPLEMENTED;
     }
 
-    void _cancelAsyncOperations() override final {
+    void _cancelAsyncOperations() final {
         MONGO_UNIMPLEMENTED;
     }
 
@@ -422,24 +425,26 @@ public:
                   const std::shared_ptr<GRPCReactor>& reactor,
                   std::shared_ptr<ClientContext> ctx,
                   std::shared_ptr<ClientStream> stream,
+                  boost::optional<SSLConfiguration> sslConfig,
+                  UUID channelId,
                   UUID clientId,
                   std::shared_ptr<SharedState> sharedState);
 
-    ~EgressSession();
+    ~EgressSession() override;
 
-    StatusWith<Message> _readFromStream() noexcept override {
+    StatusWith<Message> _readFromStream() override {
         return _asyncReadFromStream().getNoThrow();
     }
 
-    Status _writeToStream(Message message) noexcept override {
+    Status _writeToStream(Message message) override {
         return _asyncWriteToStream(message).getNoThrow();
     }
 
-    Future<Message> _asyncReadFromStream() override final;
+    Future<Message> _asyncReadFromStream() final;
 
-    Future<void> _asyncWriteToStream(Message message) override final;
+    Future<void> _asyncWriteToStream(Message message) final;
 
-    void _cancelAsyncOperations() override final;
+    void _cancelAsyncOperations() final;
 
     /**
      * Get this session's current idea of what the cluster's maxWireVersion is.
@@ -453,6 +458,14 @@ public:
 
     Status finish() {
         return asyncFinish().getNoThrow();
+    }
+
+    /**
+     * Runs the provided callback when destroying the session.
+     * Not synchronized, thus not safe to call once the session is visible to other threads.
+     */
+    void setCleanupCallback(std::function<void(Status)> callback) {
+        _cleanupCallback.emplace(std::move(callback));
     }
 
     /**
@@ -474,7 +487,15 @@ public:
         return _clientId;
     }
 
+    UUID getChannelId() const {
+        return _channelId;
+    }
+
     void appendToBSON(BSONObjBuilder& bb) const override;
+
+#ifdef MONGO_CONFIG_SSL
+    const SSLConfiguration* getSSLConfiguration() const override;
+#endif
 
 private:
     void _tryCancel() override {
@@ -486,30 +507,20 @@ private:
         return false;
     }
 
-    template <typename T>
-    Future<T> _withCancellation(const CancellationToken& token, Future<T> f) {
-        return future_util::withCancellation(std::move(f),
-                                             token)
-            .unsafeToInlineFuture();  // The returned Future is intended to run inline (typically on
-                                      // the reactor thread). Cancellation callbacks must not run on
-                                      // the thread calling cancelAsyncOperations-- the
-                                      // implementation of _cancelAsyncOperations ensures that the
-                                      // cancellation source is cancelled (and callbacks are
-                                      // correctly run) on the reactor thread.
-    }
-
     void _updateWireVersion();
 
     const std::shared_ptr<GRPCReactor> _reactor;
-    // Calls to _asyncCancelSource.cancel() must always occur on the reactor thread to ensure
-    // cancellation tasks are run on the correct thread.
-    CancellationSource _asyncCancelSource;
 
     AtomicWord<bool> _checkedWireVersion;
     const std::shared_ptr<ClientContext> _ctx;
     const std::shared_ptr<ClientStream> _stream;
+    UUID _channelId;
     UUID _clientId;
     std::shared_ptr<SharedState> _sharedState;
+
+    boost::optional<std::function<void(Status)>> _cleanupCallback;
+    boost::optional<SSLConfiguration> _sslConfig;
 };
 
-}  // namespace mongo::transport::grpc
+}  // namespace MONGO_MOD_PARENT_PRIVATE grpc
+}  // namespace mongo::transport

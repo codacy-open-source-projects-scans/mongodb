@@ -29,18 +29,18 @@
 
 #include "mongo/s/query_analysis_sample_tracker.h"
 
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/server_options.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/s/analyze_shard_key_common_gen.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/clock_source.h"
+#include "mongo/util/decorable.h"
+
 #include <mutex>
 #include <utility>
 
+#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/db/cluster_role.h"
-#include "mongo/db/server_options.h"
-#include "mongo/s/analyze_shard_key_common_gen.h"
-#include "mongo/util/assert_util_core.h"
-#include "mongo/util/clock_source.h"
-#include "mongo/util/decorable.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -125,7 +125,7 @@ QueryAnalysisSampleTracker::_getOrCreateCollectionSampleTracker(
     if (it == _trackers.end()) {
         // Do not create a new set of counters without collUuid specified:
         invariant(collUuid);
-        auto startTime = opCtx->getServiceContext()->getFastClockSource()->now();
+        auto startTime = opCtx->fastClockSource().now();
         it = _trackers
                  .emplace(std::make_pair(
                      nss,

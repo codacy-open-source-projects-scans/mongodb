@@ -28,15 +28,13 @@
  */
 #include "mongo/util/pcre_util.h"
 
-#include <fmt/format.h>
-
 #include "mongo/util/assert_util.h"
 #include "mongo/util/ctype.h"
 #include "mongo/util/pcre.h"
 
-namespace mongo::pcre_util {
+#include <fmt/format.h>
 
-using namespace fmt::literals;
+namespace mongo::pcre_util {
 
 pcre::CompileOptions flagsToOptions(StringData optionFlags, StringData opName) {
     pcre::CompileOptions opt = pcre::UTF;
@@ -57,7 +55,7 @@ pcre::CompileOptions flagsToOptions(StringData optionFlags, StringData opName) {
                 opt |= pcre::EXTENDED;
                 continue;
             default:
-                uasserted(51108, "{} invalid flag in regex options: {}"_format(opName, flag));
+                uasserted(51108, fmt::format("{} invalid flag in regex options: {}", opName, flag));
         }
     }
     return opt;

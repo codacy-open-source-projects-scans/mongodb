@@ -29,24 +29,23 @@
 
 #pragma once
 
-#include <set>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
+
+#include <set>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -74,11 +73,13 @@ public:
     }
 
     const char* getSourceName() const final {
-        return kStageName.rawData();
+        return kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kInternalSplitPipeline;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
@@ -86,7 +87,7 @@ public:
         return DistributedPlanLogic{nullptr, this, boost::none};
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         StageConstraints constraints{StreamType::kStreaming,
                                      PositionRequirement::kNone,
                                      _mergeType,
@@ -105,13 +106,16 @@ public:
 
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
 
+    DepsTracker::State getDependencies(DepsTracker* deps) const override {
+        return DepsTracker::State::SEE_NEXT;
+    }
+
 private:
     DocumentSourceInternalSplitPipeline(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                         HostTypeRequirement mergeType,
                                         boost::optional<ShardId> mergeShardId)
         : DocumentSource(kStageName, expCtx), _mergeType(mergeType), _mergeShardId(mergeShardId) {}
 
-    GetNextResult doGetNext() final;
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
     HostTypeRequirement _mergeType = HostTypeRequirement::kNone;
 

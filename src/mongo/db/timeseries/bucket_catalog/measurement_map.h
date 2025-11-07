@@ -29,14 +29,16 @@
 
 #pragma once
 
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/column/bsoncolumnbuilder.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/tracking/string_map.h"
 
+#include <utility>
+#include <vector>
+
+MONGO_MOD_PARENT_PRIVATE;
 namespace mongo::timeseries::bucket_catalog {
 
 /**
@@ -48,15 +50,16 @@ public:
     explicit MeasurementMap(tracking::Context& trackingContext);
 
     /**
-     * Inserts one measurement. Vector should contain every data field, including the time field,
-     * but not meta field. Will account for skips:
+     * Inserts one measurement.
+     * Will not insert data fields with 'metaField' key.
+     * Will account for skips:
      * - A new data field is added that wasn't in the map before - adds a number of skips equal to
      * the number of existing measurements in all builders prior to the insert into the builder of
      * the new data field.
      * - An existing data field is missing in this measurement - adds a skip to the builder of the
      * missing data field.
      */
-    void insertOne(const std::vector<BSONElement>& oneMeasurementDataFields);
+    void insertOne(const BSONObj& measurement, boost::optional<StringData> metaField);
 
     /**
      * Sets internal state of builders to that of pre-existing compressed builders.
@@ -82,18 +85,17 @@ public:
     }
 
 private:
-    /**
-     * Inserts skips where needed to all builders. Must be called after inserting one measurement.
-     * Cannot call this after multiple measurements have been inserted.
-     */
-    void _fillSkipsInMissingFields(const std::set<StringData>& fieldsSeen);
-
-    void _insertNewKey(StringData key,
-                       const BSONElement& elem,
-                       BSONColumnBuilder<tracking::Allocator<void>> builder);
+    void _insertNewKey(StringData key, const BSONElement& elem, size_t count);
 
     std::reference_wrapper<tracking::Context> _trackingContext;
-    tracking::StringMap<BSONColumnBuilder<tracking::Allocator<void>>> _builders;
+
+    // BSONColumnBuilder with a count of how many elements appended/skipped has been added to it.
+    struct BuilderWithCount {
+        BSONColumnBuilder<tracking::Allocator<void>> builder;
+        size_t count;
+    };
+    // Maps user measurement field names to BSONColumnBuilders with counts.
+    tracking::StringMap<BuilderWithCount> _builders;
     size_t _measurementCount{0};
 
     // The size of the compressed binary data across all builders since the last call to

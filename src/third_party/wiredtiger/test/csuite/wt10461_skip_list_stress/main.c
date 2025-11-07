@@ -143,11 +143,11 @@ thread_search_insert_run(void *arg)
     testutil_snprintf((char *)check_key.data, CHECK_KEY_SIZE, "00");
     check_key.size = CHECK_KEY_SIZE;
 
-    __wt_atomic_addv32(&active_search_insert_threads, 1);
+    __wt_atomic_add_uint32_v(&active_search_insert_threads, 1);
     while (inserts_finished == false)
         WT_IGNORE_RET(
           __wt_search_insert((WT_SESSION_IMPL *)session, cbt, cbt->ins_head, &check_key));
-    __wt_atomic_subv32(&active_search_insert_threads, 1);
+    __wt_atomic_sub_uint32_v(&active_search_insert_threads, 1);
 
     cursor->close(cursor);
     session->close(session, "");
@@ -197,8 +197,10 @@ run(const char *working_dir)
      */
     num_search_insert_threads = (uint32_t)(sysconf(_SC_NPROCESSORS_ONLN) - 1);
     thr = dmalloc(num_search_insert_threads * sizeof(wt_thread_t));
-    for (uint32_t i = 0; i < num_search_insert_threads; i++)
+    for (uint32_t i = 0; i < num_search_insert_threads; i++) {
+        thr[i].name_index = 0;
         testutil_check(__wt_thread_create(NULL, &thr[i], thread_search_insert_run, conn));
+    }
 
     while (active_search_insert_threads != num_search_insert_threads)
         ;
@@ -221,7 +223,6 @@ run(const char *working_dir)
     testutil_check(cursor->close(cursor));
     testutil_check(session->close(session, ""));
     testutil_check(conn->close(conn, ""));
-    testutil_clean_test_artifacts(home);
     testutil_remove(home);
 }
 

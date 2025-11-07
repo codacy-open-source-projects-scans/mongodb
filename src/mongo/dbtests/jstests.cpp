@@ -27,17 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr.hpp>
-#include <cmath>
-#include <cstdint>
-#include <iostream>
-#include <limits>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/error_extra_info.h"
 #include "mongo/base/status.h"
@@ -62,13 +51,24 @@
 #include "mongo/scripting/engine.h"
 #include "mongo/shell/shell_utils.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
+
+#include <cmath>
+#include <cstdint>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/smart_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -301,8 +301,7 @@ public:
     void run() {
         std::unique_ptr<Scope> s((getGlobalScriptEngine()->*scopeFactory)());
 
-        BSONObj o = BSON("foo"
-                         << "bar");
+        BSONObj o = BSON("foo" << "bar");
         s->setObject("a.b", o);
         ASSERT(s->getObject("a").isEmpty());
 
@@ -381,7 +380,7 @@ public:
 
             s->invoke("z = { z : x.d }", nullptr, nullptr);
             BSONObj out = s->getObject("z");
-            ASSERT(out["z"].type() == Date);
+            ASSERT(out["z"].type() == BSONType::date);
         }
 
         {
@@ -430,11 +429,11 @@ public:
             BSONObj o = fromjson("{r:[1,2,3]}");
             s->setObject("x", o, false);
             BSONObj out = s->getObject("x");
-            ASSERT_EQUALS(Array, out.firstElement().type());
+            ASSERT_EQUALS(BSONType::array, out.firstElement().type());
 
             s->setObject("x", o, true);
             out = s->getObject("x");
-            ASSERT_EQUALS(Array, out.firstElement().type());
+            ASSERT_EQUALS(BSONType::array, out.firstElement().type());
         }
 
         // symbol
@@ -445,12 +444,12 @@ public:
             BSONObj in = builder.done();
             s->setObject("x", in, false);
             BSONObj out = s->getObject("x");
-            ASSERT_EQUALS(Symbol, out.firstElement().type());
+            ASSERT_EQUALS(BSONType::symbol, out.firstElement().type());
 
             // readonly
             s->setObject("x", in, true);
             out = s->getObject("x");
-            ASSERT_EQUALS(Symbol, out.firstElement().type());
+            ASSERT_EQUALS(BSONType::symbol, out.firstElement().type());
         }
     }
 };
@@ -479,10 +478,10 @@ public:
         ASSERT(s->invoke("y = { a : z.a , b : z.b , c : z.c , d: z.d }", nullptr, nullptr) == 0);
 
         BSONObj out = s->getObject("y");
-        ASSERT_EQUALS(bsonTimestamp, out["a"].type());
-        ASSERT_EQUALS(MinKey, out["b"].type());
-        ASSERT_EQUALS(MaxKey, out["c"].type());
-        ASSERT_EQUALS(bsonTimestamp, out["d"].type());
+        ASSERT_EQUALS(BSONType::timestamp, out["a"].type());
+        ASSERT_EQUALS(BSONType::minKey, out["b"].type());
+        ASSERT_EQUALS(BSONType::maxKey, out["c"].type());
+        ASSERT_EQUALS(BSONType::timestamp, out["d"].type());
 
         ASSERT_EQUALS(9876U, out["d"].timestampInc());
         ASSERT_EQUALS(Date_t::fromMillisSinceEpoch(1234000), out["d"].timestampTime());
@@ -505,8 +504,8 @@ public:
             b.append("b", 5.6);
             o = b.obj();
         }
-        ASSERT_EQUALS(NumberInt, o["a"].type());
-        ASSERT_EQUALS(NumberDouble, o["b"].type());
+        ASSERT_EQUALS(BSONType::numberInt, o["a"].type());
+        ASSERT_EQUALS(BSONType::numberDouble, o["b"].type());
 
         s->setObject("z", o);
         s->invoke("return z", nullptr, nullptr);
@@ -514,8 +513,8 @@ public:
         ASSERT_EQUALS(5, out["a"].number());
         ASSERT_EQUALS(5.6, out["b"].number());
 
-        ASSERT_EQUALS(NumberDouble, out["b"].type());
-        ASSERT_EQUALS(NumberInt, out["a"].type());
+        ASSERT_EQUALS(BSONType::numberDouble, out["b"].type());
+        ASSERT_EQUALS(BSONType::numberInt, out["a"].type());
 
         //  --  B  --
 
@@ -532,8 +531,8 @@ public:
         ASSERT_EQUALS(5, out["a"].number());
         ASSERT_EQUALS(5.6, out["b"].number());
 
-        ASSERT_EQUALS(NumberDouble, out["b"].type());
-        ASSERT_EQUALS(NumberInt, out["a"].type());
+        ASSERT_EQUALS(BSONType::numberDouble, out["b"].type());
+        ASSERT_EQUALS(BSONType::numberInt, out["a"].type());
 
 
         //  -- C --
@@ -551,22 +550,22 @@ public:
             o = b.obj();
         }
 
-        ASSERT_EQUALS(NumberDouble, o["a"].embeddedObjectUserCheck()["0"].type());
-        ASSERT_EQUALS(NumberInt, o["a"].embeddedObjectUserCheck()["1"].type());
+        ASSERT_EQUALS(BSONType::numberDouble, o["a"].embeddedObjectUserCheck()["0"].type());
+        ASSERT_EQUALS(BSONType::numberInt, o["a"].embeddedObjectUserCheck()["1"].type());
 
         s->setObject("z", o, false);
         out = s->getObject("z");
 
-        ASSERT_EQUALS(NumberDouble, out["a"].embeddedObjectUserCheck()["0"].type());
-        ASSERT_EQUALS(NumberInt, out["a"].embeddedObjectUserCheck()["1"].type());
+        ASSERT_EQUALS(BSONType::numberDouble, out["a"].embeddedObjectUserCheck()["0"].type());
+        ASSERT_EQUALS(BSONType::numberInt, out["a"].embeddedObjectUserCheck()["1"].type());
 
         s->invokeSafe("z.z = 5;", nullptr, nullptr);
         out = s->getObject("z");
         ASSERT_EQUALS(5, out["z"].number());
-        ASSERT_EQUALS(NumberDouble, out["a"].embeddedObjectUserCheck()["0"].type());
+        ASSERT_EQUALS(BSONType::numberDouble, out["a"].embeddedObjectUserCheck()["0"].type());
         // Commenting so that v8 tests will work
         // TODO: this is technically bad, but here to make sure that i understand the behavior
-        // ASSERT_EQUALS( NumberDouble , out["a"].embeddedObjectUserCheck()["1"].type() );
+        // ASSERT_EQUALS(BSONType::numberDouble , out["a"].embeddedObjectUserCheck()["1"].type() );
 
 
         // Eliot says I don't have to worry about this case
@@ -574,8 +573,8 @@ public:
         //            // -- D --
         //
         //            o = fromjson( "{a:3.0,b:4.5}" );
-        //            ASSERT_EQUALS( NumberDouble , o["a"].type() );
-        //            ASSERT_EQUALS( NumberDouble , o["b"].type() );
+        //            ASSERT_EQUALS(BSONType::numberDouble , o["a"].type() );
+        //            ASSERT_EQUALS(BSONType::numberDouble , o["b"].type() );
         //
         //            s->setObject( "z" , o , false );
         //            s->invoke( "return z" , BSONObj() );
@@ -583,8 +582,8 @@ public:
         //            ASSERT_EQUALS( 3 , out["a"].number() );
         //            ASSERT_EQUALS( 4.5 , out["b"].number() );
         //
-        //            ASSERT_EQUALS( NumberDouble , out["b"].type() );
-        //            ASSERT_EQUALS( NumberDouble , out["a"].type() );
+        //            ASSERT_EQUALS(BSONType::numberDouble , out["b"].type() );
+        //            ASSERT_EQUALS(BSONType::numberDouble , out["a"].type() );
         //
     }
 };
@@ -600,11 +599,11 @@ public:
         BSONObj in = b.obj();
         s->setObject("a", in);
         BSONObj out = s->getObject("a");
-        ASSERT_EQUALS(mongo::NumberLong, out.firstElement().type());
+        ASSERT_EQUALS(mongo::BSONType::numberLong, out.firstElement().type());
 
         ASSERT(s->exec("b = {b:a.a}", "foo", false, true, false));
         out = s->getObject("b");
-        ASSERT_EQUALS(mongo::NumberLong, out.firstElement().type());
+        ASSERT_EQUALS(mongo::BSONType::numberLong, out.firstElement().type());
         if (val != out.firstElement().numberLong()) {
             std::cout << val << std::endl;
             std::cout << out.firstElement().numberLong() << std::endl;
@@ -620,31 +619,33 @@ public:
 
         ASSERT(s->exec("d = {d:a.a.toNumber()}", "foo", false, true, false));
         out = s->getObject("d");
-        ASSERT_EQUALS(NumberDouble, out.firstElement().type());
+        ASSERT_EQUALS(BSONType::numberDouble, out.firstElement().type());
         ASSERT_EQUALS(double(val), out.firstElement().number());
 
         ASSERT(s->exec("e = {e:a.a.floatApprox}", "foo", false, true, false));
         out = s->getObject("e");
-        ASSERT_EQUALS(NumberDouble, out.firstElement().type());
+        ASSERT_EQUALS(BSONType::numberDouble, out.firstElement().type());
         ASSERT_EQUALS(double(val), out.firstElement().number());
 
         ASSERT(s->exec("f = {f:a.a.top}", "foo", false, true, false));
         out = s->getObject("f");
-        ASSERT(NumberDouble == out.firstElement().type() || NumberInt == out.firstElement().type());
+        ASSERT(BSONType::numberDouble == out.firstElement().type() ||
+               BSONType::numberInt == out.firstElement().type());
 
         s->setObject("z", BSON("z" << (long long)(4)));
         ASSERT(s->exec("y = {y:z.z.top}", "foo", false, true, false));
         out = s->getObject("y");
-        ASSERT_EQUALS(NumberDouble, out.firstElement().type());
+        ASSERT_EQUALS(BSONType::numberDouble, out.firstElement().type());
 
         ASSERT(s->exec("x = {x:z.z.floatApprox}", "foo", false, true, false));
         out = s->getObject("x");
-        ASSERT(NumberDouble == out.firstElement().type() || NumberInt == out.firstElement().type());
+        ASSERT(BSONType::numberDouble == out.firstElement().type() ||
+               BSONType::numberInt == out.firstElement().type());
         ASSERT_EQUALS(double(4), out.firstElement().number());
 
         ASSERT(s->exec("w = {w:z.z}", "foo", false, true, false));
         out = s->getObject("w");
-        ASSERT_EQUALS(mongo::NumberLong, out.firstElement().type());
+        ASSERT_EQUALS(mongo::BSONType::numberLong, out.firstElement().type());
         ASSERT_EQUALS(4, out.firstElement().numberLong());
     }
 };
@@ -690,11 +691,11 @@ public:
         BSONObj in = b.obj();
         s->setObject("a", in);
         BSONObj out = s->getObject("a");
-        ASSERT_EQUALS(mongo::NumberLong, out.firstElement().type());
+        ASSERT_EQUALS(mongo::BSONType::numberLong, out.firstElement().type());
 
         ASSERT(s->exec("b = {b:a.a}", "foo", false, true, false));
         out = s->getObject("b");
-        ASSERT_EQUALS(mongo::NumberLong, out.firstElement().type());
+        ASSERT_EQUALS(mongo::BSONType::numberLong, out.firstElement().type());
         if (val != out.firstElement().numberLong()) {
             std::cout << val << std::endl;
             std::cout << out.firstElement().numberLong() << std::endl;
@@ -710,17 +711,17 @@ public:
 
         ASSERT(s->exec("d = {d:a.a.toNumber()}", "foo", false, true, false));
         out = s->getObject("d");
-        ASSERT_EQUALS(NumberDouble, out.firstElement().type());
+        ASSERT_EQUALS(BSONType::numberDouble, out.firstElement().type());
         ASSERT_EQUALS(double(val), out.firstElement().number());
 
         ASSERT(s->exec("e = {e:a.a.floatApprox}", "foo", false, true, false));
         out = s->getObject("e");
-        ASSERT_EQUALS(NumberDouble, out.firstElement().type());
+        ASSERT_EQUALS(BSONType::numberDouble, out.firstElement().type());
         ASSERT_EQUALS(double(val), out.firstElement().number());
 
         ASSERT(s->exec("f = {f:a.a.top}", "foo", false, true, false));
         out = s->getObject("f");
-        ASSERT(Undefined == out.firstElement().type());
+        ASSERT(BSONType::undefined == out.firstElement().type());
     }
 };
 
@@ -737,12 +738,12 @@ public:
 
         // Test the scope object
         BSONObj out = s->getObject("a");
-        ASSERT_EQUALS(mongo::NumberDecimal, out.firstElement().type());
+        ASSERT_EQUALS(mongo::BSONType::numberDecimal, out.firstElement().type());
         ASSERT_TRUE(val.isEqual(out.firstElement().numberDecimal()));
 
         ASSERT(s->exec("b = {b:a.a}", "foo", false, true, false));
         out = s->getObject("b");
-        ASSERT_EQUALS(mongo::NumberDecimal, out.firstElement().type());
+        ASSERT_EQUALS(mongo::BSONType::numberDecimal, out.firstElement().type());
         ASSERT_TRUE(val.isEqual(out.firstElement().numberDecimal()));
 
         // Test that the appropriatestd::string output is generated
@@ -802,7 +803,7 @@ public:
         BSONObj in;
         {
             BSONObjBuilder b;
-            b.bb().appendNum(static_cast<char>(bsonTimestamp));
+            b.bb().appendNum(static_cast<char>(BSONType::timestamp));
             b.bb().appendCStr("a");
             b.bb().appendNum(std::numeric_limits<unsigned long long>::max());
 
@@ -1044,7 +1045,7 @@ public:
         s->invokeSafe("y = { c : myb };", nullptr, nullptr);
 
         BSONObj out = s->getObject("y");
-        ASSERT_EQUALS(BinData, out["c"].type());
+        ASSERT_EQUALS(BSONType::binData, out["c"].type());
         //            pp( "in " , in["b"] );
         //            pp( "out" , out["c"] );
         ASSERT_EQUALS(0, in["b"].woCompare(out["c"], false));
@@ -1145,15 +1146,15 @@ public:
 
         s->setNumber("x", 5);
         ASSERT_EQUALS(5, s->getNumber("x"));
-        ASSERT_EQUALS(Undefined, s->type("y"));
+        ASSERT_EQUALS(stdx::to_underlying(BSONType::undefined), s->type("y"));
 
         s->rename("x", "y");
         ASSERT_EQUALS(5, s->getNumber("y"));
-        ASSERT_EQUALS(Undefined, s->type("x"));
+        ASSERT_EQUALS(stdx::to_underlying(BSONType::undefined), s->type("x"));
 
         s->rename("y", "x");
         ASSERT_EQUALS(5, s->getNumber("x"));
-        ASSERT_EQUALS(Undefined, s->type("y"));
+        ASSERT_EQUALS(stdx::to_underlying(BSONType::undefined), s->type("y"));
     }
 };
 
@@ -1397,11 +1398,9 @@ public:
         // Check a few elementary objects
         check(s, BSON("" << 1));
         check(s, BSON("" << 10.0));
-        check(s,
-              BSON(""
-                   << "Shardy"));
+        check(s, BSON("" << "Shardy"));
         check(s, BSON("" << BSON_ARRAY(1 << 2 << 3)));
-        check(s, BSON("" << mongo::jstNULL));
+        check(s, BSON("" << mongo::BSONType::null));
         check(s, BSON("" << mongo::BSONObj()));
         check(s,
               BSON("A" << 1 << "B"

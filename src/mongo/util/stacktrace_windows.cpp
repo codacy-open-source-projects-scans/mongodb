@@ -28,8 +28,6 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/util/stacktrace.h"
 
 #pragma warning(push)
@@ -37,18 +35,6 @@
 #pragma warning(disable : 4091)
 #include <DbgHelp.h>
 #pragma warning(pop)
-
-#include <boost/filesystem/operations.hpp>
-#include <boost/optional.hpp>
-#include <cstdio>
-#include <cstdlib>
-#include <fmt/format.h>
-#include <iostream>
-#include <memory>
-#include <sstream>
-#include <string>
-#include <utility>
-#include <vector>
 
 #include "mongo/base/init.h"
 #include "mongo/bson/bsonobj.h"
@@ -58,6 +44,19 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/text.h"
+
+#include <cstdio>
+#include <cstdlib>
+#include <iostream>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/filesystem/operations.hpp>
+#include <boost/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
@@ -83,7 +82,7 @@ public:
         const auto pathSize = GetModuleFileNameW(nullptr, &modulePath.front(), modulePath.size());
         invariant(pathSize != 0);
         modulePath.resize(pathSize);
-        boost::filesystem::wpath exePath(modulePath);
+        boost::filesystem::path exePath(modulePath);
 
         std::wstringstream symbolPathBuilder;
         symbolPathBuilder << exePath.parent_path().wstring()
@@ -103,8 +102,10 @@ public:
     }
 
     ~SymbolHandler() {
-        SymSetOptions(_origOptions);
-        SymCleanup(getHandle());
+        if (_processHandle.has_value()) {
+            SymSetOptions(_origOptions);
+            SymCleanup(getHandle());
+        }
     }
 
     HANDLE getHandle() const {
@@ -300,7 +301,8 @@ StackTrace getStackTraceImpl(CONTEXT& context) {
 }
 }  // namespace
 
-StackTrace getStackTrace() {
+namespace stack_trace_detail {
+StackTrace getStructuredStackTrace() {
     CONTEXT context;
     memset(&context, 0, sizeof(context));
     context.ContextFlags = CONTEXT_CONTROL;
@@ -308,6 +310,7 @@ StackTrace getStackTrace() {
 
     return getStackTraceImpl(context);
 }
+}  // namespace stack_trace_detail
 
 void printWindowsStackTrace(CONTEXT& context, StackTraceSink& sink) {
     getStackTraceImpl(context).sink(&sink);
@@ -322,17 +325,17 @@ void printWindowsStackTrace(CONTEXT& context) {
     getStackTraceImpl(context).log();
 }
 
-void printStackTrace(StackTraceSink& sink) {
-    getStackTrace().sink(&sink);
+void printStructuredStackTrace(StackTraceSink& sink) {
+    stack_trace_detail::getStructuredStackTrace().sink(&sink);
 }
 
-void printStackTrace(std::ostream& os) {
+void printStructuredStackTrace(std::ostream& os) {
     OstreamStackTraceSink sink{os};
     printStackTrace(sink);
 }
 
-void printStackTrace() {
-    getStackTrace().log();
+void printStructuredStackTrace() {
+    stack_trace_detail::getStructuredStackTrace().log();
 }
 
 }  // namespace mongo

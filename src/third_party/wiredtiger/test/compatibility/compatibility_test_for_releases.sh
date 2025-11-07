@@ -7,6 +7,22 @@ set -e
 set -x
 
 #############################################################
+# bcopy:
+#       arg1: branch name
+#############################################################
+bcopy()
+{
+    # Return true if the branch's format backup generates a BACKUP.copy directory.
+    test "$1" = "mongodb-8.0" && echo "1"
+    test "$1" = "mongodb-7.0" && echo "1"
+    test "$1" = "mongodb-6.0" && echo "1"
+    test "$1" = "mongodb-5.0" && echo "1"
+    test "$1" = "mongodb-4.4" && echo "1"
+    # Anything newer than mongodb-8.0 returns false.
+    return 0
+}
+
+#############################################################
 # bflag:
 #       arg1: branch name
 #############################################################
@@ -14,6 +30,7 @@ bflag()
 {
     # Return if the branch's format command takes the -B flag for backward compatibility.
     test "$1" = "develop" && echo "-B "
+    test "$1" = "mongodb-8.2" && echo "-B"
     test "$1" = "mongodb-8.0" && echo "-B"
     test "$1" = "mongodb-7.0" && echo "-B "
     test "$1" = "mongodb-6.0" && echo "-B "
@@ -88,18 +105,23 @@ build_branch()
     git checkout --quiet "${git_tag}"
 
     build_system=$(get_build_system $1)
+    config=""
     if [ "$build_system" == "cmake" ]; then
         . ./test/evergreen/find_cmake.sh
-        config=""
         config+="-DENABLE_SNAPPY=1 "
         # Need to disable configs since WT-9455 enabled additional items by default.
         # Old releases didn't have these enabled, need to make it consistent.
         config+="-DENABLE_LZ4=0 -DENABLE_ZLIB=0 -DENABLE_ZSTD=0 "
         config+="-DWT_STANDALONE_BUILD=0 "
-        # Use the stable MongoDB toolchain for this build.
-        config+="-DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/mongodbtoolchain_v4_gcc.cmake "
         # Disable cppsuite - not all versions build with the toolchain
-        config+="-DENABLE_CPPSUITE=0"
+        config+="-DENABLE_CPPSUITE=0 "
+
+        # Use the stable MongoDB toolchain if it exists
+        toolchain="$PWD/cmake/toolchains/mongodbtoolchain_stable_gcc.cmake"
+        if [ ! -f $toolchain ]; then
+            toolchain="$PWD/cmake/toolchains/mongodbtoolchain_v4_gcc.cmake"
+        fi
+        config+="-DCMAKE_TOOLCHAIN_FILE=$toolchain "
 
         (mkdir -p build && cd build &&
             $CMAKE $config ../. && make -j $(grep -c ^processor /proc/cpuinfo)) > /dev/null
@@ -154,27 +176,31 @@ create_configs()
     fi
 
     echo "##################################################" > $file_name
-    echo "runs.type=row" >> $file_name              # WT-7379 - Temporarily disable column store tests
-    echo "btree.huffman_value=0" >> $file_name      # WT-12456 - Never used, removed from newer releases
-    echo "btree.prefix=0" >> $file_name             # WT-7579 - Prefix testing isn't portable between releases
-    echo "cache=80" >> $file_name                   # Medium cache so there's eviction
-    echo "checksum=on" >> $file_name                # WT-7851 Fix illegal checksum configuration
-    echo "checkpoints=1"  >> $file_name             # Force periodic writes
-    echo "compression=snappy"  >> $file_name        # We only build with snappy, force the choice
+    echo "runs.type=row" >> $file_name                # WT-7379 - Temporarily disable column store tests
+    echo "btree.huffman_value=0" >> $file_name        # WT-12456 - Never used, removed from newer releases
+    echo "btree.prefix=0" >> $file_name               # WT-7579 - Prefix testing isn't portable between releases
+    echo "btree.prefix_len=0" >> $file_name           # WT-15548 - Not supported by older releases
+    echo "cache=80" >> $file_name                     # Medium cache so there's eviction
+    echo "checksum=on" >> $file_name                  # WT-7851 Fix illegal checksum configuration
+    echo "checkpoints=1"  >> $file_name               # Force periodic writes
+    echo "compression=snappy"  >> $file_name          # We only build with snappy, force the choice
     echo "data_source=table" >> $file_name
-    echo "debug.background_compact=0" >> $file_name # WT-13276 - Not supported by older releases
-    echo "debug.cursor_reposition=0" >> $file_name  # WT-10594 - Not supported by older releases
-    echo "debug.log_retention=0" >> $file_name      # WT-10434 - Not supported by older releases
-    echo "debug.realloc_malloc=0" >> $file_name     # WT-10111 - Not supported by older releases
-    echo "in_memory=0" >> $file_name                # Interested in the on-disk format
-    echo "leak_memory=1" >> $file_name              # Faster runs
-    echo "logging=1" >> $file_name                  # Test log compatibility
-    echo "logging_compression=snappy" >> $file_name # We only built with snappy, force the choice
-    echo "prefetch=0" >> $file_name                 # WT-12978 - Not supported by older releases
+    echo "debug.background_compact=0" >> $file_name   # WT-13276 - Not supported by older releases
+    echo "debug.cursor_reposition=0" >> $file_name    # WT-10594 - Not supported by older releases
+    echo "debug.log_retention=0" >> $file_name        # WT-10434 - Not supported by older releases
+    echo "debug.realloc_malloc=0" >> $file_name       # WT-10111 - Not supported by older releases
+    echo "eviction.evict_use_softptr=0" >> $file_name # WT-14013 - Not supported by older releases
+    echo "in_memory=0" >> $file_name                  # Interested in the on-disk format
+    echo "leak_memory=1" >> $file_name                # Faster runs
+    echo "logging=1" >> $file_name                    # Test log compatibility
+    echo "logging_compression=snappy" >> $file_name   # We only built with snappy, force the choice
+    echo "obsolete_cleanup.method=off" >> $file_name  # WT-14142 - Not supported by older releases
+    echo "obsolete_cleanup.wait=0" >> $file_name      # WT-14142 - Not supported by older releases
+    echo "prefetch=0" >> $file_name                   # WT-12978 - Not supported by older releases
     echo "rows=1000000" >> $file_name
-    echo "salvage=0" >> $file_name                  # Faster runs
-    echo "statistics_log.sources=off" >> $file_name # WT-12710 - Prevent statistics from enabling both 'all' and 'sources'
-    echo "stress.checkpoint=0" >> $file_name        # Faster runs
+    echo "salvage=0" >> $file_name                    # Faster runs
+    echo "statistics_log.sources=off" >> $file_name   # WT-12710 - Prevent statistics from enabling both 'all' and 'sources'
+    echo "stress.checkpoint=0" >> $file_name          # Faster runs
     echo "timer=4" >> $file_name
     echo "verify=1" >> $file_name
     if [ "$branch_name" == "mongodb-4.2" ] ; then
@@ -484,6 +510,22 @@ upgrade_downgrade()
                 echo "transaction.timestamps=1" >> $config
                 echo "transaction.implicit=0" >> $config
             fi
+	    # Older releases (8.0 and older) expect to find a BACKUP.copy
+	    # directory if BACKUP exists. After 8.0 the directory structure
+	    # changed. So copy it for older releases if testing against a
+	    # develop run that is doing backups.
+            need_bcopy1=$(bcopy $1)
+            need_bcopy2=$(bcopy $2)
+	    dir2=$top/$format_dir_branch2/RUNDIR.$am
+	    # If there is a BACKUP and the older release needs a BACKUP.copy directory and
+	    # the source version does not create one, remove any from an earlier run and
+	    # copy the BACKUP contents for this run.
+	    if [ -e $dir2/BACKUP -a "$need_bcopy1" == "1" -a -z "$need_bcopy2" ] ; then
+                echo "Remove any earlier $dir2/BACKUP.copy for older releases"
+		rm -rf $dir2/BACKUP.copy
+                echo "Copying backup directory for older releases"
+		cp -rp $dir2/BACKUP $dir2/BACKUP.copy
+	    fi
             echo "$1 format running on $2 access method $am..."
             cd "$top/$format_dir_branch1"
             flags="-1Rq $(bflag $1)"
@@ -500,6 +542,84 @@ upgrade_downgrade()
             ./t $flags -h "RUNDIR.$am" timer=2
         done
     done
+}
+
+# test/format manually specifies paths to loadable extensions. It also relies on WiredTiger.basecfg
+# existing, so the result is a bunch of paths to .so files in WiredTiger.basecfg. This is fine, but
+# the change from autoconf to cmake resulted in these files living in different directories. It's a
+# bit awful, but this method fixes up the paths in WiredTiger.basecfg when upgrading between
+# versions built with different build systems. This whole thing can go away once we stop caring
+# about 5.0.
+fixup_format_extension_paths()
+{
+    local src_branch="$1"
+    local dst_branch="$2"
+    local working_dir="$3"
+
+    local src_build_system=$(get_build_system "$src_branch")
+    local dst_build_system=$(get_build_system "$dst_branch")
+
+    if [ "$src_build_system" != "$dst_build_system" ]; then
+        if [ "$src_build_system" = "autoconf" ]; then
+            sed --in-place -e 's/\/\.libs//g' "$working_dir"/WiredTiger.basecfg
+        fi
+
+        # We don't need to make the inverse translation when going from cmake to autoconf, since
+        # autoconf puts the libraries in both the .libs/ directory, and the root of the extension's
+        # build directory. Thus, when a newer version saves a path without .libs/ it'll still find
+        # the right shared library.
+    fi
+}
+
+# Check if going from $from to $to is acceptable.
+check_dirty_restart_compatibility()
+{
+    local from="$1"
+    local to="$2"
+
+    # 6.0 introduced a new fast-truncate flag that 5.0 and earlier can't deal with.
+    if [[ "$from" > "mongodb-5.0" ]]; then
+        if [[ "$to" < "mongodb-6.0" ]]; then
+            return -1
+        fi
+    fi
+
+    return 0
+}
+
+# Run test/format from $src_branch, and crash. Recover using test/format from $dst_branch.
+test_dirty_restart()
+{
+    local src_branch="$1"
+    local dst_branch="$2"
+
+    # We can reuse these flags for the dst branch. We're going to restart it from the source
+    # branch's working directory, and test/format will automatically pick up that config.
+    local flags="-1q $(bflag $src_branch)"
+    local config_file="../../../../CONFIG_${src_branch}"
+
+    # Run format on the source branch until it aborts.
+    pushd "${src_branch}/build/test/format"
+    local dir="RUNDIR.${src_branch}"
+
+    # Ignore the error resulting from the segfault. We set a few options: backup=0 since it's
+    # incompatible with verify, and the compatibility version in case $src_branch is newer than
+    # $dst_branch.
+    set +e
+    ./t ${flags} -c "$config_file" -C "compatibility=(release=10.0.0)" -h "$dir" format.abort=1 backup=0
+    set -e
+    popd
+
+    # We now have a directory with WT files that resulted from a crash. Run the newer version
+    # against those.
+    pushd "${dst_branch}/build/test/format"
+    local dir="../../../../${src_branch}/build/test/format/RUNDIR.${src_branch}"
+    fixup_format_extension_paths "$src_branch" "$dst_branch" "$dir"
+    ./t ${flags} -R -h "$dir" format.abort=0
+
+    # Remove the database so future runs don't try to use it.
+    rm -rf "$dir"
+    popd
 }
 
 #############################################################
@@ -675,6 +795,7 @@ import_compatibility_test()
 }
 
 # Only one of below flags will be set by the 1st argument of the script.
+dirty_restart=false
 import=false
 older=false
 newer=false
@@ -701,38 +822,27 @@ gittags['mongodb-4.2']="mongodb-4.2"
 #gittags['mongodb-5.0']="ce1d1e58ba35166710552e3aaa1c426ddba513fd"
 #gittags['mongodb-4.4']="ec742d6807b943cd6f2baf1a55853d296eb5b5c6"
 
-# This array is used to configure the release branches we'd like to use for testing the importing
-# of files created in previous versions of WiredTiger. Go all the way back to mongodb-4.2 since
-# that's the first release where we don't support live import.
-import_release_branches=(develop mongodb-8.0 mongodb-7.0 mongodb-6.0 mongodb-5.0 mongodb-4.4 mongodb-4.2)
+# The version list is defined in the "meta/versions.sh" shell script
+# The variable name is the uppercased variable name
 
-# Branches in below 2 arrays should be put in newer-to-older order.
-#
-# An overlap (last element of the 1st array & first element of the 2nd array)
-# is expected to avoid missing the edge testing coverage.
-#
-# The 2 arrays should be adjusted over time when newer branches are created,
-# or older branches are EOL.
-newer_release_branches=(develop mongodb-8.0 mongodb-7.0 mongodb-6.0 mongodb-5.0 mongodb-4.4)
-older_release_branches=(mongodb-4.4 mongodb-4.2)
+# Use relative folder to locate the meta file
 
-# This array is used to generate compatible configuration files between releases, because
-# upgrade/downgrade test runs each build's format test program on the second build's
-# configuration file.
-compatible_upgrade_downgrade_release_branches=(mongodb-4.4 mongodb-4.2)
+SCRIPT_DIR=$(dirname "$(realpath "$0")")
+VERSIONS_FILE="$SCRIPT_DIR/meta/versions.sh"
+source "$VERSIONS_FILE"
 
-# This array is used to configure the release branches we'd like to run patch version
-# upgrade/downgrade test.
-patch_version_upgrade_downgrade_release_branches=(mongodb-8.0 mongodb-7.0 mongodb-6.0 mongodb-4.4)
+# The meaning of the names of each version list can be found in the version list file.
 
-# This array is used to configure the release branches we'd like to run test checkpoint
-# upgrade/downgrade test.
-test_checkpoint_release_branches=(develop mongodb-8.0 mongodb-7.0 mongodb-6.0 mongodb-4.4)
-
-# This array is used to configure the release branches we'd like to run upgrade to latest test.
-upgrade_to_latest_upgrade_downgrade_release_branches=(mongodb-8.0 mongodb-7.0 mongodb-6.0 mongodb-5.0 mongodb-4.4)
+import_release_branches=($IMPORT_RELEASE_BRANCHES)
+newer_release_branches=($NEWER_RELEASE_BRANCHES)
+older_release_branches=($OLDER_RELEASE_BRANCHES)
+compatible_upgrade_downgrade_release_branches=($COMPATIBLE_UPGRADE_DOWNGRADE_RELEASE_BRANCHES)
+patch_version_upgrade_downgrade_release_branches=($PATCH_VERSION_UPGRADE_DOWNGRADE_RELEASE_BRANCHES)
+test_checkpoint_release_branches=($TEST_CHECKPOINT_RELEASE_BRANCHES)
+upgrade_to_latest_upgrade_downgrade_release_branches=($UPGRADE_TO_LATEST_UPGRADE_DOWNGRADE_RELEASE_BRANCHES)
 
 declare -A scopes
+scopes[dirty_restart]="start from an unclean shutdown of a different version"
 scopes[import]="import files from previous versions"
 scopes[newer]="newer stable release branches"
 scopes[older]="older stable release branches"
@@ -784,7 +894,8 @@ get_build_system()
 #############################################################
 usage()
 {
-    echo -e "Usage: \tcompatibility_test_for_releases [-i|-n|-o|-p|-u|-w|-v]"
+    echo -e "Usage: \tcompatibility_test_for_releases [-d|-i|-n|-o|-p|-u|-w|-v]"
+    echo -e "\t-d\trun compatibility tests for ${scopes[dirty_restart]}"
     echo -e "\t-i\trun compatibility tests for ${scopes[import]}"
     echo -e "\t-n\trun compatibility tests for ${scopes[newer]}"
     echo -e "\t-o\trun compatibility tests for ${scopes[older]}"
@@ -801,6 +912,12 @@ fi
 
 # Script argument processing
 case $1 in
+"-d")
+    dirty_restart=true
+    echo "=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-="
+    echo "Performing compatibility tests for ${scopes[dirty_restart]}"
+    echo "=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-="
+;;
 "-i")
     import=true
     echo "=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-="
@@ -862,16 +979,9 @@ if [ "$import" = true ]; then
     done
 
     for i in ${!import_release_branches[@]}; do
-        newer=${import_release_branches[$i]}
-
-        # MongoDB v4.2 doesn't support live import so it should only ever be used as the "older" branch
-        # that we're importing from.
-        if [ $newer = mongodb-4.2 ]; then
-            continue
+        if [ $((i+1)) < ${#import_release_branches[@]} ]; then
+            (import_compatibility_test ${import_release_branches[$i+1]} ${import_release_branches[$i]})
         fi
-
-        older=${import_release_branches[$i+1]}
-        import_compatibility_test $older $newer
     done
 fi
 
@@ -889,6 +999,29 @@ if [ "$upgrade_to_latest" = true ]; then
         # cleanup.
         cd $test_root
         rm -rf $test_data_root
+    done
+fi
+
+if [ "$dirty_restart" = true ]; then
+    for b in "${upgrade_to_latest_upgrade_downgrade_release_branches[@]}"; do
+        create_configs "$b"
+        pushd .
+        build_branch "$b"
+        popd
+    done
+
+    # Go over the release branches, from pair to pair. If a pair has the LHS different to the RHS,
+    # treat that as a combination worth testing.
+    for b1 in "${upgrade_to_latest_upgrade_downgrade_release_branches[@]}"; do
+        for b2 in "${upgrade_to_latest_upgrade_downgrade_release_branches[@]}"; do
+            if [[ "$b1" != "$b2" ]]; then
+                if ! check_dirty_restart_compatibility "$b1" "$b2"; then
+                    continue
+                fi
+
+                test_dirty_restart "$b1" "$b2"
+            fi
+        done
     done
 fi
 

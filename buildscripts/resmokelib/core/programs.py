@@ -10,6 +10,8 @@ import re
 import stat
 from typing import Any, Optional, Tuple
 
+from opentelemetry import trace
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from packaging import version
 
 from buildscripts.resmokelib import config, logging, utils
@@ -37,7 +39,7 @@ def make_process(*args, **kwargs) -> process.Process:
 
 def get_path_env_var(env_vars):
     """Return the path base on provided environment variable."""
-    path = [os.getcwd()] + config.DEFAULT_MULTIVERSION_DIRS
+    path = [os.getcwd()] + config.MULTIVERSION_DIRS
     # If installDir is provided, add it early to the path
     if config.INSTALL_DIR is not None:
         path.append(config.INSTALL_DIR)
@@ -48,7 +50,6 @@ def get_path_env_var(env_vars):
 def get_binary_version(executable):
     """Return the string for the binary version of the given executable."""
 
-    # pylint: disable=wrong-import-position
     from buildscripts.resmokelib.multiversionconstants import LATEST_FCV
 
     split_executable = os.path.basename(executable).split("-")
@@ -69,6 +70,13 @@ def remove_set_parameter_if_before_version(
     """
     if version.parse(bin_version) < version.parse(required_bin_version):
         set_parameters.pop(parameter_name, None)
+
+
+def _should_enable_otel(test_data, bin_version):
+    """Check whether OpenTelemetry is supported on the current platform."""
+    return test_data.get("enableOTELTracing", True) and version.parse(bin_version) >= version.parse(
+        "8.3.0"
+    )
 
 
 def mongod_program(
@@ -124,6 +132,10 @@ def mongod_program(
         mongod_options["port"] = network.PortAllocator.next_fixture_port(job_num)
 
     suite_set_parameters = mongod_options.get("set_parameters", {})
+
+    if config.OTEL_COLLECTOR_DIR and _should_enable_otel(mongod_options, bin_version):
+        suite_set_parameters["opentelemetryTraceDirectory"] = config.OTEL_COLLECTOR_DIR
+
     remove_set_parameter_if_before_version(
         suite_set_parameters, "queryAnalysisSamplerConfigurationRefreshSecs", bin_version, "7.0.0"
     )
@@ -134,9 +146,6 @@ def mongod_program(
         suite_set_parameters, "defaultConfigCommandTimeoutMS", bin_version, "7.3.0"
     )
 
-    if "grpcPort" not in mongod_options and suite_set_parameters.get("featureFlagGRPC"):
-        mongod_options["grpcPort"] = network.PortAllocator.next_fixture_port(job_num)
-
     remove_set_parameter_if_before_version(
         suite_set_parameters, "internalQueryStatsRateLimit", bin_version, "7.3.0"
     )
@@ -145,6 +154,9 @@ def mongod_program(
     )
     remove_set_parameter_if_before_version(
         suite_set_parameters, "enableAutoCompaction", bin_version, "7.3.0"
+    )
+    remove_set_parameter_if_before_version(
+        suite_set_parameters, "findShardsOnConfigTimeoutMS", bin_version, "8.3.0"
     )
 
     if "grpcPort" not in mongod_options and suite_set_parameters.get("featureFlagGRPC"):
@@ -168,12 +180,19 @@ def mongod_program(
     return make_process(logger, args, **process_kwargs), final_mongod_options
 
 
-def mongos_program(logger, job_num, executable=None, process_kwargs=None, mongos_options=None):
+def mongos_program(
+    logger: logging.Logger,
+    job_num: int,
+    executable: Optional[str] = None,
+    process_kwargs: Optional[dict] = None,
+    mongos_options: dict = None,
+) -> Tuple[process.Process, dict]:
     """Return a Process instance that starts a mongos with arguments constructed from 'kwargs'."""
     bin_version = get_binary_version(executable)
     args = [executable]
 
     mongos_options = mongos_options.copy()
+    mongos_options.setdefault("set_parameters", {})
 
     if config.NOOP_MONGO_D_S_PROCESSES:
         args[0] = os.path.basename(args[0])
@@ -195,6 +214,10 @@ def mongos_program(logger, job_num, executable=None, process_kwargs=None, mongos
         mongos_options["port"] = network.PortAllocator.next_fixture_port(job_num)
 
     suite_set_parameters = mongos_options.get("set_parameters", {})
+
+    if config.OTEL_COLLECTOR_DIR and _should_enable_otel(mongos_options, bin_version):
+        suite_set_parameters["opentelemetryTraceDirectory"] = config.OTEL_COLLECTOR_DIR
+
     remove_set_parameter_if_before_version(
         suite_set_parameters, "queryAnalysisSamplerConfigurationRefreshSecs", bin_version, "7.0.0"
     )
@@ -202,14 +225,17 @@ def mongos_program(logger, job_num, executable=None, process_kwargs=None, mongos
         suite_set_parameters, "defaultConfigCommandTimeoutMS", bin_version, "7.3.0"
     )
 
-    if "grpcPort" not in mongos_options and suite_set_parameters.get("featureFlagGRPC"):
-        mongos_options["grpcPort"] = network.PortAllocator.next_fixture_port(job_num)
-
     remove_set_parameter_if_before_version(
         suite_set_parameters, "internalQueryStatsRateLimit", bin_version, "7.3.0"
     )
     remove_set_parameter_if_before_version(
         suite_set_parameters, "internalQueryStatsErrorsAreCommandFatal", bin_version, "7.3.0"
+    )
+    remove_set_parameter_if_before_version(
+        suite_set_parameters, "findShardsOnConfigTimeoutMS", bin_version, "8.3.0"
+    )
+    remove_set_parameter_if_before_version(
+        suite_set_parameters, "maxRoundsWithoutProgressParameter", bin_version, "8.2.0"
     )
 
     if "grpcPort" not in mongos_options and suite_set_parameters.get("featureFlagGRPC"):
@@ -270,6 +296,8 @@ def mongo_shell_program(
     )
     args = [executable]
 
+    bin_version = get_binary_version(executable)
+
     eval_sb = []  # String builder.
     global_vars = kwargs.pop("global_vars", {}).copy()
 
@@ -283,10 +311,12 @@ def mongo_shell_program(
         "multiversionBinVersion": (shell_mixed_version, ""),
         "storageEngine": (config.STORAGE_ENGINE, ""),
         "storageEngineCacheSizeGB": (config.STORAGE_ENGINE_CACHE_SIZE, ""),
+        "storageEngineCacheSizePct": (config.STORAGE_ENGINE_CACHE_SIZE_PCT, ""),
         "testName": (test_name, ""),
         "wiredTigerCollectionConfigString": (config.WT_COLL_CONFIG, ""),
         "wiredTigerEngineConfigString": (config.WT_ENGINE_CONFIG, ""),
         "wiredTigerIndexConfigString": (config.WT_INDEX_CONFIG, ""),
+        "pauseAfterPopulate": (config.PAUSE_AFTER_POPULATE, None),
     }
 
     test_data = global_vars.get("TestData", {}).copy()
@@ -304,6 +334,13 @@ def mongo_shell_program(
                 continue
 
             test_data[opt_name] = config.CONFIG_FUZZER_ENCRYPTION_OPTS[opt_name]
+
+    if config.LOG_FORMAT:
+        test_data["logFormat"] = config.LOG_FORMAT
+
+    level_names_to_numbers = {"ERROR": 1, "WARNING": 2, "INFO": 3, "DEBUG": 4}
+    # Convert Log Level from string to numbered values. Defaults to using "INFO".
+    test_data["logLevel"] = level_names_to_numbers.get(config.LOG_LEVEL, 3)
 
     if config.SHELL_TLS_ENABLED:
         test_data["shellTlsEnabled"] = True
@@ -326,7 +363,19 @@ def mongo_shell_program(
     if config.MONGOS_TLS_CERTIFICATE_KEY_FILE:
         test_data["mongosTlsCertificateKeyFile"] = config.MONGOS_TLS_CERTIFICATE_KEY_FILE
 
+    if config.OTEL_COLLECTOR_DIR and _should_enable_otel(test_data, bin_version):
+        test_data["otelTraceDirectory"] = config.OTEL_COLLECTOR_DIR
+
     global_vars["TestData"] = test_data
+
+    if test_data.get("enableOTELTracing", True) and "traceCtx" not in test_data:
+        current_span = trace.get_current_span()
+        if current_span:
+            otelCtx = {}
+            TraceContextTextMapPropagator().inject(otelCtx)
+            test_data["traceCtx"] = otelCtx
+
+            logger.debug("Mongo Shell: Using trace context %s", otelCtx.get("traceparent"))
 
     if config.EVERGREEN_TASK_ID is not None:
         test_data["inEvergreen"] = True
@@ -342,10 +391,14 @@ def mongo_shell_program(
     mongod_set_parameters = test_data.get("setParameters", {}).copy()
     mongos_set_parameters = test_data.get("setParametersMongos", {}).copy()
     mongocryptd_set_parameters = test_data.get("setParametersMongocryptd", {}).copy()
+    mongo_set_parameters = test_data.get("setParametersMongo", {}).copy()
 
     feature_flag_dict = {}
     if config.ENABLED_FEATURE_FLAGS is not None:
         feature_flag_dict = {ff: "true" for ff in config.ENABLED_FEATURE_FLAGS}
+
+    if config.DISABLED_FEATURE_FLAGS is not None:
+        feature_flag_dict |= {ff: "false" for ff in config.DISABLED_FEATURE_FLAGS}
 
     # Propagate additional setParameters to mongod processes spawned by the mongo shell. Command
     # line options to resmoke.py override the YAML configuration.
@@ -364,6 +417,9 @@ def mongo_shell_program(
     if config.MONGOCRYPTD_SET_PARAMETERS is not None:
         mongocryptd_set_parameters.update(utils.load_yaml(config.MONGOCRYPTD_SET_PARAMETERS))
         mongocryptd_set_parameters.update(feature_flag_dict)
+
+    if config.MONGO_SET_PARAMETERS is not None:
+        mongo_set_parameters.update(utils.load_yaml(config.MONGO_SET_PARAMETERS))
 
     fixturelib = FixtureLib()
     mongod_launcher = standalone.MongodLauncher(fixturelib)
@@ -384,12 +440,10 @@ def mongo_shell_program(
     test_data["setParameters"] = mongod_set_parameters
     test_data["setParametersMongos"] = mongos_set_parameters
     test_data["setParametersMongocryptd"] = mongocryptd_set_parameters
+    test_data["setShellParameters"] = mongo_set_parameters
 
     if "configShard" not in test_data and config.CONFIG_SHARD is not None:
         test_data["configShard"] = True
-
-    if "embeddedRouter" not in test_data and config.EMBEDDED_ROUTER is not None:
-        test_data["embeddedRouter"] = True
 
     # There's a periodic background thread that checks for and aborts expired transactions.
     # "transactionLifetimeLimitSeconds" specifies for how long a transaction can run before expiring
@@ -413,6 +467,12 @@ def mongo_shell_program(
 
     if config.FUZZ_MONGOD_CONFIGS is not None and config.FUZZ_MONGOD_CONFIGS is not False:
         test_data["fuzzMongodConfigs"] = True
+
+    if config.FUZZ_RUNTIME_PARAMS is not None and config.FUZZ_RUNTIME_PARAMS is not False:
+        test_data["fuzzRuntimeParams"] = True
+        eval_sb.append(
+            'await import("jstests/libs/override_methods/implicitly_retry_on_conflicting_operation_during_fuzztest.js")'
+        )
 
     for var_name in global_vars:
         _format_shell_vars(eval_sb, [var_name], global_vars[var_name])
@@ -461,12 +521,15 @@ def mongo_shell_program(
 
     # Load this file to retry operations that fail due to in-progress background operations.
     eval_sb.append(
-        'await import("jstests/libs/override_methods/implicitly_retry_on_background_op_in_progress.js")'
+        'await import("jstests/libs/override_methods/index_builds/implicitly_retry_on_background_op_in_progress.js")'
     )
 
     eval_sb.append(
         '(function() { Timestamp.prototype.toString = function() { throw new Error("Cannot toString timestamps. Consider using timestampCmp() for comparison or tojson(<variable>) for output."); } })()'
     )
+
+    mocha_grep = json.dumps(config.MOCHA_GREP)
+    eval_sb.append(f"globalThis._mocha_grep = {mocha_grep};")
 
     eval_str = "; ".join(eval_sb)
     args.append("--eval")
@@ -479,7 +542,9 @@ def mongo_shell_program(
         if config.SHELL_TLS_CERTIFICATE_KEY_FILE:
             kwargs["tlsCertificateKeyFile"] = config.SHELL_TLS_CERTIFICATE_KEY_FILE
 
-    if config.SHELL_GRPC:
+    # mongotmock testing with gRPC requires that the shell establish a connection with mongotmock
+    # over gRPC.
+    if config.SHELL_GRPC or mongod_set_parameters.get("useGrpcForSearch"):
         args.append("--gRPC")
 
     if connection_string is not None:
@@ -492,10 +557,9 @@ def mongo_shell_program(
         if "host" in kwargs:
             kwargs.pop("host")
 
-    # if featureFlagQETextSearchPreview is enabled in setParameter, enable it in the shell also
-    # TODO: SERVER-94394 remove once FF is enabled by default
-    if mongod_set_parameters.get("featureFlagQETextSearchPreview"):
-        args.append("--setShellParameter=featureFlagQETextSearchPreview=true")
+    for key in mongo_set_parameters:
+        val = str(mongo_set_parameters[key])
+        args.append(f"--setShellParameter={key}={val}")
 
     # Apply the rest of the command line arguments.
     _apply_kwargs(args, kwargs)

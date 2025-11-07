@@ -1,12 +1,7 @@
 /**
  * Commands supporting read and write concern.
  */
-export var kCommandsSupportingReadConcern = new Set([
-    "aggregate",
-    "count",
-    "distinct",
-    "find",
-]);
+export var kCommandsSupportingReadConcern = new Set(["aggregate", "count", "distinct", "find"]);
 
 /**
  * Write commands supporting snapshot readConcern in a transaction.
@@ -22,11 +17,7 @@ export var kWriteCommandsSupportingSnapshotInTransaction = new Set([
 /**
  * Commands supporting snapshot readConcern outside of transactions.
  */
-export var kCommandsSupportingSnapshot = new Set([
-    "aggregate",
-    "distinct",
-    "find",
-]);
+export var kCommandsSupportingSnapshot = new Set(["aggregate", "distinct", "find"]);
 
 export var kCommandsSupportingWriteConcern = new Set([
     "_configsvrAddShard",
@@ -34,10 +25,8 @@ export var kCommandsSupportingWriteConcern = new Set([
     "_configsvrCommitChunksMerge",
     "_configsvrCommitChunkMigration",
     "_configsvrCommitChunkSplit",
-    "_configsvrCommitIndex",
     "_configsvrCommitMergeAllChunksOnShard",
     "_configsvrCreateDatabase",
-    "_configsvrDropIndexCatalogEntry",
     "_configsvrMoveRange",
     "_configsvrRemoveShard",
     "_configsvrRemoveShardFromZone",
@@ -48,6 +37,7 @@ export var kCommandsSupportingWriteConcern = new Set([
     "appendOplogNote",
     "applyOps",
     "aggregate",
+    "bulkWrite",
     "cleanupOrphaned",
     "clone",
     "cloneCollectionAsCapped",
@@ -88,5 +78,4 @@ export var kCommandsSupportingWriteConcern = new Set([
     "updateUser",
 ]);
 
-export var kCommandsSupportingWriteConcernInTransaction =
-    new Set(["abortTransaction", "commitTransaction"]);
+export var kCommandsSupportingWriteConcernInTransaction = new Set(["abortTransaction", "commitTransaction"]);

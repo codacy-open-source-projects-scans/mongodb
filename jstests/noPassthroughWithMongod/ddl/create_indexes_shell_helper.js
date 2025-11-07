@@ -1,38 +1,38 @@
-var t = db.create_indexes_shell_helper;
+let t = db.create_indexes_shell_helper;
 t.drop();
 
-var mongo = db.getMongo();
+let mongo = db.getMongo();
 
 try {
-    var commandsRan = [];
-    var insertsRan = [];
-    var mockMongo = {
-        getSecondaryOk: function() {
+    let commandsRan = [];
+    let insertsRan = [];
+    let mockMongo = {
+        getSecondaryOk: function () {
             return true;
         },
-        runCommand: function(db, cmd, opts) {
+        runCommand: function (db, cmd, opts) {
             commandsRan.push({db: db, cmd: cmd, opts: opts});
             return {ok: 1.0};
         },
-        getWriteConcern: function() {
+        getWriteConcern: function () {
             return null;
         },
-        getMinWireVersion: function() {
+        getMinWireVersion: function () {
             return mongo.getMinWireVersion();
         },
-        getMaxWireVersion: function() {
+        getMaxWireVersion: function () {
             return mongo.getMaxWireVersion();
         },
-        isReplicaSetMember: function() {
+        isReplicaSetMember: function () {
             return mongo.isReplicaSetMember();
         },
-        isMongos: function() {
+        isMongos: function () {
             return mongo.isMongos();
         },
-        isCausalConsistency: function() {
+        isCausalConsistency: function () {
             return false;
         },
-        getClusterTime: function() {
+        getClusterTime: function () {
             return null;
         },
     };

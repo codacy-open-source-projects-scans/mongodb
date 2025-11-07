@@ -29,20 +29,18 @@
 
 #pragma once
 
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/window_function/window_function.h"
+#include "mongo/db/pipeline/window_function/window_function_sum.h"
+#include "mongo/util/modules.h"
+
 #include <deque>
-#include <limits>
 #include <memory>
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/pipeline/expression.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/window_function/window_function.h"
-#include "mongo/db/pipeline/window_function/window_function_sum.h"
-#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -79,17 +77,7 @@ public:
         _memUsageTracker.set(sizeof(*this));
     }
 
-    Value getValue(boost::optional<Value> current = boost::none) const override {
-        if (_values.size() == 0)
-            return kDefault;
-        if (_nanCount > 0)
-            return Value(std::numeric_limits<double>::quiet_NaN());
-
-
-        return _unitMillis
-            ? uassertStatusOK(ExpressionDivide::apply(_integral.getValue(), Value(*_unitMillis)))
-            : _integral.getValue();
-    }
+    Value getValue(boost::optional<Value> current = boost::none) const override;
 
 private:
     /**

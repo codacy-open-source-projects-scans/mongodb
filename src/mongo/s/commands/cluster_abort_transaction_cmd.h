@@ -34,6 +34,7 @@
 #include "mongo/db/transaction_validation.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/transaction_router.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -57,7 +58,7 @@ public:
         auto ctx = IDLParserContext("AbortReply");
         if (!BaseType::checkIsErrorStatus(resultObj, ctx)) {
             // Will throw if the result doesn't match the abortReply.
-            Reply::parse(ctx, resultObj);
+            Reply::parse(resultObj, ctx);
         }
     }
 
@@ -124,6 +125,10 @@ public:
         uassert(ErrorCodes::InvalidOptions,
                 "abortTransaction can only be run within a session",
                 txnRouter);
+
+        // Instruct the storage engine to not do any extra eviction while aborting transactions so
+        // that resources will not get stuck.
+        shard_role_details::getRecoveryUnit(opCtx)->setNoEvictionAfterCommitOrRollback();
 
         auto abortRes = txnRouter.abortTransaction(opCtx);
         CommandHelpers::filterCommandReplyForPassthrough(abortRes, &result);

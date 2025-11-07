@@ -27,6 +27,48 @@
  *    it in the license file.
  */
 
+#include "mongo/base/data_range.h"
+#include "mongo/base/secure_allocator.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/crypto/aead_encryption.h"
+#include "mongo/crypto/encryption_fields_gen.h"
+#include "mongo/crypto/fle_crypto.h"
+#include "mongo/crypto/fle_crypto_types.h"
+#include "mongo/crypto/fle_field_schema_gen.h"
+#include "mongo/crypto/fle_stats_gen.h"
+#include "mongo/crypto/symmetric_key.h"
+#include "mongo/db/client.h"
+#include "mongo/db/commands/fle2_compact.h"
+#include "mongo/db/fle_crud.h"
+#include "mongo/db/fle_query_interface_mock.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/repl/member_state.h"
+#include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/replication_coordinator_mock.h"
+#include "mongo/db/repl/storage_interface.h"
+#include "mongo/db/repl/storage_interface_impl.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/logv2/log.h"
+#include "mongo/platform/random.h"
+#include "mongo/shell/kms_gen.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/stdx/unordered_set.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/hex.h"
+#include "mongo/util/murmur3.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -46,56 +88,13 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
-#include "mongo/base/data_range.h"
-#include "mongo/base/secure_allocator.h"
-#include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/crypto/aead_encryption.h"
-#include "mongo/crypto/encryption_fields_gen.h"
-#include "mongo/crypto/fle_crypto.h"
-#include "mongo/crypto/fle_crypto_types.h"
-#include "mongo/crypto/fle_field_schema_gen.h"
-#include "mongo/crypto/fle_stats_gen.h"
-#include "mongo/crypto/symmetric_key.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/client.h"
-#include "mongo/db/commands/fle2_compact.h"
-#include "mongo/db/fle_crud.h"
-#include "mongo/db/fle_query_interface_mock.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/repl/member_state.h"
-#include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/replication_coordinator_mock.h"
-#include "mongo/db/repl/storage_interface.h"
-#include "mongo/db/repl/storage_interface_impl.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/service_context_d_test_fixture.h"
-#include "mongo/logv2/log.h"
-#include "mongo/platform/random.h"
-#include "mongo/shell/kms_gen.h"
-#include "mongo/stdx/unordered_map.h"
-#include "mongo/stdx/unordered_set.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/hex.h"
-#include "mongo/util/murmur3.h"
-#include "mongo/util/time_support.h"
-#include "mongo/util/uuid.h"
-
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
 namespace {
 
 constexpr auto kUserKeyId = "ABCDEFAB-1234-9876-1234-123456789012"_sd;
-static UUID userKeyId = uassertStatusOK(UUID::parse(kUserKeyId.toString()));
+static UUID userKeyId = uassertStatusOK(UUID::parse(kUserKeyId));
 
 const FLEUserKey& getUserKey() {
     static std::string userVec = hexblob::decode(
@@ -219,8 +218,10 @@ protected:
 
     ESCTestTokens getTestESCTokens(BSONObj obj);
 
-    ECOCCompactionDocumentV2 generateTestECOCDocumentV2(BSONObj obj,
-                                                        const boost::optional<bool>& = boost::none);
+    ECOCCompactionDocumentV2 generateTestECOCDocumentV2(
+        BSONObj obj,
+        const boost::optional<bool>& = boost::none,
+        const boost::optional<uint32_t>& = boost::none);
 
     EncryptedFieldConfig generateEncryptedFieldConfig(
         const std::set<std::string>& encryptedFieldNames);
@@ -242,10 +243,14 @@ protected:
                                   uint64_t insertsPerCycle = 1);
 
     template <typename Value>
-    void testCompactValueV2_NoNullAnchors(const Value& value, const boost::optional<bool>& isLeaf);
+    void testCompactValueV2_NoNullAnchors(const Value& value,
+                                          const boost::optional<bool>& isLeaf,
+                                          const boost::optional<std::uint32_t>& msize);
 
     template <typename Value>
-    void testCompactValueV2_WithNullAnchor(const Value& value, const boost::optional<bool>& isLeaf);
+    void testCompactValueV2_WithNullAnchor(const Value& value,
+                                           const boost::optional<bool>& isLeaf,
+                                           const boost::optional<std::uint32_t>& msize);
 
 protected:
     ServiceContext::UniqueOperationContext _opCtx;
@@ -259,6 +264,8 @@ protected:
     TestKeyVault _keyVault;
 
     EncryptedStateCollectionsNamespaces _namespaces;
+
+    HmacContext hmacCtx;
 };
 
 void FleCompactTest::setUp() {
@@ -314,7 +321,8 @@ void FleCompactTest::assertDocumentCounts(uint64_t edc, uint64_t esc, uint64_t e
 void FleCompactTest::assertESCNonAnchorDocument(BSONObj obj, bool exists, uint64_t cpos) {
     auto tokens = getTestESCTokens(obj);
     auto doc = _queryImpl->getById(
-        _namespaces.escNss, ESCCollection::generateNonAnchorId(tokens.twiceDerivedTag, cpos));
+        _namespaces.escNss,
+        ESCCollection::generateNonAnchorId(&hmacCtx, tokens.twiceDerivedTag, cpos));
     ASSERT_EQ(doc.isEmpty(), !exists);
     ASSERT(!doc.hasField("value"_sd));
 }
@@ -322,8 +330,8 @@ void FleCompactTest::assertESCNonAnchorDocument(BSONObj obj, bool exists, uint64
 void FleCompactTest::assertESCAnchorDocument(
     BSONObj obj, bool exists, uint64_t apos, uint64_t cpos, bool nullAnchor) {
     auto tokens = getTestESCTokens(obj);
-    auto id = nullAnchor ? ESCCollection::generateNullAnchorId(tokens.twiceDerivedTag)
-                         : ESCCollection::generateAnchorId(tokens.twiceDerivedTag, apos);
+    auto id = nullAnchor ? ESCCollection::generateNullAnchorId(&hmacCtx, tokens.twiceDerivedTag)
+                         : ESCCollection::generateAnchorId(&hmacCtx, tokens.twiceDerivedTag, apos);
     auto doc = _queryImpl->getById(_namespaces.escNss, id);
     ASSERT_EQ(doc.isEmpty(), !exists);
 
@@ -345,38 +353,33 @@ void FleCompactTest::assertESCNullAnchorDocument(BSONObj obj,
 FleCompactTest::ESCTestTokens FleCompactTest::getTestESCTokens(BSONObj obj) {
     auto element = obj.firstElement();
     auto indexKeyId = fieldNameToUUID(element.fieldNameStringData());
-    auto c1token = FLELevel1TokenGenerator::generateCollectionsLevel1Token(
-        _keyVault.getIndexKeyById(indexKeyId).key);
-    auto escToken = FLECollectionTokenGenerator::generateESCToken(c1token);
+    auto c1token = CollectionsLevel1Token::deriveFrom(_keyVault.getIndexKeyById(indexKeyId).key);
+    auto escToken = ESCToken::deriveFrom(c1token);
     auto eltCdr = ConstDataRange(element.value(), element.value() + element.valuesize());
-    auto escDataToken =
-        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, eltCdr);
+    auto escDataToken = ESCDerivedFromDataToken::deriveFrom(escToken, eltCdr);
 
     FleCompactTest::ESCTestTokens tokens;
 
-    tokens.contentionDerived = FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-        generateESCDerivedFromDataTokenAndContentionFactorToken(escDataToken, 0);
-    tokens.twiceDerivedValue =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(tokens.contentionDerived);
-    tokens.twiceDerivedTag =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedTagToken(tokens.contentionDerived);
+    tokens.contentionDerived =
+        ESCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(escDataToken, 0);
+    tokens.twiceDerivedValue = ESCTwiceDerivedValueToken::deriveFrom(tokens.contentionDerived);
+    tokens.twiceDerivedTag = ESCTwiceDerivedTagToken::deriveFrom(tokens.contentionDerived);
 
-    tokens.anchorPaddingRoot = FLEAnchorPaddingGenerator::generateAnchorPaddingRootToken(escToken);
-    tokens.anchorPaddingKey =
-        FLEAnchorPaddingDerivedGenerator::generateAnchorPaddingKeyToken(tokens.anchorPaddingRoot);
-    tokens.anchorPaddingValue =
-        FLEAnchorPaddingDerivedGenerator::generateAnchorPaddingValueToken(tokens.anchorPaddingRoot);
+    tokens.anchorPaddingRoot = AnchorPaddingRootToken::deriveFrom(escToken);
+    tokens.anchorPaddingKey = AnchorPaddingKeyToken::deriveFrom(tokens.anchorPaddingRoot);
+    tokens.anchorPaddingValue = AnchorPaddingValueToken::deriveFrom(tokens.anchorPaddingRoot);
 
     return tokens;
 }
 
 ECOCCompactionDocumentV2 FleCompactTest::generateTestECOCDocumentV2(
-    BSONObj obj, const boost::optional<bool>& isLeaf) {
+    BSONObj obj, const boost::optional<bool>& isLeaf, const boost::optional<std::uint32_t>& msize) {
     auto tokens = getTestESCTokens(obj);
     ECOCCompactionDocumentV2 doc;
     doc.fieldName = obj.firstElementFieldName();
     doc.esc = tokens.contentionDerived;
     doc.isLeaf = isLeaf;
+    doc.msize = msize;
     doc.anchorPaddingRootToken = tokens.anchorPaddingRoot;
     return doc;
 }
@@ -495,7 +498,8 @@ void FleCompactTest::doInsertAndCompactCycles(StringData fieldName,
         for (const auto& [value, state] : values) {
             auto testPair = BSON(fieldName << value);
             auto ecocDoc = generateTestECOCDocumentV2(testPair);
-            compactOneFieldValuePairV2(_queryImpl.get(), ecocDoc, _namespaces.escNss, &escStats);
+            compactOneFieldValuePairV2(
+                _queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, &escStats);
         }
     }
 }
@@ -537,18 +541,17 @@ TEST_F(FleCompactTest, GetUniqueECOCDocsMultipleFieldsWithManyDuplicateValues) {
 // Tests V2 compaction on an ESC that does not contain non-anchors
 TEST_F(FleCompactTest, CompactValueV2_NoNonAnchors) {
     ECStats escStats;
-    auto testPair = BSON("first"
-                         << "brian");
+    auto testPair = BSON("first" << "brian");
     auto ecocDoc = generateTestECOCDocumentV2(testPair);
     assertDocumentCounts(0, 0, 0);
 
     // Compact an empty ESC; assert an error is thrown because compact should not be called
     // if there are no ESC entries that correspond to the ECOC document.
     // Note: this tests compact where EmuBinary returns (cpos = 0, apos = 0)
-    ASSERT_THROWS_CODE(
-        compactOneFieldValuePairV2(_queryImpl.get(), ecocDoc, _namespaces.escNss, &escStats),
-        DBException,
-        7666502);
+    ASSERT_THROWS_CODE(compactOneFieldValuePairV2(
+                           _queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, &escStats),
+                       DBException,
+                       7666502);
     assertDocumentCounts(0, 0, 0);
 }
 
@@ -572,14 +575,16 @@ QueryTypeConfig generateQueryTypeConfigForTest(const T& min,
 
 template <typename Value>
 void FleCompactTest::testCompactValueV2_NoNullAnchors(const Value& value,
-                                                      const boost::optional<bool>& isLeaf) {
+                                                      const boost::optional<bool>& isLeaf,
+                                                      const boost::optional<std::uint32_t>& msize) {
     ECStats escStats;
     std::map<Value, InsertionState> values;
     constexpr auto key = "first"_sd;
     auto testPair = BSON(key << value);
-    auto ecocDoc = generateTestECOCDocumentV2(testPair, isLeaf);
+    auto ecocDoc = generateTestECOCDocumentV2(testPair, isLeaf, msize);
     const bool isRange = isLeaf != boost::none;
-    auto queryTypeConfig = generateQueryTypeConfigForTest(0LL, 100LL);
+    const bool isTextSearch = msize != boost::none;
+    auto rangeQueryTypeConfig = generateQueryTypeConfigForTest(0LL, 100LL);
 
     uint64_t edcCount = 0;
     uint64_t escCount = 0;
@@ -602,27 +607,38 @@ void FleCompactTest::testCompactValueV2_NoNullAnchors(const Value& value,
 
     // Compact ESC which should only have non-anchors
     // Note: this tests compact where EmuBinary returns (cpos > 0, apos = 0)
-    compactOneFieldValuePairV2(_queryImpl.get(), ecocDoc, _namespaces.escNss, &escStats);
+    compactOneFieldValuePairV2(_queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, &escStats);
     ++escCount;
     assertDocumentCounts(edcCount, escCount, ecocCount);
     assertESCAnchorDocument(testPair, true, 1, 15);
 
     // Compact ESC which should now have a fresh anchor and stale non-anchors
     // Note: this tests compact where EmuBinary returns (cpos = null, apos > 0)
-    compactOneFieldValuePairV2(_queryImpl.get(), ecocDoc, _namespaces.escNss, &escStats);
+    compactOneFieldValuePairV2(_queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, &escStats);
     assertDocumentCounts(edcCount, escCount, ecocCount);
     if (isRange) {
         compactOneRangeFieldPad(_queryImpl.get(),
+                                &hmacCtx,
                                 _namespaces.escNss,
                                 "rangeField"_sd,
-                                BSONType::NumberLong,
-                                queryTypeConfig,
+                                BSONType::numberLong,
+                                rangeQueryTypeConfig,
                                 0.42,
                                 1,
                                 1,
                                 *ecocDoc.anchorPaddingRootToken,
                                 &escStats);
         escCount += 3;
+    } else if (isTextSearch) {
+        compactOneTextSearchFieldPad(_queryImpl.get(),
+                                     &hmacCtx,
+                                     _namespaces.escNss,
+                                     "textSearchField"_sd,
+                                     *msize,
+                                     1,
+                                     *ecocDoc.anchorPaddingRootToken,
+                                     &escStats);
+        escCount += *msize - 1;
     }
     assertDocumentCounts(edcCount, escCount, ecocCount);
 
@@ -640,20 +656,31 @@ void FleCompactTest::testCompactValueV2_NoNullAnchors(const Value& value,
 
     // Compact ESC which should now have fresh anchors and fresh non-anchors
     // Note: this tests compact where EmuBinary returns (cpos > 0, apos > 0)
-    compactOneFieldValuePairV2(_queryImpl.get(), ecocDoc, _namespaces.escNss, &escStats);
+    compactOneFieldValuePairV2(_queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, &escStats);
     ++escCount;
     if (isRange) {
         compactOneRangeFieldPad(_queryImpl.get(),
+                                &hmacCtx,
                                 _namespaces.escNss,
                                 "rangeField"_sd,
-                                BSONType::NumberLong,
-                                queryTypeConfig,
+                                BSONType::numberLong,
+                                rangeQueryTypeConfig,
                                 0.42,
                                 1,
                                 1,
                                 *ecocDoc.anchorPaddingRootToken,
                                 &escStats);
         escCount += 3;
+    } else if (isTextSearch) {
+        compactOneTextSearchFieldPad(_queryImpl.get(),
+                                     &hmacCtx,
+                                     _namespaces.escNss,
+                                     "textSearchField"_sd,
+                                     *msize,
+                                     1,
+                                     *ecocDoc.anchorPaddingRootToken,
+                                     &escStats);
+        escCount += *msize - 1;
     }
     assertDocumentCounts(edcCount, escCount, ecocCount);
     assertESCAnchorDocument(testPair, true, 2, 30);
@@ -661,11 +688,15 @@ void FleCompactTest::testCompactValueV2_NoNullAnchors(const Value& value,
 }
 
 TEST_F(FleCompactTest, CompactValueV2_NoNullAnchors) {
-    testCompactValueV2_NoNullAnchors(std::string("value"), boost::none);
+    testCompactValueV2_NoNullAnchors(std::string("value"), boost::none, boost::none);
 }
 
 TEST_F(FleCompactTest, CompactValueV2_NoNullAnchors_Range) {
-    testCompactValueV2_NoNullAnchors(42LL, true);
+    testCompactValueV2_NoNullAnchors(42LL, true, boost::none);
+}
+
+TEST_F(FleCompactTest, CompactValueV2_NoNullAnchors_TextSearch) {
+    testCompactValueV2_NoNullAnchors(std::string("value"), boost::none, 11);
 }
 
 // Ignore this, it will not be in the final version.
@@ -681,12 +712,14 @@ void logCounts(const std::unique_ptr<FLEQueryInterfaceMock>& queryImpl,
 }
 
 template <typename Value>
-void FleCompactTest::testCompactValueV2_WithNullAnchor(const Value& value,
-                                                       const boost::optional<bool>& isLeaf) {
+void FleCompactTest::testCompactValueV2_WithNullAnchor(
+    const Value& value,
+    const boost::optional<bool>& isLeaf,
+    const boost::optional<std::uint32_t>& msize) {
     ECStats escStats;
     constexpr auto key = "first"_sd;
     auto testPair = BSON(key << value);
-    auto ecocDoc = generateTestECOCDocumentV2(testPair, isLeaf);
+    auto ecocDoc = generateTestECOCDocumentV2(testPair, isLeaf, msize);
     std::map<Value, InsertionState> values = {{value, {}}};
 
     uint64_t edcCount = 0;
@@ -706,13 +739,14 @@ void FleCompactTest::testCompactValueV2_WithNullAnchor(const Value& value,
 
     // Run cleanup on ESC to insert the null anchor
     anchorsToDelete = cleanupOneFieldValuePair(
-        _queryImpl.get(), ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
+        _queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
     escCount++;
     ASSERT(anchorsToDelete.empty());
     assertDocumentCounts(edcCount, escCount, ecocCount);
     assertESCNullAnchorDocument(testPair, true, 0 /*apos*/, 5 /*cpos*/);
     logCounts(_queryImpl, _namespaces);
     anchorsToDelete = cleanupOneFieldValuePair(_queryImpl.get(),
+                                               &hmacCtx,
                                                ecocDoc,
                                                _namespaces.escNss,
                                                anchorLimit,
@@ -722,9 +756,10 @@ void FleCompactTest::testCompactValueV2_WithNullAnchor(const Value& value,
 
     // Compact ESC which now contains the null anchor + stale non-anchors; assert no change
     // Note: this tests compact where EmuBinary returns (cpos = null, apos = null)
-    compactOneFieldValuePairV2(_queryImpl.get(), ecocDoc, _namespaces.escNss, &escStats);
+    compactOneFieldValuePairV2(_queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, &escStats);
     assertDocumentCounts(edcCount, escCount, ecocCount);
     anchorsToDelete = cleanupOneFieldValuePair(_queryImpl.get(),
+                                               &hmacCtx,
                                                ecocDoc,
                                                _namespaces.escNss,
                                                anchorLimit,
@@ -742,11 +777,12 @@ void FleCompactTest::testCompactValueV2_WithNullAnchor(const Value& value,
 
     // Compact ESC which now has non-anchors + null anchor; assert anchor is inserted with apos=1
     // Note: this tests compact where EmuBinary returns (cpos > 0, apos = null)
-    compactOneFieldValuePairV2(_queryImpl.get(), ecocDoc, _namespaces.escNss, &escStats);
+    compactOneFieldValuePairV2(_queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, &escStats);
     escCount++;
     assertDocumentCounts(edcCount, escCount, ecocCount);
     assertESCAnchorDocument(testPair, true, 1, edcCount);
     anchorsToDelete = cleanupOneFieldValuePair(_queryImpl.get(),
+                                               &hmacCtx,
                                                ecocDoc,
                                                _namespaces.escNss,
                                                anchorLimit,
@@ -756,11 +792,15 @@ void FleCompactTest::testCompactValueV2_WithNullAnchor(const Value& value,
 }
 
 TEST_F(FleCompactTest, CompactValueV2_WithNullAnchor) {
-    testCompactValueV2_WithNullAnchor(std::string("value"), boost::none);
+    testCompactValueV2_WithNullAnchor(std::string("value"), boost::none, boost::none);
 }
 
 TEST_F(FleCompactTest, CompactValueV2_WithNullAnchor_Range) {
-    testCompactValueV2_WithNullAnchor(42LL, true);
+    testCompactValueV2_WithNullAnchor(42LL, true, boost::none);
+}
+
+TEST_F(FleCompactTest, CompactValueV2_WithNullAnchor_TextSearch) {
+    testCompactValueV2_WithNullAnchor(std::string("value"), boost::none, 11);
 }
 
 TEST_F(FleCompactTest, RandomESCNonAnchorDeletions) {
@@ -803,7 +843,8 @@ TEST_F(FleCompactTest, RandomESCNonAnchorDeletions) {
     int counter = 0;
     for (uint64_t i = 1; i <= deleteCount; i++) {
         auto doc = _queryImpl->getById(
-            _namespaces.escNss, ESCCollection::generateNonAnchorId(tokens.twiceDerivedTag, i));
+            _namespaces.escNss,
+            ESCCollection::generateNonAnchorId(&hmacCtx, tokens.twiceDerivedTag, i));
         if (!doc.isEmpty()) {
             counter++;
         }
@@ -814,8 +855,7 @@ TEST_F(FleCompactTest, RandomESCNonAnchorDeletions) {
 // Tests cleanup on an empty ESC
 TEST_F(FleCompactTest, CleanupValueV2_EmptyESC) {
     ECStats escStats;
-    auto testPair = BSON("first"
-                         << "brian");
+    auto testPair = BSON("first" << "brian");
     auto ecocDoc = generateTestECOCDocumentV2(testPair);
     assertDocumentCounts(0, 0, 0);
     size_t anchorLimit = 100;
@@ -823,14 +863,16 @@ TEST_F(FleCompactTest, CleanupValueV2_EmptyESC) {
     // Cleanup an empty ESC; assert an error is thrown because cleanup should not be called
     // if there are no ESC entries that correspond to the ECOC document.
     // Note: this tests cleanup where EmuBinary returns (cpos = 0, apos = 0)
-    ASSERT_THROWS_CODE(cleanupOneFieldValuePair(
-                           _queryImpl.get(), ecocDoc, _namespaces.escNss, anchorLimit, &escStats),
-                       DBException,
-                       7618816);
+    ASSERT_THROWS_CODE(
+        cleanupOneFieldValuePair(
+            _queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, anchorLimit, &escStats),
+        DBException,
+        7618816);
     assertDocumentCounts(0, 0, 0);
 
     // Padding cleanup should quietly exit with a no-op.
     auto anchorsToDelete = cleanupOneFieldValuePair(_queryImpl.get(),
+                                                    &hmacCtx,
                                                     ecocDoc,
                                                     _namespaces.escNss,
                                                     anchorLimit,
@@ -867,7 +909,7 @@ TEST_F(FleCompactTest, CleanupValue_NullAnchorHasLatestApos_NoAnchors) {
 
     // Run cleanup on empty ESC to insert the null anchor with (apos = 0, cpos = 5)
     anchorsToDelete = cleanupOneFieldValuePair(
-        _queryImpl.get(), ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
+        _queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
     escCount++;
     ASSERT(anchorsToDelete.empty());
     assertDocumentCounts(edcCount, escCount, ecocCount);
@@ -875,7 +917,7 @@ TEST_F(FleCompactTest, CleanupValue_NullAnchorHasLatestApos_NoAnchors) {
 
     // Run cleanup again; (tests emuBinary apos = null, cpos = null)
     anchorsToDelete = cleanupOneFieldValuePair(
-        _queryImpl.get(), ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
+        _queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
     ASSERT(anchorsToDelete.empty());
     assertDocumentCounts(edcCount, escCount, ecocCount);
 
@@ -891,7 +933,7 @@ TEST_F(FleCompactTest, CleanupValue_NullAnchorHasLatestApos_NoAnchors) {
 
     // Run cleanup again; (tests emuBinary apos = null, cpos > 0)
     anchorsToDelete = cleanupOneFieldValuePair(
-        _queryImpl.get(), ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
+        _queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
     ASSERT(anchorsToDelete.empty());
     assertDocumentCounts(edcCount, escCount, ecocCount);
 
@@ -925,7 +967,7 @@ TEST_F(FleCompactTest, CleanupValue_NullAnchorHasLatestApos_WithAnchors) {
 
     // Run cleanup to insert the null anchor
     anchorsToDelete = cleanupOneFieldValuePair(
-        _queryImpl.get(), ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
+        _queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
     escCount++;  // null anchor inserted
     ASSERT_EQ(numAnchors, anchorsToDelete.size());
     assertDocumentCounts(edcCount, escCount, ecocCount);
@@ -933,7 +975,7 @@ TEST_F(FleCompactTest, CleanupValue_NullAnchorHasLatestApos_WithAnchors) {
 
     // Run cleanup again; (tests emuBinary apos = null, cpos = null)
     anchorsToDelete = cleanupOneFieldValuePair(
-        _queryImpl.get(), ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
+        _queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
     assertDocumentCounts(edcCount, escCount, ecocCount);
     ASSERT(anchorsToDelete.empty());
 
@@ -949,7 +991,7 @@ TEST_F(FleCompactTest, CleanupValue_NullAnchorHasLatestApos_WithAnchors) {
 
     // Run cleanup again; (tests emuBinary apos = null, cpos > 0)
     anchorsToDelete = cleanupOneFieldValuePair(
-        _queryImpl.get(), ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
+        _queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
     assertDocumentCounts(edcCount, escCount, ecocCount);
     ASSERT(anchorsToDelete.empty());
 
@@ -983,7 +1025,7 @@ TEST_F(FleCompactTest, CleanupValue_NoAnchorsExist) {
 
     // Cleanup ESC with new non-anchors; (tests emuBinary apos = 0, cpos > 0)
     anchorsToDelete = cleanupOneFieldValuePair(
-        _queryImpl.get(), ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
+        _queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
     escCount++;  // null anchor inserted
     ASSERT(anchorsToDelete.empty());
     assertDocumentCounts(edcCount, escCount, ecocCount);
@@ -1019,7 +1061,7 @@ TEST_F(FleCompactTest, CleanupValue_NewAnchorsExist) {
     // Run cleanup; (tests emuBinary apos > 0, cpos = null)
     // Assert null doc is inserted & has the latest apos & cpos
     anchorsToDelete = cleanupOneFieldValuePair(
-        _queryImpl.get(), ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
+        _queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
     escCount++;  // null anchor inserted
     escDeletesCount = numAnchors;
     ASSERT_EQ(escDeletesCount, anchorsToDelete.size());
@@ -1040,7 +1082,7 @@ TEST_F(FleCompactTest, CleanupValue_NewAnchorsExist) {
     // Run cleanup; (tests emuBinary apos > 0, cpos > 0)
     // Assert null doc is updated with the latest apos & cpos
     anchorsToDelete = cleanupOneFieldValuePair(
-        _queryImpl.get(), ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
+        _queryImpl.get(), &hmacCtx, ecocDoc, _namespaces.escNss, anchorLimit, &escStats);
     ASSERT_EQ(escDeletesCount, anchorsToDelete.size());
     assertDocumentCounts(edcCount, escCount, ecocCount);
     assertESCNullAnchorDocument(testPair, true, numAnchors, edcCount);
@@ -1059,9 +1101,10 @@ TEST_F(FleCompactTest, InjectSomeAnchorPadding_MaximizeUniqueTokens) {
     // Expect numPads := gamma * (pathLength * uniqueLeaves - uniqueTokens)
     // numPads := 0.42 * (8 * 2 - 15) => 0.42 => 1 pad
     compactOneRangeFieldPad(_queryImpl.get(),
+                            &hmacCtx,
                             _namespaces.escNss,
                             "a.b.c"_sd,
-                            BSONType::NumberInt,
+                            BSONType::numberInt,
                             queryTypeConfig,
                             0.42,
                             2,
@@ -1079,9 +1122,10 @@ TEST_F(FleCompactTest, InjectSomeAnchorPadding_MaximizeUniqueTokens) {
     queryTypeConfig.setTrimFactor(boost::none);
     escStats = ECStats();
     compactOneRangeFieldPad(_queryImpl.get(),
+                            &hmacCtx,
                             _namespaces.escNss,
                             "a.b.c"_sd,
-                            BSONType::NumberInt,
+                            BSONType::numberInt,
                             queryTypeConfig,
                             0.42,
                             2,
@@ -1105,9 +1149,10 @@ TEST_F(FleCompactTest, InjectSomeAnchorPadding_MinimizeUniqueTokens) {
     // Expect numPads := gamma * (pathLength * uniqueLeaves - uniqueTokens)
     // numPads := 0.42 * (8 * 2 - 9) => 0.42 * 7 => 2.94 => 3 pads
     compactOneRangeFieldPad(_queryImpl.get(),
+                            &hmacCtx,
                             _namespaces.escNss,
                             "a.b.c"_sd,
-                            BSONType::NumberInt,
+                            BSONType::numberInt,
                             queryTypeConfig,
                             0.42,
                             2,
@@ -1125,9 +1170,10 @@ TEST_F(FleCompactTest, InjectSomeAnchorPadding_MinimizeUniqueTokens) {
     queryTypeConfig.setTrimFactor(boost::none);
     escStats = ECStats();
     compactOneRangeFieldPad(_queryImpl.get(),
+                            &hmacCtx,
                             _namespaces.escNss,
                             "a.b.c"_sd,
-                            BSONType::NumberInt,
+                            BSONType::numberInt,
                             queryTypeConfig,
                             0.42,
                             2,
@@ -1150,9 +1196,10 @@ TEST_F(FleCompactTest, InjectSomeAnchorPadding_TinyDomainSize) {
     // Expect numPads := gamma * (pathLength * uniqueLeaves - uniqueTokens)
     // numPads := 0.42 * (4 * 2 - 5) => 0.42 * 3 => 1.26 => 2 pads
     compactOneRangeFieldPad(_queryImpl.get(),
+                            &hmacCtx,
                             _namespaces.escNss,
                             "a.b.c"_sd,
-                            BSONType::NumberInt,
+                            BSONType::numberInt,
                             queryTypeConfig,
                             0.42,
                             2,
@@ -1170,9 +1217,10 @@ TEST_F(FleCompactTest, InjectSomeAnchorPadding_TinyDomainSize) {
     queryTypeConfig.setTrimFactor(boost::none);
     escStats = ECStats();
     compactOneRangeFieldPad(_queryImpl.get(),
+                            &hmacCtx,
                             _namespaces.escNss,
                             "a.b.c"_sd,
-                            BSONType::NumberInt,
+                            BSONType::numberInt,
                             queryTypeConfig,
                             0.42,
                             2,
@@ -1192,9 +1240,10 @@ TEST_F(FleCompactTest, InjectManyAnchorPadding) {
     // Expect numPads := gamma * (pathLength * uniqueLeaves - uniqueTokens)
     // numPads := 1.0 * (8 * 5 - 25) => 40 - 25 => 15.0 => 15 pads {1..15}
     compactOneRangeFieldPad(_queryImpl.get(),
+                            &hmacCtx,
                             _namespaces.escNss,
                             "a.b.c"_sd,
-                            BSONType::NumberLong,
+                            BSONType::numberLong,
                             queryTypeConfig,
                             1,
                             5,
@@ -1218,9 +1267,10 @@ TEST_F(FleCompactTest, InjectAnchorPaddingOverBatchWriteLimit) {
     const auto uniqueTokens = 8;
     auto numPads = edges * uniqueLeaves - uniqueTokens;
     compactOneRangeFieldPad(_queryImpl.get(),
+                            &hmacCtx,
                             _namespaces.escNss,
                             "a.b.c",
-                            BSONType::NumberLong,
+                            BSONType::numberLong,
                             queryTypeConfig,
                             1,
                             uniqueLeaves,
@@ -1234,9 +1284,10 @@ TEST_F(FleCompactTest, InjectAnchorPaddingOverBatchWriteLimit) {
     // Test with max batch size of 0
     numPads *= 2;
     compactOneRangeFieldPad(_queryImpl.get(),
+                            &hmacCtx,
                             _namespaces.escNss,
                             "a.b.c",
-                            BSONType::NumberLong,
+                            BSONType::numberLong,
                             queryTypeConfig,
                             1,
                             uniqueLeaves,

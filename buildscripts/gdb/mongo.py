@@ -17,8 +17,7 @@ if not gdb:
 
 
 def detect_toolchain(progspace):
-    # LLVM's readelf is significantly faster than GNU's.
-    readelf_bin = "/opt/mongodbtoolchain/v4/bin/llvm-readelf"
+    readelf_bin = os.environ.get("MONGO_GDB_READELF", "/opt/mongodbtoolchain/v5/bin/llvm-readelf")
     if not os.path.exists(readelf_bin):
         readelf_bin = "readelf"
 
@@ -50,10 +49,17 @@ def detect_toolchain(progspace):
     # default is v4 if we can't find a version
     toolchain_ver = None
     if gcc_version:
-        if int(gcc_version.split(".")[0]) == 8:
-            toolchain_ver = "v3"
-        elif int(gcc_version.split(".")[0]) == 11:
-            toolchain_ver = "v4"
+        toolchain_ver = {
+            "8": "v3",
+            "11": "v4",
+            "14": "v5",
+        }.get(gcc_version.split(".")[0])
+    elif clang_version:
+        toolchain_ver = {
+            "19": "v5",
+        }.get(clang_version.split(".")[0])
+        if int(clang_version.split(".")[0]) == 19:
+            toolchain_ver = "v5"
 
     if not toolchain_ver:
         toolchain_ver = "v4"
@@ -69,9 +75,10 @@ STDERR:
 -----------------
 Assuming {toolchain_ver} as a default, this could cause issues with the printers.""")
 
-    pp = glob.glob(
-        f"/opt/mongodbtoolchain/{toolchain_ver}/share/gcc-*/python/libstdcxx/v6/printers.py"
+    base_toolchain_dir = os.environ.get(
+        "MONGO_GDB_PP_DIR", f"/opt/mongodbtoolchain/{toolchain_ver}/share"
     )
+    pp = glob.glob(f"{base_toolchain_dir}/gcc-*/python/libstdcxx/v6/printers.py")
     printers = pp[0]
     return os.path.dirname(os.path.dirname(os.path.dirname(printers)))
 
@@ -84,7 +91,7 @@ def load_libstdcxx_printers(progspace):
         stdcxx_printer_toolchain_paths[progspace] = detect_toolchain(progspace)
         try:
             sys.path.insert(0, stdcxx_printer_toolchain_paths[progspace])
-            global stdlib_printers  # pylint: disable=invalid-name,global-variable-not-assigned
+            global stdlib_printers
             from libstdcxx.v6 import printers as stdlib_printers
             from libstdcxx.v6 import register_libstdcxx_printers
 
@@ -173,7 +180,7 @@ def lookup_type(gdb_type_str: str) -> gdb.Type:
     case or at least it doesn't search all global blocks, sometimes it required
     to get the global block based off the current frame.
     """
-    global MAIN_GLOBAL_BLOCK  # pylint: disable=global-statement
+    global MAIN_GLOBAL_BLOCK
 
     exceptions = []
     try:
@@ -330,6 +337,14 @@ def get_boost_optional(optional):
     if not optional["m_initialized"]:
         return None
     value_ref_type = optional.type.template_argument(0).pointer()
+
+    # boost::optional<T> is either stored using boost::optional_detail::aligned_storage<T> or
+    # using direct storage of `T`. Scalar types are able to take advantage of direct storage.
+    #
+    # https://www.boost.org/doc/libs/1_79_0/libs/optional/doc/html/boost_optional/tutorial/performance_considerations.html
+    if optional["m_storage"].type.strip_typedefs().pointer() == value_ref_type:
+        return optional["m_storage"]
+
     storage = optional["m_storage"]["dummy_"]["data"]
     return storage.cast(value_ref_type).dereference()
 
@@ -372,7 +387,7 @@ class DumpGlobalServiceContext(gdb.Command):
         """Initialize DumpGlobalServiceContext."""
         RegisterMongoCommand.register(self, "mongodb-service-context", gdb.COMMAND_DATA)
 
-    def invoke(self, arg, _from_tty):  # pylint: disable=unused-argument
+    def invoke(self, arg, _from_tty):
         """Invoke GDB command to print the Global Service Context."""
         gdb.execute("print *('mongo::(anonymous namespace)::globalServiceContext')")
 
@@ -564,12 +579,12 @@ class MongoDBDumpLocks(gdb.Command):
         """Initialize MongoDBDumpLocks."""
         RegisterMongoCommand.register(self, "mongodb-dump-locks", gdb.COMMAND_DATA)
 
-    def invoke(self, arg, _from_tty):  # pylint: disable=unused-argument
+    def invoke(self, arg, _from_tty):
         """Invoke MongoDBDumpLocks."""
         print("Running Hang Analyzer Supplement - MongoDBDumpLocks")
 
         main_binary_name = get_process_name()
-        if main_binary_name == "mongod":
+        if main_binary_name == "mongod" or main_binary_name == "mongod_with_debug":
             self.dump_mongod_locks()
         else:
             print("Not invoking mongod lock dump for: %s" % (main_binary_name))
@@ -712,7 +727,7 @@ class MongoDBDumpStorageEngineInfo(gdb.Command):
         """Initialize MongoDBDumpStorageEngineInfo."""
         RegisterMongoCommand.register(self, "mongodb-dump-storage-engine-info", gdb.COMMAND_DATA)
 
-    def invoke(self, arg, _from_tty):  # pylint: disable=unused-argument
+    def invoke(self, arg, _from_tty):
         """Invoke MongoDBDumpStorageEngineInfo."""
         print("Running Hang Analyzer Supplement - MongoDBDumpStorageEngineInfo")
 
@@ -749,7 +764,7 @@ class BtIfActive(gdb.Command):
         """Initialize BtIfActive."""
         RegisterMongoCommand.register(self, "mongodb-bt-if-active", gdb.COMMAND_DATA)
 
-    def invoke(self, arg, _from_tty):  # pylint: disable=unused-argument
+    def invoke(self, arg, _from_tty):
         """Invoke GDB to print stack trace."""
         try:
             idle_location = gdb.parse_and_eval("mongo::for_debuggers::idleThreadLocation")
@@ -870,7 +885,7 @@ class MongoDBJavaScriptStack(gdb.Command):
         """Initialize MongoDBJavaScriptStack."""
         RegisterMongoCommand.register(self, "mongodb-javascript-stack", gdb.COMMAND_STATUS)
 
-    def invoke(self, arg, _from_tty):  # pylint: disable=unused-argument
+    def invoke(self, arg, _from_tty):
         """Invoke GDB to dump JS stacks."""
         print("Running Print JavaScript Stack Supplement")
 
@@ -899,6 +914,25 @@ class MongoDBJavaScriptStack(gdb.Command):
 
         return None
 
+    # Returns the current JS scope above the currently selected frame, or throws a GDB exception if
+    # it cannot be found.
+    @staticmethod
+    def get_js_scope():
+        # GDB needs to be switched to a frame that will allow it to actually know about the
+        # mongo::mozjs namespace. We can't know ahead of time which frame will guarantee
+        # finding the namespace, so we check all of them and stop at the first one that works.
+        # The bottom of the stack notably never works, so we start one frame above.
+        frame = gdb.selected_frame().older()
+        last_error = None
+        while frame:
+            frame.select()
+            frame = frame.older()
+            try:
+                return gdb.parse_and_eval("mongo::mozjs::currentJSScope")
+            except gdb.error as err:
+                last_error = err
+        raise last_error
+
     @staticmethod
     def javascript_stack():
         """GDB in-process python supplement."""
@@ -909,12 +943,6 @@ class MongoDBJavaScriptStack(gdb.Command):
                     print("Ignoring invalid thread %d in javascript_stack" % thread.num)
                     continue
                 thread.switch()
-
-                # Switch frames so gdb actually knows about the mongo::mozjs namespace. It doesn't
-                # actually matter which frame so long as it isn't the top of the stack. This also
-                # enables gdb to know about the mongo::mozjs::currentJSScope thread-local variable
-                # when using gdb.parse_and_eval().
-                gdb.selected_frame().older().select()
             except gdb.error as err:
                 print("Ignoring GDB error '%s' in javascript_stack" % str(err))
                 continue
@@ -926,7 +954,7 @@ class MongoDBJavaScriptStack(gdb.Command):
                 # }
                 # if (!scope || scope->_inOp == 0) { continue; }
                 # print(scope->buildStackString()->c_str());
-                atomic_scope = gdb.parse_and_eval("mongo::mozjs::currentJSScope")
+                atomic_scope = MongoDBJavaScriptStack.get_js_scope()
                 ptr = MongoDBJavaScriptStack.atomic_get_ptr(atomic_scope)
                 if not ptr:
                     continue
@@ -968,7 +996,7 @@ class MongoDBPPrintBsonAtPointer(gdb.Command):
             print("Usage: mongodb-pprint-bson <ptr> <optional length>")
             return
 
-        ptr = eval(args[0])  # pylint: disable=eval-used
+        ptr = eval(args[0])
         size = 20 * 1024
         if len(args) >= 2:
             size = int(args[1])
@@ -992,7 +1020,7 @@ class MongoDBHelp(gdb.Command):
         """Initialize MongoDBHelp."""
         gdb.Command.__init__(self, "mongodb-help", gdb.COMMAND_SUPPORT)
 
-    def invoke(self, arg, _from_tty):  # pylint: disable=unused-argument
+    def invoke(self, arg, _from_tty):
         """Register the mongo print commands."""
         RegisterMongoCommand.print_commands()
 

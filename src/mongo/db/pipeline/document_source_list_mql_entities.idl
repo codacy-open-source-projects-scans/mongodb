@@ -27,10 +27,11 @@
 #
 
 global:
-  cpp_namespace: "mongo"
+    mod_visibility: private
+    cpp_namespace: "mongo"
 
 imports:
-  - "mongo/db/basic_types.idl"
+    - "mongo/db/basic_types.idl"
 
 enums:
     MqlEntityType:
@@ -40,10 +41,10 @@ enums:
             aggregationStages: "aggregationStages"
 
 structs:
-  ListMqlEntitiesSpec:
-    description: "$listMqlEntities aggregation stage"
-    strict: true
-    fields:
-      entityType:
-        description: "The type of MQL entities this stage should return"
-        type: MqlEntityType
+    ListMqlEntitiesSpec:
+        description: "$listMqlEntities aggregation stage"
+        strict: true
+        fields:
+            entityType:
+                description: "The type of MQL entities this stage should return"
+                type: MqlEntityType

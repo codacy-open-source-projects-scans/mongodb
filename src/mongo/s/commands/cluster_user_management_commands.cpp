@@ -28,14 +28,6 @@
  */
 
 
-#include <fmt/format.h>
-#include <iosfwd>
-#include <memory>
-#include <set>
-#include <string>
-#include <type_traits>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -50,20 +42,29 @@
 #include "mongo/db/commands/user_management_commands_common.h"
 #include "mongo/db/commands/user_management_commands_gen.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/namespace_string_util.h"
+
+#include <iosfwd>
+#include <memory>
+#include <set>
+#include <string>
+#include <type_traits>
+#include <vector>
+
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
@@ -72,32 +73,27 @@ namespace mongo {
 
 using std::string;
 using std::stringstream;
-using namespace fmt::literals;
 
 namespace {
-
-const WriteConcernOptions kMajorityWriteConcern(WriteConcernOptions::kMajority,
-                                                // Note: Even though we're setting UNSET here,
-                                                // kMajority implies JOURNAL if journaling is
-                                                // supported by this mongod.
-                                                WriteConcernOptions::SyncMode::UNSET,
-                                                WriteConcernOptions::kWriteConcernTimeoutSharding);
 
 template <typename Request>
 void uassertEmptyReply(BSONObj obj) {
     uassert(ErrorCodes::BadValue,
-            "Received unexpected response from {} command: {}"_format(Request::kCommandName,
-                                                                      tojson(obj)),
+            fmt::format("Received unexpected response from {} command: {}",
+                        Request::kCommandName,
+                        tojson(obj)),
             (obj.nFields() == 1) && obj["ok"]);
 }
 
 template <typename Request, typename Reply>
 Reply parseUMCReply(BSONObj obj) try {
-    return Reply::parse(IDLParserContext(Request::kCommandName), obj);
+    return Reply::parse(obj, IDLParserContext(Request::kCommandName));
 } catch (const AssertionException& ex) {
     uasserted(ex.code(),
-              "Received invalid response from {} command: {}, error: {}"_format(
-                  Request::kCommandName, tojson(obj), ex.reason()));
+              fmt::format("Received invalid response from {} command: {}, error: {}",
+                          Request::kCommandName,
+                          tojson(obj),
+                          ex.reason()));
 }
 
 struct UserCacheInvalidatorNOOP {

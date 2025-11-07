@@ -31,11 +31,13 @@
 
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_set_variable_from_subpipeline.h"
+#include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/search/document_source_internal_search_mongot_remote.h"
 #include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/query/search/internal_search_mongot_remote_spec_gen.h"
 #include "mongo/db/query/search/mongot_cursor.h"
 #include "mongo/executor/task_executor_cursor.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -50,7 +52,6 @@ namespace mongo {
 class DocumentSourceSearch final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$search"_sd;
-    static constexpr StringData kProtocolStoredFieldsName = "storedSource"_sd;
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
@@ -73,17 +74,40 @@ public:
         : DocumentSource(kStageName, expCtx), _spec(std::move(spec)) {}
 
     const char* getSourceName() const override;
-    StageConstraints constraints(Pipeline::SplitState pipeState) const override;
+    StageConstraints constraints(PipelineSplitState pipeState) const override;
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final;
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
+    DepsTracker::State getDependencies(DepsTracker* deps) const override;
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kSearch;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
+    }
+
+    boost::intrusive_ptr<DocumentSource> clone(
+        const boost::intrusive_ptr<ExpressionContext>& newExpCtx) const override {
+        auto expCtx = newExpCtx ? newExpCtx : getExpCtx();
+        return make_intrusive<DocumentSourceSearch>(expCtx, _spec);
     }
 
     auto isStoredSource() const {
         auto storedSourceElem = _spec.getMongotQuery()[mongot_cursor::kReturnStoredSourceArg];
         return !storedSourceElem.eoo() && storedSourceElem.Bool();
+    }
+
+    auto hasScoreDetails() const {
+        auto scoreDetailsElem = _spec.getMongotQuery()[mongot_cursor::kScoreDetailsFieldName];
+        return !scoreDetailsElem.eoo() && scoreDetailsElem.Bool();
+    }
+
+    auto hasReturnScope() const {
+        auto returnScopeElem = _spec.getMongotQuery()[mongot_cursor::kReturnScopeArg];
+        return !returnScopeElem.eoo() && returnScopeElem.isABSONObj();
+    }
+
+    auto hasSearchRootDocumentId() const {
+        return isStoredSource() && hasReturnScope();
     }
 
     std::list<boost::intrusive_ptr<DocumentSource>> desugar();
@@ -109,7 +133,7 @@ public:
         // If it turns out that this stage is not running on a sharded collection, we don't want
         // to send the protocol version to mongot. If the protocol version is sent, mongot will
         // generate unmerged metadata documents that we won't be set up to merge.
-        if (!pExpCtx->getNeedsMerge()) {
+        if (!getExpCtx()->getNeedsMerge()) {
             return boost::none;
         }
         return _spec.getMetadataMergeProtocolVersion();
@@ -156,13 +180,8 @@ public:
 private:
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
 
-    GetNextResult doGetNext() override {
-        // We should never execute a DocumentSourceSearch.
-        MONGO_UNREACHABLE_TASSERT(6253716);
-    }
-
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) override;
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) override;
 
     // Holds all the planning information for the command's eventual mongot request.
     InternalSearchMongotRemoteSpec _spec;

@@ -29,14 +29,6 @@
 
 #pragma once
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -44,8 +36,8 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/baton.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/lock_manager/locker.h"
 #include "mongo/db/operation_id.h"
 #include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/service_context.h"
@@ -59,15 +51,26 @@
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
-#include "mongo/util/concurrency/with_lock.h"
+#include "mongo/util/clock_source.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/inline_memory.h"
 #include "mongo/util/interruptible.h"
 #include "mongo/util/lockable_adapter.h"
+#include "mongo/util/modules_incompletely_marked_header.h"
+#include "mongo/util/tick_source.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
+
+#include <algorithm>
+#include <memory>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -138,6 +141,27 @@ class OperationContext final : public OperationContextBase,
     OperationContext& operator=(const OperationContext&) = delete;
 
 public:
+    /**
+     * Used for tracking information about checkForInterrupt() calls that are overdue. This is only
+     * used for a small sample of operations to avoid regressing performance.
+     *
+     * TODO: SERVER-105801 we should consider moving this information up to Interruptible.
+     */
+    struct OverdueInterruptCheckStats {
+        OverdueInterruptCheckStats(TickSource::Tick startTime)
+            : interruptCheckWindowStartTime(std::move(startTime)) {}
+
+        Atomic<int64_t> overdueInterruptChecks{0};
+
+        // Sum and max time an operation was overdue in checking for interrupts.
+        Atomic<Milliseconds> overdueAccumulator{Milliseconds{0}};
+        Atomic<Milliseconds> overdueMaxTime{Milliseconds{0}};
+
+        // We only collect interrupt check stats for a small fraction of operations. For this sample
+        // we can afford to read the TickSource each checkForInterrupt() call.
+        TickSource::Tick interruptCheckWindowStartTime;
+    };
+
     static constexpr auto kDefaultOperationContextTimeoutError = ErrorCodes::ExceededTimeLimit;
 
     /**
@@ -163,7 +187,7 @@ public:
     // Returns the RecoveryUnit (same return value as recoveryUnit()) but the caller takes
     // ownership of the returned RecoveryUnit, and the OperationContext instance relinquishes
     // ownership. Sets the RecoveryUnit to NULL.
-    std::unique_ptr<RecoveryUnit> releaseRecoveryUnit_DO_NOT_USE();
+    std::unique_ptr<RecoveryUnit> releaseRecoveryUnit_DO_NOT_USE(ClientLock&);
 
     // TODO (SERVER-77213): The RecoveryUnit ownership is being moved to the TransactionResources.
     // Do not add any new usages to these methods as they will go away and will be folded as an
@@ -171,7 +195,7 @@ public:
     //
     // Sets up a new, inactive RecoveryUnit in the OperationContext. Destroys any previous recovery
     // unit and executes its rollback handlers.
-    void replaceRecoveryUnit_DO_NOT_USE();
+    void replaceRecoveryUnit_DO_NOT_USE(ClientLock& clientLock);
 
     // TODO (SERVER-77213): The RecoveryUnit ownership is being moved to the TransactionResources.
     // Do not add any new usages to these methods as they will go away and will be folded as an
@@ -179,7 +203,7 @@ public:
     //
     // Similar to replaceRecoveryUnit(), but returns the previous recovery unit like
     // releaseRecoveryUnit().
-    std::unique_ptr<RecoveryUnit> releaseAndReplaceRecoveryUnit_DO_NOT_USE();
+    std::unique_ptr<RecoveryUnit> releaseAndReplaceRecoveryUnit_DO_NOT_USE(ClientLock& clientLock);
 
 
     // TODO (SERVER-77213): The RecoveryUnit ownership is being moved to the TransactionResources.
@@ -191,7 +215,7 @@ public:
     // returned separately even though the state logically belongs to the RecoveryUnit,
     // as it is managed by the OperationContext.
     WriteUnitOfWork::RecoveryUnitState setRecoveryUnit_DO_NOT_USE(
-        std::unique_ptr<RecoveryUnit> unit, WriteUnitOfWork::RecoveryUnitState state);
+        std::unique_ptr<RecoveryUnit> unit, WriteUnitOfWork::RecoveryUnitState state, ClientLock&);
 
     // TODO (SERVER-77213): The locker ownership is being moved to the TransactionResources. Do not
     // add any new usages to these methods as they will go away and will be folded as an
@@ -204,7 +228,7 @@ public:
     }
     void setLockState_DO_NOT_USE(std::unique_ptr<Locker> locker);
     std::unique_ptr<Locker> swapLockState_DO_NOT_USE(std::unique_ptr<Locker> locker,
-                                                     WithLock clientLock);
+                                                     ClientLock& clientLock);
 
     /**
      * Returns Status::OK() unless this operation is in a killed state.
@@ -212,20 +236,25 @@ public:
     Status checkForInterruptNoAssert() noexcept override;
 
     /**
-     * Returns the service context under which this operation context runs, or nullptr if there is
-     * no such service context.
+     * Updates the counters for tracking overdue interrupts.
+     *
+     * This function may only be called when the operation has opted into tracking interrupts
+     * (check via overdueInterruptCheckStats()). For such operations, this should be called at the
+     * operation's completion to ensure that the time after the final checkForInterrupt() is
+     * accounted for.
+     */
+    void updateInterruptCheckCounters();
+
+    /**
+     * Returns the service context under which this operation context runs.
      */
     ServiceContext* getServiceContext() const {
-        if (!_client) {
-            return nullptr;
-        }
-
         return _client->getServiceContext();
     }
 
     /** Returns the Service under which this operation operates. */
     Service* getService() const {
-        return _client ? _client->getService() : nullptr;
+        return _client->getService();
     }
 
     /**
@@ -480,6 +509,18 @@ public:
     }
 
     /**
+     * Returns when the operation was marked as killed, or 0 if the operation has not been
+     * marked as killed.
+     *
+     * This function can return 0 even after checkForInterrupt() has returned an error as during
+     * global shutdowns checkForInterrupt looks at external flags. In this case the caller is
+     * effectively noticing the interrupt before the opCtx is marked dead.
+     */
+    TickSource::Tick getKillTime() const {
+        return _killTime.load();
+    }
+
+    /**
      * Sets the deadline for this operation to the given point in time.
      *
      * To remove a deadline, pass in Date_t::max().
@@ -585,7 +626,7 @@ public:
      * TODO SERVER-68868: Remove this once UninterruptibleLockGuard is removed from the codebase.
      */
     bool uninterruptibleLocksRequested_DO_NOT_USE() const {
-        return _interruptibleLocksRequested < 0;
+        return _interruptibleLocksRequested.load() < 0;
     }
 
     /**
@@ -742,6 +783,28 @@ public:
         _killOpsExempt = true;
     }
 
+    /**
+     * Returns number of checkForInterrupts() done on this OperationContext.
+     */
+    int64_t numInterruptChecks() const {
+        return _numInterruptChecks.loadRelaxed();
+    }
+
+    /**
+     * Begins tracking time between interrupt checks using the given time as the operation start
+     * time. It is an error to call this when already tracking interrupt checks
+     * (overdueInterruptCheckStats() can be used to determine this).
+     */
+    void trackOverdueInterruptChecks(TickSource::Tick startTime);
+
+    /**
+     * Returns pointer to the struct containing interrupt check stats iff this OperationContext is
+     * tracking interrupts. Otherwise returns nullptr.
+     */
+    const OverdueInterruptCheckStats* overdueInterruptCheckStats() const {
+        return _overdueInterruptCheckStats.get();
+    }
+
     // The query sampling options for operations on this opCtx. 'optIn' makes the operations
     // eligible for query sampling regardless of whether the client is considered as internal by
     // the sampler. 'optOut' does the opposite.
@@ -779,14 +842,22 @@ public:
     decltype(auto) runWithoutInterruptionExceptAtGlobalShutdown(Callback&& cb) {
         try {
             bool prevIgnoringInterrupts = _ignoreInterrupts;
-            DeadlineState prevDeadlineState{_deadline, _timeoutError, _hasArtificialDeadline};
+            DeadlineState prevDeadlineState{
+                _deadline, _maxTime, _timeoutError, _hasArtificialDeadline};
             ScopeGuard guard([&] {
                 // Restore the original interruption and deadline state.
                 stdx::lock_guard lg(*_client);
                 _ignoreInterrupts = prevIgnoringInterrupts;
-                setDeadlineByDate(prevDeadlineState.deadline, prevDeadlineState.error);
+                setDeadlineAndMaxTime(
+                    prevDeadlineState.deadline, prevDeadlineState.maxTime, prevDeadlineState.error);
                 _hasArtificialDeadline = prevDeadlineState.hasArtificialDeadline;
                 _markKilledIfDeadlineRequires();
+
+                // For purposes of tracking overdue interrupts, act as if the moment we left
+                // the ignore state was the last check for interrupt.
+                if (auto* stats = _overdueInterruptCheckStats.get()) {
+                    stats->interruptCheckWindowStartTime = tickSource().getTicks();
+                }
             });
             // Ignore interrupts until the callback completes.
             {
@@ -796,11 +867,24 @@ public:
                 _ignoreInterrupts = true;
             }
             return std::forward<Callback>(cb)();
-        } catch (const ExceptionForCat<ErrorCategory::ExceededTimeLimitError>&) {
+        } catch (const ExceptionFor<ErrorCategory::ExceededTimeLimitError>&) {
             // May throw replacement exception
             checkForInterrupt();
             throw;
         }
+    }
+
+    /**
+     * The following return the `FastClockSource` and `TickSource` instances that were available at
+     * the time of creating this `opCtx`. Using the following ensures we use the same source for
+     * timing during the lifetime of an `opCtx`, and we save on the cost of acquiring a reference to
+     * the clock/tick source.
+     */
+    ClockSource& fastClockSource() const {
+        return *_fastClockSource;
+    }
+    TickSource& tickSource() const {
+        return *_tickSource;
     }
 
 private:
@@ -808,7 +892,7 @@ private:
         stdx::condition_variable& cv, BasicLockableAdapter m, Date_t deadline) noexcept override;
 
     DeadlineState pushArtificialDeadline(Date_t deadline, ErrorCodes::Error error) override {
-        DeadlineState ds{_deadline, _timeoutError, _hasArtificialDeadline};
+        DeadlineState ds{_deadline, _maxTime, _timeoutError, _hasArtificialDeadline};
 
         _hasArtificialDeadline = true;
         setDeadlineByDate(std::min(_deadline, deadline), error);
@@ -817,7 +901,7 @@ private:
     }
 
     void popArtificialDeadline(DeadlineState ds) override {
-        setDeadlineByDate(ds.deadline, ds.error);
+        setDeadlineAndMaxTime(ds.deadline, ds.maxTime, ds.error);
         _hasArtificialDeadline = ds.hasArtificialDeadline;
 
         _markKilledIfDeadlineRequires();
@@ -897,6 +981,9 @@ private:
 
     Client* const _client;
 
+    ClockSource* const _fastClockSource = getServiceContext()->getFastClockSource();
+    TickSource* const _tickSource = getServiceContext()->getTickSource();
+
     const OperationId _opId;
     boost::optional<OperationKey> _opKey;
 
@@ -907,7 +994,9 @@ private:
     std::unique_ptr<Locker> _locker;
 
     std::unique_ptr<RecoveryUnit> _recoveryUnit;
-    WriteUnitOfWork::RecoveryUnitState _ruState =
+
+    // This is used directly by WriteUnitOfWork
+    MONGO_MOD_NEEDS_REPLACEMENT WriteUnitOfWork::RecoveryUnitState _ruState =
         WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork;
 
     // Operations run within a transaction will hold a WriteUnitOfWork for the duration in order
@@ -918,6 +1007,16 @@ private:
     // operation is not killed. If killed, it will contain a specific code. This value changes only
     // once from OK to some kill code.
     AtomicWord<ErrorCodes::Error> _killCode{ErrorCodes::OK};
+
+    // When the operation was marked as killed.
+    AtomicWord<TickSource::Tick> _killTime{0};
+
+    // Tracks total number of interrupt checks.
+    Atomic<int64_t> _numInterruptChecks{0};
+
+    // State for tracking overdue interrupt checks. This is only allocated for a small sample of
+    // operations that are randomly selected.
+    std::unique_ptr<OverdueInterruptCheckStats> _overdueInterruptCheckStats;
 
     // Used to cancel all tokens obtained via getCancellationToken() when this OperationContext is
     // killed.
@@ -942,13 +1041,15 @@ private:
      * UninterruptibleLockGuard. It is > 0 on the first case and < 0 in the other. The absolute
      * number specifies how many requesters there are for each type.
      */
-    int _interruptibleLocksRequested = 0;
+    Atomic<int> _interruptibleLocksRequested = 0;
 
     // Max operation time requested by the user or by the cursor in the case of a getMore with no
     // user-specified maxTimeMS. This is tracked with microsecond granularity for the purpose of
     // assigning unused execution time back to a cursor at the end of an operation, only. The
     // _deadline and the service context's fast clock are the only values consulted for determining
     // if the operation's timelimit has been exceeded.
+    // TODO (SERVER-108835): Both deadline and maxTime represent the maximum latency, consider to
+    // collapse them to mitigate the risk of bugs due to confusion.
     Microseconds _maxTime = Microseconds::max();
 
     // The value of the maxTimeMS requested by user in the case it was overwritten.
@@ -957,7 +1058,7 @@ private:
     bool _usesDefaultMaxTimeMS = false;
 
     // Timer counting the elapsed time since the construction of this OperationContext.
-    Timer _elapsedTime;
+    Timer _elapsedTime{_tickSource};
 
     bool _writesAreReplicated = true;
     bool _shouldIncrementLatencyStats = true;
@@ -1024,16 +1125,14 @@ class UninterruptibleLockGuard {
 public:
     explicit UninterruptibleLockGuard(OperationContext* opCtx) : _opCtx(opCtx) {
         invariant(_opCtx);
-        invariant(_opCtx->_interruptibleLocksRequested <= 0);
-        _opCtx->_interruptibleLocksRequested--;
+        invariant(_opCtx->_interruptibleLocksRequested.fetchAndSubtract(1) <= 0);
     }
 
     UninterruptibleLockGuard(const UninterruptibleLockGuard& other) = delete;
     UninterruptibleLockGuard& operator=(const UninterruptibleLockGuard&) = delete;
 
     ~UninterruptibleLockGuard() {
-        invariant(_opCtx->_interruptibleLocksRequested < 0);
-        _opCtx->_interruptibleLocksRequested++;
+        invariant(_opCtx->_interruptibleLocksRequested.fetchAndAdd(1) < 0);
     }
 
 private:
@@ -1050,16 +1149,14 @@ class InterruptibleLockGuard {
 public:
     explicit InterruptibleLockGuard(OperationContext* opCtx) : _opCtx(opCtx) {
         invariant(_opCtx);
-        invariant(_opCtx->_interruptibleLocksRequested >= 0);
-        _opCtx->_interruptibleLocksRequested++;
+        invariant(_opCtx->_interruptibleLocksRequested.fetchAndAdd(1) >= 0);
     }
 
     InterruptibleLockGuard(const InterruptibleLockGuard& other) = delete;
     InterruptibleLockGuard& operator=(const InterruptibleLockGuard&) = delete;
 
     ~InterruptibleLockGuard() {
-        invariant(_opCtx->_interruptibleLocksRequested > 0);
-        _opCtx->_interruptibleLocksRequested--;
+        invariant(_opCtx->_interruptibleLocksRequested.fetchAndSubtract(1) > 0);
     }
 
 private:

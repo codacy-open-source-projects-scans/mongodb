@@ -538,6 +538,103 @@ __wti_conn_remove_encryptor(WT_SESSION_IMPL *session)
 }
 
 /*
+ * __conn_add_page_log --
+ *     WT_CONNECTION->add_page_log method.
+ */
+static int
+__conn_add_page_log(
+  WT_CONNECTION *wt_conn, const char *name, WT_PAGE_LOG *page_log, const char *config)
+{
+    WT_CONNECTION_IMPL *conn;
+    WT_DECL_RET;
+    WT_NAMED_PAGE_LOG *npl;
+    WT_SESSION_IMPL *session;
+
+    npl = NULL;
+
+    conn = (WT_CONNECTION_IMPL *)wt_conn;
+    CONNECTION_API_CALL(conn, session, add_page_log, config, cfg);
+    WT_UNUSED(cfg);
+
+    WT_ERR(__wt_calloc_one(session, &npl));
+    WT_ERR(__wt_strdup(session, name, &npl->name));
+    npl->page_log = page_log;
+    __wt_spin_lock(session, &conn->api_lock);
+    TAILQ_INSERT_TAIL(&conn->pagelogqh, npl, q);
+    npl = NULL;
+    __wt_spin_unlock(session, &conn->api_lock);
+
+err:
+    if (npl != NULL) {
+        __wt_free(session, npl->name);
+        __wt_free(session, npl);
+    }
+
+    API_END_RET_NOTFOUND_MAP(session, ret);
+}
+
+/*
+ * __conn_get_page_log --
+ *     WT_CONNECTION->get_page_log method.
+ */
+static int
+__conn_get_page_log(WT_CONNECTION *wt_conn, const char *name, WT_PAGE_LOG **page_logp)
+{
+    WT_CONNECTION_IMPL *conn;
+    WT_DECL_RET;
+    WT_NAMED_PAGE_LOG *npage_log;
+    WT_PAGE_LOG *page_log;
+
+    conn = (WT_CONNECTION_IMPL *)wt_conn;
+    *page_logp = NULL;
+
+    ret = EINVAL;
+    TAILQ_FOREACH (npage_log, &conn->pagelogqh, q)
+        if (WT_STREQ(npage_log->name, name)) {
+            page_log = npage_log->page_log;
+            WT_RET(page_log->pl_add_reference(page_log));
+            *page_logp = page_log;
+            ret = 0;
+            break;
+        }
+    if (ret != 0)
+        WT_RET_MSG(conn->default_session, ret, "unknown page_log '%s'", name);
+
+    return (ret);
+}
+
+/*
+ * __wti_conn_remove_page_log --
+ *     Remove page_log added by WT_CONNECTION->add_page_log, only used internally.
+ */
+int
+__wti_conn_remove_page_log(WT_SESSION_IMPL *session)
+{
+    WT_CONNECTION_IMPL *conn;
+    WT_DECL_RET;
+    WT_NAMED_PAGE_LOG *npl;
+    WT_PAGE_LOG *pl;
+
+    conn = S2C(session);
+
+    while ((npl = TAILQ_FIRST(&conn->pagelogqh)) != NULL) {
+        /* Remove from the connection's list, free memory. */
+        TAILQ_REMOVE(&conn->pagelogqh, npl, q);
+
+        /* Call any termination method. */
+        pl = npl->page_log;
+        WT_ASSERT(session, pl != NULL);
+        if (pl->terminate != NULL)
+            WT_TRET(pl->terminate(pl, (WT_SESSION *)session));
+
+        __wt_free(session, npl->name);
+        __wt_free(session, npl);
+    }
+
+    return (ret);
+}
+
+/*
  * __conn_add_storage_source --
  *     WT_CONNECTION->add_storage_source method.
  */
@@ -771,6 +868,9 @@ extern int zstd_extension_init(WT_CONNECTION *, WT_CONFIG_ARG *);
 #ifdef HAVE_BUILTIN_EXTENSION_IAA
 extern int iaa_extension_init(WT_CONNECTION *, WT_CONFIG_ARG *);
 #endif
+#ifdef HAVE_BUILTIN_EXTENSION_PALM
+extern int palm_extension_init(WT_CONNECTION *, WT_CONFIG_ARG *);
+#endif
 
 /*
  * __conn_builtin_extensions --
@@ -793,6 +893,9 @@ __conn_builtin_extensions(WT_CONNECTION_IMPL *conn, const char *cfg[])
 #endif
 #ifdef HAVE_BUILTIN_EXTENSION_IAA
     WT_RET(__conn_builtin_init(conn, "iaa", iaa_extension_init, cfg));
+#endif
+#ifdef HAVE_BUILTIN_EXTENSION_PALM
+    WT_RET(__conn_builtin_init(conn, "palm", palm_extension_init, cfg));
 #endif
 
     /* Avoid warnings if no builtin extensions are configured. */
@@ -1061,10 +1164,10 @@ err:
     __wt_evict_favor_clearing_dirty_cache(session);
 
     if (conn->default_session->event_handler->handle_general != NULL &&
-      F_ISSET(conn, WT_CONN_MINIMAL | WT_CONN_READY))
+      F_ISSET_ATOMIC_32(conn, WT_CONN_MINIMAL | WT_CONN_READY))
         WT_TRET(conn->default_session->event_handler->handle_general(
           conn->default_session->event_handler, &conn->iface, NULL, WT_EVENT_CONN_CLOSE, NULL));
-    F_CLR(conn, WT_CONN_MINIMAL | WT_CONN_READY);
+    F_CLR_ATOMIC_32(conn, WT_CONN_MINIMAL | WT_CONN_READY);
 
     __wt_verbose_info(
       session, WT_VERB_RECOVERY_PROGRESS, "%s", "rolling back all running transactions.");
@@ -1086,7 +1189,7 @@ err:
      * Set MINIMAL again and call the event handler so that statistics can monitor any end of
      * connection activity (like the final checkpoint).
      */
-    F_SET(conn, WT_CONN_MINIMAL);
+    F_SET_ATOMIC_32(conn, WT_CONN_MINIMAL);
     if (conn->default_session->event_handler->handle_general != NULL)
         WT_TRET(conn->default_session->event_handler->handle_general(
           conn->default_session->event_handler, wt_conn, NULL, WT_EVENT_CONN_READY, NULL));
@@ -1098,6 +1201,12 @@ err:
       session, WT_VERB_RECOVERY_PROGRESS, "%s", "closing some of the internal threads.");
     /* Shut down pre-fetching - it should not operate while closing the connection. */
     WT_TRET(__wti_prefetch_destroy(session));
+
+    /*
+     * Shut down background migration. This may perform a checkpoint as part of live restore clean
+     * up, and if it does we need to let the checkpoint complete before continuing.
+     */
+    WT_TRET(__wt_live_restore_server_destroy(session));
 
     /*
      * There should be no active transactions running now. Therefore, it's safe for operations to
@@ -1120,6 +1229,14 @@ err:
     WT_TRET(__wt_checkpoint_cleanup_destroy(session));
     WT_TRET(__wt_checkpoint_server_destroy(session));
 
+    /*
+     * Shut down the layered table manager thread, ideally this would be taken care of in connection
+     * close below, but it needs to precede global transaction state shutdown, so do it here as
+     * well. It needs to happen after we destroy the sweep server. Otherwise, the sweep server may
+     * see a freed layered table manager.
+     */
+    WT_TRET(__wti_layered_table_manager_destroy(session));
+
     /* Perform a final checkpoint and shut down the global transaction state. */
     WT_TRET(__wt_txn_global_shutdown(session, cfg));
 
@@ -1127,7 +1244,7 @@ err:
     if (conn->default_session->event_handler->handle_general != NULL)
         WT_TRET(conn->default_session->event_handler->handle_general(
           conn->default_session->event_handler, wt_conn, NULL, WT_EVENT_CONN_CLOSE, NULL));
-    F_CLR(conn, WT_CONN_MINIMAL);
+    F_CLR_ATOMIC_32(conn, WT_CONN_MINIMAL);
 
     /*
      * See if close should wait for tiered storage to finish any flushing after the final
@@ -1140,7 +1257,7 @@ err:
 
     if (ret != 0) {
         __wt_err(session, ret, "failure during close, disabling further writes");
-        F_SET(conn, WT_CONN_PANIC);
+        F_SET_ATOMIC_32(conn, WT_CONN_PANIC);
     }
 
     /*
@@ -1151,11 +1268,11 @@ err:
      */
     WT_TRET(__wt_config_gets(session, cfg, "leak_memory", &cval));
     if (cval.val != 0)
-        F_SET(conn, WT_CONN_LEAK_MEMORY);
+        F_SET_ATOMIC_32(conn, WT_CONN_LEAK_MEMORY);
 
     /* Time since the shutdown has started. */
     __wt_timer_evaluate_ms(session, &timer, &conn->shutdown_timeline.shutdown_ms);
-    __wt_verbose_info(session, WT_VERB_RECOVERY_PROGRESS,
+    __wt_verbose_info_id(session, 1493200, WT_VERB_RECOVERY_PROGRESS,
       "shutdown was completed successfully and took %" PRIu64 "ms, including %" PRIu64
       "ms for the rollback to stable, and %" PRIu64 "ms for the checkpoint.",
       conn->shutdown_timeline.shutdown_ms, conn->shutdown_timeline.rts_ms,
@@ -1204,6 +1321,10 @@ __conn_debug_info(WT_CONNECTION *wt_conn, const char *config)
     WT_ERR(__wt_config_gets(session, cfg, "log", &cval));
     if (cval.val != 0)
         WT_ERR(__wt_verbose_dump_log(session));
+
+    WT_ERR(__wt_config_gets(session, cfg, "metadata", &cval));
+    if (cval.val != 0)
+        WT_ERR(__wt_verbose_dump_metadata(session));
 
     WT_ERR(__wt_config_gets(session, cfg, "sessions", &cval));
     if (cval.val != 0)
@@ -1536,7 +1657,7 @@ err:
      * that there is corruption present in the file.
      */
     if (!is_user && ret == EINVAL) {
-        F_SET(S2C(session), WT_CONN_DATA_CORRUPTION);
+        F_SET_ATOMIC_32(S2C(session), WT_CONN_DATA_CORRUPTION);
         return (WT_ERROR);
     }
 
@@ -1697,7 +1818,7 @@ __conn_single(WT_SESSION_IMPL *session, const char *cfg[])
     wt_off_t size;
     size_t len;
     char buf[256];
-    bool bytelock, empty, exist, is_create, is_salvage, match;
+    bool bytelock, empty, exist, is_create, is_disag, is_salvage, match;
 
     conn = S2C(session);
     fh = NULL;
@@ -1707,6 +1828,14 @@ __conn_single(WT_SESSION_IMPL *session, const char *cfg[])
 
     if (F_ISSET(conn, WT_CONN_READONLY))
         is_create = false;
+
+    /*
+     * FIXME-WT-14721: As it stands, __wt_conn_is_disagg only works after we have metadata access,
+     * which depends on having run recovery, so the config hack is the simplest way to break that
+     * dependency.
+     */
+    WT_RET(__wt_config_gets(session, cfg, "disaggregated.page_log", &cval));
+    is_disag = cval.len > 0;
 
     bytelock = true;
     __wt_spin_lock(session, &__wt_process.spinlock);
@@ -1759,12 +1888,16 @@ __conn_single(WT_SESSION_IMPL *session, const char *cfg[])
      * above, locked files cannot be copied on Windows). If the WiredTiger
      * file exists in the directory, create the lock file, covering the case
      * of a hot backup.
+     *
+     * In addition, in disagg mode, we should create the lock file regardless
+     * of whether the  WiredTiger file exists or not because WiredTiger file may
+     * not be there.
      */
     exist = false;
     if (!is_create)
         WT_ERR(__wt_fs_exist(session, WT_WIREDTIGER, &exist));
     ret = __wt_open(session, WT_SINGLETHREAD, WT_FS_OPEN_FILE_TYPE_REGULAR,
-      is_create || exist ? WT_FS_OPEN_CREATE : 0, &conn->lock_fh);
+      is_create || is_disag || exist ? WT_FS_OPEN_CREATE : 0, &conn->lock_fh);
 
     /*
      * If this is a read-only connection and we cannot grab the lock file, check if it is because
@@ -1787,7 +1920,7 @@ __conn_single(WT_SESSION_IMPL *session, const char *cfg[])
     if (ret == ENOENT) {
         WT_ERR(__wt_fs_exist(session, WT_WIREDTIGER, &exist));
         if (!exist) {
-            F_SET(conn, WT_CONN_DATA_CORRUPTION);
+            F_SET_ATOMIC_32(conn, WT_CONN_DATA_CORRUPTION);
             WT_ERR(WT_ERROR);
         }
     }
@@ -1838,7 +1971,7 @@ __conn_single(WT_SESSION_IMPL *session, const char *cfg[])
     if (!is_salvage && !conn->is_new) {
         WT_ERR(__wt_fs_exist(session, WT_WIREDTIGER, &exist));
         if (!exist) {
-            F_SET(conn, WT_CONN_DATA_CORRUPTION);
+            F_SET_ATOMIC_32(conn, WT_CONN_DATA_CORRUPTION);
             WT_ERR_MSG(session, WT_TRY_SALVAGE, "WiredTiger version file cannot be found");
         }
     }
@@ -1858,7 +1991,7 @@ __conn_single(WT_SESSION_IMPL *session, const char *cfg[])
         WT_ERR(ret);
     } else {
         if (ret == ENOENT) {
-            F_SET(conn, WT_CONN_DATA_CORRUPTION);
+            F_SET_ATOMIC_32(conn, WT_CONN_DATA_CORRUPTION);
             WT_ERR(WT_ERROR);
         }
         WT_ERR(ret);
@@ -1983,7 +2116,7 @@ __debug_mode_log_retention_config(WT_SESSION_IMPL *session, const char *cfg[])
 
     conn = S2C(session);
 
-    __wt_writelock(session, &conn->debug_log_retention_lock);
+    __wt_writelock(session, &conn->log_mgr.debug_log_retention_lock);
 
     WT_ERR(__wt_config_gets(session, cfg, "debug_mode.checkpoint_retention", &cval));
 
@@ -2006,7 +2139,7 @@ __debug_mode_log_retention_config(WT_SESSION_IMPL *session, const char *cfg[])
     conn->debug_log_cnt = (uint32_t)cval.val;
 
 err:
-    __wt_writeunlock(session, &conn->debug_log_retention_lock);
+    __wt_writeunlock(session, &conn->log_mgr.debug_log_retention_lock);
     return (ret);
 }
 
@@ -2220,16 +2353,20 @@ __wt_verbose_config(WT_SESSION_IMPL *session, const char *cfg[], bool reconfig)
       {"checkpoint", WT_VERB_CHECKPOINT}, {"checkpoint_cleanup", WT_VERB_CHECKPOINT_CLEANUP},
       {"checkpoint_progress", WT_VERB_CHECKPOINT_PROGRESS}, {"chunkcache", WT_VERB_CHUNKCACHE},
       {"compact", WT_VERB_COMPACT}, {"compact_progress", WT_VERB_COMPACT_PROGRESS},
-      {"configuration", WT_VERB_CONFIGURATION}, {"error_returns", WT_VERB_ERROR_RETURNS},
-      {"eviction", WT_VERB_EVICTION}, {"fileops", WT_VERB_FILEOPS},
-      {"generation", WT_VERB_GENERATION}, {"handleops", WT_VERB_HANDLEOPS}, {"log", WT_VERB_LOG},
-      {"history_store", WT_VERB_HS}, {"history_store_activity", WT_VERB_HS_ACTIVITY},
+      {"configuration", WT_VERB_CONFIGURATION},
+      {"disaggregated_storage", WT_VERB_DISAGGREGATED_STORAGE},
+      {"error_returns", WT_VERB_ERROR_RETURNS}, {"eviction", WT_VERB_EVICTION},
+      {"fileops", WT_VERB_FILEOPS}, {"generation", WT_VERB_GENERATION},
+      {"handleops", WT_VERB_HANDLEOPS}, {"history_store", WT_VERB_HS},
+      {"history_store_activity", WT_VERB_HS_ACTIVITY}, {"layered", WT_VERB_LAYERED},
+      {"live_restore", WT_VERB_LIVE_RESTORE},
+      {"live_restore_progress", WT_VERB_LIVE_RESTORE_PROGRESS}, {"log", WT_VERB_LOG},
       {"metadata", WT_VERB_METADATA}, {"mutex", WT_VERB_MUTEX}, {"prefetch", WT_VERB_PREFETCH},
       {"out_of_order", WT_VERB_OUT_OF_ORDER}, {"overflow", WT_VERB_OVERFLOW},
-      {"read", WT_VERB_READ}, {"reconcile", WT_VERB_RECONCILE}, {"recovery", WT_VERB_RECOVERY},
-      {"recovery_progress", WT_VERB_RECOVERY_PROGRESS}, {"rts", WT_VERB_RTS},
-      {"salvage", WT_VERB_SALVAGE}, {"shared_cache", WT_VERB_SHARED_CACHE},
-      {"split", WT_VERB_SPLIT}, {"temporary", WT_VERB_TEMPORARY},
+      {"page_delta", WT_VERB_PAGE_DELTA}, {"read", WT_VERB_READ}, {"reconcile", WT_VERB_RECONCILE},
+      {"recovery", WT_VERB_RECOVERY}, {"recovery_progress", WT_VERB_RECOVERY_PROGRESS},
+      {"rts", WT_VERB_RTS}, {"salvage", WT_VERB_SALVAGE}, {"shared_cache", WT_VERB_SHARED_CACHE},
+      {"split", WT_VERB_SPLIT}, {"sweep", WT_VERB_SWEEP}, {"temporary", WT_VERB_TEMPORARY},
       {"thread_group", WT_VERB_THREAD_GROUP}, {"timestamp", WT_VERB_TIMESTAMP},
       {"tiered", WT_VERB_TIERED}, {"transaction", WT_VERB_TRANSACTION}, {"verify", WT_VERB_VERIFY},
       {"version", WT_VERB_VERSION}, {"write", WT_VERB_WRITE}, {NULL, 0}};
@@ -2350,7 +2487,8 @@ __wt_verbose_dump_sessions(WT_SESSION_IMPL *session, bool show_cursors)
 
     WT_RET(__wt_msg(session, "%s", WT_DIVIDER));
     WT_RET(__wt_msg(session, "Active sessions: %" PRIu32 " Max: %" PRIu32,
-      __wt_atomic_load32(&S2C(session)->session_array.cnt), S2C(session)->session_array.size));
+      __wt_atomic_load_uint32_relaxed(&S2C(session)->session_array.cnt),
+      S2C(session)->session_array.size));
 
     /*
      * While the verbose dump doesn't dump internal sessions it returns a count of them so we don't
@@ -2644,7 +2782,12 @@ __conn_config_file_system(WT_SESSION_IMPL *session, const char *cfg[])
         if (F_ISSET(conn, WT_CONN_IN_MEMORY))
             WT_RET_MSG(
               session, EINVAL, "Live restore is not compatible with an in-memory connections");
+        WT_RET(__wt_config_gets(session, cfg, "disaggregated.page_log", &cval));
+        if (cval.len != 0)
+            WT_RET_MSG(
+              session, EINVAL, "Live restore is not compatible with disaggregated storage mode");
 #ifdef _MSC_VER
+        /* FIXME-WT-14051 Add support for Windows */
         WT_RET_MSG(session, EINVAL, "Live restore is not supported on Windows");
 #endif
     }
@@ -2669,6 +2812,10 @@ __conn_config_file_system(WT_SESSION_IMPL *session, const char *cfg[])
 #endif
         }
     }
+
+    if (!live_restore_enabled)
+        WT_RET(__wt_live_restore_validate_non_lr_system(session));
+
     return (__conn_chk_file_system(session, F_ISSET(conn, WT_CONN_READONLY)));
 }
 
@@ -2750,6 +2897,53 @@ __conn_version_verify(WT_SESSION_IMPL *session)
 }
 
 /*
+ * __conn_set_context_uint --
+ *     Set a global context parameter.
+ */
+static int
+__conn_set_context_uint(WT_CONNECTION *wt_conn, WT_CONTEXT_TYPE which, uint64_t value)
+{
+    WT_CONNECTION_IMPL *conn;
+    WT_DECL_RET;
+    WT_SESSION_IMPL *session;
+
+    conn = (WT_CONNECTION_IMPL *)wt_conn;
+
+    CONNECTION_API_CALL_NOCONF(conn, session, set_context_uint);
+
+    switch (which) {
+    case WT_CONTEXT_TYPE_LAST_MATERIALIZED_LSN:
+        WT_ERR(__wti_disagg_set_last_materialized_lsn(session, value));
+        break;
+    }
+
+err:
+    API_END_RET(session, ret);
+}
+
+/*
+ * __conn_dump_error_log --
+ *     Dump any logged error messages into the event handler. This works only if this level of
+ *     diagnostics is enabled.
+ */
+static int
+__conn_dump_error_log(WT_CONNECTION *wt_conn)
+{
+    WT_CONNECTION_IMPL *conn;
+    WT_DECL_RET;
+    WT_SESSION_IMPL *session;
+
+    conn = (WT_CONNECTION_IMPL *)wt_conn;
+
+    CONNECTION_API_CALL_NOCONF_NOERRCLEAR(conn, session, dump_error_log);
+
+    __wt_error_log_to_handler(session);
+
+err:
+    API_END_RET(session, ret);
+}
+
+/*
  * wiredtiger_open --
  *     Main library entry point: open a new connection to a WiredTiger database.
  */
@@ -2761,8 +2955,9 @@ wiredtiger_open(const char *home, WT_EVENT_HANDLER *event_handler, const char *c
       __conn_get_home, __conn_compile_configuration, __conn_configure_method, __conn_is_new,
       __conn_open_session, __conn_query_timestamp, __conn_set_timestamp, __conn_rollback_to_stable,
       __conn_load_extension, __conn_add_data_source, __conn_add_collator, __conn_add_compressor,
-      __conn_add_encryptor, __conn_set_file_system, __conn_add_storage_source,
-      __conn_get_storage_source, __conn_get_extension_api};
+      __conn_add_encryptor, __conn_set_file_system, __conn_add_page_log, __conn_add_storage_source,
+      __conn_get_page_log, __conn_get_storage_source, __conn_set_context_uint,
+      __conn_dump_error_log, __conn_get_extension_api};
     static const WT_NAME_FLAG file_types[] = {
       {"data", WT_FILE_TYPE_DATA}, {"log", WT_FILE_TYPE_LOG}, {NULL, 0}};
 
@@ -2871,6 +3066,11 @@ wiredtiger_open(const char *home, WT_EVENT_HANDLER *event_handler, const char *c
 
     /* Configure the file system on the connection. */
     WT_ERR(__conn_config_file_system(session, cfg));
+
+    /*
+     * Check for local files that need to be removed before starting in disaggregated mode.
+     */
+    WT_ERR(__wti_ensure_clean_startup_dir(session, cfg));
 
     /* Make sure no other thread of control already owns this database. */
     WT_ERR(__conn_single(session, cfg));
@@ -3044,15 +3244,48 @@ wiredtiger_open(const char *home, WT_EVENT_HANDLER *event_handler, const char *c
         WT_ERR_MSG(session, EINVAL,
           "pre-fetching cannot be enabled if pre-fetching is configured as unavailable");
 
+    WT_ERR(__wt_config_gets(session, cfg, "precise_checkpoint", &cval));
+    /*
+     * FIXME-WT-14721: Disaggregated storage should only support precise checkpoint but mongod is
+     * not ready for that yet. Enable precise checkpoint automatically for disaggregated storage in
+     * the future.
+     */
+    if (cval.val) {
+        if (F_ISSET(conn, WT_CONN_IN_MEMORY)) {
+            __wt_verbose_warning(session, WT_VERB_CHECKPOINT, "%s",
+              "precise checkpoint is ignored in in-memory database");
+            F_CLR(conn, WT_CONN_PRECISE_CHECKPOINT);
+        } else
+            F_SET(conn, WT_CONN_PRECISE_CHECKPOINT);
+    } else
+        F_CLR(conn, WT_CONN_PRECISE_CHECKPOINT);
+
+    WT_ERR(__wt_config_gets(session, cfg, "preserve_prepared", &cval));
+    if (cval.val) {
+        if (F_ISSET(conn, WT_CONN_IN_MEMORY)) {
+            __wt_verbose_warning(session, WT_VERB_CHECKPOINT, "%s",
+              "preserve prepared is ignored in in-memory database");
+            F_CLR(conn, WT_CONN_PRESERVE_PREPARED);
+        } else if (!F_ISSET(conn, WT_CONN_PRECISE_CHECKPOINT))
+            WT_ERR_MSG(session, EINVAL,
+              "Preserve prepared configuration incompatible with fuzzy checkpoint");
+        else
+            F_SET(conn, WT_CONN_PRESERVE_PREPARED);
+    } else
+        F_CLR(conn, WT_CONN_PRESERVE_PREPARED);
+
     WT_ERR(__wt_config_gets(session, cfg, "salvage", &cval));
     if (cval.val) {
         if (F_ISSET(conn, WT_CONN_READONLY))
             WT_ERR_MSG(session, EINVAL, "Readonly configuration incompatible with salvage");
+        if (F_ISSET(conn, WT_CONN_LIVE_RESTORE_FS))
+            WT_ERR_MSG(session, EINVAL, "Live restore is not compatible with salvage");
         F_SET(conn, WT_CONN_SALVAGE);
     }
 
     WT_ERR(__wt_conf_compile_init(session, cfg));
     WT_ERR(__wti_conn_statistics_config(session, cfg));
+    __wt_live_restore_init_stats(session);
     WT_ERR(__wti_sweep_config(session, cfg));
 
     /* Initialize the OS page size for mmap */
@@ -3169,19 +3402,21 @@ wiredtiger_open(const char *home, WT_EVENT_HANDLER *event_handler, const char *c
     /* Initialize connection values from stored metadata. */
     WT_ERR(__wt_meta_load_prior_state(session));
 
+    /* Open the metadata table. */
     WT_ERR(__wt_metadata_cursor(session, NULL));
+
     /*
      * Load any incremental backup information. This reads the metadata so must be done after the
      * turtle file is initialized.
      */
     WT_ERR(__wt_backup_open(session));
 
-    F_SET(conn, WT_CONN_MINIMAL);
+    F_SET_ATOMIC_32(conn, WT_CONN_MINIMAL);
     if (event_handler != NULL && event_handler->handle_general != NULL)
         WT_ERR(event_handler->handle_general(
           event_handler, &conn->iface, NULL, WT_EVENT_CONN_READY, NULL));
 
-    /* Start the worker threads and run recovery. */
+    /* Start the worker threads, run recovery, and initialize the disaggregated storage. */
     WT_ERR(__wti_connection_workers(session, cfg));
 
     /*
@@ -3216,8 +3451,8 @@ wiredtiger_open(const char *home, WT_EVENT_HANDLER *event_handler, const char *c
      */
     F_SET(session, WT_SESSION_NO_DATA_HANDLES);
 
-    F_SET(conn, WT_CONN_READY);
-    F_CLR(conn, WT_CONN_MINIMAL);
+    F_SET_ATOMIC_32(conn, WT_CONN_READY);
+    F_CLR_ATOMIC_32(conn, WT_CONN_MINIMAL);
     *connectionp = &conn->iface;
     __wt_verbose_info(
       session, WT_VERB_RECOVERY, "%s", "the WiredTiger library has successfully opened");
@@ -3249,10 +3484,10 @@ err:
 
     if (ret != 0) {
         if (conn->default_session->event_handler->handle_general != NULL &&
-          F_ISSET(conn, WT_CONN_MINIMAL | WT_CONN_READY))
+          F_ISSET_ATOMIC_32(conn, WT_CONN_MINIMAL | WT_CONN_READY))
             WT_TRET(conn->default_session->event_handler->handle_general(
               conn->default_session->event_handler, &conn->iface, NULL, WT_EVENT_CONN_CLOSE, NULL));
-        F_CLR(conn, WT_CONN_MINIMAL | WT_CONN_READY);
+        F_CLR_ATOMIC_32(conn, WT_CONN_MINIMAL | WT_CONN_READY);
 
         /*
          * Set panic if we're returning the run recovery error or if recovery did not complete so
@@ -3261,14 +3496,15 @@ err:
          * will not have that flag set.
          */
         if (ret == WT_RUN_RECOVERY || F_ISSET(&conn->log_mgr, WT_LOG_RECOVER_FAILED))
-            F_SET(conn, WT_CONN_PANIC);
+            F_SET_ATOMIC_32(conn, WT_CONN_PANIC);
         /*
          * If we detected a data corruption issue, we really want to indicate the corruption instead
          * of whatever error was set. We cannot use standard return macros because we don't want to
          * generalize this. Record it here while we have the connection and set it after we destroy
          * the connection.
          */
-        if (F_ISSET(conn, WT_CONN_DATA_CORRUPTION) && (ret == WT_PANIC || ret == WT_ERROR))
+        if (F_ISSET_ATOMIC_32(conn, WT_CONN_DATA_CORRUPTION) &&
+          (ret == WT_PANIC || ret == WT_ERROR))
             try_salvage = true;
         WT_TRET(__wti_connection_close(conn));
         /*
@@ -3276,7 +3512,7 @@ err:
          * detected the corruption above, set it here after closing.
          */
         if (try_salvage)
-            ret = WT_TRY_SALVAGE;
+            ret = WT_ERROR_LOG_ADD(WT_TRY_SALVAGE);
     }
 
     return (ret);

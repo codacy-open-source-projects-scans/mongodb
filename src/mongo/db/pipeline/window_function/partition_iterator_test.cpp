@@ -27,13 +27,7 @@
  *    it in the license file.
  */
 
-#include <deque>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/window_function/partition_iterator.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -41,15 +35,20 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
+#include "mongo/db/exec/agg/mock_stage.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/document_source_mock.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/pipeline/window_function/partition_iterator.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <deque>
+#include <string>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
@@ -59,7 +58,7 @@ namespace {
 class PartitionIteratorTest : public AggregationContextFixture {
 public:
     auto makeDefaultAccessor(
-        boost::intrusive_ptr<DocumentSourceMock> mock,
+        boost::intrusive_ptr<exec::agg::MockStage> mock,
         boost::optional<boost::intrusive_ptr<Expression>> partExpr = boost::none) {
         if (!_iter)
             _iter = std::make_unique<PartitionIterator>(
@@ -68,7 +67,7 @@ public:
     }
 
     auto makeEndpointAccessor(
-        boost::intrusive_ptr<DocumentSourceMock> mock,
+        boost::intrusive_ptr<exec::agg::MockStage> mock,
         boost::optional<boost::intrusive_ptr<Expression>> partExpr = boost::none) {
         if (!_iter)
             _iter = std::make_unique<PartitionIterator>(
@@ -78,7 +77,7 @@ public:
 
     // Same as above, but include a sort order.
     auto makeEndpointAccessor(
-        boost::intrusive_ptr<DocumentSourceMock> mock,
+        boost::intrusive_ptr<exec::agg::MockStage> mock,
         SortPattern sortPattern,
         boost::optional<boost::intrusive_ptr<Expression>> partExpr = boost::none) {
         if (!_iter)
@@ -88,7 +87,7 @@ public:
     }
 
     auto makeManualAccessor(
-        boost::intrusive_ptr<DocumentSourceMock> mock,
+        boost::intrusive_ptr<exec::agg::MockStage> mock,
         boost::optional<boost::intrusive_ptr<Expression>> partExpr = boost::none) {
         if (!_iter)
             _iter = std::make_unique<PartitionIterator>(
@@ -109,7 +108,7 @@ protected:
 TEST_F(PartitionIteratorTest, IndexAccessPullsInRequiredDocument) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{
         Document{{"a", 1}}, Document{{"b", 1}}, Document{{"c", 1}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto partIter = makeDefaultAccessor(mock);
     ASSERT_DOCUMENT_EQ(docs[0].getDocument(), *partIter[0]);
     ASSERT_DOCUMENT_EQ(docs[1].getDocument(), *partIter[1]);
@@ -119,7 +118,7 @@ TEST_F(PartitionIteratorTest, IndexAccessPullsInRequiredDocument) {
 TEST_F(PartitionIteratorTest, MultipleConsumer) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{
         Document{{"a", 1}}, Document{{"b", 1}}, Document{{"c", 1}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto partIter = makeDefaultAccessor(mock);
     ASSERT_DOCUMENT_EQ(docs[0].getDocument(), *partIter[0]);
     ASSERT_DOCUMENT_EQ(docs[1].getDocument(), *partIter[1]);
@@ -131,7 +130,7 @@ TEST_F(PartitionIteratorTest, MultipleConsumer) {
 
 TEST_F(PartitionIteratorTest, LookaheadOutOfRangeAccessEOF) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{Document{{"key", 1}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto partIter = makeDefaultAccessor(mock);
     ASSERT_DOCUMENT_EQ(docs[0].getDocument(), *partIter[0]);
     ASSERT_FALSE(partIter[1]);
@@ -142,7 +141,7 @@ TEST_F(PartitionIteratorTest, LookaheadOutOfRangeAccessNewPartition) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{Document{{"key", 1}, {"a", 1}},
                                                                 Document{{"key", 1}, {"a", 2}},
                                                                 Document{{"key", 2}, {"a", 3}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto key = ExpressionFieldPath::createPathFromString(
         getExpCtx().get(), "key", getExpCtx()->variablesParseState);
     auto partIter =
@@ -157,7 +156,7 @@ TEST_F(PartitionIteratorTest, AdvanceMovesCurrent) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{Document{{"key", 1}, {"a", 1}},
                                                                 Document{{"key", 1}, {"a", 2}},
                                                                 Document{{"key", 2}, {"a", 3}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto key = ExpressionFieldPath::createPathFromString(
         getExpCtx().get(), "key", getExpCtx()->variablesParseState);
     auto partIter =
@@ -175,7 +174,7 @@ TEST_F(PartitionIteratorTest, AdvanceOverPartitionBoundary) {
                                                                 Document{{"key", 1}, {"a", 2}},
                                                                 Document{{"key", 2}, {"a", 3}},
                                                                 Document{{"key", 2}, {"a", 4}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto key = ExpressionFieldPath::createPathFromString(
         getExpCtx().get(), "key", getExpCtx()->variablesParseState);
     auto partIter =
@@ -193,7 +192,7 @@ TEST_F(PartitionIteratorTest, AdvanceOverPartitionBoundary) {
 
 TEST_F(PartitionIteratorTest, AdvanceResultsInEof) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{Document{{"key", 1}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto key = ExpressionFieldPath::createPathFromString(
         getExpCtx().get(), "key", getExpCtx()->variablesParseState);
     auto partIter =
@@ -210,7 +209,7 @@ TEST_F(PartitionIteratorTest, AdvanceResultsInEof) {
 TEST_F(PartitionIteratorTest, CurrentReturnsCorrectDocumentAsIteratorAdvances) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{
         Document{{"key", 1}}, Document{{"key", 2}}, Document{{"key", 3}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto key = ExpressionFieldPath::createPathFromString(
         getExpCtx().get(), "key", getExpCtx()->variablesParseState);
     auto partIter =
@@ -225,7 +224,7 @@ TEST_F(PartitionIteratorTest, CurrentReturnsCorrectDocumentAsIteratorAdvances) {
 TEST_F(PartitionIteratorTest, PartitionWithNullsAndMissingFields) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{
         Document{{"key", BSONNULL}}, Document{}, Document{{"key", BSONNULL}}, Document{}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto key = ExpressionFieldPath::createPathFromString(
         getExpCtx().get(), "key", getExpCtx()->variablesParseState);
     auto partIter =
@@ -245,7 +244,7 @@ TEST_F(PartitionIteratorTest, PartitionWithNullsAndMissingFieldsCompound) {
         Document{{"key", Document{{"a", BSONNULL}, {"b", BSONNULL}}}},
         Document{{"key", Document{{"a", BSONNULL}, {"b", BSONNULL}}}},
         Document{{"key", Document{{"b", BSONNULL}}}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto key = ExpressionFieldPath::createPathFromString(
         getExpCtx().get(), "key", getExpCtx()->variablesParseState);
     auto partIter =
@@ -272,7 +271,7 @@ TEST_F(PartitionIteratorTest, PartitionWithNullsAndMissingFieldsCompound) {
 
 TEST_F(PartitionIteratorTest, EmptyCollectionReturnsEOF) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto key = ExpressionFieldPath::createPathFromString(
         getExpCtx().get(), "key", getExpCtx()->variablesParseState);
     auto partIter =
@@ -284,7 +283,7 @@ TEST_F(PartitionIteratorTest, EmptyCollectionReturnsEOF) {
 TEST_F(PartitionIteratorTest, PartitionByArrayErrs) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{Document{{"key", 1}},
                                                                 Document{fromjson("{key: [1]}")}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto key = ExpressionFieldPath::createPathFromString(
         getExpCtx().get(), "key", getExpCtx()->variablesParseState);
     auto partIter =
@@ -296,7 +295,7 @@ TEST_F(PartitionIteratorTest, PartitionByArrayErrs) {
 TEST_F(PartitionIteratorTest, CurrentOffsetIsCorrectAfterDocumentsAreAccessed) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{
         Document{{"key", 1}}, Document{{"key", 2}}, Document{{"key", 3}}, Document{{"key", 4}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto key = ExpressionFieldPath::createPathFromString(
         getExpCtx().get(), "a", getExpCtx()->variablesParseState);
     auto partIter =
@@ -317,7 +316,7 @@ TEST_F(PartitionIteratorTest, CurrentOffsetIsCorrectAfterDocumentsAreAccessed) {
 TEST_F(PartitionIteratorTest, OutsideOfPartitionAccessShouldNotTassert) {
     const auto docs =
         std::deque<DocumentSource::GetNextResult>{Document{{"a", 1}}, Document{{"a", 2}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto accessor = makeDefaultAccessor(mock, boost::none);
 
     // Test that an accessor that attempts to read off the end of the partition returns boost::none
@@ -326,23 +325,23 @@ TEST_F(PartitionIteratorTest, OutsideOfPartitionAccessShouldNotTassert) {
     ASSERT_FALSE(accessor[2]);
 }
 
-DEATH_TEST_F(PartitionIteratorTest, SingleConsumerDefaultPolicy, "Requested expired document") {
+DEATH_TEST_F(PartitionIteratorTest, RequestExpiredDocument, "Requested expired document") {
     const auto docs = std::deque<DocumentSource::GetNextResult>{
         Document{{"a", 1}}, Document{{"a", 2}}, Document{{"a", 3}}, Document{{"a", 4}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto accessor = makeDefaultAccessor(mock, boost::none);
     // Access the first document, which marks it as expired.
-    ASSERT_DOCUMENT_EQ(docs[0].getDocument(), *accessor[0]);
+    *accessor[0];
     // Advance the iterator which frees the first expired document.
     advance();
     // Attempting to access the first doc results in a tripwire assertion.
-    ASSERT_THROWS_CODE(accessor[-1], AssertionException, 5643005);
+    accessor[-1];
 }
 
-DEATH_TEST_F(PartitionIteratorTest, MultipleConsumerDefaultPolicy, "Requested expired document") {
+TEST_F(PartitionIteratorTest, MultipleConsumerDefaultPolicy) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{
         Document{{"a", 1}}, Document{{"a", 2}}, Document{{"a", 3}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto laggingAccessor = makeDefaultAccessor(mock, boost::none);
     auto leadingAccessor = makeDefaultAccessor(mock, boost::none);
 
@@ -361,14 +360,13 @@ DEATH_TEST_F(PartitionIteratorTest, MultipleConsumerDefaultPolicy, "Requested ex
     ASSERT_FALSE(leadingAccessor[1]);
 
     // The first document should now be expired.
-    ASSERT_THROWS_CODE(laggingAccessor[-2], AssertionException, 5643005);
-    ASSERT_THROWS_CODE(leadingAccessor[-2], AssertionException, 5643005);
+    ASSERT_EQ(-1, _iter->getMinCachedOffset());
 }
 
-DEATH_TEST_F(PartitionIteratorTest, SingleConsumerEndpointPolicy, "Requested expired document") {
+TEST_F(PartitionIteratorTest, SingleConsumerEndpointPolicy) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{
         Document{{"a", 1}}, Document{{"a", 2}}, Document{{"a", 3}}, Document{{"a", 4}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto accessor = makeEndpointAccessor(mock, boost::none);
     // Mock a window with documents [1, 2].
     auto windowObj = BSON("window" << BSON("documents" << BSON_ARRAY(1 << 2)));
@@ -388,14 +386,13 @@ DEATH_TEST_F(PartitionIteratorTest, SingleConsumerEndpointPolicy, "Requested exp
     endpoints = accessor.getEndpoints(bounds);
     // Now the second document, currently at index 0 in the cache, will be released.
     advance();
-    ASSERT_THROWS_CODE(accessor[-1], AssertionException, 5371202);
-    ASSERT_THROWS_CODE(accessor[-2], AssertionException, 5371202);
+    ASSERT_EQ(0, _iter->getMinCachedOffset());
 }
 
-DEATH_TEST_F(PartitionIteratorTest, MultipleConsumerEndpointPolicy, "Requested expired document") {
+TEST_F(PartitionIteratorTest, MultipleConsumerEndpointPolicy) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{
         Document{{"a", 1}}, Document{{"a", 2}}, Document{{"a", 3}}, Document{{"a", 4}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
 
     // Create two endpoint accessors, one at [-1, 0] and another at [0, 1]. Since the first one may
     // access the document at (current - 1), the only expiration that can happen on advance() would
@@ -438,15 +435,13 @@ DEATH_TEST_F(PartitionIteratorTest, MultipleConsumerEndpointPolicy, "Requested e
     // the other docs.
     advance();
     ASSERT_DOCUMENT_EQ(docs[1].getDocument(), *lookBehindAccessor[-2]);
-    ASSERT_THROWS_CODE(lookBehindAccessor[-3], AssertionException, 5643005);
+    ASSERT_EQ(-2, _iter->getMinCachedOffset());
 }
 
-DEATH_TEST_F(PartitionIteratorTest,
-             SingleConsumerRightEndpointPolicy,
-             "Requested expired document") {
+TEST_F(PartitionIteratorTest, SingleConsumerRightEndpointPolicy) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{
         Document{{"a", 1}}, Document{{"a", 2}}, Document{{"a", 3}}, Document{{"a", 4}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto partIter =
         PartitionIterator(getExpCtx().get(), mock.get(), &_tracker, boost::none, boost::none);
     auto accessor = PartitionAccessor(&partIter, PartitionAccessor::Policy::kRightEndpoint);
@@ -475,13 +470,13 @@ DEATH_TEST_F(PartitionIteratorTest,
     ASSERT_DOCUMENT_EQ(docs[3].getDocument(), *accessor[0]);
     ASSERT_DOCUMENT_EQ(docs[2].getDocument(), *accessor[-1]);
     ASSERT_DOCUMENT_EQ(docs[1].getDocument(), *accessor[-2]);
-    ASSERT_THROWS_CODE(accessor[-3], AssertionException, 5643005);
+    ASSERT_EQ(-2, partIter.getMinCachedOffset());
 }
 
-DEATH_TEST_F(PartitionIteratorTest, MixedPolicy, "Requested expired document") {
+TEST_F(PartitionIteratorTest, MixedPolicy) {
     const auto docs = std::deque<DocumentSource::GetNextResult>{
         Document{{"a", 1}}, Document{{"a", 2}}, Document{{"a", 3}}, Document{{"a", 4}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto endpointAccessor = makeEndpointAccessor(mock, boost::none);
     auto defaultAccessor = makeDefaultAccessor(mock, boost::none);
     // Mock a window with documents [1, 2].
@@ -513,7 +508,7 @@ DEATH_TEST_F(PartitionIteratorTest, MixedPolicy, "Requested expired document") {
     ASSERT_DOCUMENT_EQ(docs[2].getDocument(), *defaultAccessor[-1]);
 
     // The iterator is currently at {a: 4}, with {a: 1} and {a: 2} both being released.
-    ASSERT_THROWS_CODE(defaultAccessor[-2], AssertionException, 5643005);
+    ASSERT_EQ(-1, _iter->getMinCachedOffset());
 }
 
 TEST_F(PartitionIteratorTest, MemoryUsageAccountsForReleasedDocuments) {
@@ -521,7 +516,7 @@ TEST_F(PartitionIteratorTest, MemoryUsageAccountsForReleasedDocuments) {
     auto bsonDoc = BSON("a" << largeStr);
     const auto docs =
         std::deque<DocumentSource::GetNextResult>{Document(bsonDoc), Document(bsonDoc)};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
 
     auto accessor = makeDefaultAccessor(mock, boost::none);
     size_t initialDocSize = docs[0].getDocument().getCurrentApproximateSize();
@@ -551,7 +546,7 @@ TEST_F(PartitionIteratorTest, ManualPolicy) {
                                                   Document{{"key", 3}, {"a", 3}},
                                                   Document{{"key", 4}, {"a", 8}},
                                                   Document{{"key", 6}, {"a", 3}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     auto accessor = makeManualAccessor(mock, boost::none);
     size_t initialDocSize = docs[0].getDocument().getApproximateSize();
 
@@ -585,7 +580,7 @@ TEST_F(PartitionIteratorTest, RangeEndpointsRetrievedCorrectly) {
                                                                 Document{{"a", 2}},
                                                                 Document{{"a", 3}},
                                                                 Document{{"a", 4}}};
-    const auto mock = DocumentSourceMock::createForTest(docs, getExpCtx());
+    const auto mock = exec::agg::MockStage::createForTest(docs, getExpCtx());
     const auto sortPattern = SortPattern(BSON("a" << 1), getExpCtx());
     auto accessor = makeEndpointAccessor(mock, sortPattern, boost::none);
     // Mock a window with range -1/+1.

@@ -30,17 +30,7 @@
     LOGV2_DEBUG_OPTIONS(ID, DLEVEL, {logv2::LogComponent::kStorageRecovery}, MESSAGE, ##__VA_ARGS__)
 
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <cstddef>
-#include <exception>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/repl/replication_recovery.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -49,13 +39,14 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/dbclient_cursor.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/commands/server_status.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/commands/server_status/server_status.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
@@ -71,7 +62,6 @@
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/replication_consistency_markers.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/replication_recovery.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/transaction_oplog_application.h"
 #include "mongo/db/server_options.h"
@@ -84,13 +74,8 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
@@ -101,6 +86,18 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
+
+#include <cstddef>
+#include <exception>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -153,12 +150,12 @@ public:
         recoveryOplogApplierSection.numBatches.fetchAndAdd(1);
         LOGV2_FOR_RECOVERY(24098,
                            kRecoveryBatchLogLevel.toInt(),
-                           "Applying operations in batch",
+                           "About to apply operations in batch",
                            "numBatches"_attr = _numBatches,
-                           "batchSize"_attr = batch.size(),
+                           "numOpsInBatch"_attr = batch.size(),
                            "firstOpTime"_attr = batch.front().getOpTime(),
                            "lastOpTime"_attr = batch.back().getOpTime(),
-                           "numOpsApplied"_attr = _numOpsApplied);
+                           "numOpsAppliedBeforeThisBatch"_attr = _numOpsApplied);
 
         _numOpsApplied += batch.size();
         recoveryOplogApplierSection.numOpsApplied.fetchAndAdd(batch.size());
@@ -430,14 +427,7 @@ void ReplicationRecoveryImpl::recoverFromOplogUpTo(OperationContext* opCtx, Time
                             "Cannot use 'recoverToOplogTimestamp' without a stable checkpoint");
     }
 
-    const auto serviceCtx = opCtx->getServiceContext();
-    inReplicationRecovery(serviceCtx).store(true);
-    ON_BLOCK_EXIT([serviceCtx] {
-        invariant(
-            inReplicationRecovery(serviceCtx).load(),
-            "replication recovery flag is unexpectedly unset when exiting recoverFromOplogUpTo()");
-        inReplicationRecovery(serviceCtx).store(false);
-    });
+    InReplicationRecovery inReplicationRecovery(opCtx->getServiceContext());
 
     // This may take an IS lock on the oplog collection.
     _truncateOplogIfNeededAndThenClearOplogTruncateAfterPoint(opCtx, &recoveryTS);
@@ -486,14 +476,7 @@ boost::optional<Timestamp> ReplicationRecoveryImpl::recoverFromOplog(
         return stableTimestamp;  // Initial Sync will take over so no cleanup is needed.
     }
 
-    const auto serviceCtx = getGlobalServiceContext();
-    inReplicationRecovery(serviceCtx).store(true);
-    ON_BLOCK_EXIT([serviceCtx] {
-        invariant(
-            inReplicationRecovery(serviceCtx).load(),
-            "replication recovery flag is unexpectedly unset when exiting recoverFromOplog()");
-        inReplicationRecovery(serviceCtx).store(false);
-    });
+    InReplicationRecovery inReplicationRecovery(getGlobalServiceContext());
 
     // If we were passed in a stable timestamp, we are in rollback recovery and should recover from
     // that stable timestamp. Otherwise, we're recovering at startup. If this storage engine
@@ -576,14 +559,7 @@ void ReplicationRecoveryImpl::truncateOplogToTimestamp(OperationContext* opCtx,
 void ReplicationRecoveryImpl::applyOplogEntriesForRestore(OperationContext* opCtx,
                                                           Timestamp stableTimestamp) {
     invariant(storageGlobalParams.magicRestore);
-    const auto serviceCtx = getGlobalServiceContext();
-    inReplicationRecovery(serviceCtx).store(true);
-    ON_BLOCK_EXIT([serviceCtx] {
-        invariant(inReplicationRecovery(serviceCtx).load(),
-                  "replication recovery flag is unexpectedly unset when exiting "
-                  "applyOplogEntriesForRestore()");
-        inReplicationRecovery(serviceCtx).store(false);
-    });
+    InReplicationRecovery inReplicationRecovery(getGlobalServiceContext());
     invariant(_storageInterface->supportsRecoveryTimestamp(opCtx->getServiceContext()));
 
     auto topOfOplogSW = _getTopOfOplog(opCtx);
@@ -833,8 +809,7 @@ Timestamp ReplicationRecoveryImpl::_applyOplogOperations(OperationContext* opCtx
             _consistencyMarkers->setAppliedThrough(opCtx, applyThroughOpTime);
             replCoord->getServiceContext()->getStorageEngine()->setStableTimestamp(
                 applyThroughOpTime.getTimestamp(), false /*force*/);
-            replCoord->getServiceContext()->getStorageEngine()->setOldestTimestamp(
-                applyThroughOpTime.getTimestamp(), false /*force*/);
+            replCoord->setOldestTimestamp(applyThroughOpTime.getTimestamp());
         }
     }
     stats.complete(applyThroughOpTime);
@@ -906,9 +881,10 @@ void ReplicationRecoveryImpl::_truncateOplogTo(OperationContext* opCtx,
     }
 
     // Find an oplog entry optime <= truncateAfterTimestamp.
+    // TODO(SERVER-103411): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
     auto truncateAfterOpTimeAndWallTime =
         _storageInterface->findOplogOpTimeLessThanOrEqualToTimestamp(
-            opCtx, CollectionPtr(oplogCollection), truncateAfterTimestamp);
+            opCtx, CollectionPtr::CollectionPtr_UNSAFE(oplogCollection), truncateAfterTimestamp);
     if (!truncateAfterOpTimeAndWallTime) {
         LOGV2_FATAL_NOTRACE(40296,
                             "Reached end of oplog looking for an oplog entry lte to "
@@ -930,7 +906,7 @@ void ReplicationRecoveryImpl::_truncateOplogTo(OperationContext* opCtx,
         // of the oplog.  It is illegal for this maximum durable timestamp to be before the oldest
         // timestamp, so if the oldest timestamp is ahead of that point, we need to move it back.
         // Since the stable timestamp is never behind the oldest and also must not be ahead of the
-        // maximum durable timesatmp, it has to be moved back as well.  This usually happens when
+        // maximum durable timestamp, it has to be moved back as well.  This usually happens when
         // the truncateAfterTimestamp does not exist in the oplog because there was a hole open when
         // we crashed; in that case the oldest timestamp and the stable timestamp will be the
         // timestamp immediately prior to the hole.
@@ -953,8 +929,21 @@ void ReplicationRecoveryImpl::_truncateOplogTo(OperationContext* opCtx,
                                                        truncateAfterOplogEntryTs);
         }
     }
-    oplogCollection->getRecordStore()->capped()->truncateAfter(
-        opCtx, truncateAfterRecordId, false /*inclusive*/, nullptr /* aboutToDelete callback */);
+
+    WriteUnitOfWork wunit(opCtx);
+    RecordStore::Capped::TruncateAfterResult result =
+        oplogCollection->getRecordStore()->capped()->truncateAfter(
+            opCtx,
+            *shard_role_details::getRecoveryUnit(opCtx),
+            truncateAfterRecordId,
+            false /*inclusive*/);
+    wunit.commit();
+    if (result.recordsRemoved > 0) {
+        if (auto truncateMarkers = LocalOplogInfo::get(opCtx)->getTruncateMarkers()) {
+            truncateMarkers->updateMarkersAfterCappedTruncateAfter(
+                result.recordsRemoved, result.bytesRemoved, result.firstRemovedId);
+        }
+    }
 
     LOGV2(21554,
           "Replication recovery oplog truncation finished",

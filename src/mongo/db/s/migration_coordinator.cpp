@@ -29,38 +29,36 @@
 
 #include "mongo/db/s/migration_coordinator.h"
 
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/persistent_task_store.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/range_deleter_service.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
 #include "mongo/db/s/range_deletion_util.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
-#include "mongo/db/vector_clock.h"
-#include "mongo/db/vector_clock_mutable.h"
+#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/vector_clock/vector_clock_mutable.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
+
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kShardingMigration
 
@@ -99,6 +97,7 @@ MigrationCoordinator::MigrationCoordinator(MigrationSessionId sessionId,
                                            ChunkRange range,
                                            ChunkVersion preMigrationChunkVersion,
                                            const KeyPattern& shardKeyPattern,
+                                           ChunkVersion currentCollectionVersion,
                                            bool waitForDelete)
     : _migrationInfo(UUID::gen(),
                      std::move(sessionId),
@@ -111,6 +110,7 @@ MigrationCoordinator::MigrationCoordinator(MigrationSessionId sessionId,
                      std::move(range),
                      std::move(preMigrationChunkVersion)),
       _shardKeyPattern(shardKeyPattern),
+      _shardVersionPriorToTheMigration(currentCollectionVersion),
       _waitForDelete(waitForDelete) {}
 
 MigrationCoordinator::MigrationCoordinator(const MigrationCoordinatorDocument& doc)
@@ -134,10 +134,21 @@ void MigrationCoordinator::setShardKeyPattern(const boost::optional<KeyPattern>&
     _shardKeyPattern = shardKeyPattern;
 }
 
+void MigrationCoordinator::setTransfersFirstCollectionChunkToRecipient(OperationContext* opCtx,
+                                                                       bool value) {
+    _migrationInfo.setTransfersFirstCollectionChunkToRecipient(value);
+    migrationutil::updateMigrationCoordinatorDoc(opCtx, _migrationInfo);
+}
+
+bool MigrationCoordinator::getTransfersFirstCollectionChunkToRecipient() {
+    return _migrationInfo.getTransfersFirstCollectionChunkToRecipient().value_or(false);
+}
+
+
 void MigrationCoordinator::startMigration(OperationContext* opCtx) {
     LOGV2_DEBUG(
         23889, 2, "Persisting migration coordinator doc", "migrationDoc"_attr = _migrationInfo);
-    migrationutil::persistMigrationCoordinatorLocally(opCtx, _migrationInfo);
+    migrationutil::insertMigrationCoordinatorDoc(opCtx, _migrationInfo);
 
     LOGV2_DEBUG(23890,
                 2,
@@ -155,8 +166,9 @@ void MigrationCoordinator::startMigration(OperationContext* opCtx) {
     donorDeletionTask.setKeyPattern(*_shardKeyPattern);
     const auto currentTime = VectorClock::get(opCtx)->getTime();
     donorDeletionTask.setTimestamp(currentTime.clusterTime().asTimestamp());
+    donorDeletionTask.setPreMigrationShardVersion(_shardVersionPriorToTheMigration);
     rangedeletionutil::persistRangeDeletionTaskLocally(
-        opCtx, donorDeletionTask, WriteConcerns::kMajorityWriteConcernShardingTimeout);
+        opCtx, donorDeletionTask, defaultMajorityWriteConcernDoNotUse());
 }
 
 void MigrationCoordinator::setMigrationDecision(DecisionEnum decision) {
@@ -286,9 +298,7 @@ SharedSemiFuture<void> MigrationCoordinator::_commitMigrationOnDonorAndRecipient
 
 
     auto waitForActiveQueriesToComplete = [&]() {
-        AutoGetCollection autoColl(opCtx, deletionTask.getNss(), MODE_IS);
-        return CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(
-                   opCtx, deletionTask.getNss())
+        return CollectionShardingRuntime::acquireShared(opCtx, deletionTask.getNss())
             ->getOngoingQueriesCompletionFuture(deletionTask.getCollectionUuid(),
                                                 deletionTask.getRange())
             .semi();
@@ -338,8 +348,10 @@ void MigrationCoordinator::_abortMigrationOnDonorAndRecipient(OperationContext* 
                 "Deleting range deletion task on donor",
                 "migrationId"_attr = _migrationInfo.getId(),
                 logAttrs(_migrationInfo.getNss()));
-    rangedeletionutil::deleteRangeDeletionTaskLocally(
-        opCtx, _migrationInfo.getCollectionUuid(), _migrationInfo.getRange());
+    rangedeletionutil::deleteRangeDeletionTaskLocally(opCtx,
+                                                      _migrationInfo.getCollectionUuid(),
+                                                      _migrationInfo.getRange(),
+                                                      defaultMajorityWriteConcernDoNotUse());
 
     try {
         LOGV2_DEBUG(23900,

@@ -9,18 +9,18 @@
 
 import {isMongod} from "jstests/concurrency/fsm_workload_helpers/server_types.js";
 
-export const $config = (function() {
-    var states = {
+export const $config = (function () {
+    let states = {
         set: function set(db, collName) {
             this.setOrUnset(db, collName, true, this.numDocs);
         },
 
         unset: function unset(db, collName) {
             this.setOrUnset(db, collName, false, this.numDocs);
-        }
+        },
     };
 
-    var transitions = {set: {set: 0.5, unset: 0.5}, unset: {set: 0.5, unset: 0.5}};
+    let transitions = {set: {set: 0.5, unset: 0.5}, unset: {set: 0.5, unset: 0.5}};
 
     function setup(db, collName, cluster) {
         // index on 'value', the field being updated
@@ -28,12 +28,12 @@ export const $config = (function() {
 
         // numDocs should be much less than threadCount, to make more threads use the same docs.
         this.numDocs = Math.floor(this.threadCount / 5);
-        assert.gt(this.numDocs, 0, 'numDocs should be a positive number');
+        assert.gt(this.numDocs, 0, "numDocs should be a positive number");
 
-        for (var i = 0; i < this.numDocs; ++i) {
+        for (let i = 0; i < this.numDocs; ++i) {
             // make sure the inserted docs have a 'value' field, so they won't need
             // to grow when this workload runs against a capped collection
-            var res = db[collName].insert({_id: i, value: 0});
+            let res = db[collName].insert({_id: i, value: 0});
             assert.commandWorked(res);
             assert.eq(1, res.nInserted);
         }
@@ -42,7 +42,7 @@ export const $config = (function() {
     return {
         threadCount: 20,
         iterations: 20,
-        startState: 'set',
+        startState: "set",
         states: states,
         transitions: transitions,
         data: {
@@ -69,14 +69,14 @@ export const $config = (function() {
 
             setOrUnset: function setOrUnset(db, collName, set, numDocs) {
                 // choose a doc and value to use in the update
-                var docIndex = Random.randInt(numDocs);
-                var value = Random.randInt(5);
+                let docIndex = Random.randInt(numDocs);
+                let value = Random.randInt(5);
 
-                var updater = {};
-                updater[set ? '$set' : '$unset'] = {value: value};
+                let updater = {};
+                updater[set ? "$set" : "$unset"] = {value: value};
 
-                var query = {_id: docIndex};
-                var res = this.doUpdate(db, collName, query, updater);
+                let query = {_id: docIndex};
+                let res = this.doUpdate(db, collName, query, updater);
                 this.assertResult(db, res);
             },
 
@@ -84,6 +84,6 @@ export const $config = (function() {
                 return db[collName].update(query, updater);
             },
         },
-        setup: setup
+        setup: setup,
     };
 })();

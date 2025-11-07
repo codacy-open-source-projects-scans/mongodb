@@ -29,23 +29,6 @@
 
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <initializer_list>
-#include <memory>
-#include <mutex>
-#include <ostream>
-#include <string>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -64,23 +47,26 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/connection_pool_stats.h"
+#include "mongo/executor/executor_integration_test_connection_stats.h"
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface.h"
+#include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/network_interface_integration_fixture.h"
+#include "mongo/executor/network_interface_tl.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/idl/generic_argument_gen.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/topology_version_gen.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/transport/grpc_connection_stats_gen.h"
 #include "mongo/transport/transport_layer.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/integration_test.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/clock_source.h"
@@ -94,11 +80,41 @@
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <initializer_list>
+#include <memory>
+#include <mutex>
+#include <ostream>
+#include <sstream>  // TODO?
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 
 namespace mongo {
 namespace executor {
+
+// for assertion error messages
+// "{.sent=1, .canceled=0, ...}"
+std::ostream& operator<<(std::ostream& out, const NetworkInterface::Counters& counters) {
+#define PRINT(FIELD) "." #FIELD "=" << counters.FIELD
+    return out << "NetworkInterface::Counters{" << PRINT(sent) << ", " << PRINT(canceled) << ", "
+               << PRINT(timedOut) << ", " << PRINT(failed) << ", " << PRINT(failedRemotely)
+               << ", " PRINT(succeeded) << "}";
+#undef PRINT
+}
+
 namespace {
 
 bool pingCommandMissing(const RemoteCommandResponse& result) {
@@ -135,86 +151,60 @@ TEST_F(NetworkInterfaceIntegrationFixture, PingWithoutStartup) {
     ASSERT(fut.get(interruptible()).isOK());
 }
 
-// Hook that intentionally never finishes
-class HangingHook : public executor::NetworkConnectionHook {
-    Status validateHost(const HostAndPort&,
-                        const BSONObj& request,
-                        const RemoteCommandResponse&) final {
-        return Status::OK();
-    }
-
-    StatusWith<boost::optional<RemoteCommandRequest>> makeRequest(
-        const HostAndPort& remoteHost) final {
-        return {boost::make_optional(RemoteCommandRequest(remoteHost,
-                                                          DatabaseName::kAdmin,
-                                                          BSON("sleep" << 1 << "lock"
-                                                                       << "none"
-                                                                       << "secs" << 100000000),
-                                                          BSONObj(),
-                                                          nullptr))};
-    }
-
-    Status handleReply(const HostAndPort& remoteHost, RemoteCommandResponse&& response) final {
-        if (!pingCommandMissing(response)) {
-            ASSERT_EQ(ErrorCodes::CallbackCanceled, response.status);
-            return response.status;
-        }
-
-        return {ErrorCodes::ExceededTimeLimit, "No ping command. Returning pseudo-timeout."};
-    }
+struct ExpectedCounters {
+    boost::optional<uint64_t> sent;
+    boost::optional<uint64_t> canceled;
+    boost::optional<uint64_t> timedOut;
+    boost::optional<uint64_t> failed;
+    boost::optional<uint64_t> failedRemotely;
+    boost::optional<uint64_t> succeeded;
 };
 
-
-// Test that we time out a command if the connection hook hangs.
-TEST_F(NetworkInterfaceIntegrationFixture, HookHangs) {
-    startNet(std::make_unique<HangingHook>());
-
-    /**
-     *  Since mongos's have no ping command, we effectively skip this test by returning
-     *  ExceededTimeLimit above. (That ErrorCode is used heavily in repl and sharding code.)
-     *  If we return NetworkInterfaceExceededTimeLimit, it will make the ConnectionPool
-     *  attempt to reform the connection, which can lead to an accepted but unfortunate
-     *  race between TLConnection::setup and TLTypeFactory::shutdown.
-     *  We assert here that the error code we get is in the error class of timeouts,
-     *  which covers both NetworkInterfaceExceededTimeLimit and ExceededTimeLimit.
-     */
-    RemoteCommandRequest request{fixture().getServers()[0],
-                                 DatabaseName::kAdmin,
-                                 BSON("ping" << 1),
-                                 BSONObj(),
-                                 nullptr,
-                                 Seconds(1)};
-    auto res = runCommandSync(request);
-    ASSERT(ErrorCodes::isExceededTimeLimitError(res.status.code()));
+// Compares the non-null fields of `expected` with the corresponding fields of `actual`, for
+// assertions.
+bool operator==(const NetworkInterface::Counters& actual, const ExpectedCounters& expected) {
+#define MATCH(FIELD) (!expected.FIELD.has_value() || actual.FIELD == *expected.FIELD)
+    return MATCH(sent) && MATCH(canceled) && MATCH(timedOut) && MATCH(failed) &&
+        MATCH(failedRemotely) && MATCH(succeeded);
+#undef MATCH
 }
 
-using ResponseStatus = TaskExecutor::ResponseStatus;
-
-BSONObj objConcat(std::initializer_list<BSONObj> objs) {
-    BSONObjBuilder bob;
-
-    for (const auto& obj : objs) {
-        bob.appendElements(obj);
+// for assertion error messages:
+// "{.sent=1, .canceled=0, ...}"
+std::ostream& operator<<(std::ostream& out, const ExpectedCounters& expected) {
+    bool first = true;
+#define PRINT(FIELD)                              \
+    if (expected.FIELD.has_value()) {             \
+        if (first) {                              \
+            first = false;                        \
+        } else {                                  \
+            out << ", ";                          \
+        }                                         \
+        out << "." #FIELD "=" << *expected.FIELD; \
     }
-
-    return bob.obj();
+    out << "ExpectedCounters{";
+    PRINT(sent)
+    PRINT(canceled)
+    PRINT(timedOut)
+    PRINT(failed)
+    PRINT(failedRemotely)
+    PRINT(succeeded)
+    out << "}";
+    return out;
+#undef PRINT
 }
 
 class NetworkInterfaceTest : public NetworkInterfaceIntegrationFixture {
 public:
     constexpr static Milliseconds kNoTimeout = RemoteCommandRequest::kNoTimeout;
-    constexpr static Milliseconds kMaxWait = Milliseconds(Minutes(1));
+    constexpr static Milliseconds kMaxWait = Minutes(1);
 
-    void assertNumOps(uint64_t canceled, uint64_t timedOut, uint64_t failed, uint64_t succeeded) {
-        auto counters = net().getCounters();
-        ASSERT_EQ(canceled, counters.canceled);
-        ASSERT_EQ(timedOut, counters.timedOut);
-        ASSERT_EQ(failed, counters.failed);
-        ASSERT_EQ(succeeded, counters.succeeded);
+    void assertNumOps(const ExpectedCounters& expected) {
+        ASSERT_EQ(net().getCounters(), expected);
     }
 
     void setUp() override {
-        startNet(std::make_unique<WaitForHelloHook>(this));
+        startNet();
     }
 
     // NetworkInterfaceIntegrationFixture::tearDown() shuts down the NetworkInterface. We always
@@ -230,13 +220,12 @@ public:
                                          bool fireAndForget = false,
                                          boost::optional<ErrorCodes::Error> timeoutCode = {},
                                          boost::optional<UUID> operationKey = {}) {
-        if (!operationKey) {
-            operationKey = UUID::gen();
-        }
 
         auto cs = fixture();
-        cmd = cmd.addField(
-            BSON(GenericArguments::kClientOperationKeyFieldName << *operationKey).firstElement());
+        if (operationKey) {
+            cmd = cmd.addField(BSON(GenericArguments::kClientOperationKeyFieldName << *operationKey)
+                                   .firstElement());
+        }
 
         RemoteCommandRequest request(cs.getServers().front(),
                                      DatabaseName::kAdmin,
@@ -259,9 +248,8 @@ public:
     }
 
     BSONObj makeFindCmdObj() {
-        return BSON("find"
-                    << "test"
-                    << "filter" << BSONObj());
+        return BSON("find" << "test"
+                           << "filter" << BSONObj());
     }
 
     BSONObj makeSleepCmdObj() {
@@ -271,14 +259,12 @@ public:
     }
 
     RemoteCommandResponse runCurrentOpForCommand(HostAndPort target, const std::string command) {
-        const auto cmdObj =
-            BSON("aggregate" << 1 << "pipeline"
-                             << BSON_ARRAY(BSON("$currentOp" << BSON("localOps" << true))
-                                           << BSON("$match" << BSON(("command." + command)
-                                                                    << BSON("$exists" << true))))
-                             << "cursor" << BSONObj() << "$readPreference"
-                             << BSON("mode"
-                                     << "nearest"));
+        const auto cmdObj = BSON(
+            "aggregate" << 1 << "pipeline"
+                        << BSON_ARRAY(BSON("$currentOp" << BSON("localOps" << true))
+                                      << BSON("$match" << BSON(("command." + command)
+                                                               << BSON("$exists" << true))))
+                        << "cursor" << BSONObj() << "$readPreference" << BSON("mode" << "nearest"));
         RemoteCommandRequest request{
             target, DatabaseName::kAdmin, cmdObj, BSONObj(), nullptr, kNoTimeout};
         auto res = runCommandSync(request);
@@ -330,22 +316,11 @@ public:
         return ++numCurrentOpRan;
     }
 
-    struct HelloData {
-        BSONObj request;
-        RemoteCommandResponse response;
-    };
-
-    virtual HelloData waitForHello() {
-        stdx::unique_lock<stdx::mutex> lk(_mutex);
-        _helloCondVar.wait(lk, [this] { return _helloResult != boost::none; });
-
-        return std::move(*_helloResult);
+    const AsyncClientFactory& getFactory() {
+        return checked_cast<NetworkInterfaceTL&>(net()).getClientFactory_forTest();
     }
 
-    bool hasHelloResult() {
-        stdx::lock_guard<stdx::mutex> lk(_mutex);
-        return _helloResult != boost::none;
-    }
+    void runAcquireConnectionTimeoutTest(boost::optional<ErrorCodes::Error> customCode);
 
     // Test case definitions.
     void testCancelMissingOperation();
@@ -359,6 +334,7 @@ public:
     void testTimeoutWaitingToAcquireConnection();
     void testTimeoutGeneralNetworkInterface();
     void testCustomCodeRequestTimeoutHit();
+    void testCustomCodeTimeoutWaitingToAcquireConnection();
     void testNoCustomCodeRequestTimeoutHit();
     void testAsyncOpTimeout();
     void testAsyncOpTimeoutWithOpCtxDeadlineSooner();
@@ -372,37 +348,6 @@ public:
     void testConnectionErrorAssociatedWithRemote();
     void testShutdownBeforeSendRequest();
     void testShutdownAfterSendRequest();
-
-private:
-    class WaitForHelloHook : public NetworkConnectionHook {
-    public:
-        explicit WaitForHelloHook(NetworkInterfaceTest* parent) : _parent(parent) {}
-
-        Status validateHost(const HostAndPort& host,
-                            const BSONObj& request,
-                            const RemoteCommandResponse& helloReply) override {
-            stdx::lock_guard<stdx::mutex> lk(_parent->_mutex);
-            _parent->_helloResult = HelloData{request, helloReply};
-            _parent->_helloCondVar.notify_all();
-            return Status::OK();
-        }
-
-        StatusWith<boost::optional<RemoteCommandRequest>> makeRequest(const HostAndPort&) override {
-            return {boost::none};
-        }
-
-        Status handleReply(const HostAndPort&, RemoteCommandResponse&&) override {
-            return Status::OK();
-        }
-
-    private:
-        NetworkInterfaceTest* _parent;
-    };
-
-protected:
-    stdx::mutex _mutex;
-    stdx::condition_variable _helloCondVar;
-    boost::optional<HelloData> _helloResult;
 };
 
 class NetworkInterfaceTestWithBaton : public NetworkInterfaceTest {
@@ -423,15 +368,6 @@ public:
         return _opCtx.get();
     }
 
-    HelloData waitForHello() override {
-        stdx::unique_lock<stdx::mutex> lk(_mutex);
-        auto clockSource = _serviceContext->getPreciseClockSource();
-        Waitable::wait(
-            _baton.get(), clockSource, _helloCondVar, lk, [&] { return _helloResult.has_value(); });
-
-        return std::move(*_helloResult);
-    }
-
 private:
     ServiceContext::UniqueServiceContext _serviceContext;
     ServiceContext::UniqueClient _client;
@@ -440,6 +376,12 @@ private:
 };
 
 using NetworkInterfaceTestWithoutBaton = NetworkInterfaceTest;
+
+#define SKIP_ON_GRPC(reason)                                                             \
+    if (unittest::shouldUseGRPCEgress()) {                                               \
+        LOGV2(9936111, "Skipping test not supported with gRPC", "reason"_attr = reason); \
+        return;                                                                          \
+    }
 
 #define TEST_WITH_AND_WITHOUT_BATON_F(suite, name) \
     TEST_F(suite##WithBaton, name) {               \
@@ -450,23 +392,11 @@ using NetworkInterfaceTestWithoutBaton = NetworkInterfaceTest;
     }                                              \
     void suite::test##name()
 
-class NetworkInterfaceInternalClientTest : public NetworkInterfaceTest {
-public:
-    void setUp() override {
-        resetIsInternalClient(true);
-        NetworkInterfaceTest::setUp();
-    }
-
-    void tearDown() override {
-        NetworkInterfaceTest::tearDown();
-        resetIsInternalClient(false);
-    }
-};
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelMissingOperation) {
     // This is just a sanity check, this action should have no effect.
     cancelCommand(makeCallbackHandle());
-    assertNumOps(0u, 0u, 0u, 0u);
+    assertNumOps({.canceled = 0u, .timedOut = 0u, .failed = 0u, .succeeded = 0u});
 }
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelLocally) {
@@ -505,11 +435,12 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelLocally) {
     ASSERT_EQ(ErrorCodes::CallbackCanceled, result.status);
     ASSERT(result.elapsed);
 
-    assertNumOps(1u, 0u, 0u, 0u);
+    assertNumOps({.canceled = 1u, .timedOut = 0u, .failed = 0u, .succeeded = 0u});
 }
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelRemotely) {
     // Enable blockConnection for "echo".
+    FailPointEnableBlock fpb("increaseTimeoutOnKillOp");
     assertCommandOK(DatabaseName::kAdmin,
                     BSON("configureFailPoint"
                          << "failCommand"
@@ -523,10 +454,9 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelRemotely) {
     ON_BLOCK_EXIT([&] {
         // Disable blockConnection.
         assertCommandOK(DatabaseName::kAdmin,
-                        BSON("configureFailPoint"
-                             << "failCommand"
-                             << "mode"
-                             << "off"),
+                        BSON("configureFailPoint" << "failCommand"
+                                                  << "mode"
+                                                  << "off"),
                         kNoTimeout);
     });
 
@@ -537,10 +467,14 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelRemotely) {
     auto deferred = [&] {
         // Kick off an "echo" operation, which should block until cancelCommand causes
         // the operation to be killed.
-        auto deferred =
-            runCommand(cbh,
-                       makeTestCommand(kNoTimeout, makeEchoCmdObj(), nullptr /* opCtx */),
-                       cancellationSource.token());
+        auto deferred = runCommand(cbh,
+                                   makeTestCommand(kNoTimeout,
+                                                   makeEchoCmdObj(),
+                                                   /*opCtx=*/nullptr,
+                                                   /*fireAndForget=*/false,
+                                                   /*timeoutCode=*/{},
+                                                   /*operationKey=*/UUID::gen()),
+                                   cancellationSource.token());
 
         // Wait for the "echo" operation to start.
         numCurrentOpRan += waitForCommandToStart("echo", kMaxWait);
@@ -561,7 +495,7 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelRemotely) {
 
     // We have one canceled operation (echo), and two other succeeded operations
     // on top of the currentOp operations (configureFailPoint and _killOperations).
-    assertNumOps(1u, 0u, 0u, 2u + numCurrentOpRan);
+    assertNumOps({.canceled = 1u, .timedOut = 0u, .failed = 0u, .succeeded = 2u + numCurrentOpRan});
 }
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelRemotelyTimedOut) {
@@ -572,19 +506,18 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelRemotelyTimedOut) {
                          << "mode"
                          << "alwaysOn"
                          << "data"
-                         << BSON("blockConnection" << true << "blockTimeMS" << 5000
-                                                   << "failCommands"
-                                                   << BSON_ARRAY("echo"
-                                                                 << "_killOperations"))),
+                         << BSON("blockConnection"
+                                 << true << "blockTimeMS"
+                                 << NetworkInterfaceTL::kCancelCommandTimeout.count() + 4000
+                                 << "failCommands" << BSON_ARRAY("echo" << "_killOperations"))),
                     kNoTimeout);
 
     ON_BLOCK_EXIT([&] {
         // Disable blockConnection.
         assertCommandOK(DatabaseName::kAdmin,
-                        BSON("configureFailPoint"
-                             << "failCommand"
-                             << "mode"
-                             << "off"),
+                        BSON("configureFailPoint" << "failCommand"
+                                                  << "mode"
+                                                  << "off"),
                         kNoTimeout);
     });
 
@@ -594,10 +527,14 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelRemotelyTimedOut) {
     CancellationSource cancellationSource;
     auto deferred = [&] {
         // Kick off a blocking "echo" operation.
-        auto deferred =
-            runCommand(cbh,
-                       makeTestCommand(kNoTimeout, makeEchoCmdObj(), nullptr /* opCtx */),
-                       cancellationSource.token());
+        auto deferred = runCommand(cbh,
+                                   makeTestCommand(kNoTimeout,
+                                                   makeEchoCmdObj(),
+                                                   /*opCtx=*/nullptr,
+                                                   /*fireAndForget=*/false,
+                                                   /*timeoutCode=*/{},
+                                                   /*operationKey=*/UUID::gen()),
+                                   cancellationSource.token());
 
         // Wait for the "echo" operation to start.
         numCurrentOpRan += waitForCommandToStart("echo", kMaxWait);
@@ -624,10 +561,13 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelRemotelyTimedOut) {
 
     // We have one canceled operation (echo), one timedout operation (_killOperations),
     // and one succeeded operation on top of the currentOp operations (configureFailPoint).
-    assertNumOps(1u, 1u, 0u, 1u + numCurrentOpRan);
+    assertNumOps({.canceled = 1u, .timedOut = 1u, .failed = 0u, .succeeded = 1u + numCurrentOpRan});
 }
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelBeforeConnection) {
+    // Covered in MockGRPCAsyncClientFactoryTest::CancelStreamEstablishment.
+    SKIP_ON_GRPC("ConnectionPool-specific failpoint");
+
     boost::optional<FailPointEnableBlock> fpb("connectionPoolDoesNotFulfillRequests");
     auto cbh = makeCallbackHandle();
     CancellationSource cancellationSource;
@@ -650,7 +590,7 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CancelBeforeConnection) {
     auto result = pf.future.get();
     ASSERT_EQ(ErrorCodes::CallbackCanceled, result.status);
     ASSERT(result.elapsed);
-    assertNumOps(1u, 0u, 0u, 0u);
+    assertNumOps({.canceled = 1u, .timedOut = 0u, .failed = 0u, .succeeded = 0u});
 }
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, LateCancel) {
@@ -666,12 +606,13 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, LateCancel) {
 
     ASSERT_OK(result.status);
     ASSERT(result.elapsed);
-    assertNumOps(0u, 0u, 0u, 1u);
+    assertNumOps({.canceled = 0u, .timedOut = 0u, .failed = 0u, .succeeded = 1u});
 }
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, ConnectionErrorDropsSingleConnection) {
-    FailPoint* failPoint =
-        globalFailPointRegistry().find("asioTransportLayerAsyncConnectReturnsConnectionError");
+    SKIP_ON_GRPC("gRPC doesn't use ConnectionPool");
+
+    FailPoint* failPoint = globalFailPointRegistry().find("asyncConnectReturnsConnectionError");
     auto timesEntered = failPoint->setMode(FailPoint::nTimes, 1);
 
     auto cbh = makeCallbackHandle();
@@ -692,14 +633,16 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, ConnectionErrorDropsSingleCo
 }
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, TimeoutDuringConnectionHandshake) {
+    SKIP_ON_GRPC("gRPC skips the handshake");
+
     // If network timeout occurs during connection setup before handshake completes,
     // HostUnreachable should be returned.
-    FailPointEnableBlock fpb1("connectionPoolDropConnectionsBeforeGetConnection",
-                              BSON("instance"
-                                   << "NetworkInterfaceTL-NetworkInterfaceIntegrationFixture"));
-    FailPointEnableBlock fpb2("triggerConnectionSetupHandshakeTimeout",
-                              BSON("instance"
-                                   << "NetworkInterfaceTL-NetworkInterfaceIntegrationFixture"));
+    FailPointEnableBlock fpb1(
+        "connectionPoolDropConnectionsBeforeGetConnection",
+        BSON("instance" << "NetworkInterfaceTL-NetworkInterfaceIntegrationFixture"));
+    FailPointEnableBlock fpb2(
+        "triggerConnectionSetupHandshakeTimeout",
+        BSON("instance" << "NetworkInterfaceTL-NetworkInterfaceIntegrationFixture"));
     auto cbh = makeCallbackHandle();
     auto deferred = runCommand(cbh, makeTestCommand(Milliseconds(100), makeEchoCmdObj()));
 
@@ -707,20 +650,36 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, TimeoutDuringConnectionHands
 
     ASSERT_EQ(ErrorCodes::HostUnreachable, result.status);
     // No timeouts are counted as a result of HostUnreachable being returned.
-    assertNumOps(0u, 0u, 1u, 0u);
+    assertNumOps({.canceled = 0u, .timedOut = 0u, .failed = 1u, .succeeded = 0u});
 }
 
-TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, TimeoutWaitingToAcquireConnection) {
+void NetworkInterfaceTest::runAcquireConnectionTimeoutTest(
+    boost::optional<ErrorCodes::Error> customCode) {
+    // Covered in MockGRPCAsyncClientFactoryTest::runStreamEstablishmentTimeoutTest.
+    SKIP_ON_GRPC("ConnectionPool-specific failpoint");
+
     // If timeout occurs during connection acquisition, PooledConnectionAcquisitionExceededTimeLimit
     // should be returned.
     FailPointEnableBlock fpb("connectionPoolDoesNotFulfillRequests");
     auto cbh = makeCallbackHandle();
-    auto deferred = runCommand(cbh, makeTestCommand(Milliseconds(100), makeFindCmdObj()));
+    auto request = makeTestCommand(Milliseconds(100), makeFindCmdObj());
+    request.timeoutCode = customCode;
+    auto deferred = runCommand(cbh, request);
 
     auto result = deferred.get(interruptible());
 
-    ASSERT_EQ(ErrorCodes::PooledConnectionAcquisitionExceededTimeLimit, result.status);
-    assertNumOps(0u, 1u, 0u, 0u);
+    auto expectedCode =
+        customCode.value_or(ErrorCodes::PooledConnectionAcquisitionExceededTimeLimit);
+    ASSERT_EQ(expectedCode, result.status);
+    assertNumOps({.canceled = 0u, .timedOut = 1u, .failed = 0u, .succeeded = 0u});
+}
+
+TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, TimeoutWaitingToAcquireConnection) {
+    runAcquireConnectionTimeoutTest({});
+}
+
+TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CustomCodeTimeoutWaitingToAcquireConnection) {
+    runAcquireConnectionTimeoutTest(ErrorCodes::MaxTimeMSExpired);
 }
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, TimeoutGeneralNetworkInterface) {
@@ -735,7 +694,7 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, TimeoutGeneralNetworkInterfa
     auto result = deferred.get(interruptible());
 
     ASSERT_EQ(ErrorCodes::NetworkInterfaceExceededTimeLimit, result.status);
-    assertNumOps(0u, 1u, 0u, 1u);
+    assertNumOps({.canceled = 0u, .timedOut = 1u, .failed = 0u, .succeeded = 1u});
 }
 
 /**
@@ -743,10 +702,12 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, TimeoutGeneralNetworkInterfa
  * expect the request's error code.
  */
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CustomCodeRequestTimeoutHit) {
+    auto fpGuard = configureFailCommand("ping", {}, Milliseconds(30000));
+
     auto cb = makeCallbackHandle();
     // Force timeout by setting timeout to 0.
     auto request = makeTestCommand(
-        Milliseconds(0), makeFindCmdObj(), nullptr, false, ErrorCodes::MaxTimeMSExpired);
+        Milliseconds(0), BSON("ping" << 1), nullptr, false, ErrorCodes::MaxTimeMSExpired);
     auto deferred = runCommand(cb, request);
     auto res = deferred.get(interruptible());
 
@@ -759,6 +720,9 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, CustomCodeRequestTimeoutHit)
  * expect default error codes depending on location.
  */
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, NoCustomCodeRequestTimeoutHit) {
+    // Covered in MockGRPCAsyncClientFactoryTest::TimeoutStreamEstablishment.
+    SKIP_ON_GRPC("ConnectionPool-specific error code");
+
     auto cb = makeCallbackHandle();
     // Force timeout by setting timeout to 0.
     auto request = makeTestCommand(Milliseconds(0), makeFindCmdObj());
@@ -770,21 +734,21 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, NoCustomCodeRequestTimeoutHi
 }
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeout) {
-    auto fpGuard = configureFailCommand("ping", {}, Milliseconds(30000));
+    auto fpGuard = configureFailCommand("ping", {}, Milliseconds(30'000));
 
     // Kick off operation
     auto cb = makeCallbackHandle();
     auto request = makeTestCommand(
-        Milliseconds{1000}, BSON("ping" << 1), nullptr, false, ErrorCodes::MaxTimeMSExpired);
+        Milliseconds{3'000}, BSON("ping" << 1), nullptr, false, ErrorCodes::MaxTimeMSExpired);
     auto deferred = runCommand(cb, request);
-
-    waitForHello();
 
     auto result = deferred.get(interruptible());
     ASSERT_EQ(ErrorCodes::MaxTimeMSExpired, result.status);
     ASSERT(result.elapsed);
     ASSERT_EQ(result.target, fixture().getServers().front());
-    assertNumOps(0u, 1u, 0u, 0u);
+    // The "ping" will have timed out on the client side, and then because of that a
+    // "_killOperations" command will be sent to the server, and that will succeed.
+    assertNumOps({.canceled = 0u, .timedOut = 1u, .failed = 0u, .succeeded = 0u});
 }
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadlineSooner) {
@@ -809,8 +773,6 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadl
     // be long enough that the assertion about opCtxDeadline fails.
     auto networkStartCommandDelay = stopWatch.elapsed();
 
-    waitForHello();
-
     auto result = deferred.get(interruptible());
 
     // mongos doesn't implement the ping command, so ignore the response there, otherwise
@@ -827,7 +789,10 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadl
     ASSERT_GTE(result.elapsed.value() + networkStartCommandDelay, opCtxDeadline);
     ASSERT_LT(result.elapsed.value(), requestTimeout);
     ASSERT_EQ(result.target, fixture().getServers().front());
-    assertNumOps(0u, 1u, 0u, 0u);
+
+    // Sleep has timed out but _killOperations may still be running. We can't use
+    // waitForCommandToStop since there is no guarantee when _killOperations starts.
+    assertNumOps({.canceled = 0u, .timedOut = 1u, .failed = 0u, .succeeded = 0u});
 }
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadlineLater) {
@@ -853,8 +818,6 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadl
     // be long enough that the assertion about opCtxDeadline fails.
     auto networkStartCommandDelay = stopWatch.elapsed();
 
-    waitForHello();
-
     auto result = deferred.get(interruptible());
 
     // mongos doesn't implement the ping command, so ignore the response there, otherwise
@@ -872,11 +835,18 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, AsyncOpTimeoutWithOpCtxDeadl
     ASSERT_LT(duration_cast<Milliseconds>(result.elapsed.value() + networkStartCommandDelay),
               opCtxDeadline);
 
-    assertNumOps(0u, 1u, 0u, 0u);
+    // Sleep has timed out but _killOperations may still be running. We can't use
+    // waitForCommandToStop since there is no guarantee when _killOperations starts.
+    assertNumOps({.canceled = 0u, .timedOut = 1u, .failed = 0u, .succeeded = 0u});
 }
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, StartCommand) {
-    auto request = makeTestCommand(kNoTimeout, makeEchoCmdObj(), nullptr /* opCtx */);
+    auto request = makeTestCommand(kNoTimeout,
+                                   makeEchoCmdObj(),
+                                   /*opCtx=*/nullptr,
+                                   /*fireAndForget=*/false,
+                                   /*timeoutCode=*/{},
+                                   /*operationKey=*/UUID::gen());
 
     auto deferred = runCommand(makeCallbackHandle(), std::move(request));
 
@@ -893,7 +863,7 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, StartCommand) {
     ASSERT_EQ("admin"_sd, cmdObj.getStringField("$db"));
     ASSERT_FALSE(cmdObj["clientOperationKey"].eoo());
     ASSERT_EQ(1, res.data.getIntField("ok"));
-    assertNumOps(0u, 0u, 0u, 1u);
+    assertNumOps({.canceled = 0u, .timedOut = 0u, .failed = 0u, .succeeded = 1u});
 }
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, FireAndForget) {
@@ -908,10 +878,9 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, FireAndForget) {
 
     ON_BLOCK_EXIT([&] {
         assertCommandOK(DatabaseName::kAdmin,
-                        BSON("configureFailPoint"
-                             << "failCommand"
-                             << "mode"
-                             << "off"));
+                        BSON("configureFailPoint" << "failCommand"
+                                                  << "mode"
+                                                  << "off"));
     });
 
     // Run fireAndForget commands and verify that we get status OK responses.
@@ -939,7 +908,7 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, FireAndForget) {
     uassertStatusOK(result.status);
     ASSERT_EQ(0, result.data.getIntField("ok"));
     ASSERT_EQ(ErrorCodes::CommandFailed, result.data.getIntField("code"));
-    assertNumOps(0u, 0u, 0u, 5u);
+    assertNumOps({.canceled = 0u, .timedOut = 0u, .failed = 0u, .succeeded = 5u});
 }
 
 TEST_F(NetworkInterfaceTest, SetAlarm) {
@@ -1036,19 +1005,17 @@ TEST_F(NetworkInterfaceTest, SetAlarm) {
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, UseOperationKeyWhenProvided) {
     const auto opKey = UUID::gen();
     assertCommandOK(DatabaseName::kAdmin,
-                    BSON("configureFailPoint"
-                         << "failIfOperationKeyMismatch"
-                         << "mode"
-                         << "alwaysOn"
-                         << "data" << BSON("clientOperationKey" << opKey)),
+                    BSON("configureFailPoint" << "failIfOperationKeyMismatch"
+                                              << "mode"
+                                              << "alwaysOn"
+                                              << "data" << BSON("clientOperationKey" << opKey)),
                     kNoTimeout);
 
     ON_BLOCK_EXIT([&] {
         assertCommandOK(DatabaseName::kAdmin,
-                        BSON("configureFailPoint"
-                             << "failIfOperationKeyMismatch"
-                             << "mode"
-                             << "off"),
+                        BSON("configureFailPoint" << "failIfOperationKeyMismatch"
+                                                  << "mode"
+                                                  << "off"),
                         kNoTimeout);
     });
 
@@ -1065,43 +1032,6 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, UseOperationKeyWhenProvided)
     auto cbh = makeCallbackHandle();
     auto fut = runCommand(cbh, std::move(rcr));
     fut.get(interruptible());
-}
-
-TEST_F(NetworkInterfaceInternalClientTest,
-       HelloRequestContainsOutgoingWireVersionInternalClientInfo) {
-    auto deferred = runCommand(makeCallbackHandle(), makeTestCommand(kNoTimeout, makeEchoCmdObj()));
-    auto helloHandshake = waitForHello();
-
-    // Verify that the "hello" reply has the expected internalClient data.
-    auto wireSpec = WireSpec::getWireSpec(getGlobalServiceContext()).get();
-    auto internalClientElem = helloHandshake.request["internalClient"];
-    ASSERT_EQ(internalClientElem.type(), BSONType::Object);
-    auto minWireVersionElem = internalClientElem.Obj()["minWireVersion"];
-    auto maxWireVersionElem = internalClientElem.Obj()["maxWireVersion"];
-    ASSERT_EQ(minWireVersionElem.type(), BSONType::NumberInt);
-    ASSERT_EQ(maxWireVersionElem.type(), BSONType::NumberInt);
-    ASSERT_EQ(minWireVersionElem.numberInt(), wireSpec->outgoing.minWireVersion);
-    ASSERT_EQ(maxWireVersionElem.numberInt(), wireSpec->outgoing.maxWireVersion);
-
-    // Verify that the ping op is counted as a success.
-    auto res = deferred.get();
-    ASSERT(res.elapsed);
-    assertNumOps(0u, 0u, 0u, 1u);
-}
-
-TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest,
-                              HelloRequestMissingInternalClientInfoWhenNotInternalClient) {
-    resetIsInternalClient(false);
-
-    auto deferred = runCommand(makeCallbackHandle(), makeTestCommand(kNoTimeout, makeEchoCmdObj()));
-    auto helloHandshake = waitForHello();
-
-    // Verify that the "hello" reply has the expected internalClient data.
-    ASSERT_FALSE(helloHandshake.request["internalClient"]);
-    // Verify that the ping op is counted as a success.
-    auto res = deferred.get(interruptible());
-    ASSERT(res.elapsed);
-    assertNumOps(0u, 0u, 0u, 1u);
 }
 
 TEST_F(NetworkInterfaceTest, StartExhaustCommandShouldReceiveMultipleResponses) {
@@ -1128,21 +1058,19 @@ TEST_F(NetworkInterfaceTest, StartExhaustCommandShouldReceiveMultipleResponses) 
 TEST_F(NetworkInterfaceTest, StartExhaustCommandShouldStopOnFailure) {
     // Both assetCommandOK and makeTestCommand target the first host in the connection string, so we
     // are guaranteed that the failpoint is set on the same host that we run the exhaust command on.
-    auto configureFailpointCmd = BSON("configureFailPoint"
-                                      << "failCommand"
-                                      << "mode"
-                                      << "alwaysOn"
-                                      << "data"
-                                      << BSON("errorCode" << ErrorCodes::CommandFailed
-                                                          << "failCommands"
-                                                          << BSON_ARRAY("isMaster")));
+    auto configureFailpointCmd =
+        BSON("configureFailPoint" << "failCommand"
+                                  << "mode"
+                                  << "alwaysOn"
+                                  << "data"
+                                  << BSON("errorCode" << ErrorCodes::CommandFailed << "failCommands"
+                                                      << BSON_ARRAY("isMaster")));
     assertCommandOK(DatabaseName::kAdmin, configureFailpointCmd);
 
     ON_BLOCK_EXIT([&] {
-        auto stopFpRequest = BSON("configureFailPoint"
-                                  << "failCommand"
-                                  << "mode"
-                                  << "off");
+        auto stopFpRequest = BSON("configureFailPoint" << "failCommand"
+                                                       << "mode"
+                                                       << "off");
         assertCommandOK(DatabaseName::kAdmin, stopFpRequest);
     });
 
@@ -1232,6 +1160,9 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, RunCommandOnLeasedStream) {
 }
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, ConnectionErrorAssociatedWithRemote) {
+    // Covered in MockGRPCAsyncClientFactoryTest::ConnectionErrorAssociatedWithRemote.
+    SKIP_ON_GRPC("ConnectionPool-specific failpoint");
+
     FailPointEnableBlock fpb("connectionPoolReturnsErrorOnGet");
 
     auto cb = makeCallbackHandle();
@@ -1242,10 +1173,12 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, ConnectionErrorAssociatedWit
 
     ASSERT_EQ(ErrorCodes::HostUnreachable, result.status);
     ASSERT_EQ(result.target, fixture().getServers().front());
-    assertNumOps(0u, 0u, 1u, 0u);
+    assertNumOps({.canceled = 0u, .timedOut = 0u, .failed = 1u, .succeeded = 0u});
 }
 
 TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, ShutdownBeforeSendRequest) {
+    SKIP_ON_GRPC("gRPC client factory shutdown blocks until all clients have been destroyed");
+
     auto operationKey = UUID::gen();
 
     // Block the remote handling of "echo" indefinitely. If the NI sends the command and is
@@ -1298,7 +1231,7 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, ShutdownBeforeSendRequest) {
     // Since shutdown has completed, this future should be ready very soon if not immediately.
     ASSERT_EQ(getWithTimeout(pf.future, *opCtx, Seconds(1)).status, ErrorCodes::ShutdownInProgress);
 
-    assertNumOps(1u, 0u, 0u, 0u);
+    assertNumOps({.canceled = 1u, .timedOut = 0u, .failed = 0u, .succeeded = 0u});
 
     ConnectionPoolStats stats;
     net().appendConnectionStats(&stats);
@@ -1347,13 +1280,251 @@ TEST_WITH_AND_WITHOUT_BATON_F(NetworkInterfaceTest, ShutdownAfterSendRequest) {
     // Since shutdown has completed, this future should be ready very soon if not immediately.
     ASSERT_EQ(getWithTimeout(pf.future, *opCtx, Seconds(1)).status, ErrorCodes::ShutdownInProgress);
 
-    assertNumOps(1u, 0u, 0u, 0u);
+    assertNumOps({.canceled = 1u, .timedOut = 0u, .failed = 0u, .succeeded = 0u});
 
-    ConnectionPoolStats stats;
-    net().appendConnectionStats(&stats);
-    ASSERT_EQ(stats.totalAvailable, 0);
-    ASSERT_EQ(stats.totalInUse, 0);
+    assertConnectionStats(
+        getFactory(),
+        getServer(),
+        [](const ConnectionStatsPer& stats) { return stats.inUse == 0 && stats.available == 0; },
+        [&](const GRPCConnectionStats& stats) {
+            return stats.getTotalInUseStreams() == 0 && stats.getTotalOpenChannels() == 0;
+        },
+        "ShutdownAfterSendRequest failed assertion on inUse and available connection/channel "
+        "count.");
 }
+
+class NetworkInterfaceTestWithConnectHook : public NetworkInterfaceTest {
+public:
+    void setConnectHook(std::unique_ptr<NetworkConnectionHook> hook) {
+        _hook = std::move(hook);
+    }
+
+protected:
+    std::unique_ptr<NetworkInterface> _makeNet(std::string instanceName,
+                                               transport::TransportProtocol protocol) override {
+        return makeNetworkInterface(
+            instanceName, std::move(_hook), nullptr, makeDefaultConnectionPoolOptions(), protocol);
+    }
+
+private:
+    std::unique_ptr<NetworkConnectionHook> _hook;
+};
+
+class NetworkInterfaceTestWithHelloHook : public NetworkInterfaceTestWithConnectHook {
+public:
+    void setUp() override {
+        setConnectHook(std::make_unique<WaitForHelloHook>(this));
+        NetworkInterfaceTestWithConnectHook::setUp();
+    }
+
+    struct HelloData {
+        BSONObj request;
+        RemoteCommandResponse response;
+    };
+
+    virtual HelloData waitForHello() {
+        stdx::unique_lock<stdx::mutex> lk(_mutex);
+        _helloCondVar.wait(lk, [this] { return _helloResult != boost::none; });
+
+        return std::move(*_helloResult);
+    }
+
+    bool hasHelloResult() {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        return _helloResult != boost::none;
+    }
+
+private:
+    class WaitForHelloHook : public NetworkConnectionHook {
+    public:
+        explicit WaitForHelloHook(NetworkInterfaceTestWithHelloHook* parent) : _parent(parent) {}
+
+        Status validateHost(const HostAndPort& host,
+                            const BSONObj& request,
+                            const RemoteCommandResponse& helloReply) override {
+            stdx::lock_guard<stdx::mutex> lk(_parent->_mutex);
+            _parent->_helloResult = HelloData{request, helloReply};
+            _parent->_helloCondVar.notify_all();
+            return Status::OK();
+        }
+
+        StatusWith<boost::optional<RemoteCommandRequest>> makeRequest(const HostAndPort&) override {
+            return {boost::none};
+        }
+
+        Status handleReply(const HostAndPort&, RemoteCommandResponse&&) override {
+            return Status::OK();
+        }
+
+    private:
+        NetworkInterfaceTestWithHelloHook* _parent;
+    };
+
+protected:
+    stdx::mutex _mutex;
+    stdx::condition_variable _helloCondVar;
+    boost::optional<HelloData> _helloResult;
+};
+
+TEST_F(NetworkInterfaceTestWithHelloHook,
+       HelloRequestMissingInternalClientInfoWhenNotInternalClient) {
+    resetIsInternalClient(false);
+
+    auto deferred = runCommand(makeCallbackHandle(), makeTestCommand(kNoTimeout, makeEchoCmdObj()));
+    auto helloHandshake = waitForHello();
+
+    // Verify that the "hello" reply has the expected internalClient data.
+    ASSERT_FALSE(helloHandshake.request["internalClient"]);
+    // Verify that the ping op is counted as a success.
+    auto res = deferred.get(interruptible());
+    ASSERT(res.elapsed);
+    assertNumOps({.canceled = 0u, .timedOut = 0u, .failed = 0u, .succeeded = 1u});
+}
+
+class NetworkInterfaceInternalClientTest : public NetworkInterfaceTestWithHelloHook {
+public:
+    void setUp() override {
+        resetIsInternalClient(true);
+        NetworkInterfaceTestWithHelloHook::setUp();
+    }
+
+    void tearDown() override {
+        NetworkInterfaceTestWithHelloHook::tearDown();
+        resetIsInternalClient(false);
+    }
+};
+
+TEST_F(NetworkInterfaceInternalClientTest,
+       HelloRequestContainsOutgoingWireVersionInternalClientInfo) {
+    auto deferred = runCommand(makeCallbackHandle(), makeTestCommand(kNoTimeout, makeEchoCmdObj()));
+    auto helloHandshake = waitForHello();
+
+    // Verify that the "hello" reply has the expected internalClient data.
+    auto outgoing = WireSpec::getWireSpec(getGlobalServiceContext()).getOutgoing();
+    auto internalClientElem = helloHandshake.request["internalClient"];
+    ASSERT_EQ(internalClientElem.type(), BSONType::object);
+    auto minWireVersionElem = internalClientElem.Obj()["minWireVersion"];
+    auto maxWireVersionElem = internalClientElem.Obj()["maxWireVersion"];
+    ASSERT_EQ(minWireVersionElem.type(), BSONType::numberInt);
+    ASSERT_EQ(maxWireVersionElem.type(), BSONType::numberInt);
+    ASSERT_EQ(minWireVersionElem.numberInt(), outgoing.minWireVersion);
+    ASSERT_EQ(maxWireVersionElem.numberInt(), outgoing.maxWireVersion);
+
+    // Verify that the ping op is counted as a success.
+    auto res = deferred.get();
+    ASSERT(res.elapsed);
+    assertNumOps({.canceled = 0u, .timedOut = 0u, .failed = 0u, .succeeded = 1u});
+}
+
+class NetworkInterfaceTestWithHangingHook : public NetworkInterfaceTestWithConnectHook {
+public:
+    void setUp() override {
+        setConnectHook(std::make_unique<HangingHook>());
+        NetworkInterfaceTestWithConnectHook::setUp();
+    }
+
+private:
+    // Hook that intentionally never finishes
+    class HangingHook : public executor::NetworkConnectionHook {
+        Status validateHost(const HostAndPort&,
+                            const BSONObj& request,
+                            const RemoteCommandResponse&) final {
+            return Status::OK();
+        }
+
+        StatusWith<boost::optional<RemoteCommandRequest>> makeRequest(
+            const HostAndPort& remoteHost) final {
+            return {boost::make_optional(RemoteCommandRequest(remoteHost,
+                                                              DatabaseName::kAdmin,
+                                                              BSON("sleep" << 1 << "lock"
+                                                                           << "none"
+                                                                           << "secs" << 100000000),
+                                                              BSONObj(),
+                                                              nullptr))};
+        }
+
+        Status handleReply(const HostAndPort& remoteHost, RemoteCommandResponse&& response) final {
+            if (!pingCommandMissing(response)) {
+                ASSERT_EQ(ErrorCodes::CallbackCanceled, response.status);
+                return response.status;
+            }
+
+            return {ErrorCodes::ExceededTimeLimit, "No ping command. Returning pseudo-timeout."};
+        }
+    };
+};
+
+// Test that we time out a command if the connection hook hangs.
+TEST_F(NetworkInterfaceTestWithHangingHook, HookHangs) {
+    /**
+     *  Since mongos's have no ping command, we effectively skip this test by returning
+     *  ExceededTimeLimit above. (That ErrorCode is used heavily in repl and sharding code.)
+     *  If we return NetworkInterfaceExceededTimeLimit, it will make the ConnectionPool
+     *  attempt to reform the connection, which can lead to an accepted but unfortunate
+     *  race between TLConnection::setup and TLTypeFactory::shutdown.
+     *  We assert here that the error code we get is in the error class of timeouts,
+     *  which covers both NetworkInterfaceExceededTimeLimit and ExceededTimeLimit.
+     */
+    RemoteCommandRequest request{fixture().getServers()[0],
+                                 DatabaseName::kAdmin,
+                                 BSON("ping" << 1),
+                                 BSONObj(),
+                                 nullptr,
+                                 Seconds(1)};
+    auto res = runCommandSync(request);
+    ASSERT(ErrorCodes::isExceededTimeLimitError(res.status.code()));
+}
+
+TEST_F(NetworkInterfaceIntegrationFixture, BasicRejectConnection) {
+    SKIP_ON_GRPC("gRPC doesn't use ConnectionPool");
+
+    FailPointEnableBlock fpb2("connectionPoolRejectsConnectionRequests");
+
+    startNet();
+
+    RemoteCommandRequest request{fixture().getServers()[0],
+                                 DatabaseName::kAdmin,
+                                 BSON("ping" << 1),
+                                 BSONObj(),
+                                 nullptr,
+                                 Minutes(5)};
+
+    auto fut2 = runCommand(makeCallbackHandle(), request);
+    ASSERT_FALSE(fut2.get(interruptible()).isOK());
+
+    auto result = fut2.get(interruptible());
+    ASSERT_NOT_OK(result.status);
+    ASSERT_EQ(ErrorCodes::PooledConnectionAcquisitionRejected, result.status);
+}
+
+TEST_F(NetworkInterfaceIntegrationFixture, RejectConnection) {
+    SKIP_ON_GRPC("gRPC doesn't use ConnectionPool");
+
+    FailPointEnableBlock fpb("connectionPoolDoesNotFulfillRequests");
+
+    ConnectionPool::Options opts;
+    opts.connectionRequestsMaxQueueDepth = 1;
+    setConnectionPoolOptions(opts);
+
+    startNet();
+
+    RemoteCommandRequest request{fixture().getServers()[0],
+                                 DatabaseName::kAdmin,
+                                 BSON("ping" << 1),
+                                 BSONObj(),
+                                 nullptr,
+                                 Minutes(5)};
+
+    auto fut = runCommand(makeCallbackHandle(), request);
+
+    auto fut2 = runCommand(makeCallbackHandle(), request);
+    ASSERT_FALSE(fut2.get(interruptible()).isOK());
+
+    auto result = fut2.get(interruptible());
+    ASSERT_NOT_OK(result.status);
+    ASSERT_EQ(ErrorCodes::PooledConnectionAcquisitionRejected, result.status);
+}
+
 
 }  // namespace
 }  // namespace executor

@@ -27,12 +27,12 @@
  *    it in the license file.
  */
 
-#include <benchmark/benchmark.h>
+#include "mongo/db/repl/replication_consistency_markers_impl.h"
 
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/auth_op_observer.h"
-#include "mongo/db/catalog/database_holder_impl.h"
-#include "mongo/db/catalog/database_holder_mock.h"
+#include "mongo/db/cluster_parameters/cluster_server_parameter_op_observer.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/op_observer/change_stream_pre_images_op_observer.h"
 #include "mongo/db/op_observer/fallback_op_observer.h"
 #include "mongo/db/op_observer/fcv_op_observer.h"
@@ -41,27 +41,26 @@
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/op_observer/operation_logger_impl.h"
 #include "mongo/db/op_observer/operation_logger_transaction_proxy.h"
-#include "mongo/db/op_observer/user_write_block_mode_op_observer.h"
 #include "mongo/db/repl/primary_only_service_op_observer.h"
 #include "mongo/db/repl/replication_consistency_markers_gen.h"
-#include "mongo/db/repl/replication_consistency_markers_impl.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/storage_interface_mock.h"
-#include "mongo/db/s/config_server_op_observer.h"
 #include "mongo/db/s/migration_chunk_cloner_source_op_observer.h"
 #include "mongo/db/s/query_analysis_op_observer_configsvr.h"
 #include "mongo/db/s/query_analysis_op_observer_rs.h"
 #include "mongo/db/s/query_analysis_op_observer_shardsvr.h"
 #include "mongo/db/s/resharding/resharding_op_observer.h"
-#include "mongo/db/s/shard_server_op_observer.h"
 #include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/db/sharding_environment/config_server_op_observer.h"
+#include "mongo/db/sharding_environment/shard_server_op_observer.h"
 #include "mongo/db/storage/journal_listener.h"
 #include "mongo/db/timeseries/timeseries_op_observer.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/idl/cluster_server_parameter_op_observer.h"
+#include "mongo/db/user_write_block/user_write_block_mode_op_observer.h"
 #include "mongo/logv2/log_domain_global.h"
+
+#include <benchmark/benchmark.h>
 
 namespace mongo {
 namespace {
@@ -116,7 +115,7 @@ public:
     }
 
 private:
-    void _doTest() override{};
+    void _doTest() override {};
 
     void setUp() override {
         ServiceContextMongoDTest::setUp();
@@ -150,7 +149,7 @@ void BM_refreshOplogTruncateAFterPointIfPrimary(benchmark::State& state) {
 
 BENCHMARK(BM_refreshOplogTruncateAFterPointIfPrimary)->MinTime(10.0);
 
-void setUpObservers(ServiceContext* serviceContext, ClusterRole clusterRole, bool isServerless) {
+void setUpObservers(ServiceContext* serviceContext, ClusterRole clusterRole) {
     auto opObserverRegistry = std::make_unique<OpObserverRegistry>();
     if (clusterRole.has(ClusterRole::ShardServer)) {
         opObserverRegistry->addObserver(
@@ -212,7 +211,7 @@ void BM_setOplogTruncateAfterPoint(benchmark::State& state) {
     auto opCtx = bmTest.getOperationContext();
     auto serviceContext = bmTest.getServiceContext();
 
-    setUpObservers(serviceContext, ClusterRole::None, false /* not serverless */);
+    setUpObservers(serviceContext, ClusterRole::None);
 
     auto status = consistencyMarkers.createInternalCollections(opCtx);
     for (auto _ : state) {

@@ -29,16 +29,18 @@
 
 #pragma once
 
+#include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/new.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
 
-#include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/thread.h"
-#include "mongo/util/aligned.h"
-#include "mongo/util/shared_buffer.h"
-
-namespace mongo::tracking {
+namespace MONGO_MOD_PUB mongo {
+namespace tracking {
 
 /**
  * A minimal implementation of a partitioned counter for incrementing and decrementing allocations
@@ -47,15 +49,17 @@ namespace mongo::tracking {
 class AllocatorStats {
 public:
     explicit AllocatorStats(size_t numPartitions)
-        : _numPartitions(numPartitions), _bytesAllocated(_numPartitions) {}
+        : _numPartitions(numPartitions * 2), _bytesAllocated(_numPartitions) {}
 
     void bytesAllocated(size_t n) {
-        auto& counter = _bytesAllocated[_getSlot()];
+        // The second half of '_bytesAllocated' is reserved for tracking allocation.
+        auto& counter = _bytesAllocated[_getAllocSlot()];
         counter.value.fetchAndAddRelaxed(n);
     }
 
     void bytesDeallocated(size_t n) {
-        auto& counter = _bytesAllocated[_getSlot()];
+        // The first half of '_bytesAllocated' is reserved for tracking deallocation.
+        auto& counter = _bytesAllocated[_getDeallocSlot()];
         counter.value.fetchAndSubtractRelaxed(n);
     }
 
@@ -66,13 +70,21 @@ public:
         }
 
         // After summing the memory usage, we should not have a negative number.
+        // Since the first half is only for deallocation and second half for allocation, iterating
+        // through '_bytesAllocated' can only miss the bytes decremented in a matching
+        // allocation/deallocation when there is a race. This avoids undercounting.
         invariant(sum >= 0, std::to_string(sum));
         return static_cast<uint64_t>(sum);
     }
 
 private:
-    size_t _getSlot() const {
-        return std::hash<std::thread::id>{}(stdx::this_thread::get_id()) % _numPartitions;
+    size_t _getDeallocSlot() const {
+        return std::hash<std::thread::id>{}(stdx::this_thread::get_id()) % (_numPartitions / 2);
+    }
+
+    size_t _getAllocSlot() const {
+        return std::hash<std::thread::id>{}(stdx::this_thread::get_id()) % (_numPartitions / 2) +
+            _numPartitions / 2;
     }
 
     const size_t _numPartitions;
@@ -97,13 +109,13 @@ public:
     using propagate_on_container_move_assignment = std::true_type;
 
     Allocator() = delete;
-    explicit Allocator(AllocatorStats& stats) noexcept : _stats(stats){};
+    explicit Allocator(AllocatorStats& stats) : _stats(stats) {}
     Allocator(const Allocator&) noexcept = default;
 
     ~Allocator() = default;
 
     template <class U>
-    Allocator(const Allocator<U>& ta) noexcept : _stats{ta.stats()} {};
+    Allocator(const Allocator<U>& ta) noexcept : _stats{ta.stats()} {}
 
     T* allocate(size_t n) {
         const size_t allocation = n * sizeof(T);
@@ -126,13 +138,9 @@ private:
 };
 
 template <class T, class U>
-bool operator==(const Allocator<T>& lhs, const Allocator<U>& rhs) noexcept {
+bool operator==(const Allocator<T>& lhs, const Allocator<U>& rhs) {
     return &lhs.stats() == &rhs.stats();
 }
 
-template <class T, class U>
-bool operator!=(const Allocator<T>& lhs, const Allocator<U>& rhs) noexcept {
-    return &lhs.stats() != &rhs.stats();
-}
-
-}  // namespace mongo::tracking
+}  // namespace tracking
+}  // namespace MONGO_MOD_PUB mongo

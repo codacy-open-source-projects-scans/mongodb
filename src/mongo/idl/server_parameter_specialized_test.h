@@ -29,20 +29,20 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <mutex>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/logical_time.h"
-#include "mongo/platform/basic.h"
 #include "mongo/stdx/mutex.h"
+
+#include <cstdint>
+#include <mutex>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace test {
@@ -55,7 +55,7 @@ struct ExtraDataForServerParameter {
 class SpecializedClusterServerParameterData {
 public:
     SpecializedClusterServerParameterData()
-        : _clusterParameterTime(), _strData("default"), _intData(30){};
+        : _clusterParameterTime(), _strData("default"), _intData(30) {};
 
     SpecializedClusterServerParameterData(const std::string& newStrData, std::uint32_t newIntData)
         : _strData(newStrData), _intData(newIntData) {}
@@ -92,7 +92,7 @@ public:
 
     void setId(StringData id) {
         stdx::lock_guard<stdx::mutex> lg(_mutex);
-        _id = id.toString();
+        _id = std::string{id};
     }
 
     void parse(const BSONObj& updatedObj) {

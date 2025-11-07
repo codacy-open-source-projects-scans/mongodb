@@ -27,25 +27,25 @@
  *    it in the license file.
  */
 
+#include "mongo/db/stats/api_version_metrics.h"
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
+#include "mongo/db/validate_api_parameters.h"
+#include "mongo/util/clock_source.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/duration.h"
+
 #include <algorithm>
 #include <memory>
 #include <mutex>
 #include <type_traits>
 #include <utility>
 
-#include "mongo/db/stats/api_version_metrics.h"
-
 #include <absl/container/node_hash_map.h>
 #include <absl/meta/type_traits.h>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/commands/server_status_metric.h"
-#include "mongo/db/validate_api_parameters.h"
-#include "mongo/util/clock_source.h"
-#include "mongo/util/decorable.h"
-#include "mongo/util/duration.h"
 
 namespace mongo {
 
@@ -71,7 +71,7 @@ void APIVersionMetrics::update(StringData appName, const APIParameters& apiParam
     Date_t now = getGlobalServiceContext()->getFastClockSource()->now();
     boost::optional<int> parsedVersion;
 
-    auto appNameStr = appName.toString();
+    auto appNameStr = std::string{appName};
 
     {
         auto sharedLock = _mutex.readLock();

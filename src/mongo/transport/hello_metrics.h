@@ -29,19 +29,23 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <cstddef>
-
 #include "mongo/base/string_data.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/transport/session.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 namespace transport {
 class SessionManager;
 }  // namespace transport
+
+class HelloMetrics;
 
 /**
  * A decoration on the Session object used to track exhaust metrics. We are
@@ -49,8 +53,13 @@ class SessionManager;
  * support both commands. This allows us insight into which command is being
  * used until we decide to remove support for isMaster completely.
  */
-class InExhaustHello {
+class MONGO_MOD_PUBLIC InExhaustHello {
 public:
+    enum class Command {
+        kHello,
+        kIsMaster,
+    };
+
     InExhaustHello() = default;
 
     InExhaustHello(const InExhaustHello&) = delete;
@@ -59,12 +68,16 @@ public:
     InExhaustHello& operator=(InExhaustHello&&) = delete;
 
     static InExhaustHello* get(transport::Session* session);
-    void setInExhaust(bool inExhaust, StringData commandName);
+    void setInExhaust(Command command);
+    void resetInExhaust();
     bool getInExhaustIsMaster() const;
     bool getInExhaustHello() const;
     ~InExhaustHello();
 
 private:
+    void transitionOutOfInExhaustHello(HelloMetrics*);
+    void transitionOutOfInExhaustIsMaster(HelloMetrics*);
+
     bool _inExhaustIsMaster = false;
     bool _inExhaustHello = false;
 
@@ -83,7 +96,7 @@ private:
  * both commands. This allows us insight into which command is being used
  * until we decide to remove support for isMaster completely.
  */
-class HelloMetrics {
+class MONGO_MOD_PUBLIC HelloMetrics {
     HelloMetrics(const HelloMetrics&) = delete;
     HelloMetrics& operator=(const HelloMetrics&) = delete;
     HelloMetrics(HelloMetrics&&) = delete;

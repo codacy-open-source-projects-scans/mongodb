@@ -27,13 +27,6 @@
  *    it in the license file.
  */
 
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
@@ -55,6 +48,13 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
+
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -102,7 +102,7 @@ public:
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         IDLParserContext ctx("KillAllSessionsByPatternCmd");
-        auto ksc = KillAllSessionsByPatternCmd::parse(ctx, cmdObj);
+        auto ksc = KillAllSessionsByPatternCmd::parse(cmdObj, ctx);
 
         // The empty command kills all
         if (ksc.getKillAllSessionsByPattern().empty()) {

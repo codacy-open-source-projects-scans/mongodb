@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-#include <string>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -38,9 +35,10 @@
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_planner_test_fixture.h"
-#include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <string>
+#include <vector>
 
 namespace {
 
@@ -500,7 +498,7 @@ TEST_F(QueryPlannerTest, MultikeyTwoNestedElemMatchBounds) {
 TEST_F(QueryPlannerTest, MultikeyElemMatchValue) {
     // true means multikey
     addIndex(BSON("a.b" << 1), true);
-    runQuery(fromjson("{'a.b': {$elemMatch: {$gte: 1, $lte: 1}}}}}"));
+    runQuery(fromjson("{'a.b': {$elemMatch: {$gte: 1, $lte: 1}}}"));
 
     assertNumSolutions(2U);
     assertSolutionExists("{cscan: {dir: 1}}");
@@ -1443,7 +1441,7 @@ TEST_F(QueryPlannerTest, ContainedOrElemMatchValue) {
         "{fetch: {filter: {a: {$elemMatch: {$eq: 5}}}, node: {ixscan: {pattern: {c: 1, a: 1}, "
         "bounds: {c: [[7, 7, true, true]], a: [[5, 5, true, true]]}}}}}"
         "]}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrElemMatchObject) {
@@ -1459,7 +1457,7 @@ TEST_F(QueryPlannerTest, ContainedOrElemMatchObject) {
         "{ixscan: {pattern: {d: 1, 'a.b': 1}, bounds: {d: [[7, 7, true, true]], 'a.b': [[5, 5, "
         "true, true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrElemMatchObjectMultiplePredicates) {
@@ -1475,7 +1473,7 @@ TEST_F(QueryPlannerTest, ContainedOrElemMatchObjectMultiplePredicates) {
         "{ixscan: {pattern: {e: 1, 'a.c': 1}, bounds: {e: [[8, 8, true, true]], 'a.c': [[6, 6, "
         "true, true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrNestedElemMatchObject) {
@@ -1492,7 +1490,7 @@ TEST_F(QueryPlannerTest, ContainedOrNestedElemMatchObject) {
         "{ixscan: {pattern: {e: 1, 'a.b.c': 1}, bounds: {e: [[7, 7, true, true]], 'a.b.c': [[5, 5, "
         "true, true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrMoveToElemMatchValue) {
@@ -1508,7 +1506,7 @@ TEST_F(QueryPlannerTest, ContainedOrMoveToElemMatchValue) {
         "{ixscan: {pattern: {c: 1, a: 1}, bounds: {c: [[7, 7, true, true]], a: [[5, 5, true, "
         "true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrMoveToElemMatchObject) {
@@ -1524,7 +1522,7 @@ TEST_F(QueryPlannerTest, ContainedOrMoveToElemMatchObject) {
         "{ixscan: {pattern: {d: 1, a: 1}, bounds: {d: [[7, 7, true, true]], a: [[5, 5, true, "
         "true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrMoveToElemMatchObjectMultiplePredicates) {
@@ -1541,7 +1539,7 @@ TEST_F(QueryPlannerTest, ContainedOrMoveToElemMatchObjectMultiplePredicates) {
         "{ixscan: {pattern: {e: 1, a: 1}, bounds: {e: [[8, 8, true, true]], a: [[5, 5, true, "
         "true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrMoveToNestedElemMatchObject) {
@@ -1558,7 +1556,7 @@ TEST_F(QueryPlannerTest, ContainedOrMoveToNestedElemMatchObject) {
         "{ixscan: {pattern: {e: 1, a: 1}, bounds: {e: [[7, 7, true, true]], a: [[5, 5, true, "
         "true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrInElemMatch) {
@@ -1576,7 +1574,7 @@ TEST_F(QueryPlannerTest, ContainedOrInElemMatch) {
         "{ixscan: {pattern: {'a.d': 1, 'a.b': 1}, bounds: {'a.d': [[7, 7, true, true]], 'a.b': "
         "[[5, 5, true, true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrInAndInElemMatch) {
@@ -1595,7 +1593,7 @@ TEST_F(QueryPlannerTest, ContainedOrInAndInElemMatch) {
         "{ixscan: {pattern: {'b.e': 1, 'b.c': 1}, bounds: {'b.e': [[7, 7, true, true]], 'b.c': "
         "[[5, 5, true, true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrElemMatchPredicateIsLeadingFieldIndexIntersection) {
@@ -1626,7 +1624,7 @@ TEST_F(QueryPlannerTest, ContainedOrElemMatchPredicateIsLeadingFieldIndexInterse
         "{ixscan: {pattern: {a: 1, b: 1}, bounds: {a: [[5, 5, true, true]], b: [['MinKey', "
         "'MaxKey', true, true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrMultikeyCannotCombineLeadingFields) {
@@ -1648,7 +1646,7 @@ TEST_F(QueryPlannerTest, ContainedOrMultikeyCannotCombineLeadingFields) {
         "6}]}]}}}, node: "
         "{ixscan: {pattern: {'a.b': 1}, bounds: {'a.b': [[0, Infinity, true, true]]}}}"
         "}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCombineLeadingFields) {
@@ -1670,7 +1668,7 @@ TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCombineLeadingFields) {
         "6}]}]}}}, node: "
         "{ixscan: {pattern: {'a.b': 1}, bounds: {'a.b': [[0, Infinity, true, true]]}}}"
         "}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCannotCombineLeadingFields) {
@@ -1693,7 +1691,7 @@ TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCannotCombineLeadingFields)
         "{$lte: 10}}, {c: 6}]}}}]}, node: "
         "{ixscan: {pattern: {'a.b': 1}, bounds: {'a.b': [[0, Infinity, true, true]]}}}"
         "}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrMultikeyCompoundFields) {
@@ -1715,7 +1713,7 @@ TEST_F(QueryPlannerTest, ContainedOrMultikeyCompoundFields) {
         "{ixscan: {pattern: {'a.b': 1, 'a.c': 1}, bounds: {'a.b': [[5, 5, true, true]], 'a.c': "
         "[['MinKey', 'MaxKey', true, true]]}}}"
         "}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrMultikeyCannotCompoundFields) {
@@ -1732,7 +1730,7 @@ TEST_F(QueryPlannerTest, ContainedOrMultikeyCannotCompoundFields) {
         "{ixscan: {pattern: {'a.b': 1, 'a.c': 1}, bounds: {'a.b': [[5, 5, true, true]], 'a.c': "
         "[['MinKey', 'MaxKey', true, true]]}}}"
         "}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCompoundFields) {
@@ -1755,7 +1753,7 @@ TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCompoundFields) {
         "{ixscan: {pattern: {'a.b': 1, 'a.c': 1}, bounds: {'a.b': [[5, 5, true, true]], 'a.c': "
         "[['MinKey', 'MaxKey', true, true]]}}}"
         "}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCannotCompoundFields) {
@@ -1773,7 +1771,7 @@ TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCannotCompoundFields) {
         "{ixscan: {pattern: {'a.b': 1, 'a.c': 1}, bounds: {'a.b': [[5, 5, true, true]], 'a.c': "
         "[['MinKey', 'MaxKey', true, true]]}}}"
         "}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrMultikeyCannotCombineLeadingOutsidePreds) {
@@ -1810,7 +1808,7 @@ TEST_F(QueryPlannerTest, ContainedOrMultikeyCannotCombineLeadingOutsidePreds) {
         "{ixscan: {pattern: {'a.b': 1, 'a.c': 1}, bounds: {'a.b': [[0, Infinity, true, true]], "
         "'a.c': [['MinKey', 'MaxKey', true, true]]}}}"
         "}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCombineLeadingOutsidePreds) {
@@ -1835,7 +1833,7 @@ TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCombineLeadingOutsidePreds)
         "{ixscan: {pattern: {'a.b': 1, 'a.c': 1}, bounds: {'a.b': [[0, 10, true, true]], 'a.c': "
         "[['MinKey', 'MaxKey', true, true]]}}}"
         "}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCannotCombineLeadingOutsidePreds) {
@@ -1873,7 +1871,7 @@ TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCannotCombineLeadingOutside
         "{ixscan: {pattern: {'a.b': 1, c: 1}, bounds: {'a.b': [[0, Infinity, true, true]], c: "
         "[['MinKey', 'MaxKey', true, true]]}}}"
         "}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrMultikeyCannotCombineTrailingOutsidePreds) {
@@ -1900,7 +1898,7 @@ TEST_F(QueryPlannerTest, ContainedOrMultikeyCannotCombineTrailingOutsidePreds) {
         "{ixscan: {pattern: {'a.d': 1}, bounds: {'a.d': [[7, 7, true, true]]}}}"
         "]}}}}");
     assertHasOneSolutionOf(alternates);
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCombineTrailingOutsidePreds) {
@@ -1919,7 +1917,7 @@ TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCombineTrailingOutsidePreds
         "[[0, 10, true, true]]}}},"
         "{ixscan: {pattern: {'a.d': 1}, bounds: {'a.d': [[7, 7, true, true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCannotCombineTrailingOutsidePreds) {
@@ -1947,7 +1945,7 @@ TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCannotCombineTrailingOutsid
         "{ixscan: {pattern: {d: 1}, bounds: {d: [[7, 7, true, true]]}}}"
         "]}}}}");
     assertHasOneSolutionOf(alternates);
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrMultikeyCompoundTrailingOutsidePreds) {
@@ -1964,7 +1962,7 @@ TEST_F(QueryPlannerTest, ContainedOrMultikeyCompoundTrailingOutsidePreds) {
         "'a.c': [[6, 6, true, true]], 'a.b': [[5, 5, true, true]]}}},"
         "{ixscan: {pattern: {'a.e': 1}, bounds: {'a.e': [[8, 8, true, true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrMultikeyCannotCompoundTrailingOutsidePreds) {
@@ -1991,7 +1989,7 @@ TEST_F(QueryPlannerTest, ContainedOrMultikeyCannotCompoundTrailingOutsidePreds) 
         "{ixscan: {pattern: {e: 1}, bounds: {e: [[8, 8, true, true]]}}}"
         "]}}}}");
     assertHasOneSolutionOf(alternates);
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCompoundTrailingOutsidePreds) {
@@ -2009,7 +2007,7 @@ TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCompoundTrailingOutsidePred
         "'a.c': [[6, 6, true, true]], 'a.b': [[5, 5, true, true]]}}},"
         "{ixscan: {pattern: {'a.e': 1}, bounds: {'a.e': [[8, 8, true, true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCannotCompoundTrailingOutsidePreds) {
@@ -2029,7 +2027,7 @@ TEST_F(QueryPlannerTest, ContainedOrPathLevelMultikeyCannotCompoundTrailingOutsi
         "[[6, 6, true, true]], 'a.b': [['MinKey', 'MaxKey', true, true]]}}},"
         "{ixscan: {pattern: {e: 1}, bounds: {e: [[8, 8, true, true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrCannotPushdownThroughElemMatchObj) {
@@ -2043,7 +2041,7 @@ TEST_F(QueryPlannerTest, ContainedOrCannotPushdownThroughElemMatchObj) {
         "node: "
         "{ixscan: {filter: null, pattern: {a: 1, 'b.c': 1}, "
         "bounds: {a: [[1,1,true,true]], 'b.c': [[2,2,true,true],[3,3,true,true]]}}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrCannotPushdownThroughElemMatchObjWithMultikeyPaths) {
@@ -2058,7 +2056,7 @@ TEST_F(QueryPlannerTest, ContainedOrCannotPushdownThroughElemMatchObjWithMultike
         "node: "
         "{ixscan: {filter: null, pattern: {a: 1, 'b.c': 1}, "
         "bounds: {a: [[1,1,true,true]], 'b.c': [[2,2,true,true],[3,3,true,true]]}}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrCannotPushdownThroughOrElemMatchObjOrPattern) {
@@ -2072,7 +2070,7 @@ TEST_F(QueryPlannerTest, ContainedOrCannotPushdownThroughOrElemMatchObjOrPattern
         "node: "
         "{ixscan: {filter: null, pattern: {a: 1, 'b.c': 1}, "
         "bounds: {a: [[1,1,true,true]], 'b.c': [['MinKey','MaxKey',true,true]]}}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrCannotPushdownThroughOrElemMatchObjOrPatternWithMultikeyPaths) {
@@ -2087,7 +2085,7 @@ TEST_F(QueryPlannerTest, ContainedOrCannotPushdownThroughOrElemMatchObjOrPattern
         "node: "
         "{ixscan: {filter: null, pattern: {a: 1, 'b.c': 1}, "
         "bounds: {a: [[1,1,true,true]], 'b.c': [['MinKey','MaxKey',true,true]]}}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 // TODO SERVER-30145: Fixing this ticket should allow us to generate tight bounds on "b.c.f" below.
@@ -2108,7 +2106,7 @@ TEST_F(QueryPlannerTest, ContainedOrInAndInNestedElemMatch) {
         "{ixscan: {pattern: {'b.e': 1, 'b.c.f': 1}, bounds: {'b.e': [[7, 7, true, true]], 'b.c.f': "
         "[['MinKey', 'MaxKey', true, true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 // TODO SERVER-30145: Fixing this ticket should allow us to generate tight bounds on "b.c.f" below.
@@ -2130,7 +2128,7 @@ TEST_F(QueryPlannerTest, ContainedOrInAndInNestedElemMatchWithMultikeyPaths) {
         "{ixscan: {pattern: {'b.e': 1, 'b.c.f': 1}, bounds: {'b.e': [[7, 7, true, true]], 'b.c.f': "
         "[['MinKey', 'MaxKey', true, true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 // TODO SERVER-30145: Fixing this ticket should allow us to generate tight bounds on "b.c.f" below.
@@ -2149,7 +2147,7 @@ TEST_F(QueryPlannerTest, ContainedOrInNestedElemMatchWithMultikeyPaths) {
         "{ixscan: {pattern: {'b.e': 1, 'b.c.f': 1}, bounds: {'b.e': [[7, 7, true, true]], 'b.c.f': "
         "[['MinKey', 'MaxKey', true, true]]}}}"
         "]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, ContainedOrMoveElemMatchToNestedElemMatchObject) {
@@ -2166,7 +2164,7 @@ TEST_F(QueryPlannerTest, ContainedOrMoveElemMatchToNestedElemMatchObject) {
         "true]]}}}}},"
         "{ixscan: {pattern: {e: 1, 'a.f': 1}, bounds: {e: [[7, 7, true, true]], 'a.f': [[5, 5, "
         "true, true]]}}}]}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, TypeArrayUsingTypeCodeMustFetchAndFilter) {
@@ -2233,6 +2231,24 @@ TEST_F(QueryPlannerTest, CanExplodeMultikeyIndexScanForSortWhenSortFieldsAreNotM
         "bounds: {a: [[1,1,true,true]], 'b.c': [['MinKey','MaxKey',true,true]]}}},"
         "{ixscan: {pattern: {a: 1, 'b.c': 1}, filter: null,"
         "bounds: {a: [[2,2,true,true]], 'b.c': [['MinKey','MaxKey',true,true]]}}}]}}}}");
+}
+
+TEST_F(QueryPlannerTest, CanExploreMultikeyIndexScanForSortWhenFieldsNotUsedForSortAreMultikey) {
+    params.mainCollectionInfo.options &= ~QueryPlannerParams::INCLUDE_COLLSCAN;
+    // Index {a: 1, b: 1, c: 1} where 'c' is multikey
+    MultikeyPaths multikeyPaths{{}, {}, {0U}};
+    addIndex(BSON("a" << 1 << "b" << 1 << "c" << 1), multikeyPaths);
+
+    runQueryAsCommand(fromjson("{find: 'testns', filter: {a: {$in: [1, 2]}}, sort: {'b': 1}}"));
+    assertNumSolutions(1U);
+    assertSolutionExists(
+        "{fetch: {filter: null, node: {mergeSort: {nodes: ["
+        "{ixscan: {pattern: {a: 1, b: 1, c: 1}, filter: null,"
+        "bounds: {a: [[1,1,true,true]], b: [['MinKey','MaxKey',true,true]], "
+        "c: [['MinKey','MaxKey',true,true]]}}},"
+        "{ixscan: {pattern: {a: 1, b: 1, c: 1}, filter: null,"
+        "bounds: {a: [[2,2,true,true]], b: [['MinKey','MaxKey',true,true]], "
+        "c: [['MinKey','MaxKey',true,true]]}}}]}}}}");
 }
 
 TEST_F(QueryPlannerTest, MultikeyIndexScanWithMinKeyMaxKeyBoundsCanProvideSort) {

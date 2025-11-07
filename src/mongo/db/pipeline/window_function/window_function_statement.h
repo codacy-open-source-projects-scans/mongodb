@@ -30,6 +30,8 @@
 #pragma once
 
 #include "mongo/db/pipeline/window_function/window_function_expression.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -55,7 +57,7 @@ struct WindowFunctionStatement {
         // We do this because acting on "a.b" where a is an object also depends on "a" not being
         // changed (e.g. to a non-object).
         for (size_t i = 0; i < path.getPathLength() - 1; i++) {
-            deps->fields.insert(path.getSubpath(i).toString());
+            deps->fields.insert(std::string{path.getSubpath(i)});
         }
     }
 

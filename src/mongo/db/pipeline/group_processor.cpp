@@ -35,30 +35,15 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/util/spill_util.h"
+#include "mongo/db/sorter/sorter_file_name.h"
+#include "mongo/db/sorter/sorter_template_defs.h"
 #include "mongo/db/stats/counters.h"
 
 namespace mongo {
 
-namespace {
-
-/**
- * Generates a new file name on each call using a static, atomic and monotonically increasing
- * number.
- *
- * Each user of the Sorter must implement this function to ensure that all temporary files that the
- * Sorter instances produce are uniquely identified using a unique file name extension with separate
- * atomic variable. This is necessary because the sorter.cpp code is separately included in multiple
- * places, rather than compiled in one place and linked, and so cannot provide a globally unique ID.
- */
-std::string nextFileName() {
-    static AtomicWord<unsigned> documentSourceGroupFileCounter;
-    return "extsort-doc-group." + std::to_string(documentSourceGroupFileCounter.fetchAndAdd(1));
-}
-
-}  // namespace
-
 GroupProcessor::GroupProcessor(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                int64_t maxMemoryUsageBytes)
+
     : GroupProcessorBase(expCtx, maxMemoryUsageBytes) {}
 
 boost::optional<Document> GroupProcessor::getNext() {
@@ -80,7 +65,7 @@ boost::optional<Document> GroupProcessor::getNextSpilled() {
     // Call startNewGroup on every accumulator.
     Value expandedId = expandId(currentId);
     Document idDoc =
-        expandedId.getType() == BSONType::Object ? expandedId.getDocument() : Document();
+        expandedId.getType() == BSONType::object ? expandedId.getDocument() : Document();
     for (size_t i = 0; i < numAccumulators; ++i) {
         Value initializerValue =
             _accumulatedFields[i].expr.initializer->evaluate(idDoc, &_expCtx->variables);
@@ -118,12 +103,10 @@ boost::optional<Document> GroupProcessor::getNextSpilled() {
 }
 
 boost::optional<Document> GroupProcessor::getNextStandard() {
-    // Not spilled, and not streaming.
-    if (!_groupsIterator || _groupsIterator == _groups.end())
+    if (_groupsIterator == _groups.end()) {
         return boost::none;
-
-    auto& it = *_groupsIterator;
-
+    }
+    auto& it = _groupsIterator;
     Document out = makeDocument(it->first, it->second);
     ++it;
     return out;
@@ -184,10 +167,8 @@ void GroupProcessor::readyGroups() {
             spill();
         }
 
-        _groups = _expCtx->getValueComparator().makeUnorderedValueMap<Accumulators>();
-
-        _sorterIterator.reset(Sorter<Value, Value>::Iterator::merge(
-            _sortedFiles, SortOptions(), SorterComparator(_expCtx->getValueComparator())));
+        _sorterIterator = Sorter<Value, Value>::Iterator::merge(
+            _sortedFiles, SortOptions(), SorterComparator(_expCtx->getValueComparator()));
 
         // prepare current to accumulate data
         _currentAccumulators.reserve(_accumulatedFields.size());
@@ -198,39 +179,37 @@ void GroupProcessor::readyGroups() {
         MONGO_verify(_sorterIterator->more());  // we put data in, we should get something out.
         _firstPartOfNextGroup = _sorterIterator->next();
     } else {
-        // start the group iterator
         _groupsIterator = _groups.begin();
     }
+
+    // Update GroupStats here when reading groups in case the query finishes early without resetting
+    // the GroupProcessor. This guarantees we have $group-level statistics for explain.
+    _stats.peakTrackedMemBytes = _memoryTracker.peakTrackedMemoryBytes();
+
+    _groupsReady = true;
 }
 
 void GroupProcessor::reset() {
     // Free our resources.
     GroupProcessorBase::reset();
 
+    _groupsReady = false;
+    _groupsIterator = _groups.end();
+
     _sorterIterator.reset();
     _sortedFiles.clear();
-    // Make us look done.
-    _groupsIterator = _groups.end();
 }
 
 bool GroupProcessor::shouldSpillWithAttemptToSaveMemory() {
     if (!_memoryTracker.allowDiskUse() && !_memoryTracker.withinMemoryLimit()) {
         freeMemory();
     }
-
-    if (!_memoryTracker.withinMemoryLimit()) {
-        uassert(ErrorCodes::QueryExceededMemoryLimitNoDiskUseAllowed,
-                "Exceeded memory limit for $group, but didn't allow external sort."
-                " Pass allowDiskUse:true to opt in.",
-                _memoryTracker.allowDiskUse());
-        return true;
-    }
-    return false;
+    return !_memoryTracker.withinMemoryLimit();
 }
 
 bool GroupProcessor::shouldSpillOnEveryDuplicateId(bool isNewGroup) {
     // Spill every time we have a duplicate id to stress merge logic.
-    return (internalQueryEnableAggressiveSpillsInGroup &&
+    return (internalQueryEnableAggressiveSpillsInGroup.loadRelaxed() &&
             !_expCtx->getOperationContext()->readOnly() && !isNewGroup &&  // is not a new group
             !_expCtx->getInRouter() &&        // can't spill to disk in router
             _memoryTracker.allowDiskUse() &&  // never spill when disk use is explicitly prohibited
@@ -238,6 +217,22 @@ bool GroupProcessor::shouldSpillOnEveryDuplicateId(bool isNewGroup) {
 }
 
 void GroupProcessor::spill() {
+    if (_groups.empty()) {
+        return;
+    }
+
+    // If _groupsReady is true, we may have already returned some results, so we should skip them.
+    auto groupsIt = _groupsReady ? _groupsIterator : _groups.begin();
+    if (groupsIt == _groups.end()) {
+        // There is nothing to spill.
+        return;
+    }
+
+    uassert(ErrorCodes::QueryExceededMemoryLimitNoDiskUseAllowed,
+            "Exceeded memory limit for $group, but didn't allow external sort."
+            " Pass allowDiskUse:true to opt in.",
+            _memoryTracker.allowDiskUse());
+
     // Ensure there is sufficient disk space for spilling
     uassertStatusOK(ensureSufficientDiskSpaceForSpilling(
         _expCtx->getTempDir(), internalQuerySpillingMinAvailableDiskSpaceBytes.load()));
@@ -245,17 +240,20 @@ void GroupProcessor::spill() {
     std::vector<const GroupProcessorBase::GroupsMap::value_type*>
         ptrs;  // using pointers to speed sorting
     ptrs.reserve(_groups.size());
-    for (auto it = _groups.begin(), end = _groups.end(); it != end; ++it) {
-        ptrs.push_back(&*it);
+
+    int64_t spilledRecords = 0;
+    for (auto end = _groups.end(); groupsIt != end; ++groupsIt) {
+        ptrs.push_back(&*groupsIt);
+        ++spilledRecords;
     }
 
-    stable_sort(ptrs.begin(), ptrs.end(), SpillSTLComparator(_expCtx->getValueComparator()));
+    std::sort(ptrs.begin(), ptrs.end(), SpillSTLComparator(_expCtx->getValueComparator()));
 
     // Initialize '_file' in a lazy manner only when it is needed.
     if (!_file) {
         _spillStats = std::make_unique<SorterFileStats>(nullptr /* sorterTracker */);
-        _file = std::make_shared<Sorter<Value, Value>::File>(
-            _expCtx->getTempDir() + "/" + nextFileName(), _spillStats.get());
+        _file = std::make_shared<SorterFile>(sorter::nextFileName(_expCtx->getTempDir()),
+                                             _spillStats.get());
     }
     SortedFileWriter<Value, Value> writer(SortOptions().TempDir(_expCtx->getTempDir()), _file);
     switch (_accumulatedFields.size()) {  // same as ptrs[i]->second.size() for all i.
@@ -284,23 +282,25 @@ void GroupProcessor::spill() {
     }
     _sortedFiles.emplace_back(writer.done());
 
-    _stats.spills++;
-    _stats.numBytesSpilledEstimate += _memoryTracker.currentMemoryBytes();
-    _stats.spilledRecords += _groups.size();
-
-    int64_t spilledBytes = 0;
-    if (_spillStats) {
-        spilledBytes = _spillStats->bytesSpilled() - _stats.spilledDataStorageSize;
-        _stats.spilledDataStorageSize = _spillStats->bytesSpilled();
-    }
-    groupCounters.incrementGroupCountersPerSpilling(1 /* spills */, spilledBytes, _groups.size());
+    auto spilledDataStorageIncrease = _stats.spillingStats.updateSpillingStats(
+        1, _memoryTracker.inUseTrackedMemoryBytes(), spilledRecords, _spillStats->bytesSpilled());
+    groupCounters.incrementPerSpilling(1 /* spills */,
+                                       _memoryTracker.inUseTrackedMemoryBytes(),
+                                       spilledRecords,
+                                       spilledDataStorageIncrease);
 
     // Zero out the current per-accumulation statement memory consumption, as the memory has been
     // freed by spilling.
     GroupProcessorBase::reset();
+    _groupsIterator = _groups.end();
+
+    if (_groupsReady) {
+        tassert(9917000,
+                "Expect everything to be spilled if groups are ready and it is not the first spill",
+                !_spilled);
+        // Ready groups again to read from disk instead of from memory.
+        readyGroups();
+    }
 }
 
 }  // namespace mongo
-
-#include "mongo/db/sorter/sorter.cpp"
-// Explicit instantiation unneeded since we aren't exposing Sorter outside of this file.

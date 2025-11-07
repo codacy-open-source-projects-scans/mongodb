@@ -29,10 +29,6 @@
 
 #include "mongo/crypto/jwks_fetcher_impl.h"
 
-#include <memory>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/data_builder.h"
 #include "mongo/base/data_range.h"
 #include "mongo/base/data_range_cursor.h"
@@ -50,10 +46,14 @@
 #include "mongo/util/net/http_client.h"
 #include "mongo/util/str.h"
 
+#include <memory>
+
+#include <boost/optional/optional.hpp>
+
 namespace mongo::crypto {
 
 JWKSFetcherImpl::JWKSFetcherImpl(ClockSource* clock, StringData issuer)
-    : _issuer(issuer), _clock(clock), _lastSuccessfulFetch(Date_t::min()) {}
+    : _issuer(issuer), _clock(clock), _lastFetchQuiesceTime(Date_t::min()) {}
 
 JWKSet JWKSFetcherImpl::fetch() {
     try {
@@ -69,13 +69,13 @@ JWKSet JWKSFetcherImpl::fetch() {
 
         auto jwksUri = metadata.getJwksUri();
         auto getJWKs = makeHTTPClient()->get(jwksUri);
-        _lastSuccessfulFetch = _clock->now();
+        _lastFetchQuiesceTime = _clock->now();
 
         ConstDataRange cdr = getJWKs.getCursor();
         StringData str;
         cdr.readInto<StringData>(&str);
 
-        return JWKSet::parseOwned(IDLParserContext("JWKSet"), fromjson(str));
+        return JWKSet::parseOwned(fromjson(str), IDLParserContext("JWKSet"));
     } catch (DBException& ex) {
         ex.addContext(str::stream() << "Failed loading keys from " << _issuer);
         throw;
@@ -84,7 +84,11 @@ JWKSet JWKSFetcherImpl::fetch() {
 
 bool JWKSFetcherImpl::quiesce() const {
     return _clock->now() <
-        (_lastSuccessfulFetch.get() + Seconds(gJWKSMinimumQuiescePeriodSecs.load()));
+        (_lastFetchQuiesceTime.get() + Seconds(gJWKSMinimumQuiescePeriodSecs.load()));
+}
+
+void JWKSFetcherImpl::setQuiesce(Date_t quiesce) {
+    _lastFetchQuiesceTime = quiesce;
 }
 
 }  // namespace mongo::crypto

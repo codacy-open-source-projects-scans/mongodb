@@ -27,14 +27,7 @@
  *    it in the license file.
  */
 
-#include <bitset>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <boost/type_traits/decay.hpp>
+#include "mongo/db/exec/inclusion_projection_executor.h"
 
 #include "mongo/base/exact_cast.h"
 #include "mongo/bson/bsonmisc.h"
@@ -44,24 +37,26 @@
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/exec/inclusion_projection_executor.h"
 #include "mongo/db/exec/projection_executor.h"
 #include "mongo/db/exec/projection_executor_builder.h"
 #include "mongo/db/matcher/copyable_match_expression.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/query/projection.h"
-#include "mongo/db/query/projection_parser.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_parser.h"
 #include "mongo/db/record_id.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <bitset>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <boost/type_traits/decay.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -224,10 +219,9 @@ TEST_F(InclusionProjectionExecutionTestWithoutFallBackToDefault,
 
 TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault,
        ShouldAddDependenciesOfComputedFields) {
-    auto inclusion = makeInclusionProjectionWithDefaultPolicies(BSON("a"
-                                                                     << "$a"
-                                                                     << "x"
-                                                                     << "$z"));
+    auto inclusion = makeInclusionProjectionWithDefaultPolicies(BSON("a" << "$a"
+                                                                         << "x"
+                                                                         << "$z"));
 
     DepsTracker deps;
     inclusion->addDependencies(&deps);
@@ -266,8 +260,7 @@ TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault,
 
 TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault,
        ShouldAddPathToDependenciesForNestedComputedFieldsUsingVariableReferences) {
-    auto inclusion = makeInclusionProjectionWithDefaultPolicies(BSON("x.y"
-                                                                     << "$z"));
+    auto inclusion = makeInclusionProjectionWithDefaultPolicies(BSON("x.y" << "$z"));
 
     DepsTracker deps;
     inclusion->addDependencies(&deps);
@@ -819,48 +812,61 @@ TEST_F(InclusionProjectionExecutionTestWithoutFallBackToDefault,
     ASSERT_DOCUMENT_EQ(result, expectedDoc.freeze());
 }
 
-TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault,
-       ShouldAddMetaExpressionsToDependencies) {
-    auto inclusion =
-        makeInclusionProjectionWithDefaultPolicies(fromjson("{a: 1, c: {$meta: 'textScore'}, "
-                                                            "d: {$meta: 'randVal'}, "
-                                                            "e: {$meta: 'searchScore'}, "
-                                                            "f: {$meta: 'searchHighlights'}, "
-                                                            "g: {$meta: 'geoNearDistance'}, "
-                                                            "h: {$meta: 'geoNearPoint'}, "
-                                                            "i: {$meta: 'recordId'}, "
-                                                            "j: {$meta: 'indexKey'}, "
-                                                            "k: {$meta: 'sortKey'}, "
-                                                            "l: {$meta: 'searchScoreDetails'}}, "
-                                                            "m: {$meta: 'vectorSearchScore'}, "
-                                                            "n: {$meta: 'score'}}"));
+TEST_F(InclusionProjectionExecutionTestWithoutFallBackToDefault,
+       MetaDependenciesFalseWhenNotIncluded) {
+    auto inclusion = makeInclusionProjectionWithDefaultPolicies(fromjson("{a: 1}"));
 
     DepsTracker deps;
     inclusion->addDependencies(&deps);
 
     ASSERT_EQ(deps.fields.size(), 2UL);
 
-    // We do not add the dependencies for searchScore, searchHighlights, searchScoreDetails, or
-    // distance because those values are not stored in the collection (or in mongod at all).
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kTextScore]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kRandVal]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kGeoNearDist]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kGeoNearPoint]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kRecordId]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kIndexKey]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kSortKey]);
     ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kSearchScore]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kSearchRootDocumentId]);
     ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kSearchHighlights]);
     ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kSearchScoreDetails]);
     ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kVectorSearchScore]);
     ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kScore]);
-
-    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kTextScore]);
-    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kRandVal]);
-    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kGeoNearDist]);
-    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kGeoNearPoint]);
-    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kRecordId]);
-    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kIndexKey]);
-    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kSortKey]);
 }
 
-TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault, ShouldEvaluateMetaExpressions) {
+TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault,
+       ShouldAddSingleMetaExpressionDependency) {
+    auto inclusion =
+        makeInclusionProjectionWithDefaultPolicies(fromjson("{a: 1, b: {$meta: 'geoNearPoint'}}"));
+
+    DepsTracker deps;
+    inclusion->addDependencies(&deps);
+
+    ASSERT_EQ(deps.fields.size(), 2UL);
+
+    // Only geo near point should be included as a dependency.
+    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kGeoNearPoint]);
+
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kTextScore]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kRandVal]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kGeoNearDist]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kRecordId]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kIndexKey]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kSortKey]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kSearchScore]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kSearchRootDocumentId]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kSearchHighlights]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kSearchScoreDetails]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kVectorSearchScore]);
+    ASSERT_FALSE(deps.metadataDeps()[DocumentMetadataFields::kScore]);
+}
+
+TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault,
+       ShouldAddMetaExpressionsToDependencies) {
     // Used to set 'score' metadata.
-    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
-        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
     auto inclusion =
         makeInclusionProjectionWithDefaultPolicies(fromjson("{a: 1, c: {$meta: 'textScore'}, "
                                                             "d: {$meta: 'randVal'}, "
@@ -873,7 +879,48 @@ TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault, ShouldEvaluateMeta
                                                             "k: {$meta: 'sortKey'}, "
                                                             "l: {$meta: 'searchScoreDetails'}, "
                                                             "m: {$meta: 'vectorSearchScore'}, "
-                                                            "n: {$meta: 'score'}}"));
+                                                            "n: {$meta: 'score'}, "
+                                                            "o: {$meta: 'searchRootDocumentId'}}"));
+
+
+    DepsTracker deps;
+    inclusion->addDependencies(&deps);
+
+    ASSERT_EQ(deps.fields.size(), 2UL);
+
+    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kTextScore]);
+    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kRandVal]);
+    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kGeoNearDist]);
+    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kGeoNearPoint]);
+    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kRecordId]);
+    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kIndexKey]);
+    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kSortKey]);
+    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kSearchScore]);
+    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kSearchRootDocumentId]);
+    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kSearchHighlights]);
+    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kSearchScoreDetails]);
+    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kVectorSearchScore]);
+    ASSERT_TRUE(deps.metadataDeps()[DocumentMetadataFields::kScore]);
+}
+
+TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault, ShouldEvaluateMetaExpressions) {
+    // Used to set 'score' metadata.
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
+    auto inclusion =
+        makeInclusionProjectionWithDefaultPolicies(fromjson("{a: 1, c: {$meta: 'textScore'}, "
+                                                            "d: {$meta: 'randVal'}, "
+                                                            "e: {$meta: 'searchScore'}, "
+                                                            "f: {$meta: 'searchHighlights'}, "
+                                                            "g: {$meta: 'geoNearDistance'}, "
+                                                            "h: {$meta: 'geoNearPoint'}, "
+                                                            "i: {$meta: 'recordId'}, "
+                                                            "j: {$meta: 'indexKey'}, "
+                                                            "k: {$meta: 'sortKey'}, "
+                                                            "l: {$meta: 'searchScoreDetails'}, "
+                                                            "m: {$meta: 'vectorSearchScore'}, "
+                                                            "n: {$meta: 'score'}, "
+                                                            "o: {$meta: 'searchRootDocumentId'}}"));
+
 
     MutableDocument inputDocBuilder(Document{{"a", 1}});
     inputDocBuilder.metadata().setTextScore(0.0);
@@ -885,10 +932,10 @@ TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault, ShouldEvaluateMeta
     inputDocBuilder.metadata().setRecordId(RecordId{6});
     inputDocBuilder.metadata().setIndexKey(BSON("foo" << 7));
     inputDocBuilder.metadata().setSortKey(Value{Document{{"bar", 8}}}, true);
-    inputDocBuilder.metadata().setSearchScoreDetails(BSON("scoreDetails"
-                                                          << "foo"));
+    inputDocBuilder.metadata().setSearchScoreDetails(BSON("scoreDetails" << "foo"));
     inputDocBuilder.metadata().setVectorSearchScore(9.0);
     inputDocBuilder.metadata().setScore(10.0);
+    inputDocBuilder.metadata().setSearchRootDocumentId(Value{10.0});
     Document inputDoc = inputDocBuilder.freeze();
 
     auto result = inclusion->applyTransformation(inputDoc);
@@ -896,7 +943,7 @@ TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault, ShouldEvaluateMeta
     ASSERT_DOCUMENT_EQ(result,
                        Document{fromjson("{a: 1, c: 0.0, d: 1.0, e: 2.0, f: 'foo', g: 3.0, "
                                          "h: [4, 5], i: 6, j: {foo: 7}, k: [{bar: 8}], "
-                                         "l: {scoreDetails: 'foo'}, m: 9.0, n: 10.0}")});
+                                         "l: {scoreDetails: 'foo'}, m: 9.0, n: 10.0, o: 10.0}")});
 }
 
 //
@@ -1074,11 +1121,10 @@ TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault,
 }
 
 TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault, ExtractComputedProjections) {
-    auto inclusion = makeInclusionProjectionWithDefaultPolicies(BSON(
-        "computedMeta1" << BSON("$toUpper"
-                                << "$myMeta.x")
-                        << "computed2" << BSON("$add" << BSON_ARRAY(1 << "$c")) << "computedMeta3"
-                        << "$myMeta"));
+    auto inclusion = makeInclusionProjectionWithDefaultPolicies(
+        BSON("computedMeta1" << BSON("$toUpper" << "$myMeta.x") << "computed2"
+                             << BSON("$add" << BSON_ARRAY(1 << "$c")) << "computedMeta3"
+                             << "$myMeta"));
 
     auto r = static_cast<InclusionProjectionExecutor*>(inclusion.get())->getRoot();
     const std::set<StringData> reservedNames{};
@@ -1100,10 +1146,9 @@ TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault, ExtractComputedPro
 
 TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault,
        ExtractComputedProjectionInProjectShouldNotHideDependentFields) {
-    auto inclusion = makeInclusionProjectionWithDefaultPolicies(BSON("a"
-                                                                     << "$myMeta"
-                                                                     << "b"
-                                                                     << "$a"));
+    auto inclusion = makeInclusionProjectionWithDefaultPolicies(BSON("a" << "$myMeta"
+                                                                         << "b"
+                                                                         << "$a"));
 
     auto r = static_cast<InclusionProjectionExecutor*>(inclusion.get())->getRoot();
     const std::set<StringData> reservedNames{};
@@ -1120,8 +1165,7 @@ TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault,
 TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault,
        ExtractComputedProjectionInProjectShouldNotIncludeId) {
     auto inclusion = makeInclusionProjectionWithDefaultPolicies(
-        BSON("a" << BSON("$sum" << BSON_ARRAY("$myMeta"
-                                              << "$_id"))));
+        BSON("a" << BSON("$sum" << BSON_ARRAY("$myMeta" << "$_id"))));
 
     auto r = static_cast<InclusionProjectionExecutor*>(inclusion.get())->getRoot();
     const std::set<StringData> reservedNames{};
@@ -1137,10 +1181,9 @@ TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault,
 
 TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault,
        ExtractComputedProjectionInProjectShouldNotHideDependentSubFields) {
-    auto inclusion = makeInclusionProjectionWithDefaultPolicies(BSON("a"
-                                                                     << "$myMeta"
-                                                                     << "b"
-                                                                     << "$a.x"));
+    auto inclusion = makeInclusionProjectionWithDefaultPolicies(BSON("a" << "$myMeta"
+                                                                         << "b"
+                                                                         << "$a.x"));
 
     auto r = static_cast<InclusionProjectionExecutor*>(inclusion.get())->getRoot();
     const std::set<StringData> reservedNames{};
@@ -1156,10 +1199,9 @@ TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault,
 
 TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault,
        ExtractComputedProjectionInProjectShouldNotHideDependentSubFieldsWithDottedSibling) {
-    auto inclusion = makeInclusionProjectionWithDefaultPolicies(BSON("a"
-                                                                     << "$myMeta"
-                                                                     << "c.b"
-                                                                     << "$a.x"));
+    auto inclusion = makeInclusionProjectionWithDefaultPolicies(BSON("a" << "$myMeta"
+                                                                         << "c.b"
+                                                                         << "$a.x"));
 
     auto r = static_cast<InclusionProjectionExecutor*>(inclusion.get())->getRoot();
     const std::set<StringData> reservedNames{};
@@ -1175,11 +1217,8 @@ TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault,
 
 TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault, ApplyProjectionAfterSplit) {
     auto inclusion = makeInclusionProjectionWithDefaultPolicies(
-        BSON("a" << true << "computedMeta1"
-                 << BSON("$toUpper"
-                         << "$myMeta.x")
-                 << "computed2" << BSON("$add" << BSON_ARRAY(1 << "$c")) << "c" << true
-                 << "computedMeta3"
+        BSON("a" << true << "computedMeta1" << BSON("$toUpper" << "$myMeta.x") << "computed2"
+                 << BSON("$add" << BSON_ARRAY(1 << "$c")) << "c" << true << "computedMeta3"
                  << "$myMeta"));
 
     auto r = static_cast<InclusionProjectionExecutor*>(inclusion.get())->getRoot();
@@ -1197,11 +1236,9 @@ TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault, ApplyProjectionAft
 }
 
 TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault, DoNotExtractReservedNames) {
-    auto inclusion = makeInclusionProjectionWithDefaultPolicies(BSON("a" << true << "data"
-                                                                         << BSON("$toUpper"
-                                                                                 << "$myMeta.x")
-                                                                         << "newMeta"
-                                                                         << "$myMeta"));
+    auto inclusion = makeInclusionProjectionWithDefaultPolicies(
+        BSON("a" << true << "data" << BSON("$toUpper" << "$myMeta.x") << "newMeta"
+                 << "$myMeta"));
 
     auto r = static_cast<InclusionProjectionExecutor*>(inclusion.get())->getRoot();
     const std::set<StringData> reservedNames{"meta", "data", "_id"};
@@ -1209,8 +1246,7 @@ TEST_F(InclusionProjectionExecutionTestWithFallBackToDefault, DoNotExtractReserv
         r->extractComputedProjectionsInProject("myMeta", "meta", reservedNames);
 
     ASSERT_EQ(addFields.nFields(), 1);
-    auto expectedAddFields = BSON("newMeta"
-                                  << "$meta");
+    auto expectedAddFields = BSON("newMeta" << "$meta");
     ASSERT_BSONOBJ_EQ(expectedAddFields, addFields);
     ASSERT_EQ(deleteFlag, false);
 

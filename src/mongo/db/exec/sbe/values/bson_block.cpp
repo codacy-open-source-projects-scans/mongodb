@@ -28,262 +28,11 @@
  */
 
 #include "mongo/db/exec/sbe/values/bson_block.h"
-#include "mongo/db/exec/sbe/values/bson.h"
-#include "mongo/db/exec/sbe/values/value.h"
 
 namespace mongo::sbe::value {
-namespace {
-struct FilterPositionInfoRecorder {
-    FilterPositionInfoRecorder() : outputArr(std::make_unique<HeterogeneousBlock>()) {}
-
-    void recordValue(TypeTags tag, Value val) {
-        auto [cpyTag, cpyVal] = copyValue(tag, val);
-        outputArr->push_back(cpyTag, cpyVal);
-        posInfo.back()++;
-        isNewDoc = false;
-    }
-
-    void emptyArraySeen() {
-        arraySeen = true;
-    }
-
-    void newDoc() {
-        posInfo.push_back(0);
-        isNewDoc = true;
-        arraySeen = false;
-    }
-
-    void endDoc() {
-        if (isNewDoc) {
-            // We recorded no values for this doc. There are two possibilities:
-            // (1) there is/are only empty array(s) at this path, which were traversed.
-            //     Example: document {a: {b: []}}, path Get(a)/Traverse/Get(b)/Traverse/Id.
-            // (2) There are no values at this path.
-            //     Example: document {a: {b:1}} searching for path Get(a)/Traverse/Get(c)/Id.
-            //
-            // It is important that we distinguish these two cases for MQL's sake.
-            if (arraySeen) {
-                // This represents case (1). We record this by adding no values to our output and
-                // leaving the position info value as '0'.
-
-                // Do nothing.
-            } else {
-                // This represents case (2). We record this by adding an explicit Nothing value and
-                // indicate that there's one value for this document. This matches the behavior of
-                // the scalar traverseF primitive.
-                outputArr->push_back(value::TypeTags::Nothing, Value(0));
-                posInfo.back()++;
-            }
-        }
-    }
-
-    std::unique_ptr<HeterogeneousBlock> extractValues() {
-        auto out = std::move(outputArr);
-        outputArr = std::make_unique<HeterogeneousBlock>();
-        return out;
-    }
-
-    std::vector<int32_t> posInfo;
-    bool isNewDoc = false;
-    bool arraySeen = false;
-    std::unique_ptr<HeterogeneousBlock> outputArr;
-};
-
-struct ProjectionPositionInfoRecorder {
-    ProjectionPositionInfoRecorder() : outputArr(std::make_unique<HeterogeneousBlock>()) {}
-
-    void recordValue(TypeTags tag, Value val) {
-        isNewDoc = false;
-
-        auto [cpyTag, cpyVal] = copyValue(tag, val);
-        if (arrayStack.empty()) {
-            outputArr->push_back(cpyTag, cpyVal);
-        } else {
-            arrayStack.back()->push_back(cpyTag, cpyVal);
-        }
-    }
-
-    void newDoc() {
-        isNewDoc = true;
-    }
-
-    void endDoc() {
-        if (isNewDoc) {
-            // We didn't record anything for the last document, so add a Nothing to our block.
-            outputArr->push_back(TypeTags::Nothing, Value(0));
-        }
-        isNewDoc = false;
-    }
-
-    void startArray() {
-        isNewDoc = false;
-        arrayStack.push_back(std::make_unique<Array>());
-    }
-
-    void endArray() {
-        invariant(!arrayStack.empty());
-
-        if (arrayStack.size() > 1) {
-            // For a nested array, we cram it into its parent.
-            auto releasedArray = arrayStack.back().release();
-            arrayStack.pop_back();
-            arrayStack.back()->push_back(TypeTags::Array, bitcastFrom<Array*>(releasedArray));
-        } else {
-            outputArr->push_back(TypeTags::Array,
-                                 bitcastFrom<Array*>(arrayStack.front().release()));
-
-            arrayStack.clear();
-        }
-    }
-
-    std::unique_ptr<HeterogeneousBlock> extractValues() {
-        auto out = std::move(outputArr);
-        outputArr = std::make_unique<HeterogeneousBlock>();
-        return out;
-    }
-
-    std::unique_ptr<HeterogeneousBlock> outputArr;
-    std::vector<std::unique_ptr<value::Array>> arrayStack;
-    bool isNewDoc = false;
-};
-
-struct BsonWalkNode {
-    bool isTraverse = false;
-
-    FilterPositionInfoRecorder* filterPosInfoRecorder = nullptr;
-
-    std::vector<ProjectionPositionInfoRecorder*> childProjRecorders;
-    ProjectionPositionInfoRecorder* projRecorder = nullptr;
-
-    // Children which are Get nodes.
-    StringMap<std::unique_ptr<BsonWalkNode>> getChildren;
-
-    // Child which is a Traverse node.
-    std::unique_ptr<BsonWalkNode> traverseChild;
-
-    void add(const CellBlock::Path& path,
-             FilterPositionInfoRecorder* recorder,
-             ProjectionPositionInfoRecorder* outProjBlockRecorder,
-             size_t pathIdx = 0) {
-        if (pathIdx == 0) {
-            // Check some invariants about the path.
-            tassert(7953501, "Cannot be given empty path", !path.empty());
-            tassert(
-                7953502, "Path must end with Id", holds_alternative<CellBlock::Id>(path.back()));
-        }
-
-        if (holds_alternative<CellBlock::Get>(path[pathIdx])) {
-            auto& get = std::get<CellBlock::Get>(path[pathIdx]);
-            auto [it, inserted] =
-                getChildren.insert(std::pair(get.field, std::make_unique<BsonWalkNode>()));
-            it->second->add(path, recorder, outProjBlockRecorder, pathIdx + 1);
-        } else if (holds_alternative<CellBlock::Traverse>(path[pathIdx])) {
-            invariant(pathIdx != 0);
-            if (!traverseChild) {
-                traverseChild = std::make_unique<BsonWalkNode>();
-                traverseChild->isTraverse = true;
-            }
-            if (outProjBlockRecorder) {
-                // Each node must know about all projection recorders below it, not just ones
-                // directly below.
-                childProjRecorders.push_back(outProjBlockRecorder);
-            }
-
-            traverseChild->add(path, recorder, outProjBlockRecorder, pathIdx + 1);
-        } else if (holds_alternative<CellBlock::Id>(path[pathIdx])) {
-            invariant(pathIdx != 0);
-
-            if (recorder) {
-                filterPosInfoRecorder = recorder;
-            }
-            if (outProjBlockRecorder) {
-                projRecorder = outProjBlockRecorder;
-            }
-            invariant(pathIdx == path.size() - 1);
-        }
-    }
-};
-
-template <class Cb>
-void walkField(
-    BsonWalkNode* node, TypeTags eltTag, Value eltVal, const char* bsonPtr, const Cb& cb);
-
-template <class Cb>
-void walkObj(BsonWalkNode* node, const char* be, const Cb& cb) {
-    const auto end = bson::bsonEnd(be);
-    // Skip document length.
-    be += 4;
-
-    while (be != end - 1) {
-        auto fieldName = bson::fieldNameAndLength(be);
-        auto it = node->getChildren.find(fieldName);
-        if (it != node->getChildren.end()) {
-            auto [eltTag, eltVal] = bson::convertFrom<true>(be, end, fieldName.size());
-            walkField(it->second.get(), eltTag, eltVal, be, cb);
-        }
-
-        be = bson::advance(be, fieldName.size());
-    }
-}
-
-template <class Cb>
-void walkField(
-    BsonWalkNode* node, TypeTags eltTag, Value eltVal, const char* bsonPtr, const Cb& cb) {
-    if (value::isObject(eltTag)) {
-        invariant(eltTag == TypeTags::bsonObject);  // Only BSON is supported for now.
-
-        walkObj(node, value::bitcastTo<const char*>(eltVal), cb);
-        if (node->traverseChild) {
-            walkField(node->traverseChild.get(), eltTag, eltVal, bsonPtr, cb);
-        }
-    } else if (value::isArray(eltTag)) {
-        invariant(eltTag == TypeTags::bsonArray);
-        if (node->traverseChild) {
-            // The projection traversal semantics are "special" in that the leaf must know
-            // when there is an array higher up in the tree.
-            for (auto& projRecorder : node->childProjRecorders) {
-                projRecorder->startArray();
-            }
-
-            bool isArrayEmpty = true;
-            {
-                auto arrayBson = value::bitcastTo<const char*>(eltVal);
-                const auto arrayEnd = bson::bsonEnd(arrayBson);
-
-                // Follow "traverse" semantics by invoking our children on direct array elements.
-                arrayBson += 4;
-
-                while (arrayBson != arrayEnd - 1) {
-                    auto sv = bson::fieldNameAndLength(arrayBson);
-                    auto [arrEltTag, arrEltVal] =
-                        bson::convertFrom<true>(arrayBson, arrayEnd, sv.size());
-                    walkField(node->traverseChild.get(), arrEltTag, arrEltVal, arrayBson, cb);
-
-                    arrayBson = bson::advance(arrayBson, sv.size());
-                    isArrayEmpty = false;
-                }
-            }
-
-            if (isArrayEmpty && node->traverseChild->filterPosInfoRecorder) {
-                // If the array was empty, indicate that we saw an empty array to the
-                // filterPosInfoRecorder.
-                node->traverseChild->filterPosInfoRecorder->emptyArraySeen();
-            }
-
-            for (auto& projRecorder : node->childProjRecorders) {
-                projRecorder->endArray();
-            }
-        }
-    } else if (node->traverseChild) {
-        // We didn't see an array, so we apply the node below the traverse to this scalar.
-        walkField(node->traverseChild.get(), eltTag, eltVal, bsonPtr, cb);
-    }
-    cb(node, eltTag, eltVal, bsonPtr);
-}
-
 class BSONExtractorImpl : public BSONCellExtractor {
 public:
-    BSONExtractorImpl(std::vector<CellBlock::PathRequest> pathReqs);
+    BSONExtractorImpl(std::vector<PathRequest> pathReqs);
 
     std::vector<std::unique_ptr<CellBlock>> extractFromBsons(
         const std::vector<BSONObj>& bsons) override;
@@ -293,20 +42,20 @@ public:
         const std::span<const TypeTags>& tags,
         const std::span<const Value>& vals) override;
 
-    BsonWalkNode* getRoot() {
+    ObjectWalkNode<BlockProjectionPositionInfoRecorder>* getRoot() {
         return &_root;
     }
 
 private:
     std::vector<std::unique_ptr<CellBlock>> constructOutputFromRecorders();
 
-    std::vector<CellBlock::PathRequest> _pathReqs;
+    std::vector<PathRequest> _pathReqs;
     std::vector<FilterPositionInfoRecorder> _filterPositionInfoRecorders;
-    std::vector<ProjectionPositionInfoRecorder> _projPositionInfoRecorders;
-    BsonWalkNode _root;
+    std::vector<BlockProjectionPositionInfoRecorder> _projPositionInfoRecorders;
+    ObjectWalkNode<BlockProjectionPositionInfoRecorder> _root;
 };
 
-BSONExtractorImpl::BSONExtractorImpl(std::vector<CellBlock::PathRequest> pathReqsIn)
+BSONExtractorImpl::BSONExtractorImpl(std::vector<PathRequest> pathReqsIn)
     : _pathReqs(std::move(pathReqsIn)) {
     // Ensure we don't reallocate and move the address of these objects, since the path tree
     // contains pointers to them.
@@ -314,7 +63,7 @@ BSONExtractorImpl::BSONExtractorImpl(std::vector<CellBlock::PathRequest> pathReq
     _projPositionInfoRecorders.reserve(_pathReqs.size());
     {
         for (auto& pathReq : _pathReqs) {
-            if (pathReq.type == CellBlock::PathRequestType::kFilter) {
+            if (pathReq.type == PathRequestType::kFilter) {
                 _filterPositionInfoRecorders.emplace_back();
                 _root.add(pathReq.path, &_filterPositionInfoRecorders.back(), nullptr);
             } else {
@@ -329,11 +78,11 @@ BSONExtractorImpl::BSONExtractorImpl(std::vector<CellBlock::PathRequest> pathReq
  * Callback used in the extractor code when walking the bson. This simply records leave values
  * depending on which records are present.
  */
-void visitElementExtractorCallback(BsonWalkNode* node,
+void visitElementExtractorCallback(ObjectWalkNode<BlockProjectionPositionInfoRecorder>* node,
                                    TypeTags eltTag,
                                    Value eltVal,
                                    const char* bson) {
-    if (auto rec = node->filterPosInfoRecorder) {
+    if (auto rec = node->filterRecorder) {
         rec->recordValue(eltTag, eltVal);
     }
 
@@ -346,14 +95,15 @@ std::vector<std::unique_ptr<CellBlock>> BSONExtractorImpl::extractFromTopLevelFi
     StringData topLevelField,
     const std::span<const TypeTags>& tags,
     const std::span<const Value>& vals) {
-    invariant(tags.size() == vals.size());
+    tassert(
+        11089616, "Number of Tags doesn't match the number of Values", tags.size() == vals.size());
 
     auto node = _root.getChildren.find(topLevelField);
 
     // Caller should always ask us to extract a top level field that's in the reqs.  We could
     // relax this if needed, and return a bunch of Nothing CellBlocks, but it's a non-use case
     // for now.
-    invariant(node != _root.getChildren.end());
+    tassert(11093600, "Top level field doesn't exist", node != _root.getChildren.end());
 
     for (size_t i = 0; i < tags.size(); ++i) {
         for (auto& rec : _filterPositionInfoRecorders) {
@@ -363,7 +113,11 @@ std::vector<std::unique_ptr<CellBlock>> BSONExtractorImpl::extractFromTopLevelFi
             rec.newDoc();
         }
 
-        walkField(node->second.get(), tags[i], vals[i], nullptr, visitElementExtractorCallback);
+        walkField<BlockProjectionPositionInfoRecorder>(node->second.get(),
+                                                       tags[i],
+                                                       vals[i],
+                                                       nullptr /* bsonPtr */,
+                                                       visitElementExtractorCallback);
 
         for (auto& rec : _filterPositionInfoRecorders) {
             rec.endDoc();
@@ -386,7 +140,11 @@ std::vector<std::unique_ptr<CellBlock>> BSONExtractorImpl::extractFromBsons(
             rec.newDoc();
         }
 
-        walkObj(&_root, obj.objdata(), visitElementExtractorCallback);
+        walkObj<BlockProjectionPositionInfoRecorder>(&_root,
+                                                     TypeTags::bsonObject,
+                                                     bitcastFrom<const char*>(obj.objdata()),
+                                                     obj.objdata(),
+                                                     visitElementExtractorCallback);
 
         for (auto& rec : _filterPositionInfoRecorders) {
             rec.endDoc();
@@ -406,12 +164,12 @@ std::vector<std::unique_ptr<CellBlock>> BSONExtractorImpl::constructOutputFromRe
 
     for (auto&& path : _pathReqs) {
         auto matBlock = std::make_unique<MaterializedCellBlock>();
-        if (path.type == CellBlock::PathRequestType::kFilter) {
+        if (path.type == PathRequestType::kFilter) {
             auto& recorder = _filterPositionInfoRecorders[filterRecorderIdx];
             matBlock->_deblocked = recorder.extractValues();
             matBlock->_filterPosInfo = std::move(recorder.posInfo);
             ++filterRecorderIdx;
-        } else if (path.type == CellBlock::PathRequestType::kProject) {
+        } else if (path.type == PathRequestType::kProject) {
             auto& recorder = _projPositionInfoRecorders[projRecorderIdx];
             matBlock->_deblocked = recorder.extractValues();
             // No associated position info since we already have one value per document.
@@ -428,41 +186,44 @@ std::vector<std::unique_ptr<CellBlock>> BSONExtractorImpl::constructOutputFromRe
     return ret;
 }
 
-}  // namespace
-
 std::unique_ptr<BSONCellExtractor> BSONCellExtractor::make(
-    const std::vector<CellBlock::PathRequest>& pathReqs) {
+    const std::vector<PathRequest>& pathReqs) {
     return std::make_unique<BSONExtractorImpl>(pathReqs);
 }
 
 std::vector<std::unique_ptr<CellBlock>> extractCellBlocksFromBsons(
-    const std::vector<CellBlock::PathRequest>& pathReqs, const std::vector<BSONObj>& bsons) {
+    const std::vector<PathRequest>& pathReqs, const std::vector<BSONObj>& bsons) {
 
     auto extractor = BSONCellExtractor::make(pathReqs);
     return extractor->extractFromBsons(bsons);
 }
 
 std::vector<const char*> extractValuePointersFromBson(BSONObj& obj,
-                                                      value::CellBlock::PathRequest pathRequest) {
-    std::vector<value::CellBlock::PathRequest> pathrequests{pathRequest};
+                                                      value::PathRequest pathRequest) {
+    std::vector<value::PathRequest> pathrequests{pathRequest};
     auto extractor = BSONExtractorImpl(pathrequests);
 
     std::vector<const char*> bsonPointers;
 
     // Callback to record pointer values in bsonPointers.
-    auto recordValuePointer = [&bsonPointers](BsonWalkNode* node,
-                                              value::TypeTags eltTag,
-                                              Value eltVal,
-                                              const char* bson) {
-        if (node->filterPosInfoRecorder) {
-            bsonPointers.push_back(bson::getValue(bson));
-        }
-        if (node->projRecorder) {
-            bsonPointers.push_back(bson::getValue(bson));
-        }
-    };
+    auto recordValuePointer =
+        [&bsonPointers](ObjectWalkNode<BlockProjectionPositionInfoRecorder>* node,
+                        value::TypeTags eltTag,
+                        Value eltVal,
+                        const char* bson) {
+            if (node->filterRecorder) {
+                bsonPointers.push_back(bson::getValue(bson));
+            }
+            if (node->projRecorder) {
+                bsonPointers.push_back(bson::getValue(bson));
+            }
+        };
 
-    walkObj(extractor.getRoot(), obj.objdata(), recordValuePointer);
+    walkObj<BlockProjectionPositionInfoRecorder>(extractor.getRoot(),
+                                                 TypeTags::bsonObject,
+                                                 bitcastFrom<const char*>(obj.objdata()),
+                                                 obj.objdata(),
+                                                 recordValuePointer);
     return bsonPointers;
 }
 }  // namespace mongo::sbe::value

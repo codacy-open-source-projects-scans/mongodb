@@ -28,16 +28,12 @@
  */
 
 #include "mongo/db/matcher/schema/expression_internal_schema_root_doc_eq.h"
+
 #include "mongo/bson/util/builder.h"
 
 namespace mongo {
 
 constexpr StringData InternalSchemaRootDocEqMatchExpression::kName;
-
-bool InternalSchemaRootDocEqMatchExpression::matches(const MatchableDocument* doc,
-                                                     MatchDetails* details) const {
-    return _objCmp.evaluate(doc->toBSON() == _rhsObj);
-}
 
 void InternalSchemaRootDocEqMatchExpression::debugString(StringBuilder& debug,
                                                          int indentationLevel) const {

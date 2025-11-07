@@ -27,11 +27,11 @@
  *    it in the license file.
  */
 
-#include <benchmark/benchmark.h>
-
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/repl/replication_coordinator_test_fixture.h"
 #include "mongo/db/repl/storage_interface_mock.h"
+
+#include <benchmark/benchmark.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -211,14 +211,13 @@ public:
     }
 
     void startCoordForConfigBM() {
-        BSONObj configObj = BSON("_id"
-                                 << "mySet"
-                                 << "version" << 1 << "members"
-                                 << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                          << "node1:12345")
-                                               << BSON("_id" << 2 << "host"
-                                                             << "node2:12345"))
-                                 << "protocolVersion" << 1);
+        BSONObj configObj = BSON("_id" << "mySet"
+                                       << "version" << 1 << "members"
+                                       << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                                << "node1:12345")
+                                                     << BSON("_id" << 2 << "host"
+                                                                   << "node2:12345"))
+                                       << "protocolVersion" << 1);
         assertStartSuccess(configObj, HostAndPort("node1", 12345));
     }
 

@@ -27,12 +27,37 @@
  *    it in the license file.
  */
 
-#include <absl/hash/hash.h>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/json.h"
+#include "mongo/db/basic_types_gen.h"
+#include "mongo/db/local_catalog/collection_type.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/aggregate_command_gen.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/query/find_command.h"
+#include "mongo/db/query/parsed_find_command.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/db/query/query_shape/shape_helpers.h"
+#include "mongo/db/query/query_stats/agg_key.h"
+#include "mongo/db/query/query_stats/aggregated_metric.h"
+#include "mongo/db/query/query_stats/find_key.h"
+#include "mongo/db/query/query_stats/key.h"
+#include "mongo/db/query/query_stats/query_stats.h"
+#include "mongo/db/service_context_test_fixture.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/platform/decimal128.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/intrusive_counter.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -41,38 +66,10 @@
 #include <string>
 #include <utility>
 
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/json.h"
-#include "mongo/db/basic_types_gen.h"
-#include "mongo/db/collection_type.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/aggregate_command_gen.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/query/find_command.h"
-#include "mongo/db/query/parsed_find_command.h"
-#include "mongo/db/query/query_shape/query_shape.h"
-#include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/db/query/query_stats/agg_key.h"
-#include "mongo/db/query/query_stats/aggregated_metric.h"
-#include "mongo/db/query/query_stats/find_key.h"
-#include "mongo/db/query/query_stats/key.h"
-#include "mongo/db/query/query_stats/query_stats.h"
-#include "mongo/db/query/query_stats/transform_algorithm_gen.h"
-#include "mongo/db/service_context_test_fixture.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/platform/decimal128.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
-#include "mongo/util/str.h"
+#include <absl/hash/hash.h>
+#include <boost/cstdint.hpp>
+#include <boost/none.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::query_stats {
 
@@ -91,7 +88,9 @@ public:
         auto fcr = std::make_unique<FindCommandRequest>(kDefaultTestNss);
         fcr->setFilter(filter.getOwned());
         auto parsedFind = uassertStatusOK(parsed_find_command::parse(expCtx, {std::move(fcr)}));
-        return std::make_unique<FindKey>(expCtx, *parsedFind, collectionType);
+        auto findShape = std::make_unique<query_shape::FindCmdShape>(*parsedFind, expCtx);
+        return std::make_unique<FindKey>(
+            expCtx, *parsedFind->findCommandRequest, std::move(findShape), collectionType);
     }
 
     static constexpr auto collectionType = query_shape::CollectionType::kCollection;
@@ -100,7 +99,9 @@ public:
                                          bool applyHmac) {
         auto fcrCopy = std::make_unique<FindCommandRequest>(fcr);
         auto parsedFind = uassertStatusOK(parsed_find_command::parse(expCtx, {std::move(fcrCopy)}));
-        FindKey findKey(expCtx, *parsedFind, collectionType);
+        auto findShape = std::make_unique<query_shape::FindCmdShape>(*parsedFind, expCtx);
+        FindKey findKey(
+            expCtx, *parsedFind->findCommandRequest, std::move(findShape), collectionType);
         SerializationOptions opts = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
         if (!applyHmac) {
             opts.transformIdentifiers = false;
@@ -115,13 +116,10 @@ public:
                                               const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                               LiteralSerializationPolicy literalPolicy,
                                               bool applyHmac = false) {
-
-        auto aggKey = std::make_unique<AggKey>(acr,
-                                               pipeline,
-                                               expCtx,
-                                               pipeline.getInvolvedCollections(),
-                                               acr.getNamespace(),
-                                               collectionType);
+        auto aggShape = std::make_unique<query_shape::AggCmdShape>(
+            acr, acr.getNamespace(), pipeline.getInvolvedCollections(), pipeline, expCtx);
+        auto aggKey = std::make_unique<AggKey>(
+            expCtx, acr, std::move(aggShape), pipeline.getInvolvedCollections(), collectionType);
 
         // SerializationOptions opts{.literalPolicy = literalPolicy};
         SerializationOptions opts = SerializationOptions::kMarkIdentifiers_FOR_TEST;
@@ -215,8 +213,7 @@ TEST_F(QueryStatsStoreTest, EvictionTest) {
         // evicted first but the partition will still be over budget so the final, too large entry
         // will also be evicted.
         auto opCtx = makeOperationContext();
-        auto fcr = std::make_unique<FindCommandRequest>(NamespaceStringOrUUID(
-            NamespaceString::createNamespaceString_forTest("testDB.testColl")));
+        auto fcr = std::make_unique<FindCommandRequest>(kDefaultTestNss);
         fcr->setLet(BSON("var" << 2));
         fcr->setFilter(fromjson("{$expr: [{$eq: ['$a', '$$var']}]}"));
         fcr->setProjection(fromjson("{varIs: '$$var'}"));
@@ -225,8 +222,7 @@ TEST_F(QueryStatsStoreTest, EvictionTest) {
         fcr->setBatchSize(25);
         fcr->setMaxTimeMS(1000);
         fcr->setNoCursorTimeout(false);
-        opCtx->setComment(BSON("comment"
-                               << " foo bar baz"));
+        opCtx->setComment(BSON("comment" << " foo bar baz"));
         fcr->setSingleBatch(false);
         fcr->setAllowDiskUse(false);
         fcr->setAllowPartialResults(true);
@@ -239,8 +235,10 @@ TEST_F(QueryStatsStoreTest, EvictionTest) {
         fcr->setSort(BSON("sortVal" << 1 << "otherSort" << -1));
         auto expCtx = ExpressionContextBuilder{}.fromRequest(opCtx.get(), *fcr).build();
         auto parsedFind = uassertStatusOK(parsed_find_command::parse(expCtx, {std::move(fcr)}));
+        auto findShape = std::make_unique<query_shape::FindCmdShape>(*parsedFind, expCtx);
 
-        key = std::make_unique<query_stats::FindKey>(expCtx, *parsedFind, collectionType);
+        key = std::make_unique<query_stats::FindKey>(
+            expCtx, *parsedFind->findCommandRequest, std::move(findShape), collectionType);
         auto lookupHash = absl::HashOf(key);
         QueryStatsEntry testMetrics{std::move(key)};
         queryStatsStore.put(lookupHash, testMetrics);
@@ -284,10 +282,19 @@ TEST_F(QueryStatsStoreTest, GenerateMaxBsonSizeQueryShape) {
     // The shapification process will bloat the input query over the 16 MB memory limit. Assert
     // that calling registerRequest() doesn't throw and that the opDebug isn't registered with a
     // key hash (thus metrics won't be tracked for this query).
-    ASSERT_DOES_NOT_THROW(query_stats::registerRequest(opCtx.get(), nss, [&]() {
-        return std::make_unique<query_stats::FindKey>(
-            expCtx, *parsedFind, query_shape::CollectionType::kCollection);
-    }));
+    ASSERT_DOES_NOT_THROW(([&]() {
+        auto statusWithShape =
+            shape_helpers::tryMakeShape<query_shape::FindCmdShape>(*parsedFind, expCtx);
+        if (statusWithShape.isOK()) {
+            query_stats::registerRequest(opCtx.get(), nss, [&]() {
+                return std::make_unique<query_stats::FindKey>(
+                    expCtx,
+                    *parsedFind->findCommandRequest,
+                    std::move(statusWithShape.getValue()),
+                    query_shape::CollectionType::kCollection);
+            });
+        }
+    })());
     auto& opDebug = CurOp::get(*opCtx)->debug();
     ASSERT_EQ(opDebug.queryStatsInfo.keyHash, boost::none);
 }
@@ -516,13 +523,9 @@ TEST_F(QueryStatsStoreTest, CorrectlyRedactsFindCommandRequestAllFields) {
     fcr.setAllowDiskUse(false);
     fcr.setShowRecordId(true);
     fcr.setMirrored(true);
-    auto readPreference = BSON("mode"
-                               << "nearest"
-                               << "tags"
-                               << BSON_ARRAY(BSON("some"
-                                                  << "tag")
-                                             << BSON("some"
-                                                     << "other tag")));
+    auto readPreference =
+        BSON("mode" << "nearest"
+                    << "tags" << BSON_ARRAY(BSON("some" << "tag") << BSON("some" << "other tag")));
     ReadPreferenceSetting::get(expCtx->getOperationContext()) =
         uassertStatusOK(ReadPreferenceSetting::fromInnerBSON(readPreference));
     key = makeQueryStatsKeyFindRequest(fcr, expCtx, true);
@@ -735,8 +738,7 @@ TEST_F(QueryStatsStoreTest, CorrectlyRedactsHintsWithOptions) {
         key);
     // Test with a string hint. Note that this is the internal representation of the string hint
     // generated at parse time.
-    fcr.setHint(BSON("$hint"
-                     << "z"));
+    fcr.setHint(BSON("$hint" << "z"));
 
     key = makeQueryStatsKeyFindRequest(fcr, expCtx, false);
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
@@ -843,7 +845,10 @@ TEST_F(QueryStatsStoreTest, DefinesLetVariables) {
     fcr->setProjection(fromjson("{varIs: '$$var'}"));
 
     auto expCtx = make_intrusive<ExpressionContextForTest>(opCtx.get());
-    expCtx->variables.seedVariablesWithLetParameters(expCtx.get(), *fcr->getLet());
+    expCtx->variables.seedVariablesWithLetParameters(
+        expCtx.get(), *fcr->getLet(), [](const Expression* expr) {
+            return expression::getDependencies(expr).hasNoRequirements();
+        });
     auto hmacApplied = makeQueryStatsKeyFindRequest(*fcr, expCtx, false);
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
         R"({
@@ -993,8 +998,7 @@ TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestAllFieldsSi
     // Add the fields that shouldn't be abstracted.
     acr.setAllowDiskUse(false);
     acr.setHint(BSON("z" << 1 << "c" << 1));
-    acr.setCollation(BSON("locale"
-                          << "simple"));
+    acr.setCollation(BSON("locale" << "simple"));
     shapified = makeQueryStatsKeyAggregateRequest(
         acr, *pipeline, expCtx, LiteralSerializationPolicy::kToDebugTypeString, true);
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
@@ -1062,9 +1066,7 @@ TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestAllFieldsSi
         shapified);
 
     // Add let.
-    acr.setLet(BSON("var1" << BSON("$literal"
-                                   << "$foo")
-                           << "var2"
+    acr.setLet(BSON("var1" << BSON("$literal" << "$foo") << "var2"
                            << "bar"));
     shapified = makeQueryStatsKeyAggregateRequest(
         acr, *pipeline, expCtx, LiteralSerializationPolicy::kToDebugTypeString, true);
@@ -1142,8 +1144,7 @@ TEST_F(QueryStatsStoreTest, CorrectlyTokenizesAggregateCommandRequestAllFieldsSi
     acr.setCursor(cursorOptions);
     acr.setMaxTimeMS(500);
     acr.setBypassDocumentValidation(true);
-    expCtx->getOperationContext()->setComment(BSON("comment"
-                                                   << "note to self"));
+    expCtx->getOperationContext()->setComment(BSON("comment" << "note to self"));
     shapified = makeQueryStatsKeyAggregateRequest(
         acr, *pipeline, expCtx, LiteralSerializationPolicy::kToDebugTypeString, true);
     ASSERT_BSONOBJ_EQ_AUTO(  // NOLINT
@@ -1527,108 +1528,157 @@ TEST_F(QueryStatsStoreTest, SumOfSquaresOverflowDoubleTest) {
     SumOfSquaresOverflowTest<double>();
 }
 
-TEST_F(QueryStatsStoreTest, BasicDiskUsage) {
-    QueryStatsStore queryStatsStore{5000000, 1000};
+struct QueryStatsBSONParams {
+    bool useSubsections = false;
+    bool includeWriteMetrics = false;
+    long long lastExecutionMicros = 0LL;
+    long long execCount = 0LL;
+    BSONObj hasSortStage = boolMetricBson(0, 0);
+    BSONObj usedDisk = boolMetricBson(0, 0);
+    BSONObj nMatched = intMetricBson(0, std::numeric_limits<int64_t>::max(), 0, 0);
+    BSONObj nModified = intMetricBson(0, std::numeric_limits<int64_t>::max(), 0, 0);
+};
+
+void verifyQueryStatsBSON(QueryStatsEntry& qse, const QueryStatsBSONParams& params = {}) {
     const BSONObj emptyIntMetric = intMetricBson(0, std::numeric_limits<int64_t>::max(), 0, 0);
+    BSONObjBuilder testBuilder{};
+    testBuilder.appendNumber("lastExecutionMicros", params.lastExecutionMicros)
+        .appendNumber("execCount", params.execCount)
+        .append("totalExecMicros", emptyIntMetric)
+        .append("cpuNanos", emptyIntMetric)
+        .append("workingTimeMillis", emptyIntMetric);
 
-    auto getMetrics = [&](BSONObj query) {
-        auto key = makeFindKeyFromQuery(query);
-        auto lookupResult = queryStatsStore.lookup(absl::HashOf(key));
-        ASSERT_OK(lookupResult);
-        return *lookupResult.getValue();
-    };
+    BSONObjBuilder* subsectionBuilder = &testBuilder;
+    BSONObjBuilder cursorSection{};
+    if (params.useSubsections) {
+        subsectionBuilder = &cursorSection;
+    }
 
-    auto collectMetricsBase = [&](BSONObj query) {
-        auto key = makeFindKeyFromQuery(query);
-        auto lookupHash = absl::HashOf(key);
-        auto lookupResult = queryStatsStore.lookup(lookupHash);
-        if (!lookupResult.isOK()) {
-            queryStatsStore.put(lookupHash, QueryStatsEntry{std::move(key)});
-            lookupResult = queryStatsStore.lookup(lookupHash);
+    subsectionBuilder->append("firstResponseExecMicros", emptyIntMetric);
+
+    BSONObjBuilder queryExecSection{};
+    if (params.useSubsections) {
+        testBuilder.append("cursor", subsectionBuilder->obj());
+        subsectionBuilder = &queryExecSection;
+    }
+
+    subsectionBuilder->append("docsReturned", emptyIntMetric)
+        .append("keysExamined", emptyIntMetric)
+        .append("docsExamined", emptyIntMetric)
+        .append("bytesRead", emptyIntMetric)
+        .append("readTimeMicros", emptyIntMetric)
+        .append("delinquentAcquisitions", emptyIntMetric)
+        .append("totalAcquisitionDelinquencyMillis", emptyIntMetric)
+        .append("maxAcquisitionDelinquencyMillis", emptyIntMetric)
+        .append("numInterruptChecksPerSec", emptyIntMetric)
+        .append("overdueInterruptApproxMaxMillis", emptyIntMetric);
+
+    BSONObjBuilder queryPlannerSection{};
+    if (params.useSubsections) {
+        testBuilder.append("queryExec", subsectionBuilder->obj());
+        subsectionBuilder = &queryPlannerSection;
+    }
+
+    subsectionBuilder->append("hasSortStage", params.hasSortStage)
+        .append("usedDisk", params.usedDisk)
+        .append("fromMultiPlanner", boolMetricBson(0, 0))
+        .append("fromPlanCache", boolMetricBson(0, 0));
+
+    if (params.useSubsections) {
+        testBuilder.append("queryPlanner", subsectionBuilder->obj());
+    }
+
+    // TODO SERVER-109623 Remove includeWriteMetrics once all versions support the new write
+    // metrics.
+    if (params.includeWriteMetrics) {
+        BSONObjBuilder writeSection{};
+        writeSection.append("nMatched", params.nMatched)
+            .append("nUpserted", emptyIntMetric)
+            .append("nModified", params.nModified)
+            .append("nDeleted", emptyIntMetric)
+            .append("nInserted", emptyIntMetric);
+
+        testBuilder.append("writes", writeSection.obj());
+    }
+
+    testBuilder.append("firstSeenTimestamp", qse.firstSeenTimestamp)
+        .append("latestSeenTimestamp", Date_t());
+
+    ASSERT_BSONOBJ_EQ(qse.toBSON(params.useSubsections, params.includeWriteMetrics),
+                      testBuilder.obj());
+}
+
+TEST_F(QueryStatsStoreTest, BasicDiskUsage) {
+    // TODO SERVER-112150: Once all versions support feature flag QueryStatsMetricsSubsections,
+    // removing testing both with and without subsections.
+    for (bool useSubsections : {false, true}) {
+        QueryStatsStore queryStatsStore{5000000, 1000};
+
+        auto getMetrics = [&](BSONObj query) {
+            auto key = makeFindKeyFromQuery(query);
+            auto lookupResult = queryStatsStore.lookup(absl::HashOf(key));
+            ASSERT_OK(lookupResult);
+            return *lookupResult.getValue();
+        };
+
+        auto collectMetricsBase = [&](BSONObj query) {
+            auto key = makeFindKeyFromQuery(query);
+            auto lookupHash = absl::HashOf(key);
+            auto lookupResult = queryStatsStore.lookup(lookupHash);
+            if (!lookupResult.isOK()) {
+                queryStatsStore.put(lookupHash, QueryStatsEntry{std::move(key)});
+                lookupResult = queryStatsStore.lookup(lookupHash);
+            }
+
+            return lookupResult.getValue();
+        };
+        auto query1 = BSON("query" << 1 << "xEquals" << 42);
+
+        // Collect some metrics.
+        {
+            auto metrics = collectMetricsBase(query1);
+            metrics->execCount += 1;
+            metrics->lastExecutionMicros += 123456;
         }
 
-        return lookupResult.getValue();
-    };
+        // Verify the serialization works correctly.
+        {
+            auto qse = getMetrics(query1);
+            verifyQueryStatsBSON(qse,
+                                 {
+                                     .useSubsections = useSubsections,
+                                     .includeWriteMetrics = false,
+                                     .lastExecutionMicros = 123456LL,
+                                     .execCount = 1LL,
+                                 });
+        }
 
-    auto query1 = BSON("query" << 1 << "xEquals" << 42);
+        // Collect some metrics again but with booleans and write metrics.
+        {
+            auto metrics = collectMetricsBase(query1);
+            metrics->execCount += 1;
+            metrics->lastExecutionMicros += 123456;
+            metrics->queryPlannerStats.usedDisk.aggregate(true);
+            metrics->queryPlannerStats.hasSortStage.aggregate(false);
+            metrics->writesStats.nMatched.aggregate(1);
+            metrics->writesStats.nModified.aggregate(1);
+        }
 
-    // Collect some metrics
-    {
-        auto metrics = collectMetricsBase(query1);
-        metrics->execCount += 1;
-        metrics->lastExecutionMicros += 123456;
-    }
-
-    // Verify the serialization works correctly
-    {
-        auto qse = getMetrics(query1);
-
-        // Empty
-        ASSERT_BSONOBJ_EQ(qse.toBSON(false),
-                          BSONObjBuilder{}
-                              .append("lastExecutionMicros", 123456LL)
-                              .append("execCount", 1LL)
-                              .append("totalExecMicros", emptyIntMetric)
-                              .append("firstResponseExecMicros", emptyIntMetric)
-                              .append("docsReturned", emptyIntMetric)
-                              .append("firstSeenTimestamp", qse.firstSeenTimestamp)
-                              .append("latestSeenTimestamp", Date_t())
-                              .obj());
-
-        // With Disk Usage
-        ASSERT_BSONOBJ_EQ(qse.toBSON(true),
-                          BSONObjBuilder{}
-                              .append("lastExecutionMicros", 123456LL)
-                              .append("execCount", 1LL)
-                              .append("totalExecMicros", emptyIntMetric)
-                              .append("firstResponseExecMicros", emptyIntMetric)
-                              .append("docsReturned", emptyIntMetric)
-                              .append("keysExamined", emptyIntMetric)
-                              .append("docsExamined", emptyIntMetric)
-                              .append("bytesRead", emptyIntMetric)
-                              .append("readTimeMicros", emptyIntMetric)
-                              .append("workingTimeMillis", emptyIntMetric)
-                              .append("hasSortStage", boolMetricBson(0, 0))
-                              .append("usedDisk", boolMetricBson(0, 0))
-                              .append("fromMultiPlanner", boolMetricBson(0, 0))
-                              .append("fromPlanCache", boolMetricBson(0, 0))
-                              .append("firstSeenTimestamp", qse.firstSeenTimestamp)
-                              .append("latestSeenTimestamp", Date_t())
-                              .obj());
-    }
-
-    // Collect some metrics again but with booleans
-    {
-        auto metrics = collectMetricsBase(query1);
-        metrics->execCount += 1;
-        metrics->lastExecutionMicros += 123456;
-        metrics->usedDisk.aggregate(true);
-        metrics->hasSortStage.aggregate(false);
-    }
-
-    // With some boolean metrics
-    {
-        auto qse2 = getMetrics(query1);
-
-        ASSERT_BSONOBJ_EQ(qse2.toBSON(true),
-                          BSONObjBuilder{}
-                              .append("lastExecutionMicros", 246912LL)
-                              .append("execCount", 2LL)
-                              .append("totalExecMicros", emptyIntMetric)
-                              .append("firstResponseExecMicros", emptyIntMetric)
-                              .append("docsReturned", emptyIntMetric)
-                              .append("keysExamined", emptyIntMetric)
-                              .append("docsExamined", emptyIntMetric)
-                              .append("bytesRead", emptyIntMetric)
-                              .append("readTimeMicros", emptyIntMetric)
-                              .append("workingTimeMillis", emptyIntMetric)
-                              .append("hasSortStage", boolMetricBson(0, 1))
-                              .append("usedDisk", boolMetricBson(1, 0))
-                              .append("fromMultiPlanner", boolMetricBson(0, 0))
-                              .append("fromPlanCache", boolMetricBson(0, 0))
-                              .append("firstSeenTimestamp", qse2.firstSeenTimestamp)
-                              .append("latestSeenTimestamp", Date_t())
-                              .obj());
+        // With some boolean and write metrics.
+        {
+            auto qse2 = getMetrics(query1);
+            verifyQueryStatsBSON(qse2,
+                                 {
+                                     .useSubsections = useSubsections,
+                                     .includeWriteMetrics = true,
+                                     .lastExecutionMicros = 246912LL,
+                                     .execCount = 2LL,
+                                     .hasSortStage = boolMetricBson(0, 1),
+                                     .usedDisk = boolMetricBson(1, 0),
+                                     .nMatched = intMetricBson(1, 1, 1, 1),
+                                     .nModified = intMetricBson(1, 1, 1, 1),
+                                 });
+        }
     }
 }
 

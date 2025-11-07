@@ -27,19 +27,21 @@
  *    it in the license file.
  */
 
+#pragma once
+
 #include "mongo/db/query/search/search_index_process_interface.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
 class SearchIndexProcessShard : public SearchIndexProcessInterface {
 public:
-    boost::optional<UUID> fetchCollectionUUID(OperationContext* opCtx,
-                                              const NamespaceString& nss) override;
-    std::pair<boost::optional<UUID>, boost::optional<NamespaceString>>
-    fetchCollectionUUIDAndResolveView(OperationContext* opCtx, const NamespaceString& nss) override;
-    std::pair<UUID, boost::optional<NamespaceString>> fetchCollectionUUIDAndResolveViewOrThrow(
+    std::pair<boost::optional<UUID>, boost::optional<ResolvedView>>
+    fetchCollectionUUIDAndResolveView(OperationContext* opCtx,
+                                      const NamespaceString& nss,
+                                      bool failOnTsColl = true) override;
+    std::pair<UUID, boost::optional<ResolvedView>> fetchCollectionUUIDAndResolveViewOrThrow(
         OperationContext* opCtx, const NamespaceString& nss) override;
-    UUID fetchCollectionUUIDOrThrow(OperationContext* opCtx, const NamespaceString& nss) override;
 };
 
 }  // namespace mongo

@@ -37,23 +37,11 @@
 
 #include "mongo/db/repl/topology_coordinator.h"
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <cstddef>
-#include <fmt/format.h>
-#include <fmt/ostream.h>
-#include <limits>
-#include <ostream>
-#include <string>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/basic_types.h"
-#include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/index_builds/commit_quorum_options.h"
 #include "mongo/db/repl/heartbeat_response_action.h"
 #include "mongo/db/repl/isself.h"
@@ -63,8 +51,6 @@
 #include "mongo/db/repl/topology_coordinator_gen.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/metadata/oplog_query_metadata.h"
@@ -74,6 +60,18 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <limits>
+#include <ostream>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+#include <fmt/ostream.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -94,10 +92,8 @@ constexpr Milliseconds TopologyCoordinator::PingStats::UninitializedPingTime;
 
 // Tracks the number of times we decide to change sync sources in order to sync from a significantly
 // closer node.
-auto& numSyncSourceChangesDueToSignificantlyCloserNode =
+mongo::Counter64& numSyncSourceChangesDueToSignificantlyCloserNode =
     *MetricBuilder<Counter64>("repl.syncSource.numSyncSourceChangesDueToSignificantlyCloserNode");
-
-using namespace fmt::literals;
 
 std::string TopologyCoordinator::roleToString(TopologyCoordinator::Role role) {
     switch (role) {
@@ -480,10 +476,11 @@ bool TopologyCoordinator::_isEligibleSyncSource(int candidateIndex,
     const auto syncSourceCandidate = memberConfig.getHostAndPort();
     const auto memberData = _memberData[candidateIndex];
 
-    // Only log this message if it has not been logged in the last second.
-    bool shouldLogIneligibleCandidate =
-        (limitLogFrequency &&
-         ((_recentSyncSourceChanges.lastLoggedIneligibleSrc + Milliseconds(1000)) < now));
+    // If limitLogFrequency is true, only log this message if it has not been logged in the last
+    // second, otherwise always log.
+    bool shouldLogIneligibleCandidate = (!limitLogFrequency) ||
+        ((_recentSyncSourceChanges.lastLoggedIneligibleSrc + Milliseconds(1000)) < now);
+
 
     // Candidate must be up to be considered.
     if (!memberData.up()) {
@@ -1237,8 +1234,7 @@ OpTime TopologyCoordinator::_getMemberOpTimeForRecencyCheck(const MemberData& me
     // For j: true case use min(lastDurable, lastApplied) because oplog entries being
     // durable no longer implies being applied, but we'd like to have numbered and
     // tagged write concerns support the read-your-write semantics.
-    if (feature_flags::gReduceMajorityWriteLatency.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+    if (feature_flags::gReduceMajorityWriteLatency.isEnabled()) {
         memberOpTime = durablyWritten
             ? std::min(memberData.getLastDurableOpTime(), memberData.getLastAppliedOpTime())
             : memberData.getLastAppliedOpTime();
@@ -1451,7 +1447,11 @@ void TopologyCoordinator::setMyLastWrittenOpTimeAndWallTime(OpTimeAndWallTime op
                                                             bool isRollbackAllowed) {
     auto opTime = opTimeAndWallTime.opTime;
     auto& myMemberData = _selfMemberData();
-    invariant(isRollbackAllowed || opTime >= myMemberData.getLastWrittenOpTime());
+    invariant(isRollbackAllowed || opTime >= myMemberData.getLastWrittenOpTime(),
+              str::stream() << "isRollbackAllowed: " << isRollbackAllowed
+                            << ", current last written optime: "
+                            << myMemberData.getLastWrittenOpTime().toString()
+                            << ", setting last written optime to: " << opTime.toString());
     myMemberData.setLastWrittenOpTimeAndWallTime(opTimeAndWallTime, now);
 }
 
@@ -1476,8 +1476,10 @@ void TopologyCoordinator::setMyLastAppliedOpTimeAndWallTime(OpTimeAndWallTime op
         // timestamp. So, in pv1, its not possible for us to get opTime with higher term and
         // timestamp lesser than or equal to our current lastAppliedOptime.
         invariant(opTime.getTerm() == OpTime::kUninitializedTerm ||
-                  myLastAppliedOpTime.getTerm() == OpTime::kUninitializedTerm ||
-                  opTime.getTimestamp() > myLastAppliedOpTime.getTimestamp());
+                      myLastAppliedOpTime.getTerm() == OpTime::kUninitializedTerm ||
+                      opTime.getTimestamp() > myLastAppliedOpTime.getTimestamp(),
+                  str::stream() << "current lastApplied opTime: " << myLastAppliedOpTime.toString()
+                                << ", setting lastApplied opTime to: " << opTime.toString());
     }
 
     myMemberData.setLastAppliedOpTimeAndWallTime(opTimeAndWallTime, now);
@@ -1496,7 +1498,11 @@ void TopologyCoordinator::setMyLastDurableOpTimeAndWallTime(OpTimeAndWallTime op
                                                             bool isRollbackAllowed) {
     auto opTime = opTimeAndWallTime.opTime;
     auto& myMemberData = _selfMemberData();
-    invariant(isRollbackAllowed || opTime >= myMemberData.getLastDurableOpTime());
+    invariant(isRollbackAllowed || opTime >= myMemberData.getLastDurableOpTime(),
+              str::stream() << "isRollbackAllowed: " << isRollbackAllowed
+                            << ", current lastDurable opTime: "
+                            << myMemberData.getLastDurableOpTime().toString()
+                            << ", setting lastDurable opTime to: " << opTime.toString());
     myMemberData.setLastDurableOpTimeAndWallTime(opTimeAndWallTime, now);
 }
 
@@ -1980,8 +1986,7 @@ std::string TopologyCoordinator::_getReplSetStatusString() {
 void TopologyCoordinator::prepareStatusResponse(const ReplSetStatusArgs& rsStatusArgs,
                                                 BSONObjBuilder* response,
                                                 Status* result) {
-    auto featureFlagMajorityWriteLatency = feature_flags::gReduceMajorityWriteLatency.isEnabled(
-        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+    auto featureFlagMajorityWriteLatency = feature_flags::gReduceMajorityWriteLatency.isEnabled();
     // output for each member
     std::vector<BSONObj> membersOut;
     const MemberState myState = getMemberState();
@@ -2183,6 +2188,11 @@ void TopologyCoordinator::prepareStatusResponse(const ReplSetStatusArgs& rsStatu
 
     if (_rsConfig.getConfigServer_deprecated() ||
         (gFeatureFlagAllMongodsAreSharded.isEnabledUseLatestFCVWhenUninitialized(
+             // The FeatureFlagAllMongodsAreSharded is currently fully disabled.
+             // Ignore the VersionContext for simplicity.
+             // TODO SERVER-102586: Revisit this decision in case the feature-flag
+             // gets re-enabled.
+             kVersionContextIgnored_UNSAFE,
              serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
          serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer))) {
         response->append("configsvr", true);
@@ -2710,10 +2720,6 @@ void TopologyCoordinator::setPing_forTest(const HostAndPort& host, const Millise
     pingStats.set_forTest(ping);
 }
 
-void TopologyCoordinator::_setElectionTime(const Timestamp& newElectionTime) {
-    _electionTime = newElectionTime;
-}
-
 bool TopologyCoordinator::isSteppingDownUnconditionally() const {
     return _leaderMode == LeaderMode::kSteppingDown;
 }
@@ -2761,8 +2767,11 @@ MemberState TopologyCoordinator::getMemberState() const {
 
     if (_rsConfig.getConfigServer_deprecated() ||
         _options.clusterRole.has(ClusterRole::ConfigServer)) {
+        // If we are running with replicaSetConfigShardMaintenanceMode then it's not a removed node,
+        // rather under reconfiguration, so it's safe to consider it as part of the replicaset
         if (!_options.clusterRole.has(ClusterRole::ConfigServer) &&
-            !skipShardingConfigurationChecks) {
+            !skipShardingConfigurationChecks &&
+            !serverGlobalParams.replicaSetConfigShardMaintenanceMode) {
             return MemberState::RS_REMOVED;
         } else {
             invariant(_storageEngineSupportsReadCommitted != ReadCommittedSupport::kUnknown);
@@ -3621,27 +3630,31 @@ void TopologyCoordinator::processReplSetRequestVotes(const ReplSetRequestVotesAr
 
     if (args.getConfigVersionAndTerm() < _rsConfig.getConfigVersionAndTerm()) {
         response->setVoteGranted(false);
-        response->setReason("candidate's config with {} is older than mine with {}"_format(
-            args.getConfigVersionAndTerm(), _rsConfig.getConfigVersionAndTerm()));
+        response->setReason(fmt::format("candidate's config with {} is older than mine with {}",
+                                        fmt::streamed(args.getConfigVersionAndTerm()),
+                                        fmt::streamed(_rsConfig.getConfigVersionAndTerm())));
     } else if (args.getTerm() < _term) {
         response->setVoteGranted(false);
         response->setReason(
-            "candidate's term ({}) is lower than mine ({})"_format(args.getTerm(), _term));
+            fmt::format("candidate's term ({}) is lower than mine ({})", args.getTerm(), _term));
     } else if (args.getSetName() != _rsConfig.getReplSetName()) {
         response->setVoteGranted(false);
-        response->setReason("candidate's set name ({}) differs from mine ({})"_format(
-            args.getSetName(), _rsConfig.getReplSetName()));
+        response->setReason(fmt::format("candidate's set name ({}) differs from mine ({})",
+                                        args.getSetName(),
+                                        _rsConfig.getReplSetName()));
     } else if (args.getLastWrittenOpTime() < getMyLastWrittenOpTime()) {
         response->setVoteGranted(false);
-        response->setReason(
+        response->setReason(fmt::format(
             "candidate's data is staler than mine. candidate's last written OpTime: {}, "
-            "my last written OpTime: {}"_format(args.getLastWrittenOpTime().toString(),
-                                                getMyLastWrittenOpTime().toString()));
+            "my last written OpTime: {}",
+            args.getLastWrittenOpTime().toString(),
+            getMyLastWrittenOpTime().toString()));
     } else if (!args.isADryRun() && _lastVote.getTerm() == args.getTerm()) {
         response->setVoteGranted(false);
-        response->setReason("already voted for another candidate ({}) this term ({})"_format(
-            _rsConfig.getMemberAt(_lastVote.getCandidateIndex()).getHostAndPort(),
-            _lastVote.getTerm()));
+        response->setReason(
+            fmt::format("already voted for another candidate ({}) this term ({})",
+                        _rsConfig.getMemberAt(_lastVote.getCandidateIndex()).getHostAndPort(),
+                        _lastVote.getTerm()));
     } else {
         bool isSameConfig = args.getConfigVersionAndTerm() == _rsConfig.getConfigVersionAndTerm();
         int betterPrimary = _findHealthyPrimaryOfEqualOrGreaterPriority(args.getCandidateIndex());
@@ -3654,8 +3667,8 @@ void TopologyCoordinator::processReplSetRequestVotes(const ReplSetRequestVotesAr
         if (isSameConfig && _selfConfig().isArbiter() && betterPrimary >= 0) {
             response->setVoteGranted(false);
             response->setReason(
-                "can see a healthy primary ({}) of equal or greater priority"_format(
-                    _rsConfig.getMemberAt(betterPrimary).getHostAndPort()));
+                fmt::format("can see a healthy primary ({}) of equal or greater priority",
+                            _rsConfig.getMemberAt(betterPrimary).getHostAndPort()));
         } else {
             if (!args.isADryRun()) {
                 _lastVote.setTerm(args.getTerm());

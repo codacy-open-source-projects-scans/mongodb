@@ -29,22 +29,21 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <set>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/util/intrusive_counter.h"
+
+#include <set>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -73,10 +72,10 @@ public:
     }
 
     const char* getSourceName() const final {
-        return kStageName.rawData();
+        return kStageName.data();
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final;
+    StageConstraints constraints(PipelineSplitState pipeState) const final;
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
         return boost::none;
@@ -86,12 +85,16 @@ public:
 
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
 
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
+    }
+
 private:
     DocumentSourceChangeStreamCheckTopologyChange(
         const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : DocumentSourceInternalChangeStreamStage(kStageName, expCtx) {}
-
-    GetNextResult doGetNext() final;
 };
 
 }  // namespace mongo

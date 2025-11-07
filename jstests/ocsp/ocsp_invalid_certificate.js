@@ -2,16 +2,8 @@
 // @tags: [requires_http_client, requires_ocsp_stapling]
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {
-    FAULT_REVOKED,
-    MockOCSPServer,
-    OCSP_DELEGATE_RESPONDER
-} from "jstests/ocsp/lib/mock_ocsp.js";
-import {
-    OCSP_CA_PEM,
-    OCSP_SERVER_CERT_INVALID,
-    supportsStapling
-} from "jstests/ocsp/lib/ocsp_helpers.js";
+import {FAULT_REVOKED, MockOCSPServer, OCSP_DELEGATE_RESPONDER} from "jstests/ocsp/lib/mock_ocsp.js";
+import {OCSP_CA_PEM, OCSP_SERVER_CERT_INVALID, supportsStapling} from "jstests/ocsp/lib/ocsp_helpers.js";
 
 if (!supportsStapling()) {
     quit();
@@ -44,9 +36,9 @@ ReplSetTest.kDefaultTimeoutMS = 2 * 60 * 1000;
 MongoRunner.runHangAnalyzer.disable();
 
 const ocsp_options = {
-    sslMode: "requireSSL",
-    sslPEMKeyFile: OCSP_SERVER_CERT_INVALID,
-    sslCAFile: OCSP_CA_PEM,
+    tlsMode: "requireTLS",
+    tlsCertificateKeyFile: OCSP_SERVER_CERT_INVALID,
+    tlsCAFile: OCSP_CA_PEM,
     setParameter: {
         "ocspEnabled": "true",
         "tlsOCSPStaplingTimeoutSecs": 1,
@@ -64,8 +56,7 @@ const rstest = new ReplSetTest({
 try {
     rstest.startSet();
     rstest.initiate();
-} catch (e) {
-}
+} catch (e) {}
 
 // Though the replicaset is unhealthy, assert that all of the nodes are still be alive
 rstest.nodes.forEach((node) => {
@@ -75,6 +66,5 @@ rstest.nodes.forEach((node) => {
 // Finally, try to shutdown the set, but accept that it might not be healthy enough to do so.
 try {
     rstest.stopSet(15);
-} catch (e) {
-}
+} catch (e) {}
 mock_ocsp.stop();

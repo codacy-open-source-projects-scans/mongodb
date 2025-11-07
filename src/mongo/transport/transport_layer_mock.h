@@ -29,10 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <functional>
-#include <memory>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/config.h"  // IWYU pragma: keep
@@ -44,6 +40,7 @@
 #include "mongo/transport/transport_layer.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/net/ssl_options.h"
@@ -51,8 +48,13 @@
 #include "mongo/util/net/ssl_types.h"
 #include "mongo/util/time_support.h"
 
+#include <functional>
+#include <memory>
+
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
-namespace transport {
+namespace MONGO_MOD_PUBLIC transport {
 
 /**
  * This TransportLayerMock is a noop TransportLayer implementation.
@@ -67,7 +69,7 @@ public:
         : _sessionManager(std::move(sm)) {}
     ~TransportLayerMock() override;
 
-    std::shared_ptr<Session> createSession(bool isFromRouterPort = false);
+    std::shared_ptr<Session> createSession();
     std::shared_ptr<Session> get(Session::Id id);
     bool owns(Session::Id id);
     void deleteSession(Session::Id id);
@@ -146,5 +148,5 @@ private:
     std::shared_ptr<SessionManager> _sessionManager;
 };
 
-}  // namespace transport
+}  // namespace MONGO_MOD_PUBLIC transport
 }  // namespace mongo

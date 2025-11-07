@@ -29,28 +29,31 @@
 
 #pragma once
 
-#include <boost/container/small_vector.hpp>
-#include <concepts>
-
+#include "mongo/bson/bson_comparator_interface_base.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonelementvalue.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/bsontypes_util.h"
+#include "mongo/bson/column/bson_element_storage.h"
 #include "mongo/bson/column/bsoncolumn_util.h"
+#include "mongo/bson/column/bsonobj_traversal.h"
 #include "mongo/bson/column/simple8b.h"
 #include "mongo/bson/column/simple8b_type_util.h"
-#include "mongo/bson/util/bsonobj_traversal.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
-namespace bsoncolumn {
+#include <concepts>
+
+#include <boost/container/small_vector.hpp>
+
+namespace mongo::bsoncolumn {
 
 /**
  * Interface for a buffer to receive decoded elements from block-based
  * BSONColumn decompression.
  */
 template <class T>
-concept Appendable = requires(
+concept Appendable MONGO_MOD_PUBLIC = requires(
     T& t, StringData strVal, BSONBinData binVal, BSONCode codeVal, BSONElement bsonVal, int32_t n) {
     t.append(true);
     t.append((int32_t)1);
@@ -114,12 +117,12 @@ concept Appendable = requires(
  * materializePreallocated() instead of materialize().
  */
 template <class T>
-concept Materializer = requires(T& t,
-                                BSONElementStorage& alloc,
-                                StringData strVal,
-                                BSONBinData binVal,
-                                BSONCode codeVal,
-                                BSONElement bsonVal) {
+concept Materializer MONGO_MOD_PUBLIC = requires(T& t,
+                                                 BSONElementStorage& alloc,
+                                                 StringData strVal,
+                                                 BSONBinData binVal,
+                                                 BSONCode codeVal,
+                                                 BSONElement bsonVal) {
     typename T::Element;
 
     { T::materialize(alloc, true) } -> std::same_as<typename T::Element>;
@@ -159,7 +162,7 @@ concept Materializer = requires(T& t,
     {
         T::compare(
             typename T::Element(), typename T::Element(), (const StringDataComparator*)nullptr)
-        } -> std::same_as<int>;
+    } -> std::same_as<int>;
 };
 
 /**
@@ -167,7 +170,7 @@ concept Materializer = requires(T& t,
  * to collect the position information of values within documents.
  */
 template <typename T>
-concept PositionInfoAppender = requires(T& t, int32_t n) {
+concept PositionInfoAppender MONGO_MOD_PUBLIC = requires(T& t, int32_t n) {
     { t.appendPositionInfo(n) } -> std::same_as<void>;
 };
 
@@ -201,12 +204,12 @@ public:
         size_t elemCount = 0;
         while (ptr < end) {
             uint8_t control = *ptr;
-            if (control == EOO || isUncompressedLiteralControlByte(control) ||
-                isInterleavedStartControlByte(control))
+            if (control == stdx::to_underlying(BSONType::eoo) ||
+                isUncompressedLiteralControlByte(control) || isInterleavedStartControlByte(control))
                 return ptr;
 
-            uassert(8873800,
-                    "Invalid control byte in BSON Column",
+            uassert(ErrorCodes::InvalidBSONColumn,
+                    "Invalid control byte in BSON Column while decompressing deltas",
                     bsoncolumn::scaleIndexForControlByte(control) ==
                         Simple8bTypeUtil::kMemoryAsInteger);
 
@@ -269,13 +272,13 @@ public:
         size_t elemCount = 0;
         while (ptr < end) {
             uint8_t control = *ptr;
-            if (control == EOO || isUncompressedLiteralControlByte(control) ||
-                isInterleavedStartControlByte(control))
+            if (control == stdx::to_underlying(BSONType::eoo) ||
+                isUncompressedLiteralControlByte(control) || isInterleavedStartControlByte(control))
                 return ptr;
 
             uint8_t size = numSimple8bBlocksForControlByte(control) * sizeof(uint64_t);
-            uassert(8762800,
-                    "Invalid control byte in BSON Column",
+            uassert(ErrorCodes::InvalidBSONColumn,
+                    "Invalid control byte in BSON Column while decompressing primitive deltas",
                     bsoncolumn::scaleIndexForControlByte(control) ==
                         Simple8bTypeUtil::kMemoryAsInteger);
 
@@ -330,13 +333,13 @@ public:
         size_t elemCount = 0;
         while (ptr < end) {
             uint8_t control = *ptr;
-            if (control == EOO || isUncompressedLiteralControlByte(control) ||
-                isInterleavedStartControlByte(control))
+            if (control == stdx::to_underlying(BSONType::eoo) ||
+                isUncompressedLiteralControlByte(control) || isInterleavedStartControlByte(control))
                 return ptr;
 
             uint8_t size = numSimple8bBlocksForControlByte(control) * sizeof(uint64_t);
-            uassert(8762801,
-                    "Invalid control byte in BSON Column",
+            uassert(ErrorCodes::InvalidBSONColumn,
+                    "Invalid control byte in BSON Column while decompressing delta-of-deltas",
                     bsoncolumn::scaleIndexForControlByte(control) ==
                         Simple8bTypeUtil::kMemoryAsInteger);
 
@@ -392,17 +395,19 @@ public:
         uint8_t scaleIndex = bsoncolumn::kInvalidScaleIndex;
         while (ptr < end) {
             uint8_t control = *ptr;
-            if (control == EOO || isUncompressedLiteralControlByte(control) ||
-                isInterleavedStartControlByte(control))
+            if (control == stdx::to_underlying(BSONType::eoo) ||
+                isUncompressedLiteralControlByte(control) || isInterleavedStartControlByte(control))
                 return ptr;
 
             uint8_t size = numSimple8bBlocksForControlByte(control) * sizeof(uint64_t);
             scaleIndex = bsoncolumn::scaleIndexForControlByte(control);
-            uassert(8762802,
-                    "Invalid control byte in BSON Column",
+            uassert(ErrorCodes::InvalidBSONColumn,
+                    "Invalid control byte in BSON Column while decompressing doubles",
                     scaleIndex != bsoncolumn::kInvalidScaleIndex);
             auto encodedDouble = Simple8bTypeUtil::encodeDouble(last, scaleIndex);
-            uassert(8295701, "Invalid double encoding in BSON Column", encodedDouble);
+            uassert(ErrorCodes::InvalidBSONColumn,
+                    "Invalid double encoding in BSON Column",
+                    encodedDouble);
             lastValue = *encodedDouble;
 
             elemCount += simple8b::visitAll<int64_t>(
@@ -433,13 +438,13 @@ public:
         size_t elemCount = 0;
         while (ptr < end) {
             const uint8_t control = *ptr;
-            if (control == EOO || isUncompressedLiteralControlByte(control) ||
-                isInterleavedStartControlByte(control))
+            if (control == stdx::to_underlying(BSONType::eoo) ||
+                isUncompressedLiteralControlByte(control) || isInterleavedStartControlByte(control))
                 break;
 
             uint8_t size = numSimple8bBlocksForControlByte(control) * sizeof(uint64_t);
-            uassert(8915000,
-                    "Invalid control byte in BSON Column",
+            uassert(ErrorCodes::InvalidBSONColumn,
+                    "Invalid control byte in BSON Column while decompressing missing values",
                     bsoncolumn::scaleIndexForControlByte(control) ==
                         Simple8bTypeUtil::kMemoryAsInteger);
 
@@ -495,13 +500,13 @@ public:
         size_t elemCount = 0;
         while (ptr < end) {
             const uint8_t control = *ptr;
-            if (control == EOO || isUncompressedLiteralControlByte(control) ||
-                isInterleavedStartControlByte(control))
+            if (control == stdx::to_underlying(BSONType::eoo) ||
+                isUncompressedLiteralControlByte(control) || isInterleavedStartControlByte(control))
                 break;
 
             uint8_t size = numSimple8bBlocksForControlByte(control) * sizeof(uint64_t);
-            uassert(8762803,
-                    "Invalid control byte in BSON Column",
+            uassert(ErrorCodes::InvalidBSONColumn,
+                    "Invalid control byte in BSON Column while decompressing literals",
                     bsoncolumn::scaleIndexForControlByte(control) ==
                         Simple8bTypeUtil::kMemoryAsInteger);
 
@@ -510,8 +515,9 @@ public:
                 size,
                 lastNonRLEBlock,
                 [&buffer](const Encoding v) {
-                    uassert(
-                        8609800, "Post literal delta blocks should only contain skip or 0", v == 0);
+                    uassert(ErrorCodes::InvalidBSONColumn,
+                            "Post literal delta blocks should only contain skip or 0",
+                            v == 0);
                     buffer.appendLast();
                 },
                 [&buffer]() { buffer.appendLast(); },
@@ -540,17 +546,17 @@ public:
 
         while (ptr < end) {
             uint8_t control = *ptr;
-            if (control == EOO || isUncompressedLiteralControlByte(control) ||
-                isInterleavedStartControlByte(control))
+            if (control == stdx::to_underlying(BSONType::eoo) ||
+                isUncompressedLiteralControlByte(control) || isInterleavedStartControlByte(control))
                 return ptr;
 
             uint8_t size = numSimple8bBlocksForControlByte(control) * sizeof(uint64_t);
-            uassert(9095623,
-                    "Invalid control byte in BSON Column",
+            uassert(ErrorCodes::InvalidBSONColumn,
+                    "Invalid control byte in BSON Column while reading last delta",
                     bsoncolumn::scaleIndexForControlByte(control) ==
                         Simple8bTypeUtil::kMemoryAsInteger);
 
-            out += simple8b::sum<Encoding>(ptr + 1, size, lastNonRLEBlock);
+            out = simple8b::add(out, simple8b::sum<Encoding>(ptr + 1, size, lastNonRLEBlock));
 
             ptr += 1 + size;
         }
@@ -565,17 +571,18 @@ public:
 
         while (ptr < end) {
             uint8_t control = *ptr;
-            if (control == EOO || isUncompressedLiteralControlByte(control) ||
-                isInterleavedStartControlByte(control))
+            if (control == stdx::to_underlying(BSONType::eoo) ||
+                isUncompressedLiteralControlByte(control) || isInterleavedStartControlByte(control))
                 return ptr;
 
             uint8_t size = numSimple8bBlocksForControlByte(control) * sizeof(uint64_t);
-            uassert(9095624,
-                    "Invalid control byte in BSON Column",
+            uassert(ErrorCodes::InvalidBSONColumn,
+                    "Invalid control byte in BSON Column while reading last delta-of-delta",
                     bsoncolumn::scaleIndexForControlByte(control) ==
                         Simple8bTypeUtil::kMemoryAsInteger);
 
-            out += simple8b::prefixSum<Encoding>(ptr + 1, size, prefix, lastNonRLEBlock);
+            out = simple8b::add(
+                out, simple8b::prefixSum<Encoding>(ptr + 1, size, prefix, lastNonRLEBlock));
 
             ptr += 1 + size;
         }
@@ -590,19 +597,22 @@ public:
 
         while (ptr < end) {
             uint8_t control = *ptr;
-            if (control == EOO || isUncompressedLiteralControlByte(control) ||
-                isInterleavedStartControlByte(control))
+            if (control == stdx::to_underlying(BSONType::eoo) ||
+                isUncompressedLiteralControlByte(control) || isInterleavedStartControlByte(control))
                 return ptr;
 
             uint8_t size = numSimple8bBlocksForControlByte(control) * sizeof(uint64_t);
             scaleIndex = bsoncolumn::scaleIndexForControlByte(control);
-            uassert(9095625,
-                    "Invalid control byte in BSON Column",
+            uassert(ErrorCodes::InvalidBSONColumn,
+                    "Invalid control byte in BSON Column while reading last double",
                     scaleIndex != bsoncolumn::kInvalidScaleIndex);
             auto encodedDouble = Simple8bTypeUtil::encodeDouble(last, scaleIndex);
-            uassert(9095626, "Invalid double encoding in BSON Column", encodedDouble);
+            uassert(ErrorCodes::InvalidBSONColumn,
+                    "Invalid double encoding in BSON Column while reading last double",
+                    encodedDouble);
             lastValue = *encodedDouble;
-            lastValue += simple8b::sum<int64_t>(ptr + 1, size, lastNonRLEBlock);
+            lastValue =
+                simple8b::add(lastValue, simple8b::sum<int64_t>(ptr + 1, size, lastNonRLEBlock));
 
             last = Simple8bTypeUtil::decodeDouble(lastValue, scaleIndex);
 
@@ -624,17 +634,18 @@ public:
         if (last) {
             while (ptr < end) {
                 uint8_t control = *ptr;
-                if (control == EOO || isUncompressedLiteralControlByte(control) ||
+                if (control == stdx::to_underlying(BSONType::eoo) ||
+                    isUncompressedLiteralControlByte(control) ||
                     isInterleavedStartControlByte(control))
                     return ptr;
 
                 uint8_t size = numSimple8bBlocksForControlByte(control) * sizeof(uint64_t);
-                uassert(9095627,
-                        "Invalid control byte in BSON Column",
+                uassert(ErrorCodes::InvalidBSONColumn,
+                        "Invalid control byte in BSON Column while reading last string",
                         bsoncolumn::scaleIndexForControlByte(control) ==
                             Simple8bTypeUtil::kMemoryAsInteger);
 
-                out += simple8b::sum<int128_t>(ptr + 1, size, lastNonRLEBlock);
+                out = simple8b::add(out, simple8b::sum<int128_t>(ptr + 1, size, lastNonRLEBlock));
 
                 ptr += 1 + size;
             }
@@ -642,7 +653,8 @@ public:
             int128_t lastNonZero{0};
             while (ptr < end) {
                 uint8_t control = *ptr;
-                if (control == EOO || isUncompressedLiteralControlByte(control) ||
+                if (control == stdx::to_underlying(BSONType::eoo) ||
+                    isUncompressedLiteralControlByte(control) ||
                     isInterleavedStartControlByte(control)) {
 
                     if (lastNonZero != 0) {
@@ -653,8 +665,8 @@ public:
 
 
                 uint8_t size = numSimple8bBlocksForControlByte(control) * sizeof(uint64_t);
-                uassert(9095628,
-                        "Invalid control byte in BSON Column",
+                uassert(ErrorCodes::InvalidBSONColumn,
+                        "Invalid control byte in BSON Column while reading last string",
                         bsoncolumn::scaleIndexForControlByte(control) ==
                             Simple8bTypeUtil::kMemoryAsInteger);
 
@@ -682,13 +694,13 @@ public:
         uint64_t lastNonRLEBlock = simple8b::kSingleZero;
         while (ptr < end) {
             const uint8_t control = *ptr;
-            if (control == EOO || isUncompressedLiteralControlByte(control) ||
-                isInterleavedStartControlByte(control))
+            if (control == stdx::to_underlying(BSONType::eoo) ||
+                isUncompressedLiteralControlByte(control) || isInterleavedStartControlByte(control))
                 break;
 
             uint8_t size = numSimple8bBlocksForControlByte(control) * sizeof(uint64_t);
-            uassert(9095629,
-                    "Invalid control byte in BSON Column",
+            uassert(ErrorCodes::InvalidBSONColumn,
+                    "Invalid control byte in BSON Column while validating literals",
                     bsoncolumn::scaleIndexForControlByte(control) ==
                         Simple8bTypeUtil::kMemoryAsInteger);
 
@@ -697,8 +709,9 @@ public:
                 size,
                 lastNonRLEBlock,
                 [](int64_t v) {
-                    uassert(
-                        9095630, "Post literal delta blocks should only contain skip or 0", v == 0);
+                    uassert(ErrorCodes::InvalidBSONColumn,
+                            "Post literal delta blocks should only contain skip or 0",
+                            v == 0);
                 },
                 []() {},
                 []() {});
@@ -712,7 +725,7 @@ public:
     static bool containsScalars(const BSONObj& obj) {
         bool result = false;
         BSONObjTraversal{true,
-                         BSONType::Object,
+                         BSONType::object,
                          [](auto&&...) { return true; },
                          [&](auto&&...) {
                              result = true;
@@ -727,7 +740,7 @@ public:
 /**
  * Implements the "materializer" concept such that the output elements are BSONElements.
  */
-class BSONElementMaterializer {
+class MONGO_MOD_PUBLIC BSONElementMaterializer {
 public:
     using Element = BSONElement;
 
@@ -745,6 +758,8 @@ public:
 
     template <typename T>
     static BSONElement materialize(BSONElementStorage& allocator, BSONElement val) {
+        if (val.eoo())
+            return BSONElement();
         auto allocatedElem = allocator.allocate(val.type(), "", val.valuesize());
         memcpy(allocatedElem.value(), val.value(), val.valuesize());
         return allocatedElem.element();
@@ -826,63 +841,68 @@ private:
 template <>
 inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<bool>(
     BSONElementStorage& allocator, BSONElement val) {
-    dassert(val.type() == Bool, "materialize invoked with incorrect BSONElement type");
+    dassert(val.type() == BSONType::boolean, "materialize invoked with incorrect BSONElement type");
     return materialize(allocator, val.boolean());
 }
 
 template <>
 inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<int32_t>(
     BSONElementStorage& allocator, BSONElement val) {
-    dassert(val.type() == NumberInt, "materialize invoked with incorrect BSONElement type");
+    dassert(val.type() == BSONType::numberInt,
+            "materialize invoked with incorrect BSONElement type");
     return materialize(allocator, (int32_t)val._numberInt());
 }
 
 template <>
 inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<int64_t>(
     BSONElementStorage& allocator, BSONElement val) {
-    dassert(val.type() == NumberLong, "materialize invoked with incorrect BSONElement type");
+    dassert(val.type() == BSONType::numberLong,
+            "materialize invoked with incorrect BSONElement type");
     return materialize(allocator, (int64_t)val._numberLong());
 }
 
 template <>
 inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<double>(
     BSONElementStorage& allocator, BSONElement val) {
-    dassert(val.type() == NumberDouble, "materialize invoked with incorrect BSONElement type");
+    dassert(val.type() == BSONType::numberDouble,
+            "materialize invoked with incorrect BSONElement type");
     return materialize(allocator, val._numberDouble());
 }
 
 template <>
 inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<Decimal128>(
     BSONElementStorage& allocator, BSONElement val) {
-    dassert(val.type() == NumberDecimal, "materialize invoked with incorrect BSONElement type");
+    dassert(val.type() == BSONType::numberDecimal,
+            "materialize invoked with incorrect BSONElement type");
     return materialize(allocator, val._numberDecimal());
 }
 
 template <>
 inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<Date_t>(
     BSONElementStorage& allocator, BSONElement val) {
-    dassert(val.type() == Date, "materialize invoked with incorrect BSONElement type");
+    dassert(val.type() == BSONType::date, "materialize invoked with incorrect BSONElement type");
     return materialize(allocator, val.date());
 }
 
 template <>
 inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<Timestamp>(
     BSONElementStorage& allocator, BSONElement val) {
-    dassert(val.type() == bsonTimestamp, "materialize invoked with incorrect BSONElement type");
+    dassert(val.type() == BSONType::timestamp,
+            "materialize invoked with incorrect BSONElement type");
     return materialize(allocator, val.timestamp());
 }
 
 template <>
 inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<StringData>(
     BSONElementStorage& allocator, BSONElement val) {
-    dassert(val.type() == String, "materialize invoked with incorrect BSONElement type");
+    dassert(val.type() == BSONType::string, "materialize invoked with incorrect BSONElement type");
     return materialize(allocator, val.valueStringData());
 }
 
 template <>
 inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<BSONBinData>(
     BSONElementStorage& allocator, BSONElement val) {
-    dassert(val.type() == BinData, "materialize invoked with incorrect BSONElement type");
+    dassert(val.type() == BSONType::binData, "materialize invoked with incorrect BSONElement type");
     int len = 0;
     const char* data = val.binData(len);
     return materialize(allocator, BSONBinData(data, len, val.binDataType()));
@@ -891,23 +911,18 @@ inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<BSO
 template <>
 inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<BSONCode>(
     BSONElementStorage& allocator, BSONElement val) {
-    dassert(val.type() == Code, "materialize invoked with incorrect BSONElement type");
+    dassert(val.type() == BSONType::code, "materialize invoked with incorrect BSONElement type");
     return materialize(allocator, BSONCode(val.valueStringData()));
 }
 
 template <>
 inline BSONElementMaterializer::Element BSONElementMaterializer::materialize<OID>(
     BSONElementStorage& allocator, BSONElement val) {
-    dassert(val.type() == jstOID, "materialize invoked with incorrect BSONElement type");
+    dassert(val.type() == BSONType::oid, "materialize invoked with incorrect BSONElement type");
     return materialize(allocator, val.OID());
 }
 
-struct RootPath {
-    boost::container::small_vector<const char*, 1> elementsToMaterialize(BSONObj refObj) {
-        return {refObj.objdata()};
-    }
-};
-
+namespace internal {
 /**
  * Returns true if the given path is the root path. If it returns anything given the empty object,
  * then it's the root path.
@@ -916,6 +931,5 @@ template <class Path>
 bool isRootPath(Path& path) {
     return !path.elementsToMaterialize(BSONObj{}).empty();
 }
-
-}  // namespace bsoncolumn
-}  // namespace mongo
+}  // namespace internal
+}  // namespace mongo::bsoncolumn

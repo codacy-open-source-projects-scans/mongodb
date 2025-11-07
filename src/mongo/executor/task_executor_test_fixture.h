@@ -29,17 +29,17 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/executor/network_interface.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/log_test.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <memory>
+
+namespace MONGO_MOD_PUB mongo {
 namespace executor {
 
 class TaskExecutor;
@@ -118,4 +118,4 @@ private:
 };
 
 }  // namespace executor
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

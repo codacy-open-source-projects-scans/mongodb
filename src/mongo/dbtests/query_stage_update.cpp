@@ -31,9 +31,46 @@
  * This file tests the UpdateStage class
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/json.h"
+#include "mongo/db/client.h"
+#include "mongo/db/curop.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/exec/classic/collection_scan.h"
+#include "mongo/db/exec/classic/eof.h"
+#include "mongo/db/exec/classic/plan_stage.h"
+#include "mongo/db/exec/classic/queued_data_stage.h"
+#include "mongo/db/exec/classic/update_stage.h"
+#include "mongo/db/exec/classic/upsert_stage.h"
+#include "mongo/db/exec/classic/working_set.h"
+#include "mongo/db/exec/collection_scan_common.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/plan_stats.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/matcher/expression_with_placeholder.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/eof_node_type.h"
+#include "mongo/db/query/find_command.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/query/write_ops/update_request.h"
+#include "mongo/db/query/write_ops/write_ops_parsers.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/snapshot.h"
+#include "mongo/db/update/update_driver.h"
+#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/intrusive_counter.h"
+
 #include <cstddef>
 #include <map>
 #include <memory>
@@ -41,49 +78,9 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/json.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/client.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/curop.h"
-#include "mongo/db/db_raii.h"
-#include "mongo/db/dbdirectclient.h"
-#include "mongo/db/exec/collection_scan.h"
-#include "mongo/db/exec/collection_scan_common.h"
-#include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/exec/eof.h"
-#include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/exec/queued_data_stage.h"
-#include "mongo/db/exec/update_stage.h"
-#include "mongo/db/exec/upsert_stage.h"
-#include "mongo/db/exec/working_set.h"
-#include "mongo/db/matcher/expression_with_placeholder.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/query/canonical_query.h"
-#include "mongo/db/query/eof_node_type.h"
-#include "mongo/db/query/find_command.h"
-#include "mongo/db/query/plan_executor.h"
-#include "mongo/db/query/write_ops/update_request.h"
-#include "mongo/db/query/write_ops/write_ops_parsers.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/shard_role.h"
-#include "mongo/db/storage/snapshot.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/db/update/update_driver.h"
-#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace QueryStageUpdate {
@@ -143,7 +140,7 @@ public:
      * Uses a forward collection scan stage to get the docs, and populates 'out' with
      * the results.
      */
-    void getCollContents(const CollectionPtr& collection, std::vector<BSONObj>* out) {
+    void getCollContents(const CollectionAcquisition& collection, std::vector<BSONObj>* out) {
         WorkingSet ws;
 
         CollectionScanParams params;
@@ -151,7 +148,7 @@ public:
         params.tailable = false;
 
         std::unique_ptr<CollectionScan> scan(
-            new CollectionScan(_expCtx.get(), &collection, params, &ws, nullptr));
+            new CollectionScan(_expCtx.get(), collection, params, &ws, nullptr));
         while (!scan->isEOF()) {
             WorkingSetID id = WorkingSet::INVALID_ID;
             PlanStage::StageState state = scan->work(&id);
@@ -163,7 +160,7 @@ public:
         }
     }
 
-    void getRecordIds(const CollectionPtr& collection,
+    void getRecordIds(const CollectionAcquisition& collection,
                       CollectionScanParams::Direction direction,
                       std::vector<RecordId>* out) {
         WorkingSet ws;
@@ -173,7 +170,7 @@ public:
         params.tailable = false;
 
         std::unique_ptr<CollectionScan> scan(
-            new CollectionScan(_expCtx.get(), &collection, params, &ws, nullptr));
+            new CollectionScan(_expCtx.get(), collection, params, &ws, nullptr));
         while (!scan->isEOF()) {
             WorkingSetID id = WorkingSet::INVALID_ID;
             PlanStage::StageState state = scan->work(&id);
@@ -267,10 +264,14 @@ public:
 
         // Verify the contents of the resulting collection.
         {
-            AutoGetCollectionForReadCommand collection(&_opCtx, nss);
+            const auto collection =
+                acquireCollection(&_opCtx,
+                                  CollectionAcquisitionRequest::fromOpCtx(
+                                      &_opCtx, nss, AcquisitionPrerequisites::kRead),
+                                  MODE_IS);
 
             std::vector<BSONObj> objs;
-            getCollContents(collection.getCollection(), &objs);
+            getCollContents(collection, &objs);
 
             // Expect a single document, {_id: 0, x: 1, y: 2}.
             ASSERT_EQUALS(1U, objs.size());
@@ -306,7 +307,7 @@ public:
 
             // Get the RecordIds that would be returned by an in-order scan.
             std::vector<RecordId> recordIds;
-            getRecordIds(collection.getCollectionPtr(), CollectionScanParams::FORWARD, &recordIds);
+            getRecordIds(collection, CollectionScanParams::FORWARD, &recordIds);
 
             auto request = UpdateRequest();
             request.setNamespaceString(nss);
@@ -382,10 +383,14 @@ public:
 
         // Check the contents of the collection.
         {
-            AutoGetCollectionForReadCommand collection(&_opCtx, nss);
+            const auto collection =
+                acquireCollection(&_opCtx,
+                                  CollectionAcquisitionRequest::fromOpCtx(
+                                      &_opCtx, nss, AcquisitionPrerequisites::kRead),
+                                  MODE_IS);
 
             std::vector<BSONObj> objs;
-            getCollContents(collection.getCollection(), &objs);
+            getCollContents(collection, &objs);
 
             // Verify that the collection now has 9 docs (one was deleted).
             ASSERT_EQUALS(9U, objs.size());
@@ -431,7 +436,7 @@ public:
 
         // Get the RecordIds that would be returned by an in-order scan.
         std::vector<RecordId> recordIds;
-        getRecordIds(collection.getCollectionPtr(), CollectionScanParams::FORWARD, &recordIds);
+        getRecordIds(collection, CollectionScanParams::FORWARD, &recordIds);
 
         // Populate the request.
         request.setQuery(query);
@@ -488,7 +493,7 @@ public:
         // Should have done the update.
         BSONObj newDoc = BSON("_id" << targetDocIndex << "foo" << targetDocIndex << "x" << 0);
         std::vector<BSONObj> objs;
-        getCollContents(collection.getCollectionPtr(), &objs);
+        getCollContents(collection, &objs);
         ASSERT_BSONOBJ_EQ(objs[targetDocIndex], newDoc);
 
         // That should be it.
@@ -527,7 +532,7 @@ public:
 
         // Get the RecordIds that would be returned by an in-order scan.
         std::vector<RecordId> recordIds;
-        getRecordIds(collection.getCollectionPtr(), CollectionScanParams::FORWARD, &recordIds);
+        getRecordIds(collection, CollectionScanParams::FORWARD, &recordIds);
 
         // Populate the request.
         request.setQuery(query);
@@ -584,7 +589,7 @@ public:
 
         // Should have done the update.
         std::vector<BSONObj> objs;
-        getCollContents(collection.getCollectionPtr(), &objs);
+        getCollContents(collection, &objs);
         ASSERT_BSONOBJ_EQ(objs[targetDocIndex], newDoc);
 
         // That should be it.

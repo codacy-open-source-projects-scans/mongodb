@@ -1,6 +1,9 @@
 /*
  * Test that .min() and .max() queries properly handle the edge cases with NaN and Infinity.
  * Other edge cases are covered by C++ unit tests.
+ * @tags: [
+ *   requires_getmore,
+ * ]
  */
 const t = db.minmax_edge;
 
@@ -13,17 +16,15 @@ function verifyResultIds(results, expectedIds) {
     assert.eq(results.length, expectedIds.length);
 
     function compare(a, b) {
-        if (a._id < b._id)
-            return -1;
-        if (a._id > b._id)
-            return 1;
+        if (a._id < b._id) return -1;
+        if (a._id > b._id) return 1;
         return 0;
     }
 
     results.sort(compare);
     expectedIds.sort();
 
-    for (var i = 0; i < results.length; i++) {
+    for (let i = 0; i < results.length; i++) {
         assert.eq(results._id, expectedIds._ids);
     }
 }
@@ -76,14 +77,14 @@ verifyMin({a: {a: 1}}, indexSpec, []);
 verifyMax({a: {a: 1}}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
 
 // 'a' > all ints.
-verifyMin({a: 'a'}, indexSpec, []);
-verifyMax({a: 'a'}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+verifyMin({a: "a"}, indexSpec, []);
+verifyMax({a: "a"}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
 
 // Now with a compound index.
 reset(t);
 indexSpec = {
     a: 1,
-    b: -1
+    b: -1,
 };
 
 assert.commandWorked(t.createIndex(indexSpec));
@@ -101,8 +102,8 @@ verifyMax({a: -Infinity, b: 1}, indexSpec, []);
 verifyMin({a: {a: 1}, b: 1}, indexSpec, []);
 verifyMax({a: {a: 1}, b: 1}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
 
-verifyMin({a: 'a', b: 1}, indexSpec, []);
-verifyMax({a: 'a', b: 1}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+verifyMin({a: "a", b: 1}, indexSpec, []);
+verifyMax({a: "a", b: 1}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
 
 // Edge cases on b values
 verifyMin({a: 1, b: Infinity}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
@@ -125,13 +126,13 @@ verifyMax({a: 2, b: NaN}, indexSpec, [0, 1, 2, 3, 4, 5]);
 verifyMin({a: 2, b: {b: 1}}, indexSpec, [3, 4, 5, 6, 7, 8]);
 verifyMax({a: 2, b: {b: 1}}, indexSpec, [0, 1, 2]);
 
-verifyMin({a: 2, b: 'b'}, indexSpec, [3, 4, 5, 6, 7, 8]);
-verifyMax({a: 2, b: 'b'}, indexSpec, [0, 1, 2]);
+verifyMin({a: 2, b: "b"}, indexSpec, [3, 4, 5, 6, 7, 8]);
+verifyMax({a: 2, b: "b"}, indexSpec, [0, 1, 2]);
 
 // Test descending index.
 reset(t);
 indexSpec = {
-    a: -1
+    a: -1,
 };
 assert.commandWorked(t.createIndex(indexSpec));
 
@@ -147,14 +148,14 @@ verifyMax({a: -Infinity}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
 verifyMin({a: {a: 1}}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
 verifyMax({a: {a: 1}}, indexSpec, []);
 
-verifyMin({a: 'a'}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
-verifyMax({a: 'a'}, indexSpec, []);
+verifyMin({a: "a"}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+verifyMax({a: "a"}, indexSpec, []);
 
 // Now with a compound index.
 reset(t);
 indexSpec = {
     a: -1,
-    b: -1
+    b: -1,
 };
 assert.commandWorked(t.createIndex(indexSpec));
 
@@ -171,8 +172,8 @@ verifyMax({a: -Infinity, b: 1}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
 verifyMin({a: {a: 1}, b: 1}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
 verifyMax({a: {a: 1}, b: 1}, indexSpec, []);
 
-verifyMin({a: 'a', b: 1}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
-verifyMax({a: 'a', b: 1}, indexSpec, []);
+verifyMin({a: "a", b: 1}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7, 8]);
+verifyMax({a: "a", b: 1}, indexSpec, []);
 
 // Edge cases on b values.
 verifyMin({a: 1, b: Infinity}, indexSpec, [0, 1, 2]);
@@ -195,37 +196,37 @@ verifyMax({a: 2, b: NaN}, indexSpec, [3, 4, 5, 6, 7, 8]);
 verifyMin({a: 2, b: {b: 1}}, indexSpec, [3, 4, 5, 6, 7, 8]);
 verifyMax({a: 2, b: {b: 1}}, indexSpec, [0, 1, 2]);
 
-verifyMin({a: 2, b: 'b'}, indexSpec, [3, 4, 5, 6, 7, 8]);
-verifyMax({a: 2, b: 'b'}, indexSpec, [0, 1, 2]);
+verifyMin({a: 2, b: "b"}, indexSpec, [3, 4, 5, 6, 7, 8]);
+verifyMax({a: 2, b: "b"}, indexSpec, [0, 1, 2]);
 
 // Now a couple cases with an extra compound index.
 t.drop();
 indexSpec = {
     a: 1,
     b: -1,
-    c: 1
+    c: 1,
 };
 assert.commandWorked(t.createIndex(indexSpec));
 // The following documents are in order according to the index.
-t.insert({_id: 0, a: 1, b: 'b', c: 1});
-t.insert({_id: 1, a: 1, b: 'b', c: 2});
-t.insert({_id: 2, a: 1, b: 'a', c: 1});
-t.insert({_id: 3, a: 1, b: 'a', c: 2});
-t.insert({_id: 4, a: 2, b: 'b', c: 1});
-t.insert({_id: 5, a: 2, b: 'b', c: 2});
-t.insert({_id: 6, a: 2, b: 'a', c: 1});
-t.insert({_id: 7, a: 2, b: 'a', c: 2});
+t.insert({_id: 0, a: 1, b: "b", c: 1});
+t.insert({_id: 1, a: 1, b: "b", c: 2});
+t.insert({_id: 2, a: 1, b: "a", c: 1});
+t.insert({_id: 3, a: 1, b: "a", c: 2});
+t.insert({_id: 4, a: 2, b: "b", c: 1});
+t.insert({_id: 5, a: 2, b: "b", c: 2});
+t.insert({_id: 6, a: 2, b: "a", c: 1});
+t.insert({_id: 7, a: 2, b: "a", c: 2});
 
-verifyMin({a: 1, b: 'a', c: 1}, indexSpec, [2, 3, 4, 5, 6, 7]);
-verifyMin({a: 2, b: 'a', c: 2}, indexSpec, [7]);
-verifyMax({a: 1, b: 'a', c: 1}, indexSpec, [0, 1]);
-verifyMax({a: 2, b: 'a', c: 2}, indexSpec, [0, 1, 2, 3, 4, 5, 6]);
+verifyMin({a: 1, b: "a", c: 1}, indexSpec, [2, 3, 4, 5, 6, 7]);
+verifyMin({a: 2, b: "a", c: 2}, indexSpec, [7]);
+verifyMax({a: 1, b: "a", c: 1}, indexSpec, [0, 1]);
+verifyMax({a: 2, b: "a", c: 2}, indexSpec, [0, 1, 2, 3, 4, 5, 6]);
 
-verifyMin({a: Infinity, b: 'a', c: 2}, indexSpec, []);
-verifyMax({a: Infinity, b: 'a', c: 2}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7]);
+verifyMin({a: Infinity, b: "a", c: 2}, indexSpec, []);
+verifyMax({a: Infinity, b: "a", c: 2}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7]);
 
-verifyMin({a: -Infinity, b: 'a', c: 2}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7]);
-verifyMax({a: -Infinity, b: 'a', c: 2}, indexSpec, []);
+verifyMin({a: -Infinity, b: "a", c: 2}, indexSpec, [0, 1, 2, 3, 4, 5, 6, 7]);
+verifyMax({a: -Infinity, b: "a", c: 2}, indexSpec, []);
 
 // 'a' > Infinity, actually.
 verifyMin({a: 1, b: Infinity, c: 2}, indexSpec, [4, 5, 6, 7]);
@@ -235,8 +236,8 @@ verifyMax({a: 1, b: Infinity, c: 2}, indexSpec, [0, 1, 2, 3]);
 verifyMin({a: 1, b: -Infinity, c: 2}, indexSpec, [4, 5, 6, 7]);
 verifyMax({a: 1, b: -Infinity, c: 2}, indexSpec, [0, 1, 2, 3]);
 
-verifyMin({a: 1, b: 'a', c: Infinity}, indexSpec, [4, 5, 6, 7]);
-verifyMax({a: 1, b: 'a', c: Infinity}, indexSpec, [0, 1, 2, 3]);
+verifyMin({a: 1, b: "a", c: Infinity}, indexSpec, [4, 5, 6, 7]);
+verifyMax({a: 1, b: "a", c: Infinity}, indexSpec, [0, 1, 2, 3]);
 
-verifyMin({a: 1, b: 'a', c: -Infinity}, indexSpec, [2, 3, 4, 5, 6, 7]);
-verifyMax({a: 1, b: 'a', c: -Infinity}, indexSpec, [0, 1]);
+verifyMin({a: 1, b: "a", c: -Infinity}, indexSpec, [2, 3, 4, 5, 6, 7]);
+verifyMax({a: 1, b: "a", c: -Infinity}, indexSpec, [0, 1]);

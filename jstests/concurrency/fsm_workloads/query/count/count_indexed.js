@@ -16,17 +16,17 @@
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/query/count/count.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
-    $config.data.prefix = 'count_fsm';
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
+    $config.data.prefix = "count_fsm";
     $config.data.shardKey = {tid: 1, i: 1};
 
     $config.data.getCount = function getCount(db, predicate) {
-        var query = Object.extend({tid: this.tid}, predicate);
+        let query = Object.extend({tid: this.tid}, predicate);
         return db[this.threadCollName].find(query).hint({tid: 1, i: 1}).count();
     };
 
     $config.states.init = function init(db, collName) {
-        this.threadCollName = this.prefix + '_' + this.tid;
+        this.threadCollName = this.prefix + "_" + this.tid;
         $super.states.init.apply(this, arguments);
         assert.commandWorked(db[this.threadCollName].createIndex({tid: 1, i: 1}));
     };

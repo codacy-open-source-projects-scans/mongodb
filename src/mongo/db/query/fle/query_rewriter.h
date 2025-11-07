@@ -29,10 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/crypto/fle_crypto.h"
 #include "mongo/db/fle_crud.h"
@@ -42,9 +38,16 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/fle/encrypted_predicate.h"
 #include "mongo/db/query/fle/query_rewriter_interface.h"
+#include "mongo/db/query/fle/text_search_predicate.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::fle {
 /**
@@ -62,30 +65,31 @@ class QueryRewriter : public QueryRewriterInterface {
 public:
     /**
      * Takes in references to collection readers for the ESC that are used during tag
-     * computation.
+     * computation. Delegates to protected constructor with the appropriate EncryptedCollScanMode.
      */
     QueryRewriter(boost::intrusive_ptr<ExpressionContext> expCtx,
                   FLETagQueryInterface* tagQueryInterface,
                   const NamespaceString& nssEsc,
+                  const std::map<NamespaceString, NamespaceString>& escMap,
                   EncryptedCollScanModeAllowed mode = EncryptedCollScanModeAllowed::kAllow)
-        : _expCtx(expCtx),
-          _exprRewrites(aggPredicateRewriteMap),
-          _matchRewrites(matchPredicateRewriteMap),
-          _nssEsc(nssEsc),
-          _tagQueryInterface(tagQueryInterface) {
+        : QueryRewriter(std::move(expCtx),
+                        tagQueryInterface,
+                        nssEsc,
+                        aggPredicateRewriteMap,
+                        matchPredicateRewriteMap,
+                        escMap,
+                        [&]() {
+                            EncryptedCollScanMode modeResult{EncryptedCollScanMode::kUseIfNeeded};
 
-        if (internalQueryFLEAlwaysUseEncryptedCollScanMode.load()) {
-            _mode = EncryptedCollScanMode::kForceAlways;
-        }
+                            if (internalQueryFLEAlwaysUseEncryptedCollScanMode.load()) {
+                                modeResult = EncryptedCollScanMode::kForceAlways;
+                            }
 
-        if (mode == EncryptedCollScanModeAllowed::kDisallow) {
-            _mode = EncryptedCollScanMode::kDisallow;
-        }
-
-        // This isn't the "real" query so we don't want to increment Expression
-        // counters here.
-        _expCtx->stopExpressionCounters();
-    }
+                            if (mode == EncryptedCollScanModeAllowed::kDisallow) {
+                                modeResult = EncryptedCollScanMode::kDisallow;
+                            }
+                            return modeResult;
+                        }()) {}
 
     /**
      * Accepts a BSONObj holding a MatchExpression, and returns BSON representing the rewritten
@@ -128,26 +132,128 @@ public:
     }
 
     const NamespaceString& getESCNss() const override {
+        uassert(
+            10026006, "Invalid request of escNss for unencrypted collection", !_nssEsc.isEmpty());
         return _nssEsc;
+    }
+    /**
+     * createSubpipelineRewriter is used in the context of PipelineRewrite. When a sub-pipeline must
+     * be rewritten (i.e $lookup), this method uses its map of collection Ns to ESC metadata
+     * collection name to create a new QueryRewriter for the sub-pipeline.
+     */
+    QueryRewriter createSubpipelineRewriter(
+        const NamespaceString& collectionNss,
+        boost::intrusive_ptr<ExpressionContext> subpipelineExpCtx) {
+        tassert(9775501,
+                "createSubpipelineRewriter is not supported when feature flag is disabled",
+                feature_flags::gFeatureFlagLookupEncryptionSchemasFLE.isEnabled());
+
+        tassert(9775506, "Invalid subpipeline expression context", subpipelineExpCtx);
+        const auto iter = _escMap.find(collectionNss);
+        if (iter == _escMap.end()) {
+            /**
+             * If we couldn't find an entry in the _escMap, we ass pipeline which involves both QE
+             * collections and unencrypted collections. In this case, we provide an empty namespace
+             * string, which will lead to an error if we try to request for the esc collection for
+             * the sub-pipeline when rewriting to the tag disjunction. In the unlikely event that we
+             * try to rewrite to a runtime comparison, there will be no error, but the query
+             * expression in question won't be rewritten, which is the intended behavior.
+             */
+            return QueryRewriter(std::move(subpipelineExpCtx),
+                                 _tagQueryInterface,
+                                 NamespaceString(),
+                                 _exprRewrites,
+                                 _matchRewrites,
+                                 _escMap,
+                                 _mode);
+        }
+        uassert(10026007, "Unexpected empty nssEsc for QE schema", !iter->second.isEmpty());
+        return QueryRewriter(std::move(subpipelineExpCtx),
+                             _tagQueryInterface,
+                             iter->second,
+                             _exprRewrites,
+                             _matchRewrites,
+                             _escMap,
+                             _mode);
     }
 
 protected:
+    // Constructor that gets delegated to. This constructor is required so that
+    // createSubpipelineRewriter() can pass its exprRewrites and matchRewrites to the sub-pipeline's
+    // rewriter.
+    QueryRewriter(boost::intrusive_ptr<ExpressionContext> expCtx,
+                  FLETagQueryInterface* tagQueryInterface,
+                  const NamespaceString& nssEsc,
+                  const ExpressionToRewriteMap& exprRewrites,
+                  const MatchTypeToRewriteMap& matchRewrites,
+                  const std::map<NamespaceString, NamespaceString>& escMap,
+                  EncryptedCollScanMode mode)
+        : _expCtx(std::move(expCtx)),
+          _mode(mode),
+          _exprRewrites(exprRewrites),
+          _matchRewrites(matchRewrites),
+          _nssEsc(nssEsc),
+          _tagQueryInterface(tagQueryInterface),
+          _escMap(escMap) {
+
+        // This isn't the "real" query so we don't want to increment Expression
+        // counters here.
+        _expCtx->stopExpressionCounters();
+    }
+
     // This constructor should only be used for mocks in testing.
     QueryRewriter(boost::intrusive_ptr<ExpressionContext> expCtx,
                   const NamespaceString& nssEsc,
                   const ExpressionToRewriteMap& exprRewrites,
-                  const MatchTypeToRewriteMap& matchRewrites)
-        : _expCtx(expCtx),
+                  const MatchTypeToRewriteMap& matchRewrites,
+                  const std::map<NamespaceString, NamespaceString>& escMap)
+        : _expCtx(std::move(expCtx)),
           _exprRewrites(exprRewrites),
           _matchRewrites(matchRewrites),
           _nssEsc(nssEsc),
-          _tagQueryInterface(nullptr) {}
+          _tagQueryInterface(nullptr),
+          _escMap(escMap) {}
 
 private:
     /**
      * A single rewrite step, called recursively on child expressions.
      */
     std::unique_ptr<MatchExpression> _rewrite(MatchExpression* me);
+
+    /**
+     * Performs FLE rewrites of an aggregation expression under a match $expr, returns a new $expr
+     * wrapping the rewritten expression if a top level rewrite took place. Otherwise returns
+     * nullptr.
+     * This method updates _rewroteLastExpression if a rewrite took place which did not generate a
+     * top level rewrite, which ensures that we serialize the expression in rewriteMatchExpression
+     * to reflect the nested rewrites.
+     */
+    std::unique_ptr<MatchExpression> _rewriteExprMatchExpression(
+        ExprMatchExpression& exprMatchExpression);
+
+    /**
+     * We provide friendship to EncryptedTextSearchExpressionDetector so that it can access
+     * _getEncryptedTextSearchPredicate without having to expose this method as part of the public
+     * interface.
+     */
+    friend class EncryptedTextSearchExpressionDetector;
+
+    /**
+     * This method is required to facilitate unit testing the specific changes implemented to
+     * generate index scans for encrypted text search predicates. This requires that we expose the
+     * TextSearchPredicate name in this header. If we find this to be a problem, we can fix this by
+     * implementing our changes in the EncryptedPredicate interface instead, but that requires more
+     * plumbing changes.
+     *
+     * NOTE: It is only valid to call this method if _hasValidTextSearchPredicate() is true.
+     */
+    const TextSearchPredicate& _getEncryptedTextSearchPredicate() const;
+    bool _hasValidTextSearchPredicate() const;
+    bool _initializeTextSearchPredicate();
+
+    // _initializeTextSearchPredicateInternal() is only called from _initializeTextSearchPredicate,
+    // which guarantees that we never re-initialize our predicate.
+    virtual std::unique_ptr<TextSearchPredicate> _initializeTextSearchPredicateInternal() const;
 
     boost::intrusive_ptr<ExpressionContext> _expCtx;
 
@@ -159,7 +265,11 @@ private:
 
     const ExpressionToRewriteMap& _exprRewrites;
     const MatchTypeToRewriteMap& _matchRewrites;
-    const NamespaceString& _nssEsc;
+    const NamespaceString _nssEsc;
     FLETagQueryInterface* _tagQueryInterface;
+    // Map of collection Ns to ESC metadata collection name.
+    // Owned by caller. Lifetime must always exceed QueryRewriter.
+    const std::map<NamespaceString, NamespaceString>& _escMap;
+    std::unique_ptr<TextSearchPredicate> _textSearchPredicate;
 };
 }  // namespace mongo::fle

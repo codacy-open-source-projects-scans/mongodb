@@ -18,51 +18,17 @@
   - Query Execution
 10gen/query-integration:
   - Query Integration
-10gen/query-integration-analytic-extensions:
-  - Query Integration
-10gen/query-integration-fle:
-  - Query Integration
-10gen/query-integration-geo:
-  - Query Integration
-10gen/query-integration-javascript:
+10gen/query-integration-features:
   - Query Integration
 10gen/query-integration-observability:
   - Query Integration
 10gen/query-integration-search:
-  - Query Integration
-10gen/query-integration-search-testing:
   - Query Integration
 10gen/query-integration-staff-leads:
   - Query Integration
 10gen/query-integration-timeseries:
   - Query Integration
 10gen/query-optimization:
-  - Query Optimization
-10gen/query-optimization-golden-test:
-  - Query Optimization
-10gen/query-optimization-cost-model:
-  - Query Optimization
-10gen/query-optimization-statistics:
-  - Query Optimization
-10gen/query-optimization-explain:
-  - Query Optimization
-10gen/query-optimization-plan-cache:
-  - Query Optimization
-10gen/query-optimization-runtime-planners:
-  - Query Optimization
-10gen/query-optimization-parsers:
-  - Query Optimization
-10gen/query-optimization-logical-models:
-  - Query Optimization
-10gen/query-optimization-heuristic-rewrite:
-  - Query Optimization
-10gen/query-optimization-cardinality-estimation:
-  - Query Optimization
-10gen/query-optimization-planner:
-  - Query Optimization
-10gen/query-optimization-views:
-  - Query Optimization
-10gen/query-optimization-cluster-planning:
   - Query Optimization
 10gen/query-optimization-cost-based-ranker:
   - Query Optimization
@@ -78,13 +44,23 @@
   - Replication
 10gen/server-root-ownership: #Won't use
   - ~
-10gen/server-rss-sydney:
-  - RSS Sydney
+10gen/server-compact:
+  - Storage Engines Server Integration
+10gen/server-backup-restore:
+  - Storage Engines Server Integration
+10gen/server-dbcheck:
+  - Storage Engines Server Integration
+10gen/server-dbhash:
+  - Storage Engines Server Integration
+10gen/server-validate:
+  - Storage Engines Server Integration
+10gen/server-storage-engine-integration:
+  - Storage Engines Server Integration
 10gen/server-security:
   - Server Security
 10gen/server-storage-execution:
   - Storage Execution
-10gen/server-workload-scheduling:
+10gen/server-workload-resilience:
   - Workload Execution
 10gen/streams-engine:
   - Atlas Streams

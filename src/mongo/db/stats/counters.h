@@ -29,32 +29,31 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <cstdint>
-#include <fmt/format.h>
-#include <map>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/cluster_role.h"
-#include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/query/plan_executor.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/platform/basic.h"
 #include "mongo/rpc/message.h"
 #include "mongo/util/aligned.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
+
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/container/flat_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -164,7 +163,7 @@ private:
     void _reset();
 
     // Increment member `counter` by `n`, resetting all counters if it was > 2^60.
-    void _checkWrap(CacheExclusive<AtomicWord<long long>> OpCounters::*counter, int n);
+    void _checkWrap(CacheExclusive<AtomicWord<long long>> OpCounters::* counter, int n);
 
     CacheExclusive<AtomicWord<long long>> _insert;
     CacheExclusive<AtomicWord<long long>> _query;
@@ -194,14 +193,15 @@ extern OpCounters replOpCounters;
 
 class NetworkCounter {
 public:
+    enum class ConnectionType { kIngress = 1, kEgress = 2 };
     // Increment the counters for the number of bytes read directly off the wire
-    void hitPhysicalIn(long long bytes);
-    void hitPhysicalOut(long long bytes);
+    void hitPhysicalIn(ConnectionType connectionType, long long bytes);
+    void hitPhysicalOut(ConnectionType connectionType, long long bytes);
 
     // Increment the counters for the number of bytes passed out of the TransportLayer to the
     // server
-    void hitLogicalIn(long long bytes);
-    void hitLogicalOut(long long bytes);
+    void hitLogicalIn(ConnectionType connectionType, long long bytes);
+    void hitLogicalOut(ConnectionType connectionType, long long bytes);
 
     // Increment the counter for the number of slow dns resolution operations.
     void incrementNumSlowDNSOperations();
@@ -227,8 +227,11 @@ public:
     void append(BSONObjBuilder& b);
 
 private:
-    CacheExclusive<AtomicWord<long long>> _physicalBytesIn{0};
-    CacheExclusive<AtomicWord<long long>> _physicalBytesOut{0};
+    CacheExclusive<AtomicWord<long long>> _ingressPhysicalBytesIn{0};
+    CacheExclusive<AtomicWord<long long>> _ingressPhysicalBytesOut{0};
+
+    CacheExclusive<AtomicWord<long long>> _egressPhysicalBytesIn{0};
+    CacheExclusive<AtomicWord<long long>> _egressPhysicalBytesOut{0};
 
     // These two counters are always incremented at the same time, so
     // we place them on the same cache line. We use
@@ -240,9 +243,12 @@ private:
         AtomicWord<long long> logicalBytesIn{0};
         AtomicWord<long long> requests{0};
     };
-    CacheCombinedExclusive<Together> _together{};
 
-    CacheExclusive<AtomicWord<long long>> _logicalBytesOut{0};
+    CacheCombinedExclusive<Together> _ingressTogether{};
+    CacheExclusive<AtomicWord<long long>> _ingressLogicalBytesOut{0};
+
+    CacheCombinedExclusive<Together> _egressTogether{};
+    CacheExclusive<AtomicWord<long long>> _egressLogicalBytesOut{0};
 
     CacheExclusive<AtomicWord<long long>> _numSlowDNSOperations{0};
     CacheExclusive<AtomicWord<long long>> _numSlowSSLOperations{0};
@@ -437,27 +443,94 @@ public:
 };
 extern FastPathQueryCounters fastPathQueryCounters;
 
-class LookupPushdownCounters {
+class SpillingCounters {
 public:
-    LookupPushdownCounters() = default;
+    enum SuffixStyle { kDotSuffix, kUpperCaseSuffix };
+
+    SpillingCounters(std::string stageName, SuffixStyle suffixStyle = kDotSuffix)
+        : spills(
+              *MetricBuilder<Counter64>{"query." + stageName + _getSuffix(suffixStyle, "spills")}),
+          spilledBytes(*MetricBuilder<Counter64>{"query." + stageName +
+                                                 _getSuffix(suffixStyle, "spilledBytes")}),
+          spilledRecords(*MetricBuilder<Counter64>{"query." + stageName +
+                                                   _getSuffix(suffixStyle, "spilledRecords")}),
+          spilledDataStorageSize(*MetricBuilder<Counter64>{
+              "query." + stageName + _getSuffix(suffixStyle, "spilledDataStorageSize")}) {}
+
+    SpillingCounters(SpillingCounters&) = delete;
+    SpillingCounters& operator=(const SpillingCounters&) = delete;
+
+    virtual ~SpillingCounters() = default;
+
+    void incrementPerSpilling(int64_t spills,
+                              int64_t spilledBytes,
+                              int64_t spilledRecords,
+                              int64_t spilledDataStorageSize) {
+        this->spills.incrementRelaxed(spills);
+        this->spilledBytes.incrementRelaxed(spilledBytes);
+        this->spilledRecords.incrementRelaxed(spilledRecords);
+        this->spilledDataStorageSize.incrementRelaxed(spilledDataStorageSize);
+    }
+
+    // The total number of spills.
+    Counter64& spills;
+    // The total number of bytes spilled. The spilled storage size after compression might be
+    // different from the bytes spilled.
+    Counter64& spilledBytes;
+    // The number of records spilled.
+    Counter64& spilledRecords;
+    // The size of the file or RecordStore spilled to disk, updated after all spilling happened.
+    Counter64& spilledDataStorageSize;
+
+private:
+    std::string _getSuffix(SuffixStyle suffixStyle, std::string metricName) {
+        switch (suffixStyle) {
+            case kDotSuffix:
+                return "." + metricName;
+            case kUpperCaseSuffix:
+                return "S" + metricName.substr(1);
+        }
+        MONGO_UNREACHABLE_TASSERT(10916900);
+    }
+};
+
+class LookupPushdownCounters : public SpillingCounters {
+public:
+    LookupPushdownCounters()
+        : SpillingCounters("lookup.hashLookup", SpillingCounters::kUpperCaseSuffix) {}
     LookupPushdownCounters(LookupPushdownCounters&) = delete;
     LookupPushdownCounters& operator=(const LookupPushdownCounters&) = delete;
 
-    void incrementLookupCountersPerQuery(int nestedLoopJoin, int indexedLoopJoin, int hashLookup) {
+    void incrementLookupCountersPerQuery(int nestedLoopJoin,
+                                         int indexedLoopJoin,
+                                         int hashLookup,
+                                         int dynamicIndexedLoopJoin) {
         nestedLoopJoinCounter.incrementRelaxed(nestedLoopJoin);
         indexedLoopJoinCounter.incrementRelaxed(indexedLoopJoin);
         hashLookupCounter.incrementRelaxed(hashLookup);
+        dynamicIndexedLoopJoinCounter.incrementRelaxed(dynamicIndexedLoopJoin);
     }
 
-    void incrementLookupCountersPerSpilling(int64_t spillToDisk, int64_t spillToDiskBytes) {
-        hashLookupSpillToDisk.incrementRelaxed(spillToDisk);
-        hashLookupSpillToDiskBytes.incrementRelaxed(spillToDiskBytes);
+    void incrementPerSpilling(int64_t spills,
+                              int64_t spilledBytes,
+                              int64_t spilledRecords,
+                              int64_t spilledDataStorageSize) {
+        SpillingCounters::incrementPerSpilling(
+            spills, spilledBytes, spilledRecords, spilledDataStorageSize);
+
+        //  Counters for backward compatiblity.
+        hashLookupSpillToDisk.incrementRelaxed(spills);
+        hashLookupSpillToDiskBytes.incrementRelaxed(spilledBytes);
     }
 
     // Counters for lookup join strategies.
     Counter64& nestedLoopJoinCounter = *MetricBuilder<Counter64>{"query.lookup.nestedLoopJoin"};
     Counter64& indexedLoopJoinCounter = *MetricBuilder<Counter64>{"query.lookup.indexedLoopJoin"};
     Counter64& hashLookupCounter = *MetricBuilder<Counter64>{"query.lookup.hashLookup"};
+    Counter64& dynamicIndexedLoopJoinCounter =
+        *MetricBuilder<Counter64>{"query.lookup.dynamicIndexedLoopJoin"};
+
+    // Duplicate spilling counters, not deleted to maintain backward compatibility.
     // Counter tracking hashLookup spills in lookup stages that get pushed down.
     Counter64& hashLookupSpillToDisk =
         *MetricBuilder<Counter64>{"query.lookup.hashLookupSpillToDisk"};
@@ -467,88 +540,45 @@ public:
 };
 extern LookupPushdownCounters lookupPushdownCounters;
 
-class SortCounters {
-public:
-    void incrementSortCountersPerQuery(int64_t bytesSorted, int64_t keysSorted) {
-        sortTotalBytesCounter.incrementRelaxed(bytesSorted);
-        sortTotalKeysCounter.incrementRelaxed(keysSorted);
-    }
-
-    void incrementSortCountersPerSpilling(int64_t sortSpills, int64_t sortSpillBytes) {
-        sortSpillsCounter.incrementRelaxed(sortSpills);
-        sortSpillBytesCounter.incrementRelaxed(sortSpillBytes);
-    }
-
-    // Counters tracking sort stats across all engines
-    // The total number of spills from sort stages
-    Counter64& sortSpillsCounter = *MetricBuilder<Counter64>{"query.sort.spillToDisk"};
-    // The total bytes spilled. This is the storage size after compression.
-    Counter64& sortSpillBytesCounter = *MetricBuilder<Counter64>{"query.sort.spillToDiskBytes"};
-    // The number of keys that we've sorted.
-    Counter64& sortTotalKeysCounter = *MetricBuilder<Counter64>{"query.sort.totalKeysSorted"};
-    // The amount of data we've sorted in bytes
-    Counter64& sortTotalBytesCounter = *MetricBuilder<Counter64>{"query.sort.totalBytesSorted"};
-};
-extern SortCounters sortCounters;
-
 /** Counters tracking group stats across all execution engines. */
-class GroupCounters {
+class GroupCounters : public SpillingCounters {
 public:
-    GroupCounters() = default;
+    GroupCounters() : SpillingCounters("group") {}
     GroupCounters(GroupCounters&) = delete;
-    GroupCounters& operator=(const GroupCounters&) = delete;
-
-    void incrementGroupCountersPerSpilling(int64_t spills,
-                                           int64_t spilledBytes,
-                                           int64_t spilledRecords) {
-        groupSpills.incrementRelaxed(spills);
-        groupSpilledBytes.incrementRelaxed(spilledBytes);
-        groupSpilledRecords.incrementRelaxed(spilledRecords);
-    }
-
-    void incrementGroupCountersPerQuery(int64_t spilledDataStorageSize) {
-        groupSpilledDataStorageSize.incrementRelaxed(spilledDataStorageSize);
-    }
-
-    // The total number of spills from group stages.
-    Counter64& groupSpills = *MetricBuilder<Counter64>{"query.group.spills"};
-    // The total number of bytes spilled from group stages. The spilled stroage size after
-    // compression might be different from the bytes spilled.
-    Counter64& groupSpilledBytes = *MetricBuilder<Counter64>{"query.group.spilledBytes"};
-    // The number of records spilled.
-    Counter64& groupSpilledRecords = *MetricBuilder<Counter64>{"query.group.spilledRecords"};
-    // The size of the file or RecordStore spilled to disk, updated after all spilling happened.
-    Counter64& groupSpilledDataStorageSize =
-        *MetricBuilder<Counter64>{"query.group.spilledDataStorageSize"};
 };
 extern GroupCounters groupCounters;
 
 /** Counters tracking setWindowFields stats across all execution engines. */
-class SetWindowFieldsCounters {
+class SetWindowFieldsCounters : public SpillingCounters {
 public:
-    SetWindowFieldsCounters() = default;
-    SetWindowFieldsCounters(SetWindowFieldsCounters&) = delete;
-    SetWindowFieldsCounters& operator=(const SetWindowFieldsCounters&) = delete;
-
-    void incrementSetWindowFieldsCountersPerSpilling(int64_t spills,
-                                                     int64_t spilledBytes,
-                                                     int64_t spilledRecords) {
-        setWindowFieldsSpills.incrementRelaxed(spills);
-        setWindowFieldsSpilledBytes.incrementRelaxed(spilledBytes);
-        setWindowFieldsSpilledRecords.incrementRelaxed(spilledRecords);
-    }
-
-    // Counter tracking setWindowFields spills.
-    Counter64& setWindowFieldsSpills = *MetricBuilder<Counter64>{"query.setWindowFields.spills"};
-    // Counter tracking setWindowFields spilled bytes. The spilled storage size after compression
-    // might be different from the bytes spilled.
-    Counter64& setWindowFieldsSpilledBytes =
-        *MetricBuilder<Counter64>{"query.setWindowFields.spilledBytes"};
-    // Counter tracking setWindowFields spilled record number.
-    Counter64& setWindowFieldsSpilledRecords =
-        *MetricBuilder<Counter64>{"query.setWindowFields.spilledRecords"};
+    SetWindowFieldsCounters() : SpillingCounters("setWindowFields") {}
 };
 extern SetWindowFieldsCounters setWindowFieldsCounters;
+
+/** Counters tracking graphLookup stats. */
+class GraphLookupCounters : public SpillingCounters {
+public:
+    GraphLookupCounters() : SpillingCounters("graphLookup") {}
+};
+extern GraphLookupCounters graphLookupCounters;
+
+class TextOrCounters : public SpillingCounters {
+public:
+    TextOrCounters() : SpillingCounters("textOr") {}
+};
+extern TextOrCounters textOrCounters;
+
+class BucketAutoCounters : public SpillingCounters {
+public:
+    BucketAutoCounters() : SpillingCounters("bucketAuto") {}
+};
+extern BucketAutoCounters bucketAutoCounters;
+
+class GeoNearCounters : public SpillingCounters {
+public:
+    GeoNearCounters() : SpillingCounters("geoNear") {}
+};
+extern GeoNearCounters geoNearCounters;
 
 /**
  * A common class which holds various counters related to Classic and SBE plan caches.
@@ -575,6 +605,18 @@ public:
         classicReplanned.incrementRelaxed();
     }
 
+    void incrementClassicReplannedPlanIsCachedPlanCounter() {
+        classicReplannedPlanIsCachedPlan.incrementRelaxed();
+    }
+
+    void incrementClassicCachedPlansEvictedCounter(size_t increment) {
+        classicCachedPlansEvicted.incrementRelaxed(increment);
+    }
+
+    void incrementClassicInactiveCachedPlansReplacedCounter() {
+        classicInactiveCachedPlansReplaced.incrementRelaxed();
+    }
+
     void incrementSbeHitsCounter() {
         sbeHits.incrementRelaxed();
     }
@@ -591,6 +633,18 @@ public:
         sbeReplanned.incrementRelaxed();
     }
 
+    void incrementSbeReplannedPlanIsCachedPlanCounter() {
+        sbeReplannedPlanIsCachedPlan.incrementRelaxed();
+    }
+
+    void incrementSbeCachedPlansEvictedCounter(size_t increment) {
+        sbeCachedPlansEvicted.incrementRelaxed(increment);
+    }
+
+    void incrementSbeInactiveCachedPlansReplacedCounter() {
+        sbeInactiveCachedPlansReplaced.incrementRelaxed();
+    }
+
 private:
     static Counter64& _makeMetric(std::string name) {
         return *MetricBuilder<Counter64>("query.planCache." + std::move(name));
@@ -599,17 +653,26 @@ private:
     // Counters that track the number of times a query plan is:
     // a) found in the cache (hits),
     // b) not found in cache (misses), or
-    // c) not considered for caching hence we don't even look for it in the cache (skipped).
-    // d) failed to finish trial run within budget, so we decided to replan it (replanned).
+    // c) not considered for caching hence we don't even look for it in the cache (skipped);
+    // d) failed to finish trial run within budget, so we decided to replan it (replanned);
+    // e) replanned only to produce the same plan as what's in the plan cache.
     // Split into classic and SBE, depending on which execution engine is used.
     Counter64& classicHits = _makeMetric("classic.hits");
     Counter64& classicMisses = _makeMetric("classic.misses");
     Counter64& classicSkipped = _makeMetric("classic.skipped");
     Counter64& classicReplanned = _makeMetric("classic.replanned");
+    Counter64& classicReplannedPlanIsCachedPlan =
+        _makeMetric("classic.replanned_plan_is_cached_plan");
+    Counter64& classicCachedPlansEvicted = _makeMetric("classic.cached_plans_evicted");
+    Counter64& classicInactiveCachedPlansReplaced =
+        _makeMetric("classic.inactive_cached_plans_replaced");
     Counter64& sbeHits = _makeMetric("sbe.hits");
     Counter64& sbeMisses = _makeMetric("sbe.misses");
     Counter64& sbeSkipped = _makeMetric("sbe.skipped");
     Counter64& sbeReplanned = _makeMetric("sbe.replanned");
+    Counter64& sbeReplannedPlanIsCachedPlan = _makeMetric("sbe.replanned_plan_is_cached_plan");
+    Counter64& sbeCachedPlansEvicted = _makeMetric("sbe.cached_plans_evicted");
+    Counter64& sbeInactiveCachedPlansReplaced = _makeMetric("sbe.inactive_cached_plans_replaced");
 };
 extern PlanCacheCounters planCacheCounters;
 
@@ -637,6 +700,55 @@ private:
     // Map of expressions to the number of occurrences in queries.
     StringMap<Counter64*> _counters;
 };
+
+class TimeseriesCounters {
+public:
+    TimeseriesCounters() = default;
+    TimeseriesCounters(TimeseriesCounters&) = delete;
+    TimeseriesCounters& operator=(const TimeseriesCounters&) = delete;
+
+    void incrementDirectDeleted() {
+        directDeleted.incrementRelaxed();
+    }
+
+    void incrementDirectUpdated() {
+        directUpdated.incrementRelaxed();
+    }
+
+    void incrementMeasurementDelete() {
+        measurementDelete.incrementRelaxed();
+    }
+
+    void incrementMeasurementUpdate() {
+        measurementUpdate.incrementRelaxed();
+    }
+
+    void incrementMetaDelete() {
+        metaDelete.incrementRelaxed();
+    }
+
+    void incrementMetaUpdate() {
+        metaUpdate.incrementRelaxed();
+    }
+
+    // Number of direct writes to bucket documents from all kinds of external and internal
+    // operations. Only counts operations that commit a write to storage.
+    Counter64& directDeleted = *MetricBuilder<Counter64>{"timeseries.directDeleted"};
+    Counter64& directUpdated = *MetricBuilder<Counter64>{"timeseries.directUpdated"};
+
+    // Number of user deletes performed at measurement level.
+    Counter64& measurementDelete = *MetricBuilder<Counter64>{"timeseries.measurementDelete"};
+
+    // Number of user updates.
+    Counter64& measurementUpdate = *MetricBuilder<Counter64>{"timeseries.measurementUpdate"};
+
+    // Number of user deletes performed at bucket level.
+    Counter64& metaDelete = *MetricBuilder<Counter64>{"timeseries.metaDelete"};
+
+    // Number of user updates performed at bucket level.
+    Counter64& metaUpdate = *MetricBuilder<Counter64>{"timeseries.metaUpdate"};
+};
+extern TimeseriesCounters timeseriesCounters;
 
 class ValidatorCounters {
 public:
@@ -702,7 +814,7 @@ extern OperatorCounters operatorCountersWindowAccumulatorExpressions;
 struct QueryCounters {
 private:
     static Counter64& _makeCounter(StringData name, ClusterRole role) {
-        return *MetricBuilder<Counter64>{format(FMT_STRING("query.{}"), name)}.setRole(role);
+        return *MetricBuilder<Counter64>{fmt::format("query.{}", name)}.setRole(role);
     }
 
     ClusterRole _role;

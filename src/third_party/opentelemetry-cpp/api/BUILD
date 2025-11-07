@@ -42,6 +42,11 @@ mongo_cc_library(
         ":abi_version_no_1": ["OPENTELEMETRY_ABI_VERSION_NO=1"],
         ":abi_version_no_2": ["OPENTELEMETRY_ABI_VERSION_NO=2"],
     }),
+    includes = [
+        # Any target depending on "//src/third_party/opentelemetry-cpp/api" also gets
+        # "src/third_party/opentelemetry-cpp/api/include" added to the include path.
+        "include",
+    ],
     strip_include_prefix = "include",
     tags = ["api"],
     target_compatible_with = OTEL_TARGET_COMPATIBLE_WITH,
@@ -60,12 +65,6 @@ config_setting(
     name = "set_cxx_stdlib_best_and_msvc",
     constraint_values = ["@bazel_tools//tools/cpp:msvc"],
     flag_values = {":with_cxx_stdlib": "best"},
-)
-
-bool_flag(
-    name = "with_abseil",
-    build_setting_default = False,
-    deprecation = "The value of this flag is ignored. Bazel builds always depend on Abseil for its pre-adopted `std::` types. You should remove this flag from your build command.",
 )
 
 int_flag(

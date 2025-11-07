@@ -14,6 +14,10 @@ import yaml
 
 LOGGER = structlog.get_logger(__name__)
 
+BURN_IN_TASK_PREFIX = "burn_in:"
+BURN_IN_VARIANT_SUFFIX = "-generated-by-burn-in-tags"
+GEN_TASK_SUFFIX = "_gen"
+
 CPU_COUNT = psutil.cpu_count()
 PLATFORM_MACHINE = platform.machine()
 SYS_PLATFORM = sys.platform
@@ -28,6 +32,22 @@ SYS_PLATFORM = sys.platform
 # which means if the task has been split to run in sub-tasks, an extra "_0", "_1", ... will be
 # appended to the task name. For this reason, most task names should end with a ".*".
 
+# Task factor overrides common to several {A,UB}SAN variants.
+_AUBSAN_TASK_FACTOR_OVERRIDES = [
+    {"task": r"bulk_write_targeted_override.*", "factor": 0.25},
+    {"task": r".*causally_consistent_jscore_passthrough.*", "factor": 0.25},
+    {"task": r"change_streams_mongos_sessions_passthrough", "factor": 0.25},
+    {"task": r"fcv_upgrade_downgrade_sharded_collections_jscore_passthrough", "factor": 0.25},
+    {"task": r"fcv_upgrade_downgrade_sharding_jscore_passthrough", "factor": 0.25},
+    {"task": r"noPassthrough", "factor": 0.25},
+    {"task": r"sharded_causally_consistent_jscore_passthrough", "factor": 0.125},
+    {"task": "sharded_causally_consistent_read_concern_snapshot_passthrough", "factor": 0.25},
+    {
+        "task": r"sharding_jscore_passthrough.*",
+        "factor": 0.25,
+    },
+    {"task": r"sharding_kill_stepdown_terminate_jscore_passthrough", "factor": 0.125},
+]
 # Apply factor for a task based on the build variant it is running on.
 VARIANT_TASK_FACTOR_OVERRIDES = {
     "enterprise-rhel-8-64-bit": [{"task": r"logical_session_cache_replication.*", "factor": 0.75}],
@@ -40,7 +60,8 @@ VARIANT_TASK_FACTOR_OVERRIDES = {
         # as otherwise TSAN variants occasionally run out of memory
         # Non-TSAN variants don't need this adjustment as they have a reasonable free memory margin
         {"task": r"fcv_upgrade_downgrade_sharded_collections_jscore_passthrough.*", "factor": 0.27},
-        {"task": r"shard.*uninitialized_fcv_jscore_passthrough.*", "factor": 0.125},
+        {"task": r"sharding_kill_stepdown_terminate_jscore_passthrough.*", "factor": 0.125},
+        {"task": r"bulk_write_targeted_override.*", "factor": 0.25},
     ],
     "enterprise-rhel8-debug-tsan-all-feature-flags": [
         # Lower the default resmoke_jobs_factor for TSAN to reduce memory pressure for this suite,
@@ -52,13 +73,50 @@ VARIANT_TASK_FACTOR_OVERRIDES = {
             "factor": 0.125,
         },
         {"task": r"fcv_upgrade_downgrade_replica_sets_jscore_passthrough.*", "factor": 0.27},
-        {"task": r"shard.*uninitialized_fcv_jscore_passthrough.*", "factor": 0.125},
+        {"task": r"sharding_kill_stepdown_terminate_jscore_passthrough.*", "factor": 0.125},
     ],
-    "rhel8-debug-aubsan-classic-engine": [
-        {"task": r"shard.*uninitialized_fcv_jscore_passthrough.*", "factor": 0.25}
-    ],
-    "rhel8-debug-aubsan-all-feature-flags": [
-        {"task": r"shard.*uninitialized_fcv_jscore_passthrough.*", "factor": 0.25}
+    "rhel8-debug-aubsan-classic-engine": _AUBSAN_TASK_FACTOR_OVERRIDES,
+    "rhel8-debug-aubsan-all-feature-flags": _AUBSAN_TASK_FACTOR_OVERRIDES,
+    "rhel8-debug-aubsan": _AUBSAN_TASK_FACTOR_OVERRIDES,
+    "linux-debug-aubsan-compile-grpc": _AUBSAN_TASK_FACTOR_OVERRIDES,
+    "enterprise-rhel-8-64-bit-dynamic-debug-mode": [
+        {"task": "aggregation_one_shard_sharded_collections", "factor": 0.25},
+        {"task": "aggregation_sharded_collections_causally_consistent_passthrough", "factor": 0.25},
+        {"task": "aggregation_sharded_collections_passthrough", "factor": 0.25},
+        {
+            "task": "aggregation_unsplittable_collections_on_random_shard_passthrough",
+            "factor": 0.25,
+        },
+        {
+            "task": "aggregation_unsplittable_collections_on_random_shard_passthrough_with_config_transitions_and_add_remove_shard",
+            "factor": 0.25,
+        },
+        {"task": "fcv_upgrade_downgrade_sharded_collections_jscore_passthrough", "factor": 0.25},
+        {"task": "fcv_upgrade_downgrade_sharding_jscore_passthrough", "factor": 0.25},
+        {"task": "fle2_sharding", "factor": 0.25},
+        {"task": "fle2_sharding_high_cardinality", "factor": 0.25},
+        {"task": "sharded_causally_consistent_jscore_passthrough", "factor": 0.25},
+        {"task": "sharded_causally_consistent_read_concern_snapshot_passthrough", "factor": 0.25},
+        {"task": "sharded_collections_causally_consistent_jscore_txns_passthrough", "factor": 0.25},
+        {"task": "sharded_collections_jscore_passthrough", "factor": 0.25},
+        {"task": "sharded_collections_jscore_passthrough_with_config_shard", "factor": 0.25},
+        {
+            "task": "sharded_collections_jscore_passthrough_with_config_transitions_and_add_remove_shard",
+            "factor": 0.25,
+        },
+        {"task": "sharded_multi_stmt_txn_jscore_passthrough", "factor": 0.25},
+        {"task": "sharding_api_version_jscore_passthrough", "factor": 0.25},
+        {"task": "sharding_jscore_passthrough", "factor": 0.25},
+        {"task": "sharding_jscore_passthrough_with_config_shard", "factor": 0.25},
+        {"task": "sharding_jscore_passthrough_with_balancer", "factor": 0.25},
+        {
+            "task": "sharding_jscore_passthrough_with_config_transitions_and_add_remove_shard",
+            "factor": 0.25,
+        },
+        {
+            "task": "unsplittable_collections_created_on_any_shard_jscore_passthrough",
+            "factor": 0.25,
+        },
     ],
     "enterprise-windows-all-feature-flags-required": [{"task": "noPassthrough", "factor": 0.5}],
     "enterprise-windows-all-feature-flags-non-essential": [
@@ -68,6 +126,11 @@ VARIANT_TASK_FACTOR_OVERRIDES = {
     "windows-debug-suggested": [{"task": "noPassthrough", "factor": 0.5}],
     "windows": [{"task": "noPassthrough", "factor": 0.5}],
 }
+
+# Copy the task factor overrides for 'toolchain-v5'
+VARIANT_TASK_FACTOR_OVERRIDES["enterprise-rhel8-debug-tsan-all-feature-flags-toolchain-v5"] = (
+    VARIANT_TASK_FACTOR_OVERRIDES["enterprise-rhel8-debug-tsan-all-feature-flags"]
+)
 
 TASKS_FACTORS = [{"task": r"replica_sets.*", "factor": 0.5}, {"task": r"sharding.*", "factor": 0.5}]
 
@@ -94,24 +157,41 @@ GLOBAL_TASK_FACTOR_OVERRIDES = {
     r"replica_sets_reconfig_jscore_passthrough.*": 0.25,
     r"replica_sets_reconfig_jscore_stepdown_passthrough.*": 0.25,
     r"replica_sets_reconfig_kill_primary_jscore_passthrough.*": 0.25,
+    r"replica_sets_transition_to_csrs_jscore_passthrough.*": 0.25,
     r"sharded_causally_consistent_jscore_passthrough.*": 0.75,
     r"sharded_collections_jscore_passthrough.*": 0.75,
     r"shard.*uninitialized_fcv_jscore_passthrough.*": 0.25,
 }
 
 
-def get_original_task_name(task_name):
+def get_original_task_name(task_name, variant_name):
     """
+    Return the original task name.
+
     The task name after going through the task generator may have the form
-    /<task name>_[0-9]+-<platform>/. This function returns the original task
-    name.
+    /<task name>_[0-9]+-<platform>/ or /burn_in:<task name>_gen-<variant>_[0-9]+/
 
-    For example, "sharding_0-linux-debug" -> "sharding".
+    For example, "sharding_0-linux-debug" -> "sharding" or
+    "burn_in:sharding_gen-enterprise-amazon-linux2023-arm64-all-feature-flags-generated-by-burn-in-tags_0" -> "sharding".
     """
-    return re.compile("_[0-9]+").split(task_name)[0]
+    return (
+        re.compile("_[0-9]+")
+        .split(task_name)[0]
+        .removeprefix(BURN_IN_TASK_PREFIX)
+        .removesuffix(f"{GEN_TASK_SUFFIX}-{variant_name}")
+    )
 
 
-def global_task_factor(generated_task_name, overrides, factor):
+def get_original_variant_name(variant_name):
+    """
+    Return the original variant name.
+
+    For example, "amazon-linux2023-generated-by-burn-in-tags" -> "amazon-linux2023".
+    """
+    return variant_name.removesuffix(BURN_IN_VARIANT_SUFFIX)
+
+
+def global_task_factor(task_name, overrides, factor):
     """
     Check for a global task override and return factor.
 
@@ -120,7 +200,6 @@ def global_task_factor(generated_task_name, overrides, factor):
     :param factor: Default factor if there is no override.
     :return: Factor that should be used based on global overrides.
     """
-    task_name = get_original_task_name(generated_task_name)
     for task_re, task_factor in overrides.items():
         if re.compile(task_re).search(task_name):
             return task_factor
@@ -128,9 +207,8 @@ def global_task_factor(generated_task_name, overrides, factor):
     return factor
 
 
-def get_task_factor(generated_task_name, overrides, override_type, factor):
+def get_task_factor(task_name, overrides, override_type, factor):
     """Check for task override and return factor."""
-    task_name = get_original_task_name(generated_task_name)
     for task_override in overrides.get(override_type, []):
         if re.compile(task_override["task"]).search(task_name):
             return task_override["factor"]
@@ -190,9 +268,9 @@ def maybe_override_num_jobs_on_required(task_name, variant, jobs):
         "concurrency_sharded": 0.25,
         "concurrency.*simultaneous": 0.5,
         "replica_sets.*passthrough": 1,
-        "sharded_collections.*with_config_transitions": 2,
+        "sharded_collections.*with_config_transitions_and_add_remove_shard": 2,
         "^sharding_.*jscore_passthrough$": 1,
-        "^sharding_.*passthrough.*with_config_transitions": 2,
+        "^sharding_.*passthrough.*with_config_transitions_and_add_remove_shard": 2,
         "sharding_jscore_passthrough_with_balancer": 1,
         "^search(_auth)?$": 0.5,
         "fuzzer.*deterministic": 1,
@@ -204,13 +282,14 @@ def maybe_override_num_jobs_on_required(task_name, variant, jobs):
         "unsplittable_collections_created_on_any_shard_jscore_passthrough": 0.5,
     }
 
-    if (
-        variant != "enterprise-amazon-linux2-arm64-all-feature-flags"
-        and variant != "linux-64-debug-required"
+    if variant in (
+        "enterprise-amazon-linux2023-arm64-all-feature-flags",
+        "enterprise-amazon-linux2023-arm64-all-feature-flags-toolchain-v5",
     ):
-        LOGGER.info(f"Variant '{variant}' cannot have its jobs increased. Keeping {jobs} jobs.")
-        return jobs
-    elif variant == "linux-64-debug-required":
+        all_factors |= {
+            "search_no_pinned_connections_auth": 0.5,
+        }
+    elif variant in ("linux-64-debug-required", "linux-64-debug-required-toolchain-v5"):
         all_factors |= {
             "^noPassthrough$": 0.5,
             "read_concern_linearizable_passthrough": 1,
@@ -218,9 +297,8 @@ def maybe_override_num_jobs_on_required(task_name, variant, jobs):
             "sharding_csrs_continuous_config_stepdown": 1,
         }
     else:
-        all_factors |= {
-            "search_no_pinned_connections_auth": 0.5,
-        }
+        LOGGER.info(f"Variant '{variant}' cannot have its jobs increased. Keeping {jobs} jobs.")
+        return jobs
 
     factor = global_task_factor(task_name, all_factors, -1)
 
@@ -297,10 +375,18 @@ def main():
         cpu_count=CPU_COUNT,
     )
 
-    jobs = determine_jobs(
-        options.task, options.variant, options.distro, options.jobs_max, options.jobs_factor
+    original_task = get_original_task_name(options.task, options.variant)
+    original_variant = get_original_variant_name(options.variant)
+    LOGGER.info(
+        "Original task and variant names",
+        original_task=original_task,
+        original_variant=original_variant,
     )
-    jobs = maybe_override_num_jobs_on_required(options.task, options.variant, jobs)
+
+    jobs = determine_jobs(
+        original_task, original_variant, options.distro, options.jobs_max, options.jobs_factor
+    )
+    jobs = maybe_override_num_jobs_on_required(original_task, original_variant, jobs)
 
     if jobs < CPU_COUNT:
         print("Reducing number of jobs to run from {} to {}".format(CPU_COUNT, jobs))

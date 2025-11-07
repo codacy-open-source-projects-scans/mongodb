@@ -27,28 +27,28 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr.hpp>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/exec/projection_executor_builder.h"
 
 #include "mongo/base/exact_cast.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/exec/exclusion_projection_executor.h"
 #include "mongo/db/exec/inclusion_projection_executor.h"
-#include "mongo/db/exec/projection_executor_builder.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_find_internal.h"
 #include "mongo/db/pipeline/field_path.h"
-#include "mongo/db/query/projection_ast.h"
-#include "mongo/db/query/projection_ast_path_tracking_visitor.h"
-#include "mongo/db/query/projection_ast_visitor.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_ast.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_ast_path_tracking_visitor.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_ast_visitor.h"
 #include "mongo/db/query/tree_walker.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::projection_executor {
 namespace {

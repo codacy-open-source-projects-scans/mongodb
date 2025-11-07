@@ -28,30 +28,34 @@
  */
 
 // IWYU pragma: no_include "cxxabi.h"
+#include "mongo/client/remote_command_retry_scheduler.h"
+
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/client/retry_strategy.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/net/hostandport.h"
+#include "mongo/util/str.h"
+
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <utility>
 
-#include "mongo/base/status_with.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/client/remote_command_retry_scheduler.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/destructor_guard.h"
-#include "mongo/util/net/hostandport.h"
-#include "mongo/util/str.h"
-
 namespace mongo {
+namespace {
+MONGO_FAIL_POINT_DEFINE(shutdownBeforeSendingRetryCommand);
+}
 
 RemoteCommandRetryScheduler::RemoteCommandRetryScheduler(
     executor::TaskExecutor* executor,
     const executor::RemoteCommandRequest& request,
     const executor::TaskExecutor::RemoteCommandCallbackFn& callback,
-    std::unique_ptr<RetryPolicy> retryPolicy)
+    std::unique_ptr<mongo::RetryStrategy> retryStrategy)
     : _executor(executor),
       _request(request),
       _callback(callback),
-      _retryPolicy(std::move(retryPolicy)) {
+      _retryStrategy(std::move(retryStrategy)) {
     uassert(ErrorCodes::BadValue, "task executor cannot be null", executor);
     uassert(ErrorCodes::BadValue,
             "source in remote command request cannot be empty",
@@ -63,19 +67,16 @@ RemoteCommandRetryScheduler::RemoteCommandRetryScheduler(
             "command object in remote command request cannot be empty",
             !request.cmdObj.isEmpty());
     uassert(ErrorCodes::BadValue, "remote command callback function cannot be null", callback);
-    uassert(ErrorCodes::BadValue, "retry policy cannot be null", _retryPolicy);
-    uassert(ErrorCodes::BadValue,
-            "policy max attempts cannot be zero",
-            _retryPolicy->getMaximumAttempts() != 0);
-    uassert(ErrorCodes::BadValue,
-            "policy max response elapsed total cannot be negative",
-            !(_retryPolicy->getMaximumResponseElapsedTotal() !=
-                  executor::RemoteCommandRequest::kNoTimeout &&
-              _retryPolicy->getMaximumResponseElapsedTotal() < Milliseconds(0)));
+    uassert(ErrorCodes::BadValue, "retry strategy cannot be null", _retryStrategy);
 }
 
 RemoteCommandRetryScheduler::~RemoteCommandRetryScheduler() {
-    DESTRUCTOR_GUARD(shutdown(); join(););
+    try {
+        shutdown();
+        join();
+    } catch (...) {
+        reportFailedDestructor(MONGO_SOURCE_LOCATION());
+    }
 }
 
 bool RemoteCommandRetryScheduler::isActive() const {
@@ -132,6 +133,9 @@ void RemoteCommandRetryScheduler::shutdown() {
         remoteCommandCallbackHandle = _remoteCommandCallbackHandle;
     }
 
+    // Cancel the sleep operation
+    _cancellationSource.cancel();
+
     invariant(remoteCommandCallbackHandle.isValid());
     _executor->cancel(remoteCommandCallbackHandle);
 }
@@ -152,7 +156,6 @@ std::string RemoteCommandRetryScheduler::toString() const {
         output << " callbackHandle.cancelled: " << _remoteCommandCallbackHandle.isCanceled();
     }
     output << " attempt: " << _currentAttempt;
-    output << " retryPolicy: " << _retryPolicy->toString();
     return output;
 }
 
@@ -173,37 +176,62 @@ void RemoteCommandRetryScheduler::_remoteCommandCallback(
     const executor::TaskExecutor::RemoteCommandCallbackArgs& rcba) {
     const auto& status = rcba.response.status;
 
-    // Use a lambda to avoid unnecessary lock acquisition when checking conditions for termination.
-    auto getCurrentAttempt = [this]() {
-        stdx::lock_guard<stdx::mutex> lock(_mutex);
-        return _currentAttempt;
-    };
-
-    if (status.isOK() || status == ErrorCodes::CallbackCanceled ||
-        !_retryPolicy->shouldRetryOnError(status.code()) ||
-        getCurrentAttempt() == _retryPolicy->getMaximumAttempts()) {
+    if (status.isOK()) {
+        {
+            auto _ = stdx::lock_guard{_mutex};
+            _retryStrategy->recordSuccess(rcba.request.target);
+        }
         _onComplete(rcba);
         return;
     }
 
-    // TODO(benety): Check cumulative elapsed time of failed responses received against retry
-    // policy. Requires SERVER-24067.
-    auto scheduleStatus = [this]() {
+    auto retryDelay = [&]() -> boost::optional<Milliseconds> {
+        auto _ = stdx::lock_guard{_mutex};
+        auto shouldRetry =
+            _retryStrategy->recordFailureAndEvaluateShouldRetry(status, rcba.request.target, {});
+        return shouldRetry ? boost::make_optional(_retryStrategy->getNextRetryDelay())
+                           : boost::none;
+    }();
+    bool shouldRetry = retryDelay.has_value();
+
+    if (MONGO_unlikely(shutdownBeforeSendingRetryCommand.shouldFail())) {
+        shutdown();
+    }
+
+    if (!shouldRetry || status == ErrorCodes::CallbackCanceled) {
+        _onComplete(rcba);
+        return;
+    }
+
+    // TODO(benety): Check cumulative elapsed time of failed responses received
+    // against retry policy. Requires SERVER-24067.
+    auto scheduleCommand = [this]() -> Status {
         stdx::lock_guard<stdx::mutex> lock(_mutex);
         if (State::kShuttingDown == _state) {
             return Status(ErrorCodes::CallbackCanceled,
                           "scheduler was shut down before retrying command");
         }
         return _schedule_inlock();
-    }();
+    };
 
-    if (!scheduleStatus.isOK()) {
-        _onComplete({rcba.executor,
-                     rcba.myHandle,
-                     rcba.request,
-                     executor::RemoteCommandResponse(rcba.request.target, scheduleStatus)});
-        return;
-    }
+    auto handleScheduleError = [this, rcba](const Status& scheduleStatus) {
+        if (!scheduleStatus.isOK()) {
+            _onComplete({rcba.executor,
+                         rcba.myHandle,
+                         rcba.request,
+                         executor::RemoteCommandResponse(rcba.request.target, scheduleStatus)});
+        }
+    };
+
+    _executor->sleepFor(*retryDelay, _cancellationSource.token())
+        .then([scheduleCommand, retryDelay = *retryDelay, this] {
+            {
+                auto _ = stdx::lock_guard{_mutex};
+                _retryStrategy->recordBackoff(retryDelay);
+            }
+            return scheduleCommand();
+        })
+        .getAsync(handleScheduleError);
 }
 
 void RemoteCommandRetryScheduler::_onComplete(

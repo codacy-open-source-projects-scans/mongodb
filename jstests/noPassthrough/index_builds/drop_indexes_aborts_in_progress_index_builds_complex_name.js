@@ -6,7 +6,7 @@
  * In this file, we test calling "dropIndexes" with a complex index name whose index build is
  * in-progress.
  */
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const mongodOptions = {};
 const conn = MongoRunner.runMongod(mongodOptions);
@@ -29,8 +29,9 @@ assert.commandWorked(testDB.getCollection(collName).insert({b: 1}));
 
 IndexBuildTest.pauseIndexBuilds(testDB.getMongo());
 
-const awaitIndexBuild = IndexBuildTest.startIndexBuild(
-    testDB.getMongo(), coll.getFullName(), {a: 1, b: 1}, {}, [ErrorCodes.IndexBuildAborted]);
+const awaitIndexBuild = IndexBuildTest.startIndexBuild(testDB.getMongo(), coll.getFullName(), {a: 1, b: 1}, {}, [
+    ErrorCodes.IndexBuildAborted,
+]);
 IndexBuildTest.waitForIndexBuildToScanCollection(testDB, collName, "a_1_b_1");
 
 const awaitDropIndex = startParallelShell(() => {

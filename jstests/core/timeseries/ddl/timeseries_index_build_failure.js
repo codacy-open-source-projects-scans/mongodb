@@ -7,6 +7,7 @@
  *   requires_timeseries,
  * ]
  */
+import {createRawTimeseriesIndex} from "jstests/core/libs/raw_operation_utils.js";
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 
 TimeseriesTest.run((insert) => {
@@ -14,17 +15,17 @@ TimeseriesTest.run((insert) => {
     coll.drop();
 
     const timeFieldName = "time";
-    assert.commandWorked(
-        db.createCollection(coll.getName(), {timeseries: {timeField: timeFieldName}}));
+    assert.commandWorked(db.createCollection(coll.getName(), {timeseries: {timeField: timeFieldName}}));
 
     for (let i = 0; i < 10; i++) {
-        assert.commandWorked(insert(coll, {
-            _id: i,
-            measurement: "measurement",
-            time: ISODate(),
-        }));
+        assert.commandWorked(
+            insert(coll, {
+                _id: i,
+                measurement: "measurement",
+                time: ISODate(),
+            }),
+        );
     }
 
-    const bucketColl = db.getCollection("system.buckets." + coll.getName());
-    assert.commandFailedWithCode(bucketColl.createIndex({"control.min.time": "2dsphere"}), 16755);
+    assert.commandFailedWithCode(createRawTimeseriesIndex(coll, {"control.min.time": "2dsphere"}), 16755);
 });

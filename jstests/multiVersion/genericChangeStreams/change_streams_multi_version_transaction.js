@@ -13,7 +13,7 @@ function getChangeStreamResults(cursor, n) {
         assert.soon(() => cursor.hasNext(), "Timed out waiting for change stream result " + i);
         results.push(cursor.next());
     }
-    assert(!cursor.hasNext());  // The change stream should always have exactly 'n' results.
+    assert(!cursor.hasNext()); // The change stream should always have exactly 'n' results.
     return results;
 }
 
@@ -27,6 +27,10 @@ function compareChanges(expectedChanges, observedChanges) {
             assert.eq(expectedChanges[i].fullDocument, observedChanges[i].fullDocument);
         }
         if (expectedChanges[i].hasOwnProperty("updateDescription")) {
+            // Need to remove this field because it is only exposed by default in v8.2.0,
+            // but in previous versions and versions >= v8.2.1 it is only exposed when the change stream is opened with
+            // '{showExpandedEvents: true}'.
+            delete observedChanges[i].updateDescription.disambiguatedPaths;
             assert.eq(expectedChanges[i].updateDescription, observedChanges[i].updateDescription);
         }
         if (expectedChanges[i].hasOwnProperty("documentKey")) {
@@ -60,7 +64,7 @@ function performDBOps(mongod) {
 // Resume a change stream from each of the resume tokens in the 'changeStreamDocs' array and
 // verify that we always see the same set of changes.
 function resumeChangeStreamFromEachToken(mongod, changeStreamDocs, expectedChanges) {
-    changeStreamDocs.forEach(function(changeDoc, i) {
+    changeStreamDocs.forEach(function (changeDoc, i) {
         const testDB = mongod.getDB(dbName);
         const resumedCursor = testDB[watchedCollName].watch([], {resumeAfter: changeDoc._id});
 
@@ -69,7 +73,8 @@ function resumeChangeStreamFromEachToken(mongod, changeStreamDocs, expectedChang
         const expectedChangesAfterResumeToken = expectedChanges.slice(i + 1);
         compareChanges(
             expectedChangesAfterResumeToken,
-            getChangeStreamResults(resumedCursor, expectedChangesAfterResumeToken.length));
+            getChangeStreamResults(resumedCursor, expectedChangesAfterResumeToken.length),
+        );
     });
 }
 
@@ -91,11 +96,7 @@ function runTest(downgradeVersion) {
     const changeStreamCursor = rst.getPrimary().getDB(dbName)[watchedCollName].watch();
     performDBOps(rst.getPrimary());
 
-    // Starting with MongoDB 4.8 we expect update descriptions to include truncatedArrays.
-    const updateDescription = {updatedFields: {a: 1}, removedFields: []};
-    if (MongoRunner.compareBinVersions(downgradeVersion, "4.8") >= 0) {
-        updateDescription.truncatedArrays = [];
-    }
+    const updateDescription = {updatedFields: {a: 1}, removedFields: [], truncatedArrays: []};
 
     const expectedChanges = [
         {operationType: "insert", fullDocument: {_id: 2}},
@@ -116,8 +117,7 @@ function runTest(downgradeVersion) {
 
     // Upgrade the featureCompatibilityVersion and verify that we can correctly resume from any
     // resume token.
-    assert.commandWorked(
-        rst.getPrimary().adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
+    assert.commandWorked(rst.getPrimary().adminCommand({setFeatureCompatibilityVersion: latestFCV, confirm: true}));
     checkFCV(rst.getPrimary().getDB("admin"), latestFCV);
     resumeChangeStreamFromEachToken(rst.getPrimary(), changeStreamDocs, expectedChanges);
 

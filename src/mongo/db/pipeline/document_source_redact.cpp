@@ -27,17 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <cstddef>
-#include <iterator>
-#include <list>
-#include <memory>
-#include <utility>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <boost/utility/in_place_factory.hpp>
+#include "mongo/db/pipeline/document_source_redact.h"
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
@@ -45,12 +35,21 @@
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
 #include "mongo/db/pipeline/document_source_match.h"
-#include "mongo/db/pipeline/document_source_redact.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <cstddef>
+#include <iterator>
+#include <list>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <boost/utility/in_place_factory.hpp>
 
 namespace mongo {
 
@@ -61,34 +60,24 @@ DocumentSourceRedact::DocumentSourceRedact(const intrusive_ptr<ExpressionContext
                                            const intrusive_ptr<Expression>& expression,
                                            Variables::Id currentId)
     : DocumentSource(kStageName, expCtx),
-      _redactProcessor(boost::in_place(expCtx, expression, currentId)) {}
+      _redactProcessor(std::make_shared<RedactProcessor>(expCtx, expression, currentId)) {}
 
 REGISTER_DOCUMENT_SOURCE(redact,
                          LiteParsedDocumentSourceDefault::parse,
                          DocumentSourceRedact::createFromBson,
                          AllowedWithApiStrict::kAlways);
+ALLOCATE_DOCUMENT_SOURCE_ID(redact, DocumentSourceRedact::id)
 
 const char* DocumentSourceRedact::getSourceName() const {
-    return kStageName.rawData();
+    return kStageName.data();
 }
 
 static const Value descendVal = Value("descend"_sd);
 static const Value pruneVal = Value("prune"_sd);
 static const Value keepVal = Value("keep"_sd);
 
-DocumentSource::GetNextResult DocumentSourceRedact::doGetNext() {
-    auto nextInput = pSource->getNext();
-    for (; nextInput.isAdvanced(); nextInput = pSource->getNext()) {
-        if (boost::optional<Document> result =
-                _redactProcessor->process(nextInput.releaseDocument())) {
-            return std::move(*result);
-        }
-    }
-    return nextInput;
-}
-
-Pipeline::SourceContainer::iterator DocumentSourceRedact::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator DocumentSourceRedact::doOptimizeAt(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     invariant(*itr == this);
 
     if (std::next(itr) == container->end()) {
@@ -104,9 +93,9 @@ Pipeline::SourceContainer::iterator DocumentSourceRedact::doOptimizeAt(
             // Because R-M turns into M-R-M without modifying the original $match, we cannot step
             // backwards and optimize from before the $redact, otherwise this will just loop and
             // create an infinite number of $matches.
-            Pipeline::SourceContainer::iterator returnItr = std::next(itr);
+            DocumentSourceContainer::iterator returnItr = std::next(itr);
 
-            container->insert(itr, DocumentSourceMatch::create(redactSafePortion, pExpCtx));
+            container->insert(itr, DocumentSourceMatch::create(redactSafePortion, getExpCtx()));
 
             return returnItr;
         }

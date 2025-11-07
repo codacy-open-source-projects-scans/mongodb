@@ -27,19 +27,9 @@
  *    it in the license file.
  */
 
-#include "pinned_connection_task_executor.h"
+#include "mongo/executor/pinned_connection_task_executor.h"
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <fmt/format.h>
-#include <functional>
-#include <tuple>
-#include <type_traits>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/client/async_client.h"
@@ -49,6 +39,17 @@
 #include "mongo/util/future_impl.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/scoped_unlock.h"  // IWYU pragma: keep
+
+#include <functional>
+#include <tuple>
+#include <type_traits>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <fmt/format.h>
 
 namespace mongo::executor {
 /**
@@ -255,11 +256,12 @@ ExecutorFuture<void> PinnedConnectionTaskExecutor::_ensureStream(
     }
 
     auto remote = _stream->getClient()->remote();
-    using namespace fmt::literals;
     invariant(
         target == remote,
-        "Attempted to schedule RPC to {} on TaskExecutor that had pinned connection to {}"_format(
-            target, remote));
+        fmt::format(
+            "Attempted to schedule RPC to {} on TaskExecutor that had pinned connection to {}",
+            target,
+            remote));
     return ExecutorFuture<void>(*_executor);
 }
 
@@ -439,7 +441,8 @@ void PinnedConnectionTaskExecutor::appendConnectionStats(ConnectionPoolStats* st
     MONGO_UNIMPLEMENTED;
 }
 
-void PinnedConnectionTaskExecutor::dropConnections(const HostAndPort& hostAndPort) {
+void PinnedConnectionTaskExecutor::dropConnections(const HostAndPort& target,
+                                                   const Status& status) {
     MONGO_UNIMPLEMENTED;
 }
 

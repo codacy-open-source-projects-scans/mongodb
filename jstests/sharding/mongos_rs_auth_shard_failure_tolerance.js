@@ -31,23 +31,23 @@ TestData.skipCheckMetadataConsistency = true;
 // Multiple users cannot be authenticated on one connection within a session.
 TestData.disableImplicitSessions = true;
 
-var options = {
+let options = {
     rs: true,
     rsOptions: {nodes: 2},
     keyFile: "jstests/libs/key1",
     // ShardingTest use a high config command timeout to avoid spurious failures but this test may
     // require a timeout to complete, so we restore the default value to avoid failures.
-    mongosOptions: {setParameter: {defaultConfigCommandTimeoutMS: 30000}}
+    mongosOptions: {setParameter: {defaultConfigCommandTimeoutMS: 30000}},
 };
 
-var st = new ShardingTest({shards: 3, mongos: 1, other: options});
+let st = new ShardingTest({shards: 3, mongos: 1, other: options});
 
-var mongos = st.s0;
-var admin = mongos.getDB("admin");
+let mongos = st.s0;
+let admin = mongos.getDB("admin");
 
 jsTest.log("Setting up initial admin user...");
-var adminUser = "adminUser";
-var password = "password";
+let adminUser = "adminUser";
+let password = "password";
 
 // Create a user
 admin.createUser({user: adminUser, pwd: password, roles: ["root"]});
@@ -60,19 +60,16 @@ st.stopBalancer();
 assert.commandWorked(admin.runCommand({setParameter: 1, traceExceptions: true}));
 
 // Create the unsharded database with shard0 primary
-assert.commandWorked(
-    st.s.adminCommand({enableSharding: 'fooUnsharded', primaryShard: st.shard0.shardName}));
+assert.commandWorked(st.s.adminCommand({enableSharding: "fooUnsharded", primaryShard: st.shard0.shardName}));
 // Create the sharded database with shard1 primary
-assert.commandWorked(
-    st.s.adminCommand({enableSharding: 'fooSharded', primaryShard: st.shard1.shardName}));
+assert.commandWorked(st.s.adminCommand({enableSharding: "fooSharded", primaryShard: st.shard1.shardName}));
 
-var collSharded = mongos.getCollection("fooSharded.barSharded");
-var collUnsharded = mongos.getCollection("fooUnsharded.barUnsharded");
+let collSharded = mongos.getCollection("fooSharded.barSharded");
+let collUnsharded = mongos.getCollection("fooUnsharded.barUnsharded");
 
 assert.commandWorked(admin.runCommand({shardCollection: collSharded.toString(), key: {_id: 1}}));
 assert.commandWorked(admin.runCommand({split: collSharded.toString(), middle: {_id: 0}}));
-assert.commandWorked(admin.runCommand(
-    {moveChunk: collSharded.toString(), find: {_id: -1}, to: st.shard0.shardName}));
+assert.commandWorked(admin.runCommand({moveChunk: collSharded.toString(), find: {_id: -1}, to: st.shard0.shardName}));
 
 st.printShardingStatus();
 const dbUser = "dbUser";
@@ -84,7 +81,7 @@ admin.createUser({user: dbUser, pwd: password, roles: ["readWriteAnyDatabase"]})
 admin.logout();
 
 function authDBUsers(conn) {
-    assert(conn.getDB('admin').auth(dbUser, password));
+    assert(conn.getDB("admin").auth(dbUser, password));
     return conn;
 }
 
@@ -92,11 +89,11 @@ function authDBUsers(conn) {
 // is received, and refreshing requires communication with the primary to obtain the newest version.
 // Read from the secondaries once before taking down primaries to ensure they have loaded the
 // routing table into memory.
-var mongosSetupConn = authDBUsers(new Mongo(mongos.host));
+let mongosSetupConn = authDBUsers(new Mongo(mongos.host));
 mongosSetupConn.setReadPref("secondary");
 assert(!mongosSetupConn.getCollection(collSharded.toString()).find({}).hasNext());
 
-gc();  // Clean up connections
+gc(); // Clean up connections
 
 //
 // Setup is complete
@@ -104,11 +101,11 @@ gc();  // Clean up connections
 
 jsTest.log("Inserting initial data...");
 
-var mongosConnActive = authDBUsers(new Mongo(mongos.host));
-var mongosConnIdle = null;
-var mongosConnNew = null;
+let mongosConnActive = authDBUsers(new Mongo(mongos.host));
+let mongosConnIdle = null;
+let mongosConnNew = null;
 
-var wc = {writeConcern: {w: 2, wtimeout: 60000}};
+let wc = {writeConcern: {w: 2, wtimeout: 60000}};
 
 assert.commandWorked(mongosConnActive.getCollection(collSharded.toString()).insert({_id: -1}, wc));
 assert.commandWorked(mongosConnActive.getCollection(collSharded.toString()).insert({_id: 1}, wc));
@@ -156,7 +153,7 @@ assert.commandWorked(mongosConnNew.getCollection(collSharded.toString()).insert(
 mongosConnNew = authDBUsers(new Mongo(mongos.host));
 assert.commandWorked(mongosConnNew.getCollection(collUnsharded.toString()).insert({_id: 4}, wc));
 
-gc();  // Clean up new connections
+gc(); // Clean up new connections
 
 jsTest.log("Stopping primary of second shard...");
 
@@ -165,7 +162,7 @@ mongosConnIdle = authDBUsers(new Mongo(mongos.host));
 mongosConnIdle.setSecondaryOk();
 
 // Need to save this node for later
-var rs1Secondary = st.rs1.getSecondary();
+let rs1Secondary = st.rs1.getSecondary();
 
 st.rs1.stop(st.rs1.getPrimary());
 
@@ -208,7 +205,7 @@ assert.writeError(mongosConnNew.getCollection(collSharded.toString()).insert({_i
 mongosConnNew = authDBUsers(new Mongo(mongos.host));
 assert.commandWorked(mongosConnNew.getCollection(collUnsharded.toString()).insert({_id: 7}, wc));
 
-gc();  // Clean up new connections
+gc(); // Clean up new connections
 
 jsTest.log("Stopping primary of first shard...");
 
@@ -257,7 +254,7 @@ assert.writeError(mongosConnNew.getCollection(collSharded.toString()).insert({_i
 mongosConnNew = authDBUsers(new Mongo(mongos.host));
 assert.writeError(mongosConnNew.getCollection(collUnsharded.toString()).insert({_id: 10}));
 
-gc();  // Clean up new connections
+gc(); // Clean up new connections
 
 jsTest.log("Stopping second shard...");
 
@@ -301,7 +298,7 @@ assert.writeError(mongosConnNew.getCollection(collSharded.toString()).insert({_i
 mongosConnNew = authDBUsers(new Mongo(mongos.host));
 assert.writeError(mongosConnNew.getCollection(collUnsharded.toString()).insert({_id: 13}));
 
-gc();  // Clean up new connections
+gc(); // Clean up new connections
 
 jsTest.log("DONE!");
 st.stop();

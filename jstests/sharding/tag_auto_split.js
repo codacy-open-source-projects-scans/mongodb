@@ -2,7 +2,7 @@
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
 
-var s = new ShardingTest({shards: 2, mongos: 1});
+let s = new ShardingTest({shards: 2, mongos: 1});
 
 assert.commandWorked(s.s0.adminCommand({enablesharding: "test", primaryShard: s.shard1.shardName}));
 assert.commandWorked(s.s0.adminCommand({shardcollection: "test.foo", key: {_id: 1}}));
@@ -17,13 +17,17 @@ s.addTagRange("test.foo", {_id: 10}, {_id: 15}, "b");
 
 s.startBalancer();
 
-assert.soon(function() {
-    return findChunksUtil.findChunksByNs(s.config, "test.foo").itcount() == 4;
-}, 'Split did not occur', 3 * 60 * 1000);
+assert.soon(
+    function () {
+        return findChunksUtil.findChunksByNs(s.config, "test.foo").itcount() == 4;
+    },
+    "Split did not occur",
+    3 * 60 * 1000,
+);
 
 s.awaitBalancerRound();
 s.printShardingStatus(true);
-assert.eq(4, findChunksUtil.findChunksByNs(s.config, "test.foo").itcount(), 'Split points changed');
+assert.eq(4, findChunksUtil.findChunksByNs(s.config, "test.foo").itcount(), "Split points changed");
 
 assert.eq(1, findChunksUtil.findChunksByNs(s.config, "test.foo", {min: {_id: MinKey}}).itcount());
 assert.eq(1, findChunksUtil.findChunksByNs(s.config, "test.foo", {min: {_id: 5}}).itcount());

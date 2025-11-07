@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-#include <set>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -40,23 +37,21 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/validate/collection_validation.h"
-#include "mongo/db/catalog/validate/validate_results.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/validate/collection_validation.h"
+#include "mongo/db/validate/validate_options.h"
+#include "mongo/db/validate/validate_results.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_truncation.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -67,6 +62,10 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/testing_proctor.h"
+
+#include <set>
+#include <string>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -164,28 +163,6 @@ void logCollStats(OperationContext* opCtx, const NamespaceString& nss) {
     }
 }
 
-boost::optional<std::string> getConfigOverrideOrThrow(const BSONElement& raw) {
-    if (!raw) {
-        return boost::none;
-    }
-    StringData chosenConfig = raw.valueStringDataSafe();
-    // Only a specific subset of valid configurations are allowlisted here. This is mostly to avoid
-    // having complex logic to parse/sanitize the user-chosen configuration string.
-    static const char* allowed[] = {
-        "",
-        "dump_address",
-        "dump_blocks",
-        "dump_layout",
-        "dump_pages",
-        "dump_tree_shape",
-    };
-    static const char** allowedEnd = allowed + std::size(allowed);
-    uassert(ErrorCodes::InvalidOptions,
-            str::stream() << "Unrecognized configuration string " << chosenConfig,
-            std::find(allowed, allowedEnd, chosenConfig) != allowedEnd);
-    return {raw.str()};
-}
-
 }  // namespace
 
 /**
@@ -216,6 +193,8 @@ public:
             << "\tAdd {fixMultikey: true} to fix the multi key.\n"
             << "\tAdd {checkBSONConformance: true} to validate BSON documents more thoroughly.\n"
             << "\tAdd {metadata: true} to only check collection metadata.\n"
+            << "\tAdd {collHash: true} to generate a full hash of the documents in the "
+               "collection.\n"
             << "Cannot specify both {full: true, background: true}.";
     }
 
@@ -265,167 +244,9 @@ public:
             reqSerializationCtx.setPrefixState(vts->isFromAtlasProxy());
         }
         const NamespaceString nss(CommandHelpers::parseNsCollectionRequired(dbName, cmdObj));
-        bool background = cmdObj["background"].trueValue();
-        bool logDiagnostics = cmdObj["logDiagnostics"].trueValue();
 
-        const bool fullValidate = cmdObj["full"].trueValue();
-        if (background && fullValidate) {
-            uasserted(ErrorCodes::InvalidOptions,
-                      str::stream() << "Running the validate command with both { background: true }"
-                                    << " and { full: true } is not supported.");
-        }
-
-        const bool enforceFastCount = cmdObj["enforceFastCount"].trueValue();
-        if (background && enforceFastCount) {
-            uasserted(ErrorCodes::InvalidOptions,
-                      str::stream() << "Running the validate command with both { background: true }"
-                                    << " and { enforceFastCount: true } is not supported.");
-        }
-
-        const auto rawCheckBSONConformance = cmdObj["checkBSONConformance"];
-        const bool checkBSONConformance = rawCheckBSONConformance.trueValue();
-        if (rawCheckBSONConformance && !checkBSONConformance &&
-            (fullValidate || enforceFastCount)) {
-            uasserted(ErrorCodes::InvalidOptions,
-                      str::stream() << "Cannot explicitly set 'checkBSONConformance: false' with "
-                                       "full validation set.");
-        }
-
-        const bool repair = cmdObj["repair"].trueValue();
-        if (opCtx->readOnly() && repair) {
-            uasserted(ErrorCodes::InvalidOptions,
-                      str::stream() << "Running the validate command with { repair: true } in"
-                                    << " read-only mode is not supported.");
-        }
-        if (background && repair) {
-            uasserted(ErrorCodes::InvalidOptions,
-                      str::stream() << "Running the validate command with both { background: true }"
-                                    << " and { repair: true } is not supported.");
-        }
-        if (enforceFastCount && repair) {
-            uasserted(ErrorCodes::InvalidOptions,
-                      str::stream()
-                          << "Running the validate command with both { enforceFastCount: true }"
-                          << " and { repair: true } is not supported.");
-        }
-        if (checkBSONConformance && repair) {
-            uasserted(ErrorCodes::InvalidOptions,
-                      str::stream()
-                          << "Running the validate command with both { checkBSONConformance: true }"
-                          << " and { repair: true } is not supported.");
-        }
-        repl::ReplicationCoordinator* replCoord = repl::ReplicationCoordinator::get(opCtx);
-        if (repair && replCoord->getSettings().isReplSet()) {
-            uasserted(ErrorCodes::InvalidOptions,
-                      str::stream()
-                          << "Running the validate command with { repair: true } can only be"
-                          << " performed in standalone mode.");
-        }
-
-        const auto rawFixMultikey = cmdObj["fixMultikey"];
-        const bool fixMultikey = cmdObj["fixMultikey"].trueValue();
-        if (fixMultikey && replCoord->getSettings().isReplSet()) {
-            uasserted(ErrorCodes::InvalidOptions,
-                      str::stream()
-                          << "Running the validate command with { fixMultikey: true } can only be"
-                          << " performed in standalone mode.");
-        }
-        if (rawFixMultikey && !fixMultikey && repair) {
-            uasserted(ErrorCodes::InvalidOptions,
-                      str::stream()
-                          << "Running the validate command with both { fixMultikey: false }"
-                          << " and { repair: true } is not supported.");
-        }
-
-        const bool metadata = cmdObj["metadata"].trueValue();
-        if (metadata &&
-            (background || fullValidate || enforceFastCount || checkBSONConformance || repair)) {
-            uasserted(ErrorCodes::InvalidOptions,
-                      str::stream() << "Running the validate command with { metadata: true } is not"
-                                    << " supported with any other options");
-        }
-
-        const auto rawConfigOverride = cmdObj["wiredtigerVerifyConfigurationOverride"];
-        if (rawConfigOverride && !(fullValidate || enforceFastCount)) {
-            uasserted(ErrorCodes::InvalidOptions,
-                      str::stream() << "Overriding the verify configuration is only supported with "
-                                       "full validation set.");
-        }
-
-        // Background validation uses point-in-time catalog lookups. This requires an instance of
-        // the collection at the checkpoint timestamp. Because timestamps aren't used in standalone
-        // mode, this prevents the CollectionCatalog from being able to establish the correct
-        // collection instance.
-        const bool isReplSet = repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet();
-        if (background && !isReplSet) {
-            uasserted(ErrorCodes::CommandNotSupported,
-                      str::stream() << "Running the validate command with { background: true } "
-                                    << "is not supported in standalone mode");
-        }
-
-        // The same goes for unreplicated collections, DDL operations are untimestamped.
-        if (background && !nss.isReplicated()) {
-            uasserted(ErrorCodes::CommandNotSupported,
-                      str::stream() << "Running the validate command with { background: true } "
-                                    << "is not supported on unreplicated collections");
-        }
-
-        auto validateMode = [&] {
-            if (metadata) {
-                return CollectionValidation::ValidateMode::kMetadata;
-            }
-            if (background) {
-                if (checkBSONConformance) {
-                    return CollectionValidation::ValidateMode::kBackgroundCheckBSON;
-                }
-                return CollectionValidation::ValidateMode::kBackground;
-            }
-            if (enforceFastCount) {
-                return CollectionValidation::ValidateMode::kForegroundFullEnforceFastCount;
-            }
-            if (fullValidate) {
-                return CollectionValidation::ValidateMode::kForegroundFull;
-            }
-            if (checkBSONConformance) {
-                return CollectionValidation::ValidateMode::kForegroundCheckBSON;
-            }
-            return CollectionValidation::ValidateMode::kForeground;
-        }();
-
-        auto repairMode = [&] {
-            if (opCtx->readOnly()) {
-                // On read-only mode we can't make any adjustments.
-                return CollectionValidation::RepairMode::kNone;
-            }
-            switch (validateMode) {
-                case CollectionValidation::ValidateMode::kForeground:
-                case CollectionValidation::ValidateMode::kForegroundCheckBSON:
-                case CollectionValidation::ValidateMode::kForegroundFull:
-                case CollectionValidation::ValidateMode::kForegroundFullIndexOnly:
-                    // Foreground validation may not repair data while running as a replica set node
-                    // because we do not have timestamps that are required to perform writes.
-                    if (replCoord->getSettings().isReplSet()) {
-                        return CollectionValidation::RepairMode::kNone;
-                    }
-                    if (repair) {
-                        return CollectionValidation::RepairMode::kFixErrors;
-                    }
-                    if (fixMultikey) {
-                        return CollectionValidation::RepairMode::kAdjustMultikey;
-                    }
-                    return CollectionValidation::RepairMode::kNone;
-                default:
-                    return CollectionValidation::RepairMode::kNone;
-            }
-        }();
-
-        CollectionValidation::ValidationOptions options(
-            validateMode,
-            repairMode,
-            logDiagnostics,
-            getTestCommandsEnabled() ? (ValidationVersion)bsonTestValidationVersion
-                                     : currentValidationVersion,
-            getConfigOverrideOrThrow(rawConfigOverride));
+        CollectionValidation::ValidationOptions options =
+            CollectionValidation::parseValidateOptions(opCtx, nss, cmdObj);
 
         if (!serverGlobalParams.quiet.load()) {
             LOGV2(20514,
@@ -433,6 +254,7 @@ public:
                   logAttrs(nss),
                   "background"_attr = options.isBackground(),
                   "full"_attr = options.isFullValidation(),
+                  "extended"_attr = options.isExtendedValidation(),
                   "enforceFastCount"_attr = options.enforceFastCountRequested(),
                   "checkBSONConformance"_attr = options.isBSONConformanceValidation(),
                   "fixMultiKey"_attr = options.adjustMultikey(),
@@ -464,11 +286,6 @@ public:
             _validationsInProgress.erase(nss);
             _validationNotifier.notify_all();
         });
-
-        if (repair) {
-            shard_role_details::getRecoveryUnit(opCtx)->setPrepareConflictBehavior(
-                PrepareConflictBehavior::kIgnoreConflictsAllowWrites);
-        }
 
         ValidateResults validateResults;
         Status status =

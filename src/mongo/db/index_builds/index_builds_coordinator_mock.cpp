@@ -28,6 +28,7 @@
  */
 
 #include "mongo/db/index_builds/index_builds_coordinator_mock.h"
+
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/index_builds/repl_index_build_state.h"
 
@@ -39,7 +40,7 @@ StatusWith<SharedSemiFuture<ReplIndexBuildState::IndexCatalogStats>>
 IndexBuildsCoordinatorMock::startIndexBuild(OperationContext* opCtx,
                                             const DatabaseName& dbName,
                                             const UUID& collectionUUID,
-                                            const std::vector<BSONObj>& specs,
+                                            const std::vector<IndexBuildInfo>& indexes,
                                             const UUID& buildUUID,
                                             IndexBuildProtocol protocol,
                                             IndexBuildOptions indexBuildOptions) {
@@ -51,7 +52,7 @@ StatusWith<SharedSemiFuture<ReplIndexBuildState::IndexCatalogStats>>
 IndexBuildsCoordinatorMock::resumeIndexBuild(OperationContext* opCtx,
                                              const DatabaseName& dbName,
                                              const UUID& collectionUUID,
-                                             const std::vector<BSONObj>& specs,
+                                             const std::vector<IndexBuildInfo>& indexes,
                                              const UUID& buildUUID,
                                              const ResumeIndexInfo& resumeInfo) {
     return {ErrorCodes::InternalError, "Method not implemented"};
@@ -94,7 +95,7 @@ void IndexBuildsCoordinatorMock::_signalPrimaryForAbortAndWaitForExternalAbort(
 void IndexBuildsCoordinatorMock::_signalPrimaryForCommitReadiness(
     OperationContext* opCtx, std::shared_ptr<ReplIndexBuildState> replState) {}
 
-IndexBuildAction IndexBuildsCoordinatorMock::_drainSideWritesUntilNextActionIsAvailable(
+IndexBuildAction IndexBuildsCoordinatorMock::_waitForNextIndexBuildAction(
     OperationContext* opCtx, std::shared_ptr<ReplIndexBuildState> replState) {
     return IndexBuildAction::kNoAction;
 }

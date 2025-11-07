@@ -27,30 +27,13 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/multiprecision/cpp_int.hpp>
-#include <boost/multiprecision/number.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <climits>
-#include <cstdint>
-#include <initializer_list>
-#include <iostream>
-#include <iterator>
-#include <limits>
-#include <stack>
-#include <string>
-#include <tuple>
-#include <vector>
+#include "mongo/crypto/fle_crypto.h"
 
 #include "mongo/base/data_range.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/secure_allocator.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bson_depth.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
@@ -60,27 +43,42 @@
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/crypto/aead_encryption.h"
 #include "mongo/crypto/encryption_fields_validation.h"
-#include "mongo/crypto/fle_crypto.h"
 #include "mongo/crypto/fle_data_frames.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/crypto/fle_numeric.h"
+#include "mongo/crypto/fle_options_gen.h"
 #include "mongo/crypto/symmetric_crypto.h"
 #include "mongo/db/basic_types.h"
+#include "mongo/db/query/write_ops/write_ops_gen.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/rpc/object_check.h"  // IWYU pragma: keep
 #include "mongo/shell/kms_gen.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/time_support.h"
+
+#include <algorithm>
+#include <climits>
+#include <cstdint>
+#include <initializer_list>
+#include <iostream>
+#include <stack>
+#include <string>
+#include <tuple>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/multiprecision/cpp_int.hpp>
+#include <boost/multiprecision/number.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -93,6 +91,10 @@ std::string hexdump(const std::vector<T>& buf) {
 
 std::string hexdump(const PrfBlock& buf) {
     return hexdump(buf.data(), buf.size());
+}
+
+std::string hexdump(const ConstDataRange& buf) {
+    return hexdump(buf.data(), buf.length());
 }
 
 std::vector<char> decode(StringData sd) {
@@ -131,10 +133,12 @@ constexpr auto kIndexKeyId = "12345678-1234-9876-1234-123456789012"_sd;
 constexpr auto kIndexKey2Id = "12345678-1234-9876-1234-123456789013"_sd;
 constexpr auto kIndexKey3Id = "12345678-1234-9876-1234-123456789014"_sd;
 constexpr auto kUserKeyId = "ABCDEFAB-1234-9876-1234-123456789012"_sd;
-static UUID indexKeyId = uassertStatusOK(UUID::parse(kIndexKeyId.toString()));
-static UUID indexKey2Id = uassertStatusOK(UUID::parse(kIndexKey2Id.toString()));
-static UUID indexKey3Id = uassertStatusOK(UUID::parse(kIndexKey3Id.toString()));
-static UUID userKeyId = uassertStatusOK(UUID::parse(kUserKeyId.toString()));
+static UUID indexKeyId = uassertStatusOK(UUID::parse(kIndexKeyId));
+static UUID indexKey2Id = uassertStatusOK(UUID::parse(kIndexKey2Id));
+static UUID indexKey3Id = uassertStatusOK(UUID::parse(kIndexKey3Id));
+static UUID userKeyId = uassertStatusOK(UUID::parse(kUserKeyId));
+
+HmacContext hmacCtx;
 
 std::vector<char> testValue = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19};
 std::vector<char> testValue2 = {0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29};
@@ -237,7 +241,7 @@ BSONObj TestKeyVault::getEncryptedKey(const UUID& uuid) {
     return makeKeyStoreRecord(uuid, ciphertext).toBSON();
 }
 
-TEST(FLETokens, TestVectors) {
+TEST_F(ServiceContextTest, FLETokens_TestVectors) {
     std::vector<uint8_t> sampleValue = {0xc0, 0x7c, 0x0d, 0xf5, 0x12, 0x57, 0x94, 0x8e,
                                         0x1a, 0x0f, 0xc7, 0x0d, 0xd4, 0x56, 0x8e, 0x3a,
                                         0xf9, 0x9b, 0x23, 0xb3, 0x43, 0x4c, 0x98, 0x58,
@@ -245,9 +249,8 @@ TEST(FLETokens, TestVectors) {
     FLECounter counter = 1234567890;
 
     // Level 1
-    auto collectionToken = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
-    auto serverTokenDerivationToken =
-        FLELevel1TokenGenerator::generateServerTokenDerivationLevel1Token(getIndexKey());
+    auto collectionToken = CollectionsLevel1Token::deriveFrom(getIndexKey());
+    auto serverTokenDerivationToken = ServerTokenDerivationLevel1Token::deriveFrom(getIndexKey());
 
     ASSERT_EQUALS(CollectionsLevel1Token(decodePrf(
                       "BD53ACAC665EDD01E0CA30CB648B2B8F4967544047FD4E7D12B1A9BF07339928"_sd)),
@@ -259,121 +262,258 @@ TEST(FLETokens, TestVectors) {
 
     ASSERT_EQUALS(ServerDataEncryptionLevel1Token(decodePrf(
                       "EB9A73F7912D86A4297E81D2F675AF742874E4057E3A890FEC651A23EEE3F3EC"_sd)),
-                  FLELevel1TokenGenerator::generateServerDataEncryptionLevel1Token(getIndexKey()));
+                  ServerDataEncryptionLevel1Token::deriveFrom(getIndexKey()));
 
     // Level 2
-    auto edcToken = FLECollectionTokenGenerator::generateEDCToken(collectionToken);
+    auto edcToken = EDCToken::deriveFrom(collectionToken);
     ASSERT_EQUALS(
         EDCToken(decodePrf("82B0AB0F8F1D31AEB6F4DBC915EF17CBA2FE21E36EC436984EB63BECEC173831"_sd)),
         edcToken);
-    auto escToken = FLECollectionTokenGenerator::generateESCToken(collectionToken);
+    auto escToken = ESCToken::deriveFrom(collectionToken);
     ASSERT_EQUALS(
         ESCToken(decodePrf("279C575B52B73677EEF07D9C1126EBDF08C35369570A9B75E44A9AFDCCA96B6D"_sd)),
         escToken);
     ASSERT_EQUALS(
         ECOCToken(decodePrf("9E837ED3926CB8ED680E0E7DCB2A481A3E398BE7851FA1CE4D738FA5E67FFCC9"_sd)),
-        FLECollectionTokenGenerator::generateECOCToken(collectionToken));
+        ECOCToken::deriveFrom(collectionToken));
 
-    auto serverDataToken = FLEDerivedFromDataTokenGenerator::generateServerDerivedFromDataToken(
-        serverTokenDerivationToken, sampleValue);
+    auto serverDataToken =
+        ServerDerivedFromDataToken::deriveFrom(serverTokenDerivationToken, sampleValue);
     ASSERT_EQUALS(ServerDerivedFromDataToken(decodePrf(
                       "EDBC92F3BFE4CCB3F088FED8D42379A83F26DC37F2B6D513D4F568A6F32C8C80"_sd)),
                   serverDataToken);
 
     // Level 3
-    auto edcDataToken =
-        FLEDerivedFromDataTokenGenerator::generateEDCDerivedFromDataToken(edcToken, sampleValue);
+    auto edcDataToken = EDCDerivedFromDataToken::deriveFrom(edcToken, sampleValue);
     ASSERT_EQUALS(EDCDerivedFromDataToken(decodePrf(
                       "CEA098AA664E578D4E9CE05B50ADD15DF2F0316CD5CCB08E720C61D8C7580E2A"_sd)),
                   edcDataToken);
 
-    auto escDataToken =
-        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, sampleValue);
+    auto escDataToken = ESCDerivedFromDataToken::deriveFrom(escToken, sampleValue);
     ASSERT_EQUALS(ESCDerivedFromDataToken(decodePrf(
                       "DE6A1AC292BC62094C33E94647B044B9B10514317B75F4128DDA2E0FB686704F"_sd)),
                   escDataToken);
 
     ASSERT_EQUALS(ServerCountAndContentionFactorEncryptionToken(decodePrf(
                       "2F30DBCC06B722B60BC1FF018FC28D5FAEE2F222496BE34A264EF3267E811DA0"_sd)),
-                  FLEServerMetadataEncryptionTokenGenerator::
-                      generateServerCountAndContentionFactorEncryptionToken(serverDataToken));
+                  ServerCountAndContentionFactorEncryptionToken::deriveFrom(serverDataToken));
 
     ASSERT_EQUALS(ServerZerosEncryptionToken(decodePrf(
                       "986F23F132FF7F14F748AC69373CFC982AD0AD4BAD25BE92008B83AB43E96029"_sd)),
-                  FLEServerMetadataEncryptionTokenGenerator::generateServerZerosEncryptionToken(
-                      serverDataToken));
+                  ServerZerosEncryptionToken::deriveFrom(serverDataToken));
 
     // Level 4
-    auto edcDataCounterToken = FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-        generateEDCDerivedFromDataTokenAndContentionFactorToken(edcDataToken, counter);
+    auto edcDataCounterToken =
+        EDCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(edcDataToken, counter);
     ASSERT_EQUALS(EDCDerivedFromDataTokenAndContentionFactorToken(decodePrf(
                       "D8CC38AE6A64BD1BF195A2D35734C13AF2B1729AD1052A81BE00BF29C67A696E"_sd)),
                   edcDataCounterToken);
 
 
-    auto escDataCounterToken = FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-        generateESCDerivedFromDataTokenAndContentionFactorToken(escDataToken, counter);
+    auto escDataCounterToken =
+        ESCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(escDataToken, counter);
     ASSERT_EQUALS(ESCDerivedFromDataTokenAndContentionFactorToken(decodePrf(
                       "8AAF04CBA6DC16BFB37CADBA43DCA66C183634CB3DA278DE174556AE6E17CEBB"_sd)),
                   escDataCounterToken);
 
     // Level 5
-    auto edcTwiceToken =
-        FLETwiceDerivedTokenGenerator::generateEDCTwiceDerivedToken(edcDataCounterToken);
+    auto edcTwiceToken = EDCTwiceDerivedToken::deriveFrom(edcDataCounterToken);
     ASSERT_EQUALS(EDCTwiceDerivedToken(decodePrf(
                       "B39A7EC33FD976EFB8EEBBBF3A265A933E2128D709BB88C77E3D42AA735F697C"_sd)),
                   edcTwiceToken);
 
-    auto escTwiceTagToken =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedTagToken(escDataCounterToken);
+    auto escTwiceTagToken = ESCTwiceDerivedTagToken::deriveFrom(escDataCounterToken);
     ASSERT_EQUALS(ESCTwiceDerivedTagToken(decodePrf(
                       "D6F76A9D4767E0889B709517C8CF0412D81874AEB6E6CEBFBDDFF7B013EB7154"_sd)),
                   escTwiceTagToken);
-    auto escTwiceValueToken =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(escDataCounterToken);
+    auto escTwiceValueToken = ESCTwiceDerivedValueToken::deriveFrom(escDataCounterToken);
     ASSERT_EQUALS(ESCTwiceDerivedValueToken(decodePrf(
                       "53F0A51A43447B9881D5E79BA4C5F78E80BC2BC6AA42B00C81079EBF4C9D5A7C"_sd)),
                   escTwiceValueToken);
 
     // Anchor Padding
-    auto anchorPaddingTokenRoot =
-        FLEAnchorPaddingGenerator::generateAnchorPaddingRootToken(escToken);
+    auto anchorPaddingTokenRoot = AnchorPaddingRootToken::deriveFrom(escToken);
     ASSERT_EQUALS(AnchorPaddingRootToken(decodePrf(
                       "4312890F621FE3CA7497C3405DFD8AAF46A578C77F7404D28C12BA853A4D3327"_sd)),
                   anchorPaddingTokenRoot);
 
-    auto anchorPaddingTokenKey =
-        FLEAnchorPaddingDerivedGenerator::generateAnchorPaddingKeyToken(anchorPaddingTokenRoot);
+    auto anchorPaddingTokenKey = AnchorPaddingKeyToken::deriveFrom(anchorPaddingTokenRoot);
     ASSERT_EQUALS(AnchorPaddingKeyToken(decodePrf(
                       "EF6D80379C462FC724CE8C245DC177ED507154B4EBB04DED780FA0DDAF1A2247"_sd)),
                   anchorPaddingTokenKey);
 
-    auto anchorPaddingTokenValue =
-        FLEAnchorPaddingDerivedGenerator::generateAnchorPaddingValueToken(anchorPaddingTokenRoot);
+    auto anchorPaddingTokenValue = AnchorPaddingValueToken::deriveFrom(anchorPaddingTokenRoot);
     ASSERT_EQUALS(AnchorPaddingValueToken(decodePrf(
                       "A3308597F3C5271D5BAB640F749E619E9272A2C33F4CD372680F55F84CC4DF7F"_sd)),
                   anchorPaddingTokenValue);
+
+    auto edcTextExactToken = EDCTextExactToken::deriveFrom(edcToken);
+    ASSERT_EQUALS(EDCTextExactToken(decodePrf(
+                      "17dde6bd0c0d783aa2bf84e255b162b9362032e5ebd6d655d6b478c4d77dc077"_sd)),
+                  edcTextExactToken);
+    auto edcTextSubstringToken = EDCTextSubstringToken::deriveFrom(edcToken);
+    ASSERT_EQUALS(EDCTextSubstringToken(decodePrf(
+                      "4dde679aa0568701a0fda6b1cae21e99da32500541e4ad832ea83db94497478f"_sd)),
+                  edcTextSubstringToken);
+    auto edcTextSuffixToken = EDCTextSuffixToken::deriveFrom(edcToken);
+    ASSERT_EQUALS(EDCTextSuffixToken(decodePrf(
+                      "61fa8b8f02a5e7f3cfd2c3e58d3fb8c2d1bfe8a1acc32e43f26478a52944af78"_sd)),
+                  edcTextSuffixToken);
+    auto edcTextPrefixToken = EDCTextPrefixToken::deriveFrom(edcToken);
+    ASSERT_EQUALS(EDCTextPrefixToken(decodePrf(
+                      "926e96d7142b2d187d10579a26a11499d6c30aac2e3fdd56eb1cd536875decfd"_sd)),
+                  edcTextPrefixToken);
+
+    auto escTextExactToken = ESCTextExactToken::deriveFrom(escToken);
+    ASSERT_EQUALS(ESCTextExactToken(decodePrf(
+                      "2fea10a92e84cce913ea0ffd7fd59964507e9e96cdffa4f1b861521f3e653260"_sd)),
+                  escTextExactToken);
+    auto escTextSubstringToken = ESCTextSubstringToken::deriveFrom(escToken);
+    ASSERT_EQUALS(ESCTextSubstringToken(decodePrf(
+                      "d6a94cacc9f5dd10b2b980bd4c4044e16ff1b29ad50c692e603487c46cbe610e"_sd)),
+                  escTextSubstringToken);
+    auto escTextSuffixToken = ESCTextSuffixToken::deriveFrom(escToken);
+    ASSERT_EQUALS(ESCTextSuffixToken(decodePrf(
+                      "336f39da6fa984a3477261ea19147b77f02e843f82511c94a91ec77bd72dca68"_sd)),
+                  escTextSuffixToken);
+    auto escTextPrefixToken = ESCTextPrefixToken::deriveFrom(escToken);
+    ASSERT_EQUALS(ESCTextPrefixToken(decodePrf(
+                      "2575c2a275e8135ec73093ae2edc793f6a3a0b8ed89767c3a8695ad93f1c6e9e"_sd)),
+                  escTextPrefixToken);
+
+    auto serverTextExactToken = ServerTextExactToken::deriveFrom(serverTokenDerivationToken);
+    ASSERT_EQUALS(ServerTextExactToken(decodePrf(
+                      "2ae33773be27c9fe3522ff0459f621670e93a7423166e63e9a43687a503c7438"_sd)),
+                  serverTextExactToken);
+    auto serverTextSubstringToken =
+        ServerTextSubstringToken::deriveFrom(serverTokenDerivationToken);
+    ASSERT_EQUALS(ServerTextSubstringToken(decodePrf(
+                      "183ff338509675d5377d09978e9becd31b197458e2c8cd45b670c672ceb6dc53"_sd)),
+                  serverTextSubstringToken);
+    auto serverTextSuffixToken = ServerTextSuffixToken::deriveFrom(serverTokenDerivationToken);
+    ASSERT_EQUALS(ServerTextSuffixToken(decodePrf(
+                      "baf7c9392bb37607c6aa1f04163f4db8628872e7e7122e754bcd72771934ccbd"_sd)),
+                  serverTextSuffixToken);
+    auto serverTextPrefixToken = ServerTextPrefixToken::deriveFrom(serverTokenDerivationToken);
+    ASSERT_EQUALS(ServerTextPrefixToken(decodePrf(
+                      "52387ea6942d9299a89f70a2a4d8a4209ea1dfe56e29f6c0e3182ca7818b5c9c"_sd)),
+                  serverTextPrefixToken);
+
+    auto edcTextExactDerivedFromDataToken =
+        EDCTextExactDerivedFromDataToken::deriveFrom(edcTextExactToken, sampleValue);
+    ASSERT_EQUALS(EDCTextExactDerivedFromDataToken(decodePrf(
+                      "6006D61E9E985EE8F6490AEBF0BFD120BF7A94317646165584894DA6ECBF0E97"_sd)),
+                  edcTextExactDerivedFromDataToken);
+    auto edcTextSubstringDerivedFromDataToken =
+        EDCTextSubstringDerivedFromDataToken::deriveFrom(edcTextSubstringToken, sampleValue);
+    ASSERT_EQUALS(EDCTextSubstringDerivedFromDataToken(decodePrf(
+                      "4DAB3B274AA5D5E99ECBD7F139CD420F25305C9F082B25AA96F1C9FE6E2122E3"_sd)),
+                  edcTextSubstringDerivedFromDataToken);
+    auto edcTextSuffixDerivedFromDataToken =
+        EDCTextSuffixDerivedFromDataToken::deriveFrom(edcTextSuffixToken, sampleValue);
+    ASSERT_EQUALS(EDCTextSuffixDerivedFromDataToken(decodePrf(
+                      "997F4A0B518F6C872951B65DCF26676D3886C98502FE0A7CC4F9C5EA4F30E94B"_sd)),
+                  edcTextSuffixDerivedFromDataToken);
+    auto edcTextPrefixDerivedFromDataToken =
+        EDCTextPrefixDerivedFromDataToken::deriveFrom(edcTextPrefixToken, sampleValue);
+    ASSERT_EQUALS(EDCTextPrefixDerivedFromDataToken(decodePrf(
+                      "D3EBDD34BCACD11C5929A09D2A897EB7938ABD4756CAB805F46FF0F4AFFA7583"_sd)),
+                  edcTextPrefixDerivedFromDataToken);
+
+    auto edcTextExactDerivedFromDataTokenAndContentionFactorToken =
+        EDCTextExactDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+            edcTextExactDerivedFromDataToken, counter);
+    ASSERT_EQUALS(EDCTextExactDerivedFromDataTokenAndContentionFactorToken(decodePrf(
+                      "3551507189d32cc7768390cdd83071deeb3055ca86c4756b16bb740024b23610"_sd)),
+                  edcTextExactDerivedFromDataTokenAndContentionFactorToken);
+    auto edcTextSubstringDerivedFromDataTokenAndContentionFactorToken =
+        EDCTextSubstringDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+            edcTextSubstringDerivedFromDataToken, counter);
+    ASSERT_EQUALS(EDCTextSubstringDerivedFromDataTokenAndContentionFactorToken(decodePrf(
+                      "4b52f6daf3b688971eb5819820c3468b3c79ba45fd3e86134351f9baf203e0d1"_sd)),
+                  edcTextSubstringDerivedFromDataTokenAndContentionFactorToken);
+    auto edcTextSuffixDerivedFromDataTokenAndContentionFactorToken =
+        EDCTextSuffixDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+            edcTextSuffixDerivedFromDataToken, counter);
+    ASSERT_EQUALS(EDCTextSuffixDerivedFromDataTokenAndContentionFactorToken(decodePrf(
+                      "c1f273913631a9a1b36fea884b3c8a3a141c9e21556981094ba15f262e540ac7"_sd)),
+                  edcTextSuffixDerivedFromDataTokenAndContentionFactorToken);
+    auto edcTextPrefixDerivedFromDataTokenAndContentionFactorToken =
+        EDCTextPrefixDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+            edcTextPrefixDerivedFromDataToken, counter);
+    ASSERT_EQUALS(EDCTextPrefixDerivedFromDataTokenAndContentionFactorToken(decodePrf(
+                      "a8d68ebdb0e2d31754f693c56071b0b1d225e6ec5568aff875bd4f7c48c24f66"_sd)),
+                  edcTextPrefixDerivedFromDataTokenAndContentionFactorToken);
+
+    auto escTextExactDerivedFromDataToken =
+        ESCTextExactDerivedFromDataToken::deriveFrom(escTextExactToken, sampleValue);
+    ASSERT_EQUALS(ESCTextExactDerivedFromDataToken(decodePrf(
+                      "6D3311B3DE0E32DBFE55A565327AD4B99D670474DDEF52AA200FC79D76B8C7C4"_sd)),
+                  escTextExactDerivedFromDataToken);
+    auto escTextSubstringDerivedFromDataToken =
+        ESCTextSubstringDerivedFromDataToken::deriveFrom(escTextSubstringToken, sampleValue);
+    ASSERT_EQUALS(ESCTextSubstringDerivedFromDataToken(decodePrf(
+                      "0E9D0F7C42658DD6894D3CBE34FFA0D39BE00BA72A21AC79BC3712B25783D247"_sd)),
+                  escTextSubstringDerivedFromDataToken);
+    auto escTextSuffixDerivedFromDataToken =
+        ESCTextSuffixDerivedFromDataToken::deriveFrom(escTextSuffixToken, sampleValue);
+    ASSERT_EQUALS(ESCTextSuffixDerivedFromDataToken(decodePrf(
+                      "A95860B4A08B39B002E5AEE557268786BE4E6D5A8552090DC397FBDB34374313"_sd)),
+                  escTextSuffixDerivedFromDataToken);
+    auto escTextPrefixDerivedFromDataToken =
+        ESCTextPrefixDerivedFromDataToken::deriveFrom(escTextPrefixToken, sampleValue);
+    ASSERT_EQUALS(ESCTextPrefixDerivedFromDataToken(decodePrf(
+                      "8DF7341DD42C1CEE8411657AFAEA424BFA818A539BF0668E1C355FC2A555E11A"_sd)),
+                  escTextPrefixDerivedFromDataToken);
+
+    auto escTextExactDerivedFromDataTokenAndContentionFactorToken =
+        ESCTextExactDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+            escTextExactDerivedFromDataToken, counter);
+    ASSERT_EQUALS(ESCTextExactDerivedFromDataTokenAndContentionFactorToken(decodePrf(
+                      "4cd82a4883ab0a6224a24937066f94827f5107e8bb2f0fa841e10aff8d49e8e4"_sd)),
+                  escTextExactDerivedFromDataTokenAndContentionFactorToken);
+    auto escTextSubstringDerivedFromDataTokenAndContentionFactorToken =
+        ESCTextSubstringDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+            escTextSubstringDerivedFromDataToken, counter);
+    ASSERT_EQUALS(ESCTextSubstringDerivedFromDataTokenAndContentionFactorToken(decodePrf(
+                      "94f116183f14442e335902756e5b730683cd998c683b90d04dc9e8f48684bdb2"_sd)),
+                  escTextSubstringDerivedFromDataTokenAndContentionFactorToken);
+    auto escTextSuffixDerivedFromDataTokenAndContentionFactorToken =
+        ESCTextSuffixDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+            escTextSuffixDerivedFromDataToken, counter);
+    ASSERT_EQUALS(ESCTextSuffixDerivedFromDataTokenAndContentionFactorToken(decodePrf(
+                      "13390024c674c2d131771cf95af9787c8c7ef76b5d63078b3dc482cb4075a634"_sd)),
+                  escTextSuffixDerivedFromDataTokenAndContentionFactorToken);
+    auto escTextPrefixDerivedFromDataTokenAndContentionFactorToken =
+        ESCTextPrefixDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+            escTextPrefixDerivedFromDataToken, counter);
+    ASSERT_EQUALS(ESCTextPrefixDerivedFromDataTokenAndContentionFactorToken(decodePrf(
+                      "9d0d5f84de779360c43be8e61710deb4b2705b6bf1e11ee41fba09fd4486b7c6"_sd)),
+                  escTextPrefixDerivedFromDataTokenAndContentionFactorToken);
+
+    auto serverTextExactDerivedFromDataToken =
+        ServerTextExactDerivedFromDataToken::deriveFrom(serverTextExactToken, sampleValue);
+    ASSERT_EQUALS(ServerTextExactDerivedFromDataToken(decodePrf(
+                      "ae210cd90c230bb8cb96a4e840c9cf88740ae156f3514260d3f1ce94b0bf941e"_sd)),
+                  serverTextExactDerivedFromDataToken);
+    auto serverTextSubstringDerivedFromDataToken =
+        ServerTextSubstringDerivedFromDataToken::deriveFrom(serverTextSubstringToken, sampleValue);
+    ASSERT_EQUALS(ServerTextSubstringDerivedFromDataToken(decodePrf(
+                      "7b514ede2cd6d364f2da2580bf173a4e68f9e0617c123aee8b9dda4d8d4b47d7"_sd)),
+                  serverTextSubstringDerivedFromDataToken);
+    auto serverTextSuffixDerivedFromDataToken =
+        ServerTextSuffixDerivedFromDataToken::deriveFrom(serverTextSuffixToken, sampleValue);
+    ASSERT_EQUALS(ServerTextSuffixDerivedFromDataToken(decodePrf(
+                      "3e242be8d4c8a5894e81aa5fe0729cf48355dbe219c5c6b5ceb8b0eef124ba40"_sd)),
+                  serverTextSuffixDerivedFromDataToken);
+    auto serverTextPrefixDerivedFromDataToken =
+        ServerTextPrefixDerivedFromDataToken::deriveFrom(serverTextPrefixToken, sampleValue);
+    ASSERT_EQUALS(ServerTextPrefixDerivedFromDataToken(decodePrf(
+                      "8d8d41ac0618b0e98b086d662a2466f4aa1527d6536acdbcf220c724073331eb"_sd)),
+                  serverTextPrefixDerivedFromDataToken);
 }
 
-TEST(FLETokens, TestVectorUnindexedValueDecryption) {
-    // Unindexed field decryption
-    // Encryption can not be generated using test vectors because IV is random
-    TestKeyVault keyVault;
-
-    {
-        const std::string uxCiphertext = hexblob::decode(
-            "10ABCDEFAB1234987612341234567890120274E15D9477DA66394DF17BBA08FBEBB76A8BAFA63E6A7E7DCDDF9415B39877CE537469BB98A6B2B57E89AAC2CBBB5D5184DDE0111CD325E409739EF1C5C53AA917149FCF2EA2F6CB6BC8E11A7783E142FECC1570448837E6A295FCE6F16730B3"_sd);
-        auto [uxBsonType, uxPlaintext] =
-            FLE2UnindexedEncryptedValueV2::deserialize(&keyVault, ConstDataRange(uxCiphertext));
-        ASSERT_EQUALS(uxBsonType, BSONType::String);
-        ASSERT_EQUALS(
-            hexblob::encode(uxPlaintext.data(), uxPlaintext.size()),
-            "260000004C6F7279207761732061206D6F75736520696E2061206269672062726F776E20686F75736500");
-    }
-}
-
-
-TEST(FLETokens, TestVectorESCCollectionDecryptDocument) {
+TEST_F(ServiceContextTest, FLETokens_TestVectorESCCollectionDecryptDocument) {
     ESCTwiceDerivedTagToken escTwiceTag(
         decodePrf("B1C4E1C67F4AB83DE7632B801BDD198D65401B17EC633EB4D608DE97FAFCE02B"_sd));
     ESCTwiceDerivedValueToken escTwiceValue(
@@ -406,30 +546,26 @@ TEST(FLETokens, TestVectorESCCollectionDecryptDocument) {
     ASSERT_EQ(swDoc.getValue().count, 123456789);
 }
 
-TEST(FLE_ESC, RoundTrip) {
+TEST_F(ServiceContextTest, FLE_ESC_RoundTrip) {
     TestKeyVault keyVault;
 
     ConstDataRange value(testValue);
 
-    auto c1 = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
-    auto escToken = FLECollectionTokenGenerator::generateESCToken(c1);
+    auto c1 = CollectionsLevel1Token::deriveFrom(getIndexKey());
+    auto escToken = ESCToken::deriveFrom(c1);
 
-    ESCDerivedFromDataToken escDatakey =
-        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value);
+    ESCDerivedFromDataToken escDatakey = ESCDerivedFromDataToken::deriveFrom(escToken, value);
 
     ESCDerivedFromDataTokenAndContentionFactorToken escDataCounterkey =
-        FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-            generateESCDerivedFromDataTokenAndContentionFactorToken(escDatakey, 0);
+        ESCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(escDatakey, 0);
 
-    auto escTwiceTag =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedTagToken(escDataCounterkey);
-    auto escTwiceValue =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(escDataCounterkey);
+    auto escTwiceTag = ESCTwiceDerivedTagToken::deriveFrom(escDataCounterkey);
+    auto escTwiceValue = ESCTwiceDerivedValueToken::deriveFrom(escDataCounterkey);
 
 
     {
-        BSONObj doc =
-            ESCCollection::generateNullDocument(escTwiceTag, escTwiceValue, 123, 123456789);
+        BSONObj doc = ESCCollection::generateNullDocument(
+            &hmacCtx, escTwiceTag, escTwiceValue, 123, 123456789);
         auto swDoc = ESCCollection::decryptNullDocument(escTwiceValue, doc);
         ASSERT_OK(swDoc.getStatus());
         ASSERT_EQ(swDoc.getValue().position, 123);
@@ -438,8 +574,8 @@ TEST(FLE_ESC, RoundTrip) {
 
 
     {
-        BSONObj doc =
-            ESCCollection::generateInsertDocument(escTwiceTag, escTwiceValue, 123, 123456789);
+        BSONObj doc = ESCCollection::generateInsertDocument(
+            &hmacCtx, escTwiceTag, escTwiceValue, 123, 123456789);
         auto swDoc = ESCCollection::decryptDocument(escTwiceValue, doc);
         ASSERT_OK(swDoc.getStatus());
         ASSERT_EQ(swDoc.getValue().compactionPlaceholder, false);
@@ -449,7 +585,7 @@ TEST(FLE_ESC, RoundTrip) {
 
     {
         BSONObj doc = ESCCollection::generateCompactionPlaceholderDocument(
-            escTwiceTag, escTwiceValue, 123, 456789);
+            &hmacCtx, escTwiceTag, escTwiceValue, 123, 456789);
         auto swDoc = ESCCollection::decryptDocument(escTwiceValue, doc);
         ASSERT_OK(swDoc.getStatus());
         ASSERT_EQ(swDoc.getValue().compactionPlaceholder, true);
@@ -459,15 +595,15 @@ TEST(FLE_ESC, RoundTrip) {
 
     {
         // Non-anchor documents don't work with decryptAnchorDocument()
-        BSONObj doc = ESCCollection::generateNonAnchorDocument(escTwiceTag, 123);
+        BSONObj doc = ESCCollection::generateNonAnchorDocument(&hmacCtx, escTwiceTag, 123);
         auto swDoc = ESCCollection::decryptAnchorDocument(escTwiceValue, doc);
         ASSERT_NOT_OK(swDoc.getStatus());
         ASSERT_EQ(ErrorCodes::Error::NoSuchKey, swDoc.getStatus().code());
     }
 
     {
-        BSONObj doc =
-            ESCCollection::generateAnchorDocument(escTwiceTag, escTwiceValue, 123, 456789);
+        BSONObj doc = ESCCollection::generateAnchorDocument(
+            &hmacCtx, escTwiceTag, escTwiceValue, 123, 456789);
         auto swDoc = ESCCollection::decryptAnchorDocument(escTwiceValue, doc);
         ASSERT_OK(swDoc.getStatus());
         ASSERT_EQ(swDoc.getValue().position, 0);
@@ -475,8 +611,8 @@ TEST(FLE_ESC, RoundTrip) {
     }
 
     {
-        BSONObj doc =
-            ESCCollection::generateNullAnchorDocument(escTwiceTag, escTwiceValue, 123, 456789);
+        BSONObj doc = ESCCollection::generateNullAnchorDocument(
+            &hmacCtx, escTwiceTag, escTwiceValue, 123, 456789);
         auto swDoc = ESCCollection::decryptAnchorDocument(escTwiceValue, doc);
         ASSERT_OK(swDoc.getStatus());
         ASSERT_EQ(swDoc.getValue().position, 123);
@@ -529,51 +665,20 @@ private:
     boost::optional<int64_t> _overrideCount;
 };
 
-// Test Empty Collection
-TEST(FLE_ESC, EmuBinary_Empty) {
-    TestKeyVault keyVault;
-
-    TestDocumentCollection coll;
-    ConstDataRange value(testValue);
-
-    auto c1 = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
-    auto escToken = FLECollectionTokenGenerator::generateESCToken(c1);
-
-    ESCDerivedFromDataToken escDatakey =
-        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value);
-
-    auto escDerivedToken = FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-        generateESCDerivedFromDataTokenAndContentionFactorToken(escDatakey, 0);
-
-    auto escTwiceTag =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedTagToken(escDerivedToken);
-    auto escTwiceValue =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(escDerivedToken);
-
-
-    auto i = ESCCollection::emuBinary(coll, escTwiceTag, escTwiceValue);
-
-    ASSERT_TRUE(i.has_value());
-    ASSERT_EQ(i.value(), 0);
-}
-
 namespace {
 
 std::tuple<ESCTwiceDerivedTagToken, ESCTwiceDerivedValueToken> generateEmuBinaryTokens(
     ConstDataRange value, uint64_t contention = 0) {
-    auto c1 = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
-    auto escToken = FLECollectionTokenGenerator::generateESCToken(c1);
+    auto c1 = CollectionsLevel1Token::deriveFrom(getIndexKey());
+    auto escToken = ESCToken::deriveFrom(c1);
 
-    ESCDerivedFromDataToken escDatakey =
-        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value);
+    ESCDerivedFromDataToken escDatakey = ESCDerivedFromDataToken::deriveFrom(escToken, value);
 
-    auto escDerivedToken = FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-        generateESCDerivedFromDataTokenAndContentionFactorToken(escDatakey, contention);
+    auto escDerivedToken =
+        ESCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(escDatakey, contention);
 
-    auto escTwiceTag =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedTagToken(escDerivedToken);
-    auto escTwiceValue =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(escDerivedToken);
+    auto escTwiceTag = ESCTwiceDerivedTagToken::deriveFrom(escDerivedToken);
+    auto escTwiceValue = ESCTwiceDerivedValueToken::deriveFrom(escDerivedToken);
     return std::tie(escTwiceTag, escTwiceValue);
 }
 
@@ -593,8 +698,8 @@ EmuBinaryResult EmuBinaryV2Test(boost::optional<std::pair<uint64_t, uint64_t>> n
         auto nullApos = nullAnchor->first;
         auto nullCpos = nullAnchor->second;
         // insert null anchor
-        auto doc =
-            ESCCollection::generateNullAnchorDocument(tagToken, valueToken, nullApos, nullCpos);
+        auto doc = ESCCollection::generateNullAnchorDocument(
+            &hmacCtx, tagToken, valueToken, nullApos, nullCpos);
         coll.insert(doc);
     }
 
@@ -604,8 +709,8 @@ EmuBinaryResult EmuBinaryV2Test(boost::optional<std::pair<uint64_t, uint64_t>> n
     uint64_t lastAnchorCpos = anchorCposStart;
     auto anchorEnd = anchorStart + anchorCount;
     for (auto apos = anchorStart; apos < anchorEnd; apos++) {
-        auto doc =
-            ESCCollection::generateAnchorDocument(tagToken, valueToken, apos, lastAnchorCpos);
+        auto doc = ESCCollection::generateAnchorDocument(
+            &hmacCtx, tagToken, valueToken, apos, lastAnchorCpos);
         coll.insert(doc);
         if (lastAnchorCpos < anchorCposEnd) {
             lastAnchorCpos++;
@@ -615,18 +720,19 @@ EmuBinaryResult EmuBinaryV2Test(boost::optional<std::pair<uint64_t, uint64_t>> n
     // insert non-anchors with positions between nonAnchorStart and nonAnchorEnd (exclusive)
     uint64_t nonAnchorEnd = nonAnchorStart + nonAnchorCount;
     for (auto cpos = nonAnchorStart; cpos < nonAnchorEnd; cpos++) {
-        auto doc = ESCCollection::generateNonAnchorDocument(tagToken, cpos);
+        auto doc = ESCCollection::generateNonAnchorDocument(&hmacCtx, tagToken, cpos);
         coll.insert(doc);
     }
 
-    auto res = ESCCollection::emuBinaryV2(coll, tagToken, valueToken);
+    HmacContext hmacCtx;
+    auto res = ESCCollection::emuBinaryV2(&hmacCtx, coll, tagToken, valueToken);
 
     return res;
 }
 }  // namespace
 
 // Test EmuBinaryV2 on empty collection
-TEST(FLE_ESC, EmuBinaryV2_Empty) {
+TEST_F(ServiceContextTest, FLE_ESC_EmuBinaryV2_Empty) {
     auto res = EmuBinaryV2Test(boost::none, 0, 0, 0, 0, 0, 0);
     ASSERT_TRUE(res.apos.has_value());
     ASSERT_EQ(res.apos.value(), 0);
@@ -635,7 +741,7 @@ TEST(FLE_ESC, EmuBinaryV2_Empty) {
 }
 
 // Test EmuBinaryV2 on ESC containing non-anchors only
-TEST(FLE_ESC, EmuBinaryV2_NonAnchorsOnly) {
+TEST_F(ServiceContextTest, FLE_ESC_EmuBinaryV2_NonAnchorsOnly) {
     auto res = EmuBinaryV2Test(boost::none, 0, 0, 0, 0, 1, 5);
     ASSERT_TRUE(res.apos.has_value());
     ASSERT_EQ(res.apos.value(), 0);
@@ -644,7 +750,7 @@ TEST(FLE_ESC, EmuBinaryV2_NonAnchorsOnly) {
 }
 
 // Test EmuBinaryV2 on ESC containing non-null anchors only
-TEST(FLE_ESC, EmuBinaryV2_RegularAnchorsOnly) {
+TEST_F(ServiceContextTest, FLE_ESC_EmuBinaryV2_RegularAnchorsOnly) {
     // insert anchors 1-10, with cpos all at 0
     auto res = EmuBinaryV2Test(boost::none, 1, 10, 0, 0, 0, 0);
     ASSERT_FALSE(res.cpos.has_value());
@@ -659,7 +765,7 @@ TEST(FLE_ESC, EmuBinaryV2_RegularAnchorsOnly) {
 }
 
 // Test EmuBinaryV2 on ESC containing both non-anchors and regular (non-null) anchors only
-TEST(FLE_ESC, EmuBinaryV2_NonAnchorsAndRegularAnchorsOnly) {
+TEST_F(ServiceContextTest, FLE_ESC_EmuBinaryV2_NonAnchorsAndRegularAnchorsOnly) {
 
     // insert regular anchors 1-7, with cpos all at 0; non-anchors 1-20
     auto res = EmuBinaryV2Test(boost::none, 1, 7, 0, 0, 1, 20);
@@ -689,7 +795,7 @@ TEST(FLE_ESC, EmuBinaryV2_NonAnchorsAndRegularAnchorsOnly) {
 }
 
 // Test EmuBinaryV2 on ESC containing the null anchor only
-TEST(FLE_ESC, EmuBinaryV2_NullAnchorOnly) {
+TEST_F(ServiceContextTest, FLE_ESC_EmuBinaryV2_NullAnchorOnly) {
     std::vector<std::pair<uint64_t, uint64_t>> nullAnchors = {
         {0, 0}, {0, 10}, {10, 0}, {10, 10}, {5, 10}, {10, 5}};
 
@@ -701,7 +807,7 @@ TEST(FLE_ESC, EmuBinaryV2_NullAnchorOnly) {
 }
 
 // Test EmuBinaryV2 on ESC containing null anchor and non-anchors only
-TEST(FLE_ESC, EmuBinaryV2_NullAnchorAndNonAnchorsOnly) {
+TEST_F(ServiceContextTest, FLE_ESC_EmuBinaryV2_NullAnchorAndNonAnchorsOnly) {
 
     // insert null anchor with apos = 0, cpos = 23; non-anchors 1-20
     auto res = EmuBinaryV2Test({{0, 23}}, 0, 0, 0, 0, 1, 20);
@@ -733,7 +839,7 @@ TEST(FLE_ESC, EmuBinaryV2_NullAnchorAndNonAnchorsOnly) {
 }
 
 // Test EmuBinaryV2 on ESC containing null and non-null anchors only
-TEST(FLE_ESC, EmuBinaryV2_NullAndRegularAnchorsOnly) {
+TEST_F(ServiceContextTest, FLE_ESC_EmuBinaryV2_NullAndRegularAnchorsOnly) {
 
     // insert null anchor with apos = 47, cpos = 123; regular anchors 1-20
     auto res = EmuBinaryV2Test({{47, 123}}, 1, 20, 41, 60, 0, 0);
@@ -755,7 +861,7 @@ TEST(FLE_ESC, EmuBinaryV2_NullAndRegularAnchorsOnly) {
 // Test EmuBinaryV2 on ESC containing all kinds of records, where the positions in the
 // null anchor are ahead of all existing anchor positions.
 // e.g. (null_apos > last_apos && null_cpos >= last_anchor_cpos)
-TEST(FLE_ESC, EmuBinaryV2_AllRecordTypes_NullAnchorHasNewerPositions) {
+TEST_F(ServiceContextTest, FLE_ESC_EmuBinaryV2_AllRecordTypes_NullAnchorHasNewerPositions) {
     // all tests have null anchor with null_apos=40 and null_cpos=60
     auto nullAnchor = std::make_pair<uint64_t, uint64_t>(40, 60);
 
@@ -800,7 +906,7 @@ TEST(FLE_ESC, EmuBinaryV2_AllRecordTypes_NullAnchorHasNewerPositions) {
 // Test EmuBinaryV2 on ESC containing all kinds of records, where the positions in the
 // null anchor are similar to the most recent regular anchor's positions.
 // e.g. (null_apos == last_apos && null_cpos == last_anchor_cpos)
-TEST(FLE_ESC, EmuBinaryV2_AllRecordTypes_NullAnchorHasLastAnchorPositions) {
+TEST_F(ServiceContextTest, FLE_ESC_EmuBinaryV2_AllRecordTypes_NullAnchorHasLastAnchorPositions) {
     // all tests have null anchor with null_apos=40 and null_cpos=60
     auto nullAnchor = std::make_pair<uint64_t, uint64_t>(40, 60);
 
@@ -824,7 +930,7 @@ TEST(FLE_ESC, EmuBinaryV2_AllRecordTypes_NullAnchorHasLastAnchorPositions) {
 // Test EmuBinaryV2 on ESC containing all kinds of records, where the positions in the null
 // anchor are less than the most recent regular anchor's positions.
 // e.g. (null_apos < last_apos && null_cpos <= last_anchor_cpos)
-TEST(FLE_ESC, EmuBinaryV2_AllRecordTypes_NullAnchorHasOldAnchorPositions) {
+TEST_F(ServiceContextTest, FLE_ESC_EmuBinaryV2_AllRecordTypes_NullAnchorHasOldAnchorPositions) {
     // all tests have null anchor with null_apos=40 and null_cpos=60
     auto nullAnchor = std::make_pair<uint64_t, uint64_t>(40, 60);
 
@@ -867,141 +973,46 @@ TEST(FLE_ESC, EmuBinaryV2_AllRecordTypes_NullAnchorHasOldAnchorPositions) {
     ASSERT_EQ(res.cpos.value(), 79);
 }
 
-// Test one new field in esc
-TEST(FLE_ESC, EmuBinary) {
-    TestKeyVault keyVault;
-
-    TestDocumentCollection coll;
-    ConstDataRange value(testValue);
-
-    auto c1 = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
-    auto escToken = FLECollectionTokenGenerator::generateESCToken(c1);
-
-    ESCDerivedFromDataToken escDatakey =
-        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value);
-
-    auto escDerivedToken = FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-        generateESCDerivedFromDataTokenAndContentionFactorToken(escDatakey, 0);
-
-    auto escTwiceTag =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedTagToken(escDerivedToken);
-    auto escTwiceValue =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(escDerivedToken);
-
-    for (int j = 1; j <= 5; j++) {
-        BSONObj doc = ESCCollection::generateInsertDocument(escTwiceTag, escTwiceValue, j, j);
-        coll.insert(doc);
-    }
-
-
-    // Test with various fake counts to ensure enumBinary works with bad estimates and the original
-    // exact count.
-    int64_t origCount = coll.getDocumentCount();
-    std::vector<int64_t> testVectors{0, 2, 3, 13, 500, origCount};
-
-    for (const auto v : testVectors) {
-        coll.setOverrideCount(v);
-        auto i = ESCCollection::emuBinary(coll, escTwiceTag, escTwiceValue);
-
-        ASSERT_TRUE(i.has_value());
-        ASSERT_EQ(i.value(), 5);
-    }
-}
-
-
-// Test two new fields in esc
-TEST(FLE_ESC, EmuBinary2) {
-    TestKeyVault keyVault;
-
-    TestDocumentCollection coll;
-    ConstDataRange value(testValue);
-
-    auto c1 = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
-    auto escToken = FLECollectionTokenGenerator::generateESCToken(c1);
-
-
-    ESCDerivedFromDataToken escDatakey2 =
-        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, testValue2);
-
-    auto escDerivedToken2 = FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-        generateESCDerivedFromDataTokenAndContentionFactorToken(escDatakey2, 0);
-
-    auto escTwiceTag2 =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedTagToken(escDerivedToken2);
-    auto escTwiceValue2 =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(escDerivedToken2);
-
-    for (int j = 1; j <= 5; j++) {
-        BSONObj doc = ESCCollection::generateInsertDocument(escTwiceTag2, escTwiceValue2, j, j);
-        coll.insert(doc);
-    }
-
-    ESCDerivedFromDataToken escDatakey =
-        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value);
-
-    auto escDerivedToken = FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-        generateESCDerivedFromDataTokenAndContentionFactorToken(escDatakey, 0);
-
-    auto escTwiceTag =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedTagToken(escDerivedToken);
-    auto escTwiceValue =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(escDerivedToken);
-
-
-    for (int j = 1; j <= 13; j++) {
-        BSONObj doc = ESCCollection::generateInsertDocument(escTwiceTag, escTwiceValue, j, j);
-        coll.insert(doc);
-    }
-
-    // Test with various fake counts to ensure enumBinary works with bad estimates and the original
-    // exact count.
-    int64_t origCount = coll.getDocumentCount();
-    std::vector<int64_t> testVectors{0, 2, 5, 13, 19, 500, origCount};
-
-    for (const auto v : testVectors) {
-        coll.setOverrideCount(v);
-        auto i = ESCCollection::emuBinary(coll, escTwiceTag, escTwiceValue);
-
-        ASSERT_TRUE(i.has_value());
-        ASSERT_EQ(i.value(), 13);
-
-        i = ESCCollection::emuBinary(coll, escTwiceTag2, escTwiceValue2);
-
-        ASSERT_TRUE(i.has_value());
-        ASSERT_EQ(i.value(), 5);
-    }
-}
-
-// Test Emulated Binary with null record
-TEST(FLE_ESC, EmuBinary_NullRecord) {
-    TestKeyVault keyVault;
-
-    TestDocumentCollection coll;
-    ConstDataRange value(testValue);
-
-    auto c1 = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
-    auto escToken = FLECollectionTokenGenerator::generateESCToken(c1);
-
-    ESCDerivedFromDataToken escDatakey =
-        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value);
-
-    auto escDerivedToken = FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-        generateESCDerivedFromDataTokenAndContentionFactorToken(escDatakey, 0);
-
-    auto escTwiceTag =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedTagToken(escDerivedToken);
-    auto escTwiceValue =
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(escDerivedToken);
-
-    BSONObj doc = ESCCollection::generateNullDocument(escTwiceTag, escTwiceValue, 7, 7);
-    coll.insert(doc);
-
-    auto i = ESCCollection::emuBinary(coll, escTwiceTag, escTwiceValue);
-
-    ASSERT_FALSE(i.has_value());
-}
-
 enum class Operation { kFind, kInsert };
+
+EncryptedFieldConfig getTestEncryptedFieldConfig() {
+
+    constexpr auto schema = R"({
+        "escCollection": "enxcol_.coll.esc",
+        "ecocCollection": "enxcol_.coll.ecoc",
+        "fields": [
+            {
+                "keyId": {
+                    "$uuid": "12345678-1234-9876-1234-123456789012"
+                },
+                "path": "encrypted",
+                "bsonType": "string",
+                "queries": {
+                    "queryType": "equality"
+                }
+            },
+            {
+                "keyId": {
+                    "$uuid": "12345678-1234-9876-1234-123456789013"
+                },
+                "path": "nested.encrypted",
+                "bsonType": "string",
+                "queries": {
+                    "queryType": "equality"
+                }
+            },
+            {
+                "keyId": {
+                    "$uuid": "12345678-1234-9876-1234-123456789014"
+                },
+                "path": "nested.notindexed",
+                "bsonType": "string"
+            }
+        ]
+    })";
+
+    return EncryptedFieldConfig::parse(fromjson(schema), IDLParserContext("root"));
+}
 
 std::vector<char> generatePlaceholder(
     BSONElement value,
@@ -1025,23 +1036,23 @@ std::vector<char> generatePlaceholder(
     // Set a default lower and upper bound
     BSONObj lowerDoc, upperDoc;
     switch (value.type()) {
-        case BSONType::NumberInt:
+        case BSONType::numberInt:
             lowerDoc = BSON("lb" << 0);
             upperDoc = BSON("ub" << 1234567);
             break;
-        case BSONType::NumberLong:
+        case BSONType::numberLong:
             lowerDoc = BSON("lb" << 0LL);
             upperDoc = BSON("ub" << 1234567890123456789LL);
             break;
-        case BSONType::NumberDouble:
+        case BSONType::numberDouble:
             lowerDoc = BSON("lb" << 0.0);
             upperDoc = BSON("ub" << 1234567890123456789.0);
             break;
-        case BSONType::Date:
+        case BSONType::date:
             lowerDoc = BSON("lb" << Date_t::fromMillisSinceEpoch(0));
             upperDoc = BSON("ub" << Date_t::fromMillisSinceEpoch(1234567890123456789LL));
             break;
-        case BSONType::NumberDecimal:
+        case BSONType::numberDecimal:
             lowerDoc = BSON("lb" << Decimal128(0));
             upperDoc = BSON("ub" << Decimal128(1234567890123456789LL));
             break;
@@ -1055,13 +1066,8 @@ std::vector<char> generatePlaceholder(
             break;
     }
     insertSpec.setValue(value);
-    if (value.type() == BSONType::NumberDouble || value.type() == BSONType::NumberDecimal) {
-        insertSpec.setMinBound(boost::none);
-        insertSpec.setMaxBound(boost::none);
-    } else {
-        insertSpec.setMinBound(boost::optional<IDLAnyType>(lowerDoc.firstElement()));
-        insertSpec.setMaxBound(boost::optional<IDLAnyType>(upperDoc.firstElement()));
-    }
+    insertSpec.setMinBound(boost::optional<IDLAnyType>(lowerDoc.firstElement()));
+    insertSpec.setMaxBound(boost::optional<IDLAnyType>(upperDoc.firstElement()));
     auto specDoc = BSON("s" << insertSpec.toBSON());
 
     FLE2RangeFindSpecEdgesInfo edgesInfo;
@@ -1129,7 +1135,7 @@ BSONObj encryptDocument(BSONObj obj,
 
     // Finalize document for insert
     auto finalDoc = EDCServerCollection::finalizeForInsert(result, serverPayload);
-    ASSERT_EQ(finalDoc[kSafeContent].type(), Array);
+    ASSERT_EQ(finalDoc[kSafeContent].type(), BSONType::array);
     return finalDoc;
 }
 
@@ -1152,27 +1158,81 @@ void assertPayload(BSONElement elem, Operation operation) {
     }
 }
 
+BSONObj transformElementForInsertUpdate(BSONElement element,
+                                        const std::vector<char>& placeholder,
+                                        const EncryptedFieldConfig& efc,
+                                        const NamespaceString& edcNs,
+                                        FLEKeyVault* kv) {
+    // Wrap the element in a document in an insert command, so libmongocrypt can transform
+    // the placeholders.
+    auto origCmd = write_ops::InsertCommandRequest(edcNs, {element.wrap()}).toBSON();
+    auto cryptdResponse = [&]() {
+        BSONObjBuilder docbob;
+        docbob.appendBinData(element.fieldNameStringData(),
+                             placeholder.size(),
+                             BinDataType::Encrypt,
+                             placeholder.data());
+        BSONObjBuilder bob;
+        bob.append("hasEncryptionPlaceholders", true);
+        bob.append("schemaRequiresEncryption", true);
+        bob.append("result", write_ops::InsertCommandRequest(edcNs, {docbob.obj()}).toBSON());
+        return bob.obj();
+    }();
+    auto finalCmd =
+        FLEClientCrypto::transformPlaceholders(origCmd,
+                                               cryptdResponse,
+                                               BSON(edcNs.toString_forTest() << efc.toBSON()),
+                                               kv,
+                                               edcNs.db_forTest())
+            .addField(BSON("$db" << edcNs.db_forTest()).firstElement());
+    return write_ops::InsertCommandRequest::parse(finalCmd, IDLParserContext("finalCmd"))
+        .getDocuments()
+        .front()
+        .getOwned();
+}
+
 void roundTripTest(BSONObj doc, BSONType type, Operation opType, Fle2AlgorithmInt algorithm) {
     auto element = doc.firstElement();
     ASSERT_EQ(element.type(), type);
 
     TestKeyVault keyVault;
 
-    auto inputDoc = BSON("plainText"
-                         << "sample"
-                         << "encrypted" << element);
+    auto efc = getTestEncryptedFieldConfig();
+    auto edcNs = NamespaceString::createNamespaceString_forTest("test.coll");
+
+    auto inputDoc = BSON("plainText" << "sample"
+                                     << "encrypted" << element);
 
     auto buf = generatePlaceholder(element, opType, algorithm);
     BSONObjBuilder builder;
     builder.append("plainText", "sample");
-    builder.appendBinData("encrypted", buf.size(), BinDataType::Encrypt, buf.data());
+    builder.appendAs(
+        transformElementForInsertUpdate(element, buf, efc, edcNs, &keyVault).firstElement(),
+        "encrypted");
+    auto transformedDoc = builder.obj();
 
-    auto finalDoc = encryptDocument(builder.obj(), &keyVault);
+    auto finalDoc = [&]() {
+        auto serverPayload = EDCServerCollection::getEncryptedFieldInfo(transformedDoc);
 
-    ASSERT_EQ(finalDoc["plainText"].type(), String);
-    ASSERT_EQ(finalDoc["encrypted"].type(), BinData);
+        for (auto& payload : serverPayload) {
+            if (payload.payload.getEdgeTokenSet().has_value()) {
+                for (size_t i = 0; i < payload.payload.getEdgeTokenSet()->size(); i++) {
+                    payload.counts.push_back(1);
+                }
+            } else {
+                payload.counts.push_back(1);
+            }
+        }
+
+        // Finalize document for insert
+        auto finalDoc = EDCServerCollection::finalizeForInsert(transformedDoc, serverPayload);
+        ASSERT_EQ(finalDoc[kSafeContent].type(), BSONType::array);
+        return finalDoc;
+    }();
+
+    ASSERT_EQ(finalDoc["plainText"].type(), BSONType::string);
+    ASSERT_EQ(finalDoc["encrypted"].type(), BSONType::binData);
     ASSERT_TRUE(finalDoc["encrypted"].isBinData(BinDataType::Encrypt));
-
 
     // Decrypt document
     auto decryptedDoc = FLEClientCrypto::decryptDocument(finalDoc, &keyVault);
@@ -1204,9 +1264,8 @@ void roundTripMultiencrypted(BSONObj doc1,
 
     TestKeyVault keyVault;
 
-    auto inputDoc = BSON("plainText"
-                         << "sample"
-                         << "encrypted1" << element1 << "encrypted2" << element2);
+    auto inputDoc = BSON("plainText" << "sample"
+                                     << "encrypted1" << element1 << "encrypted2" << element2);
 
     auto buf1 = generatePlaceholder(element1, operation1, Fle2AlgorithmInt::kEquality, indexKeyId);
     auto buf2 = generatePlaceholder(element2, operation2, Fle2AlgorithmInt::kEquality, indexKey2Id);
@@ -1218,10 +1277,10 @@ void roundTripMultiencrypted(BSONObj doc1,
 
     auto finalDoc = encryptDocument(builder.obj(), &keyVault);
 
-    ASSERT_EQ(finalDoc["encrypted1"].type(), BinData);
+    ASSERT_EQ(finalDoc["encrypted1"].type(), BSONType::binData);
     ASSERT_TRUE(finalDoc["encrypted1"].isBinData(BinDataType::Encrypt));
 
-    ASSERT_EQ(finalDoc["encrypted2"].type(), BinData);
+    ASSERT_EQ(finalDoc["encrypted2"].type(), BSONType::binData);
     ASSERT_TRUE(finalDoc["encrypted2"].isBinData(BinDataType::Encrypt));
 
     assertPayload(finalDoc["encrypted1"], operation1);
@@ -1229,15 +1288,14 @@ void roundTripMultiencrypted(BSONObj doc1,
 }
 
 // Used to generate the test data for the ExpressionFLETest in expression_test.cpp
-TEST(FLE_EDC, PrintTest) {
+TEST_F(ServiceContextTest, FLE_EDC_PrintTest) {
     auto doc = BSON("value" << 1);
     auto element = doc.firstElement();
 
     TestKeyVault keyVault;
 
-    auto inputDoc = BSON("plainText"
-                         << "sample"
-                         << "encrypted" << element);
+    auto inputDoc = BSON("plainText" << "sample"
+                                     << "encrypted" << element);
 
     {
         auto buf = generatePlaceholder(element, Operation::kInsert, Fle2AlgorithmInt::kEquality);
@@ -1263,37 +1321,31 @@ TEST(FLE_EDC, PrintTest) {
     }
 }
 
-TEST(FLE_EDC, Allowed_Types) {
+TEST_F(ServiceContextTest, FLE_EDC_Allowed_Types) {
     const std::vector<std::pair<BSONObj, BSONType>> universallyAllowedObjects{
-        {BSON("sample"
-              << "value123"),
-         String},
+        {BSON("sample" << "value123"), BSONType::string},
         {BSON("sample" << BSONBinData(
                   testValue.data(), testValue.size(), BinDataType::BinDataGeneral)),
-         BinData},
-        {BSON("sample" << OID()), jstOID},
-        {BSON("sample" << false), Bool},
-        {BSON("sample" << true), Bool},
-        {BSON("sample" << Date_t()), Date},
-        {BSON("sample" << BSONRegEx("value1", "lu")), RegEx},
-        {BSON("sample" << 123456), NumberInt},
-        {BSON("sample" << Timestamp()), bsonTimestamp},
-        {BSON("sample" << 12345678901234567LL), NumberLong},
-        {BSON("sample" << BSONCode("value")), Code}};
+         BSONType::binData},
+        {BSON("sample" << OID()), BSONType::oid},
+        {BSON("sample" << false), BSONType::boolean},
+        {BSON("sample" << true), BSONType::boolean},
+        {BSON("sample" << Date_t()), BSONType::date},
+        {BSON("sample" << BSONRegEx("value1", "lu")), BSONType::regEx},
+        {BSON("sample" << 123456), BSONType::numberInt},
+        {BSON("sample" << Timestamp()), BSONType::timestamp},
+        {BSON("sample" << 12345678901234567LL), BSONType::numberLong},
+        {BSON("sample" << BSONCode("value")), BSONType::code}};
 
     const std::vector<std::pair<BSONObj, BSONType>> unindexedAllowedObjects{
-        {BSON("sample" << 123.456), NumberDouble},
-        {BSON("sample" << Decimal128()), NumberDecimal},
-        {BSON("sample" << BSON("nested"
-                               << "value")),
-         Object},
-        {BSON("sample" << BSON_ARRAY(1 << 23)), Array},
-        {BSON("sample" << BSONDBRef("value1", OID())), DBRef},
-        {BSON("sample" << BSONSymbol("value")), Symbol},
-        {BSON("sample" << BSONCodeWScope("value",
-                                         BSON("code"
-                                              << "something"))),
-         CodeWScope},
+        {BSON("sample" << 123.456), BSONType::numberDouble},
+        {BSON("sample" << Decimal128()), BSONType::numberDecimal},
+        {BSON("sample" << BSON("nested" << "value")), BSONType::object},
+        {BSON("sample" << BSON_ARRAY(1 << 23)), BSONType::array},
+        {BSON("sample" << BSONDBRef("value1", OID())), BSONType::dbRef},
+        {BSON("sample" << BSONSymbol("value")), BSONType::symbol},
+        {BSON("sample" << BSONCodeWScope("value", BSON("code" << "something"))),
+         BSONType::codeWScope},
     };
 
 
@@ -1322,14 +1374,14 @@ TEST(FLE_EDC, Allowed_Types) {
     }
 }
 
-TEST(FLE_EDC, Range_Allowed_Types) {
+TEST_F(ServiceContextTest, FLE_EDC_Range_Allowed_Types) {
 
     const std::vector<std::pair<BSONObj, BSONType>> rangeAllowedObjects{
-        {BSON("sample" << 123.456), NumberDouble},
-        {BSON("sample" << Decimal128()), NumberDecimal},
-        {BSON("sample" << 123456), NumberInt},
-        {BSON("sample" << 12345678901234567LL), NumberLong},
-        {BSON("sample" << Date_t::fromMillisSinceEpoch(12345)), Date},
+        {BSON("sample" << 123.456), BSONType::numberDouble},
+        {BSON("sample" << Decimal128()), BSONType::numberDecimal},
+        {BSON("sample" << 123456), BSONType::numberInt},
+        {BSON("sample" << 12345678901234567LL), BSONType::numberLong},
+        {BSON("sample" << Date_t::fromMillisSinceEpoch(12345)), BSONType::date},
     };
 
     std::vector<Operation> opTypes{Operation::kInsert, Operation::kFind};
@@ -1362,62 +1414,56 @@ void illegalBSONType(BSONObj doc, BSONType type, Fle2AlgorithmInt algorithm) {
     illegalBSONType(doc, type, algorithm, expectCode);
 }
 
-TEST(FLE_EDC, Disallowed_Types) {
-    illegalBSONType(BSON("sample" << 123.456), NumberDouble, Fle2AlgorithmInt::kEquality);
-    illegalBSONType(BSON("sample" << Decimal128()), NumberDecimal, Fle2AlgorithmInt::kEquality);
+TEST_F(ServiceContextTest, FLE_EDC_Disallowed_Types) {
+    illegalBSONType(BSON("sample" << 123.456), BSONType::numberDouble, Fle2AlgorithmInt::kEquality);
+    illegalBSONType(
+        BSON("sample" << Decimal128()), BSONType::numberDecimal, Fle2AlgorithmInt::kEquality);
 
-    illegalBSONType(BSON("sample" << MINKEY), MinKey, Fle2AlgorithmInt::kEquality);
+    illegalBSONType(BSON("sample" << MINKEY), BSONType::minKey, Fle2AlgorithmInt::kEquality);
 
-    illegalBSONType(BSON("sample" << BSON("nested"
-                                          << "value")),
-                    Object,
+    illegalBSONType(
+        BSON("sample" << BSON("nested" << "value")), BSONType::object, Fle2AlgorithmInt::kEquality);
+    illegalBSONType(
+        BSON("sample" << BSON_ARRAY(1 << 23)), BSONType::array, Fle2AlgorithmInt::kEquality);
+
+    illegalBSONType(
+        BSON("sample" << BSONUndefined), BSONType::undefined, Fle2AlgorithmInt::kEquality);
+    illegalBSONType(
+        BSON("sample" << BSONUndefined), BSONType::undefined, Fle2AlgorithmInt::kUnindexed);
+    illegalBSONType(BSON("sample" << BSONNULL), BSONType::null, Fle2AlgorithmInt::kEquality);
+    illegalBSONType(BSON("sample" << BSONNULL), BSONType::null, Fle2AlgorithmInt::kUnindexed);
+    illegalBSONType(BSON("sample" << BSONCodeWScope("value", BSON("code" << "something"))),
+                    BSONType::codeWScope,
                     Fle2AlgorithmInt::kEquality);
-    illegalBSONType(BSON("sample" << BSON_ARRAY(1 << 23)), Array, Fle2AlgorithmInt::kEquality);
-
-    illegalBSONType(BSON("sample" << BSONUndefined), Undefined, Fle2AlgorithmInt::kEquality);
-    illegalBSONType(BSON("sample" << BSONUndefined), Undefined, Fle2AlgorithmInt::kUnindexed);
-    illegalBSONType(BSON("sample" << BSONNULL), jstNULL, Fle2AlgorithmInt::kEquality);
-    illegalBSONType(BSON("sample" << BSONNULL), jstNULL, Fle2AlgorithmInt::kUnindexed);
-    illegalBSONType(BSON("sample" << BSONCodeWScope("value",
-                                                    BSON("code"
-                                                         << "something"))),
-                    CodeWScope,
-                    Fle2AlgorithmInt::kEquality);
-    illegalBSONType(BSON("sample" << MAXKEY), MaxKey, Fle2AlgorithmInt::kEquality);
-    illegalBSONType(BSON("sample" << MAXKEY), MaxKey, Fle2AlgorithmInt::kUnindexed);
+    illegalBSONType(BSON("sample" << MAXKEY), BSONType::maxKey, Fle2AlgorithmInt::kEquality);
+    illegalBSONType(BSON("sample" << MAXKEY), BSONType::maxKey, Fle2AlgorithmInt::kUnindexed);
 }
 
 void illegalRangeBSONType(BSONObj doc, BSONType type) {
     illegalBSONType(doc, type, Fle2AlgorithmInt::kRange, ErrorCodes::TypeMismatch);
 }
 
-TEST(FLE_EDC, Range_Disallowed_Types) {
+TEST_F(ServiceContextTest, FLE_EDC_Range_Disallowed_Types) {
 
     const std::vector<std::pair<BSONObj, BSONType>> disallowedObjects{
-        {BSON("sample"
-              << "value123"),
-         String},
+        {BSON("sample" << "value123"), BSONType::string},
         {BSON("sample" << BSONBinData(
                   testValue.data(), testValue.size(), BinDataType::BinDataGeneral)),
-         BinData},
-        {BSON("sample" << OID()), jstOID},
-        {BSON("sample" << false), Bool},
-        {BSON("sample" << true), Bool},
-        {BSON("sample" << BSONRegEx("value1", "value2")), RegEx},
-        {BSON("sample" << Timestamp()), bsonTimestamp},
-        {BSON("sample" << BSONCode("value")), Code},
-        {BSON("sample" << BSON("nested"
-                               << "value")),
-         Object},
-        {BSON("sample" << BSON_ARRAY(1 << 23)), Array},
-        {BSON("sample" << BSONDBRef("value1", OID())), DBRef},
-        {BSON("sample" << BSONSymbol("value")), Symbol},
-        {BSON("sample" << BSONCodeWScope("value",
-                                         BSON("code"
-                                              << "something"))),
-         CodeWScope},
-        {BSON("sample" << MINKEY), MinKey},
-        {BSON("sample" << MAXKEY), MaxKey},
+         BSONType::binData},
+        {BSON("sample" << OID()), BSONType::oid},
+        {BSON("sample" << false), BSONType::boolean},
+        {BSON("sample" << true), BSONType::boolean},
+        {BSON("sample" << BSONRegEx("value1", "value2")), BSONType::regEx},
+        {BSON("sample" << Timestamp()), BSONType::timestamp},
+        {BSON("sample" << BSONCode("value")), BSONType::code},
+        {BSON("sample" << BSON("nested" << "value")), BSONType::object},
+        {BSON("sample" << BSON_ARRAY(1 << 23)), BSONType::array},
+        {BSON("sample" << BSONDBRef("value1", OID())), BSONType::dbRef},
+        {BSON("sample" << BSONSymbol("value")), BSONType::symbol},
+        {BSON("sample" << BSONCodeWScope("value", BSON("code" << "something"))),
+         BSONType::codeWScope},
+        {BSON("sample" << MINKEY), BSONType::minKey},
+        {BSON("sample" << MAXKEY), BSONType::maxKey},
     };
 
     for (const auto& typePair : disallowedObjects) {
@@ -1425,11 +1471,11 @@ TEST(FLE_EDC, Range_Disallowed_Types) {
     }
 
     illegalBSONType(BSON("sample" << BSONNULL),
-                    jstNULL,
+                    BSONType::null,
                     Fle2AlgorithmInt::kRange,
                     ErrorCodes::IDLFailedToParse);
     illegalBSONType(BSON("sample" << BSONUndefined),
-                    Undefined,
+                    BSONType::undefined,
                     Fle2AlgorithmInt::kRange,
                     ErrorCodes::IDLFailedToParse);
 }
@@ -1457,10 +1503,10 @@ BSONObj transformBSON(
         auto& [iterator, builder] = frameStack.top();
         if (iterator.more()) {
             BSONElement elem = iterator.next();
-            if (elem.type() == BSONType::Object) {
+            if (elem.type() == BSONType::object) {
                 frameStack.push({BSONObjIterator(elem.Obj()),
                                  BSONObjBuilder(builder.subobjStart(elem.fieldNameStringData()))});
-            } else if (elem.type() == BSONType::Array) {
+            } else if (elem.type() == BSONType::array) {
                 frameStack.push(
                     {BSONObjIterator(elem.Obj()),
                      BSONObjBuilder(builder.subarrayStart(elem.fieldNameStringData()))});
@@ -1515,9 +1561,8 @@ void disallowedEqualityPayloadType(BSONType type) {
     TestKeyVault keyVault;
 
 
-    auto inputDoc = BSON("plainText"
-                         << "sample"
-                         << "encrypted" << element);
+    auto inputDoc = BSON("plainText" << "sample"
+                                     << "encrypted" << element);
 
     auto buf = generatePlaceholder(element, Operation::kInsert);
     BSONObjBuilder builder;
@@ -1537,7 +1582,7 @@ void disallowedEqualityPayloadType(BSONType type) {
 
             auto iup = parseFromCDR<FLE2InsertUpdatePayloadV2>(subCdr);
 
-            iup.setType(type);
+            iup.setType(stdx::to_underlying(type));
             toEncryptedBinData(fieldNameToSerialize,
                                EncryptedBinDataType::kFLE2InsertUpdatePayloadV2,
                                iup,
@@ -1549,27 +1594,79 @@ void disallowedEqualityPayloadType(BSONType type) {
     ASSERT_THROWS_CODE(EDCServerCollection::getEncryptedFieldInfo(result), DBException, 6373504);
 }
 
-TEST(FLE_EDC, Disallowed_Types_FLE2InsertUpdatePayload) {
-    disallowedEqualityPayloadType(NumberDouble);
-    disallowedEqualityPayloadType(NumberDecimal);
+TEST_F(ServiceContextTest, FLE_EDC_Disallowed_Types_FLE2InsertUpdatePayload) {
+    disallowedEqualityPayloadType(BSONType::numberDouble);
+    disallowedEqualityPayloadType(BSONType::numberDecimal);
 
-    disallowedEqualityPayloadType(MinKey);
+    disallowedEqualityPayloadType(BSONType::minKey);
 
-    disallowedEqualityPayloadType(Object);
-    disallowedEqualityPayloadType(Array);
+    disallowedEqualityPayloadType(BSONType::object);
+    disallowedEqualityPayloadType(BSONType::array);
 
-    disallowedEqualityPayloadType(Undefined);
-    disallowedEqualityPayloadType(jstNULL);
-    disallowedEqualityPayloadType(CodeWScope);
+    disallowedEqualityPayloadType(BSONType::undefined);
+    disallowedEqualityPayloadType(BSONType::null);
+    disallowedEqualityPayloadType(BSONType::codeWScope);
 
-    disallowedEqualityPayloadType(MaxKey);
+    disallowedEqualityPayloadType(BSONType::maxKey);
 
     uint8_t fakeBSONType = 42;
     ASSERT_FALSE(isValidBSONType(fakeBSONType));
     disallowedEqualityPayloadType(static_cast<BSONType>(fakeBSONType));
 }
 
-TEST(FLE_EDC, ServerSide_Equality_Payloads_V2) {
+bool areBuffersEqual(ConstDataRange lhs, ConstDataRange rhs) {
+    return (lhs.length() == rhs.length()) &&
+        std::equal(lhs.data<const uint8_t>(),
+                   lhs.data<const uint8_t>() + lhs.length(),
+                   rhs.data<const uint8_t>());
+}
+
+bool operator==(const ConstFLE2TagAndEncryptedMetadataBlock& lblk,
+                const ConstFLE2TagAndEncryptedMetadataBlock& rblk) {
+    auto lhs = lblk.getView();
+    auto rhs = rblk.getView();
+    return areBuffersEqual(lhs.encryptedCounts, rhs.encryptedCounts) &&
+        areBuffersEqual(lhs.encryptedZeros, rhs.encryptedZeros) &&
+        areBuffersEqual(lhs.tag, rhs.tag);
+}
+
+bool metadataBlocksEqual(const std::vector<ConstFLE2TagAndEncryptedMetadataBlock>& lhs,
+                         const std::vector<ConstFLE2TagAndEncryptedMetadataBlock>& rhs) {
+    return (lhs.size() == rhs.size()) && std::equal(lhs.begin(), lhs.end(), rhs.begin());
+}
+
+bool operator==(const FLE2IndexedEqualityEncryptedValueV2& lhs,
+                const FLE2IndexedEqualityEncryptedValueV2& rhs) {
+    return (lhs.getBsonType() == rhs.getBsonType()) && (lhs.getKeyId() == rhs.getKeyId()) &&
+        (lhs.getRawMetadataBlock() == rhs.getRawMetadataBlock()) &&
+        areBuffersEqual(lhs.getServerEncryptedValue(), rhs.getServerEncryptedValue()) &&
+        areBuffersEqual(lhs.getMetadataBlockTag(), rhs.getMetadataBlockTag());
+}
+
+bool operator==(const FLE2IndexedRangeEncryptedValueV2& lhs,
+                const FLE2IndexedRangeEncryptedValueV2& rhs) {
+    return (lhs.getBsonType() == rhs.getBsonType()) && (lhs.getKeyId() == rhs.getKeyId()) &&
+        (lhs.getTagCount() == rhs.getTagCount()) &&
+        areBuffersEqual(lhs.getServerEncryptedValue(), rhs.getServerEncryptedValue()) &&
+        metadataBlocksEqual(lhs.getMetadataBlocks(), rhs.getMetadataBlocks());
+}
+
+bool operator==(const FLE2IndexedTextEncryptedValue& lhs,
+                const FLE2IndexedTextEncryptedValue& rhs) {
+    return (lhs.getBsonType() == rhs.getBsonType()) && (lhs.getKeyId() == rhs.getKeyId()) &&
+        (lhs.getTagCount() == rhs.getTagCount()) &&
+        (lhs.getSubstringTagCount() == rhs.getSubstringTagCount()) &&
+        (lhs.getSuffixTagCount() == rhs.getSuffixTagCount()) &&
+        (lhs.getPrefixTagCount() == rhs.getPrefixTagCount()) &&
+        areBuffersEqual(lhs.getServerEncryptedValue(), rhs.getServerEncryptedValue()) &&
+        (lhs.getExactStringMetadataBlock() == rhs.getExactStringMetadataBlock()) &&
+        metadataBlocksEqual(lhs.getAllMetadataBlocks(), rhs.getAllMetadataBlocks()) &&
+        metadataBlocksEqual(lhs.getSubstringMetadataBlocks(), rhs.getSubstringMetadataBlocks()) &&
+        metadataBlocksEqual(lhs.getSuffixMetadataBlocks(), rhs.getSuffixMetadataBlocks()) &&
+        metadataBlocksEqual(lhs.getPrefixMetadataBlocks(), rhs.getPrefixMetadataBlocks());
+}
+
+TEST_F(ServiceContextTest, FLE_EDC_ServerSide_Equality_Payloads_V2) {
     TestKeyVault keyVault;
 
     auto doc = BSON("sample" << 123456);
@@ -1577,31 +1674,24 @@ TEST(FLE_EDC, ServerSide_Equality_Payloads_V2) {
 
     auto value = ConstDataRange(element.value(), element.value() + element.valuesize());
 
-    auto collectionToken = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
-    auto serverEncryptToken =
-        FLELevel1TokenGenerator::generateServerDataEncryptionLevel1Token(getIndexKey());
-    auto serverDerivationToken =
-        FLELevel1TokenGenerator::generateServerTokenDerivationLevel1Token(getIndexKey());
+    auto collectionToken = CollectionsLevel1Token::deriveFrom(getIndexKey());
+    auto serverEncryptToken = ServerDataEncryptionLevel1Token::deriveFrom(getIndexKey());
+    auto serverDerivationToken = ServerTokenDerivationLevel1Token::deriveFrom(getIndexKey());
 
-    auto edcToken = FLECollectionTokenGenerator::generateEDCToken(collectionToken);
-    auto escToken = FLECollectionTokenGenerator::generateESCToken(collectionToken);
-    auto ecocToken = FLECollectionTokenGenerator::generateECOCToken(collectionToken);
+    auto edcToken = EDCToken::deriveFrom(collectionToken);
+    auto escToken = ESCToken::deriveFrom(collectionToken);
+    auto ecocToken = ECOCToken::deriveFrom(collectionToken);
     auto serverDerivedFromDataToken =
-        FLEDerivedFromDataTokenGenerator::generateServerDerivedFromDataToken(serverDerivationToken,
-                                                                             value);
-    FLECounter counter = 0;
+        ServerDerivedFromDataToken::deriveFrom(serverDerivationToken, value);
+    FLECounter contention = 3;
 
-    EDCDerivedFromDataToken edcDatakey =
-        FLEDerivedFromDataTokenGenerator::generateEDCDerivedFromDataToken(edcToken, value);
-    ESCDerivedFromDataToken escDatakey =
-        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value);
+    EDCDerivedFromDataToken edcDatakey = EDCDerivedFromDataToken::deriveFrom(edcToken, value);
+    ESCDerivedFromDataToken escDatakey = ESCDerivedFromDataToken::deriveFrom(escToken, value);
 
     ESCDerivedFromDataTokenAndContentionFactorToken escDataCounterkey =
-        FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-            generateESCDerivedFromDataTokenAndContentionFactorToken(escDatakey, counter);
+        ESCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(escDatakey, contention);
     EDCDerivedFromDataTokenAndContentionFactorToken edcDataCounterkey =
-        FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-            generateEDCDerivedFromDataTokenAndContentionFactorToken(edcDatakey, counter);
+        EDCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(edcDatakey, contention);
 
     FLE2InsertUpdatePayloadV2 iupayload;
     iupayload.setEdcDerivedToken(edcDataCounterkey);
@@ -1610,67 +1700,73 @@ TEST(FLE_EDC, ServerSide_Equality_Payloads_V2) {
     iupayload.setServerDerivedFromDataToken(serverDerivedFromDataToken);
 
     auto encryptedTokens =
-        StateCollectionTokensV2(escDataCounterkey, boost::none).encrypt(ecocToken);
+        StateCollectionTokensV2(escDataCounterkey, boost::none, boost::none).encrypt(ecocToken);
     ASSERT_EQ(encryptedTokens.toCDR().length(), crypto::aesCTRIVSize + sizeof(PrfBlock));
     iupayload.setEncryptedTokens(std::move(encryptedTokens));
     iupayload.setIndexKeyId(indexKeyId);
 
     iupayload.setValue(value);
-    iupayload.setType(element.type());
+    iupayload.setType(stdx::to_underlying(element.type()));
 
-    iupayload.setContentionFactor(counter);
+    iupayload.setContentionFactor(contention);
 
-    auto edcTwiceDerived =
-        FLETwiceDerivedTokenGenerator::generateEDCTwiceDerivedToken(edcDataCounterkey);
+    auto edcTwiceDerived = EDCTwiceDerivedToken::deriveFrom(edcDataCounterkey);
 
-    auto tag = EDCServerCollection::generateTag(edcTwiceDerived, 123456);
+    uint64_t counter = 123456;  // counter from ESC
+    auto tag = EDCServerCollection::generateTag(&hmacCtx, edcTwiceDerived, counter);
 
-    FLE2IndexedEqualityEncryptedValueV2 serverPayload(iupayload, tag, 123456);
+    // serialize to on-disk format
+    auto serverPayload =
+        FLE2IndexedEqualityEncryptedValueV2::fromUnencrypted(iupayload, tag, counter);
+    auto buf = uassertStatusOK(serverPayload.serialize());
 
-    auto swBuf = serverPayload.serialize(serverEncryptToken, serverDerivedFromDataToken);
-    ASSERT_OK(swBuf.getStatus());
+    // We expect the serialized buffer to contain FLE subtype (1 byte), UUID (16), BSON type (1),
+    // CTR-encrypted client value (16 byte IV + ciphertext) + metadata block (96)
+    const size_t expectedSize = 1 + UUID::kNumBytes + 1 +
+        (crypto::aesCTRIVSize + iupayload.getValue().length()) +
+        sizeof(FLE2TagAndEncryptedMetadataBlock::SerializedBlob);
+    ASSERT_EQ(buf.size(), expectedSize);
 
-    auto swParsedType = FLE2IndexedEqualityEncryptedValueV2::readBsonType(swBuf.getValue());
-    ASSERT_OK(swParsedType.getStatus());
-    ASSERT_EQ(swParsedType.getValue(), iupayload.getType());
+    // parse it back
+    FLE2IndexedEqualityEncryptedValueV2 parsed(buf);
 
-    auto swParsedUuid = FLE2IndexedEqualityEncryptedValueV2::readKeyId(swBuf.getValue());
-    ASSERT_OK(swParsedUuid.getStatus());
-    ASSERT_EQ(swParsedUuid.getValue(), iupayload.getIndexKeyId());
+    // validate the original & parsed objects have identical values
+    ASSERT_EQ(serverPayload, parsed);
 
-    auto swDecryptedValue = FLE2IndexedEqualityEncryptedValueV2::parseAndDecryptCiphertext(
-        serverEncryptToken, swBuf.getValue());
-    ASSERT_OK(swDecryptedValue.getStatus());
-    auto& clientEncryptedValue = swDecryptedValue.getValue();
-    ASSERT(clientEncryptedValue == serverPayload.clientEncryptedValue);
-    ASSERT_EQ(serverPayload.clientEncryptedValue.size(), value.length());
-    ASSERT(std::equal(serverPayload.clientEncryptedValue.begin(),
-                      serverPayload.clientEncryptedValue.end(),
-                      value.data<uint8_t>()));
+    // validate individual fields have expected values
+    ASSERT_EQ(parsed.getKeyId(), indexKeyId);
+    ASSERT_EQ(parsed.getBsonType(), element.type());
+    ASSERT_EQ(parsed.getMetadataBlockTag(), tag);
 
-    auto swMetadata = FLE2IndexedEqualityEncryptedValueV2::parseAndDecryptMetadataBlock(
-        serverDerivedFromDataToken, swBuf.getValue());
-    ASSERT_OK(swMetadata.getStatus());
-    auto& metadataBlock = swMetadata.getValue();
-    ASSERT_EQ(metadataBlock.contentionFactor, counter);
-    ASSERT_EQ(metadataBlock.count, 123456);
-    ASSERT(metadataBlock.tag == tag);
-    ASSERT_TRUE(metadataBlock.isValidZerosBlob(metadataBlock.zeros));
+    // verify the server-encrypted value decrypts back to client-encrypted value
+    auto clientEncryptedValue = uassertStatusOK(
+        FLEUtil::decryptData(serverEncryptToken.toCDR(), parsed.getServerEncryptedValue()));
+    ASSERT_EQ(clientEncryptedValue.size(), value.length());
+    ASSERT(std::equal(
+        clientEncryptedValue.begin(), clientEncryptedValue.end(), value.data<uint8_t>()));
 
-    auto swTag = FLE2IndexedEqualityEncryptedValueV2::parseMetadataBlockTag(swBuf.getValue());
-    ASSERT_OK(swTag.getStatus());
-    ASSERT_EQ(swTag.getValue(), tag);
+    // verify the metadata blocks have the correct values after decrypt
+    auto mblock = parsed.getRawMetadataBlock();
+    auto zeros = uassertStatusOK(mblock.decryptZerosBlob(
+        ServerZerosEncryptionToken::deriveFrom(serverDerivedFromDataToken)));
+    ASSERT_TRUE(FLE2TagAndEncryptedMetadataBlock::isValidZerosBlob(zeros));
+
+    auto counterPair = uassertStatusOK(mblock.decryptCounterAndContentionFactorPair(
+        ServerCountAndContentionFactorEncryptionToken::deriveFrom(serverDerivedFromDataToken)));
+    ASSERT_EQ(counterPair.counter, counter);
+    ASSERT_EQ(counterPair.contentionFactor, contention);
+
+    ASSERT_TRUE(areBuffersEqual(mblock.getView().tag, tag));
 }
 
-TEST(FLE_EDC, ServerSide_Payloads_V2_InvalidArgs) {
+TEST_F(ServiceContextTest, FLE_EDC_ServerSide_Equality_Payloads_V2_InvalidArgs) {
     TestKeyVault keyVault;
-    auto value = ConstDataRange(0, 0);
+    auto emptyValue = ConstDataRange(0, 0);
     PrfBlock bogusTag;
     FLE2InsertUpdatePayloadV2 iupayload;
-    auto bogusEncryptedTokens = StateCollectionTokensV2({{}}, false).encrypt({{}});
+    auto bogusEncryptedTokens = StateCollectionTokensV2({{}}, false, boost::none).encrypt({{}});
 
-    iupayload.setValue(value);
-    iupayload.setType(BSONType::NumberLong);
+    iupayload.setType(stdx::to_underlying(BSONType::numberLong));
     iupayload.setContentionFactor(0);
     iupayload.setIndexKeyId(indexKeyId);
     iupayload.setEdcDerivedToken({{}});
@@ -1679,168 +1775,108 @@ TEST(FLE_EDC, ServerSide_Payloads_V2_InvalidArgs) {
     iupayload.setServerDerivedFromDataToken({{}});
     iupayload.setEncryptedTokens(bogusEncryptedTokens);
 
-    std::vector<EdgeTokenSetV2> tokens;
-    EdgeTokenSetV2 ets;
-    ets.setEdcDerivedToken({{}});
-    ets.setEscDerivedToken({{}});
-    ets.setServerDerivedFromDataToken({{}});
-    ets.setEncryptedTokens(bogusEncryptedTokens);
-
-    tokens.push_back(ets);
-    tokens.push_back(ets);
-
-    iupayload.setEdgeTokenSet(tokens);
-
-    // Test bogus client encrypted value fails for FLE2 indexed equality value v2
-    ASSERT_THROWS_CODE(
-        FLE2IndexedEqualityEncryptedValueV2(iupayload, bogusTag, 0), DBException, 7290804);
-
-    ASSERT_THROWS_CODE(
-        FLE2IndexedEqualityEncryptedValueV2(BSONType::NumberLong,
-                                            indexKeyId,
-                                            std::vector<uint8_t>(),
-                                            FLE2TagAndEncryptedMetadataBlock(0, 0, bogusTag)),
-        DBException,
-        7290804);
-
-    // Test bogus client encrypted value fails for FLE2 indexed range value v2
-    ASSERT_THROWS_CODE(
-        FLE2IndexedRangeEncryptedValueV2(iupayload, {bogusTag}, {0}), DBException, 7290902);
-
-    std::vector<uint8_t> arr{0x12, 0x34};
-    iupayload.setValue(arr);
-
-    iupayload.setType(100);
-
-    // Test setting bogus type byte throws
-    ASSERT_THROWS_CODE(
-        FLE2IndexedEqualityEncryptedValueV2(iupayload, bogusTag, 0), DBException, 7290803);
-
-    ASSERT_THROWS_CODE(
-        FLE2IndexedRangeEncryptedValueV2(iupayload, {bogusTag}, {0}), DBException, 7290901);
-
-    // Test mismatch vector length throws for range encrypted value v2
-    ASSERT_THROWS_CODE(FLE2IndexedRangeEncryptedValueV2(iupayload, {bogusTag, bogusTag}, {0}),
+    // Test bad BSON Type
+    iupayload.setType(-9);
+    ASSERT_THROWS_CODE(FLE2IndexedEqualityEncryptedValueV2::fromUnencrypted(iupayload, bogusTag, 0),
                        DBException,
-                       7290900);
+                       9697301);
+
+    // Test unsupported BSON type for equality
+    iupayload.setType(stdx::to_underlying(BSONType::maxKey));
+    ASSERT_THROWS_CODE(FLE2IndexedEqualityEncryptedValueV2::fromUnencrypted(iupayload, bogusTag, 0),
+                       DBException,
+                       7291906);
+    iupayload.setType(stdx::to_underlying(BSONType::numberLong));
+
+    // Test empty client encrypted value
+    iupayload.setValue(emptyValue);
+    ASSERT_THROWS_CODE(FLE2IndexedEqualityEncryptedValueV2::fromUnencrypted(iupayload, bogusTag, 0),
+                       DBException,
+                       9697302);
 }
 
-TEST(FLE_EDC, ServerSide_Payloads_V2_ParseInvalidInput) {
+TEST_F(ServiceContextTest, FLE_EDC_ServerSide_Payloads_V2_ParseInvalidInput) {
     ConstDataRange empty(0, 0);
-    auto serverToken =
-        FLELevel1TokenGenerator::generateServerDataEncryptionLevel1Token(getIndexKey());
+    auto serverToken = ServerDataEncryptionLevel1Token::deriveFrom(getIndexKey());
     ServerDerivedFromDataToken serverDataDerivedToken(serverToken.asPrfBlock());
 
-    constexpr size_t cipherTextSize = 32;
-    constexpr size_t typeOffset = UUID::kNumBytes;
+    // cipherTextSize minimum enforced by libmongocrypt is 17 (16 byte IV + 1 byte CTR)
+    constexpr size_t minCipherTextLen = 17;
+    constexpr size_t mblockSize = sizeof(FLE2TagAndEncryptedMetadataBlock::SerializedBlob);
+    constexpr size_t typeOffset = 1 + UUID::kNumBytes;
     constexpr size_t edgeCountOffset = typeOffset + 1;
 
-    std::vector<uint8_t> shortInput(edgeCountOffset + 1);
-    shortInput.at(typeOffset) = static_cast<uint8_t>(BSONType::Bool);
-    shortInput.at(edgeCountOffset) = 1;
+    std::vector<uint8_t> equalityInput(1 + UUID::kNumBytes + 1 + minCipherTextLen + mblockSize);
+    equalityInput.at(0) = static_cast<uint8_t>(EncryptedBinDataType::kFLE2EqualityIndexedValueV2);
+    std::vector<uint8_t> rangeInput(1 + UUID::kNumBytes + 1 + 1 + minCipherTextLen + mblockSize);
+    rangeInput.at(0) = static_cast<uint8_t>(EncryptedBinDataType::kFLE2RangeIndexedValueV2);
+    rangeInput.at(edgeCountOffset) = 1;
 
-    // test short input for equality payload
-    ASSERT_THROWS_CODE(FLE2IndexedEqualityEncryptedValueV2::parseAndValidateFields(shortInput),
-                       DBException,
-                       7290802);
-    ASSERT_THROWS_CODE(
-        FLE2IndexedEqualityEncryptedValueV2::readKeyId(shortInput), DBException, 7290802);
-    ASSERT_THROWS_CODE(
-        FLE2IndexedEqualityEncryptedValueV2::readBsonType(shortInput), DBException, 7290802);
-    ASSERT_THROWS_CODE(
-        FLE2IndexedEqualityEncryptedValueV2::parseAndDecryptCiphertext(serverToken, shortInput),
-        DBException,
-        7290802);
-    ASSERT_THROWS_CODE(FLE2IndexedEqualityEncryptedValueV2::parseAndDecryptMetadataBlock(
-                           serverDataDerivedToken, shortInput),
-                       DBException,
-                       7290802);
-    ASSERT_THROWS_CODE(FLE2IndexedEqualityEncryptedValueV2::parseMetadataBlockTag(shortInput),
-                       DBException,
-                       7290802);
+    // first, test that the shortest valid buffers can be parsed successfully
+    ASSERT_DOES_NOT_THROW(FLE2IndexedEqualityEncryptedValueV2{equalityInput});
+    ASSERT_DOES_NOT_THROW(FLE2IndexedRangeEncryptedValueV2{rangeInput});
 
-    // test short input for range payload
-    ASSERT_THROWS_CODE(
-        FLE2IndexedRangeEncryptedValueV2::parseAndValidateFields(shortInput), DBException, 7290908);
-    ASSERT_THROWS_CODE(
-        FLE2IndexedRangeEncryptedValueV2::readKeyId(shortInput), DBException, 7290908);
-    ASSERT_THROWS_CODE(
-        FLE2IndexedRangeEncryptedValueV2::readBsonType(shortInput), DBException, 7290908);
-    ASSERT_THROWS_CODE(
-        FLE2IndexedRangeEncryptedValueV2::parseAndDecryptCiphertext(serverToken, shortInput),
-        DBException,
-        7290908);
-    ASSERT_THROWS_CODE(FLE2IndexedRangeEncryptedValueV2::parseAndDecryptMetadataBlocks(
-                           {serverDataDerivedToken}, shortInput),
-                       DBException,
-                       7290908);
-    ASSERT_THROWS_CODE(
-        FLE2IndexedRangeEncryptedValueV2::parseMetadataBlockTags(shortInput), DBException, 7290908);
+    // test parsing equality as range fails
+    ASSERT_THROWS_CODE(FLE2IndexedRangeEncryptedValueV2{equalityInput}, DBException, 9588706);
 
-    // test bad bson type for equality payload
-    std::vector<uint8_t> badTypeInput(edgeCountOffset + 1 + cipherTextSize +
-                                      sizeof(FLE2TagAndEncryptedMetadataBlock::SerializedBlob));
-    badTypeInput.at(typeOffset) = 124;  // bad bsonType
-    badTypeInput.at(edgeCountOffset) = 1;
+    // test parsing range as equality fails
+    ASSERT_THROWS_CODE(FLE2IndexedEqualityEncryptedValueV2{rangeInput}, DBException, 9588708);
 
-    ASSERT_THROWS_CODE(FLE2IndexedEqualityEncryptedValueV2::parseAndValidateFields(badTypeInput),
-                       DBException,
-                       7290801);
-    ASSERT_THROWS_CODE(
-        FLE2IndexedEqualityEncryptedValueV2::readKeyId(badTypeInput), DBException, 7290801);
-    ASSERT_THROWS_CODE(
-        FLE2IndexedEqualityEncryptedValueV2::readBsonType(badTypeInput), DBException, 7290801);
-    ASSERT_THROWS_CODE(
-        FLE2IndexedEqualityEncryptedValueV2::parseAndDecryptCiphertext(serverToken, badTypeInput),
-        DBException,
-        7290801);
-    ASSERT_THROWS_CODE(FLE2IndexedEqualityEncryptedValueV2::parseAndDecryptMetadataBlock(
-                           serverDataDerivedToken, badTypeInput),
-                       DBException,
-                       7290801);
-    ASSERT_THROWS_CODE(FLE2IndexedEqualityEncryptedValueV2::parseMetadataBlockTag(badTypeInput),
-                       DBException,
-                       7290801);
+    std::vector<size_t> truncatedLengths = {
+        0, 1, 10, typeOffset, /*edgeCountOffset, edgeCountOffset + 1,
+        edgeCountOffset + 1 + mblockSize*/};
 
-    // test bad bson type for range payload
-    ASSERT_THROWS_CODE(FLE2IndexedRangeEncryptedValueV2::parseAndValidateFields(badTypeInput),
-                       DBException,
-                       7290906);
-    ASSERT_THROWS_CODE(
-        FLE2IndexedRangeEncryptedValueV2::readKeyId(badTypeInput), DBException, 7290906);
-    ASSERT_THROWS_CODE(
-        FLE2IndexedRangeEncryptedValueV2::readBsonType(badTypeInput), DBException, 7290906);
-    ASSERT_THROWS_CODE(
-        FLE2IndexedRangeEncryptedValueV2::parseAndDecryptCiphertext(serverToken, badTypeInput),
-        DBException,
-        7290906);
-    ASSERT_THROWS_CODE(FLE2IndexedRangeEncryptedValueV2::parseAndDecryptMetadataBlocks(
-                           {serverDataDerivedToken}, badTypeInput),
-                       DBException,
-                       7290906);
-    ASSERT_THROWS_CODE(FLE2IndexedRangeEncryptedValueV2::parseMetadataBlockTags(badTypeInput),
-                       DBException,
-                       7290906);
+    // test short inputs for equality payload
+    for (auto& testLength : truncatedLengths) {
+        std::vector<uint8_t> testBuf(testLength);
+        std::copy(equalityInput.begin(), equalityInput.begin() + testLength, testBuf.begin());
+        ASSERT_THROWS_CODE(FLE2IndexedEqualityEncryptedValueV2{testBuf},
+                           DBException,
+                           ErrorCodes::LibmongocryptError);
+    }
 
-    // test invalid ciphertext length for equality payload fails to decrypt
-    std::vector<uint8_t> emptyEqualityCipherText(
-        typeOffset + 1 + sizeof(FLE2TagAndEncryptedMetadataBlock::SerializedBlob));
-    emptyEqualityCipherText.at(typeOffset) = static_cast<uint8_t>(BSONType::Bool);
-    auto swDecryptedData = FLE2IndexedEqualityEncryptedValueV2::parseAndDecryptCiphertext(
-        serverToken, emptyEqualityCipherText);
-    ASSERT_NOT_OK(swDecryptedData.getStatus());
-
-    // test invalid ciphertext length for range payload fails to decrypt
-    std::vector<uint8_t> emptyRangeCipherText(
-        edgeCountOffset + 1 + sizeof(FLE2TagAndEncryptedMetadataBlock::SerializedBlob));
-    emptyRangeCipherText.at(typeOffset) = static_cast<uint8_t>(BSONType::Bool);
-    emptyRangeCipherText.at(edgeCountOffset) = 1;
-    swDecryptedData = FLE2IndexedRangeEncryptedValueV2::parseAndDecryptCiphertext(
-        serverToken, emptyRangeCipherText);
-    ASSERT_NOT_OK(swDecryptedData.getStatus());
+    // test short inputs for range payload
+    for (auto& testLength : truncatedLengths) {
+        std::vector<uint8_t> testBuf(testLength);
+        std::copy(rangeInput.begin(), rangeInput.begin() + testLength, testBuf.begin());
+        ASSERT_THROWS_CODE(
+            FLE2IndexedRangeEncryptedValueV2{testBuf}, DBException, ErrorCodes::LibmongocryptError);
+    }
 }
 
-TEST(FLE_EDC, ServerSide_Payloads_V2_IsValidZerosBlob) {
+// Test correct encryption/decryption of metadata block
+TEST_F(ServiceContextTest, FLE_EDC_ServerSide_FLE2TagAndEncryptedMetadataBlock_RoundTrip) {
+    const ServerDerivedFromDataToken token(
+        decodePrf("986F23F132FF7F14F748AC69373CFC982AD0AD4BAD25BE92008B83AB43E96029"));
+    const PrfBlock tag =
+        decodePrf("BD53ACAC665EDD01E0CA30CB648B2B8F4967544047FD4E7D12B1A9BF07339928");
+    const uint64_t count = 65;
+    const uint64_t contention = 2;
+
+    FLE2TagAndEncryptedMetadataBlock mblock;
+
+    // Trying to get a view of a mblock before encryptAndSerialize throws.
+    ASSERT_THROWS(mblock.getView(), DBException);
+
+    ASSERT_OK(mblock.encryptAndSerialize(token, count, contention, tag));
+
+    auto zerosToken = ServerZerosEncryptionToken::deriveFrom(token);
+    auto countToken = ServerCountAndContentionFactorEncryptionToken::deriveFrom(token);
+    auto view = mblock.getView();
+
+    auto swZeros = mblock.decryptZerosBlob(zerosToken);
+    ASSERT_OK(swZeros.getStatus());
+    ASSERT_TRUE(FLE2TagAndEncryptedMetadataBlock::isValidZerosBlob(swZeros.getValue()));
+
+    auto swPair = mblock.decryptCounterAndContentionFactorPair(countToken);
+    ASSERT_OK(swPair.getStatus());
+    ASSERT_EQ(count, swPair.getValue().counter);
+    ASSERT_EQ(contention, swPair.getValue().contentionFactor);
+
+    ASSERT_TRUE(areBuffersEqual(view.tag, tag));
+}
+
+TEST_F(ServiceContextTest, FLE_EDC_ServerSide_FLE2TagAndEncryptedMetadataBlock_IsValidZerosBlob) {
     FLE2TagAndEncryptedMetadataBlock::ZerosBlob zeros;
     zeros.fill(0);
     ASSERT_TRUE(FLE2TagAndEncryptedMetadataBlock::isValidZerosBlob(zeros));
@@ -1849,8 +1885,7 @@ TEST(FLE_EDC, ServerSide_Payloads_V2_IsValidZerosBlob) {
     ASSERT_FALSE(FLE2TagAndEncryptedMetadataBlock::isValidZerosBlob(zeros));
 }
 
-
-TEST(FLE_EDC, ServerSide_Range_Payloads_V2) {
+TEST_F(ServiceContextTest, FLE_EDC_ServerSide_Range_Payloads_V2) {
     TestKeyVault keyVault;
 
     auto doc = BSON("sample" << 3);
@@ -1858,50 +1893,42 @@ TEST(FLE_EDC, ServerSide_Range_Payloads_V2) {
 
     auto value = ConstDataRange(element.value(), element.value() + element.valuesize());
 
-    auto collectionToken = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
-    auto serverEncryptToken =
-        FLELevel1TokenGenerator::generateServerDataEncryptionLevel1Token(getIndexKey());
-    auto serverDerivationToken =
-        FLELevel1TokenGenerator::generateServerTokenDerivationLevel1Token(getIndexKey());
+    auto collectionToken = CollectionsLevel1Token::deriveFrom(getIndexKey());
+    auto serverEncryptToken = ServerDataEncryptionLevel1Token::deriveFrom(getIndexKey());
+    auto serverDerivationToken = ServerTokenDerivationLevel1Token::deriveFrom(getIndexKey());
 
-    auto edcToken = FLECollectionTokenGenerator::generateEDCToken(collectionToken);
-    auto escToken = FLECollectionTokenGenerator::generateESCToken(collectionToken);
-    auto ecocToken = FLECollectionTokenGenerator::generateECOCToken(collectionToken);
+    auto edcToken = EDCToken::deriveFrom(collectionToken);
+    auto escToken = ESCToken::deriveFrom(collectionToken);
+    auto ecocToken = ECOCToken::deriveFrom(collectionToken);
     auto serverDerivedFromDataToken =
-        FLEDerivedFromDataTokenGenerator::generateServerDerivedFromDataToken(serverDerivationToken,
-                                                                             value);
+        ServerDerivedFromDataToken::deriveFrom(serverDerivationToken, value);
+    FLECounter contention = 3;
 
-    FLECounter counter = 0;
-
-    EDCDerivedFromDataToken edcDatakey =
-        FLEDerivedFromDataTokenGenerator::generateEDCDerivedFromDataToken(edcToken, value);
-    ESCDerivedFromDataToken escDatakey =
-        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value);
+    EDCDerivedFromDataToken edcDatakey = EDCDerivedFromDataToken::deriveFrom(edcToken, value);
+    ESCDerivedFromDataToken escDatakey = ESCDerivedFromDataToken::deriveFrom(escToken, value);
 
     ESCDerivedFromDataTokenAndContentionFactorToken escDataCounterkey =
-        FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-            generateESCDerivedFromDataTokenAndContentionFactorToken(escDatakey, counter);
+        ESCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(escDatakey, contention);
     EDCDerivedFromDataTokenAndContentionFactorToken edcDataCounterkey =
-        FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-            generateEDCDerivedFromDataTokenAndContentionFactorToken(edcDatakey, counter);
+        EDCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(edcDatakey, contention);
 
     FLE2InsertUpdatePayloadV2 iupayload;
-
     iupayload.setEdcDerivedToken(edcDataCounterkey);
     iupayload.setEscDerivedToken(escDataCounterkey);
     iupayload.setServerEncryptionToken(serverEncryptToken);
     iupayload.setServerDerivedFromDataToken(serverDerivedFromDataToken);
 
     auto encryptedTokens =
-        StateCollectionTokensV2(escDataCounterkey, false /* isLeaf */).encrypt(ecocToken);
+        StateCollectionTokensV2(escDataCounterkey, false /* isLeaf */, boost::none)
+            .encrypt(ecocToken);
     ASSERT_EQ(encryptedTokens.toCDR().length(), crypto::aesCTRIVSize + sizeof(PrfBlock) + 1);
     iupayload.setEncryptedTokens(encryptedTokens);
     iupayload.setIndexKeyId(indexKeyId);
 
     iupayload.setValue(value);
-    iupayload.setType(element.type());
+    iupayload.setType(stdx::to_underlying(element.type()));
 
-    iupayload.setContentionFactor(counter);
+    iupayload.setContentionFactor(contention);
 
     std::vector<EdgeTokenSetV2> tokens;
     EdgeTokenSetV2 ets;
@@ -1915,84 +1942,554 @@ TEST(FLE_EDC, ServerSide_Range_Payloads_V2) {
 
     iupayload.setEdgeTokenSet(tokens);
 
-    auto edcTwiceDerived =
-        FLETwiceDerivedTokenGenerator::generateEDCTwiceDerivedToken(edcDataCounterkey);
+    auto edcTwiceDerived = EDCTwiceDerivedToken::deriveFrom(edcDataCounterkey);
 
-    auto tag = EDCServerCollection::generateTag(edcTwiceDerived, 123456);
-
+    std::vector<uint64_t> counters = {123456, 456789};
     std::vector<PrfBlock> tags;
-    tags.push_back(tag);
-    tags.push_back(tag);
+    std::transform(counters.begin(), counters.end(), std::back_inserter(tags), [&](uint64_t ct) {
+        return EDCServerCollection::generateTag(&hmacCtx, edcTwiceDerived, ct);
+    });
 
-    FLE2IndexedRangeEncryptedValueV2 serverPayload(iupayload, tags, {123456, 123456});
+    // serialize to on-disk format
+    auto serverPayload =
+        FLE2IndexedRangeEncryptedValueV2::fromUnencrypted(iupayload, tags, counters);
+    auto buf = uassertStatusOK(serverPayload.serialize());
 
-    std::vector<ServerDerivedFromDataToken> derivedDataTokens;
-    derivedDataTokens.push_back(serverDerivedFromDataToken);
-    derivedDataTokens.push_back(serverDerivedFromDataToken);
+    const size_t expectedSize = 1 + UUID::kNumBytes + 1 + sizeof(uint8_t) +
+        (crypto::aesCTRIVSize + iupayload.getValue().length()) +
+        (tags.size() * sizeof(FLE2TagAndEncryptedMetadataBlock::SerializedBlob));
+    ASSERT_EQ(buf.size(), expectedSize);
 
-    auto swBuf = serverPayload.serialize(serverEncryptToken, derivedDataTokens);
-    ASSERT_OK(swBuf.getStatus());
+    // parse it back
+    FLE2IndexedRangeEncryptedValueV2 parsed(buf);
 
-    {
-        // Test that serialize and parseAndDecryptMetadataBlocks don't work with derivedDataTokens
-        // of incorrect length.
-        std::vector<ServerDerivedFromDataToken> derivedDataTokensBad = derivedDataTokens;
-        derivedDataTokensBad.push_back(serverDerivedFromDataToken);
-        ASSERT_THROWS_CODE(serverPayload.serialize(serverEncryptToken, derivedDataTokensBad),
-                           DBException,
-                           7290909);
+    // validate the original & parsed objects have identical values
+    ASSERT_EQ(serverPayload, parsed);
 
-        ASSERT_THROWS_CODE(FLE2IndexedRangeEncryptedValueV2::parseAndDecryptMetadataBlocks(
-                               derivedDataTokensBad, swBuf.getValue()),
-                           DBException,
-                           7290907);
+    // validate individual fields have expected values
+    ASSERT_EQ(parsed.getKeyId(), indexKeyId);
+    ASSERT_EQ(parsed.getBsonType(), element.type());
+    ASSERT_EQ(parsed.getTagCount(), tags.size());
+
+    // verify the server-encrypted value decrypts back to client-encrypted value
+    auto clientEncryptedValue = uassertStatusOK(
+        FLEUtil::decryptData(serverEncryptToken.toCDR(), parsed.getServerEncryptedValue()));
+    ASSERT_EQ(clientEncryptedValue.size(), value.length());
+    ASSERT(std::equal(
+        clientEncryptedValue.begin(), clientEncryptedValue.end(), value.data<uint8_t>()));
+
+    // verify the metadata blocks have the correct values after decrypt
+    auto mblocks = parsed.getMetadataBlocks();
+    ASSERT_EQ(mblocks.size(), tags.size());
+    auto zeroEncryptToken = ServerZerosEncryptionToken::deriveFrom(serverDerivedFromDataToken);
+    auto counterEncryptToken =
+        ServerCountAndContentionFactorEncryptionToken::deriveFrom(serverDerivedFromDataToken);
+
+    for (size_t i = 0; i < mblocks.size(); i++) {
+        auto zeros = uassertStatusOK(mblocks[i].decryptZerosBlob(zeroEncryptToken));
+        ASSERT_TRUE(FLE2TagAndEncryptedMetadataBlock::isValidZerosBlob(zeros));
+
+        auto counterPair =
+            uassertStatusOK(mblocks[i].decryptCounterAndContentionFactorPair(counterEncryptToken));
+        ASSERT_EQ(counterPair.counter, counters[i]);
+        ASSERT_EQ(counterPair.contentionFactor, contention);
+
+        ASSERT_TRUE(areBuffersEqual(mblocks[i].getView().tag, tags[i]));
     }
-
-    auto swIndexKeyId = FLE2IndexedRangeEncryptedValueV2::readKeyId(swBuf.getValue());
-    ASSERT_OK(swIndexKeyId.getStatus());
-
-    auto swBsonType = FLE2IndexedRangeEncryptedValueV2::readBsonType(swBuf.getValue());
-    ASSERT_OK(swBsonType.getStatus());
-
-    auto swDecryptedValue = FLE2IndexedRangeEncryptedValueV2::parseAndDecryptCiphertext(
-        serverEncryptToken, swBuf.getValue());
-    ASSERT_OK(swDecryptedValue.getStatus());
-    auto& clientEncryptedValue = swDecryptedValue.getValue();
-
-    auto swBlocks = FLE2IndexedRangeEncryptedValueV2::parseAndDecryptMetadataBlocks(
-        derivedDataTokens, swBuf.getValue());
-    ASSERT_OK(swBlocks.getStatus());
-    auto& metadataBlocks = swBlocks.getValue();
-
-    ASSERT_EQ(swBsonType.getValue(), iupayload.getType());
-    ASSERT(swIndexKeyId.getValue() == iupayload.getIndexKeyId());
-
-    ASSERT_EQ(metadataBlocks.size(), 2);
-    for (size_t i = 0; i < metadataBlocks.size(); i++) {
-        ASSERT_EQ(metadataBlocks[i].contentionFactor, counter);
-        ASSERT_EQ(metadataBlocks[i].count, 123456);
-        ASSERT(metadataBlocks[i].tag == tag);
-    }
-
-    ASSERT(clientEncryptedValue == serverPayload.clientEncryptedValue);
-    ASSERT_EQ(serverPayload.clientEncryptedValue.size(), value.length());
-    ASSERT(std::equal(serverPayload.clientEncryptedValue.begin(),
-                      serverPayload.clientEncryptedValue.end(),
-                      value.data<uint8_t>()));
-
-    auto swTags = FLE2IndexedRangeEncryptedValueV2::parseMetadataBlockTags(swBuf.getValue());
-    ASSERT_OK(swTags.getStatus());
-    ASSERT_EQ(swTags.getValue().size(), 2);
-    ASSERT(swTags.getValue()[0] == tag);
-    ASSERT(swTags.getValue()[1] == tag);
 }
 
-TEST(FLE_EDC, DuplicateSafeContent_CompatibleType) {
+TEST_F(ServiceContextTest, FLE_EDC_ServerSide_Range_Payloads_V2_InvalidArgs) {
+    TestKeyVault keyVault;
+    auto doc = BSON("sample" << 3);
+    auto element = doc.firstElement();
+    auto value = ConstDataRange(element.value(), element.value() + element.valuesize());
+
+    FLE2InsertUpdatePayloadV2 iupayload;
+
+    iupayload.setValue(value);
+    iupayload.setType(stdx::to_underlying(BSONType::numberLong));
+    iupayload.setContentionFactor(0);
+    iupayload.setIndexKeyId(indexKeyId);
+    iupayload.setEdcDerivedToken({{}});
+    iupayload.setEscDerivedToken({{}});
+    iupayload.setServerEncryptionToken({{}});
+    iupayload.setServerDerivedFromDataToken({{}});
+
+    auto fakeEncryptedTokens = StateCollectionTokensV2({{}}, false, boost::none).encrypt({{}});
+    iupayload.setEncryptedTokens(fakeEncryptedTokens);
+    PrfBlock fakeTag;
+
+    // test no edge token set in iupayload
+    {
+        ASSERT_THROWS_CODE(
+            FLE2IndexedRangeEncryptedValueV2::fromUnencrypted(iupayload, {fakeTag}, {0}),
+            DBException,
+            9588700);
+    }
+
+    std::vector<EdgeTokenSetV2> tokens;
+    EdgeTokenSetV2 ets;
+    ets.setEdcDerivedToken({{}});
+    ets.setEscDerivedToken({{}});
+    ets.setServerDerivedFromDataToken({{}});
+    ets.setEncryptedTokens(fakeEncryptedTokens);
+    tokens.push_back(ets);
+    iupayload.setEdgeTokenSet(tokens);
+
+    // test bad bson type in iupayload
+    {
+        iupayload.setType(255);
+        ASSERT_THROWS_CODE(
+            FLE2IndexedRangeEncryptedValueV2::fromUnencrypted(iupayload, {fakeTag}, {0}),
+            DBException,
+            9588701);
+
+        iupayload.setType(stdx::to_underlying(BSONType::string));
+        ASSERT_THROWS_CODE(
+            FLE2IndexedRangeEncryptedValueV2::fromUnencrypted(iupayload, {fakeTag}, {0}),
+            DBException,
+            7291908);
+        iupayload.setType(stdx::to_underlying(BSONType::numberLong));
+    }
+
+    // test tags and counters vectors don't match the edge count
+    {
+        ASSERT_THROWS_CODE(
+            FLE2IndexedRangeEncryptedValueV2::fromUnencrypted(iupayload, {fakeTag, fakeTag}, {0}),
+            DBException,
+            9588703);
+        ASSERT_THROWS_CODE(
+            FLE2IndexedRangeEncryptedValueV2::fromUnencrypted(iupayload, {fakeTag}, {0, 1}),
+            DBException,
+            9588704);
+    }
+
+    // test empty client ciphertext
+    {
+        iupayload.setValue(ConstDataRange{0, 0});
+        ASSERT_THROWS_CODE(
+            FLE2IndexedRangeEncryptedValueV2::fromUnencrypted(iupayload, {fakeTag}, {0}),
+            DBException,
+            9588705);
+        iupayload.setValue(value);
+    }
+
+    // test edge count over limit
+    {
+        std::vector<EdgeTokenSetV2> t(EncryptionInformationHelpers::kFLE2PerFieldTagLimit + 1);
+        std::vector<PrfBlock> tags(EncryptionInformationHelpers::kFLE2PerFieldTagLimit + 1);
+        std::vector<uint64_t> counts(EncryptionInformationHelpers::kFLE2PerFieldTagLimit + 1);
+        std::for_each(t.begin(), t.end(), [&](EdgeTokenSetV2 ets) {
+            ets.setEdcDerivedToken({{}});
+            ets.setEscDerivedToken({{}});
+            ets.setServerDerivedFromDataToken({{}});
+            ets.setEncryptedTokens(fakeEncryptedTokens);
+        });
+        iupayload.setEdgeTokenSet(t);
+
+        ASSERT_THROWS_CODE(
+            FLE2IndexedRangeEncryptedValueV2::fromUnencrypted(iupayload, tags, counts),
+            DBException,
+            9588702);
+    }
+}
+
+static FLE2InsertUpdatePayloadV2 generateTestIUPV2ForTextSearch(BSONElement element) {
+    FLE2InsertUpdatePayloadV2 iupayload;
+    const FLECounter contention = 0;
+    auto value = ConstDataRange(element.value(), element.value() + element.valuesize());
+
+    auto collectionToken = CollectionsLevel1Token::deriveFrom(getIndexKey());
+    auto serverEncryptToken = ServerDataEncryptionLevel1Token::deriveFrom(getIndexKey());
+    auto serverDerivationToken = ServerTokenDerivationLevel1Token::deriveFrom(getIndexKey());
+    auto edcToken = EDCToken::deriveFrom(collectionToken);
+    auto escToken = ESCToken::deriveFrom(collectionToken);
+    auto ecocToken = ECOCToken::deriveFrom(collectionToken);
+
+    PrfBlock nullBlock;
+    // d, s, l, p are bogus data
+    iupayload.setEdcDerivedToken(EDCDerivedFromDataTokenAndContentionFactorToken(nullBlock));
+    iupayload.setEscDerivedToken(ESCDerivedFromDataTokenAndContentionFactorToken(nullBlock));
+    iupayload.setServerDerivedFromDataToken(ServerDerivedFromDataToken(nullBlock));
+    iupayload.setEncryptedTokens(
+        StateCollectionTokensV2(iupayload.getEscDerivedToken(), boost::none, 0).encrypt(ecocToken));
+    // u, t, v, e, k
+    iupayload.setIndexKeyId(indexKeyId);
+    iupayload.setType(stdx::to_underlying(element.type()));
+    iupayload.setValue(value);
+    iupayload.setServerEncryptionToken(serverEncryptToken);
+    iupayload.setContentionFactor(contention);
+    // b
+    iupayload.setTextSearchTokenSets(TextSearchTokenSets{{}, {}, {}, {}});
+    auto& tsts = iupayload.getTextSearchTokenSets().value();
+    {
+        auto& exact = tsts.getExactTokenSet();
+        auto edcDataDerivedToken = EDCTextExactDerivedFromDataToken::deriveFrom(
+            EDCTextExactToken::deriveFrom(edcToken), value);
+        auto escDataDerivedToken = ESCTextExactDerivedFromDataToken::deriveFrom(
+            ESCTextExactToken::deriveFrom(escToken), value);
+        exact.setEdcDerivedToken(
+            EDCTextExactDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+                edcDataDerivedToken, contention));
+        exact.setEscDerivedToken(
+            ESCTextExactDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+                escDataDerivedToken, contention));
+        exact.setServerDerivedFromDataToken(ServerTextExactDerivedFromDataToken::deriveFrom(
+            ServerTextExactToken::deriveFrom(serverDerivationToken), value));
+        exact.setEncryptedTokens(
+            StateCollectionTokensV2(ESCDerivedFromDataTokenAndContentionFactorToken(
+                                        exact.getEscDerivedToken().asPrfBlock()),
+                                    boost::none,
+                                    1 /* msize */)
+                .encrypt(ecocToken));
+    }
+    return iupayload;
+}
+
+static void generateTextTokenSetsForIUPV2(FLE2InsertUpdatePayloadV2& iupayload,
+                                          const std::vector<StringData>& strings,
+                                          QueryTypeEnum type,
+                                          uint32_t contention = 0) {
+    if (!iupayload.getTextSearchTokenSets().has_value()) {
+        iupayload.setTextSearchTokenSets(TextSearchTokenSets{{}, {}, {}, {}});
+    }
+    auto& tsts = iupayload.getTextSearchTokenSets().value();
+
+    auto collectionToken = CollectionsLevel1Token::deriveFrom(getIndexKey());
+    auto serverEncryptToken = ServerDataEncryptionLevel1Token::deriveFrom(getIndexKey());
+    auto serverDerivationToken = ServerTokenDerivationLevel1Token::deriveFrom(getIndexKey());
+    auto edcToken = EDCToken::deriveFrom(collectionToken);
+    auto escToken = ESCToken::deriveFrom(collectionToken);
+    auto ecocToken = ECOCToken::deriveFrom(collectionToken);
+
+    for (const auto& str : strings) {
+        auto doc = BSON("" << str);
+        auto element = doc.firstElement();
+        auto value = ConstDataRange(element.value(), element.value() + element.valuesize());
+
+        if (type == QueryTypeEnum::SubstringPreview) {
+            tsts.getSubstringTokenSets().push_back({});
+            auto& ts = tsts.getSubstringTokenSets().back();
+            auto edcDataDerivedToken = EDCTextSubstringDerivedFromDataToken::deriveFrom(
+                EDCTextSubstringToken::deriveFrom(edcToken), value);
+            auto escDataDerivedToken = ESCTextSubstringDerivedFromDataToken::deriveFrom(
+                ESCTextSubstringToken::deriveFrom(escToken), value);
+
+            ts.setEdcDerivedToken(
+                EDCTextSubstringDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+                    edcDataDerivedToken, contention));
+            ts.setEscDerivedToken(
+                ESCTextSubstringDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+                    escDataDerivedToken, contention));
+            ts.setServerDerivedFromDataToken(ServerTextSubstringDerivedFromDataToken::deriveFrom(
+                ServerTextSubstringToken::deriveFrom(serverDerivationToken), value));
+            ts.setEncryptedTokens(
+                StateCollectionTokensV2(ESCDerivedFromDataTokenAndContentionFactorToken(
+                                            ts.getEscDerivedToken().asPrfBlock()),
+                                        boost::none,
+                                        0 /* msize */)
+                    .encrypt(ecocToken));
+        } else if (type == QueryTypeEnum::SuffixPreview) {
+            tsts.getSuffixTokenSets().push_back({});
+            auto& ts = tsts.getSuffixTokenSets().back();
+            auto edcDataDerivedToken = EDCTextSuffixDerivedFromDataToken::deriveFrom(
+                EDCTextSuffixToken::deriveFrom(edcToken), value);
+            auto escDataDerivedToken = ESCTextSuffixDerivedFromDataToken::deriveFrom(
+                ESCTextSuffixToken::deriveFrom(escToken), value);
+
+            ts.setEdcDerivedToken(
+                EDCTextSuffixDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+                    edcDataDerivedToken, contention));
+            ts.setEscDerivedToken(
+                ESCTextSuffixDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+                    escDataDerivedToken, contention));
+            ts.setServerDerivedFromDataToken(ServerTextSuffixDerivedFromDataToken::deriveFrom(
+                ServerTextSuffixToken::deriveFrom(serverDerivationToken), value));
+            ts.setEncryptedTokens(
+                StateCollectionTokensV2(ESCDerivedFromDataTokenAndContentionFactorToken(
+                                            ts.getEscDerivedToken().asPrfBlock()),
+                                        boost::none,
+                                        0 /* msize */)
+                    .encrypt(ecocToken));
+        } else if (type == QueryTypeEnum::PrefixPreview) {
+            tsts.getPrefixTokenSets().push_back({});
+            auto& ts = tsts.getPrefixTokenSets().back();
+            auto edcDataDerivedToken = EDCTextPrefixDerivedFromDataToken::deriveFrom(
+                EDCTextPrefixToken::deriveFrom(edcToken), value);
+            auto escDataDerivedToken = ESCTextPrefixDerivedFromDataToken::deriveFrom(
+                ESCTextPrefixToken::deriveFrom(escToken), value);
+
+            ts.setEdcDerivedToken(
+                EDCTextPrefixDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+                    edcDataDerivedToken, contention));
+            ts.setEscDerivedToken(
+                ESCTextPrefixDerivedFromDataTokenAndContentionFactorToken::deriveFrom(
+                    escDataDerivedToken, contention));
+            ts.setServerDerivedFromDataToken(ServerTextPrefixDerivedFromDataToken::deriveFrom(
+                ServerTextPrefixToken::deriveFrom(serverDerivationToken), value));
+            ts.setEncryptedTokens(
+                StateCollectionTokensV2(ESCDerivedFromDataTokenAndContentionFactorToken(
+                                            ts.getEscDerivedToken().asPrfBlock()),
+                                        boost::none,
+                                        0 /* msize */)
+                    .encrypt(ecocToken));
+        }
+    }
+}
+
+static std::vector<ServerDerivedFromDataToken> collectServerDerivedFromDataTokensForTextSearch(
+    FLE2InsertUpdatePayloadV2& iupayload) {
+    std::vector<ServerDerivedFromDataToken> tokens;
+    if (!iupayload.getTextSearchTokenSets().has_value()) {
+        return tokens;
+    }
+    tokens.emplace_back(iupayload.getTextSearchTokenSets()
+                            ->getExactTokenSet()
+                            .getServerDerivedFromDataToken()
+                            .asPrfBlock());
+    for (auto& ts : iupayload.getTextSearchTokenSets()->getSubstringTokenSets()) {
+        tokens.emplace_back(ts.getServerDerivedFromDataToken().asPrfBlock());
+    }
+    for (auto& ts : iupayload.getTextSearchTokenSets()->getSuffixTokenSets()) {
+        tokens.emplace_back(ts.getServerDerivedFromDataToken().asPrfBlock());
+    }
+    for (auto& ts : iupayload.getTextSearchTokenSets()->getPrefixTokenSets()) {
+        tokens.emplace_back(ts.getServerDerivedFromDataToken().asPrfBlock());
+    }
+    return tokens;
+}
+
+// Tests round trip unparse/parse of FLE2IndexedTextEncryptedValue
+TEST_F(ServiceContextTest, FLE_EDC_ServerSide_TextSearch_Payloads) {
+    auto doc = BSON("sample" << "ssssssssss");
+
+    EDCServerPayloadInfo payload;
+    auto& iupayload = payload.payload = generateTestIUPV2ForTextSearch(doc.firstElement());
+
+    std::vector<StringData> substrs = {"s", "ss", "sss", "ssss"};
+    std::vector<StringData> suffixes = {"s", "ss"};
+    std::vector<StringData> prefixes = {"s", "ss", "sss"};
+
+    // Append fake padding strings > 255 to ensure tag counts over 8 bits long are ok.
+    for (int i = 1; i <= 300; i++) {
+        substrs.push_back("fake"_sd);
+        suffixes.push_back("fake"_sd);
+        prefixes.push_back("fake"_sd);
+    }
+
+    const size_t tagCount = 1 + substrs.size() + suffixes.size() + prefixes.size();
+
+    generateTextTokenSetsForIUPV2(iupayload, substrs, QueryTypeEnum::SubstringPreview);
+    generateTextTokenSetsForIUPV2(iupayload, suffixes, QueryTypeEnum::SuffixPreview);
+    generateTextTokenSetsForIUPV2(iupayload, prefixes, QueryTypeEnum::PrefixPreview);
+
+    payload.counts = std::vector<uint64_t>(tagCount);
+    std::iota(payload.counts.begin(), payload.counts.end(), 1);  // fill with values 1...tagCount
+
+    std::vector<PrfBlock> tags = EDCServerCollection::generateTagsForTextSearch(payload);
+    ASSERT_EQ(tags.size(), tagCount);
+
+    // serialize to on-disk format
+    auto serverPayload =
+        FLE2IndexedTextEncryptedValue::fromUnencrypted(iupayload, tags, payload.counts);
+    auto buf = uassertStatusOK(serverPayload.serialize());
+
+    const size_t expectedSize = 1 + UUID::kNumBytes + 1 + (3 * sizeof(uint32_t)) +
+        (crypto::aesCTRIVSize + iupayload.getValue().length()) +
+        (tagCount * sizeof(FLE2TagAndEncryptedMetadataBlock::SerializedBlob));
+    ASSERT_EQ(buf.size(), expectedSize);
+
+    // parse it back
+    FLE2IndexedTextEncryptedValue parsed(buf);
+
+    // validate the original & parsed objects have identical values
+    ASSERT_EQ(serverPayload, parsed);
+
+    ASSERT_EQ(stdx::to_underlying(parsed.getBsonType()), iupayload.getType());
+    ASSERT_EQ(parsed.getKeyId(), iupayload.getIndexKeyId());
+    ASSERT_EQ(parsed.getTagCount(), tagCount);
+    ASSERT_EQ(parsed.getSubstringTagCount(), substrs.size());
+    ASSERT_EQ(parsed.getSuffixTagCount(), suffixes.size());
+    ASSERT_EQ(parsed.getPrefixTagCount(), prefixes.size());
+
+    // verify the server-encrypted value decrypts back to client-encrypted value
+    auto serverEncryptToken = ServerDataEncryptionLevel1Token::deriveFrom(getIndexKey());
+    auto swValue =
+        FLEUtil::decryptData(serverEncryptToken.toCDR(), parsed.getServerEncryptedValue());
+    ASSERT(swValue.isOK());
+    ASSERT_EQ(swValue.getValue().size(), iupayload.getValue().length());
+    ASSERT(std::equal(swValue.getValue().begin(),
+                      swValue.getValue().end(),
+                      iupayload.getValue().data<uint8_t>()));
+
+    auto serverDataTokens = collectServerDerivedFromDataTokensForTextSearch(iupayload);
+    ASSERT_EQ(serverDataTokens.size(), parsed.getTagCount());
+
+    auto substrBlks = parsed.getSubstringMetadataBlocks();
+    auto suffixBlks = parsed.getSuffixMetadataBlocks();
+    auto prefixBlks = parsed.getPrefixMetadataBlocks();
+    ASSERT_EQ(substrBlks.size(), substrs.size());
+    ASSERT_EQ(suffixBlks.size(), suffixes.size());
+    ASSERT_EQ(prefixBlks.size(), prefixes.size());
+
+    auto mblocks = parsed.getAllMetadataBlocks();
+
+    // verify metadata blocks have the correct tags
+    for (uint32_t i = 0; i < parsed.getTagCount(); i++) {
+        auto zeroEncryptToken = ServerZerosEncryptionToken::deriveFrom(serverDataTokens[i]);
+        auto counterEncryptToken =
+            ServerCountAndContentionFactorEncryptionToken::deriveFrom(serverDataTokens[i]);
+
+        auto zeros = uassertStatusOK(mblocks[i].decryptZerosBlob(zeroEncryptToken));
+        ASSERT_TRUE(FLE2TagAndEncryptedMetadataBlock::isValidZerosBlob(zeros));
+
+        auto counterPair =
+            uassertStatusOK(mblocks[i].decryptCounterAndContentionFactorPair(counterEncryptToken));
+        ASSERT_EQ(counterPair.counter, payload.counts[i]);
+        ASSERT_EQ(counterPair.contentionFactor, 0);
+
+        ASSERT_TRUE(areBuffersEqual(mblocks[i].getView().tag, tags[i]));
+    }
+
+    // Verify the metadata blocks have unique encrypted zeros blob
+    // This ensures the AES-CTR IV is randomly set for blocks that use the same keys
+    // like text search padding blocks.
+    stdx::unordered_set<std::string> encryptedZeroesSet;
+    for (auto& mblock : mblocks) {
+        ASSERT(encryptedZeroesSet.insert(hexdump(mblock.getView().encryptedZeros)).second);
+    }
+}
+
+TEST_F(ServiceContextTest, FLE_EDC_ServerSide_TextSearch_Payloads_EmptySubstringSuffixPrefixSets) {
+    // test all of substring+suffix+prefix token sets empty
+    auto doc = BSON("sample" << "ssssssssss");
+    EDCServerPayloadInfo payload;
+    auto& iupayload = payload.payload = generateTestIUPV2ForTextSearch(doc.firstElement());
+    payload.counts = std::vector<uint64_t>(1);
+
+    std::vector<PrfBlock> tags = EDCServerCollection::generateTagsForTextSearch(payload);
+    ASSERT_EQ(tags.size(), 1);
+
+    auto serverPayload =
+        FLE2IndexedTextEncryptedValue::fromUnencrypted(iupayload, tags, payload.counts);
+    auto buf = uassertStatusOK(serverPayload.serialize());
+    FLE2IndexedTextEncryptedValue parsed(buf);
+    ASSERT_EQ(parsed.getTagCount(), 1);
+    ASSERT_EQ(parsed.getSubstringTagCount(), 0);
+    ASSERT_EQ(parsed.getSuffixTagCount(), 0);
+    ASSERT_EQ(parsed.getPrefixTagCount(), 0);
+}
+
+TEST_F(ServiceContextTest, FLE_EDC_ServerSide_TextSearch_Payloads_InvalidArgs) {
+    auto doc = BSON("sample" << "ssssssssss");
+
+    EDCServerPayloadInfo payload;
+    auto& iupayload = payload.payload = generateTestIUPV2ForTextSearch(doc.firstElement());
+    generateTextTokenSetsForIUPV2(
+        iupayload, {"s", "ss", "sss", "ssss"}, QueryTypeEnum::SubstringPreview);
+    payload.counts = std::vector<uint64_t>(5);
+
+    std::vector<PrfBlock> tags = EDCServerCollection::generateTagsForTextSearch(payload);
+
+    // test no text search token set in iupayload
+    {
+        auto tmpSets = iupayload.getTextSearchTokenSets();
+        iupayload.setTextSearchTokenSets(boost::none);
+        ASSERT_THROWS_CODE(
+            FLE2IndexedTextEncryptedValue::fromUnencrypted(iupayload, tags, payload.counts),
+            DBException,
+            9784102);
+        iupayload.setTextSearchTokenSets(std::move(tmpSets));
+    }
+
+    // test counters has wrong size
+    {
+        payload.counts.push_back(1);
+        ASSERT_THROWS_CODE(
+            FLE2IndexedTextEncryptedValue::fromUnencrypted(iupayload, tags, payload.counts),
+            DBException,
+            9784107);
+        payload.counts.pop_back();
+    }
+
+    // test tags vector has wrong size
+    {
+        tags.push_back(PrfBlock{});
+        ASSERT_THROWS_CODE(
+            FLE2IndexedTextEncryptedValue::fromUnencrypted(iupayload, tags, payload.counts),
+            DBException,
+            9784113);
+        tags.pop_back();
+    }
+
+    // test wrong BSON type
+    {
+        iupayload.setType(stdx::to_underlying(BSONType::numberInt));
+        ASSERT_THROWS_CODE(
+            FLE2IndexedTextEncryptedValue::fromUnencrypted(iupayload, tags, payload.counts),
+            DBException,
+            9784103);
+        iupayload.setType(stdx::to_underlying(BSONType::string));
+    }
+
+    // test substr/suffix/prefix token sets too large
+    {
+        EDCServerPayloadInfo tmpPayload;
+        tmpPayload.payload = generateTestIUPV2ForTextSearch(doc.firstElement());
+        generateTextTokenSetsForIUPV2(tmpPayload.payload,
+                                      std::vector<StringData>(84000, "s"_sd),
+                                      QueryTypeEnum::SubstringPreview);
+        tmpPayload.counts = std::vector<uint64_t>(84001);
+        auto tmpTags = EDCServerCollection::generateTagsForTextSearch(tmpPayload);
+        ASSERT_THROWS_CODE(FLE2IndexedTextEncryptedValue::fromUnencrypted(
+                               tmpPayload.payload, tmpTags, tmpPayload.counts),
+                           DBException,
+                           9784104);
+    }
+
+    {
+        EDCServerPayloadInfo tmpPayload;
+        tmpPayload.payload = generateTestIUPV2ForTextSearch(doc.firstElement());
+        generateTextTokenSetsForIUPV2(tmpPayload.payload,
+                                      std::vector<StringData>(42000, "s"_sd),
+                                      QueryTypeEnum::SubstringPreview);
+        generateTextTokenSetsForIUPV2(tmpPayload.payload,
+                                      std::vector<StringData>(42000, "s"_sd),
+                                      QueryTypeEnum::SuffixPreview);
+        tmpPayload.counts = std::vector<uint64_t>(84001);
+        auto tmpTags = EDCServerCollection::generateTagsForTextSearch(tmpPayload);
+        ASSERT_THROWS_CODE(FLE2IndexedTextEncryptedValue::fromUnencrypted(
+                               tmpPayload.payload, tmpTags, tmpPayload.counts),
+                           DBException,
+                           9784105);
+    }
+
+    {
+        EDCServerPayloadInfo tmpPayload;
+        tmpPayload.payload = generateTestIUPV2ForTextSearch(doc.firstElement());
+        generateTextTokenSetsForIUPV2(tmpPayload.payload,
+                                      std::vector<StringData>(28000, "s"_sd),
+                                      QueryTypeEnum::SubstringPreview);
+        generateTextTokenSetsForIUPV2(tmpPayload.payload,
+                                      std::vector<StringData>(28000, "s"_sd),
+                                      QueryTypeEnum::SuffixPreview);
+        generateTextTokenSetsForIUPV2(tmpPayload.payload,
+                                      std::vector<StringData>(28000, "s"_sd),
+                                      QueryTypeEnum::PrefixPreview);
+        tmpPayload.counts = std::vector<uint64_t>(84001);
+        auto tmpTags = EDCServerCollection::generateTagsForTextSearch(tmpPayload);
+        ASSERT_THROWS_CODE(FLE2IndexedTextEncryptedValue::fromUnencrypted(
+                               tmpPayload.payload, tmpTags, tmpPayload.counts),
+                           DBException,
+                           9784106);
+    }
+}
+
+TEST_F(ServiceContextTest, FLE_EDC_DuplicateSafeContent_CompatibleType) {
 
     TestKeyVault keyVault;
 
-    auto doc = BSON("value"
-                    << "123456");
+    auto doc = BSON("value" << "123456");
     auto element = doc.firstElement();
     auto inputDoc = BSON(kSafeContent << BSON_ARRAY(1 << 2 << 4) << "encrypted" << element);
 
@@ -2003,8 +2500,8 @@ TEST(FLE_EDC, DuplicateSafeContent_CompatibleType) {
 
     auto finalDoc = encryptDocument(builder.obj(), &keyVault);
 
-    ASSERT_EQ(finalDoc[kSafeContent].type(), Array);
-    ASSERT_EQ(finalDoc["encrypted"].type(), BinData);
+    ASSERT_EQ(finalDoc[kSafeContent].type(), BSONType::array);
+    ASSERT_EQ(finalDoc["encrypted"].type(), BSONType::binData);
     ASSERT_TRUE(finalDoc["encrypted"].isBinData(BinDataType::Encrypt));
 
     // Decrypt document
@@ -2017,16 +2514,15 @@ TEST(FLE_EDC, DuplicateSafeContent_CompatibleType) {
     ASSERT_EQ(elements[0].safeNumberInt(), 1);
     ASSERT_EQ(elements[1].safeNumberInt(), 2);
     ASSERT_EQ(elements[2].safeNumberInt(), 4);
-    ASSERT(elements[3].type() == BinData);
+    ASSERT(elements[3].type() == BSONType::binData);
 }
 
 
-TEST(FLE_EDC, DuplicateSafeContent_IncompatibleType) {
+TEST_F(ServiceContextTest, FLE_EDC_DuplicateSafeContent_IncompatibleType) {
 
     TestKeyVault keyVault;
 
-    auto doc = BSON("value"
-                    << "123456");
+    auto doc = BSON("value" << "123456");
     auto element = doc.firstElement();
 
     auto buf = generatePlaceholder(element, Operation::kInsert);
@@ -2112,7 +2608,7 @@ std::vector<char> generateRangeIntPlaceholder(BSONElement value,
     return v;
 }
 
-TEST(FLE_EDC, RangeParamtersFlow_Insert) {
+TEST_F(ServiceContextTest, FLE_EDC_RangeParamtersFlow_Insert) {
 
     TestKeyVault keyVault;
     auto obj = BSON("encrypted" << 1.23);
@@ -2139,7 +2635,7 @@ TEST(FLE_EDC, RangeParamtersFlow_Insert) {
         payload.payload.getIndexMax().get().getElement().binaryEqual(maxExpected.firstElement()));
 }
 
-TEST(FLE_EDC, RangeParamtersFlow_Find) {
+TEST_F(ServiceContextTest, FLE_EDC_RangeParamtersFlow_Find) {
 
     TestKeyVault keyVault;
     auto obj = BSON("encrypted" << 123456.7);
@@ -2162,28 +2658,35 @@ TEST(FLE_EDC, RangeParamtersFlow_Find) {
 }
 
 
-TEST(FLE_ECOC, EncryptedTokensRoundTrip) {
+TEST_F(ServiceContextTest, FLE_ECOC_EncryptedTokensRoundTrip) {
     std::vector<uint8_t> value(4);
 
-    auto collectionToken = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
-    auto escToken = FLECollectionTokenGenerator::generateESCToken(collectionToken);
-    auto ecocToken = FLECollectionTokenGenerator::generateECOCToken(collectionToken);
-    auto escDataToken =
-        FLEDerivedFromDataTokenGenerator::generateESCDerivedFromDataToken(escToken, value);
-    auto escContentionToken = FLEDerivedFromDataTokenAndContentionFactorTokenGenerator::
-        generateESCDerivedFromDataTokenAndContentionFactorToken(escDataToken, 1);
+    auto collectionToken = CollectionsLevel1Token::deriveFrom(getIndexKey());
+    auto escToken = ESCToken::deriveFrom(collectionToken);
+    auto ecocToken = ECOCToken::deriveFrom(collectionToken);
+    auto escDataToken = ESCDerivedFromDataToken::deriveFrom(escToken, value);
+    auto escContentionToken =
+        ESCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(escDataToken, 1);
 
-    std::vector<boost::optional<bool>> isLeafValues({boost::none, true, false});
-    for (auto optIsLeaf : isLeafValues) {
-        StateCollectionTokensV2 encryptor{escContentionToken, optIsLeaf};
+    std::vector<std::tuple<boost::optional<bool>, boost::optional<std::uint32_t>>> etMetaValues(
+        {{boost::none, boost::none},
+         {true, boost::none},
+         {false, boost::none},
+         {boost::none, 0},
+         {boost::none, 1},
+         {boost::none, 0xfffefd}});
+    for (auto [optIsLeaf, optMsize] : etMetaValues) {
+        StateCollectionTokensV2 encryptor{escContentionToken, optIsLeaf, optMsize};
         auto encryptedTokens = encryptor.encrypt(ecocToken);
         ASSERT_EQ(encryptedTokens.toCDR().length(),
-                  crypto::aesCTRIVSize + sizeof(PrfBlock) + (optIsLeaf ? 1 : 0));
+                  crypto::aesCTRIVSize + sizeof(PrfBlock) + (optIsLeaf ? 1 : 0) +
+                      (optMsize ? 3 : 0));
 
         auto decoded = encryptedTokens.decrypt(ecocToken);
         ASSERT_EQ(encryptor.getESCDerivedFromDataTokenAndContentionFactorToken(),
                   decoded.getESCDerivedFromDataTokenAndContentionFactorToken());
         ASSERT_EQ(encryptor.getIsLeaf(), decoded.getIsLeaf());
+        ASSERT_EQ(encryptor.getMsize(), decoded.getMsize());
 
         auto rawEcocDoc = encryptedTokens.generateDocument("foo");
 
@@ -2191,6 +2694,7 @@ TEST(FLE_ECOC, EncryptedTokensRoundTrip) {
         ASSERT_EQ(ecocDoc.fieldName, "foo");
         ASSERT_EQ(ecocDoc.esc, escContentionToken);
         ASSERT_EQ(ecocDoc.isLeaf, optIsLeaf);
+        ASSERT_EQ(ecocDoc.msize, optMsize);
     }
 }
 
@@ -2199,46 +2703,7 @@ bool vectorContains(const std::vector<T>& vec, Func func) {
     return std::find_if(vec.begin(), vec.end(), func) != vec.end();
 }
 
-EncryptedFieldConfig getTestEncryptedFieldConfig() {
-
-    constexpr auto schema = R"({
-        "escCollection": "enxcol_.coll.esc",
-        "ecocCollection": "enxcol_.coll.ecoc",
-        "fields": [
-            {
-                "keyId": {
-                    "$uuid": "12345678-1234-9876-1234-123456789012"
-                },
-                "path": "encrypted",
-                "bsonType": "string",
-                "queries": {
-                    "queryType": "equality"
-                }
-            },
-            {
-                "keyId": {
-                    "$uuid": "12345678-1234-9876-1234-123456789013"
-                },
-                "path": "nested.encrypted",
-                "bsonType": "string",
-                "queries": {
-                    "queryType": "equality"
-                }
-            },
-            {
-                "keyId": {
-                    "$uuid": "12345678-1234-9876-1234-123456789014"
-                },
-                "path": "nested.notindexed",
-                "bsonType": "string"
-            }
-        ]
-    })";
-
-    return EncryptedFieldConfig::parse(IDLParserContext("root"), fromjson(schema));
-}
-
-TEST(EncryptionInformation, RoundTrip) {
+TEST_F(ServiceContextTest, EncryptionInformation_RoundTrip) {
     NamespaceString ns = NamespaceString::createNamespaceString_forTest("test.test");
 
     EncryptedFieldConfig efc = getTestEncryptedFieldConfig();
@@ -2246,28 +2711,27 @@ TEST(EncryptionInformation, RoundTrip) {
 
 
     EncryptedFieldConfig efc2 = EncryptionInformationHelpers::getAndValidateSchema(
-        ns, EncryptionInformation::parse(IDLParserContext("foo"), obj));
+        ns, EncryptionInformation::parse(obj, IDLParserContext("foo")));
 
     ASSERT_BSONOBJ_EQ(efc.toBSON(), efc2.toBSON());
 }
 
-TEST(EncryptionInformation, BadSchema) {
+TEST_F(ServiceContextTest, EncryptionInformation_BadSchema) {
     EncryptionInformation ei;
     ei.setType(1);
 
-    ei.setSchema(BSON("a"
-                      << "b"));
+    ei.setSchema(BSON("a" << "b"));
 
     auto obj = ei.toBSON();
 
     NamespaceString ns = NamespaceString::createNamespaceString_forTest("test.test");
     ASSERT_THROWS_CODE(EncryptionInformationHelpers::getAndValidateSchema(
-                           ns, EncryptionInformation::parse(IDLParserContext("foo"), obj)),
+                           ns, EncryptionInformation::parse(obj, IDLParserContext("foo"))),
                        DBException,
                        6371205);
 }
 
-TEST(EncryptionInformation, MissingStateCollection) {
+TEST_F(ServiceContextTest, EncryptionInformation_MissingStateCollection) {
     NamespaceString ns = NamespaceString::createNamespaceString_forTest("test.test");
 
     {
@@ -2275,7 +2739,7 @@ TEST(EncryptionInformation, MissingStateCollection) {
         efc.setEscCollection(boost::none);
         auto obj = EncryptionInformationHelpers::encryptionInformationSerialize(ns, efc);
         ASSERT_THROWS_CODE(EncryptionInformationHelpers::getAndValidateSchema(
-                               ns, EncryptionInformation::parse(IDLParserContext("foo"), obj)),
+                               ns, EncryptionInformation::parse(obj, IDLParserContext("foo"))),
                            DBException,
                            6371207);
     }
@@ -2284,17 +2748,333 @@ TEST(EncryptionInformation, MissingStateCollection) {
         efc.setEcocCollection(boost::none);
         auto obj = EncryptionInformationHelpers::encryptionInformationSerialize(ns, efc);
         ASSERT_THROWS_CODE(EncryptionInformationHelpers::getAndValidateSchema(
-                               ns, EncryptionInformation::parse(IDLParserContext("foo"), obj)),
+                               ns, EncryptionInformation::parse(obj, IDLParserContext("foo"))),
                            DBException,
                            6371208);
     }
 }
 
-TEST(IndexedFields, FetchTwoLevels) {
+TEST_F(ServiceContextTest, EncryptionInformation_TestTagLimitsForTextSearch) {
+    auto makeTextQueryTypeConfig =
+        [](QueryTypeEnum qtype, int32_t lb, int32_t ub, boost::optional<int32_t> mlen) {
+            QueryTypeConfig qtc{qtype};
+            qtc.setStrMinQueryLength(lb);
+            qtc.setStrMaxQueryLength(ub);
+            qtc.setStrMaxLength(std::move(mlen));
+            return qtc;
+        };
+    auto assertExpectedMaxTags = [](const std::vector<QueryTypeConfig>& qtc, uint32_t expected) {
+        uint32_t actual = 1;
+        for (auto& qt : qtc) {
+            auto lb = qt.getStrMinQueryLength().get();
+            auto ub = qt.getStrMaxQueryLength().get();
+            actual += ((qt.getQueryType() == QueryTypeEnum::SubstringPreview)
+                           ? maxTagsForSubstring(lb, ub, qt.getStrMaxLength().get())
+                           : maxTagsForSuffixOrPrefix(lb, ub));
+        }
+        ASSERT_EQ(actual, expected);
+    };
+    auto doOneFieldTest = [](const std::vector<QueryTypeConfig>& qtc, boost::optional<int> error) {
+        EncryptedFieldConfig efc;
+        EncryptedField field{UUID::gen(), "field"};
+        field.setBsonType("string"_sd);
+        field.setQueries(std::variant<std::vector<QueryTypeConfig>, QueryTypeConfig>{qtc});
+        efc.setFields({field});
+        if (error) {
+            ASSERT_THROWS_CODE(
+                EncryptionInformationHelpers::checkTagLimitsAndStorageNotExceeded(efc),
+                DBException,
+                *error);
+        } else {
+            ASSERT_DOES_NOT_THROW(
+                EncryptionInformationHelpers::checkTagLimitsAndStorageNotExceeded(efc));
+        }
+    };
+
+    // substring field under limit
+    std::vector<QueryTypeConfig> qtc = {
+        makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 10, 100, 900)};
+    assertExpectedMaxTags(qtc, 76987);
+    doOneFieldTest(qtc, {});
+
+    // substring field at limit
+    qtc.front() = makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 1, 1, 83'999);
+    assertExpectedMaxTags(qtc, 84'000);
+    doOneFieldTest(qtc, {});
+
+    qtc.front() = makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 1, 2, 42'000);
+    assertExpectedMaxTags(qtc, 84'000);
+    doOneFieldTest(qtc, {});
+
+    // substring field over limit
+    qtc.front() = makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 10, 100, 1000);
+    assertExpectedMaxTags(qtc, 86'087);
+    doOneFieldTest(qtc, 10384602);
+
+    // overflow uint32_t
+    qtc.front() = makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 1, INT32_MAX, INT32_MAX);
+    doOneFieldTest(qtc, 10384601);
+
+    for (auto qtype : {QueryTypeEnum::SuffixPreview, QueryTypeEnum::PrefixPreview}) {
+        // suffix/prefix field under limit
+        qtc.front() = makeTextQueryTypeConfig(qtype, 9, 109, {});
+        assertExpectedMaxTags(qtc, 102);
+        doOneFieldTest(qtc, {});
+
+        // suffix/prefix field at limit
+        qtc.front() = makeTextQueryTypeConfig(qtype, 21, 84'019, {});
+        assertExpectedMaxTags(qtc, 84'000);
+        doOneFieldTest(qtc, {});
+
+        // suffix/prefix field over limit
+        qtc.front() = makeTextQueryTypeConfig(qtype, 1, 84'001, {});
+        assertExpectedMaxTags(qtc, 84'002);
+        doOneFieldTest(qtc, 10384602);
+    }
+
+    // suffix+prefix field under limit
+    qtc = {makeTextQueryTypeConfig(QueryTypeEnum::SuffixPreview, 9, 109, {}),
+           makeTextQueryTypeConfig(QueryTypeEnum::PrefixPreview, 90, 900, {})};
+    assertExpectedMaxTags(qtc, 101 + 811 + 1);
+    doOneFieldTest(qtc, {});
+
+    // suffix+prefix field at limit
+    qtc = {makeTextQueryTypeConfig(QueryTypeEnum::SuffixPreview, 101, 42100, {}),
+           makeTextQueryTypeConfig(QueryTypeEnum::PrefixPreview, 1001, 42999, {})};
+    assertExpectedMaxTags(qtc, 84'000);
+    doOneFieldTest(qtc, {});
+
+    // suffix+prefix field over limit
+    qtc = {makeTextQueryTypeConfig(QueryTypeEnum::SuffixPreview, 101, 42100, {}),
+           makeTextQueryTypeConfig(QueryTypeEnum::PrefixPreview, 1001, 43000, {})};
+    assertExpectedMaxTags(qtc, 84'001);
+    doOneFieldTest(qtc, 10384602);
+}
+
+TEST_F(ServiceContextTest, EncryptionInformation_TestTagStorageLimits) {
+    auto makeEqualityQueryTypeConfig = []() {
+        QueryTypeConfig config;
+        config.setQueryType(QueryTypeEnum::Equality);
+
+        return config;
+    };
+    auto makeRangeQueryTypeConfigInt32 =
+        [](int32_t lb, int32_t ub, const boost::optional<uint32_t>& precision, int sparsity) {
+            QueryTypeConfig config;
+            config.setQueryType(QueryTypeEnum::Range);
+            config.setMin(Value(lb));
+            config.setMax(Value(ub));
+            config.setSparsity(sparsity);
+            if (precision) {
+                config.setPrecision(*precision);
+            }
+            config.setTrimFactor(0);
+            return config;
+        };
+    auto makeTextQueryTypeConfig =
+        [](QueryTypeEnum qtype, int32_t lb, int32_t ub, boost::optional<int32_t> mlen) {
+            QueryTypeConfig qtc{qtype};
+            qtc.setStrMinQueryLength(lb);
+            qtc.setStrMaxQueryLength(ub);
+            qtc.setStrMaxLength(std::move(mlen));
+            return qtc;
+        };
+    auto makeEncryptedFields =
+        [](int numFields, StringData bsonType, const std::vector<QueryTypeConfig>& qtc) {
+            std::vector<EncryptedField> fields;
+            for (int i = 0; i < numFields; i++) {
+                EncryptedField field{UUID::gen(), fmt::format("field_{}", i)};
+                field.setBsonType(bsonType);
+                field.setQueries(std::variant<std::vector<QueryTypeConfig>, QueryTypeConfig>{qtc});
+                fields.emplace_back(field);
+            }
+
+            return fields;
+        };
+    auto doMultipleFieldsTest = [](const EncryptedFieldConfig& efc, boost::optional<int> error) {
+        // Regardless of "error", we always expect success when the override cluster param is set.
+        {
+            FLEOverrideTagOverheadData tagOverheadOverride;
+            tagOverheadOverride.setShouldOverride(true);
+
+            RAIIServerParameterControllerForTest overrideTagOverheadLimit(
+                "fleAllowTotalTagOverheadToExceedBSONLimit", tagOverheadOverride);
+            ASSERT_DOES_NOT_THROW(
+                EncryptionInformationHelpers::checkTagLimitsAndStorageNotExceeded(efc));
+        }
+
+        if (error) {
+            ASSERT_THROWS_CODE(
+                EncryptionInformationHelpers::checkTagLimitsAndStorageNotExceeded(efc),
+                DBException,
+                *error);
+        } else {
+            ASSERT_DOES_NOT_THROW(
+                EncryptionInformationHelpers::checkTagLimitsAndStorageNotExceeded(efc));
+        }
+    };
+
+    // Fields should fail if total tag storage exceeds BSON limit even while each field is
+    // within tag limit
+
+    // equality above total tag storage limit
+    EncryptedFieldConfig efc;
+    efc.setFields(makeEncryptedFields(131073, "string"_sd, {makeEqualityQueryTypeConfig()}));
+    doMultipleFieldsTest(efc, 10431800);
+
+    // equality within total tag storage limit
+    efc.setFields(makeEncryptedFields(131072, "string"_sd, {makeEqualityQueryTypeConfig()}));
+    doMultipleFieldsTest(efc, {});
+
+    // range above total tag storage limit
+    efc.setFields(makeEncryptedFields(
+        11916, "int"_sd, {makeRangeQueryTypeConfigInt32(1, 1000, boost::none, 1)}));
+    doMultipleFieldsTest(efc, 10431800);
+
+    // range within total tag storage limit
+    efc.setFields(makeEncryptedFields(
+        11915, "int"_sd, {makeRangeQueryTypeConfigInt32(1, 1000, boost::none, 1)}));
+    doMultipleFieldsTest(efc, {});
+
+    // substring above total tag storage limit
+    efc.setFields(makeEncryptedFields(
+        37, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 2, 10, 400)}));
+    doMultipleFieldsTest(efc, 10431800);
+
+    // substring within total tag storage limit
+    efc.setFields(makeEncryptedFields(
+        36, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 2, 10, 400)}));
+    doMultipleFieldsTest(efc, {});
+
+    // prefix above total tag storage limit
+    efc.setFields(makeEncryptedFields(
+        1286, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::PrefixPreview, 9, 109, {})}));
+    doMultipleFieldsTest(efc, 10431800);
+
+    // prefix within total tag storage limit
+    efc.setFields(makeEncryptedFields(
+        1285, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::PrefixPreview, 9, 109, {})}));
+    doMultipleFieldsTest(efc, {});
+
+    // suffix above total tag storage limit
+    efc.setFields(makeEncryptedFields(
+        1286, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::SuffixPreview, 9, 109, {})}));
+    doMultipleFieldsTest(efc, 10431800);
+
+    // suffix within total tag storage limit
+    efc.setFields(makeEncryptedFields(
+        1285, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::SuffixPreview, 9, 109, {})}));
+    doMultipleFieldsTest(efc, {});
+
+    // suffix+prefix above total tag storage limit
+    efc.setFields(
+        makeEncryptedFields(144,
+                            "string"_sd,
+                            {makeTextQueryTypeConfig(QueryTypeEnum::PrefixPreview, 9, 109, {}),
+                             makeTextQueryTypeConfig(QueryTypeEnum::SuffixPreview, 90, 900, {})}));
+    doMultipleFieldsTest(efc, 10431800);
+
+    // suffix+prefix within total tag storage limit
+    efc.setFields(
+        makeEncryptedFields(143,
+                            "string"_sd,
+                            {makeTextQueryTypeConfig(QueryTypeEnum::PrefixPreview, 9, 109, {}),
+                             makeTextQueryTypeConfig(QueryTypeEnum::SuffixPreview, 90, 900, {})}));
+    doMultipleFieldsTest(efc, {});
+
+    // mixture of substring, suffix, and prefix above total tag storage limit
+    std::vector<EncryptedField> fields;
+    auto substringFields = makeEncryptedFields(
+        36, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 2, 10, 400)});
+    auto prefixFields = makeEncryptedFields(
+        15, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::PrefixPreview, 9, 109, {})});
+    auto suffixFields = makeEncryptedFields(
+        15, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::SuffixPreview, 9, 109, {})});
+    fields.insert(fields.end(), substringFields.begin(), substringFields.end());
+    fields.insert(fields.end(), prefixFields.begin(), prefixFields.end());
+    fields.insert(fields.end(), suffixFields.begin(), suffixFields.end());
+    efc.setFields(fields);
+    doMultipleFieldsTest(efc, 10431800);
+
+    // mixture of substring, suffix, and prefix within total tag storage limit
+    suffixFields = makeEncryptedFields(
+        14, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::SuffixPreview, 9, 109, {})});
+    fields.clear();
+    fields.insert(fields.end(), substringFields.begin(), substringFields.end());
+    fields.insert(fields.end(), prefixFields.begin(), prefixFields.end());
+    fields.insert(fields.end(), suffixFields.begin(), suffixFields.end());
+    efc.setFields(fields);
+    doMultipleFieldsTest(efc, {});
+
+    // mixture of substring, equality, and range above total tag storage limit
+    substringFields = makeEncryptedFields(
+        14, "string"_sd, {makeTextQueryTypeConfig(QueryTypeEnum::SubstringPreview, 2, 10, 400)});
+    auto equalityFields = makeEncryptedFields(6785, "string"_sd, {makeEqualityQueryTypeConfig()});
+    auto rangeFields = makeEncryptedFields(
+        6800, "int"_sd, {makeRangeQueryTypeConfigInt32(1, 1000, boost::none, 1)});
+    fields.clear();
+    fields.insert(fields.end(), substringFields.begin(), substringFields.end());
+    fields.insert(fields.end(), equalityFields.begin(), equalityFields.end());
+    fields.insert(fields.end(), rangeFields.begin(), rangeFields.end());
+    efc.setFields(fields);
+    doMultipleFieldsTest(efc, 10431800);
+
+    // mixture of substring, equality, and range within total tag storage limit
+    equalityFields = makeEncryptedFields(5000, "string"_sd, {makeEqualityQueryTypeConfig()});
+    fields.clear();
+    fields.insert(fields.end(), substringFields.begin(), substringFields.end());
+    fields.insert(fields.end(), equalityFields.begin(), equalityFields.end());
+    fields.insert(fields.end(), rangeFields.begin(), rangeFields.end());
+    efc.setFields(fields);
+    doMultipleFieldsTest(efc, {});
+}
+
+TEST_F(ServiceContextTest, EncryptionInformation_TestSubstringPreviewParameterLimits) {
+    auto makeQueryTypeConfig = [](int32_t lb, int32_t ub, int32_t mlen) {
+        QueryTypeConfig qtc{QueryTypeEnum::SubstringPreview};
+        qtc.setStrMinQueryLength(lb);
+        qtc.setStrMaxQueryLength(ub);
+        qtc.setStrMaxLength(mlen);
+        return qtc;
+    };
+    auto doOneFieldTest = [](const std::vector<QueryTypeConfig>& qtc, boost::optional<int> error) {
+        EncryptedFieldConfig efc;
+        EncryptedField field{UUID::gen(), "field"};
+        field.setBsonType("string"_sd);
+        field.setQueries(std::variant<std::vector<QueryTypeConfig>, QueryTypeConfig>{qtc});
+        efc.setFields({field});
+        if (error) {
+            ASSERT_THROWS_CODE(
+                EncryptionInformationHelpers::checkSubstringPreviewParameterLimitsNotExceeded(efc),
+                DBException,
+                *error);
+        } else {
+            ASSERT_DOES_NOT_THROW(
+                EncryptionInformationHelpers::checkSubstringPreviewParameterLimitsNotExceeded(efc));
+        }
+    };
+
+    // substring max length over upper limit
+    std::vector<QueryTypeConfig> qtc = {makeQueryTypeConfig(2, 10, 900)};
+    doOneFieldTest(qtc, 10453202);
+
+    // substring max query length over upper limit
+    qtc[0] = makeQueryTypeConfig(2, 60, 60);
+    doOneFieldTest(qtc, 10453201);
+
+    // substring min query length below lower limit
+    qtc[0] = makeQueryTypeConfig(1, 10, 60);
+    doOneFieldTest(qtc, 10453200);
+
+    // substring params all within limtis
+    qtc[0] = makeQueryTypeConfig(2, 10, 60);
+    doOneFieldTest(qtc, {});
+}
+
+TEST_F(ServiceContextTest, IndexedFields_FetchTwoLevels) {
     TestKeyVault keyVault;
 
-    auto doc = BSON("value"
-                    << "123456");
+    auto doc = BSON("value" << "123456");
     auto element = doc.firstElement();
     auto inputDoc = BSON(kSafeContent << BSON_ARRAY(1 << 2 << 4) << "encrypted" << element);
 
@@ -2338,11 +3118,10 @@ TEST(IndexedFields, FetchTwoLevels) {
 }
 
 // Error if the user tries to reuse the same index key across fields
-TEST(IndexedFields, DuplicateIndexKeyIds) {
+TEST_F(ServiceContextTest, IndexedFields_DuplicateIndexKeyIds) {
     TestKeyVault keyVault;
 
-    auto doc = BSON("value"
-                    << "123456");
+    auto doc = BSON("value" << "123456");
     auto element = doc.firstElement();
     auto inputDoc = BSON(kSafeContent << BSON_ARRAY(1 << 2 << 4) << "encrypted" << element);
 
@@ -2360,7 +3139,7 @@ TEST(IndexedFields, DuplicateIndexKeyIds) {
 
 
 // Verify we can compare two list of tags correctly
-TEST(TagDelta, Basic) {
+TEST_F(ServiceContextTest, TagDelta_Basic) {
     auto empty = ConstDataRange(nullptr, nullptr);
     auto v1 = ConstDataRange(testValue);
     auto v2 = ConstDataRange(testValue2);
@@ -2436,41 +3215,14 @@ TEST(TagDelta, Basic) {
     }
 }
 
-TEST(EDC, UnindexedEncryptDecrypt) {
-    TestKeyVault keyVault;
-    FLEUserKeyAndId userKey = keyVault.getUserKeyById(indexKey2Id);
-
-    auto inputDoc = BSON("a"
-                         << "sample");
-    auto element = inputDoc.firstElement();
-    auto const elementData =
-        std::vector<uint8_t>(element.value(), element.value() + element.valuesize());
-
-    {
-        auto blob = FLE2UnindexedEncryptedValueV2::serialize(userKey, element);
-        ASSERT_EQ(blob[0], 16);
-
-        // assert length of ciphertext (including HMAC & IV) is consistent with CBC mode
-        auto cipherTextLen = blob.size() - FLE2UnindexedEncryptedValueV2::assocDataSize;
-        ASSERT_EQ(cipherTextLen,
-                  crypto::fle2AeadCipherOutputLength(elementData.size(), crypto::aesMode::cbc));
-
-        auto [type, plainText] = FLE2UnindexedEncryptedValueV2::deserialize(&keyVault, {blob});
-        ASSERT_EQ(type, element.type());
-        ASSERT_TRUE(
-            std::equal(plainText.begin(), plainText.end(), elementData.begin(), elementData.end()));
-    }
-}
-
-TEST(EDC, NonMatchingSchema) {
+TEST_F(ServiceContextTest, EDC_NonMatchingSchema) {
     EncryptedFieldConfig efc = getTestEncryptedFieldConfig();
 
     TestKeyVault keyVault;
 
     BSONObjBuilder builder;
     builder.append("plainText", "sample");
-    auto doc = BSON("a"
-                    << "not really a secret");
+    auto doc = BSON("a" << "not really a secret");
     auto element = doc.firstElement();
     auto buf = generatePlaceholder(element, Operation::kInsert);
     builder.appendBinData("not-encrypted", buf.size(), BinDataType::Encrypt, buf.data());
@@ -2478,7 +3230,7 @@ TEST(EDC, NonMatchingSchema) {
     ASSERT_THROWS_CODE(encryptDocument(builder.obj(), &keyVault, &efc), DBException, 6373601);
 }
 
-TEST(EDC, EncryptAlreadyEncryptedData) {
+TEST_F(ServiceContextTest, EDC_EncryptAlreadyEncryptedData) {
     constexpr StringData testVectors[] = {
         "07b347ede7329f41729dd4004b9d950ff102de64b1925159d2100d58c8d1d0a77bf23a52d30e8861d659e85de2ff96bf8326b3a57134efe5938f439936721dbfa22b02df9df0f63c6453fb2e30ee21b8bab39d4dfb3566926c650fe6995e6caeec025dac818c5a472653876b4a30711c141187236ab5d3dce403aa917d50e432a0ed6f8a685be18af3e2cd21f6b1aeee0e835de13b33fa76eace42527207db517b9e3dce5d0a0d9e25853f612e198a34b37adfce8cfeb673ef779c81c80412a96460e53fb65b0504651d55a4f329a8dc72aaeee93d1b62bf0b9564a71a"_sd,
         "07"_sd,
@@ -2508,7 +3260,7 @@ TEST(EDC, EncryptAlreadyEncryptedData) {
     }
 }
 
-TEST(FLE1, EncryptAlreadyEncryptedDataLegacy) {
+TEST_F(ServiceContextTest, FLE1_EncryptAlreadyEncryptedDataLegacy) {
     BSONObjBuilder builder;
     builder.append("plainText", "sample");
 
@@ -2553,11 +3305,10 @@ BSONObj encryptUpdateDocument(BSONObj obj, FLEKeyVault* keyVault) {
 }
 
 // Test update with no $push
-TEST(FLE_Update, Basic) {
+TEST_F(ServiceContextTest, FLE_Update_Basic) {
     TestKeyVault keyVault;
 
-    auto doc = BSON("value"
-                    << "123456");
+    auto doc = BSON("value" << "123456");
     auto element = doc.firstElement();
     auto buf = generatePlaceholder(element, Operation::kInsert);
     auto inputDoc = BSON(
@@ -2567,14 +3318,14 @@ TEST(FLE_Update, Basic) {
     std::cout << finalDoc << std::endl;
 
     ASSERT_TRUE(finalDoc["$set"]["encrypted"].isBinData(BinDataType::Encrypt));
-    ASSERT_TRUE(finalDoc["$push"][kSafeContent]["$each"].type() == Array);
+    ASSERT_TRUE(finalDoc["$push"][kSafeContent]["$each"].type() == BSONType::array);
     ASSERT_EQ(finalDoc["$push"][kSafeContent]["$each"].Array().size(), 1);
     ASSERT_TRUE(
         finalDoc["$push"][kSafeContent]["$each"].Array()[0].isBinData(BinDataType::BinDataGeneral));
 }
 
 // Test update with no crypto
-TEST(FLE_Update, Empty) {
+TEST_F(ServiceContextTest, FLE_Update_Empty) {
     TestKeyVault keyVault;
 
     auto inputDoc = BSON("$set" << BSON("count" << 1));
@@ -2582,15 +3333,14 @@ TEST(FLE_Update, Empty) {
 
     std::cout << finalDoc << std::endl;
 
-    ASSERT_EQ(finalDoc["$set"]["count"].type(), NumberInt);
+    ASSERT_EQ(finalDoc["$set"]["count"].type(), BSONType::numberInt);
     ASSERT(finalDoc["$push"].eoo());
 }
 
-TEST(FLE_Update, BadPush) {
+TEST_F(ServiceContextTest, FLE_Update_BadPush) {
     TestKeyVault keyVault;
 
-    auto doc = BSON("value"
-                    << "123456");
+    auto doc = BSON("value" << "123456");
     auto element = doc.firstElement();
 
     auto buf = generatePlaceholder(element, Operation::kInsert);
@@ -2600,11 +3350,10 @@ TEST(FLE_Update, BadPush) {
     ASSERT_THROWS_CODE(encryptUpdateDocument(inputDoc, &keyVault), DBException, 6371511);
 }
 
-TEST(FLE_Update, PushToSafeContent) {
+TEST_F(ServiceContextTest, FLE_Update_PushToSafeContent) {
     TestKeyVault keyVault;
 
-    auto doc = BSON("value"
-                    << "123456");
+    auto doc = BSON("value" << "123456");
     auto element = doc.firstElement();
 
     auto buf = generatePlaceholder(element, Operation::kInsert);
@@ -2614,11 +3363,10 @@ TEST(FLE_Update, PushToSafeContent) {
     ASSERT_THROWS_CODE(encryptUpdateDocument(inputDoc, &keyVault), DBException, 6371511);
 }
 
-TEST(FLE_Update, PushToOtherfield) {
+TEST_F(ServiceContextTest, FLE_Update_PushToOtherfield) {
     TestKeyVault keyVault;
 
-    auto doc = BSON("value"
-                    << "123456");
+    auto doc = BSON("value" << "123456");
     auto element = doc.firstElement();
 
     auto buf = generatePlaceholder(element, Operation::kInsert);
@@ -2629,14 +3377,14 @@ TEST(FLE_Update, PushToOtherfield) {
     std::cout << finalDoc << std::endl;
 
     ASSERT_TRUE(finalDoc["$set"]["encrypted"].isBinData(BinDataType::Encrypt));
-    ASSERT_TRUE(finalDoc["$push"]["abc"].type() == NumberInt);
-    ASSERT_TRUE(finalDoc["$push"][kSafeContent]["$each"].type() == Array);
+    ASSERT_TRUE(finalDoc["$push"]["abc"].type() == BSONType::numberInt);
+    ASSERT_TRUE(finalDoc["$push"][kSafeContent]["$each"].type() == BSONType::array);
     ASSERT_EQ(finalDoc["$push"][kSafeContent]["$each"].Array().size(), 1);
     ASSERT_TRUE(
         finalDoc["$push"][kSafeContent]["$each"].Array()[0].isBinData(BinDataType::BinDataGeneral));
 }
 
-TEST(FLE_Update, GetRemovedTags) {
+TEST_F(ServiceContextTest, FLE_Update_GetRemovedTags) {
     PrfBlock tag1 = decodePrf("BD53ACAC665EDD01E0CA30CB648B2B8F4967544047FD4E7D12B1A9BF07339928");
     PrfBlock tag2 = decodePrf("C17FDF249DE234F9AB15CD95137EA7EC82AE4E5B51F6BFB0FC1B8FEB6800F74C");
     ServerDerivedFromDataToken serverDerivedFromDataToken(
@@ -2645,21 +3393,28 @@ TEST(FLE_Update, GetRemovedTags) {
         decodePrf("786F23F132FF7F14F748AC69373CFC982AD0AD4BAD25BE92008B83AB437EC82A"));
 
     std::vector<uint8_t> clientBlob(64);
+    PrfBlock nullBlock;
 
-    FLE2IndexedEqualityEncryptedValueV2 value1(
-        BSONType::String, indexKeyId, clientBlob, FLE2TagAndEncryptedMetadataBlock(1, 0, tag1));
-    FLE2IndexedEqualityEncryptedValueV2 value2(
-        BSONType::String, indexKeyId, clientBlob, FLE2TagAndEncryptedMetadataBlock(1, 0, tag2));
+    FLE2InsertUpdatePayloadV2 iup;
+    iup.setServerEncryptionToken(serverToken);
+    iup.setServerDerivedFromDataToken(serverDerivedFromDataToken);
+    iup.setIndexKeyId(indexKeyId);
+    iup.setValue(clientBlob);
+    iup.setType(stdx::to_underlying(BSONType::string));
+    iup.setContentionFactor(0);
+    // these two tokens below are not used in fromUnencrypted
+    iup.setEdcDerivedToken(EDCDerivedFromDataTokenAndContentionFactorToken(nullBlock));
+    iup.setEscDerivedToken(ESCDerivedFromDataTokenAndContentionFactorToken(nullBlock));
 
-    auto swValue1Blob = value1.serialize(serverToken, serverDerivedFromDataToken);
-    ASSERT_OK(swValue1Blob.getStatus());
-    auto swValue2Blob = value2.serialize(serverToken, serverDerivedFromDataToken);
-    ASSERT_OK(swValue2Blob.getStatus());
+    auto value1 = FLE2IndexedEqualityEncryptedValueV2::fromUnencrypted(iup, tag1, 1);
+    auto value2 = FLE2IndexedEqualityEncryptedValueV2::fromUnencrypted(iup, tag2, 1);
 
-    auto value1Blob = toEncryptedVector(EncryptedBinDataType::kFLE2EqualityIndexedValueV2,
-                                        ConstDataRange(swValue1Blob.getValue()));
-    auto value2Blob = toEncryptedVector(EncryptedBinDataType::kFLE2EqualityIndexedValueV2,
-                                        ConstDataRange(swValue2Blob.getValue()));
+    auto value1Blob = uassertStatusOK(value1.serialize());
+    auto value2Blob = uassertStatusOK(value2.serialize());
+
+    auto typeByte = static_cast<uint8_t>(EncryptedBinDataType::kFLE2EqualityIndexedValueV2);
+    ASSERT_EQ(value1Blob[0], typeByte);
+    ASSERT_EQ(value2Blob[0], typeByte);
 
     std::vector<EDCIndexedFields> oldFields = {{value1Blob, "a"}, {value2Blob, "b"}};
     std::vector<EDCIndexedFields> swappedFields = {{value2Blob, "a"}, {value1Blob, "b"}};
@@ -2703,7 +3458,7 @@ TEST(FLE_Update, GetRemovedTags) {
 
     // Test exception if old fields contain deprecated FLE2 subtype...
     auto v1ValueBlob = toEncryptedVector(EncryptedBinDataType::kFLE2EqualityIndexedValue,
-                                         ConstDataRange(swValue1Blob.getValue()));
+                                         ConstDataRange(value1Blob));
     std::vector<EDCIndexedFields> v1Fields = {{v1ValueBlob, "a"}};
     ASSERT_THROWS_CODE(EDCServerCollection::getRemovedTags(v1Fields, empty), DBException, 7293204);
 
@@ -2712,11 +3467,10 @@ TEST(FLE_Update, GetRemovedTags) {
     ASSERT_EQ(tagsToPull.size(), 0);
 }
 
-TEST(FLE_Update, GenerateUpdateToRemoveTags) {
+TEST_F(ServiceContextTest, FLE_Update_GenerateUpdateToRemoveTags) {
     TestKeyVault keyVault;
 
-    auto doc = BSON("value"
-                    << "123456");
+    auto doc = BSON("value" << "123456");
     auto element = doc.firstElement();
     auto buf = generatePlaceholder(element, Operation::kInsert);
 
@@ -2739,9 +3493,9 @@ TEST(FLE_Update, GenerateUpdateToRemoveTags) {
 
     std::cout << "PULL: " << pullUpdate << std::endl;
 
-    ASSERT_EQ(pullUpdate["$pull"].type(), Object);
-    ASSERT_EQ(pullUpdate["$pull"][kSafeContent].type(), Object);
-    ASSERT_EQ(pullUpdate["$pull"][kSafeContent]["$in"].type(), Array);
+    ASSERT_EQ(pullUpdate["$pull"].type(), BSONType::object);
+    ASSERT_EQ(pullUpdate["$pull"][kSafeContent].type(), BSONType::object);
+    ASSERT_EQ(pullUpdate["$pull"][kSafeContent]["$in"].type(), BSONType::array);
     auto tagsArray = pullUpdate["$pull"][kSafeContent]["$in"].Array();
 
     ASSERT_EQ(tagsArray.size(), removedTags.size());
@@ -2753,12 +3507,12 @@ TEST(FLE_Update, GenerateUpdateToRemoveTags) {
     ASSERT_THROWS_CODE(EDCServerCollection::generateUpdateToRemoveTags({}), DBException, 7293203);
 }
 
-TEST(CompactionHelpersTest, parseCompactionTokensTestEmpty) {
+TEST_F(ServiceContextTest, CompactionHelpersTest_parseCompactionTokensTestEmpty) {
     const auto result = CompactionHelpers::parseCompactionTokens(BSONObj());
     ASSERT(result.empty());
 }
 
-TEST(CompactionHelpersTest, parseCompactionTokensTest) {
+TEST_F(ServiceContextTest, CompactionHelpersTest_parseCompactionTokensTest) {
     const ECOCToken token1(
         decodePrf("7076c7b05fb4be4fe585eed930b852a6d088a0c55f3c96b50069e8a26ebfb347"_sd));
     const ECOCToken token2(
@@ -2798,14 +3552,12 @@ TEST(CompactionHelpersTest, parseCompactionTokensTest) {
     }
 }
 
-TEST(CompactionHelpersTest, parseCompactionTokensTestInvalidType) {
-    ASSERT_THROWS_CODE(CompactionHelpers::parseCompactionTokens(BSON("foo"
-                                                                     << "bar")),
-                       DBException,
-                       6346801);
+TEST_F(ServiceContextTest, CompactionHelpersTest_parseCompactionTokensTestInvalidType) {
+    ASSERT_THROWS_CODE(
+        CompactionHelpers::parseCompactionTokens(BSON("foo" << "bar")), DBException, 6346801);
 }
 
-TEST(CompactionHelpersTest, parseCompactionTokensTestInvalidSubType) {
+TEST_F(ServiceContextTest, CompactionHelpersTest_parseCompactionTokensTestInvalidSubType) {
     const std::array<std::uint8_t, 16> kUUID = {
         0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
     BSONObjBuilder builder;
@@ -2814,7 +3566,7 @@ TEST(CompactionHelpersTest, parseCompactionTokensTestInvalidSubType) {
         CompactionHelpers::parseCompactionTokens(builder.obj()), DBException, 6346801);
 }
 
-TEST(CompactionHelpersTest, parseCompactionTokensTestTooShort) {
+TEST_F(ServiceContextTest, CompactionHelpersTest_parseCompactionTokensTestTooShort) {
     const auto kBadToken =
         hexblob::decode("7076c7b05fb4be4fe585eed930b852a6d088a0c55f3c96b50069e8a26ebfb3"_sd);
     constexpr auto kInvalidPrfLength = 9616300;
@@ -2825,7 +3577,7 @@ TEST(CompactionHelpersTest, parseCompactionTokensTestTooShort) {
         CompactionHelpers::parseCompactionTokens(builder.obj()), DBException, kInvalidPrfLength);
 }
 
-TEST(CompactionHelpersTest, parseCompactionTokensTestTooLong) {
+TEST_F(ServiceContextTest, CompactionHelpersTest_parseCompactionTokensTestTooLong) {
     const auto kBadToken =
         hexblob::decode("7076c7b05fb4be4fe585eed930b852a6d088a0c55f3c96b50069e8a26ebfb34701"_sd);
     constexpr auto kInvalidPrfLength = 9616300;
@@ -2836,38 +3588,38 @@ TEST(CompactionHelpersTest, parseCompactionTokensTestTooLong) {
         CompactionHelpers::parseCompactionTokens(builder.obj()), DBException, kInvalidPrfLength);
 }
 
-TEST(CompactionHelpersTest, validateCompactionTokensTest) {
+TEST_F(ServiceContextTest, CompactionHelpersTest_validateCompactionOrCleanupTokensTest) {
     EncryptedFieldConfig efc = getTestEncryptedFieldConfig();
 
     BSONObjBuilder builder;
     for (auto& field : efc.getFields()) {
         // validate fails until all fields are present
-        ASSERT_THROWS_CODE(CompactionHelpers::validateCompactionTokens(efc, builder.asTempObj()),
+        ASSERT_THROWS_CODE(CompactionHelpers::validateCompactionOrCleanupTokens(
+                               efc, builder.asTempObj(), "Compact"_sd),
                            DBException,
                            7294900);
 
         // validate doesn't care about the value, so this is fine
         builder.append(field.getPath(), "foo");
     }
-    CompactionHelpers::validateCompactionTokens(efc, builder.asTempObj());
+    CompactionHelpers::validateCompactionOrCleanupTokens(efc, builder.asTempObj(), "Compact"_sd);
 
     // validate OK if obj has extra fields
     builder.append("abc.xyz", "foo");
-    CompactionHelpers::validateCompactionTokens(efc, builder.obj());
+    CompactionHelpers::validateCompactionOrCleanupTokens(efc, builder.obj(), "Compact"_sd);
 }
 
-TEST(EDCServerCollectionTest, GenerateEDCTokens) {
+TEST_F(ServiceContextTest, EDCServerCollectionTest_GenerateEDCTokens) {
 
     auto doc = BSON("sample" << 123456);
     auto element = doc.firstElement();
 
     auto value = ConstDataRange(element.value(), element.value() + element.valuesize());
 
-    auto collectionToken = FLELevel1TokenGenerator::generateCollectionsLevel1Token(getIndexKey());
-    auto edcToken = FLECollectionTokenGenerator::generateEDCToken(collectionToken);
+    auto collectionToken = CollectionsLevel1Token::deriveFrom(getIndexKey());
+    auto edcToken = EDCToken::deriveFrom(collectionToken);
 
-    EDCDerivedFromDataToken edcDatakey =
-        FLEDerivedFromDataTokenGenerator::generateEDCDerivedFromDataToken(edcToken, value);
+    EDCDerivedFromDataToken edcDatakey = EDCDerivedFromDataToken::deriveFrom(edcToken, value);
 
 
     ASSERT_EQ(EDCServerCollection::generateEDCTokens(edcDatakey, 0).size(), 1);
@@ -2876,7 +3628,7 @@ TEST(EDCServerCollectionTest, GenerateEDCTokens) {
     ASSERT_EQ(EDCServerCollection::generateEDCTokens(edcDatakey, 3).size(), 4);
 }
 
-TEST(EDCServerCollectionTest, ValidateModifiedDocumentCompatibility) {
+TEST_F(ServiceContextTest, EDCServerCollectionTest_ValidateModifiedDocumentCompatibility) {
     std::vector<uint8_t> blob;
     std::vector<EncryptedBinDataType> badTypes = {
         EncryptedBinDataType::kFLE2EqualityIndexedValue,
@@ -2903,289 +3655,8 @@ TEST(EDCServerCollectionTest, ValidateModifiedDocumentCompatibility) {
     }
 }
 
-TEST(RangeTest, Int32_NoBounds) {
-#define ASSERT_EI(x, y) ASSERT_EQ(getTypeInfo32((x), boost::none, boost::none).value, (y));
 
-    ASSERT_EI(2147483647, 4294967295);
-
-    ASSERT_EI(1, 2147483649);
-    ASSERT_EI(0, 2147483648);
-    ASSERT_EI(-1, 2147483647);
-    ASSERT_EI(-2, 2147483646);
-    ASSERT_EI(-2147483647, 1);
-
-    // min int32_t, no equivalent in positive part of integer
-    ASSERT_EI(-2147483648, 0);
-
-#undef ASSERT_EI
-}
-
-bool operator==(const OSTType_Int32& lhs, const OSTType_Int32& rhs) {
-    return std::tie(lhs.value, lhs.min, lhs.max) == std::tie(rhs.value, rhs.min, rhs.max);
-}
-
-std::basic_ostream<char>& operator<<(std::basic_ostream<char>& os, const OSTType_Int32& lhs) {
-    return os << "(" << lhs.value << ", " << lhs.min << ", " << lhs.max << ")";
-}
-
-TEST(RangeTest, Int32_Bounds) {
-#define ASSERT_EIB(x, y, z, e)                   \
-    {                                            \
-        auto _ti = getTypeInfo32((x), (y), (z)); \
-        ASSERT_EQ(_ti, (e));                     \
-    }
-
-    ASSERT_EIB(1, 1, 3, OSTType_Int32(0, 0, 2));
-    ASSERT_EIB(0, 0, 1, OSTType_Int32(0, 0, 1));
-    ASSERT_EIB(-1, -1, 0, OSTType_Int32(0, 0, 1));
-    ASSERT_EIB(-2, -2, 0, OSTType_Int32(0, 0, 2));
-
-    // min int32_t, no equivalent in positive part of integer
-    ASSERT_EIB(-2147483647, -2147483648, 1, OSTType_Int32(1, 0, 2147483649));
-    ASSERT_EIB(-2147483648, -2147483648, 0, OSTType_Int32(0, 0, 2147483648));
-    ASSERT_EIB(0, -2147483648, 1, OSTType_Int32(2147483648, 0, 2147483649));
-    ASSERT_EIB(1, -2147483648, 2, OSTType_Int32(2147483649, 0, 2147483650));
-
-    ASSERT_EIB(2147483647, -2147483647, 2147483647, OSTType_Int32(4294967294, 0, 4294967294));
-    ASSERT_EIB(2147483647, -2147483648, 2147483647, OSTType_Int32(4294967295, 0, 4294967295));
-
-    ASSERT_EIB(15, 10, 26, OSTType_Int32(5, 0, 16));
-
-    ASSERT_EIB(15, -10, 55, OSTType_Int32(25, 0, 65));
-
-#undef ASSERT_EIB
-}
-
-TEST(RangeTest, Int32_Errors) {
-    ASSERT_THROWS_CODE(getTypeInfo32(1, boost::none, 2), AssertionException, 6775001);
-    ASSERT_THROWS_CODE(getTypeInfo32(1, 0, boost::none), AssertionException, 6775001);
-    ASSERT_THROWS_CODE(getTypeInfo32(1, 2, 1), AssertionException, 6775002);
-
-    ASSERT_THROWS_CODE(getTypeInfo32(1, 2, 3), AssertionException, 6775003);
-    ASSERT_THROWS_CODE(getTypeInfo32(4, 2, 3), AssertionException, 6775003);
-
-    ASSERT_THROWS_CODE(getTypeInfo32(4, -2147483648, -2147483648), AssertionException, 6775002);
-}
-
-
-TEST(RangeTest, Int64_NoBounds) {
-#define ASSERT_EI(x, y) ASSERT_EQ(getTypeInfo64((x), boost::none, boost::none).value, (y));
-
-    ASSERT_EI(9223372036854775807LL, 18446744073709551615ULL);
-
-    ASSERT_EI(1, 9223372036854775809ULL);
-    ASSERT_EI(0, 9223372036854775808ULL);
-    ASSERT_EI(-1, 9223372036854775807ULL);
-    ASSERT_EI(-2, 9223372036854775806ULL);
-    ASSERT_EI(-9223372036854775807LL, 1);
-
-    // min Int64_t, no equivalent in positive part of integer
-    ASSERT_EI(LLONG_MIN, 0);
-
-#undef ASSERT_EI
-}
-
-bool operator==(const OSTType_Int64& lhs, const OSTType_Int64& rhs) {
-    return std::tie(lhs.value, lhs.min, lhs.max) == std::tie(rhs.value, rhs.min, rhs.max);
-}
-
-std::basic_ostream<char>& operator<<(std::basic_ostream<char>& os, const OSTType_Int64& lhs) {
-    return os << "(" << lhs.value << ", " << lhs.min << ", " << lhs.max << ")";
-}
-
-
-TEST(RangeTest, Int64_Bounds) {
-#define ASSERT_EIB(x, y, z, e)                   \
-    {                                            \
-        auto _ti = getTypeInfo64((x), (y), (z)); \
-        ASSERT_EQ(_ti, (e));                     \
-    }
-
-    ASSERT_EIB(1, 1, 2, OSTType_Int64(0, 0, 1));
-    ASSERT_EIB(0, 0, 1, OSTType_Int64(0, 0, 1))
-    ASSERT_EIB(-1, -1, 0, OSTType_Int64(0, 0, 1))
-    ASSERT_EIB(-2, -2, 0, OSTType_Int64(0, 0, 2))
-
-    // min Int64_t, no equivalent in positive part of integer
-    ASSERT_EIB(-9223372036854775807LL, LLONG_MIN, 1, OSTType_Int64(1, 0, 9223372036854775809ULL));
-    ASSERT_EIB(LLONG_MIN, LLONG_MIN, 0, OSTType_Int64(0, 0, 9223372036854775808ULL));
-    ASSERT_EIB(0, LLONG_MIN, 37, OSTType_Int64(9223372036854775808ULL, 0, 9223372036854775845ULL));
-    ASSERT_EIB(1, LLONG_MIN, 42, OSTType_Int64(9223372036854775809ULL, 0, 9223372036854775850ULL));
-
-    ASSERT_EIB(9223372036854775807,
-               -9223372036854775807,
-               9223372036854775807,
-               OSTType_Int64(18446744073709551614ULL, 0, 18446744073709551614ULL));
-    ASSERT_EIB(9223372036854775807,
-               LLONG_MIN,
-               9223372036854775807,
-               OSTType_Int64(18446744073709551615ULL, 0, 18446744073709551615ULL));
-
-    ASSERT_EIB(15, 10, 26, OSTType_Int64(5, 0, 16));
-
-    ASSERT_EIB(15, -10, 55, OSTType_Int64(25, 0, 65));
-
-#undef ASSERT_EIB
-}
-
-TEST(RangeTest, Int64_Errors) {
-    ASSERT_THROWS_CODE(getTypeInfo64(1, boost::none, 2), AssertionException, 6775004);
-    ASSERT_THROWS_CODE(getTypeInfo64(1, 0, boost::none), AssertionException, 6775004);
-    ASSERT_THROWS_CODE(getTypeInfo64(1, 2, 1), AssertionException, 6775005);
-
-    ASSERT_THROWS_CODE(getTypeInfo64(1, 2, 3), AssertionException, 6775006);
-    ASSERT_THROWS_CODE(getTypeInfo64(4, 2, 3), AssertionException, 6775006);
-
-    ASSERT_THROWS_CODE(getTypeInfo64(4, LLONG_MIN, LLONG_MIN), AssertionException, 6775005);
-}
-
-TEST(RangeTest, Double_Bounds) {
-#define ASSERT_EIB(x, z) \
-    ASSERT_EQ(getTypeInfoDouble((x), boost::none, boost::none, boost::none).value, (z));
-
-    // Larger numbers map to larger uint64
-    ASSERT_EIB(-1111, 4570770991734587392ULL);
-    ASSERT_EIB(-111, 4585860689314185216ULL);
-    ASSERT_EIB(-11, 4600989969312382976ULL);
-    ASSERT_EIB(-10, 4601552919265804288ULL);
-    ASSERT_EIB(-3, 4609434218613702656ULL);
-    ASSERT_EIB(-2, 4611686018427387904ULL);
-
-    ASSERT_EIB(-1, 4616189618054758400ULL);
-    ASSERT_EIB(1, 13830554455654793216ULL);
-    ASSERT_EIB(22, 13850257704024539136ULL);
-    ASSERT_EIB(333, 13867937850999177216ULL);
-
-    // Larger exponents map to larger uint64
-    ASSERT_EIB(33E56, 14690973652625833878ULL);
-    ASSERT_EIB(22E57, 14703137697061005818ULL);
-    ASSERT_EIB(11E58, 14713688953586463292ULL);
-
-    // Smaller exponents map to smaller uint64
-    ASSERT_EIB(1E-6, 13740701229962882445ULL);
-    ASSERT_EIB(1E-7, 13725520251343122248ULL);
-    ASSERT_EIB(1E-8, 13710498295186492474ULL);
-    ASSERT_EIB(1E-56, 12992711961033031890ULL);
-    ASSERT_EIB(1E-57, 12977434315086142017ULL);
-    ASSERT_EIB(1E-58, 12962510038552207822ULL);
-
-    // Smaller negative exponents map to smaller uint64
-    ASSERT_EIB(-1E-06, 4706042843746669171ULL);
-    ASSERT_EIB(-1E-07, 4721223822366429368ULL);
-    ASSERT_EIB(-1E-08, 4736245778523059142ULL);
-    ASSERT_EIB(-1E-56, 5454032112676519726ULL);
-    ASSERT_EIB(-1E-57, 5469309758623409599ULL);
-    ASSERT_EIB(-1E-58, 5484234035157343794ULL);
-
-    // Larger exponents map to larger uint64
-    ASSERT_EIB(-33E+56, 3755770421083717738ULL);
-    ASSERT_EIB(-22E+57, 3743606376648545798ULL);
-    ASSERT_EIB(-11E+58, 3733055120123088324ULL);
-
-    ASSERT_EIB(0, 9223372036854775808ULL);
-    ASSERT_EIB(-0.0, 9223372036854775808ULL);
-
-#undef ASSERT_EIB
-}
-
-TEST(RangeTest, Double_Bounds_Precision) {
-#define ASSERT_EIBP(x, y, z) ASSERT_EQ(getTypeInfoDouble((x), -100000, 100000, y).value, (z));
-
-    ASSERT_EIBP(3.141592653589, 1, 1000031);
-    ASSERT_EIBP(3.141592653589, 2, 10000314);
-    ASSERT_EIBP(3.141592653589, 3, 100003141);
-    ASSERT_EIBP(3.141592653589, 4, 1000031415);
-    ASSERT_EIBP(3.141592653589, 5, 10000314159);
-    ASSERT_EIBP(3.141592653589, 6, 100003141592);
-    ASSERT_EIBP(3.141592653589, 7, 1000031415926);
-#undef ASSERT_EIBP
-
-
-#define ASSERT_EIBB(v, ub, lb, prc, z)                   \
-    {                                                    \
-        auto _ost = getTypeInfoDouble((v), lb, ub, prc); \
-        ASSERT_NE(_ost.max, 18446744073709551615ULL);    \
-        ASSERT_EQ(_ost.value, z);                        \
-    }
-#define ASSERT_EIBB_OVERFLOW(v, ub, lb, prc, z)          \
-    {                                                    \
-        auto _ost = getTypeInfoDouble((v), lb, ub, prc); \
-        ASSERT_EQ(_ost.max, 18446744073709551615ULL);    \
-        ASSERT_EQ(_ost.value, z);                        \
-    }
-#define ASSERT_EIBB_ERROR(v, ub, lb, prc, code) \
-    { ASSERT_THROWS_CODE(getTypeInfoDouble((v), lb, ub, prc), DBException, code); }
-
-    ASSERT_EIBB(0, 1, -1, 3, 1000);
-    ASSERT_EIBB(0, 1, -1E5, 3, 100000000);
-
-    ASSERT_EIBB(-1E-33, 1, -1E5, 3, 100000000);
-
-    ASSERT_EIBB_ERROR(
-        0, std::numeric_limits<double>::max(), std::numeric_limits<double>::lowest(), 3, 9178803);
-
-    ASSERT_EIBB(3.141592653589, 5, 0, 0, 3);
-    ASSERT_EIBB(3.141592653589, 5, 0, 1, 31);
-
-    ASSERT_EIBB(3.141592653589, 5, 0, 2, 314);
-
-    ASSERT_EIBB(3.141592653589, 5, 0, 3, 3141);
-    ASSERT_EIBB(3.141592653589, 5, 0, 16, 31415926535890000);
-
-
-    ASSERT_EIBB(-5, -1, -10, 3, 5000);
-
-    ASSERT_EIBB_ERROR(-1E100, 0, std::numeric_limits<double>::lowest(), 3, 9178804);
-
-    ASSERT_EIBB(1E9, 1E10, 0, 3, 1000000000000);
-    ASSERT_EIBB(1E9, 1E10, 0, 0, 1000000000);
-
-
-    ASSERT_EIBB(-5, 10, -10, 0, 5);
-    ASSERT_EIBB(-5, 10, -10, 2, 500);
-
-    /**
-     * 1E-30 and 10E-30 cannot be represented accurately as a double, so there will
-     * always be some rounding errors. That means scaled_max and scaled_min will also
-     * have issues with precision and will have digits after the decimal place.
-     */
-    ASSERT_EIBB_ERROR(1E-30, 10E-30, 1E-30, 35, 9178801);
-    ASSERT_EIBB_ERROR(-1E-30, 0, -10E-30, 35, 9178802);
-
-#undef ASSERT_EIBB
-#undef ASSERT_EIBB_OVERFLOW
-}
-
-TEST(RangeTest, Double_Bounds_Precision_Errors) {
-
-    ASSERT_THROWS_CODE(
-        getTypeInfoDouble(1, boost::none, boost::none, 1), AssertionException, 6966803);
-
-    ASSERT_THROWS_CODE(getTypeInfoDouble(1, 1, 2, -1), AssertionException, 9125503);
-}
-
-TEST(RangeTest, Double_Errors) {
-    ASSERT_THROWS_CODE(getTypeInfoDouble(1, boost::none, 2, 5), AssertionException, 6775007);
-    ASSERT_THROWS_CODE(getTypeInfoDouble(1, 0, boost::none, 5), AssertionException, 6775007);
-    ASSERT_THROWS_CODE(getTypeInfoDouble(1, 2, 1, 5), AssertionException, 6775009);
-
-    ASSERT_THROWS_CODE(getTypeInfoDouble(1, 2, 3, 5), AssertionException, 6775010);
-    ASSERT_THROWS_CODE(getTypeInfoDouble(4, 2, 3, 5), AssertionException, 6775010);
-
-
-    ASSERT_THROWS_CODE(getTypeInfoDouble(std::numeric_limits<double>::infinity(), 1, 2, 5),
-                       AssertionException,
-                       6775008);
-    ASSERT_THROWS_CODE(getTypeInfoDouble(std::numeric_limits<double>::quiet_NaN(), 1, 2, 5),
-                       AssertionException,
-                       6775008);
-    ASSERT_THROWS_CODE(getTypeInfoDouble(std::numeric_limits<double>::signaling_NaN(), 1, 2, 5),
-                       AssertionException,
-                       6775008);
-}
-
-
-TEST(EdgeCalcTest, SparsityConstraints) {
+TEST_F(ServiceContextTest, EdgeCalcTest_SparsityConstraints) {
     ASSERT_THROWS_CODE(getEdgesInt32(1, 0, 8, 0, 0), AssertionException, 6775101);
     ASSERT_THROWS_CODE(getEdgesInt32(1, 0, 8, -1, 0), AssertionException, 6775101);
     ASSERT_THROWS_CODE(getEdgesInt64(1, 0, 8, 0, 0), AssertionException, 6775101);
@@ -3194,7 +3665,7 @@ TEST(EdgeCalcTest, SparsityConstraints) {
     ASSERT_THROWS_CODE(getEdgesDouble(1.0, 0.0, 8.0, 5, -1, 0), AssertionException, 6775101);
 }
 
-TEST(EdgeCalcTest, TrimFactorConstraints) {
+TEST_F(ServiceContextTest, EdgeCalcTest_TrimFactorConstraints) {
     ASSERT_THROWS_CODE(getEdgesInt32(1, 0, 7, 1, -1), AssertionException, 8574105);
     ASSERT_THROWS_CODE(getEdgesInt32(1, 0, 7, 1, 3), AssertionException, 8574105);
     ASSERT_THROWS_CODE(getEdgesInt64(1, 0, 7, 1, -1), AssertionException, 8574105);
@@ -3214,7 +3685,7 @@ void doEdgeCalcTestIdentifyLeaf(std::unique_ptr<Edges> edges, StringData expectL
               1);
 }
 
-TEST(EdgeCalcTest, IdentifyLeaf) {
+TEST_F(ServiceContextTest, EdgeCalcTest_IdentifyLeaf) {
     constexpr auto k42Leaf64 =
         "1000000000000000000000000000000000000000000000000000000000101010"_sd;
     doEdgeCalcTestIdentifyLeaf(getEdgesInt64(42, {}, {}, 1, 0), k42Leaf64);
@@ -3245,7 +3716,7 @@ TEST(EdgeCalcTest, IdentifyLeaf) {
                                k42LeafDecimal128);
 }
 
-TEST(MinCoverCalcTest, MinCoverConstraints) {
+TEST_F(ServiceContextTest, MinCoverCalcTest_MinCoverConstraints) {
     ASSERT(minCoverInt32(2, true, 1, true, 0, 7, 1, 0).empty());
     ASSERT(minCoverInt64(2, true, 1, true, 0, 7, 1, 0).empty());
     ASSERT(minCoverDouble(2, true, 1, true, 0, 7, boost::none, 1, 0).empty());
@@ -3254,293 +3725,38 @@ TEST(MinCoverCalcTest, MinCoverConstraints) {
                .empty());
 }
 
-TEST(RangeTest, Decimal128_Bounds) {
-#define ASSERT_EIB(x, z)                                                                        \
-    ASSERT_EQ(                                                                                  \
-        boost::multiprecision::to_string(                                                       \
-            getTypeInfoDecimal128(Decimal128(x), boost::none, boost::none, boost::none).value), \
-        (z));
-
-    // Larger numbers map tw larger uint64
-    ASSERT_EIB(-1234567890E7, "108549948892579231731687303715884111887");
-    ASSERT_EIB(-1234567890E6, "108559948892579231731687303715884111886");
-    ASSERT_EIB(-1234567890E5, "108569948892579231731687303715884111885");
-    ASSERT_EIB(-1234567890E4, "108579948892579231731687303715884111884");
-    ASSERT_EIB(-1234567890E3, "108589948892579231731687303715884111883");
-    ASSERT_EIB(-1234567890E2, "108599948892579231731687303715884111882");
-    ASSERT_EIB(-1234567890E1, "108609948892579231731687303715884111881");
-    ASSERT_EIB(-123456789012345, "108569948892579108281687303715884111885");
-    ASSERT_EIB(-12345678901234, "108579948892579108331687303715884111884");
-    ASSERT_EIB(-1234567890123, "108589948892579108731687303715884111883");
-    ASSERT_EIB(-123456789012, "108599948892579111731687303715884111882");
-    ASSERT_EIB(-12345678901, "108609948892579131731687303715884111881");
-    ASSERT_EIB(-1234567890, "108619948892579231731687303715884111880");
-    ASSERT_EIB(-99999999, "108631183460569231731687303715884111878");
-    ASSERT_EIB(-8888888, "108642294572469231731687303715884111877");
-    ASSERT_EIB(-777777, "108653405690469231731687303715884111876");
-    ASSERT_EIB(-66666, "108664516860469231731687303715884111875");
-    ASSERT_EIB(-5555, "108675628460469231731687303715884111874");
-    ASSERT_EIB(-444, "108686743460469231731687303715884111873");
-    ASSERT_EIB(-334, "108687843460469231731687303715884111873");
-    ASSERT_EIB(-333, "108687853460469231731687303715884111873");
-    ASSERT_EIB(-44, "108696783460469231731687303715884111872");
-    ASSERT_EIB(-33, "108697883460469231731687303715884111872");
-    ASSERT_EIB(-22, "108698983460469231731687303715884111872");
-    ASSERT_EIB(-5, "108706183460469231731687303715884111871");
-    ASSERT_EIB(-4, "108707183460469231731687303715884111871");
-    ASSERT_EIB(-3, "108708183460469231731687303715884111871");
-    ASSERT_EIB(-2, "108709183460469231731687303715884111871");
-    ASSERT_EIB(-1, "108710183460469231731687303715884111871");
-    ASSERT_EIB(0, "170141183460469231731687303715884105728");
-    ASSERT_EIB(1, "231572183460469231731687303715884099585");
-    ASSERT_EIB(2, "231573183460469231731687303715884099585");
-    ASSERT_EIB(3, "231574183460469231731687303715884099585");
-    ASSERT_EIB(4, "231575183460469231731687303715884099585");
-    ASSERT_EIB(5, "231576183460469231731687303715884099585");
-    ASSERT_EIB(22, "231583383460469231731687303715884099584");
-    ASSERT_EIB(33, "231584483460469231731687303715884099584");
-    ASSERT_EIB(44, "231585583460469231731687303715884099584");
-    ASSERT_EIB(333, "231594513460469231731687303715884099583");
-    ASSERT_EIB(334, "231594523460469231731687303715884099583");
-    ASSERT_EIB(444, "231595623460469231731687303715884099583");
-    ASSERT_EIB(5555, "231606738460469231731687303715884099582");
-    ASSERT_EIB(66666, "231617850060469231731687303715884099581");
-    ASSERT_EIB(777777, "231628961230469231731687303715884099580");
-    ASSERT_EIB(8888888, "231640072348469231731687303715884099579");
-    ASSERT_EIB(33E56, "232144483460469231731687303715884099528");
-    ASSERT_EIB(22E57, "232153383460469231731687303715884099527");
-    ASSERT_EIB(11E58, "232162283460469231731687303715884099526");
-
-    // Smaller exponents map to smaller uint64
-    ASSERT_EIB(1E-6, "231512183460469231731687303715884099591");
-    ASSERT_EIB(1E-7, "231502183460469231731687303715884099592");
-    ASSERT_EIB(1E-8, "231492183460469231731687303715884099593");
-    ASSERT_EIB(1E-56, "231012183460469231731687303715884099641");
-    ASSERT_EIB(1E-57, "231002183460469231731687303715884099642");
-    ASSERT_EIB(1E-58, "230992183460469231731687303715884099643");
-
-    // Smaller negative exponents map to smaller uint64
-    ASSERT_EIB(-1E-6, "108770183460469231731687303715884111865");
-    ASSERT_EIB(-1E-7, "108780183460469231731687303715884111864");
-    ASSERT_EIB(-1E-8, "108790183460469231731687303715884111863");
-    ASSERT_EIB(-1E-56, "109270183460469231731687303715884111815");
-    ASSERT_EIB(-1E-57, "109280183460469231731687303715884111814");
-    ASSERT_EIB(-1E-58, "109290183460469231731687303715884111813");
-
-    // Larger exponents map to larger uint64
-    ASSERT_EIB(-33E56, "108137883460469231731687303715884111928");
-    ASSERT_EIB(-22E57, "108128983460469231731687303715884111929");
-    ASSERT_EIB(-11E58, "108120083460469231731687303715884111930");
-
-    ASSERT_EIB(Decimal128::kLargestPositive, "293021183460469231731687303715884093440");
-    ASSERT_EIB(Decimal128::kSmallestPositive, "170141183460469231731687303715884105729");
-    ASSERT_EIB(Decimal128::kLargestNegative, "47261183460469231731687303715884118016");
-    ASSERT_EIB(Decimal128::kSmallestNegative, "170141183460469231731687303715884105727");
-    ASSERT_EIB(Decimal128::kNormalizedZero, "170141183460469231731687303715884105728");
-    ASSERT_EIB(Decimal128::kLargestNegativeExponentZero, "170141183460469231731687303715884105728");
-
-#undef ASSERT_EIB
-}
-
-
-TEST(RangeTest, Decimal128_Bounds_Precision) {
-
-#define ASSERT_EIBP(x, y, z)                                                                    \
-    ASSERT_EQ(                                                                                  \
-        getTypeInfoDecimal128(Decimal128(x), Decimal128(-100000), Decimal128(100000), y).value, \
-        (z));
-
-    ASSERT_EIBP("3.141592653589E-1", 10, 1000003141592653);
-    ASSERT_EIBP("31.41592653589E-2", 10, 1000003141592653);
-    ASSERT_EIBP("314.1592653589E-3", 10, 1000003141592653);
-    ASSERT_EIBP("3141.592653589E-4", 10, 1000003141592653);
-    ASSERT_EIBP("31415.92653589E-5", 10, 1000003141592653);
-    ASSERT_EIBP("314159.2653589E-6", 10, 1000003141592653);
-    ASSERT_EIBP("3141592.653589E-7", 10, 1000003141592653);
-    ASSERT_EIBP("31415926.53589E-8", 10, 1000003141592653);
-
-#undef ASSERT_EIBP
-
-#define ASSERT_EIBPL(x, y, z)                                                                   \
-    ASSERT_EQ(                                                                                  \
-        getTypeInfoDecimal128(Decimal128(x), Decimal128(-100000), Decimal128("1E22"), y).value, \
-        boost::multiprecision::uint128_t(z));
-
-    ASSERT_EIBPL("3.1415926535897932384626433832795E20", 5, "31415926535897942384626433");
-    ASSERT_EIBPL("3.1415926535897932384626433832795E20", 6, "314159265358979423846264338");
-
-    ASSERT_EIBPL("3.1415926535897932384626433832795E20", 7, "3141592653589794238462643383");
-
-    ASSERT_EIBPL("3.1415926535897932384626433832795E20", 8, "31415926535897942384626433832");
-
-#undef ASSERT_EIBP
-
-#define ASSERT_EIBP(x, y, z)                                                                    \
-    ASSERT_EQ(                                                                                  \
-        getTypeInfoDecimal128(Decimal128(x), Decimal128(-100000), Decimal128(100000), y).value, \
-        (z));
-
-    ASSERT_EIBP(3.141592653589, 1, 1000031);
-    ASSERT_EIBP(3.141592653589, 2, 10000314);
-    ASSERT_EIBP(3.141592653589, 3, 100003141);
-    ASSERT_EIBP(3.141592653589, 4, 1000031415);
-    ASSERT_EIBP(3.141592653589, 5, 10000314159);
-    ASSERT_EIBP(3.141592653589, 6, 100003141592);
-    ASSERT_EIBP(3.141592653589, 7, 1000031415926);
-#undef ASSERT_EIBP
-
-
-#define ASSERT_EIBB(v, ub, lb, prc, z)                                                         \
-    {                                                                                          \
-        auto _ost = getTypeInfoDecimal128(Decimal128(v), Decimal128(lb), Decimal128(ub), prc); \
-        ASSERT_NE(_ost.max.str(), "340282366920938463463374607431768211455");                  \
-        ASSERT_EQ(_ost.value, z);                                                              \
-    }
-
-#define ASSERT_EIBB_ERROR_CODE(v, ub, lb, prc, code)                                   \
-    {                                                                                  \
-        ASSERT_THROWS_CODE(                                                            \
-            getTypeInfoDecimal128(Decimal128(v), Decimal128(lb), Decimal128(ub), prc), \
-            DBException,                                                               \
-            code);                                                                     \
-    }
-
-#define ASSERT_EIBB_OVERFLOW(v, ub, lb, prc, z)                                                \
-    {                                                                                          \
-        auto _ost = getTypeInfoDecimal128(Decimal128(v), Decimal128(lb), Decimal128(ub), prc); \
-        ASSERT_EQ(_ost.max.str(), "340282366920938463463374607431768211455");                  \
-        ASSERT_EQ(_ost.value, z);                                                              \
-    }
-
-    ASSERT_EIBB(0, 1, -1, 3, 1000);
-    ASSERT_EIBB(0, 1, -1E5, 3, 100000000);
-
-    ASSERT_EIBB(-1E-33, 1, -1E5, 3, 100000000);
-
-    ASSERT_EIBB_ERROR_CODE(
-        0, Decimal128::kLargestPositive, Decimal128::kLargestNegative, 3, 9178810);
-    ASSERT_EIBB_ERROR_CODE(0, 0, Decimal128::kLargestNegative, 3, 9178811);
-
-    ASSERT_EIBB_ERROR_CODE(
-        0, std::numeric_limits<double>::max(), std::numeric_limits<double>::lowest(), 3, 9178810);
-
-    ASSERT_EIBB(3.141592653589, 5, 0, 0, 3);
-    ASSERT_EIBB(3.141592653589, 5, 0, 1, 31);
-
-    ASSERT_EIBB(3.141592653589, 5, 0, 2, 314);
-
-    ASSERT_EIBB(3.141592653589, 5, 0, 3, 3141);
-    ASSERT_EIBB(3.141592653589, 5, 0, 16, 31415926535890000);
-
-
-    ASSERT_EIBB(-5, -1, -10, 3, 5000);
-
-
-    ASSERT_EIBB_ERROR_CODE(1E100,
-                           std::numeric_limits<double>::max(),
-                           std::numeric_limits<double>::lowest(),
-                           3,
-                           9178810);
-
-    ASSERT_EIBB(1E9, 1E10, 0, 3, 1000000000000);
-    ASSERT_EIBB(1E9, 1E10, 0, 0, 1000000000);
-
-
-    ASSERT_EIBB(-5, 10, -10, 0, 5);
-    ASSERT_EIBB(-5, 10, -10, 2, 500);
-
-
-    ASSERT_EIBB(5E-30, 10E-30, 1E-30, 35, boost::multiprecision::uint128_t("400000"));
-
-    // Test a range that requires > 64 bits.
-    ASSERT_EIBB(5, "18446744073709551616", ".1", 1, 49);
-    // Test a range that requires > 64 bits.
-    // min has more places after the decimal than precision.
-    ASSERT_EIBB_ERROR_CODE(5, "18446744073709551.616", ".01", 1, 9178808);
-    ASSERT_EIBB_ERROR_CODE(5, "18446744073709551616", ".01", 1, 9178809);
-
-#undef ASSERT_EIBB
-#undef ASSERT_EIBB_ERROR_CODE
-#undef ASSERT_EIBB_OVERFLOW
-}
-
-TEST(RangeTest, Decimal128_Errors) {
-    ASSERT_THROWS_CODE(getTypeInfoDecimal128(Decimal128(1), boost::none, Decimal128(2), 5),
-                       AssertionException,
-                       6854201);
-    ASSERT_THROWS_CODE(getTypeInfoDecimal128(Decimal128(1), Decimal128(0), boost::none, 5),
-                       AssertionException,
-                       6854201);
-    ASSERT_THROWS_CODE(getTypeInfoDecimal128(Decimal128(1), Decimal128(2), Decimal128(1), 5),
-                       AssertionException,
-                       6854203);
-
-
-    ASSERT_THROWS_CODE(getTypeInfoDecimal128(Decimal128(1), Decimal128(2), Decimal128(3), 5),
-                       AssertionException,
-                       6854204);
-    ASSERT_THROWS_CODE(getTypeInfoDecimal128(Decimal128(4), Decimal128(2), Decimal128(3), 5),
-                       AssertionException,
-                       6854204);
-
-
+TEST_F(ServiceContextTest, EdgeCalcTest_SubstringTagCalculators) {
+    // Expected values were calculated from OST paper's msize formula from the SubTree function.
+    ASSERT_EQ(0, msizeForSubstring(10, 48, 100, 200));         // (padlen=11) < lb
+    ASSERT_EQ(1, msizeForSubstring(30, 43, 100, 200));         // lb == (padlen=43) < ub
+    ASSERT_EQ(595, msizeForSubstring(30, 10, 100, 200));       // lb < (padlen=43) < ub
+    ASSERT_EQ(9316, msizeForSubstring(150, 20, 155, 200));     // ub == (padlen=155) < mlen
+    ASSERT_EQ(9301, msizeForSubstring(150, 20, 150, 200));     // ub < (padlen=155) < mlen
+    ASSERT_EQ(87815, msizeForSubstring(1004, 10, 100, 1019));  // ub < mlen == (padlen=1019)
+    ASSERT_EQ(87815, msizeForSubstring(1030, 10, 100, 1019));  // ub < mlen < (padlen=1043)
     ASSERT_THROWS_CODE(
-        getTypeInfoDecimal128(Decimal128::kPositiveInfinity, boost::none, boost::none, boost::none),
-        AssertionException,
-        6854202);
+        msizeForSubstring(INT32_MAX, 1, INT32_MAX, INT32_MAX), DBException, 10384600);
     ASSERT_THROWS_CODE(
-        getTypeInfoDecimal128(Decimal128::kNegativeInfinity, boost::none, boost::none, boost::none),
-        AssertionException,
-        6854202);
+        msizeForSubstring(INT32_MAX - 128, 1, INT32_MAX, INT32_MAX), DBException, 10384601);
 
-    ASSERT_THROWS_CODE(
-        getTypeInfoDecimal128(Decimal128::kPositiveNaN, boost::none, boost::none, boost::none),
-        AssertionException,
-        6854202);
-
-    ASSERT_THROWS_CODE(
-        getTypeInfoDecimal128(Decimal128::kNegativeNaN, boost::none, boost::none, boost::none),
-        AssertionException,
-        6854202);
+    ASSERT_EQ(87815, maxTagsForSubstring(10, 100, 1019));    // lb < ub < mlen
+    ASSERT_EQ(510555, maxTagsForSubstring(10, 1019, 1019));  // lb < ub == mlen
+    ASSERT_EQ(1003, maxTagsForSubstring(17, 17, 1019));      // lb == ub < mlen
+    ASSERT_EQ(1, maxTagsForSubstring(1019, 1019, 1019));     // lb == ub == mlen
 }
 
+TEST_F(ServiceContextTest, EdgeCalcTest_SuffixPrefixTagCalculators) {
+    // Expected values were calculated from OST paper's msize formulas from the SuffTree and
+    // PrefTree functions.
+    ASSERT_EQ(0, msizeForSuffixOrPrefix(10, 48, 100));     // (padlen=11) < lb
+    ASSERT_EQ(1, msizeForSuffixOrPrefix(30, 43, 100));     // lb == (padlen=43) < ub
+    ASSERT_EQ(34, msizeForSuffixOrPrefix(30, 10, 100));    // lb < (padlen=43) < ub
+    ASSERT_EQ(136, msizeForSuffixOrPrefix(150, 20, 155));  // ub == (padlen=155)
+    ASSERT_EQ(131, msizeForSuffixOrPrefix(150, 20, 150));  // ub < (padlen=155)
+    ASSERT_THROWS_CODE(msizeForSuffixOrPrefix(INT32_MAX, 1, INT32_MAX), DBException, 10384600);
 
-TEST(RangeTest, Decimal128_Bounds_Precision_Errors) {
-
-    ASSERT_THROWS_CODE(getTypeInfoDecimal128(Decimal128(1), boost::none, boost::none, 1),
-                       AssertionException,
-                       6966804);
-
-    ASSERT_THROWS_CODE(getTypeInfoDecimal128(Decimal128(1), Decimal128(1), Decimal128(2), -1),
-                       AssertionException,
-                       9125501);
-}
-
-void roundTripDecimal128_Int128(std::string dec_str) {
-    Decimal128 dec(dec_str);
-
-    auto ret = toUInt128FromDecimal128(dec);
-
-    Decimal128 roundTrip(ret.str());
-    ASSERT(roundTrip == dec);
-}
-
-TEST(RangeTest, Decimal128_to_Int128) {
-    roundTripDecimal128_Int128("0");
-    roundTripDecimal128_Int128("123");
-    roundTripDecimal128_Int128("40000000");
-    roundTripDecimal128_Int128("40000000.00");
-    roundTripDecimal128_Int128("40000000.00000");
-    roundTripDecimal128_Int128("40000000.000000000000");
-
-    roundTripDecimal128_Int128("40000.000E5");
-    roundTripDecimal128_Int128("40000000E10");
-    roundTripDecimal128_Int128("40000.000E10");
-    roundTripDecimal128_Int128("40000000E20");
-    roundTripDecimal128_Int128("40000.000E20");
-    roundTripDecimal128_Int128("40000000E30");
-    roundTripDecimal128_Int128("40000.000E30");
-    roundTripDecimal128_Int128("4E37");
+    ASSERT_EQ(91, maxTagsForSuffixOrPrefix(10, 100));  // lb < ub
+    ASSERT_EQ(1, maxTagsForSuffixOrPrefix(100, 100));  // lb == ub
 }
 
 // Tests to make sure that the getMinCover() interface properly calculates the mincover when given a
@@ -3624,7 +3840,7 @@ void assertMinCoverResultPrecision(A lb,
     }
 }
 
-TEST(MinCoverInterfaceTest, Int32_Basic) {
+TEST_F(ServiceContextTest, MinCoverInterfaceTest_Int32_Basic) {
     assertMinCoverResult(7, true, 32, true, 0, 32, 1, 0, {"000111", "001", "01", "100000"});
     assertMinCoverResult(7, false, 32, false, 0, 32, 1, 0, {"001", "01"});
     assertMinCoverResult(7, true, 32, false, 0, 32, 1, 0, {"000111", "001", "01"});
@@ -3657,7 +3873,7 @@ TEST(MinCoverInterfaceTest, Int32_Basic) {
                           "01111"});
 }
 
-TEST(MinCoverInterfaceTest, Int64_Basic) {
+TEST_F(ServiceContextTest, MinCoverInterfaceTest_Int64_Basic) {
     assertMinCoverResult(0LL,
                          true,
                          823LL,
@@ -3806,7 +4022,7 @@ TEST(MinCoverInterfaceTest, Int64_Basic) {
                          });
 }
 
-TEST(MinCoverInterfaceTest, Double_Basic) {
+TEST_F(ServiceContextTest, MinCoverInterfaceTest_Double_Basic) {
     assertMinCoverResult(23.5,
                          true,
                          35.25,
@@ -3995,7 +4211,7 @@ TEST(MinCoverInterfaceTest, Double_Basic) {
                          });
 }
 
-TEST(MinCoverInterfaceTest, Decimal_Basic) {
+TEST_F(ServiceContextTest, MinCoverInterfaceTest_Decimal_Basic) {
     assertMinCoverResult(
         Decimal128(23.5),
         true,
@@ -4876,7 +5092,7 @@ TEST(MinCoverInterfaceTest, Decimal_Basic) {
         });
 }
 
-TEST(MinCoverInterfaceTest, InfiniteRangeBounds) {
+TEST_F(ServiceContextTest, MinCoverInterfaceTest_InfiniteRangeBounds) {
     assertMinCoverResult(7.0,
                          true,
                          std::numeric_limits<double>::infinity(),
@@ -4932,7 +5148,7 @@ TEST(MinCoverInterfaceTest, InfiniteRangeBounds) {
                          });
 }
 
-TEST(MinCoverInteraceTest, InvalidBounds) {
+TEST_F(ServiceContextTest, MinCoverInteraceTest_InvalidBounds) {
     assertMinCoverResult(7, true, 7, false, 0, 32, 1, 0, {});
     assertMinCoverResult(7LL, true, 7LL, false, 0LL, 32LL, 1, 0, {});
     assertMinCoverResult(7.0, true, 7.0, false, 0.0, 32.0, 1, 0, {});
@@ -4953,7 +5169,7 @@ TEST(MinCoverInteraceTest, InvalidBounds) {
 }
 
 // Test point queries and that trimming bitstrings is correct in precision mode
-TEST(MinCoverInteraceTest, Precision_Equal) {
+TEST_F(ServiceContextTest, MinCoverInteraceTest_Precision_Equal) {
     assertMinCoverResultPrecision(
         3.14159, true, 3.14159, true, 0.0, 10.0, 1, 2, 0, {"00100111010"});
     assertMinCoverResultPrecision(Decimal128(3.14159),
@@ -5131,7 +5347,7 @@ public:
                             // by the test.
                             try {
                                 auto qtc = makeRangeQueryTypeConfig(lb, ub, precision, sparsity);
-                                validateRangeIndex(BSONType::NumberDouble, "rangeField"_sd, qtc);
+                                validateRangeIndex(BSONType::numberDouble, "rangeField"_sd, qtc);
                             } catch (DBException& e) {
                                 if (e.code() == 6966805 || e.code() == 6966806 ||
                                     e.code() == 9157100 || e.code() == 9178801 ||
@@ -5163,15 +5379,15 @@ public:
 };
 
 TEST_F(EdgeTestFixture, getEdgesLengthInt32) {
-    runEdgesLengthTestForFunamentalType<int32_t>(getEdgesInt32, BSONType::NumberInt);
+    runEdgesLengthTestForFunamentalType<int32_t>(getEdgesInt32, BSONType::numberInt);
 }
 
 TEST_F(EdgeTestFixture, getEdgesLengthInt64) {
-    runEdgesLengthTestForFunamentalType<int64_t>(getEdgesInt64, BSONType::NumberLong);
+    runEdgesLengthTestForFunamentalType<int64_t>(getEdgesInt64, BSONType::numberLong);
 }
 
 TEST_F(EdgeTestFixture, getEdgesLengthDouble) {
-    runEdgesLengthTestForFunamentalType<double>(getEdgesDouble, BSONType::NumberDouble);
+    runEdgesLengthTestForFunamentalType<double>(getEdgesDouble, BSONType::numberDouble);
 }
 
 // Decimal128 is less well templated than the fundamental types,
@@ -5205,14 +5421,14 @@ TEST_F(EdgeTestFixture, getEdgesLengthDecimal128) {
                                                    precision,
                                                    sparsity,
                                                    getEdgesDecimal128,
-                                                   BSONType::NumberDecimal);
+                                                   BSONType::numberDecimal);
                         } else {
                             ASSERT_THROWS_CODE(assertEdgesLengthMatch(lb,
                                                                       ub,
                                                                       precision,
                                                                       sparsity,
                                                                       getEdgesDecimal128,
-                                                                      BSONType::NumberDecimal),
+                                                                      BSONType::numberDecimal),
                                                DBException,
                                                9157101);
                         }
@@ -5246,8 +5462,10 @@ TEST_F(EdgeTestFixture, canUsePrecisionMode) {
         ASSERT_EQ(expected_bits_out, bits_out);                          \
     }
 
-#define CAN_USE_PRECISION_MODE_ERRORS(lb, ub, prc, code) \
-    { ASSERT_THROWS_CODE(canUsePrecisionMode(lb, ub, prc, nullptr), DBException, code); }
+#define CAN_USE_PRECISION_MODE_ERRORS(lb, ub, prc, code)                                  \
+    {                                                                                     \
+        ASSERT_THROWS_CODE(canUsePrecisionMode(lb, ub, prc, nullptr), DBException, code); \
+    }
 
     /**
      * Test Cases: (min, max, precision) -> (bool, bits_out)
@@ -5349,27 +5567,26 @@ TEST_F(EdgeTestFixture, getEdgesLengthDate) {
                     continue;
                 }
                 assertEdgesLengthMatch(
-                    lb, ub, boost::none, sparsity, getEdgesInt64, BSONType::Date);
+                    lb, ub, boost::none, sparsity, getEdgesInt64, BSONType::date);
             }
         }
     }
 }
 
-class AnchorPaddingFixture : public unittest::Test {
+class AnchorPaddingFixture : public ServiceContextTest {
 public:
     static constexpr auto kAnchorPaddingRootHex =
         "4312890F621FE3CA7497C3405DFD8AAF46A578C77F7404D28C12BA853A4D3327"_sd;
 
     const AnchorPaddingRootToken _rootToken{decodePrf(kAnchorPaddingRootHex)};
-    const AnchorPaddingKeyToken _keyToken =
-        FLEAnchorPaddingDerivedGenerator::generateAnchorPaddingKeyToken(_rootToken);
-    const AnchorPaddingValueToken _valueToken =
-        FLEAnchorPaddingDerivedGenerator::generateAnchorPaddingValueToken(_rootToken);
+    const AnchorPaddingKeyToken _keyToken = AnchorPaddingKeyToken::deriveFrom(_rootToken);
+    const AnchorPaddingValueToken _valueToken = AnchorPaddingValueToken::deriveFrom(_rootToken);
 };
 
 TEST_F(AnchorPaddingFixture, generatePaddingDocument) {
     constexpr std::uint64_t kId = 42;
-    auto doc = ESCCollectionAnchorPadding::generatePaddingDocument(_keyToken, _valueToken, kId);
+    auto doc =
+        ESCCollectionAnchorPadding::generatePaddingDocument(&hmacCtx, _keyToken, _valueToken, kId);
     ASSERT_EQ(doc.nFields(), 2UL);
 
     // _id := F_k(bot || id)
@@ -5380,7 +5597,7 @@ TEST_F(AnchorPaddingFixture, generatePaddingDocument) {
         auto expectId = decodePrf(kHashOf042);
 
         auto idElem = doc["_id"_sd];
-        ASSERT_EQ(idElem.type(), BinData);
+        ASSERT_EQ(idElem.type(), BSONType::binData);
         ASSERT_EQ(idElem.binDataType(), BinDataGeneral);
 
         int actualIdLen = 0;
@@ -5394,7 +5611,7 @@ TEST_F(AnchorPaddingFixture, generatePaddingDocument) {
     // value := Enc(0 || 0)
     {
         auto valueElem = doc["value"_sd];
-        ASSERT_EQ(valueElem.type(), BinData);
+        ASSERT_EQ(valueElem.type(), BSONType::binData);
         ASSERT_EQ(valueElem.binDataType(), BinDataGeneral);
         int len = 0;
         const char* value = valueElem.binData(len);
@@ -5403,6 +5620,20 @@ TEST_F(AnchorPaddingFixture, generatePaddingDocument) {
         auto dec = std::move(swDecrypt.getValue());
         ASSERT_TRUE(std::all_of(dec.begin(), dec.end(), [](auto b) { return b == 0; }));
     }
+}
+
+TEST_F(ServiceContextTest, fleEncryptAndDecrypt) {
+    PrfBlock key;
+    uassertStatusOK(crypto::engineRandBytes(DataRange(key)));
+    std::vector<uint8_t> plaintext{'a', 'b', 'c', 'd', 'e', 'f'};
+    auto encrypt1 = uassertStatusOK(FLEUtil::encryptData(key, plaintext));
+    auto encrypt2 = uassertStatusOK(FLEUtil::encryptData(key, plaintext));
+    // Ensure that we are correctly generating random IVs in encryptData.
+    ASSERT_NE(encrypt1, encrypt2);
+    auto decrypt1 = uassertStatusOK(FLEUtil::decryptData(key, encrypt1));
+    auto decrypt2 = uassertStatusOK(FLEUtil::decryptData(key, encrypt2));
+    ASSERT_EQ(decrypt1, decrypt2);
+    ASSERT_EQ(decrypt1, plaintext);
 }
 
 }  // namespace mongo

@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <queue>
-#include <tuple>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
@@ -45,9 +40,16 @@
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/interruptible.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 
-namespace mongo {
+#include <cstddef>
+#include <queue>
+#include <tuple>
+
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUB mongo {
 namespace repl {
 
 class StorageInterface;
@@ -57,7 +59,7 @@ class StorageInterface;
  * in startup() and removed in shutdown(). The documents will be popped and peeked in timestamp
  * order.
  */
-class OplogBufferCollection : public RandomAccessOplogBuffer {
+class MONGO_MOD_PARENT_PRIVATE OplogBufferCollection : public RandomAccessOplogBuffer {
 public:
     /**
      * Structure used to configure an instance of OplogBufferCollection.
@@ -115,16 +117,18 @@ public:
 
     // --- CAUTION: Push() and preload() are legal to be called only after startup() ---
 
-    void push(OperationContext* opCtx,
-              Batch::const_iterator begin,
-              Batch::const_iterator end,
-              boost::optional<const Cost&> cost = boost::none) override;
+    MONGO_MOD_PRIVATE void push(OperationContext* opCtx,
+                                Batch::const_iterator begin,
+                                Batch::const_iterator end,
+                                boost::optional<const Cost&> cost = boost::none) override;
     /**
      * Like push(), but allows the operations in the batch to be out of order with
      * respect to themselves and to the buffer. Legal to be called only before reading anything,
      * or immediately after a clear().
      */
-    void preload(OperationContext* opCtx, Batch::const_iterator begin, Batch::const_iterator end);
+    MONGO_MOD_PRIVATE void preload(OperationContext* opCtx,
+                                   Batch::const_iterator begin,
+                                   Batch::const_iterator end);
 
     void waitForSpace(OperationContext* opCtx, const Cost& cost) override;
     bool isEmpty() const override;
@@ -236,4 +240,4 @@ private:
 };
 
 }  // namespace repl
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

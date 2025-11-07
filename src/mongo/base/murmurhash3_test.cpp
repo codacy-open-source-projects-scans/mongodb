@@ -27,17 +27,16 @@
  *    it in the license file.
  */
 
+#include "mongo/base/data_type_endian.h"
+#include "mongo/base/data_view.h"
+#include "mongo/base/string_data.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/murmur3.h"
+
 #include <array>
 #include <cstdint>
 #include <string>
 #include <utility>
-
-#include "mongo/base/data_type_endian.h"
-#include "mongo/base/data_view.h"
-#include "mongo/base/string_data.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/murmur3.h"
 
 #define TEST_STRING32(str, seed, expected) \
     ASSERT_EQUALS(murmur3<sizeof(uint32_t)>(StringData{str}, seed), expected)

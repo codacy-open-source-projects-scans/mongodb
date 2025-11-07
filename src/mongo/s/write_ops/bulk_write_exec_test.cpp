@@ -30,22 +30,13 @@
 #include "mongo/db/commands/query_cmd/bulk_write_parser.h"
 #include "mongo/db/error_labels.h"
 #include "mongo/rpc/write_concern_error_detail.h"
+
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <cstdint>
-#include <ctime>
-#include <map>
-#include <memory>
-#include <string>
-#include <system_error>
-#include <tuple>
-#include <utility>
-#include <variant>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -63,38 +54,34 @@
 #include "mongo/db/commands/query_cmd/bulk_write_crud_op.h"
 #include "mongo/db/commands/query_cmd/bulk_write_gen.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/global_catalog/catalog_cache/shard_cannot_refresh_due_to_locks_held_exception.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/router_role_api/mock_ns_targeter.h"
+#include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/database_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
+#include "mongo/db/versioning_protocol/shard_version_factory.h"
+#include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/index_version.h"
-#include "mongo/s/mock_ns_targeter.h"
 #include "mongo/s/session_catalog_router.h"
-#include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
-#include "mongo/s/shard_version.h"
-#include "mongo/s/shard_version_factory.h"
-#include "mongo/s/sharding_mongos_test_fixture.h"
-#include "mongo/s/stale_exception.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/bulk_write_exec.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
+#include "mongo/s/write_ops/fle.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point.h"
@@ -102,6 +89,16 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#include <cstdint>
+#include <ctime>
+#include <map>
+#include <memory>
+#include <string>
+#include <system_error>
+#include <tuple>
+#include <utility>
+#include <variant>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -218,7 +215,7 @@ TEST_F(BulkWriteOpTest, TargetSingleOp) {
     ShardId shardId("shard");
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
     ShardEndpoint endpoint(
-        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterFullRange(nss, endpoint));
@@ -252,7 +249,7 @@ TEST_F(BulkWriteOpTest, TargetSucceedsNsInfoOver16MB) {
     ShardId shardId("shard");
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
     ShardEndpoint endpoint(
-        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterFullRange(nss, endpoint));
@@ -301,7 +298,7 @@ TEST_F(BulkWriteOpTest, TargetSucceedsNsInfoOver16MB) {
     Message req = msgBuilder.finishWithoutSizeChecking();
 
     auto request = OpMsgRequest::parse(req);
-    auto op = BulkWriteCommandRequest::parse(IDLParserContext{"testBulkWriteParse"}, request);
+    auto op = BulkWriteCommandRequest::parse(request, IDLParserContext{"testBulkWriteParse"});
 
     BulkWriteOp bulkWriteOp(_opCtx, op);
 
@@ -322,9 +319,8 @@ TEST_F(BulkWriteOpTest, TargetSucceedsNsInfoOver16MB) {
 // Test targeting a single op with target error.
 TEST_F(BulkWriteOpTest, TargetSingleOpError) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
-    ShardEndpoint endpoint(ShardId("shard"),
-                           ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                           boost::none);
+    ShardEndpoint endpoint(
+        ShardId("shard"), ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     // Initialize the targeter so that x >= 0 values are untargetable so target call will encounter
@@ -366,11 +362,10 @@ TEST_F(BulkWriteOpTest, TargetMultiOpsOrdered_SameShard) {
     NamespaceString nss1 = NamespaceString::createNamespaceString_forTest("bar.foo");
     // Two different endpoints targeting the same shard for the two namespaces.
     ShardEndpoint endpoint0(
-        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpoint1(
         shardId,
-        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11}),
-                                  boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11})),
         boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
@@ -419,11 +414,10 @@ TEST_F(BulkWriteOpTest, TargetMultiOpsOrdered_RecordTargetErrors) {
     NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
     NamespaceString nss1 = NamespaceString::createNamespaceString_forTest("bar.foo");
     ShardEndpoint endpoint0(
-        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpoint1(
         shardId,
-        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11}),
-                                  boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11})),
         boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
@@ -484,7 +478,7 @@ TEST_F(BulkWriteOpTest, TargetErrorsInTxn) {
     ShardId shardId("shard");
     NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
     ShardEndpoint endpoint0(
-        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     // Initialize the targeter so that x >= 0 values are untargetable so target call will encounter
@@ -553,13 +547,12 @@ TEST_F(BulkWriteOpTest, TargetMultiOpsOrdered_DifferentShard) {
     NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
     NamespaceString nss1 = NamespaceString::createNamespaceString_forTest("bar.foo");
     ShardEndpoint endpointA0(
-        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpointB0(
-        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpointA1(
         shardIdA,
-        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11}),
-                                  boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11})),
         boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
@@ -661,9 +654,9 @@ TEST_F(BulkWriteOpTest, TargetMultiTargetOpsOrdered) {
     ShardId shardIdB("shardB");
     NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
     ShardEndpoint endpointA(
-        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpointB(
-        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterSplitRange(nss0, endpointA, endpointB));
@@ -797,13 +790,11 @@ TEST_F(BulkWriteOpTest, TargetMultiOpsUnordered_OneShard_TwoEndpoints) {
     // The endpoints we'll use for our targeter.
     ShardEndpoint endpointA(
         shardIdA,
-        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11}),
-                                  boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11})),
         boost::none);
     ShardEndpoint endpointB(
         shardIdB,
-        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(3)}, {11, 12}),
-                                  boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(3)}, {11, 12})),
         boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
@@ -813,9 +804,9 @@ TEST_F(BulkWriteOpTest, TargetMultiOpsUnordered_OneShard_TwoEndpoints) {
     // Used for assertions below; equivalent to the endpoints that multi-target ops will use (same
     // as those above but no shard version.)
     ShardEndpoint endpointANoVersion(
-        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpointBNoVersion(
-        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     // We expect the ops to target the following endpoints with/without shardVersion as indicated:
     // ops[0] -> A, shardVersion included
@@ -886,13 +877,12 @@ TEST_F(BulkWriteOpTest, TargetMultiOpsUnordered) {
     NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
     NamespaceString nss1 = NamespaceString::createNamespaceString_forTest("bar.foo");
     ShardEndpoint endpointA0(
-        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpointB0(
-        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpointA1(
         shardIdA,
-        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11}),
-                                  boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11})),
         boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
@@ -951,11 +941,10 @@ TEST_F(BulkWriteOpTest, TargetMultiOpsUnordered_RecordTargetErrors) {
     NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
     NamespaceString nss1 = NamespaceString::createNamespaceString_forTest("bar.foo");
     ShardEndpoint endpoint0(
-        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpoint1(
         shardId,
-        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11}),
-                                  boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11})),
         boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
@@ -993,7 +982,7 @@ TEST_F(BulkWriteOpTest, TargetRetryableTimeseriesUpdate) {
     ShardId shardId("shard");
     NamespaceString nonTsNs = NamespaceString::createNamespaceString_forTest("foo.bar");
     ShardEndpoint endpoint0(
-        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
 
     NamespaceString ns = NamespaceString::createNamespaceString_forTest("foo.t");
@@ -1001,8 +990,7 @@ TEST_F(BulkWriteOpTest, TargetRetryableTimeseriesUpdate) {
         NamespaceString::createNamespaceString_forTest("foo.system.buckets.t");
     ShardEndpoint endpoint1(
         shardId,
-        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11}),
-                                  boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11})),
         boost::none);
 
     // Set up targeters for both the bucket collection and the non-timeseries collection.
@@ -1075,11 +1063,10 @@ TEST_F(BulkWriteOpTest, BuildChildRequestFromTargetedWriteBatch) {
 
     // Two different endpoints targeting the same shard for the two namespaces.
     ShardEndpoint endpoint0(
-        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpoint1(
         shardId,
-        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11}),
-                                  boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11})),
         boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
@@ -1145,16 +1132,14 @@ TEST_F(BulkWriteOpTest, BuildChildRequestFromTargetedWriteBatchDifferentNsInfoOr
 
     // Two different endpoints targeting the same shard for the two namespaces.
     ShardEndpoint endpoint0(
-        shardA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpoint1(
         shardB,
-        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11}),
-                                  boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11})),
         boost::none);
     ShardEndpoint endpoint2(
         shardB,
-        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11}),
-                                  boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11})),
         boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
@@ -1236,12 +1221,10 @@ TEST_F(BulkWriteOpTest, BuildChildRequestFromTargetedWriteBatchDifferentNsInfoOr
 TEST_F(BulkWriteOpTest, TestOrderedOpsNoExistingStmtIds) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("mgmt.kids");
 
-    ShardEndpoint endpointA(ShardId("shardA"),
-                            ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                            boost::none);
-    ShardEndpoint endpointB(ShardId("shardB"),
-                            ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                            boost::none);
+    ShardEndpoint endpointA(
+        ShardId("shardA"), ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
+    ShardEndpoint endpointB(
+        ShardId("shardB"), ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterSplitRange(nss, endpointA, endpointB));
@@ -1290,12 +1273,10 @@ TEST_F(BulkWriteOpTest, TestOrderedOpsNoExistingStmtIds) {
 TEST_F(BulkWriteOpTest, TestUnorderedOpsNoExistingStmtIds) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("zero7.spinning");
 
-    ShardEndpoint endpointA(ShardId("shardA"),
-                            ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                            boost::none);
-    ShardEndpoint endpointB(ShardId("shardB"),
-                            ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                            boost::none);
+    ShardEndpoint endpointA(
+        ShardId("shardA"), ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
+    ShardEndpoint endpointB(
+        ShardId("shardB"), ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterSplitRange(nss, endpointA, endpointB));
@@ -1343,12 +1324,10 @@ TEST_F(BulkWriteOpTest, TestUnorderedOpsNoExistingStmtIds) {
 TEST_F(BulkWriteOpTest, TestUnorderedOpsStmtIdsExist) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("zero7.spinning");
 
-    ShardEndpoint endpointA(ShardId("shardA"),
-                            ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                            boost::none);
-    ShardEndpoint endpointB(ShardId("shardB"),
-                            ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                            boost::none);
+    ShardEndpoint endpointA(
+        ShardId("shardA"), ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
+    ShardEndpoint endpointB(
+        ShardId("shardB"), ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterSplitRange(nss, endpointA, endpointB));
@@ -1397,12 +1376,10 @@ TEST_F(BulkWriteOpTest, TestUnorderedOpsStmtIdsExist) {
 TEST_F(BulkWriteOpTest, TestUnorderedOpsStmtIdFieldExists) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("zero7.spinning");
 
-    ShardEndpoint endpointA(ShardId("shardA"),
-                            ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                            boost::none);
-    ShardEndpoint endpointB(ShardId("shardB"),
-                            ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                            boost::none);
+    ShardEndpoint endpointA(
+        ShardId("shardA"), ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
+    ShardEndpoint endpointB(
+        ShardId("shardB"), ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterSplitRange(nss, endpointA, endpointB));
@@ -1450,7 +1427,7 @@ TEST_F(BulkWriteOpTest, TestUnorderedOpsStmtIdFieldExists) {
 TEST_F(BulkWriteOpTest, BuildTimeseriesChildRequest) {
     ShardId shardId("shard");
     ShardEndpoint endpoint(
-        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     NamespaceString ns = NamespaceString::createNamespaceString_forTest("foo.t");
     NamespaceString bucketNs =
@@ -1489,12 +1466,11 @@ TEST_F(BulkWriteOpTest, BatchItemRefGetLet) {
     BulkWriteCommandRequest request({BulkWriteUpdateOp(0, BSON("x" << 1), BSON("x" << 2))},
                                     {NamespaceInfoEntry(nss)});
 
-    BSONObj expected{BSON("key"
-                          << "value")};
+    BSONObj expected{BSON("key" << "value")};
     request.setLet(expected);
 
     BulkWriteOp bulkWriteOp(_opCtx, request);
-    const auto& letOption = bulkWriteOp.getWriteOp_forTest(0).getWriteItem().getLet();
+    const auto& letOption = bulkWriteOp.getWriteOp_forTest(0).getWriteItem().getCommand().getLet();
     ASSERT(letOption.has_value());
     ASSERT_BSONOBJ_EQ(letOption.value(), expected);
 }
@@ -1519,9 +1495,9 @@ TEST_F(BulkWriteOpTest, NoteResponseRetriedStmtIds) {
     ShardId shardIdB("shardB");
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
     ShardEndpoint endpointA(
-        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpointB(
-        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterSplitRange(nss, endpointA, endpointB));
@@ -1696,7 +1672,7 @@ TEST_F(BulkWriteOpTest, NoteWriteOpFinalResponse_NonTransientTransactionError) {
 
 BulkWriteOpVariant makeTestInsertOp(BSONObj document) {
     BulkWriteInsertOp op;
-    op.setInsert(0);
+    op.setNsInfoIdx(0);
     op.setDocument(document);
     return op;
 }
@@ -1710,7 +1686,7 @@ BulkWriteOpVariant makeTestUpdateOp(BSONObj filter,
                                     boost::optional<mongo::BSONObj> constants,
                                     boost::optional<mongo::BSONObj> collation) {
     BulkWriteUpdateOp op;
-    op.setUpdate(0);
+    op.setNsInfoIdx(0);
     op.setFilter(filter);
     op.setUpdateMods(updateMods);
     if (upsertSupplied.has_value()) {
@@ -1729,7 +1705,7 @@ BulkWriteOpVariant makeTestDeleteOp(BSONObj filter,
                                     mongo::BSONObj hint,
                                     boost::optional<mongo::BSONObj> collation) {
     BulkWriteDeleteOp op;
-    op.setDeleteCommand(0);
+    op.setNsInfoIdx(0);
     op.setFilter(filter);
     op.setHint(hint);
     op.setCollation(collation);
@@ -1743,7 +1719,7 @@ int getSizeEstimate(BulkWriteOpVariant op) {
     dummyBulkRequest.setOps({op});
     dummyBulkRequest.setDbName(DatabaseName::kAdmin);
     dummyBulkRequest.setNsInfo({});
-    return BatchItemRef(&dummyBulkRequest, 0).getSizeForBulkWriteBytes();
+    return BatchItemRef{dummyBulkRequest, 0}.estimateOpSizeInBytes();
 }
 
 int getActualSize(BulkWriteOpVariant op) {
@@ -1833,11 +1809,10 @@ TEST_F(BulkWriteOpTest, TestBulkWriteBatchSplittingLargeBaseCommandSize) {
     NamespaceString nss1 = NamespaceString::createNamespaceString_forTest("bar.foo");
     // Two different endpoints targeting the same shard for the two namespaces.
     ShardEndpoint endpoint0(
-        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpoint1(
         shardId,
-        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11}),
-                                  boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11})),
         boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
@@ -1896,10 +1871,8 @@ TEST_F(BulkWriteOpTest, TestGetBaseChildBatchCommandSizeEstimate) {
     BulkWriteCommandRequest request({}, {});
     request.setDbName(DatabaseName::kAdmin);
 
-    BulkWriteOp bulkWriteOp(_opCtx, request);
-
     // Get a base size estimate.
-    auto baseSizeEstimate = bulkWriteOp.getBaseChildBatchCommandSizeEstimate();
+    auto baseSizeEstimate = BulkCommandSizeEstimator(_opCtx, request).getBaseSizeEstimate();
 
     BSONObjBuilder builder;
     request.serialize(&builder);
@@ -1923,20 +1896,16 @@ TEST_F(BulkWriteOpTest, MultiAndTargetedOrderedOpsStaleConfig) {
     CollectionGeneration collGeneration = {OID::gen(), Timestamp(1000, 1)};
     NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
     ShardEndpoint endpointA(
-        shardIdA,
-        ShardVersionFactory::make(ChunkVersion(collGeneration, {1, 0}), boost::none),
-        boost::none);
+        shardIdA, ShardVersionFactory::make(ChunkVersion(collGeneration, {1, 0})), boost::none);
     ShardEndpoint endpointB(
-        shardIdB,
-        ShardVersionFactory::make(ChunkVersion(collGeneration, {1, 1}), boost::none),
-        boost::none);
+        shardIdB, ShardVersionFactory::make(ChunkVersion(collGeneration, {1, 1})), boost::none);
 
     // Used for assertions below; equivalent to the endpoints that multi-target ops will use (same
     // as those above but no shard version.)
     ShardEndpoint endpointANoVersion(
-        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpointBNoVersion(
-        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterSplitRange(nss0, endpointA, endpointB));
@@ -1973,7 +1942,7 @@ TEST_F(BulkWriteOpTest, MultiAndTargetedOrderedOpsStaleConfig) {
     {
         auto error = Status{StaleConfigInfo(nss0, *endpointA.shardVersion, boost::none, shardIdA),
                             "Mock error: shard version mismatch"};
-        bulkWriteOp.noteChildBatchError(*targeted[shardIdA], error);
+        bulkWriteOp.noteChildBatchError(*targeted[shardIdA], error, boost::none);
     }
 
     // Simulate OK response from shardB.
@@ -2046,10 +2015,10 @@ protected:
         NamespaceString::createNamespaceString_forTest("foo.bar");
     static const inline NamespaceString kNss2 =
         NamespaceString::createNamespaceString_forTest("bar.foo");
-    static const inline ShardEndpoint kEndpoint1 = ShardEndpoint(
-        kShardId1, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
-    static const inline ShardEndpoint kEndpoint2 = ShardEndpoint(
-        kShardId2, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+    static const inline ShardEndpoint kEndpoint1 =
+        ShardEndpoint(kShardId1, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
+    static const inline ShardEndpoint kEndpoint2 =
+        ShardEndpoint(kShardId2, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     // Various mock error responses used for testing.
     static const inline AsyncRequestsSender::Response kCallbackCanceledResponse =
@@ -2905,9 +2874,9 @@ TEST_F(BulkWriteOpTest, SuccessfulShardRepliesAreSavedAfterRetargeting) {
     ShardId shardIdA("shardA");
     ShardId shardIdB("shardB");
     ShardEndpoint endpointA0(
-        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpointB0(
-        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterSplitRange(nss0, endpointA0, endpointB0));
@@ -2932,12 +2901,10 @@ TEST_F(BulkWriteOpTest, SuccessfulShardRepliesAreSavedAfterRetargeting) {
 
     // Simulate StaleConfig from second shard.
     auto error =
-        Status{StaleConfigInfo(nss0,
-                               ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                               boost::none,
-                               shardIdB),
+        Status{StaleConfigInfo(
+                   nss0, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none, shardIdB),
                "Mock error: shard version mismatch"};
-    op.noteChildBatchError(*targeted[shardIdB], error);
+    op.noteChildBatchError(*targeted[shardIdB], error, boost::none);
 
     // We should have marked the write as ready so we can retarget as needed.
     ASSERT_EQ(op.getWriteOp_forTest(0).getWriteState(), WriteOpState_Ready);
@@ -2976,7 +2943,7 @@ TEST_F(BulkWriteOpTest, ShardGetsSuccessfullyRetargetedOnCannotRefreshCacheError
 
     ShardId shardId("shard");
     ShardEndpoint endpoint0(
-        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardId, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterFullRange(nss, endpoint0));
@@ -2992,7 +2959,7 @@ TEST_F(BulkWriteOpTest, ShardGetsSuccessfullyRetargetedOnCannotRefreshCacheError
     // Simulate a ShardCannotRefreshDueToLocksHeld error from the shard.
     auto error = Status{ShardCannotRefreshDueToLocksHeldInfo(nss),
                         "Mock error: Catalog cache busy in refresh"};
-    op.noteChildBatchError(*targeted[shardId], error);
+    op.noteChildBatchError(*targeted[shardId], error, boost::none);
 
     // We should have marked the write as ready so we can retarget as needed.
     ASSERT_EQ(op.getWriteOp_forTest(0).getWriteState(), WriteOpState_Ready);
@@ -3035,9 +3002,9 @@ TEST_F(BulkWriteOpTest, UnorderedBulkInsertGetsRepeatedOnCannotRefreshShardCache
     ShardId shardIdA("shardA");
     ShardId shardIdB("shardB");
     ShardEndpoint endpointA0(
-        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpointB0(
-        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterSplitRange(nss, endpointA0, endpointB0));
@@ -3067,7 +3034,7 @@ TEST_F(BulkWriteOpTest, UnorderedBulkInsertGetsRepeatedOnCannotRefreshShardCache
     auto error = Status{ShardCannotRefreshDueToLocksHeldInfo(nss),
                         "Mock error: Catalog cache busy in refresh"};
 
-    op.noteChildBatchError(*targeted[shardIdB], error);
+    op.noteChildBatchError(*targeted[shardIdB], error, boost::none);
 
     // We should have marked the remaining writes as ready so we can retarget as needed.
     ASSERT_EQ(op.getWriteOp_forTest(0).getWriteState(), WriteOpState_Completed);
@@ -3139,12 +3106,12 @@ protected:
     static const inline NamespaceString kNss1 =
         NamespaceString::createNamespaceString_forTest("foo.bar");
 
-    static const inline ShardEndpoint kEndpoint1 = ShardEndpoint(
-        kShardId1, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
-    static const inline ShardEndpoint kEndpoint2 = ShardEndpoint(
-        kShardId2, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
-    static const inline ShardEndpoint kEndpoint3 = ShardEndpoint(
-        kShardId3, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+    static const inline ShardEndpoint kEndpoint1 =
+        ShardEndpoint(kShardId1, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
+    static const inline ShardEndpoint kEndpoint2 =
+        ShardEndpoint(kShardId2, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
+    static const inline ShardEndpoint kEndpoint3 =
+        ShardEndpoint(kShardId3, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     static const inline BulkWriteCommandRequest request = BulkWriteCommandRequest(
         {
@@ -3430,85 +3397,81 @@ protected:
     }();
 
     static const inline BSONObj kStaleConfigReplyShard3 = [] {
-        auto reply = BulkWriteCommandReply(
-                         BulkWriteCommandResponseCursor(
-                             0,
-                             {[] {
-                                 auto reply = BulkWriteReplyItem(0);
-                                 reply.setOk(0);
-                                 reply.setStatus(Status{
-                                     StaleConfigInfo(kNss1,
-                                                     ShardVersionFactory::make(
-                                                         ChunkVersion::IGNORED(), boost::none),
-                                                     boost::none,
-                                                     kShardId3),
-                                     "Mock error: shard version mismatch"});
-                                 return reply;
-                             }()},
-                             NamespaceString::makeBulkWriteNSS(boost::none)),
-                         1,
-                         0,
-                         0,
-                         0,
-                         0,
-                         0)
-                         .toBSON();
+        auto reply =
+            BulkWriteCommandReply(
+                BulkWriteCommandResponseCursor(
+                    0,
+                    {[] {
+                        auto reply = BulkWriteReplyItem(0);
+                        reply.setOk(0);
+                        reply.setStatus(Status{
+                            StaleConfigInfo(kNss1,
+                                            ShardVersionFactory::make(ChunkVersion::IGNORED()),
+                                            boost::none,
+                                            kShardId3),
+                            "Mock error: shard version mismatch"});
+                        return reply;
+                    }()},
+                    NamespaceString::makeBulkWriteNSS(boost::none)),
+                1,
+                0,
+                0,
+                0,
+                0,
+                0)
+                .toBSON();
 
         reply = reply.addFields(BSON("ok" << 1));
         return reply;
     }();
 
     static const inline BSONObj kStaleConfigReplyShard3MultipleWriteOps = [] {
-        auto reply = BulkWriteCommandReply(
-                         BulkWriteCommandResponseCursor(
-                             0,
-                             {[] {
-                                 std::vector<mongo::BulkWriteReplyItem> replyItems;
-                                 auto reply = BulkWriteReplyItem(0);
-                                 reply.setOk(0);
-                                 reply.setStatus(Status{
-                                     StaleConfigInfo(kNss1,
-                                                     ShardVersionFactory::make(
-                                                         ChunkVersion::IGNORED(), boost::none),
-                                                     boost::none,
-                                                     kShardId3),
-                                     "Mock error: shard version mismatch"});
-                                 replyItems.emplace_back(reply);
-                                 replyItems.emplace_back(reply);
-                                 return replyItems;
-                             }()},
-                             NamespaceString::makeBulkWriteNSS(boost::none)),
-                         1,
-                         0,
-                         0,
-                         0,
-                         0,
-                         0)
-                         .toBSON();
+        auto reply =
+            BulkWriteCommandReply(
+                BulkWriteCommandResponseCursor(
+                    0,
+                    {[] {
+                        std::vector<mongo::BulkWriteReplyItem> replyItems;
+                        auto reply = BulkWriteReplyItem(0);
+                        reply.setOk(0);
+                        reply.setStatus(Status{
+                            StaleConfigInfo(kNss1,
+                                            ShardVersionFactory::make(ChunkVersion::IGNORED()),
+                                            boost::none,
+                                            kShardId3),
+                            "Mock error: shard version mismatch"});
+                        replyItems.emplace_back(reply);
+                        replyItems.emplace_back(reply);
+                        return replyItems;
+                    }()},
+                    NamespaceString::makeBulkWriteNSS(boost::none)),
+                1,
+                0,
+                0,
+                0,
+                0,
+                0)
+                .toBSON();
 
         reply = reply.addFields(BSON("ok" << 1));
         return reply;
     }();
 
-    // Mock targeter that sets isNonTargetedWriteWithoutShardKeyWithExactId to true
+    // Mock targeter that sets isNonTargetedRetryableWriteWithId to true
     // for all updates/deletes.
     class MockWriteWithoutShardKeyWithIdTargeter : public MockNSTargeter {
         using MockNSTargeter::MockNSTargeter;
-        std::vector<ShardEndpoint> targetDelete(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{kEndpoint1, kEndpoint2, kEndpoint3};
+        NSTargeter::TargetingResult targetDelete(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return NSTargeter::TargetingResult{std::vector{kEndpoint1, kEndpoint2, kEndpoint3},
+                                               false /* useTwoPhaseWriteProtocol */,
+                                               true /* isNonTargetedRetryableWriteWithId */};
         }
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{kEndpoint1, kEndpoint2, kEndpoint3};
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return NSTargeter::TargetingResult{std::vector{kEndpoint1, kEndpoint2, kEndpoint3},
+                                               false /* useTwoPhaseWriteProtocol */,
+                                               true /* isNonTargetedRetryableWriteWithId */};
         }
     };
 
@@ -3595,8 +3558,6 @@ TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, NoShardFindsMatch) {
 // Test that if all shards return n=0 we consider the write complete when multiple write ops are
 // batched together.
 TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, NoShardFindsMatchBatched) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithIdWithoutShardKey", true);
     auto req = requestMultipleWriteOps;
     req.setOrdered(false);
     auto op = BulkWriteOp(_opCtx, req);
@@ -3760,8 +3721,6 @@ TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, NoShardFindsMatchErrorsOnlyMode) {
 // Test that if all shards return n=0 we consider the write comple withh multiple write ops are
 // batched together. Same as the previous test but uses bulkWrite errorsOnly mode.
 TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, NoShardFindsMatchErrorsOnlyModeBatched) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithIdWithoutShardKey", true);
 
     auto req = requestMultipleWriteOps;
     req.setOrdered(false);
@@ -3902,8 +3861,6 @@ TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, SecondShardFindMatch) {
 // Test that if the one shard returns n > 0 we wait for responses from other shards before setting
 // write as completed when multiple write ops are batched together.
 TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, SecondShardFindMatchBatched) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithIdWithoutShardKey", true);
     auto req = requestMultipleWriteOps;
 
     // Ordered is set to false to ensure batching
@@ -4068,9 +4025,6 @@ TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, SecondShardFindMatchErrorsOnlyMode)
 
 // Same as above but with multiple write ops are batched together.
 TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, SecondShardFindMatchErrorsOnlyModeBatched) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithIdWithoutShardKey", true);
-
     auto req = requestMultipleWriteOps;
     req.setErrorsOnly(true);
     // Ordered is set to false to ensure batching
@@ -4228,9 +4182,6 @@ TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, SecondShardFindMatchForDelete) {
 // Same as the SecondShardFindMatchBatched test, but ensures we correctly
 // extract 'n' for deletes as well as updates.
 TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, SecondShardFindMatchForDeleteBatched) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithIdWithoutShardKey", true);
-
     auto request = BulkWriteCommandRequest(
         {
             BulkWriteDeleteOp(0, BSON("_id" << 1)),
@@ -4400,8 +4351,6 @@ TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, FirstShardFindMatchAndWCError) {
 }
 
 TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, FirstShardFindMatchAndWCErrorBatched) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithIdWithoutShardKey", true);
     auto req = requestMultipleWriteOps;
     req.setOrdered(false);
     auto op = BulkWriteOp(_opCtx, req);
@@ -4535,8 +4484,6 @@ TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, NoMatchAndRetryableError) {
 // Test that if 2 shards receive n=0 and then one shard receives a retryable error (e.g.
 // StaleConfig) we will re-target all shards on retry.
 TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, NoMatchAndRetryableErrorBatched) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithIdWithoutShardKey", true);
     auto req = requestMultipleWriteOps;
     // Ordered is set to false to ensure batching
     req.setOrdered(false);
@@ -4721,8 +4668,6 @@ TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, NoMatchAndRetryableErrorAndWCError)
 // StaleConfig) we will discard any write concern errors from the first round of processing for
 // batched writes.
 TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, NoMatchAndRetryableErrorAndWCErrorBatched) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithIdWithoutShardKey", true);
     auto req = requestMultipleWriteOps;
     req.setOrdered(false);
     auto op = BulkWriteOp(_opCtx, req);
@@ -4859,9 +4804,6 @@ TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, NoMatchAndRetryableErrorAndWCErrorB
 // Test that if one shard a retryable error (e.g. StaleConfig) but then another shard receives n=1
 // we consider the entire batch of writes are retried.
 TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, MatchAndRetryableErrorBatched) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithIdWithoutShardKey", true);
-
     auto req = requestMultipleWriteOps;
     // Ordered is set to false to ensure batching
     req.setOrdered(false);
@@ -5093,8 +5035,6 @@ TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, NoMatchAndNonRetryableError) {
 }
 
 TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, NoMatchAndNonRetryableErrorMatched) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithIdWithoutShardKey", true);
     auto req = requestMultipleWriteOps;
     req.setOrdered(false);
     auto op = BulkWriteOp(_opCtx, req);
@@ -5344,9 +5284,6 @@ TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, NoMatchAndNonRetryableErrorAndWCErr
 // Test that if one shard receives a non-retryable error but then another shard receives an n=1
 // response we abandon the batch.
 TEST_F(BulkWriteOpWithoutShardKeyWithIdTest, MatchAndNonRetryableErrorBatched) {
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagUpdateOneWithIdWithoutShardKey", true);
-
     auto req = requestMultipleWriteOps;
     req.setOrdered(false);
     auto op = BulkWriteOp(_opCtx, req);
@@ -5510,10 +5447,10 @@ TEST_F(BulkWriteOpTest, SummaryFieldsAreMergedAcrossReplies) {
     NamespaceString nss2 = NamespaceString::createNamespaceString_forTest("foo.baz");
     auto shardId1 = ShardId("shard1");
     auto shardId2 = ShardId("shard2");
-    auto endpoint1 = ShardEndpoint(
-        shardId1, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
-    auto endpoint2 = ShardEndpoint(
-        shardId2, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+    auto endpoint1 =
+        ShardEndpoint(shardId1, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
+    auto endpoint2 =
+        ShardEndpoint(shardId2, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterFullRange(nss1, endpoint1));
     targeters.push_back(initTargeterFullRange(nss2, endpoint2));
@@ -5594,9 +5531,9 @@ TEST_F(BulkWriteOpTest, SuccessAndErrorsAreMerged) {
     ShardId shardIdB("shardB");
     NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
     ShardEndpoint endpointA(
-        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpointB(
-        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        shardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterSplitRange(nss0, endpointA, endpointB));
@@ -5785,8 +5722,8 @@ TEST_F(BulkWriteOpTest, ProcessFLEResponseCalculatesSummaryFields) {
     auto insertReply = BatchedCommandResponse();
     insertReply.setStatus(Status::OK());
     insertReply.setN(2); /* nInserted=2 */
-    auto replyInfo = bulk_write_exec::processFLEResponse(
-        request, BulkWriteCRUDOp::kInsert, true /* errorsOnly */, insertReply);
+    auto replyInfo = processFLEResponse(
+        _opCtx, request, BulkWriteCRUDOp::kInsert, true /* errorsOnly */, insertReply);
     ASSERT_EQ(replyInfo.summaryFields.nErrors, 0);
     ASSERT_EQ(replyInfo.summaryFields.nInserted, 2);
     ASSERT_EQ(replyInfo.summaryFields.nMatched, 0);
@@ -5802,8 +5739,8 @@ TEST_F(BulkWriteOpTest, ProcessFLEResponseCalculatesSummaryFields) {
     insertReplyWithError.setN(1); /* nInserted=1 */
     insertReplyWithError.addToErrDetails(
         write_ops::WriteError(1, Status(ErrorCodes::BadValue, "Dummy BadValue"))); /* nErrors=1 */
-    replyInfo = bulk_write_exec::processFLEResponse(
-        request, BulkWriteCRUDOp::kInsert, true /* errorsOnly */, insertReplyWithError);
+    replyInfo = processFLEResponse(
+        _opCtx, request, BulkWriteCRUDOp::kInsert, true /* errorsOnly */, insertReplyWithError);
     ASSERT_EQ(replyInfo.summaryFields.nErrors, 1);
     ASSERT_EQ(replyInfo.summaryFields.nInserted, 1);
     ASSERT_EQ(replyInfo.summaryFields.nMatched, 0);
@@ -5819,8 +5756,8 @@ TEST_F(BulkWriteOpTest, ProcessFLEResponseCalculatesSummaryFields) {
     auto deleteReply = BatchedCommandResponse();
     deleteReply.setStatus(Status::OK());
     deleteReply.setN(1); /* nDeleted=1 */
-    replyInfo = bulk_write_exec::processFLEResponse(
-        request, BulkWriteCRUDOp::kDelete, false /* errorsOnly */, deleteReply);
+    replyInfo = processFLEResponse(
+        _opCtx, request, BulkWriteCRUDOp::kDelete, false /* errorsOnly */, deleteReply);
     ASSERT_EQ(replyInfo.summaryFields.nErrors, 0);
     ASSERT_EQ(replyInfo.summaryFields.nInserted, 0);
     ASSERT_EQ(replyInfo.summaryFields.nMatched, 0);
@@ -5835,8 +5772,8 @@ TEST_F(BulkWriteOpTest, ProcessFLEResponseCalculatesSummaryFields) {
     singleReplyWithError.setStatus(Status::OK());
     singleReplyWithError.addToErrDetails(
         write_ops::WriteError(0, Status(ErrorCodes::BadValue, "Dummy BadValue"))); /* nErrors=1 */
-    replyInfo = bulk_write_exec::processFLEResponse(
-        request, BulkWriteCRUDOp::kDelete, false /* errorsOnly */, singleReplyWithError);
+    replyInfo = processFLEResponse(
+        _opCtx, request, BulkWriteCRUDOp::kDelete, false /* errorsOnly */, singleReplyWithError);
     ASSERT_EQ(replyInfo.summaryFields.nErrors, 1);
     ASSERT_EQ(replyInfo.summaryFields.nInserted, 0);
     ASSERT_EQ(replyInfo.summaryFields.nMatched, 0);
@@ -5853,8 +5790,8 @@ TEST_F(BulkWriteOpTest, ProcessFLEResponseCalculatesSummaryFields) {
     updateReply.setStatus(Status::OK());
     updateReply.setN(1);         /* nMatched=1 */
     updateReply.setNModified(1); /* nModified=1 */
-    replyInfo = bulk_write_exec::processFLEResponse(
-        request, BulkWriteCRUDOp::kUpdate, false /* errorsOnly */, updateReply);
+    replyInfo = processFLEResponse(
+        _opCtx, request, BulkWriteCRUDOp::kUpdate, false /* errorsOnly */, updateReply);
     ASSERT_EQ(replyInfo.summaryFields.nErrors, 0);
     ASSERT_EQ(replyInfo.summaryFields.nInserted, 0);
     ASSERT_EQ(replyInfo.summaryFields.nMatched, 1);
@@ -5863,8 +5800,8 @@ TEST_F(BulkWriteOpTest, ProcessFLEResponseCalculatesSummaryFields) {
     ASSERT_EQ(replyInfo.summaryFields.nDeleted, 0);
 
     // Reuse the single error reply from delete above.
-    replyInfo = bulk_write_exec::processFLEResponse(
-        request, BulkWriteCRUDOp::kUpdate, false /* errorsOnly */, singleReplyWithError);
+    replyInfo = processFLEResponse(
+        _opCtx, request, BulkWriteCRUDOp::kUpdate, false /* errorsOnly */, singleReplyWithError);
     ASSERT_EQ(replyInfo.summaryFields.nErrors, 1);
     ASSERT_EQ(replyInfo.summaryFields.nInserted, 0);
     ASSERT_EQ(replyInfo.summaryFields.nMatched, 0);
@@ -5880,8 +5817,8 @@ TEST_F(BulkWriteOpTest, ProcessFLEResponseCalculatesSummaryFields) {
     upsertDetails->setIndex(0);
     upsertDetails->setUpsertedID(BSON("_id" << 1));
     upsertReply.addToUpsertDetails(upsertDetails.release()); /* nUpserted=1 */
-    replyInfo = bulk_write_exec::processFLEResponse(
-        request, BulkWriteCRUDOp::kUpdate, false /* errorsOnly */, upsertReply);
+    replyInfo = processFLEResponse(
+        _opCtx, request, BulkWriteCRUDOp::kUpdate, false /* errorsOnly */, upsertReply);
     ASSERT_EQ(replyInfo.summaryFields.nErrors, 0);
     ASSERT_EQ(replyInfo.summaryFields.nInserted, 0);
     ASSERT_EQ(replyInfo.summaryFields.nMatched, 0);
@@ -5936,11 +5873,10 @@ TEST_F(BulkWriteExecTest, RefreshTargetersOnTargetErrors) {
     NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
     NamespaceString nss1 = NamespaceString::createNamespaceString_forTest("bar.foo");
     ShardEndpoint endpoint0(
-        kShardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        kShardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpoint1(
         kShardIdB,
-        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11}),
-                                  boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(2)}, {10, 11})),
         boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
@@ -5963,7 +5899,9 @@ TEST_F(BulkWriteExecTest, RefreshTargetersOnTargetErrors) {
         // succeed without errors. But bulk_write_exec::execute would retry on targeting errors and
         // try to refresh the targeters upon targeting errors.
         request.setOrdered(false);
-        auto replyInfo = bulk_write_exec::execute(operationContext(), targeters, request);
+        bulk_write_exec::BulkWriteExecStats execStats;
+        auto replyInfo =
+            bulk_write_exec::execute(operationContext(), targeters, request, execStats);
         ASSERT_EQUALS(replyInfo.replyItems.size(), 2u);
         ASSERT_NOT_OK(replyInfo.replyItems[0].getStatus());
         ASSERT_OK(replyInfo.replyItems[1].getStatus());
@@ -5986,7 +5924,9 @@ TEST_F(BulkWriteExecTest, RefreshTargetersOnTargetErrors) {
         // Test ordered operations. This is mostly the same as the test case above except that we
         // should only return the first error for ordered operations.
         request.setOrdered(true);
-        auto replyInfo = bulk_write_exec::execute(operationContext(), targeters, request);
+        bulk_write_exec::BulkWriteExecStats execStats;
+        auto replyInfo =
+            bulk_write_exec::execute(operationContext(), targeters, request, execStats);
         ASSERT_EQUALS(replyInfo.replyItems.size(), 1u);
         ASSERT_NOT_OK(replyInfo.replyItems[0].getStatus());
         // We should have another refresh attempt.
@@ -6002,8 +5942,7 @@ TEST_F(BulkWriteExecTest, TestMaxRoundsWithoutProgress) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
     ShardEndpoint endpoint(
         kShardIdA,
-        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(1, 1)}, {100, 200}),
-                                  boost::optional<CollectionIndexes>(boost::none)),
+        ShardVersionFactory::make(ChunkVersion({OID::gen(), Timestamp(1, 1)}, {100, 200})),
         boost::none);
 
     std::vector<MockRange> range{MockRange(endpoint, BSON("x" << MINKEY), BSON("x" << MAXKEY))};
@@ -6021,7 +5960,9 @@ TEST_F(BulkWriteExecTest, TestMaxRoundsWithoutProgress) {
         // Both ops will return StaleShardVersion, the MockNSTargeter will never successfully
         // refresh these so we will return them until we eventually get NoProgressMade.
         request.setOrdered(false);
-        auto replyInfo = bulk_write_exec::execute(operationContext(), targeters, request);
+        bulk_write_exec::BulkWriteExecStats execStats;
+        auto replyInfo =
+            bulk_write_exec::execute(operationContext(), targeters, request, execStats);
         ASSERT_EQUALS(replyInfo.replyItems.size(), 2u);
         ASSERT_NOT_OK(replyInfo.replyItems[0].getStatus());
         ASSERT_EQUALS(replyInfo.replyItems[0].getStatus().code(), ErrorCodes::NoProgressMade);
@@ -6044,26 +5985,22 @@ TEST_F(BulkWriteExecTest, TestMaxRoundsWithoutProgress) {
                 std::vector<mongo::BulkWriteReplyItem>{
                     BulkWriteReplyItem(
                         0,
-                        Status(StaleConfigInfo(nss,
-                                               ShardVersionFactory::make(
-                                                   ChunkVersion({epoch, timestamp}, {1, 0}),
-                                                   boost::optional<CollectionIndexes>(boost::none)),
-                                               ShardVersionFactory::make(
-                                                   ChunkVersion({epoch, timestamp}, {2, 0}),
-                                                   boost::optional<CollectionIndexes>(boost::none)),
-                                               ShardId(kShardIdA)),
-                               "Stale error")),
+                        Status(
+                            StaleConfigInfo(
+                                nss,
+                                ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0})),
+                                ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0})),
+                                ShardId(kShardIdA)),
+                            "Stale error")),
                     BulkWriteReplyItem(
                         1,
-                        Status(StaleConfigInfo(nss,
-                                               ShardVersionFactory::make(
-                                                   ChunkVersion({epoch, timestamp}, {1, 0}),
-                                                   boost::optional<CollectionIndexes>(boost::none)),
-                                               ShardVersionFactory::make(
-                                                   ChunkVersion({epoch, timestamp}, {2, 0}),
-                                                   boost::optional<CollectionIndexes>(boost::none)),
-                                               ShardId(kShardIdA)),
-                               "Stale error"))},
+                        Status(
+                            StaleConfigInfo(
+                                nss,
+                                ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0})),
+                                ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0})),
+                                ShardId(kShardIdA)),
+                            "Stale error"))},
                 NamespaceString::makeBulkWriteNSS(boost::none)));
             reply.setNErrors(2);
             reply.setNInserted(0);
@@ -6081,7 +6018,7 @@ TEST_F(BulkWriteExecTest, TestMaxRoundsWithoutProgress) {
 TEST_F(BulkWriteExecTest, CollectionDroppedBeforeRefreshingTargeters) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("foo.bar");
     ShardEndpoint endpoint(
-        kShardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        kShardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     // Mock targeter that throws StaleEpoch on refresh to mimic the collection being dropped.
     class StaleEpochMockNSTargeter : public MockNSTargeter {
@@ -6108,7 +6045,8 @@ TEST_F(BulkWriteExecTest, CollectionDroppedBeforeRefreshingTargeters) {
 
     // After the targeting error from the first op, targeter refresh will throw a StaleEpoch
     // exception which should abort the entire bulkWrite.
-    auto replyInfo = bulk_write_exec::execute(operationContext(), targeters, request);
+    bulk_write_exec::BulkWriteExecStats execStats;
+    auto replyInfo = bulk_write_exec::execute(operationContext(), targeters, request, execStats);
     ASSERT_EQUALS(replyInfo.replyItems.size(), 2u);
     ASSERT_EQUALS(replyInfo.replyItems[0].getStatus().code(), ErrorCodes::StaleEpoch);
     ASSERT_EQUALS(replyInfo.replyItems[1].getStatus().code(), ErrorCodes::StaleEpoch);
@@ -6120,7 +6058,7 @@ TEST_F(BulkWriteExecTest, CollectionDroppedBeforeRefreshingTargeters) {
 TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorSingleShardTest) {
     NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
     ShardEndpoint endpoint0(
-        kShardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        kShardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterFullRange(nss0, endpoint0));
@@ -6130,7 +6068,8 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorSingleShardTest) {
 
     LOGV2(7695401, "Case 1) WCE with successful op.");
     auto future = launchAsync([&] {
-        auto reply = bulk_write_exec::execute(operationContext(), targeters, request);
+        bulk_write_exec::BulkWriteExecStats execStats;
+        auto reply = bulk_write_exec::execute(operationContext(), targeters, request, execStats);
         ASSERT_EQUALS(reply.replyItems.size(), 1u);
         ASSERT_OK(reply.replyItems[0].getStatus());
         ASSERT_EQUALS(reply.summaryFields.nErrors, 0);
@@ -6147,7 +6086,8 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorSingleShardTest) {
     // occurs should be returned to the user.
     LOGV2(7695402, "Case 2) WCE with unsuccessful op (BadValue).");
     future = launchAsync([&] {
-        auto reply = bulk_write_exec::execute(operationContext(), targeters, request);
+        bulk_write_exec::BulkWriteExecStats execStats;
+        auto reply = bulk_write_exec::execute(operationContext(), targeters, request, execStats);
         ASSERT_EQUALS(reply.replyItems.size(), 1u);
         ASSERT_NOT_OK(reply.replyItems[0].getStatus());
         ASSERT_EQUALS(reply.summaryFields.nErrors, 1);
@@ -6173,9 +6113,9 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorMultiShardTest) {
     NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("knocks.allaboutyou");
     NamespaceString nss1 = NamespaceString::createNamespaceString_forTest("foster.thepeople");
     ShardEndpoint endpoint0(
-        kShardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        kShardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpoint1(
-        kShardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        kShardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     // Writes to nss0 go to endpoint0 (shardA) and writes to nss1 go to endpoint1 (shardB).
@@ -6189,7 +6129,8 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorMultiShardTest) {
 
     LOGV2(7695403, "Case 1) WCE in ordered case.");
     auto future = launchAsync([&] {
-        auto reply = bulk_write_exec::execute(operationContext(), targeters, request);
+        bulk_write_exec::BulkWriteExecStats execStats;
+        auto reply = bulk_write_exec::execute(operationContext(), targeters, request, execStats);
         // Both operations executed, therefore the size of reply items is 2.
         ASSERT_EQUALS(reply.replyItems.size(), 2u);
         ASSERT_OK(reply.replyItems[0].getStatus());
@@ -6220,7 +6161,9 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorMultiShardTest) {
     unorderedReq.setOrdered(false);
 
     future = launchAsync([&] {
-        auto reply = bulk_write_exec::execute(operationContext(), targeters, unorderedReq);
+        bulk_write_exec::BulkWriteExecStats execStats;
+        auto reply =
+            bulk_write_exec::execute(operationContext(), targeters, unorderedReq, execStats);
         ASSERT_EQUALS(reply.replyItems.size(), 2u);
         ASSERT_OK(reply.replyItems[0].getStatus());
         ASSERT_OK(reply.replyItems[1].getStatus());
@@ -6249,7 +6192,9 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorMultiShardTest) {
     oneErrorReq.setOrdered(false);
 
     future = launchAsync([&] {
-        auto reply = bulk_write_exec::execute(operationContext(), targeters, oneErrorReq);
+        bulk_write_exec::BulkWriteExecStats execStats;
+        auto reply =
+            bulk_write_exec::execute(operationContext(), targeters, oneErrorReq, execStats);
         ASSERT_EQUALS(reply.replyItems.size(), 2u);
         // We don't really know which of the two mock responses below will be used for
         // which operation, since this is an unordered request, so we can't assert on
@@ -6283,27 +6228,25 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteConcernErrorMultiShardTest) {
 TEST_F(BulkWriteExecTest, BulkWriteWriteWriteWithoutShardKeyWithIdAwaitsAllShardResponses) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.foo");
     ShardEndpoint endpoint0(
-        kShardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        kShardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
     ShardEndpoint endpoint1(
-        kShardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        kShardIdB, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     class MockWriteWithoutShardKeyWithIdTargeter : public MockNSTargeter {
         using MockNSTargeter::MockNSTargeter;
         const ShardId kShardIdA = ShardId("shardA");
         const ShardId kShardIdB = ShardId("shardB");
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{
-                ShardEndpoint(kShardIdA,
-                              ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                              boost::none),
-                ShardEndpoint(kShardIdB,
-                              ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-                              boost::none)};
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return NSTargeter::TargetingResult{
+                std::vector{ShardEndpoint(kShardIdA,
+                                          ShardVersionFactory::make(ChunkVersion::IGNORED()),
+                                          boost::none),
+                            ShardEndpoint(kShardIdB,
+                                          ShardVersionFactory::make(ChunkVersion::IGNORED()),
+                                          boost::none)},
+                false /* useTwoPhaseWriteProtocol */,
+                true /* isNonTargetedRetryableWriteWithId */};
         }
     };
 
@@ -6320,7 +6263,8 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteWriteWithoutShardKeyWithIdAwaitsAllShard
         {NamespaceInfoEntry(nss)});
 
     auto future = launchAsync([&] {
-        auto reply = bulk_write_exec::execute(operationContext(), targeters, request);
+        bulk_write_exec::BulkWriteExecStats execStats;
+        auto reply = bulk_write_exec::execute(operationContext(), targeters, request, execStats);
         ASSERT_EQUALS(reply.replyItems.size(), 1u);
         ASSERT_EQ(reply.replyItems[0].getN(), 1);
     });
@@ -6351,7 +6295,7 @@ TEST_F(BulkWriteExecTest, BulkWriteWriteWriteWithoutShardKeyWithIdAwaitsAllShard
 TEST_F(BulkWriteExecTest, TestGetMoreFromInitialResponse) {
     NamespaceString nss0 = NamespaceString::createNamespaceString_forTest("foo.bar");
     ShardEndpoint endpoint0(
-        kShardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none), boost::none);
+        kShardIdA, ShardVersionFactory::make(ChunkVersion::IGNORED()), boost::none);
 
     std::vector<std::unique_ptr<NSTargeter>> targeters;
     targeters.push_back(initTargeterFullRange(nss0, endpoint0));
@@ -6365,7 +6309,8 @@ TEST_F(BulkWriteExecTest, TestGetMoreFromInitialResponse) {
     auto future = launchAsync([&] {
         auto client = getService()->makeClient("thread");
         getServiceContext()->makeOperationContext(client.get());
-        auto reply = bulk_write_exec::execute(operationContext(), targeters, request);
+        bulk_write_exec::BulkWriteExecStats execStats;
+        auto reply = bulk_write_exec::execute(operationContext(), targeters, request, execStats);
         // Should have 2 reply items, 1 from the original response and 1 from the getMore.
         ASSERT_EQUALS(reply.replyItems.size(), 2u);
         ASSERT_EQUALS(reply.summaryFields.nInserted, 2);
@@ -6423,12 +6368,8 @@ TEST(BulkWriteTest, getApproximateSize) {
     item = BulkWriteReplyItem{0, Status{ErrorCodes::ExceededMemoryLimit, reason}};
     ASSERT_EQUALS(item.getApproximateSize(), item.serialize().objsize());
 
-    DuplicateKeyErrorInfo extra{BSON("key" << 1),
-                                BSON("value" << 1),
-                                BSON("collation"
-                                     << "simple"),
-                                {},
-                                boost::none};
+    DuplicateKeyErrorInfo extra{
+        BSON("key" << 1), BSON("value" << 1), BSON("collation" << "simple"), {}, boost::none};
     BSONObjBuilder builder;
     extra.serialize(&builder);
     int extraSize = builder.obj().objsize();

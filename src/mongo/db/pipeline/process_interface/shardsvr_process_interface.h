@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <list>
-#include <memory>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
@@ -54,12 +47,20 @@
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/database_version.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/uuid.h"
+
+#include <list>
+#include <memory>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -94,7 +95,9 @@ public:
     }
 
     std::vector<FieldPath> collectDocumentKeyFieldsActingAsRouter(
-        OperationContext*, const NamespaceString&) const final {
+        OperationContext*,
+        const NamespaceString&,
+        RoutingContext* routingCtx = nullptr) const final {
         // We don't expect anyone to use this method on the shard itself (yet). This is currently
         // only used for $merge. For $out in a sharded cluster, the mongos is responsible for
         // collecting the document key fields before serializing them and sending them to the
@@ -125,24 +128,28 @@ public:
                                     bool multi,
                                     boost::optional<OID> targetEpoch) final;
 
-    BSONObj preparePipelineAndExplain(Pipeline* ownedPipeline,
-                                      ExplainOptions::Verbosity verbosity) final;
+    BSONObj finalizePipelineAndExplain(
+        std::unique_ptr<Pipeline> pipeline,
+        ExplainOptions::Verbosity verbosity,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr) final;
 
     BSONObj getCollectionOptions(OperationContext* opCtx, const NamespaceString& nss) final;
+
+    UUID fetchCollectionUUIDFromPrimary(OperationContext* opCtx, const NamespaceString& nss) final;
 
     query_shape::CollectionType getCollectionType(OperationContext* opCtx,
                                                   const NamespaceString& nss) final;
 
-    std::list<BSONObj> getIndexSpecs(OperationContext* opCtx,
-                                     const NamespaceString& ns,
-                                     bool includeBuildUUIDs) final;
+    std::vector<BSONObj> getIndexSpecs(OperationContext* opCtx,
+                                       const NamespaceString& ns,
+                                       bool includeBuildUUIDs) final;
     void renameIfOptionsAndIndexesHaveNotChanged(OperationContext* opCtx,
                                                  const NamespaceString& sourceNs,
                                                  const NamespaceString& targetNs,
                                                  bool dropTarget,
                                                  bool stayTemp,
                                                  const BSONObj& originalCollectionOptions,
-                                                 const std::list<BSONObj>& originalIndexes) final;
+                                                 const std::vector<BSONObj>& originalIndexes) final;
     void createCollection(OperationContext* opCtx,
                           const DatabaseName& dbName,
                           const BSONObj& cmdObj) final;
@@ -163,15 +170,24 @@ public:
      * retry on network errors and also on StaleConfig errors to avoid restarting the entire
      * operation.
      */
-    std::unique_ptr<Pipeline, PipelineDeleter> preparePipelineForExecution(
-        Pipeline* pipeline,
+    std::unique_ptr<Pipeline> finalizeAndMaybePreparePipelineForExecution(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        std::unique_ptr<Pipeline> pipeline,
+        bool attachCursorAfterOptimizing,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
+        ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
+        boost::optional<BSONObj> readConcern = boost::none,
+        bool shouldUseCollectionDefaultCollator = false) final;
+
+    std::unique_ptr<Pipeline> preparePipelineForExecution(
+        std::unique_ptr<Pipeline> pipeline,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none) final;
 
-    std::unique_ptr<Pipeline, PipelineDeleter> preparePipelineForExecution(
+    std::unique_ptr<Pipeline> preparePipelineForExecution(
         const boost::intrusive_ptr<mongo::ExpressionContext>& expCtx,
         const AggregateCommandRequest& aggRequest,
-        Pipeline* pipeline,
+        std::unique_ptr<Pipeline> pipeline,
         boost::optional<BSONObj> shardCursorsSortSpec = boost::none,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none,
@@ -212,6 +228,10 @@ protected:
 private:
     boost::optional<TimeseriesOptions> _getTimeseriesOptions(OperationContext* opCtx,
                                                              const NamespaceString& ns) final;
+
+    BSONObj _getCollectionOptions(OperationContext* opCtx,
+                                  const NamespaceString& nss,
+                                  bool runOnPrimary = false);
 };
 
 }  // namespace mongo

@@ -27,6 +27,8 @@
  *    it in the license file.
  */
 
+#pragma once
+
 #include "mongo/db/audit.h"
 #include "mongo/db/client.h"
 #include "mongo/db/namespace_string.h"
@@ -68,6 +70,10 @@ public:
 
     bool allowedInTransactions() const final {
         return true;
+    }
+
+    bool requiresAuthzChecks() const override {
+        return false;
     }
 
     class Invocation : public KCV1Gen::InvocationBaseGen {

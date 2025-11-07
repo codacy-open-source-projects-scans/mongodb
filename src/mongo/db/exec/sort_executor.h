@@ -29,21 +29,22 @@
 
 #pragma once
 
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <utility>
-
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sort_key_comparator.h"
-#include "mongo/db/exec/working_set.h"
-#include "mongo/db/pipeline/expression.h"
-#include "mongo/db/query/sort_pattern.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
 #include "mongo/db/sorter/sorter.h"
 #include "mongo/db/sorter/sorter_stats.h"
+#include "mongo/util/modules.h"
+
+#include <cstdint>
+#include <memory>
+#include <utility>
+
+#include <boost/filesystem.hpp>
 
 namespace mongo {
 /**
@@ -55,9 +56,11 @@ namespace mongo {
  * The template parameter is the type of data being sorted. In DocumentSource execution, we sort
  * Document objects directly, but in the PlanStage layer we may sort WorkingSetMembers. The type of
  * the sort key, on the other hand, is always Value.
+ *
+ * TODO SERVER-112777: Remove 'atlas_streams' dependency on this class.
  */
 template <typename T>
-class SortExecutor {
+class MONGO_MOD_NEEDS_REPLACEMENT SortExecutor {
 public:
     using DocumentSorter = Sorter<Value, T>;
     class Comparator {
@@ -77,7 +80,7 @@ public:
     SortExecutor(SortPattern sortPattern,
                  uint64_t limit,
                  uint64_t maxMemoryUsageBytes,
-                 std::string tempDir,
+                 boost::filesystem::path tempDir,
                  bool allowDiskUse,
                  bool moveSortedDataIntoIterator = false)
         : _sortPattern(std::move(sortPattern)),
@@ -115,7 +118,7 @@ public:
     }
 
     bool wasDiskUsed() const {
-        return _stats.spills > 0;
+        return _stats.spillingStats.getSpills() > 0;
     }
 
     /**
@@ -129,15 +132,21 @@ public:
     const SortStats& stats() const {
         if (_sorter) {
             _stats.memoryUsageBytes = _sorter->stats().memUsage();
+            _stats.peakTrackedMemBytes =
+                std::max(_stats.peakTrackedMemBytes, _stats.memoryUsageBytes);
         }
         return _stats;
     }
 
     SorterFileStats* getSorterFileStats() const {
-        if (!_sorterFileStats) {
-            return nullptr;
-        }
         return _sorterFileStats.get();
+    }
+
+    long long spilledBytes() const {
+        if (!_sorterFileStats) {
+            return 0;
+        }
+        return _sorterFileStats->bytesSpilledUncompressed();
     }
 
     long long spilledDataStorageSize() const {
@@ -161,11 +170,13 @@ public:
      */
     void loadingDone() {
         ensureSorter();
-        _output.reset(_sorter->done());
+        _output = _sorter->done();
         _stats.keysSorted += _sorter->stats().numSorted();
-        _stats.spills += _sorter->stats().spilledRanges();
+        _stats.spillingStats.incrementSpills(_sorter->stats().spilledRanges());
+        _stats.spillingStats.incrementSpilledBytes(spilledBytes());
+        _stats.spillingStats.incrementSpilledDataStorageSize(spilledDataStorageSize());
+        _stats.spillingStats.incrementSpilledRecords(_sorter->stats().spilledKeyValuePairs());
         _stats.totalDataSizeBytes += _sorter->stats().bytesSorted();
-        _stats.spilledDataStorageSize += spilledDataStorageSize();
         _stats.memoryUsageBytes = 0;
         _sorter.reset();
     }
@@ -211,7 +222,7 @@ public:
         invariant(!_paused);
         _paused = true;
         ensureSorter();
-        _output.reset(_sorter->pause());
+        _output = _sorter->pause();
     }
 
     /**
@@ -224,6 +235,26 @@ public:
         clearSortTable();
         _sorter->resume();
         _isEOF = false;
+    }
+
+    void forceSpill() {
+        if (_sorter) {
+            _sorter->spill();
+        } else if (_output) {
+            if (_output->spillable()) {
+                SorterTracker tracker;
+                auto opts = makeSortOptions();
+                opts.Tracker(&tracker);
+
+                _output = _output->spill(opts, typename DocumentSorter::Settings());
+
+                _stats.spillingStats.incrementSpills(tracker.spilledRanges.loadRelaxed());
+                _stats.spillingStats.incrementSpilledRecords(
+                    tracker.spilledKeyValuePairs.loadRelaxed());
+                _stats.spillingStats.setSpilledBytes(spilledBytes());
+                _stats.spillingStats.updateSpilledDataStorageSize(spilledDataStorageSize());
+            }
+        }
     }
 
 private:
@@ -241,16 +272,15 @@ private:
 
     SortOptions makeSortOptions() const {
         SortOptions opts;
-        opts.moveSortedDataIntoIterator = _moveSortedDataIntoIterator;
+        opts.MoveSortedDataIntoIterator(_moveSortedDataIntoIterator);
         if (_stats.limit) {
-            opts.limit = _stats.limit;
+            opts.Limit(_stats.limit);
         }
 
-        opts.maxMemoryUsageBytes = _stats.maxMemoryUsageBytes;
+        opts.MaxMemoryUsageBytes(_stats.maxMemoryUsageBytes);
         if (_diskUseAllowed) {
-            opts.extSortAllowed = true;
-            opts.tempDir = _tempDir;
-            opts.sorterFileStats = _sorterFileStats.get();
+            opts.TempDir(_tempDir);
+            opts.FileStats(_sorterFileStats.get());
         }
 
         return opts;
@@ -259,12 +289,12 @@ private:
     void ensureSorter() {
         // This conditional should only pass if no documents were added to the sorter.
         if (!_sorter) {
-            _sorter.reset(DocumentSorter::make(makeSortOptions(), Comparator(_sortPattern)));
+            _sorter = DocumentSorter::make(makeSortOptions(), Comparator(_sortPattern));
         }
     }
 
     const SortPattern _sortPattern;
-    const std::string _tempDir;
+    const boost::filesystem::path _tempDir;
     const bool _diskUseAllowed;
     const bool _moveSortedDataIntoIterator;
 
@@ -277,4 +307,8 @@ private:
     bool _isEOF = false;
     bool _paused = false;
 };
+
+extern template class SortExecutor<Document>;
+extern template class SortExecutor<SortableWorkingSetMember>;
+extern template class SortExecutor<BSONObj>;
 }  // namespace mongo

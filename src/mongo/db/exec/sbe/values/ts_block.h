@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <cstddef>
-#include <memory>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/cell_interface.h"
@@ -42,6 +36,12 @@
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/util/bufreader.h"
+
+#include <cstddef>
+#include <memory>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace mongo::sbe::value {
 class TsBlock;
@@ -60,7 +60,7 @@ public:
         std::vector<std::unique_ptr<CellBlock>> cellBlocks;
     };
 
-    TsBucketPathExtractor(std::vector<CellBlock::PathRequest> reqs, StringData timeField);
+    TsBucketPathExtractor(std::vector<PathRequest> reqs, StringData timeField);
 
     /*
      * Returns one CellBlock per path given in the constructor. A CellBlock represents all of the
@@ -83,7 +83,7 @@ private:
                                    const std::vector<size_t>& nonTopLevelIdxesForCurrentField,
                                    std::vector<std::unique_ptr<CellBlock>>& outCells) const;
 
-    std::vector<CellBlock::PathRequest> _pathReqs;
+    std::vector<PathRequest> _pathReqs;
 
     // Set of indexes in _pathReqs which are paths NOT of the form [Get <field> Id]. This includes
     // paths like [Get <field> Traverse Id] as well as access to nested paths. Paths of the form
@@ -241,19 +241,19 @@ private:
     // track of whether the underlying buffer '_blockVal' is owned or not via '_blockOwned'.
     //
     // If the '_blockVal' is not owned, this TsBlock is valid only as long as the underlying BSON.
-    bool _blockOwned;
-    TypeTags _blockTag;
-    Value _blockVal;
+    const bool _blockOwned;
+    const TypeTags _blockTag;
+    const Value _blockVal;
 
     // The number of values in this block.
-    size_t _count;
+    const size_t _count;
 
     // The version of the bucket, which indicates whether the data is compressed and whether the
     // time field is sorted.
-    int _bucketVersion;
+    const int _bucketVersion;
 
     // true if all values in the block are non-nothing. Currently only true for timeField
-    bool _isTimeField;
+    const bool _isTimeField;
 
     // Store the min and max found in the control field of a bucket
     std::pair<TypeTags, Value> _controlMin;

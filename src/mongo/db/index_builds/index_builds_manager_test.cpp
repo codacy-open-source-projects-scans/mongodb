@@ -27,19 +27,19 @@
  *    it in the license file.
  */
 
-#include <string>
+#include "mongo/db/index_builds/index_builds_manager.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
-#include "mongo/db/catalog/catalog_test_fixture.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/index_builds/index_builds_manager.h"
+#include "mongo/db/local_catalog/catalog_test_fixture.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/storage_interface.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/uuid.h"
+
+#include <string>
 
 namespace mongo {
 namespace {
@@ -51,6 +51,8 @@ private:
 
 public:
     void createCollection(const NamespaceString& nss);
+
+    std::vector<IndexBuildInfo> makeSpecs(std::vector<std::string> keys);
 
     const UUID _buildUUID = UUID::gen();
     const NamespaceString _nss = NamespaceString::createNamespaceString_forTest("test.foo");
@@ -72,23 +74,29 @@ void IndexBuildsManagerTest::createCollection(const NamespaceString& nss) {
     ASSERT_OK(storageInterface()->createCollection(operationContext(), nss, CollectionOptions()));
 }
 
-std::vector<BSONObj> makeSpecs(const NamespaceString& nss, std::vector<std::string> keys) {
+std::vector<IndexBuildInfo> IndexBuildsManagerTest::makeSpecs(std::vector<std::string> keys) {
     ASSERT(keys.size());
-    std::vector<BSONObj> indexSpecs;
-    for (const auto& keyName : keys) {
-        indexSpecs.push_back(
-            BSON("v" << 2 << "key" << BSON(keyName << 1) << "name" << (keyName + "_1")));
+    auto storageEngine = operationContext()->getServiceContext()->getStorageEngine();
+    std::vector<IndexBuildInfo> indexes;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        const auto& keyName = keys[i];
+        IndexBuildInfo indexBuildInfo(
+            BSON("v" << 2 << "key" << BSON(keyName << 1) << "name" << (keyName + "_1")),
+            fmt::format("index-{}", i + 1));
+        indexBuildInfo.setInternalIdents(*storageEngine,
+                                         VersionContext::getDecoration(operationContext()));
+        indexes.push_back(std::move(indexBuildInfo));
     }
-    return indexSpecs;
+    return indexes;
 }
 
 TEST_F(IndexBuildsManagerTest, IndexBuildsManagerSetUpAndTearDown) {
     AutoGetCollection autoColl(operationContext(), _nss, MODE_X);
     CollectionWriter collection(operationContext(), autoColl);
 
-    auto specs = makeSpecs(_nss, {"a", "b"});
+    auto indexes = makeSpecs({"a", "b"});
     ASSERT_OK(_indexBuildsManager.setUpIndexBuild(
-        operationContext(), collection, specs, _buildUUID, MultiIndexBlock::kNoopOnInitFn));
+        operationContext(), collection, indexes, _buildUUID, MultiIndexBlock::kNoopOnInitFn));
 
     _indexBuildsManager.abortIndexBuild(
         operationContext(), collection, _buildUUID, MultiIndexBlock::kNoopOnCleanUpFn);

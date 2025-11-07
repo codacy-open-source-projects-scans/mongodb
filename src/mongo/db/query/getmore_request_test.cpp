@@ -27,13 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -42,10 +35,14 @@
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <cstdint>
+#include <string>
+
+#include <boost/cstdint.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace {
 
@@ -68,7 +65,7 @@ GetMoreCommandRequest createGetMoreCommandRequest(
 
 std::unique_ptr<GetMoreCommandRequest> parseFromBSON(const BSONObj& cmdObj) {
     return std::make_unique<GetMoreCommandRequest>(
-        GetMoreCommandRequest::parse(IDLParserContext("GetMoreCommandRequest"), cmdObj));
+        GetMoreCommandRequest::parse(cmdObj, IDLParserContext("GetMoreCommandRequest")));
 }
 
 TEST(GetMoreRequestTest, ShouldParseAllKnownOptions) {

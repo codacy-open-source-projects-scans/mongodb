@@ -29,16 +29,9 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <cstddef>
-#include <functional>
-#include <map>
-#include <memory>
-#include <utility>
-#include <vector>
-
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/cancelable_operation_context.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/s/resharding/donor_oplog_id_gen.h"
@@ -48,16 +41,25 @@
 #include "mongo/db/s/resharding/resharding_oplog_applier_metrics.h"
 #include "mongo/db/s/resharding/resharding_oplog_fetcher.h"
 #include "mongo/db/s/resharding/resharding_txn_cloner.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/s/chunk_manager.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/functional.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <functional>
+#include <map>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 
@@ -129,6 +131,11 @@ public:
     virtual void startOplogApplication() = 0;
 
     /**
+     * Makes the data replication machinery prepare for the critical section.
+     */
+    virtual void prepareForCriticalSection() = 0;
+
+    /**
      * Returns a future that becomes ready when either
      *   (a) the recipient has finished cloning both the collection being resharded and the
      *       config.transactions records from before the resharding operation started, or
@@ -188,6 +195,8 @@ public:
         const mongo::Date_t& startConfigTxnCloneTime) override;
 
     void startOplogApplication() override;
+
+    void prepareForCriticalSection() override;
 
     SharedSemiFuture<void> awaitCloningDone() override;
 

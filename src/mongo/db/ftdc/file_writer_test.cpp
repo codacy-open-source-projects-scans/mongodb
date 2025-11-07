@@ -27,12 +27,7 @@
  *    it in the license file.
  */
 
-#include <cmath>
-#include <tuple>
-#include <vector>
-
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
+#include "mongo/db/ftdc/file_writer.h"
 
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status_with.h"
@@ -41,13 +36,17 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/ftdc/config.h"
 #include "mongo/db/ftdc/file_reader.h"
-#include "mongo/db/ftdc/file_writer.h"
 #include "mongo/db/ftdc/ftdc_test.h"
 #include "mongo/db/service_context_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/temp_dir.h"
+#include "mongo/unittest/unittest.h"
+
+#include <cmath>
+#include <tuple>
+#include <vector>
+
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
 
 namespace mongo {
 
@@ -64,15 +63,13 @@ TEST_F(FTDCFileTest, TestFileBasicMetadata) {
 
     deleteFileIfNeeded(p);
 
-    BSONObj doc1 = BSON("name"
-                        << "joe"
-                        << "key1" << 34 << "key2" << 45);
-    BSONObj doc2 = BSON("name"
-                        << "joe"
-                        << "key3" << 34 << "key5" << 45);
+    BSONObj doc1 = BSON("name" << "joe"
+                               << "key1" << 34 << "key2" << 45);
+    BSONObj doc2 = BSON("name" << "joe"
+                               << "key3" << 34 << "key5" << 45);
 
     FTDCConfig config;
-    FTDCFileWriter writer(&config, UseMultiServiceSchema{false});
+    FTDCFileWriter writer(&config);
 
     ASSERT_OK(writer.open(p));
 
@@ -109,15 +106,13 @@ TEST_F(FTDCFileTest, TestFileBasicCompress) {
 
     deleteFileIfNeeded(p);
 
-    BSONObj doc1 = BSON("name"
-                        << "joe"
-                        << "key1" << 34 << "key2" << 45);
-    BSONObj doc2 = BSON("name"
-                        << "joe"
-                        << "key3" << 34 << "key5" << 45);
+    BSONObj doc1 = BSON("name" << "joe"
+                               << "key1" << 34 << "key2" << 45);
+    BSONObj doc2 = BSON("name" << "joe"
+                               << "key3" << 34 << "key5" << 45);
 
     FTDCConfig config;
-    FTDCFileWriter writer(&config, UseMultiServiceSchema{false});
+    FTDCFileWriter writer(&config);
 
     ASSERT_OK(writer.open(p));
 
@@ -147,20 +142,6 @@ TEST_F(FTDCFileTest, TestFileBasicCompress) {
 }
 
 TEST_F(FTDCFileTest, TestFileBasicPeriodicMetadata) {
-#define TEST_BEGIN auto runTest = [this](bool multiservice) { \
-    std::cout << "Running " << _testInfo.testName() <<" with multiservice=" << \
-    multiservice << std::endl
-
-#define TEST_END                          \
-    }                                     \
-    ;                                     \
-    do {                                  \
-        for (auto mode : {true, false}) { \
-            runTest(mode);                \
-        }                                 \
-    } while (0)
-    TEST_BEGIN;
-
     unittest::TempDir tempdir("metrics_testpath");
     boost::filesystem::path p(tempdir.path());
     p /= kTestFile;
@@ -178,14 +159,9 @@ TEST_F(FTDCFileTest, TestFileBasicPeriodicMetadata) {
     BSONObj doc4 = BSON("field1" << subObj2 << "field2" << subObj1);
     BSONObj deltaDoc1 = BSON("field1" << altSubObj1);
     BSONObj deltaDoc2 = BSON("field2" << altSubObj2);
-    if (multiservice) {
-        for (auto ptr : {&doc1, &doc2, &doc3, &doc4, &deltaDoc1, &deltaDoc2}) {
-            *ptr = BSON("common" << *ptr);
-        }
-    }
 
     FTDCConfig config;
-    FTDCFileWriter writer(&config, UseMultiServiceSchema{multiservice});
+    FTDCFileWriter writer(&config);
 
     ASSERT_OK(writer.open(p));
     ASSERT_OK(writer.writePeriodicMetadataSample(doc1, Date_t()));  // writes doc1, resets delta
@@ -232,10 +208,6 @@ TEST_F(FTDCFileTest, TestFileBasicPeriodicMetadata) {
 
     ASSERT_OK(sw);
     ASSERT_EQUALS(sw.getValue(), false);
-
-    TEST_END;
-#undef TEST_BEGIN
-#undef TEST_END
 }
 
 /**
@@ -246,7 +218,7 @@ public:
     FileTestTie()
         : _tempdir("metrics_testpath"),
           _path(boost::filesystem::path(_tempdir.path()) / kTestFile),
-          _writer(&_config, UseMultiServiceSchema{false}) {
+          _writer(&_config) {
         deleteFileIfNeeded(_path);
 
         ASSERT_OK(_writer.open(_path));
@@ -300,43 +272,35 @@ private:
 TEST_F(FTDCFileTest, TestSchemaChanges) {
     FileTestTie c;
 
-    c.addSample(BSON("name"
-                     << "joe"
-                     << "key1" << 33 << "key2" << 42));
-    c.addSample(BSON("name"
-                     << "joe"
-                     << "key1" << 34 << "key2" << 45));
-    c.addSample(BSON("name"
-                     << "joe"
-                     << "key1" << 34 << "key2" << 45));
+    c.addSample(BSON("name" << "joe"
+                            << "key1" << 33 << "key2" << 42));
+    c.addSample(BSON("name" << "joe"
+                            << "key1" << 34 << "key2" << 45));
+    c.addSample(BSON("name" << "joe"
+                            << "key1" << 34 << "key2" << 45));
 
     // Add Value
-    c.addSample(BSON("name"
-                     << "joe"
-                     << "key1" << 34 << "key2" << 45 << "key3" << 47));
+    c.addSample(BSON("name" << "joe"
+                            << "key1" << 34 << "key2" << 45 << "key3" << 47));
 
-    c.addSample(BSON("name"
-                     << "joe"
-                     << "key1" << 34 << "key2" << 45 << "key3" << 47));
+    c.addSample(BSON("name" << "joe"
+                            << "key1" << 34 << "key2" << 45 << "key3" << 47));
 
     // Rename field
-    c.addSample(BSON("name"
-                     << "joe"
-                     << "key1" << 34 << "key5" << 45 << "key3" << 47));
+    c.addSample(BSON("name" << "joe"
+                            << "key1" << 34 << "key5" << 45 << "key3" << 47));
 
     // Change type
-    c.addSample(BSON("name"
-                     << "joe"
-                     << "key1" << 34 << "key5"
-                     << "45"
-                     << "key3" << 47));
+    c.addSample(BSON("name" << "joe"
+                            << "key1" << 34 << "key5"
+                            << "45"
+                            << "key3" << 47));
 
     // RemoveField
-    c.addSample(BSON("name"
-                     << "joe"
-                     << "key5"
-                     << "45"
-                     << "key3" << 47));
+    c.addSample(BSON("name" << "joe"
+                            << "key5"
+                            << "45"
+                            << "key3" << 47));
 }
 
 // Test a full buffer
@@ -345,24 +309,21 @@ TEST_F(FTDCFileTest, TestFull) {
     for (int j = 0; j < 2; j++) {
         FileTestTie c;
 
-        c.addSample(BSON("name"
-                         << "joe"
-                         << "key1" << 33 << "key2" << 42));
+        c.addSample(BSON("name" << "joe"
+                                << "key1" << 33 << "key2" << 42));
 
         for (size_t i = 0; i <= FTDCConfig::kMaxSamplesPerArchiveMetricChunkDefault - 2; i++) {
-            c.addSample(BSON("name"
-                             << "joe"
-                             << "key1" << static_cast<long long int>(i * j) << "key2" << 45));
+            c.addSample(BSON("name" << "joe"
+                                    << "key1" << static_cast<long long int>(i * j) << "key2"
+                                    << 45));
         }
 
-        c.addSample(BSON("name"
-                         << "joe"
-                         << "key1" << 34 << "key2" << 45));
+        c.addSample(BSON("name" << "joe"
+                                << "key1" << 34 << "key2" << 45));
 
         // Add Value
-        c.addSample(BSON("name"
-                         << "joe"
-                         << "key1" << 34 << "key2" << 45));
+        c.addSample(BSON("name" << "joe"
+                                << "key1" << 34 << "key2" << 45));
     }
 }
 

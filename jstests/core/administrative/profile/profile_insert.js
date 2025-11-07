@@ -9,31 +9,32 @@
 //   does_not_support_stepdowns,
 //   requires_fcv_70,
 //   requires_profiling,
+//   # The test runs getLatestProfileEntry(). The downstream syncing node affects the profiler.
+//   run_getLatestProfilerEntry,
 // ]
 
-import {
-    ClusteredCollectionUtil
-} from "jstests/libs/clustered_collections/clustered_collection_util.js";
+import {ClusteredCollectionUtil} from "jstests/libs/clustered_collections/clustered_collection_util.js";
 import {isLinux} from "jstests/libs/os_helpers.js";
 import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 
-var testDB = db.getSiblingDB("profile_insert");
+let testDB = db.getSiblingDB("profile_insert");
 assert.commandWorked(testDB.dropDatabase());
 const collName = jsTestName();
-var coll = testDB.getCollection(collName);
+let coll = testDB.getCollection(collName);
 
 // Don't profile the setFCV command, which could be run during this test in the
 // fcv_upgrade_downgrade_replica_sets_jscore_passthrough suite.
-assert.commandWorked(testDB.setProfilingLevel(
-    1, {filter: {'command.setFeatureCompatibilityVersion': {'$exists': false}}}));
+assert.commandWorked(
+    testDB.setProfilingLevel(1, {filter: {"command.setFeatureCompatibilityVersion": {"$exists": false}}}),
+);
 
 //
 // Test single insert.
 //
-var doc = {_id: 1};
+let doc = {_id: 1};
 assert.commandWorked(coll.insert(doc));
 
-var profileObj = getLatestProfilerEntry(testDB);
+let profileObj = getLatestProfilerEntry(testDB);
 
 const collectionIsClustered = ClusteredCollectionUtil.areAllCollectionsClustered(db.getMongo());
 // A clustered collection has no actual index on _id.
@@ -61,8 +62,8 @@ assert.eq(profileObj.appName, "MongoDB Shell", tojson(profileObj));
 //
 coll.drop();
 
-var docArray = [{_id: 1}, {_id: 2}];
-var bulk = coll.initializeUnorderedBulkOp();
+let docArray = [{_id: 1}, {_id: 2}];
+let bulk = coll.initializeUnorderedBulkOp();
 bulk.insert(docArray[0]);
 bulk.insert(docArray[1]);
 assert.commandWorked(bulk.execute());
@@ -80,9 +81,9 @@ assert.eq(profileObj.appName, "MongoDB Shell", tojson(profileObj));
 //
 coll.drop();
 doc = {
-    _id: 1
+    _id: 1,
 };
-var wtimeout = 60000;
+let wtimeout = 60000;
 assert.commandWorked(coll.insert(doc, {writeConcern: {w: 1, wtimeout: wtimeout}, ordered: false}));
 
 profileObj = getLatestProfilerEntry(testDB);

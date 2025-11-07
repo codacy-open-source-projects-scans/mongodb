@@ -29,10 +29,10 @@
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/exec/sbe/sbe_plan_stage_test.h"
+#include "mongo/db/exec/sbe/stages/window.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 
 namespace mongo::sbe {
 
@@ -41,13 +41,15 @@ public:
     using WindowOffset = std::
         tuple<value::SlotId, value::SlotId, boost::optional<int32_t>, boost::optional<int32_t>>;
 
-    std::pair<std::unique_ptr<PlanStage>, value::SlotVector> createSimpleWindowStage(
+    // Adds a window stage with the stage provided in the argument as its child.
+    std::pair<std::unique_ptr<PlanStage>, value::SlotVector> addWindowStage(
         std::unique_ptr<PlanStage> stage,
         value::SlotVector partitionSlots,
         value::SlotVector forwardSlots,
         value::SlotId valueSlot,
         std::vector<WindowOffset> windowOffsets,
-        boost::optional<value::SlotId> collatorSlot) {
+        boost::optional<value::SlotId> collatorSlot,
+        bool allowDiskUse = false) {
         using namespace stage_builder;
         value::SlotVector windowSlots;
         std::vector<WindowStage::Window> windows;
@@ -114,8 +116,26 @@ public:
                                    partitionSlots.size(),
                                    std::move(windows),
                                    collatorSlot,
-                                   false /* allowDiskUse */,
+                                   allowDiskUse,
                                    kEmptyPlanNodeId);
+
+
+        return {std::move(stage), std::move(windowSlots)};
+    }
+
+    std::tuple<std::unique_ptr<PlanStage>,
+               value::SlotVector,
+               const boost::optional<SimpleMemoryUsageTracker>*>
+    createSimpleWindowStage(std::unique_ptr<PlanStage> stage,
+                            value::SlotVector partitionSlots,
+                            value::SlotVector forwardSlots,
+                            value::SlotId valueSlot,
+                            std::vector<WindowOffset> windowOffsets,
+                            boost::optional<value::SlotId> collatorSlot) {
+        using namespace stage_builder;
+
+        auto [windowStage, windowSlots] = addWindowStage(
+            std::move(stage), partitionSlots, forwardSlots, valueSlot, windowOffsets, collatorSlot);
 
         value::SlotVector resultSlots;
         SlotExprPairVector projects;
@@ -128,8 +148,49 @@ public:
                            makeFunction("doubleDoubleSumFinalize", makeVariable(windowSlot)),
                            makeInt32Constant(0)));
         }
-        stage = makeS<ProjectStage>(std::move(stage), std::move(projects), kEmptyPlanNodeId);
-        return {std::move(stage), std::move(resultSlots)};
+
+        // Get the memory tracker from the window stage before we create the project stage.
+        const boost::optional<SimpleMemoryUsageTracker>* memoryTracker =
+            &windowStage->getMemoryTracker();
+
+        stage = makeS<ProjectStage>(std::move(windowStage), std::move(projects), kEmptyPlanNodeId);
+        return {std::move(stage), std::move(resultSlots), memoryTracker};
+    }
+
+    uint64_t assertMemoryTrackerState(
+        const boost::optional<SimpleMemoryUsageTracker>* memoryTracker,
+        uint64_t oldPeakMemBytes,
+        bool spill = false) {
+        uint64_t inUseTrackedMemoryBytes = (memoryTracker->value()).inUseTrackedMemoryBytes();
+
+        if (spill) {
+            // Tracked memory usage may be non-zero even after spilling, because in the case that
+            // window state memory is used, such memory does not get cleared in spill().
+            ASSERT_GTE(inUseTrackedMemoryBytes, 0);
+        } else {
+            ASSERT_GT(inUseTrackedMemoryBytes, 0);
+        }
+
+        uint64_t actualPeakMemBytes = (memoryTracker->value()).peakTrackedMemoryBytes();
+        ASSERT_GTE(actualPeakMemBytes, inUseTrackedMemoryBytes);
+        ASSERT_GTE(actualPeakMemBytes, oldPeakMemBytes);
+
+        return actualPeakMemBytes;
+    }
+
+    void assertFinalMemoryTrackerState(
+        const boost::optional<SimpleMemoryUsageTracker>* memoryTracker,
+        bool allowZeroInUseMemory = false) {
+        int64_t inUseBytes = (memoryTracker->value()).inUseTrackedMemoryBytes();
+        int64_t peakBytes = (memoryTracker->value()).peakTrackedMemoryBytes();
+
+        if (allowZeroInUseMemory) {
+            ASSERT_GTE(inUseBytes, 0);
+        } else {
+            ASSERT_GT(inUseBytes, 0);
+        }
+
+        ASSERT_GTE(peakBytes, inUseBytes);
     }
 };
 
@@ -164,12 +225,13 @@ TEST_F(WindowStageTest, IntWindowTest) {
         {boundSlot1, boundSlot1, 2, 6},
         {boundSlot1, boundSlot1, boost::none, -3},
     };
-    auto [resultStage, resultSlots] = createSimpleWindowStage(std::move(inputStage),
-                                                              std::move(partitionSlots),
-                                                              std::move(forwardSlots),
-                                                              valueSlot,
-                                                              std::move(windowOffsets),
-                                                              boost::optional<value::SlotId>());
+    auto [resultStage, resultSlots, memoryTracker] =
+        createSimpleWindowStage(std::move(inputStage),
+                                std::move(partitionSlots),
+                                std::move(forwardSlots),
+                                valueSlot,
+                                std::move(windowOffsets),
+                                boost::optional<value::SlotId>());
 
     prepareTree(ctx.get(), resultStage.get());
     std::vector<value::SlotAccessor*> resultAccessors;
@@ -189,6 +251,8 @@ TEST_F(WindowStageTest, IntWindowTest) {
         {900, 1200, 900, 500, 0, 900, 1200, 900, 500, 0},
         {0, 0, 100, 300, 600, 0, 0, 100, 300, 600},
     };
+
+    int64_t peakMemoryBytes = 0;
     for (size_t i = 0; i < expected[0].size(); i++) {
         auto planState = resultStage->getNext();
         ASSERT_EQ(PlanState::ADVANCED, planState);
@@ -198,9 +262,13 @@ TEST_F(WindowStageTest, IntWindowTest) {
             ASSERT_EQ(value::TypeTags::NumberInt32, tag);
             ASSERT_EQ(expected[j][i], val);
         }
+
+        peakMemoryBytes = assertMemoryTrackerState(memoryTracker, peakMemoryBytes);
     }
     auto planState = resultStage->getNext();
     ASSERT_EQ(PlanState::IS_EOF, planState);
+
+    assertFinalMemoryTrackerState(memoryTracker);
 }
 
 TEST_F(WindowStageTest, StringWindowTest) {
@@ -234,12 +302,13 @@ TEST_F(WindowStageTest, StringWindowTest) {
         {boundSlot1, boundSlot1, 2, 6},
         {boundSlot1, boundSlot1, boost::none, -3},
     };
-    auto [resultStage, resultSlots] = createSimpleWindowStage(std::move(inputStage),
-                                                              std::move(partitionSlots),
-                                                              std::move(forwardSlots),
-                                                              valueSlot,
-                                                              std::move(windowOffsets),
-                                                              boost::optional<value::SlotId>());
+    auto [resultStage, resultSlots, memoryTracker] =
+        createSimpleWindowStage(std::move(inputStage),
+                                std::move(partitionSlots),
+                                std::move(forwardSlots),
+                                valueSlot,
+                                std::move(windowOffsets),
+                                boost::optional<value::SlotId>());
 
     prepareTree(ctx.get(), resultStage.get());
     std::vector<value::SlotAccessor*> resultAccessors;
@@ -259,6 +328,8 @@ TEST_F(WindowStageTest, StringWindowTest) {
         {900, 1200, 900, 500, 0, 900, 1200, 900, 500, 0},
         {0, 0, 100, 300, 600, 0, 0, 100, 300, 600},
     };
+
+    int64_t peakMemoryBytes = 0;
     for (size_t i = 0; i < expected[0].size(); i++) {
         auto planState = resultStage->getNext();
         ASSERT_EQ(PlanState::ADVANCED, planState);
@@ -268,9 +339,13 @@ TEST_F(WindowStageTest, StringWindowTest) {
             ASSERT_EQ(value::TypeTags::NumberInt32, tag);
             ASSERT_EQ(expected[j][i], val);
         }
+
+        peakMemoryBytes = assertMemoryTrackerState(memoryTracker, peakMemoryBytes);
     }
     auto planState = resultStage->getNext();
     ASSERT_EQ(PlanState::IS_EOF, planState);
+
+    assertFinalMemoryTrackerState(memoryTracker);
 }
 
 TEST_F(WindowStageTest, CollatorWindowTest) {
@@ -293,8 +368,8 @@ TEST_F(WindowStageTest, CollatorWindowTest) {
     value::SlotVector forwardSlots{valueSlot};
     std::vector<WindowOffset> windowOffsets{
         // Both boundSlot1 and boundSlot2 are evenly spaced 2 units apart, we expect a range of [-2,
-        // +2] to cover
-        // 1 document on either side of the current document, similarly for other ranges.
+        // +2] to cover 1 document on either side of the current document, similarly for other
+        // ranges.
         {boundSlot1, boundSlot1, -2, 2},
         {boundSlot1, boundSlot2, -2, 2},
         {boundSlot2, boundSlot2, -2, 2},
@@ -314,12 +389,13 @@ TEST_F(WindowStageTest, CollatorWindowTest) {
     collatorAccessor.reset(value::TypeTags::collator,
                            value::bitcastFrom<CollatorInterface*>(collator.release()));
 
-    auto [resultStage, resultSlots] = createSimpleWindowStage(std::move(inputStage),
-                                                              std::move(partitionSlots),
-                                                              std::move(forwardSlots),
-                                                              valueSlot,
-                                                              std::move(windowOffsets),
-                                                              collatorSlot);
+    auto [resultStage, resultSlots, memoryTracker] =
+        createSimpleWindowStage(std::move(inputStage),
+                                std::move(partitionSlots),
+                                std::move(forwardSlots),
+                                valueSlot,
+                                std::move(windowOffsets),
+                                collatorSlot);
 
     prepareTree(ctx.get(), resultStage.get());
     std::vector<value::SlotAccessor*> resultAccessors;
@@ -337,6 +413,7 @@ TEST_F(WindowStageTest, CollatorWindowTest) {
         {900, 1200, 1000, 800, 600, 900, 1200, 900, 500, 0},
         {0, 0, 100, 300, 600, 1000, 1500, 1600, 1800, 2100}};
 
+    int64_t peakMemoryBytes = 0;
     for (size_t i = 0; i < expected[0].size(); i++) {
         auto planState = resultStage->getNext();
         ASSERT_EQ(PlanState::ADVANCED, planState);
@@ -346,8 +423,164 @@ TEST_F(WindowStageTest, CollatorWindowTest) {
             ASSERT_EQ(value::TypeTags::NumberInt32, tag);
             ASSERT_EQ(expected[j][i], val);
         }
+
+        peakMemoryBytes = assertMemoryTrackerState(memoryTracker, peakMemoryBytes);
     }
     auto planState = resultStage->getNext();
     ASSERT_EQ(PlanState::IS_EOF, planState);
+
+    assertFinalMemoryTrackerState(memoryTracker);
+}
+
+TEST_F(WindowStageTest, ForceSpillWindowTest) {
+    auto ctx = makeCompileCtx();
+    // Create a test case of two partitions with [partitionSlot, boundSlot1, boundSlot2, valueSlot]
+    auto [dataTag, dataVal] = stage_builder::makeValue(BSON_ARRAY(
+        // First partition
+        BSON_ARRAY("1" << 1 << 2 << 100)
+        << BSON_ARRAY("1" << 3 << 4 << 200) << BSON_ARRAY("1" << 5 << 6 << 300)
+        << BSON_ARRAY("1" << 7 << 8 << 400) << BSON_ARRAY("1" << 9 << 10 << 500) <<
+        // Second partition
+        BSON_ARRAY("2" << 11 << 12 << 100) << BSON_ARRAY("2" << 13 << 14 << 200)
+        << BSON_ARRAY("2" << 15 << 16 << 300) << BSON_ARRAY("2" << 17 << 18 << 400)
+        << BSON_ARRAY("2" << 19 << 20 << 500)));
+    auto [slots, inputStage] = generateVirtualScanMulti(4, dataTag, dataVal);
+    value::SlotVector partitionSlots{slots[0]};
+    auto boundSlot1 = slots[1];
+    auto boundSlot2 = slots[2];
+    auto valueSlot = slots[3];
+    value::SlotVector forwardSlots{valueSlot};
+    std::vector<WindowOffset> windowOffsets{
+        // Both boundSlot1 and boundSlot2 are evenly spaced 2 units apart, we expect a range of [-2,
+        // +2] to cover 1 document on either side of the current document, similarly for other
+        // ranges.
+        {boundSlot1, boundSlot1, -2, 2},
+        {boundSlot1, boundSlot2, -2, 2},
+        {boundSlot2, boundSlot2, -2, 2},
+        {boundSlot1, boundSlot1, boost::none, 0},
+        {boundSlot1, boundSlot1, 0, boost::none},
+        {boundSlot1, boundSlot1, -6, -2},
+        {boundSlot1, boundSlot1, 2, 6},
+        {boundSlot1, boundSlot1, boost::none, -3},
+    };
+
+    auto collatorSlot = generateSlotId();
+    // Setup collator and insert it into the ctx.
+    auto collator =
+        std::make_unique<CollatorInterfaceMock>(CollatorInterfaceMock::MockType::kAlwaysEqual);
+    value::OwnedValueAccessor collatorAccessor;
+    ctx->pushCorrelated(collatorSlot, &collatorAccessor);
+    collatorAccessor.reset(value::TypeTags::collator,
+                           value::bitcastFrom<CollatorInterface*>(collator.release()));
+
+    auto [windowStage, windowSlots] = addWindowStage(std::move(inputStage),
+                                                     std::move(partitionSlots),
+                                                     std::move(forwardSlots),
+                                                     valueSlot,
+                                                     std::move(windowOffsets),
+                                                     collatorSlot,
+                                                     true /* allowDiskUse */);
+
+    auto resultAccessors = prepareTree(ctx.get(), windowStage.get(), windowSlots);
+
+    std::vector<std::vector<int32_t>> expected{
+        {300, 600, 900, 1200, 1000, 800, 600, 900, 1200, 900},
+        {300, 600, 900, 1200, 1000, 800, 600, 900, 1200, 900},
+        {300, 600, 900, 1200, 1000, 800, 600, 900, 1200, 900},
+        {100, 300, 600, 1000, 1500, 1600, 1800, 2100, 2500, 3000},
+        {3000, 2900, 2700, 2400, 2000, 1500, 1400, 1200, 900, 500},
+        {0, 100, 300, 600, 900, 1200, 1000, 800, 600, 900},
+        {900, 1200, 1000, 800, 600, 900, 1200, 900, 500, 0},
+        {0, 0, 100, 300, 600, 1000, 1500, 1600, 1800, 2100}};
+
+    windowStage->open(false);
+    int64_t peakMemoryBytes = 0;
+    int idx = 0;
+    while (windowStage->getNext() == PlanState::ADVANCED) {
+        peakMemoryBytes =
+            assertMemoryTrackerState(&windowStage->getMemoryTracker(), peakMemoryBytes);
+
+        for (size_t i = 0; i < resultAccessors.size(); ++i) {
+            auto [resTag, resVal] = resultAccessors[i]->getViewOfValue();
+            double actualValue = 0;
+            if (resTag != value::TypeTags::Nothing) {
+                ASSERT_EQ(value::TypeTags::Array, resTag);
+                auto resArray = value::getArrayView(resVal);
+                ASSERT_EQ(3, resArray->size());
+                const auto [finalTag, finalVal] = resArray->getAt(1);
+                ASSERT_EQ(value::TypeTags::NumberDouble, finalTag);
+                actualValue = value::bitcastTo<double>(finalVal);
+            }
+            ASSERT_EQ(expected[i][idx], actualValue);
+        }
+
+        if (idx == 2) {
+            // Make sure it has not spilled already.
+            auto stats = static_cast<const WindowStats*>(windowStage->getSpecificStats());
+            ASSERT_FALSE(stats->usedDisk);
+            ASSERT_EQ(0, stats->spillingStats.getSpills());
+            ASSERT_EQ(0, stats->spillingStats.getSpilledRecords());
+
+            // Get ready to yield.
+            windowStage->saveState();
+
+            // Force spill.
+            windowStage->forceSpill(nullptr /*yieldPolicy*/);
+
+            peakMemoryBytes = assertMemoryTrackerState(
+                &windowStage->getMemoryTracker(), peakMemoryBytes, true /*spill*/);
+
+            // Check stats to make sure it spilled
+            stats = static_cast<const WindowStats*>(windowStage->getSpecificStats());
+            ASSERT_TRUE(stats->usedDisk);
+            ASSERT_EQ(1, stats->spillingStats.getSpills());
+            ASSERT_EQ(10, stats->spillingStats.getSpilledRecords());
+
+            // Get ready to retrieve more records.
+            windowStage->restoreState();
+        }
+        ++idx;
+    }
+
+    windowStage->close();
+
+    // For the same reason as spilling, the memory tracker may still have non-zero
+    // inUseTrackedMemoryBytes after close().
+    assertFinalMemoryTrackerState(&windowStage->getMemoryTracker(), true /*allowZeroInUseMemory*/);
+
+    // SpecificStats' peakTrackedMemBytes should only be updated in close().
+    ASSERT_GT(static_cast<const WindowStats*>(windowStage->getSpecificStats())->peakTrackedMemBytes,
+              0);
+}
+
+TEST_F(WindowStageTest, ClosedBeforeOpenWindowTest) {
+    auto ctx = makeCompileCtx();
+    auto [dataTag, dataVal] =
+        stage_builder::makeValue(BSON_ARRAY(BSON_ARRAY("1" << 1 << 2 << 100)));
+    auto [slots, inputStage] = generateVirtualScanMulti(4, dataTag, dataVal);
+    value::SlotVector partitionSlots{slots[0]};
+    auto boundSlot1 = slots[1];
+    auto boundSlot2 = slots[2];
+    auto valueSlot = slots[3];
+    value::SlotVector forwardSlots{valueSlot};
+    std::vector<WindowOffset> windowOffsets{
+        {boundSlot1, boundSlot2, boost::none, boost::none},
+    };
+
+    auto [windowStage, windowSlots] = addWindowStage(std::move(inputStage),
+                                                     std::move(partitionSlots),
+                                                     std::move(forwardSlots),
+                                                     valueSlot,
+                                                     std::move(windowOffsets),
+                                                     boost::none /* collatorSlot */,
+                                                     true /* allowDiskUse */);
+
+    windowStage->attachToOperationContext(operationContext());
+    windowStage->prepare(*ctx);
+
+    // Close without open() to emulate a situiation where open() failed for an earlier stage.
+    windowStage->close();
+
+    assertFinalMemoryTrackerState(&windowStage->getMemoryTracker(), true /*allowZeroInUseMemory*/);
 }
 }  // namespace mongo::sbe

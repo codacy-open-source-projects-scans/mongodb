@@ -33,10 +33,6 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <mutex>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -50,6 +46,10 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/waitable.h"
+
+#include <mutex>
+#include <utility>
+#include <vector>
 
 namespace mongo {
 
@@ -109,7 +109,7 @@ public:
         try {
             const auto guard = makeDeadlineGuard(deadline, error);
             return std::forward<Callback>(cb)();
-        } catch (const ExceptionForCat<ErrorCategory::ExceededTimeLimitError>&) {
+        } catch (const ExceptionFor<ErrorCategory::ExceededTimeLimitError>&) {
             // May throw replacement exception
             checkForInterrupt();
             throw;
@@ -248,6 +248,8 @@ public:
 
     struct DeadlineState {
         Date_t deadline;
+        // The duration from begin to deadline in fine precision.
+        Microseconds maxTime;
         ErrorCodes::Error error;
         bool hasArtificialDeadline;
     };

@@ -27,15 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
+#include "mongo/db/session/logical_session_id.h"
 
 #include "mongo/base/data_range.h"
 #include "mongo/base/error_codes.h"
@@ -71,7 +63,6 @@
 #include "mongo/db/service_liaison_mock.h"
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_cache_impl.h"
-#include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/session/sessions_collection.h"
@@ -82,13 +73,23 @@
 #include "mongo/transport/mock_session.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/transport_layer_mock.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/net/sockaddr.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -146,14 +147,13 @@ public:
     User* addSimpleUser(UserName un) {
         const auto creds = BSON("SCRAM-SHA-1" << scram::Secrets<SHA1Block>::generateCredentials(
                                     "a", saslGlobalParams.scramSHA1IterationCount.load()));
-        ASSERT_OK(mockBackend->insertUserDocument(_opCtx.get(),
-                                                  BSON("user" << un.getUser() << "db" << un.getDB()
-                                                              << "credentials" << creds << "roles"
-                                                              << BSON_ARRAY(BSON("role"
-                                                                                 << "readWrite"
-                                                                                 << "db"
-                                                                                 << "test"))),
-                                                  BSONObj()));
+        ASSERT_OK(mockBackend->insertUserDocument(
+            _opCtx.get(),
+            BSON("user" << un.getUser() << "db" << un.getDB() << "credentials" << creds << "roles"
+                        << BSON_ARRAY(BSON("role" << "readWrite"
+                                                  << "db"
+                                                  << "test"))),
+            BSONObj()));
         ASSERT_OK(authzSession->addAndAuthorizeUser(
             _opCtx.get(), std::make_unique<UserRequestGeneral>(un, boost::none), boost::none));
         return authzSession->lookupUser(un);
@@ -162,14 +162,13 @@ public:
     User* addClusterUser(UserName un) {
         const auto creds = BSON("SCRAM-SHA-256" << scram::Secrets<SHA256Block>::generateCredentials(
                                     "a", saslGlobalParams.scramSHA256IterationCount.load()));
-        ASSERT_OK(mockBackend->insertUserDocument(_opCtx.get(),
-                                                  BSON("user" << un.getUser() << "db" << un.getDB()
-                                                              << "credentials" << creds << "roles"
-                                                              << BSON_ARRAY(BSON("role"
-                                                                                 << "__system"
-                                                                                 << "db"
-                                                                                 << "admin"))),
-                                                  BSONObj()));
+        ASSERT_OK(mockBackend->insertUserDocument(
+            _opCtx.get(),
+            BSON("user" << un.getUser() << "db" << un.getDB() << "credentials" << creds << "roles"
+                        << BSON_ARRAY(BSON("role" << "__system"
+                                                  << "db"
+                                                  << "admin"))),
+            BSONObj()));
         ASSERT_OK(authzSession->addAndAuthorizeUser(
             _opCtx.get(), std::make_unique<UserRequestGeneral>(un, boost::none), boost::none));
         return authzSession->lookupUser(un);
@@ -347,8 +346,8 @@ OperationSessionInfoFromClient initializeOpSessionInfoWithRequestBody(
 
         requestBody,
         BSONObj());
-    auto osi = OperationSessionInfoFromClient::parse(IDLParserContext{"OperationSessionInfo"},
-                                                     opMsgRequest.body);
+    auto osi = OperationSessionInfoFromClient::parse(opMsgRequest.body,
+                                                     IDLParserContext{"OperationSessionInfo"});
     return initializeOperationSessionInfo(opCtx,
                                           opMsgRequest.getValidatedTenantId(),
                                           osi,
@@ -509,8 +508,7 @@ TEST_F(LogicalSessionIdTest, InitializeOperationSessionInfo_SendingInfoFailsInDi
     _opCtx->getClient()->setInDirectClient(true);
 
     for (const auto& param : operationSessionParameters) {
-        BSONObjBuilder commandBuilder = BSON("count"
-                                             << "foo");
+        BSONObjBuilder commandBuilder = BSON("count" << "foo");
         commandBuilder.appendElements(param);
 
         ASSERT_THROWS_CODE(

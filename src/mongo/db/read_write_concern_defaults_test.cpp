@@ -27,7 +27,23 @@
  *    it in the license file.
  */
 
-#include <boost/optional.hpp>
+#include "mongo/db/read_write_concern_defaults.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/read_write_concern_defaults_cache_lookup_mock.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/vector_clock/vector_clock_mutable.h"
+#include "mongo/db/vector_clock/vector_clock_test_fixture.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/clock_source_mock.h"
+#include "mongo/util/duration.h"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -36,24 +52,8 @@
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
+#include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/read_write_concern_defaults.h"
-#include "mongo/db/read_write_concern_defaults_cache_lookup_mock.h"
-#include "mongo/db/repl/optime.h"
-#include "mongo/db/service_context_test_fixture.h"
-#include "mongo/db/vector_clock_mutable.h"
-#include "mongo/db/vector_clock_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/clock_source_mock.h"
-#include "mongo/util/duration.h"
 
 namespace mongo {
 namespace {
@@ -720,7 +720,7 @@ TEST_F(ReadWriteConcernDefaultsTest, TestRefreshDefaultsWithHigherEpochNoRWCChan
     newDefaults2.setUpdateWallClockTime(Date_t::fromMillisSinceEpoch(5678));
     _lookupMock.setLookupCallReturnValue(std::move(newDefaults2));
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     ReadWriteConcernDefaults::get(getService()).refreshIfNecessary(_opCtx);
 
     ASSERT(!isCWWCSet());
@@ -729,8 +729,8 @@ TEST_F(ReadWriteConcernDefaultsTest, TestRefreshDefaultsWithHigherEpochNoRWCChan
     ASSERT_EQ(5678, defaults2.getUpdateWallClockTime()->toMillisSinceEpoch());
     ASSERT(defaults.getDefaultWriteConcernSource() == DefaultWriteConcernSourceEnum::kImplicit);
 
-    stopCapturingLogMessages();
-    ASSERT_EQUALS(0, countTextFormatLogLinesContaining("Refreshed RWC defaults"));
+    logs.stop();
+    ASSERT_EQUALS(0, logs.countTextContaining("Refreshed RWC defaults"));
 }
 
 /**
@@ -809,30 +809,27 @@ TEST_F(ReadWriteConcernDefaultsTestWithClusterTime,
     ASSERT_THROWS_CODE(
         _rwcd.generateNewCWRWCToBeSavedOnDisk(
             operationContext(),
-            repl::ReadConcernArgs::fromBSONThrows(BSON("level"
-                                                       << "local"
-                                                       << "afterOpTime" << repl::OpTime())),
+            repl::ReadConcernArgs::fromBSONThrows(BSON("level" << "local"
+                                                               << "afterOpTime" << repl::OpTime())),
             boost::none),
         AssertionException,
         ErrorCodes::BadValue);
-    ASSERT_THROWS_CODE(
-        _rwcd.generateNewCWRWCToBeSavedOnDisk(
-            operationContext(),
-            repl::ReadConcernArgs::fromBSONThrows(BSON("level"
-                                                       << "local"
-                                                       << "afterClusterTime" << Timestamp(1, 2))),
-            boost::none),
-        AssertionException,
-        ErrorCodes::BadValue);
-    ASSERT_THROWS_CODE(
-        _rwcd.generateNewCWRWCToBeSavedOnDisk(
-            operationContext(),
-            repl::ReadConcernArgs::fromBSONThrows(BSON("level"
-                                                       << "snapshot"
-                                                       << "atClusterTime" << Timestamp(1, 2))),
-            boost::none),
-        AssertionException,
-        ErrorCodes::BadValue);
+    ASSERT_THROWS_CODE(_rwcd.generateNewCWRWCToBeSavedOnDisk(
+                           operationContext(),
+                           repl::ReadConcernArgs::fromBSONThrows(BSON("level" << "local"
+                                                                              << "afterClusterTime"
+                                                                              << Timestamp(1, 2))),
+                           boost::none),
+                       AssertionException,
+                       ErrorCodes::BadValue);
+    ASSERT_THROWS_CODE(_rwcd.generateNewCWRWCToBeSavedOnDisk(
+                           operationContext(),
+                           repl::ReadConcernArgs::fromBSONThrows(BSON("level" << "snapshot"
+                                                                              << "atClusterTime"
+                                                                              << Timestamp(1, 2))),
+                           boost::none),
+                       AssertionException,
+                       ErrorCodes::BadValue);
 }
 
 TEST_F(ReadWriteConcernDefaultsTestWithClusterTime,

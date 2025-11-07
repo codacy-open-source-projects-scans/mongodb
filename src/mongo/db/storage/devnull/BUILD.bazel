@@ -18,16 +18,18 @@ mongo_cc_library(
     hdrs = [
         "devnull_kv_engine.h",
         "ephemeral_catalog_record_store.h",
-        "//src/mongo/db/catalog:import_options.h",
+        "//src/mongo/db/rss:persistence_provider.h",
         "//src/mongo/db/storage/kv:kv_engine.h",
     ],
     deps = [
         "//src/mongo/db:record_id_helpers",
         "//src/mongo/db:server_base",
         "//src/mongo/db/storage:backup_block",
+        "//src/mongo/db/storage:kv_backup_block",
         "//src/mongo/db/storage:record_store_base",
         "//src/mongo/db/storage:recovery_unit_base",
         "//src/mongo/db/storage:storage_options",
+        "//src/mongo/db/storage:stub_container",
     ],
 )
 
@@ -38,7 +40,6 @@ mongo_cc_library(
     ],
     deps = [
         ":storage_devnull_core",
-        "//src/mongo/db/storage:durable_catalog",
         "//src/mongo/db/storage:storage_engine_common",
         "//src/mongo/db/storage:storage_engine_impl",
         "//src/mongo/db/storage:storage_engine_lock_file",

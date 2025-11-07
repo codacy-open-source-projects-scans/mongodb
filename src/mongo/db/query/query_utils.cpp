@@ -30,25 +30,25 @@
 
 #include "mongo/db/query/query_utils.h"
 
-#include <algorithm>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/basic_types.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/sbe/match_path.h"
+#include "mongo/db/local_catalog/index_catalog.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/projection.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_knob_configuration.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/string_map.h"
+
+#include <algorithm>
+#include <vector>
+
 
 namespace mongo {
 
@@ -80,6 +80,46 @@ bool isMatchIdHackEligible(MatchExpression* me) {
     return false;
 }
 
+bool isSimpleIdQuery(const BSONObj& query) {
+    bool hasID = false;
+
+    BSONObjIterator it(query);
+    while (it.more()) {
+        BSONElement elt = it.next();
+        if (elt.fieldNameStringData() == "_id") {
+            if (hasID) {
+                // we already encountered an _id field
+                return false;
+            }
+
+            // Verify that the query on _id is a simple equality.
+            hasID = true;
+
+            if (elt.type() == BSONType::object) {
+                // If the value is an object, it can only have one field and that field can only be
+                // a query operator if the operator is $eq.
+                if (elt.Obj().firstElementFieldNameStringData().starts_with('$')) {
+                    if (elt.Obj().nFields() > 1 ||
+                        std::strcmp(elt.Obj().firstElementFieldName(), "$eq") != 0) {
+                        return false;
+                    }
+                    if (!Indexability::isExactBoundsGenerating(elt["$eq"])) {
+                        return false;
+                    }
+                }
+            } else if (!Indexability::isExactBoundsGenerating(elt)) {
+                // In addition to objects, some other BSON elements are not suitable for exact index
+                // lookup.
+                return false;
+            }
+        } else {
+            return false;
+        }
+    }
+
+    return hasID;
+}
+
 bool isSortSbeCompatible(const SortPattern& sortPattern) {
     // If the sort has meta or numeric path components, we cannot use SBE.
     return std::all_of(sortPattern.begin(), sortPattern.end(), [](auto&& part) {
@@ -87,44 +127,4 @@ bool isSortSbeCompatible(const SortPattern& sortPattern) {
             !sbe::MatchPath(part.fieldPath->fullPath()).hasNumericPathComponents();
     });
 }
-
-bool isQuerySbeCompatible(const CollectionPtr* collection, const CanonicalQuery* cq) {
-    tassert(6071400,
-            "Expected CanonicalQuery and Collection pointer to not be nullptr",
-            cq && collection);
-    auto expCtx = cq->getExpCtxRaw();
-
-    // If we don't support all expressions used or the query is eligible for IDHack, don't use SBE.
-    if (!expCtx || expCtx->getSbeCompatibility() == SbeCompatibility::notCompatible ||
-        expCtx->getSbePipelineCompatibility() == SbeCompatibility::notCompatible ||
-        (*collection && isIdHackEligibleQuery(*collection, *cq))) {
-        return false;
-    }
-
-    const auto* proj = cq->getProj();
-    if (proj && (proj->requiresMatchDetails() || proj->containsElemMatch())) {
-        return false;
-    }
-
-    const auto& nss = cq->nss();
-
-    auto& queryKnob = cq->getExpCtx()->getQueryKnobConfiguration();
-    if ((!feature_flags::gFeatureFlagTimeSeriesInSbe.isEnabled(
-             serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) ||
-         queryKnob.getSbeDisableTimeSeriesForOp()) &&
-        nss.isTimeseriesBucketsCollection()) {
-        return false;
-    }
-
-    // Queries against the oplog or a change collection are not supported. Also queries on the inner
-    // side of a $lookup are not considered for SBE except search queries.
-    if ((expCtx->getInLookup() && !cq->isSearchQuery()) || nss.isOplog() ||
-        nss.isChangeCollection() || !cq->metadataDeps().none()) {
-        return false;
-    }
-
-    const auto& sortPattern = cq->getSortPattern();
-    return !sortPattern || isSortSbeCompatible(*sortPattern);
-}
-
 }  // namespace mongo

@@ -16,7 +16,7 @@ export function diffHistogram(thisHistogram, lastHistogram) {
     return {
         reads: thisHistogram.reads.ops - lastHistogram.reads.ops,
         writes: thisHistogram.writes.ops - lastHistogram.writes.ops,
-        commands: thisHistogram.commands.ops - lastHistogram.commands.ops
+        commands: thisHistogram.commands.ops - lastHistogram.commands.ops,
     };
 }
 
@@ -27,6 +27,7 @@ export function diffHistogram(thisHistogram, lastHistogram) {
 export function assertHistogramDiffEq(db, coll, lastHistogram, readDiff, writeDiff, commandDiff) {
     let thisHistogram = getHistogramStats(coll);
     let diff = diffHistogram(thisHistogram, lastHistogram);
+
     // Running the $collStats aggregation itself will increment read stats by one.
     assert.eq(diff.reads, readDiff + 1, "miscounted histogram reads");
     assert.eq(diff.writes, writeDiff, "miscounted histogram writes");
@@ -39,9 +40,7 @@ export function assertHistogramDiffEq(db, coll, lastHistogram, readDiff, writeDi
         // The checkDB command could be run multiple times in a short period of time.
         allowedDiff = 3;
     }
-    assert.lte(Math.abs(diff.commands - commandDiff),
-               allowedDiff,
-               "miscounted histogram commands:\n" + tojson(diff));
+    assert.lte(Math.abs(diff.commands - commandDiff), allowedDiff, "miscounted histogram commands:\n" + tojson(diff));
     return thisHistogram;
 }
 
@@ -66,7 +65,7 @@ export function getTop(coll) {
 export function diffTop(key, thisTop, lastTop) {
     return {
         time: thisTop[key].time - lastTop[key].time,
-        count: thisTop[key].count - lastTop[key].count
+        count: thisTop[key].count - lastTop[key].count,
     };
 }
 
@@ -92,8 +91,10 @@ export function assertTopDiffEq(db, coll, lastTop, key, expectedCountDiff) {
         // The checkDB command could be run mutiple times in a short period of time.
         allowedDiff = 3;
     }
-    assert.lte(diff.count - expectedCountDiff,
-               allowedDiff,
-               "top reports wrong count for commands\n top results: " + tojson(thisTop));
+    assert.lte(
+        diff.count - expectedCountDiff,
+        allowedDiff,
+        "top reports wrong count for commands\n top results: " + tojson(thisTop),
+    );
     return thisTop;
 }

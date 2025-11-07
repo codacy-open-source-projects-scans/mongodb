@@ -31,6 +31,40 @@
  * This file tests db/exec/fetch.cpp.  Fetch goes to disk so we cannot test outside of a dbtest.
  */
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/client.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/exec/classic/fetch.h"
+#include "mongo/db/exec/classic/plan_stage.h"
+#include "mongo/db/exec/classic/queued_data_stage.h"
+#include "mongo/db/exec/classic/working_set.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/snapshot.h"
+#include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/intrusive_counter.h"
+
 #include <cstddef>
 #include <memory>
 #include <set>
@@ -40,40 +74,6 @@
 
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/client.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/db_raii.h"
-#include "mongo/db/dbdirectclient.h"
-#include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/exec/fetch.h"
-#include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/exec/queued_data_stage.h"
-#include "mongo/db/exec/working_set.h"
-#include "mongo/db/matcher/expression.h"
-#include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/storage/record_store.h"
-#include "mongo/db/storage/snapshot.h"
-#include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 
 namespace mongo {
 namespace QueryStageFetch {
@@ -86,8 +86,8 @@ public:
         _client.dropCollection(nss());
     }
 
-    void getRecordIds(std::set<RecordId>* out, const CollectionPtr& coll) {
-        auto cursor = coll->getCursor(&_opCtx);
+    void getRecordIds(std::set<RecordId>* out, const CollectionAcquisition& coll) {
+        auto cursor = coll.getCollectionPtr()->getCursor(&_opCtx);
         while (auto record = cursor->next()) {
             out->insert(record->id);
         }
@@ -125,15 +125,7 @@ class FetchStageAlreadyFetched : public QueryStageFetchBase {
 public:
     void run() {
         dbtests::WriteContextForTests ctx(&_opCtx, ns());
-        Database* db = ctx.db();
-        CollectionPtr coll(
-            CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss()));
-        if (!coll) {
-            WriteUnitOfWork wuow(&_opCtx);
-            coll = CollectionPtr(db->createCollection(&_opCtx, nss()));
-            wuow.commit();
-        }
-
+        auto coll = ctx.getOrCreateCollection();
         WorkingSet ws;
 
         // Add an object to the DB.
@@ -150,7 +142,7 @@ public:
             WorkingSetID id = ws.allocate();
             WorkingSetMember* mockMember = ws.get(id);
             mockMember->recordId = *recordIds.begin();
-            auto snapshotBson = coll->docFor(&_opCtx, mockMember->recordId);
+            auto snapshotBson = coll.getCollectionPtr()->docFor(&_opCtx, mockMember->recordId);
             mockMember->doc = {snapshotBson.snapshotId(), Document{snapshotBson.value()}};
             ws.transitionToRecordIdAndObj(id);
             // Points into our DB.
@@ -167,7 +159,7 @@ public:
         }
 
         auto fetchStage =
-            std::make_unique<FetchStage>(_expCtx.get(), &ws, std::move(mockStage), nullptr, &coll);
+            std::make_unique<FetchStage>(_expCtx.get(), &ws, std::move(mockStage), nullptr, coll);
 
         WorkingSetID id = WorkingSet::INVALID_ID;
         PlanStage::StageState state;
@@ -190,16 +182,8 @@ public:
 class FetchStageFilter : public QueryStageFetchBase {
 public:
     void run() {
-        Lock::DBLock lk(&_opCtx, nss().dbName(), MODE_X);
-        OldClientContext ctx(&_opCtx, nss());
-        Database* db = ctx.db();
-        CollectionPtr coll(
-            CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss()));
-        if (!coll) {
-            WriteUnitOfWork wuow(&_opCtx);
-            coll = CollectionPtr(db->createCollection(&_opCtx, nss()));
-            wuow.commit();
-        }
+        dbtests::WriteContextForTests ctx(&_opCtx, ns());
+        auto coll = ctx.getOrCreateCollection();
 
         WorkingSet ws;
 
@@ -234,7 +218,7 @@ public:
 
         // Matcher requires that foo==6 but we only have data with foo==5.
         auto fetchStage = std::make_unique<FetchStage>(
-            _expCtx.get(), &ws, std::move(mockStage), filterExpr.get(), &coll);
+            _expCtx.get(), &ws, std::move(mockStage), filterExpr.get(), coll);
 
         // First call should return a fetch request as it's not in memory.
         WorkingSetID id = WorkingSet::INVALID_ID;

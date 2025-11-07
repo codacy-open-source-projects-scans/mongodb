@@ -29,40 +29,32 @@
 
 #pragma once
 
-#include <boost/logic/tribool.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/exec/document_value/document_metadata_fields.h"
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/query/canonical_distinct.h"
+#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
+#include "mongo/db/query/find_command.h"
+#include "mongo/db/query/parsed_find_command.h"
+#include "mongo/db/query/query_request_helper.h"
+#include "mongo/util/assert_util.h"
+
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/exec/document_value/document_metadata_fields.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/db/matcher/expression.h"
-#include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback.h"
-#include "mongo/db/matcher/extensions_callback_noop.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/document_source_match.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/query/canonical_distinct.h"
-#include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/find_command.h"
-#include "mongo/db/query/parsed_find_command.h"
-#include "mongo/db/query/projection.h"
-#include "mongo/db/query/projection_policies.h"
-#include "mongo/db/query/query_request_helper.h"
-#include "mongo/db/query/sort_pattern.h"
-#include "mongo/db/query/stage_types.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
+#include <boost/logic/tribool.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -111,13 +103,9 @@ public:
         OperationContext* opCtx, const CanonicalQuery& baseQuery, size_t i);
 
     /**
-     * Returns true if "query" describes an exact-match query on _id.
-     */
-    static bool isSimpleIdQuery(const BSONObj& query);
-
-    /**
      * Perform validation checks on the normalized 'root' which could not be checked before
-     * normalization - those should happen in parsed_find_command::isValid().
+     * normalization - those should happen in
+     * parsed_find_command::validateAndGetAvailableMetadata().
      */
     static Status isValidNormalized(const MatchExpression* root);
 
@@ -191,36 +179,6 @@ public:
      */
     void requestAdditionalMetadata(const QueryMetadataBitSet& additionalDeps) {
         _metadataDeps |= additionalDeps;
-    }
-
-    /**
-     * Returns a bitset indicating what search metadata has been requested by the pipeline.
-     */
-    const QueryMetadataBitSet& searchMetadata() const {
-        return _searchMetadataDeps;
-    }
-
-    /**
-     * Set the bitset indicating what search metadata has been requested by the pipeline.
-     */
-    void setSearchMetadata(const QueryMetadataBitSet& deps) {
-        _searchMetadataDeps = deps;
-    }
-
-    /**
-     * Returns a bitset indicating what metadata has been requested by stages remaining in the
-     * pipeline.
-     */
-    const QueryMetadataBitSet& remainingSearchMetadata() const {
-        return _remainingSearchMetadataDeps;
-    }
-
-    /**
-     * Set the bitset indicating what metadata has been requested by stages remaining in the
-     * pipeline.
-     */
-    void setRemainingSearchMetadata(const QueryMetadataBitSet& deps) {
-        _remainingSearchMetadataDeps = deps;
     }
 
     /**
@@ -417,6 +375,13 @@ public:
         return _forSubPlanner;
     }
 
+    /**
+     * Return the solution hash for the forced plan.
+     */
+    boost::optional<int64_t> getForcedPlanSolutionHash() const {
+        return _findCommand->getForcedPlanSolutionHash();
+    }
+
 private:
     void initCq(boost::intrusive_ptr<ExpressionContext> expCtx,
                 std::unique_ptr<ParsedFindCommand> parsedFind,
@@ -449,14 +414,6 @@ private:
 
     // Keeps track of what metadata has been explicitly requested.
     QueryMetadataBitSet _metadataDeps;
-
-    // Keeps track of what search metadata has been explicitly requested.
-    QueryMetadataBitSet _searchMetadataDeps;
-
-    // Keeps track of what search metadata has been explicitly requested for stages in pipeline that
-    // are not pushed down into '_cqPipeline'. This is used by the executor to prepare corresponding
-    // metadata.
-    QueryMetadataBitSet _remainingSearchMetadataDeps;
 
     // True if this query can be executed by the SBE.
     bool _sbeCompatible = false;

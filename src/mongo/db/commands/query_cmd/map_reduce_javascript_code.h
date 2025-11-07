@@ -29,12 +29,14 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/util/modules.h"
+
+#include <string>
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 
@@ -47,7 +49,7 @@ public:
         uassert(ErrorCodes::BadValue,
                 str::stream() << "'" << element.fieldNameStringData()
                               << "' must be of string or code type",
-                element.type() == String || element.type() == Code);
+                element.type() == BSONType::string || element.type() == BSONType::code);
         return MapReduceJavascriptCode(element._asCode());
     }
 
@@ -70,16 +72,16 @@ private:
  * Same as above, but allows for null. This is required for older versions of the Java driver which
  * send finalize: null if the argument is omitted by the user.
  */
-class MapReduceJavascriptCodeOrNull {
+class MONGO_MOD_PRIVATE MapReduceJavascriptCodeOrNull {
 public:
     static MapReduceJavascriptCodeOrNull parseFromBSON(const BSONElement& element) {
-        if (element.type() == jstNULL) {
+        if (element.type() == BSONType::null) {
             return MapReduceJavascriptCodeOrNull(boost::none);
         }
         uassert(ErrorCodes::BadValue,
                 str::stream() << "'" << element.fieldNameStringData()
                               << "' must be of string or code type",
-                element.type() == String || element.type() == Code);
+                element.type() == BSONType::string || element.type() == BSONType::code);
         return MapReduceJavascriptCodeOrNull(boost::make_optional(element._asCode()));
     }
 

@@ -28,15 +28,17 @@ function getNewCollection(conn) {
 function makeUnshardedCollection(conn) {
     const coll = getNewCollection(conn);
     coll.drop();
-    assert.commandWorked(coll.insert([
-        {v: 1, y: -3},
-        {v: 2, y: -2},
-        {v: 3, y: -1},
-        {v: 4, y: 1},
-        {v: 5, y: 2},
-        {v: 6, y: 3},
-        {v: 7, y: 4}
-    ]));
+    assert.commandWorked(
+        coll.insert([
+            {v: 1, y: -3},
+            {v: 2, y: -2},
+            {v: 3, y: -1},
+            {v: 4, y: 1},
+            {v: 5, y: 2},
+            {v: 6, y: 3},
+            {v: 7, y: 4},
+        ]),
+    );
     assert.commandWorked(coll.createIndex({y: 1}));
     return coll;
 }
@@ -44,12 +46,14 @@ function makeUnshardedCollection(conn) {
 function makeShardedCollection(st) {
     const conn = st.s;
     const coll = makeUnshardedCollection(conn);
-    st.shardColl(coll,
-                 /* key */ {y: 1},
-                 /* split at */ {y: 0},
-                 /* move chunk containing */ {y: 1},
-                 /* db */ coll.getDB().getName(),
-                 /* waitForDelete */ true);
+    st.shardColl(
+        coll,
+        /* key */ {y: 1},
+        /* split at */ {y: 0},
+        /* move chunk containing */ {y: 1},
+        /* db */ coll.getDB().getName(),
+        /* waitForDelete */ true,
+    );
     return coll;
 }
 
@@ -57,22 +61,28 @@ function runUnindexedLookupPipelineTest(conn, localColl) {
     const expectedDocs = 7;
 
     const foreignColl = getNewCollection(conn);
-    foreignColl.insertMany([{v: 1, x: 1}, {v: 7, x: 2}, {v: 9000, x: 3}]);
+    foreignColl.insertMany([
+        {v: 1, x: 1},
+        {v: 7, x: 2},
+        {v: 9000, x: 3},
+    ]);
 
-    const lookup = {$lookup: {
-        from: foreignColl.getName(),
-        as: "lookedUp",
-        localField: "v",
-        foreignField: "v",
-    }};
+    const lookup = {
+        $lookup: {
+            from: foreignColl.getName(),
+            as: "lookedUp",
+            localField: "v",
+            foreignField: "v",
+        },
+    };
     const shape = {pipeline: [lookup]};
 
-    const queryStatsKey = getAggregateQueryStatsKey(
-        conn,
-        localColl.getName(),
-        shape,
-        {otherNss: [{db: "test", coll: foreignColl.getName()}]},
-    );
+    const queryStatsKey = getAggregateQueryStatsKey({
+        conn: conn,
+        collName: localColl.getName(),
+        queryShapeExtra: shape,
+        extra: {otherNss: [{db: "test", coll: foreignColl.getName()}]},
+    });
 
     for (let batchSize = 1; batchSize <= expectedDocs + 1; batchSize++) {
         clearPlanCacheAndQueryStatsStore(conn, localColl);
@@ -80,11 +90,15 @@ function runUnindexedLookupPipelineTest(conn, localColl) {
         const cmd = {
             aggregate: localColl.getName(),
             pipeline: [lookup],
-            cursor: {batchSize: batchSize}
+            cursor: {batchSize: batchSize},
         };
 
-        const queryStats =
-            exhaustCursorAndGetQueryStats(conn, localColl, cmd, queryStatsKey, expectedDocs);
+        const queryStats = exhaustCursorAndGetQueryStats({
+            conn: conn,
+            cmd: cmd,
+            key: queryStatsKey,
+            expectedDocs: expectedDocs,
+        });
 
         // There are two cases for expectedDocs:
         // 1. The query can be a collection scan against the foreign collection for each doc in
@@ -113,7 +127,7 @@ function runUnindexedLookupPipelineTest(conn, localColl) {
             hasSortStage: false,
             usedDisk: false,
             fromMultiPlanner: false,
-            fromPlanCache: false
+            fromPlanCache: false,
         });
     }
 }
@@ -125,23 +139,29 @@ function runUnindexedUnoptimizedLookupPipelineTest(conn, localColl) {
     const expectedDocs = 7;
 
     const foreignColl = getNewCollection(conn);
-    foreignColl.insertMany([{v: 1, x: 1}, {v: 7, x: 2}, {v: 9000, x: 3}]);
+    foreignColl.insertMany([
+        {v: 1, x: 1},
+        {v: 7, x: 2},
+        {v: 9000, x: 3},
+    ]);
 
-    const lookup = {$lookup: {
-        from: foreignColl.getName(),
-        as: "lookedUp",
-        localField: "v",
-        foreignField: "v",
-    }};
+    const lookup = {
+        $lookup: {
+            from: foreignColl.getName(),
+            as: "lookedUp",
+            localField: "v",
+            foreignField: "v",
+        },
+    };
     const pipeline = [{$_internalInhibitOptimization: {}}, lookup];
     const shape = {pipeline: pipeline};
 
-    const queryStatsKey = getAggregateQueryStatsKey(
-        conn,
-        localColl.getName(),
-        shape,
-        {otherNss: [{db: "test", coll: foreignColl.getName()}]},
-    );
+    const queryStatsKey = getAggregateQueryStatsKey({
+        conn: conn,
+        collName: localColl.getName(),
+        queryShapeExtra: shape,
+        extra: {otherNss: [{db: "test", coll: foreignColl.getName()}]},
+    });
 
     for (let batchSize = 1; batchSize <= expectedDocs + 1; batchSize++) {
         clearPlanCacheAndQueryStatsStore(conn, localColl);
@@ -149,11 +169,15 @@ function runUnindexedUnoptimizedLookupPipelineTest(conn, localColl) {
         const cmd = {
             aggregate: localColl.getName(),
             pipeline: pipeline,
-            cursor: {batchSize: batchSize}
+            cursor: {batchSize: batchSize},
         };
 
-        const queryStats =
-            exhaustCursorAndGetQueryStats(conn, localColl, cmd, queryStatsKey, expectedDocs);
+        const queryStats = exhaustCursorAndGetQueryStats({
+            conn: conn,
+            cmd: cmd,
+            key: queryStatsKey,
+            expectedDocs: expectedDocs,
+        });
 
         // The lookup is a collection scan against the foreign collection for each document in the
         // local collection.
@@ -164,7 +188,7 @@ function runUnindexedUnoptimizedLookupPipelineTest(conn, localColl) {
             hasSortStage: false,
             usedDisk: false,
             fromMultiPlanner: false,
-            fromPlanCache: false
+            fromPlanCache: false,
         });
     }
 }
@@ -173,23 +197,29 @@ function runIndexedLookupPipelineTest(conn, localColl) {
     const expectedDocs = 7;
 
     const foreignColl = getNewCollection(conn);
-    foreignColl.insertMany([{v: 1, x: 1}, {v: 7, x: 2}, {v: 9000, x: 3}]);
+    foreignColl.insertMany([
+        {v: 1, x: 1},
+        {v: 7, x: 2},
+        {v: 9000, x: 3},
+    ]);
     assert.commandWorked(foreignColl.createIndex({v: 1}));
 
-    const lookup = {$lookup: {
-        from: foreignColl.getName(),
-        as: "lookedUp",
-        localField: "v",
-        foreignField: "v",
-    }};
+    const lookup = {
+        $lookup: {
+            from: foreignColl.getName(),
+            as: "lookedUp",
+            localField: "v",
+            foreignField: "v",
+        },
+    };
     const shape = {pipeline: [lookup]};
 
-    const queryStatsKey = getAggregateQueryStatsKey(
-        conn,
-        localColl.getName(),
-        shape,
-        {otherNss: [{db: "test", coll: foreignColl.getName()}]},
-    );
+    const queryStatsKey = getAggregateQueryStatsKey({
+        conn: conn,
+        collName: localColl.getName(),
+        queryShapeExtra: shape,
+        extra: {otherNss: [{db: "test", coll: foreignColl.getName()}]},
+    });
 
     for (let batchSize = 1; batchSize <= expectedDocs + 1; batchSize++) {
         clearPlanCacheAndQueryStatsStore(conn, localColl);
@@ -197,11 +227,15 @@ function runIndexedLookupPipelineTest(conn, localColl) {
         const cmd = {
             aggregate: localColl.getName(),
             pipeline: [lookup],
-            cursor: {batchSize: batchSize}
+            cursor: {batchSize: batchSize},
         };
 
-        const queryStats =
-            exhaustCursorAndGetQueryStats(conn, localColl, cmd, queryStatsKey, expectedDocs);
+        const queryStats = exhaustCursorAndGetQueryStats({
+            conn: conn,
+            cmd: cmd,
+            key: queryStatsKey,
+            expectedDocs: expectedDocs,
+        });
 
         assertAggregatedMetricsSingleExec(queryStats, {
             keysExamined: 2,
@@ -209,24 +243,28 @@ function runIndexedLookupPipelineTest(conn, localColl) {
             hasSortStage: false,
             usedDisk: false,
             fromMultiPlanner: false,
-            fromPlanCache: false
+            fromPlanCache: false,
         });
     }
 }
 
 function runUnionWithPipelineTest(conn, coll1) {
     const coll2 = getNewCollection(conn);
-    assert.commandWorked(coll2.insertMany([{a: 1, b: 1}, {a: 2, b: 2}, {a: 3, b: 3}]));
+    assert.commandWorked(
+        coll2.insertMany([
+            {a: 1, b: 1},
+            {a: 2, b: 2},
+            {a: 3, b: 3},
+        ]),
+    );
 
     const pipeline = [
         {$match: {v: {$gt: 1}}},
         {
             $unionWith: {
                 coll: coll2.getName(),
-                pipeline: [
-                    {$match: {a: {$lt: 3}}},
-                ],
-            }
+                pipeline: [{$match: {a: {$lt: 3}}}],
+            },
         },
     ];
     const shape = {
@@ -235,20 +273,18 @@ function runUnionWithPipelineTest(conn, coll1) {
             {
                 $unionWith: {
                     coll: coll2.getName(),
-                    pipeline: [
-                        {$match: {a: {$lt: "?number"}}},
-                    ],
-                }
+                    pipeline: [{$match: {a: {$lt: "?number"}}}],
+                },
             },
-        ]
+        ],
     };
 
-    const queryStatsKey = getAggregateQueryStatsKey(
-        conn,
-        coll1.getName(),
-        shape,
-        {otherNss: [{db: "test", coll: coll2.getName()}]},
-    );
+    const queryStatsKey = getAggregateQueryStatsKey({
+        conn: conn,
+        collName: coll1.getName(),
+        queryShapeExtra: shape,
+        extra: {otherNss: [{db: "test", coll: coll2.getName()}]},
+    });
 
     // The query expects 6 docs from coll1 and 2 from coll2
     const expectedDocs = 8;
@@ -258,11 +294,15 @@ function runUnionWithPipelineTest(conn, coll1) {
         const cmd = {
             aggregate: coll1.getName(),
             pipeline: pipeline,
-            cursor: {batchSize: batchSize}
+            cursor: {batchSize: batchSize},
         };
 
-        const queryStats =
-            exhaustCursorAndGetQueryStats(conn, coll1, cmd, queryStatsKey, expectedDocs);
+        const queryStats = exhaustCursorAndGetQueryStats({
+            conn: conn,
+            cmd: cmd,
+            key: queryStatsKey,
+            expectedDocs: expectedDocs,
+        });
 
         // The query is a collection scan across both collections for 7 + 3 = 10 docs examined.
         assertAggregatedMetricsSingleExec(queryStats, {
@@ -271,14 +311,20 @@ function runUnionWithPipelineTest(conn, coll1) {
             hasSortStage: false,
             usedDisk: false,
             fromMultiPlanner: false,
-            fromPlanCache: false
+            fromPlanCache: false,
         });
     }
 }
 
 function runIndexedUnionWithPipelineTest(conn, coll1) {
     const coll2 = getNewCollection(conn);
-    assert.commandWorked(coll2.insertMany([{a: 1, b: 1}, {a: 2, b: 2}, {a: 3, b: 3}]));
+    assert.commandWorked(
+        coll2.insertMany([
+            {a: 1, b: 1},
+            {a: 2, b: 2},
+            {a: 3, b: 3},
+        ]),
+    );
     assert.commandWorked(coll2.createIndex({a: 1}));
 
     const pipeline = [
@@ -286,12 +332,8 @@ function runIndexedUnionWithPipelineTest(conn, coll1) {
         {
             $unionWith: {
                 coll: coll2.getName(),
-                pipeline: [
-                    {$match: {a: {$lt: 3}}},
-                    {$sort: {b: 1}},
-                    {$limit: 2},
-                ],
-            }
+                pipeline: [{$match: {a: {$lt: 3}}}, {$sort: {b: 1}}, {$limit: 2}],
+            },
         },
     ];
     const shape = {
@@ -300,22 +342,18 @@ function runIndexedUnionWithPipelineTest(conn, coll1) {
             {
                 $unionWith: {
                     coll: coll2.getName(),
-                    pipeline: [
-                        {$match: {a: {$lt: "?number"}}},
-                        {$sort: {b: 1}},
-                        {$limit: "?number"},
-                    ],
-                }
+                    pipeline: [{$match: {a: {$lt: "?number"}}}, {$sort: {b: 1}}, {$limit: "?number"}],
+                },
             },
-        ]
+        ],
     };
 
-    const queryStatsKey = getAggregateQueryStatsKey(
-        conn,
-        coll1.getName(),
-        shape,
-        {otherNss: [{db: "test", coll: coll2.getName()}]},
-    );
+    const queryStatsKey = getAggregateQueryStatsKey({
+        conn: conn,
+        collName: coll1.getName(),
+        queryShapeExtra: shape,
+        extra: {otherNss: [{db: "test", coll: coll2.getName()}]},
+    });
 
     // The query expects 6 docs from coll1 and 2 from coll2
     const expectedDocs = 8;
@@ -325,11 +363,15 @@ function runIndexedUnionWithPipelineTest(conn, coll1) {
         const cmd = {
             aggregate: coll1.getName(),
             pipeline: pipeline,
-            cursor: {batchSize: batchSize}
+            cursor: {batchSize: batchSize},
         };
 
-        const queryStats =
-            exhaustCursorAndGetQueryStats(conn, coll1, cmd, queryStatsKey, expectedDocs);
+        const queryStats = exhaustCursorAndGetQueryStats({
+            conn: conn,
+            cmd: cmd,
+            key: queryStatsKey,
+            expectedDocs: expectedDocs,
+        });
 
         // The query can leverage the index on each collection to examine only the matching
         // documents.
@@ -339,7 +381,7 @@ function runIndexedUnionWithPipelineTest(conn, coll1) {
             hasSortStage: true,
             usedDisk: false,
             fromMultiPlanner: false,
-            fromPlanCache: false
+            fromPlanCache: false,
         });
     }
 }
@@ -349,17 +391,16 @@ function runDocumentsLookupTest(conn, coll) {
 
     // In the sharded case, this will join to documents in both shards.
     const documents = {
-        $documents: [
-            {y: -1},
-            {y: 1},
-        ]
+        $documents: [{y: -1}, {y: 1}],
     };
-    const lookup = {$lookup: {
-        from: coll.getName(),
-        as: "lookedUp",
-        localField: "y",
-        foreignField: "y",
-    }};
+    const lookup = {
+        $lookup: {
+            from: coll.getName(),
+            as: "lookedUp",
+            localField: "y",
+            foreignField: "y",
+        },
+    };
     const shape = {
         cmdNs: {db: "test", coll: "$cmd.aggregate"},
         pipeline: [
@@ -368,31 +409,39 @@ function runDocumentsLookupTest(conn, coll) {
                 $project: {
                     _id: true,
                     "_tempDocumentsField": "?array<?object>",
-                }
+                },
             },
             {
                 $unwind: {
                     path: "$_tempDocumentsField",
-                }
+                },
             },
             {
                 $replaceRoot: {
                     newRoot: "$_tempDocumentsField",
-                }
-            }
-        ].concat(lookup)
+                },
+            },
+        ].concat(lookup),
     };
 
-    const queryStatsKey = getAggregateQueryStatsKey(
-        conn, "$cmd.aggregate", shape, {otherNss: [{db: "test", coll: coll.getName()}]});
+    const queryStatsKey = getAggregateQueryStatsKey({
+        conn: conn,
+        collName: "$cmd.aggregate",
+        queryShapeExtra: shape,
+        extra: {otherNss: [{db: "test", coll: coll.getName()}]},
+    });
 
     for (let batchSize = 1; batchSize <= expectedDocs + 1; batchSize++) {
         clearPlanCacheAndQueryStatsStore(conn, coll);
 
         const cmd = {aggregate: 1, pipeline: [documents, lookup], cursor: {batchSize: batchSize}};
 
-        const queryStats =
-            exhaustCursorAndGetQueryStats(conn, coll, cmd, queryStatsKey, expectedDocs);
+        const queryStats = exhaustCursorAndGetQueryStats({
+            conn: conn,
+            cmd: cmd,
+            key: queryStatsKey,
+            expectedDocs: expectedDocs,
+        });
 
         assertAggregatedMetricsSingleExec(queryStats, {
             keysExamined: 2,
@@ -400,7 +449,7 @@ function runDocumentsLookupTest(conn, coll) {
             hasSortStage: false,
             usedDisk: false,
             fromMultiPlanner: false,
-            fromPlanCache: false
+            fromPlanCache: false,
         });
     }
 }
@@ -409,17 +458,13 @@ function runFacetPipelineTest(conn, coll) {
     const pipeline = [
         {
             $facet: {
-                "facetedByY": [
-                    {$bucketAuto: {groupBy: "$y", buckets: 3}},
-                ],
-            }
+                "facetedByY": [{$bucketAuto: {groupBy: "$y", buckets: 3}}],
+            },
         },
         {
             $facet: {
-                "facetedByV": [
-                    {$bucketAuto: {groupBy: "$v", buckets: 3}},
-                ]
-            }
+                "facetedByV": [{$bucketAuto: {groupBy: "$v", buckets: 3}}],
+            },
         },
     ];
     const shape = {
@@ -431,11 +476,11 @@ function runFacetPipelineTest(conn, coll) {
                             $bucketAuto: {
                                 groupBy: "$y",
                                 buckets: "?number",
-                                output: {count: {$sum: "?number"}}
-                            }
+                                output: {count: {$sum: "?number"}},
+                            },
                         },
                     ],
-                }
+                },
             },
             {
                 $facet: {
@@ -444,16 +489,16 @@ function runFacetPipelineTest(conn, coll) {
                             $bucketAuto: {
                                 groupBy: "$v",
                                 buckets: "?number",
-                                output: {count: {$sum: "?number"}}
-                            }
+                                output: {count: {$sum: "?number"}},
+                            },
                         },
                     ],
-                }
-            }
-        ]
+                },
+            },
+        ],
     };
 
-    const queryStatsKey = getAggregateQueryStatsKey(conn, coll.getName(), shape);
+    const queryStatsKey = getAggregateQueryStatsKey({conn: conn, collName: coll.getName(), queryShapeExtra: shape});
 
     // $facet returns a single document.
     const expectedDocs = 1;
@@ -462,7 +507,12 @@ function runFacetPipelineTest(conn, coll) {
 
     const cmd = {aggregate: coll.getName(), pipeline: pipeline, cursor: {batchSize: batchSize}};
 
-    const queryStats = exhaustCursorAndGetQueryStats(conn, coll, cmd, queryStatsKey, expectedDocs);
+    const queryStats = exhaustCursorAndGetQueryStats({
+        conn: conn,
+        cmd: cmd,
+        key: queryStatsKey,
+        expectedDocs: expectedDocs,
+    });
 
     assertAggregatedMetricsSingleExec(queryStats, {
         keysExamined: 0,
@@ -470,7 +520,7 @@ function runFacetPipelineTest(conn, coll) {
         hasSortStage: false,
         usedDisk: false,
         fromMultiPlanner: false,
-        fromPlanCache: false
+        fromPlanCache: false,
     });
 }
 

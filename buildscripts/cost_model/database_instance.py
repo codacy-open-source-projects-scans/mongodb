@@ -34,11 +34,11 @@ from contextlib import asynccontextmanager
 from typing import Any, Mapping, NewType, Sequence
 
 from config import DatabaseConfig, RestoreMode
-from motor.motor_asyncio import AsyncIOMotorClient
+from pymongo import AsyncMongoClient
 
-__all__ = ["DatabaseInstance", "Pipeline"]
+__all__ = ["DatabaseInstance", "Find"]
 """MongoDB Aggregate's Pipeline"""
-Pipeline = NewType("Pipeline", Sequence[Mapping[str, Any]])
+Find = NewType("Find", Mapping[str, Any])
 
 
 class DatabaseInstance:
@@ -47,7 +47,7 @@ class DatabaseInstance:
     def __init__(self, config: DatabaseConfig) -> None:
         """Initialize wrapper."""
         self.config = config
-        self.client = AsyncIOMotorClient(config.connection_string)
+        self.client = AsyncMongoClient(config.connection_string)
         self.database = self.client[config.database_name]
 
     def __enter__(self):
@@ -60,7 +60,6 @@ class DatabaseInstance:
 
     def __exit__(self, exc_type, exc_value, traceback):
         if self.config.dump_on_exit:
-            self.enable_cascades(False)
             self.dump()
 
     async def drop(self):
@@ -73,14 +72,11 @@ class DatabaseInstance:
             ["mongorestore", "--nsInclude", f"{self.config.database_name}.*", "--drop"],
             shell=True,
             check=True,
-            cwd=self.config.dump_path,
         )
 
     def dump(self):
         """Dump the database into 'self.dump_directory'."""
-        subprocess.run(
-            ["mongodump", "--db", self.config.database_name], cwd=self.config.dump_path, check=True
-        )
+        subprocess.run(["mongodump", "--db", self.config.database_name], check=True)
 
     async def set_parameter(self, name: str, value: any) -> None:
         """Set MongoDB Parameter."""
@@ -95,20 +91,11 @@ class DatabaseInstance:
             "internalQueryFrameworkControl", "trySbeEngine" if state else "forceClassicEngine"
         )
 
-    async def enable_cascades(self, state: bool) -> None:
-        """Enable new query optimizer."""
-        await self.client.admin.command(
-            {"configureFailPoint": "enableExplainInBonsai", "mode": "alwaysOn"}
-        )
-        await self.set_parameter(
-            "internalQueryFrameworkControl", "forceBonsai" if state else "trySbeEngine"
-        )
-
-    async def explain(self, collection_name: str, pipeline: Pipeline) -> dict[str, any]:
-        """Return explain for the given pipeline."""
+    async def explain(self, collection_name: str, find: Find) -> dict[str, any]:
+        """Return explain for the given find command."""
         return await self.database.command(
             "explain",
-            {"aggregate": collection_name, "pipeline": pipeline, "cursor": {}},
+            {"find": collection_name, **find},
             verbosity="executionStats",
         )
 

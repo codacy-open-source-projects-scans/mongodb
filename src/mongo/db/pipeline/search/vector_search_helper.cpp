@@ -28,6 +28,7 @@
  */
 #include "mongo/db/pipeline/search/vector_search_helper.h"
 
+#include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/query/search/mongot_cursor.h"
 
 namespace mongo {
@@ -45,6 +46,15 @@ executor::RemoteCommandRequest getRemoteCommandRequestForVectorSearchQuery(
     if (expCtx->getExplain()) {
         cmdBob.append("explain",
                       BSON("verbosity" << ExplainOptions::verbosityString(*expCtx->getExplain())));
+    }
+
+    // Attempt to get the view from the request.
+    boost::optional<SearchQueryViewSpec> view = search_helpers::getViewFromBSONObj(request);
+    if (view) {
+        // mongot only expects the view's name but request currently holds the entire view object.
+        // Set the view name and remove the view object from the request.
+        cmdBob.append(mongot_cursor::kViewNameField, view->getName());
+        request.removeField(search_helpers::kViewFieldName);
     }
 
     auto commandObj = cmdBob.obj();

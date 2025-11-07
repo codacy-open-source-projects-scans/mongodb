@@ -27,31 +27,31 @@
 #
 
 global:
-    cpp_namespace: 'mongo'
-
+    mod_visibility: private
+    cpp_namespace: mongo
 imports:
-    - "mongo/db/basic_types.idl"
-
+    - mongo/db/basic_types.idl
+    - "mongo/db/query/search/search_query_view_spec.idl"
 structs:
     ManageSearchIndexRequest:
-        description: "Command request for search index management host"
-        # Not being strict because this is used to parse a command object that
-        # contains other fields, like 'lsid'.
+        description: Command request for search index management host
         strict: false
         fields:
             manageSearchIndex:
-                description: "Command name field that holds the collection name value"
+                description: Command name field that holds the collection name value
                 type: string
                 optional: false
             collectionUUID:
-                description: "The collection UUID"
+                description: The collection UUID
                 type: uuid
                 optional: false
             userCommand:
-                description: "The original user search index command request"
+                description: The original user search index command request
                 type: object
                 optional: false
-            viewName:
-                description: "If the command is being run on a view namespace, this field must be set to the name of the view"
-                type: string
+            view:
+                description: >-
+                    If the command is being run on a view namespace, this field must be
+                    set to SearchQueryViewSpec
+                type: SearchQueryViewSpec
                 optional: true

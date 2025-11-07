@@ -3,13 +3,12 @@
  * restart during the operation.
  * Multiversion testing does not support tests that kill and restart nodes. So we had to add the
  * 'multiversion_incompatible' tag.
+ *
  * @tags: [
  *   uses_atclustertime,
  *   requires_persistence,
  *   requires_fcv_80,
- *   featureFlagReshardingImprovements,
  *   featureFlagMoveCollection,
- *   # TODO (SERVER-87812) Remove multiversion_incompatible tag
  *   multiversion_incompatible,
  * ]
  */
@@ -23,8 +22,10 @@ const recipientShardNames = reshardingTest.recipientShardNames;
 
 const sourceCollectionNs = "reshardingDb.coll";
 
-const sourceCollection = reshardingTest.createUnshardedCollection(
-    {ns: sourceCollectionNs, primaryShardName: donorShardNames[0]});
+const sourceCollection = reshardingTest.createUnshardedCollection({
+    ns: sourceCollectionNs,
+    primaryShardName: donorShardNames[0],
+});
 
 reshardingTest.withMoveCollectionInBackground({toShard: recipientShardNames[0]}, () => {
     reshardingTest.stepUpNewPrimaryOnShard(donorShardNames[0]);
@@ -35,7 +36,7 @@ reshardingTest.withMoveCollectionInBackground({toShard: recipientShardNames[0]},
 });
 
 // Should have unsplittable set to true
-let configDb = sourceCollection.getMongo().getDB('config');
+let configDb = sourceCollection.getMongo().getDB("config");
 let unshardedColl = configDb.collections.findOne({_id: sourceCollectionNs});
 assert.eq(unshardedColl.unsplittable, true);
 let unshardedChunk = configDb.chunks.find({uuid: unshardedColl.uuid}).toArray();

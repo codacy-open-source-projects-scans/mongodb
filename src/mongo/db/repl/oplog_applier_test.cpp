@@ -27,32 +27,32 @@
  *    it in the license file.
  */
 
-#include <fmt/format.h>
-#include <limits>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
+#include "mongo/db/repl/oplog_applier.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/repl/oplog_applier.h"
 #include "mongo/db/repl/oplog_applier_batcher_test_fixture.h"
 #include "mongo/db/repl/oplog_buffer_blocking_queue.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/time_support.h"
+
+#include <limits>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace repl {
@@ -335,6 +335,78 @@ TEST_F(OplogApplierTest, GetNextApplierBatchGroupsDBCheckWithCrudOps) {
     ASSERT_EQUALS(srcOps[8], batch[0]);
 }
 
+TEST_F(OplogApplierTest, GetNextApplierBatchGroupsNewPrimary) {
+    std::vector<OplogEntry> srcOps;
+    auto nss = NamespaceString::createNamespaceString_forTest(dbName, "bar");
+    srcOps.push_back(makeInsertOplogEntry(1, nss));
+
+    // The New Primary oplog shouldn't be batched with any preceding oplog, but it can be batched
+    // with any subsequent oplog that is batchable.
+    srcOps.push_back(makeNewPrimaryBatchEntry(2));
+    srcOps.push_back(makeApplyOpsOplogEntry(3, false /* prepare */));
+    srcOps.push_back(makeInsertOplogEntry(4, nss));
+    srcOps.push_back(makeApplyOpsOplogEntry(5, true /* prepare */));
+
+    // The New Primary oplog shouldn't be batched with the previous New Primary oplog.
+    srcOps.push_back(makeNewPrimaryBatchEntry(6));
+    srcOps.push_back(makeInsertOplogEntry(7, nss));
+
+    // New Primary oplog shouldn't be batched with a prepared commit that follows it as prepared
+    // commit must start a new batch.
+    srcOps.push_back(makeCommitTransactionOplogEntry(8, dbName, true /* prepared */));
+
+    // New Primary oplog shouldn't be batched with a prepared commit that precedes it.
+    srcOps.push_back(makeNewPrimaryBatchEntry(9));
+
+    // New Primary oplog shouldn't be batched with a DBCCheck that follows it as DBCheck
+    // must start a new batch.
+    srcOps.push_back(makeDBCheckBatchEntry(10, nss));
+
+    // New Primary oplog shouldn't be batched with a DBCheck that precedes it.
+    srcOps.push_back(makeNewPrimaryBatchEntry(11));
+
+    _applier->enqueue(opCtx(), srcOps.cbegin(), srcOps.cend());
+
+    // 1st batch: [insert]
+    auto batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits)).getBatch();
+    ASSERT_EQUALS(1U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[0], batch[0]);
+
+    // 2nd batch: [New Primary, Unprepared ApplyOps, Insert, Prepared ApplyOps]
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits)).getBatch();
+    ASSERT_EQUALS(4U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[1], batch[0]);
+    ASSERT_EQUALS(srcOps[2], batch[1]);
+    ASSERT_EQUALS(srcOps[3], batch[2]);
+    ASSERT_EQUALS(srcOps[4], batch[3]);
+
+    // 3rd batch:  [New Primary, Insert]
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits)).getBatch();
+    ASSERT_EQUALS(2U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[5], batch[0]);
+    ASSERT_EQUALS(srcOps[6], batch[1]);
+
+    // 4th batch: [Commit]
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits)).getBatch();
+    ASSERT_EQUALS(1U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[7], batch[0]);
+
+    // 5th batch: [New Primary]
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits)).getBatch();
+    ASSERT_EQUALS(1U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[8], batch[0]);
+
+    // 6th batch: [Dbcheck]
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits)).getBatch();
+    ASSERT_EQUALS(1U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[9], batch[0]);
+
+    // 7th batch: [New Primary]
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits)).getBatch();
+    ASSERT_EQUALS(1U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[10], batch[0]);
+}
+
 TEST_F(OplogApplierTest, GetNextApplierBatchChecksBatchLimitsForNumberOfOperations) {
     std::vector<OplogEntry> srcOps;
     srcOps.push_back(
@@ -393,7 +465,7 @@ TEST_F(OplogApplierTest, GetNextApplierBatchChecksBatchLimitsForSizeOfOperations
 }
 
 TEST_F(OplogApplierTest,
-       GetNextApplierBatchChecksBatchLimitsUsingEmbededCountInUnpreparedCommitTransactionOp1) {
+       GetNextApplierBatchChecksBatchLimitsUsingEmbeddedCountInUnpreparedCommitTransactionOp1) {
     std::vector<OplogEntry> srcOps;
     srcOps.push_back(
         makeInsertOplogEntry(1, NamespaceString::createNamespaceString_forTest(dbName, "bar")));
@@ -418,7 +490,7 @@ TEST_F(OplogApplierTest,
 }
 
 TEST_F(OplogApplierTest,
-       GetNextApplierBatchChecksBatchLimitsUsingEmbededCountInUnpreparedCommitTransactionOp2) {
+       GetNextApplierBatchChecksBatchLimitsUsingEmbeddedCountInUnpreparedCommitTransactionOp2) {
     std::vector<OplogEntry> srcOps;
     srcOps.push_back(
         makeInsertOplogEntry(1, NamespaceString::createNamespaceString_forTest(dbName, "bar")));
@@ -447,7 +519,7 @@ TEST_F(OplogApplierTest,
 }
 
 TEST_F(OplogApplierTest,
-       GetNextApplierBatchChecksBatchLimitsUsingEmbededCountInUnpreparedCommitTransactionOp3) {
+       GetNextApplierBatchChecksBatchLimitsUsingEmbeddedCountInUnpreparedCommitTransactionOp3) {
     std::vector<OplogEntry> srcOps;
     srcOps.push_back(
         makeInsertOplogEntry(1, NamespaceString::createNamespaceString_forTest(dbName, "bar")));
@@ -512,6 +584,89 @@ TEST_F(OplogApplierTest, LastOpInLargeTransactionIsProcessedIndividually) {
     batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits)).getBatch();
     ASSERT_EQUALS(1U, batch.size()) << toString(batch);
     ASSERT_EQUALS(srcOps[4], batch[0]);
+}
+
+TEST_F(OplogApplierTest, GetNextApplierBatchGroupsCrudOpsWithTruncateRangeOnPreImagesCollection) {
+    std::vector<OplogEntry> srcOps;
+    auto nss = NamespaceString::createNamespaceString_forTest(dbName, "bar");
+    int oplogTs = 4;
+
+    // First entry in batch is timestamped (5, 1)
+    srcOps.push_back(makeInsertOplogEntry(++oplogTs, nss));
+    // Truncate preImages to (4, 1).
+    // Should continue in current batch since maxTruncateTimestamp < firstEntryTimestamp
+    srcOps.push_back(makeTruncateRangeOnPreImagesEntry(++oplogTs, 4));
+
+    // Truncate preImages to (5, 1)
+    // Should start a new batch since maxTruncateTimestamp == firstEntryTimestamp
+    // New batch's first entry is timestamped (7, 1)
+    srcOps.push_back(makeTruncateRangeOnPreImagesEntry(++oplogTs, 5));
+    srcOps.push_back(makeInsertOplogEntry(++oplogTs, nss));
+
+    // Truncate preImages to (8, 1)
+    // Should start a new batch since maxTruncateTimestamp > firstEntryTimestamp
+    srcOps.push_back(makeTruncateRangeOnPreImagesEntry(++oplogTs, 8));
+    srcOps.push_back(makeInsertOplogEntry(++oplogTs, nss));
+
+    _applier->enqueue(opCtx(), srcOps.cbegin(), srcOps.cend());
+    auto batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits)).getBatch();
+    ASSERT_EQUALS(2U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[0], batch[0]);
+    ASSERT_EQUALS(srcOps[1], batch[1]);
+
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits)).getBatch();
+    ASSERT_EQUALS(2U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[2], batch[0]);
+    ASSERT_EQUALS(srcOps[3], batch[1]);
+
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits)).getBatch();
+    ASSERT_EQUALS(2U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[4], batch[0]);
+    ASSERT_EQUALS(srcOps[5], batch[1]);
+}
+
+TEST_F(OplogApplierTest, GetNextApplierBatchGroupsCrudOpsWithTruncateRangeOnOplog) {
+    std::vector<OplogEntry> srcOps;
+    auto nss = NamespaceString::createNamespaceString_forTest(dbName, "bar");
+    int oplogTs = 0;
+
+    srcOps.push_back(makeInsertOplogEntry(++oplogTs, nss));
+    srcOps.push_back(makeTruncateRangeOnOplogEntry(++oplogTs, 0));
+    srcOps.push_back(makeTruncateRangeOnOplogEntry(++oplogTs, 1));
+    srcOps.push_back(makeTruncateRangeOnOplogEntry(++oplogTs, 2));
+    srcOps.push_back(makeInsertOplogEntry(++oplogTs, nss));
+
+    // Oplog truncation is always batched
+    _applier->enqueue(opCtx(), srcOps.cbegin(), srcOps.cend());
+    auto batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits)).getBatch();
+    ASSERT_EQUALS(5U, batch.size()) << toString(batch);
+    for (int i = 0; i < 5; i++) {
+        ASSERT_EQUALS(srcOps[i], batch[i]);
+    }
+}
+
+TEST_F(OplogApplierTest, GetNextApplierBatchGroupsCrudOpsWithTruncateRangeOnNormalColls) {
+    std::vector<OplogEntry> srcOps;
+    auto nss = NamespaceString::createNamespaceString_forTest(dbName, "bar");
+    int oplogTs = 0;
+
+    srcOps.push_back(makeInsertOplogEntry(++oplogTs, nss));
+    srcOps.push_back(makeTruncateRangeEntry(++oplogTs, nss, RecordId()));
+    srcOps.push_back(makeInsertOplogEntry(++oplogTs, nss));
+
+    // Truncation on normal collections is always processed individually
+    _applier->enqueue(opCtx(), srcOps.cbegin(), srcOps.cend());
+    auto batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits)).getBatch();
+    ASSERT_EQUALS(1U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[0], batch[0]);
+
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits)).getBatch();
+    ASSERT_EQUALS(1U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[1], batch[0]);
+
+    batch = unittest::assertGet(_applier->getNextApplierBatch(opCtx(), _limits)).getBatch();
+    ASSERT_EQUALS(1U, batch.size()) << toString(batch);
+    ASSERT_EQUALS(srcOps[2], batch[0]);
 }
 
 class OplogApplierDelayTest : public OplogApplierTest {

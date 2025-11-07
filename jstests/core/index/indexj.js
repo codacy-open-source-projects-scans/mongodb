@@ -10,6 +10,8 @@
 //   # This test assumes that either SBE or classic is fully enabled and that we're not running in
 //   # a mixed version cluster.
 //   requires_fcv_63,
+//   # During fcv upgrade/downgrade the engine might not be what we expect.
+//   cannot_run_during_upgrade_downgrade,
 // ]
 
 import {getPlanStages} from "jstests/libs/query/analyze_plan.js";
@@ -67,27 +69,33 @@ assert.commandWorked(t.insert({a: 2, b: 2}));
 // up examining 0 keys.
 const isSBEEnabled = checkSbeFullyEnabled(db);
 let expectedKeys = isSBEEnabled ? 0 : 3;
-let errMsg = function(actualNumKeys) {
-    return "Chosen plan examined " + actualNumKeys + " keys";
+let errMsg = function (explainWithKeysExamined) {
+    // Check if sbe is enabled instead of using the cached value.
+    return (
+        "Chosen plan examined " +
+        explainWithKeysExamined.keysExamined +
+        " keys. isSBEEnabled: " +
+        checkSbeFullyEnabled(db) +
+        ". explain: " +
+        explainWithKeysExamined.explain
+    );
 };
 let keysExaminedRet = keysExamined({a: {$in: [1, 2]}, b: {$gt: 1, $lt: 2}}, {a: 1, b: 1});
-assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet.keysExamined));
+assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet));
 
-keysExaminedRet =
-    keysExamined({a: {$in: [1, 2]}, b: {$gt: 1, $lt: 2}}, {a: 1, b: 1}, {a: -1, b: -1});
-assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet.keysExamined));
+keysExaminedRet = keysExamined({a: {$in: [1, 2]}, b: {$gt: 1, $lt: 2}}, {a: 1, b: 1}, {a: -1, b: -1});
+assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet));
 
 assert.commandWorked(t.insert({a: 1, b: 1}));
 assert.commandWorked(t.insert({a: 1, b: 1}));
 keysExaminedRet = keysExamined({a: {$in: [1, 2]}, b: {$gt: 1, $lt: 2}}, {a: 1, b: 1});
-assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet.keysExamined));
+assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet));
 
 keysExaminedRet = keysExamined({a: {$in: [1, 2]}, b: {$gt: 1, $lt: 2}}, {a: 1, b: 1});
-assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet.keysExamined));
+assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet));
 
-keysExaminedRet =
-    keysExamined({a: {$in: [1, 2]}, b: {$gt: 1, $lt: 2}}, {a: 1, b: 1}, {a: -1, b: -1});
-assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet.keysExamined));
+keysExaminedRet = keysExamined({a: {$in: [1, 2]}, b: {$gt: 1, $lt: 2}}, {a: 1, b: 1}, {a: -1, b: -1});
+assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet));
 
 // We examine one less key in the classic engine because the bounds are slightly tighter.
 if (!isSBEEnabled) {
@@ -95,23 +103,23 @@ if (!isSBEEnabled) {
 }
 
 keysExaminedRet = keysExamined({a: {$in: [1, 1.9]}, b: {$gt: 1, $lt: 2}}, {a: 1, b: 1});
-assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet.keysExamined));
+assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet));
 
-keysExaminedRet =
-    keysExamined({a: {$in: [1.1, 2]}, b: {$gt: 1, $lt: 2}}, {a: 1, b: 1}, {a: -1, b: -1});
-assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet.keysExamined));
+keysExaminedRet = keysExamined({a: {$in: [1.1, 2]}, b: {$gt: 1, $lt: 2}}, {a: 1, b: 1}, {a: -1, b: -1});
+assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet));
 assert.commandWorked(t.insert({a: 1, b: 1.5}));
 
 // We examine one extra key in both engines because we've inserted a document that falls within
 // both sets of bounds being scanned.
 expectedKeys = isSBEEnabled ? 1 : 4;
 keysExaminedRet = keysExamined({a: {$in: [1, 2]}, b: {$gt: 1, $lt: 2}}, {a: 1, b: 1});
-assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet.keysExamined));
+assert.eq(keysExaminedRet.keysExamined, expectedKeys, errMsg(keysExaminedRet));
 
 if (isSBEEnabled) {
-    const explain = t.find({a: {$gte: 1, $lt: 3}, b: {$gte: 1, $lt: 3}})
-                        .hint({a: 1, b: 1})
-                        .explain("executionStats");
+    const explain = t
+        .find({a: {$gte: 1, $lt: 3}, b: {$gte: 1, $lt: 3}})
+        .hint({a: 1, b: 1})
+        .explain("executionStats");
     const stage = getPlanStages(explain.executionStats.executionStages, "ixscan_generic");
     assert.eq(1, stage.length, explain);
     assert.eq(5, stage[0].keyCheckSkipped, stage);

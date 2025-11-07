@@ -1,18 +1,21 @@
 /*
  * Intersperses $geoNear aggregations with updates of non-geo fields to test deduplication.
- * @tags: [requires_non_retryable_writes, requires_getmore]
+ * @tags: [
+ *   requires_non_retryable_writes,
+ *   requires_getmore,
+ *   # This test relies on query commands returning specific batch-sized responses.
+ *   assumes_no_implicit_cursor_exhaustion,
+ * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
-import {
-    $config as $baseConfig
-} from "jstests/concurrency/fsm_workloads/query/yield/yield_geo_near.js";
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/query/yield/yield_geo_near.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
     $config.states.remove = function remove(db, collName) {
-        var id = Random.randInt(this.nDocs);
-        var doc = db[collName].findOne({_id: id});
+        let id = Random.randInt(this.nDocs);
+        let doc = db[collName].findOne({_id: id});
         if (doc !== null) {
-            var res = db[collName].remove({_id: id});
+            let res = db[collName].remove({_id: id});
             assert.commandWorked(res);
             if (res.nRemoved > 0) {
                 // Re-insert the document with the same '_id', but an incremented
@@ -42,14 +45,16 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         // This distance gets about 80 docs around the origin. There is one doc inserted
         // every 1m^2 and the area scanned by a 5m radius is PI*(5m)^2 ~ 79.
         const maxDistance = 5;
-        const cursor = db[collName].aggregate([{
-            $geoNear: {
-                near: [0, 0],
-                distanceField: "dist",
-                maxDistance: maxDistance,
-                spherical: true,
-            }
-        }]);
+        const cursor = db[collName].aggregate([
+            {
+                $geoNear: {
+                    near: [0, 0],
+                    distanceField: "dist",
+                    maxDistance: maxDistance,
+                    spherical: true,
+                },
+            },
+        ]);
 
         const seenObjs = [];
         const seenObjsOriginals = [];
@@ -60,10 +65,13 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
             // identifies a document.
             const objToSearch = {_id: doc._id, timesInserted: doc.timesInserted};
             for (let i = 0; i < seenObjs.length; ++i) {
-                assert.neq(bsonWoCompare(seenObjs[i], objToSearch),
-                           0,
-                           () => `$geoNear returned document ${tojson(doc)} multiple ` +
-                               `times: first occurence was ${tojson(seenObjsOriginals[i])}`);
+                assert.neq(
+                    bsonWoCompare(seenObjs[i], objToSearch),
+                    0,
+                    () =>
+                        `$geoNear returned document ${tojson(doc)} multiple ` +
+                        `times: first occurence was ${tojson(seenObjsOriginals[i])}`,
+                );
             }
             seenObjs.push(objToSearch);
             seenObjsOriginals.push(doc);
@@ -76,7 +84,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
     };
 
     $config.data.getIndexSpec = function getIndexSpec() {
-        return {geo: '2dsphere'};
+        return {geo: "2dsphere"};
     };
 
     $config.data.getReplaceSpec = function getReplaceSpec(i, coords) {

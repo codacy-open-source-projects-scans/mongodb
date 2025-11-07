@@ -28,11 +28,6 @@
  */
 
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -42,24 +37,25 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/rwc_defaults_commands_gen.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/global_catalog/ddl/sharding_util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/read_write_concern_defaults_gen.h"
+#include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_interface.h"
@@ -68,6 +64,12 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -160,10 +162,36 @@ public:
             auto& rwcDefaults = ReadWriteConcernDefaults::get(opCtx);
             auto newDefaults = rwcDefaults.generateNewCWRWCToBeSavedOnDisk(
                 opCtx, request().getDefaultReadConcern(), request().getDefaultWriteConcern());
-            // We don't want to check if the custom write concern exists on the config servers
-            // because it only has to exist on the actual shards in order to be valid.
-            if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
-                if (auto optWC = newDefaults.getDefaultWriteConcern()) {
+
+            if (auto optWC = newDefaults.getDefaultWriteConcern()) {
+                if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
+                    // When trying to set a custom write concern, validate that it exists on all
+                    // shards and the config server. This is a best-effort check as users may
+                    // directly connect and manipulate write concerns while the check is running.
+                    auto shardsWithMissingWCDefinition =
+                        getShardsMissingWriteConcernDefinition(opCtx, *optWC);
+                    if (!replCoord->validateWriteConcern(*optWC).isOK()) {
+                        const auto shardRegistry = Grid::get(opCtx)->shardRegistry();
+                        const auto configShard = shardRegistry->getConfigShard();
+                        shardsWithMissingWCDefinition.insert(configShard->getId());
+                    }
+                    uassert(
+                        ErrorCodes::UnknownReplWriteConcern,
+                        fmt::format(
+                            "The value of the defaultWriteConcern must be specified on the config "
+                            "server and all shards. The definition of the provided value is "
+                            "missing on: {}.",
+                            [&]() {
+                                std::ostringstream stream;
+                                StringData sep;
+                                for (auto&& shard : shardsWithMissingWCDefinition) {
+                                    stream << sep << "'" << shard.toString() << "'";
+                                    sep = ", ";
+                                }
+                                return stream.str();
+                            }()),
+                        shardsWithMissingWCDefinition.empty());
+                } else {
                     uassertStatusOK(replCoord->validateWriteConcern(*optWC));
                 }
             }
@@ -188,6 +216,32 @@ public:
                         ->isAuthorizedForPrivilege(Privilege{
                             ResourcePattern::forClusterResource(request().getDbName().tenantId()),
                             ActionType::setDefaultRWConcern}));
+        }
+
+        stdx::unordered_set<ShardId> getShardsMissingWriteConcernDefinition(
+            OperationContext* opCtx, const WriteConcernOptions& writeConcern) {
+            auto executor = Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+            BSONObj replSetGetConfigCmd = BSON("replSetGetConfig" << 1);
+            auto responses = sharding_util::sendCommandToShards(
+                opCtx,
+                DatabaseName::kAdmin,
+                replSetGetConfigCmd,
+                Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx),
+                executor);
+            stdx::unordered_set<ShardId> shardsMissingWCDef;
+            for (auto&& response : responses) {
+                uassertStatusOK(AsyncRequestsSender::Response::getEffectiveStatus(response));
+                auto configBSON = response.swResponse.getValue().data;
+                uassert(ErrorCodes::NoSuchKey,
+                        "Missing 'config' field in replSetGetConfig response",
+                        configBSON.hasField("config"));
+                repl::ReplSetConfig shardReplSetConfig(
+                    repl::ReplSetConfig::parse(configBSON["config"].Obj()));
+                if (!shardReplSetConfig.validateWriteConcern(writeConcern).isOK()) {
+                    shardsMissingWCDef.insert(response.shardId);
+                }
+            }
+            return shardsMissingWCDef;
         }
 
         NamespaceString ns() const override {

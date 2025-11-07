@@ -29,28 +29,23 @@
 
 #include "mongo/db/query/planner_analysis.h"
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <s2cellid.h>
+#include "mongo/base/string_data.h"
+#include "mongo/bson/json.h"
+#include "mongo/db/index_names.h"
+#include "mongo/db/matcher/expression_geo.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
+#include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
+#include "mongo/db/query/compiler/physical_model/interval/interval.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
+#include "mongo/db/query/query_planner_test_fixture.h"
+#include "mongo/unittest/unittest.h"
+
 #include <set>
 #include <vector>
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/json.h"
-#include "mongo/db/field_ref.h"
-#include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/index_names.h"
-#include "mongo/db/matcher/expression.h"
-#include "mongo/db/matcher/expression_geo.h"
-#include "mongo/db/query/index_bounds.h"
-#include "mongo/db/query/index_entry.h"
-#include "mongo/db/query/interval.h"
-#include "mongo/db/query/query_planner_test_fixture.h"
-#include "mongo/db/query/query_solution.h"
-#include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include <s2cellid.h>
+
 
 using namespace mongo;
 
@@ -62,7 +57,7 @@ namespace {
 IndexEntry buildSimpleIndexEntry(const BSONObj& kp) {
     return {kp,
             IndexNames::nameToType(IndexNames::findPluginName(kp)),
-            IndexDescriptor::kLatestIndexVersion,
+            IndexConfig::kLatestIndexVersion,
             false,
             {},
             {},
@@ -366,4 +361,47 @@ TEST_F(QueryPlannerTest, ExprOnFetchDoesNotIncludeImpreciseFilter) {
         "      bounds: {a: [[1,1,true,true]]}}}}}");
 }
 
+TEST(QueryPlannerAnalysis, TurnIndexScanIntoCount) {
+    auto node = std::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1)));
+
+    OrderedIntervalList a{"a"};
+    a.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << 1 << "" << 10), BoundInclusion::kIncludeBothStartAndEndKeys));
+    node->bounds.fields.push_back(a);
+
+    QuerySolution qs;
+    qs.setRoot(std::move(node));
+    ASSERT_TRUE(QueryPlannerAnalysis::turnIxscanIntoCount(&qs));
+}
+
+TEST(QueryPlannerAnalysis, TurnIndexScanAndFetchIntoCount) {
+    auto node = std::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1)));
+    OrderedIntervalList a{"a"};
+    a.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << 1 << "" << 10), BoundInclusion::kIncludeBothStartAndEndKeys));
+    node->bounds.fields.push_back(a);
+
+    QuerySolution qs;
+    qs.setRoot(std::make_unique<FetchNode>(std::move(node)));
+    ASSERT_TRUE(QueryPlannerAnalysis::turnIxscanIntoCount(&qs));
+}
+
+TEST(QueryPlannerAnalysis, CannotTurnIndexScanAndFetchIntoCount) {
+    auto node = std::make_unique<IndexScanNode>(buildSimpleIndexEntry(BSON("a" << 1)));
+    OrderedIntervalList a{"a"};
+    a.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+        BSON("" << 1 << "" << 10), BoundInclusion::kIncludeBothStartAndEndKeys));
+    node->bounds.fields.push_back(a);
+
+    // Add fetch node with filter.
+    auto fetch = std::make_unique<FetchNode>(std::move(node));
+    auto operand = BSON("$lt" << 100);
+    std::unique_ptr<LTMatchExpression> expPtr =
+        std::make_unique<LTMatchExpression>("a"_sd, operand["$lt"]);
+    fetch->filter = std::move(expPtr);
+
+    QuerySolution qs;
+    qs.setRoot(std::move(fetch));
+    ASSERT_FALSE(QueryPlannerAnalysis::turnIxscanIntoCount(&qs));
+}
 }  // namespace

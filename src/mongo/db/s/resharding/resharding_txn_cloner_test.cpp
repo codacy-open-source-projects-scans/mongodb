@@ -28,21 +28,7 @@
  */
 
 
-#include <algorithm>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/smart_ptr.hpp>
-#include <cstdint>
-#include <fmt/format.h>
-#include <functional>
-#include <ostream>
-#include <string>
-#include <tuple>
-#include <utility>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/s/resharding/resharding_txn_cloner.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -60,11 +46,18 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/cancelable_operation_context.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache_loader.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache_loader_mock.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/sharding_catalog_client_mock.h"
+#include "mongo/db/global_catalog/type_collection.h"
+#include "mongo/db/global_catalog/type_database_gen.h"
+#include "mongo/db/global_catalog/type_shard.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/pipeline/process_interface/shardsvr_process_interface.h"
@@ -82,10 +75,7 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
-#include "mongo/db/s/resharding/resharding_txn_cloner.h"
 #include "mongo/db/s/resharding/resharding_txn_cloner_progress_gen.h"
-#include "mongo/db/s/shard_server_test_fixture.h"
-#include "mongo/db/s/sharding_mongod_test_fixture.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_cache.h"
@@ -93,36 +83,28 @@
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/shard_server_test_fixture.h"
+#include "mongo/db/sharding_environment/sharding_mongod_test_fixture.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/db/vector_clock_metadata_hook.h"
+#include "mongo/db/vector_clock/vector_clock_metadata_hook.h"
+#include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/sharding_catalog_client_mock.h"
-#include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/catalog/type_database_gen.h"
-#include "mongo/s/catalog/type_index_catalog_gen.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/catalog_cache_loader.h"
-#include "mongo/s/catalog_cache_loader_mock.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/grid.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/duration.h"
@@ -133,6 +115,22 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <functional>
+#include <ostream>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -205,10 +203,10 @@ class ReshardingTxnClonerTest : service_context_test::WithSetupTransportLayer,
         public:
             StaticCatalogClient(std::vector<ShardId> shardIds) : _shardIds(std::move(shardIds)) {}
 
-            StatusWith<repl::OpTimeWith<std::vector<ShardType>>> getAllShards(
+            repl::OpTimeWith<std::vector<ShardType>> getAllShards(
                 OperationContext* opCtx,
                 repl::ReadConcernLevel readConcern,
-                bool excludeDraining) override {
+                BSONObj filter) override {
                 std::vector<ShardType> shardTypes;
                 for (const auto& shardId : _shardIds) {
                     const ConnectionString cs = ConnectionString::forReplicaSet(
@@ -219,16 +217,6 @@ class ReshardingTxnClonerTest : service_context_test::WithSetupTransportLayer,
                     shardTypes.push_back(std::move(sType));
                 };
                 return repl::OpTimeWith<std::vector<ShardType>>(shardTypes);
-            }
-
-            std::pair<CollectionType, std::vector<IndexCatalogType>>
-            getCollectionAndShardingIndexCatalogEntries(
-                OperationContext* opCtx,
-                const NamespaceString& nss,
-                const repl::ReadConcernArgs& readConcern) override {
-                uasserted(ErrorCodes::NamespaceNotFound,
-                          str::stream()
-                              << "Collection " << nss.toStringForErrorMsg() << " not found");
             }
 
         private:
@@ -266,7 +254,7 @@ protected:
     }
 
     LogicalSessionId getTxnRecordLsid(BSONObj txnRecord) {
-        return SessionTxnRecord::parse(IDLParserContext("ReshardingTxnClonerTest"), txnRecord)
+        return SessionTxnRecord::parse(txnRecord, IDLParserContext("ReshardingTxnClonerTest"))
             .getSessionId();
     }
 
@@ -320,7 +308,7 @@ protected:
         onCommand([&](const executor::RemoteCommandRequest& request) {
             ASSERT(request.cmdObj["killCursors"]);
             auto cursors = request.cmdObj["cursors"];
-            ASSERT_EQ(cursors.type(), BSONType::Array);
+            ASSERT_EQ(cursors.type(), BSONType::array);
             auto cursorsArray = cursors.Array();
             ASSERT_FALSE(cursorsArray.empty());
             ASSERT_EQ(cursorsArray[0].Long(), cursorId);
@@ -379,7 +367,7 @@ protected:
                            BSON(SessionTxnRecord::kSessionIdFieldName << sessionId.toBSON()));
         ASSERT(!bsonTxn.isEmpty());
         auto txn = SessionTxnRecord::parse(
-            IDLParserContext("resharding config transactions cloning test"), bsonTxn);
+            bsonTxn, IDLParserContext("resharding config transactions cloning test"));
         ASSERT_EQ(txn.getTxnNum(), txnNum);
         ASSERT_EQ(txn.getLastWriteOpTime(), oplogEntry.getOpTime());
     }
@@ -411,8 +399,8 @@ protected:
             return boost::none;
         }
 
-        return ReshardingTxnClonerProgress::parse(IDLParserContext("ReshardingTxnClonerProgress"),
-                                                  progressDoc);
+        return ReshardingTxnClonerProgress::parse(progressDoc,
+                                                  IDLParserContext("ReshardingTxnClonerProgress"));
     }
 
     boost::optional<LogicalSessionId> getProgressLsid(const ReshardingSourceId& sourceId) {
@@ -485,7 +473,9 @@ protected:
         txnParticipant.unstashTransactionResources(opCtx, "prepareTransaction");
 
         // The transaction machinery cannot store an empty locker.
-        { Lock::GlobalLock globalLock(opCtx, MODE_IX); }
+        {
+            Lock::GlobalLock globalLock(opCtx, MODE_IX);
+        }
         auto opTime = [opCtx] {
             TransactionParticipant::SideTransactionBlock sideTxn{opCtx};
 
@@ -523,6 +513,12 @@ protected:
     }
 
     Timestamp getLatestOplogTimestamp(OperationContext* opCtx) {
+        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+        LocalOplogInfo* oplogInfo = LocalOplogInfo::get(opCtx);
+
+        // Oplog should be available in this test.
+        invariant(oplogInfo);
+        storageEngine->waitForAllEarlierOplogWritesToBeVisible(opCtx, oplogInfo->getRecordStore());
         DBDirectClient client(opCtx);
 
         FindCommandRequest findRequest{NamespaceString::kRsOplogNamespace};
@@ -539,6 +535,12 @@ protected:
                                                                    Timestamp ts) {
         std::vector<repl::DurableOplogEntry> result;
 
+        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+        LocalOplogInfo* oplogInfo = LocalOplogInfo::get(opCtx);
+
+        // Oplog should be available in this test.
+        invariant(oplogInfo);
+        storageEngine->waitForAllEarlierOplogWritesToBeVisible(opCtx, oplogInfo->getRecordStore());
         PersistentTaskStore<repl::OplogEntryBase> store(NamespaceString::kRsOplogNamespace);
         store.forEach(opCtx, BSON("ts" << BSON("$gt" << ts)), [&](const auto& oplogEntry) {
             result.emplace_back(
@@ -1238,7 +1240,7 @@ TEST_F(ReshardingTxnClonerTest, DoNotAddDeadEndSentinelTwice) {
     auto opCtx = operationContext();
     ReshardingTxnCloner cloner(kTwoSourceIdList[1], Timestamp::max());
     auto txnRecord = SessionTxnRecord::parse(
-        IDLParserContext{"ReshardingTxnClonerTest::DoNotAddDeadEndSentinelTwice"}, makeTxn());
+        makeTxn(), IDLParserContext{"ReshardingTxnClonerTest::DoNotAddDeadEndSentinelTwice"});
 
     DBDirectClient client(opCtx);
     auto filter = fromjson(fmt::format(

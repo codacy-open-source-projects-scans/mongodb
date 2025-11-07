@@ -27,11 +27,12 @@
  *    it in the license file.
  */
 
+#include "mongo/db/profile_settings.h"
+
+#include "mongo/db/service_context.h"
+
 #include <memory>
 #include <shared_mutex>
-
-#include "mongo/db/profile_settings.h"
-#include "mongo/db/service_context.h"
 
 namespace mongo {
 namespace {
@@ -60,6 +61,12 @@ void DatabaseProfileSettings::setDefaultLevel(int level) {
     _defaultLevel = level;
 }
 
+void DatabaseProfileSettings::setDefaultSlowOpInProgressThreshold(
+    Milliseconds slowOpInProgressThreshold) {
+    std::unique_lock lk(_mutex);
+    _defaultSlowOpInProgressThreshold = slowOpInProgressThreshold;
+}
+
 void DatabaseProfileSettings::setAllDatabaseProfileFiltersAndDefault(
     std::shared_ptr<ProfileFilter> filter) {
     std::unique_lock lk(_mutex);
@@ -85,7 +92,7 @@ ProfileSettings DatabaseProfileSettings::getDatabaseProfileSettings(
         return it->second;
     }
 
-    return {_defaultLevel, _defaultProfileFilter};
+    return {_defaultLevel, _defaultProfileFilter, _defaultSlowOpInProgressThreshold};
 }
 
 void DatabaseProfileSettings::clearDatabaseProfileSettings(const DatabaseName& dbName) {

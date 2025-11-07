@@ -30,6 +30,8 @@
 #pragma once
 
 #include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/expression.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -47,13 +49,15 @@ public:
 
     const char* getSourceName() const final;
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kInternalReplaceRoot;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
-    void addVariableRefs(std::set<Variables::Id>* refs) const final{};
+    void addVariableRefs(std::set<Variables::Id>* refs) const final {};
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         StageConstraints constraints(StreamType::kStreaming,
                                      PositionRequirement::kNone,
                                      HostTypeRequirement::kNone,
@@ -71,8 +75,8 @@ public:
         return boost::none;
     }
 
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) final;
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) final;
 
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
@@ -82,8 +86,6 @@ public:
     }
 
 private:
-    GetNextResult doGetNext() final;
-
     // The parsed "newRoot" argument to the $replaceRoot stage.
     boost::intrusive_ptr<Expression> _newRoot;
 };

@@ -29,39 +29,24 @@
 
 #pragma once
 
-#include <set>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
+#include "mongo/db/pipeline/timeseries_index_conversion_options.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/util/modules.h"
+
+#include <set>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
-
-/**
- * Carries parameters for converting index stats on the buckets collection to the time-series
- * collection schema.
- */
-struct TimeseriesConversionOptions {
-    // The user-supplied timestamp field name specified during time-series collection creation.
-    std::string timeField;
-
-    // An optional user-supplied metadata field name specified during time-series collection
-    // creation. This field name is used during materialization of metadata fields of a measurement
-    // after unpacking.
-    boost::optional<std::string> metaField;
-};
 
 /**
  * Aggregation stage that converts buckets schema index stats to time-series schema index stats.
@@ -75,26 +60,30 @@ public:
 
     DocumentSourceInternalConvertBucketIndexStats(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        TimeseriesConversionOptions timeseriesOptions);
+        TimeseriesIndexConversionOptions timeseriesOptions);
 
     const char* getSourceName() const override {
-        return kStageName.rawData();
+        return kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kInternalConvertBucketIndexStats;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
-        return {StreamType::kStreaming,
-                PositionRequirement::kNone,
-                HostTypeRequirement::kNone,
-                DiskUseRequirement::kNoDiskUse,
-                FacetRequirement::kNotAllowed,
-                TransactionRequirement::kAllowed,
-                LookupRequirement::kAllowed,
-                UnionRequirement::kAllowed,
-                ChangeStreamRequirement::kDenylist};
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
+        StageConstraints constraints(StreamType::kStreaming,
+                                     PositionRequirement::kNone,
+                                     HostTypeRequirement::kNone,
+                                     DiskUseRequirement::kNoDiskUse,
+                                     FacetRequirement::kNotAllowed,
+                                     TransactionRequirement::kAllowed,
+                                     LookupRequirement::kAllowed,
+                                     UnionRequirement::kAllowed,
+                                     ChangeStreamRequirement::kDenylist);
+        constraints.consumesLogicalCollectionData = false;
+        return constraints;
     }
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
@@ -106,8 +95,10 @@ public:
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
 
 private:
-    GetNextResult doGetNext() final;
+    friend boost::intrusive_ptr<exec::agg::Stage>
+    documentSourceInternalConvertBucketIndexStatsToStageFn(
+        const boost::intrusive_ptr<DocumentSource>&);
 
-    TimeseriesConversionOptions _timeseriesOptions;
+    TimeseriesIndexConversionOptions _timeseriesOptions;
 };
 }  // namespace mongo

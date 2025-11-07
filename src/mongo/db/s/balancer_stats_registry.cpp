@@ -29,17 +29,6 @@
 
 #include "mongo/db/s/balancer_stats_registry.h"
 
-#include <algorithm>
-#include <boost/smart_ptr.hpp>
-#include <mutex>
-#include <tuple>
-#include <utility>
-#include <vector>
-
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -48,25 +37,35 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/dbclient_cursor.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/s/range_deleter_service.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/log_and_backoff.h"
 #include "mongo/util/scopeguard.h"
+
+#include <algorithm>
+#include <mutex>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/smart_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -119,11 +118,10 @@ void BalancerStatsRegistry::onStepUpComplete(OperationContext* opCtx, long long 
 void BalancerStatsRegistry::_initializeAsync(OperationContext* opCtx) {
     ExecutorFuture<void>(_threadPool)
         .then([this] {
-            // TODO(SERVER-74658): Please revisit if this thread could be made killable.
             ThreadClient tc("BalancerStatsRegistry::asynchronousInitialization",
-                            getGlobalServiceContext()->getService(ClusterRole::ShardServer),
-                            ClientOperationKillableByStepdown{false});
+                            getGlobalServiceContext()->getService(ClusterRole::ShardServer));
 
+            OperationContext* opCtx;
             {
                 stdx::lock_guard lk{_stateMutex};
                 if (const auto currentState = _state.load(); currentState != State::kPrimaryIdle) {
@@ -135,6 +133,7 @@ void BalancerStatsRegistry::_initializeAsync(OperationContext* opCtx) {
                 }
                 _state.store(State::kInitializing);
                 _initOpCtxHolder = tc->makeOperationContext();
+                opCtx = _initOpCtxHolder.get();
             }
 
             ON_BLOCK_EXIT([this] {
@@ -142,10 +141,38 @@ void BalancerStatsRegistry::_initializeAsync(OperationContext* opCtx) {
                 _initOpCtxHolder.reset();
             });
 
-            auto opCtx{_initOpCtxHolder.get()};
-
             LOGV2_DEBUG(6419601, 2, "Initializing BalancerStatsRegistry");
+            // TODO SERVER-107512 Remove this code when it is no longer necessary.
+            // We are not yet a write accepting primary when onStepUpComplete is called so even
+            // though this is an async task we can get rejected due to not being a writable primary,
+            // we expect to eventually become a writable primary and should retry until we are (or
+            // until our state changes).
             try {
+                if (gFeatureFlagIntentRegistration.isEnabled()) {
+                    int retryAttempts = 0;
+                    for (;;) {
+                        if (_state.load() != State::kInitializing) {
+                            // We are being interrupted, error out to avoid infinite looping in this
+                            // function.
+                            uasserted(ErrorCodes::InterruptedDueToReplStateChange,
+                                      "BalancerStatsRegistry initialization interrupted");
+                        }
+                        if (!rss::consensus::IntentRegistry::get(opCtx->getServiceContext())
+                                 .canDeclareIntent(rss::consensus::IntentRegistry::Intent::Write,
+                                                   opCtx)) {
+                            ++retryAttempts;
+                            logAndBackoff(10363501,
+                                          MONGO_LOGV2_DEFAULT_COMPONENT,
+                                          logv2::LogSeverity::Debug(3),
+                                          retryAttempts,
+                                          "Waiting until node is writable primary to continue with "
+                                          "BalancerStatsRegistry initialization");
+                            continue;
+                        }
+                        break;
+                    }
+                }
+
                 // Lock the range deleter to prevent concurrent modifications of orphans count
                 ScopedRangeDeleterLock rangeDeleterLock(opCtx, LockMode::MODE_S);
                 // The collection lock is needed to serialize with direct writes to
@@ -245,12 +272,11 @@ long long BalancerStatsRegistry::getCollNumOrphanDocsFromDiskIfNeeded(
         std::vector<BSONObj> pipeline;
         pipeline.push_back(
             BSON("$match" << BSON(RangeDeletionTask::kCollectionUuidFieldName << collectionUUID)));
-        pipeline.push_back(
-            BSON("$group" << BSON("_id"
-                                  << "numOrphans"
-                                  << "count"
-                                  << BSON("$sum"
-                                          << "$" + RangeDeletionTask::kNumOrphanDocsFieldName))));
+        pipeline.push_back(BSON(
+            "$group" << BSON("_id"
+                             << "numOrphans"
+                             << "count"
+                             << BSON("$sum" << "$" + RangeDeletionTask::kNumOrphanDocsFieldName))));
         AggregateCommandRequest aggRequest(NamespaceString::kRangeDeletionNamespace, pipeline);
         auto swCursor = DBClientCursor::fromAggregationRequest(
             &client, aggRequest, false /* secondaryOk */, true /* useExhaust */);
@@ -369,13 +395,11 @@ void BalancerStatsRegistry::_loadOrphansCount(OperationContext* opCtx) {
      * 		}
      * 	}
      */
-    static const BSONObj groupStage{
-        BSON("$group" << BSON("_id"
-                              << "$" + RangeDeletionTask::kCollectionUuidFieldName
-                              << kNumOrphanDocsLabel
-                              << BSON("$sum"
-                                      << "$" + RangeDeletionTask::kNumOrphanDocsFieldName)
-                              << kNumRangeDeletionTasksLabel << BSON("$count" << BSONObj())))};
+    static const BSONObj groupStage{BSON(
+        "$group" << BSON("_id" << "$" + RangeDeletionTask::kCollectionUuidFieldName
+                               << kNumOrphanDocsLabel
+                               << BSON("$sum" << "$" + RangeDeletionTask::kNumOrphanDocsFieldName)
+                               << kNumRangeDeletionTasksLabel << BSON("$count" << BSONObj())))};
     AggregateCommandRequest aggRequest{NamespaceString::kRangeDeletionNamespace, {groupStage}};
 
     DBDirectClient client{opCtx};

@@ -31,10 +31,11 @@
 
 #include "mongo/db/query/find_command_gen.h"
 #include "mongo/idl/idl_parser.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
-class FindCommandRequest : public FindCommandRequestBase {
+class MONGO_MOD_PUB FindCommandRequest : public FindCommandRequestBase {
 public:
     explicit FindCommandRequest(
         NamespaceStringOrUUID nssOrUUID,
@@ -53,12 +54,12 @@ public:
         _overrideNssOrUUID = NamespaceStringOrUUID{nss};
     }
 
-    static FindCommandRequest parse(const IDLParserContext& ctxt,
-                                    const BSONObj& bsonObject,
+    static FindCommandRequest parse(const BSONObj& bsonObject,
+                                    const IDLParserContext& ctxt,
                                     DeserializationContext* dctx = nullptr) {
         NamespaceString localNS;
         FindCommandRequest object(localNS);
-        object.parseProtected(ctxt, bsonObject, dctx);
+        object.parseProtected(bsonObject, ctxt, dctx);
         return object;
     }
 

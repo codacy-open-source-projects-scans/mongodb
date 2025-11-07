@@ -27,15 +27,6 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -43,24 +34,27 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
-#include "mongo/bson/mutable/mutable_bson_test_utils.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/client/dbclient_cursor.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/exec/mutable_bson/mutable_bson_test_utils.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
@@ -68,7 +62,7 @@
 #include "mongo/db/op_observer/operation_logger_impl.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/query_settings/query_settings_manager.h"
+#include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog.h"
@@ -85,32 +79,45 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/db/shard_role.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/versioning_protocol/database_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/shard_version.h"
 #include "mongo/transport/asio/asio_transport_layer.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/transport/transport_layer_manager_impl.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 
+#include <algorithm>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 namespace mongo {
+
+Database* getDbOrCreate(OperationContext* opCtx, const NamespaceString& nss) {
+    auto db = DatabaseHolder::get(opCtx)->getDb(opCtx, nss.dbName());
+    if (!db) {
+        return DatabaseHolder::get(opCtx)->openDb(opCtx, nss.dbName(), nullptr);
+    }
+    return db;
+}
 namespace repl {
 namespace ReplTests {
 
@@ -129,6 +136,7 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
                                 boost::none,                // uuid
                                 boost::none,                // fromMigrate
                                 boost::none,                // checkExistenceForDiffInsert
+                                boost::none,                // versionContext
                                 OplogEntry::kOplogVersion,  // version
                                 object,                     // o
                                 object2,                    // o2
@@ -184,10 +192,13 @@ public:
         dbtests::WriteContextForTests ctx(&_opCtx, ns());
         WriteUnitOfWork wuow(&_opCtx);
 
-        CollectionPtr c(
+        // TODO(SERVER-103411): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
+        CollectionPtr c = CollectionPtr::CollectionPtr_UNSAFE(
             CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss()));
         if (!c) {
-            c = CollectionPtr(ctx.db()->createCollection(&_opCtx, nss()));
+            // TODO(SERVER-103411): Investigate usage validity of
+            // CollectionPtr::CollectionPtr_UNSAFE
+            c = CollectionPtr::CollectionPtr_UNSAFE(ctx.db()->createCollection(&_opCtx, nss()));
         }
 
         ASSERT(c->getIndexCatalog()->haveIdIndex(&_opCtx));
@@ -199,7 +210,8 @@ public:
         // Start with a fresh oplog.
         deleteAll(cllNS());
 
-        query_settings::QuerySettingsManager::create(_opCtx.getServiceContext(), {}, {});
+        // Initialize the query settings.
+        query_settings::QuerySettingsService::initializeForTest(_opCtx.getServiceContext());
     }
 
     ~Base() {
@@ -249,13 +261,16 @@ protected:
     }
     int count() const {
         Lock::GlobalWrite lk(&_opCtx);
-        OldClientContext ctx(&_opCtx, nss());
-        Database* db = ctx.db();
-        CollectionPtr coll(
+        Database* db = getDbOrCreate(&_opCtx, nss());
+        // TODO(SERVER-103411): Investigate usage validity of
+        // CollectionPtr::CollectionPtr_UNSAFE
+        CollectionPtr coll = CollectionPtr::CollectionPtr_UNSAFE(
             CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss()));
         if (!coll) {
             WriteUnitOfWork wunit(&_opCtx);
-            coll = CollectionPtr(db->createCollection(&_opCtx, nss()));
+            // TODO(SERVER-103411): Investigate usage validity of
+            // CollectionPtr::CollectionPtr_UNSAFE
+            coll = CollectionPtr::CollectionPtr_UNSAFE(db->createCollection(&_opCtx, nss()));
             wunit.commit();
         }
 
@@ -276,14 +291,20 @@ protected:
         std::vector<BSONObj> ops;
         {
             DBDirectClient db(&_opCtx);
-            auto cursor = db.find(
-                FindCommandRequest{NamespaceString::createNamespaceString_forTest(cllNS())});
+            auto storageEngine = _opCtx.getServiceContext()->getStorageEngine();
+            LocalOplogInfo* oplogInfo = LocalOplogInfo::get(&_opCtx);
+
+            // Oplog should be available at this point.
+            invariant(oplogInfo);
+            storageEngine->waitForAllEarlierOplogWritesToBeVisible(&_opCtx,
+                                                                   oplogInfo->getRecordStore());
+            auto cursor = db.find(FindCommandRequest{NamespaceString::createNamespaceString_forTest(
+                cllNS())});  // Read all ops from the oplog.
             while (cursor->more()) {
                 ops.push_back(cursor->nextSafe());
             }
         }
 
-        OldClientContext ctx(&_opCtx, nss());
         for (std::vector<BSONObj>::iterator i = ops.begin(); i != ops.end(); ++i) {
             repl::UnreplicatedWritesBlock uwb(&_opCtx);
             auto entry = uassertStatusOK(OplogEntry::parse(*i));
@@ -295,7 +316,10 @@ protected:
                 for (auto& stmt : stmts) {
                     ops.push_back(ApplierOperation(&stmt));
                 }
-                shard_role_details::releaseAndReplaceRecoveryUnit(&_opCtx);
+                {
+                    ClientLock clientLock(_opCtx.getClient());
+                    shard_role_details::releaseAndReplaceRecoveryUnit(&_opCtx, clientLock);
+                }
                 uassertStatusOK(
                     OplogApplierUtils::applyOplogBatchCommon(&_opCtx,
                                                              &ops,
@@ -304,8 +328,12 @@ protected:
                                                              true,
                                                              &applyOplogEntryOrGroupedInserts));
             } else {
-                auto coll = acquireCollection(
-                    &_opCtx, {nss(), {}, {}, AcquisitionPrerequisites::kWrite}, MODE_IX);
+                auto coll = acquireCollection(&_opCtx,
+                                              {nss(),
+                                               PlacementConcern::kPretendUnsharded,
+                                               {},
+                                               AcquisitionPrerequisites::kWrite},
+                                              MODE_IX);
                 WriteUnitOfWork wunit(&_opCtx);
                 auto lastApplied = repl::ReplicationCoordinator::get(_opCtx.getServiceContext())
                                        ->getMyLastAppliedOpTime()
@@ -329,12 +357,10 @@ protected:
         NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
         ::mongo::writeConflictRetry(&_opCtx, "deleteAll", nss, [&] {
             Lock::GlobalWrite lk(&_opCtx);
-            OldClientContext ctx(&_opCtx, nss);
             WriteUnitOfWork wunit(&_opCtx);
-            Database* db = ctx.db();
-            Collection* coll =
-                CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespaceForMetadataWrite(
-                    &_opCtx, nss);
+            Database* db = getDbOrCreate(&_opCtx, nss);
+            CollectionWriter writer{&_opCtx, nss};
+            Collection* coll = writer.getWritableCollection(&_opCtx);
             if (!coll) {
                 coll = db->createCollection(&_opCtx, nss);
             }
@@ -352,13 +378,15 @@ protected:
     }
     void insert(const BSONObj& o) const {
         Lock::GlobalWrite lk(&_opCtx);
-        OldClientContext ctx(&_opCtx, nss());
         WriteUnitOfWork wunit(&_opCtx);
-        Database* db = ctx.db();
-        CollectionPtr coll(
+        Database* db = getDbOrCreate(&_opCtx, nss());
+        // TODO(SERVER-103411): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
+        CollectionPtr coll = CollectionPtr::CollectionPtr_UNSAFE(
             CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss()));
         if (!coll) {
-            coll = CollectionPtr(db->createCollection(&_opCtx, nss()));
+            // TODO(SERVER-103411): Investigate usage validity of
+            // CollectionPtr::CollectionPtr_UNSAFE
+            coll = CollectionPtr::CollectionPtr_UNSAFE(db->createCollection(&_opCtx, nss()));
         }
 
         auto lastApplied = repl::ReplicationCoordinator::get(_opCtx.getServiceContext())
@@ -965,10 +993,7 @@ protected:
 class SetNumToStr : public Base {
 public:
     void doIt() const override {
-        _client.update(nss(),
-                       BSON("_id" << 0),
-                       BSON("$set" << BSON("a"
-                                           << "bcd")));
+        _client.update(nss(), BSON("_id" << 0), BSON("$set" << BSON("a" << "bcd")));
     }
     void check() const override {
         ASSERT_EQUALS(1, count());

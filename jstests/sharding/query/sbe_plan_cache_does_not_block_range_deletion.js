@@ -6,7 +6,9 @@
  *   requires_fcv_63,
  *   # TODO (SERVER-85629): Re-enable this test once redness is resolved in multiversion suites.
  *   DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE,
- *   requires_fcv_80
+ *   requires_fcv_80,
+ *   # During fcv upgrade/downgrade the engine might not be what we expect.
+ *   cannot_run_during_upgrade_downgrade,
  * ]
  */
 import {getPlanCacheKeyFromShape} from "jstests/libs/query/analyze_plan.js";
@@ -19,8 +21,7 @@ const ns = dbName + "." + collName;
 
 const st = new ShardingTest({mongos: 1, config: 1, shards: 2});
 
-assert.commandWorked(
-    st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
 
 const isSBEEnabled = checkSbeFullyEnabled(st.s.getDB(dbName));
 
@@ -46,10 +47,8 @@ function runTest({indexes, document, filter}) {
     }
 
     // Ensure there is a cache entry we just created in the plan cache.
-    const keyHash =
-        getPlanCacheKeyFromShape({query: filter, collection: coll, db: st.s.getDB(dbName)});
-    const res =
-        coll.aggregate([{$planCacheStats: {}}, {$match: {planCacheKey: keyHash}}]).toArray();
+    const keyHash = getPlanCacheKeyFromShape({query: filter, collection: coll, db: st.s.getDB(dbName)});
+    const res = coll.aggregate([{$planCacheStats: {}}, {$match: {planCacheKey: keyHash}}]).toArray();
     assert.eq(1, res.length);
 
     // Move the chunk to the second shard leaving orphaned documents on the first shard.
@@ -61,7 +60,7 @@ function runTest({indexes, document, filter}) {
         // The "rangeDeletions" collection exists on each shard and stores a document for each chunk
         // range that contains orphaned documents. When the orphaned chunk range is cleaned up, the
         // document describing the range is deleted from the collection.
-        return st.shard0.getDB('config')["rangeDeletions"].find().itcount() === 0;
+        return st.shard0.getDB("config")["rangeDeletions"].find().itcount() === 0;
     });
 }
 
@@ -86,7 +85,12 @@ if (isSBEEnabled) {
     runTest({
         indexes: [{a: 1}, {b: 1}, {c: 1}, {d: 1}],
         document: {_id: 0, a: "abc", b: "123", c: 4, d: 5},
-        filter: {$or: [{a: "abc", b: "123"}, {c: 4, d: 5}]},
+        filter: {
+            $or: [
+                {a: "abc", b: "123"},
+                {c: 4, d: 5},
+            ],
+        },
     });
 }
 

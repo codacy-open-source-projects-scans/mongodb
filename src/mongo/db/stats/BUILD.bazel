@@ -69,7 +69,7 @@ mongo_cc_library(
     ],
     deps = [
         "//src/mongo/db:server_base",
-        "//src/mongo/db/commands:server_status_core",
+        "//src/mongo/db/commands/server_status:server_status_core",
         "//src/mongo/db/repl:read_concern_args",  # TODO(SERVER-93876): Remove.
     ],
 )
@@ -95,30 +95,9 @@ mongo_cc_library(
     deps = [
         "//src/mongo/client:read_preference",
         "//src/mongo/db:server_base",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db/commands:server_status_core",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/commands/server_status:server_status_core",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db/repl:repl_coordinator_interface",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db/repl:repl_settings",  # TODO(SERVER-93876): Remove.
-    ],
-)
-
-idl_generator(
-    name = "operation_resource_consumption_gen",
-    src = "operation_resource_consumption.idl",
-)
-
-mongo_cc_library(
-    name = "resource_consumption_metrics",
-    srcs = [
-        "resource_consumption_metrics.cpp",
-        ":operation_resource_consumption_gen",
-    ],
-    hdrs = [
-        "resource_consumption_metrics.h",
-    ],
-    deps = [
-        "//src/mongo/db:server_base",
-        "//src/mongo/db/commands:server_status_core",
-        "//src/mongo/db/repl:repl_coordinator_interface",  # TODO(SERVER-93876): Remove.
     ],
 )
 
@@ -155,6 +134,19 @@ mongo_cc_library(
 )
 
 mongo_cc_library(
+    name = "counters_sort",
+    srcs = [
+        "counters_sort.cpp",
+    ],
+    hdrs = [
+        "counters_sort.h",
+    ],
+    deps = [
+        "//src/mongo/db/commands/server_status:server_status_metric",
+    ],
+)
+
+mongo_cc_library(
     name = "counters",
     srcs = [
         "counters.cpp",
@@ -172,8 +164,9 @@ mongo_cc_library(
         "//src/mongo/db/storage:sorted_data_interface.h",
     ],
     deps = [
+        ":counters_sort",
         "//src/mongo:base",
-        "//src/mongo/db/commands:server_status_core",
+        "//src/mongo/db/commands/server_status:server_status_core",
         "//src/mongo/db/storage:index_entry_comparison",
         "//src/mongo/util/concurrency:spin_lock",
     ],
@@ -192,10 +185,10 @@ mongo_cc_library(
         ":top",
         "//src/mongo/db:server_base",
         "//src/mongo/db:shard_role",
-        "//src/mongo/db/catalog:collection_options",
-        "//src/mongo/db/catalog:index_catalog",
-        "//src/mongo/db/commands:server_status_core",
+        "//src/mongo/db/commands/server_status:server_status_core",
         "//src/mongo/db/index:index_access_method",
+        "//src/mongo/db/local_catalog:collection_options",
+        "//src/mongo/db/local_catalog:index_catalog",
         "//src/mongo/db/pipeline:document_sources_idl",
         "//src/mongo/db/s:balancer_stats_registry",
         "//src/mongo/db/timeseries/bucket_catalog",
@@ -212,29 +205,26 @@ mongo_cc_library(
         ":top",
         "//src/mongo/db:server_base",
         "//src/mongo/db:shard_role",
-        "//src/mongo/db/catalog:index_catalog",
-        "//src/mongo/db/commands:server_status_core",
+        "//src/mongo/db/commands/server_status:server_status_core",
         "//src/mongo/db/index:index_access_method",
+        "//src/mongo/db/local_catalog:index_catalog",
         "//src/mongo/db/pipeline:document_sources_idl",
         "//src/mongo/db/timeseries/bucket_catalog",
     ],
 )
 
 mongo_cc_library(
-    name = "change_collection_server_status",
+    name = "change_streams_server_status",
     srcs = [
-        "change_collection_server_status.cpp",
         "change_stream_preimages_server_status.cpp",
     ],
     deps = [
         "//src/mongo:base",
-        "//src/mongo/db:change_stream_change_collection_manager",
         "//src/mongo/db:change_stream_pre_image_util",
         "//src/mongo/db:change_stream_pre_images_collection_manager",
-        "//src/mongo/db:change_stream_serverless_helpers",
         "//src/mongo/db:server_base",
         "//src/mongo/db:shard_role",
-        "//src/mongo/db/commands:server_status_core",
+        "//src/mongo/db/commands/server_status:server_status_core",
     ],
 )
 
@@ -251,22 +241,20 @@ mongo_cc_unit_test(
     srcs = [
         "api_version_metrics_test.cpp",
         "operation_latency_histogram_test.cpp",
-        "resource_consumption_metrics_test.cpp",
         "timer_stats_test.cpp",
         "top_test.cpp",
     ],
     tags = ["mongo_unittest_first_group"],
     deps = [
         ":api_version_metrics",
-        ":resource_consumption_metrics",
         ":timer_stats",
         ":top",
-        "//src/mongo:base",
         "//src/mongo/db:service_context_non_d",
         "//src/mongo/db:service_context_test_fixture",
         "//src/mongo/db:shared_request_handling",
         "//src/mongo/db/auth:authmocks",
         "//src/mongo/db/repl:replmocks",
+        "//src/mongo/transport:transport_layer_mock",
         "//src/mongo/util:clock_source_mock",
     ],
 )

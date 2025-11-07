@@ -29,15 +29,11 @@
 
 
 #include <array>
-#include <boost/property_tree/json_parser.hpp>
-#include <boost/property_tree/ptree.hpp>
-#include <boost/tuple/tuple.hpp>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <deque>
 #include <exception>
-#include <fmt/format.h>
 #include <forward_list>
 #include <fstream>  // IWYU pragma: keep
 #include <initializer_list>
@@ -49,7 +45,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
-#include <string_view>
+#include <string_view>  // NOLINT
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -62,6 +58,10 @@
 #include <boost/log/attributes/attribute_value_set.hpp>
 #include <boost/log/core/core.hpp>
 #include <boost/log/core/record_view.hpp>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/tuple/tuple.hpp>
+#include <fmt/format.h>
 // IWYU pragma: no_include "boost/log/detail/attachable_sstream_buf.hpp"
 // IWYU pragma: no_include "boost/log/detail/locking_ptr.hpp"
 #include <boost/log/keywords/file_name.hpp>
@@ -79,12 +79,6 @@
 #include <boost/parameter/keyword.hpp>
 // IWYU pragma: no_include "boost/property_tree/detail/exception_implementation.hpp"
 // IWYU pragma: no_include "boost/property_tree/detail/ptree_implementation.hpp"
-#include <boost/property_tree/ptree_fwd.hpp>
-#include <boost/smart_ptr/make_shared_object.hpp>
-#include <boost/smart_ptr/shared_ptr.hpp>
-#include <boost/thread/exceptions.hpp>
-#include <fmt/format.h>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -96,7 +90,7 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/bson_formatter.h"
 #include "mongo/logv2/component_settings_filter.h"
@@ -128,10 +122,9 @@
 #include "mongo/platform/int128.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/stdx/unordered_map.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/temp_dir.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/debug_util.h"
@@ -143,12 +136,16 @@
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 
+#include <boost/property_tree/ptree_fwd.hpp>
+#include <boost/smart_ptr/make_shared_object.hpp>
+#include <boost/smart_ptr/shared_ptr.hpp>
+#include <boost/thread/exceptions.hpp>
+#include <fmt/format.h>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 
 namespace mongo::logv2 {
-
-using namespace fmt::literals;
 
 namespace {
 
@@ -182,7 +179,7 @@ struct TypeWithOnlyStringSerialize {
     double _y{0.0};
 
     void serialize(fmt::memory_buffer& buffer) const {
-        fmt::format_to(buffer, "(x: {}, y: {})", _x, _y);
+        fmt::format_to(std::back_inserter(buffer), "(x: {}, y: {})", _x, _y);
     }
 };
 
@@ -194,7 +191,7 @@ struct TypeWithBothStringFormatters {
     }
 
     void serialize(fmt::memory_buffer& buffer) const {
-        fmt::format_to(buffer, "serialize");
+        fmt::format_to(std::back_inserter(buffer), "serialize");
     }
 };
 
@@ -470,7 +467,7 @@ TEST_F(LogV2Test, MismatchAttrInLogging) {
     auto lines = makeLineCapture(PlainFormatter());
     if (!kDebugBuild) {
         LOGV2(4638203, "mismatch {name}", "not_name"_attr = 1);
-        ASSERT(StringData(lines->back()).startsWith("Exception during log"_sd));
+        ASSERT(StringData(lines->back()).starts_with("Exception during log"_sd));
     }
 }
 
@@ -478,7 +475,7 @@ TEST_F(LogV2Test, MissingAttrInLogging) {
     auto lines = makeLineCapture(PlainFormatter());
     if (!kDebugBuild) {
         LOGV2(6636803, "Log missing {attr}");
-        ASSERT(StringData(lines->back()).startsWith("Exception during log"_sd));
+        ASSERT(StringData(lines->back()).starts_with("Exception during log"_sd));
     }
 }
 
@@ -748,11 +745,11 @@ TEST_F(LogV2TypesTest, Stringlike) {
     StringData str_data = "a StringData"_sd;
     LOGV2(20019, "StringData {name}", "name"_attr = str_data);
     ASSERT_EQUALS(text->back(), "StringData a StringData");
-    validateJSON(str_data.toString());
+    validateJSON(std::string{str_data});
     ASSERT_EQUALS(lastBSONElement().String(), str_data);
 
     {
-        std::string_view s = "a std::string_view";
+        std::string_view s = "a std::string_view";  // NOLINT
         LOGV2(4329200, "std::string_view {name}", "name"_attr = s);
         ASSERT_EQUALS(text->back(), "std::string_view a std::string_view");
         validateJSON(std::string{s});
@@ -884,8 +881,7 @@ TEST_F(LogV2TypesTest, UUID) {
 TEST_F(LogV2TypesTest, BoostOptional) {
     LOGV2(20028, "boost::optional empty {name}", "name"_attr = boost::optional<bool>());
     ASSERT_EQUALS(text->back(),
-                  std::string("boost::optional empty ") +
-                      constants::kNullOptionalString.toString());
+                  std::string("boost::optional empty ") + constants::kNullOptionalString);
     ASSERT(mongo::fromjson(json->back())
                .getField(kAttributesFieldName)
                .Obj()
@@ -1193,7 +1189,7 @@ TEST_F(LogV2JsonBsonTest, TypeWithBSONArray) {
     LOGV2(20046, "{name}", "name"_attr = t5);
     validate([&t5](const BSONObj& obj) {
         ASSERT_EQUALS(obj.getField(kAttributesFieldName).Obj().getField("name").type(),
-                      BSONType::Array);
+                      BSONType::array);
         ASSERT(obj.getField(kAttributesFieldName)
                    .Obj()
                    .getField("name")
@@ -1434,9 +1430,9 @@ TEST_F(LogV2ContainerTest, Uint32Sequence) {
         ASSERT_EQUALS(vectorUInt32s.size(), jsonVector.size());
         for (std::size_t i = 0; i < vectorUInt32s.size(); ++i) {
             const auto& jsonElem = jsonVector[i];
-            if (jsonElem.type() == NumberInt)
+            if (jsonElem.type() == BSONType::numberInt)
                 ASSERT_EQUALS(jsonElem.Int(), vectorUInt32s[i]);
-            else if (jsonElem.type() == NumberLong)
+            else if (jsonElem.type() == BSONType::numberLong)
                 ASSERT_EQUALS(jsonElem.Long(), vectorUInt32s[i]);
             else
                 ASSERT(false) << "Element type is " << typeName(jsonElem.type())
@@ -1468,7 +1464,7 @@ TEST_F(LogV2ContainerTest, OptionalsAsElements) {
     LOGV2(20049, "{name}", "name"_attr = listOptionalBool);
     ASSERT_EQUALS(text->back(), textJoin(listOptionalBool, [](const auto& item) -> std::string {
                       if (!item)
-                          return constants::kNullOptionalString.toString();
+                          return std::string{constants::kNullOptionalString};
                       if (*item)
                           return "true";
                       return "false";
@@ -1543,7 +1539,7 @@ TEST_F(LogV2ContainerTest, AssociativeWithOptionalSequential) {
                       if (item.second) {
                           r += textJoin(*item.second, [](int v) { return fmt::format("{}", v); });
                       } else {
-                          r += constants::kNullOptionalString.toString();
+                          r += std::string{constants::kNullOptionalString};
                       }
                       return r;
                   }));
@@ -1600,9 +1596,9 @@ TEST_F(LogV2ContainerTest, StringMapUint32) {
             obj.getField(kAttributesFieldName).Obj().getField("mapOfUInt32s").Obj();
         for (const auto& mapElem : mapOfUInt32s) {
             auto elem = mappedValues.getField(mapElem.first);
-            if (elem.type() == NumberInt)
+            if (elem.type() == BSONType::numberInt)
                 ASSERT_EQUALS(elem.Int(), mapElem.second);
-            else if (elem.type() == NumberLong)
+            else if (elem.type() == BSONType::numberLong)
                 ASSERT_EQUALS(elem.Long(), mapElem.second);
             else
                 ASSERT(false) << "Element type is " << typeName(elem.type())
@@ -1740,7 +1736,7 @@ public:
             subobj1.append("lvl2_c", 1);
             subobj1.append("lvl2_d", 2);
         }
-        truncation.leafType = BSONType::String;
+        truncation.leafType = BSONType::string;
         truncation.path = {{"sub1", 0}, {"sub2", 2}, {"large", 2}};
         return TestCase{builder.obj(), std::move(truncation), "large string in subobject"};
     }
@@ -1749,7 +1745,7 @@ public:
         BSONObjBuilder builder;
         TruncationInfo truncation;
         builder.append("large", largeString);
-        truncation.leafType = BSONType::String;
+        truncation.leafType = BSONType::string;
         truncation.path = {{"large", 1}};
         return TestCase{builder.obj(), std::move(truncation), "single large string in object"};
     }
@@ -1760,7 +1756,7 @@ public:
         for (size_t i = 0; i < maxAttributeOutputSize; ++i) {
             builder.append("str");
         }
-        truncation.leafType = BSONType::String;
+        truncation.leafType = BSONType::string;
         truncation.path = {{"862", maxAttributeOutputSize - 862}};
         return TestCase{builder.arr(), std::move(truncation), "large array"};
     }
@@ -1769,7 +1765,7 @@ public:
         BSONArrayBuilder builder;
         TruncationInfo truncation;
         builder.append(largeString);
-        truncation.leafType = BSONType::String;
+        truncation.leafType = BSONType::string;
         truncation.path = {{"0", 1}};
         return TestCase{builder.arr(), std::move(truncation), "single large string in array"};
     }
@@ -1793,7 +1789,7 @@ public:
         // ["1_a", [["3_a", "3_b", "3_c", largeString, "3_d"]], "1_b"]
         auto array = builder.arr();
 
-        truncation.leafType = BSONType::String;
+        truncation.leafType = BSONType::string;
         truncation.path = {{"1", 1}, {"0", 0}, {"3", 2}};
         return TestCase{array, std::move(truncation), "large string in nested arrays"};
     }
@@ -1831,7 +1827,7 @@ public:
                                          BSONObj report,
                                          const TestCase& test) {
         auto context =
-            "Failed test: {} Failing report: {}"_format(test.name, mongo::tojson(report));
+            fmt::format("Failed test: {} Failing report: {}", test.name, mongo::tojson(report));
         auto& path = test.truncationInfo.path;
 
         ASSERT_FALSE(path.empty()) << context;
@@ -1839,54 +1835,55 @@ public:
 
         BSONObj fieldObj = report.getField(attrName).Obj();
         BSONObj truncated;
-        std::string currentObjPath = attrName.toString();
+        std::string currentObjPath = std::string{attrName};
 
         // validate nested "truncated" elements except for the last (leaf) truncated element.
         for (size_t i = 0; i < path.size(); i++) {
             const auto& segment = path.at(i);
 
-            ASSERT(fieldObj.hasField(constants::kTruncatedFieldName))
-                << "{} - missing 'truncated' field at path: {}"_format(context, currentObjPath);
+            ASSERT(fieldObj.hasField(constants::kTruncatedFieldName)) << fmt::format(
+                "{} - missing 'truncated' field at path: {}", context, currentObjPath);
 
             truncated = fieldObj.getField(constants::kTruncatedFieldName).Obj();
 
             if (segment.omitted != 0) {
-                ASSERT(fieldObj.hasField(constants::kOmittedFieldName))
-                    << "{} - missing 'omitted' field at path: {}"_format(context, currentObjPath);
+                ASSERT(fieldObj.hasField(constants::kOmittedFieldName)) << fmt::format(
+                    "{} - missing 'omitted' field at path: {}", context, currentObjPath);
                 ASSERT_EQUALS(fieldObj.getField("omitted").Int(), segment.omitted)
-                    << "{} - bad 'omitted' value at path: {}"_format(context, currentObjPath);
+                    << fmt::format("{} - bad 'omitted' value at path: {}", context, currentObjPath);
             } else {
-                ASSERT_FALSE(fieldObj.hasField("omitted"))
-                    << "{} - unexpected 'omitted' field at path: {}"_format(context,
-                                                                            currentObjPath);
+                ASSERT_FALSE(fieldObj.hasField("omitted")) << fmt::format(
+                    "{} - unexpected 'omitted' field at path: {}", context, currentObjPath);
             }
 
             currentObjPath += ".truncated";
             ASSERT(truncated.hasField(segment.fieldName))
-                << "{} - missing expected subobject {} at path {}"_format(
-                       context, segment.fieldName, currentObjPath);
+                << fmt::format("{} - missing expected subobject {} at path {}",
+                               context,
+                               segment.fieldName,
+                               currentObjPath);
 
             fieldObj = truncated.getField(segment.fieldName).Obj();
             currentObjPath += "." + segment.fieldName;
         }
         // leaf reached
         ASSERT(fieldObj.hasField("type"))
-            << "{} - missing field 'type' at path {}"_format(context, currentObjPath);
+            << fmt::format("{} - missing field 'type' at path {}", context, currentObjPath);
 
         ASSERT(fieldObj.hasField("size"))
-            << "{} - missing field 'size' at path {}"_format(context, currentObjPath);
+            << fmt::format("{} - missing field 'size' at path {}", context, currentObjPath);
 
         ASSERT(!fieldObj.hasField("omitted"))
-            << "{} - unexpected field 'omitted' at path {}"_format(context, currentObjPath);
+            << fmt::format("{} - unexpected field 'omitted' at path {}", context, currentObjPath);
 
         ASSERT(!fieldObj.hasField("truncated"))
-            << "{} - unexpected field 'truncated' at path {}"_format(context, currentObjPath);
+            << fmt::format("{} - unexpected field 'truncated' at path {}", context, currentObjPath);
 
         ASSERT_EQUALS(fieldObj.getField("type"_sd).String(), typeName(test.truncationInfo.leafType))
-            << "{} - bad 'type' value at path {}"_format(context, currentObjPath);
+            << fmt::format("{} - bad 'type' value at path {}", context, currentObjPath);
 
         ASSERT(fieldObj.getField("size"_sd).isNumber())
-            << "{} - bad 'size' value at path {}"_format(context, currentObjPath);
+            << fmt::format("{} - bad 'size' value at path {}", context, currentObjPath);
     }
 
     // Validates the reported size of the truncated attr in the log line matches the size of the
@@ -1894,8 +1891,8 @@ public:
     static void validateTruncationSize(StringData attrName,
                                        BSONObj truncatedSize,
                                        const TestCase& test) {
-        auto context =
-            "Failed test: {} Failing report: {}"_format(test.name, mongo::tojson(truncatedSize));
+        auto context = fmt::format(
+            "Failed test: {} Failing report: {}", test.name, mongo::tojson(truncatedSize));
         ASSERT(truncatedSize.hasField(attrName)) << context;
         auto reportedSize = truncatedSize.getField(attrName).Int();
         auto expectedSize = test.originalDoc.objsize();
@@ -1910,7 +1907,7 @@ public:
                                          const std::string& parentPath,
                                          size_t level) {
         static const SimpleBSONElementComparator eltCmp;
-        auto context = "Failed test: {} Path: {}"_format(test.name, parentPath);
+        auto context = fmt::format("Failed test: {} Path: {}", test.name, parentPath);
 
         auto& path = test.truncationInfo.path;
 
@@ -1929,10 +1926,10 @@ public:
 
             ASSERT_EQUALS(modifiedElement.fieldNameStringData(),
                           originalElement.fieldNameStringData())
-                << "{} - mismatched field names {} vs {}"_format(
-                       context,
-                       originalElement.fieldNameStringData(),
-                       modifiedElement.fieldNameStringData());
+                << fmt::format("{} - mismatched field names {} vs {}",
+                               context,
+                               originalElement.fieldNameStringData(),
+                               modifiedElement.fieldNameStringData());
 
             if (originalElement.fieldNameStringData() == truncatedFieldName) {
                 foundTruncatedElement = true;
@@ -1940,19 +1937,18 @@ public:
                 // if truncatedFieldName is present in the truncated object, but the test expects
                 // it to be a leaf, then it should have been omitted.
                 ASSERT_FALSE(leaf)
-                    << "{} - unexpected field {}"_format(context, truncatedFieldName);
+                    << fmt::format("{} - unexpected field {}", context, truncatedFieldName);
 
-                ASSERT_FALSE(modifiedItr.more())
-                    << "{} - truncation did not stop at field {}"_format(context,
-                                                                         truncatedFieldName);
+                ASSERT_FALSE(modifiedItr.more()) << fmt::format(
+                    "{} - truncation did not stop at field {}", context, truncatedFieldName);
 
                 ASSERT(modifiedElement.isABSONObj())
-                    << "{} - unexpected leaf element {}"_format(context, truncatedFieldName);
+                    << fmt::format("{} - unexpected leaf element {}", context, truncatedFieldName);
 
                 validateTruncationAtPath(originalElement.Obj(),
                                          modifiedElement.Obj(),
                                          test,
-                                         "{}.{}"_format(parentPath, truncatedFieldName),
+                                         fmt::format("{}.{}", parentPath, truncatedFieldName),
                                          level + 1);
             } else {
                 ASSERT(eltCmp.evaluate(originalElement == modifiedElement))
@@ -1964,18 +1960,21 @@ public:
             // if the original object has more fields than the modified object, but the truncated
             // field name is not in the modified object, then it MUST have been an omitted leaf
             // element.
-            ASSERT(leaf) << "{} - missing truncated field {}"_format(context, truncatedFieldName);
+            ASSERT(leaf) << fmt::format(
+                "{} - missing truncated field {}", context, truncatedFieldName);
 
             // The next element in the original object must be the truncated field name
             auto nextElement = originalItr.next();
             ASSERT_EQUALS(nextElement.fieldNameStringData(), truncatedFieldName)
-                << "{} - unexpected field {}, expected {}"_format(
-                       context, nextElement.fieldNameStringData(), truncatedFieldName);
+                << fmt::format("{} - unexpected field {}, expected {}",
+                               context,
+                               nextElement.fieldNameStringData(),
+                               truncatedFieldName);
 
             foundTruncatedElement = true;
         }
         ASSERT(foundTruncatedElement)
-            << "{} - missing truncated field {}"_format(context, truncatedFieldName);
+            << fmt::format("{} - missing truncated field {}", context, truncatedFieldName);
     }
 
     static void validateTruncatedAttr(const TestCase& test, const BSONObj& truncatedAttr) {
@@ -2060,11 +2059,11 @@ TEST_F(LogV2Test, StringTruncation) {
         std::string context = "Failed test: " + note;
 
         ASSERT_LTE(str.size(), maxLength) << context;
-        ASSERT(str.endsWith(suffix))
+        ASSERT(str.ends_with(suffix))
             << context << " - string " << str << " does not end with " << suffix;
 
         auto trunc = obj[constants::kTruncatedFieldName]["name"];
-        ASSERT_EQUALS(trunc["type"].String(), typeName(BSONType::String)) << context;
+        ASSERT_EQUALS(trunc["type"].String(), typeName(BSONType::string)) << context;
         ASSERT_EQUALS(trunc["size"].numberLong(), str::escapeForJSON(input).size()) << context;
     }
 }
@@ -2134,6 +2133,36 @@ TEST_F(LogV2Test, Ramlog) {
     ASSERT(verifyRamLog());
 }
 
+TEST_F(LogV2Test, Ramlog_AltMaxLinesMaxSize) {
+    constexpr size_t alternativeMaxLines = 2048;
+    constexpr size_t alternativeMaxSizeBytes = 2 * 1024 * 1024;
+    RamLog* ramlog = RamLog::get("test_ramlog_alt2", alternativeMaxLines, alternativeMaxSizeBytes);
+    auto sink = wrapInUnlockedSink(boost::make_shared<RamLogSink>(ramlog));
+    applyDefaultFilterToSink(sink);
+    sink->set_formatter(PlainFormatter());
+    attachSink(sink);
+
+    auto lines = makeLineCapture(PlainFormatter(), false);
+
+    auto verifyRamLog = [&] {
+        RamLog::LineIterator iter(ramlog);
+        for (const auto& s : lines->lines()) {
+            const auto next = iter.next();
+            if (s != next) {
+                std::cout << "\n\n\n********************** s='" << s << "', next='" << next
+                          << "'\n";
+                return false;
+            }
+        }
+        return true;
+    };
+
+    LOGV2(5816501, "test");
+    ASSERT(verifyRamLog());
+    LOGV2(5816502, "test2");
+    ASSERT(verifyRamLog());
+}
+
 // Positive: Test that the ram log is properly circular
 TEST_F(LogV2Test, Ramlog_CircularBuffer) {
     RamLog* ramlog = RamLog::get("test_ramlog2");
@@ -2158,6 +2187,42 @@ TEST_F(LogV2Test, Ramlog_CircularBuffer) {
         ASSERT_EQ(iter.getTotalLinesWritten(), 5000UL);
         for (const auto& line : lines) {
             ASSERT_EQ(line, iter.next());
+        }
+    }
+
+    ramlog->clear();
+}
+
+// Positive: Test that the ram log is properly circular
+TEST_F(LogV2Test, Ramlog_CircularBuffer_AltMaxLinesMaxSize) {
+    constexpr size_t alternativeMaxLines = 10;
+    constexpr size_t alternativeMaxSizeBytes = 2 * 1024 * 1024;
+    RamLog* ramlog = RamLog::get("test_ramlog2_alt2", alternativeMaxLines, alternativeMaxSizeBytes);
+    ASSERT_EQ(alternativeMaxLines, ramlog->getMaxLines());
+    ASSERT_EQ(alternativeMaxSizeBytes, ramlog->getMaxSizeBytes());
+
+    std::vector<std::string> lines;
+
+    constexpr size_t maxLines = alternativeMaxLines;
+    constexpr size_t testLines = 12;
+
+    // Write enough lines to trigger wrapping
+    for (size_t i = 0; i < testLines; ++i) {
+        auto s = std::to_string(i);
+        lines.push_back(s);
+        ramlog->write(s);
+    }
+
+    lines.erase(lines.begin(), lines.begin() + (testLines - maxLines) + 1);
+
+    // Verify we circled correctly through the buffer
+    {
+        RamLog::LineIterator iter(ramlog);
+        ASSERT_EQ(iter.getTotalLinesWritten(), testLines);
+        int n = 1;
+        for (const auto& line : lines) {
+            ASSERT_EQ(line, iter.next()) << "\n\n\n   n=" << n << "\n\n\n\n";
+            n++;
         }
     }
 
@@ -2198,6 +2263,43 @@ TEST_F(LogV2Test, Ramlog_MaxSize) {
     ramlog->clear();
 }
 
+// Positive: Test that the ram log has a max size cap
+TEST_F(LogV2Test, Ramlog_MaxSize_AltMaxLinesMaxSize) {
+    constexpr size_t testLines = 2000;
+    constexpr size_t longStringLength = 2048;
+    constexpr size_t fullStringLength = 2048 + 5;
+
+    constexpr size_t alternativeMaxLines = 2048;
+    constexpr size_t alternativeMaxSizeBytes = 1024 * 1024 + fullStringLength;
+    RamLog* ramlog = RamLog::get("test_ramlog3_alt", alternativeMaxLines, alternativeMaxSizeBytes);
+
+    std::vector<std::string> lines;
+
+    std::string longStr(longStringLength, 'a');
+
+    // Write enough lines to trigger wrapping and trimming
+    for (size_t i = 0; i < testLines; ++i) {
+        auto s = std::to_string(10000 + i) + longStr;
+        lines.push_back(s);
+        ramlog->write(s);
+    }
+
+    constexpr size_t linesToFit = alternativeMaxSizeBytes / fullStringLength;
+
+    lines.erase(lines.begin(), lines.begin() + (testLines - linesToFit));
+
+    // Verify we keep just enough lines that fit
+    {
+        RamLog::LineIterator iter(ramlog);
+        ASSERT_EQ(iter.getTotalLinesWritten(), 2000UL);
+        for (const auto& line : lines) {
+            ASSERT_EQ(line, iter.next());
+        }
+    }
+
+    ramlog->clear();
+}
+
 // Positive: Test that the ram log handles really large lines
 TEST_F(LogV2Test, Ramlog_GiantLine) {
     RamLog* ramlog = RamLog::get("test_ramlog4");
@@ -2216,6 +2318,41 @@ TEST_F(LogV2Test, Ramlog_GiantLine) {
     ramlog->write(s);
 
     std::string bigStr(2048 * 1024, 'a');
+    lines.push_back(bigStr);
+    ramlog->write(bigStr);
+
+    // Verify we keep 2 lines
+    {
+        RamLog::LineIterator iter(ramlog);
+        ASSERT_EQ(iter.getTotalLinesWritten(), testLines + 2);
+        for (const auto& line : lines) {
+            ASSERT_EQ(line, iter.next());
+        }
+    }
+
+    ramlog->clear();
+}
+
+// Positive: Test that the ram log handles really large lines
+TEST_F(LogV2Test, Ramlog_GiantLine_AltMaxLinesMaxSize) {
+    constexpr size_t alternativeMaxLines = 1024;
+    constexpr size_t alternativeMaxSizeBytes = 2 * 1024 * 1024;
+    RamLog* ramlog = RamLog::get("test_ramlog4_alt", alternativeMaxLines, alternativeMaxSizeBytes);
+
+    std::vector<std::string> lines;
+
+    constexpr size_t testLines = 5000;
+
+    // Write enough lines to trigger wrapping
+    for (size_t i = 0; i < testLines; ++i) {
+        ramlog->write(std::to_string(i));
+    }
+
+    auto s = std::to_string(testLines);
+    lines.push_back(s);
+    ramlog->write(s);
+
+    std::string bigStr(2048 * 1024 + 128, 'a');
     lines.push_back(bigStr);
     ramlog->write(bigStr);
 
@@ -2369,19 +2506,20 @@ TEST_F(UnstructuredLoggingTest, Args) {
     std::string format_str = "format {} str {} fields";
     logd(format_str, 1, "str");  // NOLINT
     validate([&format_str](const BSONObj& obj) {
-        ASSERT_EQUALS(obj.getField(kMessageFieldName).String(), fmt::format(format_str, 1, "str"));
+        ASSERT_EQUALS(obj.getField(kMessageFieldName).String(),
+                      fmt::format(fmt::runtime(format_str), 1, "str"));
     });
 }
 
 TEST_F(UnstructuredLoggingTest, ArgsLikeFormatSpecifier) {
     // Ensure the plain formatter does not process the formatted string
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     std::string format_str = "format {} str {} fields";
     logd(format_str, 1, "{ x : 1}");  // NOLINT
     validate([&format_str](const BSONObj& obj) {
         ASSERT_EQUALS(obj.getField(kMessageFieldName).String(),
-                      fmt::format(format_str, 1, "{ x : 1}"));
+                      fmt::format(fmt::runtime(format_str), 1, "{ x : 1}"));
     });
 }
 
@@ -2390,7 +2528,7 @@ TEST_F(UnstructuredLoggingTest, ManyArgs) {
     logd(format_str, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);  // NOLINT
     validate([&format_str](const BSONObj& obj) {
         ASSERT_EQUALS(obj.getField(kMessageFieldName).String(),
-                      fmt::format(format_str, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11));
+                      fmt::format(fmt::runtime(format_str), 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11));
     });
 }
 
@@ -2424,10 +2562,7 @@ TEST_F(UnstructuredLoggingTest, UserBothStringAndBSON) {
 }
 
 TEST_F(UnstructuredLoggingTest, VectorBSON) {
-    std::vector<BSONObj> vectorBSON = {BSON("str1"
-                                            << "str2"),
-                                       BSON("str3"
-                                            << "str4")};
+    std::vector<BSONObj> vectorBSON = {BSON("str1" << "str2"), BSON("str3" << "str4")};
     logd("{}", vectorBSON);  // NOLINT
     validate([](const BSONObj& obj) {
         ASSERT_EQUALS(obj.getField(kMessageFieldName).String(),
@@ -2436,12 +2571,8 @@ TEST_F(UnstructuredLoggingTest, VectorBSON) {
 }
 
 TEST_F(UnstructuredLoggingTest, MapBSON) {
-    std::map<std::string, BSONObj> mapBSON = {{"key1",
-                                               BSON("str1"
-                                                    << "str2")},
-                                              {"key2",
-                                               BSON("str3"
-                                                    << "str4")}};
+    std::map<std::string, BSONObj> mapBSON = {{"key1", BSON("str1" << "str2")},
+                                              {"key2", BSON("str3" << "str4")}};
     logd("{}", mapBSON);  // NOLINT
     validate([](const BSONObj& obj) {
         ASSERT_EQUALS(obj.getField(kMessageFieldName).String(),

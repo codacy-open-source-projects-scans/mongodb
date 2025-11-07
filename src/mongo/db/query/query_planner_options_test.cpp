@@ -27,15 +27,6 @@
  *    it in the license file.
  */
 
-#include <cstddef>
-#include <map>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -43,24 +34,30 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/field_ref.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/index_entry.h"
 #include "mongo/db/query/index_tag.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_planner_test_fixture.h"
-#include "mongo/db/query/query_solution.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <cstddef>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
 
 namespace mongo {
 namespace {
@@ -71,7 +68,7 @@ namespace {
 IndexEntry buildSimpleIndexEntry(const BSONObj& kp, const std::string& indexName) {
     return {kp,
             IndexNames::nameToType(IndexNames::findPluginName(kp)),
-            IndexDescriptor::kLatestIndexVersion,
+            IndexConfig::kLatestIndexVersion,
             false,
             {},
             {},
@@ -420,7 +417,7 @@ TEST_F(QueryPlannerTest, ShardFilterCollScan) {
     assertNumSolutions(1U);
     assertSolutionExists(
         "{sharding_filter: {node: "
-        "{cscan: {dir: 1}}}}}}}");
+        "{cscan: {dir: 1}}}}");
 }
 
 TEST_F(QueryPlannerTest, ShardFilterBasicIndex) {
@@ -496,10 +493,8 @@ TEST_F(QueryPlannerTest, ShardFilterNestedProjCovered) {
 
 TEST_F(QueryPlannerTest, ShardFilterHashProjNotCovered) {
     params.mainCollectionInfo.options = QueryPlannerParams::INCLUDE_SHARD_FILTER;
-    params.shardKey = BSON("a"
-                           << "hashed");
-    addIndex(BSON("a"
-                  << "hashed"));
+    params.shardKey = BSON("a" << "hashed");
+    addIndex(BSON("a" << "hashed"));
 
     runQuerySortProj(fromjson("{a: 1}"), BSONObj(), fromjson("{_id : 0, a : 1}"));
 
@@ -527,8 +522,7 @@ TEST_F(QueryPlannerTest, ShardFilterKeyPrefixIndexCovered) {
 
 TEST_F(QueryPlannerTest, ShardFilterNoIndexNotCovered) {
     params.mainCollectionInfo.options = QueryPlannerParams::INCLUDE_SHARD_FILTER;
-    params.shardKey = BSON("a"
-                           << "hashed");
+    params.shardKey = BSON("a" << "hashed");
     addIndex(BSON("b" << 1));
 
     runQuerySortProj(fromjson("{b: 1}"), BSONObj(), fromjson("{_id : 0, a : 1}"));
@@ -887,7 +881,22 @@ TEST_F(QueryPlannerTest, DollarResumeAfterFieldPropagatedFromQueryRequestToStage
 
     const auto* node = solns.front()->root();
     const CollectionScanNode* csn = static_cast<const CollectionScanNode*>(node);
-    ASSERT_EQUALS(RecordId(42LL), csn->resumeAfterRecordId.value());
+    ASSERT_EQUALS(RecordId(42LL), csn->resumeScanPoint->recordId);
+    ASSERT_FALSE(csn->resumeScanPoint->tolerateKeyNotFound);
+}
+
+TEST_F(QueryPlannerTest, DollarStartAtFieldPropagatedFromQueryRequestToStageBuilder) {
+    BSONObj cmdObj = BSON("find" << nss.ns_forTest() << "hint" << BSON("$natural" << 1) << "sort"
+                                 << BSON("$natural" << 1) << "$_requestResumeToken" << true
+                                 << "$_startAt" << BSON("$recordId" << 42LL));
+
+    runQueryAsCommand(cmdObj);
+    assertHasOnlyCollscan();
+
+    const auto* node = solns.front()->root();
+    const CollectionScanNode* csn = static_cast<const CollectionScanNode*>(node);
+    ASSERT_EQUALS(RecordId(42LL), csn->resumeScanPoint->recordId);
+    ASSERT_TRUE(csn->resumeScanPoint->tolerateKeyNotFound);
 }
 
 TEST_F(QueryPlannerTest, PreserveRecordIdOptionPrecludesSimpleSort) {

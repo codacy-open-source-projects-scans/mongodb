@@ -29,24 +29,20 @@
 
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <tuple>
-#include <unordered_map>
-#include <utility>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/stages/lookup_hash_table.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/values/row.h"
 #include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <memory>
+#include <unordered_map>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo::sbe {
 /**
@@ -125,8 +121,9 @@ protected:
     void doAttachToOperationContext(OperationContext* opCtx) override;
     void doDetachFromOperationContext() override;
 
-    void doSaveState(bool relinquishCursor) override;
-    void doRestoreState(bool relinquishCursor) override;
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {
+        return;
+    }
 
 private:
     using HashTableType = std::unordered_map<value::MaterializedRow,  // NOLINT
@@ -193,5 +190,10 @@ private:
 
     // LookupHashTable instance holding the inner collection.
     LookupHashTable _hashTable;
+
+    void doForceSpill() final {
+        _hashTable.forceSpill();
+        _memoryTracker.value().set(_hashTable.getMemUsage());
+    };
 };  // class HashLookupStage
 }  // namespace mongo::sbe

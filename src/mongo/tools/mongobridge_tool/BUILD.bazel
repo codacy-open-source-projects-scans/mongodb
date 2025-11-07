@@ -22,11 +22,13 @@ mongo_cc_binary(
     srcs = [
         "bridge.cpp",
         "bridge_commands.cpp",
-        "bridge_commands.h",
         "mongobridge_options.cpp",
-        "mongobridge_options.h",
         "mongobridge_options_gen",
         "mongobridge_options_init.cpp",
+    ],
+    private_hdrs = [
+        ":bridge_commands.h",
+        ":mongobridge_options.h",
     ],
     tags = [
         "dist_test",
@@ -34,6 +36,8 @@ mongo_cc_binary(
     deps = [
         "//src/mongo/db:dbmessage",
         "//src/mongo/db:service_context_non_d",
+        # UBSAN builds needs the RTTI info for WhereMatchExpression, that is defined in this project.
+        "//src/mongo/db/matcher:expressions_mongod_only",
         "//src/mongo/rpc",
         "//src/mongo/transport:message_compressor",
         "//src/mongo/transport:message_compressor_options_server",

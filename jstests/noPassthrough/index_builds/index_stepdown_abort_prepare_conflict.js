@@ -15,6 +15,10 @@
  *    step-up from ocurring.
  *
  * @tags: [
+ *   # When primary-driven index builds are enabled, secondaries do not run their own index builds.
+ *   # TODO SERVER-111896: May also be subject to investigation for whether this scenario is relevant
+ *   # to primary driven index builds
+ *   primary_driven_index_builds_incompatible,
  *   uses_prepare_transaction,
  *   uses_transactions,
  * ]
@@ -22,7 +26,7 @@
 import {PrepareHelpers} from "jstests/core/txns/libs/prepare_helpers.js";
 import {kDefaultWaitForFailPointTimeout} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 import {waitForState} from "jstests/replsets/rslib.js";
 
 const dbName = "test";
@@ -37,11 +41,10 @@ const primaryDB = primary.getDB(dbName);
 const primaryColl = primaryDB[collName];
 
 // This will cause the index build to fail with a CannotIndexParallelArrays error.
-assert.commandWorked(
-    primaryColl.insert({_id: 1, x: [1, 2], y: [1, 2]}, {"writeConcern": {"w": 1}}));
+assert.commandWorked(primaryColl.insert({_id: 1, x: [1, 2], y: [1, 2]}, {"writeConcern": {"w": 1}}));
 
 // Enable fail point which makes hybrid index build to hang before it aborts.
-var failPoint;
+let failPoint;
 
 // Index builds fail immediately instead of suppressing errors until the commit phase, and always
 // signal the primary for abort (even if it is itself). Abort is only ever performed in the command
@@ -51,23 +54,26 @@ var failPoint;
 // holding the lock.
 failPoint = "hangAfterInitializingIndexBuild";
 
-let res =
-    assert.commandWorked(primary.adminCommand({configureFailPoint: failPoint, mode: "alwaysOn"}));
+let res = assert.commandWorked(primary.adminCommand({configureFailPoint: failPoint, mode: "alwaysOn"}));
 let timesEntered = res.count;
 
-const indexName = 'myidx';
-const indexThread = IndexBuildTest.startIndexBuild(primary,
-                                                   primaryColl.getFullName(),
-                                                   {x: 1, y: 1},
-                                                   {name: indexName},
-                                                   ErrorCodes.InterruptedDueToReplStateChange);
+const indexName = "myidx";
+const indexThread = IndexBuildTest.startIndexBuild(
+    primary,
+    primaryColl.getFullName(),
+    {x: 1, y: 1},
+    {name: indexName},
+    ErrorCodes.InterruptedDueToReplStateChange,
+);
 
 jsTestLog("Waiting for index build to hit failpoint");
-assert.commandWorked(primary.adminCommand({
-    waitForFailPoint: failPoint,
-    timesEntered: timesEntered + 1,
-    maxTimeMS: kDefaultWaitForFailPointTimeout
-}));
+assert.commandWorked(
+    primary.adminCommand({
+        waitForFailPoint: failPoint,
+        timesEntered: timesEntered + 1,
+        maxTimeMS: kDefaultWaitForFailPointTimeout,
+    }),
+);
 
 jsTestLog("Start txn");
 const session = primary.startSession();

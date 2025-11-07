@@ -31,10 +31,12 @@
 #include "mongo/db/query/util/spill_util.h"
 
 #include "mongo/db/storage/disk_space_util.h"
+#include "mongo/util/str.h"
 
 namespace mongo {
 
-Status ensureSufficientDiskSpaceForSpilling(const std::string& dbpath, int64_t minRequired) {
+Status ensureSufficientDiskSpaceForSpilling(const boost::filesystem::path& dbpath,
+                                            int64_t minRequired) {
     int64_t available = getAvailableDiskSpaceBytesInDbPath(dbpath);
     if (available < minRequired) {
         return Status(ErrorCodes::OutOfDiskSpace,

@@ -32,24 +32,23 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
+#include "mongo/base/string_data.h"
+#include "mongo/db/session/kill_sessions.h"
+#include "mongo/db/session/session_catalog_test.h"
+#include "mongo/stdx/future.h"
+#include "mongo/unittest/barrier.h"
+#include "mongo/unittest/death_test.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/time_support.h"
+
 #include <algorithm>
 #include <future>
 #include <memory>
 #include <string>
 #include <system_error>
-
-#include "mongo/base/string_data.h"
-#include "mongo/db/session/kill_sessions.h"
-#include "mongo/db/session/session_catalog_test.h"
-#include "mongo/stdx/future.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/barrier.h"
-#include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/fail_point.h"
-#include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -1485,7 +1484,7 @@ TEST_F(SessionCatalogTestWithDefaultOpCtx, KillSessionsThroughScanSessions) {
         return {lsid0, lsid1, lsid2};
     }();
 
-    std::vector<stdx::future<void>> futures;
+    std::vector<std::future<void>> futures;  // NOLINT
     unittest::Barrier firstUseOfTheSessionReachedBarrier(lsids.size() + 1);
 
     for (const auto& lsid : lsids) {
@@ -1564,7 +1563,7 @@ TEST_F(SessionCatalogTestWithDefaultOpCtx, ConcurrentCheckOutAndKill) {
         auto opCtx = cc().makeOperationContext();
         opCtx->setLogicalSessionId(lsid);
 
-        stdx::future<void> normalCheckOutFinish, killCheckOutFinish;
+        std::future<void> normalCheckOutFinish, killCheckOutFinish;  // NOLINT
 
         // This variable is protected by the session check-out.
         std::string lastSessionCheckOut = "first session";
@@ -1634,7 +1633,7 @@ TEST_F(SessionCatalogTest, CheckOutForKillTimeout) {
         // Check out the session to block checkOutForKill.
         OperationContextSession firstCheckOut(opCtx.get());
 
-        stdx::future<void> killCheckOutTimeout = stdx::async(stdx::launch::async, [&] {
+        std::future<void> killCheckOutTimeout = std::async(std::launch::async, [&] {  // NOLINT
             ThreadClient tc(getServiceContext()->getService());
             auto sideOpCtx = Client::getCurrent()->makeOperationContext();
             sideOpCtx->setLogicalSessionId(lsid);

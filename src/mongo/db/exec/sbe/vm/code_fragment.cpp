@@ -320,19 +320,27 @@ void CodeFragment::appendNoStack(CodeFragment&& code) {
     copyCodeAndFixup(std::move(code));
 }
 
-void CodeFragment::append(CodeFragment&& lhs, CodeFragment&& rhs) {
-    invariant(lhs.stackSize() == rhs.stackSize());
+void CodeFragment::append(std::vector<CodeFragment>&& fragments) {
+    if (fragments.empty()) {
+        return;
+    }
+    for (const auto& fragment : fragments) {
+        tassert(10130701,
+                "Exclusive code fragments must have the same stack size",
+                fragment.stackSize() == fragments[0].stackSize());
+    }
 
     // Fixup all stack offsets before copying.
-    lhs.fixupStackOffsets(_stackSize);
-    rhs.fixupStackOffsets(_stackSize);
+    for (auto& fragment : fragments) {
+        fragment.fixupStackOffsets(_stackSize);
+        _maxStackSize = std::max(_maxStackSize, _stackSize + fragment._maxStackSize);
+    }
 
-    _maxStackSize = std::max(_maxStackSize, _stackSize + lhs._maxStackSize);
-    _maxStackSize = std::max(_maxStackSize, _stackSize + rhs._maxStackSize);
-    _stackSize += lhs._stackSize;
+    _stackSize += fragments[0]._stackSize;
 
-    copyCodeAndFixup(std::move(lhs));
-    copyCodeAndFixup(std::move(rhs));
+    for (auto&& fragment : fragments) {
+        copyCodeAndFixup(std::move(fragment));
+    }
 }
 
 void CodeFragment::appendConstVal(value::TypeTags tag, value::Value val) {
@@ -350,6 +358,7 @@ void CodeFragment::appendConstVal(value::TypeTags tag, value::Value val) {
 
 void CodeFragment::appendAccessVal(value::SlotAccessor* accessor) {
     Instruction i;
+    // Keep this code in sync with the code below which reads the tag
     i.tag = [](value::SlotAccessor* accessor) {
         if (accessor->is<value::OwnedValueAccessor>()) {
             return Instruction::pushOwnedAccessorVal;
@@ -362,7 +371,19 @@ void CodeFragment::appendAccessVal(value::SlotAccessor* accessor) {
     auto offset = allocateSpace(sizeof(Instruction) + sizeof(accessor));
 
     offset += writeToMemory(offset, i);
-    offset += writeToMemory(offset, accessor);
+    // Keep this code in sync with the tag generation block above
+    switch (i.tag) {
+        // Cast to the concrete class when known to avoid potential issues with pointer offset
+        // See SERVER-86896 for details
+        case Instruction::pushEnvAccessorVal:
+            offset += writeToMemory(offset, accessor->as<RuntimeEnvironment::Accessor>());
+            break;
+        case Instruction::pushOwnedAccessorVal:
+            offset += writeToMemory(offset, accessor->as<value::OwnedValueAccessor>());
+            break;
+        default:
+            offset += writeToMemory(offset, accessor);
+    };
 
     adjustStackSimple(i);
 }
@@ -388,7 +409,7 @@ void CodeFragment::appendLocalVal(FrameId frameId, int variable, bool moveFrom) 
     // Compute the absolute variable stack offset based on the current stack depth
     int stackOffset = varToOffset(variable) + _stackSize;
 
-    // If frame has stackPositiion defined, then compute the final relative stack offset.
+    // If frame has stackPosition defined, then compute the final relative stack offset.
     // Otherwise, register a fixup to compute the relative stack offset later.
     if (frame.stackPosition != FrameInfo::kPositionNotSet) {
         stackOffset -= frame.stackPosition;
@@ -405,9 +426,10 @@ void CodeFragment::appendLocalVal(FrameId frameId, int variable, bool moveFrom) 
     adjustStackSimple(i);
 }
 
-void CodeFragment::appendLocalLambda(int codePosition) {
+void CodeFragment::appendLocalLambda(int codePosition, size_t numArgs) {
+    invariant(numArgs == 1 || numArgs == 2);
     Instruction i;
-    i.tag = Instruction::pushLocalLambda;
+    i.tag = numArgs == 1 ? Instruction::pushOneArgLambda : Instruction::pushTwoArgLambda;
 
     auto size = sizeof(Instruction) + sizeof(codePosition);
     auto offset = allocateSpace(size);
@@ -586,7 +608,7 @@ void CodeFragment::appendGetField(Instruction::Parameter lhs, Instruction::Param
 
 void CodeFragment::appendGetField(Instruction::Parameter input, StringData fieldName) {
     auto size = fieldName.size();
-    invariant(size < Instruction::kMaxInlineStringSize);
+    tassert(11086817, "Field name is too long", size < Instruction::kMaxInlineStringSize);
 
     Instruction i;
     i.tag = Instruction::getFieldImm;
@@ -723,16 +745,19 @@ void CodeFragment::appendTraverseP() {
     appendSimpleInstruction(Instruction::traverseP);
 }
 
-void CodeFragment::appendTraverseP(int codePosition, Instruction::Constants k) {
+void CodeFragment::appendTraverseP(int codePosition, size_t numArgs, Instruction::Constants k) {
     Instruction i;
     i.tag = Instruction::traversePImm;
 
-    auto size = sizeof(Instruction) + sizeof(codePosition) + sizeof(k);
+    auto size =
+        sizeof(Instruction) + sizeof(codePosition) + sizeof(Instruction::Constants) + sizeof(k);
     auto offset = allocateSpace(size);
 
     int codeOffset = codePosition - _instrs.size();
 
     offset += writeToMemory(offset, i);
+    offset += writeToMemory(
+        offset, numArgs == 2 ? Instruction::Constants::True : Instruction::Constants::False);
     offset += writeToMemory(offset, k);
     offset += writeToMemory(offset, codeOffset);
 
@@ -746,16 +771,19 @@ void CodeFragment::appendTraverseF() {
     appendSimpleInstruction(Instruction::traverseF);
 }
 
-void CodeFragment::appendTraverseF(int codePosition, Instruction::Constants k) {
+void CodeFragment::appendTraverseF(int codePosition, size_t numArgs, Instruction::Constants k) {
     Instruction i;
     i.tag = Instruction::traverseFImm;
 
-    auto size = sizeof(Instruction) + sizeof(codePosition) + sizeof(k);
+    auto size =
+        sizeof(Instruction) + sizeof(codePosition) + sizeof(Instruction::Constants) + sizeof(k);
     auto offset = allocateSpace(size);
 
     int codeOffset = codePosition - _instrs.size();
 
     offset += writeToMemory(offset, i);
+    offset += writeToMemory(
+        offset, numArgs == 2 ? Instruction::Constants::True : Instruction::Constants::False);
     offset += writeToMemory(offset, k);
     offset += writeToMemory(offset, codeOffset);
 

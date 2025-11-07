@@ -29,20 +29,22 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <map>
-#include <set>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/config.h"
 #include "mongo/crypto/sha256_block.h"
 #include "mongo/db/auth/role_name.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <map>
+#include <set>
+#include <string>
+#include <vector>
+
+#include <boost/optional.hpp>
+
+namespace MONGO_MOD_PUBLIC mongo {
 
 #if (MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_WINDOWS) || \
     (MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_APPLE)
@@ -157,7 +159,7 @@ struct TLSCredentials {
     SSLParams::CertificateSelector tlsClusterCertificateSelector;
 #endif
 
-    TLSCredentials() : tlsCipherConfig(kSSLCipherConfigDefault){};
+    TLSCredentials() : tlsCipherConfig(kSSLCipherConfigDefault) {};
 };
 
 struct ClusterConnection {
@@ -232,4 +234,4 @@ Status parseCertificateSelector(SSLParams::CertificateSelector* selector,
                                 StringData name,
                                 StringData value);
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

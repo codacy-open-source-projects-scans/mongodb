@@ -1,5 +1,6 @@
 """The unittest.TestCase for C++ integration tests."""
 
+import copy
 from typing import Optional
 
 from buildscripts.resmokelib import core, logging, utils
@@ -31,7 +32,13 @@ class CPPIntegrationTestCase(interface.ProcessTestCase):
         """Configure the test case."""
         interface.ProcessTestCase.configure(self, fixture, *args, **kwargs)
 
-        self.program_options["connectionString"] = self.fixture.get_internal_connection_string()
+        self.program_options["connectionString"] = self.fixture.get_shell_connection_string(
+            self.program_options.get("useEgressGRPC")
+        )
+
+        process_kwargs = copy.deepcopy(self.program_options.get("process_kwargs", {}))
+        interface.append_process_tracking_options(process_kwargs, self._id)
+        self.program_options["process_kwargs"] = process_kwargs
 
     def _make_process(self):
         return core.programs.generic_program(

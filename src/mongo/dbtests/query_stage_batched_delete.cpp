@@ -27,15 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <ratio>
-#include <utility>
-#include <vector>
-
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -44,42 +35,51 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/exec/batched_delete_stage.h"
-#include "mongo/db/exec/collection_scan.h"
+#include "mongo/db/exec/classic/batched_delete_stage.h"
+#include "mongo/db/exec/classic/collection_scan.h"
+#include "mongo/db/exec/classic/delete_stage.h"
+#include "mongo/db/exec/classic/plan_stage.h"
+#include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/collection_scan_common.h"
-#include "mongo/db/exec/delete_stage.h"
-#include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/exec/working_set.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_role.h"
 #include "mongo/db/storage/checkpointer.h"
 #include "mongo/db/storage/snapshot.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/tick_source.h"
 #include "mongo/util/tick_source_mock.h"
 #include "mongo/util/timer.h"
+
+#include <memory>
+#include <ratio>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace QueryStageBatchedDelete {
@@ -188,7 +188,7 @@ public:
     }
 
     void getRecordIds(OperationContext* opCtx,
-                      const CollectionPtr& collection,
+                      const CollectionAcquisition& collection,
                       CollectionScanParams::Direction direction,
                       std::vector<RecordId>* out) {
         WorkingSet ws;
@@ -196,9 +196,9 @@ public:
         CollectionScanParams params;
         params.direction = direction;
         params.tailable = false;
-        auto expCtx = ExpressionContextBuilder{}.opCtx(opCtx).ns(collection->ns()).build();
+        auto expCtx = ExpressionContextBuilder{}.opCtx(opCtx).ns(collection.nss()).build();
         std::unique_ptr<CollectionScan> scan(
-            new CollectionScan(expCtx.get(), &collection, params, &ws, nullptr));
+            new CollectionScan(expCtx.get(), collection, params, &ws, nullptr));
         while (!scan->isEOF()) {
             WorkingSetID id = WorkingSet::INVALID_ID;
             PlanStage::StageState state = scan->work(&id);
@@ -325,7 +325,7 @@ TEST_F(QueryStageBatchedDeleteTest, BatchedDeleteStagedDocIsDeleted) {
 
     // Get the RecordIds that would be returned by an in-order scan.
     std::vector<RecordId> recordIds;
-    getRecordIds(&_opCtx, coll.getCollectionPtr(), CollectionScanParams::FORWARD, &recordIds);
+    getRecordIds(&_opCtx, coll, CollectionScanParams::FORWARD, &recordIds);
 
     WorkingSet ws;
     auto deleteStage = makeBatchedDeleteStage(&ws, coll);
@@ -394,10 +394,7 @@ TEST_F(QueryStageBatchedDeleteTest, BatchedDeleteStagedDocIsDeletedWriteConflict
 
     // Get the RecordIds that would be returned by an in-order scan.
     std::vector<RecordId> recordIds;
-    getRecordIds(batchedDeleteOpCtx.get(),
-                 coll.getCollectionPtr(),
-                 CollectionScanParams::FORWARD,
-                 &recordIds);
+    getRecordIds(batchedDeleteOpCtx.get(), coll, CollectionScanParams::FORWARD, &recordIds);
 
 
     WorkingSet ws;
@@ -654,17 +651,17 @@ TEST_F(QueryStageBatchedDeleteTest, BatchedDeleteTargetBatchTimeMSWithTargetBatc
 
     std::vector<std::pair<BSONObj, Milliseconds>> timedBatch0{
         {BSON("_id" << 1 << "a" << 1), Milliseconds(1)},
-        {BSON("_id" << 2 << "a" << 2), Milliseconds(0)},
-        {BSON("_id" << 3 << "a" << 3), Milliseconds(0)},
+        {BSON("_id" << 2 << "a" << 2), Milliseconds(1)},
+    };
+
+    std::vector<std::pair<BSONObj, Milliseconds>> timedBatch1{
+        {BSON("_id" << 3 << "a" << 3), Milliseconds(4)},
         {BSON("_id" << 4 << "a" << 4), Milliseconds(0)},
         {BSON("_id" << 5 << "a" << 5), Milliseconds(0)},
         {BSON("_id" << 6 << "a" << 6), Milliseconds(0)},
         {BSON("_id" << 7 << "a" << 7), Milliseconds(0)},
-        {BSON("_id" << 8 << "a" << 8), Milliseconds(4)},
-    };
-
-    std::vector<std::pair<BSONObj, Milliseconds>> timedBatch1{
-        {BSON("_id" << 9 << "a" << 9), Milliseconds(1)},
+        {BSON("_id" << 8 << "a" << 8), Milliseconds(0)},
+        {BSON("_id" << 9 << "a" << 9), Milliseconds(0)},
         {BSON("_id" << 10 << "a" << 10), Milliseconds(1)},
     };
 
@@ -707,16 +704,16 @@ TEST_F(QueryStageBatchedDeleteTest, BatchedDeleteTargetBatchTimeMSWithTargetBatc
         }
     }
 
-    // Batch0 deletions.
+    // Batch1 deletions.
     {
         Timer timer(tickSource());
         state = deleteStage->work(&id);
-        ASSERT_EQ(stats->docsDeleted, batchSize0);
+        ASSERT_EQ(stats->docsDeleted, batchSize1);
         ASSERT_EQ(state, PlanStage::NEED_TIME);
         ASSERT_GTE(Milliseconds(timer.millis()), targetBatchTimeMS);
     }
 
-    // Batch1 deletions.
+    // Batch0 deletions.
     {
         Timer timer(tickSource());
 
@@ -995,23 +992,23 @@ TEST_F(QueryStageBatchedDeleteTest, BatchedDeleteTargetPassTimeMSReachedBeforeTa
     auto targetBatchTimeMS = Milliseconds(5);
     auto targetPassTimeMS = Milliseconds(10);
 
-    // Reaches 'targetBatchDocs'.
+    // Reaches 'targetBatchDocs'. First delete batch.
     std::vector<std::pair<BSONObj, Milliseconds>> batch0{
         {BSON("_id" << 1 << "a" << 1), Milliseconds(1)},
         {BSON("_id" << 2 << "a" << 2), Milliseconds(0)},
         {BSON("_id" << 3 << "a" << 3), Milliseconds(0)},
     };
 
-    // Reaches 'targetBatchTimeMS'.
+    // 'targetPassTimeMS' is met, the buffer is partially drained, this is the last batch to commit
+    // before pass completion. Third delete batch.
     std::vector<std::pair<BSONObj, Milliseconds>> batch1{
-        {BSON("_id" << 4 << "a" << 4), Milliseconds(4)},
-        {BSON("_id" << 5 << "a" << 5), Milliseconds(6)},
+        {BSON("_id" << 6 << "a" << 6), Milliseconds(0)},
     };
 
-    // 'targetPassTimeMS' is met, the buffer is partilly drained, this is the last batch to commit
-    // before pass completion.
+    // Reaches 'targetBatchTimeMS'. Second delete batch.
     std::vector<std::pair<BSONObj, Milliseconds>> batch2{
-        {BSON("_id" << 6 << "a" << 6), Milliseconds(0)},
+        {BSON("_id" << 5 << "a" << 5), Milliseconds(6)},
+        {BSON("_id" << 4 << "a" << 4), Milliseconds(4)},
     };
 
     // Populate the collection before executing the BatchedDeleteStage.
@@ -1085,10 +1082,10 @@ TEST_F(QueryStageBatchedDeleteTest, BatchedDeleteTargetPassTimeMSReachedBeforeTa
         }
     }
 
-    // Batch1 deletions.
+    // Batch2 deletions.
     {
         state = deleteStage->work(&id);
-        ASSERT_EQ(stats->docsDeleted, batch0.size() + batch1.size());
+        ASSERT_EQ(stats->docsDeleted, batch0.size() + batch2.size());
 
         ASSERT_TRUE(stats->passTargetMet);
         // Despite reaching the 'targetPassTimeMS', the remaining deletes staged in the buffer still

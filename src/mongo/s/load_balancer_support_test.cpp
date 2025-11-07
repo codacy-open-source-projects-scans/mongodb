@@ -27,9 +27,7 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <ostream>
-#include <string>
+#include "mongo/s/load_balancer_support.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -37,14 +35,13 @@
 #include "mongo/bson/json.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
-#include "mongo/s/load_balancer_support.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/assert_that.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/unittest/matcher.h"
-#include "mongo/unittest/matcher_core.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
+
+#include <memory>
+#include <ostream>
+#include <string>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -79,7 +76,7 @@ public:
     };
 
     FailPointEnableBlock simulateLoadBalancerConnection() const {
-        return FailPointEnableBlock("loadBalancerSupportClientIsFromLoadBalancer");
+        return FailPointEnableBlock("loadBalancerSupportClientIsFromLoadBalancerPort");
     }
 };
 
@@ -93,14 +90,7 @@ TEST_F(LoadBalancerSupportTest, HelloNormalClientGivesOption) {
 
 TEST_F(LoadBalancerSupportTest, HelloLoadBalancedClientNoOption) {
     auto simLB = simulateLoadBalancerConnection();
-    try {
-        doHello(false);
-        FAIL("Expected to throw");
-    } catch (const DBException& ex) {
-        ASSERT_THAT(ex.toStatus(),
-                    StatusIs(Eq(ErrorCodes::LoadBalancerSupportMismatch),
-                             ContainsRegex("load balancer.*but.*driver")));
-    }
+    ASSERT_THAT(doHello(false), Not(HasServiceId()));
 }
 
 TEST_F(LoadBalancerSupportTest, HelloLoadBalancedClientGivesOption) {

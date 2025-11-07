@@ -29,14 +29,13 @@
 
 #pragma once
 
-#include <set>
-#include <string>
-
+#include "mongo/base/string_data.h"
 #include "mongo/db/service_context.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 /**
  * This class is for use with storage engines that track record store sizes in catalog metadata.
  *
@@ -61,18 +60,18 @@ public:
      *
      * If the system is not currently undergoing replication recovery, always returns true.
      */
-    bool collectionNeedsSizeAdjustment(const std::string& ident) const;
+    bool collectionNeedsSizeAdjustment(StringData ident) const;
 
     /**
      * Returns whether 'ident' has been specifically marked as requiring adjustment even during
      * recovery.
      */
-    bool collectionAlwaysNeedsSizeAdjustment(const std::string& ident) const;
+    bool collectionAlwaysNeedsSizeAdjustment(StringData ident) const;
 
     /**
      * Mark 'ident' as always requiring size adjustment, even if replication recovery is ongoing.
      */
-    void markCollectionAsAlwaysNeedsSizeAdjustment(const std::string& ident);
+    void markCollectionAsAlwaysNeedsSizeAdjustment(StringData ident);
 
     /**
      * Clears all internal state. This method should be called before calling 'recover to a stable
@@ -104,9 +103,32 @@ private:
 SizeRecoveryState& sizeRecoveryState(ServiceContext* serviceCtx);
 
 /**
- * Returns a mutable reference to an atomic boolean decoration on 'serviceCtx', which indicates
- * whether or not the server is currently undergoing replication recovery. Callers must explicitly
- * call 'load' and 'store' on this reference to get/set the underlying boolean.
+ * The "in replication recovery" flag. Provided by a thread-safe decorator on ServiceContext, this
+ * class provides an RAII utility around setting the flag value and allowing it to be checked by
+ * readers. Note that this flag is advisory-only: writers will not check for readers and no further
+ * synchronization is performed.
  */
-AtomicWord<bool>& inReplicationRecovery(ServiceContext* serviceCtx);
-}  // namespace mongo
+class InReplicationRecovery final {
+    InReplicationRecovery(const InReplicationRecovery&) = delete;
+    InReplicationRecovery(InReplicationRecovery&&) = delete;
+    InReplicationRecovery& operator=(const InReplicationRecovery&) = delete;
+    InReplicationRecovery& operator=(InReplicationRecovery&&) = delete;
+
+    ServiceContext* _serviceContext{nullptr};
+
+public:
+    /**
+     * Constructing this class increments the `inReplicationRecovery` flag on
+     * the provided ServiceContext. The flag will be decremented upon
+     * destruction.
+     */
+    explicit InReplicationRecovery(ServiceContext*);
+    ~InReplicationRecovery();
+
+    /**
+     * Checks whether the flag is non-zero, indicating at least 1 context has
+     * declared that replication recovery is happening.
+     */
+    static bool isSet(ServiceContext*);
+};
+}  // namespace MONGO_MOD_PUBLIC mongo

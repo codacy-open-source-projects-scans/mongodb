@@ -2,7 +2,10 @@
  * Tests $mod match expression with NaN, Infinity and large value inputs.
  *
  * This test exercises a changed behavior, thus prevent it running in multi-version variants.
- * @tags: [requires_fcv_51]
+ * @tags: [
+ *   requires_fcv_51,
+ *   requires_getmore,
+ * ]
  */
 import "jstests/libs/query/sbe_assert_error_override.js";
 const testDB = db.getSiblingDB(jsTestName());
@@ -16,7 +19,8 @@ function executeTestCase(collection, testCase) {
 
     // Issue a 'find' command with $mod and verify the result.
     const findCommand = () =>
-        collection.find({attribute: {$mod: [testCase.divisor, testCase.remainder]}}, {_id: 1})
+        collection
+            .find({attribute: {$mod: [testCase.divisor, testCase.remainder]}}, {_id: 1})
             .sort({_id: 1})
             .toArray();
     if (testCase.hasOwnProperty("expectedError")) {
@@ -47,15 +51,14 @@ for (const value of ["NaN", "+Inf", "1e19"]) {
 
 // Tests for dividend parameter.
 // Double dividend value is too large.
-testCases.push(
-    {inputDocuments: [{attribute: -1e19}], divisor: 1, remainder: 0, expectedResults: []});
+testCases.push({inputDocuments: [{attribute: -1e19}], divisor: 1, remainder: 0, expectedResults: []});
 
 // Decimal dividend value is too large.
 testCases.push({
     inputDocuments: [{attribute: NumberDecimal("1e19")}],
     divisor: 1,
     remainder: 0,
-    expectedResults: []
+    expectedResults: [],
 });
 
 // Verify that dividend value is truncated.
@@ -92,5 +95,4 @@ testCases.push({
     expectedResults: [],
 });
 
-testCases.forEach((testCase, testCaseIdx) =>
-                      executeTestCase(testDB.getCollection("coll" + testCaseIdx), testCase));
+testCases.forEach((testCase, testCaseIdx) => executeTestCase(testDB.getCollection("coll" + testCaseIdx), testCase));

@@ -27,19 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -49,11 +36,11 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/client/dbclient_cursor.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/cluster_role.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
@@ -77,20 +64,32 @@
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_operations.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -114,6 +113,7 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
         boost::none,                   // uuid
         boost::none,                   // fromMigrate
         boost::none,                   // checkExistenceForDiffInsert
+        boost::none,                   // versionContext
         0,                             // version
         object,                        // o
         boost::none,                   // o2
@@ -231,7 +231,8 @@ public:
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
-                                  bool markFromMigrate) override {
+                                  bool markFromMigrate,
+                                  bool isViewlessTimeseries) override {
         // If the oplog is not disabled for this namespace, then we need to reserve an op time for
         // the drop.
         if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, collectionName)) {
@@ -350,7 +351,7 @@ protected:
 
         auto txnRecordObj = cursor->next();
         auto txnRecord = SessionTxnRecord::parse(
-            IDLParserContext("SessionEntryWrittenAtFirstWrite"), txnRecordObj);
+            txnRecordObj, IDLParserContext("SessionEntryWrittenAtFirstWrite"));
         ASSERT(!cursor->more());
         ASSERT_EQ(session->getSessionId(), txnRecord.getSessionId());
         ASSERT_EQ(txnNum, txnRecord.getTxnNum());
@@ -376,7 +377,7 @@ class ShardTransactionParticipantRetryableWritesTest
 protected:
     void setUp() override {
         TransactionParticipantRetryableWritesTest::setUp();
-        serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::RouterServer};
+        serverGlobalParams.clusterRole = ClusterRole::ShardServer;
     }
 
     void tearDown() final {
@@ -427,8 +428,8 @@ TEST_F(TransactionParticipantRetryableWritesTest, SessionEntryWrittenAtFirstWrit
     ASSERT(cursor);
     ASSERT(cursor->more());
 
-    auto txnRecord = SessionTxnRecord::parse(IDLParserContext("SessionEntryWrittenAtFirstWrite"),
-                                             cursor->next());
+    auto txnRecord = SessionTxnRecord::parse(cursor->next(),
+                                             IDLParserContext("SessionEntryWrittenAtFirstWrite"));
     ASSERT(!cursor->more());
     ASSERT_EQ(sessionId, txnRecord.getSessionId());
     ASSERT_EQ(txnNum, txnRecord.getTxnNum());
@@ -454,8 +455,8 @@ TEST_F(TransactionParticipantRetryableWritesTest,
     ASSERT(cursor);
     ASSERT(cursor->more());
 
-    auto txnRecord = SessionTxnRecord::parse(IDLParserContext("SessionEntryWrittenAtFirstWrite"),
-                                             cursor->next());
+    auto txnRecord = SessionTxnRecord::parse(cursor->next(),
+                                             IDLParserContext("SessionEntryWrittenAtFirstWrite"));
     ASSERT(!cursor->more());
     ASSERT_EQ(sessionId, txnRecord.getSessionId());
     ASSERT_EQ(200, txnRecord.getTxnNum());
@@ -1351,7 +1352,7 @@ class ShardTxnParticipantRetryableWritesTest : public TransactionParticipantRetr
 protected:
     void setUp() final {
         TransactionParticipantRetryableWritesTest::setUp();
-        serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::RouterServer};
+        serverGlobalParams.clusterRole = ClusterRole::ShardServer;
     }
 
     void tearDown() final {

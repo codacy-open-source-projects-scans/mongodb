@@ -29,15 +29,6 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <iosfwd>
-#include <string>
-#include <utility>
-#include <variant>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -45,16 +36,23 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/ordering.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
 #include "mongo/db/storage/key_string/key_string.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/debug_util.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <iosfwd>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUBLIC mongo {
 
 /**
  * Represents a single item in an index. An index item simply consists of a key
@@ -80,8 +78,6 @@ struct IndexKeyEntry {
         return bob.obj();
     }
 
-    IndexKeyEntry(BSONObj key, RecordId loc) : key(std::move(key)), loc(std::move(loc)) {}
-
     void serialize(BSONObjBuilder* builder) const {
         builder->append("key"_sd, key);
         loc.serializeToken("RecordId", builder);
@@ -97,10 +93,6 @@ inline bool operator==(const IndexKeyEntry& lhs, const IndexKeyEntry& rhs) {
     return SimpleBSONObjComparator::kInstance.evaluate(lhs.key == rhs.key) && (lhs.loc == rhs.loc);
 }
 
-inline bool operator!=(const IndexKeyEntry& lhs, const IndexKeyEntry& rhs) {
-    return !(lhs == rhs);
-}
-
 /**
  * Represents KeyString struct containing a key_string::Value and its RecordId
  */
@@ -109,14 +101,7 @@ struct KeyStringEntry {
         if (!kDebugBuild) {
             return;
         }
-        loc.withFormat(
-            [](RecordId::Null n) { invariant(false); },
-            [&](int64_t rid) {
-                invariant(loc == key_string::decodeRecordIdLongAtEnd(ks.getBuffer(), ks.getSize()));
-            },
-            [&](const char* str, int size) {
-                invariant(loc == key_string::decodeRecordIdStrAtEnd(ks.getBuffer(), ks.getSize()));
-            });
+        invariant(loc == key_string::decodeRecordIdAtEnd(ks.getView(), loc.keyFormat()));
     }
 
     key_string::Value keyString;
@@ -229,9 +214,9 @@ public:
      * Returned buffers are for use in lookups only and should never be inserted into the
      * database, as their format may change.
      */
-    static StringData makeKeyStringFromSeekPointForSeek(const IndexSeekPoint& seekPoint,
-                                                        bool isForward,
-                                                        key_string::Builder& builder);
+    static std::span<const char> makeKeyStringFromSeekPointForSeek(const IndexSeekPoint& seekPoint,
+                                                                   bool isForward,
+                                                                   key_string::Builder& builder);
 
     /**
      * Given a KeyString Builder reference, encodes the BSON Key into the builder and returns its
@@ -255,24 +240,24 @@ public:
      * 4. When isForward == false, inclusive == false, bsonKey will be encoded with kExclusiveBefore
      * (which is less than bsonKey).
      */
-    static StringData makeKeyStringFromBSONKeyForSeek(const BSONObj& bsonKey,
-                                                      Ordering ord,
-                                                      bool isForward,
-                                                      bool inclusive,
-                                                      key_string::Builder& builder);
+    static std::span<const char> makeKeyStringFromBSONKeyForSeek(const BSONObj& bsonKey,
+                                                                 Ordering ord,
+                                                                 bool isForward,
+                                                                 bool inclusive,
+                                                                 key_string::Builder& builder);
 
     /**
      * Given a KeyString Builder reference, encodes the BSON Key into the builder and returns its
      * owned buffer to pass in to SortedDataInterface::seek().
      *
-     * This funcition is similar to IndexEntryComparison::makeKeyStringFromBSONKeyForSeek()
+     * This function is similar to IndexEntryComparison::makeKeyStringFromBSONKeyForSeek()
      * but allows you to pick your own key_string::Discriminator based on wether or not the
      * resulting KeyString is for the start key or end key of a seek.
      */
-    static StringData makeKeyStringFromBSONKey(const BSONObj& bsonKey,
-                                               Ordering ord,
-                                               key_string::Discriminator discrim,
-                                               key_string::Builder& builder);
+    static std::span<const char> makeKeyStringFromBSONKey(const BSONObj& bsonKey,
+                                                          Ordering ord,
+                                                          key_string::Discriminator discrim,
+                                                          key_string::Builder& builder);
 
 private:
     // Ordering is used in comparison() to compare BSONElements
@@ -298,13 +283,4 @@ Status buildDupKeyErrorStatus(const key_string::Value& keyString,
                               const BSONObj& indexCollation,
                               const Ordering& ordering);
 
-Status buildDupKeyErrorStatus(OperationContext* opCtx,
-                              const BSONObj& key,
-                              const IndexDescriptor* desc);
-
-Status buildDupKeyErrorStatus(OperationContext* opCtx,
-                              const key_string::Value& keyString,
-                              const Ordering& ordering,
-                              const IndexDescriptor* desc);
-
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

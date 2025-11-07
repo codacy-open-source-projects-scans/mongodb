@@ -30,10 +30,6 @@
 
 #include "mongo/db/auth/authorization_contract.h"
 
-#include <cstddef>
-#include <mutex>
-
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/auth/access_checks_gen.h"
 #include "mongo/db/auth/action_type.h"
@@ -41,22 +37,44 @@
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/debug_util.h"
+
+#include <cstddef>
+#include <mutex>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
 
 namespace mongo {
 
-void AuthorizationContract::clear() {
+void AuthorizationContract::enterCommandScope() {
     stdx::lock_guard<stdx::mutex> lck(_mutex);
 
+    // Only clear checks when its a top level command.
+    if (_commandDepth == 0) {
+        clear(lck);
+    }
+    _commandDepth++;
+}
+
+void AuthorizationContract::exitCommandScope() {
+    stdx::lock_guard<stdx::mutex> lck(_mutex);
+    invariant(_commandDepth > 0);
+    _commandDepth--;
+}
+
+void AuthorizationContract::clear() {
+    stdx::lock_guard<stdx::mutex> lck(_mutex);
+    clear(lck);
+}
+
+void AuthorizationContract::clear(WithLock lk) {
     _checks.reset();
     for (size_t i = 0; i < _privilegeChecks.size(); ++i) {
         _privilegeChecks[i].removeAllActions();
     }
+
+    _isPermissionChecked = false;
 }
 
 void AuthorizationContract::addAccessCheck(AccessCheckEnum check) {
@@ -65,8 +83,15 @@ void AuthorizationContract::addAccessCheck(AccessCheckEnum check) {
     }
 
     stdx::lock_guard<stdx::mutex> lck(_mutex);
+    if (_commandDepth > 1) {
+        return;
+    }
 
     _checks.set(static_cast<size_t>(check), true);
+
+    if (!isCommonAccessCheck(check)) {
+        _isPermissionChecked = true;
+    }
 }
 
 bool AuthorizationContract::hasAccessCheck(AccessCheckEnum check) const {
@@ -81,10 +106,17 @@ void AuthorizationContract::addPrivilege(const Privilege& p) {
     }
 
     stdx::lock_guard<stdx::mutex> lck(_mutex);
+    if (_commandDepth > 1) {
+        return;
+    }
 
     auto matchType = p.getResourcePattern().matchType();
 
     _privilegeChecks[static_cast<size_t>(matchType)].addAllActionsFromSet(p.getActions());
+
+    if (!isCommonPrivilege(p)) {
+        _isPermissionChecked = true;
+    }
 }
 
 bool AuthorizationContract::hasPrivileges(const Privilege& p) const {
@@ -144,6 +176,22 @@ bool AuthorizationContract::contains(const AuthorizationContract& other) const {
     }
 
     return true;
+}
+
+bool AuthorizationContract::isPermissionChecked() const {
+    stdx::lock_guard<stdx::mutex> lck(_mutex);
+
+    return _isPermissionChecked;
+}
+
+bool AuthorizationContract::isCommonAccessCheck(AccessCheckEnum check) const {
+    const auto& commonChecks = getCommonAccessChecks();
+    return std::find(commonChecks.begin(), commonChecks.end(), check) != commonChecks.end();
+}
+
+bool AuthorizationContract::isCommonPrivilege(const Privilege& p) const {
+    const auto& commonPrivileges = getCommonPrivileges();
+    return std::find(commonPrivileges.begin(), commonPrivileges.end(), p) != commonPrivileges.end();
 }
 
 }  // namespace mongo

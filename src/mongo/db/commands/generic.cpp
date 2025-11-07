@@ -28,18 +28,6 @@
  */
 
 
-#include <algorithm>
-#include <compare>
-#include <memory>
-#include <set>
-#include <sstream>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <absl/container/flat_hash_map.h>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -59,23 +47,27 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_options.h"
-#include "mongo/logv2/log_severity.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_builder_interface.h"
 #include "mongo/util/assert_util.h"
+
+#include <algorithm>
+#include <compare>
+#include <memory>
+#include <set>
+#include <sstream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/container/flat_hash_map.h>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 
 namespace mongo {
 namespace {
-
-using std::string;
-using std::stringstream;
-using std::vector;
 
 class PingCommand : public PingCmdVersion1Gen<PingCommand> {
 public:
@@ -94,6 +86,10 @@ public:
 
     bool allowedWithSecurityToken() const final {
         return true;
+    }
+
+    bool requiresAuthzChecks() const override {
+        return false;
     }
 
     class Invocation final : public InvocationBaseGen {
@@ -118,35 +114,24 @@ MONGO_REGISTER_COMMAND(PingCommand).forRouter().forShard();
 
 class EchoCommand final : public TypedCommand<EchoCommand> {
 public:
-    struct Request {
+    class Request : public BasicTypedRequest {
+    public:
         static constexpr auto kCommandName = "echo"_sd;
-        static Request parse(const IDLParserContext&,
-                             const OpMsgRequest& request,
-                             DeserializationContext* dctx = nullptr) {
-            return Request{
-                request,
-                GenericArguments::parse(IDLParserContext("GenericArguments",
-                                                         request.validatedTenancyScope,
-                                                         request.getValidatedTenantId(),
-                                                         request.getSerializationContext()),
-                                        request.body),
-                request.parseDbName()};
+        static Request parse(const OpMsgRequest& opMsgRequest,
+                             const IDLParserContext&,
+                             DeserializationContext*) {
+            return Request{opMsgRequest};
         }
 
-        const GenericArguments& getGenericArguments() const {
-            return stableArgs;
-        }
-        GenericArguments& getGenericArguments() {
-            return stableArgs;
+        explicit Request(const OpMsgRequest& opMsgRequest)
+            : BasicTypedRequest{opMsgRequest}, _opMsgRequest{opMsgRequest} {}
+
+        const OpMsgRequest& opMsgRequest() const {
+            return _opMsgRequest;
         }
 
-        const DatabaseName& getDbName() const {
-            return dbName;
-        }
-
-        const OpMsgRequest& request;
-        GenericArguments stableArgs;
-        DatabaseName dbName;
+    private:
+        const OpMsgRequest& _opMsgRequest;
     };
 
     class Invocation final : public MinimalInvocationBase {
@@ -161,11 +146,11 @@ public:
         void doCheckAuthorization(OperationContext* opCtx) const override {}
 
         NamespaceString ns() const override {
-            return NamespaceString(request().request.parseDbName());
+            return NamespaceString(request().getDbName());
         }
 
         void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) override {
-            auto sequences = request().request.sequences;
+            auto sequences = request().opMsgRequest().sequences;
             for (auto& docSeq : sequences) {
                 auto docBuilder = result->getDocSequenceBuilder(docSeq.name);
                 for (auto& bson : docSeq.objs) {
@@ -173,7 +158,7 @@ public:
                 }
             }
 
-            result->getBodyBuilder().append("echo", request().request.body);
+            result->getBodyBuilder().append("echo", request().opMsgRequest().body);
         }
     };
 
@@ -184,22 +169,51 @@ public:
     bool requiresAuth() const override {
         return false;
     }
+
+    bool requiresAuthzChecks() const override {
+        return false;
+    }
 };
-constexpr StringData EchoCommand::Request::kCommandName;
 
 MONGO_REGISTER_COMMAND(EchoCommand).testOnly().forRouter().forShard();
 
-class ListCommandsCmd : public BasicCommand {
+class ListCommandsCmd final : public TypedCommand<ListCommandsCmd> {
 public:
     std::string help() const override {
         return "get a list of all db commands";
     }
 
-    ListCommandsCmd() : BasicCommand("listCommands") {}
+    class Request : public BasicTypedRequest {
+    public:
+        static constexpr StringData kCommandName = "listCommands";
+        static Request parse(const OpMsgRequest& opMsgRequest,
+                             const IDLParserContext&,
+                             DeserializationContext*) {
+            return Request{opMsgRequest};
+        }
 
-    bool supportsWriteConcern(const BSONObj& cmd) const override {
-        return false;
-    }
+        using BasicTypedRequest::BasicTypedRequest;
+    };
+
+    class Invocation final : public MinimalInvocationBase {
+    public:
+        using MinimalInvocationBase::MinimalInvocationBase;
+
+        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) override {
+            auto&& bob = result->getBodyBuilder();
+            _run(opCtx, bob);
+        }
+
+        NamespaceString ns() const override {
+            return NamespaceString(request().getDbName());
+        }
+
+        bool supportsWriteConcern() const override {
+            return false;
+        }
+
+        void doCheckAuthorization(OperationContext*) const override {}
+    };
 
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kAlways;
@@ -209,13 +223,11 @@ public:
         return false;
     }
 
-    Status checkAuthForOperation(OperationContext*,
-                                 const DatabaseName&,
-                                 const BSONObj&) const override {
-        return Status::OK();  // No auth required
+    bool requiresAuth() const final {
+        return false;
     }
 
-    bool requiresAuth() const final {
+    bool requiresAuthzChecks() const override {
         return false;
     }
 
@@ -223,10 +235,7 @@ public:
         return true;
     }
 
-    bool run(OperationContext* opCtx,
-             const DatabaseName&,
-             const BSONObj& cmdObj,
-             BSONObjBuilder& result) override {
+    static void _run(OperationContext* opCtx, BSONObjBuilder& result) {
         // Sort the command names before building the result BSON.
         std::vector<Command*> commands;
         getCommandRegistry(opCtx)->forEachCommand([&](Command* c) { commands.push_back(c); });
@@ -239,6 +248,7 @@ public:
             BSONObjBuilder temp(b.subobjStart(command->getName()));
             temp.append("help", command->help());
             temp.append("requiresAuth", command->requiresAuth());
+            temp.append("requiresAuthzChecks", command->requiresAuthzChecks());
             temp.append("secondaryOk",
                         command->secondaryAllowed(opCtx->getServiceContext()) ==
                             Command::AllowedOnSecondary::kAlways);
@@ -249,12 +259,7 @@ public:
                 temp.append("secondaryOverrideOk", true);
             temp.append("apiVersions", command->apiVersions());
             temp.append("deprecatedApiVersions", command->deprecatedApiVersions());
-            temp.done();
         }
-
-        b.done();
-
-        return 1;
     }
 };
 MONGO_REGISTER_COMMAND(ListCommandsCmd).forRouter().forShard();

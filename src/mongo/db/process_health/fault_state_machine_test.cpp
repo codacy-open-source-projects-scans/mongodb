@@ -30,12 +30,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <memory>
-#include <ratio>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -49,15 +43,20 @@
 #include "mongo/db/process_health/health_monitoring_server_parameters_gen.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
 #include "mongo/util/time_support.h"
+
+#include <memory>
+#include <ratio>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace mongo {
 
@@ -377,9 +376,8 @@ TEST_F(FaultManagerTest, DNSHealthCheckWithBadHostNameFailsAndGoodHostNameSucces
     auto serverParam =
         ServerParameterSet::getNodeParameterSet()->get<PeriodicHealthCheckIntervalsServerParameter>(
             "healthMonitoringIntervals");
-    auto bsonOBj = BSON("values" << BSON_ARRAY(BSON("type"
-                                                    << "dns"
-                                                    << "interval" << 1000)));
+    auto bsonOBj = BSON("values" << BSON_ARRAY(BSON("type" << "dns"
+                                                           << "interval" << 1000)));
     const BSONObj newParameterObj = BSON("key" << bsonOBj);
     auto element = newParameterObj.getField("key");
     uassertStatusOK(serverParam->set(element, boost::none));
@@ -387,29 +385,20 @@ TEST_F(FaultManagerTest, DNSHealthCheckWithBadHostNameFailsAndGoodHostNameSucces
     registerHealthObserver<DnsHealthObserver>();
     globalFailPointRegistry()
         .find("dnsHealthObserverFp")
-        ->setMode(FailPoint::alwaysOn,
-                  0,
-                  BSON("hostname"
-                       << "yahoo.com"));
+        ->setMode(FailPoint::alwaysOn, 0, BSON("hostname" << "yahoo.com"));
 
     auto initialHealthCheckFuture = manager().startPeriodicHealthChecks();
     assertSoon([this]() { return manager().getFaultState() == FaultState::kOk; });
 
     globalFailPointRegistry()
         .find("dnsHealthObserverFp")
-        ->setMode(FailPoint::alwaysOn,
-                  0,
-                  BSON("hostname"
-                       << "badhostname.invalid"));
+        ->setMode(FailPoint::alwaysOn, 0, BSON("hostname" << "badhostname.invalid"));
     sleepFor(Seconds(1));
     assertSoon([this]() { return manager().getFaultState() == FaultState::kTransientFault; });
 
     globalFailPointRegistry()
         .find("dnsHealthObserverFp")
-        ->setMode(FailPoint::alwaysOn,
-                  0,
-                  BSON("hostname"
-                       << "yahoo.com"));
+        ->setMode(FailPoint::alwaysOn, 0, BSON("hostname" << "yahoo.com"));
     assertSoon([this]() { return manager().getFaultState() == FaultState::kOk; });
 }
 

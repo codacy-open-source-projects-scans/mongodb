@@ -27,20 +27,7 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <fmt/format.h>
-#include <functional>
-#include <initializer_list>
-#include <memory>
-#include <ostream>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/s/resharding/resharding_oplog_batch_applier.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -52,15 +39,18 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/global_catalog/type_collection_common_types_gen.h"
+#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
@@ -78,15 +68,16 @@
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
-#include "mongo/db/s/metrics/sharding_data_transform_metrics.h"
 #include "mongo/db/s/migration_chunk_cloner_source_op_observer.h"
 #include "mongo/db/s/resharding/donor_oplog_id_gen.h"
+#include "mongo/db/s/resharding/resharding_change_event_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
+#include "mongo/db/s/resharding/resharding_noop_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_oplog_application.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier_metrics.h"
-#include "mongo/db/s/resharding/resharding_oplog_batch_applier.h"
 #include "mongo/db/s/resharding/resharding_oplog_session_application.h"
+#include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
@@ -97,34 +88,48 @@
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/db/vector_clock_metadata_hook.h"
+#include "mongo/db/vector_clock/vector_clock_metadata_hook.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/database_version.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
-#include "mongo/s/type_collection_common_types_gen.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/unittest/death_test.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
+#include "mongo/util/clock_source_mock.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/uuid.h"
+
+#include <cstdint>
+#include <functional>
+#include <initializer_list>
+#include <memory>
+#include <ostream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -134,8 +139,13 @@ namespace {
 class ReshardingOplogBatchApplierTest : service_context_test::WithSetupTransportLayer,
                                         public ServiceContextMongoDTest {
 public:
+    ReshardingOplogBatchApplierTest()
+        : ServiceContextMongoDTest(
+              Options{}.useMockClock(true).useMockTickSource<Milliseconds>(true)) {}
+
     void setUp() override {
         ServiceContextMongoDTest::setUp();
+        advanceTime(Seconds(100));
 
         auto serviceContext = getServiceContext();
         {
@@ -179,14 +189,17 @@ public:
             }
 
             _metrics =
-                ReshardingMetrics::makeInstance(UUID::gen(),
-                                                BSON("y" << 1),
-                                                _outputNss,
-                                                ShardingDataTransformMetrics::Role::kRecipient,
-                                                serviceContext->getFastClockSource()->now(),
-                                                serviceContext);
-            _applierMetrics =
-                std::make_unique<ReshardingOplogApplierMetrics>(_metrics.get(), boost::none);
+                ReshardingMetrics::makeInstance_forTest(UUID::gen(),
+                                                        BSON("y" << 1),
+                                                        _outputNss,
+                                                        ReshardingMetricsCommon::Role::kRecipient,
+                                                        serviceContext->getFastClockSource()->now(),
+                                                        serviceContext);
+            _metrics->registerDonors({_myDonorId});
+
+            _applierMetrics = std::make_unique<ReshardingOplogApplierMetrics>(
+                _myDonorId, _metrics.get(), boost::none);
+
             _crudApplication = std::make_unique<ReshardingOplogApplicationRules>(
                 _outputNss,
                 std::vector<NamespaceString>{_myStashNss, _otherStashNss},
@@ -203,8 +216,33 @@ public:
         }
     }
 
+    ShardId getMyDonorShardId() {
+        return _myDonorId;
+    }
+
+    ReshardingMetrics* metrics() {
+        return _metrics.get();
+    }
+
     ReshardingOplogBatchApplier* applier() {
         return _batchApplier.get();
+    }
+
+    ClockSourceMock* clockSource() {
+        return dynamic_cast<ClockSourceMock*>(getServiceContext()->getFastClockSource());
+    }
+
+    TickSourceMock<Milliseconds>* tickSource() {
+        return dynamic_cast<TickSourceMock<Milliseconds>*>(getServiceContext()->getTickSource());
+    }
+
+    Date_t now() {
+        return clockSource()->now();
+    }
+
+    void advanceTime(Milliseconds millis) {
+        clockSource()->advance(millis);
+        tickSource()->advance(millis);
     }
 
     std::shared_ptr<executor::ThreadPoolTaskExecutor> makeTaskExecutorForApplier() {
@@ -263,7 +301,9 @@ public:
         txnParticipant.unstashTransactionResources(opCtx, "prepareTransaction");
 
         // The transaction machinery cannot store an empty locker.
-        { Lock::GlobalLock globalLock(opCtx, MODE_IX); }
+        {
+            Lock::GlobalLock globalLock(opCtx, MODE_IX);
+        }
         auto opTime = [opCtx] {
             TransactionParticipant::SideTransactionBlock sideTxn{opCtx};
 
@@ -318,6 +358,84 @@ public:
         op.setNss({});
         op.setWallClockTime({});
 
+        return {op.toBSON()};
+    }
+
+    repl::OplogEntry makeProgressMarkNoopOplogEntry(Date_t wallClockTime,
+                                                    bool createdAfterOplogApplicationStarted) {
+        repl::MutableOplogEntry op;
+        op.setOpType(repl::OpTypeEnum::kNoop);
+        op.setObject({});
+
+        ReshardProgressMarkO2Field o2Field;
+        o2Field.setType(resharding::kReshardProgressMarkOpLogType);
+        if (createdAfterOplogApplicationStarted) {
+            o2Field.setCreatedAfterOplogApplicationStarted(true);
+        }
+        op.setObject2(o2Field.toBSON());
+        op.setNss({});
+        op.setOpTime({{}, {}});
+        op.setWallClockTime(wallClockTime);
+
+        return {op.toBSON()};
+    }
+
+    repl::OplogEntry makeFinalNoopOplogEntry() {
+        repl::MutableOplogEntry op;
+        op.setOpType(repl::OpTypeEnum::kNoop);
+        op.setObject({});
+
+        ReshardBlockingWritesChangeEventO2Field o2Field;
+        o2Field.setType(resharding::kReshardFinalOpLogType);
+        o2Field.setReshardBlockingWrites({});
+        o2Field.setReshardingUUID(UUID::gen());
+        op.setObject2(o2Field.toBSON());
+
+        op.setNss({});
+        op.setOpTime({{}, {}});
+        op.setWallClockTime({});
+
+        return {op.toBSON()};
+    }
+
+    repl::OplogEntry makeGenericNoopOplogEntry() {
+        repl::MutableOplogEntry op;
+        op.setOpType(repl::OpTypeEnum::kNoop);
+        op.setObject({});
+        op.setNss({});
+        op.setOpTime({{}, {}});
+        op.setWallClockTime({});
+        return {op.toBSON()};
+    }
+
+    repl::OplogEntry makeInsertOplogEntry() {
+        repl::MutableOplogEntry op;
+        op.setOpType(repl::OpTypeEnum::kInsert);
+        op.setNss(_outputNss);
+        op.setObject(BSON("_id" << 1));
+        op.setTimestamp({});
+        op.setWallClockTime({});
+        return {op.toBSON()};
+    }
+
+    repl::OplogEntry makeUpdateOplogEntry() {
+        repl::MutableOplogEntry op;
+        op.setOpType(repl::OpTypeEnum::kUpdate);
+        op.setNss(_outputNss);
+        op.setObject(BSON("_id" << 1 << "x" << 1));
+        op.setObject2(BSON("_id" << 1));
+        op.setTimestamp({});
+        op.setWallClockTime({});
+        return {op.toBSON()};
+    }
+
+    repl::OplogEntry makeDeleteOplogEntry() {
+        repl::MutableOplogEntry op;
+        op.setOpType(repl::OpTypeEnum::kDelete);
+        op.setNss(_outputNss);
+        op.setObject(BSON("_id" << 1));
+        op.setTimestamp({});
+        op.setWallClockTime({});
         return {op.toBSON()};
     }
 
@@ -402,9 +520,7 @@ private:
                                                true /* allowMigrations */,
                                                chunks);
 
-        return ChunkManager(_myDonorId,
-                            DatabaseVersion(UUID::gen(), Timestamp(1, 1)),
-                            makeStandaloneRoutingTableHistory(std::move(rt)),
+        return ChunkManager(makeStandaloneRoutingTableHistory(std::move(rt)),
                             boost::none /* clusterTime */);
     }
 
@@ -522,6 +638,55 @@ TEST_F(ReshardingOplogBatchApplierTest, CancelableWhileWaitingOnPreparedTxn) {
 
     cancelSource.cancel();
     ASSERT_EQ(future.getNoThrow(), ErrorCodes::CallbackCanceled);
+}
+
+TEST_F(ReshardingOplogBatchApplierTest,
+       NotThrowUponSeeingProgressMarkOplogCreatedAfterOplogApplicationStarted) {
+    auto executor = makeTaskExecutorForApplier();
+    auto factory = makeCancelableOpCtxForApplier(CancellationToken::uncancelable());
+
+    auto oplogEntry =
+        makeProgressMarkNoopOplogEntry(now(), true /* createdAfterOplogApplicationStarted */);
+
+    auto future = applier()->applyBatch<false>(
+        {&oplogEntry}, executor, CancellationToken::uncancelable(), factory);
+    future.get();
+}
+
+DEATH_TEST_F(ReshardingOplogBatchApplierTest,
+             ThrowUponSeeingProgressMarkOplogCreatedBeforeOplogApplicationStarted,
+             "invariant") {
+    auto executor = makeTaskExecutorForApplier();
+    auto factory = makeCancelableOpCtxForApplier(CancellationToken::uncancelable());
+
+    auto oplogEntry =
+        makeProgressMarkNoopOplogEntry(now(), false /* createdAfterOplogApplicationStarted */);
+
+    auto future = applier()->applyBatch<false>(
+        {&oplogEntry}, executor, CancellationToken::uncancelable(), factory);
+    future.get();
+}
+
+DEATH_TEST_F(ReshardingOplogBatchApplierTest, ThrowUponSeeingFinalOplog, "invariant") {
+    auto executor = makeTaskExecutorForApplier();
+    auto factory = makeCancelableOpCtxForApplier(CancellationToken::uncancelable());
+
+    auto oplogEntry = makeFinalNoopOplogEntry();
+
+    auto future = applier()->applyBatch<false>(
+        {&oplogEntry}, executor, CancellationToken::uncancelable(), factory);
+    future.get();
+}
+
+DEATH_TEST_F(ReshardingOplogBatchApplierTest, ThrowUponSeeingGenericNoop, "invariant") {
+    auto executor = makeTaskExecutorForApplier();
+    auto factory = makeCancelableOpCtxForApplier(CancellationToken::uncancelable());
+
+    auto oplogEntry = makeGenericNoopOplogEntry();
+
+    auto future = applier()->applyBatch<false>(
+        {&oplogEntry}, executor, CancellationToken::uncancelable(), factory);
+    future.get();
 }
 
 }  // namespace

@@ -29,12 +29,11 @@
 
 #pragma once
 
-#include <variant>
-
 #include "mongo/base/status.h"
 #include "mongo/db/storage/sorted_data_interface.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
+#include "mongo/unittest/unittest.h"
+
+#include <variant>
 
 namespace mongo::unittest {
 template <typename T>

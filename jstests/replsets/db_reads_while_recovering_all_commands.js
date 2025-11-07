@@ -41,14 +41,13 @@ const allCommands = {
     _configsvrCommitChunksMerge: {skip: isPrimaryOnly},
     _configsvrCommitChunkMigration: {skip: isPrimaryOnly},
     _configsvrCommitChunkSplit: {skip: isPrimaryOnly},
-    _configsvrCommitIndex: {skip: isPrimaryOnly},
     _configsvrCommitMergeAllChunksOnShard: {skip: isPrimaryOnly},
     _configsvrCommitMovePrimary: {skip: isPrimaryOnly},
     _configsvrCommitRefineCollectionShardKey: {skip: isPrimaryOnly},
     _configsvrCommitReshardCollection: {skip: isPrimaryOnly},
+    _configsvrCommitShardRemoval: {skip: isPrimaryOnly},
     _configsvrConfigureCollectionBalancing: {skip: isPrimaryOnly},
     _configsvrCreateDatabase: {skip: isPrimaryOnly},
-    _configsvrDropIndexCatalogEntry: {skip: isPrimaryOnly},
     _configsvrEnsureChunkVersionIsGreaterThan: {skip: isPrimaryOnly},
     _configsvrGetHistoricalPlacement: {skip: isAnInternalCommand},
     _configsvrMoveRange: {skip: isPrimaryOnly},
@@ -63,10 +62,14 @@ const allCommands = {
     _configsvrSetAllowMigrations: {skip: isPrimaryOnly},
     _configsvrSetClusterParameter: {skip: isPrimaryOnly},
     _configsvrSetUserWriteBlockMode: {skip: isPrimaryOnly},
+    _configsvrShardDrainingStatus: {skip: isAnInternalCommand},
+    _configsvrStartShardDraining: {skip: isPrimaryOnly},
+    _configsvrStopShardDraining: {skip: isPrimaryOnly},
     _configsvrTransitionFromDedicatedConfigServer: {skip: isPrimaryOnly},
     _configsvrTransitionToDedicatedConfigServer: {skip: isPrimaryOnly},
     _configsvrUpdateZoneKeyRange: {skip: isPrimaryOnly},
     _dropConnectionsToMongot: {skip: isAnInternalCommand},
+    _dropMirrorMaestroConnections: {skip: isAnInternalCommand},
     _flushDatabaseCacheUpdates: {skip: isPrimaryOnly},
     _flushDatabaseCacheUpdatesWithWriteConcern: {skip: isPrimaryOnly},
     _flushReshardingStateChange: {skip: isPrimaryOnly},
@@ -79,6 +82,7 @@ const allCommands = {
     _killOperations: {skip: isNotAUserDataRead},
     _mergeAuthzCollections: {skip: isPrimaryOnly},
     _migrateClone: {skip: isPrimaryOnly},
+    _mirrorMaestroConnPoolStats: {skip: isAnInternalCommand},
     _mongotConnPoolStats: {skip: isAnInternalCommand},
     _recvChunkAbort: {skip: isPrimaryOnly},
     _recvChunkCommit: {skip: isPrimaryOnly},
@@ -90,23 +94,26 @@ const allCommands = {
     _shardsvrChangePrimary: {skip: isAnInternalCommand},
     _shardsvrCleanupStructuredEncryptionData: {skip: isPrimaryOnly},
     _shardsvrCleanupReshardCollection: {skip: isPrimaryOnly},
+    _shardsvrCloneAuthoritativeMetadata: {skip: isPrimaryOnly},
     _shardsvrCloneCatalogData: {skip: isPrimaryOnly},
     _shardsvrCompactStructuredEncryptionData: {skip: isPrimaryOnly},
-    _shardsvrRegisterIndex: {skip: isPrimaryOnly},
-    _shardsvrCommitIndexParticipant: {skip: isPrimaryOnly},
+    _shardsvrCommitCreateDatabaseMetadata: {skip: isPrimaryOnly},
+    _shardsvrCommitDropDatabaseMetadata: {skip: isPrimaryOnly},
     _shardsvrCommitReshardCollection: {skip: isPrimaryOnly},
     _shardsvrConvertToCapped: {skip: isPrimaryOnly},
     _shardsvrDropCollection: {skip: isPrimaryOnly},
     _shardsvrCreateCollection: {skip: isPrimaryOnly},
-    _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: isNotAUserDataRead},
+    _shardsvrDropCollectionIfUUIDNotMatchingWithWriteConcern: {skip: isAnInternalCommand},
     _shardsvrDropCollectionParticipant: {skip: isPrimaryOnly},
-    _shardsvrDropIndexCatalogEntryParticipant: {skip: isPrimaryOnly},
     _shardsvrDropIndexes: {skip: isAnInternalCommand},
+    _shardsvrDropIndexesParticipant: {skip: isAnInternalCommand},
     _shardsvrCreateCollectionParticipant: {skip: isPrimaryOnly},
     _shardsvrGetStatsForBalancing: {skip: isPrimaryOnly},
+    _shardsvrCheckCanConnectToConfigServer: {skip: isPrimaryOnly},
     _shardsvrJoinMigrations: {skip: isAnInternalCommand},
     _shardsvrJoinDDLCoordinators: {skip: isPrimaryOnly},
     _shardsvrMergeAllChunksOnShard: {skip: isPrimaryOnly},
+    _shardsvrMergeChunks: {skip: isAnInternalCommand},
     _shardsvrMovePrimary: {skip: isPrimaryOnly},
     _shardsvrMovePrimaryEnterCriticalSection: {skip: isPrimaryOnly},
     _shardsvrMovePrimaryExitCriticalSection: {skip: isPrimaryOnly},
@@ -117,15 +124,17 @@ const allCommands = {
     _shardsvrRenameCollectionParticipantUnblock: {skip: isAnInternalCommand},
     _shardsvrRenameIndexMetadata: {skip: isPrimaryOnly},
     _shardsvrRunSearchIndexCommand: {skip: isAnInternalCommand},
+    _shardsvrResolveView: {skip: isAnInternalCommand},
+    _shardsvrDrainOngoingDDLOperations: {skip: isPrimaryOnly},
     _shardsvrDropDatabase: {skip: isPrimaryOnly},
     _shardsvrDropDatabaseParticipant: {skip: isPrimaryOnly},
     _shardsvrReshardCollection: {skip: isPrimaryOnly},
     _shardsvrReshardingOperationTime: {skip: isPrimaryOnly},
+    _shardsvrReshardRecipientClone: {skip: isPrimaryOnly},
     _shardsvrRefineCollectionShardKey: {skip: isPrimaryOnly},
     _shardsvrSetAllowMigrations: {skip: isPrimaryOnly},
     _shardsvrSetClusterParameter: {skip: isAnInternalCommand},
     _shardsvrSetUserWriteBlockMode: {skip: isPrimaryOnly},
-    _shardsvrUnregisterIndex: {skip: isPrimaryOnly},
     _shardsvrValidateShardKeyCandidate: {skip: isPrimaryOnly},
     _shardsvrCoordinateMultiUpdate: {skip: isAnInternalCommand},
     _shardsvrCollMod: {skip: isPrimaryOnly},
@@ -135,8 +144,11 @@ const allCommands = {
     _shardsvrCheckMetadataConsistency: {skip: isAnInternalCommand},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: isAnInternalCommand},
     _shardsvrBeginMigrationBlockingOperation: {skip: isAnInternalCommand},
-    _shardsvrUntrackUnsplittableCollection: {skip: isAnInternalCommand},
     _shardsvrEndMigrationBlockingOperation: {skip: isAnInternalCommand},
+    _shardsvrReshardingDonorFetchFinalCollectionStats: {skip: isAnInternalCommand},
+    _shardsvrReshardingDonorStartChangeStreamsMonitor: {skip: isAnInternalCommand},
+    _shardsvrUntrackUnsplittableCollection: {skip: isAnInternalCommand},
+    _shardsvrFetchCollMetadata: {skip: isAnInternalCommand},
     streams_startStreamProcessor: {skip: isAnInternalCommand},
     streams_startStreamSample: {skip: isAnInternalCommand},
     streams_stopStreamProcessor: {skip: isAnInternalCommand},
@@ -149,6 +161,7 @@ const allCommands = {
     streams_testOnlyGetFeatureFlags: {skip: isAnInternalCommand},
     streams_writeCheckpoint: {skip: isAnInternalCommand},
     streams_sendEvent: {skip: "internal command"},
+    streams_updateConnection: {skip: isAnInternalCommand},
     _transferMods: {skip: isPrimaryOnly},
     abortMoveCollection: {skip: isPrimaryOnly},
     abortReshardCollection: {skip: isPrimaryOnly},
@@ -260,6 +273,7 @@ const allCommands = {
     dropUser: {skip: isPrimaryOnly},
     echo: {skip: isNotAUserDataRead},
     endSessions: {skip: isNotAUserDataRead},
+    eseRotateActiveKEK: {skip: isNotAUserDataRead},
     explain: {
         command: {count: collName},
         expectFailure: true,
@@ -277,22 +291,24 @@ const allCommands = {
     fsync: {skip: isNotAUserDataRead},
     fsyncUnlock: {skip: isNotAUserDataRead},
     getAuditConfig: {skip: isNotAUserDataRead},
-    getChangeStreamState: {skip: isNotAUserDataRead},
+    getChangeStreamState: {skip: isDeprecated}, // Removed in v8.3
     getClusterParameter: {skip: isNotAUserDataRead},
     getCmdLineOpts: {skip: isNotAUserDataRead},
     getDatabaseVersion: {skip: isNotAUserDataRead},
     getDefaultRWConcern: {skip: isNotAUserDataRead},
     getDiagnosticData: {skip: isNotAUserDataRead},
+    getESERotateActiveKEKStatus: {skip: isNotAUserDataRead},
     getLog: {skip: isNotAUserDataRead},
     getMore: {
         command: {getMore: NumberLong(123), collection: collName},
         expectFailure: true,
-        expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary
+        expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary,
     },
     getQueryableEncryptionCountInfo: {skip: isPrimaryOnly},
     getParameter: {skip: isNotAUserDataRead},
     getShardMap: {skip: isNotAUserDataRead},
     getShardVersion: {skip: isPrimaryOnly},
+    getTrafficRecordingStatus: {skip: isNotAUserDataRead},
     godinsert: {skip: isAnInternalCommand},
     grantPrivilegesToRole: {skip: isPrimaryOnly},
     grantRolesToRole: {skip: isPrimaryOnly},
@@ -314,25 +330,25 @@ const allCommands = {
     listCollections: {
         command: {listCollections: 1},
         expectFailure: true,
-        expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary
+        expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary,
     },
     listCommands: {command: {listCommands: 1}},
     listDatabases: {
         command: {listDatabases: 1},
         isAdminCommand: true,
         expectFailure: true,
-        expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary
+        expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary,
     },
     listDatabasesForAllTenants: {
         command: {listDatabasesForAllTenants: 1},
         isAdminCommand: true,
         expectFailure: true,
-        expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary
+        expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary,
     },
     listIndexes: {
         command: {listIndexes: collName},
         expectFailure: true,
-        expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary
+        expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary,
     },
     listSearchIndexes: {skip: isNotAUserDataRead},
     lockInfo: {skip: isAnInternalCommand},
@@ -344,9 +360,9 @@ const allCommands = {
     mapReduce: {
         command: {
             mapReduce: collName,
-            map: function() {},
-            reduce: function(key, vals) {},
-            out: {inline: 1}
+            map: function () {},
+            reduce: function (key, vals) {},
+            out: {inline: 1},
         },
         expectFailure: true,
         expectedErrorCode: ErrorCodes.NotPrimaryOrSecondary,
@@ -372,6 +388,7 @@ const allCommands = {
     refreshLogicalSessionCacheNow: {skip: isNotAUserDataRead},
     refreshSessions: {skip: isNotAUserDataRead},
     reIndex: {skip: isNotAUserDataRead},
+    releaseMemory: {skip: isNotAUserDataRead},
     renameCollection: {skip: isPrimaryOnly},
     repairShardedCollectionChunksHistory: {skip: isPrimaryOnly},
     replSetAbortPrimaryCatchUp: {skip: isNotAUserDataRead},
@@ -409,7 +426,7 @@ const allCommands = {
     setProfilingFilterGlobally: {skip: isNotAUserDataRead},
     setParameter: {skip: isNotAUserDataRead},
     setShardVersion: {skip: isNotAUserDataRead},
-    setChangeStreamState: {skip: isNotAUserDataRead},
+    setChangeStreamState: {skip: isDeprecated}, // Removed in v8.3
     setClusterParameter: {skip: isNotAUserDataRead},
     setQuerySettings: {skip: isPrimaryOnly},
     removeQuerySettings: {skip: isPrimaryOnly},
@@ -419,11 +436,13 @@ const allCommands = {
     sleep: {skip: isNotAUserDataRead},
     splitChunk: {skip: isPrimaryOnly},
     splitVector: {skip: isPrimaryOnly},
-    stageDebug: {skip: isPrimaryOnly},
-    startRecordingTraffic: {skip: isNotAUserDataRead},
+    startRecordingTraffic: {skip: "Renamed to startTrafficRecording"},
+    stopRecordingTraffic: {skip: "Renamed to stopTrafficRecording"},
+    startTrafficRecording: {skip: isNotAUserDataRead},
     startSession: {skip: isNotAUserDataRead},
-    stopRecordingTraffic: {skip: isNotAUserDataRead},
+    stopTrafficRecording: {skip: isNotAUserDataRead},
     sysprofile: {skip: isAnInternalCommand},
+    testCommandFeatureFlaggedOnLatestFCV83: {skip: isAnInternalCommand},
     testDeprecation: {skip: isNotAUserDataRead},
     testDeprecationInVersion2: {skip: isNotAUserDataRead},
     testInternalTransactions: {skip: isNotAUserDataRead},
@@ -451,7 +470,7 @@ const allCommands = {
     waitForFailPoint: {skip: isNotAUserDataRead},
     getShardingReady: {skip: isNotAUserDataRead},
     whatsmysni: {skip: isNotAUserDataRead},
-    whatsmyuri: {skip: isNotAUserDataRead}
+    whatsmyuri: {skip: isNotAUserDataRead},
 };
 
 /**
@@ -459,7 +478,7 @@ const allCommands = {
  * If 'code' is null we only check for failure, otherwise we confirm error code matches as
  * well. On assert 'msg' is printed.
  */
-let assertCommandOrWriteFailed = function(res, code, msg) {
+let assertCommandOrWriteFailed = function (res, code, msg) {
     if (res.writeErrors !== undefined) {
         assert.neq(0, res.writeErrors.length, msg);
     } else if (res.code !== null) {
@@ -486,7 +505,7 @@ const secondaryDb = secondary.getDB(dbName);
 assert.commandWorked(secondary.adminCommand({replSetMaintenance: 1}));
 
 // Run all tests against the RECOVERING node.
-AllCommandsTest.testAllCommands(secondary, allCommands, function(test) {
+AllCommandsTest.testAllCommands(secondary, allCommands, function (test) {
     const testDb = secondaryDb.getSiblingDB("test");
     let cmdDb = testDb;
 
@@ -496,8 +515,7 @@ AllCommandsTest.testAllCommands(secondary, allCommands, function(test) {
 
     if (test.expectFailure) {
         const expectedErrorCode = test.expectedErrorCode;
-        assertCommandOrWriteFailed(
-            cmdDb.runCommand(test.command), expectedErrorCode, () => tojson(test.command));
+        assertCommandOrWriteFailed(cmdDb.runCommand(test.command), expectedErrorCode, () => tojson(test.command));
     } else {
         assert.commandWorked(cmdDb.runCommand(test.command), () => tojson(test.command));
     }

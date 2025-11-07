@@ -13,18 +13,19 @@
  *   # Running shardCollection instead of createCollection returns different error types which are
  *   # not expected by the test
  *   assumes_unsharded_collection,
- *
- * ]
+ *  ]
  */
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+import {areViewlessTimeseriesEnabled} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 
 const tsOptions = {
     timeField: "timestamp",
-    metaField: "metadata"
+    metaField: "metadata",
 };
 const tsOptions2 = {
     timeField: "timestamp",
-    metaField: "metadata2"
+    metaField: "metadata2",
 };
 const kColl = "coll";
 const kBucket = "system.buckets.coll";
@@ -58,9 +59,7 @@ function createWorkedOrFailedWithCode(collName, tsOptions, errorCode) {
 
 function runTest(testCase, minRequiredVersion = null) {
     if (minRequiredVersion != null) {
-        const res = db.getSiblingDB("admin")
-                        .system.version.find({_id: "featureCompatibilityVersion"})
-                        .toArray();
+        const res = db.getSiblingDB("admin").system.version.find({_id: "featureCompatibilityVersion"}).toArray();
         if (res.length == 0) {
             // For specific suites like multitenancy we don't have the privileges to access to
             // specific databases. If we cannot establish the version, let's skip the test case.
@@ -116,14 +115,10 @@ db.dropDatabase();
     });
 
     jsTest.log("Case collection: timeseries / collection: timeseries.");
-    runTest(
-        () => {
-            createWorked(kColl, tsOptions);
-            createWorked(kColl, tsOptions);
-        },
-        // On 7.0 this test case wrongly fails with NamespaceExists and should not be tested.
-        "7.1"  // minRequiredVersion
-    );
+    runTest(() => {
+        createWorked(kColl, tsOptions);
+        createWorked(kColl, tsOptions);
+    });
 
     jsTest.log("Case collection: timeseries / collection: timeseries with different options.");
     runTest(() => {
@@ -138,14 +133,17 @@ db.dropDatabase();
             createWorked(kBucket, tsOptions);
         },
         // Creation of bucket namespace is not idempotent before 8.0 (SERVER-89827)
-        "8.0"  // minRequiredVersion
+        "8.0", // minRequiredVersion
     );
-
-    jsTest.log(
-        "Case collection: timeseries / collection: bucket timeseries with different options.");
+    jsTest.log("Case collection: timeseries / collection: bucket timeseries with different options.");
     runTest(() => {
         createWorked(kColl, tsOptions);
-        createFailed(kBucket, tsOptions2, ErrorCodes.NamespaceExists);
+        if (areViewlessTimeseriesEnabled(db)) {
+            // TODO SERVER-101597 creation of system.buckets collections with TS options in FCV 9.0 must fail
+            createWorked(kBucket, tsOptions2);
+        } else {
+            createFailed(kColl, tsOptions2, ErrorCodes.NamespaceExists);
+        }
     });
 }
 
@@ -173,18 +171,21 @@ db.dropDatabase();
             createWorked(kColl, tsOptions);
         },
         // Creation of bucket namespace is not idempotent before 8.0 (SERVER-89827)
-        "8.0"  // minRequiredVersion
+        "8.0", // minRequiredVersion
     );
 
-    jsTest.log(
-        "Case collection: bucket timeseries / collection: timeseries with different options.");
+    jsTest.log("Case collection: bucket timeseries / collection: timeseries with different options.");
     runTest(() => {
         createWorked(kBucket, tsOptions);
-        createFailed(kColl, tsOptions2, ErrorCodes.NamespaceExists);
+        if (areViewlessTimeseriesEnabled(db)) {
+            // TODO SERVER-101597 creation of system.buckets collections with TS options in FCV 9.0 must fail
+            createWorked(kColl, tsOptions2);
+        } else {
+            createFailed(kColl, tsOptions2, ErrorCodes.NamespaceExists);
+        }
     });
 
-    jsTest.log(
-        "Case collection: bucket timeseries / collection: bucket timeseries with different options.");
+    jsTest.log("Case collection: bucket timeseries / collection: bucket timeseries with different options.");
     runTest(() => {
         createWorked(kBucket, tsOptions);
         createFailed(kBucket, tsOptions2, ErrorCodes.NamespaceExists);
@@ -197,18 +198,13 @@ db.dropDatabase();
             createWorked(kBucket, tsOptions);
         },
         // Creation of bucket namespace is not idempotent before 8.0 (SERVER-89827)
-        "8.0"  // minRequiredVersion
+        "8.0", // minRequiredVersion
     );
 }
 
 {
-    jsTest.log(
-        "Creation of unsharded bucket collections without timeseries options is not permitted.");
-    runTest(
-        () => {
-            createFailed(kBucket, {}, ErrorCodes.IllegalOperation);
-        },
-        // TODO BACKPORT-20546: Remove minRequired version once the backport is completed.
-        "8.1"  // minRequiredVersion
-    );
+    jsTest.log("Creation of unsharded bucket collections without timeseries options is not permitted.");
+    runTest(() => {
+        createFailed(kBucket, {}, ErrorCodes.IllegalOperation);
+    });
 }

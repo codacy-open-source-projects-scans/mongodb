@@ -27,10 +27,7 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_map.h>
-#include <memory>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/transport/transport_layer_mock.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -38,8 +35,12 @@
 #include "mongo/transport/mock_session.h"
 #include "mongo/transport/session_manager_noop.h"
 #include "mongo/transport/transport_layer.h"
-#include "mongo/transport/transport_layer_mock.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace transport {
@@ -47,9 +48,8 @@ namespace transport {
 TransportLayerMock::TransportLayerMock()
     : TransportLayerMock(std::make_unique<SessionManagerNoop>()) {}
 
-std::shared_ptr<Session> TransportLayerMock::createSession(bool isFromRouterPort) {
-    auto session =
-        createSessionHook ? createSessionHook(this) : MockSession::create(this, isFromRouterPort);
+std::shared_ptr<Session> TransportLayerMock::createSession() {
+    auto session = createSessionHook ? createSessionHook(this) : MockSession::create(this);
     Session::Id sessionId = session->id();
 
     _sessions[sessionId] = Connection{false, session, SSLPeerInfo()};

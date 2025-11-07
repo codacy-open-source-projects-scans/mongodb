@@ -27,13 +27,6 @@
  *    it in the license file.
  */
 
-#include <arpa/inet.h>
-#include <cstddef>
-#include <curl/curl.h>
-#include <curl/easy.h>
-#include <memory>
-#include <string>
-
 #include "mongo/base/data_builder.h"
 #include "mongo/base/data_range.h"
 #include "mongo/base/data_range_cursor.h"
@@ -43,7 +36,7 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/commands/server_status.h"
+#include "mongo/db/commands/server_status/server_status.h"
 #include "mongo/executor/connection_pool.h"
 #include "mongo/executor/connection_pool_stats.h"
 #include "mongo/logv2/log.h"
@@ -63,6 +56,14 @@
 #include "mongo/util/strong_weak_finish_line.h"
 #include "mongo/util/system_clock_source.h"
 #include "mongo/util/timer.h"
+
+#include <cstddef>
+#include <memory>
+#include <string>
+
+#include <arpa/inet.h>
+#include <curl/curl.h>
+#include <curl/easy.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -170,7 +171,7 @@ size_t ReadMemoryCallback(char* buffer, size_t size, size_t nitems, void* instre
         size_t readSize =
             std::min(size * nitems, static_cast<unsigned long>(bufReader->remaining()));
         auto buf = bufReader->readBytes(readSize);
-        memcpy(buffer, buf.rawData(), readSize);
+        memcpy(buffer, buf.data(), readSize);
         ret = readSize;
     }
 
@@ -264,35 +265,40 @@ CurlEasyHandle createCurlEasyHandle(Protocols protocol) {
     CurlEasyHandle handle(curl_easy_init());
     uassert(ErrorCodes::InternalError, "Curl initialization failed", handle);
 
-    curl_easy_setopt(handle.get(), CURLOPT_CONNECTTIMEOUT, longSeconds(kConnectionTimeout));
-    curl_easy_setopt(handle.get(), CURLOPT_FOLLOWLOCATION, 0);
-    curl_easy_setopt(handle.get(), CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
-    curl_easy_setopt(handle.get(), CURLOPT_NOSIGNAL, 1);
-    curl_easy_setopt(handle.get(), CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+    const auto setOption = [&](CURLoption option, auto value) {
+        // Ignore the error code, if any.
+        (void)curl_easy_setopt(handle.get(), option, value);
+    };
+
+    setOption(CURLOPT_CONNECTTIMEOUT, longSeconds(kConnectionTimeout));
+    setOption(CURLOPT_FOLLOWLOCATION, 0);
+    setOption(CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+    setOption(CURLOPT_NOSIGNAL, 1);
+    setOption(CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
 #ifdef CURLOPT_TCP_KEEPALIVE
-    curl_easy_setopt(handle.get(), CURLOPT_TCP_KEEPALIVE, 1);
+    setOption(CURLOPT_TCP_KEEPALIVE, 1);
 #endif
-    curl_easy_setopt(handle.get(), CURLOPT_TIMEOUT, longSeconds(kTotalRequestTimeout));
+    setOption(CURLOPT_TIMEOUT, longSeconds(kTotalRequestTimeout));
 
 #if LIBCURL_VERSION_NUM > 0x072200
     // Requires >= 7.34.0
-    curl_easy_setopt(handle.get(), CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
+    setOption(CURLOPT_SSLVERSION, CURL_SSLVERSION_TLSv1_2);
 #endif
 
 
-    curl_easy_setopt(handle.get(), CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
-    curl_easy_setopt(handle.get(), CURLOPT_HEADERFUNCTION, WriteMemoryCallback);
+    setOption(CURLOPT_WRITEFUNCTION, WriteMemoryCallback);
+    setOption(CURLOPT_HEADERFUNCTION, WriteMemoryCallback);
 
     if (protocol == Protocols::kHttpOrHttps) {
-        curl_easy_setopt(handle.get(), CURLOPT_PROTOCOLS, CURLPROTO_HTTPS | CURLPROTO_HTTP);
+        setOption(CURLOPT_PROTOCOLS, CURLPROTO_HTTPS | CURLPROTO_HTTP);
     } else {
-        curl_easy_setopt(handle.get(), CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+        setOption(CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
     }
 
     // TODO: CURLOPT_EXPECT_100_TIMEOUT_MS?
     if (httpClientOptions.verboseLogging.loadRelaxed()) {
-        curl_easy_setopt(handle.get(), CURLOPT_VERBOSE, 1);
-        curl_easy_setopt(handle.get(), CURLOPT_DEBUGFUNCTION, curlDebugCallback);
+        setOption(CURLOPT_VERBOSE, 1);
+        setOption(CURLOPT_DEBUGFUNCTION, curlDebugCallback);
     }
 
     return handle;
@@ -365,6 +371,7 @@ public:
 
     std::shared_ptr<ConnectionPool::ConnectionInterface> makeConnection(const HostAndPort&,
                                                                         transport::ConnectSSLMode,
+                                                                        PoolConnectionId,
                                                                         size_t generation) final;
 
     std::shared_ptr<ConnectionPool::TimerInterface> makeTimer() final {
@@ -435,8 +442,9 @@ public:
                      const std::shared_ptr<AlarmScheduler>& alarmScheduler,
                      const HostAndPort& host,
                      Protocols protocol,
+                     PoolConnectionId id,
                      size_t generation)
-        : ConnectionInterface(generation),
+        : ConnectionInterface(id, generation),
           _executor(std::move(executor)),
           _alarmScheduler(alarmScheduler),
           _timer(clockSource, alarmScheduler),
@@ -529,11 +537,17 @@ void PooledCurlHandle::refresh(Milliseconds timeout, RefreshCallback cb) {
 std::shared_ptr<executor::ConnectionPool::ConnectionInterface>
 CurlHandleTypeFactory::makeConnection(const HostAndPort& host,
                                       transport::ConnectSSLMode sslMode,
+                                      PoolConnectionId id,
                                       size_t generation) {
     _start();
 
-    return std::make_shared<PooledCurlHandle>(
-        _executor, _clockSource, _timerScheduler, host, mapSSLModeToProtocol(sslMode), generation);
+    return std::make_shared<PooledCurlHandle>(_executor,
+                                              _clockSource,
+                                              _timerScheduler,
+                                              host,
+                                              mapSSLModeToProtocol(sslMode),
+                                              id,
+                                              generation);
 }
 
 /**
@@ -635,7 +649,7 @@ HostAndPort exactHostAndPortFromUrl(StringData url) {
 
     auto hp = HostAndPort(url);
     if (!hp.hasPort()) {
-        if (url.startsWith("http://"_sd)) {
+        if (url.starts_with("http://"_sd)) {
             return HostAndPort(hp.host(), 80);
         }
 
@@ -808,7 +822,7 @@ private:
                 MONGO_UNREACHABLE;
         }
 
-        const auto urlString = url.toString();
+        const auto urlString = std::string{url};
         curl_easy_setopt(handle, CURLOPT_URL, urlString.c_str());
 
         DataBuilder dataBuilder(4096), headerBuilder(4096);

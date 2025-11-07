@@ -27,7 +27,10 @@
  *    it in the license file.
  */
 
-#include "mongo/db/pipeline/lite_parsed_pipeline.h"
+#pragma once
+
+#include "mongo/db/pipeline/lite_parsed_document_source.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 /**
@@ -37,8 +40,9 @@ namespace mongo {
 class LiteParsedSearchStage : public LiteParsedDocumentSource {
 public:
     static std::unique_ptr<LiteParsedSearchStage> parse(const NamespaceString& nss,
-                                                        const BSONElement& spec) {
-        return std::make_unique<LiteParsedSearchStage>(spec.fieldName(), nss);
+                                                        const BSONElement& spec,
+                                                        const LiteParserOptions& options) {
+        return std::make_unique<LiteParsedSearchStage>(spec.fieldName(), std::move(nss));
     }
 
     stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const override {
@@ -52,6 +56,10 @@ public:
     }
 
     bool isInitialSource() const final {
+        return true;
+    }
+
+    bool isSearchStage() const final {
         return true;
     }
 

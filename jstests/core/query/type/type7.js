@@ -3,12 +3,12 @@
 // Make sure swapping floatApprox, top and bottom don't break NumberLong
 
 // NOTE: don't remove the following line, it's required for tests below
-'use strict';
+"use strict";
 
 // Picking 2^54 because it's representable as a double (as a power of
 // two), but big enough that the NumberLong code doesn't know it (numbers
 // over 2^53 can lose precision)
-var number = NumberLong("18014398509481984");
+let number = NumberLong("18014398509481984");
 
 {
     // Make sure all elements in a new NumberLong are valid
@@ -22,17 +22,29 @@ var number = NumberLong("18014398509481984");
 {
     // Make sure that floatApprox, top and bottom cannot be set
 
-    assert.throws(function() {
-        number.floatApprox = "a";
-    }, [], "floatApprox should not be setable.");
+    assert.throws(
+        function () {
+            number.floatApprox = "a";
+        },
+        [],
+        "floatApprox should not be setable.",
+    );
 
-    assert.throws(function() {
-        number.top = "a";
-    }, [], "top should not be setable.");
+    assert.throws(
+        function () {
+            number.top = "a";
+        },
+        [],
+        "top should not be setable.",
+    );
 
-    assert.throws(function() {
-        number.bottom = "a";
-    }, [], "bottom should not be setable.");
+    assert.throws(
+        function () {
+            number.bottom = "a";
+        },
+        [],
+        "bottom should not be setable.",
+    );
 }
 
 {

@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
@@ -48,12 +41,21 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -99,8 +101,7 @@ public:
                            const LogicalSessionId& lsid,
                            const TxnNumberAndRetryCounter& txnNumberAndRetryCounter,
                            std::unique_ptr<txn::AsyncWorkScheduler> scheduler,
-                           Date_t deadline,
-                           const CancellationToken& cancelToken);
+                           Date_t deadline);
 
     ~TransactionCoordinator();
 
@@ -159,6 +160,13 @@ public:
      * when the transaction coordinator service is shutting down.
      */
     void cancelIfCommitNotYetStarted();
+
+    /**
+     * Cancels the owned cancellation token which interrupts/cancels all associated
+     * `WaitForMajority` invocations under this coordinator. typically invoked only by the
+     * TransactionCoordinatorService during stepdown.
+     */
+    void cancel();
 
     TxnRetryCounter getTxnRetryCounterForTest() const {
         return *_txnNumberAndRetryCounter.getTxnRetryCounter();
@@ -253,8 +261,8 @@ private:
     // The deadline for the TransactionCoordinator to reach a decision
     Date_t _deadline;
 
-    // The cancellation token for WaitForMajority.
-    const CancellationToken _cancelToken;
+    // The cancellation source for WaitForMajority.
+    CancellationSource _cancellationSource;
 };
 
 }  // namespace mongo

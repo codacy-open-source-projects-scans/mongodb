@@ -29,7 +29,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, Callable, Optional
 
 import numpy as np
 from sklearn.metrics import explained_variance_score, mean_squared_error, r2_score
@@ -44,6 +45,11 @@ class ExecutionStats:
     execution_time: int
     n_returned: int
     n_processed: int
+    n_processed_per_child: list[int]
+    # Technically superfluous, because it's len(n_processed_per_child), but improves readability
+    n_children: int
+    seeks: Optional[int]
+    n_index_fields: Optional[int]
 
 
 @dataclass
@@ -58,16 +64,15 @@ class CostModelParameters:
 class LinearModel:
     """Calibrated Linear Model and its metrics."""
 
-    # pylint: disable=invalid-name
     intercept: float
     coef: list[float]
     mse: float  # Mean Squared Error
     r2: float  # Coefficient of determination
     evs: float  # Explained Variance Score
-    corrcoef: any  # Correlation Coefficients
+    corrcoef: Any  # Correlation Coefficients
+    predict: Callable[[Any], Any] = field(default=None, repr=False)  # the actual linear function
 
 
-# pylint: disable=invalid-name
 def estimate(
     fit, X: np.ndarray, y: np.ndarray, test_size: float, trace: bool = False
 ) -> LinearModel:
@@ -98,5 +103,11 @@ def estimate(
     corrcoef = np.corrcoef(np.transpose(X[:, 1:]), y)
 
     return LinearModel(
-        coef=coef[1:], intercept=coef[0], mse=mse, r2=r2, evs=evs, corrcoef=corrcoef[0, 1:]
+        coef=coef[1:],
+        intercept=coef[0],
+        mse=mse,
+        r2=r2,
+        evs=evs,
+        corrcoef=corrcoef[0, 1:],
+        predict=predict,
     )

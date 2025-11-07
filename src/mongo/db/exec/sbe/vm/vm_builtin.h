@@ -29,9 +29,10 @@
 
 #pragma once
 
-#include <string>
+#include "mongo/util/modules.h"
 
-#include "mongo/db/exec/sbe/vm/vm_types.h"
+#include <cstdint>  // uint8_t, etc.
+#include <string>
 
 namespace mongo {
 namespace sbe {
@@ -50,7 +51,7 @@ using SmallBuiltinType = uint8_t;
 enum class Builtin : uint16_t {
     split,
     regexMatch,
-    replaceOne,  // replace first occurrence of a specified substring with a diffferent substring
+    replaceOne,  // replace first occurrence of a specified substring with a different substring
     dateDiff,
     dateParts,
     dateToParts,
@@ -136,6 +137,7 @@ enum class Builtin : uint16_t {
     coerceToString,
     concat,
     concatArrays,
+    zipArrays,
     trim,
     ltrim,
     rtrim,
@@ -384,6 +386,8 @@ enum class Builtin : uint16_t {
     cellFoldValues_F,
     cellFoldValues_P,
     cellBlockGetFlatValuesBlock,
+
+    currentDate,
 };  // enum class Builtin
 
 std::string builtinToString(Builtin b);

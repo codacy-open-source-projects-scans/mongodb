@@ -29,11 +29,10 @@
 
 #pragma once
 
-#include "mongo/db/exec/sbe/expressions/expression.h"
-#include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/pipeline/window_function/window_function_statement.h"
 #include "mongo/db/query/stage_builder/sbe/gen_accumulator.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::stage_builder {
 struct WindowOpInfo;
@@ -42,7 +41,7 @@ class WindowOp {
 public:
     WindowOp(std::string opName);
 
-    WindowOp(StringData opName) : WindowOp(opName.toString()) {}
+    WindowOp(StringData opName) : WindowOp(std::string{opName}) {}
 
     WindowOp(const WindowFunctionStatement& wf);
 

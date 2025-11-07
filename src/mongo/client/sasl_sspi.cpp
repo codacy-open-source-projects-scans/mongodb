@@ -30,11 +30,6 @@
 #ifdef _WIN32
 
 
-#include "mongo/platform/basic.h"
-
-#include <sasl/sasl.h>
-#include <sasl/saslplug.h>
-
 #include "mongo/base/init.h"
 #include "mongo/base/status.h"
 #include "mongo/client/sasl_sspi_options.h"
@@ -42,6 +37,9 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/text.h"
+
+#include <sasl/sasl.h>
+#include <sasl/saslplug.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -104,9 +102,7 @@ void HandleLastError(const sasl_utils_t* utils, DWORD errCode, const char* msg) 
     LocalFree(err);
 }
 
-int sspiClientMechNew(void* glob_context,
-                      sasl_client_params_t* cparams,
-                      void** conn_context) noexcept {
+int sspiClientMechNew(void* glob_context, sasl_client_params_t* cparams, void** conn_context) {
     // Prepare auth identity to pass to AcquireCredentialsHandle
     SEC_WINNT_AUTH_IDENTITY authIdentity;
     authIdentity.Flags = SEC_WINNT_AUTH_IDENTITY_UNICODE;
@@ -356,7 +352,7 @@ int sspiClientMechStep(void* conn_context,
                        sasl_interact_t** prompt_need,
                        const char** clientout,
                        unsigned* clientoutlen,
-                       sasl_out_params_t* oparams) noexcept {
+                       sasl_out_params_t* oparams) {
     SspiConnContext* pcctx = static_cast<SspiConnContext*>(conn_context);
     *clientout = nullptr;
     *clientoutlen = 0;

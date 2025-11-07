@@ -33,8 +33,6 @@
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <utility>
-
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -46,9 +44,6 @@
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/stdx/mutex.h"
@@ -60,6 +55,8 @@
 #include "mongo/util/future_util.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/time_support.h"
+
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT mongo::logv2::LogComponent::kExecutor
 
@@ -674,8 +671,8 @@ void ThreadPoolTaskExecutor::_setState_inlock(State newState) {
     _stateChange.notify_all();
 }
 
-void ThreadPoolTaskExecutor::dropConnections(const HostAndPort& hostAndPort) {
-    _net->dropConnections(hostAndPort);
+void ThreadPoolTaskExecutor::dropConnections(const HostAndPort& target, const Status& status) {
+    _net->dropConnections(target, status);
 }
 
 }  // namespace executor

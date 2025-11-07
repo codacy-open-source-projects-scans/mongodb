@@ -29,29 +29,30 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/ordering.h"
+#include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/field_name_bloom_filter.h"
-#include "mongo/db/exec/working_set.h"
 #include "mongo/db/index/btree_key_generator.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/sort_pattern.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -156,7 +157,7 @@ private:
             }
 
             children.push_back(std::make_unique<SortKeyTreeNode>());
-            children.back()->name = part->fieldPath->getFieldName(pathIdx).toString();
+            children.back()->name = std::string{part->fieldPath->getFieldName(pathIdx)};
             children.back()->addSortPatternPart(part, pathIdx + 1, partIdx);
             bloomFilter.insert(children.back()->name.c_str(), children.back()->name.size());
         }

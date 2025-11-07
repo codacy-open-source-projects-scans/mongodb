@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <cstddef>
-#include <map>
-#include <memory>
-#include <string>
-
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -41,6 +36,11 @@
 #include "mongo/crypto/jwks_fetcher.h"
 #include "mongo/crypto/jws_validator.h"
 #include "mongo/crypto/jwt_types_gen.h"
+
+#include <cstddef>
+#include <map>
+#include <memory>
+#include <string>
 
 
 namespace mongo::crypto {
@@ -86,6 +86,21 @@ public:
      */
     void serialize(BSONObjBuilder* bob) const;
 
+    /**
+     * Returns TRUE if a fetch to IDP SHOULD NOT be performed at this time.
+     * e.g. If a fetch was performed too recently.
+     */
+    bool quiesce() const {
+        return _fetcher->quiesce();
+    }
+
+    /**
+     * Sets a date to be used as the latest time a fetch happened.
+     */
+    void setQuiesce(Date_t quiesce) {
+        _fetcher->setQuiesce(quiesce);
+    }
+
 private:
     bool _haveKeysBeenModified(const KeyMap& newKeyMaterial) const;
 
@@ -99,6 +114,16 @@ private:
     // If an existing key got deleted or modified while doing a just in time refresh, we activate
     // this flag to indicate that a refresh occurred during this JWKManager's lifetime.
     bool _isKeyModified;
+
+    /**
+     * Helper function to load and validate an RSA key and return a key ID
+     */
+    std::string _loadAndValidateRSAKey(const JWKRSA& RSAkey);
+
+    /**
+     * Helper function to load and validate an EC key and return a key ID
+     */
+    std::string _loadAndValidateECKey(const JWKEC& ECkey);
 };
 
 }  // namespace mongo::crypto

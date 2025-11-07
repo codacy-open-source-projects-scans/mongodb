@@ -27,13 +27,17 @@
  *    it in the license file.
  */
 
+#pragma once
+
 #include "mongo/db/commands/profile_common.h"
 #include "mongo/db/commands/profile_gen.h"
 #include "mongo/db/profile_settings.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
 static const int kDefaultSlowms = 200;
+static const int kDefaultSlowInProgMS = 1000;
 static const double kDefaultSampleRate = 1.0;
 
 /**
@@ -43,6 +47,7 @@ struct ProfileCmdTestArgs {
     int64_t level = 0;
     boost::optional<double> sampleRate = boost::none;
     boost::optional<int64_t> slowms = boost::none;
+    boost::optional<int64_t> slowinprogms = boost::none;
     boost::optional<ObjectOrUnset> filter = boost::none;
 };
 

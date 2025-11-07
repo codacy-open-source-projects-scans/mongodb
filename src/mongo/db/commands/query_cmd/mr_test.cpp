@@ -27,18 +27,6 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <fmt/format.h>
-#include <functional>
-#include <memory>
-#include <ostream>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -48,18 +36,19 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/query_cmd/map_reduce_out_options.h"
 #include "mongo/db/commands/query_cmd/mr_common.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
@@ -76,20 +65,28 @@
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/protocol.h"
 #include "mongo/scripting/dbdirectclient_factory.h"
 #include "mongo/scripting/engine.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <ostream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -107,9 +104,9 @@ void _compareOutputOptionField(const DatabaseName& dbName,
                                const T& expected) {
     if (actual == expected)
         return;
-    FAIL(str::stream() << "parseOutputOptions(\"" << dbName.toStringForErrorMsg() << ", "
-                       << cmdObjStr << "): " << fieldName << ": Expected: " << expected
-                       << ". Actual: " << actual);
+    FAIL(std::string(str::stream() << "parseOutputOptions(\"" << dbName.toStringForErrorMsg()
+                                   << ", " << cmdObjStr << "): " << fieldName
+                                   << ": Expected: " << expected << ". Actual: " << actual));
 }
 
 /**
@@ -280,8 +277,9 @@ public:
     void onCreateIndex(OperationContext* opCtx,
                        const NamespaceString& nss,
                        const UUID& uuid,
-                       BSONObj indexDoc,
-                       bool fromMigrate) override;
+                       const IndexBuildInfo& indexBuildInfo,
+                       bool fromMigrate,
+                       bool isViewlessTimeseries) override;
 
     /**
      * This function is called whenever mapReduce copies indexes from an existing output collection
@@ -291,8 +289,9 @@ public:
                            const NamespaceString& nss,
                            const UUID& collUUID,
                            const UUID& indexBuildUUID,
-                           const std::vector<BSONObj>& indexes,
-                           bool fromMigrate) override;
+                           const std::vector<IndexBuildInfo>& indexes,
+                           bool fromMigrate,
+                           bool isViewlessTimeseries) override;
 
     /**
      * This function is called whenever mapReduce inserts documents into a temporary output
@@ -310,19 +309,22 @@ public:
     /**
      * Tracks the temporary collections mapReduces creates.
      */
-    void onCreateCollection(OperationContext* opCtx,
-                            const CollectionPtr& coll,
-                            const NamespaceString& collectionName,
-                            const CollectionOptions& options,
-                            const BSONObj& idIndex,
-                            const OplogSlot& createOpTime,
-                            bool fromMigrate) override;
+    void onCreateCollection(
+        OperationContext* opCtx,
+        const NamespaceString& collectionName,
+        const CollectionOptions& options,
+        const BSONObj& idIndex,
+        const OplogSlot& createOpTime,
+        const boost::optional<CreateCollCatalogIdentifier>& createCollCatalogIdentifier,
+        bool fromMigrate,
+        bool isViewlessTimeseries) override;
 
     repl::OpTime onDropCollection(OperationContext* opCtx,
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
-                                  bool markFromMigrate) override;
+                                  bool markFromMigrate,
+                                  bool isViewlessTimeseries) override;
 
     // Hook for onInserts. Defaults to a no-op function but may be overridden to inject exceptions
     // while mapReduce inserts its results into the temporary output collection.
@@ -341,19 +343,21 @@ public:
 void MapReduceOpObserver::onCreateIndex(OperationContext* opCtx,
                                         const NamespaceString& nss,
                                         const UUID& uuid,
-                                        BSONObj indexDoc,
-                                        bool fromMigrate) {
-    indexesCreated.push_back(indexDoc.getOwned());
+                                        const IndexBuildInfo& indexBuildInfo,
+                                        bool fromMigrate,
+                                        bool isViewlessTimeseries) {
+    indexesCreated.push_back(indexBuildInfo.spec.getOwned());
 }
 
 void MapReduceOpObserver::onStartIndexBuild(OperationContext* opCtx,
                                             const NamespaceString& nss,
                                             const UUID& collUUID,
                                             const UUID& indexBuildUUID,
-                                            const std::vector<BSONObj>& indexes,
-                                            bool fromMigrate) {
-    for (auto&& obj : indexes) {
-        indexesCreated.push_back(obj.getOwned());
+                                            const std::vector<IndexBuildInfo>& indexes,
+                                            bool fromMigrate,
+                                            bool isViewlessTimeseries) {
+    for (const auto& indexBuildInfo : indexes) {
+        indexesCreated.push_back(indexBuildInfo.spec.getOwned());
     }
 }
 
@@ -368,13 +372,15 @@ void MapReduceOpObserver::onInserts(OperationContext* opCtx,
     onInsertsFn();
 }
 
-void MapReduceOpObserver::onCreateCollection(OperationContext*,
-                                             const CollectionPtr&,
-                                             const NamespaceString& collectionName,
-                                             const CollectionOptions& options,
-                                             const BSONObj&,
-                                             const OplogSlot&,
-                                             bool fromMigrate) {
+void MapReduceOpObserver::onCreateCollection(
+    OperationContext*,
+    const NamespaceString& collectionName,
+    const CollectionOptions& options,
+    const BSONObj&,
+    const OplogSlot&,
+    const boost::optional<CreateCollCatalogIdentifier>& createCollCatalogIdentifier,
+    bool fromMigrate,
+    bool isViewlessTimeseries) {
     if (!options.temp) {
         return;
     }
@@ -385,7 +391,8 @@ repl::OpTime MapReduceOpObserver::onDropCollection(OperationContext* opCtx,
                                                    const NamespaceString& collectionName,
                                                    const UUID& uuid,
                                                    std::uint64_t numRecords,
-                                                   bool markFromMigrate) {
+                                                   bool markFromMigrate,
+                                                   bool isViewlessTimeseries) {
     // If the oplog is not disabled for this namespace, then we need to reserve an op time for the
     // drop.
     if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, collectionName)) {
@@ -587,11 +594,13 @@ TEST_F(MapReduceCommandTest, ReplacingExistingOutputCollectionPreservesIndexes) 
         writeConflictRetry(
             _opCtx.get(), "ReplacingExistingOutputCollectionPreservesIndexes", outputNss, [&] {
                 WriteUnitOfWork wuow(_opCtx.get());
+                CollectionWriter writer{_opCtx.get(), coll};
+
                 ASSERT_OK(
-                    coll.getWritableCollection(_opCtx.get())
+                    writer.getWritableCollection(_opCtx.get())
                         ->getIndexCatalog()
                         ->createIndexOnEmptyCollection(
-                            _opCtx.get(), coll.getWritableCollection(_opCtx.get()), indexSpec));
+                            _opCtx.get(), writer.getWritableCollection(_opCtx.get()), indexSpec));
                 wuow.commit();
             });
     }

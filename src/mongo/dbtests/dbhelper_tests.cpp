@@ -27,11 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -39,18 +34,20 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/dbclient_cursor.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/global_settings.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
@@ -64,14 +61,16 @@
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_role.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace mongo {
 namespace {
@@ -162,8 +161,8 @@ public:
         CollectionPtr collection1;
         {
             WriteUnitOfWork wuow(opCtx1.get());
-            collection1 =
-                CollectionPtr(db->createCollection(opCtx1.get(), nss, CollectionOptions(), true));
+            collection1 = CollectionPtr::CollectionPtr_UNSAFE(
+                db->createCollection(opCtx1.get(), nss, CollectionOptions(), true));
             ASSERT_TRUE(collection1);
             ASSERT_TRUE(
                 collection_internal::insertDocument(
@@ -285,9 +284,10 @@ private:
                 ASSERT(collection2);
 
                 BSONObj res;
-                ASSERT_THROWS(Helpers::findByIdAndNoopUpdate(
-                                  opCtx2, CollectionPtr(collection2), idQuery, res),
-                              WriteConflictException);
+                ASSERT_THROWS(
+                    Helpers::findByIdAndNoopUpdate(
+                        opCtx2, CollectionPtr::CollectionPtr_UNSAFE(collection2), idQuery, res),
+                    WriteConflictException);
             }
 
             wuow1.commit();

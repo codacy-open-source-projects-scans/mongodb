@@ -29,10 +29,6 @@
 
 #include "mongo/db/commands/query_cmd/bulk_write_common.h"
 
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -49,10 +45,14 @@
 #include "mongo/db/query/write_ops/delete_request_gen.h"
 #include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/query/write_ops/write_ops.h"
+#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <boost/cstdint.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace bulk_write_common {
@@ -155,7 +155,7 @@ int32_t getStatementId(const BulkWriteCommandRequest& req, size_t currentOpIdx) 
 
 NamespaceInfoEntry getFLENamespaceInfoEntry(const BSONObj& bulkWrite) {
     BulkWriteCommandRequest bulk =
-        BulkWriteCommandRequest::parse(IDLParserContext("bulkWrite"), bulkWrite);
+        BulkWriteCommandRequest::parse(bulkWrite, IDLParserContext("bulkWrite"));
     const std::vector<NamespaceInfoEntry>& nss = bulk.getNsInfo();
     uassert(ErrorCodes::BadValue,
             "BulkWrite with Queryable Encryption supports only a single namespace",
@@ -186,6 +186,7 @@ write_ops::InsertCommandRequest makeInsertCommandRequestForFLE(
 }
 
 write_ops::UpdateOpEntry makeUpdateOpEntryFromUpdateOp(const BulkWriteUpdateOp* op) {
+    // TODO SERVER-107545: Move this check to parse time and potentially convert this to a tassert.
     uassert(ErrorCodes::FailedToParse,
             "Cannot specify sort with multi=true",
             !op->getSort() || !op->getMulti());
@@ -205,6 +206,46 @@ write_ops::UpdateOpEntry makeUpdateOpEntryFromUpdateOp(const BulkWriteUpdateOp* 
     update.setAllowShardKeyUpdatesWithoutFullShardKeyInQuery(
         op->getAllowShardKeyUpdatesWithoutFullShardKeyInQuery());
     return update;
+}
+
+BulkWriteUpdateOp toBulkWriteUpdate(const write_ops::UpdateOpEntry& op) {
+    // TODO SERVER-107545: Move this check to parse time and potentially convert this to a tassert.
+    uassert(ErrorCodes::FailedToParse,
+            "Cannot specify sort with multi=true",
+            !op.getSort() || !op.getMulti());
+
+    BulkWriteUpdateOp update;
+
+    // Set 'nsInfoIdx' to 0, as there is only one namespace in a regular update.
+    update.setNsInfoIdx(0);
+    update.setFilter(op.getQ());
+    update.setMulti(op.getMulti());
+    update.setConstants(op.getC());
+    update.setUpdateMods(op.getU());
+    update.setSort(op.getSort());
+    update.setHint(op.getHint());
+    update.setCollation(op.getCollation());
+    update.setArrayFilters(op.getArrayFilters());
+    update.setUpsert(op.getUpsert());
+    update.setUpsertSupplied(op.getUpsertSupplied());
+    update.setSampleId(op.getSampleId());
+    update.setAllowShardKeyUpdatesWithoutFullShardKeyInQuery(
+        op.getAllowShardKeyUpdatesWithoutFullShardKeyInQuery());
+    return update;
+}
+
+BulkWriteDeleteOp toBulkWriteDelete(const write_ops::DeleteOpEntry& op) {
+    BulkWriteDeleteOp deleteOp;
+
+    // Set 'nsInfoIdx' to 0, as there is only one namespace in a regular delete.
+    deleteOp.setNsInfoIdx(0);
+    if (op.getCollation()) {
+        deleteOp.setCollation(op.getCollation());
+    }
+    deleteOp.setHint(op.getHint());
+    deleteOp.setMulti(op.getMulti());
+    deleteOp.setFilter(op.getQ());
+    return deleteOp;
 }
 
 UpdateRequest makeUpdateRequestFromUpdateOp(OperationContext* opCtx,
@@ -249,8 +290,11 @@ DeleteRequest makeDeleteRequestFromDeleteOp(OperationContext* opCtx,
 }
 
 write_ops::UpdateCommandRequest makeUpdateCommandRequestFromUpdateOp(
-    const BulkWriteUpdateOp* op, const BulkWriteCommandRequest& req, size_t currentOpIdx) {
-    auto idx = op->getUpdate();
+    OperationContext* opCtx,
+    const BulkWriteUpdateOp* op,
+    const BulkWriteCommandRequest& req,
+    size_t currentOpIdx) {
+    auto idx = op->getNsInfoIdx();
     auto nsEntry = req.getNsInfo()[idx];
 
     auto stmtId = bulk_write_common::getStatementId(req, currentOpIdx);
@@ -259,6 +303,9 @@ write_ops::UpdateCommandRequest makeUpdateCommandRequestFromUpdateOp(
     write_ops::UpdateCommandRequest updateCommand(nsEntry.getNs(), updates);
 
     updateCommand.setLet(req.getLet());
+    if (isRawDataOperation(opCtx)) {
+        updateCommand.setRawData(true);
+    }
 
     auto& requestBase = updateCommand.getWriteCommandRequestBase();
     requestBase.setIsTimeseriesNamespace(nsEntry.getIsTimeseriesNamespace());
@@ -292,6 +339,9 @@ write_ops::DeleteCommandRequest makeDeleteCommandRequestForFLE(
     write_ops::DeleteCommandRequest deleteRequest(nsEntry.getNs(), deletes);
     deleteRequest.setLet(req.getLet());
     deleteRequest.setLegacyRuntimeConstants(Variables::generateRuntimeConstants(opCtx));
+    if (isRawDataOperation(opCtx)) {
+        deleteRequest.setRawData(true);
+    }
 
     auto& requestBase = deleteRequest.getWriteCommandRequestBase();
     requestBase.setCollectionUUID(nsEntry.getCollectionUUID());
@@ -311,12 +361,11 @@ BulkWriteCommandRequest makeSingleOpBulkWriteCommandRequest(
 
     // Make a copy of the operation and adjust its namespace index to 0.
     auto newOp = bulkWriteReq.getOps()[opIdx];
-    visit(OverloadedVisitor{
-              [](mongo::BulkWriteInsertOp& op) { op.setInsert(0); },
-              [](mongo::BulkWriteUpdateOp& op) { op.setUpdate(0); },
-              [](mongo::BulkWriteDeleteOp& op) { op.setDeleteCommand(0); },
-          },
-          newOp);
+    visit(
+        OverloadedVisitor{
+            [](auto& op) { op.setNsInfoIdx(0); },
+        },
+        newOp);
 
     BulkWriteCommandRequest singleOpRequest;
     singleOpRequest.setOps({newOp});
@@ -345,10 +394,15 @@ UpdateMetrics& bulkWriteUpdateMetric(ClusterRole role) {
 }  // namespace
 
 void incrementBulkWriteUpdateMetrics(
+    QueryCounters& queryCounters,
     ClusterRole role,
     const write_ops::UpdateModification& updateMod,
     const mongo::NamespaceString& ns,
-    const boost::optional<std::vector<mongo::BSONObj>>& arrayFilters) {
+    const boost::optional<std::vector<mongo::BSONObj>>& arrayFilters,
+    bool isMulti) {
+    if (isMulti) {
+        queryCounters.updateManyCount.increment(1);
+    }
     incrementUpdateMetrics(updateMod, ns, bulkWriteUpdateMetric(role), arrayFilters);
 }
 

@@ -28,17 +28,19 @@
  */
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/pipeline/variables.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+namespace MONGO_MOD_PUB mongo {
 
 /*
  * Generate a match expression from a list of encrypted fields.
@@ -53,4 +55,4 @@ StatusWithMatchExpression generateMatchExpressionFromEncryptedFields(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const std::vector<EncryptedField>& encryptedFields);
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

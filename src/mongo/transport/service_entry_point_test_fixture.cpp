@@ -32,20 +32,27 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/config.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/read_write_concern_defaults_gen.h"
-#include "mongo/db/repl/hello_gen.h"
+#include "mongo/db/repl/hello/hello_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/storage_engine_mock.h"
 #include "mongo/executor/remote_command_request.h"
+#include "mongo/otel/telemetry_context_holder.h"
+#include "mongo/otel/telemetry_context_serialization.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/legacy_reply.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/transport/service_entry_point.h"
+
+#ifdef MONGO_CONFIG_OTEL
+#include "mongo/otel/traces/span/span_telemetry_context_impl.h"
+#endif
 
 namespace mongo {
 
@@ -121,9 +128,9 @@ Message ServiceEntryPointTestFixture::constructMessage(BSONObj cmdBSON,
 
 StatusWith<DbResponse> ServiceEntryPointTestFixture::handleRequest(Message msg,
                                                                    OperationContext* opCtx) {
-    startCapturingLogMessages();
-    auto swDbResponse = getServiceEntryPoint()->handleRequest(opCtx, msg).getNoThrow();
-    stopCapturingLogMessages();
+    auto swDbResponse = getServiceEntryPoint()
+                            ->handleRequest(opCtx, msg, opCtx->fastClockSource().now())
+                            .getNoThrow();
     return swDbResponse;
 }
 
@@ -172,9 +179,11 @@ void ServiceEntryPointTestFixture::testCommandFailsRunInvocationWithResponse() {
 
 void ServiceEntryPointTestFixture::testCommandFailsRunInvocationWithException(std::string log) {
     auto cmdBSON = BSON(TestCmdFailsRunInvocationWithException::kCommandName << 1);
+    unittest::LogCaptureGuard logs;
     runCommandTestWithResponse(
         cmdBSON, nullptr, Status(ErrorCodes::InternalError, "Test command failure response."));
-    ASSERT_EQ(countTextFormatLogLinesContaining(log), 1);
+    logs.stop();
+    ASSERT_EQ(logs.countTextContaining(log), 1);
 }
 
 void ServiceEntryPointTestFixture::testHandleRequestException(int errorId) {
@@ -182,11 +191,13 @@ void ServiceEntryPointTestFixture::testHandleRequestException(int errorId) {
     auto opCtx = makeOperationContext();
     const BSONObj dummyObj = BSON("x" << 1);
     const auto dummyNS = "test.foo";
+    unittest::LogCaptureGuard logs;
     auto swDbResponse =
         handleRequest(makeUnsupportedOpInsertMessage(dummyNS, &dummyObj, 0), opCtx.get());
+    logs.stop();
     ASSERT_NOT_OK(swDbResponse);
     ASSERT_EQ(swDbResponse.getStatus().code(), ErrorCodes::Error(handleRequestErrorId));
-    ASSERT_EQ(countTextFormatLogLinesContaining("Failed to handle request"), 1);
+    ASSERT_EQ(logs.countTextContaining("Failed to handle request"), 1);
 }
 
 void ServiceEntryPointTestFixture::testParseCommandFailsDbQueryUnsupportedCommand(std::string log) {
@@ -203,19 +214,22 @@ void ServiceEntryPointTestFixture::testParseCommandFailsDbQueryUnsupportedComman
     // Make dbQuery message with unsupported command.
     auto legacyMsg = makeMessage(dbQuery, dummyLegacyDbQueryBuilder);
     auto opCtx = makeOperationContext();
+    unittest::LogCaptureGuard logs;
     auto swDbResponse = handleRequest(legacyMsg, opCtx.get());
+    logs.stop();
     ASSERT_OK(swDbResponse);
 
     auto legacyReply = rpc::LegacyReply(&swDbResponse.getValue().response);
     auto status = getStatusFromCommandResult(legacyReply.getCommandReply());
     ASSERT_EQ(status.code(), ErrorCodes::UnsupportedOpQueryCommand);
 
-    ASSERT_EQ(countTextFormatLogLinesContaining(log), 1);
+    ASSERT_EQ(logs.countTextContaining(log), 1);
 }
 
 void ServiceEntryPointTestFixture::testCommandNotFound(bool logsCommandNotFound) {
     const auto commandName = "testCommandNotFound";
     const auto cmdBSON = BSON(commandName << 1);
+    unittest::LogCaptureGuard logs;
     runCommandTestWithResponse(
         cmdBSON,
         nullptr,
@@ -224,8 +238,9 @@ void ServiceEntryPointTestFixture::testCommandNotFound(bool logsCommandNotFound)
                            "For more details see "
                            "https://dochub.mongodb.org/core/legacy-opcode-removal",
                            commandName)));
+    logs.stop();
     if (logsCommandNotFound) {
-        ASSERT_EQ(countTextFormatLogLinesContaining("Command not found in registry"), 1);
+        ASSERT_EQ(logs.countTextContaining("Command not found in registry"), 1);
     }
 }
 
@@ -358,13 +373,15 @@ void ServiceEntryPointTestFixture::testOpCtxInterrupt(bool deferHandling) {
 void ServiceEntryPointTestFixture::testReadConcernClientUnspecifiedNoDefault() {
     // We don't supply any read concern here, so the implicit default read concern is chosen by
     // the ServiceEntryPoint.
+    unittest::LogCaptureGuard logs;
     const auto cmdBSON = BSON(TestCmdSucceeds::kCommandName << 1);
     auto opCtx = makeOperationContext();
     auto dbResponse = runCommandTestWithResponse(cmdBSON, opCtx.get());
     auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx.get());
     ASSERT(readConcernArgs.isImplicitDefault());
     ASSERT_EQ(readConcernArgs.getLevel(), repl::ReadConcernLevel::kLocalReadConcern);
-    ASSERT_EQ(countTextFormatLogLinesContaining("Applying default readConcern on command"), 1);
+    logs.stop();
+    ASSERT_EQ(logs.countTextContaining("Applying default readConcern on command"), 1);
 }
 
 void ServiceEntryPointTestFixture::testReadConcernClientUnspecifiedWithDefault(
@@ -375,17 +392,19 @@ void ServiceEntryPointTestFixture::testReadConcernClientUnspecifiedWithDefault(
     const auto cmdBSON = BSON(TestCmdSucceedsDefaultRCPermitted::kCommandName << 1);
     auto opCtx = makeOperationContext();
     setDefaultReadConcern(opCtx.get(), repl::ReadConcernArgs::kAvailable);
+    unittest::LogCaptureGuard logs;
     auto dbResponse = runCommandTestWithResponse(cmdBSON, opCtx.get());
+    logs.stop();
     auto readConcernArgs = repl::ReadConcernArgs::get(opCtx.get());
 
     if (expectClusterDefault) {
         ASSERT_EQ(readConcernArgs.getLevel(), repl::ReadConcernArgs::kAvailable.getLevel());
         ASSERT_EQ(readConcernArgs.getProvenance(),
                   ReadWriteConcernProvenance(ReadWriteConcernProvenanceSourceEnum::customDefault));
-        ASSERT_EQ(countTextFormatLogLinesContaining("Applying default readConcern on command"), 1);
+        ASSERT_EQ(logs.countTextContaining("Applying default readConcern on command"), 1);
     } else {
         ASSERT(readConcernArgs.isImplicitDefault());
-        ASSERT_EQ(countTextFormatLogLinesContaining("Applying default readConcern on command"), 0);
+        ASSERT_EQ(logs.countTextContaining("Applying default readConcern on command"), 0);
     }
 }
 
@@ -393,9 +412,9 @@ void ServiceEntryPointTestFixture::testReadConcernClientSuppliedLevelNotAllowed(
     bool exceptionLogged) {
     // We supply a majority read concern, but the Command object does not support anything
     // non-local, so the ServiceEntryPoint throws.
-    const auto cmdBSON = BSON(TestCmdSucceeds::kCommandName << 1 << "readConcern"
-                                                            << BSON("level"
-                                                                    << "majority"));
+    const auto cmdBSON =
+        BSON(TestCmdSucceeds::kCommandName << 1 << "readConcern" << BSON("level" << "majority"));
+    unittest::LogCaptureGuard logs;
     runCommandTestWithResponse(
         cmdBSON,
         nullptr,
@@ -403,37 +422,39 @@ void ServiceEntryPointTestFixture::testReadConcernClientSuppliedLevelNotAllowed(
                "Command testSuccess does not support { readConcern: { level: \"majority\", "
                "provenance: \"clientSupplied\" } } :: caused by :: read concern not "
                "supported"));
+    logs.stop();
     if (exceptionLogged) {
-        ASSERT_EQ(countTextFormatLogLinesContaining("Assertion while executing command"), 1);
+        ASSERT_EQ(logs.countTextContaining("Assertion while executing command"), 1);
     }
 }
 
 void ServiceEntryPointTestFixture::testReadConcernClientSuppliedAllowed() {
     // Supplying a local read concern in the request.
-    const auto cmdBSON = BSON(TestCmdSucceeds::kCommandName << 1 << "readConcern"
-                                                            << BSON("level"
-                                                                    << "local"));
+    const auto cmdBSON =
+        BSON(TestCmdSucceeds::kCommandName << 1 << "readConcern" << BSON("level" << "local"));
     auto opCtx = makeOperationContext();
+    unittest::LogCaptureGuard logs;
     auto dbResponse = runCommandTestWithResponse(cmdBSON, opCtx.get());
+    logs.stop();
     auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx.get());
     ASSERT(!readConcernArgs.isImplicitDefault());
     ASSERT_EQ(readConcernArgs.getLevel(), repl::ReadConcernLevel::kLocalReadConcern);
-    ASSERT_EQ(countTextFormatLogLinesContaining("Applying default readConcern on command"), 0);
+    ASSERT_EQ(logs.countTextContaining("Applying default readConcern on command"), 0);
 }
 
 void ServiceEntryPointTestFixture::testReadConcernExtractedOnException() {
     // Even if we throw an exception during the command, read concern is still extracted.
-    const auto cmdBSON =
-        BSON(TestCmdFailsRunInvocationWithException::kCommandName << 1 << "readConcern"
-                                                                  << BSON("level"
-                                                                          << "local"));
+    const auto cmdBSON = BSON(TestCmdFailsRunInvocationWithException::kCommandName
+                              << 1 << "readConcern" << BSON("level" << "local"));
     auto opCtx = makeOperationContext();
+    unittest::LogCaptureGuard logs;
     auto dbResponse = runCommandTestWithResponse(
         cmdBSON, opCtx.get(), Status(ErrorCodes::InternalError, "Test command failure exception."));
+    logs.stop();
     auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx.get());
     ASSERT(!readConcernArgs.isImplicitDefault());
     ASSERT_EQ(readConcernArgs.getLevel(), repl::ReadConcernLevel::kLocalReadConcern);
-    ASSERT_EQ(countTextFormatLogLinesContaining("Applying default readConcern on command"), 0);
+    ASSERT_EQ(logs.countTextContaining("Applying default readConcern on command"), 0);
 }
 
 void ServiceEntryPointTestFixture::testCommandInvocationHooks() {
@@ -498,21 +519,20 @@ void ServiceEntryPointTestFixture::testExhaustCommandNextInvocationSet() {
 
 void ServiceEntryPointTestFixture::testWriteConcernClientSpecified() {
     // Test client supplied write concerns.
-    const auto wcObj = BSON("w"
-                            << "majority"
-                            << "wtimeout" << 30);
+    const auto wcObj = BSON("w" << "majority"
+                                << "wtimeout" << 30);
     const auto cmdBSON =
         BSON(TestCmdSupportsWriteConcern::kCommandName << 1 << "writeConcern" << wcObj);
     auto opCtx = makeOperationContext();
     auto msg = constructMessage(cmdBSON, opCtx.get());
     // ServiceEntryPoint will add the provenance based on the source.
-    auto wcObjWithProv = wcObj.addField(BSON("provenance"
-                                             << "clientSupplied")
-                                            .firstElement());
+    auto wcObjWithProv = wcObj.addField(BSON("provenance" << "clientSupplied").firstElement());
     auto expectedWC = makeWriteConcernOptions(wcObjWithProv);
     TestCmdSupportsWriteConcern::setExpectedWriteConcern(expectedWC);
+    unittest::LogCaptureGuard logs;
     runCommandTestWithResponse(cmdBSON, opCtx.get());
-    ASSERT_EQ(countTextFormatLogLinesContaining("Applying default writeConcern on command"), 0);
+    logs.stop();
+    ASSERT_EQ(logs.countTextContaining("Applying default writeConcern on command"), 0);
 }
 
 void ServiceEntryPointTestFixture::testWriteConcernClientUnspecifiedNoDefault() {
@@ -528,9 +548,8 @@ void ServiceEntryPointTestFixture::testWriteConcernClientUnspecifiedWithDefault(
     //   * In the router and replica set cases, a cluster-wide default write concern applies
     //   * In the shard server case, an implicit default applies.
     auto opCtx = makeOperationContext();
-    auto defaultWCObj = BSON("w"
-                             << "majority"
-                             << "wtimeout" << 500);
+    auto defaultWCObj = BSON("w" << "majority"
+                                 << "wtimeout" << 500);
     setDefaultWriteConcern(opCtx.get(), defaultWCObj);
     if (expectClusterDefault) {
         runWriteConcernTestExpectClusterDefault(opCtx.get());
@@ -546,8 +565,10 @@ void ServiceEntryPointTestFixture::runWriteConcernTestExpectImplicitDefault(
     auto expectedWC = makeWriteConcernOptions(BSON("w" << 1 << "wtimeout" << 0 << "provenance"
                                                        << "implicitDefault"));
     TestCmdSupportsWriteConcern::setExpectedWriteConcern(expectedWC);
+    unittest::LogCaptureGuard logs;
     runCommandTestWithResponse(cmdBSON, opCtx);
-    ASSERT_EQ(countTextFormatLogLinesContaining("Applying default writeConcern on command"), 0);
+    logs.stop();
+    ASSERT_EQ(logs.countTextContaining("Applying default writeConcern on command"), 0);
 }
 
 void ServiceEntryPointTestFixture::runWriteConcernTestExpectClusterDefault(
@@ -558,15 +579,52 @@ void ServiceEntryPointTestFixture::runWriteConcernTestExpectClusterDefault(
     // Construct default WC with provenance added.
     auto defaultWCObj =
         ReadWriteConcernDefaults::get(opCtx->getService()).getDefaultWriteConcern(opCtx)->toBSON();
-    auto defaultWCObjWithProv = defaultWCObj.addField(BSON("provenance"
-                                                           << "customDefault")
-                                                          .firstElement());
+    auto defaultWCObjWithProv =
+        defaultWCObj.addField(BSON("provenance" << "customDefault").firstElement());
     auto defaultWCWithProv = makeWriteConcernOptions(defaultWCObjWithProv);
     TestCmdSupportsWriteConcern::setExpectedWriteConcern(defaultWCWithProv);
 
+    unittest::LogCaptureGuard logs;
     runCommandTestWithResponse(cmdBSON, opCtx);
-
-    ASSERT_EQ(countTextFormatLogLinesContaining("Applying default writeConcern"), 1);
+    logs.stop();
+    ASSERT_EQ(logs.countTextContaining("Applying default writeConcern"), 1);
 }
+
+#ifdef MONGO_CONFIG_OTEL
+void ServiceEntryPointTestFixture::testTelemetryContextDeserializedFromRequest() {
+    auto opCtx = makeOperationContext();
+
+    // "traceparent" format: version-traceid-spanid-traceflags. "tracestate" can be any string.
+    BSONObjBuilder traceCtxBuilder;
+    traceCtxBuilder.append("traceparent",
+                           "00-11111111111111111111111111111111-1111111111111111-01");
+    traceCtxBuilder.append("tracestate", "dummystring");
+
+    BSONObjBuilder cmdBuilder;
+    cmdBuilder.append(TestCmdSucceeds::kCommandName, 1);
+    cmdBuilder.append("$traceCtx", traceCtxBuilder.obj());
+
+    runCommandTestWithResponse(cmdBuilder.obj(), opCtx.get());
+
+    auto& holder = otel::TelemetryContextHolder::get(opCtx.get());
+    auto retrievedCtx = holder.get();
+    ASSERT_NE(retrievedCtx, nullptr);
+
+    auto spanCtx = std::dynamic_pointer_cast<otel::traces::SpanTelemetryContextImpl>(retrievedCtx);
+    ASSERT_NE(spanCtx, nullptr);
+    auto span = spanCtx->getSpan();
+    ASSERT_TRUE(span->GetContext().IsValid());
+}
+
+void ServiceEntryPointTestFixture::testTelemetryContextNotSetWhenNotInRequest() {
+    auto opCtx = makeOperationContext();
+
+    runCommandTestWithResponse(BSON(TestCmdSucceeds::kCommandName << 1), opCtx.get());
+
+    auto& holder = otel::TelemetryContextHolder::get(opCtx.get());
+    auto retrievedCtx = holder.get();
+    ASSERT_EQ(retrievedCtx, nullptr);
+}
+#endif  // MONGO_CONFIG_OTEL
 
 }  // namespace mongo

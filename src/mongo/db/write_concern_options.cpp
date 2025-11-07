@@ -27,13 +27,7 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <array>
-#include <limits>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <fmt/format.h>
+#include "mongo/db/write_concern_options.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -42,11 +36,18 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/repl/repl_set_config.h"
-#include "mongo/db/write_concern_options.h"
 #include "mongo/db/write_concern_options_gen.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+
+#include <algorithm>
+#include <array>
+#include <limits>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -92,11 +93,6 @@ const BSONObj WriteConcernOptions::Majority(BSON("w" << WriteConcernOptions::kMa
 // "default constructed WC" ({w:1})
 const BSONObj WriteConcernOptions::kInternalWriteDefault;
 
-constexpr Seconds WriteConcernOptions::kWriteConcernTimeoutSystem;
-constexpr Seconds WriteConcernOptions::kWriteConcernTimeoutMigration;
-constexpr Seconds WriteConcernOptions::kWriteConcernTimeoutSharding;
-constexpr Seconds WriteConcernOptions::kWriteConcernTimeoutUserCommand;
-
 WriteConcernOptions::WriteConcernOptions(int numNodes, SyncMode sync, Milliseconds timeout)
     : w{numNodes},
       syncMode{sync},
@@ -132,7 +128,7 @@ StatusWith<WriteConcernOptions> WriteConcernOptions::parse(const BSONObj& obj) t
         return Status(ErrorCodes::FailedToParse, "write concern object cannot be empty");
     }
 
-    auto writeConcernIdl = WriteConcernIdl::parse(IDLParserContext{"WriteConcernOptions"}, obj);
+    auto writeConcernIdl = WriteConcernIdl::parse(obj, IDLParserContext{"WriteConcernOptions"});
     auto parsedW = writeConcernIdl.getWriteConcernW();
 
     WriteConcernOptions writeConcern;
@@ -189,7 +185,7 @@ StatusWith<WriteConcernOptions> WriteConcernOptions::extractWCFromCommand(const 
 
     BSONElement writeConcernElement;
     Status wcStatus =
-        bsonExtractTypedField(cmdObj, kWriteConcernField, Object, &writeConcernElement);
+        bsonExtractTypedField(cmdObj, kWriteConcernField, BSONType::object, &writeConcernElement);
     if (!wcStatus.isOK()) {
         return wcStatus;
     }

@@ -27,13 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/optional.hpp>
-#include <cstdint>
-#include <fmt/format.h>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/timeseries/timeseries_options.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -41,9 +35,16 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
-#include "mongo/db/timeseries/timeseries_options.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+
+#include <cstdint>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -134,6 +135,11 @@ Status checkBucketingParameters(TimeseriesOptions& timeseriesOptions,
 }
 
 }  // namespace
+
+bool areTimeseriesBucketsFixed(const TimeseriesOptions& options, const bool parametersChanged) {
+    return !parametersChanged &&
+        options.getBucketMaxSpanSeconds() == options.getBucketRoundingSeconds();
+}
 
 Status isTimeseriesGranularityValidAndUnchanged(const TimeseriesOptions& currentOptions,
                                                 const CollModTimeseries& targetOptions,
@@ -394,19 +400,22 @@ Date_t roundTimestampToGranularity(const Date_t& time, const TimeseriesOptions& 
 }
 
 Date_t roundTimestampBySeconds(const Date_t& time, const long long roundingSeconds) {
-    long long timeSeconds = durationCount<Seconds>(time.toDurationSinceEpoch());
-    long long roundedTimeSeconds = (timeSeconds - (timeSeconds % roundingSeconds));
+    long long roundingMilliSeconds = roundingSeconds * 1000;
+    long long timeMilliSeconds = time.toMillisSinceEpoch();
+    long long roundedTimeMilliSeconds =
+        (timeMilliSeconds - (timeMilliSeconds % roundingMilliSeconds));
     // Make sure we always round down and not towards epoch, even for dates prior to 1970 with a
     // negative duration since epoch.
-    if (roundedTimeSeconds > timeSeconds) {
-        roundedTimeSeconds -= roundingSeconds;
-        // It is not possible that we underflowed when performing the subtraction above. Because
-        // we've converted the dates in milliseconds to seconds there is tons of integer space left
-        // for the subtraction. We'd need to have a gigantic amount of rounding seconds to be able
-        // to overflow here. Therefore we invariant over uasserting.
-        invariant(roundedTimeSeconds <= timeSeconds);
+    if (roundedTimeMilliSeconds > timeMilliSeconds) {
+        // It is possible that we can underflow performing the subtraction below for extreme
+        // cases where the input time is close to Date_t::min(). If this would be the case then just
+        // return Date_t::min() instead.
+        if (roundedTimeMilliSeconds < Date_t::min().toMillisSinceEpoch() + roundingMilliSeconds) {
+            return Date_t::min();
+        }
+        roundedTimeMilliSeconds -= roundingMilliSeconds;
     }
-    return Date_t::fromDurationSinceEpoch(Seconds{roundedTimeSeconds});
+    return Date_t::fromMillisSinceEpoch(roundedTimeMilliSeconds);
 }
 
 Status validateAndSetBucketingParameters(TimeseriesOptions& timeseriesOptions) {

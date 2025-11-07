@@ -42,7 +42,8 @@ namespace mongo {
 class ServiceEntryPointShardRole final : public ServiceEntryPoint {
 public:
     Future<DbResponse> handleRequest(OperationContext* opCtx,
-                                     const Message& request) noexcept final;
+                                     const Message& request,
+                                     Date_t started) final;
 };
 
 }  // namespace mongo

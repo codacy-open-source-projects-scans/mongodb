@@ -6,6 +6,8 @@
 //   does_not_support_stepdowns,
 //   requires_fastcount,
 //   requires_profiling,
+//   # The test runs getLatestProfileEntry(). The downstream syncing node affects the profiler.
+//   run_getLatestProfilerEntry,
 // ]
 
 // Use a special db to support running other tests in parallel.
@@ -57,21 +59,17 @@ try {
     assert.commandWorked(profileDB.setProfilingLevel(0));
     assert.eq(10, profileDB.system.profile.count());
     profileDB.system.profile.drop();
-
 } finally {
     let profileCmd = {};
     profileCmd.profile = originalProfilingSettings.was;
 
     // The profile command will reject unknown fields, so wee need to populate only the fields
     // accepted from parser
-    if ('slowms' in originalProfilingSettings)
-        profileCmd.slowms = originalProfilingSettings.slowms;
+    if ("slowms" in originalProfilingSettings) profileCmd.slowms = originalProfilingSettings.slowms;
 
-    if ('sampleRate' in originalProfilingSettings)
-        profileCmd.sampleRate = originalProfilingSettings.sampleRate;
+    if ("sampleRate" in originalProfilingSettings) profileCmd.sampleRate = originalProfilingSettings.sampleRate;
 
-    if ('filter' in originalProfilingSettings)
-        profileCmd.filter = originalProfilingSettings.filter;
+    if ("filter" in originalProfilingSettings) profileCmd.filter = originalProfilingSettings.filter;
 
     assert.commandWorked(profileDB.runCommand(profileCmd));
 }

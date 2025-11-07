@@ -34,20 +34,11 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <functional>
-#include <set>
-#include <string>
-#include <utility>
-#include <variant>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/mutable/document.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/role_name.h"
@@ -55,6 +46,7 @@
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/client.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/write_ops.h"
@@ -62,6 +54,15 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/util/functional.h"
+
+#include <functional>
+#include <set>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -88,22 +89,6 @@ extern std::function<void(OperationContext*)> initializeManager;
 extern std::function<void(OpObserverRegistry*)> opObserverRegistrar;
 extern std::function<void(ServiceContext*)> initializeSynchronizeJob;
 extern std::function<void()> shutdownSynchronizeJob;
-
-/**
- * Struct that temporarily stores client information when an audit hook
- * executes on a separate thread with a new Client. In those cases, ImpersonatedClientAttrs
- * can bundle all relevant client attributes necessary for auditing and be safely
- * passed into the new thread, where the new Client will be loaded with the userNames and
- * roleNames stored in ImpersonatedClientAttrs.
- */
-struct ImpersonatedClientAttrs {
-    UserName userName;
-    std::vector<RoleName> roleNames;
-
-    ImpersonatedClientAttrs() = default;
-
-    ImpersonatedClientAttrs(Client* client);
-};
 
 /**
  * Narrow API for the parts of mongo::Command used by the audit library.

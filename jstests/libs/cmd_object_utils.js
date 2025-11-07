@@ -1,5 +1,47 @@
 import {sysCollNamePrefix} from "jstests/core/timeseries/libs/timeseries_writes_util.js";
 
+export const kGenericArgFieldNames = [
+    "apiVersion",
+    "apiStrict",
+    "apiDeprecationErrors",
+    "maxTimeMS",
+    "readConcern",
+    "writeConcern",
+    "lsid",
+    "clientOperationKey",
+    "txnNumber",
+    "autocommit",
+    "startTransaction",
+    "stmtId",
+    "comment",
+    "$readPreference",
+    "$clusterTime",
+    "$audit",
+    "$client",
+    "$configServerState",
+    "$oplogQueryData",
+    "$queryOptions",
+    "$replData",
+    "$traceCtx",
+    "databaseVersion",
+    "help",
+    "shardVersion",
+    "tracking_info",
+    "coordinator",
+    "maxTimeMSOpOnly",
+    "usesDefaultMaxTimeMS",
+    "$configTime",
+    "$topologyTime",
+    "txnRetryCounter",
+    "versionContext",
+    "mayBypassWriteBlocking",
+    "expectPrefix",
+    "requestGossipRoutingCache",
+    "startOrContinueTransaction",
+    "rawData",
+    "serialization_context",
+];
+
 /**
  * Resolves the command name for the given 'cmdObj'.
  */
@@ -18,7 +60,8 @@ export function getInnerCommand(cmdObj) {
     }
 
     if (typeof cmdObj.explain === "object") {
-        return cmdObj.explain;
+        const [{explain}, genericArgs] = extractGenericArgs(cmdObj);
+        return {...explain, ...genericArgs};
     }
 
     const {explain, ...cmdWithoutExplain} = cmdObj;
@@ -26,14 +69,73 @@ export function getInnerCommand(cmdObj) {
 }
 
 /**
+ * Splits 'cmdObj' into a pair of [<command without generic args>, <generic args>].
+ */
+function extractGenericArgs(cmdObj) {
+    let cmd = {},
+        genericArgs = {};
+    for (const [key, value] of Object.entries(cmdObj)) {
+        const isGenericArg = kGenericArgFieldNames.includes(key);
+        if (isGenericArg) {
+            genericArgs[key] = value;
+        } else {
+            cmd[key] = value;
+        }
+    }
+    return [cmd, genericArgs];
+}
+
+/**
  *  Returns the explain command object for the given 'cmdObj'.
  */
-export function getExplainCommand(cmdObj) {
+export function getExplainCommand(cmdObj, verbosity = "queryPlanner") {
+    // Extract the generic arguments out of 'cmd' so they can be re-added on root of the final
+    // explain command.
+    const [cmd, genericArgs] = extractGenericArgs(cmdObj);
+
+    if ("rawData" in genericArgs) {
+        // Unlike the rest of the generic arguments, 'rawData' must be passed to the inner command.
+        cmd.rawData = genericArgs.rawData;
+        delete genericArgs.rawData;
+    }
+
+    // Remove explain incompatible generic arguments.
+    const explainIncompatibleGenericArgs = [
+        // Cannot run 'explain' with "writeConcern".
+        "writeConcern",
+        // Cannot run 'explain' in a multi-document transaction.
+        "txnNumber",
+        "autocommit",
+        "startTransaction",
+        "stmtId",
+        // Don't pass in the "$readPreference" to ensure that the explain command can be executed
+        // against any node in a cluster.
+        "$readPreference",
+    ];
+    for (const arg of explainIncompatibleGenericArgs) {
+        delete genericArgs[arg];
+    }
+
+    // Explained aggregate commands require a cursor argument.
     const isAggregateCmd = getCommandName(cmdObj) === "aggregate";
-    // Extract the 'writeConcern' from the command, as it can not be passed to explain.
-    const {writeConcern, ...cmdWithoutWriteConcern} = cmdObj;
-    return isAggregateCmd ? {explain: {...cmdWithoutWriteConcern, cursor: {}}}
-                          : {explain: cmdWithoutWriteConcern};
+    if (isAggregateCmd) {
+        cmd.cursor = {};
+    }
+    return {explain: cmd, ...genericArgs, verbosity};
+}
+
+/**
+ * Returns the value of the rawData parameter for the given 'cmdObj'.
+ * Returns false if the parameter is not included.
+ */
+export function getRawData(cmdObj) {
+    const [cmd, genericArgs] = extractGenericArgs(cmdObj);
+
+    if ("rawData" in genericArgs) {
+        return genericArgs.rawData;
+    }
+
+    return false;
 }
 
 /**
@@ -50,7 +152,7 @@ export function getCollectionName(db, cmdObj) {
         let viewOn;
         let name = cmdObj[getCommandName(cmdObj)];
         do {
-            let collInfo = collectionsInfo.find(c => c.name === name);
+            let collInfo = collectionsInfo.find((c) => c.name === name);
             if (!collInfo) {
                 name = undefined;
             }

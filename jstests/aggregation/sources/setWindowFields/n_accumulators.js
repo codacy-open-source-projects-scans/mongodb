@@ -1,32 +1,16 @@
 /**
- * Test that the 'n' family of accumulators work as window functions.
+ * Test scaffolding for testing 'n' family of accumulators work as window functions.
  */
 import "jstests/libs/query/sbe_assert_error_override.js";
 
-import {
-    seedWithTickerData,
-    testAccumAgainstGroup
-} from "jstests/aggregation/extras/window_function_helpers.js";
+import {seedWithTickerData, testAccumAgainstGroup} from "jstests/aggregation/extras/window_function_helpers.js";
 
-const coll = db[jsTestName()];
-coll.drop();
-
-const needsSortBy = (op) => ({
-    $minN: false,
-    $maxN: false,
-    $firstN: false,
-    $lastN: false,
-    $topN: true,
-    $bottomN: true,
-    $top: true,
-    $bottom: true,
-}[op]);
-
-// A map from the accumulator name to a function that ignores the parameters it doesn't need and
-// generates a valid accumulator spec.
 const simple = (n, input) => ({n, input: "$" + input});
 const topBottomN = (n, output) => ({n, output: "$" + output, sortBy: {[output]: 1}});
 const topBottom = (n, output) => ({output: "$" + output, sortBy: {[output]: 1}});
+
+// A map from the accumulator name to a function that ignores the parameters it doesn't need and
+// generates a valid accumulator spec.
 const nAccumulators = {
     $minN: simple,
     $maxN: simple,
@@ -38,14 +22,29 @@ const nAccumulators = {
     $bottom: topBottom,
 };
 
-// Create a collection of tickers and prices.
-const nDocsPerTicker = 10;
-seedWithTickerData(coll, nDocsPerTicker);
+const needsSortBy = (op) =>
+    ({
+        $minN: false,
+        $maxN: false,
+        $firstN: false,
+        $lastN: false,
+        $topN: true,
+        $bottomN: true,
+        $top: true,
+        $bottom: true,
+    })[op];
 
-for (const acc of Object.keys(nAccumulators)) {
+export function testAccumulator(acc) {
+    const coll = db[jsTestName()];
+    coll.drop();
+
+    // Create a collection of tickers and prices.
+    const nDocsPerTicker = 10;
+    seedWithTickerData(coll, nDocsPerTicker);
+
     for (const nValue of [4, 7, 12]) {
         jsTestLog("Testing accumulator " + tojson(acc) + " with 'n' set to " + tojson(nValue));
-        const noValue = (acc === "$top" || acc === "$bottom") ? null : [];
+        const noValue = acc === "$top" || acc === "$bottom" ? null : [];
         testAccumAgainstGroup(coll, acc, noValue, nAccumulators[acc](nValue, "price"));
     }
 
@@ -55,7 +54,7 @@ for (const acc of Object.keys(nAccumulators)) {
             $setWindowFields: {
                 partitionBy: "$ticker",
                 sortBy: {_id: 1},
-                output: {res: {[acc]: nAccumulators[acc]({$add: [1, 2]}, "price")}}
+                output: {res: {[acc]: nAccumulators[acc]({$add: [1, 2]}, "price")}},
             },
         },
     ];
@@ -72,7 +71,7 @@ for (const acc of Object.keys(nAccumulators)) {
                 $setWindowFields: {
                     partitionBy: "$partIndex",
                     sortBy: {_id: 1},
-                    output: {res: {[acc]: nAccumulators[acc]({$add: ["$partIndex", 2]}, "price")}}
+                    output: {res: {[acc]: nAccumulators[acc]({$add: ["$partIndex", 2]}, "price")}},
                 },
             },
         ];
@@ -81,19 +80,24 @@ for (const acc of Object.keys(nAccumulators)) {
     }
     // Error cases.
     function testError(accSpec, expectedCode) {
-        assert.throwsWithCode(() => coll.aggregate([{
-            $setWindowFields: {
-                partitionBy: "$ticker",
-                sortBy: {ts: 1},
-                output: {outputField: accSpec},
-            }
-        }]),
-                              expectedCode);
+        assert.throwsWithCode(
+            () =>
+                coll.aggregate([
+                    {
+                        $setWindowFields: {
+                            partitionBy: "$ticker",
+                            sortBy: {ts: 1},
+                            output: {outputField: accSpec},
+                        },
+                    },
+                ]),
+            expectedCode,
+        );
     }
 
     // The parsers for $minN/$maxN and $firstN/$lastN will use different codes to indicate a
     // parsing error due to a non-object specification.
-    const expectedCode = (acc === "$minN" || acc === "$maxN") ? 5787900 : 5787801;
+    const expectedCode = acc === "$minN" || acc === "$maxN" ? 5787900 : 5787801;
 
     if (!needsSortBy(acc)) {
         // Invalid/missing accumulator specification.

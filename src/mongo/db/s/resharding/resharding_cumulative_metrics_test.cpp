@@ -28,29 +28,29 @@
  */
 
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
+#include "mongo/db/s/resharding/resharding_cumulative_metrics.h"
+
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/s/resharding/resharding_cumulative_metrics.h"
+#include "mongo/db/s/resharding/resharding_metrics_test_fixture.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/time_support.h"
+
 #include <map>
 #include <memory>
 #include <string>
 #include <tuple>
 #include <utility>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/s/metrics/sharding_data_transform_metrics.h"
-#include "mongo/db/s/metrics/sharding_data_transform_metrics_test_fixture.h"
-#include "mongo/db/s/resharding/resharding_cumulative_metrics.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util_core.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -59,17 +59,12 @@ namespace {
 
 constexpr auto kResharding = "resharding";
 
-class ReshardingCumulativeMetricsTest : public ShardingDataTransformMetricsTestFixture {
+class ReshardingCumulativeMetricsTest : public ReshardingMetricsTestFixture {
 protected:
     void setUp() override {
-        ShardingDataTransformMetricsTestFixture::setUp();
+        ReshardingMetricsTestFixture::setUp();
         _reshardingCumulativeMetrics =
             static_cast<ReshardingCumulativeMetrics*>(_cumulativeMetrics.get());
-        _fieldNames = std::make_unique<ReshardingCumulativeMetricsFieldNameProvider>();
-    }
-
-    std::unique_ptr<ShardingDataTransformCumulativeMetrics> initializeCumulativeMetrics() override {
-        return std::make_unique<ReshardingCumulativeMetrics>();
     }
 
     StringData getRootSectionName() override {
@@ -194,12 +189,25 @@ protected:
     }
 
     ReshardingCumulativeMetrics* _reshardingCumulativeMetrics;
-    std::unique_ptr<ReshardingCumulativeMetricsFieldNameProvider> _fieldNames;
 };
 
+class ScopedObserverMock {
+public:
+    using Ptr = std::unique_ptr<ScopedObserverMock>;
+
+    ScopedObserverMock(Date_t startTime,
+                       int64_t timeRemaining,
+                       ClockSource* clockSource,
+                       ReshardingCumulativeMetrics* parent)
+        : _mock{startTime, timeRemaining},
+          _scopedOpObserver{parent->registerInstanceMetrics(&_mock)} {}
+
+private:
+    ObserverMock _mock;
+    ReshardingCumulativeMetrics::UniqueScopedObserver _scopedOpObserver;
+};
 
 TEST_F(ReshardingCumulativeMetricsTest, ReportContainsInsertsDuringFetching) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&recipient);
 
@@ -214,9 +222,7 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsInsertsDuringFetching) {
     ASSERT_EQ(latencies.getIntField("oplogFetchingTotalLocalInsertTimeMillis"), 17);
 }
 
-
 TEST_F(ReshardingCumulativeMetricsTest, ReportContainsBatchRetrievedDuringApplying) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&recipient);
 
@@ -231,9 +237,7 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsBatchRetrievedDuringApplyi
     ASSERT_EQ(latencies.getIntField("oplogApplyingTotalLocalBatchRetrievalTimeMillis"), 39);
 }
 
-
 TEST_F(ReshardingCumulativeMetricsTest, ReportContainsBatchApplied) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&recipient);
 
@@ -249,7 +253,6 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsBatchApplied) {
 }
 
 TEST_F(ReshardingCumulativeMetricsTest, ReportContainsInsertsApplied) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&recipient);
 
@@ -263,7 +266,6 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsInsertsApplied) {
 }
 
 TEST_F(ReshardingCumulativeMetricsTest, ReportContainsUpdatesApplied) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&recipient);
 
@@ -277,7 +279,6 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsUpdatesApplied) {
 }
 
 TEST_F(ReshardingCumulativeMetricsTest, ReportContainsDeletesApplied) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&recipient);
 
@@ -291,7 +292,6 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsDeletesApplied) {
 }
 
 TEST_F(ReshardingCumulativeMetricsTest, ReportContainsOplogEntriesFetched) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&recipient);
 
@@ -314,7 +314,6 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsOplogEntriesFetched) {
 }
 
 TEST_F(ReshardingCumulativeMetricsTest, ReportContainsOplogEntriesApplied) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&recipient);
 
@@ -329,7 +328,6 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsOplogEntriesApplied) {
 
 TEST_F(ReshardingCumulativeMetricsTest,
        SimulatedNormalCoordinatorStateTransitionReportsStateCorrectly) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&coordinator);
 
@@ -357,7 +355,6 @@ TEST_F(ReshardingCumulativeMetricsTest,
 
 TEST_F(ReshardingCumulativeMetricsTest,
        SimulatedAbortedCoordinatorStateTransitionReportsStateCorrectly) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&coordinator);
 
@@ -382,7 +379,6 @@ TEST_F(ReshardingCumulativeMetricsTest,
 
 TEST_F(ReshardingCumulativeMetricsTest,
        SimulatedSteppedDownCoordinatorStateFromUnusedReportsStateCorrectly) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&coordinator);
 
@@ -395,7 +391,6 @@ TEST_F(ReshardingCumulativeMetricsTest,
 
 TEST_F(ReshardingCumulativeMetricsTest,
        SimulatedSteppedDownCoordinatorStateTransitionReportsStateCorrectly) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&coordinator);
 
@@ -418,7 +413,6 @@ TEST_F(ReshardingCumulativeMetricsTest,
 }
 
 TEST_F(ReshardingCumulativeMetricsTest, SimulatedNormalDonorStateTransitionReportsStateCorrectly) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock donor{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kDonor};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&donor);
 
@@ -445,7 +439,6 @@ TEST_F(ReshardingCumulativeMetricsTest, SimulatedNormalDonorStateTransitionRepor
 }
 
 TEST_F(ReshardingCumulativeMetricsTest, SimulatedAbortedDonorStateTransitionReportsStateCorrectly) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock donor{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kDonor};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&donor);
 
@@ -470,7 +463,6 @@ TEST_F(ReshardingCumulativeMetricsTest, SimulatedAbortedDonorStateTransitionRepo
 
 TEST_F(ReshardingCumulativeMetricsTest,
        SimulatedSteppedDownDonorStateFromUnusedReportsStateCorrectly) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock donor{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kDonor};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&donor);
 
@@ -483,7 +475,6 @@ TEST_F(ReshardingCumulativeMetricsTest,
 
 TEST_F(ReshardingCumulativeMetricsTest,
        SimulatedSteppedDownDonorStateTransitionReportsStateCorrectly) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock donor{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kDonor};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&donor);
 
@@ -507,7 +498,6 @@ TEST_F(ReshardingCumulativeMetricsTest,
 
 TEST_F(ReshardingCumulativeMetricsTest,
        SimulatedNormalRecipientStateTransitionReportsStateCorrectly) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock recipient{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kRecipient};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&recipient);
 
@@ -535,7 +525,6 @@ TEST_F(ReshardingCumulativeMetricsTest,
 
 TEST_F(ReshardingCumulativeMetricsTest,
        SimulatedAbortedRecipientStateTransitionReportsStateCorrectly) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock recipient{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kRecipient};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&recipient);
 
@@ -559,7 +548,6 @@ TEST_F(ReshardingCumulativeMetricsTest,
 
 TEST_F(ReshardingCumulativeMetricsTest,
        SimulatedSteppedDownRecipientStateFromUnusedReportsStateCorrectly) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock recipient{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kRecipient};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&recipient);
 
@@ -572,7 +560,6 @@ TEST_F(ReshardingCumulativeMetricsTest,
 
 TEST_F(ReshardingCumulativeMetricsTest,
        SimulatedSteppedDownRecipientStateTransitionReportsStateCorrectly) {
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock recipient{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kRecipient};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&recipient);
 
@@ -595,8 +582,6 @@ TEST_F(ReshardingCumulativeMetricsTest,
 }
 
 TEST_F(ReshardingCumulativeMetricsTest, ReportContainsRunCount) {
-    RAIIServerParameterControllerForTest controller("featureFlagReshardingImprovements", true);
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&coordinator);
 
@@ -608,8 +593,11 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsRunCount) {
         ASSERT_EQ(report.getObjectField(kResharding).getIntField("countSameKeyStarted"), 0);
     }
 
-    _reshardingCumulativeMetrics->onStarted(false /*isSameKeyResharding*/);
-    _reshardingCumulativeMetrics->onStarted(true /*isSameKeyResharding*/);
+    auto uuidOne = UUID::gen();
+    auto uuidTwo = UUID::gen();
+
+    _reshardingCumulativeMetrics->onStarted(false /*isSameKeyResharding*/, uuidOne);
+    _reshardingCumulativeMetrics->onStarted(true /*isSameKeyResharding*/, uuidTwo);
 
     {
         BSONObjBuilder bob;
@@ -620,10 +608,7 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsRunCount) {
     }
 }
 
-
 TEST_F(ReshardingCumulativeMetricsTest, ReportContainsSucceededCount) {
-    RAIIServerParameterControllerForTest controller("featureFlagReshardingImprovements", true);
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
     auto ignore = _cumulativeMetrics->registerInstanceMetrics(&coordinator);
 
@@ -635,8 +620,14 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsSucceededCount) {
         ASSERT_EQ(report.getObjectField(kResharding).getIntField("countSameKeySucceeded"), 0);
     }
 
-    _reshardingCumulativeMetrics->onSuccess(false /*isSameKeyResharding*/);
-    _reshardingCumulativeMetrics->onSuccess(true /*isSameKeyResharding*/);
+    auto uuidOne = UUID::gen();
+    auto uuidTwo = UUID::gen();
+
+    _reshardingCumulativeMetrics->onStarted(false, uuidOne);
+    _reshardingCumulativeMetrics->onStarted(true, uuidTwo);
+
+    _reshardingCumulativeMetrics->onSuccess(false /*isSameKeyResharding*/, uuidOne);
+    _reshardingCumulativeMetrics->onSuccess(true /*isSameKeyResharding*/, uuidTwo);
 
     {
         BSONObjBuilder bob;
@@ -648,8 +639,6 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsSucceededCount) {
 }
 
 TEST_F(ReshardingCumulativeMetricsTest, ReportContainsFailedCount) {
-    RAIIServerParameterControllerForTest controller("featureFlagReshardingImprovements", true);
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&coordinator);
 
@@ -661,8 +650,14 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsFailedCount) {
         ASSERT_EQ(report.getObjectField(kResharding).getIntField("countSameKeyFailed"), 0);
     }
 
-    _reshardingCumulativeMetrics->onFailure(false /*isSameKeyResharding*/);
-    _reshardingCumulativeMetrics->onFailure(true /*isSameKeyResharding*/);
+    auto uuidOne = UUID::gen();
+    auto uuidTwo = UUID::gen();
+
+    _reshardingCumulativeMetrics->onStarted(false, uuidOne);
+    _reshardingCumulativeMetrics->onStarted(true, uuidTwo);
+
+    _reshardingCumulativeMetrics->onFailure(false /*isSameKeyResharding*/, uuidOne);
+    _reshardingCumulativeMetrics->onFailure(true /*isSameKeyResharding*/, uuidTwo);
 
     {
         BSONObjBuilder bob;
@@ -674,8 +669,6 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsFailedCount) {
 }
 
 TEST_F(ReshardingCumulativeMetricsTest, ReportContainsCanceledCount) {
-    RAIIServerParameterControllerForTest controller("featureFlagReshardingImprovements", true);
-    using Role = ShardingDataTransformMetrics::Role;
     ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
     auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&coordinator);
 
@@ -687,8 +680,14 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsCanceledCount) {
         ASSERT_EQ(report.getObjectField(kResharding).getIntField("countSameKeyCanceled"), 0);
     }
 
-    _reshardingCumulativeMetrics->onCanceled(false /*isSameKeyResharding*/);
-    _reshardingCumulativeMetrics->onCanceled(true /*isSameKeyResharding*/);
+    auto uuidOne = UUID::gen();
+    auto uuidTwo = UUID::gen();
+
+    _reshardingCumulativeMetrics->onStarted(false, uuidOne);
+    _reshardingCumulativeMetrics->onStarted(true, uuidTwo);
+
+    _reshardingCumulativeMetrics->onCanceled(false /*isSameKeyResharding*/, uuidOne);
+    _reshardingCumulativeMetrics->onCanceled(true /*isSameKeyResharding*/, uuidTwo);
 
     {
         BSONObjBuilder bob;
@@ -698,5 +697,329 @@ TEST_F(ReshardingCumulativeMetricsTest, ReportContainsCanceledCount) {
         ASSERT_EQ(report.getObjectField(kResharding).getIntField("countSameKeyCanceled"), 1);
     }
 }
+
+TEST_F(ReshardingCumulativeMetricsTest, RepeatedCallsToOnStartedDoesNotIncrementCount) {
+    ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
+    auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&coordinator);
+
+    {
+        BSONObjBuilder bob;
+        _reshardingCumulativeMetrics->reportForServerStatus(&bob);
+        auto report = bob.done();
+        ASSERT_EQ(report.getObjectField(kResharding).getIntField("countStarted"), 0);
+    }
+
+    auto uuid = UUID::gen();
+
+    _reshardingCumulativeMetrics->onStarted(true /*isSameKeyResharding*/, uuid);
+    _reshardingCumulativeMetrics->onStarted(true /*isSameKeyResharding*/, uuid);
+
+    {
+        BSONObjBuilder bob;
+        _reshardingCumulativeMetrics->reportForServerStatus(&bob);
+        auto report = bob.done();
+        ASSERT_EQ(report.getObjectField(kResharding).getIntField("countStarted"), 1);
+    }
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, RepeatedCallsToOnFailedDoesNotIncrementCount) {
+    ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
+    auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&coordinator);
+
+    {
+        BSONObjBuilder bob;
+        _reshardingCumulativeMetrics->reportForServerStatus(&bob);
+        auto report = bob.done();
+        ASSERT_EQ(report.getObjectField(kResharding).getIntField("countFailed"), 0);
+    }
+
+    auto uuid = UUID::gen();
+
+    _reshardingCumulativeMetrics->onStarted(true, uuid);
+
+    _reshardingCumulativeMetrics->onFailure(true /*isSameKeyResharding*/, uuid);
+    _reshardingCumulativeMetrics->onFailure(true /*isSameKeyResharding*/, uuid);
+
+    {
+        BSONObjBuilder bob;
+        _reshardingCumulativeMetrics->reportForServerStatus(&bob);
+        auto report = bob.done();
+        ASSERT_EQ(report.getObjectField(kResharding).getIntField("countFailed"), 1);
+    }
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, RepeatedCallsToOnSuccessDoesNotIncrementCount) {
+    ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
+    auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&coordinator);
+
+    {
+        BSONObjBuilder bob;
+        _reshardingCumulativeMetrics->reportForServerStatus(&bob);
+        auto report = bob.done();
+        ASSERT_EQ(report.getObjectField(kResharding).getIntField("countSucceeded"), 0);
+    }
+
+    auto uuid = UUID::gen();
+
+    _reshardingCumulativeMetrics->onStarted(true, uuid);
+
+    _reshardingCumulativeMetrics->onSuccess(true /*isSameKeyResharding*/, uuid);
+    _reshardingCumulativeMetrics->onSuccess(true /*isSameKeyResharding*/, uuid);
+
+    {
+        BSONObjBuilder bob;
+        _reshardingCumulativeMetrics->reportForServerStatus(&bob);
+        auto report = bob.done();
+        ASSERT_EQ(report.getObjectField(kResharding).getIntField("countSucceeded"), 1);
+    }
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, RepeatedCallsToOnCanceledDoesNotIncrementCount) {
+    ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
+    auto ignore = _reshardingCumulativeMetrics->registerInstanceMetrics(&coordinator);
+
+    {
+        BSONObjBuilder bob;
+        _reshardingCumulativeMetrics->reportForServerStatus(&bob);
+        auto report = bob.done();
+        ASSERT_EQ(report.getObjectField(kResharding).getIntField("countCanceled"), 0);
+    }
+
+    auto uuid = UUID::gen();
+
+    _reshardingCumulativeMetrics->onStarted(true, uuid);
+
+    _reshardingCumulativeMetrics->onCanceled(true /*isSameKeyResharding*/, uuid);
+    _reshardingCumulativeMetrics->onCanceled(true /*isSameKeyResharding*/, uuid);
+
+    {
+        BSONObjBuilder bob;
+        _reshardingCumulativeMetrics->reportForServerStatus(&bob);
+        auto report = bob.done();
+        ASSERT_EQ(report.getObjectField(kResharding).getIntField("countCanceled"), 1);
+    }
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, AddAndRemoveMetrics) {
+    auto deregister = _cumulativeMetrics->registerInstanceMetrics(getOldestObserver());
+    ASSERT_EQ(_cumulativeMetrics->getObservedMetricsCount(), 1);
+    deregister.reset();
+    ASSERT_EQ(_cumulativeMetrics->getObservedMetricsCount(), 0);
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, MetricsReportsOldestWhenInsertedFirst) {
+    auto deregisterOldest = _cumulativeMetrics->registerInstanceMetrics(getOldestObserver());
+    auto deregisterYoungest = _cumulativeMetrics->registerInstanceMetrics(getYoungestObserver());
+    ASSERT_EQ(_cumulativeMetrics->getOldestOperationHighEstimateRemainingTimeMillis(
+                  ObserverMock::kDefaultRole),
+              kOldestTimeLeft);
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, MetricsReportsOldestWhenInsertedLast) {
+    auto deregisterYoungest = _cumulativeMetrics->registerInstanceMetrics(getYoungestObserver());
+    auto deregisterOldest = _cumulativeMetrics->registerInstanceMetrics(getOldestObserver());
+    ASSERT_EQ(_cumulativeMetrics->getOldestOperationHighEstimateRemainingTimeMillis(
+                  ObserverMock::kDefaultRole),
+              kOldestTimeLeft);
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, NoServerStatusWhenNeverUsed) {
+    BSONObjBuilder bob;
+    _cumulativeMetrics->reportForServerStatus(&bob);
+    auto report = bob.done();
+    ASSERT_BSONOBJ_EQ(report, BSONObj());
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, RemainingTimeReportsMinusOneWhenEmpty) {
+    ASSERT_EQ(_cumulativeMetrics->getObservedMetricsCount(), 0);
+    ASSERT_EQ(_cumulativeMetrics->getOldestOperationHighEstimateRemainingTimeMillis(
+                  ObserverMock::kDefaultRole),
+              -1);
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, UpdatesOldestWhenOldestIsRemoved) {
+    auto deregisterYoungest = _cumulativeMetrics->registerInstanceMetrics(getYoungestObserver());
+    auto deregisterOldest = _cumulativeMetrics->registerInstanceMetrics(getOldestObserver());
+    ASSERT_EQ(_cumulativeMetrics->getOldestOperationHighEstimateRemainingTimeMillis(
+                  ObserverMock::kDefaultRole),
+              kOldestTimeLeft);
+    deregisterOldest.reset();
+    ASSERT_EQ(_cumulativeMetrics->getOldestOperationHighEstimateRemainingTimeMillis(
+                  ObserverMock::kDefaultRole),
+              kYoungestTimeLeft);
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, InsertsTwoWithSameStartTime) {
+    auto deregisterOldest = _cumulativeMetrics->registerInstanceMetrics(getOldestObserver());
+    ObserverMock sameAsOldest{kOldestTime, kOldestTimeLeft};
+    auto deregisterOldest2 = _cumulativeMetrics->registerInstanceMetrics(&sameAsOldest);
+    ASSERT_EQ(_cumulativeMetrics->getObservedMetricsCount(), 2);
+    ASSERT_EQ(_cumulativeMetrics->getOldestOperationHighEstimateRemainingTimeMillis(
+                  ObserverMock::kDefaultRole),
+              kOldestTimeLeft);
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, StillReportsOldestAfterRandomOperations) {
+    doRandomOperationsTest<ScopedObserverMock>();
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, StillReportsOldestAfterRandomOperationsMultithreaded) {
+    doRandomOperationsMultithreadedTest<ScopedObserverMock>();
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, ReportsOldestByRole) {
+    auto& metrics = _cumulativeMetrics;
+    ObserverMock oldDonor{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kDonor};
+    ObserverMock youngDonor{Date_t::fromMillisSinceEpoch(200), 200, 200, Role::kDonor};
+    ObserverMock oldRecipient{Date_t::fromMillisSinceEpoch(300), 300, 300, Role::kRecipient};
+    ObserverMock youngRecipient{Date_t::fromMillisSinceEpoch(400), 400, 400, Role::kRecipient};
+    auto removeOldD = metrics->registerInstanceMetrics(&oldDonor);
+    auto removeYoungD = metrics->registerInstanceMetrics(&youngDonor);
+    auto removeOldR = metrics->registerInstanceMetrics(&oldRecipient);
+    auto removeYoungR = metrics->registerInstanceMetrics(&youngRecipient);
+
+    ASSERT_EQ(metrics->getObservedMetricsCount(), 4);
+    ASSERT_EQ(metrics->getObservedMetricsCount(Role::kDonor), 2);
+    ASSERT_EQ(metrics->getObservedMetricsCount(Role::kRecipient), 2);
+    ASSERT_EQ(metrics->getOldestOperationHighEstimateRemainingTimeMillis(Role::kDonor), 100);
+    ASSERT_EQ(metrics->getOldestOperationHighEstimateRemainingTimeMillis(Role::kRecipient), 300);
+    removeOldD.reset();
+    ASSERT_EQ(metrics->getObservedMetricsCount(), 3);
+    ASSERT_EQ(metrics->getObservedMetricsCount(Role::kDonor), 1);
+    ASSERT_EQ(metrics->getOldestOperationHighEstimateRemainingTimeMillis(Role::kDonor), 200);
+    removeOldR.reset();
+    ASSERT_EQ(metrics->getObservedMetricsCount(), 2);
+    ASSERT_EQ(metrics->getObservedMetricsCount(Role::kRecipient), 1);
+    ASSERT_EQ(metrics->getOldestOperationHighEstimateRemainingTimeMillis(Role::kRecipient), 400);
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, ReportContainsTimeEstimates) {
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
+    ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
+    auto recipientObserver = _cumulativeMetrics->registerInstanceMetrics(&recipient);
+    auto coordinatorObserver = _cumulativeMetrics->registerInstanceMetrics(&coordinator);
+
+    BSONObjBuilder bob;
+    _cumulativeMetrics->reportForServerStatus(&bob);
+    auto report = bob.done();
+    auto section = report.getObjectField(kResharding).getObjectField("oldestActive");
+    ASSERT_EQ(section.getIntField("recipientRemainingOperationTimeEstimatedMillis"), 100);
+    ASSERT_EQ(
+        section.getIntField("coordinatorAllShardsHighestRemainingOperationTimeEstimatedMillis"),
+        400);
+    ASSERT_EQ(
+        section.getIntField("coordinatorAllShardsLowestRemainingOperationTimeEstimatedMillis"),
+        300);
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, ReportContainsLastChunkImbalanceCount) {
+    ObserverMock coordinator{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kCoordinator};
+    auto ignore = _cumulativeMetrics->registerInstanceMetrics(&coordinator);
+
+    {
+        BSONObjBuilder bob;
+        _cumulativeMetrics->reportForServerStatus(&bob);
+        auto report = bob.done();
+        ASSERT_EQ(report.getObjectField(kResharding).getIntField("lastOpEndingChunkImbalance"), 0);
+    }
+
+    _cumulativeMetrics->setLastOpEndingChunkImbalance(111);
+
+    {
+        BSONObjBuilder bob;
+        _cumulativeMetrics->reportForServerStatus(&bob);
+        auto report = bob.done();
+        ASSERT_EQ(report.getObjectField(kResharding).getIntField("lastOpEndingChunkImbalance"),
+                  111);
+    }
+
+    _cumulativeMetrics->setLastOpEndingChunkImbalance(777);
+
+    {
+        BSONObjBuilder bob;
+        _cumulativeMetrics->reportForServerStatus(&bob);
+        auto report = bob.done();
+        ASSERT_EQ(report.getObjectField(kResharding).getIntField("lastOpEndingChunkImbalance"),
+                  777);
+    }
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, ReportContainsInsertsDuringCloning) {
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
+    auto ignore = _cumulativeMetrics->registerInstanceMetrics(&recipient);
+
+    auto latencies = getCumulativeMetricsReportForSection(kLatencies);
+    ASSERT_EQ(latencies.getIntField("collectionCloningTotalLocalInserts"), 0);
+    ASSERT_EQ(latencies.getIntField("collectionCloningTotalLocalInsertTimeMillis"), 0);
+
+    auto active = getCumulativeMetricsReportForSection(kActive);
+    ASSERT_EQ(active.getIntField("documentsCopied"), 0);
+    ASSERT_EQ(active.getIntField("bytesCopied"), 0);
+
+    _cumulativeMetrics->onInsertsDuringCloning(140, 20763, Milliseconds(15));
+
+    latencies = getCumulativeMetricsReportForSection(kLatencies);
+    ASSERT_EQ(latencies.getIntField("collectionCloningTotalLocalInserts"), 1);
+    ASSERT_EQ(latencies.getIntField("collectionCloningTotalLocalInsertTimeMillis"), 15);
+
+    active = getCumulativeMetricsReportForSection(kActive);
+    ASSERT_EQ(active.getIntField("documentsCopied"), 140);
+    ASSERT_EQ(active.getIntField("bytesCopied"), 20763);
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, ReportContainsReadDuringCriticalSection) {
+    ObserverMock donor{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kDonor};
+    auto ignore = _cumulativeMetrics->registerInstanceMetrics(&donor);
+
+    auto active = getCumulativeMetricsReportForSection(kActive);
+    ASSERT_EQ(active.getIntField("countReadsDuringCriticalSection"), 0);
+
+    _cumulativeMetrics->onReadDuringCriticalSection();
+
+    active = getCumulativeMetricsReportForSection(kActive);
+    ASSERT_EQ(active.getIntField("countReadsDuringCriticalSection"), 1);
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, ReportContainsWriteDuringCriticalSection) {
+    ObserverMock donor{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kDonor};
+    auto ignore = _cumulativeMetrics->registerInstanceMetrics(&donor);
+
+    auto active = getCumulativeMetricsReportForSection(kActive);
+    ASSERT_EQ(active.getIntField("countWritesDuringCriticalSection"), 0);
+
+    _cumulativeMetrics->onWriteDuringCriticalSection();
+
+    active = getCumulativeMetricsReportForSection(kActive);
+    ASSERT_EQ(active.getIntField("countWritesDuringCriticalSection"), 1);
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, ReportContainsWriteToStashedCollection) {
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(200), 400, 300, Role::kRecipient};
+    auto ignore = _cumulativeMetrics->registerInstanceMetrics(&recipient);
+
+    auto active = getCumulativeMetricsReportForSection(kActive);
+    ASSERT_EQ(active.getIntField("countWritesToStashCollections"), 0);
+
+    _cumulativeMetrics->onWriteToStashedCollections();
+
+    active = getCumulativeMetricsReportForSection(kActive);
+    ASSERT_EQ(active.getIntField("countWritesToStashCollections"), 1);
+}
+
+TEST_F(ReshardingCumulativeMetricsTest, ReportContainsBatchRetrievedDuringCloning) {
+    ObserverMock recipient{Date_t::fromMillisSinceEpoch(100), 100, 100, Role::kRecipient};
+    auto ignore = _cumulativeMetrics->registerInstanceMetrics(&recipient);
+
+    auto latencies = getCumulativeMetricsReportForSection(kLatencies);
+    ASSERT_EQ(latencies.getIntField("collectionCloningTotalRemoteBatchesRetrieved"), 0);
+    ASSERT_EQ(latencies.getIntField("collectionCloningTotalRemoteBatchRetrievalTimeMillis"), 0);
+
+    _cumulativeMetrics->onCloningRemoteBatchRetrieval(Milliseconds(19));
+
+    latencies = getCumulativeMetricsReportForSection(kLatencies);
+    ASSERT_EQ(latencies.getIntField("collectionCloningTotalRemoteBatchesRetrieved"), 1);
+    ASSERT_EQ(latencies.getIntField("collectionCloningTotalRemoteBatchRetrievalTimeMillis"), 19);
+}
+
 }  // namespace
 }  // namespace mongo

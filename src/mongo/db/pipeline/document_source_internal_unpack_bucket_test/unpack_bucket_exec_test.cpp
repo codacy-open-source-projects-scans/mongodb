@@ -27,16 +27,13 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <vector>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
+#include "mongo/db/exec/agg/mock_stage.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -46,10 +43,13 @@
 #include "mongo/db/pipeline/document_source_mock.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <memory>
+#include <vector>
+
 
 namespace mongo {
 namespace {
@@ -71,8 +71,9 @@ TEST_F(InternalUnpackBucketExecTest, UnpackBasicIncludeAllMeasurementFields) {
                          << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
-    // This source will produce two buckets.
-    auto source = DocumentSourceMock::createForTest(
+    auto unpackStage = exec::agg::buildStage(unpack);
+    // This stage will produce two buckets.
+    auto mockStage = exec::agg::MockStage::createForTest(
         {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, "
          "time: {'0':Date(1), '1':Date(2)}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}",
@@ -80,34 +81,34 @@ TEST_F(InternalUnpackBucketExecTest, UnpackBasicIncludeAllMeasurementFields) {
          "time: {'0':Date(3), '1':Date(4)}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}"},
         expCtx);
-    unpack->setSource(source.get());
+    unpackStage->setSource(mockStage.get());
     // The first result exists and is as expected.
-    auto next = unpack->getNext();
+    auto next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(1), myMeta: {m1: 999, m2: 9999}, _id: 1, a: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(2), myMeta: {m1: 999, m2: 9999}, _id: 2, a: 2, b: 1}")));
 
     // Second bucket
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(3), myMeta: {m1: 9, m2: 9, m3: 9}, _id: 3, a: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(4), myMeta: {m1: 9, m2: 9, m3: 9}, _id: 4, a: 2, b: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isEOF());
 }
 
@@ -121,8 +122,9 @@ TEST_F(InternalUnpackBucketExecTest, UnpackExcludeASingleField) {
 
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
+    auto unpackStage = exec::agg::buildStage(unpack);
 
-    auto source = DocumentSourceMock::createForTest(
+    auto mockStage = exec::agg::MockStage::createForTest(
         {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, "
          "time: {'0':Date(1), '1':Date(2)}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}",
@@ -130,34 +132,34 @@ TEST_F(InternalUnpackBucketExecTest, UnpackExcludeASingleField) {
          "{'0':Date(3), '1':Date(4)}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}"},
         expCtx);
-    unpack->setSource(source.get());
+    unpackStage->setSource(mockStage.get());
     // The first result exists and is as expected.
-    auto next = unpack->getNext();
+    auto next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(1), myMeta: {m1: 999, m2: 9999}, _id: 1, a: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(2), myMeta: {m1: 999, m2: 9999}, _id: 2, a: 2}")));
 
     // Second bucket
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(3), myMeta: {m1: 9, m2: 9, m3: 9}, _id: 3, a: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(4), myMeta: {m1: 9, m2: 9, m3: 9}, _id: 4, a: 2}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isEOF());
 }
 
@@ -170,8 +172,9 @@ TEST_F(InternalUnpackBucketExecTest, UnpackEmptyInclude) {
                              << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
+    auto unpackStage = exec::agg::buildStage(unpack);
 
-    auto source = DocumentSourceMock::createForTest(
+    auto mockStage = exec::agg::MockStage::createForTest(
         {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, "
          "time: {'0':Date(1), '1':Date(2)}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}",
@@ -179,22 +182,22 @@ TEST_F(InternalUnpackBucketExecTest, UnpackEmptyInclude) {
          "{'0':Date(3), '1':Date(4)}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}"},
         expCtx);
-    unpack->setSource(source.get());
+    unpackStage->setSource(mockStage.get());
 
     // We should produce empty documents, one per measurement in the bucket.
     for (auto idx = 0; idx < 2; ++idx) {
-        auto next = unpack->getNext();
+        auto next = unpackStage->getNext();
         ASSERT_TRUE(next.isAdvanced());
         ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{}")));
     }
 
     for (auto idx = 0; idx < 2; ++idx) {
-        auto next = unpack->getNext();
+        auto next = unpackStage->getNext();
         ASSERT_TRUE(next.isAdvanced());
         ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{}")));
     }
 
-    auto next = unpack->getNext();
+    auto next = unpackStage->getNext();
     ASSERT_TRUE(next.isEOF());
 }
 
@@ -207,8 +210,9 @@ TEST_F(InternalUnpackBucketExecTest, UnpackEmptyExclude) {
                              << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
+    auto unpackStage = exec::agg::buildStage(unpack);
 
-    auto source = DocumentSourceMock::createForTest(
+    auto mockStage = exec::agg::MockStage::createForTest(
         {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, "
          "time: {'0':Date(1), '1':Date(2)}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}",
@@ -216,34 +220,34 @@ TEST_F(InternalUnpackBucketExecTest, UnpackEmptyExclude) {
          "{'0':Date(3), '1':Date(4)}, "
          "a:{'0':1, '1':2}, b:{'1':1}}}"},
         expCtx);
-    unpack->setSource(source.get());
+    unpackStage->setSource(mockStage.get());
 
-    auto next = unpack->getNext();
+    auto next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(1), myMeta: {m1: 999, m2: 9999}, _id: 1, a: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(2), myMeta: {m1: 999, m2: 9999}, _id: 2, a: 2, b: 1}")));
 
     // Second bucket
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(3), myMeta: {m1: 9, m2: 9, m3: 9}, _id: 3, a: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(4), myMeta: {m1: 9, m2: 9, m3: 9}, _id: 4, a: 2, b: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isEOF());
 }
 
@@ -256,58 +260,59 @@ TEST_F(InternalUnpackBucketExecTest, UnpackNeitherIncludeNorExcludeDefaultsToEmp
                      << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
+    auto unpackStage = exec::agg::buildStage(unpack);
 
-    auto source = DocumentSourceMock::createForTest(
+    auto mockStage = exec::agg::MockStage::createForTest(
         {
             R"({
-    control: {'version': 1},
-    meta: {'m1': 999, 'm2': 9999},
-    data: {
-        _id: {'0':1, '1':2},
-        time: {'0':Date(1), '1':Date(2)},
-        a:{'0':1, '1':2},
-        b:{'1':1}
-    }
-})",
+      control: {'version': 1},
+      meta: {'m1': 999, 'm2': 9999},
+      data: {
+          _id: {'0':1, '1':2},
+          time: {'0':Date(1), '1':Date(2)},
+          a:{'0':1, '1':2},
+          b:{'1':1}
+      }
+  })",
             R"({
-    control: {'version': 1},
-    meta: {m1: 9, m2: 9, m3: 9},
-    data: {
-        _id: {'0':3, '1':4},
-        time: {'0':Date(3), '1':Date(4)},
-        a:{'0':1, '1':2},
-        b:{'1':1}
-    }
-})"},
+      control: {'version': 1},
+      meta: {m1: 9, m2: 9, m3: 9},
+      data: {
+          _id: {'0':3, '1':4},
+          time: {'0':Date(3), '1':Date(4)},
+          a:{'0':1, '1':2},
+          b:{'1':1}
+      }
+  })"},
         expCtx);
-    unpack->setSource(source.get());
+    unpackStage->setSource(mockStage.get());
 
-    auto next = unpack->getNext();
+    auto next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(1), myMeta: {m1: 999, m2: 9999}, _id: 1, a: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(2), myMeta: {m1: 999, m2: 9999}, _id: 2, a: 2, b: 1}")));
 
     // Second bucket
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(3), myMeta: {m1: 9, m2: 9, m3: 9}, _id: 3, a: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(4), myMeta: {m1: 9, m2: 9, m3: 9}, _id: 4, a: 2, b: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isEOF());
 }
 
@@ -320,27 +325,28 @@ TEST_F(InternalUnpackBucketExecTest, SparseColumnsWhereOneColumnIsExhaustedBefor
                              << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
+    auto unpackStage = exec::agg::buildStage(unpack);
 
-    auto source = DocumentSourceMock::createForTest(
+    auto mockStage = exec::agg::MockStage::createForTest(
         {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, "
          "time: {'0':Date(1), '1':Date(2)}, "
          "a:{'0':1}, b:{'1':1}}}"},
         expCtx);
-    unpack->setSource(source.get());
+    unpackStage->setSource(mockStage.get());
 
-    auto next = unpack->getNext();
+    auto next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(1), myMeta: {m1: 999, m2: 9999}, _id: 1, a: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(2), myMeta: {m1: 999, m2: 9999}, _id: 2, b: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isEOF());
 }
 
@@ -356,8 +362,9 @@ TEST_F(InternalUnpackBucketExecTest, UnpackBasicIncludeWithDollarPrefix) {
                          << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
-    // This source will produce two buckets.
-    auto source = DocumentSourceMock::createForTest(
+    auto unpackStage = exec::agg::buildStage(unpack);
+    // This stage will produce two buckets.
+    auto mockStage = exec::agg::MockStage::createForTest(
         {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, "
          "time: {'0':Date(1), '1':Date(2)}, "
          "$a:{'0':1, '1':2}, b:{'1':1}}}",
@@ -365,34 +372,34 @@ TEST_F(InternalUnpackBucketExecTest, UnpackBasicIncludeWithDollarPrefix) {
          "{'0':Date(3), '1':Date(4)}, "
          "$a:{'0':1, '1':2}, b:{'1':1}}}"},
         expCtx);
-    unpack->setSource(source.get());
+    unpackStage->setSource(mockStage.get());
     // The first result exists and is as expected.
-    auto next = unpack->getNext();
+    auto next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(1), myMeta: {m1: 999, m2: 9999}, _id: 1, $a: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(2), myMeta: {m1: 999, m2: 9999}, _id: 2, $a: 2, b: 1}")));
 
     // Second bucket
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(3), myMeta: {m1: 9, m2: 9, m3: 9}, _id: 3, $a: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(4), myMeta: {m1: 9, m2: 9, m3: 9}, _id: 4, $a: 2, b: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isEOF());
 }
 
@@ -405,39 +412,40 @@ TEST_F(InternalUnpackBucketExecTest, UnpackMetadataOnly) {
                              << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
+    auto unpackStage = exec::agg::buildStage(unpack);
 
-    auto source = DocumentSourceMock::createForTest(
+    auto mockStage = exec::agg::MockStage::createForTest(
         {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'0':1, '1':2}, "
          "time: {'0':Date(1), '1':Date(2)}}}",
          "{control: {'version': 1}, meta: {m1: 9, m2: 9, m3: 9}, data: {_id: {'0':3, '1':4}, time: "
          "{'0':Date(3), '1':Date(4)}}}"},
         expCtx);
-    unpack->setSource(source.get());
+    unpackStage->setSource(mockStage.get());
 
-    auto next = unpack->getNext();
+    auto next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(),
                        Document(fromjson("{time: Date(1), myMeta: {m1: 999, m2: 9999}, _id: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(),
                        Document(fromjson("{time: Date(2), myMeta: {m1: 999, m2: 9999}, _id: 2}")));
 
     // Second bucket
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(3), myMeta: {m1: 9, m2: 9, m3: 9}, _id: 3}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(4), myMeta: {m1: 9, m2: 9, m3: 9}, _id: 4}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isEOF());
 }
 
@@ -450,50 +458,51 @@ TEST_F(InternalUnpackBucketExecTest, UnpackWithStrangeTimestampOrdering) {
                              << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
+    auto unpackStage = exec::agg::buildStage(unpack);
 
-    auto source = DocumentSourceMock::createForTest(
+    auto mockStage = exec::agg::MockStage::createForTest(
         {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'1':1, "
          "'0':2, '2': 3}, time: {'1':Date(1), '0': Date(2), '2': Date(3)}}}",
          "{control: {'version': 1}, meta: {'m1': 9, 'm2': 9, 'm3': 9}, data: {_id: {'1':4, "
          "'0':5, '2':6}, time: {'1':Date(4), '0': Date(5), '2': Date(6)}}}"},
         expCtx);
-    unpack->setSource(source.get());
+    unpackStage->setSource(mockStage.get());
 
-    auto next = unpack->getNext();
+    auto next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(),
                        Document(fromjson("{time: Date(1), myMeta: {m1: 999, m2: 9999}, _id: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(),
                        Document(fromjson("{time: Date(2), myMeta: {m1: 999, m2: 9999}, _id: 2}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(),
                        Document(fromjson("{time: Date(3), myMeta: {m1: 999, m2: 9999}, _id: 3}")));
 
     // Second bucket
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(4), myMeta: {m1: 9, m2: 9, m3: 9}, _id: 4}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(5), myMeta: {m1: 9, m2: 9, m3: 9}, _id: 5}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(
         next.getDocument(),
         Document(fromjson("{time: Date(6), myMeta: {m1: 9, m2: 9, m3: 9}, _id: 6}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isEOF());
 }
 
@@ -505,41 +514,42 @@ TEST_F(InternalUnpackBucketExecTest, BucketUnpackerHandlesMissingMetadataWhenMet
                              << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
-    auto source = DocumentSourceMock::createForTest(
+    auto unpackStage = exec::agg::buildStage(unpack);
+    auto mockStage = exec::agg::MockStage::createForTest(
         {"{control: {'version': 1}, data: {_id: {'1':1, "
          "'0':2, '2': 3}, time: {'1':Date(1), '0': Date(2), '2': Date(3)}}}",
          "{control: {'version': 1}, data: {_id: {'1':4, "
          "'0':5, '2':6}, time: {'1':Date(4), '0': Date(5), '2': Date(6)}}}"},
         expCtx);
 
-    unpack->setSource(source.get());
+    unpackStage->setSource(mockStage.get());
 
-    auto next = unpack->getNext();
+    auto next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{time: Date(1), _id: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{time: Date(2), _id: 2}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{time: Date(3), _id: 3}")));
 
     // Second bucket
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{time: Date(4), _id: 4}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{time: Date(5), _id: 5}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{time: Date(6), _id: 6}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isEOF());
 }
 
@@ -553,41 +563,42 @@ TEST_F(InternalUnpackBucketExecTest, BucketUnpackerHandlesExcludedMetadataWhenBu
                      << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
-    auto source = DocumentSourceMock::createForTest(
+    auto unpackStage = exec::agg::buildStage(unpack);
+    auto mockStage = exec::agg::MockStage::createForTest(
         {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'1':1, "
          "'0':2, '2': 3}, time: {'1':Date(1), '0': Date(2), '2': Date(3)}}}",
          "{control: {'version': 1}, meta: {'m1': 9, 'm2': 9, 'm3': 9}, data: {_id: {'1':4, "
          "'0':5, '2':6}, time: {'1':Date(4), '0': Date(5), '2': Date(6)}}}"},
         expCtx);
 
-    unpack->setSource(source.get());
+    unpackStage->setSource(mockStage.get());
 
-    auto next = unpack->getNext();
+    auto next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{time: Date(1), _id: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{time: Date(2), _id: 2}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{time: Date(3), _id: 3}")));
 
     // Second bucket
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{time: Date(4), _id: 4}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{time: Date(5), _id: 5}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{time: Date(6), _id: 6}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isEOF());
 }
 
@@ -600,13 +611,14 @@ TEST_F(InternalUnpackBucketExecTest, BucketUnpackerThrowsOnUndefinedMetadata) {
                              << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
+    auto unpackStage = exec::agg::buildStage(unpack);
 
-    auto source = DocumentSourceMock::createForTest(
+    auto mockStage = exec::agg::MockStage::createForTest(
         {"{control: {'version': 1}, meta: undefined, data: {_id: {'1':1, "
          "'0':2, '2': 3}, time: {'1':Date(1), '0': Date(2), '2': Date(3)}}}"},
         expCtx);
-    unpack->setSource(source.get());
-    ASSERT_THROWS_CODE(unpack->getNext(), AssertionException, 5369600);
+    unpackStage->setSource(mockStage.get());
+    ASSERT_THROWS_CODE(unpackStage->getNext(), AssertionException, 5369600);
 }
 
 TEST_F(InternalUnpackBucketExecTest, BucketUnpackerThrowsWhenMetadataIsPresentUnexpectedly) {
@@ -617,16 +629,17 @@ TEST_F(InternalUnpackBucketExecTest, BucketUnpackerThrowsWhenMetadataIsPresentUn
                              << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
+    auto unpackStage = exec::agg::buildStage(unpack);
 
-    auto source = DocumentSourceMock::createForTest(
+    auto mockStage = exec::agg::MockStage::createForTest(
         {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'1':1, "
          "'0':2, '2': 3}, time: {'1':Date(1), '0': Date(2), '2': Date(3)}}}",
          "{control: {'version': 1}, meta: null, data: {_id: {'1':4, "
          "'0':5, '2':6}, time: {'1':Date(4), '0': Date(5), '2': Date(6)}}}"},
         expCtx);
-    unpack->setSource(source.get());
+    unpackStage->setSource(mockStage.get());
 
-    ASSERT_THROWS_CODE(unpack->getNext(), AssertionException, 5369601);
+    ASSERT_THROWS_CODE(unpackStage->getNext(), AssertionException, 5369601);
 }
 
 TEST_F(InternalUnpackBucketExecTest, BucketUnpackerHandlesNullMetadata) {
@@ -638,47 +651,48 @@ TEST_F(InternalUnpackBucketExecTest, BucketUnpackerHandlesNullMetadata) {
                              << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
+    auto unpackStage = exec::agg::buildStage(unpack);
 
-    auto source = DocumentSourceMock::createForTest(
+    auto mockStage = exec::agg::MockStage::createForTest(
         {"{control: {'version': 1}, meta: {'m1': 999, 'm2': 9999}, data: {_id: {'1':1, "
          "'0':2, '2': 3}, time: {'1':Date(1), '0': Date(2), '2': Date(3)}}}",
          "{control: {'version': 1}, meta: null, data: {_id: {'1':4, "
          "'0':5, '2':6}, time: {'1':Date(4), '0': Date(5), '2': Date(6)}}}"},
         expCtx);
-    unpack->setSource(source.get());
+    unpackStage->setSource(mockStage.get());
 
-    auto next = unpack->getNext();
+    auto next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(),
                        Document(fromjson("{time: Date(1), myMeta: {m1: 999, m2: 9999}, _id: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(),
                        Document(fromjson("{time: Date(2), myMeta: {m1: 999, m2: 9999}, _id: 2}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(),
                        Document(fromjson("{time: Date(3), myMeta: {m1: 999, m2: 9999}, _id: 3}")));
 
     // Second bucket
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(),
                        Document(fromjson("{time: Date(4), myMeta: null, _id: 4}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(),
                        Document(fromjson("{time: Date(5), myMeta: null, _id: 5}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(),
                        Document(fromjson("{time: Date(6), myMeta: null, _id: 6}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isEOF());
 }
 
@@ -691,60 +705,61 @@ TEST_F(InternalUnpackBucketExecTest, BucketUnpackerHandlesMissingMetadata) {
                              << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
+    auto unpackStage = exec::agg::buildStage(unpack);
 
-    auto source = DocumentSourceMock::createForTest(
+    auto mockStage = exec::agg::MockStage::createForTest(
         {
             R"(
-{
-    control: {'version': 1},
-    meta: {
-        'm1': 999, 'm2': 9999
-    },
-    data: {
-        _id: {'1':1, '0':2, '2': 3},
-        time: {'1':Date(1), '0': Date(2), '2': Date(3)}
-    }
-})",
+  {
+      control: {'version': 1},
+      meta: {
+          'm1': 999, 'm2': 9999
+      },
+      data: {
+          _id: {'1':1, '0':2, '2': 3},
+          time: {'1':Date(1), '0': Date(2), '2': Date(3)}
+      }
+  })",
             R"(
-{
-    control: {'version': 1},
-    data: {
-        _id: {'1':4, '0':5, '2':6},
-        time: {'1':Date(4), '0': Date(5), '2': Date(6)}
-    }
-})"},
+  {
+      control: {'version': 1},
+      data: {
+          _id: {'1':4, '0':5, '2':6},
+          time: {'1':Date(4), '0': Date(5), '2': Date(6)}
+      }
+  })"},
         expCtx);
-    unpack->setSource(source.get());
+    unpackStage->setSource(mockStage.get());
 
-    auto next = unpack->getNext();
+    auto next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(),
                        Document(fromjson("{time: Date(1), myMeta: {m1: 999, m2: 9999}, _id: 1}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(),
                        Document(fromjson("{time: Date(2), myMeta: {m1: 999, m2: 9999}, _id: 2}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(),
                        Document(fromjson("{time: Date(3), myMeta: {m1: 999, m2: 9999}, _id: 3}")));
 
     // Second bucket
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{time: Date(4), _id: 4}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{time: Date(5), _id: 5}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     ASSERT_DOCUMENT_EQ(next.getDocument(), Document(fromjson("{time: Date(6), _id: 6}")));
 
-    next = unpack->getNext();
+    next = unpackStage->getNext();
     ASSERT_TRUE(next.isEOF());
 }
 
@@ -757,12 +772,13 @@ TEST_F(InternalUnpackBucketExecTest, ThrowsOnEmptyDataValue) {
                              << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
+    auto unpackStage = exec::agg::buildStage(unpack);
 
-    auto source = DocumentSourceMock::createForTest(
+    auto mockStage = exec::agg::MockStage::createForTest(
         Document{{"_id", 1}, {"meta", Document{{"m1", 999}, {"m2", 9999}}}, {"data", Document{}}},
         expCtx);
-    unpack->setSource(source.get());
-    ASSERT_THROWS_CODE(unpack->getNext(), AssertionException, 5346509);
+    unpackStage->setSource(mockStage.get());
+    ASSERT_THROWS_CODE(unpackStage->getNext(), AssertionException, 5346509);
 }
 
 TEST_F(InternalUnpackBucketExecTest, HandlesEmptyBucket) {
@@ -774,10 +790,11 @@ TEST_F(InternalUnpackBucketExecTest, HandlesEmptyBucket) {
                              << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
     auto unpack =
         DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), expCtx);
+    auto unpackStage = exec::agg::buildStage(unpack);
 
-    auto source = DocumentSourceMock::createForTest(Document{}, expCtx);
-    unpack->setSource(source.get());
-    ASSERT_THROWS_CODE(unpack->getNext(), AssertionException, 5346510);
+    auto mockStage = exec::agg::MockStage::createForTest(Document{}, expCtx);
+    unpackStage->setSource(mockStage.get());
+    ASSERT_THROWS_CODE(unpackStage->getNext(), AssertionException, 5346510);
 }
 
 TEST_F(InternalUnpackBucketExecTest, ParserRejectsNonObjArgment) {
@@ -978,5 +995,109 @@ TEST_F(InternalUnpackBucketExecTest, RedactsCorrectly) {
         "computedMetaProjFields: [\"HASH<a>\", \"HASH<b>\", \"HASH<c>\"]}}",
         redact(*docSource));
 }
+
+TEST_F(InternalUnpackBucketExecTest, BucketExercisesPauseExecutionCorrectly) {
+    auto ctx = getExpCtx();
+    auto spec = BSON(DocumentSourceInternalUnpackBucket::kStageNameInternal
+                     << BSON(DocumentSourceInternalUnpackBucket::kExclude
+                             << BSONArray() << timeseries::kTimeFieldName << kUserDefinedTimeName
+                             << timeseries::kMetaFieldName << kUserDefinedMetaName
+                             << DocumentSourceInternalUnpackBucket::kBucketMaxSpanSeconds << 3600));
+    auto bucketSource =
+        DocumentSourceInternalUnpackBucket::createFromBsonInternal(spec.firstElement(), ctx);
+    auto bucketSourceStage = exec::agg::buildStage(bucketSource);
+
+    auto bucketOneJson = R"(
+        {
+            control: {'version': 1},
+            meta: {
+                'm1': 999, 'm2': 9999
+            },
+            data: {
+                _id: [1, 2, 3],
+                time: [Date(1), Date(2), Date(3)]
+            }
+        })";
+    auto bucketTwoJson = R"(
+            {
+                control: {'version': 1},
+                meta: {
+                    'm1': 999, 'm2': 9999
+                },
+                data: {
+                    _id: [4, 5, 6],
+                    time: [Date(4), Date(5), Date(6)]
+                }
+            })";
+
+    auto mock =
+        exec::agg::MockStage::createForTest({DocumentSource::GetNextResult::makePauseExecution(),
+                                             Document(fromjson(bucketOneJson)),
+                                             DocumentSource::GetNextResult::makePauseExecution(),
+                                             Document(fromjson(bucketTwoJson)),
+                                             DocumentSource::GetNextResult::makePauseExecution()},
+                                            ctx);
+
+    auto expectedBucketOneDocs = std::vector<Document>{
+        Document(fromjson("{time: Date(1), myMeta: {m1: 999, m2: 9999}, _id: 1}")),
+        Document(fromjson("{time: Date(2), myMeta: {m1: 999, m2: 9999}, _id: 2}")),
+        Document(fromjson("{time: Date(3), myMeta: {m1: 999, m2: 9999}, _id: 3}"))};
+
+    auto expectedBucketTwoDocs = std::vector<Document>{
+        Document(fromjson("{time: Date(4), myMeta: {m1: 999, m2: 9999}, _id: 4}")),
+        Document(fromjson("{time: Date(5), myMeta: {m1: 999, m2: 9999}, _id: 5}")),
+        Document(fromjson("{time: Date(6), myMeta: {m1: 999, m2: 9999}, _id: 6}"))};
+
+    bucketSourceStage->setSource(mock.get());
+    auto next = bucketSourceStage->getNext();
+    ASSERT_TRUE(next.isPaused());
+    next = bucketSourceStage->getNext();
+    ASSERT_TRUE(next.isAdvanced());
+    for (auto&& expectedDoc : expectedBucketOneDocs) {
+        ASSERT_TRUE(next.isAdvanced());
+        ASSERT_DOCUMENT_EQ(next.getDocument(), expectedDoc);
+        next = bucketSourceStage->getNext();
+    }
+    ASSERT_TRUE(next.isPaused());
+    next = bucketSourceStage->getNext();
+    for (auto&& expectedDoc : expectedBucketTwoDocs) {
+        ASSERT_TRUE(next.isAdvanced());
+        ASSERT_DOCUMENT_EQ(next.getDocument(), expectedDoc);
+        next = bucketSourceStage->getNext();
+    }
+    ASSERT_TRUE(next.isPaused());
+    next = bucketSourceStage->getNext();
+    ASSERT_TRUE(next.isEOF());
+}
+
+TEST_F(InternalUnpackBucketExecTest, AssertConstraints) {
+    auto ctx = getExpCtx();
+    auto bson = fromjson(
+        R"({
+             $_internalUnpackBucket: {
+                 include: [ 'a', 'b', 'c' ],
+                 timeField : 'time',
+                 metaField : 'meta',
+                 bucketMaxSpanSeconds : 3600,
+                 computedMetaProjFields : [ 'a', 'b', 'c' ]
+             }
+         })");
+    auto bucketSource = DocumentSourceInternalUnpackBucket::createFromBsonInternal(
+        bson.firstElement(), getExpCtx());
+
+    auto constraints = bucketSource->constraints();
+    ASSERT_FALSE(constraints.mustRunLocally());
+    ASSERT_TRUE(constraints.isAllowedInsideFacetStage());
+    ASSERT_FALSE(constraints.isAllowedInChangeStream());
+    ASSERT_FALSE(constraints.isChangeStreamStage());
+    ASSERT_FALSE(constraints.requiresChangeStream());
+    ASSERT_TRUE(constraints.isAllowedInTransaction());
+    ASSERT_TRUE(constraints.isAllowedInLookupPipeline());
+    ASSERT_TRUE(constraints.isAllowedInUnionPipeline());
+    ASSERT_TRUE(constraints.isAllowedInsideFacetStage());
+    ASSERT_FALSE(constraints.writesPersistentData());
+    ASSERT_FALSE(constraints.consumesLogicalCollectionData);
+}
+
 }  // namespace
 }  // namespace mongo

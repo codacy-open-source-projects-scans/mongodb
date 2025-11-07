@@ -27,44 +27,45 @@
  *    it in the license file.
  */
 
-#include <ostream>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
+#include "mongo/db/s/range_deleter_service.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/bson/unordered_fields_bsonobj_comparator.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/create_collection.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/type_collection_common_types_gen.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/create_collection.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
-#include "mongo/db/s/collection_metadata.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
-#include "mongo/db/s/operation_sharding_state.h"
-#include "mongo/db/s/range_deleter_service.h"
 #include "mongo/db/s/range_deleter_service_test.h"
-#include "mongo/db/s/sharding_runtime_d_params_gen.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/sharding_runtime_d_params_gen.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/database_version.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/random.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/database_version.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
-#include "mongo/s/type_collection_common_types_gen.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/time_support.h"
+
+#include <ostream>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 
 namespace mongo {
 
@@ -79,24 +80,18 @@ void RangeDeleterServiceTest::setUp() {
     RangeDeleterService::get(opCtx)->onStepUpComplete(opCtx, 0L);
     RangeDeleterService::get(opCtx)->getRangeDeleterServiceInitializationFuture().get(opCtx);
 
-    {
-        OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE unsafeCreateCollection(
-            opCtx);
-        uassertStatusOK(
-            createCollection(opCtx, nsCollA.dbName(), BSON("create" << nsCollA.coll())));
-        uassertStatusOK(
-            createCollection(opCtx, nsCollB.dbName(), BSON("create" << nsCollB.coll())));
-    }
+    createTestCollection(opCtx, nsCollA);
+    createTestCollection(opCtx, nsCollB);
 
     {
         AutoGetCollection autoColl(opCtx, nsCollA, MODE_X);
-        uuidCollA = autoColl.getCollection()->uuid();
+        uuidCollA = autoColl->uuid();
         nssWithUuid[uuidCollA] = nsCollA;
         _setFilteringMetadataByUUID(opCtx, uuidCollA);
     }
     {
         AutoGetCollection autoColl(opCtx, nsCollB, MODE_X);
-        uuidCollB = autoColl.getCollection()->uuid();
+        uuidCollB = autoColl->uuid();
         nssWithUuid[uuidCollB] = nsCollB;
         _setFilteringMetadataByUUID(opCtx, uuidCollB);
     }
@@ -126,9 +121,7 @@ void RangeDeleterServiceTest::_setFilteringMetadataByUUID(OperationContext* opCt
                                ChunkRange{BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)},
                                ChunkVersion({epoch, Timestamp(1, 1)}, {1, 0}),
                                ShardId("this"));
-        ChunkManager cm(ShardId("this"),
-                        DatabaseVersion(UUID::gen(), Timestamp(1, 1)),
-                        makeStandaloneRoutingTableHistory(
+        ChunkManager cm(makeStandaloneRoutingTableHistory(
                             RoutingTableHistory::makeNew(nss,
                                                          uuid,
                                                          kShardKeyPattern,
@@ -307,7 +300,7 @@ TEST_F(RangeDeleterServiceTest, ScheduledTaskInvalidatedOnStepDown) {
     rds->onStepDown();
     try {
         completionFuture.get(opCtx);
-    } catch (const ExceptionForCat<ErrorCategory::Interruption>&) {
+    } catch (const ExceptionFor<ErrorCategory::Interruption>&) {
         // Expect an interruption error when the service gets disabled
     }
 }
@@ -327,8 +320,8 @@ TEST_F(RangeDeleterServiceTest, NoActionPossibleIfServiceIsDown) {
         DBException,
         ErrorCodes::NotYetInitialized);
 
-    ASSERT_THROWS_CODE(rds->deregisterTask(taskWithOngoingQueries->getTask().getCollectionUuid(),
-                                           taskWithOngoingQueries->getTask().getRange()),
+    ASSERT_THROWS_CODE(rds->completeTask(taskWithOngoingQueries->getTask().getCollectionUuid(),
+                                         taskWithOngoingQueries->getTask().getRange()),
                        DBException,
                        ErrorCodes::NotYetInitialized);
 
@@ -575,23 +568,17 @@ TEST_F(RangeDeleterServiceTest, DumpState) {
     ASSERT_EQ(2, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
     ASSERT_EQ(1, rds->getNumRangeDeletionTasksForCollection(uuidCollB));
 
-    // Build expected state and compare it with the returned one from
-    // RangeDeleterService::dumpState()
-    BSONArrayBuilder builderArrCollA;
-    builderArrCollA.append(task0WithOngoingQueriesCollA->getTask().getRange().toBSON());
-    builderArrCollA.append(task1WithOngoingQueriesCollA->getTask().getRange().toBSON());
-
-    BSONArrayBuilder builderArrCollB;
-    builderArrCollB.append(taskWithOngoingQueriesCollB->getTask().getRange().toBSON());
-
-    BSONObj state = rds->dumpState();
-    BSONObj expectedState =
-        BSON(uuidCollA.toString() << builderArrCollA.arr() << uuidCollB.toString()
-                                  << builderArrCollB.arr());
-
-    const UnorderedFieldsBSONObjComparator kComparator;
-    ASSERT_EQ(kComparator.compare(state, expectedState), 0)
-        << "Expected " << state << " == " << expectedState;
+    auto state = dumpStateAsMap(opCtx);
+    const auto& task0A = task0WithOngoingQueriesCollA->getTask();
+    const auto& task1A = task1WithOngoingQueriesCollA->getTask();
+    const auto& taskB = taskWithOngoingQueriesCollB->getTask();
+    const auto& collAId = task0A.getCollectionUuid();
+    const auto& collBId = taskB.getCollectionUuid();
+    ASSERT_EQ(state[collAId].size(), 2);
+    ASSERT_TRUE(state[collAId].contains(task0A.getRange()));
+    ASSERT_TRUE(state[collAId].contains(task1A.getRange()));
+    ASSERT_EQ(state[collBId].size(), 1);
+    ASSERT_TRUE(state[collBId].contains(taskB.getRange()));
 }
 
 TEST_F(RangeDeleterServiceTest, TotalNumOfRegisteredTasks) {
@@ -626,8 +613,14 @@ TEST_F(RangeDeleterServiceTest, RegisterTaskWithDisableResumableRangeDeleterFlag
         registerAndCreatePersistentTask(opCtx,
                                         taskWithOngoingQueries->getTask(),
                                         taskWithOngoingQueries->getOngoingQueriesFuture());
-    ASSERT(completionFuture.isReady());
-    ASSERT_EQ(0, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+    ASSERT(!completionFuture.isReady());
+    ASSERT_EQ(1, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
+
+    auto overlappingRangeFuture = rds->getOverlappingRangeDeletionsFuture(
+        uuidCollA, taskWithOngoingQueries->getTask().getRange());
+    ASSERT(overlappingRangeFuture.isReady());
+    ASSERT_THROWS_CODE(
+        overlappingRangeFuture.get(opCtx), DBException, ErrorCodes::ResumableRangeDeleterDisabled);
 }
 
 TEST_F(RangeDeleterServiceTest,
@@ -665,7 +658,7 @@ TEST_F(RangeDeleterServiceTest, RescheduleRangeDeletionTasksOnStepUp) {
 
     // Generate and persist range deleter tasks (some pending, some non-pending, some non-pending &&
     // processing)
-    int nPending = 0, nNonPending = 0, nNonPendingAndProcessing = 0;
+    int nNonPending = 0, nNonPendingAndProcessing = 0;
     int minBound = 0;
     for (int i = 0; i < nRangeDeletionTasks; i++) {
         auto rangeDeletionTask = createRangeDeletionTask(uuidCollA,
@@ -678,7 +671,6 @@ TEST_F(RangeDeleterServiceTest, RescheduleRangeDeletionTasksOnStepUp) {
         if (rand == 0) {
             // Pending range deletion task
             rangeDeletionTask.setPending(true);
-            nPending++;
         } else if (rand == 1) {
             // Non-pending range deletion task
             rangeDeletionTask.setPending(false);
@@ -906,9 +898,44 @@ TEST_F(RangeDeleterServiceTest, WaitForOngoingQueriesInvalidatedOnStepDown) {
     rds->onStepDown();
     try {
         completionFuture.get(opCtx);
-    } catch (const ExceptionForCat<ErrorCategory::Interruption>&) {
+    } catch (const ExceptionFor<ErrorCategory::Interruption>&) {
         // Future must have been set to an interruption error because the service was disabled
     }
+}
+
+TEST_F(RangeDeleterServiceTest, ProcessingFlagIsSetWhenRangeDeletionExecutionStarts) {
+    auto rds = RangeDeleterService::get(opCtx);
+    auto taskWithOngoingQueries = rangeDeletionTask0ForCollA;
+
+    auto completionFuture =
+        registerAndCreatePersistentTask(opCtx,
+                                        taskWithOngoingQueries->getTask(),
+                                        taskWithOngoingQueries->getOngoingQueriesFuture());
+
+    // Check the `ongoing` flag is still not present since the range deletion hasn't started yet.
+    verifyProcessingFlag(opCtx,
+                         uuidCollA,
+                         rangeDeletionTask0ForCollA->getTask().getRange(),
+                         /*processingExpected=*/false);
+
+    {
+        // Add a failpoint to pause the range deletion execution after setting the `ongoing` flag.
+        FailPointEnableBlock hangBeforeDoingDeletionFp("hangBeforeDoingDeletion");
+
+        // Mark ongoing queries as drained and check the `ongoing` flag is present
+        taskWithOngoingQueries->drainOngoingQueries();
+
+        hangBeforeDoingDeletionFp->waitForTimesEntered(
+            hangBeforeDoingDeletionFp.initialTimesEntered() + 1);
+        verifyProcessingFlag(opCtx,
+                             uuidCollA,
+                             rangeDeletionTask0ForCollA->getTask().getRange(),
+                             /*processingExpected=*/true);
+    }
+
+    // Complete the range deletion execution
+    completionFuture.get(opCtx);
+    ASSERT_EQ(0, rds->getNumRangeDeletionTasksForCollection(uuidCollA));
 }
 
 }  // namespace mongo

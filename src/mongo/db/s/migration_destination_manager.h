@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <functional>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -43,12 +36,15 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/connection_string.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/s/active_migrations_registry.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/migration_batch_fetcher.h"
 #include "mongo/db/s/migration_batch_inserter.h"
 #include "mongo/db/s/migration_recipient_recovery_document_gen.h"
@@ -57,12 +53,9 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk_manager.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
@@ -72,6 +65,14 @@
 #include "mongo/util/future_impl.h"
 #include "mongo/util/timer.h"
 #include "mongo/util/uuid.h"
+
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -207,11 +208,6 @@ public:
                                                   boost::optional<Timestamp> afterClusterTime,
                                                   bool expandSimpleCollation = false);
 
-
-    bool isParallelFetchingSupported() {
-        return _parallelFetchersSupported;
-    }
-
     /**
      * Gets the collection uuid and options from fromShardId. If given a chunk manager, will fetch
      * the collection options using the database version protocol.
@@ -224,17 +220,14 @@ public:
     static CollectionOptionsAndUUID getCollectionOptions(
         OperationContext* opCtx,
         const NamespaceStringOrUUID& nssOrUUID,
-        boost::optional<Timestamp> afterClusterTime);
-
-    static CollectionOptionsAndUUID getCollectionOptions(
-        OperationContext* opCtx,
-        const NamespaceStringOrUUID& nssOrUUID,
         const ShardId& fromShardId,
         const boost::optional<DatabaseVersion>& dbVersion,
         boost::optional<Timestamp> afterClusterTime);
 
     /**
      * Creates the collection on the shard and clones the indexes and options.
+     * If the collection already exists, it will be updated to match the target options and indexes,
+     * including dropping any indexes not specified in the target index specs.
      */
     static void cloneCollectionIndexesAndOptions(
         OperationContext* opCtx,
@@ -261,15 +254,6 @@ private:
     bool _applyMigrateOp(OperationContext* opCtx, const BSONObj& xfer);
 
     bool _flushPendingWrites(OperationContext* opCtx, const repl::OpTime& lastOpApplied);
-
-    /**
-     * If this shard doesn't own any chunks for the collection to be cloned and the collection
-     * exists locally, drops its indexes to guarantee that no stale indexes carry over.
-     */
-    void _dropLocalIndexesIfNecessary(
-        OperationContext* opCtx,
-        const NamespaceString& nss,
-        const CollectionOptionsAndIndexes& collectionOptionsAndIndexes);
 
     /**
      * Remembers a chunk range between 'min' and 'max' as a range which will have data migrated
@@ -346,8 +330,6 @@ private:
 
     // State that is shared among all inserter threads.
     std::shared_ptr<MigrationCloningProgressSharedState> _migrationCloningProgress;
-
-    bool _parallelFetchersSupported;
 
     LogicalSessionId _lsid;
     TxnNumber _txnNumber{kUninitializedTxnNumber};

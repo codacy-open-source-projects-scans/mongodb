@@ -21,6 +21,9 @@
  *   assumes_no_implicit_index_creation,
  *   # This test looks for plan cache hits, which would change with repeated reads.
  *   does_not_support_repeated_reads,
+ *   # The test examines the SBE plan cache, which initial sync may change the contents of.
+ *   examines_sbe_cache,
+ *   requires_getmore,
  * ]
  */
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
@@ -92,8 +95,8 @@ if (isUsingSbePlanCache) {
     assert.eq(1, planCacheStats.length, planCacheStats);
 
     const serverStatusAfter = db.serverStatus();
-    const numPlanCacheHits = serverStatusAfter.metrics.query.planCache['sbe'].hits -
-        serverStatusBefore.metrics.query.planCache['sbe'].hits;
+    const numPlanCacheHits =
+        serverStatusAfter.metrics.query.planCache["sbe"].hits - serverStatusBefore.metrics.query.planCache["sbe"].hits;
     if (FixtureHelpers.isStandalone(db)) {
         // The first query will get cached, and since the entry will be pinned, the remaining
         // four will read the cache. Only assert on a standalone since the plan cache is local.

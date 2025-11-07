@@ -32,7 +32,6 @@
  */
 
 #include "mongo/db/query/plan_ranker.h"
-
 #include "mongo/unittest/unittest.h"
 
 namespace mongo::plan_ranker {
@@ -40,7 +39,7 @@ namespace {
 IndexEntry buildSimpleIndexEntry(const BSONObj& kp) {
     return {kp,
             IndexNames::nameToType(IndexNames::findPluginName(kp)),
-            IndexDescriptor::kLatestIndexVersion,
+            IndexConfig::kLatestIndexVersion,
             false,
             {},
             {},

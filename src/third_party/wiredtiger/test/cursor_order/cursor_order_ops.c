@@ -210,7 +210,7 @@ reverse_scan(void *arg)
     s = &run_info[id];
     cfg = s->cfg;
     testutil_check(__wt_thread_str(tid, sizeof(tid)));
-    __wt_random_init(&s->rnd);
+    __wt_random_init_default(&s->rnd);
 
     printf(" reverse scan thread %2" PRIuMAX " starting: tid: %s, file: %s\n", id, tid, s->name);
 
@@ -246,7 +246,7 @@ append_insert_op(SHARED_CONFIG *cfg, WT_SESSION *session, WT_CURSOR *cursor, INF
 
     value = &_value;
 
-    keyno = __wt_atomic_add64(&cfg->key_range, 1);
+    keyno = __wt_atomic_add_uint64(&cfg->key_range, 1);
     if (cfg->ftype == ROW) {
         testutil_snprintf(keybuf, sizeof(keybuf), "%016" PRIu64, keyno);
         cursor->set_key(cursor, keybuf);
@@ -284,7 +284,7 @@ append_insert(void *arg)
     s = &run_info[id];
     cfg = s->cfg;
     testutil_check(__wt_thread_str(tid, sizeof(tid)));
-    __wt_random_init(&s->rnd);
+    __wt_random_init_default(&s->rnd);
 
     printf("write thread %2" PRIuMAX " starting: tid: %s, file: %s\n", id, tid, s->name);
 

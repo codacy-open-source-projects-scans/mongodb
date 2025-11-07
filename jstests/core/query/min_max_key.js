@@ -1,4 +1,7 @@
 // Tests the behavior of queries using MinKey and MaxKey
+// @tags: [
+//   requires_getmore,
+// ]
 
 import {resultsEq} from "jstests/aggregation/extras/utils.js";
 
@@ -12,7 +15,7 @@ const allElements = [
     {_id: "a_number", a: 4},
     {_id: "a_subobject", a: {b: "hi"}},
     {_id: "a_undefined", a: undefined},
-    {_id: "a_string", a: "hello"}
+    {_id: "a_string", a: "hello"},
 ];
 
 assert.commandWorked(coll.insert(allElements));
@@ -29,7 +32,7 @@ function testQueriesWithMinOrMaxKey() {
         {_id: "a_number", a: 4},
         {_id: "a_subobject", a: {b: "hi"}},
         {_id: "a_undefined", a: undefined},
-        {_id: "a_string", a: "hello"}
+        {_id: "a_string", a: "hello"},
     ];
     assert(resultsEq(expectedGtMin, gtMinRes), tojson(gtMinRes));
 
@@ -59,7 +62,7 @@ function testQueriesWithMinOrMaxKey() {
         {_id: "a_number", a: 4},
         {_id: "a_subobject", a: {b: "hi"}},
         {_id: "a_undefined", a: undefined},
-        {_id: "a_string", a: "hello"}
+        {_id: "a_string", a: "hello"},
     ];
     assert(resultsEq(expectedLtMax, ltMaxRes), tojson(ltMaxRes));
 

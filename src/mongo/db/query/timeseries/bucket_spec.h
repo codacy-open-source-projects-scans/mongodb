@@ -29,16 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/document_internal.h"
@@ -46,7 +36,18 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
 namespace mongo::timeseries {
+
 /**
  * Carries parameters for unpacking a bucket. The order of operations applied to determine which
  * fields are in the final document are:
@@ -92,7 +93,7 @@ public:
     const boost::optional<std::string>& metaField() const;
     boost::optional<HashedFieldName> metaFieldHashed() const;
 
-    void setFieldSet(std::set<std::string>& fieldSet) {
+    void setFieldSet(std::set<std::string> fieldSet) {
         _fieldSet = std::move(fieldSet);
     }
 
@@ -127,10 +128,6 @@ public:
     bool doesBucketSpecProvideField(const std::string& field) const {
         // When BucketSpec is in include mode, the should be present in the '_fieldSet'.
         return _fieldSet.contains(field) == (_behavior == BucketSpec::Behavior::kInclude);
-    }
-
-    bool doesBucketSpecProvideFieldWithoutModification(const std::string& field) const {
-        return doesBucketSpecProvideField(field) && !fieldIsComputed(field);
     }
 
     // Remove fields that the predicate function evaluates to true for.
@@ -366,7 +363,7 @@ inline bool determineIncludeField(StringData fieldName,
                                   BucketSpec::Behavior unpackerBehavior,
                                   const std::set<std::string>& unpackFieldsToIncludeExclude) {
     const bool isInclude = unpackerBehavior == BucketSpec::Behavior::kInclude;
-    const bool unpackFieldsContains = unpackFieldsToIncludeExclude.find(fieldName.toString()) !=
+    const bool unpackFieldsContains = unpackFieldsToIncludeExclude.find(std::string{fieldName}) !=
         unpackFieldsToIncludeExclude.cend();
     return isInclude == unpackFieldsContains;
 }

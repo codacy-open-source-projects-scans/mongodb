@@ -124,19 +124,23 @@ struct _kms_response_parser_t {
       }                      \
    } while (0)
 
+#ifdef __GNUC__
+__attribute__((format(__printf__, 3, 4)))
+#endif
 void
-set_error (char *error, size_t size, const char *fmt, ...);
+kms_set_error (char *error, size_t size, const char *fmt, ...);
 
 #define KMS_ERROR(obj, ...)                                     \
    do {                                                         \
       obj->failed = true;                                       \
-      set_error (obj->error, sizeof (obj->error), __VA_ARGS__); \
+      kms_set_error (obj->error, sizeof (obj->error), __VA_ARGS__); \
    } while (0)
 
 #define KMS_ASSERT(stmt)                      \
    if (!(stmt)) {                             \
       fprintf (stderr, "%s failed\n", #stmt); \
       abort ();                               \
-   }
+   } else                                     \
+       ((void)0)
 
 #endif /* KMS_MESSAGE_PRIVATE_H */

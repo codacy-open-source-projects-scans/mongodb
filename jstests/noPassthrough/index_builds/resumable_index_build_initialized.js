@@ -4,6 +4,8 @@
  * completion when the node is started back up.
  *
  * @tags: [
+ *   # Primary-driven index builds aren't resumable.
+ *   primary_driven_index_builds_incompatible,
  *   requires_majority_read_concern,
  *   requires_persistence,
  *   requires_replication,
@@ -11,7 +13,7 @@
  */
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {ResumableIndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {ResumableIndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const dbName = "test";
 
@@ -19,11 +21,14 @@ const rst = new ReplSetTest({nodes: 1});
 rst.startSet();
 rst.initiate();
 
-const runTests = function(docs, indexSpecsFlat, collNameSuffix) {
-    const coll = rst.getPrimary().getDB(dbName).getCollection(jsTestName() + collNameSuffix);
+const runTests = function (docs, indexSpecsFlat, collNameSuffix) {
+    const coll = rst
+        .getPrimary()
+        .getDB(dbName)
+        .getCollection(jsTestName() + collNameSuffix);
     assert.commandWorked(coll.insert(docs));
 
-    const runTest = function(indexSpecs) {
+    const runTest = function (indexSpecs) {
         ResumableIndexBuildTest.run(
             rst,
             dbName,
@@ -32,7 +37,8 @@ const runTests = function(docs, indexSpecsFlat, collNameSuffix) {
             [{name: "hangIndexBuildBeforeWaitingUntilMajorityOpTime", logIdWithBuildUUID: 4940901}],
             {},
             ["initialized"],
-            [{numScannedAfterResume: 1}]);
+            [{numScannedAfterResume: 1}],
+        );
     };
 
     runTest([[indexSpecsFlat[0]]]);

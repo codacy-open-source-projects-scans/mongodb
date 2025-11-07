@@ -582,53 +582,6 @@ class TestBinder(testcase.IDLTestcase):
             idl.errors.ERROR_ID_BAD_ANY_TYPE_USE,
         )
 
-        # Test unsupported serialization
-        for bson_type in [
-            "bool",
-            "date",
-            "null",
-            "decimal",
-            "double",
-            "int",
-            "long",
-            "objectid",
-            "regex",
-            "timestamp",
-            "undefined",
-        ]:
-            self.assert_bind_fail(
-                textwrap.dedent(
-                    """
-                types:
-                    foofoo:
-                        description: foo
-                        cpp_type: std::string
-                        bson_serialization_type: %s
-                        serializer: foo
-                        deserializer: BSONElement::fake
-                        is_view: false
-                    """
-                    % (bson_type)
-                ),
-                idl.errors.ERROR_ID_CUSTOM_SCALAR_SERIALIZATION_NOT_SUPPORTED,
-            )
-
-            self.assert_bind_fail(
-                textwrap.dedent(
-                    """
-                types:
-                    foofoo:
-                        description: foo
-                        cpp_type: std::string
-                        bson_serialization_type: %s
-                        deserializer: foo
-                        is_view: false
-                    """
-                    % (bson_type)
-                ),
-                idl.errors.ERROR_ID_CUSTOM_SCALAR_SERIALIZATION_NOT_SUPPORTED,
-            )
-
         # Test 'any' serialization needs deserializer
         self.assert_bind_fail(
             textwrap.dedent("""
@@ -1472,145 +1425,6 @@ class TestBinder(testcase.IDLTestcase):
                 idl.errors.ERROR_ID_FIELD_MUST_BE_EMPTY_FOR_IGNORED,
             )
 
-    def test_chained_type_positive(self):
-        # type: () -> None
-        """Positive parser chaining test cases."""
-        # Setup some common types
-        test_preamble = self.common_types + indent_text(
-            1,
-            textwrap.dedent("""
-            foo1:
-                description: foo
-                cpp_type: foo
-                bson_serialization_type: chain
-                serializer: foo
-                deserializer: foo
-                default: foo
-                is_view: false
-        """),
-        )
-
-        # Chaining only
-        self.assert_bind(
-            test_preamble
-            + textwrap.dedent("""
-        structs:
-            bar1:
-                description: foo
-                strict: false
-                chained_types:
-                    foo1: alias
-        """)
-        )
-
-    def test_chained_type_negative(self):
-        # type: () -> None
-        """Negative parser chaining test cases."""
-        # Setup some common types
-        test_preamble = self.common_types + indent_text(
-            1,
-            textwrap.dedent("""
-            foo1:
-                description: foo
-                cpp_type: foo
-                bson_serialization_type: chain
-                serializer: foo
-                deserializer: foo
-                is_view: false
-        """),
-        )
-
-        # Chaining with strict struct
-        self.assert_bind_fail(
-            test_preamble
-            + textwrap.dedent("""
-        structs:
-            bar1:
-                description: foo
-                strict: true
-                chained_types:
-                    foo1: alias
-        """),
-            idl.errors.ERROR_ID_CHAINED_NO_TYPE_STRICT,
-        )
-
-        # Non-'any' type as chained type
-        self.assert_bind_fail(
-            test_preamble
-            + textwrap.dedent("""
-        structs:
-            bar1:
-                description: foo
-                strict: false
-                chained_types:
-                    string: alias
-        """),
-            idl.errors.ERROR_ID_CHAINED_TYPE_WRONG_BSON_TYPE,
-        )
-
-        # Chaining and fields only with same name
-        self.assert_bind_fail(
-            test_preamble
-            + textwrap.dedent("""
-        structs:
-            bar1:
-                description: foo
-                strict: false
-                chained_types:
-                    foo1: alias
-                fields:
-                    foo1: string
-        """),
-            idl.errors.ERROR_ID_CHAINED_DUPLICATE_FIELD,
-        )
-
-        # Non-existent chained type
-        self.assert_bind_fail(
-            test_preamble
-            + textwrap.dedent("""
-        structs:
-            bar1:
-                description: foo
-                strict: false
-                chained_types:
-                    foobar1: alias
-                fields:
-                    foo1: string
-        """),
-            idl.errors.ERROR_ID_UNKNOWN_TYPE,
-            True,
-        )
-
-        # A regular field as a chained type
-        self.assert_bind_fail(
-            test_preamble
-            + textwrap.dedent("""
-        structs:
-            bar1:
-                description: foo
-                strict: false
-                fields:
-                    foo1: string
-                    foo2: foobar1
-        """),
-            idl.errors.ERROR_ID_UNKNOWN_TYPE,
-            True,
-        )
-
-        # Array of chained types
-        self.assert_bind_fail(
-            test_preamble
-            + textwrap.dedent("""
-        structs:
-            bar1:
-                description: foo
-                strict: true
-                fields:
-                    field1: array<foo1>
-        """),
-            idl.errors.ERROR_ID_NO_ARRAY_OF_CHAIN,
-        )
-
     def test_chained_struct_positive(self):
         # type: () -> None
         """Positive parser chaining test cases."""
@@ -1635,8 +1449,6 @@ class TestBinder(testcase.IDLTestcase):
             chained:
                 description: foo
                 strict: false
-                chained_types:
-                    foo1: alias
 
             chained2:
                 description: foo
@@ -1687,8 +1499,6 @@ class TestBinder(testcase.IDLTestcase):
             bar1:
                 description: foo
                 strict: false
-                chained_types:
-                    foo1: alias
                 chained_structs:
                     chained2: alias
                 fields:
@@ -1762,6 +1572,30 @@ class TestBinder(testcase.IDLTestcase):
             )
         )
 
+        # Chained struct with nested chained struct
+        self.assert_bind(
+            test_preamble
+            + indent_text(
+                1,
+                textwrap.dedent("""
+            bar1:
+                description: foo
+                strict: false
+                chained_structs:
+                    chained: alias
+
+            foobar:
+                description: foo
+                strict: false
+                chained_structs:
+                    bar1: alias
+                fields:
+                    f1: string
+
+        """),
+            )
+        )
+
     def test_chained_struct_negative(self):
         # type: () -> None
         """Negative parser chaining test cases."""
@@ -1830,22 +1664,6 @@ class TestBinder(testcase.IDLTestcase):
             idl.errors.ERROR_ID_CHAINED_STRUCT_NOT_FOUND,
         )
 
-        # Struct as chained type
-        self.assert_bind_fail(
-            test_preamble
-            + indent_text(
-                1,
-                textwrap.dedent("""
-            bar1:
-                description: foo
-                strict: false
-                chained_types:
-                    chained: alias
-        """),
-            ),
-            idl.errors.ERROR_ID_CHAINED_TYPE_NOT_FOUND,
-        )
-
         # Duplicated field names across chained struct's fields and fields
         self.assert_bind_fail(
             test_preamble
@@ -1905,56 +1723,6 @@ class TestBinder(testcase.IDLTestcase):
         """),
             ),
             idl.errors.ERROR_ID_CHAINED_NO_NESTED_STRUCT_STRICT,
-        )
-
-        # Chained struct with nested chained struct
-        self.assert_bind_fail(
-            test_preamble
-            + indent_text(
-                1,
-                textwrap.dedent("""
-            bar1:
-                description: foo
-                strict: false
-                chained_structs:
-                    chained: alias
-
-            foobar:
-                description: foo
-                strict: false
-                chained_structs:
-                    bar1: alias
-                fields:
-                    f1: string
-
-        """),
-            ),
-            idl.errors.ERROR_ID_CHAINED_NO_NESTED_CHAINED,
-        )
-
-        # Chained struct with nested chained type
-        self.assert_bind_fail(
-            test_preamble
-            + indent_text(
-                1,
-                textwrap.dedent("""
-            bar1:
-                description: foo
-                strict: false
-                chained_types:
-                    foo1: alias
-
-            foobar:
-                description: foo
-                strict: false
-                chained_structs:
-                    bar1: alias
-                fields:
-                    f1: bar1
-
-        """),
-            ),
-            idl.errors.ERROR_ID_CHAINED_NO_NESTED_CHAINED,
         )
 
     def test_enum_positive(self):
@@ -2941,7 +2709,7 @@ class TestBinder(testcase.IDLTestcase):
         # type: () -> None
         """Test feature flag checks around version."""
 
-        # feature flag can default to false without a version (shouldBeFCVGated can be true or false)
+        # feature flag can default to false without a version (fcv_gated can be true or false)
         self.assert_bind(
             textwrap.dedent("""
             feature_flags:
@@ -2949,7 +2717,7 @@ class TestBinder(testcase.IDLTestcase):
                     description: "Make toast"
                     cpp_varname: gToaster
                     default: false
-                    shouldBeFCVGated: false
+                    fcv_gated: false
             """)
         )
 
@@ -2960,11 +2728,11 @@ class TestBinder(testcase.IDLTestcase):
                     description: "Make toast"
                     cpp_varname: gToaster
                     default: false
-                    shouldBeFCVGated: true
+                    fcv_gated: true
             """)
         )
 
-        # if shouldBeFCVGated: true, feature flag can default to true with a version
+        # if fcv_gated: true, feature flag can default to true with a version
         self.assert_bind(
             textwrap.dedent("""
             feature_flags:
@@ -2973,11 +2741,11 @@ class TestBinder(testcase.IDLTestcase):
                     cpp_varname: gToaster
                     default: true
                     version: 123
-                    shouldBeFCVGated: true
+                    fcv_gated: true
             """)
         )
 
-        # if shouldBeFCVGated: false, we do not need a version
+        # if fcv_gated: false, we do not need a version
         self.assert_bind(
             textwrap.dedent("""
             feature_flags:
@@ -2985,11 +2753,50 @@ class TestBinder(testcase.IDLTestcase):
                     description: "Make toast"
                     cpp_varname: gToaster
                     default: true
-                    shouldBeFCVGated: false
+                    fcv_gated: false
             """)
         )
 
-        # if shouldBeFCVGated: true and default: true, a version is required
+        # IFR flag does not need a default or version
+        self.assert_bind(
+            textwrap.dedent("""
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    incremental_rollout_phase: released
+                    fcv_gated: false
+            """)
+        )
+
+        # IFR flag can specify a compatible version
+        self.assert_bind(
+            textwrap.dedent("""
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    incremental_rollout_phase: released
+                    default: true
+                    fcv_gated: false
+            """)
+        )
+
+        # explicitly mark non-IFR flag
+        self.assert_bind(
+            textwrap.dedent("""
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    incremental_rollout_phase: not_for_incremental_rollout
+                    default: true
+                    version: 123
+                    fcv_gated: true
+            """)
+        )
+
+        # if fcv_gated: true and default: true, a version is required
         self.assert_bind_fail(
             textwrap.dedent("""
             feature_flags:
@@ -2997,12 +2804,12 @@ class TestBinder(testcase.IDLTestcase):
                     description: "Make toast"
                     cpp_varname: gToaster
                     default: true
-                    shouldBeFCVGated: true
+                    fcv_gated: true
             """),
             idl.errors.ERROR_ID_FEATURE_FLAG_DEFAULT_TRUE_MISSING_VERSION,
         )
 
-        # false is not allowed with a version and shouldBeFCVGated: true
+        # false is not allowed with a version and fcv_gated: true
         self.assert_bind_fail(
             textwrap.dedent("""
             feature_flags:
@@ -3011,12 +2818,12 @@ class TestBinder(testcase.IDLTestcase):
                     cpp_varname: gToaster
                     default: false
                     version: 123
-                    shouldBeFCVGated: true
+                    fcv_gated: true
             """),
             idl.errors.ERROR_ID_FEATURE_FLAG_DEFAULT_FALSE_HAS_VERSION,
         )
 
-        # false is not allowed with a version and shouldBeFCVGated: false
+        # false is not allowed with a version and fcv_gated: false
         self.assert_bind_fail(
             textwrap.dedent("""
             feature_flags:
@@ -3025,12 +2832,12 @@ class TestBinder(testcase.IDLTestcase):
                     cpp_varname: gToaster
                     default: false
                     version: 123
-                    shouldBeFCVGated: false
+                    fcv_gated: false
             """),
             idl.errors.ERROR_ID_FEATURE_FLAG_DEFAULT_FALSE_HAS_VERSION,
         )
 
-        # if shouldBeFCVGated is false, a version is not allowed
+        # if fcv_gated is false, a version is not allowed
         self.assert_bind_fail(
             textwrap.dedent("""
             feature_flags:
@@ -3039,9 +2846,150 @@ class TestBinder(testcase.IDLTestcase):
                     cpp_varname: gToaster
                     default: true
                     version: 123
-                    shouldBeFCVGated: false
+                    fcv_gated: false
             """),
-            idl.errors.ERROR_ID_FEATURE_FLAG_SHOULD_BE_FCV_GATED_FALSE_HAS_VERSION,
+            idl.errors.ERROR_ID_FEATURE_FLAG_SHOULD_BE_FCV_GATED_FALSE_HAS_UNSUPPORTED_OPTION,
+        )
+
+        # if fcv_gated is false, enable_on_transitional_fcv_UNSAFE is not allowed
+        self.assert_bind_fail(
+            textwrap.dedent("""
+            feature_flags:
+                featureFlagToaster:
+                    description: >
+                      Make toast
+                      (Enable on transitional FCV): Lorem ipsum dolor sit amet
+                    cpp_varname: gToaster
+                    default: true
+                    fcv_gated: false
+                    enable_on_transitional_fcv_UNSAFE: true
+            """),
+            idl.errors.ERROR_ID_FEATURE_FLAG_SHOULD_BE_FCV_GATED_FALSE_HAS_UNSUPPORTED_OPTION,
+        )
+
+        # if fcv_gated: true, enable_on_transitional_fcv_UNSAFE is allowed
+        self.assert_bind(
+            textwrap.dedent("""
+            feature_flags:
+                featureFlagToaster:
+                    description: >
+                      Make toast
+                      (Enable on transitional FCV): Lorem ipsum dolor sit amet
+                    cpp_varname: gToaster
+                    default: true
+                    version: 123
+                    fcv_gated: true
+                    enable_on_transitional_fcv_UNSAFE: true
+            """)
+        )
+
+        # if enable_on_transitional_fcv_UNSAFE: true, the description must contain a
+        # "(Enable on transitional FCV): ..." text explaining why the usage is safe
+        self.assert_bind_fail(
+            textwrap.dedent("""
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    default: true
+                    version: 123
+                    fcv_gated: true
+                    enable_on_transitional_fcv_UNSAFE: true
+            """),
+            idl.errors.ERROR_ID_FEATURE_FLAG_ENABLED_ON_TRANSITIONAL_FCV_MISSING_SAFETY_EXPLANATION,
+        )
+
+        # if fcv_gated is false, fcv_context_unaware is not allowed
+        self.assert_bind_fail(
+            textwrap.dedent("""
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    default: true
+                    fcv_gated: false
+                    fcv_context_unaware: true
+            """),
+            idl.errors.ERROR_ID_FEATURE_FLAG_SHOULD_BE_FCV_GATED_FALSE_HAS_UNSUPPORTED_OPTION,
+        )
+
+        # if fcv_gated: true, fcv_context_unaware is allowed
+        self.assert_bind(
+            textwrap.dedent("""
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    default: false
+                    fcv_gated: true
+                    fcv_context_unaware: true
+            """)
+        )
+
+        # incremental_rollout_phase must have a valid value
+        self.assert_bind_fail(
+            textwrap.dedent("""
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    incremental_rollout_phase: waning_gibbous
+                    fcv_gated: false
+            """),
+            idl.errors.ERROR_ID_INCREMENTAL_ROLLOUT_PHASE_INVALID_VALUE,
+        )
+
+        # if set for incremental feature rollout (IFR), version not allowed
+        self.assert_bind_fail(
+            textwrap.dedent("""
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    incremental_rollout_phase: released
+                    default: true
+                    fcv_gated: true
+            """),
+            idl.errors.ERROR_ID_ILLEGALLY_FCV_GATED_FEATURE_FLAG,
+        )
+
+        # incremental_rollout_phase must not specify incompatible default
+        self.assert_bind_fail(
+            textwrap.dedent("""
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    incremental_rollout_phase: in_development
+                    default: true
+                    fcv_gated: false
+            """),
+            idl.errors.ERROR_ID_INCREMENTAL_FEATURE_FLAG_DEFAULT_VALUE,
+        )
+
+        # default required for non-IFR feature flag
+        self.assert_bind_fail(
+            textwrap.dedent("""
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    fcv_gated: true
+            """),
+            idl.errors.ERROR_ID_FEATURE_FLAG_WITHOUT_DEFAULT_VALUE,
+        )
+        # incremental_rollout_phase must have a valid value
+        self.assert_bind_fail(
+            textwrap.dedent("""
+            feature_flags:
+                featureFlagToaster:
+                    description: "Make toast"
+                    cpp_varname: gToaster
+                    incremental_rollout_phase: rollout
+                    version: 123
+                    fcv_gated: false
+            """),
+            idl.errors.ERROR_ID_IFR_FLAG_WITH_VERSION,
         )
 
     def test_access_check(self):
@@ -3563,7 +3511,6 @@ class TestBinder(testcase.IDLTestcase):
             idl.errors.ERROR_ID_CANNOT_DECLARE_SHAPE_LITERAL,
         )
 
-    # pylint: disable=invalid-name
     def test_struct_unsafe_dangerous_disable_extra_field_duplicate_checks_negative(self):
         # type: () -> None
         """Negative struct tests for unsafe_dangerous_disable_extra_field_duplicate_checks."""

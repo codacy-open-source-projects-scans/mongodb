@@ -27,14 +27,9 @@
  *    it in the license file.
  */
 
-#include <vector>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/docval_to_sbeval.h"
@@ -44,23 +39,21 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/allowed_contexts.h"
-#include "mongo/db/query/stats/ce_histogram.h"
-#include "mongo/db/query/stats/max_diff.h"
-#include "mongo/db/query/stats/stats_gen.h"
-#include "mongo/db/query/stats/value_utils.h"
+#include "mongo/db/query/compiler/stats/ce_histogram.h"
+#include "mongo/db/query/compiler/stats/max_diff.h"
+#include "mongo/db/query/compiler/stats/stats_for_histograms_gen.h"
+#include "mongo/db/query/compiler/stats/value_utils.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <vector>
 
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
-
-using boost::intrusive_ptr;
 
 AccumulationExpression parseInternalConstructStats(ExpressionContext* const expCtx,
                                                    BSONElement elem,
@@ -71,15 +64,16 @@ AccumulationExpression parseInternalConstructStats(ExpressionContext* const expC
     tassert(7261401,
             "expected $_internalConstructStats in the analyze pipeline to an object",
             elem.isABSONObj());
-    auto params = InternalConstructStatsAccumulatorParams::parse(parser, elem.Obj());
+    auto params = InternalConstructStatsAccumulatorParams::parse(elem.Obj(), parser);
 
     auto initializer = ExpressionConstant::create(expCtx, Value(BSONNULL));
     auto argument = Expression::parseOperand(expCtx, elem, vps);
-    return {
-        initializer,
-        argument,
-        [expCtx, params]() { return AccumulatorInternalConstructStats::create(expCtx, params); },
-        "_internalConstructStats"};
+    return {initializer,
+            argument,
+            [expCtx, params]() {
+                return make_intrusive<AccumulatorInternalConstructStats>(expCtx, params);
+            },
+            "_internalConstructStats"};
 }
 
 REGISTER_ACCUMULATOR(_internalConstructStats, parseInternalConstructStats);
@@ -90,11 +84,6 @@ AccumulatorInternalConstructStats::AccumulatorInternalConstructStats(
     assertAllowedInternalIfRequired(
         expCtx->getOperationContext(), "_internalConstructStats", AllowedWithClientType::kInternal);
     _memUsageTracker.set(sizeof(*this));
-}
-
-intrusive_ptr<AccumulatorState> AccumulatorInternalConstructStats::create(
-    ExpressionContext* const expCtx, InternalConstructStatsAccumulatorParams params) {
-    return new AccumulatorInternalConstructStats(expCtx, params);
 }
 
 void AccumulatorInternalConstructStats::processInternal(const Value& input, bool merging) {
@@ -109,7 +98,7 @@ void AccumulatorInternalConstructStats::processInternal(const Value& input, bool
     //      {val: {_id: ..., val: "some value from the collection"}, sampleRate: 0.5}
     auto val = doc["val"][InternalConstructStatsAccumulatorParams::kValFieldName];
 
-    LOGV2_DEBUG(6735800, 4, "Extracted document", "val"_attr = val);
+    LOGV2_DEBUG(6735800, 4, "Extracted document", "val"_attr = redact(val.toString()));
     _values.emplace_back(stats::SBEValue(sbe::value::makeValue(val)));
 
     _count++;

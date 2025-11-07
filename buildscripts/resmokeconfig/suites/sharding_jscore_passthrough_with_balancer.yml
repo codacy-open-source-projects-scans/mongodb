@@ -23,9 +23,7 @@ selector:
     - jstests/core/**/fsync.js # uses fsync.
     - jstests/core/**/geo_s2cursorlimitskip.js # profiling.
     - jstests/core/**/geo_update_btree2.js # notablescan.
-    - jstests/core/**/index9.js # "local" database.
     - jstests/core/**/queryoptimizera.js # "local" database.
-    - jstests/core/**/stages*.js # stageDebug.
     - jstests/core/**/startup_log.js # "local" database.
     - jstests/core/**/query/top/top.js # top.
     # The following tests fail because mongos behaves differently from mongod when testing certain
@@ -36,8 +34,6 @@ selector:
     - jstests/core/**/operation_latency_histogram.js # Stats are counted differently on mongos, SERVER-24880.
     # override library is not able to intercept createIndex commands executed inside benchRun
     - jstests/core/**/bench_test1.js
-    # TODO SERVER-91073: Validate command does not check if a received shard version is stale before proceeding.
-    - jstests/core/index/index_partial_write_ops.js
     # moveCollection will drop indexes which will reset index statistics this test asserts on.
     - jstests/core/index/index_stats.js
     # moveCollection and the many deleteMany commands in this test block each other and can easily cause the test to time out.
@@ -48,9 +44,10 @@ selector:
     # This is caused by the pauseMigrationsDuringMultiUpdates cluster parameter and the random migrations failpoint both being enabled for this suite.
     # TODO SERVER-91722: re-enable this test in this suite or potentially in a noPassthrough suite.
     - jstests/core/index/geo/geo_update_btree.js
-    # TODO SERVER-98386: re-enable this test once stale routing information does not miss documents
-    # after re-creating timeseries collections.
-    - jstests/core/timeseries/query/timeseries_union_with.js
+    # TODO SERVER-88275: A moveCollection command changes the UUID of the targeted collection.
+    # Any query using an auto yielding policy will likely return a QueryPlanKilled error if a moveCollection commit happens during the query execution.
+    - jstests/core/timeseries/geo/timeseries_geonear_random_measurements.js
+    - jstests/core/timeseries/query/timeseries_homogeneous_top_bottom.js
 
   exclude_with_any_tags:
     - assumes_standalone_mongod
@@ -64,9 +61,9 @@ selector:
     # This suite performs balancing of unsharded collection in background
     # using moveCollection that changes collections UUID
     - assumes_stable_collection_uuid
-    # This suites execute random moveCollection in backgrounds that causes
-    # open cursor on the collection to be killed.
-    - requires_getmore
+    # implicitly_retry_on_migration_in_progress.js alters find/aggregate commands
+    # so that the whole result set is returned through a single batch
+    - assumes_no_implicit_cursor_exhaustion
 
 executor:
   archive:
@@ -96,11 +93,7 @@ executor:
       set_parameters:
         enableTestCommands: 1
         reshardingMinimumOperationDurationMillis: 0
-        # Increment the query yield period as a best effort to avoid getting a QueryPlanKilled error
-        # when a query and a moveCollection run concurrently (more info on SERVER-88275)
-        # TODO (SERVER-88275) Remove both parameters once this bug is being addressed
-        internalQueryExecYieldPeriodMS: 6000
-        internalQueryExecYieldIterations: 1000000
+        useBatchedDeletesForRangeDeletion: true
     num_rs_nodes_per_shard: 1
     num_shards: 2
     enable_balancer: true

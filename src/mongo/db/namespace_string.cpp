@@ -29,17 +29,7 @@
 
 #include "mongo/db/namespace_string.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
-#include "mongo/base/parse_number.h"
-#include "mongo/base/status.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/bson/util/builder.h"
-#include "mongo/bson/util/builder_fwd.h"
-#include "mongo/db/server_options.h"
-// IWYU pragma: no_include "mongo/db/namespace_string_reserved.def.h"
-#include "mongo/util/duration.h"
+#include <boost/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -62,7 +52,6 @@ static const absl::flat_hash_set<NamespaceString> globallyUniqueConfigDbCollecti
     NamespaceString::kConfigsvrChunksNamespace,
     NamespaceString::kConfigDatabasesNamespace,
     NamespaceString::kConfigsvrShardsNamespace,
-    NamespaceString::kConfigsvrIndexCatalogNamespace,
     NamespaceString::kConfigsvrPlacementHistoryNamespace,
     NamespaceString::kConfigChangelogNamespace,
     NamespaceString::kConfigsvrTagsNamespace,
@@ -108,6 +97,8 @@ bool NamespaceString::isLegalClientSystemNS() const {
             return true;
         if (collectionName == kConfigsvrCoordinatorsNamespace.coll())
             return true;
+        if (collectionName == kBlockFCVChangesNamespace.coll())
+            return true;
     } else if (isLocalDB()) {
         if (collectionName == kSystemReplSetNamespace.coll())
             return true;
@@ -131,10 +122,6 @@ bool NamespaceString::isLegalClientSystemNS() const {
         return true;
     }
     if (isChangeStreamPreImagesCollection()) {
-        return true;
-    }
-
-    if (isChangeCollection()) {
         return true;
     }
 
@@ -213,17 +200,6 @@ NamespaceString NamespaceString::makeCollectionlessAggregateNSS(const DatabaseNa
     return nss;
 }
 
-NamespaceString NamespaceString::makeChangeCollectionNSS(
-    const boost::optional<TenantId>& tenantId) {
-    return NamespaceString{tenantId, DatabaseName::kConfig.db(omitTenant), kChangeCollectionName};
-}
-
-NamespaceString NamespaceString::makePreImageCollectionNSS(
-    const boost::optional<TenantId>& tenantId) {
-    return NamespaceString{
-        tenantId, DatabaseName::kConfig.db(omitTenant), kPreImagesCollectionName};
-}
-
 NamespaceString NamespaceString::makeReshardingLocalOplogBufferNSS(
     const UUID& existingUUID, const std::string& donorShardId) {
     return NamespaceString(DatabaseName::kConfig,
@@ -254,13 +230,9 @@ NamespaceString NamespaceString::makeCommandNamespace(const DatabaseName& dbName
     return NamespaceString(dbName, "$cmd");
 }
 
-NamespaceString NamespaceString::makeDummyNamespace(const boost::optional<TenantId>& tenantId) {
-    return NamespaceString(tenantId, DatabaseName::kConfig.db(omitTenant), "dummy.namespace");
-}
-
 std::string NamespaceString::getSisterNS(StringData local) const {
     MONGO_verify(local.size() && local[0] != '.');
-    return db_deprecated().toString() + "." + local.toString();
+    return std::string{db_deprecated()} + "." + std::string{local};
 }
 
 void NamespaceString::serializeCollectionName(BSONObjBuilder* builder, StringData fieldName) const {
@@ -310,32 +282,30 @@ bool NamespaceString::isShardLocalNamespace() const {
 }
 
 bool NamespaceString::isConfigDotCacheDotChunks() const {
-    return db_deprecated() == "config" && coll().startsWith("cache.chunks.");
+    return db_deprecated() == "config" && coll().starts_with("cache.chunks.");
 }
 
 bool NamespaceString::isReshardingLocalOplogBufferCollection() const {
-    return db_deprecated() == "config" && coll().startsWith(kReshardingLocalOplogBufferPrefix);
+    return db_deprecated() == "config" && coll().starts_with(kReshardingLocalOplogBufferPrefix);
 }
 
 bool NamespaceString::isReshardingConflictStashCollection() const {
-    return db_deprecated() == "config" && coll().startsWith(kReshardingConflictStashPrefix);
+    return db_deprecated() == "config" && coll().starts_with(kReshardingConflictStashPrefix);
 }
 
 bool NamespaceString::isTemporaryReshardingCollection() const {
-    return coll().startsWith(kTemporaryTimeseriesReshardingCollectionPrefix) ||
-        coll().startsWith(kTemporaryReshardingCollectionPrefix);
+    return coll().starts_with(kTemporaryTimeseriesReshardingCollectionPrefix) ||
+        coll().starts_with(kTemporaryReshardingCollectionPrefix);
 }
 
+// TODO SERVER-101784: Remove this once 9.0 is LTS and viewful time-series collections no longer
+// exist.
 bool NamespaceString::isTimeseriesBucketsCollection() const {
-    return coll().startsWith(kTimeseriesBucketsCollectionPrefix);
+    return coll().starts_with(kTimeseriesBucketsCollectionPrefix);
 }
 
 bool NamespaceString::isChangeStreamPreImagesCollection() const {
-    return isConfigDB() && coll() == kPreImagesCollectionName;
-}
-
-bool NamespaceString::isChangeCollection() const {
-    return isConfigDB() && coll() == kChangeCollectionName;
+    return ns() == kChangeStreamPreImagesNamespace.ns();
 }
 
 bool NamespaceString::isConfigImagesCollection() const {
@@ -347,33 +317,33 @@ bool NamespaceString::isConfigTransactionsCollection() const {
 }
 
 bool NamespaceString::isFLE2StateCollection() const {
-    return coll().startsWith(fle2Prefix) &&
-        (coll().endsWith(fle2EscSuffix) || coll().endsWith(fle2EcocSuffix) ||
-         coll().endsWith(fle2EcocCompactSuffix));
+    return coll().starts_with(fle2Prefix) &&
+        (coll().ends_with(fle2EscSuffix) || coll().ends_with(fle2EcocSuffix) ||
+         coll().ends_with(fle2EcocCompactSuffix));
 }
 
 bool NamespaceString::isFLE2StateCollection(StringData coll) {
-    return coll.startsWith(fle2Prefix) &&
-        (coll.endsWith(fle2EscSuffix) || coll.endsWith(fle2EcocSuffix));
-}
-
-bool NamespaceString::isOplogOrChangeCollection() const {
-    return isOplog() || isChangeCollection();
+    return coll.starts_with(fle2Prefix) &&
+        (coll.ends_with(fle2EscSuffix) || coll.ends_with(fle2EcocSuffix));
 }
 
 bool NamespaceString::isSystemStatsCollection() const {
-    return coll().startsWith(kStatisticsCollectionPrefix);
+    return coll().starts_with(kStatisticsCollectionPrefix);
 }
 
 bool NamespaceString::isOutTmpBucketsCollection() const {
     return isTimeseriesBucketsCollection() &&
-        getTimeseriesViewNamespace().coll().startsWith(kOutTmpCollectionPrefix);
+        getTimeseriesViewNamespace().coll().starts_with(kOutTmpCollectionPrefix);
 }
 
+// TODO SERVER-101784: Remove this once 9.0 is LTS and viewful time-series collections no longer
+// exist.
 NamespaceString NamespaceString::makeTimeseriesBucketsNamespace() const {
-    return {dbName(), kTimeseriesBucketsCollectionPrefix.toString() + coll()};
+    return {dbName(), std::string{kTimeseriesBucketsCollectionPrefix} + coll()};
 }
 
+// TODO SERVER-101784: Remove this once 9.0 is LTS and viewful time-series collections no longer
+// exist.
 NamespaceString NamespaceString::getTimeseriesViewNamespace() const {
     invariant(isTimeseriesBucketsCollection(), ns());
     return {dbName(), coll().substr(kTimeseriesBucketsCollectionPrefix.size())};
@@ -381,8 +351,7 @@ NamespaceString NamespaceString::getTimeseriesViewNamespace() const {
 
 bool NamespaceString::isImplicitlyReplicated() const {
     if (db_deprecated() == DatabaseName::kConfig.db(omitTenant)) {
-        if (isChangeStreamPreImagesCollection() || isConfigImagesCollection() ||
-            isChangeCollection()) {
+        if (isChangeStreamPreImagesCollection() || isConfigImagesCollection()) {
             // Implicitly replicated namespaces are replicated, although they only replicate a
             // subset of writes.
             invariant(isReplicated());

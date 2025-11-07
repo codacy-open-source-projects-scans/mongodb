@@ -5,29 +5,27 @@ import {profilerHasAtLeastOneMatchingEntryOrThrow} from "jstests/libs/profiler.j
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 function prepareProfilerOnShards(st, dbName) {
-    st._rs.forEach(rs => {
+    st._rs.forEach((rs) => {
         const shardDB = rs.test.getPrimary().getDB(dbName);
         shardDB.system.profile.drop();
         assert.commandWorked(shardDB.setProfilingLevel(2));
     });
 }
 
-function verifyProfilerListIndexesEntry(
-    {profileDB, collName, expectShardVersion, expectDbVersion}) {
+function verifyProfilerListIndexesEntry({profileDB, collName, expectShardVersion, expectDbVersion}) {
     profilerHasAtLeastOneMatchingEntryOrThrow({
         profileDB: profileDB,
         filter: {
             "command.listIndexes": collName,
             "command.shardVersion": {$exists: expectShardVersion},
-            "command.databaseVersion": {$exists: expectDbVersion}
-        }
+            "command.databaseVersion": {$exists: expectDbVersion},
+        },
     });
 }
 
 // Creates the source collection and target collection as unsharded collections on shard0.
 function setUpUnshardedSourceAndTargetCollections(st, dbName, sourceCollName, targetCollName) {
-    assert.commandWorked(
-        st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+    assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
     assert.commandWorked(st.s.getDB(dbName).createCollection(sourceCollName));
     assert.commandWorked(st.s.getDB(dbName).createCollection(targetCollName));
 
@@ -38,54 +36,57 @@ function setUpUnshardedSourceAndTargetCollections(st, dbName, sourceCollName, ta
 // Creates the source collection as an unsharded collection on shard0 and the target collection as a
 // sharded collection with one chunk on shard0.
 function setUpUnshardedSourceShardedTargetCollections(st, dbName, sourceCollName, targetCollName) {
-    assert.commandWorked(
-        st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+    assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
 
     assert.commandWorked(st.s.getDB(dbName)[sourceCollName].insert({a: 10, b: 11}));
 
     const targetColl = st.s.getDB(dbName)[targetCollName];
-    assert.commandWorked(
-        st.s.adminCommand({shardCollection: targetColl.getFullName(), key: {a: 1}}));
+    assert.commandWorked(st.s.adminCommand({shardCollection: targetColl.getFullName(), key: {a: 1}}));
     assert.commandWorked(targetColl.insert({a: 10, b: 12}));
 }
 
 function expectMergeToSucceed(dbName, sourceCollName, targetCollName, onFields) {
-    assert.commandWorked(st.s.getDB(dbName).runCommand({
-        aggregate: sourceCollName,
-        pipeline: [{
-            $merge: {
-                into: {db: dbName, coll: targetCollName},
-                whenMatched: "replace",
-                whenNotMatched: "insert",
-                on: Object.keys(onFields)
-            }
-        }],
-        cursor: {}
-    }));
+    assert.commandWorked(
+        st.s.getDB(dbName).runCommand({
+            aggregate: sourceCollName,
+            pipeline: [
+                {
+                    $merge: {
+                        into: {db: dbName, coll: targetCollName},
+                        whenMatched: "replace",
+                        whenNotMatched: "insert",
+                        on: Object.keys(onFields),
+                    },
+                },
+            ],
+            cursor: {},
+        }),
+    );
 }
 
 function expectMergeToFailBecauseOfMissingIndex(dbName, sourceCollName, targetCollName, onFields) {
-    assert.commandFailedWithCode(st.s.getDB(dbName).runCommand({
-        aggregate: sourceCollName,
-        pipeline: [{
-            $merge: {
-                into: {db: dbName, coll: targetCollName},
-                whenMatched: "replace",
-                whenNotMatched: "insert",
-                on: Object.keys(onFields)
-            }
-        }],
-        cursor: {}
-    }),
-                                 51190);
+    assert.commandFailedWithCode(
+        st.s.getDB(dbName).runCommand({
+            aggregate: sourceCollName,
+            pipeline: [
+                {
+                    $merge: {
+                        into: {db: dbName, coll: targetCollName},
+                        whenMatched: "replace",
+                        whenNotMatched: "insert",
+                        on: Object.keys(onFields),
+                    },
+                },
+            ],
+            cursor: {},
+        }),
+        51190,
+    );
 }
 
 const st = new ShardingTest({shards: 2, rs: {nodes: 1}, mongos: 2});
 const sourceCollName = "sourceFoo";
 const targetCollName = "targetFoo";
-
-const isTrackUnshardedUponCreationEnabled = FeatureFlagUtil.isPresentAndEnabled(
-    st.shard0.getDB('admin'), "TrackUnshardedCollectionsUponCreation");
 
 //
 // Verify database versions are used to detect when the primary shard changes for an unsharded
@@ -93,10 +94,6 @@ const isTrackUnshardedUponCreationEnabled = FeatureFlagUtil.isPresentAndEnabled(
 //
 
 (() => {
-    // Database versioning tests only make sense when all collections are not tracked.
-    if (isTrackUnshardedUponCreationEnabled) {
-        return;
-    }
     const dbName = "testMovedPrimarySuccess";
     jsTestLog("Running test on database: " + dbName);
 
@@ -109,8 +106,7 @@ const isTrackUnshardedUponCreationEnabled = FeatureFlagUtil.isPresentAndEnabled(
     const otherRouter = st.s1;
     assert.commandWorked(otherRouter.adminCommand({movePrimary: dbName, to: st.shard1.shardName}));
 
-    assert.commandWorked(
-        otherRouter.getDB(dbName)[targetCollName].createIndex({a: 1, b: 1}, {unique: true}));
+    assert.commandWorked(otherRouter.getDB(dbName)[targetCollName].createIndex({a: 1, b: 1}, {unique: true}));
 
     // Run $merge and expect it to succeed because the stale router refreshes and is able to find
     // the correct indexes. Enable the profiler to verify shard/db versions later.
@@ -123,23 +119,18 @@ const isTrackUnshardedUponCreationEnabled = FeatureFlagUtil.isPresentAndEnabled(
         profileDB: st.rs1.getPrimary().getDB(dbName),
         collName: targetCollName,
         expectShardVersion: true,
-        expectDbVersion: true
+        expectDbVersion: true,
     });
 })();
 
 (() => {
-    // Database versioning tests only make sense when all collections are not tracked.
-    if (isTrackUnshardedUponCreationEnabled) {
-        return;
-    }
     const dbName = "testMovedPrimaryFailure";
     jsTestLog("Running test on database: " + dbName);
 
     setUpUnshardedSourceAndTargetCollections(st, dbName, sourceCollName, targetCollName);
 
     // Create the index necessary for the merge below.
-    assert.commandWorked(
-        st.s.getDB(dbName)[targetCollName].createIndex({a: 1, b: 1}, {unique: true}));
+    assert.commandWorked(st.s.getDB(dbName)[targetCollName].createIndex({a: 1, b: 1}, {unique: true}));
 
     // Move the primary from shard0 to shard1 and drop the index required for the merge only on the
     // new primary. Note that the collection will be dropped from the old primary when the
@@ -162,7 +153,7 @@ const isTrackUnshardedUponCreationEnabled = FeatureFlagUtil.isPresentAndEnabled(
         profileDB: st.rs1.getPrimary().getDB(dbName),
         collName: targetCollName,
         expectShardVersion: true,
-        expectDbVersion: true
+        expectDbVersion: true,
     });
 })();
 
@@ -182,8 +173,9 @@ const isTrackUnshardedUponCreationEnabled = FeatureFlagUtil.isPresentAndEnabled(
     // will only exist on shard1.
     const otherRouter = st.s1;
     const targetColl = otherRouter.getDB(dbName)[targetCollName];
-    assert.commandWorked(otherRouter.adminCommand(
-        {moveChunk: targetColl.getFullName(), find: {a: 0}, to: st.shard1.shardName}));
+    assert.commandWorked(
+        otherRouter.adminCommand({moveChunk: targetColl.getFullName(), find: {a: 0}, to: st.shard1.shardName}),
+    );
     assert.commandWorked(targetColl.createIndex({a: 1, b: 1}, {unique: true}));
 
     // Run $merge and expect it to succeed because the stale router refreshes and is able to find
@@ -197,7 +189,7 @@ const isTrackUnshardedUponCreationEnabled = FeatureFlagUtil.isPresentAndEnabled(
         profileDB: st.rs1.getPrimary().getDB(dbName),
         collName: targetCollName,
         expectShardVersion: true,
-        expectDbVersion: false
+        expectDbVersion: false,
     });
 })();
 
@@ -208,16 +200,16 @@ const isTrackUnshardedUponCreationEnabled = FeatureFlagUtil.isPresentAndEnabled(
     setUpUnshardedSourceShardedTargetCollections(st, dbName, sourceCollName, targetCollName);
 
     // Create the index necessary for the merge below.
-    assert.commandWorked(
-        st.s.getDB(dbName)[targetCollName].createIndex({a: 1, b: 1}, {unique: true}));
+    assert.commandWorked(st.s.getDB(dbName)[targetCollName].createIndex({a: 1, b: 1}, {unique: true}));
 
     // Move the only chunk for the test collection from shard0 to shard1 and drop the index required
     // for the merge. dropIndexes will only target shards that own chunks, so the index will still
     // exist on shard0.
     const otherRouter = st.s1;
     const targetColl = otherRouter.getDB(dbName)[targetCollName];
-    assert.commandWorked(otherRouter.adminCommand(
-        {moveChunk: targetColl.getFullName(), find: {a: 0}, to: st.shard1.shardName}));
+    assert.commandWorked(
+        otherRouter.adminCommand({moveChunk: targetColl.getFullName(), find: {a: 0}, to: st.shard1.shardName}),
+    );
     assert.commandWorked(targetColl.dropIndex("a_1_b_1"));
 
     // Run $merge and expect it to fail because the router refreshes and discovers the required
@@ -231,7 +223,7 @@ const isTrackUnshardedUponCreationEnabled = FeatureFlagUtil.isPresentAndEnabled(
         profileDB: st.rs1.getPrimary().getDB(dbName),
         collName: targetCollName,
         expectShardVersion: true,
-        expectDbVersion: false
+        expectDbVersion: false,
     });
 })();
 
@@ -253,11 +245,11 @@ const isTrackUnshardedUponCreationEnabled = FeatureFlagUtil.isPresentAndEnabled(
 
     const targetColl = otherRouter.getDB(dbName)[targetCollName];
     assert.commandWorked(targetColl.createIndex({a: 1}));
-    assert.commandWorked(
-        st.s1.adminCommand({shardCollection: targetColl.getFullName(), key: {a: 1}}));
+    assert.commandWorked(st.s1.adminCommand({shardCollection: targetColl.getFullName(), key: {a: 1}}));
 
-    assert.commandWorked(otherRouter.adminCommand(
-        {moveChunk: targetColl.getFullName(), find: {a: 0}, to: st.shard1.shardName}));
+    assert.commandWorked(
+        otherRouter.adminCommand({moveChunk: targetColl.getFullName(), find: {a: 0}, to: st.shard1.shardName}),
+    );
     assert.commandWorked(targetColl.createIndex({a: 1, b: 1}, {unique: true}));
 
     // Run $merge and expect it to succeed because the stale router refreshes and is able to find
@@ -271,23 +263,18 @@ const isTrackUnshardedUponCreationEnabled = FeatureFlagUtil.isPresentAndEnabled(
         profileDB: st.rs1.getPrimary().getDB(dbName),
         collName: targetCollName,
         expectShardVersion: true,
-        expectDbVersion: false
+        expectDbVersion: false,
     });
 })();
 
 (() => {
-    // Database versioning tests only make sense when all collections are not tracked.
-    if (isTrackUnshardedUponCreationEnabled) {
-        return;
-    }
     const dbName = "testBecomeUnshardedFailure";
     jsTestLog("Running test on database: " + dbName);
 
     setUpUnshardedSourceAndTargetCollections(st, dbName, sourceCollName, targetCollName);
 
     // Create the index necessary for the merge below.
-    assert.commandWorked(
-        st.s.getDB(dbName)[targetCollName].createIndex({a: 1, b: 1}, {unique: true}));
+    assert.commandWorked(st.s.getDB(dbName)[targetCollName].createIndex({a: 1, b: 1}, {unique: true}));
 
     // Drop and recreate the sharded target collection as an unsharded collection with its primary
     // on shard1. Dropping the collection will also drop the index required for the merge.
@@ -309,7 +296,7 @@ const isTrackUnshardedUponCreationEnabled = FeatureFlagUtil.isPresentAndEnabled(
         profileDB: st.rs1.getPrimary().getDB(dbName),
         collName: targetCollName,
         expectShardVersion: true,
-        expectDbVersion: true
+        expectDbVersion: true,
     });
 })();
 

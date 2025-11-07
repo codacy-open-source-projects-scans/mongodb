@@ -27,9 +27,10 @@
  *    it in the license file.
  */
 
-#pragma once
+#include "mongo/util/modules.h"
 
-#include <boost/optional/optional.hpp>
+
+#pragma once
 
 #include "mongo/db/client.h"
 #include "mongo/db/s/server_transaction_coordinators_metrics.h"
@@ -38,6 +39,8 @@
 #include "mongo/db/s/transaction_coordinator_document_gen.h"
 #include "mongo/util/tick_source.h"
 #include "mongo/util/time_support.h"
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 

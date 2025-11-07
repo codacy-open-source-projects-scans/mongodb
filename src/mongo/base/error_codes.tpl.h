@@ -29,14 +29,16 @@
 
 #pragma once
 
-#include <cstdint>
-#include <iosfwd>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/platform/compiler.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <cstdint>
+#include <iosfwd>
+#include <span>
+#include <string>
+
+namespace MONGO_MOD_PUBLIC mongo {
 
 class Status;
 class DBException;
@@ -44,12 +46,13 @@ class DBException;
 // ErrorExtraInfo subclasses:
 //#for $ec in $codes:
 //#if $ec.extra
-//#if $ec.extra_ns
-namespace $ec.extra_ns {
-    //#end if
-    class $ec.extra_class;
-    //#if $ec.extra_ns
-}  // namespace extra_ns
+//#set $extra_ns = $ec.extra_ns
+//#if $extra_ns
+namespace $extra_ns {
+//#end if
+class $ec.extra_class;
+//#if $extra_ns
+}  // namespace $extra_ns
 //#end if
 //#end if
 //#end for
@@ -155,7 +158,8 @@ template <>
 constexpr inline bool isNamedCode<ErrorCodes::$ec.name> = true;
 //#end for
 
-MONGO_COMPILER_NORETURN void throwExceptionForStatus(const Status& status);
+MONGO_MOD_NEEDS_REPLACEMENT MONGO_COMPILER_NORETURN void throwExceptionForStatus(
+    const Status& status);
 
 //
 // ErrorCategoriesFor
@@ -208,4 +212,6 @@ using ErrorExtraInfoFor = typename ErrorExtraInfoForImpl<code>::type;
 
 }  // namespace error_details
 
-}  // namespace mongo
+MONGO_MOD_PUBLIC std::span<const ErrorCodes::Error> allErrorCodes_forTest();
+
+}  // namespace MONGO_MOD_PUBLIC mongo

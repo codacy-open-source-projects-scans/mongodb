@@ -27,27 +27,13 @@
  *    it in the license file.
  */
 
-#include <absl/container/inlined_vector.h>
-#include <absl/container/node_hash_map.h>
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <s2cellid.h>
-#include <set>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/stage_builder/sbe/gen_filter.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/docval_to_sbeval.h"
 #include "mongo/db/exec/js_function.h"
-#include "mongo/db/exec/sbe/abt/abt_lower_defs.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/match_path.h"
 #include "mongo/db/exec/sbe/util/pcre.h"
@@ -85,16 +71,25 @@
 #include "mongo/db/matcher/schema/expression_internal_schema_unique_items.h"
 #include "mongo/db/matcher/schema/expression_internal_schema_xor.h"
 #include "mongo/db/query/bson_typemask.h"
-#include "mongo/db/query/optimizer/syntax/expr.h"
-#include "mongo/db/query/stage_builder/sbe/abt_holder_impl.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
-#include "mongo/db/query/stage_builder/sbe/gen_abt_helpers.h"
 #include "mongo/db/query/stage_builder/sbe/gen_expression.h"
-#include "mongo/db/query/stage_builder/sbe/gen_filter.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr_helpers.h"
 #include "mongo/db/query/tree_walker.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <set>
+
+#include <s2cellid.h>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::stage_builder {
 namespace {
@@ -336,8 +331,8 @@ SbExpr generateTraverseF(SbExpr inputExpr,
             b.makeFillEmptyFalse(
                 b.makeFunction("typeMatch",
                                fieldExpr.clone(),
-                               b.makeInt32Constant(getBSONTypeMask(BSONType::Array) |
-                                                   getBSONTypeMask(BSONType::Object)))),
+                               b.makeInt32Constant(getBSONTypeMask(BSONType::array) |
+                                                   getBSONTypeMask(BSONType::object)))),
             std::move(traverseFExpr),
             !inputExpr.isNull()
                 ? b.makeNot(b.makeFillEmptyFalse(b.makeFunction("isArray", inputExpr.clone())))
@@ -469,7 +464,7 @@ void generateArraySize(MatchExpressionVisitorContext* context,
         auto sizeExpr =
             inputParamSlotId ? SbExpr{SbSlot{*inputParamSlotId}} : b.makeInt32Constant(size);
         return b.makeFillEmptyFalse(
-            b.makeBinaryOp(sbe::EPrimBinary::eq,
+            b.makeBinaryOp(abt::Operations::Eq,
                            b.makeFunction("getArraySize", std::move(inputExpr)),
                            std::move(sizeExpr)));
     };
@@ -484,7 +479,7 @@ void generateArraySize(MatchExpressionVisitorContext* context,
  */
 void generateComparison(MatchExpressionVisitorContext* context,
                         const ComparisonMatchExpression* expr,
-                        sbe::EPrimBinary::Op binaryOp) {
+                        abt::Operations binaryOp) {
     auto makePredicate = [context, expr, binaryOp](SbExpr inputExpr) {
         return generateComparisonExpr(context->state, expr, binaryOp, std::move(inputExpr));
     };
@@ -501,15 +496,15 @@ void generateComparison(MatchExpressionVisitorContext* context,
     // potential bug where traversing the path to the empty array ([]) would prevent _any_
     // comparison, meaning a comparison like {$gt: MinKey} would return false.
     const auto& rhs = expr->getData();
-    const auto checkWholeArray = rhs.type() == BSONType::Array || rhs.type() == BSONType::MinKey ||
-        rhs.type() == BSONType::MaxKey;
+    const auto checkWholeArray = rhs.type() == BSONType::array || rhs.type() == BSONType::minKey ||
+        rhs.type() == BSONType::maxKey;
     const auto traversalMode = checkWholeArray ? LeafTraversalMode::kArrayAndItsElements
                                                : LeafTraversalMode::kArrayElementsOnly;
 
     bool matchesNothing = false;
-    if (rhs.type() == BSONType::jstNULL &&
-        (binaryOp == sbe::EPrimBinary::eq || binaryOp == sbe::EPrimBinary::lessEq ||
-         binaryOp == sbe::EPrimBinary::greaterEq)) {
+    if (rhs.type() == BSONType::null &&
+        (binaryOp == abt::Operations::Eq || binaryOp == abt::Operations::Lte ||
+         binaryOp == abt::Operations::Gte)) {
         matchesNothing = true;
     }
 
@@ -533,14 +528,14 @@ void generateBitTest(MatchExpressionVisitorContext* context,
 }
 
 // Build specified logical expression with branches stored on stack.
-void buildLogicalExpression(sbe::EPrimBinary::Op op,
+void buildLogicalExpression(abt::Operations op,
                             size_t numChildren,
                             MatchExpressionVisitorContext* context) {
     SbExprBuilder b(context->state);
 
     if (numChildren == 0) {
         // If an $and or $or expression does not have any children, a constant is returned.
-        generateAlwaysBoolean(context, op == sbe::EPrimBinary::logicAnd);
+        generateAlwaysBoolean(context, op == abt::Operations::And);
         return;
     } else if (numChildren == 1) {
         // For $and or $or expressions with 1 child, do nothing and return. The post-visitor for
@@ -551,14 +546,15 @@ void buildLogicalExpression(sbe::EPrimBinary::Op op,
     auto& frame = context->topFrame();
 
     // Move the children's outputs off of the matchStack into a vector in preparation for
-    // calling makeBalancedBooleanOpTree().
+    // calling makeBooleanOpTree().
     std::vector<SbExpr> exprs;
+    exprs.reserve(numChildren);
     for (size_t i = 0; i < numChildren; ++i) {
         exprs.emplace_back(frame.popExpr());
     }
     std::reverse(exprs.begin(), exprs.end());
 
-    frame.pushExpr(b.makeBalancedBooleanOpTree(op, std::move(exprs)));
+    frame.pushExpr(b.makeBooleanOpTree(op, std::move(exprs)));
 }
 
 /**
@@ -690,7 +686,8 @@ public:
     void visit(const NorMatchExpression* expr) final {}
 
     void visit(const NotMatchExpression* expr) final {
-        invariant(expr->numChildren() == 1);
+        tassert(
+            11051804, "Expecting Match expression to have 1 child node", expr->numChildren() == 1);
     }
 
     void visit(const OrMatchExpression* expr) final {}
@@ -775,7 +772,7 @@ public:
     }
 
     void visit(const AndMatchExpression* expr) final {
-        buildLogicalExpression(sbe::EPrimBinary::logicAnd, expr->numChildren(), _context);
+        buildLogicalExpression(abt::Operations::And, expr->numChildren(), _context);
     }
 
     void visit(const BitsAllClearMatchExpression* expr) final {
@@ -804,25 +801,26 @@ public:
         auto lambdaFrameId = *_context->topFrame().frameId;
         auto lambdaParam = SbLocalVar{lambdaFrameId, 0};
 
-        auto lambdaBodyExpr =
-            b.makeBinaryOp(sbe::EPrimBinary::logicAnd,
-                           b.makeFunction("typeMatch",
-                                          lambdaParam,
-                                          b.makeInt32Constant(getBSONTypeMask(BSONType::Array) |
-                                                              getBSONTypeMask(BSONType::Object))),
-                           _context->topFrame().popExpr());
+        auto lambdaBodyExpr = b.makeBooleanOpTree(
+            abt::Operations::And,
+            b.makeFunction("typeMatch",
+                           lambdaParam,
+                           b.makeInt32Constant(getBSONTypeMask(BSONType::array) |
+                                               getBSONTypeMask(BSONType::object))),
+            _context->topFrame().popExpr());
 
         _context->popFrame();
 
         auto lambdaExpr = b.makeLocalLambda(lambdaFrameId, std::move(lambdaBodyExpr));
 
         auto makePredicate = [&](SbExpr inputExpr) {
-            return b.makeFillEmptyFalse(b.makeBinaryOp(sbe::EPrimBinary::logicAnd,
-                                                       b.makeFunction("isArray", inputExpr.clone()),
-                                                       b.makeFunction("traverseF",
-                                                                      inputExpr.clone(),
-                                                                      std::move(lambdaExpr),
-                                                                      b.makeBoolConstant(false))));
+            return b.makeFillEmptyFalse(
+                b.makeBooleanOpTree(abt::Operations::And,
+                                    b.makeFunction("isArray", inputExpr.clone()),
+                                    b.makeFunction("traverseF",
+                                                   inputExpr.clone(),
+                                                   std::move(lambdaExpr),
+                                                   b.makeBoolConstant(false))));
         };
 
         const auto traversalMode = LeafTraversalMode::kDoNotTraverseLeaf;
@@ -839,8 +837,9 @@ public:
         auto lambdaFrameId = *_context->topFrame().frameId;
 
         // Move the children's outputs off of the expr stack into a vector in preparation for
-        // calling makeBalancedBooleanOpTree().
+        // calling makeBooleanOpTree().
         std::vector<SbExpr> exprs;
+        exprs.reserve(numChildren);
         for (size_t i = 0; i < numChildren; ++i) {
             exprs.emplace_back(_context->topFrame().popExpr());
         }
@@ -848,18 +847,18 @@ public:
 
         _context->popFrame();
 
-        auto lambdaBodyExpr =
-            b.makeBalancedBooleanOpTree(sbe::EPrimBinary::logicAnd, std::move(exprs));
+        auto lambdaBodyExpr = b.makeBooleanOpTree(abt::Operations::And, std::move(exprs));
 
         auto lambdaExpr = b.makeLocalLambda(lambdaFrameId, std::move(lambdaBodyExpr));
 
         auto makePredicate = [&](SbExpr inputExpr) {
-            return b.makeFillEmptyFalse(b.makeBinaryOp(sbe::EPrimBinary::logicAnd,
-                                                       b.makeFunction("isArray", inputExpr.clone()),
-                                                       b.makeFunction("traverseF",
-                                                                      inputExpr.clone(),
-                                                                      std::move(lambdaExpr),
-                                                                      b.makeBoolConstant(false))));
+            return b.makeFillEmptyFalse(
+                b.makeBooleanOpTree(abt::Operations::And,
+                                    b.makeFunction("isArray", inputExpr.clone()),
+                                    b.makeFunction("traverseF",
+                                                   inputExpr.clone(),
+                                                   std::move(lambdaExpr),
+                                                   b.makeBoolConstant(false))));
         };
 
         const auto traversalMode = LeafTraversalMode::kDoNotTraverseLeaf;
@@ -867,7 +866,7 @@ public:
     }
 
     void visit(const EqualityMatchExpression* expr) final {
-        generateComparison(_context, expr, sbe::EPrimBinary::eq);
+        generateComparison(_context, expr, abt::Operations::Eq);
     }
 
     void visit(const ExistsMatchExpression* expr) final {
@@ -896,11 +895,11 @@ public:
     }
 
     void visit(const GTEMatchExpression* expr) final {
-        generateComparison(_context, expr, sbe::EPrimBinary::greaterEq);
+        generateComparison(_context, expr, abt::Operations::Gte);
     }
 
     void visit(const GTMatchExpression* expr) final {
-        generateComparison(_context, expr, sbe::EPrimBinary::greater);
+        generateComparison(_context, expr, abt::Operations::Gt);
     }
 
     void visit(const GeoMatchExpression* expr) final {}
@@ -969,8 +968,8 @@ public:
         regexArrSetGuard.reset();
 
         auto makePredicate = [&, hasNull = hasNull](SbExpr inputExpr) {
-            auto resultExpr = b.makeBinaryOp(
-                sbe::EPrimBinary::logicOr,
+            auto resultExpr = b.makeBooleanOpTree(
+                abt::Operations::Or,
                 b.makeFillEmptyFalse(
                     b.makeFunction("isMember", inputExpr.clone(), std::move(regexSetConstant))),
                 b.makeFillEmptyFalse(b.makeFunction(
@@ -984,8 +983,8 @@ public:
                                          inputExpr.clone());
                 }
 
-                resultExpr = b.makeBinaryOp(
-                    sbe::EPrimBinary::logicOr,
+                resultExpr = b.makeBooleanOpTree(
+                    abt::Operations::Or,
                     b.makeFunction("isMember", std::move(inputExpr), std::move(equalitiesExpr)),
                     std::move(resultExpr));
             }
@@ -1035,12 +1034,12 @@ public:
             generateExpressionCompare(state, cmpOp, lhsVar.clone(), b.makeConstant(rhsTag, rhsVal));
 
         auto isArrayExpr =
-            b.makeBinaryOp(sbe::EPrimBinary::logicOr,
-                           b.makeFillEmptyFalse(b.makeFunction("isArray", lhsVar.clone())),
-                           std::move(translatedCmpExpr));
+            b.makeBooleanOpTree(abt::Operations::Or,
+                                b.makeFillEmptyFalse(b.makeFunction("isArray", lhsVar.clone())),
+                                std::move(translatedCmpExpr));
 
         // Now generate the actual field path expression for the LHS.
-        FieldPath fp("CURRENT." + expr->fieldRef()->dottedField().toString());
+        FieldPath fp("CURRENT." + std::string{expr->fieldRef()->dottedField()});
 
         auto translatedFieldPathExpr = generateExpressionFieldPath(
             _context->state, fp, boost::none, _context->rootSlot, *_context->slots);
@@ -1091,11 +1090,11 @@ public:
     void visit(const InternalSchemaXorMatchExpression* expr) final {}
 
     void visit(const LTEMatchExpression* expr) final {
-        generateComparison(_context, expr, sbe::EPrimBinary::lessEq);
+        generateComparison(_context, expr, abt::Operations::Lte);
     }
 
     void visit(const LTMatchExpression* expr) final {
-        generateComparison(_context, expr, sbe::EPrimBinary::less);
+        generateComparison(_context, expr, abt::Operations::Lt);
     }
 
     void visit(const ModMatchExpression* expr) final {
@@ -1115,7 +1114,7 @@ public:
 
         // $nor is implemented as a negation of $or. First step is to build $or expression from
         // stack.
-        buildLogicalExpression(sbe::EPrimBinary::logicOr, expr->numChildren(), _context);
+        buildLogicalExpression(abt::Operations::Or, expr->numChildren(), _context);
 
         // Second step is to negate the result of $or expression.
         // Here we discard the index value of the state even if it was set by expressions below NOR.
@@ -1137,7 +1136,7 @@ public:
     }
 
     void visit(const OrMatchExpression* expr) final {
-        buildLogicalExpression(sbe::EPrimBinary::logicOr, expr->numChildren(), _context);
+        buildLogicalExpression(abt::Operations::Or, expr->numChildren(), _context);
     }
 
     void visit(const RegexMatchExpression* expr) final {
@@ -1162,7 +1161,7 @@ public:
 
         // If there's an "inputParamId" in this expr meaning this expr got parameterized, we can
         // register a SlotId for it and use the slot directly. Note that we don't auto-parameterize
-        // if the type set contains 'BSONType::Array'.
+        // if the type set contains 'BSONType::array'.
         if (auto typeMaskParam = expr->getInputParamId()) {
             auto typeMaskSlot = SbSlot{_context->state.registerInputParamSlot(*typeMaskParam)};
             auto makePredicate = [&](SbExpr inputExpr) {
@@ -1175,7 +1174,7 @@ public:
             return;
         }
 
-        const auto traversalMode = expr->typeSet().hasType(BSONType::Array)
+        const auto traversalMode = expr->typeSet().hasType(BSONType::array)
             ? LeafTraversalMode::kDoNotTraverseLeaf
             : LeafTraversalMode::kArrayElementsOnly;
 
@@ -1205,7 +1204,7 @@ private:
  */
 class MatchExpressionInVisitor final : public MatchExpressionConstVisitor {
 public:
-    MatchExpressionInVisitor(MatchExpressionVisitorContext* context) : _context(context) {}
+    MatchExpressionInVisitor(MatchExpressionVisitorContext*) {}
 
     void visit(const AlwaysFalseMatchExpression* expr) final {}
     void visit(const AlwaysTrueMatchExpression* expr) final {}
@@ -1265,9 +1264,6 @@ public:
     void visit(const TypeMatchExpression* expr) final {}
     void visit(const WhereMatchExpression* expr) final {}
     void visit(const WhereNoOpMatchExpression* expr) final {}
-
-private:
-    MatchExpressionVisitorContext* _context;
 };
 }  // namespace
 
@@ -1333,7 +1329,7 @@ template <typename BuilderType, typename ExpressionType>
 ExpressionType generateComparisonExpr(BuilderType& b,
                                       sbe::value::TypeTags tag,
                                       sbe::value::Value val,
-                                      sbe::EPrimBinary::Op binaryOp,
+                                      abt::Operations binaryOp,
                                       ExpressionType inputExpr,
                                       ValueExpressionFn<ExpressionType> makeValExpr) {
     // Most commonly the comparison does not do any kind of type conversions (i.e. 12 > "10" does
@@ -1342,34 +1338,34 @@ ExpressionType generateComparisonExpr(BuilderType& b,
     // is one). We can compare any type to MinKey or MaxKey type and expect a true/false answer.
     if (tag == sbe::value::TypeTags::MinKey) {
         switch (binaryOp) {
-            case sbe::EPrimBinary::eq:
-            case sbe::EPrimBinary::neq:
+            case abt::Operations::Eq:
+            case abt::Operations::Neq:
                 break;
-            case sbe::EPrimBinary::greater:
+            case abt::Operations::Gt:
                 return b.makeNot(
                     b.makeFunction("isMinKey", b.makeFillEmptyNull(std::move(inputExpr))));
-            case sbe::EPrimBinary::greaterEq:
+            case abt::Operations::Gte:
                 return b.makeBoolConstant(true);
-            case sbe::EPrimBinary::less:
+            case abt::Operations::Lt:
                 return b.makeBoolConstant(false);
-            case sbe::EPrimBinary::lessEq:
+            case abt::Operations::Lte:
                 return b.makeFunction("isMinKey", b.makeFillEmptyNull(std::move(inputExpr)));
             default:
                 MONGO_UNREACHABLE_TASSERT(8217105);
         }
     } else if (tag == sbe::value::TypeTags::MaxKey) {
         switch (binaryOp) {
-            case sbe::EPrimBinary::eq:
-            case sbe::EPrimBinary::neq:
+            case abt::Operations::Eq:
+            case abt::Operations::Neq:
                 break;
-            case sbe::EPrimBinary::greater:
+            case abt::Operations::Gt:
                 return b.makeBoolConstant(false);
-            case sbe::EPrimBinary::greaterEq:
+            case abt::Operations::Gte:
                 return b.makeFunction("isMaxKey", b.makeFillEmptyNull(std::move(inputExpr)));
-            case sbe::EPrimBinary::less:
+            case abt::Operations::Lt:
                 return b.makeNot(
                     b.makeFunction("isMaxKey", b.makeFillEmptyNull(std::move(inputExpr))));
-            case sbe::EPrimBinary::lessEq:
+            case abt::Operations::Lte:
                 return b.makeBoolConstant(true);
             default:
                 MONGO_UNREACHABLE_TASSERT(8217101);
@@ -1386,19 +1382,19 @@ ExpressionType generateComparisonExpr(BuilderType& b,
     } else if (sbe::value::isNaN(tag, val)) {
         // Construct an expression to perform a NaN check.
         switch (binaryOp) {
-            case sbe::EPrimBinary::eq:
-            case sbe::EPrimBinary::greaterEq:
-            case sbe::EPrimBinary::lessEq:
+            case abt::Operations::Eq:
+            case abt::Operations::Gte:
+            case abt::Operations::Lte:
                 // If 'rhs' is NaN, then return whether the lhs is NaN.
                 return b.makeFillEmptyFalse(b.makeFunction("isNaN", std::move(inputExpr)));
-            case sbe::EPrimBinary::less:
-            case sbe::EPrimBinary::greater:
+            case abt::Operations::Lt:
+            case abt::Operations::Gt:
                 // Always return false for non-equality operators.
                 return b.makeBoolConstant(false);
             default:
                 tasserted(5449400,
-                          str::stream()
-                              << "Could not construct expression for comparison op " << binaryOp);
+                          str::stream() << "Could not construct expression for comparison op "
+                                        << abt::toStringData(binaryOp));
         }
     }
 
@@ -1409,7 +1405,7 @@ ExpressionType generateComparisonExpr(BuilderType& b,
 
 SbExpr generateComparisonExpr(StageBuilderState& state,
                               const ComparisonMatchExpression* expr,
-                              sbe::EPrimBinary::Op binaryOp,
+                              abt::Operations binaryOp,
                               SbExpr inputExpr) {
     SbExprBuilder b(state);
 
@@ -1543,7 +1539,7 @@ SbExpr generateModExpr(StageBuilderState& state, const ModMatchExpression* expr,
         }
     }();
     return b.makeFillEmptyFalse(b.makeBinaryOp(
-        sbe::EPrimBinary::eq,
+        abt::Operations::Eq,
         b.makeFunction("mod"_sd, std::move(truncatedArgument), std::move(divisorExpr)),
         std::move(remainderExpr)));
 }
@@ -1579,10 +1575,10 @@ SbExpr generateRegexExpr(StageBuilderState& state,
         }
     }();
 
-    auto resultExpr = b.makeBinaryOp(
-        sbe::EPrimBinary::logicOr,
+    auto resultExpr = b.makeBooleanOpTree(
+        abt::Operations::Or,
         b.makeFillEmptyFalse(
-            b.makeBinaryOp(sbe::EPrimBinary::eq, inputExpr.clone(), std::move(bsonRegexExpr))),
+            b.makeBinaryOp(abt::Operations::Eq, inputExpr.clone(), std::move(bsonRegexExpr))),
         b.makeFillEmptyFalse(
             b.makeFunction("regexMatch", std::move(compiledRegexExpr), inputExpr.clone())));
 

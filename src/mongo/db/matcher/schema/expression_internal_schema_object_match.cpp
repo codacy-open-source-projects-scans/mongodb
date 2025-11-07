@@ -27,16 +27,17 @@
  *    it in the license file.
  */
 
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/matcher/schema/expression_internal_schema_object_match.h"
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/matcher/path.h"
-#include "mongo/db/matcher/schema/expression_internal_schema_object_match.h"
+
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -52,14 +53,6 @@ InternalSchemaObjectMatchExpression::InternalSchemaObjectMatchExpression(
                           ElementPath::NonLeafArrayBehavior::kTraverse,
                           std::move(annotation)),
       _sub(std::move(expr)) {}
-
-bool InternalSchemaObjectMatchExpression::matchesSingleElement(const BSONElement& elem,
-                                                               MatchDetails* details) const {
-    if (elem.type() != BSONType::Object) {
-        return false;
-    }
-    return _sub->matchesBSON(elem.Obj());
-}
 
 void InternalSchemaObjectMatchExpression::debugString(StringBuilder& debug,
                                                       int indentationLevel) const {
@@ -91,16 +84,4 @@ std::unique_ptr<MatchExpression> InternalSchemaObjectMatchExpression::clone() co
     return std::move(clone);
 }
 
-MatchExpression::ExpressionOptimizerFunc InternalSchemaObjectMatchExpression::getOptimizer() const {
-    return [](std::unique_ptr<MatchExpression> expression) {
-        auto& objectMatchExpression =
-            static_cast<InternalSchemaObjectMatchExpression&>(*expression);
-        // The Boolean simplifier does not support schema expressions for we haven't figured out how
-        // to simplify them and whether we want them to be simplified or not.
-        objectMatchExpression._sub = MatchExpression::optimize(
-            std::move(objectMatchExpression._sub), /* enableSimplification */ false);
-
-        return expression;
-    };
-}
 }  // namespace mongo

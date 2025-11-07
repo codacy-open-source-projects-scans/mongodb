@@ -27,11 +27,10 @@
  *    it in the license file.
  */
 
-#include <benchmark/benchmark.h>
-
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/auth_op_observer.h"
-#include "mongo/db/catalog/collection_mock.h"
+#include "mongo/db/cluster_parameters/cluster_server_parameter_op_observer.h"
+#include "mongo/db/local_catalog/collection_mock.h"
 #include "mongo/db/op_observer/change_stream_pre_images_op_observer.h"
 #include "mongo/db/op_observer/fallback_op_observer.h"
 #include "mongo/db/op_observer/fcv_op_observer.h"
@@ -41,20 +40,21 @@
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/op_observer/operation_logger_impl.h"
 #include "mongo/db/op_observer/operation_logger_transaction_proxy.h"
-#include "mongo/db/op_observer/user_write_block_mode_op_observer.h"
 #include "mongo/db/repl/primary_only_service_op_observer.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
-#include "mongo/db/s/config_server_op_observer.h"
 #include "mongo/db/s/migration_chunk_cloner_source_op_observer.h"
 #include "mongo/db/s/query_analysis_op_observer_configsvr.h"
 #include "mongo/db/s/query_analysis_op_observer_rs.h"
 #include "mongo/db/s/query_analysis_op_observer_shardsvr.h"
 #include "mongo/db/s/resharding/resharding_op_observer.h"
-#include "mongo/db/s/shard_server_op_observer.h"
+#include "mongo/db/sharding_environment/config_server_op_observer.h"
+#include "mongo/db/sharding_environment/shard_server_op_observer.h"
 #include "mongo/db/timeseries/timeseries_op_observer.h"
-#include "mongo/idl/cluster_server_parameter_op_observer.h"
+#include "mongo/db/user_write_block/user_write_block_mode_op_observer.h"
 #include "mongo/logv2/log_domain_global.h"
 #include "mongo/platform/compiler.h"
+
+#include <benchmark/benchmark.h>
 
 namespace mongo {
 namespace {
@@ -81,8 +81,7 @@ ServiceContext* setupServiceContext() {
 
 void setUpObservers(ServiceContext* serviceContext,
                     OpObserverRegistry* opObserverRegistry,
-                    ClusterRole clusterRole,
-                    bool isServerless) {
+                    ClusterRole clusterRole) {
     if (clusterRole.has(ClusterRole::ShardServer)) {
         opObserverRegistry->addObserver(
             std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerTransactionProxy>(
@@ -137,15 +136,14 @@ void setUpObservers(ServiceContext* serviceContext,
 
 void BM_OnUpdate(benchmark::State& state, const char* nss) {
     CollectionMock coll(NamespaceString::createNamespaceString_forTest(nss));
-    CollectionPtr collptr(&coll);
-    CollectionUpdateArgs cuArgs(BSON("_id"
-                                     << "whatever"
-                                     << "stmtid"
-                                     << "oldstuff"));
-    cuArgs.update = BSON("_id"
-                         << "whatever"
-                         << "stmtid"
-                         << "whateverelse");
+    // TODO(SERVER-103400): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
+    CollectionPtr collptr = CollectionPtr::CollectionPtr_UNSAFE(&coll);
+    CollectionUpdateArgs cuArgs(BSON("_id" << "whatever"
+                                           << "stmtid"
+                                           << "oldstuff"));
+    cuArgs.update = BSON("_id" << "whatever"
+                               << "stmtid"
+                               << "whateverelse");
     OplogUpdateEntryArgs args(&cuArgs, collptr);
     OpObserverRegistry registry;
     auto* serviceContext = setupServiceContext();
@@ -158,7 +156,7 @@ void BM_OnUpdate(benchmark::State& state, const char* nss) {
     auto client = serviceContext->getService()->makeClient("BM_OnUpdate_Client");
     auto opCtx = client->makeOperationContext();
     repl::UnreplicatedWritesBlock uwb(opCtx.get());
-    setUpObservers(serviceContext, &registry, ClusterRole::None, false /* not serverless */);
+    setUpObservers(serviceContext, &registry, ClusterRole::None);
     for (auto _ : state) {
         registry.onUpdate(opCtx.get(), args);
     }
@@ -182,15 +180,12 @@ BENCHMARK(BM_OnUpdate_System)->MinTime(10.0);
 
 void BM_OnInserts(benchmark::State& state, const char* nss) {
     CollectionMock coll(NamespaceString::createNamespaceString_forTest(nss));
-    CollectionPtr collptr(&coll);
-    MONGO_COMPILER_DIAGNOSTIC_PUSH
-    MONGO_COMPILER_DIAGNOSTIC_IGNORED_TRANSITIONAL("-Wuninitialized")
+    // TODO(SERVER-103400): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
+    const auto collptr = CollectionPtr::CollectionPtr_UNSAFE(&coll);
     std::vector<InsertStatement> statements(1,
-                                            InsertStatement(BSON("_id"
-                                                                 << "whatever"
-                                                                 << "key"
-                                                                 << "value")));
-    MONGO_COMPILER_DIAGNOSTIC_POP
+                                            InsertStatement(BSON("_id" << "whatever"
+                                                                       << "key"
+                                                                       << "value")));
     OpObserverRegistry registry;
     auto* serviceContext = setupServiceContext();
     repl::ReplSettings replSettings;
@@ -202,7 +197,7 @@ void BM_OnInserts(benchmark::State& state, const char* nss) {
     auto client = serviceContext->getService()->makeClient("BM_OnInserts_Client");
     auto opCtx = client->makeOperationContext();
     repl::UnreplicatedWritesBlock uwb(opCtx.get());
-    setUpObservers(serviceContext, &registry, ClusterRole::None, false /* not serverless */);
+    setUpObservers(serviceContext, &registry, ClusterRole::None);
     for (auto _ : state) {
         registry.onInserts(opCtx.get(),
                            collptr,
@@ -233,11 +228,11 @@ BENCHMARK(BM_OnInserts_System)->MinTime(10.0);
 
 void BM_onDelete(benchmark::State& state, const char* nss) {
     CollectionMock coll(NamespaceString::createNamespaceString_forTest(nss));
-    CollectionPtr collptr(&coll);
-    BSONObj const doc = BSON("_id"
-                             << "whatever"
-                             << "key"
-                             << "value");
+    // TODO(SERVER-103400): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
+    const auto collptr = CollectionPtr::CollectionPtr_UNSAFE(&coll);
+    BSONObj const doc = BSON("_id" << "whatever"
+                                   << "key"
+                                   << "value");
     const auto& documentKey = getDocumentKey(collptr, doc);
     OplogDeleteEntryArgs deleteArgs;
     OpObserverRegistry registry;
@@ -252,7 +247,7 @@ void BM_onDelete(benchmark::State& state, const char* nss) {
     auto opCtx = client->makeOperationContext();
     repl::UnreplicatedWritesBlock uwb(opCtx.get());
 
-    setUpObservers(serviceContext, &registry, ClusterRole::None, false /* not serverless */);
+    setUpObservers(serviceContext, &registry, ClusterRole::None);
     for (auto _ : state) {
         registry.onDelete(
             opCtx.get(), collptr, kUninitializedStmtId, doc, documentKey, deleteArgs, nullptr);

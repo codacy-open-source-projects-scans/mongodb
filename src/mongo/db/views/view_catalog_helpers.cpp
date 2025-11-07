@@ -36,21 +36,16 @@
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <algorithm>
-#include <iterator>
-#include <list>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/basic_types_gen.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/process_interface/stub_mongo_process_interface.h"
@@ -69,6 +64,12 @@
 #include "mongo/util/uuid.h"
 #include "mongo/util/version/releases.h"
 
+#include <algorithm>
+#include <iterator>
+#include <list>
+#include <utility>
+#include <vector>
+
 namespace mongo {
 namespace view_catalog_helpers {
 
@@ -82,18 +83,18 @@ StatusWith<stdx::unordered_set<NamespaceString>> validatePipeline(OperationConte
     //     - the view pipeline can have stages that are not allowed in stable API version '1' eg.
     //       '$_internalUnpackBucket'.
     bool performApiVersionChecks = !viewDef.timeseries();
-
     liteParsedPipeline.validate(opCtx, performApiVersionChecks);
+    liteParsedPipeline.checkStagesAllowedInViewDefinition();
 
     // Verify that this is a legitimate pipeline specification by making sure it parses
     // correctly. In order to parse a pipeline we need to resolve any namespaces involved to a
     // collection and a pipeline, but in this case we don't need this map to be accurate since
     // we will not be evaluating the pipeline.
-    StringMap<ResolvedNamespace> resolvedNamespaces;
+    ResolvedNamespaceMap resolvedNamespaces;
 
     // Create copy of involved namespaces, as these can be moved into the result.
     for (const auto& nss : liteParsedPipeline.getInvolvedNamespaces()) {
-        resolvedNamespaces[nss.coll()] = {nss, {}};
+        resolvedNamespaces[nss] = {nss, {}};
     }
     AggregateCommandRequest aggregateRequest(viewDef.viewOn(), viewDef.pipeline());
     // We can use a stub MongoProcessInterface because we are only
@@ -108,16 +109,6 @@ StatusWith<stdx::unordered_set<NamespaceString>> validatePipeline(OperationConte
                       // definition to apply some additional checks.
                       .isParsingViewDefinition(true)
                       .build();
-    // If the feature compatibility version is not kLatest, and we are validating features as
-    // primary, ban the use of new agg features introduced in kLatest to prevent them from being
-    // persisted in the catalog.
-    // (Generic FCV reference): This FCV check should exist across LTS binary versions.
-    multiversion::FeatureCompatibilityVersion fcv;
-    if (serverGlobalParams.validateFeaturesAsPrimary.load() &&
-        serverGlobalParams.featureCompatibility.acquireFCVSnapshot().isLessThan(
-            multiversion::GenericFCV::kLatest, &fcv)) {
-        expCtx->setMaxFeatureCompatibilityVersion(fcv);
-    }
 
     try {
         auto pipeline =
@@ -202,6 +193,11 @@ StatusWith<ResolvedView> resolveView(OperationContext* opCtx,
     boost::optional<bool> hasExtendedRange = boost::none;
     boost::optional<bool> fixedBuckets = boost::none;
 
+    // Whether we are working with a new, viewless timeseries collection. In general, we expect this
+    // to be false, but this is present so that we can enforce this invariant in ResolvedView. Once
+    // this parameter is removed from the catalog cache, this variable should be removed as well.
+    bool isNewTimeseriesWithoutView = false;
+
     for (; depth < ViewGraph::kMaxViewDepth; depth++) {
         auto view = catalog->lookupView(opCtx, *resolvedNss);
         if (!view) {
@@ -226,7 +222,8 @@ StatusWith<ResolvedView> resolveView(OperationContext* opCtx,
                  tsOptions,
                  mixedData,
                  hasExtendedRange,
-                 fixedBuckets});
+                 fixedBuckets,
+                 isNewTimeseriesWithoutView});
         }
 
         resolvedNss = &view->viewOn();
@@ -243,10 +240,12 @@ StatusWith<ResolvedView> resolveView(OperationContext* opCtx,
                     str::stream() << "expected time-series buckets collection "
                                   << (*resolvedNss).toStringForErrorMsg() << " to exist",
                     tsCollection);
-            mixedData = tsCollection->getTimeseriesBucketsMayHaveMixedSchemaData();
+            mixedData = tsCollection->getTimeseriesMixedSchemaBucketsState()
+                            .mustConsiderMixedSchemaBucketsInReads();
             tsOptions = tsCollection->getTimeseriesOptions();
             hasExtendedRange = tsCollection->getRequiresTimeseriesExtendedRangeSupport();
             fixedBuckets = tsCollection->areTimeseriesBucketsFixed();
+            isNewTimeseriesWithoutView = tsCollection->isNewTimeseriesWithoutView();
         }
 
         dependencyChain.push_back(*resolvedNss);

@@ -21,7 +21,6 @@ from opentelemetry.trace.status import StatusCode
 from retry import retry
 
 from buildscripts.resmokelib.hang_analyzer.dumper import Dumper
-from buildscripts.resmokelib.run.runtime_recorder import compare_start_time
 from buildscripts.resmokelib.setup_multiversion.download import DownloadError
 from buildscripts.resmokelib.setup_multiversion.setup_multiversion import (
     SetupMultiversion,
@@ -32,10 +31,11 @@ from buildscripts.resmokelib.utils import evergreen_conn
 from buildscripts.resmokelib.utils.filesystem import build_hygienic_bin_path
 from buildscripts.resmokelib.utils.otel_thread_pool_executor import OtelThreadPoolExecutor
 from buildscripts.resmokelib.utils.otel_utils import get_default_current_span
+from buildscripts.resmokelib.utils.runtime_recorder import compare_start_time
 from evergreen.task import Artifact, Task
 
 _DEBUG_FILE_BASE_NAMES = ["mongo", "mongod", "mongos"]
-TOOLCHAIN_ROOT = "/opt/mongodbtoolchain/v4"
+TOOLCHAIN_ROOT = "/opt/mongodbtoolchain/v5"
 TRACER = trace.get_tracer("resmoke")
 
 
@@ -238,6 +238,9 @@ def post_install_gdb_optimization(download_dir: str, root_looger: Logger):
                     "add_index_error": "Could not find dwarf version in file",
                 }
             )
+            # The file has no debug info if stdout ends like this
+            if process.stdout.strip().endswith(".debug_info contents:"):
+                return
             raise RuntimeError(f"Could not find dwarf version in file {file_path}")
 
         version = int(regex.group(1))
@@ -259,17 +262,26 @@ def post_install_gdb_optimization(download_dir: str, root_looger: Logger):
                     ],
                     check=True,
                 )
+
+                # objcopy overwrites the input executable when only given one positional argument.
+                # /dev/null is specified as the second positional argument to simultaneously prevent
+                # the debug symbol file from being overwritten and to discard the generated copy.
                 subprocess.run(
                     [
                         f"{TOOLCHAIN_ROOT}/bin/objcopy",
                         "--dump-section",
                         f".debug_str={file_path}.debug_str.new",
                         file_path,
-                    ]
+                        "/dev/null",
+                    ],
+                    check=True,
                 )
                 with open(f"{file_path}.debug_str", "r") as file1:
                     with open(f"{file_path}.debug_str.new", "a") as file2:
                         file2.write(file1.read())
+
+                # Ensure the file is writable, we have seen the uploaded binaries be non-writable.
+                os.chmod(file_path, 0o775)
                 subprocess.run(
                     [
                         f"{TOOLCHAIN_ROOT}/bin/objcopy",
@@ -329,10 +341,10 @@ def post_install_gdb_optimization(download_dir: str, root_looger: Logger):
             current_span.set_attributes(
                 {
                     "add_index_status": "failed",
-                    "add_index_error": ex,
+                    "add_index_error": str(ex),
                 }
             )
-            return
+            raise ex
 
         current_span.set_attribute("add_index_changed_file_size", os.path.getsize(file_path))
 
@@ -354,12 +366,26 @@ def post_install_gdb_optimization(download_dir: str, root_looger: Logger):
         )
 
         process = subprocess.run(
-            [f"{TOOLCHAIN_ROOT}/bin/eu-readelf", "-S", file_path], capture_output=True, text=True
+            [f"{TOOLCHAIN_ROOT}/bin/eu-readelf", "-n", file_path], capture_output=True, text=True
         )
-        if process.returncode != 0 or ".gnu_debuglink" not in process.stdout:
+        if process.returncode != 0:
             current_span.set_attribute("recalc_debuglink_status", "skipped")
             return
+        binary_build_id = get_build_id(process.stdout)
+        process = subprocess.run(
+            [f"{TOOLCHAIN_ROOT}/bin/eu-readelf", "-n", f"{file_path}.debug"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        debugsymbol_build_id = get_build_id(process.stdout)
+        if binary_build_id != debugsymbol_build_id:
+            print(f"{file_path} build id: {binary_build_id}")
+            print(f"{file_path}.debug build id: {debugsymbol_build_id}")
+            raise RuntimeError("binary and debugsymbol build ids do not match")
         try:
+            # Ensure the file is writable, we have seen the uploaded binaries be non-writable.
+            os.chmod(file_path, 0o775)
             subprocess.run(
                 [f"{TOOLCHAIN_ROOT}/bin/objcopy", "--remove-section", ".gnu_debuglink", file_path],
                 check=True,
@@ -379,20 +405,24 @@ def post_install_gdb_optimization(download_dir: str, root_looger: Logger):
             current_span.set_attributes(
                 {
                     "recalc_debuglink_status": "failed",
-                    "recalc_debuglink_error": ex,
+                    "recalc_debuglink_error": str(ex),
                 }
             )
-            return
+            raise ex
 
         root_looger.debug("Finished recalculating the debuglink for %s", file_path)
 
-    install_dir = os.path.join(download_dir, "install")
-    lib_dir = os.path.join(install_dir, "dist-test", "lib")
-    if not os.path.exists(lib_dir):
-        return
-    lib_files = [os.path.join(lib_dir, file_path) for file_path in os.listdir(lib_dir)]
+    dist_dir = os.path.join(download_dir, "install", "dist-test")
+    bin_dir = os.path.join(dist_dir, "bin")
+    bin_files = [os.path.join(bin_dir, file_path) for file_path in os.listdir(bin_dir)]
+    lib_dir = os.path.join(dist_dir, "lib")
+    lib_files = []
+    if os.path.exists(lib_dir):
+        lib_files = [os.path.join(lib_dir, file_path) for file_path in os.listdir(lib_dir)]
+
     current_span = get_default_current_span()
 
+    # add gdb indexes so gdb can process these libraries faster, we cannot do this to the binaries.
     with OtelThreadPoolExecutor() as executor:
         with TRACER.start_as_current_span(
             "core_analyzer.post_install_gdb_optimization.add_indexes"
@@ -400,26 +430,43 @@ def post_install_gdb_optimization(download_dir: str, root_looger: Logger):
             futures = []
             current_span.set_status(StatusCode.OK)
             for file_path in lib_files:
+                # If a debug file exists for this file, then the debug symbols are
+                # over in that other file and we can skip this file.
+                if os.path.exists(f"{file_path}.debug"):
+                    continue
+
                 # When we add the .gdb_index section to binaries being ran with gdb
                 # it makes gdb not longer recognize them as the binary that generated
                 # the core dumps
                 futures.append(executor.submit(add_index, file_path=file_path))
 
-            concurrent.futures.wait(futures)
+            for future in concurrent.futures.as_completed(futures):
+                # raise any exceptions that were thrown in child processes
+                future.result()
 
+        # add gnu_debuglink section to all libraries and debugsymbols. This tells gdb where to look
+        # to find the debugsymbols.
         with TRACER.start_as_current_span(
             "core_analyzer.post_install_gdb_optimization.recalc_debuglink"
         ):
             futures = []
             current_span = get_default_current_span()
-            for file_path in lib_files:
+            for file_path in lib_files + bin_files:
                 # There will be no debuglinks in the separate debug files
                 # We do not want to edit any of the binary files that gdb might directly run
                 # so we skip the bin directory
-                if file_path.endswith(".debug"):
+                if file_path.endswith(".debug") or not os.path.exists(f"{file_path}.debug"):
                     continue
                 futures.append(executor.submit(recalc_debuglink, file_path=file_path))
-            concurrent.futures.wait(futures)
+
+            for future in concurrent.futures.as_completed(futures):
+                # raise any exceptions that were thrown in child processes
+                future.result()
+
+
+def get_build_id(process_output: str) -> str:
+    result = re.search("Build ID: ([0-9a-z]+)", process_output)
+    return result.group(1)
 
 
 @TRACER.start_as_current_span("core_analyzer.download_task_artifacts")
@@ -468,13 +515,21 @@ def download_task_artifacts(
 
     # We support `skip_compile` tasks that download master instead of compiling it
     # For analysis on these tasks we should download the same binaries that the task downloaded
-    if multiversion_downloads and "" in multiversion_downloads:
-        version_downloads = multiversion_downloads[""]
-        variant = version_downloads["evg_build_variant"]
-        version_id = version_downloads["evg_version_id"]
-    else:
-        variant = task_info.build_variant
-        version_id = task_info.version_id
+    variant = task_info.build_variant
+    version_id = task_info.version_id
+    if multiversion_downloads:
+        skip_download = next(
+            filter(lambda v: v.get("bin_suffix") == "", multiversion_downloads), None
+        )
+        if skip_download:
+            version_id = skip_download["evg_urls_info"]["evg_version_id"]
+            variant = skip_download["evg_urls_info"]["evg_build_variant"]
+
+    if variant == "enterprise-rhel-8-64-bit-future-git-tag-multiversion":
+        # Tasks on this variant depend on multiple archive_dist_test tasks from the same version, so
+        # it is ambiguous which binaries/debug symbols to download. We want "-latest" for the "new" binaries,
+        # and -last-lts/-last-continuous will come from the multiversion download list for the "old".
+        variant = "linux-x86-dynamic-compile-future-tag-multiversion-latest"
 
     all_downloaded = True
     multiversion_versions = set()
@@ -539,9 +594,14 @@ def download_task_artifacts(
         with OtelThreadPoolExecutor() as executor:
             futures = []
             for version in multiversion_versions:
-                version_downloads = multiversion_downloads[version]
-                version_id = version_downloads["evg_version_id"]
-                variant = version_downloads["evg_build_variant"]
+                version_downloads = next(
+                    filter(
+                        lambda actual, desired=version: actual.get("bin_suffix") == desired,
+                        multiversion_downloads,
+                    )
+                )
+                version_id = version_downloads["evg_urls_info"]["evg_version_id"]
+                variant = version_downloads["evg_urls_info"]["evg_build_variant"]
                 futures.append(
                     executor.submit(
                         run_with_retries,

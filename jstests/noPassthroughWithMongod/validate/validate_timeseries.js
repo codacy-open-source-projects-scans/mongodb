@@ -7,26 +7,28 @@
  * ]
  */
 import {assertDropCollection} from "jstests/libs/collection_drop_recreate.js";
+import {getTimeseriesCollForDDLOps} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 
 assertDropCollection(db, "validate_timeseries");
 assertDropCollection(db, "viewSource");
 
-assert.commandWorked(db.createCollection(
-    "validate_timeseries",
-    {timeseries: {timeField: "timestamp", metaField: "metadata", granularity: "hours"}}));
+assert.commandWorked(
+    db.createCollection("validate_timeseries", {
+        timeseries: {timeField: "timestamp", metaField: "metadata", granularity: "hours"},
+    }),
+);
 
 const coll = db.validate_timeseries;
-const bucketColl = db.system.buckets.validate_timeseries;
 const weather_data = [
     {
         "metadata": {"sensorId": 5578, "type": "temperature"},
         "timestamp": ISODate("2021-05-18T00:00:00.000Z"),
-        "temp": 12
+        "temp": 12,
     },
     {
         "metadata": {"sensorId": 5578, "type": "temperature"},
         "timestamp": ISODate("2021-05-18T04:00:00.000Z"),
-        "temp": 11
+        "temp": 11,
     },
 ];
 
@@ -38,7 +40,7 @@ assert.commandWorked(coll.insertMany(weather_data), {ordered: false});
 let res = assert.commandWorked(coll.validate());
 assert(res.valid, tojson(res));
 
-res = assert.commandWorked(bucketColl.validate());
+res = assert.commandWorked(getTimeseriesCollForDDLOps(db, coll).validate());
 assert(res.valid, tojson(res));
 
 // Tests that the validate command doesn't run on a view without a bucket collection.

@@ -28,7 +28,6 @@
  */
 
 #include "mongo/db/exec/sbe/expressions/expression.h"
-
 #include "mongo/db/exec/sbe/values/arith_common.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/util.h"
@@ -44,6 +43,8 @@
 
 namespace mongo::sbe::vm {
 using ColumnOpType = value::ColumnOpType;
+
+MONGO_FAIL_POINT_DEFINE(sleepBeforeCurrentDateEvaluationSBE);
 
 namespace {
 const size_t kTimezoneDBStackPosDefault = 0u;
@@ -87,8 +88,8 @@ FastTuple<bool, value::TypeTags, value::Value> builtinDateHelper(
         return {false, value::TypeTags::Nothing, 0};
     }
 
+    tassert(11054000, "unexpected TZDB value", valueTzdb);
     auto timeZoneDB = value::getTimeZoneDBView(valueTzdb);
-    invariant(timeZoneDB);
 
     auto tzString = value::getStringView(typeTagTz, valueTz);
     const auto tz = tzString == "" ? timeZoneDB->utcZone() : timeZoneDB->getTimeZone(tzString);
@@ -139,7 +140,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDate(ArityType a
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateToString(ArityType arity) {
-    invariant(arity == 4);
+    tassert(11080051, "Unexpected arity value", arity == 4);
 
     auto [timezoneDBOwn, timezoneDBTag, timezoneDBValue] = getFromStack(0);
     if (timezoneDBTag != value::TypeTags::timeZoneDB) {
@@ -179,7 +180,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateToString(Ari
         return {false, value::TypeTags::Nothing, 0};
     }
 
-    auto [strTag, strValue] = sbe::value::makeNewString(formatted.str());
+    auto [strTag, strValue] = sbe::value::makeNewString(formatted.stringData());
     return {true, strTag, strValue};
 }
 
@@ -358,7 +359,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinIsoDateToParts(A
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDayOfYear(ArityType arity) {
-    invariant(arity == 3 || arity == 2);
+    tassert(11080050, "Unexpected arity value", arity == 3 || arity == 2);
 
     auto [dateOwn, dateTag, dateValue] = getFromStack(0);
     if (arity == 3) {
@@ -373,7 +374,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDayOfYear(ArityT
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDayOfMonth(ArityType arity) {
-    invariant(arity == 3 || arity == 2);
+    tassert(11080049, "Unexpected arity value", arity == 3 || arity == 2);
 
     auto [dateOwn, dateTag, dateValue] = getFromStack(0);
     if (arity == 3) {
@@ -388,7 +389,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDayOfMonth(Arity
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDayOfWeek(ArityType arity) {
-    invariant(arity == 3 || arity == 2);
+    tassert(11080048, "Unexpected arity value", arity == 3 || arity == 2);
 
     auto [dateOwn, dateTag, dateValue] = getFromStack(0);
     if (arity == 3) {
@@ -403,7 +404,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDayOfWeek(ArityT
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinYear(ArityType arity) {
-    invariant(arity == 3 || arity == 2);
+    tassert(11080047, "Unexpected arity value", arity == 3 || arity == 2);
 
     auto [dateOwn, dateTag, dateValue] = getFromStack(0);
     if (arity == 3) {
@@ -418,7 +419,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinYear(ArityType a
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMonth(ArityType arity) {
-    invariant(arity == 3 || arity == 2);
+    tassert(11080046, "Unexpected arity value", arity == 3 || arity == 2);
 
     auto [dateOwn, dateTag, dateValue] = getFromStack(0);
     if (arity == 3) {
@@ -433,7 +434,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMonth(ArityType 
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinHour(ArityType arity) {
-    invariant(arity == 3 || arity == 2);
+    tassert(11080045, "Unexpected arity value", arity == 3 || arity == 2);
 
     auto [dateOwn, dateTag, dateValue] = getFromStack(0);
     if (arity == 3) {
@@ -448,7 +449,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinHour(ArityType a
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMinute(ArityType arity) {
-    invariant(arity == 3 || arity == 2);
+    tassert(11080044, "Unexpected arity value", arity == 3 || arity == 2);
 
     auto [dateOwn, dateTag, dateValue] = getFromStack(0);
     if (arity == 3) {
@@ -463,7 +464,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMinute(ArityType
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSecond(ArityType arity) {
-    invariant(arity == 3 || arity == 2);
+    tassert(11080043, "Unexpected arity value", arity == 3 || arity == 2);
 
     auto [dateOwn, dateTag, dateValue] = getFromStack(0);
     if (arity == 3) {
@@ -478,7 +479,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinSecond(ArityType
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMillisecond(ArityType arity) {
-    invariant(arity == 3 || arity == 2);
+    tassert(11080042, "Unexpected arity value", arity == 3 || arity == 2);
 
     auto [dateOwn, dateTag, dateValue] = getFromStack(0);
     if (arity == 3) {
@@ -493,7 +494,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinMillisecond(Arit
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinWeek(ArityType arity) {
-    invariant(arity == 3 || arity == 2);
+    tassert(11080041, "Unexpected arity value", arity == 3 || arity == 2);
 
     auto [dateOwn, dateTag, dateValue] = getFromStack(0);
     if (arity == 3) {
@@ -508,7 +509,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinWeek(ArityType a
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinISOWeekYear(ArityType arity) {
-    invariant(arity == 3 || arity == 2);
+    tassert(11080040, "Unexpected arity value", arity == 3 || arity == 2);
 
     auto [dateOwn, dateTag, dateValue] = getFromStack(0);
     if (arity == 3) {
@@ -523,7 +524,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinISOWeekYear(Arit
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinISODayOfWeek(ArityType arity) {
-    invariant(arity == 3 || arity == 2);
+    tassert(11080039, "Unexpected arity value", arity == 3 || arity == 2);
 
     auto [dateOwn, dateTag, dateValue] = getFromStack(0);
     if (arity == 3) {
@@ -538,7 +539,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinISODayOfWeek(Ari
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinISOWeek(ArityType arity) {
-    invariant(arity == 3 || arity == 2);
+    tassert(11080038, "Unexpected arity value", arity == 3 || arity == 2);
 
     auto [dateOwn, dateTag, dateValue] = getFromStack(0);
     if (arity == 3) {
@@ -553,7 +554,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinISOWeek(ArityTyp
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinIsTimeUnit(ArityType arity) {
-    invariant(arity == 1);
+    tassert(11080037, "Unexpected arity value", arity == 1);
     auto [timeUnitOwn, timeUnitTag, timeUnitValue] = getFromStack(0);
     if (!value::isString(timeUnitTag)) {
         return {false, value::TypeTags::Nothing, 0};
@@ -565,7 +566,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinIsTimeUnit(Arity
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinIsDayOfWeek(ArityType arity) {
-    invariant(arity == 1);
+    tassert(11080036, "Unexpected arity value", arity == 1);
     auto [dayOfWeekOwn, dayOfWeekTag, dayOfWeekValue] = getFromStack(0);
     if (!value::isString(dayOfWeekTag)) {
         return {false, value::TypeTags::Nothing, 0};
@@ -594,7 +595,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinIsTimezone(Arity
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinTsSecond(ArityType arity) {
-    invariant(arity == 1);
+    tassert(11080035, "Unexpected arity value", arity == 1);
 
     auto [inputValueOwn, inputTypeTag, inputValue] = getFromStack(0);
 
@@ -607,7 +608,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinTsSecond(ArityTy
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinTsIncrement(ArityType arity) {
-    invariant(arity == 1);
+    tassert(11080034, "Unexpected arity value", arity == 1);
 
     auto [inputValueOwn, inputTypeTag, inputValue] = getFromStack(0);
 
@@ -699,7 +700,7 @@ bool ByteCode::validateDateTruncParameters(TimeUnit* unit,
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateTrunc(ArityType arity) {
-    invariant(arity == 6);
+    tassert(11080033, "Unexpected arity value", arity == 6);
 
     TimeUnit unit{TimeUnit::year};
     int64_t binSize{0u};
@@ -793,7 +794,9 @@ bool ByteCode::validateDateDiffParameters(Date_t* endDate,
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateDiff(ArityType arity) {
-    invariant(arity == 5 || arity == 6);  // 6th parameter is 'startOfWeek'.
+    tassert(11080032,
+            "Unexpected arity value",
+            arity == 5 || arity == 6);  // 6th parameter is 'startOfWeek'.
 
     Date_t endDate;
     TimeUnit unit{TimeUnit::year};
@@ -870,8 +873,7 @@ bool ByteCode::validateDateAddParameters(TimeUnit* unit, int64_t* amount, TimeZo
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDateAdd(ArityType arity) {
-    invariant(arity == 5);
-
+    tassert(11080031, "Unexpected arity value", arity == 5);
     TimeUnit unit{TimeUnit::year};
     int64_t amount;
     TimeZone timezone{};
@@ -1042,7 +1044,7 @@ FastTuple<bool, value::TypeTags, value::Value> makeNothingBlock(value::ValueBloc
  */
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockDateTrunc(
     ArityType arity) {
-    invariant(arity == 7);
+    tassert(11080030, "Unexpected arity value", arity == 7);
 
     auto [inputOwned, inputTag, inputVal] = getFromStack(1);
     tassert(8625725,
@@ -1094,7 +1096,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockDateTr
  */
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockDateDiff(
     ArityType arity) {
-    invariant(arity == 6 || arity == 7);
+    tassert(11080029, "Unexpected arity value", arity == 6 || arity == 7);
 
     auto [inputOwned, inputTag, inputVal] = getFromStack(1);
     tassert(8625727,
@@ -1132,7 +1134,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockDateDi
 }
 
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockDateAdd(ArityType arity) {
-    invariant(arity == 6);
+    tassert(11080028, "Unexpected arity value", arity == 6);
 
     auto [inputOwned, inputTag, inputVal] = getFromStack(1);
     tassert(8649700,
@@ -1192,4 +1194,14 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinValueBlockDateAd
                 value::bitcastFrom<value::ValueBlock*>(out.release())};
     }
 }
+
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinCurrentDate(ArityType arity) {
+    if (MONGO_unlikely(sleepBeforeCurrentDateEvaluationSBE.shouldFail())) {
+        sleepBeforeCurrentDateEvaluationSBE.execute(
+            [&](const BSONObj& data) { sleepmillis(data["ms"].numberInt()); });
+    }
+
+    return {false, value::TypeTags::Date, value::bitcastFrom<int64_t>(Date_t::now().asInt64())};
+}
+
 }  // namespace mongo::sbe::vm

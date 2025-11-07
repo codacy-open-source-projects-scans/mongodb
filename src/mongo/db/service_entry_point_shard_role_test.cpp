@@ -27,16 +27,17 @@
  *    it in the license file.
  */
 
+#include "mongo/db/service_entry_point_shard_role.h"
+
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/admission/ingress_admission_context.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/service_entry_point_shard_role.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/rpc/message.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/service_entry_point_test_fixture.h"
@@ -62,6 +63,7 @@ public:
 
         auto replCoordMock = std::make_unique<repl::ReplicationCoordinatorMock>(
             getGlobalServiceContext(), replSettings);
+        _replCoordMock = replCoordMock.get();
         invariant(replCoordMock->setFollowerMode(repl::MemberState::RS_PRIMARY));
         repl::ReplicationCoordinator::set(getGlobalServiceContext(), std::move(replCoordMock));
 
@@ -72,6 +74,9 @@ public:
     void testProcessInternalCommand();
     void testCommandFailsRunInvocationWithCloseConnectionError();
     void testCommandMaxTimeMSOpOnly();
+
+protected:
+    repl::ReplicationCoordinatorMock* _replCoordMock;
 };
 
 void ServiceEntryPointShardRoleTest::testProcessInternalCommand() {
@@ -95,10 +100,12 @@ void ServiceEntryPointShardRoleTest::testCommandFailsRunInvocationWithCloseConne
     auto opCtx = makeOperationContext();
     auto msg = constructMessage(
         BSON(TestCmdFailsRunInvocationWithCloseConnectionError::kCommandName << 1), opCtx.get());
+    unittest::LogCaptureGuard logs;
     auto swDbResponse = handleRequest(msg, opCtx.get());
+    logs.stop();
     ASSERT_NOT_OK(swDbResponse);
     ASSERT_EQ(swDbResponse.getStatus().code(), ErrorCodes::SplitHorizonChange);
-    ASSERT_EQ(countTextFormatLogLinesContaining("Failed to handle request"), 1);
+    ASSERT_EQ(logs.countTextContaining("Failed to handle request"), 1);
 }
 
 void ServiceEntryPointShardRoleTest::testCommandMaxTimeMSOpOnly() {
@@ -206,8 +213,10 @@ TEST_F(ServiceEntryPointShardServerTest, TestHelpField) {
 }
 
 TEST_F(ServiceEntryPointShardServerTest, TestCommandAdminOnlyLog) {
+    unittest::LogCaptureGuard logs;
     runCommandTestWithResponse(BSON(TestCmdSucceedsAdminOnly::kCommandName << 1));
-    ASSERT_EQ(countTextFormatLogLinesContaining("Admin only command"), 1);
+    logs.stop();
+    ASSERT_EQ(logs.countTextContaining("Admin only command"), 1);
 }
 
 TEST_F(ServiceEntryPointShardServerTest, TestCommandServiceCounters) {
@@ -255,16 +264,29 @@ TEST_F(ServiceEntryPointShardServerTest, TestExhaustCommandNextInvocationSet) {
 }
 
 TEST_F(ServiceEntryPointShardServerTest, TestWriteConcernClientSpecified) {
+    _replCoordMock->setWriteConcernMajorityShouldJournal(false);
     testWriteConcernClientSpecified();
 }
 
 TEST_F(ServiceEntryPointShardServerTest, TestWriteConcernClientUnspecifiedNoDefault) {
+    _replCoordMock->setWriteConcernMajorityShouldJournal(false);
     testWriteConcernClientUnspecifiedNoDefault();
 }
 
 TEST_F(ServiceEntryPointShardServerTest, TestWriteConcernClientUnspecifiedWithDefault) {
+    _replCoordMock->setWriteConcernMajorityShouldJournal(false);
     testWriteConcernClientUnspecifiedWithDefault(false);
 }
+
+#ifdef MONGO_CONFIG_OTEL
+TEST_F(ServiceEntryPointShardServerTest, TelemetryContextDeserializedFromRequest) {
+    testTelemetryContextDeserializedFromRequest();
+}
+
+TEST_F(ServiceEntryPointShardServerTest, TelemetryContextNotSetWhenNotInRequest) {
+    testTelemetryContextNotSetWhenNotInRequest();
+}
+#endif
 
 
 class ServiceEntryPointReplicaSetTest : public virtual service_context_test::ReplicaSetRoleOverride,
@@ -315,8 +337,10 @@ TEST_F(ServiceEntryPointReplicaSetTest, TestHelpField) {
 }
 
 TEST_F(ServiceEntryPointReplicaSetTest, TestCommandAdminOnlyLog) {
+    unittest::LogCaptureGuard logs;
     runCommandTestWithResponse(BSON(TestCmdSucceedsAdminOnly::kCommandName << 1));
-    ASSERT_EQ(countTextFormatLogLinesContaining("Admin only command"), 1);
+    logs.stop();
+    ASSERT_EQ(logs.countTextContaining("Admin only command"), 1);
 }
 
 TEST_F(ServiceEntryPointReplicaSetTest, TestCommandServiceCounters) {
@@ -364,16 +388,29 @@ TEST_F(ServiceEntryPointReplicaSetTest, TestExhaustCommandNextInvocationSet) {
 }
 
 TEST_F(ServiceEntryPointReplicaSetTest, TestWriteConcernClientSpecified) {
+    _replCoordMock->setWriteConcernMajorityShouldJournal(false);
     testWriteConcernClientSpecified();
 }
 
 TEST_F(ServiceEntryPointReplicaSetTest, TestWriteConcernClientUnspecifiedNoDefault) {
+    _replCoordMock->setWriteConcernMajorityShouldJournal(false);
     testWriteConcernClientUnspecifiedNoDefault();
 }
 
 TEST_F(ServiceEntryPointReplicaSetTest, TestWriteConcernClientUnspecifiedWithDefault) {
+    _replCoordMock->setWriteConcernMajorityShouldJournal(false);
     testWriteConcernClientUnspecifiedWithDefault(true);
 }
+
+#ifdef MONGO_CONFIG_OTEL
+TEST_F(ServiceEntryPointReplicaSetTest, TelemetryContextDeserializedFromRequest) {
+    testTelemetryContextDeserializedFromRequest();
+}
+
+TEST_F(ServiceEntryPointReplicaSetTest, TelemetryContextNotSetWhenNotInRequest) {
+    testTelemetryContextNotSetWhenNotInRequest();
+}
+#endif
 
 }  // namespace
 }  // namespace mongo

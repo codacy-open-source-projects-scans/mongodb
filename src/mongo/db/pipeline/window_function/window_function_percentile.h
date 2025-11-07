@@ -30,8 +30,14 @@
 
 #pragma once
 
+#include "mongo/db/pipeline/accumulator_percentile_enum_gen.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/percentile_algo_continuous.h"
+#include "mongo/db/pipeline/percentile_algo_discrete.h"
 #include "mongo/db/pipeline/window_function/window_function.h"
+#include "mongo/util/modules.h"
+
+#include <boost/container/flat_set.hpp>
 
 namespace mongo {
 
@@ -40,33 +46,11 @@ namespace mongo {
  */
 class WindowFunctionPercentileCommon : public WindowFunctionState {
 public:
-    void add(Value value) override {
-        // Only add numeric values.
-        if (!value.numeric()) {
-            return;
-        }
-        _values.insert(value.coerceToDouble());
-        _memUsageTracker.add(sizeof(double));
-    }
+    void add(Value value) override;
 
-    void remove(Value value) override {
-        // Only numeric values were added, so only numeric values need to be removed.
-        if (!value.numeric()) {
-            return;
-        }
+    void remove(Value value) override;
 
-        auto iter = _values.find(value.coerceToDouble());
-        tassert(7455904,
-                "Cannot remove a value not tracked by WindowFunctionPercentile",
-                iter != _values.end());
-        _memUsageTracker.add(-static_cast<int64_t>(sizeof(double)));
-        _values.erase(iter);
-    }
-
-    void reset() override {
-        _values.clear();
-        // resetting _memUsageTracker is the responsibility of the derived classes.
-    }
+    void reset() override;
 
 protected:
     explicit WindowFunctionPercentileCommon(ExpressionContext* const expCtx,
@@ -75,19 +59,7 @@ protected:
           _values(boost::container::flat_multiset<double>()),
           _method(method) {}
 
-    Value computePercentile(double p) const {
-        // Calculate the rank.
-        const double n = _values.size();
-
-        // boost::container::flat_multiset stores the values in ascending order, so we don't need to
-        // sort them before finding the value at index 'rank'.
-        // boost::container::flat_multiset has random-access iterators, so std::advance has an
-        // expected runtime of O(1).
-        const double rank = DiscretePercentile::computeTrueRank(n, p);
-        auto it = _values.begin();
-        std::advance(it, rank);
-        return Value(*it);
-    }
+    Value computePercentile(double p) const;
 
     // Holds all the values in the window in ascending order.
     // A boost::container::flat_multiset stores elements in a contiguous array, so iterating through
@@ -113,26 +85,9 @@ public:
         _memUsageTracker.set(sizeof(*this) + _ps.capacity() * sizeof(double));
     }
 
-    Value getValue(boost::optional<Value> current = boost::none) const final {
-        if (_values.empty()) {
-            std::vector<Value> nulls;
-            nulls.insert(nulls.end(), _ps.size(), Value(BSONNULL));
-            return Value(std::move(nulls));
-        }
-        std::vector<Value> pctls;
-        pctls.reserve(_ps.size());
-        for (double p : _ps) {
-            auto result = WindowFunctionPercentileCommon::computePercentile(p);
-            pctls.push_back(result);
-        }
+    Value getValue(boost::optional<Value> current = boost::none) const final;
 
-        return Value(std::move(pctls));
-    };
-
-    void reset() final {
-        WindowFunctionPercentileCommon::reset();
-        _memUsageTracker.set(sizeof(*this) + _ps.capacity() * sizeof(double));
-    }
+    void reset() final;
 
 private:
     std::vector<double> _ps;
@@ -150,17 +105,9 @@ public:
         _memUsageTracker.set(sizeof(*this));
     }
 
-    Value getValue(boost::optional<Value> current = boost::none) const final {
-        if (_values.empty())
-            return Value{BSONNULL};
+    Value getValue(boost::optional<Value> current = boost::none) const final;
 
-        return WindowFunctionPercentileCommon::computePercentile(0.5 /* p */);
-    }
-
-    void reset() final {
-        WindowFunctionPercentileCommon::reset();
-        _memUsageTracker.set(sizeof(*this));
-    }
+    void reset() final;
 };
 
 }  // namespace mongo

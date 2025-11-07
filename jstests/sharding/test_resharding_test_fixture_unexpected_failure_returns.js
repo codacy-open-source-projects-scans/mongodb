@@ -25,15 +25,17 @@ const mongos = sourceCollection.getMongo();
 
 const recipientShardNames = reshardingTest.recipientShardNames;
 
-assert.commandWorked(mongos.adminCommand({
-    configureFailPoint: "failCommand",
-    mode: "alwaysOn",
-    data: {
-        // Choosing a random code that `reshardCollection` won't return.
-        errorCode: ErrorCodes.ResumableRangeDeleterDisabled,
-        failCommands: ["reshardCollection"],
-    }
-}));
+assert.commandWorked(
+    mongos.adminCommand({
+        configureFailPoint: "failCommand",
+        mode: "alwaysOn",
+        data: {
+            // Choosing a random code that `reshardCollection` won't return.
+            errorCode: ErrorCodes.ResumableRangeDeleterDisabled,
+            failCommands: ["reshardCollection"],
+        },
+    }),
+);
 
 const err = assert.throws(() => {
     reshardingTest.withReshardingInBackground({
@@ -45,6 +47,5 @@ const err = assert.throws(() => {
     });
 });
 
-assert(/ResumableRangeDeleterDisabled/.test(err.message), err);
-
+assert(/ResumableRangeDeleterDisabled/.test(formatErrorMsg(err.message, err.extraAttr)), err);
 reshardingTest.teardown();

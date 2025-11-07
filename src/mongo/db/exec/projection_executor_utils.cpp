@@ -27,6 +27,18 @@
  *    it in the license file.
  */
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/exec/matcher/match_details.h"
+#include "mongo/db/exec/matcher/matcher.h"
+#include "mongo/db/exec/projection_executor.h"
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/pipeline/field_path.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <string>
@@ -35,21 +47,14 @@
 
 #include <boost/optional/optional.hpp>
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/exec/projection_executor.h"
-#include "mongo/db/matcher/expression.h"
-#include "mongo/db/matcher/match_details.h"
-#include "mongo/db/pipeline/field_path.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
-
 namespace mongo::projection_executor_utils {
 bool applyProjectionToOneField(projection_executor::ProjectionExecutor* executor,
                                StringData field) {
-    const FieldPath fp{field};
+    // Skip field name validation if 'field' contains '$' or '.'.
+    bool skipValidation = field.find('\0') == std::string::npos &&
+        (field.find('$') != std::string::npos || field.find('.') != std::string::npos);
+    const FieldPath fp{
+        field, false /* precomputeHashes */, !skipValidation /* validateFieldNames */};
     MutableDocument md;
     md.setNestedField(fp, Value{1.0});
     auto output = executor->applyTransformation(md.freeze());
@@ -140,7 +145,7 @@ Value applyFindSliceProjectionToArray(const std::vector<Value>& array,
 
     for (const auto& elem : array) {
         output.push_back(
-            elem.getType() == BSONType::Object
+            elem.getType() == BSONType::object
                 ? applyFindSliceProjectionHelper(elem.getDocument(), params, fieldPathIndex)
                 : elem);
     }
@@ -172,12 +177,12 @@ Value applyFindSliceProjectionHelper(const Document& input,
     Value val{input[fieldName]};
 
     switch (val.getType()) {
-        case BSONType::Array:
+        case BSONType::array:
             val = (fieldPathIndex == params.path.getPathLength())
                 ? sliceArray(val.getArray(), params.skip, params.limit)
                 : applyFindSliceProjectionToArray(val.getArray(), params, fieldPathIndex);
             break;
-        case BSONType::Object:
+        case BSONType::object:
             if (fieldPathIndex < params.path.getPathLength()) {
                 val = applyFindSliceProjectionHelper(val.getDocument(), params, fieldPathIndex);
             }
@@ -203,7 +208,8 @@ Document applyFindPositionalProjection(const Document& preImage,
     // recorded in the 'details' object.
     MatchDetails details;
     details.requestElemMatchKey();
-    auto stillMatchesExpression = matchExpr.matchesBSON(preImage.toBson(), &details);
+    auto stillMatchesExpression =
+        exec::matcher::matchesBSON(&matchExpr, preImage.toBson(), &details);
 
     // Since 'matchExpr' used with the positional projection is the very same selection filter
     // expression in the find command, the input document passed to this function should have
@@ -225,7 +231,7 @@ Document applyFindPositionalProjection(const Document& preImage,
     // document untouched.
     for (auto [ind, subDoc] = std::pair{0ULL, postImage}; ind < path.getPathLength(); ind++) {
         switch (auto val = subDoc[path.getFieldName(ind)]; val.getType()) {
-            case BSONType::Array: {
+            case BSONType::array: {
                 // Raise an error if we found the first array on the 'path', but the matching array
                 // element index wasn't recorded in the 'details' object. This can happen when the
                 // match expression doesn't conform to the positional projection requirements. E.g.,
@@ -245,7 +251,7 @@ Document applyFindPositionalProjection(const Document& preImage,
                                       Value{std::vector<Value>{matchingElem}});
                 return output.freeze();
             }
-            case BSONType::Object:
+            case BSONType::object:
                 subDoc = val.getDocument();
                 break;
             default:
@@ -268,16 +274,17 @@ Value applyFindElemMatchProjection(const Document& input,
     // recorded in the 'details' object.
     MatchDetails details;
     details.requestElemMatchKey();
-    if (!matchExpr.matchesBSON(input.toBson(), &details)) {
+    if (!exec::matcher::matchesBSON(&matchExpr, input.toBson(), &details)) {
         return {};
     }
 
-    auto val = input[path.fullPath()];
+    const auto& fullPath = path.fullPath();
+    auto val = input[StringData{fullPath}];
     tassert(7241707,
             str::stream()
                 << "$elemMatch projection operator requires an array field, found field of type:"
                 << typeName(val.getType()),
-            val.getType() == BSONType::Array);
+            val.getType() == BSONType::array);
     auto elemMatchKey = details.elemMatchKey();
     tassert(7241708,
             "$elemMatch projection operator couldn't find a matching element in the array",
@@ -296,7 +303,7 @@ Document applyFindSliceProjection(const Document& input,
     auto val = applyFindSliceProjectionHelper(input, params, 0);
     tassert(7241710,
             "output of the slice projection must be an Object",
-            val.getType() == BSONType::Object);
+            val.getType() == BSONType::object);
     return val.getDocument();
 }
 }  // namespace mongo::projection_executor_utils

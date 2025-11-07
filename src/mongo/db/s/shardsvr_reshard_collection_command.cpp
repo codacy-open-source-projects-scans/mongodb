@@ -28,34 +28,34 @@
  */
 
 
-#include <memory>
-#include <string>
-#include <utility>
-
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
+#include "mongo/db/cluster_parameters/sharding_cluster_parameters_gen.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/global_catalog/ddl/cluster_ddl.h"
+#include "mongo/db/global_catalog/ddl/reshard_collection_coordinator.h"
+#include "mongo/db/global_catalog/ddl/reshard_collection_coordinator_document_gen.h"
+#include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
+#include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator_gen.h"
+#include "mongo/db/global_catalog/ddl/sharding_ddl_coordinator_service.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/s/reshard_collection_coordinator.h"
-#include "mongo/db/s/reshard_collection_coordinator_document_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
-#include "mongo/db/s/sharding_ddl_coordinator_gen.h"
-#include "mongo/db/s/sharding_ddl_coordinator_service.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/topology/sharding_state.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/s/cluster_ddl.h"
-#include "mongo/s/request_types/sharded_ddl_commands_gen.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
-#include "mongo/s/sharding_cluster_parameters_gen.h"
-#include "mongo/s/sharding_state.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/future.h"
+
+#include <memory>
+#include <string>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -100,29 +100,8 @@ public:
 
             CommandHelpers::uassertCommandRunWithMajority(Request::kCommandName,
                                                           opCtx->getWriteConcern());
-            resharding::validateImplicitlyCreateIndex(request().getImplicitlyCreateIndex(),
-                                                      request().getKey());
-
-            {
-                FixedFCVRegion fixedFcvRegion{opCtx};
-                bool isReshardingForTimeseriesEnabled =
-                    mongo::resharding::gFeatureFlagReshardingForTimeseries.isEnabled(
-                        fixedFcvRegion->acquireFCVSnapshot());
-
-                AutoGetCollection collOrView{opCtx,
-                                             ns(),
-                                             MODE_IS,
-                                             AutoGetCollection::Options{}.viewMode(
-                                                 auto_get_collection::ViewMode::kViewsPermitted)};
-
-                bool isTimeseries = collOrView.getView()
-                    ? collOrView.getView()->timeseries()
-                    : *collOrView && collOrView->getTimeseriesOptions().has_value();
-
-                uassert(ErrorCodes::IllegalOperation,
-                        "Can't reshard a timeseries collection",
-                        !isTimeseries || isReshardingForTimeseriesEnabled);
-            }
+            resharding::validatePerformVerification(VersionContext::getDecoration(opCtx),
+                                                    request().getPerformVerification());
 
             if (resharding::isMoveCollection(request().getProvenance())) {
                 bool clusterHasTwoOrMoreShards = [&]() {
@@ -180,8 +159,8 @@ public:
 
                 auto service = ShardingDDLCoordinatorService::getService(opCtx);
                 auto reshardCollectionCoordinator =
-                    checked_pointer_cast<ReshardCollectionCoordinator>(
-                        service->getOrCreateInstance(opCtx, coordinatorDoc.toBSON()));
+                    checked_pointer_cast<ReshardCollectionCoordinator>(service->getOrCreateInstance(
+                        opCtx, coordinatorDoc.toBSON(), FixedFCVRegion{opCtx}));
                 return reshardCollectionCoordinator->getCompletionFuture();
             }();
 

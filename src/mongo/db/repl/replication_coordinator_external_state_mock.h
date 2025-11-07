@@ -29,18 +29,11 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/last_vote.h"
 #include "mongo/db/repl/optime.h"
@@ -54,8 +47,16 @@
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <memory>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -63,7 +64,8 @@ class ServiceContext;
 
 namespace repl {
 
-class ReplicationCoordinatorExternalStateMock : public ReplicationCoordinatorExternalState {
+class MONGO_MOD_PUB ReplicationCoordinatorExternalStateMock
+    : public ReplicationCoordinatorExternalState {
     ReplicationCoordinatorExternalStateMock(const ReplicationCoordinatorExternalStateMock&) =
         delete;
     ReplicationCoordinatorExternalStateMock& operator=(
@@ -157,11 +159,6 @@ public:
     void setLocalLastVoteDocument(const StatusWith<LastVote>& localLastVoteDocument);
 
     /**
-     * Sets the return value for subsequent calls to getClientHostAndPort().
-     */
-    void setClientHostAndPort(const HostAndPort& clientHostAndPort);
-
-    /**
      * Sets the return value for subsequent calls to loadLastOpTimeApplied.
      */
     void setLastOpTimeAndWallTime(const StatusWith<OpTime>& lastApplied,
@@ -178,12 +175,6 @@ public:
      * If "status" is Status::OK(), the subsequent calls will call the underlying funtion.
      */
     void setStoreLocalLastVoteDocumentStatus(Status status);
-
-    /**
-     * Sets whether or not subsequent calls to storeLocalLastVoteDocument() should hang
-     * indefinitely or not based on the value of "hang".
-     */
-    void setStoreLocalLastVoteDocumentToHang(bool hang);
 
     void setFirstOpTimeOfMyTerm(const OpTime& opTime);
 

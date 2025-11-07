@@ -26,10 +26,14 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+#pragma once
 
-#include <boost/optional/optional.hpp>
+#pragma once
 
 #include "mongo/db/pipeline/percentile_algo_accurate.h"
+#include "mongo/util/modules.h"
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -38,15 +42,24 @@ namespace mongo {
  */
 class ContinuousPercentile : public AccuratePercentile {
 public:
-    ContinuousPercentile() = default;  // no config required for this algorithm
+    ContinuousPercentile(ExpressionContext* expCtx);
 
     static double computeTrueRank(int n, double p) {
         return p * (n - 1);
     }
 
-    double linearInterpolate(double rank, int rank_ceil, int rank_floor);
+    static double linearInterpolate(
+        double rank, int rank_ceil, int rank_floor, double value_ceil, double value_floor);
 
     boost::optional<double> computePercentile(double p) final;
+
+    void reset() final;
+
+private:
+    // Only used if we spilled to disk.
+    boost::optional<double> computeSpilledPercentile(double p) final;
+    std::pair<boost::optional<double>, boost::optional<double>> _previousValues = {boost::none,
+                                                                                   boost::none};
 };
 
 }  // namespace mongo

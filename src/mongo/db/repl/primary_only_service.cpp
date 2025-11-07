@@ -28,41 +28,25 @@
  */
 
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/node_hash_map.h>
-#include <absl/container/node_hash_set.h>
-#include <absl/meta/type_traits.h>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <fmt/format.h>
-#include <functional>
-#include <mutex>
-#include <tuple>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/repl/primary_only_service.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/db/vector_clock_metadata_hook.h"
+#include "mongo/db/vector_clock/vector_clock_metadata_hook.h"
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
@@ -73,6 +57,21 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
+
+#include <functional>
+#include <mutex>
+#include <tuple>
+#include <utility>
+
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/node_hash_map.h>
+#include <absl/container/node_hash_set.h>
+#include <absl/meta/type_traits.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -375,7 +374,6 @@ void PrimaryOnlyService::startup(OperationContext* opCtx) {
 }
 
 void PrimaryOnlyService::onStepUp(const OpTime& stepUpOpTime) {
-    using namespace fmt::literals;
     SimpleBSONObjUnorderedMap<ActiveInstance> savedInstances;
     invariant(_getHasExecutor());
     auto newThenOldScopedExecutor =
@@ -476,10 +474,12 @@ void PrimaryOnlyService::onStepUp(const OpTime& stepUpOpTime) {
                 bool steppedDown = _state == State::kPaused;
                 bool shutDown = _state == State::kShutdown;
                 bool termAdvanced = _term > newTerm;
-                invariant(
-                    steppedDown || shutDown || termAdvanced,
-                    "Unexpected _state or _term; _state is {}, _term is {}, term was {} "_format(
-                        _getStateString(lk), _term, newTerm));
+                invariant(steppedDown || shutDown || termAdvanced,
+                          fmt::format(
+                              "Unexpected _state or _term; _state is {}, _term is {}, term was {} ",
+                              _getStateString(lk),
+                              _term,
+                              newTerm));
                 return;
             }
             invariant(_state == State::kRebuilding);
@@ -631,8 +631,14 @@ PrimaryOnlyService::lookupInstance(OperationContext* opCtx, const InstanceID& id
     // interrupted at stepdown to prevent deadlocks.
     invariant(
         !shard_role_details::getLocker(opCtx)->isLocked() ||
-        opCtx->shouldAlwaysInterruptAtStepDownOrUp() ||
-        shard_role_details::getLocker(opCtx)->wasGlobalLockTakenInModeConflictingWithWrites());
+            opCtx->shouldAlwaysInterruptAtStepDownOrUp() ||
+            shard_role_details::getLocker(opCtx)->wasGlobalLockTakenInModeConflictingWithWrites(),
+        str::stream() << "isLocked: " << shard_role_details::getLocker(opCtx)->isLocked()
+                      << ", interruptibleByStepDownOrUp: "
+                      << opCtx->shouldAlwaysInterruptAtStepDownOrUp()
+                      << ", globalLockConflictingWithWrites: "
+                      << shard_role_details::getLocker(opCtx)
+                             ->wasGlobalLockTakenInModeConflictingWithWrites());
 
     stdx::unique_lock lk(_mutex);
     _waitForStateNotRebuilding(opCtx, lk);
@@ -660,8 +666,14 @@ std::vector<std::shared_ptr<PrimaryOnlyService::Instance>> PrimaryOnlyService::g
     // interrupted at stepdown to prevent deadlocks.
     invariant(
         !shard_role_details::getLocker(opCtx)->isLocked() ||
-        opCtx->shouldAlwaysInterruptAtStepDownOrUp() ||
-        shard_role_details::getLocker(opCtx)->wasGlobalLockTakenInModeConflictingWithWrites());
+            opCtx->shouldAlwaysInterruptAtStepDownOrUp() ||
+            shard_role_details::getLocker(opCtx)->wasGlobalLockTakenInModeConflictingWithWrites(),
+        str::stream() << "isLocked: " << shard_role_details::getLocker(opCtx)->isLocked()
+                      << ", interruptibleByStepDownOrUp: "
+                      << opCtx->shouldAlwaysInterruptAtStepDownOrUp()
+                      << ", globalLockConflictingWithWrites: "
+                      << shard_role_details::getLocker(opCtx)
+                             ->wasGlobalLockTakenInModeConflictingWithWrites());
 
     std::vector<std::shared_ptr<PrimaryOnlyService::Instance>> instances;
 

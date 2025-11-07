@@ -29,31 +29,26 @@
 
 #include "mongo/db/update/path_support.h"
 
-#include <utility>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/mutable/algorithm.h"
-#include "mongo/bson/mutable/document.h"
-#include "mongo/bson/mutable/element.h"
+#include "mongo/db/exec/mutable_bson/algorithm.h"
+#include "mongo/db/exec/mutable_bson/document.h"
+#include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <utility>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace pathsupport {
 
-using std::string;
-using str::stream;
-
 namespace {
 
 Status maybePadTo(mutablebson::Element* elemArray, size_t sizeRequired) {
-    dassert(elemArray->getType() == Array);
+    dassert(elemArray->getType() == BSONType::array);
 
     size_t currSize = mutablebson::countChildren(*elemArray);
     if (sizeRequired > currSize) {
@@ -101,11 +96,11 @@ StatusWith<bool> findLongestPrefix(const FieldRef& prefix,
         StringData prefixPart = prefix.getPart(i);
         prev = curr;
         switch (curr.getType()) {
-            case Object:
+            case BSONType::object:
                 curr = prev[prefixPart];
                 break;
 
-            case Array:
+            case BSONType::array:
                 numericPart = str::parseUnsignedBase10Integer(prefixPart);
                 if (!numericPart) {
                     viable = false;
@@ -156,7 +151,7 @@ StatusWith<mutablebson::Element> createPathAt(const FieldRef& prefix,
     Status status = Status::OK();
     auto firstNewElem = elemFound.getDocument().end();
 
-    if (elemFound.getType() != BSONType::Object && elemFound.getType() != BSONType::Array) {
+    if (elemFound.getType() != BSONType::object && elemFound.getType() != BSONType::array) {
         return Status(ErrorCodes::PathNotViable,
                       str::stream() << "Cannot create field '" << prefix.getPart(idxFound)
                                     << "' in element {" << elemFound.toString() << "}");
@@ -174,7 +169,7 @@ StatusWith<mutablebson::Element> createPathAt(const FieldRef& prefix,
     // we need padding.
     FieldIndex i = idxFound;
     bool inArray = false;
-    if (elemFound.getType() == mongo::Array) {
+    if (elemFound.getType() == BSONType::array) {
         boost::optional<size_t> newIdx = str::parseUnsignedBase10Integer(prefix.getPart(idxFound));
         if (!newIdx) {
             return Status(ErrorCodes::PathNotViable,
@@ -341,19 +336,17 @@ static Status checkEqualityConflicts(const EqualityMatches& equalities, const Fi
     if (parentEl.eoo())
         return Status::OK();
 
-    string errMsg = "cannot infer query fields to set, ";
-
     StringData pathStr = path.dottedField();
     StringData prefixStr = path.dottedSubstring(0, parentPathPart);
     StringData suffixStr = path.dottedSubstring(parentPathPart, path.numParts());
 
-    if (suffixStr.size() != 0)
-        errMsg += stream() << "both paths '" << pathStr << "' and '" << prefixStr
-                           << "' are matched";
-    else
-        errMsg += stream() << "path '" << pathStr << "' is matched twice";
-
-    return Status(ErrorCodes::NotSingleValueField, errMsg);
+    return Status(ErrorCodes::NotSingleValueField, [&] {
+        static constexpr auto pre = "cannot infer query fields to set, "_sd;
+        if (!suffixStr.empty())
+            return fmt::format("{}both paths '{}' and '{}' are matched", pre, pathStr, prefixStr);
+        else
+            return fmt::format("{}path '{}' is matched twice", pre, pathStr);
+    }());
 }
 
 static Status _extractFullEqualityMatches(const MatchExpression& root,

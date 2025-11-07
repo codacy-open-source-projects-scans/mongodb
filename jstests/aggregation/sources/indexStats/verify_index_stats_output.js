@@ -16,7 +16,7 @@
  */
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const coll = db.index_stats_output;
 coll.drop();
@@ -30,7 +30,7 @@ assert.commandWorked(bulk.execute());
 
 const indexKey = {
     _id: 1,
-    a: 1
+    a: 1,
 };
 const indexName = "testIndex";
 
@@ -65,9 +65,11 @@ let pausedOutput = coll.aggregate([{$indexStats: {}}, {$match: {name: indexName}
 
 let allShards = [];
 let shardsFound = [];
-db.getSiblingDB("config").shards.find().forEach(function(shard) {
-    allShards.push(shard._id);
-});
+db.getSiblingDB("config")
+    .shards.find()
+    .forEach(function (shard) {
+        allShards.push(shard._id);
+    });
 const isShardedCluster = !!allShards.length;
 
 for (const indexStats of pausedOutput) {

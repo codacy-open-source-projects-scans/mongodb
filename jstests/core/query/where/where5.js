@@ -3,9 +3,10 @@
 // @tags: [
 //   # Uses $where operator
 //   requires_scripting,
+//   requires_getmore,
 // ]
 
-var t = db.where5;
+let t = db.where5;
 
 t.drop();
 
@@ -19,16 +20,16 @@ function printIdConstructor(doc) {
     }
 
     // Verify that function and data fields are hidden.
-    assert(!('_native_function' in sleep));
-    assert(!('_native_data' in sleep));
+    assert(!("_native_function" in sleep));
+    assert(!("_native_data" in sleep));
 
     // Predicate for matching document in collection.
     return true;
 }
 
-print('Running JS function in server...');
+print("Running JS function in server...");
 assert.eq(t.find({$where: printIdConstructor}).itcount(), 1);
 
-print('Running JS function in client...');
-var doc = t.findOne();
+print("Running JS function in client...");
+let doc = t.findOne();
 printIdConstructor(doc);

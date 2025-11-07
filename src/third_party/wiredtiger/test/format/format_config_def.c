@@ -19,6 +19,15 @@ CONFIG configuration_list[] = {{"assert.read_timestamp", "assert read_timestamp"
   {"backup.incr_granularity", "incremental backup block granularity (KB)", 0x0, 4, 16384, 16384,
     V_GLOBAL_BACKUP_INCR_GRANULARITY},
 
+  {"backup.live_restore", "configure backup live restore recovery", C_BOOL, 25, 0, 0,
+    V_GLOBAL_BACKUP_LIVE_RESTORE},
+
+  {"backup.live_restore_read_size", "live restore read size (KB power of 2)", C_POW2, 1, 16384,
+    16384, V_GLOBAL_BACKUP_LIVE_RESTORE_READ_SIZE},
+
+  {"backup.live_restore_threads", "number of live restore worker threads", 0x0, 0, 12, 12,
+    V_GLOBAL_BACKUP_LIVE_RESTORE_THREADS},
+
   {"block_cache", "enable the block cache", C_BOOL, 10, 0, 0, V_GLOBAL_BLOCK_CACHE},
 
   {"block_cache.cache_on_checkpoint", "block cache: cache checkpoint writes", C_BOOL, 30, 0, 0,
@@ -91,6 +100,12 @@ CONFIG configuration_list[] = {{"assert.read_timestamp", "assert read_timestamp"
   {"cache.eviction_dirty_trigger", "dirty content trigger for eviction", C_IGNORE, 0, 0, 100,
     V_GLOBAL_CACHE_EVICTION_DIRTY_TRIGGER},
 
+  {"cache.eviction_updates_target", "update content target for eviction", C_IGNORE, 0, 0, 100,
+    V_GLOBAL_CACHE_EVICTION_UPDATES_TARGET},
+
+  {"cache.eviction_updates_trigger", "update content trigger for eviction", C_IGNORE, 0, 0, 100,
+    V_GLOBAL_CACHE_EVICTION_UPDATES_TRIGGER},
+
   {"cache.minimum", "minimum cache size (MB)", C_IGNORE, 0, 0, 100 * 1024, V_GLOBAL_CACHE_MINIMUM},
 
   {"cache.maximum", "maximum cache size (MB)", C_IGNORE, 0, 0, UINT_MAX, V_GLOBAL_CACHE_MAXIMUM},
@@ -156,6 +171,30 @@ CONFIG configuration_list[] = {{"assert.read_timestamp", "assert read_timestamp"
     "control all dirty page evictions through forcing update restore eviction", C_BOOL, 2, 0, 0,
     V_GLOBAL_DEBUG_UPDATE_RESTORE_EVICT},
 
+  {"disagg.internal_page_delta", "writing deltas for internal pages", C_BOOL, 95, 0, 0,
+    V_GLOBAL_DISAGG_INTERNAL_PAGE_DELTA},
+
+  {"disagg.leaf_page_delta", "writing deltas for leaf pages", C_BOOL, 95, 0, 0,
+    V_GLOBAL_DISAGG_LEAF_PAGE_DELTA},
+
+  {"disagg.multi", "configure multiple nodes (leader & followers) for disaggregated storage",
+    C_IGNORE | C_BOOL, 0, 0, 0, V_GLOBAL_DISAGG_MULTI},
+
+  {"disagg.enabled", "configure disaggregated storage", C_IGNORE | C_BOOL | C_TABLE | C_TYPE_ROW, 0,
+    0, 0, V_TABLE_DISAGG_ENABLED},
+
+  {"disagg.layered", "use layered URI for any disaggregated tables", C_BOOL, 100, 1, 0,
+    V_GLOBAL_DISAGG_LAYERED},
+
+  {"disagg.mode", "configure mode for disaggregated storage (follower | leader | switch)",
+    C_IGNORE | C_STRING, 0, 0, 0, V_GLOBAL_DISAGG_MODE},
+
+  {"disagg.page_log", "configure page log for disaggregated storage (off | palm | palite)",
+    C_IGNORE | C_STRING, 0, 0, 0, V_GLOBAL_DISAGG_PAGE_LOG},
+
+  {"disagg.page_log.verbose", "set page log verbosity (default=WT_VERBOSE_INFO)", C_IGNORE, 0, 0,
+    WT_VERBOSE_DEBUG_5, V_GLOBAL_DISAGG_PAGE_LOG_VERBOSE},
+
   {"disk.checksum", "checksum type (on | off | uncompressed | unencrypted)",
     C_IGNORE | C_STRING | C_TABLE, 0, 0, 0, V_TABLE_DISK_CHECKSUM},
 
@@ -171,6 +210,9 @@ CONFIG configuration_list[] = {{"assert.read_timestamp", "assert read_timestamp"
 
   {"disk.mmap_all", "configure mmap operations (read and write)", C_BOOL, 5, 0, 0,
     V_GLOBAL_DISK_MMAP_ALL},
+
+  {"eviction.evict_use_softptr", "use soft pointers instead of hard hazard pointers in eviction",
+    C_BOOL, 20, 0, 0, V_GLOBAL_EVICTION_EVICT_USE_SOFTPTR},
 
   /* Test format can only handle 32 tables so we use a maximum value of 32 here. */
   {"file_manager.close_handle_minimum",
@@ -213,6 +255,12 @@ CONFIG configuration_list[] = {{"assert.read_timestamp", "assert read_timestamp"
     V_GLOBAL_LOGGING_PREALLOC},
 
   {"logging.remove", "configure log file removal", C_BOOL, 50, 0, 0, V_GLOBAL_LOGGING_REMOVE},
+
+  {"obsolete_cleanup.method", "obsolete cleanup strategy", C_IGNORE | C_STRING, 0, 0, 0,
+    V_GLOBAL_OBSOLETE_CLEANUP_METHOD},
+
+  {"obsolete_cleanup.wait", "obsolete cleanup interval in seconds", 0x0, 0, 3600, 100000,
+    V_GLOBAL_OBSOLETE_CLEANUP_WAIT},
 
   {"ops.alter", "configure table alterations", C_BOOL, 10, 0, 0, V_GLOBAL_OPS_ALTER},
 
@@ -262,6 +310,10 @@ CONFIG configuration_list[] = {{"assert.read_timestamp", "assert read_timestamp"
 
   {"prefetch", "configure prefetch", C_BOOL, 50, 0, 0, V_GLOBAL_PREFETCH},
 
+  {"precise_checkpoint", "Precise checkpoint", C_BOOL, 50, 0, 0, V_GLOBAL_PRECISE_CHECKPOINT},
+
+  {"preserve_prepared", "Preserve prepared", C_BOOL, 50, 0, 0, V_GLOBAL_PRESERVE_PREPARED},
+
   {"quiet", "quiet run (same as -q)", C_BOOL | C_IGNORE, 0, 0, 1, V_GLOBAL_QUIET},
 
   {"random.data_seed", "set random seed for data operations", 0x0, 0, 0, UINT_MAX,
@@ -281,8 +333,8 @@ CONFIG configuration_list[] = {{"assert.read_timestamp", "assert read_timestamp"
 
   {"runs.rows", "number of rows", C_TABLE, 10, M(1), M(100), V_TABLE_RUNS_ROWS},
 
-  {"runs.source", "data source type (file | table)", C_IGNORE | C_STRING | C_TABLE, 0, 0, 0,
-    V_TABLE_RUNS_SOURCE},
+  {"runs.source", "data source type (file | layered | table)", C_IGNORE | C_STRING | C_TABLE, 0, 0,
+    0, V_TABLE_RUNS_SOURCE},
 
   {"runs.tables", "number of tables", 0x0, 1, 32, V_MAX_TABLES_CONFIG, V_GLOBAL_RUNS_TABLES},
 
@@ -326,6 +378,9 @@ CONFIG configuration_list[] = {{"assert.read_timestamp", "assert read_timestamp"
 
   {"stress.failpoint_hs_delete_key_from_ts", "stress failpoint history store delete key from ts",
     C_BOOL, 30, 0, 0, V_GLOBAL_STRESS_FAILPOINT_HS_DELETE_KEY_FROM_TS},
+
+  {"stress.failpoint_rec_before_wrapup", "stress failpoint reconciliation before wrapup", C_BOOL, 1,
+    0, 0, V_GLOBAL_STRESS_FAILPOINT_REC_BEFORE_WRAPUP},
 
   {"stress.hs_checkpoint_delay", "stress history store checkpoint delay", C_BOOL, 2, 0, 0,
     V_GLOBAL_STRESS_HS_CHECKPOINT_DELAY},

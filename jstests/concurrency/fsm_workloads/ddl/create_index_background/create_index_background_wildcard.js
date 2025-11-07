@@ -5,6 +5,8 @@
  * isn't guaranteed to be true when they are run in parallel with other workloads. Therefore
  * it can't be run in concurrency simultaneous suites.
  * @tags: [
+ *   # TODO(SERVER-110840): Primary-driven index builds don't support draining side writes yet.
+ *   primary_driven_index_builds_incompatible,
  *   assumes_balancer_off,
  *   creates_background_indexes,
  *   requires_getmore,
@@ -12,12 +14,10 @@
  * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
-import {
-    $config as $baseConfig
-} from "jstests/concurrency/fsm_workloads/ddl/create_index_background/create_index_background.js";
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/ddl/create_index_background/create_index_background.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
-    $config.data.getIndexSpec = function() {
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
+    $config.data.getIndexSpec = function () {
         return {"$**": 1};
     };
 

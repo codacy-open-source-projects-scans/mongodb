@@ -4,28 +4,30 @@
  * Intersperse queries which use the SORT stage with updates and deletes of documents they may
  * match.
  * @tags: [
- *   requires_getmore
+ *   requires_getmore,
+ *   # This test relies on query commands returning specific batch-sized responses.
+ *   assumes_no_implicit_cursor_exhaustion,
  * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
-import {
-    $config as $baseConfig
-} from "jstests/concurrency/fsm_workloads/query/yield/yield_sort_merge.js";
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/query/yield/yield_sort_merge.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
     /*
      * Execute a query that will use the SORT stage.
      */
     $config.states.query = function sort(db, collName) {
-        var nMatches = 100;
+        let nMatches = 100;
         // Sort on c, since it's not an indexed field.
-        var cursor =
-            db[collName].find({a: {$lt: nMatches}}).sort({c: -1}).batchSize(this.batchSize);
+        let cursor = db[collName]
+            .find({a: {$lt: nMatches}})
+            .sort({c: -1})
+            .batchSize(this.batchSize);
 
-        var verifier = function sortVerifier(doc, prevDoc) {
-            var correctOrder = true;
+        let verifier = function sortVerifier(doc, prevDoc) {
+            let correctOrder = true;
             if (prevDoc !== null) {
-                correctOrder = (doc.c <= prevDoc.c);
+                correctOrder = doc.c <= prevDoc.c;
             }
             return doc.a < nMatches && correctOrder;
         };
@@ -34,8 +36,8 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
     };
 
     $config.data.genUpdateDoc = function genUpdateDoc() {
-        var newA = Random.randInt(this.nDocs);
-        var newC = Random.randInt(this.nDocs);
+        let newA = Random.randInt(this.nDocs);
+        let newC = Random.randInt(this.nDocs);
         return {$set: {a: newA, c: newC}};
     };
 

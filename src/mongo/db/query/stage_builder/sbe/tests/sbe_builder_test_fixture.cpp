@@ -27,28 +27,25 @@
  *    it in the license file.
  */
 
-#include <absl/container/inlined_vector.h>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/stage_builder/sbe/tests/sbe_builder_test_fixture.h"
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_mock.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/shard_filterer.h"
 #include "mongo/db/keypattern.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_mock.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role_mock.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/canonical_query.h"
-#include "mongo/db/query/find_command.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
-#include "mongo/db/query/stage_builder/sbe/tests/sbe_builder_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/util/intrusive_counter.h"
+#include "mongo/unittest/unittest.h"
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -65,15 +62,16 @@ std::tuple<sbe::value::SlotVector,
            std::unique_ptr<sbe::PlanStage>,
            stage_builder::PlanStageData,
            boost::intrusive_ptr<ExpressionContext>>
-SbeStageBuilderTestFixture::buildPlanStage(
-    std::unique_ptr<QuerySolution> querySolution,
-    MultipleCollectionAccessor& colls,
-    bool hasRecordId,
-    std::unique_ptr<ShardFiltererFactoryInterface> shardFiltererInterface,
-    std::unique_ptr<CollatorInterface> collator) {
-    auto findCommand = std::make_unique<FindCommandRequest>(_nss);
-    const boost::intrusive_ptr<ExpressionContext> expCtx(
-        new ExpressionContextForTest(operationContext(), _nss, std::move(collator)));
+SbeStageBuilderTestFixture::buildPlanStage(std::unique_ptr<QuerySolution> querySolution,
+                                           MultipleCollectionAccessor& colls,
+                                           bool hasRecordId,
+                                           BuildPlanStageParam param) {
+    auto findCommand = param.makeFindCmdReq(_nss);
+
+    boost::intrusive_ptr<ExpressionContext> expCtx = param.expCtx
+        ? *param.expCtx
+        : new ExpressionContextForTest(operationContext(), _nss, std::move(param.collator));
+
     auto cq = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
         .expCtx = expCtx, .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
     if (hasRecordId) {
@@ -82,11 +80,13 @@ SbeStageBuilderTestFixture::buildPlanStage(
     }
 
     CollectionMock coll(_nss);
-    CollectionPtr collPtr(&coll);
-    if (shardFiltererInterface) {
-        auto shardFilterer = shardFiltererInterface->makeShardFilterer(operationContext());
+    // TODO(SERVER-103403): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
+    CollectionPtr collPtr = CollectionPtr::CollectionPtr_UNSAFE(&coll);
+    if (param.shardFilterInterface) {
+        auto shardFilterer = param.shardFilterInterface->makeShardFilterer(operationContext());
         collPtr.setShardKeyPattern(shardFilterer->getKeyPattern().toBSON());
-        colls = MultipleCollectionAccessor(collPtr);
+        colls = MultipleCollectionAccessor(
+            shard_role_mock::acquireCollectionMocked(operationContext(), _nss, std::move(collPtr)));
     }
 
     stage_builder::SlotBasedStageBuilder builder{
@@ -96,8 +96,8 @@ SbeStageBuilderTestFixture::buildPlanStage(
 
     // Reset "shardFilterer".
     if (auto shardFiltererSlot = data.env->getSlotIfExists("shardFilterer"_sd);
-        shardFiltererSlot && shardFiltererInterface) {
-        auto shardFilterer = shardFiltererInterface->makeShardFilterer(operationContext());
+        shardFiltererSlot && param.shardFilterInterface) {
+        auto shardFilterer = param.shardFilterInterface->makeShardFilterer(operationContext());
         data.env->resetSlot(*shardFiltererSlot,
                             sbe::value::TypeTags::shardFilterer,
                             sbe::value::bitcastFrom<ShardFilterer*>(shardFilterer.release()),
@@ -118,24 +118,72 @@ SbeStageBuilderTestFixture::buildPlanStage(
     return {slots, std::move(stage), std::move(data), expCtx};
 }
 
+void SbeStageBuilderTestFixture::insertDocuments(const NamespaceString& nss,
+                                                 const std::vector<BSONObj>& docs) {
+    std::vector<InsertStatement> inserts{docs.begin(), docs.end()};
+
+    auto coll = acquireCollection(
+        operationContext(),
+        CollectionAcquisitionRequest(nss,
+                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     repl::ReadConcernArgs::get(operationContext()),
+                                     AcquisitionPrerequisites::kWrite),
+        MODE_IX);
+    {
+        WriteUnitOfWork wuow{operationContext()};
+        ASSERT_OK(collection_internal::insertDocuments(operationContext(),
+                                                       coll.getCollectionPtr(),
+                                                       inserts.begin(),
+                                                       inserts.end(),
+                                                       nullptr /* opDebug */));
+        wuow.commit();
+    }
+}
+
+void GoldenSbeStageBuilderTestFixture::createCollection(const std::vector<BSONObj>& docs,
+                                                        boost::optional<BSONObj> indexKeyPattern,
+                                                        CollectionOptions options) {
+    ASSERT_FALSE(_collInitialized) << "collection has been initialized";
+    _collInitialized = true;
+    // Create collection and index
+    ASSERT_OK(storageInterface()->createCollection(operationContext(), _nss, CollectionOptions()));
+    if (indexKeyPattern) {
+        ASSERT_OK(storageInterface()->createIndexesOnEmptyCollection(
+            operationContext(),
+            _nss,
+            {BSON("v" << 2 << "name" << DBClientBase::genIndexName(*indexKeyPattern) << "key"
+                      << *indexKeyPattern)}));
+    }
+    insertDocuments(_nss, docs);
+}
+
 void GoldenSbeStageBuilderTestFixture::runTest(std::unique_ptr<QuerySolutionNode> root,
-                                               const mongo::BSONArray& expectedValue) {
+                                               const mongo::BSONArray& expectedValue,
+                                               BuildPlanStageParam param) {
     auto querySolution = makeQuerySolution(std::move(root));
 
     // Translate the QuerySolution tree to an sbe::PlanStage.
-    AutoGetCollection localColl(operationContext(), _nss, LockMode::MODE_IS);
-    MultipleCollectionAccessor colls(*localColl);
-    auto [resultSlots, stage, data, _] = buildPlanStage(std::move(querySolution),
-                                                        colls,
-                                                        false /*hasRecordId*/,
-                                                        nullptr /*shard filterer*/,
-                                                        nullptr /*collator*/);
+    boost::optional<CollectionOrViewAcquisition> localColl;
+    MultipleCollectionAccessor colls;
+    if (_collInitialized) {
+        localColl.emplace(
+            acquireCollectionOrView(operationContext(),
+                                    CollectionOrViewAcquisitionRequest::fromOpCtx(
+                                        operationContext(), _nss, AcquisitionPrerequisites::kRead),
+                                    MODE_IS));
+        colls = MultipleCollectionAccessor(*localColl);
+    }
+
+    auto [resultSlots, stage, data, _] =
+        buildPlanStage(std::move(querySolution), colls, false /*hasRecordId*/, std::move(param));
     auto resultAccessors = prepareTree(&data.env.ctx, stage.get(), resultSlots);
     ASSERT_EQ(resultAccessors.size(), 1u);
 
     // Print the stage explain output and verify.
     _gctx->printTestHeader(GoldenTestContext::HeaderFormat::Text);
-    _gctx->outStream() << replaceUuid(sbe::DebugPrinter().print(*stage.get()), localColl->uuid());
+    auto explain = sbe::DebugPrinter().print(*stage.get());
+    _gctx->outStream() << (localColl ? replaceUuid(explain, localColl->getCollection().uuid())
+                                     : explain);
     _gctx->outStream() << std::endl;
     _gctx->verifyOutput();
 
@@ -169,21 +217,10 @@ std::string GoldenSbeStageBuilderTestFixture::replaceUuid(std::string input, UUI
     return input;
 }
 
-void GoldenSbeStageBuilderTestFixture::insertDocuments(const std::vector<BSONObj>& docs) {
-    std::vector<InsertStatement> inserts{docs.begin(), docs.end()};
-
-    AutoGetCollection agc(operationContext(), _nss, LockMode::MODE_IX);
-    {
-        WriteUnitOfWork wuow{operationContext()};
-        ASSERT_OK(collection_internal::insertDocuments(
-            operationContext(), *agc, inserts.begin(), inserts.end(), nullptr /* opDebug */));
-        wuow.commit();
-    }
-}
-
 void GoldenSbeExprBuilderTestFixture::setUp() {
     SbeStageBuilderTestFixture::setUp();
     _expCtx = new ExpressionContextForTest();
+    _planStageData = std::make_unique<stage_builder::PlanStageStaticData>();
     _state.emplace(operationContext(),
                    _env,
                    _planStageData.get(),
@@ -197,8 +234,8 @@ void GoldenSbeExprBuilderTestFixture::setUp() {
                    &_sortSpecMap,
                    _expCtx,
                    false /* needsMerge */,
-                   false /* allowDiskUse */
-    );
+                   false /* allowDiskUse */,
+                   _expCtx->getIfrContext());
 }
 
 void GoldenSbeExprBuilderTestFixture::runTest(stage_builder::SbExpr sbExpr,

@@ -119,9 +119,6 @@ ERROR_ID_REPLY_FIELD_DESERIALIZER_NOT_EQUAL = "ID0076"
 ERROR_ID_NEW_REPLY_FIELD_REQUIRES_STABILITY = "ID0077"
 ERROR_ID_NEW_PARAMETER_REQUIRES_STABILITY = "ID0078"
 ERROR_ID_NEW_COMMAND_TYPE_FIELD_REQUIRES_STABILITY = "ID0079"
-ERROR_ID_NEW_REPLY_CHAINED_TYPE_NOT_SUBSET = "ID0080"
-ERROR_ID_NEW_COMMAND_PARAMETER_CHAINED_TYPE_NOT_SUPERSET = "ID0081"
-ERROR_ID_NEW_COMMAND_CHAINED_TYPE_NOT_SUPERSET = "ID0082"
 ERROR_ID_UNSTABLE_REPLY_FIELD_CHANGED_TO_STABLE = "ID0083"
 ERROR_ID_UNSTABLE_COMMAND_PARAM_FIELD_CHANGED_TO_STABLE = "ID0084"
 ERROR_ID_UNSTABLE_COMMAND_TYPE_FIELD_CHANGED_TO_STABLE = "ID0085"
@@ -250,9 +247,12 @@ class IDLCompatibilityErrorCollection(object):
     def dump_errors(self) -> None:
         """Print the list of errors."""
         error_list = self.to_list()
-        print("Errors found while checking IDL compatibility: %s errors:" % (len(error_list)))
-        for error_msg in error_list:
-            print("%s\n\n" % error_msg)
+        if len(error_list) == 0:
+            print("IDL compatibility check passed.")
+        else:
+            print("IDL compatibility check failed with %s errors:" % (len(error_list)))
+            for error_msg in error_list:
+                print("%s\n\n" % error_msg)
         print("------------------------------------------------")
 
     def count(self) -> int:
@@ -428,7 +428,6 @@ class IDLCompatibilityContext(object):
         type_name: Optional[str],
         is_command_parameter: bool,
     ) -> None:
-        # pylint: disable=invalid-name
         """Add an error about the new and old command or parameter type validators not being equal."""
         if is_command_parameter:
             self._add_error(
@@ -536,7 +535,6 @@ class IDLCompatibilityContext(object):
         type_name: str,
         is_command_parameter: bool,
     ) -> None:
-        # pylint: disable=invalid-name
         """
         Add a new added required parameter or command type field error.
 
@@ -630,7 +628,6 @@ class IDLCompatibilityContext(object):
         type_name: Optional[str],
         is_command_parameter: bool,
     ) -> None:
-        # pylint: disable=invalid-name
         """
         Add a stable required parameter or command type field error.
 
@@ -764,7 +761,6 @@ class IDLCompatibilityContext(object):
         field_name: Optional[str],
         is_command_parameter: bool,
     ) -> None:
-        # pylint: disable=invalid-name
         """
         Add an error about the new command or parameter type not being a variant type.
 
@@ -804,7 +800,6 @@ class IDLCompatibilityContext(object):
         field_name: Optional[str],
         is_command_parameter: bool,
     ) -> None:
-        # pylint: disable=invalid-name
         """
         Add an error about the new variant types not being a superset.
 
@@ -835,48 +830,6 @@ class IDLCompatibilityContext(object):
                     "the command types."
                 )
                 % (command_name, variant_type_name),
-                file,
-            )
-
-    def add_new_command_or_param_chained_type_not_superset_error(
-        self,
-        command_name: str,
-        chained_type_name: str,
-        file: str,
-        field_name: Optional[str],
-        is_command_parameter: bool,
-    ) -> None:
-        # pylint: disable=invalid-name
-        """
-        Add an error about the new chained types not being a superset.
-
-        Add an error about the new command or parameter chained types not being a superset
-        of the old chained types.
-        """
-        if is_command_parameter:
-            self._add_error(
-                ERROR_ID_NEW_COMMAND_PARAMETER_CHAINED_TYPE_NOT_SUPERSET,
-                command_name,
-                (
-                    "The '%s' command has field or sub-field '%s' of chained types that is not "
-                    "a superset of the corresponding old definition of the field's chained types: "
-                    "The type '%s' is in the old definition of the field types but not the new "
-                    "definition of the field types."
-                )
-                % (command_name, field_name, chained_type_name),
-                file,
-            )
-        else:
-            self._add_error(
-                ERROR_ID_NEW_COMMAND_CHAINED_TYPE_NOT_SUPERSET,
-                command_name,
-                (
-                    "'%s' or its sub-struct has chained types that is not a supserset "
-                    "of the corresponding old definition of the command chained types: The type '%s' "
-                    "is in the old definition of the command types but not the new definition of the "
-                    "command types."
-                )
-                % (command_name, chained_type_name),
                 file,
             )
 
@@ -1148,28 +1101,6 @@ class IDLCompatibilityContext(object):
             file,
         )
 
-    def add_new_reply_chained_type_not_subset_error(
-        self, command_name: str, reply_name: str, chained_type_name: str, file: str
-    ) -> None:
-        """
-        Add an error about the reply chained types not being a subset.
-
-        Add an error about the new reply chained types
-        not being a subset of the old chained types.
-        """
-        self._add_error(
-            ERROR_ID_NEW_REPLY_CHAINED_TYPE_NOT_SUBSET,
-            command_name,
-            (
-                "'%s' has a reply '%s' with chained types that is "
-                "not a subset of the corresponding "
-                "old definition of the reply chained types: The type '%s' is not in the old "
-                "definition of the reply chained types."
-            )
-            % (command_name, reply_name, chained_type_name),
-            file,
-        )
-
     def add_old_command_or_param_type_bson_any_error(
         self,
         command_name: str,
@@ -1217,7 +1148,6 @@ class IDLCompatibilityContext(object):
         field_name: Optional[str],
         is_command_parameter: bool,
     ) -> None:
-        # pylint: disable=invalid-name
         """
         Add an error about the old command or param type bson serialization type being 'any'.
 
@@ -1256,7 +1186,6 @@ class IDLCompatibilityContext(object):
         field_name: Optional[str],
         is_command_parameter: bool,
     ) -> None:
-        # pylint: disable=invalid-name
         """
         Add an error about the new command or param type bson serialization type being 'any'.
 
@@ -1642,7 +1571,6 @@ class IDLCompatibilityContext(object):
     def add_new_param_or_command_type_field_requires_stability_error(
         self, command_name: str, field_name: str, file: str, is_command_parameter: bool
     ) -> None:
-        # pylint: disable=invalid-name
         """Add an error that a new param or command type field requires the 'stability' field."""
         if is_command_parameter:
             self._add_error(

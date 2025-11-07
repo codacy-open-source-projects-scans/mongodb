@@ -27,21 +27,19 @@
  *    it in the license file.
  */
 
-#include <utility>
-
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/inlined_vector.h>
-#include <absl/meta/type_traits.h>
+#include "mongo/db/exec/sbe/stages/loop_join.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
-#include "mongo/db/exec/sbe/stages/loop_join.h"
 #include "mongo/db/exec/sbe/stages/stage_visitors.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <utility>
+
 
 namespace mongo::sbe {
 LoopJoinStage::LoopJoinStage(std::unique_ptr<PlanStage> outer,
@@ -79,7 +77,9 @@ LoopJoinStage::LoopJoinStage(std::unique_ptr<PlanStage> outer,
     _children.emplace_back(std::move(outer));
     _children.emplace_back(std::move(inner));
 
-    invariant(_joinType == JoinType::Inner || _joinType == JoinType::Left);
+    tassert(11094719,
+            "Expecting either inner or left join in loop join stage",
+            _joinType == JoinType::Inner || _joinType == JoinType::Left);
 }
 
 
@@ -214,7 +214,7 @@ void LoopJoinStage::close() {
     _children[0]->close();
 }
 
-void LoopJoinStage::doSaveState(bool relinquishCursor) {
+void LoopJoinStage::doSaveState() {
     if (_isReadingLeftSide) {
         // If we yield while reading the left side, there is no need to prepareForYielding() data
         // held in the right side, since we will have to re-open it anyway.
@@ -225,7 +225,7 @@ void LoopJoinStage::doSaveState(bool relinquishCursor) {
 
 std::unique_ptr<PlanStageStats> LoopJoinStage::getStats(bool includeDebugInfo) const {
     auto ret = std::make_unique<PlanStageStats>(_commonStats);
-    invariant(ret);
+
     ret->children.emplace_back(_children[0]->getStats(includeDebugInfo));
     ret->children.emplace_back(_children[1]->getStats(includeDebugInfo));
     ret->specific = std::make_unique<LoopJoinStats>(_specificStats);

@@ -29,45 +29,36 @@
 
 #include "mongo/db/exec/sbe/stages/hash_agg.h"
 
-#include <absl/container/inlined_vector.h>
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <type_traits>
-
-#include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/stages/hashagg_base.h"
+#include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/stats/counters.h"
-#include "mongo/db/storage/key_format.h"
-#include "mongo/db/storage/key_string/key_string.h"
+#include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 #include "mongo/db/storage/record_data.h"
-#include "mongo/db/storage/storage_engine.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
 #include "mongo/util/str.h"
+
+#include <type_traits>
+
+#include <boost/optional/optional.hpp>
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
 namespace sbe {
 HashAggStage::HashAggStage(std::unique_ptr<PlanStage> input,
                            value::SlotVector gbs,
-                           AggExprVector aggs,
+                           std::vector<std::unique_ptr<HashAggAccumulator>> accumulatorList,
                            value::SlotVector seekKeysSlots,
                            bool optimizedClose,
                            boost::optional<value::SlotId> collatorSlot,
                            bool allowDiskUse,
-                           SlotExprPairVector mergingExprs,
                            PlanYieldPolicy* yieldPolicy,
                            PlanNodeId planNodeId,
                            bool participateInTrialRunTracking,
@@ -75,54 +66,38 @@ HashAggStage::HashAggStage(std::unique_ptr<PlanStage> input,
     : HashAggBaseStage("group"_sd,
                        yieldPolicy,
                        planNodeId,
-                       nullptr,
+                       nullptr /* _collatorAccessor */,
                        participateInTrialRunTracking,
                        allowDiskUse,
                        forceIncreasedSpilling),
       _gbs(std::move(gbs)),
-      _aggs(std::move(aggs)),
+      _accumulatorList(std::move(accumulatorList)),
       _collatorSlot(collatorSlot),
       _seekKeysSlots(std::move(seekKeysSlots)),
-      _optimizedClose(optimizedClose),
-      _mergingExprs(std::move(mergingExprs)) {
+      _optimizedClose(optimizedClose) {
     _children.emplace_back(std::move(input));
-    invariant(_seekKeysSlots.empty() || _seekKeysSlots.size() == _gbs.size());
+    tassert(11094726,
+            "Expecting seekKeySlots to be either empty or of the same size as gbs array",
+            _seekKeysSlots.empty() || _seekKeysSlots.size() == _gbs.size());
     tassert(5843100,
             "HashAgg stage was given optimizedClose=false and seek keys",
             _seekKeysSlots.empty() || _optimizedClose);
-
-    if (_allowDiskUse) {
-        tassert(7039549,
-                "disk use enabled for HashAggStage but incorrect number of merging expresssions",
-                _aggs.size() == _mergingExprs.size());
-    }
 }
 
 std::unique_ptr<PlanStage> HashAggStage::clone() const {
-    AggExprVector aggs;
-    aggs.reserve(_aggs.size());
-    for (auto& [slot, expr] : _aggs) {
-        std::unique_ptr<EExpression> initExpr{nullptr};
-        if (expr.init) {
-            initExpr = expr.init->clone();
-        }
-        aggs.push_back(std::make_pair(slot, AggExprPair{std::move(initExpr), expr.agg->clone()}));
-    }
-
-    SlotExprPairVector mergingExprsClone;
-    mergingExprsClone.reserve(_mergingExprs.size());
-    for (auto&& [k, v] : _mergingExprs) {
-        mergingExprsClone.push_back({k, v->clone()});
+    std::vector<std::unique_ptr<HashAggAccumulator>> clonedAccumulators;
+    clonedAccumulators.reserve(_accumulatorList.size());
+    for (auto& accumulator : _accumulatorList) {
+        clonedAccumulators.emplace_back(accumulator->clone());
     }
 
     return std::make_unique<HashAggStage>(_children[0]->clone(),
                                           _gbs,
-                                          std::move(aggs),
+                                          std::move(clonedAccumulators),
                                           _seekKeysSlots,
                                           _optimizedClose,
                                           _collatorSlot,
                                           _allowDiskUse,
-                                          std::move(mergingExprsClone),
                                           _yieldPolicy,
                                           _commonStats.nodeId,
                                           participateInTrialRunTracking(),
@@ -145,7 +120,7 @@ void HashAggStage::prepare(CompileCtx& ctx) {
         tassert(7039551, "duplicate slot id", inserted);
     };
 
-    size_t counter = 0;
+    size_t accIdx = 0;
     // Process group by columns.
     for (auto& slot : _gbs) {
         throwIfDupSlot(slot);
@@ -154,9 +129,9 @@ void HashAggStage::prepare(CompileCtx& ctx) {
 
         // Construct accessors for obtaining the key values from either the hash table '_ht' or the
         // '_recordStore'.
-        _outHashKeyAccessors.emplace_back(std::make_unique<HashKeyAccessor>(_htIt, counter));
+        _outHashKeyAccessors.emplace_back(std::make_unique<HashKeyAccessor>(_htIt, accIdx));
         _outRecordStoreKeyAccessors.emplace_back(
-            std::make_unique<value::MaterializedSingleRowAccessor>(_outKeyRowRecordStore, counter));
+            std::make_unique<value::MaterializedSingleRowAccessor>(_outKeyRowRecordStore, accIdx));
 
         // A 'SwitchAccessor' is used to point the '_outKeyAccessors' to the key coming from the
         // '_ht' or the '_recordStore' when draining the HashAgg stage in getNext(). If no spilling
@@ -169,7 +144,7 @@ void HashAggStage::prepare(CompileCtx& ctx) {
 
         _outAccessors[slot] = _outKeyAccessors.back().get();
 
-        ++counter;
+        ++accIdx;
     }
 
     // Process seek keys (if any). The keys must come from outside of the subtree (by definition) so
@@ -178,15 +153,15 @@ void HashAggStage::prepare(CompileCtx& ctx) {
         _seekKeysAccessors.emplace_back(ctx.getAccessor(slot));
     }
 
-    counter = 0;
-    for (auto& [slot, expr] : _aggs) {
-        throwIfDupSlot(slot);
+    accIdx = 0;
+    for (auto& accumulator : _accumulatorList) {
+        throwIfDupSlot(accumulator->getOutSlot());
 
         // Just like with the output accessors for the keys, we construct output accessors for the
         // aggregate values that read from either the hash table '_ht' or the '_recordStore'.
         _outRecordStoreAggAccessors.emplace_back(
-            std::make_unique<value::MaterializedSingleRowAccessor>(_outAggRowRecordStore, counter));
-        _outHashAggAccessors.emplace_back(std::make_unique<HashAggAccessor>(_htIt, counter));
+            std::make_unique<value::MaterializedSingleRowAccessor>(_outAggRowRecordStore, accIdx));
+        _outHashAggAccessors.emplace_back(std::make_unique<HashAggAccessor>(_htIt, accIdx));
 
         // A 'SwitchAccessor' is used to toggle the '_outAggAccessors' between the '_ht' and the
         // '_recordStore'. Just like the key values, the aggregate values are always obtained from
@@ -196,42 +171,39 @@ void HashAggStage::prepare(CompileCtx& ctx) {
             std::make_unique<value::SwitchAccessor>(std::vector<value::SlotAccessor*>{
                 _outHashAggAccessors.back().get(), _outRecordStoreAggAccessors.back().get()}));
 
-        _outAccessors[slot] = _outAggAccessors.back().get();
+        _outAccessors[accumulator->getOutSlot()] = _outAggAccessors.back().get();
 
         ctx.root = this;
-        std::unique_ptr<vm::CodeFragment> initCode{nullptr};
-        if (expr.init) {
-            initCode = expr.init->compile(ctx);
-        }
-        ctx.aggExpression = true;
-        ctx.accumulator = _outAggAccessors.back().get();
-        _aggCodes.emplace_back(std::move(initCode), expr.agg->compile(ctx));
-        ctx.aggExpression = false;
+        accumulator->prepare(ctx, _outAggAccessors.back().get());
 
-        ++counter;
+        ++accIdx;
     }
 
-    // If disk use is allowed, then we need to compile the merging expressions as well.
+    // Merging expressions are used to merge partial accumulator values after spilling them
+    // to disk, so we only compile them when spilling is enabled.
     if (_allowDiskUse) {
-        counter = 0;
-        for (auto&& [spillSlot, mergingExpr] : _mergingExprs) {
-            throwIfDupSlot(spillSlot);
+        accIdx = 0;
+        for (auto& accumulator : _accumulatorList) {
+            throwIfDupSlot(accumulator->getSpillSlot());
 
+            // Create an accessor to store a partial value recovered from disk, making it available
+            // to the merging expression.
             _spilledAggsAccessors.push_back(
-                std::make_unique<value::MaterializedSingleRowAccessor>(_spilledAggRow, counter));
-            _spilledAggsAccessorMap[spillSlot] = _spilledAggsAccessors.back().get();
+                std::make_unique<value::MaterializedSingleRowAccessor>(_spilledAggRow, accIdx));
+            _spilledAggsAccessorMap[accumulator->getSpillSlot()] =
+                _spilledAggsAccessors.back().get();
 
             ctx.root = this;
-            ctx.aggExpression = true;
-            ctx.accumulator = _outAggAccessors[counter].get();
-            _mergingExprCodes.emplace_back(mergingExpr->compile(ctx));
-            ctx.aggExpression = false;
+            accumulator->prepareForMerge(ctx, _outAggAccessors[accIdx].get());
 
-            ++counter;
+            ++accIdx;
         }
     }
 
     _compiled = true;
+
+    _memoryTracker = OperationMemoryUsageTracker::createSimpleMemoryUsageTrackerForSBE(
+        _opCtx, loadMemoryLimit(StageMemoryLimit::QuerySBEAggApproxMemoryUseInBytesBeforeSpill));
 }
 
 value::SlotAccessor* HashAggStage::getAccessor(CompileCtx& ctx, value::SlotId slot) {
@@ -261,6 +233,7 @@ void HashAggStage::open(bool reOpen) {
     _commonStats.opens++;
 
     if (!reOpen || _seekKeysAccessors.empty()) {
+        tassert(10226701, "Expecting _opCtx to be populated", _opCtx);
         _children[0]->open(_childOpened);
         _childOpened = true;
         if (_collatorAccessor) {
@@ -277,7 +250,8 @@ void HashAggStage::open(bool reOpen) {
 
         _seekKeys.resize(_seekKeysAccessors.size());
 
-        // Reset state since this stage may have been previously opened.
+        // Reset switch accessors to point to '_ht' (index 0) not '_recordStore' (index 1) since
+        // this stage may have been previously opened.
         for (auto&& accessor : _outKeyAccessors) {
             accessor->setIndex(0);
         }
@@ -287,6 +261,7 @@ void HashAggStage::open(bool reOpen) {
         if (_recordStore) {
             _recordStore->resetCursor(_opCtx, _rsCursor);
         }
+        _rsCursor.reset();
         _recordStore.reset();
         _outKeyRowRecordStore = {0};
         _outAggRowRecordStore = {0};
@@ -299,11 +274,11 @@ void HashAggStage::open(bool reOpen) {
 
         // If the group-by key is empty, we aggregate into a single row. In this case, avoid hash
         // table lookups for each child document.
-        bool first = true;
+        bool firstDoc = true;
         const bool groupByListHasSlots = !_inKeyAccessors.empty();
         while (_children[0]->getNext() == PlanState::ADVANCED) {
-            bool newKey = false;
-            if (groupByListHasSlots || first) {
+            bool newKey = false;  // tells if the current key is NOT in '_ht' so must be inserted
+            if (groupByListHasSlots || firstDoc) {
                 // Copy keys in order to do the lookup.
                 size_t idx = 0;
                 for (auto& p : _inKeyAccessors) {
@@ -311,7 +286,7 @@ void HashAggStage::open(bool reOpen) {
                     key.reset(idx++, false, tag, val);
                 }
                 _htIt = _ht->find(key);
-                first = false;
+                firstDoc = false;
             }
             dassert(_htIt == _ht->find(key));
             if (_htIt == _ht->end()) {
@@ -326,19 +301,16 @@ void HashAggStage::open(bool reOpen) {
 
                 _htIt = it;
 
-                // Run accumulator initializer if needed.
+                // Run all acc initializers for this key.
                 for (size_t idx = 0; idx < _outAggAccessors.size(); ++idx) {
-                    if (_aggCodes[idx].first) {
-                        auto [owned, tag, val] = _bytecode.run(_aggCodes[idx].first.get());
-                        _outHashAggAccessors[idx]->reset(owned, tag, val);
-                    }
+                    _accumulatorList[idx]->initialize(_bytecode, *_outHashAggAccessors[idx]);
                 }
             }
 
-            // Accumulate state in '_ht'.
+            // Accumulate state in '_ht' value, which is a materialized row of '_outAggAccessors'
+            // each of which contains the current accumulator state for one accumulator.
             for (size_t idx = 0; idx < _outAggAccessors.size(); ++idx) {
-                auto [owned, tag, val] = _bytecode.run(_aggCodes[idx].second.get());
-                _outHashAggAccessors[idx]->reset(owned, tag, val);
+                _accumulatorList[idx]->accumulate(_bytecode, *_outHashAggAccessors[idx]);
             }
 
             // If the group-by key is empty we will only ever aggregate into a single row so no
@@ -347,6 +319,7 @@ void HashAggStage::open(bool reOpen) {
                 if (_forceIncreasedSpilling && !newKey) {
                     // If configured to spill more than usual, we spill after seeing the same key
                     // twice.
+                    _htIt = _ht->begin();
                     spill(memoryCheckData);
                 } else {
                     // Estimates how much memory is being used. If we estimate that the hash table
@@ -355,7 +328,7 @@ void HashAggStage::open(bool reOpen) {
                     checkMemoryUsageAndSpillIfNecessary(memoryCheckData);
                 }
             }
-        }
+        }  // while child's getNext advanced
 
         if (_optimizedClose) {
             _children[0]->close();
@@ -369,25 +342,12 @@ void HashAggStage::open(bool reOpen) {
         // store.
         if (_recordStore) {
             if (!_ht->empty()) {
+                _htIt = _ht->begin();
                 spill(memoryCheckData);
             }
 
-            auto& ru = *shard_role_details::getRecoveryUnit(_opCtx);
-            _specificStats.spilledDataStorageSize = _recordStore->rs()->storageSize(ru);
-            groupCounters.incrementGroupCountersPerQuery(_specificStats.spilledDataStorageSize);
-
-            // Establish a cursor, positioned at the beginning of the record store.
-            _rsCursor = _recordStore->getCursor(_opCtx);
-
-            // Callers will be obtaining the results from the spill table, so set the
-            // 'SwitchAccessors' so that they refer to the rows recovered from the record store
-            // under the hood.
-            for (auto&& accessor : _outKeyAccessors) {
-                accessor->setIndex(1);
-            }
-            for (auto&& accessor : _outAggAccessors) {
-                accessor->setIndex(1);
-            }
+            // Data will be returned from disk.
+            switchToDisk();
         }
     }
 
@@ -430,6 +390,7 @@ PlanState HashAggStage::getNextSpilled() {
             return deserializeSpilledRecord(record, _gbs.size(), keyBuffer);
         };
 
+    tassert(10226700, "Expecting _rsCursor to be populated", _rsCursor);
     if (_stashedNextRow.first.isEmpty()) {
         auto nextRecord = _rsCursor->next();
         if (!nextRecord) {
@@ -461,11 +422,12 @@ PlanState HashAggStage::getNextSpilled() {
             return trackPlanState(PlanState::ADVANCED);
         }
 
-        // Merge in the new partial aggregate values.
+        // Merge in the new partial aggregate values. The current in-memory partial state value is
+        // in _outRecordStoreAggAccessors[idx].get()->getViewOfValue(). The incoming disk partial
+        // state to be merged into it is in _spilledAggRow.getViewOfValue(idx).
         _spilledAggRow = std::move(recoveredRow.second);
-        for (size_t idx = 0; idx < _mergingExprCodes.size(); ++idx) {
-            auto [owned, tag, val] = _bytecode.run(_mergingExprCodes[idx].get());
-            _outRecordStoreAggAccessors[idx]->reset(owned, tag, val);
+        for (size_t idx = 0; idx < _accumulatorList.size(); ++idx) {
+            _accumulatorList[idx]->merge(_bytecode, *_outRecordStoreAggAccessors[idx]);
         }
     }
 
@@ -479,30 +441,27 @@ PlanState HashAggStage::getNext() {
     // If we've spilled, then we need to produce the output by merging the spilled segments from the
     // spill file.
     if (_recordStore) {
-        return getNextSpilled();
+        PlanState planState = getNextSpilled();
+        if (planState == PlanState::ADVANCED) {
+            for (size_t accIdx = 0; accIdx < _accumulatorList.size(); ++accIdx) {
+                _accumulatorList[accIdx]->finalize(_bytecode, *_outRecordStoreAggAccessors[accIdx]);
+            }
+        }
+        return planState;
     }
 
     // We didn't spill. Obtain the next output row from the hash table.
-    if (_htIt == _ht->end()) {
-        // First invocation of getNext() after open().
-        if (!_seekKeysAccessors.empty()) {
-            _htIt = _ht->find(_seekKeys);
-        } else {
-            _htIt = _ht->begin();
-        }
-    } else if (!_seekKeysAccessors.empty()) {
-        // Subsequent invocation with seek keys. Return only 1 single row (if any).
-        _htIt = _ht->end();
-    } else {
-        ++_htIt;
-    }
+    setIteratorToNextRecord();
 
     if (_htIt == _ht->end()) {
         // The hash table has been drained (and we never spilled to disk) so we're done.
         return trackPlanState(PlanState::IS_EOF);
-    } else {
-        return trackPlanState(PlanState::ADVANCED);
     }
+
+    for (size_t accIdx = 0; accIdx < _accumulatorList.size(); ++accIdx) {
+        _accumulatorList[accIdx]->finalize(_bytecode, *_outHashAggAccessors[accIdx]);
+    }
+    return trackPlanState(PlanState::ADVANCED);
 }
 
 std::unique_ptr<PlanStageStats> HashAggStage::getStats(bool includeDebugInfo) const {
@@ -513,36 +472,47 @@ std::unique_ptr<PlanStageStats> HashAggStage::getStats(bool includeDebugInfo) co
         DebugPrinter printer;
         BSONObjBuilder bob;
         bob.append("groupBySlots", _gbs.begin(), _gbs.end());
-        if (!_aggs.empty()) {
+        if (!_accumulatorList.empty()) {
             BSONObjBuilder exprBuilder(bob.subobjStart("expressions"));
-            for (auto&& [slot, expr] : _aggs) {
-                exprBuilder.append(str::stream() << slot, printer.print(expr.agg->debugPrint()));
+
+            for (auto& accumulator : _accumulatorList) {
+                exprBuilder.append(str::stream() << accumulator->getOutSlot(),
+                                   printer.print(accumulator->debugPrintAccumulate()));
             }
 
             BSONObjBuilder initExprBuilder(bob.subobjStart("initExprs"));
-            for (auto&& [slot, expr] : _aggs) {
-                if (expr.init) {
-                    initExprBuilder.append(str::stream() << slot,
-                                           printer.print(expr.init->debugPrint()));
+            for (auto& accumulator : _accumulatorList) {
+                if (auto initializer = accumulator->debugPrintInitialize(); initializer) {
+                    initExprBuilder.append(str::stream() << accumulator->getOutSlot(),
+                                           printer.print(std::move(*initializer)));
                 } else {
-                    initExprBuilder.appendNull(str::stream() << slot);
+                    initExprBuilder.appendNull(str::stream() << accumulator->getOutSlot());
                 }
             }
-        }
 
-        if (!_mergingExprs.empty()) {
             BSONObjBuilder nestedBuilder{bob.subobjStart("mergingExprs")};
-            for (auto&& [slot, expr] : _mergingExprs) {
-                nestedBuilder.append(str::stream() << slot, printer.print(expr->debugPrint()));
+            for (auto& accumulator : _accumulatorList) {
+                nestedBuilder.append(str::stream() << accumulator->getSpillSlot(),
+                                     printer.print(accumulator->debugPrintMerge()));
             }
         }
 
         // Spilling stats.
         bob.appendBool("usedDisk", _specificStats.usedDisk);
-        bob.appendNumber("spills", _specificStats.spills);
-        bob.appendNumber("spilledBytes", _specificStats.spilledBytes);
-        bob.appendNumber("spilledRecords", _specificStats.spilledRecords);
-        bob.appendNumber("spilledDataStorageSize", _specificStats.spilledDataStorageSize);
+        bob.appendNumber("spills",
+                         static_cast<long long>(_specificStats.spillingStats.getSpills()));
+        bob.appendNumber("spilledBytes",
+                         static_cast<long long>(_specificStats.spillingStats.getSpilledBytes()));
+        bob.appendNumber("spilledRecords",
+                         static_cast<long long>(_specificStats.spillingStats.getSpilledRecords()));
+        bob.appendNumber(
+            "spilledDataStorageSize",
+            static_cast<long long>(_specificStats.spillingStats.getSpilledDataStorageSize()));
+
+        if (feature_flags::gFeatureFlagQueryMemoryTracking.isEnabled()) {
+            bob.appendNumber("peakTrackedMemBytes",
+                             static_cast<long long>(_specificStats.peakTrackedMemBytes));
+        }
 
         ret->debugInfo = bob.obj();
     }
@@ -578,6 +548,9 @@ void HashAggStage::close() {
         _children[0]->close();
         _childOpened = false;
     }
+
+    _memoryTracker.value().set(0);
+    _specificStats.peakTrackedMemBytes = _memoryTracker.value().peakTrackedMemoryBytes();
 }
 
 std::vector<DebugPrinter::Block> HashAggStage::debugPrint() const {
@@ -595,17 +568,18 @@ std::vector<DebugPrinter::Block> HashAggStage::debugPrint() const {
 
     ret.emplace_back(DebugPrinter::Block("[`"));
     bool first = true;
-    for (auto&& [slot, expr] : _aggs) {
+    for (const auto& accumulator : _accumulatorList) {
         if (!first) {
             ret.emplace_back(DebugPrinter::Block("`,"));
         }
 
-        DebugPrinter::addIdentifier(ret, slot);
-        ret.emplace_back("=");
-        DebugPrinter::addBlocks(ret, expr.agg->debugPrint());
-        if (expr.init) {
+        DebugPrinter::addIdentifier(ret, accumulator->getOutSlot());
+        ret.emplace_back(DebugPrinter::Block("="));
+        DebugPrinter::addBlocks(ret, accumulator->debugPrintAccumulate());
+
+        if (auto initializer = accumulator->debugPrintInitialize(); initializer) {
             ret.emplace_back(DebugPrinter::Block("init{`"));
-            DebugPrinter::addBlocks(ret, expr.init->debugPrint());
+            DebugPrinter::addBlocks(ret, std::move(*initializer));
             ret.emplace_back(DebugPrinter::Block("`}"));
         }
         first = false;
@@ -624,27 +598,29 @@ std::vector<DebugPrinter::Block> HashAggStage::debugPrint() const {
         ret.emplace_back("`]");
     }
 
-    if (!_mergingExprs.empty()) {
-        ret.emplace_back("spillSlots[`");
-        for (size_t idx = 0; idx < _mergingExprs.size(); ++idx) {
-            if (idx) {
-                ret.emplace_back("`,");
-            }
-
-            DebugPrinter::addIdentifier(ret, _mergingExprs[idx].first);
+    ret.emplace_back(DebugPrinter::Block("spillSlots[`"));
+    first = true;
+    for (const auto& accumulator : _accumulatorList) {
+        if (!first) {
+            ret.emplace_back(DebugPrinter::Block("`,"));
         }
-        ret.emplace_back("`]");
 
-        ret.emplace_back("mergingExprs[`");
-        for (size_t idx = 0; idx < _mergingExprs.size(); ++idx) {
-            if (idx) {
-                ret.emplace_back("`,");
-            }
-
-            DebugPrinter::addBlocks(ret, _mergingExprs[idx].second->debugPrint());
-        }
-        ret.emplace_back("`]");
+        DebugPrinter::addIdentifier(ret, accumulator->getSpillSlot());
+        first = false;
     }
+    ret.emplace_back("`]");
+
+    ret.emplace_back(DebugPrinter::Block("mergingExprs[`"));
+    first = true;
+    for (const auto& accumulator : _accumulatorList) {
+        if (!first) {
+            ret.emplace_back(DebugPrinter::Block("`,"));
+        }
+
+        DebugPrinter::addBlocks(ret, accumulator->debugPrintMerge());
+        first = false;
+    }
+    ret.emplace_back("`]");
 
     if (!_optimizedClose) {
         ret.emplace_back("reopen");
@@ -664,9 +640,8 @@ size_t HashAggStage::estimateCompileTimeSize() const {
     size_t size = sizeof(*this);
     size += size_estimator::estimate(_children);
     size += size_estimator::estimate(_gbs);
-    size += size_estimator::estimate(_aggs);
+    size += size_estimator::estimate(_accumulatorList);
     size += size_estimator::estimate(_seekKeysSlots);
-    size += size_estimator::estimate(_mergingExprs);
     return size;
 }
 }  // namespace sbe

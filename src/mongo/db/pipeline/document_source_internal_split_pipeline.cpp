@@ -27,19 +27,21 @@
  *    it in the license file.
  */
 
-#include <string>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/document_source_internal_split_pipeline.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/pipeline/document_source_internal_split_pipeline.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/query/allowed_contexts.h"
-#include "mongo/s/grid.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/version_context.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <string>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -47,6 +49,7 @@ REGISTER_DOCUMENT_SOURCE(_internalSplitPipeline,
                          LiteParsedDocumentSourceDefault::parse,
                          DocumentSourceInternalSplitPipeline::createFromBson,
                          AllowedWithApiStrict::kNeverInVersion1);
+ALLOCATE_DOCUMENT_SOURCE_ID(_internalSplitPipeline, DocumentSourceInternalSplitPipeline::id)
 
 constexpr StringData DocumentSourceInternalSplitPipeline::kStageName;
 
@@ -55,7 +58,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalSplitPipeline::create
     uassert(ErrorCodes::TypeMismatch,
             str::stream() << "$_internalSplitPipeline must take a nested object but found: "
                           << elem,
-            elem.type() == BSONType::Object);
+            elem.type() == BSONType::object);
 
     auto specObj = elem.embeddedObject();
 
@@ -65,7 +68,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalSplitPipeline::create
         if (elt.fieldNameStringData() == "mergeType"_sd) {
             const auto type = elt.type();
 
-            if (type == BSONType::String) {
+            if (type == BSONType::string) {
                 auto mergeTypeString = elt.valueStringData();
                 if ("localOnly"_sd == mergeTypeString) {
                     mergeType = HostTypeRequirement::kLocalOnly;
@@ -78,14 +81,14 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalSplitPipeline::create
                               str::stream() << "unrecognized field while parsing mergeType: '"
                                             << mergeTypeString << "'");
                 }
-            } else if (type == BSONType::Object) {
+            } else if (type == BSONType::object) {
                 auto specificShardObj = elt.Obj();
                 auto specificShardElem = specificShardObj.getField("specificShard"_sd);
                 uassert(7958300,
                         "Object argument to $_internalSplitPipeline must contain a single string "
                         "field named 'specificShard'",
                         specificShardObj.nFields() == 1 &&
-                            specificShardElem.type() == BSONType::String);
+                            specificShardElem.type() == BSONType::string);
 
                 auto* opCtx = expCtx->getOperationContext();
                 auto* grid = Grid::get(opCtx);
@@ -115,10 +118,6 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceInternalSplitPipeline::create
     return new DocumentSourceInternalSplitPipeline(expCtx, mergeType, mergeShardId);
 }
 
-DocumentSource::GetNextResult DocumentSourceInternalSplitPipeline::doGetNext() {
-    return pSource->getNext();
-}
-
 Value DocumentSourceInternalSplitPipeline::serialize(const SerializationOptions& opts) const {
     std::string mergeTypeString;
     Document specificShardDoc;
@@ -134,6 +133,7 @@ Value DocumentSourceInternalSplitPipeline::serialize(const SerializationOptions&
 
         case HostTypeRequirement::kRouter:
             if (feature_flags::gFeatureFlagAggMongosToRouter.isEnabled(
+                    VersionContext::getDecoration(getExpCtx()->getOperationContext()),
                     serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
                 mergeTypeString = "router";
             } else {

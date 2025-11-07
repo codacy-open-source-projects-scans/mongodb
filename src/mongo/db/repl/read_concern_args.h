@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -48,12 +42,19 @@
 #include "mongo/db/repl/read_concern_gen.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/modules.h"
+
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace repl {
 
-class ReadConcernArgs {
+class MONGO_MOD_PUB ReadConcernArgs {
 public:
     static constexpr StringData kReadConcernFieldName = "readConcern"_sd;
     static constexpr StringData kAfterOpTimeFieldName = ReadConcernIdl::kAfterOpTimeFieldName;
@@ -155,23 +156,11 @@ public:
     static ReadConcernArgs fromIDLThrows(ReadConcernIdl readConcern);
 
     /**
-     * Sets the mechanism we should use to satisfy 'majority' reads.
-     *
-     * Invalid to call unless the read concern level is 'kMajorityReadConcern'.
-     */
-    void setMajorityReadMechanism(MajorityReadMechanism m);
-
-    /**
      * Returns the mechanism to use for satisfying 'majority' read concern.
      *
      * Invalid to call unless the read concern level is 'kMajorityReadConcern'.
      */
     MajorityReadMechanism getMajorityReadMechanism() const;
-
-    /**
-     * Returns whether the read concern is speculative 'majority'.
-     */
-    bool isSpeculativeMajority() const;
 
     /**
      * Appends level, afterOpTime, and any other sub-fields in a 'readConcern' sub-object.
@@ -261,7 +250,8 @@ public:
      * {level: "snapshot", atClusterTime: <ts>}.
      */
     void setArgsAtClusterTimeForSnapshot(Timestamp ts) {
-        invariant(_level && _level == ReadConcernLevel::kSnapshotReadConcern);
+        invariant(_level);
+        invariant(_level == ReadConcernLevel::kSnapshotReadConcern);
         // Only overwrite a server-selected atClusterTime, not user-supplied.
         invariant(_atClusterTime.is_initialized() == _atClusterTimeSelected);
         _afterClusterTime = boost::none;

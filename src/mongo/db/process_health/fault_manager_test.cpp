@@ -29,10 +29,8 @@
 
 #include "mongo/db/process_health/fault_manager.h"
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/process_health/fault_manager_test_suite.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 
 namespace mongo {
 
@@ -42,7 +40,7 @@ using test::FaultManagerTest;
 
 namespace {
 
-TEST(FaultManagerTest, Registration) {
+TEST(SimpleFaultManagerTest, Registration) {
     auto serviceCtx = ServiceContext::make();
     ASSERT_TRUE(FaultManager::get(serviceCtx.get()));
 }

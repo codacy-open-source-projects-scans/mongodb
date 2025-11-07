@@ -28,22 +28,7 @@
  */
 
 
-#include <algorithm>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <fmt/format.h>
-#include <iterator>
-#include <limits>
-#include <memory>
-#include <mutex>
-#include <set>
-#include <string>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/repl/replication_recovery.h"
 
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
@@ -54,10 +39,9 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/client.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
@@ -73,7 +57,6 @@
 #include "mongo/db/repl/replication_consistency_markers_mock.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
-#include "mongo/db/repl/replication_recovery.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/server_options.h"
@@ -83,7 +66,7 @@
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/storage/durable_history_pin.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
@@ -94,17 +77,32 @@
 #include "mongo/logv2/log_severity.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/log_test.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <iterator>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -184,7 +182,8 @@ public:
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
-                                  bool markFromMigrate) override {
+                                  bool markFromMigrate,
+                                  bool isViewlessTimeseries) override {
         // If the oplog is not disabled for this namespace, then we need to reserve an op time for
         // the drop.
         if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, collectionName)) {
@@ -315,6 +314,7 @@ repl::OplogEntry _makeOplogEntry(repl::OpTime opTime,
                                 boost::none,                      // uuid
                                 boost::none,                      // fromMigrate
                                 boost::none,                      // checkExistenceForDiffInsert
+                                boost::none,                      // versionContext
                                 repl::OplogEntry::kOplogVersion,  // version
                                 object,                           // o
                                 object2,                          // o2
@@ -409,7 +409,7 @@ void _setUpOplog(OperationContext* opCtx, StorageInterface* storage, std::vector
             opCtx, oplogNs, _makeInsertOplogEntry(ts), OpTime::kUninitializedTerm));
     }
     if (!timestamps.empty()) {
-        // Use the highest inserted timestamp to update oplog visibilty so that all of the inserted
+        // Use the highest inserted timestamp to update oplog visibility so that all of the inserted
         // oplog entries are visible.
         storage->oplogDiskLocRegister(opCtx, Timestamp(timestamps.back(), timestamps.back()), true);
     }
@@ -765,6 +765,16 @@ TEST_F(ReplicationRecoveryTest,
     testRecoveryToStableAppliesDocumentsWithNoAppliedThrough(false);
 }
 
+CollectionAcquisition getCollectionForRead(OperationContext* opCtx, const NamespaceString& nss) {
+    return acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest(nss,
+                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     repl::ReadConcernArgs::get(opCtx),
+                                     mongo::AcquisitionPrerequisites::kRead),
+        MODE_IS);
+}
+
 TEST_F(ReplicationRecoveryTest, UnstableRecoveryIgnoresDroppedCollections) {
     ReplicationRecoveryImpl recovery(getStorageInterface(), getConsistencyMarkers());
     auto opCtx = getOperationContext();
@@ -773,8 +783,8 @@ TEST_F(ReplicationRecoveryTest, UnstableRecoveryIgnoresDroppedCollections) {
 
     ASSERT_OK(getStorageInterface()->dropCollection(opCtx, testNs));
     {
-        AutoGetCollectionForReadCommand autoColl(opCtx, testNs);
-        ASSERT_FALSE(autoColl.getCollection());
+        const auto coll = getCollectionForRead(opCtx, testNs);
+        ASSERT_FALSE(coll.exists());
     }
 
     // Not setting a stable timestamp in order to perform unstable recovery,
@@ -782,8 +792,8 @@ TEST_F(ReplicationRecoveryTest, UnstableRecoveryIgnoresDroppedCollections) {
 
     _assertDocsInOplog(opCtx, {1, 2, 3, 4, 5});
     {
-        AutoGetCollectionForReadCommand autoColl(opCtx, testNs);
-        ASSERT_FALSE(autoColl.getCollection());
+        const auto coll = getCollectionForRead(opCtx, testNs);
+        ASSERT_FALSE(coll.exists());
     }
     ASSERT_EQ(getConsistencyMarkers()->getOplogTruncateAfterPoint(opCtx), Timestamp());
 }
@@ -798,8 +808,8 @@ DEATH_TEST_REGEX_F(ReplicationRecoveryTest,
 
     ASSERT_OK(getStorageInterface()->dropCollection(opCtx, testNs));
     {
-        AutoGetCollectionForReadCommand autoColl(opCtx, testNs);
-        ASSERT_FALSE(autoColl.getCollection());
+        const auto coll = getCollectionForRead(opCtx, testNs);
+        ASSERT_FALSE(coll.exists());
     }
 
     getStorageInterfaceRecovery()->setRecoveryTimestamp(Timestamp(2, 2));
@@ -1176,10 +1186,9 @@ TEST_F(ReplicationRecoveryTest, CommitTransactionOplogEntryCorrectlyUpdatesConfi
     sessionInfo.setSessionId(sessionId);
     sessionInfo.setTxnNumber(3);
 
-    const auto txnOperations = BSON_ARRAY(BSON("op"
-                                               << "i"
-                                               << "ns" << testNs.toString_forTest() << "o"
-                                               << BSON("_id" << 1)));
+    const auto txnOperations =
+        BSON_ARRAY(BSON("op" << "i"
+                             << "ns" << testNs.toString_forTest() << "o" << BSON("_id" << 1)));
     const auto prepareDate = Date_t::now();
     const auto prepareOp =
         _makeTransactionOplogEntry({Timestamp(2, 0), 1},
@@ -1251,10 +1260,9 @@ TEST_F(ReplicationRecoveryTest,
     sessionInfo.setSessionId(sessionId);
     sessionInfo.setTxnNumber(3);
 
-    const auto txnOperations = BSON_ARRAY(BSON("op"
-                                               << "i"
-                                               << "ns" << testNs.toString_forTest() << "o"
-                                               << BSON("_id" << 1)));
+    const auto txnOperations =
+        BSON_ARRAY(BSON("op" << "i"
+                             << "ns" << testNs.toString_forTest() << "o" << BSON("_id" << 1)));
     const auto prepareDate = Date_t::now();
     const auto prepareOp =
         _makeTransactionOplogEntry({Timestamp(2, 0), 1},
@@ -1369,12 +1377,11 @@ TEST_F(ReplicationRecoveryTest, RecoverFromOplogUpToWithEmptyOplog) {
     _setUpOplog(opCtx, getStorageInterface(), {2});
     getStorageInterfaceRecovery()->setRecoveryTimestamp(Timestamp(2, 2));
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     recovery.recoverFromOplogUpTo(opCtx, Timestamp(5, 5));
-    stopCapturingLogMessages();
+    logs.stop();
 
-    ASSERT_EQUALS(
-        1, countTextFormatLogLinesContaining("No stored oplog entries to apply for recovery"));
+    ASSERT_EQUALS(1, logs.countTextContaining("No stored oplog entries to apply for recovery"));
     _assertDocsInTestCollection(opCtx, {});
 }
 
@@ -1407,13 +1414,12 @@ TEST_F(ReplicationRecoveryTest, RecoverFromOplogUpToWithNoOperationsToRecover) {
     _setUpOplog(opCtx, getStorageInterface(), {1, 1580148188, std::numeric_limits<int>::max()});
     getStorageInterfaceRecovery()->setRecoveryTimestamp(Timestamp(1580148188, 1580148188));
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     recovery.recoverFromOplogUpTo(opCtx, Timestamp(1580148193, 1));
-    stopCapturingLogMessages();
+    logs.stop();
 
     ASSERT_EQUALS(
-        1,
-        countTextFormatLogLinesContaining("No stored oplog entries to apply for recovery between"));
+        1, logs.countTextContaining("No stored oplog entries to apply for recovery between"));
 }
 
 TEST_F(ReplicationRecoveryTest, RecoverFromOplogUpToReconstructsPreparedTransactions) {
@@ -1501,13 +1507,12 @@ TEST_F(ReplicationRecoveryTest,
             opCtx, NamespaceString::kSessionTransactionsTableNamespace, {doc, Timestamp(1, 1)}, 1));
     }
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     recovery.recoverFromOplogUpTo(opCtx, Timestamp(5, 1));
-    stopCapturingLogMessages();
+    logs.stop();
 
     ASSERT_EQUALS(
-        1,
-        countTextFormatLogLinesContaining("No stored oplog entries to apply for recovery between"));
+        1, logs.countTextContaining("No stored oplog entries to apply for recovery between"));
 
     {
         auto ocs = mongoDSessionCatalog->checkOutSession(opCtx);
@@ -1704,13 +1709,12 @@ TEST_F(ReplicationRecoveryTest, StartupRecoveryRunsCompletionHook) {
 
     auto severityGuard = unittest::MinimumLoggedSeverityGuard{logv2::LogComponent::kSharding,
                                                               logv2::LogSeverity::Debug(2)};
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     recovery.recoverFromOplog(opCtx, boost::none);
-    stopCapturingLogMessages();
+    logs.stop();
 
-    ASSERT_EQUALS(1,
-                  countTextFormatLogLinesContaining(
-                      "Recovering all user writes recoverable critical sections"));
+    ASSERT_EQUALS(
+        1, logs.countTextContaining("Recovering all user writes recoverable critical sections"));
 
     _assertDocsInOplog(opCtx, {1, 2, 3, 4});
     _assertDocsInTestCollection(opCtx, {});
@@ -1911,13 +1915,13 @@ TEST_F(ReplicationRecoveryTest, ApplyOplogEntriesForRestoreStartPointIsAfterOplo
     _setUpOplog(opCtx, getStorageInterface(), {1, 2, 3, 4, 5});
     getStorageInterfaceRecovery()->setRecoveryTimestamp(Timestamp(7, 7));
     // The function will adjust the Timestamp(7, 7) start point to the top of the oplog.
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     ASSERT_DOES_NOT_THROW(recovery.applyOplogEntriesForRestore(opCtx, Timestamp(7, 7)));
-    stopCapturingLogMessages();
+    logs.stop();
     ASSERT_EQUALS(
         1,
-        countTextFormatLogLinesContaining("Start point for recovery oplog application not found in "
-                                          "oplog. Adjusting start point to earlier entry"));
+        logs.countTextContaining("Start point for recovery oplog application not found in "
+                                 "oplog. Adjusting start point to earlier entry"));
     ASSERT_EQ(getConsistencyMarkers()->getAppliedThrough(opCtx), OpTime());
     ASSERT_EQ(getStorageInterface()->getInitialDataTimestamp(opCtx->getServiceContext()),
               Timestamp::kAllowUnstableCheckpointsSentinel);

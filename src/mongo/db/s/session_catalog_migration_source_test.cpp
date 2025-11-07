@@ -27,20 +27,7 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/cstdint.hpp>
-#include <boost/none.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <initializer_list>
-#include <iterator>
-#include <string>
-#include <utility>
-#include <variant>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/s/session_catalog_migration_source.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -59,22 +46,34 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/s/session_catalog_migration.h"
-#include "mongo/db/s/session_catalog_migration_source.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <initializer_list>
+#include <iterator>
+#include <string>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 namespace mongo {
@@ -118,6 +117,7 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
         boost::none,                      // uuid
         boost::none,                      // fromMigrate
         boost::none,                      // checkExistenceForDiffInsert
+        boost::none,                      // versionContext
         repl::OplogEntry::kOplogVersion,  // version
         object,                           // o
         object2,                          // o2
@@ -173,6 +173,7 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
                                 boost::none,                      // uuid
                                 boost::none,                      // fromMigrate
                                 boost::none,                      // checkExistenceForDiffInsert
+                                boost::none,                      // versionContext
                                 repl::OplogEntry::kOplogVersion,  // version
                                 oField,                           // o
                                 o2Field,                          // o2
@@ -3213,8 +3214,7 @@ TEST_F(SessionCatalogMigrationSourceTest, ExtractShardKeyFromOplogNonCRUD) {
                                     BSON("_id" << 1 << "a.b" << 5));        // o
     auto commandOplog = makeOplogEntry(repl::OpTime(Timestamp(60, 10), 1),  // optime
                                        repl::OpTypeEnum::kCommand,          // op type
-                                       BSON("create"
-                                            << "c"));  // o
+                                       BSON("create" << "c"));              // o
 
     ASSERT_BSONOBJ_EQ(
         SessionCatalogMigrationSource::extractShardKeyFromOplogEntry(pattern, noopOplog),

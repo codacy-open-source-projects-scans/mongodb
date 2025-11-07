@@ -27,21 +27,24 @@
  *    it in the license file.
  */
 
+#include "mongo/db/s/migration_blocking_operation/multi_update_coordinator.h"
+
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/repl/primary_only_service_test_fixture.h"
-#include "mongo/db/s/migration_blocking_operation/multi_update_coordinator.h"
 #include "mongo/db/s/migration_blocking_operation/multi_update_coordinator_external_state.h"
 #include "mongo/db/s/migration_blocking_operation/multi_update_coordinator_gen.h"
 #include "mongo/db/s/primary_only_service_helpers/phase_transition_progress_gen.h"
 #include "mongo/db/s/primary_only_service_helpers/with_automatic_retry.h"
 #include "mongo/db/session/internal_session_pool.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/util/fail_point.h"
+
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -200,14 +203,12 @@ public:
     }
 
     void startBlockingMigrations(OperationContext* opCtx,
-                                 const NamespaceString& nss,
-                                 const UUID& operationId) override {
+                                 const MultiUpdateCoordinatorMetadata& metadata) override {
         _fakeState->startBlockingMigrations();
     }
 
     void stopBlockingMigrations(OperationContext* opCtx,
-                                const NamespaceString& nss,
-                                const UUID& operationId) override {
+                                const MultiUpdateCoordinatorMetadata& metadata) override {
         _fakeState->stopBlockingMigrations();
     }
 
@@ -303,7 +304,7 @@ protected:
                                              "namespace: '{}', failLocalClients: true, "
                                              "failInternalCommands: true, errorCode: {}}}",
                                              nss.toString_forTest(),
-                                             code)));
+                                             fmt::underlying(code))));
         return std::tuple{fp, count};
     }
 
@@ -314,18 +315,17 @@ protected:
     MultiUpdateCoordinatorMetadata createMetadata() {
         MultiUpdateCoordinatorMetadata metadata;
         metadata.setId(UUID::gen());
+        metadata.setDatabaseVersion(DatabaseVersion{UUID::gen(), Timestamp(1, 1)});
 
-        const BSONObj query = BSON("member"
-                                   << "abc123");
+        const BSONObj query = BSON("member" << "abc123");
         const BSONObj update = BSON("$set" << BSON("points" << 50));
         auto rawUpdate = BSON("q" << query << "u" << update << "multi" << true);
         if (_testUpsert) {
             rawUpdate.addField(BSON("upsert" << true).firstElement());
             metadata.setIsUpsert(true);
         }
-        auto cmd = BSON("update"
-                        << "coll"
-                        << "updates" << BSON_ARRAY(rawUpdate));
+        auto cmd = BSON("update" << "coll"
+                                 << "updates" << BSON_ARRAY(rawUpdate));
         metadata.setUpdateCommand(cmd);
         metadata.setNss(kNamespace);
         return metadata;
@@ -344,7 +344,7 @@ protected:
         auto doc = client.findOne(NamespaceString::kMultiUpdateCoordinatorsNamespace,
                                   BSON(MultiUpdateCoordinatorDocument::kIdFieldName << instanceId));
         IDLParserContext errCtx("MultiUpdateCoordinatorTest::getPhaseDocumentOnDisk()");
-        return MultiUpdateCoordinatorDocument::parse(errCtx, doc);
+        return MultiUpdateCoordinatorDocument::parse(doc, errCtx);
     }
 
     bool stateDocumentExistsOnDisk(OperationContext* opCtx, UUID instanceId) {
@@ -432,10 +432,10 @@ protected:
     }
 
     Phase getPhase(const std::shared_ptr<Instance>& instance) {
-        auto phaseString =
-            getMetrics(instance).getObjectField("mutableFields").getStringField("phase").toString();
+        auto phaseString = std::string{
+            getMetrics(instance).getObjectField("mutableFields").getStringField("phase")};
         IDLParserContext errCtx("MultiUpdateCoordinatorTest::getPhase()");
-        return MultiUpdateCoordinatorPhase_parse(errCtx, phaseString);
+        return MultiUpdateCoordinatorPhase_parse(phaseString, errCtx);
     }
 
     enum ResultCategory { kSuccess, kFailure };
@@ -721,13 +721,11 @@ TEST_F(MultiUpdateCoordinatorTest, AbortAfterDone) {
 
 TEST_F(MultiUpdateCoordinatorTest, FailsForUnsupportedCmd) {
     auto document = createStateDocument();
-    const BSONObj query = BSON("member"
-                               << "abc123");
+    const BSONObj query = BSON("member" << "abc123");
     const BSONObj update = BSON("$set" << BSON("points" << 50));
     auto rawUpdate = BSON("q" << query << "u" << update << "multi" << true);
-    auto cmd = BSON("NotARealUpdateCmd"
-                    << "coll"
-                    << "updates" << BSON_ARRAY(rawUpdate));
+    auto cmd = BSON("NotARealUpdateCmd" << "coll"
+                                        << "updates" << BSON_ARRAY(rawUpdate));
     document.getMetadata().setUpdateCommand(cmd);
 
     auto instance = createInstanceFrom(document);

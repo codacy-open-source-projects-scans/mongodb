@@ -28,23 +28,22 @@
  */
 
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <exception>
-#include <mutex>
+#include "mongo/db/s/move_timing_helper.h"
 
 #include "mongo/db/client.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/s/move_timing_helper.h"
-#include "mongo/db/s/sharding_logging.h"
+#include "mongo/db/sharding_environment/sharding_logging.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <exception>
+#include <mutex>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -98,7 +97,7 @@ MoveTimingHelper::~MoveTimingHelper() {
                                                 str::stream() << "moveChunk." << _where,
                                                 _ns,
                                                 _b.obj(),
-                                                ShardingCatalogClient::kMajorityWriteConcern);
+                                                defaultMajorityWriteConcernDoNotUse());
     } catch (const std::exception& e) {
         LOGV2_WARNING(23759,
                       "couldn't record timing for moveChunk '{where}': {e_what}",

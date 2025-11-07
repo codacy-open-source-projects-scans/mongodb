@@ -29,32 +29,32 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstdint>
-#include <memory>
-
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/exec/batched_delete_stage.h"
+#include "mongo/db/exec/classic/batched_delete_stage.h"
+#include "mongo/db/exec/classic/delete_stage.h"
+#include "mongo/db/exec/classic/plan_stage.h"
+#include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/collection_scan_common.h"
-#include "mongo/db/exec/delete_stage.h"
-#include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/exec/working_set.h"
-#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/global_catalog/ddl/shard_key_index_util.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/query/index_bounds.h"
+#include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/record_id_bound.h"
 #include "mongo/db/record_id.h"
-#include "mongo/db/s/shard_key_index_util.h"
-#include "mongo/db/shard_role.h"
+
+#include <cstdint>
+#include <memory>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -90,6 +90,23 @@ public:
     };
 
     /**
+     * Convenient struct used to store all parameters needed to create a collectionScan executor.
+     */
+    struct CreateCollectionScanParams {
+        OperationContext* opCtx;
+        CollectionAcquisition collection;
+        PlanYieldPolicy::YieldPolicy yieldPolicy;
+        Direction direction = FORWARD;
+        const boost::optional<RecordId>& resumeAfterRecordId = boost::none;
+        boost::optional<RecordIdBound> minRecord = boost::none;
+        boost::optional<RecordIdBound> maxRecord = boost::none;
+        CollectionScanParams::ScanBoundInclusion boundInclusion =
+            CollectionScanParams::ScanBoundInclusion::kIncludeBothStartAndEndRecords;
+        bool shouldReturnEofOnFilterMismatch = false;
+        size_t plannerOptions = 0;
+    };
+
+    /**
      * Returns a sampling of the given collection with up to 'numSamples'. If the caller doesn't
      * provide a value for 'numSamples' then the executor will return an infinite stream of random
      * documents of the collection.
@@ -99,7 +116,7 @@ public:
      */
     static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> sampleCollection(
         OperationContext* opCtx,
-        VariantCollectionPtrOrAcquisition collection,
+        const CollectionAcquisition& collection,
         PlanYieldPolicy::YieldPolicy yieldPolicy,
         boost::optional<int64_t> numSamples = boost::none);
 
@@ -109,7 +126,7 @@ public:
      */
     static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> collectionScan(
         OperationContext* opCtx,
-        VariantCollectionPtrOrAcquisition collection,
+        const CollectionAcquisition& collection,
         PlanYieldPolicy::YieldPolicy yieldPolicy,
         Direction direction = FORWARD,
         const boost::optional<RecordId>& resumeAfterRecordId = boost::none,
@@ -120,8 +137,11 @@ public:
         bool shouldReturnEofOnFilterMismatch = false);
 
     static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> collectionScan(
+        CreateCollectionScanParams&& params);
+
+    static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> collectionScan(
         OperationContext* opCtx,
-        const CollectionPtr* collection,
+        const CollectionAcquisition& collection,
         const CollectionScanParams& params,
         PlanYieldPolicy::YieldPolicy yieldPolicy);
 
@@ -148,7 +168,7 @@ public:
      */
     static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> indexScan(
         OperationContext* opCtx,
-        const CollectionPtr* collection,
+        const CollectionAcquisition& collection,
         const IndexDescriptor* descriptor,
         const BSONObj& startKey,
         const BSONObj& endKey,
@@ -180,7 +200,7 @@ public:
      */
     static std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> shardKeyIndexScan(
         OperationContext* opCtx,
-        const CollectionPtr* collection,
+        const CollectionAcquisition& collection,
         const ShardKeyIndex& shardKeyIdx,
         const BSONObj& startKey,
         const BSONObj& endKey,
@@ -204,6 +224,7 @@ public:
         const BSONObj& endKey,
         BoundInclusion boundInclusion,
         PlanYieldPolicy::YieldPolicy yieldPolicy,
+        std::unique_ptr<BatchedDeleteStageParams> batchedDeleteParams,
         Direction direction = FORWARD);
 
     /**
@@ -226,7 +247,7 @@ private:
     static std::unique_ptr<PlanStage> _collectionScan(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         WorkingSet* ws,
-        const CollectionPtr* collection,
+        const CollectionAcquisition& coll,
         Direction direction,
         const boost::optional<RecordId>& resumeAfterRecordId = boost::none,
         const boost::optional<RecordId>& minRecord = boost::none,
@@ -235,7 +256,7 @@ private:
     static std::unique_ptr<PlanStage> _collectionScan(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         WorkingSet* ws,
-        const CollectionPtr* collection,
+        const CollectionAcquisition& coll,
         const CollectionScanParams& params,
         const MatchExpression* filter = nullptr);
 
@@ -247,13 +268,26 @@ private:
     static std::unique_ptr<PlanStage> _indexScan(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         WorkingSet* ws,
-        const CollectionPtr* collection,
+        const CollectionAcquisition& collection,
         const IndexDescriptor* descriptor,
         const BSONObj& startKey,
         const BSONObj& endKey,
         BoundInclusion boundInclusion,
         Direction direction = FORWARD,
         int options = IXSCAN_DEFAULT);
+
+    /**
+     * Returns a plan stage that is either a DeleteStage or a BatchedDeleteStage.
+     *
+     * Used as a helper when it is necessary to create a delete stage.
+     */
+    static std::unique_ptr<PlanStage> _createAppropriateDeleteStage(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        CollectionAcquisition coll,
+        std::unique_ptr<DeleteStageParams> params,
+        std::unique_ptr<BatchedDeleteStageParams> batchedDeleteParams,
+        WorkingSet* ws,
+        PlanStage* child);
 };
 
 }  // namespace mongo

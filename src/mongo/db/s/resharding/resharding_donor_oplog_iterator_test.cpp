@@ -28,16 +28,7 @@
  */
 
 
-#include <boost/smart_ptr.hpp>
-#include <cstddef>
-#include <functional>
-#include <string>
-#include <tuple>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
+#include "mongo/db/s/resharding/resharding_donor_oplog_iterator.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -50,32 +41,39 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
-#include "mongo/db/s/resharding/resharding_donor_oplog_iterator.h"
+#include "mongo/db/s/resharding/resharding_noop_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
-#include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/thread_pool_mock.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/uuid.h"
 
+#include <cstddef>
+#include <functional>
+#include <string>
+#include <tuple>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <fmt/format.h>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 
 namespace mongo {
 namespace {
-
-using namespace fmt::literals;
 
 const ReshardingDonorOplogId kResumeFromBeginning{Timestamp::min(), Timestamp::min()};
 
@@ -118,8 +116,7 @@ public:
 
     repl::MutableOplogEntry makeFinalOplog(Timestamp ts) {
         ReshardingDonorOplogId oplogId(ts, ts);
-        const BSONObj oField(BSON("msg"
-                                  << "Created temporary resharding collection"));
+        const BSONObj oField(BSON("msg" << "Created temporary resharding collection"));
         const BSONObj o2Field(
             BSON("type" << resharding::kReshardFinalOpLogType << "reshardingUUID" << UUID::gen()));
         return makeOplog(_crudNss, _uuid, repl::OpTypeEnum::kNoop, oField, o2Field, oplogId);
@@ -127,10 +124,11 @@ public:
 
     repl::MutableOplogEntry makeProgressMarkOplogEntry(Timestamp ts) {
         ReshardingDonorOplogId oplogId(ts, ts);
-        const BSONObj oField(BSON("msg"
-                                  << "Latest oplog ts from donor's cursor response"));
-        const BSONObj o2Field(BSON("type" << resharding::kReshardProgressMark));
-        return makeOplog(_crudNss, _uuid, repl::OpTypeEnum::kNoop, oField, o2Field, oplogId);
+        const BSONObj oField(BSON("msg" << "Latest oplog ts from donor's cursor response"));
+        ReshardProgressMarkO2Field o2Field;
+        o2Field.setType(resharding::kReshardProgressMarkOpLogType);
+        return makeOplog(
+            _crudNss, _uuid, repl::OpTypeEnum::kNoop, oField, o2Field.toBSON(), oplogId);
     }
 
     const NamespaceString& oplogNss() const {
@@ -203,7 +201,7 @@ public:
 private:
     const NamespaceString _oplogNss = NamespaceString::createNamespaceString_forTest(
         DatabaseName::kConfig,
-        "{}xxx.yyy"_format(NamespaceString::kReshardingLocalOplogBufferPrefix));
+        fmt::format("{}xxx.yyy", NamespaceString::kReshardingLocalOplogBufferPrefix));
     const NamespaceString _crudNss = NamespaceString::createNamespaceString_forTest("test.foo");
     const UUID _uuid{UUID::gen()};
 

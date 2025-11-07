@@ -1,5 +1,5 @@
 /**
- * Tests that $concatArrays and $setUnion accumulators respect configurable memory limits.
+ * Tests that $concatArrays and $setUnion accumulators/operators respect configurable memory limits.
  * @tags: [requires_fcv_81]
  */
 
@@ -14,13 +14,13 @@ const nSets = 20;
 // For the $concatArrays accumulator, 5 strings will be added to the accumulated array for each set
 // of strings inserted to the collection. When this memory limit is set, $concatArrays should fail
 // due to exceeding the memory limit because it's about half of what we expect to need.
-const memLimitArray = nSets * 5 * stringSize / 2;
+const memLimitArray = (nSets * 5 * stringSize) / 2;
 // For the $setUnion accumulator, 1 new unique string will be added to the accumulated array for
 // each set of strings inserted to the collection (nSets). Additionally, "string 0", "string 1",
 // "string 2", and "string 3" will be added with each of the nSets, but only appear once in the
 // output (+4). When this memory limit is set, $setUnion should fail due to exceeding the memory
 // limit because it's about half of what we expect to need.
-const memLimitSet = (nSets + 4) * stringSize / 2;
+const memLimitSet = ((nSets + 4) * stringSize) / 2;
 
 const bulk = coll.initializeUnorderedBulkOp();
 for (let i = 0; i < nSets; i++) {
@@ -32,18 +32,40 @@ for (let i = 0; i < nSets; i++) {
 }
 assert.commandWorked(bulk.execute());
 
+// Function to change the parameter value and return the previous value.
+function setParam(param, val) {
+    const res = db.adminCommand({setParameter: 1, [param]: val});
+    assert.commandWorked(res);
+    return res.was;
+}
+
 (function testInternalQueryMaxConcatArraysBytesSetting() {
     // Test that the default 100MB memory limit isn't reached with our data.
-    assert.doesNotThrow(
-        () => coll.aggregate([{$group: {_id: null, strings: {$concatArrays: "$y"}}}]));
+    assert.doesNotThrow(() => coll.aggregate([{$group: {_id: null, strings: {$concatArrays: "$y"}}}]));
 
     // Now lower the limit to test that its configuration is obeyed.
-    assert.commandWorked(
-        db.adminCommand({setParameter: 1, internalQueryMaxConcatArraysBytes: memLimitArray}));
+    const originalVal = setParam("internalQueryMaxConcatArraysBytes", memLimitArray);
     assert.throwsWithCode(
         () => coll.aggregate([{$group: {_id: null, strings: {$concatArrays: "$y"}}}]),
-        ErrorCodes.ExceededMemoryLimit);
-}());
+        ErrorCodes.ExceededMemoryLimit,
+    );
+    setParam("internalQueryMaxConcatArraysBytes", originalVal);
+})();
+
+(function testInternalQueryMaxConcatArraysBytesSettingWindowFunc() {
+    let pipeline = [
+        {
+            $setWindowFields: {partitionBy: null, sortBy: {_id: 1}, output: {allStr: {$concatArrays: "$y"}}},
+        },
+    ];
+    // Test that the default 100MB memory limit isn't reached with our data.
+    assert.doesNotThrow(() => coll.aggregate(pipeline));
+
+    // Now lower the limit to test that its configuration is obeyed.
+    const originalVal = setParam("internalQueryMaxConcatArraysBytes", memLimitArray);
+    assert.throwsWithCode(() => coll.aggregate(pipeline), ErrorCodes.ExceededMemoryLimit);
+    setParam("internalQueryMaxConcatArraysBytes", originalVal);
+})();
 
 (function testInternalQueryMaxSetUnionBytesSetting() {
     // Test that the default 100MB memory limit isn't reached with our data.
@@ -51,15 +73,32 @@ assert.commandWorked(bulk.execute());
 
     // Test that $setUnion needs a tighter limit than $concatArrays (because some of the strings are
     // the same).
-    assert.commandWorked(
-        db.adminCommand({setParameter: 1, internalQueryMaxSetUnionBytes: memLimitArray}));
+    const originalVal = setParam("internalQueryMaxSetUnionBytes", memLimitArray);
     assert.doesNotThrow(() => coll.aggregate([{$group: {_id: null, strings: {$setUnion: "$y"}}}]));
 
     // Test that a tighter limit for $setUnion is obeyed.
-    assert.commandWorked(
-        db.adminCommand({setParameter: 1, internalQueryMaxSetUnionBytes: memLimitSet}));
-    assert.throwsWithCode(() => coll.aggregate([{$group: {_id: null, strings: {$setUnion: "$y"}}}]),
-                          ErrorCodes.ExceededMemoryLimit);
-}());
+    setParam("internalQueryMaxSetUnionBytes", memLimitSet);
+    assert.throwsWithCode(
+        () => coll.aggregate([{$group: {_id: null, strings: {$setUnion: "$y"}}}]),
+        ErrorCodes.ExceededMemoryLimit,
+    );
+    setParam("internalQueryMaxSetUnionBytes", originalVal);
+})();
+
+(function testInternalQueryMaxSetUnionBytesSettingWindowFunc() {
+    let pipeline = [{$setWindowFields: {sortBy: {_id: 1}, output: {v: {$setUnion: "$y"}}}}];
+    // Test that the default 100MB memory limit isn't reached with our data.
+    assert.doesNotThrow(() => coll.aggregate(pipeline));
+
+    // Test that $setUnion needs a tighter limit than $concatArrays (because some of the strings are
+    // the same).
+    const originalVal = setParam("internalQueryMaxSetUnionBytes", memLimitArray);
+    assert.doesNotThrow(() => coll.aggregate(pipeline));
+
+    // Test that a tighter limit for $setUnion is obeyed.
+    setParam("internalQueryMaxSetUnionBytes", memLimitSet);
+    assert.throwsWithCode(() => coll.aggregate(pipeline), ErrorCodes.ExceededMemoryLimit);
+    setParam("internalQueryMaxSetUnionBytes", originalVal);
+})();
 
 MongoRunner.stopMongod(conn);

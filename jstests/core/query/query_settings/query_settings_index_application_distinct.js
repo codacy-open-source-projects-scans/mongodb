@@ -1,6 +1,9 @@
 // Tests query settings are applied to distinct queries regardless of the query engine (SBE or
 // classic).
 // @tags: [
+//   # TODO SERVER-98659 Investigate why this test is failing on
+//   # 'sharding_kill_stepdown_terminate_jscore_passthrough'.
+//   does_not_support_stepdowns,
 //   # Balancer may impact the explain output (e.g. data was previously present on both shards and
 //   # now only on one).
 //   assumes_balancer_off,
@@ -8,14 +11,12 @@
 //   simulate_atlas_proxy_incompatible,
 //   # 'planCacheClear' command is not allowed with the security token.
 //   not_allowed_with_signed_security_token,
-//   requires_fcv_80,
+//   # Test includes SBE plan cache assertions if the SBE plan cache is used.
+//   examines_sbe_cache,
 // ]
 //
 
-import {
-    assertDropAndRecreateCollection,
-    assertDropCollection
-} from "jstests/libs/collection_drop_recreate.js";
+import {assertDropAndRecreateCollection, assertDropCollection} from "jstests/libs/collection_drop_recreate.js";
 import {QuerySettingsIndexHintsTests} from "jstests/libs/query/query_settings_index_hints_tests.js";
 import {QuerySettingsUtils} from "jstests/libs/query/query_settings_utils.js";
 
@@ -29,7 +30,7 @@ assertDropCollection(db, viewName);
 assert.commandWorked(db.createView(viewName, coll.getName(), []));
 const ns = {
     db: db.getName(),
-    coll: coll.getName()
+    coll: coll.getName(),
 };
 
 // Ensure query settings are applied as expected in a straightforward scenario for distinct.
@@ -76,13 +77,15 @@ function assertQuerySettingsDistinctFallback(qsutils, qstests, querySettingsQuer
 }
 
 // Insert data into the collection.
-assert.commandWorked(coll.insertMany([
-    {a: 1, b: 5},
-    {a: 2, b: 4},
-    {a: 3, b: 3},
-    {a: 4, b: 2},
-    {a: 5, b: 1},
-]));
+assert.commandWorked(
+    coll.insertMany([
+        {a: 1, b: 5},
+        {a: 2, b: 4},
+        {a: 3, b: 3},
+        {a: 4, b: 2},
+        {a: 5, b: 1},
+    ]),
+);
 
 function setIndexes(coll, indexList) {
     assert.commandWorked(coll.dropIndexes());
@@ -96,10 +99,10 @@ function testDistinctQuerySettingsApplication(collOrViewName) {
     // This query has the key that doesn't match any provided index which guarantees that there
     // would be no DISTINCT_SCAN plan and the query planner will fall back to the `find`. In case
     // multiplanner is involved it is expected that the query will end up in query plan cache.
-    setIndexes(coll, [qstests.indexA, qstests.indexB, qstests.indexAB]);
+    setIndexes(coll, qstests.allIndexes);
 
     const querySettingsDistinctQuery = qsutils.makeDistinctQueryInstance({
-        key: 'c',
+        key: "c",
         query: {a: 1, b: 1},
     });
 
@@ -107,6 +110,7 @@ function testDistinctQuerySettingsApplication(collOrViewName) {
     qstests.assertQuerySettingsNaturalApplication(querySettingsDistinctQuery, ns);
     qstests.assertQuerySettingsIgnoreCursorHints(querySettingsDistinctQuery, ns);
     qstests.assertQuerySettingsFallback(querySettingsDistinctQuery, ns);
+    qstests.assertQuerySettingsFallbackNoQueryExecutionPlans(querySettingsDistinctQuery, ns);
     qstests.assertQuerySettingsCommandValidation(querySettingsDistinctQuery, ns);
 }
 
@@ -121,7 +125,7 @@ function testDistinctWithDistinctScanQuerySettingsApplication(collOrViewName) {
     // matter what hints/index_filters/query_settings are.
     setIndexes(coll, [qstests.indexA, qstests.indexAB]);
 
-    const querySettingsDistinctQuery = qsutils.makeDistinctQueryInstance({key: 'a'});
+    const querySettingsDistinctQuery = qsutils.makeDistinctQueryInstance({key: "a"});
 
     assertQuerySettingsDistinctIndexApplication(qsutils, qstests, querySettingsDistinctQuery);
     assertQuerySettingsDistinctScanIgnoreCursorHints(qsutils, qstests, querySettingsDistinctQuery);

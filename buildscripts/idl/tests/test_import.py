@@ -58,7 +58,6 @@ class DictionaryImportResolver(idl.parser.ImportResolverBase):
     def resolve(self, base_file, imported_file_name):
         # type: (str, str) -> str
         """Return the complete path to an imported file name."""
-        # pylint: disable=unused-argument
         if imported_file_name not in self._import_dict:
             return None
 
@@ -418,90 +417,6 @@ class TestImport(testcase.IDLTestcase):
             - "notfound.idl"
             """),
             idl.errors.ERROR_ID_BAD_IMPORT,
-            resolver=resolver,
-        )
-
-        # Duplicate types
-        self.assert_parse_fail(
-            textwrap.dedent("""
-        imports:
-            - "basetypes.idl"
-
-        types:
-            string:
-                description: foo
-                cpp_type: foo
-                bson_serialization_type: string
-                is_view: false
-            """),
-            idl.errors.ERROR_ID_DUPLICATE_SYMBOL,
-            resolver=resolver,
-        )
-
-        # Duplicate structs
-        self.assert_parse_fail(
-            textwrap.dedent("""
-        imports:
-            - "basetypes.idl"
-
-        structs:
-            bar:
-                description: foo
-                fields:
-                    foo1: string
-            """),
-            idl.errors.ERROR_ID_DUPLICATE_SYMBOL,
-            resolver=resolver,
-        )
-
-        # Duplicate struct and type
-        self.assert_parse_fail(
-            textwrap.dedent("""
-        imports:
-            - "basetypes.idl"
-
-        structs:
-            string:
-                description: foo
-                fields:
-                    foo1: string
-            """),
-            idl.errors.ERROR_ID_DUPLICATE_SYMBOL,
-            resolver=resolver,
-        )
-
-        # Duplicate type and struct
-        self.assert_parse_fail(
-            textwrap.dedent("""
-        imports:
-            - "basetypes.idl"
-
-        types:
-            bar:
-                description: foo
-                cpp_type: foo
-                bson_serialization_type: string
-                is_view: false
-            """),
-            idl.errors.ERROR_ID_DUPLICATE_SYMBOL,
-            resolver=resolver,
-        )
-
-        # Duplicate enums
-        self.assert_parse_fail(
-            textwrap.dedent("""
-        imports:
-            - "basetypes.idl"
-
-        enums:
-            IntEnum:
-                description: "An example int enum"
-                type: int
-                values:
-                    a0: 0
-                    b1: 1
-            """),
-            idl.errors.ERROR_ID_DUPLICATE_SYMBOL,
             resolver=resolver,
         )
 

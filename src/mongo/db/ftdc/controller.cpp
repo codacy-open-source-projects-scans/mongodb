@@ -31,10 +31,6 @@
 #include <boost/filesystem/path.hpp>
 #include <boost/move/utility_core.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <memory>
-#include <mutex>
-#include <tuple>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/db/client.h"
 #include "mongo/db/ftdc/collector.h"
@@ -42,8 +38,6 @@
 #include "mongo/db/ftdc/util.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
@@ -53,10 +47,18 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
+#include <memory>
+#include <mutex>
+#include <tuple>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kFTDC
 
 
 namespace mongo {
+
+long long FTDCController::getNumAsyncPeriodicCollectors() {
+    return _numAsyncPeriodicCollectors.get();
+}
 
 Status FTDCController::setEnabled(bool enabled) {
     stdx::lock_guard<stdx::mutex> lock(_mutex);
@@ -79,10 +81,76 @@ void FTDCController::setMetadataCaptureFrequency(std::uint64_t freq) {
     _condvar.notify_one();
 }
 
+Milliseconds FTDCController::getPeriod() {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    return _configTemp.period;
+}
+
 void FTDCController::setPeriod(Milliseconds millis) {
     stdx::lock_guard<stdx::mutex> lock(_mutex);
     _configTemp.period = millis;
     _condvar.notify_one();
+}
+
+Status FTDCController::setSampleTimeout(Milliseconds newValue) {
+    if (!feature_flags::gFeatureFlagGaplessFTDC.isEnabled()) {
+        return Status(
+            ErrorCodes::InvalidOptions,
+            "The diagnosticDataCollectionSampleTimeoutMillis parameter is not available with "
+            "featureFlagGaplessFTDC disabled.");
+    }
+
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    _configTemp.sampleTimeout = newValue;
+    _asyncPeriodicCollectors->updateSampleTimeout(newValue);
+    _condvar.notify_one();
+    return Status::OK();
+}
+
+Status FTDCController::setMinThreads(size_t newValue) {
+    if (!feature_flags::gFeatureFlagGaplessFTDC.isEnabled()) {
+        return Status(ErrorCodes::InvalidOptions,
+                      "The diagnosticDataCollectionMinThreads parameter is not available with "
+                      "featureFlagGaplessFTDC disabled.");
+    }
+
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    if (newValue > _configTemp.maxThreads) {
+        return Status(
+            ErrorCodes::BadValue,
+            fmt::format("Cannot set diagnosticDataCollectionMinThreads to {}. The value must not "
+                        "exceed diagnosticDataCollectionMaxThreads, currently set to {}.",
+                        newValue,
+                        _configTemp.maxThreads));
+    }
+
+    _configTemp.minThreads = newValue;
+    _asyncPeriodicCollectors->updateMinThreads(newValue);
+    _condvar.notify_one();
+    return Status::OK();
+}
+
+Status FTDCController::setMaxThreads(size_t newValue) {
+    if (!feature_flags::gFeatureFlagGaplessFTDC.isEnabled()) {
+        return Status(ErrorCodes::InvalidOptions,
+                      "The diagnosticDataCollectionMaxThreads parameter is not available with "
+                      "featureFlagGaplessFTDC disabled.");
+    }
+
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    if (newValue < _configTemp.minThreads) {
+        return Status(
+            ErrorCodes::BadValue,
+            fmt::format("Cannot set diagnosticDataCollectionMaxThreads to {}. The value must not "
+                        "fall below diagnosticDataCollectionMinThreads, currently set to {}.",
+                        newValue,
+                        _configTemp.minThreads));
+    }
+
+    _configTemp.maxThreads = newValue;
+    _asyncPeriodicCollectors->updateMaxThreads(newValue);
+    _condvar.notify_one();
+    return Status::OK();
 }
 
 void FTDCController::setMaxDirectorySizeBytes(std::uint64_t size) {
@@ -125,29 +193,32 @@ Status FTDCController::setDirectory(const boost::filesystem::path& path) {
     return Status::OK();
 }
 
-
-void FTDCController::addPeriodicMetadataCollector(std::unique_ptr<FTDCCollectorInterface> collector,
-                                                  ClusterRole role) {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
+void FTDCController::addPeriodicMetadataCollector(
+    std::unique_ptr<FTDCCollectorInterface> collector) {
+    stdx::lock_guard lock(_mutex);
     invariant(_state == State::kNotStarted);
 
-    _periodicMetadataCollectors.add(std::move(collector), role);
+    _periodicMetadataCollectors.add(std::move(collector));
 }
 
-void FTDCController::addPeriodicCollector(std::unique_ptr<FTDCCollectorInterface> collector,
-                                          ClusterRole role) {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
+void FTDCController::addPeriodicCollector(std::unique_ptr<FTDCCollectorInterface> collector) {
+    stdx::lock_guard lock(_mutex);
     invariant(_state == State::kNotStarted);
 
-    _periodicCollectors.add(std::move(collector), role);
+    if (feature_flags::gFeatureFlagGaplessFTDC.isEnabled()) {
+        _asyncPeriodicCollectors->add(std::move(collector));
+        _numAsyncPeriodicCollectors.increment();
+        return;
+    }
+
+    _periodicCollectors.add(std::move(collector));
 }
 
-void FTDCController::addOnRotateCollector(std::unique_ptr<FTDCCollectorInterface> collector,
-                                          ClusterRole role) {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
+void FTDCController::addOnRotateCollector(std::unique_ptr<FTDCCollectorInterface> collector) {
+    stdx::lock_guard lock(_mutex);
     invariant(_state == State::kNotStarted);
 
-    _rotateCollectors.add(std::move(collector), role);
+    _rotateCollectors.add(std::move(collector));
 }
 
 BSONObj FTDCController::getMostRecentPeriodicDocument() {
@@ -162,15 +233,18 @@ void FTDCController::triggerRotate() {
 }
 
 void FTDCController::start(Service* service) {
-    LOGV2(20625,
-          "Initializing full-time diagnostic data capture",
-          "dataDirectory"_attr = _path.generic_string());
+    const auto initPath = [&] {
+        // FTDC is initialized after `TransportLayer`, so avoid a read-after-write on `_path`.
+        stdx::lock_guard lk(_mutex);
+        return _path.generic_string();
+    }();
+    LOGV2(20625, "Initializing full-time diagnostic data capture", "dataDirectory"_attr = initPath);
 
     // Start the thread
     _thread = stdx::thread([this, service] { doLoop(service); });
 
     {
-        stdx::lock_guard<stdx::mutex> lock(_mutex);
+        stdx::lock_guard lock(_mutex);
 
         invariant(_state == State::kNotStarted);
         _state = State::kStarted;
@@ -181,7 +255,7 @@ void FTDCController::stop() {
     LOGV2(20626, "Shutting down full-time diagnostic data capture");
 
     {
-        stdx::lock_guard<stdx::mutex> lock(_mutex);
+        stdx::lock_guard lock(_mutex);
 
         bool started = (_state == State::kStarted);
 
@@ -201,7 +275,10 @@ void FTDCController::stop() {
 
     _thread.join();
 
-    _state = State::kDone;
+    {
+        stdx::lock_guard lock(_mutex);
+        _state = State::kDone;
+    }
 
     if (_mgr) {
         auto s = _mgr->close();
@@ -232,6 +309,7 @@ void FTDCController::doLoop(Service* service) try {
     // reset to _config.metadataCaptureFrequency and countdown starts again.
     std::uint64_t metadataCaptureFrequencyCountdown = 1;
 
+    std::vector<std::pair<std::string, int>> sectionSizes;
     while (true) {
         _env->onStartLoop();
 
@@ -278,8 +356,11 @@ void FTDCController::doLoop(Service* service) try {
         // Delay initialization of FTDCFileManager until we are sure the user has enabled
         // FTDC
         if (!_mgr) {
-            auto swMgr = FTDCFileManager::create(
-                &_config, _path, &_rotateCollectors, client, _multiServiceSchema);
+            const auto path = [&] {
+                stdx::lock_guard lk(_mutex);
+                return _path;
+            }();
+            auto swMgr = FTDCFileManager::create(&_config, path, &_rotateCollectors, client);
 
             _mgr = uassertStatusOK(std::move(swMgr));
         }
@@ -288,25 +369,47 @@ void FTDCController::doLoop(Service* service) try {
             iassert(_mgr->rotate(client));
         }
 
-        auto collectSample = _periodicCollectors.collect(client, _multiServiceSchema);
+        sectionSizes.clear();
+        try {
+            auto collectSample = feature_flags::gFeatureFlagGaplessFTDC.isEnabled()
+                ? _asyncPeriodicCollectors->collect(client, sectionSizes)
+                : _periodicCollectors.collect(client, sectionSizes);
+            Status s = _mgr->writeSampleAndRotateIfNeeded(
+                client, std::get<0>(collectSample), std::get<1>(collectSample));
 
-        Status s = _mgr->writeSampleAndRotateIfNeeded(
-            client, std::get<0>(collectSample), std::get<1>(collectSample));
+            uassertStatusOK(s);
 
-        uassertStatusOK(s);
-
-        // Store a reference to the most recent document from the periodic collectors
-        {
-            stdx::lock_guard<stdx::mutex> lock(_mutex);
-            _mostRecentPeriodicDocument = std::get<0>(collectSample);
+            // Store a reference to the most recent document from the periodic collectors
+            {
+                stdx::lock_guard<stdx::mutex> lock(_mutex);
+                _mostRecentPeriodicDocument = std::get<0>(collectSample);
+            }
+        } catch (...) {
+            for (const auto& entry : sectionSizes) {
+                LOGV2_INFO(
+                    10630200, "FTDC Entry", "name"_attr = entry.first, "size"_attr = entry.second);
+            }
+            throw;
         }
 
         if (--metadataCaptureFrequencyCountdown == 0) {
             metadataCaptureFrequencyCountdown = _config.metadataCaptureFrequency;
-            auto collectSample = _periodicMetadataCollectors.collect(client, _multiServiceSchema);
-            Status s = _mgr->writePeriodicMetadataSampleAndRotateIfNeeded(
-                client, std::get<0>(collectSample), std::get<1>(collectSample));
-            iassert(s);
+            sectionSizes.clear();
+            try {
+                auto collectSample = _periodicMetadataCollectors.collect(client, sectionSizes);
+                Status s = _mgr->writePeriodicMetadataSampleAndRotateIfNeeded(
+                    client, std::get<0>(collectSample), std::get<1>(collectSample));
+                iassert(s);
+
+            } catch (const ExceptionFor<ErrorCodes::BSONObjectTooLarge>&) {
+                for (const auto& entry : sectionSizes) {
+                    LOGV2_INFO(10630202,
+                               "FTDC Entry",
+                               "name"_attr = entry.first,
+                               "size"_attr = entry.second);
+                }
+                throw;
+            }
         }
     }
 } catch (...) {

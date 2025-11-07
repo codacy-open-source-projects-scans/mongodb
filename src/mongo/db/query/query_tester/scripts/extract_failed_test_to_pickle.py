@@ -14,6 +14,7 @@ that can be further analyzed or processed within the QueryTester framework.
 """
 
 import subprocess
+from pathlib import Path
 
 import utils
 
@@ -23,7 +24,7 @@ args = utils.parse_args_common(
     fail_filepath=True,
 )
 output_prefix = args.output_prefix
-fail_filepath = args.fail_filepath
+fail_filepath = Path(args.fail_filepath).resolve()
 
 # Validate directories and change to feature-extractor directory
 feature_extractor_dir = utils.validate_and_change_directory(args.feature_extractor_dir)
@@ -38,10 +39,10 @@ bash_command = (
 )
 subprocess.run(bash_command, shell=True, text=True, check=True)
 
-# Extract DB and COLL from the .fail file
-db, coll = utils.extract_db_and_coll(fail_filepath)
+# Extract DB from the .fail file
+db = utils.extract_db(fail_filepath)
 
-# Convert JSON into DataFrame, passing in the relevant DB and COLL.
+# Convert JSON into DataFrame, passing in the relevant DB.
 cmd = [
     "bin/venv",
     "extract_features_to_dataframe.py",
@@ -49,8 +50,6 @@ cmd = [
     utils.MONGODB_URI,
     "--db",
     db,
-    "--coll",
-    coll,
 ]
 with open(json_file, encoding="utf-8") as json_input:
     with open(pkl_file, "ab") as pkl_output:

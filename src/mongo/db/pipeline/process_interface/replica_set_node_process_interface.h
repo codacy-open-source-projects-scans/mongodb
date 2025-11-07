@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <list>
-#include <memory>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
@@ -55,6 +48,14 @@
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
 
+#include <list>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
 namespace mongo {
 
 /**
@@ -67,6 +68,11 @@ public:
 
     std::unique_ptr<WriteSizeEstimator> getWriteSizeEstimator(
         OperationContext* opCtx, const NamespaceString& ns) const override {
+        // TODO SERVER-99709: This method gets called after acquiring the global lock. As a result,
+        // instead of going through the hierarchy of RSTL -> Global locks this method acquires the
+        // RSTL after acquiring the Global lock. We should investigate if there's any potential
+        // safety concerns since it might lead to a deadlock.
+        DisableLockerRuntimeOrderingChecks disable{opCtx};
         if (_canWriteLocally(opCtx, ns)) {
             return std::make_unique<LocalWriteSizeEstimator>();
         } else {
@@ -109,7 +115,7 @@ public:
         bool dropTarget,
         bool stayTemp,
         const BSONObj& originalCollectionOptions,
-        const std::list<BSONObj>& originalIndexes) override;
+        const std::vector<BSONObj>& originalIndexes) override;
     void createCollection(OperationContext* opCtx,
                           const DatabaseName& dbName,
                           const BSONObj& cmdObj) override;
@@ -128,6 +134,9 @@ public:
                             const WriteConcernOptions& wc,
                             boost::optional<OID> targetEpoch) override;
 
+    UUID fetchCollectionUUIDFromPrimary(OperationContext* opCtx,
+                                        const NamespaceString& nss) override;
+
 private:
     /**
      * Attemps to execute the specified command on the primary. Returns the command response upon
@@ -136,12 +145,15 @@ private:
      */
     StatusWith<BSONObj> _executeCommandOnPrimary(OperationContext* opCtx,
                                                  const NamespaceString& ns,
-                                                 const BSONObj& cmdObj) const;
+                                                 const BSONObj& cmdObj,
+                                                 bool attachWriteConcern = true) const;
 
     /**
-     * Attaches command arguments such as writeConcern to 'cmd'.
+     * Attaches command arguments such as maxTimeMS to 'cmd'.
      */
-    void _attachGenericCommandArgs(OperationContext* opCtx, BSONObjBuilder* cmd) const;
+    void _attachGenericCommandArgs(OperationContext* opCtx,
+                                   BSONObjBuilder* cmd,
+                                   bool attachWriteConcern = true) const;
 
     /**
      * Returns whether we are the primary and can therefore perform writes locally. Result may be

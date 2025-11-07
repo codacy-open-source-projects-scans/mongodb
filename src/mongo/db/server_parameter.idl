@@ -35,30 +35,37 @@ imports:
 
 enums:
     SetAtOption:
+        mod_visibility: pub
         description: "SetAt option value"
         type: string
         values:
             kStartup: "startup"
             kRuntime: "runtime"
 
-# Options for the getParameter command. Describes the object "options" when the command is run as 
+# Options for the getParameter command. Describes the object "options" when the command is run as
 # {getParameter: <options>}
 structs:
-  GetParameterOptions:
-    description: 'Optional flags to pass to {getParameter: options, ...}'
-    fields: 
-      showDetails:
-        description: 'Return metadata about the server parameter along with its current value'
-        type: safeBool
-        default: false
-      setAt:
-        description: >- 
-            Can be set to "runtime" or "startup". If set to "startup", then only startup-settable
-            parameters are returned from the requested ones. If set to "runtime", then only
-            runtime-settable parameters are returned from the requested ones.
-        type: SetAtOption
-        optional: true
-      allParameters:
-        description: 'Return all server parameters, not just the ones specified'
-        type: safeBool
-        default: false
+    GetParameterOptions:
+        mod_visibility: pub
+        description: "Optional flags to pass to {getParameter: options, ...}"
+        fields:
+            showDetails:
+                description: "Return metadata about the server parameter along with its current value"
+                type: safeBool
+                default: false
+            setAt:
+                description: >-
+                    Can be set to "runtime" or "startup". If set to "startup", then only startup-settable
+                    parameters are returned from the requested ones. If set to "runtime", then only
+                    runtime-settable parameters are returned from the requested ones.
+                type: SetAtOption
+                optional: true
+            forIncrementalFeatureRollout:
+                description: >-
+                    Return only server parameters that can participate in Incremental Feature Rollout (IFR).
+                type: safeBool
+                default: false
+            allParameters:
+                description: "Return all server parameters, not just the ones specified"
+                type: safeBool
+                default: false

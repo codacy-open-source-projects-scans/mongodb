@@ -27,21 +27,20 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
 #include "mongo/bson/unordered_fields_bsonobj_comparator.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/util/make_data_structure.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <memory>
+#include <vector>
 
 namespace mongo {
 namespace {
@@ -56,7 +55,7 @@ TEST_F(InternalUnpackBucketSampleReorderTest, SampleThenSimpleProject) {
     auto projectSpec = fromjson("{$project: {_id: false, x: false, y: false}}");
 
     auto pipeline = Pipeline::parse(makeVector(unpackSpec, sampleSpec, projectSpec), getExpCtx());
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
 
@@ -76,7 +75,7 @@ TEST_F(InternalUnpackBucketSampleReorderTest, SampleThenComputedProject) {
         fromjson("{$project: {_id: true, city: '$myMeta.address.city', temp: '$temp.celsius'}}");
 
     auto pipeline = Pipeline::parse(makeVector(unpackSpec, sampleSpec, projectSpec), getExpCtx());
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
 
@@ -98,7 +97,7 @@ TEST_F(InternalUnpackBucketSampleReorderTest, SimpleProjectThenSample) {
     auto sampleSpec = fromjson("{$sample: {size: 500}}");
 
     auto pipeline = Pipeline::parse(makeVector(unpackSpec, projectSpec, sampleSpec), getExpCtx());
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
 
@@ -120,7 +119,7 @@ TEST_F(InternalUnpackBucketSampleReorderTest, ComputedProjectThenSample) {
     auto sampleSpec = fromjson("{$sample: {size: 500}}");
 
     auto pipeline = Pipeline::parse(makeVector(unpackSpec, projectSpec, sampleSpec), getExpCtx());
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
 

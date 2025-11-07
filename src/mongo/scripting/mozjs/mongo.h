@@ -29,6 +29,12 @@
 
 #pragma once
 
+#include "mongo/client/dbclient_base.h"
+#include "mongo/scripting/mozjs/base.h"
+#include "mongo/scripting/mozjs/objectwrapper.h"
+#include "mongo/scripting/mozjs/wraptype.h"
+#include "mongo/util/modules.h"
+
 #include <memory>
 
 #include <js/CallArgs.h>
@@ -37,11 +43,6 @@
 #include <js/RootingAPI.h>
 #include <js/TracingAPI.h>
 #include <js/TypeDecls.h>
-
-#include "mongo/client/dbclient_base.h"
-#include "mongo/scripting/mozjs/base.h"
-#include "mongo/scripting/mozjs/objectwrapper.h"
-#include "mongo/scripting/mozjs/wraptype.h"
 
 namespace mongo {
 namespace mozjs {
@@ -56,9 +57,10 @@ using EncryptedDBClientFromExistingCallback = std::shared_ptr<DBClientBase>(
 
 using GetNestedConnectionCallback = DBClientBase*(DBClientBase*);
 
-void setEncryptedDBClientCallbacks(EncryptedDBClientCallback* encCallback,
-                                   EncryptedDBClientFromExistingCallback* encFromExistingCallback,
-                                   GetNestedConnectionCallback* getCallback);
+MONGO_MOD_PUB void setEncryptedDBClientCallbacks(
+    EncryptedDBClientCallback* encCallback,
+    EncryptedDBClientFromExistingCallback* encFromExistingCallback,
+    GetNestedConnectionCallback* getCallback);
 
 /**
  * Shared code for the "Mongo" javascript object.
@@ -107,9 +109,10 @@ struct MongoBase : public BaseInfo {
         MONGO_DECLARE_JS_FUNCTION(_startSession);
         MONGO_DECLARE_JS_FUNCTION(_setOIDCIdPAuthCallback);
         MONGO_DECLARE_JS_FUNCTION(_refreshAccessToken);
+        MONGO_DECLARE_JS_FUNCTION(getShellPort);
     };
 
-    static const JSFunctionSpec methods[31];
+    static const JSFunctionSpec methods[32];
 
     static const char* const className;
     static const unsigned classFlags =
@@ -131,7 +134,7 @@ struct MongoExternalInfo : public MongoBase {
     static const JSFunctionSpec freeFunctions[4];
 };
 
-class EncryptionCallbacks {
+class MONGO_MOD_OPEN EncryptionCallbacks {
 public:
     virtual void generateDataKey(JSContext* cx, JS::CallArgs args) = 0;
     virtual void getDataKeyCollection(JSContext* cx, JS::CallArgs args) = 0;

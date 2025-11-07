@@ -9,8 +9,7 @@ import {QuerySamplingUtil} from "jstests/sharding/analyze_shard_key/libs/query_s
 function setUpCollection(st, isShardedColl) {
     const dbName = "testDb-" + extractUUIDFromObject(UUID());
     if (st) {
-        assert.commandWorked(
-            st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+        assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
     }
     const collName = isShardedColl ? "testCollSharded" : "testCollUnsharded";
     const ns = dbName + "." + collName;
@@ -21,8 +20,7 @@ function setUpCollection(st, isShardedColl) {
         assert(st);
         assert.commandWorked(st.s0.adminCommand({shardCollection: ns, key: {x: 1}}));
         assert.commandWorked(st.s0.adminCommand({split: ns, middle: {x: 0}}));
-        assert.commandWorked(
-            st.s0.adminCommand({moveChunk: ns, find: {x: 0}, to: st.shard1.shardName}));
+        assert.commandWorked(st.s0.adminCommand({moveChunk: ns, find: {x: 0}, to: st.shard1.shardName}));
     }
 
     return {dbName, collName};
@@ -31,8 +29,9 @@ function setUpCollection(st, isShardedColl) {
 function enableQuerySampling(st, dbName, collName) {
     const ns = dbName + "." + collName;
     const collUuid = QuerySamplingUtil.getCollectionUuid(st.s.getDB(dbName), collName);
-    assert.commandWorked(st.s.adminCommand(
-        {configureQueryAnalyzer: ns, mode: "full", samplesPerSecond: samplesPerSecond}));
+    assert.commandWorked(
+        st.s.adminCommand({configureQueryAnalyzer: ns, mode: "full", samplesPerSecond: samplesPerSecond}),
+    );
     QuerySamplingUtil.waitForActiveSampling(ns, collUuid, {st});
 }
 
@@ -57,28 +56,11 @@ function assertQuerySampling(dbName, collName, isActive, st) {
     const conn = st.s;
     const mongosDB = conn.getDB(dbName);
 
-    // Make sure that the resharded UUID has been propagated to the query analyzer on each mongod.
-    // Otherwise, the find query below will be discarded due to the collection UUID mismatch.
+    // Make sure that we wait for active sampling. Otherwise, the find query below will be discarded
+    // due to either the collection UUID mismatch or a lack of tokens in the mongos.
     if (isActive) {
         let collUuid = QuerySamplingUtil.getCollectionUuid(mongosDB, collName);
-        assert.soon(() => {
-            let isCollUuidUpdated = true;
-
-            st.forEachConnection(conn => {
-                const currentOp = assert
-                                      .commandWorked(conn.adminCommand(
-                                          {currentOp: true, desc: "query analyzer", ns: ns}))
-                                      .inprog;
-
-                currentOp.forEach(op => {
-                    if (bsonWoCompare(collUuid, op.collUuid) != 0) {
-                        isCollUuidUpdated = false;
-                    }
-                });
-            });
-
-            return isCollUuidUpdated;
-        });
+        QuerySamplingUtil.waitForActiveSampling(ns, collUuid, {st});
     }
 
     assert.commandWorked(mongosDB.runCommand({find: collName, filter: {x: 0, comment: uuid}}));
@@ -88,12 +70,12 @@ function assertQuerySampling(dbName, collName, isActive, st) {
     // If query sampling is active, assert that the find query above was sampled. Otherwise, assert
     // that it was not.
     assert.soon(() => {
-        const aggRes = assert.commandWorked(conn.adminCommand(
-            {aggregate: 1, pipeline: [{$listSampledQueries: {namespace: ns}}], cursor: {}}));
+        const aggRes = assert.commandWorked(
+            conn.adminCommand({aggregate: 1, pipeline: [{$listSampledQueries: {namespace: ns}}], cursor: {}}),
+        );
         const sampledQueryDocs = aggRes.cursor.firstBatch;
 
-        const matchCount =
-            sampledQueryDocs.filter(doc => bsonWoCompare(uuid, doc.cmd.filter.comment) == 0).length;
+        const matchCount = sampledQueryDocs.filter((doc) => bsonWoCompare(uuid, doc.cmd.filter.comment) == 0).length;
 
         if (isActive) {
             return matchCount == 1;
@@ -220,14 +202,14 @@ const mongodSetParameterOpts = {
 };
 const mongosSetParametersOpts = {
     queryAnalysisSamplerConfigurationRefreshSecs,
-    logComponentVerbosity: tojson({sharding: 3})
+    logComponentVerbosity: tojson({sharding: 3}),
 };
 
 {
     const st = new ShardingTest({
         shards: 2,
         rs: {nodes: 1, setParameter: mongodSetParameterOpts},
-        mongosOptions: {setParameter: mongosSetParametersOpts}
+        mongosOptions: {setParameter: mongosSetParametersOpts},
     });
 
     testMoveCollectionQuerySamplingEnabled(st);

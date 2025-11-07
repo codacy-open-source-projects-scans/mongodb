@@ -29,16 +29,16 @@
 
 #pragma once
 
-#include <string>
-
 #include "mongo/bson/bson_field.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/jsobj.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <string>
+
+namespace MONGO_MOD_PUBLIC mongo {
 
 /**
- * This class represents the layout and content of an idem inside the 'upserted' array of a write
+ * This class represents the layout and content of an item inside the 'upserted' array of a write
  * command's response (see BatchedCommandResponse).
  */
 class BatchedUpsertDetail {
@@ -96,4 +96,4 @@ private:
     bool _isUpsertedIDSet;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

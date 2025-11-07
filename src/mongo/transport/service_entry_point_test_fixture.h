@@ -42,11 +42,12 @@
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/unittest/log_test.h"
 #include "mongo/util/clock_source_mock.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/tick_source_mock.h"
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 
-class ServiceEntryPointTestFixture : public ServiceContextTest {
+class MONGO_MOD_OPEN ServiceEntryPointTestFixture : public ServiceContextTest {
 public:
     ServiceEntryPointTestFixture()
         : ServiceContextTest(std::make_unique<ScopedGlobalServiceContextForTest>(
@@ -107,6 +108,11 @@ public:
     void testWriteConcernClientSpecified();
     void testWriteConcernClientUnspecifiedNoDefault();
     void testWriteConcernClientUnspecifiedWithDefault(bool expectClusterDefault);
+
+#ifdef MONGO_CONFIG_OTEL
+    void testTelemetryContextDeserializedFromRequest();
+    void testTelemetryContextNotSetWhenNotInRequest();
+#endif
 
 protected:
     ReadWriteConcernDefaultsLookupMock _lookupMock;
@@ -325,6 +331,9 @@ public:
     bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
     }
+    ReadWriteType getReadWriteType() const override {
+        return ReadWriteType::kWrite;
+    }
     bool runWithReplyBuilder(OperationContext* opCtx,
                              const DatabaseName&,
                              const BSONObj&,
@@ -341,4 +350,4 @@ public:
     }
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

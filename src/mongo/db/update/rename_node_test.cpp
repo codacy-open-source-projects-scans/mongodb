@@ -27,28 +27,28 @@
  *    it in the license file.
  */
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/update/rename_node.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/json.h"
-#include "mongo/bson/mutable/algorithm.h"
-#include "mongo/bson/mutable/document.h"
-#include "mongo/bson/mutable/element.h"
+#include "mongo/db/exec/mutable_bson/algorithm.h"
+#include "mongo/db/exec/mutable_bson/document.h"
+#include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/update/rename_node.h"
 #include "mongo/db/update/update_executor.h"
 #include "mongo/db/update/update_node_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
 
 using RenameNodeTest = UpdateTestFixture;
 
-TEST(RenameNodeTest, PositionalNotAllowedInFromField) {
+TEST(SimpleRenameNodeTest, PositionalNotAllowedInFromField) {
     auto update = fromjson("{$rename: {'a.$': 'b'}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     RenameNode node;
@@ -57,7 +57,7 @@ TEST(RenameNodeTest, PositionalNotAllowedInFromField) {
     ASSERT_EQUALS(ErrorCodes::BadValue, status);
 }
 
-TEST(RenameNodeTest, PositionalNotAllowedInToField) {
+TEST(SimpleRenameNodeTest, PositionalNotAllowedInToField) {
     auto update = fromjson("{$rename: {'a': 'b.$'}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     RenameNode node;
@@ -66,7 +66,7 @@ TEST(RenameNodeTest, PositionalNotAllowedInToField) {
     ASSERT_EQUALS(ErrorCodes::BadValue, status);
 }
 
-TEST(RenameNodeTest, ArrayFilterNotAllowedInFromField) {
+TEST(SimpleRenameNodeTest, ArrayFilterNotAllowedInFromField) {
     auto update = fromjson("{$rename: {'a.$[i]': 'b'}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     RenameNode node;
@@ -75,7 +75,7 @@ TEST(RenameNodeTest, ArrayFilterNotAllowedInFromField) {
     ASSERT_EQUALS(ErrorCodes::BadValue, status);
 }
 
-TEST(RenameNodeTest, ArrayFilterNotAllowedInToField) {
+TEST(SimpleRenameNodeTest, ArrayFilterNotAllowedInToField) {
     auto update = fromjson("{$rename: {'a': 'b.$[i]'}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     RenameNode node;
@@ -85,7 +85,7 @@ TEST(RenameNodeTest, ArrayFilterNotAllowedInToField) {
 }
 
 
-TEST(RenameNodeTest, MoveUpNotAllowed) {
+TEST(SimpleRenameNodeTest, MoveUpNotAllowed) {
     auto update = fromjson("{$rename: {'b.a': 'b'}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     RenameNode node;
@@ -94,7 +94,7 @@ TEST(RenameNodeTest, MoveUpNotAllowed) {
     ASSERT_EQUALS(ErrorCodes::BadValue, status);
 }
 
-TEST(RenameNodeTest, MoveDownNotAllowed) {
+TEST(SimpleRenameNodeTest, MoveDownNotAllowed) {
     auto update = fromjson("{$rename: {'b': 'b.a'}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     RenameNode node;
@@ -103,7 +103,7 @@ TEST(RenameNodeTest, MoveDownNotAllowed) {
     ASSERT_EQUALS(ErrorCodes::BadValue, status);
 }
 
-TEST(RenameNodeTest, MoveToSelfNotAllowed) {
+TEST(SimpleRenameNodeTest, MoveToSelfNotAllowed) {
     auto update = fromjson("{$rename: {'b.a': 'b.a'}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     RenameNode node;
@@ -475,9 +475,7 @@ TEST_F(RenameNodeTest, ApplyCanRemoveRequiredPartOfDBRefIfValidateForStorageIsFa
     auto result = node.apply(getApplyParams(doc.root()), getUpdateNodeApplyParams());
     ASSERT_FALSE(result.noop);
     ASSERT_TRUE(getIndexAffectedFromLogEntry());
-    auto updated = BSON("a" << BSON("$ref"
-                                    << "c")
-                            << "b" << 0);
+    auto updated = BSON("a" << BSON("$ref" << "c") << "b" << 0);
     ASSERT_EQUALS(updated, doc);
     ASSERT_FALSE(doc.isInPlaceModeEnabled());
 

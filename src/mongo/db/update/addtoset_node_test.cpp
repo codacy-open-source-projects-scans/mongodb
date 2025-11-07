@@ -27,32 +27,32 @@
  *    it in the license file.
  */
 
+#include "mongo/db/update/addtoset_node.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/json.h"
+#include "mongo/db/exec/mutable_bson/algorithm.h"
+#include "mongo/db/exec/mutable_bson/document.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/query/collation/collator_interface_mock.h"
+#include "mongo/db/update/update_executor.h"
+#include "mongo/db/update/update_node_test_fixture.h"
+#include "mongo/unittest/death_test.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/intrusive_counter.h"
+
 #include <string>
 #include <utility>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/bson/json.h"
-#include "mongo/bson/mutable/algorithm.h"
-#include "mongo/bson/mutable/document.h"
-#include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/db/update/addtoset_node.h"
-#include "mongo/db/update/update_executor.h"
-#include "mongo/db/update/update_node_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 
 namespace mongo {
 namespace {
 
 using AddToSetNodeTest = UpdateTestFixture;
 
-DEATH_TEST_REGEX(AddToSetNodeTest,
+DEATH_TEST_REGEX(AddToSetNodeDeathTest,
                  InitFailsForEmptyElement,
                  R"#(Invariant failure.*modExpr.ok())#") {
     auto update = fromjson("{$addToSet: {}}");
@@ -61,7 +61,7 @@ DEATH_TEST_REGEX(AddToSetNodeTest,
     node.init(update["$addToSet"].embeddedObject().firstElement(), expCtx).transitional_ignore();
 }
 
-TEST(AddToSetNodeTest, InitFailsIfEachIsNotArray) {
+TEST(SimpleAddToSetNodeTest, InitFailsIfEachIsNotArray) {
     auto update = fromjson("{$addToSet: {fieldName: {$each: {}}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddToSetNode node;
@@ -72,7 +72,7 @@ TEST(AddToSetNodeTest, InitFailsIfEachIsNotArray) {
               "The argument to $each in $addToSet must be an array but it was of type object");
 }
 
-TEST(AddToSetNodeTest, InitFailsIfThereAreFieldsAfterEach) {
+TEST(SimpleAddToSetNodeTest, InitFailsIfThereAreFieldsAfterEach) {
     auto update = fromjson("{$addToSet: {fieldName: {$each: [], bad: 1}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddToSetNode node;
@@ -83,34 +83,33 @@ TEST(AddToSetNodeTest, InitFailsIfThereAreFieldsAfterEach) {
               "Found unexpected fields after $each in $addToSet: { $each: [], bad: 1 }");
 }
 
-TEST(AddToSetNodeTest, InitSucceedsWithFailsBeforeEach) {
+TEST(SimpleAddToSetNodeTest, InitSucceedsWithFailsBeforeEach) {
     auto update = fromjson("{$addToSet: {fieldName: {other: 1, $each: []}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddToSetNode node;
     ASSERT_OK(node.init(update["$addToSet"]["fieldName"], expCtx));
 }
 
-TEST(AddToSetNodeTest, InitSucceedsWithObject) {
+TEST(SimpleAddToSetNodeTest, InitSucceedsWithObject) {
     auto update = fromjson("{$addToSet: {fieldName: {}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddToSetNode node;
     ASSERT_OK(node.init(update["$addToSet"]["fieldName"], expCtx));
 }
 
-TEST(AddToSetNodeTest, InitSucceedsWithArray) {
+TEST(SimpleAddToSetNodeTest, InitSucceedsWithArray) {
     auto update = fromjson("{$addToSet: {fieldName: []}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddToSetNode node;
     ASSERT_OK(node.init(update["$addToSet"]["fieldName"], expCtx));
 }
 
-TEST(AddToSetNodeTest, InitFailsWhenArgumentIsInvalidBSONArray) {
+TEST(SimpleAddToSetNodeTest, InitFailsWhenArgumentIsInvalidBSONArray) {
     // Create our invalid array by creating a BSONObj with non contiguous array indexes that is then
     // passed to the BSONArray ctor.
-    BSONObj updateArrAsObj = BSON("0"
-                                  << "foo"
-                                  << "2"
-                                  << "bar");
+    BSONObj updateArrAsObj = BSON("0" << "foo"
+                                      << "2"
+                                      << "bar");
     BSONArray updateArr(updateArrAsObj);
 
     auto update = BSON("$addToSet" << BSON("fieldName" << BSON("$each" << updateArr)));
@@ -121,7 +120,7 @@ TEST(AddToSetNodeTest, InitFailsWhenArgumentIsInvalidBSONArray) {
                   ExceptionFor<ErrorCodes::BadValue>);
 }
 
-TEST(AddToSetNodeTest, InitSucceedsWithScaler) {
+TEST(SimpleAddToSetNodeTest, InitSucceedsWithScaler) {
     auto update = fromjson("{$addToSet: {fieldName: 1}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddToSetNode node;
@@ -424,7 +423,7 @@ TEST_F(AddToSetNodeTest, ApplyRespectsCollationFromSetCollator) {
     ASSERT_EQUALS(getModifiedPaths(), "{fieldName}");
 }
 
-DEATH_TEST_REGEX(AddToSetNodeTest,
+DEATH_TEST_REGEX(AddToSetNodeDeathTest,
                  CannotSetCollatorIfCollatorIsNonNull,
                  "Invariant failure.*!_collator") {
     auto update = fromjson("{$addToSet: {fieldName: 1}}");
@@ -437,7 +436,7 @@ DEATH_TEST_REGEX(AddToSetNodeTest,
     node.setCollator(expCtx->getCollator());
 }
 
-DEATH_TEST_REGEX(AddToSetNodeTest, CannotSetCollatorTwice, "Invariant failure.*!_collator") {
+DEATH_TEST_REGEX(AddToSetNodeDeathTest, CannotSetCollatorTwice, "Invariant failure.*!_collator") {
     auto update = fromjson("{$addToSet: {fieldName: 1}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddToSetNode node;

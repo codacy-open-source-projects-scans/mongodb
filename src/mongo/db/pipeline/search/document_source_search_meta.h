@@ -31,6 +31,7 @@
 
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/search/document_source_internal_search_mongot_remote.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -49,11 +50,13 @@ public:
     using DocumentSourceInternalSearchMongotRemote::DocumentSourceInternalSearchMongotRemote;
 
     const char* getSourceName() const override {
-        return kStageName.rawData();
+        return kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kSearchMeta;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
     /**
@@ -62,16 +65,27 @@ public:
      */
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final;
 
+    DepsTracker::State getDependencies(DepsTracker* deps) const final {
+        // We must override DocumentSourceInternalSearchMongotRemote::getDependencies() since this
+        // stage does not populate any metadata fields.
+
+        // TODO SERVER-101100 Implement logic for dependency analysis.
+        return DepsTracker::State::NOT_SUPPORTED;
+    }
+
     boost::intrusive_ptr<DocumentSource> clone(
         const boost::intrusive_ptr<ExpressionContext>& newExpCtx) const override {
-        auto expCtx = newExpCtx ? newExpCtx : pExpCtx;
+        auto expCtx = newExpCtx ? newExpCtx : getExpCtx();
         auto executor =
             executor::getMongotTaskExecutor(expCtx->getOperationContext()->getServiceContext());
         auto spec = getMongotRemoteSpec();
-        tassert(9497007, "Cannot clone with an initialized cursor - it cannot be shared", !_cursor);
+        tassert(9497007,
+                "Cannot clone with an initialized cursor - it cannot be shared",
+                !_sharedState->_cursor);
         if (_mergingPipeline) {
             spec.setMergingPipeline(_mergingPipeline->serializeToBson());
         }
+
         return make_intrusive<DocumentSourceSearchMeta>(std::move(spec), expCtx, executor);
     }
 
@@ -90,20 +104,18 @@ public:
     }
 
     std::unique_ptr<executor::TaskExecutorCursor> getCursor() {
-        return std::move(_cursor);
+        return std::move(_sharedState->_cursor);
     }
 
-protected:
-    std::unique_ptr<executor::TaskExecutorCursor> establishCursor() override;
 
 private:
-    GetNextResult getNextAfterSetup() override;
-
-    bool _returnedAlready = false;
+    friend boost::intrusive_ptr<exec::agg::Stage> documentSourceSearchMetaToStageFn(
+        const boost::intrusive_ptr<DocumentSource>&);
 
     // An unique id of search stage in the pipeline, currently it is hard coded to 0 because we can
     // only have one search stage and sub-pipelines are not in the same PlanExecutor.
     // We should assign unique ids when we have everything in a single PlanExecutorSBE.
+    // TODO SERVER-109825: This should be moved to SearchMetaStage class.
     size_t _remoteCursorId{0};
 
     boost::optional<BSONObj> _remoteCursorVars;

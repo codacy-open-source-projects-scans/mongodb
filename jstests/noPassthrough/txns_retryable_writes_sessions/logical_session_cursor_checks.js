@@ -5,15 +5,15 @@
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 function runFixture(Fixture) {
-    var fixture = new Fixture();
-    var conn = fixture.getConn();
-    var admin = conn.getDB("admin");
-    var data = conn.getDB("data_storage");
+    let fixture = new Fixture();
+    let conn = fixture.getConn();
+    let admin = conn.getDB("admin");
+    let data = conn.getDB("data_storage");
 
-    admin.createUser({user: 'admin', pwd: 'admin', roles: jsTest.adminUserRoles});
+    admin.createUser({user: "admin", pwd: "admin", roles: jsTest.adminUserRoles});
     admin.auth("admin", "admin");
-    data.createUser({user: 'admin', pwd: 'admin', roles: jsTest.basicUserRoles});
-    data.createUser({user: 'user0', pwd: 'password', roles: jsTest.basicUserRoles});
+    data.createUser({user: "admin", pwd: "admin", roles: jsTest.basicUserRoles});
+    data.createUser({user: "user0", pwd: "password", roles: jsTest.basicUserRoles});
     admin.logout();
 
     data.auth("user0", "password");
@@ -24,11 +24,9 @@ function runFixture(Fixture) {
     {
         var session1 = conn.startSession();
         var session2 = conn.startSession();
-        var res = assert.commandWorked(
-            session1.getDatabase("data_storage").runCommand({find: "test", batchSize: 0}));
+        var res = assert.commandWorked(session1.getDatabase("data_storage").runCommand({find: "test", batchSize: 0}));
         var cursorId = res.cursor.id;
-        assert.commandWorked(session1.getDatabase("data_storage")
-                                 .runCommand({getMore: cursorId, collection: "test"}));
+        assert.commandWorked(session1.getDatabase("data_storage").runCommand({getMore: cursorId, collection: "test"}));
 
         session2.endSession();
         session1.endSession();
@@ -38,11 +36,9 @@ function runFixture(Fixture) {
     {
         var session1 = conn.startSession();
         var session2 = conn.startSession();
-        var res = assert.commandWorked(
-            session1.getDatabase("data_storage").runCommand({find: "test", batchSize: 0}));
+        var res = assert.commandWorked(session1.getDatabase("data_storage").runCommand({find: "test", batchSize: 0}));
         var cursorId = res.cursor.id;
-        assert.commandFailed(session2.getDatabase("data_storage")
-                                 .runCommand({getMore: cursorId, collection: "test"}));
+        assert.commandFailed(session2.getDatabase("data_storage").runCommand({getMore: cursorId, collection: "test"}));
 
         session2.endSession();
         session1.endSession();
@@ -52,7 +48,7 @@ function runFixture(Fixture) {
     {
         var session1 = conn.startSession();
         var session2 = conn.startSession();
-        var cursor = session1.getDatabase("data_storage").test.find({}).batchSize(1);
+        let cursor = session1.getDatabase("data_storage").test.find({}).batchSize(1);
         cursor.next();
         cursor.next();
         cursor.close();
@@ -68,24 +64,23 @@ function Standalone() {
     this.standalone = MongoRunner.runMongod({auth: ""});
 }
 
-Standalone.prototype.stop = function() {
+Standalone.prototype.stop = function () {
     MongoRunner.stopMongod(this.standalone);
 };
 
-Standalone.prototype.getConn = function() {
+Standalone.prototype.getConn = function () {
     return this.standalone;
 };
 
 function Sharding() {
-    this.st =
-        new ShardingTest({shards: 1, config: 1, mongos: 1, other: {keyFile: 'jstests/libs/key1'}});
+    this.st = new ShardingTest({shards: 1, config: 1, mongos: 1, other: {keyFile: "jstests/libs/key1"}});
 }
 
-Sharding.prototype.stop = function() {
+Sharding.prototype.stop = function () {
     this.st.stop();
 };
 
-Sharding.prototype.getConn = function() {
+Sharding.prototype.getConn = function () {
     return this.st.s0;
 };
 

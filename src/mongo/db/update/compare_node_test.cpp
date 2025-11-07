@@ -27,31 +27,31 @@
  *    it in the license file.
  */
 
+#include "mongo/db/update/compare_node.h"
+
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/json.h"
+#include "mongo/db/exec/mutable_bson/algorithm.h"
+#include "mongo/db/exec/mutable_bson/document.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/query/collation/collator_interface_mock.h"
+#include "mongo/db/update/update_executor.h"
+#include "mongo/db/update/update_node_test_fixture.h"
+#include "mongo/unittest/death_test.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/intrusive_counter.h"
+
 #include <string>
 #include <utility>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/json.h"
-#include "mongo/bson/mutable/algorithm.h"
-#include "mongo/bson/mutable/document.h"
-#include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/db/update/compare_node.h"
-#include "mongo/db/update/update_executor.h"
-#include "mongo/db/update/update_node_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/intrusive_counter.h"
 
 namespace mongo {
 namespace {
 
 using CompareNodeTest = UpdateTestFixture;
 
-DEATH_TEST_REGEX(CompareNodeTest,
+DEATH_TEST_REGEX(CompareNodeDeathTest,
                  InitFailsForEmptyElement,
                  R"#(Invariant failure.*modExpr.ok\(\))#") {
     auto update = fromjson("{$max: {}}");
@@ -377,7 +377,7 @@ TEST_F(CompareNodeTest, ApplyMaxRespectsCollationFromSetCollator) {
     assertOplogEntry(fromjson("{$v:2, diff: {u: {a: 'abd'}}}"));
 }
 
-DEATH_TEST_REGEX(CompareNodeTest,
+DEATH_TEST_REGEX(CompareNodeDeathTest,
                  CannotSetCollatorIfCollatorIsNonNull,
                  "Invariant failure.*!_collator") {
     auto update = fromjson("{$max: {a: 1}}");
@@ -391,7 +391,7 @@ DEATH_TEST_REGEX(CompareNodeTest,
     node.setCollator(expCtx->getCollator());
 }
 
-DEATH_TEST_REGEX(CompareNodeTest, CannotSetCollatorTwice, "Invariant failure.*!_collator") {
+DEATH_TEST_REGEX(CompareNodeDeathTest, CannotSetCollatorTwice, "Invariant failure.*!_collator") {
     auto update = fromjson("{$max: {a: 1}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     CompareNode node(CompareNode::CompareMode::kMax);

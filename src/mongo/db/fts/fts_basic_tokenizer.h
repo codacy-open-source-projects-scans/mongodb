@@ -29,14 +29,15 @@
 
 #pragma once
 
-#include <memory>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/db/fts/fts_language.h"
 #include "mongo/db/fts/fts_tokenizer.h"
 #include "mongo/db/fts/stemmer.h"
 #include "mongo/db/fts/tokenizer.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <string>
 
 namespace mongo {
 namespace fts {

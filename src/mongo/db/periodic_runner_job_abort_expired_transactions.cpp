@@ -27,27 +27,26 @@
  *    it in the license file.
  */
 
-#include <string>
+#include "mongo/db/periodic_runner_job_abort_expired_transactions.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/client.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/periodic_runner_job_abort_expired_transactions.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/kill_sessions_local.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/mutable_observer_registry.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/periodic_runner.h"
+
+#include <string>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -127,22 +126,22 @@ void PeriodicThreadToAbortExpiredTransactions::_init(ServiceContext* serviceCont
 
             // This thread needs storage rollback to complete timely, so instruct the storage
             // engine to not do any extra eviction for this thread, if supported.
-            shard_role_details::getRecoveryUnit(opCtx.get())->setNoEvictionAfterRollback();
+            shard_role_details::getRecoveryUnit(opCtx.get())->setNoEvictionAfterCommitOrRollback();
 
             try {
                 int64_t numKills = 0;
                 int64_t numTimeOuts = 0;
                 killAllExpiredTransactions(
                     opCtx.get(),
-                    Milliseconds(gAbortExpiredTransactionsSessionCheckoutTimeout),
+                    Milliseconds(gAbortExpiredTransactionsSessionCheckoutTimeout.load()),
                     &numKills,
                     &numTimeOuts);
                 abortExpiredTransactionsPasses.increment(1);
                 abortExpiredTransactionsSuccessfulKills.increment(numKills);
                 abortExpiredTransactionsTimedOutKills.increment(numTimeOuts);
-            } catch (ExceptionForCat<ErrorCategory::CancellationError>& ex) {
+            } catch (ExceptionFor<ErrorCategory::CancellationError>& ex) {
                 LOGV2_DEBUG(4684101, 2, "Periodic job canceled", "{reason}"_attr = ex.reason());
-            } catch (ExceptionForCat<ErrorCategory::Interruption>& ex) {
+            } catch (ExceptionFor<ErrorCategory::Interruption>& ex) {
                 LOGV2_DEBUG(7465601, 2, "Periodic job canceled", "{reason}"_attr = ex.reason());
             }
         },

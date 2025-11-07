@@ -26,28 +26,20 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#include <boost/smart_ptr.hpp>
-#include <string>
-#include <tuple>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/s/commands/document_shard_key_update_util.h"
 
 #include "mongo/base/status.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
+#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
+#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/cluster_write.h"
-#include "mongo/s/commands/document_shard_key_update_util.h"
 #include "mongo/s/session_catalog_router.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/s/write_ops/batch_write_exec.h"
@@ -56,6 +48,16 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future_impl.h"
+
+#include <string>
+#include <tuple>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -75,7 +77,8 @@ bool executeOperationsAsPartOfShardKeyUpdate(OperationContext* opCtx,
                                              const BSONObj& deleteCmdObj,
                                              const BSONObj& insertCmdObj,
                                              const DatabaseName& db,
-                                             const bool shouldUpsert) {
+                                             const bool shouldUpsert,
+                                             const bool isTimeseriesViewRequest) {
     auto deleteOpMsg =
         OpMsgRequestBuilder::create(auth::ValidatedTenancyScope::get(opCtx), db, deleteCmdObj);
     auto deleteRequest = BatchedCommandRequest::parseDelete(deleteOpMsg);
@@ -109,6 +112,15 @@ bool executeOperationsAsPartOfShardKeyUpdate(OperationContext* opCtx,
 
     BatchedCommandResponse insertResponse;
     BatchWriteExecStats insertStats;
+    const bool isRawData = isRawDataOperation(opCtx);
+    // Restore the isRawData value for this operation.
+    ON_BLOCK_EXIT([&] { isRawDataOperation(opCtx) = isRawData; });
+
+    if (isTimeseriesViewRequest) {
+        // We directly insert the updated bucket.
+        isRawDataOperation(opCtx) = true;
+    }
+
     cluster::write(opCtx, insertRequest, nullptr, &insertStats, &insertResponse);
     uassertStatusOKWithContext(insertResponse.toStatus(),
                                "During insert stage of updating a shard key");
@@ -121,16 +133,54 @@ bool executeOperationsAsPartOfShardKeyUpdate(OperationContext* opCtx,
     return true;
 }
 
+BSONObj convertDocumentIntoQuery(const BSONObj& document) {
+    BSONObjBuilder query;
+    BSONArrayBuilder exprQuery;
+
+    for (BSONElement elem : document) {
+        const StringData fieldName = elem.fieldNameStringData();
+
+        const bool shouldWrapIntoGetField = fieldName.starts_with("$");
+        if (MONGO_unlikely(shouldWrapIntoGetField)) {
+            exprQuery.append(
+                BSON("$eq" << BSON_ARRAY(
+                         BSON("$getField" << BSON("input" << "$$ROOT" << "field"
+                                                          << BSON("$literal" << fieldName)))
+                         << BSON("$literal" << elem))));
+        } else {
+            const bool shouldWrapIntoEq = elem.type() == BSONType::object &&
+                elem.Obj().firstElementFieldNameStringData().starts_with("$");
+            if (shouldWrapIntoEq) {
+                BSONObjBuilder eqOperator = query.subobjStart(fieldName);
+                eqOperator.appendAs(elem, "$eq");
+                eqOperator.doneFast();
+            } else {
+                query.append(elem);
+            }
+        }
+    }
+
+    if (auto exprQueryArray = exprQuery.arr(); !exprQueryArray.isEmpty()) {
+        query.append("$expr", BSON("$and" << exprQueryArray));
+    }
+
+    return query.obj();
+}
+
 /**
  * Creates the delete op that will be used to delete the pre-image document. Will also attach the
  * original document _id retrieved from 'updatePreImage'.
  */
 write_ops::DeleteCommandRequest createShardKeyDeleteOp(const NamespaceString& nss,
-                                                       const BSONObj& updatePreImage) {
+                                                       const BSONObj& updatePreImageOrPredicate,
+                                                       bool shouldUpsert) {
+    BSONObj query = shouldUpsert ? updatePreImageOrPredicate
+                                 : convertDocumentIntoQuery(updatePreImageOrPredicate);
+
     write_ops::DeleteCommandRequest deleteOp(nss);
     deleteOp.setDeletes({[&] {
         write_ops::DeleteOpEntry entry;
-        entry.setQ(updatePreImage);
+        entry.setQ(query.getOwned());
         entry.setMulti(false);
         return entry;
     }()});
@@ -170,7 +220,10 @@ std::pair<bool, boost::optional<BSONObj>> handleWouldChangeOwningShardErrorTrans
     try {
         // Delete the original document and insert the new one
         updatedShardKey = updateShardKeyForDocumentLegacy(
-            opCtx, nss, documentKeyChangeInfo, nss.isTimeseriesBucketsCollection());
+            opCtx,
+            nss,
+            documentKeyChangeInfo,
+            CollectionRoutingInfoTargeter{opCtx, nss}.isTrackedTimeSeriesNamespace());
 
         // If the operation was an upsert, record the _id of the new document.
         if (updatedShardKey && documentKeyChangeInfo.getShouldUpsert()) {
@@ -292,11 +345,19 @@ bool updateShardKeyForDocumentLegacy(OperationContext* opCtx,
     // If the WouldChangeOwningShard error happens for a timeseries collection, the pre-image is
     // a measurement to be deleted and so the delete command should be sent to the timeseries view.
     auto deleteCmdObj = constructShardKeyDeleteCmdObj(
-        isTimeseriesViewRequest ? nss.getTimeseriesViewNamespace() : nss, updatePreImage);
+        (isTimeseriesViewRequest && nss.isTimeseriesBucketsCollection())
+            ? nss.getTimeseriesViewNamespace()
+            : nss,
+        updatePreImage,
+        documentKeyChangeInfo.getShouldUpsert());
     auto insertCmdObj = constructShardKeyInsertCmdObj(nss, updatePostImage, fleCrudProcessed);
 
-    return executeOperationsAsPartOfShardKeyUpdate(
-        opCtx, deleteCmdObj, insertCmdObj, nss.dbName(), documentKeyChangeInfo.getShouldUpsert());
+    return executeOperationsAsPartOfShardKeyUpdate(opCtx,
+                                                   deleteCmdObj,
+                                                   insertCmdObj,
+                                                   nss.dbName(),
+                                                   documentKeyChangeInfo.getShouldUpsert(),
+                                                   isTimeseriesViewRequest);
 }
 
 void startTransactionForShardKeyUpdate(OperationContext* opCtx) {
@@ -317,8 +378,10 @@ BSONObj commitShardKeyUpdateTransaction(OperationContext* opCtx) {
     return txnRouter.commitTransaction(opCtx, boost::none);
 }
 
-BSONObj constructShardKeyDeleteCmdObj(const NamespaceString& nss, const BSONObj& updatePreImage) {
-    auto deleteOp = createShardKeyDeleteOp(nss, updatePreImage);
+BSONObj constructShardKeyDeleteCmdObj(const NamespaceString& nss,
+                                      const BSONObj& updatePreImageOrPredicate,
+                                      bool shouldUpsert) {
+    auto deleteOp = createShardKeyDeleteOp(nss, updatePreImageOrPredicate, shouldUpsert);
     return deleteOp.toBSON();
 }
 
@@ -339,7 +402,8 @@ SemiFuture<bool> updateShardKeyForDocument(const txn_api::TransactionClient& txn
     // a measurement to be deleted and so the delete command should be sent to the timeseries view.
     auto deleteCmdObj = documentShardKeyUpdateUtil::constructShardKeyDeleteCmdObj(
         nss.isTimeseriesBucketsCollection() ? nss.getTimeseriesViewNamespace() : nss,
-        changeInfo.getPreImage().getOwned());
+        changeInfo.getPreImage().getOwned(),
+        changeInfo.getShouldUpsert());
     auto vts = auth::ValidatedTenancyScope::get(opCtx);
     auto deleteOpMsg = OpMsgRequestBuilder::create(
         auth::ValidatedTenancyScope::get(opCtx), nss.dbName(), std::move(deleteCmdObj));

@@ -1,11 +1,10 @@
-
 let a = db.ref4a;
 let b = db.ref4b;
 
 a.drop();
 b.drop();
 
-var other = {s: "other thing", n: 17};
+let other = {s: "other thing", n: 17};
 b.save(other);
 
 a.save({name: "abc", others: [new DBRef("ref4b", other._id), new DBPointer("ref4b", other._id)]});

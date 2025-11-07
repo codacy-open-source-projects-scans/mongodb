@@ -27,20 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <mutex>
-#include <set>
-#include <string>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -59,29 +45,30 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/auth/validated_tenancy_scope.h"
 #include "mongo/db/basic_types.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/collection_type.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/query_cmd/run_aggregate.h"
-#include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/exec/classic/projection.h"
 #include "mongo/db/exec/disk_use_options_gen.h"
-#include "mongo/db/exec/projection.h"
 #include "mongo/db/exec/shard_filterer_impl.h"
 #include "mongo/db/fle_crud.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/collection_type.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/logical_time.h"
-#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/pipeline/expression_context_diagnostic_printer.h"
 #include "mongo/db/pipeline/query_request_conversion.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/profile_settings.h"
@@ -92,8 +79,9 @@
 #include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/command_diagnostic_printer.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/explain.h"
+#include "mongo/db/query/explain_diagnostic_printer.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/find.h"
 #include "mongo/db/query/find_command.h"
@@ -103,31 +91,32 @@
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/query_request_helper.h"
-#include "mongo/db/query/query_settings/query_settings_utils.h"
+#include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/query_stats/find_key.h"
 #include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/query_utils.h"
+#include "mongo/db/query/shard_key_diagnostic_printer.h"
+#include "mongo/db/query/timeseries/timeseries_translation.h"
+#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/query_analysis_writer.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
-#include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/storage_stats.h"
+#include "mongo/db/timeseries/timeseries_request_util.h"
+#include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -136,7 +125,6 @@
 #include "mongo/rpc/reply_builder_interface.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
 #include "mongo/s/query_analysis_sampler_util.h"
-#include "mongo/s/sharding_state.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
@@ -148,6 +136,19 @@
 #include "mongo/util/serialization_context.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -188,7 +189,7 @@ std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
     const auto* collator = collection ? collection->getDefaultCollator() : nullptr;
     auto expCtx = ExpressionContextBuilder{}
                       .fromRequest(opCtx, *findCommand, collator, allowDiskUseByDefault.load())
-                      .tmpDir(storageGlobalParams.dbpath + "/_tmp")
+                      .tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp")
                       .build();
     expCtx->startExpressionCounters();
     auto parsedRequest = uassertStatusOK(parsed_find_command::parse(
@@ -202,18 +203,34 @@ std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
     // properly initialized.
     expCtx->initializeReferencedSystemVariables();
 
-    // Register query stats collection. Exclude queries against collections with encrypted fields.
+    // Compute QueryShapeHash and record it in CurOp.
+    query_shape::DeferredQueryShape deferredShape{[&]() {
+        return shape_helpers::tryMakeShape<query_shape::FindCmdShape>(*parsedRequest, expCtx);
+    }};
+    auto queryShapeHash = CurOp::get(opCtx)->debug().ensureQueryShapeHash(
+        opCtx, [&]() { return shape_helpers::computeQueryShapeHash(expCtx, deferredShape, nss); });
+
+    // Perform the query settings lookup and attach it to 'expCtx'.
+    auto& querySettingsService = query_settings::QuerySettingsService::get(opCtx);
+    auto querySettings = querySettingsService.lookupQuerySettingsWithRejectionCheck(
+        expCtx, queryShapeHash, nss, parsedRequest->findCommandRequest->getQuerySettings());
+    expCtx->setQuerySettingsIfNotPresent(std::move(querySettings));
+
+    // Register query stats collection. Exclude queries with encrypted fields as indicated by the
+    // inclusion of encryptionInformation in the request.
     // It is important to do this before canonicalizing and optimizing the query, each of which
     // would alter the query shape.
-    if (!(collection && collection.get()->getCollectionOptions().encryptedFieldConfig)) {
+    if (!parsedRequest->findCommandRequest->getEncryptionInformation()) {
         query_stats::registerRequest(opCtx, nss, [&]() {
+            uassertStatusOKWithContext(deferredShape->getStatus(), "Failed to compute query shape");
             return std::make_unique<query_stats::FindKey>(
-                expCtx, *parsedRequest, collOrViewAcquisition.getCollectionType());
+                expCtx,
+                *parsedRequest->findCommandRequest,
+                std::move(deferredShape->getValue()),
+                collOrViewAcquisition.getCollectionType());
         });
 
-        if (parsedRequest->findCommandRequest->getIncludeQueryStatsMetrics() &&
-            feature_flags::gFeatureFlagQueryStatsDataBearingNodes.isEnabled(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        if (parsedRequest->findCommandRequest->getIncludeQueryStatsMetrics()) {
             CurOp::get(opCtx)->debug().queryStatsInfo.metricsRequested = true;
         }
     }
@@ -233,11 +250,6 @@ std::unique_ptr<CanonicalQuery> parseQueryAndBeginOperation(
             "https://www.mongodb.com/docs/manual/reference/operator/aggregation/function/");
     }
 
-    // TODO: SERVER-73632 Remove feature flag for PM-635.
-    // Query settings will only be looked up on mongos and therefore should be part of command body
-    // on mongod if present.
-    expCtx->setQuerySettingsIfNotPresent(
-        query_settings::lookupQuerySettingsForFind(expCtx, *parsedRequest, nss));
     return std::make_unique<CanonicalQuery>(CanonicalQueryParams{
         .expCtx = std::move(expCtx),
         .parsedFind = std::move(parsedRequest),
@@ -328,6 +340,10 @@ public:
         return true;
     }
 
+    bool enableDiagnosticPrintingOnFailure() const final {
+        return true;
+    }
+
     class Invocation final : public CommandInvocation {
     public:
         Invocation(const FindCmd* definition,
@@ -355,6 +371,10 @@ public:
         ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
                                                      bool isImplicitDefault) const final {
             return ReadConcernSupportResult::allSupportedAndDefaultPermitted();
+        }
+
+        bool supportsRawData() const override {
+            return true;
         }
 
         bool isSubjectToIngressAdmissionControl() const override {
@@ -402,9 +422,8 @@ public:
                         nsOrUUID.nss().isValid());
                 uassertStatusOK(auth::checkAuthForFind(authSession, nsOrUUID.nss(), hasTerm));
             } else {
-                const auto resolvedNss =
-                    CollectionCatalog::get(opCtx)->resolveNamespaceStringFromDBNameAndUUID(
-                        opCtx, nsOrUUID.dbName(), nsOrUUID.uuid());
+                const auto resolvedNss = shard_role_nocheck::resolveNssWithoutAcquisition(
+                    opCtx, nsOrUUID.dbName(), nsOrUUID.uuid());
                 uassertStatusOK(auth::checkAuthForFind(authSession, resolvedNss, hasTerm));
             }
         }
@@ -415,6 +434,10 @@ public:
             // We want to start the query planning timer right after parsing. In the explain code
             // path, we have already parsed the FindCommandRequest, so start timing here.
             CurOp::get(opCtx)->beginQueryPlanningTimer();
+
+            if (!_cmdRequest) {
+                _cmdRequest = _parseCmdObjectToFindCommandRequest(opCtx, _request);
+            }
 
             // Acquire locks. The RAII object is optional, because in the case of a view, the locks
             // need to be released.
@@ -434,6 +457,22 @@ public:
             boost::optional<CollectionOrViewAcquisition> collectionOrView =
                 acquireCollectionOrViewMaybeLockFree(opCtx, acquisitionRequest);
 
+            auto ns = [&] {
+                if (isRawDataOperation(opCtx)) {
+                    auto [isTimeseriesViewRequest, translatedNs] =
+                        timeseries::isTimeseriesViewRequest(opCtx, *_cmdRequest);
+                    if (isTimeseriesViewRequest) {
+                        _cmdRequest->setNss(translatedNs);
+                        collectionOrView = acquireCollectionOrViewMaybeLockFree(
+                            opCtx,
+                            CollectionOrViewAcquisitionRequest::fromOpCtx(
+                                opCtx, translatedNs, AcquisitionPrerequisites::kRead));
+                        return translatedNs;
+                    }
+                }
+                return _ns;
+            }();
+
             // Going forward this operation must never ignore interrupt signals while waiting for
             // lock acquisition. This InterruptibleLockGuard will ensure that waiting for lock
             // re-acquisition after yielding will not ignore interrupt signals. This is necessary to
@@ -452,21 +491,30 @@ public:
             const auto& collectionPtr = collectionOrView->getCollectionPtr();
             if (!collectionOrView->isView()) {
                 const bool isClusteredCollection = collectionPtr && collectionPtr->isClustered();
-                uassertStatusOK(query_request_helper::validateResumeAfter(
-                    opCtx, _cmdRequest->getResumeAfter(), isClusteredCollection));
+                uassertStatusOK(
+                    query_request_helper::validateResumeInput(opCtx,
+                                                              _cmdRequest->getResumeAfter(),
+                                                              _cmdRequest->getStartAt(),
+                                                              isClusteredCollection));
             }
             const auto* collator = collectionPtr ? collectionPtr->getDefaultCollator() : nullptr;
             auto expCtx =
                 ExpressionContextBuilder{}
                     .fromRequest(opCtx, *_cmdRequest, collator, allowDiskUseByDefault.load())
                     .explain(verbosity)
-                    .tmpDir(storageGlobalParams.dbpath + "/_tmp")
+                    .tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp")
                     .build();
             expCtx->startExpressionCounters();
+
+            // Create an RAII object that prints useful information about the ExpressionContext in
+            // the case of a tassert or crash.
+            ScopedDebugInfo expCtxDiagnostics(
+                "ExpCtxDiagnostics", diagnostic_printers::ExpressionContextPrinter{expCtx});
+
             auto parsedRequest = uassertStatusOK(parsed_find_command::parse(
                 expCtx,
                 {.findCommand = std::move(_cmdRequest),
-                 .extensionsCallback = ExtensionsCallbackReal(opCtx, &_ns),
+                 .extensionsCallback = ExtensionsCallbackReal(opCtx, &ns),
                  .allowedFeatures = MatchExpressionParser::kAllowAllSpecialFeatures}));
 
             // Initialize system variables before constructing CanonicalQuery as the constructor
@@ -474,20 +522,43 @@ public:
             // properly initialized.
             expCtx->initializeReferencedSystemVariables();
 
-            expCtx->setQuerySettingsIfNotPresent(
-                query_settings::lookupQuerySettingsForFind(expCtx, *parsedRequest, _ns));
+            // Compute QueryShapeHash and record it in CurOp.
+            query_shape::DeferredQueryShape deferredShape{[&]() {
+                return shape_helpers::tryMakeShape<query_shape::FindCmdShape>(*parsedRequest,
+                                                                              expCtx);
+            }};
+            auto queryShapeHash = CurOp::get(opCtx)->debug().ensureQueryShapeHash(opCtx, [&]() {
+                return shape_helpers::computeQueryShapeHash(expCtx, deferredShape, ns);
+            });
+
+            // Perform the query settings lookup and attach it to 'expCtx'.
+            auto& querySettingsService = query_settings::QuerySettingsService::get(opCtx);
+            auto querySettings = querySettingsService.lookupQuerySettingsWithRejectionCheck(
+                expCtx, queryShapeHash, ns, parsedRequest->findCommandRequest->getQuerySettings());
+            expCtx->setQuerySettingsIfNotPresent(std::move(querySettings));
+
             auto cq = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
                 .expCtx = std::move(expCtx), .parsedFind = std::move(parsedRequest)});
 
-            // If we are running a query against a view redirect this query through the aggregation
-            // system.
-            if (collectionOrView->isView()) {
+            // If we are running a query against a view or a timeseries collection, redirect this
+            // query through the aggregation system.
+            if (collectionOrView->isView() ||
+                timeseries::requiresViewlessTimeseriesTranslation(opCtx, *collectionOrView)) {
                 // Relinquish locks. The aggregation command will re-acquire them.
                 collectionOrView.reset();
-                auto curOp = CurOp::get(opCtx);
-                curOp->debug().queryStatsInfo.disableForSubqueryExecution = true;
-                return runFindOnView(opCtx, *cq, verbosity, replyBuilder);
+                CurOp::get(opCtx)->debug().queryStatsInfo.disableForSubqueryExecution = true;
+                return runFindAsAgg(opCtx, *cq, verbosity, replyBuilder);
             }
+
+            // Create an RAII object that prints the collection's shard key in the case of a tassert
+            // or crash.
+            auto collShardingDescription =
+                collectionOrView->getCollection().getShardingDescription();
+            ScopedDebugInfo shardKeyDiagnostics("ShardKeyDiagnostics",
+                                                diagnostic_printers::ShardKeyDiagnosticPrinter{
+                                                    collShardingDescription.isSharded()
+                                                        ? collShardingDescription.getKeyPattern()
+                                                        : BSONObj()});
 
             // Get the execution plan for the query.
             const auto& collection = collectionOrView->getCollection();
@@ -497,6 +568,9 @@ public:
                                                         PlanYieldPolicy::YieldPolicy::YIELD_AUTO));
 
             auto bodyBuilder = replyBuilder->getBodyBuilder();
+            // Capture diagnostics to be logged in the case of a failure.
+            ScopedDebugInfo explainDiagnostics(
+                "explainDiagnostics", diagnostic_printers::ExplainDiagnosticPrinter{exec.get()});
             // Got the execution tree. Explain it.
             Explain::explainStages(
                 exec.get(), collection, verbosity, BSONObj(), respSc, _request.body, &bodyBuilder);
@@ -509,20 +583,18 @@ public:
          */
         uint64_t batchedExecute(const size_t batchSize,
                                 PlanExecutor* exec,
-                                CursorResponseBuilder& firstBatch,
-                                ResourceConsumption::DocumentUnitCounter& docUnitsReturned) {
+                                CursorResponseBuilder& firstBatch) {
             BSONObj pbrt = exec->getPostBatchResumeToken();
             size_t numResults = 0;
             bool failedToAppend = false;
 
+            // Capture diagnostics to be logged in the case of a failure.
+            ScopedDebugInfo explainDiagnostics("explainDiagnostics",
+                                               diagnostic_printers::ExplainDiagnosticPrinter{exec});
             numResults = exec->getNextBatch(
                 batchSize,
-                FindCommon::BSONObjCursorAppender{true /* alwaysAcceptFirstDoc */,
-                                                  exec,
-                                                  &firstBatch,
-                                                  &docUnitsReturned,
-                                                  pbrt,
-                                                  failedToAppend});
+                FindCommon::BSONObjCursorAppender{
+                    true /* alwaysAcceptFirstDoc */, &firstBatch, pbrt, failedToAppend});
 
             // Use the resume token generated by the last execution of the plan that didn't stash a
             // document, or the latest resume token if we hit EOF/the end of the batch.
@@ -544,14 +616,6 @@ public:
             CommandHelpers::handleMarkKillOnClientDisconnect(opCtx);
 
             const BSONObj& cmdObj = _request.body;
-
-            // Capture diagnostics for tassert and invariant failures that may occur during query
-            // parsing, planning or execution. No work is done on the hot-path, all computation of
-            // these diagnostics is done lazily during failure handling. This line just creates an
-            // RAII object which holds references to objects on this stack frame, which will be used
-            // to print diagnostics in the event of a tassert or invariant.
-            ScopedDebugInfo findCmdDiagnostics("commandDiagnostics",
-                                               command_diagnostics::Printer{opCtx});
 
             // Parse the command BSON to a FindCommandRequest. Pass in the parsedNss in case cmdObj
             // does not have a UUID.
@@ -648,8 +712,8 @@ public:
                                 nss,
                                 Top::LockType::ReadLocked,
                                 AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-                                0 /* dbProfilingLevel */
-                );
+                                DatabaseProfileSettings::get(opCtx->getServiceContext())
+                                    .getDatabaseProfileLevel(nss.dbName()));
             };
             auto const nssOrUUID = _cmdRequest->getNamespaceOrUUID();
             if (nssOrUUID.isNamespaceString()) {
@@ -664,29 +728,20 @@ public:
                 return req;
             }();
 
-            // The acquireCollection can throw before we raise the profile level, and some callers
-            // expect to see profiler entries on errors that can throw in the acquisition. To avoid
-            // getting an expensive CollectionCatalog snapshot an extra time before the collection
-            // acquisition path, only do this if the collection acquisition fails. Note that this
-            // still doesn't work correctly if UUID resolution fails.
-            auto setProfileLevelOnError = ScopeGuard([&] {
-                if (nssOrUUID.isNamespaceString()) {
-                    CurOp::get(opCtx)->raiseDbProfileLevel(
-                        DatabaseProfileSettings::get(opCtx->getServiceContext())
-                            .getDatabaseProfileLevel(nssOrUUID.dbName()));
-                }
-            });
-
             boost::optional<CollectionOrViewAcquisition> collectionOrView =
                 acquireCollectionOrViewMaybeLockFree(opCtx, acquisitionRequest);
+            if (isRawDataOperation(opCtx)) {
+                auto [isTimeseriesViewRequest, translatedNs] =
+                    timeseries::isTimeseriesViewRequest(opCtx, *_cmdRequest);
+                if (isTimeseriesViewRequest) {
+                    _cmdRequest->setNss(translatedNs);
+                    collectionOrView = acquireCollectionOrViewMaybeLockFree(
+                        opCtx,
+                        CollectionOrViewAcquisitionRequest::fromOpCtx(
+                            opCtx, translatedNs, AcquisitionPrerequisites::kRead));
+                }
+            }
             const NamespaceString nss = collectionOrView->nss();
-
-            // It is cheaper to raise the profiling level here, now that a CollectionCatalog
-            // snapshot is stashed on the OpCtx.
-            CurOp::get(opCtx)->raiseDbProfileLevel(
-                DatabaseProfileSettings::get(opCtx->getServiceContext())
-                    .getDatabaseProfileLevel(nss.dbName()));
-            setProfileLevelOnError.dismiss();
 
             if (!tracker) {
                 initializeTracker(nss);
@@ -747,29 +802,49 @@ public:
                 }
             }
 
-            // Views use the aggregation system and the $_resumeAfter parameter is not allowed. A
-            // more descriptive error will be raised later, but we want to validate this parameter
-            // before beginning the operation.
+            // Views use the aggregation system and the $_resumeAfter/ $_startAt parameter is not
+            // allowed. A more descriptive error will be raised later, but we want to validate this
+            // parameter before beginning the operation.
             if (!collectionOrView->isView()) {
-                uassertStatusOK(query_request_helper::validateResumeAfter(
-                    opCtx, _cmdRequest->getResumeAfter(), isClusteredCollection));
+                uassertStatusOK(
+                    query_request_helper::validateResumeInput(opCtx,
+                                                              _cmdRequest->getResumeAfter(),
+                                                              _cmdRequest->getStartAt(),
+                                                              isClusteredCollection));
             }
 
             auto cq = parseQueryAndBeginOperation(
                 opCtx, *collectionOrView, nss, _request.body, std::move(_cmdRequest));
             const auto& findCommandReq = cq->getFindCommandRequest();
 
+            // Create an RAII object that prints useful information about the ExpressionContext in
+            // the case of a tassert or crash.
+            ScopedDebugInfo expCtxDiagnostics(
+                "ExpCtxDiagnostics",
+                diagnostic_printers::ExpressionContextPrinter{cq->getExpCtx()});
+
             tassert(7922501,
                     "CanonicalQuery namespace should match catalog namespace",
                     cq->nss() == nss);
 
-            // If we are running a query against a view redirect this query through the aggregation
-            // system.
-            if (collectionOrView->isView()) {
+            // If we are running a query against a view or a timeseries collection, redirect this
+            // query through the aggregation system.
+            if (collectionOrView->isView() ||
+                timeseries::requiresViewlessTimeseriesTranslation(opCtx, *collectionOrView)) {
                 // Relinquish locks. The aggregation command will re-acquire them.
                 collectionOrView.reset();
-                return runFindOnView(opCtx, *cq, boost::none /* verbosity */, replyBuilder);
+                return runFindAsAgg(opCtx, *cq, boost::none /* verbosity */, replyBuilder);
             }
+
+            // Create an RAII object that prints the collection's shard key in the case of a tassert
+            // or crash.
+            auto collShardingDescription =
+                collectionOrView->getCollection().getShardingDescription();
+            ScopedDebugInfo shardKeyDiagnostics("ShardKeyDiagnostics",
+                                                diagnostic_printers::ShardKeyDiagnosticPrinter{
+                                                    collShardingDescription.isSharded()
+                                                        ? collShardingDescription.getKeyPattern()
+                                                        : BSONObj()});
 
             const auto& collection = collectionOrView->getCollection();
 
@@ -792,12 +867,6 @@ public:
                                                         MultipleCollectionAccessor{collection},
                                                         std::move(cq),
                                                         PlanYieldPolicy::YieldPolicy::YIELD_AUTO));
-
-            // If the executor supports it, find operations will maintain the storage engine state
-            // across commands.
-            if (gMaintainValidCursorsAcrossReadCommands && !opCtx->inMultiDocumentTransaction()) {
-                exec->enableSaveRecoveryUnitAcrossCommandsIfSupported();
-            }
 
             {
                 stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -835,7 +904,6 @@ public:
             CursorResponseBuilder firstBatch(replyBuilder, options);
 
             uint64_t numResults = 0;
-            ResourceConsumption::DocumentUnitCounter docUnitsReturned;
 
             // Enforce that the default batch size is used if not specified. Note: A batch
             // size of 0 means we actually want an empty first batch, unlike in get_more. We
@@ -844,7 +912,7 @@ public:
                 originalFC.getBatchSize().get_value_or(query_request_helper::getDefaultBatchSize());
 
             try {
-                numResults = batchedExecute(batchSize, exec.get(), firstBatch, docUnitsReturned);
+                numResults = batchedExecute(batchSize, exec.get(), firstBatch);
             } catch (DBException& exception) {
                 firstBatch.abandon();
 
@@ -855,7 +923,7 @@ public:
                               "Plan executor error during find command",
                               "error"_attr = exception.toStatus(),
                               "stats"_attr = redact(stats),
-                              "cmd"_attr = cmdObj);
+                              "cmd"_attr = redact(cmdObj));
 
                 exception.addContext(str::stream() << "Executor error during find command: "
                                                    << nss.toStringForErrorMsg());
@@ -865,8 +933,6 @@ public:
             // Set up the cursor for getMore.
             CursorId cursorId = 0;
             if (shouldSaveCursor(opCtx, collectionPtr, exec.get())) {
-                const bool stashResourcesForGetMore =
-                    exec->isSaveRecoveryUnitAcrossCommandsEnabled();
                 ClientCursorPin pinnedCursor = CursorManager::get(opCtx)->registerCursor(
                     opCtx,
                     {std::move(exec),
@@ -912,20 +978,6 @@ public:
                 // Fill out curop based on the results.
                 endQueryOp(opCtx, collectionPtr, *cursorExec, numResults, pinnedCursor, cmdObj);
 
-                if (stashResourcesForGetMore) {
-                    // Collect storage stats now before we stash the recovery unit. These stats are
-                    // normally collected in the service entry point layer just before a command
-                    // ends, but they must be collected before stashing the RecoveryUnit. Otherwise,
-                    // the service entry point layer will collect the stats from the new
-                    // RecoveryUnit, which wasn't actually used for the query.
-                    //
-                    // The stats collected here will not get overwritten, as the service entry
-                    // point layer will only set these stats when they're not empty.
-                    CurOp::get(opCtx)->debug().storageStats =
-                        shard_role_details::getRecoveryUnit(opCtx)
-                            ->computeOperationStatisticsSinceLastCall();
-                }
-
                 stashTransactionResourcesFromOperationContext(opCtx, pinnedCursor.getCursor());
 
                 deleteCursorOnError.dismiss();
@@ -945,43 +997,44 @@ public:
                 : boost::none;
             firstBatch.done(cursorId, nss, metrics, respSc);
 
-            // Increment this metric once we have generated a response and we know it will return
-            // documents.
-            auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-            metricsCollector.incrementDocUnitsReturned(toStringForLogging(nss), docUnitsReturned);
             query_request_helper::validateCursorResponse(replyBuilder->getBodyBuilder().asTempObj(),
                                                          auth::ValidatedTenancyScope::get(opCtx),
                                                          nss.tenantId(),
                                                          respSc);
         }
 
-        void runFindOnView(OperationContext* opCtx,
-                           const CanonicalQuery& cq,
-                           boost::optional<ExplainOptions::Verbosity> verbosity,
-                           rpc::ReplyBuilderInterface* replyBuilder) {
-            auto aggRequest =
-                query_request_conversion::asAggregateCommandRequest(cq.getFindCommandRequest());
-            aggRequest.setExplain(verbosity);
+        void runFindAsAgg(OperationContext* opCtx,
+                          const CanonicalQuery& cq,
+                          boost::optional<ExplainOptions::Verbosity> verbosity,
+                          rpc::ReplyBuilderInterface* replyBuilder) {
+            const auto hasExplain = verbosity.has_value();
+            auto aggRequest = query_request_conversion::asAggregateCommandRequest(
+                cq.getFindCommandRequest(), hasExplain);
+
             aggRequest.setQuerySettings(cq.getExpCtx()->getQuerySettings());
 
             // An empty PrivilegeVector for explain is acceptable because these privileges are only
             // checked on getMore and explain will not open a cursor.
-            const auto privileges = verbosity ? PrivilegeVector()
+            const auto privileges = verbosity ? PrivilegeVector{}
                                               : uassertStatusOK(auth::getPrivilegesForAggregate(
+                                                    opCtx,
                                                     AuthorizationSession::get(opCtx->getClient()),
                                                     aggRequest.getNamespace(),
                                                     aggRequest,
                                                     false));
+            // This will do view definition resolution for views and timeseries things for
+            // timeseries queries.
             const auto status = runAggregate(opCtx,
                                              aggRequest,
                                              {aggRequest},
                                              _request.body,
                                              privileges,
-                                             replyBuilder,
-                                             {} /* usedExternalDataSources  */);
+                                             verbosity,
+                                             replyBuilder);
             if (status.code() == ErrorCodes::InvalidPipelineOperator) {
                 uasserted(ErrorCodes::InvalidPipelineOperator,
-                          str::stream() << "Unsupported in view pipeline: " << status.reason());
+                          str::stream{} << "Unsupported operator in converted pipeline: "
+                                        << status.reason());
             }
             uassertStatusOK(status);
         }
@@ -1002,6 +1055,7 @@ public:
                 keyBob.append("shardVersion", 1);
                 keyBob.append("databaseVersion", 1);
                 keyBob.append("encryptionInformation", 1);
+                keyBob.append("rawData", 1);
                 return keyBob.obj();
             }();
 
@@ -1056,12 +1110,16 @@ private:
             CommandHelpers::ensureValidCollectionName(nss.nss());
         }
 
-        // TODO: SERVER-73632 Remove Feature Flag for PM-635.
         // Forbid users from passing 'querySettings' explicitly.
         uassert(7746901,
                 "BSON field 'querySettings' is an unknown field",
-                query_settings::utils::allowQuerySettingsFromClient(opCtx->getClient()) ||
+                query_settings::allowQuerySettingsFromClient(opCtx->getClient()) ||
                     !findCommand->getQuerySettings().has_value());
+
+        uassert(ErrorCodes::FailedToParse,
+                "Use of forcedPlanSolutionHash not permitted.",
+                !findCommand->getForcedPlanSolutionHash() ||
+                    internalQueryAllowForcedPlanByHash.load());
 
         return findCommand;
     }

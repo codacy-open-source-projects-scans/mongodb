@@ -29,13 +29,14 @@
 
 #pragma once
 
-#include <fmt/format.h>
-
 #include "mongo/rpc/message.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
+#include <fmt/format.h>
 
 namespace mongo {
-namespace rpc {
+namespace MONGO_MOD_PUBLIC rpc {
 
 /**
  * Bit flags representing support for a particular RPC protocol. This is just an internal
@@ -58,8 +59,8 @@ enum class Protocol : std::uint64_t {
     kOpMsg = 1 << 1,
 };
 
-inline Protocol protocolForMessage(const Message& message) {
-    switch (message.operation()) {
+inline Protocol protocolForOperation(NetworkOp operation) {
+    switch (operation) {
         case mongo::dbMsg:
             return Protocol::kOpMsg;
         case mongo::dbQuery:
@@ -67,9 +68,13 @@ inline Protocol protocolForMessage(const Message& message) {
         default:
             uasserted(ErrorCodes::UnsupportedFormat,
                       fmt::format("Received a reply message with unexpected opcode: {}",
-                                  message.operation()));
+                                  fmt::underlying(operation)));
     }
 }
 
-}  // namespace rpc
+inline Protocol protocolForMessage(const Message& message) {
+    return protocolForOperation(message.operation());
+}
+
+}  // namespace MONGO_MOD_PUBLIC rpc
 }  // namespace mongo

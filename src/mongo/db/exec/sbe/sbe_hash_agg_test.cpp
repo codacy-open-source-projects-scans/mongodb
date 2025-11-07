@@ -31,6 +31,33 @@
  * This file contains tests for sbe::HashAggStage.
  */
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/exec/sbe/expressions/compile_ctx.h"
+#include "mongo/db/exec/sbe/expressions/expression.h"
+#include "mongo/db/exec/sbe/sbe_plan_stage_test.h"
+#include "mongo/db/exec/sbe/stages/hash_agg.h"
+#include "mongo/db/exec/sbe/stages/hash_agg_accumulator.h"
+#include "mongo/db/exec/sbe/stages/plan_stats.h"
+#include "mongo/db/exec/sbe/stages/project.h"
+#include "mongo/db/exec/sbe/stages/stages.h"
+#include "mongo/db/exec/sbe/values/slot.h"
+#include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/collation/collator_interface_mock.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
+#include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
+#include "mongo/db/record_id.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/scopeguard.h"
+
 #include <algorithm>
 #include <array>
 #include <cstddef>
@@ -38,45 +65,13 @@
 #include <map>
 #include <memory>
 #include <set>
-#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/exec/sbe/expressions/compile_ctx.h"
-#include "mongo/db/exec/sbe/expressions/expression.h"
-#include "mongo/db/exec/sbe/sbe_plan_stage_test.h"
-#include "mongo/db/exec/sbe/stages/hash_agg.h"
-#include "mongo/db/exec/sbe/stages/plan_stats.h"
-#include "mongo/db/exec/sbe/stages/project.h"
-#include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
-#include "mongo/db/query/stage_types.h"
-#include "mongo/db/record_id.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/unordered_map.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/scopeguard.h"
-
 namespace mongo::sbe {
-
 class HashAggStageTest : public PlanStageTestFixture {
 public:
     void setUp() override {
@@ -94,6 +89,38 @@ public:
         BSONArray expectedOutputArray,
         bool shouldSpill = false,
         std::unique_ptr<mongo::CollatorInterfaceMock> optionalCollator = nullptr);
+
+    void runAndAssertForceSpill(mongo::sbe::PlanStage* stage,
+                                const SpillingStats& expectedSpillingStats) {
+        // Get ready to yield.
+        stage->saveState();
+
+        // Force spill.
+        stage->forceSpill(nullptr /*yieldPolicy*/);
+
+        // Check stats to make sure it spilled
+        auto stats = static_cast<const HashAggStats*>(stage->getSpecificStats());
+        ASSERT_TRUE(stats->usedDisk);
+        ASSERT_EQ(expectedSpillingStats.getSpills(), stats->spillingStats.getSpills());
+        ASSERT_EQ(expectedSpillingStats.getSpilledRecords(),
+                  stats->spillingStats.getSpilledRecords());
+
+        ASSERT_EQ(stage->getMemoryTracker()->inUseTrackedMemoryBytes(), 0);
+
+        // Get ready to retrieve more records.
+        stage->restoreState();
+    }
+
+    void checkMemoryStats(mongo::sbe::PlanStage* stage, bool spill) {
+        ASSERT_GT(stage->getMemoryTracker()->peakTrackedMemoryBytes(), 0);
+        if (spill) {
+            ASSERT_EQ(stage->getMemoryTracker()->inUseTrackedMemoryBytes(), 0);
+        } else {
+            ASSERT_GT(stage->getMemoryTracker()->inUseTrackedMemoryBytes(), 0);
+        }
+        auto stats = static_cast<const HashAggStats*>(stage->getSpecificStats());
+        ASSERT_GT(stats->peakTrackedMemBytes, 0);
+    }
 
 private:
     std::unique_ptr<Lock::GlobalLock> _globalLock;
@@ -123,16 +150,17 @@ void HashAggStageTest::performHashAggWithSpillChecking(
         auto hashAggStage = makeS<HashAggStage>(
             std::move(scanStage),
             makeSV(scanSlot),
-            makeAggExprVector(countsSlot,
-                              nullptr,
-                              makeFunction("sum",
-                                           makeE<EConstant>(value::TypeTags::NumberInt64,
-                                                            value::bitcastFrom<int64_t>(1)))),
+            makeHashAggAccumulatorList(std::make_unique<CompiledHashAggAccumulator>(
+                countsSlot,
+                spillSlot,
+                makeFunction(
+                    "sum",
+                    makeE<EConstant>(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(1))),
+                makeFunction("sum", makeVariable(spillSlot)))),
             makeSV(),
             true,
             boost::optional<value::SlotId>{shouldUseCollator, collatorSlot},
             shouldSpill,
-            makeSlotExprPairVec(spillSlot, makeFunction("sum", makeVariable(spillSlot))),
             nullptr /* yieldPolicy */,
             kEmptyPlanNodeId);
 
@@ -188,6 +216,12 @@ void HashAggStageTest::performHashAggWithSpillChecking(
     }
 
     assertValuesEqual(sortedResultsTag, sortedResultsVal, expectedTag, expectedVal);
+    ASSERT_GT(stage->getMemoryTracker()->peakTrackedMemoryBytes(), 0);
+    if (shouldSpill) {
+        ASSERT_EQ(stage->getMemoryTracker()->inUseTrackedMemoryBytes(), 0);
+    } else {
+        ASSERT_GT(stage->getMemoryTracker()->inUseTrackedMemoryBytes(), 0);
+    }
 };
 
 TEST_F(HashAggStageTest, HashAggMinMaxTest) {
@@ -219,24 +253,39 @@ TEST_F(HashAggStageTest, HashAggMinMaxTest) {
         auto hashAggStage = makeS<HashAggStage>(
             std::move(scanStage),
             makeSV(),
-            makeAggExprVector(
-                minSlot,
-                nullptr,
-                makeFunction("min", makeE<EVariable>(scanSlot)),
-                maxSlot,
-                nullptr,
-                makeFunction("max", makeE<EVariable>(scanSlot)),
-                collMinSlot,
-                nullptr,
-                makeFunction("collMin", collExpr->clone(), makeE<EVariable>(scanSlot)),
-                collMaxSlot,
-                nullptr,
-                makeFunction("collMax", collExpr->clone(), makeE<EVariable>(scanSlot))),
+            makeHashAggAccumulatorList(
+                std::make_unique<CompiledHashAggAccumulator>(
+                    minSlot,
+                    generateSlotId(),
+                    makeFunction("min", makeE<EVariable>(scanSlot)),
+                    makeFunction("fail",
+                                 makeInt32Constant(ErrorCodes::NotImplemented),
+                                 makeStringConstant("Unexpected merge with allowDiskUse=false"))),
+                std::make_unique<CompiledHashAggAccumulator>(
+                    maxSlot,
+                    generateSlotId(),
+                    makeFunction("max", makeE<EVariable>(scanSlot)),
+                    makeFunction("fail",
+                                 makeInt32Constant(ErrorCodes::NotImplemented),
+                                 makeStringConstant("Unexpected merge with allowDiskUse=false"))),
+                std::make_unique<CompiledHashAggAccumulator>(
+                    collMinSlot,
+                    generateSlotId(),
+                    makeFunction("collMin", collExpr->clone(), makeE<EVariable>(scanSlot)),
+                    makeFunction("fail",
+                                 makeInt32Constant(ErrorCodes::NotImplemented),
+                                 makeStringConstant("Unexpected merge with allowDiskUse=false"))),
+                std::make_unique<CompiledHashAggAccumulator>(
+                    collMaxSlot,
+                    generateSlotId(),
+                    makeFunction("collMax", collExpr->clone(), makeE<EVariable>(scanSlot)),
+                    makeFunction("fail",
+                                 makeInt32Constant(ErrorCodes::NotImplemented),
+                                 makeStringConstant("Unexpected merge with allowDiskUse=false")))),
             makeSV(),
             true,
             boost::none,
             false /* allowDiskUse */,
-            makeSlotExprPairVec() /* mergingExprs */,
             nullptr /* yieldPolicy */,
             kEmptyPlanNodeId);
 
@@ -287,15 +336,17 @@ TEST_F(HashAggStageTest, HashAggAddToSetTest) {
         auto hashAggStage = makeS<HashAggStage>(
             std::move(scanStage),
             makeSV(),
-            makeAggExprVector(
+            makeHashAggAccumulatorList(std::make_unique<CompiledHashAggAccumulator>(
                 hashAggSlot,
-                nullptr,
-                makeFunction("collAddToSet", std::move(collExpr), makeE<EVariable>(scanSlot))),
+                generateSlotId(),
+                makeFunction("collAddToSet", std::move(collExpr), makeE<EVariable>(scanSlot)),
+                makeFunction("fail",
+                             makeInt32Constant(ErrorCodes::NotImplemented),
+                             makeStringConstant("Unexpected merge with allowDiskUse=false")))),
             makeSV(),
             true,
             boost::none,
             false /* allowDiskUse */,
-            makeSlotExprPairVec() /* mergingExprs */,
             nullptr /* yieldPolicy */,
             kEmptyPlanNodeId);
 
@@ -343,15 +394,18 @@ TEST_F(HashAggStageTest, HashAggAddToSetTest) {
     // Assert that the results array does not contain more than one element.
     resultsEnumerator.advance();
     ASSERT_TRUE(resultsEnumerator.atEnd());
+
+    // The group-by key is empty, so we never compute an estimate for the amount of memory.
+    ASSERT_EQ(stage->getMemoryTracker()->peakTrackedMemoryBytes(), 0);
+    ASSERT_EQ(stage->getMemoryTracker()->inUseTrackedMemoryBytes(), 0);
 }
 
 TEST_F(HashAggStageTest, HashAggCollationTest) {
-    auto inputArr = BSON_ARRAY("A"
-                               << "a"
-                               << "b"
-                               << "c"
-                               << "B"
-                               << "a");
+    auto inputArr = BSON_ARRAY("A" << "a"
+                                   << "b"
+                                   << "c"
+                                   << "B"
+                                   << "a");
 
     // Collator groups the values as: ["A", "a", "a"], ["B", "b"], ["c"].
     auto collatorExpectedOutputArr = BSON_ARRAY(3 << 2 << 1);
@@ -387,16 +441,19 @@ TEST_F(HashAggStageTest, HashAggSeekKeysTest) {
         auto hashAggStage = makeS<HashAggStage>(
             std::move(scanStage),
             makeSV(scanSlot),
-            makeAggExprVector(countsSlot,
-                              nullptr,
-                              makeFunction("sum",
-                                           makeE<EConstant>(value::TypeTags::NumberInt64,
-                                                            value::bitcastFrom<int64_t>(1)))),
+            makeHashAggAccumulatorList(std::make_unique<CompiledHashAggAccumulator>(
+                countsSlot,
+                generateSlotId(),
+                makeFunction(
+                    "sum",
+                    makeE<EConstant>(value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(1))),
+                makeFunction("fail",
+                             makeInt32Constant(ErrorCodes::NotImplemented),
+                             makeStringConstant("Unexpected merge with allowDiskUse=false")))),
             makeSV(seekSlot),
             true,
             boost::none,
             false /* allowDiskUse */,
-            makeSlotExprPairVec() /* mergingExprs */,
             nullptr /* yieldPolicy */,
             kEmptyPlanNodeId);
 
@@ -412,7 +469,7 @@ TEST_F(HashAggStageTest, HashAggSeekKeysTest) {
 
     ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
     auto [res1Tag, res1Val] = resultAccessor->getViewOfValue();
-    // There are '2' occurences of '5' in the input.
+    // There are '2' occurrences of '5' in the input.
     assertValuesEqual(res1Tag, res1Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(2));
     ASSERT_TRUE(stage->getNext() == PlanState::IS_EOF);
 
@@ -421,7 +478,7 @@ TEST_F(HashAggStageTest, HashAggSeekKeysTest) {
     stage->open(true);
     ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
     auto [res2Tag, res2Val] = resultAccessor->getViewOfValue();
-    // There are '3' occurences of '6' in the input.
+    // There are '3' occurrences of '6' in the input.
     assertValuesEqual(res2Tag, res2Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(3));
     ASSERT_TRUE(stage->getNext() == PlanState::IS_EOF);
 
@@ -430,10 +487,11 @@ TEST_F(HashAggStageTest, HashAggSeekKeysTest) {
     stage->open(true);
     ASSERT_TRUE(stage->getNext() == PlanState::ADVANCED);
     auto [res3Tag, res3Val] = resultAccessor->getViewOfValue();
-    // There are '4' occurences of '7' in the input.
+    // There are '4' occurrences of '7' in the input.
     assertValuesEqual(res3Tag, res3Val, value::TypeTags::NumberInt32, value::bitcastFrom<int>(4));
     ASSERT_TRUE(stage->getNext() == PlanState::IS_EOF);
 
+    checkMemoryStats(stage.get(), false /*spill*/);
     stage->close();
 }
 
@@ -451,21 +509,22 @@ TEST_F(HashAggStageTest, HashAggBasicCountNoSpill) {
     // Build a HashAggStage, group by the scanSlot and compute a simple count.
     auto countsSlot = generateSlotId();
     auto spillSlot = generateSlotId();
-    auto stage = makeS<HashAggStage>(
-        std::move(scanStage),
-        makeSV(scanSlot),
-        makeAggExprVector(countsSlot,
-                          nullptr,
-                          makeFunction("sum",
-                                       makeE<EConstant>(value::TypeTags::NumberInt64,
-                                                        value::bitcastFrom<int64_t>(1)))),
-        makeSV(),  // Seek slot
-        true,
-        boost::none,
-        true /* allowDiskUse */,
-        makeSlotExprPairVec(spillSlot, makeFunction("sum", makeVariable(spillSlot))),
-        nullptr /* yieldPolicy */,
-        kEmptyPlanNodeId);
+    auto stage =
+        makeS<HashAggStage>(std::move(scanStage),
+                            makeSV(scanSlot),
+                            makeHashAggAccumulatorList(std::make_unique<CompiledHashAggAccumulator>(
+                                countsSlot,
+                                spillSlot,
+                                makeFunction("sum",
+                                             makeE<EConstant>(value::TypeTags::NumberInt64,
+                                                              value::bitcastFrom<int64_t>(1))),
+                                makeFunction("sum", makeVariable(spillSlot)))),
+                            makeSV(),  // Seek slot
+                            true,
+                            boost::none,
+                            true /* allowDiskUse */,
+                            nullptr /* yieldPolicy */,
+                            kEmptyPlanNodeId);
 
     // Prepare the tree and get the 'SlotAccessor' for the output slot.
     auto resultAccessor = prepareTree(ctx.get(), stage.get(), countsSlot);
@@ -487,22 +546,95 @@ TEST_F(HashAggStageTest, HashAggBasicCountNoSpill) {
     // Check that the spilling behavior matches the expected.
     auto stats = static_cast<const HashAggStats*>(stage->getSpecificStats());
     ASSERT_FALSE(stats->usedDisk);
-    ASSERT_EQ(0, stats->spills);
-    ASSERT_EQ(0, stats->spilledRecords);
+    ASSERT_EQ(0, stats->spillingStats.getSpills());
+    ASSERT_EQ(0, stats->spillingStats.getSpilledRecords());
 
+    checkMemoryStats(stage.get(), false /*spill*/);
+    stage->close();
+}
+
+TEST_F(HashAggStageTest, HashAggBasicCountForceSpill) {
+    auto ctx = makeCompileCtx();
+
+    // Build a scan of the [5,6,7,5,6,7,6,7,7] input array.
+    auto [inputTag, inputVal] =
+        stage_builder::makeValue(BSON_ARRAY(5 << 6 << 7 << 5 << 6 << 7 << 6 << 7 << 7));
+    auto [scanSlot, scanStage] = generateVirtualScan(inputTag, inputVal);
+
+    // Build a HashAggStage, group by the scanSlot and compute a simple count.
+    auto countsSlot = generateSlotId();
+    auto spillSlot = generateSlotId();
+    auto stage =
+        makeS<HashAggStage>(std::move(scanStage),
+                            makeSV(scanSlot),
+                            makeHashAggAccumulatorList(std::make_unique<CompiledHashAggAccumulator>(
+                                countsSlot,
+                                spillSlot,
+                                makeFunction("sum",
+                                             makeE<EConstant>(value::TypeTags::NumberInt64,
+                                                              value::bitcastFrom<int64_t>(1))),
+                                makeFunction("sum", makeVariable(spillSlot)))),
+                            makeSV(),  // Seek slot
+                            true,
+                            boost::none,
+                            true /* allowDiskUse */,
+                            nullptr /* yieldPolicy */,
+                            kEmptyPlanNodeId);
+
+    // Prepare the tree and get the 'SlotAccessor' for the output slot.
+    auto resultAccessor = prepareTree(ctx.get(), stage.get(), countsSlot);
+
+    // Read in all of the results.
+    std::set<int64_t> results;
+    bool firstForceSpill = true;
+    bool secondForceSpill = true;
+    while (stage->getNext() == PlanState::ADVANCED) {
+        auto [resTag, resVal] = resultAccessor->getViewOfValue();
+        ASSERT_EQ(value::TypeTags::NumberInt64, resTag);
+        ASSERT_TRUE(results.insert(value::bitcastFrom<int64_t>(resVal)).second);
+        if (firstForceSpill) {
+            // Make sure it has not spilled already.
+            auto stats = static_cast<const HashAggStats*>(stage->getSpecificStats());
+            ASSERT_FALSE(stats->usedDisk);
+            ASSERT_EQ(0, stats->spillingStats.getSpills());
+            ASSERT_EQ(0, stats->spillingStats.getSpilledRecords());
+
+            SpillingStats expectedSpillingStats;
+            expectedSpillingStats.incrementSpills();
+            // There are three records in total and one has been already consumed.
+            expectedSpillingStats.incrementSpilledRecords(2);
+            runAndAssertForceSpill(stage.get(), expectedSpillingStats);
+
+            firstForceSpill = false;
+        } else if (secondForceSpill) {
+            auto statsBeforeForceSpill =
+                static_cast<const HashAggStats*>(stage->getSpecificStats());
+            runAndAssertForceSpill(stage.get(), statsBeforeForceSpill->spillingStats);
+            secondForceSpill = false;
+        }
+    }
+
+    // Check that the results match the expected.
+    ASSERT_EQ(3, results.size());
+    ASSERT_EQ(1, results.count(2));  // 2 of "5"s
+    ASSERT_EQ(1, results.count(3));  // 3 of "6"s
+    ASSERT_EQ(1, results.count(4));  // 4 of "7"s
+
+    // Check that the spilling behavior matches the expected.
+    auto stats = static_cast<const HashAggStats*>(stage->getSpecificStats());
+    ASSERT_TRUE(stats->usedDisk);
+    ASSERT_EQ(1, stats->spillingStats.getSpills());
+    ASSERT_EQ(2, stats->spillingStats.getSpilledRecords());
+
+    checkMemoryStats(stage.get(), true /*spill*/);
     stage->close();
 }
 
 TEST_F(HashAggStageTest, HashAggBasicCountSpill) {
     // We estimate the size of result row like {int64, int64} at 50B. Set the memory threshold to
     // 64B so that exactly one row fits in memory.
-    auto defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill =
-        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.load();
-    internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(64);
-    ON_BLOCK_EXIT([&] {
-        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(
-            defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill);
-    });
+    RAIIServerParameterControllerForTest maxMemoryLimit(
+        "internalQuerySlotBasedExecutionHashAggApproxMemoryUseInBytesBeforeSpill", 64);
 
     auto ctx = makeCompileCtx();
 
@@ -514,21 +646,22 @@ TEST_F(HashAggStageTest, HashAggBasicCountSpill) {
     // Build a HashAggStage, group by the scanSlot and compute a simple count.
     auto countsSlot = generateSlotId();
     auto spillSlot = generateSlotId();
-    auto stage = makeS<HashAggStage>(
-        std::move(scanStage),
-        makeSV(scanSlot),
-        makeAggExprVector(countsSlot,
-                          nullptr,
-                          makeFunction("sum",
-                                       makeE<EConstant>(value::TypeTags::NumberInt64,
-                                                        value::bitcastFrom<int64_t>(1)))),
-        makeSV(),  // Seek slot
-        true,
-        boost::none,
-        true /* allowDiskUse */,
-        makeSlotExprPairVec(spillSlot, makeFunction("sum", makeVariable(spillSlot))),
-        nullptr /* yieldPolicy */,
-        kEmptyPlanNodeId);
+    auto stage =
+        makeS<HashAggStage>(std::move(scanStage),
+                            makeSV(scanSlot),
+                            makeHashAggAccumulatorList(std::make_unique<CompiledHashAggAccumulator>(
+                                countsSlot,
+                                spillSlot,
+                                makeFunction("sum",
+                                             makeE<EConstant>(value::TypeTags::NumberInt64,
+                                                              value::bitcastFrom<int64_t>(1))),
+                                makeFunction("sum", makeVariable(spillSlot)))),
+                            makeSV(),  // Seek slot
+                            true,
+                            boost::none,
+                            true /* allowDiskUse */,
+                            nullptr /* yieldPolicy */,
+                            kEmptyPlanNodeId);
 
     // Prepare the tree and get the 'SlotAccessor' for the output slot.
     auto resultAccessor = prepareTree(ctx.get(), stage.get(), countsSlot);
@@ -554,11 +687,12 @@ TEST_F(HashAggStageTest, HashAggBasicCountSpill) {
     // spilling after estimating that the memory budget is exceeded. These two factors result in
     // fewer expected spills than there are input records, even though only one record fits in
     // memory at a time.
-    ASSERT_EQ(stats->spills, 3);
+    ASSERT_EQ(stats->spillingStats.getSpills(), 3);
     // The input has one run of two consecutive values, so we expect to spill as many records as
     // there are input values minus one.
-    ASSERT_EQ(stats->spilledRecords, 8);
+    ASSERT_EQ(stats->spillingStats.getSpilledRecords(), 8);
 
+    checkMemoryStats(stage.get(), true /*spill*/);
     stage->close();
 }
 
@@ -567,20 +701,12 @@ TEST_F(HashAggStageTest, HashAggBasicCountNoSpillIfNoMemCheck) {
     // 64B so that exactly one row fits in memory and spill would be required. At the same time, set
     // the memory check bounds to exceed the number of processed records so the checks are never run
     // and the need to spill is never discovered.
-    auto defaultMemoryLimit = internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.load();
-    internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(64);
-
-    auto defaultAtMost = internalQuerySBEAggMemoryCheckPerAdvanceAtMost.load();
-    internalQuerySBEAggMemoryCheckPerAdvanceAtMost.store(100);
-
-    auto defaultAtLeast = internalQuerySBEAggMemoryCheckPerAdvanceAtLeast.load();
-    internalQuerySBEAggMemoryCheckPerAdvanceAtLeast.store(100);
-
-    ON_BLOCK_EXIT([&] {
-        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(defaultMemoryLimit);
-        internalQuerySBEAggMemoryCheckPerAdvanceAtMost.store(defaultAtMost);
-        internalQuerySBEAggMemoryCheckPerAdvanceAtLeast.store(defaultAtLeast);
-    });
+    RAIIServerParameterControllerForTest maxMemoryLimit(
+        "internalQuerySlotBasedExecutionHashAggApproxMemoryUseInBytesBeforeSpill", 64);
+    RAIIServerParameterControllerForTest checkPerAdvanceAtMost(
+        "internalQuerySlotBasedExecutionHashAggMemoryCheckPerAdvanceAtMost", 100);
+    RAIIServerParameterControllerForTest checkPerAdvanceAtLeast(
+        "internalQuerySlotBasedExecutionHashAggMemoryCheckPerAdvanceAtLeast", 100);
 
     auto ctx = makeCompileCtx();
 
@@ -592,21 +718,22 @@ TEST_F(HashAggStageTest, HashAggBasicCountNoSpillIfNoMemCheck) {
     // Build a HashAggStage, group by the scanSlot and compute a simple count.
     auto countsSlot = generateSlotId();
     auto spillSlot = generateSlotId();
-    auto stage = makeS<HashAggStage>(
-        std::move(scanStage),
-        makeSV(scanSlot),
-        makeAggExprVector(countsSlot,
-                          nullptr,
-                          makeFunction("sum",
-                                       makeE<EConstant>(value::TypeTags::NumberInt64,
-                                                        value::bitcastFrom<int64_t>(1)))),
-        makeSV(),  // Seek slot
-        true,
-        boost::none,
-        true /* allowDiskUse */,
-        makeSlotExprPairVec(spillSlot, makeFunction("sum", makeVariable(spillSlot))),
-        nullptr /* yieldPolicy */,
-        kEmptyPlanNodeId);
+    auto stage =
+        makeS<HashAggStage>(std::move(scanStage),
+                            makeSV(scanSlot),
+                            makeHashAggAccumulatorList(std::make_unique<CompiledHashAggAccumulator>(
+                                countsSlot,
+                                spillSlot,
+                                makeFunction("sum",
+                                             makeE<EConstant>(value::TypeTags::NumberInt64,
+                                                              value::bitcastFrom<int64_t>(1))),
+                                makeFunction("sum", makeVariable(spillSlot)))),
+                            makeSV(),  // Seek slot
+                            true,
+                            boost::none,
+                            true /* allowDiskUse */,
+                            nullptr /* yieldPolicy */,
+                            kEmptyPlanNodeId);
 
     // Prepare the tree and get the 'SlotAccessor' for the output slot.
     auto resultAccessor = prepareTree(ctx.get(), stage.get(), countsSlot);
@@ -628,22 +755,18 @@ TEST_F(HashAggStageTest, HashAggBasicCountNoSpillIfNoMemCheck) {
     // Check that it did not spill.
     auto stats = static_cast<const HashAggStats*>(stage->getSpecificStats());
     ASSERT_FALSE(stats->usedDisk);
-    ASSERT_EQ(0, stats->spills);
-    ASSERT_EQ(0, stats->spilledRecords);
+    ASSERT_EQ(0, stats->spillingStats.getSpills());
+    ASSERT_EQ(0, stats->spillingStats.getSpilledRecords());
 
+    checkMemoryStats(stage.get(), false /*spill*/);
     stage->close();
 }
 
 TEST_F(HashAggStageTest, HashAggBasicCountSpillDouble) {
     // We estimate the size of result row like {double, int64} at 50B. Set the memory threshold to
     // 64B so that exactly one row fits in memory.
-    auto defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill =
-        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.load();
-    internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(64);
-    ON_BLOCK_EXIT([&] {
-        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(
-            defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill);
-    });
+    RAIIServerParameterControllerForTest maxMemoryLimit(
+        "internalQuerySlotBasedExecutionHashAggApproxMemoryUseInBytesBeforeSpill", 64);
 
     auto ctx = makeCompileCtx();
 
@@ -655,21 +778,22 @@ TEST_F(HashAggStageTest, HashAggBasicCountSpillDouble) {
     // Build a HashAggStage, group by the scanSlot and compute a simple count.
     auto countsSlot = generateSlotId();
     auto spillSlot = generateSlotId();
-    auto stage = makeS<HashAggStage>(
-        std::move(scanStage),
-        makeSV(scanSlot),
-        makeAggExprVector(countsSlot,
-                          nullptr,
-                          makeFunction("sum",
-                                       makeE<EConstant>(value::TypeTags::NumberInt64,
-                                                        value::bitcastFrom<int64_t>(1)))),
-        makeSV(),  // Seek slot
-        true,
-        boost::none,
-        true /* allowDiskUse */,
-        makeSlotExprPairVec(spillSlot, makeFunction("sum", makeVariable(spillSlot))),
-        nullptr /* yieldPolicy */,
-        kEmptyPlanNodeId);
+    auto stage =
+        makeS<HashAggStage>(std::move(scanStage),
+                            makeSV(scanSlot),
+                            makeHashAggAccumulatorList(std::make_unique<CompiledHashAggAccumulator>(
+                                countsSlot,
+                                spillSlot,
+                                makeFunction("sum",
+                                             makeE<EConstant>(value::TypeTags::NumberInt64,
+                                                              value::bitcastFrom<int64_t>(1))),
+                                makeFunction("sum", makeVariable(spillSlot)))),
+                            makeSV(),  // Seek slot
+                            true,
+                            boost::none,
+                            true /* allowDiskUse */,
+                            nullptr /* yieldPolicy */,
+                            kEmptyPlanNodeId);
 
     // Prepare the tree and get the 'SlotAccessor' for the output slot.
     auto resultAccessor = prepareTree(ctx.get(), stage.get(), countsSlot);
@@ -695,22 +819,18 @@ TEST_F(HashAggStageTest, HashAggBasicCountSpillDouble) {
     // spilling after estimating that the memory budget is exceeded. These two factors result in
     // fewer expected spills than there are input records, even though only one record fits in
     // memory at a time.
-    ASSERT_EQ(stats->spills, 3);
+    ASSERT_EQ(stats->spillingStats.getSpills(), 3);
     // The input has one run of two consecutive values, so we expect to spill as many records as
     // there are input values minus one.
-    ASSERT_EQ(stats->spilledRecords, 8);
+    ASSERT_EQ(stats->spillingStats.getSpilledRecords(), 8);
 
+    checkMemoryStats(stage.get(), true /*spill*/);
     stage->close();
 }
 
 TEST_F(HashAggStageTest, HashAggBasicCountNoSpillWithNoGroupByDouble) {
-    auto defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill =
-        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.load();
-    internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(1);
-    ON_BLOCK_EXIT([&] {
-        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(
-            defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill);
-    });
+    RAIIServerParameterControllerForTest maxMemoryLimit(
+        "internalQuerySlotBasedExecutionHashAggApproxMemoryUseInBytesBeforeSpill", 128);
 
     auto ctx = makeCompileCtx();
 
@@ -721,21 +841,22 @@ TEST_F(HashAggStageTest, HashAggBasicCountNoSpillWithNoGroupByDouble) {
     // Build a HashAggStage, with an empty group by slot and compute a simple count.
     auto countsSlot = generateSlotId();
     auto spillSlot = generateSlotId();
-    auto stage = makeS<HashAggStage>(
-        std::move(scanStage),
-        makeSV(),
-        makeAggExprVector(countsSlot,
-                          nullptr,
-                          makeFunction("sum",
-                                       makeE<EConstant>(value::TypeTags::NumberInt64,
-                                                        value::bitcastFrom<int64_t>(1)))),
-        makeSV(),  // Seek slot
-        true,
-        boost::none,
-        true /* allowDiskUse */,
-        makeSlotExprPairVec(spillSlot, makeFunction("sum", makeVariable(spillSlot))),
-        nullptr /* yieldPolicy */,
-        kEmptyPlanNodeId);
+    auto stage =
+        makeS<HashAggStage>(std::move(scanStage),
+                            makeSV(),
+                            makeHashAggAccumulatorList(std::make_unique<CompiledHashAggAccumulator>(
+                                countsSlot,
+                                spillSlot,
+                                makeFunction("sum",
+                                             makeE<EConstant>(value::TypeTags::NumberInt64,
+                                                              value::bitcastFrom<int64_t>(1))),
+                                makeFunction("sum", makeVariable(spillSlot)))),
+                            makeSV(),  // Seek slot
+                            true,
+                            boost::none,
+                            true /* allowDiskUse */,
+                            nullptr /* yieldPolicy */,
+                            kEmptyPlanNodeId);
 
     // Prepare the tree and get the 'SlotAccessor' for the output slot.
     auto resultAccessor = prepareTree(ctx.get(), stage.get(), countsSlot);
@@ -755,8 +876,12 @@ TEST_F(HashAggStageTest, HashAggBasicCountNoSpillWithNoGroupByDouble) {
     // Check that the spilling behavior matches the expected.
     auto stats = static_cast<const HashAggStats*>(stage->getSpecificStats());
     ASSERT_FALSE(stats->usedDisk);
-    ASSERT_EQ(0, stats->spills);
-    ASSERT_EQ(0, stats->spilledRecords);
+    ASSERT_EQ(0, stats->spillingStats.getSpills());
+    ASSERT_EQ(0, stats->spillingStats.getSpilledRecords());
+
+    // The group-by key is empty, so we never compute an estimate for the amount of memory.
+    ASSERT_EQ(stage->getMemoryTracker()->peakTrackedMemoryBytes(), 0);
+    ASSERT_EQ(stage->getMemoryTracker()->inUseTrackedMemoryBytes(), 0);
 
     stage->close();
 }
@@ -764,13 +889,8 @@ TEST_F(HashAggStageTest, HashAggBasicCountNoSpillWithNoGroupByDouble) {
 TEST_F(HashAggStageTest, HashAggMultipleAccSpill) {
     // We estimate the size of result row like {double, int64} at 59B. Set the memory threshold to
     // 128B so that two rows fit in memory.
-    auto defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill =
-        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.load();
-    internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(128);
-    ON_BLOCK_EXIT([&] {
-        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(
-            defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill);
-    });
+    RAIIServerParameterControllerForTest maxMemoryLimit(
+        "internalQuerySlotBasedExecutionHashAggApproxMemoryUseInBytesBeforeSpill", 128);
 
     auto ctx = makeCompileCtx();
 
@@ -784,27 +904,28 @@ TEST_F(HashAggStageTest, HashAggMultipleAccSpill) {
     auto sumsSlot = generateSlotId();
     auto spillSlot1 = generateSlotId();
     auto spillSlot2 = generateSlotId();
-    auto stage = makeS<HashAggStage>(
-        std::move(scanStage),
-        makeSV(scanSlot),
-        makeAggExprVector(countsSlot,
-                          nullptr,
-                          makeFunction("sum",
-                                       makeE<EConstant>(value::TypeTags::NumberInt64,
-                                                        value::bitcastFrom<int64_t>(1))),
-                          sumsSlot,
-                          nullptr,
-                          makeFunction("sum", makeE<EVariable>(scanSlot))),
-        makeSV(),  // Seek slot
-        true,
-        boost::none,
-        true /* allowDiskUse */,
-        makeSlotExprPairVec(spillSlot1,
-                            makeFunction("sum", makeVariable(spillSlot1)),
-                            spillSlot2,
-                            makeFunction("sum", makeVariable(spillSlot2))),
-        nullptr /* yieldPolicy */,
-        kEmptyPlanNodeId);
+    auto stage =
+        makeS<HashAggStage>(std::move(scanStage),
+                            makeSV(scanSlot),
+                            makeHashAggAccumulatorList(
+                                std::make_unique<CompiledHashAggAccumulator>(
+                                    countsSlot,
+                                    spillSlot1,
+                                    makeFunction("sum",
+                                                 makeE<EConstant>(value::TypeTags::NumberInt64,
+                                                                  value::bitcastFrom<int64_t>(1))),
+                                    makeFunction("sum", makeVariable(spillSlot1))),
+                                std::make_unique<CompiledHashAggAccumulator>(
+                                    sumsSlot,
+                                    spillSlot2,
+                                    makeFunction("sum", makeVariable(scanSlot)),
+                                    makeFunction("sum", makeVariable(spillSlot2)))),
+                            makeSV(),  // Seek slot
+                            true,
+                            boost::none,
+                            true /* allowDiskUse */,
+                            nullptr /* yieldPolicy */,
+                            kEmptyPlanNodeId);
 
     // Prepare the tree and get the 'SlotAccessor' for the output slot.
     auto resultAccessors = prepareTree(ctx.get(), stage.get(), makeSV(countsSlot, sumsSlot));
@@ -833,23 +954,19 @@ TEST_F(HashAggStageTest, HashAggMultipleAccSpill) {
     // Check that the spilling behavior matches the expected.
     auto stats = static_cast<const HashAggStats*>(stage->getSpecificStats());
     ASSERT_TRUE(stats->usedDisk);
-    ASSERT_EQ(stats->spills, 3);
+    ASSERT_EQ(stats->spillingStats.getSpills(), 3);
     // The input has one run of two consecutive values, so we expect to spill as many records as
     // there are input values minus one.
-    ASSERT_EQ(stats->spilledRecords, 8);
+    ASSERT_EQ(stats->spillingStats.getSpilledRecords(), 8);
 
+    checkMemoryStats(stage.get(), true /*spill*/);
     stage->close();
 }
 
 TEST_F(HashAggStageTest, HashAggMultipleAccSpillAllToDisk) {
-    // Set available memory to zero so all aggregated rows have to be spilled.
-    auto defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill =
-        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.load();
-    internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(0);
-    ON_BLOCK_EXIT([&] {
-        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(
-            defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill);
-    });
+    // Set available memory to 1 byte so all aggregated rows have to be spilled.
+    RAIIServerParameterControllerForTest maxMemoryLimit(
+        "internalQuerySlotBasedExecutionHashAggApproxMemoryUseInBytesBeforeSpill", 1);
 
     auto ctx = makeCompileCtx();
 
@@ -863,27 +980,28 @@ TEST_F(HashAggStageTest, HashAggMultipleAccSpillAllToDisk) {
     auto sumsSlot = generateSlotId();
     auto spillSlot1 = generateSlotId();
     auto spillSlot2 = generateSlotId();
-    auto stage = makeS<HashAggStage>(
-        std::move(scanStage),
-        makeSV(scanSlot),
-        makeAggExprVector(countsSlot,
-                          nullptr,
-                          makeFunction("sum",
-                                       makeE<EConstant>(value::TypeTags::NumberInt64,
-                                                        value::bitcastFrom<int64_t>(1))),
-                          sumsSlot,
-                          nullptr,
-                          makeFunction("sum", makeE<EVariable>(scanSlot))),
-        makeSV(),  // Seek slot
-        true,
-        boost::none,
-        true,  // allowDiskUse=true
-        makeSlotExprPairVec(spillSlot1,
-                            makeFunction("sum", makeVariable(spillSlot1)),
-                            spillSlot2,
-                            makeFunction("sum", makeVariable(spillSlot2))),
-        nullptr /* yieldPolicy */,
-        kEmptyPlanNodeId);
+    auto stage =
+        makeS<HashAggStage>(std::move(scanStage),
+                            makeSV(scanSlot),
+                            makeHashAggAccumulatorList(
+                                std::make_unique<CompiledHashAggAccumulator>(
+                                    countsSlot,
+                                    spillSlot1,
+                                    makeFunction("sum",
+                                                 makeE<EConstant>(value::TypeTags::NumberInt64,
+                                                                  value::bitcastFrom<int64_t>(1))),
+                                    makeFunction("sum", makeVariable(spillSlot1))),
+                                std::make_unique<CompiledHashAggAccumulator>(
+                                    sumsSlot,
+                                    spillSlot2,
+                                    makeFunction("sum", makeVariable(scanSlot)),
+                                    makeFunction("sum", makeVariable(spillSlot2)))),
+                            makeSV(),  // Seek slot
+                            true,
+                            boost::none,
+                            true,  // allowDiskUse=true
+                            nullptr /* yieldPolicy */,
+                            kEmptyPlanNodeId);
 
     // Prepare the tree and get the 'SlotAccessor' for the output slot.
     auto resultAccessors = prepareTree(ctx.get(), stage.get(), makeSV(countsSlot, sumsSlot));
@@ -913,9 +1031,188 @@ TEST_F(HashAggStageTest, HashAggMultipleAccSpillAllToDisk) {
     auto stats = static_cast<const HashAggStats*>(stage->getSpecificStats());
     ASSERT_TRUE(stats->usedDisk);
     // We expect each incoming value to result in a spill of a single record.
-    ASSERT_EQ(stats->spills, 9);
-    ASSERT_EQ(stats->spilledRecords, 9);
+    ASSERT_EQ(stats->spillingStats.getSpills(), 9);
+    ASSERT_EQ(stats->spillingStats.getSpilledRecords(), 9);
 
+    checkMemoryStats(stage.get(), true /*spill*/);
+    stage->close();
+}
+
+TEST_F(HashAggStageTest, HashAggMultipleAccForceSpill) {
+    auto ctx = makeCompileCtx();
+
+    // Build a scan of the [5,6,7,5,6,7,6,7,7] input array.
+    auto [inputTag, inputVal] =
+        stage_builder::makeValue(BSON_ARRAY(5 << 6 << 7 << 5 << 6 << 7 << 6 << 7 << 7));
+    auto [scanSlot, scanStage] = generateVirtualScan(inputTag, inputVal);
+
+    // Build a HashAggStage, group by the scanSlot and compute a simple count.
+    auto countsSlot = generateSlotId();
+    auto sumsSlot = generateSlotId();
+    auto spillSlot1 = generateSlotId();
+    auto spillSlot2 = generateSlotId();
+    auto stage =
+        makeS<HashAggStage>(std::move(scanStage),
+                            makeSV(scanSlot),
+                            makeHashAggAccumulatorList(
+                                std::make_unique<CompiledHashAggAccumulator>(
+                                    countsSlot,
+                                    spillSlot1,
+                                    makeFunction("sum",
+                                                 makeE<EConstant>(value::TypeTags::NumberInt64,
+                                                                  value::bitcastFrom<int64_t>(1))),
+                                    makeFunction("sum", makeVariable(spillSlot1))),
+                                std::make_unique<CompiledHashAggAccumulator>(
+                                    sumsSlot,
+                                    spillSlot2,
+                                    makeFunction("sum", makeVariable(scanSlot)),
+                                    makeFunction("sum", makeVariable(spillSlot2)))),
+                            makeSV(),  // Seek slot
+                            true,
+                            boost::none,
+                            true /* allowDiskUse */,
+                            nullptr /* yieldPolicy */,
+                            kEmptyPlanNodeId);
+
+    // Prepare the tree and get the 'SlotAccessor' for the output slot.
+    auto resultAccessors = prepareTree(ctx.get(), stage.get(), makeSV(countsSlot, sumsSlot));
+
+    // Read in all of the results.
+    std::set<std::pair<int64_t /*count*/, int32_t /*sum*/>> results;
+    bool firstForceSpill = true;
+    bool secondForceSpill = true;
+    while (stage->getNext() == PlanState::ADVANCED) {
+        auto [resCountTag, resCountVal] = resultAccessors[0]->getViewOfValue();
+        ASSERT_EQ(value::TypeTags::NumberInt64, resCountTag);
+
+        auto [resSumTag, resSumVal] = resultAccessors[1]->getViewOfValue();
+        ASSERT_EQ(value::TypeTags::NumberInt32, resSumTag);
+
+        ASSERT_TRUE(results
+                        .insert(std::make_pair(value::bitcastFrom<int64_t>(resCountVal),
+                                               value::bitcastFrom<int32_t>(resSumVal)))
+                        .second);
+
+        if (firstForceSpill) {
+            // Make sure it has not spilled already.
+            auto stats = static_cast<const HashAggStats*>(stage->getSpecificStats());
+            ASSERT_FALSE(stats->usedDisk);
+            ASSERT_EQ(0, stats->spillingStats.getSpills());
+            ASSERT_EQ(0, stats->spillingStats.getSpilledRecords());
+
+            SpillingStats expectedSpillingStats;
+            expectedSpillingStats.incrementSpills();
+            // There are three records in total and one has been already consumed.
+            expectedSpillingStats.incrementSpilledRecords(2);
+            runAndAssertForceSpill(stage.get(), expectedSpillingStats);
+
+            firstForceSpill = false;
+        } else if (secondForceSpill) {
+            auto statsBeforeForceSpill =
+                static_cast<const HashAggStats*>(stage->getSpecificStats());
+            runAndAssertForceSpill(stage.get(), statsBeforeForceSpill->spillingStats);
+            secondForceSpill = false;
+        }
+    }
+
+    // Check that the results match the expected.
+    ASSERT_EQ(3, results.size());
+    ASSERT_EQ(1, results.count(std::make_pair(2, 2 * 5)));  // 2 of "5"s
+    ASSERT_EQ(1, results.count(std::make_pair(3, 3 * 6)));  // 3 of "6"s
+    ASSERT_EQ(1, results.count(std::make_pair(4, 4 * 7)));  // 4 of "7"s
+
+    // Check that the spilling behavior matches the expected.
+    // Check that the spilling behavior matches the expected.
+    auto stats = static_cast<const HashAggStats*>(stage->getSpecificStats());
+    ASSERT_TRUE(stats->usedDisk);
+    ASSERT_EQ(1, stats->spillingStats.getSpills());
+    ASSERT_EQ(2, stats->spillingStats.getSpilledRecords());
+
+    checkMemoryStats(stage.get(), true /*spill*/);
+    stage->close();
+}
+
+TEST_F(HashAggStageTest, HashAggMultipleAccForceSpillAfterSpill) {
+    // We estimate the size of result row like {double, int64} at 59B. Set the memory threshold to
+    // 128B so that two rows fit in memory.
+    RAIIServerParameterControllerForTest maxMemoryLimit(
+        "internalQuerySlotBasedExecutionHashAggApproxMemoryUseInBytesBeforeSpill", 128);
+
+    auto ctx = makeCompileCtx();
+
+    // Build a scan of the [5,6,7,5,6,7,6,7,7] input array.
+    auto [inputTag, inputVal] =
+        stage_builder::makeValue(BSON_ARRAY(5 << 6 << 7 << 5 << 6 << 7 << 6 << 7 << 7));
+    auto [scanSlot, scanStage] = generateVirtualScan(inputTag, inputVal);
+
+    // Build a HashAggStage, group by the scanSlot and compute a simple count.
+    auto countsSlot = generateSlotId();
+    auto sumsSlot = generateSlotId();
+    auto spillSlot1 = generateSlotId();
+    auto spillSlot2 = generateSlotId();
+    auto stage =
+        makeS<HashAggStage>(std::move(scanStage),
+                            makeSV(scanSlot),
+                            makeHashAggAccumulatorList(
+                                std::make_unique<CompiledHashAggAccumulator>(
+                                    countsSlot,
+                                    spillSlot1,
+                                    makeFunction("sum",
+                                                 makeE<EConstant>(value::TypeTags::NumberInt64,
+                                                                  value::bitcastFrom<int64_t>(1))),
+                                    makeFunction("sum", makeVariable(spillSlot1))),
+                                std::make_unique<CompiledHashAggAccumulator>(
+                                    sumsSlot,
+                                    spillSlot2,
+                                    makeFunction("sum", makeVariable(scanSlot)),
+                                    makeFunction("sum", makeVariable(spillSlot2)))),
+                            makeSV(),  // Seek slot
+                            true,
+                            boost::none,
+                            true /* allowDiskUse */,
+                            nullptr /* yieldPolicy */,
+                            kEmptyPlanNodeId);
+
+    // Prepare the tree and get the 'SlotAccessor' for the output slot.
+    auto resultAccessors = prepareTree(ctx.get(), stage.get(), makeSV(countsSlot, sumsSlot));
+
+    // Read in all of the results.
+    std::set<std::pair<int64_t /*count*/, int32_t /*sum*/>> results;
+    bool forceSpill = true;
+    while (stage->getNext() == PlanState::ADVANCED) {
+        auto [resCountTag, resCountVal] = resultAccessors[0]->getViewOfValue();
+        ASSERT_EQ(value::TypeTags::NumberInt64, resCountTag);
+
+        auto [resSumTag, resSumVal] = resultAccessors[1]->getViewOfValue();
+        ASSERT_EQ(value::TypeTags::NumberInt32, resSumTag);
+
+        ASSERT_TRUE(results
+                        .insert(std::make_pair(value::bitcastFrom<int64_t>(resCountVal),
+                                               value::bitcastFrom<int32_t>(resSumVal)))
+                        .second);
+
+        if (forceSpill) {
+            auto stats = static_cast<const HashAggStats*>(stage->getSpecificStats());
+            runAndAssertForceSpill(stage.get(), stats->spillingStats);
+            forceSpill = false;
+        }
+    }
+
+    // Check that the results match the expected.
+    ASSERT_EQ(3, results.size());
+    ASSERT_EQ(1, results.count(std::make_pair(2, 2 * 5)));  // 2 of "5"s
+    ASSERT_EQ(1, results.count(std::make_pair(3, 3 * 6)));  // 3 of "6"s
+    ASSERT_EQ(1, results.count(std::make_pair(4, 4 * 7)));  // 4 of "7"s
+
+    // Check that the spilling behavior matches the expected.
+    auto stats = static_cast<const HashAggStats*>(stage->getSpecificStats());
+    ASSERT_TRUE(stats->usedDisk);
+    ASSERT_EQ(stats->spillingStats.getSpills(), 3);
+    // The input has one run of two consecutive values, so we expect to spill as many records as
+    // there are input values minus one.
+    ASSERT_EQ(stats->spillingStats.getSpilledRecords(), 8);
+
+    checkMemoryStats(stage.get(), true /*spill*/);
     stage->close();
 }
 
@@ -924,13 +1221,8 @@ TEST_F(HashAggStageTest, HashAggSum10Groups) {
     // estimated size is >= 128. This should spilt the number of ints between the hash table and
     // the record store somewhat evenly.
     const auto memLimit = 128;
-    auto defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill =
-        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.load();
-    internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(memLimit);
-    ON_BLOCK_EXIT([&] {
-        internalQuerySBEAggApproxMemoryUseInBytesBeforeSpill.store(
-            defaultInternalQuerySBEAggApproxMemoryUseInBytesBeforeSpill);
-    });
+    RAIIServerParameterControllerForTest maxMemoryLimit(
+        "internalQuerySlotBasedExecutionHashAggApproxMemoryUseInBytesBeforeSpill", memLimit);
 
     auto ctx = makeCompileCtx();
 
@@ -952,17 +1244,20 @@ TEST_F(HashAggStageTest, HashAggSum10Groups) {
     // Build a HashAggStage, group by the scanSlot and compute a sum for each group.
     auto sumsSlot = generateSlotId();
     auto spillSlot = generateSlotId();
-    auto stage = makeS<HashAggStage>(
-        std::move(scanStage),
-        makeSV(scanSlot),
-        makeAggExprVector(sumsSlot, nullptr, makeFunction("sum", makeE<EVariable>(scanSlot))),
-        makeSV(),  // Seek slot
-        true,
-        boost::none,
-        true,  // allowDiskUse=true
-        makeSlotExprPairVec(spillSlot, makeFunction("sum", makeVariable(spillSlot))),
-        nullptr /* yieldPolicy */,
-        kEmptyPlanNodeId);
+    auto stage =
+        makeS<HashAggStage>(std::move(scanStage),
+                            makeSV(scanSlot),
+                            makeHashAggAccumulatorList(std::make_unique<CompiledHashAggAccumulator>(
+                                sumsSlot,
+                                spillSlot,
+                                makeFunction("sum", makeVariable(scanSlot)),
+                                makeFunction("sum", makeVariable(spillSlot)))),
+                            makeSV(),  // Seek slot
+                            true,
+                            boost::none,
+                            true,  // allowDiskUse=true
+                            nullptr /* yieldPolicy */,
+                            kEmptyPlanNodeId);
 
     // Prepare the tree and get the 'SlotAccessor' for the output slot.
     auto resultAccessors = prepareTree(ctx.get(), stage.get(), makeSV(scanSlot, sumsSlot));
@@ -977,6 +1272,7 @@ TEST_F(HashAggStageTest, HashAggSum10Groups) {
                           value::TypeTags::NumberInt32,
                           value::bitcastFrom<int>(it->second));
     }
+    checkMemoryStats(stage.get(), true /*spill*/);
     stage->close();
 }
 
@@ -996,21 +1292,22 @@ TEST_F(HashAggStageTest, HashAggBasicCountWithRecordIds) {
     // Build a HashAggStage, group by the scanSlot and compute a simple count.
     auto countsSlot = generateSlotId();
     auto spillSlot = generateSlotId();
-    auto stage = makeS<HashAggStage>(
-        std::move(scanStage),
-        makeSV(scanSlot),
-        makeAggExprVector(countsSlot,
-                          nullptr,
-                          makeFunction("sum",
-                                       makeE<EConstant>(value::TypeTags::NumberInt64,
-                                                        value::bitcastFrom<int64_t>(1)))),
-        makeSV(),  // Seek slot
-        true,
-        boost::none,
-        true,  // allowDiskUse=true
-        makeSlotExprPairVec(spillSlot, makeFunction("sum", makeVariable(spillSlot))),
-        nullptr /* yieldPolicy */,
-        kEmptyPlanNodeId);
+    auto stage =
+        makeS<HashAggStage>(std::move(scanStage),
+                            makeSV(scanSlot),
+                            makeHashAggAccumulatorList(std::make_unique<CompiledHashAggAccumulator>(
+                                countsSlot,
+                                spillSlot,
+                                makeFunction("sum",
+                                             makeE<EConstant>(value::TypeTags::NumberInt64,
+                                                              value::bitcastFrom<int64_t>(1))),
+                                makeFunction("sum", makeVariable(spillSlot)))),
+                            makeSV(),  // Seek slot
+                            true,
+                            boost::none,
+                            true,  // allowDiskUse=true
+                            nullptr /* yieldPolicy */,
+                            kEmptyPlanNodeId);
 
     // Prepare the tree and get the 'SlotAccessor' for the output slot.
     auto resultAccessors = prepareTree(ctx.get(), stage.get(), makeSV(scanSlot, countsSlot));
@@ -1037,6 +1334,7 @@ TEST_F(HashAggStageTest, HashAggBasicCountWithRecordIds) {
     ASSERT_EQ(3, results[10]);
     ASSERT_EQ(4, results[999]);
 
+    checkMemoryStats(stage.get(), false /*spill*/);
     stage->close();
 }
 }  // namespace mongo::sbe

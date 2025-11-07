@@ -31,6 +31,7 @@
 #include "mongo/db/geo/geoparser.h"
 
 #include <cstddef>
+
 #include <s1angle.h>
 #include <s1interval.h>
 #include <s2.h>
@@ -41,25 +42,26 @@
 #include <s2loop.h>
 #include <s2polygon.h>
 #include <s2polyline.h>
+
 #include <util/math/vector3-inl.h>
 #include <util/math/vector3.h>
 // IWYU pragma: no_include "ext/alloc_traits.h"
+#include "mongo/base/clonable_ptr.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/dotted_path/dotted_path_support.h"
+#include "mongo/db/geo/big_polygon.h"
+#include "mongo/db/geo/shapes.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
+#include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
+
 #include <cmath>
 #include <memory>
 #include <ostream>
 #include <string>
 #include <vector>
-
-#include "mongo/base/clonable_ptr.h"
-#include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/db/geo/big_polygon.h"
-#include "mongo/db/geo/shapes.h"
-#include "mongo/db/query/bson/dotted_path_support.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
-#include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kGeo
 
@@ -68,7 +70,7 @@
 
 namespace mongo {
 
-namespace dps = ::mongo::dotted_path_support;
+namespace dps = ::mongo::bson;
 
 // Convenience function to extract flat point coordinates from enclosing element.
 // Note, coordinate elements must not outlive the parent element.
@@ -94,6 +96,54 @@ Status GeoParser::parseFlatPointCoordinates(const BSONElement& elem,
     }
     if (!allowAddlFields && it.more()) {
         return BAD_VALUE("Point must only contain two numeric elements");
+    }
+    return Status::OK();
+}
+
+// Convenience function to extract point coordinates and distance from enclosing element.
+// Note, coordinate and distance elements must not outlive the parent element.
+Status GeoParser::parseLegacyPointWithMaxDistance(const BSONElement& elem,
+                                                  BSONElement& lat,
+                                                  BSONElement& lng,
+                                                  BSONElement& maxDist) {
+    if (!elem.isABSONObj()) {
+        return BAD_VALUE("Point and distance must be an array or object, instead got type "
+                         << typeName(elem.type()));
+    }
+
+    BSONObjIterator it(elem.Obj());
+    if (!it.more()) {
+        return BAD_VALUE("Point with max distance must contain exactly three numeric elements");
+    }
+    lat = it.next();
+    if (!lat.isNumber()) {
+        return BAD_VALUE(
+            "Point with max distance must only contain numeric elements, instead got type "
+            << typeName(lat.type()));
+    }
+
+    if (!it.more()) {
+        return BAD_VALUE("Point with max distance must contain exactly three numeric elements");
+    }
+    lng = it.next();
+    if (!lng.isNumber()) {
+        return BAD_VALUE(
+            "Point with max distance must only contain numeric elements, instead got type "
+            << typeName(lng.type()));
+    }
+
+    if (!it.more()) {
+        return BAD_VALUE("Point with max distance must contain exactly three numeric elements");
+    }
+    maxDist = it.next();
+    if (!maxDist.isNumber()) {
+        return BAD_VALUE(
+            "Point with max distance must only contain numeric elements, instead got type "
+            << typeName(maxDist.type()));
+    }
+
+    if (it.more()) {
+        return BAD_VALUE("Point with max distance must contain exactly three numeric elements");
     }
     return Status::OK();
 }
@@ -139,7 +189,7 @@ static Status coordToPoint(double lng, double lat, S2Point* out) {
 }
 
 static Status parseGeoJSONCoordinate(const BSONElement& elem, S2Point* out) {
-    if (Array != elem.type()) {
+    if (BSONType::array != elem.type()) {
         return BAD_VALUE("GeoJSON coordinates must be an array, instead got type "
                          << typeName(elem.type()));
     }
@@ -155,7 +205,7 @@ static Status parseGeoJSONCoordinate(const BSONElement& elem, S2Point* out) {
 
 // "coordinates": [ [100.0, 0.0], [101.0, 1.0] ]
 static Status parseArrayOfCoordinates(const BSONElement& elem, vector<S2Point>* out) {
-    if (Array != elem.type()) {
+    if (BSONType::array != elem.type()) {
         return BAD_VALUE("GeoJSON coordinates must be an array of coordinates, instead got type "
                          << typeName(elem.type()));
     }
@@ -206,7 +256,7 @@ static Status isLoopClosed(const vector<S2Point>& loop, const BSONElement loopEl
 static Status parseGeoJSONPolygonCoordinates(const BSONElement& elem,
                                              bool skipValidation,
                                              S2Polygon* out) {
-    if (Array != elem.type()) {
+    if (BSONType::array != elem.type()) {
         return BAD_VALUE("Polygon coordinates must be an array, instead got type "
                          << typeName(elem.type()));
     }
@@ -319,7 +369,7 @@ static Status parseGeoJSONPolygonCoordinates(const BSONElement& elem,
 }
 
 static Status parseBigSimplePolygonCoordinates(const BSONElement& elem, BigSimplePolygon* out) {
-    if (Array != elem.type()) {
+    if (BSONType::array != elem.type()) {
         return BAD_VALUE("Coordinates of polygon must be an array, instead got type "
                          << typeName(elem.type()));
     }
@@ -390,7 +440,8 @@ static Status parseGeoJSONCRS(const BSONObj& obj, CRS* crs, bool allowStrictSphe
     BSONObj crsObj = crsElt.embeddedObject();
 
     // "type": "name"
-    if (String != crsObj[kCrsTypeField].type() || kCrsNameField != crsObj[kCrsTypeField].String())
+    if (BSONType::string != crsObj[kCrsTypeField].type() ||
+        kCrsNameField != crsObj[kCrsTypeField].String())
         return BAD_VALUE("GeoJSON CRS must have field \"type\": \"name\"");
 
     // "properties"
@@ -400,7 +451,7 @@ static Status parseGeoJSONCRS(const BSONObj& obj, CRS* crs, bool allowStrictSphe
                          << typeName(propertiesElt.type()));
     }
     BSONObj propertiesObj = propertiesElt.embeddedObject();
-    if (String != propertiesObj[kPropertiesNameField].type()) {
+    if (BSONType::string != propertiesObj[kPropertiesNameField].type()) {
         return BAD_VALUE("In CRS, \"properties.name\" must be a string, instead got type "
                          << typeName(propertiesObj[kPropertiesNameField].type()));
     }
@@ -454,7 +505,7 @@ Status parsePoint(const BSONElement& elem, PointWithCRS* out, bool allowAddlFiel
     }
     BSONObj obj = elem.Obj();
     // location: [1, 2] or location: {x: 1, y:2}
-    if (Array == elem.type() || obj.firstElement().isNumber()) {
+    if (BSONType::array == elem.type() || obj.firstElement().isNumber()) {
         // Legacy point
         return GeoParser::parseLegacyPoint(elem, out, allowAddlFields);
     }
@@ -587,7 +638,7 @@ Status GeoParser::parseMultiPoint(const BSONObj& obj, MultiPointWithCRS* out) {
         return status;
 
     out->points.clear();
-    BSONElement coordElt = dps::extractElementAtPath(obj, GEOJSON_COORDINATES);
+    BSONElement coordElt = dps::extractElementAtDottedPath(obj, GEOJSON_COORDINATES);
     status = parseArrayOfCoordinates(coordElt, &out->points);
     if (!status.isOK())
         return status;
@@ -608,8 +659,8 @@ Status GeoParser::parseMultiLine(const BSONObj& obj, bool skipValidation, MultiL
     if (!status.isOK())
         return status;
 
-    BSONElement coordElt = dps::extractElementAtPath(obj, GEOJSON_COORDINATES);
-    if (Array != coordElt.type()) {
+    BSONElement coordElt = dps::extractElementAtDottedPath(obj, GEOJSON_COORDINATES);
+    if (BSONType::array != coordElt.type()) {
         return BAD_VALUE("MultiLineString coordinates must be an array, instead got type "
                          << typeName(coordElt.type()));
     }
@@ -641,8 +692,8 @@ Status GeoParser::parseMultiPolygon(const BSONObj& obj,
     if (!status.isOK())
         return status;
 
-    BSONElement coordElt = dps::extractElementAtPath(obj, GEOJSON_COORDINATES);
-    if (Array != coordElt.type()) {
+    BSONElement coordElt = dps::extractElementAtDottedPath(obj, GEOJSON_COORDINATES);
+    if (BSONType::array != coordElt.type()) {
         return BAD_VALUE("MultiPolygon coordinates must be an array, instead got type "
                          << typeName(coordElt.type()));
     }
@@ -736,8 +787,8 @@ Status GeoParser::parseCenterSphere(const BSONObj& obj, CapWithCRS* out) {
 Status GeoParser::parseGeometryCollection(const BSONObj& obj,
                                           bool skipValidation,
                                           GeometryCollection* out) {
-    BSONElement coordElt = dps::extractElementAtPath(obj, GEOJSON_GEOMETRIES);
-    if (Array != coordElt.type()) {
+    BSONElement coordElt = dps::extractElementAtDottedPath(obj, GEOJSON_GEOMETRIES);
+    if (BSONType::array != coordElt.type()) {
         return BAD_VALUE("GeometryCollection geometries must be an array, instead got type "
                          << typeName(coordElt.type()));
     }
@@ -746,7 +797,7 @@ Status GeoParser::parseGeometryCollection(const BSONObj& obj,
         return BAD_VALUE("GeometryCollection geometries must have at least 1 element");
 
     for (size_t i = 0; i < geometries.size(); ++i) {
-        if (Object != geometries[i].type())
+        if (BSONType::object != geometries[i].type())
             return BAD_VALUE("Element " << i
                                         << " of \"geometries\" must be an object, instead got type "
                                         << typeName(geometries[i].type()) << ": "
@@ -782,8 +833,7 @@ Status GeoParser::parseGeometryCollection(const BSONObj& obj,
             out->multiPolygons.push_back(std::make_unique<MultiPolygonWithCRS>());
             status = parseMultiPolygon(geoObj, skipValidation, out->multiPolygons.back().get());
         } else {
-            // Should not reach here.
-            MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE_TASSERT(9911957);
         }
 
         // Check parsing result.
@@ -794,41 +844,19 @@ Status GeoParser::parseGeometryCollection(const BSONObj& obj,
     return Status::OK();
 }
 
-bool GeoParser::parsePointWithMaxDistance(const BSONObj& obj, PointWithCRS* out, double* maxOut) {
-    BSONObjIterator it(obj);
-    if (!it.more()) {
-        return false;
+Status GeoParser::parsePointWithMaxDistance(const BSONElement& elem,
+                                            PointWithCRS* out,
+                                            double* maxOut) {
+    BSONElement lat, lng, maxDist;
+    auto status = GeoParser::parseLegacyPointWithMaxDistance(elem, lat, lng, maxDist);
+    if (!status.isOK()) {
+        return status;
     }
-
-    BSONElement lng = it.next();
-    if (!lng.isNumber()) {
-        return false;
-    }
-    if (!it.more()) {
-        return false;
-    }
-
-    BSONElement lat = it.next();
-    if (!lat.isNumber()) {
-        return false;
-    }
-    if (!it.more()) {
-        return false;
-    }
-
-    BSONElement dist = it.next();
-    if (!dist.isNumber()) {
-        return false;
-    }
-    if (it.more()) {
-        return false;
-    }
-
-    out->oldPoint.x = lng.number();
-    out->oldPoint.y = lat.number();
+    out->oldPoint.x = lat.number();
+    out->oldPoint.y = lng.number();
     out->crs = FLAT;
-    *maxOut = dist.number();
-    return true;
+    *maxOut = maxDist.number();
+    return Status::OK();
 }
 
 GeoParser::GeoSpecifier GeoParser::parseGeoSpecifier(const BSONElement& type) {
@@ -851,8 +879,8 @@ GeoParser::GeoSpecifier GeoParser::parseGeoSpecifier(const BSONElement& type) {
 }
 
 GeoParser::GeoJSONType GeoParser::parseGeoJSONType(const BSONObj& obj) {
-    BSONElement type = dps::extractElementAtPath(obj, GEOJSON_TYPE);
-    if (String != type.type()) {
+    BSONElement type = dps::extractElementAtDottedPath(obj, GEOJSON_TYPE);
+    if (BSONType::string != type.type()) {
         return GeoParser::GEOJSON_UNKNOWN;
     }
     return geoJSONTypeStringToEnum(type.checkAndGetStringData());
@@ -860,11 +888,11 @@ GeoParser::GeoJSONType GeoParser::parseGeoJSONType(const BSONObj& obj) {
 
 // TODO: SERVER-86141 audit if this method is needed else remove.
 void GeoParser::assertValidGeoJSONType(const BSONObj& obj) {
-    BSONElement type = dps::extractElementAtPath(obj, GEOJSON_TYPE);
+    BSONElement type = dps::extractElementAtDottedPath(obj, GEOJSON_TYPE);
     uassert(8459801,
             str::stream() << "Expected valid geojson of type string, got non-string type of value "
                           << type,
-            String == type.type());
+            BSONType::string == type.type());
     auto str = type.checkAndGetStringData();
     uassert(8459800,
             str::stream() << "Expected valid geojson type, got " << str,

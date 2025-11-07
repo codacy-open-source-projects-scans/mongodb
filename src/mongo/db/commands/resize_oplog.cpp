@@ -27,11 +27,6 @@
  *    it in the license file.
  */
 
-#include <string>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -40,14 +35,14 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/resize_oplog_gen.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
@@ -55,10 +50,13 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
+
+#include <string>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -107,14 +105,16 @@ public:
         uassert(ErrorCodes::IllegalOperation, "oplog isn't capped", coll->isCapped());
 
         auto params =
-            ReplSetResizeOplogRequest::parse(IDLParserContext("replSetResizeOplog"), jsobj);
+            ReplSetResizeOplogRequest::parse(jsobj, IDLParserContext("replSetResizeOplog"));
 
         return writeConflictRetry(opCtx, "replSetResizeOplog", coll->ns(), [&] {
             WriteUnitOfWork wunit(opCtx);
 
+            CollectionWriter writer{opCtx, coll};
+
             if (auto sizeMB = params.getSize()) {
                 const long long sizeBytes = *sizeMB * 1024 * 1024;
-                uassertStatusOK(coll.getWritableCollection(opCtx)->updateCappedSize(
+                uassertStatusOK(writer.getWritableCollection(opCtx)->updateCappedSize(
                     opCtx, sizeBytes, /*newCappedMax=*/boost::none));
             }
 

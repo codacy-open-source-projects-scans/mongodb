@@ -30,9 +30,10 @@
 #pragma once
 
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
-#include "mongo/db/pipeline/expression_dependencies.h"
 #include "mongo/db/pipeline/transformer_interface.h"
 #include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/dependency_analysis/expression_dependencies.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -51,10 +52,6 @@ public:
         return TransformerType::kSetMetadata;
     }
 
-    bool noFieldModifications() const final {
-        return true;
-    }
-
     DocumentMetadataFields::MetaType getMetaType() {
         return _metaType;
     }
@@ -71,8 +68,8 @@ public:
 
     void addVariableRefs(std::set<Variables::Id>* refs) const final;
 
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) final;
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) final;
 
 private:
     const boost::intrusive_ptr<ExpressionContext> _expCtx;

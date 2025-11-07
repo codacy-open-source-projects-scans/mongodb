@@ -29,14 +29,6 @@
 
 #pragma once
 
-#include <memory>
-#include <set>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/s/transaction_coordinator_catalog.h"
@@ -45,15 +37,25 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/observable_mutex.h"
 #include "mongo/util/time_support.h"
+
+#include <memory>
+#include <set>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
-class TransactionCoordinatorService {
+class MONGO_MOD_PUB TransactionCoordinatorService {
     TransactionCoordinatorService(const TransactionCoordinatorService&) = delete;
     TransactionCoordinatorService& operator=(const TransactionCoordinatorService&) = delete;
 
@@ -137,6 +139,12 @@ public:
      */
     void shutdown();
 
+    /**
+     * Notifies this service that the provided TransactionCoordinator is finished and no longer
+     * needs to be interrupted when the service is interrupted.
+     */
+    void notifyCoordinatorFinished(std::shared_ptr<TransactionCoordinator>);
+
 protected:
     struct CatalogAndScheduler {
         CatalogAndScheduler(ServiceContext* service) : scheduler(service) {}
@@ -157,12 +165,12 @@ protected:
     std::shared_ptr<CatalogAndScheduler> getCatalogAndScheduler(OperationContext* opCtx);
 
     virtual long long getInitTerm() const {
-        stdx::lock_guard<stdx::mutex> lg(_mutex);
+        stdx::lock_guard lg(_mutex);
         return _initTerm;
     };
 
     virtual bool pendingCleanup() const {
-        stdx::lock_guard<stdx::mutex> lg(_mutex);
+        stdx::lock_guard lg(_mutex);
         return _catalogAndSchedulerToCleanup != NULL;
     };
 
@@ -191,7 +199,7 @@ private:
     std::shared_ptr<CatalogAndScheduler> _catalogAndSchedulerToCleanup;
 
     // Protects the state below
-    mutable stdx::mutex _mutex;
+    mutable ObservableMutex<stdx::mutex> _mutex;
 
     // The catalog + scheduler instantiated at the last initialization attempt. When nullptr, it
     // means initializeIfNeeded() has not been called yet after the last interruption (or
@@ -207,8 +215,14 @@ private:
     // Set to true during initialization to avoid multiple thread attempting to initialize at once.
     bool _isInitializing{false};
 
-    // Used to cancel WaitForMajority for TransactionCoordinator when this service gets interrupted.
-    CancellationSource _cancelSource;
+    // tracks active transactionCoordinators to be interrupted on step-down. previously they were
+    // tracked implicitly through futures associated with the above CancellationSource, but that
+    // does not provide a way to deregister those futures when sub sources complete.
+    // NOTE: this must be an ordered container because std::weak_ptr only exposes an ordering
+    // operator, it does not expose an address or other control block information that would allow
+    // storage in a hash-based container.
+    std::set<std::weak_ptr<TransactionCoordinator>, std::owner_less<>>
+        _activeTransactionCoordinators;
 };
 
 }  // namespace mongo

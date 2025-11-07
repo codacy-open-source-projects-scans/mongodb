@@ -27,22 +27,23 @@
  *    it in the license file.
  */
 
-#include <variant>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/window_function/partition_iterator.h"
 
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
 #include "mongo/db/pipeline/field_path.h"
-#include "mongo/db/pipeline/window_function/partition_iterator.h"
 #include "mongo/db/query/datetime/date_time_support.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 #include "mongo/util/str.h"
+
+#include <variant>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 using boost::optional;
 
@@ -91,7 +92,7 @@ static optional<boost::intrusive_ptr<ExpressionFieldPath>> exprFromSort(
 }  // namespace
 
 PartitionIterator::PartitionIterator(ExpressionContext* expCtx,
-                                     DocumentSource* source,
+                                     exec::agg::Stage* source,
                                      MemoryUsageTracker* tracker,
                                      optional<boost::intrusive_ptr<Expression>> partitionExpr,
                                      const optional<SortPattern>& sortPattern)
@@ -100,8 +101,16 @@ PartitionIterator::PartitionIterator(ExpressionContext* expCtx,
       _partitionExpr(std::move(partitionExpr)),
       _sortExpr(exprFromSort(_expCtx, sortPattern)),
       _state(IteratorState::kNotInitialized),
-      _cache(std::make_unique<SpillableCache>(_expCtx, tracker)),
+      _cache(_expCtx, tracker),
       _memoryToken(0, &(*tracker)["PartitionIterator"]) {}
+
+PartitionIterator::~PartitionIterator() {
+    const auto& stats = _cache.getSpillingStats();
+    setWindowFieldsCounters.incrementPerSpilling(stats.getSpills(),
+                                                 stats.getSpilledBytes(),
+                                                 stats.getSpilledRecords(),
+                                                 stats.getSpilledDataStorageSize());
+}
 
 optional<Document> PartitionIterator::operator[](int index) {
     auto docDesired = _indexOfCurrentInPartition + index;
@@ -114,8 +123,8 @@ optional<Document> PartitionIterator::operator[](int index) {
     if (docDesired < 0)
         return boost::none;
     // Case 1: Document is in the cache already.
-    if (_cache->isIdInCache(docDesired)) {
-        return _cache->getDocumentById(docDesired);
+    if (_cache.isIdInCache(docDesired)) {
+        return _cache.getDocumentById(docDesired);
     }
 
     // Case 2: Attempting to access index greater than what the cache currently holds. If we've
@@ -125,7 +134,7 @@ optional<Document> PartitionIterator::operator[](int index) {
         _state == IteratorState::kAwaitingAdvanceToEOF) {
         return boost::none;
     }
-    for (int i = _cache->getHighestIndex(); i < docDesired; i++) {
+    for (int i = _cache.getHighestIndex(); i < docDesired; i++) {
         // Pull in document from prior stage.
         getNextDocument();
         // Check whether the next document is available.
@@ -134,7 +143,7 @@ optional<Document> PartitionIterator::operator[](int index) {
             return boost::none;
         }
     }
-    return _cache->getDocumentById(docDesired);
+    return _cache.getDocumentById(docDesired);
 }
 
 void PartitionIterator::releaseExpired() {
@@ -152,7 +161,7 @@ void PartitionIterator::releaseExpired() {
         minIndex = std::min(minIndex, cacheIndex);
     }
 
-    _cache->freeUpTo(minIndex);
+    _cache.freeUpTo(minIndex);
 }
 
 PartitionIterator::AdvanceResult PartitionIterator::advance() {
@@ -165,7 +174,7 @@ PartitionIterator::AdvanceResult PartitionIterator::advance() {
 
 PartitionIterator::AdvanceResult PartitionIterator::advanceInternal() {
     // Check if the next document is in the cache.
-    if ((_indexOfCurrentInPartition + 1) <= _cache->getHighestIndex()) {
+    if ((_indexOfCurrentInPartition + 1) <= _cache.getHighestIndex()) {
         // Same partition, update the current index.
         _indexOfCurrentInPartition++;
         return AdvanceResult::kAdvanced;
@@ -224,7 +233,7 @@ void PartitionIterator::advanceToNextPartition() {
             _nextPartitionDoc != boost::none);
     resetCache();
     // Cache is cleared, and we are moving the _nextPartitionDoc value to different positions.
-    _cache->addDocument(std::move(*_nextPartitionDoc));
+    _cache.addDocument(std::move(*_nextPartitionDoc));
     _nextPartitionDoc.reset();
     _state = IteratorState::kIntraPartition;
     updateNextPartitionStateSize();
@@ -243,12 +252,12 @@ optional<std::pair<int, int>> PartitionIterator::getEndpointsRangeBased(
             5429513,
             str::stream() << "Invalid range: Expected the sortBy field to be a Date, but it was "
                           << base.getType(),
-            base.getType() == BSONType::Date);
+            base.getType() == BSONType::date);
     } else {
         uassert(
             5429413,
             "Invalid range: For windows that involve date or time ranges, a unit must be provided.",
-            base.getType() != BSONType::Date);
+            base.getType() != BSONType::date);
         uassert(
             5429414,
             str::stream() << "Invalid range: Expected the sortBy field to be a number, but it was "
@@ -261,7 +270,7 @@ optional<std::pair<int, int>> PartitionIterator::getEndpointsRangeBased(
                 dateAdd(base.coerceToDate(), *range.unit, delta.coerceToInt(), TimeZone())};
         } else {
             tassert(5429406, "Range-based bounds are specified as a number", delta.numeric());
-            if (base.getType() == BSONType::NumberDouble) {
+            if (base.getType() == BSONType::numberDouble) {
                 // When we compare a double and a Decimal128, we convert the Decimal128 to double
                 // and compare two double values. Since converting a double to Decimal128 is
                 // expensive and since during the comparison we will convert the Decimal128 to
@@ -277,7 +286,7 @@ optional<std::pair<int, int>> PartitionIterator::getEndpointsRangeBased(
     };
     auto hasExpectedType = [&](const Value& v) -> bool {
         if (range.unit) {
-            return v.getType() == BSONType::Date;
+            return v.getType() == BSONType::date;
         } else {
             return v.numeric();
         }
@@ -455,7 +464,7 @@ optional<std::pair<int, int>> PartitionIterator::getEndpointsDocumentBased(
     }
 
     // Valid offsets into the cache are any 'i' such that
-    // '_cache->getDocumentById(_indexOfCurrentInPartition + i)' is valid. We know the cache is
+    // '_cache.getDocumentById(_indexOfCurrentInPartition + i)' is valid. We know the cache is
     // nonempty because it contains the current document.
     int cacheOffsetMin = getMinCachedOffset();
     int cacheOffsetMax = getMaxCachedOffset();
@@ -528,10 +537,10 @@ void PartitionIterator::getNextDocument() {
             _state = IteratorState::kAwaitingAdvanceToNext;
             updateNextPartitionStateSize();
         } else {
-            _cache->addDocument(std::move(doc));
+            _cache.addDocument(std::move(doc));
         }
     } else {
-        _cache->addDocument(std::move(doc));
+        _cache.addDocument(std::move(doc));
         _state = IteratorState::kIntraPartition;
     }
 }

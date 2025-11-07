@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -41,12 +36,18 @@
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_visitor.h"
-#include "mongo/db/pipeline/javascript_execution.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/str.h"
+
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -81,27 +82,17 @@ public:
         return visitor->visit(this);
     }
 
-    // For a given invocation of the user-defined function, this struct holds the results of each
-    // call to emit(). Mark as mutable since it needs to be modified for each call to evaluate().
-    mutable struct EmitState {
-        void emit(Document&& doc) {
-            bytesUsed += doc.getApproximateSize();
-            uassert(31292,
-                    str::stream() << "Size of emitted values exceeds the set size limit of "
-                                  << byteLimit << " bytes",
-                    bytesUsed < byteLimit);
-            emittedObjects.emplace_back(std::move(doc));
-        }
+    const Expression* getThisRef() const {
+        return _thisRef.get();
+    }
 
-        auto reset() {
-            emittedObjects.clear();
-            bytesUsed = 0;
-        }
+    const std::string& getFuncSource() const {
+        return _funcSource;
+    }
 
-        std::vector<Value> emittedObjects;
-        int byteLimit;
-        int bytesUsed;
-    } _emitState;
+    boost::intrusive_ptr<Expression> clone() const final {
+        return ExpressionInternalJsEmit::create(getExpressionContext(), cloneChild(0), _funcSource);
+    }
 
 private:
     ExpressionInternalJsEmit(ExpressionContext* expCtx,

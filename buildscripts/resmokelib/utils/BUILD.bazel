@@ -20,10 +20,24 @@ py_library(
         "otel_utils.py",
         "queue.py",
         "registry.py",
+        "runtime_recorder.py",
+        "self_test_fakes.py",
+        "sharded_cluster_util.py",
     ],
     visibility = ["//visibility:public"],
-    deps = [dependency(
-        "evergreen-py",
-        group = "testing",
-    )],
+    deps = [
+        dependency(
+            "evergreen-py",
+            group = "testing",
+        ),
+        dependency(
+            "boto3",
+            group = "aws",
+        ),
+        dependency(
+            "botocore",
+            group = "aws",
+        ),
+        "//buildscripts/util:download_utils",
+    ],
 )

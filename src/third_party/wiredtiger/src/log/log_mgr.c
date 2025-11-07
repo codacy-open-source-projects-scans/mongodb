@@ -54,7 +54,7 @@ static int
 __logmgr_force_remove(WT_SESSION_IMPL *session, uint32_t lognum)
 {
     WT_CONNECTION_IMPL *conn;
-    WT_LOG *log;
+    WTI_LOG *log;
     WT_SESSION_IMPL *tmp_session;
     uint64_t sleep_usecs, yield_cnt;
 
@@ -105,7 +105,7 @@ __logmgr_get_log_version(WT_VERSION version)
     else if (__wt_version_lt(version, WT_LOG_V5_VERSION))
         return (4);
     else
-        return (WT_LOG_VERSION);
+        return (WTI_LOG_VERSION);
 }
 
 /*
@@ -132,7 +132,7 @@ static int
 __logmgr_version(WT_SESSION_IMPL *session, bool reconfig)
 {
     WT_CONNECTION_IMPL *conn;
-    WT_LOG *log;
+    WTI_LOG *log;
     uint32_t first_record, lognum;
     uint16_t new_version;
     bool downgrade;
@@ -151,9 +151,9 @@ __logmgr_version(WT_SESSION_IMPL *session, bool reconfig)
     new_version = __logmgr_get_log_version(conn->compat_version);
 
     if (new_version > 1)
-        first_record = WT_LOG_END_HEADER + WT_LOG_ALIGN;
+        first_record = WTI_LOG_END_HEADER + WTI_LOG_ALIGN;
     else
-        first_record = WT_LOG_END_HEADER;
+        first_record = WTI_LOG_END_HEADER;
 
     __wt_logmgr_compat_version(session);
 
@@ -167,7 +167,7 @@ __logmgr_version(WT_SESSION_IMPL *session, bool reconfig)
      * Note: downgrade in this context means the new version is not the latest possible version. It
      * does not mean the direction of change from the release we may be running currently.
      */
-    downgrade = new_version != WT_LOG_VERSION;
+    downgrade = new_version != WTI_LOG_VERSION;
 
     /*
      * If we are reconfiguring and at a new version we need to force the log file to advance so that
@@ -222,11 +222,6 @@ __wt_logmgr_config(WT_SESSION_IMPL *session, const char **cfg, bool reconfig)
 
     WT_RET(__wt_config_gets(session, cfg, "log.enabled", &cval));
     enabled = cval.val != 0;
-
-    if (enabled) {
-        WT_ASSERT_ALWAYS(session, !F_ISSET(conn, WT_CONN_LIVE_RESTORE_FS),
-          "FIXME-WT-13792 logging is not currently supported with live restore.");
-    }
 
     /*
      * If we're reconfiguring, enabled must match the already existing setting.
@@ -319,7 +314,7 @@ __wt_logmgr_config(WT_SESSION_IMPL *session, const char **cfg, bool reconfig)
         WT_RET(__wt_config_gets(session, cfg, "log.prealloc_init_count", &cval));
         log_mgr->prealloc = (uint32_t)cval.val;
         log_mgr->prealloc_init_count = (uint32_t)cval.val;
-        WT_ASSERT(session, log_mgr->prealloc > 0);
+        WT_ASSERT(session, __wti_log_is_prealloc_enabled(session));
     }
 
     WT_RET(__wt_config_gets(session, cfg, "log.force_write_wait", &cval));
@@ -388,7 +383,7 @@ __log_remove_once_int(
  *     Determine the number of the earliest log file we must keep.
  */
 static uint32_t
-__compute_min_lognum(WT_SESSION_IMPL *session, WT_LOG *log, uint32_t backup_file)
+__compute_min_lognum(WT_SESSION_IMPL *session, WTI_LOG *log, uint32_t backup_file)
 {
 #ifdef HAVE_DIAGNOSTIC
     struct timespec ts;
@@ -406,7 +401,7 @@ __compute_min_lognum(WT_SESSION_IMPL *session, WT_LOG *log, uint32_t backup_file
     min_lognum = backup_file == 0 ? WT_MIN(log->ckpt_lsn.l.file, log->sync_lsn.l.file) :
                                     WT_MIN(log->ckpt_lsn.l.file, backup_file);
 
-    __wt_readlock(session, &conn->debug_log_retention_lock);
+    __wt_readlock(session, &conn->log_mgr.debug_log_retention_lock);
 
     /* Adjust the number of log files to retain based on debugging options. */
 
@@ -431,7 +426,7 @@ __compute_min_lognum(WT_SESSION_IMPL *session, WT_LOG *log, uint32_t backup_file
             min_lognum = WT_MIN(log->fileid - (conn->debug_log_cnt + 1), min_lognum);
     }
 
-    __wt_readunlock(session, &conn->debug_log_retention_lock);
+    __wt_readunlock(session, &conn->log_mgr.debug_log_retention_lock);
 #ifdef HAVE_DIAGNOSTIC
     __wt_epoch(session, &ts);
     if (min_lognum > WT_INIT_LSN_FILE && min_lognum != log->min_fileid) {
@@ -444,7 +439,15 @@ __compute_min_lognum(WT_SESSION_IMPL *session, WT_LOG *log, uint32_t backup_file
           log->min_fileid));
         log->min_fileid = min_lognum;
     }
+
+    /* Encourage race conditions in log subsystem during database shutdown. */
+    if (FLD_ISSET(conn->timing_stress_flags, WT_TIMING_STRESS_CLOSE_STRESS_LOG) &&
+      F_ISSET_ATOMIC_32(conn, WT_CONN_CLOSING)) {
+        for (int i = 0; i < 50; i++)
+            WT_IGNORE_RET(__wt_log_printf(session, "DEBUG: Stress for concurrency control"));
+    }
 #endif
+
     return (min_lognum);
 }
 
@@ -456,7 +459,7 @@ static int
 __log_remove_once(WT_SESSION_IMPL *session, uint32_t backup_file)
 {
     WT_DECL_RET;
-    WT_LOG *log;
+    WTI_LOG *log;
     WT_LOG_MANAGER *log_mgr;
     uint32_t min_lognum;
     u_int logcount;
@@ -517,10 +520,11 @@ static int
 __log_prealloc_once(WT_SESSION_IMPL *session)
 {
     WT_DECL_RET;
-    WT_LOG *log;
+    WTI_LOG *log;
     WT_LOG_MANAGER *log_mgr;
     u_int i, reccount;
     char **recfiles;
+    uint32_t prep_missed;
 
     log_mgr = &S2C(session)->log_mgr;
     log = log_mgr->log;
@@ -532,16 +536,17 @@ __log_prealloc_once(WT_SESSION_IMPL *session)
      * used yet.
      */
     WT_ERR(
-      __wt_fs_directory_list(session, log_mgr->log_path, WT_LOG_PREPNAME, &recfiles, &reccount));
+      __wt_fs_directory_list(session, log_mgr->log_path, WTI_LOG_PREPNAME, &recfiles, &reccount));
 
     /*
      * Adjust the number of files to pre-allocate if we find that the critical path had to allocate
      * them since we last ran.
      */
-    if (log->prep_missed > 0) {
-        log_mgr->prealloc += log->prep_missed;
+    prep_missed = __wt_atomic_load_uint32_relaxed(&log->prep_missed);
+    if (prep_missed > 0) {
+        log_mgr->prealloc += prep_missed;
         __wt_verbose(session, WT_VERB_LOG, "Missed %" PRIu32 ". Now pre-allocating up to %" PRIu32,
-          log->prep_missed, log_mgr->prealloc);
+          prep_missed, log_mgr->prealloc);
     } else if (reccount > log_mgr->prealloc / 2 &&
       log_mgr->prealloc > log_mgr->prealloc_init_count) {
         /*
@@ -558,7 +563,7 @@ __log_prealloc_once(WT_SESSION_IMPL *session)
      * Allocate up to the maximum number that we just computed and detected.
      */
     for (i = reccount; i < (u_int)log_mgr->prealloc; i++) {
-        WT_ERR(__wti_log_allocfile(session, ++log->prep_fileid, WT_LOG_PREPNAME));
+        WT_ERR(__wti_log_allocfile(session, ++log->prep_fileid, WTI_LOG_PREPNAME));
         WT_STAT_CONN_INCR(session, log_prealloc_files);
     }
     /*
@@ -566,8 +571,7 @@ __log_prealloc_once(WT_SESSION_IMPL *session)
      * allocation is not keeping up, not that we didn't allocate enough. So we don't just want to
      * keep adding in more.
      */
-    log->prep_missed = 0;
-
+    __wt_atomic_store_uint32_relaxed(&log->prep_missed, 0);
     if (0)
 err:
         __wt_err(session, ret, "log pre-alloc server error");
@@ -584,7 +588,7 @@ __wt_log_truncate_files(WT_SESSION_IMPL *session, WT_CURSOR *cursor, bool force)
 {
     WT_CONNECTION_IMPL *conn;
     WT_DECL_RET;
-    WT_LOG *log;
+    WTI_LOG *log;
     uint32_t backup_file;
 
     conn = S2C(session);
@@ -622,7 +626,7 @@ __log_file_server(void *arg)
     WT_CONNECTION_IMPL *conn;
     WT_DECL_RET;
     WT_FH *close_fh;
-    WT_LOG *log;
+    WTI_LOG *log;
     WT_LSN close_end_lsn;
     WT_SESSION_IMPL *session;
     uint32_t filenum;
@@ -654,8 +658,25 @@ __log_file_server(void *arg)
                  * make sure the compiler does not reorder the following two statements.
                  */
                 WT_ASSIGN_LSN(&close_end_lsn, &log->log_close_lsn);
+
+                /*
+                 * Based on the code investigation, there is no reason to use a FULL_BARRIER here.
+                 * We send a message that `log_close_lsn` is read by setting `log_close_fh` to NULL,
+                 * making it available to `__log_newfile` to assign a new one. Therefore, release
+                 * semantics should be sufficient.
+                 *
+                 * For now, this is placed under the TSAN_BUILD macro only, since weakening barriers
+                 * requires extra care.
+                 *
+                 * FIXME-WT-15337: Consider using a release write in production.
+                 */
+#if defined(TSAN_BUILD)
+                __wt_atomic_store_ptr_release(&log->log_close_fh, NULL);
+#else
                 WT_FULL_BARRIER();
-                log->log_close_fh = NULL;
+                __wt_atomic_store_ptr_relaxed(&log->log_close_fh, NULL);
+#endif
+
                 /*
                  * Set the close_end_lsn to the LSN immediately after ours. That is, the beginning
                  * of the next log file. We need to know the LSN file number of our own close in
@@ -670,7 +691,7 @@ __log_file_server(void *arg)
                  * file system may not support truncate: both are OK, it's just more work during
                  * cursor traversal.
                  */
-                if (__wt_atomic_load64(&conn->hot_backup_start) == 0 &&
+                if (__wt_atomic_load_uint64_relaxed(&conn->hot_backup_start) == 0 &&
                   conn->log_mgr.cursors == 0) {
                     WT_WITH_HOTBACKUP_READ_LOCK(session,
                       ret = __wt_ftruncate(session, close_fh, __wt_lsn_offset(&close_end_lsn)),
@@ -726,9 +747,9 @@ void
 __wti_log_wrlsn(WT_SESSION_IMPL *session, int *yield)
 {
     WT_CONNECTION_IMPL *conn;
-    WT_LOG *log;
-    WT_LOGSLOT *coalescing, *slot;
-    WT_LOG_WRLSN_ENTRY written[WT_SLOT_POOL];
+    WTI_LOG *log;
+    WTI_LOGSLOT *coalescing, *slot;
+    WT_LOG_WRLSN_ENTRY written[WTI_SLOT_POOL];
     WT_LSN save_lsn;
     size_t written_i;
     uint32_t i, save_i, slot_last_offset;
@@ -743,12 +764,12 @@ restart:
     i = 0;
 
     /*
-     * Walk the array once saving any slots that are in the WT_LOG_SLOT_WRITTEN state.
+     * Walk the array once saving any slots that are in the WTI_LOG_SLOT_WRITTEN state.
      */
-    while (i < WT_SLOT_POOL) {
+    while (i < WTI_SLOT_POOL) {
         save_i = i;
         slot = &log->slot_pool[i++];
-        if (__wt_atomic_loadiv64(&slot->slot_state) != WT_LOG_SLOT_WRITTEN)
+        if (__wt_atomic_load_int64_v_relaxed(&slot->slot_state) != WTI_LOG_SLOT_WRITTEN)
             continue;
         written[written_i].slot_index = save_i;
         WT_ASSIGN_LSN(&written[written_i++].lsn, &slot->slot_release_lsn);
@@ -790,15 +811,15 @@ restart:
                 /*
                  * If we get here we have a slot to coalesce and free.
                  */
-                __wt_atomic_storeiv64(
-                  &coalescing->slot_last_offset, __wt_atomic_loadi64(&slot->slot_last_offset));
+                __wt_atomic_store_int64_v_relaxed(&coalescing->slot_last_offset,
+                  __wt_atomic_load_int64_relaxed(&slot->slot_last_offset));
                 WT_ASSIGN_LSN(&coalescing->slot_end_lsn, &slot->slot_end_lsn);
                 WT_STAT_CONN_INCR(session, log_slot_coalesced);
                 /*
                  * Copy the flag for later closing.
                  */
-                if (F_ISSET_ATOMIC_16(slot, WT_SLOT_CLOSEFH))
-                    F_SET_ATOMIC_16(coalescing, WT_SLOT_CLOSEFH);
+                if (F_ISSET_ATOMIC_16(slot, WTI_SLOT_CLOSEFH))
+                    F_SET_ATOMIC_16(coalescing, WTI_SLOT_CLOSEFH);
             } else {
                 /*
                  * If this written slot is not the next LSN, try to start coalescing with later
@@ -819,9 +840,11 @@ restart:
                  * LSN refers to the beginning of a real record. The last offset in a slot is kept
                  * so that the checkpoint LSN is close to the end of the record.
                  */
-                slot_last_offset = (uint32_t)__wt_atomic_loadi64(&slot->slot_last_offset);
+                slot_last_offset =
+                  (uint32_t)__wt_atomic_load_int64_relaxed(&slot->slot_last_offset);
                 if (__wt_lsn_offset(&slot->slot_start_lsn) != slot_last_offset)
-                    __wt_atomic_store32(&slot->slot_start_lsn.l.offset, slot_last_offset);
+                    __wt_atomic_store_uint32_relaxed(
+                      &slot->slot_start_lsn.l.offset, slot_last_offset);
                 WT_ASSIGN_LSN(&log->write_start_lsn, &slot->slot_start_lsn);
                 WT_ASSIGN_LSN(&log->write_lsn, &slot->slot_end_lsn);
                 __wt_cond_signal(session, log->log_write_cond);
@@ -829,7 +852,7 @@ restart:
                 /*
                  * Signal the close thread if needed.
                  */
-                if (F_ISSET_ATOMIC_16(slot, WT_SLOT_CLOSEFH))
+                if (F_ISSET_ATOMIC_16(slot, WTI_SLOT_CLOSEFH))
                     __wt_cond_signal(session, conn->log_mgr.file.cond);
             }
             __wti_log_slot_free(session, slot);
@@ -847,7 +870,7 @@ __log_wrlsn_server(void *arg)
 {
     WT_CONNECTION_IMPL *conn;
     WT_DECL_RET;
-    WT_LOG *log;
+    WTI_LOG *log;
     WT_LOG_MANAGER *log_mgr;
     WT_LSN prev;
     WT_SESSION_IMPL *session;
@@ -884,9 +907,12 @@ __log_wrlsn_server(void *arg)
     }
     /*
      * On close we need to do this one more time because there could be straggling log writes that
-     * need to be written.
+     * need to be written. It is possible to return EBUSY due to the database shutting down.
+     * Therefore loop until we finish the log write.
      */
-    WT_ERR(__wti_log_force_write(session, true, NULL));
+    do {
+        WT_ERR_ERROR_OK(__wti_log_force_write(session, true, NULL), EBUSY, true);
+    } while (ret == EBUSY);
     __wti_log_wrlsn(session, NULL);
     if (0) {
 err:
@@ -904,7 +930,7 @@ __log_server(void *arg)
 {
     WT_CONNECTION_IMPL *conn;
     WT_DECL_RET;
-    WT_LOG *log;
+    WTI_LOG *log;
     WT_LOG_MANAGER *log_mgr;
     WT_SESSION_IMPL *session;
     uint64_t force_write_time_start, force_write_timediff;
@@ -955,7 +981,7 @@ __log_server(void *arg)
             /*
              * Perform log pre-allocation.
              */
-            if (log_mgr->prealloc > 0) {
+            if (__wti_log_is_prealloc_enabled(session)) {
                 /*
                  * Log file pre-allocation is disabled when a hot backup cursor is open because we
                  * have agreed not to rename or remove any files in the database directory.
@@ -986,6 +1012,14 @@ __log_server(void *arg)
         force_write_timediff = WT_CLOCKDIFF_MS(time_stop, force_write_time_start);
     }
 
+    /*
+     * On close, force out buffered writes to move the write_lsn forward. The write_lsn needs to be
+     * updated to avoid hangs from the wrlsn thread. It is possible to return EBUSY due to the
+     * database shutting down. Therefore loop until we finish the log write.
+     */
+    do {
+        WT_ERR_ERROR_OK(__wti_log_force_write(session, false, &did_work), EBUSY, true);
+    } while (ret == EBUSY);
     if (0) {
 err:
         WT_IGNORE_RET(__wt_panic(session, ret, "log server error"));
@@ -1001,7 +1035,7 @@ int
 __wt_logmgr_create(WT_SESSION_IMPL *session)
 {
     WT_CONNECTION_IMPL *conn;
-    WT_LOG *log;
+    WTI_LOG *log;
     WT_LOG_MANAGER *log_mgr;
     uint64_t now;
 
@@ -1017,7 +1051,7 @@ __wt_logmgr_create(WT_SESSION_IMPL *session)
 
     F_SET(log_mgr, WT_LOG_ENABLED);
     /*
-     * Logging is on, allocate the WT_LOG structure and open the log file.
+     * Logging is on, allocate the WTI_LOG structure and open the log file.
      */
     WT_RET(__wt_calloc_one(session, &log_mgr->log));
     log = log_mgr->log;

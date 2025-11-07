@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/base/string_data_comparator.h"
@@ -44,8 +38,17 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/flat_bson.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 
+#include <cstdint>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+
+MONGO_MOD_PUBLIC;
 namespace mongo::timeseries::bucket_catalog {
 
 /**
@@ -114,7 +117,6 @@ std::vector<BSONObj> generateReopeningPipeline(const Date_t& time,
 void handleDirectWrite(RecoveryUnit&,
                        BucketCatalog&,
                        const TimeseriesOptions& options,
-                       const StringDataComparator* comparator,
                        const UUID& collectionUUID,
                        const BSONObj& bucket);
 }  // namespace mongo::timeseries::bucket_catalog

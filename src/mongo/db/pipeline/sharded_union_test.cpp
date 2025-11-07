@@ -27,19 +27,10 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
+
 #include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <system_error>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -51,9 +42,14 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/client.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
+#include "mongo/db/exec/agg/queue_stage.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -71,33 +67,40 @@
 #include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
+#include "mongo/db/versioning_protocol/shard_version_factory.h"
+#include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/index_version.h"
 #include "mongo/s/query/exec/sharded_agg_test_fixture.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/s/shard_version.h"
-#include "mongo/s/shard_version_factory.h"
-#include "mongo/s/stale_exception.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/uuid.h"
 
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
+
 namespace mongo {
 namespace {
 
 // Use this new name to register these tests under their own unit test suite.
 using ShardedUnionTest = ShardedAggTestFixture;
+
+boost::intrusive_ptr<exec::agg::Stage> makeQueueStage(
+    boost::intrusive_ptr<ExpressionContext> expCtx) {
+    return exec::agg::buildStage(DocumentSourceQueue::create(expCtx));
+}
 
 TEST_F(ShardedUnionTest, RetriesSubPipelineOnNetworkError) {
     // Sharded by {_id: 1}, [MinKey, 0) on shard "0", [0, MaxKey) on shard "1".
@@ -106,21 +109,22 @@ TEST_F(ShardedUnionTest, RetriesSubPipelineOnNetworkError) {
 
     auto pipeline = Pipeline::create(
         {DocumentSourceMatch::create(fromjson("{_id: 'unionResult'}"), expCtx())}, expCtx());
-    auto unionWith = DocumentSourceUnionWith(expCtx(), std::move(pipeline));
+    auto unionWith = exec::agg::buildStage(
+        make_intrusive<DocumentSourceUnionWith>(expCtx(), std::move(pipeline)));
     expCtx()->setMongoProcessInterface(std::make_shared<ShardServerProcessInterface>(executor()));
-    auto queue = DocumentSourceQueue::create(expCtx());
-    unionWith.setSource(queue.get());
+    auto queue = makeQueueStage(expCtx());
+    unionWith->setSource(queue.get());
 
     auto expectedResult = Document{{"_id"_sd, "unionResult"_sd}};
 
     auto future = launchAsync([&] {
-        auto next = unionWith.getNext();
+        auto next = unionWith->getNext();
         ASSERT_TRUE(next.isAdvanced());
         auto result = next.releaseDocument();
         ASSERT_DOCUMENT_EQ(result, expectedResult);
-        ASSERT(unionWith.getNext().isEOF());
-        ASSERT(unionWith.getNext().isEOF());
-        ASSERT(unionWith.getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
     });
 
     onCommand([&](const executor::RemoteCommandRequest& request) {
@@ -135,7 +139,7 @@ TEST_F(ShardedUnionTest, RetriesSubPipelineOnNetworkError) {
 
     future.default_timed_get();
 
-    unionWith.dispose();
+    unionWith->dispose();
 }
 
 TEST_F(ShardedUnionTest, ForwardsMaxTimeMSToRemotes) {
@@ -144,10 +148,11 @@ TEST_F(ShardedUnionTest, ForwardsMaxTimeMSToRemotes) {
     loadRoutingTableWithTwoChunksAndTwoShards(kTestAggregateNss);
 
     auto pipeline = Pipeline::create({}, expCtx());
-    auto unionWith = DocumentSourceUnionWith(expCtx(), std::move(pipeline));
+    auto unionWith = exec::agg::buildStage(
+        make_intrusive<DocumentSourceUnionWith>(expCtx(), std::move(pipeline)));
     expCtx()->setMongoProcessInterface(std::make_shared<ShardServerProcessInterface>(executor()));
-    auto queue = DocumentSourceQueue::create(expCtx());
-    unionWith.setSource(queue.get());
+    auto queue = makeQueueStage(expCtx());
+    unionWith->setSource(queue.get());
 
     auto expectedResult = Document{{"_id"_sd, BSONNULL}, {"count"_sd, 1}};
 
@@ -156,19 +161,19 @@ TEST_F(ShardedUnionTest, ForwardsMaxTimeMSToRemotes) {
 
     auto future = launchAsync([&] {
         // Expect one result from each host.
-        auto next = unionWith.getNext();
+        auto next = unionWith->getNext();
         ASSERT_TRUE(next.isAdvanced());
         auto result = next.releaseDocument();
         ASSERT_DOCUMENT_EQ(result, expectedResult);
 
-        next = unionWith.getNext();
+        next = unionWith->getNext();
         ASSERT_TRUE(next.isAdvanced());
         result = next.releaseDocument();
         ASSERT_DOCUMENT_EQ(result, expectedResult);
 
-        ASSERT(unionWith.getNext().isEOF());
-        ASSERT(unionWith.getNext().isEOF());
-        ASSERT(unionWith.getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
     });
 
     const auto assertHasExpectedMaxTimeMSAndReturnResult =
@@ -184,7 +189,7 @@ TEST_F(ShardedUnionTest, ForwardsMaxTimeMSToRemotes) {
 
     future.default_timed_get();
 
-    unionWith.dispose();
+    unionWith->dispose();
 }
 
 TEST_F(ShardedUnionTest, RetriesSubPipelineOnStaleConfigError) {
@@ -194,21 +199,22 @@ TEST_F(ShardedUnionTest, RetriesSubPipelineOnStaleConfigError) {
 
     auto pipeline = Pipeline::create(
         {DocumentSourceMatch::create(fromjson("{_id: 'unionResult'}"), expCtx())}, expCtx());
-    auto unionWith = DocumentSourceUnionWith(expCtx(), std::move(pipeline));
+    auto unionWith = exec::agg::buildStage(
+        make_intrusive<DocumentSourceUnionWith>(expCtx(), std::move(pipeline)));
     expCtx()->setMongoProcessInterface(std::make_shared<ShardServerProcessInterface>(executor()));
-    auto queue = DocumentSourceQueue::create(expCtx());
-    unionWith.setSource(queue.get());
+    auto queue = makeQueueStage(expCtx());
+    unionWith->setSource(queue.get());
 
     auto expectedResult = Document{{"_id"_sd, "unionResult"_sd}};
 
     auto future = launchAsync([&] {
-        auto next = unionWith.getNext();
+        auto next = unionWith->getNext();
         ASSERT_TRUE(next.isAdvanced());
         auto result = next.releaseDocument();
         ASSERT_DOCUMENT_EQ(result, expectedResult);
-        ASSERT(unionWith.getNext().isEOF());
-        ASSERT(unionWith.getNext().isEOF());
-        ASSERT(unionWith.getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
     });
 
     // Mock out one error response, then expect a refresh of the sharding catalog for that
@@ -216,14 +222,12 @@ TEST_F(ShardedUnionTest, RetriesSubPipelineOnStaleConfigError) {
     onCommand([&](const executor::RemoteCommandRequest& request) {
         OID epoch{OID::gen()};
         Timestamp timestamp{1, 0};
-        return createErrorCursorResponse(
-            Status{StaleConfigInfo(
-                       kTestAggregateNss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none,
-                       ShardId{"0"}),
-                   "Mock error: shard version mismatch"});
+        return createErrorCursorResponse(Status{
+            StaleConfigInfo(kTestAggregateNss,
+                            ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0})),
+                            boost::none,
+                            ShardId{"0"}),
+            "Mock error: shard version mismatch"});
     });
 
     // Mock the expected config server queries.
@@ -251,9 +255,6 @@ TEST_F(ShardedUnionTest, RetriesSubPipelineOnStaleConfigError) {
     expectCollectionAndChunksAggregation(
         kTestAggregateNss, epoch, timestamp, uuid, shardKeyPattern, {chunk1, chunk2});
 
-    expectCollectionAndIndexesAggregation(
-        kTestAggregateNss, epoch, timestamp, uuid, shardKeyPattern, boost::none, {});
-
     // That error should be retried, but only the one on that shard.
     onCommand([&](const executor::RemoteCommandRequest& request) {
         return CursorResponse(kTestAggregateNss, CursorId{0}, {expectedResult.toBson()})
@@ -262,7 +263,7 @@ TEST_F(ShardedUnionTest, RetriesSubPipelineOnStaleConfigError) {
 
     future.default_timed_get();
 
-    unionWith.dispose();
+    unionWith->dispose();
 }
 
 TEST_F(ShardedUnionTest, CorrectlySplitsSubPipelineIfRefreshedDistributionRequiresIt) {
@@ -279,23 +280,25 @@ TEST_F(ShardedUnionTest, CorrectlySplitsSubPipelineIfRefreshedDistributionRequir
         {DocumentSourceMatch::create(fromjson("{_id: {$gte: 0}}"), expCtx()),
          DocumentSourceGroup::create(expCtx(),
                                      ExpressionConstant::create(expCtx().get(), Value(BSONNULL)),
-                                     {countStatement})},
+                                     {countStatement},
+                                     false)},
         expCtx().get());
-    auto unionWith = DocumentSourceUnionWith(expCtx(), std::move(pipeline));
+    auto unionWith = exec::agg::buildStage(
+        make_intrusive<DocumentSourceUnionWith>(expCtx(), std::move(pipeline)));
     expCtx()->setMongoProcessInterface(std::make_shared<ShardServerProcessInterface>(executor()));
-    auto queue = DocumentSourceQueue::create(expCtx());
-    unionWith.setSource(queue.get());
+    auto queue = makeQueueStage(expCtx());
+    unionWith->setSource(queue.get());
 
     auto expectedResult = Document{{"_id"_sd, BSONNULL}, {"count"_sd, 1}};
 
     auto future = launchAsync([&] {
-        auto next = unionWith.getNext();
+        auto next = unionWith->getNext();
         ASSERT_TRUE(next.isAdvanced());
         auto result = next.releaseDocument();
         ASSERT_DOCUMENT_EQ(result, expectedResult);
-        ASSERT(unionWith.getNext().isEOF());
-        ASSERT(unionWith.getNext().isEOF());
-        ASSERT(unionWith.getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
     });
 
     // With the $match at the front of the sub-pipeline, we should be able to target the request to
@@ -306,14 +309,12 @@ TEST_F(ShardedUnionTest, CorrectlySplitsSubPipelineIfRefreshedDistributionRequir
 
         OID epoch{OID::gen()};
         Timestamp timestamp{1, 0};
-        return createErrorCursorResponse(
-            Status{StaleConfigInfo(
-                       kTestAggregateNss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none,
-                       ShardId{"0"}),
-                   "Mock error: shard version mismatch"});
+        return createErrorCursorResponse(Status{
+            StaleConfigInfo(kTestAggregateNss,
+                            ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0})),
+                            boost::none,
+                            ShardId{"0"}),
+            "Mock error: shard version mismatch"});
     });
 
     // Mock the expected config server queries. Update the distribution as if a chunk [0, 10] was
@@ -346,9 +347,6 @@ TEST_F(ShardedUnionTest, CorrectlySplitsSubPipelineIfRefreshedDistributionRequir
     expectCollectionAndChunksAggregation(
         kTestAggregateNss, epoch, timestamp, uuid, shardKeyPattern, {chunk1, chunk2, chunk3});
 
-    expectCollectionAndIndexesAggregation(
-        kTestAggregateNss, epoch, timestamp, uuid, shardKeyPattern, boost::none, {});
-
     // That error should be retried, this time two shards.
     onCommand([&](const executor::RemoteCommandRequest& request) {
         return CursorResponse(kTestAggregateNss,
@@ -365,7 +363,7 @@ TEST_F(ShardedUnionTest, CorrectlySplitsSubPipelineIfRefreshedDistributionRequir
 
     future.default_timed_get();
 
-    unionWith.dispose();
+    unionWith->dispose();
 }
 
 TEST_F(ShardedUnionTest, AvoidsSplittingSubPipelineIfRefreshedDistributionDoesNotRequire) {
@@ -381,23 +379,25 @@ TEST_F(ShardedUnionTest, AvoidsSplittingSubPipelineIfRefreshedDistributionDoesNo
     auto pipeline = Pipeline::create(
         {DocumentSourceGroup::create(expCtx(),
                                      ExpressionConstant::create(expCtx().get(), Value(BSONNULL)),
-                                     {countStatement})},
+                                     {countStatement},
+                                     false)},
         expCtx().get());
-    auto unionWith = DocumentSourceUnionWith(expCtx(), std::move(pipeline));
+    auto unionWith = exec::agg::buildStage(
+        make_intrusive<DocumentSourceUnionWith>(expCtx(), std::move(pipeline)));
     expCtx()->setMongoProcessInterface(std::make_shared<ShardServerProcessInterface>(executor()));
-    auto queue = DocumentSourceQueue::create(expCtx());
-    unionWith.setSource(queue.get());
+    auto queue = makeQueueStage(expCtx());
+    unionWith->setSource(queue.get());
 
     auto expectedResult = Document{{"_id"_sd, BSONNULL}, {"count"_sd, 1}};
 
     auto future = launchAsync([&] {
-        auto next = unionWith.getNext();
+        auto next = unionWith->getNext();
         ASSERT_TRUE(next.isAdvanced());
         auto result = next.releaseDocument();
         ASSERT_DOCUMENT_EQ(result, expectedResult);
-        ASSERT(unionWith.getNext().isEOF());
-        ASSERT(unionWith.getNext().isEOF());
-        ASSERT(unionWith.getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
     });
 
     // Mock out an error response from both shards, then expect a refresh of the sharding catalog
@@ -406,24 +406,20 @@ TEST_F(ShardedUnionTest, AvoidsSplittingSubPipelineIfRefreshedDistributionDoesNo
     Timestamp timestamp{1, 1};
 
     onCommand([&](const executor::RemoteCommandRequest& request) {
-        return createErrorCursorResponse(
-            Status{StaleConfigInfo(
-                       kTestAggregateNss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none,
-                       ShardId{"0"}),
-                   "Mock error: shard version mismatch"});
+        return createErrorCursorResponse(Status{
+            StaleConfigInfo(kTestAggregateNss,
+                            ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0})),
+                            boost::none,
+                            ShardId{"0"}),
+            "Mock error: shard version mismatch"});
     });
     onCommand([&](const executor::RemoteCommandRequest& request) {
-        return createErrorCursorResponse(
-            Status{StaleConfigInfo(
-                       kTestAggregateNss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none,
-                       ShardId{"0"}),
-                   "Mock error: shard version mismatch"});
+        return createErrorCursorResponse(Status{
+            StaleConfigInfo(kTestAggregateNss,
+                            ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0})),
+                            boost::none,
+                            ShardId{"0"}),
+            "Mock error: shard version mismatch"});
     });
 
     // Mock the expected config server queries. Update the distribution so that all chunks are on
@@ -441,9 +437,6 @@ TEST_F(ShardedUnionTest, AvoidsSplittingSubPipelineIfRefreshedDistributionDoesNo
     expectCollectionAndChunksAggregation(
         kTestAggregateNss, epoch, timestamp, uuid, shardKeyPattern, {chunk1});
 
-    expectCollectionAndIndexesAggregation(
-        kTestAggregateNss, epoch, timestamp, uuid, shardKeyPattern, boost::none, {});
-
     // That error should be retried, this time targetting only one shard.
     onCommand([&](const executor::RemoteCommandRequest& request) {
         ASSERT_EQ(request.target, HostAndPort(shards[0].getHost())) << request;
@@ -453,7 +446,7 @@ TEST_F(ShardedUnionTest, AvoidsSplittingSubPipelineIfRefreshedDistributionDoesNo
 
     future.default_timed_get();
 
-    unionWith.dispose();
+    unionWith->dispose();
 }
 
 TEST_F(ShardedUnionTest, IncorporatesViewDefinitionAndRetriesWhenViewErrorReceived) {
@@ -465,26 +458,27 @@ TEST_F(ShardedUnionTest, IncorporatesViewDefinitionAndRetriesWhenViewErrorReceiv
         expCtx()->getNamespaceString().db_forTest(), "view");
     // Mock out the view namespace as emtpy for now - this is what it would be when parsing in a
     // sharded cluster - only later would we learn the actual view definition.
-    expCtx()->setResolvedNamespaces(StringMap<ResolvedNamespace>{
-        {nsToUnionWith.coll().toString(), {nsToUnionWith, std::vector<BSONObj>{}}}});
+    expCtx()->setResolvedNamespaces(
+        ResolvedNamespaceMap{{nsToUnionWith, {nsToUnionWith, std::vector<BSONObj>{}}}});
     auto bson = BSON("$unionWith" << nsToUnionWith.coll());
     auto unionWith = DocumentSourceUnionWith::createFromBson(bson.firstElement(), expCtx());
+    auto unionWithStage = exec::agg::buildStage(unionWith);
     expCtx()->setMongoProcessInterface(std::make_shared<ShardServerProcessInterface>(executor()));
-    auto queue = DocumentSourceQueue::create(expCtx());
-    unionWith->setSource(queue.get());
+    auto queue = makeQueueStage(expCtx());
+    unionWithStage->setSource(queue.get());
 
     NamespaceString expectedBackingNs(kTestAggregateNss);
     auto expectedResult = Document{{"_id"_sd, "unionResult"_sd}};
     auto expectToBeFiltered = Document{{"_id"_sd, "notTheUnionResult"_sd}};
 
     auto future = launchAsync([&] {
-        auto next = unionWith->getNext();
+        auto next = unionWithStage->getNext();
         ASSERT_TRUE(next.isAdvanced());
         auto result = next.releaseDocument();
         ASSERT_DOCUMENT_EQ(result, expectedResult);
-        ASSERT(unionWith->getNext().isEOF());
-        ASSERT(unionWith->getNext().isEOF());
-        ASSERT(unionWith->getNext().isEOF());
+        ASSERT(unionWithStage->getNext().isEOF());
+        ASSERT(unionWithStage->getNext().isEOF());
+        ASSERT(unionWithStage->getNext().isEOF());
     });
 
     // Mock the expected config server queries.
@@ -511,9 +505,6 @@ TEST_F(ShardedUnionTest, IncorporatesViewDefinitionAndRetriesWhenViewErrorReceiv
 
     expectCollectionAndChunksAggregation(
         kTestAggregateNss, epoch, timestamp, uuid, shardKeyPattern, {chunk1, chunk2});
-
-    expectCollectionAndIndexesAggregation(
-        kTestAggregateNss, epoch, timestamp, uuid, shardKeyPattern, boost::none, {});
 
     // Mock out the sharded view error responses from both shards.
     std::vector<BSONObj> viewPipeline = {fromjson("{$group: {_id: '$groupKey'}}"),
@@ -548,7 +539,7 @@ TEST_F(ShardedUnionTest, IncorporatesViewDefinitionAndRetriesWhenViewErrorReceiv
 
     future.default_timed_get();
 
-    unionWith->dispose();
+    unionWithStage->dispose();
 }
 
 TEST_F(ShardedUnionTest, ForwardsReadConcernToRemotes) {
@@ -564,12 +555,14 @@ TEST_F(ShardedUnionTest, ForwardsReadConcernToRemotes) {
     auto pipeline = Pipeline::create(
         {DocumentSourceGroup::create(expCtx(),
                                      ExpressionConstant::create(expCtx().get(), Value(BSONNULL)),
-                                     {countStatement})},
+                                     {countStatement},
+                                     false)},
         expCtx().get());
-    auto unionWith = DocumentSourceUnionWith(expCtx(), std::move(pipeline));
+    auto unionWith = exec::agg::buildStage(
+        make_intrusive<DocumentSourceUnionWith>(expCtx(), std::move(pipeline)));
     expCtx()->setMongoProcessInterface(std::make_shared<ShardServerProcessInterface>(executor()));
-    auto queue = DocumentSourceQueue::create(expCtx());
-    unionWith.setSource(queue.get());
+    auto queue = makeQueueStage(expCtx());
+    unionWith->setSource(queue.get());
 
     auto expectedResult = Document{{"_id"_sd, BSONNULL}, {"count"_sd, 2}};
 
@@ -579,13 +572,13 @@ TEST_F(ShardedUnionTest, ForwardsReadConcernToRemotes) {
         repl::ReadConcernArgs::get(expCtx()->getOperationContext()) = readConcernArgs;
     }
     auto future = launchAsync([&] {
-        auto next = unionWith.getNext();
+        auto next = unionWith->getNext();
         ASSERT_TRUE(next.isAdvanced());
         auto result = next.releaseDocument();
         ASSERT_DOCUMENT_EQ(result, expectedResult);
-        ASSERT(unionWith.getNext().isEOF());
-        ASSERT(unionWith.getNext().isEOF());
-        ASSERT(unionWith.getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
+        ASSERT(unionWith->getNext().isEOF());
     });
 
     const auto assertHasExpectedReadConcernAndReturnResult =
@@ -604,7 +597,7 @@ TEST_F(ShardedUnionTest, ForwardsReadConcernToRemotes) {
 
     future.default_timed_get();
 
-    unionWith.dispose();
+    unionWith->dispose();
 }
 }  // namespace
 }  // namespace mongo

@@ -29,22 +29,6 @@
 
 #include "mongo/db/commands/query_cmd/mr_common.h"
 
-#include <algorithm>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <fmt/format.h>
-#include <set>
-#include <string>
-#include <tuple>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -54,10 +38,10 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/query_cmd/map_reduce_javascript_code.h"
 #include "mongo/db/exec/inclusion_projection_executor.h"
+#include "mongo/db/local_catalog/document_validation.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/accumulator_js_reduce.h"
@@ -76,14 +60,29 @@
 #include "mongo/db/pipeline/expression_function.h"
 #include "mongo/db/pipeline/expression_js_emit.h"
 #include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/pipeline/transformer_interface.h"
-#include "mongo/db/query/projection_policies.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_policies.h"
 #include "mongo/db/query/util/make_data_structure.h"
-#include "mongo/s/chunk_version.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <set>
+#include <string>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
 
 namespace mongo::map_reduce_common {
 
@@ -91,7 +90,6 @@ namespace {
 using namespace std::string_literals;
 
 Status interpretTranslationError(DBException* ex, const MapReduceCommandRequest& parsedMr) {
-    using namespace fmt::literals;
 
     auto status = ex->toStatus();
     auto outOptions = parsedMr.getOutOptions();
@@ -105,8 +103,8 @@ Status interpretTranslationError(DBException* ex, const MapReduceCommandRequest&
     std::string error;
     switch (static_cast<int>(ex->code())) {
         case ErrorCodes::InvalidNamespace:
-            error =
-                "Invalid output namespace {} for MapReduce"_format(outNss.toStringForErrorMsg());
+            error = fmt::format("Invalid output namespace {} for MapReduce",
+                                outNss.toStringForErrorMsg());
             break;
         case 15976:
             error = "The mapReduce sort option must have at least one sort key";
@@ -121,12 +119,13 @@ Status interpretTranslationError(DBException* ex, const MapReduceCommandRequest&
             break;
         case 17385:
         case 31319:
-            error = "Can't output mapReduce results to special collection {}"_format(outNss.coll());
+            error = fmt::format("Can't output mapReduce results to special collection {}",
+                                outNss.coll());
             break;
         case 31320:
         case 31321:
-            error = "Can't output mapReduce results to internal DB {}"_format(
-                outNss.dbName().toStringForErrorMsg());
+            error = fmt::format("Can't output mapReduce results to internal DB {}",
+                                outNss.dbName().toStringForErrorMsg());
             break;
         default:
             // Prepend MapReduce context in the event of an unknown exception.
@@ -161,7 +160,7 @@ auto translateReduce(boost::intrusive_ptr<ExpressionContext> expCtx, std::string
     auto initializer = ExpressionArray::create(expCtx.get(), {});
     auto argument = ExpressionFieldPath::parse(expCtx.get(), "$emits", expCtx->variablesParseState);
     auto reduceFactory = [expCtx, funcSource = std::move(code)]() {
-        return AccumulatorInternalJsReduce::create(expCtx.get(), funcSource);
+        return make_intrusive<AccumulatorInternalJsReduce>(expCtx.get(), funcSource);
     };
     AccumulationStatement jsReduce("value",
                                    AccumulationExpression(std::move(initializer),
@@ -173,6 +172,7 @@ auto translateReduce(boost::intrusive_ptr<ExpressionContext> expCtx, std::string
     return DocumentSourceGroup::create(expCtx,
                                        std::move(groupKeyExpression),
                                        makeVector<AccumulationStatement>(std::move(jsReduce)),
+                                       false,
                                        boost::none);
 }
 
@@ -231,9 +231,8 @@ auto translateOutReduce(boost::intrusive_ptr<ExpressionContext> expCtx,
     // at the moment so we reparse here. Note that the reduce function signature expects 2
     // arguments, the first being the key and the second being the array of values to reduce.
     auto reduceObj =
-        BSON("args" << BSON_ARRAY("$_id" << BSON_ARRAY("$value"
-                                                       << "$$new.value"))
-                    << "body" << reduceCode << "lang" << ExpressionFunction::kJavaScript);
+        BSON("args" << BSON_ARRAY("$_id" << BSON_ARRAY("$value" << "$$new.value")) << "body"
+                    << reduceCode << "lang" << ExpressionFunction::kJavaScript);
 
     auto reduceSpec = BSON(DocumentSourceProject::kStageName << BSON(
                                "value" << BSON(ExpressionFunction::kExpressionName << reduceObj)));
@@ -241,9 +240,8 @@ auto translateOutReduce(boost::intrusive_ptr<ExpressionContext> expCtx,
 
     // Build finalize $project stage if given.
     if (finalizeCode && finalizeCode->hasCode()) {
-        auto finalizeObj = BSON("args" << BSON_ARRAY("$_id"
-                                                     << "$value")
-                                       << "body" << finalizeCode->getCode().value() << "lang"
+        auto finalizeObj = BSON("args" << BSON_ARRAY("$_id" << "$value") << "body"
+                                       << finalizeCode->getCode().value() << "lang"
                                        << ExpressionFunction::kJavaScript);
         auto finalizeSpec =
             BSON(DocumentSourceProject::kStageName
@@ -308,10 +306,10 @@ OutputOptions parseOutputOptions(const DatabaseName& dbName, const BSONObj& cmdO
     OutputOptions outputOptions;
 
     outputOptions.outNonAtomic = true;
-    if (cmdObj["out"].type() == String) {
+    if (cmdObj["out"].type() == BSONType::string) {
         outputOptions.collectionName = cmdObj["out"].String();
         outputOptions.outType = OutputType::Replace;
-    } else if (cmdObj["out"].type() == Object) {
+    } else if (cmdObj["out"].type() == BSONType::object) {
         BSONObj o = cmdObj["out"].embeddedObject();
 
         if (o.hasElement("normal")) {
@@ -387,7 +385,7 @@ Status checkAuthForMapReduce(const BasicCommand* commandTemplate,
 
     auto mapReduceField = cmdObj.firstElement();
     const auto emptyNss =
-        mapReduceField.type() == mongo::String && mapReduceField.valueStringData().empty();
+        mapReduceField.type() == BSONType::string && mapReduceField.valueStringData().empty();
     uassert(ErrorCodes::InvalidNamespace,
             str::stream() << "Invalid input namespace "
                           << inputResource.dbNameToMatch().toStringForErrorMsg() << "."
@@ -431,15 +429,15 @@ Status checkAuthForMapReduce(const BasicCommand* commandTemplate,
 bool mrSupportsWriteConcern(const BSONObj& cmd) {
     if (!cmd.hasField("out")) {
         return false;
-    } else if (cmd["out"].type() == Object && cmd["out"].Obj().hasField("inline")) {
+    } else if (cmd["out"].type() == BSONType::object && cmd["out"].Obj().hasField("inline")) {
         return false;
     } else {
         return true;
     }
 }
 
-std::unique_ptr<Pipeline, PipelineDeleter> translateFromMR(
-    MapReduceCommandRequest parsedMr, boost::intrusive_ptr<ExpressionContext> expCtx) {
+std::unique_ptr<Pipeline> translateFromMR(MapReduceCommandRequest parsedMr,
+                                          boost::intrusive_ptr<ExpressionContext> expCtx) {
     const auto outNss = parsedMr.getOutOptions().getDatabaseName()
         ? (NamespaceStringUtil::deserialize(parsedMr.getDbName().tenantId(),
                                             *parsedMr.getOutOptions().getDatabaseName(),
@@ -483,7 +481,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> translateFromMR(
                              parsedMr.getReduce().getCode(),
                              parsedMr.getFinalize())),
             expCtx);
-        pipeline->optimizePipeline();
+        pipeline_optimization::optimizePipeline(*pipeline);
         return pipeline;
     } catch (DBException& ex) {
         uassertStatusOK(interpretTranslationError(&ex, parsedMr));

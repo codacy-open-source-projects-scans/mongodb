@@ -28,16 +28,13 @@ filters:
       - 10gen/query-execution-sbe
   - "generate_icu_init_cpp.py":
     approvers:
-      - 10gen/query-execution-collation
+      - 10gen/query-execution
   - "icu*":
     approvers:
-      - 10gen/query-execution-collation
+      - 10gen/query-execution
   - "pcre*":
     approvers:
-      - 10gen/query-execution-regex
-  - "regex_util*":
-    approvers:
-      - 10gen/query-execution-regex
+      - 10gen/query-execution
   - "log_with_sampling*":
     approvers:
       - 10gen/query-integration-observability
@@ -46,16 +43,22 @@ filters:
       - 10gen/query-optimization
   - "latency_distribution*":
     approvers:
-      - 10gen/server-workload-scheduling
+      - 10gen/server-workload-resilience
   - "tcmalloc*":
     approvers:
-      - 10gen/server-workload-scheduling
+      - 10gen/server-workload-resilience
   - "log_and_backoff*":
     approvers:
       - 10gen/server-networking-and-observability
   - "read_through_cache*":
     approvers:
-      - 10gen/server-catalog-and-routing
+      - 10gen/server-catalog-and-routing-routing-and-topology
   - "version_constants_gen.py":
     approvers:
       - 10gen/devprod-build
+  - "moving_average*":
+    approvers:
+      - 10gen/server-networking-and-observability
+  - "observable_mutex*":
+    approvers:
+      - 10gen/server-networking-and-observability

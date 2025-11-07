@@ -18,12 +18,20 @@ error_categories:
   - ConnectionFatalMessageParseError
   - ExceededTimeLimitError
   - SnapshotError
+  # isVoteAbortError() includes all error codes that a participant might return in response to the
+  # prepare command sent by the coordinator during the two-phase commit protocol.
+  # These error codes indicate that the coordinator should choose to abort the transaction.
   - VoteAbortError
+  # isTwoPhaseDecisionAckError() includes all error codes that a participant may return in response
+  # to the decision (abort/commit) sent by the coordinator during the two-phase commit protocol.
+  # These codes indicate the participant has seen the decision before and forgotten the transaction,
+  # so the coordinator treats them as successful acknowledgment.
+  - TwoPhaseDecisionAckError
   - NonResumableChangeStreamError
   - RetriableError
   # isCloseConnectionError() includes all codes that indicate that it is no longer safe or
   # desirable to maintain a connection with the client. The server will close the connection to
-  # get the client to through server selection again.
+  # get the client to go through server selection again.
   - CloseConnectionError
   - VersionedAPIError
   - ValidationError
@@ -210,7 +218,12 @@ error_codes:
   - {code: 140, name: InvalidSSLConfiguration}
   - {code: 141, name: SSLHandshakeFailed}
   - {code: 142, name: JSUncatchableError}
-  - {code: 143, name: CursorInUse}
+  - {
+      code: 143,
+      name: CursorInUse,
+      extra: CursorInUseInfo,
+      extraIsOptional: true,
+    }
   - {code: 144, name: IncompatibleCatalogManager}
   - {code: 145, name: PooledConnectionsDropped}
   - {code: 146, name: ExceededMemoryLimit}
@@ -223,13 +236,16 @@ error_codes:
   - {code: 149, name: NoConfigPrimary}
   # This error code is obsolete as of version 6.0 and no new places where it is thrown should be
   # added. Use StaleConfig.
+  # Note: StaleEpochInfo is currently optional, but will be required in v9.1. Always include a
+  # StaleEpochInfo when throwing a StaleEpoch to ensure forward compatibility.
   - {
       code: 150,
       name: StaleEpoch,
       categories: [StaleShardVersionError, NeedRetargettingError],
+      # TODO SERVER-109793: Make StaleEpochInfo non-optional once 9.0 becomes LTS
       extra: StaleEpochInfo,
       extraIsOptional: True,
-    } # TODO extra not optional once 6.0 becomes LTS
+    }
   - {code: 151, name: OperationCannotBeBatched}
   - {code: 152, name: OplogOutOfOrder}
   - {code: 153, name: ChunkTooBig}
@@ -319,7 +335,11 @@ error_codes:
       categories: [ConnectionFatalMessageParseError],
     }
   - {code: 224, name: QueryFeatureNotAllowed}
-  - {code: 225, name: TransactionTooOld, categories: [VoteAbortError]}
+  - {
+      code: 225,
+      name: TransactionTooOld,
+      categories: [VoteAbortError, TwoPhaseDecisionAckError],
+    }
   - {code: 226, name: AtomicityFailure}
   - {
       code: 227,
@@ -360,7 +380,11 @@ error_codes:
   - {code: 248, name: ProducerConsumerQueueEndClosed}
   - {code: 249, name: StaleDbVersion, extra: StaleDbRoutingVersion}
   - {code: 250, name: StaleChunkHistory, categories: [SnapshotError]}
-  - {code: 251, name: NoSuchTransaction, categories: [VoteAbortError]}
+  - {
+      code: 251,
+      name: NoSuchTransaction,
+      categories: [VoteAbortError, TwoPhaseDecisionAckError],
+    }
   - {code: 252, name: ReentrancyNotAllowed}
   # - {code: 253,name: FreeMonHttpInFlight} # Removed in 7.1
   # - {code: 254,name: FreeMonHttpTemporaryFailure} # Removed in 7.1
@@ -594,7 +618,7 @@ error_codes:
       code: 356,
       name: TxnRetryCounterTooOld,
       extra: TxnRetryCounterTooOldInfo,
-      categories: [VoteAbortError],
+      categories: [VoteAbortError, TwoPhaseDecisionAckError],
     }
 
   - {code: 357, name: InvalidBSONType}
@@ -824,6 +848,138 @@ error_codes:
       name: QueryStatsFailedToRecord,
       extra: QueryStatsFailedToRecordInfo,
     }
+  - {
+      code: 436,
+      name: StreamProcessorHTTPSConnectionError,
+      categories: [StreamProcessorUserError, StreamProcessorRetryableError],
+    }
+  - {
+      code: 440,
+      name: StreamProcessorExternalFunctionConnectionError,
+      categories: [StreamProcessorUserError, StreamProcessorRetryableError],
+    }
+  - {code: 442, name: RetryMultiPlanning}
+  - {
+      code: 443,
+      name: StreamProcessorS3ConnectionError,
+      categories: [StreamProcessorUserError, StreamProcessorRetryableError],
+    }
+  - {
+      code: 444,
+      name: StreamProcessorS3Error,
+      categories: [StreamProcessorUserError],
+    }
+  - {
+      code: 445,
+      name: DatabaseMetadataRefreshCanceledDueToFCVTransition,
+      categories: [InternalOnly],
+    }
+  # This error code must NEVER be used outside of cluster user management commands.
+  # This error must only be used to wrap both the actual command error and a write concern error
+  # in its extra info, in the event that a cluster UMC passthrough command receives both errors
+  # from the config shard. As cluster UMC commands are typed commands, and there's currently no
+  # clean, standard way to attach the write concern error in the final reply when a non-OK
+  # command status needs to be thrown, this works around that limitation. This error code is
+  # internal-only and must never be returned to clients, so a special handling of this error
+  # (where the contained WCE is appended to the final reply, and this error replaced by the
+  # contained error) must be performed in ClientCommand::_handleException() in strategy.cpp.
+  - {
+      code: 446,
+      name: ClusterUMCErrorWithWriteConcernError,
+      extra: ClusterUMCErrorWithWriteConcernErrorInfo,
+      categories: [InternalOnly],
+    }
+  - {code: 447, name: ObjectAlreadyExists, categories: [InternalOnly]}
+  - {
+      code: 448,
+      name: StreamProcessorInvalidNamespace,
+      categories: [StreamProcessorUserError],
+    }
+  - {code: 449, name: RateLimitExceeded, categories: [SystemOverloadedError]}
+  - {
+      code: 450,
+      name: PooledConnectionAcquisitionRejected,
+      categories: [SystemOverloadedError],
+    }
+  - {
+      code: 451,
+      name: StreamProcessorS3TokenExpired,
+      categories: [StreamProcessorRetryableError],
+    }
+
+  - {code: 452, name: ReleaseMemoryShardError}
+
+  - {
+      code: 453,
+      name: InterruptedDueToReshardingCriticalSection,
+      categories: [Interruption, RetriableError],
+    }
+  #Replay client errors.
+  - {code: 454, name: ReplayClientConfigurationError}
+  - {code: 455, name: ReplayClientNotConnected}
+  - {code: 456, name: ReplayClientFailedToProcessBSON}
+  - {code: 457, name: ReplayClientInternalError}
+  - {code: 458, name: ReplayClientSessionSchedulerError}
+  - {code: 459, name: ReplayClientSessionSimulationError}
+  - {
+      code: 460,
+      name: StreamProcessorKinesisConnectionError,
+      categories: [StreamProcessorUserError, StreamProcessorRetryableError],
+    }
+  - {
+      code: 461,
+      name: StreamProcessorKinesisError,
+      categories: [StreamProcessorUserError],
+    }
+  - {
+      code: 462,
+      name: IngressRequestRateLimitExceeded,
+      categories: [SystemOverloadedError, RetriableError],
+    }
+  - {
+      code: 463,
+      name: StreamProcessorKinesisRetryableError,
+      categories: [StreamProcessorRetryableError],
+    }
+  - {
+      code: 464,
+      name: ShardRemovedError,
+      categories: [NonResumableChangeStreamError],
+    }
+  - {code: 465, name: PlacementHistoryInitializationInProgress}
+  - {
+      code: 466,
+      name: SchemaRegistryNonRetryableError,
+      categories: [StreamProcessorUserError],
+    }
+  - {
+      code: 467,
+      name: StreamProcessorRetryableIcebergError,
+      categories: [StreamProcessorUserError, StreamProcessorRetryableError],
+    }
+  - {
+      code: 468,
+      name: StreamProcessorStartupRetryableError,
+      categories: [StreamProcessorRetryableError],
+    }
+  - {
+      code: 469,
+      name: SchemaRegistryConnectionError,
+      categories: [StreamProcessorUserError, StreamProcessorRetryableError],
+    }
+  - {
+      code: 470,
+      name: StreamProcessorAtlasConnectionErrorDuringFirstStart,
+      categories: [StreamProcessorUserError, StreamProcessorRetryableError],
+    }
+  - {
+      code: 471,
+      name: InterruptedDueToAddShard,
+      categories: [Interruption, RetriableError],
+    }
+
+  # Bad BSON column format found during decompression
+  - {code: 472, name: InvalidBSONColumn, categories: [ValidationError]}
 
   # Error codes 4000-8999 are reserved.
 
@@ -904,6 +1060,8 @@ error_codes:
       name: IDLUnknownFieldPossibleMongocryptd,
       categories: [IDLParseError],
     }
+  - {code: 6371402, name: EncryptedFindAndModifyNewNotSupported}
+
   # The following is for rewriting errors returned by a remote server while running a retriable
   # command so that the error is not passed through to other servers in a cluster. See SERVER-91331
   # for an example of using this error code.
@@ -925,3 +1083,24 @@ error_codes:
       name: SamplingCEFailure,
       categories: [PlannerEstimationError],
     }
+  - {code: 9751903, name: CEFailure, categories: [PlannerEstimationError]}
+  - {
+      code: 9737301,
+      name: UnsupportedCbrNode,
+      categories: [PlannerEstimationError],
+    }
+
+  # The following is for remove shard commit commands which fail due to draining not yet being
+  # complete.
+  - {
+      code: 1003141,
+      name: RemoveShardDrainingInProgress,
+      extra: RemoveShardDrainingInfo,
+    }
+  - {
+      code: 10045600,
+      name: InterruptedDueToFCVChange,
+      categories: [Interruption, RetriableError],
+    }
+
+  - {code: 10171600, name: ReadThroughCacheTimeMonotonicityViolation}

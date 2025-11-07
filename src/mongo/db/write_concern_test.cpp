@@ -27,15 +27,14 @@
  *    it in the license file.
  */
 
+#include "mongo/db/write_concern.h"
+
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/storage/storage_engine_mock.h"
-#include "mongo/db/write_concern.h"
 #include "mongo/db/write_concern_idl.h"
 #include "mongo/idl/generic_argument_gen.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -91,6 +90,17 @@ GenericArguments makeGenericArgs(const WriteConcernIdl& wc) {
 }
 
 constexpr auto kCommandName = "doSomeWrite"_sd;
+
+TEST_F(WriteConcernTest, ParseFailsOnNullBytes) {
+    std::string s = "wcWithNullBytes ";
+    s[s.length() - 1] = '\0';
+    auto testDoc = BSON("w" << s);
+    ASSERT_THROWS_CODE_AND_WHAT(
+        WriteConcernIdl::parse(testDoc, IDLParserContext("writeConcernTest")),
+        DBException,
+        ErrorCodes::FailedToParse,
+        "w has illegal embedded NUL byte, w: wcWithNullBytes");
+}
 
 TEST_F(WriteConcernTest, ExtractOverridesWMajorityJFalse) {
     WriteConcernIdl wc;

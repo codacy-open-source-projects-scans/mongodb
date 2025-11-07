@@ -27,34 +27,30 @@
  *    it in the license file.
  */
 
-#include <absl/container/inlined_vector.h>
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <utility>
+#include "mongo/db/exec/sbe/stages/ix_scan.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
-#include "mongo/db/exec/sbe/stages/ix_scan.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/snapshot.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/str.h"
+
+#include <utility>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo::sbe {
 IndexScanStageBase::IndexScanStageBase(StringData stageType,
@@ -86,7 +82,9 @@ IndexScanStageBase::IndexScanStageBase(StringData stageType,
       _indexIdentSlot(indexIdentSlot),
       _indexKeysToInclude(indexKeysToInclude),
       _vars(std::move(vars)) {
-    invariant(_indexKeysToInclude.count() == _vars.size());
+    tassert(11094724,
+            "Expecting the number of index keys to include to match the number of slots",
+            _indexKeysToInclude.count() == _vars.size());
 }
 
 void IndexScanStageBase::prepareImpl(CompileCtx& ctx) {
@@ -96,7 +94,7 @@ void IndexScanStageBase::prepareImpl(CompileCtx& ctx) {
         uassert(4822821, str::stream() << "duplicate slot: " << _vars[idx], inserted);
     }
 
-    tassert(5709602, "'_coll' should not be initialized prior to 'acquireCollection()'", !_coll);
+    // No-op if using acquisition.
     _coll.acquireCollection(_opCtx, _dbName, _collUuid);
 
     auto indexCatalog = _coll.getPtr()->getIndexCatalog();
@@ -163,35 +161,30 @@ value::SlotAccessor* IndexScanStageBase::getAccessor(CompileCtx& ctx, value::Slo
     return ctx.getAccessor(slot);
 }
 
-void IndexScanStageBase::doSaveState(bool relinquishCursor) {
-    if (relinquishCursor) {
-        if (_indexKeySlot && !_key.owned() && slotsAccessible()) {
-            _key = std::move(*_key.makeCopy());
-        }
-        if (_recordIdSlot) {
-            prepareForYielding(_recordIdAccessor, slotsAccessible());
-        }
-        for (auto& accessor : _accessors) {
-            prepareForYielding(accessor, slotsAccessible());
-        }
-
-        if (_cursor) {
-            _cursor->save();
-        }
+void IndexScanStageBase::doSaveState() {
+    if (_indexKeySlot && !_key.owned() && slotsAccessible()) {
+        _key = std::move(*_key.makeCopy());
+    }
+    if (_recordIdSlot) {
+        prepareForYielding(_recordIdAccessor, slotsAccessible());
+    }
+    for (auto& accessor : _accessors) {
+        prepareForYielding(accessor, slotsAccessible());
     }
 
     if (_cursor) {
-        _cursor->setSaveStorageCursorOnDetachFromOperationContext(!relinquishCursor);
+        _cursor->save();
     }
 
     // Set the index entry to null, since accessing this pointer is illegal during yield.
     _entry = nullptr;
-
     _coll.reset();
 }
 
 void IndexScanStageBase::restoreCollectionAndIndex() {
-    _coll.restoreCollection(_opCtx, _dbName, _collUuid);
+    if (!_coll.isAcquisition()) {
+        _coll.restoreCollection(_opCtx, _dbName, _collUuid);
+    }
 
     auto [identTag, identVal] = _indexIdentAccessor.getViewOfValue();
     tassert(7566700, "Expected ident to be a string", value::isString(identTag));
@@ -210,24 +203,25 @@ void IndexScanStageBase::restoreCollectionAndIndex() {
     _entry = desc->getEntry();
 }
 
-void IndexScanStageBase::doRestoreState(bool relinquishCursor) {
+void IndexScanStageBase::doRestoreState() {
     invariant(_opCtx);
-    invariant(!_coll);
-
-    // If this stage has not been prepared, then yield recovery is a no-op.
-    if (!_coll.getCollName()) {
-        return;
+    if (!_coll.isAcquisition()) {
+        invariant(!_coll);
+        // If this stage has not been prepared, then yield recovery is a no-op.
+        if (!_coll.getCollName()) {
+            return;
+        }
     }
     restoreCollectionAndIndex();
-
-    if (_cursor && relinquishCursor) {
-        _cursor->restore();
+    auto& ru = *shard_role_details::getRecoveryUnit(_opCtx);
+    if (_cursor) {
+        _cursor->restore(ru);
     }
 
     // Yield is the only time during plan execution that the snapshotId can change. As such, we
     // update it accordingly as part of yield recovery.
     if (_snapshotIdSlot) {
-        _latestSnapshotId = shard_role_details::getRecoveryUnit(_opCtx)->getSnapshotId().toNumber();
+        _latestSnapshotId = ru.getSnapshotId().toNumber();
     }
 }
 
@@ -255,17 +249,18 @@ void IndexScanStageBase::openImpl(bool reOpen) {
     }
 
     tassert(5071009, "first open to IndexScanStageBase but reOpen=true", !_open);
-
     if (!_coll) {
         // We're being opened for the first time after 'close()', or we're being opened for the
         // first time ever. We need to re-acquire '_coll' in this case and make some validity
         // checks (the collection has not been dropped, renamed, etc).
         tassert(5071010, "IndexScanStageBase is not open but have _cursor", !_cursor);
-        restoreCollectionAndIndex();
     }
 
+    restoreCollectionAndIndex();
+
     if (!_cursor) {
-        _cursor = _entry->accessMethod()->asSortedData()->newCursor(_opCtx, _forward);
+        _cursor = _entry->accessMethod()->asSortedData()->newCursor(
+            _opCtx, *shard_role_details::getRecoveryUnit(_opCtx), _forward);
     }
 
     _open = true;
@@ -277,6 +272,10 @@ void IndexScanStageBase::trackIndexRead() {
     trackRead();
 }
 
+void IndexScanStageBase::doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) {
+    _coll.setCollAcquisition(mca.getCollectionAcquisitionFromUuid(_collUuid));
+}
+
 PlanState IndexScanStageBase::getNext() {
     auto optTimer(getOptTimer(_opCtx));
 
@@ -286,17 +285,18 @@ PlanState IndexScanStageBase::getNext() {
 
     checkForInterruptAndYield(_opCtx);
 
+    auto& ru = *shard_role_details::getRecoveryUnit(_opCtx);
     do {
         switch (_scanState) {
             case ScanState::kNeedSeek:
                 ++_specificStats.seeks;
                 trackIndexRead();
                 // Seek for key and establish the cursor position.
-                _nextKeyString = seek();
+                _nextKeyString = seek(ru);
                 break;
             case ScanState::kScanning:
                 trackIndexRead();
-                _nextKeyString = _cursor->nextKeyValueView();
+                _nextKeyString = _cursor->nextKeyValueView(ru);
                 break;
             case ScanState::kFinished:
                 return trackPlanState(PlanState::IS_EOF);
@@ -343,7 +343,6 @@ std::unique_ptr<PlanStageStats> IndexScanStageBase::getStats(bool includeDebugIn
     ret->specific = std::make_unique<IndexScanStats>(_specificStats);
 
     if (includeDebugInfo) {
-        DebugPrinter printer;
         BSONObjBuilder bob;
         bob.append("indexName", _indexName);
         bob.appendNumber("keysExamined", static_cast<long long>(_specificStats.keysExamined));
@@ -411,7 +410,7 @@ void IndexScanStageBase::debugPrintImpl(std::vector<DebugPrinter::Block>& blocks
         if (varIndex) {
             blocks.emplace_back(DebugPrinter::Block("`,"));
         }
-        invariant(varIndex < _vars.size());
+        tassert(11093504, "Index out of bounds", varIndex < _vars.size());
         DebugPrinter::addIdentifier(blocks, _vars[varIndex++]);
         blocks.emplace_back("=");
         blocks.emplace_back(std::to_string(keyIndex));
@@ -473,8 +472,11 @@ SimpleIndexScanStage::SimpleIndexScanStage(UUID collUuid,
       _seekKeyLow(std::move(seekKeyLow)),
       _seekKeyHigh(std::move(seekKeyHigh)) {
     // The valid state is when both boundaries, or none is set, or only low key is set.
-    invariant((_seekKeyLow && _seekKeyHigh) || (!_seekKeyLow && !_seekKeyHigh) ||
-              (_seekKeyLow && !_seekKeyHigh));
+    tassert(11094723,
+            "Expecting neither boundary keys, only low boundary key, or both low and high boundary "
+            "key to be set",
+            (_seekKeyLow && _seekKeyHigh) || (!_seekKeyLow && !_seekKeyHigh) ||
+                (_seekKeyLow && !_seekKeyHigh));
 }
 
 std::unique_ptr<PlanStage> SimpleIndexScanStage::clone() const {
@@ -511,10 +513,10 @@ void SimpleIndexScanStage::prepare(CompileCtx& ctx) {
     _seekKeyHighHolder.reset();
 }
 
-void SimpleIndexScanStage::doSaveState(bool relinquishCursor) {
+void SimpleIndexScanStage::doSaveState() {
     // Seek points are external to the index scan and must be accessible no matter what as long
     // as the index scan is opened.
-    if (_open && relinquishCursor) {
+    if (_open) {
         if (_seekKeyLow) {
             prepareForYielding(_seekKeyLowHolder, true);
         }
@@ -523,7 +525,7 @@ void SimpleIndexScanStage::doSaveState(bool relinquishCursor) {
         }
     }
 
-    IndexScanStageBase::doSaveState(relinquishCursor);
+    IndexScanStageBase::doSaveState();
 }
 
 void SimpleIndexScanStage::open(bool reOpen) {
@@ -627,9 +629,9 @@ size_t SimpleIndexScanStage::estimateCompileTimeSize() const {
     return size;
 }
 
-SortedDataKeyValueView SimpleIndexScanStage::seek() {
+SortedDataKeyValueView SimpleIndexScanStage::seek(RecoveryUnit& ru) {
     auto& query = getSeekKeyLow();
-    return _cursor->seekForKeyValueView(StringData(query.getBuffer(), query.getSize()));
+    return _cursor->seekForKeyValueView(ru, query.getView());
 }
 
 bool SimpleIndexScanStage::validateKey(const SortedDataKeyValueView& key) {
@@ -715,8 +717,9 @@ void GenericIndexScanStage::open(bool reOpen) {
         return;
     }
 
-    invariant(!ownedBound && tagBound == value::TypeTags::indexBounds,
-              "indexBounds should be unowned and IndexBounds type");
+    tassert(11094722,
+            "indexBounds should be unowned and IndexBounds type",
+            !ownedBound && tagBound == value::TypeTags::indexBounds);
     _checker.emplace(value::getIndexBoundsView(valBound), _params.keyPattern, _params.direction);
 
     if (!_checker->getStartSeekPoint(&_seekPoint)) {
@@ -744,10 +747,10 @@ size_t GenericIndexScanStage::estimateCompileTimeSize() const {
     return size;
 }
 
-SortedDataKeyValueView GenericIndexScanStage::seek() {
+SortedDataKeyValueView GenericIndexScanStage::seek(RecoveryUnit& ru) {
     key_string::Builder builder(_params.version, _params.ord);
     return _cursor->seekForKeyValueView(
-        IndexEntryComparison::makeKeyStringFromSeekPointForSeek(_seekPoint, _forward, builder));
+        ru, IndexEntryComparison::makeKeyStringFromSeekPointForSeek(_seekPoint, _forward, builder));
 }
 
 bool GenericIndexScanStage::validateKey(const SortedDataKeyValueView& key) {
@@ -759,8 +762,7 @@ bool GenericIndexScanStage::validateKey(const SortedDataKeyValueView& key) {
     auto keyStringData = key.getKeyStringWithoutRecordIdView();
 
     if (!_endKey.isEmpty()) {
-        auto result = key_string::compare(
-            keyStringData.data(), _endKey.getBuffer(), keyStringData.size(), _endKey.getSize());
+        auto result = key_string::compare(keyStringData, _endKey.getView());
         if ((_forward && result <= 0) || (!_forward && result >= 0)) {
             ++_specificStats.keyCheckSkipped;
             _scanState = ScanState::kScanning;
@@ -776,8 +778,7 @@ bool GenericIndexScanStage::validateKey(const SortedDataKeyValueView& key) {
         BufReader typeBitsBr(typeBits.data(), typeBits.size());
         auto reader = key_string::TypeBits::getReaderFromBuffer(key.getVersion(), &typeBitsBr);
 
-        key_string::toBsonSafe(
-            keyStringData.data(), keyStringData.size(), _params.ord, reader, keyBuilder);
+        key_string::toBsonSafe(keyStringData, _params.ord, reader, keyBuilder);
         auto bsonKey = keyBuilder.done();
 
         switch (_checker->checkKeyWithEndPosition(

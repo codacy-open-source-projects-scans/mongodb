@@ -27,16 +27,6 @@
  *    it in the license file.
  */
 
-#include <cmath>
-#include <cstdint>
-#include <limits>
-#include <utility>
-
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/numeric/conversion/converter_policies.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/db/exec/sbe/accumulator_sum_value_enum.h"
 #include "mongo/db/exec/sbe/values/arith_common.h"
@@ -50,6 +40,12 @@
 #include "mongo/util/represent_as.h"
 #include "mongo/util/str.h"
 #include "mongo/util/summation.h"
+
+#include <cmath>
+#include <cstdint>
+#include <limits>
+#include <utility>
+
 
 namespace mongo {
 namespace sbe {
@@ -65,8 +61,7 @@ namespace {
  *'base' and 'exp' are both integers. Assumes 'exp' is in the range [0, 63].
  */
 bool representableAsLong(long long base, long long exp) {
-    invariant(exp <= 63);
-    invariant(exp >= 0);
+    tassert(11086815, "Unexpected exponent value", exp >= 0 && exp <= 63);
     struct MinMax {
         long long min;
         long long max;
@@ -319,7 +314,7 @@ FastTuple<bool, value::TypeTags, value::Value> genericTrigonometricFun(value::Ty
                 return {true, resTag, resValue};
             }
             default:
-                MONGO_UNREACHABLE;
+                MONGO_UNREACHABLE_TASSERT(11122926);
         }
     }
     return {false, value::TypeTags::Nothing, 0};
@@ -451,7 +446,7 @@ void ByteCode::aggDoubleDoubleSumImpl(value::Array* accumulator,
 
         setDecimalTotal(nonDecimalTotalTag, nonDecimalTotal, decimalTotal, accumulator);
     }
-}  // aggDoubleDoubleSumImpl
+}  // ByteCode::aggDoubleDoubleSumImpl
 
 void ByteCode::aggMergeDoubleDoubleSumsImpl(value::Array* accumulator,
                                             value::TypeTags rhsTag,
@@ -459,7 +454,7 @@ void ByteCode::aggMergeDoubleDoubleSumsImpl(value::Array* accumulator,
     auto [accumWidestType, _1] = accumulator->getAt(AggSumValueElems::kNonDecimalTotalTag);
 
     tassert(7039532, "value must be of type 'Array'", rhsTag == value::TypeTags::Array);
-    auto nextDoubleDoubleArr = value::getArrayView(rhsValue);
+    value::Array* nextDoubleDoubleArr = value::getArrayView(rhsValue);
 
     tassert(7039533,
             "array does not have enough elements",
@@ -748,7 +743,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericDiv(value::TypeT
                 return {true, tag, val};
             }
             default:
-                MONGO_UNREACHABLE;
+                MONGO_UNREACHABLE_TASSERT(11122927);
         }
     }
 
@@ -802,7 +797,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericIDiv(value::Type
                 return {false, value::TypeTags::NumberInt64, value::bitcastFrom<int64_t>(result)};
             }
             default:
-                MONGO_UNREACHABLE;
+                MONGO_UNREACHABLE_TASSERT(11122928);
         }
     }
 
@@ -845,7 +840,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericMod(value::TypeT
                 return {true, tag, val};
             }
             default:
-                MONGO_UNREACHABLE;
+                MONGO_UNREACHABLE_TASSERT(11122929);
         }
     }
 
@@ -865,7 +860,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericAbs(value::TypeT
 
             return {false,
                     value::TypeTags::NumberInt32,
-                    value::bitcastFrom<int32_t>(operand >= 0 ? operand : -operand)};
+                    value::bitcastFrom<int32_t>(std::abs(operand))};
         }
         case value::TypeTags::NumberInt64: {
             auto operand = value::bitcastTo<int64_t>(operandValue);
@@ -875,13 +870,13 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericAbs(value::TypeT
             }
             return {false,
                     value::TypeTags::NumberInt64,
-                    value::bitcastFrom<int64_t>(operand >= 0 ? operand : -operand)};
+                    value::bitcastFrom<int64_t>(std::abs(operand))};
         }
         case value::TypeTags::NumberDouble: {
             auto operand = value::bitcastTo<double>(operandValue);
             return {false,
                     value::TypeTags::NumberDouble,
-                    value::bitcastFrom<double>(operand >= 0 ? operand : -operand)};
+                    value::bitcastFrom<double>(std::abs(operand))};
         }
         case value::TypeTags::NumberDecimal: {
             auto operand = value::bitcastTo<Decimal128>(operandValue);
@@ -913,7 +908,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericCeil(value::Type
                 // Ceil on integer values is the identity function.
                 return {false, operandTag, operandValue};
             default:
-                MONGO_UNREACHABLE;
+                MONGO_UNREACHABLE_TASSERT(11122930);
         }
     }
 
@@ -940,7 +935,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericFloor(value::Typ
                 // Floor on integer values is the identity function.
                 return {false, operandTag, operandValue};
             default:
-                MONGO_UNREACHABLE;
+                MONGO_UNREACHABLE_TASSERT(11122931);
         }
     }
 
@@ -955,7 +950,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericExp(value::TypeT
             return {false, value::TypeTags::NumberDouble, value::bitcastFrom<double>(result)};
         }
         case value::TypeTags::NumberDecimal: {
-            auto result = value::bitcastTo<Decimal128>(operandValue).exponential();
+            auto result = value::bitcastTo<Decimal128>(operandValue).exp();
             auto [tag, value] = value::makeCopyDecimal(result);
             return {true, tag, value};
         }
@@ -991,7 +986,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericLn(value::TypeTa
             if (!operand.isGreater(Decimal128::kNormalizedZero) && !operand.isNaN()) {
                 return {false, value::TypeTags::Nothing, 0};
             }
-            auto operandLn = operand.naturalLogarithm();
+            auto operandLn = operand.log();
 
             auto [tag, value] = value::makeCopyDecimal(operandLn);
             return {true, tag, value};
@@ -1032,7 +1027,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericLog10(value::Typ
             if (!operand.isGreater(Decimal128::kNormalizedZero) && !operand.isNaN()) {
                 return {false, value::TypeTags::Nothing, 0};
             }
-            auto operandLog10 = operand.logarithm(Decimal128(10));
+            auto operandLog10 = operand.log10();
 
             auto [tag, value] = value::makeCopyDecimal(operandLog10);
             return {true, tag, value};
@@ -1073,7 +1068,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericSqrt(value::Type
             if (operand.isLess(Decimal128::kNormalizedZero) && !operand.isNaN()) {
                 return {false, value::TypeTags::Nothing, 0};
             }
-            auto [tag, value] = value::makeCopyDecimal(operand.squareRoot());
+            auto [tag, value] = value::makeCopyDecimal(operand.sqrt());
             return {true, tag, value};
         }
         case value::TypeTags::NumberInt32:
@@ -1161,7 +1156,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericPow(value::TypeT
         }
 
         // We should have checked earlier that 0 to a negative power is banned.
-        MONGO_UNREACHABLE;
+        MONGO_UNREACHABLE_TASSERT(11122932);
     } else if (baseLong == 1) {
         // 1^x = 1.
         return formatResult(1);
@@ -1189,6 +1184,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericPow(value::TypeT
     // Use repeated multiplication, since pow() casts args to doubles which could result in
     // loss of precision if arguments are very large.
     const auto computeWithRepeatedMultiplication = [](int64_t base, int64_t exp) {
+        tassert(11086819, "Expecting exp >= 0 in computeWithRepeatedMultiplication", exp >= 0);
+
         int64_t result = 1;
 
         while (exp > 1) {
@@ -1202,7 +1199,6 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericPow(value::TypeT
         }
 
         if (exp) {
-            invariant(exp == 1);
             result *= base;
         }
 
@@ -1271,7 +1267,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericAtan2(value::Typ
                 return {true, resTag, resValue};
             }
             default:
-                MONGO_UNREACHABLE;
+                MONGO_UNREACHABLE_TASSERT(11122933);
         }
     }
     return {false, value::TypeTags::Nothing, 0};
@@ -1304,7 +1300,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericDegreesToRadians
                 return {true, resTag, resValue};
             }
             default:
-                MONGO_UNREACHABLE;
+                MONGO_UNREACHABLE_TASSERT(11122934);
         }
     }
     return {false, value::TypeTags::Nothing, 0};
@@ -1327,7 +1323,7 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::genericRadiansToDegrees
                 return {true, resTag, resValue};
             }
             default:
-                MONGO_UNREACHABLE;
+                MONGO_UNREACHABLE_TASSERT(11122935);
         }
     }
     return {false, value::TypeTags::Nothing, 0};

@@ -30,19 +30,6 @@
 
 #include "mongo/db/query/fle/server_rewrite.h"
 
-#include <boost/smart_ptr.hpp>
-#include <functional>
-#include <list>
-#include <memory>
-#include <string>
-#include <typeindex>
-#include <utility>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
 #include "mongo/base/status_with.h"
@@ -56,10 +43,13 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_geo_near.h"
 #include "mongo/db/pipeline/document_source_graph_lookup.h"
+#include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/expression.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/fle/query_rewriter.h"
+#include "mongo/db/query/fle/server_rewrite_helper.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/stdx/unordered_map.h"
@@ -67,6 +57,16 @@
 #include "mongo/util/future.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/namespace_string_util.h"
+
+#include <functional>
+#include <list>
+#include <memory>
+#include <string>
+#include <typeindex>
+#include <utility>
+
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -128,95 +128,53 @@ void rewriteGraphLookUp(QueryRewriter* rewriter, DocumentSourceGraphLookUp* sour
     }
 }
 
+void rewriteLookUp(QueryRewriter* rewriter, DocumentSourceLookUp* source) {
+    if (!feature_flags::gFeatureFlagLookupEncryptionSchemasFLE.isEnabled()) {
+        return;
+    }
+    // When rewriting a lookup, we're only concerned with rewriting the pipeline of the lookup which
+    // may contain encrypted placeholders.
+    if (!source->hasPipeline()) {
+        return;
+    }
+
+    bool hadPipelineRewrites{false};
+    auto fromExpCtx = source->getSubpipelineExpCtx();
+    tassert(9775505, "Invalid from expression context", fromExpCtx);
+    // Create a new pipeline rewriter for the foreign collection namespace's pipeline.
+    auto subpipelineRewriter = rewriter->createSubpipelineRewriter(source->getFromNs(), fromExpCtx);
+    for (auto&& src : source->getResolvedIntrospectionPipeline().getSources()) {
+        if (stageRewriterMap.find(typeid(*src)) != stageRewriterMap.end()) {
+            hadPipelineRewrites = true;
+            stageRewriterMap[typeid(*src)](&subpipelineRewriter, src.get());
+        }
+    }
+
+    if (hadPipelineRewrites) {
+        source->rebuildResolvedPipeline();
+    }
+}
+
 REGISTER_DOCUMENT_SOURCE_FLE_REWRITER(DocumentSourceMatch, rewriteMatch);
 REGISTER_DOCUMENT_SOURCE_FLE_REWRITER(DocumentSourceGeoNear, rewriteGeoNear);
 REGISTER_DOCUMENT_SOURCE_FLE_REWRITER(DocumentSourceGraphLookUp, rewriteGraphLookUp);
+REGISTER_DOCUMENT_SOURCE_FLE_REWRITER(DocumentSourceLookUp, rewriteLookUp);
 
 
 BSONObj rewriteEncryptedFilterV2(FLETagQueryInterface* queryImpl,
                                  const NamespaceString& nssEsc,
                                  boost::intrusive_ptr<ExpressionContext> expCtx,
                                  BSONObj filter,
+                                 const std::map<NamespaceString, NamespaceString>& escMap,
                                  EncryptedCollScanModeAllowed mode) {
 
     if (auto rewritten =
-            QueryRewriter(expCtx, queryImpl, nssEsc, mode).rewriteMatchExpression(filter)) {
+            QueryRewriter(expCtx, queryImpl, nssEsc, escMap, mode).rewriteMatchExpression(filter)) {
         return rewritten.value();
     }
 
     return filter;
 }
-
-namespace {
-NamespaceString getAndValidateEscNsFromSchema(const EncryptionInformation& encryptInfo,
-                                              const NamespaceString& nss) {
-    auto efc = EncryptionInformationHelpers::getAndValidateSchema(nss, encryptInfo);
-    return NamespaceStringUtil::deserialize(nss.dbName(), efc.getEscCollection()->toString());
-}
-}  // namespace
-
-class RewriteBase {
-public:
-    RewriteBase(boost::intrusive_ptr<ExpressionContext> expCtx,
-                const NamespaceString& nss,
-                const EncryptionInformation& encryptInfo)
-        : expCtx(expCtx), nssEsc(getAndValidateEscNsFromSchema(encryptInfo, nss)) {}
-
-    virtual ~RewriteBase(){};
-
-    virtual void doRewrite(FLETagQueryInterface* queryImpl){};
-
-    boost::intrusive_ptr<ExpressionContext> expCtx;
-    const NamespaceString nssEsc;
-};
-
-// This class handles rewriting of an entire pipeline.
-class PipelineRewrite : public RewriteBase {
-public:
-    PipelineRewrite(const NamespaceString& nss,
-                    const EncryptionInformation& encryptInfo,
-                    std::unique_ptr<Pipeline, PipelineDeleter> toRewrite)
-        : RewriteBase(toRewrite->getContext(), nss, encryptInfo), pipeline(std::move(toRewrite)) {}
-
-    ~PipelineRewrite() override{};
-
-    void doRewrite(FLETagQueryInterface* queryImpl) final {
-        auto rewriter = QueryRewriter(expCtx, queryImpl, nssEsc);
-        for (auto&& source : pipeline->getSources()) {
-            if (stageRewriterMap.find(typeid(*source)) != stageRewriterMap.end()) {
-                stageRewriterMap[typeid(*source)](&rewriter, source.get());
-            }
-        }
-    }
-
-    std::unique_ptr<Pipeline, PipelineDeleter> getPipeline() {
-        return std::move(pipeline);
-    }
-
-private:
-    std::unique_ptr<Pipeline, PipelineDeleter> pipeline;
-};
-
-// This class handles rewriting of a single match expression, represented as a BSONObj.
-class FilterRewrite : public RewriteBase {
-public:
-    FilterRewrite(boost::intrusive_ptr<ExpressionContext> expCtx,
-                  const NamespaceString& nss,
-                  const EncryptionInformation& encryptInfo,
-                  const BSONObj toRewrite,
-                  EncryptedCollScanModeAllowed mode)
-        : RewriteBase(expCtx, nss, encryptInfo), userFilter(toRewrite), _mode(mode) {}
-
-    ~FilterRewrite() override{};
-
-    void doRewrite(FLETagQueryInterface* queryImpl) final {
-        rewrittenFilter = rewriteEncryptedFilterV2(queryImpl, nssEsc, expCtx, userFilter, _mode);
-    }
-
-    const BSONObj userFilter;
-    BSONObj rewrittenFilter;
-    EncryptedCollScanModeAllowed _mode;
-};
 
 // This helper executes the rewrite(s) inside a transaction. The transaction runs in a separate
 // executor, and so we can't pass data by reference into the lambda. The provided rewriter should
@@ -235,7 +193,13 @@ void doFLERewriteInTxn(OperationContext* opCtx,
         sharedBlock->doRewrite(&queryInterface);
         return;
     }
-
+    // This scoped object will stash transaction resource and restore them on commit. This is
+    // necessary because the internal transaction will cause the participant to take ownership of
+    // the locker in case of yield and destroy it in case of abort. Destroying the locker invariants
+    // if some locks are still held. Note that for transactions (where we hold 2-phase locks)
+    // stashing locks doesn't directly release them but signals the locker it can destroy them if
+    // necessary.
+    auto stashHandle = StashTransactionResourcesForMultiDocumentTransaction(opCtx);
     auto txn = getTxn(opCtx);
     auto service = opCtx->getService();
     auto swCommitResult = txn->runNoThrow(
@@ -252,19 +216,99 @@ void doFLERewriteInTxn(OperationContext* opCtx,
     uassertStatusOK(swCommitResult);
     uassertStatusOK(swCommitResult.getValue().cmdStatus);
     uassertStatusOK(swCommitResult.getValue().getEffectiveStatus());
+    stashHandle.restoreOnCommit();
+}
+
+NamespaceString getAndValidateEscNsFromSchema(const EncryptionInformation& encryptInfo,
+                                              const NamespaceString& nss,
+                                              bool allowEmptySchema) {
+    // In the case of PipelineRewrite, we must allow for unencrypted schemas alongside QE schemas,
+    // which manifest as collections without schemas in the provided encryptionInformation.
+    if (allowEmptySchema &&
+        !encryptInfo.getSchema().hasField(nss.serializeWithoutTenantPrefix_UNSAFE())) {
+        return NamespaceString();
+    }
+    auto efc = EncryptionInformationHelpers::getAndValidateSchema(nss, encryptInfo);
+    return NamespaceStringUtil::deserialize(nss.dbName(), std::string{*efc.getEscCollection()});
+}
+
+std::map<NamespaceString, NamespaceString> generateEncryptInfoEscMap(
+    const DatabaseName& dbName, const EncryptionInformation& encryptInfo) {
+    std::map<NamespaceString, NamespaceString> escMap;
+    if (feature_flags::gFeatureFlagLookupEncryptionSchemasFLE.isEnabled()) {
+        // Get the Esc collection namespace for every namespace in our encryption schema.
+        for (const auto& elem : encryptInfo.getSchema()) {
+            uassert(9775500,
+                    "Each namespace schema "
+                    "must be an object",
+                    elem.type() == BSONType::object);
+            auto schemaNs = NamespaceStringUtil::deserialize(
+                boost::none, elem.fieldNameStringData(), SerializationContext::stateDefault());
+            auto efc = EncryptionInformationHelpers::getAndValidateSchema(schemaNs, encryptInfo);
+
+            escMap.emplace(std::piecewise_construct,
+                           std::forward_as_tuple(std::move(schemaNs)),
+                           std::forward_as_tuple(NamespaceStringUtil::deserialize(
+                               dbName, std::string{*efc.getEscCollection()})));
+        }
+    }
+    return escMap;
 }
 }  // namespace
 
+RewriteBase::RewriteBase(boost::intrusive_ptr<ExpressionContext> expCtx,
+                         const NamespaceString& nss,
+                         const EncryptionInformation& encryptInfo,
+                         bool allowEmptySchema)
+    : expCtx(expCtx),
+      nssEsc(getAndValidateEscNsFromSchema(encryptInfo, nss, allowEmptySchema)),
+      _escMap(generateEncryptInfoEscMap(nss.dbName(), encryptInfo)) {}
+
+FilterRewrite::FilterRewrite(boost::intrusive_ptr<ExpressionContext> expCtx,
+                             const NamespaceString& nss,
+                             const EncryptionInformation& encryptInfo,
+                             BSONObj toRewrite,
+                             EncryptedCollScanModeAllowed mode)
+    : RewriteBase(expCtx, nss, encryptInfo, false), userFilter(toRewrite), _mode(mode) {}
+
+void FilterRewrite::doRewrite(FLETagQueryInterface* queryImpl) {
+    rewrittenFilter =
+        rewriteEncryptedFilterV2(queryImpl, nssEsc, expCtx, userFilter, _escMap, _mode);
+}
+
+PipelineRewrite::PipelineRewrite(const NamespaceString& nss,
+                                 const EncryptionInformation& encryptInfo,
+                                 std::unique_ptr<Pipeline> toRewrite)
+    : RewriteBase(toRewrite->getContext(), nss, encryptInfo, true),
+      _pipeline(std::move(toRewrite)) {}
+
+void PipelineRewrite::doRewrite(FLETagQueryInterface* queryImpl) {
+    auto rewriter = getQueryRewriterForEsc(queryImpl);
+    for (auto&& source : _pipeline->getSources()) {
+        if (stageRewriterMap.find(typeid(*source)) != stageRewriterMap.end()) {
+            stageRewriterMap[typeid(*source)](&rewriter, source.get());
+        }
+    }
+}
+
+std::unique_ptr<Pipeline> PipelineRewrite::getPipeline() {
+    return std::move(_pipeline);
+}
+
+QueryRewriter PipelineRewrite::getQueryRewriterForEsc(FLETagQueryInterface* queryImpl) {
+    return QueryRewriter(expCtx, queryImpl, nssEsc, _escMap);
+}
+
 BSONObj rewriteEncryptedFilterInsideTxn(FLETagQueryInterface* queryImpl,
-                                        const DatabaseName& dbName,
+                                        const NamespaceString& nss,
                                         const EncryptedFieldConfig& efc,
                                         boost::intrusive_ptr<ExpressionContext> expCtx,
                                         BSONObj filter,
                                         EncryptedCollScanModeAllowed mode) {
     NamespaceString nssEsc(
-        NamespaceStringUtil::deserialize(dbName, efc.getEscCollection().value()));
+        NamespaceStringUtil::deserialize(nss.dbName(), efc.getEscCollection().value()));
 
-    return rewriteEncryptedFilterV2(queryImpl, nssEsc, expCtx, filter, mode);
+    return rewriteEncryptedFilterV2(queryImpl, nssEsc, expCtx, filter, {{nss, nssEsc}}, mode);
 }
 
 BSONObj rewriteQuery(OperationContext* opCtx,
@@ -284,7 +328,9 @@ void processFindCommand(OperationContext* opCtx,
                         const NamespaceString& nss,
                         FindCommandRequest* findCommand,
                         GetTxnCallback getTransaction) {
-    invariant(findCommand->getEncryptionInformation());
+    tassert(11177500,
+            "findCommand must contain encryption information",
+            findCommand->getEncryptionInformation());
     auto expCtx = ExpressionContextBuilder{}
                       .fromRequest(opCtx, *findCommand)
                       .collator(collatorFromBSON(opCtx, findCommand->getCollation()))
@@ -306,7 +352,9 @@ void processCountCommand(OperationContext* opCtx,
                          const NamespaceString& nss,
                          CountCommandRequest* countCommand,
                          GetTxnCallback getTxn) {
-    invariant(countCommand->getEncryptionInformation());
+    tassert(11177501,
+            "countCommand must contain encryption information",
+            countCommand->getEncryptionInformation());
     // Count command does not have legacy runtime constants, and does not support user variables
     // defined in a let expression.
     auto expCtx =
@@ -329,12 +377,11 @@ void processCountCommand(OperationContext* opCtx,
     countCommand->getEncryptionInformation()->setCrudProcessed(true);
 }
 
-std::unique_ptr<Pipeline, PipelineDeleter> processPipeline(
-    OperationContext* opCtx,
-    NamespaceString nss,
-    const EncryptionInformation& encryptInfo,
-    std::unique_ptr<Pipeline, PipelineDeleter> toRewrite,
-    GetTxnCallback txn) {
+std::unique_ptr<Pipeline> processPipeline(OperationContext* opCtx,
+                                          NamespaceString nss,
+                                          const EncryptionInformation& encryptInfo,
+                                          std::unique_ptr<Pipeline> toRewrite,
+                                          GetTxnCallback txn) {
     auto sharedBlock = std::make_shared<PipelineRewrite>(nss, encryptInfo, std::move(toRewrite));
     doFLERewriteInTxn(opCtx, sharedBlock, txn);
 

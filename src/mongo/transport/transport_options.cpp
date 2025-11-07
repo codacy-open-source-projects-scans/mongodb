@@ -27,77 +27,72 @@
  *    it in the license file.
  */
 
-#include <string>
-#include <variant>
-#include <vector>
+#include "mongo/transport/transport_options.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/server_options.h"
-#include "mongo/idl/idl_parser.h"
+#include "mongo/db/service_context.h"
+#include "mongo/transport/cidr_range_list_parameter.h"
+#include "mongo/transport/session_manager.h"
+#include "mongo/transport/transport_layer.h"
+#include "mongo/transport/transport_layer_manager.h"
 #include "mongo/transport/transport_options_gen.h"
-#include "mongo/util/net/cidr.h"
-#include "mongo/util/overloaded_visitor.h"
 
 namespace mongo::transport {
-namespace {
-auto parseMaxIncomingConnectionsParameters(const BSONObj& obj) {
-    IDLParserContext ctx("maxIncomingConnections");
-    const auto params = MaxIncomingConnectionsParameters::parse(ctx, obj);
-    std::vector<std::variant<CIDR, std::string>> output;
-    for (const auto& range : params.getRanges()) {
-        auto swr = CIDR::parse(range);
-        if (!swr.isOK()) {
-            output.push_back(range.toString());
-        } else {
-            output.push_back(std::move(swr.getValue()));
-        }
-    }
-    return output;
-}
 
-void updateMaxIncomingConnectionsOverride(BSONObj obj) {
-    auto maxConnsOverride = parseMaxIncomingConnectionsParameters(obj);
-    serverGlobalParams.maxConnsOverride.update(
-        std::make_shared<decltype(maxConnsOverride)>(std::move(maxConnsOverride)));
-}
-}  // namespace
-
+// TODO: SERVER-106468 Define CIDRRangeListParameter and remove this glue code
 void MaxIncomingConnectionsOverrideServerParameter::append(OperationContext*,
                                                            BSONObjBuilder* bob,
                                                            StringData name,
                                                            const boost::optional<TenantId>&) {
-    BSONObjBuilder subBob(bob->subobjStart(name));
-    BSONArrayBuilder subArray(subBob.subarrayStart("ranges"_sd));
-    auto snapshot = serverGlobalParams.maxConnsOverride.makeSnapshot();
-    if (!snapshot)
-        return;
-
-    for (const auto& range : *snapshot) {
-        subArray.append(std::visit(OverloadedVisitor{
-                                       [](const CIDR& arg) { return arg.toString(); },
-                                       [](const std::string& arg) { return arg; },
-                                   },
-                                   range));
-    }
+    appendCIDRRangeListParameter(serverGlobalParams.maxIncomingConnsOverride, bob, name);
 }
 
 Status MaxIncomingConnectionsOverrideServerParameter::set(const BSONElement& value,
-                                                          const boost::optional<TenantId>&) try {
-    updateMaxIncomingConnectionsOverride(value.Obj());
-    return Status::OK();
-} catch (const AssertionException& e) {
-    return e.toStatus();
+                                                          const boost::optional<TenantId>&) {
+    return setCIDRRangeListParameter(serverGlobalParams.maxIncomingConnsOverride, value.Obj());
 }
 
 Status MaxIncomingConnectionsOverrideServerParameter::setFromString(
-    StringData str, const boost::optional<TenantId>&) try {
-    updateMaxIncomingConnectionsOverride(fromjson(str));
-    return Status::OK();
-} catch (const AssertionException& e) {
-    return e.toStatus();
+    StringData str, const boost::optional<TenantId>&) {
+    return setCIDRRangeListParameter(serverGlobalParams.maxIncomingConnsOverride, fromjson(str));
 }
 
+template <typename Callback>
+Status forEachSessionManager(Callback&& updateFunc) try {
+    // If the global service context hasn't yet been initialized, then the parameters will be
+    // set on SessionManager construction rather than through the hooks here.
+    if (MONGO_likely(hasGlobalServiceContext())) {
+        getGlobalServiceContext()->getTransportLayerManager()->forEach([&](auto tl) {
+            if (tl->getSessionManager()) {
+                updateFunc(tl->getSessionManager());
+            }
+        });
+    }
+    return Status::OK();
+} catch (const DBException& ex) {
+    return ex.toStatus();
+}
+
+Status onUpdateEstablishmentRefreshRate(int32_t newValue) {
+    return forEachSessionManager([newValue](SessionManager* sm) {
+        sm->getSessionEstablishmentRateLimiter().updateRateParameters(
+            newValue, gIngressConnectionEstablishmentBurstCapacitySecs.load());
+    });
+}
+
+Status onUpdateEstablishmentBurstCapacitySecs(double newValue) {
+    auto refreshRate = gIngressConnectionEstablishmentRatePerSec.load();
+    return forEachSessionManager([refreshRate, burstCapacitySecs = newValue](SessionManager* sm) {
+        sm->getSessionEstablishmentRateLimiter().updateRateParameters(refreshRate,
+                                                                      burstCapacitySecs);
+    });
+}
+
+Status onUpdateEstablishmentMaxQueueDepth(int32_t newValue) {
+    return forEachSessionManager([newValue](SessionManager* sm) {
+        sm->getSessionEstablishmentRateLimiter().setMaxQueueDepth(newValue);
+    });
+}
 }  // namespace mongo::transport

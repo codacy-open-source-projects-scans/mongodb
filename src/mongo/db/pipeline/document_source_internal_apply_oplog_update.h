@@ -29,23 +29,23 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <set>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/db/update/update_driver.h"
+#include "mongo/util/modules.h"
+
+#include <set>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -65,14 +65,16 @@ public:
                                            const BSONObj& oplogUpdate);
 
     const char* getSourceName() const override {
-        return kStageName.rawData();
+        return kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kInternalApplyOplogUpdate;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const override {
+    StageConstraints constraints(PipelineSplitState pipeState) const override {
         StageConstraints constraints(StreamType::kStreaming,
                                      PositionRequirement::kNone,
                                      HostTypeRequirement::kNone,
@@ -87,6 +89,7 @@ public:
         constraints.isAllowedWithinUpdatePipeline = true;
         constraints.checkExistenceForDiffInsertOperations = true;
         constraints.isIndependentOfAnyCollection = false;
+        constraints.consumesLogicalCollectionData = false;
         return constraints;
     }
 
@@ -101,12 +104,13 @@ public:
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
 
 private:
+    friend boost::intrusive_ptr<exec::agg::Stage>
+    documentSourceInternalApplyOplogUpdateGroupToStageFn(
+        const boost::intrusive_ptr<DocumentSource>&);
+
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
 
-    GetNextResult doGetNext() override;
-
     BSONObj _oplogUpdate;
-    UpdateDriver _updateDriver;
 };
 
 }  // namespace mongo

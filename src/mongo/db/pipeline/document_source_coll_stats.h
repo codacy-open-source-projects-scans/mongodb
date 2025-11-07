@@ -29,19 +29,8 @@
 
 #pragma once
 
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/action_type.h"
@@ -53,7 +42,6 @@
 #include "mongo/db/pipeline/document_source_coll_stats_gen.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
-#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
@@ -61,6 +49,15 @@
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -75,12 +72,13 @@ public:
     class LiteParsed final : public LiteParsedDocumentSource {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
-                                                 const BSONElement& specElem) {
+                                                 const BSONElement& specElem,
+                                                 const LiteParserOptions& options) {
             uassert(5447000,
                     str::stream() << "$collStats must take a nested object but found: " << specElem,
-                    specElem.type() == BSONType::Object);
-            auto spec = DocumentSourceCollStatsSpec::parse(IDLParserContext(kStageName),
-                                                           specElem.embeddedObject());
+                    specElem.type() == BSONType::object);
+            auto spec = DocumentSourceCollStatsSpec::parse(specElem.embeddedObject(),
+                                                           IDLParserContext(kStageName));
             return std::make_unique<LiteParsed>(specElem.fieldName(), nss, std::move(spec));
         }
 
@@ -115,11 +113,6 @@ public:
         const DocumentSourceCollStatsSpec _spec;
     };
 
-    static BSONObj makeStatsForNs(const boost::intrusive_ptr<ExpressionContext>&,
-                                  const NamespaceString&,
-                                  const DocumentSourceCollStatsSpec&,
-                                  const boost::optional<BSONObj>& filterObj = boost::none);
-
     DocumentSourceCollStats(const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
                             DocumentSourceCollStatsSpec spec)
         : DocumentSource(kStageName, pExpCtx),
@@ -128,11 +121,13 @@ public:
 
     const char* getSourceName() const final;
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kCollStats;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         HostTypeRequirement hostTypeRequirement =
             _targetAllNodes ? HostTypeRequirement::kAllShardHosts : HostTypeRequirement::kAnyShard;
         StageConstraints constraints(StreamType::kStreaming,
@@ -144,7 +139,7 @@ public:
                                      LookupRequirement::kAllowed,
                                      UnionRequirement::kAllowed);
 
-        constraints.requiresInputDocSource = false;
+        constraints.setConstraintsForNoInputSources();
         return constraints;
     }
 
@@ -160,11 +155,11 @@ public:
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
 private:
-    GetNextResult doGetNext() final;
+    friend boost::intrusive_ptr<exec::agg::Stage> documentSourceCollStatsToStageFn(
+        const boost::intrusive_ptr<DocumentSource>& documentSource);
 
     // The raw object given to $collStats containing user specified options.
     DocumentSourceCollStatsSpec _collStatsSpec;
-    bool _finished = false;
     bool _targetAllNodes;
 };
 

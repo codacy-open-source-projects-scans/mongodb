@@ -27,9 +27,12 @@
 #
 """Calibration configuration."""
 
+import os
 import random
 
 import config
+import numpy as np
+import pandas as pd
 from random_generator import ArrayRandomDistribution, DataType, RandomDistribution, RangeGenerator
 
 __all__ = ["main_config", "distributions"]
@@ -123,78 +126,17 @@ distributions["array_small"] = ArrayRandomDistribution(lengths_distr, distributi
 
 # Database settings
 database = config.DatabaseConfig(
-    connection_string="mongodb://localhost",
-    database_name="abt_calibration",
-    dump_path="~/data/dump",
+    connection_string=os.getenv("MONGODB_URI", "mongodb://localhost"),
+    database_name="qsn_calibration",
+    dump_path="~/mongo/buildscripts/cost_model",
     restore_from_dump=config.RestoreMode.NEVER,
     dump_on_exit=False,
 )
 
 
 # Collection template settings
-def create_index_scan_collection_template(name: str, cardinality: int) -> config.CollectionTemplate:
-    values = [
-        "iqtbr5b5is",
-        "vt5s3tf8o6",
-        "b0rgm58qsn",
-        "9m59if353m",
-        "biw2l9ok17",
-        "b9ct0ue14d",
-        "oxj0vxjsti",
-        "f3k8w9vb49",
-        "ec7v82k6nk",
-        "f49ufwaqx7",
-    ]
-
-    start_weight = 10
-    step_weight = 25
-    finish_weight = start_weight + len(values) * step_weight
-    weights = list(range(start_weight, finish_weight, step_weight))
-    fill_up_weight = cardinality - sum(weights)
-    if fill_up_weight > 0:
-        values.append(HIDDEN_STRING_VALUE)
-        weights.append(fill_up_weight)
-
-    distr = RandomDistribution.choice(values, weights)
-
-    return config.CollectionTemplate(
-        name=name,
-        fields=[
-            config.FieldTemplate(
-                name="choice", data_type=config.DataType.STRING, distribution=distr, indexed=True
-            ),
-            config.FieldTemplate(
-                name="mixed1",
-                data_type=config.DataType.STRING,
-                distribution=distributions["string_mixed"],
-                indexed=False,
-            ),
-            config.FieldTemplate(
-                name="uniform1",
-                data_type=config.DataType.STRING,
-                distribution=distributions["string_uniform"],
-                indexed=False,
-            ),
-            config.FieldTemplate(
-                name="choice2",
-                data_type=config.DataType.STRING,
-                distribution=distributions["string_choice"],
-                indexed=False,
-            ),
-            config.FieldTemplate(
-                name="mixed2",
-                data_type=config.DataType.STRING,
-                distribution=distributions["string_mixed"],
-                indexed=False,
-            ),
-        ],
-        compound_indexes=[],
-        cardinalities=[cardinality],
-    )
-
-
-def create_physical_scan_collection_template(
-    name: str, payload_size: int = 0
+def create_coll_scan_collection_template(
+    name: str, cardinalities: list[int], payload_size: int = 0
 ) -> config.CollectionTemplate:
     template = config.CollectionTemplate(
         name=name,
@@ -229,9 +171,23 @@ def create_physical_scan_collection_template(
                 distribution=distributions["string_mixed"],
                 indexed=False,
             ),
+            config.FieldTemplate(
+                name="int_uniform",
+                data_type=config.DataType.INTEGER,
+                distribution=RandomDistribution.uniform(
+                    RangeGenerator(DataType.INTEGER, 0, 100_000)
+                ),
+                indexed=True,
+            ),
+            config.FieldTemplate(
+                name="int_uniform_unindexed",
+                data_type=config.DataType.INTEGER,
+                distribution=RandomDistribution.uniform(RangeGenerator(DataType.INTEGER, 1, 2)),
+                indexed=False,
+            ),
         ],
         compound_indexes=[],
-        cardinalities=[1000, 5000, 10000],
+        cardinalities=cardinalities,
     )
 
     if payload_size > 0:
@@ -247,10 +203,107 @@ def create_physical_scan_collection_template(
     return template
 
 
-collection_caridinalities = list(range(10000, 50001, 10000))
+def create_intersection_collection_template(
+    name: str, cardinalities: list[int], distribution: str, value_range: int = 10
+) -> config.CollectionTemplate:
+    distribution_fn = (
+        RandomDistribution.normal if distribution == "normal" else RandomDistribution.uniform
+    )
 
-c_int_05 = config.CollectionTemplate(
-    name="c_int_05",
+    fields = [
+        config.FieldTemplate(
+            name="a",
+            data_type=config.DataType.INTEGER,
+            distribution=distribution_fn(RangeGenerator(DataType.INTEGER, 1, value_range + 1)),
+            indexed=True,
+        ),
+        config.FieldTemplate(
+            name="b",
+            data_type=config.DataType.INTEGER,
+            distribution=distribution_fn(RangeGenerator(DataType.INTEGER, 1, value_range + 1)),
+            indexed=True,
+        ),
+    ]
+
+    return config.CollectionTemplate(
+        name=name,
+        fields=fields,
+        compound_indexes=[],
+        cardinalities=cardinalities,
+    )
+
+
+# Creates a collection with fields "a", "b", ... "j" (if 'num_fields' is 10) and an
+# additional field "sort_field" if 'include_sort_field' is true.
+# If 'every_field_indexed' is false then only "a" will be indexed.
+# 'end_of_range_is_card' requires that there is only one cardinality in
+# 'cardinalities' and sets the end of the range for the field values to be the cardinality.
+def create_indexed_fields_template(
+    name: str,
+    cardinalities: list[int],
+    end_of_range_is_card,
+    every_field_indexed,
+    include_sort_field,
+    num_base_fields: int = 10,
+) -> config.CollectionTemplate:
+    # Generate fields "a", "b", ... "j" (if num_merge_fields is 10)
+    field_names = [chr(ord("a") + i) for i in range(num_base_fields)]
+
+    dist_end_range = num_base_fields + 1
+    if end_of_range_is_card:
+        assert len(cardinalities) == 1
+        dist_end_range = cardinalities[0]
+
+    fields = [
+        config.FieldTemplate(
+            name=field_name,
+            data_type=config.DataType.INTEGER,
+            distribution=RandomDistribution.uniform(
+                RangeGenerator(DataType.INTEGER, 1, dist_end_range)
+            ),
+            indexed=True if every_field_indexed else (field_name == "a"),
+        )
+        for field_name in field_names
+    ]
+
+    compound_indexes = []
+
+    if include_sort_field:
+        fields.append(
+            config.FieldTemplate(
+                name="sort_field",
+                data_type=config.DataType.STRING,
+                distribution=random_strings_distr(10, 1000),
+                indexed=False,
+            )
+        )
+        compound_indexes = [{field_name: 1, "sort_field": 1} for field_name in field_names]
+
+    elif not every_field_indexed:
+        assert num_base_fields == 10
+        compound_indexes = [
+            # Note the single field index is created in the FieldTemplate for 'a' above.
+            ["a", "b"],
+            ["a", "b", "c"],
+            ["a", "b", "c", "d"],
+            ["a", "b", "c", "d", "e"],
+            ["a", "b", "c", "d", "e", "f"],
+            ["a", "b", "c", "d", "e", "f", "g"],
+            ["a", "b", "c", "d", "e", "f", "g", "h"],
+            ["a", "b", "c", "d", "e", "f", "g", "h", "i"],
+            ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"],
+        ]
+
+    return config.CollectionTemplate(
+        name=name,
+        fields=fields,
+        compound_indexes=compound_indexes,
+        cardinalities=cardinalities,
+    )
+
+
+projection_collection = config.CollectionTemplate(
+    name="projection",
     fields=[
         config.FieldTemplate(
             name="in1",
@@ -284,33 +337,70 @@ c_int_05 = config.CollectionTemplate(
         ),
     ],
     compound_indexes=[],
-    cardinalities=collection_caridinalities,
+    cardinalities=[30000],
 )
 
-c_arr_01 = config.CollectionTemplate(
-    name="c_arr_01",
-    fields=[
-        config.FieldTemplate(
-            name="as",
-            data_type=config.DataType.INTEGER,
-            distribution=distributions["array_small"],
-            indexed=True,
-        )
-    ],
-    compound_indexes=[],
-    cardinalities=collection_caridinalities,
+doc_scan_collection = create_coll_scan_collection_template(
+    "doc_scan", cardinalities=[100_000, 200_000], payload_size=2000
+)
+sort_collections = create_coll_scan_collection_template(
+    "sort",
+    cardinalities=[5, 10, 50, 75, 100, 150, 300, 400, 500, 750, 1000],
+    payload_size=10,
+)
+merge_sort_collections = create_indexed_fields_template(
+    "merge_sort",
+    cardinalities=[5, 10, 50, 75, 100, 150, 300, 400, 500, 750, 1000],
+    end_of_range_is_card=False,
+    every_field_indexed=False,
+    include_sort_field=True,
+    num_base_fields=10,
+)
+or_collections = create_indexed_fields_template(
+    "or",
+    cardinalities=[5, 10, 50, 75, 100, 150, 300, 400, 500, 750] + list(range(1000, 10001, 1000)),
+    end_of_range_is_card=False,
+    every_field_indexed=True,
+    include_sort_field=False,
+    num_base_fields=2,
+)
+intersection_sorted_collections = create_intersection_collection_template(
+    "intersection_sorted",
+    distribution="normal",
+    cardinalities=[5, 100, 1000, 5000],
+    value_range=10,
+)
+intersection_hash_collection = create_intersection_collection_template(
+    "intersection_hash",
+    distribution="normal",
+    cardinalities=[1000],
+    value_range=10,
 )
 
-index_scan = create_index_scan_collection_template("index_scan", 1000000)
-
-physical_scan = create_physical_scan_collection_template("physical_scan", 2000)
+index_scan_collection = create_indexed_fields_template(
+    "index_scan",
+    cardinalities=[10000],
+    end_of_range_is_card=True,
+    every_field_indexed=False,
+    include_sort_field=False,
+    num_base_fields=10,
+)
 
 # Data Generator settings
 data_generator = config.DataGeneratorConfig(
     enabled=True,
     create_indexes=True,
     batch_size=10000,
-    collection_templates=[index_scan, physical_scan, c_int_05, c_arr_01],
+    collection_templates=[
+        index_scan_collection,
+        doc_scan_collection,
+        sort_collections,
+        merge_sort_collections,
+        or_collections,
+        intersection_sorted_collections,
+        intersection_hash_collection,
+        projection_collection,
+    ],
     write_mode=config.WriteMode.REPLACE,
     collection_name_with_card=True,
 )
@@ -320,56 +410,173 @@ workload_execution = config.WorkloadExecutionConfig(
     enabled=True,
     output_collection_name="calibrationData",
     write_mode=config.WriteMode.REPLACE,
-    warmup_runs=3,
-    runs=30,
+    warmup_runs=10,
+    runs=100,
 )
 
-
-def make_filter_by_note(note_value: any):
-    def impl(df):
-        return df[df.note == note_value]
-
-    return impl
-
-
-abt_nodes = [
-    config.AbtNodeCalibrationConfig(
-        type="PhysicalScan", filter_function=make_filter_by_note("PhysicalScan")
+qsn_nodes = [
+    config.QsNodeCalibrationConfig(name="COLLSCAN_FORWARD", type="COLLSCAN"),
+    config.QsNodeCalibrationConfig(name="COLLSCAN_BACKWARD", type="COLLSCAN"),
+    config.QsNodeCalibrationConfig(name="COLLSCAN_W_FILTER", type="COLLSCAN"),
+    config.QsNodeCalibrationConfig(
+        name="IXSCAN_FORWARD",
+        type="IXSCAN",
+        variables_override=lambda df: pd.concat(
+            [df["n_processed"].rename("Keys Examined"), df["seeks"].rename("Number of seeks")],
+            axis=1,
+        ),
     ),
-    config.AbtNodeCalibrationConfig(
-        type="IndexScan", filter_function=make_filter_by_note("IndexScan")
+    config.QsNodeCalibrationConfig(
+        name="IXSCAN_BACKWARD",
+        type="IXSCAN",
+        variables_override=lambda df: pd.concat(
+            [df["n_processed"].rename("Keys Examined"), df["seeks"].rename("Number of seeks")],
+            axis=1,
+        ),
     ),
-    config.AbtNodeCalibrationConfig(type="Seek", filter_function=make_filter_by_note("IndexScan")),
-    config.AbtNodeCalibrationConfig(
-        type="Filter", filter_function=make_filter_by_note("PhysicalScan")
+    config.QsNodeCalibrationConfig(
+        name="IXSCANS_W_DIFF_NUM_FIELDS",
+        type="IXSCAN",
+        variables_override=lambda df: pd.concat(
+            [df["n_index_fields"].rename("Number of fields in index")],
+            axis=1,
+        ),
     ),
-    config.AbtNodeCalibrationConfig(
-        type="Evaluation", filter_function=make_filter_by_note("Evaluation")
+    config.QsNodeCalibrationConfig(
+        name="IXSCAN_W_FILTER",
+        type="IXSCAN",
+        variables_override=lambda df: pd.concat(
+            [df["n_processed"].rename("Keys Examined"), df["seeks"].rename("Number of seeks")],
+            axis=1,
+        ),
     ),
-    config.AbtNodeCalibrationConfig(type="NestedLoopJoin"),
-    config.AbtNodeCalibrationConfig(type="HashJoin"),
-    config.AbtNodeCalibrationConfig(type="MergeJoin"),
-    config.AbtNodeCalibrationConfig(type="Union"),
-    config.AbtNodeCalibrationConfig(
-        type="LimitSkip", filter_function=make_filter_by_note("LimitSkip")
+    config.QsNodeCalibrationConfig(type="FETCH"),
+    config.QsNodeCalibrationConfig(name="FETCH_W_FILTER", type="FETCH"),
+    config.QsNodeCalibrationConfig(
+        type="AND_HASH",
+        variables_override=lambda df: pd.concat(
+            [
+                df["n_processed_per_child"].str[0].rename("Documents from first child"),
+                df["n_processed_per_child"].str[1].rename("Documents from second child"),
+                df["n_returned"],
+            ],
+            axis=1,
+        ),
     ),
-    config.AbtNodeCalibrationConfig(type="GroupBy"),
-    config.AbtNodeCalibrationConfig(type="Unwind"),
-    config.AbtNodeCalibrationConfig(type="Unique"),
+    config.QsNodeCalibrationConfig(
+        type="AND_SORTED",
+        variables_override=lambda df: pd.concat(
+            [
+                df["n_processed"],
+                df["n_returned"],
+            ],
+            axis=1,
+        ),
+    ),
+    config.QsNodeCalibrationConfig(type="OR"),
+    config.QsNodeCalibrationConfig(
+        type="SORT_MERGE",
+        # Note: n_returned = n_processed - (amount of duplicates dropped)
+        variables_override=lambda df: pd.concat(
+            [
+                (df["n_returned"] * np.log2(df["n_children"])).rename(
+                    "n_returned * log2(n_children)"
+                ),
+                df["n_processed"],
+            ],
+            axis=1,
+        ),
+    ),
+    config.QsNodeCalibrationConfig(
+        name="SORT_DEFAULT",
+        type="SORT",
+        # Calibration involves a combination of a linearithmic and linear factor
+        variables_override=lambda df: pd.concat(
+            [
+                (df["n_processed"] * np.log2(df["n_processed"])).rename(
+                    "n_processed * log2(n_processed)"
+                ),
+                df["n_processed"],
+            ],
+            axis=1,
+        ),
+    ),
+    config.QsNodeCalibrationConfig(
+        name="SORT_SIMPLE",
+        type="SORT",
+        # Calibration involves a combination of a linearithmic and linear factor
+        variables_override=lambda df: pd.concat(
+            [
+                (df["n_processed"] * np.log2(df["n_processed"])).rename(
+                    "n_processed * log2(n_processed)"
+                ),
+                df["n_processed"],
+            ],
+            axis=1,
+        ),
+    ),
+    config.QsNodeCalibrationConfig(
+        name="SORT_LIMIT_SIMPLE",
+        type="SORT",
+        # Note: n_returned = min(limitAmount, n_processed)
+        variables_override=lambda df: pd.concat(
+            [
+                df["n_processed"],
+                (df["n_processed"] * np.log2(df["n_returned"])).rename(
+                    "n_processed * log2(n_returned)"
+                ),
+                (df["n_returned"] * np.log2(df["n_returned"])).rename(
+                    "n_returned * log2(n_returned)"
+                ),
+            ],
+            axis=1,
+        ),
+    ),
+    config.QsNodeCalibrationConfig(
+        name="SORT_LIMIT_DEFAULT",
+        type="SORT",
+        # Note: n_returned = min(limitAmount, n_processed)
+        variables_override=lambda df: pd.concat(
+            [
+                df["n_processed"],
+                (df["n_processed"] * np.log2(df["n_returned"])).rename(
+                    "n_processed * log2(n_returned)"
+                ),
+                (df["n_returned"] * np.log2(df["n_returned"])).rename(
+                    "n_returned * log2(n_returned)"
+                ),
+            ],
+            axis=1,
+        ),
+    ),
+    config.QsNodeCalibrationConfig(type="LIMIT"),
+    config.QsNodeCalibrationConfig(
+        type="SKIP",
+        variables_override=lambda df: pd.concat(
+            [
+                df["n_returned"].rename("Documents Passed"),
+                (df["n_processed"] - df["n_returned"]).rename("Documents Skipped"),
+            ],
+            axis=1,
+        ),
+    ),
+    config.QsNodeCalibrationConfig(type="PROJECTION_SIMPLE"),
+    config.QsNodeCalibrationConfig(type="PROJECTION_COVERED"),
+    config.QsNodeCalibrationConfig(type="PROJECTION_DEFAULT"),
 ]
-
 # Calibrator settings
-abt_calibrator = config.AbtCalibratorConfig(
+qs_calibrator = config.QuerySolutionCalibrationConfig(
     enabled=True,
     test_size=0.2,
     input_collection_name=workload_execution.output_collection_name,
     trace=False,
-    nodes=abt_nodes,
+    nodes=qsn_nodes,
 )
+
 
 main_config = config.Config(
     database=database,
     data_generator=data_generator,
-    abt_calibrator=abt_calibrator,
+    qs_calibrator=qs_calibrator,
     workload_execution=workload_execution,
 )

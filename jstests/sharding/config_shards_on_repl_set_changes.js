@@ -1,10 +1,6 @@
 /**
  * Tests that the connection string in the config.shards document is correctly updated when a node
  * is added or removed from the replica set.
- * @tags: [
- *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
- *    embedded_router_incompatible,
- * ]
  */
 
 import {ShardingTest} from "jstests/libs/shardingtest.js";
@@ -17,7 +13,7 @@ const testColl = st.s.getDB(dbName).getCollection(collName);
 
 function getConfigShardsDoc(rst) {
     return st.s.getCollection("config.shards").findOne({
-        _id: rst.isConfigServer ? "config" : rst.name
+        _id: rst.isConfigServer ? "config" : rst.name,
     });
 }
 
@@ -27,7 +23,11 @@ const rs0Config = st.rs0.getReplSetConfigFromNode();
 const configShardsDoc0 = getConfigShardsDoc(st.rs0);
 assert.eq(configShardsDoc0.host.split(",").length, 2);
 
-const newNode = st.rs0.add({rsConfig: {votes: 0, priority: 0}});
+let roleStr = st.rs0.isConfigServer ? "configsvr" : "shardsvr";
+let replConfigForNewNode = {rsConfig: {votes: 0, priority: 0}};
+replConfigForNewNode[roleStr] = "";
+
+const newNode = st.rs0.add(replConfigForNewNode);
 st.rs0.reInitiate();
 
 assert.soon(() => {
@@ -45,4 +45,18 @@ assert.soon(() => {
 });
 
 assert.commandWorked(testColl.insert({x: 1}));
+
+// Simulate restore procedure removing the replSetConfigVersion field.
+// Shards should still be able to update the host names after this.
+let shardsColl = st.s.getCollection("config.shards");
+assert.commandWorked(shardsColl.update({_id: st.rs0.name}, {$unset: {replSetConfigVersion: ""}}));
+
+st.rs0.add(replConfigForNewNode);
+st.rs0.reInitiate();
+
+assert.soon(() => {
+    const configShardsDoc1 = getConfigShardsDoc(st.rs0);
+    return configShardsDoc1.host.split(",").length === 3;
+});
+
 st.stop();

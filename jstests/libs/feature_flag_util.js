@@ -3,13 +3,112 @@ import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 /**
  * Utilities for feature flags.
  */
-export var FeatureFlagUtil = (function() {
+export var FeatureFlagUtil = (function () {
     // A JS attempt at an enum.
     const FlagStatus = {
-        kEnabled: 'kEnabled',
-        kDisabled: 'kDisabled',
-        kNotFound: 'kNotFound',
+        kEnabled: "kEnabled",
+        kDisabled: "kDisabled",
+        kNotFound: "kNotFound",
     };
+
+    function _getConnectionToMongod(db) {
+        // If db represents a connection to mongos, or some other configuration, we need
+        // to obtain the correct connection to a mongod.
+        const getMongodConn = (db) => {
+            if (!FixtureHelpers.isMongos(db)) {
+                return db;
+            }
+
+            // For sharded cluster get a connection to the config server through a Mongo
+            // object. We may fail to connect if we are in a stepdown/terminate passthrough, so
+            // retry on retryable errors. After the connection is established, runCommand overrides
+            // should guarantee that subsequent operations on the connection are retried in the
+            // event of network errors in suites where that possibility exists.
+            return retryOnRetryableError(() => {
+                return new Mongo(
+                    FixtureHelpers.getConfigServerConnString(db),
+                    undefined /*encryptedDBClientCallback */,
+                    {gRPC: false},
+                );
+            });
+        };
+        try {
+            return getMongodConn(db);
+        } catch (err) {
+            // Some db-like objects (e.g. ShardingTest.shard0) aren't supported by FixtureHelpers,
+            // but we can replace it with an object that should work and try again.
+            if (typeof db.getDB === typeof Function) {
+                return getMongodConn(db.getDB(db.defaultDB));
+            } else {
+                // Some db-like objects (e.g ShardedClusterFixture) have a getSiblingDB method
+                // instead of getDB, use that here to avoid an undefined error.
+                return getMongodConn(db.getSiblingDB(db.getMongo().defaultDB));
+            }
+        }
+    }
+
+    function _getAuthenticatedConnectionToMongod(db) {
+        let mongodConn = _getConnectionToMongod(db);
+        return mongodConn;
+    }
+
+    function _getFullFeatureFlagName(featureFlagName) {
+        if (!featureFlagName.startsWith("featureFlag")) {
+            return `featureFlag${featureFlagName}`;
+        }
+        return featureFlagName;
+    }
+
+    function _getFeatureFlagDoc(conn, featureFlagName) {
+        const fullFlagName = _getFullFeatureFlagName(featureFlagName);
+        const parameterDoc = conn.adminCommand({getParameter: 1, [fullFlagName]: 1});
+        if (!parameterDoc.ok || !parameterDoc.hasOwnProperty(fullFlagName)) {
+            // Feature flag not found.
+            if (!parameterDoc.ok) {
+                assert.eq(parameterDoc.errmsg, "no option found to get");
+            }
+            return undefined;
+        }
+        return parameterDoc[fullFlagName];
+    }
+
+    function _getStatusLegacy(conn, ignoreFCV, flagDoc) {
+        const fcvDoc = assert.commandWorked(conn.adminCommand({getParameter: 1, featureCompatibilityVersion: 1}));
+        assert(fcvDoc.hasOwnProperty("featureCompatibilityVersion"), fcvDoc);
+
+        const flagIsEnabled = flagDoc.value;
+        const flagVersionIsValid =
+            MongoRunner.compareBinVersions(fcvDoc.featureCompatibilityVersion.version, flagDoc.version) >= 0;
+
+        const flagShouldBeFCVGated = flagDoc.fcv_gated;
+
+        if (flagIsEnabled && (!flagShouldBeFCVGated || ignoreFCV || flagVersionIsValid)) {
+            return FlagStatus.kEnabled;
+        }
+        return FlagStatus.kDisabled;
+    }
+
+    function _getStatus(ignoreFCV, flagDoc) {
+        assert(flagDoc.hasOwnProperty("currentlyEnabled"));
+
+        if (flagDoc.fcv_gated && ignoreFCV) {
+            return flagDoc.value ? FlagStatus.kEnabled : FlagStatus.kDisabled;
+        } else {
+            return flagDoc.currentlyEnabled ? FlagStatus.kEnabled : FlagStatus.kDisabled;
+        }
+    }
+
+    function getFeatureFlagDoc(db, flagName) {
+        const conn = _getAuthenticatedConnectionToMongod(db);
+        return _getFeatureFlagDoc(conn, flagName);
+    }
+
+    function getFeatureFlagDocStatus(db, flagDoc, ignoreFCV) {
+        // TODO (SERVER-102609): Remove _getStatusLegacy() once v9.0 becomes last-LTS.
+        return flagDoc.hasOwnProperty("currentlyEnabled")
+            ? _getStatus(ignoreFCV, flagDoc)
+            : _getStatusLegacy(_getAuthenticatedConnectionToMongod(db), ignoreFCV, flagDoc);
+    }
 
     /**
      * @param 'featureFlag' - the name of the flag you want to check, but *without* the
@@ -25,73 +124,12 @@ export var FeatureFlagUtil = (function() {
      *     not found. A flag may be not found because it was recently deleted or because the test is
      *     running on an older mongod version for example.
      */
-    function getStatus(db, featureFlag, user, ignoreFCV) {
+    function getStatus(db, featureFlag, ignoreFCV) {
         // In order to get an accurate answer for whether a feature flag is enabled, we need to ask
-        // a mongod. If db represents a connection to mongos, or some other configuration, we need
-        // to obtain the correct connection to a mongod.
-        let conn = null;
-        const setConn = (db) => {
-            if (!FixtureHelpers.isMongos(db)) {
-                conn = db;
-                return;
-            }
-
-            // For sharded cluster get a connection to the first replicaset through a Mongo
-            // object. We may fail to connect if we are in a stepdown/terminate passthrough, so
-            // retry on retryable errors. After the connection is established, runCommand overrides
-            // should guarantee that subsequent operations on the connection are retried in the
-            // event of network errors in suites where that possibility exists.
-            retryOnRetryableError(() => {
-                conn = new Mongo(
-                    FixtureHelpers.getAllReplicas(db)[0].getURL(), undefined, {gRPC: false});
-            });
-        };
-        try {
-            setConn(db);
-        } catch (err) {
-            // Some db-like objects (e.g. ShardingTest.shard0) aren't supported by FixtureHelpers,
-            // but we can replace it with an object that should work and try again.
-            if (typeof db.getDB === typeof Function) {
-                setConn(db.getDB(db.defaultDB));
-            } else {
-                // Some db-like objects (e.g ShardedClusterFixture) have a getSiblingDB method
-                // instead of getDB, use that here to avoid an undefined error.
-                setConn(db.getSiblingDB(db.getMongo().defaultDB));
-            }
-        }
-
-        if (user) {
-            conn.auth(user.username, user.password);
-        }
-
-        const fcvDoc = assert.commandWorked(
-            conn.adminCommand({getParameter: 1, featureCompatibilityVersion: 1}));
-        assert(fcvDoc.hasOwnProperty("featureCompatibilityVersion"), fcvDoc);
-
-        assert(!featureFlag.startsWith("featureFlag"),
-               `unexpected prefix in feature flag name: "${featureFlag}". Use "${
-                   featureFlag.replace(/^featureFlag/, '')}" instead.`);
-        const fullFlagName = `featureFlag${featureFlag}`;
-        const flagDoc = conn.adminCommand({getParameter: 1, [fullFlagName]: 1});
-        if (!flagDoc.ok || !flagDoc.hasOwnProperty(fullFlagName)) {
-            // Feature flag not found.
-            if (!flagDoc.ok) {
-                assert.eq(flagDoc.errmsg, "no option found to get");
-            }
-            return FlagStatus.kNotFound;
-        }
-
-        const flagIsEnabled = flagDoc[fullFlagName].value;
-        const flagVersionIsValid =
-            MongoRunner.compareBinVersions(fcvDoc.featureCompatibilityVersion.version,
-                                           flagDoc[fullFlagName].version) >= 0;
-
-        const flagShouldBeFCVGated = flagDoc[fullFlagName].shouldBeFCVGated;
-
-        if (flagIsEnabled && (!flagShouldBeFCVGated || ignoreFCV || flagVersionIsValid)) {
-            return FlagStatus.kEnabled;
-        }
-        return FlagStatus.kDisabled;
+        // a mongod.
+        const conn = _getAuthenticatedConnectionToMongod(db);
+        const flagDoc = _getFeatureFlagDoc(conn, featureFlag);
+        return flagDoc ? getFeatureFlagDocStatus(db, flagDoc, ignoreFCV) : FlagStatus.kNotFound;
     }
 
     /**
@@ -110,13 +148,14 @@ export var FeatureFlagUtil = (function() {
      * The advantage of this throwing API is that such a test will start complaining in evergreen
      * when you delete the feature flag, rather than passing by not actually running any assertions.
      */
-    function isEnabled(db, featureFlag, user, ignoreFCV) {
-        let status = getStatus(db, featureFlag, user, ignoreFCV);
+    function isEnabled(db, featureFlag, ignoreFCV) {
+        let status = getStatus(db, featureFlag, ignoreFCV);
         assert(
             status != FlagStatus.kNotFound,
             `You asked about a feature flag ${featureFlag} which wasn't present. If this is a ` +
                 "multiversion test and you want the coverage despite the flag not existing on an " +
-                "older version, consider using 'isPresentAndEnabled()' instead of 'isEnabled()'");
+                "older version, consider using 'isPresentAndEnabled()' instead of 'isEnabled()'",
+        );
         return status == FlagStatus.kEnabled;
     }
 
@@ -153,8 +192,8 @@ export var FeatureFlagUtil = (function() {
      * That code is dangerous because we may forget to delete it when "featureFlagMyFlag" is
      * removed, and the test would keep passing but stop testing.
      */
-    function isPresentAndEnabled(db, featureFlag, user, ignoreFCV) {
-        return getStatus(db, featureFlag, user, ignoreFCV) == FlagStatus.kEnabled;
+    function isPresentAndEnabled(db, featureFlag, ignoreFCV) {
+        return getStatus(db, featureFlag, ignoreFCV) == FlagStatus.kEnabled;
     }
 
     /**
@@ -172,8 +211,8 @@ export var FeatureFlagUtil = (function() {
      *
      *   assert(FeatureFlagUtil.isPresentAndDisabled(db, "MyFlag"))
      */
-    function isPresentAndDisabled(db, featureFlag, user, ignoreFCV) {
-        return getStatus(db, featureFlag, user, ignoreFCV) == FlagStatus.kDisabled;
+    function isPresentAndDisabled(db, featureFlag, ignoreFCV) {
+        return getStatus(db, featureFlag, ignoreFCV) == FlagStatus.kDisabled;
     }
 
     return {
@@ -181,6 +220,8 @@ export var FeatureFlagUtil = (function() {
         isEnabled: isEnabled,
         isPresentAndEnabled: isPresentAndEnabled,
         isPresentAndDisabled: isPresentAndDisabled,
+        getFeatureFlagDoc: getFeatureFlagDoc,
+        getFeatureFlagDocStatus: getFeatureFlagDocStatus,
         getStatus: getStatus,
     };
 })();

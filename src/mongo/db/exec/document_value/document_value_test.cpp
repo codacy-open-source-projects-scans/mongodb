@@ -27,16 +27,6 @@
  *    it in the license file.
  */
 
-#include <cmath>
-#include <cstdint>
-#include <cstring>
-#include <limits>
-#include <memory>
-#include <sstream>
-#include <string>
-#include <variant>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bson_depth.h"
@@ -58,17 +48,23 @@
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
 #include "mongo/db/pipeline/field_path.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/decimal128.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
 #include "mongo/util/time_support.h"
+
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <variant>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -118,18 +114,18 @@ TEST(DocumentConstruction, FromNonEmptyBson) {
     Document document = fromBson(BSON("a" << 1 << "b"
                                           << "q"));
     ASSERT_EQUALS(2ULL, document.computeSize());
-    ASSERT_EQUALS("a", getNthField(document, 0).first.toString());
+    ASSERT_EQUALS("a", getNthField(document, 0).first);
     ASSERT_EQUALS(1, getNthField(document, 0).second.getInt());
-    ASSERT_EQUALS("b", getNthField(document, 1).first.toString());
+    ASSERT_EQUALS("b", getNthField(document, 1).first);
     ASSERT_EQUALS("q", getNthField(document, 1).second.getString());
 }
 
 TEST(DocumentConstruction, FromInitializerList) {
     auto document = Document{{"a", 1}, {"b", "q"_sd}};
     ASSERT_EQUALS(2ULL, document.computeSize());
-    ASSERT_EQUALS("a", getNthField(document, 0).first.toString());
+    ASSERT_EQUALS("a", getNthField(document, 0).first);
     ASSERT_EQUALS(1, getNthField(document, 0).second.getInt());
-    ASSERT_EQUALS("b", getNthField(document, 1).first.toString());
+    ASSERT_EQUALS("b", getNthField(document, 1).first);
     ASSERT_EQUALS("q", getNthField(document, 1).second.getString());
 }
 
@@ -199,6 +195,77 @@ TEST(DocumentSerialization, CannotSerializeDocumentThatExceedsDepthLimit) {
     throwaway.abandon();
 }
 
+TEST(DocumentDepthCalculations, Sanity) {
+    {
+        // A scalar has depth 0.
+        ASSERT_EQ(0, Value(1).depth(BSONDepth::getMaxAllowableDepth()));
+    }
+    {
+        // Nesting documents increments depth.
+        int32_t initialDepth = 1;
+        MutableDocument md;
+        md.addField("a", Value(1));
+        Document doc(md.freeze());
+        Value val(doc);
+        int32_t iters = 16;
+        ASSERT_EQ(initialDepth, val.depth(BSONDepth::getMaxAllowableDepth()));
+        for (int32_t idx = 0; idx < iters; ++idx) {
+            MutableDocument md;
+            md.addField("a", Value(doc));
+            doc = md.freeze();
+            Value val(doc);
+            ASSERT_EQ(idx + initialDepth + 1, val.depth(BSONDepth::getMaxAllowableDepth()));
+        }
+    }
+    {
+        // Simple document with no nested paths has depth 1.
+        Value val(BSON("a" << 1));
+        ASSERT_EQ(1, val.depth(BSONDepth::getMaxAllowableDepth()));
+    }
+    {
+        // Depth is max of children.
+        BSONObj bson = BSON("a" << 1 << "b" << BSON("c" << 1));
+        Document document = fromBson(bson);
+        Value val(document);
+        ASSERT_EQ(2, val.depth(BSONDepth::getMaxAllowableDepth()));
+    }
+    {
+        // Arrays increment depth.
+        BSONObj bson = BSON("a" << BSON_ARRAY(1 << 1));
+        Value val(fromBson(bson));
+        ASSERT_EQ(2, val.depth(BSONDepth::getMaxAllowableDepth()));
+    }
+    {
+        // Array length does not affect depth.
+        BSONObj bson = BSON("a" << BSON_ARRAY(1 << 1));
+        BSONObj bson2 = BSON("a" << BSON_ARRAY(1 << 1 << 1));
+        Value val(fromBson(bson));
+        Value val2(fromBson(bson2));
+        ASSERT_EQ(val.depth(BSONDepth::getMaxAllowableDepth()),
+                  val2.depth(BSONDepth::getMaxAllowableDepth()));
+    }
+    {
+        // Nested arrays increment depth.
+        BSONObj bson = BSON("a" << BSON_ARRAY(1 << BSON_ARRAY(1 << 1)));
+        Value val(fromBson(bson));
+        ASSERT_EQ(3, val.depth(BSONDepth::getMaxAllowableDepth()));
+    }
+    {
+        // If maxDepth at least document depth, this function returns -1.
+        BSONObj bson = BSON("a" << 1 << "b" << BSON("c" << 1));
+        Document document = fromBson(bson);
+        Value val(document);
+        int32_t depth = 2;
+        for (int32_t maxDepth = 0; maxDepth < 2 * depth; maxDepth++) {
+            if (maxDepth <= depth) {
+                ASSERT_EQ(-1, val.depth(maxDepth));
+            } else {
+                ASSERT_EQ(depth, val.depth(maxDepth));
+            }
+        }
+    }
+}
+
 TEST(DocumentGetFieldNonCaching, UncachedTopLevelFields) {
     BSONObj bson = BSON("scalar" << 1 << "scalar2" << true);
     Document document = fromBson(bson);
@@ -210,8 +277,7 @@ TEST(DocumentGetFieldNonCaching, UncachedTopLevelFields) {
         ASSERT_EQ(Value::compare(*value, Value(elt), nullptr), 0);
 
         // Verify that the cache does not contain the field.
-        auto pos = storage->findField(elt.fieldNameStringData(),
-                                      DocumentStorage::LookupPolicy::kCacheOnly);
+        auto pos = storage->findFieldInCache(elt.fieldNameStringData());
         ASSERT_FALSE(pos.found());
     }
 
@@ -249,10 +315,11 @@ TEST(DocumentGetFieldNonCaching, ModifiedTopLevelFields) {
     // caching accessor.
     {
         ASSERT_EQ(document.getNestedScalarFieldNonCaching("val1")->getBool(), true);
-        ASSERT_EQ(document.getNestedScalarFieldNonCaching("val1.val1")->getType(), EOO);
+        ASSERT_EQ(document.getNestedScalarFieldNonCaching("val1.val1")->getType(), BSONType::eoo);
 
         ASSERT_EQ(document.getNestedScalarFieldNonCaching("val2.val2")->getBool(), true);
-        ASSERT_EQ(document.getNestedScalarFieldNonCaching("val2.val2.val2")->getType(), EOO);
+        ASSERT_EQ(document.getNestedScalarFieldNonCaching("val2.val2.val2")->getType(),
+                  BSONType::eoo);
     }
 }
 
@@ -263,7 +330,7 @@ TEST(DocumentGetFieldNonCaching, NonArrayDottedPaths) {
 
     auto isFieldCached = [&](StringData field) {
         const DocumentStorage* storage = static_cast<const DocumentStorage*>(document.getPtr());
-        auto pos = storage->findField(field, DocumentStorage::LookupPolicy::kCacheOnly);
+        auto pos = storage->findFieldInCache(field);
         return pos.found();
     };
 
@@ -389,8 +456,7 @@ TEST(DocumentGetFieldNonCaching, TraverseArray) {
 }
 
 TEST(DocumentSize, ApproximateSizeIsSnapshotted) {
-    const auto rawBson = BSON("field"
-                              << "value");
+    const auto rawBson = BSON("field" << "value");
     const Document document{rawBson};
     const auto noCacheSize = document.getApproximateSize();
 
@@ -469,6 +535,108 @@ TEST(ShredDocument, HandlesMetadata) {
     md.setMetadata(std::move(meta));
     Document shredded = md.freeze().shred();
     ASSERT_EQ(6, shredded.metadata().getSearchScore());
+}
+
+TEST(DocumentMerge, Sanity) {
+    /**
+     * doc1
+     * { "a": 1, "b": 2.2, "c": null }
+     *
+     * doc2
+     * { "a": 42, "d": false }
+     *
+     * result
+     * {  "a": 42, "b": 2.2, "c": null, "d": false }
+     */
+    Document doc1 = fromBson(BSON("a" << 1 << "b" << 2.2 << "c" << BSONNULL));
+    Document doc2 = fromBson(BSON("a" << 42 << "d" << false));
+
+    auto mergedDoc = Document::deepMerge(doc1, doc2);
+    // Value in 'doc2' prevails over value in 'doc1'.
+    ASSERT_EQUALS(42, mergedDoc["a"].getInt());
+    ASSERT_EQUALS(2.2, mergedDoc["b"].getDouble());
+    ASSERT_EQUALS(BSONType::null, mergedDoc["c"].getType());
+    ASSERT_EQUALS(false, mergedDoc["d"].getBool());
+}
+
+TEST(DocumentMerge, ArraysValueInRightDocumentPrevails) {
+    /**
+     * doc1
+     * {
+     *      "key": [ { "a": 1 }, { "b": 2 } ]
+     * }
+     *
+     * doc2
+     * {
+     *      "key": [ { "c": 3 }, { "d": 4 } ]
+     * }
+     *
+     * result
+     * {
+     *      "key": [ { "c": 3 }, { "c": 4 } ]
+     * }
+     */
+    Document doc1 = fromBson(BSON("key" << BSON_ARRAY(BSON("a" << 1) << BSON("b" << 2))));
+    Document doc2 = fromBson(BSON("key" << BSON_ARRAY(BSON("c" << 3) << BSON("d" << 4))));
+
+    auto mergedDoc = Document::deepMerge(doc1, doc2);
+    auto arr = mergedDoc["key"].getArray();
+    ASSERT_EQ(3, arr[0]["c"].getInt());
+    ASSERT_EQ(4, arr[1]["d"].getInt());
+}
+
+TEST(DocumentMerge, SubDocumentsAreMerged) {
+    /**
+     * doc1
+     * {
+     *      "key": { "a": 1, "b": 2 }
+     * }
+     *
+     * doc2
+     * {
+     *      "key": { "c": 3, "d": 4 }
+     * }
+     *
+     * result
+     * {
+     *      "key": { "a": 1, "b": 2, "c": 3 , "d": 4 }
+     * }
+     */
+    Document doc1 = fromBson(BSON("key" << BSON("a" << 1 << "b" << 2)));
+    Document doc2 = fromBson(BSON("key" << BSON("c" << 3 << "d" << 4)));
+
+    auto mergedDoc = Document::deepMerge(doc1, doc2);
+    ASSERT_EQ(1, mergedDoc["key"]["a"].getInt());
+    ASSERT_EQ(2, mergedDoc["key"]["b"].getInt());
+    ASSERT_EQ(3, mergedDoc["key"]["c"].getInt());
+    ASSERT_EQ(4, mergedDoc["key"]["d"].getInt());
+}
+
+TEST(DocumentMerge, SubDocumentsAreMergedRecursively) {
+    /**
+     * doc1
+     * {
+     *      "key": { "a": { "b": 1 }, "c": { "d": 2 } }
+     * }
+     *
+     * doc2
+     * {
+     *      "key": { "a": { "e": 3 }, "f": { "g": 4 } }
+     * }
+     *
+     * result
+     * {
+     *      "key": { "a": { "b": 1, "e": 3 }, "c": { "d": 2 }, "f": { "g": 4 } }
+     * }
+     */
+    Document doc1 = fromBson(BSON("key" << BSON("a" << BSON("b" << 1) << "c" << BSON("d" << 2))));
+    Document doc2 = fromBson(BSON("key" << BSON("a" << BSON("e" << 3) << "f" << BSON("g" << 4))));
+
+    auto mergedDoc = Document::deepMerge(doc1, doc2);
+    ASSERT_EQ(1, mergedDoc["key"]["a"]["b"].getInt());
+    ASSERT_EQ(3, mergedDoc["key"]["a"]["e"].getInt());
+    ASSERT_EQ(2, mergedDoc["key"]["c"]["d"].getInt());
+    ASSERT_EQ(4, mergedDoc["key"]["f"]["g"].getInt());
 }
 
 /** Add Document fields. */
@@ -555,8 +723,8 @@ public:
         LOGV2(20585, "{md_peek}", "md_peek"_attr = md.peek().toString());
         ASSERT_EQUALS(2ULL, md.peek().computeSize());
         ASSERT(md.peek()["b"].missing());
-        ASSERT_EQUALS("a", getNthField(md.peek(), 0).first.toString());
-        ASSERT_EQUALS("c", getNthField(md.peek(), 1).first.toString());
+        ASSERT_EQUALS("a", getNthField(md.peek(), 0).first);
+        ASSERT_EQUALS("c", getNthField(md.peek(), 1).first);
         ASSERT_EQUALS(99, md.peek()["c"].getInt());
         assertRoundTrips(md.peek());
 
@@ -564,7 +732,7 @@ public:
         md["a"] = Value();
         ASSERT_EQUALS(1ULL, md.peek().computeSize());
         ASSERT(md.peek()["a"].missing());
-        ASSERT_EQUALS("c", getNthField(md.peek(), 0).first.toString());
+        ASSERT_EQUALS("c", getNthField(md.peek(), 0).first);
         ASSERT_EQUALS(99, md.peek()["c"].getInt());
         assertRoundTrips(md.peek());
 
@@ -615,15 +783,9 @@ public:
         assertComparison(-1, BSON("a" << 1), BSON("a" << 2));
         assertComparison(-1, BSON("a" << 1 << "b" << 1), BSON("a" << 1 << "b" << 2));
         // numbers sort before strings
-        assertComparison(-1,
-                         BSON("a" << 1),
-                         BSON("a"
-                              << "foo"));
+        assertComparison(-1, BSON("a" << 1), BSON("a" << "foo"));
         // numbers sort before strings, even if keys compare otherwise
-        assertComparison(-1,
-                         BSON("b" << 1),
-                         BSON("a"
-                              << "foo"));
+        assertComparison(-1, BSON("b" << 1), BSON("a" << "foo"));
         // null before number, even if keys compare otherwise
         assertComparison(-1, BSON("z" << BSONNULL), BSON("a" << 1));
     }
@@ -711,7 +873,7 @@ public:
         FieldIterator iterator(fromBson(BSON("a" << 1)));
         ASSERT(iterator.more());
         Document::FieldPair field = iterator.next();
-        ASSERT_EQUALS("a", field.first.toString());
+        ASSERT_EQUALS("a", field.first);
         ASSERT_EQUALS(1, field.second.getInt());
         ASSERT(!iterator.more());
     }
@@ -725,17 +887,17 @@ public:
                                                  << "z")));
         ASSERT(iterator.more());
         Document::FieldPair field = iterator.next();
-        ASSERT_EQUALS("a", field.first.toString());
+        ASSERT_EQUALS("a", field.first);
         ASSERT_EQUALS(1, field.second.getInt());
         ASSERT(iterator.more());
 
         Document::FieldPair field2 = iterator.next();
-        ASSERT_EQUALS("b", field2.first.toString());
+        ASSERT_EQUALS("b", field2.first);
         ASSERT_EQUALS(5.6, field2.second.getDouble());
         ASSERT(iterator.more());
 
         Document::FieldPair field3 = iterator.next();
-        ASSERT_EQUALS("c", field3.first.toString());
+        ASSERT_EQUALS("c", field3.first);
         ASSERT_EQUALS("z", field3.second.getString());
         ASSERT(!iterator.more());
     }
@@ -761,7 +923,7 @@ public:
         append("oid", OID());
         append("true", true);
         append("false", false);
-        append("date", jsTime());
+        append("date", Date_t::now());
         append("null", BSONNULL);
         append("regex", BSONRegEx(".*"));
         append("regexFlags", BSONRegEx(".*", "i"));
@@ -843,6 +1005,57 @@ TEST(DocumentTest, ToBsonSizeTraits) {
 
 namespace MetaFields {
 using mongo::Document;
+
+TEST(MetaFields, ChangeStreamControlDocument) {
+    // Documents should not have the 'control event' flag set.
+    ASSERT_FALSE(Document().metadata().isChangeStreamControlEvent());
+
+    // Empty document created via building should not have the 'control event' flag set.
+    {
+        MutableDocument docBuilder;
+        Document doc = docBuilder.freeze();
+        ASSERT_FALSE(doc.metadata().isChangeStreamControlEvent());
+
+        // Cloning the document should also not set the flag.
+        Document cloned = doc.clone();
+        ASSERT_FALSE(cloned.metadata().isChangeStreamControlEvent());
+        ASSERT_FALSE(doc.metadata().isChangeStreamControlEvent());
+    }
+
+    // Explicitly setting the 'control event' flag on the document should work.
+    {
+        MutableDocument docBuilder;
+        docBuilder.metadata().setChangeStreamControlEvent();
+        Document doc = docBuilder.freeze();
+        ASSERT_TRUE(doc.metadata().isChangeStreamControlEvent());
+
+        // Cloning the document should also clone the flag.
+        Document cloned = doc.clone();
+        ASSERT_TRUE(cloned.metadata().isChangeStreamControlEvent());
+        ASSERT_TRUE(doc.metadata().isChangeStreamControlEvent());
+    }
+
+    // Creating a regular document from BSON should not set the flag.
+    {
+        Document source = Document::fromBsonWithMetaData(BSON("foo" << "bar"));
+
+        MutableDocument docBuilder;
+        docBuilder.copyMetaDataFrom(source);
+        auto doc = docBuilder.freeze();
+        ASSERT_FALSE(doc.metadata().isChangeStreamControlEvent());
+    }
+
+    // Creating a document from BSON with the flag present should set the flag correctly.
+    for (auto value : {true, false}) {
+        Document doc = Document::fromBsonWithMetaData(
+            BSON("foo" << "bar" << Document::metaFieldChangeStreamControlEvent << value));
+
+        // Note: the presence of '$changeStreamControlEvent' is enough to set the equivalent
+        // metadata bit. The value that '$changeStreamControlEvent' is set to does not matter.
+        ASSERT_TRUE(doc.metadata().isChangeStreamControlEvent());
+    }
+}
+
 TEST(MetaFields, TextScoreBasics) {
     // Documents should not have a text score until it is set.
     ASSERT_FALSE(Document().metadata().hasTextScore());
@@ -901,8 +1114,7 @@ TEST(MetaFields, SearchHighlightsBasic) {
 
     // Setting the search highlights field should work as expected.
     MutableDocument docBuilder;
-    Value highlights = DOC_ARRAY("a"_sd
-                                 << "b"_sd);
+    Value highlights = DOC_ARRAY("a"_sd << "b"_sd);
     docBuilder.metadata().setSearchHighlights(highlights);
     Document doc = docBuilder.freeze();
     ASSERT_TRUE(doc.metadata().hasSearchHighlights());
@@ -910,9 +1122,8 @@ TEST(MetaFields, SearchHighlightsBasic) {
 
     // Setting the searchHighlights twice should keep the second value.
     MutableDocument docBuilder2;
-    Value otherHighlights = DOC_ARRAY("snippet1"_sd
-                                      << "snippet2"_sd
-                                      << "snippet3"_sd);
+    Value otherHighlights = DOC_ARRAY("snippet1"_sd << "snippet2"_sd
+                                                    << "snippet3"_sd);
     docBuilder2.metadata().setSearchHighlights(highlights);
     docBuilder2.metadata().setSearchHighlights(otherHighlights);
     Document doc2 = docBuilder2.freeze();
@@ -926,8 +1137,7 @@ TEST(MetaFields, SearchScoreDetailsBasic) {
 
     // Setting the searchScoreDetails field should work as expected.
     MutableDocument docBuilder;
-    BSONObj details = BSON("scoreDetails"
-                           << "foo");
+    BSONObj details = BSON("scoreDetails" << "foo");
     docBuilder.metadata().setSearchScoreDetails(details);
     Document doc = docBuilder.freeze();
     ASSERT_TRUE(doc.metadata().hasSearchScoreDetails());
@@ -935,8 +1145,7 @@ TEST(MetaFields, SearchScoreDetailsBasic) {
 
     // Setting the searchScoreDetails twice should keep the second value.
     MutableDocument docBuilder2;
-    BSONObj otherDetails = BSON("scoreDetails"
-                                << "bar");
+    BSONObj otherDetails = BSON("scoreDetails" << "bar");
     docBuilder2.metadata().setSearchScoreDetails(details);
     docBuilder2.metadata().setSearchScoreDetails(otherDetails);
     Document doc2 = docBuilder2.freeze();
@@ -976,8 +1185,7 @@ TEST(MetaFields, FromBsonWithMetadataHandlesEmptyFieldName) {
 
 TEST(MetaFields, CopyMetadataFromCopiesAllMetadata) {
     // Used to set 'score' metadata.
-    RAIIServerParameterControllerForTest searchHybridScoringPrerequisitesController(
-        "featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
     Document source = Document::fromBsonWithMetaData(
         BSON("a" << 1 << "$textScore" << 9.9 << "b" << 1 << "$randVal" << 42.0 << "c" << 1
                  << "$sortKey" << BSON("x" << 1) << "d" << 1 << "$dis" << 3.2 << "e" << 1 << "$pt"
@@ -985,10 +1193,8 @@ TEST(MetaFields, CopyMetadataFromCopiesAllMetadata) {
                  << "$searchHighlights"
                  << "foo"
                  << "h" << 1 << "$indexKey" << BSON("y" << 1) << "$searchScoreDetails"
-                 << BSON("scoreDetails"
-                         << "foo")
-                 << "$searchSortValues" << BSON("a" << 1) << "$vectorSearchScore" << 6.7 << "$score"
-                 << 8.1));
+                 << BSON("scoreDetails" << "foo") << "$searchSortValues" << BSON("a" << 1)
+                 << "$vectorSearchScore" << 6.7 << "$score" << 8.1));
 
     MutableDocument destination{};
     destination.copyMetaDataFrom(source);
@@ -1002,12 +1208,11 @@ TEST(MetaFields, CopyMetadataFromCopiesAllMetadata) {
     ASSERT_EQ(result.metadata().getSearchScore(), 5.4);
     ASSERT_VALUE_EQ(result.metadata().getSearchHighlights(), Value{"foo"_sd});
     ASSERT_BSONOBJ_EQ(result.metadata().getIndexKey(), BSON("y" << 1));
-    ASSERT_BSONOBJ_EQ(result.metadata().getSearchScoreDetails(),
-                      BSON("scoreDetails"
-                           << "foo"));
+    ASSERT_BSONOBJ_EQ(result.metadata().getSearchScoreDetails(), BSON("scoreDetails" << "foo"));
     ASSERT_BSONOBJ_EQ(result.metadata().getSearchSortValues(), BSON("a" << 1));
     ASSERT_EQ(result.metadata().getVectorSearchScore(), 6.7);
     ASSERT_EQ(result.metadata().getScore(), 8.1);
+    ASSERT_FALSE(result.metadata().isChangeStreamControlEvent());
 }
 
 class SerializationTest : public unittest::Test {
@@ -1058,6 +1263,8 @@ protected:
         if (input.metadata().hasScore()) {
             ASSERT_EQ(output.metadata().getScore(), input.metadata().getScore());
         }
+        ASSERT_EQ(input.metadata().isChangeStreamControlEvent(),
+                  output.metadata().isChangeStreamControlEvent());
 
         ASSERT(output.toBson().binaryEqual(input.toBson()));
     }
@@ -1068,10 +1275,8 @@ TEST_F(SerializationTest, MetaSerializationNoVals) {
     docBuilder.metadata().setTextScore(10.0);
     docBuilder.metadata().setRandVal(20.0);
     docBuilder.metadata().setSearchScore(30.0);
-    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"_sd
-                                                        << "def"_sd));
-    docBuilder.metadata().setSearchScoreDetails(BSON("scoreDetails"
-                                                     << "foo"));
+    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"_sd << "def"_sd));
+    docBuilder.metadata().setSearchScoreDetails(BSON("scoreDetails" << "foo"));
     docBuilder.metadata().setVectorSearchScore(40.0);
     docBuilder.metadata().setScore(60.0);
     assertRoundTrips(docBuilder.freeze());
@@ -1083,13 +1288,12 @@ TEST_F(SerializationTest, MetaSerializationWithVals) {
     docBuilder.metadata().setTextScore(10.0);
     docBuilder.metadata().setRandVal(20.0);
     docBuilder.metadata().setSearchScore(30.0);
-    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"_sd
-                                                        << "def"_sd));
+    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"_sd << "def"_sd));
     docBuilder.metadata().setIndexKey(BSON("key" << 42));
-    docBuilder.metadata().setSearchScoreDetails(BSON("scoreDetails"
-                                                     << "foo"));
+    docBuilder.metadata().setSearchScoreDetails(BSON("scoreDetails" << "foo"));
     docBuilder.metadata().setVectorSearchScore(40.0);
     docBuilder.metadata().setScore(60.0);
+    docBuilder.metadata().setChangeStreamControlEvent();
     assertRoundTrips(docBuilder.freeze());
 }
 
@@ -1105,43 +1309,40 @@ TEST_F(SerializationTest, MetaSerializationSearchHighlightsNonArray) {
 
 TEST(MetaFields, ToAndFromBson) {
     // Used to set 'score' metadata.
-    RAIIServerParameterControllerForTest prerequisitesController("featureFlagRankFusionFull", true);
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagRankFusionFull", true);
     MutableDocument docBuilder;
     docBuilder.metadata().setTextScore(10.0);
     docBuilder.metadata().setRandVal(20.0);
     docBuilder.metadata().setSearchScore(30.0);
-    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"_sd
-                                                        << "def"_sd));
-    docBuilder.metadata().setSearchScoreDetails(BSON("scoreDetails"
-                                                     << "foo"));
+    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"_sd << "def"_sd));
+    docBuilder.metadata().setSearchScoreDetails(BSON("scoreDetails" << "foo"));
     docBuilder.metadata().setSearchSortValues(BSON("a" << 42));
     docBuilder.metadata().setVectorSearchScore(40.0);
     docBuilder.metadata().setScore(60.0);
+    docBuilder.metadata().setChangeStreamControlEvent();
     Document doc = docBuilder.freeze();
     BSONObj obj = doc.toBsonWithMetaData();
     ASSERT_EQ(10.0, obj[Document::metaFieldTextScore].Double());
     ASSERT_EQ(20, obj[Document::metaFieldRandVal].numberLong());
     ASSERT_EQ(30.0, obj[Document::metaFieldSearchScore].Double());
     ASSERT_BSONOBJ_EQ(obj[Document::metaFieldSearchHighlights].embeddedObject(),
-                      BSON_ARRAY("abc"_sd
-                                 << "def"_sd));
+                      BSON_ARRAY("abc"_sd << "def"_sd));
     ASSERT_BSONOBJ_EQ(obj[Document::metaFieldSearchScoreDetails].Obj(),
-                      BSON("scoreDetails"
-                           << "foo"));
+                      BSON("scoreDetails" << "foo"));
     ASSERT_BSONOBJ_EQ(BSON("a" << 42), obj[Document::metaFieldSearchSortValues].Obj());
     ASSERT_EQ(40.0, obj[Document::metaFieldVectorSearchScore].Double());
     ASSERT_EQ(60.0, obj[Document::metaFieldScore].Double());
+    ASSERT_TRUE(obj[Document::metaFieldChangeStreamControlEvent].boolean());
     Document fromBson = Document::fromBsonWithMetaData(obj);
     ASSERT_TRUE(fromBson.metadata().hasTextScore());
     ASSERT_TRUE(fromBson.metadata().hasRandVal());
     ASSERT_EQ(10.0, fromBson.metadata().getTextScore());
     ASSERT_EQ(20, fromBson.metadata().getRandVal());
-    ASSERT_BSONOBJ_EQ(BSON("scoreDetails"
-                           << "foo"),
-                      fromBson.metadata().getSearchScoreDetails());
+    ASSERT_BSONOBJ_EQ(BSON("scoreDetails" << "foo"), fromBson.metadata().getSearchScoreDetails());
     ASSERT_BSONOBJ_EQ(BSON("a" << 42), fromBson.metadata().getSearchSortValues());
     ASSERT_EQ(40.0, fromBson.metadata().getVectorSearchScore());
     ASSERT_EQ(60.0, fromBson.metadata().getScore());
+    ASSERT_TRUE(fromBson.metadata().isChangeStreamControlEvent());
 }
 
 TEST(MetaFields, ToAndFromBsonTrivialConvertibility) {
@@ -1149,14 +1350,17 @@ TEST(MetaFields, ToAndFromBsonTrivialConvertibility) {
     // Create a document with a backing BSONObj and separate metadata.
     auto origObjNoMetadata = BSON("a" << 42);
     ASSERT_FALSE(origObjNoMetadata.hasField(Document::metaFieldSortKey));
+    ASSERT_FALSE(origObjNoMetadata.hasField(Document::metaFieldChangeStreamControlEvent));
 
     MutableDocument docBuilder;
     docBuilder.reset(origObjNoMetadata, false);
     docBuilder.metadata().setSortKey(sortKey, true);
+    docBuilder.metadata().setChangeStreamControlEvent();
     Document docWithSeparateBsonAndMetadata = docBuilder.freeze();
 
     BSONObj origObjWithMetadata = docWithSeparateBsonAndMetadata.toBsonWithMetaData();
     ASSERT_TRUE(origObjWithMetadata.hasField(Document::metaFieldSortKey));
+    ASSERT_TRUE(origObjWithMetadata.hasField(Document::metaFieldChangeStreamControlEvent));
     Document restoredDocWithMetadata = Document::fromBsonWithMetaData(origObjWithMetadata);
     ASSERT_DOCUMENT_EQ(docWithSeparateBsonAndMetadata, restoredDocWithMetadata);
 
@@ -1248,23 +1452,22 @@ TEST(MetaFields, TrivialConvertibilityMetadataModified) {
 
 TEST(MetaFields, MetaFieldsIncludedInDocumentApproximateSize) {
     MutableDocument docBuilder;
-    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"_sd
-                                                        << "def"_sd));
+    docBuilder.metadata().setSearchHighlights(DOC_ARRAY("abc"_sd << "def"_sd));
     const size_t smallMetadataDocSize = docBuilder.freeze().getApproximateSize();
 
     // The second document has a larger "search highlights" object.
     MutableDocument docBuilder2;
-    docBuilder2.metadata().setSearchHighlights(DOC_ARRAY("abc"_sd
-                                                         << "def"_sd
-                                                         << "ghijklmnop"_sd));
+    docBuilder2.metadata().setSearchHighlights(DOC_ARRAY("abc"_sd << "def"_sd
+                                                                  << "ghijklmnop"_sd));
     Document doc2 = docBuilder2.freeze();
     const size_t bigMetadataDocSize = doc2.getApproximateSize();
     ASSERT_GT(bigMetadataDocSize, smallMetadataDocSize);
 
     // Do a sanity check on the amount of space taken by metadata in document 2. Note that the size
     // of certain data types may vary on different build variants, so we cannot assert on the exact
-    // size.
-    ASSERT_LT(doc2.getMetadataApproximateSize(), 400U);
+    // size. Also note that if this assertion fails, it may be because more document metadata fields
+    // were added. If this is the case, then the limit should be relaxed again.
+    ASSERT_LT(doc2.getMetadataApproximateSize(), 500U);
 
     Document emptyDoc;
     ASSERT_LT(emptyDoc.getMetadataApproximateSize(), 100U);
@@ -1330,7 +1533,7 @@ public:
         ASSERT_EQUALS(5, value.getInt());
         ASSERT_EQUALS(5, value.getLong());
         ASSERT_EQUALS(5, value.getDouble());
-        ASSERT_EQUALS(NumberInt, value.getType());
+        ASSERT_EQUALS(BSONType::numberInt, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1342,7 +1545,7 @@ public:
         Value value = Value(99LL);
         ASSERT_EQUALS(99, value.getLong());
         ASSERT_EQUALS(99, value.getDouble());
-        ASSERT_EQUALS(NumberLong, value.getType());
+        ASSERT_EQUALS(BSONType::numberLong, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1353,7 +1556,7 @@ public:
     void run() {
         Value value = Value(5.5);
         ASSERT_EQUALS(5.5, value.getDouble());
-        ASSERT_EQUALS(NumberDouble, value.getType());
+        ASSERT_EQUALS(BSONType::numberDouble, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1364,7 +1567,7 @@ public:
     void run() {
         Value value = Value("foo"_sd);
         ASSERT_EQUALS("foo", value.getString());
-        ASSERT_EQUALS(mongo::String, value.getType());
+        ASSERT_EQUALS(BSONType::string, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1397,7 +1600,7 @@ public:
                 Value{obj["str"]};
             }(),
             DBException,
-            16493);
+            ErrorCodes::BSONObjectTooLarge);
     }
 };
 
@@ -1407,7 +1610,7 @@ public:
     void run() {
         Value value = Value(Date_t::fromMillisSinceEpoch(999));
         ASSERT_EQUALS(999, value.getDate().toMillisSinceEpoch());
-        ASSERT_EQUALS(mongo::Date, value.getType());
+        ASSERT_EQUALS(mongo::BSONType::date, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1418,12 +1621,12 @@ public:
     void run() {
         Value value = Value(Timestamp(777));
         ASSERT(Timestamp(777) == value.getTimestamp());
-        ASSERT_EQUALS(mongo::bsonTimestamp, value.getType());
+        ASSERT_EQUALS(mongo::BSONType::timestamp, value.getType());
         assertRoundTrips(value);
 
         value = Value(Timestamp(~0U, 3));
         ASSERT(Timestamp(~0U, 3) == value.getTimestamp());
-        ASSERT_EQUALS(mongo::bsonTimestamp, value.getType());
+        ASSERT_EQUALS(mongo::BSONType::timestamp, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1435,7 +1638,7 @@ public:
         mongo::Document document = mongo::Document();
         Value value = Value(document);
         ASSERT_EQUALS(document.getPtr(), value.getDocument().getPtr());
-        ASSERT_EQUALS(Object, value.getType());
+        ASSERT_EQUALS(BSONType::object, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1457,7 +1660,7 @@ public:
         ASSERT_EQUALS(5, document["a"].getInt());
         ASSERT_EQUALS("rrr", document["apple"].getString());
         ASSERT_EQUALS(-.3, document["banana"].getDouble());
-        ASSERT_EQUALS(Object, value.getType());
+        ASSERT_EQUALS(BSONType::object, value.getType());
         assertRoundTrips(value);
 
         MutableDocument md1;
@@ -1482,7 +1685,7 @@ public:
         const std::vector<Value>& array2 = value.getArray();
 
         ASSERT(array2.empty());
-        ASSERT_EQUALS(Array, value.getType());
+        ASSERT_EQUALS(BSONType::array, value.getType());
         ASSERT_EQUALS(0U, value.getArrayLength());
         assertRoundTrips(value);
     }
@@ -1504,7 +1707,7 @@ public:
         ASSERT_EQUALS(5, array2[0].getInt());
         ASSERT_EQUALS("lala", array2[1].getString());
         ASSERT_EQUALS(3.14, array2[2].getDouble());
-        ASSERT_EQUALS(mongo::Array, value.getType());
+        ASSERT_EQUALS(mongo::BSONType::array, value.getType());
         ASSERT_EQUALS(3U, value.getArrayLength());
         assertRoundTrips(value);
     }
@@ -1516,7 +1719,7 @@ public:
     void run() {
         Value value = fromBson(BSON("" << OID("abcdefabcdefabcdefabcdef")));
         ASSERT_EQUALS(OID("abcdefabcdefabcdefabcdef"), value.getOid());
-        ASSERT_EQUALS(jstOID, value.getType());
+        ASSERT_EQUALS(BSONType::oid, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1527,7 +1730,7 @@ public:
     void run() {
         Value value = fromBson(BSON("" << true));
         ASSERT_EQUALS(true, value.getBool());
-        ASSERT_EQUALS(mongo::Bool, value.getType());
+        ASSERT_EQUALS(BSONType::boolean, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1538,7 +1741,7 @@ public:
     void run() {
         Value value = fromBson(fromjson("{'':/abc/}"));
         ASSERT_EQUALS(std::string("abc"), value.getRegex());
-        ASSERT_EQUALS(RegEx, value.getType());
+        ASSERT_EQUALS(BSONType::regEx, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1549,7 +1752,7 @@ public:
     void run() {
         Value value(BSONSymbol("FOOBAR"));
         ASSERT_EQUALS("FOOBAR", value.getSymbol());
-        ASSERT_EQUALS(mongo::Symbol, value.getType());
+        ASSERT_EQUALS(BSONType::symbol, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1559,7 +1762,7 @@ class Undefined {
 public:
     void run() {
         Value value = Value(BSONUndefined);
-        ASSERT_EQUALS(mongo::Undefined, value.getType());
+        ASSERT_EQUALS(BSONType::undefined, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1569,7 +1772,7 @@ class Null {
 public:
     void run() {
         Value value = Value(BSONNULL);
-        ASSERT_EQUALS(jstNULL, value.getType());
+        ASSERT_EQUALS(BSONType::null, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1580,7 +1783,7 @@ public:
     void run() {
         Value value = Value(true);
         ASSERT_EQUALS(true, value.getBool());
-        ASSERT_EQUALS(mongo::Bool, value.getType());
+        ASSERT_EQUALS(BSONType::boolean, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1591,7 +1794,7 @@ public:
     void run() {
         Value value = Value(false);
         ASSERT_EQUALS(false, value.getBool());
-        ASSERT_EQUALS(mongo::Bool, value.getType());
+        ASSERT_EQUALS(BSONType::boolean, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1602,7 +1805,7 @@ public:
     void run() {
         Value value = Value(-1);
         ASSERT_EQUALS(-1, value.getInt());
-        ASSERT_EQUALS(NumberInt, value.getType());
+        ASSERT_EQUALS(BSONType::numberInt, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1613,7 +1816,7 @@ public:
     void run() {
         Value value = Value(0);
         ASSERT_EQUALS(0, value.getInt());
-        ASSERT_EQUALS(NumberInt, value.getType());
+        ASSERT_EQUALS(BSONType::numberInt, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -1624,7 +1827,7 @@ public:
     void run() {
         Value value = Value(1);
         ASSERT_EQUALS(1, value.getInt());
-        ASSERT_EQUALS(NumberInt, value.getType());
+        ASSERT_EQUALS(BSONType::numberInt, value.getType());
         assertRoundTrips(value);
     }
 };
@@ -2249,32 +2452,30 @@ public:
 class GetWidestNumeric {
 public:
     void run() {
-        using mongo::Undefined;
-
         // Numeric types.
-        assertWidest(NumberInt, NumberInt, NumberInt);
-        assertWidest(NumberLong, NumberInt, NumberLong);
-        assertWidest(NumberDouble, NumberInt, NumberDouble);
-        assertWidest(NumberLong, NumberLong, NumberLong);
-        assertWidest(NumberDouble, NumberLong, NumberDouble);
-        assertWidest(NumberDouble, NumberDouble, NumberDouble);
+        assertWidest(BSONType::numberInt, BSONType::numberInt, BSONType::numberInt);
+        assertWidest(BSONType::numberLong, BSONType::numberInt, BSONType::numberLong);
+        assertWidest(BSONType::numberDouble, BSONType::numberInt, BSONType::numberDouble);
+        assertWidest(BSONType::numberLong, BSONType::numberLong, BSONType::numberLong);
+        assertWidest(BSONType::numberDouble, BSONType::numberLong, BSONType::numberDouble);
+        assertWidest(BSONType::numberDouble, BSONType::numberDouble, BSONType::numberDouble);
 
         // Missing value and numeric types (result Undefined).
-        assertWidest(Undefined, NumberInt, Undefined);
-        assertWidest(Undefined, NumberInt, Undefined);
-        assertWidest(Undefined, NumberLong, jstNULL);
-        assertWidest(Undefined, NumberLong, Undefined);
-        assertWidest(Undefined, NumberDouble, jstNULL);
-        assertWidest(Undefined, NumberDouble, Undefined);
+        assertWidest(BSONType::undefined, BSONType::numberInt, BSONType::undefined);
+        assertWidest(BSONType::undefined, BSONType::numberInt, BSONType::undefined);
+        assertWidest(BSONType::undefined, BSONType::numberLong, BSONType::null);
+        assertWidest(BSONType::undefined, BSONType::numberLong, BSONType::undefined);
+        assertWidest(BSONType::undefined, BSONType::numberDouble, BSONType::null);
+        assertWidest(BSONType::undefined, BSONType::numberDouble, BSONType::undefined);
 
         // Missing value types (result Undefined).
-        assertWidest(Undefined, jstNULL, jstNULL);
-        assertWidest(Undefined, jstNULL, Undefined);
-        assertWidest(Undefined, Undefined, Undefined);
+        assertWidest(BSONType::undefined, BSONType::null, BSONType::null);
+        assertWidest(BSONType::undefined, BSONType::null, BSONType::undefined);
+        assertWidest(BSONType::undefined, BSONType::undefined, BSONType::undefined);
 
         // Other types (result Undefined).
-        assertWidest(Undefined, NumberInt, mongo::Bool);
-        assertWidest(Undefined, mongo::String, NumberDouble);
+        assertWidest(BSONType::undefined, BSONType::numberInt, BSONType::boolean);
+        assertWidest(BSONType::undefined, BSONType::string, BSONType::numberDouble);
     }
 
 private:
@@ -2325,15 +2526,9 @@ public:
 
         // Undefined / null with other types.
         assertComparison(-1, undefined, BSON("" << 1));
-        assertComparison(-1,
-                         undefined,
-                         BSON(""
-                              << "bar"));
+        assertComparison(-1, undefined, BSON("" << "bar"));
         assertComparison(-1, BSON("" << BSONNULL), BSON("" << -1));
-        assertComparison(-1,
-                         BSON("" << BSONNULL),
-                         BSON(""
-                              << "bar"));
+        assertComparison(-1, BSON("" << BSONNULL), BSON("" << "bar"));
 
         // Numeric types.
         assertComparison(0, 5, 5LL);
@@ -2350,10 +2545,7 @@ public:
 
         // strings compare between numbers and objects
         assertComparison(1, "abc", 90);
-        assertComparison(-1,
-                         "abc",
-                         BSON("a"
-                              << "b"));
+        assertComparison(-1, "abc", BSON("a" << "b"));
 
         // String comparison.
         assertComparison(-1, "", "a");
@@ -2494,27 +2686,27 @@ public:
         const Value val = fromBson(fromjson("{'': {a: [{x:1, b:[1, {y:1, c:1234, z:1}, 1]}]}}"));
         // ^ this outer object is removed by fromBson
 
-        ASSERT(val.getType() == BSONType::Object);
+        ASSERT(val.getType() == BSONType::object);
 
         ASSERT(val[999].missing());
         ASSERT(val["missing"].missing());
-        ASSERT(val["a"].getType() == BSONType::Array);
+        ASSERT(val["a"].getType() == BSONType::array);
 
         ASSERT(val["a"][999].missing());
         ASSERT(val["a"]["missing"].missing());
-        ASSERT(val["a"][0].getType() == BSONType::Object);
+        ASSERT(val["a"][0].getType() == BSONType::object);
 
         ASSERT(val["a"][0][999].missing());
         ASSERT(val["a"][0]["missing"].missing());
-        ASSERT(val["a"][0]["b"].getType() == BSONType::Array);
+        ASSERT(val["a"][0]["b"].getType() == BSONType::array);
 
         ASSERT(val["a"][0]["b"][999].missing());
         ASSERT(val["a"][0]["b"]["missing"].missing());
-        ASSERT(val["a"][0]["b"][1].getType() == BSONType::Object);
+        ASSERT(val["a"][0]["b"][1].getType() == BSONType::object);
 
         ASSERT(val["a"][0]["b"][1][999].missing());
         ASSERT(val["a"][0]["b"][1]["missing"].missing());
-        ASSERT(val["a"][0]["b"][1]["c"].getType() == BSONType::NumberInt);
+        ASSERT(val["a"][0]["b"][1]["c"].getType() == BSONType::numberInt);
         ASSERT_EQUALS(val["a"][0]["b"][1]["c"].getInt(), 1234);
     }
 };

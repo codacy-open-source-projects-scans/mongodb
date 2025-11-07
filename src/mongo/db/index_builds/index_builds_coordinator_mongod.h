@@ -29,10 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -50,6 +46,11 @@
 #include "mongo/util/future.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -92,7 +93,7 @@ public:
         OperationContext* opCtx,
         const DatabaseName& dbName,
         const UUID& collectionUUID,
-        const std::vector<BSONObj>& specs,
+        const std::vector<IndexBuildInfo>& indexes,
         const UUID& buildUUID,
         IndexBuildProtocol protocol,
         IndexBuildOptions indexBuildOptions) override;
@@ -106,7 +107,7 @@ public:
         OperationContext* opCtx,
         const DatabaseName& dbName,
         const UUID& collectionUUID,
-        const std::vector<BSONObj>& specs,
+        const std::vector<IndexBuildInfo>& indexes,
         const UUID& buildUUID,
         const ResumeIndexInfo& resumeInfo) override;
 
@@ -182,7 +183,7 @@ private:
     void _signalPrimaryForCommitReadiness(OperationContext* opCtx,
                                           std::shared_ptr<ReplIndexBuildState> replState) override;
 
-    IndexBuildAction _drainSideWritesUntilNextActionIsAvailable(
+    IndexBuildAction _waitForNextIndexBuildAction(
         OperationContext* opCtx, std::shared_ptr<ReplIndexBuildState> replState) override;
 
     void _waitForNextIndexBuildActionAndCommit(OperationContext* opCtx,
@@ -193,7 +194,7 @@ private:
         OperationContext* opCtx,
         const DatabaseName& dbName,
         const UUID& collectionUUID,
-        const std::vector<BSONObj>& specs,
+        const std::vector<IndexBuildInfo>& indexes,
         const UUID& buildUUID,
         IndexBuildProtocol protocol,
         IndexBuildOptions indexBuildOptions,

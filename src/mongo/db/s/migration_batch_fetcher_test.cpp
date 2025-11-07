@@ -28,11 +28,7 @@
  */
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <boost/move/utility_core.hpp>
-#include <fmt/format.h>
-#include <future>
-#include <system_error>
-#include <vector>
+#include "mongo/db/s/migration_batch_fetcher.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -42,31 +38,37 @@
 #include "mongo/client/connection_string.h"
 #include "mongo/client/remote_command_targeter_mock.h"
 #include "mongo/db/cancelable_operation_context.h"
+#include "mongo/db/error_labels.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/sharding_catalog_client_mock.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime_with.h"
 #include "mongo/db/repl/read_concern_level.h"
-#include "mongo/db/s/migration_batch_fetcher.h"
 #include "mongo/db/s/migration_batch_mock_inserter.h"
 #include "mongo/db/s/migration_session_id.h"
-#include "mongo/db/s/shard_server_test_fixture.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/shard_server_test_fixture.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/task_executor_pool.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/sharding_catalog_client_mock.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/stdx/future.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/uuid.h"
+
+#include <future>
+#include <system_error>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -139,15 +141,28 @@ protected:
     }
 
     static BSONObj getTerminalBsonObj() {
-        return BSON("Status"
-                    << "OK"
-                    << "ok" << 1 << "objects" << createEmptyCloneArray());
+        return BSON("Status" << "OK"
+                             << "ok" << 1 << "objects" << createEmptyCloneArray());
     }
 
     static BSONObj getBatchBsonObj() {
-        return BSON("Status"
-                    << "OK"
-                    << "ok" << 1 << "objects" << createDocumentsToCloneArray());
+        return BSON("Status" << "OK"
+                             << "ok" << 1 << "objects" << createDocumentsToCloneArray());
+    }
+
+    static BSONObj getErrorRetryable() {
+        BSONObjBuilder bob;
+        bob.append("ok", 0.0);
+        bob.append("code", ErrorCodes::IngressRequestRateLimitExceeded);
+        bob.append("errmsg", "retryable");
+        bob.append("codeName",
+                   ErrorCodes::errorString(ErrorCodes::IngressRequestRateLimitExceeded));
+        {
+            BSONArrayBuilder arrayBuilder = bob.subarrayStart(kErrorLabelsFieldName);
+            arrayBuilder.append(ErrorLabel::kSystemOverloadedError);
+            arrayBuilder.append(ErrorLabel::kRetryableError);
+        }
+        return bob.obj();
     }
 
 private:
@@ -160,10 +175,10 @@ private:
         public:
             StaticCatalogClient() = default;
 
-            StatusWith<repl::OpTimeWith<std::vector<ShardType>>> getAllShards(
+            repl::OpTimeWith<std::vector<ShardType>> getAllShards(
                 OperationContext* opCtx,
                 repl::ReadConcernLevel readConcern,
-                bool excludeDraining) override {
+                BSONObj filter) override {
 
                 ShardType donorShard;
                 donorShard.setName(kDonorConnStr.getSetName());
@@ -196,12 +211,6 @@ TEST_F(MigrationBatchFetcherTestFixture, BasicEmptyFetchingTest) {
     auto newClient =
         outerOpCtx->getServiceContext()->getService()->makeClient("MigrationCoordinator");
 
-    int concurrency = 30;
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagConcurrencyInChunkMigration", true);
-    RAIIServerParameterControllerForTest setMigrationConcurrencyParam{"chunkMigrationConcurrency",
-                                                                      concurrency};
-
     AlternativeClientRegion acr(newClient);
     auto executor =
         Grid::get(outerOpCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
@@ -220,10 +229,7 @@ TEST_F(MigrationBatchFetcherTestFixture, BasicEmptyFetchingTest) {
         UUID::gen(),
         UUID::gen(),
         nullptr,
-        true,
         0 /* maxBytesPerThread */);
-
-    ASSERT_EQ(fetcher->getChunkMigrationConcurrency(), 1);
 
     // Start asynchronous task for responding to _migrateClone requests.
     // Must name the return of value std::async.  The destructor of std::future joins the
@@ -231,6 +237,43 @@ TEST_F(MigrationBatchFetcherTestFixture, BasicEmptyFetchingTest) {
     // would hang forever.)
     auto fut = stdx::async(stdx::launch::async,
                            [&]() { onCommand(getOnMigrateCloneCommandCb(getTerminalBsonObj())); });
+    fetcher->fetchAndScheduleInsertion();
+}
+
+TEST_F(MigrationBatchFetcherTestFixture, BasicEmptyFetchingTestRetry) {
+    auto _ = FailPointEnableBlock{"setBackoffDelayForTesting", BSON("backoffDelayMs" << 0)};
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("test", "foo");
+    ShardId fromShard{"Donor"};
+    auto msid = MigrationSessionId::generate(fromShard, "Recipient");
+
+    auto outerOpCtx = operationContext();
+    auto newClient =
+        outerOpCtx->getServiceContext()->getService()->makeClient("MigrationCoordinator");
+    AlternativeClientRegion acr(newClient);
+
+    auto executor =
+        Grid::get(outerOpCtx->getServiceContext())->getExecutorPool()->getFixedExecutor();
+    auto newOpCtxPtr = CancelableOperationContext(
+        cc().makeOperationContext(), outerOpCtx->getCancellationToken(), executor);
+    auto opCtx = newOpCtxPtr.get();
+
+    auto fetcher = std::make_unique<MigrationBatchFetcher<MigrationBatchMockInserter>>(
+        outerOpCtx,
+        opCtx,
+        nss,
+        msid,
+        WriteConcernOptions::parse(WriteConcernOptions::Majority).getValue(),
+        fromShard,
+        ChunkRange{BSON("x" << 1), BSON("x" << 2)},
+        UUID::gen(),
+        UUID::gen(),
+        nullptr,
+        0 /* maxBytesPerThread */);
+
+    auto fut = stdx::async(stdx::launch::async, [&]() {
+        onCommand(getOnMigrateCloneCommandCb(getErrorRetryable()));
+        onCommand(getOnMigrateCloneCommandCb(getTerminalBsonObj()));
+    });
     fetcher->fetchAndScheduleInsertion();
 }
 
@@ -250,13 +293,6 @@ TEST_F(MigrationBatchFetcherTestFixture, BasicFetching) {
         cc().makeOperationContext(), outerOpCtx->getCancellationToken(), executor);
     auto opCtx = newOpCtxPtr.get();
 
-
-    int concurrency = 30;
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagConcurrencyInChunkMigration", true);
-    RAIIServerParameterControllerForTest setMigrationConcurrencyParam{"chunkMigrationConcurrency",
-                                                                      concurrency};
-
     auto fetcher = std::make_unique<MigrationBatchFetcher<MigrationBatchMockInserter>>(
         outerOpCtx,
         opCtx,
@@ -268,10 +304,7 @@ TEST_F(MigrationBatchFetcherTestFixture, BasicFetching) {
         UUID::gen(),
         UUID::gen(),
         nullptr,
-        true,
         0 /* maxBytesPerThread */);
-
-    ASSERT_EQ(fetcher->getChunkMigrationConcurrency(), 1);
 
     auto fut = stdx::async(stdx::launch::async, [&]() {
         for (int i = 0; i < 8; ++i) {

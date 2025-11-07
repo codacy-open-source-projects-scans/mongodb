@@ -136,54 +136,24 @@ class SymbolTable(object):
         self.generic_argument_lists = []  # type: List[Struct]
         self.generic_reply_field_lists = []  # type: List[Struct]
 
-    def _is_duplicate(self, ctxt, location, name, duplicate_class_name):
-        # type: (errors.ParserContext, common.SourceLocation, str, str) -> bool
-        """Return true if the given item already exist in the symbol table."""
-        for item, entity_type in _item_and_type(
-            {
-                "command": self.commands,
-                "enum": self.enums,
-                "struct": self.structs,
-                "type": self.types,
-            }
-        ):
-            if item.name == name:
-                ctxt.add_duplicate_symbol_error(location, name, duplicate_class_name, entity_type)
-                return True
-            if entity_type == "command":
-                if name in [item.command_name, item.command_alias if item.command_alias else ""]:
-                    ctxt.add_duplicate_symbol_error(
-                        location, name, duplicate_class_name, entity_type
-                    )
-                    return True
-
-        return False
-
     def add_enum(self, ctxt, idl_enum):
         # type: (errors.ParserContext, Enum) -> None
         """Add an IDL enum to the symbol table and check for duplicates."""
-        if not self._is_duplicate(ctxt, idl_enum, idl_enum.name, "enum"):
-            self.enums.append(idl_enum)
+        self.enums.append(idl_enum)
 
     def add_struct(self, ctxt, struct):
         # type: (errors.ParserContext, Struct) -> None
         """Add an IDL struct to the symbol table and check for duplicates."""
-        if not self._is_duplicate(ctxt, struct, struct.name, "struct"):
-            self.structs.append(struct)
+        self.structs.append(struct)
 
     def add_type(self, ctxt, idltype):
         # type: (errors.ParserContext, Type) -> None
         """Add an IDL type to the symbol table and check for duplicates."""
-        if not self._is_duplicate(ctxt, idltype, idltype.name, "type"):
-            self.types.append(idltype)
+        self.types.append(idltype)
 
     def add_command(self, ctxt, command):
-        # type: (errors.ParserContext, Command) -> None
         """Add an IDL command to the symbol table and check for duplicates."""
-        if not self._is_duplicate(
-            ctxt, command, command.name, "command"
-        ) and not self._is_duplicate(ctxt, command, command.command_alias, "command"):
-            self.commands.append(command)
+        self.commands.append(command)
 
     def add_generic_argument_list(self, field_list):
         # type: (Struct) -> None
@@ -203,24 +173,21 @@ class SymbolTable(object):
         Marks imported structs as imported, and errors on duplicate symbols.
         """
         for command in imported_symbols.commands:
-            if not self._is_duplicate(ctxt, command, command.name, "command"):
-                command.imported = True
-                self.commands.append(command)
+            command.imported = True
+            self.commands.append(command)
 
         for struct in imported_symbols.structs:
-            if not self._is_duplicate(ctxt, struct, struct.name, "struct"):
-                struct.imported = True
-                self.structs.append(struct)
+            struct.imported = True
+            self.structs.append(struct)
 
-                if struct.is_generic_cmd_list == "arg":
-                    self.add_generic_argument_list(struct)
-                elif struct.is_generic_cmd_list == "reply":
-                    self.add_generic_reply_field_list(struct)
+            if struct.is_generic_cmd_list == "arg":
+                self.add_generic_argument_list(struct)
+            elif struct.is_generic_cmd_list == "reply":
+                self.add_generic_reply_field_list(struct)
 
         for idl_enum in imported_symbols.enums:
-            if not self._is_duplicate(ctxt, idl_enum, idl_enum.name, "enum"):
-                idl_enum.imported = True
-                self.enums.append(idl_enum)
+            idl_enum.imported = True
+            self.enums.append(idl_enum)
 
         for idltype in imported_symbols.types:
             self.add_type(ctxt, idltype)
@@ -359,6 +326,7 @@ class Global(common.SourceLocation):
         """Construct a Global."""
         self.cpp_namespace = None  # type: str
         self.cpp_includes = []  # type: List[str]
+        self.mod_visibility = None  # type: str
         self.configs = None  # type: ConfigGlobal
 
         super(Global, self).__init__(file_name, line, column)
@@ -453,7 +421,6 @@ class Validator(common.SourceLocation):
         # type: (str, int, int) -> None
         """Construct a Validator."""
         # Don't lint gt/lt as bad attibute names.
-        # pylint: disable=C0103
         self.gt = None  # type: Expression
         self.lt = None  # type: Expression
         self.gte = None  # type: Expression
@@ -536,22 +503,6 @@ class ChainedStruct(common.SourceLocation):
         super(ChainedStruct, self).__init__(file_name, line, column)
 
 
-class ChainedType(common.SourceLocation):
-    """
-    Stores all type information about an IDL chained type.
-
-    The fields name, and cpp_name are required.
-    """
-
-    def __init__(self, file_name, line, column):
-        # type: (str, int, int) -> None
-        """Construct a Type."""
-        self.name = None  # type: str
-        self.cpp_name = None  # type: str
-
-        super(ChainedType, self).__init__(file_name, line, column)
-
-
 class Struct(common.SourceLocation):
     """
     IDL struct information.
@@ -568,7 +519,6 @@ class Struct(common.SourceLocation):
         self.immutable = False  # type: bool
         self.inline_chained_structs = True  # type: bool
         self.generate_comparison_operators = False  # type: bool
-        self.chained_types = None  # type: List[ChainedType]
         self.chained_structs = None  # type: List[ChainedStruct]
         self.fields = None  # type: List[Field]
         self.allow_global_collection_name = False  # type: bool
@@ -577,11 +527,11 @@ class Struct(common.SourceLocation):
         self.is_command_reply = False  # type: bool
         self.is_catalog_ctxt = False  # type: bool
         self.is_generic_cmd_list = None  # type: Optional[str]
-        # pylint: disable=invalid-name
         self.unsafe_dangerous_disable_extra_field_duplicate_checks = None  # type: bool
 
         # Command only property
         self.cpp_name = None  # type: str
+        self.mod_visibility = None  # type: str
 
         # Internal property that is not represented as syntax. An imported struct is read from an
         # imported file, and no code is generated for it.
@@ -755,6 +705,7 @@ class Enum(common.SourceLocation):
         self.description = None  # type: str
         self.type = None  # type: str
         self.values = None  # type: List[EnumValue]
+        self.mod_visibility = None  # type: str
 
         # Internal property that is not represented as syntax. An imported enum is read from an
         # imported file, and no code is generated for it.
@@ -818,7 +769,7 @@ class FieldTypeArray(FieldType):
 
     def debug_string(self):
         """Display this field type in error messages."""
-        return f"array<{self.element_type.type_name}>"
+        return f"array<{self.element_type.debug_string()}>"
 
 
 class FieldTypeVariant(FieldType):
@@ -876,6 +827,7 @@ class ServerParameterClass(common.SourceLocation):
         self.override_ctor = False  # type: bool
         self.override_set = False  # type: bool
         self.override_validate = False  # type: bool
+        self.override_warn_if_deprecated = False  # type: bool
 
         super(ServerParameterClass, self).__init__(file_name, line, column)
 
@@ -891,6 +843,7 @@ class ServerParameter(common.SourceLocation):
         self.description = None  # type: str
         self.cpp_vartype = None  # type: str
         self.cpp_varname = None  # type: str
+        self.mod_visibility = None  # type: str
         self.cpp_class = None  # type: ServerParameterClass
         self.condition = None  # type: Condition
         self.deprecated_name = []  # type: List[str]
@@ -902,6 +855,8 @@ class ServerParameter(common.SourceLocation):
         # Only valid if cpp_varname is specified.
         self.validator = None  # type: Validator
         self.on_update = None  # type: str
+
+        self.is_deprecated = False  # type: bool
 
         super(ServerParameter, self).__init__(file_name, line, column)
 
@@ -915,10 +870,14 @@ class FeatureFlag(common.SourceLocation):
         self.name = None  # type: str
         self.description = None  # type: str
         self.cpp_varname = None  # type: str
+        self.mod_visibility = None  # type: str
         self.default = None  # type: Expression
         self.version = None  # type: str
-        # pylint: disable=C0103
-        self.shouldBeFCVGated = None  # type: Expression
+        self.fcv_gated = None  # type: Expression
+        self.enable_on_transitional_fcv_UNSAFE = None  # type: bool
+        self.incremental_rollout_phase = None  # type: Optional[str]
+        # TODO(SERVER-102615): Remove this parameter once it's not needed anymore
+        self.fcv_context_unaware = None  # type: bool
 
         super(FeatureFlag, self).__init__(file_name, line, column)
 
@@ -967,6 +926,7 @@ class ConfigOption(common.SourceLocation):
         self.arg_vartype = None  # type: str
         self.cpp_vartype = None  # type: str
         self.cpp_varname = None  # type: str
+        self.mod_visibility = None  # type: str
         self.condition = None  # type: Condition
 
         self.conflicts = []  # type: List[str]

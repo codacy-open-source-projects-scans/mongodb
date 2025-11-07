@@ -59,12 +59,13 @@ bool MongoCryptStatus::isOK() const {
 std::string MongoCryptStatus::reason() const {
     uint32_t len = 0;
     const char* msg = mongocrypt_status_message(_status, &len);
+    if (!msg) {
+        return std::string();
+    }
     return {msg, len};
 }
 
 Status MongoCryptStatus::toStatus() const {
-    using namespace fmt::literals;
-
     StringData errorPrefix;
     switch (mongocrypt_status_type(_status)) {
         case MONGOCRYPT_STATUS_OK:
@@ -73,17 +74,17 @@ Status MongoCryptStatus::toStatus() const {
             errorPrefix = "Client Error"_sd;
             break;
         case MONGOCRYPT_STATUS_ERROR_KMS:
-            errorPrefix = "Kms Error"_sd;
+            errorPrefix = "KMS Error"_sd;
             break;
         case MONGOCRYPT_STATUS_ERROR_CRYPT_SHARED:
-            errorPrefix = "Crypt Shared  Error"_sd;
+            errorPrefix = "Crypt Shared Error"_sd;
             break;
         default:
             errorPrefix = "Unexpected Error"_sd;
             break;
     }
 
-    return Status(ErrorCodes::LibmongocryptError, "{}: {}"_format(errorPrefix, reason()));
+    return Status(ErrorCodes::LibmongocryptError, fmt::format("{}: {}", errorPrefix, reason()));
 }
 
 }  // namespace mongo

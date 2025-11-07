@@ -5,6 +5,8 @@
  * ]
  */
 
+import {getTimeseriesCollForDDLOps} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
+import {getTimeseriesCollForRawOps} from "jstests/libs/raw_operation_utils.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 const st = new ShardingTest({shards: 2, rs: {nodes: 2}});
@@ -12,9 +14,9 @@ const st = new ShardingTest({shards: 2, rs: {nodes: 2}});
 //
 // Constants used throughout all tests.
 //
-const dbName = 'testDB';
-const collNameWithMeta = 'weatherWithLocationMeta';
-const collNameWithoutMeta = 'weather';
+const dbName = "testDB";
+const collNameWithMeta = "weatherWithLocationMeta";
+const collNameWithoutMeta = "weather";
 const mongos = st.s;
 const testDB = mongos.getDB(dbName);
 const primary = st.shard0;
@@ -22,17 +24,16 @@ const primaryDB = primary.getDB(dbName);
 const otherShard = st.shard1;
 const otherDB = otherShard.getDB(dbName);
 
-assert.commandWorked(
-    mongos.adminCommand({enableSharding: dbName, primaryShard: primary.shardName}));
+assert.commandWorked(mongos.adminCommand({enableSharding: dbName, primaryShard: primary.shardName}));
 
 const shard0RoutingValues = {
     shardNumber: 0,
-    timestamp: ISODate("2000-05-18T08:00:00.000Z")
+    timestamp: ISODate("2000-05-18T08:00:00.000Z"),
 };
 const shard1RoutingValues = {
     shardNumber: 1,
     timestamp1: ISODate("2010-05-18T08:00:00.000Z"),
-    timestamp2: ISODate("2010-05-19T08:00:00.000Z")
+    timestamp2: ISODate("2010-05-19T08:00:00.000Z"),
 };
 
 const data = [
@@ -100,71 +101,87 @@ const data = [
 ];
 
 // Set up a sharded time-series collection and split up the data points across 2 shards.
-const setUpShardedTimeseriesCollection = function(collName) {
+const setUpShardedTimeseriesCollection = function (collName) {
     const testColl = testDB[collName];
     let splitObject = null;
 
     if (collName == collNameWithoutMeta) {
-        assert.commandWorked(testDB.createCollection(
-            collName, {timeseries: {timeField: "time", granularity: "hours"}}));
         assert.commandWorked(
-            testDB.adminCommand({shardCollection: testColl.getFullName(), key: {"time": 1}}));
+            testDB.createCollection(collName, {timeseries: {timeField: "time", granularity: "hours"}}),
+        );
+        assert.commandWorked(testDB.adminCommand({shardCollection: testColl.getFullName(), key: {"time": 1}}));
 
         // In the measurements used for this test, timestamps use either year 2000 or year 2010 so
         // this split key in the year 2005 splits measurements across 2 shards accordingly.
         splitObject = {"control.min.time": ISODate("2005-05-18T08:00:00.000Z")};
     } else {
-        assert.commandWorked(testDB.createCollection(
-            collName,
-            {timeseries: {timeField: "time", metaField: "location", granularity: "hours"}}));
-        assert.commandWorked(testDB.adminCommand(
-            {shardCollection: testColl.getFullName(), key: {"location.shardNumber": 1}}));
+        assert.commandWorked(
+            testDB.createCollection(collName, {
+                timeseries: {timeField: "time", metaField: "location", granularity: "hours"},
+            }),
+        );
+        assert.commandWorked(
+            testDB.adminCommand({shardCollection: testColl.getFullName(), key: {"location.shardNumber": 1}}),
+        );
         splitObject = {"meta.shardNumber": 1};
     }
 
     assert.commandWorked(testColl.insertMany(data, {ordered: false}));
-    const bucketCollName = `system.buckets.${collName}`;
-    const bucketCollFullName = `${dbName}.${bucketCollName}`;
 
     // Shard 0 :   2 Corks   |   2 Dublins   |   1 New York City
     // Shard 1 :   2 Dublins |   2 Galways   |   2 New York Citys
-    assert.commandWorked(st.s.adminCommand({split: bucketCollFullName, middle: splitObject}));
+    assert.commandWorked(
+        st.s.adminCommand({split: getTimeseriesCollForDDLOps(testDB, testColl).getFullName(), middle: splitObject}),
+    );
 
     // Move chunks to the other shard.
-    assert.commandWorked(st.s.adminCommand({
-        movechunk: bucketCollFullName,
-        find: splitObject,
-        to: otherShard.shardName,
-        _waitForDelete: true
-    }));
+    assert.commandWorked(
+        st.s.adminCommand({
+            movechunk: getTimeseriesCollForDDLOps(testDB, testColl).getFullName(),
+            find: splitObject,
+            to: otherShard.shardName,
+            _waitForDelete: true,
+        }),
+    );
 
     // Ensures that each shard owns one chunk.
-    const counts = st.chunkCounts(bucketCollName, dbName);
+    const counts = st.chunkCounts(collName, dbName);
     assert.eq(1, counts[primary.shardName], counts);
     assert.eq(1, counts[otherShard.shardName], counts);
 
     // Ensure there is at least one bucket document on each shard.
-    const numDocsOnPrimaryDB = primaryDB[bucketCollName].find({}).toArray();
-    const numDocsOnOtherDB = otherDB[bucketCollName].find({}).toArray();
-    assert.gt(numDocsOnPrimaryDB.length,
-              1,
-              `Documents on primaryDB: ${tojson(numDocsOnPrimaryDB)} Documents on otherDB: ${
-                  tojson(numDocsOnOtherDB)}`);
-    assert.gt(numDocsOnOtherDB.length,
-              1,
-              `Documents on primaryDB: ${tojson(numDocsOnPrimaryDB)} Documents on otherDB: ${
-                  tojson(numDocsOnOtherDB)}`);
+    const numBucketDocsOnPrimaryDB = primaryDB[getTimeseriesCollForRawOps(testDB, collName)]
+        .find({})
+        .rawData()
+        .toArray();
+    const numBucketDocsOnOtherDB = otherDB[getTimeseriesCollForRawOps(testDB, collName)].find({}).rawData().toArray();
+    assert.gt(
+        numBucketDocsOnPrimaryDB.length,
+        1,
+        `Bucket documents on primaryDB: ${tojson(numBucketDocsOnPrimaryDB)} Bucket documents on otherDB: ${tojson(
+            numBucketDocsOnOtherDB,
+        )}`,
+    );
+    assert.gt(
+        numBucketDocsOnOtherDB.length,
+        1,
+        `Bucket documents on primaryDB: ${tojson(numBucketDocsOnPrimaryDB)} Bucket documents on otherDB: ${tojson(
+            numBucketDocsOnOtherDB,
+        )}`,
+    );
 };
 
 let numOfDeletedMeasurements = 0;
-const runDeleteOneWithQuery = function(collName, query, expectedN) {
+const runDeleteOneWithQuery = function (collName, query, expectedN) {
     jsTestLog(`running deleteOne() with query: ${tojson(query)} on collection: "${collName}"`);
     const deleteCommand = {
         delete: collName,
-        deletes: [{
-            q: query,
-            limit: 1,
-        }]
+        deletes: [
+            {
+                q: query,
+                limit: 1,
+            },
+        ],
     };
     const result = assert.commandWorked(testDB.runCommand(deleteCommand));
 
@@ -172,7 +189,7 @@ const runDeleteOneWithQuery = function(collName, query, expectedN) {
     numOfDeletedMeasurements += expectedN;
 };
 
-const runTests = function(collName) {
+const runTests = function (collName) {
     numOfDeletedMeasurements = 0;
 
     // Set up sharded time-series collections with data split across 2 shards.
@@ -200,12 +217,14 @@ const runTests = function(collName) {
     // We expect 'deleteOne' with an empty predicate to succeed.
     runDeleteOneWithQuery(collName, {}, 1);
 
-    // Verify the expected number of documents exist.
+    // Verify that the expected number of measurements exist.
     const originalCount = data.length;
-    const remainingDocuments = testDB[collName].find({}).toArray();
-    assert.eq(originalCount - numOfDeletedMeasurements,
-              remainingDocuments.length,
-              "Remaining Documents: " + tojson(remainingDocuments));
+    const remainingMeasurements = testDB[collName].find({}).toArray();
+    assert.eq(
+        originalCount - numOfDeletedMeasurements,
+        remainingMeasurements.length,
+        "Remaining Measurements: " + tojson(remainingMeasurements),
+    );
 };
 
 // Run tests on a collection with a metaField specified upon creation.

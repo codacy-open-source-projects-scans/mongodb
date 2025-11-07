@@ -29,28 +29,24 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <set>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/pipeline/change_stream_constants.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/document_source_change_stream_gen.h"
-#include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/resume_token.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+
+#include <set>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 /**
@@ -78,27 +74,20 @@ class DocumentSourceChangeStreamCheckResumability : public DocumentSourceInterna
 public:
     static constexpr StringData kStageName = "$_internalChangeStreamCheckResumability"_sd;
 
-    // Used to record the results of comparing the token data extracted from documents in the
-    // resumed stream against the client's resume token.
-    enum class ResumeStatus {
-        kFoundToken,      // The stream produced a document satisfying the client resume token.
-        kSurpassedToken,  // The stream's latest document is more recent than the resume token.
-        kCheckNextDoc,    // The next document produced by the stream may contain the resume token.
-        kNeedsSplit       // We found a candidate resume token but the event must be split.
-    };
-
     const char* getSourceName() const override;
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const override {
-        return {StreamType::kStreaming,
-                PositionRequirement::kNone,
-                HostTypeRequirement::kAnyShard,
-                DiskUseRequirement::kNoDiskUse,
-                FacetRequirement::kNotAllowed,
-                TransactionRequirement::kNotAllowed,
-                LookupRequirement::kNotAllowed,
-                UnionRequirement::kNotAllowed,
-                ChangeStreamRequirement::kChangeStreamStage};
+    StageConstraints constraints(PipelineSplitState pipeState) const override {
+        StageConstraints constraints(StreamType::kStreaming,
+                                     PositionRequirement::kNone,
+                                     HostTypeRequirement::kAnyShard,
+                                     DiskUseRequirement::kNoDiskUse,
+                                     FacetRequirement::kNotAllowed,
+                                     TransactionRequirement::kNotAllowed,
+                                     LookupRequirement::kNotAllowed,
+                                     UnionRequirement::kNotAllowed,
+                                     ChangeStreamRequirement::kChangeStreamStage);
+        constraints.consumesLogicalCollectionData = false;
+        return constraints;
     }
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
@@ -116,19 +105,23 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const DocumentSourceChangeStreamSpec& spec);
 
-    static ResumeStatus compareAgainstClientResumeToken(const Document& eventFromResumedStream,
-                                                        const ResumeTokenData& tokenDataFromClient);
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
+    }
 
 protected:
+    friend boost::intrusive_ptr<exec::agg::Stage>
+    documentSourceChangeStreamCheckResumabilityToStageFn(
+        const boost::intrusive_ptr<DocumentSource>& documentSource);
+
     /**
      * Use the create static method to create a DocumentSourceChangeStreamCheckResumability.
      */
     DocumentSourceChangeStreamCheckResumability(
         const boost::intrusive_ptr<ExpressionContext>& expCtx, ResumeTokenData token);
 
-    GetNextResult doGetNext() override;
-
-    ResumeStatus _resumeStatus = ResumeStatus::kCheckNextDoc;
     const ResumeTokenData _tokenFromClient;
 };
 }  // namespace mongo

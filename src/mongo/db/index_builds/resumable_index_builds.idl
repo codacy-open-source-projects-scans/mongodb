@@ -36,6 +36,26 @@ imports:
     - "mongo/db/sorter/sorter.idl"
 
 enums:
+    IndexBuildMethod:
+        description: "Index build method"
+        type: string
+        values:
+            # Use a collection scan to dump all keys into an external sorter. During this process,
+            # concurrent client writes are accepted, and their generated keys are written into an
+            # interceptor. On completion, this interceptor is drained and used to verify uniqueness
+            # constraints on the index.
+            kHybrid: "hybrid"
+            # Perform a collection scan to dump all keys into the external sorter, then into the
+            # index. During this process, callers guarantee that no writes will be accepted on this
+            # collection.
+            kForeground: "foreground"
+            # The overall index build process is similar to kHybrid. However, instead of building
+            # the index independently on each replica, only the primary runs the logic to build the
+            # index. Replicas simply apply the oplog entries generated during the build.
+            #
+            # This is the default for all index builds in a disaggregated storage cluster and is
+            # currently not supported in an attached storage cluster.
+            kPrimaryDriven: "Primary driven"
     IndexBuildPhase:
         description: "Phase of a hybrid index build"
         type: string
@@ -59,17 +79,20 @@ structs:
         strict: true
         fields:
             sideWritesTable:
-                description: "The name of the ident associated with the side writes table for this
-                              index build"
+                description:
+                    "The name of the ident associated with the side writes table for this
+                    index build"
                 type: string
             duplicateKeyTrackerTable:
-                description: "The name of the ident associated with the duplicate key tracker table
-                              for this index build"
+                description:
+                    "The name of the ident associated with the duplicate key tracker table
+                    for this index build"
                 type: string
                 optional: true
             skippedRecordTrackerTable:
-                description: "The name of the ident associated with the skipped record tracker table
-                              for this index build"
+                description:
+                    "The name of the ident associated with the skipped record tracker table
+                    for this index build"
                 type: string
                 optional: true
             fileName:
@@ -99,16 +122,18 @@ structs:
         strict: true
         fields:
             _id:
-                description: "A UUID that uniquely identifies the index build across replica set
-                              members."
+                description:
+                    "A UUID that uniquely identifies the index build across replica set
+                    members."
                 cpp_name: buildUUID
                 type: uuid
             phase:
                 description: "The phase the index build was in when the node shut down"
                 type: IndexBuildPhase
             collectionUUID:
-                description: "A UUID that uniquely identifies which collection the index is being
-                             built on"
+                description:
+                    "A UUID that uniquely identifies which collection the index is being
+                    built on"
                 type: uuid
             collectionScanPosition:
                 description: "The last record id inserted into the sorter before shutdown"

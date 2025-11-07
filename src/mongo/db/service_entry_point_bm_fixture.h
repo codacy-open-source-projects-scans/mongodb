@@ -29,61 +29,58 @@
 
 #pragma once
 
-#include <benchmark/benchmark.h>
-
 #include "mongo/base/init.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/client.h"
 #include "mongo/db/client_strand.h"
 #include "mongo/db/dbmessage.h"
-#include "mongo/db/profiler_bm_fixture.h"
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mock.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/platform/atomic.h"
 #include "mongo/transport/service_entry_point.h"
+#include "mongo/unittest/benchmark_util.h"
 #include "mongo/util/processinfo.h"
 
-namespace mongo {
-class ServiceEntryPointBenchmarkFixture : public BenchmarkWithProfiler {
-public:
-    void SetUp(benchmark::State& state) override {
-        stdx::lock_guard lk(_setupMutex);
-        if (_configuredThreads++)
-            return;
+#include <memory>
 
+#include <benchmark/benchmark.h>
+
+namespace mongo {
+class ServiceEntryPointBenchmarkFixture : public unittest::BenchmarkWithProfiler {
+public:
+    void setUpSharedResources(benchmark::State& state) override {
+        BenchmarkWithProfiler::setUpSharedResources(state);
         serverGlobalParams.clusterRole = getClusterRole();
-        BenchmarkWithProfiler::SetUp(state);
 
         setGlobalServiceContext(ServiceContext::make());
 
         // Minimal set up necessary for ServiceEntryPoint.
-        auto service = getGlobalServiceContext();
+        auto sc = getGlobalServiceContext();
+        auto service = sc->getService(getClusterRole());
 
-        ReadWriteConcernDefaults::create(service->getService(), _lookupMock.getFetchDefaultsFn());
+        ReadWriteConcernDefaults::create(service, _lookupMock.getFetchDefaultsFn());
         _lookupMock.setLookupCallReturnValue({});
-
-        setupImpl(service);
-        setServiceEntryPoint(service);
+        setUpServiceContext(sc);
     }
 
-    void TearDown(benchmark::State& state) override {
-        stdx::lock_guard lk(_setupMutex);
-        if (--_configuredThreads)
-            return;
+    void tearDownSharedResources(benchmark::State& state) override {
+        tearDownServiceContext(getGlobalServiceContext());
         setGlobalServiceContext({});
-
-        BenchmarkWithProfiler::TearDown(state);
+        BenchmarkWithProfiler::tearDownSharedResources(state);
     }
 
-    virtual void setServiceEntryPoint(ServiceContext* service) const = 0;
-
-    virtual void setupImpl(ServiceContext* service){};
+    /** Any custom service context setup and teardown, such as attaching a ServiceEntryPoint. */
+    virtual void setUpServiceContext(ServiceContext*) {}
+    virtual void tearDownServiceContext(ServiceContext*) {}
 
     virtual ClusterRole getClusterRole() const = 0;
 
     void doRequest(ServiceEntryPoint* sep, Client* client, Message& msg) {
         auto newOpCtx = client->makeOperationContext();
-        iassert(sep->handleRequest(newOpCtx.get(), msg).getNoThrow());
+        iassert(sep->handleRequest(newOpCtx.get(), msg, newOpCtx.get()->fastClockSource().now())
+                    .getNoThrow());
     }
 
     void runBenchmark(benchmark::State& state, BSONObj obj) {
@@ -109,9 +106,7 @@ public:
 private:
     Atomic<uint64_t> _nextClientId{0};
 
-    stdx::mutex _setupMutex;
     ReadWriteConcernDefaultsLookupMock _lookupMock;
-    size_t _configuredThreads = 0;
 };
 
 /**
@@ -119,10 +114,10 @@ private:
  * With sanitizers, run this in a diminished "correctness check" mode.
  */
 #if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
-const auto kSEPBMMaxThreads = 1;
+const auto kCommandBMMaxThreads = 1;
 #else
 /** 2x to benchmark the case of more threads than cores for curiosity's sake. */
-const auto kSEPBMMaxThreads = 2 * ProcessInfo::getNumLogicalCores();
+const auto kCommandBMMaxThreads = 2 * ProcessInfo::getNumLogicalCores();
 #endif
 
 

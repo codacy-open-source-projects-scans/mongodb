@@ -29,21 +29,21 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <map>
-#include <memory>
-#include <string>
-#include <utility>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/index_entry.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/index_hint.h"
-#include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_params.h"
-#include "mongo/db/query/query_solution.h"
+#include "mongo/util/modules.h"
+
+#include <map>
+#include <memory>
+#include <string>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -182,6 +182,14 @@ public:
      * choose the hash join algorithm for cases when the hash table is unlikely to spill to disk.
      */
     static bool isEligibleForHashJoin(const CollectionInfo& foreignCollInfo);
+
+    /**
+     * Returns 'true' if the provided solution 'soln' can be rewritten to use a fast counting stage.
+     * Mutates the tree in 'soln->root'.
+     *
+     * Otherwise, returns 'false'.
+     */
+    static bool turnIxscanIntoCount(QuerySolution* soln);
 };
 
 }  // namespace mongo

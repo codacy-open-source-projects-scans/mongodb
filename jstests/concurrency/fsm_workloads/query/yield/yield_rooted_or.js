@@ -5,33 +5,35 @@
  * match.
  * Other workloads that need an index on c and d can inherit from this.
  * @tags: [
- *   requires_getmore
+ *   requires_getmore,
+ *   # This test relies on query commands returning specific batch-sized responses.
+ *   assumes_no_implicit_cursor_exhaustion,
  * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/query/yield/yield.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
     /*
      * Issue a query with an or stage as the root.
      */
     $config.states.query = function rootedOr(db, collName) {
-        var nMatches = 100;
+        let nMatches = 100;
 
-        var cursor = db[collName]
-                         .find({$or: [{c: {$lte: nMatches / 2}}, {d: {$lte: nMatches / 2}}]})
-                         .batchSize(this.batchSize);
+        let cursor = db[collName]
+            .find({$or: [{c: {$lte: nMatches / 2}}, {d: {$lte: nMatches / 2}}]})
+            .batchSize(this.batchSize);
 
-        var verifier = function rootedOrVerifier(doc, prevDoc) {
-            return (doc.c <= nMatches / 2 || doc.d <= nMatches / 2);
+        let verifier = function rootedOrVerifier(doc, prevDoc) {
+            return doc.c <= nMatches / 2 || doc.d <= nMatches / 2;
         };
 
         this.advanceCursor(cursor, verifier);
     };
 
     $config.data.genUpdateDoc = function genUpdateDoc() {
-        var newC = Random.randInt(this.nDocs);
-        var newD = Random.randInt(this.nDocs);
+        let newC = Random.randInt(this.nDocs);
+        let newD = Random.randInt(this.nDocs);
         return {$set: {c: newC, d: newD}};
     };
 

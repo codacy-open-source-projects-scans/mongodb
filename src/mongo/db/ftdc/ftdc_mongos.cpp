@@ -27,12 +27,7 @@
  *    it in the license file.
  */
 
-#include <functional>
-#include <memory>
-#include <string>
-
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
+#include "mongo/db/ftdc/ftdc_mongos.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -42,23 +37,30 @@
 #include "mongo/client/global_conn_pool.h"
 #include "mongo/client/replica_set_monitor_manager.h"
 #include "mongo/db/ftdc/collector.h"
-#include "mongo/db/ftdc/ftdc_mongos.h"
 #include "mongo/db/ftdc/ftdc_server.h"
 #include "mongo/db/ftdc/util.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/executor/connection_pool_stats.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
+
+#include <functional>
+#include <memory>
+#include <string>
+
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kFTDC
 
 
 namespace mongo {
+
+namespace {
 
 class ConnPoolStatsCollector : public FTDCCollectorInterface {
 public:
@@ -114,33 +116,29 @@ public:
 };
 
 void registerRouterCollectors(FTDCController* controller) {
-    registerServerCollectorsForRole(controller, ClusterRole::RouterServer);
+    registerServerCollectors(controller);
 
     // PoolStats
-    controller->addPeriodicCollector(std::make_unique<ConnPoolStatsCollector>(),
-                                     ClusterRole::RouterServer);
+    controller->addPeriodicCollector(std::make_unique<ConnPoolStatsCollector>());
 
-    controller->addPeriodicCollector(std::make_unique<NetworkInterfaceStatsCollector>(),
-                                     ClusterRole::RouterServer);
+    controller->addPeriodicCollector(std::make_unique<NetworkInterfaceStatsCollector>());
 
-    controller->addPeriodicMetadataCollector(
-        std::make_unique<FTDCSimpleInternalCommandCollector>(
-            "getParameter",
-            "getParameter",
-            DatabaseName::kEmpty,
-            BSON("getParameter" << BSON("allParameters" << true << "setAt"
-                                                        << "runtime"))),
-        ClusterRole::RouterServer);
+    controller->addPeriodicMetadataCollector(std::make_unique<FTDCSimpleInternalCommandCollector>(
+        "getParameter",
+        "getParameter",
+        DatabaseName::kEmpty,
+        BSON("getParameter" << BSON("allParameters" << true << "setAt"
+                                                    << "runtime"))));
 
-    controller->addPeriodicMetadataCollector(
-        std::make_unique<FTDCSimpleInternalCommandCollector>("getClusterParameter",
-                                                             "getClusterParameter",
-                                                             DatabaseName::kEmpty,
-                                                             BSON("getClusterParameter"
-                                                                  << "*"
-                                                                  << "omitInFTDC" << true)),
-        ClusterRole::RouterServer);
+    controller->addPeriodicMetadataCollector(std::make_unique<FTDCSimpleInternalCommandCollector>(
+        "getClusterParameter",
+        "getClusterParameter",
+        DatabaseName::kEmpty,
+        BSON("getClusterParameter" << "*"
+                                   << "omitInFTDC" << true)));
 }
+
+}  // namespace
 
 void startMongoSFTDC(ServiceContext* serviceContext) {
     // Get the path to use for FTDC:
@@ -168,11 +166,7 @@ void startMongoSFTDC(ServiceContext* serviceContext) {
         }
     }
 
-    // (Ignore FCV check): This code is only executed in mongoS, and they're not FCV-gated anyway.
-    const UseMultiServiceSchema multiServiceSchema{
-        feature_flags::gMultiServiceLogAndFTDCFormat.isEnabledAndIgnoreFCVUnsafe()};
-
-    startFTDC(serviceContext, directory, startMode, {registerRouterCollectors}, multiServiceSchema);
+    startFTDC(serviceContext, directory, startMode, {registerRouterCollectors});
 }
 
 void stopMongoSFTDC() {

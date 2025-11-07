@@ -27,19 +27,7 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <functional>
-#include <initializer_list>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
+#include "mongo/base/counter.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -52,48 +40,46 @@
 #include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/basic_types_gen.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/server_status.h"
+#include "mongo/db/commands/server_status/server_status.h"
 #include "mongo/db/commands/test_commands_enabled.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/direct_shard_client_tracker.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/direct_shard_client_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/read_write_concern_defaults.h"
-#include "mongo/db/repl/hello_auth.h"
-#include "mongo/db/repl/hello_gen.h"
-#include "mongo/db/repl/hello_response.h"
+#include "mongo/db/repl/hello/hello_auth.h"
+#include "mongo/db/repl/hello/hello_gen.h"
+#include "mongo/db/repl/hello/hello_response.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_process.h"
-#include "mongo/db/repl/split_horizon.h"
-#include "mongo/db/s/global_user_write_block_state.h"
+#include "mongo/db/repl/split_horizon/split_horizon.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/db/user_write_block/global_user_write_block_state.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/metadata/client_metadata.h"
@@ -112,9 +98,28 @@
 #include "mongo/util/string_map.h"
 #include "mongo/util/time_support.h"
 
+#include <cstdint>
+#include <functional>
+#include <initializer_list>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kFTDC
 
 namespace mongo {
+
+auto& replCoordMutexTotalWaitTimeInOplogServerStatus =
+    *MetricBuilder<Counter64>{"repl.waiters.replCoordMutexTotalWaitTimeInOplogServerStatusMillis"};
+
+auto& numReplCoordMutexAcquisitionsInOplogServerStatus =
+    *MetricBuilder<Counter64>("repl.waiters.numReplCoordMutexAcquisitionsInOplogServerStatus");
 
 // Hangs in the beginning of each hello command when set.
 MONGO_FAIL_POINT_DEFINE(shardWaitInHello);
@@ -247,11 +252,12 @@ public:
         }
         {
             auto state = UserWriteBlockState::kUnknown;
+            auto reason = UserWritesBlockReasonEnum::kUnspecified;
             // Try to lock. If we fail (i.e. lock is already held in write mode), don't read the
             // GlobalUserWriteBlockState and set the userWriteBlockMode field to kUnknown.
             Lock::GlobalLock lk(
                 opCtx, MODE_IS, Date_t::now(), Lock::InterruptBehavior::kLeaveUnlocked, [] {
-                    Lock::GlobalLockSkipOptions options;
+                    Lock::GlobalLockOptions options;
                     options.skipRSTLLock = true;
                     return options;
                 }());
@@ -261,8 +267,11 @@ public:
                 state = GlobalUserWriteBlockState::get(opCtx)->isUserWriteBlockingEnabled(opCtx)
                     ? UserWriteBlockState::kEnabled
                     : UserWriteBlockState::kDisabled;
+                reason = GlobalUserWriteBlockState::get(opCtx)->getUserWriteBlockingReason(opCtx);
             }
             result.append("userWriteBlockMode", state);
+            result.append("userWriteBlockReason", reason);
+            GlobalUserWriteBlockState::get(opCtx)->appendUserWriteBlockModeCounters(result);
         }
 
         return result.obj();
@@ -287,7 +296,12 @@ public:
         }
 
         BSONObjBuilder result;
+
+        // Time the total amount of time spent waiting for repl coord mutex.
+        Timer timer;
         result.append("latestOptime", replCoord->getMyLastAppliedOpTime().getTimestamp());
+        replCoordMutexTotalWaitTimeInOplogServerStatus.increment(timer.millis());
+        numReplCoordMutexAcquisitionsInOplogServerStatus.increment(1);
 
         auto earliestOplogTimestampFetch = [&]() -> Timestamp {
             boost::optional<AutoGetOplogFastPath> oplog = boost::none;
@@ -341,7 +355,7 @@ auto& oplogInfoServerStatus =
     *ServerStatusSectionBuilder<OplogInfoServerStatus>("oplog").forShard();
 
 const std::string kAutomationServiceDescriptorFieldName =
-    HelloCommandReply::kAutomationServiceDescriptorFieldName.toString();
+    std::string{HelloCommandReply::kAutomationServiceDescriptorFieldName};
 
 class CmdHello : public BasicCommandWithReplyBuilderInterface {
 public:
@@ -397,6 +411,10 @@ public:
         return Status::OK();  // No auth required
     }
 
+    bool requiresAuthzChecks() const override {
+        return false;
+    }
+
     bool runWithReplyBuilder(OperationContext* opCtx,
                              const DatabaseName& dbName,
                              const BSONObj& cmdObj,
@@ -411,7 +429,12 @@ public:
             ? SerializationContext::stateCommandRequest(vts->hasTenantId(), vts->isFromAtlasProxy())
             : SerializationContext::stateCommandRequest();
         auto cmd = idl::parseCommandDocument<HelloCommand>(
-            IDLParserContext("hello", vts, dbName.tenantId(), sc), cmdObj);
+            cmdObj, IDLParserContext("hello", vts, dbName.tenantId(), sc));
+
+        if (cmd.getLoadBalanced().value_or(false)) {
+            LOGV2(10107800,
+                  "Client declared load balancer support. This is not supported on mongod.");
+        }
 
         shardWaitInHello.execute(
             [&](const BSONObj& customArgs) { _handleHelloFailPoint(customArgs, opCtx, cmdObj); });
@@ -443,8 +466,10 @@ public:
         const auto internalClient = cmd.getInternalClient();
         const bool isInternalClient = internalClient.has_value();
 
+        bool isInitialHandshake = false;
         if (ClientMetadata::tryFinalize(client)) {
             // This is the first hello for this client.
+            isInitialHandshake = true;
             audit::logClientMetadata(client);
             if (!isInternalClient) {
                 DirectShardClientTracker::trackClient(client);
@@ -464,8 +489,8 @@ public:
             // closed if the featureCompatibilityVersion is bumped to 3.6.
             if (internalClient->getMaxWireVersion() >=
                 WireSpec::getWireSpec(opCtx->getServiceContext())
-                    .get()
-                    ->incomingExternalClient.maxWireVersion) {
+                    .getIncomingExternalClient()
+                    .maxWireVersion) {
                 connectionTagsToSet |= Client::kLatestVersionInternalClientKeepOpen;
             } else {
                 connectionTagsToUnset |= Client::kLatestVersionInternalClientKeepOpen;
@@ -553,24 +578,22 @@ public:
                             static_cast<long long>(MaxMessageSizeBytes));
         result.appendNumber(HelloCommandReply::kMaxWriteBatchSizeFieldName,
                             static_cast<long long>(write_ops::kMaxWriteBatchSize));
-        result.appendDate(HelloCommandReply::kLocalTimeFieldName, jsTime());
+        result.appendDate(HelloCommandReply::kLocalTimeFieldName, Date_t::now());
         result.append(HelloCommandReply::kLogicalSessionTimeoutMinutesFieldName,
                       localLogicalSessionTimeoutMinutes);
         result.appendNumber(HelloCommandReply::kConnectionIdFieldName,
                             opCtx->getClient()->getConnectionId());
 
 
-        if (auto wireSpec = WireSpec::getWireSpec(opCtx->getServiceContext()).get();
-            cmd.getInternalClient()) {
-            result.append(HelloCommandReply::kMinWireVersionFieldName,
-                          wireSpec->incomingInternalClient.minWireVersion);
-            result.append(HelloCommandReply::kMaxWireVersionFieldName,
-                          wireSpec->incomingInternalClient.maxWireVersion);
+        auto& wireSpec = WireSpec::getWireSpec(opCtx->getServiceContext());
+        if (cmd.getInternalClient()) {
+            auto internal = wireSpec.getIncomingInternalClient();
+            result.append(HelloCommandReply::kMinWireVersionFieldName, internal.minWireVersion);
+            result.append(HelloCommandReply::kMaxWireVersionFieldName, internal.maxWireVersion);
         } else {
-            result.append(HelloCommandReply::kMinWireVersionFieldName,
-                          wireSpec->incomingExternalClient.minWireVersion);
-            result.append(HelloCommandReply::kMaxWireVersionFieldName,
-                          wireSpec->incomingExternalClient.maxWireVersion);
+            auto external = wireSpec.getIncomingExternalClient();
+            result.append(HelloCommandReply::kMinWireVersionFieldName, external.minWireVersion);
+            result.append(HelloCommandReply::kMaxWireVersionFieldName, external.maxWireVersion);
         }
 
         result.append(HelloCommandReply::kReadOnlyFieldName, opCtx->readOnly());
@@ -588,8 +611,7 @@ public:
                     maxAwaitTimeMS);
             invariant(clientTopologyVersion);
 
-            InExhaustHello::get(opCtx->getClient()->session().get())
-                ->setInExhaust(true /* inExhaust */, getName());
+            InExhaustHello::get(opCtx->getClient()->session().get())->setInExhaust(commandType());
 
             if (clientTopologyVersion->getProcessId() == currentTopologyVersion.getProcessId() &&
                 clientTopologyVersion->getCounter() == currentTopologyVersion.getCounter()) {
@@ -611,7 +633,7 @@ public:
             }
         }
 
-        handleHelloAuth(opCtx, dbName, cmd, &result);
+        handleHelloAuth(opCtx, dbName, cmd, isInitialHandshake, &result);
 
         if (getTestCommandsEnabled()) {
             validateResult(&result);
@@ -623,11 +645,11 @@ public:
         auto ret = result->asTempObj();
         if (ret[ErrorReply::kErrmsgFieldName].eoo()) {
             // Nominal success case, parse the object as-is.
-            HelloCommandReply::parse(IDLParserContext{"hello.reply"}, ret);
+            HelloCommandReply::parse(ret, IDLParserContext{"hello.reply"});
         } else {
             // Something went wrong, still try to parse, but accept a few ignorable fields.
             StringDataSet ignorable({ErrorReply::kCodeFieldName, ErrorReply::kErrmsgFieldName});
-            HelloCommandReply::parse(IDLParserContext{"hello.reply"}, ret.removeFields(ignorable));
+            HelloCommandReply::parse(ret.removeFields(ignorable), IDLParserContext{"hello.reply"});
         }
     }
 
@@ -637,6 +659,10 @@ protected:
 
     virtual bool useLegacyResponseFields() const {
         return false;
+    }
+
+    virtual InExhaustHello::Command commandType() const {
+        return InExhaustHello::Command::kHello;
     }
 
 private:
@@ -695,6 +721,10 @@ protected:
     // instead of "ismaster" and "secondaryDelaySecs" response field instead of "slaveDelay".
     bool useLegacyResponseFields() const final {
         return true;
+    }
+
+    InExhaustHello::Command commandType() const final {
+        return InExhaustHello::Command::kIsMaster;
     }
 };
 MONGO_REGISTER_COMMAND(CmdIsMaster).forShard();

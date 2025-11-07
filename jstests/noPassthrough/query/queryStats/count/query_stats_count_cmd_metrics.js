@@ -5,16 +5,14 @@
  * @tags: [requires_fcv_81]
  */
 
-import {
-    assertDropAndRecreateCollection,
-} from "jstests/libs/collection_drop_recreate.js";
+import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
 import {
     assertAggregatedMetricsSingleExec,
     assertExpectedResults,
     getLatestQueryStatsEntry,
     getQueryStats,
     resetQueryStatsStore,
-    withQueryStatsEnabled
+    withQueryStatsEnabled,
 } from "jstests/libs/query/query_stats_utils.js";
 
 /**
@@ -48,16 +46,18 @@ function testDefaultCountCommand(db, collName) {
         hasSortStage: false,
         usedDisk: false,
         fromMultiPlanner: false,
-        fromPlanCache: false
+        fromPlanCache: false,
     });
-    assertExpectedResults(firstEntry,
-                          firstEntry.key,
-                          /* expectedExecCount */ 1,
-                          /* expectedDocsReturnedSum */ 1,
-                          /* expectedDocsReturnedMax */ 1,
-                          /* expectedDocsReturnedMin */ 1,
-                          /* expectedDocsReturnedSumOfSq */ 1,
-                          /* getMores */ false);
+    assertExpectedResults({
+        results: firstEntry,
+        expectedQueryStatsKey: firstEntry.key,
+        expectedExecCount: 1,
+        expectedDocsReturnedSum: 1,
+        expectedDocsReturnedMax: 1,
+        expectedDocsReturnedMin: 1,
+        expectedDocsReturnedSumOfSq: 1,
+        getMores: false,
+    });
 
     // Check that only one query stats entry is added.
     const stats = getQueryStats(db.getMongo(), {collName: collName});
@@ -71,10 +71,12 @@ function testDefaultCountCommand(db, collName) {
  * @param {String} collName - The name of the collection.
  */
 function testCountCommandWithQuery(db, collName) {
-    assert.commandWorked(db.runCommand({
-        count: collName,
-        query: {$or: [{a: {$lt: 3}}, {a: {$eq: 4}}]},
-    }));
+    assert.commandWorked(
+        db.runCommand({
+            count: collName,
+            query: {$or: [{a: {$lt: 3}}, {a: {$eq: 4}}]},
+        }),
+    );
 
     // Check that query stats metrics are properly updated.
     const firstEntry = getLatestQueryStatsEntry(db.getMongo(), {collname: collName});
@@ -85,16 +87,18 @@ function testCountCommandWithQuery(db, collName) {
         hasSortStage: false,
         usedDisk: false,
         fromMultiPlanner: false,
-        fromPlanCache: false
+        fromPlanCache: false,
     });
-    assertExpectedResults(firstEntry,
-                          firstEntry.key,
-                          /* expectedExecCount */ 1,
-                          /* expectedDocsReturnedSum */ 1,
-                          /* expectedDocsReturnedMax */ 1,
-                          /* expectedDocsReturnedMin */ 1,
-                          /* expectedDocsReturnedSumOfSq */ 1,
-                          /* getMores */ false);
+    assertExpectedResults({
+        results: firstEntry,
+        expectedQueryStatsKey: firstEntry.key,
+        expectedExecCount: 1,
+        expectedDocsReturnedSum: 1,
+        expectedDocsReturnedMax: 1,
+        expectedDocsReturnedMin: 1,
+        expectedDocsReturnedSumOfSq: 1,
+        getMores: false,
+    });
 
     // Check that only one query stats entry is added.
     const stats = getQueryStats(db.getMongo(), {collName: collName});
@@ -109,10 +113,12 @@ function testCountCommandWithQuery(db, collName) {
  */
 function testCountCommandWithIndex(db, collName) {
     assert.commandWorked(db[collName].createIndex({a: 1}));
-    assert.commandWorked(db.runCommand({
-        count: collName,
-        query: {$or: [{a: {$lt: 3}}, {a: {$eq: 4}}]},
-    }));
+    assert.commandWorked(
+        db.runCommand({
+            count: collName,
+            query: {$or: [{a: {$lt: 3}}, {a: {$eq: 4}}]},
+        }),
+    );
 
     // Check that query stats metrics are properly updated.
     const firstEntry = getLatestQueryStatsEntry(db.getMongo(), {collname: collName});
@@ -123,16 +129,18 @@ function testCountCommandWithIndex(db, collName) {
         hasSortStage: false,
         usedDisk: false,
         fromMultiPlanner: false,
-        fromPlanCache: false
+        fromPlanCache: false,
     });
-    assertExpectedResults(firstEntry,
-                          firstEntry.key,
-                          /* expectedExecCount */ 1,
-                          /* expectedDocsReturnedSum */ 1,
-                          /* expectedDocsReturnedMax */ 1,
-                          /* expectedDocsReturnedMin */ 1,
-                          /* expectedDocsReturnedSumOfSq */ 1,
-                          /* getMores */ false);
+    assertExpectedResults({
+        results: firstEntry,
+        expectedQueryStatsKey: firstEntry.key,
+        expectedExecCount: 1,
+        expectedDocsReturnedSum: 1,
+        expectedDocsReturnedMax: 1,
+        expectedDocsReturnedMin: 1,
+        expectedDocsReturnedSumOfSq: 1,
+        getMores: false,
+    });
 
     // Check that only one query stats entry is added.
     const stats = getQueryStats(db.getMongo(), {collName: collName});

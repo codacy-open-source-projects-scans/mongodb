@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <cstddef>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -45,12 +38,18 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_visitor.h"
 #include "mongo/db/matcher/expression_with_placeholder.h"
-#include "mongo/db/matcher/match_details.h"
-#include "mongo/db/matcher/matchable.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/pcre.h"
 #include "mongo/util/string_map.h"
+
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 
@@ -138,18 +137,6 @@ public:
         return MatchCategory::kOther;
     }
 
-    /**
-     * The input matches if:
-     *
-     *  - it is a document;
-     *  - each field that matches a regular expression in '_patternProperties' also matches the
-     *    corresponding match expression; and
-     *  - any field not contained in '_properties' nor matching a pattern in '_patternProperties'
-     *    matches the '_otherwise' match expression.
-     */
-    bool matches(const MatchableDocument* doc, MatchDetails* details) const final;
-    bool matchesSingleElement(const BSONElement& element, MatchDetails* details) const final;
-
     void serialize(BSONObjBuilder* builder,
                    const SerializationOptions& opts = {},
                    bool includePath = true) const final;
@@ -184,6 +171,16 @@ public:
         }
     }
 
+    MatchExpression* releaseChild(size_t i) {
+        tassert(10806401, "Out-of-bounds access to child of MatchExpression.", i < numChildren());
+
+        if (i == 0) {
+            return _otherwise->releaseFilter();
+        } else {
+            return _patternProperties[i - 1].second->releaseFilter();
+        }
+    }
+
     void acceptVisitor(MatchExpressionMutableVisitor* visitor) final {
         visitor->visit(this);
     }
@@ -209,13 +206,6 @@ public:
     }
 
 private:
-    ExpressionOptimizerFunc getOptimizer() const final;
-
-    /**
-     * Helper function for matches() and matchesSingleElement().
-     */
-    bool _matchesBSONObj(const BSONObj& obj) const;
-
     // The names of the properties are owned by the BSONObj used to create this match expression.
     // Since that BSONObj must outlive this object, we can safely store StringData.
     StringDataSet _properties;

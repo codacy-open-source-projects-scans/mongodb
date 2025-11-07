@@ -34,16 +34,6 @@
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "cxxabi.h"
-#include <chrono>
-#include <cstddef>
-#include <exception>
-#include <functional>
-#include <limits>
-#include <ostream>
-#include <set>
-#include <string>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
@@ -59,15 +49,24 @@
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/executor/connection_pool_stats.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/socket_exception.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/testing_proctor.h"
+
+#include <chrono>
+#include <cstddef>
+#include <exception>
+#include <functional>
+#include <limits>
+#include <ostream>
+#include <set>
+#include <string>
+#include <utility>
 
 #if __has_feature(address_sanitizer)
 #include <sanitizer/lsan_interface.h>
@@ -639,7 +638,9 @@ void DBConnectionPool::appendConnectionStats(executor::ConnectionPoolStats* stat
                                                    0,
                                                    0,
                                                    0,
-                                                   Milliseconds{0}};
+                                                   Milliseconds{0},
+                                                   0,
+                                                   0};
             hostStats.acquisitionWaitTimes = i->second.connectionWaitTimeStats();
             stats->updateStatsForHost("global", host, hostStats);
         }
@@ -716,8 +717,8 @@ void DBConnectionPool::taskDoWork() {
 
     for (size_t i = 0; i < toDelete.size(); i++) {
         try {
+            ScopeGuard cleanup([&] { delete toDelete[i]; });
             onDestroy(toDelete[i]);
-            delete toDelete[i];
         } catch (...) {
             // we don't care if there was a socket error
         }

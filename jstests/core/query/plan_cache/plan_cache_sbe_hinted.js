@@ -10,6 +10,7 @@
  *   # Multiple servers can mess up the plan cache list.
  *   assumes_standalone_mongod,
  *   featureFlagSbeFull,
+ *   requires_getmore,
  * ]
  */
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
@@ -20,11 +21,11 @@ coll.drop();
 assert.commandWorked(coll.insert({a: 1, b: 1}));
 assert.commandWorked(coll.createIndexes([{a: 1}, {a: 1, b: 1}]));
 
-const verifyPlanCacheSize = function(len) {
+const verifyPlanCacheSize = function (len) {
     const caches = coll.getPlanCache().list();
     assert.eq(len, caches.length, caches);
 };
-const queryAndVerify = function(hint, expected) {
+const queryAndVerify = function (hint, expected) {
     assert.eq(1, coll.find({a: 1}).hint(hint).itcount());
     assert.eq(1, coll.find({a: 1}).hint(hint).itcount());
     verifyPlanCacheSize(expected);

@@ -29,25 +29,6 @@
 
 #include "mongo/logv2/plain_formatter.h"
 
-#include <algorithm>
-#include <any>
-#include <boost/log/attributes/value_extraction.hpp>
-#include <boost/log/utility/formatting_ostream.hpp>
-#include <cstddef>
-#include <deque>
-#include <fmt/format.h>
-#include <functional>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <utility>
-#include <variant>
-
-#include <boost/cstdint.hpp>
-#include <boost/exception/exception.hpp>
-#include <boost/log/core/record_view.hpp>
-#include <boost/log/utility/formatting_ostream_fwd.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -60,6 +41,25 @@
 #include "mongo/logv2/log_truncation.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+
+#include <algorithm>
+#include <any>
+#include <cstddef>
+#include <deque>
+#include <functional>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <variant>
+
+#include <boost/cstdint.hpp>
+#include <boost/exception/exception.hpp>
+#include <boost/log/attributes/value_extraction.hpp>
+#include <boost/log/core/record_view.hpp>
+#include <boost/log/utility/formatting_ostream.hpp>
+#include <boost/log/utility/formatting_ostream_fwd.hpp>
+#include <fmt/args.h>
+#include <fmt/format.h>
 
 namespace mongo::logv2 {
 namespace {
@@ -125,7 +125,7 @@ private:
      * values and user-defined values.
      */
     static auto _wrapValue(StringData val) {
-        return std::string_view{val.rawData(), val.size()};
+        return toStdStringViewForInterop(val);
     }
 
     template <typename T>
@@ -174,7 +174,8 @@ void PlainFormatter::operator()(boost::log::record_view const& rec,
     TextValueExtractor extractor;
     extractor.reserve(attrs.get().size());
     attrs.get().apply(extractor);
-    fmt::vformat_to(buffer, std::string_view{message}, extractor.args());
+    fmt::vformat_to(
+        std::back_inserter(buffer), toStdStringViewForInterop(message), extractor.args());
 
     size_t attributeMaxSize = buffer.size();
     if (extract<LogTruncation>(attributes::truncation(), rec).get() == LogTruncation::Enabled) {
@@ -185,7 +186,7 @@ void PlainFormatter::operator()(boost::log::record_view const& rec,
     }
 
     buffer.resize(std::min(attributeMaxSize, buffer.size()));
-    if (StringData sd(buffer.data(), buffer.size()); sd.endsWith("\n"_sd))
+    if (StringData sd(buffer.data(), buffer.size()); sd.ends_with("\n"_sd))
         buffer.resize(buffer.size() - 1);
 }
 

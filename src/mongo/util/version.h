@@ -27,15 +27,17 @@
  *    it in the license file.
  */
 
+#pragma once
+
 #ifndef UTIL_VERSION_HEADER
 #define UTIL_VERSION_HEADER
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
 
 #include <iosfwd>
 #include <string>
 #include <vector>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
 
 namespace mongo {
 
@@ -82,32 +84,32 @@ public:
     /**
      * Returns the major version as configured via MONGO_VERSION.
      */
-    virtual int majorVersion() const noexcept = 0;
+    virtual int majorVersion() const = 0;
 
     /**
      * Returns the minor version as configured via MONGO_VERSION.
      */
-    virtual int minorVersion() const noexcept = 0;
+    virtual int minorVersion() const = 0;
 
     /**
      * Returns the patch version as configured via MONGO_VERSION.
      */
-    virtual int patchVersion() const noexcept = 0;
+    virtual int patchVersion() const = 0;
 
     /**
      * Returns the extra version as configured via MONGO_VERSION.
      */
-    virtual int extraVersion() const noexcept = 0;
+    virtual int extraVersion() const = 0;
 
     /**
      * Returns a string representation of MONGO_VERSION.
      */
-    virtual StringData version() const noexcept = 0;
+    virtual StringData version() const = 0;
 
     /**
      * Returns a string representation of MONGO_GIT_HASH.
      */
-    virtual StringData gitVersion() const noexcept = 0;
+    virtual StringData gitVersion() const = 0;
 
     /**
      * Returns a vector describing the enabled modules.
@@ -117,18 +119,18 @@ public:
     /**
      * Returns a string describing the configured memory allocator.
      */
-    virtual StringData allocator() const noexcept = 0;
+    virtual StringData allocator() const = 0;
 
     /**
      * Returns a string describing the configured javascript engine.
      */
-    virtual StringData jsEngine() const noexcept = 0;
+    virtual StringData jsEngine() const = 0;
 
     /**
      * Returns a string describing the minimum requred OS. Note that this method is currently only
      * valid to call when running on Windows.
      */
-    virtual StringData targetMinOS() const noexcept = 0;
+    virtual StringData targetMinOS() const = 0;
 
     /**
      * Returns build information (e.g. LINKFLAGS, compiler, etc.).

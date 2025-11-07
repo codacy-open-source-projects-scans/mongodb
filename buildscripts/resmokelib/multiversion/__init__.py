@@ -6,7 +6,7 @@ from typing import List, Optional
 import yaml
 from pydantic import BaseModel
 
-from buildscripts.resmokelib import configure_resmoke
+from buildscripts.resmokelib import config, configure_resmoke
 from buildscripts.resmokelib.multiversion.multiversion_service import (
     MongoReleases,
     MongoVersion,
@@ -41,8 +41,8 @@ class MultiversionConfig(BaseModel):
 class MultiversionConfigSubcommand(Subcommand):
     """Subcommand for discovering multiversion configuration."""
 
-    def __init__(self, options: argparse.Namespace) -> None:
-        self.config_file_output = options.config_file_output
+    def __init__(self, options: dict) -> None:
+        self.config_file_output = options["config_file_output"]
 
     def execute(self):
         """Execute the subcommand."""
@@ -60,8 +60,8 @@ class MultiversionConfigSubcommand(Subcommand):
         from buildscripts.resmokelib import multiversionconstants
 
         multiversion_service = MultiversionService(
-            mongo_version=MongoVersion.from_yaml_file(multiversionconstants.MONGO_VERSION_YAML),
-            mongo_releases=MongoReleases.from_yaml_file(multiversionconstants.RELEASES_YAML),
+            mongo_version=MongoVersion.from_yaml_file(config.MONGO_VERSION_FILE),
+            mongo_releases=MongoReleases.from_yaml_file(config.RELEASES_FILE),
         )
         version_constants = multiversion_service.calculate_version_constants()
         return MultiversionConfig(
@@ -100,7 +100,7 @@ class MultiversionPlugin(PluginInterface):
         self,
         subcommand: str,
         parser: argparse.ArgumentParser,
-        parsed_args: argparse.Namespace,
+        parsed_args: dict,
         should_configure_otel=True,
         **kwargs,
     ) -> Optional[Subcommand]:

@@ -32,6 +32,34 @@
  */
 
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/client.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/exec/classic/near.h"
+#include "mongo/db/exec/classic/plan_stage.h"
+#include "mongo/db/exec/classic/queued_data_stage.h"
+#include "mongo/db/exec/classic/working_set.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/snapshot.h"
+#include "mongo/db/storage/storage_options.h"
+#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/intrusive_counter.h"
+
 #include <memory>
 #include <utility>
 #include <vector>
@@ -39,35 +67,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/client.h"
-#include "mongo/db/db_raii.h"
-#include "mongo/db/dbdirectclient.h"
-#include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/exec/near.h"
-#include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/exec/queued_data_stage.h"
-#include "mongo/db/exec/working_set.h"
-#include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/query/plan_executor.h"
-#include "mongo/db/query/stage_types.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/storage/snapshot.h"
-#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/intrusive_counter.h"
 
 namespace mongo {
 namespace {
@@ -83,16 +82,21 @@ public:
         directClient.createCollection(kTestNamespace);
         ASSERT_OK(dbtests::createIndex(_opCtx, kTestNamespace.ns_forTest(), kTestKeyPattern));
 
-        _autoColl.emplace(_opCtx, kTestNamespace);
-        const auto& coll = _autoColl->getCollection();
-        ASSERT(coll);
-        _mockGeoIndex = coll->getIndexCatalog()->findIndexByKeyPatternAndOptions(
+        _coll = acquireCollectionMaybeLockFree(
+            _opCtx,
+            CollectionAcquisitionRequest(kTestNamespace,
+                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         repl::ReadConcernArgs::get(_opCtx),
+                                         AcquisitionPrerequisites::kRead));
+        const auto& collPtr = _coll->getCollectionPtr();
+        ASSERT(collPtr);
+        _mockGeoIndex = collPtr->getIndexCatalog()->findIndexByKeyPatternAndOptions(
             _opCtx, kTestKeyPattern, _makeMinimalIndexSpec(kTestKeyPattern));
         ASSERT(_mockGeoIndex);
     }
 
     const CollectionPtr& getCollection() const {
-        return _autoColl->getCollection();
+        return _coll->getCollectionPtr();
     }
 
 protected:
@@ -108,7 +112,7 @@ protected:
 
     boost::intrusive_ptr<ExpressionContext> _expCtx;
 
-    boost::optional<AutoGetCollectionForReadMaybeLockFree> _autoColl;
+    boost::optional<CollectionAcquisition> _coll;
     const IndexDescriptor* _mockGeoIndex;
 };
 
@@ -129,13 +133,13 @@ public:
 
     MockNearStage(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                   WorkingSet* workingSet,
-                  const CollectionPtr& coll,
+                  const CollectionAcquisition& coll,
                   const IndexDescriptor* indexDescriptor)
         : NearStage(expCtx.get(),
                     "MOCK_DISTANCE_SEARCH_STAGE",
                     STAGE_UNKNOWN,
                     workingSet,
-                    &coll,
+                    coll,
                     indexDescriptor),
           _pos(0) {}
 
@@ -159,6 +163,7 @@ public:
             const WorkingSetID id = workingSet->allocate();
             WorkingSetMember* member = workingSet->get(id);
             member->doc = {SnapshotId(), Document{interval.data[i]}};
+            member->recordId = RecordId{_pos, static_cast<int>(i)};
             workingSet->transitionToOwnedObj(id);
             queuedStage->pushBack(id);
         }
@@ -214,7 +219,7 @@ TEST_F(QueryStageNearTest, Basic) {
     std::vector<BSONObj> mockData;
     WorkingSet workingSet;
 
-    MockNearStage nearStage(_expCtx.get(), &workingSet, getCollection(), _mockGeoIndex);
+    MockNearStage nearStage(_expCtx.get(), &workingSet, *_coll, _mockGeoIndex);
 
     // First set of results
     mockData.clear();
@@ -249,9 +254,13 @@ TEST_F(QueryStageNearTest, EmptyResults) {
     std::vector<BSONObj> mockData;
     WorkingSet workingSet;
 
-    AutoGetCollectionForReadMaybeLockFree autoColl(_opCtx, kTestNamespace);
-    const auto& coll = autoColl.getCollection();
-    ASSERT(coll);
+    auto coll = acquireCollectionMaybeLockFree(
+        _opCtx,
+        CollectionAcquisitionRequest(kTestNamespace,
+                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     repl::ReadConcernArgs::get(_opCtx),
+                                     AcquisitionPrerequisites::kRead));
+    ASSERT(coll.exists());
 
     MockNearStage nearStage(_expCtx.get(), &workingSet, coll, _mockGeoIndex);
 
@@ -269,6 +278,37 @@ TEST_F(QueryStageNearTest, EmptyResults) {
     std::vector<BSONObj> results = advanceStage(&nearStage, &workingSet);
     ASSERT_EQUALS(results.size(), 3u);
     assertAscendingAndValid(results);
+}
+
+TEST_F(QueryStageNearTest, Spilling) {
+    RAIIServerParameterControllerForTest featureFlag{"featureFlagExtendedAutoSpilling", true};
+    RAIIServerParameterControllerForTest maxMemoryBytes{"internalNearStageMaxMemoryBytes", 128};
+
+    _expCtx->setTempDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp");
+    _expCtx->setAllowDiskUse(true);
+
+    WorkingSet workingSet;
+
+    MockNearStage nearStage(_expCtx.get(), &workingSet, *_coll, _mockGeoIndex);
+
+    static constexpr int kMaxDistance = 100;
+    size_t expectedResultCount = 0;
+    for (int minDistance = 0; minDistance < kMaxDistance; ++minDistance) {
+        std::vector<BSONObj> mockData;
+        mockData.reserve(kMaxDistance);
+        for (int distance = 0; distance <= kMaxDistance; ++distance) {
+            mockData.push_back(BSON("distance" << distance));
+            expectedResultCount += distance >= minDistance ? 1 : 0;
+        }
+        nearStage.addInterval(std::move(mockData), minDistance, minDistance + 1);
+    }
+
+    std::vector<BSONObj> results = advanceStage(&nearStage, &workingSet);
+    ASSERT_EQUALS(results.size(), expectedResultCount);
+    assertAscendingAndValid(results);
+
+    const auto* stats = static_cast<const NearStats*>(nearStage.getSpecificStats());
+    ASSERT_GT(stats->spillingStats.getSpills(), 0);
 }
 
 }  // namespace

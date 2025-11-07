@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -40,6 +38,8 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/synchronized_value.h"
 
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
 
 void QueryPlanRankerMode::append(OperationContext*,
@@ -50,7 +50,7 @@ void QueryPlanRankerMode::append(OperationContext*,
 }
 
 Status QueryPlanRankerMode::setFromString(StringData value, const boost::optional<TenantId>&) {
-    _data = QueryPlanRankerMode_parse(IDLParserContext("planRankerMode"), value);
+    _data = QueryPlanRankerMode_parse(value, IDLParserContext("planRankerMode"));
     return Status::OK();
 }
 

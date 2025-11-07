@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <set>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonelement.h"
@@ -54,8 +48,16 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <set>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -176,7 +178,7 @@ struct RollbackStats {
  * get closed and finding the common point should fail.
  *
  */
-class RollbackImpl : public Rollback {
+class MONGO_MOD_PARENT_PRIVATE RollbackImpl : public Rollback {
 public:
     /**
      * Used to indicate that the files we create with deleted documents are from rollback.
@@ -188,7 +190,7 @@ public:
      * A class with functions that get called throughout rollback. These can be overridden to
      * instrument this class for diagnostics and testing.
      */
-    class Listener {
+    class MONGO_MOD_PRIVATE Listener {
     public:
         virtual ~Listener() = default;
 
@@ -292,8 +294,8 @@ public:
     }
 
     /**
-     * Returns true if the rollback system should write out data files containing documents that
-     * will be deleted by rollback.
+     * Returns true if the rollback system should write out data files containing documents and
+     * oplog entries that will be deleted by rollback.
      */
     static bool shouldCreateDataFiles();
 

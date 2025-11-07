@@ -28,6 +28,24 @@
  */
 
 
+#include "mongo/db/ftdc/file_manager.h"
+
+#include "mongo/base/data_type_endian.h"
+#include "mongo/base/data_view.h"
+#include "mongo/base/init.h"  // IWYU pragma: keep
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/client.h"
+#include "mongo/db/ftdc/collector.h"
+#include "mongo/db/ftdc/config.h"
+#include "mongo/db/ftdc/file_reader.h"
+#include "mongo/db/ftdc/file_writer.h"
+#include "mongo/db/ftdc/ftdc_test.h"
+#include "mongo/db/service_context_test_fixture.h"
+#include "mongo/logv2/log.h"
+#include "mongo/unittest/temp_dir.h"
+#include "mongo/unittest/unittest.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <iostream>
@@ -38,26 +56,6 @@
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 
-#include "mongo/base/data_type_endian.h"
-#include "mongo/base/data_view.h"
-#include "mongo/base/init.h"  // IWYU pragma: keep
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/client.h"
-#include "mongo/db/ftdc/collector.h"
-#include "mongo/db/ftdc/config.h"
-#include "mongo/db/ftdc/file_manager.h"
-#include "mongo/db/ftdc/file_reader.h"
-#include "mongo/db/ftdc/file_writer.h"
-#include "mongo/db/ftdc/ftdc_test.h"
-#include "mongo/db/service_context_test_fixture.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/unittest/temp_dir.h"
-
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 
@@ -65,7 +63,7 @@ namespace mongo {
 
 class FTDCFileManagerTest : public ServiceContextTest {
 protected:
-    void testPeriodicCollection(bool multiservice);
+    void testPeriodicCollection();
 };
 
 // Test a full buffer
@@ -80,41 +78,37 @@ TEST_F(FTDCFileManagerTest, TestFull) {
     boost::filesystem::path dir(tempdir.path());
     createDirectoryClean(dir);
 
-    FTDCCollectorCollection rotate;
-    auto swMgr = FTDCFileManager::create(&c, dir, &rotate, client, UseMultiServiceSchema{false});
+    SyncFTDCCollectorCollection rotate;
+    auto swMgr = FTDCFileManager::create(&c, dir, &rotate, client);
     ASSERT_OK(swMgr.getStatus());
     auto mgr = std::move(swMgr.getValue());
 
     // Test a large numbers of zeros, and incremental numbers in a full buffer
     for (int j = 0; j < 10; j++) {
-        ASSERT_OK(
-            mgr->writeSampleAndRotateIfNeeded(client,
-                                              BSON("name"
-                                                   << "joe"
-                                                   << "key1" << 3230792343LL << "key2" << 235135),
-                                              Date_t()));
+        ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
+                                                    BSON("name" << "joe"
+                                                                << "key1" << 3230792343LL << "key2"
+                                                                << 235135),
+                                                    Date_t()));
 
         for (size_t i = 0; i <= FTDCConfig::kMaxSamplesPerArchiveMetricChunkDefault - 2; i++) {
             ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(
                 client,
-                BSON("name"
-                     << "joe"
-                     << "key1" << static_cast<long long int>(i * j * 37) << "key2"
-                     << static_cast<long long int>(i * (645 << j))),
+                BSON("name" << "joe"
+                            << "key1" << static_cast<long long int>(i * j * 37) << "key2"
+                            << static_cast<long long int>(i * (645 << j))),
                 Date_t()));
         }
 
         ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
-                                                    BSON("name"
-                                                         << "joe"
-                                                         << "key1" << 34 << "key2" << 45),
+                                                    BSON("name" << "joe"
+                                                                << "key1" << 34 << "key2" << 45),
                                                     Date_t()));
 
         // Add Value
         ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
-                                                    BSON("name"
-                                                         << "joe"
-                                                         << "key1" << 34 << "key2" << 45),
+                                                    BSON("name" << "joe"
+                                                                << "key1" << 34 << "key2" << 45),
                                                     Date_t()));
     }
 
@@ -169,44 +163,40 @@ TEST_F(FTDCFileManagerTest, TestNormalRestart) {
 
     for (int i = 0; i < 3; i++) {
         // Do a few cases of stop and start to ensure it works as expected
-        FTDCCollectorCollection rotate;
-        auto swMgr =
-            FTDCFileManager::create(&c, dir, &rotate, client, UseMultiServiceSchema{false});
+        SyncFTDCCollectorCollection rotate;
+        auto swMgr = FTDCFileManager::create(&c, dir, &rotate, client);
         ASSERT_OK(swMgr.getStatus());
         auto mgr = std::move(swMgr.getValue());
 
         // Test a large numbers of zeros, and incremental numbers in a full buffer
         for (int j = 0; j < 4; j++) {
             ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
-                                                        BSON("name"
-                                                             << "joe"
-                                                             << "key1" << 3230792343LL << "key2"
-                                                             << 235135),
+                                                        BSON("name" << "joe"
+                                                                    << "key1" << 3230792343LL
+                                                                    << "key2" << 235135),
                                                         Date_t()));
 
             for (size_t i = 0; i <= FTDCConfig::kMaxSamplesPerArchiveMetricChunkDefault - 2; i++) {
-                ASSERT_OK(
-                    mgr->writeSampleAndRotateIfNeeded(
-                        client,
-                        BSON("name"
-                             << "joe"
-                             << "key1" << static_cast<long long int>(i * j * 37) << "key2"
-                             << static_cast<long long int>(i * (645 << j))),
-                        Date_t()));
+                ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(
+                    client,
+                    BSON("name" << "joe"
+                                << "key1" << static_cast<long long int>(i * j * 37) << "key2"
+                                << static_cast<long long int>(i * (645 << j))),
+                    Date_t()));
             }
 
-            ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
-                                                        BSON("name"
-                                                             << "joe"
-                                                             << "key1" << 34 << "key2" << 45),
-                                                        Date_t()));
+            ASSERT_OK(
+                mgr->writeSampleAndRotateIfNeeded(client,
+                                                  BSON("name" << "joe"
+                                                              << "key1" << 34 << "key2" << 45),
+                                                  Date_t()));
 
             // Add Value
-            ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
-                                                        BSON("name"
-                                                             << "joe"
-                                                             << "key1" << 34 << "key2" << 45),
-                                                        Date_t()));
+            ASSERT_OK(
+                mgr->writeSampleAndRotateIfNeeded(client,
+                                                  BSON("name" << "joe"
+                                                              << "key1" << 34 << "key2" << 45),
+                                                  Date_t()));
         }
 
         mgr->close().transitional_ignore();
@@ -230,44 +220,40 @@ TEST_F(FTDCFileManagerTest, TestCorruptCrashRestart) {
 
     for (int i = 0; i < 2; i++) {
         // Do a few cases of stop and start to ensure it works as expected
-        FTDCCollectorCollection rotate;
-        auto swMgr =
-            FTDCFileManager::create(&c, dir, &rotate, client, UseMultiServiceSchema{false});
+        SyncFTDCCollectorCollection rotate;
+        auto swMgr = FTDCFileManager::create(&c, dir, &rotate, client);
         ASSERT_OK(swMgr.getStatus());
         auto mgr = std::move(swMgr.getValue());
 
         // Test a large numbers of zeros, and incremental numbers in a full buffer
         for (int j = 0; j < 4; j++) {
             ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
-                                                        BSON("name"
-                                                             << "joe"
-                                                             << "key1" << 3230792343LL << "key2"
-                                                             << 235135),
+                                                        BSON("name" << "joe"
+                                                                    << "key1" << 3230792343LL
+                                                                    << "key2" << 235135),
                                                         Date_t()));
 
             for (size_t i = 0; i <= FTDCConfig::kMaxSamplesPerArchiveMetricChunkDefault - 2; i++) {
-                ASSERT_OK(
-                    mgr->writeSampleAndRotateIfNeeded(
-                        client,
-                        BSON("name"
-                             << "joe"
-                             << "key1" << static_cast<long long int>(i * j * 37) << "key2"
-                             << static_cast<long long int>(i * (645 << j))),
-                        Date_t()));
+                ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(
+                    client,
+                    BSON("name" << "joe"
+                                << "key1" << static_cast<long long int>(i * j * 37) << "key2"
+                                << static_cast<long long int>(i * (645 << j))),
+                    Date_t()));
             }
 
-            ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
-                                                        BSON("name"
-                                                             << "joe"
-                                                             << "key1" << 34 << "key2" << 45),
-                                                        Date_t()));
+            ASSERT_OK(
+                mgr->writeSampleAndRotateIfNeeded(client,
+                                                  BSON("name" << "joe"
+                                                              << "key1" << 34 << "key2" << 45),
+                                                  Date_t()));
 
             // Add Value
-            ASSERT_OK(mgr->writeSampleAndRotateIfNeeded(client,
-                                                        BSON("name"
-                                                             << "joe"
-                                                             << "key1" << 34 << "key2" << 45),
-                                                        Date_t()));
+            ASSERT_OK(
+                mgr->writeSampleAndRotateIfNeeded(client,
+                                                  BSON("name" << "joe"
+                                                              << "key1" << 34 << "key2" << 45),
+                                                  Date_t()));
         }
 
         mgr->close().transitional_ignore();
@@ -295,23 +281,19 @@ TEST_F(FTDCFileManagerTest, TestNormalCrashInterim) {
     unittest::TempDir tempdir("metrics_testpath");
     boost::filesystem::path dir(tempdir.path());
 
-    BSONObj mdoc1 = BSON("name"
-                         << "some_metadata"
-                         << "key1" << 34 << "something" << 98);
+    BSONObj mdoc1 = BSON("name" << "some_metadata"
+                                << "key1" << 34 << "something" << 98);
 
-    BSONObj sdoc1 = BSON("name"
-                         << "joe"
-                         << "key1" << 34 << "key2" << 45);
-    BSONObj sdoc2 = BSON("name"
-                         << "joe"
-                         << "key3" << 34 << "key5" << 45);
+    BSONObj sdoc1 = BSON("name" << "joe"
+                                << "key1" << 34 << "key2" << 45);
+    BSONObj sdoc2 = BSON("name" << "joe"
+                                << "key3" << 34 << "key5" << 45);
 
     boost::filesystem::path fileOut;
 
     {
-        FTDCCollectorCollection rotate;
-        auto swMgr =
-            FTDCFileManager::create(&c, dir, &rotate, client, UseMultiServiceSchema{false});
+        SyncFTDCCollectorCollection rotate;
+        auto swMgr = FTDCFileManager::create(&c, dir, &rotate, client);
         ASSERT_OK(swMgr.getStatus());
         auto swFile = swMgr.getValue()->generateArchiveFileName(dir, "0test-crash");
         ASSERT_OK(swFile);
@@ -322,7 +304,7 @@ TEST_F(FTDCFileManagerTest, TestNormalCrashInterim) {
     createDirectoryClean(dir);
 
     {
-        FTDCFileWriter writer(&c, UseMultiServiceSchema{false});
+        FTDCFileWriter writer(&c);
 
         ASSERT_OK(writer.open(fileOut));
 
@@ -344,9 +326,8 @@ TEST_F(FTDCFileManagerTest, TestNormalCrashInterim) {
 
     // Let the manager run the recovery over the interim file
     {
-        FTDCCollectorCollection rotate;
-        auto swMgr =
-            FTDCFileManager::create(&c, dir, &rotate, client, UseMultiServiceSchema{false});
+        SyncFTDCCollectorCollection rotate;
+        auto swMgr = FTDCFileManager::create(&c, dir, &rotate, client);
         ASSERT_OK(swMgr.getStatus());
         auto mgr = std::move(swMgr.getValue());
         ASSERT_OK(mgr->close());
@@ -367,7 +348,7 @@ TEST_F(FTDCFileManagerTest, TestNormalCrashInterim) {
     ValidateDocumentList(files[1], docs2, FTDCValidationMode::kStrict);
 }
 
-void FTDCFileManagerTest::testPeriodicCollection(bool multiservice) {
+TEST_F(FTDCFileManagerTest, TestPeriodicMetadataCollection) {
     Client* client = &cc();
     FTDCConfig c;
     c.maxFileSizeBytes = 1024;
@@ -378,9 +359,8 @@ void FTDCFileManagerTest::testPeriodicCollection(bool multiservice) {
     boost::filesystem::path dir(tempdir.path());
     createDirectoryClean(dir);
 
-    FTDCCollectorCollection rotate;
-    auto mgr = uassertStatusOK(
-        FTDCFileManager::create(&c, dir, &rotate, client, UseMultiServiceSchema{multiservice}));
+    SyncFTDCCollectorCollection rotate;
+    auto mgr = uassertStatusOK(FTDCFileManager::create(&c, dir, &rotate, client));
 
     BSONObj subObj1 = BSON("f1_1" << 101 << "f1_2" << 102);
     BSONObj subObj2 = BSON("f2_1" << 201 << "f2_2" << 202);
@@ -389,12 +369,6 @@ void FTDCFileManagerTest::testPeriodicCollection(bool multiservice) {
     BSONObj doc2 = BSON("field1" << altSubObj1 << "field2" << subObj2);
     BSONObj deltaDoc1 = BSON("field1" << altSubObj1);
     BSONObj deltaDoc2 = BSON("field1" << subObj1);
-
-    if (multiservice) {
-        for (auto ptr : {&doc1, &doc2, &deltaDoc1, &deltaDoc2}) {
-            *ptr = BSON("common" << *ptr);
-        }
-    }
 
     int pmSamplesBeforeRotate = 0;
     auto currentFiles = scanDirectory(dir);
@@ -458,14 +432,6 @@ void FTDCFileManagerTest::testPeriodicCollection(bool multiservice) {
     verifyDeltaDocuments(pmSamplesBeforeRotate / 2);
 
     mgr->close().transitional_ignore();
-}
-
-TEST_F(FTDCFileManagerTest, PeriodicMetadataCollection) {
-    testPeriodicCollection(false);
-}
-
-TEST_F(FTDCFileManagerTest, MultiservicePeriodicMetadataCollection) {
-    testPeriodicCollection(true);
 }
 
 }  // namespace mongo

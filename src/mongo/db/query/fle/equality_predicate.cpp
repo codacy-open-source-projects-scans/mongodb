@@ -27,19 +27,7 @@
  *    it in the license file.
  */
 
-#include "equality_predicate.h"
-
-#include <array>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <iterator>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/fle/equality_predicate.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -58,6 +46,17 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <iterator>
+
+#include <boost/cstdint.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::fle {
 
@@ -132,9 +131,8 @@ boost::intrusive_ptr<ExpressionInternalFLEEqual> generateFleEqualMatch(StringDat
     return make_intrusive<ExpressionInternalFLEEqual>(
         expCtx,
         ExpressionFieldPath::createPathFromString(
-            expCtx, path.toString(), expCtx->variablesParseState),
-        FLEServerMetadataEncryptionTokenGenerator::generateServerZerosEncryptionToken(
-            tokens.serverDataDerivedToken));
+            expCtx, std::string{path}, expCtx->variablesParseState),
+        ServerZerosEncryptionToken::deriveFrom(tokens.serverDataDerivedToken));
 }
 
 
@@ -148,9 +146,8 @@ std::unique_ptr<ExpressionInternalFLEEqual> generateFleEqualMatchUnique(StringDa
     return std::make_unique<ExpressionInternalFLEEqual>(
         expCtx,
         ExpressionFieldPath::createPathFromString(
-            expCtx, path.toString(), expCtx->variablesParseState),
-        FLEServerMetadataEncryptionTokenGenerator::generateServerZerosEncryptionToken(
-            tokens.serverDataDerivedToken));
+            expCtx, std::string{path}, expCtx->variablesParseState),
+        ServerZerosEncryptionToken::deriveFrom(tokens.serverDataDerivedToken));
 }
 
 std::unique_ptr<MatchExpression> generateFleEqualMatchAndExpr(StringData path,

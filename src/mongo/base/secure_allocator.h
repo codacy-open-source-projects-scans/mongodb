@@ -29,6 +29,15 @@
 
 #pragma once
 
+#include "mongo/base/static_assert.h"
+#include "mongo/base/string_data.h"
+#include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/server_options.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/type_traits.h"
+#include "mongo/util/allocator.h"
+#include "mongo/util/assert_util.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdlib>
@@ -39,15 +48,6 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-
-#include "mongo/base/static_assert.h"
-#include "mongo/base/string_data.h"
-#include "mongo/config.h"  // IWYU pragma: keep
-#include "mongo/db/server_options.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/type_traits.h"
-#include "mongo/util/allocator.h"
-#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -97,6 +97,18 @@ inline void deallocateWrapper(void* ptr, std::size_t bytes, bool secure) {
         return free(ptr);
     }
 }
+
+template <typename NameTrait>
+struct TraitNamedDomain {
+    static bool peg() {
+        const auto& dsmd = serverGlobalParams.disabledSecureAllocatorDomains;
+        const auto contains = [&](StringData dt) {
+            return std::find(dsmd.begin(), dsmd.end(), dt) != dsmd.end();
+        };
+        static const bool ret = !(contains("*"_sd) || contains(NameTrait::DomainType));
+        return ret;
+    }
+};
 
 }  // namespace secure_allocator_details
 
@@ -363,8 +375,8 @@ struct SecureAllocatorAuthDomainTrait {
     static constexpr StringData DomainType = "auth"_sd;
 };
 
-using SecureAllocatorAuthDomain =
-    SecureAllocatorDomain<TraitNamedDomain<SecureAllocatorAuthDomainTrait>>;
+using SecureAllocatorAuthDomain = SecureAllocatorDomain<
+    secure_allocator_details::TraitNamedDomain<SecureAllocatorAuthDomainTrait>>;
 
 using SecureAllocatorDefaultDomain = SecureAllocatorDomain<SecureAllocatorDefaultDomainTrait>;
 

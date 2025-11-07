@@ -28,14 +28,9 @@
  */
 #pragma once
 
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <utility>
-
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/cancelable_operation_context.h"
+#include "mongo/db/exec/agg/exec_pipeline.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
@@ -48,6 +43,14 @@
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <utility>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace executor {
@@ -72,7 +75,7 @@ public:
      *      {$sort: {_id: 1}},
      * ]
      */
-    std::unique_ptr<Pipeline, PipelineDeleter> makePipeline(
+    std::unique_ptr<Pipeline> makePipeline(
         OperationContext* opCtx,
         std::shared_ptr<MongoProcessInterface> mongoProcessInterface,
         const boost::optional<LogicalSessionId>& startAfter);
@@ -109,13 +112,15 @@ public:
 private:
     boost::optional<LogicalSessionId> _fetchProgressLsid(OperationContext* opCtx);
 
-    std::unique_ptr<Pipeline, PipelineDeleter> _targetAggregationRequest(OperationContext* opCtx,
-                                                                         const Pipeline& pipeline);
+    std::unique_ptr<Pipeline> _targetAggregationRequest(OperationContext* opCtx,
+                                                        const Pipeline& pipeline);
 
-    std::unique_ptr<Pipeline, PipelineDeleter> _restartPipeline(
+    std::unique_ptr<Pipeline> _restartPipeline(
         OperationContext* opCtx, std::shared_ptr<MongoProcessInterface> mongoProcessInterface);
 
-    boost::optional<SessionTxnRecord> _getNextRecord(OperationContext* opCtx, Pipeline& pipeline);
+    boost::optional<SessionTxnRecord> _getNextRecord(OperationContext* opCtx,
+                                                     Pipeline& pipeline,
+                                                     exec::agg::Pipeline& execPipeline);
 
     void _updateProgressDocument(OperationContext* opCtx, const LogicalSessionId& progress);
 
@@ -134,7 +139,7 @@ private:
  *
  * fetchTimestamp never isNull()
  */
-std::unique_ptr<Pipeline, PipelineDeleter> createConfigTxnCloningPipelineForResharding(
+std::unique_ptr<Pipeline> createConfigTxnCloningPipelineForResharding(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     Timestamp fetchTimestamp,
     boost::optional<LogicalSessionId> startAfter);

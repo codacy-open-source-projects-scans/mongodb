@@ -27,28 +27,20 @@
  *    it in the license file.
  */
 
-#include <boost/cstdint.hpp>
-#include <cstdint>
-#include <memory>
-#include <mutex>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/rs_local_client.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/read_concern.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/rs_local_client.h"
+#include "mongo/db/scoped_read_concern.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_interface.h"
@@ -58,6 +50,16 @@
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
+
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <utility>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -109,7 +111,7 @@ StatusWith<Shard::CommandResponse> RSLocalClient::runCommandOnce(OperationContex
     }
 }
 
-StatusWith<Shard::QueryResponse> RSLocalClient::queryOnce(
+RetryStrategy::Result<Shard::QueryResponse> RSLocalClient::queryOnce(
     OperationContext* opCtx,
     const ReadPreferenceSetting& readPref,
     const repl::ReadConcernLevel& readConcernLevel,
@@ -195,9 +197,9 @@ StatusWith<Shard::QueryResponse> RSLocalClient::queryOnce(
         std::unique_ptr<DBClientCursor> cursor = client.find(std::move(findRequest), readPref);
 
         if (!cursor) {
-            return {ErrorCodes::OperationFailed,
-                    str::stream() << "Failed to establish a cursor for reading "
-                                  << nss.toStringForErrorMsg() << " from local storage"};
+            return Status{ErrorCodes::OperationFailed,
+                          str::stream() << "Failed to establish a cursor for reading "
+                                        << nss.toStringForErrorMsg() << " from local storage"};
         }
 
         std::vector<BSONObj> documentVector;
@@ -219,54 +221,41 @@ Status RSLocalClient::runAggregation(
     std::function<bool(const std::vector<BSONObj>& batch,
                        const boost::optional<BSONObj>& postBatchResumeToken)> callback) {
     /* We use DBDirectClient to read locally, which uses the readSource/readTimestamp set on the
-     * opCtx rather than applying the readConcern speficied in the command. This is not
+     * opCtx rather than applying the readConcern specified in the command. This is not
      * consistent with any remote client. We extract the readConcern from the request and apply
      * it to the opCtx's readSource/readTimestamp. Leave as it was originally before returning*/
 
     invariant(!shard_role_details::getLocker(opCtx)->isLocked());
     invariant(!shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
 
-    // extracting readConcern
-    repl::ReadConcernArgs requestReadConcernArgs;
-    if (!aggRequest.getReadConcern()) {
-        requestReadConcernArgs =
-            repl::ReadConcernArgs{_getLastOpTime(), repl::ReadConcernLevel::kLocalReadConcern};
-    } else {
-        // initialize read concern args
-        requestReadConcernArgs = *aggRequest.getReadConcern();
-
-        // if after cluster time is set, change it with lastOp time if this comes later
-        if (requestReadConcernArgs.getArgsAfterClusterTime()) {
-            auto afterClusterTime = *requestReadConcernArgs.getArgsAfterClusterTime();
-            if (afterClusterTime.asTimestamp() < _getLastOpTime().getTimestamp())
-                requestReadConcernArgs =
-                    repl::ReadConcernArgs{_getLastOpTime(), requestReadConcernArgs.getLevel()};
-        }
-    }
-    // saving original read source and read concern
-    auto originalRCA = repl::ReadConcernArgs::get(opCtx);
-    auto originalReadSource = shard_role_details::getRecoveryUnit(opCtx)->getTimestampReadSource();
-    boost::optional<Timestamp> originalReadTimestamp;
-    if (originalReadSource == RecoveryUnit::ReadSource::kProvided)
-        originalReadTimestamp =
-            shard_role_details::getRecoveryUnit(opCtx)->getPointInTimeReadTimestamp();
-
-    ON_BLOCK_EXIT([&]() {
-        repl::ReadConcernArgs::get(opCtx) = originalRCA;
-        if (originalReadSource == RecoveryUnit::ReadSource::kProvided) {
-            shard_role_details::getRecoveryUnit(opCtx)->setTimestampReadSource(
-                originalReadSource, originalReadTimestamp);
+    repl::ReadConcernArgs requestReadConcernArgs = [&]() -> repl::ReadConcernArgs {
+        if (!aggRequest.getReadConcern()) {
+            // Default concern is local at the lastOp applied timestamp.
+            return repl::ReadConcernArgs{_getLastOpTime(),
+                                         repl::ReadConcernLevel::kLocalReadConcern};
         } else {
-            shard_role_details::getRecoveryUnit(opCtx)->setTimestampReadSource(originalReadSource);
+            return *aggRequest.getReadConcern();
         }
-    });
+    }();
+    ScopedReadConcern scopedReadConcern(opCtx, requestReadConcernArgs);
 
     // Waits for any writes performed by this ShardLocal instance to be committed and
-    // visible. This will set the correct ReadSource as well
-    repl::ReadConcernArgs::get(opCtx) = requestReadConcernArgs;
+    // visible. This will set the correct ReadSource as well.
+    if (const auto& afterClusterTime = requestReadConcernArgs.getArgsAfterClusterTime();
+        afterClusterTime) {
+        // If the afterClusterTime is later than lastOp we have to wait here in order in order to
+        // prevent the operation failing due to the call to mongo::waitForReadConcern below. We
+        // don't allow specifying a future timestamp for normal operations.
+        if (const auto lastOp = _getLastOpTime();
+            afterClusterTime->asTimestamp() < lastOp.getTimestamp()) {
+            auto status = repl::ReplicationCoordinator::get(opCtx)->waitUntilOpTimeForRead(
+                opCtx, repl::ReadConcernArgs{lastOp, requestReadConcernArgs.getLevel()});
+            if (!status.isOK())
+                return status;
+        }
+    }
     Status rcStatus = mongo::waitForReadConcern(
         opCtx, requestReadConcernArgs, aggRequest.getNamespace().dbName(), true);
-
     if (!rcStatus.isOK())
         return rcStatus;
 

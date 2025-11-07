@@ -3,7 +3,9 @@ filters:
   - "*":
     approvers:
       - 10gen/server-storage-engine-integration
-  - "durable_catalog*":
+  - "backup*":
     approvers:
-      - 10gen/server-catalog-and-routing
-      - 10gen/server-storage-engine-integration
+      - 10gen/server-backup-restore
+  - "compact_options*":
+    approvers:
+      - 10gen/server-compact

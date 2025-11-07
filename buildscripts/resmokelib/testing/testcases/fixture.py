@@ -8,9 +8,12 @@ from buildscripts.resmokelib.testing.fixtures.external import ExternalFixture
 from buildscripts.resmokelib.testing.fixtures.replicaset import ReplicaSetFixture
 from buildscripts.resmokelib.testing.testcases import interface
 from buildscripts.resmokelib.utils import registry
+from buildscripts.resmokelib.utils.sharded_cluster_util import (
+    refresh_logical_session_cache_with_retry,
+)
 
 
-class FixtureTestCase(interface.TestCase):  # pylint: disable=abstract-method
+class FixtureTestCase(interface.TestCase):
     """Base class for the fixture test cases."""
 
     REGISTERED_NAME = registry.LEAVE_UNREGISTERED
@@ -47,6 +50,10 @@ class FixtureSetupTestCase(FixtureTestCase):
             self.fixture.await_ready()
             if (
                 not isinstance(self.fixture, (fixture_interface.NoOpFixture, ExternalFixture))
+                # TODO(SERVER-109851): Remove this.
+                # disagg mongod does not yet support "refreshLogicalSessionCacheNow" because it requires
+                # wtimeout support.
+                and self.fixture.__class__.__name__ != "DisaggFixture"
                 # Replica set with --configsvr cannot run refresh unless it is part of a sharded cluster.
                 and not (
                     isinstance(self.fixture, ReplicaSetFixture)
@@ -59,7 +66,7 @@ class FixtureSetupTestCase(FixtureTestCase):
                 # by the router, when performing the LogicalSessionCache refresh.
                 mongo_client.admin["system.version"].find({})
                 # Perform the LogicalSessionCache refresh.
-                mongo_client.admin.command({"refreshLogicalSessionCacheNow": 1})
+                refresh_logical_session_cache_with_retry(mongo_client)
             self.logger.info("Finished the setup of %s.", self.fixture)
             self.return_code = 0
         except errors.ServerFailure as err:

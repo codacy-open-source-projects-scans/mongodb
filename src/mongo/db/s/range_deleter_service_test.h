@@ -28,34 +28,34 @@
  */
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/keypattern.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/s/range_deleter_service.h"
+#include "mongo/db/s/range_deletion_task_gen.h"
+#include "mongo/db/sharding_environment/shard_server_test_fixture.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/logv2/log_component.h"
+#include "mongo/logv2/log_severity.h"
+#include "mongo/unittest/log_test.h"
+#include "mongo/util/future.h"
+#include "mongo/util/future_impl.h"
+#include "mongo/util/uuid.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
 #include <map>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/keypattern.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/s/range_deletion_task_gen.h"
-#include "mongo/db/s/shard_server_test_fixture.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/unittest/log_test.h"
-#include "mongo/util/future.h"
-#include "mongo/util/future_impl.h"
-#include "mongo/util/uuid.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -109,12 +109,14 @@ private:
                                                         logv2::LogSeverity::Debug(2)};
 };
 
-RangeDeletionTask createRangeDeletionTask(const UUID& collectionUUID,
-                                          const BSONObj& min,
-                                          const BSONObj& max,
-                                          CleanWhenEnum whenToClean = CleanWhenEnum::kNow,
-                                          bool pending = true,
-                                          boost::optional<KeyPattern> keyPattern = boost::none);
+RangeDeletionTask createRangeDeletionTask(
+    const UUID& collectionUUID,
+    const BSONObj& min,
+    const BSONObj& max,
+    CleanWhenEnum whenToClean = CleanWhenEnum::kNow,
+    bool pending = true,
+    boost::optional<KeyPattern> keyPattern = boost::none,
+    const ChunkVersion& shardVersion = ChunkVersion::IGNORED());
 
 std::shared_ptr<RangeDeletionWithOngoingQueries> createRangeDeletionTaskWithOngoingQueries(
     const UUID& collectionUUID,
@@ -122,7 +124,8 @@ std::shared_ptr<RangeDeletionWithOngoingQueries> createRangeDeletionTaskWithOngo
     const BSONObj& max,
     CleanWhenEnum whenToClean = CleanWhenEnum::kNow,
     bool pending = true,
-    boost::optional<KeyPattern> keyPattern = boost::none);
+    boost::optional<KeyPattern> keyPattern = boost::none,
+    const ChunkVersion& shardVersion = ChunkVersion::IGNORED());
 
 SharedSemiFuture<void> registerAndCreatePersistentTask(
     OperationContext* opCtx,
@@ -132,9 +135,16 @@ SharedSemiFuture<void> registerAndCreatePersistentTask(
 int insertDocsWithinRange(
     OperationContext* opCtx, const NamespaceString& nss, int min, int max, int maxCount);
 
+range_deletions::detail::CollectionToTasks dumpStateAsMap(OperationContext* opCtx);
+
 void verifyRangeDeletionTasks(OperationContext* opCtx,
                               UUID uuidColl,
                               std::vector<ChunkRange> expectedChunkRanges);
+
+void verifyProcessingFlag(OperationContext* opCtx,
+                          UUID uuidColl,
+                          const ChunkRange& range,
+                          bool processingExpected);
 
 /* Unset any filtering metadata associated with the specified collection */
 void _clearFilteringMetadataByUUID(OperationContext* opCtx, const UUID& uuid);

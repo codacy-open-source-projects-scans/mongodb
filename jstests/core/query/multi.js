@@ -1,3 +1,7 @@
+// @tags: [
+//   requires_getmore,
+// ]
+
 let t = db.jstests_multi;
 t.drop();
 
@@ -19,6 +23,6 @@ assert.eq(0, t.find({a: {$ne: 1}}).count(), "G");
 
 t.drop();
 t.save({a: [{b: 1}, {b: 2}]});
-assert.eq(0, t.find({'a.b': {$ne: 1}}).count(), "H");
+assert.eq(0, t.find({"a.b": {$ne: 1}}).count(), "H");
 
 // TODO - run same tests with an index on a

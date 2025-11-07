@@ -50,7 +50,8 @@ usage(void)
       "incompatible with "
       "the -f option",
       "-f output", "dump to the specified file (the default is stdout)", "-j",
-      "dump in JSON format", "-k", "specify a key too look for", "-l lower bound",
+      "dump in JSON format", "-k",
+      "specify a key to look for (if not found, then no error is displayed)", "-l lower bound",
       "lower bound of the key range to dump", "-n",
       "if the specified key to look for cannot be found, return the result from search_near", "-p",
       "dump in human readable format (pretty-print). The -p flag can be combined with -x. In this "
@@ -110,6 +111,7 @@ util_dump(WT_SESSION *session, int argc, char *argv[])
     char *checkpoint, *ofile, *p, *simpleuri, *timestamp, *uri;
     const char *end_key, *key, *start_key;
     bool explore, hex, json, pretty, reverse, search_near;
+    bool in_json_table = false;
 
     session_impl = (WT_SESSION_IMPL *)session;
     window = 0;
@@ -195,13 +197,15 @@ util_dump(WT_SESSION *session, int argc, char *argv[])
         return (usage());
     }
 
-    /* Open any optional output file. */
-    if (ofile == NULL)
-        fp = stdout;
-    else if (explore) {
+    /* -f and -e are incompatible. */
+    if (ofile != NULL && explore) {
         fprintf(stderr, "%s: the options -e and -f are incompatible\n", progname);
         return (usage());
-    } else if ((fp = fopen(ofile, "w")) == NULL)
+    }
+
+    /* Open an optional output file. */
+    fp = util_open_output_file(ofile);
+    if (fp == NULL)
         return (util_err(session, errno, "%s: open", ofile));
 
     if (!explore && json &&
@@ -213,6 +217,10 @@ util_dump(WT_SESSION *session, int argc, char *argv[])
         if (json && i > 0)
             if (dump_json_separator(session) != 0)
                 goto err;
+
+        if (json)
+            in_json_table = true;
+
         util_free(uri);
         util_free(simpleuri);
         uri = simpleuri = NULL;
@@ -252,7 +260,7 @@ util_dump(WT_SESSION *session, int argc, char *argv[])
          * nothing will be visible. The only exception is if we've supplied a timestamp in which
          * case, we're specifically interested in what is visible at a given read timestamp.
          */
-        if (WT_STREQ(simpleuri, WT_HS_URI) && timestamp == NULL) {
+        if (WT_IS_URI_HS(simpleuri) && timestamp == NULL) {
             hs_dump_cursor = (WT_CURSOR_DUMP *)cursor;
             /* Set the "ignore tombstone" flag on the underlying cursor. */
             F_SET(hs_dump_cursor->child, WT_CURSTD_IGNORE_TOMBSTONE);
@@ -288,6 +296,8 @@ util_dump(WT_SESSION *session, int argc, char *argv[])
         if (json && dump_json_table_end(session) != 0)
             goto err;
 
+        in_json_table = false;
+
         if (hs_dump_cursor != NULL)
             F_CLR(hs_dump_cursor->child, WT_CURSTD_IGNORE_TOMBSTONE);
         ret = cursor->close(cursor);
@@ -298,13 +308,17 @@ util_dump(WT_SESSION *session, int argc, char *argv[])
             goto err;
         }
     }
-    if (json && dump_json_end(session) != 0)
-        goto err;
 
     if (0) {
 err:
         ret = 1;
     }
+
+    if (in_json_table)
+        dump_json_table_end(session);
+
+    if (json)
+        dump_json_end(session);
 
     if (cursor != NULL) {
         if (hs_dump_cursor != NULL)
@@ -313,7 +327,7 @@ err:
             ret = util_err(session, ret, NULL);
     }
 
-    if (ofile != NULL && (ret = fclose(fp)) != 0)
+    if (util_close_output_file(fp) != 0)
         ret = util_err(session, errno, NULL);
 
     __wt_scr_free(session_impl, &tmp);

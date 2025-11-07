@@ -29,8 +29,8 @@
 
 #pragma once
 
-#include "mongo/bson/mutable/element.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/field_ref_set.h"
 #include "mongo/db/update/update_node_visitor.h"
 #include "mongo/db/update_index_data.h"
@@ -125,7 +125,7 @@ public:
 
     virtual Value serialize() const = 0;
 
-    virtual void setCollator(const CollatorInterface* collator){};
+    virtual void setCollator(const CollatorInterface* collator) {};
 
     virtual bool getCheckExistenceForDiffInsertOperations() const {
         return false;

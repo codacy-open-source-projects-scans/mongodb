@@ -27,8 +27,13 @@
  *    it in the license file.
  */
 
+#include "mongo/base/string_data.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/pipeline/percentile_algo.h"
+#include "mongo/logv2/log.h"
+#include "mongo/unittest/unittest.h"
+
 #include <algorithm>
-#include <boost/random/normal_distribution.hpp>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -37,17 +42,7 @@
 #include <random>
 #include <vector>
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/pipeline/percentile_algo.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include <boost/random/normal_distribution.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 

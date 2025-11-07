@@ -28,14 +28,7 @@
  */
 
 
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/repl/session_update_tracker.h"
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -44,7 +37,6 @@
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/repl/session_update_tracker.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/session/session_txn_record_gen.h"
@@ -52,11 +44,17 @@
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/time_support.h"
+
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -78,6 +76,7 @@ OplogEntry createOplogEntryForTransactionTableUpdate(repl::OpTime opTime,
                                     boost::none,  // uuid
                                     false,        // fromMigrate
                                     boost::none,  // checkExistenceForDiffInsert
+                                    boost::none,  // versionContext
                                     repl::OplogEntry::kOplogVersion,
                                     updateBSON,
                                     o2Field,
@@ -229,6 +228,8 @@ boost::optional<std::vector<OplogEntry>> SessionUpdateTracker::_updateSessionInf
 std::vector<OplogEntry> SessionUpdateTracker::_flush(const OplogEntry& entry) {
     switch (entry.getOpType()) {
         case OpTypeEnum::kInsert:
+        case OpTypeEnum::kContainerInsert:
+        case OpTypeEnum::kContainerDelete:
         case OpTypeEnum::kNoop:
             // Session table is keyed by session id, so nothing to do here because
             // it would have triggered a unique index violation in the primary if
@@ -264,7 +265,7 @@ std::vector<OplogEntry> SessionUpdateTracker::flushAll() {
 std::vector<OplogEntry> SessionUpdateTracker::_flushForQueryPredicate(
     const BSONObj& queryPredicate) {
     auto idField = queryPredicate["_id"].Obj();
-    auto lsid = LogicalSessionId::parse(IDLParserContext("lsidInOplogQuery"), idField);
+    auto lsid = LogicalSessionId::parse(idField, IDLParserContext("lsidInOplogQuery"));
     auto iter = _sessionsToUpdate.find(lsid);
 
     if (iter == _sessionsToUpdate.end()) {

@@ -29,23 +29,27 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/index_builds/index_build_interceptor.h"
+#include "mongo/db/index_builds/index_builds_common.h"
 #include "mongo/db/index_builds/resumable_index_builds_gen.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/util/uuid.h"
 
+#include <memory>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
+
+struct IndexBuildInfo;
 
 /**
  * Interface for building a single index from an index spec and persisting its state to disk.
@@ -57,7 +61,7 @@ class IndexBuildBlock {
 public:
     IndexBuildBlock(const NamespaceString& nss,
                     const BSONObj& spec,
-                    IndexBuildMethod method,
+                    IndexBuildMethodEnum method,
                     // The index build UUID is only required for persisting to the catalog.
                     boost::optional<UUID> indexBuildUUID);
 
@@ -75,18 +79,27 @@ public:
      * getEntry(). IndexCatalog will still own the entry.
      *
      * Must be called from within a `WriteUnitOfWork`
+     * TODO(SERVER-111304): We might be able to remove generateTableWrites param by not creating an
+     * instance of IndexBuildInterceptor on a standby in case of primary driven index builds.
      */
-    Status init(OperationContext* opCtx, Collection* collection, bool forRecovery);
+    Status init(OperationContext* opCtx,
+                Collection* collection,
+                const IndexBuildInfo& indexBuildInfo,
+                bool forRecovery,
+                bool generateTableWrites);
 
     /**
      * Makes sure that an entry for the index was created at startup in the IndexCatalog. Returns
      * an error status if we are resuming from the bulk load phase and the index ident was unable
      * to be dropped or recreated in the storage engine.
+     * TODO(SERVER-111304): We might be able to remove generateTableWrites param by not creating an
+     * instance of IndexBuildInterceptor on a standby in case of primary driven index builds.
      */
     Status initForResume(OperationContext* opCtx,
                          Collection* collection,
-                         const IndexStateInfo& stateInfo,
-                         IndexBuildPhaseEnum phase);
+                         const IndexBuildInfo& indexBuildInfo,
+                         IndexBuildPhaseEnum phase,
+                         bool generateTableWrites);
 
     /**
      * Marks the state of the index as 'ready' and commits the index to disk.
@@ -114,8 +127,12 @@ public:
     /**
      * Returns the name of the index managed by this index builder.
      */
-    const std::string& getIndexName() const {
-        return _indexName;
+    std::string getIndexName() const {
+        return std::string{_indexBuildInfo->getIndexName()};
+    }
+
+    const IndexBuildInfo& getIndexBuildInfo() const {
+        return *_indexBuildInfo;
     }
 
     /**
@@ -125,16 +142,20 @@ public:
         return _spec;
     }
 
+    static Status buildEmptyIndex(OperationContext* opCtx,
+                                  Collection* collection,
+                                  const IndexBuildInfo& indexBuildInfo);
+
 private:
     void _completeInit(OperationContext* opCtx, Collection* collection);
 
     const NamespaceString _nss;
 
     BSONObj _spec;
-    IndexBuildMethod _method;
+    IndexBuildMethodEnum _method;
     boost::optional<UUID> _buildUUID;
 
-    std::string _indexName;
+    boost::optional<IndexBuildInfo> _indexBuildInfo;
     std::string _indexNamespace;
 
     std::unique_ptr<IndexBuildInterceptor> _indexBuildInterceptor;

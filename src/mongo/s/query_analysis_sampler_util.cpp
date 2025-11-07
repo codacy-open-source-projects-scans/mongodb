@@ -29,6 +29,11 @@
 
 #include "mongo/s/query_analysis_sampler_util.h"
 
+#include "mongo/idl/idl_parser.h"
+#include "mongo/platform/random.h"
+#include "mongo/util/static_immortal.h"
+#include "mongo/util/synchronized_value.h"
+
 #include <iterator>
 #include <new>
 #include <utility>
@@ -36,11 +41,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/idl/idl_parser.h"
-#include "mongo/platform/random.h"
-#include "mongo/util/static_immortal.h"
-#include "mongo/util/synchronized_value.h"
 
 namespace mongo {
 namespace analyze_shard_key {
@@ -79,8 +79,8 @@ boost::optional<UUID> tryGenerateSampleId(OperationContext* opCtx,
                                           StringData cmdName) {
     return tryGenerateSampleId(opCtx,
                                nss,
-                               SampledCommandName_parse(IDLParserContext("tryGenerateSampleId"),
-                                                        adjustCmdNameCase(cmdName)));
+                               SampledCommandName_parse(adjustCmdNameCase(cmdName),
+                                                        IDLParserContext("tryGenerateSampleId")));
 }
 
 boost::optional<TargetedSampleId> tryGenerateTargetedSampleId(OperationContext* opCtx,
@@ -100,8 +100,8 @@ boost::optional<TargetedSampleId> tryGenerateTargetedSampleId(OperationContext* 
     return tryGenerateTargetedSampleId(
         opCtx,
         nss,
-        SampledCommandName_parse(IDLParserContext("tryGenerateTargetedSampleId"),
-                                 adjustCmdNameCase(cmdName)),
+        SampledCommandName_parse(adjustCmdNameCase(cmdName),
+                                 IDLParserContext("tryGenerateTargetedSampleId")),
         shardIds);
 }
 

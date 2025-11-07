@@ -28,55 +28,50 @@
  */
 
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
-#include <algorithm>
-#include <cstddef>
-#include <iterator>
-#include <limits>
-#include <mutex>
-#include <utility>
+#include "mongo/db/op_observer/op_observer_impl.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/backwards_compatible_collection_options_util.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_operation_source.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/catalog/import_collection_oplog_entry_gen.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/change_stream_serverless_helpers.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/create_indexes_gen.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/global_catalog/router_role_api/sharding_write_router.h"
+#include "mongo/db/index_builds/index_builds_common.h"
+#include "mongo/db/local_catalog/backwards_compatible_collection_options_util.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_operation_source.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/ddl/create_indexes_gen.h"
+#include "mongo/db/local_catalog/import_collection_oplog_entry_gen.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/scoped_collection_metadata.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/batched_write_context.h"
-#include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/member_state.h"
+#include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/scoped_collection_metadata.h"
-#include "mongo/db/s/sharding_write_router.h"
+#include "mongo/db/repl/truncate_range_oplog_entry_gen.h"
+#include "mongo/db/rss/replicated_storage_service.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
 #include "mongo/db/session/session_txn_record_gen.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/db/shard_role.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
@@ -84,12 +79,10 @@
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/version_context.h"
+#include "mongo/db/version_context_feature_flags_gen.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/s/catalog/type_index_catalog.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/decorable.h"
@@ -97,6 +90,14 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <iterator>
+#include <limits>
+#include <utility>
+
+#include <boost/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -115,8 +116,7 @@ constexpr auto kMsgFieldName = "msg"_sd;
 constexpr long long kInvalidNumRecords = -1LL;
 
 Date_t getWallClockTimeForOpLog(OperationContext* opCtx) {
-    auto const clockSource = opCtx->getServiceContext()->getFastClockSource();
-    return clockSource->now();
+    return opCtx->fastClockSource().now();
 }
 
 repl::OpTime logOperation(OperationContext* opCtx,
@@ -125,6 +125,13 @@ repl::OpTime logOperation(OperationContext* opCtx,
                           OperationLogger* operationLogger) {
     if (assignWallClockTime) {
         oplogEntry->setWallClockTime(getWallClockTimeForOpLog(opCtx));
+    }
+    if (auto& vCtx = VersionContext::getDecoration(opCtx); vCtx.isInitialized()) {
+        if (feature_flags::gReplicateOFCVInOplog.isEnabled(
+                VersionContext::getDecoration(opCtx),
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            oplogEntry->setVersionContext(vCtx);
+        }
     }
     auto& times = OpObserver::Times::get(opCtx).reservedOpTimes;
     auto opTime = operationLogger->logOp(opCtx, oplogEntry);
@@ -232,6 +239,9 @@ OpTimeBundle replLogUpdate(OperationContext* opCtx,
     oplogEntry->setNss(args.coll->ns());
     oplogEntry->setUuid(args.coll->uuid());
 
+    if (args.coll->isNewTimeseriesWithoutView()) {
+        oplogEntry->setIsTimeseries();
+    }
     repl::OplogLink oplogLink;
     operationLogger->appendOplogEntryChainInfo(
         opCtx, oplogEntry, &oplogLink, args.updateArgs->stmtIds);
@@ -264,12 +274,16 @@ OpTimeBundle replLogDelete(OperationContext* opCtx,
                            bool fromMigrate,
                            const DocumentKey& documentKey,
                            const boost::optional<ShardId>& destinedRecipient,
+                           bool isTimeseries,
                            OperationLogger* operationLogger) {
     oplogEntry->setTid(nss.tenantId());
     oplogEntry->setNss(nss);
     oplogEntry->setUuid(uuid);
     oplogEntry->setDestinedRecipient(destinedRecipient);
 
+    if (isTimeseries) {
+        oplogEntry->setIsTimeseries();
+    }
     repl::OplogLink oplogLink;
     operationLogger->appendOplogEntryChainInfo(opCtx, oplogEntry, &oplogLink, {stmtId});
 
@@ -316,22 +330,39 @@ OpObserverImpl::OpObserverImpl(std::unique_ptr<OperationLogger> operationLogger)
 void OpObserverImpl::onCreateIndex(OperationContext* opCtx,
                                    const NamespaceString& nss,
                                    const UUID& uuid,
-                                   BSONObj indexDoc,
-                                   bool fromMigrate) {
+                                   const IndexBuildInfo& indexBuildInfo,
+                                   bool fromMigrate,
+                                   bool isTimeseries) {
     if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
         return;
     }
 
+    bool replicateLocalCatalogIdentifiers = shouldReplicateLocalCatalogIdentifiers(
+        rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider());
+
     BSONObjBuilder builder;
+    // Note that despite using this constant, we are not building a CreateIndexCommand here
     builder.append(CreateIndexesCommand::kCommandName, nss.coll());
-    builder.appendElements(indexDoc);
+    builder.appendElements(indexBuildInfo.spec);
 
     MutableOplogEntry oplogEntry;
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
     oplogEntry.setTid(nss.tenantId());
     oplogEntry.setNss(nss.getCommandNS());
     oplogEntry.setUuid(uuid);
+    if (isTimeseries &&
+        gFeatureFlagMarkTimeseriesEventsInOplog.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        oplogEntry.setIsTimeseries();
+    }
     oplogEntry.setObject(builder.obj());
+    if (replicateLocalCatalogIdentifiers) {
+        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+        auto indexIdentUniqueTag =
+            storageEngine->getIndexIdentUniqueTag(indexBuildInfo.indexIdent, nss.dbName());
+        oplogEntry.setObject2(BSON("indexIdent" << indexIdentUniqueTag));
+    }
     oplogEntry.setFromMigrateIfTrue(fromMigrate);
 
     auto opTime = logMutableOplogEntry(opCtx, &oplogEntry, _operationLogger.get());
@@ -342,14 +373,16 @@ void OpObserverImpl::onCreateIndex(OperationContext* opCtx,
                   "Added oplog entry for createIndexes to transaction",
                   logAttrs(oplogEntry.getNss()),
                   "uuid"_attr = oplogEntry.getUuid(),
-                  "object"_attr = oplogEntry.getObject());
+                  "object"_attr = oplogEntry.getObject(),
+                  "object2"_attr = oplogEntry.getObject2());
         } else {
             LOGV2(7360101,
                   "Wrote oplog entry for createIndexes",
                   logAttrs(oplogEntry.getNss()),
                   "uuid"_attr = oplogEntry.getUuid(),
                   "opTime"_attr = opTime,
-                  "object"_attr = oplogEntry.getObject());
+                  "object"_attr = oplogEntry.getObject(),
+                  "object2"_attr = oplogEntry.getObject2());
         }
     }
 }
@@ -358,30 +391,49 @@ void OpObserverImpl::onStartIndexBuild(OperationContext* opCtx,
                                        const NamespaceString& nss,
                                        const UUID& collUUID,
                                        const UUID& indexBuildUUID,
-                                       const std::vector<BSONObj>& indexes,
-                                       bool fromMigrate) {
+                                       const std::vector<IndexBuildInfo>& indexes,
+                                       bool fromMigrate,
+                                       bool isTimeseries) {
     if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
         return;
     }
+
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
 
     BSONObjBuilder oplogEntryBuilder;
     oplogEntryBuilder.append("startIndexBuild", nss.coll());
 
     indexBuildUUID.appendToBuilder(&oplogEntryBuilder, "indexBuildUUID");
 
-    BSONArrayBuilder indexesArr(oplogEntryBuilder.subarrayStart("indexes"));
-    for (const auto& indexDoc : indexes) {
-        indexesArr.append(indexDoc);
+    BSONArrayBuilder oIndexesArr(oplogEntryBuilder.subarrayStart("indexes"));
+    for (const auto& indexBuildInfo : indexes) {
+        oIndexesArr.append(indexBuildInfo.spec);
     }
-    indexesArr.done();
+    oIndexesArr.done();
+
+    BSONArrayBuilder o2IndexesArr;
+    for (const auto& indexBuildInfo : indexes) {
+        auto indexIdentUniqueTag =
+            storageEngine->getIndexIdentUniqueTag(indexBuildInfo.indexIdent, nss.dbName());
+        o2IndexesArr.append(BSON("indexIdent" << indexIdentUniqueTag));
+    }
 
     MutableOplogEntry oplogEntry;
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
-
+    if (isTimeseries &&
+        gFeatureFlagMarkTimeseriesEventsInOplog.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        oplogEntry.setIsTimeseries();
+    }
     oplogEntry.setTid(nss.tenantId());
     oplogEntry.setNss(nss.getCommandNS());
     oplogEntry.setUuid(collUUID);
     oplogEntry.setObject(oplogEntryBuilder.done());
+    if (shouldReplicateLocalCatalogIdentifiers(
+            rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider())) {
+        oplogEntry.setObject2(BSON("indexes" << o2IndexesArr.arr()));
+    }
     oplogEntry.setFromMigrateIfTrue(fromMigrate);
     logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _operationLogger.get());
 }
@@ -411,7 +463,9 @@ void OpObserverImpl::onCommitIndexBuild(OperationContext* opCtx,
                                         const UUID& collUUID,
                                         const UUID& indexBuildUUID,
                                         const std::vector<BSONObj>& indexes,
-                                        bool fromMigrate) {
+                                        const std::vector<boost::optional<BSONObj>>& multikey,
+                                        bool fromMigrate,
+                                        bool isTimeseries) {
     if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
         return;
     }
@@ -427,9 +481,30 @@ void OpObserverImpl::onCommitIndexBuild(OperationContext* opCtx,
     }
     indexesArr.done();
 
+    if (!multikey.empty()) {
+        uassert(11084600,
+                "Multikey array length must match length of indexes",
+                indexes.size() == multikey.size());
+
+        BSONArrayBuilder multikeyBuilder{oplogEntryBuilder.subarrayStart("multikey")};
+        for (auto&& m : multikey) {
+            if (m) {
+                multikeyBuilder.append(*m);
+            } else {
+                multikeyBuilder.appendNull();
+            }
+        }
+    }
+
     MutableOplogEntry oplogEntry;
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
 
+    if (isTimeseries &&
+        gFeatureFlagMarkTimeseriesEventsInOplog.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        oplogEntry.setIsTimeseries();
+    }
     oplogEntry.setTid(nss.tenantId());
     oplogEntry.setNss(nss.getCommandNS());
     oplogEntry.setUuid(collUUID);
@@ -444,7 +519,8 @@ void OpObserverImpl::onAbortIndexBuild(OperationContext* opCtx,
                                        const UUID& indexBuildUUID,
                                        const std::vector<BSONObj>& indexes,
                                        const Status& cause,
-                                       bool fromMigrate) {
+                                       bool fromMigrate,
+                                       bool isTimeseries) {
     if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
         return;
     }
@@ -470,6 +546,12 @@ void OpObserverImpl::onAbortIndexBuild(OperationContext* opCtx,
     MutableOplogEntry oplogEntry;
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
 
+    if (isTimeseries &&
+        gFeatureFlagMarkTimeseriesEventsInOplog.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        oplogEntry.setIsTimeseries();
+    }
     oplogEntry.setTid(nss.tenantId());
     oplogEntry.setNss(nss.getCommandNS());
     oplogEntry.setUuid(collUUID);
@@ -526,6 +608,9 @@ std::vector<repl::OpTime> _logInsertOps(OperationContext* opCtx,
         const auto docKey = getDocumentKey(collectionPtr, begin[i].doc).getShardKeyAndId();
         if (!recordIds.empty()) {
             oplogEntry.setRecordId(recordIds[i]);
+        }
+        if (collectionPtr->isNewTimeseriesWithoutView()) {
+            oplogEntry.setIsTimeseries();
         }
         oplogEntry.setObject(begin[i].doc);
         oplogEntry.setObject2(docKey);
@@ -637,7 +722,13 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
         size_t i = 0;
         for (auto iter = first; iter != last; iter++) {
             const auto docKey = getDocumentKey(coll, iter->doc).getShardKeyAndId();
-            auto operation = MutableOplogEntry::makeInsertOperation(nss, uuid, iter->doc, docKey);
+            repl::ReplOperation operation;
+            operation = MutableOplogEntry::makeInsertOperation(
+                nss,
+                uuid,
+                iter->doc,
+                docKey,
+                /*isTimeseries=*/coll->isNewTimeseriesWithoutView());
             operation.setDestinedRecipient(
                 shardingWriteRouter->getReshardingDestinedRecipient(iter->doc));
 
@@ -683,6 +774,12 @@ void OpObserverImpl::onInserts(OperationContext* opCtx,
         // Ensure well-formed embedded ReplOperation for logging.
         // This means setting optype, nss, and object at the minimum.
         MutableOplogEntry oplogEntryTemplate;
+        if (coll->isNewTimeseriesWithoutView() &&
+            gFeatureFlagMarkTimeseriesEventsInOplog.isEnabled(
+                VersionContext::getDecoration(opCtx),
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            oplogEntryTemplate.setIsTimeseries();
+        }
         oplogEntryTemplate.setOpType(repl::OpTypeEnum::kInsert);
         oplogEntryTemplate.setTid(nss.tenantId());
         oplogEntryTemplate.setNss(nss);
@@ -769,8 +866,13 @@ void OpObserverImpl::onUpdate(OperationContext* opCtx,
     auto shardingWriteRouter = std::make_unique<ShardingWriteRouter>(opCtx, nss);
     OpTimeBundle opTime;
     if (inBatchedWrite) {
-        auto operation = MutableOplogEntry::makeUpdateOperation(
-            nss, args.coll->uuid(), args.updateArgs->update, args.updateArgs->criteria);
+        repl::ReplOperation operation;
+        operation = MutableOplogEntry::makeUpdateOperation(
+            nss,
+            args.coll->uuid(),
+            args.updateArgs->update,
+            args.updateArgs->criteria,
+            /*isTimeseries=*/args.coll->isNewTimeseriesWithoutView());
         operation.setDestinedRecipient(
             shardingWriteRouter->getReshardingDestinedRecipient(args.updateArgs->updatedDoc));
         operation.setFromMigrateIfTrue(args.updateArgs->source == OperationSource::kFromMigrate);
@@ -931,8 +1033,12 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
 
     OpTimeBundle opTime;
     if (inBatchedWrite) {
-        auto operation =
-            MutableOplogEntry::makeDeleteOperation(nss, uuid, documentKey.getShardKeyAndId());
+        repl::ReplOperation operation;
+        operation = MutableOplogEntry::makeDeleteOperation(
+            nss,
+            uuid,
+            documentKey.getShardKeyAndId(),
+            /*isTimeseries=*/coll->isNewTimeseriesWithoutView());
         operation.setDestinedRecipient(destinedRecipient);
         operation.setFromMigrateIfTrue(args.fromMigrate);
 
@@ -1009,6 +1115,7 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
                                args.fromMigrate,
                                documentKey,
                                destinedRecipient,
+                               coll->isNewTimeseriesWithoutView(),
                                _operationLogger.get());
         if (opAccumulator) {
             opAccumulator->opTime.writeOpTime = opTime.writeOpTime;
@@ -1028,6 +1135,191 @@ void OpObserverImpl::onDelete(OperationContext* opCtx,
         sessionTxnRecord.setLastWriteDate(opTime.wallClockTime);
         onWriteOpCompleted(opCtx, std::vector<StmtId>{stmtId}, sessionTxnRecord, nss);
     }
+}
+
+namespace {
+
+BSONObj buildContainerOpObject(std::variant<int64_t, std::span<const char>> key,
+                               boost::optional<std::span<const char>> value = boost::none) {
+    BSONObjBuilder builder;
+    std::visit(OverloadedVisitor{[&builder](int64_t key) { builder.append("k", key); },
+                                 [&builder](std::span<const char> key) {
+                                     builder.appendBinData(
+                                         "k", key.size(), BinDataType::BinDataGeneral, key.data());
+                                 }},
+               key);
+    if (value) {
+        builder.appendBinData("v", value->size(), BinDataType::BinDataGeneral, value->data());
+    }
+    return builder.obj();
+}
+
+OpTimeBundle logContainerInsert(OperationContext* opCtx,
+                                const NamespaceString& ns,
+                                const UUID& uuid,
+                                StringData container,
+                                std::variant<int64_t, std::span<const char>> key,
+                                std::span<const char> value,
+                                OperationLogger& logger) {
+    MutableOplogEntry entry;
+    entry.setTid(ns.tenantId());
+    entry.setNss(ns);
+    entry.setUuid(uuid);
+    entry.setContainer(container);
+    entry.setOpType(repl::OpTypeEnum::kContainerInsert);
+    entry.setObject(buildContainerOpObject(key, value));
+
+    OpTimeBundle opTime;
+    opTime.writeOpTime = logOperation(opCtx, &entry, true /*assignWallClockTime*/, &logger);
+    opTime.wallClockTime = entry.getWallClockTime();
+
+    return opTime;
+}
+
+void _onContainerInsert(OperationContext* opCtx,
+                        const NamespaceString& ns,
+                        const UUID& collUUID,
+                        StringData ident,
+                        std::variant<int64_t, std::span<const char>> key,
+                        std::span<const char> value,
+                        OperationLogger& logger) {
+    auto oplogDisabled = repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, ns);
+    auto txnParticipant = TransactionParticipant::get(opCtx);
+    auto inMultiDocumentTransaction =
+        txnParticipant && !oplogDisabled && txnParticipant.transactionIsOpen();
+    auto inBatchedWrite = BatchedWriteContext::get(opCtx).writesAreBatched();
+
+    uassert(10942700,
+            "Cannot insert into a container in a multi-document transaction",
+            !inMultiDocumentTransaction);
+
+    if (inBatchedWrite) {
+        BatchedWriteContext::BatchedOperation op;
+        op.setOpType(repl::OpTypeEnum::kContainerInsert);
+        op.setTid(ns.tenantId());
+        op.setNss(ns);
+        op.setUuid(collUUID);
+        op.setContainer(ident);
+        op.setObject(buildContainerOpObject(key, value));
+        BatchedWriteContext::get(opCtx).addBatchedOperation(opCtx, op);
+        return;
+    }
+
+    if (_skipOplogOps(oplogDisabled,
+                      inBatchedWrite,
+                      inMultiDocumentTransaction,
+                      ns,
+                      {kUninitializedStmtId})) {
+        return;
+    }
+
+    auto opTime = logContainerInsert(opCtx, ns, collUUID, ident, key, value, logger);
+
+    SessionTxnRecord sessionTxnRecord;
+    sessionTxnRecord.setLastWriteOpTime(opTime.writeOpTime);
+    sessionTxnRecord.setLastWriteDate(opTime.wallClockTime);
+    onWriteOpCompleted(opCtx, {kUninitializedStmtId}, sessionTxnRecord, ns);
+}
+
+OpTimeBundle logContainerDelete(OperationContext* opCtx,
+                                const NamespaceString& ns,
+                                const UUID& uuid,
+                                StringData container,
+                                std::variant<int64_t, std::span<const char>> key,
+                                OperationLogger& logger) {
+    MutableOplogEntry entry;
+    entry.setTid(ns.tenantId());
+    entry.setNss(ns);
+    entry.setUuid(uuid);
+    entry.setContainer(container);
+    entry.setOpType(repl::OpTypeEnum::kContainerDelete);
+    entry.setObject(buildContainerOpObject(key));
+
+    OpTimeBundle opTime;
+    opTime.writeOpTime = logOperation(opCtx, &entry, true /*assignWallClockTime*/, &logger);
+    opTime.wallClockTime = entry.getWallClockTime();
+
+    return opTime;
+}
+
+void _onContainerDelete(OperationContext* opCtx,
+                        const NamespaceString& ns,
+                        const UUID& collUUID,
+                        StringData ident,
+                        std::variant<int64_t, std::span<const char>> key,
+                        OperationLogger& logger) {
+    auto oplogDisabled = repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, ns);
+    auto txnParticipant = TransactionParticipant::get(opCtx);
+    auto inMultiDocumentTransaction =
+        txnParticipant && !oplogDisabled && txnParticipant.transactionIsOpen();
+    auto inBatchedWrite = BatchedWriteContext::get(opCtx).writesAreBatched();
+
+    uassert(10942702,
+            "Cannot delete from a container in a multi-document transaction",
+            !inMultiDocumentTransaction);
+
+    if (inBatchedWrite) {
+        BatchedWriteContext::BatchedOperation op;
+        op.setOpType(repl::OpTypeEnum::kContainerDelete);
+        op.setTid(ns.tenantId());
+        op.setNss(ns);
+        op.setUuid(collUUID);
+        op.setContainer(ident);
+        op.setObject(buildContainerOpObject(key));
+        BatchedWriteContext::get(opCtx).addBatchedOperation(opCtx, op);
+        return;
+    }
+
+    if (_skipOplogOps(oplogDisabled,
+                      inBatchedWrite,
+                      inMultiDocumentTransaction,
+                      ns,
+                      {kUninitializedStmtId})) {
+        return;
+    }
+
+    auto opTime = logContainerDelete(opCtx, ns, collUUID, ident, key, logger);
+
+    SessionTxnRecord sessionTxnRecord;
+    sessionTxnRecord.setLastWriteOpTime(opTime.writeOpTime);
+    sessionTxnRecord.setLastWriteDate(opTime.wallClockTime);
+    onWriteOpCompleted(opCtx, {kUninitializedStmtId}, sessionTxnRecord, ns);
+}
+
+}  // namespace
+
+void OpObserverImpl::onContainerInsert(OperationContext* opCtx,
+                                       const NamespaceString& ns,
+                                       const UUID& collUUID,
+                                       StringData ident,
+                                       int64_t key,
+                                       std::span<const char> value) {
+    _onContainerInsert(opCtx, ns, collUUID, ident, key, value, *_operationLogger);
+}
+
+void OpObserverImpl::onContainerInsert(OperationContext* opCtx,
+                                       const NamespaceString& ns,
+                                       const UUID& collUUID,
+                                       StringData ident,
+                                       std::span<const char> key,
+                                       std::span<const char> value) {
+    _onContainerInsert(opCtx, ns, collUUID, ident, key, value, *_operationLogger);
+}
+
+void OpObserverImpl::onContainerDelete(OperationContext* opCtx,
+                                       const NamespaceString& ns,
+                                       const UUID& collUUID,
+                                       StringData ident,
+                                       int64_t key) {
+    _onContainerDelete(opCtx, ns, collUUID, ident, key, *_operationLogger);
+}
+
+void OpObserverImpl::onContainerDelete(OperationContext* opCtx,
+                                       const NamespaceString& ns,
+                                       const UUID& collUUID,
+                                       StringData ident,
+                                       std::span<const char> key) {
+    _onContainerDelete(opCtx, ns, collUUID, ident, key, *_operationLogger);
 }
 
 void OpObserverImpl::onInternalOpMessage(
@@ -1062,23 +1354,48 @@ void OpObserverImpl::onInternalOpMessage(
     logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _operationLogger.get());
 }
 
-void OpObserverImpl::onCreateCollection(OperationContext* opCtx,
-                                        const CollectionPtr& coll,
-                                        const NamespaceString& collectionName,
-                                        const CollectionOptions& options,
-                                        const BSONObj& idIndex,
-                                        const OplogSlot& createOpTime,
-                                        bool fromMigrate) {
+void OpObserverImpl::onCreateCollection(
+    OperationContext* opCtx,
+    const NamespaceString& collectionName,
+    const CollectionOptions& options,
+    const BSONObj& idIndex,
+    const OplogSlot& createOpTime,
+    const boost::optional<CreateCollCatalogIdentifier>& createCollCatalogIdentifier,
+    bool fromMigrate,
+    bool isTimeseries) {
     if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, collectionName)) {
         return;
     }
 
     MutableOplogEntry oplogEntry;
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
+    if (isTimeseries &&
+        gFeatureFlagMarkTimeseriesEventsInOplog.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        oplogEntry.setIsTimeseries();
+    }
     oplogEntry.setTid(collectionName.tenantId());
     oplogEntry.setNss(collectionName.getCommandNS());
     oplogEntry.setUuid(options.uuid);
-    oplogEntry.setObject(MutableOplogEntry::makeCreateCollCmdObj(collectionName, options, idIndex));
+    oplogEntry.setObject(MutableOplogEntry::makeCreateCollObject(collectionName, options, idIndex));
+    if (shouldReplicateLocalCatalogIdentifiers(
+            rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider())) {
+        invariant(createCollCatalogIdentifier.has_value(),
+                  "Missing catalog identifier required to log replicated "
+                  "collection");
+
+        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+        auto identUniqueTag = storageEngine->getCollectionIdentUniqueTag(
+            createCollCatalogIdentifier->ident, collectionName.dbName());
+        auto idIndexIdentUniqueTag = createCollCatalogIdentifier->idIndexIdent
+            ? boost::optional<StringData>(storageEngine->getIndexIdentUniqueTag(
+                  *createCollCatalogIdentifier->idIndexIdent, collectionName.dbName()))
+            : boost::none;
+        const auto o2 = repl::MutableOplogEntry::makeCreateCollObject2(
+            createCollCatalogIdentifier->catalogId, identUniqueTag, idIndexIdentUniqueTag);
+        oplogEntry.setObject2(o2);
+    }
     oplogEntry.setFromMigrateIfTrue(fromMigrate);
 
     if (!createOpTime.isNull()) {
@@ -1108,7 +1425,8 @@ void OpObserverImpl::onCollMod(OperationContext* opCtx,
                                const UUID& uuid,
                                const BSONObj& collModCmd,
                                const CollectionOptions& oldCollOptions,
-                               boost::optional<IndexCollModInfo> indexInfo) {
+                               boost::optional<IndexCollModInfo> indexInfo,
+                               bool isTimeseries) {
     const auto [collModOplogCmd, additionalO2Field] =
         backwards_compatible_collection_options::getCollModCmdAndAdditionalO2Field(collModCmd);
 
@@ -1144,6 +1462,12 @@ void OpObserverImpl::onCollMod(OperationContext* opCtx,
 
         oplogEntry.setTid(nss.tenantId());
         oplogEntry.setNss(nss.getCommandNS());
+        if (isTimeseries &&
+            gFeatureFlagMarkTimeseriesEventsInOplog.isEnabled(
+                VersionContext::getDecoration(opCtx),
+                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            oplogEntry.setIsTimeseries();
+        }
         oplogEntry.setUuid(uuid);
         oplogEntry.setObject(makeCollModCmdObj(collModOplogCmd, oldCollOptions, indexInfo));
         oplogEntry.setObject2(o2Builder.done());
@@ -1205,7 +1529,8 @@ repl::OpTime OpObserverImpl::onDropCollection(OperationContext* opCtx,
                                               const NamespaceString& collectionName,
                                               const UUID& uuid,
                                               std::uint64_t numRecords,
-                                              bool markFromMigrate) {
+                                              bool markFromMigrate,
+                                              bool isTimeseries) {
     uassert(50715,
             "dropping the server configuration collection (admin.system.version) is not allowed.",
             collectionName != NamespaceString::kServerConfigurationNamespace);
@@ -1218,6 +1543,12 @@ repl::OpTime OpObserverImpl::onDropCollection(OperationContext* opCtx,
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
 
     oplogEntry.setTid(collectionName.tenantId());
+    if (isTimeseries &&
+        gFeatureFlagMarkTimeseriesEventsInOplog.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        oplogEntry.setIsTimeseries();
+    }
     oplogEntry.setNss(collectionName.getCommandNS());
     oplogEntry.setUuid(uuid);
     oplogEntry.setFromMigrateIfTrue(markFromMigrate);
@@ -1241,7 +1572,8 @@ void OpObserverImpl::onDropIndex(OperationContext* opCtx,
                                  const NamespaceString& nss,
                                  const UUID& uuid,
                                  const std::string& indexName,
-                                 const BSONObj& indexInfo) {
+                                 const BSONObj& indexInfo,
+                                 bool isTimeseries) {
     if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
         return;
     }
@@ -1250,6 +1582,12 @@ void OpObserverImpl::onDropIndex(OperationContext* opCtx,
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
 
     oplogEntry.setTid(nss.tenantId());
+    if (isTimeseries &&
+        gFeatureFlagMarkTimeseriesEventsInOplog.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        oplogEntry.setIsTimeseries();
+    }
     oplogEntry.setNss(nss.getCommandNS());
     oplogEntry.setUuid(uuid);
     oplogEntry.setObject(BSON("dropIndexes" << nss.coll() << "index" << indexName));
@@ -1273,7 +1611,8 @@ repl::OpTime OpObserverImpl::preRenameCollection(OperationContext* const opCtx,
                                                  const boost::optional<UUID>& dropTargetUUID,
                                                  std::uint64_t numRecords,
                                                  bool stayTemp,
-                                                 bool markFromMigrate) {
+                                                 bool markFromMigrate,
+                                                 bool isTimeseries) {
     if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, fromCollection)) {
         return {};
     }
@@ -1294,6 +1633,12 @@ repl::OpTime OpObserverImpl::preRenameCollection(OperationContext* const opCtx,
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
 
     oplogEntry.setTid(fromCollection.tenantId());
+    if (isTimeseries &&
+        gFeatureFlagMarkTimeseriesEventsInOplog.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        oplogEntry.setIsTimeseries();
+    }
     oplogEntry.setNss(fromCollection.getCommandNS());
     oplogEntry.setUuid(uuid);
     oplogEntry.setFromMigrateIfTrue(markFromMigrate);
@@ -1332,7 +1677,8 @@ void OpObserverImpl::onRenameCollection(OperationContext* const opCtx,
                                         const boost::optional<UUID>& dropTargetUUID,
                                         std::uint64_t numRecords,
                                         bool stayTemp,
-                                        bool markFromMigrate) {
+                                        bool markFromMigrate,
+                                        bool isTimeseries) {
     preRenameCollection(opCtx,
                         fromCollection,
                         toCollection,
@@ -1340,10 +1686,10 @@ void OpObserverImpl::onRenameCollection(OperationContext* const opCtx,
                         dropTargetUUID,
                         numRecords,
                         stayTemp,
-                        markFromMigrate);
+                        markFromMigrate,
+                        isTimeseries);
     postRenameCollection(opCtx, fromCollection, toCollection, uuid, dropTargetUUID, stayTemp);
 }
-
 void OpObserverImpl::onImportCollection(OperationContext* opCtx,
                                         const UUID& importUUID,
                                         const NamespaceString& nss,
@@ -1351,7 +1697,8 @@ void OpObserverImpl::onImportCollection(OperationContext* opCtx,
                                         long long dataSize,
                                         const BSONObj& catalogEntry,
                                         const BSONObj& storageMetadata,
-                                        bool isDryRun) {
+                                        bool isDryRun,
+                                        bool isTimeseries) {
     if (repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, nss)) {
         return;
     }
@@ -1363,6 +1710,12 @@ void OpObserverImpl::onImportCollection(OperationContext* opCtx,
     oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
 
     oplogEntry.setTid(nss.tenantId());
+    if (isTimeseries &&
+        gFeatureFlagMarkTimeseriesEventsInOplog.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        oplogEntry.setIsTimeseries();
+    }
     oplogEntry.setNss(nss.getCommandNS());
     oplogEntry.setObject(importCollection.toBSON());
     logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _operationLogger.get());
@@ -1661,6 +2014,7 @@ void OpObserverImpl::onBatchedWriteCommit(OperationContext* opCtx,
     boost::optional<repl::ReplOperation::ImageBundle> noPrePostImage;
 
     if (!gFeatureFlagLargeBatchedOperations.isEnabled(
+            VersionContext::getDecoration(opCtx),
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         // Before SERVER-70765, we relied on packTransactionStatementsForApplyOps() to check if the
         // batch of operations could fit in a single applyOps entry. Now, we pass the size limit to
@@ -1937,22 +2291,6 @@ void OpObserverImpl::onTransactionAbort(OperationContext* opCtx,
         opCtx, &oplogEntry, DurableTxnStateEnum::kAborted, _operationLogger.get());
 }
 
-void OpObserverImpl::onModifyCollectionShardingIndexCatalog(OperationContext* opCtx,
-                                                            const NamespaceString& nss,
-                                                            const UUID& uuid,
-                                                            BSONObj opDoc) {
-    repl::MutableOplogEntry oplogEntry;
-    auto obj = BSON(kShardingIndexCatalogOplogEntryName
-                    << NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()))
-                   .addFields(opDoc);
-    oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
-    oplogEntry.setNss(nss);
-    oplogEntry.setUuid(uuid);
-    oplogEntry.setObject(obj);
-
-    logOperation(opCtx, &oplogEntry, true, _operationLogger.get());
-}
-
 void OpObserverImpl::onReplicationRollback(OperationContext* opCtx,
                                            const RollbackObserverInfo& rbInfo) {
     // Reset the key manager cache.
@@ -1971,4 +2309,32 @@ void OpObserverImpl::onReplicationRollback(OperationContext* opCtx,
     ReadWriteConcernDefaults::get(opCtx).invalidate();
 }
 
+void OpObserverImpl::onTruncateRange(OperationContext* opCtx,
+                                     const CollectionPtr& coll,
+                                     const RecordId& minRecordId,
+                                     const RecordId& maxRecordId,
+                                     int64_t bytesDeleted,
+                                     int64_t docsDeleted,
+                                     repl::OpTime& opTime) {
+    // Don't write oplog entry on secondaries.
+    if (!opCtx->writesAreReplicated()) {
+        return;
+    }
+
+    uassert(ErrorCodes::IllegalOperation,
+            "Replicated ranged truncate not enabled",
+            shouldReplicateRangeTruncates(
+                rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider(),
+                VersionContext::getDecoration(opCtx)));
+
+    TruncateRangeOplogEntry objectEntry(
+        std::string(coll->ns().coll()), minRecordId, maxRecordId, bytesDeleted, docsDeleted);
+
+    MutableOplogEntry oplogEntry;
+    oplogEntry.setOpType(repl::OpTypeEnum::kCommand);
+    oplogEntry.setNss(coll->ns().getCommandNS());
+    oplogEntry.setUuid(coll->uuid());
+    oplogEntry.setObject(objectEntry.toBSON());
+    opTime = logOperation(opCtx, &oplogEntry, true /*assignWallClockTime*/, _operationLogger.get());
+}
 }  // namespace mongo

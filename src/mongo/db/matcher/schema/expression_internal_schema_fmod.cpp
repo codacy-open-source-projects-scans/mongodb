@@ -27,11 +27,7 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/matcher/schema/expression_internal_schema_fmod.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
@@ -39,8 +35,12 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/matcher/schema/expression_internal_schema_fmod.h"
 #include "mongo/util/assert_util.h"
+
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -55,19 +55,6 @@ InternalSchemaFmodMatchExpression::InternalSchemaFmodMatchExpression(
     uassert(ErrorCodes::BadValue, "divisor cannot be 0", !divisor.isZero());
     uassert(ErrorCodes::BadValue, "divisor cannot be NaN", !divisor.isNaN());
     uassert(ErrorCodes::BadValue, "divisor cannot be infinite", !divisor.isInfinite());
-}
-
-bool InternalSchemaFmodMatchExpression::matchesSingleElement(const BSONElement& e,
-                                                             MatchDetails* details) const {
-    if (!e.isNumber()) {
-        return false;
-    }
-    std::uint32_t flags = Decimal128::SignalingFlag::kNoFlag;
-    Decimal128 result = e.numberDecimal().modulo(_divisor, &flags);
-    if (flags == Decimal128::SignalingFlag::kNoFlag) {
-        return result.isEqual(_remainder);
-    }
-    return false;
 }
 
 void InternalSchemaFmodMatchExpression::debugString(StringBuilder& debug,

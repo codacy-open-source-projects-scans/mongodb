@@ -87,8 +87,13 @@ mongo_cc_unit_test(
         "codepoints_test.cpp",
         "string_test.cpp",
     ],
-    tags = ["mongo_unittest_second_group"],
+    tags = ["mongo_unittest_fourth_group"],
     deps = [
         ":unicode",
     ],
+)
+
+py_binary(
+    name = "gen_diacritic_map",
+    srcs = ["gen_diacritic_map.py"],
 )

@@ -27,27 +27,27 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/document_source_current_op.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/document_source_current_op.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/process_interface/stub_mongo_process_interface.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
+
+#include <boost/none.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -278,8 +278,9 @@ TEST_F(DocumentSourceCurrentOpTest, ShouldReturnEOFImmediatelyIfNoCurrentOps) {
     getExpCtx()->setMongoProcessInterface(std::make_shared<MockMongoInterface>());
 
     const auto currentOp = DocumentSourceCurrentOp::create(getExpCtx());
+    auto currentOpStage = exec::agg::buildStage(currentOp);
 
-    ASSERT(currentOp->getNext().isEOF());
+    ASSERT(currentOpStage->getNext().isEOF());
 }
 
 TEST_F(DocumentSourceCurrentOpTest,
@@ -290,13 +291,14 @@ TEST_F(DocumentSourceCurrentOpTest,
     getExpCtx()->setMongoProcessInterface(std::make_shared<MockMongoInterface>(ops));
 
     const auto currentOp = DocumentSourceCurrentOp::create(getExpCtx());
+    auto currentOpStage = exec::agg::buildStage(currentOp);
 
     const auto expectedOutput =
         Document{{"shard", kMockShardName},
                  {"client_s", std::string("192.168.1.10:50844")},
                  {"opid", std::string(str::stream() << kMockShardName << ":430")}};
 
-    ASSERT_DOCUMENT_EQ(currentOp->getNext().getDocument(), expectedOutput);
+    ASSERT_DOCUMENT_EQ(currentOpStage->getNext().getDocument(), expectedOutput);
 }
 
 TEST_F(DocumentSourceCurrentOpTest,
@@ -307,11 +309,12 @@ TEST_F(DocumentSourceCurrentOpTest,
     getExpCtx()->setMongoProcessInterface(std::make_shared<MockMongoInterface>(ops));
 
     const auto currentOp = DocumentSourceCurrentOp::create(getExpCtx());
+    auto currentOpStage = exec::agg::buildStage(currentOp);
 
     const auto expectedOutput =
         Document{{"client", std::string("192.168.1.10:50844")}, {"opid", 430}};
 
-    ASSERT_DOCUMENT_EQ(currentOp->getNext().getDocument(), expectedOutput);
+    ASSERT_DOCUMENT_EQ(currentOpStage->getNext().getDocument(), expectedOutput);
 }
 
 TEST_F(DocumentSourceCurrentOpTest, ShouldFailIfNoShardNameAvailableForShardedRequest) {
@@ -320,8 +323,9 @@ TEST_F(DocumentSourceCurrentOpTest, ShouldFailIfNoShardNameAvailableForShardedRe
     getExpCtx()->setMongoProcessInterface(std::make_shared<MockMongoInterface>(false));
 
     const auto currentOp = DocumentSourceCurrentOp::create(getExpCtx());
+    auto currentOpStage = exec::agg::buildStage(currentOp);
 
-    ASSERT_THROWS_CODE(currentOp->getNext(), AssertionException, 40465);
+    ASSERT_THROWS_CODE(currentOpStage->getNext(), AssertionException, 40465);
 }
 
 TEST_F(DocumentSourceCurrentOpTest, ShouldFailIfOpIDIsNonNumericWhenModifyingInShardedContext) {
@@ -331,8 +335,9 @@ TEST_F(DocumentSourceCurrentOpTest, ShouldFailIfOpIDIsNonNumericWhenModifyingInS
     getExpCtx()->setMongoProcessInterface(std::make_shared<MockMongoInterface>(ops));
 
     const auto currentOp = DocumentSourceCurrentOp::create(getExpCtx());
+    auto currentOpStage = exec::agg::buildStage(currentOp);
 
-    ASSERT_THROWS_CODE(currentOp->getNext(), AssertionException, ErrorCodes::TypeMismatch);
+    ASSERT_THROWS_CODE(currentOpStage->getNext(), AssertionException, ErrorCodes::TypeMismatch);
 }
 
 }  // namespace

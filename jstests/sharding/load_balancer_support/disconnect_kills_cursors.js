@@ -1,8 +1,7 @@
 /**
  * Tests that when a load-balanced client disconnects, its cursors are killed.
  * @tags: [
- *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
- *    embedded_router_incompatible,
+ *    requires_fcv_81
  * ]
  */
 import {Thread} from "jstests/libs/parallelTester.js";
@@ -12,16 +11,14 @@ function setupShardedCollection(st, dbName, collName) {
     const fullNss = dbName + "." + collName;
     const admin = st.s.getDB("admin");
     // Shard collection; ensure docs on each shard
-    assert.commandWorked(
-        admin.runCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+    assert.commandWorked(admin.runCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
     assert.commandWorked(admin.runCommand({shardCollection: fullNss, key: {_id: 1}}));
     assert.commandWorked(admin.runCommand({split: fullNss, middle: {_id: 0}}));
-    assert.commandWorked(
-        admin.runCommand({moveChunk: fullNss, find: {_id: 0}, to: st.shard1.shardName}));
+    assert.commandWorked(admin.runCommand({moveChunk: fullNss, find: {_id: 0}, to: st.shard1.shardName}));
 
     // Insert some docs on each shard
     let coll = admin.getSiblingDB(dbName).getCollection(collName);
-    var bulk = coll.initializeUnorderedBulkOp();
+    let bulk = coll.initializeUnorderedBulkOp();
     for (let i = -150; i < 150; i++) {
         bulk.insert({_id: i});
     }
@@ -30,8 +27,16 @@ function setupShardedCollection(st, dbName, collName) {
 
 function openCursor(mongosHost, dbName, collName, countdownLatch, identifyingComment) {
     const newDBConn = new Mongo(mongosHost).getDB(dbName);
-    assert.commandWorked(newDBConn.getSiblingDB("admin").adminCommand(
-        {configureFailPoint: "clientIsFromLoadBalancer", mode: "alwaysOn"}));
+    assert.commandWorked(
+        newDBConn
+            .getSiblingDB("admin")
+            .adminCommand({configureFailPoint: "clientIsConnectedToLoadBalancerPort", mode: "alwaysOn"}),
+    );
+    assert.commandWorked(
+        newDBConn
+            .getSiblingDB("admin")
+            .adminCommand({configureFailPoint: "clientIsLoadBalancedPeer", mode: "alwaysOn"}),
+    );
     let cmdRes = newDBConn.runCommand({find: collName, comment: identifyingComment, batchSize: 1});
     assert.commandWorked(cmdRes);
     const cursorId = cmdRes.cursor.id;
@@ -51,8 +56,7 @@ const identifyingComment = "loadBalancedDisconnectComment";
 setupShardedCollection(st, dbName, collName);
 let countdownLatch = new CountDownLatch(1);
 
-let cursorOpeningThread =
-    new Thread(openCursor, st.s.host, dbName, collName, countdownLatch, identifyingComment);
+let cursorOpeningThread = new Thread(openCursor, st.s.host, dbName, collName, countdownLatch, identifyingComment);
 cursorOpeningThread.start();
 
 let idleCursor = {};
@@ -63,7 +67,7 @@ assert.soon(() => {
     const curopCursor = admin.aggregate([
         {$currentOp: {allUsers: true, idleCursors: true, localOps: true}},
         {$match: {type: "idleCursor"}},
-        {$match: {"cursor.originatingCommand.comment": identifyingComment}}
+        {$match: {"cursor.originatingCommand.comment": identifyingComment}},
     ]);
     if (curopCursor.hasNext()) {
         idleCursor = curopCursor.next().cursor;
@@ -82,17 +86,16 @@ assert.eq(idleCursor.cursorId, cursorId);
 
 // Make sure we can't find that cursor anymore/it has been killed.
 assert.soon(() => {
-    const numCursorsFoundWithId =
-        admin
-            .aggregate([
-                {$currentOp: {allUsers: true, idleCursors: true, localOps: true}},
-                {$match: {type: "idleCursor"}},
-                {$match: {"cursor.cursorId": cursorId}}
-            ])
-            .itcount();
-    return (numCursorsFoundWithId == 0);
+    const numCursorsFoundWithId = admin
+        .aggregate([
+            {$currentOp: {allUsers: true, idleCursors: true, localOps: true}},
+            {$match: {type: "idleCursor"}},
+            {$match: {"cursor.cursorId": cursorId}},
+        ])
+        .itcount();
+    return numCursorsFoundWithId == 0;
 });
 
-assert.commandWorked(
-    admin.adminCommand({configureFailPoint: "clientIsFromLoadBalancer", mode: "off"}));
+assert.commandWorked(admin.adminCommand({configureFailPoint: "clientIsConnectedToLoadBalancerPort", mode: "off"}));
+assert.commandWorked(admin.adminCommand({configureFailPoint: "clientIsLoadBalancedPeer", mode: "off"}));
 st.stop();

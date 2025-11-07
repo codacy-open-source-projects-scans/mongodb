@@ -29,22 +29,20 @@
 
 #include "mongo/db/exec/document_value/document.h"
 
-#include <absl/container/node_hash_map.h>
-#include <boost/container_hash/extensions.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <cstdint>
-#include <memory>
-
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/query/util/validate_id.h"
 #include "mongo/util/str.h"
+
+#include <cstdint>
+#include <memory>
+
+#include <boost/functional/hash.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 using boost::intrusive_ptr;
@@ -79,9 +77,9 @@ boost::optional<BSONElement> getNestedFieldHelperBSON(BSONElement elt,
         return elt;
     }
 
-    if (elt.type() == BSONType::Array) {
+    if (elt.type() == BSONType::array) {
         return boost::none;
-    } else if (elt.type() == BSONType::Object) {
+    } else if (elt.type() == BSONType::object) {
         auto subFieldElt = elt.embeddedObject()[fp.getFieldName(level)];
         return getNestedFieldHelperBSON(subFieldElt, fp, level + 1);
     }
@@ -103,9 +101,13 @@ const StringDataSet Document::allMetadataFieldNames{Document::metaFieldTextScore
                                                     Document::metaFieldSearchSortValues,
                                                     Document::metaFieldIndexKey,
                                                     Document::metaFieldSearchScoreDetails,
+                                                    Document::metaFieldSearchRootDocumentId,
                                                     Document::metaFieldVectorSearchScore,
                                                     Document::metaFieldSearchSequenceToken,
-                                                    Document::metaFieldScore};
+                                                    Document::metaFieldScore,
+                                                    Document::metaFieldScoreDetails,
+                                                    Document::metaFieldStream,
+                                                    Document::metaFieldChangeStreamControlEvent};
 
 DocumentStorageIterator::DocumentStorageIterator(DocumentStorage* storage, BSONObjIterator bsonIt)
     : _bsonIt(std::move(bsonIt)),
@@ -189,7 +191,7 @@ Position DocumentStorage::findFieldInCache(T requested) const {
         Position pos = _hashTab[bucket];
         while (pos.found()) {
             const ValueElement& elem = getField(pos);
-            if (elem.nameLen == reqSize && memcmp(requested.rawData(), elem._name, reqSize) == 0) {
+            if (elem.nameLen == reqSize && memcmp(requested.data(), elem._name, reqSize) == 0) {
                 return pos;
             }
 
@@ -198,7 +200,7 @@ Position DocumentStorage::findFieldInCache(T requested) const {
         }
     } else {  // linear scan
         for (auto it = iteratorCacheOnly(); !it.atEnd(); it.advance()) {
-            if (it->nameLen == reqSize && memcmp(requested.rawData(), it->_name, reqSize) == 0) {
+            if (it->nameLen == reqSize && memcmp(requested.data(), it->_name, reqSize) == 0) {
                 return it.position();
             }
         }
@@ -211,8 +213,8 @@ template Position DocumentStorage::findFieldInCache<StringData>(StringData field
 template Position DocumentStorage::findFieldInCache<HashedFieldName>(HashedFieldName field) const;
 
 template <typename T>
-Position DocumentStorage::findField(T field, LookupPolicy policy) const {
-    if (auto pos = findFieldInCache(field); pos.found() || policy == LookupPolicy::kCacheOnly) {
+Position DocumentStorage::findField(T field) const {
+    if (auto pos = findFieldInCache(field); pos.found()) {
         return pos;
     }
 
@@ -225,10 +227,8 @@ Position DocumentStorage::findField(T field, LookupPolicy policy) const {
     // if we got here, there's no such field
     return Position();
 }
-template Position DocumentStorage::findField<StringData>(StringData field,
-                                                         LookupPolicy policy) const;
-template Position DocumentStorage::findField<HashedFieldName>(HashedFieldName field,
-                                                              LookupPolicy policy) const;
+template Position DocumentStorage::findField<StringData>(StringData field) const;
+template Position DocumentStorage::findField<HashedFieldName>(HashedFieldName field) const;
 
 Position DocumentStorage::constructInCache(const BSONElement& elem) {
     auto savedModified = _modified;
@@ -291,7 +291,7 @@ template Value& DocumentStorage::appendField<StringData>(StringData, ValueElemen
 template Value& DocumentStorage::appendField<HashedFieldName>(HashedFieldName, ValueElement::Kind);
 
 // Call after adding field to _fields and increasing _numFields
-template <typename T>
+template <AnyFieldNameTypeButStdString T>
 void DocumentStorage::addFieldToHashTable(T field, Position pos) {
     ValueElement& elem = getField(pos);
     elem.nextCollision = Position();
@@ -498,10 +498,11 @@ void DocumentStorage::loadLazyMetadata() const {
                 _metadataFields.setGeoNearDistance(elem.Double());
             } else if (fieldName == Document::metaFieldGeoNearPoint) {
                 Value val;
-                if (elem.type() == BSONType::Array) {
+                if (elem.type() == BSONType::array) {
                     val = Value(BSONArray(elem.embeddedObject()));
                 } else {
-                    invariant(elem.type() == BSONType::Object);
+                    tassert(
+                        11103300, "Expected elem to be an object", elem.type() == BSONType::object);
                     val = Value(elem.embeddedObject());
                 }
 
@@ -510,6 +511,10 @@ void DocumentStorage::loadLazyMetadata() const {
                 _metadataFields.setIndexKey(elem.Obj());
             } else if (fieldName == Document::metaFieldSearchScoreDetails) {
                 _metadataFields.setSearchScoreDetails(elem.Obj());
+            } else if (fieldName == Document::metaFieldSearchRootDocumentId) {
+                auto status = validIdField(elem);
+                uassertStatusOK(status);
+                _metadataFields.setSearchRootDocumentId(Value(elem));
             } else if (fieldName == Document::metaFieldSearchSortValues) {
                 _metadataFields.setSearchSortValues(elem.Obj());
             } else if (fieldName == Document::metaFieldVectorSearchScore) {
@@ -518,6 +523,12 @@ void DocumentStorage::loadLazyMetadata() const {
                 _metadataFields.setSearchSequenceToken(Value(elem));
             } else if (fieldName == Document::metaFieldScore) {
                 _metadataFields.setScore(elem.Double());
+            } else if (fieldName == Document::metaFieldScoreDetails) {
+                _metadataFields.setScoreDetails(Value(elem));
+            } else if (fieldName == Document::metaFieldStream) {
+                _metadataFields.setStream(Value(elem));
+            } else if (fieldName == Document::metaFieldChangeStreamControlEvent) {
+                _metadataFields.setChangeStreamControlEvent();
             }
         }
     }
@@ -543,18 +554,11 @@ Document::Document(std::initializer_list<std::pair<StringData, ImplicitValue>> i
     *this = mutableDoc.freeze();
 }
 
-Document::Document(std::vector<std::pair<StringData, Value>> fields) {
+Document::Document(const std::vector<std::pair<StringData, Value>>& fields) {
     MutableDocument mutableDoc(fields.size());
     for (auto&& pair : fields)
         mutableDoc.addField(pair.first, pair.second);
     *this = mutableDoc.freeze();
-}
-
-BSONObjBuilder& operator<<(BSONObjBuilderValueStream& builder, const Document& doc) {
-    BSONObjBuilder subobj(builder.subobjStart());
-    doc.toBson(&subobj);
-    subobj.doneFast();
-    return builder.builder();
 }
 
 void Document::toBson(BSONObjBuilder* builder, size_t recursionLevel) const {
@@ -587,9 +591,12 @@ constexpr StringData Document::metaFieldGeoNearPoint;
 constexpr StringData Document::metaFieldSearchScore;
 constexpr StringData Document::metaFieldSearchHighlights;
 constexpr StringData Document::metaFieldSearchScoreDetails;
+constexpr StringData Document::metaFieldSearchRootDocumentId;
 constexpr StringData Document::metaFieldSearchSortValues;
 constexpr StringData Document::metaFieldVectorSearchScore;
 constexpr StringData Document::metaFieldScore;
+constexpr StringData Document::metaFieldStream;
+constexpr StringData Document::metaFieldChangeStreamControlEvent;
 
 void Document::toBsonWithMetaData(BSONObjBuilder* builder) const {
     toBson(builder);
@@ -617,6 +624,8 @@ void Document::toBsonWithMetaData(BSONObjBuilder* builder) const {
         builder->append(metaFieldIndexKey, metadata().getIndexKey());
     if (metadata().hasSearchScoreDetails())
         builder->append(metaFieldSearchScoreDetails, metadata().getSearchScoreDetails());
+    if (metadata().hasSearchRootDocumentId())
+        metadata().getSearchRootDocumentId().addToBsonObj(builder, metaFieldSearchRootDocumentId);
     if (metadata().hasSearchSortValues()) {
         builder->append(metaFieldSearchSortValues, metadata().getSearchSortValues());
     }
@@ -628,6 +637,12 @@ void Document::toBsonWithMetaData(BSONObjBuilder* builder) const {
     }
     if (metadata().hasScore()) {
         builder->append(metaFieldScore, metadata().getScore());
+    }
+    if (metadata().hasStream()) {
+        metadata().getStream().addToBsonObj(builder, metaFieldStream);
+    }
+    if (metadata().isChangeStreamControlEvent()) {
+        builder->append(metaFieldChangeStreamControlEvent, true);
     }
 }
 
@@ -710,14 +725,14 @@ boost::optional<Value> Document::getNestedScalarFieldNonCachingHelper(const Fiel
         if (auto val = _storage->getFieldCacheOnly(fieldName); val) {
             // Whether landing on an array (level + 1 == dottedField.getPathLength) or traversing an
             // array, return boost::none.
-            if (val->getType() == BSONType::Array)
+            if (val->getType() == BSONType::array)
                 return boost::none;
 
             if (level + 1 == dottedField.getPathLength()) {
                 return val;
             }
 
-            if (val->getType() == BSONType::Object) {
+            if (val->getType() == BSONType::object) {
                 return val->getDocument().getNestedScalarFieldNonCachingHelper(dottedField,
                                                                                level + 1);
             }
@@ -738,7 +753,7 @@ boost::optional<Value> Document::getNestedScalarFieldNonCachingHelper(const Fiel
         // 3. BSONElement::eoo --> path does not exist, so return an empty Value via
         // Value(BSONElement::eoo).
         // 4. boost::none --> encountered an array along the path, return boost::none.
-        if (maybeBsonElt && maybeBsonElt->type() != BSONType::Array)
+        if (maybeBsonElt && maybeBsonElt->type() != BSONType::array)
             return Value(*maybeBsonElt);
         return boost::none;
     }
@@ -769,7 +784,7 @@ static Value getNestedFieldHelper(const Document& doc,
         return doc.getField(pos);
 
     Value val = doc.getField(pos);
-    if (val.getType() != Object)
+    if (val.getType() != BSONType::object)
         return Value();
 
     return getNestedFieldHelper(val.getDocument(), fieldNames, positions, level + 1);
@@ -797,7 +812,7 @@ size_t Document::memUsageForSorter() const {
 void Document::hash_combine(size_t& seed, const StringDataComparator* stringComparator) const {
     for (DocumentStorageIterator it = storage().iterator(); !it.atEnd(); it.advance()) {
         StringData name = it->nameSD();
-        boost::hash_range(seed, name.rawData(), name.rawData() + name.size());
+        boost::hash_range(seed, name.data(), name.data() + name.size());
         it->val.hash_combine(seed, stringComparator);
     }
 }
@@ -848,6 +863,23 @@ int Document::compare(const Document& rL,
         rIt.advance();
         lIt.advance();
     }
+}
+
+Document Document::deepMerge(const Document& lhs, const Document& rhs) {
+    MutableDocument result(lhs);
+    for (auto it = rhs.fieldIterator(); it.more();) {
+        auto p = it.next();
+        // Merge the values recursively if they're both documents. Otherwise, the value in 'rhs'
+        // prevails.
+        auto val = lhs.getField(p.first);
+        if (val.getType() == BSONType::object && p.second.getType() == BSONType::object) {
+            result.setField(p.first,
+                            Value(Document::deepMerge(val.getDocument(), p.second.getDocument())));
+        } else {
+            result.setField(p.first, p.second);
+        }
+    }
+    return result.freeze();
 }
 
 string Document::toString() const {

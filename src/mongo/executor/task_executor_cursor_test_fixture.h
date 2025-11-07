@@ -39,7 +39,8 @@
 #include "mongo/executor/pinned_connection_task_executor_test_fixture.h"
 #include "mongo/executor/task_executor_cursor.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/modules.h"
 
 /**
  * Defines two test fixtures for task executor cursors: one with pinned cursors and the other with
@@ -54,12 +55,12 @@
  * implementation, which is why we want to run all the behavioral tests against both
  * implementations.
  */
-namespace mongo {
+namespace MONGO_MOD_PUB mongo {
 namespace executor {
-inline BSONObj buildCursorResponse(StringData fieldName,
-                                   size_t start,
-                                   size_t end,
-                                   size_t cursorId) {
+MONGO_MOD_FILE_PRIVATE inline BSONObj buildCursorResponse(StringData fieldName,
+                                                          size_t start,
+                                                          size_t end,
+                                                          size_t cursorId) {
     BSONObjBuilder bob;
     {
         BSONObjBuilder cursor(bob.subobjStart("cursor"));
@@ -78,10 +79,10 @@ inline BSONObj buildCursorResponse(StringData fieldName,
     return bob.obj();
 }
 
-inline BSONObj buildMultiCursorResponse(StringData fieldName,
-                                        size_t start,
-                                        size_t end,
-                                        std::vector<size_t> cursorIds) {
+MONGO_MOD_FILE_PRIVATE inline BSONObj buildMultiCursorResponse(StringData fieldName,
+                                                               size_t start,
+                                                               size_t end,
+                                                               std::vector<size_t> cursorIds) {
     BSONObjBuilder bob;
     {
         BSONArrayBuilder cursors;
@@ -190,7 +191,7 @@ public:
     }
 
     std::unique_ptr<TaskExecutorCursor> makeTec(RemoteCommandRequest rcr,
-                                                TaskExecutorCursorOptions&& options = {}) {
+                                                TaskExecutorCursorOptions&& options) {
         options.pinConnection = false;
         return std::make_unique<TaskExecutorCursor>(getExecutorPtr(), rcr, std::move(options));
     }
@@ -201,7 +202,7 @@ public:
     void postSetUp() {}
 
     BSONObj scheduleResponse(StatusWith<BSONObj> response) {
-        int32_t responseToId;
+        int32_t responseToId = -1;
         BSONObj cmdObjReceived;
         auto pf = makePromiseFuture<void>();
         expectSinkMessage([&](Message m) {
@@ -256,7 +257,7 @@ public:
     }
 
     std::unique_ptr<TaskExecutorCursor> makeTec(RemoteCommandRequest rcr,
-                                                TaskExecutorCursorOptions&& options = {}) {
+                                                TaskExecutorCursorOptions&& options) {
         options.pinConnection = true;
         return std::make_unique<TaskExecutorCursor>(getExecutorPtr(), rcr, std::move(options));
     }
@@ -279,4 +280,4 @@ public:
     }
 };
 }  // namespace executor
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

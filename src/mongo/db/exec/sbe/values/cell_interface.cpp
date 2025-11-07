@@ -28,10 +28,12 @@
  */
 
 #include "mongo/db/exec/sbe/values/cell_interface.h"
-#include <memory>
 
 #include "mongo/db/exec/sbe/values/block_interface.h"
+#include "mongo/db/exec/sbe/values/path_request.h"
 #include "mongo/db/exec/sbe/values/value.h"
+
+#include <memory>
 
 namespace mongo::sbe::value {
 ValueBlock& MaterializedCellBlock::getValueBlock() {
@@ -43,51 +45,5 @@ std::unique_ptr<CellBlock> MaterializedCellBlock::clone() const {
     ret->_deblocked = _deblocked->clone();
     ret->_filterPosInfo = _filterPosInfo;
     return ret;
-}
-
-namespace {
-std::string pathToString(const CellBlock::Path& p) {
-    std::string out;
-    size_t idx = 0;
-    for (auto& component : p) {
-        if (holds_alternative<CellBlock::Id>(component)) {
-            out += "Id";
-        } else if (holds_alternative<CellBlock::Get>(component)) {
-            out += "Get(";
-            out += get<CellBlock::Get>(component).field;
-            out += ')';
-        } else if (holds_alternative<CellBlock::Traverse>(component)) {
-            out += "Traverse";
-        }
-        ++idx;
-
-        if (idx != p.size()) {
-            out.push_back('/');
-        }
-    }
-    return out;
-}
-}  // namespace
-
-std::string CellBlock::PathRequest::toString() const {
-    return str::stream() << (type == kFilter ? "FilterPath" : "ProjectPath") << "("
-                         << pathToString(path) << ")";
-}
-
-StringData CellBlock::PathRequest::getTopLevelField() const {
-    return get<Get>(path[0]).field;
-}
-
-std::string CellBlock::PathRequest::getFullPath() const {
-    StringBuilder sb;
-    for (const auto& component : path) {
-        if (holds_alternative<Get>(component)) {
-            if (sb.len() != 0) {
-                sb.append(".");
-            }
-            sb.append(get<Get>(component).field);
-        }
-    }
-    return sb.str();
 }
 }  // namespace mongo::sbe::value

@@ -29,19 +29,14 @@
 
 #pragma once
 
-#include <memory>
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
+#include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
+#include "mongo/util/modules.h"
+
 #include <string>
 #include <utility>
 #include <vector>
-
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/exec/sbe/expressions/expression.h"
-#include "mongo/db/exec/sbe/stages/collection_helpers.h"
-#include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/query/query_solution.h"
-#include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
 
 namespace mongo::stage_builder {
 
@@ -65,7 +60,6 @@ class PlanStageSlots;
 std::pair<SbStage, PlanStageSlots> generateCollScan(StageBuilderState& state,
                                                     const CollectionPtr& collection,
                                                     const CollectionScanNode* csn,
-                                                    std::vector<std::string> scanFieldNames,
-                                                    bool isResumingTailableScan);
+                                                    std::vector<std::string> scanFieldNames);
 
 }  // namespace mongo::stage_builder

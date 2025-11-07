@@ -29,20 +29,21 @@
 
 #pragma once
 
-#include <boost/filesystem/path.hpp>
-#include <boost/optional.hpp>
-#include <cstddef>
-#include <fstream>  // IWYU pragma: keep
-#include <tuple>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/ftdc/decompressor.h"
 #include "mongo/db/ftdc/util.h"
-#include "mongo/db/jsobj.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <fstream>  // IWYU pragma: keep
+#include <tuple>
+#include <vector>
+
+#include <boost/filesystem/path.hpp>
+#include <boost/optional.hpp>
 
 namespace mongo {
 
@@ -131,7 +132,7 @@ private:
     std::vector<BSONObj> _docs;
 
     // Type of the current document
-    FTDCBSONUtil::FTDCType _type;
+    FTDCBSONUtil::FTDCType _type{FTDCBSONUtil::FTDCType::kUnknown};
 
     // _id of current metadata, metric chunk, or periodic metadata
     Date_t _dateId;

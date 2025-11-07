@@ -29,19 +29,19 @@
 
 #pragma once
 
-#include <deque>
-#include <list>
-#include <memory>
-#include <utility>
-#include <vector>
-
-
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/memory_token_container_util.h"
 #include "mongo/db/pipeline/window_function/window_function.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
+#include <deque>
+#include <list>
+#include <memory>
+#include <utility>
+#include <vector>
 
 namespace mongo {
 
@@ -55,7 +55,8 @@ public:
         return std::make_unique<WindowFunctionPush>(expCtx);
     }
 
-    explicit WindowFunctionPush(ExpressionContext* const expCtx) : WindowFunctionState(expCtx) {
+    explicit WindowFunctionPush(ExpressionContext* const expCtx)
+        : WindowFunctionState(expCtx, internalQueryMaxPushBytes.load()) {
         _memUsageTracker.set(sizeof(*this));
     }
 
@@ -65,6 +66,12 @@ public:
         }
         _values.emplace_back(SimpleMemoryUsageToken{value.getApproximateSize(), &_memUsageTracker},
                              std::move(value));
+        uassert(ErrorCodes::ExceededMemoryLimit,
+                str::stream() << "$push used too much memory and cannot spill to disk. Used: "
+                              << _memUsageTracker.inUseTrackedMemoryBytes()
+                              << "bytes. Memory limit: "
+                              << _memUsageTracker.maxAllowedMemoryUsageBytes() << " bytes",
+                _memUsageTracker.withinMemoryLimit());
     }
 
     /**

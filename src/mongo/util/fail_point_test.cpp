@@ -27,6 +27,26 @@
  *    it in the license file.
  */
 
+#include "mongo/util/fail_point.h"
+
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/client.h"
+#include "mongo/db/exec/mutable_bson/mutable_bson_test_utils.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/stdx/type_traits.h"
+#include "mongo/unittest/thread_assertion_monitor.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/clock_source.h"
+#include "mongo/util/clock_source_mock.h"
+#include "mongo/util/tick_source.h"
+#include "mongo/util/tick_source_mock.h"
+#include "mongo/util/time_support.h"
+
 #include <cstddef>
 #include <functional>
 #include <limits>
@@ -35,26 +55,6 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/mutable/mutable_bson_test_utils.h"
-#include "mongo/db/client.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/service_context.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/thread.h"
-#include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/unittest/thread_assertion_monitor.h"
-#include "mongo/util/clock_source.h"
-#include "mongo/util/clock_source_mock.h"
-#include "mongo/util/fail_point.h"
-#include "mongo/util/tick_source.h"
-#include "mongo/util/tick_source_mock.h"
-#include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -346,22 +346,19 @@ TEST(FailPoint, parseBSONInvalidModeFails) {
     swTuple = FailPoint::parseBSON(BSON("mode" << true));
     ASSERT_FALSE(swTuple.isOK());
 
-    swTuple = FailPoint::parseBSON(BSON("mode"
-                                        << "notAMode"));
+    swTuple = FailPoint::parseBSON(BSON("mode" << "notAMode"));
     ASSERT_FALSE(swTuple.isOK());
 
     swTuple = FailPoint::parseBSON(BSON("mode" << BSON("invalidSubField" << 1)));
     ASSERT_FALSE(swTuple.isOK());
 
-    swTuple = FailPoint::parseBSON(BSON("mode" << BSON("times"
-                                                       << "notAnInt")));
+    swTuple = FailPoint::parseBSON(BSON("mode" << BSON("times" << "notAnInt")));
     ASSERT_FALSE(swTuple.isOK());
 
     swTuple = FailPoint::parseBSON(BSON("mode" << BSON("times" << -5)));
     ASSERT_FALSE(swTuple.isOK());
 
-    swTuple = FailPoint::parseBSON(BSON("mode" << BSON("activationProbability"
-                                                       << "notADouble")));
+    swTuple = FailPoint::parseBSON(BSON("mode" << BSON("activationProbability" << "notADouble")));
     ASSERT_FALSE(swTuple.isOK());
 
     double greaterThan1 = 1.3;
@@ -374,12 +371,10 @@ TEST(FailPoint, parseBSONInvalidModeFails) {
 }
 
 TEST(FailPoint, parseBSONValidModeSucceeds) {
-    auto swTuple = FailPoint::parseBSON(BSON("mode"
-                                             << "off"));
+    auto swTuple = FailPoint::parseBSON(BSON("mode" << "off"));
     ASSERT_TRUE(swTuple.isOK());
 
-    swTuple = FailPoint::parseBSON(BSON("mode"
-                                        << "alwaysOn"));
+    swTuple = FailPoint::parseBSON(BSON("mode" << "alwaysOn"));
     ASSERT_TRUE(swTuple.isOK());
 
     swTuple = FailPoint::parseBSON(BSON("mode" << BSON("times" << 1)));
@@ -390,17 +385,15 @@ TEST(FailPoint, parseBSONValidModeSucceeds) {
 }
 
 TEST(FailPoint, parseBSONInvalidDataFails) {
-    auto swTuple = FailPoint::parseBSON(BSON("mode"
-                                             << "alwaysOn"
-                                             << "data"
-                                             << "notABSON"));
+    auto swTuple = FailPoint::parseBSON(BSON("mode" << "alwaysOn"
+                                                    << "data"
+                                                    << "notABSON"));
     ASSERT_FALSE(swTuple.isOK());
 }
 
 TEST(FailPoint, parseBSONValidDataSucceeds) {
-    auto swTuple = FailPoint::parseBSON(BSON("mode"
-                                             << "alwaysOn"
-                                             << "data" << BSON("a" << 1)));
+    auto swTuple = FailPoint::parseBSON(BSON("mode" << "alwaysOn"
+                                                    << "data" << BSON("a" << 1)));
     ASSERT_TRUE(swTuple.isOK());
 }
 
@@ -425,6 +418,36 @@ TEST(FailPoint, FailPointEnableBlockByPointer) {
     {
         FailPointEnableBlock dummyFp(failPoint);
         ASSERT_TRUE(failPoint->shouldFail());
+    }
+
+    ASSERT_FALSE(failPoint->shouldFail());
+}
+
+TEST(FailPoint, FailPointEnableBlockWithMode) {
+    auto failPoint = mongo::globalFailPointRegistry().find("dummy");
+
+    ASSERT_FALSE(failPoint->shouldFail());
+
+    {
+        FailPointEnableBlock dummyFp(
+            "dummy", FailPoint::ModeOptions{.mode = FailPoint::Mode::nTimes, .val = 1});
+        ASSERT_TRUE(failPoint->shouldFail());
+        ASSERT_FALSE(failPoint->shouldFail());
+    }
+
+    ASSERT_FALSE(failPoint->shouldFail());
+}
+
+TEST(FailPoint, FailPointEnableBlockByPointerWithMode) {
+    auto failPoint = mongo::globalFailPointRegistry().find("dummy");
+
+    ASSERT_FALSE(failPoint->shouldFail());
+
+    {
+        FailPointEnableBlock dummyFp(
+            failPoint, FailPoint::ModeOptions{.mode = FailPoint::Mode::nTimes, .val = 1});
+        ASSERT_TRUE(failPoint->shouldFail());
+        ASSERT_FALSE(failPoint->shouldFail());
     }
 
     ASSERT_FALSE(failPoint->shouldFail());

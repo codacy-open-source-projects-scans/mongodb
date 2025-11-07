@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <cstdint>
-#include <map>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/atomic_word.h"
@@ -43,6 +37,13 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/hierarchical_acquisition.h"
+#include "mongo/util/modules.h"
+
+#include <cstdint>
+#include <map>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 
@@ -101,7 +102,8 @@ public:
     std::int64_t getTotalRequestsTargeted() const;
     void incrementTotalRequestsTargeted();
 
-    const CommitStats& getCommitTypeStats_forTest(TransactionRouter::CommitType commitType) const;
+    MONGO_MOD_PRIVATE const CommitStats& getCommitTypeStats_forTest(
+        TransactionRouter::CommitType commitType) const;
     void incrementCommitInitiated(TransactionRouter::CommitType commitType);
     void incrementCommitSuccessful(TransactionRouter::CommitType commitType,
                                    Microseconds durationMicros);

@@ -27,15 +27,7 @@
  *    it in the license file.
  */
 
-#include <functional>
-#include <initializer_list>
-#include <map>
-#include <set>
-#include <variant>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/query/fle/equality_predicate.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -51,12 +43,17 @@
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/fle/encrypted_predicate_test_fixtures.h"
-#include "mongo/db/query/fle/equality_predicate.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <functional>
+#include <initializer_list>
+#include <map>
+#include <set>
+#include <variant>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::fle {
 namespace {
@@ -131,7 +128,7 @@ std::unique_ptr<Expression> makeEqAggExpr(
     ExpressionCompare::CmpOp comparisonType = ExpressionCompare::EQ) {
     auto valExpr = make_intrusive<ExpressionConstant>(expCtx, value);
     auto fieldpath = ExpressionFieldPath::createPathFromString(
-        expCtx, path.toString(), expCtx->variablesParseState);
+        expCtx, std::string{path}, expCtx->variablesParseState);
     std::vector<boost::intrusive_ptr<Expression>> children = {std::move(fieldpath),
                                                               std::move(valExpr)};
     return std::make_unique<ExpressionCompare>(expCtx, comparisonType, std::move(children));
@@ -147,7 +144,7 @@ std::unique_ptr<Expression> makeInAggExpr(ExpressionContext* const expCtx,
     }
     auto valArray = make_intrusive<ExpressionArray>(expCtx, std::move(valExprs));
     auto fieldpath = ExpressionFieldPath::createPathFromString(
-        expCtx, path.toString(), expCtx->variablesParseState);
+        expCtx, std::string{path}, expCtx->variablesParseState);
     std::vector<boost::intrusive_ptr<Expression>> children{std::move(fieldpath),
                                                            std::move(valArray)};
     return std::make_unique<ExpressionIn>(expCtx, std::move(children));
@@ -174,13 +171,11 @@ TEST_F(EqualityPredicateRewriteTest, Equality_NoFFP_Expr) {
 
 TEST_F(EqualityPredicateRewriteTest, In_NoFFP_Match) {
     auto input = makeInExpr("name",
-                            BSON_ARRAY("harry"
-                                       << "ron"
-                                       << "hermione"));
+                            BSON_ARRAY("harry" << "ron"
+                                               << "hermione"));
     auto expected = makeInExpr("name",
-                               BSON_ARRAY("harry"
-                                          << "ron"
-                                          << "hermione"));
+                               BSON_ARRAY("harry" << "ron"
+                                                  << "hermione"));
 
     auto result = _predicate.rewrite(input.get());
     ASSERT(result == nullptr);

@@ -10,6 +10,8 @@
 //   requires_fcv_70,
 //   requires_profiling,
 //   uses_map_reduce_with_temp_collections,
+//   # The test runs getLatestProfileEntry(). The downstream syncing node affects the profiler.
+//   run_getLatestProfilerEntry,
 // ]
 
 import {isLinux} from "jstests/libs/os_helpers.js";
@@ -23,14 +25,15 @@ const coll = testDB.getCollection(collName);
 
 // Don't profile the setFCV command, which could be run during this test in the
 // fcv_upgrade_downgrade_replica_sets_jscore_passthrough suite.
-assert.commandWorked(testDB.setProfilingLevel(
-    1, {filter: {'command.setFeatureCompatibilityVersion': {'$exists': false}}}));
+assert.commandWorked(
+    testDB.setProfilingLevel(1, {filter: {"command.setFeatureCompatibilityVersion": {"$exists": false}}}),
+);
 
-const mapFunction = function() {
+const mapFunction = function () {
     emit(this.a, this.b);
 };
 
-const reduceFunction = function(a, b) {
+const reduceFunction = function (a, b) {
     return Array.sum(b);
 };
 
@@ -42,9 +45,7 @@ for (let i = 0; i < 3; i++) {
 }
 assert.commandWorked(coll.createIndex({a: 1}));
 
-coll.mapReduce(mapFunction,
-               reduceFunction,
-               {query: {a: {$gte: 0}}, out: {inline: 1}, collation: {locale: "fr"}});
+coll.mapReduce(mapFunction, reduceFunction, {query: {a: {$gte: 0}}, out: {inline: 1}, collation: {locale: "fr"}});
 
 let profileObj = getLatestProfilerEntry(testDB);
 
@@ -87,7 +88,7 @@ for (let i = 0; i < 3; i++) {
     assert.commandWorked(coll.insert({a: i, b: i}));
 }
 
-var outputCollectionName = "output_col";
+let outputCollectionName = "output_col";
 coll.mapReduce(mapFunction, reduceFunction, {query: {a: {$gte: 0}}, out: outputCollectionName});
 
 profileObj = getLatestProfilerEntry(testDB);

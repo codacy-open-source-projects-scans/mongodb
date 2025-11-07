@@ -28,29 +28,28 @@
  */
 
 
-#include <boost/smart_ptr.hpp>
-#include <set>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/client/remote_command_targeter_rs.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/client/remote_command_targeter_rs.h"
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/replica_set_monitor_server_parameters_gen.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <set>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/smart_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -103,12 +102,15 @@ bool RemoteCommandTargeterRS::_mustTargetLocalHost(const ReadPreferenceSetting& 
     return _isTargetingLocalRS && readPref.isPretargeted;
 }
 
-SemiFuture<HostAndPort> RemoteCommandTargeterRS::findHost(const ReadPreferenceSetting& readPref,
-                                                          const CancellationToken& cancelToken) {
+SemiFuture<HostAndPort> RemoteCommandTargeterRS::findHost(
+    const ReadPreferenceSetting& readPref,
+    const CancellationToken& cancelToken,
+    const TargetingMetadata& targetingMetadata) {
     if (_mustTargetLocalHost(readPref)) {
         return getLocalHostAndPort(_serviceContext);
     }
-    return _rsMonitor->getHostOrRefresh(readPref, cancelToken);
+    return _rsMonitor->getAtLeastOneHostOrRefresh(
+        readPref, targetingMetadata.deprioritizedServers, cancelToken);
 }
 
 SemiFuture<std::vector<HostAndPort>> RemoteCommandTargeterRS::findHosts(
@@ -119,8 +121,10 @@ SemiFuture<std::vector<HostAndPort>> RemoteCommandTargeterRS::findHosts(
     return _rsMonitor->getHostsOrRefresh(readPref, cancelToken);
 }
 
-StatusWith<HostAndPort> RemoteCommandTargeterRS::findHost(OperationContext* opCtx,
-                                                          const ReadPreferenceSetting& readPref) {
+StatusWith<HostAndPort> RemoteCommandTargeterRS::findHost(
+    OperationContext* opCtx,
+    const ReadPreferenceSetting& readPref,
+    const TargetingMetadata& targetingMetadata) {
     const auto interruptStatus = opCtx->checkForInterruptNoAssert();
     if (!interruptStatus.isOK()) {
         return interruptStatus;
@@ -132,8 +136,11 @@ StatusWith<HostAndPort> RemoteCommandTargeterRS::findHost(OperationContext* opCt
 
     bool maxTimeMsLesser = (opCtx->getRemainingMaxTimeMillis() <
                             Milliseconds(gDefaultFindReplicaSetHostTimeoutMS.load()));
-    auto swHostAndPort =
-        _rsMonitor->getHostOrRefresh(readPref, opCtx->getCancellationToken()).getNoThrow(opCtx);
+    auto swHostAndPort = _rsMonitor
+                             ->getAtLeastOneHostOrRefresh(readPref,
+                                                          targetingMetadata.deprioritizedServers,
+                                                          opCtx->getCancellationToken())
+                             .getNoThrow(opCtx);
 
     // If opCtx is interrupted, getHostOrRefresh may be canceled through the token (rather than
     // opCtx) and therefore we may get a generic FailedToSatisfyReadPreference as tokens do not

@@ -27,25 +27,30 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional.hpp>
+#include "mongo/db/storage/storage_options.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/server_parameter.h"
-#include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/util/str.h"
 
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
 
 StorageGlobalParams::StorageGlobalParams() {
-    reset();
+    _reset();
 }
 
-void StorageGlobalParams::reset() {
+void StorageGlobalParams::reset_forTest() {
+    _reset();
+}
+
+void StorageGlobalParams::_reset() {
     engine = "wiredTiger";
     engineSetByUser = false;
     dbpath = kDefaultDbPath;
@@ -57,13 +62,17 @@ void StorageGlobalParams::reset() {
 
     noTableScan.store(false);
     directoryperdb = false;
-    syncdelay = 60.0;
+    syncdelay.store(-1.0);
     queryableBackupMode = false;
     groupCollections = false;
     oplogMinRetentionHours.store(0.0);
     allowOplogTruncation = true;
-    disableLockFreeReads = false;
     forceDisableTableLogging = false;
+}
+
+boost::filesystem::path StorageGlobalParams::getSpillDbPath() const {
+    return gSpillPath.empty() ? (boost::filesystem::path(dbpath) / "_tmp" / "spilldb")
+                              : boost::filesystem::path(gSpillPath);
 }
 
 StorageGlobalParams storageGlobalParams;

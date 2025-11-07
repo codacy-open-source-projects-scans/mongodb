@@ -27,9 +27,8 @@
  *    it in the license file.
  */
 
-#include "authorization_manager_factory.h"
+#include "mongo/db/auth/authorization_manager_factory.h"
 
-#include "mongo/platform/basic.h"
 
 namespace mongo {
 

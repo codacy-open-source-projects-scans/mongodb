@@ -27,17 +27,15 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/accumulator_for_window_functions.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/window_function/window_function_expression.h"
 #include "mongo/db/pipeline/window_function/window_function_integral.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -66,8 +64,4 @@ void AccumulatorIntegral::reset() {
     _memUsageTracker.set(sizeof(*this));
 }
 
-boost::intrusive_ptr<AccumulatorState> AccumulatorIntegral::create(
-    ExpressionContext* const expCtx, boost::optional<long long> unitMillis) {
-    return new AccumulatorIntegral(expCtx, unitMillis);
-}
 }  // namespace mongo

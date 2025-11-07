@@ -28,39 +28,50 @@
  */
 
 #include "mongo/db/s/migration_blocking_operation/multi_update_coordinator_external_state.h"
-#include "mongo/db/catalog_raii.h"
+
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/s/migration_blocking_operation/migration_blocking_operation_coordinator.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/cluster_ddl.h"
-#include "mongo/s/grid.h"
+#include "mongo/db/global_catalog/ddl/cluster_ddl.h"
+#include "mongo/db/global_catalog/ddl/migration_blocking_operation_coordinator.h"
+#include "mongo/db/global_catalog/ddl/migration_blocking_operation_gen.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/topology/sharding_state.h"
 #include "mongo/s/query/planner/cluster_aggregate.h"
-#include "mongo/s/request_types/migration_blocking_operation_gen.h"
 #include "mongo/s/service_entry_point_router_role.h"
-#include "mongo/s/stale_shard_version_helpers.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 namespace mongo {
 
 namespace {
-auto runDDLOperationWithRetry(OperationContext* opCtx,
-                              const NamespaceString& nss,
-                              BSONObj command) {
-    auto cmdName = command.firstElement().fieldNameStringData();
-    auto catalogCache = Grid::get(opCtx)->catalogCache();
-    return shardVersionRetry(opCtx, catalogCache, nss, cmdName, [&] {
-        const auto dbInfo = uassertStatusOK(catalogCache->getDatabase(opCtx, nss.dbName()));
-        auto response = executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
-            opCtx,
-            DatabaseName::kAdmin,
-            dbInfo,
-            command,
-            ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-            Shard::RetryPolicy::kIdempotent);
-        const auto remoteResponse = uassertStatusOK(response.swResponse);
-        return uassertStatusOK(getStatusFromCommandResult(remoteResponse.data));
-    });
+auto getDatabaseVersion(OperationContext* opCtx, const MultiUpdateCoordinatorMetadata& metadata) {
+    // TODO SERVER-110173: Only keep this branch to support older behavior in multiversion testing
+    // where the MultiUpdateCoordinator did not store the database version. Once these changes are
+    // in last LTS, the database version should always be set and this branch can be removed.
+    if (!metadata.getDatabaseVersion().has_value()) {
+        auto catalogCache = Grid::get(opCtx)->catalogCache();
+        auto dbInfo = uassertStatusOK(catalogCache->getDatabase(opCtx, metadata.getNss().dbName()));
+        return dbInfo->getVersion();
+    }
+    return *metadata.getDatabaseVersion();
+}
+
+template <typename Command>
+auto runDDLOperationOnCurrentShard(OperationContext* opCtx,
+                                   const DatabaseVersion& databaseVersion,
+                                   Command command) {
+    auto selfId = ShardingState::get(opCtx)->shardId();
+    auto self = uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, selfId));
+    generic_argument_util::setMajorityWriteConcern(command, &opCtx->getWriteConcern());
+    generic_argument_util::setDbVersionIfPresent(command, databaseVersion);
+
+    const auto response = self->runCommand(opCtx,
+                                           ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                                           DatabaseName::kAdmin,
+                                           command.toBSON(),
+                                           Shard::RetryPolicy::kIdempotent);
+    return uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(response));
 }
 }  // namespace
 
@@ -71,44 +82,41 @@ MultiUpdateCoordinatorExternalStateImpl::MultiUpdateCoordinatorExternalStateImpl
 Future<DbResponse> MultiUpdateCoordinatorExternalStateImpl::sendClusterUpdateCommandToShards(
     OperationContext* opCtx, const Message& message) const {
     opCtx->setCommandForwardedFromRouter();
-    return ServiceEntryPointRouterRole::handleRequestImpl(opCtx, message);
+    return ServiceEntryPointRouterRole::handleRequestImpl(
+        opCtx, message, opCtx->fastClockSource().now());
 }
 
-void MultiUpdateCoordinatorExternalStateImpl::startBlockingMigrations(OperationContext* opCtx,
-                                                                      const NamespaceString& nss,
-                                                                      const UUID& operationId) {
-    ShardsvrBeginMigrationBlockingOperation beginMigrationCmd(nss, operationId);
-    generic_argument_util::setMajorityWriteConcern(beginMigrationCmd, &opCtx->getWriteConcern());
-    runDDLOperationWithRetry(opCtx, nss, beginMigrationCmd.toBSON());
+void MultiUpdateCoordinatorExternalStateImpl::startBlockingMigrations(
+    OperationContext* opCtx, const MultiUpdateCoordinatorMetadata& metadata) {
+    runDDLOperationOnCurrentShard(
+        opCtx,
+        getDatabaseVersion(opCtx, metadata),
+        ShardsvrBeginMigrationBlockingOperation{metadata.getNss(), metadata.getId()});
 }
 
-void MultiUpdateCoordinatorExternalStateImpl::stopBlockingMigrations(OperationContext* opCtx,
-                                                                     const NamespaceString& nss,
-                                                                     const UUID& operationId) {
-    ShardsvrEndMigrationBlockingOperation endMigrationCmd(nss, operationId);
-    generic_argument_util::setMajorityWriteConcern(endMigrationCmd, &opCtx->getWriteConcern());
-    runDDLOperationWithRetry(opCtx, nss, endMigrationCmd.toBSON());
+void MultiUpdateCoordinatorExternalStateImpl::stopBlockingMigrations(
+    OperationContext* opCtx, const MultiUpdateCoordinatorMetadata& metadata) {
+    runDDLOperationOnCurrentShard(
+        opCtx,
+        getDatabaseVersion(opCtx, metadata),
+        ShardsvrEndMigrationBlockingOperation{metadata.getNss(), metadata.getId()});
 }
 
 bool MultiUpdateCoordinatorExternalStateImpl::isUpdatePending(
     OperationContext* opCtx, const NamespaceString& nss, AggregateCommandRequest& request) const {
-    auto catalogCache = Grid::get(opCtx)->catalogCache();
-    return shardVersionRetry(
-        opCtx, catalogCache, nss, "AggregationForMultiUpdateCoordinator"_sd, [&] {
-            BSONObjBuilder responseBuilder;
-            auto status = ClusterAggregate::runAggregate(opCtx,
-                                                         ClusterAggregate::Namespaces{nss, nss},
-                                                         request,
-                                                         LiteParsedPipeline{request},
-                                                         PrivilegeVector(),
-                                                         &responseBuilder);
+    BSONObjBuilder responseBuilder;
+    auto status = ClusterAggregate::runAggregate(opCtx,
+                                                 ClusterAggregate::Namespaces{nss, nss},
+                                                 request,
+                                                 LiteParsedPipeline{request},
+                                                 PrivilegeVector(),
+                                                 boost::none, /* verbosity */
+                                                 &responseBuilder);
 
-            uassertStatusOKWithContext(status,
-                                       "Aggregation request in MultiUpdateCoordinator failed.");
+    uassertStatusOKWithContext(status, "Aggregation request in MultiUpdateCoordinator failed.");
 
-            auto resultArr = responseBuilder.obj()["cursor"]["firstBatch"].Array();
-            return (!resultArr.empty());
-        });
+    auto resultArr = responseBuilder.obj()["cursor"]["firstBatch"].Array();
+    return (!resultArr.empty());
 }
 
 bool MultiUpdateCoordinatorExternalStateImpl::collectionExists(OperationContext* opCtx,

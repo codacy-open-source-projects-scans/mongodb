@@ -29,33 +29,35 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/baton.h"
+#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/resource_yielder.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/scoped_task_executor.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/s/client/shard.h"
 #include "mongo/util/future.h"
 #include "mongo/util/interruptible.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/producer_consumer_queue.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <memory>
+#include <span>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -166,7 +168,7 @@ public:
     /**
      * Returns true if responses for all requests have been returned via next().
      */
-    bool done() noexcept;
+    bool done() const noexcept;
 
     /**
      * Returns the next available response or error.
@@ -178,7 +180,7 @@ public:
      *
      * Note: Must only be called from one thread at a time, and invalid to call if done() is true.
      */
-    Response next() noexcept;
+    Response next();
 
     /**
      * Stops the ARS from retrying requests.
@@ -205,6 +207,11 @@ private:
                    HostAndPort designatedHost,
                    std::shared_ptr<Shard> shard = nullptr);
 
+        RemoteData(const RemoteData&) = delete;
+        RemoteData& operator=(const RemoteData&) = delete;
+        RemoteData(RemoteData&&) = default;
+        RemoteData& operator=(RemoteData&&) = default;
+
         /**
          * Returns a SemiFuture containing a shard object associated with this remote.
          *
@@ -214,7 +221,7 @@ private:
          * Additionally this call can trigger a refresh of the ShardRegistry so it could possibly
          * return other network error status related to the refresh.
          */
-        SemiFuture<std::shared_ptr<Shard>> getShard() noexcept;
+        SemiFuture<std::shared_ptr<Shard>> getShard();
 
         /**
          * Returns true if we've already queued a response from the remote.
@@ -251,21 +258,14 @@ private:
         SemiFuture<RemoteCommandCallbackArgs> scheduleRequest();
 
         /**
-         * Given a read preference, selects a lists of hosts on which the command can run.
-         */
-        SemiFuture<std::vector<HostAndPort>> resolveShardIdToHostAndPorts(
-            const ReadPreferenceSetting& readPref);
-
-        /**
          * Schedules the remote command on the ARS's TaskExecutor
          */
-        SemiFuture<RemoteCommandCallbackArgs> scheduleRemoteCommand(
-            std::vector<HostAndPort>&& hostAndPort);
+        SemiFuture<RemoteCommandCallbackArgs> scheduleRemoteCommand(const HostAndPort& hostAndPort);
 
         /**
          * Handles the remote response
          */
-        SemiFuture<RemoteCommandCallbackArgs> handleResponse(RemoteCommandCallbackArgs&& rcr);
+        SemiFuture<RemoteCommandCallbackArgs> handleResponse(RemoteCommandCallbackArgs rcr);
 
     private:
         bool _done = false;
@@ -284,12 +284,17 @@ private:
         // Optional shard from shard registry for given shard id.
         std::shared_ptr<Shard> _shard;
 
+        // The retry strategy that will be used to evaluate if we should retry.
+        boost::optional<Shard::OwnerRetryStrategy> _retryStrategy;
+
         // The exact host on which the remote command was run. Is unset until a request has been
         // sent.
         boost::optional<HostAndPort> _shardHostAndPort;
 
-        // The number of times we've retried sending the command to this remote.
-        int _retryCount = 0;
+        // Record the last writeConcernError received during any retry attempt and return this
+        // response if a further retry attempt results in an error signaling a write was not
+        // performed.
+        boost::optional<RemoteCommandCallbackArgs> _writeConcernErrorRCR;
     };
 
     OperationContext* _opCtx;
@@ -341,6 +346,9 @@ private:
     // Interface for yielding and unyielding resources while waiting on results from the network.
     // Null if yielding isn't necessary.
     std::unique_ptr<ResourceYielder> _resourceYielder;
+
+    // A cancellation source to stop any requests that are waiting for backoff.
+    CancellationSource _cancellationSource;
 };
 
 }  // namespace mongo

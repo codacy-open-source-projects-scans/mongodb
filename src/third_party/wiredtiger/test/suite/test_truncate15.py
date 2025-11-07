@@ -34,8 +34,8 @@ from wtscenario import make_scenarios
 # test_truncate15.py
 #
 # Check that readonly database reading fast truncated pages doesn't lead to cache stuck.
-
-@wttest.skip_for_hook("nonstandalone", "timestamped truncate not supported for nonstandalone")
+# FIXME-WT-15430: Re-enable once disaggregated storage works with fast truncate tests.
+@wttest.skip_for_hook("disagg", "fast truncate is not supported yet")
 class test_truncate15(wttest.WiredTigerTestCase):
     conn_config = 'statistics=(all)'
     session_config = 'isolation=snapshot'

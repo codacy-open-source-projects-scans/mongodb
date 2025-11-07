@@ -29,19 +29,6 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <deque>
-#include <list>
-#include <map>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -51,32 +38,49 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/shard_filterer.h"
+#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/catalog_resource_handle.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/javascript_execution.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
 #include "mongo/db/pipeline/process_interface/common_process_interface.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
+#include "mongo/db/pipeline/shard_role_transaction_resources_stasher_for_pipeline.h"
 #include "mongo/db/pipeline/storage_stats_spec_gen.h"
 #include "mongo/db/query/client_cursor/generic_cursor_gen.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/write_ops/write_ops_exec.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/resource_yielder.h"
 #include "mongo/db/storage/backup_cursor_state.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/spill_table.h"
 #include "mongo/db/storage/storage_engine.h"
-#include "mongo/db/storage/temporary_record_store.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
-#include "mongo/s/chunk_version.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
+
+#include <deque>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -123,13 +127,31 @@ public:
                               const NamespaceString& nss,
                               BSONObjBuilder* builder) const final;
     BSONObj getCollectionOptions(OperationContext* opCtx, const NamespaceString& nss) override;
+    UUID fetchCollectionUUIDFromPrimary(OperationContext* opCtx,
+                                        const NamespaceString& nss) override;
     query_shape::CollectionType getCollectionType(OperationContext* opCtx,
                                                   const NamespaceString& nss) override;
-    std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipelineForLocalRead(
-        Pipeline* pipeline,
+
+    std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalReadWithCatalog(
+        std::unique_ptr<Pipeline> pipeline,
+        const MultipleCollectionAccessor& collections,
+        const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle) final;
+
+    std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalRead(
+        std::unique_ptr<Pipeline> pipeline,
         boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
         bool shouldUseCollectionDefaultCollator = false,
         ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) final;
+
+    std::unique_ptr<Pipeline> finalizeAndAttachCursorToPipelineForLocalRead(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        std::unique_ptr<Pipeline> pipeline,
+        bool attachCursorAfterOptimizing,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
+        bool shouldUseCollectionDefaultCollator = false,
+        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
+        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) final;
+
     std::string getShardName(OperationContext* opCtx) const final;
 
     boost::optional<ShardId> getShardId(OperationContext* opCtx) const final;
@@ -160,24 +182,27 @@ public:
         boost::optional<ChunkVersion> targetCollectionPlacementVersion,
         const NamespaceString& outputNs) const final;
 
-    std::unique_ptr<TemporaryRecordStore> createTemporaryRecordStore(
+    std::unique_ptr<SpillTable> createSpillTable(
         const boost::intrusive_ptr<ExpressionContext>& expCtx, KeyFormat keyFormat) const final;
 
-    void writeRecordsToRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                   RecordStore* rs,
-                                   std::vector<Record>* records,
-                                   const std::vector<Timestamp>& ts) const final;
+    void writeRecordsToSpillTable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                  SpillTable& spillTable,
+                                  std::vector<Record>* records) const final;
 
-    Document readRecordFromRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                       RecordStore* rs,
-                                       RecordId rID) const final;
+    Document readRecordFromSpillTable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                      const SpillTable& spillTable,
+                                      RecordId rID) const final;
 
-    void deleteRecordFromRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                     RecordStore* rs,
-                                     RecordId rID) const final;
+    bool checkRecordInSpillTable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                 const SpillTable& spillTable,
+                                 RecordId rID) const final;
 
-    void truncateRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                             RecordStore* rs) const final;
+    void deleteRecordFromSpillTable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                    SpillTable& spillTable,
+                                    RecordId rID) const final;
+
+    void truncateSpillTable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                            SpillTable& spillTable) const final;
 
     boost::optional<Document> lookupSingleDocumentLocally(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -195,7 +220,7 @@ protected:
         const NamespaceString& nss,
         boost::optional<UUID> collectionUUID,
         const Document& documentKey,
-        MakePipelineOptions opts);
+        pipeline_factory::MakePipelineOptions opts);
 
     BSONObj _reportCurrentOpForClient(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                       Client* client,
@@ -224,7 +249,7 @@ protected:
                                            const NamespaceString& sourceNs,
                                            const NamespaceString& targetNs,
                                            const BSONObj& originalCollectionOptions,
-                                           const std::list<BSONObj>& originalIndexes);
+                                           const std::vector<BSONObj>& originalIndexes);
 
     void _handleTimeseriesCreateError(const DBException& ex,
                                       OperationContext* opCtx,

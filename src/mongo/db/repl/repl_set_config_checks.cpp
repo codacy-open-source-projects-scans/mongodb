@@ -27,14 +27,10 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
 #include <cstddef>
-// IWYU pragma: no_include "ext/alloc_traits.h"
-#include <algorithm>
-#include <iterator>
-#include <set>
-#include <vector>
 
+#include <boost/move/utility_core.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -53,12 +49,15 @@
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <iterator>
+#include <set>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -164,7 +163,8 @@ Status validateSingleNodeChange(const ReplSetConfig& oldConfig, const ReplSetCon
  * When "force" is true, skips config version check, since the version is guaranteed
  * to be valid either by "force" reconfig command or by internal use.
  */
-Status validateOldAndNewConfigsCompatible(const ReplSetConfig& oldConfig,
+Status validateOldAndNewConfigsCompatible(const VersionContext& vCtx,
+                                          const ReplSetConfig& oldConfig,
                                           const ReplSetConfig& newConfig) {
     invariant(newConfig.isInitialized());
     invariant(oldConfig.isInitialized());
@@ -195,9 +195,12 @@ Status validateOldAndNewConfigsCompatible(const ReplSetConfig& oldConfig,
                                     << newConfig.getReplicaSetId());
     }
 
+    // If we are running with replicaSetConfigShardMaintenanceMode then it's safe to skip this check
+    // as we are about to reconfigure the replicaset
     if (oldConfig.getConfigServer_deprecated() && !newConfig.getConfigServer_deprecated() &&
+        !serverGlobalParams.replicaSetConfigShardMaintenanceMode &&
         !gFeatureFlagAllMongodsAreSharded.isEnabledUseLatestFCVWhenUninitialized(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            vCtx, serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         return Status(ErrorCodes::NewReplicaSetConfigurationIncompatible,
                       str::stream()
                           << "Cannot remove \"" << ReplSetConfig::kConfigServer_deprecatedFieldName
@@ -380,7 +383,9 @@ StatusWith<int> findSelfInConfig(ReplicationCoordinatorExternalState* externalSt
     }
 
     int myIndex = std::distance(newConfig.membersBegin(), meConfigs.front());
-    invariant(myIndex >= 0 && myIndex < newConfig.getNumMembers());
+    invariant(myIndex >= 0 && myIndex < newConfig.getNumMembers(),
+              str::stream() << "myIndex: " << myIndex
+                            << ", numMembers: " << newConfig.getNumMembers());
     return StatusWith<int>(myIndex);
 }
 
@@ -483,7 +488,8 @@ StatusWith<int> validateConfigForInitiate(ReplicationCoordinatorExternalState* e
     return findSelfInConfigIfElectable(externalState, newConfig, ctx);
 }
 
-Status validateConfigForReconfig(const ReplSetConfig& oldConfig,
+Status validateConfigForReconfig(const VersionContext& vCtx,
+                                 const ReplSetConfig& oldConfig,
                                  const ReplSetConfig& newConfig,
                                  bool force,
                                  bool allowSplitHorizonIP) {
@@ -500,7 +506,7 @@ Status validateConfigForReconfig(const ReplSetConfig& oldConfig,
             "set a cluster-wide default writeConcern.",
             !newConfig.containsCustomizedGetLastErrorDefaults());
 
-    status = validateOldAndNewConfigsCompatible(oldConfig, newConfig);
+    status = validateOldAndNewConfigsCompatible(vCtx, oldConfig, newConfig);
     if (!status.isOK()) {
         return status;
     }

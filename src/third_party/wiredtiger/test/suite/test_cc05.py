@@ -29,10 +29,12 @@
 from test_cc01 import test_cc_base
 from wtdataset import SimpleDataSet
 from wtscenario import make_scenarios
+import wttest
 
 # test_cc05.py
 # Verify a locked checkpoint is not removed during garbage collection.
 
+@wttest.skip_for_hook("disagg", "layered trees do not support named checkpoints")
 class test_cc05(test_cc_base):
     conn_config = 'cache_size=50MB,statistics=(all)'
 
@@ -77,9 +79,9 @@ class test_cc05(test_cc_base):
         # Move stable to 35 so there's something to checkpoint.
         self.conn.set_timestamp('stable_timestamp=' + self.timestamp_str(35))
 
-        # Trigger checkpoint cleanup and wait until it is done.
-        ckpt_name = "checkpoint_one" if self.named else ""
-        self.check_cc_stats(ckpt_name=ckpt_name)
+        # Trigger checkpoint.
+        ckpt_config = "name=checkpoint_one" if self.named else None
+        self.session.checkpoint(ckpt_config)
 
         # Open a cursor to the checkpoint just performed.
         if self.named:

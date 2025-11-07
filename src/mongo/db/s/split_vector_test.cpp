@@ -27,10 +27,7 @@
  *    it in the license file.
  */
 
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
+#include "mongo/db/s/split_vector.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -38,21 +35,23 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
-#include "mongo/db/catalog/create_collection.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/create_collection.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/s/collection_metadata.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
-#include "mongo/db/s/operation_sharding_state.h"
-#include "mongo/db/s/shard_server_test_fixture.h"
-#include "mongo/db/s/split_vector.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/db/sharding_environment/shard_server_test_fixture.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -66,7 +65,7 @@ void setUnshardedFilteringMetadata(OperationContext* opCtx, const NamespaceStrin
     AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX);
     Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
     CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(opCtx, nss)
-        ->setFilteringMetadata(opCtx, CollectionMetadata());
+        ->setFilteringMetadata(opCtx, CollectionMetadata::UNTRACKED());
 }
 
 class SplitVectorTest : public ShardServerTestFixture {
@@ -76,12 +75,7 @@ public:
 
         auto opCtx = operationContext();
 
-        {
-            OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
-                unsafeCreateCollection(opCtx);
-            uassertStatusOK(
-                createCollection(operationContext(), kNss.dbName(), BSON("create" << kNss.coll())));
-        }
+        createTestCollection(opCtx, kNss);
         setUnshardedFilteringMetadata(opCtx, kNss);
         DBDirectClient client(opCtx);
         client.createIndex(kNss, BSON(kPattern << 1));
@@ -106,9 +100,16 @@ private:
     const long long docSizeBytes = BSON(kPattern << 1).objsize();
 };
 
+CollectionAcquisition acquireColl(OperationContext* opCtx, const NamespaceString& nss) {
+    return acquireCollectionMaybeLockFree(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kRead));
+}
+
 TEST_F(SplitVectorTest, SplitVectorInHalf) {
+    const auto coll = acquireColl(operationContext(), kNss);
     std::vector<BSONObj> splitKeys = splitVector(operationContext(),
-                                                 kNss,
+                                                 coll,
                                                  BSON(kPattern << 1),
                                                  BSON(kPattern << 0),
                                                  BSON(kPattern << 100),
@@ -127,8 +128,9 @@ TEST_F(SplitVectorTest, SplitVectorInHalf) {
 }
 
 TEST_F(SplitVectorTest, ForceSplit) {
+    const auto coll = acquireColl(operationContext(), kNss);
     std::vector<BSONObj> splitKeys = splitVector(operationContext(),
-                                                 kNss,
+                                                 coll,
                                                  BSON(kPattern << 1),
                                                  BSON(kPattern << 0),
                                                  BSON(kPattern << 100),
@@ -147,8 +149,9 @@ TEST_F(SplitVectorTest, ForceSplit) {
 }
 
 TEST_F(SplitVectorTest, MaxChunkObjectsSet) {
+    const auto coll = acquireColl(operationContext(), kNss);
     std::vector<BSONObj> splitKeys = splitVector(operationContext(),
-                                                 kNss,
+                                                 coll,
                                                  BSON(kPattern << 1),
                                                  BSON(kPattern << 0),
                                                  BSON(kPattern << 100),
@@ -176,8 +179,9 @@ TEST_F(SplitVectorTest, MaxChunkObjectsSet) {
 }
 
 TEST_F(SplitVectorTest, SplitEveryThird) {
+    const auto coll = acquireColl(operationContext(), kNss);
     std::vector<BSONObj> splitKeys = splitVector(operationContext(),
-                                                 kNss,
+                                                 coll,
                                                  BSON(kPattern << 1),
                                                  BSON(kPattern << 0),
                                                  BSON(kPattern << 100),
@@ -203,8 +207,9 @@ TEST_F(SplitVectorTest, SplitEveryThird) {
 }
 
 TEST_F(SplitVectorTest, MaxSplitPointsSet) {
+    const auto coll = acquireColl(operationContext(), kNss);
     std::vector<BSONObj> splitKeys = splitVector(operationContext(),
-                                                 kNss,
+                                                 coll,
                                                  BSON(kPattern << 1),
                                                  BSON(kPattern << 0),
                                                  BSON(kPattern << 100),
@@ -226,8 +231,9 @@ TEST_F(SplitVectorTest, MaxSplitPointsSet) {
 }
 
 TEST_F(SplitVectorTest, IgnoreMaxChunkObjects) {
+    const auto coll = acquireColl(operationContext(), kNss);
     std::vector<BSONObj> splitKeys = splitVector(operationContext(),
-                                                 kNss,
+                                                 coll,
                                                  BSON(kPattern << 1),
                                                  BSON(kPattern << 0),
                                                  BSON(kPattern << 100),
@@ -255,8 +261,9 @@ TEST_F(SplitVectorTest, IgnoreMaxChunkObjects) {
 }
 
 TEST_F(SplitVectorTest, NoSplit) {
+    const auto coll = acquireColl(operationContext(), kNss);
     std::vector<BSONObj> splitKeys = splitVector(operationContext(),
-                                                 kNss,
+                                                 coll,
                                                  BSON(kPattern << 1),
                                                  BSON(kPattern << 0),
                                                  BSON(kPattern << 100),
@@ -269,23 +276,25 @@ TEST_F(SplitVectorTest, NoSplit) {
 }
 
 TEST_F(SplitVectorTest, NoCollection) {
-    ASSERT_THROWS_CODE(
-        splitVector(operationContext(),
-                    NamespaceString::createNamespaceString_forTest("dummy", "collection"),
-                    BSON(kPattern << 1),
-                    BSON(kPattern << 0),
-                    BSON(kPattern << 100),
-                    false,
-                    boost::none,
-                    boost::none,
-                    boost::none),
-        DBException,
-        ErrorCodes::NamespaceNotFound);
+    const auto coll = acquireColl(
+        operationContext(), NamespaceString::createNamespaceString_forTest("dummy", "collection"));
+    ASSERT_THROWS_CODE(splitVector(operationContext(),
+                                   coll,
+                                   BSON(kPattern << 1),
+                                   BSON(kPattern << 0),
+                                   BSON(kPattern << 100),
+                                   false,
+                                   boost::none,
+                                   boost::none,
+                                   boost::none),
+                       DBException,
+                       ErrorCodes::NamespaceNotFound);
 }
 
 TEST_F(SplitVectorTest, NoIndex) {
+    const auto coll = acquireColl(operationContext(), kNss);
     ASSERT_THROWS_CODE(splitVector(operationContext(),
-                                   kNss,
+                                   coll,
                                    BSON("foo" << 1),
                                    BSON(kPattern << 0),
                                    BSON(kPattern << 100),
@@ -298,8 +307,9 @@ TEST_F(SplitVectorTest, NoIndex) {
 }
 
 TEST_F(SplitVectorTest, NoMaxChunkSize) {
+    const auto coll = acquireColl(operationContext(), kNss);
     ASSERT_THROWS_CODE(splitVector(operationContext(),
-                                   kNss,
+                                   coll,
                                    BSON(kPattern << 1),
                                    BSON(kPattern << 0),
                                    BSON(kPattern << 100),
@@ -321,12 +331,7 @@ public:
 
         auto opCtx = operationContext();
 
-        {
-            OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
-                unsafeCreateCollection(opCtx);
-            uassertStatusOK(createCollection(
-                operationContext(), kJumboNss.dbName(), BSON("create" << kJumboNss.coll())));
-        }
+        createTestCollection(opCtx, kJumboNss);
         setUnshardedFilteringMetadata(opCtx, kJumboNss);
         DBDirectClient client(opCtx);
         client.createIndex(kJumboNss, BSON(kJumboPattern << 1));
@@ -351,8 +356,9 @@ private:
 };
 
 TEST_F(SplitVectorJumboTest, JumboChunk) {
+    const auto coll = acquireColl(operationContext(), kJumboNss);
     std::vector<BSONObj> splitKeys = splitVector(operationContext(),
-                                                 kJumboNss,
+                                                 coll,
                                                  BSON(kJumboPattern << 1),
                                                  BSON(kJumboPattern << 1),
                                                  BSON(kJumboPattern << 2),
@@ -385,13 +391,7 @@ public:
 
         auto opCtx = operationContext();
 
-        {
-            OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
-                unsafeCreateCollection(opCtx);
-            uassertStatusOK(createCollection(operationContext(),
-                                             kMaxResponseNss.dbName(),
-                                             BSON("create" << kMaxResponseNss.coll())));
-        }
+        createTestCollection(opCtx, kMaxResponseNss);
         setUnshardedFilteringMetadata(opCtx, kMaxResponseNss);
         DBDirectClient client(opCtx);
         client.createIndex(kMaxResponseNss, BSON("a" << 1));
@@ -418,15 +418,9 @@ public:
 };
 
 TEST_F(SplitVectorMaxResponseSizeTest, MaxResponseSize) {
-    std::vector<BSONObj> splitKeys = splitVector(operationContext(),
-                                                 kMaxResponseNss,
-                                                 BSON("a" << 1),
-                                                 {},
-                                                 {},
-                                                 false,
-                                                 boost::none,
-                                                 boost::none,
-                                                 1LL);
+    const auto coll = acquireColl(operationContext(), kMaxResponseNss);
+    std::vector<BSONObj> splitKeys = splitVector(
+        operationContext(), coll, BSON("a" << 1), {}, {}, false, boost::none, boost::none, 1LL);
 
     ASSERT_EQUALS((int)splitKeys.size(), numDocs - 2);
 

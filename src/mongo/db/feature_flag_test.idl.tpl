@@ -19,12 +19,10 @@
 ##
 global:
   cpp_namespace: "mongo::feature_flags"
-  cpp_includes:
-  - "mongo/db/change_streams_cluster_parameter.h"
 
 imports:
     - "mongo/db/basic_types.idl"
-    - "mongo/idl/cluster_server_parameter.idl"
+    - "mongo/db/cluster_parameters/cluster_server_parameter.idl"
 
 structs:
     CWSPIntStorage:
@@ -42,19 +40,19 @@ feature_flags:
       description: "Create a feature flag"
       cpp_varname: gFeatureFlagToaster
       default: false
-      shouldBeFCVGated: true
+      fcv_gated: true
 
     featureFlagFryer:
       description: "Create a feature flag"
       cpp_varname: gFeatureFlagFryer
       default: false
-      shouldBeFCVGated: true
+      fcv_gated: true
     
     featureFlagFork:
       description: "Create a feature flag that should not be FCV gated"
       cpp_varname: gFeatureFlagFork
       default: true
-      shouldBeFCVGated: false
+      fcv_gated: false
 
 #def $ver_str(v): ${'{}.{}'.format(v.major, v.minor)}
     featureFlagBlender:
@@ -64,7 +62,7 @@ feature_flags:
       # The version should be a valid FCV not equal to GenericFCV::kLastLTS in
       # the generated 'releases.h' file.
       version: $ver_str(latest)
-      shouldBeFCVGated: true
+      fcv_gated: true
 
     featureFlagSpoon:
       description: "Create a feature flag"
@@ -72,7 +70,19 @@ feature_flags:
       default: true
       # The version should match GenericFCV::kLastLTS in the generated 'releases.h' file.
       version: $ver_str(last_lts)
-      shouldBeFCVGated: true
+      fcv_gated: true
+
+    featureFlagInDevelopmentForTest:
+      description: "Incremental feature rollout flag"
+      cpp_varname: gFeatureFlagInDevelopmentForTest
+      incremental_rollout_phase: in_development
+      fcv_gated: false
+
+    featureFlagReleasedForTest:
+      description: "Incremental feature rollout flag in the 'released' phase"
+      cpp_varname: gFeatureFlagReleasedForTest
+      incremental_rollout_phase: released
+      fcv_gated: false
 
 server_parameters:
     spTestNeedsFeatureFlagToaster:

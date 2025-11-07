@@ -29,10 +29,6 @@
 
 #pragma once
 
-#include <cstdint>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -46,8 +42,13 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <cstdint>
+#include <utility>
+#include <vector>
+
+namespace MONGO_MOD_PRIVATE mongo {
 
 class FLEQueryInterfaceMock : public FLEQueryInterface {
 public:
@@ -59,7 +60,7 @@ public:
 
     BSONObj getById(const NamespaceString& nss, PrfBlock block);
 
-    uint64_t countDocuments(const NamespaceString& nss) final;
+    uint64_t countDocuments(const NamespaceString& nss);
 
     std::vector<std::vector<FLEEdgeCountInfo>> getTags(
         const NamespaceString& nss,
@@ -104,4 +105,4 @@ private:
     repl::StorageInterface* _storage;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PRIVATE mongo

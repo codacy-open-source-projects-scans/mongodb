@@ -29,20 +29,20 @@
 
 #include "mongo/db/pipeline/document_source_set_variable_from_subpipeline.h"
 
-#include <string>
-
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/pipeline/document_source_set_variable_from_subpipeline_gen.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <string>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -57,6 +57,8 @@ REGISTER_INTERNAL_DOCUMENT_SOURCE(setVariableFromSubPipeline,
                                   LiteParsedDocumentSourceDefault::parse,
                                   DocumentSourceSetVariableFromSubPipeline::createFromBson,
                                   true);
+ALLOCATE_DOCUMENT_SOURCE_ID(setVariableFromSubPipeline,
+                            DocumentSourceSetVariableFromSubPipeline::id)
 
 Value DocumentSourceSetVariableFromSubPipeline::serialize(const SerializationOptions& opts) const {
     const auto var = "$$" + Variables::getBuiltinVariableName(_variableID);
@@ -85,19 +87,20 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceSetVariableFromSubPipeline::c
         str::stream()
             << "the $setVariableFromSubPipeline stage specification must be an object, but found "
             << typeName(elem.type()),
-        elem.type() == BSONType::Object);
+        elem.type() == BSONType::object);
 
     auto spec =
-        SetVariableFromSubPipelineSpec::parse(IDLParserContext(kStageName), elem.embeddedObject());
+        SetVariableFromSubPipelineSpec::parse(elem.embeddedObject(), IDLParserContext(kStageName));
     const auto searchMetaStr = "$$" + Variables::getBuiltinVariableName(Variables::kSearchMetaId);
     uassert(
         625291,
         str::stream() << "SetVariableFromSubPipeline only allows setting $$SEARCH_META variable,  "
-                      << spec.getSetVariable().toString() << " is not allowed.",
-        spec.getSetVariable().toString() == searchMetaStr);
+                      << spec.getSetVariable() << " is not allowed.",
+        spec.getSetVariable() == searchMetaStr);
 
-    std::unique_ptr<Pipeline, PipelineDeleter> pipeline = Pipeline::parse(
-        spec.getPipeline(), expCtx->copyForSubPipeline(expCtx->getNamespaceString()));
+    std::unique_ptr<Pipeline> pipeline = Pipeline::parse(
+        spec.getPipeline(),
+        makeCopyForSubPipelineFromExpressionContext(expCtx, expCtx->getNamespaceString()));
 
     return DocumentSourceSetVariableFromSubPipeline::create(
         expCtx, std::move(pipeline), Variables::kSearchMetaId);
@@ -106,7 +109,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceSetVariableFromSubPipeline::c
 intrusive_ptr<DocumentSourceSetVariableFromSubPipeline>
 DocumentSourceSetVariableFromSubPipeline::create(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    std::unique_ptr<Pipeline, PipelineDeleter> subpipeline,
+    std::unique_ptr<Pipeline> subpipeline,
     Variables::Id varID) {
     uassert(625290,
             str::stream()
@@ -117,51 +120,46 @@ DocumentSourceSetVariableFromSubPipeline::create(
         new DocumentSourceSetVariableFromSubPipeline(expCtx, std::move(subpipeline), varID));
 };
 
-void DocumentSourceSetVariableFromSubPipeline::doDispose() {
-    if (_subPipeline) {
-        _subPipeline.get_deleter().dismissDisposal();
-        _subPipeline->dispose(pExpCtx->getOperationContext());
-        _subPipeline.reset();
-    }
-}
-
-DocumentSource::GetNextResult DocumentSourceSetVariableFromSubPipeline::doGetNext() {
-    if (_firstCallForInput) {
-        tassert(6448002,
-                "Expected to have already attached a cursor source to the pipeline",
-                !_subPipeline->peekFront()->constraints().requiresInputDocSource);
-        auto nextSubPipelineInput = _subPipeline->getNext();
-        uassert(625296,
-                "No document returned from $SetVariableFromSubPipeline subpipeline",
-                nextSubPipelineInput);
-        uassert(625297,
-                "Multiple documents returned from $SetVariableFromSubPipeline subpipeline when "
-                "only one expected",
-                !_subPipeline->getNext());
-        pExpCtx->variables.setReservedValue(_variableID, Value(*nextSubPipelineInput), true);
-    }
-    _firstCallForInput = false;
-    return pSource->getNext();
-}
-
 void DocumentSourceSetVariableFromSubPipeline::addSubPipelineInitialSource(
     boost::intrusive_ptr<DocumentSource> source) {
     _subPipeline->addInitialSource(std::move(source));
 }
 
-void DocumentSourceSetVariableFromSubPipeline::detachFromOperationContext() {
+
+void DocumentSourceSetVariableFromSubPipeline::detachSourceFromOperationContext() {
+    // We have an execution pipeline we're going to execute across multiple commands, so we need to
+    // detach it from the operation context when it goes out of scope.
+    if (_sharedState->_subExecPipeline) {
+        _sharedState->_subExecPipeline->detachFromOperationContext();
+    }
+    // Some methods require pipeline to have a valid operation context. Normally, a pipeline and the
+    // corresponding execution pipeline share the same expression context containing a pointer to
+    // the operation context, but it might not be the case anymore when a pipeline is cloned with
+    // another expression context.
     if (_subPipeline) {
         _subPipeline->detachFromOperationContext();
     }
 }
 
-void DocumentSourceSetVariableFromSubPipeline::reattachToOperationContext(OperationContext* opCtx) {
-    _subPipeline->reattachToOperationContext(opCtx);
+void DocumentSourceSetVariableFromSubPipeline::reattachSourceToOperationContext(
+    OperationContext* opCtx) {
+    // We have an execution pipeline we're going to execute across multiple commands, so we need to
+    // propagate the new operation context to the pipeline stages.
+    if (_sharedState->_subExecPipeline) {
+        _sharedState->_subExecPipeline->reattachToOperationContext(opCtx);
+    }
+    // Some methods require pipeline to have a valid operation context. Normally, a pipeline and the
+    // corresponding execution pipeline share the same expression context containing a pointer to
+    // the operation context, but it might not be the case anymore when a pipeline is cloned with
+    // another expression context.
+    if (_subPipeline) {
+        _subPipeline->reattachToOperationContext(opCtx);
+    }
 }
 
-bool DocumentSourceSetVariableFromSubPipeline::validateOperationContext(
+bool DocumentSourceSetVariableFromSubPipeline::validateSourceOperationContext(
     const OperationContext* opCtx) const {
-    return getContext()->getOperationContext() == opCtx &&
+    return getExpCtx()->getOperationContext() == opCtx &&
         (!_subPipeline || _subPipeline->validateOperationContext(opCtx));
 }
 

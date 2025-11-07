@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <cstdint>
-#include <cstring>
-#include <iosfwd>
-#include <string>
-#include <string_view>
-#include <sys/types.h>
-
 #include "mongo/base/data_range.h"
 #include "mongo/base/data_view.h"
 #include "mongo/base/static_assert.h"
@@ -45,6 +38,13 @@
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdint>
+#include <cstring>
+#include <iosfwd>
+#include <string>
+
+#include <sys/types.h>
 
 namespace mongo {
 class SecureRandom;
@@ -200,7 +200,7 @@ public:
     template <typename H>
     friend H AbslHashValue(H h, const OID& oid) {
         const auto& d = oid._data;
-        return H::combine(std::move(h), std::string_view(d, sizeof(d)));
+        return H::combine(std::move(h), toStdStringViewForInterop({d, sizeof(d)}));
     }
 
     /** call this after a fork to update the process id */

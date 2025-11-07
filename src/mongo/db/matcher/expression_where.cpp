@@ -27,15 +27,16 @@
  *    it in the license file.
  */
 
+#include "mongo/db/matcher/expression_where.h"
+
+#include "mongo/base/init.h"  // IWYU pragma: keep
+#include "mongo/db/matcher/expression.h"
+
 #include <memory>
 #include <string>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/init.h"  // IWYU pragma: keep
-#include "mongo/db/matcher/expression.h"
-#include "mongo/db/matcher/expression_where.h"
 
 
 namespace mongo {
@@ -48,11 +49,6 @@ WhereMatchExpression::WhereMatchExpression(OperationContext* opCtx,
     : WhereMatchExpressionBase(std::move(params)),
       _opCtx(opCtx),
       _jsFunction(std::make_unique<JsFunction>(_opCtx, getCode(), dbName)) {}
-
-bool WhereMatchExpression::matches(const MatchableDocument* doc, MatchDetails* details) const {
-    validateState();
-    return _jsFunction->runAsPredicate(doc->toBSON());
-}
 
 unique_ptr<MatchExpression> WhereMatchExpression::clone() const {
     validateState();

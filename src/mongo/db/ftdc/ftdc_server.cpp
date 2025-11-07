@@ -27,12 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional.hpp>
-#include <fstream>  // IWYU pragma: keep
-#include <memory>
-#include <utility>
-
-#include <boost/filesystem/path.hpp>
+#include "mongo/db/ftdc/ftdc_server.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -40,28 +35,38 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/ftdc/collection_metrics.h"
 #include "mongo/db/ftdc/collector.h"
 #include "mongo/db/ftdc/config.h"
 #include "mongo/db/ftdc/controller.h"
-#include "mongo/db/ftdc/ftdc_server.h"
 #include "mongo/db/ftdc/ftdc_server_gen.h"
 #include "mongo/db/ftdc/ftdc_system_stats.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/mirror_maestro.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
-#include "mongo/transport/transport_layer_ftdc_collector.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/transport/transport_layer_manager.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/str.h"
 #include "mongo/util/synchronized_value.h"
 
+#include <fstream>  // IWYU pragma: keep
+#include <memory>
+#include <utility>
+
+#include <boost/filesystem/path.hpp>
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
 
 namespace {
+
+MONGO_FAIL_POINT_DEFINE(injectFTDCServerStatusCollectionDelay);
 
 const auto ftdcControllerDecoration =
     ServiceContext::declareDecoration<std::unique_ptr<FTDCController>>();
@@ -88,19 +93,19 @@ void DiagnosticDataCollectionDirectoryPathServerParameter::append(
 Status DiagnosticDataCollectionDirectoryPathServerParameter::setFromString(
     StringData str, const boost::optional<TenantId>&) {
     if (!hasGlobalServiceContext()) {
-        ftdcDirectoryPathParameter = str.toString();
+        ftdcDirectoryPathParameter = std::string{str};
         return Status::OK();
     }
 
     FTDCController* controller = FTDCController::get(getGlobalServiceContext());
     if (controller) {
-        Status s = controller->setDirectory(str.toString());
+        Status s = controller->setDirectory(std::string{str});
         if (!s.isOK()) {
             return s;
         }
     }
 
-    ftdcDirectoryPathParameter = str.toString();
+    ftdcDirectoryPathParameter = std::string{str};
     return Status::OK();
 }
 
@@ -130,6 +135,8 @@ Status onUpdateFTDCPeriod(const std::int32_t potentialNewValue) {
     if (FTDCController * controller;
         hasGlobalServiceContext() && (controller = getFTDCController(getGlobalServiceContext()))) {
         controller->setPeriod(Milliseconds(potentialNewValue));
+        FTDCCollectionMetrics::get(getGlobalServiceContext())
+            .onUpdatingCollectionPeriod(Milliseconds(potentialNewValue));
     }
 
     return Status::OK();
@@ -189,11 +196,54 @@ Status onUpdateFTDCPerInterimUpdate(const std::int32_t potentialNewValue) {
     return Status::OK();
 }
 
+Status onUpdateFTDCSampleTimeout(std::int32_t potentialNewValue) {
+    if (FTDCController * controller;
+        hasGlobalServiceContext() && (controller = getFTDCController(getGlobalServiceContext()))) {
+        return controller->setSampleTimeout(Milliseconds(potentialNewValue));
+    }
+
+    return Status::OK();
+}
+
+Status onUpdateFTDCMinThreads(std::int32_t potentialNewValue) {
+    if (FTDCController * controller;
+        hasGlobalServiceContext() && (controller = getFTDCController(getGlobalServiceContext()))) {
+        return controller->setMinThreads(potentialNewValue);
+    }
+
+    return Status::OK();
+}
+
+Status onUpdateFTDCMaxThreads(std::int32_t potentialNewValue) {
+    if (FTDCController * controller;
+        hasGlobalServiceContext() && (controller = getFTDCController(getGlobalServiceContext()))) {
+        return controller->setMaxThreads(potentialNewValue);
+    }
+
+    return Status::OK();
+}
+
+Status validateSampleTimeoutMillis(std::int32_t potentialNewValue,
+                                   const boost::optional<TenantId>&) {
+    if (hasGlobalServiceContext()) {
+        auto controller = getFTDCController(getGlobalServiceContext());
+        double numCollectors = controller->getNumAsyncPeriodicCollectors();
+        if (potentialNewValue > controller->getPeriod().count() / numCollectors) {
+            return {ErrorCodes::InvalidOptions,
+                    fmt::format("diagnosticDataCollectionSampleTimeoutMillis must be smaller than "
+                                "diagnosticDataCollectionPeriodMillis / {}.",
+                                static_cast<int>(numCollectors))};
+        }
+    }
+
+    return Status::OK();
+}
+
 FTDCSimpleInternalCommandCollector::FTDCSimpleInternalCommandCollector(StringData command,
                                                                        StringData name,
                                                                        const DatabaseName& db,
                                                                        BSONObj cmdObj)
-    : _name(name.toString()),
+    : _name(std::string{name}),
       _request(OpMsgRequestBuilder::create(
           boost::none /* TODO SERVER-74464 investigate if tenant-aware. */,
           db,
@@ -236,6 +286,16 @@ public:
         // mirrored by this process in FTDC collections.
         // "oplog" is included to append the earliest and latest optimes, which allow calculation of
         // the oplog window.
+        // "lockContentionMetrics" is included to collect metrics on mutexes
+
+        auto ru = shard_role_details::getRecoveryUnit(opCtx);
+        if (ru) {
+            // Set the cache max wait timeout very low as we do not want any FTDC
+            // operation to get blocked on cache eviction. 1 is a magic number that
+            // opts
+            // this thread out of all optional eviction without any waiting.
+            ru->setCacheMaxWaitTimeout(Milliseconds(1));
+        }
 
         BSONObjBuilder commandBuilder;
         commandBuilder.append(kCommand, 1);
@@ -243,6 +303,7 @@ public:
         commandBuilder.append("timing", false);
         commandBuilder.append("defaultRWConcern", false);
         commandBuilder.append(MirrorMaestro::kServerStatusSectionName, true);
+        commandBuilder.append("lockContentionMetrics", BSON("listAll" << 0));
 
         // Avoid requesting metrics that aren't available during a shutdown.
         if (_serverShuttingDown) {
@@ -255,10 +316,10 @@ public:
         // frequent schema changes.
         commandBuilder.append("transactions", BSON("includeLastCommitted" << false));
 
-        // Exclude detailed query planning statistics and apiVersions.
-        commandBuilder.append("metrics",
-                              BSON("query" << BSON("multiPlanner" << BSON("histograms" << false))
-                                           << "apiVersions" << false));
+        // Exclude apiVersions.
+        commandBuilder.append("metrics", BSON("apiVersions" << false));
+
+        commandBuilder.append("spillWiredTiger", gSpillWiredTigerServerStatusVerbosity.load());
 
         if (gDiagnosticDataCollectionEnableLatencyHistograms.load()) {
             BSONObjBuilder subObjBuilder(commandBuilder.subobjStart("opLatencies"));
@@ -289,30 +350,39 @@ public:
             }
         }
 
+        if (MONGO_unlikely(injectFTDCServerStatusCollectionDelay.shouldFail())) {
+            injectFTDCServerStatusCollectionDelay.execute([&](const BSONObj& data) {
+                sleepFor(Milliseconds(data["sleepTimeMillis"].numberInt()));
+            });
+        }
+
         builder.appendElements(result);
     }
 
     std::string name() const final {
-        return kName.toString();
+        return std::string{kName};
     }
 
 private:
     bool _serverShuttingDown;
 };
 
-void registerServerCollectorsForRole(FTDCController* controller, ClusterRole clusterRole) {
-    // TODO (SERVER-88268): Add ServerStatus collector as a router collector for every MongoD part
-    // of a sharded cluster.
-
-    // Includes the ServerStatus Collector if this node is:
-    // - If MongoS, only as a router collector.
-    // - If MongoD, only as a shard collector.
-    if (serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer) ||
-        clusterRole.hasExclusively(ClusterRole::ShardServer)) {
-        controller->addPeriodicCollector(std::make_unique<FTDCServerStatusCommandCollector>(),
-                                         ClusterRole::None);
-    }
+void registerServerCollectors(FTDCController* controller) {
+    controller->addPeriodicCollector(std::make_unique<FTDCServerStatusCommandCollector>());
 }
+
+class TransportLayerFTDCCollector final : public FTDCCollectorInterface {
+public:
+    void collect(OperationContext* opCtx, BSONObjBuilder& builder) override {
+        if (auto tl = opCtx->getServiceContext()->getTransportLayerManager()) {
+            tl->appendStatsForFTDC(builder);
+        }
+    }
+
+    std::string name() const override {
+        return "transportLayerStats";
+    }
+};
 
 // Register the FTDC system
 // Note: This must be run before the server parameters are parsed during startup
@@ -321,10 +391,10 @@ void registerServerCollectorsForRole(FTDCController* controller, ClusterRole clu
 void startFTDC(ServiceContext* serviceContext,
                boost::filesystem::path& path,
                FTDCStartMode startupMode,
-               std::vector<RegisterCollectorsFunction> registerCollectorsFns,
-               UseMultiServiceSchema multiServiceSchema) {
+               std::vector<RegisterCollectorsFunction> registerCollectorsFns) {
     FTDCConfig config;
     config.period = Milliseconds(ftdcStartupParams.periodMillis.load());
+    FTDCCollectionMetrics::get(serviceContext).onUpdatingCollectionPeriod(config.period);
     config.metadataCaptureFrequency = ftdcStartupParams.metadataCaptureFrequency.load();
     // Only enable FTDC if our caller says to enable FTDC, MongoS may not have a valid path to write
     // files to so update the diagnosticDataCollectionEnabled set parameter to reflect that.
@@ -333,18 +403,9 @@ void startFTDC(ServiceContext* serviceContext,
     config.enabled = ftdcStartupParams.enabled.load();
     config.maxFileSizeBytes = ftdcStartupParams.maxFileSizeMB.load() * 1024 * 1024;
 
-    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-    if (feature_flags::gMultiServiceLogAndFTDCFormat.isEnabledUseLatestFCVWhenUninitialized(
-            fcvSnapshot) &&
-        serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
-        // By embedding the router in MongoD, the FTDC machinery will produce diagnostic data for
-        // router and shard services, requiring extra space for retention. If that is the case and
-        // `maxDirectorySizeBytes` has not been customized by the user, doubled it.
-        int maxDirectorySizeMBDefault = FTDCConfig::kMaxDirectorySizeBytesDefault / (1024 * 1024);
-        if (ftdcStartupParams.maxDirectorySizeMB.load() == maxDirectorySizeMBDefault) {
-            ftdcStartupParams.maxDirectorySizeMB.addAndFetch(maxDirectorySizeMBDefault);
-        }
-    }
+    config.sampleTimeout = Milliseconds(ftdcStartupParams.sampleTimeoutMillis.load());
+    config.minThreads = ftdcStartupParams.minThreads.load();
+    config.maxThreads = ftdcStartupParams.maxThreads.load();
     config.maxDirectorySizeBytes = ftdcStartupParams.maxDirectorySizeMB.load() * 1024 * 1024;
 
     config.maxSamplesPerArchiveMetricChunk =
@@ -354,14 +415,13 @@ void startFTDC(ServiceContext* serviceContext,
 
     ftdcDirectoryPathParameter = path;
 
-    auto controller = std::make_unique<FTDCController>(path, config, multiServiceSchema);
+    auto controller = std::make_unique<FTDCController>(path, config);
 
     for (auto&& fn : registerCollectorsFns) {
         fn(controller.get());
     }
 
-    controller->addPeriodicCollector(std::make_unique<transport::TransportLayerFTDCCollector>(),
-                                     ClusterRole::None);
+    controller->addPeriodicCollector(std::make_unique<TransportLayerFTDCCollector>());
 
     // Install System Metric Collector as a periodic collector
     installSystemMetricsCollector(controller.get());
@@ -385,33 +445,25 @@ void startFTDC(ServiceContext* serviceContext,
         const bool isShardServerOnly = serverGlobalParams.clusterRole.isShardOnly();
         if (isMongoS || (isReplNode && !isShardServerOnly)) {
             // GetDefaultRWConcern
-            controller->addOnRotateCollector(
-                std::make_unique<FTDCSimpleInternalCommandCollector>(
-                    "getDefaultRWConcern",
-                    "getDefaultRWConcern",
-                    DatabaseName::kEmpty,
-                    BSON("getDefaultRWConcern" << 1 << "inMemory" << true)),
-                ClusterRole::None);
+            controller->addOnRotateCollector(std::make_unique<FTDCSimpleInternalCommandCollector>(
+                "getDefaultRWConcern",
+                "getDefaultRWConcern",
+                DatabaseName::kEmpty,
+                BSON("getDefaultRWConcern" << 1 << "inMemory" << true)));
         }
     }
 
     // CmdBuildInfo
-    controller->addOnRotateCollector(
-        std::make_unique<FTDCSimpleInternalCommandCollector>(
-            "buildInfo", "buildInfo", DatabaseName::kEmpty, BSON("buildInfo" << 1)),
-        ClusterRole::None);
+    controller->addOnRotateCollector(std::make_unique<FTDCSimpleInternalCommandCollector>(
+        "buildInfo", "buildInfo", DatabaseName::kEmpty, BSON("buildInfo" << 1)));
 
     // CmdGetCmdLineOpts
-    controller->addOnRotateCollector(
-        std::make_unique<FTDCSimpleInternalCommandCollector>(
-            "getCmdLineOpts", "getCmdLineOpts", DatabaseName::kEmpty, BSON("getCmdLineOpts" << 1)),
-        ClusterRole::None);
+    controller->addOnRotateCollector(std::make_unique<FTDCSimpleInternalCommandCollector>(
+        "getCmdLineOpts", "getCmdLineOpts", DatabaseName::kEmpty, BSON("getCmdLineOpts" << 1)));
 
     // HostInfoCmd
-    controller->addOnRotateCollector(
-        std::make_unique<FTDCSimpleInternalCommandCollector>(
-            "hostInfo", "hostInfo", DatabaseName::kEmpty, BSON("hostInfo" << 1)),
-        ClusterRole::None);
+    controller->addOnRotateCollector(std::make_unique<FTDCSimpleInternalCommandCollector>(
+        "hostInfo", "hostInfo", DatabaseName::kEmpty, BSON("hostInfo" << 1)));
 
     // Install the new controller
     auto& staticFTDC = ftdcControllerDecoration(serviceContext);

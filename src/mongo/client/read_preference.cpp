@@ -27,11 +27,7 @@
  *    it in the license file.
  */
 
-#include <string>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/client/read_preference.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -41,11 +37,16 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/bson_extract.h"
-#include "mongo/client/read_preference.h"
 #include "mongo/client/read_preference_gen.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -75,7 +76,7 @@ const BSONArray TagSet::kMatchAny = BSON_ARRAY(BSONObj());
 
 Status validateReadPreferenceMode(const std::string& prefStr, const boost::optional<TenantId>&) {
     try {
-        ReadPreference_parse(IDLParserContext(kModeFieldName), prefStr);
+        ReadPreference_parse(prefStr, IDLParserContext(kModeFieldName));
     } catch (DBException& e) {
         return e.toStatus();
     }
@@ -183,7 +184,7 @@ StatusWith<ReadPreferenceSetting> ReadPreferenceSetting::fromInnerBSON(const BSO
 
     // Translate any parsing related exceptions to status.
     try {
-        rp = ReadPreferenceIdl::parse(IDLParserContext("readPreference"), readPrefObj);
+        rp = ReadPreferenceIdl::parse(readPrefObj, IDLParserContext("readPreference"));
     } catch (const DBException& ex) {
         return ex.toStatus();
     }
@@ -192,10 +193,10 @@ StatusWith<ReadPreferenceSetting> ReadPreferenceSetting::fromInnerBSON(const BSO
 }
 
 StatusWith<ReadPreferenceSetting> ReadPreferenceSetting::fromInnerBSON(const BSONElement& elem) {
-    if (elem.type() != mongo::Object) {
+    if (elem.type() != BSONType::object) {
         return Status(ErrorCodes::TypeMismatch,
                       str::stream() << "$readPreference has incorrect type: expected "
-                                    << mongo::Object << " but got " << elem.type());
+                                    << BSONType::object << " but got " << elem.type());
     }
     return fromInnerBSON(elem.Obj());
 }

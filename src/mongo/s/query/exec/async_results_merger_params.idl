@@ -29,9 +29,11 @@
 global:
     cpp_namespace: "mongo"
     cpp_includes:
-        - "mongo/db/shard_id.h"
+        - "mongo/db/sharding_environment/shard_id.h"
         - "mongo/util/net/hostandport.h"
         - "mongo/db/query/client_cursor/cursor_response.h"
+    # TODO SERVER-111290 Remove external dependencies on this IDL file.
+    mod_visibility: needs_replacement
 
 imports:
     - "mongo/db/session/logical_session_id.idl"
@@ -66,13 +68,17 @@ structs:
             cursorResponse:
                 type: CursorResponse
                 query_shape: literal
-                description: The response after establishing a cursor on the remote shard, including
-                             the first batch.
+                description:
+                    The response after establishing a cursor on the remote shard, including
+                    the first batch.
+                # Non-const getter is needed here so we can move the batch of BSONObjs out of
+                # the response if needed.
+                non_const_getter: true
 
     AsyncResultsMergerParams:
         description: The parameters needed to establish an AsyncResultsMerger.
         chained_structs:
-            OperationSessionInfoFromClientBase : OperationSessionInfo
+            OperationSessionInfoFromClientBase: OperationSessionInfo
         query_shape_component: true
         fields:
             sort:

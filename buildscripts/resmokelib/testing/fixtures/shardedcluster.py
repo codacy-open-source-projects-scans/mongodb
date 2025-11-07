@@ -8,14 +8,19 @@ import pymongo
 import pymongo.errors
 import yaml
 
+from buildscripts.resmokelib.extensions import (
+    delete_extension_configs,
+    find_and_generate_extension_configs,
+)
 from buildscripts.resmokelib.testing.fixtures import _builder, external, interface
+from buildscripts.resmokelib.utils.sharded_cluster_util import (
+    inject_catalog_metadata_on_the_csrs,
+    refresh_logical_session_cache_with_retry,
+)
 
 
 class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface):
     """Fixture which provides JSTests with a sharded cluster to run against."""
-
-    _CONFIGSVR_REPLSET_NAME = "config-rs"
-    _SHARD_REPLSET_NAME_PREFIX = "shard-rs"
 
     AWAIT_SHARDING_INITIALIZATION_TIMEOUT_SECS = 60
 
@@ -39,20 +44,17 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
         cluster_logging_prefix=None,
         config_shard=None,
         use_auto_bootstrap_procedure=None,
-        embedded_router=False,
         replica_set_endpoint=False,
         random_migrations=False,
         launch_mongot=False,
+        load_all_extensions=False,
         set_cluster_parameter=None,
+        inject_catalog_metadata=None,
+        shard_replset_name_prefix="shard-rs",
+        configsvr_replset_name="config-rs",
     ):
-        """Initialize ShardedClusterFixture with different options for the cluster processes.
-
-        :param embedded_router - True if this ShardedCluster is running in "embedded router mode". Today, this means that:
-            (1) The cluster has no dedicated routers.
-            (2) Each shard-server in the cluster is started with the "--routerPort" CLI switch to enable routing.
-            (3) An arbitrary subset of size `num_routers` of the shard-servers are chosen at fixture startup to serve as the routers,
-                and all routing requests are directed to the routing ports of those nodes.
-            TODO SERVER-86554: Support a mix of shard servers with the routerPort opened and not.
+        """
+        Initialize ShardedClusterFixture with different options for the cluster processes.
         """
         interface.Fixture.__init__(self, logger, job_num, fixturelib, dbpath_prefix=dbpath_prefix)
 
@@ -70,6 +72,16 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
         self.mongod_options = self.fixturelib.make_historic(
             self.fixturelib.default_if_none(mongod_options, {})
         )
+
+        self.load_all_extensions = load_all_extensions or self.config.LOAD_ALL_EXTENSIONS
+        if self.load_all_extensions:
+            self.loaded_extensions = find_and_generate_extension_configs(
+                is_evergreen=self.config.EVERGREEN_TASK_ID,
+                logger=self.logger,
+                mongod_options=self.mongod_options,
+                mongos_options=self.mongos_options,
+            )
+
         self.mongod_executable = mongod_executable
         self.mongod_options["set_parameters"] = self.fixturelib.make_historic(
             mongod_options.get("set_parameters", {})
@@ -92,9 +104,11 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
         self.num_mongos = num_mongos
         self.auth_options = auth_options
         self.use_auto_bootstrap_procedure = use_auto_bootstrap_procedure
-        self.embedded_router_mode = embedded_router
         self.replica_endpoint_mode = replica_set_endpoint
         self.set_cluster_parameter = set_cluster_parameter
+        self.inject_catalog_metadata = inject_catalog_metadata
+        self.configsvr_replset_name = configsvr_replset_name
+        self.shard_replset_name_prefix = shard_replset_name_prefix
 
         # Options for roles - shardsvr, configsvr.
         self.configsvr_options = self.fixturelib.make_historic(
@@ -194,7 +208,7 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
                 task.result()
 
         # Need to get the new config shard connection string generated from the auto-bootstrap procedure
-        if self.use_auto_bootstrap_procedure and not self.embedded_router_mode:
+        if self.use_auto_bootstrap_procedure:
             for mongos in self.mongos:
                 mongos.mongos_options["configdb"] = self.configsvr.get_internal_connection_string()
 
@@ -202,7 +216,14 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
             # These mongot parameters are popped from shard.mongod_options when mongod is launched in above
             # setup() call. As such, the final values can't be cleanly copied over from mongod_options, but
             # need to be recreated here.
-            self.mongotHost = "localhost:" + str(self.shards[-1].mongot_port)
+            if self.mongos[0].mongos_options["set_parameters"].get("useGrpcForSearch"):
+                # If mongos & mongod are configured to use egress gRPC for search, then set the
+                # `mongotHost` parameter to the mongot listening address expecting communication via
+                # the MongoDB gRPC protocol (which we configured in setup_mongot_params).
+                self.mongotHost = "localhost:" + str(self.shards[-1].mongot_grpc_port)
+            else:
+                self.mongotHost = "localhost:" + str(self.shards[-1].mongot_port)
+
             self.searchIndexManagementHostAndPort = self.mongotHost
 
             for mongos in self.mongos:
@@ -296,13 +317,18 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
 
         # Ensure that the sessions collection gets auto-sharded by the config server
         if self.configsvr is not None:
-            self.refresh_logical_session_cache(self.configsvr)
+            primary_mongo_client = self.configsvr.get_primary().mongo_client()
+            refresh_logical_session_cache_with_retry(primary_mongo_client, self.configsvr)
 
         for shard in self.shards:
             self.refresh_logical_session_cache(shard)
 
         if self.set_cluster_parameter:
             self.run_set_cluster_parameter()
+
+        if self.inject_catalog_metadata:
+            csrs_client = interface.build_client(self.configsvr, self.auth_options)
+            inject_catalog_metadata_on_the_csrs(csrs_client, self.inject_catalog_metadata)
 
         self.is_ready = True
 
@@ -365,9 +391,12 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
                 if str(node.port) in ports:
                     return shard
 
-    def _do_teardown(self, mode=None):
+    def _do_teardown(self, finished=False, mode=None):
         """Shut down the sharded cluster."""
         self.logger.info("Stopping all members of the sharded cluster...")
+
+        if finished and self.load_all_extensions and self.loaded_extensions:
+            delete_extension_configs(self.loaded_extensions, self.logger)
 
         running_at_start = self.is_running()
         if not running_at_start:
@@ -435,11 +464,11 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
 
         return ",".join([mongos.get_internal_connection_string() for mongos in self.mongos])
 
-    def get_shell_connection_string(self):
+    def get_shell_connection_string(self, use_grpc=False):
         if self.mongos is None:
             raise ValueError("Must call setup() before calling get_shell_connection_string()")
 
-        return ",".join([mongos.get_shell_connection_string() for mongos in self.mongos])
+        return ",".join([mongos.get_shell_connection_string(use_grpc) for mongos in self.mongos])
 
     def _get_replica_set_endpoint(self):
         # The replica set endpoint would only become active after the replica set has become a
@@ -454,24 +483,10 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
             raise ValueError("Cannot use replica set endpoint on a multi-shard cluster")
         return self.shards[0]
 
-    def _get_embedded_router(self):
-        # If the embedded router is enabled, we must have a mongos placed in a node acting as a
-        # configsvr.
-        config_mongos = next((mongos for mongos in self.mongos if mongos.is_from_configsvr()), None)
-        if config_mongos:
-            return config_mongos
-        else:
-            raise ValueError(
-                "Cannot use the embedded router mode without opening the routerPort of the configsvr"
-            )
-
     def get_shell_connection_url(self):
         """Return the driver connection URL."""
         if self.is_ready and self.replica_endpoint_mode:
             return self._get_replica_set_endpoint().get_shell_connection_url()
-
-        if self.embedded_router_mode:
-            return self._get_embedded_router().get_shell_connection_url()
 
         return "mongodb://" + self.get_shell_connection_string()
 
@@ -479,9 +494,6 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
         """Return the driver connection URL."""
         if self.is_ready and self.replica_endpoint_mode:
             return self._get_replica_set_endpoint().get_driver_connection_url()
-
-        if self.embedded_router_mode:
-            return self._get_embedded_router().get_driver_connection_url()
 
         return "mongodb://" + self.get_internal_connection_string()
 
@@ -519,11 +531,8 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
         )
         mongod_options["configsvr"] = ""
         mongod_options["dbpath"] = os.path.join(self._dbpath_prefix, "config")
-        mongod_options["replSet"] = ShardedClusterFixture._CONFIGSVR_REPLSET_NAME
+        mongod_options["replSet"] = self.configsvr_replset_name
         mongod_options["storageEngine"] = "wiredTiger"
-
-        if self.embedded_router_mode:
-            mongod_options["routerPort"] = ""
 
         return {
             "mongod_options": mongod_options,
@@ -568,7 +577,7 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
         )
         mongod_options["shardsvr"] = ""
         mongod_options["dbpath"] = os.path.join(self._dbpath_prefix, "shard{}".format(index))
-        mongod_options["replSet"] = self._SHARD_REPLSET_NAME_PREFIX + str(index)
+        mongod_options["replSet"] = self.shard_replset_name_prefix + str(index)
 
         if self.config_shard == index:
             del mongod_options["shardsvr"]
@@ -597,9 +606,6 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
                         )
                 else:
                     shard_options[option] = value
-
-        if self.embedded_router_mode:
-            mongod_options["routerPort"] = ""
 
         use_auto_bootstrap_procedure = (
             self.use_auto_bootstrap_procedure and self.config_shard == index
@@ -661,6 +667,10 @@ class ShardedClusterFixture(interface.Fixture, interface._DockerComposeInterface
             self.logger.info("Adding %s as a shard...", connection_string)
             client.admin.command({"addShard": connection_string})
 
+    def internode_validation(self):
+        for replicaset in self.shards:
+            replicaset.internode_validation()
+
 
 class ExternalShardedClusterFixture(external.ExternalFixture, ShardedClusterFixture):
     """Fixture to interact with external sharded cluster fixture."""
@@ -702,7 +712,7 @@ class ExternalShardedClusterFixture(external.ExternalFixture, ShardedClusterFixt
         """Use ExternalFixture method."""
         return external.ExternalFixture.await_ready(self)
 
-    def _do_teardown(self, mode=None):
+    def _do_teardown(self, finished=False, mode=None):
         """Use ExternalFixture method."""
         return external.ExternalFixture._do_teardown(self)
 
@@ -729,72 +739,6 @@ class ExternalShardedClusterFixture(external.ExternalFixture, ShardedClusterFixt
     def get_node_info(self):
         """Use ExternalFixture method."""
         return external.ExternalFixture.get_node_info(self)
-
-
-class _RouterView(interface.Fixture):
-    """A fixture that exposes the routing API of a routing-enabled shardsvr."""
-
-    def __init__(self, logger, job_num, fixturelib, is_configsvr: bool, mongod):
-        interface.Fixture.__init__(self, logger, job_num, fixturelib)
-        self.mongod = mongod
-        self.port = self.mongod.router_port
-        self.is_configsvr = is_configsvr
-        if not self.port:
-            raise ValueError(
-                "Mongod must be started with the --routerPort flag to support a RouterView"
-            )
-
-    def pids(self):
-        return self.mongod.pids
-
-    def is_from_configsvr(self):
-        """Return true if the router is part of a mongod acting as a config server."""
-        return self.is_configsvr
-
-    def await_ready(self):
-        """Block until the fixture can be used for testing."""
-        deadline = time.time() + interface.Fixture.AWAIT_READY_TIMEOUT_SECS
-
-        # Wait until the router is accepting connections. The retry logic is necessary to support
-        # versions of PyMongo <3.0 that immediately raise a ConnectionFailure if a connection cannot
-        # be established.
-        while True:
-            # Check whether the process exited for some reason.
-            self.mongod.await_ready()
-            try:
-                # Use a shorter connection timeout to more closely satisfy the requested deadline.
-                client = self.mongo_client(timeout_millis=500)
-                client.admin.command("ping")
-                break
-            except pymongo.errors.ConnectionFailure:
-                remaining = deadline - time.time()
-                if remaining <= 0.0:
-                    raise self.fixturelib.ServerFailure(
-                        "Failed to connect to embedded router on port {} after {} seconds".format(
-                            self.port, interface.Fixture.AWAIT_READY_TIMEOUT_SECS
-                        )
-                    )
-
-                self.logger.info("Waiting to connect to embedded router on port %d.", self.port)
-                time.sleep(0.1)  # Wait a little bit before trying again.
-
-        self.logger.info("Successfully contacted the embedded router on port %d.", self.port)
-
-    def is_running(self):
-        """Return true if the cluster is still operating."""
-        return self.mongod.is_running()
-
-    def get_internal_connection_string(self):
-        """Return the internal connection string."""
-        return f"localhost:{self.port}"
-
-    def get_driver_connection_url(self):
-        """Return the driver connection URL."""
-        return "mongodb://" + self.get_internal_connection_string()
-
-    def _all_mongo_d_s_t(self):
-        """Return the _RouterView instance."""
-        return [self]
 
 
 class _MongoSFixture(interface.Fixture, interface._DockerComposeInterface):
@@ -917,7 +861,7 @@ class _MongoSFixture(interface.Fixture, interface._DockerComposeInterface):
 
         self.logger.info("Successfully contacted the mongos on port %d.", self.port)
 
-    def _do_teardown(self, mode=None):
+    def _do_teardown(self, finished=False, mode=None):
         if self.config.NOOP_MONGO_D_S_PROCESSES:
             self.logger.info(
                 "This is running against an External System Under Test setup with `docker-compose.yml` -- skipping teardown."
@@ -980,8 +924,8 @@ class _MongoSFixture(interface.Fixture, interface._DockerComposeInterface):
         """Return the internal connection string."""
         return f"{self._get_hostname()}:{self.port}"
 
-    def get_shell_connection_string(self):
-        port = self.port if not self.config.SHELL_GRPC else self.grpcPort
+    def get_shell_connection_string(self, use_grpc=False):
+        port = self.port if not (self.config.SHELL_GRPC or use_grpc) else self.grpcPort
         return f"{self._get_hostname()}:{port}"
 
     def get_shell_connection_url(self):
@@ -1002,7 +946,6 @@ class _MongoSFixture(interface.Fixture, interface._DockerComposeInterface):
             name=self.logger.name,
             port=self.port,
             pid=self.mongos.pid,
-            router_port=None,
         )
         return [info]
 

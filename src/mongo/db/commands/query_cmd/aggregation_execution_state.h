@@ -28,20 +28,23 @@
  */
 #pragma once
 
-#include "mongo/db/catalog/external_data_source_scope_guard.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/external_data_source_scope_guard.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
+#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/read_concern.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/db/views/view.h"
-#include "mongo/s/catalog_cache.h"
+
 #include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -72,10 +75,7 @@ using DeferredCmd = DeferredFn<BSONObj>;
 class AggExState {
 public:
     /**
-     * Upon construction, the context always references the inital request it is constructed with.
-     * However, if upon computation it is determined that aggregation is on a view, the 'setView()'
-     * function can be used to reset the state to a new equivelant aggregation pipeline on the
-     * underlying collection.
+     * Upon construction, the context always references the initial request it is constructed with.
      */
     AggExState(OperationContext* opCtx,
                AggregateCommandRequest& request,
@@ -83,12 +83,13 @@ public:
                const BSONObj& cmdObj,
                const PrivilegeVector& privileges,
                const std::vector<std::pair<NamespaceString, std::vector<ExternalDataSourceInfo>>>&
-                   usedExternalDataSources)
+                   usedExternalDataSources,
+               const boost::optional<ExplainOptions::Verbosity>& verbosity)
         : _aggReqDerivatives(new AggregateRequestDerivatives(request, liteParsedPipeline, cmdObj)),
           _opCtx(opCtx),
           _executionNss(request.getNamespace()),
           _privileges(privileges),
-          _originalAggReqDerivatives(request, liteParsedPipeline, cmdObj) {
+          _verbosity(verbosity) {
         // Create virtual collections and drop them when aggregate command is done.
         // If a cursor is registered, the ExternalDataSourceScopeGuard will be stored in the cursor;
         // when the cursor is later destroyed, the scope guard will also be destroyed, and any
@@ -102,8 +103,7 @@ public:
     }
 
     /**
-     * Getter functions. Please note that some values can change after setting the view or
-     * namespace.
+     * Getter functions. Please note that some values can change after setting the namespace.
      */
 
     OperationContext* getOpCtx() const {
@@ -115,11 +115,11 @@ public:
     }
 
     /**
-     * Returns the original request the class was constructed with, regardless if setView() has been
-     * called.
+     * Returns the original request the class was constructed with. For AggExState, this is just the
+     * normal request.
      */
-    const AggregateCommandRequest& getOriginalRequest() const {
-        return _originalAggReqDerivatives.request;
+    virtual const AggregateCommandRequest& getOriginalRequest() const {
+        return getRequest();
     }
 
     const NamespaceString& getExecutionNss() const {
@@ -127,11 +127,15 @@ public:
     }
 
     /**
-     * Returns the namespace of the original request the class was constructed with, regardless if
-     * setView() has been called.
+     * Returns the namespace of the original request the class was constructed with. For AggExState,
+     * this is just the namespace on the request.
      */
     const NamespaceString& getOriginalNss() const {
-        return _originalAggReqDerivatives.request.getNamespace();
+        return getOriginalRequest().getNamespace();
+    }
+
+    virtual boost::optional<NamespaceString> getViewNss() const {
+        return boost::none;
     }
 
     const DeferredCmd& getDeferredCmd() const {
@@ -144,6 +148,10 @@ public:
 
     std::shared_ptr<ExternalDataSourceScopeGuard> getExternalDataSourceScopeGuard() const {
         return _externalDataSourceGuard;
+    }
+
+    boost::optional<ExplainOptions::Verbosity> getVerbosity() const {
+        return _verbosity;
     }
 
     /**
@@ -161,15 +169,7 @@ public:
         return _aggReqDerivatives->liteParsedPipeline.getForeignExecutionNamespaces();
     }
 
-    boost::optional<const ResolvedView&> getResolvedView() const {
-        if (_resolvedView.has_value()) {
-            return boost::optional<const ResolvedView&>(_resolvedView.value());
-        } else {
-            return boost::none;
-        }
-    }
-
-    StatusWith<StringMap<ResolvedNamespace>> resolveInvolvedNamespaces() const;
+    StatusWith<ResolvedNamespaceMap> resolveInvolvedNamespaces() const;
 
     /**
      * Setter functions
@@ -180,35 +180,30 @@ public:
      * view (notably the oplog)
      */
     void setExecutionNss(NamespaceString nss) {
-        _executionNss = nss;
+        _executionNss = std::move(nss);
     }
-
-    /**
-     * Once the aggregation is calculated to be on view, this function is used to set the internal
-     * state of the aggregation execution on the resolved view.
-     *
-     * TODO SERVER-93539 remove this function and construct a ResolvedViewAggExState instead.
-     */
-    void setView(std::shared_ptr<const CollectionCatalog> catalog, const ViewDefinition* view);
-
-    /**
-     * Only to be used after this class has been set as a resolved view.
-     *
-     * TODO SERVER-93539 put this function only on the ResolvedViewAggExState.
-     */
-    ScopedSetShardRole setShardRole(const CollectionRoutingInfo& cri);
 
     /* Checking member functions (returns bool / status describing the aggregation state) */
-
-    bool aggIsOnView() const {
-        return _resolvedView.has_value();
-    }
 
     /**
      * True iff aggregation has a $changeStream stage.
      */
     bool hasChangeStream() const {
         return _aggReqDerivatives->liteParsedPipeline.hasChangeStream();
+    }
+
+    /**
+     * True iff aggregation represents a hybrid search pipeline ($rankFusion or $scoreFusion).
+     *
+     * If the hybrid search request came from the router, that will get annotated on the request
+     * from the router (which is necessary to distinguish it as $rankFusion or $scoreFusion since
+     * the pipeline dispatched will be the desugared representation). If the hybrid search request
+     * came straight from the user, we'll identify via the lite-parsed pipeline.
+     */
+    bool isHybridSearchPipeline() const {
+        // Use the original request as we want this assert to work during/after view resolution.
+        return _aggReqDerivatives->request.getIsHybridSearch() ||
+            _aggReqDerivatives->liteParsedPipeline.hasHybridSearchStage();
     }
 
     /**
@@ -254,16 +249,32 @@ public:
      */
     std::unique_ptr<AggCatalogState> createAggCatalogState();
 
-private:
     /**
-     * Upconverts the read concern for a change stream aggregation, if necessary.
-     *
-     * If there is no given read concern level on the given object, upgrades the level to 'majority'
-     * and waits for read concern. If a read concern level is already specified on the given read
-     * concern object, this method does nothing.
+     * Returns whether the aggregation in question is on a view or not. This is useful when using
+     * dynamic polymorphism.
      */
-    void adjustChangeStreamReadConcern();
+    virtual bool isView() const {
+        return false;
+    }
 
+    virtual const ResolvedView& getResolvedView() const {
+        MONGO_UNREACHABLE;
+    }
+
+    /**
+     * Returns the total aggregation pipeline for a view. If called on the base class, returns the
+     * normal pipeline (no op).
+     */
+    virtual std::unique_ptr<Pipeline> applyViewToPipeline(
+        boost::intrusive_ptr<ExpressionContext> expCtx,
+        std::unique_ptr<Pipeline> pipeline,
+        boost::optional<UUID> uuid) const {
+        return pipeline;
+    }
+
+    virtual ~AggExState() = default;
+
+protected:
     /**
      * This inner struct holds the AggregateCommandRequest, as well derivative structures that
      * are are processed from it (LiteParsedPipeline & DeferredCmd).
@@ -289,11 +300,12 @@ private:
               liteParsedPipeline(liteParsedPipeline),
               cmdObj(DeferredCmd(cmdObj)) {}
 
-        // Constructor for when the BSONObj's construction is to be deferred
+        // Constructor for when the BSONObj's construction is to be deferred.
         AggregateRequestDerivatives(AggregateCommandRequest& request,
-                                    const LiteParsedPipeline& liteParsedPipeline,
-                                    std::function<BSONObj()> BSONObjFn)
-            : request(request), liteParsedPipeline(liteParsedPipeline), cmdObj(BSONObjFn) {}
+                                    const LiteParsedPipeline& liteParsedPipeline)
+            : request(request),
+              liteParsedPipeline(liteParsedPipeline),
+              cmdObj([&request]() { return request.toBSON(); }) {}
     };
 
     // The AggregateRequestDerivatives variables is wrapped in a unique_ptr because it needs to be
@@ -308,6 +320,23 @@ private:
     // Set upon construction and never reset. Should never be nullptr.
     OperationContext* _opCtx;
 
+    /**
+     * Protected move constructor for derived classes only.
+     */
+    AggExState(AggExState&& other)
+        : _aggReqDerivatives(std::move(other._aggReqDerivatives)),
+          _opCtx(other._opCtx),
+          _executionNss(std::move(other._executionNss)),
+          _privileges(other._privileges),
+          _externalDataSourceGuard(std::move(other._externalDataSourceGuard)),
+          _verbosity(other._verbosity) {
+        other._opCtx = nullptr;
+    }
+
+    AggExState(const AggExState&) = delete;
+    AggExState& operator=(const AggExState&) = delete;
+
+private:
     // This is the namespace that the aggregation will be executed in.
     // This is sometimes, but not necessarily the same namespace as original request.
     // Alternatively, the execution namespace can be set to the namespace of the
@@ -323,41 +352,91 @@ private:
 
     std::shared_ptr<ExternalDataSourceScopeGuard> _externalDataSourceGuard;
 
-    /* The following member variables are added to support views */
+    // Has a value if the aggregation has explain: true, to be used in
+    // AggCatalogState::createExpressionContext to populate verbosity on the expression context.
+    boost::optional<ExplainOptions::Verbosity> _verbosity;
 
-    // An 'original' copy of the request derivatives struct is kept for the case where the
+    /**
+     * Upconverts the read concern for a change stream aggregation, if necessary.
+     *
+     * If there is no given read concern level on the given object, upgrades the level to
+     * 'majority' and waits for read concern. If a read concern level is already specified on
+     * the given read concern object, this method does nothing.
+     */
+    void adjustChangeStreamReadConcern();
+};
+
+class ResolvedViewAggExState : public AggExState {
+public:
+    ResolvedViewAggExState(AggExState&& baseState,
+                           std::unique_ptr<AggCatalogState>& catalog,
+                           const ViewDefinition& view);
+
+    /**
+     * Returns a new ResolvedViewAggExState object after performing a collation compatibility check.
+     */
+    static StatusWith<std::unique_ptr<ResolvedViewAggExState>> create(
+        AggExState&& aggExState, std::unique_ptr<AggCatalogState>& aggCatalogState);
+
+    bool isView() const override {
+        return true;
+    }
+
+    /**
+     * Returns the resolved view attached to the class.
+     */
+    const ResolvedView& getResolvedView() const override {
+        return _resolvedView;
+    }
+
+    std::unique_ptr<Pipeline> applyViewToPipeline(boost::intrusive_ptr<ExpressionContext> expCtx,
+                                                  std::unique_ptr<Pipeline> pipeline,
+                                                  boost::optional<UUID> uuid) const override;
+
+    ScopedSetShardRole setShardRole(const CollectionRoutingInfo& cri);
+
+    /**
+     * Returns the original request the class was constructed with.
+     */
+    const AggregateCommandRequest& getOriginalRequest() const override {
+        return _originalAggReqDerivatives->request;
+    }
+
+    boost::optional<NamespaceString> getViewNss() const override {
+        return boost::make_optional(getOriginalNss());
+    }
+
+private:
+    // An 'original' copy of the request derivatives struct is kept when the
     // aggregation is on a view. To process an aggregation on a view the underlying collection
     // and pipeline are first resolved, and then the aggregation is re-processed as if it were
     // on a the resolved collection with an updated request that is equivalent to the original
-    // request. Both the primary and original copies of this struct should be set upon construction.
-    // We should not be worried about memory costs as the underlying struct only holds
-    // references. This variable will never be reassigned after construction.
-    AggregateRequestDerivatives _originalAggReqDerivatives;
+    // request. This variable will never be reassigned after construction.
+    const std::unique_ptr<AggregateRequestDerivatives> _originalAggReqDerivatives;
 
-    // Once '_aggReqDerivatives' points to a new object related to the resolved view parameters,
-    // the member references point to these underlying class variables.
-    // Unfortunately we can't change the underlying member fields in AggregateCommandRequest
-    // to not be references because we accept these variables as such in the constructor.
-    // This class would need a way to have complete ownership of the currently referenced variables
-    // (perhaps with move semantics) to get rid of these member variables.
-    boost::optional<AggregateCommandRequest> _resolvedViewRequest;
-    boost::optional<LiteParsedPipeline> _resolvedViewLiteParsedPipeline;
+    ResolvedView _resolvedView;
 
-    // Has a value iff the aggregation is on a view. It will always start without a value,
-    // and then optionally be populated upon calculation that the aggregation is on a view.
-    // Is used both as a demarcator of if the aggregation is on a view,
-    // and for the underlying value itself.
-    boost::optional<ResolvedView> _resolvedView;
+    // After construction of the ResolvedViewAggExState, we return to the start of runAggregate()
+    // Both of these fields below will now be the underlying resolved _aggReqDerivatives for
+    // aggregation as we return to the start of runAggregate() with the newly resolved full
+    // pipeline. Since the AggExState base class only stores references inside
+    // AggregateRequestDerivatives, we need to store them here, but usages should almost always go
+    // through _aggReqDerivatives instead.
+    //
+    // TODO SERVER-93536 Remove this member variable once AggregateRequestDerivatives stores
+    // the request by value instead of reference.
+    AggregateCommandRequest _resolvedViewRequest_DO_NOT_USE_DIRECTLY;
+    const LiteParsedPipeline _resolvedViewLiteParsedPipeline_DO_NOT_USE_DIRECTLY;
 };
 
 /**
  * AggCatalogState encapsulates the catalog state relevant to an aggregation pipeline, including
  * ownership of any catalog locks, which are released upon destruction. It also provides
- * resolveCollator() to resolve the query collation from the request and collection's collation in
- * the catalog.
+ * resolveCollator() to resolve the query collation from the request and collection's collation
+ * in the catalog.
  *
- * This class is abstract; to create an instance appropriate to a given pipeline, the factory class
- * AggCatalogStateFactory can be used.
+ * This class is abstract; to create an instance appropriate to a given pipeline, the factory
+ * class AggCatalogStateFactory can be used.
  */
 class AggCatalogState {
 public:
@@ -380,10 +459,10 @@ public:
     virtual bool lockAcquired() const = 0;
 
     /**
-     * Return the catalog context for this pipeline. This will fail an invariant if called for a
-     * collectionless pipeline.
+     * Return the main collection or view for this pipeline. This will fail an invariant if called
+     * for a collectionless pipeline.
      */
-    virtual const AutoGetCollectionForReadCommandMaybeLockFree& getCtx() const = 0;
+    virtual const CollectionOrViewAcquisition& getMainCollectionOrView() const = 0;
 
     /**
      * Collectionless pipelines may need an 'AutoStatsTracker' to track stats. This method will
@@ -403,26 +482,48 @@ public:
     virtual const MultipleCollectionAccessor& getCollections() const = 0;
 
     /**
-     * Get the collection catalog instance for this pipeline.
+     * Get the acquired catalog.
      */
     virtual std::shared_ptr<const CollectionCatalog> getCatalog() const = 0;
 
     /**
-     * Get the UUID, if any, for the primary collection of the pipeline.
+     * Use the acquired catalog to resolve the view.
+     */
+    virtual StatusWith<ResolvedView> resolveView(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        boost::optional<BSONObj> timeSeriesCollator) const = 0;
+    /**
+     * Get the UUID, if any, for the main collection of the pipeline.
      */
     virtual boost::optional<UUID> getUUID() const = 0;
 
+    virtual bool isTimeseries() const = 0;
+
     /**
-     * Free any catalog locks acquired by the constructor.
+     * Free any catalog resources acquired by the constructor.
      */
-    virtual void relinquishLocks() = 0;
+    virtual void relinquishResources() = 0;
+
+    /**
+     * Stash any catalog resources acquired by the constructor.
+     * 'transactionResourcesStasher' must not be nullptr.
+     */
+    virtual void stashResources(TransactionResourcesStasher* transactionResourcesStasher) = 0;
 
     query_shape::CollectionType determineCollectionType() const;
 
     /**
-     * Create an ExpressionContext instance for this pipeline, which involves first resolving the
-     * collation.  The expression context is used to store state that is useful to access throughout
-     * the lifespan of this query.
+     * Check if any namespaces referenced by the pipeline require extended range support for
+     * timeseries.
+     */
+    bool requiresExtendedRangeSupportForTimeseries(
+        const ResolvedNamespaceMap& resolvedNamespaces) const;
+
+    /**
+     * Create an ExpressionContext instance for this pipeline, which involves first resolving
+     * the collation.  The expression context is used to store state that is useful to access
+     * throughout the lifespan of this query.
      */
     boost::intrusive_ptr<ExpressionContext> createExpressionContext();
 
@@ -430,6 +531,12 @@ public:
 
 protected:
     explicit AggCatalogState(const AggExState& aggExState) : _aggExState{aggExState} {}
+
+    /**
+     * Return the main collection type for this pipeline. This will fail an invariant if called for
+     * a collectionless pipeline.
+     */
+    virtual query_shape::CollectionType getMainCollectionType() const = 0;
 
     // Reference to the aggregation execution state, which is owned by the caller of
     // _runAggregate(). Since AggCatalogState is always allocated from within _runAggregate(),

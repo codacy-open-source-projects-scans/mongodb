@@ -27,20 +27,21 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <limits>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/ftdc/compressor.h"
 
 #include "mongo/base/data_builder.h"
 #include "mongo/base/data_range_cursor.h"
 #include "mongo/base/status.h"
-#include "mongo/db/ftdc/compressor.h"
 #include "mongo/db/ftdc/config.h"
 #include "mongo/db/ftdc/util.h"
-#include "mongo/db/ftdc/varint.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/varint.h"
+
+#include <limits>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -133,7 +134,7 @@ StatusWith<std::tuple<ConstDataRange, Date_t>> FTDCCompressor::getCompressedSamp
 
     if (_metricsCount != 0 && _deltaCount != 0) {
         // On average, we do not need all 10 bytes for every sample, worst case, we grow the buffer
-        DataBuilder db(_metricsCount * _deltaCount * FTDCVarInt::kMaxSizeBytes64 / 2);
+        DataBuilder db(_metricsCount * _deltaCount * VarInt::kMaxSizeBytes64 / 2);
 
         std::uint32_t zeroesCount = 0;
 
@@ -161,12 +162,12 @@ StatusWith<std::tuple<ConstDataRange, Date_t>> FTDCCompressor::getCompressedSamp
 
                 // If we have a non-zero sample, then write out all the accumulated zero samples.
                 if (zeroesCount > 0) {
-                    auto s1 = db.writeAndAdvance(FTDCVarInt(0));
+                    auto s1 = db.writeAndAdvance(VarInt(0));
                     if (!s1.isOK()) {
                         return s1;
                     }
 
-                    auto s2 = db.writeAndAdvance(FTDCVarInt(zeroesCount - 1));
+                    auto s2 = db.writeAndAdvance(VarInt(zeroesCount - 1));
                     if (!s2.isOK()) {
                         return s2;
                     }
@@ -174,7 +175,7 @@ StatusWith<std::tuple<ConstDataRange, Date_t>> FTDCCompressor::getCompressedSamp
                     zeroesCount = 0;
                 }
 
-                auto s3 = db.writeAndAdvance(FTDCVarInt(delta));
+                auto s3 = db.writeAndAdvance(VarInt(delta));
                 if (!s3.isOK()) {
                     return s3;
                 }
@@ -184,12 +185,12 @@ StatusWith<std::tuple<ConstDataRange, Date_t>> FTDCCompressor::getCompressedSamp
             // RLE
             // pair of zero information.
             if ((i == (_metricsCount - 1)) && zeroesCount) {
-                auto s1 = db.writeAndAdvance(FTDCVarInt(0));
+                auto s1 = db.writeAndAdvance(VarInt(0));
                 if (!s1.isOK()) {
                     return s1;
                 }
 
-                auto s2 = db.writeAndAdvance(FTDCVarInt(zeroesCount - 1));
+                auto s2 = db.writeAndAdvance(VarInt(zeroesCount - 1));
                 if (!s2.isOK()) {
                     return s2;
                 }

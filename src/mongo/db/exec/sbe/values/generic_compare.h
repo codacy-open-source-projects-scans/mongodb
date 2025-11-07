@@ -27,9 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/cstdint.hpp>
-#include <boost/optional/optional.hpp>
-#include <cmath>
+#pragma once
 
 #include "mongo/base/compare_numbers.h"
 #include "mongo/base/string_data_comparator.h"
@@ -39,6 +37,10 @@
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/collation/collator_interface.h"
+
+#include <cmath>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace sbe {
@@ -107,7 +109,7 @@ inline std::pair<TypeTags, Value> genericCompare(TypeTags lhsTag,
                 return {TypeTags::Boolean, bitcastFrom<bool>(result)};
             }
             default:
-                MONGO_UNREACHABLE;
+                MONGO_UNREACHABLE_TASSERT(11122913);
         }
     } else if (isStringOrSymbol(lhsTag) && isStringOrSymbol(rhsTag)) {
         auto lhsStr = getStringOrSymbolView(lhsTag, lhsValue);

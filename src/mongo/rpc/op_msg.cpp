@@ -28,38 +28,36 @@
  */
 
 
-#include <bitset>
-#include <boost/cstdint.hpp>
-#include <fmt/format.h>
-#include <memory>
-#include <set>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/rpc/op_msg.h"
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_type_validated.h"
 #include "mongo/base/data_view.h"
 #include "mongo/base/error_codes.h"
+#include "mongo/bson/dotted_path/dotted_path_support.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/multitenancy_gen.h"
-#include "mongo/db/query/bson/dotted_path_support.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/rpc/object_check.h"  // IWYU pragma: keep
-#include "mongo/rpc/op_msg.h"
 #include "mongo/util/bufreader.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/str.h"
+
+#include <bitset>
+#include <memory>
+#include <set>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #ifdef MONGO_CONFIG_WIREDTIGER_ENABLED
 #include <wiredtiger.h>
@@ -184,6 +182,8 @@ OpMsg OpMsg::parse(const Message& message, Client* client) try {
                 uassert(40430, "Multiple body sections in message", !haveBody);
                 haveBody = true;
                 msg.body = sectionsBuf.read<Validated<BSONObj>>();
+                uassertStatusOK(msg.body.validateBSONObjSize(kOpMsgReplyBSONBufferMaxSize)
+                                    .addContext("Parsing opMsg body failed"));
                 break;
             }
 
@@ -205,9 +205,15 @@ OpMsg OpMsg::parse(const Message& message, Client* client) try {
                         str::stream() << "Duplicate document sequence: " << name,
                         !msg.getSequence(name));  // TODO IDL
 
-                msg.sequences.push_back({name.toString()});
+                msg.sequences.push_back({std::string{name}});
                 while (!seqBuf.atEof()) {
-                    msg.sequences.back().objs.push_back(seqBuf.read<Validated<BSONObj>>());
+                    auto obj = seqBuf.read<Validated<BSONObj>>();
+                    // For document sequences, each document must be within the 16MB document limit.
+                    // See the OP_MSG documentation for further details on the size limits:
+                    // https://github.com/mongodb/specifications/blob/master/source/message/OP_MSG.md#sections.
+                    uassertStatusOK(msg.body.validateBSONObjSize().addContext(
+                        "Parsing opMsg DocSequence failed"));
+                    msg.sequences.back().objs.push_back(obj);
                 }
                 break;
             }
@@ -234,8 +240,7 @@ OpMsg OpMsg::parse(const Message& message, Client* client) try {
     // Technically this is O(N*M) but N is at most 2.
     for (const auto& docSeq : msg.sequences) {
         const char* name = docSeq.name.c_str();  // Pointer is redirected by next call.
-        auto inBody =
-            !dotted_path_support::extractElementAtPathOrArrayAlongPath(msg.body, name).eoo();
+        auto inBody = !bson::extractElementAtOrArrayAlongDottedPath(msg.body, name).eoo();
         uassert(40433,
                 str::stream() << "Duplicate field between body and document sequence "
                               << docSeq.name,
@@ -440,10 +445,10 @@ AtomicWord<bool> OpMsgBuilder::disableDupeFieldCheck_forTest{false};
 Message OpMsgBuilder::finish() {
     const auto size = _buf.len();
     uassert(ErrorCodes::BSONObjectTooLarge,
-            str::stream() << "BSON size limit hit while building Message. Size: " << size << " (0x"
-                          << unsignedHex(size) << "); maxSize: " << BSONObjMaxInternalSize << "("
-                          << (BSONObjMaxInternalSize / (1024 * 1024)) << "MB)",
-            size <= BSONObjMaxInternalSize);
+            fmt::format("Building Message failed. Size {} exceeds maximum {}",
+                        size,
+                        kOpMsgReplyBSONBufferMaxSize),
+            size < kOpMsgReplyBSONBufferMaxSize);
 
     return finishWithoutSizeChecking();
 }

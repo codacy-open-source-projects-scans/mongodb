@@ -20,6 +20,8 @@
 #include "mc-efc-private.h"
 #include "mc-optional-private.h"
 #include "mc-rangeopts-private.h"
+#include "mc-schema-broker-private.h"
+#include "mc-textopts-private.h"
 #include "mongocrypt-buffer-private.h"
 #include "mongocrypt-endpoint-private.h"
 #include "mongocrypt-key-broker-private.h"
@@ -36,19 +38,15 @@ typedef enum {
     _MONGOCRYPT_TYPE_COMPACT,
 } _mongocrypt_ctx_type_t;
 
-typedef enum {
-    MONGOCRYPT_INDEX_TYPE_NONE = 1,
-    MONGOCRYPT_INDEX_TYPE_EQUALITY = 2,
-    MONGOCRYPT_INDEX_TYPE_RANGE = 3,
-    MONGOCRYPT_INDEX_TYPE_RANGEPREVIEW_DEPRECATED = 4
-} mongocrypt_index_type_t;
-
 const char *_mongocrypt_index_type_to_string(mongocrypt_index_type_t val);
 
 typedef enum {
     MONGOCRYPT_QUERY_TYPE_EQUALITY = 1,
     MONGOCRYPT_QUERY_TYPE_RANGE = 2,
-    MONGOCRYPT_QUERY_TYPE_RANGEPREVIEW_DEPRECATED = 3
+    MONGOCRYPT_QUERY_TYPE_RANGEPREVIEW_DEPRECATED = 3,
+    MONGOCRYPT_QUERY_TYPE_PREFIXPREVIEW = 4,
+    MONGOCRYPT_QUERY_TYPE_SUFFIXPREVIEW = 5,
+    MONGOCRYPT_QUERY_TYPE_SUBSTRINGPREVIEW = 6,
 } mongocrypt_query_type_t;
 
 const char *_mongocrypt_query_type_to_string(mongocrypt_query_type_t val);
@@ -86,6 +84,11 @@ typedef struct __mongocrypt_ctx_opts_t {
         mc_RangeOpts_t value;
         bool set;
     } rangeopts;
+
+    struct {
+        mc_TextOpts_t value;
+        bool set;
+    } textopts;
 } _mongocrypt_ctx_opts_t;
 
 // `_mongocrypt_ctx_opts_t` inherits extended alignment from libbson. To dynamically allocate, use
@@ -159,7 +162,10 @@ typedef struct {
     char *target_coll;
 
     _mongocrypt_buffer_t list_collections_filter;
-    _mongocrypt_buffer_t schema;
+
+    // `sb` manages encryption schemas (JSONSchema for CSFLE and encryptedFields for QE).
+    mc_schema_broker_t *sb;
+
     /* TODO CDRIVER-3150: audit + rename these buffers.
      * original_cmd for explicit is {v: <BSON value>}, for auto is the command to
      * be encrypted.
@@ -177,24 +183,6 @@ typedef struct {
     _mongocrypt_buffer_t marked_cmd;
     _mongocrypt_buffer_t encrypted_cmd;
     _mongocrypt_buffer_t key_id;
-    bool used_local_schema;
-    /* collinfo_has_siblings is true if the schema came from a remote JSON
-     * schema, and there were siblings. */
-    bool collinfo_has_siblings;
-    /* encrypted_field_config is set when:
-     * 1. `target_ns` is present in an encrypted_field_config_map.
-     * 2. (TODO MONGOCRYPT-414) The collection has encryptedFields in the
-     * response to listCollections. encrypted_field_config is true if and only if
-     * encryption is using FLE 2.0.
-     * 3. The `bulkWrite` command is processed and needs an empty encryptedFields to be processed by query analysis.
-     * (`bulkWrite` does not support empty JSON schema).
-     */
-    _mongocrypt_buffer_t encrypted_field_config;
-    mc_EncryptedFieldConfig_t efc;
-    // `used_empty_encryptedFields` is true if the collection has no JSON schema or encryptedFields,
-    // yet an empty encryptedFields was constructed to support query analysis.
-    // When true, an empty encryptedFields is sent to query analysis, but not appended to the final command.
-    bool used_empty_encryptedFields;
     /* bypass_query_analysis is set to true to skip the
      * MONGOCRYPT_CTX_NEED_MONGO_MARKINGS state. */
     bool bypass_query_analysis;

@@ -3,42 +3,44 @@
  * collection options are correctly applied by secondaries and cloned on initial sync according to
  * the format introduced under SERVER-91195 (relying on storageEngine.wiredTiger.configString).
  */
+import {getTimeseriesCollForDDLOps} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
+import {getRawOperationSpec, getTimeseriesCollForRawOps} from "jstests/libs/raw_operation_utils.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
 const dbName = "testdb";
 const collName = "testcoll";
-const bucketCollName = 'system.buckets.' + collName;
-const bucketNs = dbName + '.' + bucketCollName;
 
-const rst = new ReplSetTest({name: 'rs', nodes: 2});
+const rst = new ReplSetTest({name: "rs", nodes: 2});
 rst.startSet();
 rst.initiate();
 
 // Create collection on the primary node
-const primary = rst.getPrimary();
-const primaryDb = primary.getDB(dbName);
-const primaryColl = primaryDb.getCollection(collName);
+const primary = function () {
+    return rst.getPrimary();
+};
+const primaryDb = function () {
+    return primary().getDB(dbName);
+};
 
-assert.commandWorked(primaryDb.createCollection(collName, {timeseries: {timeField: "t"}}));
+assert.commandWorked(primaryDb().createCollection(collName, {timeseries: {timeField: "t"}}));
 
 // Execute collMod to change the timeseries catalog options under testing
-assert.commandWorked(primaryDb.runCommand({
-    collMod: collName,
-    timeseriesBucketsMayHaveMixedSchemaData: true,
-    timeseries: {bucketMaxSpanSeconds: 5400, bucketRoundingSeconds: 5400}
-}));
+assert.commandWorked(
+    primaryDb().runCommand({
+        collMod: collName,
+        timeseriesBucketsMayHaveMixedSchemaData: true,
+        timeseries: {bucketMaxSpanSeconds: 5400, bucketRoundingSeconds: 5400},
+    }),
+);
 
 // Double check that options have been correctly applied on the primary node
-const expectedAppMetadata =
-    FeatureFlagUtil.isPresentAndEnabled(primaryDb, "TSBucketingParametersUnchanged")
+const expectedAppMetadata = FeatureFlagUtil.isPresentAndEnabled(primaryDb(), "TSBucketingParametersUnchanged")
     ? "app_metadata=(timeseriesBucketingParametersHaveChanged=true,timeseriesBucketsMayHaveMixedSchemaData=true)"
     : "app_metadata=(timeseriesBucketsMayHaveMixedSchemaData=true)";
 
-const configStringAfterCollMod =
-    primaryDb.runCommand({listCollections: 1, filter: {name: bucketCollName}})
-        .cursor.firstBatch[0]
-        .options.storageEngine.wiredTiger.configString;
+const configStringAfterCollMod = primaryDb().runCommand({listCollections: 1, filter: {name: collName}}).cursor
+    .firstBatch[0].options.storageEngine.wiredTiger.configString;
 
 assert.eq(configStringAfterCollMod, expectedAppMetadata);
 
@@ -51,25 +53,25 @@ rst.awaitReplication();
 
 function assertSameOutputFromDifferentNodes(func) {
     let outputs = [];
-    rst.nodes.forEach(function(node) {
+    rst.nodes.forEach(function (node) {
         outputs.push(func(node));
     });
     assert.eq(outputs[0], outputs[1]);
     assert.eq(outputs[1], outputs[2]);
 }
 
-// Assert that collection options for the view and for the buckets namespace
+// Assert that collection options in both regular and raw mode
 // are the same on primary, secondary and initial-synced secondary.
-assertSameOutputFromDifferentNodes(node => {
-    return node.getDB(dbName)
-        .runCommand({listCollections: 1, filter: {name: collName}})
-        .cursor.firstBatch[0];
+assertSameOutputFromDifferentNodes((node) => {
+    return node.getDB(dbName).runCommand({listCollections: 1, filter: {name: collName}}).cursor.firstBatch[0];
 });
 
-assertSameOutputFromDifferentNodes(node => {
-    return node.getDB(dbName)
-        .runCommand({listCollections: 1, filter: {name: bucketCollName}})
-        .cursor.firstBatch[0];
+assertSameOutputFromDifferentNodes((node) => {
+    return node.getDB(dbName).runCommand({
+        listCollections: 1,
+        filter: {name: getTimeseriesCollForDDLOps(primaryDb(), collName)},
+        ...getRawOperationSpec(primaryDb()),
+    }).cursor.firstBatch[0];
 });
 
 const bucketWithMixedSchema = {
@@ -101,15 +103,19 @@ const bucketWithMixedSchema = {
             0: "a",
             1: 1,
         },
-    }
+    },
 };
 
 // Assert the current primary accepts the document.
 assert.commandWorked(
-    rst.getPrimary().getDB(dbName).getCollection(bucketCollName).insert(bucketWithMixedSchema));
+    getTimeseriesCollForRawOps(primaryDb(), primaryDb()[collName]).insertOne(
+        bucketWithMixedSchema,
+        getRawOperationSpec(primaryDb()),
+    ),
+);
 
 // Step-up to primary the initial-synced secondary.
-assert.soonNoExcept(function() {
+assert.soonNoExcept(function () {
     assert.commandWorked(isync_node.adminCommand({replSetStepUp: 1}));
     return true;
 });
@@ -117,11 +123,15 @@ rst.awaitNodesAgreeOnPrimary(undefined /* timesout */, undefined /* nodes */, is
 
 // Assert the initial-synced node accepts the document.
 bucketWithMixedSchema._id = ObjectId("65a6eb806ffc9fa4280ecada");
-var bucketColl = rst.getPrimary().getDB(dbName).getCollection(bucketCollName);
-assert.commandWorked(bucketColl.insert(bucketWithMixedSchema));
+assert.commandWorked(
+    getTimeseriesCollForRawOps(primaryDb(), primaryDb()[collName]).insertOne(
+        bucketWithMixedSchema,
+        getRawOperationSpec(primaryDb()),
+    ),
+);
 
 // Delete the collection to prevent post-test checks to fail. The current bucket collection is left
 // uncompressed.
-bucketColl.drop();
+assert(getTimeseriesCollForRawOps(primaryDb(), primaryDb()[collName]).drop());
 
 rst.stopSet();

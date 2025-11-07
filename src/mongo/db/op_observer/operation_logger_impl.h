@@ -29,11 +29,8 @@
 
 #pragma once
 
-#include <cstddef>
-#include <vector>
-
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/operation_logger.h"
 #include "mongo/db/operation_context.h"
@@ -42,9 +39,13 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/storage/record_store.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 
-namespace mongo {
+#include <cstddef>
+#include <vector>
+
+namespace MONGO_MOD_PUB mongo {
 
 class OperationLoggerImpl : public OperationLogger {
     OperationLoggerImpl(const OperationLoggerImpl&) = delete;
@@ -72,4 +73,4 @@ public:
     std::vector<OplogSlot> getNextOpTimes(OperationContext* opCtx, std::size_t count) override;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <boost/filesystem/path.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <vector>
-
 #include "mongo/base/data_range.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -42,13 +37,19 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/ftdc/decompressor.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+#include <boost/filesystem/path.hpp>
 
 namespace mongo {
 
-constexpr StringData kFTDCThreadName = "ftdc"_sd;
+MONGO_MOD_NEEDS_REPLACEMENT constexpr StringData kFTDCThreadName = "ftdc"_sd;
 
 /**
  * Utilities for inflating and deflating BSON documents and metric arrays
@@ -62,7 +63,7 @@ namespace FTDCBSONUtil {
  */
 enum class FTDCType : std::int32_t {
     /**
-     * A metadata document is composed of a header + an array of bson documents
+     * A metadata document is composed of a header + an array of bson documents.
      *
      * See createBSONMetadataChunkDocument
      */
@@ -76,11 +77,16 @@ enum class FTDCType : std::int32_t {
     kMetricChunk = 1,
 
     /**
-     * A periodic metadata document is composed of a header + a counter value + delta document
+     * A periodic metadata document is composed of a header + a counter value + delta document.
      *
      * See createBSONPeriodicMetadataDocument
      */
     kPeriodicMetadata = 2,
+
+    /**
+     * Unknown type used ONLY for initializing FTDCType in FTDCFileReader.
+     */
+    kUnknown = 3,
 };
 
 

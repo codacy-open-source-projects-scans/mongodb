@@ -29,19 +29,17 @@
 
 #include "mongo/db/query/timeseries/bucket_level_comparison_predicate_generator.h"
 
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/bson/oid.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_algo.h"
-#include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/matcher/expression_expr.h"
 #include "mongo/db/matcher/expression_internal_expr_comparison.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/db/timeseries/timeseries_options.h"
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 
 namespace mongo {
@@ -62,7 +60,7 @@ boost::optional<StringData> checkComparisonPredicateEligibility(
     // The control field's min and max are chosen using a field-order insensitive comparator, while
     // MatchExpressions use a comparator that treats field-order as significant. Because of this we
     // will not perform this optimization on queries with operands of compound types.
-    if (matchExprData.type() == BSONType::Object || matchExprData.type() == BSONType::Array)
+    if (matchExprData.type() == BSONType::object || matchExprData.type() == BSONType::array)
         return "operand can't be an object or array"_sd;
 
     const auto isTimeField = (matchExprPath == bucketSpec.timeField());
@@ -78,9 +76,9 @@ boost::optional<StringData> checkComparisonPredicateEligibility(
     //    1) time field cannot be empty.
     //    2) the only type less than null is MinKey, which is internal, so we don't need to guard
     //       GT and GTE.
-    //    3) for the buckets that might have mixed schema data, we'll compare the types of min and
+    //    3) if the collection might have mixed schema data, we'll compare the types of min and
     //       max when _creating_ the bucket-level predicate (that check won't help with missing).
-    if (matchExprData.type() == BSONType::jstNULL)
+    if (matchExprData.type() == BSONType::null)
         return "can't handle comparison to null"_sd;
     if (!isTimeField &&
         (matchExpr->matchType() == MatchExpression::INTERNAL_EXPR_LTE ||
@@ -92,7 +90,7 @@ boost::optional<StringData> checkComparisonPredicateEligibility(
     // query's collation does not match the collection's collation and the query operand is a
     // string or compound type (skipped above) we will not perform this optimization.
     if (collationMatchesDefault == ExpressionContextCollationMatchesDefault::kNo &&
-        matchExprData.type() == BSONType::String) {
+        matchExprData.type() == BSONType::string) {
         return "can't handle string comparison with a non-default collation"_sd;
     }
 
@@ -106,7 +104,7 @@ boost::optional<StringData> checkComparisonPredicateEligibility(
     }
 
     // We must avoid mapping predicates on fields computed via $addFields or a computed $project.
-    if (bucketSpec.fieldIsComputed(matchExprPath.toString())) {
+    if (bucketSpec.fieldIsComputed(std::string{matchExprPath})) {
         return "can't handle a computed field"_sd;
     }
 
@@ -115,12 +113,9 @@ boost::optional<StringData> checkComparisonPredicateEligibility(
         return "can't handle a field removed by projection"_sd;
     }
 
-    if (isTimeField && matchExprData.type() != BSONType::Date) {
-        // Users are not allowed to insert non-date measurements into time field. So this query
+    if (isTimeField && matchExprData.type() != BSONType::date) {
+        // Users are not allowed to insert non-date measurements into the time field. So this query
         // would not match anything. We do not need to optimize for this case.
-        // TODO SERVER-84207: right now we will end up unpacking everything and applying the event
-        // filter, which indeed would be either trivially true or trivially false but it won't be
-        // optimized away.
         return "can't handle comparison of time field to a non-Date type"_sd;
     }
 
@@ -153,8 +148,8 @@ std::unique_ptr<MatchExpression> makeOr(std::vector<std::unique_ptr<MatchExpress
  * type of `control.min.subpath` is not the same as `control.max.subpath` then we will match that
  * document.
  *
- * However, if the buckets collection has no mixed-schema data then this type-equality predicate is
- * unnecessary. In that case this function returns an empty, always-true predicate.
+ * However, if the timeseries collection has no mixed-schema data then this type-equality predicate
+ * is unnecessary. In that case this function returns an empty, always-true predicate.
  */
 std::unique_ptr<MatchExpression> createTypeEqualityPredicate(
     boost::intrusive_ptr<ExpressionContext> pExpCtx,

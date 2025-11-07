@@ -27,13 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/none.hpp>
-#include <fmt/format.h>
-#include <functional>
-#include <memory>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/repl/sync_source_resolver.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -48,21 +42,26 @@
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
-#include "mongo/db/repl/sync_source_resolver.h"
 #include "mongo/db/repl/sync_source_selector_mock.h"
 #include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
 #include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/task_executor_proxy.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <functional>
+#include <memory>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <fmt/format.h>
 
 namespace mongo::repl {
 namespace {
@@ -303,6 +302,7 @@ BSONObj _makeOplogEntry(Timestamp ts, long long term) {
                              boost::none,                                            // uuid
                              boost::none,                                            // fromMigrate
                              boost::none,                      // checkExistenceForDiffInsert
+                             boost::none,                      // versionContext
                              repl::OplogEntry::kOplogVersion,  // version
                              BSONObj(),                        // o
                              boost::none,                      // o2

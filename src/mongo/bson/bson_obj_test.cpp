@@ -27,16 +27,6 @@
  *    it in the license file.
  */
 
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <string>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-
 #include "mongo/base/data_range.h"
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/error_codes.h"
@@ -55,11 +45,19 @@
 #include "mongo/bson/unordered_fields_bsonobj_comparator.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/string_map.h"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 
 namespace {
 using namespace mongo;
@@ -657,9 +655,8 @@ TEST(Looping, Cpp17StructuredBindings) {
 TEST(BSONObj, getFieldsWithEmbeddedNull) {
     // Test that getField() returns an eoo element when the field name contains an embedded null.
     // This should never happen, but we want to make sure we handle it correctly.
-    BSONObj obj = BSON(""
-                       << "foo"_sd
-                       << "bar" << 9 << "baz" << 4.5);
+    BSONObj obj = BSON("" << "foo"_sd
+                          << "bar" << 9 << "baz" << 4.5);
     ASSERT_TRUE(obj.getField("\0"_sd).eoo());
     ASSERT_TRUE(obj.getField("ba\0r"_sd).eoo());
     ASSERT_TRUE(obj.getField("baz\0"_sd).eoo());
@@ -670,11 +667,11 @@ TEST(BSONObj, getFields) {
     std::array<StringData, 3> fieldNames{"c", "d", "f"};
     std::array<BSONElement, 3> fields;
     e.getFields(fieldNames, &fields);
-    ASSERT_EQUALS(fields[0].type(), BSONType::NumberInt);
+    ASSERT_EQUALS(fields[0].type(), BSONType::numberInt);
     ASSERT_EQUALS(fields[0].numberInt(), 3);
-    ASSERT_EQUALS(fields[1].type(), BSONType::NumberInt);
+    ASSERT_EQUALS(fields[1].type(), BSONType::numberInt);
     ASSERT_EQUALS(fields[1].numberInt(), 4);
-    ASSERT_EQUALS(fields[2].type(), BSONType::NumberInt);
+    ASSERT_EQUALS(fields[2].type(), BSONType::numberInt);
     ASSERT_EQUALS(fields[2].numberInt(), 6);
 }
 
@@ -685,9 +682,9 @@ TEST(BSONObj, getFieldsWithDuplicates) {
     std::array<StringData, 2> fieldNames{"a", "b"};
     std::array<BSONElement, 2> fields;
     e.getFields(fieldNames, &fields);
-    ASSERT_EQUALS(fields[0].type(), BSONType::NumberInt);
+    ASSERT_EQUALS(fields[0].type(), BSONType::numberInt);
     ASSERT_EQUALS(fields[0].numberInt(), 2);
-    ASSERT_EQUALS(fields[1].type(), BSONType::String);
+    ASSERT_EQUALS(fields[1].type(), BSONType::string);
     ASSERT_EQUALS(fields[1].str(), "3");
 }
 
@@ -785,7 +782,7 @@ TEST(BSONObj, sizeChecks) {
     // Large buffers cause an exception to be thrown.
     ASSERT_THROWS_CODE(
         [&] {
-            auto largeBuffer = generateBuffer(17 * 1024 * 1024);
+            auto largeBuffer = generateBuffer(126 * 1024 * 1024);
             BSONObj obj(largeBuffer.data());
         }(),
         DBException,

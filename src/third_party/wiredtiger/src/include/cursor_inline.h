@@ -227,7 +227,8 @@ __cursor_enter(WT_SESSION_IMPL *session)
      * If there are no other cursors positioned in the session, check whether the cache is full.
      */
     if (session->ncursors == 0)
-        WT_RET(__wt_evict_app_assist_worker_check(session, false, false, NULL));
+        WT_RET_ONLY(
+          __wt_evict_app_assist_worker_check(session, false, false, true, NULL), WT_ROLLBACK);
     ++session->ncursors;
     return (0);
 }
@@ -377,8 +378,8 @@ __wt_cursor_dhandle_incr_use(WT_SESSION_IMPL *session)
     dhandle = session->dhandle;
 
     /* If we open a handle with a time of death set, clear it. */
-    if (__wt_atomic_addi32(&dhandle->session_inuse, 1) == 1 && dhandle->timeofdeath != 0)
-        dhandle->timeofdeath = 0;
+    if (__wt_atomic_add_int32(&dhandle->session_inuse, 1) == 1 && dhandle->timeofdeath != 0)
+        __wt_tsan_suppress_store_uint64(&dhandle->timeofdeath, 0);
 }
 
 /*
@@ -396,10 +397,10 @@ __wt_cursor_dhandle_decr_use(WT_SESSION_IMPL *session)
      * If we close a handle with a time of death set, clear it. The ordering is important: after
      * decrementing the use count, there's a chance that the data handle can be freed.
      */
-    WT_ASSERT(session, __wt_atomic_loadi32(&dhandle->session_inuse) > 0);
-    if (dhandle->timeofdeath != 0 && __wt_atomic_loadi32(&dhandle->session_inuse) == 1)
+    WT_ASSERT(session, __wt_atomic_load_int32_relaxed(&dhandle->session_inuse) > 0);
+    if (dhandle->timeofdeath != 0 && __wt_atomic_load_int32_relaxed(&dhandle->session_inuse) == 1)
         dhandle->timeofdeath = 0;
-    (void)__wt_atomic_subi32(&dhandle->session_inuse, 1);
+    (void)__wt_atomic_sub_int32(&dhandle->session_inuse, 1);
 }
 
 /*
@@ -470,7 +471,8 @@ __wt_cursor_free_cached_memory(WT_CURSOR *cursor)
         __wt_buf_free(session, &cursor->value);
 
         /* Discard the underlying WT_CURSOR_BTREE buffers. */
-        __wt_btcur_free_cached_memory((WT_CURSOR_BTREE *)cursor);
+        if (!WT_PREFIX_MATCH(cursor->internal_uri, "layered:"))
+            __wt_btcur_free_cached_memory((WT_CURSOR_BTREE *)cursor);
 
         F_CLR(cursor, WT_CURSTD_CACHED_WITH_MEM);
     }
@@ -564,4 +566,24 @@ slow: /*
     kb->size = cbt->row_key->size;
     cbt->rip_saved = rip;
     return (0);
+}
+
+/*
+ * We need a tombstone to mark deleted records, and we use the special value below for that purpose.
+ * We use two 0x14 (Device Control 4) bytes to minimize the likelihood of colliding with an
+ * application-chosen encoding byte, if the application uses two leading DC4 byte for some reason,
+ * we'll do a wasted data copy each time a new value is inserted into the object. FIXME-WT-14806:
+ * this needs tests and a bit more documentation.
+ */
+static const WT_ITEM __wt_tombstone = {"\x14\x14", 2, NULL, 0, 0};
+
+/*
+ * __wt_clayered_deleted --
+ *     Check whether the current value is a tombstone.
+ */
+static WT_INLINE bool
+__wt_clayered_deleted(const WT_ITEM *item)
+{
+    return (item->size == __wt_tombstone.size &&
+      memcmp(item->data, __wt_tombstone.data, __wt_tombstone.size) == 0);
 }

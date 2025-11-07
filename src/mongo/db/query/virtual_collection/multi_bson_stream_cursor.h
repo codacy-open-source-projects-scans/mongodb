@@ -29,31 +29,30 @@
 
 #pragma once
 
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-
-#include "mongo/db/catalog/virtual_collection_options.h"
+#include "mongo/db/local_catalog/virtual_collection_options.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/virtual_collection/input_stream.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/transport/named_pipe/named_pipe.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
-class MultiBsonStreamCursor : public SeekableRecordCursor {
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+
+namespace MONGO_MOD_PUB mongo {
+class MONGO_MOD_NEEDS_REPLACEMENT MultiBsonStreamCursor : public SeekableRecordCursor {
 public:
     MultiBsonStreamCursor(const VirtualCollectionOptions& vopts)
         : _numStreams(vopts.dataSources.size()), _vopts(vopts) {
-        using namespace fmt::literals;
-        tassert(6968310, "_numStreams {} <= 0"_format(_numStreams), _numStreams > 0);
+        tassert(6968310, fmt::format("_numStreams {} <= 0", _numStreams), _numStreams > 0);
         _streamReader = getInputStream(_vopts.dataSources[_streamIdx].url);
     }
 
@@ -63,7 +62,7 @@ public:
     // external data source is read-only.
     void save() override {}
     void saveUnpositioned() override {}
-    bool restore(bool tolerateCappedRepositioning) override {
+    bool restore(RecoveryUnit& ru, bool tolerateCappedRepositioning) override {
         return true;
     }
     void detachFromOperationContext() override {}
@@ -119,4 +118,4 @@ private:
 
     const VirtualCollectionOptions& _vopts;  // metadata containing the pipe URLs
 };
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

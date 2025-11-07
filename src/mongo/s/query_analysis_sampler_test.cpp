@@ -32,6 +32,35 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
+#include "mongo/client/remote_command_targeter_mock.h"
+#include "mongo/db/client.h"
+#include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/replication_coordinator_mock.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
+#include "mongo/db/stats/counters.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/executor/remote_command_request.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/rpc/op_msg.h"
+#include "mongo/s/analyze_shard_key_common_gen.h"
+#include "mongo/s/analyze_shard_key_server_parameters_gen.h"
+#include "mongo/s/refresh_query_analyzer_configuration_cmd_gen.h"
+#include "mongo/stdx/future.h"
+#include "mongo/transport/session.h"
+#include "mongo/transport/transport_layer_mock.h"
+#include "mongo/unittest/death_test.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/clock_source.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/net/hostandport.h"
+#include "mongo/util/periodic_runner_factory.h"
+#include "mongo/util/tick_source_mock.h"
+#include "mongo/util/time_support.h"
+
 #include <future>
 #include <initializer_list>
 #include <limits>
@@ -41,35 +70,6 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/client/remote_command_targeter_mock.h"
-#include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
-#include "mongo/db/repl/repl_settings.h"
-#include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/replication_coordinator_mock.h"
-#include "mongo/db/server_options.h"
-#include "mongo/db/service_context_test_fixture.h"
-#include "mongo/db/stats/counters.h"
-#include "mongo/executor/remote_command_request.h"
-#include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/rpc/op_msg.h"
-#include "mongo/s/analyze_shard_key_common_gen.h"
-#include "mongo/s/refresh_query_analyzer_configuration_cmd_gen.h"
-#include "mongo/s/sharding_mongos_test_fixture.h"
-#include "mongo/stdx/future.h"
-#include "mongo/transport/session.h"
-#include "mongo/transport/transport_layer_mock.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/clock_source.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/net/hostandport.h"
-#include "mongo/util/periodic_runner_factory.h"
-#include "mongo/util/tick_source_mock.h"
-#include "mongo/util/time_support.h"
-
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
@@ -77,8 +77,6 @@ namespace analyze_shard_key {
 namespace {
 
 using QuerySamplingOptions = OperationContext::QuerySamplingOptions;
-
-const auto smoothingFactor = gQueryAnalysisQueryStatsSmoothingFactor.load();
 
 class QueryAnalysisSamplerRateLimiterTest : public ServiceContextTest {
 public:
@@ -486,7 +484,7 @@ protected:
         onCommand([&](const executor::RemoteCommandRequest& request) {
             auto opMsg = static_cast<OpMsgRequest>(request);
             auto refreshRequest = RefreshQueryAnalyzerConfiguration::parse(
-                IDLParserContext("QueryAnalysisSamplerTest"), opMsg.body);
+                opMsg.body, IDLParserContext("QueryAnalysisSamplerTest"));
             ASSERT_EQ(refreshRequest.getNumQueriesExecutedPerSecond(),
                       expectedNumQueriesExecutedPerSecond);
 
@@ -911,6 +909,7 @@ TEST_F(QueryAnalysisSamplerTest, RefreshQueryStatsAndConfigurations) {
 
     auto queryStats2 = sampler.getQueryStatsForTest();
     ASSERT_EQ(queryStats2.getLastTotalCount(), 2);
+    const auto smoothingFactor = gQueryAnalysisQueryStatsSmoothingFactor.load();
     auto expectedAvgCount2 = (1 - smoothingFactor) * expectedAvgCount1 + smoothingFactor * 2;
     auto actualAvgCount2 = queryStats2.getLastAvgCount();
     ASSERT(actualAvgCount2);

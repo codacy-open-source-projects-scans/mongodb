@@ -37,6 +37,7 @@ static void config_checksum(TABLE *);
 static void config_chunk_cache(void);
 static void config_compact(void);
 static void config_compression(TABLE *, const char *);
+static void config_disagg_storage(void);
 static void config_encryption(void);
 static bool config_explicit(TABLE *, const char *);
 static const char *config_file_type(u_int);
@@ -48,6 +49,7 @@ static void config_map_checkpoint(const char *, u_int *);
 static void config_map_file_type(const char *, u_int *);
 static void config_mirrors(void);
 static void config_mirrors_disable_reverse(void);
+static void config_obsolete_cleanup(void);
 static void config_off(TABLE *, const char *);
 static void config_off_all(const char *);
 static void config_pct(TABLE *);
@@ -89,7 +91,7 @@ config_random_generator(
  * config_random_generators --
  *     Initialize our global random generators using provided seeds.
  */
-static void
+void
 config_random_generators(void)
 {
     config_random_generator("random.data_seed", GV(RANDOM_DATA_SEED), 0, &g.data_rnd);
@@ -154,7 +156,17 @@ config_random(TABLE *table, bool table_only)
         if (F_ISSET(cp, C_BOOL))
             testutil_snprintf(buf, sizeof(buf), "%s=%s", cp->name,
               mmrand(&g.data_rnd, 1, 100) <= cp->min ? "on" : "off");
-        else
+        else if (F_ISSET(cp, C_POW2)) {
+            double max, min;
+            uint32_t vbits, val_p2;
+
+            max = log2((double)cp->maxrand);
+            testutil_assert(max < 32);
+            min = log2((double)cp->min);
+            vbits = mmrand(&g.data_rnd, (uint32_t)min, (uint32_t)max);
+            val_p2 = (uint32_t)(1 << vbits);
+            testutil_snprintf(buf, sizeof(buf), "%s=%" PRIu32, cp->name, val_p2);
+        } else
             testutil_snprintf(
               buf, sizeof(buf), "%s=%" PRIu32, cp->name, mmrand(&g.data_rnd, cp->min, cp->maxrand));
         config_single(table, buf, false);
@@ -197,7 +209,7 @@ config_table_am(TABLE *table)
     }
 
     if (!config_explicit(table, "runs.type")) {
-        if (config_explicit(table, "runs.source"))
+        if (config_explicit(table, "runs.source") && DATASOURCE(table, "layered"))
             config_single(table, "runs.type=row", false);
         else
             switch (mmrand(&g.data_rnd, 1, 10)) {
@@ -420,8 +432,16 @@ config_table(TABLE *table, void *arg)
     config_pct(table);
 
     /* Column-store tables require special row insert resolution. */
-    if (table->type != ROW)
+    if (table->type != ROW) {
         g.column_store_config = true;
+        /* FIXME-WT-15274 Support column store with precise checkpoint */
+        if (GV(PRECISE_CHECKPOINT)) {
+            if (config_explicit(NULL, "precise_checkpoint"))
+                WARN("turning off precise_checkpoint as table%" PRIu32 " is a column-store",
+                  table->id);
+            config_off(NULL, "precise_checkpoint");
+        }
+    }
 
     /* Only row-store tables support a collation order. */
     if (table->type != ROW)
@@ -435,8 +455,6 @@ config_table(TABLE *table, void *arg)
 void
 config_run(void)
 {
-    config_random_generators(); /* Configure the random number generators. */
-
     config_random(tables[0], false); /* Configure the remaining global name space. */
 
     /*
@@ -476,8 +494,12 @@ config_run(void)
 
     tables_apply(config_table, NULL); /* Configure the tables. */
 
+    /* FIXME-WT-12983: Temporarily disable salvage test due to increased failures. */
+    config_off(NULL, "ops.salvage");
+
     /* Order can be important, don't shuffle without careful consideration. */
     config_tiered_storage();                         /* Tiered storage */
+    config_disagg_storage();                         /* Disaggregated storage */
     config_chunk_cache();                            /* Chunk cache */
     config_transaction();                            /* Transactions */
     config_backup_incr();                            /* Incremental backup */
@@ -489,6 +511,7 @@ config_run(void)
     config_mirrors();                                /* Mirrors */
     config_statistics();                             /* Statistics */
     config_compact();                                /* Compaction */
+    config_obsolete_cleanup();                       /* Obsolete cleanup */
 
     /* Configure the cache last, cache size depends on everything else. */
     config_cache();
@@ -655,6 +678,10 @@ config_cache(void)
 
     /* Check if both min and max cache sizes have been specified and if they're consistent. */
     if (config_explicit(NULL, "cache")) {
+        if (GV(CACHE) < 2048) {
+            config_off(NULL, "preserve_prepared");
+            config_off(NULL, "precise_checkpoint");
+        }
         if (config_explicit(NULL, "cache.minimum") && GV(CACHE) < GV(CACHE_MINIMUM))
             testutil_die(EINVAL, "minimum cache set larger than cache (%" PRIu32 " > %" PRIu32 ")",
               GV(CACHE_MINIMUM), GV(CACHE));
@@ -677,10 +704,12 @@ config_cache(void)
     GV(CACHE) = GV(CACHE_MINIMUM);
 
     /*
-     * If it's an in-memory run, size the cache at 2x the maximum initial data set. This calculation
-     * is done in bytes, convert to megabytes before testing against the cache.
+     * If it's an in-memory run or disaggregated follower mode, size the cache at 2x the maximum
+     * initial data set. This calculation is done in bytes, convert to megabytes before testing
+     * against the cache.
      */
-    if (GV(RUNS_IN_MEMORY)) {
+    if (GV(RUNS_IN_MEMORY) ||
+      (g.disagg_storage_config && strcmp(GVS(DISAGG_MODE), "follower") == 0)) {
         cache = table_sumv(V_TABLE_BTREE_KEY_MAX) + table_sumv(V_TABLE_BTREE_VALUE_MAX);
         cache *= table_sumv(V_TABLE_RUNS_ROWS);
         cache *= 2;
@@ -702,11 +731,26 @@ config_cache(void)
     cache = table_sumv(V_TABLE_BTREE_MEMORY_PAGE_MAX); /* in MB units, no conversion to cache */
     cache *= workers;
     cache *= 2;
+
+    /*
+     * FIXME-WT-15723: Re-evaluate whether setting large cache size is need after cache stuck issue
+     * is solved.
+     */
+    if (GV(PRECISE_CHECKPOINT))
+        cache *= 2;
+
     if (GV(CACHE) < cache)
         GV(CACHE) = (uint32_t)cache;
 
-    if (cache_maximum_explicit && GV(CACHE) > GV(CACHE_MAXIMUM))
-        GV(CACHE) = GV(CACHE_MAXIMUM);
+    if (GV(PRECISE_CHECKPOINT) && GV(CACHE) < 2048)
+        GV(CACHE) = 2048;
+
+    if (cache_maximum_explicit && GV(CACHE) > GV(CACHE_MAXIMUM)) {
+        if (GV(PRECISE_CHECKPOINT) && GV(CACHE_MAXIMUM) < 2048)
+            config_off(NULL, "cache.maximum");
+        else
+            GV(CACHE) = GV(CACHE_MAXIMUM);
+    }
 
     /* Give any block cache 20% of the total cache size, over and above the cache. */
     if (GV(BLOCK_CACHE) != 0)
@@ -724,6 +768,20 @@ dirty_eviction_config:
           GV(CACHE));
         config_single(NULL, "cache.eviction_dirty_trigger=40", false);
         config_single(NULL, "cache.eviction_dirty_target=10", false);
+    }
+
+    if (g.disagg_storage_config && strcmp(GVS(DISAGG_MODE), "follower") == 0) {
+        WARN("%s",
+          "Setting cache.eviction_dirty_trigger=95 and cache.eviction_update_trigger=95. In "
+          "disaggregated follower mode, these eviction trigger thresholds are increased to help "
+          "avoid operation thread stalls.");
+        config_single(NULL, "cache.eviction_dirty_trigger=95", false);
+        config_single(NULL, "cache.eviction_updates_trigger=95", false);
+    }
+
+    if (GV(PRECISE_CHECKPOINT) && GV(CACHE) < 2048) {
+        WARN("%s", "Setting cache to minimum of 2048MB due to precise_checkpoint");
+        config_single(NULL, "cache=2048", false);
     }
 }
 
@@ -743,13 +801,19 @@ config_checkpoint(void)
         case 4: /* 20% */
             config_single(NULL, "checkpoint=wiredtiger", false);
             break;
-        case 5: /* 5 % */
+        case 5: /* 5% */
             config_off(NULL, "checkpoint");
             break;
         default: /* 75% */
             config_single(NULL, "checkpoint=on", false);
+            /* 50% */
+            if (mmrand(&g.extra_rnd, 1, 10) > 5)
+                config_single(NULL, "checkpoint=on", false);
             break;
         }
+
+    if (!GV(PRECISE_CHECKPOINT))
+        config_off(NULL, "preserve_prepared");
 }
 
 /*
@@ -946,6 +1010,8 @@ config_in_memory(void)
         return;
     if (config_explicit(NULL, "ops.verify"))
         return;
+    if (config_explicit(NULL, "precise_checkpoint"))
+        return;
     if (config_explicit(NULL, "runs.mirror"))
         return;
     if (config_explicit(NULL, "runs.predictable_replay"))
@@ -996,6 +1062,8 @@ config_in_memory_reset(void)
         config_off(NULL, "ops.salvage");
     if (!config_explicit(NULL, "ops.verify"))
         config_off(NULL, "ops.verify");
+    if (!config_explicit(NULL, "precise_checkpoint"))
+        config_off(NULL, "precise_checkpoint");
     if (!config_explicit(NULL, "prefetch"))
         config_off(NULL, "prefetch");
 }
@@ -1438,6 +1506,60 @@ config_tiered_storage(void)
 }
 
 /*
+ * config_disagg_storage --
+ *     Disaggregated storage configuration.
+ */
+static void
+config_disagg_storage(void)
+{
+    char buf[128];
+    const char *mode, *page_log;
+
+    page_log = GVS(DISAGG_PAGE_LOG);
+
+    g.disagg_storage_config = (strcmp(page_log, "off") != 0 && strcmp(page_log, "none") != 0);
+    if (!g.disagg_storage_config)
+        return; /* Disaggregated storage not enabled. */
+
+    if (GV(DISAGG_MULTI) && !GV(RUNS_PREDICTABLE_REPLAY))
+        testutil_die(EINVAL,
+          "Invalid configuration: multi-node in disagg requires predictable replay mode "
+          "(set runs.predictable_replay=1).");
+
+    if (!config_explicit(NULL, "disagg.mode")) {
+        /* Randomly assign "leader" or "follower" to disagg.mode with equal probability. */
+        testutil_snprintf(buf, sizeof(buf), "disagg.mode=%s",
+          mmrand(&g.data_rnd, 1, 100) <= 50 ? "leader" : "follower");
+        config_single(NULL, buf, false);
+    }
+
+    mode = GVS(DISAGG_MODE);
+    if (strcmp(mode, "leader") != 0 && strcmp(mode, "follower") != 0 && strcmp(mode, "switch") != 0)
+        testutil_die(EINVAL, "illegal disagg.mode configuration: %s", mode);
+
+    if (strcmp(mode, "switch") == 0)
+        /* Randomly assign "leader" or "follower". */
+        g.disagg_leader = mmrand(&g.data_rnd, 0, 1);
+    else
+        g.disagg_leader = strcmp(mode, "leader") == 0;
+
+    /* Disaggregated storage requires timestamps. */
+    config_off(NULL, "transaction.implicit");
+    config_single(NULL, "transaction.timestamps=on", true);
+
+    /* It makes sense to do checkpoints. */
+    if (!config_explicit(NULL, "checkpoint"))
+        config_single(NULL, "checkpoint=on", false);
+
+    /* TODO: Some operations are not yet supported for disaggregated storage. */
+    config_off(NULL, "ops.salvage");
+    config_off(NULL, "backup");
+    config_off(NULL, "backup.incremental");
+    config_off(NULL, "ops.compaction");
+    config_off(NULL, "background_compact");
+}
+
+/*
  * config_transaction --
  *     Transaction configuration.
  */
@@ -1510,8 +1632,19 @@ config_transaction(void)
         config_off(NULL, "ops.salvage");
         config_off(NULL, "logging");
     }
-    if (!GV(TRANSACTION_TIMESTAMPS))
+    if (!GV(TRANSACTION_TIMESTAMPS)) {
         config_off(NULL, "ops.prepare");
+        config_off(NULL, "precise_checkpoint");
+        config_off(NULL, "preserve_prepared");
+    }
+    /* FIXME-WT-15565 Write prepared truncate operation to disk. */
+    if (GV(PRECISE_CHECKPOINT) && GV(OPS_PREPARE)) {
+        if (config_explicit(NULL, "ops.truncate")) {
+            WARN("%s" PRIu32,
+              "turning off ops.truncate to work with ops.prepare and precise checkpoint");
+        }
+        config_off(NULL, "ops.truncate");
+    }
 
     /* Set a default transaction timeout limit if one is not specified. */
     if (!config_explicit(NULL, "transaction.operation_timeout_ms"))
@@ -1519,6 +1652,7 @@ config_transaction(void)
 
     g.operation_timeout_ms = GV(TRANSACTION_OPERATION_TIMEOUT_MS);
     g.transaction_timestamps_config = GV(TRANSACTION_TIMESTAMPS) != 0;
+    g.prepared_id = 1;
 }
 
 /*
@@ -1925,6 +2059,7 @@ config_single(TABLE *table, const char *s, bool explicit)
             config_map_checkpoint(equalp, &g.checkpoint_config);
         else if (strncmp(s, "runs.source", strlen("runs.source")) == 0 &&
           strncmp("file", equalp, strlen("file")) != 0 &&
+          strncmp("layered", equalp, strlen("layered")) != 0 &&
           strncmp("table", equalp, strlen("table")) != 0) {
             testutil_die(EINVAL, "Invalid data source option: %s", equalp);
         } else if (strncmp(s, "runs.type", strlen("runs.type")) == 0) {
@@ -1954,6 +2089,16 @@ config_single(TABLE *table, const char *s, bool explicit)
             if (v1 != 0 && v1 != 1)
                 testutil_die(EINVAL, "%s: %s: value of boolean not 0 or 1", progname, s);
         }
+
+        v->v = v1;
+        v->set = explicit;
+        return;
+    }
+
+    if (F_ISSET(cp, C_POW2)) {
+        v1 = atou32(s, equalp, '\0');
+        if (v1 != 0 && !__wt_ispo2(v1))
+            testutil_die(EINVAL, "%s: %s: value is not a power of 2", progname, s);
 
         v->v = v1;
         v->set = explicit;
@@ -2198,5 +2343,27 @@ config_compact(void)
               EINVAL, "%s: Foreground compaction cannot be enabled for in-memory runs", progname);
         config_off(NULL, "background_compact");
         config_off(NULL, "ops.compaction");
+    }
+}
+
+/*
+ * config_obsolete_cleanup --
+ *     Obsolete cleanup configuration.
+ */
+static void
+config_obsolete_cleanup(void)
+{
+    uint32_t wait_seconds;
+    char confbuf[128];
+
+    if (!config_explicit(NULL, "obsolete_cleanup.method")) {
+        if (mmrand(&g.extra_rnd, 1, 10) < 2)
+            config_single(NULL, "obsolete_cleanup.method=reclaim_space", false);
+    }
+
+    if (!config_explicit(NULL, "obsolete_cleanup.wait")) {
+        wait_seconds = mmrand(&g.extra_rnd, 1, 3600);
+        testutil_snprintf(confbuf, sizeof(confbuf), "obsolete_cleanup.wait=%" PRIu32, wait_seconds);
+        config_single(NULL, confbuf, false);
     }
 }

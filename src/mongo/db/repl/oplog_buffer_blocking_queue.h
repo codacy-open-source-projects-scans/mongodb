@@ -29,20 +29,21 @@
 
 #pragma once
 
-#include <cstddef>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/repl/oplog_buffer.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/interruptible.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/queue.h"
 #include "mongo/util/time_support.h"
 
-namespace mongo {
+#include <cstddef>
+
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUB mongo {
 namespace repl {
 
 /**
@@ -108,4 +109,4 @@ private:
 };
 
 }  // namespace repl
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

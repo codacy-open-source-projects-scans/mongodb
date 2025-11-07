@@ -29,14 +29,15 @@
 
 #pragma once
 
-#include <cstdint>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier_progress_gen.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
+
+#include <cstdint>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -45,12 +46,15 @@ namespace mongo {
  */
 class ReshardingOplogApplierMetrics {
 public:
-    ReshardingOplogApplierMetrics(ReshardingMetrics* metrics,
+    ReshardingOplogApplierMetrics(ShardId donorShardId,
+                                  ReshardingMetrics* metrics,
                                   boost::optional<ReshardingOplogApplierProgress> progressDoc);
 
     void onInsertApplied();
     void onUpdateApplied();
     void onDeleteApplied();
+
+    void updateAverageTimeToApplyOplogEntries(Milliseconds timeToApply);
 
     void onBatchRetrievedDuringOplogApplying(Milliseconds elapsed);
     void onOplogLocalBatchApplied(Milliseconds elapsed);
@@ -64,6 +68,8 @@ public:
     int64_t getWritesToStashCollections() const;
 
 private:
+    const ShardId _donorShardId;
+
     ReshardingMetrics* _metrics;
     AtomicWord<int64_t> _insertsApplied{0};
     AtomicWord<int64_t> _updatesApplied{0};

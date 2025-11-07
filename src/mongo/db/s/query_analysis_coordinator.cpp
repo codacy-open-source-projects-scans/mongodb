@@ -27,32 +27,20 @@
  *    it in the license file.
  */
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <memory>
-#include <type_traits>
-#include <utility>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/s/query_analysis_coordinator.h"
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/dbclient_cursor.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/repl/member_config.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/query_analysis_coordinator.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/s/analyze_shard_key_role.h"
@@ -63,6 +51,17 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <memory>
+#include <type_traits>
+#include <utility>
+
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -141,8 +140,11 @@ void QueryAnalysisCoordinator::onConfigurationDelete(const QueryAnalyzerDocument
 
 Date_t QueryAnalysisCoordinator::_getMinLastPingTime() {
     auto serviceContext = getQueryAnalysisCoordinator.owner(this);
-    return serviceContext->getFastClockSource()->now() -
-        Seconds(gQueryAnalysisSamplerInActiveThresholdSecs.load());
+    return _getMinLastPingTime(serviceContext->getFastClockSource()->now());
+}
+
+Date_t QueryAnalysisCoordinator::_getMinLastPingTime(Date_t now) {
+    return now - Seconds(gQueryAnalysisSamplerInActiveThresholdSecs.load());
 }
 
 void QueryAnalysisCoordinator::Sampler::setLastPingTime(Date_t pingTime) {
@@ -158,7 +160,9 @@ void QueryAnalysisCoordinator::Sampler::resetLastNumQueriesExecutedPerSecond() {
 }
 
 void QueryAnalysisCoordinator::onSamplerInsert(const MongosType& doc) {
-    invariant(serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
+    tassert(10690304,
+            "QueryAnalysisCoordinator should only run if the cluster role is ConfigServer.",
+            serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
     stdx::lock_guard<stdx::mutex> lk(_mutex);
 
     if (doc.getPing() < _getMinLastPingTime()) {
@@ -169,7 +173,9 @@ void QueryAnalysisCoordinator::onSamplerInsert(const MongosType& doc) {
 }
 
 void QueryAnalysisCoordinator::onSamplerUpdate(const MongosType& doc) {
-    invariant(serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
+    tassert(10690303,
+            "QueryAnalysisCoordinator should only run if the cluster role is ConfigServer.",
+            serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
     stdx::lock_guard<stdx::mutex> lk(_mutex);
 
     auto it = _samplers.find(doc.getName());
@@ -182,11 +188,12 @@ void QueryAnalysisCoordinator::onSamplerUpdate(const MongosType& doc) {
 }
 
 void QueryAnalysisCoordinator::onSamplerDelete(const MongosType& doc) {
-    invariant(serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
+    tassert(10690302,
+            "QueryAnalysisCoordinator should only run if the cluster role is ConfigServer.",
+            serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer));
     stdx::lock_guard<stdx::mutex> lk(_mutex);
 
-    auto erased = _samplers.erase(doc.getName());
-    invariant(erased);
+    _samplers.erase(doc.getName());
 }
 
 void QueryAnalysisCoordinator::onStartup(OperationContext* opCtx) {
@@ -201,12 +208,11 @@ void QueryAnalysisCoordinator::onStartup(OperationContext* opCtx) {
     {
         invariant(_configurations.empty());
         FindCommandRequest findRequest{NamespaceString::kConfigQueryAnalyzersNamespace};
-        findRequest.setFilter(BSON(QueryAnalyzerDocument::kModeFieldName << BSON("$ne"
-                                                                                 << "off")));
+        findRequest.setFilter(BSON(QueryAnalyzerDocument::kModeFieldName << BSON("$ne" << "off")));
         auto cursor = client.find(std::move(findRequest));
         while (cursor->more()) {
-            auto doc = QueryAnalyzerDocument::parse(IDLParserContext("QueryAnalysisCoordinator"),
-                                                    cursor->next());
+            auto doc = QueryAnalyzerDocument::parse(cursor->next(),
+                                                    IDLParserContext("QueryAnalysisCoordinator"));
             invariant(doc.getMode() != QueryAnalyzerModeEnum::kOff);
             auto configuration = CollectionQueryAnalyzerConfiguration{doc.getNs(),
                                                                       doc.getCollectionUuid(),
@@ -250,7 +256,7 @@ void QueryAnalysisCoordinator::onSetCurrentConfig(OperationContext* opCtx) {
             }
 
             auto samplerName = member.getHostAndPort().toString();
-            auto now = opCtx->getServiceContext()->getFastClockSource()->now();
+            auto now = opCtx->fastClockSource().now();
             auto it = _samplers.find(samplerName);
             if (it == _samplers.end()) {
                 // Initialize a sampler for every new data-bearing replica set member.
@@ -280,10 +286,10 @@ QueryAnalysisCoordinator::getNewConfigurationsForSampler(OperationContext* opCtx
     stdx::lock_guard<stdx::mutex> lk(_mutex);
 
     // Update the last ping time and last number of queries executed per second of this sampler.
-    auto now = opCtx->getServiceContext()->getFastClockSource()->now();
+    auto now = opCtx->fastClockSource().now();
     auto it = _samplers.find(samplerName);
     if (it == _samplers.end()) {
-        auto sampler = Sampler{samplerName.toString(), now};
+        auto sampler = Sampler{std::string{samplerName}, now};
         it = _samplers.emplace(samplerName, std::move(sampler)).first;
     } else {
         it->second.setLastPingTime(now);
@@ -296,7 +302,7 @@ QueryAnalysisCoordinator::getNewConfigurationsForSampler(OperationContext* opCtx
     double weight = numQueriesExecutedPerSecond;
     double totalWeight = 0;
 
-    auto minPingTime = _getMinLastPingTime();
+    auto minPingTime = _getMinLastPingTime(now);
     for (const auto& [name, sampler] : _samplers) {
         if (sampler.getLastPingTime() > minPingTime) {
             numActiveSamplers++;
@@ -306,7 +312,10 @@ QueryAnalysisCoordinator::getNewConfigurationsForSampler(OperationContext* opCtx
             }
         }
     }
-    invariant(numActiveSamplers > 0);
+    tassert(10690301,
+            str::stream() << "There should be at least one active sampler after '" << samplerName
+                          << "' updated its number of queries executed per second.",
+            numActiveSamplers > 0);
     // If the coordinator doesn't yet have a full view of the query distribution or no samplers
     // have executed any queries, each sampler gets an equal ratio of the sample rates. Otherwise,
     // the ratio is weighted based on the query distribution across samplers.

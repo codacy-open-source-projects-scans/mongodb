@@ -1,19 +1,22 @@
 // Test running explains on count commands.
 //
-// @tags: [requires_fastcount]
+// @tags: [
+//    requires_fastcount,
+//    requires_fcv_82,
+// ]
 
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-import {assertExplainCount, getPlanStage} from "jstests/libs/query/analyze_plan.js";
+import {assertExplainCount, getPlanStage, getPlanStages} from "jstests/libs/query/analyze_plan.js";
 
-var collName = "jstests_explain_count";
-var t = db[collName];
+let collName = "jstests_explain_count";
+let t = db[collName];
 t.drop();
 
 /**
  * Given an explain output from a COUNT_SCAN stage, check that a indexBounds field is present.
  */
 function checkCountScanIndexExplain(explain, startKey, endKey, startInclusive, endInclusive) {
-    var countStage = getPlanStage(explain.executionStats.executionStages, "COUNT_SCAN");
+    let countStage = getPlanStage(explain.executionStats.executionStages, "COUNT_SCAN");
 
     assert.eq(countStage.stage, "COUNT_SCAN");
     assert("indexBounds" in countStage);
@@ -29,16 +32,20 @@ function checkCountScanIndexExplain(explain, startKey, endKey, startInclusive, e
  * fast. Assumes that the shard key is part of the index.
  */
 function checkShardingFilterIndexScanExplain(explain, keyName, bounds) {
-    var filterStage = getPlanStage(explain.executionStats.executionStages, "SHARDING_FILTER");
+    const filterStages = getPlanStages(explain.executionStats.executionStages, "SHARDING_FILTER");
+    assert.gt(filterStages.length, 0, "No SHARDING_FILTER stage found");
 
-    assert.eq(filterStage.stage, "SHARDING_FILTER");
-    const ixScanStage = filterStage.inputStage;
-    assert.eq(ixScanStage.stage, "IXSCAN");
-    assert("indexBounds" in ixScanStage);
+    for (const filterStage of filterStages) {
+        assert.eq(filterStage.stage, "SHARDING_FILTER", filterStage);
+        const ixScanStage = filterStage.inputStage;
 
-    assert.eq(ixScanStage.indexBounds[keyName].length, 1);
-    const expectedBoundsArr = JSON.parse(ixScanStage.indexBounds[keyName][0]);
-    assert.eq(expectedBoundsArr, bounds);
+        assert.eq(ixScanStage.stage, "IXSCAN");
+        assert("indexBounds" in ixScanStage);
+
+        assert.eq(ixScanStage.indexBounds[keyName].length, 1);
+        const expectedBoundsArr = JSON.parse(ixScanStage.indexBounds[keyName][0]);
+        assert.eq(expectedBoundsArr, bounds);
+    }
 }
 
 /**
@@ -63,109 +70,105 @@ function checkIndexedCountWithPred(db, explain, keyName, bounds) {
 // sets and sharded clusters.
 if (FixtureHelpers.isMongos(db) || TestData.testingReplicaSetEndpoint) {
     // Create database
-    assert.commandWorked(db.adminCommand({'enableSharding': db.getName()}));
+    assert.commandWorked(db.adminCommand({"enableSharding": db.getName()}));
 }
 
 // Collection does not exist.
 assert.eq(0, t.count());
-var explain =
-    assert.commandWorked(db.runCommand({explain: {count: collName}, verbosity: "executionStats"}));
+let explain = assert.commandWorked(db.runCommand({explain: {count: collName}, verbosity: "executionStats"}));
 assertExplainCount({explainResults: explain, expectedCount: 0});
 
 // Collection does not exist with skip, limit, and/or query.
-var result = assert.commandWorked(db.runCommand({count: collName, skip: 3}));
+let result = assert.commandWorked(db.runCommand({count: collName, skip: 3}));
 assert.eq(0, result.n);
-explain = assert.commandWorked(
-    db.runCommand({explain: {count: collName, skip: 3}, verbosity: "executionStats"}));
+explain = assert.commandWorked(db.runCommand({explain: {count: collName, skip: 3}, verbosity: "executionStats"}));
 assertExplainCount({explainResults: explain, expectedCount: 0});
 
 result = assert.commandWorked(db.runCommand({count: collName, limit: 3}));
 assert.eq(0, result.n);
-explain = assert.commandWorked(
-    db.runCommand({explain: {count: collName, limit: 3}, verbosity: "executionStats"}));
+explain = assert.commandWorked(db.runCommand({explain: {count: collName, limit: 3}, verbosity: "executionStats"}));
 assertExplainCount({explainResults: explain, expectedCount: 0});
 
 result = assert.commandWorked(db.runCommand({count: collName, limit: -3}));
 assert.eq(0, result.n);
-explain = assert.commandWorked(
-    db.runCommand({explain: {count: collName, limit: -3}, verbosity: "executionStats"}));
+explain = assert.commandWorked(db.runCommand({explain: {count: collName, limit: -3}, verbosity: "executionStats"}));
 assertExplainCount({explainResults: explain, expectedCount: 0});
 
 result = assert.commandWorked(db.runCommand({count: collName, limit: -3, skip: 4}));
 assert.eq(0, result.n);
 explain = assert.commandWorked(
-    db.runCommand({explain: {count: collName, limit: -3, skip: 4}, verbosity: "executionStats"}));
+    db.runCommand({explain: {count: collName, limit: -3, skip: 4}, verbosity: "executionStats"}),
+);
 assertExplainCount({explainResults: explain, expectedCount: 0});
 
 result = assert.commandWorked(db.runCommand({count: collName, query: {a: 1}, limit: -3, skip: 4}));
 assert.eq(0, result.n);
-explain = assert.commandWorked(db.runCommand(
-    {explain: {count: collName, query: {a: 1}, limit: -3, skip: 4}, verbosity: "executionStats"}));
+explain = assert.commandWorked(
+    db.runCommand({explain: {count: collName, query: {a: 1}, limit: -3, skip: 4}, verbosity: "executionStats"}),
+);
 assertExplainCount({explainResults: explain, expectedCount: 0});
 
 // Now add a bit of data to the collection.
 // On sharded clusters, we'll want the shard key to be indexed, so we make _id part of the index.
 // This means counts will not have to fetch from the document in order to get the shard key.
 t.createIndex({a: 1, _id: 1});
-for (var i = 0; i < 10; i++) {
+for (let i = 0; i < 10; i++) {
     t.insert({_id: i, a: 1});
 }
 
 // Trivial count with no skip, limit, or query.
 assert.eq(10, t.count());
-explain =
-    assert.commandWorked(db.runCommand({explain: {count: collName}, verbosity: "executionStats"}));
+explain = assert.commandWorked(db.runCommand({explain: {count: collName}, verbosity: "executionStats"}));
 assertExplainCount({explainResults: explain, expectedCount: 10});
 
 // Trivial count with skip.
 result = assert.commandWorked(db.runCommand({count: collName, skip: 3}));
 assert.eq(7, result.n);
-explain = assert.commandWorked(
-    db.runCommand({explain: {count: collName, skip: 3}, verbosity: "executionStats"}));
+explain = assert.commandWorked(db.runCommand({explain: {count: collName, skip: 3}, verbosity: "executionStats"}));
 assertExplainCount({explainResults: explain, expectedCount: 7});
 
 // Trivial count with limit.
 result = assert.commandWorked(db.runCommand({count: collName, limit: 3}));
 assert.eq(3, result.n);
-explain = assert.commandWorked(
-    db.runCommand({explain: {count: collName, limit: 3}, verbosity: "executionStats"}));
+explain = assert.commandWorked(db.runCommand({explain: {count: collName, limit: 3}, verbosity: "executionStats"}));
 assertExplainCount({explainResults: explain, expectedCount: 3});
 
 // Trivial count with negative limit.
 result = assert.commandWorked(db.runCommand({count: collName, limit: -3}));
 assert.eq(3, result.n);
-explain = assert.commandWorked(
-    db.runCommand({explain: {count: collName, limit: -3}, verbosity: "executionStats"}));
+explain = assert.commandWorked(db.runCommand({explain: {count: collName, limit: -3}, verbosity: "executionStats"}));
 assertExplainCount({explainResults: explain, expectedCount: 3});
 
 // Trivial count with both limit and skip.
 result = assert.commandWorked(db.runCommand({count: collName, limit: -3, skip: 4}));
 assert.eq(3, result.n);
 explain = assert.commandWorked(
-    db.runCommand({explain: {count: collName, limit: -3, skip: 4}, verbosity: "executionStats"}));
+    db.runCommand({explain: {count: collName, limit: -3, skip: 4}, verbosity: "executionStats"}),
+);
 assertExplainCount({explainResults: explain, expectedCount: 3});
 
 // With a query.
 result = assert.commandWorked(db.runCommand({count: collName, query: {a: 1}}));
 assert.eq(10, result.n);
-explain = assert.commandWorked(
-    db.runCommand({explain: {count: collName, query: {a: 1}}, verbosity: "executionStats"}));
+explain = assert.commandWorked(db.runCommand({explain: {count: collName, query: {a: 1}}, verbosity: "executionStats"}));
 assertExplainCount({explainResults: explain, expectedCount: 10});
 checkIndexedCountWithPred(db, explain, "a", [1.0, 1.0]);
 
 // With a query and skip.
 result = assert.commandWorked(db.runCommand({count: collName, query: {a: 1}, skip: 3}));
 assert.eq(7, result.n);
-explain = assert.commandWorked(db.runCommand(
-    {explain: {count: collName, query: {a: 1}, skip: 3}, verbosity: "executionStats"}));
+explain = assert.commandWorked(
+    db.runCommand({explain: {count: collName, query: {a: 1}, skip: 3}, verbosity: "executionStats"}),
+);
 assertExplainCount({explainResults: explain, expectedCount: 7});
 checkIndexedCountWithPred(db, explain, "a", [1.0, 1.0]);
 
 // With a query and limit.
 result = assert.commandWorked(db.runCommand({count: collName, query: {a: 1}, limit: 3}));
 assert.eq(3, result.n);
-explain = assert.commandWorked(db.runCommand(
-    {explain: {count: collName, query: {a: 1}, limit: 3}, verbosity: "executionStats"}));
+explain = assert.commandWorked(
+    db.runCommand({explain: {count: collName, query: {a: 1}, limit: 3}, verbosity: "executionStats"}),
+);
 assertExplainCount({explainResults: explain, expectedCount: 3});
 checkIndexedCountWithPred(db, explain, "a", [1.0, 1.0]);
 
@@ -175,15 +178,17 @@ t.insert({a: 2});
 // Case where all results are skipped.
 result = assert.commandWorked(db.runCommand({count: collName, query: {a: 2}, skip: 2}));
 assert.eq(0, result.n);
-explain = assert.commandWorked(db.runCommand(
-    {explain: {count: collName, query: {a: 2}, skip: 2}, verbosity: "executionStats"}));
+explain = assert.commandWorked(
+    db.runCommand({explain: {count: collName, query: {a: 2}, skip: 2}, verbosity: "executionStats"}),
+);
 assertExplainCount({explainResults: explain, expectedCount: 0});
 checkIndexedCountWithPred(db, explain, "a", [2, 2]);
 
 // Case where we have a limit, but we don't hit it.
 result = assert.commandWorked(db.runCommand({count: collName, query: {a: 2}, limit: 2}));
 assert.eq(1, result.n);
-explain = assert.commandWorked(db.runCommand(
-    {explain: {count: collName, query: {a: 2}, limit: 2}, verbosity: "executionStats"}));
+explain = assert.commandWorked(
+    db.runCommand({explain: {count: collName, query: {a: 2}, limit: 2}, verbosity: "executionStats"}),
+);
 assertExplainCount({explainResults: explain, expectedCount: 1});
 checkIndexedCountWithPred(db, explain, "a", [2, 2]);

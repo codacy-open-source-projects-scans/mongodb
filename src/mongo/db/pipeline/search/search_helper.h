@@ -29,24 +29,25 @@
 
 #pragma once
 
-#include <memory>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/visitors/docs_needed_bounds_gen.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/search/internal_search_mongot_remote_spec_gen.h"
 #include "mongo/db/query/search/search_task_executors.h"
 #include "mongo/db/service_context.h"
 #include "mongo/executor/task_executor_cursor.h"
 #include "mongo/util/decorable.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -55,6 +56,10 @@ using RemoteExplainVector = std::vector<BSONObj>;
 
 extern FailPoint searchReturnEofImmediately;
 namespace search_helpers {
+
+static constexpr StringData kViewFieldName = "view"_sd;
+static constexpr StringData kProtocolStoredFieldsName = "storedSource"_sd;
+
 /**
  * Consult mongot to get planning information for sharded search queries, used to configure the
  * metadataMergeProtocolVersion, metaPipeline, and sortSpec fields in the existing mongot remote
@@ -81,11 +86,13 @@ bool isSearchPipeline(const Pipeline* pipeline);
  */
 bool isSearchMetaPipeline(const Pipeline* pipeline);
 
-/* This function is only called if the mongot pipeline is on a view. */
-void setResolvedNamespaceForSearch(const NamespaceString& origNss,
-                                   const ResolvedView& resolvedView,
-                                   boost::intrusive_ptr<ExpressionContext> expCtx,
-                                   boost::optional<UUID> uuid = boost::none);
+/**
+ * Checks that the *user* pipeline contains a search stage and sets the view on expCtx.
+ */
+void checkAndSetViewOnExpCtx(boost::intrusive_ptr<ExpressionContext> expCtx,
+                             std::vector<mongo::BSONObj> pipelineObj,
+                             ResolvedView resolvedView,
+                             const NamespaceString& viewName);
 
 /**
  * Check if this is a stored source $search or $_internalSearchMongot pipeline.
@@ -101,12 +108,12 @@ bool isMongotPipeline(const Pipeline* pipeline);
 /**
  * Check if this is a $search stage.
  */
-bool isSearchStage(DocumentSource* stage);
+bool isSearchStage(const DocumentSource* stage);
 
 /**
  * Check if this is a $searchMeta stage.
  */
-bool isSearchMetaStage(DocumentSource* stage);
+bool isSearchMetaStage(const DocumentSource* stage);
 
 /**
  * Check if this is a search-related stage that will rely on calls to mongot.
@@ -117,15 +124,15 @@ bool isMongotStage(DocumentSource* stage);
  * Asserts that $$SEARCH_META is accessed correctly; that is, it is set by a prior stage, and is
  * not accessed in a subpipline.
  */
-void assertSearchMetaAccessValid(const Pipeline::SourceContainer& pipeline,
+void assertSearchMetaAccessValid(const DocumentSourceContainer& pipeline,
                                  ExpressionContext* expCtx);
 
 /**
  * Overload used to check that $$SEARCH_META is being referenced correctly in a pipeline split
  * for execution on a sharded cluster.
  */
-void assertSearchMetaAccessValid(const Pipeline::SourceContainer& shardsPipeline,
-                                 const Pipeline::SourceContainer& mergePipeline,
+void assertSearchMetaAccessValid(const DocumentSourceContainer& shardsPipeline,
+                                 const DocumentSourceContainer& mergePipeline,
                                  ExpressionContext* expCtx);
 
 /**
@@ -145,7 +152,7 @@ void assertSearchMetaAccessValid(const Pipeline::SourceContainer& shardsPipeline
  *
  * Returns the additional pipline used for metadata, or nullptr if no pipeline is necessary.
  */
-std::unique_ptr<Pipeline, PipelineDeleter> prepareSearchForTopLevelPipelineLegacyExecutor(
+std::unique_ptr<Pipeline> prepareSearchForTopLevelPipelineLegacyExecutor(
     boost::intrusive_ptr<ExpressionContext> expCtx,
     Pipeline* origPipeline,
     DocsNeededBounds bounds,
@@ -190,35 +197,35 @@ std::unique_ptr<RemoteExplainVector> getSearchRemoteExplains(
     const ExpressionContext* expCtx,
     const std::vector<boost::intrusive_ptr<DocumentSource>>& cqPipeline);
 
+boost::optional<SearchQueryViewSpec> getViewFromExpCtx(
+    boost::intrusive_ptr<ExpressionContext> expCtx);
+
+boost::optional<SearchQueryViewSpec> getViewFromBSONObj(const BSONObj& spec);
+
+void validateViewNotSetByUser(boost::intrusive_ptr<ExpressionContext> expCtx, const BSONObj& spec);
+
 /**
- * Create the initial search pipeline which can be used for both $search and $searchMeta. The
- * returned list is unique and mutable.
+ * Validates that search stages on views are only allowed when the respective feature flag
+ * is enabled.
  */
-template <typename TargetSearchDocumentSource>
-std::list<boost::intrusive_ptr<DocumentSource>> createInitialSearchPipeline(
-    BSONObj specObj, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+void validateMongotIndexedViewsFF(boost::intrusive_ptr<ExpressionContext> expCtx,
+                                  const std::vector<BSONObj>& effectivePipeline);
 
-    uassert(6600901,
-            "Running search command in non-allowed context (update pipeline)",
-            !expCtx->getIsParsingPipelineUpdate());
+/**
+ * This function promotes the fields in storedSource to root if applicable, otherwise adds an
+ * internalSearchMongotRemote stage to the desugared pipeline.
+ */
+void promoteStoredSourceOrAddIdLookup(
+    boost::intrusive_ptr<ExpressionContext> expCtx,
+    std::list<boost::intrusive_ptr<DocumentSource>>& desugaredPipeline,
+    bool isStoredSource,
+    long long limit,
+    boost::optional<SearchQueryViewSpec> view);
 
-    // This is only called from user pipelines during desugaring of $search/$searchMeta, so the
-    // `specObj` should be the search query itself.
-    auto executor =
-        executor::getMongotTaskExecutor(expCtx->getOperationContext()->getServiceContext());
-    if ((!expCtx->getMongoProcessInterface()->isExpectedToExecuteQueries() ||
-         !expCtx->getMongoProcessInterface()->inShardedEnvironment(
-             expCtx->getOperationContext())) ||
-        MONGO_unlikely(searchReturnEofImmediately.shouldFail())) {
-        return {make_intrusive<TargetSearchDocumentSource>(std::move(specObj), expCtx, executor)};
-    }
-
-    // Send a planShardedSearch command to mongot to get the relevant planning information,
-    // including the metadata merging pipeline and the optional merge sort spec.
-    InternalSearchMongotRemoteSpec remoteSpec(specObj.getOwned());
-    planShardedSearch(expCtx, &remoteSpec);
-
-    return {make_intrusive<TargetSearchDocumentSource>(std::move(remoteSpec), expCtx, executor)};
-}
+/**
+ * Creates a Search QSN from the given DocumentSource stage, if isSearchStage(stage) or
+ * isSearchMetaStage(stage) return 'true'. Else, an error is thrown.
+ */
+std::unique_ptr<SearchNode> getSearchNode(DocumentSource* stage);
 }  // namespace search_helpers
 }  // namespace mongo

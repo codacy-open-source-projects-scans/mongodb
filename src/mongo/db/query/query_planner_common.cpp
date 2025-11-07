@@ -28,33 +28,22 @@
  */
 
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <memory>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
-
-#include "mongo/base/exact_cast.h"
-#include "mongo/base/string_data.h"
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
-#include "mongo/db/catalog/clustered_collection_util.h"
-#include "mongo/db/exec/document_value/document_metadata_fields.h"
-#include "mongo/db/pipeline/expression.h"
-#include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/index_bounds.h"
-#include "mongo/db/query/index_entry.h"
-#include "mongo/db/query/projection_ast.h"
-#include "mongo/db/query/projection_ast_path_tracking_visitor.h"
-#include "mongo/db/query/projection_ast_visitor.h"
 #include "mongo/db/query/query_planner_common.h"
-#include "mongo/db/query/query_solution.h"
-#include "mongo/db/query/stage_types.h"
-#include "mongo/db/query/tree_walker.h"
+
+#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/local_catalog/clustered_collection_util.h"
+#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -101,7 +90,8 @@ void QueryPlannerCommon::reverseScans(QuerySolutionNode* node, bool reverseCollS
 
         isn->bounds = isn->bounds.reverse();
 
-        invariant(isn->bounds.isValidFor(isn->index.keyPattern, isn->direction),
+        invariant(isn->bounds.isValidFor(
+                      isn->index.keyPattern, isn->direction, isn->index.collator != nullptr),
                   str::stream() << "Invalid bounds: "
                                 << redact(isn->bounds.toString(isn->index.collator != nullptr)));
 
@@ -113,7 +103,8 @@ void QueryPlannerCommon::reverseScans(QuerySolutionNode* node, bool reverseCollS
 
         dn->bounds = dn->bounds.reverse();
 
-        invariant(dn->bounds.isValidFor(dn->index.keyPattern, dn->direction),
+        invariant(dn->bounds.isValidFor(
+                      dn->index.keyPattern, dn->direction, dn->index.collator != nullptr),
                   str::stream() << "Invalid bounds: "
                                 << redact(dn->bounds.toString(dn->index.collator != nullptr)));
 
@@ -136,60 +127,13 @@ void QueryPlannerCommon::reverseScans(QuerySolutionNode* node, bool reverseCollS
     }
 }
 
-namespace {
-
-struct MetaFieldData {
-    std::vector<FieldPath> metaPaths;
-};
-
-using MetaFieldVisitorContext = projection_ast::PathTrackingVisitorContext<MetaFieldData>;
-
-/**
- * Visitor which produces a list of paths where $meta expressions are.
- */
-class MetaFieldVisitor final : public projection_ast::ProjectionASTConstVisitor {
-public:
-    MetaFieldVisitor(MetaFieldVisitorContext* context) : _context(context) {}
-
-
-    void visit(const projection_ast::ExpressionASTNode* node) final {
-        const auto* metaExpr = exact_pointer_cast<const ExpressionMeta*>(node->expressionRaw());
-        if (!metaExpr || metaExpr->getMetaType() != DocumentMetadataFields::MetaType::kSortKey) {
-            return;
-        }
-
-        _context->data().metaPaths.push_back(_context->fullPath());
-    }
-
-    void visit(const projection_ast::ProjectionPositionalASTNode* node) final {}
-    void visit(const projection_ast::ProjectionSliceASTNode* node) final {}
-    void visit(const projection_ast::ProjectionElemMatchASTNode* node) final {}
-    void visit(const projection_ast::BooleanConstantASTNode* node) final {}
-    void visit(const projection_ast::ProjectionPathASTNode* node) final {}
-    void visit(const projection_ast::MatchExpressionASTNode* node) final {}
-
-private:
-    MetaFieldVisitorContext* _context;
-};
-}  // namespace
-
-std::vector<FieldPath> QueryPlannerCommon::extractSortKeyMetaFieldsFromProjection(
-    const projection_ast::Projection& proj) {
-
-    MetaFieldVisitorContext ctx;
-    MetaFieldVisitor visitor(&ctx);
-    projection_ast::PathTrackingConstWalker<MetaFieldData> walker{&ctx, {&visitor}, {}};
-    tree_walker::walk<true, projection_ast::ASTNode>(proj.root(), &walker);
-
-    return std::move(ctx.data().metaPaths);
-}
-
 boost::optional<int> QueryPlannerCommon::determineClusteredScanDirection(
-    const CanonicalQuery& query, const QueryPlannerParams& params) {
-    if (params.clusteredInfo && query.getSortPattern() &&
-        CollatorInterface::collatorsMatch(params.clusteredCollectionCollator,
-                                          query.getCollator())) {
-        BSONObj kp = clustered_util::getSortPattern(params.clusteredInfo->getIndexSpec());
+    const CanonicalQuery& query,
+    const boost::optional<ClusteredCollectionInfo>& clusteredInfo,
+    const CollatorInterface* clusteredCollectionCollator) {
+    if (clusteredInfo && query.getSortPattern() &&
+        CollatorInterface::collatorsMatch(clusteredCollectionCollator, query.getCollator())) {
+        BSONObj kp = clustered_util::getSortPattern(clusteredInfo->getIndexSpec());
         if (QueryPlannerCommon::providesSort(query, kp)) {
             return 1;
         } else if (QueryPlannerCommon::providesSort(query,

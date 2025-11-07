@@ -4,20 +4,20 @@ const conn = MongoRunner.runMongod();
 assert.neq(null, conn, "mongod failed to start.");
 const db = conn.getDB("test");
 
-var maxFields = 3;
+let maxFields = 3;
 
-for (var fields = 1; fields < maxFields; fields++) {
-    var coll = db.testMnyPts;
+for (let fields = 1; fields < maxFields; fields++) {
+    let coll = db.testMnyPts;
     coll.drop();
 
-    var totalPts = 500 * 1000;
+    let totalPts = 500 * 1000;
 
-    var bulk = coll.initializeUnorderedBulkOp();
+    let bulk = coll.initializeUnorderedBulkOp();
     // Add points in a 100x100 grid
     for (var i = 0; i < totalPts; i++) {
-        var ii = i % 10000;
+        let ii = i % 10000;
 
-        var doc = {loc: [ii % 100, Math.floor(ii / 100)]};
+        let doc = {loc: [ii % 100, Math.floor(ii / 100)]};
 
         // Add fields with different kinds of data
         for (var j = 0; j < fields; j++) {
@@ -59,42 +59,48 @@ for (var fields = 1; fields < maxFields; fields++) {
 
     // Check that quarter of points in each quadrant
     for (var i = 0; i < 4; i++) {
-        var x = i % 2;
-        var y = Math.floor(i / 2);
+        let x = i % 2;
+        let y = Math.floor(i / 2);
 
-        var box = [[0, 0], [49, 49]];
-        box[0][0] += (x == 1 ? 50 : 0);
-        box[1][0] += (x == 1 ? 50 : 0);
-        box[0][1] += (y == 1 ? 50 : 0);
-        box[1][1] += (y == 1 ? 50 : 0);
+        var box = [
+            [0, 0],
+            [49, 49],
+        ];
+        box[0][0] += x == 1 ? 50 : 0;
+        box[1][0] += x == 1 ? 50 : 0;
+        box[0][1] += y == 1 ? 50 : 0;
+        box[1][1] += y == 1 ? 50 : 0;
 
         // Now only half of each result comes back
-        assert.eq(totalPts / (4 * 2),
-                  coll.find(Object.extend({loc: {$within: {$box: box}}}, queryFields)).count());
-        assert.eq(totalPts / (4 * 2),
-                  coll.find(Object.extend({loc: {$within: {$box: box}}}, queryFields)).itcount());
+        assert.eq(totalPts / (4 * 2), coll.find(Object.extend({loc: {$within: {$box: box}}}, queryFields)).count());
+        assert.eq(totalPts / (4 * 2), coll.find(Object.extend({loc: {$within: {$box: box}}}, queryFields)).itcount());
     }
 
     // Check that half of points in each half
     for (var i = 0; i < 2; i++) {
-        var box = [[0, 0], [49, 99]];
-        box[0][0] += (i == 1 ? 50 : 0);
-        box[1][0] += (i == 1 ? 50 : 0);
+        var box = [
+            [0, 0],
+            [49, 99],
+        ];
+        box[0][0] += i == 1 ? 50 : 0;
+        box[1][0] += i == 1 ? 50 : 0;
 
-        assert.eq(totalPts / (2 * 2),
-                  coll.find(Object.extend({loc: {$within: {$box: box}}}, queryFields)).count());
-        assert.eq(totalPts / (2 * 2),
-                  coll.find(Object.extend({loc: {$within: {$box: box}}}, queryFields)).itcount());
+        assert.eq(totalPts / (2 * 2), coll.find(Object.extend({loc: {$within: {$box: box}}}, queryFields)).count());
+        assert.eq(totalPts / (2 * 2), coll.find(Object.extend({loc: {$within: {$box: box}}}, queryFields)).itcount());
     }
 
     // Check that all but corner set of points in radius
-    var circle = [[0, 0], (100 - 1) * Math.sqrt(2) - 0.25];
+    let circle = [[0, 0], (100 - 1) * Math.sqrt(2) - 0.25];
 
     // All [99,x] pts are field0 : "abcdefg"
-    assert.eq(totalPts / 2 - totalPts / (100 * 100),
-              coll.find(Object.extend({loc: {$within: {$center: circle}}}, queryFields)).count());
-    assert.eq(totalPts / 2 - totalPts / (100 * 100),
-              coll.find(Object.extend({loc: {$within: {$center: circle}}}, queryFields)).itcount());
+    assert.eq(
+        totalPts / 2 - totalPts / (100 * 100),
+        coll.find(Object.extend({loc: {$within: {$center: circle}}}, queryFields)).count(),
+    );
+    assert.eq(
+        totalPts / 2 - totalPts / (100 * 100),
+        coll.find(Object.extend({loc: {$within: {$center: circle}}}, queryFields)).itcount(),
+    );
 }
 
 MongoRunner.stopMongod(conn);

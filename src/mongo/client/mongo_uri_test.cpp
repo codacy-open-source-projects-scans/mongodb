@@ -28,18 +28,7 @@
  */
 
 
-#include <algorithm>
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
-#include <cstddef>
-#include <fstream>  // IWYU pragma: keep
-#include <initializer_list>
-#include <iostream>
-#include <memory>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/client/mongo_uri.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -49,13 +38,22 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
-#include "mongo/client/mongo_uri.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <fstream>  // IWYU pragma: keep
+#include <initializer_list>
+#include <iostream>
+#include <memory>
+
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -77,7 +75,6 @@ struct URITestCase {
     MongoURI::OptionsMap options;
     std::string database;
     ConnectSSLMode sslMode;
-// TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants
 #ifdef MONGO_CONFIG_GRPC
     bool gRPC = false;
 #endif
@@ -513,7 +510,6 @@ const URITestCase validCases[] = {
     {"mongodb://localhost/?ssl=false", "", "", kMaster, "", 1, {{"ssl", "false"}}, "", kDisableSSL},
     {"mongodb://localhost/?tls=true", "", "", kMaster, "", 1, {{"tls", "true"}}, "", kEnableSSL},
     {"mongodb://localhost/?tls=false", "", "", kMaster, "", 1, {{"tls", "false"}}, "", kDisableSSL},
-// TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants
 #ifdef MONGO_CONFIG_GRPC
     {"mongodb://localhost", "", "", kMaster, "", 1, {}, "", kDisableSSL, false},
     {"mongodb://localhost/?grpc=false",
@@ -612,7 +608,6 @@ const InvalidURITestCase invalidCases[] = {
     {"mongodb://127.0.0.1:1234/dbName?ssl=blah", ErrorCodes::FailedToParse},
     {"mongodb://127.0.0.1:1234/dbName?tls=blah", ErrorCodes::FailedToParse},
 
-// TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants
 #ifdef MONGO_CONFIG_GRPC
     {"mongodb://127.0.0.1:1234/dbName?gRPC=blah", ErrorCodes::FailedToParse},
 #endif
@@ -637,17 +632,16 @@ BSONObj getBsonFromJsonFile(std::string fileName) {
 // Helper method to take a BSONElement and either extract its string or return an empty string
 std::string returnStringFromElementOrNull(BSONElement element) {
     ASSERT_TRUE(!element.eoo());
-    if (element.type() == jstNULL) {
+    if (element.type() == BSONType::null) {
         return std::string();
     }
-    ASSERT_EQ(element.type(), String);
+    ASSERT_EQ(element.type(), BSONType::string);
     return element.String();
 }
 
 // Helper method to take a valid test case, parse() it, and assure the output is correct
 void testValidURIFormat(URITestCase testCase) {
     LOGV2(20153, "Testing URI", "mongoUri"_attr = testCase.URI);
-    std::string errMsg;
     const auto cs_status = MongoURI::parse(testCase.URI);
     ASSERT_OK(cs_status);
     auto result = cs_status.getValue();
@@ -683,7 +677,10 @@ TEST(MongoURI, InvalidURIs) {
     }
 }
 
-TEST_F(ServiceContextTest, ValidButBadURIsFailToConnect) {
+class URIConnectionTest : service_context_test::WithSetupTransportLayer,
+                          public ServiceContextTest {};
+
+TEST_F(URIConnectionTest, ValidButBadURIsFailToConnect) {
     // "invalid" is a TLD that cannot exit on the public internet (see rfc2606). It should always
     // parse as a valid URI, but connecting should always fail.
     auto sw_uri = MongoURI::parse("mongodb://user:pass@hostname.invalid:12345");
@@ -739,7 +736,7 @@ TEST(MongoURI, specTests) {
         const auto testBson = getBsonFromJsonFile(file);
 
         for (const auto& testElement : testBson) {
-            ASSERT_EQ(testElement.type(), Object);
+            ASSERT_EQ(testElement.type(), BSONType::object);
             const auto test = testElement.Obj();
 
             // First extract the valid field and the uri field
@@ -750,7 +747,7 @@ TEST(MongoURI, specTests) {
 
             const auto uriDoc = test.getField("uri");
             ASSERT_FALSE(uriDoc.eoo());
-            ASSERT_EQ(uriDoc.type(), String);
+            ASSERT_EQ(uriDoc.type(), BSONType::string);
             const auto uri = uriDoc.String();
 
             if (!valid) {
@@ -767,8 +764,8 @@ TEST(MongoURI, specTests) {
 
                 const auto auth = test.getField("auth");
                 ASSERT_FALSE(auth.eoo());
-                if (auth.type() != jstNULL) {
-                    ASSERT_EQ(auth.type(), Object);
+                if (auth.type() != BSONType::null) {
+                    ASSERT_EQ(auth.type(), BSONType::object);
                     const auto authObj = auth.embeddedObject();
                     database = returnStringFromElementOrNull(authObj.getField("db"));
                     username = returnStringFromElementOrNull(authObj.getField("username"));
@@ -778,29 +775,27 @@ TEST(MongoURI, specTests) {
                 // parse the hosts
                 const auto hosts = test.getField("hosts");
                 ASSERT_FALSE(hosts.eoo());
-                ASSERT_EQ(hosts.type(), Array);
+                ASSERT_EQ(hosts.type(), BSONType::array);
                 const auto numHosts = static_cast<size_t>(hosts.Obj().nFields());
 
                 // parse the options
                 ConnectionString::ConnectionType connectionType = kMaster;
-                size_t numOptions = 0;
                 std::string setName;
                 const auto optionsElement = test.getField("options");
                 ASSERT_FALSE(optionsElement.eoo());
                 MongoURI::OptionsMap options;
-                if (optionsElement.type() != jstNULL) {
-                    ASSERT_EQ(optionsElement.type(), Object);
+                if (optionsElement.type() != BSONType::null) {
+                    ASSERT_EQ(optionsElement.type(), BSONType::object);
                     const auto optionsObj = optionsElement.Obj();
-                    numOptions = optionsObj.nFields();
                     const auto replsetElement = optionsObj.getField("replicaSet");
                     if (!replsetElement.eoo()) {
-                        ASSERT_EQ(replsetElement.type(), String);
+                        ASSERT_EQ(replsetElement.type(), BSONType::string);
                         setName = replsetElement.String();
                         connectionType = kReplicaSet;
                     }
 
                     for (auto&& field : optionsElement.Obj()) {
-                        if (field.type() == String) {
+                        if (field.type() == BSONType::string) {
                             options[field.fieldNameStringData()] = field.String();
                         } else if (field.isNumber()) {
                             options[field.fieldNameStringData()] = std::to_string(field.Int());

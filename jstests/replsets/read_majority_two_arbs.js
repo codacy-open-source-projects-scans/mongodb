@@ -11,51 +11,50 @@ function log(arg) {
 }
 
 // Set up a set and grab things for later.
-var name = "read_majority_two_arbs";
-var replTest = new ReplSetTest({name: name, nodes: 3});
+let name = "read_majority_two_arbs";
+let replTest = new ReplSetTest({name: name, nodes: 3});
 
 replTest.startSet({setParameter: {allowMultipleArbiters: true}});
-var nodes = replTest.nodeList();
-var config = {
+let nodes = replTest.nodeList();
+let config = {
     "_id": name,
     "members": [
         {"_id": 0, "host": nodes[0]},
         {"_id": 1, "host": nodes[1], arbiterOnly: true},
-        {"_id": 2, "host": nodes[2], arbiterOnly: true}
-    ]
+        {"_id": 2, "host": nodes[2], arbiterOnly: true},
+    ],
 };
 
 replTest.initiate(config);
 
-var primary = replTest.getPrimary();
+let primary = replTest.getPrimary();
 var db = primary.getDB(name);
-var t = db[name];
+let t = db[name];
 
 function doRead(readConcern) {
     readConcern.maxTimeMS = 3000;
-    var res = assert.commandWorked(t.runCommand('find', readConcern));
-    var docs = (new DBCommandCursor(db, res)).toArray();
+    let res = assert.commandWorked(t.runCommand("find", readConcern));
+    let docs = new DBCommandCursor(db, res).toArray();
     assert.gt(docs.length, 0, "no docs returned!");
     return docs[0].state;
 }
 
 function doDirtyRead() {
     log("doing dirty read");
-    var ret = doRead({"readConcern": {"level": "local"}});
+    let ret = doRead({"readConcern": {"level": "local"}});
     log("done doing dirty read.");
     return ret;
 }
 
 function doCommittedRead() {
     log("doing committed read");
-    var ret = doRead({"readConcern": {"level": "majority"}});
+    let ret = doRead({"readConcern": {"level": "majority"}});
     log("done doing committed read.");
     return ret;
 }
 
 jsTest.log("doing write");
-assert.commandWorked(
-    t.save({_id: 1, state: 0}, {writeConcern: {w: "majority", wtimeout: 10 * 1000}}));
+assert.commandWorked(t.save({_id: 1, state: 0}, {writeConcern: {w: "majority", wtimeout: 10 * 1000}}));
 jsTest.log("doing read");
 assert.eq(doDirtyRead(), 0);
 jsTest.log("doing committed read");

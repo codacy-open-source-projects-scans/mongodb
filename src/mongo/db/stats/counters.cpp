@@ -29,22 +29,20 @@
 
 #include "mongo/db/stats/counters.h"
 
-#include <fmt/format.h>
-#include <tuple>
-
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/client/authenticate.h"
-#include "mongo/db/commands/server_status.h"
+#include "mongo/db/commands/server_status/server_status.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/util/static_immortal.h"
+
+#include <tuple>
+
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 namespace mongo {
-
-using namespace fmt::literals;
 
 void OpCounters::_reset() {
     _insert->store(0);
@@ -64,7 +62,7 @@ void OpCounters::_reset() {
     _acceptableErrorInCommand->store(0);
 }
 
-void OpCounters::_checkWrap(CacheExclusive<AtomicWord<long long>> OpCounters::*counter, int n) {
+void OpCounters::_checkWrap(CacheExclusive<AtomicWord<long long>> OpCounters::* counter, int n) {
     static constexpr auto maxCount = 1LL << 60;
     auto oldValue = (this->*counter)->fetchAndAddRelaxed(n);
     if (oldValue > maxCount) {
@@ -108,60 +106,67 @@ BSONObj OpCounters::getObj() const {
     return b.obj();
 }
 
-void NetworkCounter::hitPhysicalIn(long long bytes) {
+void NetworkCounter::hitPhysicalIn(ConnectionType connectionType, long long bytes) {
     static const int64_t MAX = 1ULL << 60;
+    auto& ref = connectionType == ConnectionType::kIngress ? _ingressPhysicalBytesIn
+                                                           : _egressPhysicalBytesIn;
 
     // don't care about the race as its just a counter
-    const bool overflow = _physicalBytesIn->loadRelaxed() > MAX;
+    const bool overflow = ref->loadRelaxed() > MAX;
 
     if (overflow) {
-        _physicalBytesIn->store(bytes);
+        ref->store(bytes);
     } else {
-        _physicalBytesIn->fetchAndAdd(bytes);
+        ref->fetchAndAdd(bytes);
     }
 }
 
-void NetworkCounter::hitPhysicalOut(long long bytes) {
+void NetworkCounter::hitPhysicalOut(ConnectionType connectionType, long long bytes) {
     static const int64_t MAX = 1ULL << 60;
+    auto& ref = connectionType == ConnectionType::kIngress ? _ingressPhysicalBytesOut
+                                                           : _egressPhysicalBytesOut;
 
     // don't care about the race as its just a counter
-    const bool overflow = _physicalBytesOut->loadRelaxed() > MAX;
+    const bool overflow = ref->loadRelaxed() > MAX;
 
     if (overflow) {
-        _physicalBytesOut->store(bytes);
+        ref->store(bytes);
     } else {
-        _physicalBytesOut->fetchAndAdd(bytes);
+        ref->fetchAndAdd(bytes);
     }
 }
 
-void NetworkCounter::hitLogicalIn(long long bytes) {
+void NetworkCounter::hitLogicalIn(ConnectionType connectionType, long long bytes) {
     static const int64_t MAX = 1ULL << 60;
+    auto& ref = connectionType == ConnectionType::kIngress ? _ingressTogether : _egressTogether;
 
     // don't care about the race as its just a counter
-    const bool overflow = _together->logicalBytesIn.loadRelaxed() > MAX;
+    const bool overflow = ref->logicalBytesIn.loadRelaxed() > MAX;
 
     if (overflow) {
-        _together->logicalBytesIn.store(bytes);
+        ref->logicalBytesIn.store(bytes);
         // The requests field only gets incremented here (and not in hitPhysical) because the
         // hitLogical and hitPhysical are each called for each operation. Incrementing it in both
         // functions would double-count the number of operations.
-        _together->requests.store(1);
+        ref->requests.store(1);
     } else {
-        _together->logicalBytesIn.fetchAndAdd(bytes);
-        _together->requests.fetchAndAdd(1);
+        ref->logicalBytesIn.fetchAndAdd(bytes);
+        ref->requests.fetchAndAdd(1);
     }
 }
 
-void NetworkCounter::hitLogicalOut(long long bytes) {
+void NetworkCounter::hitLogicalOut(ConnectionType connectionType, long long bytes) {
     static const int64_t MAX = 1ULL << 60;
+    auto& ref = connectionType == ConnectionType::kIngress ? _ingressLogicalBytesOut
+                                                           : _egressLogicalBytesOut;
 
     // don't care about the race as its just a counter
-    const bool overflow = _logicalBytesOut->loadRelaxed() > MAX;
+    const bool overflow = ref->loadRelaxed() > MAX;
 
     if (overflow) {
-        _logicalBytesOut->store(bytes);
+        ref->store(bytes);
     } else {
-        _logicalBytesOut->fetchAndAdd(bytes);
+        ref->fetchAndAdd(bytes);
     }
 }
 
@@ -178,13 +183,26 @@ void NetworkCounter::acceptedTFOIngress() {
 }
 
 void NetworkCounter::append(BSONObjBuilder& b) {
-    b.append("bytesIn", static_cast<long long>(_together->logicalBytesIn.loadRelaxed()));
-    b.append("bytesOut", static_cast<long long>(_logicalBytesOut->loadRelaxed()));
-    b.append("physicalBytesIn", static_cast<long long>(_physicalBytesIn->loadRelaxed()));
-    b.append("physicalBytesOut", static_cast<long long>(_physicalBytesOut->loadRelaxed()));
+    b.append("bytesIn", static_cast<long long>(_ingressTogether->logicalBytesIn.loadRelaxed()));
+    b.append("bytesOut", static_cast<long long>(_ingressLogicalBytesOut->loadRelaxed()));
+    b.append("physicalBytesIn", static_cast<long long>(_ingressPhysicalBytesIn->loadRelaxed()));
+    b.append("physicalBytesOut", static_cast<long long>(_ingressPhysicalBytesOut->loadRelaxed()));
+
+    BSONObjBuilder egressBuilder(b.subobjStart("egress"));
+    egressBuilder.append("bytesIn",
+                         static_cast<long long>(_egressTogether->logicalBytesIn.loadRelaxed()));
+    egressBuilder.append("bytesOut", static_cast<long long>(_egressLogicalBytesOut->loadRelaxed()));
+    egressBuilder.append("physicalBytesIn",
+                         static_cast<long long>(_egressPhysicalBytesIn->loadRelaxed()));
+    egressBuilder.append("physicalBytesOut",
+                         static_cast<long long>(_egressPhysicalBytesOut->loadRelaxed()));
+    egressBuilder.append("numRequests",
+                         static_cast<long long>(_egressTogether->requests.loadRelaxed()));
+    egressBuilder.done();
+
     b.append("numSlowDNSOperations", static_cast<long long>(_numSlowDNSOperations->loadRelaxed()));
     b.append("numSlowSSLOperations", static_cast<long long>(_numSlowSSLOperations->loadRelaxed()));
-    b.append("numRequests", static_cast<long long>(_together->requests.loadRelaxed()));
+    b.append("numRequests", static_cast<long long>(_ingressTogether->requests.loadRelaxed()));
 
     BSONObjBuilder tfo;
 #ifdef __linux__
@@ -211,12 +229,12 @@ void AuthCounter::initializeMechanismMap(const std::vector<std::string>& mechani
     // When clusterAuthMode == `x509` or `sendX509`, we'll use MONGODB-X509 for intra-cluster auth
     // even if it's not explicitly enabled by authenticationMechanisms.
     // Ensure it's always included in counts.
-    addMechanism(auth::kMechanismMongoX509.toString());
+    addMechanism(std::string{auth::kMechanismMongoX509});
 
     // It's possible for intracluster auth to use a default fallback mechanism of SCRAM-SHA-256
     // even if it's not configured to do so.
     // Explicitly add this to the map for now so that they can be incremented if this happens.
-    addMechanism(auth::kMechanismScramSha256.toString());
+    addMechanism(std::string{auth::kMechanismScramSha256});
 }
 
 void AuthCounter::incSaslSupportedMechanismsReceived() {
@@ -252,9 +270,9 @@ void AuthCounter::MechanismCounterHandle::incClusterAuthenticateSuccessful() {
 }
 
 auto AuthCounter::getMechanismCounter(StringData mechanism) -> MechanismCounterHandle {
-    auto it = _mechanisms.find(mechanism.rawData());
+    auto it = _mechanisms.find(mechanism.data());
     uassert(ErrorCodes::MechanismUnavailable,
-            "Received authentication for mechanism {} which is not enabled"_format(mechanism),
+            fmt::format("Received authentication for mechanism {} which is not enabled", mechanism),
             it != _mechanisms.end());
 
     auto& data = it->second;
@@ -352,10 +370,14 @@ AggStageCounters aggStageCounters{"aggStageCounters."};
 DotsAndDollarsFieldsCounters dotsAndDollarsFieldsCounters;
 QueryFrameworkCounters queryFrameworkCounters;
 LookupPushdownCounters lookupPushdownCounters;
-SortCounters sortCounters;
 ValidatorCounters validatorCounters;
 GroupCounters groupCounters;
 SetWindowFieldsCounters setWindowFieldsCounters;
+GraphLookupCounters graphLookupCounters;
+TextOrCounters textOrCounters;
+BucketAutoCounters bucketAutoCounters;
+GeoNearCounters geoNearCounters;
+TimeseriesCounters timeseriesCounters;
 PlanCacheCounters planCacheCounters;
 FastPathQueryCounters fastPathQueryCounters;
 

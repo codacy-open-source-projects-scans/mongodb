@@ -1,4 +1,7 @@
-// @tags: [requires_fastcount]
+// @tags: [
+//  requires_fastcount,
+//  requires_getmore,
+// ]
 
 let t = db.query1;
 t.drop();
@@ -10,7 +13,7 @@ t.save({num: 4});
 let num = 0;
 let total = 0;
 
-t.find().forEach(function(z) {
+t.find().forEach(function (z) {
     num++;
     total += z.num;
 });

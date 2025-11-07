@@ -28,6 +28,40 @@
  */
 
 
+#include "mongo/db/s/resharding/resharding_util.h"
+
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/oid.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/exec/agg/pipeline_builder.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/global_catalog/type_shard.h"
+#include "mongo/db/pipeline/aggregation_context_fixture.h"
+#include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/document_source_mock.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/db/s/resharding/resharding_coordinator_service_util.h"
+#include "mongo/db/s/resharding/resharding_noop_o2_field_gen.h"
+#include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
+#include "mongo/db/s/resharding/resharding_txn_cloner.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/session/session_txn_record_gen.h"
+#include "mongo/db/sharding_environment/config_server_test_fixture.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/otel/telemetry_context_holder.h"
+#include "mongo/otel/telemetry_context_serialization.h"
+#include "mongo/otel/traces/span/span.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/uuid.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <deque>
@@ -39,29 +73,6 @@
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/document_source_mock.h"
-#include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/repl/optime.h"
-#include "mongo/db/s/config/config_server_test_fixture.h"
-#include "mongo/db/s/resharding/resharding_txn_cloner.h"
-#include "mongo/db/s/resharding/resharding_util.h"
-#include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/session/session_txn_record_gen.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
-#include "mongo/util/time_support.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -110,15 +121,15 @@ protected:
                          std::vector<BSONObj>& recipientSpecs,
                          ErrorCodes::Error code) {
         if (code == ErrorCodes::OK) {
-            ASSERT_DOES_NOT_THROW(validateIndexSpecsMatch(sourceSpecs.cbegin(),
-                                                          sourceSpecs.cend(),
-                                                          recipientSpecs.cbegin(),
-                                                          recipientSpecs.cend()));
+            ASSERT_DOES_NOT_THROW(verifyIndexSpecsMatch(sourceSpecs.cbegin(),
+                                                        sourceSpecs.cend(),
+                                                        recipientSpecs.cbegin(),
+                                                        recipientSpecs.cend()));
         } else {
-            ASSERT_THROWS_CODE(validateIndexSpecsMatch(sourceSpecs.cbegin(),
-                                                       sourceSpecs.cend(),
-                                                       recipientSpecs.cbegin(),
-                                                       recipientSpecs.cend()),
+            ASSERT_THROWS_CODE(verifyIndexSpecsMatch(sourceSpecs.cbegin(),
+                                                     sourceSpecs.cend(),
+                                                     recipientSpecs.cbegin(),
+                                                     recipientSpecs.cend()),
                                DBException,
                                code);
         }
@@ -138,12 +149,11 @@ protected:
 private:
     const NamespaceString _nss = NamespaceString::createNamespaceString_forTest("test.foo");
     const std::string _shardKey = "x";
-    const ShardKeyPattern _shardKeyPattern = ShardKeyPattern(BSON("x"
-                                                                  << "hashed"));
+    const ShardKeyPattern _shardKeyPattern = ShardKeyPattern(BSON("x" << "hashed"));
 };
 
 // Confirm the highest minFetchTimestamp is properly computed.
-TEST(ReshardingUtilTest, HighestMinFetchTimestampSucceeds) {
+TEST(SimpleReshardingUtilTest, HighestMinFetchTimestampSucceeds) {
     std::vector<DonorShardEntry> donorShards{
         makeDonorShard(ShardId("s0"), DonorStateEnum::kDonatingInitialData, Timestamp(10, 2)),
         makeDonorShard(ShardId("s1"), DonorStateEnum::kDonatingInitialData, Timestamp(10, 3)),
@@ -152,7 +162,7 @@ TEST(ReshardingUtilTest, HighestMinFetchTimestampSucceeds) {
     ASSERT_EQ(Timestamp(10, 3), highestMinFetchTimestamp);
 }
 
-TEST(ReshardingUtilTest, HighestMinFetchTimestampThrowsWhenDonorMissingTimestamp) {
+TEST(SimpleReshardingUtilTest, HighestMinFetchTimestampThrowsWhenDonorMissingTimestamp) {
     std::vector<DonorShardEntry> donorShards{
         makeDonorShard(ShardId("s0"), DonorStateEnum::kDonatingInitialData, Timestamp(10, 3)),
         makeDonorShard(ShardId("s1"), DonorStateEnum::kDonatingInitialData),
@@ -160,7 +170,8 @@ TEST(ReshardingUtilTest, HighestMinFetchTimestampThrowsWhenDonorMissingTimestamp
     ASSERT_THROWS_CODE(getHighestMinFetchTimestamp(donorShards), DBException, 4957300);
 }
 
-TEST(ReshardingUtilTest, HighestMinFetchTimestampSucceedsWithDonorStateGTkDonatingOplogEntries) {
+TEST(SimpleReshardingUtilTest,
+     HighestMinFetchTimestampSucceedsWithDonorStateGTkDonatingOplogEntries) {
     std::vector<DonorShardEntry> donorShards{
         makeDonorShard(ShardId("s0"), DonorStateEnum::kBlockingWrites, Timestamp(10, 2)),
         makeDonorShard(ShardId("s1"), DonorStateEnum::kDonatingOplogEntries, Timestamp(10, 3)),
@@ -248,7 +259,7 @@ TEST_F(ReshardingUtilTest, FailWhenOverlappingZones) {
     ASSERT_THROWS_CODE(checkForOverlappingZones(zones), DBException, ErrorCodes::BadValue);
 }
 
-TEST(ReshardingUtilTest, AssertDonorOplogIdSerialization) {
+TEST(SimpleReshardingUtilTest, AssertDonorOplogIdSerialization) {
     // It's a correctness requirement that `ReshardingDonorOplogId.toBSON` serializes as
     // `{clusterTime: <value>, ts: <value>}`, paying particular attention to the ordering of the
     // fields. The serialization order is defined as the ordering of the fields in the idl file.
@@ -267,25 +278,20 @@ TEST(ReshardingUtilTest, AssertDonorOplogIdSerialization) {
 
 TEST_F(ReshardingUtilTest, ValidateIndexSpecsMatch) {
     // 1. Source has index, Recipient has none.
-    validateIndexes(BSON("name"
-                         << "test"),
-                    BSONObj(),
-                    (ErrorCodes::Error)9365601);
+    validateIndexes(BSON("name" << "test"), BSONObj(), (ErrorCodes::Error)9365601);
 
     // 2. Collation subField difference.
     auto sourceSpec = BSON("key" << BSON("field" << 1) << "name"
                                  << "indexName"
                                  << "v" << 3 << "collation"
-                                 << BSON("locale"
-                                         << "en"
-                                         << "strength" << 2));
+                                 << BSON("locale" << "en"
+                                                  << "strength" << 2));
 
     auto recipientSpec = BSON("key" << BSON("field" << 1) << "name"
                                     << "indexName"
                                     << "v" << 3 << "collation"
-                                    << BSON("locale"
-                                            << "en"
-                                            << "strength" << 3));
+                                    << BSON("locale" << "en"
+                                                     << "strength" << 3));
     validateIndexes(sourceSpec, recipientSpec, (ErrorCodes::Error)9365602);
 
     // 3. Collation simple vs non-simple.
@@ -296,9 +302,8 @@ TEST_F(ReshardingUtilTest, ValidateIndexSpecsMatch) {
     recipientSpec = BSON("key" << BSON("field" << 1) << "name"
                                << "indexName"
                                << "v" << 3 << "collation"
-                               << BSON("locale"
-                                       << "en"
-                                       << "strength" << 2));
+                               << BSON("locale" << "en"
+                                                << "strength" << 2));
     validateIndexes(sourceSpec, recipientSpec, (ErrorCodes::Error)9365602);
 
     // 4. Different field ordering.
@@ -316,18 +321,16 @@ TEST_F(ReshardingUtilTest, ValidateIndexSpecsMatch) {
                                      BSON("key" << BSON("field" << 1) << "name"
                                                 << "indexName"
                                                 << "v" << 3 << "collation"
-                                                << BSON("locale"
-                                                        << "en"
-                                                        << "strength" << 2))};
+                                                << BSON("locale" << "en"
+                                                                 << "strength" << 2))};
     std::vector<BSONObj> recipientSpecs{BSON("key" << BSON("field_2" << 1) << "name"
                                                    << "indexName_2"
                                                    << "v" << 3),
                                         BSON("key" << BSON("field" << 1) << "name"
                                                    << "indexName"
                                                    << "v" << 3 << "collation"
-                                                   << BSON("locale"
-                                                           << "en"
-                                                           << "strength" << 2))};
+                                                   << BSON("locale" << "en"
+                                                                    << "strength" << 2))};
 
     validateIndexes(sourceSpecs, recipientSpecs, ErrorCodes::OK);
 
@@ -338,14 +341,397 @@ TEST_F(ReshardingUtilTest, ValidateIndexSpecsMatch) {
     std::vector<BSONObj> recipientSpecs2{BSON("key" << BSON("field" << 1) << "name"
                                                     << "indexName"
                                                     << "v" << 3 << "collation"
-                                                    << BSON("locale"
-                                                            << "en"
-                                                            << "strength" << 2)),
+                                                    << BSON("locale" << "en"
+                                                                     << "strength" << 2)),
                                          BSON("key" << BSON("field2" << 1) << "name"
                                                     << "indexName_2"
                                                     << "v" << 3)};
 
     validateIndexes(sourceSpecs2, recipientSpecs2, ErrorCodes::OK);
+}
+
+TEST_F(ReshardingUtilTest, SetNumSamplesPerChunkThroughConfigsvrReshardCollectionRequest) {
+    RAIIServerParameterControllerForTest featureFlagController(
+        "featureFlagReshardingNumSamplesPerChunk", true);
+
+    int numInitialChunks = 1;
+    int numSamplesPerChunk = 10;
+
+    const CollectionType collEntry(nss(),
+                                   OID::gen(),
+                                   Timestamp(static_cast<unsigned int>(std::time(nullptr)), 1),
+                                   Date_t::now(),
+                                   UUID::gen(),
+                                   keyPattern());
+
+    ConfigsvrReshardCollection configsvrReshardCollection(nss(), BSON(shardKey() << 1));
+    configsvrReshardCollection.setDbName(nss().dbName());
+    configsvrReshardCollection.setUnique(true);
+    const auto collationObj = BSON("locale" << "en_US");
+    configsvrReshardCollection.setCollation(collationObj);
+    configsvrReshardCollection.setNumInitialChunks(numInitialChunks);
+
+    boost::optional<ReshardingProvenanceEnum> provenance(
+        ReshardingProvenanceEnum::kReshardCollection);
+    configsvrReshardCollection.setProvenance(provenance);
+    configsvrReshardCollection.setNumSamplesPerChunk(numSamplesPerChunk);
+
+
+    ReshardingCoordinatorDocument coordinatorDoc = createReshardingCoordinatorDoc(
+        operationContext(), configsvrReshardCollection, collEntry, nss(), true);
+    auto numSamplesPerChunkOptional = coordinatorDoc.getNumSamplesPerChunk();
+    ASSERT_TRUE(numSamplesPerChunkOptional.has_value());
+    ASSERT_EQ(*numSamplesPerChunkOptional, numSamplesPerChunk);
+}
+
+TEST_F(ReshardingUtilTest, CreateCoordinatorDocPerformVerification) {
+    for (auto performVerification : std::vector<boost::optional<bool>>{true, false, boost::none}) {
+        for (bool enableVerification : {true, false}) {
+            LOGV2(9849102,
+                  "Running case",
+                  "test"_attr = unittest::getTestName(),
+                  "performVerification"_attr = performVerification,
+                  "enableVerification"_attr = enableVerification);
+            RAIIServerParameterControllerForTest featureFlagController(
+                "featureFlagReshardingVerification", enableVerification);
+
+
+            const CollectionType collEntry(
+                nss(),
+                OID::gen(),
+                Timestamp(static_cast<unsigned int>(std::time(nullptr)), 1),
+                Date_t::now(),
+                UUID::gen(),
+                keyPattern());
+
+            ConfigsvrReshardCollection configsvrReshardCollection(nss(), BSON(shardKey() << 1));
+            configsvrReshardCollection.setDbName(nss().dbName());
+            configsvrReshardCollection.setPerformVerification(performVerification);
+
+            ReshardingCoordinatorDocument coordinatorDoc = createReshardingCoordinatorDoc(
+                operationContext(), configsvrReshardCollection, collEntry, nss(), true);
+
+            auto actualPerformVerification = coordinatorDoc.getPerformVerification();
+            if (performVerification.has_value()) {
+                ASSERT(actualPerformVerification.has_value());
+                ASSERT_EQ(actualPerformVerification, *performVerification);
+            } else if (enableVerification) {
+                ASSERT(actualPerformVerification.has_value());
+                ASSERT_EQ(actualPerformVerification, true);
+            } else {
+                ASSERT_FALSE(actualPerformVerification.has_value());
+            }
+        }
+    }
+}
+
+TEST_F(ReshardingUtilTest, GetMajorityReplicationLag_Basic) {
+    auto replCoord = repl::ReplicationCoordinator::get(operationContext());
+
+    auto expectedReplicationLag = Milliseconds(1500);
+    auto lastCommittedOpTimeAndWallTime =
+        repl::OpTimeAndWallTime{repl::OpTime(Timestamp(100, 1), 1), Date_t::now()};
+    auto lastAppliedOpTimeAndWallTime =
+        repl::OpTimeAndWallTime{repl::OpTime(Timestamp(120, 1), 2),
+                                lastCommittedOpTimeAndWallTime.wallTime + expectedReplicationLag};
+    replCoord->setMyLastAppliedOpTimeAndWallTimeForward(lastAppliedOpTimeAndWallTime);
+    replCoord->advanceCommitPoint(lastCommittedOpTimeAndWallTime, false /* fromSyncSource */);
+
+    auto actualReplicationLag = getMajorityReplicationLag(operationContext());
+    ASSERT_EQ(actualReplicationLag, expectedReplicationLag);
+}
+
+TEST_F(ReshardingUtilTest, GetMajorityReplicationLag_LastAppliedEqualToLastCommitted) {
+    auto replCoord = repl::ReplicationCoordinator::get(operationContext());
+
+    auto lastCommittedOpTimeAndWallTime =
+        repl::OpTimeAndWallTime{repl::OpTime(Timestamp(100, 1), 1), Date_t::now()};
+    auto lastAppliedOpTimeAndWallTime = lastCommittedOpTimeAndWallTime;
+    replCoord->setMyLastAppliedOpTimeAndWallTimeForward(lastAppliedOpTimeAndWallTime);
+    replCoord->advanceCommitPoint(lastCommittedOpTimeAndWallTime, false /* fromSyncSource */);
+
+    auto actualReplicationLag = getMajorityReplicationLag(operationContext());
+    ASSERT_EQ(actualReplicationLag, Milliseconds(0));
+}
+
+TEST_F(ReshardingUtilTest, ReshardingCoordinatorDocContainsTelemetryContextFromOpCtx) {
+    const CollectionType collEntry(nss(),
+                                   OID::gen(),
+                                   Timestamp(static_cast<unsigned int>(std::time(nullptr)), 1),
+                                   Date_t::now(),
+                                   UUID::gen(),
+                                   keyPattern());
+
+    ConfigsvrReshardCollection configsvrReshardCollection(nss(), BSON(shardKey() << 1));
+    configsvrReshardCollection.setDbName(nss().dbName());
+
+    auto telemetryCtx = otel::traces::Span::createTelemetryContext();
+    auto& telemetryCtxHolder = otel::TelemetryContextHolder::get(operationContext());
+
+    telemetryCtxHolder.set(telemetryCtx);
+
+    ReshardingCoordinatorDocument coordinatorDoc = createReshardingCoordinatorDoc(
+        operationContext(), configsvrReshardCollection, collEntry, nss(), true);
+    ASSERT_TRUE(coordinatorDoc.getTelemetryContext().has_value());
+    ASSERT_BSONOBJ_EQ(coordinatorDoc.getTelemetryContext().value(),
+                      otel::TelemetryContextSerializer::toBSON(telemetryCtx));
+}
+
+TEST_F(ReshardingUtilTest, ReshardingCoordinatorDocDoesNotContainTelemetryContextWhenNotSet) {
+    const CollectionType collEntry(nss(),
+                                   OID::gen(),
+                                   Timestamp(static_cast<unsigned int>(std::time(nullptr)), 1),
+                                   Date_t::now(),
+                                   UUID::gen(),
+                                   keyPattern());
+
+    ConfigsvrReshardCollection configsvrReshardCollection(nss(), BSON(shardKey() << 1));
+    configsvrReshardCollection.setDbName(nss().dbName());
+
+    ReshardingCoordinatorDocument coordinatorDoc = createReshardingCoordinatorDoc(
+        operationContext(), configsvrReshardCollection, collEntry, nss(), true);
+    ASSERT_FALSE(coordinatorDoc.getTelemetryContext().has_value());
+}
+
+TEST_F(ReshardingUtilTest, GetMajorityReplicationLag_LastAppliedLessThanLastCommitted) {
+    auto replCoord = repl::ReplicationCoordinator::get(operationContext());
+
+    auto lastCommittedOpTimeAndWallTime =
+        repl::OpTimeAndWallTime{repl::OpTime(Timestamp(100, 1), 1), Date_t::now()};
+    auto lastAppliedOpTimeAndWallTime =
+        repl::OpTimeAndWallTime{repl::OpTime(Timestamp(80, 1), 1),
+                                lastCommittedOpTimeAndWallTime.wallTime - Milliseconds(5)};
+    replCoord->setMyLastAppliedOpTimeAndWallTimeForward(lastAppliedOpTimeAndWallTime);
+    replCoord->advanceCommitPoint(lastCommittedOpTimeAndWallTime, false /* fromSyncSource */);
+
+    auto actualReplicationLag = getMajorityReplicationLag(operationContext());
+    ASSERT_EQ(actualReplicationLag, Milliseconds(0));
+}
+
+TEST_F(ReshardingUtilTest, SetDemoModeThroughConfigsvrReshardCollectionRequest) {
+    const CollectionType collEntry(nss(),
+                                   OID::gen(),
+                                   Timestamp(static_cast<unsigned int>(std::time(nullptr)), 1),
+                                   Date_t::now(),
+                                   UUID::gen(),
+                                   keyPattern());
+
+    ConfigsvrReshardCollection configsvrReshardCollection(nss(), BSON(shardKey() << 1));
+    configsvrReshardCollection.setDbName(nss().dbName());
+    configsvrReshardCollection.setUnique(true);
+    const auto collationObj = BSON("locale" << "en_US");
+    configsvrReshardCollection.setCollation(collationObj);
+    configsvrReshardCollection.setDemoMode(true);
+
+    boost::optional<ReshardingProvenanceEnum> provenance(
+        ReshardingProvenanceEnum::kReshardCollection);
+    configsvrReshardCollection.setProvenance(provenance);
+
+    ReshardingCoordinatorDocument coordinatorDoc = createReshardingCoordinatorDoc(
+        operationContext(), configsvrReshardCollection, collEntry, nss(), true);
+    auto demoModeOpt = coordinatorDoc.getDemoMode();
+    ASSERT_TRUE(demoModeOpt.has_value() && demoModeOpt);
+
+    // When demoMode is set to true, reshardingMinimumOperationDurationMillis value is overridden
+    // to 0 for the reshardCollection operation.
+    auto recipientFields = constructRecipientFields(coordinatorDoc);
+    ASSERT_EQ(recipientFields.getMinimumOperationDurationMillis(), 0);
+}
+
+TEST_F(ReshardingUtilTest, EmptyDemoModeReshardCollectionRequest) {
+    const CollectionType collEntry(nss(),
+                                   OID::gen(),
+                                   Timestamp(static_cast<unsigned int>(std::time(nullptr)), 1),
+                                   Date_t::now(),
+                                   UUID::gen(),
+                                   keyPattern());
+
+    ConfigsvrReshardCollection configsvrReshardCollection(nss(), BSON(shardKey() << 1));
+    configsvrReshardCollection.setDbName(nss().dbName());
+    configsvrReshardCollection.setUnique(true);
+    const auto collationObj = BSON("locale" << "en_US");
+    configsvrReshardCollection.setCollation(collationObj);
+
+    boost::optional<ReshardingProvenanceEnum> provenance(
+        ReshardingProvenanceEnum::kReshardCollection);
+    configsvrReshardCollection.setProvenance(provenance);
+
+    ReshardingCoordinatorDocument coordinatorDoc = createReshardingCoordinatorDoc(
+        operationContext(), configsvrReshardCollection, collEntry, nss(), true);
+    auto demoModeOpt = coordinatorDoc.getDemoMode();
+    ASSERT_FALSE(demoModeOpt.has_value());
+
+    // If demoMode is not specified or is set to False, then
+    // reshardingMinimumOperationDurationMillis will default to the server's predefined parameter
+    // value.
+    auto recipientFields = constructRecipientFields(coordinatorDoc);
+    ASSERT_EQ(recipientFields.getMinimumOperationDurationMillis(),
+              gReshardingMinimumOperationDurationMillis.load());
+}
+
+TEST_F(ReshardingUtilTest, IsProgressMarkOplogCreatedAfterOplogApplicationStarted) {
+    repl::MutableOplogEntry oplog;
+    oplog.setNss(nss());
+    oplog.setOpType(repl::OpTypeEnum::kNoop);
+    oplog.setUuid(UUID::gen());
+    oplog.set_id({});
+    oplog.setObject({});
+    oplog.setObject2(
+        BSON(ReshardProgressMarkO2Field::kTypeFieldName
+             << resharding::kReshardProgressMarkOpLogType
+             << ReshardProgressMarkO2Field::kCreatedAfterOplogApplicationStartedFieldName << true));
+    oplog.setOpTime(OplogSlot());
+    oplog.setWallClockTime(getServiceContext()->getFastClockSource()->now());
+    ASSERT(isProgressMarkOplogAfterOplogApplicationStarted({oplog.toBSON()}));
+}
+
+TEST_F(ReshardingUtilTest, IsNotProgressMarkOplogCreatedAfterOplogApplicationStarted_NotNoop) {
+    repl::MutableOplogEntry oplog;
+    oplog.setNss(nss());
+    oplog.setOpType(repl::OpTypeEnum::kInsert);
+    oplog.setUuid(UUID::gen());
+    oplog.set_id({});
+    oplog.setObject({});
+    oplog.setObject2(
+        BSON(ReshardProgressMarkO2Field::kTypeFieldName
+             << resharding::kReshardProgressMarkOpLogType
+             << ReshardProgressMarkO2Field::kCreatedAfterOplogApplicationStartedFieldName << true));
+    oplog.setOpTime(OplogSlot());
+    oplog.setWallClockTime(getServiceContext()->getFastClockSource()->now());
+    ASSERT_FALSE(isProgressMarkOplogAfterOplogApplicationStarted({oplog.toBSON()}));
+}
+
+TEST_F(ReshardingUtilTest, IsNotProgressMarkOplogCreatedAfterOplogApplicationStarted_NoObject2) {
+    repl::MutableOplogEntry oplog;
+    oplog.setNss(nss());
+    oplog.setOpType(repl::OpTypeEnum::kNoop);
+    oplog.setUuid(UUID::gen());
+    oplog.set_id({});
+    oplog.setObject({});
+    oplog.setOpTime(OplogSlot());
+    oplog.setWallClockTime(getServiceContext()->getFastClockSource()->now());
+    ASSERT_FALSE(isProgressMarkOplogAfterOplogApplicationStarted({oplog.toBSON()}));
+}
+
+TEST_F(ReshardingUtilTest,
+       IsNotProgressMarkOplogCreatedAfterOplogApplicationStarted_NotProgressMarkType) {
+    repl::MutableOplogEntry oplog;
+    oplog.setNss(nss());
+    oplog.setOpType(repl::OpTypeEnum::kNoop);
+    oplog.setUuid(UUID::gen());
+    oplog.set_id({});
+    oplog.setObject({});
+    oplog.setObject2(
+        BSON(ReshardProgressMarkO2Field::kTypeFieldName
+             << resharding::kReshardFinalOpLogType
+             << ReshardProgressMarkO2Field::kCreatedAfterOplogApplicationStartedFieldName << true));
+    oplog.setOpTime(OplogSlot());
+    oplog.setWallClockTime(getServiceContext()->getFastClockSource()->now());
+    ASSERT_FALSE(isProgressMarkOplogAfterOplogApplicationStarted({oplog.toBSON()}));
+}
+
+TEST_F(ReshardingUtilTest, IsNotProgressMarkOplogCreatedAfterOplogApplicationStarted_InvalidType) {
+    repl::MutableOplogEntry oplog;
+    oplog.setNss(nss());
+    oplog.setOpType(repl::OpTypeEnum::kNoop);
+    oplog.setUuid(UUID::gen());
+    oplog.set_id({});
+    oplog.setObject({});
+    oplog.setObject2(BSON(
+        ReshardProgressMarkO2Field::kTypeFieldName
+        << 2 << ReshardProgressMarkO2Field::kCreatedAfterOplogApplicationStartedFieldName << true));
+    oplog.setOpTime(OplogSlot());
+    oplog.setWallClockTime(getServiceContext()->getFastClockSource()->now());
+    ASSERT_FALSE(isProgressMarkOplogAfterOplogApplicationStarted({oplog.toBSON()}));
+}
+
+TEST_F(ReshardingUtilTest,
+       IsNotProgressMarkOplogCreatedAfterOplogApplicationStarted_CreatedAfterNull) {
+    repl::MutableOplogEntry oplog;
+    oplog.setNss(nss());
+    oplog.setOpType(repl::OpTypeEnum::kNoop);
+    oplog.setUuid(UUID::gen());
+    oplog.set_id({});
+    oplog.setObject({});
+    oplog.setObject2(BSON(ReshardProgressMarkO2Field::kTypeFieldName
+                          << resharding::kReshardProgressMarkOpLogType));
+    oplog.setOpTime(OplogSlot());
+    oplog.setWallClockTime(getServiceContext()->getFastClockSource()->now());
+    ASSERT_FALSE(isProgressMarkOplogAfterOplogApplicationStarted({oplog.toBSON()}));
+}
+
+TEST_F(ReshardingUtilTest,
+       IsNotProgressMarkOplogCreatedAfterOplogApplicationStarted_CreatedAfterFalse) {
+    repl::MutableOplogEntry oplog;
+    oplog.setNss(nss());
+    oplog.setOpType(repl::OpTypeEnum::kNoop);
+    oplog.setUuid(UUID::gen());
+    oplog.set_id({});
+    oplog.setObject({});
+    oplog.setObject2(BSON(
+        ReshardProgressMarkO2Field::kTypeFieldName
+        << resharding::kReshardProgressMarkOpLogType
+        << ReshardProgressMarkO2Field::kCreatedAfterOplogApplicationStartedFieldName << false));
+    oplog.setOpTime(OplogSlot());
+    oplog.setWallClockTime(getServiceContext()->getFastClockSource()->now());
+    ASSERT_FALSE(isProgressMarkOplogAfterOplogApplicationStarted({oplog.toBSON()}));
+}
+
+TEST_F(ReshardingUtilTest,
+       IsNotProgressMarkOplogCreatedAfterOplogApplicationStarted_CreatedAfterNotBoolean) {
+    repl::MutableOplogEntry oplog;
+    oplog.setNss(nss());
+    oplog.setOpType(repl::OpTypeEnum::kNoop);
+    oplog.setUuid(UUID::gen());
+    oplog.set_id({});
+    oplog.setObject({});
+    oplog.setObject2(
+        BSON(ReshardProgressMarkO2Field::kTypeFieldName
+             << resharding::kReshardProgressMarkOpLogType
+             << ReshardProgressMarkO2Field::kCreatedAfterOplogApplicationStartedFieldName << 2));
+    oplog.setOpTime(OplogSlot());
+    oplog.setWallClockTime(getServiceContext()->getFastClockSource()->now());
+    ASSERT_FALSE(isProgressMarkOplogAfterOplogApplicationStarted({oplog.toBSON()}));
+}
+
+TEST_F(ReshardingUtilTest, CalculateExponentialMovingAverageSmoothingFactorLessThanZero) {
+    ASSERT_THROWS_CODE(
+        calculateExponentialMovingAverage(0, 1, -0.1), DBException, ErrorCodes::InvalidOptions);
+}
+
+TEST_F(ReshardingUtilTest, CalculateExponentialMovingAverageSmoothingFactorEqualToZero) {
+    ASSERT_THROWS_CODE(
+        calculateExponentialMovingAverage(0, 1, 0), DBException, ErrorCodes::InvalidOptions);
+}
+
+TEST_F(ReshardingUtilTest, CalculateExponentialMovingAverageSmoothingFactorEqualToOne) {
+    ASSERT_THROWS_CODE(
+        calculateExponentialMovingAverage(0, 1, 1), DBException, ErrorCodes::InvalidOptions);
+}
+
+TEST_F(ReshardingUtilTest, CalculateExponentialMovingAverageSmoothingFactorEqualGreaterThanOne) {
+    ASSERT_THROWS_CODE(
+        calculateExponentialMovingAverage(0, 1, 1.1), DBException, ErrorCodes::InvalidOptions);
+}
+
+TEST_F(ReshardingUtilTest, CalculateExponentialMovingAverageBasic) {
+    auto smoothFactor = 0.75;
+
+    auto val0 = 1;
+    auto avg0 = calculateExponentialMovingAverage(0, val0, smoothFactor);
+    ASSERT_EQ(avg0, 0.75);
+
+    auto val1 = 10.5;
+    auto avg1 = calculateExponentialMovingAverage(avg0, val1, smoothFactor);
+    ASSERT_EQ(avg1, (1 - smoothFactor) * avg0 + smoothFactor * val1);
+
+    auto val2 = -0.2;
+    auto avg2 = calculateExponentialMovingAverage(avg1, val2, smoothFactor);
+    ASSERT_EQ(avg2, (1 - smoothFactor) * avg1 + smoothFactor * val2);
+
+    auto val3 = 0;
+    auto avg3 = calculateExponentialMovingAverage(avg2, val3, smoothFactor);
+    ASSERT_EQ(avg3, (1 - smoothFactor) * avg2 + smoothFactor * val3);
 }
 
 class ReshardingTxnCloningPipelineTest : public AggregationContextFixture {
@@ -381,7 +767,7 @@ protected:
         return std::pair(mockResults, expectedTransactions);
     }
 
-    std::unique_ptr<Pipeline, PipelineDeleter> constructPipeline(
+    std::unique_ptr<Pipeline> constructPipeline(
         std::deque<DocumentSource::GetNextResult> mockResults,
         Timestamp fetchTimestamp,
         boost::optional<LogicalSessionId> startAfter) {
@@ -399,19 +785,19 @@ protected:
         return pipeline;
     }
 
-    bool pipelineMatchesDeque(const std::unique_ptr<Pipeline, PipelineDeleter>& pipeline,
+    bool pipelineMatchesDeque(const std::unique_ptr<exec::agg::Pipeline>& execPipeline,
                               const std::deque<SessionTxnRecord>& transactions) {
         auto expected = transactions.begin();
         boost::optional<Document> next;
         for (size_t i = 0; i < transactions.size(); i++) {
-            next = pipeline->getNext();
+            next = execPipeline->getNext();
             if (expected == transactions.end() || !next ||
                 !expected->toBSON().binaryEqual(next->toBson())) {
                 return false;
             }
             expected++;
         }
-        return !pipeline->getNext() && expected == transactions.end();
+        return !execPipeline->getNext() && expected == transactions.end();
     }
 };
 
@@ -420,8 +806,9 @@ TEST_F(ReshardingTxnCloningPipelineTest, TxnPipelineSorted) {
         makeTransactions(10, 10, [](size_t) { return Timestamp::min(); });
 
     auto pipeline = constructPipeline(mockResults, Timestamp::max(), boost::none);
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    ASSERT(pipelineMatchesDeque(pipeline, expectedTransactions));
+    ASSERT(pipelineMatchesDeque(execPipeline, expectedTransactions));
 }
 
 TEST_F(ReshardingTxnCloningPipelineTest, TxnPipelineAfterID) {
@@ -433,8 +820,9 @@ TEST_F(ReshardingTxnCloningPipelineTest, TxnPipelineAfterID) {
     expectedTransactions.erase(expectedTransactions.begin(), middleTransaction + 1);
 
     auto pipeline = constructPipeline(mockResults, Timestamp::max(), middleTransactionSessionId);
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    ASSERT(pipelineMatchesDeque(pipeline, expectedTransactions));
+    ASSERT(pipelineMatchesDeque(execPipeline, expectedTransactions));
 }
 
 }  // namespace

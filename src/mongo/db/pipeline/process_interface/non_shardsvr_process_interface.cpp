@@ -29,76 +29,96 @@
 
 #include "mongo/db/pipeline/process_interface/non_shardsvr_process_interface.h"
 
-#include <typeinfo>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/create_collection.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/drop_collection.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/list_indexes.h"
-#include "mongo/db/catalog/rename_collection.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/commands/list_databases_gen.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/exec/agg/pipeline_builder.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/create_collection.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/ddl/list_databases_gen.h"
+#include "mongo/db/local_catalog/drop_collection.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/list_indexes.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/rename_collection.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
+#include "mongo/db/pipeline/plan_executor_pipeline.h"
 #include "mongo/db/query/write_ops/single_write_result_gen.h"
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_exec.h"
 #include "mongo/db/repl/speculative_majority_read_info.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/timeseries/timeseries_request_util.h"
 #include "mongo/db/timeseries/write_ops/timeseries_write_ops.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/util/str.h"
+
+#include <typeinfo>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
-std::unique_ptr<Pipeline, PipelineDeleter>
-NonShardServerProcessInterface::preparePipelineForExecution(
-    Pipeline* ownedPipeline,
+
+std::unique_ptr<Pipeline>
+NonShardServerProcessInterface::finalizeAndMaybePreparePipelineForExecution(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    std::unique_ptr<Pipeline> pipeline,
+    bool attachCursorAfterOptimizing,
+    std::function<void(Pipeline* pipeline)> optimizePipeline,
     ShardTargetingPolicy shardTargetingPolicy,
-    boost::optional<BSONObj> readConcern) {
-    return attachCursorSourceToPipelineForLocalRead(ownedPipeline);
+    boost::optional<BSONObj> readConcern,
+    bool shouldUseCollectionDefaultCollator) {
+    return finalizeAndAttachCursorToPipelineForLocalRead(expCtx,
+                                                         std::move(pipeline),
+                                                         attachCursorAfterOptimizing,
+                                                         optimizePipeline,
+                                                         shouldUseCollectionDefaultCollator);
 }
 
-std::unique_ptr<Pipeline, PipelineDeleter>
-NonShardServerProcessInterface::preparePipelineForExecution(
+std::unique_ptr<Pipeline> NonShardServerProcessInterface::preparePipelineForExecution(
+    std::unique_ptr<Pipeline> pipeline,
+    ShardTargetingPolicy shardTargetingPolicy,
+    boost::optional<BSONObj> readConcern) {
+    return attachCursorSourceToPipelineForLocalRead(std::move(pipeline));
+}
+
+std::unique_ptr<Pipeline> NonShardServerProcessInterface::preparePipelineForExecution(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const AggregateCommandRequest& aggRequest,
-    Pipeline* pipeline,
+    std::unique_ptr<Pipeline> pipeline,
     boost::optional<BSONObj> shardCursorsSortSpec,
     ShardTargetingPolicy shardTargetingPolicy,
     boost::optional<BSONObj> readConcern,
     bool shouldUseCollectionDefaultCollator) {
     return attachCursorSourceToPipelineForLocalRead(
-        pipeline, aggRequest, shouldUseCollectionDefaultCollator);
+        std::move(pipeline), aggRequest, shouldUseCollectionDefaultCollator);
 }
 
-std::list<BSONObj> NonShardServerProcessInterface::getIndexSpecs(OperationContext* opCtx,
-                                                                 const NamespaceString& ns,
-                                                                 bool includeBuildUUIDs) {
-    return listIndexesEmptyListIfMissing(
-        opCtx, ns, includeBuildUUIDs ? ListIndexesInclude::BuildUUID : ListIndexesInclude::Nothing);
+std::vector<BSONObj> NonShardServerProcessInterface::getIndexSpecs(OperationContext* opCtx,
+                                                                   const NamespaceString& ns,
+                                                                   bool includeBuildUUIDs) {
+    return listIndexesEmptyListIfMissing(opCtx,
+                                         ns,
+                                         includeBuildUUIDs ? ListIndexesInclude::kBuildUUID
+                                                           : ListIndexesInclude::kNothing);
 }
 
 std::vector<FieldPath> NonShardServerProcessInterface::collectDocumentKeyFieldsActingAsRouter(
-    OperationContext* opCtx, const NamespaceString& nss) const {
+    OperationContext* opCtx, const NamespaceString& nss, RoutingContext*) const {
     return {"_id"};  // Nothing is sharded.
 }
 
@@ -106,7 +126,7 @@ std::vector<DatabaseName> NonShardServerProcessInterface::getAllDatabases(
     OperationContext* opCtx, boost::optional<TenantId> tenantId) {
     DBDirectClient dbClient(opCtx);
     auto databasesResponse = dbClient.getDatabaseInfos(
-        BSONObj() /* filter */, true /* nameOnly */, true /* authorizedDatabases */);
+        BSONObj() /* filter */, true /* nameOnly */, false /* authorizedDatabases */);
 
     std::vector<DatabaseName> databases;
     databases.reserve(databasesResponse.size());
@@ -146,7 +166,7 @@ boost::optional<Document> NonShardServerProcessInterface::lookupSingleDocument(
     boost::optional<UUID> collectionUUID,
     const Document& documentKey,
     boost::optional<BSONObj> readConcern) {
-    MakePipelineOptions opts;
+    pipeline_factory::MakePipelineOptions opts;
     opts.shardTargetingPolicy = ShardTargetingPolicy::kNotAllowed;
     opts.readConcern = std::move(readConcern);
 
@@ -202,8 +222,14 @@ Status NonShardServerProcessInterface::insertTimeseries(
     const WriteConcernOptions& wc,
     boost::optional<OID> targetEpoch) {
     try {
+        auto [preConditions, _] =
+            timeseries::getCollectionPreConditionsAndIsTimeseriesLogicalRequest(
+                expCtx->getOperationContext(),
+                ns,
+                *insertCommand,
+                insertCommand->getCollectionUUID());
         auto insertReply = timeseries::write_ops::performTimeseriesWrites(
-            expCtx->getOperationContext(), *insertCommand);
+            expCtx->getOperationContext(), *insertCommand, preConditions);
 
         checkWriteErrors(insertReply.getWriteCommandReplyBase());
     } catch (DBException& ex) {
@@ -221,8 +247,8 @@ StatusWith<MongoProcessInterface::UpdateResult> NonShardServerProcessInterface::
     UpsertType upsert,
     bool multi,
     boost::optional<OID> targetEpoch) {
-    auto writeResults =
-        write_ops_exec::performUpdates(expCtx->getOperationContext(), *updateCommand);
+    auto writeResults = write_ops_exec::performUpdates(
+        expCtx->getOperationContext(), *updateCommand, /*preConditions=*/boost::none);
 
     // Need to check each result in the batch since the writes are unordered.
     UpdateResult updateResult;
@@ -239,40 +265,51 @@ StatusWith<MongoProcessInterface::UpdateResult> NonShardServerProcessInterface::
 
 void NonShardServerProcessInterface::createIndexesOnEmptyCollection(
     OperationContext* opCtx, const NamespaceString& ns, const std::vector<BSONObj>& indexSpecs) {
-    AutoGetCollection autoColl(opCtx, ns, MODE_X);
-    CollectionWriter collection(opCtx, autoColl);
     writeConflictRetry(
         opCtx, "CommonMongodProcessInterface::createIndexesOnEmptyCollection", ns, [&] {
-            uassert(ErrorCodes::DatabaseDropPending,
-                    str::stream() << "The database is in the process of being dropped "
-                                  << ns.dbName().toStringForErrorMsg(),
-                    autoColl.getDb() && !CollectionCatalog::get(opCtx)->isDropPending(ns.dbName()));
+            // We use kPretendUnsharded since this is an a non_shardsvr process interface.
+            auto coll =
+                acquireCollection(opCtx,
+                                  CollectionAcquisitionRequest(ns,
+                                                               PlacementConcern::kPretendUnsharded,
+                                                               repl::ReadConcernArgs::get(opCtx),
+                                                               AcquisitionPrerequisites::kWrite),
+                                  MODE_X);
 
             uassert(ErrorCodes::NamespaceNotFound,
                     str::stream() << "Failed to create indexes for aggregation because collection "
                                      "does not exist: "
                                   << ns.toStringForErrorMsg() << ": "
                                   << BSON("indexes" << indexSpecs),
-                    collection.get());
+                    coll.exists());
 
-            invariant(collection->isEmpty(opCtx),
-                      str::stream() << "Expected empty collection for index creation: "
-                                    << ns.toStringForErrorMsg()
-                                    << ": numRecords: " << collection->numRecords(opCtx) << ": "
-                                    << BSON("indexes" << indexSpecs));
+            uassert(ErrorCodes::DatabaseDropPending,
+                    str::stream() << "The database is in the process of being dropped "
+                                  << ns.dbName().toStringForErrorMsg(),
+                    !CollectionCatalog::get(opCtx)->isDropPending(ns.dbName()));
+
+            const auto& collPtr = coll.getCollectionPtr();
+            tassert(7683200,
+                    str::stream() << "Expected empty collection for index creation: "
+                                  << ns.toStringForErrorMsg()
+                                  << ": numRecords: " << collPtr->numRecords(opCtx) << ": "
+                                  << BSON("indexes" << indexSpecs),
+                    collPtr->isEmpty(opCtx));
+
+            CollectionWriter collectionWriter(opCtx, &coll);
 
             // Secondary index builds do not filter existing indexes so we have to do this on the
             // primary.
             auto removeIndexBuildsToo = false;
-            auto filteredIndexes = collection->getIndexCatalog()->removeExistingIndexes(
-                opCtx, collection.get(), indexSpecs, removeIndexBuildsToo);
+            auto filteredIndexes = collectionWriter->getIndexCatalog()->removeExistingIndexes(
+                opCtx, collectionWriter.get(), indexSpecs, removeIndexBuildsToo);
             if (filteredIndexes.empty()) {
                 return;
             }
 
             WriteUnitOfWork wuow(opCtx);
             IndexBuildsCoordinator::get(opCtx)->createIndexesOnEmptyCollection(
-                opCtx, collection, filteredIndexes, false  // fromMigrate
+                opCtx, collectionWriter, filteredIndexes, false  // fromMigrate
             );
             wuow.commit();
         });
@@ -284,7 +321,7 @@ void NonShardServerProcessInterface::renameIfOptionsAndIndexesHaveNotChanged(
     bool dropTarget,
     bool stayTemp,
     const BSONObj& originalCollectionOptions,
-    const std::list<BSONObj>& originalIndexes) {
+    const std::vector<BSONObj>& originalIndexes) {
     RenameCollectionOptions options;
     options.dropTarget = dropTarget;
     options.stayTemp = stayTemp;
@@ -336,28 +373,36 @@ void NonShardServerProcessInterface::dropTempCollection(OperationContext* opCtx,
     dropCollection(opCtx, nss);
 }
 
-BSONObj NonShardServerProcessInterface::preparePipelineAndExplain(
-    Pipeline* ownedPipeline, ExplainOptions::Verbosity verbosity) {
+BSONObj NonShardServerProcessInterface::finalizePipelineAndExplain(
+    std::unique_ptr<Pipeline> pipeline,
+    ExplainOptions::Verbosity verbosity,
+    std::function<void(Pipeline* pipeline)> optimizePipeline) {
     std::vector<Value> pipelineVec;
-    auto firstStage = ownedPipeline->peekFront();
+    auto firstStage = pipeline->peekFront();
     auto opts = SerializationOptions{.verbosity = verbosity};
     // If the pipeline already has a cursor explain with that one, otherwise attach a new one like
     // we would for a normal execution and explain that.
     if (firstStage && typeid(*firstStage) == typeid(DocumentSourceCursor)) {
-        // Managed pipeline goes out of scope at the end of this else block, but we've already
-        // extracted the necessary information and won't need it again.
-        std::unique_ptr<Pipeline, PipelineDeleter> managedPipeline(
-            ownedPipeline, PipelineDeleter(ownedPipeline->getContext()->getOperationContext()));
-        pipelineVec = managedPipeline->writeExplainOps(opts);
-        ownedPipeline = nullptr;
-    } else {
-        auto pipelineWithCursor = attachCursorSourceToPipelineForLocalRead(ownedPipeline);
         // If we need execution stats, this runs the plan in order to gather the stats.
         if (verbosity >= ExplainOptions::Verbosity::kExecStats) {
-            while (pipelineWithCursor->getNext()) {
-            }
+            auto managedExecPipeline = exec::agg::buildPipeline(pipeline->freeze());
+            pipelineVec = mergeExplains(*pipeline, *managedExecPipeline, opts);
+        } else {
+            pipelineVec = pipeline->writeExplainOps(opts);
         }
-        pipelineVec = pipelineWithCursor->writeExplainOps(opts);
+    } else {
+        const boost::intrusive_ptr<ExpressionContext>& pipelineCtx = pipeline->getContext();
+        auto pipelineWithCursor = finalizeAndAttachCursorToPipelineForLocalRead(
+            pipelineCtx, std::move(pipeline), true, optimizePipeline);
+        // If we need execution stats, this runs the plan in order to gather the stats.
+        if (verbosity >= ExplainOptions::Verbosity::kExecStats) {
+            auto execPipelineWithCursor = exec::agg::buildPipeline(pipelineWithCursor->freeze());
+            while (execPipelineWithCursor->getNext()) {
+            }
+            pipelineVec = mergeExplains(*pipelineWithCursor, *execPipelineWithCursor, opts);
+        } else {
+            pipelineVec = pipelineWithCursor->writeExplainOps(opts);
+        }
     }
     BSONArrayBuilder bab;
     for (auto&& stage : pipelineVec) {

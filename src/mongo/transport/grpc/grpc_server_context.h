@@ -29,13 +29,13 @@
 
 #pragma once
 
-#include <string>
-
-#include <grpcpp/grpcpp.h>
-
 #include "mongo/transport/grpc/metadata.h"
 #include "mongo/transport/grpc/server_context.h"
 #include "mongo/transport/grpc/util.h"
+
+#include <string>
+
+#include <grpcpp/grpcpp.h>
 
 namespace mongo::transport::grpc {
 
@@ -49,7 +49,7 @@ public:
         }
     }
 
-    ~GRPCServerContext() = default;
+    ~GRPCServerContext() override = default;
 
     void addInitialMetadataEntry(const std::string& key, const std::string& value) override {
         _ctx->AddInitialMetadata(key, value);

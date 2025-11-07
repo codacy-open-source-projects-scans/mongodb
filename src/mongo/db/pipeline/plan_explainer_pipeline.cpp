@@ -27,17 +27,14 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <list>
-#include <memory>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/document_source_cursor.h"
 #include "mongo/db/pipeline/plan_explainer_pipeline.h"
+
+#include "mongo/db/exec/agg/cursor_stage.h"
 #include "mongo/db/query/plan_summary_stats_visitor.h"
 #include "mongo/util/assert_util.h"
+
+#include <algorithm>
+
 
 namespace mongo {
 const PlanExplainer::ExplainVersion& PlanExplainerPipeline::getVersion() const {
@@ -51,27 +48,27 @@ const PlanExplainer::ExplainVersion& PlanExplainerPipeline::getVersion() const {
 }
 
 std::string PlanExplainerPipeline::getPlanSummary() const {
-    if (auto docSourceCursor =
-            dynamic_cast<DocumentSourceCursor*>(_pipeline->getSources().front().get())) {
-        return docSourceCursor->getPlanSummaryStr();
+    if (auto cursorStage =
+            dynamic_cast<exec::agg::CursorStage*>(_execPipeline->getStages().front().get())) {
+        return cursorStage->getPlanSummaryStr();
     }
 
     return "";
 }
 
 void PlanExplainerPipeline::getSummaryStats(PlanSummaryStats* statsOut) const {
-    invariant(statsOut);
+    tassert(9378603, "Encountered unexpected nullptr for PlanSummaryStats", statsOut);
 
-    auto source_it = _pipeline->getSources().begin();
-    if (auto docSourceCursor = dynamic_cast<DocumentSourceCursor*>(source_it->get())) {
-        *statsOut = docSourceCursor->getPlanSummaryStats();
-        ++source_it;
+    auto stage_it = _execPipeline->getStages().cbegin();
+    if (auto cursorStage = dynamic_cast<exec::agg::CursorStage*>(stage_it->get())) {
+        *statsOut = cursorStage->getPlanSummaryStats();
+        ++stage_it;
     };
 
     PlanSummaryStatsVisitor visitor(*statsOut);
-    std::for_each(source_it, _pipeline->getSources().end(), [&](const auto& source) {
-        statsOut->usedDisk = statsOut->usedDisk || source->usedDisk();
-        if (auto specificStats = source->getSpecificStats()) {
+    std::for_each(stage_it, _execPipeline->getStages().cend(), [&](const auto& stage) {
+        statsOut->usedDisk = statsOut->usedDisk || stage->usedDisk();
+        if (auto specificStats = stage->getSpecificStats()) {
             specificStats->acceptVisitor(&visitor);
         }
     });
@@ -82,6 +79,16 @@ void PlanExplainerPipeline::getSummaryStats(PlanSummaryStats* statsOut) const {
 PlanExplainer::PlanStatsDetails PlanExplainerPipeline::getWinningPlanStats(
     ExplainOptions::Verbosity verbosity) const {
     // TODO SERVER-49808: Report execution stats for the pipeline.
+    if (_pipeline->empty()) {
+        return {};
+    }
+
+    if (auto docSourceCursor =
+            dynamic_cast<DocumentSourceCursor*>(_pipeline->getSources().cbegin()->get())) {
+        if (auto explainer = docSourceCursor->getPlanExplainer()) {
+            return explainer->getWinningPlanStats(verbosity);
+        }
+    };
     return {};
 }
 

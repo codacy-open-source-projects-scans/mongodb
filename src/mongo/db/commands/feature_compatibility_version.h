@@ -29,20 +29,21 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/commands/set_feature_compatibility_version_gen.h"
-#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/feature_compatibility_version_document_gen.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/server_options.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/version/releases.h"
 
-namespace mongo {
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUB mongo {
 
 class FeatureCompatibilityVersion {
 public:
@@ -67,6 +68,18 @@ public:
      * server parameter is set to 'false'. That parameter is test-only and defaulted to 'true'.
      */
     static void addTransitionFromLatestToLastContinuous();
+
+    /**
+     * Adds transitions that allow users to downgrade back to the originalFCV after a failed
+     * upgrade.
+     */
+    static void addTransitionsUpgradingToDowngrading();
+
+    /**
+     * Performs actions that need to be done after startup, including asserting if FCV is not
+     * properly initialized and adding transitions for FCV states
+     */
+    static void afterStartupActions(OperationContext* opCtx);
 
     /**
      * Returns the on-disk feature compatibility version document if it can be found.
@@ -101,9 +114,13 @@ public:
      * featureCompatibilityVersion document. If we are not running with --shardsvr, set the version
      * to be the upgrade value. If we are running with --shardsvr, set the version to be the
      * downgrade value.
+     *
+     * If 'term' is provided, writes FCV with a timestamp and replicates it in oplog.
+     * Returns FCV's Timestamp.
      */
-    static void setIfCleanStartup(OperationContext* opCtx,
-                                  repl::StorageInterface* storageInterface);
+    static Timestamp setIfCleanStartup(OperationContext* opCtx,
+                                       repl::StorageInterface* storageInterface,
+                                       long long term = repl::OpTime::kUninitializedTerm);
 
     /**
      * Returns true if the server has no replicated collections.
@@ -163,4 +180,4 @@ private:
     Lock::SharedLock _lk;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

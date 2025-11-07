@@ -29,10 +29,11 @@
 
 #pragma once
 
-#include <string>
-
 #include "mongo/db/fts/fts_phrase_matcher.h"
 #include "mongo/db/fts/unicode/codepoints.h"
+#include "mongo/util/modules.h"
+
+#include <string>
 
 namespace mongo {
 namespace fts {

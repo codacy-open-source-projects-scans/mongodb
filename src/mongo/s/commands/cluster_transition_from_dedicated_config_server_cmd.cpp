@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/auth/action_type.h"
@@ -44,12 +41,15 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
 #include "mongo/s/request_types/transition_from_dedicated_config_server_gen.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+#include <string>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -92,12 +92,11 @@ public:
             auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
 
             // Force a reload of this node's shard list cache at the end of this command.
-            auto cmdResponseWithStatus =
-                configShard->runCommandWithFixedRetryAttempts(opCtx,
-                                                              kPrimaryOnlyReadPreference,
-                                                              DatabaseName::kAdmin,
-                                                              cmdToSend.toBSON(),
-                                                              Shard::RetryPolicy::kIdempotent);
+            auto cmdResponseWithStatus = configShard->runCommand(opCtx,
+                                                                 kPrimaryOnlyReadPreference,
+                                                                 DatabaseName::kAdmin,
+                                                                 cmdToSend.toBSON(),
+                                                                 Shard::RetryPolicy::kIdempotent);
 
             Grid::get(opCtx)->shardRegistry()->reload(opCtx);
 

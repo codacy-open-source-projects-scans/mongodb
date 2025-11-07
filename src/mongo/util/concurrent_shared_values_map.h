@@ -29,11 +29,12 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
+#include "mongo/stdx/mutex.h"
+
 #include <memory>
 #include <utility>
 
-#include "mongo/stdx/mutex.h"
+#include <absl/container/flat_hash_map.h>
 
 namespace mongo {
 /**
@@ -157,7 +158,7 @@ public:
     }
 
 private:
-    ConcurrentSharedValuesMap(std::shared_ptr<Map> otherMap) : _map(std::move(otherMap)){};
+    ConcurrentSharedValuesMap(std::shared_ptr<Map> otherMap) : _map(std::move(otherMap)) {};
 
     // shared_ptr in order to allow lock-free reads of the values.
     std::shared_ptr<Map> _map;

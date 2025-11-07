@@ -27,27 +27,29 @@
  *    it in the license file.
  */
 
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/repl/oplog_interface_local.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/db_raii.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/profile_settings.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/record_id.h"
-#include "mongo/db/repl/oplog_interface_local.h"
 #include "mongo/db/server_options.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/str.h"
+
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 namespace repl {
@@ -61,17 +63,28 @@ public:
     StatusWith<Value> next() override;
 
 private:
-    AutoGetOplogFastPath _oplogRead;
-    OldClientContext _ctx;
+    CollectionAcquisition _oplogRead;
+    AutoStatsTracker _tracker;
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> _exec;
 };
 
 OplogIteratorLocal::OplogIteratorLocal(OperationContext* opCtx)
-    : _oplogRead(opCtx, OplogAccessMode::kRead),
-      _ctx(opCtx, NamespaceString::kRsOplogNamespace),
-      _exec(_oplogRead.getCollection()
+    : _oplogRead(acquireCollectionMaybeLockFree(
+          opCtx,
+          CollectionAcquisitionRequest(NamespaceString::kRsOplogNamespace,
+                                       PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                       repl::ReadConcernArgs::get(opCtx),
+                                       AcquisitionPrerequisites::kRead))),
+      _tracker(opCtx,
+               NamespaceString::kRsOplogNamespace,
+               shard_role_details::getLocker(opCtx)->isWriteLocked() ? Top::LockType::WriteLocked
+                                                                     : Top::LockType::ReadLocked,
+               AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+               DatabaseProfileSettings::get(opCtx->getServiceContext())
+                   .getDatabaseProfileLevel(NamespaceString::kRsOplogNamespace.dbName())),
+      _exec(_oplogRead.exists()
                 ? InternalPlanner::collectionScan(opCtx,
-                                                  &_oplogRead.getCollection(),
+                                                  _oplogRead,
                                                   PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                                   InternalPlanner::BACKWARD)
                 : nullptr) {}
@@ -87,7 +100,8 @@ StatusWith<OplogInterface::Iterator::Value> OplogIteratorLocal::next() {
     }
 
     // Non-yielding collection scans from InternalPlanner will never error.
-    invariant(PlanExecutor::ADVANCED == state || PlanExecutor::IS_EOF == state);
+    invariant(PlanExecutor::ADVANCED == state || PlanExecutor::IS_EOF == state,
+              str::stream() << "Plan Executor state: " << state);
 
     return StatusWith<Value>(std::make_pair(obj.getOwned(), recordId));
 }

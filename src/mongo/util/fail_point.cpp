@@ -27,16 +27,7 @@
  *    it in the license file.
  */
 
-#include <absl/container/flat_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <chrono>
-#include <fmt/format.h>
-#include <limits>
-#include <new>
-#include <random>
-#include <thread>
-
+#include "mongo/util/fail_point.h"
 
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
@@ -49,21 +40,27 @@
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/random.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/fail_point.h"
 #include "mongo/util/fail_point_server_parameter_gen.h"
+
+#include <chrono>
+#include <limits>
+#include <new>
+#include <random>
+#include <thread>
+
+#include <absl/container/flat_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
 
 namespace mongo {
 namespace {
-
-using namespace fmt::literals;
 
 MONGO_FAIL_POINT_DEFINE(dummy);  // used by tests in jstests/fail_point
 
@@ -176,16 +173,16 @@ StatusWith<FailPoint::ModeOptions> FailPoint::parseBSON(const BSONObj& obj) {
     const BSONElement modeElem(obj["mode"]);
     if (modeElem.eoo()) {
         return {ErrorCodes::IllegalOperation, "When setting a failpoint, you must supply a 'mode'"};
-    } else if (modeElem.type() == String) {
+    } else if (modeElem.type() == BSONType::string) {
         const std::string modeStr(modeElem.str());
         if (modeStr == "off") {
             mode = FailPoint::off;
         } else if (modeStr == "alwaysOn") {
             mode = FailPoint::alwaysOn;
         } else {
-            return {ErrorCodes::BadValue, "unknown mode: {}"_format(modeStr)};
+            return {ErrorCodes::BadValue, fmt::format("unknown mode: {}", modeStr)};
         }
-    } else if (modeElem.type() == Object) {
+    } else if (modeElem.type() == BSONType::object) {
         const BSONObj modeObj(modeElem.Obj());
 
         if (modeObj.hasField("times")) {
@@ -234,8 +231,8 @@ StatusWith<FailPoint::ModeOptions> FailPoint::parseBSON(const BSONObj& obj) {
             const double activationProbability = modeObj["activationProbability"].numberDouble();
             if (activationProbability < 0 || activationProbability > 1) {
                 return {ErrorCodes::BadValue,
-                        "activationProbability must be between 0.0 and 1.0; "
-                        "found {}"_format(activationProbability)};
+                        fmt::format("activationProbability must be between 0.0 and 1.0; found {}",
+                                    activationProbability)};
             }
             val = static_cast<int32_t>(std::numeric_limits<int32_t>::max() * activationProbability);
         } else {
@@ -292,19 +289,27 @@ auto setGlobalFailPoint(const std::string& failPointName, const BSONObj& cmdObj)
 }
 
 FailPointEnableBlock::FailPointEnableBlock(StringData failPointName)
-    : FailPointEnableBlock(failPointName, {}) {}
+    : FailPointEnableBlock(failPointName, BSONObj{}) {}
 
 FailPointEnableBlock::FailPointEnableBlock(StringData failPointName, BSONObj data)
     : FailPointEnableBlock(globalFailPointRegistry().find(failPointName), std::move(data)) {}
 
+FailPointEnableBlock::FailPointEnableBlock(StringData failPointName, FailPoint::ModeOptions mode)
+    : FailPointEnableBlock(globalFailPointRegistry().find(failPointName), std::move(mode)) {}
+
 FailPointEnableBlock::FailPointEnableBlock(FailPoint* failPoint)
-    : FailPointEnableBlock(failPoint, {}) {}
+    : FailPointEnableBlock(failPoint, BSONObj{}) {}
 
 FailPointEnableBlock::FailPointEnableBlock(FailPoint* failPoint, BSONObj data)
+    : FailPointEnableBlock(
+          failPoint,
+          FailPoint::ModeOptions{.mode = FailPoint::Mode::alwaysOn, .extra = std::move(data)}) {}
+
+FailPointEnableBlock::FailPointEnableBlock(FailPoint* failPoint, FailPoint::ModeOptions mode)
     : _failPoint(failPoint) {
     invariant(_failPoint != nullptr);
 
-    _initialTimesEntered = _failPoint->setMode(FailPoint::alwaysOn, 0, std::move(data));
+    _initialTimesEntered = _failPoint->setMode(std::move(mode));
 
     LOGV2_WARNING(23830,
                   "Set failpoint",
@@ -329,7 +334,7 @@ Status FailPointRegistry::add(FailPoint* failPoint) {
     auto [pos, ok] = _fpMap.insert({failPoint->getName(), failPoint});
     if (!ok) {
         return {ErrorCodes::Error(51006),
-                "Fail point already registered: {}"_format(failPoint->getName())};
+                fmt::format("Fail point already registered: {}", failPoint->getName())};
     }
     return Status::OK();
 }
@@ -359,10 +364,10 @@ void FailPointRegistry::disableAllFailpoints() {
 static constexpr auto kFailPointServerParameterPrefix = "failpoint."_sd;
 
 FailPointServerParameter::FailPointServerParameter(StringData name, ServerParameterType spt)
-    : ServerParameter("{}{}"_format(kFailPointServerParameterPrefix, name), spt),
-      _data(globalFailPointRegistry().find(name.toString())) {
+    : ServerParameter(fmt::format("{}{}", kFailPointServerParameterPrefix, name), spt),
+      _data(globalFailPointRegistry().find(std::string{name})) {
     invariant(name != "failpoint.*", "Failpoint prototype was auto-registered from IDL");
-    invariant(_data != nullptr, "Unknown failpoint: {}"_format(name));
+    invariant(_data != nullptr, fmt::format("Unknown failpoint: {}", name));
 }
 
 void FailPointServerParameter::append(OperationContext* opCtx,

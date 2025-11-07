@@ -29,10 +29,11 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/db/operation_context.h"
 #include "mongo/s/query/exec/cluster_client_cursor.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
 
 namespace mongo {
 
@@ -40,7 +41,7 @@ namespace mongo {
  * An RAII object which owns a ClusterClientCursor and kills the cursor if it is not explicitly
  * released.
  */
-class ClusterClientCursorGuard final {
+class MONGO_MOD_PUBLIC ClusterClientCursorGuard final {
     ClusterClientCursorGuard(const ClusterClientCursorGuard&) = delete;
     ClusterClientCursorGuard& operator=(const ClusterClientCursorGuard&) = delete;
 
@@ -74,6 +75,13 @@ public:
     }
 
     /**
+     * Returns a pointer to the underlying cursor.
+     */
+    ClusterClientCursor* get() {
+        return _ccc.get();
+    }
+
+    /**
      * True if this ClusterClientCursorGuard owns a cursor.
      */
     explicit operator bool() const {
@@ -86,7 +94,7 @@ public:
      * using operator bool or operator ->.
      */
     std::unique_ptr<ClusterClientCursor> releaseCursor() {
-        invariant(_ccc);
+        tassert(11052320, "Expected ClusterClientCursorGuard to own a cursor", _ccc);
         return std::move(_ccc);
     }
 

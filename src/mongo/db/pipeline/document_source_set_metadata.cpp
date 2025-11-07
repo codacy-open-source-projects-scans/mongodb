@@ -72,6 +72,9 @@ Document SetMetadataTransformation::serializeTransformation(
 DepsTracker::State SetMetadataTransformation::addDependencies(DepsTracker* deps) const {
     expression::addDependencies(_metadataExpression.get(), deps);
 
+    // Mark that _metaType is available for downstream stages to access.
+    deps->setMetadataAvailable(_metaType);
+
     // This transformation only sets metadata and does not modify fields, so later stages could need
     // access to either fields or metadata.
     return DepsTracker::State::SEE_NEXT;
@@ -82,8 +85,8 @@ DocumentSource::GetModPathsReturn SetMetadataTransformation::getModifiedPaths() 
     return {DocumentSource::GetModPathsReturn::Type::kFiniteSet, OrderedPathSet{}, {}};
 }
 
-Pipeline::SourceContainer::iterator SetMetadataTransformation::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator SetMetadataTransformation::doOptimizeAt(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     return std::next(itr);
 }
 
@@ -97,7 +100,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceSetMetadata::createFromBson(
             str::stream() << "The " << kStageName
                           << " stage specification must be an object, found "
                           << typeName(elem.type()),
-            elem.type() == BSONType::Object);
+            elem.type() == BSONType::object);
 
     BSONObj obj = elem.embeddedObject();
     uassert(ErrorCodes::FailedToParse,

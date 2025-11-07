@@ -29,11 +29,8 @@
 
 #pragma once
 
-#include <vector>
-
-#include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/query/query_knob_configuration.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 class CanonicalQuery;
@@ -44,11 +41,8 @@ class Pipeline;
  * Removes the first 'stagesToRemove' stages from the pipeline. This function is meant to be paired
  * with a call to attachPipelineStages() - the caller must first get the stages for push down, add
  * them to the canonical query, and only then remove them from the pipeline.
- * Also updates 'canonicalQuery' using 'unavailableMetadata'.
  */
-void finalizePipelineStages(Pipeline* pipeline,
-                            QueryMetadataBitSet unavailableMetadata,
-                            CanonicalQuery* canonicalQuery);
+void finalizePipelineStages(Pipeline* pipeline, CanonicalQuery* canonicalQuery);
 
 /**
  * Identifies the prefix of the 'pipeline' that is eligible for running in SBE and adds it to the

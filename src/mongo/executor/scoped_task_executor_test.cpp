@@ -27,12 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/smart_ptr.hpp>
-#include <string>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/executor/scoped_task_executor.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -40,17 +35,22 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/executor/scoped_task_executor.h"
 #include "mongo/executor/thread_pool_mock.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
 
 namespace mongo {
 namespace executor {
@@ -310,6 +310,33 @@ TEST_F(ScopedTaskExecutorTest, scheduleLoseRaceWithShutdownOfUnderlying) {
                 ->scheduleWork([&](const TaskExecutor::CallbackArgs& ca) { MONGO_UNREACHABLE; })
                 .getStatus()
                 .isOK());
+    });
+
+    (bfp).pauseWhileSet();
+
+    shutdownUnderlying();
+
+    efp.setMode(FailPoint::off);
+
+    scheduler.join();
+}
+
+// Alternative version, schedule() instead of scheduleWork()
+TEST_F(ScopedTaskExecutorTest, scheduleLoseRaceWithShutdownOfUnderlyingAlt) {
+    auto& bfp = ScopedTaskExecutorHangBeforeSchedule;
+    auto& efp = ScopedTaskExecutorHangExitBeforeSchedule;
+    bfp.setMode(FailPoint::alwaysOn);
+    efp.setMode(FailPoint::alwaysOn);
+
+    stdx::thread scheduler([&] {
+        // schedule() runs the callback inline when we're in shutdown
+        auto self_id = stdx::this_thread::get_id();
+        bool did_run = false;
+        getExecutor()->schedule([&](Status status) {
+            invariant(stdx::this_thread::get_id() == self_id);
+            did_run = true;
+        });
+        invariant(did_run);
     });
 
     (bfp).pauseWhileSet();

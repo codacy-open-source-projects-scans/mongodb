@@ -27,43 +27,20 @@
  *    it in the license file.
  */
 
+#pragma once
+
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/internal_transactions_test_command_gen.h"
 #include "mongo/db/query/find_command.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
-#include "mongo/s/grid.h"
 #include "mongo/stdx/future.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
-
-// TODO SERVER-86458
-// RAII object that switches an OperationContext's service role to the router role if it isn't
-// already and if the OperationContext's ServiceContext has a router role Service, restoring the
-// original role on destruction. This should be replaced with a formal, public methodology that
-// achieves role switching in either direction.
-class ScopedRouterBehavior {
-public:
-    ScopedRouterBehavior(OperationContext* opCtx)
-        : _opCtx(std::move(opCtx)), _original(_opCtx->getService()) {
-        auto targetService = opCtx->getServiceContext()->getService(ClusterRole::RouterServer);
-        if (!targetService)
-            targetService = opCtx->getServiceContext()->getService();
-        ClientLock lk(_opCtx->getClient());
-        _opCtx->getClient()->setService(targetService);
-    }
-
-    ~ScopedRouterBehavior() {
-        ClientLock lk(_opCtx->getClient());
-        _opCtx->getClient()->setService(_original);
-    }
-
-private:
-    OperationContext* _opCtx;
-    Service* _original;
-};
 
 template <typename Impl>
 class InternalTransactionsTestCommandBase : public TypedCommand<Impl> {
@@ -89,10 +66,6 @@ public:
             const auto executor = Grid::get(opCtx)->isShardingInitialized()
                 ? Grid::get(opCtx)->getExecutorPool()->getFixedExecutor()
                 : getTransactionExecutor();
-
-            boost::optional<ScopedRouterBehavior> scopedRouterBehavior = boost::none;
-            if (Base::request().getUseClusterClient())
-                scopedRouterBehavior.emplace(opCtx);
 
             // If internalTransactionsTestCommand is received by a mongod, it should be instantiated
             // with the TransactionParticipant's resource yielder. If on a mongos, txn should be
@@ -124,7 +97,7 @@ public:
                                 auto findOpMsgRequest = OpMsgRequestBuilder::create(
                                     auth::ValidatedTenancyScope::get(opCtx), dbName, command);
                                 auto findCommand = FindCommandRequest::parse(
-                                    IDLParserContext("FindCommandRequest"), findOpMsgRequest.body);
+                                    findOpMsgRequest.body, IDLParserContext("FindCommandRequest"));
 
                                 auto docs = txnClient.exhaustiveFindSync(findCommand);
 

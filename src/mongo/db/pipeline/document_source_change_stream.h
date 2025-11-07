@@ -29,15 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <list>
-#include <memory>
-#include <string>
-#include <type_traits>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -51,6 +42,7 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/change_stream.h"
 #include "mongo/db/pipeline/change_stream_constants.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_change_stream_gen.h"
@@ -68,6 +60,15 @@
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 
+#include <list>
+#include <memory>
+#include <string>
+#include <type_traits>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
 namespace mongo {
 
 /**
@@ -79,10 +80,11 @@ public:
     class LiteParsed : public LiteParsedDocumentSource {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
-                                                 const BSONElement& spec) {
+                                                 const BSONElement& spec,
+                                                 const LiteParserOptions& options) {
             uassert(6188500,
                     str::stream() << "$changeStream must take a nested object but found: " << spec,
-                    spec.type() == BSONType::Object);
+                    spec.type() == BSONType::object);
             return std::make_unique<LiteParsed>(spec.fieldName(), nss, spec);
         }
 
@@ -223,6 +225,10 @@ public:
     // path to the cluster time will be kIdField + "." + kClusterTimeField.
     static constexpr StringData kClusterTimeField = "clusterTime"_sd;
 
+    // The name of the field where the commit timestamp of a prepared transaction will be located.
+    // Only shown if 'showExpandedEvents' is used.
+    static constexpr StringData kCommitTimestampField = "commitTimestamp"_sd;
+
     // The name of the field with the nsType of a changestream create event. Will contain
     // "collection", "view" or "timeseries". Will only be exposed if 'showExpandedEvents' is used.
     static constexpr StringData kNsTypeField = "nsType"_sd;
@@ -262,6 +268,7 @@ public:
 
     // The internal change events that are not exposed to the users.
     static constexpr StringData kReshardBeginOpType = "reshardBegin"_sd;
+    static constexpr StringData kReshardBlockingWritesOpType = "reshardBlockingWrites"_sd;
     static constexpr StringData kReshardDoneCatchUpOpType = "reshardDoneCatchUp"_sd;
 
     // Internal op type to signal mongos to open cursors on new shards.
@@ -295,13 +302,9 @@ public:
     static constexpr StringData kRegexAllDBs = R"(^(?!(admin|config|local)\.)[^.]+)"_sd;
     static constexpr StringData kRegexCmdColl = R"(\$cmd$)"_sd;
 
-    enum class ChangeStreamType { kSingleCollection, kSingleDatabase, kAllChangesForCluster };
-
     /**
-     * Helpers for Determining which regex to match a change stream against.
+     * Helpers for determining which regex to match a change stream against.
      */
-    static ChangeStreamType getChangeStreamType(const NamespaceString& nss);
-    static std::string regexEscapeNsForChangeStream(StringData source);
     static StringData resolveAllCollectionsRegex(
         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
@@ -309,9 +312,54 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx);
     static std::string getCollRegexForChangeStream(
         const boost::intrusive_ptr<ExpressionContext>& expCtx);
+    static std::string getViewNsRegexForChangeStream(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
     static std::string getCmdNsRegexForChangeStream(
         const boost::intrusive_ptr<ExpressionContext>& expCtx);
-    static std::string getViewNsRegexForChangeStream(
+
+    /**
+     * Helper function that creates the BSON for matching changes to a specific namespace.
+     * This will always create a 'BSONObj' with an empty field name. The first and only
+     * 'BSONElement' in the 'BSONObj' will contain either a BSON String value with the collection
+     * name in case the change stream is opened on a single database, or a BSON RegEx if the change
+     * stream is opened on the entire cluster. Callers can use 'BSON("ns" <<
+     * getViewNsMatchObjForChangeStream(expCtx).firstElement())' to use the return value.
+     */
+    static BSONObj getNsMatchObjForChangeStream(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
+
+    /**
+     * Helper function that creates the BSON for matching changes to view definitions.
+     * This will always create a 'BSONObj' with an empty field name. The first and only
+     * 'BSONElement' in the 'BSONObj' will contain either a BSON String value with the collection
+     * name in case the change stream is opened on a single database, or a BSON RegEx if the change
+     * stream is opened on the entire cluster. Callers can use 'BSON("ns" <<
+     * getViewNsMatchObjForChangeStream(expCtx).firstElement())' to use the return value.
+     */
+    static BSONObj getViewNsMatchObjForChangeStream(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
+
+    /**
+     * Helper function that creates the BSON for matching a specific collection.
+     * This will always create a 'BSONObj' with an empty field name. The first and only
+     * 'BSONElement' in the 'BSONObj' will contain either a BSON String value with the collection
+     * name in case the change stream is opened on a single collection, and a BSON RegEx otherwise.
+     * Callers can use 'BSON("ns" << getCollMatchObjForChangeStream(expCtx).firstElement())' to use
+     * the return value.
+     */
+    static BSONObj getCollMatchObjForChangeStream(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx);
+
+    /**
+     * Helper function that creates the BSON for matching the '$cmd' namespace.
+     * This will always create a 'BSONObj' with an empty field name. The first and only
+     * 'BSONElement' in the 'BSONObj' will contain either a BSON String value with the database or
+     * collection name in case the change stream is opened on a database or a collection, or a BSON
+     * RegEx if the change stream is opened on the entire cluster.
+     * Callers can use 'BSON("ns" << getCmdNsMatchObjForChangeStream(expCtx).firstElement())' to use
+     * the return value.
+     */
+    static BSONObj getCmdNsMatchObjForChangeStream(
         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     /**
@@ -340,9 +388,17 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
 private:
-    // Constructs and returns a series of stages representing the full change stream pipeline.
-    static std::list<boost::intrusive_ptr<DocumentSource>> _buildPipeline(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx, DocumentSourceChangeStreamSpec spec);
+    // Determines the change stream reader version (v1 or v2) from the user's change stream request
+    // ('spec') parameter. The v2 reader version will only be selected if the feature flag for
+    // precise change stream shard-targeting ('featureFlagChangeStreamPreciseShardTargeting') is
+    // enabled. In addition, the change stream must have been opened on a collection, and the user
+    // must have explicitly selected the v2 version in the request. For all other combinations, the
+    // v1 change stream reader version will be selected.
+    static ChangeStreamReaderVersionEnum _determineChangeStreamReaderVersion(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        Timestamp atClusterTime,
+        const DocumentSourceChangeStreamSpec& spec,
+        const ChangeStream& changeStream);
 
     // Helper function which throws if the $changeStream fails any of a series of semantic checks.
     // For instance, whether it is permitted to run given the current FCV, whether the namespace is
@@ -364,7 +420,7 @@ class LiteParsedDocumentSourceChangeStreamInternal final
     : public DocumentSourceChangeStream::LiteParsed {
 public:
     static std::unique_ptr<LiteParsedDocumentSourceChangeStreamInternal> parse(
-        const NamespaceString& nss, const BSONElement& spec) {
+        const NamespaceString& nss, const BSONElement& spec, const LiteParserOptions& options) {
         return std::make_unique<LiteParsedDocumentSourceChangeStreamInternal>(
             spec.fieldName(), nss, spec);
     }
@@ -396,8 +452,7 @@ public:
         : DocumentSource(stageName, expCtx) {}
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const override {
-        if (opts.literalPolicy != LiteralSerializationPolicy::kUnchanged ||
-            opts.transformIdentifiers) {
+        if (opts.isSerializingForQueryStats()) {
             // Stages made internally by 'DocumentSourceChangeStream' should not be serialized for
             // query stats. For query stats we will serialize only the user specified $changeStream
             // stage.
@@ -408,8 +463,10 @@ public:
 
     virtual Value doSerialize(const SerializationOptions& opts) const = 0;
 
-    DocumentSourceType getType() const final {
-        return DocumentSourceType::kInternalChangeStream;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 };
 

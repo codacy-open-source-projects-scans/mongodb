@@ -29,15 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <queue>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
@@ -45,6 +36,7 @@
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/query_stats/data_bearing_node_metrics.h"
 #include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -53,7 +45,18 @@
 #include "mongo/s/query/exec/cluster_client_cursor.h"
 #include "mongo/s/query/exec/cluster_query_result.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <queue>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -71,6 +74,8 @@ public:
     StatusWith<ClusterQueryResult> next() final;
 
     void kill(OperationContext* opCtx) final;
+
+    Status releaseMemory() final;
 
     void reattachToOperationContext(OperationContext* opCtx) final {
         _opCtx = opCtx;
@@ -101,7 +106,7 @@ public:
 
     long long getNumReturnedSoFar() const final;
 
-    void queueResult(const ClusterQueryResult& result) final;
+    void queueResult(ClusterQueryResult&& result) final;
 
     Status setAwaitDataTimeout(Milliseconds awaitDataTimeout) final;
 
@@ -125,6 +130,8 @@ public:
 
     boost::optional<uint32_t> getPlanCacheShapeHash() const final;
 
+    boost::optional<query_shape::QueryShapeHash> getQueryShapeHash() const final;
+
     boost::optional<std::size_t> getQueryStatsKeyHash() const final;
 
     bool getQueryStatsWillNeverExhaust() const final;
@@ -132,9 +139,9 @@ public:
     /**
      * Returns false unless the mock cursor has been fully iterated.
      */
-    bool remotesExhausted() final;
+    bool remotesExhausted() const final;
 
-    bool hasBeenKilled() final;
+    bool hasBeenKilled() const final;
 
     /**
      * Queues an error response.

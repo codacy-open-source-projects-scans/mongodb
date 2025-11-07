@@ -27,20 +27,26 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <cstdint>
-
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/exec/trial_period_utils.h"
+
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/query_knob_configuration.h"
-#include "mongo/platform/atomic_word.h"
+
+#include <algorithm>
+
 
 namespace mongo::trial_period {
+
+double getCollFractionPerCandidatePlan(const CanonicalQuery& query, size_t numSolutions) {
+    const double collFraction =
+        query.getExpCtx()->getQueryKnobConfiguration().getPlanEvaluationCollFraction();
+    const double totalCollFraction =
+        query.getExpCtx()->getQueryKnobConfiguration().getPlanTotalEvaluationCollFraction();
+
+    return std::min(collFraction, totalCollFraction / numSolutions);
+}
+
 size_t getTrialPeriodMaxWorks(OperationContext* opCtx,
                               const CollectionPtr& collection,
                               int maxWorksParam,

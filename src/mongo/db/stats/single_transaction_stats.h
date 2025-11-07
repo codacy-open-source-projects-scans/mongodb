@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <string>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -50,6 +44,12 @@
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/tick_source.h"
 #include "mongo/util/time_support.h"
+
+#include <string>
+
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -76,15 +76,15 @@ public:
             connectionId = client->getConnectionId();
             if (auto metadata = ClientMetadata::get(client)) {
                 clientMetadata = metadata->getDocument();
-                appName = metadata->getApplicationName().toString();
+                appName = std::string{metadata->getApplicationName()};
             }
         }
     };
 
     SingleTransactionStats()
-        : _txnNumberAndRetryCounter(kUninitializedTxnNumber, kUninitializedTxnRetryCounter){};
+        : _txnNumberAndRetryCounter(kUninitializedTxnNumber, kUninitializedTxnRetryCounter) {};
     SingleTransactionStats(TxnNumberAndRetryCounter txnNumberAndRetryCounter)
-        : _txnNumberAndRetryCounter(txnNumberAndRetryCounter){};
+        : _txnNumberAndRetryCounter(txnNumberAndRetryCounter) {};
 
     /**
      * Sets the transaction's start time, only if it hasn't already been set.
@@ -197,14 +197,20 @@ public:
         return &_opDebug;
     }
 
+    void incrementPrepareReadConflicts(long long n) {
+        _prepareReadConflicts.inc(n);
+    }
+
+    long long getPrepareReadConflicts() const {
+        return _prepareReadConflicts.get();
+    }
+
     AtomicStorageMetrics& getTransactionStorageMetrics() {
         return _storageMetrics;
     }
-
     const AtomicStorageMetrics& getTransactionStorageMetrics() const {
         return _storageMetrics;
     }
-
     /**
      * Returns the LastClientInfo object stored in this SingleTransactionStats instance.
      */
@@ -270,6 +276,25 @@ public:
                 TickSource::Tick curTick) const;
 
 private:
+    class AtomicPrepareReadConflicts {
+    public:
+        long long get() const {
+            return _prepareReadConflicts.loadRelaxed();
+        }
+
+        void inc(long long n) {
+            _prepareReadConflicts.fetchAndAddRelaxed(n);
+        }
+
+        AtomicPrepareReadConflicts& operator=(const AtomicPrepareReadConflicts& other) {
+            _prepareReadConflicts.storeRelaxed(other.get());
+            return *this;
+        }
+
+    private:
+        AtomicWord<long long> _prepareReadConflicts{0};
+    };
+
     // The struct containing the transaction number and transaction retry counter.
     TxnNumberAndRetryCounter _txnNumberAndRetryCounter;
 
@@ -303,6 +328,8 @@ private:
 
     // Tracks and accumulates stats from all operations that run inside the transaction.
     OpDebug _opDebug;
+
+    AtomicPrepareReadConflicts _prepareReadConflicts;
 
     AtomicStorageMetrics _storageMetrics;
 

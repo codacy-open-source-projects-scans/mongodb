@@ -29,31 +29,32 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <utility>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/oid.h"
 #include "mongo/client/connection_string.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/s/collection_metadata.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/migration_chunk_cloner_source.h"
 #include "mongo/db/s/migration_coordinator.h"
 #include "mongo/db/s/move_timing_helper.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/write_concern_options.h"
-#include "mongo/s/chunk_version.h"
 #include "mongo/s/request_types/move_range_request_gen.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/timer.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -110,11 +111,11 @@ public:
      *  - InvalidOptions if the operation context is missing shard version
      *  - StaleConfig if the expected placement version does not match the one known by this shard.
      */
-    MigrationSourceManager(OperationContext* opCtx,
-                           ShardsvrMoveRange&& request,
-                           WriteConcernOptions&& writeConcern,
-                           ConnectionString donorConnStr,
-                           HostAndPort recipientHost);
+    static MigrationSourceManager createMigrationSourceManager(OperationContext* opCtx,
+                                                               ShardsvrMoveRange&& request,
+                                                               WriteConcernOptions&& writeConcern,
+                                                               ConnectionString donorConnStr,
+                                                               HostAndPort recipientHost);
     ~MigrationSourceManager();
 
     /**
@@ -200,6 +201,13 @@ public:
     }
 
 private:
+    // Private constructor, use the buildMigrationSourceManager() factory method instead.
+    MigrationSourceManager(OperationContext* opCtx,
+                           ShardsvrMoveRange&& request,
+                           WriteConcernOptions&& writeConcern,
+                           ConnectionString donorConnStr,
+                           HostAndPort recipientHost);
+
     // Used to track the current state of the source manager. See the methods above, which have
     // comments explaining the various state transitions.
     enum State {
@@ -218,7 +226,7 @@ private:
      * Called when any of the states fails. May only be called once and will put the migration
      * manager into the kDone state.
      */
-    void _cleanup(bool completeMigration) noexcept;
+    void _cleanup(bool completeMigration);
 
     /**
      * May be called at any time. Unregisters the migration source manager from the collection,
@@ -228,17 +236,14 @@ private:
      * Expected state: Any
      * Resulting state: kDone
      */
-    void _cleanupOnError() noexcept;
-
-    // Mutex to protect concurrent reads and writes to internal attributes
-    mutable stdx::mutex _mutex;
+    void _cleanupOnError();
 
     // This is the opCtx of the moveChunk request that constructed the MigrationSourceManager.
     // The caller must guarantee it outlives the MigrationSourceManager.
     OperationContext* const _opCtx;
 
     // The parameters to the moveRange command
-    ShardsvrMoveRange _args;
+    const ShardsvrMoveRange _args;
 
     // The write concern received for the moveRange command
     const WriteConcernOptions _writeConcern;
@@ -284,21 +289,18 @@ private:
     };
     boost::optional<ScopedRegisterer> _scopedRegisterer;
 
-    // The epoch of the collection being migrated and its UUID, as of the time the migration
-    // started. Values are boost::optional only up until the constructor runs, because UUID doesn't
-    // have a default constructor.
-    // TODO SERVER-80188: remove _collectionEpoch once 8.0 becomes last-lts.
-    boost::optional<OID> _collectionEpoch;
+    // The UUID and timesetamp of the collection being migrated. The UUID values is boost::optional
+    // only up until the constructor runs, because UUID doesn't have a default constructor.
     boost::optional<UUID> _collectionUUID;
-    boost::optional<Timestamp> _collectionTimestamp;
+
+    Timestamp _collectionTimestamp;
 
     // The version of the chunk at the time the migration started.
     boost::optional<ChunkVersion> _chunkVersion;
 
     // The chunk cloner source. Only available if there is an active migration going on. To set and
-    // remove it, a collection lock and the CSRLock need to be acquired first in order to block all
-    // logOp calls and then the mutex. To access it, only the mutex is necessary. Available after
-    // cloning stage has completed.
+    // remove it, the CSRLock needs to be acquired in exclusive mode. To access it, the CSRlock has
+    // to be acquired at least in shared mode. Available after cloning stage has completed.
     std::shared_ptr<MigrationChunkClonerSource> _cloneDriver;
 
     // Contains logic for ensuring the donor's and recipient's config.rangeDeletions entries are

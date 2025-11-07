@@ -29,12 +29,11 @@
 
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 
+#include "mongo/base/string_data.h"
+#include "mongo/unittest/unittest.h"
+
 #include <string>
 #include <variant>
-
-#include "mongo/base/string_data.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 
 namespace mongo {
 namespace {

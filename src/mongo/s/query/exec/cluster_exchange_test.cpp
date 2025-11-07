@@ -32,15 +32,6 @@
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <set>
-#include <string>
-#include <system_error>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -49,6 +40,9 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/global_catalog/type_collection.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/document_source_match.h"
@@ -62,22 +56,26 @@
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/chunk_version.h"
 #include "mongo/s/query/exec/sharded_agg_test_fixture.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <set>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 namespace mongo {
 namespace {
@@ -178,14 +176,6 @@ TEST_F(ClusterExchangeTest, SingleMergeStageNotEligibleForExchangeIfOutputCollec
     expectGetDatabase(kTestTargetNss);
     // Pretend there are no collections in this database.
     expectFindSendBSONObjVector(kConfigHostAndPort, std::vector<BSONObj>());
-    if (feature_flags::gGlobalIndexesShardingCatalog.isEnabledAndIgnoreFCVUnsafe()) {
-        onCommand([&](const executor::RemoteCommandRequest& request) {
-            ASSERT_EQ(request.target, kConfigHostAndPort);
-            ASSERT_EQ(request.dbname, DatabaseName::kConfig);
-            return CursorResponse(CollectionType::ConfigNS, CursorId{0}, {})
-                .toBSON(CursorResponse::ResponseType::InitialResponse);
-        });
-    }
 
     future.default_timed_get();
 }
@@ -411,9 +401,7 @@ TEST_F(ClusterExchangeTest, SortThenGroupIsEligibleForExchangeHash) {
             sharded_agg_helpers::checkIfEligibleForExchange(operationContext(), mergePipe.get());
         ASSERT_TRUE(exchangeSpec);
         ASSERT(exchangeSpec->exchangeSpec.getPolicy() == ExchangePolicyEnum::kKeyRange);
-        ASSERT_BSONOBJ_EQ(exchangeSpec->exchangeSpec.getKey(),
-                          BSON("x"
-                               << "hashed"));
+        ASSERT_BSONOBJ_EQ(exchangeSpec->exchangeSpec.getKey(), BSON("x" << "hashed"));
         ASSERT_EQ(exchangeSpec->consumerShards.size(), 2UL);  // One for each shard.
         const auto& boundaries = exchangeSpec->exchangeSpec.getBoundaries().value();
         const auto& consumerIds = exchangeSpec->exchangeSpec.getConsumerIds().value();
@@ -518,26 +506,17 @@ TEST_F(ClusterExchangeTest, WordCountUseCaseExampleShardedByWord) {
     const OID epoch = OID::gen();
     const Timestamp timestamp = Timestamp(1);
     ShardKeyPattern shardKey(BSON("word" << 1));
-    loadRoutingTable(kTestTargetNss,
-                     epoch,
-                     timestamp,
-                     shardKey,
-                     makeChunks(UUID::gen(),
-                                epoch,
-                                timestamp,
-                                {{ChunkRange{BSON("word" << MINKEY),
-                                             BSON("word"
-                                                  << "hello")},
-                                  ShardId("0")},
-                                 {ChunkRange{BSON("word"
-                                                  << "hello"),
-                                             BSON("word"
-                                                  << "world")},
-                                  ShardId("1")},
-                                 {ChunkRange{BSON("word"
-                                                  << "world"),
-                                             BSON("word" << MAXKEY)},
-                                  ShardId("1")}}));
+    loadRoutingTable(
+        kTestTargetNss,
+        epoch,
+        timestamp,
+        shardKey,
+        makeChunks(UUID::gen(),
+                   epoch,
+                   timestamp,
+                   {{ChunkRange{BSON("word" << MINKEY), BSON("word" << "hello")}, ShardId("0")},
+                    {ChunkRange{BSON("word" << "hello"), BSON("word" << "world")}, ShardId("1")},
+                    {ChunkRange{BSON("word" << "world"), BSON("word" << MAXKEY)}, ShardId("1")}}));
 
     // As an example of a pipeline that might replace a map reduce, imagine that we are performing a
     // word count, and the shards part of the pipeline tokenized some text field of each document
@@ -573,12 +552,8 @@ TEST_F(ClusterExchangeTest, WordCountUseCaseExampleShardedByWord) {
         ASSERT_EQ(consumerIds.size(), 3UL);
 
         ASSERT_BSONOBJ_EQ(boundaries[0], BSON("_id" << MINKEY));
-        ASSERT_BSONOBJ_EQ(boundaries[1],
-                          BSON("_id"
-                               << "hello"));
-        ASSERT_BSONOBJ_EQ(boundaries[2],
-                          BSON("_id"
-                               << "world"));
+        ASSERT_BSONOBJ_EQ(boundaries[1], BSON("_id" << "hello"));
+        ASSERT_BSONOBJ_EQ(boundaries[2], BSON("_id" << "world"));
         ASSERT_BSONOBJ_EQ(boundaries[3], BSON("_id" << MAXKEY));
 
         ASSERT_EQ(consumerIds[0], 0);

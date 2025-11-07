@@ -30,27 +30,23 @@
 
 #include "mongo/transport/asio/asio_transport_layer.h"
 
-#include <fmt/format.h>
 #include <fstream>
+#include <functional>
+
+#include <fmt/format.h>
 
 #ifdef __linux__
 #include <netinet/tcp.h>
 #endif
 
-#include <asio.hpp>
-#include <asio/system_timer.hpp>
-#include <boost/algorithm/string.hpp>
-#include <boost/filesystem/operations.hpp>
-
-#include "mongo/config.h"
-
 #include "mongo/base/system_error.h"
+#include "mongo/config.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/logv2/log.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/transport/asio/asio_tcp_fast_open.h"
 #include "mongo/transport/asio/asio_utils.h"
 #include "mongo/transport/service_entry_point.h"
@@ -65,8 +61,18 @@
 #include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/options_parser/startup_options.h"
+#include "mongo/util/processinfo.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/signal_handlers_synchronous.h"
 #include "mongo/util/strong_weak_finish_line.h"
+
+#include <type_traits>
+
+#include <asio/io_context.hpp>
+#include <asio/is_executor.hpp>
+#include <asio/system_timer.hpp>
+#include <boost/algorithm/string.hpp>
+#include <boost/filesystem/operations.hpp>
 
 #ifdef MONGO_CONFIG_SSL
 #include "mongo/util/net/ssl.hpp"
@@ -84,6 +90,20 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
 
+// The default member-function-detection-based implementation of `asio::is_executor` involves
+// inheriting from the target type; but our target type, `AsioReactor`, is `final`.
+// Instead, forward declare `AsioReactor` and then explicitly mark `AsioReactor` as an executor
+// by providing a full specialization of `asio::is_executor`.
+namespace mongo {
+namespace transport {
+class AsioReactor;
+}  // namespace transport
+}  // namespace mongo
+namespace asio {
+template <>
+struct is_executor<mongo::transport::AsioReactor> : public std::true_type {};
+}  // namespace asio
+
 namespace mongo {
 namespace transport {
 
@@ -97,13 +117,31 @@ using TcpInfoOption = SocketOption<IPPROTO_TCP, TCP_INFO, tcp_info>;
 #endif  // __linux__
 
 const Seconds kSessionShutdownTimeout{10};
+
+bool shouldDiscardSocketDueToLostConnectivity(AsioSession::GenericSocket& peerSocket) {
+#ifdef __linux__
+    if (gPessimisticConnectivityCheckForAcceptedConnections.load()) {
+        auto swEvents = pollASIOSocket(peerSocket, POLLRDHUP | POLLHUP, Milliseconds::zero());
+        if (MONGO_unlikely(!swEvents.isOK())) {
+            const auto err = swEvents.getStatus();
+            if (err.code() != ErrorCodes::NetworkTimeout) {
+                LOGV2_DEBUG(10158100, 3, "Error checking socket connectivity", "error"_attr = err);
+                return true;
+            }
+        } else if (MONGO_unlikely(swEvents.getValue() & (POLLRDHUP | POLLHUP))) {
+            LOGV2_DEBUG(10158101, 3, "Client has closed the socket before server reading from it");
+            return true;
+        }
+    }
+#endif  // __linux__
+    return false;
+}
 }  // namespace
 
 MONGO_FAIL_POINT_DEFINE(asioTransportLayerAsyncConnectTimesOut);
 MONGO_FAIL_POINT_DEFINE(asioTransportLayerDelayConnection);
 MONGO_FAIL_POINT_DEFINE(asioTransportLayerHangBeforeAcceptCallback);
 MONGO_FAIL_POINT_DEFINE(asioTransportLayerHangDuringAcceptCallback);
-MONGO_FAIL_POINT_DEFINE(asioTransportLayerAsyncConnectReturnsConnectionError);
 
 #ifdef MONGO_CONFIG_SSL
 SSLConnectionContext::~SSLConnectionContext() = default;
@@ -134,6 +172,11 @@ public:
 
 
     Future<void> waitUntil(Date_t expiration, const BatonHandle& baton = nullptr) override {
+        if (static_cast<asio::io_context&>((**_timer)->get_executor().context()).stopped()) {
+            return Future<void>::makeReady(
+                Status(ErrorCodes::ShutdownInProgress,
+                       "The reactor associated with this timer has been shutdown"));
+        }
         if (baton && baton->networking()) {
             return _asyncWait([&] { return baton->networking()->waitUntil(*this, expiration); },
                               baton);
@@ -185,10 +228,15 @@ class AsioReactor final : public Reactor {
 public:
     AsioReactor() : _clkSource(this), _stats(&_clkSource), _ioContext() {}
 
-    void run() noexcept override {
-        ThreadIdGuard threadIdGuard(this);
-        asio::io_context::work work(_ioContext);
-        _ioContext.run();
+    void run() override {
+        try {
+            ThreadIdGuard threadIdGuard(this);
+            const auto work = asio::make_work_guard(_ioContext);
+            _ioContext.run();
+        } catch (...) {
+            auto status = exceptionToStatus();
+            LOGV2_FATAL(10470501, "Unable to start an ASIO reactor", "error"_attr = status);
+        }
     }
 
     void stop() override {
@@ -232,6 +280,12 @@ public:
 
     operator asio::io_context&() {
         return _ioContext;
+    }
+
+    using executor_type = asio::io_context::executor_type;
+
+    executor_type get_executor() {
+        return _ioContext.get_executor();
     }
 
     void appendStats(BSONObjBuilder& bob) const override {
@@ -363,23 +417,23 @@ public:
 
     WrappedEndpoint() = default;
 
-    Endpoint* operator->() noexcept {
+    Endpoint* operator->() {
         return &_endpoint;
     }
 
-    const Endpoint* operator->() const noexcept {
+    const Endpoint* operator->() const {
         return &_endpoint;
     }
 
-    Endpoint& operator*() noexcept {
+    Endpoint& operator*() {
         return _endpoint;
     }
 
-    const Endpoint& operator*() const noexcept {
+    const Endpoint& operator*() const {
         return _endpoint;
     }
 
-    bool operator<(const WrappedEndpoint& rhs) const noexcept {
+    bool operator<(const WrappedEndpoint& rhs) const {
         return _endpoint < rhs._endpoint;
     }
 
@@ -546,8 +600,9 @@ StatusWith<std::shared_ptr<Session>> AsioTransportLayer::connect(
     WrappedResolver resolver(*_egressReactor);
     Date_t timeBefore = Date_t::now();
     auto swEndpoints = resolver.resolve(peer, _listenerOptions.enableIPv6);
-    Date_t timeAfter = Date_t::now();
-    if (timeAfter - timeBefore > kSlowOperationThreshold) {
+    Milliseconds dnsResolveLatency = Date_t::now() - timeBefore;
+    _dnsResolveStatsMillis.record(durationCount<Milliseconds>(dnsResolveLatency));
+    if (dnsResolveLatency > kSlowOperationThreshold) {
         networkCounter.incrementNumSlowDNSOperations();
     }
 
@@ -722,9 +777,6 @@ Future<std::shared_ptr<Session>> AsioTransportLayer::asyncConnect(
     Milliseconds timeout,
     std::shared_ptr<ConnectionMetrics> connectionMetrics,
     std::shared_ptr<const SSLConnectionContext> transientSSLContext) {
-    if (MONGO_unlikely(asioTransportLayerAsyncConnectReturnsConnectionError.shouldFail()))
-        return Status{ErrorCodes::ConnectionError, "Failing asyncConnect due to fail-point"};
-
     invariant(connectionMetrics);
     connectionMetrics->onConnectionStarted();
 
@@ -793,7 +845,7 @@ Future<std::shared_ptr<Session>> AsioTransportLayer::asyncConnect(
                 if (connector->session) {
                     connector->session->end();
                 } else {
-                    connector->socket.cancel(ec);
+                    (void)connector->socket.cancel(ec);
                 }
             });
     }
@@ -824,16 +876,18 @@ Future<std::shared_ptr<Session>> AsioTransportLayer::asyncConnect(
     }();
 
     std::move(resolverFuture)
-        .then([connector, timeBefore, connectionMetrics](WrappedResolver::EndpointVector results) {
+        .then([connector, timeBefore, connectionMetrics, this](
+                  WrappedResolver::EndpointVector results) {
             try {
                 connectionMetrics->onDNSResolved();
 
-                Date_t timeAfter = Date_t::now();
-                if (timeAfter - timeBefore > kSlowOperationThreshold) {
+                Milliseconds resolveLatency = Date_t::now() - timeBefore;
+                _dnsResolveStatsMillis.record(durationCount<Milliseconds>(resolveLatency));
+                if (resolveLatency > kSlowOperationThreshold) {
                     LOGV2_WARNING(23019,
                                   "DNS resolution while connecting to peer was slow",
                                   "peer"_attr = connector->peer,
-                                  "duration"_attr = timeAfter - timeBefore);
+                                  "duration"_attr = resolveLatency);
                     networkCounter.incrementNumSlowDNSOperations();
                 }
 
@@ -952,10 +1006,6 @@ Status AsioTransportLayer::setup() {
         if (_listenerOptions.loadBalancerPort) {
             listenAddrs.push_back(makeUnixSockPath(*_listenerOptions.loadBalancerPort));
         }
-
-        if (auto port = _listenerOptions.routerPort) {
-            listenAddrs.push_back(makeUnixSockPath(*port));
-        }
     }
 #endif
 
@@ -974,9 +1024,6 @@ Status AsioTransportLayer::setup() {
     std::vector<int> ports = {_listenerPort};
     if (_listenerOptions.loadBalancerPort) {
         ports.push_back(*_listenerOptions.loadBalancerPort);
-    }
-    if (auto port = _listenerOptions.routerPort) {
-        ports.push_back(*port);
     }
 
     // Self-deduplicating list of unique endpoint addresses.
@@ -1059,12 +1106,12 @@ Status AsioTransportLayer::setup() {
                 acceptor, IPV6OnlyOption(true), "acceptor v6 only", logv2::LogSeverity::Info());
         }
 
-        acceptor.non_blocking(true, ec);
+        (void)acceptor.non_blocking(true, ec);
         if (ec) {
             return errorCodeToStatus(ec, "setup non_blocking");
         }
 
-        acceptor.bind(*addr, ec);
+        (void)acceptor.bind(*addr, ec);
         if (ec) {
             return errorCodeToStatus(ec, "setup bind").withContext(addr.toString());
         }
@@ -1123,18 +1170,30 @@ std::vector<std::pair<SockAddr, int>> AsioTransportLayer::getListenerSocketBackl
 
 void AsioTransportLayer::appendStatsForServerStatus(BSONObjBuilder* bob) const {
     bob->append("listenerProcessingTime", _listenerProcessingTime.load().toBSON());
-}
-
-void AsioTransportLayer::appendStatsForFTDC(BSONObjBuilder& bob) const {
-    BSONArrayBuilder queueDepthsArrayBuilder(bob.subarrayStart("listenerSocketBacklogQueueDepths"));
+    BSONArrayBuilder queueDepthsArrayBuilder(
+        bob->subarrayStart("listenerSocketBacklogQueueDepths"));
     for (const auto& record : _acceptorRecords) {
         BSONObjBuilder{queueDepthsArrayBuilder.subobjStart()}.append(
             record->address.toString(), record->backlogQueueDepth.load());
     }
     queueDepthsArrayBuilder.done();
+    bob->append("connsDiscardedDueToClientDisconnect", _discardedDueToClientDisconnect.get());
+    bob->append("connsRejectedDueToMaxPendingProxyProtocolHeader",
+                _discardedDueToMaximumPendingOnProxyHeader.get());
+    BSONObjBuilder dnsStatsBuilder(bob->subobjStart("dnsResolveStatsLastMin"));
+    RollingStatsResult dnsResolveStatsMillis = _dnsResolveStatsMillis.getStats();
+    dnsStatsBuilder.append("count", dnsResolveStatsMillis.count);
+    dnsStatsBuilder.append("meanMillis", dnsResolveStatsMillis.mean);
+    dnsStatsBuilder.append("maxMillis", dnsResolveStatsMillis.max);
+    dnsStatsBuilder.append("p50Millis", dnsResolveStatsMillis.p50);
+    dnsStatsBuilder.append("p90Millis", dnsResolveStatsMillis.p90);
+    dnsStatsBuilder.append("p99Millis", dnsResolveStatsMillis.p99);
+    dnsStatsBuilder.done();
 }
 
-void AsioTransportLayer::_runListener() noexcept {
+void AsioTransportLayer::appendStatsForFTDC(BSONObjBuilder&) const {}
+
+void AsioTransportLayer::_runListener() {
     setThreadName("listener");
 
     stdx::unique_lock lk(_mutex);
@@ -1146,14 +1205,17 @@ void AsioTransportLayer::_runListener() noexcept {
         _listener.cv.notify_all();
     });
 
-    if (_isShutdown || _listener.state == Listener::State::kShuttingDown) {
+    if (_isShutdown.load() || _listener.state == Listener::State::kShuttingDown) {
         LOGV2_DEBUG(9484000, 3, "Unable to start listening: transport layer in shutdown");
         return;
     }
 
+    const int listenBacklog = serverGlobalParams.listenBacklog
+        ? *serverGlobalParams.listenBacklog
+        : ProcessInfo::getDefaultListenBacklog();
     for (auto& acceptorRecord : _acceptorRecords) {
         asio::error_code ec;
-        acceptorRecord->acceptor.listen(serverGlobalParams.listenBacklog, ec);
+        (void)acceptorRecord->acceptor.listen(listenBacklog, ec);
         if (ec) {
             LOGV2_FATAL(31339,
                         "Error listening for new connections on listen address",
@@ -1175,7 +1237,7 @@ void AsioTransportLayer::_runListener() noexcept {
 
     _listener.state = Listener::State::kActive;
     _listener.cv.notify_all();
-    while (!_isShutdown && (_listener.state == Listener::State::kActive)) {
+    while (!_isShutdown.load() && (_listener.state == Listener::State::kActive)) {
         lk.unlock();
         _acceptorReactor->run();
         lk.lock();
@@ -1202,7 +1264,7 @@ void AsioTransportLayer::_runListener() noexcept {
 
 Status AsioTransportLayer::start() {
     stdx::unique_lock lk(_mutex);
-    if (_isShutdown) {
+    if (_isShutdown.load()) {
         LOGV2(6986801, "Cannot start an already shutdown TransportLayer");
         return ShutdownStatus;
     }
@@ -1224,7 +1286,7 @@ Status AsioTransportLayer::start() {
 void AsioTransportLayer::shutdown() {
     stdx::unique_lock lk(_mutex);
 
-    if (std::exchange(_isShutdown, true)) {
+    if (_isShutdown.swap(true)) {
         // We were already stopped
         return;
     }
@@ -1304,13 +1366,26 @@ bool isTcp(Protocol&& p) {
 }
 }  // namespace
 
+std::unique_ptr<AsioTransportLayer::TokenType>
+AsioTransportLayer::_makeParseProxyTokenIfPossible() {
+    stdx::lock_guard lk(_mutex);
+    if (_numConnectionsPendingProxyHeader >= gProxyProtocolMaximumPendingConnections.load()) {
+        return {};
+    }
+    ++_numConnectionsPendingProxyHeader;
+    return std::make_unique<TokenType>([this] {
+        stdx::lock_guard lk(_mutex);
+        --_numConnectionsPendingProxyHeader;
+    });
+}
+
 void AsioTransportLayer::_acceptConnection(GenericAcceptor& acceptor) {
     auto acceptCb = [this, &acceptor](const std::error_code& ec,
                                       AsioSession::GenericSocket peerSocket) mutable {
         Timer timer;
         asioTransportLayerHangDuringAcceptCallback.pauseWhileSet();
 
-        if (auto lk = stdx::lock_guard(_mutex); _isShutdown) {
+        if (_isShutdown.load()) {
             LOGV2_DEBUG(9484001, 3, "Unable to accept connection: transport layer in shutdown");
             return;
         }
@@ -1320,6 +1395,12 @@ void AsioTransportLayer::_acceptConnection(GenericAcceptor& acceptor) {
                   "Error accepting new connection on local endpoint",
                   "localEndpoint"_attr = endpointToHostAndPort(acceptor.local_endpoint()),
                   "error"_attr = ec.message());
+            _acceptConnection(acceptor);
+            return;
+        }
+
+        if (MONGO_unlikely(shouldDiscardSocketDueToLostConnectivity(peerSocket))) {
+            _discardedDueToClientDisconnect.incrementRelaxed();
             _acceptConnection(acceptor);
             return;
         }
@@ -1337,13 +1418,36 @@ void AsioTransportLayer::_acceptConnection(GenericAcceptor& acceptor) {
         try {
             std::shared_ptr<AsioSession> session(
                 new SyncAsioSession(this, std::move(peerSocket), true));
-            if (session->isFromLoadBalancer()) {
+            if (session->isConnectedToLoadBalancerPort()) {
+                // This session is not counted towards the number of accepted connections until the
+                // server receives the proxy header and moves the session to `SessionManager`.
+                // Therefore, the server may go above the ingress connection limits if it is waiting
+                // to receive the proxy header for many accepted connections.
+                // Thus, the server limits the number of connections received on the proxy port that
+                // are yet to provide the proxy header.
+                auto token = _makeParseProxyTokenIfPossible();
+                if (MONGO_unlikely(!token)) {
+                    static logv2::SeveritySuppressor severitySuppressor{
+                        Seconds(10), logv2::LogSeverity::Info(), logv2::LogSeverity::Debug(2)};
+                    _discardedDueToMaximumPendingOnProxyHeader.incrementRelaxed();
+                    LOGV2_DEBUG(
+                        11246701,
+                        severitySuppressor().toInt(),
+                        "Rejecting proxy connection due to reaching the limit on connections "
+                        "pending on proxy protocol header",
+                        "remote"_attr = session->remote(),
+                        "limit"_attr = gProxyProtocolMaximumPendingConnections.loadRelaxed(),
+                        "rejected"_attr = _discardedDueToMaximumPendingOnProxyHeader.get());
+                    _acceptConnection(acceptor);
+                    return;
+                }
                 session->parseProxyProtocolHeader(_acceptorReactor)
-                    .getAsync([this, session = std::move(session)](Status s) {
+                    .getAsync([this, session = std::move(session), t = std::move(token)](Status s) {
                         if (s.isOK()) {
                             invariant(!!_sessionManager);
                             _sessionManager->startSession(std::move(session));
                         }
+                        // We will release the token (i.e. `t`) as we leave this function.
                     });
             } else {
                 _sessionManager->startSession(std::move(session));
@@ -1371,8 +1475,7 @@ void AsioTransportLayer::_acceptConnection(GenericAcceptor& acceptor) {
     acceptor.async_accept(*_ingressReactor, std::move(acceptCb));
 }
 
-void AsioTransportLayer::_trySetListenerSocketBacklogQueueDepth(
-    GenericAcceptor& acceptor) noexcept {
+void AsioTransportLayer::_trySetListenerSocketBacklogQueueDepth(GenericAcceptor& acceptor) {
 #ifdef __linux__
     try {
         if (!isTcp(acceptor.local_endpoint().protocol()))

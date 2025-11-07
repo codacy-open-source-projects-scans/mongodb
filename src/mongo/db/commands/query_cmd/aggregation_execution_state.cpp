@@ -28,15 +28,21 @@
  */
 
 #include "mongo/db/commands/query_cmd/aggregation_execution_state.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_uuid_mismatch.h"
-#include "mongo/db/change_stream_serverless_helpers.h"
+
 #include "mongo/db/exec/disk_use_options_gen.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_uuid_mismatch.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/initialize_auto_get_helper.h"
+#include "mongo/db/pipeline/search/search_helper.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/query/query_settings/query_settings_service.h"
+#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/timeseries/timeseries_request_util.h"
+#include "mongo/db/version_context.h"
 #include "mongo/db/views/view_catalog_helpers.h"
 
 namespace mongo {
@@ -48,29 +54,25 @@ MONGO_FAIL_POINT_DEFINE(hangAfterAcquiringCollectionCatalog);
  * This class represents catalog state for normal (i.e., not change stream or collectionless)
  * pipelines.
  *
- * The catalog lock is managed in the RAII style, being acquired in the constructor and relinquished
- * in the destructor (unless relinquished early by calling 'relinquishLocks()').
+ * The catalog resources are managed in the RAII style, being acquired in the constructor and
+ * relinquished in the destructor (unless relinquished early by calling 'relinquishResources()').
  */
 class DefaultAggCatalogState : public AggCatalogState {
 public:
-    /**
-     * This class should never be copied or moved, since catalog locks are scoped to the lifetime of
-     * exactly one instance of this class.
-     */
     DefaultAggCatalogState(const DefaultAggCatalogState&) = delete;
     DefaultAggCatalogState(DefaultAggCatalogState&&) = delete;
 
     explicit DefaultAggCatalogState(const AggExState& aggExState)
         : AggCatalogState{aggExState},
           _secondaryExecNssList{aggExState.getForeignExecutionNamespaces()} {
-        initContext(auto_get_collection::ViewMode::kViewsPermitted);
+        initContext(AcquisitionPrerequisites::ViewMode::kCanBeView);
         if (_collections.hasMainCollection()) {
             _uuid = _collections.getMainCollection()->uuid();
         }
     }
 
     bool lockAcquired() const override {
-        return _ctx.has_value();
+        return _mainAcq.has_value();
     }
 
     std::pair<std::unique_ptr<CollatorInterface>, ExpressionContextCollationMatchesDefault>
@@ -81,13 +83,18 @@ public:
             _collections.getMainCollection());
     }
 
-    const AutoGetCollectionForReadCommandMaybeLockFree& getCtx() const override {
-        invariant(lockAcquired());
-        return *_ctx;
+    const CollectionOrViewAcquisition& getMainCollectionOrView() const override {
+        tassert(10240801, "Expected resources to be acquired", lockAcquired());
+        return *_mainAcq;
+    }
+
+    query_shape::CollectionType getMainCollectionType() const override {
+        tassert(10240802, "Expected resources to be acquired", lockAcquired());
+        return _mainAcq->getCollectionType();
     }
 
     void getStatsTrackerIfNeeded(boost::optional<AutoStatsTracker>& statsTracker) const override {
-        // By default '_ctx' will create a stats tracker, so no need to need to instantiate an
+        // By default '_mainAcq' will create a stats tracker, so no need to need to instantiate an
         // AutoStatsTracker here.
     }
 
@@ -99,44 +106,125 @@ public:
         return _catalog;
     }
 
+    StatusWith<ResolvedView> resolveView(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        boost::optional<BSONObj> timeSeriesCollator) const override {
+        return view_catalog_helpers::resolveView(opCtx, _catalog, nss, timeSeriesCollator);
+    }
+
     boost::optional<UUID> getUUID() const override {
         return _uuid;
     }
 
-    void relinquishLocks() override {
-        _ctx.reset();
+    /**
+     * Returns true if the collection is a viewful or viewless timeseries collection.
+     */
+    bool isTimeseries() const override {
+        if (!lockAcquired()) {
+            return false;
+        }
+
+        // If the collection is timeseries, enabling 'rawData' will treat the aggregation as
+        // happening directly on the underlying bucket formatted documents, without any timeseries
+        // translation, and is thus not considered a timeseries query. If the collection is not
+        // timeseries, we would return false anyway.
+        if (isRawDataOperation(_aggExState.getOpCtx())) {
+            return false;
+        }
+
+        if (_mainAcq->isView() && _mainAcq->getView().getViewDefinition().timeseries()) {
+            return true;
+        }
+        if (_mainAcq->collectionExists() &&
+            _mainAcq->getCollectionPtr()->isTimeseriesCollection()) {
+            return true;
+        }
+        return false;
+    }
+
+    void relinquishResources() override {
+        _mainAcq.reset();
         _collections.clear();
     }
 
-    ~DefaultAggCatalogState() override {}
+    void stashResources(TransactionResourcesStasher* transactionResourcesStasher) override {
+        tassert(10096103,
+                "DefaultAggCatalogStateWithAcquisition::stashResources got null stasher",
+                transactionResourcesStasher);
+
+        // First release our own CollectionAcquisitions references.
+        relinquishResources();
+
+        // Stash the remaining ShardRole::TransactionResources that back the CollectionAcquisitions
+        // currently held by the query plan executor.
+        stashTransactionResourcesFromOperationContext(_aggExState.getOpCtx(),
+                                                      transactionResourcesStasher);
+    }
 
 private:
     /**
      * This is the method that does the actual acquisition and initialization of catalog data
      * structures, during construction of subclass instances.
      */
-    void initContext(auto_get_collection::ViewMode viewMode) {
-        auto initAutoGetCallback = [&]() {
-            _ctx.emplace(_aggExState.getOpCtx(),
-                         _aggExState.getExecutionNss(),
-                         AutoGetCollection::Options{}.viewMode(viewMode).secondaryNssOrUUIDs(
-                             _secondaryExecNssList.cbegin(), _secondaryExecNssList.cend()),
-                         AutoStatsTracker::LogMode::kUpdateTopAndCurOp);
-        };
-        bool anySecondaryCollectionNotLocal = intializeAutoGet(_aggExState.getOpCtx(),
-                                                               _aggExState.getExecutionNss(),
-                                                               _secondaryExecNssList,
-                                                               initAutoGetCallback);
-        tassert(8322000,
-                "Should have initialized AutoGet* after calling 'initializeAutoGet'",
-                _ctx.has_value());
-        _collections = MultipleCollectionAccessor(_aggExState.getOpCtx(),
-                                                  &_ctx->getCollection(),
-                                                  _ctx->getNss(),
-                                                  _ctx->isAnySecondaryNamespaceAView() ||
-                                                      anySecondaryCollectionNotLocal,
-                                                  _secondaryExecNssList);
+    void initContext(const AcquisitionPrerequisites::ViewMode& viewMode) {
+        auto opCtx = _aggExState.getOpCtx();
+        auto executionNss = _aggExState.getExecutionNss();
 
+        AutoStatsTracker statsTracker(
+            opCtx,
+            executionNss,
+            Top::LockType::ReadLocked,
+            AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+            DatabaseProfileSettings::get(_aggExState.getOpCtx()->getServiceContext())
+                .getDatabaseProfileLevel(_aggExState.getExecutionNss().dbName()),
+            Date_t::max(),
+            _secondaryExecNssList.begin(),
+            _secondaryExecNssList.end());
+
+        CollectionOrViewAcquisitionMap secondaryAcquisitions;
+        secondaryAcquisitions.reserve(_secondaryExecNssList.size() + 1);
+        auto initAutoGetCallback = [&]() {
+            CollectionOrViewAcquisitionRequests acquisitionRequests;
+            acquisitionRequests.reserve(_secondaryExecNssList.size() + 1);
+
+            // Emplace the main acquisition request.
+            acquisitionRequests.emplace_back(CollectionOrViewAcquisitionRequest::fromOpCtx(
+                opCtx, executionNss, AcquisitionPrerequisites::kRead, viewMode));
+
+            // Emplace a request for every secondary nss.
+            for (auto& nss : _secondaryExecNssList) {
+                auto r = CollectionOrViewAcquisitionRequest::fromOpCtx(
+                    opCtx, nss, AcquisitionPrerequisites::kRead, viewMode);
+                acquisitionRequests.emplace_back(std::move(r));
+            }
+
+            // Acquire all the collection and extract the main acquisition
+            secondaryAcquisitions = makeAcquisitionMap(
+                acquireCollectionsOrViewsMaybeLockFree(opCtx, acquisitionRequests));
+            _mainAcq.emplace(secondaryAcquisitions.extract(executionNss).mapped());
+        };
+
+        bool isAnySecondaryCollectionNotLocal = initializeAutoGet(_aggExState.getOpCtx(),
+                                                                  _aggExState.getExecutionNss(),
+                                                                  _secondaryExecNssList,
+                                                                  initAutoGetCallback);
+
+        uassertStatusOK(repl::ReplicationCoordinator::get(opCtx)->checkCanServeReadsFor(
+            opCtx,
+            _aggExState.getExecutionNss(),
+            ReadPreferenceSetting::get(opCtx).canRunOnSecondary()));
+
+        bool isAnySecondaryNamespaceAView =
+            std::any_of(secondaryAcquisitions.begin(),
+                        secondaryAcquisitions.end(),
+                        [](const auto& acq) { return acq.second.isView(); });
+
+        bool isAnySecondaryNamespaceAViewOrNotFullyLocal =
+            isAnySecondaryNamespaceAView || isAnySecondaryCollectionNotLocal;
+
+        _collections = MultipleCollectionAccessor(
+            *_mainAcq, secondaryAcquisitions, isAnySecondaryNamespaceAViewOrNotFullyLocal);
         // Return the catalog that gets implicitly stashed during the collection acquisition
         // above, which also implicitly opened a storage snapshot. This catalog object can
         // be potentially different than the one obtained before and will be in sync with
@@ -150,21 +238,22 @@ private:
             });
     }
 
+
 protected:
     /**
      * Constructor used by Oplog subclass.
      */
-    DefaultAggCatalogState(const AggExState& aggExState, auto_get_collection::ViewMode viewMode)
+    DefaultAggCatalogState(const AggExState& aggExState,
+                           const AcquisitionPrerequisites::ViewMode& viewMode)
         : AggCatalogState{aggExState} {
         initContext(viewMode);
     }
 
     const std::vector<NamespaceStringOrUUID> _secondaryExecNssList;
 
-    // If emplaced, AutoGetCollectionForReadCommandMaybeLockFree will throw if the sharding version
-    // for this connection is out of date. If the namespace is a view, the lock will be released
-    // before re-running the expanded aggregation.
-    boost::optional<AutoGetCollectionForReadCommandMaybeLockFree> _ctx;
+    // If the namespace is a view, the lock will be released before re-running the expanded
+    // aggregation.
+    boost::optional<CollectionOrViewAcquisition> _mainAcq;
     MultipleCollectionAccessor _collections;
     std::shared_ptr<const CollectionCatalog> _catalog;
     boost::optional<UUID> _uuid;
@@ -177,7 +266,8 @@ protected:
 class OplogAggCatalogState : public DefaultAggCatalogState {
 public:
     explicit OplogAggCatalogState(const AggExState& aggExState)
-        : DefaultAggCatalogState{aggExState, auto_get_collection::ViewMode::kViewsForbidden} {}
+        : DefaultAggCatalogState{aggExState,
+                                 AcquisitionPrerequisites::ViewMode::kMustBeCollection} {}
 
     void validate() const override {
         AggCatalogState::validate();
@@ -201,8 +291,8 @@ public:
     std::pair<std::unique_ptr<CollatorInterface>, ExpressionContextCollationMatchesDefault>
     resolveCollator() const override {
         // If the user specified an explicit collation, adopt it; otherwise, use the simple
-        // collation. We do not inherit the collection's default collation or UUID, since the stream
-        // may be resuming from a point before the current UUID existed.
+        // collation. We do not inherit the collection's default collation or UUID, since the
+        // stream may be resuming from a point before the current UUID existed.
         return ::mongo::resolveCollator(
             _aggExState.getOpCtx(),
             _aggExState.getRequest().getCollation().get_value_or(BSONObj()),
@@ -211,6 +301,7 @@ public:
 
     ~OplogAggCatalogState() override {}
 };
+
 
 /**
  * AggCatalogState subclass for pipelines that do not access any collections. They do not have a
@@ -228,8 +319,8 @@ public:
     }
 
     void getStatsTrackerIfNeeded(boost::optional<AutoStatsTracker>& tracker) const override {
-        // If this is a collectionless aggregation, we won't create '_ctx' but will still need an
-        // AutoStatsTracker to record CurOp and Top entries.
+        // If this is a collectionless aggregation, we won't create '_ctx' but will still need
+        // an AutoStatsTracker to record CurOp and Top entries.
         tracker.emplace(_aggExState.getOpCtx(),
                         _aggExState.getExecutionNss(),
                         Top::LockType::NotLocked,
@@ -246,7 +337,11 @@ public:
             CollectionPtr());
     }
 
-    const AutoGetCollectionForReadCommandMaybeLockFree& getCtx() const override {
+    const CollectionOrViewAcquisition& getMainCollectionOrView() const override {
+        MONGO_UNREACHABLE;
+    }
+
+    query_shape::CollectionType getMainCollectionType() const override {
         MONGO_UNREACHABLE;
     }
 
@@ -258,11 +353,24 @@ public:
         return _catalog;
     }
 
+    StatusWith<ResolvedView> resolveView(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        boost::optional<BSONObj> timeSeriesCollator) const override {
+        return view_catalog_helpers::resolveView(opCtx, _catalog, nss, timeSeriesCollator);
+    }
+
     boost::optional<UUID> getUUID() const override {
         return boost::none;
     }
 
-    void relinquishLocks() override {}
+    bool isTimeseries() const final {
+        return false;
+    }
+
+    void relinquishResources() override {}
+
+    void stashResources(TransactionResourcesStasher* transactionResourcesStasher) override {}
 
     ~CollectionlessAggCatalogState() override {}
 
@@ -276,14 +384,14 @@ const MultipleCollectionAccessor CollectionlessAggCatalogState::_emptyMultipleCo
 
 }  // namespace
 
-StatusWith<StringMap<ResolvedNamespace>> AggExState::resolveInvolvedNamespaces() const {
+StatusWith<ResolvedNamespaceMap> AggExState::resolveInvolvedNamespaces() const {
     auto request = getRequest();
     auto pipelineInvolvedNamespaces = getInvolvedNamespaces();
 
     // If there are no involved namespaces, return before attempting to take any locks. This is
     // important for collectionless aggregations, which may be expected to run without locking.
     if (pipelineInvolvedNamespaces.empty()) {
-        return {StringMap<ResolvedNamespace>()};
+        return {ResolvedNamespaceMap()};
     }
 
     // Acquire a single const view of the CollectionCatalog and use it for all view and collection
@@ -295,13 +403,13 @@ StatusWith<StringMap<ResolvedNamespace>> AggExState::resolveInvolvedNamespaces()
 
     std::deque<NamespaceString> involvedNamespacesQueue(pipelineInvolvedNamespaces.begin(),
                                                         pipelineInvolvedNamespaces.end());
-    StringMap<ResolvedNamespace> resolvedNamespaces;
+    ResolvedNamespaceMap resolvedNamespaces;
 
     while (!involvedNamespacesQueue.empty()) {
         auto involvedNs = std::move(involvedNamespacesQueue.front());
         involvedNamespacesQueue.pop_front();
 
-        if (resolvedNamespaces.find(involvedNs.coll()) != resolvedNamespaces.end()) {
+        if (resolvedNamespaces.find(involvedNs) != resolvedNamespaces.end()) {
             continue;
         }
 
@@ -317,10 +425,10 @@ StatusWith<StringMap<ResolvedNamespace>> AggExState::resolveInvolvedNamespaces()
             auto&& underlyingNs = resolvedView.getValue().getNamespace();
             // Attempt to acquire UUID of the underlying collection using lock free method.
             auto uuid = catalog->lookupUUIDByNSS(_opCtx, underlyingNs);
-            resolvedNamespaces[ns.coll()] = {underlyingNs,
-                                             resolvedView.getValue().getPipeline(),
-                                             uuid,
-                                             true /*involvedNamespaceIsAView*/};
+            resolvedNamespaces[ns] = {underlyingNs,
+                                      resolvedView.getValue().getPipeline(),
+                                      uuid,
+                                      true /*involvedNamespaceIsAView*/};
 
             // We parse the pipeline corresponding to the resolved view in case we must resolve
             // other view namespaces that are also involved.
@@ -335,31 +443,12 @@ StatusWith<StringMap<ResolvedNamespace>> AggExState::resolveInvolvedNamespaces()
             return Status::OK();
         };
 
-        // If the involved namespace is not in the same database as the aggregation, it must be
-        // from an $out/$merge to a collection in a different database.
-        if (!involvedNs.isEqualDb(request.getNamespace())) {
-            // SERVER-51886: It is not correct to assume that we are reading from a collection
-            // because the collection targeted by $out/$merge on a given database can have the
-            // same name as a view on the source database. As such, we determine whether the
-            // collection name references a view on the aggregation request's database. Note
-            // that the inverse scenario (mistaking a view for a collection) is not an issue
-            // because $merge/$out cannot target a view.
-            auto nssToCheck = NamespaceStringUtil::deserialize(request.getNamespace().dbName(),
-                                                               involvedNs.coll());
-            if (catalog->lookupView(_opCtx, nssToCheck)) {
-                auto status = resolveViewDefinition(nssToCheck);
-                if (!status.isOK()) {
-                    return status;
-                }
-            } else {
-                resolvedNamespaces[involvedNs.coll()] = {involvedNs, std::vector<BSONObj>{}};
-            }
-        } else if (catalog->lookupCollectionByNamespace(_opCtx, involvedNs)) {
+        if (catalog->lookupCollectionByNamespace(_opCtx, involvedNs)) {
             // Attempt to acquire UUID of the collection using lock free method.
             auto uuid = catalog->lookupUUIDByNSS(_opCtx, involvedNs);
             // If 'involvedNs' refers to a collection namespace, then we resolve it as an empty
             // pipeline in order to read directly from the underlying collection.
-            resolvedNamespaces[involvedNs.coll()] = {involvedNs, std::vector<BSONObj>{}, uuid};
+            resolvedNamespaces[involvedNs] = {involvedNs, std::vector<BSONObj>{}, uuid};
         } else if (catalog->lookupView(_opCtx, involvedNs)) {
             auto status = resolveViewDefinition(involvedNs);
             if (!status.isOK()) {
@@ -368,40 +457,11 @@ StatusWith<StringMap<ResolvedNamespace>> AggExState::resolveInvolvedNamespaces()
         } else {
             // 'involvedNs' is neither a view nor a collection, so resolve it as an empty pipeline
             // to treat it as reading from a non-existent collection.
-            resolvedNamespaces[involvedNs.coll()] = {involvedNs, std::vector<BSONObj>{}};
+            resolvedNamespaces[involvedNs] = {involvedNs, std::vector<BSONObj>{}};
         }
     }
 
     return resolvedNamespaces;
-}
-
-void AggExState::setView(std::shared_ptr<const CollectionCatalog> catalog,
-                         const ViewDefinition* view) {
-    // Queries on timeseries views may specify non-default collation whereas queries
-    // on all other types of views must match the default collator (the collation used
-    // to originally create that collections). Thus in the case of operations on TS
-    // views, we use the request's collation.
-    auto timeSeriesCollator =
-        view->timeseries() ? _aggReqDerivatives->request.getCollation() : boost::none;
-
-    auto resolvedView = uassertStatusOK(view_catalog_helpers::resolveView(
-        _opCtx, catalog, _aggReqDerivatives->request.getNamespace(), timeSeriesCollator));
-
-    uassert(std::move(resolvedView),
-            "Explain of a resolved view must be executed by mongos",
-            !ShardingState::get(_opCtx)->enabled() || !_aggReqDerivatives->request.getExplain());
-
-    _resolvedView = resolvedView;
-
-    // Parse the resolved view into a new AggregationRequestDerivatives object.
-    _resolvedViewRequest = resolvedView.asExpandedViewAggregation(_aggReqDerivatives->request);
-    _resolvedViewLiteParsedPipeline = _resolvedViewRequest.value();
-    _aggReqDerivatives = std::make_unique<AggregateRequestDerivatives>(
-        _resolvedViewRequest.value(), _resolvedViewLiteParsedPipeline.value(), [this]() {
-            return aggregation_request_helper::serializeToCommandObj(_resolvedViewRequest.value());
-        });
-
-    _executionNss = _aggReqDerivatives->request.getNamespace();
 }
 
 void AggExState::performValidationChecks() {
@@ -414,48 +474,10 @@ void AggExState::performValidationChecks() {
 
     // If we are in a transaction, check whether the parsed pipeline supports being in
     // a transaction and if the transaction's read concern is supported.
+    bool isExplain = request.getExplain().get_value_or(false);
     if (_opCtx->inMultiDocumentTransaction()) {
-        liteParsedPipeline.assertSupportsMultiDocumentTransaction(request.getExplain());
-        liteParsedPipeline.assertSupportsReadConcern(_opCtx, request.getExplain());
-    }
-}
-
-ScopedSetShardRole AggExState::setShardRole(const CollectionRoutingInfo& cri) {
-    const NamespaceString& underlyingNss = _resolvedView.value().getNamespace();
-
-    const auto optPlacementConflictTimestamp = [&]() {
-        auto originalShardVersion =
-            OperationShardingState::get(_opCtx).getShardVersion(getOriginalNss());
-
-        // Since for requests on timeseries namespaces the ServiceEntryPoint installs shard version
-        // on the buckets collection instead of the viewNss.
-        // TODO: SERVER-80719 Remove this.
-        if (!originalShardVersion && underlyingNss.isTimeseriesBucketsCollection()) {
-            originalShardVersion =
-                OperationShardingState::get(_opCtx).getShardVersion(underlyingNss);
-        }
-
-        return originalShardVersion ? originalShardVersion->placementConflictTime() : boost::none;
-    }();
-
-    if (cri.cm.hasRoutingTable()) {
-        const auto myShardId = ShardingState::get(_opCtx)->shardId();
-
-        auto sv = cri.getShardVersion(myShardId);
-        if (optPlacementConflictTimestamp) {
-            sv.setPlacementConflictTime(*optPlacementConflictTimestamp);
-        }
-        return ScopedSetShardRole(
-            _opCtx, underlyingNss, sv /*shardVersion*/, boost::none /*databaseVersion*/);
-    } else {
-        auto sv = ShardVersion::UNSHARDED();
-        if (optPlacementConflictTimestamp) {
-            sv.setPlacementConflictTime(*optPlacementConflictTimestamp);
-        }
-        return ScopedSetShardRole(_opCtx,
-                                  underlyingNss,
-                                  ShardVersion::UNSHARDED() /*shardVersion*/,
-                                  cri.cm.dbVersion() /*databaseVersion*/);
+        liteParsedPipeline.assertSupportsMultiDocumentTransaction(isExplain);
+        liteParsedPipeline.assertSupportsReadConcern(_opCtx, isExplain);
     }
 }
 
@@ -463,15 +485,16 @@ bool AggExState::canReadUnderlyingCollectionLocally(const CollectionRoutingInfo&
     const auto myShardId = ShardingState::get(_opCtx)->shardId();
     const auto atClusterTime = repl::ReadConcernArgs::get(_opCtx).getArgsAtClusterTime();
 
-    const auto chunkManagerMaybeAtClusterTime =
-        atClusterTime ? ChunkManager::makeAtTime(cri.cm, atClusterTime->asTimestamp()) : cri.cm;
+    const auto chunkManagerMaybeAtClusterTime = atClusterTime
+        ? ChunkManager::makeAtTime(cri.getChunkManager(), atClusterTime->asTimestamp())
+        : cri.getChunkManager();
 
     if (chunkManagerMaybeAtClusterTime.isSharded()) {
         return false;
     } else if (chunkManagerMaybeAtClusterTime.isUnsplittable()) {
         return chunkManagerMaybeAtClusterTime.getMinKeyShardIdWithSimpleCollation() == myShardId;
     } else {
-        return chunkManagerMaybeAtClusterTime.dbPrimary() == myShardId;
+        return cri.getDbPrimaryShardId() == myShardId;
     }
 }
 
@@ -533,22 +556,6 @@ std::unique_ptr<AggCatalogState> AggExState::createAggCatalogState() {
         // Replace the execution namespace with the oplog.
         setExecutionNss(NamespaceString::kRsOplogNamespace);
 
-        // In case of serverless the change stream will be opened on the change collection.
-        const bool isServerless = change_stream_serverless_helpers::isServerlessEnvironment();
-        if (isServerless) {
-            const auto tenantId =
-                change_stream_serverless_helpers::resolveTenantId(getOriginalNss().tenantId());
-
-            uassert(
-                ErrorCodes::BadValue, "Change streams cannot be used without tenant id", tenantId);
-            setExecutionNss(NamespaceString::makeChangeCollectionNSS(tenantId));
-
-            uassert(ErrorCodes::ChangeStreamNotEnabled,
-                    "Change streams must be enabled before being used",
-                    change_stream_serverless_helpers::isChangeStreamEnabled(
-                        getOpCtx(), *getExecutionNss().tenantId()));
-        }
-
         // Assert that a change stream on the config server is always opened on the oplog.
         tassert(6763400,
                 str::stream() << "Change stream was unexpectedly opened on the namespace: "
@@ -558,7 +565,6 @@ std::unique_ptr<AggCatalogState> AggExState::createAggCatalogState() {
 
         // Upgrade and wait for read concern if necessary.
         adjustChangeStreamReadConcern();
-
         collectionState = AggCatalogStateFactory::createOplogAggCatalogState(*this);
     } else if (getExecutionNss().isCollectionlessAggregateNS() && getInvolvedNamespaces().empty()) {
         // We get here for aggregations that are not against a specific collection, e.g.,
@@ -571,6 +577,16 @@ std::unique_ptr<AggCatalogState> AggExState::createAggCatalogState() {
         collectionState = AggCatalogStateFactory::createCollectionlessAggCatalogState(*this);
     } else {
         collectionState = AggCatalogStateFactory::createDefaultAggCatalogState(*this);
+
+        if (isRawDataOperation(getOpCtx())) {
+            auto [isTimeseriesViewRequest, translatedNs] =
+                timeseries::isTimeseriesViewRequest(getOpCtx(), getRequest());
+            if (isTimeseriesViewRequest) {
+                setExecutionNss(translatedNs);
+                collectionState->relinquishResources();
+                collectionState = AggCatalogStateFactory::createDefaultAggCatalogState(*this);
+            }
+        }
     }
 
     collectionState->validate();
@@ -578,8 +594,161 @@ std::unique_ptr<AggCatalogState> AggExState::createAggCatalogState() {
     return collectionState;
 }
 
+ResolvedViewAggExState::ResolvedViewAggExState(AggExState&& baseState,
+                                               std::unique_ptr<AggCatalogState>& aggCatalogStage,
+                                               const ViewDefinition& view)
+    : AggExState(std::move(baseState)),
+      _originalAggReqDerivatives(std::move(_aggReqDerivatives)),
+      _resolvedView(uassertStatusOK(aggCatalogStage->resolveView(
+          _opCtx,
+          _originalAggReqDerivatives->request.getNamespace(),
+          view.timeseries() ? _originalAggReqDerivatives->request.getCollation() : boost::none))),
+      _resolvedViewRequest_DO_NOT_USE_DIRECTLY(PipelineResolver::buildRequestWithResolvedPipeline(
+          _resolvedView, _originalAggReqDerivatives->request)),
+      _resolvedViewLiteParsedPipeline_DO_NOT_USE_DIRECTLY(_resolvedViewRequest_DO_NOT_USE_DIRECTLY,
+                                                          true) {
+    bool isExplain = _originalAggReqDerivatives->request.getExplain().get_value_or(false);
+    uassert(std::move(_resolvedView),
+            "Explain of a resolved view must be executed by mongos",
+            !ShardingState::get(_opCtx)->enabled() || !isExplain);
+
+    // Parse the resolved view into a new AggregationRequestDerivatives object.
+    _aggReqDerivatives = std::make_unique<AggregateRequestDerivatives>(
+        _resolvedViewRequest_DO_NOT_USE_DIRECTLY,
+        _resolvedViewLiteParsedPipeline_DO_NOT_USE_DIRECTLY);
+
+    setExecutionNss(_resolvedView.getNamespace());
+}
+
+StatusWith<std::unique_ptr<ResolvedViewAggExState>> ResolvedViewAggExState::create(
+    AggExState&& aggExState, std::unique_ptr<AggCatalogState>& aggCatalogState) {
+    invariant(aggCatalogState->lockAcquired());
+
+    // Resolve the request's collation and check that the default collation of 'view' is compatible
+    // with the operation's collation. The collation resolution and check are both skipped if the
+    // request did not specify a collation.
+    tassert(10240800, "Expected a view", aggCatalogState->getMainCollectionOrView().isView());
+    const auto& viewDefinition =
+        aggCatalogState->getMainCollectionOrView().getView().getViewDefinition();
+
+    if (!aggExState.getRequest().getCollation().get_value_or(BSONObj()).isEmpty()) {
+        auto [collatorToUse, collatorToUseMatchesDefault] = aggCatalogState->resolveCollator();
+        if (!CollatorInterface::collatorsMatch(viewDefinition.defaultCollator(),
+                                               collatorToUse.get()) &&
+            !viewDefinition.timeseries()) {
+            return {ErrorCodes::OptionNotSupportedOnView,
+                    "Cannot override a view's default collation"};
+        }
+    }
+
+    // Create the ResolvedViewAggExState object which will resolve the view upon
+    // initialization.
+    return std::make_unique<ResolvedViewAggExState>(
+        std::move(aggExState), aggCatalogState, viewDefinition);
+}
+
+std::unique_ptr<Pipeline> ResolvedViewAggExState::applyViewToPipeline(
+    boost::intrusive_ptr<ExpressionContext> expCtx,
+    std::unique_ptr<Pipeline> pipeline,
+    boost::optional<UUID> uuid) const {
+    if (getResolvedView().timeseries()) {
+        // For timeseries, there may have been rewrites done on the raw BSON pipeline
+        // during view resolution. We must parse the request's full resolved pipeline
+        // which will account for those rewrites.
+        // TODO SERVER-101599 remove this code once 9.0 becomes last LTS. By then only viewless
+        // timeseries collections will exist.
+        return Pipeline::parse(getRequest().getPipeline(), expCtx);
+    } else if (search_helpers::isMongotPipeline(pipeline.get())) {
+        // For search queries on views don't do any of the pipeline stitching that is done for
+        // normal views.
+        return pipeline;
+    }
+
+    // Parse the view pipeline, then stitch the user pipeline and view pipeline together
+    // to build the total aggregation pipeline.
+    auto userPipeline = std::move(pipeline);
+    pipeline = Pipeline::parse(getResolvedView().getPipeline(), expCtx);
+    pipeline->appendPipeline(std::move(userPipeline));
+    return pipeline;
+}
+
+ScopedSetShardRole ResolvedViewAggExState::setShardRole(const CollectionRoutingInfo& cri) {
+    const NamespaceString& underlyingNss = getExecutionNss();
+
+    const auto optPlacementConflictTimestamp = [&]() {
+        auto originalShardVersion =
+            OperationShardingState::get(_opCtx).getShardVersion(getOriginalNss());
+
+        // Since for requests on timeseries namespaces the ServiceEntryPoint installs shard
+        // version on the buckets collection instead of the viewNss.
+        // TODO: SERVER-80719 Remove this.
+        if (!originalShardVersion && underlyingNss.isTimeseriesBucketsCollection()) {
+            originalShardVersion =
+                OperationShardingState::get(_opCtx).getShardVersion(underlyingNss);
+        }
+
+        return originalShardVersion ? originalShardVersion->placementConflictTime() : boost::none;
+    }();
+
+    if (cri.hasRoutingTable()) {
+        const auto myShardId = ShardingState::get(_opCtx)->shardId();
+
+        auto sv = cri.getShardVersion(myShardId);
+        if (optPlacementConflictTimestamp) {
+            sv.setPlacementConflictTime(*optPlacementConflictTimestamp);
+        }
+        return ScopedSetShardRole(
+            _opCtx, underlyingNss, sv /*shardVersion*/, boost::none /*databaseVersion*/);
+    } else {
+        auto sv = ShardVersion::UNSHARDED();
+        if (optPlacementConflictTimestamp) {
+            sv.setPlacementConflictTime(*optPlacementConflictTimestamp);
+        }
+        return ScopedSetShardRole(
+            _opCtx, underlyingNss, sv /*shardVersion*/, cri.getDbVersion() /*databaseVersion*/);
+    }
+}
+
+bool AggCatalogState::requiresExtendedRangeSupportForTimeseries(
+    const ResolvedNamespaceMap& resolvedNamespaces) const {
+    auto requiresExtendedRange = false;
+
+    // Check the in-memory collections.
+    getCollections().forEach([&](const CollectionPtr& coll) {
+        if (coll->getRequiresTimeseriesExtendedRangeSupport()) {
+            requiresExtendedRange = true;
+        }
+    });
+
+    // It's possible that an involved nss resolves to a timeseries collection that requires extended
+    // range support (e.g. in the foreign coll of a $lookup), so we check for that as well.
+    if (!requiresExtendedRange) {
+        for (auto& [_, resolvedNs] : resolvedNamespaces) {
+            const auto& nss = resolvedNs.ns;
+            auto readTimestamp = shard_role_details::getRecoveryUnit(_aggExState.getOpCtx())
+                                     ->getPointInTimeReadTimestamp();
+            auto collPtr = CollectionPtr(getCatalog()->establishConsistentCollection(
+                _aggExState.getOpCtx(), NamespaceStringOrUUID(nss), readTimestamp));
+            if (collPtr && collPtr->getRequiresTimeseriesExtendedRangeSupport()) {
+                requiresExtendedRange = true;
+                break;
+            }
+        }
+    }
+
+    return requiresExtendedRange;
+}
+
 boost::intrusive_ptr<ExpressionContext> AggCatalogState::createExpressionContext() {
     auto [collator, collationMatchesDefault] = resolveCollator();
+    const bool canPipelineBeRejected =
+        query_settings::canPipelineBeRejected(_aggExState.getRequest().getPipeline());
+
+    // If any involved collection contains extended-range data, set a flag which individual
+    // DocumentSource parsers can check.
+    const auto& resolvedNamespaces = uassertStatusOK(_aggExState.resolveInvolvedNamespaces());
+    auto requiresExtendedRange = requiresExtendedRangeSupportForTimeseries(resolvedNamespaces);
+
     auto expCtx = ExpressionContextBuilder{}
                       .fromRequest(_aggExState.getOpCtx(),
                                    _aggExState.getRequest(),
@@ -588,31 +757,54 @@ boost::intrusive_ptr<ExpressionContext> AggCatalogState::createExpressionContext
                       .collUUID(getUUID())
                       .mongoProcessInterface(MongoProcessInterface::create(_aggExState.getOpCtx()))
                       .mayDbProfile(CurOp::get(_aggExState.getOpCtx())->dbProfileLevel() > 0)
-                      .resolvedNamespace(uassertStatusOK(_aggExState.resolveInvolvedNamespaces()))
-                      .tmpDir(storageGlobalParams.dbpath + "/_tmp")
+                      .ns(_aggExState.hasChangeStream() ? _aggExState.getOriginalNss()
+                                                        : _aggExState.getExecutionNss())
+                      .resolvedNamespace(std::move(resolvedNamespaces))
+                      .originalNs(_aggExState.getOriginalNss())
+                      .requiresTimeseriesExtendedRangeSupport(requiresExtendedRange)
+                      .tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp")
                       .collationMatchesDefault(collationMatchesDefault)
+                      .canBeRejected(canPipelineBeRejected)
+                      .explain(_aggExState.getVerbosity())
                       .build();
-    // If any involved collection contains extended-range data, set a flag which individual
-    // DocumentSource parsers can check.
-    getCollections().forEach([&](const CollectionPtr& coll) {
-        if (coll->getRequiresTimeseriesExtendedRangeSupport())
-            expCtx->setRequiresTimeseriesExtendedRangeSupport(true);
-    });
+
+    if (_aggExState.getRequest().getIsHybridSearch()) {
+        expCtx->setIsHybridSearch();
+    }
 
     return expCtx;
 }
 
 void AggCatalogState::validate() const {
-    if (_aggExState.getRequest().getResumeAfter()) {
+    uassert(10557301,
+            "$rankFusion and $scoreFusion are unsupported on timeseries collections",
+            !(_aggExState.isHybridSearchPipeline() && isTimeseries()));
+
+    if (_aggExState.getRequest().getResumeAfter() || _aggExState.getRequest().getStartAt()) {
+        const auto& collectionOrView = getMainCollectionOrView();
+        uassert(ErrorCodes::InvalidPipelineOperator,
+                "$_resumeAfter is not supported on timeseries collections",
+                !isTimeseries()
+                    // Consider special case where user queries directly on underlying bucket ns
+                    // for a view-ful timeseries. The $_resumeAfter token should still be allowed
+                    // here. This is equivalent to querying on a timeseries coll with 'rawData'
+                    // true. Even though in a normal view-ful timeseries query we will end up here
+                    // after view resolution with the execution nss being the ts bucket collection,
+                    // this assertion will have tripped on the first round before view resolution.
+                    // TODO SERVER-111172: Remove this clause when 9.0 is LTS.
+                    || _aggExState.getExecutionNss().isTimeseriesBucketsCollection());
         uassert(ErrorCodes::InvalidPipelineOperator,
                 "$_resumeAfter is not supported on view",
-                !getCtx().getView());
-        const auto& collection = getCtx().getCollection();
-        const bool isClusteredCollection = collection && collection->isClustered();
-        uassertStatusOK(
-            query_request_helper::validateResumeAfter(_aggExState.getOpCtx(),
-                                                      *_aggExState.getRequest().getResumeAfter(),
-                                                      isClusteredCollection));
+                !collectionOrView.isView());
+        const bool isClusteredCollection = collectionOrView.collectionExists() &&
+            collectionOrView.getCollection().getCollectionPtr()->isClustered();
+        uassertStatusOK(query_request_helper::validateResumeInput(
+            _aggExState.getOpCtx(),
+            _aggExState.getRequest().getResumeAfter() ? *_aggExState.getRequest().getResumeAfter()
+                                                      : BSONObj(),
+            _aggExState.getRequest().getStartAt() ? *_aggExState.getRequest().getStartAt()
+                                                  : BSONObj(),
+            isClusteredCollection));
     }
 
     // If collectionUUID was provided, verify the collection exists and has the expected UUID.
@@ -628,10 +820,11 @@ void AggCatalogState::validate() const {
  * classified as a view).
  */
 query_shape::CollectionType AggCatalogState::determineCollectionType() const {
-    if (_aggExState.getResolvedView().has_value()) {
-        if (_aggExState.getResolvedView()->timeseries()) {
-            return query_shape::CollectionType::kTimeseries;
-        }
+    if (isTimeseries()) {
+        return query_shape::CollectionType::kTimeseries;
+    }
+
+    if (_aggExState.isView()) {
         return query_shape::CollectionType::kView;
     }
 
@@ -647,7 +840,21 @@ query_shape::CollectionType AggCatalogState::determineCollectionType() const {
     if (_aggExState.hasChangeStream()) {
         return query_shape::CollectionType::kChangeStream;
     }
-    return lockAcquired() ? getCtx().getCollectionType() : query_shape::CollectionType::kUnknown;
+
+    query_shape::CollectionType type = query_shape::CollectionType::kUnknown;
+    if (lockAcquired()) {
+        type = getMainCollectionType();
+        // In the case that the collection type is timeseries,
+        // and 'rawData' has been specified, the collection type is considered to be 'kCollection'.
+        // Even though previously we checked if 'isTimeseries()', this will return false
+        // in the case that 'rawData' was specified.
+        if (type == query_shape::CollectionType::kTimeseries &&
+            isRawDataOperation(_aggExState.getOpCtx())) {
+            type = query_shape::CollectionType::kCollection;
+        }
+    }
+
+    return type;
 }
 
 std::unique_ptr<AggCatalogState> AggCatalogStateFactory::createDefaultAggCatalogState(

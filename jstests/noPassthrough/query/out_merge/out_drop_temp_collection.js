@@ -3,14 +3,15 @@
  */
 
 import {waitForCurOpByFailPointNoNS} from "jstests/libs/curop_helpers.js";
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 function runTest(st, testDb, portNum) {
-    // TODO SERVER-80853 add 'hangWhileBuildingDocumentSourceOutBatch' to this list
-    for (const failpointName
-             of ["outWaitAfterTempCollectionCreation", "outWaitBeforeTempCollectionRename"]) {
+    for (const failpointName of [
+        "outWaitAfterTempCollectionCreation",
+        "outWaitBeforeTempCollectionRename",
+        "hangWhileBuildingDocumentSourceOutBatch",
+    ]) {
         const coll = testDb.out_source_coll;
         coll.drop();
 
@@ -25,14 +26,17 @@ function runTest(st, testDb, portNum) {
             cmdObj: {
                 configureFailPoint: failpointName,
                 mode: "alwaysOn",
-            }
+            },
         });
-        res.forEach(cmdResult => assert.commandWorked(cmdResult));
+        res.forEach((cmdResult) => assert.commandWorked(cmdResult));
 
         const aggDone = startParallelShell(() => {
             const targetDB = db.getSiblingDB("out_drop_temp");
-            const res = targetDB.runCommand(
-                {aggregate: "out_source_coll", pipeline: [{$out: "out_target_coll"}], cursor: {}});
+            const res = targetDB.runCommand({
+                aggregate: "out_source_coll",
+                pipeline: [{$out: "out_target_coll"}],
+                cursor: {},
+            });
 
             // When the dropDatabase and $out happen concurrently, the result must be the same as if
             // they happened serially: $out then drop (result is non-existant collection) or, drop
@@ -57,7 +61,7 @@ function runTest(st, testDb, portNum) {
             cmdObj: {
                 configureFailPoint: failpointName,
                 mode: "off",
-            }
+            },
         });
         aggDone();
     }

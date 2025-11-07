@@ -13,27 +13,28 @@
  *   # Cannot implicitly shard accessed collections because of collection existing when none
  *   # expected.
  *   assumes_no_implicit_collection_creation_after_drop,
+ *   requires_getmore,
  * ]
  */
 
-var cName = "explain_find_and_modify";
-var t = db.getCollection(cName);
+let cName = "explain_find_and_modify";
+let t = db.getCollection(cName);
 
 // Different types of findAndModify explain requests.
-var explainRemove = {explain: {findAndModify: cName, remove: true, query: {_id: 0}}};
-var explainUpdate = {explain: {findAndModify: cName, update: {$inc: {i: 1}}, query: {_id: 0}}};
-var explainUpsert = {
-    explain: {findAndModify: cName, update: {$inc: {i: 1}}, query: {_id: 0}, upsert: true}
+let explainRemove = {explain: {findAndModify: cName, remove: true, query: {_id: 0}}};
+let explainUpdate = {explain: {findAndModify: cName, update: {$inc: {i: 1}}, query: {_id: 0}}};
+let explainUpsert = {
+    explain: {findAndModify: cName, update: {$inc: {i: 1}}, query: {_id: 0}, upsert: true},
 };
 
 // 1. Explaining findAndModify should never create a database.
 
 // Make sure this one doesn't exist before we start.
 assert.commandWorked(db.getSiblingDB(cName).runCommand({dropDatabase: 1}));
-var newDB = db.getSiblingDB(cName);
+let newDB = db.getSiblingDB(cName);
 
 // Explain the command, ensuring the database is not created.
-var err_msg = "Explaining findAndModify on a non-existent database should return an error.";
+let err_msg = "Explaining findAndModify on a non-existent database should return an error.";
 assert.commandFailed(newDB.runCommand(explainRemove), err_msg);
 assertDBDoesNotExist(newDB, "Explaining a remove should not create a database.");
 
@@ -43,7 +44,7 @@ assertDBDoesNotExist(newDB, "Explaining an upsert should not create a database."
 // 2. Explaining findAndModify should never create a collection.
 
 // Insert a document to make sure the database exists.
-t.insert({'will': 'be dropped'});
+t.insert({"will": "be dropped"});
 // Make sure the collection doesn't exist.
 t.drop();
 
@@ -55,7 +56,7 @@ assert.commandWorked(db.runCommand(explainUpsert));
 assertCollDoesNotExist(cName, "explaining an upsert should not create a new collection.");
 
 explainUpsert.explain.fields = {
-    x: 1
+    x: 1,
 };
 assert.commandWorked(db.runCommand(explainUpsert));
 assertCollDoesNotExist(cName, "explaining an upsert should not create a new collection.");
@@ -66,33 +67,32 @@ assertCollDoesNotExist(cName, "explaining an upsert should not create a new coll
 assert.commandFailed(db.runCommand({remove: true, new: true}));
 
 // 4. Explaining findAndModify should not modify any contents of the collection.
-var onlyDoc = {_id: 0, i: 1};
+let onlyDoc = {_id: 0, i: 1};
 assert.commandWorked(t.insert(onlyDoc));
 
 // Explaining a delete should not delete anything.
-var matchingRemoveCmd = {findAndModify: cName, remove: true, query: {_id: onlyDoc._id}};
+let matchingRemoveCmd = {findAndModify: cName, remove: true, query: {_id: onlyDoc._id}};
 var res = db.runCommand({explain: matchingRemoveCmd});
 assert.commandWorked(res);
 assert.eq(t.find().itcount(), 1, "Explaining a remove should not remove any documents.");
 
 // Explaining an update should not update anything.
-var matchingUpdateCmd = {findAndModify: cName, update: {x: "x"}, query: {_id: onlyDoc._id}};
+let matchingUpdateCmd = {findAndModify: cName, update: {x: "x"}, query: {_id: onlyDoc._id}};
 var res = db.runCommand({explain: matchingUpdateCmd});
 assert.commandWorked(res);
 assert.eq(t.findOne(), onlyDoc, "Explaining an update should not update any documents.");
 
 // Explaining an upsert should not insert anything.
-var matchingUpsertCmd =
-    {findAndModify: cName, update: {x: "x"}, query: {_id: "non-match"}, upsert: true};
+let matchingUpsertCmd = {findAndModify: cName, update: {x: "x"}, query: {_id: "non-match"}, upsert: true};
 var res = db.runCommand({explain: matchingUpsertCmd});
 assert.commandWorked(res);
 assert.eq(t.find().itcount(), 1, "Explaining an upsert should not insert any documents.");
 
 // 5. The reported stats should reflect how it would execute and what it would modify.
-var isMongos = db.runCommand({isdbgrid: 1}).isdbgrid;
+let isMongos = db.runCommand({isdbgrid: 1}).isdbgrid;
 
 // List out the command to be explained, and the expected results of that explain.
-var testCases = [
+let testCases = [
     // -------------------------------------- Removes ----------------------------------------
     {
         // Non-matching remove command.
@@ -101,9 +101,9 @@ var testCases = [
             executionStats: {
                 nReturned: 0,
                 executionSuccess: true,
-                executionStages: {stage: "DELETE", nWouldDelete: 0}
-            }
-        }
+                executionStages: {stage: "DELETE", nWouldDelete: 0},
+            },
+        },
     },
     {
         // Matching remove command.
@@ -112,9 +112,9 @@ var testCases = [
             executionStats: {
                 nReturned: 1,
                 executionSuccess: true,
-                executionStages: {stage: "DELETE", nWouldDelete: 1}
-            }
-        }
+                executionStages: {stage: "DELETE", nWouldDelete: 1},
+            },
+        },
     },
     // -------------------------------------- Updates ----------------------------------------
     {
@@ -124,9 +124,9 @@ var testCases = [
             executionStats: {
                 nReturned: 0,
                 executionSuccess: true,
-                executionStages: {stage: "UPDATE", nWouldModify: 0, nWouldUpsert: 0}
-            }
-        }
+                executionStages: {stage: "UPDATE", nWouldModify: 0, nWouldUpsert: 0},
+            },
+        },
     },
     {
         // Non-matching update query, returning new doc.
@@ -135,9 +135,9 @@ var testCases = [
             executionStats: {
                 nReturned: 0,
                 executionSuccess: true,
-                executionStages: {stage: "UPDATE", nWouldModify: 0, nWouldUpsert: 0}
-            }
-        }
+                executionStages: {stage: "UPDATE", nWouldModify: 0, nWouldUpsert: 0},
+            },
+        },
     },
     {
         // Matching update query.
@@ -146,9 +146,9 @@ var testCases = [
             executionStats: {
                 nReturned: 1,
                 executionSuccess: true,
-                executionStages: {stage: "UPDATE", nWouldModify: 1, nWouldUpsert: 0}
-            }
-        }
+                executionStages: {stage: "UPDATE", nWouldModify: 1, nWouldUpsert: 0},
+            },
+        },
     },
     {
         // Matching update query, returning new doc.
@@ -157,9 +157,9 @@ var testCases = [
             executionStats: {
                 nReturned: 1,
                 executionSuccess: true,
-                executionStages: {stage: "UPDATE", nWouldModify: 1, nWouldUpsert: 0}
-            }
-        }
+                executionStages: {stage: "UPDATE", nWouldModify: 1, nWouldUpsert: 0},
+            },
+        },
     },
     // -------------------------------------- Upserts ----------------------------------------
     {
@@ -169,9 +169,9 @@ var testCases = [
             executionStats: {
                 nReturned: 0,
                 executionSuccess: true,
-                executionStages: {stage: "UPDATE", nWouldModify: 0, nWouldUpsert: 1}
-            }
-        }
+                executionStages: {stage: "UPDATE", nWouldModify: 0, nWouldUpsert: 1},
+            },
+        },
     },
     {
         // Non-matching upsert query, returning new doc.
@@ -180,9 +180,9 @@ var testCases = [
             executionStats: {
                 nReturned: 1,
                 executionSuccess: true,
-                executionStages: {stage: "UPDATE", nWouldModify: 0, nWouldUpsert: 1}
-            }
-        }
+                executionStages: {stage: "UPDATE", nWouldModify: 0, nWouldUpsert: 1},
+            },
+        },
     },
     {
         // Matching upsert query, returning new doc.
@@ -191,32 +191,34 @@ var testCases = [
             executionStats: {
                 nReturned: 1,
                 executionSuccess: true,
-                executionStages: {stage: "UPDATE", nWouldModify: 1, nWouldUpsert: 0}
-            }
-        }
-    }
+                executionStages: {stage: "UPDATE", nWouldModify: 1, nWouldUpsert: 0},
+            },
+        },
+    },
 ];
 
 // Apply all the same test cases, this time adding a projection stage.
-testCases = testCases.concat(testCases.map(function makeProjection(testCase) {
-    return {
-        cmd: Object.merge(testCase.cmd, {fields: {i: 0}}),
-        expectedResult: {
-            executionStats: {
-                // nReturned Shouldn't change.
-                nReturned: testCase.expectedResult.executionStats.nReturned,
-                executionStages: {
-                    stage: "PROJECTION_DEFAULT",
-                    transformBy: {i: 0},
-                    // put previous root stage under projection stage.
-                    inputStage: testCase.expectedResult.executionStats.executionStages
-                }
-            }
-        }
-    };
-}));
+testCases = testCases.concat(
+    testCases.map(function makeProjection(testCase) {
+        return {
+            cmd: Object.merge(testCase.cmd, {fields: {i: 0}}),
+            expectedResult: {
+                executionStats: {
+                    // nReturned Shouldn't change.
+                    nReturned: testCase.expectedResult.executionStats.nReturned,
+                    executionStages: {
+                        stage: "PROJECTION_DEFAULT",
+                        transformBy: {i: 0},
+                        // put previous root stage under projection stage.
+                        inputStage: testCase.expectedResult.executionStats.executionStages,
+                    },
+                },
+            },
+        };
+    }),
+);
 // Actually assert on the test cases.
-testCases.forEach(function(testCase) {
+testCases.forEach(function (testCase) {
     assertExplainMatchedAllVerbosities(testCase.cmd, testCase.expectedResult);
 });
 
@@ -240,7 +242,7 @@ function transformIfSharded(explainOut) {
         assert(explainOut.hasOwnProperty(outerKey));
         assert(explainOut[outerKey].hasOwnProperty(innerKey));
 
-        var shardStage = explainOut[outerKey][innerKey];
+        let shardStage = explainOut[outerKey][innerKey];
         assert.eq("SINGLE_SHARD", shardStage.stage);
         assert.eq(1, shardStage.shards.length);
         Object.extend(explainOut[outerKey], shardStage.shards[0], false);
@@ -263,40 +265,68 @@ function transformIfSharded(explainOut) {
  */
 function assertExplainResultsMatch(explainOut, expectedMatches, preMsg, currentPath) {
     // This is only used recursively, to keep track of where we are in the document.
-    var isRootLevel = typeof currentPath === "undefined";
-    Object.keys(expectedMatches).forEach(function(key) {
-        var totalFieldName = isRootLevel ? key : currentPath + "." + key;
-        assert(explainOut.hasOwnProperty(key),
-               preMsg + "Explain's output does not have a value for " + key + "\n" +
-                   tojson(explainOut));
+    let isRootLevel = typeof currentPath === "undefined";
+    Object.keys(expectedMatches).forEach(function (key) {
+        let totalFieldName = isRootLevel ? key : currentPath + "." + key;
+        assert(
+            explainOut.hasOwnProperty(key),
+            preMsg + "Explain's output does not have a value for " + key + "\n" + tojson(explainOut),
+        );
         if (typeof expectedMatches[key] === "object") {
             // Sub-doc, recurse to match on it's fields
-            assertExplainResultsMatch(
-                explainOut[key], expectedMatches[key], preMsg, totalFieldName);
+            assertExplainResultsMatch(explainOut[key], expectedMatches[key], preMsg, totalFieldName);
         } else if (key == "stage" && expectedMatches[key] == "UPDATE") {
             // Express handles update-by-id post 8.0
             let want = [expectedMatches[key], "EXPRESS_UPDATE"];
-            assert.contains(explainOut[key],
-                            want,
-                            preMsg + "Explain's " + totalFieldName + " (" + explainOut[key] + ")" +
-                                " does not match one of the expected values (" + want + ")." +
-                                "\n" + tojson(explainOut));
-
+            assert.contains(
+                explainOut[key],
+                want,
+                preMsg +
+                    "Explain's " +
+                    totalFieldName +
+                    " (" +
+                    explainOut[key] +
+                    ")" +
+                    " does not match one of the expected values (" +
+                    want +
+                    ")." +
+                    "\n" +
+                    tojson(explainOut),
+            );
         } else if (key == "stage" && expectedMatches[key] == "DELETE") {
             // Express handles delete-by-id post 8.0
             let want = [expectedMatches[key], "EXPRESS_DELETE"];
-            assert.contains(explainOut[key],
-                            want,
-                            preMsg + "Explain's " + totalFieldName + " (" + explainOut[key] + ")" +
-                                " does not match one of the expected values (" + want + ")." +
-                                "\n" + tojson(explainOut));
-
+            assert.contains(
+                explainOut[key],
+                want,
+                preMsg +
+                    "Explain's " +
+                    totalFieldName +
+                    " (" +
+                    explainOut[key] +
+                    ")" +
+                    " does not match one of the expected values (" +
+                    want +
+                    ")." +
+                    "\n" +
+                    tojson(explainOut),
+            );
         } else {
-            assert.eq(explainOut[key],
-                      expectedMatches[key],
-                      preMsg + "Explain's " + totalFieldName + " (" + explainOut[key] + ")" +
-                          " does not match expected value (" + expectedMatches[key] + ")." +
-                          "\n" + tojson(explainOut));
+            assert.eq(
+                explainOut[key],
+                expectedMatches[key],
+                preMsg +
+                    "Explain's " +
+                    totalFieldName +
+                    " (" +
+                    explainOut[key] +
+                    ")" +
+                    " does not match expected value (" +
+                    expectedMatches[key] +
+                    ")." +
+                    "\n" +
+                    tojson(explainOut),
+            );
         }
     });
 }
@@ -307,13 +337,13 @@ function assertExplainResultsMatch(explainOut, expectedMatches, preMsg, currentP
  * since it doesn't have any useful stats).
  */
 function assertExplainMatchedAllVerbosities(findAndModifyArgs, expectedResult) {
-    ["queryPlanner", "executionStats", "allPlansExecution"].forEach(function(verbosityMode) {
-        var cmd = {
+    ["queryPlanner", "executionStats", "allPlansExecution"].forEach(function (verbosityMode) {
+        let cmd = {
             explain: Object.merge({findAndModify: cName}, findAndModifyArgs),
-            verbosity: verbosityMode
+            verbosity: verbosityMode,
         };
-        var msg = "Error after running command: " + tojson(cmd) + ": ";
-        var explainOut = db.runCommand(cmd);
+        let msg = "Error after running command: " + tojson(cmd) + ": ";
+        let explainOut = db.runCommand(cmd);
         assert.commandWorked(explainOut, "command: " + tojson(cmd));
         // Don't check explain results for queryPlanner mode, as that doesn't have any of the
         // interesting stats.
@@ -325,9 +355,7 @@ function assertExplainMatchedAllVerbosities(findAndModifyArgs, expectedResult) {
 }
 
 function assertDBDoesNotExist(db, msg) {
-    assert.eq(db.getMongo().getDBNames().indexOf(db.getName()),
-              -1,
-              msg + "db " + db.getName() + " exists.");
+    assert.eq(db.getMongo().getDBNames().indexOf(db.getName()), -1, msg + "db " + db.getName() + " exists.");
 }
 
 function assertCollDoesNotExist(cName, msg) {

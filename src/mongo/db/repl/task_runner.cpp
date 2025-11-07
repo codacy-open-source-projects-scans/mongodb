@@ -29,23 +29,20 @@
 
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <mutex>
-#include <utility>
+#include "mongo/db/repl/task_runner.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/repl/task_runner.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/destructor_guard.h"
 #include "mongo/util/str.h"
+
+#include <mutex>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -78,20 +75,18 @@ TaskRunner::NextAction runSingleTask(const TaskRunner::Task& task,
 
 }  // namespace
 
-// static
-TaskRunner::Task TaskRunner::makeCancelTask() {
-    return [](OperationContext* opCtx, const Status& status) {
-        return NextAction::kCancel;
-    };
-}
-
 TaskRunner::TaskRunner(ThreadPool* threadPool)
     : _threadPool(threadPool), _active(false), _cancelRequested(false) {
     uassert(ErrorCodes::BadValue, "null thread pool", threadPool);
 }
 
 TaskRunner::~TaskRunner() {
-    DESTRUCTOR_GUARD(cancel(); join(););
+    try {
+        cancel();
+        join();
+    } catch (...) {
+        reportFailedDestructor(MONGO_SOURCE_LOCATION());
+    }
 }
 
 std::string TaskRunner::getDiagnosticString() const {

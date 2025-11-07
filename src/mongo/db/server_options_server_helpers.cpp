@@ -42,13 +42,6 @@
 // IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 #include <boost/type_index/type_index_facade.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <cstdlib>
-#include <iostream>
-#include <map>
-#include <type_traits>
-#include <utility>
-#include <variant>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -61,8 +54,6 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_options_helpers.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/transport/message_compressor_registry.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cmdline_utils/censor_cmdline.h"
@@ -71,10 +62,16 @@
 #include "mongo/util/options_parser/value.h"
 #include "mongo/util/str.h"
 
+#include <cstdlib>
+#include <iostream>
+#include <map>
+#include <type_traits>
+#include <utility>
+#include <variant>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
 
-using std::endl;
 using std::string;
 
 namespace mongo {
@@ -134,10 +131,6 @@ bool shouldFork(const moe::Environment& params) {
         return envVal && std::string{envVal} == "1";
     };
 
-    if (paramYes(params, "shutdown")) {
-        return false;
-    }
-
     if (envVarYes("MONGODB_CONFIG_OVERRIDE_NOFORK")) {
         LOGV2(7484500,
               "Environment variable MONGODB_CONFIG_OVERRIDE_NOFORK == 1, "
@@ -152,16 +145,6 @@ bool shouldFork(const moe::Environment& params) {
     return false;
 }
 }  // namespace
-
-void printCommandLineOpts(std::ostream* os) {
-    if (os) {
-        *os << format(FMT_STRING("Options set by command line: {}"),
-                      tojson(serverGlobalParams.parsedOpts, ExtendedRelaxedV2_0_0, true))
-            << std::endl;
-    } else {
-        LOGV2(21951, "Options set by command line", "options"_attr = serverGlobalParams.parsedOpts);
-    }
-}
 
 Status validateServerOptions(const moe::Environment& params) {
     Status ret = validateBaseOptions(params);
@@ -361,18 +344,20 @@ Status storeServerOptions(const moe::Environment& params) {
     }
 
     if (params.count("net.maxIncomingConnectionsOverride")) {
-        std::vector<std::variant<CIDR, std::string>> maxConnsOverride;
+        CIDRList maxIncomingConnsOverride;
         auto ranges = params["net.maxIncomingConnectionsOverride"].as<std::vector<std::string>>();
         for (const auto& range : ranges) {
             auto swr = CIDR::parse(range);
             if (!swr.isOK()) {
-                maxConnsOverride.push_back(range);
+                maxIncomingConnsOverride.emplace_back(std::in_place_type<std::string>, range);
             } else {
-                maxConnsOverride.push_back(std::move(swr.getValue()));
+                maxIncomingConnsOverride.emplace_back(std::in_place_type<CIDR>,
+                                                      std::move(swr.getValue()));
             }
         }
-        serverGlobalParams.maxConnsOverride.update(
-            std::make_shared<decltype(maxConnsOverride)>(std::move(maxConnsOverride)));
+        serverGlobalParams.maxIncomingConnsOverride.update(
+            std::make_shared<decltype(maxIncomingConnsOverride)>(
+                std::move(maxIncomingConnsOverride)));
     }
 
     if (params.count("net.reservedAdminThreads")) {
@@ -419,6 +404,14 @@ Status storeServerOptions(const moe::Environment& params) {
         serverGlobalParams.doFork = true;
     }
 #endif  // _WIN32
+
+#ifdef __APPLE__
+    if (serverGlobalParams.doFork) {
+        return Status(ErrorCodes::BadValue,
+                      "Server fork+exec via `--fork` or `processManagement.fork` "
+                      "is incompatible with macOS");
+    }
+#endif  // Apple
 
     if (serverGlobalParams.doFork && serverGlobalParams.logpath.empty() &&
         !serverGlobalParams.logWithSyslog) {
@@ -467,6 +460,10 @@ Status storeServerOptions(const moe::Environment& params) {
         if (!ret.isOK()) {
             return ret;
         }
+    }
+
+    if (params.count("net.maintenancePort")) {
+        serverGlobalParams.maintenancePort = params["net.maintenancePort"].as<int>();
     }
 
     return Status::OK();

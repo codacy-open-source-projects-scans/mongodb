@@ -28,18 +28,16 @@
  */
 
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/index_builds/repl_index_build_state.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
-#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/index_builds/repl_index_build_state.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -47,12 +45,13 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -67,7 +66,7 @@ namespace {
 std::vector<std::string> extractIndexNames(const std::vector<BSONObj>& specs) {
     std::vector<std::string> indexNames;
     for (const auto& spec : specs) {
-        std::string name = spec.getStringField(IndexDescriptor::kIndexNameFieldName).toString();
+        std::string name = std::string{spec.getStringField(IndexDescriptor::kIndexNameFieldName)};
         invariant(!name.empty(),
                   str::stream() << "Bad spec passed into ReplIndexBuildState constructor, missing '"
                                 << IndexDescriptor::kIndexNameFieldName << "' field: " << spec);
@@ -121,6 +120,14 @@ void IndexBuildState::setState(State state,
         invariant(_state == kAborted || _state == kFailureCleanUp || _state == kExternalAbort);
         _abortStatus = *abortStatus;
     }
+}
+
+void IndexBuildState::setMultikey(std::vector<boost::optional<MultikeyPaths>> multikey) {
+    _multikey = std::move(multikey);
+}
+
+const std::vector<boost::optional<MultikeyPaths>>& IndexBuildState::getMultikey() const {
+    return _multikey;
 }
 
 bool IndexBuildState::_checkIfValidTransition(IndexBuildState::State currentState,
@@ -203,14 +210,13 @@ void IndexBuildState::appendBuildInfo(BSONObjBuilder* builder) const {
 ReplIndexBuildState::ReplIndexBuildState(const UUID& indexBuildUUID,
                                          const UUID& collUUID,
                                          const DatabaseName& dbName,
-                                         const std::vector<BSONObj>& specs,
+                                         std::vector<IndexBuildInfo> indexes,
                                          IndexBuildProtocol protocol)
     : buildUUID(indexBuildUUID),
       collectionUUID(collUUID),
       dbName(dbName),
-      indexNames(extractIndexNames(specs)),
-      indexSpecs(specs),
-      protocol(protocol) {
+      protocol(protocol),
+      _indexes(std::move(indexes)) {
     _waitForNextAction = std::make_unique<SharedPromise<IndexBuildAction>>();
     if (protocol == IndexBuildProtocol::kTwoPhase)
         commitQuorumLock.emplace(indexBuildUUID.toString());
@@ -233,6 +239,16 @@ void ReplIndexBuildState::setInProgress(OperationContext* opCtx) {
     // transtion to kInProgress would be an error.
     opCtx->checkForInterrupt();
     _indexBuildState.setState(IndexBuildState::kInProgress, false /* skipCheck */);
+}
+
+void ReplIndexBuildState::setGenerateTableWrites(bool generateTableWrites) {
+    stdx::lock_guard lk(_mutex);
+    _generateTableWrites = generateTableWrites;
+}
+
+bool ReplIndexBuildState::getGenerateTableWrites() const {
+    stdx::lock_guard lk(_mutex);
+    return _generateTableWrites;
 }
 
 void ReplIndexBuildState::setPostFailureState(const Status& status) {
@@ -467,7 +483,7 @@ bool ReplIndexBuildState::tryCommit(OperationContext* opCtx) {
 
 ReplIndexBuildState::TryAbortResult ReplIndexBuildState::tryAbort(OperationContext* opCtx,
                                                                   IndexBuildAction signalAction,
-                                                                  std::string reason) {
+                                                                  Status abortStatus) {
     stdx::lock_guard lk(_mutex);
     // It is not possible for the index build to be in kExternalAbort state, as the collection
     // MODE_X lock is held and there cannot be concurrent external aborters.
@@ -530,14 +546,14 @@ ReplIndexBuildState::TryAbortResult ReplIndexBuildState::tryAbort(OperationConte
         return TryAbortResult::kRetry;
     }
 
-    LOGV2(4656003, "Aborting index build", "buildUUID"_attr = buildUUID, "error"_attr = reason);
+    LOGV2(
+        4656003, "Aborting index build", "buildUUID"_attr = buildUUID, "error"_attr = abortStatus);
 
     // Set the state on replState. Once set, the calling thread must complete the abort process.
     auto abortTimestamp = boost::make_optional<Timestamp>(
         !shard_role_details::getRecoveryUnit(opCtx)->getCommitTimestamp().isNull(),
         shard_role_details::getRecoveryUnit(opCtx)->getCommitTimestamp());
     auto skipCheck = _shouldSkipIndexBuildStateTransitionCheck(opCtx);
-    Status abortStatus = Status(ErrorCodes::IndexBuildAborted, reason);
     invariant(!abortStatus.isOK());
     _indexBuildState.setState(
         IndexBuildState::kExternalAbort, skipCheck, abortTimestamp, abortStatus);
@@ -719,6 +735,14 @@ void ReplIndexBuildState::appendBuildInfo(BSONObjBuilder* builder) const {
     builder->append("resumable", !_lastOpTimeBeforeInterceptors.isNull());
 
     _indexBuildState.appendBuildInfo(builder);
+}
+
+void ReplIndexBuildState::setMultikey(std::vector<boost::optional<MultikeyPaths>> multikey) {
+    _indexBuildState.setMultikey(std::move(multikey));
+}
+
+const std::vector<boost::optional<MultikeyPaths>>& ReplIndexBuildState::getMultikey() const {
+    return _indexBuildState.getMultikey();
 }
 
 bool ReplIndexBuildState::_shouldSkipIndexBuildStateTransitionCheck(OperationContext* opCtx) const {

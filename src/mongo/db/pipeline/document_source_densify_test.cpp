@@ -27,33 +27,35 @@
  *    it in the license file.
  */
 
-#include "mongo/util/assert_util.h"
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/document_source_densify.h"
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/json.h"
+#include "mongo/db/exec/agg/densify_stage.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/exec/expression/evaluate.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/document_source_densify.h"
 #include "mongo/db/pipeline/document_source_mock.h"
 #include "mongo/db/pipeline/pipeline.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+
+#include <boost/none.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
 
 using ExplicitBounds = RangeStatement::ExplicitBounds;
 using Full = RangeStatement::Full;
-using GenClass = DocumentSourceInternalDensify::DocGenerator;
+using GenClass = exec::agg::InternalDensifyStage::DocGenerator;
+using InternalDensifyStage = exec::agg::InternalDensifyStage;
 using DensifyFullNumericTest = AggregationContextFixture;
 using DensifyExplicitNumericTest = AggregationContextFixture;
+using DensifyMonthStepTest = AggregationContextFixture;
 using DensifyPartitionNumericTest = AggregationContextFixture;
 using DensifyCloneTest = AggregationContextFixture;
 using DensifyStepTest = AggregationContextFixture;
@@ -102,9 +104,9 @@ bool isOnStepRelativeTo(DensifyValue testVal, DensifyValue base, RangeStatement 
             return diff % stepDurationInMillis == 0;
         }
     } else if (testVal.isNumber()) {
-        Value diff =
-            uassertStatusOK(ExpressionSubtract::apply(testVal.getNumber(), base.getNumber()));
-        Value remainder = uassertStatusOK(ExpressionMod::apply(diff, range.getStep()));
+        Value diff = uassertStatusOK(
+            exec::expression::evaluateSubtract(testVal.getNumber(), base.getNumber()));
+        Value remainder = uassertStatusOK(exec::expression::evaluateMod(diff, range.getStep()));
         return remainder.getDouble() == 0.0;
     }
     return false;
@@ -113,69 +115,57 @@ bool isOnStepRelativeTo(DensifyValue testVal, DensifyValue base, RangeStatement 
 DEATH_TEST(DensifyGeneratorTest, ErrorsIfMinOverMax, "lower or equal to max") {
     Document doc{{"a", 1}};
     size_t counter = 0;
-    ASSERT_THROWS_CODE(
-        GenClass(Value(1),
-                 RangeStatement(Value(1), ExplicitBounds(Value(1), Value(0)), boost::none),
-                 "path",
-                 doc,
-                 doc,
-                 boost::none,
-                 ValueComparator(),
-                 &counter,
-                 false),
-        AssertionException,
-        5733303);
+    GenClass(Value(1),
+             RangeStatement(Value(1), ExplicitBounds(Value(1), Value(0)), boost::none),
+             "path",
+             doc,
+             doc,
+             boost::none,
+             ValueComparator(),
+             &counter,
+             false);
 }
 
 DEATH_TEST(DensifyGeneratorTest, ErrorsIfStepIsZero, "be positive") {
     Document doc{{"a", 1}};
     size_t counter = 0;
-    ASSERT_THROWS_CODE(
-        GenClass(Value(0),
-                 RangeStatement(Value(0), ExplicitBounds(Value(0), Value(1)), boost::none),
-                 "path",
-                 doc,
-                 doc,
-                 boost::none,
-                 ValueComparator(),
-                 &counter,
-                 false),
-        AssertionException,
-        5733305);
+    GenClass(Value(0),
+             RangeStatement(Value(0), ExplicitBounds(Value(0), Value(1)), boost::none),
+             "path",
+             doc,
+             doc,
+             boost::none,
+             ValueComparator(),
+             &counter,
+             false);
 }
 
 DEATH_TEST(DensifyGeneratorTest, ErrorsOnMixedValues, "same type") {
     Document doc{{"a", 1}};
     size_t counter = 0;
-    ASSERT_THROWS_CODE(
-        GenClass(Date_t::max(),
-                 RangeStatement(Value(1), ExplicitBounds(Value(0), Value(1)), boost::none),
-                 "path",
-                 doc,
-                 doc,
-                 boost::none,
-                 ValueComparator(),
-                 &counter,
-                 false),
-        AssertionException,
-        5733300);
+    GenClass(Date_t::max(),
+             RangeStatement(Value(1), ExplicitBounds(Value(0), Value(1)), boost::none),
+             "path",
+             doc,
+             doc,
+             boost::none,
+             ValueComparator(),
+             &counter,
+             false);
 }
 
 DEATH_TEST(DensifyGeneratorTest, ErrorsIfFieldExistsInDocument, "cannot include field") {
     Document doc{{"path", 1}};
     size_t counter = 0;
-    ASSERT_THROWS_CODE(
-        GenClass(Value(0),
-                 RangeStatement(Value(1), ExplicitBounds(Value(0), Value(1)), boost::none),
-                 "path",
-                 doc,
-                 doc,
-                 boost::none,
-                 ValueComparator(),
-                 &counter,
-                 false),
-        AssertionException,
-        5733306);
+    GenClass(Value(0),
+             RangeStatement(Value(1), ExplicitBounds(Value(0), Value(1)), boost::none),
+             "path",
+             doc,
+             doc,
+             boost::none,
+             ValueComparator(),
+             &counter,
+             false);
 }
 
 DEATH_TEST(DensifyGeneratorTest, ErrorsIfFieldExistsButIsArray, "cannot include field") {
@@ -185,18 +175,15 @@ DEATH_TEST(DensifyGeneratorTest, ErrorsIfFieldExistsButIsArray, "cannot include 
     docArray.push_back(doc);
     Document preservedFields{{"arr", Value(docArray)}};
     size_t counter = 0;
-    ASSERT_THROWS_CODE(
-        GenClass(Value(0),
-                 RangeStatement(Value(1), ExplicitBounds(Value(0), Value(1)), boost::none),
-                 "arr",
-                 preservedFields,
-                 doc,
-                 boost::none,
-                 ValueComparator(),
-                 &counter,
-                 false),
-        AssertionException,
-        5733306);
+    GenClass(Value(0),
+             RangeStatement(Value(1), ExplicitBounds(Value(0), Value(1)), boost::none),
+             "arr",
+             preservedFields,
+             doc,
+             boost::none,
+             ValueComparator(),
+             &counter,
+             false);
 }
 
 TEST(DensifyGeneratorTest, ErrorsIfFieldIsInArray) {
@@ -414,72 +401,63 @@ TEST(DensifyGeneratorTest, GeneratesAtDottedPathCorrectly) {
 
 DEATH_TEST(DensifyGeneratorTest, FailsIfDatesAndUnitNotProvided, "date step") {
     size_t counter = 0;
-    ASSERT_THROWS_CODE(GenClass(makeDate("2021-01-01T00:00:00.000Z"),
-                                RangeStatement(Value(1),
-                                               ExplicitBounds(makeDate("2021-01-01T00:00:00.000Z"),
-                                                              makeDate("2021-01-01T00:00:02.000Z")),
-                                               boost::none),
-                                "a",
-                                Document(),
-                                Document(),
-                                boost::none,
-                                ValueComparator(),
-                                &counter,
-                                false),
-                       AssertionException,
-                       5733501);
+    GenClass(makeDate("2021-01-01T00:00:00.000Z"),
+             RangeStatement(Value(1),
+                            ExplicitBounds(makeDate("2021-01-01T00:00:00.000Z"),
+                                           makeDate("2021-01-01T00:00:02.000Z")),
+                            boost::none),
+             "a",
+             Document(),
+             Document(),
+             boost::none,
+             ValueComparator(),
+             &counter,
+             false);
 }
 
 DEATH_TEST(DensifyGeneratorTest, FailsIfNumberAndUnitProvided, "non-date") {
     size_t counter = 0;
-    ASSERT_THROWS_CODE(
-        GenClass(Value(1),
-                 RangeStatement(Value(1), ExplicitBounds(Value(1), Value(10)), TimeUnit::second),
-                 "a",
-                 Document(),
-                 Document(),
-                 boost::none,
-                 ValueComparator(),
-                 &counter,
-                 false),
-        AssertionException,
-        5733506);
+    GenClass(Value(1),
+             RangeStatement(Value(1), ExplicitBounds(Value(1), Value(10)), TimeUnit::second),
+             "a",
+             Document(),
+             Document(),
+             boost::none,
+             ValueComparator(),
+             &counter,
+             false);
 }
 
 DEATH_TEST(DensifyGeneratorTest, DateMinMustBeLessThanMax, "lower or equal to") {
     size_t counter = 0;
-    ASSERT_THROWS_CODE(GenClass(makeDate("2021-01-01T00:00:02.000Z"),
-                                RangeStatement(Value(1),
-                                               ExplicitBounds(makeDate("2021-01-01T00:00:02.000Z"),
-                                                              makeDate("2021-01-01T00:00:01.000Z")),
-                                               TimeUnit::second),
-                                "a",
-                                Document(),
-                                Document(),
-                                boost::none,
-                                ValueComparator(),
-                                &counter,
-                                false),
-                       AssertionException,
-                       5733502);
+    GenClass(makeDate("2021-01-01T00:00:02.000Z"),
+             RangeStatement(Value(1),
+                            ExplicitBounds(makeDate("2021-01-01T00:00:02.000Z"),
+                                           makeDate("2021-01-01T00:00:01.000Z")),
+                            TimeUnit::second),
+             "a",
+             Document(),
+             Document(),
+             boost::none,
+             ValueComparator(),
+             &counter,
+             false);
 }
 
 DEATH_TEST(DensifyGeneratorTest, DateStepMustBeInt, "whole number") {
     size_t counter = 0;
-    ASSERT_THROWS_CODE(GenClass(makeDate("2021-01-01T00:00:00.000Z"),
-                                RangeStatement(Value(1.5),
-                                               ExplicitBounds(makeDate("2021-01-01T00:00:00.000Z"),
-                                                              makeDate("2021-01-01T00:00:01.000Z")),
-                                               TimeUnit::second),
-                                "a",
-                                Document(),
-                                Document(),
-                                boost::none,
-                                ValueComparator(),
-                                &counter,
-                                false),
-                       AssertionException,
-                       5733505);
+    GenClass(makeDate("2021-01-01T00:00:00.000Z"),
+             RangeStatement(Value(1.5),
+                            ExplicitBounds(makeDate("2021-01-01T00:00:00.000Z"),
+                                           makeDate("2021-01-01T00:00:01.000Z")),
+                            TimeUnit::second),
+             "a",
+             Document(),
+             Document(),
+             boost::none,
+             ValueComparator(),
+             &counter,
+             false);
 }
 
 TEST(DensifyGeneratorTest, GeneratesDatesBySecondCorrectly) {
@@ -566,10 +544,13 @@ TEST(DensifyGeneratorTest, GeneratesDatesByMonthCorrectly) {
     ASSERT_TRUE(generator.done());
 }
 TEST_F(DensifyFullNumericTest, DensifySingleValue) {
-    auto densify = DocumentSourceInternalDensify(
-        getExpCtx(), "a", std::list<FieldPath>(), RangeStatement(Value(2), Full(), boost::none));
-    auto source = DocumentSourceMock::createForTest({"{a: 1}"}, getExpCtx());
-    densify.setSource(source.get());
+    auto densify = InternalDensifyStage(DocumentSourceInternalDensify::kStageName,
+                                        getExpCtx(),
+                                        "a",
+                                        std::list<FieldPath>(),
+                                        RangeStatement(Value(2), Full(), boost::none));
+    auto stage = exec::agg::MockStage::createForTest({"{a: 1}"}, getExpCtx());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT_TRUE(next.isAdvanced());
@@ -579,11 +560,14 @@ TEST_F(DensifyFullNumericTest, DensifySingleValue) {
 }
 
 TEST_F(DensifyFullNumericTest, DensifyValuesCorrectlyWithDuplicates) {
-    auto densify = DocumentSourceInternalDensify(
-        getExpCtx(), "a", std::list<FieldPath>(), RangeStatement(Value(2), Full(), boost::none));
-    auto source = DocumentSourceMock::createForTest(
+    auto densify = InternalDensifyStage(DocumentSourceInternalDensify::kStageName,
+                                        getExpCtx(),
+                                        "a",
+                                        std::list<FieldPath>(),
+                                        RangeStatement(Value(2), Full(), boost::none));
+    auto stage = exec::agg::MockStage::createForTest(
         {"{a: 1}", "{a: 1}", "{a: 1}", "{a: 3}", "{a: 7}", "{a: 7}", "{a: 7}"}, getExpCtx());
-    densify.setSource(source.get());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT_TRUE(next.isAdvanced());
@@ -620,10 +604,13 @@ TEST_F(DensifyFullNumericTest, DensifyValuesCorrectlyWithDuplicates) {
 }
 
 TEST_F(DensifyFullNumericTest, DensifyValuesCorrectlyOffStep) {
-    auto densify = DocumentSourceInternalDensify(
-        getExpCtx(), "a", std::list<FieldPath>(), RangeStatement(Value(3), Full(), boost::none));
-    auto source = DocumentSourceMock::createForTest({"{a: 1}", "{a: 9}"}, getExpCtx());
-    densify.setSource(source.get());
+    auto densify = InternalDensifyStage("",
+                                        getExpCtx(),
+                                        "a",
+                                        std::list<FieldPath>(),
+                                        RangeStatement(Value(3), Full(), boost::none));
+    auto stage = exec::agg::MockStage::createForTest({"{a: 1}", "{a: 9}"}, getExpCtx());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT_TRUE(next.isAdvanced());
@@ -648,10 +635,13 @@ TEST_F(DensifyFullNumericTest, DensifyValuesCorrectlyOffStep) {
 }
 
 TEST_F(DensifyFullNumericTest, DensifyValuesCorrectlyOnStep) {
-    auto densify = DocumentSourceInternalDensify(
-        getExpCtx(), "a", std::list<FieldPath>(), RangeStatement(Value(2), Full(), boost::none));
-    auto source = DocumentSourceMock::createForTest({"{a: 1}", "{a: 9}"}, getExpCtx());
-    densify.setSource(source.get());
+    auto densify = InternalDensifyStage(DocumentSourceInternalDensify::kStageName,
+                                        getExpCtx(),
+                                        "a",
+                                        std::list<FieldPath>(),
+                                        RangeStatement(Value(2), Full(), boost::none));
+    auto stage = exec::agg::MockStage::createForTest({"{a: 1}", "{a: 9}"}, getExpCtx());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT_TRUE(next.isAdvanced());
@@ -682,11 +672,14 @@ TEST_F(DensifyFullNumericTest, DensifyValuesCorrectlyOnStep) {
 
 TEST_F(DensifyFullNumericTest,
        NoDensificationIfStepIsGreaterThanDocumentDifferenceMultipleDocuments) {
-    auto densify = DocumentSourceInternalDensify(
-        getExpCtx(), "a", std::list<FieldPath>(), RangeStatement(Value(2), Full(), boost::none));
-    auto source =
-        DocumentSourceMock::createForTest({"{a: 1}", "{a : 2}", "{a: 3}", "{a: 4}"}, getExpCtx());
-    densify.setSource(source.get());
+    auto densify = InternalDensifyStage(DocumentSourceInternalDensify::kStageName,
+                                        getExpCtx(),
+                                        "a",
+                                        std::list<FieldPath>(),
+                                        RangeStatement(Value(2), Full(), boost::none));
+    auto stage =
+        exec::agg::MockStage::createForTest({"{a: 1}", "{a : 2}", "{a: 3}", "{a: 4}"}, getExpCtx());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT_TRUE(next.isAdvanced());
@@ -708,10 +701,13 @@ TEST_F(DensifyFullNumericTest,
 }
 
 TEST_F(DensifyFullNumericTest, DensificationFieldMissing) {
-    auto densify = DocumentSourceInternalDensify(
-        getExpCtx(), "a", std::list<FieldPath>(), RangeStatement(Value(10), Full(), boost::none));
-    auto source = DocumentSourceMock::createForTest(
-        {"{b: 1}", "{a: 1}", "{a: 20}", "{b: 2}", "{b: 3}"}, getExpCtx());
+    auto densify = InternalDensifyStage(DocumentSourceInternalDensify::kStageName,
+                                        getExpCtx(),
+                                        "a",
+                                        std::list<FieldPath>(),
+                                        RangeStatement(Value(10), Full(), boost::none));
+    auto source = exec::agg::buildStage(DocumentSourceMock::createForTest(
+        {"{b: 1}", "{a: 1}", "{a: 20}", "{b: 2}", "{b: 3}"}, getExpCtx()));
     densify.setSource(source.get());
 
     auto next = densify.getNext();
@@ -741,10 +737,13 @@ TEST_F(DensifyFullNumericTest, DensificationFieldMissing) {
 }
 
 TEST_F(DensifyFullNumericTest, NoDensificationIfStepGreaterThanDocumentDifference) {
-    auto densify = DocumentSourceInternalDensify(
-        getExpCtx(), "a", std::list<FieldPath>(), RangeStatement(Value(10), Full(), boost::none));
-    auto source = DocumentSourceMock::createForTest({"{a: 1}", "{a: 9}"}, getExpCtx());
-    densify.setSource(source.get());
+    auto densify = InternalDensifyStage(DocumentSourceInternalDensify::kStageName,
+                                        getExpCtx(),
+                                        "a",
+                                        std::list<FieldPath>(),
+                                        RangeStatement(Value(10), Full(), boost::none));
+    auto stage = exec::agg::MockStage::createForTest({"{a: 1}", "{a: 9}"}, getExpCtx());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT_TRUE(next.isAdvanced());
@@ -757,11 +756,14 @@ TEST_F(DensifyFullNumericTest, NoDensificationIfStepGreaterThanDocumentDifferenc
 }
 
 TEST_F(DensifyFullNumericTest, DensifyOverDocumentsWithGaps) {
-    auto densify = DocumentSourceInternalDensify(
-        getExpCtx(), "a", std::list<FieldPath>(), RangeStatement(Value(3), Full(), boost::none));
-    auto source = DocumentSourceMock::createForTest(
+    auto densify = InternalDensifyStage(DocumentSourceInternalDensify::kStageName,
+                                        getExpCtx(),
+                                        "a",
+                                        std::list<FieldPath>(),
+                                        RangeStatement(Value(3), Full(), boost::none));
+    auto stage = exec::agg::MockStage::createForTest(
         {"{a: 1}", "{a: 2}", "{a : 3}", "{a : 4}", "{a : 9}", "{a : 10}", "{a : 15}"}, getExpCtx());
-    densify.setSource(source.get());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT_TRUE(next.isAdvanced());
@@ -802,14 +804,15 @@ TEST_F(DensifyFullNumericTest, DensifyOverDocumentsWithGaps) {
 }
 
 TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeStartingBelowRange) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        DocumentSourceInternalDensify::kStageName,
         getExpCtx(),
         "a",
         std::list<FieldPath>(),
         RangeStatement(Value(2), ExplicitBounds(Value(5), Value(15)), boost::none));
-    auto source = DocumentSourceMock::createForTest(
+    auto stage = exec::agg::MockStage::createForTest(
         {"{a: 0}", "{a: 1}", "{a: 8}", "{a: 13}", "{a: 19}"}, getExpCtx());
-    densify.setSource(source.get());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT(next.isAdvanced());
@@ -857,14 +860,15 @@ TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeStar
 
 TEST_F(DensifyExplicitNumericTest,
        CorrectlyDensifiesForNumericExplicitRangeStepStartingOnMinRange) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        DocumentSourceInternalDensify::kStageName,
         getExpCtx(),
         "a",
         std::list<FieldPath>(),
         RangeStatement(Value(1), ExplicitBounds(Value(0), Value(5)), boost::none));
-    auto source = DocumentSourceMock::createForTest(
+    auto stage = exec::agg::MockStage::createForTest(
         {"{a: 0}", "{a: 1}", "{a: 8}", "{a: 13}", "{a: 19}"}, getExpCtx());
-    densify.setSource(source.get());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT(next.isAdvanced());
@@ -906,14 +910,15 @@ TEST_F(DensifyExplicitNumericTest,
 }
 
 TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeStartingInsideRange) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        DocumentSourceInternalDensify::kStageName,
         getExpCtx(),
         "a",
         std::list<FieldPath>(),
         RangeStatement(Value(1), ExplicitBounds(Value(0), Value(4)), boost::none));
-    auto source =
-        DocumentSourceMock::createForTest({"{a: 1}", "{a: 2}", "{a: 4}", "{a: 6}"}, getExpCtx());
-    densify.setSource(source.get());
+    auto stage =
+        exec::agg::MockStage::createForTest({"{a: 1}", "{a: 2}", "{a: 4}", "{a: 6}"}, getExpCtx());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT(next.isAdvanced());
@@ -948,14 +953,15 @@ TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeStar
 
 TEST_F(DensifyExplicitNumericTest,
        CorrectlyDensifiesForPartionedRangeStartingBeforeBoundsRangeWithDocMatchingBoundsStart) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        "$_internalDensify",
         getExpCtx(),
         "b",
         std::list<FieldPath>({"a"}),
         RangeStatement(Value(1), ExplicitBounds(Value(4), Value(8)), boost::none));
-    auto source = DocumentSourceMock::createForTest(
+    auto stage = exec::agg::MockStage::createForTest(
         {"{a: 1, b: 2}", "{a: 1, b: 4}", "{a: 1, b: 6}"}, getExpCtx());
-    densify.setSource(source.get());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT(next.isAdvanced());
@@ -985,14 +991,15 @@ TEST_F(DensifyExplicitNumericTest,
 }
 
 TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForPartionedRangeAcrossTwoPartitions) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        "$_internalDensify",
         getExpCtx(),
         "b",
         std::list<FieldPath>({"a"}),
         RangeStatement(Value(1), ExplicitBounds(Value(0), Value(10)), boost::none));
-    auto source = DocumentSourceMock::createForTest(
+    auto stage = exec::agg::MockStage::createForTest(
         {"{a: 1, b: 2}", "{a: 2, b: 5}", "{a: 1, b: 7}", "{a: 2, b: 9}"}, getExpCtx());
-    densify.setSource(source.get());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT(next.isAdvanced());
@@ -1102,13 +1109,14 @@ TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForPartionedRangeAcrossTwoP
 }
 
 TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeOnlyInsideRange) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        DocumentSourceInternalDensify::kStageName,
         getExpCtx(),
         "a",
         std::list<FieldPath>(),
         RangeStatement(Value(1), ExplicitBounds(Value(0), Value(4)), boost::none));
-    auto source = DocumentSourceMock::createForTest({"{a: 1}"}, getExpCtx());
-    densify.setSource(source.get());
+    auto stage = exec::agg::MockStage::createForTest({"{a: 1}"}, getExpCtx());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT(next.isAdvanced());
@@ -1134,13 +1142,14 @@ TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeOnly
 }
 
 TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeStartingAboveRange) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        DocumentSourceInternalDensify::kStageName,
         getExpCtx(),
         "a",
         std::list<FieldPath>(),
         RangeStatement(Value(1), ExplicitBounds(Value(0), Value(5)), boost::none));
-    auto source = DocumentSourceMock::createForTest({"{a: 6}", "{a: 7}"}, getExpCtx());
-    densify.setSource(source.get());
+    auto stage = exec::agg::MockStage::createForTest({"{a: 6}", "{a: 7}"}, getExpCtx());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT(next.isAdvanced());
@@ -1178,13 +1187,14 @@ TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeStar
 }
 
 TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeStartingInsideOffStep) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        DocumentSourceInternalDensify::kStageName,
         getExpCtx(),
         "a",
         std::list<FieldPath>(),
         RangeStatement(Value(2), ExplicitBounds(Value(0), Value(4)), boost::none));
-    auto source = DocumentSourceMock::createForTest({"{a: 1}", "{a: 6}"}, getExpCtx());
-    densify.setSource(source.get());
+    auto stage = exec::agg::MockStage::createForTest({"{a: 1}", "{a: 6}"}, getExpCtx());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT(next.isAdvanced());
@@ -1211,13 +1221,14 @@ TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeStar
 
 TEST_F(DensifyExplicitNumericTest,
        CorrectlyDensifiesForNumericExplicitRangeStartingInsideWithDupes) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        DocumentSourceInternalDensify::kStageName,
         getExpCtx(),
         "a",
         std::list<FieldPath>(),
         RangeStatement(Value(1), ExplicitBounds(Value(0), Value(4)), boost::none));
-    auto source = DocumentSourceMock::createForTest({"{a: 1}", "{a: 1}", "{a: 6}"}, getExpCtx());
-    densify.setSource(source.get());
+    auto stage = exec::agg::MockStage::createForTest({"{a: 1}", "{a: 1}", "{a: 6}"}, getExpCtx());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT(next.isAdvanced());
@@ -1251,14 +1262,15 @@ TEST_F(DensifyExplicitNumericTest,
 }
 
 TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeWithDupesWithinSource) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        DocumentSourceInternalDensify::kStageName,
         getExpCtx(),
         "a",
         std::list<FieldPath>(),
         RangeStatement(Value(1), ExplicitBounds(Value(0), Value(20)), boost::none));
-    auto source = DocumentSourceMock::createForTest(
+    auto stage = exec::agg::MockStage::createForTest(
         {"{a: 1}", "{a: 7}", "{a: 7}", "{a: 7}", "{a: 15}"}, getExpCtx());
-    densify.setSource(source.get());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT(next.isAdvanced());
@@ -1296,13 +1308,14 @@ TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeWith
 }
 
 TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeAfterHitsEOF) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        DocumentSourceInternalDensify::kStageName,
         getExpCtx(),
         "a",
         std::list<FieldPath>(),
         RangeStatement(Value(1), ExplicitBounds(Value(2), Value(6)), boost::none));
-    auto source = DocumentSourceMock::createForTest({"{a: 0}"}, getExpCtx());
-    densify.setSource(source.get());
+    auto stage = exec::agg::MockStage::createForTest({"{a: 0}"}, getExpCtx());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT(next.isAdvanced());
@@ -1332,13 +1345,14 @@ TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeAfte
 }
 
 TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeWhenFieldIsMissing) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        DocumentSourceInternalDensify::kStageName,
         getExpCtx(),
         "a",
         std::list<FieldPath>(),
         RangeStatement(Value(1), ExplicitBounds(Value(0), Value(5)), boost::none));
-    auto source = DocumentSourceMock::createForTest({"{b: 2}", "{b: 6}", "{a: 1}"}, getExpCtx());
-    densify.setSource(source.get());
+    auto stage = exec::agg::MockStage::createForTest({"{b: 2}", "{b: 6}", "{a: 1}"}, getExpCtx());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT(next.isAdvanced());
@@ -1376,13 +1390,14 @@ TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeWhen
 }
 
 TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeStepLargerThanRange) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        DocumentSourceInternalDensify::kStageName,
         getExpCtx(),
         "a",
         std::list<FieldPath>(),
         RangeStatement(Value(6), ExplicitBounds(Value(0), Value(4)), boost::none));
-    auto source = DocumentSourceMock::createForTest({"{a: 1}", "{a: 6}"}, getExpCtx());
-    densify.setSource(source.get());
+    auto stage = exec::agg::MockStage::createForTest({"{a: 1}", "{a: 6}"}, getExpCtx());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT(next.isAdvanced());
@@ -1404,13 +1419,14 @@ TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeStep
 }
 
 TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeHitEOFNearMax) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        DocumentSourceInternalDensify::kStageName,
         getExpCtx(),
         "a",
         std::list<FieldPath>(),
         RangeStatement(Value(2), ExplicitBounds(Value(0), Value(3)), boost::none));
-    auto source = DocumentSourceMock::createForTest({"{a: 0}", "{a: 2}"}, getExpCtx());
-    densify.setSource(source.get());
+    auto stage = exec::agg::MockStage::createForTest({"{a: 0}", "{a: 2}"}, getExpCtx());
+    densify.setSource(stage.get());
 
     auto next = densify.getNext();
     ASSERT(next.isAdvanced());
@@ -1428,25 +1444,27 @@ TEST_F(DensifyExplicitNumericTest, CorrectlyDensifiesForNumericExplicitRangeHitE
 }
 
 TEST_F(DensifyExplicitNumericTest, DensificationForNumericValuesErrorsIfFieldIsNotNumeric) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        DocumentSourceInternalDensify::kStageName,
         getExpCtx(),
         "a",
         std::list<FieldPath>(),
         RangeStatement(Value(6), ExplicitBounds(Value(0), Value(4)), boost::none));
-    auto source =
-        DocumentSourceMock::createForTest({"{a: \"should be numeric\"}", "{a: 6}"}, getExpCtx());
-    densify.setSource(source.get());
+    auto stage =
+        exec::agg::MockStage::createForTest({"{a: \"should be numeric\"}", "{a: 6}"}, getExpCtx());
+    densify.setSource(stage.get());
     ASSERT_THROWS_CODE(densify.getNext(), AssertionException, 5733201);
 }
 
 TEST_F(DensifyExplicitNumericTest, DensifiesOnImmediateEOFExplictRange) {
-    auto densify = DocumentSourceInternalDensify(
+    auto densify = InternalDensifyStage(
+        DocumentSourceInternalDensify::kStageName,
         getExpCtx(),
         "a",
         std::list<FieldPath>(),
         RangeStatement(Value(1), ExplicitBounds(Value(0), Value(2)), boost::none));
-    auto source = DocumentSourceMock::createForTest({}, getExpCtx());
-    densify.setSource(source.get());
+    auto stage = exec::agg::MockStage::createForTest({}, getExpCtx());
+    densify.setSource(stage.get());
     auto next = densify.getNext();
     ASSERT(next.isAdvanced());
     ASSERT_EQUALS(0, next.getDocument().getField("a").getDouble());
@@ -1458,19 +1476,25 @@ TEST_F(DensifyExplicitNumericTest, DensifiesOnImmediateEOFExplictRange) {
 }
 
 TEST_F(DensifyFullNumericTest, DensifiesOnImmediateEOFExplicitRange) {
-    auto densify = DocumentSourceInternalDensify(
-        getExpCtx(), "a", std::list<FieldPath>(), RangeStatement(Value(3), Full(), boost::none));
-    auto source = DocumentSourceMock::createForTest({}, getExpCtx());
-    densify.setSource(source.get());
+    auto densify = InternalDensifyStage(DocumentSourceInternalDensify::kStageName,
+                                        getExpCtx(),
+                                        "a",
+                                        std::list<FieldPath>(),
+                                        RangeStatement(Value(3), Full(), boost::none));
+    auto stage = exec::agg::MockStage::createForTest({}, getExpCtx());
+    densify.setSource(stage.get());
     auto next = densify.getNext();
     ASSERT_FALSE(next.isAdvanced());
 }
 
 TEST_F(DensifyPartitionNumericTest, DensifiesOnImmediateEOFExplicitRange) {
-    auto densify = DocumentSourceInternalDensify(
-        getExpCtx(), "a", std::list<FieldPath>(), RangeStatement(Value(3), Full(), boost::none));
-    auto source = DocumentSourceMock::createForTest({}, getExpCtx());
-    densify.setSource(source.get());
+    auto densify = InternalDensifyStage(DocumentSourceInternalDensify::kStageName,
+                                        getExpCtx(),
+                                        "a",
+                                        std::list<FieldPath>(),
+                                        RangeStatement(Value(3), Full(), boost::none));
+    auto stage = exec::agg::MockStage::createForTest({}, getExpCtx());
+    densify.setSource(stage.get());
     auto next = densify.getNext();
     ASSERT_FALSE(next.isAdvanced());
 }
@@ -1770,6 +1794,43 @@ TEST_F(DensifyRedactionTest, RangeTimeUnitSerializationDebug) {
             }
         })"),
                                      SerializationOptions::kDebugQueryShapeSerializeOptions);
+}
+
+TEST_F(DensifyMonthStepTest, CorrectlyDensifiesForDateExplicitRangeStartingInsideMonthStep) {
+    // Starting at January 31, with a step of 9 Months, densify steps back initially to April 30th
+    // before starting with generation. This test ensures that when the step is added back we don't
+    // generate January 30th which is outside of the range.
+    auto densify =
+        InternalDensifyStage(DocumentSourceInternalDensify::kStageName,
+                             getExpCtx(),
+                             "a",
+                             std::list<FieldPath>(),
+                             RangeStatement(Value(9),
+                                            ExplicitBounds(makeDate("2019-01-31T21:53:45.323Z"),
+                                                           makeDate("2020-06-02T10:40:15.842Z")),
+                                            TimeUnit::month));
+
+    Document doc{{"a", makeDate("2019-10-01T00:00:00.000Z")}};
+    auto stage = exec::agg::MockStage::createForTest(doc, getExpCtx());
+    densify.setSource(stage.get());
+
+    auto next = densify.getNext();
+    ASSERT(next.isAdvanced());
+    ASSERT_EQUALS(makeDate("2019-01-31T21:53:45.323Z"), next.getDocument().getField("a").getDate());
+
+    next = densify.getNext();
+    ASSERT(next.isAdvanced());
+    ASSERT_EQUALS(makeDate("2019-10-01T00:00:00.000Z"), next.getDocument().getField("a").getDate());
+
+    next = densify.getNext();
+    ASSERT(next.isAdvanced());
+    ASSERT_EQUALS(makeDate("2019-10-31T21:53:45.323Z"), next.getDocument().getField("a").getDate());
+
+    next = densify.getNext();
+    ASSERT_FALSE(next.isAdvanced());
+
+    next = densify.getNext();
+    ASSERT_FALSE(next.isAdvanced());
 }
 }  // namespace
 }  // namespace mongo

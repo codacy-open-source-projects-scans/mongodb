@@ -27,6 +27,27 @@
  *    it in the license file.
  */
 
+#include "mongo/db/matcher/expression_algo.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/json.h"
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/query/collation/collator_interface_mock.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
+#include "mongo/db/query/compiler/parsers/matcher/parsed_match_expression_for_test.h"
+#include "mongo/db/query/compiler/rewrites/matcher/expression_optimizer.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/stdx/unordered_set.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/intrusive_counter.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <initializer_list>
@@ -37,26 +58,6 @@
 
 #include <absl/container/flat_hash_map.h>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status_with.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/json.h"
-#include "mongo/db/matcher/expression.h"
-#include "mongo/db/matcher/expression_algo.h"
-#include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/parsed_match_expression_for_test.h"
-#include "mongo/db/pipeline/dependencies.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/stdx/unordered_set.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/intrusive_counter.h"
 #include <fmt/format.h>
 #include <fmt/ranges.h>
 
@@ -835,6 +836,23 @@ TEST(ExpressionAlgoIsSubsetOf, IsSubsetOfComplexRHSExpression) {
     {
         ParsedMatchExpressionForTest lhs("{x: 1, y: 3}");
         ASSERT_FALSE(expression::isSubsetOf(lhs.get(), complex.get()));
+    }
+}
+
+TEST(ExpressionAlgoIsSubsetOf, IsSubsetOfRHSDisjunction) {
+    ParsedMatchExpressionForTest rhs("{$or: [{a: 1}, {a: {$gt: 20}}]}");
+    {
+        ParsedMatchExpressionForTest lhs("{$or: [{a: 1}, {a: {$gt: 20}}], b: 5}");
+        ASSERT_TRUE(expression::isSubsetOf(lhs.get(), rhs.get()));
+    }
+    {
+        ParsedMatchExpressionForTest lhs("{$or: [{a: 1}, {a: {$gt: 30}}]}");
+        ASSERT_TRUE(expression::isSubsetOf(lhs.get(), rhs.get()));
+    }
+    {
+        // {a: 11, b: 5} is a document which satisfies this predicate but not the rhs.
+        ParsedMatchExpressionForTest lhs("{$or: [{a: 1}, {a: {$gt: 10}}], b: 5}");
+        ASSERT_FALSE(expression::isSubsetOf(lhs.get(), rhs.get()));
     }
 }
 
@@ -2099,99 +2117,186 @@ TEST(IsPathPrefixOf, ComputesPrefixesCorrectly) {
     ASSERT_FALSE(expression::isPathPrefixOf("a.b", "a"));
 }
 
-TEST(hasExistenceOrTypePredicateOnPath, IdentifiesLeavesCorrectly) {
+TEST(hasPredicateOnPaths, IdentifiesLeavesCorrectly) {
     BSONObj matchPredicate = fromjson("{$and: [{a: {$exists: true}}, {b: {$lte: 2}}]}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     auto swMatchExpression = MatchExpressionParser::parse(matchPredicate, std::move(expCtx));
     ASSERT_OK(swMatchExpression.getStatus());
-    ASSERT_TRUE(
-        expression::hasExistenceOrTypePredicateOnPath(*swMatchExpression.getValue().get(), "a"_sd));
-    ASSERT_FALSE(
-        expression::hasExistenceOrTypePredicateOnPath(*swMatchExpression.getValue().get(), "b"_sd));
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::EXISTS, {"a"}));
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::EXISTS, {"b"}));
 }
 
-TEST(hasExistenceOrTypePredicateOnPath, HandlesMultiplePredicatesWithSamePath) {
+TEST(hasPredicateOnPaths, HandlesMultiplePredicatesWithSamePath) {
     BSONObj matchPredicate = fromjson("{$and: [{a: {$gt: 5000}}, {a: {$exists: false}}]}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     auto swMatchExpression = MatchExpressionParser::parse(matchPredicate, std::move(expCtx));
     ASSERT_OK(swMatchExpression.getStatus());
-    ASSERT_TRUE(
-        expression::hasExistenceOrTypePredicateOnPath(*swMatchExpression.getValue().get(), "a"_sd));
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::EXISTS, {"a"}));
 }
 
-TEST(hasExistenceOrTypePredicateOnPath, DeeperTreeTest) {
+TEST(hasPredicateOnPaths, DeeperTreeTest) {
     BSONObj matchPredicate = fromjson(
         "{$and: [{q: {$gt: 5000}}, {$and: [{z: {$lte: 50}},"
         "{$or: [{f : {$gte: 4}}, {a : {$exists : true}}]}]}]}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     auto swMatchExpression = MatchExpressionParser::parse(matchPredicate, std::move(expCtx));
     ASSERT_OK(swMatchExpression.getStatus());
-    ASSERT_TRUE(
-        expression::hasExistenceOrTypePredicateOnPath(*swMatchExpression.getValue().get(), "a"_sd));
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::EXISTS, {"a"}));
 }
 
-TEST(hasExistenceOrTypePredicateOnPath, HandlesDottedPathsInDeepTree) {
+TEST(hasPredicateOnPaths, HandlesDottedPathsInDeepTree) {
     BSONObj matchPredicate = fromjson(
         "{$and: [{q: {$gt: 5000}}, {$and: [{z: {$lte: 50}},"
         "{$or: [{f : {$gte: 4}}, {'a.b.c.d' : {$exists : true}}]}]}]}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     auto swMatchExpression = MatchExpressionParser::parse(matchPredicate, std::move(expCtx));
     ASSERT_OK(swMatchExpression.getStatus());
-    ASSERT_TRUE(expression::hasExistenceOrTypePredicateOnPath(*swMatchExpression.getValue().get(),
-                                                              "a.b.c.d"_sd));
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::EXISTS, {"a.b.c.d"}));
 }
 
-TEST(hasExistenceOrTypePredicateOnPath, ReturnsFalseWhenExistsOnlyOnPrefix) {
+TEST(hasPredicateOnPaths, ReturnsFalseWhenExistsOnlyOnPrefix) {
     BSONObj matchPredicate = fromjson(
         "{$and: [{q: {$gt: 5000}}, {$and: [{z: {$lte: 50}},"
         "{$or: [{f : {$gte: 4}}, {'a' : {$exists : true}}]}]}]}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     auto swMatchExpression = MatchExpressionParser::parse(matchPredicate, std::move(expCtx));
     ASSERT_OK(swMatchExpression.getStatus());
-    ASSERT_FALSE(expression::hasExistenceOrTypePredicateOnPath(*swMatchExpression.getValue().get(),
-                                                               "a.b"_sd));
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::EXISTS, {"a.b"}));
 }
 
-TEST(hasExistenceOrTypePredicateOnPath, ReturnsFalseWhenExistsOnSubpath) {
+TEST(hasPredicateOnPaths, ReturnsTrueWhenExistsOnSubpath) {
     BSONObj matchPredicate = fromjson(
         "{$and: [{q: {$gt: 5000}}, {$and: [{z: {$lte: 50}},"
         "{$or: [{f : {$gte: 4}}, {'a.b' : {$exists : true}}]}]}]}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     auto swMatchExpression = MatchExpressionParser::parse(matchPredicate, std::move(expCtx));
     ASSERT_OK(swMatchExpression.getStatus());
-    ASSERT_FALSE(
-        expression::hasExistenceOrTypePredicateOnPath(*swMatchExpression.getValue().get(), "a"_sd));
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::EXISTS, {"a"}));
 }
 
-TEST(hasExistenceOrTypePredicateOnPath, FindsTypeUsage) {
+TEST(hasPredicateOnPaths, ReturnsTrueWhenTypeOnSubpath) {
+    BSONObj matchPredicate = fromjson(
+        "{$and: [{q: {$gt: 5000}}, {$and: [{z: {$lte: 50}},"
+        "{$or: [{f : {$gte: 4}}, {'a.b' : {$type : 'long'}}]}]}]}");
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    auto swMatchExpression = MatchExpressionParser::parse(matchPredicate, std::move(expCtx));
+    ASSERT_OK(swMatchExpression.getStatus());
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"a"}));
+}
+
+TEST(hasPredicateOnPaths, ReturnsTrueWhenTraversingThroughElemMatchObject) {
+    BSONObj matchPredicate = fromjson("{a: {$elemMatch: {b: 5, c: {$type : 'long'}}}}");
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    auto swMatchExpression = MatchExpressionParser::parse(matchPredicate, std::move(expCtx));
+    ASSERT_OK(swMatchExpression.getStatus());
+
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"a"}));
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"a.c"}));
+
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"b"}));
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"c"}));
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"a.b"}));
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"a.d"}));
+}
+
+TEST(hasPredicateOnPaths, ReturnsTrueWhenTraversingThroughElemMatchValue) {
+    BSONObj matchPredicate = fromjson("{a: {$elemMatch: {$type : 'long'}}}");
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    auto swMatchExpression = MatchExpressionParser::parse(matchPredicate, std::move(expCtx));
+    ASSERT_OK(swMatchExpression.getStatus());
+
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"a"}));
+
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"a.b"}));
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"a."}));
+}
+
+TEST(hasPredicateOnPaths, EmptyFieldTests) {
+    BSONObj matchPredicate = fromjson("{\"\": {$elemMatch: {a: {$type : 'long'}}}}");
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    auto swMatchExpression = MatchExpressionParser::parse(matchPredicate, std::move(expCtx));
+    ASSERT_OK(swMatchExpression.getStatus());
+
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {""}));
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {".a"}));
+
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"a"}));
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"."}));
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {".b"}));
+}
+
+TEST(hasPredicateOnPaths, NestedEmptyFieldTests) {
+    BSONObj matchPredicate = fromjson("{a: {$elemMatch: {\"\": {$type : 'long'}}}}");
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    auto swMatchExpression = MatchExpressionParser::parse(matchPredicate, std::move(expCtx));
+    ASSERT_OK(swMatchExpression.getStatus());
+
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"a"}));
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"a."}));
+
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {""}));
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {".a"}));
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"."}));
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"a.a"}));
+}
+
+TEST(hasPredicateOnPaths, FindsTypeUsage) {
     BSONObj matchPredicate = fromjson("{$and: [{a: {$type: 'string'}}, {b: {$lte: 2}}]}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     auto swMatchExpression = MatchExpressionParser::parse(matchPredicate, std::move(expCtx));
     ASSERT_OK(swMatchExpression.getStatus());
-    ASSERT_TRUE(
-        expression::hasExistenceOrTypePredicateOnPath(*swMatchExpression.getValue().get(), "a"_sd));
-    ASSERT_FALSE(
-        expression::hasExistenceOrTypePredicateOnPath(*swMatchExpression.getValue().get(), "b"_sd));
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"a"}));
+    ASSERT_FALSE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"b"}));
 }
 
-TEST(hasExistenceOrTypePredicateOnPath, IdentifiesBothExistsAndType) {
+TEST(hasPredicateOnPaths, IdentifiesBothExistsAndType) {
     BSONObj matchPredicate = fromjson("{$and: [{a: {$type: 'string'}}, {b: {$exists : true}}]}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     auto swMatchExpression = MatchExpressionParser::parse(matchPredicate, std::move(expCtx));
     ASSERT_OK(swMatchExpression.getStatus());
-    ASSERT_TRUE(
-        expression::hasExistenceOrTypePredicateOnPath(*swMatchExpression.getValue().get(), "a"_sd));
-    ASSERT_TRUE(
-        expression::hasExistenceOrTypePredicateOnPath(*swMatchExpression.getValue().get(), "b"_sd));
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"a"}));
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::EXISTS, {"b"}));
 }
 
-TEST(hasExistenceOrTypePredicateOnPath, FindsTypeInSecondPredicate) {
+TEST(hasPredicateOnPaths, FindsTypeInSecondPredicate) {
     BSONObj matchPredicate = fromjson("{$and: [{a: {$gt: 0}}, {a: {$type: 'long'}}]}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     auto swMatchExpression = MatchExpressionParser::parse(matchPredicate, std::move(expCtx));
     ASSERT_OK(swMatchExpression.getStatus());
-    ASSERT_TRUE(
-        expression::hasExistenceOrTypePredicateOnPath(*swMatchExpression.getValue().get(), "a"_sd));
+    ASSERT_TRUE(expression::hasPredicateOnPaths(
+        *swMatchExpression.getValue().get(), MatchExpression::MatchType::TYPE_OPERATOR, {"a"}));
 }
 
 struct RemoveImprecisePredicateTestCase {
@@ -2220,7 +2325,7 @@ void testRemoveImprecisePredicates(const RemoveImprecisePredicateTestCase& testC
               [&](RemoveImprecisePredicateTestCase::AssertPredicateRewritten a) {
                   ParsedMatchExpressionForTest parsedPred(a.predicateStr);
                   std::unique_ptr<MatchExpression> expected = parsedPred.release();
-                  MatchExpression::sortTree(expected.get());
+                  sortMatchExpressionTree(expected.get());
                   ASSERT(expected->equivalent(newExpr.get()));
               },
           },

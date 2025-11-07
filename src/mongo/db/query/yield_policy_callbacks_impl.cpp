@@ -27,20 +27,21 @@
  *    it in the license file.
  */
 
-#include <string>
-#include <utility>
+#include "mongo/db/query/yield_policy_callbacks_impl.h"
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
-#include "mongo/db/query/yield_policy_callbacks_impl.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/time_support.h"
+
+#include <string>
+#include <utility>
 
 namespace mongo {
 namespace {
@@ -56,11 +57,16 @@ YieldPolicyCallbacksImpl::YieldPolicyCallbacksImpl(NamespaceString nssForFailpoi
 void YieldPolicyCallbacksImpl::duringYield(OperationContext* opCtx) const {
     CurOp::get(opCtx)->yielded();
 
+    _tryLogLongRunningQueries(opCtx);
+
     // If we yielded because we encountered the need to refresh the sharding CatalogCache, refresh
     // it here while the locks are yielded.
     auto& catalogCacheRefreshRequired =
         planExecutorShardingState(opCtx).catalogCacheRefreshRequired;
     if (catalogCacheRefreshRequired) {
+        // We are simply joining the refresh of the routing tables for the affected namespace here
+        // but not performing a routing operation, so this routing table access is not gated behind
+        // a RoutingContext.
         auto catalogCache = Grid::get(opCtx)->catalogCache();
         uassertStatusOK(
             catalogCache->getCollectionRoutingInfo(opCtx, *catalogCacheRefreshRequired));
@@ -94,11 +100,9 @@ void YieldPolicyCallbacksImpl::duringYield(OperationContext* opCtx) const {
         });
 }
 
-void YieldPolicyCallbacksImpl::handledWriteConflict(OperationContext* opCtx) const {
-    CurOp::get(opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
-}
-
 void YieldPolicyCallbacksImpl::preCheckInterruptOnly(OperationContext* opCtx) const {
+    _tryLogLongRunningQueries(opCtx);
+
     // If the 'setInterruptOnlyPlansCheckForInterruptHang' fail point is enabled, set the
     // 'failPointMsg' field of this operation's CurOp to signal that we've hit this point.
     if (MONGO_unlikely(setInterruptOnlyPlansCheckForInterruptHang.shouldFail())) {
@@ -107,6 +111,10 @@ void YieldPolicyCallbacksImpl::preCheckInterruptOnly(OperationContext* opCtx) co
             opCtx,
             "setInterruptOnlyPlansCheckForInterruptHang");
     }
+}
+
+void YieldPolicyCallbacksImpl::_tryLogLongRunningQueries(OperationContext* opCtx) const {
+    CurOp::get(opCtx)->logLongRunningOperationIfNeeded();
 }
 
 }  // namespace mongo

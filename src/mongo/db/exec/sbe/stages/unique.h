@@ -29,19 +29,19 @@
 
 #pragma once
 
-#include <cstddef>
-#include <memory>
-#include <queue>
-#include <vector>
-
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/exec/sbe/values/row.h"
 #include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/query/stage_types.h"
-#include "mongo/stdx/unordered_set.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
+#include "mongo/db/query/util/hash_roaring_set.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <memory>
+#include <vector>
 
 namespace mongo::sbe {
 /**
@@ -86,6 +86,10 @@ protected:
         return true;
     }
 
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {
+        return;
+    }
+
 private:
     const value::SlotVector _keySlots;
 
@@ -96,6 +100,53 @@ private:
                         value::MaterializedRowHasher,
                         value::MaterializedRowEq>
         _seen;
+    size_t _prevSeenSizeBytes = 0;
+    UniqueStats _specificStats;
+};
+
+/**
+ * This stage is the same as UniqueStage functionally but uses roaring bitmap internally. It can
+ * only be used to deduplicate a single integral key.
+ *
+ * Debug string representation:
+ *
+ *   unique_roaring [<key>] childStage
+ */
+class UniqueRoaringStage final : public PlanStage {
+public:
+    UniqueRoaringStage(std::unique_ptr<PlanStage> input,
+                       value::SlotId key,
+                       PlanNodeId planNodeId,
+                       bool participateInTrialRunTracking = true);
+
+    std::unique_ptr<PlanStage> clone() const final;
+
+    void prepare(CompileCtx& ctx) final;
+    value::SlotAccessor* getAccessor(CompileCtx& ctx, value::SlotId slot) final;
+    void open(bool reOpen) final;
+    PlanState getNext() final;
+    void close() final;
+
+    std::unique_ptr<PlanStageStats> getStats(bool includeDebugInfo) const final;
+    const SpecificStats* getSpecificStats() const final;
+    std::vector<DebugPrinter::Block> debugPrint() const final;
+    size_t estimateCompileTimeSize() const final;
+
+protected:
+    bool shouldOptimizeSaveState(size_t) const final {
+        return true;
+    }
+
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {
+        return;
+    }
+
+private:
+    const value::SlotId _keySlot;
+    value::SlotAccessor* _inKeyAccessor = nullptr;
+    HashRoaringSet _seen;
+    size_t _prevSeenSizeBytes = 0;
+
     UniqueStats _specificStats;
 };
 }  // namespace mongo::sbe

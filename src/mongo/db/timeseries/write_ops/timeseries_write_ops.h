@@ -30,47 +30,32 @@
 #pragma once
 
 #include "mongo/db/curop.h"
-#include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
-#include "mongo/db/timeseries/bucket_catalog/write_batch.h"
+#include "mongo/util/modules.h"
+
+MONGO_MOD_PUBLIC;
 
 namespace mongo::timeseries::write_ops {
 
-void assertTimeseriesBucketsCollectionNotFound(const NamespaceString& ns);
-
 /**
- * Returns an InsertCommandReply if the timeseries writes succeeded.
+ * Performs a write to a time-series collection. Returns an InsertCommandReply if the timeseries
+ * writes succeeded.
  */
 mongo::write_ops::InsertCommandReply performTimeseriesWrites(
-    OperationContext* opCtx, const mongo::write_ops::InsertCommandRequest& request);
-
-mongo::write_ops::InsertCommandReply performTimeseriesWrites(
-    OperationContext* opCtx, const mongo::write_ops::InsertCommandRequest& request, CurOp* curOp);
-
-
-namespace details {
-
-/**
- * Returns whether the request can continue.
- */
-bool commitTimeseriesBucket(OperationContext* opCtx,
-                            std::shared_ptr<bucket_catalog::WriteBatch> batch,
-                            size_t start,
-                            size_t index,
-                            std::vector<StmtId>&& stmtIds,
-                            std::vector<mongo::write_ops::WriteError>* errors,
-                            boost::optional<repl::OpTime>* opTime,
-                            boost::optional<OID>* electionId,
-                            std::vector<size_t>* docsToRetry,
-                            absl::flat_hash_map<int, int>& retryAttemptsForDup,
-                            const mongo::write_ops::InsertCommandRequest& request);
-
-Status performAtomicTimeseriesWrites(
     OperationContext* opCtx,
-    const std::vector<mongo::write_ops::InsertCommandRequest>& insertOps,
-    const std::vector<mongo::write_ops::UpdateCommandRequest>& updateOps);
+    const mongo::write_ops::InsertCommandRequest& request,
+    const timeseries::CollectionPreConditions& preConditions,
+    CurOp* curOp);
 
-}  // namespace details
+
+/**
+ * Performs a write to a time-series collection. Returns an InsertCommandReply if the timeseries
+ * writes succeeded. Same as above, but generates its own curOp.
+ */
+mongo::write_ops::InsertCommandReply performTimeseriesWrites(
+    OperationContext* opCtx,
+    const mongo::write_ops::InsertCommandRequest& request,
+    const timeseries::CollectionPreConditions& preConditions);
 
 }  // namespace mongo::timeseries::write_ops

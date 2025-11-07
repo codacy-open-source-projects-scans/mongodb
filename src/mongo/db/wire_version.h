@@ -29,19 +29,21 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <memory>
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/version/releases.h"
 
-namespace mongo {
+#include <memory>
+#include <string>
+
+#include <boost/optional.hpp>
+
+namespace MONGO_MOD_PUBLIC mongo {
 
 /**
  * The 'WireVersion' captures all "protocol events" the write protocol went through.  A
@@ -173,15 +175,14 @@ public:
         bool isInternalClient = false;
 
         static void appendToBSON(const Specification& spec, BSONObjBuilder* bob) {
-            auto appendWireVersion = [bob](std::string tag,
-                                           const WireVersionInfo& wireVersionInfo) {
+            auto appendWireVersion = [bob](StringData tag, const WireVersionInfo& wireVersionInfo) {
                 BSONObjBuilder builder = bob->subobjStart(tag);
                 WireVersionInfo::appendToBSON(wireVersionInfo, &builder);
             };
 
-            appendWireVersion("incomingExternalClient", spec.incomingExternalClient);
-            appendWireVersion("incomingInternalClient", spec.incomingInternalClient);
-            appendWireVersion("outgoing", spec.outgoing);
+            appendWireVersion("incomingExternalClient"_sd, spec.incomingExternalClient);
+            appendWireVersion("incomingInternalClient"_sd, spec.incomingInternalClient);
+            appendWireVersion("outgoing"_sd, spec.outgoing);
 
             bob->append("isInternalClient", spec.isInternalClient);
         }
@@ -214,10 +215,12 @@ public:
     // Calling `get()` on uninitialized instances of `WireSpec` is an invariant failure.
     std::shared_ptr<const Specification> get();
 
-    // Do not call this, it requires the caller to hold the lock on _spec.
-    bool isInitialized() const {
-        return _spec ? true : false;
-    }
+    // These getters allow direct access to fields in `WireSpec::Specification.`
+    // Calling these getters on uninitialized instances of `WireSpec` is an invariant failure.
+    WireVersionInfo getIncomingExternalClient() const;
+    WireVersionInfo getIncomingInternalClient() const;
+    WireVersionInfo getOutgoing() const;
+    bool isInternalClient() const;
 
 private:
     // Ensures concurrent accesses to `get()`, `appendInternalClientWireVersionIfNeeded()`, and
@@ -225,6 +228,10 @@ private:
     mutable stdx::mutex _mutex;
 
     std::shared_ptr<const Specification> _spec;
+
+    bool isInitialized() const {
+        return !!_spec;
+    }
 };
 
 namespace wire_version {
@@ -241,4 +248,4 @@ Status validateWireVersion(WireVersionInfo client, WireVersionInfo server);
 StatusWith<WireVersionInfo> parseWireVersionFromHelloReply(const BSONObj& helloReply);
 
 }  // namespace wire_version
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

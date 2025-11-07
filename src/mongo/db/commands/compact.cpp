@@ -27,11 +27,6 @@
  *    it in the license file.
  */
 
-#include <absl/container/btree_set.h>
-#include <cstdint>
-#include <iosfwd>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -41,13 +36,13 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_compact.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/compact_gen.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_compact.h"
+#include "mongo/db/local_catalog/db_raii.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/profile_settings.h"
@@ -56,6 +51,12 @@
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstdint>
+#include <iosfwd>
+#include <string>
+
+#include <absl/container/btree_set.h>
 
 namespace mongo {
 
@@ -119,7 +120,7 @@ public:
             : SerializationContext::stateCommandRequest();
 
         auto params =
-            CompactCommand::parse(IDLParserContext("compact", vts, dbName.tenantId(), sc), cmdObj);
+            CompactCommand::parse(cmdObj, IDLParserContext("compact", vts, dbName.tenantId(), sc));
 
         _assertCanRunCompact(opCtx, params);
 
@@ -133,14 +134,20 @@ public:
         auto collectionCatalog = CollectionCatalog::get(opCtx);
 
         CollectionPtr collection = [&]() {
-            if (CollectionPtr collection = CollectionPtr(
+            // Here and below, using the UNSAFE API is not a problem:
+            // - The catalog snapshot is held open.
+            // - Failures to locate the on-disk collection are handled at the storage-engine layer.
+            // - We are unable to use the safe APIs (establishConsistentCollection or
+            //   AcquireCollection) since the storage snapshot is abandoned at the storage-engine
+            //   layer as part of running compact.
+            if (CollectionPtr collection = CollectionPtr::CollectionPtr_UNSAFE(
                     collectionCatalog->lookupCollectionByNamespace(opCtx, collectionNss))) {
                 return collection;
             }
 
             // Check if this is a time-series collection.
             auto bucketsNs = collectionNss.makeTimeseriesBucketsNamespace();
-            if (CollectionPtr collection = CollectionPtr(
+            if (CollectionPtr collection = CollectionPtr::CollectionPtr_UNSAFE(
                     collectionCatalog->lookupCollectionByNamespace(opCtx, bucketsNs))) {
                 return collection;
             }
@@ -213,8 +220,7 @@ private:
 
         uassert(ErrorCodes::IllegalOperation,
                 "Compact command with extra options requires its feature flag to be enabled",
-                gFeatureFlagCompactOptions.isEnabled(
-                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) ||
+                gFeatureFlagCompactOptions.isEnabled() ||
                     (!params.getFreeSpaceTargetMB() && !params.getDryRun()));
     }
 };

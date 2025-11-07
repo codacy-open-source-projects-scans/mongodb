@@ -28,17 +28,7 @@
  */
 
 
-#include <algorithm>
-#include <cmath>
-#include <iterator>
-#include <s2cellid.h>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/document_source_geo_near.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -52,21 +42,31 @@
 #include "mongo/db/geo/shapes.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_geo.h"
-#include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/pipeline/document_source_geo_near.h"
 #include "mongo/db/pipeline/document_source_internal_compute_geo_near_distance.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/expression.h"
-#include "mongo/db/pipeline/expression_dependencies.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/allowed_contexts.h"
-#include "mongo/db/query/sort_pattern.h"
+#include "mongo/db/query/compiler/dependency_analysis/expression_dependencies.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_geo_parser.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
+
+#include <algorithm>
+#include <cmath>
+#include <iterator>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <s2cellid.h>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -81,6 +81,7 @@ REGISTER_DOCUMENT_SOURCE(geoNear,
                          LiteParsedDocumentSourceDefault::parse,
                          DocumentSourceGeoNear::createFromBson,
                          AllowedWithApiStrict::kAlways);
+ALLOCATE_DOCUMENT_SOURCE_ID(geoNear, DocumentSourceGeoNear::id)
 
 Value DocumentSourceGeoNear::serialize(const SerializationOptions& opts) const {
     MutableDocument result;
@@ -88,7 +89,6 @@ Value DocumentSourceGeoNear::serialize(const SerializationOptions& opts) const {
     if (keyFieldPath) {
         result.setField(kKeyFieldName, Value(opts.serializeFieldPath(*keyFieldPath)));
     }
-
 
     // Serialize the expression as a literal if possible
     auto serializeExpr = [&](boost::intrusive_ptr<Expression> expr) -> Value {
@@ -112,7 +112,10 @@ Value DocumentSourceGeoNear::serialize(const SerializationOptions& opts) const {
         result.setField("minDistance", serializeExpr(minDistance));
     }
 
-    result.setField("query", query ? Value(query->getMatchExpression()->serialize(opts)) : Value());
+    // When the query is missing, we serialize to an empty document here (instead of omitting) in
+    // order to maintain stability of the query shape hash for this stage. See SERVER-104645.
+    result.setField("query",
+                    query ? Value(query->getMatchExpression()->serialize(opts)) : Value{BSONObj{}});
     result.setField("spherical", opts.serializeLiteral(spherical));
     if (distanceMultiplier) {
         result.setField("distanceMultiplier", opts.serializeLiteral(*distanceMultiplier));
@@ -135,8 +138,8 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceGeoNear::optimize() {
     return this;
 }
 
-Pipeline::SourceContainer::iterator DocumentSourceGeoNear::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator DocumentSourceGeoNear::doOptimizeAt(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
 
     // Currently this is the only rewrite.
     itr = splitForTimeseries(itr, container);
@@ -144,9 +147,9 @@ Pipeline::SourceContainer::iterator DocumentSourceGeoNear::doOptimizeAt(
     return itr;
 }
 
-Pipeline::SourceContainer::iterator DocumentSourceGeoNear::splitForTimeseries(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
-    invariant(*itr == this);
+DocumentSourceContainer::iterator DocumentSourceGeoNear::splitForTimeseries(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
+    tassert(9911904, "", *itr == this);
 
     // Only do this rewrite if we are immediately following an $_internalUnpackBucket stage.
     if (container->begin() == itr ||
@@ -206,7 +209,7 @@ Pipeline::SourceContainer::iterator DocumentSourceGeoNear::splitForTimeseries(
     // asNearQuery() is something like '{fieldName: {$near: ...}}'.
     // GeoNearExpression seems to want something like '{$near: ...}'.
     auto nearQuery = asNearQuery(keyFieldPath->fullPath()).firstElement().Obj().getOwned();
-    auto exprStatus = nearExpr.parseFrom(nearQuery);
+    auto exprStatus = parsers::matcher::parseGeoNearExpressionFromBSON(nearQuery, nearExpr);
     uassert(6330900,
             str::stream() << "Unable to parse geoNear query: " << exprStatus.reason(),
             exprStatus.isOK());
@@ -214,7 +217,7 @@ Pipeline::SourceContainer::iterator DocumentSourceGeoNear::splitForTimeseries(
             "Unexpected GeoNearExpression field name after asNearQuery(): "_sd + nearExpr.field,
             nearExpr.field == ""_sd);
 
-    Pipeline::SourceContainer replacement;
+    DocumentSourceContainer replacement;
     // 1. $geoWithin maxDistance
     //    We always include a $geoWithin predicate, even if maxDistance covers the entire space,
     //    because it takes care of excluding documents that don't have the geo field we're querying.
@@ -237,7 +240,7 @@ Pipeline::SourceContainer::iterator DocumentSourceGeoNear::splitForTimeseries(
                  << BSON("$geoWithin"
                          << BSON("$centerSphere" << BSON_ARRAY(
                                      BSON_ARRAY(x << y) << radiusRadians(nearExpr.maxDistance))))),
-            pExpCtx));
+            getExpCtx()));
 
         if (minDistance) {
             // Also include an inside-out $geoWithin. This query is imprecise due to rounding error,
@@ -251,7 +254,7 @@ Pipeline::SourceContainer::iterator DocumentSourceGeoNear::splitForTimeseries(
                          << BSON("$geoWithin" << BSON("$centerSphere" << BSON_ARRAY(
                                                           BSON_ARRAY(antipodalX << antipodalY)
                                                           << insideOutRadiusRadians)))),
-                    pExpCtx));
+                    getExpCtx()));
             }
         }
     } else if (nearExpr.centroid->crs == FLAT) {
@@ -265,7 +268,7 @@ Pipeline::SourceContainer::iterator DocumentSourceGeoNear::splitForTimeseries(
             BSON(keyFieldPath->fullPath()
                  << BSON("$geoWithin" << BSON(
                              "$center" << BSON_ARRAY(BSON_ARRAY(x << y) << nearExpr.maxDistance)))),
-            pExpCtx));
+            getExpCtx()));
 
         if (std::isnormal(nearExpr.minDistance)) {
             // $geoWithin includes its boundary, so a negated $geoWithin excludes the boundary.
@@ -282,7 +285,7 @@ Pipeline::SourceContainer::iterator DocumentSourceGeoNear::splitForTimeseries(
                 BSON(keyFieldPath->fullPath() << BSON(
                          "$not" << BSON("$geoWithin" << BSON("$center" << BSON_ARRAY(
                                                                  BSON_ARRAY(x << y) << radius))))),
-                pExpCtx));
+                getExpCtx()));
         }
     } else {
         tasserted(5860203, "Expected coordinate system to be either SPHERE or FLAT.");
@@ -298,11 +301,10 @@ Pipeline::SourceContainer::iterator DocumentSourceGeoNear::splitForTimeseries(
         }
 
         auto coords = nearExpr.centroid->crs == SPHERE
-            ? BSON("near" << BSON("type"
-                                  << "Point"
-                                  << "coordinates"
-                                  << BSON_ARRAY(nearExpr.centroid->oldPoint.x
-                                                << nearExpr.centroid->oldPoint.y)))
+            ? BSON("near" << BSON("type" << "Point"
+                                         << "coordinates"
+                                         << BSON_ARRAY(nearExpr.centroid->oldPoint.x
+                                                       << nearExpr.centroid->oldPoint.y)))
             : BSON("near" << BSON_ARRAY(nearExpr.centroid->oldPoint.x
                                         << nearExpr.centroid->oldPoint.y));
         tassert(5860220, "", coords.firstElement().isABSONObj());
@@ -312,7 +314,7 @@ Pipeline::SourceContainer::iterator DocumentSourceGeoNear::splitForTimeseries(
                     .withContext("parsing centroid for $geoNear time-series rewrite"));
 
         replacement.push_back(make_intrusive<DocumentSourceInternalGeoNearDistance>(
-            pExpCtx,
+            getExpCtx(),
             keyFieldPath->fullPath(),
             std::move(centroid),
             coords.firstElement().Obj().getOwned(),
@@ -327,7 +329,7 @@ Pipeline::SourceContainer::iterator DocumentSourceGeoNear::splitForTimeseries(
             BSON(distanceField->fullPath()
                  << BSON("$gte" << nearExpr.minDistance *
                              (distanceMultiplier ? *distanceMultiplier : 1.0))),
-            pExpCtx));
+            getExpCtx()));
     }
     if (maxDistance) {
         // 'maxDistance' does not take 'distanceMultiplier' into account.
@@ -335,13 +337,13 @@ Pipeline::SourceContainer::iterator DocumentSourceGeoNear::splitForTimeseries(
             BSON(distanceField->fullPath()
                  << BSON("$lte" << nearExpr.maxDistance *
                              (distanceMultiplier ? *distanceMultiplier : 1.0))),
-            pExpCtx));
+            getExpCtx()));
     }
 
     // 4. $sort by geo distance.
     {
         // {$sort: {dist: 1}}
-        replacement.push_back(DocumentSourceSort::create(pExpCtx,
+        replacement.push_back(DocumentSourceSort::create(getExpCtx(),
                                                          SortPattern({
                                                              {true, *distanceField, nullptr},
                                                          })));
@@ -350,8 +352,8 @@ Pipeline::SourceContainer::iterator DocumentSourceGeoNear::splitForTimeseries(
     LOGV2_DEBUG(5860209,
                 5,
                 "$geoNear splitForTimeseries",
-                "pipeline"_attr = Pipeline::serializeContainer(*container),
-                "replacement"_attr = Pipeline::serializeContainer(replacement));
+                "pipeline"_attr = Pipeline::serializeContainerForLogging(*container),
+                "replacement"_attr = Pipeline::serializeContainerForLogging(replacement));
 
     auto prev = std::prev(itr);
     std::move(replacement.begin(), replacement.end(), std::inserter(*container, itr));
@@ -379,8 +381,6 @@ bool DocumentSourceGeoNear::hasQuery() const {
 void DocumentSourceGeoNear::parseOptions(BSONObj options,
                                          const boost::intrusive_ptr<ExpressionContext>& pCtx) {
 
-    const std::string nearStr = "near";
-    const std::string distanceFieldStr = "distanceField";
     // First, check for explicitly-disallowed fields.
 
     // The old geoNear command used to accept a collation. We explicitly ban it here, since the
@@ -400,18 +400,18 @@ void DocumentSourceGeoNear::parseOptions(BSONObj options,
     uassert(50856, "$geoNear no longer supports the 'start' argument.", !options["start"]);
 
     // The "near" parameter is required.
-    uassert(5860400, "$geoNear requires a 'near' argument", options[nearStr]);
+    uassert(5860400, "$geoNear requires a 'near' argument", options[kNearFieldName]);
 
     // go through all the fields
     for (auto&& argument : options) {
         const auto argName = argument.fieldNameStringData();
-        if (argName == nearStr) {
+        if (argName == kNearFieldName) {
             _nearGeometry =
                 Expression::parseOperand(pCtx.get(), argument, pCtx->variablesParseState);
-        } else if (argName == distanceFieldStr) {
+        } else if (argName == kDistanceFieldFieldName) {
             uassert(16606,
                     "$geoNear requires that the 'distanceField' option is a String",
-                    argument.type() == String);
+                    argument.type() == BSONType::string);
             distanceField = FieldPath(argument.str());
         } else if (argName == "maxDistance") {
             maxDistance = Expression::parseOperand(pCtx.get(), argument, pCtx->variablesParseState);
@@ -428,17 +428,17 @@ void DocumentSourceGeoNear::parseOptions(BSONObj options,
         } else if (argName == "query") {
             uassert(ErrorCodes::TypeMismatch,
                     "query must be an object",
-                    argument.type() == BSONType::Object);
+                    argument.type() == BSONType::object);
             auto queryObj = argument.embeddedObject();
             if (!queryObj.isEmpty()) {
-                query = std::make_unique<Matcher>(queryObj.getOwned(), pExpCtx);
+                query = std::make_unique<Matcher>(queryObj.getOwned(), getExpCtx());
             }
         } else if (argName == "spherical") {
             spherical = argument.trueValue();
-        } else if (argName == "includeLocs") {
+        } else if (argName == kIncludeLocsFieldName) {
             uassert(16607,
                     "$geoNear requires that 'includeLocs' option is a String",
-                    argument.type() == String);
+                    argument.type() == BSONType::string);
             includeLocs = FieldPath(argument.str());
         } else if (argName == "uniqueDocs") {
             LOGV2_WARNING(23758,
@@ -448,7 +448,7 @@ void DocumentSourceGeoNear::parseOptions(BSONObj options,
                     str::stream() << "$geoNear parameter '" << DocumentSourceGeoNear::kKeyFieldName
                                   << "' must be of type string but found type: "
                                   << typeName(argument.type()),
-                    argument.type() == BSONType::String);
+                    argument.type() == BSONType::string);
             const auto keyFieldStr = argument.valueStringData();
             uassert(ErrorCodes::BadValue,
                     str::stream() << "$geoNear parameter '" << DocumentSourceGeoNear::kKeyFieldName
@@ -529,8 +529,18 @@ DepsTracker::State DocumentSourceGeoNear::getDependencies(DepsTracker* deps) con
     // produced by this stage, and we could inform the query system that it need not include it in
     // its response. For now, assume that we require the entire document as well as the appropriate
     // geoNear metadata.
-    deps->setNeedsMetadata(DocumentMetadataFields::kGeoNearDist, true);
-    deps->setNeedsMetadata(DocumentMetadataFields::kGeoNearPoint, needsGeoNearPoint());
+
+    // This may look confusing, but we must call two setters on the DepsTracker for different
+    // purposes. We mark the fields as available metadata that can be consumed by any
+    // downstream stage for $meta field validation. We also also mark that this stage does
+    // require the meta fields so that the executor knows to produce the metadata.
+    // TODO SERVER-100902 Split $meta validation out of dependency tracking.
+    deps->setMetadataAvailable(DocumentMetadataFields::kGeoNearDist);
+    deps->setNeedsMetadata(DocumentMetadataFields::kGeoNearDist);
+    if (needsGeoNearPoint()) {
+        deps->setMetadataAvailable(DocumentMetadataFields::kGeoNearPoint);
+        deps->setNeedsMetadata(DocumentMetadataFields::kGeoNearPoint);
+    }
 
     deps->needWholeDocument = true;
     return DepsTracker::State::EXHAUSTIVE_FIELDS;

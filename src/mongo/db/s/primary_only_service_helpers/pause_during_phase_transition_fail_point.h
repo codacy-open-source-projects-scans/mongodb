@@ -30,8 +30,9 @@
 #pragma once
 
 #include "mongo/db/s/primary_only_service_helpers/phase_transition_progress_gen.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+namespace MONGO_MOD_PUB mongo {
 
 namespace primary_only_service_helpers {
 
@@ -79,7 +80,7 @@ private:
     boost::optional<PhaseTransitionProgressEnum> _readProgressArgument(const BSONObj& data) {
         auto arg = data.getStringField("progress");
         IDLParserContext ctx("PauseDuringPhaseTransitionFailPoint::readProgressArgument");
-        return PhaseTransitionProgress_parse(ctx, arg);
+        return PhaseTransitionProgress_parse(arg, ctx);
     }
 
     boost::optional<Phase> _readPhaseArgument(const BSONObj& data) {
@@ -110,4 +111,4 @@ private:
 };
 }  // namespace primary_only_service_helpers
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

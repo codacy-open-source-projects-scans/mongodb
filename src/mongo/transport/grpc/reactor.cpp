@@ -27,10 +27,16 @@
  *    it in the license file.
  */
 
-#include <grpcpp/support/time.h>
+#include "mongo/transport/grpc/reactor.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/transport/grpc/reactor.h"
+#include "mongo/logv2/log.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/util/future_util.h"
+
+#include <grpcpp/support/time.h>
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
 namespace mongo::transport::grpc {
 
@@ -53,7 +59,7 @@ Future<void> GRPCReactorTimer::waitUntil(Date_t deadline, const BatonHandle& bat
     return reactor->_setAlarm(_alarm, ::grpc::TimePoint(deadline.toSystemTimePoint()).raw_time());
 };
 
-void GRPCReactor::run() noexcept {
+void GRPCReactor::run() {
     ThreadIdGuard threadIdGuard(this);
     void* tag;
     bool ok = false;
@@ -98,6 +104,8 @@ void GRPCReactor::drain() {
     while (_cq.Next(&tag, &ok)) {
         _processCompletionQueueNotification(tag, ok);
     }
+
+    stdx::lock_guard lk(_taskMutex);
     invariant(_cqTaskStash.size() == 0, "GRPCReactor did not properly drain all tasks");
 }
 

@@ -27,15 +27,16 @@
  *    it in the license file.
  */
 
-#include <memory>
-
-#include <boost/optional/optional.hpp>
-
-#include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/db/stats/counters_sort.h"
 #include "mongo/platform/atomic_word.h"
+
+#include <memory>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -103,9 +104,8 @@ struct InShard : InBoth {
 
     void recordWriteConflicts(OperationContext* opCtx) {
         auto* curOp = CurOp::get(opCtx);
-        auto& debug = curOp->debug();
-        auto& am = debug.additiveMetrics;
-        incrCounter(writeConflicts, am.writeConflicts);
+        const auto& sm = curOp->getOperationStorageMetrics();
+        incrCounter(writeConflicts, sm.writeConflicts);
     }
 
     void record(OperationContext* opCtx) {
@@ -120,7 +120,16 @@ struct InShard : InBoth {
         incrCounter(scanned, am.keysExamined);
         incrCounter(scannedObjects, am.docsExamined);
         incrCounter(scanAndOrder, am.hasSortStage);
-        incrCounter(writeConflicts, am.writeConflicts);
+        // Increment oplog metrics if the current request is a change stream or replication request.
+        if (debug.isChangeStreamQuery || debug.isReplOplogGetMore) {
+            incrCounter(oplogReturned, am.nreturned);
+            incrCounter(oplogScannedObjects, am.docsExamined);
+        }
+        // Write Conflicts is recorded at Operation level, not individual CurOp stash,
+        // so we only increment the counters if we are the top level.
+        if (curOp->isTop()) {
+            recordWriteConflicts(opCtx);
+        }
 
         _updateExternalStats(opCtx);
     }
@@ -130,8 +139,10 @@ private:
     static void _updateExternalStats(const OperationContext* opCtx) {
         auto* curOp = CurOp::get(opCtx);
         auto& debug = curOp->debug();
-        lookupPushdownCounters.incrementLookupCountersPerQuery(
-            debug.nestedLoopJoin, debug.indexedLoopJoin, debug.hashLookup);
+        lookupPushdownCounters.incrementLookupCountersPerQuery(debug.nestedLoopJoin,
+                                                               debug.indexedLoopJoin,
+                                                               debug.hashLookup,
+                                                               debug.dynamicIndexedLoopJoin);
         sortCounters.incrementSortCountersPerQuery(debug.sortTotalDataSizeBytes, debug.keysSorted);
         queryFrameworkCounters.incrementQueryEngineCounters(curOp);
     }
@@ -145,6 +156,8 @@ public:
     Counter64* scannedObjects{makeCounter("queryExecutor.scannedObjects", role)};
     Counter64* scanAndOrder{makeCounter("operation.scanAndOrder", role)};
     Counter64* writeConflicts{makeCounter("operation.writeConflicts", role)};
+    Counter64* oplogReturned{makeCounter("oplogStats.document.returned", role)};
+    Counter64* oplogScannedObjects{makeCounter("oplogStats.queryExecutor.scannedObjects", role)};
 };
 
 /** Counters that are in the router service (currently none). */

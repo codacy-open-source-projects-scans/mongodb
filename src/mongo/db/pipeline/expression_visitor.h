@@ -29,10 +29,8 @@
 
 #pragma once
 
-#include "mongo/db/pipeline/expression.h"
-#include "mongo/platform/basic.h"
-
 #include "mongo/db/pipeline/expression_walker.h"
+#include "mongo/util/modules.h"
 
 namespace ExpressionTests {
 class Testable;
@@ -55,7 +53,6 @@ class ExpressionObjectToArray;
 class ExpressionArrayToObject;
 class ExpressionBsonSize;
 class ExpressionCeil;
-class ExpressionCoerceToBool;
 class ExpressionCompare;
 class ExpressionConcat;
 class ExpressionConcatArrays;
@@ -104,13 +101,21 @@ class ExpressionSetEquals;
 class ExpressionSetIntersection;
 class ExpressionSetIsSubset;
 class ExpressionSetUnion;
+class ExpressionSimilarityDotProduct;
+class ExpressionSimilarityCosine;
+class ExpressionSimilarityEuclidean;
 class ExpressionSize;
 class ExpressionReverseArray;
 class ExpressionSortArray;
+class ExpressionTopN;
+class ExpressionTop;
+class ExpressionBottomN;
+class ExpressionBottom;
 class ExpressionSlice;
 class ExpressionIsArray;
 class ExpressionInternalFindAllValuesAtPath;
 class ExpressionRandom;
+class ExpressionCurrentDate;
 class ExpressionRound;
 class ExpressionSecond;
 class ExpressionSplit;
@@ -122,6 +127,7 @@ class ExpressionStrLenBytes;
 class ExpressionBinarySize;
 class ExpressionStrLenCP;
 class ExpressionSubtract;
+class ExpressionSubtype;
 class ExpressionSwitch;
 class ExpressionTestApiVersion;
 class ExpressionToLower;
@@ -157,6 +163,7 @@ class ExpressionInternalFindPositional;
 class ExpressionInternalFindElemMatch;
 class ExpressionInternalFLEBetween;
 class ExpressionInternalFLEEqual;
+class ExpressionInternalRawSortKey;
 class ExpressionInternalIndexKey;
 class ExpressionInternalJsEmit;
 class ExpressionInternalOwningShard;
@@ -173,6 +180,14 @@ class ExpressionBitAnd;
 class ExpressionBitOr;
 class ExpressionBitXor;
 class ExpressionInternalKeyStringValue;
+class ExpressionCreateUUID;
+class ExpressionEncStrStartsWith;
+class ExpressionEncStrEndsWith;
+class ExpressionEncStrContains;
+class ExpressionEncStrNormalizedEq;
+class ExpressionCreateObjectId;
+class ExpressionTestFeatureFlagLatest;
+class ExpressionTestFeatureFlagLastLTS;
 
 class AccumulatorAvg;
 class AccumulatorFirstN;
@@ -238,7 +253,6 @@ public:
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionArrayToObject>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionBsonSize>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionCeil>) = 0;
-    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionCoerceToBool>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionCompare>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionConcat>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionConcatArrays>) = 0;
@@ -266,6 +280,11 @@ public:
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionLog10>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionInternalFLEBetween>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionInternalFLEEqual>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionEncStrStartsWith>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionEncStrEndsWith>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionEncStrContains>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionEncStrNormalizedEq>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionInternalRawSortKey>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionMap>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionMeta>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionMod>) = 0;
@@ -283,14 +302,24 @@ public:
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSetIntersection>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSetIsSubset>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSetUnion>) = 0;
+    virtual void visit(
+        expression_walker::MaybeConstPtr<IsConst, ExpressionSimilarityDotProduct>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSimilarityCosine>) = 0;
+    virtual void visit(
+        expression_walker::MaybeConstPtr<IsConst, ExpressionSimilarityEuclidean>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSize>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionReverseArray>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSortArray>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionTopN>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionTop>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionBottomN>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionBottom>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSlice>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionIsArray>) = 0;
     virtual void visit(
         expression_walker::MaybeConstPtr<IsConst, ExpressionInternalFindAllValuesAtPath>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionRandom>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionCurrentDate>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionRound>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSplit>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSqrt>) = 0;
@@ -301,6 +330,7 @@ public:
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionBinarySize>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionStrLenCP>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSubtract>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSubtype>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionSwitch>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionToLower>) = 0;
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionToUpper>) = 0;
@@ -395,6 +425,12 @@ public:
     virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionInternalIndexKey>) = 0;
     virtual void visit(
         expression_walker::MaybeConstPtr<IsConst, ExpressionInternalKeyStringValue>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionCreateUUID>) = 0;
+    virtual void visit(expression_walker::MaybeConstPtr<IsConst, ExpressionCreateObjectId>) = 0;
+    virtual void visit(
+        expression_walker::MaybeConstPtr<IsConst, ExpressionTestFeatureFlagLatest>) = 0;
+    virtual void visit(
+        expression_walker::MaybeConstPtr<IsConst, ExpressionTestFeatureFlagLastLTS>) = 0;
 };
 
 using ExpressionMutableVisitor = ExpressionVisitor<false>;
@@ -434,7 +470,6 @@ struct SelectiveConstExpressionVisitorBase : public ExpressionConstVisitor {
     void visit(const ExpressionArrayToObject*) override {}
     void visit(const ExpressionBsonSize*) override {}
     void visit(const ExpressionCeil*) override {}
-    void visit(const ExpressionCoerceToBool*) override {}
     void visit(const ExpressionCompare*) override {}
     void visit(const ExpressionConcat*) override {}
     void visit(const ExpressionConcatArrays*) override {}
@@ -462,6 +497,11 @@ struct SelectiveConstExpressionVisitorBase : public ExpressionConstVisitor {
     void visit(const ExpressionLog10*) override {}
     void visit(const ExpressionInternalFLEBetween*) override {}
     void visit(const ExpressionInternalFLEEqual*) override {}
+    void visit(const ExpressionEncStrStartsWith*) override {}
+    void visit(const ExpressionEncStrEndsWith*) override {}
+    void visit(const ExpressionEncStrContains*) override {}
+    void visit(const ExpressionEncStrNormalizedEq*) override {}
+    void visit(const ExpressionInternalRawSortKey*) override {}
     void visit(const ExpressionMap*) override {}
     void visit(const ExpressionMeta*) override {}
     void visit(const ExpressionMod*) override {}
@@ -479,9 +519,16 @@ struct SelectiveConstExpressionVisitorBase : public ExpressionConstVisitor {
     void visit(const ExpressionSetIntersection*) override {}
     void visit(const ExpressionSetIsSubset*) override {}
     void visit(const ExpressionSetUnion*) override {}
+    void visit(const ExpressionSimilarityDotProduct*) override {}
+    void visit(const ExpressionSimilarityCosine*) override {}
+    void visit(const ExpressionSimilarityEuclidean*) override {}
     void visit(const ExpressionSize*) override {}
     void visit(const ExpressionReverseArray*) override {}
     void visit(const ExpressionSortArray*) override {}
+    void visit(const ExpressionTopN*) override {}
+    void visit(const ExpressionTop*) override {}
+    void visit(const ExpressionBottomN*) override {}
+    void visit(const ExpressionBottom*) override {}
     void visit(const ExpressionSlice*) override {}
     void visit(const ExpressionIsArray*) override {}
     void visit(const ExpressionInternalFindAllValuesAtPath*) override {}
@@ -495,6 +542,7 @@ struct SelectiveConstExpressionVisitorBase : public ExpressionConstVisitor {
     void visit(const ExpressionBinarySize*) override {}
     void visit(const ExpressionStrLenCP*) override {}
     void visit(const ExpressionSubtract*) override {}
+    void visit(const ExpressionSubtype*) override {}
     void visit(const ExpressionSwitch*) override {}
     void visit(const ExpressionTestApiVersion*) override {}
     void visit(const ExpressionToLower*) override {}
@@ -555,6 +603,7 @@ struct SelectiveConstExpressionVisitorBase : public ExpressionConstVisitor {
     void visit(const ExpressionInternalFindElemMatch*) override {}
     void visit(const ExpressionFunction*) override {}
     void visit(const ExpressionRandom*) override {}
+    void visit(const ExpressionCurrentDate*) override {}
     void visit(const ExpressionToHashedIndexKey*) override {}
     void visit(const ExpressionDateAdd*) override {}
     void visit(const ExpressionDateSubtract*) override {}
@@ -565,5 +614,9 @@ struct SelectiveConstExpressionVisitorBase : public ExpressionConstVisitor {
     void visit(const ExpressionInternalOwningShard*) override {}
     void visit(const ExpressionInternalIndexKey*) override {}
     void visit(const ExpressionInternalKeyStringValue*) override {}
+    void visit(const ExpressionCreateUUID*) override {}
+    void visit(const ExpressionCreateObjectId*) override {}
+    void visit(const ExpressionTestFeatureFlagLatest*) override {}
+    void visit(const ExpressionTestFeatureFlagLastLTS*) override {}
 };
 }  // namespace mongo

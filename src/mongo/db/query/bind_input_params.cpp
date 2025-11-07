@@ -29,18 +29,6 @@
 
 #include "mongo/db/query/bind_input_params.h"
 
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <utility>
-#include <variant>
-#include <vector>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/js_function.h"
@@ -59,17 +47,26 @@
 #include "mongo/db/matcher/matcher_type_set.h"
 #include "mongo/db/matcher/schema/expression_internal_schema_allowed_properties.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
+#include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/index_bounds.h"
-#include "mongo/db/query/index_bounds_builder.h"
-#include "mongo/db/query/index_entry.h"
 #include "mongo/db/query/planner_access.h"
 #include "mongo/db/query/record_id_bound.h"
 #include "mongo/db/query/stage_builder/sbe/gen_filter.h"
 #include "mongo/db/query/stage_builder/sbe/gen_index_scan.h"
 #include "mongo/db/query/tree_walker.h"
-#include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo::input_params {
 namespace {

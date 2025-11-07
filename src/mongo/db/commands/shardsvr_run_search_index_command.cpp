@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
@@ -37,11 +34,11 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/shardsvr_run_search_index_command_gen.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/generic_argument_util.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/search/search_index_common.h"
@@ -50,6 +47,11 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+#include <string>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -64,6 +66,7 @@ namespace {
 class ShardSvrRunSearchIndexCommand : public TypedCommand<ShardSvrRunSearchIndexCommand> {
 public:
     using Request = ShardsvrRunSearchIndex;
+    using Response = ShardsvrRunSearchIndexCommandReply;
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kAlways;
     }
@@ -82,27 +85,41 @@ public:
     public:
         using InvocationBase::InvocationBase;
 
-        void typedRun(OperationContext* opCtx) {
-            auto cmd = request();
+        Response typedRun(OperationContext* opCtx) {
+            auto& cmd = request();
             generic_argument_util::prepareRequestForSearchIndexManagerPassthrough(cmd);
+            Response res;
 
             auto alreadyInformedMongot = cmd.getMongotAlreadyInformed();
-            if (globalSearchIndexParams.host == alreadyInformedMongot) {
+            bool cmdIsListSearchIx = std::string(cmd.getUserCmd().firstElement().fieldName())
+                                         .compare("$listSearchIndexes") == 0;
+            // mongos executes $listSearchIndexes on all hosts after multicasting the initial
+            // create/update command, to ensure the initial command has completed and the index is
+            // queryable. Therefore we want to allow running $listSearchIndexes on the shared mongot
+            // in order to help ensure the index is queryable on all mongots.
+            if (globalSearchIndexParams.host == alreadyInformedMongot && !cmdIsListSearchIx) {
                 // This mongod shares its mongot with a mongos that originally received the user's
                 // search index command. We therefore can return early as this mongod's mongot has
-                // already been issued the search index command.
-                return;
+                // already been issued the create, drop, or update, search index command.
+                res.setOk(1);
+                return res;
             }
 
             auto catalog = CollectionCatalog::get(opCtx);
             auto resolvedNamespace = cmd.getResolvedNss();
 
             BSONObj manageSearchIndexResponse =
-                runSearchIndexCommand(opCtx,
-                                      resolvedNamespace,
-                                      cmd.getUserCmd(),
-                                      *catalog->lookupUUIDByNSS(opCtx, resolvedNamespace),
-                                      cmd.getViewName());
+                getSearchIndexManagerResponse(opCtx,
+                                              resolvedNamespace,
+                                              *catalog->lookupUUIDByNSS(opCtx, resolvedNamespace),
+                                              cmd.getUserCmd(),
+                                              cmd.getView());
+
+            auto searchIdxResp = SearchIndexManagerResponse::parse(
+                manageSearchIndexResponse, IDLParserContext("_shardsvrRunSearchIndexCommand"));
+            res.setSearchIndexManagerResponse(searchIdxResp);
+            res.setOk(1.0);
+            return res;
         }
 
     private:

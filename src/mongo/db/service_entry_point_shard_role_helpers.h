@@ -26,13 +26,8 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#include "mongo/db/service_entry_point_shard_role.h"
 
-#include <memory>
-#include <mutex>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
+#pragma once
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -40,10 +35,14 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/fsync_locked.h"
+#include "mongo/db/commands/fsync.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/catalog_cache/shard_cannot_refresh_due_to_locks_held_exception.h"
+#include "mongo/db/global_catalog/router_role_api/gossiped_routing_cache_gen.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/read_concern.h"
@@ -55,37 +54,36 @@
 #include "mongo/db/repl/speculative_majority_read_info.h"
 #include "mongo/db/replica_set_endpoint_util.h"
 #include "mongo/db/s/resharding/resharding_metrics_helpers.h"
-#include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/transaction_coordinator_service.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/stats/resource_consumption_metrics.h"
+#include "mongo/db/service_entry_point_shard_role.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/database_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
+#include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/idl/generic_argument_gen.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/rpc/check_allowed_op_query_cmd.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/op_msg_rpc_impls.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/gossiped_routing_cache_gen.h"
-#include "mongo/s/grid.h"
 #include "mongo/s/service_entry_point_router_role.h"
-#include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
-#include "mongo/s/shard_version.h"
-#include "mongo/s/stale_exception.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/namespace_string_util.h"
+
+#include <memory>
+#include <mutex>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -171,11 +169,6 @@ inline void waitForWriteConcern(OperationContext* opCtx,
         return;
     }
 
-    // Do not increase consumption metrics during wait for write concern, as in serverless this
-    // might cause a tenant to be billed for reading the oplog entry (which might be of
-    // considerable size) of another tenant.
-    ResourceConsumption::PauseMetricsCollectorBlock pauseMetricsCollection(opCtx);
-
     auto lastOpAfterRun = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
 
     auto waitForWriteConcernAndAppendStatus = [&]() {
@@ -207,8 +200,31 @@ inline void waitForWriteConcern(OperationContext* opCtx,
     // transactions will do a noop write at commit time, which should have incremented the
     // lastOp. And speculative majority semantics dictate that "abortTransaction" should not
     // wait for write concern on operations the transaction observed.
-    if (shard_role_details::getLocker(opCtx)->wasGlobalLockTakenForWrite() &&
-        !opCtx->inMultiDocumentTransaction()) {
+    if (!opCtx->inMultiDocumentTransaction() &&
+        shard_role_details::getLocker(opCtx)->wasGlobalLockTakenForWrite()) {
+        repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
+        lastOpAfterRun = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+        waitForWriteConcernAndAppendStatus();
+        return;
+    }
+
+    // Aggregate and getMore requests can be read ops or write ops. We only want to wait for write
+    // concern if the op could have done a write (i.e. had any write stages in its pipeline).
+    // Aggregate::Invocation::isReadOperation will indicate whether the original agg request had
+    // any write stages in its pipeline, but GetMore::Invocation::isReadOperation will not, so we
+    // fall back to checking whether it took the global write lock for getMore.
+    // Also, aggregate requests with write stages can be processed on secondaries if the read
+    // concern specifies such. The secondariy will forward writes to the primary, and the primary
+    // will wait for write concern. The secondary should not wait for write concern.
+    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+    auto skipSettingLastOpToSystemOp = (replCoord && replCoord->getSettings().isReplSet() &&
+                                        !replCoord->getMemberState().primary()) ||
+        (invocation->isReadOperation() &&
+         invocation->definition()->getLogicalOp() != LogicalOp::opGetMore) ||
+        (invocation->definition()->getLogicalOp() == LogicalOp::opGetMore &&
+         !shard_role_details::getLocker(opCtx)->wasGlobalLockTakenForWrite());
+
+    if (!skipSettingLastOpToSystemOp && !opCtx->inMultiDocumentTransaction()) {
         repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
         lastOpAfterRun = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
         waitForWriteConcernAndAppendStatus();
@@ -289,37 +305,14 @@ inline void appendReplyMetadata(OperationContext* opCtx,
     }
 }
 
-inline Status refreshDatabase(OperationContext* opCtx, const StaleDbRoutingVersion& se) noexcept {
-    return FilteringMetadataCache::get(opCtx)->onDbVersionMismatch(
-        opCtx, se.getDb(), se.getVersionReceived());
-}
-
-inline Status refreshCollection(OperationContext* opCtx, const StaleConfigInfo& se) noexcept {
-    return FilteringMetadataCache::get(opCtx)->onCollectionPlacementVersionMismatch(
-        opCtx, se.getNss(), se.getVersionReceived().placementVersion());
-}
-
-inline Status refreshCatalogCache(
-    OperationContext* opCtx, const ShardCannotRefreshDueToLocksHeldInfo& refreshInfo) noexcept {
-    return Grid::get(opCtx)
-        ->catalogCache()
-        ->getCollectionRoutingInfo(opCtx, refreshInfo.getNss())
-        .getStatus();
-}
-
-inline void handleReshardingCriticalSectionMetrics(OperationContext* opCtx,
-                                                   const StaleConfigInfo& se) noexcept {
-    resharding_metrics::onCriticalSectionError(opCtx, se);
-}
-
-// The refreshDatabase, refreshCollection, and refreshCatalogCache methods may have modified the
-// locker state, in particular the flags which say if the operation took a write lock or shared
-// lock.  This will cause mongod to perhaps erroneously check for write concern when no writes
-// were done, or unnecessarily kill a read operation.  If we re-use the opCtx to retry command
-// execution, we must reset the locker state.
-inline void resetLockerState(OperationContext* opCtx) noexcept {
+// When handling possible retryable errors, we may have modified the locker state, in particular the
+// flags which say if the operation took a write lock or shared lock. This will cause mongod to
+// perhaps erroneously check for write concern when no writes were done, or unnecessarily kill a
+// read operation. If we re-use the opCtx to retry command execution, we must reset the locker
+// state.
+inline void resetLockerState(OperationContext* opCtx) {
     // It is necessary to lock the client to change the Locker on the OperationContext.
-    stdx::lock_guard<Client> lk(*opCtx->getClient());
+    ClientLock lk(opCtx->getClient());
     invariant(!shard_role_details::getLocker(opCtx)->isLocked());
     shard_role_details::swapLocker(opCtx, std::make_unique<Locker>(opCtx->getServiceContext()), lk);
 }
@@ -328,7 +321,7 @@ inline void createTransactionCoordinator(OperationContext* opCtx,
                                          TxnNumber clientTxnNumber,
                                          boost::optional<TxnRetryCounter> clientTxnRetryCounter) {
     auto clientLsid = opCtx->getLogicalSessionId().value();
-    auto clockSource = opCtx->getServiceContext()->getFastClockSource();
+    auto& clockSource = opCtx->fastClockSource();
 
     // If this shard has been selected as the coordinator, set up the coordinator state
     // to be ready to receive votes.
@@ -336,7 +329,7 @@ inline void createTransactionCoordinator(OperationContext* opCtx,
         opCtx,
         clientLsid,
         {clientTxnNumber, clientTxnRetryCounter ? *clientTxnRetryCounter : 0},
-        clockSource->now() + Seconds(gTransactionLifetimeLimitSeconds.load()));
+        clockSource.now() + Seconds(gTransactionLifetimeLimitSeconds.load()));
 }
 }  // namespace service_entry_point_shard_role_helpers
 }  // namespace mongo

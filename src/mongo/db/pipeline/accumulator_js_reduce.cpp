@@ -27,20 +27,13 @@
  *    it in the license file.
  */
 
-#include <boost/none.hpp>
-#include <boost/smart_ptr.hpp>
-#include <type_traits>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/accumulator_js_reduce.h"
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/db/pipeline/accumulator_js_reduce.h"
 #include "mongo/db/pipeline/javascript_execution.h"
 #include "mongo/db/pipeline/make_js_function.h"
 #include "mongo/db/pipeline/map_reduce_options_gen.h"
@@ -48,6 +41,11 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -57,7 +55,7 @@ AccumulationExpression AccumulatorInternalJsReduce::parseInternalJsReduce(
     ExpressionContext* const expCtx, BSONElement elem, VariablesParseState vps) {
     uassert(31326,
             str::stream() << kName << " requires a document argument, but found " << elem.type(),
-            elem.type() == BSONType::Object);
+            elem.type() == BSONType::object);
     BSONObj obj = elem.embeddedObject();
 
     expCtx->setSbeGroupCompatibility(SbeCompatibility::notCompatible);
@@ -85,7 +83,7 @@ AccumulationExpression AccumulatorInternalJsReduce::parseInternalJsReduce(
             argument);
 
     auto factory = [expCtx, funcSource = funcSource]() {
-        return AccumulatorInternalJsReduce::create(expCtx, funcSource);
+        return make_intrusive<AccumulatorInternalJsReduce>(expCtx, funcSource);
     };
 
     auto initializer = ExpressionConstant::create(expCtx, Value(BSONNULL));
@@ -101,7 +99,7 @@ std::string AccumulatorInternalJsReduce::parseReduceFunction(BSONElement func) {
         str::stream() << kName
                       << " requires the 'eval' argument to be of type string, or code but found "
                       << func.type(),
-        func.type() == BSONType::String || func.type() == BSONType::Code);
+        func.type() == BSONType::string || func.type() == BSONType::code);
     return func._asCode();
 }
 
@@ -112,7 +110,7 @@ void AccumulatorInternalJsReduce::processInternal(const Value& input, bool mergi
     uassert(31242,
             str::stream() << kName << " requires a document argument, but found "
                           << input.getType(),
-            input.getType() == BSONType::Object);
+            input.getType() == BSONType::object);
     Document data = input.getDocument();
 
     // Avoid too many lookups into the Document cache.
@@ -196,12 +194,6 @@ Value AccumulatorInternalJsReduce::getValue(bool toBeMerged) {
     }
 }
 
-boost::intrusive_ptr<AccumulatorState> AccumulatorInternalJsReduce::create(
-    ExpressionContext* const expCtx, StringData funcSource) {
-
-    return make_intrusive<AccumulatorInternalJsReduce>(expCtx, funcSource);
-}
-
 void AccumulatorInternalJsReduce::reset() {
     _values.clear();
     _memUsageTracker.set(sizeof(*this));
@@ -218,16 +210,6 @@ Document AccumulatorInternalJsReduce::serialize(boost::intrusive_ptr<Expression>
 
 REGISTER_ACCUMULATOR(accumulator, AccumulatorJs::parse);
 
-boost::intrusive_ptr<AccumulatorState> AccumulatorJs::create(
-    ExpressionContext* const expCtx,
-    std::string init,
-    std::string accumulate,
-    std::string merge,
-    boost::optional<std::string> finalize) {
-    return new AccumulatorJs(
-        expCtx, std::move(init), std::move(accumulate), std::move(merge), std::move(finalize));
-}
-
 namespace {
 // Parses a constant expression of type String or Code.
 std::string parseFunction(StringData fieldName,
@@ -243,7 +225,7 @@ std::string parseFunction(StringData fieldName,
     Value v = ec->getValue();
     uassert(4544702,
             str::stream() << "$accumulator '" << fieldName << "' must be a String or Code",
-            v.getType() == BSONType::String || v.getType() == BSONType::Code);
+            v.getType() == BSONType::string || v.getType() == BSONType::code);
     return v.coerceToString();
 }
 }  // namespace
@@ -287,7 +269,7 @@ AccumulationExpression AccumulatorJs::parse(ExpressionContext* const expCtx,
     uassert(4544703,
             str::stream() << "$accumulator expects an object as an argument; found: "
                           << typeName(elem.type()),
-            elem.type() == BSONType::Object);
+            elem.type() == BSONType::object);
     BSONObj obj = elem.embeddedObject();
 
     expCtx->setSbeGroupCompatibility(SbeCompatibility::notCompatible);
@@ -313,7 +295,7 @@ AccumulationExpression AccumulatorJs::parse(ExpressionContext* const expCtx,
             uassert(4544704,
                     str::stream() << "$accumulator lang must be a string; found: "
                                   << element.type(),
-                    element.type() == BSONType::String);
+                    element.type() == BSONType::string);
             uassert(4544705,
                     "$accumulator only supports lang: 'js'",
                     element.valueStringData() == "js");
@@ -340,7 +322,7 @@ AccumulationExpression AccumulatorJs::parse(ExpressionContext* const expCtx,
                     accumulate = std::move(accumulate),
                     merge = std::move(merge),
                     finalize = std::move(finalize)]() {
-        return new AccumulatorJs(expCtx, init, accumulate, merge, finalize);
+        return make_intrusive<AccumulatorJs>(expCtx, init, accumulate, merge, finalize);
     };
     return {
         std::move(initArgs), std::move(accumulateArgs), std::move(factory), AccumulatorJs::kName};
@@ -396,7 +378,7 @@ void AccumulatorJs::startNewGroup(Value const& input) {
     uassert(4544711,
             str::stream() << "$accumulator initArgs must evaluate to an array: "
                           << input.toString(),
-            input.getType() == BSONType::Array);
+            input.getType() == BSONType::array);
 
     size_t index = 0;
     BSONArrayBuilder bob;
@@ -427,7 +409,7 @@ void AccumulatorJs::processInternal(const Value& input, bool merging) {
         uassert(4544712,
                 str::stream() << "$accumulator accumulateArgs must evaluate to an array: "
                               << input.toString(),
-                input.getType() == BSONType::Array);
+                input.getType() == BSONType::array);
     }
 
     _pendingCalls.emplace_back(input);

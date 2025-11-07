@@ -29,13 +29,13 @@
 
 #include "mongo/db/index/fts_access_method.h"
 
+#include "mongo/db/index/expression_keys_private.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+
 #include <utility>
 
 #include <boost/optional/optional.hpp>
-
-#include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/index/expression_keys_private.h"
-#include "mongo/db/index/index_descriptor.h"
 
 namespace mongo {
 

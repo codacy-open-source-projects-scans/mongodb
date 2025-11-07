@@ -29,17 +29,6 @@
 
 #pragma once
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <memory>
-#include <set>
-#include <string>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -52,6 +41,16 @@
 #include "mongo/db/timeseries/timeseries_constants.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/time_support.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <set>
+#include <string>
+#include <vector>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo::timeseries {
 // A table that is useful for interpolations between the number of measurements in a bucket and
@@ -112,7 +111,7 @@ public:
         auto&& controlField = bucket[kBucketControlFieldName];
         uassert(5857904,
                 "The $_internalUnpackBucket stage requires 'control' object to be present",
-                controlField && controlField.type() == BSONType::Object);
+                controlField && controlField.type() == BSONType::object);
 
         auto&& controlFieldObj = controlField.Obj();
         auto&& versionField = controlFieldObj[kBucketControlVersionFieldName];
@@ -121,7 +120,7 @@ public:
                 versionField && isNumericBSONType(versionField.type()));
 
         auto&& dataField = bucket[kBucketDataFieldName];
-        if (!dataField || dataField.type() != BSONType::Object)
+        if (!dataField || dataField.type() != BSONType::object)
             return 0;
 
         auto&& dataFieldObj = dataField.Obj();
@@ -150,7 +149,7 @@ public:
     static const std::set<StringData> reservedBucketFieldNames;
 
     BucketUnpacker();
-    BucketUnpacker(BucketSpec spec);
+    explicit BucketUnpacker(BucketSpec spec);
     BucketUnpacker(const BucketUnpacker& other) = delete;
     BucketUnpacker(BucketUnpacker&& other);
     ~BucketUnpacker();
@@ -250,8 +249,39 @@ public:
         return std::string{kControlMaxFieldNamePrefix} + field;
     }
 
+    bool getUsesExtendedRange() const {
+        return _spec.usesExtendedRange();
+    }
+
     bool isClosedBucket() const {
         return _closedBucket;
+    }
+
+    bool providesField(StringData field) const {
+        auto& metaField = getMetaField();
+        if (metaField && *metaField == field) {
+            return _includeMetaField;
+        } else if (getTimeField() == field) {
+            return _includeTimeField;
+        }
+
+        return _spec.doesBucketSpecProvideField(static_cast<std::string>(field));
+    }
+
+    bool providesFieldWithoutModification(StringData field) const {
+        return providesField(field) && !_spec.fieldIsComputed(field);
+    }
+
+    bool removedMetaFieldFromFieldSet() const {
+        return (_includeMetaField && behavior() == BucketSpec::Behavior::kInclude) ||
+            (!_includeMetaField && getMetaField() && behavior() == BucketSpec::Behavior::kExclude);
+    }
+
+    bool hasIncludeExcludeFields() const {
+        // We remove the metaField from the fieldSet and set the '_includeMetaField' flag to enable
+        // more push downs in 'eraseMetaFromFieldSetAndDetermineIncludeMeta', but the metaField
+        // should still be considered in the fieldSet when enabling optimizations.
+        return !_spec.fieldSet().empty() || removedMetaFieldFromFieldSet();
     }
 
     void setBucketSpec(BucketSpec&& bucketSpec);
@@ -292,6 +322,10 @@ private:
     bool _includeTimeField{false};
 
     // A flag used to mark that a bucket's metadata value should be materialized in measurements.
+    // The value is determined by the behavior of the unpacker and if the metadata was included in
+    // the field set. If the unpacking behavior is 'kExclude' this value is true if metadata was not
+    // in the field set. If the unpacking behavior is 'kInclude' this value is true if the metadata
+    // field is inside the field set.
     bool _includeMetaField{false};
 
     // A flag used to mark that a bucket's min time should be materialized as metadata.

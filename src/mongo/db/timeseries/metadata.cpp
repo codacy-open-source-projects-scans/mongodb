@@ -29,9 +29,10 @@
 
 #include "mongo/db/timeseries/metadata.h"
 
-#include <boost/container/small_vector.hpp>
+#include "mongo/bson/simple_bsonelement_comparator.h"
+#include "mongo/bson/unordered_fields_bsonelement_comparator.h"
 
-#include "mongo/util/tracking/allocator.h"
+#include <boost/container/small_vector.hpp>
 
 namespace mongo::timeseries::metadata {
 namespace {
@@ -44,10 +45,10 @@ void normalizeObject(const BSONObj& obj, allocator_aware::BSONObjBuilder<Allocat
 template <class Allocator>
 void normalizeArray(const BSONObj& obj, allocator_aware::BSONArrayBuilder<Allocator>& builder) {
     for (auto& arrayElem : obj) {
-        if (arrayElem.type() == BSONType::Array) {
+        if (arrayElem.type() == BSONType::array) {
             allocator_aware::BSONArrayBuilder<Allocator> subArray{builder.subarrayStart()};
             normalizeArray(arrayElem.Obj(), subArray);
-        } else if (arrayElem.type() == BSONType::Object) {
+        } else if (arrayElem.type() == BSONType::object) {
             allocator_aware::BSONObjBuilder<Allocator> subObject{builder.subobjStart()};
             normalizeObject(arrayElem.Obj(), subObject);
         } else {
@@ -67,8 +68,8 @@ void normalizeObject(const BSONObj& obj, allocator_aware::BSONObjBuilder<Allocat
     // the same BSONElement from.
     struct Field {
         BSONElement element() const {
-            return BSONElement(fieldName.rawData() - 1,  // Include type byte before field name
-                               fieldName.size() + 1,     // Include null terminator after field name
+            return BSONElement(fieldName.data() - 1,  // Include type byte before field name
+                               fieldName.size() + 1,  // Include null terminator after field name
                                BSONElement::TrustedInitTag{});
         }
         bool operator<(const Field& rhs) const {
@@ -93,11 +94,11 @@ void normalizeObject(const BSONObj& obj, allocator_aware::BSONObjBuilder<Allocat
     std::sort(it, end);
     for (; it != end; ++it) {
         auto elem = it->element();
-        if (elem.type() == BSONType::Array) {
+        if (elem.type() == BSONType::array) {
             allocator_aware::BSONArrayBuilder<Allocator> subArray(
                 builder.subarrayStart(elem.fieldNameStringData()));
             normalizeArray(elem.Obj(), subArray);
-        } else if (elem.type() == BSONType::Object) {
+        } else if (elem.type() == BSONType::object) {
             allocator_aware::BSONObjBuilder<Allocator> subObject(
                 builder.subobjStart(elem.fieldNameStringData()));
             normalizeObject(elem.Obj(), subObject);
@@ -107,17 +108,89 @@ void normalizeObject(const BSONObj& obj, allocator_aware::BSONObjBuilder<Allocat
     }
 }
 
+bool areBSONObjectsEqualUnordered(const BSONObj& lhs, const BSONObj& rhs);
+bool areBSONArraysEqualUnordered(const BSONObj& lhs, const BSONObj& rhs);
+
+bool areBSONArraysEqualUnordered(const BSONObj& lhs, const BSONObj& rhs) {
+    BSONObjIterator it1(lhs);
+    BSONObjIterator it2(rhs);
+
+    while (it1.more() && it2.more()) {
+        auto l = it1.next();
+        auto r = it2.next();
+        if (l.type() != r.type()) {
+            return false;
+        }
+
+        if (l.type() == BSONType::object) {
+            if (!areBSONObjectsEqualUnordered(l.Obj(), r.Obj())) {
+                return false;
+            }
+        } else if (l.type() == BSONType::array) {
+            if (!areBSONArraysEqualUnordered(l.Obj(), r.Obj())) {
+                return false;
+            }
+        } else {
+            // In order to match the behavior of timeseries::metadata::normalize, we ignore field
+            // names when comparing array elements.
+            UnorderedFieldsBSONElementComparator comparator;
+            if (comparator.compare(l, r) != 0) {
+                return false;
+            }
+        }
+    }
+
+    if (it1.more() || it2.more()) {
+        return false;
+    }
+
+    return true;
+}
+
+bool areBSONObjectsEqualUnordered(const BSONObj& lhs, const BSONObj& rhs) {
+    BSONObjIteratorSorted it1(lhs);
+    BSONObjIteratorSorted it2(rhs);
+
+    while (it1.more() && it2.more()) {
+        auto l = it1.next();
+        auto r = it2.next();
+        if (l.type() != r.type()) {
+            return false;
+        }
+
+        if (l.type() == BSONType::object) {
+            if (!areBSONObjectsEqualUnordered(l.Obj(), r.Obj())) {
+                return false;
+            }
+        } else if (l.type() == BSONType::array) {
+            if (!areBSONArraysEqualUnordered(l.Obj(), r.Obj())) {
+                return false;
+            }
+        } else {
+            SimpleBSONElementComparator comparator;
+            if (comparator.compare(l, r) != 0) {
+                return false;
+            }
+        }
+    }
+
+    if (it1.more() || it2.more()) {
+        return false;
+    }
+
+    return true;
+}
 }  // namespace
 
 template <class Allocator>
 void normalize(const BSONElement& elem,
                allocator_aware::BSONObjBuilder<Allocator>& builder,
                boost::optional<StringData> as) {
-    if (elem.type() == BSONType::Array) {
+    if (elem.type() == BSONType::array) {
         allocator_aware::BSONArrayBuilder<Allocator> subArray(
             builder.subarrayStart(as.has_value() ? as.value() : elem.fieldNameStringData()));
         normalizeArray(elem.Obj(), subArray);
-    } else if (elem.type() == BSONType::Object) {
+    } else if (elem.type() == BSONType::object) {
         allocator_aware::BSONObjBuilder<Allocator> subObject(
             builder.subobjStart(as.has_value() ? as.value() : elem.fieldNameStringData()));
         normalizeObject(elem.Obj(), subObject);
@@ -137,4 +210,16 @@ template void normalize(const BSONElement& elem,
                         allocator_aware::BSONObjBuilder<tracking::Allocator<void>>& builder,
                         boost::optional<StringData> as);
 
+bool areMetadataEqual(const BSONElement& elem1, const BSONElement& elem2) {
+    if (elem1.type() != elem2.type()) {
+        return false;
+    }
+    if (elem1.type() == BSONType::object) {
+        return areBSONObjectsEqualUnordered(elem1.Obj(), elem2.Obj());
+    } else if (elem1.type() == BSONType::array) {
+        return areBSONArraysEqualUnordered(elem1.Obj(), elem2.Obj());
+    } else {
+        return elem1.binaryEqualValues(elem2);
+    }
+}
 }  // namespace mongo::timeseries::metadata

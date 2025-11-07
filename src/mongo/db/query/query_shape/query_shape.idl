@@ -26,11 +26,11 @@
 # it in the license file.
 
 global:
+    mod_visibility: private
     cpp_namespace: "mongo::query_shape"
 
 imports:
     - "mongo/db/basic_types.idl"
-
 
 structs:
     CommandNamespace:
@@ -44,7 +44,6 @@ structs:
             uuid:
                 type: string
                 optional: true
-            tenantId: 
+            tenantId:
                 type: string
                 optional: true
-            

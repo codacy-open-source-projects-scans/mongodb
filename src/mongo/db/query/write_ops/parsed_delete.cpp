@@ -29,24 +29,23 @@
 
 #include "mongo/db/query/write_ops/parsed_delete.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/query_utils.h"
 #include "mongo/db/query/write_ops/delete_request_gen.h"
 #include "mongo/db/query/write_ops/parsed_writes_common.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
-#include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
+#include "mongo/db/version_context.h"
 #include "mongo/util/assert_util.h"
+
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
 
@@ -66,6 +65,7 @@ ParsedDelete::ParsedDelete(OperationContext* opCtx,
           isTimeseriesDelete
               ? createTimeseriesWritesQueryExprsIfNecessary(
                     feature_flags::gTimeseriesDeletesSupport.isEnabled(
+                        VersionContext::getDecoration(opCtx),
                         serverGlobalParams.featureCompatibility.acquireFCVSnapshot()),
                     collection)
               : nullptr),
@@ -73,13 +73,14 @@ ParsedDelete::ParsedDelete(OperationContext* opCtx,
 
 Status ParsedDelete::parseRequest() {
     dassert(!_canonicalQuery.get());
-    // It is invalid to request that the DeleteStage return the deleted document during a
-    // multi-remove.
-    invariant(!(_request->getReturnDeleted() && _request->getMulti()));
+    tassert(11052001,
+            "Cannot request DeleteStage to return the deleted document during a multi-delete",
+            !(_request->getReturnDeleted() && _request->getMulti()));
 
-    // It is invalid to request that a ProjectionStage be applied to the DeleteStage if the
-    // DeleteStage would not return the deleted document.
-    invariant(_request->getProj().isEmpty() || _request->getReturnDeleted());
+    tassert(11052002,
+            "Cannot apply projection to DeleteStage if the DeleteStage would not return the "
+            "deleted document",
+            _request->getProj().isEmpty() || _request->getReturnDeleted());
 
     auto [collatorToUse, collationMatchesDefault] =
         resolveCollator(_opCtx, _request->getCollation(), _collection);
@@ -93,7 +94,7 @@ Status ParsedDelete::parseRequest() {
                   .build();
 
     // The '_id' field of a time-series collection needs to be handled as other fields.
-    if (CanonicalQuery::isSimpleIdQuery(_request->getQuery()) && !_timeseriesDeleteQueryExprs) {
+    if (isSimpleIdQuery(_request->getQuery()) && !_timeseriesDeleteQueryExprs) {
         return Status::OK();
     }
 
@@ -127,6 +128,11 @@ Status ParsedDelete::parseRequest() {
         // internal match expression. We do not need to track the internal match expression counters
         // and so we stop the counters.
         _expCtx->stopExpressionCounters();
+
+        if (_request->getMulti() && !getResidualExpr()) {
+            // The command is performing a time-series meta delete.
+            timeseriesCounters.incrementMetaDelete();
+        }
 
         // At least, the bucket-level filter must contain the closed bucket filter.
         tassert(7542400, "Bucket-level filter must not be null", queryExprs->_bucketExpr);
@@ -165,7 +171,9 @@ bool ParsedDelete::hasParsedQuery() const {
 }
 
 std::unique_ptr<CanonicalQuery> ParsedDelete::releaseParsedQuery() {
-    invariant(_canonicalQuery.get() != nullptr);
+    tassert(11052003,
+            "Expected ParsedDelete to own a CanonicalQuery",
+            _canonicalQuery.get() != nullptr);
     return std::move(_canonicalQuery);
 }
 

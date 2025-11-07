@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <cstddef>
-#include <memory>
-#include <utility>
-#include <vector>
-
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
@@ -41,16 +36,12 @@
 #include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/query/stage_types.h"
-#include "mongo/db/sorter/sorter_stats.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
-template <typename Key, typename Value>
-class SortIteratorInterface;
-
-template <typename Key, typename Value>
-class Sorter;
-}  // namespace mongo
+#include <cstddef>
+#include <memory>
+#include <vector>
 
 namespace mongo::sbe {
 /**
@@ -59,8 +50,8 @@ namespace mongo::sbe {
  * order-by slots is given by 'dirs'. The 'obs' and 'dirs' vectors must be the same length. The
  * 'vals' slot vector indicates the values that should associated with the sort keys.
  *
- * Together, a set of values for 'obs' and 'vals' consistute one of the rows being sorted. These
- * rows are materialized at runtime. The given 'memoryLimit' contrains the amount of materialized
+ * Together, a set of values for 'obs' and 'vals' constitute one of the rows being sorted. These
+ * rows are materialized at runtime. The given 'memoryLimit' contains the amount of materialized
  * data that can be held in memory. If this limit is exceeded, and 'allowDiskUse' is false, then
  * this stage throws a query-fatal exception. If 'allowDiskUse' is true, then this stage will spill
  * materialized rows to disk.
@@ -103,67 +94,40 @@ public:
     std::vector<DebugPrinter::Block> debugPrint() const final;
     size_t estimateCompileTimeSize() const final;
 
+protected:
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {
+        return;
+    }
+
 private:
+    void doForceSpill() override {
+        if (_stageImpl) {
+            _stageImpl->forceSpill();
+        }
+    }
+
     class SortIface {
     public:
-        virtual ~SortIface() {}
+        virtual ~SortIface() = default;
         virtual void prepare(CompileCtx& ctx) = 0;
         virtual value::SlotAccessor* getAccessor(CompileCtx& ctx, value::SlotId slot) = 0;
         virtual void open(bool reOpen) = 0;
         virtual PlanState getNext() = 0;
         virtual void close() = 0;
+        virtual void forceSpill() = 0;
     };
 
+    /** Implements `SortIface`. Defined in `sort_stage_sort_impl.cpp`. */
     template <typename KeyRow, typename ValueRow>
-    class SortImpl : public SortIface {
-    public:
-        SortImpl(SortStage& stage);
-        ~SortImpl() override;
+    class SortImpl;
 
-        void prepare(CompileCtx& ctx) final;
-        value::SlotAccessor* getAccessor(CompileCtx& ctx, value::SlotId slot) final;
-        void open(bool reOpen) final;
-        PlanState getNext() final;
-        void close() final;
+    /** Defined in `sort_stage_sort_impl.cpp`. */
+    std::unique_ptr<SortIface> _makeStageImpl();
 
-    private:
-        int64_t runLimitCode();
-        void makeSorter();
-
-        using SorterIterator = SortIteratorInterface<KeyRow, ValueRow>;
-        using SorterData = std::pair<KeyRow, ValueRow>;
-
-        SortStage& _stage;
-
-        std::vector<value::SlotAccessor*> _inKeyAccessors;
-        std::vector<value::SlotAccessor*> _inValueAccessors;
-
-        value::SlotMap<std::unique_ptr<value::SlotAccessor>> _outAccessors;
-
-        std::unique_ptr<SorterIterator> _mergeIt;
-        SorterData _mergeData;
-        SorterData* _mergeDataIt{&_mergeData};
-        std::unique_ptr<Sorter<KeyRow, ValueRow>> _sorter;
-
-        std::unique_ptr<vm::CodeFragment> _limitCode;
-    };
-
-private:
-    template <typename KeyType, typename ValueType>
-    std::unique_ptr<SortIface> makeStageImplInternal();
-    template <typename KeyType>
-    std::unique_ptr<SortIface> makeStageImplInternal(size_t valueSize);
-    std::unique_ptr<SortIface> makeStageImplInternal(size_t keySize, size_t valueSize);
-
-    std::unique_ptr<SortIface> makeStageImpl();
-
-private:
     const value::SlotVector _obs;
     const std::vector<value::SortDirection> _dirs;
     const value::SlotVector _vals;
     const bool _allowDiskUse;
-
-    std::unique_ptr<SorterFileStats> _sorterFileStats;
 
     std::unique_ptr<SortIface> _stageImpl;
 

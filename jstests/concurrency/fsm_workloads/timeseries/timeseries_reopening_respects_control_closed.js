@@ -10,17 +10,15 @@
  * @tags: [
  *  requires_timeseries,
  *  # Timeseries do not support multi-document transactions with inserts.
- *   does_not_support_transactions,
+ *  does_not_support_transactions,
+ *  requires_getmore,
  * ]
  */
 
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
-import {
-    $config as $baseConfig
-} from
-    'jstests/concurrency/fsm_workloads/timeseries/timeseries_crud_operations_respect_control_closed.js';
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/timeseries/timeseries_crud_operations_respect_control_closed.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
     const standardTransition = {
         insertOrdered: 1,
         insertUnordered: 1,

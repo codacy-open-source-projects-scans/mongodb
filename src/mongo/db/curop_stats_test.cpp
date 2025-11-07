@@ -30,12 +30,15 @@
 #include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/admission/ingress_admission_context.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/prepare_conflict_tracker.h"
+#include "mongo/db/operation_context_options_gen.h"
+#include "mongo/db/query/query_test_service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/db/storage/execution_context.h"
+#include "mongo/db/storage/prepare_conflict_tracker.h"
+#include "mongo/db/storage/recovery_unit_noop.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/tick_source_mock.h"
 namespace mongo {
 
@@ -54,6 +57,16 @@ protected:
 
     TickSourceMock<Microseconds>* tickSource() {
         return checked_cast<decltype(tickSource())>(getServiceContext()->getTickSource());
+    }
+
+    void updateStatsOnTransactionUnstashWithLock(OperationContext* opCtx, CurOp* curop) {
+        ClientLock lk(opCtx->getClient());
+        curop->updateStatsOnTransactionUnstash(lk);
+    }
+
+    void updateStatsOnTransactionStashWithLock(OperationContext* opCtx, CurOp* curop) {
+        ClientLock lk(opCtx->getClient());
+        curop->updateStatsOnTransactionStash(lk);
     }
 };
 
@@ -136,9 +149,13 @@ TEST_F(CurOpStatsTest, CheckWorkingMillisValue) {
 
     // Check that workingTimeMillis correctly excludes time spent waiting for prepare conflicts.
     // Simulate a prepare conflict and check that workingMillis is the same as before.
-    PrepareConflictTracker::get(opCtx.get()).beginPrepareConflict(*tickSource());
+    StorageExecutionContext::get(opCtx.get())
+        ->getPrepareConflictTracker()
+        .beginPrepareConflict(*tickSource());
     advanceTime(Milliseconds(1000));
-    PrepareConflictTracker::get(opCtx.get()).endPrepareConflict(*tickSource());
+    StorageExecutionContext::get(opCtx.get())
+        ->getPrepareConflictTracker()
+        .endPrepareConflict(*tickSource());
     curop->completeAndLogOperation({logv2::LogComponent::kTest}, nullptr);
     // This wait time should be excluded from workingTimeMillis.
     ASSERT_EQ(curop->debug().workingTimeMillis,
@@ -214,7 +231,7 @@ TEST_F(CurOpStatsTest, UnstashingAndStashingTransactionResource) {
 
     // Simulate stashing locker from opCtx1. Check that wait times after stashing are still reported
     // on opCtx1.
-    curop1->updateStatsOnTransactionStash();
+    updateStatsOnTransactionStashWithLock(opCtx1.get(), curop1);
     auto locker = shard_role_details::swapLocker(
         opCtx1.get(), std::make_unique<Locker>(opCtx1->getServiceContext()));
     curop1->completeAndLogOperation({logv2::LogComponent::kTest}, nullptr);
@@ -229,7 +246,7 @@ TEST_F(CurOpStatsTest, UnstashingAndStashingTransactionResource) {
     // unstashed locker is not considered blocked for opCtx2.
     shard_role_details::swapLocker(opCtx2.get(), std::move(locker));
     auto lockerOp2 = shard_role_details::getLocker(opCtx2.get());
-    curop2->updateStatsOnTransactionUnstash();
+    updateStatsOnTransactionUnstashWithLock(opCtx2.get(), curop2);
     curop2->completeAndLogOperation({logv2::LogComponent::kTest}, nullptr);
     ASSERT_EQ(lockerOp2->getLockerInfo(boost::none).stats.getCumulativeWaitTimeMicros(),
               waitForLocks);
@@ -265,7 +282,7 @@ TEST_F(CurOpStatsTest, UnstashingAndStashingTransactionResource) {
 
     // Simulate stashing locker from opCtx2. Check that ticket and lock wait time after stashing is
     // still reported on opCtx2.
-    curop2->updateStatsOnTransactionStash();
+    updateStatsOnTransactionStashWithLock(opCtx2.get(), curop2);
     locker = shard_role_details::swapLocker(opCtx2.get(),
                                             std::make_unique<Locker>(opCtx2->getServiceContext()));
     curop2->completeAndLogOperation({logv2::LogComponent::kTest}, nullptr);
@@ -275,7 +292,7 @@ TEST_F(CurOpStatsTest, UnstashingAndStashingTransactionResource) {
 
     // Confirm stats are correctly accounted for even when we try unstashing the locker again.
     shard_role_details::swapLocker(opCtx2.get(), std::move(locker));
-    curop2->updateStatsOnTransactionUnstash();
+    updateStatsOnTransactionUnstashWithLock(opCtx2.get(), curop2);
     lockerOp2 = shard_role_details::getLocker(opCtx2.get());
     int64_t waitForLocksOnOp3 =
         addWaitForLock(opCtx2.get(), opCtx2->getServiceContext(), lockerOp2, Milliseconds(1));
@@ -341,7 +358,6 @@ TEST_F(CurOpStatsTest, CheckWorkingMillisWithBlockedTimeAtStart) {
 }
 
 TEST_F(CurOpStatsTest, MultipleUnstashingAndStashingTransaction) {
-    // Initialize two operation contexts.
     auto serviceContext = getGlobalServiceContext();
     auto client1 = serviceContext->getService()->makeClient("client1");
     auto opCtx1 = client1->makeOperationContext();
@@ -360,20 +376,20 @@ TEST_F(CurOpStatsTest, MultipleUnstashingAndStashingTransaction) {
     lockerOp1->addFlowControlTicketQueueTime(Milliseconds{20});
 
     // Advance counters while stashed
-    curop1->updateStatsOnTransactionStash();
+    updateStatsOnTransactionStashWithLock(opCtx1.get(), curop1);
     tickSourceMock->advance(Milliseconds{1000});
     lockerOp1->addFlowControlTicketQueueTime(Milliseconds{30});
-    curop1->updateStatsOnTransactionUnstash();
+    updateStatsOnTransactionUnstashWithLock(opCtx1.get(), curop1);
 
     // Advance counters while not stashed
     tickSourceMock->advance(Milliseconds{1000});
     lockerOp1->addFlowControlTicketQueueTime(Milliseconds{40});
 
     // Advance counters while stashed
-    curop1->updateStatsOnTransactionStash();
+    updateStatsOnTransactionStashWithLock(opCtx1.get(), curop1);
     tickSourceMock->advance(Milliseconds{1000});
     lockerOp1->addFlowControlTicketQueueTime(Milliseconds{50});
-    curop1->updateStatsOnTransactionUnstash();
+    updateStatsOnTransactionUnstashWithLock(opCtx1.get(), curop1);
 
     // Advance counters while not stashed
     tickSourceMock->advance(Milliseconds{1000});
@@ -480,9 +496,8 @@ TEST_F(CurOpStatsTest, CheckAdmissionQueueStats) {
     BSONObj currentQueue = bsonObj.getObjectField("currentQueue");
     BSONObj queueStats = bsonObj.getObjectField("queues");
 
-    auto expectedCurrentQueue = BSON("name"
-                                     << "execution"
-                                     << "timeQueuedMicros" << 5000);
+    auto expectedCurrentQueue = BSON("name" << "execution"
+                                            << "timeQueuedMicros" << 5000);
     auto expectedQueueStats =
         BSON("execution" << BSON("admissions" << 7 << "totalTimeQueuedMicros" << 5000
                                               << "isHoldingTicket" << false)
@@ -492,6 +507,159 @@ TEST_F(CurOpStatsTest, CheckAdmissionQueueStats) {
 
     ASSERT_BSONOBJ_EQ(currentQueue, expectedCurrentQueue);
     ASSERT_BSONOBJ_EQ_UNORDERED(queueStats, expectedQueueStats);
+}
+
+TEST(CurOpTest, DelinquentInterruptChecksNotDoubleCounted) {
+    RAIIServerParameterControllerForTest enableDelinquentTracking(
+        "featureFlagRecordDelinquentMetrics", true);
+    RAIIServerParameterControllerForTest alwaysTrackInterrupts("overdueInterruptCheckSamplingRate",
+                                                               1);
+
+    QueryTestServiceContext serviceContext;
+
+    auto& totalInterruptChecks = CurOp::totalInterruptChecks_forTest();
+    const auto interruptChecksAtStart = totalInterruptChecks.get();
+
+    auto opCtx = serviceContext.makeOperationContext();
+    auto curop = CurOp::get(*opCtx);
+    curop->ensureStarted();
+
+    const Milliseconds interval{gOverdueInterruptCheckIntervalMillis.load()};
+
+    serviceContext.tickSource()->advance(interval * 2);
+    opCtx->checkForInterrupt();
+
+    // Now push another operation onto the curop stack.
+    {
+        CurOp subOp;
+        subOp.push(opCtx.get());
+
+        for (size_t i = 0; i < 10; ++i) {
+            serviceContext.tickSource()->advance(interval * 10);
+            opCtx->checkForInterrupt();
+        }
+
+        subOp.completeAndLogOperation({logv2::LogComponent::kTest}, nullptr);
+    }
+
+    curop->done();
+    curop->completeAndLogOperation({logv2::LogComponent::kTest}, nullptr);
+
+    ASSERT_EQ(totalInterruptChecks.get() - interruptChecksAtStart, 11);
+}
+
+TEST(CurOpTest, OpWhichNeverChecksForInterruptBumpsDelinquentCounter) {
+    RAIIServerParameterControllerForTest enableDelinquentTracking(
+        "featureFlagRecordDelinquentMetrics", true);
+    RAIIServerParameterControllerForTest alwaysTrackInterrupts("overdueInterruptCheckSamplingRate",
+                                                               1);
+
+    QueryTestServiceContext serviceContext;
+
+    auto& opsWithOverdueInterruptCheck = CurOp::opsWithOverdueInterruptCheck_forTest();
+    const auto overdueOpsAtStart = opsWithOverdueInterruptCheck.get();
+
+    auto opCtx = serviceContext.makeOperationContext();
+    auto curop = CurOp::get(*opCtx);
+
+    curop->setTickSource_forTest(serviceContext.tickSource());
+    curop->ensureStarted();
+
+    // OpCtx should be set up to track interrupts.
+    ASSERT(opCtx->overdueInterruptCheckStats());
+
+    // The operation never checks for interrupt. It should still be marked as overdue though.
+    const Milliseconds interval{gOverdueInterruptCheckIntervalMillis.load()};
+    serviceContext.tickSource()->advance(interval * 2);
+
+    curop->completeAndLogOperation({logv2::LogComponent::kTest}, nullptr);
+    ASSERT_EQ(opCtx->overdueInterruptCheckStats()->overdueInterruptChecks.loadRelaxed(), 1);
+
+    ASSERT_EQ(opsWithOverdueInterruptCheck.get() - overdueOpsAtStart, 1);
+}
+
+TEST(CurOpTest, InterruptChecksSamplingRespectsFeatureFlag) {
+    // When the feature flag is set to false, we should never sample an operation, even if the
+    // sampling rate is set to 1.0
+    RAIIServerParameterControllerForTest disableDelinquentTracking(
+        "featureFlagRecordDelinquentMetrics", false);
+    RAIIServerParameterControllerForTest alwaysTrackInterrupts("overdueInterruptCheckSamplingRate",
+                                                               1);
+
+    QueryTestServiceContext serviceContext;
+
+    auto opCtx = serviceContext.makeOperationContext();
+    auto curop = CurOp::get(*opCtx);
+
+    curop->ensureStarted();
+    opCtx->checkForInterrupt();
+
+    // Simulate advancing the mock clock.
+    const Milliseconds interval{gOverdueInterruptCheckIntervalMillis.load()};
+    serviceContext.tickSource()->advance(interval * 5);
+
+    // Verify that delinquent stats are not recorded due to the feature flag being disabled.
+    ASSERT(!opCtx->overdueInterruptCheckStats());
+    ASSERT_EQ(opCtx->numInterruptChecks(), 1);
+}
+
+TEST(CurOpTest, InterruptCheckTrackingWithSamplingRateZero) {
+    RAIIServerParameterControllerForTest enableDelinquentTracking(
+        "featureFlagRecordDelinquentMetrics", true);
+    // When the sampling rate is 0, an operation should not track interrupts, but should
+    // otherwise behave normally.
+    RAIIServerParameterControllerForTest neverTrackInterrupts("overdueInterruptCheckSamplingRate",
+                                                              0);
+
+    QueryTestServiceContext serviceContext;
+
+    auto opCtx = serviceContext.makeOperationContext();
+    auto curop = CurOp::get(*opCtx);
+
+    curop->ensureStarted();
+    opCtx->checkForInterrupt();
+
+    // Simulate advancing the mock clock.
+    const Milliseconds interval{gOverdueInterruptCheckIntervalMillis.load()};
+    serviceContext.tickSource()->advance(interval * 5);
+
+    // Verify that overdue interrupt check stats are not tracked due to sampling rate being 0.
+    ASSERT(!opCtx->overdueInterruptCheckStats());
+    ASSERT_EQ(opCtx->numInterruptChecks(), 1);
+}
+
+TEST(CurOpTest, InterruptCheckTrackingIsSampled) {
+    RAIIServerParameterControllerForTest enableDelinquentTracking(
+        "featureFlagRecordDelinquentMetrics", true);
+    RAIIServerParameterControllerForTest alwaysTrackInterrupts("overdueInterruptCheckSamplingRate",
+                                                               1.0 / 1000.0);
+
+    QueryTestServiceContext serviceContext;
+
+    size_t iters = 0;
+    size_t nSampled = 0;
+
+    do {
+        auto opCtx = serviceContext.makeOperationContext();
+        auto curop = CurOp::get(*opCtx);
+
+        curop->ensureStarted();
+        opCtx->checkForInterrupt();
+
+        if (opCtx->overdueInterruptCheckStats()) {
+            // Found an operation which was sampled.
+            nSampled++;
+            break;
+        }
+
+        ++iters;
+    } while (iters < 100'000);
+
+    // If this assertion fails, it means none of the CurOps we generated were selected
+    // for sampling. This should be statistically impossible (around 1 in 10^44) assuming
+    // 1 in 1000 ops gets randomly sampled, and indicates there's likely a problem
+    // with the sampling mechanism (or you are very unlucky).
+    ASSERT_GT(nSampled, 0);
 }
 
 }  // namespace

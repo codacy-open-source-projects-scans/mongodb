@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <memory>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
@@ -47,10 +41,17 @@
 #include "mongo/stdx/thread.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace repl {
-class OplogFetcherMock : public OplogFetcher {
+class MONGO_MOD_PARENT_PRIVATE OplogFetcherMock : public OplogFetcher {
 public:
     explicit OplogFetcherMock(
         executor::TaskExecutor* executor,
@@ -118,7 +119,7 @@ private:
         OplogFetcherMock* _mock;
     };
 
-    OpTime _getLastOpTimeFetched() const override;
+    OpTime getLastOpTimeFetched() const override;
 
     void _finishCallback(Status status);
 
@@ -152,7 +153,7 @@ private:
     bool _first = true;
 };
 
-typedef OplogFetcherFactoryImpl<OplogFetcherMock> CreateOplogFetcherMockFn;
+MONGO_MOD_PUB typedef OplogFetcherFactoryImpl<OplogFetcherMock> CreateOplogFetcherMockFn;
 
 }  // namespace repl
 }  // namespace mongo

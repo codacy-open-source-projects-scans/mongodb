@@ -30,12 +30,15 @@
 #pragma once
 
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/observable_mutex_registry.h"
+
+#include <tuple>
 
 #include <boost/log/detail/fake_mutex.hpp>
 #include <boost/log/detail/locking_ptr.hpp>
 #include <boost/log/sinks/basic_sink_backend.hpp>
 #include <boost/log/sinks/frontend_requirements.hpp>
-#include <tuple>
 
 namespace mongo::logv2 {
 
@@ -56,9 +59,14 @@ private:
             boost::log::sinks::has_requirement<typename backend_t::frontend_requirements,
                                                boost::log::sinks::concurrent_feeding>::value,
             boost::log::aux::fake_mutex,
-            stdx::mutex>;
+            ObservableMutex<stdx::mutex>>;
 
-        BackendTraits(boost::shared_ptr<backend_t> backend) : _backend(std::move(backend)) {}
+        BackendTraits(boost::shared_ptr<backend_t> backend) : _backend(std::move(backend)) {
+            if constexpr (std::is_same_v<decltype(_mutex), ObservableMutex<stdx::mutex>>) {
+                ObservableMutexRegistry::get().add("logv2::CompositeBackend::BackendTraits::_mutex",
+                                                   _mutex);
+            }
+        }
         boost::shared_ptr<backend_t> _backend;
         backend_mutex_type _mutex;
         std::function<bool(boost::log::attribute_value_set const&)> _filter;

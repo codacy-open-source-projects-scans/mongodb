@@ -29,49 +29,51 @@
 
 #include "mongo/db/repl/change_stream_oplog_notification.h"
 
-#include <boost/move/utility_core.hpp>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/pipeline/change_stream_helpers.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/logv2/redaction.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/str.h"
 
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
 
 namespace {
-
-void insertOplogEntry(OperationContext* opCtx,
-                      repl::MutableOplogEntry&& oplogEntry,
-                      StringData opStr) {
+void insertNotificationOplogEntries(OperationContext* opCtx,
+                                    std::vector<repl::MutableOplogEntry>&& oplogEntries,
+                                    StringData opStr) {
     writeConflictRetry(opCtx, opStr, NamespaceString::kRsOplogNamespace, [&] {
         AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
         WriteUnitOfWork wunit(opCtx);
-        const auto& oplogOpTime = repl::logOp(opCtx, &oplogEntry);
-        uassert(8423339,
-                str::stream() << "Failed to create new oplog entry for oplog with opTime: "
-                              << oplogEntry.getOpTime().toString() << ": "
-                              << redact(oplogEntry.toBSON()),
-                !oplogOpTime.isNull());
+        for (auto& oplogEntry : oplogEntries) {
+            const auto& oplogOpTime = repl::logOp(opCtx, &oplogEntry);
+            uassert(8423339,
+                    str::stream() << "Failed to create new oplog entry for oplog with opTime: "
+                                  << oplogEntry.getOpTime().toString() << ": "
+                                  << redact(oplogEntry.toBSON()),
+                    !oplogOpTime.isNull() || !oplogEntry.getNss().isReplicated());
+        }
         wunit.commit();
     });
 }
@@ -79,91 +81,34 @@ void insertOplogEntry(OperationContext* opCtx,
 }  // namespace
 
 void notifyChangeStreamsOnShardCollection(OperationContext* opCtx,
-                                          const NamespaceString& nss,
-                                          const UUID& uuid,
-                                          BSONObj cmd,
-                                          CommitPhase commitPhase,
-                                          const boost::optional<std::set<ShardId>>& shardIds) {
+                                          const CollectionSharded& notification) {
     BSONObjBuilder cmdBuilder;
-    std::string opName;
-    switch (commitPhase) {
-        case mongo::CommitPhase::kSuccessful:
-            opName = "shardCollection";
-            break;
-        case CommitPhase::kAborted:
-            opName = "shardCollectionAbort";
-            break;
-        case CommitPhase::kPrepare:
-            // in case of prepare, shardsIds is required
-            cmdBuilder.append("shards", *shardIds);
-            opName = "shardCollectionPrepare";
-            break;
-        default:
-            MONGO_UNREACHABLE;
-    }
+    StringData opName("shardCollection");
 
-    const auto nssStr = NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault());
+    const auto nssStr =
+        NamespaceStringUtil::serialize(notification.getNss(), SerializationContext::stateDefault());
     cmdBuilder.append(opName, nssStr);
-    cmdBuilder.appendElements(cmd);
+    cmdBuilder.appendElements(notification.getRequest());
 
     BSONObj fullCmd = cmdBuilder.obj();
 
     repl::MutableOplogEntry oplogEntry;
     oplogEntry.setOpType(repl::OpTypeEnum::kNoop);
-    oplogEntry.setNss(nss);
-    oplogEntry.setUuid(uuid);
-    oplogEntry.setTid(nss.tenantId());
+    oplogEntry.setNss(notification.getNss());
+    oplogEntry.setUuid(notification.getUuid());
+    oplogEntry.setTid(notification.getNss().tenantId());
     oplogEntry.setObject(BSON("msg" << BSON(opName << nssStr)));
     oplogEntry.setObject2(fullCmd);
     oplogEntry.setOpTime(repl::OpTime());
-    oplogEntry.setWallClockTime(opCtx->getServiceContext()->getFastClockSource()->now());
+    oplogEntry.setWallClockTime(opCtx->fastClockSource().now());
 
-    insertOplogEntry(opCtx, std::move(oplogEntry), "ShardCollectionWritesOplog");
+    insertNotificationOplogEntries(opCtx, {std::move(oplogEntry)}, "ShardCollectionWritesOplog");
 }
 
-void notifyChangeStreamsOnDatabaseAdded(OperationContext* opCtx,
-                                        const DatabasesAdded& databasesAddedNotification) {
-    const std::string operationName = [&] {
-        switch (databasesAddedNotification.getPhase()) {
-            case CommitPhaseEnum::kSuccessful:
-                return "createDatabase";
-            case CommitPhaseEnum::kAborted:
-                return "createDatabaseAbort";
-            case CommitPhaseEnum::kPrepare:
-                return "createDatabasePrepare";
-            default:
-                MONGO_UNREACHABLE;
-        }
-    }();
-
-    for (const auto& dbName : databasesAddedNotification.getNames()) {
-        repl::MutableOplogEntry oplogEntry;
-        const auto dbNameStr =
-            DatabaseNameUtil::serialize(dbName, SerializationContext::stateDefault());
-
-        oplogEntry.setOpType(repl::OpTypeEnum::kNoop);
-        oplogEntry.setNss(NamespaceString(dbName));
-        oplogEntry.setTid(dbName.tenantId());
-        oplogEntry.setObject(BSON("msg" << BSON(operationName << dbNameStr)));
-        BSONObjBuilder o2Builder;
-        o2Builder.append(operationName, dbNameStr);
-        if (databasesAddedNotification.getPhase() == CommitPhaseEnum::kPrepare) {
-            o2Builder.append("primaryShard", *databasesAddedNotification.getPrimaryShard());
-        }
-
-        o2Builder.append("isImported", databasesAddedNotification.getAreImported());
-        oplogEntry.setObject2(o2Builder.obj());
-        oplogEntry.setOpTime(repl::OpTime());
-        oplogEntry.setWallClockTime(opCtx->getServiceContext()->getFastClockSource()->now());
-
-        insertOplogEntry(opCtx, std::move(oplogEntry), "DbAddedToConfigCatalogWritesOplog");
-    }
-}
-
-void notifyChangeStreamsOnMovePrimary(OperationContext* opCtx,
-                                      const DatabaseName& dbName,
-                                      const ShardId& oldPrimary,
-                                      const ShardId& newPrimary) {
+repl::MutableOplogEntry buildMovePrimaryOplogEntry(OperationContext* opCtx,
+                                                   const DatabaseName& dbName,
+                                                   const ShardId& oldPrimary,
+                                                   const ShardId& newPrimary) {
     repl::MutableOplogEntry oplogEntry;
     const auto dbNameStr =
         DatabaseNameUtil::serialize(dbName, SerializationContext::stateDefault());
@@ -175,9 +120,19 @@ void notifyChangeStreamsOnMovePrimary(OperationContext* opCtx,
     oplogEntry.setObject2(
         BSON("movePrimary" << dbNameStr << "from" << oldPrimary << "to" << newPrimary));
     oplogEntry.setOpTime(repl::OpTime());
-    oplogEntry.setWallClockTime(opCtx->getServiceContext()->getFastClockSource()->now());
+    oplogEntry.setWallClockTime(opCtx->fastClockSource().now());
 
-    insertOplogEntry(opCtx, std::move(oplogEntry), "MovePrimaryWritesOplog");
+    return oplogEntry;
+}
+
+void notifyChangeStreamsOnMovePrimary(OperationContext* opCtx,
+                                      const DatabaseName& dbName,
+                                      const ShardId& oldPrimary,
+                                      const ShardId& newPrimary) {
+    insertNotificationOplogEntries(
+        opCtx,
+        {buildMovePrimaryOplogEntry(opCtx, dbName, oldPrimary, newPrimary)},
+        "MovePrimaryWritesOplog");
 }
 
 void notifyChangeStreamsOnReshardCollectionComplete(OperationContext* opCtx,
@@ -215,6 +170,12 @@ void notifyChangeStreamsOnReshardCollectionComplete(OperationContext* opCtx,
                 o2Builder.append("collation", notification.getCollation().value());
             }
 
+            if (notification.getProvenance().has_value()) {
+                o2Builder.append(
+                    "provenance",
+                    ReshardingProvenance_serializer(notification.getProvenance().value()));
+            }
+
             if (!zones.empty()) {
                 BSONArrayBuilder zonesBSON(o2Builder.subarrayStart("zones"));
                 for (const auto& zone : zones) {
@@ -228,7 +189,7 @@ void notifyChangeStreamsOnReshardCollectionComplete(OperationContext* opCtx,
         }
 
         oplogEntry.setOpTime(repl::OpTime());
-        oplogEntry.setWallClockTime(opCtx->getServiceContext()->getFastClockSource()->now());
+        oplogEntry.setWallClockTime(opCtx->fastClockSource().now());
         return oplogEntry;
     };
 
@@ -237,27 +198,171 @@ void notifyChangeStreamsOnReshardCollectionComplete(OperationContext* opCtx,
     // redacted version.
     try {
         auto catalogClient = Grid::get(opCtx)->catalogClient();
-        const auto zones =
-            uassertStatusOK(catalogClient->getTagsForCollection(opCtx, notification.getNss()));
+        // Due to the size constraints mentioned above, the zone list is not embedded into this
+        // notification and it needs to be fetched from the config database.
+        const auto& collectionCurrentlyHoldingZones =
+            notification.getReferenceToZoneList().value_or(notification.getNss());
+        const auto zones = uassertStatusOK(
+            catalogClient->getTagsForCollection(opCtx, collectionCurrentlyHoldingZones));
         auto oplogEntry = buildOpEntry(zones);
-        insertOplogEntry(opCtx, std::move(oplogEntry), "ReshardCollectionWritesOplog");
+        insertNotificationOplogEntries(
+            opCtx, {std::move(oplogEntry)}, "ReshardCollectionWritesOplog");
     } catch (ExceptionFor<ErrorCodes::BSONObjectTooLarge>&) {
         auto oplogEntry = buildOpEntry({});
-        insertOplogEntry(opCtx, std::move(oplogEntry), "ReshardCollectionWritesOplog");
+        insertNotificationOplogEntries(
+            opCtx, {std::move(oplogEntry)}, "ReshardCollectionWritesOplog");
     }
+}
+
+repl::MutableOplogEntry buildNamespacePlacementChangedOplogEntry(
+    OperationContext* opCtx, const NamespacePlacementChanged& notification) {
+    repl::MutableOplogEntry oplogEntry;
+    oplogEntry.setOpType(repl::OpTypeEnum::kNoop);
+    oplogEntry.setNss(notification.getNss());
+    oplogEntry.setTid(notification.getNss().tenantId());
+
+    oplogEntry.setObject(
+        BSON("msg" << BSON("namespacePlacementChanged" << NamespaceStringUtil::serialize(
+                               notification.getNss(), SerializationContext::stateDefault()))));
+
+    const auto buildO2Field = [&] {
+        BSONObjBuilder nsFieldBuilder;
+        if (notification.getNss() != NamespaceString::kEmpty) {
+            nsFieldBuilder.append("db", notification.getNss().dbName().toStringForResourceId());
+
+            if (!notification.getNss().isDbOnly()) {
+                nsFieldBuilder.append("coll", notification.getNss().coll());
+            }
+        }
+
+        return BSON("namespacePlacementChanged" << 1 << "ns" << nsFieldBuilder.obj()
+                                                << "committedAt" << notification.getCommittedAt());
+    };
+
+    oplogEntry.setObject2(buildO2Field());
+
+    oplogEntry.setOpTime(repl::OpTime());
+    oplogEntry.setWallClockTime(opCtx->fastClockSource().now());
+
+    return oplogEntry;
+}
+
+void notifyChangeStreamsOnNamespacePlacementChanged(OperationContext* opCtx,
+                                                    const NamespacePlacementChanged& notification) {
+    insertNotificationOplogEntries(opCtx,
+                                   {buildNamespacePlacementChangedOplogEntry(opCtx, notification)},
+                                   "NamespacePlacementChangedWritesOplog");
+}
+
+void notifyChangeStreamsOnPlacementHistoryMetadataChanged(OperationContext* opCtx) {
+    Timestamp now(opCtx->fastClockSource().now());
+    // Global changes to the metadata of placementHistory are encoded as a NamespacePlacementChanged
+    // notification with an unspecified namespace.
+    NamespacePlacementChanged globalChangeNotification(NamespaceString::kEmpty, now);
+    insertNotificationOplogEntries(
+        opCtx,
+        {buildNamespacePlacementChangedOplogEntry(opCtx, globalChangeNotification)},
+        "PlacementHistoryMetadataChangedWritesOplog");
 }
 
 void notifyChangeStreamOnEndOfTransaction(OperationContext* opCtx,
                                           const LogicalSessionId& lsid,
                                           const TxnNumber& txnNumber,
                                           const std::vector<NamespaceString>& affectedNamespaces) {
-    repl::MutableOplogEntry oplogEntry = change_stream::createEndOfTransactionOplogEntry(
-        lsid,
-        txnNumber,
-        affectedNamespaces,
-        repl::OpTime().getTimestamp(),
-        opCtx->getServiceContext()->getFastClockSource()->now());
-    insertOplogEntry(opCtx, std::move(oplogEntry), "EndOfTransactionWritesOplog");
+    repl::MutableOplogEntry oplogEntry =
+        change_stream::createEndOfTransactionOplogEntry(lsid,
+                                                        txnNumber,
+                                                        affectedNamespaces,
+                                                        repl::OpTime().getTimestamp(),
+                                                        opCtx->fastClockSource().now());
+    insertNotificationOplogEntries(opCtx, {std::move(oplogEntry)}, "EndOfTransactionWritesOplog");
+}
+
+std::vector<repl::MutableOplogEntry> buildMoveChunkOplogEntries(
+    OperationContext* opCtx,
+    const NamespaceString& collName,
+    const boost::optional<UUID>& collUUID,
+    const ShardId& donor,
+    const ShardId& recipient,
+    bool noMoreCollectionChunksOnDonor,
+    bool firstCollectionChunkOnRecipient) {
+    const auto nss = NamespaceStringUtil::serialize(collName, SerializationContext::stateDefault());
+    std::vector<repl::MutableOplogEntry> oplogEntries;
+    {
+        repl::MutableOplogEntry oplogEntry;
+        StringData opName("moveChunk");
+
+        oplogEntry.setOpType(repl::OpTypeEnum::kNoop);
+        oplogEntry.setNss(collName);
+        oplogEntry.setUuid(collUUID);
+        oplogEntry.setTid(collName.tenantId());
+        oplogEntry.setObject(BSON("msg" << BSON(opName << nss)));
+        oplogEntry.setObject2(BSON(opName << nss << "donor" << donor << "recipient" << recipient
+                                          << "allCollectionChunksMigratedFromDonor"
+                                          << noMoreCollectionChunksOnDonor));
+        oplogEntry.setOpTime(repl::OpTime());
+        oplogEntry.setWallClockTime(opCtx->fastClockSource().now());
+
+        oplogEntries.push_back(std::move(oplogEntry));
+    }
+
+    // Conditionally emit the legacy 'migrateLastChunkFromShard' and 'migrateChunkToNewShard' op
+    // entry types, consumed by V1 change stream readers.
+    if (noMoreCollectionChunksOnDonor) {
+        repl::MutableOplogEntry legacyOplogEntry;
+
+        legacyOplogEntry.setOpType(repl::OpTypeEnum::kNoop);
+        legacyOplogEntry.setNss(collName);
+        legacyOplogEntry.setUuid(collUUID);
+        legacyOplogEntry.setTid(collName.tenantId());
+        const std::string oMessage = str::stream()
+            << "Migrate the last chunk for " << collName.toStringForErrorMsg() << " off shard "
+            << donor;
+        legacyOplogEntry.setObject(BSON("msg" << oMessage));
+        legacyOplogEntry.setObject2(BSON("migrateLastChunkFromShard" << nss << "shardId" << donor));
+        legacyOplogEntry.setOpTime(repl::OpTime());
+        legacyOplogEntry.setWallClockTime(opCtx->fastClockSource().now());
+
+        oplogEntries.push_back(std::move(legacyOplogEntry));
+    }
+
+    if (firstCollectionChunkOnRecipient) {
+        repl::MutableOplogEntry legacyOplogEntry;
+        legacyOplogEntry.setOpType(repl::OpTypeEnum::kNoop);
+        legacyOplogEntry.setNss(collName);
+        legacyOplogEntry.setUuid(collUUID);
+        legacyOplogEntry.setTid(collName.tenantId());
+        const std::string oMessage = str::stream()
+            << "Migrating chunk from shard " << donor << " to shard " << recipient
+            << " with no chunks for this collection";
+        legacyOplogEntry.setObject(BSON("msg" << oMessage));
+        legacyOplogEntry.setObject2(BSON("migrateChunkToNewShard" << nss << "fromShardId" << donor
+                                                                  << "toShardId" << recipient));
+        legacyOplogEntry.setOpTime(repl::OpTime());
+        legacyOplogEntry.setWallClockTime(opCtx->fastClockSource().now());
+
+        oplogEntries.push_back(std::move(legacyOplogEntry));
+    }
+
+    return oplogEntries;
+}
+
+void notifyChangeStreamsOnChunkMigrated(OperationContext* opCtx,
+                                        const NamespaceString& collName,
+                                        const boost::optional<UUID>& collUUID,
+                                        const ShardId& donor,
+                                        const ShardId& recipient,
+                                        bool noMoreCollectionChunksOnDonor,
+                                        bool firstCollectionChunkOnRecipient) {
+    insertNotificationOplogEntries(opCtx,
+                                   buildMoveChunkOplogEntries(opCtx,
+                                                              collName,
+                                                              collUUID,
+                                                              donor,
+                                                              recipient,
+                                                              noMoreCollectionChunksOnDonor,
+                                                              firstCollectionChunkOnRecipient),
+                                   "ChunkMigrationWritesOplog");
 }
 
 }  // namespace mongo

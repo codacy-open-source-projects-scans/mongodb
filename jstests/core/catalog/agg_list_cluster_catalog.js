@@ -2,26 +2,27 @@
  * Test the $listClusterCatalog stage.
  *
  * @tags: [
- *    # $listClusterCatalog was introduced in v8.1
+ *    # TODO (SERVER-98651) remove the tag as part of this ticket.
  *    requires_fcv_81,
- *    # $listClusterCatalog only supports local read concern
- *    assumes_read_concern_unchanged,
  *    # There is no need to support multitenancy, as it has been canceled and was never in
  *    # production (see SERVER-97215 for more information)
  *    command_not_supported_in_serverless,
- *    does_not_support_transactions,
- *    # In a clustered environment, the $listClusterCatalog will eventually target the CSRS to
- *    # access the cluster catalog. The causally consistent suites run on fixtures with CSRS without
- *    # secondaries.
- *    does_not_support_causal_consistency,
+ *    # This test invokes listCollections separately to validate the $listClusterCatalog output.
+ *    # None of them can read at a provided timestamp, therefore this test cannot run in a suite
+ *    # that can change a collection's incarnation.
+ *    assumes_stable_collection_uuid,
+ *    requires_getmore,
  * ]
  */
 
+import {areViewlessTimeseriesEnabled} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
+
 const kDb1 = "db1_agg_list_cluster_catalog";
 const kDb2 = "db2_agg_list_cluster_catalog";
-const kNotExistent = 'notExistent_agg_list_cluster_catalog';
+const kNotExistent = "notExistent_agg_list_cluster_catalog";
 const kSpecsList = ["shards", "tracked", "balancingConfiguration"];
 const adminDB = db.getSiblingDB("admin");
+const configDB = db.getSiblingDB("config");
 
 // Test all the combination of specs. Every spec can be true or false. The total number of
 // combinations will be 2^n where n is number of specs.
@@ -32,7 +33,7 @@ function generateSpecCombinations(specs) {
     for (let i = 0; i < totalCombinations; i++) {
         const combination = {};
         for (let j = 0; j < specs.length; j++) {
-            combination[specs[j]] = Boolean(i & (1 << j));  // 0 for false, a value for true.
+            combination[specs[j]] = Boolean(i & (1 << j)); // 0 for false, a value for true.
         }
 
         combinations.push(combination);
@@ -73,20 +74,12 @@ function verify(expectedResult, result, specs) {
         assert.eq(undefined, result.shards, "shards field mismatch:" + tojson(result));
     }
     if (result.sharded && specs.balancingConfiguration) {
-        assert.neq(undefined,
-                   result.balancingEnabled,
-                   "balancingEnabled field mismatch:" + tojson(result));
-        assert.neq(undefined,
-                   result.autoMergingEnabled,
-                   "autoMergingEnabled field mismatch:" + tojson(result));
+        assert.neq(undefined, result.balancingEnabled, "balancingEnabled field mismatch:" + tojson(result));
+        assert.neq(undefined, result.autoMergingEnabled, "autoMergingEnabled field mismatch:" + tojson(result));
         assert.neq(undefined, result.chunkSize, "chunkSize field mismatch:" + tojson(result));
     } else {
-        assert.eq(undefined,
-                  result.balancingEnabled,
-                  "balancingEnabled field mismatch:" + tojson(result));
-        assert.eq(undefined,
-                  result.autoMergingEnabled,
-                  "autoMergingEnabled field mismatch:" + tojson(result));
+        assert.eq(undefined, result.balancingEnabled, "balancingEnabled field mismatch:" + tojson(result));
+        assert.eq(undefined, result.autoMergingEnabled, "autoMergingEnabled field mismatch:" + tojson(result));
         assert.eq(undefined, result.chunkSize, "chunkSize field mismatch:" + tojson(result));
     }
 }
@@ -98,34 +91,41 @@ function getStageResultForNss(stageResult, nss) {
 }
 
 function isTempNss(collectionName) {
-    if (collectionName.startsWith("system.resharding") ||
-        collectionName.startsWith("tmp.agg_out") ||
-        collectionName.startsWith("system.buckets.resharding") ||
-        collectionName.startsWith("system.buckets.tmp.agg_out")) {
+    if (collectionName.startsWith("system.resharding") || collectionName.startsWith("tmp.agg_out")) {
         return true;
+    }
+    if (!areViewlessTimeseriesEnabled(db)) {
+        if (
+            collectionName.startsWith("system.buckets.resharding") ||
+            collectionName.startsWith("system.buckets.tmp.agg_out")
+        ) {
+            return true;
+        }
     }
     return false;
 }
 
 function verifyAgainstListCollections(listCollectionResult, stageResult, specs) {
-    listCollectionResult
-        .forEach(
-            (expectedResult) => {
-                let nss = expectedResult.db + "." + expectedResult.name;
-                let nssStageResult = getStageResultForNss(stageResult, nss);
-                // Temporary namespaces might disappear between the list collection request and the
-                // aggregation request. Ignore this case.
-                if (isTempNss(expectedResult.name) && nssStageResult == undefined) {
-                    return;
-                }
-                // The result must be present.
-                assert.neq(nssStageResult, undefined, `The namespace ${
-                    nss} was found in listCollections but not in the $listClusterCatalog. Result ${
-                    tojson(stageResult)}`);
-                // The result must match the entire list collection result + some few extra fields.
-                expectedResult.ns = nss;
-                verify(expectedResult, nssStageResult, specs);
-            });
+    listCollectionResult.forEach((expectedResult) => {
+        let nss = expectedResult.db + "." + expectedResult.name;
+        let nssStageResult = getStageResultForNss(stageResult, nss);
+        // Temporary namespaces might disappear between the list collection request and the
+        // aggregation request. Ignore this case.
+        if (isTempNss(expectedResult.name) && nssStageResult == undefined) {
+            return;
+        }
+        // The result must be present.
+        assert.neq(
+            nssStageResult,
+            undefined,
+            `The namespace ${nss} was found in listCollections but not in the $listClusterCatalog. Result ${tojson(
+                stageResult,
+            )}`,
+        );
+        // The result must match the entire list collection result + some few extra fields.
+        expectedResult.ns = nss;
+        verify(expectedResult, nssStageResult, specs);
+    });
 }
 
 function setupUserCollections(dbTest) {
@@ -140,8 +140,7 @@ function setupUserCollections(dbTest) {
     assert.commandWorked(dbTest.createCollection("coll1"));
     assert.commandWorked(dbTest.createCollection("coll2"));
     assert.commandWorked(dbTest.createCollection("view", {viewOn: "coll1", pipeline: []}));
-    assert.commandWorked(dbTest.createCollection(
-        "timeseries", {timeseries: {metaField: "meta", timeField: "timestamp"}}));
+    assert.commandWorked(dbTest.createCollection("timeseries", {timeseries: {metaField: "m", timeField: "timestamp"}}));
 }
 
 function runListCollectionsOnDbs(db, dbNames) {
@@ -167,20 +166,25 @@ jsTest.log("The stage must run collectionless.");
 {
     assert.commandFailedWithCode(
         db.runCommand({aggregate: "foo", pipeline: [{$listClusterCatalog: {}}], cursor: {}}),
-        9621301);
+        9621301,
+    );
 }
 
 jsTest.log("The stage must take an object.");
 {
     assert.commandFailedWithCode(
         db.runCommand({aggregate: 1, pipeline: [{$listClusterCatalog: "wrong"}], cursor: {}}),
-        9621302);
+        9621302,
+    );
 }
 
 jsTest.log("The stage must return the collection for the specified user db.");
 {
     let listCollectionResult = runListCollectionsOnDbs(db, [kDb1]);
-    let stageResult = db.getSiblingDB(kDb1).aggregate([{$listClusterCatalog: {}}]).toArray();
+    let stageResult = db
+        .getSiblingDB(kDb1)
+        .aggregate([{$listClusterCatalog: {}}])
+        .toArray();
 
     verifyAgainstListCollections(listCollectionResult, stageResult, {});
 }
@@ -188,19 +192,19 @@ jsTest.log("The stage must return the collection for the specified user db.");
 jsTest.log("The stage must return the collection for the specified user db: Using a second db.");
 {
     let listCollectionResult = runListCollectionsOnDbs(db, [kDb2]);
-    let stageResult = db.getSiblingDB(kDb2).aggregate([{$listClusterCatalog: {}}]).toArray();
+    let stageResult = db
+        .getSiblingDB(kDb2)
+        .aggregate([{$listClusterCatalog: {}}])
+        .toArray();
 
     verifyAgainstListCollections(listCollectionResult, stageResult, {});
 }
 
 jsTest.log("The stage must return an empty result if the user database doesn't exist.");
 {
-    let result =
-        assert
-            .commandWorked(
-                db.getSiblingDB(kNotExistent)
-                    .runCommand({aggregate: 1, pipeline: [{$listClusterCatalog: {}}], cursor: {}}))
-            .cursor.firstBatch;
+    let result = assert.commandWorked(
+        db.getSiblingDB(kNotExistent).runCommand({aggregate: 1, pipeline: [{$listClusterCatalog: {}}], cursor: {}}),
+    ).cursor.firstBatch;
     assert.eq(0, result.length, result);
 }
 
@@ -223,5 +227,33 @@ jsTest.log("The stage must work under any combination of specs.");
         jsTest.log("Verify the stage reports the correct result for specs " + tojson(specs));
         let stageResult = adminDB.aggregate([{$listClusterCatalog: specs}]).toArray();
         verifyAgainstListCollections(listCollectionResult, stageResult, specs);
+    });
+}
+
+jsTest.log("The stage must return the admin collections.");
+{
+    let listCollectionResult = runListCollectionsOnDbs(db, ["admin"]);
+    let stageResult = adminDB.aggregate([{$listClusterCatalog: {}}]).toArray();
+
+    verifyAgainstListCollections(listCollectionResult, stageResult, {});
+}
+
+jsTest.log("The stage must return the same config collections from admin and config databases.");
+{
+    assert.soon(() => {
+        let listCollectionResult = runListCollectionsOnDbs(db, ["config"]);
+        let stageResultAdmin = adminDB
+            .aggregate([{$listClusterCatalog: {}}, {$match: {$and: [{db: "config"}, {ns: {$not: /system.profile/}}]}}])
+            .toArray();
+        let stageResultConfig = configDB.aggregate([{$listClusterCatalog: {}}]).toArray();
+        if (
+            listCollectionResult.length != stageResultAdmin.length ||
+            listCollectionResult.length != stageResultConfig.length
+        ) {
+            return false;
+        }
+        verifyAgainstListCollections(listCollectionResult, stageResultAdmin, {});
+        verifyAgainstListCollections(listCollectionResult, stageResultConfig, {});
+        return true;
     });
 }

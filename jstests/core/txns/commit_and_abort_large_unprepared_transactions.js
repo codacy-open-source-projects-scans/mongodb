@@ -14,7 +14,7 @@ const testColl = testDB.getCollection(collName);
 // of 10MB each to create a "large" transaction.
 const kSize10MB = 10 * 1024 * 1024;
 function createLargeDocument(id) {
-    return {_id: id, longString: new Array(kSize10MB).join("a")};
+    return {_id: id, longString: "a".repeat(kSize10MB)};
 }
 
 testColl.drop({writeConcern: {w: "majority"}});
@@ -60,7 +60,8 @@ withRetryOnTransientTxnError(
     },
     () => {
         session.abortTransaction_forTesting();
-    });
+    },
+);
 assert.sameMembers(sessionColl.find().toArray(), [doc1, doc2]);
 
 // Test aborting an unprepared large transaction with two 10MB inserts.
@@ -75,6 +76,7 @@ withRetryOnTransientTxnError(
     },
     () => {
         session.abortTransaction_forTesting();
-    });
+    },
+);
 
 assert.sameMembers(sessionColl.find({_id: {$gt: 2}}).toArray(), []);

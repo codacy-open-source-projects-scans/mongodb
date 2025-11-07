@@ -23,18 +23,18 @@
 
 assert.commandWorked(db._adminCommand({setParameter: 1, notablescan: true}));
 
-var status = function(msg) {
+let status = function (msg) {
     print("\n\n###\n" + msg + "\n###\n\n");
 };
 
-var coll = db.getCollection("jstests_geo_update_btree2");
+let coll = db.getCollection("jstests_geo_update_btree2");
 coll.drop();
 
-coll.createIndex({loc: '2d'});
+coll.createIndex({loc: "2d"});
 
 status("Inserting points...");
 
-var numPoints = 10;
+let numPoints = 10;
 Random.setRandomSeed();
 for (i = 0; i < numPoints; i++) {
     coll.insert({_id: i, loc: [Random.rand() * 180, Random.rand() * 180], i: i % 2});
@@ -42,24 +42,34 @@ for (i = 0; i < numPoints; i++) {
 
 status("Starting long query...");
 
-var query = coll.find({loc: {$within: {$box: [[-180, -180], [180, 180]]}}}).batchSize(2);
-var firstValues = [query.next()._id, query.next()._id];
+let query = coll
+    .find({
+        loc: {
+            $within: {
+                $box: [
+                    [-180, -180],
+                    [180, 180],
+                ],
+            },
+        },
+    })
+    .batchSize(2);
+let firstValues = [query.next()._id, query.next()._id];
 printjson(firstValues);
 
 status("Removing points not returned by query...");
 
-var allQuery = coll.find();
-var removeIds = [];
+let allQuery = coll.find();
+let removeIds = [];
 while (allQuery.hasNext()) {
-    var id = allQuery.next()._id;
+    let id = allQuery.next()._id;
     if (firstValues.indexOf(id) < 0) {
         removeIds.push(id);
     }
 }
 
-var updateIds = [];
-for (var i = 0, max = removeIds.length / 2; i < max; i++)
-    updateIds.push(removeIds.pop());
+let updateIds = [];
+for (var i = 0, max = removeIds.length / 2; i < max; i++) updateIds.push(removeIds.pop());
 
 printjson(removeIds);
 coll.remove({_id: {$in: removeIds}});
@@ -67,9 +77,8 @@ coll.remove({_id: {$in: removeIds}});
 status("Updating points returned by query...");
 printjson(updateIds);
 
-var big = new Array(3000).toString();
-for (var i = 0; i < updateIds.length; i++)
-    coll.update({_id: updateIds[i]}, {$set: {data: big}});
+let big = new Array(3000).toString();
+for (var i = 0; i < updateIds.length; i++) coll.update({_id: updateIds[i]}, {$set: {data: big}});
 
 status("Counting final points...");
 

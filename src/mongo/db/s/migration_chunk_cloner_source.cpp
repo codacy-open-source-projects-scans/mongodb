@@ -36,13 +36,6 @@
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "cxxabi.h"
-#include <algorithm>
-#include <cstdint>
-#include <iterator>
-#include <limits>
-#include <string>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -52,48 +45,44 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/basic_types.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/global_catalog/ddl/shard_key_index_util.h"
+#include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/query/index_bounds.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/write_ops/write_ops_retryability.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/collection_metadata.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/migration_source_manager.h"
-#include "mongo/db/s/shard_key_index_util.h"
-#include "mongo/db/s/sharding_runtime_d_params_gen.h"
-#include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/s/start_chunk_clone_request.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/sharding_runtime_d_params_gen.h"
+#include "mongo/db/sharding_environment/sharding_statistics.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/balancer_configuration.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/grid.h"
 #include "mongo/s/request_types/migration_secondary_throttle_options.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
@@ -104,18 +93,22 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <iterator>
+#include <limits>
+#include <string>
+#include <utility>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 namespace mongo {
 namespace {
 
-using namespace fmt::literals;
-
 const char kRecvChunkStatus[] = "_recvChunkStatus";
 const char kRecvChunkCommit[] = "_recvChunkCommit";
 const char kRecvChunkAbort[] = "_recvChunkAbort";
 
-const int kMaxObjectPerChunk{250000};
 const Hours kMaxWaitToCommitCloneForJumboChunk(6);
 
 MONGO_FAIL_POINT_DEFINE(failTooMuchMemoryUsed);
@@ -169,8 +162,8 @@ std::vector<repl::ReplOperation> convertVector(const std::vector<repl::OplogEntr
             auto durableReplOp = op.getDurableReplOperation();
             if (!durableReplOp.isOwned()) {
                 durableReplOp = repl::DurableReplOperation::parseOwned(
-                    IDLParserContext{"MigrationChunkClonerSource_toOwnedDurableReplOperation"},
-                    durableReplOp.toBSON());
+                    durableReplOp.toBSON(),
+                    IDLParserContext{"MigrationChunkClonerSource_toOwnedDurableReplOperation"});
             }
 
             return repl::ReplOperation(std::move(durableReplOp));
@@ -197,7 +190,7 @@ LogTransactionOperationsForShardingHandler::LogTransactionOperationsForShardingH
       _prepareOrCommitOpTime(std::move(prepareOrCommitOpTime)) {}
 
 void LogTransactionOperationsForShardingHandler::commit(OperationContext* opCtx,
-                                                        boost::optional<Timestamp>) {
+                                                        boost::optional<Timestamp>) noexcept {
     std::set<NamespaceString> namespacesTouchedByTransaction;
 
     // Inform the session migration subsystem that a transaction has committed for the given
@@ -238,8 +231,6 @@ void LogTransactionOperationsForShardingHandler::commit(OperationContext* opCtx,
         const auto& nss = stmt.getNss();
         auto opCtx = cc().getOperationContext();
 
-        // TODO (SERVER-71444): Fix to be interruptible or document exception.
-        UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
         const auto scopedCss =
             CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss);
 
@@ -286,7 +277,7 @@ void LogTransactionOperationsForShardingHandler::commit(OperationContext* opCtx,
                 // tell whether post image doc will fall within the chunk range. If it turns out
                 // both preImage and postImage doc don't fall into the chunk range, it is not wrong
                 // for this op to be added to session migration, but it will result in wasted work
-                // and unneccesary extra oplog storage on the destination.
+                // and unnecessary extra oplog storage on the destination.
                 cloner->_deferProcessingForXferMod(preImageDocKey);
             }
         } else {
@@ -430,6 +421,7 @@ StatusWith<BSONObj> MigrationChunkClonerSource::commitClone(OperationContext* op
                 return status;
             }
         } else {
+            stdx::lock_guard<stdx::mutex> sl(_mutex);
             invariant(PlanExecutor::IS_EOF == _jumboChunkCloneState->clonerState);
             invariant(!_cloneList.hasMore());
         }
@@ -461,7 +453,7 @@ StatusWith<BSONObj> MigrationChunkClonerSource::commitClone(OperationContext* op
     return responseStatus.getStatus();
 }
 
-void MigrationChunkClonerSource::cancelClone(OperationContext* opCtx) noexcept {
+void MigrationChunkClonerSource::cancelClone(OperationContext* opCtx) {
     invariant(!shard_role_details::getLocker(opCtx)->isLocked());
 
     _sessionCatalogSource->onCloneCleanup();
@@ -661,20 +653,29 @@ void MigrationChunkClonerSource::_decrementOutstandingOperationTrackRequests() {
     }
 }
 
-void MigrationChunkClonerSource::_nextCloneBatchFromIndexScan(OperationContext* opCtx,
-                                                              const CollectionPtr& collection,
-                                                              BSONArrayBuilder* arrBuilder) {
-    ElapsedTracker tracker(opCtx->getServiceContext()->getFastClockSource(),
+void MigrationChunkClonerSource::_nextCloneBatchFromIndexScan(
+    OperationContext* opCtx,
+    boost::optional<CollectionAcquisition> collection,
+    BSONArrayBuilder* arrBuilder) {
+    ElapsedTracker tracker(&opCtx->fastClockSource(),
                            internalQueryExecYieldIterations.load(),
                            Milliseconds(internalQueryExecYieldPeriodMS.load()));
-
-    if (!_jumboChunkCloneState->clonerExec) {
+    boost::optional<HandleTransactionResourcesFromStasher> scopedResourceHandler;
+    auto isFirstIteration = !_jumboChunkCloneState->clonerExec;
+    if (isFirstIteration) {
+        tassert(10711502,
+                "Expected an active acquisition when running nextCloneBatch from index scan at the "
+                "first iteration",
+                static_cast<bool>(collection));
         auto exec = uassertStatusOK(_getIndexScanExecutor(
-            opCtx, collection, InternalPlanner::IndexScanOptions::IXSCAN_FETCH));
+            opCtx, *collection, InternalPlanner::IndexScanOptions::IXSCAN_FETCH));
         _jumboChunkCloneState->clonerExec = std::move(exec);
     } else {
+        // Restore the acquisition
+        scopedResourceHandler.emplace(opCtx,
+                                      _jumboChunkCloneState->transactionResourceStasher.get());
         _jumboChunkCloneState->clonerExec->reattachToOperationContext(opCtx);
-        _jumboChunkCloneState->clonerExec->restoreState(&collection);
+        _jumboChunkCloneState->clonerExec->restoreState(nullptr);
     }
 
     PlanExecutor::ExecState execState;
@@ -718,18 +719,27 @@ void MigrationChunkClonerSource::_nextCloneBatchFromIndexScan(OperationContext* 
 
     _jumboChunkCloneState->clonerExec->saveState();
     _jumboChunkCloneState->clonerExec->detachFromOperationContext();
+
+    // From the second iteration, the destruction of the HandleTransactionResourcesFromStasher will
+    // re-stash resources.
+    if (isFirstIteration) {
+        stashTransactionResourcesFromOperationContext(
+            opCtx, _jumboChunkCloneState->transactionResourceStasher.get());
+    }
 }
 
-void MigrationChunkClonerSource::_nextCloneBatchFromCloneRecordIds(OperationContext* opCtx,
-                                                                   const CollectionPtr& collection,
-                                                                   BSONArrayBuilder* arrBuilder) {
-    ElapsedTracker tracker(opCtx->getServiceContext()->getFastClockSource(),
+void MigrationChunkClonerSource::_nextCloneBatchFromCloneRecordIds(
+    OperationContext* opCtx,
+    const CollectionAcquisition& collection,
+    BSONArrayBuilder* arrBuilder) {
+    ElapsedTracker tracker(&opCtx->fastClockSource(),
                            internalQueryExecYieldIterations.load(),
                            Milliseconds(internalQueryExecYieldPeriodMS.load()));
 
     while (true) {
         int recordsNoLongerExist = 0;
-        auto docInFlight = _cloneList.getNextDoc(opCtx, collection, &recordsNoLongerExist);
+        auto docInFlight =
+            _cloneList.getNextDoc(opCtx, collection.getCollectionPtr(), &recordsNoLongerExist);
 
         if (recordsNoLongerExist) {
             stdx::lock_guard lk(_mutex);
@@ -791,9 +801,21 @@ uint64_t MigrationChunkClonerSource::getCloneBatchBufferAllocationSize() {
 }
 
 Status MigrationChunkClonerSource::nextCloneBatch(OperationContext* opCtx,
-                                                  const CollectionPtr& collection,
+                                                  boost::optional<CollectionAcquisition> collection,
                                                   BSONArrayBuilder* arrBuilder) {
-    dassert(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(nss(), MODE_IS));
+    // Locks will be internally restored by the cloner in case of ongoing jumbo chunk cloning in
+    // progress.
+    if (hasOngoingJumboChunkCloning()) {
+        tassert(10711500,
+                "Expected no active acquisitions when a jumbo chunk cloning is ongoing",
+                !collection.has_value());
+    } else {
+        tassert(10711501,
+                "Expected an active acquisition when running nextCloneBatch and no jumbo chunk "
+                "cloning is ongoing",
+                shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(nss(), MODE_IS) &&
+                    collection.has_value());
+    }
 
     // If this chunk is too large to store records in _cloneRecordIds and the command args specify
     // to attempt to move it, scan the collection directly.
@@ -806,7 +828,7 @@ Status MigrationChunkClonerSource::nextCloneBatch(OperationContext* opCtx,
         }
     }
 
-    _nextCloneBatchFromCloneRecordIds(opCtx, collection, arrBuilder);
+    _nextCloneBatchFromCloneRecordIds(opCtx, *collection, arrBuilder);
     return Status::OK();
 }
 
@@ -1004,12 +1026,12 @@ StatusWith<BSONObj> MigrationChunkClonerSource::_callRecipient(OperationContext*
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>>
 MigrationChunkClonerSource::_getIndexScanExecutor(OperationContext* opCtx,
-                                                  const CollectionPtr& collection,
+                                                  const CollectionAcquisition& acquisition,
                                                   InternalPlanner::IndexScanOptions scanOption) {
     // Allow multiKey based on the invariant that shard keys must be single-valued. Therefore, any
     // multi-key index prefixed by shard key cannot be multikey over the shard key fields.
     const auto shardKeyIdx = findShardKeyPrefixedIndex(opCtx,
-                                                       collection,
+                                                       acquisition.getCollectionPtr(),
                                                        _shardKeyPattern.toBSON(),
                                                        /*requireSingleKey=*/false);
     if (!shardKeyIdx) {
@@ -1027,7 +1049,7 @@ MigrationChunkClonerSource::_getIndexScanExecutor(OperationContext* opCtx,
     // We can afford to yield here because any change to the base data that we might miss is already
     // being queued and will migrate in the 'transferMods' stage.
     return InternalPlanner::shardKeyIndexScan(opCtx,
-                                              &collection,
+                                              acquisition,
                                               *shardKeyIdx,
                                               min,
                                               max,
@@ -1038,15 +1060,18 @@ MigrationChunkClonerSource::_getIndexScanExecutor(OperationContext* opCtx,
 }
 
 Status MigrationChunkClonerSource::_storeCurrentRecordId(OperationContext* opCtx) {
-    AutoGetCollection collection(opCtx, nss(), MODE_IS);
-    if (!collection) {
+    auto collection = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nss(), AcquisitionPrerequisites::kRead),
+        MODE_IS);
+    if (!collection.exists()) {
         return {ErrorCodes::NamespaceNotFound,
                 str::stream() << "Collection " << nss().toStringForErrorMsg()
                               << " does not exist."};
     }
 
-    auto swExec = _getIndexScanExecutor(
-        opCtx, collection.getCollection(), InternalPlanner::IndexScanOptions::IXSCAN_DEFAULT);
+    auto swExec =
+        _getIndexScanExecutor(opCtx, collection, InternalPlanner::IndexScanOptions::IXSCAN_DEFAULT);
     if (!swExec.isOK()) {
         return swExec.getStatus();
     }
@@ -1058,9 +1083,9 @@ Status MigrationChunkClonerSource::_storeCurrentRecordId(OperationContext* opCtx
     unsigned long long maxRecsWhenFull;
     long long avgRecSize;
 
-    const long long totalRecs = collection->numRecords(opCtx);
+    const long long totalRecs = collection.getCollectionPtr()->numRecords(opCtx);
     if (totalRecs > 0) {
-        avgRecSize = collection->dataSize(opCtx) / totalRecs;
+        avgRecSize = collection.getCollectionPtr()->dataSize(opCtx) / totalRecs;
         // The calls to numRecords() and dataSize() are not atomic so it is possible that the data
         // size becomes smaller than the number of records between the two calls, which would result
         // in average record size of zero
@@ -1110,22 +1135,24 @@ Status MigrationChunkClonerSource::_storeCurrentRecordId(OperationContext* opCtx
         throw;
     }
 
-    const uint64_t collectionAverageObjectSize = collection->averageObjectSize(opCtx);
+    const uint64_t collectionAverageObjectSize =
+        collection.getCollectionPtr()->averageObjectSize(opCtx);
 
     uint64_t averageObjectIdSize = 0;
     const uint64_t defaultObjectIdSize = OID::kOIDSize;
 
     // For clustered collection, an index on '_id' is not required.
-    if (totalRecs > 0 && !collection->isClustered()) {
-        const auto idIdx = collection->getIndexCatalog()->findIdIndex(opCtx);
+    if (totalRecs > 0 && !collection.getCollectionPtr()->isClustered()) {
+        const auto idIdx = collection.getCollectionPtr()->getIndexCatalog()->findIdIndex(opCtx);
         if (!idIdx || !idIdx->getEntry()) {
             return {ErrorCodes::IndexNotFound,
                     str::stream() << "can't find index '_id' in storeCurrentRecordId for "
                                   << nss().toStringForErrorMsg()};
         }
 
-        averageObjectIdSize =
-            idIdx->getEntry()->accessMethod()->getSpaceUsedBytes(opCtx) / totalRecs;
+        averageObjectIdSize = idIdx->getEntry()->accessMethod()->getSpaceUsedBytes(
+                                  opCtx, *shard_role_details::getRecoveryUnit(opCtx)) /
+            totalRecs;
     }
 
     if (isLargeChunk) {
@@ -1519,9 +1546,8 @@ LogInsertForShardingHandler::LogInsertForShardingHandler(NamespaceString nss,
                                                          repl::OpTime opTime)
     : _nss(std::move(nss)), _doc(doc.getOwned()), _opTime(std::move(opTime)) {}
 
-void LogInsertForShardingHandler::commit(OperationContext* opCtx, boost::optional<Timestamp>) {
-    // TODO (SERVER-71444): Fix to be interruptible or document exception.
-    UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
+void LogInsertForShardingHandler::commit(OperationContext* opCtx,
+                                         boost::optional<Timestamp>) noexcept {
     const auto scopedCss =
         CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, _nss);
 
@@ -1539,9 +1565,8 @@ LogUpdateForShardingHandler::LogUpdateForShardingHandler(NamespaceString nss,
       _postImageDoc(postImageDoc.getOwned()),
       _opTime(std::move(opTime)) {}
 
-void LogUpdateForShardingHandler::commit(OperationContext* opCtx, boost::optional<Timestamp>) {
-    // TODO (SERVER-71444): Fix to be interruptible or document exception.
-    UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
+void LogUpdateForShardingHandler::commit(OperationContext* opCtx,
+                                         boost::optional<Timestamp>) noexcept {
     const auto scopedCss =
         CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, _nss);
 
@@ -1555,9 +1580,8 @@ LogDeleteForShardingHandler::LogDeleteForShardingHandler(NamespaceString nss,
                                                          repl::OpTime opTime)
     : _nss(std::move(nss)), _documentKey(std::move(documentKey)), _opTime(std::move(opTime)) {}
 
-void LogDeleteForShardingHandler::commit(OperationContext* opCtx, boost::optional<Timestamp>) {
-    // TODO (SERVER-71444): Fix to be interruptible or document exception.
-    UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
+void LogDeleteForShardingHandler::commit(OperationContext* opCtx,
+                                         boost::optional<Timestamp>) noexcept {
     const auto scopedCss =
         CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, _nss);
 
@@ -1571,11 +1595,8 @@ LogRetryableApplyOpsForShardingHandler::LogRetryableApplyOpsForShardingHandler(
     : _namespaces(std::move(namespaces)), _opTimes(std::move(opTimes)) {}
 
 void LogRetryableApplyOpsForShardingHandler::commit(OperationContext* opCtx,
-                                                    boost::optional<Timestamp>) {
+                                                    boost::optional<Timestamp>) noexcept {
     for (const auto& nss : _namespaces) {
-        // TODO (SERVER-71444): Fix to be interruptible or document exception.
-        UninterruptibleLockGuard noInterrupt(opCtx);  // NOLINT.
-
         // For vectored inserts an applyOps entry will only affect a single namespace that is still
         // under a WUOW, so we should be holding an IX lock on it. Other affected namespaces should
         // be skipped since they were handled already in one of LogInsertForShardingHandler,

@@ -29,12 +29,12 @@
 
 #include "mongo/db/pipeline/name_expression.h"
 
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/util/assert_util.h"
+
+#include <string>
 
 namespace mongo {
 void NameExpression::compile(ExpressionContext* expCtx) {
@@ -54,12 +54,11 @@ std::string NameExpression::evaluate(ExpressionContext* expCtx, const Document& 
     }
     invariant(_expr);
 
-    using namespace fmt::literals;
     auto value = _expr->evaluate(doc, &expCtx->variables);
     uassert(8117101,
-            "Expected string, but got {}"_format(typeName(value.getType())),
-            value.getType() == BSONType::String);
+            fmt::format("Expected string, but got {}", typeName(value.getType())),
+            value.getType() == BSONType::string);
 
-    return value.getStringData().toString();
+    return std::string{value.getStringData()};
 }
 }  // namespace mongo

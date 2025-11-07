@@ -28,11 +28,6 @@
  */
 #pragma once
 
-#include <memory>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/db/process_health/deadline_future.h"
 #include "mongo/db/process_health/fault_manager_config.h"
@@ -48,8 +43,14 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
 #include "mongo/util/hierarchical_acquisition.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/tick_source.h"
 #include "mongo/util/time_support.h"
+
+#include <memory>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 namespace process_health {
@@ -59,7 +60,7 @@ namespace process_health {
  * Every instance of health observer is wired internally to update the state of the FaultManager
  * when a problem is detected.
  */
-class HealthObserverBase : public HealthObserver {
+class MONGO_MOD_OPEN HealthObserverBase : public HealthObserver {
 public:
     explicit HealthObserverBase(ServiceContext* svcCtx);
     ~HealthObserverBase() override = default;
@@ -80,8 +81,7 @@ public:
     // Implements the common logic for periodic checks.
     // Every observer should implement periodicCheckImpl() for specific tests.
     SharedSemiFuture<HealthCheckStatus> periodicCheck(
-        std::shared_ptr<executor::TaskExecutor> taskExecutor,
-        CancellationToken token) noexcept override;
+        std::shared_ptr<executor::TaskExecutor> taskExecutor, CancellationToken token) override;
 
     HealthCheckStatus makeHealthyStatus() const;
     static HealthCheckStatus makeHealthyStatusWithType(FaultFacetType type);

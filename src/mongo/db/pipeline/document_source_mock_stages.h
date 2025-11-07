@@ -27,8 +27,12 @@
  *    it in the license file.
  */
 
+#pragma once
+
 #include "mongo/db/pipeline/document_source_mock.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/util/modules.h"
+
 #include <boost/intrusive_ptr.hpp>
 
 namespace mongo {
@@ -66,7 +70,7 @@ public:
     DocumentSourceMustRunOnRouter(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : DocumentSourceMock({}, expCtx) {}
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         // Overrides DocumentSourceMock's required position.
         return {StreamType::kStreaming,
                 PositionRequirement::kNone,
@@ -98,12 +102,7 @@ public:
         return boost::none;
     }
 
-    // This is just to test splitting logic, doGetNext should not be called.
-    GetNextResult doGetNext() override {
-        MONGO_UNREACHABLE;
-    }
-
-    StageConstraints constraints(Pipeline::SplitState pipeState) const override {
+    StageConstraints constraints(PipelineSplitState pipeState) const override {
         StageConstraints constraints(StreamType::kStreaming,
                                      PositionRequirement::kNone,
                                      HostTypeRequirement::kNone,
@@ -124,7 +123,7 @@ public:
     DocumentSourceCollectionlessMock(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : DocumentSourceMock({}, expCtx) {}
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         StageConstraints constraints(StreamType::kStreaming,
                                      PositionRequirement::kFirst,
                                      HostTypeRequirement::kNone,
@@ -134,7 +133,7 @@ public:
                                      LookupRequirement::kAllowed,
                                      UnionRequirement::kAllowed);
         constraints.isIndependentOfAnyCollection = true;
-        constraints.requiresInputDocSource = false;
+        constraints.setConstraintsForNoInputSources();
         return constraints;
     }
 
@@ -149,7 +148,7 @@ public:
     DocumentSourceDisallowedInTransactions(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : DocumentSourceMock({}, expCtx) {}
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         return StageConstraints{StreamType::kStreaming,
                                 PositionRequirement::kNone,
                                 HostTypeRequirement::kNone,
@@ -176,7 +175,7 @@ public:
     DocumentSourceDependencyDummy(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : DocumentSourceMock({}, expCtx) {}
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         // Overrides DocumentSourceMock's required position.
         return {StreamType::kStreaming,
                 PositionRequirement::kNone,
@@ -233,32 +232,59 @@ public:
     }
 };
 
-class DocumentSourceNeedsOnlyTextScore : public DocumentSourceDependencyDummy {
+class DocumentSourceNeedsMetaField : public DocumentSourceDependencyDummy {
 public:
-    DocumentSourceNeedsOnlyTextScore(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : DocumentSourceDependencyDummy(expCtx) {}
+    DocumentSourceNeedsMetaField(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                 const DocumentMetadataFields::MetaType type)
+        : DocumentSourceDependencyDummy(expCtx), _type(type) {}
+
     DepsTracker::State getDependencies(DepsTracker* deps) const final {
-        deps->setNeedsMetadata(DocumentMetadataFields::kTextScore, true);
+        deps->setNeedsMetadata(_type);
         return DepsTracker::State::EXHAUSTIVE_META;
     }
 
-    static boost::intrusive_ptr<DocumentSourceNeedsOnlyTextScore> create(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx) {
-        return new DocumentSourceNeedsOnlyTextScore(expCtx);
+    static boost::intrusive_ptr<DocumentSourceNeedsMetaField> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        const DocumentMetadataFields::MetaType type) {
+        return new DocumentSourceNeedsMetaField(expCtx, type);
     }
+
+private:
+    const DocumentMetadataFields::MetaType _type;
 };
 
-class DocumentSourceStripsTextScore : public DocumentSourceDependencyDummy {
+class DocumentSourceGeneratesMetaField : public DocumentSourceDependencyDummy {
 public:
-    DocumentSourceStripsTextScore(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+    DocumentSourceGeneratesMetaField(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                     const DocumentMetadataFields::MetaType type)
+        : DocumentSourceDependencyDummy(expCtx), _type(type) {}
+
+    DepsTracker::State getDependencies(DepsTracker* deps) const final {
+        deps->setMetadataAvailable(_type);
+        return DepsTracker::State::SEE_NEXT;
+    }
+
+    static boost::intrusive_ptr<DocumentSourceGeneratesMetaField> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        const DocumentMetadataFields::MetaType type) {
+        return new DocumentSourceGeneratesMetaField(expCtx, type);
+    }
+
+private:
+    const DocumentMetadataFields::MetaType _type;
+};
+
+class DocumentSourceStripsMetadata : public DocumentSourceDependencyDummy {
+public:
+    DocumentSourceStripsMetadata(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : DocumentSourceDependencyDummy(expCtx) {}
     DepsTracker::State getDependencies(DepsTracker* deps) const final {
         return DepsTracker::State::EXHAUSTIVE_META;
     }
 
-    static boost::intrusive_ptr<DocumentSourceStripsTextScore> create(
+    static boost::intrusive_ptr<DocumentSourceStripsMetadata> create(
         const boost::intrusive_ptr<ExpressionContext>& expCtx) {
-        return new DocumentSourceStripsTextScore(expCtx);
+        return new DocumentSourceStripsMetadata(expCtx);
     }
 };
 

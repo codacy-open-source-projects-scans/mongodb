@@ -87,9 +87,13 @@ Crt
 Crummey
 CustomersPhone
 Cygwin
+DBI
+DEK
 DESC
 DEST
 DHANDLE
+DISAGG
+DISAGGREGATED
 DNE
 DONTNEED
 DS
@@ -97,6 +101,8 @@ DUPLICATEV
 Decrypt
 DeleteFileW
 Deterministically
+Disagg
+Disaggregated
 Dk
 DmpRvXx
 Dxxx
@@ -169,6 +175,7 @@ GetLastError
 GetModuleHandleExW
 GetProcAddress
 Getters
+Golomb
 HANDLEOPS
 HFS
 HOTBACKUP
@@ -206,12 +213,14 @@ LANGID
 LF
 LLVM
 LLVMFuzzerTestOneInput
+LMDB
 LOGOP
 LOGREC
 LOGSCAN
 LOGSLOT
 LRU
 LSB
+LSBs
 LSM
 LSN
 LSNs
@@ -230,6 +239,7 @@ LogSink
 LogSystemInterface
 MADV
 MALLOC
+MDB
 MEM
 MERCHANTABILITY
 MONGODB
@@ -237,6 +247,7 @@ MOVEFILE
 MRXB
 MRXBOPC
 MSAN
+MSB
 MSDN
 MSVC
 MSan
@@ -281,9 +292,11 @@ OVFL
 ObWgfvgw
 Optane
 Outfmt
+PALI
 PDEATHSIG
 PFX
 PID
+PINDEX
 POS
 POSIX
 PPC
@@ -291,6 +304,7 @@ PREFETCH
 PREV
 PRId
 PRIu
+PRIx
 PRNG
 PSD
 PSE
@@ -329,6 +343,7 @@ RETRYABLE
 RHEL
 RLE
 RLEs
+RMW
 RNG
 RNGs
 RPC
@@ -342,11 +357,13 @@ Readonly
 Realloc
 RedHat
 Redistributions
+Reentrancy
 Reify
 Rogerio
 Runtime
 SDK
 SIMD
+SLS
 SLVG
 SMT
 SPINLOCK
@@ -375,6 +392,7 @@ Su
 Subdirectory
 Subprocess
 TAILQ
+TCMalloc
 TESTUTIL
 TID
 TMP
@@ -393,6 +411,7 @@ ThreadListWrapper
 Timespec
 Tput
 TryCV
+Typedefs
 UBSAN
 UDF
 UID
@@ -417,6 +436,7 @@ UnlockFile
 Unmap
 UnmapViewOfFile
 Unmount
+Unreferenced
 Uryyb
 VARCHAR
 VLCS
@@ -435,9 +455,11 @@ WILLNEED
 WIREDTIGER
 WRLSN
 WRNOLOCK
+WTI
 WTPERF
 WaitForSingleObject
 WaitOn
+Warray
 Wconditional
 Wduplicated
 WeakHashLen
@@ -455,11 +477,14 @@ WiredTigerHS
 WiredTigerLAS
 WiredTigerLog
 WiredTigerPreplog
+WiredTigerShared
+WiredTigerSharedHS
 WiredTigerTmplog
 WithSeeds
 Wl
 Wmissing
 WriteFile
+Wundef
 Wuninitialized
 Wunused
 XP
@@ -506,10 +531,10 @@ auximage
 auxincr
 aws
 bInheritHandle
+backlink
 backoff
 bal
 basecfg
-basename
 bb
 bba
 bbb
@@ -523,6 +548,7 @@ bitcnt
 bitfield
 bitfields
 bitflip
+bitpack
 bitstr
 bitstring
 bitwise
@@ -532,12 +558,14 @@ blkincr
 blkmod
 blkmods
 bm
+bmd
 bms
 bnd
 bool
 boolean
 booleans
 boption
+bpack
 br
 breakpoint
 bs
@@ -569,6 +597,7 @@ ccc
 ccr
 cd
 ce
+ceil
 celsius
 centric
 cerr
@@ -594,6 +623,7 @@ ckpt
 ckptfrag
 ckptlist
 cksum
+clayered
 cloexec
 closedir
 cmd
@@ -623,6 +653,7 @@ cookiep
 copydoc
 countp
 cp
+cplusplus
 cpp
 cppsuite
 cpu
@@ -634,6 +665,7 @@ cryptographic
 cstring
 csuite
 ctime
+ctx
 ctype
 curbackup
 curbt
@@ -673,6 +705,7 @@ ddd
 decile
 deciles
 decl
+decompressor
 decr
 decrementing
 decrypt
@@ -682,10 +715,12 @@ decryptor
 decrypts
 deflateEnd
 deflateInit
+dek
 del
 dequeued
 der
 dereference
+dereferencing
 desc
 designator
 dest
@@ -700,6 +735,8 @@ difftime
 dir
 directio
 dirlist
+disagg
+disaggregated
 disproportionally
 dlclose
 dlh
@@ -723,6 +760,7 @@ dstrndup
 dsync
 dup
 dv
+dylib
 eee
 eg
 ejnprx
@@ -732,6 +770,7 @@ encodings
 encryptor
 encryptors
 endian
+enomem
 enum
 env
 eof
@@ -790,6 +829,7 @@ foward
 fprintf
 fread
 free'd
+freopen
 fs
 fscanf
 fseek
@@ -805,6 +845,7 @@ fuzzutil
 fvisibility
 fwrite
 gb
+gc
 gcc
 gcp
 gdb
@@ -821,7 +862,9 @@ gettime
 gettimeofday
 getv
 ggg
+gid
 github
+globals
 globfree
 gobare
 goesc
@@ -856,6 +899,7 @@ idx
 ie
 iface
 ifdef's
+iff
 iiSii
 iiiS
 ikey
@@ -875,10 +919,12 @@ initsize
 initval
 inlined
 inlining
+inlock
 inmem
 inmemory
 inserters
 instantiation
+interruptible
 intl
 intnum
 intpack
@@ -891,6 +937,7 @@ isalnum
 isalpha
 isascii
 isb
+isd
 isdigit
 ish
 ishld
@@ -959,6 +1006,7 @@ logpath
 logread
 logrec
 logsize
+logslot
 logtest
 lookaside
 lookups
@@ -968,6 +1016,7 @@ lru
 lseek
 lsm
 lsn
+lsnp
 lt
 lte
 lu
@@ -985,6 +1034,7 @@ maxv
 mb
 mbll
 mbss
+md
 mem
 membar
 memcmp
@@ -992,6 +1042,7 @@ memcpy
 memdup
 memkind
 memmove
+memset
 memsize
 mergeable
 metaconf
@@ -1012,10 +1063,13 @@ msan
 msecs
 msg
 msvc
+mtime
 multiblock
 multicycle
+multiline
 multiprocess
 multithreaded
+multithreading
 munmap
 mutex
 mutexes
@@ -1039,6 +1093,7 @@ nextprev
 nf
 nfilename
 nhex
+nilly
 nlohmann
 nlpo
 nocase
@@ -1063,6 +1118,7 @@ np
 npos
 nrecs
 nsec
+nsecs
 nset
 nul
 nullptr
@@ -1091,6 +1147,7 @@ ori
 origstartrecno
 os
 ostream
+overcount
 oversized
 ovfl
 ownp
@@ -1099,6 +1156,7 @@ pT
 packv
 pageref
 pagesize
+palite
 param
 pareto
 parserp
@@ -1109,6 +1167,8 @@ perf
 pfx
 pid
 pindexp
+plh
+plhandle
 pmem
 poptable
 popthreads
@@ -1155,6 +1215,8 @@ qrrSS
 qsort
 quartile
 queueable
+queueing
+queuer
 quiesce
 qup
 rN
@@ -1189,6 +1251,7 @@ relocked
 repl
 repositioned
 repositions
+reproducibility
 requeue
 resizable
 ret
@@ -1200,8 +1263,10 @@ rle
 rmw
 rnd
 rng
+rol
 rotN
 rotn
+roundtrip
 rpc
 rts
 ru
@@ -1281,6 +1346,7 @@ strndup
 strnlen
 strobed
 strtoll
+strtoull
 strtouq
 struct
 structs
@@ -1288,6 +1354,8 @@ su
 subdir
 subdirectories
 subdirectory
+subfolder
+subfolders
 subget
 subgetraw
 subgets
@@ -1324,6 +1392,7 @@ timespec
 tinfo
 tlb
 tmp
+tod
 tokenizer
 toklen
 tokname
@@ -1345,6 +1414,7 @@ truncations
 trylock
 tryrdlock
 trywrlock
+tsan
 tsc
 tupdate
 tw
@@ -1355,6 +1425,7 @@ txt
 typedef
 typeof
 uS
+uid
 uint
 uintAny
 ulock
@@ -1363,6 +1434,7 @@ unallocated
 unbare
 unbuffered
 uncached
+unclosed
 unconfigured
 uncustomized
 undef
@@ -1408,6 +1480,7 @@ vPodir
 vW
 va
 validator
+vals
 valuep
 valuev
 vanishingly

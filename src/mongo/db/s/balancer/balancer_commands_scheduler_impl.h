@@ -29,17 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonmisc.h"
@@ -48,6 +37,11 @@
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/generic_argument_util.h"
+#include "mongo/db/global_catalog/ddl/merge_chunk_request_gen.h"
+#include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/global_catalog/type_collection.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -55,23 +49,18 @@
 #include "mongo/db/s/balancer/balancer_commands_scheduler.h"
 #include "mongo/db/s/balancer/balancer_policy.h"
 #include "mongo/db/s/forwardable_operation_metadata.h"
-#include "mongo/db/s/sharding_config_server_parameters_gen.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/sharding_config_server_parameters_gen.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/scoped_task_executor.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/request_types/merge_chunk_request_gen.h"
 #include "mongo/s/request_types/migration_secondary_throttle_options.h"
 #include "mongo/s/request_types/move_range_request_gen.h"
-#include "mongo/s/request_types/sharded_ddl_commands_gen.h"
-#include "mongo/s/shard_version.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
@@ -81,8 +70,21 @@
 #include "mongo/util/decorable.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
 
 namespace mongo {
 
@@ -282,7 +284,7 @@ public:
             .append(kEstimatedValue, _estimatedValue)
             .append(kMaxSizeValue, _maxSize);
 
-        _version.serialize(ShardVersion::kShardVersionField, &commandBuilder);
+        appendShardVersion(commandBuilder, _version);
 
         return commandBuilder.obj();
     }
@@ -331,7 +333,7 @@ public:
             getNameSpace().dbName(),
             getNameSpace(),
             _toShardId,
-            ProvenanceEnum::kBalancerMoveCollection);
+            ReshardingProvenanceEnum::kBalancerMoveCollection);
         generic_argument_util::setMajorityWriteConcern(moveCollectionRequest);
         generic_argument_util::setDbVersionIfPresent(moveCollectionRequest, _dbVersion);
         return moveCollectionRequest.toBSON();

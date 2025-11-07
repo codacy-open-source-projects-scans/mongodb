@@ -28,17 +28,19 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
-#include <bitset>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <iostream>
-#include <psapi.h>
-
 #include "mongo/logv2/log.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/text.h"
+
+#include <bitset>
+#include <iostream>
+
+#include <psapi.h>
+#include <winsock2.h>
+
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
@@ -345,59 +347,12 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
             verstr << " SP" << osvi.wServicePackMajor;
         verstr << " (build " << osvi.dwBuildNumber << ")";
 
-        osName = "Microsoft ";
-        switch (osvi.dwMajorVersion) {
-            case 10:
-                if (osvi.wProductType == VER_NT_WORKSTATION)
-                    osName += "Windows 10";
-                else {
-                    // The only way to tell apart Windows Server versions is via build number
-                    if (osvi.dwBuildNumber >= 17763) {
-                        osName += "Windows Server 2019";
-                    } else {
-                        osName += "Windows Server 2016";
-                    }
-                }
-                break;
-            case 6:
-                switch (osvi.dwMinorVersion) {
-                    case 3:
-                        if (osvi.wProductType == VER_NT_WORKSTATION)
-                            osName += "Windows 8.1";
-                        else
-                            osName += "Windows Server 2012 R2";
-                        break;
-                    case 2:
-                        if (osvi.wProductType == VER_NT_WORKSTATION)
-                            osName += "Windows 8";
-                        else
-                            osName += "Windows Server 2012";
-                        break;
-                    case 1:
-                        if (osvi.wProductType == VER_NT_WORKSTATION)
-                            osName += "Windows 7";
-                        else
-                            osName += "Windows Server 2008 R2";
-                        break;
-                    case 0:
-                        if (osvi.wProductType == VER_NT_WORKSTATION)
-                            osName += "Windows Vista";
-                        else
-                            osName += "Windows Server 2008";
-                        break;
-                    default:
-                        osName += "Windows NT version ";
-                        osName += verstr.str();
-                        break;
-                }
-                break;
-            default:
-                osName += "Windows";
-                break;
-        }
+        osName = fmt::format("Microsoft Windows {} (build {})",
+                             osvi.wProductType == VER_NT_WORKSTATION ? "Workstation" : "Server",
+                             osvi.dwBuildNumber);
     } else {
         // unable to get any version data
-        osName += "Windows NT";
+        osName = "Microsoft Windows (unknown build)";
     }
 
     if (ntsysinfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64) {
@@ -413,6 +368,12 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
     osType = "Windows";
     osVersion = verstr.str();
     _extraStats = bExtra.obj();
+
+    // On Windows, `SOMAXCONN` is not a maximum value. Instead, it's a special
+    // placeholder value (`2**31 - 1`) indicating that the runtime should
+    // choose a suitable maximum value.
+    // See <https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-listen>.
+    defaultListenBacklog = SOMAXCONN;
 }
 
 }  // namespace mongo

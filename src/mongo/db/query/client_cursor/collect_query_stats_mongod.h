@@ -32,6 +32,7 @@
 #include "mongo/db/query/client_cursor/clientcursor.h"
 #include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/query/query_stats/supplemental_metrics_stats.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -46,6 +47,8 @@ namespace mongo {
  * their subsequent getMore requests), so these should only be called from those request paths.
  */
 void collectQueryStatsMongod(OperationContext* opCtx, ClientCursorPin& cursor);
+// TODO SERVER-112083 Move this function to a better location since it has nothing to do with
+// ClientCursor.
 void collectQueryStatsMongod(OperationContext* opCtx,
                              const boost::intrusive_ptr<ExpressionContext>& expCtx,
                              std::unique_ptr<query_stats::Key> key);

@@ -29,20 +29,11 @@
 
 #include "mongo/db/pipeline/sbe_pushdown.h"
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstdlib>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
-#include "mongo/db/pipeline/document_source_add_fields.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_internal_projection.h"
 #include "mongo/db/pipeline/document_source_internal_replace_root.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
-#include "mongo/db/pipeline/document_source_project.h"
 #include "mongo/db/pipeline/document_source_replace_root.h"
 #include "mongo/db/pipeline/document_source_set_window_fields.h"
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
@@ -50,12 +41,18 @@
 #include "mongo/db/pipeline/document_source_unwind.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/pipeline/search/search_helper.h"
+#include "mongo/db/pipeline/search/document_source_internal_search_mongot_remote.h"
+#include "mongo/db/pipeline/search/document_source_search.h"
+#include "mongo/db/pipeline/search/document_source_search_meta.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_utils.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstdlib>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
@@ -80,7 +77,7 @@ boost::intrusive_ptr<DocumentSource> sbeCompatibleProjectionFromSingleDocumentTr
             return nullptr;
     }
 
-    const boost::intrusive_ptr<ExpressionContext>& expCtx = transformStage.getContext();
+    const boost::intrusive_ptr<ExpressionContext>& expCtx = transformStage.getExpCtx();
     SbeCompatibility originalSbeCompatibility =
         expCtx->sbeCompatibilityExchange(SbeCompatibility::noRequirements);
     ON_BLOCK_EXIT([&] { expCtx->setSbeCompatibility(originalSbeCompatibility); });
@@ -94,6 +91,10 @@ boost::intrusive_ptr<DocumentSource> sbeCompatibleProjectionFromSingleDocumentTr
     }
 
     return projectionStage;
+}
+
+bool isSortStageSbeCompatible(const DocumentSourceSort* sort) {
+    return !sort->shouldSetSortKeyMetadata() && isSortSbeCompatible(sort->getSortKeyPattern());
 }
 
 /**
@@ -116,7 +117,7 @@ boost::intrusive_ptr<DocumentSource> sbeCompatibleReplaceRootStage(
     }
 
     return make_intrusive<DocumentSourceInternalReplaceRoot>(
-        replaceRootStage->getContext(), replaceRootTransformation.getExpression());
+        replaceRootStage->getExpCtx(), replaceRootTransformation.getExpression());
 }
 
 // A bit field with a bool flag for each aggregation pipeline stage that can be translated to SBE.
@@ -147,102 +148,99 @@ bool pushDownPipelineStageIfCompatible(
     const boost::intrusive_ptr<DocumentSource>& stage,
     SbeCompatibility minRequiredCompatibility,
     const CompatiblePipelineStages& allowedStages,
-    std::vector<boost::intrusive_ptr<DocumentSource>>& stagesForPushdown) {
+    std::vector<boost::intrusive_ptr<DocumentSource>>& stagesForPushdown,
+    const MultipleCollectionAccessor& collections) {
 
-    switch (stage->getType()) {
-        case DocumentSourceType::kMatch:
-            if (!allowedStages.match ||
-                static_cast<DocumentSourceMatch*>(stage.get())->sbeCompatibility() <
-                    minRequiredCompatibility) {
-                return false;
-            }
-            stagesForPushdown.emplace_back(std::move(stage));
-            return true;
-        case DocumentSourceType::kGroup:
-            if (!allowedStages.group ||
-                static_cast<DocumentSourceGroup*>(stage.get())->doingMerge() ||
-                static_cast<DocumentSourceGroup*>(stage.get())->sbeCompatibility() <
-                    minRequiredCompatibility) {
-                return false;
-            }
-            stagesForPushdown.emplace_back(std::move(stage));
-            return true;
-        case DocumentSourceType::kLookUp:
-            if (!allowedStages.lookup ||
-                static_cast<DocumentSourceLookUp*>(stage.get())->sbeCompatibility() <
-                    minRequiredCompatibility) {
-                return false;
-            }
-            stagesForPushdown.emplace_back(std::move(stage));
-            return true;
-        case DocumentSourceType::kUnwind:
-            if (!allowedStages.unwind ||
-                static_cast<DocumentSourceUnwind*>(stage.get())->sbeCompatibility() <
-                    minRequiredCompatibility) {
-                return false;
-            }
-            stagesForPushdown.emplace_back(std::move(stage));
-            return true;
-        case DocumentSourceType::kSingleDocumentTransformation:
-            if (!allowedStages.transform) {
-                return false;
-            }
-            if (auto replaceRoot = sbeCompatibleReplaceRootStage(
-                    static_cast<DocumentSourceSingleDocumentTransformation*>(stage.get()),
-                    minRequiredCompatibility)) {
-                stagesForPushdown.emplace_back(std::move(replaceRoot));
-                return true;
-            } else if (auto projectionStage =
-                           sbeCompatibleProjectionFromSingleDocumentTransformation(
-                               *static_cast<DocumentSourceSingleDocumentTransformation*>(
-                                   stage.get()),
-                               minRequiredCompatibility)) {
-                stagesForPushdown.emplace_back(std::move(projectionStage));
-                return true;
-            }
+    auto stageId = stage->getId();
+    if (stageId == DocumentSourceMatch::id) {
+        if (!allowedStages.match ||
+            static_cast<DocumentSourceMatch*>(stage.get())->sbeCompatibility() <
+                minRequiredCompatibility) {
             return false;
-        case DocumentSourceType::kSort:
-            if (!allowedStages.sort ||
-                !isSortSbeCompatible(
-                    static_cast<DocumentSourceSort*>(stage.get())->getSortKeyPattern())) {
-                return false;
-            }
-            stagesForPushdown.emplace_back(std::move(stage));
-            return true;
-        case DocumentSourceType::kLimit:
-            [[fallthrough]];
-        case DocumentSourceType::kSkip:
-            if (!allowedStages.limitSkip) {
-                return false;
-            }
-            stagesForPushdown.emplace_back(std::move(stage));
-            return true;
-        case DocumentSourceType::kSearchMeta:
-            [[fallthrough]];
-        case DocumentSourceType::kSearch:
-            [[fallthrough]];
-        case DocumentSourceType::kInternalSearchMongotRemote:
-            if (!allowedStages.search) {
-                return false;
-            }
-            stagesForPushdown.emplace_back(std::move(stage));
-            return true;
-        case DocumentSourceType::kInternalSetWindowFields:
-            if (!allowedStages.window ||
-                static_cast<DocumentSourceInternalSetWindowFields*>(stage.get())
-                        ->sbeCompatibility() < minRequiredCompatibility) {
-                return false;
-            }
-            stagesForPushdown.emplace_back(std::move(stage));
-            return true;
-        case DocumentSourceType::kInternalUnpackBucket:
-            if (!allowedStages.unpackBucket) {
-                return false;
-            }
-            stagesForPushdown.emplace_back(std::move(stage));
-            return true;
-        default:
+        }
+        stagesForPushdown.emplace_back(std::move(stage));
+        return true;
+    } else if (stageId == DocumentSourceGroup::id) {
+        if (!allowedStages.group || static_cast<DocumentSourceGroup*>(stage.get())->doingMerge() ||
+            static_cast<DocumentSourceGroup*>(stage.get())->sbeCompatibility() <
+                minRequiredCompatibility) {
             return false;
+        }
+        stagesForPushdown.emplace_back(std::move(stage));
+        return true;
+    } else if (stageId == DocumentSourceLookUp::id) {
+        DocumentSourceLookUp* lookup = static_cast<DocumentSourceLookUp*>(stage.get());
+        if (!allowedStages.lookup || lookup->sbeCompatibility() < minRequiredCompatibility) {
+            return false;
+        }
+        const auto& secondaryCollections = collections.getSecondaryCollections();
+        if (const auto& coll = secondaryCollections.find(lookup->getFromNs());
+            coll != secondaryCollections.end() && coll->second &&
+            coll->second->isTimeseriesCollection()) {
+            return false;
+        }
+        stagesForPushdown.emplace_back(std::move(stage));
+        return true;
+    } else if (stageId == DocumentSourceUnwind::id) {
+        if (!allowedStages.unwind ||
+            static_cast<DocumentSourceUnwind*>(stage.get())->sbeCompatibility() <
+                minRequiredCompatibility) {
+            return false;
+        }
+        stagesForPushdown.emplace_back(std::move(stage));
+        return true;
+    } else if (stageId == DocumentSourceSingleDocumentTransformation::id) {
+        if (!allowedStages.transform) {
+            return false;
+        }
+        if (auto replaceRoot = sbeCompatibleReplaceRootStage(
+                static_cast<DocumentSourceSingleDocumentTransformation*>(stage.get()),
+                minRequiredCompatibility)) {
+            stagesForPushdown.emplace_back(std::move(replaceRoot));
+            return true;
+        } else if (auto projectionStage = sbeCompatibleProjectionFromSingleDocumentTransformation(
+                       *static_cast<DocumentSourceSingleDocumentTransformation*>(stage.get()),
+                       minRequiredCompatibility)) {
+            stagesForPushdown.emplace_back(std::move(projectionStage));
+            return true;
+        }
+        return false;
+    } else if (stageId == DocumentSourceSort::id) {
+        if (!allowedStages.sort ||
+            !isSortStageSbeCompatible(static_cast<DocumentSourceSort*>(stage.get()))) {
+            return false;
+        }
+        stagesForPushdown.emplace_back(std::move(stage));
+        return true;
+    } else if (stageId == DocumentSourceLimit::id || stageId == DocumentSourceSkip::id) {
+        if (!allowedStages.limitSkip) {
+            return false;
+        }
+        stagesForPushdown.emplace_back(std::move(stage));
+        return true;
+    } else if (stageId == DocumentSourceSearchMeta::id || stageId == DocumentSourceSearch::id ||
+               stageId == DocumentSourceInternalSearchMongotRemote::id) {
+        if (!allowedStages.search) {
+            return false;
+        }
+        stagesForPushdown.emplace_back(std::move(stage));
+        return true;
+    } else if (stageId == DocumentSourceInternalSetWindowFields::id) {
+        if (!allowedStages.window ||
+            static_cast<DocumentSourceInternalSetWindowFields*>(stage.get())->sbeCompatibility() <
+                minRequiredCompatibility) {
+            return false;
+        }
+        stagesForPushdown.emplace_back(std::move(stage));
+        return true;
+    } else if (stageId == DocumentSourceInternalUnpackBucket::id) {
+        if (!allowedStages.unpackBucket) {
+            return false;
+        }
+        stagesForPushdown.emplace_back(std::move(stage));
+        return true;
+    } else {
+        return false;
     }
 }  // pushDownPipelineStageIfCompatible
 
@@ -437,7 +435,8 @@ constexpr size_t kSbeMaxPipelineStages = 100;
  * $lookup via 'DocumentSourceLookUp':
  *   - The 'internalQuerySlotBasedExecutionDisableLookupPushdown' query knob is false,
  *   - The $lookup uses only the 'localField'/'foreignField' syntax (no pipelines), and
- *   - The foreign collection is fully local to this node and is not a view.
+ *   - The foreign collection is fully local to this node, is not a view, and is not timeseries,
+ *     since timeseries collections always require a pipeline.
  *   - There is no absorbed $unwind stage ('_unwindSrc') or 'trySbeEngine' is enabled.
  *   - There is no absorbed $match stage ('_matchSrc').
  *
@@ -494,15 +493,15 @@ bool findSbeCompatibleStagesForPushdown(
     const auto& sources = pipeline->getSources();
 
     bool isMainCollectionSharded = false;
+    bool isTimeseriesCollection = false;
     if (const auto& mainColl = collections.getMainCollection()) {
         isMainCollectionSharded = mainColl.isSharded_DEPRECATED();
+        isTimeseriesCollection = mainColl->isTimeseriesCollection();
     }
 
-    const bool sbeFullEnabled = feature_flags::gFeatureFlagSbeFull.isEnabled(
-        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+    const bool sbeFullEnabled = feature_flags::gFeatureFlagSbeFull.isEnabled();
     const SbeCompatibility minRequiredCompatibility = getMinRequiredSbeCompatibility(
         queryKnob.getInternalQueryFrameworkControlForOp(), sbeFullEnabled);
-    const bool isTimeseriesCollection = cq->nss().isTimeseriesBucketsCollection();
 
     auto meetsRequirements = [&minRequiredCompatibility, &cq](SbeCompatibility stageCompatibility) {
         return stageCompatibility >= minRequiredCompatibility;
@@ -536,22 +535,20 @@ bool findSbeCompatibleStagesForPushdown(
         // the pipeline is the shard part of a sorted-merge query on a sharded collection. It is
         // possible that the merge operation will need a $sortKey field from the sort, and SBE plans
         // do not yet support metadata fields.
-        .sort = meetsRequirements(SbeCompatibility::requiresTrySbe) && !needsMerge,
+        .sort = meetsRequirements(SbeCompatibility::requiresTrySbe),
 
         .limitSkip = meetsRequirements(SbeCompatibility::requiresTrySbe),
 
         // TODO (SERVER-77229): SBE execution of $search requires 'featureFlagSearchInSbe' to be
         // enabled.
         .search = meetsRequirements(SbeCompatibility::requiresSbeFull) &&
-            feature_flags::gFeatureFlagSearchInSbe.isEnabled(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot()),
+            feature_flags::gFeatureFlagSearchInSbe.isEnabled(),
 
         .window = meetsRequirements(SbeCompatibility::requiresTrySbe),
 
         // TODO (SERVER-80243): Remove 'featureFlagTimeSeriesInSbe' check.
         .unpackBucket = meetsRequirements(SbeCompatibility::noRequirements) &&
-            feature_flags::gFeatureFlagTimeSeriesInSbe.isEnabled(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
+            feature_flags::gFeatureFlagTimeSeriesInSbe.isEnabled() &&
             !queryKnob.getSbeDisableTimeSeriesForOp() &&
             cq->getExpCtx()->getSbePipelineCompatibility() == SbeCompatibility::noRequirements,
     };
@@ -567,7 +564,8 @@ bool findSbeCompatibleStagesForPushdown(
                                                *itr,
                                                minRequiredCompatibility,
                                                allowedStages,
-                                               stagesForPushdown)) {
+                                               stagesForPushdown,
+                                               collections)) {
             // Stop pushing stages down once we hit an incompatible stage.
             allStagesPushedDown = false;
             break;
@@ -581,10 +579,8 @@ bool findSbeCompatibleStagesForPushdown(
 }  // findSbeCompatibleStagesForPushdown
 }  // namespace
 
-void finalizePipelineStages(Pipeline* pipeline,
-                            QueryMetadataBitSet unavailableMetadata,
-                            CanonicalQuery* canonicalQuery) {
-    if (!pipeline || pipeline->getSources().empty()) {
+void finalizePipelineStages(Pipeline* pipeline, CanonicalQuery* canonicalQuery) {
+    if (!pipeline || pipeline->empty()) {
         return;
     }
 
@@ -596,9 +592,6 @@ void finalizePipelineStages(Pipeline* pipeline,
     for (size_t i = 0; i < stagesToRemove; ++i) {
         sources.erase(sources.begin());
     }
-
-    canonicalQuery->setRemainingSearchMetadata(
-        pipeline->getDependencies(unavailableMetadata).searchMetadataDeps());
 }
 
 void attachPipelineStages(const MultipleCollectionAccessor& collections,
@@ -608,7 +601,7 @@ void attachPipelineStages(const MultipleCollectionAccessor& collections,
     tassert(9298700,
             "attachPipelineStages() must not be called multiple times on a query",
             canonicalQuery->cqPipeline().empty());
-    if (!pipeline || pipeline->getSources().empty()) {
+    if (!pipeline || pipeline->empty()) {
         return;
     }
 

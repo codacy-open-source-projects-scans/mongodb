@@ -29,16 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
@@ -51,11 +41,23 @@
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/functional.h"
 #include "mongo/util/hierarchical_acquisition.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -65,7 +67,7 @@ class ObservableSession;
  * Keeps track of the transaction runtime state for every active transaction session on this
  * instance.
  */
-class SessionCatalog {
+class MONGO_MOD_PUB SessionCatalog {
     SessionCatalog(const SessionCatalog&) = delete;
     SessionCatalog& operator=(const SessionCatalog&) = delete;
 
@@ -112,7 +114,7 @@ public:
      * Resets the transaction table to an uninitialized state.
      * Meant only for testing.
      */
-    void reset_forTest();
+    MONGO_MOD_NEEDS_REPLACEMENT void reset_forTest();
 
     /**
      * See the description of 'ObservableSession::kill' for more information on the session kill
@@ -159,7 +161,8 @@ public:
      * Shortcut to invoke 'kill' on the specified session under the SessionCatalog mutex. Throws a
      * NoSuchSession exception if the session doesn't exist.
      */
-    KillToken killSession(const LogicalSessionId& lsid);
+    KillToken killSession(const LogicalSessionId& lsid,
+                          ErrorCodes::Error reason = ErrorCodes::Interrupted);
 
     /**
      * Returns the total number of entries currently cached on the session catalog.
@@ -406,7 +409,7 @@ using SessionToKill = SessionCatalog::SessionToKill;
  * have locked the whole catalog and, if the observed session is bound to an operation context,
  * you hold that operation context's client's mutex, as well.
  */
-class ObservableSession {
+class MONGO_MOD_PUB ObservableSession {
 public:
     ObservableSession(const ObservableSession&) = delete;
     ObservableSession(ObservableSession&&) = delete;
@@ -475,8 +478,8 @@ public:
      * being reaped. However, reaping will still obey the specified reap mode. See the comment for
      * '_shouldBeReaped' for more info.
      */
-    enum class ReapMode { kExclusive, kNonExclusive };
-    void markForReap(ReapMode reapMode);
+    enum class MONGO_MOD_PRIVATE ReapMode { kExclusive, kNonExclusive };
+    MONGO_MOD_PRIVATE void markForReap(ReapMode reapMode);
 
     /**
      * Returns a pointer to the Session itself.
@@ -532,7 +535,7 @@ private:
  * it for later access by the command. The session is installed at construction time and is removed
  * at destruction.
  */
-class OperationContextSession {
+class MONGO_MOD_PUB OperationContextSession {
     OperationContextSession(const OperationContextSession&) = delete;
     OperationContextSession& operator=(const OperationContextSession&) = delete;
 

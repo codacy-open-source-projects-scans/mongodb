@@ -29,25 +29,26 @@
 
 #include "mongo/db/s/range_deletion_util.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/admission/execution_admission_context.h"
-#include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/admission/execution_control_parameters_gen.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/exec/delete_stage.h"
+#include "mongo/db/exec/classic/batched_delete_stage.h"
+#include "mongo/db/exec/classic/delete_stage.h"
 #include "mongo/db/generic_argument_util.h"
+#include "mongo/db/global_catalog/ddl/shard_key_index_util.h"
+#include "mongo/db/global_catalog/ddl/sharding_util.h"
 #include "mongo/db/keypattern.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer.h"
@@ -57,26 +58,27 @@
 #include "mongo/db/s/balancer_stats_registry.h"
 #include "mongo/db/s/range_deleter_service.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
-#include "mongo/db/s/shard_key_index_util.h"
-#include "mongo/db/s/sharding_runtime_d_params_gen.h"
-#include "mongo/db/s/sharding_statistics.h"
-#include "mongo/db/s/sharding_util.h"
-#include "mongo/db/shard_role.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/sharding_environment/sharding_runtime_d_params_gen.h"
+#include "mongo/db/sharding_environment/sharding_statistics.h"
+#include "mongo/db/storage/exceptions.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/reply_interface.h"
 #include "mongo/rpc/unique_message.h"
 #include "mongo/util/concurrency/admission_context.h"
-#include "mongo/util/database_name_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/namespace_string_util.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kShardingRangeDeleter
 
@@ -98,14 +100,14 @@ MONGO_FAIL_POINT_DEFINE(hangInReadyRangeDeletionLocallyThenSimulateErrorUninterr
  * Performs the deletion of up to numDocsToRemovePerBatch entries within the range in progress. Must
  * be called under the collection lock.
  *
- * Returns the number of documents deleted, 0 if done with the range, or bad status if deleting
- * the range failed.
+ * Returns the number of documents and bytes deleted, 0 if done with the range, or bad status if
+ * deleting the range failed.
  */
-StatusWith<int> deleteNextBatch(OperationContext* opCtx,
-                                const CollectionAcquisition& collection,
-                                BSONObj const& keyPattern,
-                                ChunkRange const& range,
-                                int numDocsToRemovePerBatch) {
+StatusWith<std::pair<int, int>> deleteNextBatch(OperationContext* opCtx,
+                                                const CollectionAcquisition& collection,
+                                                BSONObj const& keyPattern,
+                                                ChunkRange const& range,
+                                                int numDocsToRemovePerBatch) {
     invariant(collection.exists());
 
     auto const nss = collection.nss();
@@ -122,11 +124,6 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
                         "Unable to find range shard key index",
                         "keyPattern"_attr = keyPattern,
                         logAttrs(nss));
-
-            // When a shard key index is not found, the range deleter moves the task to the bottom
-            // of the range deletion queue. This sleep is aimed at avoiding logging too aggressively
-            // in order to prevent log files to increase too much in size.
-            opCtx->sleepFor(Seconds(5));
         }
 
         iasserted(ErrorCodes::IndexNotFound,
@@ -144,17 +141,32 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
     const auto min = extend(range.getMin());
     const auto max = extend(range.getMax());
 
+    auto usingBatchedDeletes = useBatchedDeletesForRangeDeletion.load();
+
     LOGV2_DEBUG(6180601,
                 1,
                 "Begin removal of range",
                 logAttrs(nss),
                 "collectionUUID"_attr = uuid,
-                "range"_attr = redact(range.toString()));
+                "range"_attr = redact(range.toString()),
+                "usingBatchedDeletes"_attr = usingBatchedDeletes);
 
     auto deleteStageParams = std::make_unique<DeleteStageParams>();
     deleteStageParams->fromMigrate = true;
     deleteStageParams->isMulti = true;
     deleteStageParams->returnDeleted = true;
+
+    auto batchedDeleteStageParams = std::make_unique<BatchedDeleteStageParams>();
+
+    // If batchedDeleteStageParams is null, we will use a DeleteStage which deletes documents
+    // one-by-one, if it is not null we will use a BatchedDeleteStage which deletes documents in
+    // batches.
+    if (usingBatchedDeletes) {
+        batchedDeleteStageParams->targetBatchDocs = numDocsToRemovePerBatch;
+        batchedDeleteStageParams->targetPassDocs = numDocsToRemovePerBatch;
+    } else {
+        batchedDeleteStageParams = nullptr;
+    }
 
     auto exec =
         InternalPlanner::deleteWithShardKeyIndexScan(opCtx,
@@ -165,6 +177,7 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
                                                      max,
                                                      BoundInclusion::kIncludeStartKeyOnly,
                                                      PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                                     std::move(batchedDeleteStageParams),
                                                      InternalPlanner::FORWARD);
 
     if (MONGO_unlikely(hangBeforeDoingDeletion.shouldFail())) {
@@ -174,6 +187,7 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
 
     long long bytesDeleted = 0;
     int numDocsDeleted = 0;
+
     do {
         BSONObj deletedObj;
 
@@ -204,18 +218,26 @@ StatusWith<int> deleteNextBatch(OperationContext* opCtx,
             throw;
         }
 
+        if (!usingBatchedDeletes) {
+            if (state != PlanExecutor::IS_EOF) {
+                bytesDeleted += deletedObj.objsize();
+                numDocsDeleted++;
+            }
+        } else {
+            auto batchedDeleteStats = exec->getBatchedDeleteStats();
+            bytesDeleted += batchedDeleteStats.bytesDeleted;
+            numDocsDeleted += batchedDeleteStats.docsDeleted;
+        }
         if (state == PlanExecutor::IS_EOF) {
             break;
         }
-
-        bytesDeleted += deletedObj.objsize();
         invariant(PlanExecutor::ADVANCED == state);
-    } while (++numDocsDeleted < numDocsToRemovePerBatch);
+    } while (numDocsDeleted < numDocsToRemovePerBatch);
 
     ShardingStatistics::get(opCtx).countDocsDeletedByRangeDeleter.addAndFetch(numDocsDeleted);
     ShardingStatistics::get(opCtx).countBytesDeletedByRangeDeleter.addAndFetch(bytesDeleted);
 
-    return numDocsDeleted;
+    return std::make_pair(numDocsDeleted, bytesDeleted);
 }
 
 void ensureRangeDeletionTaskStillExists(OperationContext* opCtx,
@@ -264,7 +286,8 @@ void markRangeDeletionTaskAsProcessing(OperationContext* opCtx,
                             << CleanWhen_serializer(CleanWhenEnum::kNow)));
 
     try {
-        store.update(opCtx, query, update, WriteConcerns::kLocalWriteConcern);
+        store.update(
+            opCtx, query, update, ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter());
     } catch (const ExceptionFor<ErrorCodes::NoMatchingDocument>&) {
         // The collection may have been dropped or the document could have been manually deleted
     }
@@ -309,14 +332,21 @@ BSONObj getQueryFilterForRangeDeletionTaskOnRecipient(const UUID& collectionUuid
 
 namespace rangedeletionutil {
 
-Status deleteRangeInBatches(OperationContext* opCtx,
-                            const DatabaseName& dbName,
-                            const UUID& collectionUuid,
-                            const BSONObj& keyPattern,
-                            const ChunkRange& range) {
+StatusWith<std::pair<int, int>> deleteRangeInBatches(OperationContext* opCtx,
+                                                     const DatabaseName& dbName,
+                                                     const UUID& collectionUuid,
+                                                     const BSONObj& keyPattern,
+                                                     const ChunkRange& range) {
+    boost::optional<ScopedAdmissionPriority<ExecutionAdmissionContext>>
+        deprioritizeExecutionControl;
+    if (gStorageEngineDeprioritizeBackgroundTasks.load()) {
+        deprioritizeExecutionControl.emplace(opCtx, AdmissionContext::Priority::kLow);
+    }
+
     suspendRangeDeletion.pauseWhileSet(opCtx);
 
     bool allDocsRemoved = false;
+    int totalNumDeleted = 0, totalBytesDeleted = 0;
     // Delete all batches in this range unless a stepdown error occurs. Do not yield the
     // executor to ensure that this range is fully deleted before another range is
     // processed.
@@ -337,13 +367,12 @@ Status deleteRangeInBatches(OperationContext* opCtx,
             const auto nss = [&]() {
                 try {
                     const auto nssOrUuid = NamespaceStringOrUUID{dbName, collectionUuid};
-                    const auto collection =
-                        acquireCollection(opCtx,
-                                          {nssOrUuid,
-                                           AcquisitionPrerequisites::kPretendUnsharded,
-                                           repl::ReadConcernArgs::get(opCtx),
-                                           AcquisitionPrerequisites::kWrite},
-                                          MODE_IX);
+                    const auto collection = acquireCollection(opCtx,
+                                                              {nssOrUuid,
+                                                               PlacementConcern::kPretendUnsharded,
+                                                               repl::ReadConcernArgs::get(opCtx),
+                                                               AcquisitionPrerequisites::kWrite},
+                                                              MODE_IX);
 
                     LOGV2_DEBUG(6777800,
                                 1,
@@ -354,8 +383,11 @@ Status deleteRangeInBatches(OperationContext* opCtx,
                                 "numDocsToRemovePerBatch"_attr = numDocsToRemovePerBatch,
                                 "delayBetweenBatches"_attr = delayBetweenBatches);
 
-                    numDeleted = uassertStatusOK(deleteNextBatch(
+                    auto numDocsAndBytesDeleted = uassertStatusOK(deleteNextBatch(
                         opCtx, collection, keyPattern, range, numDocsToRemovePerBatch));
+                    numDeleted = numDocsAndBytesDeleted.first;
+                    totalNumDeleted += numDeleted;
+                    totalBytesDeleted += numDocsAndBytesDeleted.second;
 
                     return collection.nss();
                 } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
@@ -405,7 +437,33 @@ Status deleteRangeInBatches(OperationContext* opCtx,
             };
         }
     }
-    return Status::OK();
+    return std::make_pair(totalNumDeleted, totalBytesDeleted);
+}
+
+bool hasAtLeastOneRangeDeletionTaskForCollection(OperationContext* opCtx,
+                                                 const NamespaceString& nss,
+                                                 const UUID& collectionUuid) {
+    // Get the number of outstanding range deletion tasks on the given collection
+    try {
+        // Check in memory via the range deleter service if possible to avoid reading from disk
+        auto rds = RangeDeleterService::get(opCtx);
+        return rds->getNumRangeDeletionTasksForCollection(collectionUuid);
+    } catch (const ExceptionFor<ErrorCodes::NotYetInitialized>&) {
+        // If the range deleter service is not yet up, as might be the case after a step up, fall
+        // back to reading the range deletion documents from disk
+        LOGV2_DEBUG(9931402,
+                    2,
+                    "Range deletion service is not initialized yet. Falling back to reading range "
+                    "deletion documents from disk.",
+                    logAttrs(nss),
+                    "collectionUUID"_attr = collectionUuid);
+        DBDirectClient dbClient(opCtx);
+        const auto query = BSON(RangeDeletionTask::kCollectionUuidFieldName << collectionUuid);
+        return dbClient.count(NamespaceString::kRangeDeletionNamespace,
+                              query,
+                              0 /* options */,
+                              1 /* limit */) > 0;
+    }
 }
 
 void snapshotRangeDeletionsForRename(OperationContext* opCtx,
@@ -494,7 +552,7 @@ void persistUpdatedNumOrphans(OperationContext* opCtx,
                              query,
                              BSON("$inc" << BSON(RangeDeletionTask::kNumOrphanDocsFieldName
                                                  << changeInOrphans)),
-                             WriteConcerns::kLocalWriteConcern);
+                             ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter());
             });
         BalancerStatsRegistry::get(opCtx)->updateOrphansCount(collectionUuid, changeInOrphans);
     } catch (const ExceptionFor<ErrorCodes::NoMatchingDocument>&) {
@@ -502,21 +560,12 @@ void persistUpdatedNumOrphans(OperationContext* opCtx,
     }
 }
 
-void removePersistentRangeDeletionTask(OperationContext* opCtx,
-                                       const UUID& collectionUuid,
-                                       const ChunkRange& range) {
+void removePersistentTask(OperationContext* opCtx, const UUID& taskId) {
     PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
-
-    auto overlappingRangeDeletionsQuery = BSON(
-        RangeDeletionTask::kCollectionUuidFieldName
-        << collectionUuid << RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMinFieldName
-        << GTE << range.getMin()
-        << RangeDeletionTask::kRangeFieldName + "." + ChunkRange::kMaxFieldName << LTE
-        << range.getMax());
-    store.remove(opCtx, overlappingRangeDeletionsQuery);
+    store.remove(opCtx, BSON(RangeDeletionTask::kIdFieldName << taskId));
 }
 
-void removePersistentRangeDeletionTasksByUUID(OperationContext* opCtx, const UUID& collectionUuid) {
+void removeAllPersistentTasksForCollection(OperationContext* opCtx, const UUID& collectionUuid) {
     DBDirectClient dbClient(opCtx);
 
     auto query = BSON(RangeDeletionTask::kCollectionUuidFieldName << collectionUuid);
@@ -611,7 +660,7 @@ boost::optional<KeyPattern> getShardKeyPatternFromRangeDeletionTask(OperationCon
         // we won't need the shard key pattern anyways.
         return boost::none;
     }
-    auto rdt = RangeDeletionTask::parse(IDLParserContext("MigrationRecovery"), cursor->next());
+    auto rdt = RangeDeletionTask::parse(cursor->next(), IDLParserContext("MigrationRecovery"));
     return rdt.getKeyPattern();
 }
 
@@ -625,7 +674,7 @@ void deleteRangeDeletionTaskOnRecipient(OperationContext* opCtx,
     write_ops::DeleteCommandRequest deleteOp(NamespaceString::kRangeDeletionNamespace);
     write_ops::DeleteOpEntry query(queryFilter, false /*multi*/);
     deleteOp.setDeletes({query});
-    deleteOp.setWriteConcern(generic_argument_util::kMajorityWriteConcern);
+    deleteOp.setWriteConcern(defaultMajorityWriteConcernDoNotUse());
 
     hangInDeleteRangeDeletionOnRecipientInterruptible.pauseWhileSet(opCtx);
 
@@ -698,7 +747,7 @@ void markAsReadyRangeDeletionTaskOnRecipient(OperationContext* opCtx,
     updateEntry.setMulti(false);
     updateEntry.setUpsert(false);
     updateOp.setUpdates({updateEntry});
-    updateOp.setWriteConcern(generic_argument_util::kMajorityWriteConcern);
+    updateOp.setWriteConcern(defaultMajorityWriteConcernDoNotUse());
 
     sharding_util::retryIdempotentWorkAsPrimaryUntilSuccessOrStepdown(
         opCtx, "ready remote range deletion", [&](OperationContext* newOpCtx) {
@@ -723,6 +772,27 @@ void markAsReadyRangeDeletionTaskOnRecipient(OperationContext* opCtx,
                           "simulate an error response when initiating range deletion on recipient");
             }
         });
+}
+
+// TODO SERVER-103046: Remove once 9.0 becomes last lts.
+void setPreMigrationShardVersionOnRangeDeletionTasks(OperationContext* opCtx) {
+    DBDirectClient client(opCtx);
+    write_ops::UpdateCommandRequest update(NamespaceString::kRangeDeletionNamespace);
+
+    update.setUpdates({[&]() {
+        write_ops::UpdateOpEntry entry;
+        entry.setQ(BSON(RangeDeletionTask::kPreMigrationShardVersionFieldName
+                        << BSON("$exists" << false)));
+        BSONObjBuilder builder;
+        ChunkVersion::IGNORED().serialize(RangeDeletionTask::kPreMigrationShardVersionFieldName,
+                                          &builder);
+        entry.setU(
+            write_ops::UpdateModification::parseFromClassicUpdate(BSON("$set" << builder.obj())));
+        entry.setMulti(true);
+        return entry;
+    }()});
+    update.getWriteCommandRequestBase().setOrdered(false);
+    write_ops::checkWriteErrors(client.update(update));
 }
 }  // namespace rangedeletionutil
 }  // namespace mongo

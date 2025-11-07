@@ -29,16 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -46,19 +36,47 @@
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/timeseries/bucket_unpacker.h"
 #include "mongo/db/matcher/expression.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/timeseries/bucket_spec.h"
+#include "mongo/db/timeseries/mixed_schema_buckets_state.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
-class DocumentSourceInternalUnpackBucket : public DocumentSource {
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+namespace MONGO_MOD_PUB mongo {
+
+struct MONGO_MOD_PRIVATE InternalUnpackBucketSharedState {
+    // It's beneficial to do as much filtering at the bucket level as possible to avoid unpacking
+    // buckets that wouldn't contribute to the results anyway. There is a generic mechanism that
+    // allows to swap $match stages with this one (see 'getModifiedPaths()'). It lets us split out
+    // and push down a filter on the metaField "as is". The remaining filters might cause creation
+    // of additional bucket-level filters (see 'createPredicatesOnBucketLevelField()') that are
+    // inserted before this stage while the original filter is incorporated into this stage as
+    // '_eventFilter' (to be applied to each unpacked document) and/or '_wholeBucketFilter' for the
+    // cases when _all_ events in a bucket would match so that the filter is evaluated only once
+    // rather than on all events from the bucket (currently, we only do this for the 'timeField').
+    std::unique_ptr<MatchExpression> _eventFilter;
+    std::unique_ptr<MatchExpression> _wholeBucketFilter;
+    timeseries::BucketUnpacker _bucketUnpacker;
+};
+
+class MONGO_MOD_NEEDS_REPLACEMENT DocumentSourceInternalUnpackBucket : public DocumentSource {
 public:
     static constexpr StringData kStageNameInternal = "$_internalUnpackBucket"_sd;
     static constexpr StringData kStageNameExternal = "$_unpackBucket"_sd;
@@ -96,11 +114,13 @@ public:
                                        boost::optional<bool> sbeCompatible = boost::none);
 
     const char* getSourceName() const override {
-        return kStageNameInternal.rawData();
+        return kStageNameInternal.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kInternalUnpackBucket;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
     void serializeToArray(std::vector<Value>& array,
@@ -114,19 +134,19 @@ public:
     }
 
     bool includeMetaField() const {
-        return _bucketUnpacker.includeMetaField();
+        return _sharedState->_bucketUnpacker.includeMetaField();
     }
 
     bool includeTimeField() const {
-        return _bucketUnpacker.includeTimeField();
+        return _sharedState->_bucketUnpacker.includeTimeField();
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         StageConstraints constraints{StreamType::kStreaming,
                                      PositionRequirement::kNone,
                                      HostTypeRequirement::kNone,
                                      DiskUseRequirement::kNoDiskUse,
-                                     FacetRequirement::kNotAllowed,
+                                     FacetRequirement::kAllowed,
                                      TransactionRequirement::kAllowed,
                                      LookupRequirement::kAllowed,
                                      UnionRequirement::kAllowed,
@@ -134,6 +154,8 @@ public:
         constraints.canSwapWithMatch = true;
         // The user cannot specify multiple $unpackBucket stages in the pipeline.
         constraints.canAppearOnlyOnceInPipeline = true;
+        // This stage only reads raw timeseries bucket documents.
+        constraints.consumesLogicalCollectionData = false;
         return constraints;
     }
 
@@ -152,11 +174,13 @@ public:
     }
 
     std::string getMinTimeField() const {
-        return _bucketUnpacker.getMinField(_bucketUnpacker.getTimeField());
+        return _sharedState->_bucketUnpacker.getMinField(
+            _sharedState->_bucketUnpacker.getTimeField());
     }
 
     std::string getMaxTimeField() const {
-        return _bucketUnpacker.getMaxField(_bucketUnpacker.getTimeField());
+        return _sharedState->_bucketUnpacker.getMaxField(
+            _sharedState->_bucketUnpacker.getTimeField());
     }
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
@@ -164,7 +188,7 @@ public:
     };
 
     const timeseries::BucketUnpacker& bucketUnpacker() const {
-        return _bucketUnpacker;
+        return _sharedState->_bucketUnpacker;
     }
 
     /**
@@ -172,8 +196,8 @@ public:
      * function. The README.md should be maintained in sync with this function. Please update the
      * README accordingly.
      */
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) final;
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) final;
 
     /*
      * Given a $project produced by 'extractOrBuildProjectToInternalize()', attempt to internalize
@@ -196,7 +220,7 @@ public:
      *    3. Otherwise, an empty BSONObj will be returned.
      */
     std::pair<BSONObj, bool> extractOrBuildProjectToInternalize(
-        Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) const;
+        DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) const;
 
     /**
      * Convenience wrapper around BucketSpec::createPredicatesOnBucketLevelField().
@@ -231,11 +255,11 @@ public:
     }
 
     void setIncludeMinTimeAsMetadata() {
-        _bucketUnpacker.setIncludeMinTimeAsMetadata();
+        _sharedState->_bucketUnpacker.setIncludeMinTimeAsMetadata();
     }
 
     void setIncludeMaxTimeAsMetadata() {
-        _bucketUnpacker.setIncludeMaxTimeAsMetadata();
+        _sharedState->_bucketUnpacker.setIncludeMaxTimeAsMetadata();
     }
 
     boost::optional<long long> sampleSize() const {
@@ -247,8 +271,8 @@ public:
      * from it computed meta projections and push them pass the current stage. Returns the iterator
      * that needs to be optimized next.
      */
-    boost::optional<Pipeline::SourceContainer::iterator> pushDownComputedMetaProjection(
-        Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container);
+    boost::optional<DocumentSourceContainer::iterator> pushDownComputedMetaProjection(
+        DocumentSourceContainer::iterator itr, DocumentSourceContainer* container);
 
     /**
      * If 'src' represents an exclusion $project, attempts to extract the parts of 'src' that are
@@ -263,15 +287,15 @@ public:
      * min/max/count aggregates. If the rewrite is possible, 'container' is modified, bool in the
      * return pair is set to 'true' and the iterator is set to point to the new group.
      */
-    std::pair<bool, Pipeline::SourceContainer::iterator> rewriteGroupStage(
-        Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container);
+    std::pair<bool, DocumentSourceContainer::iterator> rewriteGroupStage(
+        DocumentSourceContainer::iterator itr, DocumentSourceContainer* container);
 
     /**
      * Helper method which checks if we can replace DocumentSourceGroup with
      * DocumentSourceStreamingGroup. Returns true if the optimization is performed.
      */
-    bool enableStreamingGroupIfPossible(Pipeline::SourceContainer::iterator itr,
-                                        Pipeline::SourceContainer* container);
+    bool enableStreamingGroupIfPossible(DocumentSourceContainer::iterator itr,
+                                        DocumentSourceContainer* container);
 
     /**
      * If the current aggregation is a lastpoint-type query (ie. with a $sort on meta and time
@@ -293,29 +317,28 @@ public:
      *
      * Note that the first $group includes all fields so we can avoid fetching the bucket twice.
      */
-    bool optimizeLastpoint(Pipeline::SourceContainer::iterator itr,
-                           Pipeline::SourceContainer* container);
+    bool optimizeLastpoint(DocumentSourceContainer::iterator itr,
+                           DocumentSourceContainer* container);
 
     GetModPathsReturn getModifiedPaths() const final;
 
-    DepsTracker getRestPipelineDependencies(Pipeline::SourceContainer::iterator itr,
-                                            Pipeline::SourceContainer* container,
+    DepsTracker getRestPipelineDependencies(DocumentSourceContainer::iterator itr,
+                                            DocumentSourceContainer* container,
                                             bool includeEventFilter) const;
 
     const MatchExpression* eventFilter() const {
-        return _eventFilter.get();
+        return _sharedState->_eventFilter.get();
     }
 
     const MatchExpression* wholeBucketFilter() const {
-        return _wholeBucketFilter.get();
+        return _sharedState->_wholeBucketFilter.get();
     }
 
     bool isSbeCompatible();
 
 private:
-    GetNextResult doGetNext() final;
-
-    boost::optional<Document> getNextMatchingMeasure();
+    friend boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalUnpackBucketToStageFn(
+        const boost::intrusive_ptr<DocumentSource>& documentSource);
 
     bool haveComputedMetaField() const;
 
@@ -331,8 +354,8 @@ private:
      * preceeding stages will be optimized. However, optimization of the bucket unpack stage will be
      * skipped.
      */
-    Pipeline::SourceContainer::iterator optimizeAtRestOfPipeline(
-        Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container);
+    DocumentSourceContainer::iterator optimizeAtRestOfPipeline(
+        DocumentSourceContainer::iterator itr, DocumentSourceContainer* container);
 
     /**
      * The top-k sort optimization absorbs a $sort stage that is enough to produce a top-k sorted
@@ -357,8 +380,8 @@ private:
      *   }
      * ]
      */
-    bool tryToAbsorbTopKSortIntoGroup(Pipeline::SourceContainer::iterator itr,
-                                      Pipeline::SourceContainer* container);
+    bool tryToAbsorbTopKSortIntoGroup(DocumentSourceContainer::iterator itr,
+                                      DocumentSourceContainer* container);
 
     // If buckets contained a mixed type schema along some path, we have to push down special
     // predicates in order to ensure correctness.
@@ -375,25 +398,15 @@ private:
     // different from the DB primary shard.
     bool _usesExtendedRange = false;
 
-    timeseries::BucketUnpacker _bucketUnpacker;
     int _bucketMaxSpanSeconds;
 
     int _bucketMaxCount = 0;
     boost::optional<long long> _sampleSize;
 
-    // It's beneficial to do as much filtering at the bucket level as possible to avoid unpacking
-    // buckets that wouldn't contribute to the results anyway. There is a generic mechanism that
-    // allows to swap $match stages with this one (see 'getModifiedPaths()'). It lets us split out
-    // and push down a filter on the metaField "as is". The remaining filters might cause creation
-    // of additional bucket-level filters (see 'createPredicatesOnBucketLevelField()') that are
-    // inserted before this stage while the original filter is incorporated into this stage as
-    // '_eventFilter' (to be applied to each unpacked document) and/or '_wholeBucketFilter' for the
-    // cases when _all_ events in a bucket would match so that the filter is evaluated only once
-    // rather than on all events from the bucket (currently, we only do this for the 'timeField').
-    std::unique_ptr<MatchExpression> _eventFilter;
+    std::shared_ptr<InternalUnpackBucketSharedState> _sharedState;
+
     BSONObj _eventFilterBson;
     DepsTracker _eventFilterDeps;
-    std::unique_ptr<MatchExpression> _wholeBucketFilter;
     BSONObj _wholeBucketFilterBson;
 
     // This will be boost::none or true if should check to see if we can generate predicates on _id
@@ -405,9 +418,14 @@ private:
     bool _unpackToBson = false;
 
     bool _optimizedEndOfPipeline = false;
-    bool _triedInternalizeProject = false;
-    bool _triedLastpointRewrite = false;
-    bool _triedLimitPushDown = false;
+
+    // These variables are only used to prevent infinite loops when we step backwards to optimize
+    // $match. These values do not guarantee that optimizations have only run once. Even with these
+    // values optimizations can happen twice (once on mongos and once on mongod) and all
+    // optimizations must be correct when run multiple times.
+    bool _triedInternalizeProjectLocally = false;
+    bool _triedLastpointRewriteLocally = false;
+    bool _triedLimitPushDownLocally = false;
 
     // The $project or $addFields stages which we have tried to apply the computed meta project push
     // down optimization to.
@@ -417,4 +435,4 @@ private:
     boost::optional<bool> _isSbeCompatible = boost::none;
     boost::optional<SbeCompatibility> _isEventFilterSbeCompatible = boost::none;
 };
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

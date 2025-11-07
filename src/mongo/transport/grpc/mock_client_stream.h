@@ -29,9 +29,8 @@
 
 #pragma once
 
-#include "mongo/transport/grpc/client_stream.h"
-
 #include "mongo/transport/grpc/bidirectional_pipe.h"
+#include "mongo/transport/grpc/client_stream.h"
 #include "mongo/transport/grpc/metadata.h"
 #include "mongo/transport/grpc/mock_util.h"
 #include "mongo/util/future.h"
@@ -54,7 +53,8 @@ public:
                      Future<MetadataContainer>&& serverInitialMetadata,
                      Future<::grpc::Status>&& rpcReturnStatus,
                      std::shared_ptr<MockCancellationState> rpcCancellationState,
-                     BidirectionalPipe::End&& pipe);
+                     BidirectionalPipe::End&& pipe,
+                     const std::shared_ptr<GRPCReactor>& reactor);
 
     void read(SharedBuffer* msg, GRPCReactor::CompletionQueueEntry* tag) override;
 
@@ -64,6 +64,7 @@ public:
 
     void writesDone(GRPCReactor::CompletionQueueEntry* tag) override;
 
+    void startCall(GRPCReactor::CompletionQueueEntry* tag) override;
 
     // The below sync APIs are provided to enable easier unit testing.
     boost::optional<SharedBuffer> syncRead(const std::shared_ptr<GRPCReactor>& reactor);
@@ -93,5 +94,7 @@ private:
     std::shared_ptr<MockCancellationState> _rpcCancellationState;
 
     BidirectionalPipe::End _pipe;
+
+    std::shared_ptr<GRPCReactor> _reactor;
 };
 }  // namespace mongo::transport::grpc

@@ -28,14 +28,6 @@
  */
 
 
-#include <boost/optional.hpp>
-#include <memory>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -45,19 +37,19 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/s/active_migrations_registry.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/migration_chunk_cloner_source.h"
 #include "mongo/db/s/migration_session_id.h"
 #include "mongo/db/s/migration_source_manager.h"
@@ -67,6 +59,14 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/notification.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -94,11 +94,14 @@ public:
         uassert(ErrorCodes::NotYetInitialized, "No active migrations were found", nss);
 
         // Once the collection is locked, the migration status cannot change
-        _autoColl.emplace(opCtx, *nss, MODE_IS);
+        _acquisition.emplace(acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, *nss, AcquisitionPrerequisites::kRead),
+            MODE_IS));
 
         uassert(ErrorCodes::NamespaceNotFound,
                 str::stream() << "Collection " << nss->toStringForErrorMsg() << " does not exist",
-                _autoColl->getCollection());
+                _acquisition->exists());
 
         uassert(ErrorCodes::NotWritablePrimary,
                 "No longer primary when trying to acquire active migrate cloner",
@@ -109,13 +112,12 @@ public:
             const auto scopedCsr =
                 CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, *nss);
 
-            if ((_chunkCloner = MigrationSourceManager::getCurrentCloner(*scopedCsr))) {
-                invariant(_chunkCloner);
-            } else {
-                uasserted(ErrorCodes::IllegalOperation,
-                          str::stream() << "No active migrations were found for collection "
-                                        << nss->toStringForErrorMsg());
-            }
+            _chunkCloner = MigrationSourceManager::getCurrentCloner(*scopedCsr);
+
+            uassert(ErrorCodes::IllegalOperation,
+                    str::stream() << "No active migrations were found for collection "
+                                  << nss->toStringForErrorMsg(),
+                    _chunkCloner);
         }
 
         // Ensure the session ids are correct
@@ -125,14 +127,17 @@ public:
                               << _chunkCloner->getSessionId().toString(),
                 migrationSessionId.matches(_chunkCloner->getSessionId()));
 
-
         if (!holdCollectionLock)
-            _autoColl = boost::none;
+            _acquisition.reset();
     }
 
-    const CollectionPtr& getColl() const {
-        invariant(_autoColl);
-        return _autoColl->getCollection();
+
+    boost::optional<CollectionAcquisition> getCollectionAcquisition() const {
+        return _acquisition;
+    }
+
+    void resetAcquisition() {
+        _acquisition.reset();
     }
 
     MigrationChunkClonerSource* getCloner() const {
@@ -141,11 +146,11 @@ public:
     }
 
 private:
-    // Scoped database + collection lock
-    boost::optional<AutoGetCollection> _autoColl;
-
     // Contains the active cloner for the namespace
     std::shared_ptr<MigrationChunkClonerSource> _chunkCloner;
+
+    // Scoped database + collection lock
+    boost::optional<CollectionAcquisition> _acquisition;
 };
 
 class InitialCloneCommand : public BasicCommand {
@@ -204,11 +209,18 @@ public:
             if (!arrBuilder) {
                 arrBuilder.emplace(autoCloner.getCloner()->getCloneBatchBufferAllocationSize());
             }
+            // In case of an ongoing jumbo chunk cloning, the cloner has an inner query plan that
+            // will be restored, including its transaction resources (i.e collections acquisitions)
+            // to continue the operation. We should therefore always release the locks and let the
+            // cloner internally re-acquire them.
+            if (autoCloner.getCloner()->hasOngoingJumboChunkCloning()) {
+                autoCloner.resetAcquisition();
+            }
 
             arrSizeAtPrevIteration = arrBuilder->arrSize();
 
             uassertStatusOK(autoCloner.getCloner()->nextCloneBatch(
-                opCtx, autoCloner.getColl(), arrBuilder.get_ptr()));
+                opCtx, autoCloner.getCollectionAcquisition(), arrBuilder.get_ptr()));
         }
 
         invariant(arrBuilder);

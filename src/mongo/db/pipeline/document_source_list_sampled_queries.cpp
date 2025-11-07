@@ -29,28 +29,12 @@
 
 #include "mongo/db/pipeline/document_source_list_sampled_queries.h"
 
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/pipeline/sharded_agg_helpers_targeting_policy.h"
 #include "mongo/db/query/allowed_contexts.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/s/analyze_shard_key_common_gen.h"
-#include "mongo/s/analyze_shard_key_documents_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
-#include "mongo/util/namespace_string_util.h"
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace analyze_shard_key {
@@ -59,6 +43,7 @@ REGISTER_DOCUMENT_SOURCE(listSampledQueries,
                          DocumentSourceListSampledQueries::LiteParsed::parse,
                          DocumentSourceListSampledQueries::createFromBson,
                          AllowedWithApiStrict::kNeverInVersion1);
+ALLOCATE_DOCUMENT_SOURCE_ID(listSampledQueries, DocumentSourceListSampledQueries::id)
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceListSampledQueries::createFromBson(
     BSONElement specElem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx) {
@@ -68,9 +53,9 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceListSampledQueries::createFro
             nss.isAdminDB() && nss.isCollectionlessAggregateNS());
     uassert(6876001,
             str::stream() << kStageName << " must take a nested object but found: " << specElem,
-            specElem.type() == BSONType::Object);
-    auto spec = DocumentSourceListSampledQueriesSpec::parse(IDLParserContext(kStageName),
-                                                            specElem.embeddedObject());
+            specElem.type() == BSONType::object);
+    auto spec = DocumentSourceListSampledQueriesSpec::parse(specElem.embeddedObject(),
+                                                            IDLParserContext(kStageName));
 
     return make_intrusive<DocumentSourceListSampledQueries>(pExpCtx, std::move(spec));
 }
@@ -79,56 +64,33 @@ Value DocumentSourceListSampledQueries::serialize(const SerializationOptions& op
     return Value(Document{{getSourceName(), _spec.toBSON(opts)}});
 }
 
-DocumentSource::GetNextResult DocumentSourceListSampledQueries::doGetNext() {
-    if (_pipeline == nullptr) {
-        auto foreignExpCtx = pExpCtx->copyWith(NamespaceString::kConfigSampledQueriesNamespace);
-        std::vector<BSONObj> stages;
-        if (auto& nss = _spec.getNamespace()) {
-            uassertStatusOK(validateNamespace(*nss));
-            stages.push_back(
-                BSON("$match" << BSON(SampledQueryDocument::kNsFieldName
-                                      << NamespaceStringUtil::serialize(
-                                             *nss, SerializationContext::stateDefault()))));
-        }
-        try {
-            _pipeline = Pipeline::makePipeline(stages, foreignExpCtx);
-        } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>& ex) {
-            LOGV2(7807800,
-                  "Failed to create aggregation pipeline to list sampled queries",
-                  "error"_attr = redact(ex.toStatus()));
-            return GetNextResult::makeEOF();
-        }
-    }
-
-    if (auto doc = _pipeline->getNext()) {
-        auto queryDoc = SampledQueryDocument::parse(
-            IDLParserContext(DocumentSourceListSampledQueries::kStageName), doc->toBson());
-        DocumentSourceListSampledQueriesResponse response;
-        response.setSampledQueryDocument(std::move(queryDoc));
-        return {Document(response.toBSON())};
-    }
-
-    return GetNextResult::makeEOF();
-}
-
-void DocumentSourceListSampledQueries::detachFromOperationContext() {
-    if (_pipeline) {
-        _pipeline->detachFromOperationContext();
+void DocumentSourceListSampledQueries::detachSourceFromOperationContext() {
+    if (_sharedState->pipeline) {
+        tassert(10713701,
+                "expecting '_execPipeline' to be initialized when '_pipeline' is initialized",
+                _sharedState->execPipeline);
+        _sharedState->execPipeline->detachFromOperationContext();
+        _sharedState->pipeline->detachFromOperationContext();
     }
 }
 
-void DocumentSourceListSampledQueries::reattachToOperationContext(OperationContext* opCtx) {
-    if (_pipeline) {
-        _pipeline->reattachToOperationContext(opCtx);
+void DocumentSourceListSampledQueries::reattachSourceToOperationContext(OperationContext* opCtx) {
+    if (_sharedState->pipeline) {
+        tassert(10713703,
+                "expecting '_execPipeline' to be initialized when '_pipeline' is initialized",
+                _sharedState->execPipeline);
+        _sharedState->execPipeline->reattachToOperationContext(opCtx);
+        _sharedState->pipeline->reattachToOperationContext(opCtx);
     }
 }
 
 std::unique_ptr<DocumentSourceListSampledQueries::LiteParsed>
 DocumentSourceListSampledQueries::LiteParsed::parse(const NamespaceString& nss,
-                                                    const BSONElement& specElem) {
+                                                    const BSONElement& specElem,
+                                                    const LiteParserOptions& options) {
     uassert(6876000,
             str::stream() << kStageName << " must take a nested object but found: " << specElem,
-            specElem.type() == BSONType::Object);
+            specElem.type() == BSONType::object);
     uassert(ErrorCodes::IllegalOperation,
             str::stream() << kStageName << " is not supported on a standalone mongod",
             serverGlobalParams.clusterRole.hasExclusively(ClusterRole::RouterServer) ||
@@ -139,8 +101,8 @@ DocumentSourceListSampledQueries::LiteParsed::parse(const NamespaceString& nss,
             str::stream() << kStageName << " is not supported on a multitenant replica set",
             !gMultitenancySupport);
 
-    auto spec = DocumentSourceListSampledQueriesSpec::parse(IDLParserContext(kStageName),
-                                                            specElem.embeddedObject());
+    auto spec = DocumentSourceListSampledQueriesSpec::parse(specElem.embeddedObject(),
+                                                            IDLParserContext(kStageName));
     if (spec.getNamespace()) {
         uassertStatusOK(validateNamespace(*spec.getNamespace()));
     }

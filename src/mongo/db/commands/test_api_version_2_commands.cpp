@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-#include <set>
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -40,6 +37,9 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/decorable.h"
+
+#include <set>
+#include <string>
 
 namespace mongo {
 
@@ -66,6 +66,10 @@ public:
                                  const DatabaseName&,
                                  const BSONObj&) const override {
         return Status::OK();  // No auth required
+    }
+
+    bool requiresAuthzChecks() const override {
+        return false;
     }
 
     bool run(OperationContext* opCtx,
@@ -98,6 +102,10 @@ public:
                                  const DatabaseName&,
                                  const BSONObj&) const override {
         return Status::OK();  // No auth required
+    }
+
+    bool requiresAuthzChecks() const override {
+        return false;
     }
 
     bool run(OperationContext* opCtx,
@@ -136,6 +144,10 @@ public:
         return Status::OK();  // No auth required
     }
 
+    bool requiresAuthzChecks() const override {
+        return false;
+    }
+
     bool run(OperationContext* opCtx,
              const DatabaseName&,
              const BSONObj& cmdObj,
@@ -166,6 +178,10 @@ public:
                                  const DatabaseName&,
                                  const BSONObj&) const override {
         return Status::OK();  // No auth required
+    }
+
+    bool requiresAuthzChecks() const override {
+        return false;
     }
 
     bool run(OperationContext* opCtx,

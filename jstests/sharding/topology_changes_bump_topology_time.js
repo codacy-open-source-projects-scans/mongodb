@@ -15,8 +15,7 @@ function assertTopologyGt(topologyTime1, topologyTime2, msg) {
 }
 
 function cmdAsInternalClient(st, cmd) {
-    const command =
-        {[cmd]: 1, internalClient: {minWireVersion: NumberInt(0), maxWireVersion: NumberInt(7)}};
+    const command = {[cmd]: 1, internalClient: {minWireVersion: NumberInt(0), maxWireVersion: NumberInt(7)}};
     const connInternal = new Mongo(st.configRS.getPrimary().host);
     const res = assert.commandWorked(connInternal.adminCommand(command));
     connInternal.close();
@@ -32,7 +31,7 @@ function printConfigShards(st, msg) {
     print(msg, tojson(st.s.getDB("config").shards.find().toArray()));
 }
 
-var st = new ShardingTest({shards: 1, rs: {nodes: 1}, config: 3});
+let st = new ShardingTest({shards: 1, rs: {nodes: 1}, config: 3});
 
 let initialTopology = getTopologyTime(st);
 
@@ -47,9 +46,11 @@ assert.commandWorked(st.s.getDB("admin").runCommand({addShard: rs.getURL(), name
 let topologyTimeAfterAddShard = getTopologyTime(st);
 
 // topology time must increase
-assertTopologyGt(topologyTimeAfterAddShard,
-                 initialTopology,
-                 "Current topologyTime should change after add shard, but it did not");
+assertTopologyGt(
+    topologyTimeAfterAddShard,
+    initialTopology,
+    "Current topologyTime should change after add shard, but it did not",
+);
 
 removeShard(st, "rs1");
 
@@ -58,9 +59,11 @@ printConfigShards(st, "config.shards after remove shard ");
 let topologyTimeAfterRemoveShard = getTopologyTime(st);
 
 // topology time should change
-assertTopologyGt(topologyTimeAfterRemoveShard,
-                 topologyTimeAfterAddShard,
-                 "Current topologyTime should change after remove shard, but it did not");
+assertTopologyGt(
+    topologyTimeAfterRemoveShard,
+    topologyTimeAfterAddShard,
+    "Current topologyTime should change after remove shard, but it did not",
+);
 
 rs.stopSet();
 st.stop();

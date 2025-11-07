@@ -29,21 +29,23 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
-#include "mongo/s/catalog_cache.h"
+#include "mongo/db/views/resolved_view.h"
 #include "mongo/s/query/exec/cluster_client_cursor_params.h"
 #include "mongo/s/query/exec/document_source_merge_cursors.h"
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -86,24 +88,18 @@ public:
      * internally.
      *
      * On success, fills out 'result' with the command response.
+     *
+     * It manages the collection routing, meaning that the aggregation may be implicitly retried by
+     * `runAggregate` if the placement of the collection has changed.
      */
     static Status runAggregate(OperationContext* opCtx,
                                const Namespaces& namespaces,
                                AggregateCommandRequest& request,
                                const LiteParsedPipeline& liteParsedPipeline,
                                const PrivilegeVector& privileges,
-                               boost::optional<CollectionRoutingInfo> cri,
-                               BSONObjBuilder* result);
-
-    /**
-     * Convenience version that requests routing table internally.
-     */
-    static Status runAggregate(OperationContext* opCtx,
-                               const Namespaces& namespaces,
-                               AggregateCommandRequest& request,
-                               const LiteParsedPipeline& liteParsedPipeline,
-                               const PrivilegeVector& privileges,
-                               BSONObjBuilder* result);
+                               boost::optional<ExplainOptions::Verbosity> verbosity,
+                               BSONObjBuilder* result,
+                               StringData comment = "ClusterAggregate::runAggregate"_sd);
 
 
     /**
@@ -113,7 +109,27 @@ public:
                                const Namespaces& namespaces,
                                AggregateCommandRequest& request,
                                const PrivilegeVector& privileges,
-                               BSONObjBuilder* result);
+                               boost::optional<ExplainOptions::Verbosity> verbosity,
+                               BSONObjBuilder* result,
+                               StringData comment = "ClusterAggregate::runAggregate"_sd);
+
+    /**
+     * Convenience version to inject the routingCtx by the caller. This function skips the
+     * collection routing management, therefore it has to be managed by the caller. If the view is
+     * resolved, 'request' will refer to the resolved request and 'originalRequest' will refer to
+     * the unresolved request'. Avoid calling this function unless it's strictly necessary.
+     */
+    static Status runAggregateWithRoutingCtx(
+        OperationContext* opCtx,
+        RoutingContext& routingCtx,
+        const Namespaces& namespaces,
+        AggregateCommandRequest& request,
+        const LiteParsedPipeline& liteParsedPipeline,
+        const PrivilegeVector& privileges,
+        boost::optional<ResolvedView> resolvedView,
+        boost::optional<AggregateCommandRequest> originalRequest,
+        boost::optional<ExplainOptions::Verbosity> verbosity,
+        BSONObjBuilder* result);
 
     /**
      * Retries a command that was previously run on a view by resolving the view as an aggregation
@@ -123,12 +139,15 @@ public:
      * later for re-checking privileges for GetMore commands.
      *
      * On success, populates 'result' with the command response.
+     *
+     * This function doesn't throw, it return a Status object instead.
      */
     static Status retryOnViewError(OperationContext* opCtx,
                                    const AggregateCommandRequest& request,
                                    const ResolvedView& resolvedView,
                                    const NamespaceString& requestedNss,
                                    const PrivilegeVector& privileges,
+                                   boost::optional<ExplainOptions::Verbosity> verbosity,
                                    BSONObjBuilder* result,
                                    unsigned numberRetries = 0);
 };

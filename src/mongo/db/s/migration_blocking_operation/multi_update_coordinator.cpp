@@ -28,18 +28,21 @@
  */
 
 #include "mongo/db/s/migration_blocking_operation/multi_update_coordinator.h"
+
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/cluster_command_translations.h"
 #include "mongo/db/dbmessage.h"
+#include "mongo/db/global_catalog/ddl/sharding_ddl_util.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/s/migration_blocking_operation/multi_update_coordinator_server_parameters_gen.h"
-#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/primary_only_service_helpers/pause_during_phase_transition_fail_point.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/rpc/factory.h"
@@ -70,17 +73,16 @@ primary_only_service_helpers::PauseDuringPhaseTransitionFailPoint<MultiUpdateCoo
         [](StringData phase) {
             IDLParserContext ectx(
                 "pauseDuringMultiUpdateCoordinatorPhaseTransition::readPhaseArgument");
-            return MultiUpdateCoordinatorPhase_parse(ectx, phase);
+            return MultiUpdateCoordinatorPhase_parse(phase, ectx);
         }};
 
 AggregateCommandRequest makeAggregationToCheckForPendingUpdates(const NamespaceString& nss,
                                                                 const LogicalSessionId& lsid) {
     auto currentOpStage = fromjson("{$currentOp: {allUsers: true, idleSessions: true}}");
-    auto matchStage = BSON("$match" << BSON("type"
-                                            << "op"
-                                            << "op"
-                                            << "command"
-                                            << "lsid" << lsid.toBSON()));
+    auto matchStage = BSON("$match" << BSON("type" << "op"
+                                                   << "op"
+                                                   << "command"
+                                                   << "lsid" << lsid.toBSON()));
 
     AggregateCommandRequest request{nss};
     request.setPipeline({currentOpStage, matchStage});
@@ -134,9 +136,7 @@ MultiUpdateCoordinatorService::MultiUpdateCoordinatorService(ServiceContext* ser
 MultiUpdateCoordinatorService::MultiUpdateCoordinatorService(
     ServiceContext* serviceContext,
     std::unique_ptr<MultiUpdateCoordinatorExternalStateFactory> factory)
-    : PrimaryOnlyService{serviceContext},
-      _serviceContext{serviceContext},
-      _externalStateFactory{std::move(factory)} {}
+    : PrimaryOnlyService{serviceContext}, _externalStateFactory{std::move(factory)} {}
 
 StringData MultiUpdateCoordinatorService::getServiceName() const {
     return kServiceName;
@@ -161,7 +161,7 @@ void MultiUpdateCoordinatorService::checkIfConflictsWithOtherInstances(
 std::shared_ptr<repl::PrimaryOnlyService::Instance>
 MultiUpdateCoordinatorService::constructInstance(BSONObj initialState) {
     auto initialDocument = MultiUpdateCoordinatorDocument::parse(
-        IDLParserContext("MultiUpdateCoordinatorServiceConstructInstance"), initialState);
+        initialState, IDLParserContext("MultiUpdateCoordinatorServiceConstructInstance"));
     return std::make_shared<MultiUpdateCoordinatorInstance>(this, std::move(initialDocument));
 }
 
@@ -260,7 +260,7 @@ ExecutorFuture<void> MultiUpdateCoordinatorInstance::_doBlockMigrationsPhase() {
             _externalState->createCollection(opCtx.get(), _metadata.getNss());
         }
 
-        _externalState->startBlockingMigrations(opCtx.get(), _metadata.getNss(), _metadata.getId());
+        _externalState->startBlockingMigrations(opCtx.get(), _metadata);
         hangAfterBlockingMigrations.pauseWhileSet();
 
         // Ensure that the collection still exists after the DDL lock has been acquired through
@@ -348,8 +348,7 @@ ExecutorFuture<void> MultiUpdateCoordinatorInstance::_stopBlockingMigrationsIfNe
                 return;
             }
             auto opCtx = factory.makeOperationContext(&cc());
-            _externalState->stopBlockingMigrations(
-                opCtx.get(), _metadata.getNss(), _metadata.getId());
+            _externalState->stopBlockingMigrations(opCtx.get(), _metadata);
             LOGV2(9554706,
                   "MultiUpdateCoordinator ended request for migrations to be blocked",
                   "id"_attr = _metadata.getId());
@@ -478,7 +477,11 @@ ExecutorFuture<void> MultiUpdateCoordinatorInstance::_transitionToPhase(
             if (newPhase == Phase::kSuccess) {
                 newDocument.getMutableFields().setResult(_cmdResponse);
             } else if (newPhase == Phase::kFailure) {
-                newDocument.getMutableFields().setAbortReason(_abortReason);
+                stdx::lock_guard lock(_mutex);
+                if (_abortReason) {
+                    newDocument.getMutableFields().setAbortReason(
+                        sharding_ddl_util::possiblyTruncateErrorStatus(*_abortReason));
+                }
             }
             pauseDuringPhaseTransitions.evaluate(PhaseTransitionProgressEnum::kBefore, newPhase);
             _updateOnDiskState(opCtx.get(), newDocument);
@@ -503,17 +506,19 @@ void MultiUpdateCoordinatorInstance::_updateOnDiskState(
     auto oldPhase = _getCurrentPhase();
     auto newPhase = newPhaseDocument.getMutableFields().getPhase();
     if (oldPhase == Phase::kUnused) {
-        store.add(opCtx, newPhaseDocument, WriteConcerns::kLocalWriteConcern);
+        store.add(opCtx,
+                  newPhaseDocument,
+                  ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter());
     } else if (newPhase == Phase::kDone) {
         store.remove(opCtx,
                      BSON(MultiUpdateCoordinatorDocument::kIdFieldName << _metadata.getId()),
-                     WriteConcerns::kLocalWriteConcern);
+                     ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter());
     } else {
         store.update(opCtx,
                      BSON(MultiUpdateCoordinatorDocument::kIdFieldName << _metadata.getId()),
                      BSON("$set" << BSON(MultiUpdateCoordinatorDocument::kMutableFieldsFieldName
                                          << newPhaseDocument.getMutableFields().toBSON())),
-                     WriteConcerns::kLocalWriteConcern);
+                     ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter());
     }
 }
 

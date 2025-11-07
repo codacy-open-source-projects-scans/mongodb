@@ -7,15 +7,18 @@ import datetime
 import glob
 import os
 import os.path
+import platform
 import random
 import shlex
 import subprocess
 import sys
 import textwrap
 import traceback
+from functools import cache
 from pathlib import Path
 from typing import Dict, Optional
 
+import git
 import pymongo.uri_parser
 import yaml
 from opentelemetry import baggage, context, trace
@@ -25,52 +28,119 @@ from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 
 from buildscripts.idl import gen_all_feature_flag_list
 from buildscripts.resmokelib import config as _config
-from buildscripts.resmokelib import mongo_fuzzer_configs, utils
+from buildscripts.resmokelib import multiversionsetupconstants, utils
+from buildscripts.resmokelib.generate_fuzz_config import mongo_fuzzer_configs
+from buildscripts.resmokelib.run import TestRunner
+from buildscripts.resmokelib.utils import autoloader
 from buildscripts.resmokelib.utils.batched_baggage_span_processor import BatchedBaggageSpanProcessor
 from buildscripts.resmokelib.utils.file_span_exporter import FileSpanExporter
 from buildscripts.util.read_config import read_config_file
+from buildscripts.util.taskname import determine_task_base_name
+from buildscripts.util.teststats import HistoricTaskData
+from evergreen.config import get_auth
 
 BASE_16_TO_INT = 16
+COLLECTOR_ENDPOINT = "otel-collector.prod.corp.mongodb.com:443"
+BAZEL_GENERATED_OFF_FEATURE_FLAGS = "bazel/resmoke/off_feature_flags.txt"
+BAZEL_GENERATED_UNRELEASED_IFR_FEATURE_FLAGS = "bazel/resmoke/unreleased_ifr_feature_flags.txt"
+EVERGREEN_EXPANSIONS_FILE = "../expansions.yml"
 
 
-def validate_and_update_config(parser, args, should_configure_otel=True):
+def validate_and_update_config(
+    parser: argparse.ArgumentParser, args: dict, should_configure_otel: bool = True
+):
     """Validate inputs and update config module."""
 
     _validate_options(parser, args)
     _update_config_vars(parser, args, should_configure_otel)
     _update_symbolizer_secrets()
     _validate_config(parser)
+    _set_up_modules()
     _set_logging_config()
 
 
-def _validate_options(parser, args):
+def process_feature_flag_file(path: str) -> list[str]:
+    with open(path) as fd:
+        return fd.read().split()
+
+
+@cache
+def _get_module_configs() -> dict:
+    with open(_config.MODULES_CONFIG_PATH, "r") as file:
+        return yaml.safe_load(file)
+
+
+def _set_up_modules():
+    module_configs = _get_module_configs()
+    # verify all enabled modules exist
+    for module in _config.MODULES:
+        if module not in module_configs:
+            raise RuntimeError(f"Could not find configuration for module {module}")
+
+    # loop through all modules, we need to act on both enabled and disabled modules
+    for module in module_configs.keys():
+        module_config = module_configs[module]
+        all_paths_present = True
+        for key in ("fixture_dirs", "hook_dirs", "suite_dirs", "jstest_dirs"):
+            if key not in module_config:
+                continue
+            assert (
+                type(module_config[key]) == list
+            ), f"{key} in {module} did not have the expected type of list"
+            for module_dir in module_config[key]:
+                if not os.path.exists(module_dir):
+                    all_paths_present = False
+                    break
+
+        if module in _config.MODULES and all_paths_present:
+            # both the fixures and the hooks just need to be loaded once for resmoke to recognize them
+            for resource_dir in module_config.get("fixture_dirs", []) + module_config.get(
+                "hook_dirs", []
+            ):
+                norm_path = os.path.normpath(resource_dir)
+                package = resource_dir.replace("/", ".")
+                autoloader.load_all_modules(package, [norm_path])
+
+            for suite_dir in module_config.get("suite_dirs", []):
+                _config.MODULE_SUITE_DIRS.append(suite_dir)
+        else:
+            for jstest_dir in module_config.get("jstest_dirs", []):
+                _config.MODULE_DISABLED_JSTEST_DIRS.append(jstest_dir)
+
+
+def _validate_options(parser: argparse.ArgumentParser, args: dict):
     """Do preliminary validation on the options and error on any invalid options."""
 
     if "shell_port" not in args or "shell_conn_string" not in args:
         return
 
-    if args.shell_port is not None and args.shell_conn_string is not None:
+    if args["shell_port"] is not None and args["shell_conn_string"] is not None:
         parser.error("Cannot specify both `shellPort` and `shellConnString`")
 
-    if args.executor_file:
+    if args["executor_file"]:
         parser.error(
             "--executor is superseded by --suites; specify --suites={} {} to run the"
             " test(s) under those suite configuration(s)".format(
-                args.executor_file, " ".join(args.test_files)
+                args["executor_file"], " ".join(args["test_files"])
             )
         )
 
     # The "test_files" positional argument logically overlaps with `--replayFile`. Disallow using both.
-    if args.test_files and args.replay_file:
+    if args["test_files"] and args["replay_file"]:
         parser.error(
             "Cannot use --replayFile with additional test files listed on the command line invocation."
         )
 
-    if args.shell_seed and (not args.test_files or len(args.test_files) != 1):
+    for f in args["test_files"] or []:
+        # args.test_files can be a "replay" command or a list of tests files, if it's neither raise an error.
+        if not f.startswith("@") and not Path(f).exists():
+            parser.error(f"Test file {f} does not exist.")
+
+    if args["shell_seed"] and (not args["test_files"] or len(args["test_files"]) != 1):
         parser.error("The --shellSeed argument must be used with only one test.")
 
-    if args.additional_feature_flags_file and not os.path.isfile(
-        args.additional_feature_flags_file
+    if args["additional_feature_flags_file"] and not os.path.isfile(
+        args["additional_feature_flags_file"]
     ):
         parser.error("The specified additional feature flags file does not exist.")
 
@@ -94,12 +164,12 @@ def _validate_options(parser, args):
 
         return errors
 
-    config = vars(args)
-    mongod_set_param_errors = get_set_param_errors(config.get("mongod_set_parameters") or [])
-    mongos_set_param_errors = get_set_param_errors(config.get("mongos_set_parameters") or [])
+    mongod_set_param_errors = get_set_param_errors(args.get("mongod_set_parameters") or [])
+    mongos_set_param_errors = get_set_param_errors(args.get("mongos_set_parameters") or [])
     mongocryptd_set_param_errors = get_set_param_errors(
-        config.get("mongocryptd_set_parameters") or []
+        args.get("mongocryptd_set_parameters") or []
     )
+    mongo_set_param_errors = get_set_param_errors(args.get("mongo_set_parameters") or [])
     error_msgs = {}
     if mongod_set_param_errors:
         error_msgs["mongodSetParameters"] = mongod_set_param_errors
@@ -107,12 +177,26 @@ def _validate_options(parser, args):
         error_msgs["mongosSetParameters"] = mongos_set_param_errors
     if mongocryptd_set_param_errors:
         error_msgs["mongocryptdSetParameters"] = mongocryptd_set_param_errors
+    if mongo_set_param_errors:
+        error_msgs["mongoSetParameters"] = mongo_set_param_errors
     if error_msgs:
         parser.error(str(error_msgs))
 
+    if (args["shard_count"] is not None) ^ (args["shard_index"] is not None):
+        parser.error("Must specify both or neither of --shardCount and --shardIndex")
+    if (args["shard_count"] is not None) and (args["shard_index"] is not None) and args["jobs"]:
+        parser.error("Cannot specify --shardCount and --shardIndex in combination with --jobs.")
 
-def _validate_config(parser):
-    from buildscripts.resmokelib.config_fuzzer_limits import config_fuzzer_params
+    if (args["archive_mode"] != "directory") ^ (args["archive_directory"] is None):
+        parser.error(
+            "--archiveMode=directory must be used in combination with --archiveDirectory=DIR"
+        )
+
+
+def _validate_config(parser: argparse.ArgumentParser):
+    from buildscripts.resmokelib.generate_fuzz_config.config_fuzzer_limits import (
+        config_fuzzer_params,
+    )
 
     """Do validation on the config settings and config fuzzer limits."""
 
@@ -133,8 +217,7 @@ def _validate_config(parser):
         for version in _config.MIXED_BIN_VERSIONS:
             if version not in set(["old", "new"]):
                 parser.error(
-                    "Must specify binary versions as 'old' or 'new' in format"
-                    " 'version1-version2'"
+                    "Must specify binary versions as 'old' or 'new' in format 'version1-version2'"
                 )
 
     if not _config.TLS_MODE or _config.TLS_MODE == "disabled":
@@ -151,13 +234,16 @@ def _validate_config(parser):
         if _config.SHELL_TLS_CERTIFICATE_KEY_FILE:
             parser.error("--shellTlsCertificateKeyFile requires --shellTls")
 
+    if not sys.platform.startswith("linux") and _config.LOAD_ALL_EXTENSIONS:
+        parser.error("--loadAllExtensions is only supported on Linux")
+
     # Ranges through param specs and checks that they are valid parameter declarations.
     for param_type in config_fuzzer_params:
         _validate_params_spec(parser, config_fuzzer_params[param_type])
 
 
-def _validate_params_spec(parser, spec):
-    valid_fuzz_at_vals = {"startup", "runtime"}
+def _validate_params_spec(parser: argparse.ArgumentParser, spec: dict):
+    valid_fuzz_at_vals = {"startup", "runtime", "cluster"}
     for key, value in spec.items():
         if "fuzz_at" not in value:
             parser.error(
@@ -188,21 +274,30 @@ def _find_resmoke_wrappers():
     return list(candidate_installs)
 
 
+def _should_skip_grpc_tracing():
+    """Check whether grpc tracing is enabled on the current machine's OS."""
+    return sys.platform.startswith("linux") and platform.machine().startswith(
+        ("ppc", "powerpc", "s390")
+    )
+
+
 def _set_up_tracing(
     otel_collector_dir: Optional[str],
     trace_id: Optional[str],
     parent_span_id: Optional[str],
-    extra_context: Optional[Dict[str, object]],
+    extra_context: Dict[str, object],
 ) -> bool:
     """Try to set up otel tracing. On success return True. On failure return False.
 
-    This method does 3 things:
+    This method does 4 things:
     1. If a user passes in a directory pathname to store OTel metrics in,
     then we export metrics to files in that directory using our custom exporter
     `FileSpanExporter`.
-    2. If a user passes in a trace ID and a parent span ID, we assume both of those.
+    2. If the user is running outside of Evergreen, we send data directly to the
+    OTEL collector.
+    3. If a user passes in a trace ID and a parent span ID, we assume both of those.
     This allows us to tie resmoke metrics to a parent metric.
-    3. If a user passes in extra_context, we add these "global" values to our baggage.
+    4. If a user passes in extra_context, we add these "global" values to our baggage.
     This allows us to propagate these values to all child spans in resmoke
     using our custom span processor `BatchedBaggageSpanProcessor`.
     """
@@ -224,7 +319,26 @@ def _set_up_tracing(
             provider.add_span_processor(processor)
         except OSError:
             traceback.print_exc()
+            print("Failed to create local file to send otel metrics to.")
             success = False
+
+    # If we're not running inside of Evergreen, we need to configure the endpoint to send traces directly to the ingestor.
+    if not _config.EVERGREEN_TASK_ID and not _should_skip_grpc_tracing():
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+
+        try:
+            user_email = git.config.GitConfigParser().get_value("user", "email")
+            extra_context["user.email"] = user_email
+
+            evg_auth = get_auth()
+            if evg_auth is not None:
+                extra_context["user.evg"] = evg_auth.username
+            processor = BatchedBaggageSpanProcessor(OTLPSpanExporter(endpoint=COLLECTOR_ENDPOINT))
+            provider.add_span_processor(processor)
+        except Exception:
+            # We'll only track local usage we can actually follow back to real users.
+            pass
+
     trace.set_tracer_provider(provider)
 
     if trace_id and parent_span_id:
@@ -245,21 +359,21 @@ def _set_up_tracing(
     return success
 
 
-def _update_config_vars(parser, values, should_configure_otel=True):
+def _update_config_vars(
+    parser: argparse.ArgumentParser, values: dict, should_configure_otel: bool = True
+):
     """Update the variables of the config module."""
 
     config = _config.DEFAULTS.copy()
 
-    # Override `config` with values from command line arguments.
-    cmdline_vars = vars(values)
-    for cmdline_key in cmdline_vars:
+    for cmdline_key in values:
         if cmdline_key not in _config.DEFAULTS:
             # Ignore options that don't map to values in config.py
             continue
-        if cmdline_vars[cmdline_key] is not None:
-            config[cmdline_key] = cmdline_vars[cmdline_key]
+        if values[cmdline_key] is not None:
+            config[cmdline_key] = values[cmdline_key]
 
-    if values.command == "run" and os.path.isfile("resmoke.ini"):
+    if values["command"] == "run" and os.path.isfile("resmoke.ini"):
         err = textwrap.dedent("""\
 Support for resmoke.ini has been removed. You must delete
 resmoke.ini and rerun your build to run resmoke. If only one testable
@@ -277,54 +391,96 @@ into the bin directory of each installation.""")
 Based on the current value of resmoke.ini, after rebuilding, resmoke.py should
 be invoked as either:
 - {shlex.quote(f"{user_config['install_dir']}/resmoke.py")}
-- buildscripts/resmoke.py --installDir {shlex.quote(user_config['install_dir'])}""")
+- buildscripts/resmoke.py --installDir {shlex.quote(user_config["install_dir"])}""")
         raise RuntimeError(err)
 
-    def process_feature_flag_file(path):
-        with open(path) as fd:
-            return fd.read().split()
-
-    def setup_feature_flags():
-        _config.RUN_ALL_FEATURE_FLAG_TESTS = config.pop("run_all_feature_flag_tests")
-        _config.RUN_NO_FEATURE_FLAG_TESTS = config.pop("run_no_feature_flag_tests")
-        _config.ADDITIONAL_FEATURE_FLAGS_FILE = config.pop("additional_feature_flags_file")
-        _config.DISABLE_FEATURE_FLAGS = config.pop("disable_feature_flags")
-
-        if values.command == "run":
-            # These logging messages start with # becuase the output of this file must produce
-            # valid yaml. This comments out these print statements when the output is parsed.
-            print("# Fetching feature flags...")
-            all_ff = gen_all_feature_flag_list.get_all_feature_flags_turned_off_by_default()
-            print("# Fetched feature flags...")
+    def set_up_feature_flags():
+        # These logging messages start with # becuase the output of this file must produce
+        # valid yaml. This comments out these print statements when the output is parsed.
+        print("# Fetching feature flags...")
+        if os.path.exists(BAZEL_GENERATED_OFF_FEATURE_FLAGS):
+            default_disabled_feature_flags = set(
+                process_feature_flag_file(BAZEL_GENERATED_OFF_FEATURE_FLAGS)
+            )
         else:
-            all_ff = []
+            default_disabled_feature_flags = set(
+                gen_all_feature_flag_list.get_all_feature_flags_turned_off_by_default()
+            )
+        default_disabled_set = set(default_disabled_feature_flags)
+        print("# Fetched feature flags...")
 
-        enabled_feature_flags = []
-        if _config.RUN_ALL_FEATURE_FLAG_TESTS:
-            enabled_feature_flags = all_ff[:]
+        # Get feature flags that are to be explicitly enabled or disabled.
+        additional_feature_flags = _tags_from_list(config.pop("additional_feature_flags"))
+        excluded_feature_flags = _tags_from_list(config.pop("excluded_feature_flags"))
+
+        added_set = set(additional_feature_flags) if additional_feature_flags is not None else set()
+        excluded_set = set(excluded_feature_flags) if excluded_feature_flags is not None else set()
 
         if _config.ADDITIONAL_FEATURE_FLAGS_FILE:
-            enabled_feature_flags.extend(
-                process_feature_flag_file(_config.ADDITIONAL_FEATURE_FLAGS_FILE)
-            )
+            added_set |= set(process_feature_flag_file(_config.ADDITIONAL_FEATURE_FLAGS_FILE))
 
-        # Specify additional feature flags from the command line.
-        # Set running all feature flag tests to True if this options is specified.
-        additional_feature_flags = _tags_from_list(config.pop("additional_feature_flags"))
-        if additional_feature_flags is not None:
-            enabled_feature_flags.extend(additional_feature_flags)
+        common_set = set.intersection(added_set, excluded_set)
+        if len(common_set) > 0:
+            err = textwrap.dedent(f"""\
+The --additionalFeatureFlags and --disableFeatureFlags arguments must not have
+flags in common: {common_set}
+""")
+            raise ValueError(err)
 
-        # Remove feature flags which enabled with other feature flags arguments
-        if _config.DISABLE_FEATURE_FLAGS:
-            disable_feature_flags = _tags_from_list(_config.DISABLE_FEATURE_FLAGS)
-            for flag in disable_feature_flags:
-                if flag in enabled_feature_flags:
-                    enabled_feature_flags.remove(flag)
+        enabled_feature_flags_set = (
+            (default_disabled_set - excluded_set) | added_set
+            if _config.RUN_ALL_FEATURE_FLAG_TESTS
+            else added_set
+        )
 
-        return enabled_feature_flags, all_ff
+        if _config.DISABLE_UNRELEASED_IFR_FLAGS:
+            print("# Fetching unreleased incremental rollout feature flags...")
+            if os.path.exists(BAZEL_GENERATED_UNRELEASED_IFR_FEATURE_FLAGS):
+                unreleased_ifr_set = set(
+                    process_feature_flag_file(BAZEL_GENERATED_UNRELEASED_IFR_FEATURE_FLAGS)
+                )
+            else:
+                unreleased_ifr_set = set(
+                    gen_all_feature_flag_list.get_all_unreleased_ifr_feature_flags()
+                )
+            print("# Fetched unreleased incremental rollout feature flags...")
 
-    _config.ENABLED_FEATURE_FLAGS, all_feature_flags = setup_feature_flags()
-    not_enabled_feature_flags = list(set(all_feature_flags) - set(_config.ENABLED_FEATURE_FLAGS))
+            disabled_feature_flags_set = (unreleased_ifr_set - added_set) | excluded_set
+        else:
+            disabled_feature_flags_set = excluded_set
+
+        # This list includes flags that are disabled by default, even if they are not explicitly
+        # disabled.
+        off_feature_flags = list(
+            (default_disabled_set | disabled_feature_flags_set) - enabled_feature_flags_set
+        )
+
+        return (
+            list(enabled_feature_flags_set),
+            list(disabled_feature_flags_set),
+            default_disabled_feature_flags,
+            off_feature_flags,
+        )
+
+    _config.RUN_ALL_FEATURE_FLAG_TESTS = config.pop("run_all_feature_flag_tests")
+    _config.RUN_NO_FEATURE_FLAG_TESTS = config.pop("run_no_feature_flag_tests")
+    _config.DISABLE_UNRELEASED_IFR_FLAGS = config.pop("disable_unreleased_ifr_flags")
+    _config.ADDITIONAL_FEATURE_FLAGS_FILE = config.pop("additional_feature_flags_file")
+    _config.ENABLED_FEATURE_FLAGS = []
+    _config.DISABLED_FEATURE_FLAGS = []
+    default_disabled_feature_flags = []
+    off_feature_flags = []
+    if values["command"] == "run":
+        (
+            _config.ENABLED_FEATURE_FLAGS,
+            _config.DISABLED_FEATURE_FLAGS,
+            default_disabled_feature_flags,
+            off_feature_flags,
+        ) = set_up_feature_flags()
+    else:
+        # Explicitly ignore these run-related options.
+        config.pop("additional_feature_flags")
+        config.pop("excluded_feature_flags")
 
     # This must be set before the fuzzers instantiated
     _config.STORAGE_ENGINE = config.pop("storage_engine")
@@ -341,20 +497,32 @@ be invoked as either:
         utils.default_if_none(_tags_from_list(config.pop("exclude_with_any_tags")), [])
     )
 
-    with open("buildscripts/resmokeconfig/fully_disabled_feature_flags.yml") as fully_disabled_ffs:
-        force_disabled_flags = yaml.safe_load(fully_disabled_ffs)
+    _config.INCLUDE_FULLY_DISABLED_FEATURE_TESTS = config.pop(
+        "include_fully_disabled_feature_tests"
+    )
+    if not _config.INCLUDE_FULLY_DISABLED_FEATURE_TESTS:
+        with open(
+            "buildscripts/resmokeconfig/fully_disabled_feature_flags.yml", encoding="utf8"
+        ) as fully_disabled_ffs:
+            # the ENABLED_FEATURE_FLAGS list already excludes the fully disabled features flags
+            # This keeps any feature flags enabled that were manually turned on from being excluded
+            force_disabled_flags = set(yaml.safe_load(fully_disabled_ffs)) - set(
+                _config.ENABLED_FEATURE_FLAGS
+            )
 
-    _config.EXCLUDE_WITH_ANY_TAGS.extend(force_disabled_flags)
+        _config.EXCLUDE_WITH_ANY_TAGS.extend(force_disabled_flags)
 
     if _config.RUN_NO_FEATURE_FLAG_TESTS:
-        # Don't run any feature flag tests.
-        _config.EXCLUDE_WITH_ANY_TAGS.extend(all_feature_flags)
+        # Don't run tests tagged with feature flags that are disabled by default.
+        _config.EXCLUDE_WITH_ANY_TAGS.extend(default_disabled_feature_flags)
     else:
         # Don't run tests with feature flags that are not enabled.
-        _config.EXCLUDE_WITH_ANY_TAGS.extend(not_enabled_feature_flags)
-        _config.EXCLUDE_WITH_ANY_TAGS.extend(
-            [f"{feature_flag}_incompatible" for feature_flag in _config.ENABLED_FEATURE_FLAGS]
-        )
+        _config.EXCLUDE_WITH_ANY_TAGS.extend(off_feature_flags)
+
+    # Don't run tests that are incompatible with enabled feature flags.
+    _config.EXCLUDE_WITH_ANY_TAGS.extend(
+        [f"{feature_flag}_incompatible" for feature_flag in _config.ENABLED_FEATURE_FLAGS]
+    )
 
     _config.DOCKER_COMPOSE_BUILD_IMAGES = config.pop("docker_compose_build_images")
     if _config.DOCKER_COMPOSE_BUILD_IMAGES is not None:
@@ -377,6 +545,9 @@ be invoked as either:
 
     _config.FAIL_FAST = not config.pop("continue_on_failure")
 
+    timeout = config.pop("test_timeout")
+    _config.TEST_TIMEOUT = int(timeout) if timeout else None
+
     _config.INCLUDE_WITH_ANY_TAGS = _tags_from_list(config.pop("include_with_any_tags"))
     _config.INCLUDE_TAGS = _tags_from_list(config.pop("include_with_all_tags"))
 
@@ -384,26 +555,60 @@ be invoked as either:
     _config.JOBS = config.pop("jobs")
     _config.LINEAR_CHAIN = config.pop("linear_chain") == "on"
     _config.MAJORITY_READ_CONCERN = config.pop("majority_read_concern") == "on"
-    _config.ENABLE_ENTERPRISE_TESTS = config.pop("enable_enterprise_tests")
+    _config.MODULES_CONFIG_PATH = config.pop("resmoke_modules_path")
+    modules = config.pop("modules").strip()
+    if modules == "default":
+        # try turning on all modules
+        _config.MODULES = list(_get_module_configs().keys())
+    elif modules == "none":
+        _config.MODULES = []
+    elif not modules:
+        raise RuntimeError("--modules must contain content. Specify 'none' to define no modules")
+    else:
+        _config.MODULES = modules.split(",")
+
     _config.MIXED_BIN_VERSIONS = config.pop("mixed_bin_versions")
     if _config.MIXED_BIN_VERSIONS is not None:
         _config.MIXED_BIN_VERSIONS = _config.MIXED_BIN_VERSIONS.split("-")
 
     _config.MULTIVERSION_BIN_VERSION = config.pop("old_bin_version")
 
-    _config.INSTALL_DIR = config.pop("install_dir")
-    if values.command == "run" and _config.INSTALL_DIR is None:
-        resmoke_wrappers = _find_resmoke_wrappers()
-        if len(resmoke_wrappers) == 1:
-            _config.INSTALL_DIR = os.path.dirname(resmoke_wrappers[0])
-        elif len(resmoke_wrappers) > 1:
-            err = textwrap.dedent(f"""\
-Multiple testable installations were found, but installDir was not specified.
-You must either call resmoke via one of the following scripts:
-{os.linesep.join(map(shlex.quote, resmoke_wrappers))}
+    _config.ENABLE_EVERGREEN_API_TEST_SELECTION = config.pop("enable_evergreen_api_test_selection")
+    _config.EVERGREEN_TEST_SELECTION_STRATEGY = config.pop("test_selection_strategies_array")
 
-or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py.""")
-            raise RuntimeError(err)
+    shard_index = config.pop("shard_index")
+    shard_count = config.pop("shard_count")
+    _config.SHARD_INDEX = int(shard_index) if shard_index is not None else None
+    _config.SHARD_COUNT = int(shard_count) if shard_count is not None else None
+
+    _config.HISTORIC_TEST_RUNTIMES = config.pop("historic_test_runtimes")
+
+    mongo_version_file = config.pop("mongo_version_file")
+    if mongo_version_file is not None:
+        _config.MONGO_VERSION_FILE = mongo_version_file
+
+    releases_file = config.pop("releases_file")
+    if releases_file is not None:
+        multiversionsetupconstants.USE_EXISTING_RELEASES_FILE = True
+        _config.RELEASES_FILE = releases_file
+
+    _config.INSTALL_DIR = config.pop("install_dir")
+    if values["command"] == "run" and _config.INSTALL_DIR is None:
+        bazel_bin_path = os.path.abspath("bazel-bin/install/bin")
+        if os.path.exists(bazel_bin_path):
+            _config.INSTALL_DIR = bazel_bin_path
+        else:
+            resmoke_wrappers = _find_resmoke_wrappers()
+            if len(resmoke_wrappers) == 1:
+                _config.INSTALL_DIR = os.path.dirname(resmoke_wrappers[0])
+            elif len(resmoke_wrappers) > 1:
+                err = textwrap.dedent(f"""\
+    Multiple testable installations were found, but installDir was not specified.
+    You must either call resmoke via one of the following scripts:
+    {os.linesep.join(map(shlex.quote, resmoke_wrappers))}
+
+    or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py.""")
+                raise RuntimeError(err)
     if _config.INSTALL_DIR is not None:
         # Normalize the path so that on Windows dist-test/bin
         # translates to .\dist-test\bin then absolutify it since the
@@ -414,6 +619,8 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
             keyname = binary + "_executable"
             if config.get(keyname, None) is None:
                 config[keyname] = os.path.join(_config.INSTALL_DIR, binary)
+
+    _config.MULTIVERSION_DIRS = [_expand_user(dir) for dir in config.pop("multiversion_dirs")]
 
     _config.DBTEST_EXECUTABLE = _expand_user(config.pop("dbtest_executable"))
     _config.MONGO_EXECUTABLE = _expand_user(config.pop("mongo_executable"))
@@ -448,7 +655,7 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
             _config.WT_INDEX_CONFIG,
             _config.CONFIG_FUZZER_ENCRYPTION_OPTS,
         ) = mongo_fuzzer_configs.fuzz_mongod_set_parameters(
-            _config.FUZZ_MONGOD_CONFIGS, _config.CONFIG_FUZZ_SEED, _config.MONGOD_SET_PARAMETERS
+            _config.CONFIG_FUZZ_SEED, _config.MONGOD_SET_PARAMETERS
         )
         _config.EXCLUDE_WITH_ANY_TAGS.extend(["uses_compact"])
 
@@ -467,6 +674,7 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
         )
 
     _config.MONGOCRYPTD_SET_PARAMETERS = _merge_set_params(config.pop("mongocryptd_set_parameters"))
+    _config.MONGO_SET_PARAMETERS = _merge_set_params(config.pop("mongo_set_parameters"))
 
     _config.MONGOT_EXECUTABLE = _expand_user(config.pop("mongot-localdev/mongot_executable"))
     mongot_set_parameters = config.pop("mongot_set_parameters")
@@ -512,6 +720,17 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
         mongot_version = subprocess.check_output(
             [_config.MONGOT_EXECUTABLE, "--version"], text=True
         ).strip()
+
+        commit_version_substr = "-"
+        if commit_version_substr in mongot_version:
+            # Mongot release versions are in the format of x.y.z. Its possible that the release version of mongot can have a higher x.y.z value
+            # than the latest version of mongot master. We can identify a latest binary by the presence of a commit version (a hash/substring
+            # that starts with "-"). We can get the true value of the latest release by then removing the commit version and increasing the
+            # minor version. eg x.y.z-a becaomes x.y+1.0 or 1.42.3-26-g328e4474f becomes 1.44.0
+            major_version = mongot_version.split(".")[0]
+            minor_version = mongot_version.split(".")[1]
+            mongot_version = major_version + "." + str(int(minor_version) + 1) + ".0"
+
         mongot_excluded_versions = get_excluded_mongot_versions(mongot_version)
         _config.EXCLUDE_WITH_ANY_TAGS.extend(mongot_excluded_versions)
 
@@ -531,7 +750,6 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     _config.CONFIG_SHARD = utils.pick_catalog_shard_node(
         config.pop("config_shard"), _config.NUM_SHARDS
     )
-    _config.EMBEDDED_ROUTER = config.pop("embedded_router")
     _config.ORIGIN_SUITE = config.pop("origin_suite")
     _config.CEDAR_REPORT_FILE = config.pop("cedar_report_file")
     _config.RANDOM_SEED = config.pop("seed")
@@ -546,13 +764,18 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     _config.SHELL_SEED = config.pop("shell_seed")
     _config.STAGGER_JOBS = config.pop("stagger_jobs") == "on"
     _config.STORAGE_ENGINE_CACHE_SIZE = config.pop("storage_engine_cache_size_gb")
+    _config.STORAGE_ENGINE_CACHE_SIZE_PCT = config.pop("storage_engine_cache_size_pct")
     _config.MOZJS_JS_GC_ZEAL = config.pop("mozjs_js_gc_zeal")
     _config.SUITE_FILES = config.pop("suite_files")
     if _config.SUITE_FILES is not None:
         _config.SUITE_FILES = _config.SUITE_FILES.split(",")
     _config.TAG_FILES = config.pop("tag_files")
     _config.USER_FRIENDLY_OUTPUT = config.pop("user_friendly_output")
+    _config.LOG_FORMAT = config.pop("log_format")
+    _config.LOG_LEVEL = config.pop("log_level")
     _config.SANITY_CHECK = config.pop("sanity_check")
+    _config.PAUSE_AFTER_POPULATE = config.pop("pause_after_populate")
+    _config.LOAD_ALL_EXTENSIONS = config.pop("load_all_extensions")
 
     # Internal testing options.
     _config.INTERNAL_PARAMS = config.pop("internal_params")
@@ -587,25 +810,39 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
         # has been called >1 times
         assert trace._TRACER_PROVIDER is None
 
+        extra_context = {
+            "evergreen.build.id": _config.EVERGREEN_BUILD_ID,
+            "evergreen.distro.id": _config.EVERGREEN_DISTRO_ID,
+            "evergreen.project.identifier": _config.EVERGREEN_PROJECT_NAME,
+            "evergreen.task.execution": _config.EVERGREEN_EXECUTION
+            if _config.EVERGREEN_TASK_ID
+            else None,  # We need to explicitly set this to None to prevent it from being included even when it makes no sense locally.
+            "evergreen.task.id": _config.EVERGREEN_TASK_ID,
+            "evergreen.task.name": _config.EVERGREEN_TASK_NAME,
+            "evergreen.variant.name": _config.EVERGREEN_VARIANT_NAME,
+            "evergreen.version.id": _config.EVERGREEN_VERSION_ID,
+            "evergreen.revision": _config.EVERGREEN_REVISION,
+            "evergreen.patch_build": _config.EVERGREEN_PATCH_BUILD,
+            "resmoke.cmd.verbatim": " ".join(sys.argv),
+            "resmoke.cmd": values["command"],
+            "machine.os": sys.platform,
+        }
+
+        for arg, value in values.items():
+            if arg != "command" and value is not None:
+                extra_context[f"resmoke.cmd.params.{arg}"] = value
+
         try:
             setup_success = _set_up_tracing(
                 _config.OTEL_COLLECTOR_DIR,
                 _config.OTEL_TRACE_ID,
                 _config.OTEL_PARENT_ID,
-                extra_context={
-                    "evergreen.build.id": _config.EVERGREEN_BUILD_ID,
-                    "evergreen.distro.id": _config.EVERGREEN_DISTRO_ID,
-                    "evergreen.project.identifier": _config.EVERGREEN_PROJECT_NAME,
-                    "evergreen.task.execution": _config.EVERGREEN_EXECUTION,
-                    "evergreen.task.id": _config.EVERGREEN_TASK_ID,
-                    "evergreen.task.name": _config.EVERGREEN_TASK_NAME,
-                    "evergreen.variant.name": _config.EVERGREEN_VARIANT_NAME,
-                    "evergreen.revision": _config.EVERGREEN_REVISION,
-                    "evergreen.patch_build": _config.EVERGREEN_PATCH_BUILD,
-                },
+                extra_context=extra_context,
             )
             if not setup_success:
-                print("Failed to create file to send otel metrics to. Continuing.")
+                print(
+                    "Failed to set up otel metric collection. Continuing as this is not a blocking error."
+                )
         except (KeyboardInterrupt, SystemExit):
             raise
         except:
@@ -613,7 +850,7 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
             # If there is some problem setting up metrics we don't want resmoke to fail
             # We would rather just swallow the error
             traceback.print_exc()
-            print("Failed to set up otel metrics. Continuing.")
+            print("Failed to set up otel metrics. Continuing.", file=sys.stderr)
 
     # Force invalid suite config
     _config.FORCE_EXCLUDED_TESTS = config.pop("force_excluded_tests")
@@ -636,6 +873,8 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
 
     _config.ARCHIVE_LIMIT_MB = config.pop("archive_limit_mb")
     _config.ARCHIVE_LIMIT_TESTS = config.pop("archive_limit_tests")
+    _config.ARCHIVE_MODE = config.pop("archive_mode")
+    _config.ARCHIVE_DIRECTORY = config.pop("archive_directory")
 
     # Wiredtiger options. Prevent fuzzed wt configs from being overwritten unless user specifies it.
     wt_engine_config = config.pop("wt_engine_config")
@@ -662,6 +901,9 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     # Directory with jstests option
     _config.JSTESTS_DIR = config.pop("jstests_dir")
 
+    # Mocha-style test options
+    _config.MOCHA_GREP = config.pop("mocha_grep")
+
     # Configure evergreen task documentation
     if _config.EVERGREEN_TASK_NAME:
         task_name = utils.get_task_name_without_suffix(
@@ -678,6 +920,8 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     _config.MAX_TEST_QUEUE_SIZE = config.pop("max_test_queue_size")
 
     _config.FUZZ_RUNTIME_STRESS = config.pop("fuzz_runtime_stress")
+
+    _config.VALIDATE_SELECTOR_PATHS = config.pop("validate_selector_paths")
 
     def configure_tests(test_files, replay_file):
         # `_validate_options` has asserted that at most one of `test_files` and `replay_file` contains input.
@@ -705,13 +949,23 @@ or explicitly pass --installDir to the run subcommand of buildscripts/resmoke.py
     _config.LOGGER_DIR = os.path.join(_config.CONFIG_DIR, "loggers")
 
     shuffle = config.pop("shuffle")
-    if shuffle == "auto":
-        # If the user specified a value for --jobs > 1 (or -j > 1), then default to randomize
-        # the order in which tests are executed. This is because with multiple threads the tests
-        # wouldn't run in a deterministic order anyway.
-        _config.SHUFFLE = _config.JOBS > 1
-    else:
-        _config.SHUFFLE = shuffle == "on"
+    if (
+        shuffle == "longest-first"
+        and _config.EVERGREEN_TASK_NAME
+        and _config.EVERGREEN_VARIANT_NAME
+        and _config.EVERGREEN_PROJECT_NAME
+    ):
+        base_task = determine_task_base_name(
+            _config.EVERGREEN_TASK_NAME, _config.EVERGREEN_VARIANT_NAME
+        )
+        historic_task_data = HistoricTaskData.from_s3(
+            _config.EVERGREEN_PROJECT_NAME, base_task, _config.EVERGREEN_VARIANT_NAME
+        )
+        _config.SHUFFLE_STRATEGY = TestRunner.LongestFirstPartialShuffle(historic_task_data)
+    elif shuffle == "auto":
+        _config.SHUFFLE_STRATEGY = TestRunner.RandomShuffle() if _config.JOBS > 1 else None
+    elif shuffle != "off":
+        _config.SHUFFLE_STRATEGY = TestRunner.RandomShuffle()
 
     conn_string = config.pop("shell_conn_string")
     port = config.pop("shell_port")
@@ -786,8 +1040,8 @@ def _tags_from_list(tags_list):
 
 def _update_symbolizer_secrets():
     """Open `expansions.yml`, get values for symbolizer secrets and update their values inside config.py ."""
-    if not _config.EVERGREEN_TASK_ID:
-        # not running on Evergreen
+    if not _config.EVERGREEN_TASK_ID or _config.SKIP_SYMBOLIZATION:
+        # not running on Evergreen or explicitly skipping symbolization
         return
     yml_data = utils.load_yaml_file(_config.EXPANSIONS_FILE)
     _config.SYMBOLIZER_CLIENT_SECRET = yml_data.get("symbolizer_client_secret")
@@ -820,24 +1074,26 @@ def add_otel_args(parser: argparse.ArgumentParser):
     )
 
 
-def detect_evergreen_config(
-    parsed_args: argparse.Namespace, expansions_file: str = "../expansions.yml"
-):
-    if not os.path.exists(expansions_file):
+def detect_evergreen_config(parsed_args: dict):
+    if not os.path.exists(EVERGREEN_EXPANSIONS_FILE):
         return
 
-    expansions = read_config_file(expansions_file)
+    expansions = read_config_file(EVERGREEN_EXPANSIONS_FILE)
 
-    parsed_args.build_id = expansions.get("build_id", None)
-    parsed_args.distro_id = expansions.get("distro_id", None)
-    parsed_args.execution_number = expansions.get("execution", None)
-    parsed_args.project_name = expansions.get("project", None)
-    parsed_args.git_revision = expansions.get("revision", None)
-    parsed_args.revision_order_id = expansions.get("revision_order_id", None)
-    parsed_args.task_id = expansions.get("task_id", None)
-    parsed_args.task_name = expansions.get("task_name", None)
-    parsed_args.variant_name = expansions.get("build_variant", None)
-    parsed_args.version_id = expansions.get("version_id", None)
-    parsed_args.work_dir = expansions.get("workdir", None)
-    parsed_args.evg_project_config_path = expansions.get("evergreen_config_file_path", None)
-    parsed_args.requester = expansions.get("requester", None)
+    parsed_args.update(
+        {
+            "build_id": expansions.get("build_id", None),
+            "distro_id": expansions.get("distro_id", None),
+            "execution_number": expansions.get("execution", None),
+            "project_name": expansions.get("project", None),
+            "git_revision": expansions.get("revision", None),
+            "revision_order_id": expansions.get("revision_order_id", None),
+            "task_id": expansions.get("task_id", None),
+            "task_name": expansions.get("task_name", None),
+            "variant_name": expansions.get("build_variant", None),
+            "version_id": expansions.get("version_id", None),
+            "work_dir": expansions.get("workdir", None),
+            "evg_project_config_path": expansions.get("evergreen_config_file_path", None),
+            "requester": expansions.get("requester", None),
+        }
+    )

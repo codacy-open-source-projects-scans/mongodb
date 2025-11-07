@@ -29,26 +29,22 @@
 
 #include "mongo/db/server_parameter.h"
 
-#include <fmt/format.h>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/server_options.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/static_immortal.h"
 #include "mongo/util/time_support.h"
+
+#include <utility>
+
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
 namespace mongo {
 
-using namespace fmt::literals;
 using SPT = ServerParameterType;
 
 MONGO_INITIALIZER_GROUP(BeginServerParameterRegistration, (), ("EndServerParameterRegistration"))
@@ -60,9 +56,6 @@ ServerParameter::ServerParameter(StringData name, ServerParameterType spt)
     : _name{name}, _type(spt) {}
 
 ServerParameter::ServerParameter(const ServerParameter& other) {
-    // Since there is a mutex stored as a member variable, we need to explicitly write a copy
-    // constructor because a mutex has it's default copy constructor deleted.
-    stdx::lock_guard lk(other._mutex);
     this->_name = other._name;
     this->_type = other._type;
     this->_testOnly = other._testOnly;
@@ -70,7 +63,7 @@ ServerParameter::ServerParameter(const ServerParameter& other) {
     this->_isOmittedInFTDC = other._isOmittedInFTDC;
     this->_featureFlag = other._featureFlag;
     this->_minFCV = other._minFCV;
-    this->_disableState = other._disableState;
+    this->_state.store(other._state.load());
 }
 
 Status ServerParameter::set(const BSONElement& newValueElement,
@@ -91,8 +84,9 @@ ServerParameterSet* ServerParameterSet::getNodeParameterSet() {
         ServerParameterSet sps;
         sps.setValidate([](const ServerParameter& sp) {
             uassert(6225102,
-                    "Registering cluster-wide parameter '{}' as node-local server parameter"
-                    ""_format(sp.name()),
+                    fmt::format(
+                        "Registering cluster-wide parameter '{}' as node-local server parameter",
+                        sp.name()),
                     sp.isNodeLocal());
         });
         return sps;
@@ -100,46 +94,32 @@ ServerParameterSet* ServerParameterSet::getNodeParameterSet() {
     return &*obj;
 }
 
-bool ServerParameter::isEnabled() const {
-    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-    return isEnabledOnVersion(
-        fcvSnapshot.isVersionInitialized()
-            ? fcvSnapshot.getVersion()
-            : multiversion::FeatureCompatibilityVersion::kUnsetDefaultLastLTSBehavior);
-}
-
-bool ServerParameter::isEnabledOnVersion(
-    const multiversion::FeatureCompatibilityVersion& targetFCV) const {
-    {
-        stdx::lock_guard lk(_mutex);
-        if (_disableState != DisableState::Enabled) {
-            return false;
-        }
+void ServerParameter::warnIfDeprecated(StringData action) {
+    if (_isDeprecated) {
+        std::call_once(_warnDeprecatedOnce, [&] {
+            LOGV2_WARNING(9260800, "Use of deprecated server parameter", "parameter"_attr = _name);
+        });
     }
-    return _isEnabledOnVersion(targetFCV);
 }
 
-bool ServerParameter::canBeEnabledOnVersion(
-    const multiversion::FeatureCompatibilityVersion& targetFCV) const {
-    {
-        stdx::lock_guard lk(_mutex);
-        if (_disableState == DisableState::PermanentlyDisabled) {
-            return false;
-        }
+void ServerParameter::disable(bool permanent) {
+    if (permanent) {
+        _state.store(EnableState::prohibited);
+    } else {
+        // This operation only has an effect when the parameter is enabled.
+        auto expected = EnableState::enabled;
+        _state.compareAndSwap(&expected, EnableState::disabled);
     }
-    return _isEnabledOnVersion(targetFCV);
 }
 
-bool ServerParameter::_isEnabledOnVersion(
-    const multiversion::FeatureCompatibilityVersion& targetFCV) const {
-    return minFCVIsLessThanOrEqualToVersion(targetFCV) &&
-        !featureFlagIsDisabledOnVersion(targetFCV);
-}
-
-bool ServerParameter::featureFlagIsDisabledOnVersion(
-    const multiversion::FeatureCompatibilityVersion& targetFCV) const {
-    stdx::lock_guard lk(_mutex);
-    return _featureFlag && !_featureFlag->isEnabledOnVersion(targetFCV);
+bool ServerParameter::enable() {
+    // This 'compareAndSwap` operation will not modify the parameter's state when it is either
+    // enabled already or disabled permanently.  Instead, the state gets loaded into the 'expected'
+    // variable, so we can use it to return to the caller whether or not the parameter is now
+    // enabled.
+    auto expected = EnableState::disabled;
+    return _state.compareAndSwap(&expected, EnableState::enabled) ||
+        expected == EnableState::enabled;
 }
 
 ServerParameterSet* ServerParameterSet::getClusterParameterSet() {
@@ -147,8 +127,9 @@ ServerParameterSet* ServerParameterSet::getClusterParameterSet() {
         ServerParameterSet sps;
         sps.setValidate([](const ServerParameter& sp) {
             uassert(6225103,
-                    "Registering node-local parameter '{}' as cluster-wide server parameter"
-                    ""_format(sp.name()),
+                    fmt::format(
+                        "Registering node-local parameter '{}' as cluster-wide server parameter",
+                        sp.name()),
                     sp.isClusterWide());
         });
         return sps;
@@ -161,26 +142,26 @@ void ServerParameterSet::add(std::unique_ptr<ServerParameter> sp) {
         _validate(*sp);
     auto [it, ok] = _map.try_emplace(sp->name(), std::move(sp));
     uassert(23784,
-            "Duplicate server parameter registration for '{}'"_format(
-                sp->name()),  // NOLINT(bugprone-use-after-move)
+            fmt::format("Duplicate server parameter registration for '{}'",
+                        sp->name()),  // NOLINT(bugprone-use-after-move)
             ok);
 }
 
 StatusWith<std::string> ServerParameter::_coerceToString(const BSONElement& element) {
     switch (element.type()) {
-        case NumberDouble:
+        case BSONType::numberDouble:
             return std::to_string(element.Double());
-        case String:
+        case BSONType::string:
             return element.String();
-        case NumberInt:
+        case BSONType::numberInt:
             return std::to_string(element.Int());
-        case NumberLong:
+        case BSONType::numberLong:
             return std::to_string(element.Long());
-        case Date:
+        case BSONType::date:
             return dateToISOStringLocal(element.Date());
         default:
             std::string diag;
-            if (isRedact()) {
+            if (_redact) {
                 diag = "###";
             } else {
                 diag = element.toString();
@@ -192,7 +173,7 @@ StatusWith<std::string> ServerParameter::_coerceToString(const BSONElement& elem
 }
 
 void ServerParameterSet::remove(const std::string& name) {
-    invariant(1 == _map.erase(name), "Failed to erase key \"{}\""_format(name));
+    invariant(1 == _map.erase(name), fmt::format("Failed to erase key \"{}\"", name));
 }
 
 IDLServerParameterDeprecatedAlias::IDLServerParameterDeprecatedAlias(StringData name,
@@ -203,48 +184,34 @@ IDLServerParameterDeprecatedAlias::IDLServerParameterDeprecatedAlias(StringData 
     }
 }
 
-void IDLServerParameterDeprecatedAlias::append(OperationContext* opCtx,
-                                               BSONObjBuilder* b,
-                                               StringData fieldName,
-                                               const boost::optional<TenantId>& tenantId) {
+void IDLServerParameterDeprecatedAlias::warnIfDeprecated(StringData action) {
     std::call_once(_warnOnce, [&] {
         LOGV2_WARNING(636300,
                       "Use of deprecated server parameter name",
                       "deprecatedName"_attr = name(),
-                      "canonicalName"_attr = _sp->name());
+                      "canonicalName"_attr = _sp->name(),
+                      "action"_attr = action);
     });
+}
+
+void IDLServerParameterDeprecatedAlias::append(OperationContext* opCtx,
+                                               BSONObjBuilder* b,
+                                               StringData fieldName,
+                                               const boost::optional<TenantId>& tenantId) {
     _sp->append(opCtx, b, fieldName, tenantId);
 }
 
 Status IDLServerParameterDeprecatedAlias::reset(const boost::optional<TenantId>& tenantId) {
-    std::call_once(_warnOnce, [&] {
-        LOGV2_WARNING(636301,
-                      "Use of deprecated server parameter name",
-                      "deprecatedName"_attr = name(),
-                      "canonicalName"_attr = _sp->name());
-    });
     return _sp->reset(tenantId);
 }
 
 Status IDLServerParameterDeprecatedAlias::set(const BSONElement& newValueElement,
                                               const boost::optional<TenantId>& tenantId) {
-    std::call_once(_warnOnce, [&] {
-        LOGV2_WARNING(636302,
-                      "Use of deprecated server parameter name",
-                      "deprecatedName"_attr = name(),
-                      "canonicalName"_attr = _sp->name());
-    });
     return _sp->set(newValueElement, tenantId);
 }
 
 Status IDLServerParameterDeprecatedAlias::setFromString(StringData str,
                                                         const boost::optional<TenantId>& tenantId) {
-    std::call_once(_warnOnce, [&] {
-        LOGV2_WARNING(636303,
-                      "Use of deprecated server parameter name",
-                      "deprecatedName"_attr = name(),
-                      "canonicalName"_attr = _sp->name());
-    });
     return _sp->setFromString(str, tenantId);
 }
 
@@ -257,6 +224,7 @@ void ServerParameterSet::disableTestParameters() {
 }
 
 void registerServerParameter(std::unique_ptr<ServerParameter> p) {
+    p->onRegistrationWithProcessGlobalParameterList();
     auto spt = p->getServerParameterType();
     ServerParameterSet::getParameterSet(spt)->add(std::move(p));
 }

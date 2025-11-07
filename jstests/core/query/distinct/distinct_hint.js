@@ -10,7 +10,7 @@
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {getPlanStage} from "jstests/libs/query/analyze_plan.js";
 
-var isHintsToQuerySettingsSuite = TestData.isHintsToQuerySettingsSuite || false;
+let isHintsToQuerySettingsSuite = TestData.isHintsToQuerySettingsSuite || false;
 
 const collName = "jstests_explain_distinct_hint";
 const coll = db[collName];
@@ -74,23 +74,21 @@ if (!isHintsToQuerySettingsSuite) {
     assert.eq([1], cmdObj.values);
 }
 
-assert.throws(function() {
+assert.throws(function () {
     coll.explain().distinct("a", {a: 1, b: 2}, {hint: {bad: 1, hint: 1}});
 });
 
-assert.throws(function() {
+assert.throws(function () {
     coll.explain().distinct("a", {a: 1, b: 2}, {hint: "BAD HINT"});
 });
 
-let cmdRes =
-    coll.runCommand("distinct", {"key": "a", query: {a: 1, b: 2}, hint: {bad: 1, hint: 1}});
+let cmdRes = coll.runCommand("distinct", {"key": "a", query: {a: 1, b: 2}, hint: {bad: 1, hint: 1}});
 assert.commandFailedWithCode(cmdRes, ErrorCodes.BadValue, cmdRes);
-var regex = new RegExp("hint provided does not correspond to an existing index");
+let regex = new RegExp("hint provided does not correspond to an existing index");
 assert(regex.test(cmdRes.errmsg));
 
 // Make sure $natural hints are applied to distinct.
-if (!isHintsToQuerySettingsSuite ||
-    FeatureFlagUtil.isPresentAndEnabled(db, "ShardFilteringDistinctScan")) {
+if (!isHintsToQuerySettingsSuite || FeatureFlagUtil.isPresentAndEnabled(db, "ShardFilteringDistinctScan")) {
     // Query settings for distinct have different semantics. $natural in that case is _only_ a
     // hint and may not be enforced if there are better query plans available.
     //

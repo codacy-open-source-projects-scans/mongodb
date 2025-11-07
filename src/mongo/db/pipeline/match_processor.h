@@ -29,21 +29,25 @@
 
 #pragma once
 
-#include <boost/intrusive_ptr.hpp>
-#include <memory>
-
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/matcher/expression_algo.h"
-#include "mongo/db/matcher/matcher.h"
-#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+
+#include <boost/intrusive_ptr.hpp>
 
 namespace mongo {
 
-// This class is used by the aggregation framework and streams enterprise module
-// to perform the document processing needed for $match.
-class MatchProcessor {
+/**
+ * This class is used by the aggregation framework and streams enterprise module to perform the
+ * document processing needed for $match.
+ */
+class MONGO_MOD_PUBLIC MatchProcessor {
 public:
-    MatchProcessor(std::unique_ptr<MatchExpression> expr, DepsTracker dependencies);
+    MatchProcessor(std::unique_ptr<MatchExpression> expr,
+                   DepsTracker dependencies,
+                   BSONObj&& predicate);
 
     // Processes the given document and returns true if it matches the conditions specified in
     // the MatchExpression.
@@ -61,11 +65,29 @@ public:
         _expression = std::move(expression);
     }
 
+    const BSONObj& getPredicate() const {
+        return _predicate;
+    }
+
 private:
+    // Determines whether all fields have unique prefixes. This is called once during object
+    // construction to determine the value of '_hasUniquePrefixes'.
+    static bool hasUniquePrefixes(const OrderedPathSet& fields);
+
     std::unique_ptr<MatchExpression> _expression;
+
     // Cache the dependencies so that we know what fields we need to serialize to BSON for
     // matching.
     DepsTracker _dependencies;
+
+    // Whether or not the paths in '_dependencies.fields' have unique prefixes or not. Based on the
+    // uniqueness check outcome the match processor may be able to use an optimized code path when
+    // converting input Documents to BSONObjs.
+    const bool _hasUniquePrefixes;
+
+    // Store the BSONObj that backs this '_expression' so that it doesn't get disposed before the
+    // match expression does.
+    BSONObj _predicate;
 };
 
 }  // namespace mongo

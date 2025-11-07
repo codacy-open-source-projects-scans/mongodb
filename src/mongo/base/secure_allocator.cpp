@@ -28,18 +28,17 @@
  */
 
 
+#include "mongo/base/secure_allocator.h"
+
+#include "mongo/base/initializer.h"
+#include "mongo/util/errno_util.h"
+
 #include <cerrno>
-#include <fmt/format.h>
 #include <memory>
 #include <mutex>
 
 #include <absl/container/node_hash_map.h>
-
-#include "mongo/base/initializer.h"
-#include "mongo/base/secure_allocator.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/util/errno_util.h"
+#include <fmt/format.h>
 
 #ifdef _WIN32
 #include <psapi.h>
@@ -66,7 +65,7 @@ namespace {
 
 std::string fmtError(StringData prefix) {
     auto ec = lastSystemError();
-    return format(FMT_STRING("{}: {}"), prefix, errorMessage(ec));
+    return fmt::format("{}: {}", prefix, errorMessage(ec));
 }
 
 /**

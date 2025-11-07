@@ -1,15 +1,15 @@
 // SERVER-2326 - make sure that sharding only works with unique indices
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
-var s = new ShardingTest({name: "shard_index", shards: 2, mongos: 1});
+let s = new ShardingTest({name: "shard_index", shards: 2, mongos: 1});
 
 // Regenerate fully because of SERVER-2782
-for (var i = 0; i < 22; i++) {
-    var coll = s.admin._mongo.getDB("test").getCollection("foo" + i);
+for (let i = 0; i < 22; i++) {
+    let coll = s.admin._mongo.getDB("test").getCollection("foo" + i);
     coll.drop();
 
-    var bulk = coll.initializeUnorderedBulkOp();
-    for (var j = 0; j < 300; j++) {
+    let bulk = coll.initializeUnorderedBulkOp();
+    for (let j = 0; j < 300; j++) {
         bulk.insert({num: j, x: 1});
     }
     assert.commandWorked(bulk.execute());
@@ -51,12 +51,9 @@ for (var i = 0; i < 22; i++) {
         try {
             s.adminCommand({shardcollection: "" + coll, key: {x: 1}});
             passed = true;
-
         } catch (e) {
             print(e);
-            assert(
-                !passed,
-                "Should be able to shard collection with no unique index if unique not specified.");
+            assert(!passed, "Should be able to shard collection with no unique index if unique not specified.");
         }
     }
     if (i == 3) {
@@ -103,20 +100,18 @@ for (var i = 0; i < 22; i++) {
             s.adminCommand({shardcollection: "" + coll, key: {num: 1}, unique: true});
         } catch (e) {
             print(e);
-            assert(
-                false,
-                "Should be able to shard collection with no unique index but with a unique prefix index.");
+            assert(false, "Should be able to shard collection with no unique index but with a unique prefix index.");
         }
 
         printjson(coll.getIndexes());
 
         // Make sure the index created is unique!
-        assert.eq(1,
-                  coll.getIndexes()
-                      .filter(function(z) {
-                          return friendlyEqual(z.key, {num: 1}) && z.unique;
-                      })
-                      .length);
+        assert.eq(
+            1,
+            coll.getIndexes().filter(function (z) {
+                return friendlyEqual(z.key, {num: 1}) && z.unique;
+            }).length,
+        );
     }
     if (i == 7) {
         coll.remove({});
@@ -146,17 +141,18 @@ for (var i = 0; i < 22; i++) {
         }
         assert(
             passed,
-            "Should be able to shard collection with unique flag but with no unique index on shard key, if coll empty.");
+            "Should be able to shard collection with unique flag but with no unique index on shard key, if coll empty.",
+        );
 
         printjson(coll.getIndexes());
 
         // Make sure the index created is unique!
-        assert.eq(1,
-                  coll.getIndexes()
-                      .filter(function(z) {
-                          return friendlyEqual(z.key, {num: 1}) && z.unique;
-                      })
-                      .length);
+        assert.eq(
+            1,
+            coll.getIndexes().filter(function (z) {
+                return friendlyEqual(z.key, {num: 1}) && z.unique;
+            }).length,
+        );
     }
     if (i == 9) {
         // Unique index exists on a different field as well

@@ -33,7 +33,7 @@ function _doFailedWrite(collection) {
 
 /* writeOK tests */
 tests.push(function writeOKSuccessfulWriteDoesNotCallMsgFunction() {
-    var msgFunctionCalled = false;
+    let msgFunctionCalled = false;
 
     const result = db.coll.insert({data: "hello world"});
     assert.doesNotThrow(() => {
@@ -46,7 +46,7 @@ tests.push(function writeOKSuccessfulWriteDoesNotCallMsgFunction() {
 });
 
 tests.push(function writeOKUnsuccessfulWriteDoesCallMsgFunction() {
-    var msgFunctionCalled = false;
+    let msgFunctionCalled = false;
 
     const failedResult = _doFailedWrite(db.coll);
     assert.throws(() => {
@@ -60,7 +60,7 @@ tests.push(function writeOKUnsuccessfulWriteDoesCallMsgFunction() {
 
 /* writeError tests */
 tests.push(function writeErrorSuccessfulWriteDoesCallMsgFunction() {
-    var msgFunctionCalled = false;
+    let msgFunctionCalled = false;
 
     const result = db.coll.insert({data: "hello world"});
     assert.throws(() => {
@@ -73,7 +73,7 @@ tests.push(function writeErrorSuccessfulWriteDoesCallMsgFunction() {
 });
 
 tests.push(function writeErrorUnsuccessfulWriteDoesNotCallMsgFunction() {
-    var msgFunctionCalled = false;
+    let msgFunctionCalled = false;
 
     const failedResult = _doFailedWrite(db.coll);
     assert.doesNotThrow(() => {
@@ -86,8 +86,10 @@ tests.push(function writeErrorUnsuccessfulWriteDoesNotCallMsgFunction() {
 });
 
 tests.push(function writeConcernErrorIsCaughtFromInsert() {
-    const result = db.coll.insert({data: "hello world"},
-                                  {writeConcern: {w: 'invalid', wtimeout: kReallyShortTimeoutMS}});
+    const result = db.coll.insert(
+        {data: "hello world"},
+        {writeConcern: {w: "invalid", wtimeout: kReallyShortTimeoutMS}},
+    );
 
     assert.throws(() => {
         assert.writeOK(result);
@@ -95,11 +97,13 @@ tests.push(function writeConcernErrorIsCaughtFromInsert() {
 });
 
 tests.push(function writeConcernErrorCanBeIgnored() {
-    const result = db.coll.insert({data: "hello world"},
-                                  {writeConcern: {w: 'invalid', wtimeout: kReallyShortTimeoutMS}});
+    const result = db.coll.insert(
+        {data: "hello world"},
+        {writeConcern: {w: "invalid", wtimeout: kReallyShortTimeoutMS}},
+    );
 
     assert.doesNotThrow(() => {
-        assert.writeOK(result, 'write can ignore writeConcern', {ignoreWriteConcernErrors: true});
+        assert.writeOK(result, "write can ignore writeConcern", {ignoreWriteConcernErrors: true});
     });
 });
 

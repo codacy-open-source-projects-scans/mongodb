@@ -28,17 +28,7 @@
  */
 
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/smart_ptr.hpp>
-#include <fmt/format.h>
-#include <functional>
-#include <mutex>
-#include <string>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/index_builds/index_builds_coordinator_mongod.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
@@ -47,43 +37,42 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/index_builds/active_index_builds.h"
 #include "mongo/db/index_builds/index_build_entry_gen.h"
 #include "mongo/db/index_builds/index_build_entry_helpers.h"
-#include "mongo/db/index_builds/index_builds_coordinator_mongod.h"
+#include "mongo/db/index_builds/index_builds_common.h"
 #include "mongo/db/index_builds/two_phase_index_build_knobs_gen.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/db/repl/member_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/replication_state_transition_lock_guard.h"
 #include "mongo/db/s/forwardable_operation_metadata.h"
-#include "mongo/db/s/global_user_write_block_state.h"
-#include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/server_parameter_with_storage.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/db/user_write_block/global_user_write_block_state.h"
+#include "mongo/db/versioning_protocol/database_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_options.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/shard_version.h"
+#include "mongo/rpc/metadata/audit_user_attrs.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
@@ -93,6 +82,18 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
+#include <algorithm>
+#include <functional>
+#include <mutex>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <fmt/format.h>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 
@@ -100,8 +101,10 @@ namespace mongo {
 
 namespace {
 
+MONGO_FAIL_POINT_DEFINE(failIndexBuildWithErrorInSecondDrain);
 MONGO_FAIL_POINT_DEFINE(hangAfterRegisteringIndexBuild);
 MONGO_FAIL_POINT_DEFINE(hangBeforeInitializingIndexBuild);
+MONGO_FAIL_POINT_DEFINE(hangIndexBuildBeforeSignalPrimaryForCommitReadiness);
 MONGO_FAIL_POINT_DEFINE(hangIndexBuildAfterSignalPrimaryForCommitReadiness);
 MONGO_FAIL_POINT_DEFINE(hangBeforeRunningIndexBuild);
 MONGO_FAIL_POINT_DEFINE(hangIndexBuildBeforeSignalingPrimaryForAbort);
@@ -248,19 +251,25 @@ StatusWith<SharedSemiFuture<ReplIndexBuildState::IndexCatalogStats>>
 IndexBuildsCoordinatorMongod::startIndexBuild(OperationContext* opCtx,
                                               const DatabaseName& dbName,
                                               const UUID& collectionUUID,
-                                              const std::vector<BSONObj>& specs,
+                                              const std::vector<IndexBuildInfo>& indexes,
                                               const UUID& buildUUID,
                                               IndexBuildProtocol protocol,
                                               IndexBuildOptions indexBuildOptions) {
-    return _startIndexBuild(
-        opCtx, dbName, collectionUUID, specs, buildUUID, protocol, indexBuildOptions, boost::none);
+    return _startIndexBuild(opCtx,
+                            dbName,
+                            collectionUUID,
+                            indexes,
+                            buildUUID,
+                            protocol,
+                            indexBuildOptions,
+                            boost::none);
 }
 
 StatusWith<SharedSemiFuture<ReplIndexBuildState::IndexCatalogStats>>
 IndexBuildsCoordinatorMongod::resumeIndexBuild(OperationContext* opCtx,
                                                const DatabaseName& dbName,
                                                const UUID& collectionUUID,
-                                               const std::vector<BSONObj>& specs,
+                                               const std::vector<IndexBuildInfo>& indexes,
                                                const UUID& buildUUID,
                                                const ResumeIndexInfo& resumeInfo) {
     IndexBuildsCoordinator::IndexBuildOptions indexBuildOptions;
@@ -268,7 +277,7 @@ IndexBuildsCoordinatorMongod::resumeIndexBuild(OperationContext* opCtx,
     return _startIndexBuild(opCtx,
                             dbName,
                             collectionUUID,
-                            specs,
+                            indexes,
                             buildUUID,
                             IndexBuildProtocol::kTwoPhase,
                             indexBuildOptions,
@@ -279,20 +288,31 @@ StatusWith<SharedSemiFuture<ReplIndexBuildState::IndexCatalogStats>>
 IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
                                                const DatabaseName& dbName,
                                                const UUID& collectionUUID,
-                                               const std::vector<BSONObj>& specs,
+                                               const std::vector<IndexBuildInfo>& indexes,
                                                const UUID& buildUUID,
                                                IndexBuildProtocol protocol,
                                                IndexBuildOptions indexBuildOptions,
                                                const boost::optional<ResumeIndexInfo>& resumeInfo) {
-    _waitIfNewIndexBuildsBlocked(opCtx, collectionUUID, specs, buildUUID);
-
     const NamespaceStringOrUUID nssOrUuid{dbName, collectionUUID};
 
     auto writeBlockState = GlobalUserWriteBlockState::get(opCtx);
 
     invariant(!shard_role_details::getLocker(opCtx)->isRSTLExclusive(), buildUUID.toString());
 
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    if (protocol == IndexBuildProtocol::kTwoPhase && fcvSnapshot.isVersionInitialized() &&
+        feature_flags::gFeatureFlagPrimaryDrivenIndexBuilds.isEnabled(
+            VersionContext::getDecoration(opCtx), fcvSnapshot)) {
+        invariant(indexBuildOptions.indexBuildMethod == IndexBuildMethodEnum::kPrimaryDriven);
+    }
+
     const auto nss = CollectionCatalog::get(opCtx)->resolveNamespaceStringOrUUID(opCtx, nssOrUuid);
+
+    std::vector<BSONObj> indexSpecs;
+    indexSpecs.reserve(indexes.size());
+    for (const auto& indexBuildInfo : indexes) {
+        indexSpecs.push_back(indexBuildInfo.spec);
+    }
 
     {
         // Only operations originating from user connections need to wait while there are more than
@@ -306,12 +326,21 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
                 // to fail later on when locks are reacquired. Therefore, this assertion is not
                 // required for correctness, but only intended to rate limit index builds started on
                 // primaries.
-                Lock::GlobalLock globalLk(opCtx, MODE_IX);
-
-                auto replCoord = repl::ReplicationCoordinator::get(opCtx);
-                uassert(ErrorCodes::NotWritablePrimary,
-                        "Not primary while waiting to start an index build",
-                        replCoord->canAcceptWritesFor(opCtx, nssOrUuid));
+                if (gFeatureFlagIntentRegistration.isEnabled()) {
+                    auto intent = nss.isReplicated()
+                        ? rss::consensus::IntentRegistry::Intent::Write
+                        : rss::consensus::IntentRegistry::Intent::LocalWrite;
+                    uassert(ErrorCodes::NotWritablePrimary,
+                            "Not primary while waiting to start an index build",
+                            rss::consensus::IntentRegistry::get(opCtx->getServiceContext())
+                                .canDeclareIntent(intent, opCtx));
+                } else {
+                    repl::ReplicationStateTransitionLockGuard rstl(opCtx, MODE_IX);
+                    auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+                    uassert(ErrorCodes::NotWritablePrimary,
+                            "Not primary while waiting to start an index build",
+                            replCoord->canAcceptWritesFor(opCtx, nssOrUuid));
+                }
             }
 
             // The checks here catch empty index builds and also allow us to stop index
@@ -334,7 +363,7 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
                         "active index builds is below the threshold",
                         "numActiveIndexBuilds"_attr = _numActiveIndexBuilds,
                         "maxNumActiveUserIndexBuilds"_attr = maxActiveBuilds,
-                        "indexSpecs"_attr = specs,
+                        "indexSpecs"_attr = indexSpecs,
                         "buildUUID"_attr = buildUUID,
                         "collectionUUID"_attr = collectionUUID);
                     messageLogged = true;
@@ -371,17 +400,17 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
         auto status = Status::OK();
         if (resumeInfo) {
             status = _setUpResumeIndexBuild(
-                opCtx, dbName, collectionUUID, specs, buildUUID, resumeInfo.value());
+                opCtx, dbName, collectionUUID, indexes, buildUUID, resumeInfo.value());
         } else {
             status = _setUpIndexBuildForTwoPhaseRecovery(
-                opCtx, dbName, collectionUUID, specs, buildUUID);
+                opCtx, dbName, collectionUUID, indexes, buildUUID);
         }
         if (!status.isOK()) {
             return status;
         }
     } else {
-        auto statusWithOptionalResult =
-            _filterSpecsAndRegisterBuild(opCtx, dbName, collectionUUID, specs, buildUUID, protocol);
+        auto statusWithOptionalResult = _filterSpecsAndRegisterBuild(
+            opCtx, dbName, collectionUUID, indexes, buildUUID, protocol);
         if (!statusWithOptionalResult.isOK()) {
             return statusWithOptionalResult.getStatus();
         }
@@ -431,12 +460,8 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
     // written, or an error has been encountered otherwise.
     auto [startPromise, startFuture] = makePromiseFuture<void>();
 
-
     auto replState = invariant(_getIndexBuild(buildUUID));
 
-    // Since index builds occur in a separate thread, client attributes that are audited must be
-    // extracted from the client object and passed into the thread separately.
-    audit::ImpersonatedClientAttrs impersonatedClientAttrs(opCtx->getClient());
     ForwardableOperationMetadata forwardableOpMetadata(opCtx);
 
     // The thread pool task will be responsible for signalling the condition variable when the index
@@ -455,9 +480,8 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
                           shardVersion = oss.getShardVersion(nss),
                           dbVersion = oss.getDbVersion(dbName),
                           resumeInfo,
-                          impersonatedClientAttrs = std::move(impersonatedClientAttrs),
                           forwardableOpMetadata =
-                              std::move(forwardableOpMetadata)](auto status) mutable noexcept {
+                              std::move(forwardableOpMetadata)](auto status) mutable {
         ScopeGuard onScopeExitGuard([&] {
             stdx::unique_lock<stdx::mutex> lk(_throttlingMutex);
             _numActiveIndexBuilds--;
@@ -477,29 +501,14 @@ IndexBuildsCoordinatorMongod::_startIndexBuild(OperationContext* opCtx,
 
         // Set up the thread's currentOp information to display createIndexes cmd information,
         // merged with the caller's opDesc.
-        updateCurOpOpDescription(opCtx.get(), nss, replState->indexSpecs, opDesc);
+        updateCurOpOpDescription(opCtx.get(), nss, toIndexSpecs(replState->getIndexes()), opDesc);
 
         // Forward the forwardable operation metadata from the external client to this thread's
         // client.
         forwardableOpMetadata.setOn(opCtx.get());
 
-        // Load the external client's attributes into this thread's client for auditing.
-        auto authSession = AuthorizationSession::get(opCtx->getClient());
-        if (authSession) {
-            authSession->setImpersonatedUserData(std::move(impersonatedClientAttrs.userName),
-                                                 std::move(impersonatedClientAttrs.roleNames));
-        }
-
         while (MONGO_unlikely(hangBeforeInitializingIndexBuild.shouldFail())) {
             sleepmillis(100);
-        }
-
-        // Start collecting metrics for the index build. The metrics for this operation will
-        // only be aggregated globally if the node commits or aborts while it is primary.
-        auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx.get());
-        if (ResourceConsumption::shouldCollectMetricsForDatabase(dbName) &&
-            ResourceConsumption::isMetricsCollectionEnabled()) {
-            metricsCollector.beginScopedCollecting(opCtx.get(), dbName);
         }
 
         if (indexBuildOptions.applicationMode != ApplicationMode::kStartupRepair) {
@@ -577,7 +586,9 @@ Status IndexBuildsCoordinatorMongod::voteAbortIndexBuild(OperationContext* opCtx
         opCtx,
         buildUUID,
         IndexBuildAction::kPrimaryAbort,
-        fmt::format("'voteAbortIndexBuild' received from '{}': {}", votingNode.toString(), reason));
+        Status{ErrorCodes::IndexBuildAborted,
+               fmt::format(
+                   "'voteAbortIndexBuild' received from '{}': {}", votingNode.toString(), reason)});
 
     if (aborted) {
         return Status::OK();
@@ -602,6 +613,10 @@ Status IndexBuildsCoordinatorMongod::voteCommitIndexBuild(OperationContext* opCt
     auto replState = swReplState.getValue();
 
     {
+        // TODO SERVER-99706: Investigate if this is safe. Other commit quorum operations take the
+        // RSTL lock before locking the commit quorum lock. However, this operation follows the
+        // inverse order.
+        DisableLockerRuntimeOrderingChecks disable{opCtx};
         // Secondary nodes will always try to vote regardless of the commit quorum value. If the
         // commit quorum is disabled, do not record their entry into the commit ready nodes.
         // If we fail to retrieve the persisted commit quorum, the index build might be in the
@@ -619,8 +634,10 @@ Status IndexBuildsCoordinatorMongod::voteCommitIndexBuild(OperationContext* opCt
     // after this point, it's not possible for the index build's commit quorum value to get updated
     // to CommitQuorumOptions::kDisabled.
 
-    IndexBuildEntry indexbuildEntry(
-        buildUUID, replState->collectionUUID, CommitQuorumOptions(), replState->indexNames);
+    IndexBuildEntry indexbuildEntry(buildUUID,
+                                    replState->collectionUUID,
+                                    CommitQuorumOptions(),
+                                    toIndexNames(replState->getIndexes()));
     std::vector<HostAndPort> votersList{votingNode};
     indexbuildEntry.setCommitReadyMembers(votersList);
 
@@ -639,6 +656,11 @@ void IndexBuildsCoordinatorMongod::_sendCommitQuorumSatisfiedSignal(
 
 bool IndexBuildsCoordinatorMongod::_signalIfCommitQuorumIsSatisfied(
     OperationContext* opCtx, std::shared_ptr<ReplIndexBuildState> replState) {
+
+    // TODO SERVER-99706: Investigate if this is safe. Other commit quorum operations take the
+    // RSTL lock before locking the commit quorum lock. However, this operation follows the
+    // inverse order.
+    DisableLockerRuntimeOrderingChecks disable{opCtx};
 
     // Acquire the commitQuorumLk in shared mode to make sure commit quorum value did not change
     // after reading it from config.system.indexBuilds collection.
@@ -678,15 +700,27 @@ bool IndexBuildsCoordinatorMongod::_signalIfCommitQuorumNotEnabled(
 
     invariant(IndexBuildProtocol::kTwoPhase == replState->protocol);
 
-    const NamespaceStringOrUUID dbAndUUID(replState->dbName, replState->collectionUUID);
-    repl::ReplicationStateTransitionLockGuard rstl(opCtx, MODE_IX);
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        if (!rss::consensus::IntentRegistry::get(opCtx->getServiceContext())
+                 .canDeclareIntent(rss::consensus::IntentRegistry::Intent::Write, opCtx)) {
+            return false;
+        }
+    } else {
+        const NamespaceStringOrUUID dbAndUUID(replState->dbName, replState->collectionUUID);
+        repl::ReplicationStateTransitionLockGuard rstl(opCtx, MODE_IX);
 
-    // Secondaries should always try to vote even if the commit quorum is disabled. Secondaries
-    // must not read the on-disk commit quorum value as it may not be present at all times, such as
-    // during initial sync.
-    if (!replCoord->canAcceptWritesFor(opCtx, dbAndUUID)) {
-        return false;
+        // Secondaries should always try to vote even if the commit quorum is disabled. Secondaries
+        // must not read the on-disk commit quorum value as it may not be present at all times, such
+        // as during initial sync.
+        if (!replCoord->canAcceptWritesFor(opCtx, dbAndUUID)) {
+            return false;
+        }
     }
+
+    // TODO SERVER-99706: Investigate if this is safe. Other commit quorum operations take the
+    // RSTL lock before locking the commit quorum lock. However, this operation follows the
+    // inverse order.
+    DisableLockerRuntimeOrderingChecks disable{opCtx};
 
     // Acquire the commitQuorumLk in shared mode to make sure commit quorum value did not change
     // after reading it from config.system.indexBuilds collection.
@@ -732,9 +766,7 @@ void IndexBuildsCoordinatorMongod::_signalPrimaryForAbortAndWaitForExternalAbort
 
     const auto generateCmd = [reason](const UUID& uuid, const std::string& address) {
         return BSON("voteAbortIndexBuild" << uuid << "hostAndPort" << address << "reason" << reason
-                                          << "writeConcern"
-                                          << BSON("w"
-                                                  << "majority"));
+                                          << "writeConcern" << BSON("w" << "majority"));
     };
 
     const auto checkVoteAbortIndexCmdDone = [](const BSONObj& response,
@@ -798,6 +830,11 @@ void IndexBuildsCoordinatorMongod::_signalPrimaryForAbortAndWaitForExternalAbort
 
 void IndexBuildsCoordinatorMongod::_signalPrimaryForCommitReadiness(
     OperationContext* opCtx, std::shared_ptr<ReplIndexBuildState> replState) {
+    if (MONGO_unlikely(hangIndexBuildBeforeSignalPrimaryForCommitReadiness.shouldFail())) {
+        LOGV2(10528500, "Hanging index build after signaling the primary for commit readiness");
+        hangIndexBuildBeforeSignalPrimaryForCommitReadiness.pauseWhileSet(opCtx);
+    }
+
     // Before voting see if we are eligible to skip voting and signal
     // to commit index build if the node is primary.
     if (_signalIfCommitQuorumNotEnabled(opCtx, replState)) {
@@ -825,8 +862,7 @@ void IndexBuildsCoordinatorMongod::_signalPrimaryForCommitReadiness(
 
     const auto generateCmd = [](const UUID& uuid, const std::string& address) {
         return BSON("voteCommitIndexBuild" << uuid << "hostAndPort" << address << "writeConcern"
-                                           << BSON("w"
-                                                   << "majority"));
+                                           << BSON("w" << "majority"));
     };
 
     const auto checkVoteCommitIndexCmdSucceeded = [](const BSONObj& response,
@@ -853,7 +889,7 @@ void IndexBuildsCoordinatorMongod::_signalPrimaryForCommitReadiness(
     return;
 }
 
-IndexBuildAction IndexBuildsCoordinatorMongod::_drainSideWritesUntilNextActionIsAvailable(
+IndexBuildAction IndexBuildsCoordinatorMongod::_waitForNextIndexBuildAction(
     OperationContext* opCtx, std::shared_ptr<ReplIndexBuildState> replState) {
     auto future = replState->getNextActionFuture();
 
@@ -866,7 +902,7 @@ IndexBuildAction IndexBuildsCoordinatorMongod::_drainSideWritesUntilNextActionIs
         try {
             nextAction =
                 opCtx->runWithDeadline(deadline, timeoutError, [&] { return future.get(opCtx); });
-        } catch (const ExceptionForCat<ErrorCategory::ExceededTimeLimitError>& e) {
+        } catch (const ExceptionFor<ErrorCategory::ExceededTimeLimitError>& e) {
             if (e.code() == timeoutError) {
                 return false;
             }
@@ -879,6 +915,13 @@ IndexBuildAction IndexBuildsCoordinatorMongod::_drainSideWritesUntilNextActionIs
     // allows the critical section of committing, which must drain the remainder of the side writes,
     // to be as short as possible.
     while (!waitUntilNextActionIsReady()) {
+        if (replState->getGenerateTableWrites()) {
+            _insertKeysFromSideTablesWithoutBlockingWrites(opCtx, replState);
+        }
+    }
+
+    if (replState->getGenerateTableWrites()) {
+        // Final chance to catch up before taking an X lock.
         _insertKeysFromSideTablesWithoutBlockingWrites(opCtx, replState);
     }
     return nextAction;
@@ -892,6 +935,15 @@ void IndexBuildsCoordinatorMongod::_waitForNextIndexBuildActionAndCommit(
           "Index build: waiting for next action before completing final phase",
           "buildUUID"_attr = replState->buildUUID);
 
+    failIndexBuildWithErrorInSecondDrain.executeIf(
+        [](const BSONObj& data) {
+            uasserted(data["error"].safeNumberInt(),
+                      "failIndexBuildWithErrorInSecondDrain failpoint triggered");
+        },
+        [&](const BSONObj& data) {
+            return UUID::parse(data["buildUUID"]) == replState->buildUUID;
+        });
+
     while (true) {
         // Future wait should hold no locks.
         invariant(!shard_role_details::getLocker(opCtx)->isLocked(),
@@ -901,7 +953,7 @@ void IndexBuildsCoordinatorMongod::_waitForNextIndexBuildActionAndCommit(
         auto const nextAction = [&] {
             _incWaitForCommitQuorum();
             // Future wait can be interrupted.
-            return _drainSideWritesUntilNextActionIsAvailable(opCtx, replState);
+            return _waitForNextIndexBuildAction(opCtx, replState);
         }();
         LOGV2(3856204,
               "Index build: received signal",
@@ -1007,12 +1059,14 @@ Status IndexBuildsCoordinatorMongod::setCommitQuorum(OperationContext* opCtx,
         if (collectionUUID != replState.collectionUUID) {
             return false;
         }
-        if (indexNames.size() != replState.indexNames.size()) {
+
+        auto replStateIndexNames = toIndexNames(replState.getIndexes());
+        if (indexNames.size() != replStateIndexNames.size()) {
             return false;
         }
         // Ensure the ReplIndexBuildState has the same indexes as 'indexNames'.
         return std::equal(
-            replState.indexNames.begin(), replState.indexNames.end(), indexNames.begin());
+            replStateIndexNames.begin(), replStateIndexNames.end(), indexNames.begin());
     };
     auto collIndexBuilds = activeIndexBuilds.filterIndexBuilds(pred);
     if (collIndexBuilds.empty()) {
@@ -1048,6 +1102,16 @@ Status IndexBuildsCoordinatorMongod::setCommitQuorum(OperationContext* opCtx,
     }
 
     auto currentCommitQuorum = invariantStatusOK(swOnDiskCommitQuorum);
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    if (fcvSnapshot.isVersionInitialized() &&
+        feature_flags::gFeatureFlagPrimaryDrivenIndexBuilds.isEnabled(
+            VersionContext::getDecoration(opCtx), fcvSnapshot)) {
+        invariant(currentCommitQuorum.numNodes == CommitQuorumOptions::kDisabled);
+        LOGV2_WARNING(11302401,
+                      "Setting commitQuorum is not supported for primary-driven index builds.");
+        return Status::OK();
+    }
+
     if (currentCommitQuorum.numNodes == CommitQuorumOptions::kDisabled ||
         newCommitQuorum.numNodes == CommitQuorumOptions::kDisabled) {
         return Status(ErrorCodes::BadValue,
@@ -1059,7 +1123,8 @@ Status IndexBuildsCoordinatorMongod::setCommitQuorum(OperationContext* opCtx,
                           << " providedCommitQuorum: " << newCommitQuorum.toBSON());
     }
 
-    invariant(shard_role_details::getLocker(opCtx)->isRSTLLocked());
+    invariant(shard_role_details::getLocker(opCtx)->isRSTLLocked() ||
+              gFeatureFlagIntentRegistration.isEnabled());
     // About to update the commit quorum value on-disk. So, take the lock in exclusive mode to
     // prevent readers from reading the commit quorum value and making decision on commit quorum
     // satisfied with the stale read commit quorum value.
@@ -1073,8 +1138,10 @@ Status IndexBuildsCoordinatorMongod::setCommitQuorum(OperationContext* opCtx,
         }
     }
 
-    IndexBuildEntry indexbuildEntry(
-        replState->buildUUID, replState->collectionUUID, newCommitQuorum, replState->indexNames);
+    IndexBuildEntry indexbuildEntry(replState->buildUUID,
+                                    replState->collectionUUID,
+                                    newCommitQuorum,
+                                    toIndexNames(replState->getIndexes()));
     status = indexbuildentryhelpers::persistIndexCommitQuorum(opCtx, indexbuildEntry);
     if (!status.isOK()) {
         return status;

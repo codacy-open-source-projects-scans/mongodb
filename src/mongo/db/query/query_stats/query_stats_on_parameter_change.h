@@ -29,18 +29,17 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <string>
-
 #include "mongo/base/status.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/query/partitioned_cache.h"
 #include "mongo/db/query/util/memory_util.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <string>
+
+#include <boost/optional/optional.hpp>
 
 
 namespace mongo::query_stats_util {
@@ -50,7 +49,11 @@ Status onQueryStatsStoreSizeUpdate(const std::string& str);
 
 Status validateQueryStatsStoreSize(const std::string& str, const boost::optional<TenantId>&);
 
-Status onQueryStatsSamplingRateUpdate(int samplingRate);
+Status onQueryStatsRateLimitUpdate(int requestLimit);
+
+Status onQueryStatsSamplingRateUpdate(double samplingRate);
+
+Status validateQueryStatsWriteCmdSampleRate(const double&, const boost::optional<TenantId>&);
 
 /**
  * An interface used to modify the queryStats store when query setParameters are modified. This is
@@ -71,7 +74,7 @@ public:
     /**
      * Updates the sampling rate for the queryStats rate limiter.
      */
-    virtual void updateSamplingRate(ServiceContext* serviceCtx, int samplingRate) = 0;
+    virtual void updateRateLimiter(ServiceContext* serviceCtx) = 0;
 };
 
 /**

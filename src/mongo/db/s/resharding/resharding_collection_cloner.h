@@ -29,28 +29,30 @@
 
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <utility>
-#include <vector>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/cancelable_operation_context.h"
-#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/s/shard_key_pattern.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -80,12 +82,8 @@ public:
                                ShardId recipientShard,
                                Timestamp atClusterTime,
                                NamespaceString outputNss,
+                               bool storeProgress,
                                bool relaxed);
-
-    std::pair<std::vector<BSONObj>, boost::intrusive_ptr<ExpressionContext>> makeRawPipeline(
-        OperationContext* opCtx,
-        std::shared_ptr<MongoProcessInterface> mongoProcessInterface,
-        Value resumeId = Value());
 
     std::pair<std::vector<BSONObj>, boost::intrusive_ptr<ExpressionContext>>
     makeRawNaturalOrderPipeline(OperationContext* opCtx,
@@ -104,33 +102,16 @@ public:
                          CancelableOperationContextFactory factory);
 
     /**
-     * Fetches and inserts a single batch of documents.
-     *
-     * Returns true if there are more documents to be fetched and inserted, and returns false
-     * otherwise.
-     */
-    bool doOneBatch(OperationContext* opCtx, Pipeline& pipeline, TxnNumber& txnNum);
-
-    /**
      * Inserts a single batch of documents and its resume information if provided.
      */
     void writeOneBatch(OperationContext* opCtx,
                        TxnNumber& txnNum,
                        std::vector<InsertStatement>& batch,
-                       ShardId donorShard = ShardId(),
-                       HostAndPort donorHost = HostAndPort(),
-                       BSONObj resumeToken = BSONObj(),
-                       // TODO(SERVER-77873): remove the useNaturalOrderCloner parameter.
-                       bool useNaturalOrderCloner = false);
+                       ShardId donorShard,
+                       HostAndPort donorHost,
+                       BSONObj resumeToken);
 
 private:
-    std::unique_ptr<Pipeline, PipelineDeleter> _targetAggregationRequest(
-        const std::vector<BSONObj>& rawPipeline,
-        const boost::intrusive_ptr<ExpressionContext>& expCtx);
-
-    std::unique_ptr<Pipeline, PipelineDeleter> _restartPipeline(
-        OperationContext* opCtx, std::shared_ptr<executor::TaskExecutor> executor);
-
     sharded_agg_helpers::DispatchShardPipelineResults _queryOnceWithNaturalOrder(
         OperationContext* opCtx, std::shared_ptr<MongoProcessInterface> mongoProcessInterface);
 
@@ -154,6 +135,7 @@ private:
     const ShardId _recipientShard;
     const Timestamp _atClusterTime;
     const NamespaceString _outputNss;
+    const bool _storeProgress;
     const bool _relaxed;
 };
 

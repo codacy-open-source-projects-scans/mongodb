@@ -28,10 +28,10 @@
  */
 
 #include "mongo/bson/json.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/profile_filter_impl.h"
 #include "mongo/db/service_context_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 
 namespace mongo {
 
@@ -44,14 +44,17 @@ public:
         opCtx = opCtxPtr.get();
         curop = CurOp::get(*opCtx);
         opDebug = &curop->debug();
+        expCtx = ExpressionContextBuilder{}.opCtx(opCtx).build();
     }
     ServiceContext::UniqueOperationContext opCtxPtr;
     OperationContext* opCtx;
     CurOp* curop;
     OpDebug* opDebug;
+    boost::intrusive_ptr<ExpressionContext> expCtx;
 };
 
 TEST_F(ProfileFilterTest, FilterOnAllOpDebugFields) {
+    // NOLINTNEXTLINE
     const std::unordered_set<std::string> allowedOpDebugFields = {"ts",
                                                                   "client",
                                                                   "appName",
@@ -114,13 +117,12 @@ TEST_F(ProfileFilterTest, FilterOnAllOpDebugFields) {
                                                                   "estimatedCost",
                                                                   "estimatedCardinality",
                                                                   "totalOplogSlotDurationMicros",
-                                                                  "execStats",
-                                                                  "operationMetrics"};
+                                                                  "execStats"};
 
     for (const auto& fieldName : allowedOpDebugFields) {
         auto filterExpr = BSON(fieldName << BSON("$exists" << true));
 
-        ProfileFilterImpl profileFilter{filterExpr};
+        ProfileFilterImpl profileFilter{filterExpr, expCtx};
         ASSERT_TRUE(profileFilter.dependsOn(fieldName))
             << "Profile filter failed to report dependency on " << fieldName;
 
@@ -137,7 +139,7 @@ TEST_F(ProfileFilterTest, FilterOnAllOpDebugFields) {
 TEST_F(ProfileFilterTest, FilterOnNestedField) {
     auto filterExpr = BSON("originatingCommand.pipeline" << BSON("$exists" << true));
 
-    ProfileFilterImpl profileFilter{filterExpr};
+    ProfileFilterImpl profileFilter{filterExpr, expCtx};
     ASSERT_TRUE(profileFilter.dependsOn("originatingCommand"))
         << "Profile filter failed to report dependency on originatingCommand";
 
@@ -152,10 +154,9 @@ TEST_F(ProfileFilterTest, FilterOnNestedField) {
 }
 
 TEST_F(ProfileFilterTest, FilterOnOptionalField) {
-    auto filterExpr = BSON("replanReason"
-                           << "a good reason");
+    auto filterExpr = BSON("replanReason" << "a good reason");
 
-    ProfileFilterImpl profileFilter{filterExpr};
+    ProfileFilterImpl profileFilter{filterExpr, expCtx};
 
     // Field doesn't exist.
     opDebug->replanReason = boost::none;
@@ -166,10 +167,30 @@ TEST_F(ProfileFilterTest, FilterOnOptionalField) {
     ASSERT_TRUE(profileFilter.matches(opCtx, *opDebug, *curop));
 }
 
+TEST_F(ProfileFilterTest, FilterDependsOnEnabledFeatureFlag) {
+    // '$_testFeatureFlagLatest' is an expression that is permanently enabled in the latest FCV.
+    auto filterExpr = fromjson(R"({
+        $expr: {
+            $gt: ['$nreturned', {'$_testFeatureFlagLatest' : 1}]
+        }
+    })");
+
+    ProfileFilterImpl profileFilter{filterExpr, expCtx};
+    ASSERT_TRUE(profileFilter.dependsOn("nreturned"));
+
+    // '$_testFeatureFlagLatest' will always return 1. If 'nreturned' is 2, the filter should match.
+    opDebug->additiveMetrics.nreturned = 2;
+    ASSERT_TRUE(profileFilter.matches(opCtx, *opDebug, *curop));
+
+    // '$_testFeatureFlagLatest' will always return 1. If 'nreturned' is 0.1, the filter should not
+    // match.
+    opDebug->additiveMetrics.nreturned = 0.1;
+    ASSERT_FALSE(profileFilter.matches(opCtx, *opDebug, *curop));
+}
+
 TEST_F(ProfileFilterTest, FilterOnUnavailableField) {
-    auto filterExpr = BSON("notAnOpDebugField"
-                           << "some value");
-    ASSERT_THROWS_CODE(ProfileFilterImpl{filterExpr}, DBException, 4910200);
+    auto filterExpr = BSON("notAnOpDebugField" << "some value");
+    ASSERT_THROWS_CODE(ProfileFilterImpl(filterExpr, expCtx), DBException, 4910200);
 }
 
 TEST_F(ProfileFilterTest, FilterThrowsException) {
@@ -180,7 +201,7 @@ TEST_F(ProfileFilterTest, FilterThrowsException) {
         }
     })");
 
-    ProfileFilterImpl profileFilter{filterExpr};
+    ProfileFilterImpl profileFilter{filterExpr, expCtx};
     ASSERT_TRUE(profileFilter.dependsOn("nreturned"));
 
     ASSERT_FALSE(profileFilter.matches(opCtx, *opDebug, *curop));

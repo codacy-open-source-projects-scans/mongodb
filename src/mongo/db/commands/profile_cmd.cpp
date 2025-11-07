@@ -28,15 +28,16 @@
  */
 
 #include "mongo/base/status.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/profile_common.h"
 #include "mongo/db/commands/profile_gen.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/db_raii.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/profile_collection.h"
 #include "mongo/db/profile_filter_impl.h"
 #include "mongo/db/profile_settings.h"
@@ -126,12 +127,17 @@ protected:
             if (auto filterOrUnset = request.getFilter()) {
                 if (auto filter = filterOrUnset->obj) {
                     // filter: <match expression>
-                    newSettings.filter = std::make_shared<ProfileFilterImpl>(*filter);
+                    newSettings.filter = std::make_shared<ProfileFilterImpl>(
+                        *filter, ExpressionContextBuilder{}.opCtx(opCtx).build());
                 } else {
                     // filter: "unset"
                     newSettings.filter = nullptr;
                 }
             }
+            if (auto slowOpInProgMS = request.getSlowinprogms()) {
+                newSettings.slowOpInProgressThreshold = Milliseconds(*slowOpInProgMS);
+            }
+
             uassertStatusOK(_setProfileSettings(opCtx, db, dbName, newSettings));
         }
 

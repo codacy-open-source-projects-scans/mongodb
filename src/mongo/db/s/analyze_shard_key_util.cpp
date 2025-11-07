@@ -29,25 +29,21 @@
 
 #include "mongo/db/s/analyze_shard_key_util.h"
 
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/client.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/s/analyze_shard_key_common_gen.h"
+#include "mongo/transport/session.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
+
 #include <cmath>
 #include <memory>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/client.h"
-#include "mongo/db/db_raii.h"
-#include "mongo/db/shard_role.h"
-#include "mongo/s/analyze_shard_key_common_gen.h"
-#include "mongo/transport/session.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -55,30 +51,36 @@ namespace mongo {
 namespace analyze_shard_key {
 
 StatusWith<UUID> validateCollectionOptions(OperationContext* opCtx, const NamespaceString& nss) {
-    AutoGetCollectionForReadCommandMaybeLockFree collection(
+    const auto collectionOrView = acquireCollectionOrViewMaybeLockFree(
         opCtx,
-        nss,
-        AutoGetCollection::Options{}.viewMode(auto_get_collection::ViewMode::kViewsPermitted));
+        CollectionOrViewAcquisitionRequest::fromOpCtx(
+            opCtx, nss, AcquisitionPrerequisites::kRead, AcquisitionPrerequisites::kCanBeView));
 
-    if (auto view = collection.getView()) {
-        if (view->timeseries()) {
+    if (collectionOrView.isView()) {
+        if (collectionOrView.getView().getViewDefinition().timeseries()) {
             return Status{ErrorCodes::IllegalOperation,
                           "Operation not supported for a timeseries collection"};
         }
         return Status{ErrorCodes::CommandNotSupportedOnView, "Operation not supported for a view"};
     }
-    if (!collection) {
+
+    const auto& collection = collectionOrView.getCollection();
+    if (!collection.exists()) {
         return Status{ErrorCodes::NamespaceNotFound,
                       str::stream() << "The namespace does not exist"};
     }
-    if (collection->getCollectionOptions().encryptedFieldConfig.has_value()) {
+    if (collection.getCollectionPtr()->isTimeseriesCollection()) {
+        return Status{ErrorCodes::IllegalOperation,
+                      "Operation not supported for a timeseries collection"};
+    }
+    if (collection.getCollectionPtr()->getCollectionOptions().encryptedFieldConfig.has_value()) {
         return Status{
             ErrorCodes::IllegalOperation,
             str::stream()
                 << "Operation not supported for a collection with queryable encryption enabled"};
     }
 
-    return collection->uuid();
+    return collection.uuid();
 }
 
 Status validateIndexKey(const BSONObj& indexKey) {
@@ -90,7 +92,7 @@ void uassertShardKeyValueNotContainArrays(const BSONObj& value) {
         uassert(ErrorCodes::BadValue,
                 str::stream() << "The shard key contains an array field '" << element.fieldName()
                               << "'",
-                element.type() != BSONType::Array);
+                element.type() != BSONType::array);
     }
 }
 

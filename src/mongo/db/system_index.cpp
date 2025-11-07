@@ -28,11 +28,7 @@
  */
 
 
-#include <chrono>
-#include <string>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/system_index.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -44,26 +40,30 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/index_spec.h"
 #include "mongo/db/auth/authorization_manager.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_key_validate.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/exec/scoped_timer.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/index_builds/index_builds_manager.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/index_key_validate.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/repl/intent_registry.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/system_index.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#include <chrono>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -143,15 +143,17 @@ Status verifySystemIndexes(OperationContext* opCtx, BSONObjBuilder* startupTimeE
     const NamespaceString& systemUsers = NamespaceString::kAdminUsersNamespace;
     const NamespaceString& systemRoles = NamespaceString::kAdminRolesNamespace;
 
+    auto options = auto_get_collection::Options{}.globalLockOptions(Lock::GlobalLockOptions{
+        .explicitIntent = rss::consensus::IntentRegistry::Intent::LocalWrite});
+
     // Create indexes for the admin.system.users collection.
     {
-        AutoGetCollection collection(opCtx, systemUsers, MODE_X);
+        AutoGetCollection collection(opCtx, systemUsers, MODE_X, options);
 
         if (collection) {
-            auto scopedTimer = createTimeElapsedBuilderScopedTimer(
-                opCtx->getServiceContext()->getFastClockSource(),
-                "Verify indexes for admin.system.users collection",
-                startupTimeElapsedBuilder);
+            SectionScopedTimer scopedTimer(&opCtx->fastClockSource(),
+                                           TimedSectionId::createSystemUsersIndex,
+                                           startupTimeElapsedBuilder);
             const IndexCatalog* indexCatalog = collection->getIndexCatalog();
             invariant(indexCatalog);
 
@@ -184,14 +186,13 @@ Status verifySystemIndexes(OperationContext* opCtx, BSONObjBuilder* startupTimeE
 
     // Create indexes for the admin.system.roles collection.
     {
-        AutoGetCollection collection(opCtx, systemRoles, MODE_X);
+        AutoGetCollection collection(opCtx, systemRoles, MODE_X, options);
 
         // Ensure that system indexes exist for the roles collection, if it exists.
         if (collection) {
-            auto scopedTimer = createTimeElapsedBuilderScopedTimer(
-                opCtx->getServiceContext()->getFastClockSource(),
-                "Verify indexes for admin.system.roles collection",
-                startupTimeElapsedBuilder);
+            SectionScopedTimer scopedTimer(&opCtx->fastClockSource(),
+                                           TimedSectionId::createSystemRolesIndex,
+                                           startupTimeElapsedBuilder);
             const IndexCatalog* indexCatalog = collection->getIndexCatalog();
             invariant(indexCatalog);
 

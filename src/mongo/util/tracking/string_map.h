@@ -29,14 +29,15 @@
 
 #pragma once
 
-#include <scoped_allocator>
-
-#include "mongo/util/string_map.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/tracking/allocator.h"
 #include "mongo/util/tracking/context.h"
 #include "mongo/util/tracking/string.h"
 
-namespace mongo::tracking {
+#include <scoped_allocator>
+
+namespace MONGO_MOD_PUB mongo {
+namespace tracking {
 
 struct StringMapHashedKey {
 public:
@@ -136,4 +137,5 @@ inline StringSet makeStringSet(Context& Context) {
     return StringSet(Context.makeAllocator<typename StringSet::allocator_type::value_type>());
 }
 
-}  // namespace mongo::tracking
+}  // namespace tracking
+}  // namespace MONGO_MOD_PUB mongo

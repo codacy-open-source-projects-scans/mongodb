@@ -1,5 +1,6 @@
 """Subcommands for test discovery."""
 
+import argparse
 from typing import List, Optional
 
 import yaml
@@ -108,6 +109,14 @@ class DiscoveryPlugin(PluginInterface):
                 " suite_A_B will also run the same tests."
             ),
         )
+        parser.add_argument(
+            "--includeFullyDisabledFeatureTests",
+            dest="include_fully_disabled_feature_tests",
+            action="store_true",
+            help=(
+                "Include tests tagged with features that are in fully_disabled_feature_flags.yml."
+            ),
+        )
 
         parser = subparsers.add_parser(
             SUITECONFIG_SUBCOMMAND, help="Display configuration of a test suite."
@@ -115,7 +124,12 @@ class DiscoveryPlugin(PluginInterface):
         parser.add_argument("--suite", metavar="SUITE", help="Suite to run against.")
 
     def parse(
-        self, subcommand, parser, parsed_args, should_configure_otel=True, **kwargs
+        self,
+        subcommand: str,
+        parser: argparse.ArgumentParser,
+        parsed_args: dict,
+        should_configure_otel: bool = True,
+        **kwargs,
     ) -> Optional[Subcommand]:
         """
         Resolve command-line options to a Subcommand or None.
@@ -128,8 +142,8 @@ class DiscoveryPlugin(PluginInterface):
         """
         if subcommand == TEST_DISCOVERY_SUBCOMMAND:
             configure_resmoke.validate_and_update_config(parser, parsed_args, should_configure_otel)
-            return TestDiscoverySubcommand(parsed_args.suite)
+            return TestDiscoverySubcommand(parsed_args["suite"])
         if subcommand == SUITECONFIG_SUBCOMMAND:
             configure_resmoke.validate_and_update_config(parser, parsed_args, should_configure_otel)
-            return SuiteConfigSubcommand(parsed_args.suite)
+            return SuiteConfigSubcommand(parsed_args["suite"])
         return None

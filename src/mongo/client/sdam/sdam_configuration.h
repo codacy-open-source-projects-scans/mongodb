@@ -28,13 +28,6 @@
  */
 #pragma once
 
-#include <string>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/sdam/sdam_configuration_parameters_gen.h"
 #include "mongo/client/sdam/sdam_datatypes.h"
@@ -42,10 +35,17 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/net/hostandport.h"
 
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
 namespace mongo::sdam {
 class SdamConfiguration {
 public:
-    SdamConfiguration() : SdamConfiguration(boost::none){};
+    SdamConfiguration() : SdamConfiguration(boost::none) {};
 
     /**
      * Initialize the TopologyDescription. This constructor may uassert if the provided

@@ -9,9 +9,9 @@ import {
     getMovieData,
     getMoviePlotEmbeddingById,
     getMovieSearchIndexSpec,
-    getMovieVectorSearchIndexSpec
-} from "jstests/with_mongot/e2e/lib/data/movies.js";
-import {assertDocArrExpectedFuzzy} from "jstests/with_mongot/e2e/lib/search_e2e_utils.js";
+    getMovieVectorSearchIndexSpec,
+} from "jstests/with_mongot/e2e_lib/data/movies.js";
+import {assertDocArrExpectedFuzzy} from "jstests/with_mongot/e2e_lib/search_e2e_utils.js";
 
 const moviesCollName = jsTestName() + "_movies";
 const moviesColl = db.getCollection(moviesCollName);
@@ -33,9 +33,11 @@ basicColl.drop();
 assert.commandWorked(basicColl.insert({"_id": 100, "localField": "cakes", "weird": false}));
 assert.commandWorked(basicColl.insert({"_id": 101, "localField": "cakes and kale", "weird": true}));
 
-const limit = 20;  // Default limit (number of documents returned)
-const vectorSearchOverrequestFactor =
-    10;  // Multiplication factor of k for numCandidates in $vectorSearch.
+// Make sure the shard that is going to execute the $unionWith/$lookup has up-to-date routing info.
+basicColl.aggregate([{$lookup: {from: moviesCollName, pipeline: [], as: "out"}}]);
+
+const limit = 20; // Default limit (number of documents returned)
+const vectorSearchOverrequestFactor = 10; // Multiplication factor of k for numCandidates in $vectorSearch.
 
 // Takes "nReturned" argument to control how many documents are returned by $vectorSearch
 // ("nReturned" also affects the number of candidates considered here).
@@ -43,12 +45,12 @@ function getVSQuery(nReturned) {
     let query = [
         {
             $vectorSearch: {
-                queryVector: getMoviePlotEmbeddingById(6),  // embedding for 'Tarzan the Ape Man'
+                queryVector: getMoviePlotEmbeddingById(6), // embedding for 'Tarzan the Ape Man'
                 path: "plot_embedding",
                 numCandidates: nReturned * vectorSearchOverrequestFactor,
                 index: getMovieVectorSearchIndexSpec().name,
                 limit: nReturned,
-            }
+            },
         },
     ];
     return query;
@@ -56,9 +58,7 @@ function getVSQuery(nReturned) {
 
 // Common use case of $vectorSearch + basic projection.
 function getVSPipeline(nReturned) {
-    return getVSQuery(nReturned).concat([
-        {$project: {_id: 0, title: 1, score: {$meta: 'vectorSearchScore'}}},
-    ]);
+    return getVSQuery(nReturned).concat([{$project: {_id: 0, title: 1, score: {$meta: "vectorSearchScore"}}}]);
 }
 
 // Basic check of an isolated $vectorSearch.
@@ -77,18 +77,20 @@ const vectorSearchExpected = [
     {"title": "King Kong Lives", "score": 0.7352674007415771},
     {"title": "Kung Fu Panda", "score": 0.7324357032775879},
     {"title": "Abraham Lincoln: Vampire Hunter", "score": 0.6931257247924805},
-    {"title": "Titanic", "score": 0.6765283942222595}
+    {"title": "Titanic", "score": 0.6765283942222595},
 ];
-var vectorSearchResult = moviesColl.aggregate(getVSPipeline(15)).toArray();
+let vectorSearchResult = moviesColl.aggregate(getVSPipeline(15)).toArray();
 assert.fuzzySameMembers(vectorSearchResult, vectorSearchExpected, ["score"]);
 
 // Basic collection $unionWith $vectorSearch.
-var basicUnionWith = [{
-    $unionWith: {
-        coll: moviesCollName,
-        pipeline: getVSPipeline(30),
-    }
-}];
+let basicUnionWith = [
+    {
+        $unionWith: {
+            coll: moviesCollName,
+            pipeline: getVSPipeline(30),
+        },
+    },
+];
 const basicUnionWithExpected = [
     {"_id": 100, "localField": "cakes", "weird": false},
     {"_id": 101, "localField": "cakes and kale", "weird": true},
@@ -106,10 +108,9 @@ const basicUnionWithExpected = [
     {"title": "King Kong Lives", "score": 0.7352674007415771},
     {"title": "Kung Fu Panda", "score": 0.7324357032775879},
     {"title": "Abraham Lincoln: Vampire Hunter", "score": 0.6931257247924805},
-    {"title": "Titanic", "score": 0.6765283942222595}
-
+    {"title": "Titanic", "score": 0.6765283942222595},
 ];
-var basicUnionWithResult = basicColl.aggregate(basicUnionWith).toArray();
+let basicUnionWithResult = basicColl.aggregate(basicUnionWith).toArray();
 assert.fuzzySameMembers(basicUnionWithResult, basicUnionWithExpected, ["score"]);
 
 // Check that the explain output of the above contains both $unionWith and $vectorSearch.
@@ -119,24 +120,24 @@ assert.neq(getAggPlanStages(result, "$unionWith"), null, result);
 assert.neq(getAggPlanStages(result, "$vectorSearch"), null, result);
 
 // $vectorSearch on moviesColl $unionWith $vectorSearch on moviesColl.
-var vsUnionWithVs1 = getVSPipeline(2);
-var vsUnionWithVs2 = [
-    {$project: {_id: 0, title: 1, score: {$meta: 'vectorSearchScore'}}},
+let vsUnionWithVs1 = getVSPipeline(2);
+let vsUnionWithVs2 = [
+    {$project: {_id: 0, title: 1, score: {$meta: "vectorSearchScore"}}},
     {
         $unionWith: {
             coll: moviesCollName,
             pipeline: getVSPipeline(2),
-        }
-    }
+        },
+    },
 ];
-var vsUnionWithVs = vsUnionWithVs1.concat(vsUnionWithVs2);
+let vsUnionWithVs = vsUnionWithVs1.concat(vsUnionWithVs2);
 const vsUnionWithVsExpected = [
     {"title": "Tarzan the Ape Man", "score": 1},
     {"title": "King Kong", "score": 0.8097645044326782},
     {"title": "Tarzan the Ape Man", "score": 1},
     {"title": "King Kong", "score": 0.8097645044326782},
 ];
-var vsUnionWithVsResult = moviesColl.aggregate(vsUnionWithVs).toArray();
+let vsUnionWithVsResult = moviesColl.aggregate(vsUnionWithVs).toArray();
 assert.fuzzySameMembers(vsUnionWithVsResult, vsUnionWithVsExpected, ["score"]);
 
 // Creating moviesCollB, which is another collection with a vector search index
@@ -148,12 +149,14 @@ assert.commandWorked(moviesCollB.insertMany(getMovieData()));
 createSearchIndex(moviesCollB, getMovieSearchIndexSpec());
 
 // $vectorSearch on moviesColl $unionWith $vectorSearch on moviesCollB.
-var vsUnionWithVsCollB = getVSPipeline(2).concat([{
-    $unionWith: {
-        coll: moviesCollName,
-        pipeline: getVSPipeline(3),
-    }
-}]);
+let vsUnionWithVsCollB = getVSPipeline(2).concat([
+    {
+        $unionWith: {
+            coll: moviesCollName,
+            pipeline: getVSPipeline(3),
+        },
+    },
+]);
 const vsUnionWithVsCollBExpected = [
     {"title": "Tarzan the Ape Man", "score": 1},
     {"title": "King Kong", "score": 0.8097645044326782},
@@ -161,23 +164,23 @@ const vsUnionWithVsCollBExpected = [
     {"title": "King Kong", "score": 0.8097645044326782},
     {"title": "The Son of Kong", "score": 0.7921581864356995},
 ];
-var vsUnionWithVsCollBResult = moviesColl.aggregate(vsUnionWithVsCollB).toArray();
+let vsUnionWithVsCollBResult = moviesColl.aggregate(vsUnionWithVsCollB).toArray();
 assert.fuzzySameMembers(vsUnionWithVsCollBResult, vsUnionWithVsCollBExpected, ["score"]);
 
 // Multiple $unionWith $vectorSearch stages:  {$unionWith $vectorSearch}, {$unionWith
 // $vectorSearch}.
-var dualUnionWith = [
+let dualUnionWith = [
     {
         $unionWith: {
             coll: moviesCollName,
             pipeline: getVSPipeline(2),
-        }
+        },
     },
     {
         $unionWith: {
             coll: moviesCollName,
             pipeline: getVSPipeline(2),
-        }
+        },
     },
 ];
 const dualUnionWithExpected = [
@@ -188,11 +191,11 @@ const dualUnionWithExpected = [
     {"title": "Tarzan the Ape Man", "score": 1},
     {"title": "King Kong", "score": 0.8097645044326782},
 ];
-var dualUnionWithResult = basicColl.aggregate(dualUnionWith).toArray();
+let dualUnionWithResult = basicColl.aggregate(dualUnionWith).toArray();
 assert.fuzzySameMembers(dualUnionWithResult, dualUnionWithExpected, ["score"]);
 
 // Nested $unionWith $vectorSearch (should get same results as above).
-var nestedUnionWith = [
+let nestedUnionWith = [
     {
         $unionWith: {
             coll: moviesCollName,
@@ -201,27 +204,27 @@ var nestedUnionWith = [
                     $unionWith: {
                         coll: moviesCollName,
                         pipeline: getVSPipeline(2),
-                    }
+                    },
                 },
             ]),
-        }
+        },
     },
 ];
-var nestedUnionWithResult = basicColl.aggregate(nestedUnionWith).toArray();
+let nestedUnionWithResult = basicColl.aggregate(nestedUnionWith).toArray();
 assert.fuzzySameMembers(nestedUnionWithResult, dualUnionWithExpected, ["score"]);
 
 // $unionWith {$vectorSearch} after a non-$vectorSearch $unionWith, and vice versa.
-var twoDiffUnionWith = [
+let twoDiffUnionWith = [
     {
         $unionWith: {
             coll: basicCollName,
-        }
+        },
     },
     {
         $unionWith: {
             coll: moviesCollName,
             pipeline: getVSPipeline(2),
-        }
+        },
     },
 ];
 const twoDiffUnionWithExpected = [
@@ -232,20 +235,20 @@ const twoDiffUnionWithExpected = [
     {"title": "Tarzan the Ape Man", "score": 1},
     {"title": "King Kong", "score": 0.8097645044326782},
 ];
-var twoDiffUnionWithResult = basicColl.aggregate(twoDiffUnionWith).toArray();
+let twoDiffUnionWithResult = basicColl.aggregate(twoDiffUnionWith).toArray();
 assert.fuzzySameMembers(twoDiffUnionWithResult, twoDiffUnionWithExpected, ["score"]);
 
-var twoDiffUnionWithFlipped = [
+let twoDiffUnionWithFlipped = [
     {
         $unionWith: {
             coll: moviesCollName,
             pipeline: getVSPipeline(2),
-        }
+        },
     },
     {
         $unionWith: {
             coll: basicCollName,
-        }
+        },
     },
 ];
 const twoDiffUnionWithFlippedExpected = [
@@ -256,37 +259,35 @@ const twoDiffUnionWithFlippedExpected = [
     {"_id": 100, "localField": "cakes", "weird": false},
     {"_id": 101, "localField": "cakes and kale", "weird": true},
 ];
-var twoDiffUnionWithFlippedResult = basicColl.aggregate(twoDiffUnionWithFlipped).toArray();
+let twoDiffUnionWithFlippedResult = basicColl.aggregate(twoDiffUnionWithFlipped).toArray();
 assert.fuzzySameMembers(twoDiffUnionWithFlippedResult, twoDiffUnionWithFlippedExpected, ["score"]);
 
 // Match stage after a $unionWith $vectorSearch.
-var matchAfterUnionWith = [
+let matchAfterUnionWith = [
     {
         $unionWith: {
             coll: moviesCollName,
             pipeline: getVSPipeline(15),
-        }
+        },
     },
     {$match: {title: "Titanic"}},
 ];
-const matchAfterUnionWithExpected = [
-    {"title": "Titanic", "score": 0.6765283942222595},
-];
-var matchAfterUnionWithResult = basicColl.aggregate(matchAfterUnionWith).toArray();
+const matchAfterUnionWithExpected = [{"title": "Titanic", "score": 0.6765283942222595}];
+let matchAfterUnionWithResult = basicColl.aggregate(matchAfterUnionWith).toArray();
 assert.fuzzySameMembers(matchAfterUnionWithResult, matchAfterUnionWithExpected, ["score"]);
 
 // $addFields to basic collection (basicColl) prior to a $unionWith $vectorSearch.
-var addFieldsToBasicPreUnionWith = [
+let addFieldsToBasicPreUnionWith = [
     {
         $addFields: {
             id2: "$_id",
-        }
+        },
     },
     {
         $unionWith: {
             coll: moviesCollName,
             pipeline: getVSPipeline(2),
-        }
+        },
     },
 ];
 const addFieldsToBasicPreUnionWithExpected = [
@@ -295,13 +296,11 @@ const addFieldsToBasicPreUnionWithExpected = [
     {"title": "Tarzan the Ape Man", "score": 1},
     {"title": "King Kong", "score": 0.8097645044326782},
 ];
-var addFieldsToBasicPreUnionWithResult =
-    basicColl.aggregate(addFieldsToBasicPreUnionWith).toArray();
-assert.fuzzySameMembers(
-    addFieldsToBasicPreUnionWithResult, addFieldsToBasicPreUnionWithExpected, ["score"]);
+let addFieldsToBasicPreUnionWithResult = basicColl.aggregate(addFieldsToBasicPreUnionWith).toArray();
+assert.fuzzySameMembers(addFieldsToBasicPreUnionWithResult, addFieldsToBasicPreUnionWithExpected, ["score"]);
 
 //$addFields to movie data collection (coll) prior to a $unionWith $vectorSearch.
-var addFieldsToMoviesPreUnionWith = [
+let addFieldsToMoviesPreUnionWith = [
     {
         $sort: {_id: 1},
     },
@@ -314,13 +313,13 @@ var addFieldsToMoviesPreUnionWith = [
     {
         $addFields: {
             id2: "$_id",
-        }
+        },
     },
     {
         $unionWith: {
             coll: moviesCollName,
             pipeline: getVSPipeline(2),
-        }
+        },
     },
 ];
 const addFieldsToMoviesPreUnionWithExpected = [
@@ -329,13 +328,11 @@ const addFieldsToMoviesPreUnionWithExpected = [
     {"title": "Tarzan the Ape Man", "score": 1},
     {"title": "King Kong", "score": 0.8097645044326782},
 ];
-var addFieldsToMoviesPreUnionWithResult =
-    moviesColl.aggregate(addFieldsToMoviesPreUnionWith).toArray();
-assert.fuzzySameMembers(
-    addFieldsToMoviesPreUnionWithResult, addFieldsToMoviesPreUnionWithExpected, ["score"]);
+let addFieldsToMoviesPreUnionWithResult = moviesColl.aggregate(addFieldsToMoviesPreUnionWith).toArray();
+assert.fuzzySameMembers(addFieldsToMoviesPreUnionWithResult, addFieldsToMoviesPreUnionWithExpected, ["score"]);
 
 // Adding (non-meta related) fields within $unionWith.
-var addFieldsWithinUnionWith = [
+let addFieldsWithinUnionWith = [
     {
         $sort: {_id: 1},
     },
@@ -349,11 +346,11 @@ var addFieldsWithinUnionWith = [
         $unionWith: {
             coll: moviesCollName,
             pipeline: getVSQuery(2).concat([
-                {$project: {title: 1, score: {$meta: 'vectorSearchScore'}}},
+                {$project: {title: 1, score: {$meta: "vectorSearchScore"}}},
                 {$addFields: {id2: "$_id"}},
             ]),
-        }
-    }
+        },
+    },
 ];
 const addFieldsWithinUnionWithExpected = [
     {"_id": 0, "title": "It's a Mad, Mad, Mad, Mad World"},
@@ -361,12 +358,11 @@ const addFieldsWithinUnionWithExpected = [
     {"_id": 6, "title": "Tarzan the Ape Man", "score": 1, "id2": 6},
     {"_id": 4, "title": "King Kong", "score": 0.8097645044326782, "id2": 4},
 ];
-var addFieldsWithinUnionWithResult = moviesColl.aggregate(addFieldsWithinUnionWith).toArray();
-assert.fuzzySameMembers(
-    addFieldsWithinUnionWithResult, addFieldsWithinUnionWithExpected, ["score"]);
+let addFieldsWithinUnionWithResult = moviesColl.aggregate(addFieldsWithinUnionWith).toArray();
+assert.fuzzySameMembers(addFieldsWithinUnionWithResult, addFieldsWithinUnionWithExpected, ["score"]);
 
 // Adding fields after $unionWith.
-var addFieldsAfterUnionWith = [
+let addFieldsAfterUnionWith = [
     {
         $sort: {_id: 1},
     },
@@ -379,15 +375,13 @@ var addFieldsAfterUnionWith = [
     {
         $unionWith: {
             coll: moviesCollName,
-            pipeline: getVSQuery(2).concat([
-                {$project: {title: 1, score: {$meta: 'vectorSearchScore'}}},
-            ]),
-        }
+            pipeline: getVSQuery(2).concat([{$project: {title: 1, score: {$meta: "vectorSearchScore"}}}]),
+        },
     },
     {
         $addFields: {
             id2: "$_id",
-        }
+        },
     },
 ];
 const addFieldsAfterUnionWithExpected = [
@@ -396,21 +390,19 @@ const addFieldsAfterUnionWithExpected = [
     {"_id": 6, "title": "Tarzan the Ape Man", "score": 1, "id2": 6},
     {"_id": 4, "title": "King Kong", "score": 0.8097645044326782, "id2": 4},
 ];
-var addFieldsAfterUnionWithResult = moviesColl.aggregate(addFieldsAfterUnionWith).toArray();
+let addFieldsAfterUnionWithResult = moviesColl.aggregate(addFieldsAfterUnionWith).toArray();
 assert.fuzzySameMembers(addFieldsAfterUnionWithResult, addFieldsAfterUnionWithExpected, ["score"]);
 
 // Sorting by score AFTER a unionWith.
-var sortAfterUnionWith = [
+let sortAfterUnionWith = [
     {
         $addFields: {score: 2},
     },
     {
         $unionWith: {
             coll: moviesCollName,
-            pipeline: getVSQuery(2).concat([
-                {$project: {_id: 1, title: 1, score: {$meta: 'vectorSearchScore'}}},
-            ]),
-        }
+            pipeline: getVSQuery(2).concat([{$project: {_id: 1, title: 1, score: {$meta: "vectorSearchScore"}}}]),
+        },
     },
     {$sort: {score: -1}},
 ];
@@ -420,7 +412,7 @@ const sortAfterUnionWithExpected = [
     {"_id": 6, "title": "Tarzan the Ape Man", "score": 1},
     {"_id": 4, "title": "King Kong", "score": 0.8097645044326782},
 ];
-var sortAfterUnionWithResult = basicColl.aggregate(sortAfterUnionWith).toArray();
+let sortAfterUnionWithResult = basicColl.aggregate(sortAfterUnionWith).toArray();
 assertDocArrExpectedFuzzy(sortAfterUnionWithResult, sortAfterUnionWithExpected);
 
 // Set up to test with a $lookup stage.
@@ -432,17 +424,15 @@ assert.commandWorked(lookupColl.insert({_id: 1, blob: true}));
 assert.commandWorked(lookupColl.insert({_id: 2, blob: true}));
 
 // {$lookup (non-VS)}, {$unionWith $vectorSearch}.
-var lookupThenUnionWithVS = [
+let lookupThenUnionWithVS = [
     {
-        $lookup:
-            {from: lookupColl.getName(), localField: "weird", foreignField: "blob", as: "result"}
-
+        $lookup: {from: lookupColl.getName(), localField: "weird", foreignField: "blob", as: "result"},
     },
     {
         $unionWith: {
             coll: moviesCollName,
             pipeline: getVSPipeline(2),
-        }
+        },
     },
 ];
 const lookupThenUnionWithVSExpected = [
@@ -451,27 +441,27 @@ const lookupThenUnionWithVSExpected = [
         "_id": 101,
         "localField": "cakes and kale",
         "weird": true,
-        "result": [{"_id": 1, "blob": true}, {"_id": 2, "blob": true}]
+        "result": [
+            {"_id": 1, "blob": true},
+            {"_id": 2, "blob": true},
+        ],
     },
     {"title": "Tarzan the Ape Man", "score": 1},
-    {"title": "King Kong", "score": 0.8097645044326782}
+    {"title": "King Kong", "score": 0.8097645044326782},
 ];
-var lookupThenUnionWithVSResult = basicColl.aggregate(lookupThenUnionWithVS).toArray();
+let lookupThenUnionWithVSResult = basicColl.aggregate(lookupThenUnionWithVS).toArray();
 assert.fuzzySameMembers(lookupThenUnionWithVSResult, lookupThenUnionWithVSExpected, ["score"]);
 
 // {$unionWith $vectorSearch}, {$lookup (non-VS)}.
-var unionWithVSThenLookup = [
+let unionWithVSThenLookup = [
     {
         $unionWith: {
             coll: moviesCollName,
-            pipeline: getVSPipeline(2).concat([
-                {$addFields: {"weird": {$lt: ["$score", 1]}}},
-            ]),
-        }
+            pipeline: getVSPipeline(2).concat([{$addFields: {"weird": {$lt: ["$score", 1]}}}]),
+        },
     },
     {
-        $lookup:
-            {from: lookupColl.getName(), localField: "weird", foreignField: "blob", as: "result"}
+        $lookup: {from: lookupColl.getName(), localField: "weird", foreignField: "blob", as: "result"},
     },
 ];
 const unionWithVSThenLookupExpected = [
@@ -480,30 +470,37 @@ const unionWithVSThenLookupExpected = [
         "_id": 101,
         "localField": "cakes and kale",
         "weird": true,
-        "result": [{"_id": 1, "blob": true}, {"_id": 2, "blob": true}]
+        "result": [
+            {"_id": 1, "blob": true},
+            {"_id": 2, "blob": true},
+        ],
     },
     {"title": "Tarzan the Ape Man", "score": 1, "weird": false, "result": []},
     {
         "title": "King Kong",
         "score": 0.8097645044326782,
         "weird": true,
-        "result": [{"_id": 1, "blob": true}, {"_id": 2, "blob": true}]
-    }
+        "result": [
+            {"_id": 1, "blob": true},
+            {"_id": 2, "blob": true},
+        ],
+    },
 ];
-var unionWithVSThenLookupResult = basicColl.aggregate(unionWithVSThenLookup).toArray();
+let unionWithVSThenLookupResult = basicColl.aggregate(unionWithVSThenLookup).toArray();
 assert.fuzzySameMembers(unionWithVSThenLookupResult, unionWithVSThenLookupExpected, ["score"]);
 
 // Failure Case: The query should fail when $vectorSearch is not the first stage of the
 // $unionWith pipeline (because $vectorSearch must be the first stage of any pipeline
 // it's in).)
-var unionWithMatchVS = [{
-    $unionWith: {
-        coll: moviesCollName,
-        pipeline: [{$match: {title: "Titanic"}}].concat(getVSPipeline(2)),
-    }
-}];
-assert.commandFailedWithCode(
-    db.runCommand({aggregate: basicCollName, pipeline: unionWithMatchVS, cursor: {}}), 40602);
+let unionWithMatchVS = [
+    {
+        $unionWith: {
+            coll: moviesCollName,
+            pipeline: [{$match: {title: "Titanic"}}].concat(getVSPipeline(2)),
+        },
+    },
+];
+assert.commandFailedWithCode(db.runCommand({aggregate: basicCollName, pipeline: unionWithMatchVS, cursor: {}}), 40602);
 
 dropSearchIndex(moviesColl, {name: getMovieSearchIndexSpec().name});
 dropSearchIndex(moviesColl, {name: getMovieVectorSearchIndexSpec().name});

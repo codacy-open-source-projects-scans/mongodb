@@ -29,14 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/error_extra_info.h"
 #include "mongo/base/status.h"
@@ -45,16 +37,25 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/rpc/write_concern_error_detail.h"
 #include "mongo/s/write_ops/batched_upsert_detail.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUBLIC mongo {
 
 /**
  * This class represents the layout and content of a insert/update/delete runCommand,
@@ -109,9 +110,11 @@ public:
 
     void setNModified(long long n);
     long long getNModified() const;
+    boost::optional<long long> getNModifiedOpt() const;
 
     void setN(long long n);
     long long getN() const;
+    boost::optional<long long> getNOpt() const;
 
     void setUpsertDetails(const std::vector<BatchedUpsertDetail*>& upsertDetails);
     void addToUpsertDetails(BatchedUpsertDetail* upsertDetails);
@@ -121,12 +124,10 @@ public:
     const std::vector<BatchedUpsertDetail*>& getUpsertDetails() const;
     const BatchedUpsertDetail* getUpsertDetailsAt(std::size_t pos) const;
 
-    // TODO SERVER-87035: Remove lastOp.
     void setLastOp(repl::OpTime lastOp);
     bool isLastOpSet() const;
     repl::OpTime getLastOp() const;
 
-    // TODO SERVER-87035: Remove electionId.
     void setElectionId(const OID& electionId);
     bool isElectionIdSet() const;
     OID getElectionId() const;
@@ -215,4 +216,4 @@ private:
     BSONArray _arr;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

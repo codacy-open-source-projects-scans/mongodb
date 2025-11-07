@@ -16,14 +16,13 @@ bool
 __wt_modify_idempotent(const void *modify)
 {
     WT_MODIFY mod;
-    size_t tmp;
-    const size_t *p;
-    int nentries;
+    size_t nentries;
+    const uint8_t *p;
 
     /* Get the number of modify entries. */
     p = modify;
-    memcpy(&tmp, p++, sizeof(size_t));
-    nentries = (int)tmp;
+    memcpy(&nentries, p, sizeof(nentries));
+    p += sizeof(nentries);
 
     WT_MODIFY_FOREACH_BEGIN (mod, p, nentries, 0) {
         /*
@@ -192,8 +191,8 @@ __modify_apply_one(WT_SESSION_IMPL *session, WT_ITEM *value, WT_MODIFY *modify, 
  *     remaining ones are sorted and non-overlapping.
  */
 static void
-__modify_fast_path(WT_ITEM *value, const size_t *p, int nentries, int *nappliedp, bool *overlapp,
-  size_t *dataszp, size_t *destszp)
+__modify_fast_path(WT_ITEM *value, const uint8_t *p, size_t nentries, size_t *nappliedp,
+  bool *overlapp, size_t *dataszp, size_t *destszp)
 {
     WT_MODIFY current, prev;
     size_t datasz, destoff;
@@ -275,8 +274,8 @@ __modify_fast_path(WT_ITEM *value, const size_t *p, int nentries, int *nappliedp
  *     and none of the changes overlap.
  */
 static void
-__modify_apply_no_overlap(WT_SESSION_IMPL *session, WT_ITEM *value, const size_t *p, int nentries,
-  int napplied, size_t datasz, size_t destsz)
+__modify_apply_no_overlap(WT_SESSION_IMPL *session, WT_ITEM *value, const uint8_t *p,
+  size_t nentries, size_t napplied, size_t datasz, size_t destsz)
 {
     WT_MODIFY current;
     size_t sz;
@@ -316,18 +315,17 @@ __wt_modify_apply_item(
   WT_SESSION_IMPL *session, const char *value_format, WT_ITEM *value, const void *modify)
 {
     WT_MODIFY mod;
-    size_t datasz, destsz, tmp;
+    size_t datasz, destsz, napplied, nentries;
     size_t item_offset;
-    const size_t *p;
-    int napplied, nentries;
+    const uint8_t *p;
     bool overlap, sformat;
 
     /*
      * Get the number of modify entries and set a second pointer to reference the replacement data.
      */
     p = modify;
-    memcpy(&tmp, p++, sizeof(size_t));
-    nentries = (int)tmp;
+    memcpy(&nentries, p, sizeof(nentries));
+    p += sizeof(nentries);
 
     /*
      * Modifies can only be applied on a single value field. Make sure we are not applying modifies
@@ -414,15 +412,18 @@ __wt_modify_reconstruct_from_upd_list(WT_SESSION_IMPL *session, WT_CURSOR_BTREE 
     WT_UPDATE *upd;
     WT_UPDATE_VECTOR modifies;
     size_t base_value_size, item_offset, max_memsize;
-    bool onpage_retry;
+    uint64_t txnid;
+    uint8_t prepare_state;
+    bool onpage_retry, check_prepare;
 
     WT_ASSERT(session, modify->type == WT_UPDATE_MODIFY);
 
     cursor = &cbt->iface;
     /* While we have a pointer to our original modify, grab this information. */
-    upd_value->tw.durable_start_ts = modify->durable_ts;
+    upd_value->tw.durable_start_ts = modify->upd_durable_ts;
     upd_value->tw.start_txn = modify->txnid;
     onpage_retry = true;
+    txnid = WT_TS_NONE;
 
     /*
      * It is possible that a read-uncommitted reader can not reconstruct a full value. This is
@@ -433,15 +434,36 @@ __wt_modify_reconstruct_from_upd_list(WT_SESSION_IMPL *session, WT_CURSOR_BTREE 
      * user with a rollback error.
      */
     if (context == WT_OPCTX_TRANSACTION && session->txn->isolation == WT_ISO_READ_UNCOMMITTED)
-        WT_RET_MSG(session, WT_ROLLBACK,
+        WT_RET_SUB(session, WT_ROLLBACK, WT_MODIFY_READ_UNCOMMITTED,
           "Read-uncommitted readers do not support reconstructing a record with modifies.");
-retry:
-    /* Construct full update */
+
+    /* Initial modifies vector initialization. */
     __wt_update_vector_init(session, &modifies);
+retry:
+    /* When retrying, the vector might already contain allocated memory that should be released. */
+    __wt_update_vector_free(&modifies);
+
+    check_prepare = false;
+    /*
+     * Handle the case that modify is a prepared update and we race with prepared rollback. This can
+     * happen in reconciliation with the preserve prepared config.
+     *
+     * We may see a locked prepare state if we race with prepare rollback.
+     */
+    prepare_state = __wt_atomic_load_uint8_v_acquire(&modify->prepare_state);
+    if (prepare_state == WT_PREPARE_INPROGRESS || prepare_state == WT_PREPARE_LOCKED) {
+        txnid = __wt_atomic_load_uint64_v_acquire(&modify->txnid);
+        /* The update may be already aborted. Get the saved transaction id. */
+        if (txnid == WT_TXN_ABORTED)
+            txnid = modify->upd_saved_txnid;
+
+        check_prepare = true;
+    }
+
     /* Find a complete update. */
     for (upd = modify; upd != NULL; upd = upd->next) {
-        if (upd->txnid == WT_TXN_ABORTED)
-            continue;
+        uint64_t temp_txnid;
+        WT_SKIP_ABORTED_AND_SET_CHECK_PREPARED(temp_txnid, txnid, check_prepare, upd);
 
         if (WT_UPDATE_DATA_VALUE(upd))
             break;

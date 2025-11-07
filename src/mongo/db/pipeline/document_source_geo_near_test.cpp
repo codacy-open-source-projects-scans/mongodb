@@ -27,9 +27,7 @@
  *    it in the license file.
  */
 
-#include <vector>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/document_source_geo_near.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobj.h"
@@ -37,9 +35,10 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/document_source_geo_near.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <vector>
+
 
 namespace mongo {
 namespace {
@@ -104,9 +103,11 @@ TEST_F(DocumentSourceGeoNearTest, CanParseAndSerializeWithoutDistanceField) {
     geoNear->optimize();
     geoNear->serializeToArray(serialized);
     ASSERT_EQ(serialized.size(), 1u);
-    auto expectedSerialization = Value{Document{
-        {"$geoNear",
-         Value{Document{{"near", std::vector<Value>{Value{0}, Value{0}}}, {"spherical", false}}}}}};
+    auto expectedSerialization =
+        Value{Document{{"$geoNear",
+                        Value{Document{{"near", std::vector<Value>{Value{0}, Value{0}}},
+                                       {"query", BSONObj{}},
+                                       {"spherical", false}}}}}};
     ASSERT_VALUE_EQ(expectedSerialization, serialized[0]);
 }
 
@@ -123,6 +124,7 @@ TEST_F(DocumentSourceGeoNearTest, CanParseAndSerializeKeyField) {
                         Value{Document{{"key", "a.b"_sd},
                                        {"near", std::vector<Value>{Value{0}, Value{0}}},
                                        {"distanceField", "dist"_sd},
+                                       {"query", BSONObj{}},
                                        {"spherical", false}}}}}};
     ASSERT_VALUE_EQ(expectedSerialization, serialized[0]);
 }
@@ -178,6 +180,7 @@ TEST_F(DocumentSourceGeoNearTest, RedactionWithGeoJSONLineString) {
                 "near": "?object",
                 "distanceField": "HASH<a>",
                 "minDistance": "?number",
+                "query": {},
                 "spherical": "?bool"
             }
         })",

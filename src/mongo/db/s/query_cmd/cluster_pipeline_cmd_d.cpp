@@ -27,14 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -49,12 +41,20 @@
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/query/explain_options.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/topology/sharding_state.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/commands/query_cmd/cluster_pipeline_cmd.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/sharding_state.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/database_name_util.h"
+
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -98,7 +98,10 @@ struct ClusterPipelineCommandD {
         boost::optional<ExplainOptions::Verbosity> explainVerbosity) {
         // Replace clusterAggregate in the request body because the parser doesn't recognize it.
         auto modifiedRequestBody =
-            opMsgRequest.body.replaceFieldNames(BSON(AggregateCommandRequest::kCommandName << 1));
+            BSONObjBuilder()
+                .appendElementsRenamed(opMsgRequest.body,
+                                       BSON(AggregateCommandRequest::kCommandName << 1))
+                .obj();
         return aggregation_request_helper::parseFromBSON(
             modifiedRequestBody, opMsgRequest.validatedTenancyScope, explainVerbosity);
     }

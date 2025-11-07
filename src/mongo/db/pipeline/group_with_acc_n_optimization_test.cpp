@@ -27,17 +27,17 @@
  *    it in the license file.
  */
 
-#include <fmt/format.h>
+#include "mongo/bson/json.h"
+#include "mongo/db/pipeline/aggregation_context_fixture.h"
+#include "mongo/db/pipeline/optimization/optimize.h"
+#include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/query/util/make_data_structure.h"
+#include "mongo/unittest/unittest.h"
+
 #include <memory>
 #include <vector>
 
-#include "mongo/bson/json.h"
-#include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/query/util/make_data_structure.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -47,9 +47,9 @@ protected:
     void verify(const BSONObj& groupSpec, const std::vector<BSONObj>& expectedOptimizedPipeline) {
         auto pipeline = Pipeline::parse(makeVector(groupSpec), getExpCtx());
 
-        ASSERT_EQ(pipeline->getSources().size(), 1U);
+        ASSERT_EQ(pipeline->size(), 1U);
 
-        pipeline->optimizePipeline();
+        pipeline_optimization::optimizePipeline(*pipeline);
 
         auto actualOptimizedPipeline = pipeline->serializeToBson();
         ASSERT_EQ(actualOptimizedPipeline.size(), expectedOptimizedPipeline.size())
@@ -75,7 +75,8 @@ TEST_F(AccNforNis1OptimizationTest, FirstNForNis1Optimized) {
 {
     $group: {
         _id: {$const: null},
-        field: {$first: "$m"}
+        field: {$first: "$m"},
+        $willBeMerged: false
     }
 }
     )");
@@ -101,7 +102,8 @@ TEST_F(AccNforNis1OptimizationTest, LastNForNis1Optimized) {
 {
     $group: {
         _id: {$const: null},
-        field: {$last: "$m"}
+        field: {$last: "$m"},
+        $willBeMerged: false
     }
 }
     )");
@@ -127,7 +129,8 @@ TEST_F(AccNforNis1OptimizationTest, TopNForNis1Optimized) {
 {
     $group: {
         _id: {$const: null},
-        field: {$top: {sortBy: {time: 1}, output: "$m"}}
+        field: {$top: {sortBy: {time: 1}, output: "$m"}},
+        $willBeMerged: false
     }
 }
     )");
@@ -153,7 +156,8 @@ TEST_F(AccNforNis1OptimizationTest, BottomNForNis1Optimized) {
 {
     $group: {
         _id: {$const: null},
-        field: {$bottom: {sortBy: {time: 1}, output: "$m"}}
+        field: {$bottom: {sortBy: {time: 1}, output: "$m"}},
+        $willBeMerged: false
     }
 }
     )");
@@ -183,7 +187,8 @@ TEST_F(AccNforNis1OptimizationTest, MultipleFirstNisOptimized) {
         _id: {$const: null},
         f1: {$first: "$m"},
         f2: {$first: "$i"},
-        f3: {$first: "$k"}
+        f3: {$first: "$k"},
+        $willBeMerged: false
     }
 }
     )");
@@ -211,7 +216,8 @@ TEST_F(AccNforNis1OptimizationTest, CompatibleLastAccsOptimized) {
     $group: {
         _id: {$const: null},
         f1: {$last: "$m"},
-        f2: {$last: "$i"}
+        f2: {$last: "$i"},
+        $willBeMerged: false
     }
 }
     )");
@@ -245,7 +251,8 @@ TEST_F(AccNforNis1OptimizationTest, CompatibleBottomAccsOptimized) {
         bs_0: {$bottom: {
             sortBy: {time: 1},
             output: {f1: {$ifNull: ["$a", {$const: null}]}, f2: {$ifNull: ["$b", {$const: null}]}}
-        }}
+        }},
+        $willBeMerged: false
     }
 }
     )");
@@ -284,7 +291,8 @@ TEST_F(AccNforNis1OptimizationTest, DifferentAccNnotOptimized) {
     $group: {
         _id: {$const: null},
         f1: {$firstN: {input: "$m", n: {$const: 1}}},
-        f2: {$lastN: {input: "$i", n: {$const: 1}}}
+        f2: {$lastN: {input: "$i", n: {$const: 1}}},
+        $willBeMerged: false
     }
 }
     )");
@@ -307,7 +315,8 @@ TEST_F(AccNforNis1OptimizationTest, AccNforNdifferentThan1NotOptimized) {
     $group: {
         _id: {$const: null},
         f1: {$lastN: {input: "$i", n: {$const: 1}}},
-        f2: {$lastN: {input: "$i", n: {$const: 5}}}
+        f2: {$lastN: {input: "$i", n: {$const: 5}}},
+        $willBeMerged: false
     }
 }
         )");
@@ -330,7 +339,8 @@ TEST_F(AccNforNis1OptimizationTest, AccNwithDifferentSortKeyNotOptimized) {
     $group: {
         _id: {$const: null},
         f1: {$topN: {n: {$const: 1}, sortBy: {time: 1}, output: "$i"}},
-        f2: {$topN: {n: {$const: 1}, sortBy: {age: 1}, output: "$i"}}
+        f2: {$topN: {n: {$const: 1}, sortBy: {age: 1}, output: "$i"}},
+        $willBeMerged: false
     }
 }
         )");
@@ -353,7 +363,8 @@ TEST_F(AccNforNis1OptimizationTest, CompatibleAccsWithDifferentSortKeyNotOptimiz
     $group: {
         _id: {$const: null},
         f1: {$topN: {n: {$const: 1}, sortBy: {time: 1}, output: "$i"}},
-        f2: {$top: {sortBy: {age: 1}, output: "$i"}}
+        f2: {$top: {sortBy: {age: 1}, output: "$i"}},
+        $willBeMerged: false
     }
 }
         )");
@@ -374,7 +385,8 @@ TEST_F(AccNforNis1OptimizationTest, MinNnotOptimized) {
 {
     $group: {
         _id: {$const: null},
-        field: {$minN: {input: "$m", n: {$const: 1}}}
+        field: {$minN: {input: "$m", n: {$const: 1}}},
+        $willBeMerged: false
     }
 }
         )");
@@ -395,7 +407,8 @@ TEST_F(AccNforNis1OptimizationTest, MaxNnotOptimized) {
 {
     $group: {
         _id: {$const: null},
-        field: {$maxN: {input: "$m", n: {$const: 1}}}
+        field: {$maxN: {input: "$m", n: {$const: 1}}},
+        $willBeMerged: false
     }
 }
         )");

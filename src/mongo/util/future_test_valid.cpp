@@ -27,27 +27,26 @@
  *    it in the license file.
  */
 
-#include <boost/smart_ptr.hpp>
-#include <fmt/format.h>
-#include <memory>
-#include <string>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/executor_test_util.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/future_test_utils.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -66,7 +65,7 @@ void assertFutureValidAfter(const TestFunc& func) {
     FUTURE_SUCCESS_TEST([] { return 0; },
                         [func](auto&& fut) {
                             func(std::move(fut));
-                            ASSERT_TRUE(fut.valid());
+                            ASSERT_TRUE(fut.valid());  // NOLINT(bugprone-use-after-move)
                         });
 }
 
@@ -76,7 +75,7 @@ void assertFutureInvalidAfter(const TestFunc& func) {
     FUTURE_SUCCESS_TEST([] { return 0; },
                         [func](auto&& fut) {
                             func(std::move(fut));
-                            ASSERT_FALSE(fut.valid());
+                            ASSERT_FALSE(fut.valid());  // NOLINT(bugprone-use-after-move)
                         });
 }
 
@@ -89,7 +88,8 @@ void assertFutureTransfersValid(const TestFunc& func) {
     FUTURE_SUCCESS_TEST<doExecutorFuture>([] { return 0; },
                                           [func](auto&& fut) {
                                               auto otherFut = func(std::move(fut));
-                                              ASSERT_FALSE(fut.valid());
+                                              ASSERT_FALSE(
+                                                  fut.valid());  // NOLINT(bugprone-use-after-move)
                                               ASSERT_TRUE(otherFut.valid());
                                           });
 }
@@ -97,11 +97,12 @@ void assertFutureTransfersValid(const TestFunc& func) {
 /** Passes an invalid Future or ExecutorFuture into `func`. To be used with DEATH_TEST. */
 template <DoExecutorFuture doExecutorFuture = kDoExecutorFuture, typename TestFunc>
 void callWithInvalidFuture(const TestFunc& func) {
-    FUTURE_SUCCESS_TEST<doExecutorFuture>([] { return 0; },
-                                          [func](auto&& fut) {
-                                              [[maybe_unused]] auto val = std::move(fut).get();
-                                              (void)func(std::move(fut));
-                                          });
+    FUTURE_SUCCESS_TEST<doExecutorFuture>(
+        [] { return 0; },
+        [func](auto&& fut) {
+            [[maybe_unused]] auto val = std::move(fut).get();
+            (void)func(std::move(fut));  // NOLINT(bugprone-use-after-move)
+        });
 }
 
 TEST(FutureValid, ValidAtStart) {
@@ -232,10 +233,7 @@ TEST(FutureValid, ShareTransfersValid) {
 }
 
 DEATH_TEST(FutureValid, ShareCrashesOnInvalidFuture, "Invariant failure") {
-    MONGO_COMPILER_DIAGNOSTIC_PUSH
-    MONGO_COMPILER_DIAGNOSTIC_IGNORED_TRANSITIONAL("-Wuninitialized")
     callWithInvalidFuture([](auto&& fut) { return std::move(fut).share(); });
-    MONGO_COMPILER_DIAGNOSTIC_POP
 }
 
 /** Asserts that the SemiFuture is invalid() after `func`. */
@@ -245,7 +243,7 @@ void assertSemiFutureInvalidAfter(const TestFunc& func) {
                         [func](auto&& fut) {
                             auto semiFut = std::move(fut).semi();
                             func(std::move(semiFut));
-                            ASSERT_FALSE(semiFut.valid());
+                            ASSERT_FALSE(semiFut.valid());  // NOLINT(bugprone-use-after-move)
                         });
 }
 
@@ -256,7 +254,7 @@ void assertSemiFutureValidAfter(const TestFunc& func) {
                         [func](auto&& fut) {
                             auto semiFut = std::move(fut).semi();
                             func(std::move(semiFut));
-                            ASSERT_TRUE(semiFut.valid());
+                            ASSERT_TRUE(semiFut.valid());  // NOLINT(bugprone-use-after-move)
                         });
 }
 
@@ -267,7 +265,7 @@ void assertSemiFutureTransfersValid(const TestFunc& func) {
                         [func](auto&& fut) {
                             auto semiFut = std::move(fut).semi();
                             auto otherFut = func(std::move(semiFut));
-                            ASSERT_FALSE(semiFut.valid());
+                            ASSERT_FALSE(semiFut.valid());  // NOLINT(bugprone-use-after-move)
                             ASSERT_TRUE(otherFut.valid());
                         });
 }
@@ -340,7 +338,7 @@ void assertSharedSemiFutureValidAfter(const TestFunc& func) {
                         [func](auto&& fut) {
                             auto sharedFut = std::move(fut).share();
                             func(std::move(sharedFut));
-                            ASSERT_TRUE(sharedFut.valid());
+                            ASSERT_TRUE(sharedFut.valid());  // NOLINT(bugprone-use-after-move)
                         });
 }
 
@@ -353,7 +351,7 @@ void assertSharedSemiFutureTransfersValid(const TestFunc& func) {
                         [func](auto&& fut) {
                             auto sharedFut = std::move(fut).share();
                             auto otherFut = func(std::move(sharedFut));
-                            ASSERT_FALSE(sharedFut.valid());
+                            ASSERT_FALSE(sharedFut.valid());  // NOLINT(bugprone-use-after-move)
                             ASSERT_TRUE(otherFut.valid());
                         });
 }
@@ -365,7 +363,7 @@ void assertSharedSemiFutureSplits(const TestFunc& func) {
                         [func](auto&& fut) {
                             auto sharedFut = std::move(fut).share();
                             auto otherFut = func(std::move(sharedFut));
-                            ASSERT_TRUE(sharedFut.valid());
+                            ASSERT_TRUE(sharedFut.valid());  // NOLINT(bugprone-use-after-move)
                             ASSERT_TRUE(otherFut.valid());
                         });
 }
@@ -373,12 +371,13 @@ void assertSharedSemiFutureSplits(const TestFunc& func) {
 /** Passes an invalid SharedSemiFuture into `func`. To be used with DEATH_TEST. */
 template <DoExecutorFuture doExecutorFuture = kDoExecutorFuture, typename TestFunc>
 void callWithInvalidSharedSemiFuture(const TestFunc& func) {
-    FUTURE_SUCCESS_TEST<doExecutorFuture>([] { return 0; },
-                                          [func](auto&& fut) {
-                                              auto sharedFut = std::move(fut).share();
-                                              auto otherSharedFut = std::move(sharedFut);
-                                              (void)func(std::move(sharedFut));
-                                          });
+    FUTURE_SUCCESS_TEST<doExecutorFuture>(
+        [] { return 0; },
+        [func](auto&& fut) {
+            auto sharedFut = std::move(fut).share();
+            auto otherSharedFut = std::move(sharedFut);
+            (void)func(std::move(sharedFut));  // NOLINT(bugprone-use-after-move)
+        });
 }
 
 TEST(SharedSemiFutureValid, ValidAfterGetLvalue) {
@@ -462,7 +461,7 @@ TEST(FutureValid, InterruptedGetValidity) {
 
                             if (!res.isOK()) {
                                 ASSERT_EQ(res.getStatus(), ErrorCodes::Interrupted);
-                                ASSERT_TRUE(fut.valid());
+                                ASSERT_TRUE(fut.valid());  // NOLINT(bugprone-use-after-move)
                             } else {
                                 ASSERT_FALSE(fut.valid());
                             }
@@ -479,7 +478,7 @@ TEST(SemiFutureValid, InterruptedGetValidity) {
 
                             if (!res.isOK()) {
                                 ASSERT_EQ(res.getStatus(), ErrorCodes::Interrupted);
-                                ASSERT_TRUE(semiFut.valid());
+                                ASSERT_TRUE(semiFut.valid());  // NOLINT(bugprone-use-after-move)
                             } else {
                                 ASSERT_FALSE(semiFut.valid());
                             }

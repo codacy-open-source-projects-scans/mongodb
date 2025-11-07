@@ -28,9 +28,6 @@
  */
 
 
-#include <memory>
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
@@ -39,15 +36,17 @@
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/profile_collection.h"
+#include "mongo/db/profile_settings.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/get_executor.h"
@@ -60,6 +59,9 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/md5.h"
 #include "mongo/util/namespace_string_util.h"
+
+#include <memory>
+#include <string>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -95,7 +97,7 @@ public:
         if (const auto rootElt = cmdObj["root"]) {
             uassert(ErrorCodes::InvalidNamespace,
                     "'root' must be of type String",
-                    rootElt.type() == BSONType::String);
+                    rootElt.type() == BSONType::string);
             collectionName = rootElt.str();
         }
         if (collectionName.empty())
@@ -128,7 +130,7 @@ public:
 
         md5digest d;
         md5_state_t st;
-        md5_init_state(&st);
+        md5_init_state_deprecated(&st);
 
         int n = 0;
 
@@ -144,14 +146,14 @@ public:
                         str::stream() << "The element that calls binDataClean() must be type of "
                                          "BinData, but type of "
                                       << typeName(stateElem.type()) << " found.",
-                        (stateElem.type() == BSONType::BinData));
+                        (stateElem.type() == BSONType::binData));
 
                 int len;
                 const char* data = stateElem.binDataClean(len);
                 massert(16247, "md5 state not correct size", len == sizeof(st));
                 memcpy(&st, data, sizeof(st));
             }
-            n = jsobj["startAt"].numberInt();
+            n = jsobj["startAt"].safeNumberInt();
         }
 
         BSONObj query = BSON("files_id" << jsobj["filemd5"] << "n" << GTE << n);
@@ -174,12 +176,20 @@ public:
             // Check shard version at startup.
             // This will throw before we've done any work if shard version is outdated
             // We drop and re-acquire these locks every document because md5'ing is expensive
-            std::unique_ptr<AutoGetCollectionForReadCommand> ctx(
-                new AutoGetCollectionForReadCommand(opCtx, nss));
-            const CollectionPtr& coll = ctx->getCollection();
+            auto ctx = acquireCollection(opCtx,
+                                         CollectionAcquisitionRequest::fromOpCtx(
+                                             opCtx, nss, AcquisitionPrerequisites::kRead),
+                                         MODE_IS);
+
+            AutoStatsTracker statsTracker(opCtx,
+                                          nss,
+                                          Top::LockType::ReadLocked,
+                                          AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                                          DatabaseProfileSettings::get(opCtx->getServiceContext())
+                                              .getDatabaseProfileLevel(nss.dbName()));
 
             auto exec = uassertStatusOK(getExecutorFind(opCtx,
-                                                        MultipleCollectionAccessor{coll},
+                                                        MultipleCollectionAccessor{ctx},
                                                         std::move(cq),
                                                         PlanYieldPolicy::YieldPolicy::YIELD_MANUAL,
                                                         QueryPlannerParams::NO_TABLE_SCAN));
@@ -189,7 +199,7 @@ public:
                 while (PlanExecutor::ADVANCED == exec->getNext(&obj, nullptr)) {
                     BSONElement ne = obj["n"];
                     MONGO_verify(ne.isNumber());
-                    int myn = ne.numberInt();
+                    int myn = ne.safeNumberInt();
                     if (n != myn) {
                         if (partialOk) {
                             break;  // skipped chunk is probably on another shard
@@ -211,16 +221,16 @@ public:
                             str::stream() << "The element that calls binDataClean() must be type "
                                              "of BinData, but type of "
                                           << owned["data"].type() << " found.",
-                            owned["data"].type() == BSONType::BinData);
+                            owned["data"].type() == BSONType::binData);
 
                     exec->saveState();
                     // UNLOCKED
-                    ctx.reset();
+                    auto yieldResources = yieldTransactionResourcesFromOperationContext(opCtx);
 
                     int len;
                     const char* data = owned["data"].binDataClean(len);
                     // This is potentially an expensive operation, so do it out of the lock
-                    md5_append(&st, (const md5_byte_t*)(data), len);
+                    md5_append_deprecated(&st, (const md5_byte_t*)(data), len);
                     n++;
 
                     CurOpFailpointHelpers::waitWhileFailPointEnabled(
@@ -228,7 +238,8 @@ public:
 
                     try {
                         // RELOCKED
-                        ctx.reset(new AutoGetCollectionForReadCommand(opCtx, nss));
+                        restoreTransactionResourcesToOperationContext(opCtx,
+                                                                      std::move(yieldResources));
                     } catch (const ExceptionFor<ErrorCodes::StaleConfig>&) {
                         LOGV2_DEBUG(
                             20453,
@@ -238,7 +249,7 @@ public:
                     }
 
                     // Now that we have the lock again, we can restore the PlanExecutor.
-                    exec->restoreState(&ctx->getCollection());
+                    exec->restoreState(nullptr);
                 }
             } catch (DBException& exception) {
                 exception.addContext("Executor error during filemd5 command");
@@ -249,7 +260,7 @@ public:
                 result.appendBinData("md5state", sizeof(st), BinDataGeneral, &st);
 
             // This must be *after* the capture of md5state since it mutates st
-            md5_finish(&st, d);
+            md5_finish_deprecated(&st, d);
 
             result.append("numChunks", n);
             result.append("md5", digestToString(d));

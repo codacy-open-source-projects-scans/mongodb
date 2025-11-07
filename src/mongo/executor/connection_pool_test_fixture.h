@@ -27,12 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <deque>
-#include <memory>
-#include <set>
-#include <string>
+#pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/executor/connection_pool.h"
@@ -45,6 +40,14 @@
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <deque>
+#include <memory>
+#include <set>
+#include <string>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace executor {
@@ -94,7 +97,10 @@ public:
     using PushSetupCallback = unique_function<Status()>;
     using PushRefreshCallback = unique_function<Status()>;
 
-    ConnectionImpl(const HostAndPort& hostAndPort, size_t generation, PoolImpl* global);
+    ConnectionImpl(const HostAndPort& hostAndPort,
+                   PoolConnectionId,
+                   size_t generation,
+                   PoolImpl* global);
 
     size_t id() const;
 
@@ -162,6 +168,7 @@ public:
     std::shared_ptr<ConnectionPool::ConnectionInterface> makeConnection(
         const HostAndPort& hostAndPort,
         transport::ConnectSSLMode sslMode,
+        PoolConnectionId,
         size_t generation) override;
 
     std::shared_ptr<ConnectionPool::TimerInterface> makeTimer() override;

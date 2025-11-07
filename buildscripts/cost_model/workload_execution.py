@@ -30,22 +30,29 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from typing import Sequence
+from typing import Any, Sequence
 
 import bson.json_util as json
 from bson.objectid import ObjectId
 from config import WorkloadExecutionConfig, WriteMode
 from data_generator import CollectionInfo
-from database_instance import DatabaseInstance, Pipeline
+from database_instance import DatabaseInstance, Find
 
 __all__ = ["execute"]
 
 
 @dataclass
 class Query:
-    """Query pipleline and related model input parameters."""
+    """Query command and related model input parameters."""
 
-    pipeline: Pipeline
+    find_cmd: Find
+
+    # If the query expects any stages to be present in the winning plan
+    # for calibration purposes, they can be specified as either a string or a dictionary:
+    # example: "LIMIT"
+    # example: {"FETCH": {"filter": {"a": {"$eq": 1}}}}}
+    # example: {"IXSCAN": {"direction": "forward"}}]
+    expected_stage: Any
     keys_length_in_bytes: int = 0
     number_of_fields: int = 0
     note: any = None
@@ -95,9 +102,6 @@ class WorkloadExecution:
 
     async def async_init(self):
         """Initialize the database settings."""
-        await self.database.enable_sbe(True)
-        await self.database.enable_cascades(True)
-
         if self.config.write_mode == WriteMode.REPLACE:
             await self.database.drop_collection(self.config.output_collection_name)
 
@@ -108,15 +112,47 @@ class WorkloadExecution:
         for coll_info in collection_infos:
             print(f"\n>>>>> running queries on collection {coll_info.name}")
             for query in queries:
-                print(f">>>>>>> running query {query.pipeline}")
+                print(f">>>>>>> running query {query.find_cmd}")
                 await self._run_query(coll_info, query, measurements)
 
         await self.database.insert_many(self.config.output_collection_name, measurements)
 
+    def _check_explain_helper(self, expected_stage: Any, node: dict) -> bool:
+        exp_stage = ""
+        if isinstance(expected_stage, str):
+            exp_stage = expected_stage
+        else:
+            assert isinstance(expected_stage, dict)
+            assert len(list(expected_stage.keys())) == 1
+            exp_stage = list(expected_stage.keys())[0]
+
+        if node["stage"] == exp_stage:
+            if isinstance(expected_stage, dict):
+                expected_conditions = expected_stage[list(expected_stage.keys())[0]]
+                for member in expected_conditions.keys():
+                    if member in node and expected_conditions[member] == node[member]:
+                        continue
+                    return False
+
+            return True
+
+        if "inputStage" in node:
+            return self._check_explain_helper(expected_stage, node["inputStage"])
+        if "inputStages" in node:
+            for stage in node["inputStages"]:
+                if self._check_explain_helper(expected_stage, stage):
+                    return True
+
+        return False
+
+    def _check_explain(self, expected_stage: Any, explain: dict) -> bool:
+        root = explain["queryPlanner"]["winningPlan"]
+        return self._check_explain_helper(expected_stage, root)
+
     async def _run_query(self, coll_info: CollectionInfo, query: Query, result: Sequence):
         # warm up
         for _ in range(self.config.warmup_runs):
-            await self.database.explain(coll_info.name, query.pipeline)
+            await self.database.explain(coll_info.name, query.find_cmd)
 
         run_id = ObjectId()
         avg_doc_size = await self.database.get_average_document_size(coll_info.name)
@@ -127,13 +163,22 @@ class WorkloadExecution:
             note=query.note,
         )
         for _ in range(self.config.runs):
-            explain = await self.database.explain(coll_info.name, query.pipeline)
+            explain = await self.database.explain(coll_info.name, query.find_cmd)
+
+            # Check that the winning plan has the expected stages.
+            assert self._check_explain(query.expected_stage, explain), (
+                "Explain did not contain the expected stage "
+                + str(query.expected_stage)
+                + "\nExplain: "
+                + str(explain)
+            )
+
             if explain["ok"] == 1:
                 result.append(
                     {
                         "run_id": run_id,
                         "collection": coll_info.name,
-                        "pipeline": json.dumps(query.pipeline),
+                        "command": json.dumps(query.find_cmd),
                         "explain": json.dumps(explain),
                         "query_parameters": parameters.to_json(),
                     }

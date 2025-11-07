@@ -29,14 +29,6 @@
 
 #include "mongo/db/commands/test_commands.h"
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <ostream>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
@@ -46,38 +38,48 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/collection_crud/capped_collection_maintenance.h"
 #include "mongo/db/collection_crud/capped_utils.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/feature_flag_test_gen.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/profile_settings.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/write_ops/insert.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/repl/intent_registry.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_role.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <memory>
+#include <ostream>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -117,6 +119,11 @@ public:
         return Status::OK();
     }
 
+    bool requiresAuthzChecks() const override {
+        return false;
+    }
+
+
     std::string help() const override {
         return "internal. for testing only.";
     }
@@ -129,14 +136,30 @@ public:
         LOGV2(20505, "Test-only command 'godinsert' invoked", "collection"_attr = nss.coll());
         BSONObj obj = cmdObj["obj"].embeddedObjectUserCheck();
 
-        Lock::DBLock lk(opCtx, dbName, MODE_X);
-        OldClientContext ctx(opCtx, nss);
-        Database* db = ctx.db();
-
-        auto collection = acquireCollection(
+        AutoGetDb autodb(
             opCtx,
-            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
-            MODE_IX);
+            dbName,
+            MODE_X,
+            boost::none,
+            Date_t::max(),
+            Lock::DBLockSkipOptions{
+                false, false, false, rss::consensus::IntentRegistry::Intent::LocalWrite});
+        Database* db = autodb.ensureDbExists(opCtx);
+
+        AutoStatsTracker statsTracker(opCtx,
+                                      nss,
+                                      Top::LockType::WriteLocked,
+                                      AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                                      DatabaseProfileSettings::get(opCtx->getServiceContext())
+                                          .getDatabaseProfileLevel(dbName));
+
+        // GodInsert is a test only command that can execute inserts on secondary nodes and uses an
+        // unreplicated writes block.
+        auto collection =
+            acquireCollection(opCtx,
+                              CollectionAcquisitionRequest::fromOpCtx(
+                                  opCtx, nss, AcquisitionPrerequisites::kUnreplicatedWrite),
+                              MODE_IX);
 
         WriteUnitOfWork wunit(opCtx);
         UnreplicatedWritesBlock unreplicatedWritesBlock(opCtx);
@@ -184,6 +207,10 @@ public:
                                  const DatabaseName&,
                                  const BSONObj&) const override {
         return Status::OK();
+    }
+
+    bool requiresAuthzChecks() const override {
+        return false;
     }
 
     std::string help() const override {
@@ -275,6 +302,10 @@ public:
         return Status::OK();
     }
 
+    bool requiresAuthzChecks() const override {
+        return false;
+    }
+
     std::string help() const override {
         return "return the value of timeseriesCatalogBucketParamsChanged";
     }
@@ -284,9 +315,12 @@ public:
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         const NamespaceString fullNs = CommandHelpers::parseNsCollectionRequired(dbName, cmdObj);
-        AutoGetCollection autoColl(opCtx, fullNs, MODE_IS);
-        uassert(7927100, "Could not find a collection with the requested namespace", autoColl);
-        auto output = autoColl->timeseriesBucketingParametersHaveChanged();
+        const auto coll = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, fullNs, AcquisitionPrerequisites::kRead),
+            MODE_IS);
+        uassert(7927100, "Could not find a collection with the requested namespace", coll.exists());
+        auto output = coll.getCollectionPtr()->timeseriesBucketingParametersHaveChanged();
         if (output) {
             result.append("changed", *output);
         }
@@ -295,6 +329,55 @@ public:
 };
 
 MONGO_REGISTER_COMMAND(TimeseriesCatalogBucketParamsChangedTestCmd).testOnly().forShard();
+
+// TODO SERVER-110189: Make testing this command resilient to releases or update the name of this
+// command.
+class CommandFeatureFlaggedOnLatestFCVTestCmd83 : public BasicCommand {
+public:
+    CommandFeatureFlaggedOnLatestFCVTestCmd83()
+        : BasicCommand("testCommandFeatureFlaggedOnLatestFCV83") {}
+
+    bool adminOnly() const override {
+        return false;
+    }
+
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
+    }
+
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
+        return true;
+    }
+
+    // No auth needed because it only works when enabled via command line.
+    Status checkAuthForOperation(OperationContext*,
+                                 const DatabaseName&,
+                                 const BSONObj&) const override {
+        return Status::OK();
+    }
+
+    bool requiresAuthzChecks() const override {
+        return false;
+    }
+
+    std::string help() const override {
+        return "internal. for testing only.";
+    }
+
+    bool run(OperationContext* opCtx,
+             const DatabaseName& dbName,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
+        LOGV2(10044800, "Test-only command 'testCommandFeatureFlaggedOnLatestFCV83' invoked");
+        return true;
+    }
+};
+
+MONGO_REGISTER_COMMAND(CommandFeatureFlaggedOnLatestFCVTestCmd83)
+    .testOnly()
+    .requiresFeatureFlag(feature_flags::gFeatureFlagBlender)
+    .forShard();
+
 }  // namespace
 
 std::string TestingDurableHistoryPin::getName() {
@@ -302,13 +385,19 @@ std::string TestingDurableHistoryPin::getName() {
 }
 
 boost::optional<Timestamp> TestingDurableHistoryPin::calculatePin(OperationContext* opCtx) {
-    AutoGetCollectionForRead autoColl(opCtx, NamespaceString::kDurableHistoryTestNamespace);
-    if (!autoColl) {
+    const auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest(NamespaceString::kDurableHistoryTestNamespace,
+                                     PlacementConcern::kPretendUnsharded,
+                                     repl::ReadConcernArgs::get(opCtx),
+                                     AcquisitionPrerequisites::kRead),
+        MODE_IS);
+    if (!coll.exists()) {
         return boost::none;
     }
 
     Timestamp ret = Timestamp::max();
-    auto cursor = autoColl->getCursor(opCtx);
+    auto cursor = coll.getCollectionPtr()->getCursor(opCtx);
     for (auto doc = cursor->next(); doc; doc = cursor->next()) {
         const BSONObj obj = doc.value().data.toBson();
         const Timestamp ts = obj["pinTs"].timestamp();

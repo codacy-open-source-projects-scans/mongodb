@@ -16,7 +16,7 @@
  * ]
  */
 
-var t = db.apply_ops2;
+let t = db.apply_ops2;
 t.drop();
 
 assert.eq(0, t.find().count(), "test collection not empty");
@@ -25,28 +25,27 @@ t.insert({_id: 1, x: "init"});
 
 print("Testing applyOps with alwaysUpsert explicity set to true");
 
-var res = db.runCommand({
+let res = db.runCommand({
     applyOps: [
         {
             op: "u",
             ns: t.getFullName(),
             o2: {_id: 1},
-            o: {$v: 2, diff: {u: {x: "upsert=true existing"}}}
+            o: {$v: 2, diff: {u: {x: "upsert=true existing"}}},
         },
         {
             op: "u",
             ns: t.getFullName(),
             o2: {_id: 2},
-            o: {$v: 2, diff: {u: {x: "upsert=true non-existing"}}}
-        }
+            o: {$v: 2, diff: {u: {x: "upsert=true non-existing"}}},
+        },
     ],
-    alwaysUpsert: true
+    alwaysUpsert: true,
 });
 
 // Verify that the 'alwaysUpsert' option is no longer supported.
 assert.commandFailedWithCode(res, 6711601);
-assert.eq(
-    1, t.find().count(), "1 doc expected after unsupported option failure on applyOps command");
+assert.eq(1, t.find().count(), "1 doc expected after unsupported option failure on applyOps command");
 
 // alwaysUpsert not specified, should default to false
 print("Testing applyOps with default alwaysUpsert");
@@ -57,15 +56,15 @@ res = db.runCommand({
             op: "u",
             ns: t.getFullName(),
             o2: {_id: 1},
-            o: {$v: 2, diff: {u: {x: "upsert=false existing"}}}
+            o: {$v: 2, diff: {u: {x: "upsert=false existing"}}},
         },
         {
             op: "u",
             ns: t.getFullName(),
             o2: {_id: 3},
-            o: {$v: 2, diff: {u: {x: "upsert=false non-existing"}}}
-        }
-    ]
+            o: {$v: 2, diff: {u: {x: "upsert=false non-existing"}}},
+        },
+    ],
 });
 
 assert.eq(true, res.results[0], "upsert = true, existing doc expected to succeed, but it failed");

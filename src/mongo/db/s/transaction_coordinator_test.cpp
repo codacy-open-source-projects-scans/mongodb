@@ -29,20 +29,7 @@
 
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <absl/container/flat_hash_set.h>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <ratio>
-#include <string>
-#include <system_error>
-#include <utility>
-#include <vector>
+#include "mongo/db/s/transaction_coordinator.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -65,7 +52,6 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/s/server_transaction_coordinators_metrics.h"
 #include "mongo/db/s/single_transaction_coordinator_stats.h"
-#include "mongo/db/s/transaction_coordinator.h"
 #include "mongo/db/s/transaction_coordinator_document_gen.h"
 #include "mongo/db/s/transaction_coordinator_futures_util.h"
 #include "mongo/db/s/transaction_coordinator_metrics_observer.h"
@@ -78,21 +64,17 @@
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/log_test.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/clock_source_mock.h"
@@ -103,6 +85,22 @@
 #include "mongo/util/tick_source.h"
 #include "mongo/util/tick_source_mock.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <ratio>
+#include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+#include <absl/container/flat_hash_set.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -119,6 +117,9 @@ const Hours kLongFutureTimeout(8);
 const StatusWith<BSONObj> kNoSuchTransaction =
     BSON("ok" << 0 << "code" << ErrorCodes::NoSuchTransaction << "errmsg"
               << "No such transaction exists");
+const StatusWith<BSONObj> kAPIMismatchError =
+    BSON("ok" << 0 << "code" << ErrorCodes::APIMismatchError << "errmsg"
+              << "API parameter mismatch...");
 const StatusWith<BSONObj> kOk = BSON("ok" << 1);
 const Timestamp kDummyPrepareTimestamp = Timestamp(1, 1);
 const std::vector<NamespaceString> kDummyAffectedNamespaces = {
@@ -185,27 +186,32 @@ protected:
         : TransactionCoordinatorTestFixture(std::move(options)) {}
 
     void assertPrepareSentAndRespondWithSuccess() {
-        assertCommandSentAndRespondWith(PrepareTransaction::kCommandName,
-                                        kPrepareOk,
-                                        generic_argument_util::kMajorityWriteConcern);
+        assertCommandSentAndRespondWith(
+            PrepareTransaction::kCommandName, kPrepareOk, defaultMajorityWriteConcernDoNotUse());
     }
 
     void assertPrepareSentAndRespondWithSuccess(const Timestamp& timestamp) {
         assertCommandSentAndRespondWith(PrepareTransaction::kCommandName,
                                         makePrepareOkResponse(timestamp, kDummyAffectedNamespaces),
-                                        generic_argument_util::kMajorityWriteConcern);
+                                        defaultMajorityWriteConcernDoNotUse());
+    }
+
+    void assertPrepareSentAndRespondWithAPIMismatchError() {
+        assertCommandSentAndRespondWith(PrepareTransaction::kCommandName,
+                                        kAPIMismatchError,
+                                        defaultMajorityWriteConcernDoNotUse());
     }
 
     void assertPrepareSentAndRespondWithNoSuchTransaction() {
         assertCommandSentAndRespondWith(PrepareTransaction::kCommandName,
                                         kNoSuchTransaction,
-                                        generic_argument_util::kMajorityWriteConcern);
+                                        defaultMajorityWriteConcernDoNotUse());
     }
 
     void assertPrepareSentAndRespondWithRetryableError() {
         assertCommandSentAndRespondWith(PrepareTransaction::kCommandName,
                                         kRetryableError,
-                                        generic_argument_util::kMajorityWriteConcern);
+                                        defaultMajorityWriteConcernDoNotUse());
         advanceClockAndExecuteScheduledTasks();
     }
 
@@ -242,8 +248,8 @@ protected:
         TransactionCoordinatorDocument doc;
         do {
             doc = TransactionCoordinatorDocument::parse(
-                IDLParserContext("dummy"),
-                dbClient.findOne(NamespaceString::kTransactionCoordinatorsNamespace, BSONObj{}));
+                dbClient.findOne(NamespaceString::kTransactionCoordinatorsNamespace, BSONObj{}),
+                IDLParserContext("dummy"));
         } while (!doc.getDecision());
     }
 
@@ -265,8 +271,6 @@ protected:
 
     LogicalSessionId _lsid{makeLogicalSessionIdForTest()};
     TxnNumberAndRetryCounter _txnNumberAndRetryCounter{1, 1};
-    CancellationSource cancelSource;
-    CancellationToken _cancelToken{cancelSource.token()};
 };
 
 class TransactionCoordinatorDriverTest : public TransactionCoordinatorTestBase {
@@ -291,7 +295,7 @@ auto makeDummyPrepareCommand(const LogicalSessionId& lsid,
     prepareCmd.setTxnNumber(txnNumberAndRetryCounter.getTxnNumber());
     prepareCmd.setTxnRetryCounter(txnNumberAndRetryCounter.getTxnRetryCounter());
     prepareCmd.setAutocommit(false);
-    prepareCmd.setWriteConcern(generic_argument_util::kMajorityWriteConcern);
+    prepareCmd.setWriteConcern(defaultMajorityWriteConcernDoNotUse());
     return prepareCmd.toBSON();
 }
 
@@ -351,7 +355,7 @@ TEST_F(TransactionCoordinatorDriverTest,
 }
 
 TEST_F(TransactionCoordinatorDriverTest,
-       SendDecisionToParticipantShardInterpretsVoteToAbortAsSuccess) {
+       SendDecisionToParticipantShardInterpretsTwoPhaseDecisionAckErrorAsSuccess) {
     txn::AsyncWorkScheduler aws(getServiceContext());
     Future<void> future =
         txn::sendDecisionToShard(getServiceContext(),
@@ -364,6 +368,30 @@ TEST_F(TransactionCoordinatorDriverTest,
     assertPrepareSentAndRespondWithNoSuchTransaction();
 
     future.get();
+}
+
+TEST_F(TransactionCoordinatorDriverTest,
+       SendDecisionToParticipantShardInterpretsVoteToAbortErrorsAsFailure) {
+    txn::AsyncWorkScheduler aws(getServiceContext());
+    Future<void> future =
+        txn::sendDecisionToShard(getServiceContext(),
+                                 aws,
+                                 _lsid,
+                                 _txnNumberAndRetryCounter,
+                                 kTwoShardIdList[0],
+                                 makeDummyPrepareCommand(_lsid, _txnNumberAndRetryCounter));
+
+    // Ensure that the APIMismatchError (VoteAbortError category) is not interpreted as a success.
+    // This allows it to be retried indefinitely, like any other error, even though such errors are
+    // unexpected at this stage. Consequently, shutting down the coordinator will consistently
+    // determine that the scheduler has not succeeded, leading to the retrial process failing with a
+    // TransactionCoordinatorSteppingDown error.
+    assertPrepareSentAndRespondWithAPIMismatchError();
+    sleepmillis(10);
+    aws.shutdown({ErrorCodes::TransactionCoordinatorSteppingDown, "Shutdown for test"});
+    advanceClockAndExecuteScheduledTasks();
+    ASSERT_THROWS_CODE(
+        future.get(), AssertionException, ErrorCodes::TransactionCoordinatorSteppingDown);
 }
 
 TEST_F(TransactionCoordinatorDriverTest,
@@ -651,7 +679,7 @@ TEST_F(TransactionCoordinatorDriverTest,
     assertPrepareSentAndRespondWithSuccess(timestamp);
     assertCommandSentAndRespondWith(PrepareTransaction::kCommandName,
                                     kPrepareOkNoTimestamp,
-                                    generic_argument_util::kMajorityWriteConcern);
+                                    defaultMajorityWriteConcernDoNotUse());
 
     auto decision = future.get().decision();
 
@@ -675,7 +703,7 @@ TEST_F(TransactionCoordinatorDriverTest,
         PrepareTransaction::kCommandName,
         BSON("ok" << 0 << "code" << ErrorCodes::ReadConcernMajorityNotEnabled << "errmsg"
                   << "Read concern majority not enabled"),
-        generic_argument_util::kMajorityWriteConcern);
+        defaultMajorityWriteConcernDoNotUse());
 
     auto decision = future.get().decision();
 
@@ -747,13 +775,13 @@ TEST_F(TransactionCoordinatorDriverTest, SendPrepareToShardsCollectsAffectedName
         makePrepareOkResponse(timestamp,
                               {NamespaceString::createNamespaceString_forTest("db1.coll1"),
                                NamespaceString::createNamespaceString_forTest("db2.coll2")}),
-        generic_argument_util::kMajorityWriteConcern);
+        defaultMajorityWriteConcernDoNotUse());
     assertCommandSentAndRespondWith(
         PrepareTransaction::kCommandName,
         makePrepareOkResponse(timestamp,
                               {NamespaceString::createNamespaceString_forTest("db1.coll2"),
                                NamespaceString::createNamespaceString_forTest("db2.coll1")}),
-        generic_argument_util::kMajorityWriteConcern);
+        defaultMajorityWriteConcernDoNotUse());
 
     auto response = future.get();
     ASSERT_EQUALS(txn::CommitDecision::kCommit, response.decision().getDecision());
@@ -1249,8 +1277,7 @@ TEST_F(TransactionCoordinatorTest, RunCommitProducesCommitDecisionOnTwoCommitRes
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
     coordinator->runCommit(operationContext(), kTwoShardIdList);
     auto commitDecisionFuture = coordinator->getDecision();
@@ -1276,8 +1303,7 @@ TEST_F(TransactionCoordinatorTest, RunCommitProducesAbortDecisionOnAbortAndCommi
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
     coordinator->runCommit(operationContext(), kTwoShardIdList);
     auto commitDecisionFuture = coordinator->getDecision();
@@ -1305,8 +1331,7 @@ TEST_F(TransactionCoordinatorTest,
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
     coordinator->runCommit(operationContext(), kTwoShardIdList);
     auto commitDecisionFuture = coordinator->getDecision();
@@ -1334,8 +1359,7 @@ TEST_F(TransactionCoordinatorTest,
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
     coordinator->runCommit(operationContext(), kTwoShardIdList);
     auto commitDecisionFuture = coordinator->getDecision();
@@ -1362,8 +1386,7 @@ TEST_F(TransactionCoordinatorTest, RunCommitProducesAbortDecisionOnSingleAbortRe
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
     coordinator->runCommit(operationContext(), kTwoShardIdList);
     auto commitDecisionFuture = coordinator->getDecision();
@@ -1389,8 +1412,7 @@ TEST_F(TransactionCoordinatorTest,
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
     coordinator->runCommit(operationContext(), kTwoShardIdList);
     auto commitDecisionFuture = coordinator->getDecision();
@@ -1423,8 +1445,7 @@ TEST_F(TransactionCoordinatorTest,
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
     coordinator->runCommit(operationContext(), kTwoShardIdList);
     auto commitDecisionFuture = coordinator->getDecision();
@@ -1454,8 +1475,7 @@ TEST_F(TransactionCoordinatorTest,
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
     coordinator->runCommit(operationContext(), kTwoShardIdList);
     auto commitDecisionFuture = coordinator->getDecision();
@@ -1490,8 +1510,7 @@ TEST_F(TransactionCoordinatorTest,
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
     coordinator->runCommit(operationContext(), kTwoShardIdList);
     auto commitDecisionFuture = coordinator->getDecision();
@@ -1523,8 +1542,7 @@ TEST_F(TransactionCoordinatorTest, RunCommitProducesEndOfTransactionOplogEntry) 
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
     coordinator->runCommit(operationContext(), kOneShardIdList);
     assertPrepareSentAndRespondWithSuccess();
@@ -1545,11 +1563,10 @@ TEST_F(TransactionCoordinatorTest, RunCommitProducesEndOfTransactionOplogEntry) 
 
     DBDirectClient dbClient(operationContext());
     auto oplogEntry = dbClient.findOne(NamespaceString::kRsOplogNamespace,
-                                       BSON("op"
-                                            << "n"
-                                            << "o.msg.endOfTransaction" << 1));
+                                       BSON("op" << "n"
+                                                 << "o.msg.endOfTransaction" << 1));
     auto o2 = oplogEntry.getField("o2");
-    ASSERT_EQ(o2.type(), BSONType::Object);
+    ASSERT_EQ(o2.type(), BSONType::object);
     ASSERT_BSONOBJ_EQ(o2.Obj(), expectedO2);
 }
 
@@ -1703,15 +1720,12 @@ protected:
     }
 
     void runSimpleTwoPhaseCommitWithCommitDecisionAndCaptureLogLines() {
-        startCapturingLogMessages();
-
         auto coordinator = std::make_shared<TransactionCoordinator>(
             operationContext(),
             _lsid,
             _txnNumberAndRetryCounter,
             std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-            Date_t::max(),
-            _cancelToken);
+            Date_t::max());
         coordinator->start(operationContext());
 
         coordinator->runCommit(operationContext(), kTwoShardIdList);
@@ -1725,7 +1739,6 @@ protected:
 
         coordinator->onCompletion().get();
         coordinator->shutdown();
-        stopCapturingLogMessages();
     }
 };
 
@@ -1874,7 +1887,7 @@ TEST_F(TransactionCoordinatorMetricsTest, ServerWideMetricsSimpleTwoPhaseCommitT
 }
 
 TEST_F(TransactionCoordinatorMetricsTest, SimpleTwoPhaseCommitRealCoordinator) {
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     Stats expectedStats;
     Metrics expectedMetrics;
@@ -1892,8 +1905,7 @@ TEST_F(TransactionCoordinatorMetricsTest, SimpleTwoPhaseCommitRealCoordinator) {
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
     const auto& stats =
         coordinator->getMetricsObserverForTest().getSingleTransactionCoordinatorStats();
@@ -1915,9 +1927,8 @@ TEST_F(TransactionCoordinatorMetricsTest, SimpleTwoPhaseCommitRealCoordinator) {
     expectedMetrics.currentInSteps[stepIndex]++;
 
     setGlobalFailPoint("hangBeforeWaitingForParticipantListWriteConcern",
-                       BSON("mode"
-                            << "alwaysOn"
-                            << "data" << BSON("useUninterruptibleSleep" << 1)));
+                       BSON("mode" << "alwaysOn"
+                                   << "data" << BSON("useUninterruptibleSleep" << 1)));
     coordinator->runCommit(operationContext(), kTwoShardIdList);
     waitUntilCoordinatorDocIsPresent();
 
@@ -1938,9 +1949,7 @@ TEST_F(TransactionCoordinatorMetricsTest, SimpleTwoPhaseCommitRealCoordinator) {
     expectedMetrics.currentInSteps[stepIndex - 1]--;
     expectedMetrics.currentInSteps[stepIndex]++;
 
-    setGlobalFailPoint("hangBeforeWaitingForParticipantListWriteConcern",
-                       BSON("mode"
-                            << "off"));
+    setGlobalFailPoint("hangBeforeWaitingForParticipantListWriteConcern", BSON("mode" << "off"));
     waitUntilMessageSent();
 
     checkStats(stats, expectedStats);
@@ -1961,9 +1970,8 @@ TEST_F(TransactionCoordinatorMetricsTest, SimpleTwoPhaseCommitRealCoordinator) {
     expectedMetrics.currentInSteps[stepIndex]++;
 
     setGlobalFailPoint("hangBeforeWaitingForDecisionWriteConcern",
-                       BSON("mode"
-                            << "alwaysOn"
-                            << "data" << BSON("useUninterruptibleSleep" << 1)));
+                       BSON("mode" << "alwaysOn"
+                                   << "data" << BSON("useUninterruptibleSleep" << 1)));
     // Respond to the second prepare request in a separate thread, because the coordinator will
     // hijack that thread to run its continuation.
     assertPrepareSentAndRespondWithSuccess();
@@ -1987,9 +1995,7 @@ TEST_F(TransactionCoordinatorMetricsTest, SimpleTwoPhaseCommitRealCoordinator) {
     expectedMetrics.currentInSteps[stepIndex - 1]--;
     expectedMetrics.currentInSteps[stepIndex]++;
 
-    setGlobalFailPoint("hangBeforeWaitingForDecisionWriteConcern",
-                       BSON("mode"
-                            << "off"));
+    setGlobalFailPoint("hangBeforeWaitingForDecisionWriteConcern", BSON("mode" << "off"));
     // The last thing the coordinator will do on the hijacked prepare response thread is schedule
     // the commitTransaction network requests.
     future.timed_get(kLongFutureTimeout);
@@ -2014,9 +2020,8 @@ TEST_F(TransactionCoordinatorMetricsTest, SimpleTwoPhaseCommitRealCoordinator) {
     expectedMetrics.currentInSteps[stepIndex]++;
 
     setGlobalFailPoint("hangAfterDeletingCoordinatorDoc",
-                       BSON("mode"
-                            << "alwaysOn"
-                            << "data" << BSON("useUninterruptibleSleep" << 1)));
+                       BSON("mode" << "alwaysOn"
+                                   << "data" << BSON("useUninterruptibleSleep" << 1)));
     // Respond to the second commit request in a separate thread, because the coordinator will
     // hijack that thread to run its continuation.
     assertCommitSentAndRespondWithSuccess();
@@ -2038,9 +2043,7 @@ TEST_F(TransactionCoordinatorMetricsTest, SimpleTwoPhaseCommitRealCoordinator) {
     expectedMetrics.currentInSteps[stepIndex]--;
     expectedMetrics.totalCommittedTwoPhaseCommit++;
 
-    setGlobalFailPoint("hangAfterDeletingCoordinatorDoc",
-                       BSON("mode"
-                            << "off"));
+    setGlobalFailPoint("hangAfterDeletingCoordinatorDoc", BSON("mode" << "off"));
     // The last thing the coordinator will do on the hijacked commit response thread is signal
     // the coordinator's completion.
 
@@ -2053,14 +2056,14 @@ TEST_F(TransactionCoordinatorMetricsTest, SimpleTwoPhaseCommitRealCoordinator) {
     checkStats(stats, expectedStats);
     checkMetrics(expectedMetrics);
 
-    stopCapturingLogMessages();
+    logs.stop();
 
     // Slow log line is logged since the coordination completed successfully.
-    ASSERT_EQUALS(1, countTextFormatLogLinesContaining("two-phase commit"));
+    ASSERT_EQUALS(1, logs.countTextContaining("two-phase commit"));
 }
 
 TEST_F(TransactionCoordinatorMetricsTest, CoordinatorIsCanceledWhileInactive) {
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     Stats expectedStats;
     Metrics expectedMetrics;
@@ -2078,8 +2081,7 @@ TEST_F(TransactionCoordinatorMetricsTest, CoordinatorIsCanceledWhileInactive) {
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
     const auto& stats =
         coordinator->getMetricsObserverForTest().getSingleTransactionCoordinatorStats();
@@ -2103,14 +2105,14 @@ TEST_F(TransactionCoordinatorMetricsTest, CoordinatorIsCanceledWhileInactive) {
     checkStats(stats, expectedStats);
     checkMetrics(expectedMetrics);
 
-    stopCapturingLogMessages();
+    logs.stop();
 
     // Slow log line is not logged since the coordination did not complete successfully.
-    ASSERT_EQUALS(0, countTextFormatLogLinesContaining("two-phase commit"));
+    ASSERT_EQUALS(0, logs.countTextContaining("two-phase commit"));
 }
 
 TEST_F(TransactionCoordinatorMetricsTest, CoordinatorsAWSIsShutDownWhileCoordinatorIsInactive) {
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     Stats expectedStats;
     Metrics expectedMetrics;
@@ -2125,12 +2127,8 @@ TEST_F(TransactionCoordinatorMetricsTest, CoordinatorsAWSIsShutDownWhileCoordina
 
     auto aws = std::make_unique<txn::AsyncWorkScheduler>(getServiceContext());
     auto awsPtr = aws.get();
-    auto coordinator = std::make_shared<TransactionCoordinator>(operationContext(),
-                                                                _lsid,
-                                                                _txnNumberAndRetryCounter,
-                                                                std::move(aws),
-                                                                Date_t::max(),
-                                                                _cancelToken);
+    auto coordinator = std::make_shared<TransactionCoordinator>(
+        operationContext(), _lsid, _txnNumberAndRetryCounter, std::move(aws), Date_t::max());
     coordinator->start(operationContext());
     const auto& stats =
         coordinator->getMetricsObserverForTest().getSingleTransactionCoordinatorStats();
@@ -2155,15 +2153,15 @@ TEST_F(TransactionCoordinatorMetricsTest, CoordinatorsAWSIsShutDownWhileCoordina
     checkStats(stats, expectedStats);
     checkMetrics(expectedMetrics);
 
-    stopCapturingLogMessages();
+    logs.stop();
 
     // Slow log line is not logged since the coordination did not complete successfully.
-    ASSERT_EQUALS(0, countTextFormatLogLinesContaining("two-phase commit"));
+    ASSERT_EQUALS(0, logs.countTextContaining("two-phase commit"));
 }
 
 TEST_F(TransactionCoordinatorMetricsTest,
        CoordinatorsAWSIsShutDownWhileCoordinatorIsWritingParticipantList) {
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     Stats expectedStats;
     Metrics expectedMetrics;
@@ -2177,12 +2175,8 @@ TEST_F(TransactionCoordinatorMetricsTest,
     expectedMetrics.totalCreated++;
 
     auto aws = std::make_unique<txn::AsyncWorkScheduler>(getServiceContext());
-    auto coordinator = std::make_shared<TransactionCoordinator>(operationContext(),
-                                                                _lsid,
-                                                                _txnNumberAndRetryCounter,
-                                                                std::move(aws),
-                                                                Date_t::max(),
-                                                                _cancelToken);
+    auto coordinator = std::make_shared<TransactionCoordinator>(
+        operationContext(), _lsid, _txnNumberAndRetryCounter, std::move(aws), Date_t::max());
     coordinator->start(operationContext());
     const auto& stats =
         coordinator->getMetricsObserverForTest().getSingleTransactionCoordinatorStats();
@@ -2226,15 +2220,15 @@ TEST_F(TransactionCoordinatorMetricsTest,
     checkStats(stats, expectedStats);
     checkMetrics(expectedMetrics);
 
-    stopCapturingLogMessages();
+    logs.stop();
 
     // Slow log line is not logged since the coordination did not complete successfully.
-    ASSERT_EQUALS(0, countTextFormatLogLinesContaining("two-phase commit"));
+    ASSERT_EQUALS(0, logs.countTextContaining("two-phase commit"));
 }
 
 TEST_F(TransactionCoordinatorMetricsTest,
        CoordinatorsAWSIsShutDownWhileCoordinatorIsWaitingForVotes) {
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     Stats expectedStats;
     Metrics expectedMetrics;
@@ -2249,12 +2243,8 @@ TEST_F(TransactionCoordinatorMetricsTest,
 
     auto aws = std::make_unique<txn::AsyncWorkScheduler>(getServiceContext());
     auto awsPtr = aws.get();
-    auto coordinator = std::make_shared<TransactionCoordinator>(operationContext(),
-                                                                _lsid,
-                                                                _txnNumberAndRetryCounter,
-                                                                std::move(aws),
-                                                                Date_t::max(),
-                                                                _cancelToken);
+    auto coordinator = std::make_shared<TransactionCoordinator>(
+        operationContext(), _lsid, _txnNumberAndRetryCounter, std::move(aws), Date_t::max());
     coordinator->start(operationContext());
     const auto& stats =
         coordinator->getMetricsObserverForTest().getSingleTransactionCoordinatorStats();
@@ -2298,15 +2288,15 @@ TEST_F(TransactionCoordinatorMetricsTest,
     checkStats(stats, expectedStats);
     checkMetrics(expectedMetrics);
 
-    stopCapturingLogMessages();
+    logs.stop();
 
     // Slow log line is not logged since the coordination did not complete successfully.
-    ASSERT_EQUALS(0, countTextFormatLogLinesContaining("two-phase commit"));
+    ASSERT_EQUALS(0, logs.countTextContaining("two-phase commit"));
 }
 
 TEST_F(TransactionCoordinatorMetricsTest,
        CoordinatorsAWSIsShutDownWhileCoordinatorIsWritingDecision) {
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     Stats expectedStats;
     Metrics expectedMetrics;
@@ -2320,12 +2310,8 @@ TEST_F(TransactionCoordinatorMetricsTest,
     expectedMetrics.totalCreated++;
 
     auto aws = std::make_unique<txn::AsyncWorkScheduler>(getServiceContext());
-    auto coordinator = std::make_shared<TransactionCoordinator>(operationContext(),
-                                                                _lsid,
-                                                                _txnNumberAndRetryCounter,
-                                                                std::move(aws),
-                                                                Date_t::max(),
-                                                                _cancelToken);
+    auto coordinator = std::make_shared<TransactionCoordinator>(
+        operationContext(), _lsid, _txnNumberAndRetryCounter, std::move(aws), Date_t::max());
     coordinator->start(operationContext());
     const auto& stats =
         coordinator->getMetricsObserverForTest().getSingleTransactionCoordinatorStats();
@@ -2376,15 +2362,15 @@ TEST_F(TransactionCoordinatorMetricsTest,
     checkStats(stats, expectedStats);
     checkMetrics(expectedMetrics);
 
-    stopCapturingLogMessages();
+    logs.stop();
 
     // Slow log line is not logged since the coordination did not complete successfully.
-    ASSERT_EQUALS(0, countTextFormatLogLinesContaining("two-phase commit"));
+    ASSERT_EQUALS(0, logs.countTextContaining("two-phase commit"));
 }
 
 TEST_F(TransactionCoordinatorMetricsTest,
        CoordinatorsAWSIsShutDownWhileCoordinatorIsWaitingForDecisionAcks) {
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     Stats expectedStats;
     Metrics expectedMetrics;
@@ -2399,12 +2385,8 @@ TEST_F(TransactionCoordinatorMetricsTest,
 
     auto aws = std::make_unique<txn::AsyncWorkScheduler>(getServiceContext());
     auto awsPtr = aws.get();
-    auto coordinator = std::make_shared<TransactionCoordinator>(operationContext(),
-                                                                _lsid,
-                                                                _txnNumberAndRetryCounter,
-                                                                std::move(aws),
-                                                                Date_t::max(),
-                                                                _cancelToken);
+    auto coordinator = std::make_shared<TransactionCoordinator>(
+        operationContext(), _lsid, _txnNumberAndRetryCounter, std::move(aws), Date_t::max());
     coordinator->start(operationContext());
     const auto& stats =
         coordinator->getMetricsObserverForTest().getSingleTransactionCoordinatorStats();
@@ -2455,14 +2437,14 @@ TEST_F(TransactionCoordinatorMetricsTest,
     checkStats(stats, expectedStats);
     checkMetrics(expectedMetrics);
 
-    stopCapturingLogMessages();
+    logs.stop();
 
     // Slow log line is not logged since the coordination did not complete successfully.
-    ASSERT_EQUALS(0, countTextFormatLogLinesContaining("two-phase commit"));
+    ASSERT_EQUALS(0, logs.countTextContaining("two-phase commit"));
 }
 
 TEST_F(TransactionCoordinatorMetricsTest, CoordinatorsAWSIsShutDownWhileCoordinatorIsDeletingDoc) {
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     Stats expectedStats;
     Metrics expectedMetrics;
@@ -2477,12 +2459,8 @@ TEST_F(TransactionCoordinatorMetricsTest, CoordinatorsAWSIsShutDownWhileCoordina
 
     auto aws = std::make_unique<txn::AsyncWorkScheduler>(getServiceContext());
     auto awsPtr = aws.get();
-    auto coordinator = std::make_shared<TransactionCoordinator>(operationContext(),
-                                                                _lsid,
-                                                                _txnNumberAndRetryCounter,
-                                                                std::move(aws),
-                                                                Date_t::max(),
-                                                                _cancelToken);
+    auto coordinator = std::make_shared<TransactionCoordinator>(
+        operationContext(), _lsid, _txnNumberAndRetryCounter, std::move(aws), Date_t::max());
     coordinator->start(operationContext());
     const auto& stats =
         coordinator->getMetricsObserverForTest().getSingleTransactionCoordinatorStats();
@@ -2542,10 +2520,10 @@ TEST_F(TransactionCoordinatorMetricsTest, CoordinatorsAWSIsShutDownWhileCoordina
     checkStats(stats, expectedStats);
     checkMetrics(expectedMetrics);
 
-    stopCapturingLogMessages();
+    logs.stop();
 
     // Slow log line is not logged since the coordination did not complete successfully.
-    ASSERT_EQUALS(0, countTextFormatLogLinesContaining("two-phase commit"));
+    ASSERT_EQUALS(0, logs.countTextContaining("two-phase commit"));
 }
 
 TEST_F(TransactionCoordinatorMetricsTest,
@@ -2562,8 +2540,7 @@ TEST_F(TransactionCoordinatorMetricsTest,
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::now() + Seconds(1),
-        _cancelToken);
+        Date_t::now() + Seconds(1));
     coordinator->start(operationContext());
 
     // Wait until the coordinator is writing the participant list.
@@ -2612,15 +2589,17 @@ TEST_F(TransactionCoordinatorMetricsTest,
 TEST_F(TransactionCoordinatorMetricsTest, LogsTransactionAtLogLevelOne) {
     auto severityGuard = unittest::MinimumLoggedSeverityGuard{logv2::LogComponent::kTransaction,
                                                               logv2::LogSeverity::Debug(1)};
+    unittest::LogCaptureGuard logs;
     runSimpleTwoPhaseCommitWithCommitDecisionAndCaptureLogLines();
-    ASSERT_EQUALS(1, countTextFormatLogLinesContaining("two-phase commit"));
+    ASSERT_EQUALS(1, logs.countTextContaining("two-phase commit"));
 }
 
 TEST_F(TransactionCoordinatorMetricsTest, DoesNotLogTransactionAtLogLevelZero) {
     auto severityGuard = unittest::MinimumLoggedSeverityGuard{logv2::LogComponent::kTransaction,
                                                               logv2::LogSeverity::Log()};
+    unittest::LogCaptureGuard logs;
     runSimpleTwoPhaseCommitWithCommitDecisionAndCaptureLogLines();
-    ASSERT_EQUALS(0, countTextFormatLogLinesContaining("two-phase commit"));
+    ASSERT_EQUALS(0, logs.countTextContaining("two-phase commit"));
 }
 
 TEST_F(TransactionCoordinatorMetricsTest, DoesNotLogTransactionsUnderSlowMSThreshold) {
@@ -2629,15 +2608,14 @@ TEST_F(TransactionCoordinatorMetricsTest, DoesNotLogTransactionsUnderSlowMSThres
     auto severityGuard = unittest::MinimumLoggedSeverityGuard{logv2::LogComponent::kTransaction,
                                                               logv2::LogSeverity::Log()};
     serverGlobalParams.slowMS.store(100);
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     auto coordinator = std::make_shared<TransactionCoordinator>(
         operationContext(),
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
 
     coordinator->runCommit(operationContext(), kTwoShardIdList);
@@ -2653,9 +2631,9 @@ TEST_F(TransactionCoordinatorMetricsTest, DoesNotLogTransactionsUnderSlowMSThres
 
     coordinator->onCompletion().get();
     coordinator->shutdown();
-    stopCapturingLogMessages();
+    logs.stop();
 
-    ASSERT_EQUALS(0, countTextFormatLogLinesContaining("two-phase commit"));
+    ASSERT_EQUALS(0, logs.countTextContaining("two-phase commit"));
 }
 
 TEST_F(
@@ -2666,15 +2644,14 @@ TEST_F(
     auto severityGuard = unittest::MinimumLoggedSeverityGuard{logv2::LogComponent::kTransaction,
                                                               logv2::LogSeverity::Log()};
     serverGlobalParams.slowMS.store(100);
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     auto coordinator = std::make_shared<TransactionCoordinator>(
         operationContext(),
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
 
     tickSource()->advance(Milliseconds(101));
@@ -2690,9 +2667,9 @@ TEST_F(
 
     coordinator->onCompletion().get();
     coordinator->shutdown();
-    stopCapturingLogMessages();
+    logs.stop();
 
-    ASSERT_EQUALS(0, countTextFormatLogLinesContaining("two-phase commit"));
+    ASSERT_EQUALS(0, logs.countTextContaining("two-phase commit"));
 }
 
 TEST_F(TransactionCoordinatorMetricsTest, LogsTransactionsOverSlowMSThreshold) {
@@ -2701,15 +2678,14 @@ TEST_F(TransactionCoordinatorMetricsTest, LogsTransactionsOverSlowMSThreshold) {
     auto severityGuard = unittest::MinimumLoggedSeverityGuard{logv2::LogComponent::kTransaction,
                                                               logv2::LogSeverity::Log()};
     serverGlobalParams.slowMS.store(100);
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     auto coordinator = std::make_shared<TransactionCoordinator>(
         operationContext(),
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
 
     coordinator->runCommit(operationContext(), kTwoShardIdList);
@@ -2726,17 +2702,19 @@ TEST_F(TransactionCoordinatorMetricsTest, LogsTransactionsOverSlowMSThreshold) {
 
     coordinator->onCompletion().get();
     coordinator->shutdown();
-    stopCapturingLogMessages();
+    logs.stop();
 
-    ASSERT_EQUALS(1, countTextFormatLogLinesContaining("two-phase commit"));
+    ASSERT_EQUALS(1, logs.countTextContaining("two-phase commit"));
 }
 
 TEST_F(TransactionCoordinatorMetricsTest, SlowLogLineIncludesTransactionParameters) {
+    unittest::LogCaptureGuard logs;
     runSimpleTwoPhaseCommitWithCommitDecisionAndCaptureLogLines();
+    logs.stop();
     BSONObjBuilder lsidBob;
     _lsid.serialize(&lsidBob);
     ASSERT_EQUALS(1,
-                  countBSONFormatLogLinesIsSubset(BSON(
+                  logs.countBSONContainingSubset(BSON(
                       "attr" << BSON("parameters" << BSON(
                                          "lsid" << lsidBob.obj() << "txnNumber"
                                                 << _txnNumberAndRetryCounter.getTxnNumber())))));
@@ -2744,24 +2722,25 @@ TEST_F(TransactionCoordinatorMetricsTest, SlowLogLineIncludesTransactionParamete
 
 TEST_F(TransactionCoordinatorMetricsTest,
        SlowLogLineIncludesTerminationCauseAndCommitTimestampForCommitDecision) {
+    unittest::LogCaptureGuard logs;
     runSimpleTwoPhaseCommitWithCommitDecisionAndCaptureLogLines();
-    ASSERT_EQUALS(1,
-                  countBSONFormatLogLinesIsSubset(
-                      BSON("attr" << BSON("terminationCause"
-                                          << "committed"
-                                          << "commitTimestamp" << Timestamp(1, 1).toBSON()))));
+    logs.stop();
+    ASSERT_EQUALS(
+        1,
+        logs.countBSONContainingSubset(BSON(
+            "attr" << BSON("terminationCause" << "committed"
+                                              << "commitTimestamp" << Timestamp(1, 1).toBSON()))));
 }
 
 TEST_F(TransactionCoordinatorMetricsTest, SlowLogLineIncludesTerminationCauseForAbortDecision) {
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     auto coordinator = std::make_shared<TransactionCoordinator>(
         operationContext(),
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
 
     coordinator->runCommit(operationContext(), kTwoShardIdList);
@@ -2776,22 +2755,21 @@ TEST_F(TransactionCoordinatorMetricsTest, SlowLogLineIncludesTerminationCauseFor
     ASSERT_THROWS_CODE(
         coordinator->onCompletion().get(), AssertionException, ErrorCodes::NoSuchTransaction);
     coordinator->shutdown();
-    stopCapturingLogMessages();
+    logs.stop();
 
-    ASSERT_EQUALS(1,
-                  countBSONFormatLogLinesIsSubset(BSON("attr" << BSON("terminationCause"
-                                                                      << "aborted"))));
+    ASSERT_EQUALS(
+        1, logs.countBSONContainingSubset(BSON("attr" << BSON("terminationCause" << "aborted"))));
 
     ASSERT_EQUALS(
         1,
-        countBSONFormatLogLinesIsSubset(BSON(
+        logs.countBSONContainingSubset(BSON(
             "attr" << BSON(
                 "terminationDetails"
                 << BSON("code" << 251 << "codeName"
                                << "NoSuchTransaction"
                                << "errmsg"
                                << "from shard s1 :: caused by :: No such transaction exists")))) +
-            countBSONFormatLogLinesIsSubset(BSON(
+            logs.countBSONContainingSubset(BSON(
                 "attr" << BSON(
                     "terminationDetails"
                     << BSON("code" << 251 << "codeName"
@@ -2803,21 +2781,21 @@ TEST_F(TransactionCoordinatorMetricsTest, SlowLogLineIncludesTerminationCauseFor
 }
 
 TEST_F(TransactionCoordinatorMetricsTest, SlowLogLineIncludesNumParticipants) {
+    unittest::LogCaptureGuard logs;
     runSimpleTwoPhaseCommitWithCommitDecisionAndCaptureLogLines();
 
-    ASSERT_EQUALS(1, countBSONFormatLogLinesIsSubset(BSON("attr" << BSON("numParticipants" << 2))));
+    ASSERT_EQUALS(1, logs.countBSONContainingSubset(BSON("attr" << BSON("numParticipants" << 2))));
 }
 
 TEST_F(TransactionCoordinatorMetricsTest, SlowLogLineIncludesStepDurationsAndTotalDuration) {
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     auto coordinator = std::make_shared<TransactionCoordinator>(
         operationContext(),
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
 
     {
@@ -2881,14 +2859,14 @@ TEST_F(TransactionCoordinatorMetricsTest, SlowLogLineIncludesStepDurationsAndTot
     coordinator->onCompletion().get();
     coordinator->shutdown();
 
-    stopCapturingLogMessages();
+    logs.stop();
 
     // Note: The waiting for decision acks and deleting coordinator doc durations are not
     // reported.
 
     ASSERT_EQUALS(
         1,
-        countBSONFormatLogLinesIsSubset(BSON(
+        logs.countBSONContainingSubset(BSON(
             "attr" << BSON("stepDurations" << BSON(
 
                                                   "writingParticipantListMicros"
@@ -2925,8 +2903,7 @@ TEST_F(TransactionCoordinatorMetricsTest, RecoveryFromFailureIndicatedInReportSt
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
 
     const auto assertRecoveryFlag = [opCtx = operationContext(),
@@ -2967,8 +2944,7 @@ TEST_F(TransactionCoordinatorMetricsTest, ClientInformationIncludedInReportState
         _lsid,
         _txnNumberAndRetryCounter,
         std::make_unique<txn::AsyncWorkScheduler>(getServiceContext()),
-        Date_t::max(),
-        _cancelToken);
+        Date_t::max());
     coordinator->start(operationContext());
 
     {

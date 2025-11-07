@@ -29,22 +29,19 @@
 
 #pragma once
 
-#include <vector>
-
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/jsobj.h"
+#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/query/canonical_distinct.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/index_entry.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/stats/collection_statistics.h"
 #include "mongo/db/query/index_hint.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/stats/collection_statistics.h"
-#include "mongo/s/shard_key_pattern_query_util.h"
-#include "mongo/s/shard_targeting_helpers.h"
+
+#include <vector>
 
 namespace mongo {
 
@@ -146,15 +143,15 @@ struct QueryPlannerParams {
         GENERATE_COVERED_IXSCANS = 1 << 4,
 
         // Set this to track the most recent timestamp seen by this cursor while scanning the
-        // oplog or change collection.
+        // oplog.
         TRACK_LATEST_OPLOG_TS = 1 << 5,
 
         // Set this so that collection scans on the oplog wait for visibility before reading.
         OPLOG_SCAN_WAIT_FOR_VISIBLE = 1 << 6,
 
-        // Set this so that tryGetExecutorDistinct() will only use a plan that _guarantees_ it will
-        // return exactly one document per value of the distinct field. See the comments above the
-        // declaration of tryGetExecutorDistinct() for more detail.
+        // Set this so that tryGetQuerySolutionForDistinct() will only use a plan that _guarantees_
+        // it will return exactly one document per value of the distinct field. See the comments
+        // above the declaration of tryGetQuerySolutionForDistinct() for more detail.
         STRICT_DISTINCT_ONLY = 1 << 7,
 
         // Set this on an oplog scan to uassert that the oplog has not already rolled over the
@@ -235,6 +232,7 @@ struct QueryPlannerParams {
         const MultipleCollectionAccessor& collections;
         size_t plannerOptions = DEFAULT;
         boost::optional<TraversalPreference> traversalPreference = boost::none;
+        QueryPlanRankerModeEnum planRankerMode = QueryPlanRankerModeEnum::kMultiPlanning;
     };
 
     /**
@@ -269,14 +267,24 @@ struct QueryPlannerParams {
      */
     explicit QueryPlannerParams(ArgsForSingleCollectionQuery&& args)
         : providedOptions(args.plannerOptions),
-          traversalPreference(std::move(args.traversalPreference)) {
+          traversalPreference(std::move(args.traversalPreference)),
+          planRankerMode(args.planRankerMode) {
         mainCollectionInfo.options = args.plannerOptions;
         if (!args.collections.hasMainCollection()) {
             return;
         }
+        // Prevent histogramCE on queries on internal collections. This is because currently
+        // histogramCE will cause queries to fail if the query contains a predicate on a field
+        // without a histogram. We don't create histograms on internal collections. To prevent such
+        // queries from failing, we use multiplanning in this case.
+        if (planRankerMode == QueryPlanRankerModeEnum::kHistogramCE &&
+            args.canonicalQuery.nss().dbName().isInternalDb()) {
+            planRankerMode = QueryPlanRankerModeEnum::kMultiPlanning;
+        }
         fillOutPlannerParamsForExpressQuery(
             args.opCtx, args.canonicalQuery, args.collections.getMainCollection());
-        fillOutMainCollectionPlannerParams(args.opCtx, args.canonicalQuery, args.collections);
+        fillOutMainCollectionPlannerParams(
+            args.opCtx, args.canonicalQuery, args.collections, args.planRankerMode);
     }
 
     /**
@@ -290,7 +298,7 @@ struct QueryPlannerParams {
 
     explicit QueryPlannerParams(ArgsForTest&& args) {
         mainCollectionInfo.options = DEFAULT;
-    };
+    }
 
     QueryPlannerParams(const QueryPlannerParams&) = delete;
     QueryPlannerParams& operator=(const QueryPlannerParams& other) = delete;
@@ -359,37 +367,11 @@ struct QueryPlannerParams {
     // Were query settings applied?
     bool querySettingsApplied{false};
 
+    QueryPlanRankerModeEnum planRankerMode = QueryPlanRankerModeEnum::kMultiPlanning;
+
 private:
     bool requiresShardFiltering(const CanonicalQuery& canonicalQuery,
-                                const CollectionPtr& collection) {
-        if (!(mainCollectionInfo.options & INCLUDE_SHARD_FILTER)) {
-            // Shard filter was not requested; cmd may not be from a router.
-            return false;
-        }
-        // If the caller wants a shard filter, make sure we're actually sharded.
-        if (!collection.isSharded_DEPRECATED()) {
-            // Not actually sharded.
-            return false;
-        }
-
-        const auto& shardKeyPattern = collection.getShardKeyPattern();
-        // Shards cannot own orphans for the key ranges they own, so there is no need
-        // to include a shard filtering stage. By omitting the shard filter, it may be
-        // possible to get a more efficient plan (for example, a COUNT_SCAN may be used if
-        // the query is eligible).
-        const BSONObj extractedKey = extractShardKeyFromQuery(shardKeyPattern, canonicalQuery);
-
-        if (extractedKey.isEmpty()) {
-            // Couldn't extract all the fields of the shard key from the query,
-            // no way to target a single shard.
-            return true;
-        }
-
-        return !isSingleShardTargetable(
-            extractedKey,
-            shardKeyPattern,
-            CollatorInterface::isSimpleCollator(canonicalQuery.getCollator()));
-    }
+                                const CollectionPtr& collection);
 
     MONGO_COMPILER_ALWAYS_INLINE
     void fillOutPlannerParamsForExpressQuery(OperationContext* opCtx,
@@ -416,7 +398,8 @@ private:
      */
     void fillOutMainCollectionPlannerParams(OperationContext* opCtx,
                                             const CanonicalQuery& canonicalQuery,
-                                            const MultipleCollectionAccessor& collections);
+                                            const MultipleCollectionAccessor& collections,
+                                            QueryPlanRankerModeEnum planRankerMode);
 
     /**
      * Applies query settings to the main collection if applicable. If not, tries to apply index

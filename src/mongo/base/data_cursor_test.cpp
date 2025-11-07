@@ -29,12 +29,11 @@
 
 #include "mongo/base/data_cursor.h"
 
-#include <cstdint>
-
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/string_data.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <cstdint>
 
 namespace mongo {
 

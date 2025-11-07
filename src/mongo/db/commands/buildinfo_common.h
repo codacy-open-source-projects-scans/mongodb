@@ -27,8 +27,7 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
+#pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
@@ -40,6 +39,9 @@
 #include "mongo/db/request_execution_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/executor/async_request_executor.h"
+
+#include <memory>
+#include <string>
 
 namespace mongo {
 
@@ -76,6 +78,9 @@ public:
         return true;
     }
 
+    bool requiresAuthzChecks() const override {
+        return false;
+    }
     class Invocation : public InvocationBase {
     public:
         using InvocationBase::InvocationBase;

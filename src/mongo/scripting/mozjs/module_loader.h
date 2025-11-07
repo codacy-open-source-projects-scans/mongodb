@@ -29,16 +29,19 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/util/modules.h"
+
+#include <string>
+
+#include <jsapi.h>
+
 #include <boost/filesystem.hpp>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 #include <js/RootingAPI.h>
 #include <js/TypeDecls.h>
-#include <jsapi.h>
-#include <string>
-
-#include "mongo/base/string_data.h"
 
 namespace mongo {
 namespace mozjs {

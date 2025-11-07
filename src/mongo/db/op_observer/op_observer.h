@@ -29,31 +29,19 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <set>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/index_builds/commit_quorum_options.h"
-#include "mongo/db/jsobj.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/repl/rollback.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
@@ -61,13 +49,25 @@
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 
-namespace mongo {
+#include <cstddef>
+#include <cstdint>
+#include <set>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUB mongo {
 
 class DocumentKey;
+struct IndexBuildInfo;
 struct InsertStatement;
 
 struct OpTimeBundle {
@@ -170,7 +170,7 @@ struct IndexCollModInfo {
  * to perform the operation being observed are still held. These rules should apply for all observer
  * methods unless otherwise specified.
  */
-class OpObserver {
+class MONGO_MOD_PUB OpObserver {
 public:
     using ApplyOpsOplogSlotAndOperationAssignment = TransactionOperations::ApplyOpsInfo;
 
@@ -200,23 +200,20 @@ public:
     // improve performance. Avoid using 'kAll' as much as possible.
     virtual NamespaceFilters getNamespaceFilters() const = 0;
 
-    virtual void onModifyCollectionShardingIndexCatalog(OperationContext* opCtx,
-                                                        const NamespaceString& nss,
-                                                        const UUID& uuid,
-                                                        BSONObj indexDoc) = 0;
-
     virtual void onCreateIndex(OperationContext* opCtx,
                                const NamespaceString& nss,
                                const UUID& uuid,
-                               BSONObj indexDoc,
-                               bool fromMigrate) = 0;
+                               const IndexBuildInfo& indexBuildInfo,
+                               bool fromMigrate,
+                               bool isTimeseries = false) = 0;
 
     virtual void onStartIndexBuild(OperationContext* opCtx,
                                    const NamespaceString& nss,
                                    const UUID& collUUID,
                                    const UUID& indexBuildUUID,
-                                   const std::vector<BSONObj>& indexes,
-                                   bool fromMigrate) = 0;
+                                   const std::vector<IndexBuildInfo>& indexes,
+                                   bool fromMigrate,
+                                   bool isTimeseries = false) = 0;
 
     virtual void onStartIndexBuildSinglePhase(OperationContext* opCtx,
                                               const NamespaceString& nss) = 0;
@@ -226,7 +223,9 @@ public:
                                     const UUID& collUUID,
                                     const UUID& indexBuildUUID,
                                     const std::vector<BSONObj>& indexes,
-                                    bool fromMigrate) = 0;
+                                    const std::vector<boost::optional<BSONObj>>& multikey,
+                                    bool fromMigrate,
+                                    bool isTimeseries = false) = 0;
 
     virtual void onAbortIndexBuild(OperationContext* opCtx,
                                    const NamespaceString& nss,
@@ -234,7 +233,8 @@ public:
                                    const UUID& indexBuildUUID,
                                    const std::vector<BSONObj>& indexes,
                                    const Status& cause,
-                                   bool fromMigrate) = 0;
+                                   bool fromMigrate,
+                                   bool isTimeseries = false) = 0;
 
     /**
      * 'recordIds' is a vector of recordIds corresponding to the inserted documents.
@@ -282,6 +282,32 @@ public:
                           const OplogDeleteEntryArgs& args,
                           OpStateAccumulator* opAccumulator = nullptr) = 0;
 
+    virtual void onContainerInsert(OperationContext* opCtx,
+                                   const NamespaceString& ns,
+                                   const UUID& collUUID,
+                                   StringData ident,
+                                   int64_t key,
+                                   std::span<const char> value) = 0;
+
+    virtual void onContainerInsert(OperationContext* opCtx,
+                                   const NamespaceString& ns,
+                                   const UUID& collUUID,
+                                   StringData ident,
+                                   std::span<const char> key,
+                                   std::span<const char> value) = 0;
+
+    virtual void onContainerDelete(OperationContext* opCtx,
+                                   const NamespaceString& ns,
+                                   const UUID& collUUID,
+                                   StringData ident,
+                                   int64_t key) = 0;
+
+    virtual void onContainerDelete(OperationContext* opCtx,
+                                   const NamespaceString& ns,
+                                   const UUID& collUUID,
+                                   StringData ident,
+                                   std::span<const char> key) = 0;
+
     /**
      * Logs a no-op with "msgObj" in the o field into oplog.
      *
@@ -313,13 +339,30 @@ public:
                             boost::none);
     }
 
-    virtual void onCreateCollection(OperationContext* opCtx,
-                                    const CollectionPtr& coll,
-                                    const NamespaceString& collectionName,
-                                    const CollectionOptions& options,
-                                    const BSONObj& idIndex,
-                                    const OplogSlot& createOpTime,
-                                    bool fromMigrate) = 0;
+    /**
+     * Signals to observers that a new collection has been created.
+     * - 'collectionName': The namespace of the new collection.
+     * - 'options': The main options for collection creation.
+     * - 'idIndex': The spec for the '_id_' index automatically generated as a part of collection
+     * creation. Empty if no '_id_' index was generated.
+     * - 'createOpTime': The reserved timestamp for collection creation outside a multi-document
+     * transaction. Unset for creation inside a multi-document transaction as multi-document
+     * transactions reserve the appropriate oplog slots at commit time.
+     * - 'createCollCatalogIdentifier': Information about how the collection was registered in the
+     * local catalog and storage engine. 'boost::none' if the collection was not persisted to the
+     * local catalog.
+     * - 'fromMigrate': Whether collection creation was driven by a migration.
+     */
+    virtual void onCreateCollection(
+        OperationContext* opCtx,
+        const NamespaceString& collectionName,
+        const CollectionOptions& options,
+        const BSONObj& idIndex,
+        const OplogSlot& createOpTime,
+        const boost::optional<CreateCollCatalogIdentifier>& createCollCatalogIdentifier,
+        bool fromMigrate,
+        bool isTimeseries = false) = 0;
+
     /**
      * This function logs an oplog entry when a 'collMod' command on a collection is executed.
      * Since 'collMod' commands can take a variety of different formats, the 'o' field of the
@@ -356,7 +399,8 @@ public:
                            const UUID& uuid,
                            const BSONObj& collModCmd,
                            const CollectionOptions& oldCollOptions,
-                           boost::optional<IndexCollModInfo> indexInfo) = 0;
+                           boost::optional<IndexCollModInfo> indexInfo,
+                           bool isTimeseries = false) = 0;
     virtual void onDropDatabase(OperationContext* opCtx,
                                 const DatabaseName& dbName,
                                 bool markFromMigrate) = 0;
@@ -372,7 +416,8 @@ public:
                                           const NamespaceString& collectionName,
                                           const UUID& uuid,
                                           std::uint64_t numRecords,
-                                          bool markFromMigrate) = 0;
+                                          bool markFromMigrate,
+                                          bool isTimeseries = false) = 0;
 
 
     /**
@@ -388,7 +433,8 @@ public:
                              const NamespaceString& nss,
                              const UUID& uuid,
                              const std::string& indexName,
-                             const BSONObj& indexInfo) = 0;
+                             const BSONObj& indexInfo,
+                             bool isTimeseries = false) = 0;
 
     /**
      * This function logs an oplog entry when a 'renameCollection' command on a collection is
@@ -405,7 +451,8 @@ public:
                                              const boost::optional<UUID>& dropTargetUUID,
                                              std::uint64_t numRecords,
                                              bool stayTemp,
-                                             bool markFromMigrate) = 0;
+                                             bool markFromMigrate,
+                                             bool isTimeseries = false) = 0;
 
     /**
      * This function performs all op observer handling for a 'renameCollection' command except for
@@ -431,7 +478,8 @@ public:
                                     const boost::optional<UUID>& dropTargetUUID,
                                     std::uint64_t numRecords,
                                     bool stayTemp,
-                                    bool markFromMigrate) = 0;
+                                    bool markFromMigrate,
+                                    bool isTimeseries) = 0;
 
     virtual void onImportCollection(OperationContext* opCtx,
                                     const UUID& importUUID,
@@ -440,7 +488,8 @@ public:
                                     long long dataSize,
                                     const BSONObj& catalogEntry,
                                     const BSONObj& storageMetadata,
-                                    bool isDryRun) = 0;
+                                    bool isDryRun,
+                                    bool isTimeseries) = 0;
 
     /**
      * The onTransaction Start method is called at the beginning of a multi-document transaction.
@@ -674,6 +723,28 @@ public:
     virtual void onMajorityCommitPointUpdate(ServiceContext* service,
                                              const repl::OpTime& newCommitPoint) = 0;
 
+    /**
+     * Called when the authoritative DSS needs to be updated with a createDatabase operation.
+     */
+    virtual void onCreateDatabaseMetadata(OperationContext* opCtx, const repl::OplogEntry& op) = 0;
+
+    /**
+     * Called when the authoritative DSS needs to be updated with a dropDatabase operation.
+     */
+    virtual void onDropDatabaseMetadata(OperationContext* opCtx, const repl::OplogEntry& op) = 0;
+
+    /**
+     * Called when 'truncateRange' is called on a collection.
+     * Out parameter 'opTime' is updated to the optime of the oplog entry logged.
+     */
+    virtual void onTruncateRange(OperationContext* opCtx,
+                                 const CollectionPtr& coll,
+                                 const RecordId& minRecordId,
+                                 const RecordId& maxRecordId,
+                                 int64_t bytesDeleted,
+                                 int64_t docsDeleted,
+                                 repl::OpTime& opTime) = 0;
+
     struct Times;
 
 protected:
@@ -704,7 +775,7 @@ private:
  * is cleared. It is intended for use as a scope object in `OpObserverRegistry` to manage
  * re-entrancy.
  */
-class OpObserver::ReservedTimes {
+class MONGO_MOD_PRIVATE OpObserver::ReservedTimes {
     ReservedTimes(const ReservedTimes&) = delete;
     ReservedTimes& operator=(const ReservedTimes&) = delete;
 
@@ -720,4 +791,4 @@ private:
     Times& _times;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

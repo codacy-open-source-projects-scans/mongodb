@@ -16,8 +16,8 @@
  * "jstests/libs/ca.pem").
  */
 export function TLSTest(serverOpts, clientOpts) {
-    var canonicalServerOpts = function(userProvidedOpts) {
-        var canonical = Object.extend({}, userProvidedOpts || {});
+    let canonicalServerOpts = function (userProvidedOpts) {
+        let canonical = Object.extend({}, userProvidedOpts || {});
 
         if (!canonical.hasOwnProperty("tlsMode")) {
             canonical.tlsMode = "preferTLS";
@@ -49,15 +49,15 @@ export function TLSTest(serverOpts, clientOpts) {
 TLSTest.prototype.defaultTLSClientOptions = {
     "tls": "",
     "tlsCertificateKeyFile": "jstests/libs/client.pem",
-    "tlsAllowInvalidCertificates": "",
-    "eval": ";"  // prevent the shell from entering interactive mode
+    "tlsCAFile": "jstests/libs/ca.pem",
+    "eval": ";", // prevent the shell from entering interactive mode
 };
 
 /**
  * The default shell arguments for a shell without TLS enabled.
  */
 TLSTest.prototype.noTLSClientOptions = {
-    eval: ";"  // prevent the shell from entering interactive mode
+    eval: ";", // prevent the shell from entering interactive mode
 };
 
 /**
@@ -65,23 +65,60 @@ TLSTest.prototype.noTLSClientOptions = {
  * connect with a shell created with the configured options. Returns whether a connection
  * was successfully established.
  */
-TLSTest.prototype.connectWorked = function() {
-    var connectTimeoutMillis = 3 * 60 * 1000;
+TLSTest.prototype.connectWorked = function () {
+    let connectTimeoutMillis = 3 * 60 * 1000;
 
-    var serverArgv = MongoRunner.arrOptions("mongod", this.serverOpts);
-    var clientArgv = MongoRunner.arrOptions("mongo", this.clientOpts);
+    let serverArgv = MongoRunner.arrOptions("mongod", this.serverOpts);
+    let clientArgv = MongoRunner.arrOptions("mongo", this.clientOpts);
 
-    var serverPID = _startMongoProgram.apply(null, serverArgv);
+    let serverPID = _startMongoProgram.apply(null, serverArgv);
     try {
         // Don't run the hang analyzer because we don't expect connectWorked() to always succeed.
-        assert.soon(function() {
-            return checkProgram(serverPID).alive &&
-                (0 === _runMongoProgram.apply(null, clientArgv));
-        }, "connect failed", connectTimeoutMillis, undefined, {runHangAnalyzer: false});
+        assert.soon(
+            function () {
+                return checkProgram(serverPID).alive && 0 === _runMongoProgram.apply(null, clientArgv);
+            },
+            "connect failed",
+            connectTimeoutMillis,
+            undefined,
+            {runHangAnalyzer: false},
+        );
     } catch (ex) {
         return false;
     } finally {
         _stopMongoProgram(this.port);
     }
     return true;
+};
+
+/**
+ * Starts a server with the parameters passed to the fixture constructor and then attempts to
+ * connect with a shell created with the configured options. Returns immediately with true
+ * if a connection cannot be established using the configured client options.
+ */
+TLSTest.prototype.connectFails = function () {
+    const connectTimeoutMillis = 3 * 60 * 1000;
+
+    let waitForConnectClientOpts = this.noTLSClientOptions;
+    if (this.serverOpts.tlsMode === "requireTLS") {
+        waitForConnectClientOpts = this.defaultTLSClientOptions;
+    }
+    waitForConnectClientOpts.port = this.port;
+
+    const serverArgv = MongoRunner.arrOptions("mongod", this.serverOpts);
+    const failingClientArgv = MongoRunner.arrOptions("mongo", this.clientOpts);
+    const workingClientArgv = MongoRunner.arrOptions("mongo", waitForConnectClientOpts);
+    const serverPID = _startMongoProgram.apply(null, serverArgv);
+
+    // Wait until we can connect to mongod using the working client args
+    assert.soon(
+        function () {
+            return checkProgram(serverPID).alive && 0 === _runMongoProgram.apply(null, workingClientArgv);
+        },
+        "connect failed",
+        connectTimeoutMillis,
+    );
+    const result = _runMongoProgram.apply(null, failingClientArgv);
+    _stopMongoProgram(this.port);
+    return result !== 0;
 };

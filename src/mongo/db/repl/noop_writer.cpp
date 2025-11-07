@@ -29,30 +29,25 @@
 
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <functional>
-#include <mutex>
-#include <utility>
+#include "mongo/db/repl/noop_writer.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/repl/noop_writer.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/thread.h"
@@ -62,6 +57,10 @@
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/time_support.h"
 
+#include <functional>
+#include <mutex>
+#include <utility>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
 
@@ -70,8 +69,7 @@ namespace repl {
 
 namespace {
 
-const auto kMsgObj = BSON("msg"
-                          << "periodic noop");
+const auto kMsgObj = BSON("msg" << "periodic noop");
 
 }  // namespace
 
@@ -117,7 +115,7 @@ private:
                         return;
                 }
                 noopWrite(&opCtx);
-            } catch (ExceptionForCat<ErrorCategory::Interruption>& ex) {
+            } catch (ExceptionFor<ErrorCategory::Interruption>& ex) {
                 LOGV2_DEBUG(7465602,
                             2,
                             "NoopWriter interrupted, will retry in the next run",
@@ -179,50 +177,61 @@ void NoopWriter::stopWritingPeriodicNoops() {
 }
 
 void NoopWriter::_writeNoop(OperationContext* opCtx) {
-    // Use GlobalLock instead of DBLock to allow return when the lock is not available. It may
-    // happen when the primary steps down and a shared global lock is acquired.
-    Lock::GlobalLock lock(
-        opCtx, MODE_IX, Date_t::now() + Milliseconds(1), Lock::InterruptBehavior::kLeaveUnlocked);
-    if (!lock.isLocked()) {
-        LOGV2_DEBUG(21219, 1, "Global lock is not available, skipping the noop write");
-        return;
-    }
-
-    auto replCoord = ReplicationCoordinator::get(opCtx);
-    // Its a proxy for being a primary
-    if (!replCoord->canAcceptWritesForDatabase(opCtx, DatabaseName::kAdmin)) {
-        LOGV2_DEBUG(21220, 1, "Not a primary, skipping the noop write");
-        return;
-    }
-
-    auto lastAppliedOpTime = replCoord->getMyLastAppliedOpTime();
-
-    // _lastKnownOpTime is not protected by lock as its used only by one thread.
-    if (lastAppliedOpTime != _lastKnownOpTime) {
-        LOGV2_DEBUG(21221,
-                    1,
-                    "Not scheduling a noop write. Last known OpTime != last primary OpTime",
-                    "lastKnownOpTime"_attr = _lastKnownOpTime,
-                    "lastAppliedOpTime"_attr = lastAppliedOpTime);
-    } else {
-        if (writePeriodicNoops.load()) {
-            const auto logLevel = TestingProctor::instance().isEnabled() ? 0 : 1;
-            LOGV2_DEBUG(21222,
-                        logLevel,
-                        "Writing noop to oplog as there has been no writes to this replica set "
-                        "within write interval",
-                        "writeInterval"_attr = _writeInterval);
-            writeConflictRetry(opCtx, "writeNoop", NamespaceString::kRsOplogNamespace, [&opCtx] {
-                WriteUnitOfWork uow(opCtx);
-                opCtx->getClient()->getServiceContext()->getOpObserver()->onOpMessage(opCtx,
-                                                                                      kMsgObj);
-                uow.commit();
-            });
+    try {
+        // Use GlobalLock instead of DBLock to allow return when the lock is not available. It may
+        // happen when the primary steps down and a shared global lock is acquired.
+        Lock::GlobalLock lock(opCtx,
+                              MODE_IX,
+                              Date_t::now() + Milliseconds(1),
+                              Lock::InterruptBehavior::kLeaveUnlocked);
+        if (!lock.isLocked()) {
+            LOGV2_DEBUG(21219, 1, "Global lock is not available, skipping the noop write");
+            return;
         }
-    }
 
-    _lastKnownOpTime = replCoord->getMyLastAppliedOpTime();
-    LOGV2_DEBUG(21223, 1, "Set last known op time", "lastKnownOpTime"_attr = _lastKnownOpTime);
+        auto replCoord = ReplicationCoordinator::get(opCtx);
+        // Its a proxy for being a primary
+        if (!replCoord->canAcceptWritesForDatabase(opCtx, DatabaseName::kAdmin)) {
+            LOGV2_DEBUG(21220, 1, "Not a primary, skipping the noop write");
+            return;
+        }
+
+        auto lastAppliedOpTime = replCoord->getMyLastAppliedOpTime();
+
+        // _lastKnownOpTime is not protected by lock as its used only by one thread.
+        if (lastAppliedOpTime != _lastKnownOpTime) {
+            LOGV2_DEBUG(21221,
+                        1,
+                        "Not scheduling a noop write. Last known OpTime != last primary OpTime",
+                        "lastKnownOpTime"_attr = _lastKnownOpTime,
+                        "lastAppliedOpTime"_attr = lastAppliedOpTime);
+        } else {
+            if (writePeriodicNoops.load()) {
+                const auto logLevel = TestingProctor::instance().isEnabled() ? 0 : 1;
+                LOGV2_DEBUG(21222,
+                            logLevel,
+                            "Writing noop to oplog as there has been no writes to this replica set "
+                            "within write interval",
+                            "writeInterval"_attr = _writeInterval);
+                writeConflictRetry(
+                    opCtx, "writeNoop", NamespaceString::kRsOplogNamespace, [&opCtx] {
+                        WriteUnitOfWork uow(opCtx);
+                        opCtx->getClient()->getServiceContext()->getOpObserver()->onOpMessage(
+                            opCtx, kMsgObj);
+                        uow.commit();
+                    });
+            }
+        }
+
+        _lastKnownOpTime = replCoord->getMyLastAppliedOpTime();
+        LOGV2_DEBUG(21223, 1, "Set last known op time", "lastKnownOpTime"_attr = _lastKnownOpTime);
+    } catch (const ExceptionFor<ErrorCodes::NotWritablePrimary>&) {
+        // Skip performing the write if not primary.
+        LOGV2_DEBUG(10262301, 1, "Not a primary, skipping the noop write");
+        return;
+    } catch (const DBException&) {
+        throw;
+    }
 }
 
 }  // namespace repl

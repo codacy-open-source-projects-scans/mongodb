@@ -29,29 +29,28 @@
 
 #pragma once
 
+#include "mongo/db/exec/agg/stage.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/memory_tracking/memory_usage_tracker.h"
+#include "mongo/db/pipeline/expression.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/partition_key_comparator.h"
+#include "mongo/db/pipeline/spilling/spillable_deque.h"
+#include "mongo/db/pipeline/window_function/window_bounds.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
 #include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstddef>
 #include <memory>
 #include <utility>
 #include <vector>
 
-#include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/expression.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/partition_key_comparator.h"
-#include "mongo/db/pipeline/window_function/spillable_cache.h"
-#include "mongo/db/pipeline/window_function/window_bounds.h"
-#include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/sort_pattern.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
-#include "mongo/util/memory_usage_tracker.h"
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -69,10 +68,12 @@ namespace mongo {
 class PartitionIterator {
 public:
     PartitionIterator(ExpressionContext* expCtx,
-                      DocumentSource* source,
+                      exec::agg::Stage* source,
                       MemoryUsageTracker* tracker,
                       boost::optional<boost::intrusive_ptr<Expression>> partitionExpr,
                       const boost::optional<SortPattern>& sortPattern);
+
+    ~PartitionIterator();
 
     using SlotId = unsigned int;
     SlotId newSlot() {
@@ -121,9 +122,9 @@ public:
     }
 
     /**
-     * Sets the input DocumentSource for this iterator to 'source'.
+     * Sets the input Stage for this iterator to 'source'.
      */
-    void setSource(DocumentSource* source) {
+    void setSource(exec::agg::Stage* source) {
         _source = source;
     }
 
@@ -133,7 +134,7 @@ public:
      * structures.
      */
     auto getApproximateSize() const {
-        return _cache->getApproximateSize() + getNextPartitionStateSize();
+        return _cache.getApproximateSize() + getNextPartitionStateSize();
     }
 
     /**
@@ -141,11 +142,15 @@ public:
      * allowed.
      */
     void spillToDisk() {
-        _cache->spillToDisk();
+        _cache.spillToDisk();
     }
 
     bool usedDisk() const {
-        return _cache->usedDisk();
+        return _cache.usedDisk();
+    }
+
+    const SpillingStats& getSpillingStats() const {
+        return _cache.getSpillingStats();
     }
 
     /**
@@ -153,7 +158,7 @@ public:
      * are invalid after calling this.
      */
     void finalize() {
-        _cache->finalize();
+        _cache.finalize();
     }
 
     /**
@@ -164,6 +169,15 @@ public:
         if (_partitionExpr) {
             _partitionExpr = _partitionExpr->get()->optimize();
         }
+    }
+
+    /**
+     * Returns the smallest offset 'i' such that (*this)[i] is in '_cache'.
+     *
+     * This value is negative or zero, because the current document is always in '_cache'.
+     */
+    auto getMinCachedOffset() const {
+        return -_indexOfCurrentInPartition + _cache.getLowestIndex();
     }
 
 private:
@@ -200,15 +214,6 @@ private:
         const WindowBounds& bounds, const boost::optional<std::pair<int, int>>& hint);
 
     /**
-     * Returns the smallest offset 'i' such that (*this)[i] is in '_cache'.
-     *
-     * This value is negative or zero, because the current document is always in '_cache'.
-     */
-    auto getMinCachedOffset() const {
-        return -_indexOfCurrentInPartition + _cache->getLowestIndex();
-    }
-
-    /**
      * Returns the largest offset 'i' such that (*this)[i] is in '_cache'.
      *
      * Note that offsets greater than 'i' might still be in the partition, even though they
@@ -218,7 +223,7 @@ private:
      * This value is positive or zero, because the current document is always in '_cache'.
      */
     auto getMaxCachedOffset() const {
-        return _cache->getHighestIndex() - _indexOfCurrentInPartition;
+        return _cache.getHighestIndex() - _indexOfCurrentInPartition;
     }
 
     /**
@@ -261,7 +266,7 @@ private:
     void getNextDocument();
 
     void resetCache() {
-        _cache->clear();
+        _cache.clear();
         _indexOfCurrentInPartition = 0;
         for (int slot = 0; slot < (int)_slots.size(); slot++) {
             _slots[slot] = -1;
@@ -281,7 +286,7 @@ private:
         const boost::optional<std::pair<int, int>>& hint);
 
     ExpressionContext* _expCtx;
-    DocumentSource* _source;
+    exec::agg::Stage* _source;
     boost::optional<boost::intrusive_ptr<Expression>> _partitionExpr;
 
     // '_sortExpr' tells us which field is the "time" field. When the user writes
@@ -330,8 +335,8 @@ private:
     int _indexOfCurrentInPartition = 0;
 
     // The actual cache of the PartitionIterator. Holds documents and spills documents that exceed
-    // the memory limit given to PartitionIterator to disk. Behaves like a deque.
-    std::unique_ptr<SpillableCache> _cache = nullptr;
+    // the memory limit given to PartitionIterator to disk.
+    SpillableDeque _cache;
 
     // Memory token, used to track memory consumption of PartitionIterator. Needed to avoid problems
     // when getNextPartitionStateSize() changes value between invocations.
@@ -392,7 +397,7 @@ public:
                 // With this policy, all documents before the lower bound can be marked as expired.
                 // They will only be released on the next call to releaseExpired(), so when
                 // getEndpoints() returns, the caller may also look at documents from the previous
-                // result of getEndpoints(), until it returns control to the DocumentSource.
+                // result of getEndpoints(), until it returns control to the Stage.
                 if (endpoints) {
                     _iter->expireUpTo(_slot, endpoints->first - 1);
                 }
@@ -401,7 +406,7 @@ public:
                 // With this policy, all documents before the upper bound can be marked as expired.
                 // They will only be released on the next call to releaseExpired(), so when
                 // getEndpoints() returns, the caller may also look at documents from the previous
-                // result of getEndpoints(), until it returns control to the DocumentSource.
+                // result of getEndpoints(), until it returns control to the Stage.
                 if (endpoints) {
                     _iter->expireUpTo(_slot, endpoints->second - 1);
                 }

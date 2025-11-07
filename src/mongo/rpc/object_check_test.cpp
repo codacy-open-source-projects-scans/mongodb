@@ -27,19 +27,19 @@
  *    it in the license file.
  */
 
-#include <iterator>
-#include <variant>
+#include "mongo/rpc/object_check.h"  // IWYU pragma: keep
 
 #include "mongo/base/data_range_cursor.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/server_options.h"
-#include "mongo/rpc/object_check.h"  // IWYU pragma: keep
 #include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/scopeguard.h"
+
+#include <iterator>
+#include <variant>
 
 namespace {
 
@@ -54,11 +54,8 @@ TEST(DataTypeValidated, BSONValidationEnabled) {
     };
     ON_BLOCK_EXIT([=] { setValidation(wasEnabled); });
 
-    BSONObj valid = BSON("baz"
-                         << "bar"
-                         << "garply"
-                         << BSON("foo"
-                                 << "bar"));
+    BSONObj valid = BSON("baz" << "bar"
+                               << "garply" << BSON("foo" << "bar"));
     char buf[1024] = {0};
     std::copy(valid.objdata(), valid.objdata() + valid.objsize(), begin(buf));
     {
@@ -100,11 +97,8 @@ DEATH_TEST(ObjectCheck, BSONValidationEnabledWithCrashOnError, "50761") {
     serverGlobalParams.crashOnInvalidBSONError = true;
     ON_BLOCK_EXIT([&] { serverGlobalParams.crashOnInvalidBSONError = crashOnErrorValue; });
 
-    BSONObj valid = BSON("baz"
-                         << "bar"
-                         << "garply"
-                         << BSON("foo"
-                                 << "bar"));
+    BSONObj valid = BSON("baz" << "bar"
+                               << "garply" << BSON("foo" << "bar"));
     char buf[1024] = {0};
     std::copy(valid.objdata(), valid.objdata() + valid.objsize(), begin(buf));
 

@@ -27,10 +27,10 @@
  *    it in the license file.
  */
 
-#include "mongo/db/field_ref.h"
 #include "mongo/db/field_ref_set.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+
+#include "mongo/db/field_ref.h"
+#include "mongo/unittest/unittest.h"
 
 namespace mongo {
 

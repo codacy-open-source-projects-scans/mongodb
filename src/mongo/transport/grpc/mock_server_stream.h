@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <map>
-#include <string>
-
-#include <grpcpp/grpcpp.h>
-
 #include "mongo/transport/grpc/bidirectional_pipe.h"
 #include "mongo/transport/grpc/metadata.h"
 #include "mongo/transport/grpc/mock_util.h"
@@ -41,11 +36,16 @@
 #include "mongo/util/future.h"
 #include "mongo/util/net/hostandport.h"
 
+#include <map>
+#include <string>
+
+#include <grpcpp/grpcpp.h>
+
 namespace mongo::transport::grpc {
 
 class MockServerStream : public ServerStream {
 public:
-    ~MockServerStream() = default;
+    ~MockServerStream() override = default;
 
     boost::optional<SharedBuffer> read() override;
 
@@ -56,7 +56,7 @@ public:
                               Promise<::grpc::Status>&& rpcTerminationStatusPromise,
                               std::shared_ptr<MockCancellationState> rpcCancellationState,
                               BidirectionalPipe::End&& serverPipeEnd,
-                              MetadataView clientMetadata);
+                              MetadataContainer clientMetadata);
 
 private:
     friend class MockServerContext;
@@ -135,6 +135,7 @@ private:
     std::shared_ptr<MockCancellationState> _rpcCancellationState;
 
     BidirectionalPipe::End _pipe;
-    MetadataView _clientMetadata;
+    MetadataContainer _clientMetadata;
+    MetadataView _clientMetadataView;
 };
 }  // namespace mongo::transport::grpc

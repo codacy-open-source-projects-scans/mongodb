@@ -28,14 +28,6 @@
  */
 
 
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
@@ -46,25 +38,32 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/generic_argument_util.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/async_requests_sender.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/grid.h"
 #include "mongo/s/request_types/reshard_collection_gen.h"
-#include "mongo/s/request_types/sharded_ddl_commands_gen.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -96,27 +95,6 @@ public:
             reshardCollectionRequest.setNumInitialChunks(request().getNumInitialChunks());
             reshardCollectionRequest.setCollectionUUID(request().getCollectionUUID());
 
-            if (!resharding::gFeatureFlagReshardingImprovements.isEnabled(
-                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-                uassert(
-                    ErrorCodes::InvalidOptions,
-                    "Resharding improvements is not enabled, reject shardDistribution parameter",
-                    !request().getShardDistribution().has_value());
-                uassert(
-                    ErrorCodes::InvalidOptions,
-                    "Resharding improvements is not enabled, reject forceRedistribution parameter",
-                    !request().getForceRedistribution().has_value());
-                uassert(ErrorCodes::InvalidOptions,
-                        "Resharding improvements is not enabled, reject reshardingUUID parameter",
-                        !request().getReshardingUUID().has_value());
-                uassert(ErrorCodes::InvalidOptions,
-                        "Resharding improvements is not enabled, reject feature flag "
-                        "moveCollection or unshardCollection",
-                        !resharding::gFeatureFlagMoveCollection.isEnabled(
-                            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
-                            !resharding::gFeatureFlagUnshardCollection.isEnabled(
-                                serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
-            }
             reshardCollectionRequest.setShardDistribution(request().getShardDistribution());
             reshardCollectionRequest.setForceRedistribution(request().getForceRedistribution());
             reshardCollectionRequest.setReshardingUUID(request().getReshardingUUID());
@@ -125,28 +103,41 @@ public:
                     serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) ||
                 resharding::gFeatureFlagUnshardCollection.isEnabled(
                     serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-                reshardCollectionRequest.setProvenance(ProvenanceEnum::kReshardCollection);
+                reshardCollectionRequest.setProvenance(
+                    ReshardingProvenanceEnum::kReshardCollection);
             }
-            reshardCollectionRequest.setImplicitlyCreateIndex(request().getImplicitlyCreateIndex());
+            reshardCollectionRequest.setPerformVerification(request().getPerformVerification());
+
+            if (resharding::gfeatureFlagReshardingNumSamplesPerChunk.isEnabled(
+                    VersionContext::getDecoration(opCtx),
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+                reshardCollectionRequest.setNumSamplesPerChunk(request().getNumSamplesPerChunk());
+            }
+
+            reshardCollectionRequest.setDemoMode(request().getDemoMode());
 
             shardsvrReshardCollection.setReshardCollectionRequest(
                 std::move(reshardCollectionRequest));
 
-            auto catalogCache = Grid::get(opCtx)->catalogCache();
-            const auto dbInfo = uassertStatusOK(catalogCache->getDatabase(opCtx, nss.dbName()));
-
             generic_argument_util::setMajorityWriteConcern(shardsvrReshardCollection,
                                                            &opCtx->getWriteConcern());
-            auto cmdResponse = executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
-                opCtx,
-                DatabaseName::kAdmin,
-                dbInfo,
-                shardsvrReshardCollection.toBSON(),
-                ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                Shard::RetryPolicy::kIdempotent);
 
-            const auto remoteResponse = uassertStatusOK(cmdResponse.swResponse);
-            uassertStatusOK(getStatusFromCommandResult(remoteResponse.data));
+            sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
+            router.route(opCtx,
+                         Request::kCommandParameterFieldName,
+                         [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
+                             auto cmdResponse =
+                                 executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
+                                     opCtx,
+                                     DatabaseName::kAdmin,
+                                     dbInfo,
+                                     shardsvrReshardCollection.toBSON(),
+                                     ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                                     Shard::RetryPolicy::kIdempotent);
+
+                             const auto remoteResponse = uassertStatusOK(cmdResponse.swResponse);
+                             uassertStatusOK(getStatusFromCommandResult(remoteResponse.data));
+                         });
         }
 
     private:

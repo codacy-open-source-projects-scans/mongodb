@@ -29,43 +29,45 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <memory>
-#include <tuple>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/cancelable_operation_context.h"
+#include "mongo/db/global_catalog/ddl/shard_key_util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/s/resharding/recipient_document_gen.h"
+#include "mongo/db/s/resharding/resharding_change_streams_monitor.h"
 #include "mongo/db/s/resharding/resharding_data_replication.h"
 #include "mongo/db/s/resharding/resharding_future_util.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier_metrics.h"
 #include "mongo/db/s/resharding/resharding_util.h"
-#include "mongo/db/s/shard_key_util.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/scoped_task_executor.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdint>
+#include <memory>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -95,7 +97,8 @@ public:
     void checkIfConflictsWithOtherInstances(
         OperationContext* opCtx,
         BSONObj initialState,
-        const std::vector<const repl::PrimaryOnlyService::Instance*>& existingInstances) override{};
+        const std::vector<const repl::PrimaryOnlyService::Instance*>& existingInstances) override {
+    };
 
     std::shared_ptr<repl::PrimaryOnlyService::Instance> constructInstance(
         BSONObj initialState) override;
@@ -139,7 +142,6 @@ public:
         const ReshardingRecipientService* recipientService,
         const ReshardingRecipientDocument& recipientDoc,
         std::unique_ptr<RecipientStateMachineExternalState> externalState,
-        ReshardingDataReplicationFactory dataReplicationFactory,
         ServiceContext* serviceContext);
 
     ~RecipientStateMachine() override = default;
@@ -149,7 +151,7 @@ public:
      */
     ExecutorFuture<void> _runUntilStrictConsistencyOrErrored(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken) noexcept;
+        const CancellationToken& abortToken);
 
     /**
      * Notifies the coordinator if the recipient is in kStrictConsistency or kError and waits for
@@ -158,7 +160,7 @@ public:
      */
     ExecutorFuture<void> _notifyCoordinatorAndAwaitDecision(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken) noexcept;
+        const CancellationToken& abortToken);
 
     /**
      * Finishes the work left remaining on the recipient after the coordinator persists its decision
@@ -167,12 +169,17 @@ public:
     ExecutorFuture<void> _finishReshardingOperation(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
         const CancellationToken& stepdownToken,
-        bool aborted) noexcept;
+        bool aborted);
 
     SemiFuture<void> run(std::shared_ptr<executor::ScopedTaskExecutor> executor,
                          const CancellationToken& token) noexcept override;
 
     void interrupt(Status status) override;
+
+    /**
+     * Makes the recipient prepare for the critical section.
+     */
+    void prepareForCriticalSection();
 
     /**
      * Returns a Future fulfilled once the recipient locally persists its final state before the
@@ -191,11 +198,28 @@ public:
         return _completionPromise.getFuture();
     }
 
+    /**
+     * Waits for the monitor to start. Throws an error if verification
+     * is not enabled or skipCloningAndApplying is true.
+     */
+    SharedSemiFuture<void> awaitChangeStreamsMonitorStartedForTest();
+
+    /**
+     * Waits for the monitor to complete and returns the final document delta from the applying
+     * phase. Throws an error if verification is not enabled or skipCloningAndApplying is true.
+     */
+    SharedSemiFuture<int64_t> awaitChangeStreamsMonitorCompletedForTest();
+
     inline const CommonReshardingMetadata& getMetadata() const {
         return _metadata;
     }
 
     inline const ReshardingMetrics& getMetrics() const {
+        invariant(_metrics);
+        return *_metrics;
+    }
+
+    ReshardingMetrics& getMetricsForTest() const {
         invariant(_metrics);
         return *_metrics;
     }
@@ -224,7 +248,29 @@ public:
 
     void checkIfOptionsConflict(const BSONObj& stateDoc) const final {}
 
+    SemiFuture<void> fulfillAllDonorsPreparedToDonate(CloneDetails cloneDetails,
+                                                      const CancellationToken& cancelToken);
+
 private:
+    class CloningMetrics {
+    public:
+        void add(int64_t documentsCopied, int64_t bytesCopied);
+
+        int64_t getDocumentsCopied() const {
+            return _documentsCopied;
+        }
+
+        int64_t getBytesCopied() const {
+            return _bytesCopied;
+        }
+
+    private:
+        int64_t _documentsCopied = 0;
+        int64_t _bytesCopied = 0;
+    };
+
+    using ShardApplierProgress = std::map<ShardId, ReshardingOplogApplierProgress>;
+
     /**
      * The work inside this function must be run regardless of any work on _scopedExecutor ever
      * running.
@@ -278,6 +324,8 @@ private:
                                          boost::optional<mongo::Date_t> startConfigTxnCloneTime,
                                          const CancelableOperationContextFactory& factory);
 
+    void _transitionToApplying(const CancelableOperationContextFactory& factory);
+
     void _transitionToError(Status abortReason, const CancelableOperationContextFactory& factory);
 
     void _transitionToDone(bool aborted, const CancelableOperationContextFactory& factory);
@@ -296,14 +344,24 @@ private:
                                   boost::optional<mongo::Date_t> configStartTime,
                                   const CancelableOperationContextFactory& factory);
 
+    void _updateRecipientDocument(ChangeStreamsMonitorContext newChangeStreamsCtx,
+                                  const CancelableOperationContextFactory& factory);
+
     // Removes the local recipient document from disk.
     void _removeRecipientDocument(bool aborted, const CancelableOperationContextFactory& factory);
 
-    std::unique_ptr<ReshardingDataReplicationInterface> _makeDataReplication(
-        OperationContext* opCtx, bool cloningDone);
-
     void _ensureDataReplicationStarted(
         OperationContext* opCtx,
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        const CancellationToken& abortToken,
+        const CancelableOperationContextFactory& factory);
+
+    void _createAndStartChangeStreamsMonitor(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        const CancellationToken& abortToken,
+        const CancelableOperationContextFactory& factory);
+
+    ExecutorFuture<void> _awaitChangeStreamsMonitorCompleted(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
         const CancellationToken& abortToken,
         const CancelableOperationContextFactory& factory);
@@ -318,6 +376,13 @@ private:
         const CancellationToken& abortToken);
     void _restoreMetrics(const CancelableOperationContextFactory& factory);
 
+    void _initializeShardApplierMetrics(
+        const boost::optional<ShardApplierProgress>& existingProgress);
+
+    void _initializeDataReplication();
+
+    void _updateContextMetrics(OperationContext* opCtx);
+
     // Initializes the _abortSource and generates a token from it to return back the caller.
     //
     // Should only be called once per lifetime.
@@ -325,6 +390,12 @@ private:
 
     // Get indexesToBuild and indexesBuilt from the index catalog, then save them in _metrics
     void _tryFetchBuildIndexMetrics(OperationContext* opCtx);
+
+    // Return the total and per-donor number documents and bytes cloned if the numbers are available
+    // in the cloner resume data documents. Otherwise, return none.
+    boost::optional<CloningMetrics> _tryFetchCloningMetrics(OperationContext* opCtx);
+
+    void _fulfillPromisesOnStepup(boost::optional<mongo::ReshardingRecipientMetrics> metrics);
 
     // The primary-only service instance corresponding to the recipient instance. Not owned.
     const ReshardingRecipientService* const _recipientService;
@@ -342,6 +413,9 @@ private:
     // Set to true if this recipient should skip cloning documents and fetching/applying oplog
     // entries because it is not going to own any chunks for the collection after resharding.
     const bool _skipCloningAndApplying;
+    // Set to true if this recipient should skip cloning documents because it is not going to own
+    // any chunks for the collection after resharding.
+    const bool _skipCloning;
     // Set to true if this recipient should store the count of oplog entries fetched in a progress
     // document and use this count instead of the fast count to recover metrics upon recovery
     const bool _storeOplogFetcherProgress;
@@ -352,6 +426,7 @@ private:
     // The in-memory representation of the mutable portion of the document in
     // config.localReshardingOperations.recipient.
     RecipientShardContext _recipientCtx;
+    boost::optional<ChangeStreamsMonitorContext> _changeStreamsMonitorCtx;
     std::vector<DonorShardFetchTimestamp> _donorShards;
     boost::optional<Timestamp> _cloneTimestamp;
 
@@ -368,13 +443,17 @@ private:
     boost::optional<resharding::RetryingCancelableOperationContextFactory>
         _retryingCancelableOpCtxFactory;
 
-    const ReshardingDataReplicationFactory _dataReplicationFactory;
     SharedSemiFuture<void> _dataReplicationQuiesced;
+
+    SharedPromise<void> _changeStreamsMonitorStarted;
+    SharedPromise<int64_t> _changeStreamsMonitorCompleted;
+    SharedSemiFuture<void> _changeStreamsMonitorQuiesced;
 
     // Protects the state below
     stdx::mutex _mutex;
 
     std::unique_ptr<ReshardingDataReplicationInterface> _dataReplication;
+    std::shared_ptr<ReshardingChangeStreamsMonitor> _changeStreamsMonitor;
 
     // Canceled when there is an unrecoverable error or stepdown.
     boost::optional<CancellationSource> _abortSource;
@@ -397,6 +476,9 @@ private:
     SharedPromise<void> _coordinatorHasDecisionPersisted;
 
     SharedPromise<void> _completionPromise;
+
+    // This promise is emplaced if the recipient has majority committed the createCollection state.
+    SharedPromise<void> _transitionedToCreateCollection;
 };
 
 }  // namespace mongo

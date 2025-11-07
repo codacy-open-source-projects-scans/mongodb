@@ -29,19 +29,21 @@
 
 #pragma once
 
-#include <boost/log/attributes/attribute_value_set.hpp>
-#include <boost/log/attributes/value_extraction.hpp>
-
 #include "mongo/logv2/attributes.h"
 #include "mongo/logv2/domain_filter.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_component_settings.h"
 #include "mongo/logv2/log_severity.h"
+#include "mongo/util/modules.h"
+
+#include <boost/log/attributes/attribute_value_set.hpp>
+#include <boost/log/attributes/value_extraction.hpp>
 
 namespace mongo::logv2 {
 
 // Boost::log filter that enables logging if Component+Severity match current settings
-class ComponentSettingsFilter : public DomainFilter<ComponentSettingsFilter> {
+class MONGO_MOD_NEEDS_REPLACEMENT ComponentSettingsFilter
+    : public DomainFilter<ComponentSettingsFilter> {
 public:
     ComponentSettingsFilter(const LogDomain& domain, const LogComponentSettings& settings)
         : DomainFilter(domain), _settings(settings) {}

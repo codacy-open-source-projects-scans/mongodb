@@ -27,25 +27,32 @@
  *    it in the license file.
  */
 
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/index_builds/index_build_oplog_entry.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/bson_extract.h"
-#include "mongo/db/index_builds/index_build_oplog_entry.h"
+#include "mongo/db/index/multikey_paths.h"
+#include "mongo/db/op_observer/op_observer_util.h"
+#include "mongo/db/repl/create_oplog_entry_gen.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
+#include "mongo/db/storage/ident.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
-StatusWith<IndexBuildOplogEntry> IndexBuildOplogEntry::parse(const repl::OplogEntry& entry) {
+StatusWith<IndexBuildOplogEntry> IndexBuildOplogEntry::parse(OperationContext* opCtx,
+                                                             const repl::OplogEntry& entry,
+                                                             bool parseO2) {
     // Example 'o' field which takes the same form for all three oplog entries.
     // {
     //     < "startIndexBuild" | "commitIndexBuild" | "abortIndexBuild" > : "coll",
@@ -66,6 +73,12 @@ StatusWith<IndexBuildOplogEntry> IndexBuildOplogEntry::parse(const repl::OplogEn
     //             ...
     //         }
     //     ],
+    //     "multikey" : [  // Only allowed for 'commitIndexBuild'.
+    //         null,
+    //         {
+    //             "k": BinData(0,"AQ=="),
+    //         },
+    //     ],
     //     "cause" : <Object> // Only required for 'abortIndexBuild'.
     // }
     //
@@ -81,13 +94,19 @@ StatusWith<IndexBuildOplogEntry> IndexBuildOplogEntry::parse(const repl::OplogEn
     BSONObj obj = entry.getObject();
     BSONElement first = obj.firstElement();
     auto commandName = first.fieldNameStringData();
-    uassert(ErrorCodes::InvalidNamespace,
-            str::stream() << commandName << " value must be a string",
-            first.type() == mongo::String);
+    if (first.type() != BSONType::string) {
+        return {ErrorCodes::InvalidNamespace,
+                str::stream() << commandName << " value must be a string"};
+    }
+
+    IndexBuildMethodEnum indexBuildMethod{IndexBuildMethodEnum::kHybrid};
+    if (isPrimaryDrivenIndexBuildEnabled(VersionContext::getDecoration(opCtx))) {
+        indexBuildMethod = IndexBuildMethodEnum::kPrimaryDriven;
+    }
 
     auto buildUUIDElem = obj.getField("indexBuildUUID");
     if (buildUUIDElem.eoo()) {
-        return {ErrorCodes::BadValue, str::stream() << "Missing required field 'indexBuildUUID'"};
+        return {ErrorCodes::BadValue, "Missing required field 'indexBuildUUID'"};
     }
 
     auto swBuildUUID = UUID::parse(buildUUIDElem);
@@ -97,28 +116,60 @@ StatusWith<IndexBuildOplogEntry> IndexBuildOplogEntry::parse(const repl::OplogEn
 
     auto indexesElem = obj.getField("indexes");
     if (indexesElem.eoo()) {
-        return {ErrorCodes::BadValue, str::stream() << "Missing required field 'indexes'"};
+        return {ErrorCodes::BadValue, "Missing required field 'indexes'"};
     }
 
-    if (indexesElem.type() != Array) {
-        return {ErrorCodes::BadValue,
-                str::stream() << "Field 'indexes' must be an array of index spec objects"};
+    if (indexesElem.type() != BSONType::array) {
+        return {ErrorCodes::BadValue, "Field 'indexes' must be an array of index spec objects"};
     }
 
-    std::vector<std::string> indexNames;
-    std::vector<BSONObj> indexSpecs;
+    std::vector<IndexBuildInfo> indexesVec;
     for (auto& indexElem : indexesElem.Array()) {
         if (!indexElem.isABSONObj()) {
-            return {ErrorCodes::BadValue,
-                    str::stream() << "Element of 'indexes' must be an object"};
+            return {ErrorCodes::BadValue, "Element of 'indexes' must be an object"};
         }
         std::string indexName;
         auto status = bsonExtractStringField(indexElem.Obj(), "name", &indexName);
         if (!status.isOK()) {
             return status.withContext("Error extracting 'name' from index spec");
         }
-        indexNames.push_back(indexName);
-        indexSpecs.push_back(indexElem.Obj().getOwned());
+        indexesVec.emplace_back(indexElem.Obj().getOwned(), boost::none);
+    }
+
+    auto multikeyElem = obj["multikey"];
+    if (multikeyElem) {
+        if (multikeyElem.type() != BSONType::array) {
+            return {ErrorCodes::BadValue, "Field 'multikey' must be an array"};
+        }
+        if (commandType != repl::OplogEntry::CommandType::kCommitIndexBuild) {
+            return {ErrorCodes::BadValue,
+                    "Field 'multikey' can only be used with 'commitIndexBuild'"};
+        }
+    }
+
+    std::vector<boost::optional<MultikeyPaths>> multikey;
+    for (auto&& elem : multikeyElem ? multikeyElem.Obj() : BSONObj{}) {
+        switch (elem.type()) {
+            case BSONType::null:
+                multikey.push_back(boost::none);
+                break;
+            case BSONType::object: {
+                auto parsed = multikey_paths::parse(elem.Obj());
+                if (!parsed.isOK()) {
+                    return parsed.getStatus();
+                }
+                multikey.push_back(parsed.getValue());
+                break;
+            }
+            default:
+                return {ErrorCodes::BadValue,
+                        "Multikey array can only contain null or object types"};
+        }
+    }
+
+    if (!multikey.empty() && multikey.size() != indexesVec.size()) {
+        return {ErrorCodes::BadValue,
+                "Multikey array must have the same number of elements as indexes array"};
     }
 
     // Get the reason this index build was aborted on the primary.
@@ -128,7 +179,7 @@ StatusWith<IndexBuildOplogEntry> IndexBuildOplogEntry::parse(const repl::OplogEn
         if (causeElem.eoo()) {
             return {ErrorCodes::BadValue, "Missing required field 'cause'."};
         }
-        if (causeElem.type() != Object) {
+        if (causeElem.type() != BSONType::object) {
             return {ErrorCodes::BadValue, "Field 'cause' must be an object."};
         }
         auto causeStatusObj = causeElem.Obj();
@@ -138,12 +189,40 @@ StatusWith<IndexBuildOplogEntry> IndexBuildOplogEntry::parse(const repl::OplogEn
     auto collUUID = entry.getUuid();
     invariant(collUUID, str::stream() << redact(entry.toBSONForLogging()));
 
+    if (auto o2 = entry.getObject2(); o2 && parseO2) {
+        auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+        auto parsedO2 = repl::StartIndexBuildOplogEntryO2::parse(
+            *o2, IDLParserContext("startIndexBuildOplogEntryO2"));
+        auto indexes = parsedO2.getIndexes();
+
+        if (indexesVec.size() != indexes.size()) {
+            return {
+                ErrorCodes::BadValue,
+                fmt::format("'indexes' array sizes differ between o and o2 objects, got {} vs {}",
+                            indexesVec.size(),
+                            indexes.size())};
+        }
+
+        for (size_t i = 0; i < indexes.size(); ++i) {
+            auto indexIdentUniqueTag = indexes[i].getIndexIdent();
+            if (!ident::validateTag(indexIdentUniqueTag)) {
+                return {ErrorCodes::BadValue,
+                        fmt::format("'indexIdent' '{}' is not valid", indexIdentUniqueTag)};
+            }
+
+            const auto& indexIdent =
+                storageEngine->generateNewIndexIdent(entry.getNss().dbName(), indexIdentUniqueTag);
+            indexesVec[i].indexIdent = std::string{indexIdent};
+        }
+    }
+
     return IndexBuildOplogEntry{*collUUID,
                                 commandType,
-                                commandName.toString(),
+                                std::string{commandName},
+                                indexBuildMethod,
                                 swBuildUUID.getValue(),
-                                std::move(indexNames),
-                                std::move(indexSpecs),
+                                std::move(indexesVec),
+                                std::move(multikey),
                                 cause,
                                 entry.getOpTime()};
 }

@@ -229,7 +229,7 @@ __wt_session_compact_check_interrupted(WT_SESSION_IMPL *session)
     if (session == conn->background_compact.session) {
         background_compaction = true;
         __wt_spin_lock(session, &conn->background_compact.lock);
-        if (!__wt_atomic_loadbool(&conn->background_compact.running))
+        if (!__wt_atomic_load_bool_relaxed(&conn->background_compact.running))
             ret = WT_ERROR;
         __wt_spin_unlock(session, &conn->background_compact.lock);
     } else if (session->event_handler->handle_general != NULL) {
@@ -249,7 +249,7 @@ __wt_session_compact_check_interrupted(WT_SESSION_IMPL *session)
          * Otherwise, it is expected to potentially interrupt background compaction and should not
          * be exposed as a warning.
          */
-        if (!background_compaction || !F_ISSET(conn, WT_CONN_CLOSING | WT_CONN_MINIMAL))
+        if (!background_compaction || !F_ISSET_ATOMIC_32(conn, WT_CONN_CLOSING | WT_CONN_MINIMAL))
             __wt_verbose_warning(session, WT_VERB_COMPACT, "%s", interrupt_msg);
         else
             __wt_verbose(session, WT_VERB_COMPACT, "%s", interrupt_msg);
@@ -275,7 +275,7 @@ __compact_checkpoint(WT_SESSION_IMPL *session)
     WT_RET(__wt_session_compact_check_interrupted(session));
 
     WT_STAT_CONN_INCR(session, checkpoints_compact);
-    return (__wt_txn_checkpoint(session, checkpoint_cfg, true));
+    return (__wt_checkpoint_db(session, checkpoint_cfg, true));
 }
 
 /*

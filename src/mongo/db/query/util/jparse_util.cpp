@@ -28,19 +28,20 @@
  */
 #include "mongo/db/query/util/jparse_util.h"
 
-#include <boost/lexical_cast.hpp>
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/query/datetime/date_time_support.h"
+
 #include <cstdint>
 #include <cstring>
 #include <exception>
-#include <fmt/format.h>
 #include <memory>
 #include <ostream>
 #include <string>
 #include <type_traits>
 #include <utility>
 
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/query/datetime/date_time_support.h"
+#include <boost/lexical_cast.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -49,7 +50,6 @@ namespace mongo {
 using std::ostringstream;
 using std::string;
 using std::unique_ptr;
-using namespace fmt::literals;
 
 #if 0
 #define MONGO_JPARSE_UTIL_DEBUG(message)                                \
@@ -575,7 +575,7 @@ Status JParseUtil::numberLong(StringData fieldName, BSONObjBuilder& builder) {
     if (!parsedStatus.isOK()) {
         return _jparse.parseError("Expecting number in NumberLong");
     }
-    _jparse._input = endptr;
+    _jparse._input.remove_prefix(endptr - _jparse._input.data());
 
     // Check that a number beginning in quotations ends in quotations.
     if (quotedNum && !readToken(DOUBLEQUOTE)) {
@@ -646,8 +646,8 @@ Status JParseUtil::number(StringData fieldName, BSONObjBuilder& builder) {
     MONGO_JPARSE_UTIL_DEBUG("Type: double");
     builder.append(fieldName, retd);
 
-    _jparse._input = endptrd;
-    if (_jparse._input >= _jparse._input_end) {
+    _jparse._input.remove_prefix(endptrd - _jparse._input.data());
+    if (_jparse._input.empty()) {
         return _jparse.parseError("Trailing number at end of input");
     }
     return Status::OK();
@@ -680,7 +680,10 @@ BSONObj fromFuzzerJson(const char* jsonString, int* len) {
     }
 
     if (ret != Status::OK()) {
-        uasserted(9180302, "code {}: {}: {}"_format(ret.code(), ret.codeString(), ret.reason()));
+        uasserted(
+            9180302,
+            fmt::format(
+                "code {}: {}: {}", fmt::underlying(ret.code()), ret.codeString(), ret.reason()));
     }
     if (len)
         *len = jparseutil.offset();
@@ -688,7 +691,7 @@ BSONObj fromFuzzerJson(const char* jsonString, int* len) {
 }
 
 BSONObj fromFuzzerJson(StringData str) {
-    return fromFuzzerJson(str.toString().c_str());
+    return fromFuzzerJson(std::string{str}.c_str());
 }
 
 } /* namespace mongo */

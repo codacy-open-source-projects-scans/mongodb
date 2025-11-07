@@ -29,30 +29,28 @@
 
 #include "mongo/db/s/active_migrations_registry.h"
 
-#include <absl/container/node_hash_map.h>
-#include <boost/none.hpp>
-#include <fmt/format.h>
-#include <mutex>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/migration_destination_manager.h"
 #include "mongo/db/s/migration_source_manager.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
+
+#include <mutex>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kShardingMigration
 
@@ -251,13 +249,10 @@ BSONObj ActiveMigrationsRegistry::getActiveMigrationStatusReport(OperationContex
     // The state of the MigrationSourceManager or the MigrationDestinationManager could change
     // between taking and releasing the mutex above and then taking the collection lock here, but
     // that's fine because it isn't important to return information on a migration that just ended
-    // or started. This is just best effort and desireable for reporting, and then diagnosing,
+    // or started. This is just best effort and desirable for reporting, and then diagnosing,
     // migrations that are stuck.
     if (nss) {
-        // Lock the collection so nothing changes while we're getting the migration report.
-        AutoGetCollection autoColl(opCtx, nss.value(), MODE_IS);
-        const auto scopedCsr =
-            CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss.value());
+        const auto scopedCsr = CollectionShardingRuntime::acquireShared(opCtx, nss.value());
 
         if (auto msm = MigrationSourceManager::get(*scopedCsr)) {
             return msm->getMigrationStatusReport(scopedCsr);

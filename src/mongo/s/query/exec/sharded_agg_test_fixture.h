@@ -30,10 +30,11 @@
 #pragma once
 
 #include "mongo/bson/json.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache_test_fixture.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/process_interface/stub_mongo_process_interface.h"
-#include "mongo/s/catalog_cache_test_fixture.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -51,7 +52,10 @@ public:
     }
 };
 
-class ShardedAggTestFixture : public ShardCatalogCacheTestFixture {
+/**
+ * TODO SERVER-111290 Remove external dependencies on this class.
+ */
+class MONGO_MOD_NEEDS_REPLACEMENT ShardedAggTestFixture : public ShardCatalogCacheTestFixture {
 public:
     const NamespaceString kTestAggregateNss =
         NamespaceString::createNamespaceString_forTest("unittests", "sharded_agg_test");
@@ -102,11 +106,9 @@ public:
         expectGetDatabase(nss);
         expectCollectionAndChunksAggregation(
             nss, epoch, timestamp, UUID::gen(), shardKey, chunkDistribution);
-        expectCollectionAndIndexesAggregation(
-            nss, epoch, timestamp, UUID::gen(), shardKey, boost::none, {});
 
         const auto cri = future.default_timed_get();
-        ASSERT(cri->cm.isSharded());
+        ASSERT(cri->isSharded());
     }
 
 protected:

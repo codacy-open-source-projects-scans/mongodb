@@ -33,11 +33,10 @@
 
 #include "mongo/db/auth/action_set.h"
 
-#include <memory>
-
 #include "mongo/db/auth/action_type.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <memory>
 
 namespace mongo {
 namespace {

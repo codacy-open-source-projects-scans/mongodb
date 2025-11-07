@@ -38,9 +38,11 @@
 #include "mongo/unittest/thread_assertion_monitor.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/notification.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/producer_consumer_queue.h"
 
-namespace mongo::transport::grpc {
+namespace mongo::transport {
+namespace MONGO_MOD_PARENT_PRIVATE grpc {
 
 class MockRPC {
 public:
@@ -187,22 +189,20 @@ public:
 
     ~MockStub() {}
 
-    std::shared_ptr<MockClientStream> unauthenticatedCommandStream(MockClientContext* ctx) {
-        return _makeStream(MockRPC::MethodName::UnauthenticatedCommandStream, ctx);
+    std::shared_ptr<MockClientStream> unauthenticatedCommandStream(
+        MockClientContext* ctx, const std::shared_ptr<GRPCReactor>& reactor) {
+        return _makeStream(MockRPC::MethodName::UnauthenticatedCommandStream, ctx, reactor);
     }
 
-    std::shared_ptr<MockClientStream> authenticatedCommandStream(MockClientContext* ctx) {
-        return _makeStream(MockRPC::MethodName::AuthenticatedCommandStream, ctx);
+    std::shared_ptr<MockClientStream> authenticatedCommandStream(
+        MockClientContext* ctx, const std::shared_ptr<GRPCReactor>& reactor) {
+        return _makeStream(MockRPC::MethodName::AuthenticatedCommandStream, ctx, reactor);
     }
 
 private:
     std::shared_ptr<MockClientStream> _makeStream(MockRPC::MethodName methodName,
-                                                  MockClientContext* ctx) {
-        MetadataView clientMetadata;
-        for (auto& kvp : ctx->_metadata) {
-            clientMetadata.insert(kvp);
-        }
-
+                                                  MockClientContext* ctx,
+                                                  const std::shared_ptr<GRPCReactor>& reactor) {
         BidirectionalPipe pipe;
         auto metadataPF = makePromiseFuture<MetadataContainer>();
         auto terminationStatusPF = makePromiseFuture<::grpc::Status>();
@@ -216,16 +216,17 @@ private:
                                                std::move(terminationStatusPF.promise),
                                                cancellationState,
                                                std::move(*pipe.left),
-                                               clientMetadata);
+                                               ctx->_metadata);
         rpc.serverCtx = std::make_unique<MockServerContext>(rpc.serverStream.get());
         auto clientStream =
             std::make_shared<MockClientStream>(_channel->getRemote(),
                                                std::move(metadataPF.future),
                                                std::move(terminationStatusPF.future),
                                                cancellationState,
-                                               std::move(*pipe.right));
+                                               std::move(*pipe.right),
+                                               reactor);
 
-        ctx->_stream = clientStream.get();
+        ctx->_stream = clientStream;
         _channel->sendRPC(std::move(rpc));
         return clientStream;
     }
@@ -233,4 +234,5 @@ private:
     std::shared_ptr<MockChannel> _channel;
 };
 
-}  // namespace mongo::transport::grpc
+}  // namespace MONGO_MOD_PARENT_PRIVATE grpc
+}  // namespace mongo::transport

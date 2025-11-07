@@ -26,6 +26,22 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+#include "mongo/db/exec/sbe/values/value_printer.h"
+
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/oid.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/basic_types_gen.h"
+#include "mongo/db/exec/sbe/values/block_interface.h"
+#include "mongo/db/exec/sbe/values/cell_interface.h"
+#include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/query/datetime/date_time_support.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/storage/key_string/key_string.h"
+#include "mongo/platform/decimal128.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/hex.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -34,27 +50,6 @@
 #include <vector>
 
 #include <fmt/format.h>
-
-#include "mongo/bson/bsontypes.h"
-#include "mongo/bson/oid.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/basic_types_gen.h"
-#include "mongo/db/exec/sbe/makeobj_spec.h"
-#include "mongo/db/exec/sbe/sort_spec.h"
-#include "mongo/db/exec/sbe/values/block_interface.h"
-#include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/exec/sbe/values/value_printer.h"
-#include "mongo/db/fts/fts_matcher.h"
-#include "mongo/db/fts/fts_query_impl.h"
-#include "mongo/db/query/datetime/date_time_support.h"
-#include "mongo/db/query/index_bounds.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/storage/key_string/key_string.h"
-#include "mongo/platform/decimal128.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/hex.h"
-#include "mongo/util/pcre.h"
-#include "mongo/util/pcre_util.h"
 
 namespace mongo::sbe::value {
 
@@ -139,8 +134,11 @@ void ValuePrinter<T>::writeTagToStream(TypeTags tag) {
         case TypeTags::bsonBinData:
             stream << "bsonBinData";
             break;
-        case TypeTags::LocalLambda:
-            stream << "LocalLambda";
+        case TypeTags::LocalOneArgLambda:
+            stream << "LocalOneArgLambda";
+            break;
+        case TypeTags::LocalTwoArgLambda:
+            stream << "LocalTwoArgLambda";
             break;
         case TypeTags::bsonUndefined:
             stream << "bsonUndefined";
@@ -513,14 +511,14 @@ void ValuePrinter<T>::writeValueToStream(TypeTags tag, Value val, size_t depth) 
 
             // If the BinData is a correctly sized newUUID, display it as such.
             if (type == newUUID && len == kNewUUIDLength) {
-                using namespace fmt::literals;
                 StringData sd(data, len);
                 // 4 Octets - 2 Octets - 2 Octets - 2 Octets - 6 Octets
-                stream << "UUID(\"{}-{}-{}-{}-{}\")"_format(hexblob::encodeLower(sd.substr(0, 4)),
-                                                            hexblob::encodeLower(sd.substr(4, 2)),
-                                                            hexblob::encodeLower(sd.substr(6, 2)),
-                                                            hexblob::encodeLower(sd.substr(8, 2)),
-                                                            hexblob::encodeLower(sd.substr(10, 6)));
+                stream << fmt::format("UUID(\"{}-{}-{}-{}-{}\")",
+                                      hexblob::encodeLower(sd.substr(0, 4)),
+                                      hexblob::encodeLower(sd.substr(4, 2)),
+                                      hexblob::encodeLower(sd.substr(6, 2)),
+                                      hexblob::encodeLower(sd.substr(8, 2)),
+                                      hexblob::encodeLower(sd.substr(10, 6)));
                 break;
             }
 
@@ -532,13 +530,16 @@ void ValuePrinter<T>::writeValueToStream(TypeTags tag, Value val, size_t depth) 
         case TypeTags::bsonUndefined:
             stream << "undefined";
             break;
-        case TypeTags::LocalLambda:
-            stream << "LocalLambda";
+        case TypeTags::LocalOneArgLambda:
+            stream << "LocalOneArgLambda";
+            break;
+        case TypeTags::LocalTwoArgLambda:
+            stream << "LocalTwoArgLambda";
             break;
         case TypeTags::keyString: {
             auto ks = getKeyString(val);
             stream << "KS(";
-            writeStringDataToStream(hexblob::encode(ks->getKeyStringView()), false /*addQuotes*/);
+            writeStringDataToStream(ks->toString(), false /*addQuotes*/);
             stream << ")";
             break;
         }
@@ -618,7 +619,7 @@ void ValuePrinter<T>::writeValueToStream(TypeTags tag, Value val, size_t depth) 
             stream << getExtendedTypeOps(tag)->print(val);
             break;
         default:
-            MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE_TASSERT(11122921);
     }
 }
 

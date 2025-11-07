@@ -45,6 +45,7 @@ class ContinuousAddRemoveShard(interface.Hook):
         transition_configsvr=False,
         add_remove_random_shards=False,
         move_primary_comment=None,
+        move_sessions_collection=False,
         transition_intervals=TRANSITION_INTERVALS,
     ):
         interface.Hook.__init__(self, hook_logger, fixture, ContinuousAddRemoveShard.DESCRIPTION)
@@ -55,6 +56,7 @@ class ContinuousAddRemoveShard(interface.Hook):
         self._transition_configsvr = transition_configsvr
         self._add_remove_random_shards = add_remove_random_shards
         self._move_primary_comment = move_primary_comment
+        self._move_sessions_collection = move_sessions_collection
         self._transition_intervals = transition_intervals
 
         # The action file names need to match the same construction as found in
@@ -104,6 +106,7 @@ class ContinuousAddRemoveShard(interface.Hook):
             self._transition_configsvr,
             self._add_remove_random_shards,
             self._move_primary_comment,
+            self._move_sessions_collection,
             self._transition_intervals,
         )
         self.logger.info("Starting the add/remove shard thread.")
@@ -136,6 +139,7 @@ class _AddRemoveShardThread(threading.Thread):
     _NAMESPACE_NOT_FOUND = 26
     _INTERRUPTED = 11601
     _CONFLICTING_OPERATION_IN_PROGRESS = 117
+    _DATABASE_DROP_PENDING = 215
     _BACKGROUND_OPERATION_IN_PROGRESS_FOR_NAMESPACE = 12587
     _ILLEGAL_OPERATION = 20
     _SHARD_NOT_FOUND = 70
@@ -144,7 +148,11 @@ class _AddRemoveShardThread(threading.Thread):
     _RESHARD_COLLECTION_IN_PROGRESS = 338
     _LOCK_BUSY = 46
     _FAILED_TO_SATISFY_READ_PREFERENCE = 133
+    _OPLOG_OPERATION_UNSUPPORTED = 62
 
+    _CONFIG_DATABASE_NAME = "config"
+    _LOGICAL_SESSIONS_COLLECTION_NAME = "system.sessions"
+    _LOGICAL_SESSIONS_NAMESPACE = _CONFIG_DATABASE_NAME + "." + _LOGICAL_SESSIONS_COLLECTION_NAME
     _UNMOVABLE_NAMESPACE_REGEXES = [
         r"\.system\.",
         r"enxcol_\..*\.esc",
@@ -162,6 +170,7 @@ class _AddRemoveShardThread(threading.Thread):
         transition_configsvr,
         add_remove_random_shards,
         move_primary_comment,
+        move_sessions_collection,
         transition_intervals,
     ):
         threading.Thread.__init__(self, name="AddRemoveShardThread")
@@ -173,6 +182,7 @@ class _AddRemoveShardThread(threading.Thread):
         self._transition_configsvr = transition_configsvr
         self._add_remove_random_shards = add_remove_random_shards
         self._move_primary_comment = move_primary_comment
+        self._move_sessions_collection = move_sessions_collection
         self._transition_intervals = transition_intervals
         self._client = fixture_interface.build_client(self._fixture, self._auth_options)
         self._current_config_mode = self._current_fixture_mode()
@@ -271,7 +281,7 @@ class _AddRemoveShardThread(threading.Thread):
                 if self.__lifecycle.poll_for_idle_request():
                     self.__lifecycle.send_idle_acknowledgement()
 
-        except Exception:  # pylint: disable=W0703
+        except Exception:
             # Proactively log the exception when it happens so it will be
             # flushed immediately.
             self.logger.exception("Add/Remove Shard Thread threw exception")
@@ -311,6 +321,10 @@ class _AddRemoveShardThread(threading.Thread):
             # run moveCollection.
             return True
 
+        if err.code == self._DATABASE_DROP_PENDING:
+            # A concurrent dropDatabase can prevent migrations.
+            return True
+
         if err.code == self._BACKGROUND_OPERATION_IN_PROGRESS_FOR_NAMESPACE:
             # Ongoing background operations (e.g. index builds) will prevent moveCollection until
             # they complete.
@@ -338,11 +352,38 @@ class _AddRemoveShardThread(threading.Thread):
                 if re.search(regex, namespace):
                     return True
 
+        if err.code == self._OPLOG_OPERATION_UNSUPPORTED:
+            # If the collection is untracked and the balancer is off, the moveCollection operation
+            # is attempted by the hook but the coordinator cannot proceed because operations are not
+            # supported for untracked collections.
+            return True
+
+        return False
+
+    def _is_expected_move_range_error(self, err):
+        if err.code == self._NAMESPACE_NOT_FOUND:
+            # A concurrent dropDatabase or dropCollection could have removed the database before we
+            # run moveRange.
+            return True
+        if err.code == self._DATABASE_DROP_PENDING:
+            # A concurrent dropDatabase can prevent migrations.
+            return True
+        if err.code == self._RESHARD_COLLECTION_IN_PROGRESS:
+            # A concurrent reshardCollection or unshardCollection could have started before we
+            # run moveRange.
+            return True
+        if err.code == self._CONFLICTING_OPERATION_IN_PROGRESS:
+            # This error is expected when balancing is blocked, e.g. via 'setAllowMigrations'.
+            return True
         return False
 
     def _is_expected_move_primary_error_code(self, code):
         if code == self._NAMESPACE_NOT_FOUND:
             # A concurrent dropDatabase could have removed the database before we run movePrimary.
+            return True
+
+        if code == self._DATABASE_DROP_PENDING:
+            # A concurrent dropDatabase can prevent migrations.
             return True
 
         if code == self._CONFLICTING_OPERATION_IN_PROGRESS:
@@ -390,67 +431,78 @@ class _AddRemoveShardThread(threading.Thread):
     def _decomission_removed_shard(self, shard_obj):
         start_time = time.time()
 
-        while True:
-            if time.time() - start_time > self.TRANSITION_TIMEOUT_SECS:
-                msg = "Timed out waiting for removed shard to finish data clean up"
+        direct_shard_conn = pymongo.MongoClient(shard_obj.get_driver_connection_url())
+
+        with shard_obj.removeshard_teardown_mutex:
+            while True:
+                if time.time() - start_time > self.TRANSITION_TIMEOUT_SECS:
+                    msg = "Timed out waiting for removed shard to finish data clean up"
+                    self.logger.error(msg)
+                    raise errors.ServerFailure(msg)
+
+                # Wait until any DDL, resharding, transactions, and migration ops are cleaned up.
+                # TODO SERVER-90782 Change these to be assertions, rather than waiting for the collections
+                # to be empty
+                if len(list(direct_shard_conn.config.system.sharding_ddl_coordinators.find())) != 0:
+                    self.logger.info(
+                        "Waiting for config.system.sharding_ddl_coordinators to be empty before decomissioning."
+                    )
+                    time.sleep(1)
+                    continue
+
+                if (
+                    len(list(direct_shard_conn.config.localReshardingOperations.recipient.find()))
+                    != 0
+                ):
+                    self.logger.info(
+                        "Waiting for config.localReshardingOperations.recipient to be empty before decomissioning."
+                    )
+                    time.sleep(1)
+                    continue
+
+                if len(list(direct_shard_conn.config.transaction_coordinators.find())) != 0:
+                    self.logger.info(
+                        "Waiting for config.transaction_coordinators to be empty before decomissioning."
+                    )
+                    time.sleep(1)
+                    continue
+
+                # TODO SERVER-91474 Wait for ongoing transactions to finish on participants
+                if self._get_number_of_ongoing_transactions(direct_shard_conn) != 0:
+                    self.logger.info(
+                        "Waiting for ongoing transactions to commit or abort before decomissioning."
+                    )
+                    time.sleep(1)
+                    continue
+
+                # TODO SERVER-50144 Wait for config.rangeDeletions to be empty before decomissioning
+
+                all_dbs = direct_shard_conn.admin.command({"listDatabases": 1})
+                for db in all_dbs["databases"]:
+                    if db["name"] not in ["admin", "config", "local"] and db["empty"] is False:
+                        all_collections = direct_shard_conn.db_name.command({"listCollections": 1})
+                        for coll in all_collections:
+                            if len(list(direct_shard_conn.db_name.coll.find())) != 0:
+                                msg = "Found non-empty collection after removing shard: " + coll
+                                self.logger.error(msg)
+                                raise errors.ServerFailure(msg)
+
+                break
+
+            for db_name in direct_shard_conn.list_database_names():
+                if db_name in ["admin", "config", "local"]:
+                    continue
+                self.logger.info(f"Dropping database before decommissioning: {db_name}")
+                direct_shard_conn.drop_database(db_name)
+                self.logger.info(f"Successfully dropped database: {db_name}")
+
+            teardown_handler = fixture_interface.FixtureTeardownHandler(self.logger)
+            shard_obj.removeshard_teardown_marker = True
+            teardown_handler.teardown(shard_obj, "shard")
+            if not teardown_handler.was_successful():
+                msg = "Error when decomissioning shard."
                 self.logger.error(msg)
-                raise errors.ServerFailure(msg)
-
-            direct_shard_conn = pymongo.MongoClient(shard_obj.get_driver_connection_url())
-
-            # Wait until any DDL, resharding, transactions, and migration ops are cleaned up.
-            # TODO SERVER-90782 Change these to be assertions, rather than waiting for the collections
-            # to be empty
-            if len(list(direct_shard_conn.config.system.sharding_ddl_coordinators.find())) != 0:
-                self.logger.info(
-                    "Waiting for config.system.sharding_ddl_coordinators to be empty before decomissioning."
-                )
-                time.sleep(1)
-                continue
-
-            if len(list(direct_shard_conn.config.localReshardingOperations.recipient.find())) != 0:
-                self.logger.info(
-                    "Waiting for config.localReshardingOperations.recipient to be empty before decomissioning."
-                )
-                time.sleep(1)
-                continue
-
-            if len(list(direct_shard_conn.config.transaction_coordinators.find())) != 0:
-                self.logger.info(
-                    "Waiting for config.transaction_coordinators to be empty before decomissioning."
-                )
-                time.sleep(1)
-                continue
-
-            # TODO SERVER-91474 Wait for ongoing transactions to finish on participants
-            if self._get_number_of_ongoing_transactions(direct_shard_conn) != 0:
-                self.logger.info(
-                    "Waiting for ongoing transactions to commit or abort before decomissioning."
-                )
-                time.sleep(1)
-                continue
-
-            # TODO SERVER-50144 Wait for config.rangeDeletions to be empty before decomissioning
-
-            all_dbs = direct_shard_conn.admin.command({"listDatabases": 1})
-            for db in all_dbs["databases"]:
-                if db["name"] not in ["admin", "config", "local"] and db["empty"] is False:
-                    all_collections = direct_shard_conn.db_name.command({"listCollections": 1})
-                    for coll in all_collections:
-                        if len(list(direct_shard_conn.db_name.coll.find())) != 0:
-                            msg = "Found non-empty collection after removing shard: " + coll
-                            self.logger.error(msg)
-                            raise errors.ServerFailure(msg)
-
-            break
-
-        teardown_handler = fixture_interface.FixtureTeardownHandler(self.logger)
-        shard_obj.removeshard_teardown_marker = True
-        teardown_handler.teardown(shard_obj, "shard")
-        if not teardown_handler.was_successful():
-            msg = "Error when decomissioning shard."
-            self.logger.error(msg)
-            raise errors.ServerFailure(teardown_handler.get_error_message())
+                raise errors.ServerFailure(teardown_handler.get_error_message())
 
     def _get_tracked_collections_on_shard(self, shard_id):
         return list(
@@ -501,7 +553,15 @@ class _AddRemoveShardThread(threading.Thread):
                     untracked_collections.append(collection)
         return untracked_collections
 
-    def _move_all_collections_from_shard(self, collections, source):
+    def _get_collection_uuid(self, namespace):
+        collection_entry = self._client.config.collections.find_one({"_id": namespace})
+        if collection_entry and "uuid" in collection_entry:
+            return collection_entry["uuid"]
+        msg = "Could not find the collection uuid for " + namespace
+        self.logger.warning(msg)
+        return None
+
+    def _move_all_unsharded_collections_from_shard(self, collections, source):
         for collection in collections:
             namespace = collection["_id"]
             destination = self._get_other_shard_id(source)
@@ -520,6 +580,49 @@ class _AddRemoveShardThread(threading.Thread):
                         + "operation in progress"
                     )
                     return
+
+    def _move_sessions_collection_from_shard(self, source):
+        namespace = self._LOGICAL_SESSIONS_NAMESPACE
+        collection_uuid = self._get_collection_uuid(namespace)
+        if collection_uuid is None:
+            return
+        chunks_on_source = [
+            doc
+            for doc in self._client["config"]["chunks"].find(
+                {"shard": source, "uuid": collection_uuid}
+            )
+        ]
+
+        for chunk in chunks_on_source:
+            destination = self._get_other_shard_id(source)
+            self.logger.info(
+                "Running moveRange for "
+                + namespace
+                + " to move the chunk "
+                + str(chunk)
+                + " to "
+                + destination
+            )
+            try:
+                self._client.admin.command(
+                    {
+                        "moveRange": namespace,
+                        "min": chunk["min"],
+                        "max": chunk["max"],
+                        "toShard": destination,
+                    }
+                )
+            except pymongo.errors.OperationFailure as err:
+                if not self._is_expected_move_range_error(err):
+                    raise err
+                self.logger.info(
+                    "Ignoring error when moving the chunk "
+                    + str(chunk)
+                    + " for the collection '"
+                    + namespace
+                    + "': "
+                    + str(err)
+                )
 
     def _move_all_primaries_from_shard(self, databases, source):
         for database in databases:
@@ -593,9 +696,11 @@ class _AddRemoveShardThread(threading.Thread):
         # still move collections half of the time.
         should_move = not self._random_balancer_on or random.random() < 0.5
         if should_move:
-            self._move_all_collections_from_shard(
+            self._move_all_unsharded_collections_from_shard(
                 tracked_unsharded_colls + untracked_unsharded_colls, source
             )
+        if self._move_sessions_collection:
+            self._move_sessions_collection_from_shard(source)
         self._move_all_primaries_from_shard(transition_result["dbsToMove"], source)
 
     def _get_balancer_status_on_shard_not_found(self, prev_round_interrupted, msg):
@@ -688,7 +793,15 @@ class _AddRemoveShardThread(threading.Thread):
                         "Completed " + msg + " in %0d ms", (time.time() - start_time) * 1000
                     )
                     return True
-                elif res["state"] == "started":
+
+                # Check whether the transition timeout has elapsed. Performing the check at this point
+                # ensures that the most updated transition state is logged if the timeout is reached.
+                if time.time() - start_time > self.TRANSITION_TIMEOUT_SECS:
+                    msg = "Could not " + msg + " with last response: " + str(res)
+                    self.logger.error(msg)
+                    raise errors.ServerFailure(msg)
+
+                if res["state"] == "started":
                     if self._client.config.chunks.count_documents({"shard": shard_id}) == 0:
                         self._should_wait_for_balancer_round = True
                 elif res["state"] == "ongoing":
@@ -698,10 +811,9 @@ class _AddRemoveShardThread(threading.Thread):
                 prev_round_interrupted = False
                 time.sleep(1)
 
-                if time.time() - start_time > self.TRANSITION_TIMEOUT_SECS:
-                    msg = "Could not " + msg + " with last response: " + str(res)
-                    self.logger.error(msg)
-                    raise errors.ServerFailure(msg)
+            except pymongo.errors.AutoReconnect:
+                self.logger.info("AutoReconnect exception thrown, retrying...")
+                time.sleep(0.1)
             except pymongo.errors.OperationFailure as err:
                 # Some workloads add and remove shards so removing the config shard may fail transiently.
                 if err.code in [self._ILLEGAL_OPERATION] and "would remove the last shard" in str(
@@ -773,6 +885,8 @@ class _AddRemoveShardThread(threading.Thread):
         else:
             self.logger.info("Starting to add shard " + shard_id)
 
+        start_time = time.time()
+
         msg = "transitioning from dedicated" if shard_id == "config" else "adding shard"
 
         while True:
@@ -787,7 +901,14 @@ class _AddRemoveShardThread(threading.Thread):
                     self.logger.info("Adding shard with new shardId: " + shard_name)
                     self._client.admin.command({"addShard": shard_host, "name": shard_name})
                     self._shard_name_suffix = self._shard_name_suffix + 1
+
+                self.logger.info(
+                    "Completed " + msg + " in %0d ms", (time.time() - start_time) * 1000
+                )
                 return
+            except pymongo.errors.AutoReconnect:
+                self.logger.info("AutoReconnect exception thrown, retrying...")
+                time.sleep(0.1)
             except pymongo.errors.OperationFailure as err:
                 # Some suites run with forced failovers, if transitioning fails with a retryable
                 # network error, we should retry.

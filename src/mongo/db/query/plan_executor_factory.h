@@ -29,32 +29,32 @@
 
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-#include <memory>
-#include <queue>
-#include <utility>
-
 #include "mongo/base/status_with.h"
-#include "mongo/db/exec/multi_plan.h"
+#include "mongo/db/exec/classic/multi_plan.h"
+#include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/exec/working_set.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/plan_executor_pipeline.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/plan_yield_policy_sbe.h"
 #include "mongo/db/query/query_planner.h"
-#include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/sbe_plan_ranker.h"
+#include "mongo/db/query/stage_builder/classic_stage_builder.h"
 #include "mongo/db/query/stage_builder/sbe/builder_data.h"
-#include "mongo/db/shard_role.h"
-#include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <memory>
+#include <utility>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::plan_executor_factory {
 
@@ -78,11 +78,11 @@ namespace mongo::plan_executor_factory {
  * Note that the PlanExecutor will use the ExpressionContext associated with 'cq' and the
  * OperationContext associated with that ExpressionContext.
  */
-StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
+MONGO_MOD_PUBLIC StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     std::unique_ptr<CanonicalQuery> cq,
     std::unique_ptr<WorkingSet> ws,
     std::unique_ptr<PlanStage> rootStage,
-    VariantCollectionPtrOrAcquisition collection,
+    const boost::optional<CollectionAcquisition>& collection,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     size_t plannerOptions,
     NamespaceString nss = NamespaceString::kEmpty,
@@ -96,25 +96,25 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
  * Note that the PlanExecutor will use the OperationContext associated with the 'expCtx'
  * ExpressionContext.
  */
-StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
+MONGO_MOD_PUBLIC StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     std::unique_ptr<WorkingSet> ws,
     std::unique_ptr<PlanStage> rootStage,
-    VariantCollectionPtrOrAcquisition collection,
+    const boost::optional<CollectionAcquisition>& collection,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
     size_t plannerOptions,
     NamespaceString nss = NamespaceString::kEmpty,
     std::unique_ptr<QuerySolution> qs = nullptr);
 
 // TODO: SERVER-86878 Remove `StatusWith` return type from plan_executor_factory::make().
-StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
+MONGO_MOD_PUBLIC StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     OperationContext* opCtx,
     std::unique_ptr<WorkingSet> ws,
     std::unique_ptr<PlanStage> rootStage,
     std::unique_ptr<QuerySolution> qs,
     std::unique_ptr<CanonicalQuery> cq,
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    VariantCollectionPtrOrAcquisition collection,
+    const boost::optional<CollectionAcquisition>& collection,
     size_t plannerOptions,
     NamespaceString nss,
     PlanYieldPolicy::YieldPolicy yieldPolicy,
@@ -134,6 +134,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
     std::unique_ptr<CanonicalQuery> cq,
     std::unique_ptr<QuerySolution> solution,
     std::pair<std::unique_ptr<sbe::PlanStage>, stage_builder::PlanStageData> root,
+    const MultipleCollectionAccessor& mca,
     size_t plannerOptions,
     NamespaceString nss,
     std::unique_ptr<PlanYieldPolicySBE> yieldPolicy,
@@ -163,9 +164,9 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> make(
 /**
  * Constructs a plan executor for executing the given 'pipeline'.
  */
-std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> make(
+MONGO_MOD_PUBLIC std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> make(
     boost::intrusive_ptr<ExpressionContext> expCtx,
-    std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
+    std::unique_ptr<Pipeline> pipeline,
     PlanExecutorPipeline::ResumableScanType resumableScanType =
         PlanExecutorPipeline::ResumableScanType::kNone);
 

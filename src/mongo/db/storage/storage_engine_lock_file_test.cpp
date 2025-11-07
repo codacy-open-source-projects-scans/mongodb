@@ -28,24 +28,24 @@
  */
 
 #include <cstdint>
+#include <filesystem>
 #include <fstream>  // IWYU pragma: keep
 
 #ifndef _WIN32
 #include <sys/stat.h>
 #endif
 
-#include <boost/filesystem/directory.hpp>
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
-#include <boost/iterator/iterator_facade.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/storage/storage_engine_lock_file.h"
 #include "mongo/platform/process_id.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/temp_dir.h"
+#include "mongo/unittest/unittest.h"
+
+#include <boost/filesystem/directory.hpp>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/iterator/iterator_facade.hpp>
 
 #if defined(MONGO_CONFIG_HAVE_HEADER_UNISTD_H)
 #include <unistd.h>
@@ -57,6 +57,11 @@ using mongo::unittest::TempDir;
 using std::string;
 
 using namespace mongo;
+
+// Ensures a file exists if it doesn't already.
+void touch(std::string filename) {
+    (void)std::ofstream(filename.c_str());
+}
 
 TEST(StorageEngineLockFileTest, UncleanShutdownNoExistingFile) {
     TempDir tempDir("StorageEngineLockFileTest_UncleanShutdownNoExistingFile");
@@ -98,7 +103,7 @@ TEST(StorageEngineLockFileTest, OpenInvalidDirectory) {
 TEST(StorageEngineLockFileTest, OpenInvalidFilename) {
     TempDir tempDir("StorageEngineLockFileTest_OpenInvalidFilename");
     std::string filename(tempDir.path() + "/some_file");
-    std::ofstream(filename.c_str());
+    touch(filename.c_str());
     StorageEngineLockFile lockFile(filename);
     Status status = lockFile.open();
     ASSERT_NOT_OK(status);
@@ -116,7 +121,7 @@ TEST(StorageEngineLockFileTest, OpenEmptyLockFile) {
     TempDir tempDir("StorageEngineLockFileTest_OpenEmptyLockFile");
     StorageEngineLockFile lockFile(tempDir.path());
     std::string filename(lockFile.getFilespec());
-    std::ofstream(filename.c_str());
+    touch(filename.c_str());
     ASSERT_OK(lockFile.open());
     lockFile.close();
 }

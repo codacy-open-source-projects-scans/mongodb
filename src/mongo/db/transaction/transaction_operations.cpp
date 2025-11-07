@@ -29,12 +29,6 @@
 
 #include "mongo/db/transaction/transaction_operations.h"
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-#include <memory>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/namespace_string.h"
@@ -42,6 +36,13 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <memory>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -95,6 +96,7 @@ std::vector<BSONObj> packOperationsIntoApplyOps(
 }  // namespace
 
 MONGO_FAIL_POINT_DEFINE(hangAfterLoggingApplyOpsForTransaction);
+MONGO_FAIL_POINT_DEFINE(skipLoggingLastOpForTransaction);
 
 // static
 void TransactionOperations::packTransactionStatementsForApplyOps(
@@ -118,15 +120,12 @@ void TransactionOperations::packTransactionStatementsForApplyOps(
         stmt.extractPrePostImageForTransaction(imageToWrite);
     }
     try {
-        // BSONArrayBuilder will throw a BSONObjectTooLarge exception if we exceeded the max BSON
-        // size.
-        opsArray.done();
-    } catch (const AssertionException& e) {
-        // Change the error code to TransactionTooLarge if it is BSONObjectTooLarge.
-        uassert(ErrorCodes::TransactionTooLarge,
-                e.reason(),
-                e.code() != ErrorCodes::BSONObjectTooLarge);
-        throw;
+        // If the BSONArrayBuilder exceeds the max BSON size, throw TransactionTooLarge.
+        uassertStatusOK(opsArray.done().validateBSONObjSize().addContext(
+            "Packing transaction statements failed."));
+    } catch (const ExceptionFor<ErrorCodes::BSONObjectTooLarge>& e) {
+        // Change BSONObjectTooLarge => TransactionTooLarge.
+        uasserted(ErrorCodes::TransactionTooLarge, e.reason());
     }
 }
 
@@ -321,6 +320,13 @@ std::size_t TransactionOperations::logOplogEntries(
         auto firstOp = stmtsIter == _transactionOperations.begin();
         auto lastOp = nextStmt == _transactionOperations.end();
 
+        // Skip logging the last oplog entry if this failpoint is enabled.
+        if (MONGO_unlikely(skipLoggingLastOpForTransaction.shouldFail()) && lastOp) {
+            // This will cause the loop to exit.
+            stmtsIter = nextStmt;
+            continue;
+        }
+
         auto implicitPrepare = lastOp && prepare;
         auto isPartialTxn = !lastOp && !applyOpsAppliedSeparately;
 
@@ -334,7 +340,9 @@ std::size_t TransactionOperations::logOplogEntries(
         }
 
         // A 'prepare' oplog entry should never include a 'partialTxn' field.
-        invariant(!(isPartialTxn && implicitPrepare));
+        invariant(!(isPartialTxn && implicitPrepare),
+                  str::stream() << "isPartialTxn: " << isPartialTxn
+                                << ", implicitPrepare: " << implicitPrepare);
         if (implicitPrepare) {
             applyOpsBuilder.append("prepare", true);
         }

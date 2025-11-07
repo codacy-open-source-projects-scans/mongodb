@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <cstddef>
-#include <functional>
-#include <memory>
-#include <string>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -55,6 +48,14 @@
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 
@@ -228,7 +229,7 @@ public:
 
     /**
      * Same as waitForEvent without an OperationContext, but if the OperationContext gets
-     * interrupted, will return the kill code, or, if the the deadline passes, will return
+     * interrupted, will return the kill code, or, if the deadline passes, will return
      * Status::OK with cv_status::timeout.
      */
     virtual StatusWith<stdx::cv_status> waitForEvent(OperationContext* opCtx,
@@ -412,9 +413,10 @@ public:
     virtual void appendConnectionStats(ConnectionPoolStats* stats) const = 0;
 
     /**
-     * Drops all connections to the given host on the network interface.
+     * Drops all connections to the given host on the network interface and relays a status message
+     * describing why the connection was dropped.
      */
-    virtual void dropConnections(const HostAndPort& hostAndPort) = 0;
+    virtual void dropConnections(const HostAndPort& target, const Status& status) = 0;
 
     /**
      * Appends statistics for the underlying network interface.

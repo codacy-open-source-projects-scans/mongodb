@@ -28,32 +28,21 @@
  */
 
 
-#include <iterator>
-#include <map>
-#include <memory>
-#include <ostream>
-#include <string>
-#include <tuple>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/shim.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
@@ -70,13 +59,11 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/db/vector_clock.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/db/vector_clock/vector_clock.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
@@ -87,6 +74,17 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
+
+#include <iterator>
+#include <map>
+#include <memory>
+#include <ostream>
+#include <string>
+#include <tuple>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -520,7 +518,7 @@ Status waitForReadConcernImpl(OperationContext* opCtx,
                                 MODE_IS,
                                 Date_t::max(),
                                 Lock::InterruptBehavior::kThrow,
-                                Lock::GlobalLockSkipOptions{.skipRSTLLock = true});
+                                Lock::GlobalLockOptions{.skipRSTLLock = true});
         auto lastStableRecoveryTimestamp = storageEngine->getLastStableRecoveryTimestamp();
         if (!lastStableRecoveryTimestamp ||
             *lastStableRecoveryTimestamp < atClusterTime->asTimestamp()) {
@@ -584,9 +582,7 @@ Status waitForLinearizableReadConcernImpl(OperationContext* opCtx,
             opCtx, "waitForLinearizableReadConcern", NamespaceString::kRsOplogNamespace, [&opCtx] {
                 WriteUnitOfWork uow(opCtx);
                 opCtx->getClient()->getServiceContext()->getOpObserver()->onOpMessage(
-                    opCtx,
-                    BSON("msg"
-                         << "linearizable read"));
+                    opCtx, BSON("msg" << "linearizable read"));
                 uow.commit();
             });
     }

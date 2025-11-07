@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
-
 #include "mongo/base/parse_number.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -44,17 +41,17 @@
 #include "mongo/db/commands/kill_op_cmd_base.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <string>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -77,7 +74,7 @@ public:
 
             // killOp always reports success once past the auth check.
             return true;
-        } else if (element.type() == BSONType::String) {
+        } else if (element.type() == BSONType::string) {
             // It's a string. Should be of the form shardid:opid.
             if (_killShardOperation(opCtx, element.str(), result)) {
                 reportSuccessfulCompletion(opCtx, dbName, cmdObj);
@@ -124,11 +121,11 @@ private:
 
         auto cmdToSend = BSON("killOp" << 1 << "op" << opId);
         shard
-            ->runCommand(opCtx,
-                         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                         DatabaseName::kAdmin,
-                         cmdToSend,
-                         Shard::RetryPolicy::kNoRetry)
+            ->runCommandWithIndefiniteRetries(opCtx,
+                                              ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                              DatabaseName::kAdmin,
+                                              cmdToSend,
+                                              Shard::RetryPolicy::kStrictlyNotIdempotent)
             .getStatus()
             .ignore();
 

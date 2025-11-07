@@ -29,17 +29,16 @@
 
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <utility>
+#include "mongo/executor/network_interface_thread_pool.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/executor/network_interface.h"
-#include "mongo/executor/network_interface_thread_pool.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/util/assert_util_core.h"
-#include "mongo/util/destructor_guard.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/functional.h"
+
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT mongo::logv2::LogComponent::kExecutor
 
@@ -50,7 +49,11 @@ namespace executor {
 NetworkInterfaceThreadPool::NetworkInterfaceThreadPool(NetworkInterface* net) : _net(net) {}
 
 NetworkInterfaceThreadPool::~NetworkInterfaceThreadPool() {
-    DESTRUCTOR_GUARD(_dtorImpl());
+    try {
+        _dtorImpl();
+    } catch (...) {
+        reportFailedDestructor(MONGO_SOURCE_LOCATION());
+    }
 }
 
 void NetworkInterfaceThreadPool::_dtorImpl() {
@@ -153,7 +156,7 @@ void NetworkInterfaceThreadPool::_consumeTasks(stdx::unique_lock<stdx::mutex> lk
     invariant(ret.isOK() || ErrorCodes::isShutdownError(ret.code()));
 }
 
-void NetworkInterfaceThreadPool::_consumeTasksInline(stdx::unique_lock<stdx::mutex> lk) noexcept {
+void NetworkInterfaceThreadPool::_consumeTasksInline(stdx::unique_lock<stdx::mutex> lk) {
     _consumeState = ConsumeState::kConsuming;
     const ScopeGuard consumingTasksGuard([&] { _consumeState = ConsumeState::kNeutral; });
 

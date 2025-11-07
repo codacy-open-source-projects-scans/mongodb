@@ -29,14 +29,13 @@
 
 #include "mongo/util/scoped_unlock.h"
 
-#include <ostream>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <ostream>
+#include <string>
 
 namespace mongo {
 namespace {
@@ -44,7 +43,9 @@ TEST(ScopedUnlockTest, Relocked) {
     stdx::mutex mutex;
     stdx::unique_lock lk(mutex);
 
-    { ScopedUnlock scopedUnlock(lk); }
+    {
+        ScopedUnlock scopedUnlock(lk);
+    }
 
     ASSERT(lk.owns_lock()) << "ScopedUnlock should relock on destruction";
 }

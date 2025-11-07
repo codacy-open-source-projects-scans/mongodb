@@ -4,6 +4,7 @@ selector:
   roots:
     - jstests/multiVersion/**/*.js
     - src/mongo/db/modules/*/jstests/hot_backups_multiversion/*.js
+    - src/mongo/db/modules/*/jstests/live_import_multiversion/*.js
     - src/mongo/db/modules/*/jstests/audit/multiVersion/*.js
   exclude_files:
     # Do not execute files with helper functions.
@@ -18,12 +19,16 @@ selector:
   exclude_with_any_tags:
     - featureFlagToaster
     - featureFlagSpoon
+    # This suite's fixture does not set up authentication. There is a multiversion_auth variant
+    # which does. Those tests which require auth should not run here, only in the auth variant.
+    - requires_auth
 
 # Multiversion tests start their own mongod's.
 executor:
   archive:
     tests:
       - src/mongo/db/modules/enterprise/jstests/hot_backups_multiversion/*.js
+      - src/mongo/db/modules/enterprise/jstests/live_imports_multiversion/*.js
   config:
     shell_options:
       nodb: ""
@@ -31,3 +36,5 @@ executor:
         TestData:
           setParameters:
             bsonTestValidationVersion: 1
+          # TODO (SERVER-111403): Enable OpenTelemetry tracing in multiversion suites.
+          enableOTELTracing: false

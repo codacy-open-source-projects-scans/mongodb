@@ -27,24 +27,24 @@
  *    it in the license file.
  */
 
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
+#include "mongo/db/op_observer/batched_write_context.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
-#include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer/batched_write_context.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/uuid.h"
+
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 
 namespace mongo {
 namespace {
@@ -111,7 +111,13 @@ DEATH_TEST_REGEX_F(BatchedWriteContextTest,
 
     const NamespaceString nss =
         NamespaceString::createNamespaceString_forTest(boost::none, "other", "coll");
-    auto op = repl::MutableOplogEntry::makeCreateCommand(nss, CollectionOptions(), BSON("v" << 2));
+    repl::ReplOperation op;
+    op.setOpType(repl::OpTypeEnum::kCommand);
+
+    op.setTid(nss.tenantId());
+    op.setNss(nss.getCommandNS());
+    op.setObject(
+        repl::MutableOplogEntry::makeCreateCollObject(nss, CollectionOptions(), BSON("v" << 2)));
     bwc.addBatchedOperation(opCtx, op);
 }
 

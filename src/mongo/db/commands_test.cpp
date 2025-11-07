@@ -27,14 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/none.hpp>
-#include <cstdint>
-#include <fmt/format.h>
-#include <functional>
-#include <initializer_list>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/commands.h"
 
 #include "mongo/base/error_extra_info.h"
 #include "mongo/bson/bsonmisc.h"
@@ -53,7 +46,6 @@
 #include "mongo/db/auth/sasl_options.h"
 #include "mongo/db/auth/user.h"
 #include "mongo/db/auth/user_name.h"
-#include "mongo/db/commands.h"
 #include "mongo/db/commands_test_example.h"
 #include "mongo/db/commands_test_example_gen.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
@@ -74,12 +66,20 @@
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 
+#include <cstdint>
+#include <functional>
+#include <initializer_list>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
 namespace {
 
-using namespace fmt::literals;
 
 using service_context_test::RoleOverride;
 using service_context_test::ServerRoleIndex;
@@ -194,16 +194,14 @@ TEST_F(ParseNsOrUUID, FailWrongType) {
 }
 
 TEST_F(ParseNsOrUUID, FailEmptyDbName) {
-    auto cmd = BSON("query"
-                    << "coll");
+    auto cmd = BSON("query" << "coll");
     ASSERT_THROWS_CODE(CommandHelpers::parseNsOrUUID(DatabaseName(), cmd),
                        DBException,
                        ErrorCodes::InvalidNamespace);
 }
 
 TEST_F(ParseNsOrUUID, FailInvalidDbName) {
-    auto cmd = BSON("query"
-                    << "coll");
+    auto cmd = BSON("query" << "coll");
     ASSERT_THROWS_CODE(CommandHelpers::parseNsOrUUID(
                            DatabaseName::createDatabaseName_forTest(boost::none, "test.coll"), cmd),
                        DBException,
@@ -211,8 +209,7 @@ TEST_F(ParseNsOrUUID, FailInvalidDbName) {
 }
 
 TEST_F(ParseNsOrUUID, FailInvalidCollectionNameContainsDollar) {
-    auto cmd = BSON("query"
-                    << "$coll");
+    auto cmd = BSON("query" << "$coll");
     ASSERT_THROWS_CODE(CommandHelpers::parseNsOrUUID(
                            DatabaseName::createDatabaseName_forTest(boost::none, "test"), cmd),
                        DBException,
@@ -220,16 +217,14 @@ TEST_F(ParseNsOrUUID, FailInvalidCollectionNameContainsDollar) {
 }
 
 TEST_F(ParseNsOrUUID, ParseValidColl) {
-    auto cmd = BSON("query"
-                    << "coll");
+    auto cmd = BSON("query" << "coll");
     auto parsedNss = CommandHelpers::parseNsOrUUID(
         DatabaseName::createDatabaseName_forTest(boost::none, "test"), cmd);
     ASSERT_EQ(parsedNss.nss(), NamespaceString::createNamespaceString_forTest("test.coll"));
 }
 
 TEST_F(ParseNsOrUUID, ParseValidCollLocalOpLogDollarMain) {
-    auto cmd = BSON("query"
-                    << "oplog.$main");
+    auto cmd = BSON("query" << "oplog.$main");
     auto parsedNss = CommandHelpers::parseNsOrUUID(
         DatabaseName::createDatabaseName_forTest(
             boost::none, NamespaceString::kLocalOplogDollarMain.db(omitTenant)),
@@ -283,17 +278,15 @@ public:
                                << scram::Secrets<SHA256Block>::generateCredentials(
                                       "a", saslGlobalParams.scramSHA256IterationCount.load()));
 
-        BSONObj userDoc = BSON("_id"_sd
-                               << "test.varun"_sd
-                               << "user"_sd
-                               << "varun"
-                               << "db"_sd
-                               << "test"
-                               << "credentials"_sd << credentials << "roles"_sd
-                               << BSON_ARRAY(BSON("role"_sd
-                                                  << "readWrite"_sd
-                                                  << "db"_sd
-                                                  << "test"_sd)));
+        BSONObj userDoc = BSON("_id"_sd << "test.varun"_sd
+                                        << "user"_sd
+                                        << "varun"
+                                        << "db"_sd
+                                        << "test"
+                                        << "credentials"_sd << credentials << "roles"_sd
+                                        << BSON_ARRAY(BSON("role"_sd << "readWrite"_sd
+                                                                     << "db"_sd
+                                                                     << "test"_sd)));
 
         auto opCtx = _client->makeOperationContext();
         ASSERT_OK(_mockBackend->insertUserDocument(opCtx.get(), userDoc, {}));
@@ -524,7 +517,7 @@ class TrivialNopCommand : public BasicCommand {
     }
 
     static std::string makeName() {
-        return "trivialNopCommand_{}_{}"_format(n, nextSerial());
+        return fmt::format("trivialNopCommand_{}_{}", n, nextSerial());
     }
 
 public:
@@ -571,13 +564,12 @@ public:
     TypeInfoSet registerSomeUniqueNops(CommandConstructionPlan& plan) {
         TypeInfoSet typesAdded;
         auto populateOneCommand = [&]<typename Cmd>(std::type_identity<Cmd>) {
-            *CommandConstructionPlan::EntryBuilder::make<Cmd>().setPlan(&plan);
+            *CommandConstructionPlan::EntryBuilder::make<Cmd>().setPlan_forTest(&plan);
             typesAdded.insert(&typeid(Cmd));
         };
         [&]<int... i>(std::integer_sequence<int, i...>) {
             (populateOneCommand(std::type_identity<TrivialNopCommand<i>>{}), ...);
-        }
-        (std::make_integer_sequence<int, count>{});
+        }(std::make_integer_sequence<int, count>{});
         return typesAdded;
     }
 };
@@ -620,13 +612,12 @@ public:
         auto populateOneCommand = [&]<typename Cmd>(std::type_identity<Cmd>) {
             *CommandConstructionPlan::EntryBuilder::make<Cmd>()
                  .addRoles(serverRole())
-                 .setPlan(&plan);
+                 .setPlan_forTest(&plan);
             typesAdded.insert(&typeid(Cmd));
         };
         [&]<int... i>(std::integer_sequence<int, i...>) {
             (populateOneCommand(std::type_identity<TrivialNopCommand<i>>{}), ...);
-        }
-        (std::make_integer_sequence<int, 3>{});
+        }(std::make_integer_sequence<int, 3>{});
         return typesAdded;
     }
 
@@ -676,23 +667,17 @@ TEST_F(RouterCommandRegistryTest, ExecutePlanForService) {
     ASSERT_EQ(result.commandTypes, result.fullSet);
 }
 
-using ShardRouterCommandRegistryTest = CommandRegistryTest<ServerRoleIndex::shard>;
+using ShardCommandRegistryTest = CommandRegistryTest<ServerRoleIndex::shard>;
 
-TEST_F(ShardRouterCommandRegistryTest, ServicesInit) {
+TEST_F(ShardCommandRegistryTest, ServicesInit) {
     auto sc = getGlobalServiceContext();
     ASSERT(sc->getService(ClusterRole::ShardServer));
-    ASSERT(sc->getService(ClusterRole::RouterServer));
+    ASSERT(!sc->getService(ClusterRole::RouterServer));
 }
 
-TEST_F(ShardRouterCommandRegistryTest, ShardExecutePlanForService) {
+TEST_F(ShardCommandRegistryTest, ShardExecutePlanForService) {
     // The shard side of the shard+router ServiceContext.
     auto result = testExecutePlanForService(ClusterRole::ShardServer);
-    ASSERT_EQ(result.commandTypes, result.fullSet);
-}
-
-TEST_F(ShardRouterCommandRegistryTest, RouterExecutePlanForService) {
-    // The router side of the shard+router ServiceContext.
-    auto result = testExecutePlanForService(ClusterRole::RouterServer);
     ASSERT_EQ(result.commandTypes, result.fullSet);
 }
 

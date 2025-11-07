@@ -29,18 +29,16 @@
 
 #include "mongo/db/exec/sbe/stages/hash_lookup_unwind.h"
 
-#include <set>
-
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/db/curop.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/stages/stage_visitors.h"
+#include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo::sbe {
 
@@ -117,6 +115,8 @@ void HashLookupUnwindStage::prepare(CompileCtx& ctx) {
     }
 
     _lookupStageOutput.resize(1);
+    _memoryTracker = OperationMemoryUsageTracker::createSimpleMemoryUsageTrackerForSBE(
+        _opCtx, loadMemoryLimit(StageMemoryLimit::QuerySBELookupApproxMemoryUseInBytesBeforeSpill));
 }  // HashLookupUnwindStage::prepare
 
 value::SlotAccessor* HashLookupUnwindStage::getAccessor(CompileCtx& ctx, value::SlotId slot) {
@@ -134,18 +134,11 @@ void HashLookupUnwindStage::doDetachFromOperationContext() {
     _hashTable.doDetachFromOperationContext();
 }
 
-void HashLookupUnwindStage::doSaveState(bool relinquishCursor) {
-    _hashTable.doSaveState(relinquishCursor);
-}
-
-void HashLookupUnwindStage::doRestoreState(bool relinquishCursor) {
-    _hashTable.doRestoreState(relinquishCursor);
-}
-
 void HashLookupUnwindStage::reset(bool fromClose) {
     _outerKeyOpen = false;
     // Also resets the memory threshold if the knob changes between re-open calls.
     _hashTable.reset(fromClose);
+    _memoryTracker.value().set(_hashTable.getMemUsage());
 }
 
 void HashLookupUnwindStage::open(bool reOpen) {
@@ -168,6 +161,7 @@ void HashLookupUnwindStage::open(bool reOpen) {
 
         // This where we put the value in here. This can grow need to spill.
         size_t bufferIndex = _hashTable.bufferValueOrSpill(value);
+        _memoryTracker.value().set(_hashTable.getMemUsage());
 
         auto [tagKeyView, valKeyView] = _inInnerMatchAccessor->getViewOfValue();
         if (value::isArray(tagKeyView)) {
@@ -176,12 +170,15 @@ void HashLookupUnwindStage::open(bool reOpen) {
 
             while (!arrayAccessor.atEnd()) {
                 _hashTable.addHashTableEntry(&arrayAccessor, bufferIndex);
+                _memoryTracker.value().set(_hashTable.getMemUsage());
                 arrayAccessor.advance();
             }
         } else {
             _hashTable.addHashTableEntry(_inInnerMatchAccessor, bufferIndex);
+            _memoryTracker.value().set(_hashTable.getMemUsage());
         }
     }
+
     innerChild()->close();
     outerChild()->open(reOpen);
 }  // HashLookupUnwindStage::open
@@ -207,14 +204,10 @@ PlanState HashLookupUnwindStage::getNext() {
                 _lookupStageOutputAccessor.reset(
                     false /* owned */, innerMatch->first, innerMatch->second);
                 return trackPlanState(PlanState::ADVANCED);
-            } else {
-                _outerKeyOpen = false;
             }
-        } else {
-            _outerKeyOpen = false;
         }
+        _outerKeyOpen = false;
     }  // while true
-    return trackPlanState(PlanState::IS_EOF);
 }  // HashLookupUnwindStage::getNext
 
 void HashLookupUnwindStage::close() {
@@ -226,7 +219,7 @@ void HashLookupUnwindStage::close() {
 
 std::unique_ptr<PlanStageStats> HashLookupUnwindStage::getStats(bool includeDebugInfo) const {
     auto ret = std::make_unique<PlanStageStats>(_commonStats);
-    invariant(ret);
+
     ret->children.emplace_back(outerChild()->getStats(includeDebugInfo));
     ret->children.emplace_back(innerChild()->getStats(includeDebugInfo));
 
@@ -235,9 +228,18 @@ std::unique_ptr<PlanStageStats> HashLookupUnwindStage::getStats(bool includeDebu
     if (includeDebugInfo) {
         BSONObjBuilder bob(StorageAccessStatsVisitor::collectStats(*this, *ret).toBSON());
         // Spilling stats.
+        const auto& spillingStats = specificStats->getTotalSpillingStats();
         bob.appendBool("usedDisk", specificStats->usedDisk)
-            .appendNumber("spilledRecords", specificStats->getSpilledRecords())
-            .appendNumber("spilledBytesApprox", specificStats->getSpilledBytesApprox());
+            .appendNumber("spills", static_cast<long long>(spillingStats.getSpills()))
+            .appendNumber("spilledRecords",
+                          static_cast<long long>(spillingStats.getSpilledRecords()))
+            .appendNumber("spilledBytes", static_cast<long long>(spillingStats.getSpilledBytes()))
+            .appendNumber("spilledDataStorageSize",
+                          static_cast<long long>(spillingStats.getSpilledDataStorageSize()));
+        if (feature_flags::gFeatureFlagQueryMemoryTracking.isEnabled()) {
+            bob.appendNumber("peakTrackedMemBytes",
+                             static_cast<long long>(specificStats->peakTrackedMemBytes));
+        }
         ret->debugInfo = bob.obj();
     }
     return ret;

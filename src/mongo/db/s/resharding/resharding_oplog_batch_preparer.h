@@ -29,13 +29,14 @@
 
 #pragma once
 
+#include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/util/modules.h"
+
 #include <cstdint>
 #include <list>
 #include <memory>
 #include <vector>
-
-#include "mongo/db/repl/oplog_entry.h"
-#include "mongo/db/session/logical_session_id_gen.h"
 
 namespace mongo {
 

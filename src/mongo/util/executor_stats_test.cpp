@@ -28,27 +28,26 @@
  */
 
 
-#include <cstddef>
-#include <fmt/format.h>
-#include <functional>
-#include <memory>
-#include <ratio>
-#include <string>
-#include <utility>
+#include "mongo/util/executor_stats.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/duration.h"
-#include "mongo/util/executor_stats.h"
 #include "mongo/util/functional.h"
+
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <ratio>
+#include <string>
+#include <utility>
+
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -225,6 +224,20 @@ TEST_F(ExecutorStatsTest, RunTime) {
     };
 
     runTimingTests("runTime", test);
+}
+
+TEST_F(ExecutorStatsTest, SlowTaskExecutorWaitTimeProfilingLog) {
+    // Make the tasks wait time 51 Millis exceed the default slow wait time threshold of 50 Millis
+    Milliseconds delay = Milliseconds{51};
+    unittest::LogCaptureGuard logs;
+
+    auto task = wrapTask([](Status) {});
+    advanceTime(delay);
+    task(Status::OK());
+
+    logs.stop();
+    // Check for the slow wait time log message
+    ASSERT_EQUALS(1, logs.countTextContaining("Task exceeded the slow wait time threshold"));
 }
 
 }  // namespace mongo

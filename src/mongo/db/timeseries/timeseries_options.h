@@ -29,20 +29,26 @@
 
 #pragma once
 
-#include <utility>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 
-namespace mongo {
+#include <utility>
+
+MONGO_MOD_PUBLIC;
+
+namespace mongo::timeseries {
 
 /**
- * Namespace for helper functions related to time-series collections.
+ * Evaluates whether the timeseries bucket's options are fixed (unchanged).
+ *
+ * Returns true if `options.bucketRoundingSeconds` and `options.bucketMaxSpanSeconds` are equal and
+ * the `parametersChanged` argument is `false`.
  */
-namespace timeseries {
+bool areTimeseriesBucketsFixed(const TimeseriesOptions& options, bool parametersChanged);
 
 /**
  * Evaluates whether the transition of timeseries granularities is valid (returning Status::OK if
@@ -92,5 +98,4 @@ Status validateAndSetBucketingParameters(TimeseriesOptions& timeseriesOptions);
  * are missing.
  */
 Status validateBucketingParameters(const TimeseriesOptions&);
-}  // namespace timeseries
-}  // namespace mongo
+}  // namespace mongo::timeseries

@@ -29,14 +29,17 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <functional>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
+#include "mongo/util/modules.h"
 
-namespace mongo::logv2 {
+#include <functional>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+
+namespace mongo {
+namespace MONGO_MOD_PUBLIC logv2 {
 
 constexpr auto kServerLogTag = "server"_sd;
 constexpr auto kAuditLogTag = "audit"_sd;
@@ -115,4 +118,5 @@ bool shouldEmitLogService();
  */
 void setShouldEmitLogService(ShouldEmitLogServiceFn fn);
 
-}  // namespace mongo::logv2
+}  // namespace MONGO_MOD_PUBLIC logv2
+}  // namespace mongo

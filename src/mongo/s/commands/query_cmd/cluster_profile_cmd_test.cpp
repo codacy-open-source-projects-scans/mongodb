@@ -33,8 +33,8 @@
 #include "mongo/db/commands/profile_gen.h"
 #include "mongo/db/profile_filter_impl.h"
 #include "mongo/db/profile_settings.h"
+#include "mongo/db/sharding_environment/cluster_command_test_fixture.h"
 #include "mongo/rpc/factory.h"
-#include "mongo/s/commands/cluster_command_test_fixture.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -56,6 +56,9 @@ public:
 
         serverGlobalParams.slowMS.store(kDefaultSlowms);
         serverGlobalParams.sampleRate.store(kDefaultSampleRate);
+
+        DatabaseProfileSettings::get(getServiceContext())
+            .setDefaultSlowOpInProgressThreshold(Milliseconds(kDefaultSlowInProgMS));
     }
 
     ProfileSettings getDbProfileSettings() {
@@ -107,6 +110,7 @@ TEST_F(ClusterProfileCmdTest, SetAllParameters) {
     ProfileCmdTestArgs args{.level = 0,
                             .sampleRate = 0.5,
                             .slowms = -1,
+                            .slowinprogms = -2,
                             .filter = ObjectOrUnset{BSON("nreturned" << BSON("$eq" << 1))}};
 
     auto resp = runCommand(buildCmdRequest(args));

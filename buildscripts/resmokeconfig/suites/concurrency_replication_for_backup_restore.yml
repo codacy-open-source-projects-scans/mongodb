@@ -22,6 +22,9 @@ selector:
     # These workloads use a verbose log level.
     - jstests/concurrency/fsm_workloads/ddl/rename_collection/collection_uuid.js
 
+    # TODO BACKPORT-25689: reenable this workload after backport to 8.0.
+    - jstests/concurrency/fsm_workloads/query/remove/update_and_batched_delete.js
+
   exclude_with_any_tags:
     - requires_standalone
     # The ability to shut down a node while its in the middle of applying ops is required for
@@ -45,8 +48,21 @@ executor:
           # The backup_restore*.js tests are expected to run the FSM workloads directly against the
           # primary of the replica set without being aware of the other members.
           discoverTopology: False
+          # TODO (SERVER-111403): Enable OpenTelemetry tracing in multiversion suites.
+          # When running in the multiversion suite, incremental_backup_helpers.js and
+          # backup_restore.js runs resmoke with this suite without using any multiversion
+          # overrides.
+          enableOTELTracing: false
   hooks:
     - class: WaitForReplication
+      shell_options:
+        global_vars:
+          TestData:
+            # TODO (SERVER-111403): Enable OpenTelemetry tracing in multiversion suites.
+            # When running in the multiversion suite, incremental_backup_helpers.js and
+            # backup_restore.js runs resmoke with this suite without using any multiversion
+            # overrides.
+            enableOTELTracing: false
     - class: CleanupConcurrencyWorkloads
       exclude_dbs:
         - crud

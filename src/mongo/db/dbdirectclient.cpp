@@ -29,12 +29,6 @@
 
 #include "mongo/db/dbdirectclient.h"
 
-#include <boost/move/utility_core.hpp>
-#include <utility>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/api_parameters.h"
@@ -54,6 +48,12 @@
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/future.h"
+
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -109,18 +109,22 @@ std::string DBDirectClient::getServerAddress() const {
     return "localhost";  // TODO: should this have the port?
 }
 
+std::string DBDirectClient::getLocalAddress() const {
+    MONGO_UNIMPLEMENTED;
+}
+
 // Returned version should match the incoming connections restrictions.
 int DBDirectClient::getMinWireVersion() {
     return WireSpec::getWireSpec(_opCtx->getServiceContext())
-        .get()
-        ->incomingExternalClient.minWireVersion;
+        .getIncomingExternalClient()
+        .minWireVersion;
 }
 
 // Returned version should match the incoming connections restrictions.
 int DBDirectClient::getMaxWireVersion() {
     return WireSpec::getWireSpec(_opCtx->getServiceContext())
-        .get()
-        ->incomingExternalClient.maxWireVersion;
+        .getIncomingExternalClient()
+        .maxWireVersion;
 }
 
 bool DBDirectClient::isReplicaSetMember() const {
@@ -163,7 +167,10 @@ DbResponse loopbackBuildResponse(OperationContext* const opCtx, Message& toSend)
     toSend.header().setId(nextMessageId());
     toSend.header().setResponseToMsgId(0);
     IgnoreAPIParametersBlock ignoreApiParametersBlock(opCtx);
-    return opCtx->getService()->getServiceEntryPoint()->handleRequest(opCtx, toSend).get();
+    return opCtx->getService()
+        ->getServiceEntryPoint()
+        ->handleRequest(opCtx, toSend, opCtx->fastClockSource().now())
+        .get();
 }
 }  // namespace
 
@@ -233,12 +240,12 @@ write_ops::DeleteCommandReply DBDirectClient::remove(
     return DeleteOp::parseResponse(response->getCommandReply());
 }
 
-long long DBDirectClient::count(const NamespaceStringOrUUID nsOrUuid,
+long long DBDirectClient::count(const NamespaceStringOrUUID& nsOrUuid,
                                 const BSONObj& query,
                                 int options,
                                 int limit,
                                 int skip,
-                                boost::optional<repl::ReadConcernArgs> readConcern) {
+                                const boost::optional<repl::ReadConcernArgs>& readConcern) {
     invariant(!readConcern,
               "passing readConcern to DBDirectClient functions is not supported as it has to use "
               "the parent operation's readConcern");

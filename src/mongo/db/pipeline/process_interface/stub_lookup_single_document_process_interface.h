@@ -29,17 +29,6 @@
 
 #pragma once
 
-#include <boost/intrusive_ptr.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-#include <deque>
-#include <memory>
-#include <utility>
-#include <vector>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/shard_filterer.h"
@@ -52,7 +41,20 @@
 #include "mongo/db/pipeline/process_interface/stub_mongo_process_interface.h"
 #include "mongo/db/pipeline/sharded_agg_helpers_targeting_policy.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <deque>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/intrusive_ptr.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -91,24 +93,42 @@ public:
     StubLookupSingleDocumentProcessInterface(std::deque<DocumentSource::GetNextResult> mockResults)
         : _mockResults(std::move(mockResults)) {}
 
-    std::unique_ptr<Pipeline, PipelineDeleter> preparePipelineForExecution(
-        Pipeline* ownedPipeline,
+    std::unique_ptr<Pipeline> finalizeAndMaybePreparePipelineForExecution(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        std::unique_ptr<Pipeline> pipeline,
+        bool attachCursorAfterOptimizing,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
+        ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
+        boost::optional<BSONObj> readConcern = boost::none,
+        bool shouldUseCollectionDefaultCollator = false) final;
+
+    std::unique_ptr<Pipeline> preparePipelineForExecution(
+        std::unique_ptr<Pipeline> pipeline,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none) final;
 
-    std::unique_ptr<Pipeline, PipelineDeleter> preparePipelineForExecution(
+    std::unique_ptr<Pipeline> preparePipelineForExecution(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const AggregateCommandRequest& aggRequest,
-        Pipeline* pipeline,
+        std::unique_ptr<Pipeline> pipeline,
         boost::optional<BSONObj> shardCursorsSortSpec = boost::none,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none,
         bool shouldUseCollectionDefaultCollator = false) final;
 
-    std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipelineForLocalRead(
-        Pipeline* ownedPipeline,
+    std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalRead(
+        std::unique_ptr<Pipeline> pipeline,
         boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
         bool shouldUseCollectionDefaultCollator = false,
+        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) final;
+
+    std::unique_ptr<Pipeline> finalizeAndAttachCursorToPipelineForLocalRead(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        std::unique_ptr<Pipeline> pipeline,
+        bool attachCursorAfterOptimizing,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
+        bool shouldUseCollectionDefaultCollator = false,
+        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
         ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) final;
 
     boost::optional<Document> lookupSingleDocument(

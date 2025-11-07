@@ -29,16 +29,47 @@
 
 #include "mongo/db/index_names.h"
 
-#include <utility>
-
-#include <absl/container/node_hash_map.h>
-
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/util/string_map.h"
 
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
+
 namespace mongo {
+
+std::string toString(IndexType indexType) {
+    switch (indexType) {
+        case INDEX_COLUMN:
+            return IndexNames::COLUMN;
+        case INDEX_2D:
+            return IndexNames::GEO_2D;
+        case INDEX_ENCRYPTED_RANGE:
+            return IndexNames::ENCRYPTED_RANGE;
+        case INDEX_HAYSTACK:
+            return IndexNames::GEO_HAYSTACK;
+        case INDEX_2DSPHERE:
+            return IndexNames::GEO_2DSPHERE;
+        case INDEX_2DSPHERE_BUCKET:
+            return IndexNames::GEO_2DSPHERE_BUCKET;
+        case INDEX_TEXT:
+            return IndexNames::TEXT;
+        case INDEX_HASHED:
+            return IndexNames::HASHED;
+        case INDEX_WILDCARD:
+            return IndexNames::WILDCARD;
+        case INDEX_BTREE:
+            // While `IndexNames::BTREE` is represented internally as an empty string, this function
+            // represents `IndexType::INDEX_BTREE` as "btree" to make logs more readable.
+            return "btree";
+        case INDEX_TYPE_COUNT:
+            return "index_type_count";
+        default:
+            MONGO_UNREACHABLE;
+    }
+}
 
 using std::string;
 
@@ -74,10 +105,10 @@ string IndexNames::findPluginName(const BSONObj& keyPattern) {
     while (i.more()) {
         BSONElement e = i.next();
         StringData fieldName(e.fieldNameStringData());
-        if (String == e.type()) {
+        if (e.type() == BSONType::string) {
             indexTypeStr = e.String();
         } else if (WildcardNames::isWildcardFieldName(fieldName)) {
-            if (keyPattern.firstElement().type() == String &&
+            if (keyPattern.firstElement().type() == BSONType::string &&
                 keyPattern.firstElement().fieldNameStringData() == "columnstore"_sd) {
                 return IndexNames::COLUMN;
             } else {
@@ -105,5 +136,4 @@ IndexType IndexNames::nameToType(StringData accessMethod) {
     }
     return typeIt->second;
 }
-
 }  // namespace mongo

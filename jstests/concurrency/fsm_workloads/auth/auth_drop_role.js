@@ -12,20 +12,20 @@
 // UMC commands are not supported in transactions.
 TestData.runInsideTransaction = false;
 
-export const $config = (function() {
+export const $config = (function () {
     const kMaxCmdTimeMs = 60000;
     const kMaxTxnLockReqTimeMs = 100;
     const kDefaultTxnLockReqTimeMs = 5;
 
-    var data = {
+    let data = {
         // Use the workload name as a prefix for the role name,
         // since the workload name is assumed to be unique.
-        prefix: 'auth_drop_role'
+        prefix: "auth_drop_role",
     };
 
-    var states = (function() {
+    let states = (function () {
         function uniqueRoleName(prefix, tid, num) {
-            return prefix + tid + '_' + num;
+            return prefix + tid + "_" + num;
         }
 
         function init(db, collName) {
@@ -33,22 +33,26 @@ export const $config = (function() {
         }
 
         function createAndDropRole(db, collName) {
-            var roleName = uniqueRoleName(this.prefix, this.tid, this.num++);
+            let roleName = uniqueRoleName(this.prefix, this.tid, this.num++);
 
             const kCreateRoleRetries = 5;
             const kCreateRoleRetryInterval = 5 * 1000;
             assert.retry(
-                function() {
+                function () {
                     try {
-                        assert.commandWorked(db.runCommand({
-                            createRole: roleName,
-                            privileges: [{
-                                resource: {db: db.getName(), collection: collName},
-                                actions: ['remove']
-                            }],
-                            roles: [{role: 'read', db: db.getName()}],
-                            maxTimeMS: kMaxCmdTimeMs
-                        }));
+                        assert.commandWorked(
+                            db.runCommand({
+                                createRole: roleName,
+                                privileges: [
+                                    {
+                                        resource: {db: db.getName(), collection: collName},
+                                        actions: ["remove"],
+                                    },
+                                ],
+                                roles: [{role: "read", db: db.getName()}],
+                                maxTimeMS: kMaxCmdTimeMs,
+                            }),
+                        );
                         return true;
                     } catch (e) {
                         jsTest.log("Caught createRole exception: " + tojson(e));
@@ -57,34 +61,40 @@ export const $config = (function() {
                 },
                 "Failed creating role '" + roleName + "'",
                 kCreateRoleRetries,
-                kCreateRoleRetryInterval);
+                kCreateRoleRetryInterval,
+            );
 
-            var res = db.getRole(roleName);
+            let res = db.getRole(roleName);
 
             assert(res !== null, "role '" + roleName + "' should exist");
             assert.eq(roleName, res.role);
-            assert(!res.isBuiltin, 'role should be user-defined');
+            assert(!res.isBuiltin, "role should be user-defined");
 
             // Some test machines may hit high contention during these concurrency tests
             // allow for occaisional failure with retries.
             const kDropRoleRetries = 5;
             const kDropRoleSnapshotUnavailableIntervalMS = 5 * 1000;
             const kDropRoleRetryInterval = 0;
-            assert.retry(function() {
-                let cmdResult;
-                try {
-                    cmdResult = db.runCommand({dropRole: roleName, maxTimeMS: kMaxCmdTimeMs});
-                    assert.commandWorked(cmdResult);
-                    return true;
-                } catch (e) {
-                    jsTest.log("Caught dropRole exception: " + tojson(e));
-                    if (cmdResult.code == ErrorCodes.SnapshotUnavailable) {
-                        // Give pending catalog changes a chance to catch up.
-                        sleep(kDropRoleSnapshotUnavailableIntervalMS);
+            assert.retry(
+                function () {
+                    let cmdResult;
+                    try {
+                        cmdResult = db.runCommand({dropRole: roleName, maxTimeMS: kMaxCmdTimeMs});
+                        assert.commandWorked(cmdResult);
+                        return true;
+                    } catch (e) {
+                        jsTest.log("Caught dropRole exception: " + tojson(e));
+                        if (cmdResult.code == ErrorCodes.SnapshotUnavailable) {
+                            // Give pending catalog changes a chance to catch up.
+                            sleep(kDropRoleSnapshotUnavailableIntervalMS);
+                        }
+                        return false;
                     }
-                    return false;
-                }
-            }, "Failed dropping role '" + roleName + "'", kDropRoleRetries, kDropRoleRetryInterval);
+                },
+                "Failed dropping role '" + roleName + "'",
+                kDropRoleRetries,
+                kDropRoleRetryInterval,
+            );
 
             assert.isnull(db.getRole(roleName), "role '" + roleName + "' should not exist");
         }
@@ -92,32 +102,30 @@ export const $config = (function() {
         return {init: init, createAndDropRole: createAndDropRole};
     })();
 
-    var transitions = {init: {createAndDropRole: 1}, createAndDropRole: {createAndDropRole: 1}};
+    let transitions = {init: {createAndDropRole: 1}, createAndDropRole: {createAndDropRole: 1}};
 
     function setup(db, collName, cluster) {
-        cluster.executeOnMongodNodes(function(db) {
-            db.adminCommand(
-                {setParameter: 1, maxTransactionLockRequestTimeoutMillis: kMaxTxnLockReqTimeMs});
+        cluster.executeOnMongodNodes(function (db) {
+            db.adminCommand({setParameter: 1, maxTransactionLockRequestTimeoutMillis: kMaxTxnLockReqTimeMs});
         });
 
-        cluster.executeOnMongosNodes(function(db) {
-            db.adminCommand(
-                {setParameter: 1, maxTransactionLockRequestTimeoutMillis: kMaxTxnLockReqTimeMs});
+        cluster.executeOnMongosNodes(function (db) {
+            db.adminCommand({setParameter: 1, maxTransactionLockRequestTimeoutMillis: kMaxTxnLockReqTimeMs});
         });
     }
 
     function teardown(db, collName, cluster) {
-        cluster.executeOnMongodNodes(function(db) {
+        cluster.executeOnMongodNodes(function (db) {
             db.adminCommand({
                 setParameter: 1,
-                maxTransactionLockRequestTimeoutMillis: kDefaultTxnLockReqTimeMs
+                maxTransactionLockRequestTimeoutMillis: kDefaultTxnLockReqTimeMs,
             });
         });
 
-        cluster.executeOnMongosNodes(function(db) {
+        cluster.executeOnMongosNodes(function (db) {
             db.adminCommand({
                 setParameter: 1,
-                maxTransactionLockRequestTimeoutMillis: kDefaultTxnLockReqTimeMs
+                maxTransactionLockRequestTimeoutMillis: kDefaultTxnLockReqTimeMs,
             });
         });
     }
@@ -129,6 +137,6 @@ export const $config = (function() {
         states: states,
         transitions: transitions,
         setup: setup,
-        teardown: teardown
+        teardown: teardown,
     };
 })();

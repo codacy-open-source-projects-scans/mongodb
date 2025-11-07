@@ -28,8 +28,6 @@
  */
 
 
-#include <asio.hpp>  // IWYU pragma: keep
-#include <boost/smart_ptr.hpp>
 #include <chrono>
 #include <compare>
 #include <cstddef>
@@ -38,21 +36,19 @@
 #include <thread>
 #include <utility>
 
+#include <asio.hpp>  // IWYU pragma: keep
+
+#include <boost/smart_ptr.hpp>
+
 // IWYU pragma: no_include "asio/impl/dispatch.hpp"
 // IWYU pragma: no_include "asio/impl/io_context.hpp"
 // IWYU pragma: no_include "asio/impl/post.hpp"
 // IWYU pragma: no_include "asio/impl/system_executor.hpp"
-#include <asio/io_context.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/mock_session.h"
@@ -60,12 +56,10 @@
 #include "mongo/transport/service_executor_synchronous.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/transport/transport_layer_mock.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/barrier.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/join_thread.h"
-#include "mongo/unittest/matcher_core.h"
 #include "mongo/unittest/thread_assertion_monitor.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/notification.h"
 #include "mongo/util/concurrency/thread_pool.h"
@@ -77,6 +71,10 @@
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/synchronized_value.h"
 #include "mongo/util/time_support.h"
+
+#include <asio/io_context.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -100,7 +98,7 @@ class AsioReactor : public transport::Reactor {
 public:
     AsioReactor() : _ioContext() {}
 
-    void run() noexcept final {
+    void run() final {
         MONGO_UNREACHABLE;
     }
 

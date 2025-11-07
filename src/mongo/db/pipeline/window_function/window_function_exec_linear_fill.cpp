@@ -29,35 +29,31 @@
 
 #include "mongo/db/pipeline/window_function/window_function_exec_linear_fill.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
+#include "mongo/db/exec/expression/evaluate.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
 namespace mongo {
 namespace {
 namespace value_arithmetic_operators {
-template <typename Op>
-Value applyExpressionOp(const Value& a, const Value& b) {
-    return uassertStatusOK(Op::apply(a, b));
-}
 Value operator+(const Value& a, const Value& b) {
-    return applyExpressionOp<ExpressionAdd>(a, b);
+    return uassertStatusOK(exec::expression::evaluateAdd(a, b));
 }
 Value operator-(const Value& a, const Value& b) {
-    return applyExpressionOp<ExpressionSubtract>(a, b);
+    return uassertStatusOK(exec::expression::evaluateSubtract(a, b));
 }
 Value operator*(const Value& a, const Value& b) {
-    return applyExpressionOp<ExpressionMultiply>(a, b);
+    return uassertStatusOK(exec::expression::evaluateMultiply(a, b));
 }
 Value operator/(const Value& a, const Value& b) {
-    return applyExpressionOp<ExpressionDivide>(a, b);
+    return uassertStatusOK(exec::expression::evaluateDivide(a, b));
 }
 }  // namespace value_arithmetic_operators
 
@@ -115,7 +111,7 @@ Value WindowFunctionExecLinearFill::getNext(boost::optional<Document> current) {
     // or (10, -100) when we interpolate on the third document.
 
     uassert(6050106,
-            "There can be no repeated values in the sort field",
+            "There can be no repeated values in the sort field in the same partition",
             ValueComparator{}.evaluate(sortFieldValue != _lastSeenElement));
     if (!_lastSeenElement.missing())
         // Throw an error If the sort value was previously of type numeric, but we've just found a

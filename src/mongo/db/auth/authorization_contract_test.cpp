@@ -27,21 +27,21 @@
  *    it in the license file.
  */
 
+#include "mongo/db/auth/authorization_contract.h"
+
+#include "mongo/base/string_data.h"
+#include "mongo/db/auth/access_checks_gen.h"
+#include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/privilege.h"
+#include "mongo/db/auth/resource_pattern.h"
+#include "mongo/db/tenant_id.h"
+#include "mongo/unittest/unittest.h"
+
 #include <initializer_list>
 #include <memory>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/db/auth/access_checks_gen.h"
-#include "mongo/db/auth/action_type.h"
-#include "mongo/db/auth/authorization_contract.h"
-#include "mongo/db/auth/privilege.h"
-#include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/tenant_id.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 
 namespace mongo {
 namespace {
@@ -200,6 +200,72 @@ TEST(AuthContractTest, NonTestModeCheck) {
                                             ActionType::refineCollectionShardKey)));
     ASSERT_FALSE(ac.hasPrivileges(Privilege(ResourcePattern::forAnyNormalResource(boost::none),
                                             ActionType::reshardCollection)));
+}
+
+TEST(AuthContractTest, CommandDepthTracking) {
+    AuthorizationContract ac;
+
+    // Start tracking for top-level command
+    ac.enterCommandScope();
+
+    // Add checks at depth 1 (should be recorded)
+    ac.addAccessCheck(AccessCheckEnum::kIsAuthenticated);
+    ac.addPrivilege(
+        Privilege(ResourcePattern::forAnyNormalResource(boost::none), ActionType::find));
+
+    ASSERT_TRUE(ac.hasAccessCheck(AccessCheckEnum::kIsAuthenticated));
+    ASSERT_TRUE(ac.hasPrivileges(
+        Privilege(ResourcePattern::forAnyNormalResource(boost::none), ActionType::find)));
+
+    // Start nested command (depth 2)
+    ac.enterCommandScope();
+
+    // Add checks at depth 2 (should be ignored)
+    ac.addAccessCheck(AccessCheckEnum::kIsCoAuthorized);
+    ac.addPrivilege(
+        Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::insert));
+
+    // Original checks should still be there, new ones should not
+    ASSERT_TRUE(ac.hasAccessCheck(AccessCheckEnum::kIsAuthenticated));
+    ASSERT_TRUE(ac.hasPrivileges(
+        Privilege(ResourcePattern::forAnyNormalResource(boost::none), ActionType::find)));
+    ASSERT_FALSE(ac.hasAccessCheck(AccessCheckEnum::kIsCoAuthorized));
+    ASSERT_FALSE(ac.hasPrivileges(
+        Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::insert)));
+
+    // End nested command
+    ac.exitCommandScope();
+
+    // Back at depth 1, can add checks again
+    ac.addAccessCheck(AccessCheckEnum::kIsAuthorizedToParseNamespaceElement);
+    ASSERT_TRUE(ac.hasAccessCheck(AccessCheckEnum::kIsAuthorizedToParseNamespaceElement));
+
+    // End top-level command
+    ac.exitCommandScope();
+}
+
+TEST(AuthContractTest, ClearOnlyAtTopLevel) {
+    AuthorizationContract ac;
+
+    // Start first top-level command
+    ac.enterCommandScope();
+    ac.addAccessCheck(AccessCheckEnum::kIsAuthenticated);
+    ASSERT_TRUE(ac.hasAccessCheck(AccessCheckEnum::kIsAuthenticated));
+    ac.exitCommandScope();
+
+    // Start second top-level command - should clear previous checks
+    ac.enterCommandScope();
+    ASSERT_FALSE(ac.hasAccessCheck(AccessCheckEnum::kIsAuthenticated));
+
+    ac.addAccessCheck(AccessCheckEnum::kIsCoAuthorized);
+    ASSERT_TRUE(ac.hasAccessCheck(AccessCheckEnum::kIsCoAuthorized));
+
+    // Start nested command - should NOT clear
+    ac.enterCommandScope();
+    ASSERT_TRUE(ac.hasAccessCheck(AccessCheckEnum::kIsCoAuthorized));
+
+    ac.exitCommandScope();
+    ac.exitCommandScope();
 }
 
 }  // namespace

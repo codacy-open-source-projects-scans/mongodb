@@ -32,7 +32,9 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
+
 #include <string>
 
 namespace mongo::cluster::cmd::translations {
@@ -48,15 +50,14 @@ inline StringMap<std::string> clusterCommandTranslations = {
     {"insert", "clusterInsert"},
     {"update", "clusterUpdate"}};
 
-inline BSONObj replaceCommandNameWithClusterCommandName(BSONObj cmdObj) {
-    using namespace fmt::literals;
+MONGO_MOD_PUB inline BSONObj replaceCommandNameWithClusterCommandName(BSONObj cmdObj) {
     auto cmdName = cmdObj.firstElement().fieldNameStringData();
     auto newNameIt = clusterCommandTranslations.find(cmdName);
     uassert(6349501,
-            "Cannot use unsupported command {} with cluster transaction API"_format(cmdName),
+            fmt::format("Cannot use unsupported command {} with cluster transaction API", cmdName),
             newNameIt != clusterCommandTranslations.end());
 
-    return cmdObj.replaceFieldNames(BSON(newNameIt->second << 1));
+    return BSONObjBuilder().appendElementsRenamed(cmdObj, BSON(newNameIt->second << 1)).obj();
 }
 
 }  // namespace mongo::cluster::cmd::translations

@@ -28,12 +28,13 @@
  */
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <ostream>
-#include <utility>
-
 #include "mongo/db/repl/abstract_async_component.h"
+
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <ostream>
+#include <utility>
 
 namespace mongo {
 namespace repl {
@@ -46,10 +47,6 @@ AbstractAsyncComponent::AbstractAsyncComponent(executor::TaskExecutor* executor,
 
 executor::TaskExecutor* AbstractAsyncComponent::_getExecutor() {
     return _executor;
-}
-
-std::string AbstractAsyncComponent::_getComponentName() const {
-    return _componentName;
 }
 
 bool AbstractAsyncComponent::isActive() noexcept {
@@ -70,7 +67,7 @@ bool AbstractAsyncComponent::_isShuttingDown(WithLock lk) noexcept {
     return State::kShuttingDown == _state;
 }
 
-Status AbstractAsyncComponent::startup() noexcept {
+Status AbstractAsyncComponent::startup() {
     stdx::lock_guard<stdx::mutex> lock(*_getMutex());
     switch (_state) {
         case State::kPreStart:

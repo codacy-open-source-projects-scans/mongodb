@@ -29,6 +29,14 @@
 
 #pragma once
 
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/time_support.h"
+
 #include <compare>
 #include <cstddef>
 #include <iosfwd>
@@ -36,21 +44,9 @@
 #include <tuple>
 #include <utility>
 
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/util/time_support.h"
-
 namespace mongo {
 
-class BSONObj;
-class BSONObjBuilder;
-class BSONObjBuilderValueStream;
-template <typename T>
-class StatusWith;
-
-namespace repl {
+namespace MONGO_MOD_PUB repl {
 
 /**
  * OpTime encompasses a Timestamp (which itself is composed of two 32-bit integers, which can
@@ -58,7 +54,7 @@ namespace repl {
  * label every op in an oplog with a unique identifier.
  */
 
-class OpTime {
+class MONGO_MOD_PUB OpTime {
 public:
     static constexpr auto kTermFieldName = "t"_sd;
     static constexpr auto kTimestampFieldName = "ts"_sd;
@@ -170,6 +166,10 @@ public:
         return !(*this < rhs);
     }
 
+    friend void appendToBson(BSONObjBuilder& builder, StringData fieldName, const OpTime& value) {
+        builder.append(fieldName, value.toBSON());
+    }
+
     friend std::ostream& operator<<(std::ostream& out, const OpTime& opTime);
 
     void appendAsQuery(BSONObjBuilder* builder) const;
@@ -180,7 +180,7 @@ private:
     long long _term = kInitialTerm;
 };
 
-class OpTimeAndWallTime {
+class MONGO_MOD_PUB OpTimeAndWallTime {
 public:
     static constexpr auto kWallClockTimeFieldName = "wall"_sd;
 
@@ -213,13 +213,15 @@ public:
         return opTime.toString() + ", " + wallTime.toString();
     }
 };
+
 std::ostream& operator<<(std::ostream& out, const OpTimeAndWallTime& opTime);
-}  // namespace repl
 
-/**
- * Support BSONObjBuilder and BSONArrayBuilder "stream" API.
- */
-BSONObjBuilder& operator<<(BSONObjBuilderValueStream& builder, const repl::OpTime& value);
+// A convenience class for holding both a Timestamp and a Date_t.
+struct MONGO_MOD_PUB TimestampAndWallTime {
+    Timestamp timestamp;
+    Date_t wallTime;
+};
 
+}  // namespace MONGO_MOD_PUB repl
 
 }  // namespace mongo

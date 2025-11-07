@@ -27,25 +27,23 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <cstddef>
-#include <limits>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/crypto/fle_tags.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/crypto/fle_crypto.h"
-#include "mongo/crypto/fle_tags.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 
-namespace mongo::fle {
+#include <algorithm>
+#include <cstddef>
+#include <limits>
 
-using DerivedToken = FLEDerivedFromDataTokenAndContentionFactorTokenGenerator;
-using TwiceDerived = FLETwiceDerivedTokenGenerator;
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
+namespace mongo::fle {
 
 size_t sizeArrayElementsMemory(size_t tagCount);
 
@@ -78,11 +76,14 @@ void generateTags(uint64_t numInserts,
                   EDCDerivedFromDataTokenAndContentionFactorToken edcTok,
                   std::vector<PrfBlock>& binaryTags) {
 
-    auto edcTag = TwiceDerived::generateEDCTwiceDerivedToken(edcTok);
+    auto edcTag = EDCTwiceDerivedToken::deriveFrom(edcTok);
 
+    HmacContext hmacCtx;
+    hmacCtx.setReuseKey(true);
     for (uint64_t i = 1; i <= numInserts; i++) {
-        binaryTags.emplace_back(EDCServerCollection::generateTag(edcTag, i));
+        binaryTags.emplace_back(EDCServerCollection::generateTag(&hmacCtx, edcTag, i));
     }
+    hmacCtx.setReuseKey(false);
 }
 
 }  // namespace
@@ -113,10 +114,8 @@ std::vector<std::vector<FLEEdgeCountInfo>> getCountInfoSets(FLETagQueryInterface
     blocks.reserve(contentionMax + 1);
 
     for (auto cf = 0; cf <= contentionMax; cf++) {
-        auto escToken =
-            DerivedToken::generateESCDerivedFromDataTokenAndContentionFactorToken(s, cf);
-        auto edcToken =
-            DerivedToken::generateEDCDerivedFromDataTokenAndContentionFactorToken(d, cf);
+        auto escToken = ESCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(s, cf);
+        auto edcToken = EDCDerivedFromDataTokenAndContentionFactorToken::deriveFrom(d, cf);
 
         FLEEdgePrfBlock edgeSet{escToken.asPrfBlock(), edcToken.asPrfBlock()};
 

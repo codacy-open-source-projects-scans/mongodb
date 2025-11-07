@@ -29,25 +29,32 @@
 
 #include "mongo/util/pcre.h"
 
-#include <array>
-#include <fmt/format.h>
-#include <initializer_list>
-#include <ostream>
-
 #include "mongo/base/error_codes.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/assert_that.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/unittest/matcher.h"
-#include "mongo/unittest/matcher_core.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/errno_util.h"
 
+#include <array>
+#include <initializer_list>
+#include <ostream>
+
+#include <fmt/format.h>
+
 namespace mongo::pcre {
 namespace {
-using namespace fmt::literals;
 using namespace std::string_literals;
 using namespace unittest::match;
+
+std::string buildAnchoredRepeatedPattern(const std::string& fragment, size_t repeats) {
+    std::string pattern;
+    pattern.reserve(2 + repeats * fragment.size());
+    pattern.push_back('^');
+    for (size_t i = 0; i < repeats; ++i) {
+        pattern.append(fragment);
+    }
+    pattern.push_back('$');
+    return pattern;
+}
 
 /**
  * In C++20, u8 literals yield char8_t[N].
@@ -156,8 +163,8 @@ TEST(PcreTest, MatchView) {
 TEST(PcreTest, MatchDataInputStorage) {
     Regex re{"hi"};
     const std::string in = "i";
-    ASSERT_NE(re.match(in).input().rawData(), in.data());
-    ASSERT_EQ(re.matchView(in).input().rawData(), in.data());
+    ASSERT_NE(re.match(in).input().data(), in.data());
+    ASSERT_EQ(re.matchView(in).input().data(), in.data());
 }
 
 TEST(PcreTest, StartPos) {
@@ -182,7 +189,7 @@ TEST(PcreTest, StartPos) {
 
     // `MatchData` retains the `startPos` from the match call.
     for (size_t i = 0; i != ohi.size(); ++i)
-        ASSERT_EQ(hiRe.matchView(ohi, {}, i).startPos(), i) << " i="_format(i);
+        ASSERT_EQ(hiRe.matchView(ohi, {}, i).startPos(), i) << fmt::format(" i={}", i);
 }
 
 TEST(PcreTest, CompileOptions) {
@@ -201,7 +208,7 @@ TEST(PcreTest, CompileOptions) {
         Regex re{pattern, opt};
         for (size_t i = 0; i < subjects.size(); ++i)
             ASSERT_EQ(!!re.matchView(subjects[i], pcre::ANCHORED | pcre::ENDANCHORED), outMatch[i])
-                << "opt={}, subject={}"_format(uint32_t(opt), subjects[i]);
+                << fmt::format("opt={}, subject={}", uint32_t(opt), subjects[i]);
     }
 }
 
@@ -229,9 +236,9 @@ TEST(PcreTest, Captures) {
     ASSERT_EQ(m.captureCount(), 1);
     ASSERT_TRUE(!!m);
     ASSERT_EQ(m[0], "abbbc");
-    ASSERT_EQ(m[0].rawData(), subject.rawData() + 3);
+    ASSERT_EQ(m[0].data(), subject.data() + 3);
     ASSERT_EQ(m[1], "bbb");
-    ASSERT_EQ(m[1].rawData(), subject.rawData() + 4);
+    ASSERT_EQ(m[1].data(), subject.data() + 4);
     ASSERT_THROWS(m[2], ExceptionFor<ErrorCodes::NoSuchKey>);
 }
 
@@ -255,8 +262,8 @@ TEST(PcreTest, UnusedLastCapture) {
 
 TEST(PcreTest, NullCapture) {
     static constexpr auto sb = "b"_sd;
-    ASSERT_THAT(Regex("(a*)b").matchView(sb)[1].rawData(), Eq(sb.rawData())) << "Empty";
-    ASSERT_THAT(Regex("(?:b|(a))").matchView(sb)[1].rawData(), Eq(nullptr)) << "Null";
+    ASSERT_THAT(Regex("(a*)b").matchView(sb)[1].data(), Eq(sb.data())) << "Empty";
+    ASSERT_THAT(Regex("(?:b|(a))").matchView(sb)[1].data(), Eq(nullptr)) << "Null";
 }
 
 TEST(PcreTest, CapturesByName) {
@@ -269,6 +276,47 @@ TEST(PcreTest, CapturesByName) {
     ASSERT_THROWS(m[2], ExceptionFor<ErrorCodes::NoSuchKey>);
     ASSERT_EQ(m["bees"], "bbb");
     ASSERT_THROWS(m["seas"], ExceptionFor<ErrorCodes::NoSuchKey>);
+}
+
+TEST(PcreTest, NotAllCaptured) {
+    Regex re("^(a)(b)?(c)?(d)?$");
+    auto m = re.match("ac");
+    ASSERT_EQ(re.captureCount(), 4);
+    ASSERT_TRUE(!!m);
+    ASSERT_EQ(m[0], "ac");
+    ASSERT_EQ(m[1], "a");
+    ASSERT_EQ(m[2], "");
+    ASSERT_EQ(m[3], "c");
+    ASSERT_EQ(m[4], "");
+    ASSERT_THROWS(m[5], ExceptionFor<ErrorCodes::NoSuchKey>);
+}
+
+TEST(PcreTest, ManyCaptures) {
+    constexpr size_t n = 1000;
+    const std::string pattern = buildAnchoredRepeatedPattern("(b)", n);
+    const std::string subject(n, 'b');
+    Regex re(pattern);
+    ASSERT_EQ(re.captureCount(), n);
+    auto m = re.match(subject);
+    ASSERT_EQ(m.captureCount(), n);
+    ASSERT_TRUE(!!m);
+    ASSERT_EQ(m[0], subject);
+    for (size_t i = 0; i < n; ++i) {
+        ASSERT_EQ(m[i + 1], "b");
+    }
+    ASSERT_THROWS(m[n + 1], ExceptionFor<ErrorCodes::NoSuchKey>);
+}
+
+TEST(PcreTest, TooDeepNesting) {
+    constexpr size_t n = 5000;
+    const std::string pattern = buildAnchoredRepeatedPattern("(b)", n);
+    const std::string subject(n, 'b');
+    Regex re(pattern);
+    ASSERT_EQ(re.captureCount(), n);
+    auto m = re.match(subject);
+    ASSERT_EQ(m.captureCount(), n);
+    ASSERT_FALSE(!!m);
+    ASSERT_EQ(Errc::ERROR_DEPTHLIMIT, m.error());
 }
 
 TEST(PcreTest, Utf) {
@@ -349,6 +397,50 @@ TEST(PcreTest, SubstituteFlags) {
               "The quick brown fox jumped over the lazy dog.");
     ASSERT_EQ(subst(re, repl, str, SUBSTITUTE_GLOBAL | SUBSTITUTE_LITERAL),  //
               "The $3 $2 $1 jumped over $3 $2 $1.");
+}
+
+TEST(PcreTest, MatchLimit) {
+    std::string s(8, 'a');
+    static const std::string pattern = "(a+)+\\d";
+    {
+        Regex customLimitRegex(pattern, CompileOptions{}, Limits{.matchLimit = 128});
+        auto match = customLimitRegex.match(s);
+        ASSERT_TRUE(match.error());
+        ASSERT_EQ(match.error().message(), "match limit exceeded");
+    }
+    {
+        Regex defaultLimitRegex(pattern, CompileOptions{});
+        auto match = defaultLimitRegex.match(s);
+        ASSERT_TRUE(match.error());
+        ASSERT_EQ(match.error().message(), "no match");
+    }
+}
+
+TEST(PcreTest, HeapLimit) {
+    static const size_t kBlockSize = 1024;
+    static const size_t kBlockCount = 512;
+
+    static const std::string pattern = "(b(a+)+[bc])+";
+
+    std::string s;
+    s.reserve(kBlockSize * kBlockCount);
+    for (size_t i = 0; i < kBlockCount; ++i) {
+        s.push_back('b');
+        s += std::string(kBlockSize - 2, 'a');
+        s.push_back('b' + i % 2);
+    }
+
+    {
+        Regex customLimitRegex(pattern, CompileOptions{}, Limits{.heapLimitKB = 128});
+        auto match = customLimitRegex.match(s);
+        ASSERT_TRUE(match.error());
+        ASSERT_EQ(match.error().message(), "heap limit exceeded");
+    }
+    {
+        Regex defaultLimitRegex(pattern, CompileOptions{});
+        auto match = defaultLimitRegex.match(s);
+        ASSERT_FALSE(match.error());
+    }
 }
 
 }  // namespace

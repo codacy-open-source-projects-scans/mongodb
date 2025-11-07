@@ -29,21 +29,22 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <iosfwd>
-#include <memory>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/rpc/message.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
+
+#include <iosfwd>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -53,6 +54,7 @@ class ReplyInterface;
 
 namespace executor {
 
+std::vector<std::string> extractErrorLabels(BSONObj data);
 
 /**
  * Type of object describing the response of previously sent RemoteCommandRequest.
@@ -75,6 +77,7 @@ struct RemoteCommandResponse {
                           bool moreToCome = false);
 
     std::string toString() const;
+    std::vector<std::string> getErrorLabels() const;
 
     bool operator==(const RemoteCommandResponse& rhs) const;
     bool operator!=(const RemoteCommandResponse& rhs) const;

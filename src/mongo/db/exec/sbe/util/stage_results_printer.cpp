@@ -29,14 +29,12 @@
 
 #include "mongo/db/exec/sbe/util/stage_results_printer.h"
 
-#include <cstddef>
-
-#include <absl/container/inlined_vector.h>
-
 #include "mongo/db/exec/plan_stats_visitor.h"
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
 #include "mongo/db/query/tree_walker.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstddef>
 
 namespace mongo::sbe {
 
@@ -53,6 +51,7 @@ void StageResultsPrinter<T>::printStageResults(CompileCtx* ctx,
                                                PlanStage* stage) {
     tassert(6441701, "slots and names sizes must match", slots.size() == names.size());
     SlotNames slotNames;
+    slotNames.reserve(slots.size());
     size_t idx = 0;
     for (auto slot : slots) {
         slotNames.emplace_back(slot, names[idx++]);
@@ -66,19 +65,18 @@ void StageResultsPrinter<T>::printStageResults(CompileCtx* ctx,
                                                const SlotNames& slotNames,
                                                PlanStage* stage) {
     std::vector<value::SlotAccessor*> accessors;
+    accessors.reserve(slotNames.size());
     for (const auto& slot : slotNames) {
         accessors.push_back(stage->getAccessor(*ctx, slot.first));
     }
 
     printSlotNames(slotNames);
-    _stream << ":"
-            << "\n";
+    _stream << ":\n";
 
     size_t iter = 0;
     for (auto st = stage->getNext(); st == PlanState::ADVANCED; st = stage->getNext(), iter++) {
         if (iter >= _options.arrayObjectOrNestingMaxDepth()) {
-            _stream << "..."
-                    << "\n";
+            _stream << "...\n";
             break;
         }
 
@@ -124,10 +122,10 @@ struct PlanStatsSpecificStatsPrinter : PlanStatsVisitorBase<true> {
 
     void visit(tree_walker::MaybeConstPtr<true, sbe::HashLookupStats> stats) final {
         _stream << "dsk:" << stats->usedDisk << "\n";
-        _stream << "htRecs:" << stats->spilledHtRecords << "\n";
-        _stream << "htIndices:" << stats->spilledHtBytesOverAllRecords << "\n";
-        _stream << "buffRecs:" << stats->spilledBuffRecords << "\n";
-        _stream << "buffBytes:" << stats->spilledBuffBytesOverAllRecords << "\n";
+        _stream << "htRecs:" << stats->spillingHtStats.getSpilledRecords() << "\n";
+        _stream << "htIndices:" << stats->spillingHtStats.getSpilledBytes() << "\n";
+        _stream << "buffRecs:" << stats->spillingBuffStats.getSpilledRecords() << "\n";
+        _stream << "buffBytes:" << stats->spillingBuffStats.getSpilledBytes() << "\n";
     }
 
     // TODO: Add an overload for the specific stats of other stages by overriding their

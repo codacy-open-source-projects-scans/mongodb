@@ -35,7 +35,7 @@ class Powercycle(Subcommand):
     SAVE_DIAG = 3
     REMOTE_HANG_ANALYZER = 4
 
-    def __init__(self, parser_actions, options):
+    def __init__(self, parser_actions, options: dict):
         """Initialize."""
         self.parser_actions = parser_actions
         self.options = options
@@ -47,7 +47,7 @@ class Powercycle(Subcommand):
             self.HOST_SETUP: self._exec_powercycle_host_setup,
             self.SAVE_DIAG: self._exec_powercycle_save_diagnostics,
             self.REMOTE_HANG_ANALYZER: self._exec_powercycle_hang_analyzer,
-        }[self.options.run_option]()
+        }[self.options["run_option"]]()
 
     def _exec_powercycle_main(self):
         powercycle.main(self.parser_actions, self.options)
@@ -244,7 +244,7 @@ MongoDB Powercycle Tests. To run a powercycle test locally, use the following st
 
         parser.add_argument("remote_operations", nargs="*", help=argparse.SUPPRESS)
 
-        self.parser_actions = parser._actions[1:-1]  # pylint: disable=protected-access
+        self.parser_actions = parser._actions[1:-1]
 
     def parse(self, subcommand, parser, parsed_args, should_configure_otel=True, **kwargs):
         """Parse command-line options."""

@@ -29,14 +29,16 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/base/status.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <memory>
+
+namespace MONGO_MOD_PUB mongo {
 namespace repl {
 
 
@@ -44,7 +46,7 @@ namespace repl {
  * Once scheduled, the NoopWriter will periodically write a noop to the oplog if the replication
  * coordinator's optime has not changed since the last time it did a write.
  */
-class NoopWriter {
+class MONGO_MOD_PARENT_PRIVATE NoopWriter {
     NoopWriter(const NoopWriter&) = delete;
     NoopWriter& operator=(const NoopWriter&) = delete;
 
@@ -82,4 +84,4 @@ private:
 };
 
 }  // namespace repl
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

@@ -27,6 +27,8 @@
  *    it in the license file.
  */
 
+#pragma once
+
 #include "mongo/db/change_stream_options_gen.h"
 #include "mongo/db/change_stream_options_manager.h"
 #include "mongo/db/change_stream_pre_images_truncate_markers_per_nsUUID.h"
@@ -40,8 +42,6 @@ namespace change_stream_pre_image_test_helper {
  * Pre-defined pre-images and UUIDs for testing pre-image components.
  */
 struct ChangeStreamPreImageTestConstants {
-    const boost::optional<TenantId> kTenantId{};
-
     /**
      * 'kNsUUID' constants.
      */
@@ -116,8 +116,7 @@ PreImagesTruncateMarkersPerNsUUID::InitialSetOfMarkers makeInitialSetOfMarkers(
     int64_t partialMarkerBytes,
     CollectionTruncateMarkers::MarkersCreationMethod creationMethod);
 
-PreImagesTruncateMarkersPerNsUUID makeEmptyTruncateMarkers(boost::optional<TenantId> tenantId,
-                                                           const UUID& nsUUID,
+PreImagesTruncateMarkersPerNsUUID makeEmptyTruncateMarkers(const UUID& nsUUID,
                                                            int64_t minBytesPerMarker);
 
 /**
@@ -140,10 +139,9 @@ bool activelyTrackingPreImage(const PreImagesTruncateMarkersPerNsUUID& nsUUIDTru
                               const ChangeStreamPreImage& preImage);
 
 /**
- * Performs a direct write to the pre-images collection for 'tenantId'.
+ * Performs a direct write to the pre-images collection.
  */
 void insertDirectlyToPreImagesCollection(OperationContext* opCtx,
-                                         boost::optional<TenantId> tenantId,
                                          const ChangeStreamPreImage& preImage);
 
 ChangeStreamPreImage makePreImage(const UUID& nsUUID,
@@ -153,7 +151,7 @@ ChangeStreamPreImage makePreImage(const UUID& nsUUID,
 CollectionTruncateMarkers::RecordIdAndWallTime extractRecordIdAndWallTime(
     const ChangeStreamPreImage& preImage);
 
-void createPreImagesCollection(OperationContext* opCtx, boost::optional<TenantId> tenantId);
+void createPreImagesCollection(OperationContext* opCtx);
 
 /**
  * Returns the size of the 'preImage' in bytes.
@@ -163,7 +161,6 @@ int64_t bytes(const ChangeStreamPreImage& preImage);
 /**
  * Readability convenience method - obtains locks to read the pre-image collection.
  */
-CollectionAcquisition acquirePreImagesCollectionForRead(OperationContext* opCtx,
-                                                        boost::optional<TenantId> tenantId);
+CollectionAcquisition acquirePreImagesCollectionForRead(OperationContext* opCtx);
 }  // namespace change_stream_pre_image_test_helper
 }  // namespace mongo

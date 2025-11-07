@@ -28,18 +28,7 @@
  */
 
 
-#include <absl/container/node_hash_map.h>
-#include <algorithm>
-#include <cstdint>
-#include <ctime>
-#include <fmt/format.h>
-#include <limits>
-#include <memory>
-#include <random>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/s/balancer/balancer_policy.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -47,22 +36,31 @@
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
+#include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
+#include "mongo/db/global_catalog/ddl/sharding_util.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/type_tags.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/s/balancer/balancer_policy.h"
-#include "mongo/db/s/config/sharding_catalog_manager.h"
-#include "mongo/db/s/sharding_util.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/type_tags.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <ctime>
+#include <limits>
+#include <memory>
+#include <random>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -74,7 +72,6 @@ MONGO_FAIL_POINT_DEFINE(balancerShouldReturnRandomMigrations);
 using std::numeric_limits;
 using std::string;
 using std::vector;
-using namespace fmt::literals;
 
 namespace {
 
@@ -439,14 +436,19 @@ boost::optional<MigrateInfo> chooseRandomMigration(
             return true;
         });
 
-        invariant(rndChunk.getShard().isValid());
         return rndChunk;
     }();
 
     tassert(8245222, "randomChunk's shard is invalid", randomChunk.getShard().isValid());
 
-    return MigrateInfo{
-        recipientShard.get(), distribution.nss(), randomChunk, ForceJumbo::kDoNotForce};
+    return MigrateInfo{recipientShard.get(),
+                       randomChunk.getShard(),
+                       distribution.nss(),
+                       randomChunk.getCollectionUUID(),
+                       randomChunk.getMin(),
+                       boost::none,
+                       randomChunk.getVersion(),
+                       ForceJumbo::kDoNotForce};
 }
 
 MigrateInfosWithReason BalancerPolicy::balance(
@@ -554,8 +556,7 @@ MigrateInfosWithReason BalancerPolicy::balance(
     // Select random migrations after checking for draining shards so tests with removeShard or
     // transitionToDedicatedConfigServer can eventually drain shards.
     // NOTE: randomly chosen migrations do not respect zones.
-    if (MONGO_unlikely(balancerShouldReturnRandomMigrations.shouldFail()) &&
-        !distribution.nss().isConfigDB()) {
+    if (MONGO_unlikely(balancerShouldReturnRandomMigrations.shouldFail())) {
         LOGV2_DEBUG(21881, 1, "balancerShouldReturnRandomMigrations failpoint is set");
 
         auto migration = chooseRandomMigration(shardStats, *availableShards, distribution);
@@ -931,7 +932,9 @@ std::string SplitInfo::toString() const {
         splitKeysBuilder << splitKey.toString() << ", ";
     }
 
-    return "Splitting chunk in {} [ {}, {} ), residing on {} at [ {} ] with version {} and collection placement version {}"_format(
+    return fmt::format(
+        "Splitting chunk in {} [ {}, {} ), residing on {} at [ {} ] with version {} and collection "
+        "placement version {}",
         toStringForLogging(nss),
         minKey.toString(),
         maxKey.toString(),
@@ -953,7 +956,8 @@ MergeInfo::MergeInfo(const ShardId& shardId,
       chunkRange(chunkRange) {}
 
 std::string MergeInfo::toString() const {
-    return "Merging chunk range {} in {} residing on {} with collection placement version {}"_format(
+    return fmt::format(
+        "Merging chunk range {} in {} residing on {} with collection placement version {}",
         chunkRange.toString(),
         NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()),
         shardId.toString(),
@@ -965,9 +969,9 @@ MergeAllChunksOnShardInfo::MergeAllChunksOnShardInfo(const ShardId& shardId,
     : shardId(shardId), nss(nss) {}
 
 std::string MergeAllChunksOnShardInfo::toString() const {
-    return "Merging all contiguous chunks residing on shard {} for collection {}"_format(
-        shardId.toString(),
-        NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
+    return fmt::format("Merging all contiguous chunks residing on shard {} for collection {}",
+                       shardId.toString(),
+                       NamespaceStringUtil::serialize(nss, SerializationContext::stateDefault()));
 }
 
 DataSizeInfo::DataSizeInfo(const ShardId& shardId,
@@ -1000,19 +1004,18 @@ NamespaceStringToShardDataSizeMap getStatsForBalancing(
     auto responsesFromShards = sharding_util::sendCommandToShards(
         opCtx, DatabaseName::kAdmin, reqObj, shardIds, executor, false /* throwOnError */);
 
-    using namespace fmt::literals;
     NamespaceStringToShardDataSizeMap namespaceToShardDataSize;
     for (auto&& response : responsesFromShards) {
         try {
             const auto& shardId = response.shardId;
-            auto errorContext =
-                "Failed to get stats for balancing from shard '{}'"_format(shardId.toString());
+            auto errorContext = fmt::format("Failed to get stats for balancing from shard '{}'",
+                                            shardId.toString());
             const auto responseValue =
                 uassertStatusOKWithContext(std::move(response.swResponse), errorContext);
 
             const ShardsvrGetStatsForBalancingReply reply =
                 ShardsvrGetStatsForBalancingReply::parse(
-                    IDLParserContext("ShardsvrGetStatsForBalancingReply"), responseValue.data);
+                    responseValue.data, IDLParserContext("ShardsvrGetStatsForBalancingReply"));
             const auto collStatsFromShard = reply.getStats();
 
             tassert(8245200,

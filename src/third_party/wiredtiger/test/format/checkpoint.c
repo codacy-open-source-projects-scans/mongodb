@@ -64,7 +64,7 @@ checkpoint(void *arg)
     WT_CONNECTION *conn;
     WT_DECL_RET;
     WT_SESSION *session;
-    u_int counter, secs;
+    u_int counter, max_secs, secs;
     char config_buf[64];
     const char *ckpt_config, *ckpt_vrfy_name;
     bool backup_locked, ebusy_ok, flush_tier, named_checkpoints;
@@ -80,6 +80,9 @@ checkpoint(void *arg)
     named_checkpoints = true;
     /* Tiered tables do not support named checkpoints. */
     if (g.tiered_storage_config)
+        named_checkpoints = false;
+    /* Named checkpoints are not allowed with disaggregated storage. */
+    if (g.disagg_storage_config)
         named_checkpoints = false;
 
     for (secs = mmrand(&g.extra_rnd, 1, 10); !g.workers_finished;) {
@@ -150,17 +153,20 @@ checkpoint(void *arg)
         testutil_assert(ret == 0 || (ret == EBUSY && ebusy_ok));
 
         if (ckpt_config == NULL)
-            trace_msg(session, "Checkpoint #%u stop", counter);
+            trace_msg(session, "Checkpoint #%u stop, ret=%d", counter, ret);
         else
-            trace_msg(session, "Checkpoint #%u stop (%s)", counter, ckpt_config);
+            trace_msg(session, "Checkpoint #%u stop (%s), ret=%d", counter, ckpt_config, ret);
 
         if (backup_locked)
             lock_writeunlock(session, &g.backup_lock);
 
-        /* Verify the checkpoints. */
-        wts_verify_mirrors(conn, ckpt_vrfy_name, NULL);
+        /* FIXME-WT-15357 Checkpoint cursors are not compatible with disagg for now. */
+        if (!g.disagg_storage_config)
+            /* Verify the checkpoints. */
+            wts_verify_mirrors(conn, ckpt_vrfy_name, NULL);
 
-        secs = mmrand(&g.extra_rnd, 5, 40);
+        max_secs = g.disagg_storage_config ? 10 : 40;
+        secs = mmrand(&g.extra_rnd, 5, max_secs);
     }
 
     wt_wrap_open_session(conn, &sap, NULL, NULL, &session);

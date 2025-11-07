@@ -6,31 +6,32 @@
 //   does_not_support_stepdowns,
 //   requires_fcv_70,
 //   requires_profiling,
+//   # The test runs getLatestProfileEntry(). The downstream syncing node affects the profiler.
+//   run_getLatestProfilerEntry,
 // ]
 
-import {
-    ClusteredCollectionUtil
-} from "jstests/libs/clustered_collections/clustered_collection_util.js";
+import {ClusteredCollectionUtil} from "jstests/libs/clustered_collections/clustered_collection_util.js";
 import {isLinux} from "jstests/libs/os_helpers.js";
 import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 
-var testDB = db.getSiblingDB("profile_find");
+let testDB = db.getSiblingDB("profile_find");
 assert.commandWorked(testDB.dropDatabase());
 const collName = jsTestName();
-var coll = testDB.getCollection(collName);
+let coll = testDB.getCollection(collName);
 
 // Don't profile the setFCV command, which could be run during this test in the
 // fcv_upgrade_downgrade_replica_sets_jscore_passthrough suite.
-assert.commandWorked(testDB.setProfilingLevel(
-    1, {filter: {'command.setFeatureCompatibilityVersion': {'$exists': false}}}));
+assert.commandWorked(
+    testDB.setProfilingLevel(1, {filter: {"command.setFeatureCompatibilityVersion": {"$exists": false}}}),
+);
 const profileEntryFilter = {
-    op: "query"
+    op: "query",
 };
 
 //
 // Confirm most metrics on single document read.
 //
-var i;
+let i;
 for (i = 0; i < 3; ++i) {
     assert.commandWorked(coll.insert({a: i, b: i}));
 }
@@ -39,12 +40,14 @@ assert.commandWorked(coll.createIndex({a: 1}, {collation: {locale: "fr"}}));
 // Use batchSize to avoid express path.
 assert.eq(coll.find({a: 1}).collation({locale: "fr"}).limit(1).batchSize(2).itcount(), 1);
 
-var profileObj = getLatestProfilerEntry(testDB, profileEntryFilter);
+let profileObj = getLatestProfilerEntry(testDB, profileEntryFilter);
 
 assert.eq(profileObj.ns, coll.getFullName(), profileObj);
 assert.eq(profileObj.keysExamined, 1, profileObj);
 assert.eq(profileObj.docsExamined, 1, profileObj);
 assert.eq(profileObj.nreturned, 1, profileObj);
+assert(profileObj.hasOwnProperty("queryHash"), tojson(profileObj));
+assert(profileObj.hasOwnProperty("planCacheKey"), tojson(profileObj));
 assert.eq(profileObj.planSummary, "IXSCAN { a: 1 }", profileObj);
 assert(profileObj.execStats.hasOwnProperty("stage"), profileObj);
 assert.eq(profileObj.command.filter, {a: 1}, profileObj);
@@ -96,7 +99,14 @@ assert.commandWorked(coll.createIndex({a: 1}));
 
 assert.neq(coll.findOne({a: 1}), null);
 
-assert.neq(coll.find({a: {$gte: 0}}).sort({b: 1}).batchSize(1).next(), null);
+assert.neq(
+    coll
+        .find({a: {$gte: 0}})
+        .sort({b: 1})
+        .batchSize(1)
+        .next(),
+    null,
+);
 profileObj = getLatestProfilerEntry(testDB, profileEntryFilter);
 
 assert.eq(profileObj.hasSortStage, true, profileObj);
@@ -125,10 +135,20 @@ assert.eq(profileObj.fromMultiPlanner, true, profileObj);
 assert.eq(profileObj.planSummary, "IXSCAN { a: 1, b: 1 }", profileObj);
 assert.eq(profileObj.appName, "MongoDB Shell", profileObj);
 
-assert.neq(coll.findOne({a: 3, b: 3}), null);
-assert.neq(coll.findOne({a: 3, b: 3}), null);
-profileObj = getLatestProfilerEntry(testDB, profileEntryFilter);
-assert.eq(profileObj.fromPlanCache, true, profileObj);
+// Using 'assert.soon()' here to skip over transient situations in which a query
+// plan cannot be added to the plan cache.
+assert.soon(() => {
+    assert.neq(coll.findOne({a: 3, b: 3}), null);
+    profileObj = getLatestProfilerEntry(testDB, profileEntryFilter);
+    return !!profileObj.fromPlanCache;
+});
+assert.eq(!!profileObj.fromPlanCache, true, () => {
+    const planCacheEntries = coll.getPlanCache().list();
+    return (
+        `Query not served from plan cache.\nProfile: ${tojson(profileObj)}\n` +
+        `Plan cache: ${tojson(planCacheEntries)}`
+    );
+});
 assert.eq(profileObj.planSummary, "IXSCAN { a: 1, b: 1 }", profileObj);
 assert.eq(profileObj.appName, "MongoDB Shell", profileObj);
 
@@ -159,11 +179,13 @@ assert.neq(coll.findOne({a: 15, b: 10}), null);
 profileObj = getLatestProfilerEntry(testDB, profileEntryFilter);
 
 assert.eq(profileObj.replanned, true, profileObj);
-assert(profileObj.hasOwnProperty('replanReason'), profileObj);
+assert(profileObj.hasOwnProperty("replanReason"), profileObj);
 assert(
     profileObj.replanReason.match(
-        /cached plan was less efficient than expected: expected trial execution to take [0-9]+ (works|reads) but it took at least [0-9]+ (works|reads)/),
-    profileObj);
+        /cached plan was less efficient than expected: expected trial execution to take [0-9]+ (works|reads) but it took at least [0-9]+ (works|reads)/,
+    ),
+    profileObj,
+);
 assert.eq(profileObj.appName, "MongoDB Shell", profileObj);
 
 //
@@ -180,7 +202,7 @@ assert.eq(coll.find().comment("a comment").itcount(), 1);
 profileObj = getLatestProfilerEntry(testDB, profileEntryFilter);
 assert.eq(profileObj.command.comment, "a comment", profileObj);
 
-var maxTimeMS = 100000;
+let maxTimeMS = 100000;
 assert.eq(coll.find().maxTimeMS(maxTimeMS).itcount(), 1);
 profileObj = getLatestProfilerEntry(testDB, profileEntryFilter);
 assert.eq(profileObj.command.maxTimeMS, maxTimeMS, profileObj);
@@ -209,7 +231,7 @@ for (let i = 0; i < 501; i++) {
 
 assert.eq(coll.find(queryPredicate).comment("profile_find").itcount(), 0);
 profileObj = getLatestProfilerEntry(testDB, profileEntryFilter);
-assert.eq((typeof profileObj.command.$truncated), "string", profileObj);
+assert.eq(typeof profileObj.command.$truncated, "string", profileObj);
 assert.eq(profileObj.command.comment, "profile_find", profileObj);
 
 //

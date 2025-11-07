@@ -28,8 +28,7 @@
  */
 
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <utility>
-#include <vector>
+#include "mongo/db/query/stage_builder/classic_stage_builder.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -37,23 +36,25 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_mock.h"
-#include "mongo/db/catalog/index_catalog_mock.h"
 #include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_mock.h"
+#include "mongo/db/local_catalog/index_catalog_mock.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role_mock.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/query_solution.h"
-#include "mongo/db/query/stage_builder/classic_stage_builder.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/storage/snapshot.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <utility>
+#include <vector>
 
 namespace mongo {
 
@@ -100,9 +101,13 @@ public:
             .expCtx = ExpressionContextBuilder{}.fromRequest(opCtx(), *findCommand).build(),
             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
 
-        auto coll = CollectionPtr(_collection.get());
+        // The collection holder is guaranteed to be valid for the lifetime of the test. This
+        // initialization is safe.
+        CollectionPtr collptr = CollectionPtr::CollectionPtr_UNSAFE(_collection.get());
+        auto coll =
+            shard_role_mock::acquireCollectionMocked(_opCtx.get(), kNss, std::move(collptr));
         stage_builder::ClassicStageBuilder builder{
-            opCtx(), &coll, *cq, *querySolution, workingSet(), &_planStageQsnMap};
+            opCtx(), coll, *cq, *querySolution, workingSet(), &_planStageQsnMap};
         return builder.build(querySolution->root());
     }
 
@@ -149,7 +154,7 @@ namespace {
 IndexEntry buildSimpleIndexEntry(const BSONObj& kp) {
     return {kp,
             IndexNames::nameToType(IndexNames::findPluginName(kp)),
-            IndexDescriptor::kLatestIndexVersion,
+            IndexConfig::kLatestIndexVersion,
             false,
             {},
             {},

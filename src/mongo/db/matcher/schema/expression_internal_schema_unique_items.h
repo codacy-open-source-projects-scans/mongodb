@@ -29,15 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-#include <set>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -47,9 +38,17 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_array.h"
 #include "mongo/db/matcher/expression_visitor.h"
-#include "mongo/db/matcher/match_details.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstddef>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -84,20 +83,6 @@ public:
         return nullptr;
     }
 
-    bool matchesArray(const BSONObj& array, MatchDetails*) const final {
-        return !findFirstDuplicateValue(array);
-    }
-
-    BSONElement findFirstDuplicateValue(const BSONObj& array) const {
-        auto set = _comparator.makeBSONEltSet();
-        for (auto&& elem : array) {
-            if (!get<bool>(set.insert(elem))) {
-                return elem;
-            }
-        }
-        return {};
-    }
-
     void debugString(StringBuilder& builder, int indentationLevel) const final;
 
     bool equivalent(const MatchExpression* other) const final;
@@ -116,13 +101,11 @@ public:
         visitor->visit(this);
     }
 
-private:
-    ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) {
-            return expression;
-        };
+    const auto& getComparator() const {
+        return _comparator;
     }
 
+private:
     // The comparator to use when comparing BSONElements, which will never use a collation.
     UnorderedFieldsBSONElementComparator _comparator;
 };

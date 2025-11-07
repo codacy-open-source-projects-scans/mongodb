@@ -19,29 +19,33 @@ Mongo.prototype.runCommand = function runCommand(dbName, cmdObj, options) {
 function runWithRetries(mongo, cmdObj, clientFunction, clientFunctionArguments) {
     let cmdName = Object.keys(cmdObj)[0];
 
-    const isRetryableWriteCmd = cmdObj.hasOwnProperty("lsid") &&
-        cmdObj.hasOwnProperty("txnNumber") && RetryableWritesUtil.isRetryableWriteCmdName(cmdName);
+    const isRetryableWriteCmd =
+        cmdObj.hasOwnProperty("lsid") &&
+        cmdObj.hasOwnProperty("txnNumber") &&
+        RetryableWritesUtil.isRetryableWriteCmdName(cmdName);
     const canRetryWrites = _ServerSession.canRetryWrites(cmdObj);
 
     let res = clientFunction.apply(mongo, clientFunctionArguments);
 
-    if ((isRetryableWriteCmd && canRetryWrites)
+    if (
+        (isRetryableWriteCmd && canRetryWrites) ||
         // Commit is always considered a retryable write.
-        || cmdName === "commitTransaction") {
-        print("*** Initial response: " + tojsononeline(res));
+        cmdName === "commitTransaction"
+    ) {
+        jsTest.log.info("*** Initial response", {res});
         let retryAttempt = 1;
         do {
-            print("*** Retry attempt: " + retryAttempt + ", for command: " + cmdName +
-                  " with txnNumber: " + tojson(cmdObj.txnNumber) +
-                  ", and lsid: " + tojson(cmdObj.lsid));
+            jsTest.log.info("*** Retry attempt: " + retryAttempt + ", for command: " + cmdName, {
+                txnNumber: cmdObj.txnNumber,
+                lsid: cmdObj.lsid,
+            });
             ++retryAttempt;
             res = clientFunction.apply(mongo, clientFunctionArguments);
-            print("*** Retry response: " + tojsononeline(res));
+            jsTest.log.info("*** Retry response", {res});
         } while (Random.rand() <= kExtraRetryProbability);
     }
 
     return res;
 }
 
-OverrideHelpers.prependOverrideInParallelShell(
-    "jstests/libs/override_methods/retry_writes_at_least_once.js");
+OverrideHelpers.prependOverrideInParallelShell("jstests/libs/override_methods/retry_writes_at_least_once.js");

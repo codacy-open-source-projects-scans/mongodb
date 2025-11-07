@@ -29,26 +29,24 @@
 
 #include "mongo/db/query/virtual_collection/multi_bson_stream_cursor.h"
 
-#include <cstring>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/db/catalog/virtual_collection_options.h"
+#include "mongo/db/local_catalog/virtual_collection_options.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/platform/compiler.h"
 
+#include <cstring>
+#include <utility>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+
 namespace mongo {
-using namespace fmt::literals;
 
 /**
  * Expands '_buffer' by a multiple of two of its current size that is large enough to contain two
@@ -57,9 +55,9 @@ using namespace fmt::literals;
  */
 void MultiBsonStreamCursor::expandBuffer(int32_t bsonSize) {
     uassert(6968308,
-            "bsonSize {} > BSONObjMaxUserSize {}"_format(bsonSize, BSONObjMaxUserSize),
+            fmt::format("bsonSize {} > BSONObjMaxUserSize {}", bsonSize, BSONObjMaxUserSize),
             (bsonSize <= BSONObjMaxUserSize));
-    uassert(6968309, "bsonSize {} < 0"_format(bsonSize), (bsonSize >= 0));
+    uassert(6968309, fmt::format("bsonSize {} < 0", bsonSize), (bsonSize >= 0));
 
     int newSizeTarget = 2 * bsonSize;
     do {
@@ -96,10 +94,13 @@ boost::optional<Record> MultiBsonStreamCursor::nextFromCurrentStream() {
             // Cases 3: get the rest of size. This collapses case 3 into case 2.
             if (availBytes < kSizeSize) {
                 remBytes = kSizeSize - availBytes;
+                // TODO SERVER-111117 It seems like we should check that we have enough room in the
+                // buffer to accomodate the rest of the size.
                 readBytes = _streamReader->readBytes(remBytes, (_buffer.get() + _bufEnd));
                 if (MONGO_unlikely(readBytes < remBytes)) {
-                    uasserted(6968303,
-                              "Truncated file: {}"_format(_vopts.dataSources[_streamIdx].url));
+                    uasserted(
+                        6968303,
+                        fmt::format("Truncated file: {}", _vopts.dataSources[_streamIdx].url));
                     return boost::none;
                 }
                 _bufEnd += readBytes;
@@ -113,8 +114,9 @@ boost::optional<Record> MultiBsonStreamCursor::nextFromCurrentStream() {
                 if (MONGO_likely(remBytes <= _bufSize - _bufEnd)) {  // 'remBytes' will fit
                     readBytes = _streamReader->readBytes(remBytes, (_buffer.get() + _bufEnd));
                     if (MONGO_unlikely(readBytes < remBytes)) {
-                        uasserted(6968304,
-                                  "Truncated file: {}"_format(_vopts.dataSources[_streamIdx].url));
+                        uasserted(
+                            6968304,
+                            fmt::format("Truncated file: {}", _vopts.dataSources[_streamIdx].url));
                         return boost::none;
                     }
                     _bufEnd += readBytes;
@@ -131,7 +133,8 @@ boost::optional<Record> MultiBsonStreamCursor::nextFromCurrentStream() {
                 return boost::none;
             }
             if (MONGO_unlikely(_bufEnd < kSizeSize)) {
-                uasserted(6968305, "Truncated file: {}"_format(_vopts.dataSources[_streamIdx].url));
+                uasserted(6968305,
+                          fmt::format("Truncated file: {}", _vopts.dataSources[_streamIdx].url));
                 return boost::none;
             }
             // Not used again: availBytes += _bufEnd;
@@ -142,7 +145,8 @@ boost::optional<Record> MultiBsonStreamCursor::nextFromCurrentStream() {
                     expandBuffer(bsonSize);
                     continue;
                 }
-                uasserted(6968306, "Truncated file: {}"_format(_vopts.dataSources[_streamIdx].url));
+                uasserted(6968306,
+                          fmt::format("Truncated file: {}", _vopts.dataSources[_streamIdx].url));
                 return boost::none;
             }
         }
@@ -153,8 +157,9 @@ boost::optional<Record> MultiBsonStreamCursor::nextFromCurrentStream() {
     // 'recordData.data' includes the size in the first four bytes.
     boost::optional<RecordData> recordData = RecordData{(_buffer.get() + _bufBegin), bsonSize};
     _bufBegin += bsonSize;
-    tassert(
-        6968307, "_bufBegin {} > _bufSize {}"_format(_bufBegin, _bufSize), (_bufBegin <= _bufSize));
+    tassert(6968307,
+            fmt::format("_bufBegin {} > _bufSize {}", _bufBegin, _bufSize),
+            (_bufBegin <= _bufSize));
 
     return {{RecordId{_nextRecordId++}, std::move(*recordData)}};
 }
@@ -166,9 +171,10 @@ boost::optional<Record> MultiBsonStreamCursor::nextFromCurrentStream() {
  */
 std::unique_ptr<InputStream<NamedPipeInput>> MultiBsonStreamCursor::getInputStream(
     const std::string& url) {
-    auto filePathPos = url.find(ExternalDataSourceMetadata::kUrlProtocolFile.toString());
-    tassert(
-        ErrorCodes::BadValue, "Invalid file url: {}"_format(url), filePathPos != std::string::npos);
+    auto filePathPos = url.find(std::string{ExternalDataSourceMetadata::kUrlProtocolFile});
+    tassert(ErrorCodes::BadValue,
+            fmt::format("Invalid file url: {}", url),
+            filePathPos != std::string::npos);
 
     auto filePathStr =
         url.substr(filePathPos + ExternalDataSourceMetadata::kUrlProtocolFile.size());

@@ -29,12 +29,8 @@
 
 #include "mongo/db/exec/sbe/stages/hashagg_base.h"
 
-#include <memory>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/sbe/stages/block_hashagg.h"
 #include "mongo/db/exec/sbe/stages/hash_agg.h"
 #include "mongo/db/exec/sbe/util/spilling.h"
@@ -42,6 +38,10 @@
 #include "mongo/db/query/util/spill_util.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/storage/storage_options.h"
+
+#include <memory>
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
 namespace sbe {
@@ -64,29 +64,16 @@ HashAggBaseStage<Derived>::HashAggBaseStage(StringData stageName,
 }
 
 template <class Derived>
-void HashAggBaseStage<Derived>::doSaveState(bool relinquishCursor) {
-    if (relinquishCursor) {
-        if (_rsCursor) {
-            _recordStore->saveCursor(_opCtx, _rsCursor);
-        }
-    }
-    if (_rsCursor) {
-        _rsCursor->setSaveStorageCursorOnDetachFromOperationContext(!relinquishCursor);
-    }
-
-    if (_recordStore) {
-        _recordStore->saveState();
+void HashAggBaseStage<Derived>::doSaveState() {
+    if (_recordStore && _rsCursor) {
+        _recordStore->saveCursor(_opCtx, _rsCursor);
     }
 }
 
 template <class Derived>
-void HashAggBaseStage<Derived>::doRestoreState(bool relinquishCursor) {
+void HashAggBaseStage<Derived>::doRestoreState() {
     invariant(_opCtx);
-    if (_recordStore) {
-        _recordStore->restoreState();
-    }
-
-    if (_rsCursor && relinquishCursor) {
+    if (_recordStore && _rsCursor) {
         auto couldRestore = _recordStore->restoreCursor(_opCtx, _rsCursor);
         uassert(6196500, "HashAggStage could not restore cursor", couldRestore);
     }
@@ -156,7 +143,7 @@ int64_t HashAggBaseStage<Derived>::spillRowToDisk(const value::MaterializedRow& 
     // keys to be adjacent in the 'RecordStore' so that we can merge the partial aggregates with a
     // single pass.
     kb.appendNumberLong(_ridSuffixCounter++);
-    auto rid = RecordId(kb.getBuffer(), kb.getSize());
+    auto rid = RecordId(kb.getView());
 
     int spilledBytes = 0;
     if (collator) {
@@ -169,13 +156,26 @@ int64_t HashAggBaseStage<Derived>::spillRowToDisk(const value::MaterializedRow& 
             _recordStore->upsertToRecordStore(_opCtx, rid, val, typeBits, false /*update*/);
     }
 
-    static_cast<Derived*>(this)->getHashAggStats()->spilledBytes += spilledBytes;
-    static_cast<Derived*>(this)->getHashAggStats()->spilledRecords++;
     return spilledBytes;
 }
 
 template <class Derived>
-void HashAggBaseStage<Derived>::spill(MemoryCheckData& mcd) {
+void HashAggBaseStage<Derived>::spill() {
+    // The stage returns results using an iterator '_htIt' over the hashTable '_ht'. At any moment
+    // '_htIt' points to the record that should be returned in the next getNext() invocation. When
+    // we spill, we want to spill only the records in '_ht' that have not been already returned to
+    // the caller.
+    if (_htIt == _ht->end()) {
+        LOGV2_DEBUG(9915700,
+                    2,
+                    "All in memory data has been consumed. HashAgg stage has nothing to spill. "
+                    "Clearing memory.");
+        _ht->clear();
+        _htIt = _ht->end();
+        _memoryTracker.value().set(0);
+        return;
+    }
+
     uassert(ErrorCodes::QueryExceededMemoryLimitNoDiskUseAllowed,
             "Exceeded memory limit for $group, but didn't allow external spilling;"
             " pass allowDiskUse:true to opt in",
@@ -185,25 +185,75 @@ void HashAggBaseStage<Derived>::spill(MemoryCheckData& mcd) {
     uassertStatusOK(ensureSufficientDiskSpaceForSpilling(
         storageGlobalParams.dbpath, internalQuerySpillingMinAvailableDiskSpaceBytes.load()));
 
-    // Since we flush the entire hash table to disk, we also clear any state related to estimating
-    // memory consumption.
-    mcd.reset();
-
     if (!_recordStore) {
         makeTemporaryRecordStore();
     }
 
     int64_t spilledBytes = 0;
     int64_t spilledRecords = 0;
-    for (auto&& it : *_ht) {
-        spilledBytes += spillRowToDisk(it.first, it.second);
+
+    // Spill only the records that have not been already consumed.
+    for (; _htIt != _ht->end(); ++_htIt) {
+        spilledBytes += spillRowToDisk(_htIt->first, _htIt->second);
         spilledRecords++;
     }
 
     _ht->clear();
+    _htIt = _ht->end();
+    _memoryTracker.value().set(0);
 
-    static_cast<Derived*>(this)->getHashAggStats()->spills++;
-    groupCounters.incrementGroupCountersPerSpilling(1 /* spills */, spilledBytes, spilledRecords);
+    auto spilledDataStorageIncrease =
+        static_cast<Derived*>(this)->getHashAggStats()->spillingStats.updateSpillingStats(
+            1 /* spills */, spilledBytes, spilledRecords, _recordStore->storageSize(_opCtx));
+    groupCounters.incrementPerSpilling(
+        1 /* spills */, spilledBytes, spilledRecords, spilledDataStorageIncrease);
+    _recordStore->updateSpillStorageStatsForOperation(_opCtx);
+}
+
+template <class Derived>
+void HashAggBaseStage<Derived>::spill(MemoryCheckData& mcd) {
+    spill();
+
+    // Since we flush the entire hash table to disk, we also clear any state related to estimating
+    // memory consumption.
+    mcd.reset();
+}
+
+template <class Derived>
+void HashAggBaseStage<Derived>::doForceSpill() {
+    // The state has already finished (_ht is set in open and unset in close)
+    if (!_ht) {
+        LOGV2_DEBUG(9915601, 2, "HashAggStage has finished its execution");
+        return;
+    }
+
+    // If we've already spilled, then there is nothing else to do.
+    if (_recordStore) {
+        return;
+    }
+
+    // Check before advancing _htIt.
+    uassert(ErrorCodes::QueryExceededMemoryLimitNoDiskUseAllowed,
+            "$group Received a spilling request, but didn't allow external spilling;"
+            " pass allowDiskUse:true to opt in",
+            _allowDiskUse);
+
+    static_assert(
+        std::is_member_function_pointer_v<decltype(&Derived::setIteratorToNextRecord)>,
+        "A class derived from HashAggBaseStage must implement 'setIteratorToNextRecord' method");
+
+    derived().setIteratorToNextRecord();
+
+    spill();
+
+    if (_recordStore) {
+        static_assert(std::is_member_function_pointer_v<decltype(&Derived::switchToDisk)>,
+                      "A class derived from HashAggBaseStage must implement 'switchToDisk' method");
+
+        derived().switchToDisk();
+    }
+
+    doSaveState();
 }
 
 // Checks memory usage. Ideally, we'd want to know the exact size of already accumulated data, but
@@ -212,7 +262,10 @@ void HashAggBaseStage<Derived>::spill(MemoryCheckData& mcd) {
 // spilling.
 template <class Derived>
 void HashAggBaseStage<Derived>::checkMemoryUsageAndSpillIfNecessary(MemoryCheckData& mcd) {
-    invariant(!_ht->empty());
+    if (_ht->empty()) {
+        // Simply nothing to spill.
+        return;
+    }
 
     mcd.memoryCheckpointCounter++;
     if (mcd.memoryCheckpointCounter < mcd.nextMemoryCheckpoint) {
@@ -221,26 +274,36 @@ void HashAggBaseStage<Derived>::checkMemoryUsageAndSpillIfNecessary(MemoryCheckD
         return;
     }
 
+    const long lastEstimatedMemoryUsage = _memoryTracker.value().inUseTrackedMemoryBytes();
     const long estimatedRowSize =
         _htIt->first.memUsageForSorter() + _htIt->second.memUsageForSorter();
-    const long long estimatedTotalSize = _ht->size() * estimatedRowSize;
+    _memoryTracker.value().set(_ht->size() * estimatedRowSize);
+    static_cast<Derived*>(this)->getHashAggStats()->peakTrackedMemBytes =
+        _memoryTracker.value().peakTrackedMemoryBytes();
 
-    if (estimatedTotalSize >= _approxMemoryUseInBytesBeforeSpill) {
+    if (!_memoryTracker.value().withinMemoryLimit()) {
+        // It is safe to set this to the begining because spilling outside the releaseMemory only
+        // happens before any results have been consumed and every time data is spilled the _ht is
+        // cleared.
+        _htIt = _ht->begin();
         spill(mcd);
     } else {
         // Calculate the next memory checkpoint. We estimate it based on the prior growth of the
         // '_ht' and the remaining available memory. If 'estimatedGainPerChildAdvance' suggests that
         // the hash table is growing, then the checkpoint is estimated as some configurable
         // percentage of the number of additional input rows that we would have to process to
-        // consume the remaining memory. On the other hand, a value of 'estimtedGainPerChildAdvance'
-        // close to zero indicates a stable hash stable size, in which case we can delay the next
-        // check progressively.
+        // consume the remaining memory. On the other hand, a value of
+        // 'estimatedGainPerChildAdvance' close to zero indicates a stable hash stable size, in
+        // which case we can delay the next check progressively.
         const double estimatedGainPerChildAdvance =
-            (static_cast<double>(estimatedTotalSize - mcd.lastEstimatedMemoryUsage) /
+            (static_cast<double>(_memoryTracker.value().inUseTrackedMemoryBytes() -
+                                 lastEstimatedMemoryUsage) /
              mcd.memoryCheckpointCounter);
 
         const long nextCheckpointCandidate = (estimatedGainPerChildAdvance > 0.1)
-            ? mcd.checkpointMargin * (_approxMemoryUseInBytesBeforeSpill - estimatedTotalSize) /
+            ? mcd.checkpointMargin *
+                (_memoryTracker.value().maxAllowedMemoryUsageBytes() -
+                 _memoryTracker.value().inUseTrackedMemoryBytes()) /
                 estimatedGainPerChildAdvance
             : mcd.nextMemoryCheckpoint * 2;
 
@@ -248,7 +311,6 @@ void HashAggBaseStage<Derived>::checkMemoryUsageAndSpillIfNecessary(MemoryCheckD
             std::min<long>(mcd.memoryCheckFrequency,
                            std::max<long>(mcd.atMostCheckFrequency, nextCheckpointCandidate));
 
-        mcd.lastEstimatedMemoryUsage = estimatedTotalSize;
         mcd.memoryCheckpointCounter = 0;
         mcd.memoryCheckFrequency =
             std::min<long>(mcd.memoryCheckFrequency * 2, mcd.atLeastMemoryCheckFrequency);

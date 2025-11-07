@@ -29,30 +29,34 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <boost/shared_array.hpp>
-#include <boost/smart_ptr/shared_array.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <map>
-#include <memory>
-#include <set>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/storage/container_base.h"
 #include "mongo/db/storage/damage_vector.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/record_data.h"
-#include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/record_store_base.h"
+#include "mongo/db/storage/stub_container.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <set>
+#include <variant>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+#include <boost/shared_array.hpp>
+#include <boost/smart_ptr/shared_array.hpp>
 
 namespace mongo {
 
@@ -61,7 +65,7 @@ namespace mongo {
  *
  * @param cappedMaxSize - required if isCapped. limit uses dataSize() in this impl.
  */
-class EphemeralForTestRecordStore : public RecordStore {
+class EphemeralForTestRecordStore : public RecordStoreBase {
 public:
     explicit EphemeralForTestRecordStore(boost::optional<UUID> uuid,
                                          StringData identName,
@@ -71,66 +75,51 @@ public:
 
     const char* name() const override;
 
-    boost::optional<UUID> uuid() const override;
-
-    bool isTemp() const override;
-
-    std::shared_ptr<Ident> getSharedIdent() const override;
-
-    const std::string& getIdent() const override;
-
-    void setIdent(std::shared_ptr<Ident>) override;
-
     KeyFormat keyFormat() const override {
         return KeyFormat::Long;
     }
 
-    RecordData dataFor(OperationContext* opCtx, const RecordId& loc) const override;
+    void _deleteRecord(OperationContext*, RecoveryUnit&, const RecordId&) override;
 
-    bool findRecord(OperationContext* opCtx, const RecordId& loc, RecordData* rd) const override;
+    Status _insertRecords(OperationContext*,
+                          RecoveryUnit&,
+                          std::vector<Record>*,
+                          const std::vector<Timestamp>&) override;
 
-    void deleteRecord(OperationContext*, const RecordId&) override;
-
-    Status insertRecords(OperationContext*,
-                         std::vector<Record>*,
-                         const std::vector<Timestamp>&) override;
-
-    StatusWith<RecordId> insertRecord(OperationContext*,
-                                      const char* data,
-                                      int len,
-                                      Timestamp) override;
-
-    StatusWith<RecordId> insertRecord(
-        OperationContext*, const RecordId&, const char* data, int len, Timestamp) override;
-
-    Status updateRecord(OperationContext*, const RecordId&, const char* data, int len) override;
+    Status _updateRecord(
+        OperationContext*, RecoveryUnit&, const RecordId&, const char* data, int len) override;
 
     bool updateWithDamagesSupported() const override;
 
-    StatusWith<RecordData> updateWithDamages(OperationContext*,
-                                             const RecordId& loc,
-                                             const RecordData& oldRec,
-                                             const char* damageSource,
-                                             const DamageVector& damages) override;
+    StatusWith<RecordData> _updateWithDamages(OperationContext*,
+                                              RecoveryUnit&,
+                                              const RecordId& loc,
+                                              const RecordData& oldRec,
+                                              const char* damageSource,
+                                              const DamageVector& damages) override;
 
     void printRecordMetadata(const RecordId& recordId,
                              std::set<Timestamp>* recordTimestamps) const override {}
 
+    using RecordStoreBase::getCursor;
     std::unique_ptr<SeekableRecordCursor> getCursor(OperationContext* opCtx,
+                                                    RecoveryUnit& ru,
                                                     bool forward) const final;
 
-    std::unique_ptr<RecordCursor> getRandomCursor(OperationContext*) const override;
+    using RecordStoreBase::getRandomCursor;
+    std::unique_ptr<RecordCursor> getRandomCursor(OperationContext*, RecoveryUnit&) const override;
 
-    Status truncate(OperationContext*) override;
-    Status rangeTruncate(OperationContext*,
-                         const RecordId& minRecordId,
-                         const RecordId& maxRecordId,
-                         int64_t hintDataSizeDiff,
-                         int64_t hintNumRecordsDiff) override;
+    Status _truncate(OperationContext*, RecoveryUnit& ru) override;
+    Status _rangeTruncate(OperationContext*,
+                          RecoveryUnit&,
+                          const RecordId& minRecordId,
+                          const RecordId& maxRecordId,
+                          int64_t hintDataSizeDiff,
+                          int64_t hintNumRecordsDiff) override;
 
     bool compactSupported() const override;
 
-    StatusWith<int64_t> compact(OperationContext*, const CompactOptions&) override;
+    StatusWith<int64_t> _compact(OperationContext*, RecoveryUnit&, const CompactOptions&) override;
 
     void validate(RecoveryUnit&,
                   const CollectionValidation::ValidationOptions&,
@@ -157,19 +146,21 @@ public:
     }
 
     void updateStatsAfterRepair(long long numRecords, long long dataSize) override {
-        stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
+        stdx::lock_guard<stdx::recursive_mutex> lock(_data->mutex);
         invariant(_data->records.size() == size_t(numRecords));
         _data->dataSize = dataSize;
     }
 
-    RecordId getLargestKey(OperationContext* opCtx) const final {
-        stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
+    RecordId getLargestKey(OperationContext* opCtx, RecoveryUnit& ru) const final {
+        stdx::lock_guard<stdx::recursive_mutex> lock(_data->mutex);
         return RecordId(_data->nextId - 1);
     }
 
+    using RecordStoreBase::reserveRecordIds;
     void reserveRecordIds(OperationContext* opCtx,
+                          RecoveryUnit& ru,
                           std::vector<RecordId>* out,
-                          size_t nRecords) final{};
+                          size_t nRecords) final;
 
     RecordStore::Capped* capped() override {
         return nullptr;
@@ -178,6 +169,8 @@ public:
     RecordStore::Oplog* oplog() override {
         return nullptr;
     }
+
+    RecordStore::RecordStoreContainer getContainer() override;
 
 protected:
     struct EphemeralForTestRecord {
@@ -194,6 +187,7 @@ protected:
 
     virtual const EphemeralForTestRecord* recordFor(WithLock, const RecordId& loc) const;
     virtual EphemeralForTestRecord* recordFor(WithLock, const RecordId& loc);
+    std::variant<StubIntegerKeyedContainer, StubStringKeyedContainer> _container;
 
 public:
     //
@@ -213,21 +207,23 @@ private:
     class Cursor;
     class ReverseCursor;
 
+    std::variant<StubIntegerKeyedContainer, StubStringKeyedContainer> _makeContainer();
+
     StatusWith<RecordId> extractAndCheckLocForOplog(WithLock, const char* data, int len) const;
 
     RecordId allocateLoc(WithLock);
 
-    boost::optional<UUID> _uuid;
-    std::shared_ptr<Ident> _ident;
     const bool _isCapped;
 
     // This is the "persistent" data.
     struct Data {
-        explicit Data(bool isOplog) : dataSize(0), recordsMutex(), nextId(1), isOplog(isOplog) {}
+        explicit Data(bool isOplog) : mutex(), dataSize(0), nextId(1), isOplog(isOplog) {}
 
+        // Protects 'dataSize' and 'records'.
+        stdx::recursive_mutex mutex;
         int64_t dataSize;
-        stdx::recursive_mutex recordsMutex;
         Records records;
+
         int64_t nextId;
         const bool isOplog;
     };

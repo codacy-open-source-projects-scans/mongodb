@@ -17,8 +17,6 @@ import buildscripts.resmokelib.testing.tags as _tags
 from buildscripts.resmokelib import config, errors, utils
 from buildscripts.resmokelib.utils import globstar, jscomment
 
-ENTERPRISE_TEST_DIR = os.path.normpath("src/mongo/db/modules/enterprise/jstests")
-
 ########################
 #  Test file explorer  #
 ########################
@@ -221,7 +219,7 @@ class _TestList(object):
 
     def _expand_roots(self, tests: List[str]) -> List[str]:
         paths = self._evaluate_paths(tests)
-        if len(paths.unrecognized) > 0:
+        if len(paths.unrecognized) > 0 and config.VALIDATE_SELECTOR_PATHS:
             raise errors.SuiteSelectorConfigurationError(
                 _DO_NOT_MATCH_ANY_EXISTING_TEST_FILES_MESSAGE.format(
                     config_section="roots", not_matching_paths=paths.unrecognized
@@ -239,7 +237,7 @@ class _TestList(object):
             raise TypeError("_TestList does not contain files.")
 
         paths = self._evaluate_paths(include_files)
-        if len(paths.unrecognized) > 0:
+        if len(paths.unrecognized) > 0 and config.VALIDATE_SELECTOR_PATHS:
             raise errors.SuiteSelectorConfigurationError(
                 _DO_NOT_MATCH_ANY_EXISTING_TEST_FILES_MESSAGE.format(
                     config_section="include_files", not_matching_paths=paths.unrecognized
@@ -252,7 +250,7 @@ class _TestList(object):
             if path.startswith(self._test_file_explorer.get_jstests_dir())
             and path not in self._roots
         ]
-        if len(paths_missing_from_roots) > 0:
+        if len(paths_missing_from_roots) > 0 and config.VALIDATE_SELECTOR_PATHS:
             raise errors.SuiteSelectorConfigurationError(
                 _DO_NOT_MATCH_ANY_TEST_FILES_FROM_ROOTS_MESSAGE.format(
                     config_section="include_files", not_matching_paths=paths_missing_from_roots
@@ -271,7 +269,7 @@ class _TestList(object):
             raise TypeError("_TestList does not contain files.")
 
         paths = self._evaluate_paths(exclude_files)
-        if len(paths.unrecognized) > 0:
+        if len(paths.unrecognized) > 0 and config.VALIDATE_SELECTOR_PATHS:
             raise errors.SuiteSelectorConfigurationError(
                 _DO_NOT_MATCH_ANY_EXISTING_TEST_FILES_MESSAGE.format(
                     config_section="exclude_files", not_matching_paths=paths.unrecognized
@@ -284,7 +282,7 @@ class _TestList(object):
             if path.startswith(self._test_file_explorer.get_jstests_dir())
             and path not in self._roots
         ]
-        if len(paths_missing_from_roots) > 0:
+        if len(paths_missing_from_roots) > 0 and config.VALIDATE_SELECTOR_PATHS:
             raise errors.SuiteSelectorConfigurationError(
                 _DO_NOT_MATCH_ANY_TEST_FILES_FROM_ROOTS_MESSAGE.format(
                     config_section="exclude_files", not_matching_paths=paths_missing_from_roots
@@ -294,13 +292,22 @@ class _TestList(object):
         for path in paths.evaluated:
             self._filtered.discard(path)
 
-    def filter_enterprise_tests(self):
-        """Exclude tests that start with the enterprise module directory from the test list."""
-        self._filtered = {
-            test
-            for test in self._filtered
-            if not os.path.normpath(test).startswith(ENTERPRISE_TEST_DIR)
-        }
+    def filter_module_tests(self):
+        """Exclude tests that start directories of disabled module jstest dirs."""
+        if not config.MODULE_DISABLED_JSTEST_DIRS:
+            return
+
+        new_filtered = []
+        for test in self._filtered:
+            in_disabled_module = False
+            for disabled_jstest_dir in config.MODULE_DISABLED_JSTEST_DIRS:
+                if os.path.normpath(test).startswith(os.path.normpath(disabled_jstest_dir)):
+                    in_disabled_module = True
+                    break
+            if not in_disabled_module:
+                new_filtered.append(test)
+
+        self._filtered = new_filtered
 
     def match_tag_expression(self, tag_expression, get_tags):
         """Filter the test list to only include tests that match the tag expression.
@@ -561,9 +568,8 @@ class _Selector(object):
         # 5. Apply the include files last with force=True to take precedence over the tags.
         if self._tests_are_files and selector_config.include_files:
             test_list.include_files(selector_config.include_files)
-        # 6: Apply the enterprise tests filter
-        if self.get_enterprise_tests_status() == "off":
-            test_list.filter_enterprise_tests()
+        # 6: Filter tests in disabled modules
+        test_list.filter_module_tests()
 
         return self.sort_tests(*test_list.get_tests())
 
@@ -586,14 +592,9 @@ class _Selector(object):
         return tests, excluded
 
     @staticmethod
-    def get_tags(test_file):  # pylint: disable=unused-argument
+    def get_tags(test_file):
         """Retrieve the tags associated with the give test file."""
         return []
-
-    @staticmethod
-    def get_enterprise_tests_status() -> str:
-        """Get the status of enterprise tests from the configuration."""
-        return config.ENABLE_ENTERPRISE_TESTS
 
 
 class _JSTestSelectorConfig(_SelectorConfig):
@@ -844,7 +845,7 @@ class _DbTestSelector(_Selector):
 
 
 class _FileBasedSelectorConfig(_SelectorConfig):
-    """_SelectorConfig subclass for json_schema_test and mql_model_mongod_test tests."""
+    """_SelectorConfig subclass for json_schema_test tests."""
 
     def __init__(self, roots, include_files=None, exclude_files=None):
         """Initialize _FileBasedSelectorConfig."""
@@ -897,8 +898,6 @@ _SELECTOR_REGISTRY = {
     "json_schema_test": (_FileBasedSelectorConfig, _Selector),
     "js_test": (_JSTestSelectorConfig, _JSTestSelector),
     "all_versions_js_test": (_JSTestSelectorConfig, _JSTestSelector),
-    "mql_model_haskell_test": (_FileBasedSelectorConfig, _Selector),
-    "mql_model_mongod_test": (_FileBasedSelectorConfig, _Selector),
     "multi_stmt_txn_passthrough": (_JSTestSelectorConfig, _JSTestSelector),
     "py_test": (_PyTestCaseSelectorConfig, _Selector),
     "sleep_test": (_SleepTestCaseSelectorConfig, _SleepTestCaseSelector),
@@ -907,6 +906,7 @@ _SELECTOR_REGISTRY = {
     "bulk_write_cluster_js_test": (_JSTestSelectorConfig, _JSTestSelector),
     "magic_restore_js_test": (_JSTestSelectorConfig, _JSTestSelector),
     "query_tester_self_test": (_FileBasedSelectorConfig, _Selector),
+    "query_tester_server_test": (_FileBasedSelectorConfig, _Selector),
 }
 
 

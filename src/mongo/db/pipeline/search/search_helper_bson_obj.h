@@ -27,35 +27,70 @@
  *    it in the license file.
  */
 
-#include "document_source_list_search_indexes.h"
+#pragma once
+
+#include "mongo/db/pipeline/document_source_rank_fusion.h"
+#include "mongo/db/pipeline/document_source_rank_fusion_gen.h"
+#include "mongo/db/pipeline/document_source_score_fusion.h"
+#include "mongo/db/pipeline/document_source_score_fusion_gen.h"
 #include "mongo/db/pipeline/search/document_source_list_search_indexes.h"
 #include "mongo/db/pipeline/search/document_source_search.h"
 #include "mongo/db/pipeline/search/document_source_search_meta.h"
 #include "mongo/db/pipeline/search/document_source_vector_search.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
 namespace search_helper_bson_obj {
 
+/**
+ * Checks that the pipeline isn't empty and if the first stage in the pipeline is a mongot stage
+ * (either $search, $vectorSearch, $searchMeta, $listSearchIndexes, $rankFusion, or $scoreFusion).
+ */
 inline bool isMongotPipeline(const std::vector<BSONObj> pipeline) {
+    // Note that the $rankFusion/$scoreFusion stages are syntactic sugar. When desugared, the first
+    // stage in its first pipeline in the $rankFusion/$scoreFusion query (ex: $rankFusion: {
+    //    input: {
+    //        pipelines: {
+    //            searchPipeline: [
+    //                { $search: {...} },
+    //                { $sort: {author: 1} }
+    //            ]
+    //        }
+    //    }
+    //}) will become the first stage in the final desugared ouput. Thus, there is an extra recursive
+    // call to check for this.
     if (pipeline.size() >= 1 &&
         (pipeline[0][DocumentSourceSearch::kStageName] ||
          pipeline[0][DocumentSourceVectorSearch::kStageName] ||
          pipeline[0][DocumentSourceSearchMeta::kStageName] ||
-         pipeline[0][DocumentSourceListSearchIndexes::kStageName])) {
+         pipeline[0][DocumentSourceListSearchIndexes::kStageName] ||
+         (pipeline[0][DocumentSourceRankFusion::kStageName] &&
+          isMongotPipeline(std::vector<BSONObj>{
+              pipeline[0][DocumentSourceRankFusion::kStageName][RankFusionSpec::kInputFieldName]
+                      [RankFusionInputSpec::kPipelinesFieldName]
+                          .Obj()
+                          .firstElement()
+                          .Array()[0]
+                          .Obj()})) ||
+         (pipeline[0][DocumentSourceScoreFusion::kStageName] &&
+          isMongotPipeline(std::vector<BSONObj>{
+              pipeline[0][DocumentSourceScoreFusion::kStageName][ScoreFusionSpec::kInputFieldName]
+                      [ScoreFusionInputsSpec::kPipelinesFieldName]
+                          .Obj()
+                          .firstElement()
+                          .Array()[0]
+                          .Obj()})))) {
         return true;
     }
     return false;
 }
 
 inline bool isStoredSource(const std::vector<BSONObj> pipeline) {
-
     if (pipeline.size() >= 1 && pipeline[0][DocumentSourceSearch::kStageName]) {
         auto searchStage = pipeline[0][DocumentSourceSearch::kStageName];
-        if (searchStage.isABSONObj() && searchStage.Obj().hasField("returnStoredSource") &&
-            searchStage["returnStoredSource"]) {
-            return true;
-        }
+        auto storedSourceElem = searchStage[mongot_cursor::kReturnStoredSourceArg];
+        return !storedSourceElem.eoo() && storedSourceElem.Bool();
     }
     return false;
 }

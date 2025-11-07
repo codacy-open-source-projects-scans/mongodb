@@ -29,33 +29,16 @@
 
 #include "mongo/db/pipeline/document_source_internal_list_collections.h"
 
-#include <boost/smart_ptr.hpp>
-#include <iterator>
-#include <list>
-#include <type_traits>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/util/bson_extract.h"
-#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/list_collections_gen.h"
-#include "mongo/db/matcher/expression.h"
-#include "mongo/db/pipeline/document_source_coll_stats.h"
-#include "mongo/db/pipeline/document_source_single_document_transformation.h"
-#include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
-#include "mongo/db/pipeline/transformer_interface.h"
+#include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/query/allowed_contexts.h"
-#include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -69,45 +52,14 @@ REGISTER_DOCUMENT_SOURCE(_internalListCollections,
                          DocumentSourceInternalListCollections::LiteParsed::parse,
                          DocumentSourceInternalListCollections::createFromBson,
                          AllowedWithApiStrict::kInternal);
-
-DocumentSource::GetNextResult DocumentSourceInternalListCollections::doGetNext() {
-    if (!_databases) {
-        if (pExpCtx->getNamespaceString().isAdminDB()) {
-            _databases = pExpCtx->getMongoProcessInterface()->getAllDatabases(
-                pExpCtx->getOperationContext(), pExpCtx->getNamespaceString().tenantId());
-        } else {
-            _databases = std::vector<DatabaseName>{pExpCtx->getNamespaceString().dbName()};
-        }
-    }
-
-    while (_collectionsToReply.empty()) {
-        if (_databases->empty()) {
-            return GetNextResult::makeEOF();
-        }
-
-        if (_databases->back().isInternalDb() ||
-            !AuthorizationSession::get(pExpCtx->getOperationContext()->getClient())
-                 ->isAuthorizedForAnyActionOnAnyResourceInDB(_databases->back())) {
-            _databases->pop_back();
-            continue;
-        }
-
-        _buildCollectionsToReplyForDb(_databases->back(), _collectionsToReply);
-        _databases->pop_back();
-    }
-
-    auto collObj = _collectionsToReply.back().getOwned();
-    _collectionsToReply.pop_back();
-
-    return Document{collObj.getOwned()};
-}
+ALLOCATE_DOCUMENT_SOURCE_ID(_internalListCollections, DocumentSourceInternalListCollections::id)
 
 intrusive_ptr<DocumentSource> DocumentSourceInternalListCollections::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& pExpCtx) {
     uassert(9525805,
             str::stream() << kStageNameInternal
                           << " must take a nested empty object but found: " << elem,
-            elem.type() == BSONType::Object && elem.embeddedObject().isEmpty());
+            elem.type() == BSONType::object && elem.embeddedObject().isEmpty());
 
     uassert(9525806,
             str::stream() << "The " << kStageNameInternal
@@ -117,8 +69,8 @@ intrusive_ptr<DocumentSource> DocumentSourceInternalListCollections::createFromB
     return make_intrusive<DocumentSourceInternalListCollections>(pExpCtx);
 }
 
-Pipeline::SourceContainer::iterator DocumentSourceInternalListCollections::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator DocumentSourceInternalListCollections::doOptimizeAt(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     tassert(9741503, "The given iterator must be this object.", *itr == this);
 
     if (std::next(itr) == container->end()) {
@@ -143,7 +95,8 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalListCollections::doOpt
             _absorbedMatch = std::move(matchRelatedToDb);
         } else {
             // We have already absorbed a $match. We need to join it.
-            _absorbedMatch->joinMatchWith(std::move(matchRelatedToDb), "$and"_sd);
+            _absorbedMatch->joinMatchWith(std::move(matchRelatedToDb),
+                                          MatchExpression::MatchType::AND);
         }
     }
 
@@ -159,7 +112,7 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalListCollections::doOpt
 }
 
 const char* DocumentSourceInternalListCollections::getSourceName() const {
-    return kStageNameInternal.rawData();
+    return kStageNameInternal.data();
 }
 
 void DocumentSourceInternalListCollections::serializeToArray(
@@ -176,47 +129,6 @@ void DocumentSourceInternalListCollections::serializeToArray(
         if (_absorbedMatch) {
             _absorbedMatch->serializeToArray(array);
         }
-    }
-}
-
-void DocumentSourceInternalListCollections::_buildCollectionsToReplyForDb(
-    const DatabaseName& db, std::vector<BSONObj>& collectionsToReply) {
-    tassert(9525807, "The vector 'collectionsToReply' must be empty", collectionsToReply.empty());
-
-    const auto& dbNameStr = DatabaseNameUtil::serialize(db, SerializationContext::stateDefault());
-
-    // Avoid computing a database that doesn't match the absorbed filter on the 'db' field.
-    if (_absorbedMatch &&
-        !_absorbedMatch->getMatchExpression()->matchesBSON(BSON("db" << dbNameStr))) {
-        return;
-    }
-
-    const auto& collectionsList = pExpCtx->getMongoProcessInterface()->runListCollections(
-        pExpCtx->getOperationContext(), db, true /* addPrimaryShard */);
-    collectionsToReply.reserve(collectionsList.size());
-
-    for (const auto& collObj : collectionsList) {
-        BSONObjBuilder builder;
-
-        // Removing the 'name' field and adding a 'ns' field to return the entire namespace of
-        // the collection instead of just the collection name.
-        //
-        // In addition, we are adding the 'db' field to make it easier for the user to filter by
-        // this field.
-        for (const auto& elem : collObj) {
-            auto fieldName = elem.fieldNameStringData();
-            if (fieldName == ListCollectionsReplyItem::kNameFieldName) {
-                const auto& collName = elem.valueStringDataSafe();
-                const auto& nssStr = dbNameStr + "." + collName;
-                builder.append("ns", nssStr);
-                builder.append("db", dbNameStr);
-            } else {
-                builder.append(elem);
-            }
-        }
-
-        const auto obj = builder.obj();
-        collectionsToReply.push_back(obj.getOwned());
     }
 }
 

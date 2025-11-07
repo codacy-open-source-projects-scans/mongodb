@@ -40,9 +40,6 @@
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <cstddef>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -54,17 +51,15 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_component_settings.h"
 #include "mongo/logv2/log_format.h"
-#include "mongo/logv2/log_manager.h"
-#include "mongo/logv2/log_severity.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cmdline_utils/censor_cmdline.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/str.h"
+
+#include <cstddef>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
@@ -268,22 +263,22 @@ Status setupBaseOptions(const std::vector<std::string>& args) {
 namespace server_options_detail {
 StatusWith<BSONObj> applySetParameterOptions(const std::map<std::string, std::string>& toApply,
                                              ServerParameterSet& parameterSet) {
-    using namespace fmt::literals;
     BSONObjBuilder summaryBuilder;
     for (const auto& [name, value] : toApply) {
         auto sp = parameterSet.getIfExists(name);
         if (!sp)
             return Status(ErrorCodes::BadValue,
-                          "Illegal --setParameter parameter: \"{}\""_format(name));
+                          fmt::format("Illegal --setParameter parameter: \"{}\"", name));
         if (!sp->allowedToChangeAtStartup())
             return Status(ErrorCodes::BadValue,
-                          "Cannot use --setParameter to set \"{}\" at startup"_format(name));
+                          fmt::format("Cannot use --setParameter to set \"{}\" at startup", name));
         BSONObjBuilder sub(summaryBuilder.subobjStart(name));
         sp->append(nullptr, &sub, "default", boost::none);
+        sp->warnIfDeprecated("setAtStartup");
         Status status = sp->setFromString(value, boost::none);
         if (!status.isOK())
             return Status(ErrorCodes::BadValue,
-                          "Bad value for parameter \"{}\": {}"_format(name, status.reason()));
+                          fmt::format("Bad value for parameter \"{}\": {}", name, status.reason()));
         sp->append(nullptr, &sub, "value", boost::none);
     }
     return summaryBuilder.obj();
@@ -453,10 +448,19 @@ Status storeBaseOptions(const moe::Environment& params) {
     if (params.count("operationProfiling.slowOpThresholdMs")) {
         serverGlobalParams.slowMS.store(params["operationProfiling.slowOpThresholdMs"].as<int>());
     }
+    if (params.count("operationProfiling.slowOpInProgressThresholdMs")) {
+        serverGlobalParams.defaultSlowInProgMS.store(
+            params["operationProfiling.slowOpInProgressThresholdMs"].as<int>());
+    }
+
 
     if (params.count("operationProfiling.slowOpSampleRate")) {
         serverGlobalParams.sampleRate.store(
             params["operationProfiling.slowOpSampleRate"].as<double>());
+    }
+    if (params.count("taskExecutorProfiling.slowTaskWaitTimeProfilingMs")) {
+        serverGlobalParams.slowTaskExecutorWaitTimeProfilingMs.store(
+            params["taskExecutorProfiling.slowTaskWaitTimeProfilingMs"].as<int>());
     }
 
     if (params.count("operationProfiling.filter")) {
@@ -469,6 +473,25 @@ Status storeBaseOptions(const moe::Environment& params) {
                       str::stream()
                           << "Failed to parse option operationProfiling.filter: " << e.reason());
         }
+    }
+
+    if (params.count("processManagement.loadExtensions")) {
+#ifdef __linux__
+        // Save off configured extensions, but don't do any validation at this point - that will be
+        // done later on during startup when we attempt to load them.
+        for (const std::string& extension :
+             params["processManagement.loadExtensions"].as<std::vector<std::string>>()) {
+            std::vector<std::string> intermediates;
+            str::splitStringDelim(extension, &intermediates, ',');
+            std::copy(intermediates.begin(),
+                      intermediates.end(),
+                      std::back_inserter(serverGlobalParams.extensions));
+        }
+#else
+        return Status(ErrorCodes::BadValue,
+                      "Loading extensions via `--loadExtensions` or "
+                      "`processManagement.loadExtensions` is only supported on Linux");
+#endif
     }
 
     return Status::OK();

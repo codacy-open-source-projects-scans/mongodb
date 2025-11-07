@@ -27,24 +27,20 @@
  *    it in the license file.
  */
 
-#include <string>
 
-#include <absl/container/node_hash_map.h>
+#include "mongo/db/query/stage_builder/sbe/type_checker.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/query/optimizer/algebra/operator.h"
-#include "mongo/db/query/optimizer/algebra/polyvalue.h"
-#include "mongo/db/query/optimizer/comparison_op.h"
+#include "mongo/db/query/algebra/polyvalue.h"
+#include "mongo/db/query/stage_builder/sbe/abt/comparison_op.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr.h"
-#include "mongo/db/query/stage_builder/sbe/type_checker.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 
 namespace mongo::stage_builder {
 namespace {
 
-using namespace optimizer;
+using namespace abt;
 
 TEST(TypeCheckerTest, FoldFunctionCallTypeMatch) {
     // Run typeMatch on a numeric operation that is guaranteed to never be Nothing.
@@ -140,7 +136,7 @@ TEST(TypeCheckerTest, FoldFillEmpty) {
 
 TEST(TypeCheckerTest, FoldFillEmptyInComplexCheck) {
     // Run both exists and typeMatch as part of an And, and expect that the resulting expression is
-    // guaranteeded to never be Nothing (hence, FillEmpty can be safely removed).
+    // guaranteed to never be Nothing (hence, FillEmpty can be safely removed).
     auto tree = make<BinaryOp>(
         Operations::FillEmpty,
         make<BinaryOp>(Operations::And,
@@ -156,6 +152,24 @@ TEST(TypeCheckerTest, FoldFillEmptyInComplexCheck) {
     ASSERT(tree.is<BinaryOp>() && tree.cast<BinaryOp>()->op() == Operations::And);
 }
 
+TEST(TypeCheckerTest, FoldFillEmptyInComplexNaryCheck) {
+    // Run both exists and typeMatch as part of an n-ary And, and expect that the resulting
+    // expression is guaranteed to never be Nothing (hence, FillEmpty can be safely removed).
+    auto tree = make<BinaryOp>(
+        Operations::FillEmpty,
+        make<NaryOp>(Operations::And,
+                     makeSeq(make<FunctionCall>("exists", makeSeq(make<Variable>("inputVar"))),
+                             make<FunctionCall>("typeMatch",
+                                                makeSeq(make<Variable>("inputVar"),
+                                                        Constant::int32(getBSONTypeMask(
+                                                            sbe::value::TypeTags::NumberInt32)))))),
+        Constant::str("impossible"));
+
+    TypeChecker{}.typeCheck(tree);
+
+    ASSERT(tree.is<NaryOp>() && tree.cast<NaryOp>()->op() == Operations::And);
+}
+
 TEST(TypeCheckerTest, TypeCheckIf) {
     auto tree = make<If>(
         make<BinaryOp>(Operations::And,
@@ -167,6 +181,67 @@ TEST(TypeCheckerTest, TypeCheckIf) {
     TypeSignature sign = TypeChecker{}.typeCheck(tree);
 
     ASSERT(!TypeSignature::kNothingType.isSubset(sign));
+}
+
+TEST(TypeCheckerTest, TypeCheckIfWithNary) {
+    auto tree = make<If>(
+        make<NaryOp>(Operations::And,
+                     makeSeq(make<FunctionCall>("exists", makeSeq(make<Variable>("inputVar"))),
+                             make<FunctionCall>("isNumber", makeSeq(make<Variable>("inputVar"))))),
+        make<BinaryOp>(Operations::Mult, Constant::int32(9), make<Variable>("inputVar")),
+        Constant::int32(0));
+
+    TypeSignature sign = TypeChecker{}.typeCheck(tree);
+
+    ASSERT(!TypeSignature::kNothingType.isSubset(sign));
+}
+
+TEST(TypeCheckerTest, TypeCheckSwitch1) {
+    // Single-case Switch is identical to an If
+    auto tree = make<Switch>(ABTVector{
+        make<BinaryOp>(Operations::And,
+                       make<FunctionCall>("exists", makeSeq(make<Variable>("inputVar"))),
+                       make<FunctionCall>("isNumber", makeSeq(make<Variable>("inputVar")))),
+        make<BinaryOp>(Operations::Mult, Constant::int32(9), make<Variable>("inputVar")),
+        Constant::int32(0)});
+
+    TypeSignature sign = TypeChecker{}.typeCheck(tree);
+
+    ASSERT(!TypeSignature::kNothingType.isSubset(sign));
+
+    tree = make<Switch>(ABTVector{
+        make<NaryOp>(Operations::And,
+                     makeSeq(make<FunctionCall>("exists", makeSeq(make<Variable>("inputVar"))),
+                             make<FunctionCall>("isNumber", makeSeq(make<Variable>("inputVar"))))),
+        make<BinaryOp>(Operations::Mult, Constant::int32(9), make<Variable>("inputVar")),
+        Constant::int32(0)});
+
+    sign = TypeChecker{}.typeCheck(tree);
+
+    ASSERT(!TypeSignature::kNothingType.isSubset(sign));
+}
+
+TEST(TypeCheckerTest, TypeCheckSwitch2) {
+    auto tree = make<Switch>(
+        ABTVector{make<FunctionCall>("isNumber", makeSeq(make<Variable>("inputVar"))),
+                  make<BinaryOp>(Operations::Mult, Constant::int32(9), make<Variable>("inputVar")),
+                  make<FunctionCall>("isDate", makeSeq(make<Variable>("inputVar"))),
+                  make<FunctionCall>("dateAdd",
+                                     makeSeq(make<Variable>("timezoneVar"),
+                                             make<Variable>("inputVar"),
+                                             Constant::str("hour"_sd),
+                                             Constant::int32(8),
+                                             Constant::str("UTC"_sd))),
+                  Constant::null()});
+
+    TypeSignature sign = TypeChecker{}.typeCheck(tree);
+
+    // The signature of a Switch is the union of all the possible branches, plus Nothing if it's a
+    // possible result of the test conditions.
+    ASSERT_EQ(sign.typesMask,
+              TypeSignature::kNothingType.include(TypeSignature::kNumericType.include(
+                  getTypeSignature(sbe::value::TypeTags::Date)
+                      .include(getTypeSignature(sbe::value::TypeTags::Null).typesMask))));
 }
 
 TEST(TypeCheckerTest, TypeCheckIsString) {
@@ -250,40 +325,41 @@ TEST(TypeCheckerTest, FoldComparisonBetweenBools) {
 
 TEST(TypeCheckerTest, FoldFillEmptyVariable) {
     // Run fillEmpty on a test expression based on a slot variable.
-    auto tree1 = make<BinaryOp>(Operations::FillEmpty,
-                                make<If>(make<BinaryOp>(Operations::Eq,
-                                                        make<Variable>(getABTVariableName(1)),
-                                                        Constant::int32(34)),
-                                         Constant::int64(9),
-                                         Constant::int64(18)),
-                                Constant::null());
+    auto tree1 =
+        make<BinaryOp>(Operations::FillEmpty,
+                       make<If>(make<BinaryOp>(Operations::Eq,
+                                               make<Variable>(SbVar::makeProjectionName(1)),
+                                               Constant::int32(34)),
+                                Constant::int64(9),
+                                Constant::int64(18)),
+                       Constant::null());
     TypeSignature signature = TypeChecker{}.typeCheck(tree1);
     ASSERT_EQ(
         signature.typesMask,
         getTypeSignature(sbe::value::TypeTags::NumberInt64, sbe::value::TypeTags::Null).typesMask);
     // Inject the information that the slot contains a number that cannot be Nothing.
     TypeChecker checker;
-    checker.bind(getABTVariableName(1), TypeSignature::kNumericType);
+    checker.bind(SbVar::makeProjectionName(1), TypeSignature::kNumericType);
     signature = checker.typeCheck(tree1);
     ASSERT_EQ(signature.typesMask, getTypeSignature(sbe::value::TypeTags::NumberInt64).typesMask);
 }
 
 TEST(TypeCheckerTest, FoldTraverseF) {
     // Run traverseF on a slot variable.
-    auto tree1 =
-        make<FunctionCall>("traverseF",
-                           makeSeq(make<Variable>(getABTVariableName(1)),
-                                   make<LambdaAbstraction>(
-                                       getABTLocalVariableName(2, 0),
-                                       make<BinaryOp>(Operations::Gt,
-                                                      make<Variable>(getABTLocalVariableName(2, 0)),
-                                                      Constant::int32(8))),
-                                   Constant::boolean(false)));
+    auto tree1 = make<FunctionCall>(
+        "traverseF",
+        makeSeq(
+            make<Variable>(SbVar::makeProjectionName(1)),
+            make<LambdaAbstraction>(SbVar::makeProjectionName(2, 0),
+                                    make<BinaryOp>(Operations::Gt,
+                                                   make<Variable>(SbVar::makeProjectionName(2, 0)),
+                                                   Constant::int32(8))),
+            Constant::boolean(false)));
     TypeSignature signature = TypeChecker{}.typeCheck(tree1);
     ASSERT_EQ(signature.typesMask, TypeSignature::kAnyScalarType.typesMask);
     // Inject the information that the slot contains a number (and not an array).
     TypeChecker checker;
-    checker.bind(getABTVariableName(1), TypeSignature::kNumericType);
+    checker.bind(SbVar::makeProjectionName(1), TypeSignature::kNumericType);
     signature = checker.typeCheck(tree1);
 
     // The result should be a Let expression having the comparison in its body.
@@ -291,29 +367,29 @@ TEST(TypeCheckerTest, FoldTraverseF) {
     ASSERT_EQ(signature.typesMask, getTypeSignature(sbe::value::TypeTags::Boolean).typesMask);
 
     // Run it on a constant array.
-    auto tree2 =
-        make<FunctionCall>("traverseF",
-                           makeSeq(Constant::array(sbe::value::makeIntOrLong(78)),
-                                   make<LambdaAbstraction>(
-                                       getABTLocalVariableName(2, 0),
-                                       make<BinaryOp>(Operations::Gt,
-                                                      make<Variable>(getABTLocalVariableName(2, 0)),
-                                                      Constant::int32(8))),
-                                   Constant::boolean(false)));
+    auto tree2 = make<FunctionCall>(
+        "traverseF",
+        makeSeq(
+            Constant::array(sbe::value::makeIntOrLong(78)),
+            make<LambdaAbstraction>(SbVar::makeProjectionName(2, 0),
+                                    make<BinaryOp>(Operations::Gt,
+                                                   make<Variable>(SbVar::makeProjectionName(2, 0)),
+                                                   Constant::int32(8))),
+            Constant::boolean(false)));
     signature = TypeChecker{}.typeCheck(tree2);
 
     ASSERT_EQ(signature.typesMask, TypeSignature::kAnyScalarType.typesMask);
 
     // Run it on a constant number.
-    auto tree3 =
-        make<FunctionCall>("traverseF",
-                           makeSeq(Constant::int32(78),
-                                   make<LambdaAbstraction>(
-                                       getABTLocalVariableName(2, 0),
-                                       make<BinaryOp>(Operations::Gt,
-                                                      make<Variable>(getABTLocalVariableName(2, 0)),
-                                                      Constant::int32(8))),
-                                   Constant::boolean(false)));
+    auto tree3 = make<FunctionCall>(
+        "traverseF",
+        makeSeq(
+            Constant::int32(78),
+            make<LambdaAbstraction>(SbVar::makeProjectionName(2, 0),
+                                    make<BinaryOp>(Operations::Gt,
+                                                   make<Variable>(SbVar::makeProjectionName(2, 0)),
+                                                   Constant::int32(8))),
+            Constant::boolean(false)));
     signature = TypeChecker{}.typeCheck(tree3);
 
     // The result should be a Let expression having the comparison in its body.
@@ -323,20 +399,20 @@ TEST(TypeCheckerTest, FoldTraverseF) {
 
 TEST(TypeCheckerTest, FoldTraverseP) {
     // Run traverseP on a slot variable.
-    auto tree1 =
-        make<FunctionCall>("traverseP",
-                           makeSeq(make<Variable>(getABTVariableName(1)),
-                                   make<LambdaAbstraction>(
-                                       getABTLocalVariableName(2, 0),
-                                       make<BinaryOp>(Operations::Mult,
-                                                      make<Variable>(getABTLocalVariableName(2, 0)),
-                                                      Constant::int32(90))),
-                                   Constant::int32(0)));
+    auto tree1 = make<FunctionCall>(
+        "traverseP",
+        makeSeq(
+            make<Variable>(SbVar::makeProjectionName(1)),
+            make<LambdaAbstraction>(SbVar::makeProjectionName(2, 0),
+                                    make<BinaryOp>(Operations::Mult,
+                                                   make<Variable>(SbVar::makeProjectionName(2, 0)),
+                                                   Constant::int32(90))),
+            Constant::int32(0)));
     TypeSignature signature = TypeChecker{}.typeCheck(tree1);
     ASSERT_EQ(signature.typesMask, TypeSignature::kAnyScalarType.typesMask);
     // Inject the information that the slot contains a number (and not an array).
     TypeChecker checker;
-    checker.bind(getABTVariableName(1), TypeSignature::kNumericType);
+    checker.bind(SbVar::makeProjectionName(1), TypeSignature::kNumericType);
     signature = checker.typeCheck(tree1);
 
     // The result should be a Let expression having the multiplication in its body.
@@ -344,34 +420,139 @@ TEST(TypeCheckerTest, FoldTraverseP) {
     ASSERT_EQ(signature.typesMask, TypeSignature::kNumericType.typesMask);
 
     // Run it on a constant array.
-    auto tree2 =
-        make<FunctionCall>("traverseP",
-                           makeSeq(Constant::array(sbe::value::makeIntOrLong(78)),
-                                   make<LambdaAbstraction>(
-                                       getABTLocalVariableName(2, 0),
-                                       make<BinaryOp>(Operations::Mult,
-                                                      make<Variable>(getABTLocalVariableName(2, 0)),
-                                                      Constant::int32(90))),
-                                   Constant::int32(0)));
+    auto tree2 = make<FunctionCall>(
+        "traverseP",
+        makeSeq(
+            Constant::array(sbe::value::makeIntOrLong(78)),
+            make<LambdaAbstraction>(SbVar::makeProjectionName(2, 0),
+                                    make<BinaryOp>(Operations::Mult,
+                                                   make<Variable>(SbVar::makeProjectionName(2, 0)),
+                                                   Constant::int32(90))),
+            Constant::int32(0)));
     signature = TypeChecker{}.typeCheck(tree2);
 
     ASSERT_EQ(signature.typesMask, TypeSignature::kAnyScalarType.typesMask);
 
     // Run it on a constant number.
-    auto tree3 =
-        make<FunctionCall>("traverseP",
-                           makeSeq(Constant::int32(78),
-                                   make<LambdaAbstraction>(
-                                       getABTLocalVariableName(2, 0),
-                                       make<BinaryOp>(Operations::Mult,
-                                                      make<Variable>(getABTLocalVariableName(2, 0)),
-                                                      Constant::int32(90))),
-                                   Constant::int32(0)));
+    auto tree3 = make<FunctionCall>(
+        "traverseP",
+        makeSeq(
+            Constant::int32(78),
+            make<LambdaAbstraction>(SbVar::makeProjectionName(2, 0),
+                                    make<BinaryOp>(Operations::Mult,
+                                                   make<Variable>(SbVar::makeProjectionName(2, 0)),
+                                                   Constant::int32(90))),
+            Constant::int32(0)));
     signature = TypeChecker{}.typeCheck(tree3);
 
     // The result should be a Let expression having the multiplication in its body.
     ASSERT(tree3.is<Let>() && tree1.cast<Let>()->in().is<BinaryOp>());
     ASSERT_EQ(signature.typesMask, TypeSignature::kNumericType.typesMask);
+}
+
+TEST(TypeCheckerTest, TypeCheckMultiLet) {
+    {
+        auto tree = make<MultiLet>(
+            std::vector<std::pair<ProjectionName, ABT>>{{"Var1", Constant::int32(1)},
+                                                        {"Var2", Constant::int32(2)}},
+            make<BinaryOp>(Operations::Mult, make<Variable>("Var1"), make<Variable>("Var2")));
+        auto signature = TypeChecker{}.typeCheck(tree);
+        ASSERT_EQ(signature.typesMask, TypeSignature::kNumericType.typesMask);
+    }
+    {
+        auto tree = make<MultiLet>(
+            std::vector<std::pair<ProjectionName, ABT>>{{"Var1", Constant::int32(1)},
+                                                        {"Var2", Constant::int32(2)}},
+            make<BinaryOp>(Operations::And,
+                           make<FunctionCall>("exists", makeSeq(make<Variable>("var3"))),
+                           make<FunctionCall>("isNumber", makeSeq(make<Variable>("var4")))));
+        auto signature = TypeChecker{}.typeCheck(tree);
+        ASSERT_EQ(signature.typesMask,
+                  TypeSignature::kNothingType.include(TypeSignature::kBooleanType).typesMask);
+    }
+    {
+        auto tree = make<MultiLet>(
+            std::vector<std::pair<ProjectionName, ABT>>{{"Var1", Constant::int32(1)},
+                                                        {"Var2", Constant::int32(2)}},
+            make<BinaryOp>(Operations::And,
+                           make<FunctionCall>("exists", makeSeq(make<Variable>("var1"))),
+                           make<FunctionCall>("isNumber", makeSeq(make<Variable>("var1")))));
+        TypeChecker{}.typeCheck(tree);
+        auto signature = TypeChecker{}.typeCheck(tree);
+        ASSERT_EQ(signature.typesMask, TypeSignature::kBooleanType.typesMask);
+    }
+}
+
+TEST(TypeCheckerTest, TypeCheckNaryAdd) {
+    {
+        auto tree = make<NaryOp>(
+            Operations::Add,
+            ABTVector{
+                Constant::int32(1), Constant::int32(2), Constant::int32(3), Constant::int32(4)});
+        auto signature = TypeChecker{}.typeCheck(tree);
+        ASSERT_EQ(signature.typesMask, TypeSignature::kNumericType.typesMask);
+    }
+    {
+        auto tree = make<NaryOp>(Operations::Add,
+                                 ABTVector{Constant::int32(1),
+                                           Constant::date(Date_t::fromMillisSinceEpoch(10000000)),
+                                           Constant::int32(1),
+                                           Constant::int32(1)});
+        auto signature = TypeChecker{}.typeCheck(tree);
+        ASSERT_EQ(
+            signature.typesMask,
+            (TypeSignature::kNumericType.include(getTypeSignature(sbe::value::TypeTags::Date)))
+                .typesMask);
+    }
+    {
+        auto tree = make<NaryOp>(
+            Operations::Add,
+            ABTVector{
+                Constant::int32(1), Constant::int32(2), Constant::int32(3), Constant::nothing()});
+        auto signature = TypeChecker{}.typeCheck(tree);
+        ASSERT_EQ(signature.typesMask,
+                  (TypeSignature::kNothingType.include(TypeSignature::kNumericType)).typesMask);
+    }
+    {
+        auto tree = make<NaryOp>(
+            Operations::Add,
+            ABTVector{
+                Constant::int32(1), Constant::int32(2), Constant::int32(3), make<Variable>("var")});
+        auto signature = TypeChecker{}.typeCheck(tree);
+        ASSERT_EQ(signature.typesMask,
+                  (TypeSignature::kNumericType.include(TypeSignature::kDateTimeType)
+                       .include(TypeSignature::kNothingType))
+                      .typesMask);
+    }
+}
+
+TEST(TypeCheckerTest, TypeCheckNaryMult) {
+    {
+        auto tree = make<NaryOp>(
+            Operations::Mult,
+            ABTVector{
+                Constant::int32(1), Constant::int32(2), Constant::int32(3), Constant::int32(4)});
+        auto signature = TypeChecker{}.typeCheck(tree);
+        ASSERT_EQ(signature.typesMask, TypeSignature::kNumericType.typesMask);
+    }
+    {
+        auto tree = make<NaryOp>(
+            Operations::Mult,
+            ABTVector{
+                Constant::int32(1), Constant::int32(2), Constant::int32(3), Constant::nothing()});
+        auto signature = TypeChecker{}.typeCheck(tree);
+        ASSERT_EQ(signature.typesMask,
+                  (TypeSignature::kNothingType.include(TypeSignature::kNumericType)).typesMask);
+    }
+    {
+        auto tree = make<NaryOp>(
+            Operations::Mult,
+            ABTVector{
+                Constant::int32(1), Constant::int32(2), Constant::int32(3), make<Variable>("var")});
+        auto signature = TypeChecker{}.typeCheck(tree);
+        ASSERT_EQ(signature.typesMask,
+                  (TypeSignature::kNumericType.include(TypeSignature::kNothingType)).typesMask);
+    }
 }
 
 }  // namespace

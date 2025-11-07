@@ -28,38 +28,42 @@
  */
 
 
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/profile_filter_impl.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/init.h"  // IWYU pragma: keep
+#include "mongo/db/exec/matcher/matcher.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/profile_settings.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/dependency_analysis/match_expression_dependencies.h"
+#include "mongo/db/server_options.h"
+#include "mongo/logv2/log.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
+
 #include <memory>
 #include <set>
 #include <string>
 #include <utility>
 
 #include <absl/container/node_hash_map.h>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/init.h"  // IWYU pragma: keep
-#include "mongo/db/matcher/match_expression_dependencies.h"
-#include "mongo/db/pipeline/dependencies.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/field_path.h"
-#include "mongo/db/profile_filter_impl.h"
-#include "mongo/db/profile_settings.h"
-#include "mongo/db/server_options.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 
 namespace mongo {
 
-ProfileFilterImpl::ProfileFilterImpl(BSONObj expr)
-    : _matcher(expr.getOwned(), ExpressionContextBuilder{}.build()) {
+ProfileFilterImpl::ProfileFilterImpl(BSONObj expr,
+                                     boost::intrusive_ptr<ExpressionContext> parserExpCtx)
+    : _matcher(expr.getOwned(), parserExpCtx) {
+
     DepsTracker deps;
-    match_expression::addDependencies(_matcher.getMatchExpression(), &deps);
+    dependency_analysis::addDependencies(_matcher.getMatchExpression(), &deps);
     uassert(4910201,
             "Profile filter is not allowed to depend on metadata",
             !deps.getNeedsAnyMetadata());
@@ -71,16 +75,21 @@ ProfileFilterImpl::ProfileFilterImpl(BSONObj expr)
     _needWholeDocument = deps.needWholeDocument;
 
     // Remember a list of functions we'll call whenever we need to build BSON from CurOp.
-    _makeBSON = OpDebug::appendStaged(_dependencies, _needWholeDocument);
+    _makeBSON = OpDebug::appendStaged(
+        parserExpCtx->getOperationContext(), _dependencies, _needWholeDocument);
+
+    // The operation context is necessary for parsing, but should not be used for the rest of the
+    // lifetime of the filter, since the filter exists for longer than a single operation.
+    parserExpCtx->setOperationContext(nullptr);
 }
 
 bool ProfileFilterImpl::matches(OperationContext* opCtx,
                                 const OpDebug& op,
                                 const CurOp& curop) const {
     try {
-        return _matcher.matches(_makeBSON({opCtx, op, curop}));
+        return exec::matcher::matches(&_matcher, _makeBSON({opCtx, op, curop}));
     } catch (const DBException& e) {
-        LOGV2_DEBUG(4910202, 5, "Profile filter threw an exception", "exception"_attr = e);
+        LOGV2_DEBUG(4910202, 5, "Profile filter threw an exception", "exception"_attr = redact(e));
         return false;
     }
 }
@@ -88,10 +97,15 @@ bool ProfileFilterImpl::matches(OperationContext* opCtx,
 void ProfileFilterImpl::initializeDefaults(ServiceContext* service) {
     auto& dbProfileSettings = DatabaseProfileSettings::get(service);
     dbProfileSettings.setDefaultLevel(serverGlobalParams.defaultProfile);
-
+    dbProfileSettings.setDefaultSlowOpInProgressThreshold(
+        Milliseconds(serverGlobalParams.defaultSlowInProgMS.load()));
     try {
         if (auto expr = serverGlobalParams.defaultProfileFilter) {
-            dbProfileSettings.setDefaultFilter(std::make_shared<ProfileFilterImpl>(*expr));
+            // Create a temporary operation context that will only be valid for parsing, and will
+            // be deleted after the try/catch block.
+            const auto tempOpCtx = cc().makeOperationContext();
+            dbProfileSettings.setDefaultFilter(std::make_shared<ProfileFilterImpl>(
+                *expr, ExpressionContextBuilder{}.opCtx(tempOpCtx.get()).build()));
         }
     } catch (AssertionException& e) {
         // Add more context to the error

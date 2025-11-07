@@ -29,12 +29,12 @@
 
 #pragma once
 
-#include <memory>
-#include <utility>
-
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/temporary_record_store.h"
+
+#include <memory>
+#include <utility>
 
 namespace mongo {
 
@@ -44,10 +44,10 @@ namespace mongo {
 class DeferredDropRecordStore : public TemporaryRecordStore {
 public:
     DeferredDropRecordStore(std::unique_ptr<RecordStore> rs, StorageEngine* storageEngine)
-        : TemporaryRecordStore(std::move(rs)), _storageEngine(storageEngine){};
+        : TemporaryRecordStore(std::move(rs)), _storageEngine(storageEngine) {};
     ~DeferredDropRecordStore() override;
 
 protected:
-    StorageEngine* _storageEngine;
+    StorageEngine* _storageEngine{nullptr};
 };
 }  // namespace mongo

@@ -27,21 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <fmt/format.h>
-#include <memory>
-#include <mutex>
-#include <set>
-#include <string>
-#include <utility>
-
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -55,21 +40,20 @@
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/basic_types.h"
-#include "mongo/db/catalog/external_data_source_scope_guard.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/query_cmd/acquire_locks.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/cursor_in_use_info.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/logical_time.h"
+#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/change_stream_invalidation_info.h"
-#include "mongo/db/profile_settings.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/client_cursor/clientcursor.h"
 #include "mongo/db/query/client_cursor/collect_query_stats_mongod.h"
@@ -77,7 +61,7 @@
 #include "mongo/db/query/client_cursor/cursor_manager.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/client_cursor/cursor_response_gen.h"
-#include "mongo/db/query/command_diagnostic_printer.h"
+#include "mongo/db/query/explain_diagnostic_printer.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/find.h"
 #include "mongo/db/query/find_command.h"
@@ -91,25 +75,17 @@
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/speculative_majority_read_info.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/stats/counters.h"
-#include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/op_msg.h"
@@ -128,12 +104,24 @@
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <boost/cstdint.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
 namespace {
 
-using namespace fmt::literals;
 
 MONGO_FAIL_POINT_DEFINE(rsStopGetMoreCmd);
 MONGO_FAIL_POINT_DEFINE(getMoreHangAfterPinCursor);
@@ -258,53 +246,6 @@ void validateMaxTimeMS(const boost::optional<std::int64_t>& commandMaxTimeMS,
 }
 
 /**
- * Apply the read concern from the cursor to this operation.
- */
-void applyCursorReadConcern(OperationContext* opCtx, repl::ReadConcernArgs rcArgs) {
-    const auto isReplSet = repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet();
-
-    // Select the appropriate read source. If we are in a transaction with read concern majority,
-    // this will already be set to kNoTimestamp, so don't set it again.
-    if (isReplSet && rcArgs.getLevel() == repl::ReadConcernLevel::kMajorityReadConcern &&
-        !opCtx->inMultiDocumentTransaction()) {
-        switch (rcArgs.getMajorityReadMechanism()) {
-            case repl::ReadConcernArgs::MajorityReadMechanism::kMajoritySnapshot: {
-                // Make sure we read from the majority snapshot.
-                shard_role_details::getRecoveryUnit(opCtx)->setTimestampReadSource(
-                    RecoveryUnit::ReadSource::kMajorityCommitted);
-                uassertStatusOK(shard_role_details::getRecoveryUnit(opCtx)
-                                    ->majorityCommittedSnapshotAvailable());
-                break;
-            }
-            case repl::ReadConcernArgs::MajorityReadMechanism::kSpeculative: {
-                // Mark the operation as speculative and select the correct read source.
-                repl::SpeculativeMajorityReadInfo::get(opCtx).setIsSpeculativeRead();
-                shard_role_details::getRecoveryUnit(opCtx)->setTimestampReadSource(
-                    RecoveryUnit::ReadSource::kNoOverlap);
-                break;
-            }
-        }
-    }
-
-    if (isReplSet && rcArgs.getLevel() == repl::ReadConcernLevel::kSnapshotReadConcern &&
-        !opCtx->inMultiDocumentTransaction()) {
-        auto atClusterTime = rcArgs.getArgsAtClusterTime();
-        invariant(atClusterTime && *atClusterTime != LogicalTime::kUninitialized);
-        shard_role_details::getRecoveryUnit(opCtx)->setTimestampReadSource(
-            RecoveryUnit::ReadSource::kProvided, atClusterTime->asTimestamp());
-    }
-
-    // For cursor commands that take locks internally, the read concern on the
-    // OperationContext may affect the timestamp read source selected by the storage engine.
-    // We place the cursor read concern onto the OperationContext so the lock acquisition
-    // respects the cursor's read concern.
-    {
-        stdx::lock_guard<Client> lk(*opCtx->getClient());
-        repl::ReadConcernArgs::get(opCtx) = rcArgs;
-    }
-}
-
-/**
  * Sets a deadline on the operation if the originating command had a maxTimeMS specified or if this
  * is a tailable, awaitData cursor.
  */
@@ -334,29 +275,39 @@ void setUpOperationDeadline(OperationContext* opCtx,
  * Sets up the OperationContext in order to correctly inherit options like the read concern from the
  * cursor to this operation.
  */
-void setUpOperationContextStateForGetMore(OperationContext* opCtx,
-                                          const ClientCursor& cursor,
-                                          const GetMoreCommandRequest& cmd,
-                                          bool disableAwaitDataFailpointActive) {
-    applyCursorReadConcern(opCtx, cursor.getReadConcernArgs());
-    opCtx->setWriteConcern(cursor.getWriteConcernOptions());
-    ReadPreferenceSetting::get(opCtx) = cursor.getReadPreferenceSetting();
+void setUpOperationContextAndCurOpStateForGetMore(OperationContext* opCtx,
+                                                  CurOp* curOp,
+                                                  const ClientCursor& cursor,
+                                                  const GetMoreCommandRequest& cmd,
+                                                  bool disableAwaitDataFailpointActive) {
+    applyConcernsAndReadPreference(opCtx, cursor);
 
     auto apiParamsFromClient = APIParameters::get(opCtx);
     uassert(
         ErrorCodes::APIMismatchError,
-        "API parameter mismatch: getMore used params {}, the cursor-creating command used {}"_format(
-            apiParamsFromClient.toBSON().toString(), cursor.getAPIParameters().toBSON().toString()),
+        fmt::format(
+            "API parameter mismatch: getMore used params {}, the cursor-creating command used {}",
+            apiParamsFromClient.toBSON().toString(),
+            cursor.getAPIParameters().toBSON().toString()),
         apiParamsFromClient == cursor.getAPIParameters());
 
     setUpOperationDeadline(opCtx, cursor, cmd, disableAwaitDataFailpointActive);
 
-    // If the originating command had a 'comment' field, we extract it and set it on opCtx. Note
-    // that if the 'getMore' command itself has a 'comment' field, we give precedence to it.
-    auto comment = cursor.getOriginatingCommandObj()["comment"];
-    if (!opCtx->getComment() && comment) {
+    auto originatingCommand = cursor.getOriginatingCommandObj();
+    if (!originatingCommand.isEmpty()) {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
-        opCtx->setComment(comment.wrap());
+
+        // Ensure that the original query or command object is available in the slow query log,
+        // profiler and currentOp.
+        curOp->setOriginatingCommand(lk, originatingCommand);
+
+        // If the originating command had a 'comment' field, we extract it and set it on opCtx. Note
+        // that if the 'getMore' command itself has a 'comment' field, we give precedence to it.
+        auto comment = originatingCommand["comment"];
+
+        if (!opCtx->getComment() && comment) {
+            opCtx->setComment(comment.wrap());
+        }
     }
 }
 
@@ -387,11 +338,16 @@ public:
     bool allowedWithSecurityToken() const final {
         return true;
     }
+
+    bool enableDiagnosticPrintingOnFailure() const final {
+        return true;
+    }
+
     class Invocation final : public CommandInvocation {
     public:
         Invocation(Command* cmd, const OpMsgRequest& request)
             : CommandInvocation(cmd),
-              _cmd(GetMoreCommandRequest::parse(IDLParserContext{"getMore"}, request)) {
+              _cmd(GetMoreCommandRequest::parse(request, IDLParserContext{"getMore"})) {
             NamespaceString nss(
                 NamespaceStringUtil::deserialize(_cmd.getDbName(), _cmd.getCollection()));
             uassert(ErrorCodes::InvalidNamespace,
@@ -440,8 +396,7 @@ public:
             return _cmd.getGenericArguments();
         }
 
-        bool canRetryOnStaleConfigOrShardCannotRefreshDueToLocksHeld(
-            const OpMsgRequest& request) const override {
+        bool canRetryOnStaleShardMetadataError(const OpMsgRequest& request) const override {
             // Can not rerun the command when executing a GetMore command as the cursor may already
             // be lost.
             return false;
@@ -449,8 +404,8 @@ public:
 
         /**
          * Implements populating 'nextBatch' with up to 'batchSize' documents from the plan executor
-         * 'exec'. Outputs the number of documents and relevant size statistics in 'numResults' and
-         * 'docUnitsReturned'. Returns whether or not the cursor should be saved.
+         * 'exec'. Outputs the number of documents and relevant size statistics in 'numResults'.
+         * Returns whether or not the cursor should be saved.
          */
         bool batchedExecute(OperationContext* opCtx,
                             ClientCursor* cursor,
@@ -458,11 +413,14 @@ public:
                             const size_t batchSize,
                             const bool isTailable,
                             CursorResponseBuilder* nextBatch,
-                            uint64_t* numResults,
-                            ResourceConsumption::DocumentUnitCounter* docUnitsReturned) {
-            BSONObj obj, pbrt = exec->getPostBatchResumeToken();
-            size_t objSize;
+                            uint64_t* numResults) {
+            BSONObj obj;
+            BSONObj pbrt = exec->getPostBatchResumeToken();
             bool failedToAppend = false;
+
+            // Capture diagnostics to be logged in the case of a failure.
+            ScopedDebugInfo explainDiagnostics("explainDiagnostics",
+                                               diagnostic_printers::ExplainDiagnosticPrinter{exec});
 
             // Note that unlike in find, a batch size of 0 means there is no limit on the number of
             // documents, and we may choose to pre-allocate space for the batch after the first
@@ -471,14 +429,13 @@ public:
                 // Reserve space based on the size of the first object. Note that we always
                 // allow the first object to be appended to the batch so we can make
                 // progress.
-                objSize = obj.objsize();
+                size_t objSize = obj.objsize();
                 auto bytesToReserve =
                     FindCommon::getBytesToReserveForGetMoreReply(isTailable, objSize, batchSize);
                 nextBatch->reserveReplyBuffer(bytesToReserve);
                 // Don't check document size here before appending, since we always want to make
                 // progress.
                 nextBatch->append(obj);
-                docUnitsReturned->observeOne(objSize);
                 *numResults = 1;
 
                 // As soon as we get a result, this operation no longer waits.
@@ -492,12 +449,8 @@ public:
                 // the first call to getNext() above.
                 *numResults += exec->getNextBatch(
                     batchSize - 1,
-                    FindCommon::BSONObjCursorAppender{false /* alwaysAcceptFirstDoc */,
-                                                      exec,
-                                                      nextBatch,
-                                                      docUnitsReturned,
-                                                      pbrt,
-                                                      failedToAppend});
+                    FindCommon::BSONObjCursorAppender{
+                        false /* alwaysAcceptFirstDoc */, nextBatch, pbrt, failedToAppend});
             }
 
             // Use the resume token generated by the last execution of the plan that didn't stash a
@@ -522,13 +475,11 @@ public:
                            const GetMoreCommandRequest& cmd,
                            const bool isTailable,
                            CursorResponseBuilder* nextBatch,
-                           uint64_t* numResults,
-                           ResourceConsumption::DocumentUnitCounter* docUnitsReturned) {
+                           uint64_t* numResults) {
             // Note: if an awaitData getMore is killed during this process due to our max time
             // expiring at an interrupt point, we just continue as normal and return rather than
             // reporting a timeout to the user.
             PlanExecutor* exec = cursor->getExecutor();
-            BSONObj obj;
 
             // We intentionally set the batch size to the max size_t value for a batch size of 0 in
             // order to simulate "no limit" on the batch size. We will run out of space in the
@@ -536,14 +487,8 @@ public:
             size_t batchSize = cmd.getBatchSize().value_or(std::numeric_limits<size_t>::max());
 
             try {
-                return batchedExecute(opCtx,
-                                      cursor,
-                                      exec,
-                                      batchSize,
-                                      isTailable,
-                                      nextBatch,
-                                      numResults,
-                                      docUnitsReturned);
+                return batchedExecute(
+                    opCtx, cursor, exec, batchSize, isTailable, nextBatch, numResults);
             } catch (const ExceptionFor<ErrorCodes::CloseChangeStream>&) {
                 // This exception indicates that we should close the cursor without reporting an
                 // error.
@@ -568,7 +513,7 @@ public:
                               "getMore command executor error",
                               "error"_attr = exception.toStatus(),
                               "stats"_attr = redact(stats),
-                              "cmd"_attr = cmd.toBSON());
+                              "cmd"_attr = redact(cmd.toBSON()));
 
                 exception.addContext("Executor error during getMore");
                 throw;
@@ -579,114 +524,23 @@ public:
                                           rpc::ReplyBuilderInterface* reply,
                                           ClientCursorPin& cursorPin,
                                           CurOp* curOp) {
-            // Get a reference to the shared_ptr so that we drop the virtual collections (via the
-            // destructor) after deleting our cursors and releasing our read locks.
-            std::shared_ptr<ExternalDataSourceScopeGuard> extDataSourceScopeGuard =
-                ExternalDataSourceScopeGuard::get(cursorPin.getCursor());
-
-            // Cursors come in one of two flavors:
-            //
-            // - Cursors which read from a single collection, such as those generated via the
-            //   find command. For these cursors, we hold the appropriate collection lock for the
-            //   duration of the getMore using AutoGetCollectionForRead. These cursors have the
-            //   'kLockExternally' lock policy.
-            //
-            // - Cursors which may read from many collections, e.g. those generated via the
-            //   aggregate command, or which do not read from a collection at all, e.g. those
-            //   generated by the listIndexes command. We don't need to acquire locks to use these
-            //   cursors, since they either manage locking themselves or don't access data protected
-            //   by collection locks. These cursors have the 'kLocksInternally' lock policy.
-            //
-            // While we only need to acquire locks for 'kLockExternally' cursors, we need to create
-            // an AutoStatsTracker in either case. This is responsible for updating statistics in
-            // CurOp and Top. We avoid using AutoGetCollectionForReadCommand because we may need to
-            // drop and reacquire locks when the cursor is awaitData, but we don't want to update
-            // the stats twice.
-            boost::optional<AutoGetCollectionForReadMaybeLockFree> readLock;
-            boost::optional<AutoStatsTracker> statsTracker;
-            NamespaceString nss(
-                NamespaceStringUtil::deserialize(_cmd.getDbName(), _cmd.getCollection()));
-
             const bool disableAwaitDataFailpointActive =
                 MONGO_unlikely(disableAwaitDataForGetMoreCmd.shouldFail());
 
             // Inherit properties like readConcern and maxTimeMS from our originating cursor.
-            setUpOperationContextStateForGetMore(
-                opCtx, *cursorPin.getCursor(), _cmd, disableAwaitDataFailpointActive);
+            setUpOperationContextAndCurOpStateForGetMore(
+                opCtx, curOp, *cursorPin.getCursor(), _cmd, disableAwaitDataFailpointActive);
 
-            // Update opCtx of the decorated ExternalDataSourceScopeGuard object so that it can drop
-            // virtual collections in the new 'opCtx'.
-            ExternalDataSourceScopeGuard::updateOperationContext(cursorPin.getCursor(), opCtx);
-
-            boost::optional<HandleTransactionResourcesFromStasher> txnResourcesHandler;
+            NamespaceString nss = ns();
+            CursorLocks locks{opCtx, nss, cursorPin};
 
             // On early return, typically due to a failed assertion, delete the cursor.
             ScopeGuard cursorDeleter([&] {
-                if (txnResourcesHandler) {
-                    txnResourcesHandler->dismissRestoredResources();
-                }
                 cursorPin.deleteUnderlying();
+                if (locks.txnResourcesHandler) {
+                    locks.txnResourcesHandler->dismissRestoredResources();
+                }
             });
-
-            if (cursorPin->getExecutor()->lockPolicy() ==
-                PlanExecutor::LockPolicy::kLocksInternally) {
-                // TODO SERVER-78724: This invariant can be safely removed once aggregations uses
-                // collection acquisitions.
-                invariant(!cursorPin->getExecutor()->usesCollectionAcquisitions());
-
-                if (!nss.isCollectionlessCursorNamespace()) {
-                    statsTracker.emplace(opCtx,
-                                         nss,
-                                         Top::LockType::NotLocked,
-                                         AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-                                         DatabaseProfileSettings::get(opCtx->getServiceContext())
-                                             .getDatabaseProfileLevel(nss.dbName()));
-                }
-            } else {
-                invariant(cursorPin->getExecutor()->lockPolicy() ==
-                          PlanExecutor::LockPolicy::kLockExternally);
-
-                if (cursorPin->getExecutor()->usesCollectionAcquisitions()) {
-                    // Restore the acquisitions used in the original call. This takes care of
-                    // checking that the preconditions for the original acquisition still hold and
-                    // restores any locks necessary.
-                    txnResourcesHandler.emplace(opCtx, cursorPin.getCursor());
-                } else {
-                    // Lock the backing collection by using the executor's namespace. Note that it
-                    // may be different from the cursor's namespace. One such possible scenario is
-                    // when getMore() is executed against a view. Technically, views are pipelines
-                    // and under normal circumstances use 'kLocksInternally' policy, so we shouldn't
-                    // be getting into here in the first place. However, if the pipeline was
-                    // optimized away and replaced with a query plan, its lock policy would have
-                    // also been changed to 'kLockExternally'. So, we'll use the executor's
-                    // namespace to take the lock (which is always the backing collection
-                    // namespace), but will use the namespace provided in the user request for
-                    // profiling.
-                    //
-                    // Otherwise, these two namespaces will match.
-                    //
-                    // Note that some pipelines which were optimized away may require locking
-                    // multiple namespaces. As such, we pass any secondary namespaces required by
-                    // the pinned cursor's executor when constructing 'readLock'.
-                    const auto& secondaryNamespaces =
-                        cursorPin->getExecutor()->getSecondaryNamespaces();
-                    readLock.emplace(opCtx,
-                                     cursorPin->getExecutor()->nss(),
-                                     AutoGetCollection::Options{}.secondaryNssOrUUIDs(
-                                         secondaryNamespaces.cbegin(), secondaryNamespaces.cend()));
-                }
-
-                statsTracker.emplace(opCtx,
-                                     nss,
-                                     Top::LockType::ReadLocked,
-                                     AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
-                                     DatabaseProfileSettings::get(opCtx->getServiceContext())
-                                         .getDatabaseProfileLevel(nss.dbName()));
-
-                // Check whether we are allowed to read from this node after acquiring our locks.
-                uassertStatusOK(repl::ReplicationCoordinator::get(opCtx)->checkCanServeReadsFor(
-                    opCtx, nss, true));
-            }
 
             if (MONGO_unlikely(waitAfterPinningCursorBeforeGetMoreBatch.shouldFail())) {
                 CurOpFailpointHelpers::waitWhileFailPointEnabled(
@@ -709,19 +563,13 @@ public:
                 shard_role_details::getRecoveryUnit(opCtx)->setReadOnce(true);
             }
             exec->reattachToOperationContext(opCtx);
-            exec->restoreState(readLock ? &readLock->getCollection() : nullptr);
+            exec->restoreState(nullptr);
 
-            auto planSummary = exec->getPlanExplainer().getPlanSummary();
             {
-                stdx::lock_guard<Client> lk(*opCtx->getClient());
-                curOp->setPlanSummary(lk, planSummary);
+                auto planSummary = exec->getPlanExplainer().getPlanSummary();
 
-                // Ensure that the original query or command object is available in the slow query
-                // log, profiler and currentOp.
-                auto originatingCommand = cursorPin->getOriginatingCommandObj();
-                if (!originatingCommand.isEmpty()) {
-                    curOp->setOriginatingCommand(lk, originatingCommand);
-                }
+                stdx::lock_guard<Client> lk(*opCtx->getClient());
+                curOp->setPlanSummary(lk, std::move(planSummary));
 
                 curOp->debug().queryFramework = exec->getQueryFramework();
                 curOp->setShouldOmitDiagnosticInformation(
@@ -755,7 +603,6 @@ public:
             }
             CursorResponseBuilder nextBatch(reply, options);
             uint64_t numResults = 0;
-            ResourceConsumption::DocumentUnitCounter docUnitsReturned;
 
             // We report keysExamined and docsExamined to OpDebug for a given getMore operation. To
             // obtain these values we need to take a diff of the pre-execution and post-execution
@@ -789,8 +636,7 @@ public:
                                                         _cmd,
                                                         cursorPin->isTailable(),
                                                         &nextBatch,
-                                                        &numResults,
-                                                        &docUnitsReturned);
+                                                        &numResults);
 
             PlanSummaryStats postExecutionStats;
             exec->getPlanExplainer().getSummaryStats(&postExecutionStats);
@@ -840,8 +686,6 @@ public:
 
             // Collect and increment metrics now that we have enough information. It's important
             // we do so before generating the response so that the response can include metrics.
-            auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-            metricsCollector.incrementDocUnitsReturned(curOp->getNS(), docUnitsReturned);
             curOp->debug().additiveMetrics.nBatches = 1;
             curOp->setEndOfOpMetrics(numResults);
             collectQueryStatsMongod(opCtx, cursorPin);
@@ -865,15 +709,50 @@ public:
             }
         }
 
-        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* reply) override {
-            // Capture diagnostics for tassert and invariant failures that may occur during query
-            // parsing, planning or execution. No work is done on the hot-path, all computation of
-            // these diagnostics is done lazily during failure handling. This line just creates an
-            // RAII object which holds references to objects on this stack frame, which will be used
-            // to print diagnostics in the event of a tassert or invariant.
-            ScopedDebugInfo getMoreCmdDiagnostics("commandDiagnostics",
-                                                  command_diagnostics::Printer{opCtx});
+        ClientCursorPin pinCursorWithRetry(OperationContext* opCtx,
+                                           CursorId cursorId,
+                                           const NamespaceString& nss) {
+            // Perform validation checks which don't cause the cursor to be deleted on failure.
+            auto pinCheck = [&](const ClientCursor& cc) {
+                validateLSID(opCtx, cursorId, &cc);
+                validateTxnNumber(opCtx, cursorId, &cc);
+                validateAuthorization(opCtx, cc);
+                validateNamespace(nss, cc);
+                validateMaxTimeMS(_cmd.getMaxTimeMS(), cc);
+            };
 
+            Backoff retryBackoff{Seconds(1), Milliseconds::max()};
+
+            const size_t maxAttempts = internalQueryGetMoreMaxCursorPinRetryAttempts.loadRelaxed();
+            for (size_t attempt = 1; attempt <= maxAttempts; ++attempt) {
+                auto statusWithCursorPin = CursorManager::get(opCtx)->pinCursor(
+                    opCtx, cursorId, definition()->getName(), pinCheck);
+                auto status = statusWithCursorPin.getStatus();
+                if (status.isOK()) {
+                    return std::move(statusWithCursorPin.getValue());
+                }
+                // We only return CursorInUse errors if the command that is holding the cursor is
+                // "releaseMemory".
+                if (attempt == maxAttempts || status.code() != ErrorCodes::CursorInUse) {
+                    uassertStatusOK(status);
+                }
+                auto extraInfo = status.extraInfo<CursorInUseInfo>();
+                if (extraInfo == nullptr || extraInfo->commandName() != "releaseMemory") {
+                    uassertStatusOK(status);
+                }
+                Milliseconds sleepDuration = retryBackoff.nextSleep();
+                LOGV2_DEBUG(10116501,
+                            3,
+                            "getMore failed to pin cursor, because it is held by releaseMemory "
+                            "command. Will retry after sleep.",
+                            "sleepDuration"_attr = sleepDuration,
+                            "attempt"_attr = attempt);
+                opCtx->sleepFor(sleepDuration);
+            }
+            MONGO_UNREACHABLE_TASSERT(101165);
+        }
+
+        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* reply) override {
             // Gets the number of write ops in the current multidocument transaction.
             auto getNumTxnOps = [opCtx]() -> boost::optional<size_t> {
                 if (opCtx->inMultiDocumentTransaction()) {
@@ -921,23 +800,11 @@ public:
                 admissionPriority.emplace(opCtx, AdmissionContext::Priority::kExempt);
             }
 
-            if (_cmd.getIncludeQueryStatsMetrics() &&
-                feature_flags::gFeatureFlagQueryStatsDataBearingNodes.isEnabled(
-                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            if (_cmd.getIncludeQueryStatsMetrics()) {
                 curOp->debug().queryStatsInfo.metricsRequested = true;
             }
 
-            // Perform validation checks which don't cause the cursor to be deleted on failure.
-            auto pinCheck = [&](const ClientCursor& cc) {
-                validateLSID(opCtx, cursorId, &cc);
-                validateTxnNumber(opCtx, cursorId, &cc);
-                validateAuthorization(opCtx, cc);
-                validateNamespace(nss, cc);
-                validateMaxTimeMS(_cmd.getMaxTimeMS(), cc);
-            };
-
-            auto cursorPin =
-                uassertStatusOK(CursorManager::get(opCtx)->pinCursor(opCtx, cursorId, pinCheck));
+            ClientCursorPin cursorPin = pinCursorWithRetry(opCtx, cursorId, nss);
 
             // Get the read concern level here in case the cursor is exhausted while iterating.
             const auto isLinearizableReadConcern = cursorPin->getReadConcernArgs().getLevel() ==
@@ -952,7 +819,8 @@ public:
             if (MONGO_unlikely(getMoreHangAfterPinCursor.shouldFail())) {
                 LOGV2(20477,
                       "getMoreHangAfterPinCursor fail point enabled. Blocking until fail "
-                      "point is disabled");
+                      "point is disabled",
+                      "cursorId"_attr = cursorId);
                 getMoreHangAfterPinCursor.pauseWhileSet(opCtx);
             }
 
@@ -991,12 +859,12 @@ public:
             auto ret = reply->getBodyBuilder().asTempObj();
 
             // We need to copy the serialization context from the request to the reply object
-            CursorGetMoreReply::parse(IDLParserContext("CursorGetMoreReply",
+            CursorGetMoreReply::parse(ret.removeField("ok"),
+                                      IDLParserContext("CursorGetMoreReply",
                                                        auth::ValidatedTenancyScope::get(opCtx),
                                                        tenantId,
                                                        SerializationContext::stateCommandReply(
-                                                           _cmd.getSerializationContext())),
-                                      ret.removeField("ok"));
+                                                           _cmd.getSerializationContext())));
         }
 
         const GetMoreCommandRequest _cmd;

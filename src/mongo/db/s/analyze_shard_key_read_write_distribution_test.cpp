@@ -29,6 +29,37 @@
 
 #include "mongo/db/s/analyze_shard_key_read_write_distribution.h"
 
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/oid.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/basic_types_gen.h"
+#include "mongo/db/commands/query_cmd/bulk_write_gen.h"
+#include "mongo/db/global_catalog/type_collection_common_types_gen.h"
+#include "mongo/db/hasher.h"
+#include "mongo/db/keypattern.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/query/collation/collation_spec.h"
+#include "mongo/db/query/collation/collator_factory_interface.h"
+#include "mongo/db/query/write_ops/write_ops_parsers.h"
+#include "mongo/db/s/analyze_shard_key_util.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/shard_server_test_fixture.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/database_version.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/platform/random.h"
+#include "mongo/s/analyze_shard_key_common_gen.h"
+#include "mongo/s/analyze_shard_key_documents_gen.h"
+#include "mongo/s/analyze_shard_key_server_parameters_gen.h"
+#include "mongo/s/resharding/type_collection_fields_gen.h"
+#include "mongo/unittest/death_test.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/time_support.h"
+#include "mongo/util/uuid.h"
+
 #include <cstddef>
 #include <initializer_list>
 #include <memory>
@@ -38,39 +69,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/status_with.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/oid.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/basic_types_gen.h"
-#include "mongo/db/commands/query_cmd/bulk_write_gen.h"
-#include "mongo/db/hasher.h"
-#include "mongo/db/keypattern.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/query/collation/collation_spec.h"
-#include "mongo/db/query/collation/collator_factory_interface.h"
-#include "mongo/db/query/write_ops/write_ops_parsers.h"
-#include "mongo/db/s/analyze_shard_key_util.h"
-#include "mongo/db/s/shard_server_test_fixture.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/platform/random.h"
-#include "mongo/s/analyze_shard_key_common_gen.h"
-#include "mongo/s/analyze_shard_key_documents_gen.h"
-#include "mongo/s/analyze_shard_key_server_parameters_gen.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/resharding/type_collection_fields_gen.h"
-#include "mongo/s/sharding_index_catalog_cache.h"
-#include "mongo/s/type_collection_common_types_gen.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/time_support.h"
-#include "mongo/util/uuid.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -122,7 +120,8 @@ protected:
             chunkSplitInfo.shardKeyPattern.getKeyPattern().globalMax());
 
         const Timestamp timestamp{Timestamp(100, 1)};
-        ChunkVersion version({OID::gen(), timestamp}, {1, 0});
+        const OID epoch = OID::gen();
+        ChunkVersion version({epoch, timestamp}, {1, 0});
 
         std::vector<ChunkType> chunks;
         for (size_t i = 1; i < splitPointsIncludingEnds.size(); ++i) {
@@ -146,22 +145,23 @@ protected:
                                          false, /* unsplittable */
                                          std::move(defaultCollator) /* collator */,
                                          false /* unique */,
-                                         OID::gen(),
+                                         epoch,
                                          timestamp,
                                          boost::none /* timeseriesFields */,
                                          boost::none /* reshardingFields */,
                                          true /* allowMigrations */,
                                          chunks);
 
-        auto cm = ChunkManager(ShardId("dummyPrimaryShard"),
-                               DatabaseVersion(UUID::gen(), timestamp),
-                               RoutingTableHistoryValueHandle(std::make_shared<RoutingTableHistory>(
+        auto cm = ChunkManager(RoutingTableHistoryValueHandle(std::make_shared<RoutingTableHistory>(
                                    std::move(routingTableHistory))),
                                boost::none);
         return CollectionRoutingInfoTargeter(
             nss,
-            CollectionRoutingInfo{std::move(cm),
-                                  boost::optional<ShardingIndexesCatalogCache>(boost::none)});
+            CollectionRoutingInfo{
+                std::move(cm),
+                DatabaseTypeValueHandle(DatabaseType{nss.dbName(),
+                                                     ShardId("dummyPrimaryShard"),
+                                                     DatabaseVersion(UUID::gen(), timestamp)})});
     }
 
     int32_t getRandomInt(int32_t limit) const {
@@ -267,7 +267,7 @@ protected:
         std::vector<std::variant<BulkWriteInsertOp, BulkWriteUpdateOp, BulkWriteDeleteOp>> ops;
         for (const auto& updateOp : updateOps) {
             BulkWriteUpdateOp op;
-            op.setUpdate(0);
+            op.setNsInfoIdx(0);
             op.setFilter(updateOp.getQ());
             op.setMulti(updateOp.getMulti());
             op.setConstants(updateOp.getC());
@@ -310,7 +310,7 @@ protected:
         std::vector<std::variant<BulkWriteInsertOp, BulkWriteUpdateOp, BulkWriteDeleteOp>> ops;
         for (const auto& deleteOp : deleteOps) {
             BulkWriteDeleteOp op;
-            op.setDeleteCommand(0);
+            op.setNsInfoIdx(0);
             op.setFilter(deleteOp.getQ());
             op.setMulti(deleteOp.getMulti());
             op.setHint(deleteOp.getHint());
@@ -432,14 +432,10 @@ protected:
                                    << "hashed")},
         std::vector<BSONObj>{
             BSON("a.x" << -100 << "b.y"
-                       << BSONElementHasher::hash64(BSON(""
-                                                         << "A")
-                                                        .firstElement(),
+                       << BSONElementHasher::hash64(BSON("" << "A").firstElement(),
                                                     BSONElementHasher::DEFAULT_HASH_SEED)),
             BSON("a.x" << 100 << "b.y"
-                       << BSONElementHasher::hash64(BSON(""
-                                                         << "A")
-                                                        .firstElement(),
+                       << BSONElementHasher::hash64(BSON("" << "A").firstElement(),
                                                     BSONElementHasher::DEFAULT_HASH_SEED))}};
 
     // 'chunkSplitInfoRangeSharding1' makes the collection have the following chunks:
@@ -457,11 +453,10 @@ protected:
     // {a: MinKey} -> {a: -4611686018427387902LL}
     // {a: -4611686018427387902LL} -> {a: 4611686018427387902LL}
     // {a: -4611686018427387902LL} -> {a: MaxKey}
-    const ChunkSplitInfo chunkSplitInfoHashedSharding2{ShardKeyPattern{BSON("a"
-                                                                            << "hashed")},
-                                                       std::vector<BSONObj>{
-                                                           BSON("a" << -4611686018427387902LL),
-                                                           BSON("a" << 4611686018427387902LL)}};
+    const ChunkSplitInfo chunkSplitInfoHashedSharding2{
+        ShardKeyPattern{BSON("a" << "hashed")},
+        std::vector<BSONObj>{BSON("a" << -4611686018427387902LL),
+                             BSON("a" << 4611686018427387902LL)}};
 
     const BSONObj emptyCollation = {};
     const BSONObj simpleCollation = CollationSpec::kSimpleSpec;
@@ -712,12 +707,8 @@ TEST_F(ReadDistributionFilterByShardKeyEqualityTest, ShardKeyEqualityOrdered) {
                                                    << "A"),
                                         BSON("a" << BSON("x" << 0) << "b.y"
                                                  << "A"),
-                                        BSON("a" << BSON("x" << 0) << "b"
-                                                 << BSON("y"
-                                                         << "A")),
-                                        BSON("a" << BSON("x" << 0) << "b"
-                                                 << BSON("y"
-                                                         << "A"))};
+                                        BSON("a" << BSON("x" << 0) << "b" << BSON("y" << "A")),
+                                        BSON("a" << BSON("x" << 0) << "b" << BSON("y" << "A"))};
     auto numByRange = std::vector<int64_t>({0, 1, 0});
     auto hasSimpleCollation = true;
     auto hasCollatableType = true;
@@ -733,9 +724,8 @@ TEST_F(ReadDistributionFilterByShardKeyEqualityTest, ShardKeyEqualityOrdered) {
 
 TEST_F(ReadDistributionFilterByShardKeyEqualityTest, ShardKeyEqualityNotOrdered) {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
-    auto filter = BSON("b.y"
-                       << "A"
-                       << "a.x" << 0);
+    auto filter = BSON("b.y" << "A"
+                             << "a.x" << 0);
     auto numByRange = std::vector<int64_t>({0, 1, 0});
     auto hasSimpleCollation = true;
     auto hasCollatableType = true;
@@ -967,10 +957,9 @@ TEST_F(ReadDistributionFilterByShardKeyEqualityTest, ShardKeyEqualityHashed) {
 
 TEST_F(ReadDistributionFilterByShardKeyEqualityTest, ShardKeyEqualityExpressionWithLetParameters) {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
-    auto filter = BSON("$expr" << BSON("$and" << BSON_ARRAY(BSON("$eq" << BSON_ARRAY("$a.x"
-                                                                                     << "$$value"))
-                                                            << BSON("$eq" << BSON_ARRAY("$b.y"
-                                                                                        << "A")))));
+    auto filter =
+        BSON("$expr" << BSON("$and" << BSON_ARRAY(BSON("$eq" << BSON_ARRAY("$a.x" << "$$value"))
+                                                  << BSON("$eq" << BSON_ARRAY("$b.y" << "A")))));
     auto collation = BSONObj();
     auto letParameters = BSON("value" << 100);
 
@@ -1054,10 +1043,9 @@ TEST_F(ReadDistributionFilterByShardKeyRangeTest, ShardKeyPrefixRangeNoMinOrMaxK
 TEST_F(ReadDistributionFilterByShardKeyRangeTest, FullShardKeyRange) {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     auto filter = BSON("a.x" << BSON("$gte" << -4 << "$lt" << 4) << "b.y"
-                             << BSON("$gte"
-                                     << "A"
-                                     << "$lt"
-                                     << "Z"));
+                             << BSON("$gte" << "A"
+                                            << "$lt"
+                                            << "Z"));
     auto numByRange = std::vector<int64_t>({0, 1, 0});
     assertTargetMetrics(targeter,
                         makeSampledReadQueryDocument(getRandomSampledReadCommandName(), filter),
@@ -1094,8 +1082,7 @@ protected:
 
 TEST_F(ReadDistributionNotFilterByShardKeyTest, ShardKeySuffixEquality) {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
-    auto filter = BSON("b.y"
-                       << "A");
+    auto filter = BSON("b.y" << "A");
     assertTargetMetrics(targeter,
                         makeSampledReadQueryDocument(getRandomSampledReadCommandName(), filter));
 }
@@ -1134,10 +1121,9 @@ TEST_F(ReadDistributionNotFilterByShardKeyTest, ShardKeyPrefixEqualityDotted) {
 TEST_F(ReadDistributionNotFilterByShardKeyTest, RuntimeConstants) {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     auto filter = BSON(
-        "$expr" << BSON("$and" << BSON_ARRAY(BSON("$eq" << BSON_ARRAY("$ts"
-                                                                      << "$$NOW"))
-                                             << BSON("$eq" << BSON_ARRAY("$clusterTime"
-                                                                         << "$$CLUSTER_TIME")))));
+        "$expr" << BSON("$and" << BSON_ARRAY(
+                            BSON("$eq" << BSON_ARRAY("$ts" << "$$NOW"))
+                            << BSON("$eq" << BSON_ARRAY("$clusterTime" << "$$CLUSTER_TIME")))));
     assertTargetMetrics(targeter,
                         makeSampledReadQueryDocument(getRandomSampledReadCommandName(), filter));
 }
@@ -1237,12 +1223,8 @@ TEST_F(WriteDistributionFilterByShardKeyEqualityTest, ShardKeyEqualityOrdered) {
                                                    << "A"),
                                         BSON("a" << BSON("x" << 0) << "b.y"
                                                  << "A"),
-                                        BSON("a" << BSON("x" << 0) << "b"
-                                                 << BSON("y"
-                                                         << "A")),
-                                        BSON("a" << BSON("x" << 0) << "b"
-                                                 << BSON("y"
-                                                         << "A"))};
+                                        BSON("a" << BSON("x" << 0) << "b" << BSON("y" << "A")),
+                                        BSON("a" << BSON("x" << 0) << "b" << BSON("y" << "A"))};
     auto updateMod = BSON("$set" << BSON("c" << -100));
     auto numByRange = std::vector<int64_t>({0, 1, 0});
     auto hasSimpleCollation = true;
@@ -1279,9 +1261,8 @@ TEST_F(WriteDistributionFilterByShardKeyEqualityTest, ShardKeyEqualityOrdered) {
 
 TEST_F(WriteDistributionFilterByShardKeyEqualityTest, ShardKeyEqualityNotOrdered) {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
-    auto filter = BSON("b.y"
-                       << "A"
-                       << "a.x" << 0);
+    auto filter = BSON("b.y" << "A"
+                             << "a.x" << 0);
     auto updateMod = BSON("$set" << BSON("c" << 0));
     auto numByRange = std::vector<int64_t>({0, 1, 0});
     auto hasSimpleCollation = true;
@@ -1678,10 +1659,9 @@ TEST_F(WriteDistributionFilterByShardKeyEqualityTest, ShardKeyEqualitySuffixFiel
 
 TEST_F(WriteDistributionFilterByShardKeyEqualityTest, ShardKeyEqualityExpressionWithLetParameters) {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
-    auto filter = BSON("$expr" << BSON("$and" << BSON_ARRAY(BSON("$eq" << BSON_ARRAY("$a.x"
-                                                                                     << "$$value"))
-                                                            << BSON("$eq" << BSON_ARRAY("$b.y"
-                                                                                        << "A")))));
+    auto filter =
+        BSON("$expr" << BSON("$and" << BSON_ARRAY(BSON("$eq" << BSON_ARRAY("$a.x" << "$$value"))
+                                                  << BSON("$eq" << BSON_ARRAY("$b.y" << "A")))));
     auto updateMod = BSON("$set" << BSON("c" << 100));
     auto collation = BSONObj();
     auto letParameters = BSON("value" << 100);
@@ -1915,10 +1895,9 @@ TEST_F(WriteDistributionFilterByShardKeyRangeTest, ShardKeyPrefixRangeNoMinOrMax
 TEST_F(WriteDistributionFilterByShardKeyRangeTest, FullShardKeyRange) {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     auto filter = BSON("a.x" << BSON("$gte" << -4 << "$lt" << 4) << "b.y"
-                             << BSON("$gte"
-                                     << "A"
-                                     << "$lt"
-                                     << "Z"));
+                             << BSON("$gte" << "A"
+                                            << "$lt"
+                                            << "Z"));
     auto updateMod = BSON("$set" << BSON("c" << 4));
     auto numByRange = std::vector<int64_t>({0, 1, 0});
     for (auto& multi : {true, false}) {
@@ -2012,10 +1991,7 @@ protected:
 TEST_F(WriteDistributionFilterByShardKeyRangeReplacementUpdateTest, NotUpsert) {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     auto filter = BSON("a.x" << BSON("$lt" << 0) << "_id" << 0);
-    auto updateMod = BSON("a" << BSON("x" << 0) << "b"
-                              << BSON("y"
-                                      << "A")
-                              << "c" << 0);
+    auto updateMod = BSON("a" << BSON("x" << 0) << "b" << BSON("y" << "A") << "c" << 0);
 
     WriteMetrics metrics;
     metrics.numSingleShard = 1;
@@ -2047,8 +2023,7 @@ TEST_F(WriteDistributionFilterByShardKeyRangeReplacementUpdateTest, NotUpsertEve
 TEST_F(WriteDistributionFilterByShardKeyRangeReplacementUpdateTest, NotUpsertPrefixFieldIsNull) {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     auto filter = BSON("a.x" << BSON("$lt" << 0) << "_id" << 0);
-    auto updateMod = BSON("b" << BSON("y"
-                                      << "A"));
+    auto updateMod = BSON("b" << BSON("y" << "A"));
 
     WriteMetrics metrics;
     metrics.numSingleShard = 1;
@@ -2080,10 +2055,7 @@ TEST_F(WriteDistributionFilterByShardKeyRangeReplacementUpdateTest, NotUpsertSuf
 TEST_F(WriteDistributionFilterByShardKeyRangeReplacementUpdateTest, NonUpsertNotExactIdQuery) {
     auto runTest = [&](const BSONObj& filter, const BSONObj& collation = BSONObj()) {
         auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
-        auto updateMod = BSON("a" << BSON("x" << 0) << "b"
-                                  << BSON("y"
-                                          << "A")
-                                  << "c" << 0);
+        auto updateMod = BSON("a" << BSON("x" << 0) << "b" << BSON("y" << "A") << "c" << 0);
 
         WriteMetrics metrics;
         metrics.numMultiShard = 1;
@@ -2109,10 +2081,7 @@ TEST_F(WriteDistributionFilterByShardKeyRangeReplacementUpdateTest, NonUpsertNot
 TEST_F(WriteDistributionFilterByShardKeyRangeReplacementUpdateTest, Upsert) {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     auto filter = BSON("a.x" << BSON("$lt" << 0));
-    auto updateMod = BSON("a" << BSON("x" << 0) << "b"
-                              << BSON("y"
-                                      << "A")
-                              << "c" << 0);
+    auto updateMod = BSON("a" << BSON("x" << 0) << "b" << BSON("y" << "A") << "c" << 0);
 
     WriteMetrics metrics;
     metrics.numMultiShard = 1;
@@ -2182,8 +2151,7 @@ protected:
 
 TEST_F(WriteDistributionNotFilterByShardKeyTest, ShardKeySuffixEquality) {
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
-    auto filter = BSON("b.y"
-                       << "A");
+    auto filter = BSON("b.y" << "A");
     auto updateMod = BSON("$set" << BSON("c" << 0));
     for (auto& multi : {true, false}) {
         assertTargetMetrics(
@@ -2290,10 +2258,8 @@ TEST_F(WriteDistributionNotFilterByShardKeyReplacementUpdateTest, NotUpsert) {
 
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     auto filter = BSON("_id" << 0);
-    auto updateMod = BSON("_id" << 0 << "a" << BSON("x" << 0) << "b"
-                                << BSON("y"
-                                        << "A")
-                                << "c" << 0);
+    auto updateMod =
+        BSON("_id" << 0 << "a" << BSON("x" << 0) << "b" << BSON("y" << "A") << "c" << 0);
     auto numByRange = std::vector<int64_t>({0, 1, 0});
     assertTargetMetrics(targeter,
                         makeSampledUpdateQueryDocument(filter, updateMod, false /* upsert */),
@@ -2316,10 +2282,8 @@ TEST_F(WriteDistributionNotFilterByShardKeyReplacementUpdateTest, Upsert) {
 
     auto targeter = makeCollectionRoutingInfoTargeter(chunkSplitInfoRangeSharding0);
     auto filter = BSON("_id" << 0);
-    auto updateMod = BSON("_id" << 0 << "a" << BSON("x" << 0) << "b"
-                                << BSON("y"
-                                        << "A")
-                                << "c" << 0);
+    auto updateMod =
+        BSON("_id" << 0 << "a" << BSON("x" << 0) << "b" << BSON("y" << "A") << "c" << 0);
     assertTargetMetrics(targeter,
                         makeSampledUpdateQueryDocument(filter, updateMod, true /* upsert */));
     assertTargetMetrics(

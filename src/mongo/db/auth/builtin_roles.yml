@@ -41,6 +41,7 @@ roles:
           - listCollections
           - listIndexes
           - listSearchIndexes
+          - performRawDataOperations
           - planCacheRead
       - matchType: exact_namespace
         collection: "system.js"
@@ -255,11 +256,11 @@ roles:
           - hostInfo
           - listClusterCatalog
           - listDatabases
+          - listExtensions # clusterManager gets this also
           - listSampledQueries
           - listSessions # clusterManager gets this also
           - listShards # clusterManager gets this also
           - netstat
-          - operationMetrics
           - replSetGetConfig # clusterManager gets this also
           - replSetGetStatus # clusterManager gets this also
           - serverStatus
@@ -355,6 +356,7 @@ roles:
           - resync # hostManager gets this also
           - addShard
           - removeShard
+          - listExtensions # clusterMonitor gets this also
           - listSessions # clusterMonitor gets this also
           - listShards # clusterMonitor gets this also
           - flushRouterConfig # hostManager gets this also
@@ -364,8 +366,6 @@ roles:
           - setFeatureCompatibilityVersion
           - setClusterParameter
           - getClusterParameter
-          - setChangeStreamState
-          - getChangeStreamState
           - querySettings
           - checkMetadataConsistency
           - transitionFromDedicatedConfigServer
@@ -449,9 +449,11 @@ roles:
       - matchType: any_normal
         actions:
           - find
+          - performRawDataOperations
       - matchType: any_system_buckets
         actions:
           - find
+          - performRawDataOperations
       - matchType: cluster
         actions:
           - getParameter
@@ -505,6 +507,7 @@ roles:
       - matchType: cluster
         actions:
           - appendOplogNote # For BRS
+          - readBackupFile # For oplog based migrations
           - serverStatus # For push based initial sync
           - setUserWriteBlockMode # For C2C replication
       - matchType: exact_namespace
@@ -536,7 +539,10 @@ roles:
           - createSearchIndexes
           - dropCollection
           - insert
+          - performRawDataOperations
           - updateSearchIndex
+          - containerInsert
+          - containerDelete
       - matchType: database
         db: "config"
         actions: *restoreRoleWriteActions
@@ -641,6 +647,24 @@ roles:
       - matchType: cluster
         actions:
           - issueDirectShardOperations
+
+  # PREVIEW role for performing internal search operations in 8.1 .
+  # The privileges defined for this role may be further restricted
+  #  without warning in future releases.
+  # TODO: SPM-4133
+  searchCoordinator:
+    adminOnly: true
+    roles:
+      - clusterMonitor
+      - directShardOperations
+      - readAnyDatabase
+    privileges:
+      - matchType: database
+        db: "__mdb_internal_search"
+        actions: *readWriteRoleActions
+      - matchType: cluster
+        actions:
+          - bypassDefaultMaxTimeMS
 
   # Builtin role 'admin.__system' has its privileges special cased in builtin_roles.tpl.cpp
   __system:

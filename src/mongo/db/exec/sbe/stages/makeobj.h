@@ -29,6 +29,19 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/exec/plan_stats.h"
+#include "mongo/db/exec/sbe/stages/plan_stats.h"
+#include "mongo/db/exec/sbe/stages/stages.h"
+#include "mongo/db/exec/sbe/util/debug_print.h"
+#include "mongo/db/exec/sbe/values/slot.h"
+#include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/string_listset.h"
+
 #include <cstddef>
 #include <limits>
 #include <memory>
@@ -38,18 +51,6 @@
 
 #include <absl/container/inlined_vector.h>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/exec/sbe/stages/plan_stats.h"
-#include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/exec/sbe/util/debug_print.h"
-#include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/pipeline/dependencies.h"
-#include "mongo/db/query/stage_types.h"
-#include "mongo/util/string_listset.h"
 
 namespace mongo::sbe {
 enum class MakeObjFieldBehavior { drop, keep };
@@ -147,9 +148,13 @@ public:
     size_t estimateCompileTimeSize() const final;
 
 protected:
-    void doSaveState(bool relinquishCursor) final;
+    void doSaveState() final;
     bool shouldOptimizeSaveState(size_t) const final {
         return true;
+    }
+
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {
+        return;
     }
 
 private:

@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -40,17 +38,18 @@
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/fsync_locked.h"
+#include "mongo/db/commands/fsync.h"
 #include "mongo/db/commands/query_cmd/current_op_common.h"
 #include "mongo/db/commands/query_cmd/run_aggregate.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
-#include "mongo/db/pipeline/aggregation_request_helper.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/rpc/op_msg_rpc_impls.h"
 #include "mongo/util/serialization_context.h"
+
+#include <utility>
 
 namespace mongo {
 
@@ -83,7 +82,7 @@ public:
 
     StatusWith<CursorResponse> runAggregation(OperationContext* opCtx,
                                               AggregateCommandRequest& request) const final {
-        auto aggCmdObj = aggregation_request_helper::serializeToCommandObj(request);
+        auto aggCmdObj = request.toBSON();
 
         rpc::OpMsgReplyBuilder replyBuilder;
 
@@ -94,8 +93,13 @@ public:
                           ActionType::inprog)};
         }
 
-        auto status = runAggregate(
-            opCtx, request, {request}, std::move(aggCmdObj), privileges, &replyBuilder);
+        auto status = runAggregate(opCtx,
+                                   request,
+                                   {request},
+                                   std::move(aggCmdObj),
+                                   privileges,
+                                   boost::none, /* verbosity */
+                                   &replyBuilder);
 
         if (!status.isOK()) {
             return status;

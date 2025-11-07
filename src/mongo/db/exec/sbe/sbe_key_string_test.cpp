@@ -27,18 +27,6 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <memory>
-#include <ostream>
-#include <queue>
-#include <string>
-#include <tuple>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -56,12 +44,23 @@
 #include "mongo/db/exec/sbe/stages/co_scan.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/query/stage_types.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/platform/decimal128.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/time_support.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <ostream>
+#include <queue>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 namespace mongo::sbe {
 
@@ -188,15 +187,9 @@ TEST_F(SBEKeyStringTest, Basic) {
 
             builder.reset();
             keyStringValues.resize(size);
-            auto keySize = static_cast<int32_t>(key_string::getKeySize(
-                keyString.getBuffer(), keyString.getSize(), ordering, keyString.getVersion()));
-            auto b = keyString.getTypeBitsView();
-            SortedDataKeyValueView view{keyString.getBuffer(),
-                                        keySize,
-                                        keyString.getBuffer() + keySize,
-                                        static_cast<int32_t>(keyString.getSize() - keySize),
-                                        b.data(),
-                                        static_cast<int32_t>(b.size()),
+            SortedDataKeyValueView view{keyString.getView(),
+                                        keyString.getRecordIdView(),
+                                        keyString.getTypeBitsView(),
                                         keyString.getVersion(),
                                         true};
             readKeyStringValueIntoAccessors(view, ordering, &builder, &keyStringValues);
@@ -218,7 +211,7 @@ TEST_F(SBEKeyStringTest, Basic) {
     ASSERT(keyStringQueue.empty());
 }
 
-TEST(SBEKeyStringTest, KeyComponentInclusion) {
+TEST(SimpleSBEKeyStringTest, KeyComponentInclusion) {
     key_string::Builder keyStringBuilder(key_string::Version::V1, key_string::ALL_ASCENDING);
     keyStringBuilder.appendNumberLong(12345);  // Included
     keyStringBuilder.appendString("I've information vegetable, animal, and mineral"_sd);
@@ -234,17 +227,11 @@ TEST(SBEKeyStringTest, KeyComponentInclusion) {
     std::vector<value::OwnedValueAccessor> accessors;
     accessors.resize(2);
 
-    auto keySize = static_cast<int32_t>(key_string::getKeySize(keyStringBuilder.getBuffer(),
-                                                               keyStringBuilder.getSize(),
-                                                               key_string::ALL_ASCENDING,
-                                                               keyStringBuilder.version));
-    auto b = keyStringBuilder.getTypeBits();
-    SortedDataKeyValueView view{keyStringBuilder.getBuffer(),
-                                keySize,
-                                keyStringBuilder.getBuffer() + keySize,
-                                static_cast<int32_t>(keyStringBuilder.getSize() - keySize),
-                                b.getBuffer(),
-                                b.getSize(),
+    auto keySize = key_string::getKeySize(
+        keyStringBuilder.getView(), key_string::ALL_ASCENDING, keyStringBuilder.version);
+    SortedDataKeyValueView view{keyStringBuilder.getView(),
+                                keyStringBuilder.getView().subspan(keySize),
+                                keyStringBuilder.getTypeBits().getView(),
                                 keyStringBuilder.version,
                                 true};
     BufBuilder builder;

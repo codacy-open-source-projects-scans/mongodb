@@ -29,13 +29,16 @@
 
 #pragma once
 
-#include <absl/container/inlined_vector.h>
-#include <scoped_allocator>
-
+#include "mongo/util/modules.h"
 #include "mongo/util/tracking/allocator.h"
 #include "mongo/util/tracking/context.h"
 
-namespace mongo::tracking {
+#include <scoped_allocator>
+
+#include <absl/container/inlined_vector.h>
+
+namespace MONGO_MOD_PUB mongo {
+namespace tracking {
 
 template <class T, std::size_t N>
 using inlined_vector = absl::InlinedVector<T, N, std::scoped_allocator_adaptor<Allocator<T>>>;
@@ -45,4 +48,5 @@ inlined_vector<T, N> make_inlined_vector(Context& Context) {
     return inlined_vector<T, N>(Context.makeAllocator<T>());
 }
 
-}  // namespace mongo::tracking
+}  // namespace tracking
+}  // namespace MONGO_MOD_PUB mongo

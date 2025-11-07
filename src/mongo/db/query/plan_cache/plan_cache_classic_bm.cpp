@@ -26,15 +26,15 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#include <benchmark/benchmark.h>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/catalog/collection_mock.h"
-#include "mongo/db/catalog/index_catalog_mock.h"
-#include "mongo/db/exec/working_set.h"
-#include "mongo/db/query/classic_runtime_planner/planner_interface.h"
-#include "mongo/db/query/index_entry.h"
+#include "mongo/db/exec/classic/working_set.h"
+#include "mongo/db/exec/runtime_planners/classic_runtime_planner/planner_interface.h"
+#include "mongo/db/local_catalog/collection_mock.h"
+#include "mongo/db/local_catalog/index_catalog_mock.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role_mock.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
 #include "mongo/db/query/plan_cache/plan_cache_key_factory.h"
@@ -43,7 +43,10 @@
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_planner_test_fixture.h"
 #include "mongo/db/query/query_test_service_context.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/unittest/unittest.h"
+
+#include <benchmark/benchmark.h>
 
 namespace mongo {
 
@@ -259,7 +262,7 @@ std::unique_ptr<FindCommandRequest> makeFindFromBmParams(
 IndexEntry createIndexEntry(BSONObj keyPattern, const std::string& indexName) {
     return IndexEntry(keyPattern,
                       IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                      IndexDescriptor::kLatestIndexVersion,
+                      IndexConfig::kLatestIndexVersion,
                       false,
                       {},
                       {},
@@ -316,7 +319,8 @@ std::unique_ptr<QueryPlannerParams> extractFromBmParams(
 template <typename Query>
 void BM_PlanCacheClassic(benchmark::State& state) {
     PlanCacheClassicBenchmarkParameters bmParams(state);
-
+    RAIIServerParameterControllerForTest truncateFeatureFlag{
+        "internalQueryPlannerEnableSortIndexIntersection", true};
     QueryTestServiceContext serviceContext;
     auto opCtx = serviceContext.makeOperationContext();
     const auto yieldPolicy = PlanYieldPolicy::YieldPolicy::YIELD_AUTO;
@@ -363,8 +367,12 @@ void BM_PlanCacheClassic(benchmark::State& state) {
 
     auto collection =
         std::make_shared<CollectionMock>(UUID::gen(), kNss, std::make_unique<IndexCatalogMock>());
-    auto collectionPtr = CollectionPtr(collection.get());
-    auto collectionsAccessor = MultipleCollectionAccessor(collectionPtr);
+    // The initialization of the CollectionPtr is SAFE. The lifetime of the Mocked Collection
+    // instance is managed by the test and guaranteed to be valid for the entire duration of the
+    // test.
+    const auto collectionAcquisition = shard_role_mock::acquireCollectionMocked(
+        opCtx.get(), kNss, CollectionPtr::CollectionPtr_UNSAFE(collection.get()));
+    auto collectionsAccessor = MultipleCollectionAccessor(collectionAcquisition);
 
     // If there is an index specified, add it to the IndexCatalogMock.
     if (bmParams.index == kSingleFieldIndex || bmParams.index == kTwoFieldCompoundIndex ||
@@ -400,7 +408,7 @@ void BM_PlanCacheClassic(benchmark::State& state) {
     auto planCache =
         CollectionQueryInfo::get(collectionsAccessor.getMainCollection()).getPlanCache();
     auto planCacheKey = plan_cache_key_factory::make<PlanCacheKey>(
-        *cq.get(), collectionsAccessor.getMainCollection());
+        *cq.get(), collectionsAccessor.getMainCollectionAcquisition());
 
     // At first, there is no entry for the plan cache key.
     ASSERT_EQ(planCache->get(planCacheKey).state, PlanCache::CacheEntryState::kNotPresent);

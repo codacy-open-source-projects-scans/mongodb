@@ -28,19 +28,10 @@
  */
 
 
-#include <algorithm>
-#include <benchmark/benchmark.h>
-#include <iostream>
-#include <string>
-#include <vector>
-
 #include "mongo/base/initializer.h"
 #include "mongo/base/status.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/unittest/benchmark_options_gen.h"
 #include "mongo/unittest/log_test.h"
 #include "mongo/util/exit_code.h"
@@ -49,6 +40,13 @@
 #include "mongo/util/options_parser/options_parser.h"
 #include "mongo/util/options_parser/value.h"
 #include "mongo/util/signal_handlers_synchronous.h"
+
+#include <algorithm>
+#include <iostream>
+#include <string>
+#include <vector>
+
+#include <benchmark/benchmark.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 

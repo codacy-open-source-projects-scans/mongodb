@@ -27,11 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <map>
-#include <memory>
-#include <ratio>
-#include <utility>
+#include "mongo/db/repl/reporter.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -40,7 +36,6 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/baton.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/repl/reporter.h"
 #include "mongo/db/repl/update_position_args.h"
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_mock.h"
@@ -49,34 +44,27 @@
 #include "mongo/executor/task_executor_test_fixture.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
 #include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/task_executor_proxy.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <map>
+#include <memory>
+#include <ratio>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
 
 namespace {
 
 using namespace mongo;
 using namespace mongo::repl;
-using executor::RemoteCommandRequest;
 using executor::RemoteCommandResponse;
 
 class MockProgressManager {
 public:
     void updateMap(int memberId, const OpTime& lastDurableOpTime, const OpTime& lastAppliedOpTime) {
         _progressMap[memberId] = ProgressInfo(lastDurableOpTime, lastAppliedOpTime);
-    }
-
-    void clear() {
-        _progressMap.clear();
-    }
-
-    long long getConfigVersion() const {
-        return _configVersion;
-    }
-
-    void setConfigVersion(long long configVersion) {
-        _configVersion = configVersion;
     }
 
     StatusWith<BSONObj> prepareReplSetUpdatePositionCommand() {

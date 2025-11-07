@@ -4,10 +4,7 @@
  *
  * @tags: [
  *  requires_fcv_80,
- *  featureFlagReshardingImprovements,
  *  featureFlagUnshardCollection,
- *  # TODO (SERVER-87812) Remove multiversion_incompatible tag
- *  multiversion_incompatible
  * ]
  */
 import {DiscoverTopology} from "jstests/libs/discover_topology.js";
@@ -31,8 +28,10 @@ const mongos = sourceCollection.getMongo();
 const topology = DiscoverTopology.findConnectedNodes(mongos);
 const donor = new Mongo(topology.shards[donorShardNames[0]].primary);
 
-const reshardingPauseDonorBeforeCatalogCacheRefreshFailpoint =
-    configureFailPoint(donor, "reshardingPauseDonorBeforeCatalogCacheRefresh");
+const reshardingPauseDonorBeforeCatalogCacheRefreshFailpoint = configureFailPoint(
+    donor,
+    "reshardingPauseDonorBeforeCatalogCacheRefresh",
+);
 
 // We trigger a refresh to make the catalog cache track the routing info for the temporary
 // resharding namespace as unsharded because the collection won't exist yet.

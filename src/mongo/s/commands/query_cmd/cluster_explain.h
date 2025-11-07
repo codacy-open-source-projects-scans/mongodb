@@ -29,16 +29,16 @@
 
 #pragma once
 
-#include <cstddef>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/s/async_requests_sender.h"
+
+#include <cstddef>
+#include <string>
+#include <vector>
 
 namespace mongo {
 
@@ -87,7 +87,9 @@ public:
         const char* mongosStageName,
         long long millisElapsed,
         const BSONObj& command,
-        BSONObjBuilder* out);
+        BSONObjBuilder* out,
+        boost::optional<int64_t> limit = boost::none,
+        boost::optional<int64_t> skip = boost::none);
 
 
     //
@@ -129,7 +131,9 @@ private:
     static void buildExecStats(const std::vector<AsyncRequestsSender::Response>& shardResponses,
                                const char* mongosStageName,
                                long long millisElapsed,
-                               BSONObjBuilder* out);
+                               BSONObjBuilder* out,
+                               boost::optional<int64_t> limit,
+                               boost::optional<int64_t> skip);
 };
 
 }  // namespace mongo

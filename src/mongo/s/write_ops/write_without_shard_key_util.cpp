@@ -29,23 +29,21 @@
 
 #include "mongo/s/write_ops/write_without_shard_key_util.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/smart_ptr.hpp>
-#include <memory>
-#include <string>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/mutable/document.h"
 #include "mongo/db/basic_types.h"
+#include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/field_ref_set.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
+#include "mongo/db/global_catalog/shard_key_pattern_query_util.h"
+#include "mongo/db/global_catalog/type_collection_common_types_gen.h"
+#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collation_index_key.h"
@@ -53,35 +51,40 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
-#include "mongo/db/resource_yielder.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
 #include "mongo/db/timeseries/timeseries_write_util.h"
+#include "mongo/db/timeseries/write_ops/timeseries_write_ops_utils.h"
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/db/update/update_driver.h"
 #include "mongo/db/update/update_util.h"
+#include "mongo/db/version_context.h"
 #include "mongo/executor/inline_executor.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/collection_routing_info_targeter.h"
-#include "mongo/s/grid.h"
+#include "mongo/rpc/write_concern_error_detail.h"
 #include "mongo/s/request_types/cluster_commands_without_shard_key_gen.h"
-#include "mongo/s/shard_key_pattern_query_util.h"
 #include "mongo/s/transaction_router_resource_yielder.h"
-#include "mongo/s/type_collection_common_types_gen.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/future.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/out_of_line_executor.h"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -128,14 +131,12 @@ std::pair<BSONObj, BSONObj> generateUpsertDocument(
         return {upsertDoc, BSONObj()};
     }
 
-    tassert(7777500,
-            "Expected timeseries buckets collection namespace",
-            updateRequest.getNamespaceString().isTimeseriesBucketsCollection());
-    auto upsertBucketObj = timeseries::makeBucketDocument(std::vector{upsertDoc},
-                                                          updateRequest.getNamespaceString(),
-                                                          collectionUUID,
-                                                          *timeseriesOptions,
-                                                          comparator);
+    auto upsertBucketObj =
+        timeseries::write_ops::makeBucketDocument(std::vector{upsertDoc},
+                                                  updateRequest.getNamespaceString(),
+                                                  collectionUUID,
+                                                  *timeseriesOptions,
+                                                  comparator);
     return {upsertBucketObj, upsertDoc};
 }
 
@@ -156,9 +157,9 @@ BSONObj constructUpsertResponse(BatchedCommandResponse& writeRes,
                 0, {replyItem}, NamespaceString::makeBulkWriteNSS(boost::none)),
             0 /* nErrors */,
             0 /* nInserted */,
-            writeRes.getN() /* nMatched */,
+            0 /* nMatched */,
             0 /* nModified */,
-            1 /* nUpserted */,
+            writeRes.getN() /* nUpserted */,
             0 /* nDeleted */);
         reply = bulkWriteReply.toBSON();
     } else if (commandName == write_ops::FindAndModifyCommandRequest::kCommandName ||
@@ -177,7 +178,7 @@ BSONObj constructUpsertResponse(BatchedCommandResponse& writeRes,
         reply = result.toBSON();
     } else {
         write_ops::UpdateCommandReply updateReply = write_ops::UpdateCommandReply::parse(
-            IDLParserContext("upsertWithoutShardKeyResult"), writeRes.toBSON());
+            writeRes.toBSON(), IDLParserContext("upsertWithoutShardKeyResult"));
         write_ops::Upserted upsertedType;
 
         // It is guaranteed that the index of this update is 0 since shards evaluate one
@@ -212,17 +213,19 @@ bool useTwoPhaseProtocol(OperationContext* opCtx,
         uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
 
     // Unsharded collections always target one single shard.
-    if (!cri.cm.isSharded()) {
+    if (!cri.isSharded()) {
         return false;
     }
 
-    auto tsFields = cri.cm.getTimeseriesFields();
+    const auto& cm = cri.getChunkManager();
+
+    auto tsFields = cm.getTimeseriesFields();
 
     // updateOne and deleteOne do not use the two phase protocol for single writes that specify
     // _id in their queries, unless a document is being upserted. An exact _id match requires
     // default collation if the _id value is a collatable type.
     if (isUpdateOrDelete && query.hasField("_id") &&
-        CollectionRoutingInfoTargeter::isExactIdQuery(opCtx, nss, query, collation, cri.cm) &&
+        CollectionRoutingInfoTargeter::isExactIdQuery(opCtx, nss, query, collation, cm) &&
         !isUpsert && !isTimeseriesViewRequest) {
         return false;
     }
@@ -237,12 +240,14 @@ bool useTwoPhaseProtocol(OperationContext* opCtx,
 
     bool arbitraryTimeseriesWritesEnabled =
         feature_flags::gTimeseriesDeletesSupport.isEnabled(
+            VersionContext::getDecoration(opCtx),
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) ||
         feature_flags::gTimeseriesUpdatesSupport.isEnabled(
+            VersionContext::getDecoration(opCtx),
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
     auto shardKey = uassertStatusOK(extractShardKeyFromBasicQueryWithContext(
         expCtx,
-        cri.cm.getShardKeyPattern(),
+        cm.getShardKeyPattern(),
         !isTimeseriesViewRequest
             ? query
             : timeseries::getBucketLevelPredicateForRouting(query,
@@ -261,13 +266,13 @@ bool useTwoPhaseProtocol(OperationContext* opCtx,
             }
             auto collator = uassertStatusOK(
                 CollatorFactoryInterface::get(opCtx->getServiceContext())->makeFromBSON(collation));
-            return CollatorInterface::collatorsMatch(collator.get(), cri.cm.getDefaultCollator());
+            return CollatorInterface::collatorsMatch(collator.get(), cm.getDefaultCollator());
         }();
 
         // If the default collection collation is not used or the default collation is not the
         // simple collation and any field of the shard key is a collatable type, then we will use
         // the two phase write protocol since we cannot target directly to a shard.
-        if ((!hasDefaultCollation || cri.cm.getDefaultCollator()) &&
+        if ((!hasDefaultCollation || cm.getDefaultCollator()) &&
             shardKeyHasCollatableType(shardKey)) {
             return true;
         } else {
@@ -278,9 +283,11 @@ bool useTwoPhaseProtocol(OperationContext* opCtx,
     return true;
 }
 
-StatusWith<ClusterWriteWithoutShardKeyResponse> runTwoPhaseWriteProtocol(OperationContext* opCtx,
-                                                                         NamespaceString nss,
-                                                                         BSONObj cmdObj) {
+StatusWith<ClusterWriteWithoutShardKeyResponse> runTwoPhaseWriteProtocol(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const BSONObj& cmdObj,
+    boost::optional<WriteConcernErrorDetail>& wce) {
     if (opCtx->isRetryableWrite()) {
         tassert(7260900,
                 "Retryable writes must have an explicit stmtId",
@@ -315,7 +322,7 @@ StatusWith<ClusterWriteWithoutShardKeyResponse> runTwoPhaseWriteProtocol(Operati
 
             ClusterQueryWithoutShardKeyResponse queryResponse =
                 ClusterQueryWithoutShardKeyResponse::parseOwned(
-                    IDLParserContext("_clusterQueryWithoutShardKeyResponse"), std::move(queryRes));
+                    std::move(queryRes), IDLParserContext("_clusterQueryWithoutShardKeyResponse"));
 
             // The target document can contain the target document's _id or a generated upsert
             // document. If there's no targetDocument, then no modification needs to be made.
@@ -328,6 +335,8 @@ StatusWith<ClusterWriteWithoutShardKeyResponse> runTwoPhaseWriteProtocol(Operati
                 std::vector<BSONObj> docs;
                 docs.push_back(queryResponse.getTargetDoc().get());
                 write_ops::InsertCommandRequest insertRequest(sharedBlock->nss, docs);
+                // For time-series operations we directly insert the newly generated bucket.
+                insertRequest.setRawData(true);
 
                 // Append "encryptionInformation" if the original command is an encrypted command.
                 boost::optional<EncryptionInformation> encryptionInformation;
@@ -344,7 +353,7 @@ StatusWith<ClusterWriteWithoutShardKeyResponse> runTwoPhaseWriteProtocol(Operati
                     auto bypassEmptyTsReplacementField = sharedBlock->cmdObj.getField(
                         write_ops::WriteCommandRequestBase::kBypassEmptyTsReplacementFieldName);
 
-                    if (bypassEmptyTsReplacementField.type() == BSONType::Bool) {
+                    if (bypassEmptyTsReplacementField.type() == BSONType::boolean) {
                         insertRequest.getWriteCommandRequestBase().setBypassEmptyTsReplacement(
                             bypassEmptyTsReplacementField.Bool());
                     }
@@ -362,8 +371,8 @@ StatusWith<ClusterWriteWithoutShardKeyResponse> runTwoPhaseWriteProtocol(Operati
                     sharedBlock->cmdObj.getBoolField("new"));
 
                 sharedBlock->clusterWriteResponse = ClusterWriteWithoutShardKeyResponse::parseOwned(
-                    IDLParserContext("_clusterWriteWithoutShardKeyResponse"),
-                    std::move(upsertResponse));
+                    std::move(upsertResponse),
+                    IDLParserContext("_clusterWriteWithoutShardKeyResponse"));
             } else {
                 BSONObjBuilder bob(sharedBlock->cmdObj);
                 ClusterWriteWithoutShardKey clusterWriteWithoutShardKeyCommand(
@@ -376,7 +385,7 @@ StatusWith<ClusterWriteWithoutShardKeyResponse> runTwoPhaseWriteProtocol(Operati
                 uassertStatusOK(getStatusFromCommandResult(writeRes));
 
                 sharedBlock->clusterWriteResponse = ClusterWriteWithoutShardKeyResponse::parseOwned(
-                    IDLParserContext("_clusterWriteWithoutShardKeyResponse"), std::move(writeRes));
+                    std::move(writeRes), IDLParserContext("_clusterWriteWithoutShardKeyResponse"));
             }
             uassertStatusOK(
                 getStatusFromWriteCommandReply(sharedBlock->clusterWriteResponse.getResponse()));
@@ -385,6 +394,11 @@ StatusWith<ClusterWriteWithoutShardKeyResponse> runTwoPhaseWriteProtocol(Operati
         });
 
     if (swResult.isOK()) {
+        // Check if 'swResult' contains a 'WriteConcernError', and if so, populate the 'wce' out
+        // variable.
+        if (swResult.getValue().wcError.isValid(nullptr)) {
+            wce.emplace(swResult.getValue().wcError);
+        }
         if (swResult.getValue().getEffectiveStatus().isOK()) {
             return StatusWith<ClusterWriteWithoutShardKeyResponse>(
                 sharedBlock->clusterWriteResponse);

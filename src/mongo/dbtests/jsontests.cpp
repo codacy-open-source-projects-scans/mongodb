@@ -31,15 +31,10 @@
  * Tests for json.{h,cpp} code and BSONObj::jsonString()
  */
 
-#include <boost/property_tree/json_parser.hpp>
-#include <boost/property_tree/ptree.hpp>
-#include <boost/tuple/tuple.hpp>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
-#include <fmt/format.h>
-#include <fmt/printf.h>  // IWYU pragma: keep
 #include <initializer_list>
 #include <limits>
 #include <memory>
@@ -51,12 +46,15 @@
 #include <boost/core/swap.hpp>
 #include <boost/iterator/iterator_facade.hpp>
 #include <boost/move/utility_core.hpp>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/tuple/tuple.hpp>
+#include <fmt/format.h>
+#include <fmt/printf.h>  // IWYU pragma: keep
 // IWYU pragma: no_include "boost/multi_index/detail/bidir_node_iterator.hpp"
 #include <boost/operators.hpp>
 // IWYU pragma: no_include "boost/property_tree/detail/exception_implementation.hpp"
 // IWYU pragma: no_include "boost/property_tree/detail/ptree_implementation.hpp"
-#include <boost/property_tree/ptree_fwd.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bson_validate.h"
@@ -71,16 +69,15 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/decimal128.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <boost/property_tree/ptree_fwd.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -144,7 +141,7 @@ TEST(JsonStringTest, BasicTest) {
 TEST(JsonStringTest, PrettyFormatTest) {
     auto validate = [&](int line, BSONObj obj, bool arr, std::string out) {
         ASSERT_EQUALS(obj.jsonString(ExtendedRelaxedV2_0_0, true, arr), out)
-            << format(FMT_STRING(", line {}"), line);
+            << fmt::format(", line {}", line);
     };
     validate(__LINE__, B().obj(), 0, "{}");
     validate(__LINE__, B{}.obj(), 1, "[]");
@@ -579,10 +576,7 @@ TEST(JsonStringTest, CodeTests) {
 
 TEST(JsonStringTest, CodeWScopeTests) {
     BSONObjBuilder b;
-    b.appendCodeWScope("x",
-                       "function(arg){ var string = \"\\n\"; return x; }",
-                       BSON("x"
-                            << "1"));
+    b.appendCodeWScope("x", "function(arg){ var string = \"\\n\"; return x; }", BSON("x" << "1"));
 
     checkJsonStringEach({{b.done(),
                           "{ \"x\" : "
@@ -833,7 +827,7 @@ TEST(FromJsonTest, DBRefTest) {
          B().append("a", B().append("$ref", "ns").append("$id", OID()).obj()).obj()},
         // DbName
         {R"({ "a" : { "$ref" : "ns", "$id" : "000000000000000000000000", )"
-         R"("$db" : "dbname" } }))",
+         R"("$db" : "dbname" } })",
          B().append("a",
                     B().append("$ref", "ns")
                         .append("$id", "000000000000000000000000")
@@ -883,9 +877,7 @@ TEST(FromJsonTest, BinDataTypes) {
     for (const auto& ts : specs) {
         if (ts.bdt == Column) {
             BSONColumnBuilder cb;
-            cb.append(BSON("a"
-                           << "abc")
-                          .getField("a"));
+            cb.append(BSON("a" << "abc").getField("a"));
             BSONBinData columnData = cb.finalize();
             checkEquivalence(fmt::sprintf(R"({ "a" : { "$binary" : "%s", "$type" : "%02x" } })",
                                           base64::encode(columnData.data, columnData.length),
@@ -1202,9 +1194,9 @@ TEST(FromJsonTest, NumericTypes) {
         for (const auto& json : altReps) {
             checkEquivalence(json, obj);
             BSONObj o = fromjson(json);
-            ASSERT(o["int"].type() == NumberInt);
-            ASSERT(o["long"].type() == NumberLong);
-            ASSERT(o["double"].type() == NumberDouble);
+            ASSERT(o["int"].type() == BSONType::numberInt);
+            ASSERT(o["long"].type() == BSONType::numberLong);
+            ASSERT(o["double"].type() == BSONType::numberDouble);
             ASSERT(o["long"].numberLong() == val.l);
         }
     }
@@ -1257,10 +1249,10 @@ TEST(FromJsonTest, EmbeddedDates) {
     for (const auto& format : formats) {
         const std::string json = fmt::sprintf(format, kMin, kMax);
         BSONObj o = fromjson(json);
-        ASSERT_EQUALS(3, (o["time.valid"].type()));
+        ASSERT_EQUALS(3, stdx::to_underlying(o["time.valid"].type()));
         BSONObj e = o["time.valid"].embeddedObjectUserCheck();
-        ASSERT_EQUALS(9, e["$gt"].type());
-        ASSERT_EQUALS(9, e["$lt"].type());
+        ASSERT_EQUALS(9, stdx::to_underlying(e["$gt"].type()));
+        ASSERT_EQUALS(9, stdx::to_underlying(e["$lt"].type()));
         checkEquivalence(json, bson);
     }
 }

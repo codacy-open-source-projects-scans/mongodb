@@ -29,9 +29,6 @@
 
 #include <algorithm>
 #include <array>
-#include <boost/core/null_deleter.hpp>
-#include <boost/filesystem/operations.hpp>
-#include <boost/log/attributes/value_extraction.hpp>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -47,8 +44,11 @@
 #include <utility>
 #include <vector>
 
+#include <boost/core/null_deleter.hpp>
 #include <boost/exception/exception.hpp>
+#include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
+#include <boost/log/attributes/value_extraction.hpp>
 #include <boost/log/core/core.hpp>
 #include <boost/log/core/record_view.hpp>
 // IWYU pragma: no_include "boost/log/detail/attachable_sstream_buf.hpp"
@@ -60,8 +60,6 @@
 #include <boost/smart_ptr/make_shared_object.hpp>
 #include <boost/smart_ptr/shared_ptr.hpp>
 // IWYU pragma: no_include "boost/system/detail/error_code.hpp"
-#include <boost/thread/exceptions.hpp>
-
 #include "mongo/base/error_extra_info.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
@@ -82,6 +80,7 @@
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/logv2/attributes.h"
 #include "mongo/logv2/component_settings_filter.h"
@@ -94,7 +93,6 @@
 #include "mongo/logv2/plain_formatter.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/process_id.h"
-#include "mongo/s/sharding_state.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/shell/linenoise.h"
 #include "mongo/shell/mongo_main.h"
@@ -128,6 +126,8 @@
 #include "mongo/util/version.h"
 #include "mongo/util/version/releases.h"
 
+#include <boost/thread/exceptions.hpp>
+
 #ifdef MONGO_CONFIG_GRPC
 #include "mongo/transport/grpc/grpc_transport_layer.h"
 #include "mongo/transport/grpc/grpc_transport_layer_impl.h"
@@ -158,14 +158,6 @@ bool gotInterrupted = false;
 bool inMultiLine = false;
 static AtomicWord<bool> atPrompt(false);  // can eval before getting to prompt
 
-const std::string kDefaultMongoHost = "127.0.0.1"s;
-const std::string kDefaultMongoPort = "27017"s;
-const std::string kDefaultMongoURL = "mongodb://"s + kDefaultMongoHost + ":"s + kDefaultMongoPort;
-#ifdef MONGO_CONFIG_GRPC
-const std::string kDefaultMongoGRPCPort = "27021"s;
-const std::string kDefaultMongoGRPCURL =
-    "mongodb://"s + kDefaultMongoHost + ":"s + kDefaultMongoGRPCPort;
-#endif
 
 // Initialize the featureCompatibilityVersion server parameter since the mongo shell does not have a
 // featureCompatibilityVersion document from which to initialize the parameter. The parameter is set
@@ -388,167 +380,6 @@ void setupSignals() {
     signal(SIGINT, quitNicely);
 }
 
-std::string getURIFromArgs(const std::string& arg,
-                           const std::string& host,
-                           const std::string& port) {
-    if (host.empty() && arg.empty() && port.empty()) {
-// Nothing provided, just play the default.
-#ifdef MONGO_CONFIG_GRPC
-        return shellGlobalParams.gRPC ? kDefaultMongoGRPCURL : kDefaultMongoURL;
-#else
-        return kDefaultMongoURL;
-#endif
-    }
-
-    if ((str::startsWith(arg, "mongodb://") || str::startsWith(arg, "mongodb+srv://")) &&
-        host.empty() && port.empty()) {
-        // mongo mongodb://blah
-        return arg;
-    }
-    if ((str::startsWith(host, "mongodb://") || str::startsWith(host, "mongodb+srv://")) &&
-        arg.empty() && port.empty()) {
-        // mongo --host mongodb://blah
-        return host;
-    }
-
-    // We expect a positional arg to be a plain dbname or plain hostname at this point
-    // since we have separate host/port args.
-    if ((arg.find('/') != std::string::npos) && (host.size() || port.size())) {
-        std::cerr << "If a full URI is provided, you cannot also specify --host or --port"
-                  << std::endl;
-        quickExit(ExitCode::badOptions);
-    }
-
-    const auto parseDbHost = [port](const std::string& db, const std::string& host) -> std::string {
-        // Parse --host as a connection string.
-        // e.g. rs0/host0:27000,host1:27001
-        const auto slashPos = host.find('/');
-        const auto hasReplSet = (slashPos > 0) && (slashPos != std::string::npos);
-
-        std::ostringstream ss;
-        ss << "mongodb://";
-
-        // Handle each sub-element of the connection string individually.
-        // Comma separated list of host elements.
-        // Each host element may be:
-        // * /unix/domain.sock
-        // * hostname
-        // * hostname:port
-        // If --port is specified and port is included in connection string,
-        // then they must match exactly.
-        auto start = hasReplSet ? slashPos + 1 : 0;
-        while (start < host.size()) {
-            // Encode each host component.
-            auto end = host.find(',', start);
-            if (end == std::string::npos) {
-                end = host.size();
-            }
-            if ((end - start) == 0) {
-                // Ignore empty components.
-                start = end + 1;
-                continue;
-            }
-
-            const auto hostElem = host.substr(start, end - start);
-            if ((hostElem.find('/') != std::string::npos) && str::endsWith(hostElem, ".sock")) {
-                // Unix domain socket, ignore --port.
-                ss << uriEncode(hostElem);
-
-            } else {
-                auto colon = hostElem.find(':');
-                if ((colon != std::string::npos) &&
-                    (hostElem.find(':', colon + 1) != std::string::npos)) {
-                    // Looks like an IPv6 numeric address.
-                    const auto close = hostElem.find(']');
-                    if ((hostElem[0] == '[') && (close != std::string::npos)) {
-                        // Encapsulated already.
-                        ss << '[' << uriEncode(hostElem.substr(1, close - 1), ":") << ']';
-                        colon = hostElem.find(':', close + 1);
-                    } else {
-                        // Not encapsulated yet.
-                        ss << '[' << uriEncode(hostElem, ":") << ']';
-                        colon = std::string::npos;
-                    }
-                } else if (colon != std::string::npos) {
-                    // Not IPv6 numeric, but does have a port.
-                    ss << uriEncode(hostElem.substr(0, colon));
-                } else {
-                    // Raw hostname/IPv4 without port.
-                    ss << uriEncode(hostElem);
-                }
-
-                if (colon != std::string::npos) {
-                    // Have a port in our host element, verify it.
-                    const auto myport = hostElem.substr(colon + 1);
-                    if (port.size() && (port != myport)) {
-                        std::cerr
-                            << "connection string bears different port than provided by --port"
-                            << std::endl;
-                        quickExit(ExitCode::badOptions);
-                    }
-                    ss << ':' << uriEncode(myport);
-                } else if (port.size()) {
-                    ss << ':' << uriEncode(port);
-                } else {
-#ifdef MONGO_CONFIG_GRPC
-                    ss << ":"
-                       << (shellGlobalParams.gRPC ? kDefaultMongoGRPCPort : kDefaultMongoPort);
-#else
-                    ss << ":" << kDefaultMongoPort;
-#endif
-                }
-            }
-            start = end + 1;
-            if (start < host.size()) {
-                ss << ',';
-            }
-        }
-
-        ss << '/' << uriEncode(db);
-
-        if (hasReplSet) {
-            // Remap included replica set name to URI option
-            ss << "?replicaSet=" << uriEncode(host.substr(0, slashPos));
-        }
-
-        return ss.str();
-    };
-
-    if (host.size()) {
-        // --host provided, treat it as the connect string and get db from positional arg.
-        return parseDbHost(arg, host);
-    } else if (arg.size()) {
-        // --host missing, but we have a potential host/db positional arg.
-        const auto slashPos = arg.find('/');
-        if (slashPos != std::string::npos) {
-            // host/db pair.
-            return parseDbHost(arg.substr(slashPos + 1), arg.substr(0, slashPos));
-        }
-
-        // Compatability formats.
-        // * Any arg with a dot is assumed to be a hostname or IPv4 numeric address.
-        // * Any arg with a colon followed by a digit assumed to be host or IP followed by port.
-        // * Anything else is assumed to be a db.
-
-        if (arg.find('.') != std::string::npos) {
-            // Assume IPv4 or hostnameish.
-            return parseDbHost("test", arg);
-        }
-
-        const auto colonPos = arg.find(':');
-        if ((colonPos != std::string::npos) && ((colonPos + 1) < arg.size()) &&
-            ctype::isDigit(arg[colonPos + 1])) {
-            // Assume IPv4 or hostname with port.
-            return parseDbHost("test", arg);
-        }
-
-        // db, assume localhost.
-        return parseDbHost(arg, "127.0.0.1");
-    }
-
-    // --host empty, position arg empty, fallback on localhost without a dbname.
-    return parseDbHost("", "127.0.0.1");
-}
 
 std::string finishCode(std::string code) {
     while (!shell_utils::isBalanced(code)) {
@@ -580,7 +411,7 @@ bool execPrompt(mongo::Scope& scope, const char* promptFunction, std::string& pr
     std::string execStatement = std::string("__promptWrapper__(") + promptFunction + ");";
     scope.exec("delete __prompt__;", "", false, false, false, 0);
     scope.exec(execStatement, "", false, false, false, 0);
-    if (scope.type("__prompt__") == String) {
+    if (scope.type("__prompt__") == stdx::to_underlying(BSONType::string)) {
         prompt = scope.getString("__prompt__");
         return true;
     }
@@ -595,7 +426,7 @@ bool execPrompt(mongo::Scope& scope, const char* promptFunction, std::string& pr
 static void edit(const std::string& whatToEdit) {
     // EDITOR may be defined in the JavaScript scope or in the environment
     std::string editor;
-    if (shellMainScope->type("EDITOR") == String) {
+    if (shellMainScope->type("EDITOR") == stdx::to_underlying(BSONType::string)) {
         editor = shellMainScope->getString("EDITOR");
     } else {
         static const char* editorFromEnv = getenv("EDITOR");
@@ -622,7 +453,7 @@ static void edit(const std::string& whatToEdit) {
     if (editingVariable) {
         // If "whatToEdit" is undeclared or uninitialized, declare
         int varType = shellMainScope->type(whatToEdit.c_str());
-        if (varType == Undefined) {
+        if (varType == stdx::to_underlying(BSONType::undefined)) {
             shellMainScope->exec("var " + whatToEdit, "(shell)", false, true, false);
         }
 
@@ -749,7 +580,7 @@ bool mechanismRequiresPassword(const MongoURI& uri) {
             auth::kMechanismGSSAPI, auth::kMechanismMongoX509, auth::kMechanismMongoOIDC};
         const std::string& authMechanism = authMechanisms.value();
         for (const auto& mechanism : passwordlessMechanisms) {
-            if (mechanism.toString() == authMechanism) {
+            if (mechanism == authMechanism) {
                 return false;
             }
         }
@@ -830,10 +661,10 @@ int mongo_main(int argc, char* argv[]) {
 
         // Parse the output of getURIFromArgs which will determine if --host passed in a URI
         MongoURI parsedURI;
-        parsedURI =
-            uassertStatusOK(MongoURI::parse(getURIFromArgs(cmdlineURI,
-                                                           str::escape(shellGlobalParams.dbhost),
-                                                           str::escape(shellGlobalParams.port))));
+        parsedURI = uassertStatusOK(MongoURI::parse(
+            mongo::shell_utils::getURIFromArgs(cmdlineURI,
+                                               str::escape(shellGlobalParams.dbhost),
+                                               str::escape(shellGlobalParams.port))));
 
         // TODO: add in all of the relevant shellGlobalParams to parsedURI
         parsedURI.setOptionIfNecessary("compressors"s, shellGlobalParams.networkMessageCompressors);
@@ -841,7 +672,6 @@ int mongo_main(int argc, char* argv[]) {
         parsedURI.setOptionIfNecessary("authSource"s, shellGlobalParams.authenticationDatabase);
         parsedURI.setOptionIfNecessary("gssapiServiceName"s, shellGlobalParams.gssapiServiceName);
         parsedURI.setOptionIfNecessary("gssapiHostName"s, shellGlobalParams.gssapiHostName);
-// TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants
 #ifdef MONGO_CONFIG_GRPC
         parsedURI.setOptionIfNecessary("gRPC"s, shellGlobalParams.gRPC ? "true" : "false");
 #endif
@@ -856,23 +686,24 @@ int mongo_main(int argc, char* argv[]) {
         auto asioLayer = tls[0].get();
 
 #ifdef MONGO_CONFIG_GRPC
-        // If built with gRPC support, the shell will always start an egress gRPC layer in addition
-        // to the asio one. It will decide at runtime during Mongo construction which layer to use
-        // based on the options/URI provided to it.
+        // The shell will start an egress gRPC layer in addition to the asio one if it was
+        // configured to communicate with gRPC. It will decide at runtime during Mongo construction
+        // which layer to use based on the options/URI provided to it.
+        if (shellGlobalParams.gRPC) {
+            // Create the gRPC client metadata.
+            boost::optional<std::string> appname = parsedURI.getAppName();
+            BSONObjBuilder bob;
+            uassertStatusOK(DBClientSession::appendClientMetadata(
+                appname.value_or(MongoURI::kDefaultTestRunnerAppName), &bob));
+            auto metadataDoc = bob.obj();
 
-        // Create the gRPC client metadata.
-        boost::optional<std::string> appname = parsedURI.getAppName();
-        BSONObjBuilder bob;
-        uassertStatusOK(DBClientSession::appendClientMetadata(
-            appname.value_or(MongoURI::kDefaultTestRunnerAppName), &bob));
-        auto metadataDoc = bob.obj();
-
-        // Create the gRPC transport layer.
-        transport::grpc::GRPCTransportLayer::Options grpcOpts;
-        grpcOpts.enableEgress = true;
-        grpcOpts.clientMetadata = metadataDoc.getObjectField(kMetadataDocumentName).getOwned();
-        tls.push_back(std::make_unique<transport::grpc::GRPCTransportLayerImpl>(
-            serviceContext, grpcOpts, nullptr));
+            // Create the gRPC transport layer.
+            transport::grpc::GRPCTransportLayer::Options grpcOpts;
+            grpcOpts.enableEgress = true;
+            grpcOpts.clientMetadata = metadataDoc.getObjectField(kMetadataDocumentName).getOwned();
+            tls.push_back(std::make_unique<transport::grpc::GRPCTransportLayerImpl>(
+                serviceContext, grpcOpts, nullptr));
+        }
 #endif
 
         serviceContext->setTransportLayerManager(
@@ -951,7 +782,6 @@ int mongo_main(int argc, char* argv[]) {
         mongo::ScriptEngine::setup(ExecutionEnvironment::TestRunner);
         mongo::getGlobalScriptEngine()->setJSHeapLimitMB(shellGlobalParams.jsHeapLimitMB);
         mongo::getGlobalScriptEngine()->setScopeInitCallback(mongo::shell_utils::initScope);
-        mongo::getGlobalScriptEngine()->enableJIT(!shellGlobalParams.nojit);
         mongo::getGlobalScriptEngine()->enableJavaScriptProtection(
             shellGlobalParams.javascriptProtection);
 
@@ -1012,6 +842,14 @@ int mongo_main(int argc, char* argv[]) {
                 return kInputFileError;
             }
 
+            // If the test is using the mochalite framework, invoke the runner
+            try {
+                shell_utils::closeMochaStyleTestContext(*shellMainScope);
+            } catch (std::exception&) {
+                std::cout << "Failure detected from Mocha test runner" << std::endl;
+                return kInputFileError;
+            }
+
             // If the test began a GoldenTestContext, end it and compare actual/expected results.
             // NOTE: putting this in ~MongoProgramScope would call it at the end of each load(),
             // but we only want to call it once the original test file finishes.
@@ -1052,7 +890,7 @@ int mongo_main(int argc, char* argv[]) {
                     "function() { return typeof TestData === 'object' && TestData !== null && "
                     "TestData.hasOwnProperty('ignoreChildProcessErrorCode') && "
                     "TestData.ignoreChildProcessErrorCode === true; }"_sd;
-                shellMainScope->invokeSafe(code.rawData(), nullptr, nullptr);
+                shellMainScope->invokeSafe(code.data(), nullptr, nullptr);
                 ignoreChildProcessErrorCode = shellMainScope->getBoolean("__returnValue");
                 auto childProcessErrorCode = mongo::shell_utils::KillMongoProgramInstances();
 
@@ -1086,7 +924,7 @@ int mongo_main(int argc, char* argv[]) {
                     "function() { return typeof TestData === 'object' && TestData !== null && "
                     "TestData.hasOwnProperty('ignoreUnterminatedProcesses') && "
                     "TestData.ignoreUnterminatedProcesses === true; }"_sd;
-                shellMainScope->invokeSafe(code.rawData(), nullptr, nullptr);
+                shellMainScope->invokeSafe(code.data(), nullptr, nullptr);
                 ignoreUnterminatedProcesses = shellMainScope->getBoolean("__returnValue");
 
                 if (!ignoreUnterminatedProcesses) {
@@ -1134,7 +972,7 @@ int mongo_main(int argc, char* argv[]) {
                     "function() { return typeof TestData === 'object' && TestData !== null && "
                     "TestData.hasOwnProperty('cleanUpCoreDumpsFromExpectedCrash') && "
                     "TestData.cleanUpCoreDumpsFromExpectedCrash === true; }"_sd;
-                shellMainScope->invokeSafe(code.rawData(), nullptr, nullptr);
+                shellMainScope->invokeSafe(code.data(), nullptr, nullptr);
                 bool cleanUpCoreDumpsFromExpectedCrash =
                     shellMainScope->getBoolean("__returnValue");
 
@@ -1161,7 +999,7 @@ int mongo_main(int argc, char* argv[]) {
 
         {
             const StringData parallelShellCode = "uncheckedParallelShellPidsString();"_sd;
-            shellMainScope->invokeSafe(parallelShellCode.rawData(), nullptr, nullptr);
+            shellMainScope->invokeSafe(parallelShellCode.data(), nullptr, nullptr);
             std::string ret = shellMainScope->getString("__returnValue");
             if (!ret.empty()) {
                 std::cout << "exiting due to parallel shells with unchecked return values. "
@@ -1266,9 +1104,10 @@ int mongo_main(int argc, char* argv[]) {
                 gotInterrupted = false;
 
                 promptType = scope->type("prompt");
-                if (promptType == String) {
+                if (promptType == stdx::to_underlying(BSONType::string)) {
                     prompt = scope->getString("prompt");
-                } else if ((promptType == Code) && execPrompt(*scope, "prompt", prompt)) {
+                } else if ((promptType == stdx::to_underlying(BSONType::code)) &&
+                           execPrompt(*scope, "prompt", prompt)) {
                 } else if (execPrompt(*scope, "defaultPrompt", prompt)) {
                 } else {
                     prompt = "> ";

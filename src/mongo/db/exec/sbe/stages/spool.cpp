@@ -27,14 +27,12 @@
  *    it in the license file.
  */
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/inlined_vector.h>
-#include <absl/meta/type_traits.h>
+#include "mongo/db/exec/sbe/stages/spool.h"
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
-#include "mongo/db/exec/sbe/stages/spool.h"
 #include "mongo/db/exec/sbe/values/row.h"
+
 
 namespace mongo::sbe {
 SpoolEagerProducerStage::SpoolEagerProducerStage(std::unique_ptr<PlanStage> input,
@@ -195,6 +193,7 @@ SpoolLazyProducerStage::SpoolLazyProducerStage(std::unique_ptr<PlanStage> input,
 }
 
 std::unique_ptr<PlanStage> SpoolLazyProducerStage::clone() const {
+    tassert(1112540, "predicate pointer must not be null", _predicate);
     return std::make_unique<SpoolLazyProducerStage>(_children[0]->clone(),
                                                     _spoolId,
                                                     _vals,
@@ -292,11 +291,7 @@ PlanState SpoolLazyProducerStage::getNext() {
     return trackPlanState(state);
 }
 
-void SpoolLazyProducerStage::doSaveState(bool relinquishCursor) {
-    if (!relinquishCursor) {
-        return;
-    }
-
+void SpoolLazyProducerStage::doSaveState() {
     for (auto& [slot, accessor] : _outAccessors) {
         prepareForYielding(accessor, slotsAccessible());
     }

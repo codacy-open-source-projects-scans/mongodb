@@ -28,22 +28,21 @@
  */
 
 
+#include "mongo/db/wire_version.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/util/bson_extract.h"
+#include "mongo/db/service_context.h"
+#include "mongo/logv2/log.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/str.h"
+
 #include <limits>
 #include <new>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/bson/util/bson_extract.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/wire_version.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/decorable.h"
-#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -108,6 +107,30 @@ std::shared_ptr<const WireSpec::Specification> WireSpec::get() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     fassert(9097914, isInitialized());
     return _spec;
+}
+
+bool WireSpec::isInternalClient() const {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    fassert(8082001, isInitialized());
+    return _spec->isInternalClient;
+}
+
+WireVersionInfo WireSpec::getIncomingExternalClient() const {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    fassert(8082002, isInitialized());
+    return _spec->incomingExternalClient;
+}
+
+WireVersionInfo WireSpec::getIncomingInternalClient() const {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    fassert(8082003, isInitialized());
+    return _spec->incomingInternalClient;
+}
+
+WireVersionInfo WireSpec::getOutgoing() const {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    fassert(8082004, isInitialized());
+    return _spec->outgoing;
 }
 
 namespace wire_version {

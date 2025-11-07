@@ -4,12 +4,14 @@
 //   assumes_no_implicit_collection_creation_after_drop,
 //   requires_capped,
 //   requires_getmore,
+//   # This test relies on query commands returning specific batch-sized responses.
+//   assumes_no_implicit_cursor_exhaustion,
 // ]
 
 // Test attaching maxTimeMS to a getMore command.
-var cmdRes;
-var collName = 'getmore_cmd_maxtimems';
-var coll = db[collName];
+let cmdRes;
+let collName = "getmore_cmd_maxtimems";
+let coll = db[collName];
 coll.drop();
 
 for (var i = 0; i < 10; i++) {

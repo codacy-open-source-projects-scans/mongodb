@@ -6,38 +6,43 @@
 //   does_not_support_stepdowns,
 //   requires_fcv_70,
 //   requires_profiling,
+//   # The test runs getLatestProfileEntry(). The downstream syncing node affects the profiler.
+//   run_getLatestProfilerEntry,
 // ]
 
 import {isLinux} from "jstests/libs/os_helpers.js";
 import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 
-var testDB = db.getSiblingDB("profile_distinct");
+let testDB = db.getSiblingDB("profile_distinct");
 assert.commandWorked(testDB.dropDatabase());
-var conn = testDB.getMongo();
+let conn = testDB.getMongo();
 const collName = jsTestName();
-var coll = testDB.getCollection(collName);
+let coll = testDB.getCollection(collName);
 
 // Don't profile the setFCV command, which could be run during this test in the
 // fcv_upgrade_downgrade_replica_sets_jscore_passthrough suite.
-assert.commandWorked(testDB.setProfilingLevel(
-    1, {filter: {'command.setFeatureCompatibilityVersion': {'$exists': false}}}));
+assert.commandWorked(
+    testDB.setProfilingLevel(1, {filter: {"command.setFeatureCompatibilityVersion": {"$exists": false}}}),
+);
 
 //
 // Confirm metrics for distinct with query.
 //
-var i;
+let i;
 for (i = 0; i < 10; ++i) {
     assert.commandWorked(coll.insert({a: i % 5, b: i}));
 }
 assert.commandWorked(coll.createIndex({b: 1}));
 
 coll.distinct("a", {b: {$gte: 5}}, {collation: {locale: "fr"}});
-var profileObj = getLatestProfilerEntry(testDB);
+let profileObj = getLatestProfilerEntry(testDB);
 
 assert.eq(profileObj.ns, coll.getFullName(), tojson(profileObj));
 assert.eq(profileObj.op, "command", tojson(profileObj));
 assert.eq(profileObj.keysExamined, 5, tojson(profileObj));
 assert.eq(profileObj.docsExamined, 5, tojson(profileObj));
+assert(profileObj.hasOwnProperty("queryHash"), tojson(profileObj));
+assert(profileObj.hasOwnProperty("planCacheKey"), tojson(profileObj));
 assert.eq(profileObj.planSummary, "IXSCAN { b: 1 }", tojson(profileObj));
 assert(profileObj.execStats.hasOwnProperty("stage"), tojson(profileObj));
 assert.eq(profileObj.protocol, "op_msg", tojson(profileObj));

@@ -29,18 +29,17 @@
 
 #pragma once
 
-#include <list>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/document_source_rank_fusion_gen.h"
-#include "mongo/db/pipeline/document_source_rank_fusion_inputs_gen.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
+#include "mongo/util/modules.h"
+
+#include <list>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -77,7 +76,8 @@ public:
     class LiteParsed final : public LiteParsedDocumentSourceNestedPipelines {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
-                                                 const BSONElement& spec);
+                                                 const BSONElement& spec,
+                                                 const LiteParserOptions& options);
 
         LiteParsed(std::string parseTimeName,
                    const NamespaceString& nss,
@@ -90,25 +90,22 @@ public:
                                            bool bypassDocumentValidation) const final {
             return requiredPrivilegesBasic(isMongos, bypassDocumentValidation);
         };
-    };
 
-    static StageConstraints constraints() {
-        StageConstraints constraints{DocumentSource::StreamType::kStreaming,
-                                     DocumentSource::PositionRequirement::kFirst,
-                                     DocumentSource::HostTypeRequirement::kLocalOnly,
-                                     DocumentSource::DiskUseRequirement::kNoDiskUse,
-                                     DocumentSource::FacetRequirement::kNotAllowed,
-                                     DocumentSource::TransactionRequirement::kAllowed,
-                                     DocumentSource::LookupRequirement::kAllowed,
-                                     DocumentSource::UnionRequirement::kAllowed};
-        // Tried to get rid of the 'has to be the first stage in the pipeline' error.
-        constraints.requiresInputDocSource = false;
-        return constraints;
-    }
+        bool requiresAuthzChecks() const override {
+            return false;
+        }
+
+        bool isSearchStage() const final {
+            return _pipelines[0].hasSearchStage();
+        }
+
+        bool isHybridSearchStage() const final {
+            return true;
+        }
+    };
 
 private:
     // It is illegal to construct a DocumentSourceRankFusion directly, use createFromBson() instead.
-    DocumentSourceRankFusion() = default;
+    DocumentSourceRankFusion() = delete;
 };
-
 }  // namespace mongo

@@ -27,15 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <mutex>
-#include <set>
-#include <string>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -50,6 +41,8 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/explain_options.h"
+#include "mongo/db/raw_data_operation.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/idl/command_generic_argument.h"
 #include "mongo/idl/idl_parser.h"
@@ -59,6 +52,15 @@
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -97,6 +99,10 @@ public:
         return "explain database reads and writes";
     }
 
+    bool enableDiagnosticPrintingOnFailure() const final {
+        return true;
+    }
+
 private:
     class Invocation;
 };
@@ -113,11 +119,12 @@ public:
           _ns{CommandHelpers::parseNsFromCommand(_outerRequest->parseDbName(),
                                                  _outerRequest->body)},
           _verbosity{std::move(verbosity)},
-          _genericArgs(GenericArguments::parse(IDLParserContext("explain",
-                                                                request.validatedTenancyScope,
-                                                                request.getValidatedTenantId(),
-                                                                request.getSerializationContext()),
-                                               _outerRequest->body)),
+          _genericArgs(
+              GenericArguments::parse(_outerRequest->body,
+                                      IDLParserContext("explain",
+                                                       request.validatedTenancyScope,
+                                                       request.getValidatedTenantId(),
+                                                       request.getSerializationContext()))),
           _innerRequest{std::move(innerRequest)},
           _innerInvocation{std::move(innerInvocation)} {}
 
@@ -185,8 +192,9 @@ BSONObj makeExplainedObj(const BSONObj& outerObj,
                          const DatabaseName& dbName,
                          const SerializationContext& serializationContext) {
     const auto& first = outerObj.firstElement();
-    uassert(
-        ErrorCodes::BadValue, "explain command requires a nested object", first.type() == Object);
+    uassert(ErrorCodes::BadValue,
+            "explain command requires a nested object",
+            first.type() == BSONType::object);
     const BSONObj& innerObj = first.Obj();
 
     if (auto innerDb = innerObj["$db"]) {
@@ -218,11 +226,11 @@ std::unique_ptr<CommandInvocation> ClusterExplainCmd::parse(OperationContext* op
 
     // To enforce API versioning
     auto cmdObj = idl::parseCommandRequest<ExplainCommandRequest>(
+        request,
         IDLParserContext(ExplainCommandRequest::kCommandName,
                          request.validatedTenancyScope,
                          request.getValidatedTenantId(),
-                         request.getSerializationContext()),
-        request);
+                         request.getSerializationContext()));
     ExplainOptions::Verbosity verbosity = cmdObj.getVerbosity();
     // This is the nested command which we are explaining. We need to propagate generic
     // arguments into the inner command since it is what is passed to the virtual
@@ -245,6 +253,19 @@ std::unique_ptr<CommandInvocation> ClusterExplainCmd::parse(OperationContext* op
     auto innerRequest = std::make_unique<OpMsgRequest>(OpMsg{explainedObj});
     innerRequest->validatedTenancyScope = request.validatedTenancyScope;
     auto innerInvocation = explainedCommand->parseForExplain(opCtx, *innerRequest, verbosity);
+
+    uassert(ErrorCodes::InvalidOptions,
+            "Command does not support the rawData option",
+            !innerInvocation->getGenericArguments().getRawData() ||
+                innerInvocation->supportsRawData());
+    uassert(ErrorCodes::InvalidOptions,
+            "rawData is not enabled",
+            !innerInvocation->getGenericArguments().getRawData() ||
+                gFeatureFlagRawDataCrudOperations.isEnabled());
+    if (innerInvocation->getGenericArguments().getRawData()) {
+        isRawDataOperation(opCtx) = true;
+    }
+
     return std::make_unique<Invocation>(
         this, request, std::move(verbosity), std::move(innerRequest), std::move(innerInvocation));
 }

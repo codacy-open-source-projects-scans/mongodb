@@ -27,12 +27,10 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_map.h>
-
+#include "mongo/db/pipeline/field_path.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bson_depth.h"
-#include "mongo/db/pipeline/field_path.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
 
@@ -57,30 +55,28 @@ const StringDataSet kAllowedDollarPrefixedFields = {
     // This is necessary for $search queries with a specified sort.
     "$searchSortValues"_sd,
     "$searchScore"_sd,
+    "$searchRootDocumentId"_sd,
 };
 
 }  // namespace
 
-using std::string;
-using std::vector;
-
-string FieldPath::getFullyQualifiedPath(StringData prefix, StringData suffix) {
+std::string FieldPath::getFullyQualifiedPath(StringData prefix, StringData suffix) {
     if (prefix.empty()) {
-        return suffix.toString();
+        return std::string{suffix};
     }
 
     return str::stream() << prefix << "." << suffix;
 }
 
 FieldPath::FieldPath(std::string inputPath, bool precomputeHashes, bool validateFieldNames)
-    : _fieldPath(std::move(inputPath)), _fieldPathDotPosition{string::npos} {
+    : _fieldPath(std::move(inputPath)), _fieldPathDotPosition{std::string::npos} {
     uassert(40352, "FieldPath cannot be constructed with empty string", !_fieldPath.empty());
     uassert(40353, "FieldPath must not end with a '.'.", _fieldPath[_fieldPath.size() - 1] != '.');
 
     // Store index delimiter position for use in field lookup.
     size_t dotPos;
     size_t startPos = 0;
-    while (string::npos != (dotPos = _fieldPath.find('.', startPos))) {
+    while (std::string::npos != (dotPos = _fieldPath.find('.', startPos))) {
         _fieldPathDotPosition.push_back(dotPos);
         startPos = dotPos + 1;
     }
@@ -92,15 +88,22 @@ FieldPath::FieldPath(std::string inputPath, bool precomputeHashes, bool validate
     uassert(ErrorCodes::Overflow,
             "FieldPath is too long",
             pathLength <= BSONDepth::getMaxAllowableDepth());
-    _fieldHash.reserve(pathLength);
+
+    // Only allocate heap storage space for the vector of precomputed hashes if it is actually
+    // needed.
+    if (precomputeHashes) {
+        _fieldHash.reserve(pathLength);
+    }
     for (size_t i = 0; i < pathLength; ++i) {
-        const auto& fieldName = getFieldName(i);
+        auto fieldName = getFieldName(i);
         if (validateFieldNames) {
             uassertStatusOKWithContext(
                 validateFieldName(fieldName),
                 "Consider using $getField or $setField for a field path with '.' or '$'.");
         }
-        _fieldHash.push_back(precomputeHashes ? FieldNameHasher()(fieldName) : kHashUninitialized);
+        if (precomputeHashes) {
+            _fieldHash.push_back(FieldNameHasher()(fieldName));
+        }
     }
 }
 
@@ -115,13 +118,13 @@ Status FieldPath::validateFieldName(StringData fieldName) {
                                     << fieldName << "'.");
     }
 
-    if (fieldName.find('\0') != string::npos) {
+    if (fieldName.find('\0') != std::string::npos) {
         return Status(ErrorCodes::Error{16411},
                       str::stream() << "FieldPath field names may not contain '\0', given '"
                                     << fieldName << "'.");
     }
 
-    if (fieldName.find('.') != string::npos) {
+    if (fieldName.find('.') != std::string::npos) {
         return Status(ErrorCodes::Error{16412},
                       str::stream() << "FieldPath field names may not contain '.', given '"
                                     << fieldName << "'.");
@@ -151,25 +154,41 @@ FieldPath FieldPath::concat(const FieldPath& tail) const {
         head._fieldPathDotPosition.size() + tail._fieldPathDotPosition.size() - 2 + 1;
     newDots.reserve(expectedDotSize);
 
-    std::vector<size_t> newHashes;
-    // We don't need the extra entry in hashes.
-    newHashes.reserve(expectedDotSize - 1);
-
     // The first one in head._fieldPathDotPosition is npos. The last one, is, conveniently, the
     // size of head fieldPath, which also happens to be the index at which we added a new dot.
     newDots.insert(
         newDots.begin(), head._fieldPathDotPosition.begin(), head._fieldPathDotPosition.end());
-    newHashes.insert(newHashes.begin(), head._fieldHash.begin(), head._fieldHash.end());
 
     invariant(tail._fieldPathDotPosition.size() >= 2);
     for (size_t i = 1; i < tail._fieldPathDotPosition.size(); ++i) {
         // Move each index back by size of the first field path, plus one, for the newly added dot.
         newDots.push_back(tail._fieldPathDotPosition[i] + head._fieldPath.size() + 1);
-        newHashes.push_back(tail._fieldHash[i - 1]);
     }
     invariant(newDots.back() == concat.size());
     invariant(newDots.size() == expectedDotSize);
-    invariant(newHashes.size() == expectedDotSize - 1);
+
+    // Re-use/compute the field hashes.
+    // Field hashes are only needed if either 'head' or 'tail' has computed hashes. If neither have
+    // computed hashes, we can skip copying them entirely.
+    std::vector<uint32_t> newHashes;
+    if (!head._fieldHash.empty() || !tail._fieldHash.empty()) {
+        newHashes.reserve(head.getPathLength() + tail._fieldHash.size());
+
+        // Insert all hashes from 'head' first. These may be zero hashes if hash computation hasn't
+        // happened for 'head' yet.
+        newHashes.insert(newHashes.end(), head._fieldHash.begin(), head._fieldHash.end());
+
+        // Fill up any potential gap in the hashes for 'head'.
+        for (size_t i = head._fieldHash.size(); i < head.getPathLength(); ++i) {
+            newHashes.push_back(FieldNameHasher()(head.getFieldName(i)));
+        }
+
+        dassert(newHashes.size() == head.getPathLength());
+
+        // Now append all hashes from 'tail'. These may be empty, so the hash values may only be
+        // partially filled.
+        newHashes.insert(newHashes.end(), tail._fieldHash.begin(), tail._fieldHash.end());
+    }
 
     return FieldPath(std::move(concat), std::move(newDots), std::move(newHashes));
 }

@@ -33,10 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <exception>
-#include <list>
-#include <memory>
-
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
 #include "mongo/db/client.h"
@@ -49,16 +45,19 @@
 #include "mongo/db/storage/recovery_unit_noop.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/transport_layer_manager.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/observable_mutex_registry.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/system_clock_source.h"
 #include "mongo/util/system_tick_source.h"
+
+#include <exception>
+#include <list>
+#include <memory>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -145,11 +144,13 @@ ServiceContext::ServiceContext(std::unique_ptr<ClockSource> fastClockSource,
     : _tickSource(std::move(tickSource)),
       _fastClockSource(std::move(fastClockSource)),
       _preciseClockSource(std::move(preciseClockSource)),
-      _serviceSet(std::make_unique<ServiceSet>(this)) {}
+      _serviceSet(std::make_unique<ServiceSet>(this)) {
+    ObservableMutexRegistry::get().add("ServiceContext::_mutex", _mutex);
+}
 
 
 ServiceContext::~ServiceContext() {
-    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    stdx::lock_guard lk(_mutex);
     for (const auto& [client, _] : _clients) {
         LOGV2_ERROR(23828,
                     "Non-empty client list when destroying service context",
@@ -237,7 +238,7 @@ ServiceContext::UniqueClient ServiceContext::makeClientForService(
     onCreate(client.get(), _clientObservers);
     auto entry = _clientsList.add(client.get());
     {
-        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        stdx::lock_guard lk(_mutex);
         invariant(_clients.insert({client.get(), entry}).second);
     }
     return UniqueClient(client.release());
@@ -312,17 +313,19 @@ ServiceContext::UniqueOperationContext ServiceContext::makeOperationContext(Clie
     auto lk = _storageChangeMutex.readLock();
 
     onCreate(opCtx.get(), _clientObservers);
-    ScopeGuard onCreateGuard([&] { onDestroy(opCtx.get(), _clientObservers); });
-
-    if (!opCtx->recoveryUnit_DO_NOT_USE()) {
-        opCtx->setRecoveryUnit_DO_NOT_USE(std::make_unique<RecoveryUnitNoop>(),
-                                          WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
-    }
-
-    ScopeGuard batonGuard([&] { opCtx->getBaton()->detach(); });
+    ScopeGuard onCreateAndBatonGuard([&] {
+        onDestroy(opCtx.get(), _clientObservers);
+        opCtx->getBaton()->detach();
+    });
 
     {
         ClientLock lk(client);
+
+        if (!opCtx->recoveryUnit_DO_NOT_USE()) {
+            opCtx->setRecoveryUnit_DO_NOT_USE(std::make_unique<RecoveryUnitNoop>(),
+                                              WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork,
+                                              lk);
+        }
 
         // If we have a previous operation context, it's not worth crashing the process in
         // production. However, we do want to prevent it from doing more work and complain
@@ -338,8 +341,7 @@ ServiceContext::UniqueOperationContext ServiceContext::makeOperationContext(Clie
         client->_setOperationContext(opCtx.get());
     }
 
-    onCreateGuard.dismiss();
-    batonGuard.dismiss();
+    onCreateAndBatonGuard.dismiss();
 
     return UniqueOperationContext(opCtx.release());
 };
@@ -380,7 +382,8 @@ ClientLock Service::LockedClientsCursor::next() {
     return {};
 }
 
-void ServiceContext::setKillAllOperations(const std::set<std::string>& excludedClients) {
+void ServiceContext::setKillAllOperations(
+    std::function<bool(const StringData)> excludedClientPredicate) {
     ServiceContextLock svcCtxLock(this);
 
     // Ensure that all newly created operation contexts will immediately be in the interrupted state
@@ -392,7 +395,7 @@ void ServiceContext::setKillAllOperations(const std::set<std::string>& excludedC
         ClientLock lk(client);
 
         // Do not kill operations from the excluded clients.
-        if (excludedClients.find(client->desc()) != excludedClients.end()) {
+        if (excludedClientPredicate && excludedClientPredicate(client->desc())) {
             continue;
         }
 
@@ -430,7 +433,7 @@ void ServiceContext::killOperation(ClientLock& clientLock,
     }
 }
 
-void ServiceContext::_delistOperation(OperationContext* opCtx) noexcept {
+void ServiceContext::_delistOperation(OperationContext* opCtx) {
     auto client = opCtx->getClient();
     {
         stdx::lock_guard clientLock(*client);
@@ -446,7 +449,7 @@ void ServiceContext::_delistOperation(OperationContext* opCtx) noexcept {
     opCtx->releaseOperationKey();
 }
 
-void ServiceContext::delistOperation(OperationContext* opCtx) noexcept {
+void ServiceContext::delistOperation(OperationContext* opCtx) {
     auto client = opCtx->getClient();
     invariant(client);
 
@@ -456,8 +459,7 @@ void ServiceContext::delistOperation(OperationContext* opCtx) noexcept {
     _delistOperation(opCtx);
 }
 
-void ServiceContext::killAndDelistOperation(OperationContext* opCtx,
-                                            ErrorCodes::Error killCode) noexcept {
+void ServiceContext::killAndDelistOperation(OperationContext* opCtx, ErrorCodes::Error killCode) {
 
     auto client = opCtx->getClient();
     invariant(client);
@@ -476,19 +478,20 @@ void ServiceContext::unsetKillAllOperations() {
 }
 
 void ServiceContext::registerKillOpListener(KillOpListenerInterface* listener) {
-    stdx::lock_guard<stdx::mutex> clientLock(_mutex);
+    stdx::lock_guard clientLock(_mutex);
     _killOpListeners.push_back(listener);
 }
 
 void ServiceContext::waitForStartupComplete() {
-    stdx::unique_lock<stdx::mutex> lk(_mutex);
+    stdx::unique_lock lk(_mutex);
     _startupCompleteCondVar.wait(lk, [this] { return _startupComplete; });
 }
 
 void ServiceContext::notifyStorageStartupRecoveryComplete() {
-    stdx::unique_lock<stdx::mutex> lk(_mutex);
-    _startupComplete = true;
-    lk.unlock();
+    {
+        stdx::lock_guard lk(_mutex);
+        _startupComplete = true;
+    }
     _startupCompleteCondVar.notify_all();
 }
 

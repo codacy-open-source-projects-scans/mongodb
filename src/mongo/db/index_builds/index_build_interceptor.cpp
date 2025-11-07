@@ -27,17 +27,7 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/container/flat_set.hpp>
-#include <boost/container/vector.hpp>
-#include <cstdint>
-#include <limits>
-#include <vector>
-
-#include <boost/container/small_vector.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/index_builds/index_build_interceptor.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -49,16 +39,17 @@
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds/duplicate_key_tracker.h"
-#include "mongo/db/index_builds/index_build_interceptor.h"
 #include "mongo/db/index_builds/index_build_interceptor_gen.h"
+#include "mongo/db/index_builds/index_builds_common.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -66,17 +57,27 @@
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/progress_meter.h"
 #include "mongo/util/str.h"
 #include "mongo/util/timer.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <vector>
+
+#include <boost/container/flat_set.hpp>
+#include <boost/container/small_vector.hpp>
+#include <boost/container/vector.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
 
@@ -89,36 +90,36 @@ MONGO_FAIL_POINT_DEFINE(hangIndexBuildDuringDrainWritesPhase);
 MONGO_FAIL_POINT_DEFINE(hangIndexBuildDuringDrainWritesPhaseSecond);
 
 IndexBuildInterceptor::IndexBuildInterceptor(OperationContext* opCtx,
-                                             const IndexCatalogEntry* entry)
-    : _sideWritesTable(opCtx->getServiceContext()->getStorageEngine()->makeTemporaryRecordStore(
-          opCtx, KeyFormat::Long)),
-      _skippedRecordTracker(opCtx, boost::none) {
-
-    if (entry->descriptor()->unique()) {
-        _duplicateKeyTracker = std::make_unique<DuplicateKeyTracker>(opCtx, entry);
-    }
-}
-
-IndexBuildInterceptor::IndexBuildInterceptor(OperationContext* opCtx,
                                              const IndexCatalogEntry* entry,
-                                             StringData sideWritesIdent,
-                                             boost::optional<StringData> duplicateKeyTrackerIdent,
-                                             boost::optional<StringData> skippedRecordTrackerIdent)
-    : _sideWritesTable(
-          opCtx->getServiceContext()->getStorageEngine()->makeTemporaryRecordStoreFromExistingIdent(
-              opCtx, sideWritesIdent, KeyFormat::Long)),
-      _skippedRecordTracker(opCtx, skippedRecordTrackerIdent),
+                                             const IndexBuildInfo& indexBuildInfo,
+                                             bool resume,
+                                             bool generateTableWrites)
+    : _generateTableWrites(generateTableWrites),
+      _sideWritesTable([&]() {
+          uassert(10709201, "sideWritesIdent is not provided", indexBuildInfo.sideWritesIdent);
+          auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+          if (resume) {
+              return storageEngine->makeTemporaryRecordStoreFromExistingIdent(
+                  opCtx, *indexBuildInfo.sideWritesIdent, KeyFormat::Long);
+          } else {
+              return storageEngine->makeTemporaryRecordStore(
+                  opCtx, *indexBuildInfo.sideWritesIdent, KeyFormat::Long);
+          }
+      }()),
+      _skippedRecordTracker([&]() {
+          uassert(10709202,
+                  "skippedRecordsTrackerIdent is not provided",
+                  indexBuildInfo.skippedRecordsTrackerIdent);
+          return SkippedRecordTracker(
+              opCtx, *indexBuildInfo.skippedRecordsTrackerIdent, /*tableExists=*/resume);
+      }()),
       _skipNumAppliedCheck(true) {
-
-    auto dupKeyTrackerIdentExists = duplicateKeyTrackerIdent ? true : false;
-    uassert(ErrorCodes::BadValue,
-            str::stream() << "Resume info must contain the duplicate key tracker ident ["
-                          << duplicateKeyTrackerIdent
-                          << "] if and only if the index is unique: " << entry->descriptor(),
-            entry->descriptor()->unique() == dupKeyTrackerIdentExists);
-    if (duplicateKeyTrackerIdent) {
-        _duplicateKeyTracker =
-            std::make_unique<DuplicateKeyTracker>(opCtx, entry, duplicateKeyTrackerIdent.value());
+    if (entry->descriptor()->unique()) {
+        uassert(10709203,
+                "constraintViolationsTrackerIdent is not provided",
+                indexBuildInfo.constraintViolationsTrackerIdent);
+        _duplicateKeyTracker = std::make_unique<DuplicateKeyTracker>(
+            opCtx, entry, *indexBuildInfo.constraintViolationsTrackerIdent, /*tableExists=*/resume);
     }
 }
 
@@ -131,10 +132,11 @@ void IndexBuildInterceptor::keepTemporaryTables() {
 }
 
 Status IndexBuildInterceptor::recordDuplicateKey(OperationContext* opCtx,
+                                                 const CollectionPtr& coll,
                                                  const IndexCatalogEntry* indexCatalogEntry,
-                                                 const key_string::Value& key) const {
+                                                 const key_string::View& key) const {
     invariant(indexCatalogEntry->descriptor()->unique());
-    return _duplicateKeyTracker->recordKey(opCtx, indexCatalogEntry, key);
+    return _duplicateKeyTracker->recordKey(opCtx, coll, indexCatalogEntry, key);
 }
 
 Status IndexBuildInterceptor::checkDuplicateKeyConstraints(
@@ -221,7 +223,8 @@ Status IndexBuildInterceptor::drainWritesIntoIndex(OperationContext* opCtx,
         int32_t batchSize = 0;
         int64_t batchSizeBytes = 0;
 
-        auto cursor = _sideWritesTable->rs()->getCursor(opCtx);
+        auto cursor =
+            _sideWritesTable->rs()->getCursor(opCtx, *shard_role_details::getRecoveryUnit(opCtx));
 
         // We use an ordered container because the order of deletion for the records in the side
         // table matters.
@@ -276,7 +279,8 @@ Status IndexBuildInterceptor::drainWritesIntoIndex(OperationContext* opCtx,
         // Delete documents from the side table as soon as they have been inserted into the index.
         // This ensures that no key is ever inserted twice and no keys are skipped.
         for (const auto& recordId : recordsAddedToIndex) {
-            _sideWritesTable->rs()->deleteRecord(opCtx, recordId);
+            _sideWritesTable->rs()->deleteRecord(
+                opCtx, *shard_role_details::getRecoveryUnit(opCtx), recordId);
         }
 
         if (batchSize == 0) {
@@ -357,15 +361,14 @@ Status IndexBuildInterceptor::_applyWrite(OperationContext* opCtx,
                                           TrackDuplicates trackDups,
                                           int64_t* const keysInserted,
                                           int64_t* const keysDeleted) {
-    // Sorted index types may choose to disallow duplicates (enforcing an unique index). Columnar
-    // indexes are not sorted and therefore cannot enforce uniqueness constraints. Only sorted
-    // indexes will use this lambda passed through the IndexAccessMethod interface.
-    IndexAccessMethod::KeyHandlerFn onDuplicateKeyFn =
-        [=, this](const key_string::Value& duplicateKey) {
-            return trackDups == TrackDuplicates::kTrack
-                ? recordDuplicateKey(opCtx, indexCatalogEntry, duplicateKey)
-                : Status::OK();
-        };
+    // Sorted index types may choose to disallow duplicates (enforcing an unique index).
+    // Only sorted indexes will use this lambda passed through the IndexAccessMethod interface.
+    auto onDuplicateKeyFn = [=, this](const CollectionPtr& coll,
+                                      const key_string::View& duplicateKey) {
+        return trackDups == TrackDuplicates::kTrack
+            ? recordDuplicateKey(opCtx, coll, indexCatalogEntry, duplicateKey)
+            : Status::OK();
+    };
 
     return indexCatalogEntry->accessMethod()->applyIndexBuildSideWrite(opCtx,
                                                                        coll,
@@ -422,7 +425,8 @@ bool IndexBuildInterceptor::_checkAllWritesApplied(OperationContext* opCtx, bool
     invariant(_sideWritesTable);
 
     // The table is empty only when all writes are applied.
-    auto cursor = _sideWritesTable->rs()->getCursor(opCtx);
+    auto cursor =
+        _sideWritesTable->rs()->getCursor(opCtx, *shard_role_details::getRecoveryUnit(opCtx));
     auto record = cursor->next();
     if (fatal) {
         invariant(
@@ -487,7 +491,8 @@ Status IndexBuildInterceptor::_finishSideWrite(OperationContext* opCtx,
     // By passing a vector of null timestamps, these inserts are not timestamped individually, but
     // rather with the timestamp of the owning operation.
     std::vector<Timestamp> timestamps(records.size());
-    return _sideWritesTable->rs()->insertRecords(opCtx, &records, timestamps);
+    return _sideWritesTable->rs()->insertRecords(
+        opCtx, *shard_role_details::getRecoveryUnit(opCtx), &records, timestamps);
 }
 
 Status IndexBuildInterceptor::sideWrite(OperationContext* opCtx,
@@ -555,9 +560,8 @@ Status IndexBuildInterceptor::sideWrite(OperationContext* opCtx,
             builder.reset();
             keyString.serialize(builder);
             BSONBinData binData(builder.buf(), builder.len(), BinDataGeneral);
-            toInsert.emplace_back(BSON("op"
-                                       << "i"
-                                       << "key" << binData));
+            toInsert.emplace_back(BSON("op" << "i"
+                                            << "key" << binData));
         }
     }
 

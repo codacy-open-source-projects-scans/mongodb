@@ -3,7 +3,7 @@
  */
 
 function makeRegExMatchFn(pattern) {
-    return function(text) {
+    return function (text) {
         return pattern.test(text);
     };
 }
@@ -14,19 +14,21 @@ function testStartupLogging(launcher, matchFn, expectedExitCode) {
 
 function validateWaitingMessage(launcher) {
     clearRawMongoProgramOutput();
-    var conn = launcher.start({});
+    let conn = launcher.start({});
     launcher.stop(conn, undefined, {});
     testStartupLogging(
         launcher,
         makeRegExMatchFn(
-            /"id":23016,\s*(?:"svc":".",\s*)?"ctx":"listener","msg":"Waiting for connections","attr":{"port":/));
+            /"id":23016,\s*(?:"svc":".",\s*)?"ctx":"listener","msg":"Waiting for connections","attr":{"port":/,
+        ),
+    );
 }
 
 print("********************\nTesting startup logging in mongod\n********************");
 
 validateWaitingMessage({
-    start: function(opts) {
+    start: function (opts) {
         return MongoRunner.runMongod(opts);
     },
-    stop: MongoRunner.stopMongod
+    stop: MongoRunner.stopMongod,
 });

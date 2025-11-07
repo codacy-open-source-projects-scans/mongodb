@@ -1,13 +1,13 @@
 /**
  * Test that verifies mongod can start using paths that contain UTF-8 characters that are not ASCII.
  */
-var db_name = "ελληνικά";
-var path = MongoRunner.dataPath + "Росси́я";
+let db_name = "ελληνικά";
+let path = MongoRunner.dataPath + "Росси́я";
 
 mkdir(path);
 
 // Test MongoD
-let testMongoD = function() {
+let testMongoD = function () {
     let options = {
         dbpath: path,
         useLogFiles: true,
@@ -20,7 +20,7 @@ let testMongoD = function() {
     }
 
     let conn = MongoRunner.runMongod(options);
-    assert.neq(null, conn, 'mongod was unable to start up');
+    assert.neq(null, conn, "mongod was unable to start up");
 
     let coll = conn.getCollection(db_name + ".foo");
     assert.commandWorked(coll.insert({_id: 1}));

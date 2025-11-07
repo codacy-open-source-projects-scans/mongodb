@@ -27,28 +27,26 @@
  *    it in the license file.
  */
 
-#include <boost/exception/exception.hpp>
-#include <fmt/format.h>
+#include "mongo/base/status.h"
+
+#include "mongo/bson/json.h"
+#include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/unittest/death_test.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
+
 #include <functional>
 #include <stdexcept>
 #include <string>
-#include <string_view>
 
+#include <boost/exception/exception.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/status.h"
-#include "mongo/bson/json.h"
-#include "mongo/config.h"  // IWYU pragma: keep
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
 
-using namespace fmt::literals;
 
 static constexpr const char* kReason = "reason";
 static const std::string& kReasonString = *new std::string{kReason};
@@ -57,7 +55,7 @@ static const std::string& kReasonString = *new std::string{kReason};
 template <typename R>
 void checkReason(R&& r, std::string expected = kReasonString) {
     ASSERT_EQUALS(Status(ErrorCodes::MaxError, std::forward<R>(r)).reason(), expected)
-        << "type {}"_format(demangleName(typeid(decltype(r))));
+        << fmt::format("type {}", demangleName(typeid(decltype(r))));
 };
 
 struct CanString {
@@ -94,7 +92,7 @@ TEST(Status, ReasonStrings) {
     // Try several types of `reason` arguments.
     checkReason(kReason);
     checkReason(kReasonString);
-    checkReason(std::string_view{kReason});
+    checkReason(std::string_view{kReason});  // NOLINT
     checkReason(std::string{kReason});
     checkReason(StringData{kReason});
     checkReason(str::stream{} << kReason);
@@ -293,6 +291,19 @@ TEST(Status, ExceptionToStatus) {
     ASSERT_EQUALS(fromBoostExcept, ErrorCodes::UnknownError);
     // Reason should include that it was a boost::exception
     ASSERT_TRUE(fromBoostExcept.reason().find("boost::exception") != std::string::npos);
+
+    Status fromUnknownExceptionType = [=]() {
+        try {
+            throw 7;
+        } catch (...) {
+            return exceptionToStatus();
+        }
+    }();
+
+    ASSERT_NOT_OK(fromUnknownExceptionType);
+    ASSERT_EQUALS(fromUnknownExceptionType, ErrorCodes::UnknownError);
+    // Reason should include that it was an unknown exception
+    ASSERT_TRUE(fromUnknownExceptionType.reason().find("unknown type") != std::string::npos);
 }
 
 DEATH_TEST_REGEX(ErrorExtraInfo, InvariantAllRegistered, "Invariant failure.*parsers::") {

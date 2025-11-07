@@ -51,10 +51,14 @@ export class ContinuousStepdown {
         verbositySetting = tojson(verbositySetting);
 
         return {
-            ReplSetTestWithContinuousPrimaryStepdown:
-                makeReplSetTestWithContinuousPrimaryStepdown(stepdownOptions, verbositySetting),
-            ShardingTestWithContinuousPrimaryStepdown:
-                makeShardingTestWithContinuousPrimaryStepdown(stepdownOptions, verbositySetting)
+            ReplSetTestWithContinuousPrimaryStepdown: makeReplSetTestWithContinuousPrimaryStepdown(
+                stepdownOptions,
+                verbositySetting,
+            ),
+            ShardingTestWithContinuousPrimaryStepdown: makeShardingTestWithContinuousPrimaryStepdown(
+                stepdownOptions,
+                verbositySetting,
+            ),
         };
     }
 }
@@ -63,7 +67,7 @@ export class ContinuousStepdown {
  * Helper class to manage the Thread instance that will continuously step down the primary
  * node.
  */
-const StepdownThread = function() {
+const StepdownThread = function () {
     let _counter = null;
     let _thread = null;
 
@@ -89,7 +93,7 @@ const StepdownThread = function() {
      *          the error.
      */
     function _continuousPrimaryStepdownFn(stopCounter, seedNode, options) {
-        print("*** Continuous stepdown thread running with seed node " + seedNode);
+        jsTest.log.info("*** Continuous stepdown thread running with seed node " + seedNode);
 
         try {
             // The config primary may unexpectedly step down during startup if under heavy
@@ -99,14 +103,14 @@ const StepdownThread = function() {
             let primary = replSet.getPrimary();
 
             while (stopCounter.getCount() > 0) {
-                print("*** Stepping down " + primary);
+                jsTest.log.info("*** Stepping down " + primary);
 
                 // The command may fail if the node is no longer primary or is in the process of
                 // stepping down.
                 assert.commandWorkedOrFailedWithCode(
-                    primary.adminCommand(
-                        {replSetStepDown: options.stepdownDurationSecs, force: true}),
-                    [ErrorCodes.NotWritablePrimary, ErrorCodes.ConflictingOperationInProgress]);
+                    primary.adminCommand({replSetStepDown: options.stepdownDurationSecs, force: true}),
+                    [ErrorCodes.NotWritablePrimary, ErrorCodes.ConflictingOperationInProgress],
+                );
 
                 // Wait for primary to get elected and allow the test to make some progress
                 // before attempting another stepdown.
@@ -119,10 +123,10 @@ const StepdownThread = function() {
                 }
             }
 
-            print("*** Continuous stepdown thread completed successfully");
+            jsTest.log.info("*** Continuous stepdown thread completed successfully");
             return {ok: 1};
         } catch (e) {
-            print("*** Continuous stepdown thread caught exception: " + tojson(e));
+            jsTest.log.info("*** Continuous stepdown thread caught exception", {error: e});
             return {ok: 0, error: e.toString(), stack: e.stack};
         }
     }
@@ -130,14 +134,14 @@ const StepdownThread = function() {
     /**
      * Returns true if the stepdown thread has been created and started.
      */
-    this.hasStarted = function() {
+    this.hasStarted = function () {
         return !!_thread;
     };
 
     /**
      * Spawns a Thread using the given seedNode to discover the replica set.
      */
-    this.start = function(seedNode, options) {
+    this.start = function (seedNode, options) {
         if (_thread) {
             throw new Error("Continuous stepdown thread is already active");
         }
@@ -151,7 +155,7 @@ const StepdownThread = function() {
      * Sets the stepdown thread's counter to 0, and waits for it to finish. Throws if the
      * stepdown thread did not exit successfully.
      */
-    this.stop = function() {
+    this.stop = function () {
         if (!_thread) {
             throw new Error("Continuous stepdown thread is not active");
         }
@@ -189,11 +193,11 @@ function makeReplSetTestWithContinuousPrimaryStepdown(stepdownOptions, verbosity
         startSet(options, restart) {
             // Helper function to convert a string representation of setParameter to object form.
             function setParamToObj(setParam) {
-                if (typeof (setParam) === "string") {
-                    var eqIdx = setParam.indexOf("=");
+                if (typeof setParam === "string") {
+                    let eqIdx = setParam.indexOf("=");
                     if (eqIdx != -1) {
-                        var param = setParam.substring(0, eqIdx);
-                        var value = setParam.substring(eqIdx + 1);
+                        let param = setParam.substring(0, eqIdx);
+                        let value = setParam.substring(eqIdx + 1);
                         return {[param]: value};
                     }
                 }
@@ -201,9 +205,11 @@ function makeReplSetTestWithContinuousPrimaryStepdown(stepdownOptions, verbosity
             }
 
             options = options || {};
-            options.setParameter = Object.assign(setParamToObj(this._origNodeOpts.setParameter),
-                                                 setParamToObj(options.setParameter),
-                                                 {logComponentVerbosity: verbositySetting});
+            options.setParameter = Object.assign(
+                setParamToObj(this._origNodeOpts.setParameter),
+                setParamToObj(options.setParameter),
+                {logComponentVerbosity: verbositySetting},
+            );
             return super.startSet(options, restart);
         }
 
@@ -239,9 +245,9 @@ function makeReplSetTestWithContinuousPrimaryStepdown(stepdownOptions, verbosity
             const rsconfig = this.getReplSetConfigFromNode();
 
             const shouldUpdateElectionTimeout =
-                (rsconfig.settings.electionTimeoutMillis !== stepdownOptions.electionTimeoutMS);
+                rsconfig.settings.electionTimeoutMillis !== stepdownOptions.electionTimeoutMS;
             const shouldUpdateCatchUpTimeout =
-                (rsconfig.settings.catchUpTimeoutMillis !== stepdownOptions.catchUpTimeoutMS);
+                rsconfig.settings.catchUpTimeoutMillis !== stepdownOptions.catchUpTimeoutMS;
 
             if (shouldUpdateElectionTimeout || shouldUpdateCatchUpTimeout) {
                 rsconfig.settings.electionTimeoutMillis = stepdownOptions.electionTimeoutMS;
@@ -252,14 +258,18 @@ function makeReplSetTestWithContinuousPrimaryStepdown(stepdownOptions, verbosity
 
                 const newSettings = this.getReplSetConfigFromNode().settings;
 
-                assert.eq(newSettings.electionTimeoutMillis,
-                          stepdownOptions.electionTimeoutMS,
-                          "Failed to set the electionTimeoutMillis to " +
-                              stepdownOptions.electionTimeoutMS + " milliseconds.");
-                assert.eq(newSettings.catchUpTimeoutMillis,
-                          stepdownOptions.catchUpTimeoutMS,
-                          "Failed to set the catchUpTimeoutMillis to " +
-                              stepdownOptions.catchUpTimeoutMS + " milliseconds.");
+                assert.eq(
+                    newSettings.electionTimeoutMillis,
+                    stepdownOptions.electionTimeoutMS,
+                    "Failed to set the electionTimeoutMillis to " +
+                        stepdownOptions.electionTimeoutMS +
+                        " milliseconds.",
+                );
+                assert.eq(
+                    newSettings.catchUpTimeoutMillis,
+                    stepdownOptions.catchUpTimeoutMS,
+                    "Failed to set the catchUpTimeoutMillis to " + stepdownOptions.catchUpTimeoutMS + " milliseconds.",
+                );
             }
 
             this._stepdownThread.start(this.nodes[0].host, stepdownOptions);
@@ -281,7 +291,7 @@ function makeReplSetTestWithContinuousPrimaryStepdown(stepdownOptions, verbosity
 
             if (waitForPrimary) {
                 this.getPrimary();
-                this.nodes.forEach(node => reconnect(node));
+                this.nodes.forEach((node) => reconnect(node));
             }
         }
     };
@@ -297,8 +307,7 @@ function makeShardingTestWithContinuousPrimaryStepdown(stepdownOptions, verbosit
 
             if (stepdownOptions.configStepdown) {
                 params.other.configOptions = params.other.configOptions || {};
-                params.other.configOptions.setParameter =
-                    params.other.configOptions.setParameter || {};
+                params.other.configOptions.setParameter = params.other.configOptions.setParameter || {};
                 params.other.configOptions.setParameter.logComponentVerbosity = verbositySetting;
             }
 
@@ -313,13 +322,11 @@ function makeShardingTestWithContinuousPrimaryStepdown(stepdownOptions, verbosit
 
             // Validate the stepdown options.
             if (stepdownOptions.configStepdown && !this.configRS) {
-                throw new Error(
-                    "Continuous config server primary step down only available with CSRS");
+                throw new Error("Continuous config server primary step down only available with CSRS");
             }
 
-            if (stepdownOptions.shardStepdown && this._rs.some(rst => !rst)) {
-                throw new Error(
-                    "Continuous shard primary step down only available with replica set shards");
+            if (stepdownOptions.shardStepdown && this._rs.some((rst) => !rst)) {
+                throw new Error("Continuous shard primary step down only available with replica set shards");
             }
         }
 
@@ -333,7 +340,7 @@ function makeShardingTestWithContinuousPrimaryStepdown(stepdownOptions, verbosit
             }
 
             if (stepdownOptions.shardStepdown) {
-                this._rs.forEach(function(rst) {
+                this._rs.forEach(function (rst) {
                     rst.test.startContinuousFailover();
                 });
             }
@@ -345,15 +352,13 @@ function makeShardingTestWithContinuousPrimaryStepdown(stepdownOptions, verbosit
          *
          * If waitForPrimary is true, blocks until each replica set has elected a primary.
          */
-        stopContinuousFailover({
-            waitForPrimary: waitForPrimary = false,
-        } = {}) {
+        stopContinuousFailover({waitForPrimary: waitForPrimary = false} = {}) {
             if (stepdownOptions.configStepdown) {
                 this.configRS.stopContinuousFailover({waitForPrimary: waitForPrimary});
             }
 
             if (stepdownOptions.shardStepdown) {
-                this._rs.forEach(function(rst) {
+                this._rs.forEach(function (rst) {
                     rst.test.stopContinuousFailover({waitForPrimary: waitForPrimary});
                 });
             }
@@ -363,7 +368,6 @@ function makeShardingTestWithContinuousPrimaryStepdown(stepdownOptions, verbosit
          * This method is disabled because it runs aggregation, which doesn't handle config
          * server stepdown correctly.
          */
-        printShardingStatus() {
-        }
+        printShardingStatus() {}
     };
 }

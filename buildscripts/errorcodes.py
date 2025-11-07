@@ -23,14 +23,14 @@ except ImportError:
     print("*** Run 'pip3 install --user regex' to speed up error code checking")
     import re  # type: ignore
 
-MAXIMUM_CODE = 9999999  # JIRA Ticket + XX
+MAXIMUM_CODE = 99999999  # JIRA Ticket + XX
 
 codes = []  # type: ignore
 
 # Each AssertLocation identifies the C++ source location of an assertion
 AssertLocation = namedtuple("AssertLocation", ["sourceFile", "byteOffset", "lines", "code"])
 
-list_files = False  # pylint: disable=invalid-name
+list_files = False
 
 _CODE_PATTERNS = [
     re.compile(p + r"\s*(?P<code>\d+)", re.MULTILINE)
@@ -57,17 +57,7 @@ _CODE_PATTERNS = [
     ]
 ]
 
-_DIR_EXCLUDE_RE = re.compile(
-    r"(\..*"
-    r"|pcre2.*"
-    r"|32bit.*"
-    r"|mongodb-.*"
-    r"|debian.*"
-    r"|mongo-cxx-driver.*"
-    r"|.*gotools.*"
-    r"|.*mozjs.*"
-    r")"
-)
+_DIR_EXCLUDE_RE = re.compile(r"(pcre2.*|debian.*)")
 
 _FILE_INCLUDE_RE = re.compile(r".*\.(cpp|c|h|py|idl)")
 
@@ -142,11 +132,7 @@ def is_terminated(lines):
 
 
 def get_next_code(seen, server_ticket=0):
-    """Find next unused assertion code.
-
-    Called by: SConstruct and main()
-    Since SConstruct calls us, codes[] must be global OR WE REPARSE EVERYTHING
-    """
+    """Find next unused assertion code."""
     if not codes:
         (_, _, seen) = read_error_codes()
 
@@ -167,12 +153,6 @@ def get_next_code(seen, server_ticket=0):
     # No server ticket. Return a generator that counts starting at highest + 1.
     highest = reduce(lambda x, y: max(int(x), int(y)), (loc.code for loc in codes))
     return iter(range(highest + 1, MAXIMUM_CODE))
-
-
-def check_error_codes():
-    """Check error codes as SConstruct expects a boolean response from this function."""
-    (_, errors, _) = read_error_codes()
-    return len(errors) == 0
 
 
 def read_error_codes(src_root="src/mongo"):
@@ -300,6 +280,9 @@ def coerce_to_number(ticket_value):
 
 def main():
     """Validate error codes."""
+
+    os.chdir(os.environ.get("BUILD_WORKSPACE_DIRECTORY", "."))
+
     parser = OptionParser(description=__doc__.strip())
     parser.add_option(
         "--fix",
@@ -336,7 +319,7 @@ def main():
     if extra:
         parser.error(f"Unrecognized arguments: {' '.join(extra)}")
 
-    global list_files  # pylint: disable=global-statement,invalid-name
+    global list_files
     list_files = options.list_files
 
     (_, errors, seen) = read_error_codes()

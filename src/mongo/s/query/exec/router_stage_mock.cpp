@@ -30,18 +30,18 @@
 
 #include "mongo/s/query/exec/router_stage_mock.h"
 
+#include "mongo/base/error_codes.h"
+
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 
 namespace mongo {
 
-void RouterStageMock::queueResult(const ClusterQueryResult& result) {
-    _resultsQueue.push({result});
+void RouterStageMock::queueResult(ClusterQueryResult&& result) {
+    _resultsQueue.push({std::move(result)});
 }
 
 void RouterStageMock::queueError(Status status) {
@@ -61,7 +61,7 @@ StatusWith<ClusterQueryResult> RouterStageMock::next() {
         return {ClusterQueryResult()};
     }
 
-    auto out = _resultsQueue.front();
+    auto out = std::move(_resultsQueue.front());
     _resultsQueue.pop();
     return out;
 }
@@ -70,7 +70,7 @@ void RouterStageMock::kill(OperationContext* opCtx) {
     // No child to kill.
 }
 
-bool RouterStageMock::remotesExhausted() {
+bool RouterStageMock::remotesExhausted() const {
     return _remotesExhausted;
 }
 

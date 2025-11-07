@@ -30,36 +30,35 @@
 
 #include "mongo/db/keys_collection_util.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/keys_collection_document_gen.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_client_info.h"
-#include "mongo/db/shard_role.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/versioning_protocol/database_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/shard_version.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace keys_collection_util {
 
 ExternalKeysCollectionDocument makeExternalClusterTimeKeyDoc(BSONObj keyDoc,
                                                              boost::optional<Date_t> expireAt) {
-    auto originalKeyDoc = KeysCollectionDocument::parse(IDLParserContext("keyDoc"), keyDoc);
+    auto originalKeyDoc = KeysCollectionDocument::parse(keyDoc, IDLParserContext("keyDoc"));
 
     ExternalKeysCollectionDocument externalKeyDoc(OID::gen(), originalKeyDoc.getKeyId());
     externalKeyDoc.setKeysCollectionDocumentBase(originalKeyDoc.getKeysCollectionDocumentBase());

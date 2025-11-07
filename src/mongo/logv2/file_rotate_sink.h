@@ -29,16 +29,17 @@
 
 #pragma once
 
-#include <boost/log/sinks/text_ostream_backend.hpp>
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/logv2/log_format.h"
+#include "mongo/util/modules.h"
+
 #include <functional>
 #include <memory>
 #include <string>
 
 #include <boost/log/core/record_view.hpp>
-
-#include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
-#include "mongo/logv2/log_format.h"
+#include <boost/log/sinks/text_ostream_backend.hpp>
 
 namespace mongo::logv2 {
 // boost::log backend sink to provide MongoDB style file rotation.

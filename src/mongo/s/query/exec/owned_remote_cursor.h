@@ -29,11 +29,12 @@
 
 #pragma once
 
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/executor/task_executor_pool.h"
-#include "mongo/s/grid.h"
 #include "mongo/s/query/exec/establish_cursors.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 
 /**
  * A RAII wrapper class for RemoteCursor which schedules a killCursors request upon destruction if
@@ -65,12 +66,12 @@ public:
     }
 
     RemoteCursor* operator->() {
-        invariant(_remoteCursor);
+        tassert(11052342, "Expected OwnedRemoteCursor to own a cursor", _remoteCursor);
         return &(*_remoteCursor);
     }
 
     RemoteCursor* operator*() {
-        invariant(_remoteCursor);
+        tassert(11052343, "Expected OwnedRemoteCursor to own a cursor", _remoteCursor);
         return &(*_remoteCursor);
     }
 
@@ -90,4 +91,4 @@ private:
     NamespaceString _nss;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

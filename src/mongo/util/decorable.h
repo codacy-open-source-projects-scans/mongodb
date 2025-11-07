@@ -60,10 +60,12 @@
 
 #pragma once
 
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules_incompletely_marked_header.h"
+#include "mongo/util/static_immortal.h"
+
 #include <algorithm>
-#include <boost/optional.hpp>
 #include <cstdint>
-#include <fmt/format.h>
 #include <iostream>
 #include <memory>
 #include <numeric>
@@ -73,8 +75,8 @@
 #include <typeinfo>
 #include <vector>
 
-#include "mongo/util/assert_util.h"
-#include "mongo/util/static_immortal.h"
+#include <boost/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -185,7 +187,7 @@ public:
         return _entries.size();
     }
     const auto& operator[](size_t i) const {
-        invariant(i < size(), format(FMT_STRING("{} < {}"), i, size()));
+        invariant(i < size(), fmt::format("{} < {}", i, size()));
         return _entries[i];
     }
 
@@ -411,7 +413,7 @@ private:
 }  // namespace decorable_detail
 
 template <typename D>
-class Decorable {
+class MONGO_MOD_OPEN Decorable {
 public:
     using DerivedType = D;  // CRTP
 

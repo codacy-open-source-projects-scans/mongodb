@@ -15,8 +15,14 @@ import {getPlanStages} from "jstests/libs/query/analyze_plan.js";
 const coll = db.regex_distinct;
 coll.drop();
 
-assert.commandWorked(coll.insertMany(
-    [{a: "abc", b: "foo"}, {a: "abc", b: "bar"}, {a: "abd", b: "far"}, {a: "aeb", b: "car"}]));
+assert.commandWorked(
+    coll.insertMany([
+        {a: "abc", b: "foo"},
+        {a: "abc", b: "bar"},
+        {a: "abd", b: "far"},
+        {a: "aeb", b: "car"},
+    ]),
+);
 
 assert.commandWorked(coll.createIndex({a: 1}));
 
@@ -26,9 +32,10 @@ results.sort();
 const formatResultsFn = () => tojson(results);
 
 if (FixtureHelpers.isMongos(db)) {
-    // TODO: SERVER-13116 DISTINCT_SCAN will return orphaned documents. We assert that each
-    // result returned has a matching value, but we do not enforce how many are returned (we allow
-    // duplicates).
+    // TODO SERVER-92983: On multiversion suites with a version < 8.2, DISTINCT_SCAN will return
+    // orphaned documents. We assert that each result returned has a matching value, but we do not
+    // enforce how many are returned (we allow duplicates). Once the version is high enough, we
+    // should always shard filter here.
     assert.lte(2, results.length, formatResultsFn);
     for (let res of results) {
         assert(res == "abc" || res == "abd", formatResultsFn);
@@ -38,7 +45,6 @@ if (FixtureHelpers.isMongos(db)) {
     assert.eq(results[0], "abc", formatResultsFn);
     assert.eq(results[1], "abd", formatResultsFn);
 }
-const distinctScanStages =
-    getPlanStages(coll.explain().distinct("a", {a: {"$regex": "^ab.*"}}), "DISTINCT_SCAN");
+const distinctScanStages = getPlanStages(coll.explain().distinct("a", {a: {"$regex": "^ab.*"}}), "DISTINCT_SCAN");
 
 assert.eq(distinctScanStages.length, FixtureHelpers.numberOfShardsForCollection(coll));

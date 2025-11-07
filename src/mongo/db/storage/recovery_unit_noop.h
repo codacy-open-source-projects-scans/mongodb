@@ -29,10 +29,10 @@
 
 #pragma once
 
+#include "mongo/db/storage/recovery_unit.h"
+
 #include <memory>
 #include <vector>
-
-#include "mongo/db/storage/recovery_unit.h"
 
 namespace mongo {
 
@@ -40,9 +40,6 @@ class OperationContext;
 
 class RecoveryUnitNoop : public RecoveryUnit {
 public:
-    RecoveryUnitNoop();
-    ~RecoveryUnitNoop() override;
-
     bool isNoop() const final {
         return true;
     }
@@ -62,6 +59,8 @@ public:
     void doAbortUnitOfWork() override {
         _executeRollbackHandlers();
     }
+
+    void _setIsolation(Isolation) override {}
 
 private:
     std::vector<std::unique_ptr<Change>> _changes;

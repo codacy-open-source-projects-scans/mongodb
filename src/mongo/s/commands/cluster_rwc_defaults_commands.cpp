@@ -28,14 +28,6 @@
  */
 
 
-#include <memory>
-#include <string>
-#include <utility>
-#include <variant>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -49,22 +41,28 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/rwc_defaults_commands_gen.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/read_write_concern_defaults_gen.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <variant>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -85,22 +83,25 @@ public:
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
-        auto cmdResponse = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
-            opCtx,
-            ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-            DatabaseName::kAdmin,
-            // TODO SERVER-91373: Remove appendMajorityWriteConcern
-            CommandHelpers::appendMajorityWriteConcern(
-                CommandHelpers::filterCommandRequestForPassthrough(cmdObj),
-                opCtx->getWriteConcern()),
-            Shard::RetryPolicy::kNotIdempotent));
+        auto cmdResponse = uassertStatusOK(
+            configShard->runCommand(opCtx,
+                                    ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                                    DatabaseName::kAdmin,
+                                    // TODO SERVER-91373: Remove appendMajorityWriteConcern
+                                    CommandHelpers::appendMajorityWriteConcern(
+                                        CommandHelpers::filterCommandRequestForPassthrough(cmdObj),
+                                        opCtx->getWriteConcern()),
+                                    Shard::RetryPolicy::kNotIdempotent));
 
-        uassertStatusOK(cmdResponse.commandStatus);
-        uassertStatusOK(cmdResponse.writeConcernStatus);
+        CommandHelpers::filterCommandReplyForPassthrough(cmdResponse.response, &result);
+
+        if (!cmdResponse.commandStatus.isOK() || !cmdResponse.writeConcernStatus.isOK()) {
+            return false;
+        }
 
         // Quickly pick up the new defaults by setting them in the cache.
-        auto newDefaults = RWConcernDefault::parse(IDLParserContext("ClusterSetDefaultRWConcern"),
-                                                   cmdResponse.response);
+        auto newDefaults = RWConcernDefault::parse(cmdResponse.response,
+                                                   IDLParserContext("ClusterSetDefaultRWConcern"));
         if (auto optWC = newDefaults.getDefaultWriteConcern()) {
             if (optWC->hasCustomWriteMode()) {
                 LOGV2_WARNING(
@@ -113,7 +114,6 @@ public:
         }
         ReadWriteConcernDefaults::get(opCtx).setDefault(opCtx, std::move(newDefaults));
 
-        CommandHelpers::filterCommandReplyForPassthrough(cmdResponse.response, &result);
         return true;
     }
 
@@ -176,17 +176,17 @@ public:
             setReadWriteConcern(opCtx, configsvrRequest, this);
 
             auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
-            auto cmdResponse = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
-                opCtx,
-                ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                DatabaseName::kAdmin,
-                configsvrRequest.toBSON(),
-                Shard::RetryPolicy::kIdempotent));
+            auto cmdResponse = uassertStatusOK(
+                configShard->runCommand(opCtx,
+                                        ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                                        DatabaseName::kAdmin,
+                                        configsvrRequest.toBSON(),
+                                        Shard::RetryPolicy::kIdempotent));
 
             uassertStatusOK(cmdResponse.commandStatus);
 
             return GetDefaultRWConcernResponse::parse(
-                IDLParserContext("ClusterGetDefaultRWConcernResponse"), cmdResponse.response);
+                cmdResponse.response, IDLParserContext("ClusterGetDefaultRWConcernResponse"));
         }
 
     private:

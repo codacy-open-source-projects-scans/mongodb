@@ -29,277 +29,44 @@
 
 #include "mongo/db/query/stage_builder/sbe/gen_abt_helpers.h"
 
-#include <algorithm>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/query_feature_flags_gen.h"
+
 #include <cstddef>
-#include <cstdint>
-#include <iterator>
-#include <limits>
-#include <numeric>
-#include <string_view>
-
-#include <absl/container/node_hash_map.h>
-
-#include "mongo/bson/bsontypes.h"
-#include "mongo/db/exec/sbe/expressions/runtime_environment.h"
-#include "mongo/db/query/bson_typemask.h"
-#include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/optimizer/algebra/polyvalue.h"
-#include "mongo/db/query/optimizer/reference_tracker.h"
-#include "mongo/db/query/stage_builder/sbe/abt_holder_impl.h"
-#include "mongo/db/query/stage_builder/sbe/builder.h"
-#include "mongo/db/query/stage_builder/sbe/expression_const_eval.h"
-#include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
-#include "mongo/db/query/stage_builder/sbe/type_checker.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
 
 namespace mongo::stage_builder {
-SbExpr makeBalancedBooleanOpTree(sbe::EPrimBinary::Op logicOp,
-                                 std::vector<SbExpr> leaves,
-                                 StageBuilderState& state) {
-    std::vector<optimizer::ABT> abtExprs;
-    abtExprs.reserve(leaves.size());
-    for (auto&& e : leaves) {
-        abtExprs.push_back(abt::unwrap(e.extractABT()));
+abt::ABT makeVariable(abt::ProjectionName var) {
+    return abt::make<abt::Variable>(std::move(var));
+}
+
+abt::ABT makeUnaryOp(abt::Operations unaryOp, abt::ABT operand) {
+    return abt::make<abt::UnaryOp>(unaryOp, std::move(operand));
+}
+
+abt::ABT makeBinaryOp(abt::Operations binaryOp, abt::ABT lhs, abt::ABT rhs) {
+    return abt::make<abt::BinaryOp>(binaryOp, std::move(lhs), std::move(rhs));
+}
+
+abt::ABT makeIf(abt::ABT condExpr, abt::ABT thenExpr, abt::ABT elseExpr) {
+    return abt::make<abt::If>(std::move(condExpr), std::move(thenExpr), std::move(elseExpr));
+}
+
+abt::ABT makeLet(const abt::ProjectionName& name, abt::ABT bindExpr, abt::ABT expr) {
+    return abt::make<abt::Let>(name, std::move(bindExpr), std::move(expr));
+}
+
+abt::ABT makeLet(std::vector<abt::ProjectionName> bindNames,
+                 abt::ABTVector bindExprs,
+                 abt::ABT inExpr) {
+    if (!feature_flags::gFeatureFlagSbeUpgradeBinaryTrees.checkEnabled()) {
+        for (size_t idx = bindExprs.size(); idx > 0;) {
+            --idx;
+            inExpr = abt::make<abt::Let>(
+                std::move(bindNames[idx]), std::move(bindExprs[idx]), std::move(inExpr));
+        }
+        return inExpr;
+    } else {
+        bindExprs.emplace_back(std::move(inExpr));
+        return abt::make<abt::MultiLet>(std::move(bindNames), std::move(bindExprs));
     }
-    return abt::wrap(makeBalancedBooleanOpTree(logicOp == sbe::EPrimBinary::logicAnd
-                                                   ? optimizer::Operations::And
-                                                   : optimizer::Operations::Or,
-                                               std::move(abtExprs)));
-}
-
-optimizer::ABT makeFillEmpty(optimizer::ABT expr, optimizer::ABT altExpr) {
-    return optimizer::make<optimizer::BinaryOp>(
-        optimizer::Operations::FillEmpty, std::move(expr), std::move(altExpr));
-}
-
-optimizer::ABT makeFillEmptyFalse(optimizer::ABT e) {
-    return optimizer::make<optimizer::BinaryOp>(
-        optimizer::Operations::FillEmpty, std::move(e), optimizer::Constant::boolean(false));
-}
-
-optimizer::ABT makeFillEmptyTrue(optimizer::ABT e) {
-    return optimizer::make<optimizer::BinaryOp>(
-        optimizer::Operations::FillEmpty, std::move(e), optimizer::Constant::boolean(true));
-}
-
-optimizer::ABT makeFillEmptyNull(optimizer::ABT e) {
-    return optimizer::make<optimizer::BinaryOp>(
-        optimizer::Operations::FillEmpty, std::move(e), optimizer::Constant::null());
-}
-
-optimizer::ABT makeFillEmptyUndefined(optimizer::ABT e) {
-    return optimizer::make<optimizer::BinaryOp>(
-        optimizer::Operations::FillEmpty,
-        std::move(e),
-        makeABTConstant(sbe::value::TypeTags::bsonUndefined, 0));
-}
-
-optimizer::ABT makeNot(optimizer::ABT e) {
-    return makeUnaryOp(optimizer::Operations::Not, std::move(e));
-}
-
-optimizer::ABT makeUnaryOp(optimizer::Operations unaryOp, optimizer::ABT operand) {
-    return optimizer::make<optimizer::UnaryOp>(unaryOp, std::move(operand));
-}
-
-optimizer::ABT makeBinaryOp(optimizer::Operations binaryOp,
-                            optimizer::ABT lhs,
-                            optimizer::ABT rhs) {
-    return optimizer::make<optimizer::BinaryOp>(binaryOp, std::move(lhs), std::move(rhs));
-}
-
-optimizer::ABT generateABTNullOrMissing(optimizer::ABT var) {
-    return makeFillEmptyTrue(
-        makeABTFunction("typeMatch"_sd,
-                        std::move(var),
-                        optimizer::Constant::int32(getBSONTypeMask(BSONType::jstNULL))));
-}
-
-optimizer::ABT generateABTNullOrMissing(optimizer::ProjectionName var) {
-    return generateABTNullOrMissing(makeVariable(std::move(var)));
-}
-
-optimizer::ABT generateABTNullMissingOrUndefined(optimizer::ABT var) {
-    return makeFillEmptyTrue(
-        makeABTFunction("typeMatch"_sd,
-                        std::move(var),
-                        optimizer::Constant::int32(getBSONTypeMask(BSONType::jstNULL) |
-                                                   getBSONTypeMask(BSONType::Undefined))));
-}
-
-optimizer::ABT generateABTNullMissingOrUndefined(optimizer::ProjectionName var) {
-    return generateABTNullMissingOrUndefined(makeVariable(std::move(var)));
-}
-
-optimizer::ABT generateABTNonStringCheck(optimizer::ABT var) {
-    return makeNot(makeABTFunction("isString"_sd, std::move(var)));
-}
-
-optimizer::ABT generateABTNonStringCheck(optimizer::ProjectionName var) {
-    return generateABTNonStringCheck(makeVariable(std::move(var)));
-}
-
-optimizer::ABT generateABTNonTimestampCheck(optimizer::ProjectionName var) {
-    return makeNot(makeABTFunction("isTimestamp"_sd, makeVariable(std::move(var))));
-}
-
-optimizer::ABT generateABTNegativeCheck(optimizer::ProjectionName var) {
-    return optimizer::make<optimizer::BinaryOp>(
-        optimizer::Operations::And,
-        makeNot(makeABTFunction("isNaN"_sd, makeVariable(var))),
-        optimizer::make<optimizer::BinaryOp>(
-            optimizer::Operations::Lt, makeVariable(var), optimizer::Constant::int32(0)));
-}
-
-optimizer::ABT generateABTNonPositiveCheck(optimizer::ProjectionName var) {
-    return optimizer::make<optimizer::BinaryOp>(
-        optimizer::Operations::Lte, makeVariable(std::move(var)), optimizer::Constant::int32(0));
-}
-
-optimizer::ABT generateABTPositiveCheck(optimizer::ABT var) {
-    return optimizer::make<optimizer::BinaryOp>(
-        optimizer::Operations::Gt, std::move(var), optimizer::Constant::int32(0));
-}
-
-optimizer::ABT generateABTNonNumericCheck(optimizer::ProjectionName var) {
-    return makeNot(makeABTFunction("isNumber"_sd, makeVariable(std::move(var))));
-}
-
-optimizer::ABT generateABTLongLongMinCheck(optimizer::ProjectionName var) {
-    return optimizer::make<optimizer::BinaryOp>(
-        optimizer::Operations::And,
-        makeABTFunction("typeMatch"_sd,
-                        makeVariable(var),
-                        optimizer::Constant::int32(getBSONTypeMask(BSONType::NumberLong))),
-        optimizer::make<optimizer::BinaryOp>(
-            optimizer::Operations::Eq,
-            makeVariable(var),
-            optimizer::Constant::int64(std::numeric_limits<int64_t>::min())));
-}
-
-optimizer::ABT generateABTNonArrayCheck(optimizer::ProjectionName var) {
-    return makeNot(makeABTFunction("isArray"_sd, makeVariable(std::move(var))));
-}
-
-optimizer::ABT generateABTNonObjectCheck(optimizer::ProjectionName var) {
-    return makeNot(makeABTFunction("isObject"_sd, makeVariable(std::move(var))));
-}
-
-optimizer::ABT generateABTNullishOrNotRepresentableInt32Check(optimizer::ProjectionName var) {
-    return optimizer::make<optimizer::BinaryOp>(
-        optimizer::Operations::Or,
-        generateABTNullMissingOrUndefined(var),
-        makeNot(makeABTFunction("exists"_sd,
-                                makeABTFunction("convert"_sd,
-                                                makeVariable(var),
-                                                optimizer::Constant::int32(static_cast<int32_t>(
-                                                    sbe::value::TypeTags::NumberInt32))))));
-}
-
-optimizer::ABT generateInvalidRoundPlaceArgCheck(const optimizer::ProjectionName& var) {
-    return makeBalancedBooleanOpTree(
-        optimizer::Operations::Or,
-        {
-            // We can perform our numerical test with trunc. trunc will return nothing if we pass a
-            // non-number to it. We return true if the comparison returns nothing, or if
-            // var != trunc(var), indicating this is not a whole number.
-            makeFillEmptyTrue(
-                optimizer::make<optimizer::BinaryOp>(optimizer::Operations::Neq,
-                                                     makeVariable(var),
-                                                     makeABTFunction("trunc", makeVariable(var)))),
-            optimizer::make<optimizer::BinaryOp>(
-                optimizer::Operations::Lt, makeVariable(var), optimizer::Constant::int32(-20)),
-            optimizer::make<optimizer::BinaryOp>(
-                optimizer::Operations::Gt, makeVariable(var), optimizer::Constant::int32(100)),
-        });
-}
-
-optimizer::ABT generateABTNaNCheck(optimizer::ProjectionName var) {
-    return makeABTFunction("isNaN"_sd, makeVariable(std::move(var)));
-}
-
-optimizer::ABT generateABTInfinityCheck(optimizer::ProjectionName var) {
-    return makeABTFunction("isInfinity"_sd, makeVariable(std::move(var)));
-}
-
-template <>
-optimizer::ABT buildABTMultiBranchConditional(optimizer::ABT defaultCase) {
-    return defaultCase;
-}
-
-optimizer::ABT buildABTMultiBranchConditionalFromCaseValuePairs(
-    std::vector<ABTCaseValuePair> caseValuePairs, optimizer::ABT defaultValue) {
-    return std::accumulate(
-        std::make_reverse_iterator(std::make_move_iterator(caseValuePairs.end())),
-        std::make_reverse_iterator(std::make_move_iterator(caseValuePairs.begin())),
-        std::move(defaultValue),
-        [](auto&& expression, auto&& caseValuePair) {
-            return buildABTMultiBranchConditional(std::move(caseValuePair), std::move(expression));
-        });
-}
-
-optimizer::ABT makeIfNullExpr(std::vector<optimizer::ABT> values,
-                              sbe::value::FrameIdGenerator* frameIdGenerator) {
-    tassert(6987505, "Expected 'values' to be non-empty", values.size() > 0);
-
-    size_t idx = values.size() - 1;
-    auto expr = std::move(values[idx]);
-
-    while (idx > 0) {
-        --idx;
-
-        auto var = getABTLocalVariableName(frameIdGenerator->generate(), 0);
-
-        expr = optimizer::make<optimizer::Let>(
-            var,
-            std::move(values[idx]),
-            optimizer::make<optimizer::If>(
-                generateABTNullMissingOrUndefined(var), std::move(expr), makeVariable(var)));
-    }
-
-    return expr;
-}
-
-optimizer::ABT makeIf(optimizer::ABT condExpr, optimizer::ABT thenExpr, optimizer::ABT elseExpr) {
-    return optimizer::make<optimizer::If>(
-        std::move(condExpr), std::move(thenExpr), std::move(elseExpr));
-}
-
-optimizer::ABT makeLet(const optimizer::ProjectionName& name,
-                       optimizer::ABT bindExpr,
-                       optimizer::ABT expr) {
-    return optimizer::make<optimizer::Let>(name, std::move(bindExpr), std::move(expr));
-}
-
-optimizer::ABT makeLet(sbe::FrameId frameId, optimizer::ABT bindExpr, optimizer::ABT expr) {
-    return optimizer::make<optimizer::Let>(
-        getABTLocalVariableName(frameId, 0), std::move(bindExpr), std::move(expr));
-}
-
-optimizer::ABT makeLet(sbe::FrameId frameId, optimizer::ABTVector bindExprs, optimizer::ABT expr) {
-    for (size_t idx = bindExprs.size(); idx > 0;) {
-        --idx;
-        expr = optimizer::make<optimizer::Let>(
-            getABTLocalVariableName(frameId, idx), std::move(bindExprs[idx]), std::move(expr));
-    }
-
-    return expr;
-}
-
-optimizer::ABT makeLocalLambda(sbe::FrameId frameId, optimizer::ABT expr) {
-    optimizer::ProjectionName var = getABTLocalVariableName(frameId, 0);
-    return optimizer::make<optimizer::LambdaAbstraction>(std::move(var), std::move(expr));
-}
-
-optimizer::ABT makeNumericConvert(optimizer::ABT expr, sbe::value::TypeTags tag) {
-    return makeABTFunction(
-        "convert"_sd, std::move(expr), optimizer::Constant::int32(static_cast<int32_t>(tag)));
-}
-
-optimizer::ABT makeABTFail(ErrorCodes::Error error, StringData errorMessage) {
-    return makeABTFunction(
-        "fail"_sd, optimizer::Constant::int32(error), makeABTConstant(errorMessage));
 }
 }  // namespace mongo::stage_builder

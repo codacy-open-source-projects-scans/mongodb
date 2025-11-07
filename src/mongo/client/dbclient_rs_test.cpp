@@ -59,11 +59,10 @@
 #include "mongo/dbtests/mock/mock_conn_registry.h"
 #include "mongo/dbtests/mock/mock_remote_db_server.h"
 #include "mongo/dbtests/mock/mock_replica_set.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/rpc/reply_interface.h"
 #include "mongo/stdx/unordered_set.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/clock_source_mock.h"
@@ -105,15 +104,19 @@ private:
 };
 
 /**
- * Basic fixture with one primary and one secondary.
+ * Basic replica set test fixture with configurable number of nodes.
+ * Creates one primary and (numNodes-1) secondary nodes.
+ * Default: 2 nodes (1 primary + 1 secondary).
  */
 class BasicRS : public DBClientRSTest {
 protected:
+    explicit BasicRS(int numNodes = 2) : _numNodes(numNodes) {}
+
     void setUp() override {
         DBClientRSTest::setUp();
         ReplicaSetMonitor::cleanup();
 
-        _replSet.reset(new MockReplicaSet("test", 2));
+        _replSet.reset(new MockReplicaSet("test", _numNodes));
         _rsmMonitor.setup(_replSet->getURI());
         getTopologyManager()->setTopologyDescription(_replSet->getTopologyDescription(clock()));
 
@@ -134,6 +137,7 @@ protected:
     }
 
 private:
+    int _numNodes;
     std::unique_ptr<MockReplicaSet> _replSet;
 };
 
@@ -157,7 +161,7 @@ void assertOneOfNodesSelected(MockReplicaSet* replSet,
 }
 
 void assertNodeSelected(MockReplicaSet* replSet, ReadPreference rp, StringData host) {
-    assertOneOfNodesSelected(replSet, rp, std::vector<std::string>{host.toString()});
+    assertOneOfNodesSelected(replSet, rp, std::vector<std::string>{std::string{host}});
 }
 
 TEST_F(BasicRS, QueryPrimary) {
@@ -224,6 +228,116 @@ TEST_F(BasicRS, QuerySecondaryPreferred) {
 TEST_F(BasicRS, CommandSecondaryPreferred) {
     assertOneOfNodesSelected(
         getReplSet(), ReadPreference::SecondaryPreferred, getReplSet()->getSecondaries());
+}
+
+/**
+ * Basic fixture with one primary and six secondaries.
+ */
+class BasicRS7 : public BasicRS {
+protected:
+    BasicRS7() : BasicRS(7) {}
+};
+
+TEST_F(BasicRS7, GetAtLeastOneHostOrRefreshBasic) {
+    ReadPreferenceSetting criteria{ReadPreference::Nearest};
+    stdx::unordered_set<HostAndPort> emptyDeprioritized;
+
+    // deprioritized set is empty - getAtLeastOneHostOrRefresh should return any host
+    auto host = _rsmMonitor.getAtLeastOneHostOrRefresh(criteria, emptyDeprioritized);
+
+    // Should return a valid host
+    ASSERT_FALSE(host.empty());
+}
+
+TEST_F(BasicRS7, GetAtLeastOneHostOrRefreshDeprioritized) {
+    ReadPreferenceSetting criteria{ReadPreference::Nearest};
+    MockReplicaSet* replSet = getReplSet();
+    auto rsHosts = replSet->getHosts();
+
+    HostAndPort removedHost = rsHosts[0];
+
+    stdx::unordered_set<HostAndPort> deprioritized;
+
+    // Fill deprioritized servers - getAtLeastOneHostOrRefresh should avoid them
+    for (size_t i = 1; i < rsHosts.size(); ++i) {
+        deprioritized.insert(rsHosts[i]);
+    }
+    ASSERT_GT(deprioritized.size(), 0u);
+
+    auto host = _rsmMonitor.getAtLeastOneHostOrRefresh(criteria, deprioritized);
+
+    // Should return a valid host
+    ASSERT_FALSE(host.empty());
+    ASSERT_EQ(removedHost, host);
+    ASSERT_EQ(deprioritized.count(host), 0u);
+}
+
+TEST_F(BasicRS7, GetAtLeastOneHostOrRefreshAllDeprioritized) {
+    ReadPreferenceSetting criteria{ReadPreference::Nearest};
+    MockReplicaSet* replSet = getReplSet();
+    auto rsHosts = replSet->getHosts();
+
+    // All hosts deprioritized - getAtLeastOneHostOrRefresh should still return a host (fallback
+    // behavior)
+    stdx::unordered_set<HostAndPort> deprioritized;
+
+    for (size_t i = 0; i < rsHosts.size(); ++i) {
+        deprioritized.insert(rsHosts[i]);
+    }
+    ASSERT_GT(deprioritized.size(), 0u);
+
+    auto host = _rsmMonitor.getAtLeastOneHostOrRefresh(criteria, deprioritized);
+
+    // Should return a valid host
+    ASSERT_FALSE(host.empty());
+    ASSERT_EQ(deprioritized.count(host), 1u);
+}
+
+TEST_F(BasicRS7, GetAtLeastOneHostOrRefreshMultiple) {
+    ReadPreferenceSetting criteria{ReadPreference::Nearest};
+    MockReplicaSet* replSet = getReplSet();
+    auto rsHosts = replSet->getHosts();
+    ASSERT_GTE(rsHosts.size(), 3u);
+
+    stdx::unordered_set<HostAndPort> deprioritized;
+    deprioritized.insert(rsHosts.back());
+    deprioritized.insert(rsHosts.front());
+
+    // Multiple calls with same deprioritized set - should return non-deprioritized
+    for (int i = 0; i < 10; ++i) {
+        auto selectedHost = _rsmMonitor.getAtLeastOneHostOrRefresh(criteria, deprioritized);
+        ASSERT_FALSE(selectedHost.empty());
+
+        // Should never select the deprioritized host
+        ASSERT_EQ(deprioritized.count(selectedHost), 0u);
+    }
+}
+
+TEST_F(BasicRS7, GetAtLeastOneHostOrRefreshPrimaryOnly) {
+    // Primary-only read preference
+    ReadPreferenceSetting criteria{ReadPreference::PrimaryOnly};
+    stdx::unordered_set<HostAndPort> deprioritized;
+    // Deprioritize the primary
+    deprioritized.insert(HostAndPort(getReplSet()->getPrimary()));
+
+    auto selectedHost = _rsmMonitor.getAtLeastOneHostOrRefresh(criteria, deprioritized);
+
+    // Should return the primary as fallback
+    ASSERT_FALSE(selectedHost.empty());
+    ASSERT_EQ(selectedHost.toString(), getReplSet()->getPrimary());
+}
+
+TEST_F(BasicRS7, GetAtLeastOneHostOrRefreshSecondaryPreferred) {
+    ReadPreferenceSetting criteria{ReadPreference::SecondaryPreferred};
+    stdx::unordered_set<HostAndPort> deprioritized;
+    // Deprioritize primary, should select secondary with SecondaryPreferred
+    deprioritized.insert(HostAndPort(getReplSet()->getPrimary()));
+
+    auto selectedHost = _rsmMonitor.getAtLeastOneHostOrRefresh(criteria, deprioritized);
+
+    // Should not select the primary
+    ASSERT_NE(selectedHost.toString(), getReplSet()->getPrimary());
+    ASSERT_EQ(deprioritized.count(selectedHost), 0u);
 }
 
 /**
@@ -454,6 +568,19 @@ TEST_F(PrimaryDown, Nearest) {
     ASSERT_EQUALS(replSet->getSecondaries().front(), doc[HostField.name()].str());
 }
 
+TEST_F(PrimaryDown, GetAtLeastOneHostOrRefreshPrimaryDown) {
+    MockReplicaSet* replSet = getReplSet();
+    ReadPreferenceSetting criteria{ReadPreference::PrimaryPreferred};
+    stdx::unordered_set<HostAndPort> emptyDeprioritized;
+
+    // deprioritized set is empty - getAtLeastOneHostOrRefresh should return a secondary host
+    auto host = _rsmMonitor.getAtLeastOneHostOrRefresh(criteria, emptyDeprioritized);
+
+    // Should return a valid secondary host
+    ASSERT_FALSE(host.empty());
+    ASSERT_EQUALS(replSet->getSecondaries().front(), host.toString());
+}
+
 /**
  * Setup for 2 member replica set with the secondary down.
  */
@@ -595,10 +722,9 @@ protected:
                     oldConfig.findMemberByHostAndPort(HostAndPort(host));
                 membersBuilder.append(BSON("_id" << member->getId().getData() << "host" << host
                                                  << "tags"
-                                                 << BSON("dc"
-                                                         << "ny"
-                                                         << "p"
-                                                         << "1")));
+                                                 << BSON("dc" << "ny"
+                                                              << "p"
+                                                              << "1")));
                 _replSet->getNode(host)->insert(IdentityNS, BSON(HostField(host)));
             }
 
@@ -611,12 +737,11 @@ protected:
                     oldConfig.findMemberByHostAndPort(HostAndPort(host));
                 membersBuilder.append(BSON("_id" << member->getId().getData() << "host" << host
                                                  << "tags"
-                                                 << BSON("dc"
-                                                         << "sf"
-                                                         << "s"
-                                                         << "1"
-                                                         << "group"
-                                                         << "1")));
+                                                 << BSON("dc" << "sf"
+                                                              << "s"
+                                                              << "1"
+                                                              << "group"
+                                                              << "1")));
                 _replSet->getNode(host)->insert(IdentityNS, BSON(HostField(host)));
             }
 
@@ -627,12 +752,11 @@ protected:
                     oldConfig.findMemberByHostAndPort(HostAndPort(host));
                 membersBuilder.append(BSON("_id" << member->getId().getData() << "host" << host
                                                  << "tags"
-                                                 << BSON("dc"
-                                                         << "ma"
-                                                         << "s"
-                                                         << "2"
-                                                         << "group"
-                                                         << "1")));
+                                                 << BSON("dc" << "ma"
+                                                              << "s"
+                                                              << "2"
+                                                              << "group"
+                                                              << "1")));
                 _replSet->getNode(host)->insert(IdentityNS, BSON(HostField(host)));
             }
 
@@ -643,10 +767,9 @@ protected:
                     oldConfig.findMemberByHostAndPort(HostAndPort(host));
                 membersBuilder.append(BSON("_id" << member->getId().getData() << "host" << host
                                                  << "tags"
-                                                 << BSON("dc"
-                                                         << "eu"
-                                                         << "s"
-                                                         << "3")));
+                                                 << BSON("dc" << "eu"
+                                                              << "s"
+                                                              << "3")));
                 _replSet->getNode(host)->insert(IdentityNS, BSON(HostField(host)));
             }
 
@@ -657,10 +780,9 @@ protected:
                     oldConfig.findMemberByHostAndPort(HostAndPort(host));
                 membersBuilder.append(BSON("_id" << member->getId().getData() << "host" << host
                                                  << "tags"
-                                                 << BSON("dc"
-                                                         << "jp"
-                                                         << "s"
-                                                         << "4")));
+                                                 << BSON("dc" << "jp"
+                                                              << "s"
+                                                              << "4")));
                 _replSet->getNode(host)->insert(IdentityNS, BSON(HostField(host)));
             }
 

@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <set>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -42,13 +36,18 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/expression_dependencies.h"
-#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/redact_processor.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/dependency_analysis/expression_dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/util/intrusive_counter.h"
+
+#include <memory>
+#include <set>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -58,11 +57,13 @@ public:
     const char* getSourceName() const final;
     boost::intrusive_ptr<DocumentSource> optimize() final;
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kRedact;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         return {StreamType::kStreaming,
                 PositionRequirement::kNone,
                 HostTypeRequirement::kNone,
@@ -82,16 +83,16 @@ public:
      * Attempts to duplicate the redact-safe portion of a subsequent $match before the $redact
      * stage.
      */
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) final;
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) final;
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
 
-    RedactProcessor* getRedactProcessor() {
-        return _redactProcessor.get_ptr();
+    const std::shared_ptr<RedactProcessor>& getRedactProcessor() const {
+        return _redactProcessor;
     }
 
     boost::intrusive_ptr<Expression> getExpression() {
@@ -107,9 +108,7 @@ private:
                          const boost::intrusive_ptr<Expression>& previsit,
                          Variables::Id currentId);
 
-    GetNextResult doGetNext() final;
-
-    boost::optional<RedactProcessor> _redactProcessor;
+    std::shared_ptr<RedactProcessor> _redactProcessor;
 };
 
 }  // namespace mongo

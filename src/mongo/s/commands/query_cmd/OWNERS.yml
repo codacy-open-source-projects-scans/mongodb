@@ -1,10 +1,8 @@
 version: 1.0.0
 filters:
-  # The top-level command implementations are neither clearly QE or QO, so files in this directory
-  # are owned by the entire query team by default.
   - "*":
     approvers:
-      - 10gen/query
+      - 10gen/query-optimization
   - "OWNERS.yml":
     approvers:
       - 10gen/query-execution-staff-leads
@@ -12,16 +10,29 @@ filters:
       - 10gen/query-integration-staff-leads
   - "cluster_analyze_cmd.cpp":
     approvers:
-      - 10gen/query-optimization-statistics
+      - 10gen/query-optimization
   - "cluster_current_op.cpp":
     approvers:
       - 10gen/query-integration-observability
+  - "cluster_getmore_cmd*":
+    approvers:
+      - 10gen/query-execution-router
+  - "cluster_killcursors_cmd.cpp":
+    approvers:
+      - 10gen/query-execution-router
+  - "cluster_map_reduce_agg*":
+    approvers:
+      - 10gen/query-integration-features
   - "cluster_index_filter_cmd.cpp":
     approvers:
       - 10gen/query-execution-query-settings
   - "cluster_plan_cache_clear_cmd.cpp":
     approvers:
-      - 10gen/query-optimization-plan-cache
+      - 10gen/query-optimization
   - "cluster_profile_cmd.cpp":
     approvers:
       - 10gen/query-integration-observability
+  - "cluster_release_memory_cmd.cpp":
+    approvers:
+      - 10gen/query-execution
+      - 10gen/query-execution-router

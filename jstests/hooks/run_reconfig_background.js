@@ -6,15 +6,21 @@
  * This hook will run concurrently with tests.
  */
 import {DiscoverTopology, Topology} from "jstests/libs/discover_topology.js";
+import newMongoWithRetry from "jstests/libs/retryable_mongo.js";
 
 /**
  * Returns true if the error code is transient.
  */
 function isIgnorableError(codeName) {
-    return (codeName === "ConfigurationInProgress" || codeName === "InterruptedAtShutdown" ||
-            codeName === "InterruptedDueToReplStateChange" || codeName === "NodeNotFound" ||
-            codeName === "NotWritablePrimary" || codeName === "PrimarySteppedDown" ||
-            codeName === "ShutdownInProgress");
+    return (
+        codeName === "ConfigurationInProgress" ||
+        codeName === "InterruptedAtShutdown" ||
+        codeName === "InterruptedDueToReplStateChange" ||
+        codeName === "NodeNotFound" ||
+        codeName === "NotWritablePrimary" ||
+        codeName === "PrimarySteppedDown" ||
+        codeName === "ShutdownInProgress"
+    );
 }
 
 /**
@@ -23,9 +29,12 @@ function isIgnorableError(codeName) {
 function isShutdownError(error) {
     // TODO (SERVER-54026): Remove check for error message once the shell correctly
     // propagates the error code.
-    return error.code === ErrorCodes.ShutdownInProgress ||
+    return (
+        error.code === ErrorCodes.ShutdownInProgress ||
         error.code === ErrorCodes.InterruptedAtShutdown ||
-        error.message.includes("The server is in quiesce mode and will shut down");
+        error.message.includes("The server is in quiesce mode and will shut down") ||
+        error.message.includes("interrupted at shutdown")
+    );
 }
 
 /**
@@ -71,14 +80,14 @@ function reconfigBackground(primary, numNodes) {
     // could lead to generating an overwhelming amount of log messages.
     let conn;
     quietly(() => {
-        conn = new Mongo(primary);
+        conn = newMongoWithRetry(primary);
     });
     assert.neq(null, conn, `Failed to connect to primary '${primary}' for background reconfigs`);
 
-    var config = assert.commandWorked(conn.getDB("admin").runCommand({replSetGetConfig: 1})).config;
+    let config = assert.commandWorked(conn.getDB("admin").runCommand({replSetGetConfig: 1})).config;
 
     // Find the correct host in the member config
-    const primaryHostIndex = (cfg, pHost) => cfg.members.findIndex(m => m.host === pHost);
+    const primaryHostIndex = (cfg, pHost) => cfg.members.findIndex((m) => m.host === pHost);
     const primaryIndex = primaryHostIndex(config, primary);
     jsTestLog(`primaryIndex is ${primaryIndex}`);
     jsTestLog(`primary's config: (configVersion: ${config.version}, configTerm: ${config.term})`);
@@ -86,11 +95,11 @@ function reconfigBackground(primary, numNodes) {
     // Calculate the total number of voting nodes in this set so that we make sure we
     // always have at least two voting nodes. This is so that the primary can always
     // safely step down because there is at least one other electable secondary.
-    const numVotingNodes = config.members.filter(member => member.votes === 1).length;
+    const numVotingNodes = config.members.filter((member) => member.votes === 1).length;
 
     // Randomly change the vote of a node to 1 or 0 depending on its current value. Do not
     // change the primary's votes.
-    var indexToChange = primaryIndex;
+    let indexToChange = primaryIndex;
     while (indexToChange === primaryIndex) {
         // randInt is exclusive of the upper bound.
         indexToChange = Random.randInt(numNodes);
@@ -103,8 +112,7 @@ function reconfigBackground(primary, numNodes) {
     // We want to ensure that there are at least 3 voting nodes so that killing the primary
     // will not affect a majority.
     config.version++;
-    config.members[indexToChange].votes =
-        (config.members[indexToChange].votes === 1 && numVotingNodes > 3) ? 0 : 1;
+    config.members[indexToChange].votes = config.members[indexToChange].votes === 1 && numVotingNodes > 3 ? 0 : 1;
     config.members[indexToChange].priority = config.members[indexToChange].votes;
 
     let votingRes = conn.getDB("admin").runCommand({replSetReconfig: config});
@@ -136,14 +144,16 @@ try {
     // Ignore this error until we find a new primary.
     const kReplicaSetMonitorErrors = [
         /^Could not find host matching read preference.*mode: "primary"/,
-        /^can't connect to new replica set primary/
+        /^can't connect to new replica set primary/,
     ];
 
     if (isNetworkError(e)) {
         jsTestLog(`Ignoring network error: ${tojson(e)}`);
-    } else if (kReplicaSetMonitorErrors.some((regex) => {
-                   return regex.test(e.message);
-               })) {
+    } else if (
+        kReplicaSetMonitorErrors.some((regex) => {
+            return regex.test(e.message);
+        })
+    ) {
         jsTestLog(`Ignoring replica set monitor error: ${tojson(e)}`);
     } else if (isShutdownError(e)) {
         // It's possible that the primary we passed in gets killed by the kill primary hook.

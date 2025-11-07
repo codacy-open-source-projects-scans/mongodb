@@ -30,26 +30,22 @@
 
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mongod.h"
 
-#include <boost/move/utility_core.hpp>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/read_write_concern_defaults.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_tag.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -76,8 +72,8 @@ boost::optional<RWConcernDefault> readWriteConcernDefaultsCacheLookupMongoD(
     // Note that a default constructed RWConcern is returned if no document is found instead of
     // boost::none. This is to avoid excessive lookups when there is no defaults document, because
     // otherwise every attempt to get the defaults from the RWC cache would trigger a lookup.
-    return RWConcernDefault::parse(IDLParserContext("ReadWriteConcernDefaultsCacheLookupMongoD"),
-                                   getPersistedDefaultRWConcernDocument(opCtx));
+    return RWConcernDefault::parse(getPersistedDefaultRWConcernDocument(opCtx),
+                                   IDLParserContext("ReadWriteConcernDefaultsCacheLookupMongoD"));
 }
 
 void readWriteConcernDefaultsMongodStartupChecks(OperationContext* opCtx, bool isReplicaSet) {

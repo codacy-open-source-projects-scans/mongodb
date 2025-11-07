@@ -31,11 +31,9 @@
 
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/exec/sbe/values/bson.h"
-#include "mongo/db/exec/sbe/values/ts_block.h"
+#include "mongo/db/exec/sbe/values/cell_interface.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
 
 namespace mongo::sbe {
 BlockToRowStage::BlockToRowStage(std::unique_ptr<PlanStage> input,
@@ -50,7 +48,9 @@ BlockToRowStage::BlockToRowStage(std::unique_ptr<PlanStage> input,
       _valsOutSlotIds(std::move(valsOut)),
       _bitmapSlotId(bitmapSlotId) {
     _children.emplace_back(std::move(input));
-    invariant(_blockSlotIds.size() == _valsOutSlotIds.size());
+    tassert(11094729,
+            "Expecting number of input block slots to match the number of output slots",
+            _blockSlotIds.size() == _valsOutSlotIds.size());
 }
 
 void BlockToRowStage::freeDeblockedValueRuns() {
@@ -230,7 +230,7 @@ void BlockToRowStage::close() {
     _children[0]->close();
 }
 
-void BlockToRowStage::doSaveState(bool relinquishCursor) {
+void BlockToRowStage::doSaveState() {
     // Copy the values no matter whether the slotsAccessible() returns true or not. We do this
     // because, even if the slot is not accessible, it is not clear whether we'll need the remaining
     // values in our input block or not. We make local copies of all unprocessed values, plus the

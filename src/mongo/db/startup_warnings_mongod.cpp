@@ -29,9 +29,11 @@
 
 #include "mongo/db/startup_warnings_mongod.h"
 
-#include <fmt/format.h>
 #include <fstream>
 #include <ios>
+
+#include <boost/filesystem.hpp>
+#include <fmt/format.h>
 
 #ifdef __linux__
 #include <linux/prctl.h>
@@ -59,7 +61,6 @@
 namespace mongo {
 namespace {
 
-using namespace fmt::literals;
 
 #ifdef __linux__
 #if MONGO_CONFIG_TCMALLOC_GOOGLE
@@ -217,7 +218,7 @@ void checkMultipleNumaNodes() {
 }
 
 std::string thpParameterPath(StringData parameter) {
-    return "{}/{}"_format(ProcessInfo::kTranparentHugepageDirectory, parameter);
+    return fmt::format("{}/{}", ProcessInfo::kTranparentHugepageDirectory, parameter);
 }
 
 void logIncorrectAllocatorSettings(StringData path,

@@ -29,20 +29,18 @@
 
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
 
-#include <boost/optional/optional.hpp>
-
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/basic_types.h"
-#include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/str.h"
+
 
 namespace mongo {
 Counter64& planCacheTotalSizeEstimateBytes =
@@ -126,15 +124,14 @@ std::string SolutionCacheData::toString() const {
     switch (this->solnType) {
         case WHOLE_IXSCAN_SOLN:
             MONGO_verify(this->tree.get());
-            return str::stream() << "(whole index scan solution: "
-                                 << "dir=" << this->wholeIXSolnDir << "; "
-                                 << "tree=" << this->tree->toString() << ")";
+            return str::stream() << "(whole index scan solution: " << "dir=" << this->wholeIXSolnDir
+                                 << "; " << "tree=" << this->tree->toString() << ")";
         case COLLSCAN_SOLN:
             return "(collection scan)";
         case USE_INDEX_TAGS_SOLN:
             MONGO_verify(this->tree.get());
-            return str::stream() << "(index-tagged expression tree: "
-                                 << "tree=" << this->tree->toString() << ")";
+            return str::stream() << "(index-tagged expression tree: " << "tree="
+                                 << this->tree->toString() << ")";
         case VIRTSCAN_SOLN:
             return "(virtual scan)";
     }
@@ -174,9 +171,7 @@ bool shouldCacheQuery(const CanonicalQuery& query) {
     // SBE plan cache is only on when featureFlagSbeFull is enabled, so in cases where the query
     // is SBE ineligble or the SBE plan cache is disabled, we do not cache at all.
     if (!findCommand.getHint().isEmpty()) {
-        if (!query.isSbeCompatible() ||
-            !feature_flags::gFeatureFlagSbeFull.isEnabled(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        if (!query.isSbeCompatible() || !feature_flags::gFeatureFlagSbeFull.isEnabled()) {
             return false;
         }
     }

@@ -29,13 +29,13 @@
 
 #include "mongo/db/pipeline/serverless_aggregation_context_fixture.h"
 
-#include "mongo/s/sharding_state.h"
+#include "mongo/db/topology/sharding_state.h"
 
 namespace mongo {
 
 ServerlessAggregationContextFixture::ServerlessAggregationContextFixture()
     : AggregationContextFixture(NamespaceString::createNamespaceString_forTest(
-          TenantId(OID::gen()), "unittests", "pipeline_test")) {
+          TenantId(OID::gen()), "test", "pipeline_test")) {
     ShardingState::create(getServiceContext());
 }
 

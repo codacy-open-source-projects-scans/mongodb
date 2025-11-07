@@ -3,12 +3,18 @@
 import os.path
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+from typing import Optional
 
 import bson
 import pymongo
 import pymongo.errors
 import pymongo.write_concern
 
+from buildscripts.resmokelib.extensions import (
+    delete_extension_configs,
+    find_and_generate_extension_configs,
+)
 from buildscripts.resmokelib.testing.fixtures import interface
 
 
@@ -70,6 +76,9 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         initial_sync_uninitialized_fcv=False,
         hide_initial_sync_node_from_conn_string=False,
         launch_mongot=False,
+        load_all_extensions=False,
+        router_endpoint_for_mongot: Optional[int] = None,
+        disagg_base_config=None,
     ):
         """Initialize ReplicaSetFixture."""
 
@@ -81,6 +90,15 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         self.mongod_options = self.fixturelib.make_historic(
             self.fixturelib.default_if_none(mongod_options, {})
         )
+
+        self.load_all_extensions = load_all_extensions or self.config.LOAD_ALL_EXTENSIONS
+        if self.load_all_extensions:
+            self.loaded_extensions = find_and_generate_extension_configs(
+                is_evergreen=self.config.EVERGREEN_TASK_ID,
+                logger=self.logger,
+                mongod_options=self.mongod_options,
+            )
+
         self.preserve_dbpath = preserve_dbpath
         self.start_initial_sync_node = start_initial_sync_node
         self.electable_initial_sync_node = electable_initial_sync_node
@@ -105,6 +123,8 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         self.fcv = None
         # Used by suites that run search integration tests.
         self.launch_mongot = launch_mongot
+        # Used to set --mongoHostAndPort startup option on mongot.
+        self.router_endpoint_for_mongot = router_endpoint_for_mongot
         # Use the values given from the command line if they exist for linear_chain and num_nodes.
         linear_chain_option = self.fixturelib.default_if_none(
             self.config.LINEAR_CHAIN, linear_chain
@@ -129,6 +149,8 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         # Set the default oplogSize to 511MB.
         self.mongod_options.setdefault("oplogSize", 511)
 
+        self.disagg_base_config = disagg_base_config
+
         # The dbpath in mongod_options is used as the dbpath prefix for replica set members and
         # takes precedence over other settings. The ShardedClusterFixture uses this parameter to
         # create replica sets and assign their dbpath structure explicitly.
@@ -145,16 +167,35 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         self.initial_sync_node = None
         self.initial_sync_node_idx = -1
         self.use_auto_bootstrap_procedure = use_auto_bootstrap_procedure
-        # This will be set in setup() after the MongoTFixture has been launched.
+        # The below ports will be set in setup() after the MongoTFixture has been launched.
         self.mongot_port = None
+        # mongot_grpc_port is the ingress grpc port on mongot that is configured for the search
+        # in community architecture. See setup_mongot_params and MongoDFixture.__init__ for more details.
+        self.mongot_grpc_port = None
         # Track the fixture removal [teardown] performed during removeShard testing.
         # This is needed, because we expect the fixture to be in the 'running' state
         # when the evergeen job performs the final teardown. Therefore if the fixture was
         # teared down earlier, it must be skipped during those final checks.
         self.removeshard_teardown_marker = False
+        self.removeshard_teardown_mutex = Lock()
+        # Track the number of times the fixture has been teared down. This can be used as a restart
+        # indicator for hooks that need to reset state upon a restart.
+        self.teardown_counter = 0
 
     def setup(self):
         """Set up the replica set."""
+
+        if self.disagg_base_config:
+            # Wait for primary (first node) to get elected first before
+            # starting other nodes, otherwise the election can race.
+            self.nodes[0].setup()
+            self.nodes[0].await_ready()
+            self._await_primary()
+            for i in range(1, self.num_nodes):
+                self.nodes[i].setup()
+                self.nodes[i].await_ready()
+            return
+
         start_node = 0
         if self.use_auto_bootstrap_procedure:
             # We need to wait for the first node to finish auto-bootstrapping so that we can
@@ -308,15 +349,6 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
             for ind in range(2, len(members) + 1):
                 self._add_node_to_repl_set(client, repl_config, ind, members)
 
-        if self.launch_mongot:
-            # To model Atlas Search's coupled architecture, resmoke deploys a mongot for each
-            # mongod node in a replica set.
-            for node in self.nodes:
-                node.setup_mongot()
-            # Saving the mongot port to the ReplicaSetFixture allows the ShardedClusterFixture
-            # to spin up a mongos with a connection to the last launched mongot.
-            self.mongot_port = node.mongot_port
-
         self.removeshard_teardown_marker = False
 
     def _all_mongo_d_s_t(self):
@@ -366,7 +398,6 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
                 # These error codes may be transient, and so we retry the reconfig with a
                 # (potentially) higher config version. We should not receive these codes
                 # indefinitely.
-                # pylint: disable=too-many-boolean-expressions
                 if err.code not in [
                     ReplicaSetFixture._NEW_REPLICA_SET_CONFIGURATION_INCOMPATIBLE,
                     ReplicaSetFixture._CURRENT_CONFIG_NOT_COMMITTED_YET,
@@ -459,8 +490,8 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         client = primary.mongo_client()
         while True:
             self.logger.info("Waiting for primary on port %d to be elected.", primary.port)
-            is_master = client.admin.command("isMaster")["ismaster"]
-            if is_master:
+            cmd_result = client.admin.command("isMaster")
+            if cmd_result["ismaster"]:
                 break
             time.sleep(0.1)  # Wait a little bit before trying again.
         self.logger.info("Primary on port %d successfully elected.", primary.port)
@@ -670,8 +701,11 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         sync_node_conn = initial_sync_node.mongo_client()
         sync_node_conn.admin.command(failpoint_off_cmd)
 
-    def _do_teardown(self, mode=None):
+    def _do_teardown(self, finished=False, mode=None):
         self.logger.info("Stopping all members of the replica set '%s'...", self.replset_name)
+
+        if finished and self.load_all_extensions and self.loaded_extensions:
+            delete_extension_configs(self.loaded_extensions, self.logger)
 
         running_at_start = self.is_running()
         if not running_at_start:
@@ -705,6 +739,7 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
 
         if teardown_handler.was_successful():
             self.logger.info("Successfully stopped all members of the replica set.")
+            self.teardown_counter += 1
         else:
             self.logger.error("Stopping the replica set fixture failed.")
             raise self.fixturelib.ServerFailure(teardown_handler.get_error_message())
@@ -947,7 +982,7 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
             # into Rollback (which causes it to close any open connections).
             return False
 
-    def restart_node(self, chosen):
+    def restart_node(self, chosen, temporary_flags={}):
         """Restart the new step up node."""
         self.logger.info(
             "Waiting for the old primary on port %d of replica set '%s' to exit.",
@@ -983,7 +1018,7 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
         original_preserve_dbpath = chosen.preserve_dbpath
         chosen.preserve_dbpath = True
         try:
-            chosen.setup()
+            chosen.setup(temporary_flags=temporary_flags)
             self.logger.info(interface.create_fixture_table(self))
             chosen.await_ready()
         finally:
@@ -1115,6 +1150,113 @@ class ReplicaSetFixture(interface.ReplFixture, interface._DockerComposeInterface
     def write_historic(self, obj):
         """Convert the obj to a record to track history."""
         self.fixturelib.make_historic(obj)
+
+    def internode_validation(self):
+        """
+        Perform internode validation on this replica set using extended validate. Compares the 'all' and 'metadata' hashes of each collection.
+        """
+        self.logger.info("Waiting for all nodes to be caught up")
+        primary_client = interface.build_client(self.get_primary(), self.auth_options)
+        coll = primary_client["test"]["validate.hook"].with_options(
+            write_concern=pymongo.write_concern.WriteConcern(w=len(self.nodes))
+        )
+        coll.insert_one({"a": 1})
+        coll.drop()
+
+        self.logger.info("Performing Internode Validation")
+
+        # Collections we exclude from the hash comparisons. This is because these collections can contain different document contents for valid reasons (i.e. implicitly replicated, TTL indexes, etc)
+        excluded_config_collections = [
+            "system.preimages",
+            "mongos",
+            "rangeDeletions",
+            "sampledQueries",
+            "sampledQueriesDiff",
+            "analyzeShardKeySplitPoints",
+            "system.sessions",
+            "actionlog",
+        ]
+
+        # the 'system.profile' collections are unreplicated and should not be compared.
+        excluded_any_db_collections = ["system.profile"]
+
+        base_hashes = {}
+        filter = {"type": "collection"}
+        for node in self.nodes:
+            client = interface.build_client(node, self.auth_options)
+            # Skip validating collections for arbiters.
+            admin_db = client.get_database("admin")
+            ret = admin_db.command("isMaster")
+            if "arbiterOnly" in ret and ret["arbiterOnly"]:
+                self.logger.info("Skipping collection validation on arbiter")
+                continue
+
+            hashes = {}
+            something_set = False
+            for db_name in client.list_database_names():
+                # the 'local' database is unreplicated and should not be compared.
+                if db_name == "local":
+                    continue
+                if db_name not in hashes:
+                    hashes[db_name] = {}
+                db = client.get_database(db_name)
+                for coll_name in db.list_collection_names(filter=filter):
+                    # Skip excluded collections which all live in the 'config' database.
+                    if db_name == "config" and coll_name in excluded_config_collections:
+                        continue
+                    if coll_name in excluded_any_db_collections:
+                        continue
+                    validate_cmd = {"validate": coll_name, "collHash": True}
+                    ret = db.command(validate_cmd, check=False)
+                    if "all" in ret and "metadata" in ret:
+                        something_set = True
+                        hashes[db_name][coll_name] = {
+                            "all": ret["all"],
+                            "metadata": ret["metadata"],
+                        }
+                    elif not self.fcv:
+                        # 'all' and 'metadata' should only not exist when in multiversion suite.
+                        raise RuntimeError(
+                            f"Missing {db_name}.{coll_name} hashes on a node outside of a multiversion suite."
+                        )
+                    elif something_set:
+                        # we have previously gotten a hash for this node, so we should continue to get hashes for it.
+                        raise RuntimeError(
+                            f"Missing {db_name}.{coll_name} hashes on a node when we previously received hashes on other namespaces."
+                        )
+
+            if not base_hashes and something_set:
+                base_hashes = hashes
+            elif something_set:
+                self.logger.info(f"Base Hashes: {base_hashes}")
+                self.logger.info(f"Comparing Hashes: {hashes}")
+                # Compare the sets of hashes
+                for db_name in base_hashes:
+                    # No collection hashes for this DB entry, skipping.
+                    if not base_hashes[db_name]:
+                        continue
+                    if db_name not in hashes:
+                        raise RuntimeError(
+                            f"Missing {db_name} hashes on a node when it was expected to exist."
+                        )
+                    for coll_name in base_hashes[db_name]:
+                        if coll_name not in hashes[db_name]:
+                            raise RuntimeError(
+                                f"Missing {db_name}.{coll_name} hashes on a node when it was expected to exist."
+                            )
+                        base_hash = base_hashes[db_name][coll_name]
+                        comp_hash = hashes[db_name][coll_name]
+                        if base_hash["all"] != comp_hash["all"]:
+                            raise RuntimeError(
+                                f"all hash difference on {db_name}.{coll_name}. {base_hash['all']} vs {comp_hash['all']}"
+                            )
+                        # Metadata hashes can be different on multiversion suites due to removed fields from indexes.
+                        if base_hash["metadata"] != comp_hash["metadata"] and not self.fcv:
+                            raise RuntimeError(
+                                f"metadata hash difference on {db_name}.{coll_name}. {base_hash['metadata']} vs {comp_hash['metadata']}"
+                            )
+
+        self.logger.info("Internode Validation Successful")
 
 
 def get_last_optime(client, fixturelib):

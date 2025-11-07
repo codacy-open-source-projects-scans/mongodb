@@ -30,11 +30,12 @@
 
 #include "mongo/db/storage/storage_file_util.h"
 
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
 #include <cerrno>
 #include <string>
 #include <system_error>
+
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
 // IWYU pragma: no_include "boost/system/detail/error_code.hpp"
 
 #ifdef __linux__
@@ -44,8 +45,6 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/file.h"
 #include "mongo/util/str.h"

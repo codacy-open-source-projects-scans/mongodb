@@ -32,11 +32,22 @@
  */
 
 
+#include "mongo/unittest/unittest.h"
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/logv2/log.h"
+#include "mongo/stdx/type_traits.h"
+#include "mongo/unittest/assert.h"
+#include "mongo/unittest/death_test.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/unittest/stringify.h"
+#include "mongo/util/assert_util.h"
+
 #include <array>
-#include <boost/optional.hpp>
 #include <cstddef>
 #include <exception>
-#include <fmt/format.h>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -48,21 +59,9 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/none_t.hpp>
+#include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/unittest/stringify.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/util/assert_util.h"
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -167,17 +166,15 @@ TEST(UnitTestSelfTest, TestAssertStringOmits) {
     ASSERT_TEST_FAILS_MATCH(ASSERT_STRING_OMITS("abcdef", "bcd") << "XmsgX", "XmsgX");
 }
 
-TEST(UnitTestSelfTest, TestAssertIdentity) {
-    auto intIdentity = [](int x) {
-        return x;
-    };
-    ASSERT_IDENTITY(123, intIdentity);
-    ASSERT_IDENTITY(123, [](int x) { return x; });
-    auto zero = [](auto) {
-        return 0;
-    };
-    ASSERT_TEST_FAILS(ASSERT_IDENTITY(1, zero));
-    ASSERT_TEST_FAILS_MATCH(ASSERT_IDENTITY(1, zero) << "XmsgX", "XmsgX");
+TEST(UnitTestSelfTest, TestAssertStringSearchRegex) {
+    ASSERT_STRING_SEARCH_REGEX("abcdef", "^abcdef$");
+    ASSERT_STRING_SEARCH_REGEX("abcdef", "cd");
+    ASSERT_STRING_SEARCH_REGEX("abcdef", ".*");
+    ASSERT_TEST_FAILS(ASSERT_STRING_SEARCH_REGEX("abcdef", "ce"));
+    ASSERT_TEST_FAILS(ASSERT_STRING_SEARCH_REGEX("abcdef", ".z."));
+    // A regex starting with ? is invalid and shouldn't match.
+    ASSERT_TEST_FAILS(ASSERT_STRING_SEARCH_REGEX("?", "?"));
+    ASSERT_TEST_FAILS(ASSERT_STRING_SEARCH_REGEX("abcdef", "?.*"));
 }
 
 TEST(UnitTestSelfTest, TestStreamingIntoFailures) {
@@ -305,7 +302,7 @@ TEST_F(UnitTestFormatTest, FormatEnumClass) {
 
 namespace test_extension {
 struct X {
-    friend std::string stringifyForAssert(const X& x) {
+    friend std::string stringify_forTest(const X& x) {
         return "X{" + std::to_string(x.x) + "}";
     }
 
@@ -343,7 +340,7 @@ TEST(UnitTestSelfTest, StackTraceForAssertion) {
         threw = true;
     }
     ASSERT_TRUE(threw);
-    ASSERT_STRING_CONTAINS(stacktrace, "printStackTrace");
+    ASSERT_STRING_CONTAINS(stacktrace, "printStructuredStackTrace");
 }
 
 TEST(UnitTestSelfTest, ComparisonAssertionOverloadResolution) {

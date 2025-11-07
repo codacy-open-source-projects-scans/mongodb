@@ -27,33 +27,36 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <utility>
+#include "mongo/db/transaction/transaction_history_iterator.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/db_raii.h"
-#include "mongo/db/matcher/expression_parser.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/stats/top.h"
-#include "mongo/db/transaction/transaction_history_iterator.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#include <memory>
+#include <utility>
 
 namespace mongo {
 
@@ -83,7 +86,12 @@ BSONObj findOneOplogEntry(OperationContext* opCtx,
                                               .allowedFeatures =
                                                   MatchExpressionParser::kBanAllSpecialFeatures},
     });
-    AutoGetCollectionForReadMaybeLockFree oplogRead(opCtx, NamespaceString::kRsOplogNamespace);
+    const auto oplogRead = acquireCollectionOrViewMaybeLockFree(
+        opCtx,
+        CollectionOrViewAcquisitionRequest(NamespaceString::kRsOplogNamespace,
+                                           PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                           repl::ReadConcernArgs::get(opCtx),
+                                           AcquisitionPrerequisites::kRead));
 
     const auto localDb = DatabaseHolder::get(opCtx)->getDb(opCtx, DatabaseName::kLocal);
     invariant(localDb);
@@ -97,8 +105,8 @@ BSONObj findOneOplogEntry(OperationContext* opCtx,
 
     const auto yieldPolicy = permitYield ? PlanYieldPolicy::YieldPolicy::YIELD_AUTO
                                          : PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY;
-    auto exec = uassertStatusOK(getExecutorFind(
-        opCtx, MultipleCollectionAccessor{&oplogRead.getCollection()}, std::move(cq), yieldPolicy));
+    auto exec = uassertStatusOK(
+        getExecutorFind(opCtx, MultipleCollectionAccessor{oplogRead}, std::move(cq), yieldPolicy));
 
     PlanExecutor::ExecState getNextResult;
     try {

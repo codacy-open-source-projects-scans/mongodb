@@ -28,20 +28,21 @@
  */
 
 
-#include <cstdint>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/repl/apply_ops_command_info.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <cstdint>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -49,37 +50,35 @@
 namespace mongo {
 namespace repl {
 
-namespace {
+namespace apply_ops_command_info_details {
 
 /**
  * Return true iff the applyOpsCmd can be executed in a single WriteUnitOfWork.
  */
 bool _parseAreOpsCrudOnly(const BSONObj& applyOpCmd) {
     for (const auto& elem : applyOpCmd.firstElement().Obj()) {
-        const char* opType = elem.Obj().getStringField("op").rawData();
+        const char* opType = elem.Obj().getStringField("op").data();
 
-        // All atomic ops have an opType of length 1.
-        if (opType[0] == '\0' || opType[1] != '\0')
+        if (opType == "i"_sd) {
+            continue;
+        } else if (opType == "ci"_sd) {
+            continue;
+        } else if (opType == "d"_sd) {
+            continue;
+        } else if (opType == "cd"_sd) {
+            continue;
+        } else if (opType == "u"_sd) {
+            continue;
+        } else if (opType == "n"_sd) {
+            continue;
+        } else {
             return false;
-
-        // Only consider CRUD operations.
-        switch (*opType) {
-            case 'd':
-            case 'n':
-            case 'u':
-                break;
-            case 'i':
-                break;
-            // Fallthrough.
-            default:
-                return false;
         }
     }
-
     return true;
 }
 
-}  // namespace
+}  // namespace apply_ops_command_info_details
 
 // static
 ApplyOpsCommandInfo ApplyOpsCommandInfo::parse(const BSONObj& applyOpCmd) {
@@ -96,14 +95,14 @@ bool ApplyOpsCommandInfo::areOpsCrudOnly() const {
 }
 
 ApplyOpsCommandInfo::ApplyOpsCommandInfo(const BSONObj& applyOpCmd)
-    : _areOpsCrudOnly(_parseAreOpsCrudOnly(applyOpCmd)) {
+    : _areOpsCrudOnly(apply_ops_command_info_details::_parseAreOpsCrudOnly(applyOpCmd)) {
     const auto tid = repl::OplogEntry::parseTid(applyOpCmd);
     const auto vts = tid
         ? boost::make_optional(auth::ValidatedTenancyScopeFactory::create(
               *tid, auth::ValidatedTenancyScopeFactory::TrustedForInnerOpMsgRequestTag{}))
         : boost::none;
-    parseProtected(IDLParserContext("applyOps", vts, tid, SerializationContext::stateDefault()),
-                   applyOpCmd);
+    parseProtected(applyOpCmd,
+                   IDLParserContext("applyOps", vts, tid, SerializationContext::stateDefault()));
 
     uassert(6711600,
             "applyOps command no longer supports the 'preCondition' option",

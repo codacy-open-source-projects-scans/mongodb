@@ -29,16 +29,18 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-
 #include "mongo/db/repl/oplog_buffer.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/interruptible.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <memory>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace repl {
@@ -49,7 +51,7 @@ class StorageInterface;
  * Oplog buffer proxy that caches front and back (most recently pushed) oplog entries in the target
  * oplog buffer.
  */
-class OplogBufferProxy : public OplogBuffer {
+class MONGO_MOD_PARENT_PRIVATE OplogBufferProxy : public OplogBuffer {
     OplogBufferProxy(const OplogBufferProxy&) = delete;
     OplogBufferProxy& operator=(const OplogBufferProxy&) = delete;
 

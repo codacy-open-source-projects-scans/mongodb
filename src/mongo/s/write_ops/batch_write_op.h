@@ -29,29 +29,32 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/router_role_api/ns_targeter.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/query/write_ops/write_ops_parsers.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/rpc/write_concern_error_detail.h"
+#include "mongo/s/write_ops/batched_command_request.h"
+#include "mongo/s/write_ops/batched_command_response.h"
+#include "mongo/s/write_ops/batched_upsert_detail.h"
+#include "mongo/s/write_ops/pause_migrations_during_multi_updates_enablement.h"
+#include "mongo/s/write_ops/wc_error.h"
+#include "mongo/s/write_ops/write_op.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/util/modules.h"
+
 #include <functional>
 #include <map>
 #include <memory>
 #include <set>
 #include <vector>
 
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/query/write_ops/write_ops_parsers.h"
-#include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/rpc/write_concern_error_detail.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/ns_targeter.h"
-#include "mongo/s/write_ops/batched_command_request.h"
-#include "mongo/s/write_ops/batched_command_response.h"
-#include "mongo/s/write_ops/batched_upsert_detail.h"
-#include "mongo/s/write_ops/pause_migrations_during_multi_updates_enablement.h"
-#include "mongo/s/write_ops/write_op.h"
-#include "mongo/stdx/unordered_map.h"
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -75,21 +78,6 @@ struct ShardError {
 
     ShardEndpoint endpoint;
     write_ops::WriteError error;
-};
-
-/**
- * Simple struct for storing a write concern error with an endpoint.
- *
- * Certain types of errors are not stored in WriteOps or must be returned to a caller.
- */
-struct ShardWCError {
-    ShardWCError(const ShardId& shardName, const WriteConcernErrorDetail& error)
-        : shardName(shardName) {
-        error.cloneTo(&this->error);
-    }
-
-    ShardId shardName;
-    WriteConcernErrorDetail error;
 };
 
 using TargetedBatchMap = std::map<ShardId, std::unique_ptr<TargetedWriteBatch>>;
@@ -175,7 +163,9 @@ public:
      * BatchWriteOp.
      */
     void noteBatchError(const TargetedWriteBatch& targetedBatch,
-                        const write_ops::WriteError& error);
+                        const write_ops::WriteError& error,
+                        const WriteConcernErrorDetail* wce = nullptr,
+                        TrackedErrors* trackedErrors = nullptr);
 
     /**
      * Aborts any further writes in the batch with the provided error.  There must be no pending
@@ -267,7 +257,7 @@ private:
 
     // Statement ids for the ops that had already been executed, thus were not executed in this
     // batch write.
-    std::vector<StmtId> _retriedStmtIds;
+    std::set<StmtId> _retriedStmtIds;
 
     // Stats for the entire batch op
     int _numInserted{0};
@@ -310,16 +300,45 @@ private:
 typedef std::function<const NSTargeter&(const WriteOp& writeOp)> GetTargeterFn;
 typedef std::function<int(const WriteOp& writeOp, ShardId& shard)> GetWriteSizeFn;
 
-// Utility function to merge write concern errors received from various shards.
-boost::optional<WriteConcernErrorDetail> mergeWriteConcernErrors(
-    const std::vector<ShardWCError>& wcErrors);
-
 // Utility function to add the actualCollection field into a WriteError if it does not already
 // exist, contacting the primary shard if it needs to.
 void populateCollectionUUIDMismatch(OperationContext* opCtx,
                                     write_ops::WriteError* error,
                                     boost::optional<std::string>* actualCollection,
                                     bool* hasContactedPrimaryShard);
+
+class BatchCommandSizeEstimatorBase {
+public:
+    BatchCommandSizeEstimatorBase() = default;
+    virtual ~BatchCommandSizeEstimatorBase() = default;
+
+    virtual int getBaseSizeEstimate() const = 0;
+    virtual int getOpSizeEstimate(int opIdx, const ShardId& shard) const = 0;
+    virtual void addOpToBatch(int opIdx, const ShardId& shard) = 0;
+
+protected:
+    // Copy/move constructors and assignment operators are declared protected to prevent slicing.
+    // Derived classes can supply public copy/move constructors and assignment operators if desired.
+    BatchCommandSizeEstimatorBase(const BatchCommandSizeEstimatorBase&) = default;
+    BatchCommandSizeEstimatorBase(BatchCommandSizeEstimatorBase&&) = default;
+    BatchCommandSizeEstimatorBase& operator=(const BatchCommandSizeEstimatorBase&) = default;
+    BatchCommandSizeEstimatorBase& operator=(BatchCommandSizeEstimatorBase&&) = default;
+};
+
+class BatchedCommandSizeEstimator final : public BatchCommandSizeEstimatorBase {
+public:
+    explicit BatchedCommandSizeEstimator(OperationContext* opCtx,
+                                         const BatchedCommandRequest& clientRequest);
+
+    int getBaseSizeEstimate() const final;
+    int getOpSizeEstimate(int opIdx, const ShardId& shardId) const final;
+    void addOpToBatch(int opIdx, const ShardId& shardId) final {}
+
+private:
+    const BatchedCommandRequest& _clientRequest;
+    const bool _isRetryableWriteOrInTransaction;
+    const int _baseSizeEstimate;
+};
 
 // Helper function to target ready writeOps. See BatchWriteOp::targetBatch for details.
 StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
@@ -328,7 +347,6 @@ StatusWith<WriteType> targetWriteOps(OperationContext* opCtx,
                                      bool recordTargetErrors,
                                      PauseMigrationsDuringMultiUpdatesEnablement& pauseMigrations,
                                      GetTargeterFn getTargeterFn,
-                                     GetWriteSizeFn getWriteSizeFn,
-                                     int baseCommandSizeBytes,
+                                     BatchCommandSizeEstimatorBase& sizeEstimator,
                                      TargetedBatchMap& batchMap);
 }  // namespace mongo

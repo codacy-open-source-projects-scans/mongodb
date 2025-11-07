@@ -32,27 +32,28 @@
 
 #if defined(MONGO_STACKTRACE_CAN_DUMP_ALL_THREADS)
 
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
 #include <atomic>
-#include <boost/filesystem/directory.hpp>
-#include <boost/filesystem/fstream.hpp>
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
-#include <boost/iterator/iterator_facade.hpp>
 #include <cerrno>
 #include <csignal>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
-#include <fmt/format.h>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/filesystem/directory.hpp>
+#include <boost/filesystem/fstream.hpp>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/iterator/iterator_facade.hpp>
+#include <fmt/format.h>
 // IWYU pragma: no_include <syscall.h>
 // IWYU pragma: no_include "bits/types/siginfo_t.h"
 
@@ -68,8 +69,6 @@
 #include "mongo/bson/oid.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/future.h"
 #include "mongo/util/stacktrace_somap.h"
@@ -209,7 +208,7 @@ public:
 
 private:
     std::string makeId() {
-        return format(FMT_STRING("{:03d}"), _serial++);
+        return fmt::format("{:03d}", _serial++);
     }
 
     size_t _hits = 0;
@@ -304,16 +303,10 @@ public:
     void printStacks(StackTraceSink& sink);
     void printStacks();
 
-    /*
-     * This function is currently prone to deadlocks and should not be used.
-     * For more information, refer to SERVER-90775.
-     * TODO (SERVER-90775): Verify that this function is no longer deadlock prone and remove the
-     * usage warnings.
-     */
-    void printAllThreadStacksBlocking_UNSAFE();
+    void printAllThreadStacksBlocking();
 
     /**
-     * We need signals for two purpposes in the stack tracing system.
+     * We need signals for two purposes in the stack tracing system.
      *
      * An external process sends a signal to initiate stack tracing.  When that's received,
      * we *also* need a signal to send to each thread to cause to dump its backtrace.
@@ -321,7 +314,7 @@ public:
      *
      * Since all threads are open to receiving this signal, any of them can be selected to
      * receive it when it comes from outside. So we arrange for any thread that receives the
-     * undirected stack trace signal to re-issue it directy at the signal processing thread.
+     * undirected stack trace signal to re-issue it directly at the signal processing thread.
      *
      * The signal processing thread will have the signal blocked, and handle it
      * synchronously with sigwaitinfo, so this handler only applies to the other
@@ -506,7 +499,11 @@ void State::printStacks() {
     printToEmitter(emitter);
 }
 
-void State::printAllThreadStacksBlocking_UNSAFE() {
+void State::printAllThreadStacksBlocking() {
+    if (!_signal) {
+        LOGV2_ERROR(9967000, "Failed to print all thread stacks: signal handler not initialized.");
+        return;
+    }
     auto waiter = _printAllStacksSession.waiter();
     kill(getpid(), _signal);  // The SignalHandler thread calls printAllThreadStacks.
 }
@@ -539,7 +536,7 @@ void State::printToEmitter(AbstractEmitter& emitter) {
                 StringData key = be.fieldNameStringData();
 
                 // Handle 'somap' specially. Pass everything else through.
-                if (be.type() == BSONType::Array && key == "somap"_sd) {
+                if (be.type() == BSONType::array && key == "somap"_sd) {
                     BSONArrayBuilder soMapArr(procInfo.subarrayStart(key));
                     for (const BSONElement& ae : be.Array()) {
                         BSONObj bRec = ae.embeddedObject();
@@ -666,15 +663,11 @@ void printAllThreadStacks() {
     stack_trace_detail::stateSingleton->printStacks();
 }
 
-/*
- * This function is intended for usage of printing stacktraces when the caller is not the
- * SignalHandler. This function is currently prone to deadlocks and should not be used. For more
- * information, refer to SERVER-90775.
- * TODO (SERVER-90775): Verify that this function is no longer deadlock prone and remove the
- * usage warnings.
+/**
+ * For use by threads other than the SignalHandler thread.
  */
-void printAllThreadStacksBlocking_UNSAFE() {
-    stack_trace_detail::stateSingleton->printAllThreadStacksBlocking_UNSAFE();
+void printAllThreadStacksBlocking() {
+    stack_trace_detail::stateSingleton->printAllThreadStacksBlocking();
 }
 
 void setupStackTraceSignalAction(int signal) {

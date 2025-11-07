@@ -29,23 +29,24 @@
 
 #pragma once
 
-#include <functional>
-#include <memory>
-#include <string>
-#include <variant>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/restore_context.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/elapsed_tracker.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#include <functional>
+#include <memory>
+#include <string>
+#include <variant>
 
 namespace mongo {
 
@@ -64,18 +65,12 @@ public:
     virtual void duringYield(OperationContext*) const = 0;
 
     /**
-     * Called if the PlanYieldPolicy observes a WriteConflictException while attempting to restore
-     * an execution plan.
-     */
-    virtual void handledWriteConflict(OperationContext*) const = 0;
-
-    /**
      * If the yield policy is INTERRUPT_ONLY, this is called prior to checking for interrupt.
      */
     virtual void preCheckInterruptOnly(OperationContext* opCtx) const = 0;
 };
 
-class PlanYieldPolicy {
+class MONGO_MOD_PUBLIC PlanYieldPolicy {
 public:
     enum class YieldPolicy {
         // Any call to getNext() may yield. In particular, the executor may die on any call to
@@ -142,7 +137,7 @@ public:
     }
 
     static YieldPolicy parseFromBSON(StringData element) {
-        const std::string& yieldPolicy = element.toString();
+        const std::string& yieldPolicy = std::string{element};
         if (yieldPolicy == "YIELD_AUTO") {
             return YieldPolicy::YIELD_AUTO;
         }
@@ -184,8 +179,6 @@ public:
      */
     static YieldPolicy getPolicyOverrideForOperation(OperationContext* opCtx, YieldPolicy desired);
 
-    class YieldThroughAcquisitions {};
-
     /**
      * Constructs a PlanYieldPolicy of the given 'policy' type. This class uses an ElapsedTracker
      * to keep track of elapsed time, which is initialized from the parameters 'cs',
@@ -202,7 +195,6 @@ public:
                     ClockSource* cs,
                     int yieldIterations,
                     Milliseconds yieldPeriod,
-                    std::variant<const Yieldable*, YieldThroughAcquisitions> yieldable,
                     std::unique_ptr<const YieldPolicyCallbacks> callbacks);
 
     virtual ~PlanYieldPolicy() = default;
@@ -240,7 +232,9 @@ public:
      * been relinquished.
      */
     virtual Status yieldOrInterrupt(OperationContext* opCtx,
-                                    std::function<void()> whileYieldingFn = nullptr);
+                                    const std::function<void()>& whileYieldingFn,
+                                    RestoreContext::RestoreType restoreType,
+                                    const std::function<void()>& afterSnapshotAbandonFn = nullptr);
 
     /**
      * All calls to shouldYieldOrInterrupt() will return true until the next call to
@@ -296,15 +290,6 @@ public:
         return _policy;
     }
 
-    void setYieldable(const Yieldable* yieldable) {
-        invariant(!usesCollectionAcquisitions());
-        _yieldable = yieldable;
-    }
-
-    bool usesCollectionAcquisitions() const {
-        return holds_alternative<YieldThroughAcquisitions>(_yieldable);
-    }
-
 protected:
     /**
      * The function that actually do check for interrupt or release locks or storage engine state.
@@ -318,17 +303,10 @@ private:
      * specific query execution engines.
      */
     virtual void saveState(OperationContext* opCtx) = 0;
-    virtual void restoreState(OperationContext* opCtx, const Yieldable* yieldable) = 0;
+    virtual void restoreState(OperationContext* opCtx,
+                              const Yieldable* yieldable,
+                              RestoreContext::RestoreType restoreType) = 0;
 
-    /**
-     * TODO SERVER-59620: Remove this.
-     *
-     * Indicates whether we should use the feature-flag-guarded behavior for
-     * keeping data pinned across yields.
-     */
-    virtual bool useExperimentalCommitTxnBehavior() const {
-        return false;
-    }
 
     /**
      * Relinquishes and reacquires lock manager locks and catalog state. Also responsible for
@@ -337,12 +315,13 @@ private:
      */
     void performYield(OperationContext* opCtx,
                       const Yieldable& yieldable,
-                      std::function<void()> whileYieldingFn);
+                      std::function<void()> whileYieldingFn,
+                      std::function<void()> afterSnapshotAbandonFn);
     void performYieldWithAcquisitions(OperationContext* opCtx,
-                                      std::function<void()> whileYieldingFn);
+                                      std::function<void()> whileYieldingFn,
+                                      std::function<void()> afterSnapshotAbandonFn);
 
     const YieldPolicy _policy;
-    std::variant<const Yieldable*, YieldThroughAcquisitions> _yieldable;
     std::unique_ptr<const YieldPolicyCallbacks> _callbacks;
 
     ElapsedTracker _elapsedTracker;

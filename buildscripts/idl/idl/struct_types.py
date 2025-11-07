@@ -97,8 +97,6 @@ class ArgumentInfo(object):
 class MethodInfo(object):
     """Class that encapslates information about a method and how to declare, define, and call it."""
 
-    # pylint: disable=too-many-instance-attributes
-
     def __init__(
         self,
         class_name,
@@ -111,7 +109,6 @@ class MethodInfo(object):
         desc_for_comment=None,
     ):
         # type: (str, str, List[str], str, bool, bool, bool, Optional[str]) -> None
-        # pylint: disable=too-many-arguments
         """Create a MethodInfo instance."""
         self.class_name = class_name
         self.method_name = method_name
@@ -141,19 +138,12 @@ class MethodInfo(object):
         if self.return_type:
             return_type_str = self.return_type + " "
 
-        return common.template_args(
-            "${pre_modifiers}${return_type}${method_name}(${args})${post_modifiers};",
-            pre_modifiers=pre_modifiers,
-            return_type=return_type_str,
-            method_name=self.method_name,
-            args=", ".join([arg.get_string(True) for arg in self.args]),
-            post_modifiers=post_modifiers,
-        )
+        args = ", ".join([arg.get_string(True) for arg in self.args])
+        return f"{pre_modifiers}{return_type_str}{self.method_name}({args}){post_modifiers};"
 
     def get_definition(self):
         # type: () -> str
         """Get a definition for a method."""
-        pre_modifiers = ""
         post_modifiers = ""
         return_type_str = ""
 
@@ -163,15 +153,8 @@ class MethodInfo(object):
         if self.return_type:
             return_type_str = self.return_type + " "
 
-        return common.template_args(
-            "${pre_modifiers}${return_type}${class_name}::${method_name}(${args})${post_modifiers}",
-            pre_modifiers=pre_modifiers,
-            return_type=return_type_str,
-            class_name=self.class_name,
-            method_name=self.method_name,
-            args=", ".join([arg.get_string(False) for arg in self.args]),
-            post_modifiers=post_modifiers,
-        )
+        args = ", ".join([arg.get_string(False) for arg in self.args])
+        return f"{return_type_str}{self.class_name}::{self.method_name}({args}){post_modifiers}"
 
     def get_call(self, obj):
         # type: (Optional[str]) -> str
@@ -180,13 +163,9 @@ class MethodInfo(object):
         args = ", ".join([arg.name for arg in self.args])
 
         if obj:
-            return common.template_args(
-                "${obj}.${method_name}(${args});", obj=obj, method_name=self.method_name, args=args
-            )
+            return f"{obj}.{self.method_name}({args});"
 
-        return common.template_args(
-            "${method_name}(${args});", method_name=self.method_name, args=args
-        )
+        return f"{self.method_name}({args});"
 
     def get_desc_for_comment(self):
         # type: () -> Optional[str]
@@ -264,7 +243,7 @@ class StructTypeInfoBase(object, metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def gen_getter_method(self, indented_writer):
+    def gen_methods(self, indented_writer):
         # type: (writer.IndentedTextWriter) -> None
         """Generate the additional methods for a class."""
         pass
@@ -316,8 +295,8 @@ class _StructTypeInfo(StructTypeInfoBase):
             class_name,
             "parseSharingOwnership",
             [
-                "const IDLParserContext& ctxt",
                 "const BSONObj& bsonObject",
+                f'const IDLParserContext& ctxt = IDLParserContext("{self._struct.name}")',
                 "DeserializationContext* dctx = nullptr",
             ],
             class_name,
@@ -335,8 +314,8 @@ class _StructTypeInfo(StructTypeInfoBase):
             class_name,
             "parseOwned",
             [
-                "const IDLParserContext& ctxt",
                 "BSONObj&& bsonObject",
+                f'const IDLParserContext& ctxt = IDLParserContext("{self._struct.name}")',
                 "DeserializationContext* dctx = nullptr",
             ],
             class_name,
@@ -357,8 +336,8 @@ class _StructTypeInfo(StructTypeInfoBase):
             class_name,
             "parse",
             [
-                "const IDLParserContext& ctxt",
                 "const BSONObj& bsonObject",
+                f'const IDLParserContext& ctxt = IDLParserContext("{self._struct.name}")',
                 "DeserializationContext* dctx = nullptr",
             ],
             class_name,
@@ -368,12 +347,13 @@ class _StructTypeInfo(StructTypeInfoBase):
 
     def get_deserializer_method(self):
         # type: () -> MethodInfo
+        class_name = common.title_case(self._struct.cpp_name)
         return MethodInfo(
-            common.title_case(self._struct.cpp_name),
+            class_name,
             "parseProtected",
             [
-                "const IDLParserContext& ctxt",
                 "const BSONObj& bsonObject",
+                f'const IDLParserContext& ctxt = IDLParserContext("{self._struct.name}")',
                 "DeserializationContext* dctx = nullptr",
             ],
             "void",
@@ -409,7 +389,7 @@ class _StructTypeInfo(StructTypeInfoBase):
         # type: () -> Optional[MethodInfo]
         return None
 
-    def gen_getter_method(self, indented_writer):
+    def gen_methods(self, indented_writer):
         # type: (writer.IndentedTextWriter) -> None
         pass
 
@@ -449,8 +429,8 @@ class _CommandBaseTypeInfo(_StructTypeInfo):
             class_name,
             "parse",
             [
-                "const IDLParserContext& ctxt",
                 "const OpMsgRequest& request",
+                f'const IDLParserContext& ctxt = IDLParserContext("{self._struct.name}")',
                 "DeserializationContext* dctx = nullptr",
             ],
             class_name,
@@ -459,12 +439,13 @@ class _CommandBaseTypeInfo(_StructTypeInfo):
 
     def get_op_msg_request_deserializer_method(self):
         # type: () -> Optional[MethodInfo]
+        class_name = common.title_case(self._struct.cpp_name)
         return MethodInfo(
-            common.title_case(self._struct.cpp_name),
+            class_name,
             "parseProtected",
             [
-                "const IDLParserContext& ctxt",
                 "const OpMsgRequest& request",
+                f'const IDLParserContext& ctxt = IDLParserContext("{self._struct.name}")',
                 "DeserializationContext* dctx = nullptr",
             ],
             "void",
@@ -564,18 +545,19 @@ class _CommandFromType(_CommandBaseTypeInfo):
 
     def get_deserializer_method(self):
         # type: () -> MethodInfo
+        class_name = common.title_case(self._struct.cpp_name)
         return MethodInfo(
-            common.title_case(self._struct.cpp_name),
+            class_name,
             "parseProtected",
             [
-                "const IDLParserContext& ctxt",
                 "const BSONObj& bsonObject",
+                f'const IDLParserContext& ctxt = IDLParserContext("{self._struct.name}")',
                 "DeserializationContext* dctx = nullptr",
             ],
             "void",
         )
 
-    def gen_getter_method(self, indented_writer):
+    def gen_methods(self, indented_writer):
         # type: (writer.IndentedTextWriter) -> None
         raise NotImplementedError
 
@@ -645,19 +627,23 @@ class _CommandWithNamespaceTypeInfo(_CommandBaseTypeInfo):
 
     def get_deserializer_method(self):
         # type: () -> MethodInfo
+        class_name = common.title_case(self._struct.cpp_name)
         return MethodInfo(
-            common.title_case(self._struct.cpp_name),
+            class_name,
             "parseProtected",
             [
-                "const IDLParserContext& ctxt",
                 "const BSONObj& bsonObject",
+                f'const IDLParserContext& ctxt = IDLParserContext("{self._struct.name}")',
                 "DeserializationContext* dctx = nullptr",
             ],
             "void",
         )
 
-    def gen_getter_method(self, indented_writer):
+    def gen_methods(self, indented_writer):
         # type: (writer.IndentedTextWriter) -> None
+        indented_writer.write_line(
+            "void setNamespace(NamespaceString nss) { _nss = std::move(nss); }"
+        )
         indented_writer.write_line("const NamespaceString& getNamespace() const { return _nss; }")
         if self._struct.non_const_getter:
             indented_writer.write_line("NamespaceString& getNamespace() { return _nss; }")
@@ -749,18 +735,19 @@ class _CommandWithUUIDNamespaceTypeInfo(_CommandBaseTypeInfo):
 
     def get_deserializer_method(self):
         # type: () -> MethodInfo
+        class_name = common.title_case(self._struct.cpp_name)
         return MethodInfo(
-            common.title_case(self._struct.cpp_name),
+            class_name,
             "parseProtected",
             [
-                "const IDLParserContext& ctxt",
                 "const BSONObj& bsonObject",
+                f'const IDLParserContext& ctxt = IDLParserContext("{self._struct.name}")',
                 "DeserializationContext* dctx = nullptr",
             ],
             "void",
         )
 
-    def gen_getter_method(self, indented_writer):
+    def gen_methods(self, indented_writer):
         # type: (writer.IndentedTextWriter) -> None
         indented_writer.write_line(
             "const NamespaceStringOrUUID& getNamespaceOrUUID() const { return _nssOrUUID; }"
@@ -781,18 +768,11 @@ class _CommandWithUUIDNamespaceTypeInfo(_CommandBaseTypeInfo):
 
     def gen_namespace_check(self, indented_writer, db_name, element):
         # type: (writer.IndentedTextWriter, str, str) -> None
-        indented_writer.write_line(
-            "auto collOrUUID = ctxt.checkAndAssertCollectionNameOrUUID(%s);" % (element)
-        )
-        indented_writer.write_line(
-            "_nssOrUUID = std::holds_alternative<StringData>(collOrUUID) ? NamespaceStringUtil::deserialize(%s, get<StringData>(collOrUUID)) : NamespaceStringOrUUID(%s, get<UUID>(collOrUUID));"
-            % (db_name, db_name)
-        )
-        indented_writer.write_line(
-            'uassert(ErrorCodes::InvalidNamespace, str::stream() << "Invalid namespace specified: "'
-            " << _nssOrUUID.toStringForErrorMsg()"
-            ", !_nssOrUUID.isNamespaceString() || _nssOrUUID.nss().isValid());"
-        )
+        indented_writer._stream.write(f"""
+    auto collOrUUID = ctxt.checkAndAssertCollectionNameOrUUID({element});
+    _nssOrUUID = std::holds_alternative<StringData>(collOrUUID) ? NamespaceStringUtil::deserialize({db_name}, get<StringData>(collOrUUID)) : NamespaceStringOrUUID({db_name}, get<UUID>(collOrUUID));
+    uassert(ErrorCodes::InvalidNamespace, str::stream() << "Invalid namespace specified: " << _nssOrUUID.toStringForErrorMsg(), !_nssOrUUID.isNamespaceString() || _nssOrUUID.nss().isValid());
+""")
 
 
 def get_struct_info(struct):

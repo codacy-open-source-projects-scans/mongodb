@@ -29,12 +29,14 @@
 
 #pragma once
 
+#include "mongo/db/pipeline/spilling/spilling_stats.h"
+#include "mongo/util/container_size_helper.h"
 #include "mongo/util/duration.h"
-#include <optional>
+
 #include <set>
 #include <string>
 
-#include "mongo/util/container_size_helper.h"
+#include <absl/container/flat_hash_map.h>
 
 namespace mongo {
 
@@ -92,13 +94,22 @@ struct PlanSummaryStats {
     // Did this plan use disk space?
     bool usedDisk = false;
 
-    // The total number of spills to disk from sort stages
-    long long sortSpills = 0;
+    // Stages that report SpillingStats.
+    enum class SpillingStage {
+        BUCKET_AUTO,
+        GEO_NEAR,
+        GRAPH_LOOKUP,
+        GROUP,
+        HASH_LOOKUP,
+        SET_WINDOW_FIELDS,
+        SORT,
+        TEXT_OR,
+    };
 
-    // The total number of bytes spilled to disk from sort stages
-    long long sortSpillBytes = 0;
+    // The accumulated spilling statistics per stage type.
+    absl::flat_hash_map<SpillingStage, SpillingStats> spillingStatsPerStage;
 
-    // The amount of data we've sorted in bytes
+    // The amount of data we've sorted in bytes.
     size_t sortTotalDataSizeBytes = 0;
 
     // The number of keys that we've sorted.

@@ -29,9 +29,6 @@
 
 #pragma once
 
-#include <cstddef>
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -39,9 +36,11 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/str.h"
+
+#include <cstddef>
+#include <string>
 
 namespace mongo {
 

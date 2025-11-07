@@ -34,12 +34,9 @@
 #include "mongo/db/exec/sbe/stages/hashagg_base.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/stats/counters.h"
-#include "mongo/db/storage/kv/kv_engine.h"
-#include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
-
 
 namespace mongo {
 namespace sbe {
@@ -94,7 +91,7 @@ BlockHashAggStage::BlockHashAggStage(std::unique_ptr<PlanStage> input,
                                      value::SlotVector blockDataInSlotIds,
                                      value::SlotVector accumulatorDataSlotIds,
                                      value::SlotId accumulatorBitsetSlotId,
-                                     AggExprTupleVector aggs,
+                                     BlockAggExprTupleVector aggs,
                                      bool allowDiskUse,
                                      SlotExprPairVector mergingExprs,
                                      PlanYieldPolicy* yieldPolicy,
@@ -132,14 +129,15 @@ BlockHashAggStage::BlockHashAggStage(std::unique_ptr<PlanStage> input,
     _tokenInfos.reserve(_groupSlots.size());
 
     if (_allowDiskUse) {
-        tassert(8780601,
-                "Disk use enabled for HashAggStage but incorrect number of merging expresssions",
-                _aggs.size() == _mergingExprs.size());
+        tassert(
+            8780601,
+            "Disk use enabled for BlockHashAggStage but incorrect number of merging expressions",
+            _aggs.size() == _mergingExprs.size());
     }
 }
 
 std::unique_ptr<PlanStage> BlockHashAggStage::clone() const {
-    AggExprTupleVector blockRowAggs;
+    BlockAggExprTupleVector blockRowAggs;
     for (const auto& [slot, aggTuple] : _aggs) {
         std::unique_ptr<sbe::EExpression> init;
         std::unique_ptr<sbe::EExpression> blockAgg;
@@ -152,7 +150,8 @@ std::unique_ptr<PlanStage> BlockHashAggStage::clone() const {
             blockAgg = aggTuple.blockAgg->clone();
         }
 
-        auto clonedAggTuple = AggExprTuple{std::move(init), std::move(blockAgg), std::move(agg)};
+        auto clonedAggTuple =
+            BlockAggExprTuple{std::move(init), std::move(blockAgg), std::move(agg)};
 
         blockRowAggs.emplace_back(slot, std::move(clonedAggTuple));
     }
@@ -285,6 +284,9 @@ void BlockHashAggStage::prepare(CompileCtx& ctx) {
     }
 
     _compiled = true;
+
+    _memoryTracker = OperationMemoryUsageTracker::createSimpleMemoryUsageTrackerForSBE(
+        _opCtx, loadMemoryLimit(StageMemoryLimit::QuerySBEAggApproxMemoryUseInBytesBeforeSpill));
 }
 
 value::SlotAccessor* BlockHashAggStage::getAccessor(CompileCtx& ctx, value::SlotId slot) {
@@ -353,7 +355,9 @@ void BlockHashAggStage::executeRowLevelAccumulatorCode(
 
     for (size_t blockIndex = 0; blockIndex < _currentBlockSize; ++blockIndex) {
         auto [bitTag, bitVal] = extractedBitmap[blockIndex];
-        invariant(bitTag == value::TypeTags::Boolean);
+        tassert(11094732,
+                "Expect bit from extractedBitmap to be of Boolean type",
+                bitTag == value::TypeTags::Boolean);
 
         if (!value::bitcastTo<bool>(bitVal)) {
             continue;
@@ -484,7 +488,7 @@ void BlockHashAggStage::runAccumulatorsElementWise(const value::DeblockedTagVals
 
 boost::optional<std::vector<size_t>> BlockHashAggStage::tokenizeTokenInfos(
     const std::vector<value::TokenizedBlock>& tokenInfos) {
-    invariant(!tokenInfos.empty());
+    tassert(11094731, "Expect non-empty vector of tokenInfos", !tokenInfos.empty());
 
     // If any individual ID block is high enough partition, we know the combined output will also be
     // high partition. We can return early in this case.
@@ -675,7 +679,9 @@ void BlockHashAggStage::open(bool reOpen) {
     while (PlanState::ADVANCED == _children[0]->getNext()) {
         // Update '_bitmapBlock' and '_currentBlockSize'.
         auto [bitmapInTag, bitmapInVal] = _blockBitsetInAccessor->getViewOfValue();
-        invariant(bitmapInTag == value::TypeTags::valueBlock);
+        tassert(11094730,
+                "Expecting bitmapIn to be of type valueBlock",
+                bitmapInTag == value::TypeTags::valueBlock);
 
         _bitmapBlock = value::bitcastTo<value::ValueBlock*>(bitmapInVal);
         _currentBlockSize = _bitmapBlock->count();
@@ -726,6 +732,7 @@ void BlockHashAggStage::open(bool reOpen) {
         if (!_ht->empty()) {
             if (_forceIncreasedSpilling) {
                 // Spill for every row that appears in the hash table.
+                _htIt = _ht->begin();
                 spill(memoryCheckData);
             } else {
                 // Estimates how much memory is being used. If we estimate that the hash table
@@ -748,25 +755,15 @@ void BlockHashAggStage::open(bool reOpen) {
     // store.
     if (_recordStore) {
         if (!_ht->empty()) {
+            _htIt = _ht->begin();
             spill(memoryCheckData);
         }
 
-        auto& ru = *shard_role_details::getRecoveryUnit(_opCtx);
-        _specificStats.spilledDataStorageSize = _recordStore->rs()->storageSize(ru);
-        groupCounters.incrementGroupCountersPerQuery(_specificStats.spilledDataStorageSize);
-
-        // Establish a cursor, positioned at the beginning of the record store.
-        _rsCursor = _recordStore->getCursor(_opCtx);
+        switchToDisk();
     }
 
     _accumulatorBitsetAccessor.reset(false, value::TypeTags::Nothing, 0);
     _htIt = _ht->end();
-
-    if (_recordStore) {
-        for (auto&& aggAccessor : _rowAggAccessors) {
-            aggAccessor->setIndex(1);
-        }
-    }
 }
 
 bool BlockHashAggStage::getNextSpilledHelper() {
@@ -823,7 +820,9 @@ PlanState BlockHashAggStage::getNextSpilled() {
         // If we have a key, add the value to our result. If not, break because we won't get anymore
         // values from the record store.
         if (hasNextKey) {
-            invariant(_outKeyRowRecordStore.size() == _outIdBlocks.size());
+            tassert(11093500,
+                    "Size of '_outKeyRowRecordStore' doesn't match the size of '_outIdBlocks'",
+                    _outKeyRowRecordStore.size() == _outIdBlocks.size());
             for (size_t i = 0; i < _outKeyRowRecordStore.size(); i++) {
                 auto [keyComponentTag, keyComponentVal] = _outKeyRowRecordStore.getViewOfValue(i);
                 _outIdBlocks[i].push_back(value::copyValue(keyComponentTag, keyComponentVal));
@@ -874,17 +873,16 @@ PlanState BlockHashAggStage::getNext() {
     ON_BLOCK_EXIT([&]() { populateBitmapSlot(numRows); });
 
     while (numRows < kBlockOutSize) {
-        if (_htIt == _ht->end()) {
-            _htIt = _ht->begin();
-        } else {
-            ++_htIt;
-        }
+        setIteratorToNextRecord();
 
         if (_done) {
             return trackPlanState(PlanState::IS_EOF);
         }
 
         if (_htIt == _ht->end()) {
+            // All records have been processed.
+            _ht->clear();
+            _htIt = _ht->end();
             _done = true;
             if (numRows == 0) {
                 return trackPlanState(PlanState::IS_EOF);
@@ -893,8 +891,13 @@ PlanState BlockHashAggStage::getNext() {
             }
         }
 
-        invariant(_outAggBlocks.size() == _outAggBlockAccessors.size());
-        invariant(_outAggBlocks.size() == _rowAggAccessors.size());
+        tassert(
+            11093501,
+            "Number of aggregated blocks doesn't match the number of aggregated block accessors",
+            _outAggBlocks.size() == _outAggBlockAccessors.size());
+        tassert(11093502,
+                "Number of aggregated blocks doesn't match the number of aggregated accessors",
+                _outAggBlocks.size() == _rowAggAccessors.size());
 
         // Copy the key from the current element in the HT into the out blocks.
         idx = 0;
@@ -967,15 +970,25 @@ std::unique_ptr<PlanStageStats> BlockHashAggStage::getStats(bool includeDebugInf
 
         // Spilling stats.
         bob.appendBool("usedDisk", _specificStats.usedDisk);
-        bob.appendNumber("spills", _specificStats.spills);
-        bob.appendNumber("spilledBytes", _specificStats.spilledBytes);
-        bob.appendNumber("spilledRecords", _specificStats.spilledRecords);
-        bob.appendNumber("spilledDataStorageSize", _specificStats.spilledDataStorageSize);
+        bob.appendNumber("spills",
+                         static_cast<long long>(_specificStats.spillingStats.getSpills()));
+        bob.appendNumber("spilledBytes",
+                         static_cast<long long>(_specificStats.spillingStats.getSpilledBytes()));
+        bob.appendNumber("spilledRecords",
+                         static_cast<long long>(_specificStats.spillingStats.getSpilledRecords()));
+        bob.appendNumber(
+            "spilledDataStorageSize",
+            static_cast<long long>(_specificStats.spillingStats.getSpilledDataStorageSize()));
 
         // Block-specific stats.
         bob.appendNumber("blockAccumulations", _specificStats.blockAccumulations);
         bob.appendNumber("blockAccumulatorTotalCalls", _specificStats.blockAccumulatorTotalCalls);
         bob.appendNumber("elementWiseAccumulations", _specificStats.elementWiseAccumulations);
+
+        if (feature_flags::gFeatureFlagQueryMemoryTracking.isEnabled()) {
+            bob.appendNumber("peakTrackedMemBytes",
+                             static_cast<long long>(_specificStats.peakTrackedMemBytes));
+        }
 
         ret->debugInfo = bob.obj();
     }
@@ -988,7 +1001,7 @@ const SpecificStats* BlockHashAggStage::getSpecificStats() const {
     return &_specificStats;
 }
 
-HashAggStats* BlockHashAggStage::getHashAggStats() {
+BlockHashAggStats* BlockHashAggStage::getHashAggStats() {
     return &_specificStats;
 }
 
@@ -1015,6 +1028,9 @@ void BlockHashAggStage::close() {
     _monoBlocks.clear();
 
     _children[0]->close();
+
+    _specificStats.peakTrackedMemBytes = _memoryTracker.value().peakTrackedMemoryBytes();
+    _memoryTracker.value().set(0);
 }
 
 std::vector<DebugPrinter::Block> BlockHashAggStage::debugPrint() const {

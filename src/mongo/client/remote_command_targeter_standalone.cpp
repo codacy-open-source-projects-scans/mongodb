@@ -27,14 +27,15 @@
  *    it in the license file.
  */
 
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/client/remote_command_targeter_standalone.h"
 
 #include "mongo/base/status_with.h"
 #include "mongo/client/connection_string.h"
-#include "mongo/client/remote_command_targeter_standalone.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
+
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 
@@ -46,7 +47,9 @@ ConnectionString RemoteCommandTargeterStandalone::connectionString() {
 }
 
 SemiFuture<HostAndPort> RemoteCommandTargeterStandalone::findHost(
-    const ReadPreferenceSetting& readPref, const CancellationToken& cancelToken) {
+    const ReadPreferenceSetting& readPref,
+    const CancellationToken& cancelToken,
+    const TargetingMetadata& targetingMetadata) {
     return {_hostAndPort};
 }
 
@@ -56,7 +59,9 @@ SemiFuture<std::vector<HostAndPort>> RemoteCommandTargeterStandalone::findHosts(
 }
 
 StatusWith<HostAndPort> RemoteCommandTargeterStandalone::findHost(
-    OperationContext* opCtx, const ReadPreferenceSetting& readPref) {
+    OperationContext* opCtx,
+    const ReadPreferenceSetting& readPref,
+    const TargetingMetadata& targetingMetadata) {
     return _hostAndPort;
 }
 

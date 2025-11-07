@@ -35,13 +35,13 @@ namespace mongo {
 REGISTER_ACCUMULATOR_WITH_FEATURE_FLAG(
     concatArrays,
     genericParseSingleExpressionAccumulator<AccumulatorConcatArrays>,
-    feature_flags::gFeatureFlagArrayAccumulators);
+    &feature_flags::gFeatureFlagArrayAccumulators);
 
 REGISTER_WINDOW_FUNCTION_WITH_FEATURE_FLAG(
     concatArrays,
     (mongo::window_function::ExpressionRemovable<AccumulatorConcatArrays,
                                                  WindowFunctionConcatArrays>::parse),
-    feature_flags::gFeatureFlagArrayAccumulators,
+    &feature_flags::gFeatureFlagArrayAccumulators,
     AllowedWithApiStrict::kAlways);
 
 AccumulatorConcatArrays::AccumulatorConcatArrays(ExpressionContext* const expCtx,
@@ -100,11 +100,6 @@ Value AccumulatorConcatArrays::getValue(bool) {
 void AccumulatorConcatArrays::reset() {
     std::vector<Value>().swap(_array);
     _memUsageTracker.set(sizeof(*this));
-}
-
-boost::intrusive_ptr<AccumulatorState> AccumulatorConcatArrays::create(
-    ExpressionContext* const expCtx) {
-    return new AccumulatorConcatArrays(expCtx, boost::none);
 }
 
 }  // namespace mongo

@@ -29,21 +29,22 @@
 
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <functional>
-#include <string>
-
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/crypto/sha256_block.h"
-#include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/query/query_shape/query_shape_hash.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/db/query/query_shape/shape_helpers.h"
+#include "mongo/db/query/util/deferred.h"
+#include "mongo/util/modules.h"
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::query_shape {
+
+class Shape;
+
+using DeferredQueryShape = DeferredFn<StatusWith<std::unique_ptr<Shape>>>;
 
 /**
  * Each type of "query" command likely has different fields/options that are considered important
@@ -52,7 +53,7 @@ namespace mongo::query_shape {
  * ensure we can appropriately hash them to compare their shapes, and properly account for their
  * size.
  *
- * This struct is split out as a separate inheritence hierarchy from 'Shape' to make it easier to
+ * This struct is split out as a separate inheritance hierarchy from 'Shape' to make it easier to
  * ensure each piece is hashed without sub-classes needing to enumerate the parent class's member
  * variables.
  */
@@ -86,17 +87,15 @@ struct CmdSpecificShapeComponents {
     }
 };
 
-using QueryShapeHash = SHA256Block;
-
 /**
  * A query "shape" is a version of a command with literal values abstracted so that two instances of
  * the command may compare/hash equal even if they use slightly different literal values. This
- * concept exists not just the find command, but planned for many of the CRUD commands + aggregate.
- * It also includes most (but not all) components of these commands, not just the query predicate
- * (MatchExpresssion). In these ways, "query" is meant more generally.
+ * concept exists not just for the find command, but is planned for many of the CRUD commands +
+ * aggregate. It also includes most (but not all) components of these commands, not just the query
+ * predicate (MatchExpresssion). In these ways, "query" is meant more generally.
  *
  * A "Query Shape" can vary depending on the command (e.g. find, aggregate, or distinct). This
- * abstract struct is the API we must implement for each command which we want to have a "shape"
+ * abstract struct is the API we must implement for each command for which we want to have a "shape"
  * concept.
  *
  * In order to properly account for the size of a query shape, the CmdSpecificShapeComponents should
@@ -148,7 +147,6 @@ public:
         return h;
     }
 
-
     // Not shapified but it is an identifier so it may be transformed.
     NamespaceStringOrUUID nssOrUUID;
 
@@ -174,5 +172,4 @@ private:
                            const SerializationContext& serializationContext) const;
     void appendCmdNs(BSONObjBuilder&, const NamespaceString&, const SerializationOptions&) const;
 };
-
 }  // namespace mongo::query_shape

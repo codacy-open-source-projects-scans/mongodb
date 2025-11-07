@@ -31,7 +31,8 @@
 
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_internal_projection_gen.h"
-#include "mongo/db/query/projection.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 /**
@@ -55,13 +56,15 @@ public:
 
     const char* getSourceName() const final;
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kInternalProjection;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
-    void addVariableRefs(std::set<Variables::Id>* refs) const final{};
+    void addVariableRefs(std::set<Variables::Id>* refs) const final {};
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         StageConstraints constraints(StreamType::kStreaming,
                                      PositionRequirement::kNone,
                                      HostTypeRequirement::kNone,
@@ -80,8 +83,8 @@ public:
         return boost::none;
     }
 
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) final;
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) final;
 
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
@@ -95,8 +98,6 @@ public:
     }
 
 private:
-    GetNextResult doGetNext() final;
-
     // The specification for the $_internalProjection stage (defined by
     // document_source_internal_projection.idl).
     DocumentSourceInternalProjectionSpec _stageSpec;

@@ -29,19 +29,11 @@
 
 
 #include <algorithm>
-#include <boost/cstdint.hpp>
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/numeric/conversion/converter_policies.hpp>
-#include <boost/optional/optional.hpp>
 #include <cerrno>
 #include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <fmt/format.h>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -50,6 +42,15 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/numeric/conversion/converter_policies.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #ifndef _WIN32
 #include <pwd.h>
@@ -91,6 +92,7 @@
 #include "mongo/util/ctype.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/processinfo.h"
+#include "mongo/util/quick_exit.h"
 #include "mongo/util/represent_as.h"
 #include "mongo/util/str.h"
 #include "mongo/util/text.h"  // IWYU pragma: keep
@@ -102,8 +104,10 @@
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 
+using namespace std::literals::string_literals;
+
+
 namespace mongo::shell_utils {
-using namespace fmt::literals;
 namespace {
 boost::filesystem::path getUserDir() {
 #ifdef _WIN32
@@ -155,11 +159,16 @@ boost::filesystem::path mongo::shell_utils::getHistoryFilePath() {
 
 namespace mongo {
 namespace JSFiles {
-extern const JSFile servers;
-extern const JSFile servers_misc;
-extern const JSFile data_consistency_checker;
 extern const JSFile bridge;
+extern const JSFile bridge_global;
+extern const JSFile data_consistency_checker;
+extern const JSFile data_consistency_checker_global;
 extern const JSFile feature_compatibility_version;
+extern const JSFile feature_compatibility_version_global;
+extern const JSFile servers;
+extern const JSFile servers_global;
+extern const JSFile servers_misc;
+extern const JSFile servers_misc_global;
 }  // namespace JSFiles
 
 namespace {
@@ -268,6 +277,7 @@ bool isBalanced(const std::string& code) {
                 break;
             case '"':
             case '\'':
+                fassert(9879200, i < std::numeric_limits<std::size_t>::max());
                 i = skipOverString(code, i + 1, code[i]);
                 if (i >= code.size()) {
                     return true;  // Do not let unterminated strings enter multi-line mode
@@ -411,16 +421,16 @@ BSONObj computeSHA256Block(const BSONObj& a, void* data) {
 
     BSONObjBuilder bob;
     switch (ele.type()) {
-        case BinData: {
+        case BSONType::binData: {
             int len;
             const char* ptr = ele.binData(len);
             SHA256Block::computeHash({ConstDataRange(ptr, len)}).appendAsBinData(bob, ""_sd);
 
             break;
         }
-        case String: {
+        case BSONType::string: {
             auto str = ele.valueStringData();
-            SHA256Block::computeHash({ConstDataRange(str.rawData(), str.size())})
+            SHA256Block::computeHash({ConstDataRange(str.data(), str.size())})
                 .appendAsBinData(bob, ""_sd);
             break;
         }
@@ -429,6 +439,50 @@ BSONObj computeSHA256Block(const BSONObj& a, void* data) {
     }
 
     return bob.obj();
+}
+
+BSONObj computeSHA256Hmac(const BSONObj& a, void* data) {
+    std::vector<ConstDataRange> blocks;
+
+    if (a.nFields() != 1) {
+        uasserted(ErrorCodes::BadValue,
+                  str::stream() << "_computeSHA256Hmac takes exactly 1 argument, but was given "
+                                << a.nFields());
+    }
+
+    if (!a.firstElement().isABSONObj()) {
+        uasserted(ErrorCodes::BadValue,
+                  str::stream() << "_computeSHA256Hmac given a non-object as an argument.");
+    }
+
+    auto cmdObj = a.firstElement().Obj();
+    static constexpr StringData kComputeSha256HmacKeyField = "key";
+    static constexpr StringData kComputeSha256HmacPayloadField = "payload";
+
+    uassert(
+        ErrorCodes::BadValue,
+        str::stream() << "_computeSHA256Hmac input must give an object with `key` field provided",
+        cmdObj.hasField(kComputeSha256HmacKeyField));
+    uassert(ErrorCodes::BadValue,
+            str::stream() << "_computeSHA256Hmac `key` field must be sensitive BinData",
+            cmdObj[kComputeSha256HmacKeyField].isBinData(BinDataType::Sensitive));
+    ;
+    uassert(ErrorCodes::BadValue,
+            str::stream()
+                << "_computeSHA256Hmac input must give an object with `payload` field provided",
+            cmdObj.hasField(kComputeSha256HmacPayloadField));
+    uassert(ErrorCodes::BadValue,
+            str::stream() << "_computeSHA256Hmac `payload` field must be a string",
+            cmdObj[kComputeSha256HmacPayloadField].type() == BSONType::string);
+
+    int keySize = 0;
+    std::string key = std::string(cmdObj[kComputeSha256HmacKeyField].binData(keySize), keySize);
+    auto payload = cmdObj[kComputeSha256HmacPayloadField].checkAndGetStringData();
+
+    auto hashed = SHA256Block::computeHmac(
+        (const uint8_t*)key.data(), key.size(), (const uint8_t*)payload.data(), payload.size());
+
+    return BSON("" << hashed.toString());
 }
 
 /**
@@ -466,8 +520,8 @@ BSONObj _createSecurityToken(const BSONObj& args, void* data) {
     args.elems(argv);
     uassert(6161500,
             "_createSecurityToken requires two arguments, an object and a non-empty string",
-            (argv.size() == 2) && (argv[0].type() == Object) && (argv[1].type() == String) &&
-                !argv[1].valueStringData().empty());
+            (argv.size() == 2) && (argv[0].type() == BSONType::object) &&
+                (argv[1].type() == BSONType::string) && !argv[1].valueStringData().empty());
 
     auto token = auth::ValidatedTenancyScopeFactory::create(
         UserName::parseFromBSON(argv[0]),
@@ -489,7 +543,7 @@ BSONObj _createTenantToken(const BSONObj& args, void* data) {
     const auto obj = args.firstElement().Obj();
     uassert(8154401,
             "_createTenantToken requires field `tenant` of type ObjectId",
-            obj.hasField("tenant"_sd) && obj["tenant"_sd].type() == jstOID);
+            obj.hasField("tenant"_sd) && obj["tenant"_sd].type() == BSONType::oid);
     const auto tenant = TenantId::parseFromBSON(obj["tenant"_sd]);
     const auto expectPrefix = obj["expectPrefix"].booleanSafe();
     const auto token = auth::ValidatedTenancyScopeFactory::create(
@@ -503,13 +557,12 @@ BSONObj _createTenantToken(const BSONObj& args, void* data) {
 BSONObj replMonitorStats(const BSONObj& a, void* data) {
     uassert(17134,
             "replMonitorStats requires a single string argument (the ReplSet name)",
-            a.nFields() == 1 && a.firstElement().type() == String);
+            a.nFields() == 1 && a.firstElement().type() == BSONType::string);
 
     auto name = a.firstElement().valueStringDataSafe();
-    auto rsm = ReplicaSetMonitor::get(name.toString());
+    auto rsm = ReplicaSetMonitor::get(std::string{name});
     if (!rsm) {
-        return BSON(""
-                    << "no ReplSetMonitor exists by that name");
+        return BSON("" << "no ReplSetMonitor exists by that name");
     }
 
     BSONObjBuilder result;
@@ -540,7 +593,7 @@ BSONObj interpreterVersion(const BSONObj& a, void* data) {
 BSONObj fileExistsJS(const BSONObj& a, void*) {
     uassert(40678,
             "fileExists expects one string argument",
-            a.nFields() == 1 && a.firstElement().type() == String);
+            a.nFields() == 1 && a.firstElement().type() == BSONType::string);
     return BSON("" << fileExists(a.firstElement().str()));
 }
 
@@ -556,7 +609,7 @@ BSONObj numberDecimalsEqual(const BSONObj& input, void*) {
     auto second = i.next();
     uassert(5760501,
             "Both the arguments of numberDecimalsEqual should be of type 'NumberDecimal'",
-            first.type() == BSONType::NumberDecimal && second.type() == BSONType::NumberDecimal);
+            first.type() == BSONType::numberDecimal && second.type() == BSONType::numberDecimal);
 
     return BSON("" << first.numberDecimal().isEqual(second.numberDecimal()));
 }
@@ -575,17 +628,14 @@ BSONObj numberDecimalsAlmostEqual(const BSONObj& input, void*) {
     auto third = i.next();
 
     // Type-check arguments before performing any calculations.
-    if (!(first.type() == BSONType::NumberDecimal && second.type() == BSONType::NumberDecimal &&
+    if (!(first.type() == BSONType::numberDecimal && second.type() == BSONType::numberDecimal &&
           third.isNumber())) {
         return BSON("" << false);
     }
 
     auto a = first.numberDecimal();
     auto b = second.numberDecimal();
-
-    // 10.0 is used frequently in the rest of the function, so save it to a variable.
-    auto ten = Decimal128(10);
-    auto exponent = a.toAbs().logarithm(ten).round();
+    auto exponent = a.toAbs().log10().round();
 
     // Early exit for zero, infinity and NaN cases.
     if ((a.isZero() && b.isZero()) || (a.isNaN() && b.isNaN()) ||
@@ -593,21 +643,21 @@ BSONObj numberDecimalsAlmostEqual(const BSONObj& input, void*) {
         return BSON("" << true /* isErrorAcceptable */);
     } else if (!a.isZero() && !b.isZero()) {
         // Return early if arguments are not the same order of magnitude.
-        if (exponent != b.toAbs().logarithm(ten).round()) {
+        if (exponent != b.toAbs().log10().round()) {
             return BSON("" << false);
         }
 
         // Put the whole number behind the decimal point.
         if (!exponent.isZero()) {
-            a = a.divide(ten.power(exponent));
-            b = b.divide(ten.power(exponent));
+            a = a.divide(exponent.exp10());
+            b = b.divide(exponent.exp10());
         }
     }
 
     auto places = third.numberDecimal();
     auto isErrorAcceptable = a.subtract(b)
                                  .toAbs()
-                                 .multiply(ten.power(places, Decimal128::kRoundTowardZero))
+                                 .multiply(places.exp10(Decimal128::kRoundTowardZero))
                                  .round(Decimal128::kRoundTowardZero) == Decimal128(0);
 
     return BSON("" << isErrorAcceptable);
@@ -637,10 +687,12 @@ protected:
 };
 
 std::string GoldenTestContextShellFailure::toString() const {
-    return "Test output verification failed: {}\n"
-           "Actual output file: {}, "
-           "expected output file: {}"
-           ""_format(message, actualOutputFile, expectedOutputFile);
+    return fmt::format(
+        "Test output verification failed: {}\n"
+        "Actual output file: {}, expected output file: {}",
+        message,
+        actualOutputFile,
+        expectedOutputFile);
 }
 
 void GoldenTestContextShellFailure::diff() const {
@@ -673,16 +725,16 @@ BSONObj _openGoldenData(const BSONObj& input, void*) {
 
     uassert(6741512,
             "_openGoldenData 'testPath' must be a string",
-            testPathArg.type() == BSONType::String);
+            testPathArg.type() == BSONType::string);
     auto testPath = testPathArg.valueStringData();
 
     uassert(6741511,
             "_openGoldenData 'config' must be an object",
-            configArg.type() == BSONType::Object);
+            configArg.type() == BSONType::object);
     auto config = configArg.Obj();
     goldenTestConfig = unittest::GoldenTestConfig::parseFromBson(config);
 
-    goldenTestContext.emplace(&goldenTestConfig, testPath.toString(), true /*validateOnClose*/);
+    goldenTestContext.emplace(&goldenTestConfig, std::string{testPath}, true /*validateOnClose*/);
 
     return {};
 }
@@ -697,7 +749,7 @@ BSONObj _writeGoldenData(const BSONObj& input, void*) {
 
     uassert(6741509,
             "_writeGoldenData 'content' must be a string",
-            contentArg.type() == BSONType::String);
+            contentArg.type() == BSONType::string);
     auto content = contentArg.valueStringData();
 
     uassert(6741508, "_writeGoldenData() requires _openGoldenData() first", goldenTestContext);
@@ -714,6 +766,17 @@ BSONObj _closeGoldenData(const BSONObj& input, void*) {
     closeGoldenTestContext();
 
     return {};
+}
+
+void closeMochaStyleTestContext(Scope& scope) {
+    const StringData code =
+        "if (typeof globalThis.__mochalite_closer === 'function') { await __mochalite_closer(); }"_sd;
+    scope.exec(code.data(),
+               "" /* name */,
+               true /* printResult */,
+               true /* reportError*/,
+               true /* assertOnError*/,
+               0 /*timeoutMs*/);
 }
 
 /**
@@ -744,7 +807,7 @@ BSONObj _buildBsonObj(const BSONObj& args, void*) {
     do {
         name = args.getField(std::to_string(fieldNum++));
         value = args.getField(std::to_string(fieldNum++));
-        if (name.type() == BSONType::EOO) {
+        if (name.type() == BSONType::eoo) {
             break;
         }
 
@@ -753,13 +816,44 @@ BSONObj _buildBsonObj(const BSONObj& args, void*) {
                 std::string::npos == name.str().find('\0'));
         uassert(7587900,
                 str::stream() << "BSON field name must be a string: " << name,
-                name.type() == BSONType::String);
+                name.type() == BSONType::string);
         uassert(7587901,
                 str::stream() << "Missing BSON field value: " << value,
-                value.type() != BSONType::EOO);
+                value.type() != BSONType::eoo);
         builder << name.str() << value;
-    } while (name.type() != BSONType::EOO);
+    } while (name.type() != BSONType::eoo);
     return BSON("" << builder.obj());
+}
+
+namespace {
+
+// Intel's implementation supports magic strings for
+// Infinity and NaN, but not for maximum and minimum size.
+// Intel's match is case insensitive, so ours should be too.
+const std::array<std::pair<StringData, Decimal128>, 6> magicMatches{{
+    {"max", Decimal128::kLargestPositive},
+    {"min", Decimal128::kSmallestPositive},
+    {"+max", Decimal128::kLargestPositive},
+    {"+min", Decimal128::kSmallestPositive},
+    {"-max", Decimal128::kLargestNegative},
+    {"-min", Decimal128::kSmallestNegative},
+}};
+
+}  // namespace
+
+BSONObj _decimal128Limit(const BSONObj& args, void*) {
+    uassert(11190601,
+            "_decimal128Limit expects one string argument",
+            args.nFields() == 1 && args.firstElement().type() == BSONType::string);
+
+    auto input = args.firstElement().str();
+    for (auto&& [name, value] : magicMatches) {
+        if (str::equalCaseInsensitive(input, name)) {
+            return BSON("" << value);
+        }
+    }
+
+    uasserted(11190602, str::stream() << "Invalid magic Decimal128 string '" << input << "'");
 }
 
 /*
@@ -782,7 +876,7 @@ static inline uint64_t fnv_64a_buf(const void* buf, size_t len, uint64_t hval) {
 BSONObj _fnvHashToHexString(const BSONObj& args, void*) {
     uassert(8423397,
             "_fnvHashToHexString expects one string argument",
-            args.nFields() == 1 && args.firstElement().type() == String);
+            args.nFields() == 1 && args.firstElement().type() == BSONType::string);
 
     auto input = args.firstElement().str();
     auto hashed = fnv_64a_buf(input.c_str(), input.size(), FNV1A_64_INIT);
@@ -804,7 +898,7 @@ void sortBSONObjectInternallyHelper(const BSONObj& input,
 void sortBSONElementInternally(const BSONElement& el,
                                BSONObjBuilder& bob,
                                NormalizationOptsSet opts) {
-    if (el.type() == BSONType::Array) {
+    if (el.type() == BSONType::array) {
         std::vector<BSONElement> arr = el.Array();
 
         if (isSet(opts, NormalizationOpts::kSortArrays)) {
@@ -835,7 +929,7 @@ void sortBSONElementInternally(const BSONElement& el,
             }
             sub.doneFast();
         }
-    } else if (el.type() == BSONType::Object) {
+    } else if (el.type() == BSONType::object) {
         BSONObjBuilder sub(bob.subobjStart(el.fieldNameStringData()));
         sortBSONObjectInternallyHelper(el.Obj(), sub, opts);
         sub.doneFast();
@@ -857,8 +951,7 @@ void sortBSONObjectInternallyHelper(const BSONObj& input,
  * Returns a new BSON with the same field/value pairings, but is recursively sorted by the fields.
  * By default, arrays are not sorted unless NormalizationOptsSet has the kSortArrays bit set.
  */
-BSONObj sortBSONObjectInternally(const BSONObj& input,
-                                 NormalizationOptsSet opts = NormalizationOpts::kSortBSON) {
+BSONObj sortBSONObjectInternally(const BSONObj& input, NormalizationOptsSet opts) {
     BSONObjBuilder bob(input.objsize());
     sortBSONObjectInternallyHelper(input, bob, opts);
     return bob.obj();
@@ -874,14 +967,14 @@ void normalizeNumericElementsHelper(const BSONObj& input, BSONObjBuilder& bob);
 
 void normalizeNumericElements(const BSONElement& el, BSONObjBuilder& bob) {
     switch (el.type()) {
-        case NumberInt:
-        case NumberLong:
-        case NumberDouble:
-        case NumberDecimal: {
+        case BSONType::numberInt:
+        case BSONType::numberLong:
+        case BSONType::numberDouble:
+        case BSONType::numberDecimal: {
             bob.append(el.fieldName(), el.numberDecimal().normalize());
             break;
         }
-        case Array: {
+        case BSONType::array: {
             BSONObjBuilder sub(bob.subarrayStart(el.fieldNameStringData()));
             for (const auto& child : el.Array()) {
                 normalizeNumericElements(child, sub);
@@ -889,7 +982,7 @@ void normalizeNumericElements(const BSONElement& el, BSONObjBuilder& bob) {
             sub.doneFast();
             break;
         }
-        case Object: {
+        case BSONType::object: {
             BSONObjBuilder sub(bob.subobjStart(el.fieldNameStringData()));
             normalizeNumericElementsHelper(el.Obj(), sub);
             sub.doneFast();
@@ -919,16 +1012,64 @@ BSONObj normalizeNumerics(const BSONObj& input) {
     return bob.obj();
 }
 
+void roundFloatingPointNumericElementsHelper(const BSONObj& input, BSONObjBuilder& bob);
+
+void roundFloatingPointNumericElements(const BSONElement& el, BSONObjBuilder& bob) {
+    switch (el.type()) {
+        case BSONType::numberDouble: {
+            // Take advantage of Decimal128's ability to round to 15 digits at construction time.
+            bob.append(el.fieldName(),
+                       Decimal128(el.numberDouble(), Decimal128::kRoundTo15Digits).toDouble());
+            break;
+        }
+        case BSONType::array: {
+            BSONObjBuilder sub(bob.subarrayStart(el.fieldNameStringData()));
+            for (const auto& child : el.Array()) {
+                roundFloatingPointNumericElements(child, sub);
+            }
+            sub.doneFast();
+            break;
+        }
+        case BSONType::object: {
+            BSONObjBuilder sub(bob.subobjStart(el.fieldNameStringData()));
+            roundFloatingPointNumericElementsHelper(el.Obj(), sub);
+            sub.doneFast();
+            break;
+        }
+        default:
+            bob.append(el);
+            break;
+    }
+}
+
+void roundFloatingPointNumericElementsHelper(const BSONObj& input, BSONObjBuilder& bob) {
+    BSONObjIterator it(input);
+    while (it.more()) {
+        roundFloatingPointNumericElements(it.next(), bob);
+    }
+}
+
+/**
+ * Returns a new BSONObj with the same field/value pairings, but with floating-point types rounded
+ * to 15 digits of precision. For example, 1.000000000000001 and NumberDecimal('1') would
+ * be normalized into the same number.
+ */
+BSONObj roundFloatingPointNumerics(const BSONObj& input) {
+    BSONObjBuilder bob(input.objsize());
+    roundFloatingPointNumericElementsHelper(input, bob);
+    return bob.obj();
+}
+
 void removeNullAndUndefinedElementsHelper(const BSONObj& input, BSONObjBuilder& bob);
 
 template <typename Builder>
 void removeNullAndUndefinedElements(const BSONElement& el, Builder& bob) {
     switch (el.type()) {
-        case Undefined:
-        case jstNULL:
+        case BSONType::undefined:
+        case BSONType::null:
             // Don't append the element if it's null or undefined.
             break;
-        case Array: {
+        case BSONType::array: {
             auto appendArrayElements = [&](auto& sub) {
                 for (const auto& child : el.Array()) {
                     removeNullAndUndefinedElements(child, sub);
@@ -945,7 +1086,7 @@ void removeNullAndUndefinedElements(const BSONElement& el, Builder& bob) {
             }
             break;
         }
-        case Object: {
+        case BSONType::object: {
             if constexpr (std::is_same_v<Builder, BSONObjBuilder>) {
                 BSONObjBuilder sub(bob.subobjStart(el.fieldNameStringData()));
                 removeNullAndUndefinedElementsHelper(el.Obj(), sub);
@@ -983,8 +1124,17 @@ BSONObj removeNullAndUndefined(const BSONObj& input) {
 
 BSONObj normalizeBSONObj(const BSONObj& input, NormalizationOptsSet opts) {
     BSONObj result = input;
+    if (isSet(opts, NormalizationOpts::kQueryShapeHash)) {
+        uassert(10384200,
+                "expected explain mode to be set when using the queryShapeHash option",
+                isSet(opts, NormalizationOpts::kExplain));
+        return BSON(input.getField("queryShapeHash"));
+    }
     if (isSet(opts, NormalizationOpts::kConflateNullAndMissing)) {
         result = removeNullAndUndefined(result);
+    }
+    if (isSet(opts, NormalizationOpts::kRoundFloatingPointNumerics)) {
+        result = roundFloatingPointNumerics(result);
     }
     if (isSet(opts, NormalizationOpts::kNormalizeNumerics)) {
         result = normalizeNumerics(result);
@@ -995,67 +1145,86 @@ BSONObj normalizeBSONObj(const BSONObj& input, NormalizationOptsSet opts) {
     return result;
 }
 
-/*
- * Takes two arrays of documents, and returns whether they contain the same set of BSON Objects. The
- * BSON do not need to be in the same order for this to return true. Has no special logic for
- * handling double/NumberDecimal closeness.
- */
-BSONObj _resultSetsEqualUnordered(const BSONObj& input, void*) {
+bool compareNormalizedResultSets(const BSONObj& input, NormalizationOptsSet opts) {
     BSONObjIterator i(input);
-    uassert(9422901, "_resultSetsEqualUnordered expects two arguments", i.more());
+    uassert(9422901, "expected two arguments", i.more());
     auto first = i.next();
-    uassert(9422902, "_resultSetsEqualUnordered expects two arguments", i.more());
+    uassert(9422902, "expected two arguments", i.more());
     auto second = i.next();
     uassert(9193201,
-            str::stream() << "_resultSetsEqualUnordered expects two arrays of containing objects "
-                             "as input received "
+            str::stream() << "expected two arrays containing objects as input received "
                           << first.type() << " and " << second.type(),
-            first.type() == BSONType::Array && second.type() == BSONType::Array);
+            first.type() == BSONType::array && second.type() == BSONType::array);
 
     auto firstAsBson = first.Array();
     auto secondAsBson = second.Array();
 
     for (const auto& el : firstAsBson) {
         uassert(9193202,
-                str::stream() << "_resultSetsEqualUnordered expects all elements of input arrays "
-                                 "to be objects, received "
+                str::stream() << "expected all elements of input arrays to be objects, received "
                               << el.type(),
-                el.type() == BSONType::Object);
+                el.type() == BSONType::object);
     }
     for (const auto& el : secondAsBson) {
         uassert(9193203,
-                str::stream() << "_resultSetsEqualUnordered expects all elements of input arrays "
-                                 "to be objects, received "
+                str::stream() << "expected all elements of input arrays to be objects, received "
                               << el.type(),
-                el.type() == BSONType::Object);
+                el.type() == BSONType::object);
     }
 
     if (firstAsBson.size() != secondAsBson.size()) {
-        return BSON("" << false);
+        return false;
     }
 
     // Optimistically assume they're already in the same order.
     if (first.binaryEqualValues(second)) {
-        return BSON("" << true);
+        return true;
     }
 
     std::vector<BSONObj> firstSorted;
     std::vector<BSONObj> secondSorted;
     for (size_t i = 0; i < firstAsBson.size(); i++) {
-        firstSorted.push_back(sortBSONObjectInternally(firstAsBson[i].Obj()));
-        secondSorted.push_back(sortBSONObjectInternally(secondAsBson[i].Obj()));
+        firstSorted.push_back(normalizeBSONObj(firstAsBson[i].Obj(), opts));
+        secondSorted.push_back(normalizeBSONObj(secondAsBson[i].Obj(), opts));
     }
 
-    sortQueryResults(firstSorted);
-    sortQueryResults(secondSorted);
+    if (isSet(opts, NormalizationOpts::kSortResults)) {
+        sortQueryResults(firstSorted);
+        sortQueryResults(secondSorted);
+    }
 
     for (size_t i = 0; i < firstSorted.size(); i++) {
         if (!firstSorted[i].binaryEqual(secondSorted[i])) {
-            return BSON("" << false);
+            return false;
         }
     }
 
-    return BSON("" << true);
+    return true;
+}
+
+/*
+ * Takes two arrays of documents, and returns whether they contain the same set of BSON Objects.
+ * Applies more normalizations than '_resultSetsEqualUnordered()'. Used by the fuzzer comparator.
+ * The following edge cases are currently accepted by the fuzzer but rejected by this function:
+ * - String comparison with collaction.
+ * - Numeric string vs other numeric types.
+ * - Rounding numeric types down to <15 digits. The fuzzer rounds to 6 or 10, depending on the type.
+ */
+BSONObj _resultSetsEqualNormalized(const BSONObj& input, void*) {
+    auto opts = NormalizationOpts::kSortResults | NormalizationOpts::kSortBSON |
+        NormalizationOpts::kSortArrays | NormalizationOpts::kNormalizeNumerics |
+        NormalizationOpts::kRoundFloatingPointNumerics;
+    return BSON("" << compareNormalizedResultSets(input, opts));
+}
+
+/*
+ * Takes two arrays of documents, and returns whether they contain the same set of BSON Objects. The
+ * BSON do not need to be in the same order for this to return true. Has no special logic for
+ * handling double/NumberDecimal closeness. Used in property based jstests.
+ */
+BSONObj _resultSetsEqualUnordered(const BSONObj& input, void*) {
+    auto opts = NormalizationOpts::kSortResults | NormalizationOpts::kSortBSON;
+    return BSON("" << compareNormalizedResultSets(input, opts));
 }
 
 /*
@@ -1071,15 +1240,15 @@ BSONObj _compareStringsWithCollation(const BSONObj& input, void*) {
 
     uassert(9367800, "Expected left argument", i.more());
     auto left = i.next();
-    uassert(9367801, "Left argument should be a string", left.type() == BSONType::String);
+    uassert(9367801, "Left argument should be a string", left.type() == BSONType::string);
 
     uassert(9367802, "Expected right argument", i.more());
     auto right = i.next();
-    uassert(9367803, "Right argument should be string", right.type() == BSONType::String);
+    uassert(9367803, "Right argument should be string", right.type() == BSONType::string);
 
     uassert(9367804, "Expected collation argument", i.more());
     auto collatorSpec = i.next();
-    uassert(9367805, "Expected a collation object", collatorSpec.type() == BSONType::Object);
+    uassert(9367805, "Expected a collation object", collatorSpec.type() == BSONType::object);
 
     CollatorFactoryICU collationFactory;
     auto collator = uassertStatusOK(collationFactory.makeFromBSON(collatorSpec.Obj()));
@@ -1106,6 +1275,7 @@ void installShellUtils(Scope& scope) {
     scope.injectNative("interpreterVersion", interpreterVersion);
     scope.injectNative("getBuildInfo", getBuildInfo);
     scope.injectNative("computeSHA256Block", computeSHA256Block);
+    scope.injectNative("computeSHA256Hmac", computeSHA256Hmac);
     scope.injectNative("convertShardKeyToHashed", convertShardKeyToHashed);
     scope.injectNative("fileExists", fileExistsJS);
     scope.injectNative("isInteractive", isInteractive);
@@ -1115,8 +1285,10 @@ void installShellUtils(Scope& scope) {
     scope.injectNative("_writeGoldenData", _writeGoldenData);
     scope.injectNative("_closeGoldenData", _closeGoldenData);
     scope.injectNative("_buildBsonObj", _buildBsonObj);
+    scope.injectNative("_decimal128Limit", _decimal128Limit);
     scope.injectNative("_fnvHashToHexString", _fnvHashToHexString);
     scope.injectNative("_resultSetsEqualUnordered", _resultSetsEqualUnordered);
+    scope.injectNative("_resultSetsEqualNormalized", _resultSetsEqualNormalized);
     scope.injectNative("_compareStringsWithCollation", _compareStringsWithCollation);
 
     installShellUtilsLauncher(scope);
@@ -1140,11 +1312,20 @@ void initScope(Scope& scope) {
     scope.injectNative("_apiParameters", apiParameters);
     scope.externalSetup();
     mongo::shell_utils::installShellUtils(scope);
+
+    // modules
+    scope.execSetup(JSFiles::bridge);
+    scope.execSetup(JSFiles::data_consistency_checker);
+    scope.execSetup(JSFiles::feature_compatibility_version);
     scope.execSetup(JSFiles::servers);
     scope.execSetup(JSFiles::servers_misc);
-    scope.execSetup(JSFiles::data_consistency_checker);
-    scope.execSetup(JSFiles::bridge);
-    scope.execSetup(JSFiles::feature_compatibility_version);
+
+    // globals
+    scope.execSetup(JSFiles::bridge_global);
+    scope.execSetup(JSFiles::data_consistency_checker_global);
+    scope.execSetup(JSFiles::feature_compatibility_version_global);
+    scope.execSetup(JSFiles::servers_global);
+    scope.execSetup(JSFiles::servers_misc_global);
 
     initializeEnterpriseScope(scope);
 
@@ -1191,7 +1372,7 @@ void ConnectionRegistry::registerConnection(DBClientBase& client, StringData uri
 
     if (client.runCommand(DatabaseName::kAdmin, command, info)) {
         stdx::lock_guard<stdx::mutex> lk(_mutex);
-        _connectionUris[uri.toString()].insert(info["you"].str());
+        _connectionUris[std::string{uri}].insert(info["you"].str());
     }
 }
 
@@ -1221,7 +1402,7 @@ void ConnectionRegistry::killOperationsOnAllConnections(bool withPrompt) const {
             std::string client;
             if (auto elem = op["client"]) {
                 // mongod currentOp client
-                if (elem.type() != String) {
+                if (elem.type() != BSONType::string) {
                     std::cout << "Ignoring operation " << op["opid"].toString(false)
                               << "; expected 'client' field in currentOp response to have type "
                                  "string, but found "
@@ -1231,7 +1412,7 @@ void ConnectionRegistry::killOperationsOnAllConnections(bool withPrompt) const {
                 client = elem.str();
             } else if (auto elem = op["client_s"]) {
                 // mongos currentOp client
-                if (elem.type() != String) {
+                if (elem.type() != BSONType::string) {
                     std::cout << "Ignoring operation " << op["opid"].toString(false)
                               << "; expected 'client_s' field in currentOp response to have type "
                                  "string, but found "
@@ -1277,6 +1458,178 @@ bool fileExists(const std::string& file) {
     } catch (...) {
         return false;
     }
+}
+
+
+const std::string kDefaultMongoHost = "127.0.0.1"s;
+const std::string kDefaultMongoPort = "27017"s;
+const std::string kDefaultMongoURL = "mongodb://"s + kDefaultMongoHost + ":"s + kDefaultMongoPort;
+#ifdef MONGO_CONFIG_GRPC
+const std::string kDefaultMongoGRPCPort = "27021"s;
+const std::string kDefaultMongoGRPCURL =
+    "mongodb://"s + kDefaultMongoHost + ":"s + kDefaultMongoGRPCPort;
+#endif
+
+std::string getURIFromArgs(const std::string& arg,
+                           const std::string& host,
+                           const std::string& port) {
+    if (host.empty() && arg.empty() && port.empty()) {
+// Nothing provided, just play the default.
+#ifdef MONGO_CONFIG_GRPC
+        return shellGlobalParams.gRPC ? kDefaultMongoGRPCURL : kDefaultMongoURL;
+#else
+        return kDefaultMongoURL;
+#endif
+    }
+
+    if ((str::startsWith(arg, "mongodb://") || str::startsWith(arg, "mongodb+srv://")) &&
+        host.empty() && port.empty()) {
+        // mongo mongodb://blah
+        return arg;
+    }
+    if ((str::startsWith(host, "mongodb://") || str::startsWith(host, "mongodb+srv://")) &&
+        arg.empty() && port.empty()) {
+        // mongo --host mongodb://blah
+        return host;
+    }
+
+    // We expect a positional arg to be a plain dbname or plain hostname at this point
+    // since we have separate host/port args.
+    if ((arg.find('/') != std::string::npos) && (host.size() || port.size())) {
+        std::cerr << "If a full URI is provided, you cannot also specify --host or --port"
+                  << std::endl;
+        quickExit(ExitCode::badOptions);
+    }
+
+    const auto parseDbHost = [port](const std::string& db, const std::string& host) -> std::string {
+        // Parse --host as a connection string.
+        // e.g. rs0/host0:27000,host1:27001
+        const auto slashPos = host.find('/');
+        const auto hasReplSet = (slashPos > 0) && (slashPos != std::string::npos);
+
+        std::ostringstream ss;
+        ss << "mongodb://";
+
+        // Handle each sub-element of the connection string individually.
+        // Comma separated list of host elements.
+        // Each host element may be:
+        // * /unix/domain.sock
+        // * hostname
+        // * hostname:port
+        // If --port is specified and port is included in connection string,
+        // then they must match exactly.
+        auto start = hasReplSet ? slashPos + 1 : 0;
+        while (start < host.size()) {
+            // Encode each host component.
+            auto end = host.find(',', start);
+            if (end == std::string::npos) {
+                end = host.size();
+            }
+            if ((end - start) == 0) {
+                // Ignore empty components.
+                start = end + 1;
+                continue;
+            }
+
+            const auto hostElem = host.substr(start, end - start);
+            if ((hostElem.find('/') != std::string::npos) && str::endsWith(hostElem, ".sock")) {
+                // Unix domain socket, ignore --port.
+                ss << uriEncode(hostElem);
+
+            } else {
+                auto colon = hostElem.find(':');
+                if ((colon != std::string::npos) &&
+                    (hostElem.find(':', colon + 1) != std::string::npos)) {
+                    // Looks like an IPv6 numeric address.
+                    const auto close = hostElem.find(']');
+                    if ((hostElem[0] == '[') && (close != std::string::npos)) {
+                        // Encapsulated already.
+                        ss << '[' << uriEncode(hostElem.substr(1, close - 1), ":") << ']';
+                        colon = hostElem.find(':', close + 1);
+                    } else {
+                        // Not encapsulated yet.
+                        ss << '[' << uriEncode(hostElem, ":") << ']';
+                        colon = std::string::npos;
+                    }
+                } else if (colon != std::string::npos) {
+                    // Not IPv6 numeric, but does have a port.
+                    ss << uriEncode(hostElem.substr(0, colon));
+                } else {
+                    // Raw hostname/IPv4 without port.
+                    ss << uriEncode(hostElem);
+                }
+
+                if (colon != std::string::npos) {
+                    // Have a port in our host element, verify it.
+                    const auto myport = hostElem.substr(colon + 1);
+                    if (port.size() && (port != myport)) {
+                        std::cerr
+                            << "connection string bears different port than provided by --port"
+                            << std::endl;
+                        quickExit(ExitCode::badOptions);
+                    }
+                    ss << ':' << uriEncode(myport);
+                } else if (port.size()) {
+                    ss << ':' << uriEncode(port);
+                } else {
+#ifdef MONGO_CONFIG_GRPC
+                    ss << ":"
+                       << (shellGlobalParams.gRPC ? kDefaultMongoGRPCPort : kDefaultMongoPort);
+#else
+                    ss << ":" << kDefaultMongoPort;
+#endif
+                }
+            }
+            start = end + 1;
+            if (start < host.size()) {
+                ss << ',';
+            }
+        }
+
+        ss << '/' << uriEncode(db);
+
+        if (hasReplSet) {
+            // Remap included replica set name to URI option
+            ss << "?replicaSet=" << uriEncode(host.substr(0, slashPos));
+        }
+
+        return ss.str();
+    };
+
+    if (host.size()) {
+        // --host provided, treat it as the connect string and get db from positional arg.
+        return parseDbHost(arg, host);
+    } else if (arg.size()) {
+        // --host missing, but we have a potential host/db positional arg.
+        const auto slashPos = arg.find('/');
+        if (slashPos != std::string::npos) {
+            // host/db pair.
+            return parseDbHost(arg.substr(slashPos + 1), arg.substr(0, slashPos));
+        }
+
+        // Compatability formats.
+        // * Any arg with a dot is assumed to be a hostname or IPv4 numeric address.
+        // * Any arg with a colon followed by a digit assumed to be host or IP followed by port.
+        // * Anything else is assumed to be a db.
+
+        if (arg.find('.') != std::string::npos) {
+            // Assume IPv4 or hostnameish.
+            return parseDbHost("test", arg);
+        }
+
+        const auto colonPos = arg.find(':');
+        if ((colonPos != std::string::npos) && ((colonPos + 1) < arg.size()) &&
+            ctype::isDigit(arg[colonPos + 1])) {
+            // Assume IPv4 or hostname with port.
+            return parseDbHost("test", arg);
+        }
+
+        // db, assume localhost.
+        return parseDbHost(arg, kDefaultMongoHost);
+    }
+
+    // --host empty, position arg empty, fallback on localhost without a dbname.
+    return parseDbHost("", kDefaultMongoHost);
 }
 
 }  // namespace shell_utils

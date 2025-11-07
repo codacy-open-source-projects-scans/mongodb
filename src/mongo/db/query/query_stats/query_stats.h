@@ -29,34 +29,23 @@
 
 #pragma once
 
-#include <algorithm>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <limits>
-#include <memory>
-#include <string>
-#include <utility>
-
-#include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/query/client_cursor/cursor_response_gen.h"
 #include "mongo/db/query/partitioned_cache.h"
-#include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/query_stats/key.h"
-#include "mongo/db/query/query_stats/optimizer_metrics_stats_entry.h"
 #include "mongo/db/query/query_stats/query_stats_entry.h"
 #include "mongo/db/query/query_stats/rate_limiting.h"
 #include "mongo/db/service_context.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::query_stats {
 
@@ -118,7 +107,7 @@ public:
     // The query stats store can be configured using these objects on a per-ServiceContext level.
     // This is essentially global, but can be manipulated by unit tests.
     static const ServiceContext::Decoration<std::unique_ptr<QueryStatsStoreManager>> get;
-    static const ServiceContext::Decoration<std::unique_ptr<RateLimiting>> getRateLimiter;
+    static const ServiceContext::Decoration<RateLimiter> getRateLimiter;
 
     template <typename... QueryStatsStoreArgs>
     QueryStatsStoreManager(size_t cacheSize, size_t numPartitions)
@@ -195,9 +184,18 @@ QueryStatsStore& getQueryStatsStore(OperationContext* opCtx);
  */
 void registerRequest(OperationContext* opCtx,
                      const NamespaceString& collection,
-                     std::function<std::unique_ptr<Key>(void)> makeKey,
+                     const std::function<std::unique_ptr<Key>(void)>& makeKey,
                      bool willNeverExhaust = false);
 
+
+/**
+ * Register a write request. After performing write-relevant checks, it registers a write request
+ * using registerRequest().
+ */
+void registerWriteRequest(OperationContext* opCtx,
+                          const NamespaceString& collection,
+                          const std::function<std::unique_ptr<Key>(void)>& makeKey,
+                          bool willNeverExhaust = false);
 
 /**
  * Returns whether or not the current operation should request metrics from remote hosts. This
@@ -215,6 +213,15 @@ inline uint64_t microsecondsToUint64(boost::optional<Microseconds> duration) {
 }
 
 /**
+ * Convert an optional Duration to a count of Nanoseconds int64_t.
+ */
+inline int64_t nanosecondsToInt64(boost::optional<Nanoseconds> duration) {
+    return duration.has_value() && duration.value() >= Nanoseconds::zero()
+        ? static_cast<int64_t>(duration->count())
+        : static_cast<int64_t>(-1);
+}
+
+/**
  * Snapshot of query stats from CurOp::OpDebug to store in query stats store.
  */
 struct QueryStatsSnapshot {
@@ -227,10 +234,25 @@ struct QueryStatsSnapshot {
     uint64_t bytesRead;
     int64_t readTimeMicros;
     int64_t workingTimeMillis;
+    int64_t cpuNanos;
+
+    uint64_t delinquentAcquisitions;
+    int64_t totalAcquisitionDelinquencyMillis;
+    int64_t maxAcquisitionDelinquencyMillis;
+
+    uint64_t numInterruptChecks;
+    int64_t overdueInterruptApproxMaxMillis;
+
     bool hasSortStage;
     bool usedDisk;
     bool fromMultiPlanner;
     bool fromPlanCache;
+
+    uint64_t nMatched;
+    uint64_t nUpserted;
+    uint64_t nModified;
+    uint64_t nDeleted;
+    uint64_t nInserted;
 };
 
 /**

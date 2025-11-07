@@ -6,14 +6,16 @@
  *   # TODO (SERVER-89668): Remove tag. Currently incompatible due to change
  *   # events containing the recordIdsReplicated:true option, which
  *   # this test dislikes.
- *   exclude_when_record_ids_replicated
+ *   exclude_when_record_ids_replicated,
+ *   # TODO SERVER-111733 re-enable this test in viewless timeseries suites
+ *   featureFlagCreateViewlessTimeseriesCollections_incompatible,
  * ]
  */
 import {assertDropCollection} from "jstests/libs/collection_drop_recreate.js";
 import {
     assertChangeStreamEventEq,
     canonicalizeEventForTesting,
-    ChangeStreamTest
+    ChangeStreamTest,
 } from "jstests/libs/query/change_stream_util.js";
 
 const testDB = db.getSiblingDB(jsTestName());
@@ -36,8 +38,7 @@ function runViewEventAndResumeTest(showSystemEvents) {
     assert.commandWorked(testDB.createCollection("base"));
     assert.commandWorked(testDB["base"].insert({_id: 1}));
 
-    let cursor = testDB.aggregate(
-        [{$changeStream: {showExpandedEvents: true, showSystemEvents: showSystemEvents}}]);
+    let cursor = testDB.aggregate([{$changeStream: {showExpandedEvents: true, showSystemEvents: showSystemEvents}}]);
 
     assert.commandWorked(testDB.createView("view", "base", viewPipeline));
     assert.soon(() => cursor.hasNext());
@@ -69,10 +70,11 @@ function runViewEventAndResumeTest(showSystemEvents) {
 
     // Ensure that we can resume the change stream using a resuming token from the create view
     // event.
-    cursor = testDB.aggregate([{
-        $changeStream:
-            {resumeAfter: event._id, showExpandedEvents: true, showSystemEvents: showSystemEvents}
-    }]);
+    cursor = testDB.aggregate([
+        {
+            $changeStream: {resumeAfter: event._id, showExpandedEvents: true, showSystemEvents: showSystemEvents},
+        },
+    ]);
     assert.commandWorked(testDB.createView("viewOnView", "view", viewPipeline));
     assert.soon(() => cursor.hasNext());
 
@@ -89,8 +91,7 @@ function runViewEventAndResumeTest(showSystemEvents) {
 
     // Test 'collMod' command on views.
     const updatedViewPipeline = [{$match: {a: 1}}, {$project: {a: 1}}];
-    assert.commandWorked(
-        testDB.runCommand({collMod: "viewOnView", viewOn: "view", pipeline: updatedViewPipeline}));
+    assert.commandWorked(testDB.runCommand({collMod: "viewOnView", viewOn: "view", pipeline: updatedViewPipeline}));
     assert.soon(() => cursor.hasNext());
     const modifyEvent = cursor.next();
     events.push(modifyEvent);
@@ -98,7 +99,7 @@ function runViewEventAndResumeTest(showSystemEvents) {
     assertChangeStreamEventEq(modifyEvent, {
         operationType: "modify",
         ns: {db: dbName, coll: "viewOnView"},
-        operationDescription: {viewOn: "view", pipeline: updatedViewPipeline}
+        operationDescription: {viewOn: "view", pipeline: updatedViewPipeline},
     });
 
     // Test 'drop' events.
@@ -114,12 +115,10 @@ function runViewEventAndResumeTest(showSystemEvents) {
     const dropEventView = cursor.next();
     events.push(dropEventView);
 
-    assertChangeStreamEventEq(dropEventView,
-                              {operationType: "drop", ns: {db: dbName, coll: "viewOnView"}});
+    assertChangeStreamEventEq(dropEventView, {operationType: "drop", ns: {db: dbName, coll: "viewOnView"}});
 
     // Test view change stream events on a timeseries collection.
-    assert.commandWorked(
-        testDB.createCollection("timeseries_coll", {timeseries: {timeField: "time"}}));
+    assert.commandWorked(testDB.createCollection("timeseries_coll", {timeseries: {timeField: "time"}}));
 
     if (showSystemEvents) {
         // Also expect the creation of the buckets collection.
@@ -147,8 +146,7 @@ function runViewEventAndResumeTest(showSystemEvents) {
         nsType: "timeseries",
     });
 
-    assert.commandWorked(
-        testDB.runCommand({collMod: "timeseries_coll", timeseries: {granularity: 'minutes'}}));
+    assert.commandWorked(testDB.runCommand({collMod: "timeseries_coll", timeseries: {granularity: "minutes"}}));
     assert.soon(() => cursor.hasNext());
     let modifyTimeseriesEvent = cursor.next();
     events.push(modifyTimeseriesEvent);
@@ -167,12 +165,12 @@ function runViewEventAndResumeTest(showSystemEvents) {
 
         assertChangeStreamEventEq(createIndexesEvent, {
             operationType: "createIndexes",
-            ns: {db: dbName, coll: "system.buckets.timeseries_coll"}
+            ns: {db: dbName, coll: "system.buckets.timeseries_coll"},
         });
 
         assertChangeStreamEventEq(shardCollectionEvent, {
             operationType: "shardCollection",
-            ns: {db: dbName, coll: "system.buckets.timeseries_coll"}
+            ns: {db: dbName, coll: "system.buckets.timeseries_coll"},
         });
     }
 
@@ -181,8 +179,8 @@ function runViewEventAndResumeTest(showSystemEvents) {
         ns: {db: dbName, coll: "timeseries_coll"},
         operationDescription: {
             viewOn: "system.buckets.timeseries_coll",
-            pipeline: [{$_internalUnpackBucket: {timeField: "time", bucketMaxSpanSeconds: 86400}}]
-        }
+            pipeline: [{$_internalUnpackBucket: {timeField: "time", bucketMaxSpanSeconds: 86400}}],
+        },
     });
 
     if (showSystemEvents) {
@@ -197,7 +195,8 @@ function runViewEventAndResumeTest(showSystemEvents) {
                 event = canonicalizeEventForTesting(event, expected);
                 delete event.stateBeforeChange;
                 return event;
-            });
+            },
+        );
     }
 
     assertDropCollection(testDB, "timeseries_coll");
@@ -246,13 +245,15 @@ function runViewEventAndResumeTest(showSystemEvents) {
     for (let idx = 0; idx < events.length - 1; idx++) {
         const event = events[idx];
         const subsequent = events[idx + 1];
-        const newCursor = testDB.aggregate([{
-            $changeStream: {
-                resumeAfter: event._id,
-                showExpandedEvents: true,
-                showSystemEvents: showSystemEvents
-            }
-        }]);
+        const newCursor = testDB.aggregate([
+            {
+                $changeStream: {
+                    resumeAfter: event._id,
+                    showExpandedEvents: true,
+                    showSystemEvents: showSystemEvents,
+                },
+            },
+        ]);
         assert.soon(() => newCursor.hasNext());
         assertChangeStreamEventEq(newCursor.next(), subsequent);
     }
@@ -270,7 +271,7 @@ assert.soon(() => {
         cst.startWatchingChanges({
             pipeline: [{$changeStream: {showExpandedEvents: true}}],
             collection: "view",
-            doNotModifyInPassthroughs: true
+            doNotModifyInPassthroughs: true,
         });
     } catch (e) {
         assert.commandFailedWithCode(e, ErrorCodes.CommandNotSupportedOnView);
@@ -286,7 +287,7 @@ assertDropCollection(testDB, "view");
 let cursor = cst.startWatchingChanges({
     pipeline: [{$changeStream: {showExpandedEvents: true}}],
     collection: "view",
-    doNotModifyInPassthroughs: true
+    doNotModifyInPassthroughs: true,
 });
 
 // Create a view, then drop it and create a normal collection with the same name.
@@ -309,7 +310,7 @@ assertDropCollection(testDB, "view");
 cursor = cst.startWatchingChanges({
     pipeline: [{$changeStream: {showExpandedEvents: true}}],
     collection: "base",
-    doNotModifyInPassthroughs: true
+    doNotModifyInPassthroughs: true,
 });
 
 // Verify that the view related operations are ignored, and only the event for insert on the base
@@ -323,5 +324,38 @@ assertChangeStreamEventEq(event, {
     operationType: "insert",
     ns: {db: dbName, coll: "base"},
     fullDocument: {_id: 0},
-    documentKey: {_id: 0}
+    documentKey: {_id: 0},
+});
+
+// Verify that collection names such as 'system_views' do not trigger fake view creation events.
+["system_views", "systemxviews", "systemviews"].forEach((collName) => {
+    assertDropCollection(testDB, collName);
+    assert.commandWorked(testDB.createCollection(collName));
+
+    // Note: excluding "createIndexes" and "shardCollection" events is necessary here because some
+    // passthroughs add index creation events to the change stream.
+    cursor = cst.startWatchingChanges({
+        pipeline: [
+            {$changeStream: {showExpandedEvents: true}},
+            {$match: {operationType: {$nin: ["shardCollection", "createIndexes"]}}},
+        ],
+        collection: 1,
+        doNotModifyInPassthroughs: true,
+    });
+
+    // Insert a document into a collection with a name similar to 'system.views'.
+    testDB[collName].insert({_id: "test"});
+
+    // Verify that we only see the insert and no view creation event.
+    event = cst.getNextChanges(cursor, 1)[0];
+    assertChangeStreamEventEq(event, {
+        operationType: "insert",
+        ns: {db: dbName, coll: collName},
+        fullDocument: {_id: "test"},
+        documentKey: {_id: "test"},
+    });
+
+    cst.assertNoChange(cursor);
+
+    assertDropCollection(testDB, collName);
 });

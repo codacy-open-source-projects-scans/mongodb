@@ -33,12 +33,14 @@
 #include "mongo/db/repl/replication_consistency_markers.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/stats/timer_stats.h"
+#include "mongo/db/version_context.h"
 #include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+namespace MONGO_MOD_PUB mongo {
 namespace repl {
 
-class OplogWriterStats {
+class MONGO_MOD_PRIVATE OplogWriterStats {
 public:
     void incrementBatchSize(uint64_t n);
     TimerStats& getBatches();
@@ -56,12 +58,11 @@ private:
  * Writes oplog entries.
  *
  * Primarily used to write batches of operations fetched from a sync source during steady
- * state replication and initial sync. Startup recovery can also use this to recover the
- * change collection.
+ * state replication and initial sync.
  *
  * When used for steady state replication, runs a thread that reads batches of operations
  * from an oplog buffer populated through the BackgroundSync interface and writes them to
- * the oplog and/or change collection.
+ * the oplog.
  */
 class OplogWriterImpl : public OplogWriter {
     OplogWriterImpl(const OplogWriterImpl&) = delete;
@@ -78,11 +79,10 @@ public:
                     ReplicationCoordinator* replCoord,
                     StorageInterface* storageInterface,
                     ReplicationConsistencyMarkers* consistencyMarkers,
-                    Observer* observer,
                     const OplogWriter::Options& options);
 
     /**
-     * Writes a batch of oplog entries to the oplog and/or the change collections.
+     * Writes a batch of oplog entries to the oplog.
      *
      * Returns false if nothing is written, true otherwise.
      *
@@ -92,9 +92,8 @@ public:
     bool writeOplogBatch(OperationContext* opCtx, const std::vector<BSONObj>& ops) override;
 
     /**
-     * Schedules the writes of the oplog batch to the oplog and/or the change collections
-     * using the thread pool. Use waitForScheduledWrites() after calling this function to
-     * wait for the writes to complete.
+     * Schedules the writes of the oplog batch to the oplog using the thread pool.
+     * Use waitForScheduledWrites() after calling this function to wait for the writes to complete.
      *
      * Returns false if no write is scheduled, true otherwise.
      *
@@ -137,12 +136,9 @@ private:
     void _writeOplogBatchForRange(OperationContext* opCtx,
                                   const std::vector<T>& ops,
                                   size_t begin,
-                                  size_t end,
-                                  bool writeOplogColl,
-                                  bool writeChangeColl);
+                                  size_t end);
 
-
-    std::pair<bool, bool> _checkWriteOptions();
+    bool _checkWriteOptions(const VersionContext& vCtx);
 
     // Not owned by us.
     OplogBuffer* const _applyBuffer;
@@ -159,10 +155,7 @@ private:
 
     // Not owned by us.
     ReplicationConsistencyMarkers* const _consistencyMarkers;
-
-    // Not owned by us.
-    Observer* const _observer;
 };
 
 }  // namespace repl
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

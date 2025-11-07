@@ -29,15 +29,17 @@
 
 #pragma once
 
-#include <bitset>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-
 #include "mongo/db/exec/projection_executor.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/query/projection.h"
-#include "mongo/db/query/projection_ast.h"
-#include "mongo/db/query/projection_policies.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_ast.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_policies.h"
+#include "mongo/util/modules.h"
+
+#include <bitset>
+#include <memory>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::projection_executor {
 /**
@@ -87,8 +89,10 @@ using BuilderParamsBitSet = std::bitset<BuilderParams::kNumParams>;
 
 /**
  * By default all projection executor builder parameters are turned on.
+ *
+ * TODO SERVER-113179: Remove external dependencies on this constant.
  */
-static constexpr auto kDefaultBuilderParams =
+MONGO_MOD_NEEDS_REPLACEMENT static constexpr auto kDefaultBuilderParams =
     BuilderParamsBitSet(~(1 << BuilderParams::kNumParams));
 
 /**
@@ -96,8 +100,10 @@ static constexpr auto kDefaultBuilderParams =
  * 'policies' by walking an AST tree starting at the root node stored within the 'projection'.
  * The 'params' parameter is used to pass various control parameters to alter the behaviour of the
  * projection executor builder.
+ *
+ * TODO SERVER-113179: Remove external dependencies on this constant.
  */
-std::unique_ptr<ProjectionExecutor> buildProjectionExecutor(
+MONGO_MOD_NEEDS_REPLACEMENT std::unique_ptr<ProjectionExecutor> buildProjectionExecutor(
     boost::intrusive_ptr<ExpressionContext> expCtx,
     const projection_ast::Projection* projection,
     ProjectionPolicies policies,

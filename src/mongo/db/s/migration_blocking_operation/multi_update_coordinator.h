@@ -30,7 +30,6 @@
 #pragma once
 
 #include "mongo/db/repl/primary_only_service.h"
-#include "mongo/db/s/migration_blocking_operation/multi_update_coordinator.h"
 #include "mongo/db/s/migration_blocking_operation/multi_update_coordinator_external_state.h"
 #include "mongo/db/s/migration_blocking_operation/multi_update_coordinator_gen.h"
 #include "mongo/db/s/primary_only_service_helpers/retry_until_majority_commit.h"
@@ -67,7 +66,6 @@ public:
     std::shared_ptr<PrimaryOnlyService::Instance> constructInstance(BSONObj initialState) override;
 
 private:
-    ServiceContext* _serviceContext;
     std::unique_ptr<MultiUpdateCoordinatorExternalStateFactory> _externalStateFactory;
 };
 

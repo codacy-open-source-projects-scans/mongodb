@@ -1,10 +1,13 @@
 // Check the semantics of near calls with multiple locations
+// @tags: [
+//   requires_getmore,
+// ]
 
 let t = db.geoarray2;
 t.drop();
 
-var numObjs = 10;
-var numLocs = 100;
+let numObjs = 10;
+let numLocs = 100;
 
 Random.setRandomSeed();
 
@@ -14,8 +17,7 @@ for (var i = -1; i < 2; i++) {
     for (var j = -1; j < 2; j++) {
         let locObj = [];
 
-        if (i != 0 || j != 0)
-            locObj.push({x: i * 50 + Random.rand(), y: j * 50 + Random.rand()});
+        if (i != 0 || j != 0) locObj.push({x: i * 50 + Random.rand(), y: j * 50 + Random.rand()});
         locObj.push({x: Random.rand(), y: Random.rand()});
         locObj.push({x: Random.rand(), y: Random.rand()});
 
@@ -29,24 +31,23 @@ assert.commandWorked(t.createIndex({loc: "2d", type: 1}));
 print("Starting testing phase... ");
 
 for (let t = 0; t < 2; t++) {
-    var type = t == 0 ? "A" : "B";
+    let type = t == 0 ? "A" : "B";
 
     for (var i = -1; i < 2; i++) {
         for (var j = -1; j < 2; j++) {
-            var center = [i * 50, j * 50];
+            let center = [i * 50, j * 50];
             var count = i == 0 && j == 0 ? 9 : 1;
             var objCount = 1;
 
             // Do near check
 
-            var nearResults =
-                db.geoarray2
-                    .find({loc: {$near: center}, type: type}, {dis: {$meta: "geoNearDistance"}})
-                    .limit(count)
-                    .toArray();
+            let nearResults = db.geoarray2
+                .find({loc: {$near: center}, type: type}, {dis: {$meta: "geoNearDistance"}})
+                .limit(count)
+                .toArray();
 
-            var objsFound = {};
-            var lastResult = 0;
+            let objsFound = {};
+            let lastResult = 0;
             for (var k = 0; k < nearResults.length; k++) {
                 // All distances should be small, for the # of results
                 assert.gt(1.5, nearResults[k].dis);
@@ -57,10 +58,8 @@ for (let t = 0; t < 2; t++) {
 
                 var objKey = "" + nearResults[k]._id;
 
-                if (objKey in objsFound)
-                    objsFound[objKey]++;
-                else
-                    objsFound[objKey] = 1;
+                if (objKey in objsFound) objsFound[objKey]++;
+                else objsFound[objKey] = 1;
             }
 
             // Make sure we found the right objects each time
@@ -72,13 +71,11 @@ for (let t = 0; t < 2; t++) {
             // Do nearSphere check
 
             // Earth Radius from geoconstants.h
-            var eRad = 6378.1;
+            let eRad = 6378.1;
 
-            nearResults =
-                db.geoarray2
-                    .find(
-                        {loc: {$nearSphere: center, $maxDistance: 500 /* km */ / eRad}, type: type})
-                    .toArray();
+            nearResults = db.geoarray2
+                .find({loc: {$nearSphere: center, $maxDistance: 500 /* km */ / eRad}, type: type})
+                .toArray();
 
             assert.eq(nearResults.length, count);
 
@@ -86,10 +83,8 @@ for (let t = 0; t < 2; t++) {
             lastResult = 0;
             for (var k = 0; k < nearResults.length; k++) {
                 var objKey = "" + nearResults[k]._id;
-                if (objKey in objsFound)
-                    objsFound[objKey]++;
-                else
-                    objsFound[objKey] = 1;
+                if (objKey in objsFound) objsFound[objKey]++;
+                else objsFound[objKey] = 1;
             }
 
             // Make sure we found the right objects each time
@@ -105,21 +100,21 @@ for (let t = 0; t < 2; t++) {
             // Do within check
             objsFound = {};
 
-            var box = [[center[0] - 1, center[1] - 1], [center[0] + 1, center[1] + 1]];
+            let box = [
+                [center[0] - 1, center[1] - 1],
+                [center[0] + 1, center[1] + 1],
+            ];
 
             // printjson( box )
 
-            var withinResults =
-                db.geoarray2.find({loc: {$within: {$box: box}}, type: type}).toArray();
+            let withinResults = db.geoarray2.find({loc: {$within: {$box: box}}, type: type}).toArray();
 
             assert.eq(withinResults.length, count);
 
             for (var k = 0; k < withinResults.length; k++) {
                 var objKey = "" + withinResults[k]._id;
-                if (objKey in objsFound)
-                    objsFound[objKey]++;
-                else
-                    objsFound[objKey] = 1;
+                if (objKey in objsFound) objsFound[objKey]++;
+                else objsFound[objKey] = 1;
             }
 
             // printjson( objsFound )
@@ -132,17 +127,14 @@ for (let t = 0; t < 2; t++) {
             // Do within check (circle)
             objsFound = {};
 
-            withinResults =
-                db.geoarray2.find({loc: {$within: {$center: [center, 1.5]}}, type: type}).toArray();
+            withinResults = db.geoarray2.find({loc: {$within: {$center: [center, 1.5]}}, type: type}).toArray();
 
             assert.eq(withinResults.length, count);
 
             for (var k = 0; k < withinResults.length; k++) {
                 var objKey = "" + withinResults[k]._id;
-                if (objKey in objsFound)
-                    objsFound[objKey]++;
-                else
-                    objsFound[objKey] = 1;
+                if (objKey in objsFound) objsFound[objKey]++;
+                else objsFound[objKey] = 1;
             }
 
             // Make sure we found the right objects each time

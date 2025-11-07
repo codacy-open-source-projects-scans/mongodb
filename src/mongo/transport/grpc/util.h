@@ -29,24 +29,21 @@
 
 #pragma once
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/util/net/hostandport.h"
+
 #include <type_traits>
 
 #include <grpcpp/security/server_credentials.h>
 #include <grpcpp/support/status_code_enum.h>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
-#include "mongo/util/net/hostandport.h"
-
 namespace mongo::transport::grpc::util {
 namespace constants {
 /**
- * Placeholder wire version constant corresponding to the first wire version that supports using
- * gRPC.
- * TODO SERVER-78614: Move this to the WireVersion enum closer to the initial release containing
- * gRPC support.
+ * Wire version constant corresponding to the first wire version that supports using gRPC.
  */
-static constexpr auto kMinimumWireVersion = 22;
+static constexpr auto kMinimumWireVersion = 26;
 
 static constexpr auto kAuthenticatedCommandStreamMethodName =
     "/mongodb.CommandService/AuthenticatedCommandStream";
@@ -78,7 +75,7 @@ std::string toGRPCFormattedURI(const HostAndPort& address);
 
 // See: https://grpc.github.io/grpc/cpp/md_doc_naming.html
 inline bool isUnixSchemeGRPCFormattedURI(StringData uri) {
-    return uri.startsWith("unix:");
+    return uri.starts_with("unix:");
 }
 
 /**

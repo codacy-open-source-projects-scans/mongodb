@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
@@ -42,6 +37,12 @@
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
+
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -55,8 +56,10 @@ public:
 
     const char* getSourceName() const final;
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kGroup;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
     /**
@@ -67,6 +70,7 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const boost::intrusive_ptr<Expression>& groupByExpression,
         std::vector<AccumulationStatement> accumulationStatements,
+        bool willBeMerged,
         boost::optional<int64_t> maxMemoryUsageBytes = boost::none);
 
     /**
@@ -80,20 +84,18 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         boost::optional<int64_t> maxMemoryUsageBytes);
 
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) override;
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) override;
 
     // The $sort/$group with $first/$last is rewritten to use $top/$bottom in $group so that $sort
     // is absorbed into $group. Currently this rewrite is only invoked from time-series.
     //
     // TODO SERVER-28980 will lift the restriction.
     bool tryToAbsorbTopKSort(DocumentSourceSort* prospectiveSort,
-                             Pipeline::SourceContainer::iterator prospectiveSortItr,
-                             Pipeline::SourceContainer* container);
+                             DocumentSourceContainer::iterator prospectiveSortItr,
+                             DocumentSourceContainer* container);
 
 protected:
-    GetNextResult doGetNext() final;
-
     bool isSpecFieldReserved(StringData) final {
         return false;
     }
@@ -118,8 +120,8 @@ protected:
      * dotted paths which include arrays change the evaluation of the filter statement and may lead
      * to erroneous results.
      */
-    bool pushDotRenamedMatch(Pipeline::SourceContainer::iterator itr,
-                             Pipeline::SourceContainer* container);
+    bool pushDotRenamedMatch(DocumentSourceContainer::iterator itr,
+                             DocumentSourceContainer* container);
 
     /**
      * This optimization combines multiple $top(N) or $bottom(N) accumulators that use the same sort
@@ -146,8 +148,8 @@ protected:
      * },
      * {$project: {tm: "$ts.tm", ti: "$ts.ti"}}
      */
-    bool tryToGenerateCommonSortKey(Pipeline::SourceContainer::iterator itr,
-                                    Pipeline::SourceContainer* container);
+    bool tryToGenerateCommonSortKey(DocumentSourceContainer::iterator itr,
+                                    DocumentSourceContainer* container);
 
     /**
      * This optimization desugars a $topN where N == 1 to a single $top followed by a $addFields to
@@ -172,31 +174,15 @@ protected:
      * },
      * {$addFields: {myField: ["$myField"]}
      */
-    bool tryToOptimizeAccN(Pipeline::SourceContainer::iterator itr,
-                           Pipeline::SourceContainer* container);
+    bool tryToOptimizeAccN(DocumentSourceContainer::iterator itr,
+                           DocumentSourceContainer* container);
 
 private:
+    friend boost::intrusive_ptr<exec::agg::Stage> documentSourceGroupToStageFn(
+        const boost::intrusive_ptr<DocumentSource>& documentSource);
+
     explicit DocumentSourceGroup(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                  boost::optional<int64_t> maxMemoryUsageBytes = boost::none);
-
-    /**
-     * Before returning anything, this source must prepare itself. performBlockingGroup() exhausts
-     * the previous source before
-     * returning. The '_groupsReady' boolean indicates that performBlockingGroup() has finished.
-     *
-     * This method may not be able to finish initialization in a single call if 'pSource' returns a
-     * DocumentSource::GetNextResult::kPauseExecution, so it returns the last GetNextResult
-     * encountered, which may be either kEOF or kPauseExecution.
-     */
-    GetNextResult performBlockingGroup();
-
-    /**
-     * Initializes this $group after any children are initialized. See performBlockingGroup() for
-     * more details.
-     */
-    GetNextResult performBlockingGroupSelf(GetNextResult input);
-
-    bool _groupsReady;
 };
 
 }  // namespace mongo

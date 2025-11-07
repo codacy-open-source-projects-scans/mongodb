@@ -13,9 +13,6 @@
  *     does_not_support_stepdowns,
  *     # We need a timeseries collection.
  *     requires_timeseries,
- *     # TODO (SERVER-88539) the timeseries setup runs a migration. Remove the upgrade-downgrade
- *     # incompatible tag once migrations  work during downgrade.
- *     cannot_run_during_upgrade_downgrade,
  *     requires_getmore,
  * ]
  */
@@ -23,7 +20,7 @@ import {
     backwardIxscan,
     forwardIxscan,
     runRewritesTest,
-    setupColl
+    setupColl,
 } from "jstests/core/timeseries/libs/timeseries_sort_util.js";
 
 const metaCollName = jsTestName();
@@ -37,12 +34,8 @@ for (const sort of [-1, +1]) {
         for (const t of [-1, +1]) {
             const index = {m, t};
             const expectedAccessPath = t === sort ? forwardIxscan : backwardIxscan;
-            runRewritesTest({t: sort}, index, index, expectedAccessPath, metaColl, t === sort, [
-                {$match: {m: 7}}
-            ]);
-            runRewritesTest({t: sort}, index, null, expectedAccessPath, metaColl, t === sort, [
-                {$match: {m: 7}}
-            ]);
+            runRewritesTest({t: sort}, index, index, expectedAccessPath, metaColl, t === sort, [{$match: {m: 7}}]);
+            runRewritesTest({t: sort}, index, null, expectedAccessPath, metaColl, t === sort, [{$match: {m: 7}}]);
         }
     }
 }

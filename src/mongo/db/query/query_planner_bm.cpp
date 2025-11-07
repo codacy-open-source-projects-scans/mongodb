@@ -27,11 +27,13 @@
  *    it in the license file.
  */
 
-#include <benchmark/benchmark.h>
-
 #include "mongo/db/query/query_planner.h"
+
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/query_test_service_context.h"
+
+#include <benchmark/benchmark.h>
 
 namespace mongo {
 
@@ -59,7 +61,7 @@ std::unique_ptr<CanonicalQuery> getCanonicalQuery(OperationContext* opCtx, Query
 IndexEntry createIndexEntry(BSONObj keyPattern) {
     return IndexEntry(keyPattern,
                       IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                      IndexDescriptor::kLatestIndexVersion,
+                      IndexConfig::kLatestIndexVersion,
                       false /*multikey*/,
                       {} /*mutikeyPaths*/,
                       {} /*multikeyPathSet*/,

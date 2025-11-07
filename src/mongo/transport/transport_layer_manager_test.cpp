@@ -27,17 +27,20 @@
  *    it in the license file.
  */
 
-#include <memory>
-
+#include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/service_context.h"
+#include "mongo/transport/test_fixtures.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/transport/transport_layer_manager_impl.h"
 #include "mongo/transport/transport_layer_mock.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/net/hostandport.h"
+#include "mongo/util/periodic_runner_factory.h"
+
+#include <memory>
 
 namespace mongo::transport {
 namespace {
@@ -128,6 +131,38 @@ TEST_F(TransportLayerManagerTest, ShutdownAfterSetup) {
     for (auto layer : getMockTransportLayers(manager)) {
         ASSERT_TRUE(layer->inShutdown());
     }
+}
+
+DEATH_TEST(PortsTest,
+           ShouldFailIfMainAndMaintenancePortsCollide,
+           "Port collision, ports must be unique.") {
+    serverGlobalParams.port = 20017;
+    serverGlobalParams.maintenancePort = 20017;
+
+    gFeatureFlagDedicatedPortForMaintenanceOperations.setForServerParameter(true);
+
+    auto svcCtx = ServiceContext::make();
+    svcCtx->setPeriodicRunner(makePeriodicRunner(svcCtx.get()));
+    svcCtx->getService()->setServiceEntryPoint(
+        std::make_unique<test::ServiceEntryPointUnimplemented>());
+
+    std::ignore = TransportLayerManagerImpl::make(svcCtx.get(), true);
+}
+
+DEATH_TEST(PortsTest,
+           ShouldFailIfMainAndProxyPortsCollide,
+           "Port collision, ports must be unique.") {
+    serverGlobalParams.port = 20017;
+    serverGlobalParams.proxyPort = 20017;
+
+    gFeatureFlagDedicatedPortForMaintenanceOperations.setForServerParameter(true);
+
+    auto svcCtx = ServiceContext::make();
+    svcCtx->setPeriodicRunner(makePeriodicRunner(svcCtx.get()));
+    svcCtx->getService()->setServiceEntryPoint(
+        std::make_unique<test::ServiceEntryPointUnimplemented>());
+
+    std::ignore = TransportLayerManagerImpl::make(svcCtx.get(), true);
 }
 
 TEST_F(TransportLayerManagerTest, ConnectEgressLayer) {

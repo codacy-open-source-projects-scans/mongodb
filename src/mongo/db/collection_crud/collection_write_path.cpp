@@ -29,16 +29,6 @@
 
 #include "mongo/db/collection_crud/collection_write_path.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <iterator>
-#include <memory>
-#include <string>
-#include <type_traits>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -48,43 +38,52 @@
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/crypto/fle_crypto_types.h"
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/collection_options_gen.h"
-#include "mongo/db/catalog/document_validation.h"
-#include "mongo/db/catalog/local_oplog_info.h"
 #include "mongo/db/collection_crud/capped_collection_maintenance.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/write_stage_common.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/collection_options_gen.h"
+#include "mongo/db/local_catalog/document_validation.h"
+#include "mongo/db/local_catalog/local_oplog_info.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/damage_vector.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
+#include "mongo/db/storage/exceptions.h"
 #include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/str.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <iterator>
+#include <memory>
+#include <string>
+#include <type_traits>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -239,10 +238,7 @@ Status insertDocumentsImpl(OperationContext* opCtx,
     const auto& nss = collection->ns();
 
     dassert(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(nss, MODE_IX) ||
-            (nss.isOplog() && shard_role_details::getLocker(opCtx)->isWriteLocked()) ||
-            (nss.isChangeCollection() && nss.tenantId() &&
-             shard_role_details::getLocker(opCtx)->isLockHeldForMode(
-                 {ResourceType::RESOURCE_TENANT, *nss.tenantId()}, MODE_IX)));
+            (nss.isOplog() && shard_role_details::getLocker(opCtx)->isWriteLocked()));
 
     const size_t count = std::distance(begin, end);
 
@@ -252,30 +248,34 @@ Status insertDocumentsImpl(OperationContext* opCtx,
     }
 
     if (collection->needsCappedLock()) {
-        // X-lock the metadata resource for this replicated, non-clustered capped collection until
-        // the end of the WUOW. Non-clustered capped collections require writes to be serialized on
+        // Ensure that we have X-locked the metadata resource for this replicated, non-clustered
+        // capped collection. Non-clustered capped collections require writes to be serialized on
         // the secondary in order to guarantee insertion order (SERVER-21483); this exclusive access
         // to the metadata resource prevents the primary from executing with more concurrency than
         // secondaries - thus helping secondaries keep up - and protects '_cappedFirstRecord'. See
         // SERVER-21646. On the other hand, capped clustered collections with a monotonically
         // increasing cluster key natively guarantee preservation of the insertion order, and don't
         // need serialisation. We allow concurrent inserts for clustered capped collections.
-        Lock::ResourceLock heldUntilEndOfWUOW{opCtx, ResourceId(RESOURCE_METADATA, nss), MODE_X};
+        bool oplogSlotsReserved = std::any_of(
+            begin, end, [](InsertStatement statement) { return !statement.oplogSlot.isNull(); });
+        if (oplogSlotsReserved) {
+            tassert(8218001,
+                    "Operation on non-clustered capped collection had reserved an oplog time but "
+                    "did not have an exclusive lock on "
+                    "the metadata resource",
+                    shard_role_details::getLocker(opCtx)->isLockHeldForMode(
+                        ResourceId(ResourceType::RESOURCE_METADATA, collection->ns()), MODE_X));
+        } else if (!shard_role_details::getLocker(opCtx)->isLockHeldForMode(
+                       ResourceId(ResourceType::RESOURCE_METADATA, collection->ns()), MODE_X)) {
+            Lock::ResourceLock heldUntilEndOfWUOW{
+                opCtx, ResourceId(RESOURCE_METADATA, nss), MODE_X};
+        }
     }
 
     std::vector<Record> records;
     records.reserve(count);
     std::vector<Timestamp> timestamps;
     timestamps.reserve(count);
-
-    std::vector<RecordId> cappedRecordIds;
-    // For capped collections requiring capped snapshots, usually RecordIds are reserved and
-    // registered here to handle visibility. If the RecordId is provided by the caller, it is
-    // assumed the caller already reserved and properly registered the inserts in the
-    // CappedVisibilityObserver.
-    if (collection->usesCappedSnapshots() && begin->recordId.isNull()) {
-        cappedRecordIds = collection->reserveCappedRecordIds(opCtx, count);
-    }
 
     size_t i = 0;
     for (auto it = begin; it != end; it++, i++) {
@@ -296,8 +296,6 @@ Status insertDocumentsImpl(OperationContext* opCtx,
             // This case would only normally be called in a testing circumstance to avoid
             // automatically generating record ids for capped collections.
             recordId = it->recordId;
-        } else if (cappedRecordIds.size()) {
-            recordId = std::move(cappedRecordIds[i]);
         }
 
         if (MONGO_unlikely(corruptDocumentOnInsert.shouldFail())) {
@@ -322,7 +320,8 @@ Status insertDocumentsImpl(OperationContext* opCtx,
         timestamps.emplace_back(it->oplogSlot.getTimestamp());
     }
 
-    Status status = collection->getRecordStore()->insertRecords(opCtx, &records, timestamps);
+    Status status = collection->getRecordStore()->insertRecords(
+        opCtx, *shard_role_details::getRecoveryUnit(opCtx), &records, timestamps);
 
     if (!status.isOK()) {
         if (auto extraInfo = status.extraInfo<DuplicateKeyErrorInfo>();
@@ -444,8 +443,13 @@ Status insertDocumentForBulkLoader(OperationContext* opCtx,
 
     // Using timestamp 0 for these inserts, which are non-oplog so we don't have an appropriate
     // timestamp to use.
-    StatusWith<RecordId> loc = collection->getRecordStore()->insertRecord(
-        opCtx, recordId, doc.objdata(), doc.objsize(), Timestamp());
+    StatusWith<RecordId> loc =
+        collection->getRecordStore()->insertRecord(opCtx,
+                                                   *shard_role_details::getRecoveryUnit(opCtx),
+                                                   recordId,
+                                                   doc.objdata(),
+                                                   doc.objsize(),
+                                                   Timestamp());
 
     if (!loc.isOK())
         return loc.getStatus();
@@ -581,7 +585,7 @@ Status insertDocuments(OperationContext* opCtx,
             // If the failpoint specifies no collection or matches the existing one, hang.
             return (fpNss.isEmpty() || nss == fpNss) &&
                 (!firstIdElem ||
-                 (begin != end && firstIdElem.type() == mongo::String &&
+                 (begin != end && firstIdElem.type() == BSONType::string &&
                   begin->doc["_id"].str() == firstIdElem.str()));
         });
 
@@ -706,8 +710,18 @@ void updateDocument(OperationContext* opCtx,
         invariant(!(args->retryableWrite && setNeedsRetryImageOplogField));
     }
 
-    uassertStatusOK(collection->getRecordStore()->updateRecord(
-        opCtx, oldLocation, newDoc.objdata(), newDoc.objsize()));
+    if (collection->ns().isOplog()) {
+        uassert(ErrorCodes::IllegalOperation,
+                "Cannot change the size of a document in the oplog",
+                !LocalOplogInfo::get(opCtx)->getTruncateMarkers() ||
+                    oldDoc.value().objsize() == newDoc.objsize());
+    }
+    uassertStatusOK(
+        collection->getRecordStore()->updateRecord(opCtx,
+                                                   *shard_role_details::getRecoveryUnit(opCtx),
+                                                   oldLocation,
+                                                   newDoc.objdata(),
+                                                   newDoc.objsize()));
 
     // don't update the indexes if kUpdateNoIndexes has been specified.
     if (opDiff != kUpdateNoIndexes) {
@@ -787,8 +801,13 @@ StatusWith<BSONObj> updateDocumentWithDamages(OperationContext* opCtx,
     }
 
     RecordData oldRecordData(oldDoc.value().objdata(), oldDoc.value().objsize());
-    StatusWith<RecordData> recordData = collection->getRecordStore()->updateWithDamages(
-        opCtx, loc, oldRecordData, damageSource, damages);
+    StatusWith<RecordData> recordData =
+        collection->getRecordStore()->updateWithDamages(opCtx,
+                                                        *shard_role_details::getRecoveryUnit(opCtx),
+                                                        loc,
+                                                        oldRecordData,
+                                                        damageSource,
+                                                        damages);
     if (!recordData.isOK())
         return recordData.getStatus();
     BSONObj newDoc = std::move(recordData.getValue()).releaseToBson().getOwned();
@@ -909,7 +928,8 @@ void deleteDocument(OperationContext* opCtx,
                     "recordId"_attr = loc,
                     "doc"_attr = doc.value().toString());
     } else {
-        collection->getRecordStore()->deleteRecord(opCtx, loc);
+        collection->getRecordStore()->deleteRecord(
+            opCtx, *shard_role_details::getRecoveryUnit(opCtx), loc);
     }
 
     const auto& documentKey = getDocumentKey(collection, doc.value());
@@ -928,5 +948,45 @@ void deleteDocument(OperationContext* opCtx,
     }
 }
 
+repl::OpTime truncateRange(OperationContext* opCtx,
+                           const CollectionPtr& collection,
+                           const RecordId& minRecordId,
+                           const RecordId& maxRecordId,
+                           int64_t bytesDeleted,
+                           int64_t docsDeleted) {
+    const auto& nss = collection->ns();
+    uassert(ErrorCodes::IllegalOperation,
+            "Cannot perform ranged truncate without holding an IX lock on the collection",
+            shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(nss, MODE_IX) ||
+                (nss.isOplog() && shard_role_details::getLocker(opCtx)->isWriteLocked()));
+
+    uassert(ErrorCodes::IllegalOperation,
+            "Cannot perform ranged truncate in collections other than clustered collections as "
+            "RecordIds must be equal across nodes",
+            collection->isClustered());
+    uassert(ErrorCodes::IllegalOperation,
+            "Cannot perform ranged truncate in collections with preimages enabled",
+            !collection->isChangeStreamPreAndPostImagesEnabled());
+    uassert(ErrorCodes::IllegalOperation,
+            "Cannot perform ranged truncate on collections that have an index",
+            collection->getTotalIndexCount() == 0);
+    uassert(ErrorCodes::IllegalOperation,
+            "Cannot perform ranged truncate on null range upper bound",
+            !maxRecordId.isNull());
+
+    repl::OpTime opTime;
+    auto status =
+        collection->getRecordStore()->rangeTruncate(opCtx,
+                                                    *shard_role_details::getRecoveryUnit(opCtx),
+                                                    minRecordId,
+                                                    maxRecordId,
+                                                    -bytesDeleted,
+                                                    -docsDeleted);
+    uassertStatusOK(status);
+
+    opCtx->getServiceContext()->getOpObserver()->onTruncateRange(
+        opCtx, collection, minRecordId, maxRecordId, bytesDeleted, docsDeleted, opTime);
+    return opTime;
+}
 }  // namespace collection_internal
 }  // namespace mongo

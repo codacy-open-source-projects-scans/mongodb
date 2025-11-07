@@ -8,7 +8,8 @@
 //     # Cannot implicitly shard accessed collections because of not being able to create unique
 //     # index using hashed shard key pattern.
 //     cannot_create_unique_index_when_using_hashed_shard_key,
-//     requires_fastcount
+//     requires_fastcount,
+//     requires_getmore,
 // ]
 
 let t = db.jstests_index8;
@@ -22,7 +23,7 @@ t.drop();
     const checkIndexUniqueness = () => {
         let indexes = t.getIndexes();
         assert.eq(4, indexes.length);
-        indexes = Object.fromEntries(indexes.map(idx => [idx.name, idx]));
+        indexes = Object.fromEntries(indexes.map((idx) => [idx.name, idx]));
         assert.sameMembers(Object.keys(indexes), ["_id_", "a_1", "b_1", "cIndex"], tojson(indexes));
         assert(!indexes["a_1"].unique);
         assert(indexes["b_1"].unique);
@@ -33,7 +34,7 @@ t.drop();
 
     // The reIndex command is only supported in standalone mode.
     const hello = db.runCommand({hello: 1});
-    const isStandalone = hello.msg !== "isdbgrid" && !hello.hasOwnProperty('setName');
+    const isStandalone = hello.msg !== "isdbgrid" && !hello.hasOwnProperty("setName");
     if (isStandalone) {
         jsTest.log("Re-index and check index key uniqueness");
         assert.commandWorked(t.reIndex());

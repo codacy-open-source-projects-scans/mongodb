@@ -1,16 +1,15 @@
 // Basic test of sharding with a hashed shard key
 //  - Test basic migrations with moveChunk, using different chunk specification methods
 
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
 
-var s = new ShardingTest({name: jsTestName(), shards: 3, mongos: 1, verbose: 1});
-var dbname = "test";
-var coll = "foo";
-var ns = dbname + "." + coll;
+let s = new ShardingTest({name: jsTestName(), shards: 3, mongos: 1, verbose: 1});
+let dbname = "test";
+let coll = "foo";
+let ns = dbname + "." + coll;
 var db = s.getDB(dbname);
-var t = db.getCollection(coll);
+let t = db.getCollection(coll);
 db.adminCommand({enablesharding: dbname, primaryShard: s.shard1.shardName});
 
 // for simplicity start by turning off balancer
@@ -20,18 +19,13 @@ s.stopBalancer();
 t.drop();
 var res = db.adminCommand({shardcollection: ns, key: {a: "hashed"}});
 
-let expectedChunkCount = 3;
-// TODO SERVER-81884: update once 8.0 becomes last LTS.
-if (!FeatureFlagUtil.isPresentAndEnabled(db, "OneChunkPerShardEmptyCollectionWithHashedShardKey")) {
-    expectedChunkCount = 6;
-}
-assert.eq(expectedChunkCount, findChunksUtil.countChunksForNs(s.config, ns));
+assert.eq(3, findChunksUtil.countChunksForNs(s.config, ns));
 
 assert.eq(res.ok, 1, "shardcollection didn't work");
 s.printShardingStatus();
 
 // insert stuff
-var numitems = 1000;
+let numitems = 1000;
 for (let i = 0; i < numitems; i++) {
     t.insert({a: i});
 }
@@ -41,13 +35,12 @@ printjson(t.find().explain());
 
 // find a chunk that's not on s.shard0.shardName
 let collEntry = s.config.collections.findOne({_id: ns});
-var chunk = s.config.chunks.findOne({uuid: collEntry.uuid, shard: {$ne: s.shard0.shardName}});
+let chunk = s.config.chunks.findOne({uuid: collEntry.uuid, shard: {$ne: s.shard0.shardName}});
 assert.neq(chunk, null, "all chunks on s.shard0.shardName!");
 printjson(chunk);
 
 // try to move the chunk using an invalid specification method. should fail.
-var res = db.adminCommand(
-    {movechunk: ns, find: {a: 0}, bounds: [chunk.min, chunk.max], to: s.shard0.shardName});
+var res = db.adminCommand({movechunk: ns, find: {a: 0}, bounds: [chunk.min, chunk.max], to: s.shard0.shardName});
 assert.eq(res.ok, 0, "moveChunk shouldn't work with invalid specification method");
 
 // now move a chunk using the lower/upper bound method. should work.

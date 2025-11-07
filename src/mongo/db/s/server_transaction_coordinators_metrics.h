@@ -27,19 +27,22 @@
  *    it in the license file.
  */
 
-#pragma once
+#include "mongo/util/modules.h"
 
-#include <cstdint>
-#include <memory>
+
+#pragma once
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/commands/server_status.h"
+#include "mongo/db/commands/server_status/server_status.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/s/transaction_coordinator.h"
 #include "mongo/db/s/transaction_coordinators_stats_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/atomic_word.h"
+
+#include <cstdint>
+#include <memory>
 
 namespace mongo {
 

@@ -28,23 +28,26 @@
  */
 
 
-#include <boost/move/utility_core.hpp>
-#include <memory>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/s/cluster_write.h"
 
 #include "mongo/db/fle_crud.h"
+#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
+#include "mongo/db/global_catalog/router_role_api/ns_targeter.h"
 #include "mongo/db/not_primary_error_tracker.h"
+#include "mongo/db/query/shard_key_diagnostic_printer.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/s/cluster_write.h"
-#include "mongo/s/collection_routing_info_targeter.h"
-#include "mongo/s/ns_targeter.h"
 #include "mongo/s/write_ops/bulk_write_exec.h"
+#include "mongo/s/write_ops/fle.h"
+#include "mongo/s/write_ops/unified_write_executor/unified_write_executor.h"
 #include "mongo/util/decorable.h"
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
+#include <memory>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
 namespace mongo {
 namespace cluster {
@@ -55,19 +58,20 @@ void write(OperationContext* opCtx,
            BatchWriteExecStats* stats,
            BatchedCommandResponse* response,
            boost::optional<OID> targetEpoch) {
-    if (request.hasEncryptionInformation()) {
-        FLEBatchResult result = processFLEBatch(opCtx, request, stats, response, targetEpoch);
-        if (result == FLEBatchResult::kProcessed) {
-            return;
-        }
-
-        // fall through
-    }
-
     NotPrimaryErrorTracker::Disabled scopeDisabledTracker(
         &NotPrimaryErrorTracker::get(opCtx->getClient()));
 
     CollectionRoutingInfoTargeter targeter(opCtx, request.getNS(), targetEpoch);
+
+    // Create an RAII object that prints the collection's shard key in the case of a tassert
+    // or crash.
+    ScopedDebugInfo shardKeyDiagnostics(
+        "ShardKeyDiagnostics",
+        diagnostic_printers::ShardKeyDiagnosticPrinter{
+            targeter.isTargetedCollectionSharded()
+                ? targeter.getRoutingInfo().getChunkManager().getShardKeyPattern().toBSON()
+                : BSONObj()});
+
     if (nss) {
         *nss = targeter.getNS();
     }
@@ -75,8 +79,23 @@ void write(OperationContext* opCtx,
     LOGV2_DEBUG_OPTIONS(
         4817400, 2, {logv2::LogComponent::kShardMigrationPerf}, "Starting batch write");
 
-    BatchWriteExec::executeBatch(opCtx, targeter, request, response, stats);
+    // TODO SERVER-104145: Enable insert/update/delete commands from internal clients.
+    if (unified_write_executor::isEnabled(opCtx)) {
+        *response = unified_write_executor::write(opCtx, request);
+        // SERVER-109104 This can be removed once we delete BatchWriteExec.
+        stats->markIgnore();
+    } else {
+        if (request.hasEncryptionInformation()) {
+            FLEBatchResult result = processFLEBatch(opCtx, request, response);
+            if (result == FLEBatchResult::kProcessed) {
+                return;
+            }
 
+            // fall through
+        }
+
+        BatchWriteExec::executeBatch(opCtx, targeter, request, response, stats);
+    }
     LOGV2_DEBUG_OPTIONS(
         4817401, 2, {logv2::LogComponent::kShardMigrationPerf}, "Finished batch write");
 }
@@ -84,21 +103,16 @@ void write(OperationContext* opCtx,
 bulk_write_exec::BulkWriteReplyInfo bulkWrite(
     OperationContext* opCtx,
     const BulkWriteCommandRequest& request,
-    const std::vector<std::unique_ptr<NSTargeter>>& targeters) {
-    if (request.getNsInfo().size() > 1) {
-        for (const auto& nsInfo : request.getNsInfo()) {
-            uassert(ErrorCodes::BadValue,
-                    "BulkWrite with Queryable Encryption supports only a single namespace.",
-                    !nsInfo.getEncryptionInformation().has_value());
-        }
-    } else if (request.getNsInfo()[0].getEncryptionInformation().has_value()) {
-        auto [result, replies] = bulk_write_exec::attemptExecuteFLE(opCtx, request);
+    const std::vector<std::unique_ptr<NSTargeter>>& targeters,
+    bulk_write_exec::BulkWriteExecStats& execStats) {
+    if (request.getNsInfo()[0].getEncryptionInformation().has_value()) {
+        auto [result, replies] = attemptExecuteFLE(opCtx, request);
         if (result == FLEBatchResult::kProcessed) {
             return replies;
         }  // else fallthrough.
     }
 
-    return bulk_write_exec::execute(opCtx, targeters, request);
+    return bulk_write_exec::execute(opCtx, targeters, request, execStats);
 }
 
 }  // namespace cluster

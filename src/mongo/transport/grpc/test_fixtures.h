@@ -29,18 +29,9 @@
 
 #pragma once
 
-#include <map>
-#include <memory>
-#include <string>
-
-#include <grpcpp/channel.h>
-#include <grpcpp/client_context.h>
-#include <grpcpp/create_channel.h>
-#include <grpcpp/security/credentials.h>
-#include <grpcpp/support/sync_stream.h>
-
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/wire_version.h"
+#include "mongo/platform/random.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/op_msg.h"
@@ -57,17 +48,29 @@
 #include "mongo/transport/grpc/service.h"
 #include "mongo/transport/grpc/util.h"
 #include "mongo/transport/test_fixtures.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/thread_assertion_monitor.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source_mock.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/net/ssl_util.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/uuid.h"
 
-namespace mongo::transport::grpc {
+#include <map>
+#include <memory>
+#include <string>
+
+#include <grpcpp/channel.h>
+#include <grpcpp/client_context.h>
+#include <grpcpp/create_channel.h>
+#include <grpcpp/security/credentials.h>
+#include <grpcpp/support/sync_stream.h>
+
+namespace mongo::transport {
+namespace MONGO_MOD_PARENT_PRIVATE grpc {
 
 #define ASSERT_EQ_MSG(a, b) ASSERT_EQ((a).opMsgDebugString(), (b).opMsgDebugString())
 #define ASSERT_GRPC_STUB_CONNECTED(stub) \
@@ -75,9 +78,14 @@ namespace mongo::transport::grpc {
 #define ASSERT_GRPC_STUB_NOT_CONNECTED(stub) \
     ASSERT_EQ(stub.connect(Milliseconds(50)).error_code(), ::grpc::StatusCode::UNAVAILABLE)
 
-inline Message makeUniqueMessage() {
+inline Message makeUniqueMessage(const std::string& body = "") {
     OpMsg msg;
-    msg.body = BSON("id" << UUID::gen().toBSON());
+    mongo::BSONObjBuilder builder;
+    builder.append("id", UUID::gen().toBSON());
+    if (!body.empty()) {
+        builder.append("msg", body);
+    }
+    msg.body = builder.obj();
     auto out = msg.serialize();
     out.header().setId(nextMessageId());
     out.header().setResponseToMsgId(0);
@@ -119,16 +127,19 @@ public:
     }
 
     std::unique_ptr<MockStreamTestFixtures> makeStreamTestFixtures(
-        Date_t deadline, const MetadataView& clientMetadata) {
+        Date_t deadline,
+        const MetadataView& clientMetadata,
+        const std::shared_ptr<GRPCReactor>& reactor) {
         MockStreamTestFixtures fixtures{nullptr, std::make_shared<MockClientContext>(), nullptr};
 
         auto clientThread = stdx::thread([&] {
             fixtures.clientCtx->setDeadline(deadline);
             for (auto& kvp : clientMetadata) {
-                fixtures.clientCtx->addMetadataEntry(kvp.first.toString(), kvp.second.toString());
+                fixtures.clientCtx->addMetadataEntry(std::string{kvp.first},
+                                                     std::string{kvp.second});
             }
             fixtures.clientStream =
-                makeStub().unauthenticatedCommandStream(fixtures.clientCtx.get());
+                makeStub().unauthenticatedCommandStream(fixtures.clientCtx.get(), reactor);
         });
 
         auto rpc = getServer().acceptRPC();
@@ -340,6 +351,7 @@ public:
      */
     static void runWithMockServers(
         std::vector<HostAndPort> addresses,
+        ServiceContext* svcCtx,
         std::function<void(HostAndPort, std::shared_ptr<IngressSession>)> rpcHandler,
         std::function<void(MockClient&, unittest::ThreadAssertionMonitor&)> clientThreadBody,
         const BSONObj& md = makeClientMetadataDocument(),
@@ -374,8 +386,8 @@ public:
                 return entry->second;
             };
 
-            auto client =
-                std::make_shared<MockClient>(nullptr, HostAndPort(kMockedClientAddr), resolver, md);
+            auto client = std::make_shared<MockClient>(
+                nullptr, svcCtx, HostAndPort(kMockedClientAddr), resolver, md);
             clientThreadBody(*client, monitor);
         });
     }
@@ -429,7 +441,7 @@ public:
         auto credentials = util::isUnixSchemeGRPCFormattedURI(uri)
             ? ::grpc::InsecureChannelCredentials()
             : ::grpc::SslCredentials(sslOps);
-        return Stub(::grpc::CreateChannel(uri.toString(), credentials));
+        return Stub(::grpc::CreateChannel(std::string{uri}, credentials));
     }
 
     /**
@@ -437,22 +449,22 @@ public:
      * a superset of the required metadata for any individual RPC.
      */
     static void addRequiredClientMetadata(::grpc::ClientContext& ctx) {
-        ctx.AddMetadata(util::constants::kWireVersionKey.toString(),
+        ctx.AddMetadata(std::string{util::constants::kWireVersionKey},
                         std::to_string(WireSpec::getWireSpec(getGlobalServiceContext())
-                                           .get()
-                                           ->incomingExternalClient.maxWireVersion));
-        ctx.AddMetadata(util::constants::kAuthenticationTokenKey.toString(), "my-token");
+                                           .getIncomingExternalClient()
+                                           .maxWireVersion));
+        ctx.AddMetadata(std::string{util::constants::kAuthenticationTokenKey}, "my-token");
     }
 
     static void addClientMetadataDocument(::grpc::ClientContext& ctx) {
         auto clientDoc = makeClientMetadataDocument();
-        ctx.AddMetadata(util::constants::kClientMetadataKey.toString(),
+        ctx.AddMetadata(std::string{util::constants::kClientMetadataKey},
                         base64::encode(clientDoc.objdata(), clientDoc.objsize()));
     }
 
     static void addAllClientMetadata(::grpc::ClientContext& ctx) {
         addRequiredClientMetadata(ctx);
-        ctx.AddMetadata(util::constants::kClientIdKey.toString(), UUID::gen().toString());
+        ctx.AddMetadata(std::string{util::constants::kClientIdKey}, UUID::gen().toString());
         addClientMetadataDocument(ctx);
     }
 };
@@ -472,4 +484,12 @@ inline void assertEchoSucceeds(Session& session) {
     ASSERT_EQ_MSG(swResponse.getValue(), msg);
 }
 
-}  // namespace mongo::transport::grpc
+inline std::string makeGRPCUnixSockPath(int port, StringData label = "grpc") {
+    if (port == 0) {
+        port = SecureRandom().nextUInt64();
+    }
+    return makeUnixSockPath(port, label);
+}
+
+}  // namespace MONGO_MOD_PARENT_PRIVATE grpc
+}  // namespace mongo::transport

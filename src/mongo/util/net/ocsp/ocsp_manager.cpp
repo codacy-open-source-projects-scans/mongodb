@@ -27,14 +27,13 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
 
-#include <memory>
+#include "mongo/util/net/ocsp/ocsp_manager.h"
 
 #include "mongo/db/client.h"
-#include "mongo/executor/network_interface_factory.h"
-#include "mongo/util/net/ocsp/ocsp_manager.h"
 #include "mongo/util/net/ssl_parameters_gen.h"
+
+#include <memory>
 
 namespace mongo {
 
@@ -70,7 +69,10 @@ void OCSPManager::start(ServiceContext* service) {
 }
 
 void OCSPManager::shutdown(ServiceContext* service) {
-    get(service)->_pool->shutdown();
+    auto* ocspManager = get(service);
+    if (ocspManager) {
+        ocspManager->_pool->shutdown();
+    }
 }
 
 OCSPManager::OCSPManager() {

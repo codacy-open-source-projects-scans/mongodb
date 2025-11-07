@@ -28,31 +28,21 @@
  */
 
 
-#include <utility>
+#include "mongo/db/s/resharding/document_source_resharding_ownership_match.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/pipeline/lite_parsed_document_source.h"
-#include "mongo/db/s/resharding/document_source_resharding_ownership_match.h"
-#include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/grid.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+#include <utility>
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 namespace mongo {
 
@@ -60,6 +50,8 @@ REGISTER_INTERNAL_DOCUMENT_SOURCE(_internalReshardingOwnershipMatch,
                                   LiteParsedDocumentSourceInternal::parse,
                                   DocumentSourceReshardingOwnershipMatch::createFromBson,
                                   true);
+ALLOCATE_DOCUMENT_SOURCE_ID(_internalReshardingOwnershipMatch,
+                            DocumentSourceReshardingOwnershipMatch::id)
 
 boost::intrusive_ptr<DocumentSourceReshardingOwnershipMatch>
 DocumentSourceReshardingOwnershipMatch::create(
@@ -78,10 +70,10 @@ DocumentSourceReshardingOwnershipMatch::createFromBson(
     BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
     uassert(8423307,
             str::stream() << "Argument to " << kStageName << " must be an object",
-            elem.type() == Object);
+            elem.type() == BSONType::object);
 
     auto parsed = DocumentSourceReshardingOwnershipMatchSpec::parse(
-        IDLParserContext{"DocumentSourceReshardingOwnershipMatchSpec"}, elem.embeddedObject());
+        elem.embeddedObject(), IDLParserContext{"DocumentSourceReshardingOwnershipMatchSpec"});
 
     return new DocumentSourceReshardingOwnershipMatch(parsed.getRecipientShardId(),
                                                       ShardKeyPattern(parsed.getReshardingKey()),
@@ -96,11 +88,11 @@ DocumentSourceReshardingOwnershipMatch::DocumentSourceReshardingOwnershipMatch(
     const boost::intrusive_ptr<ExpressionContext>& expCtx)
     : DocumentSource(kStageName, expCtx),
       _recipientShardId{std::move(recipientShardId)},
-      _reshardingKey{std::move(reshardingKey)},
+      _reshardingKey{std::make_shared<ShardKeyPattern>(std::move(reshardingKey))},
       _temporaryReshardingNamespace{std::move(temporaryReshardingNamespace)} {}
 
 StageConstraints DocumentSourceReshardingOwnershipMatch::constraints(
-    Pipeline::SplitState pipeState) const {
+    PipelineSplitState pipeState) const {
     return StageConstraints(StreamType::kStreaming,
                             PositionRequirement::kNone,
                             HostTypeRequirement::kAnyShard,
@@ -114,9 +106,10 @@ StageConstraints DocumentSourceReshardingOwnershipMatch::constraints(
 
 Value DocumentSourceReshardingOwnershipMatch::serialize(const SerializationOptions& opts) const {
     auto spec = DocumentSourceReshardingOwnershipMatchSpec(_recipientShardId,
-                                                           _reshardingKey.getKeyPattern());
+                                                           _reshardingKey->getKeyPattern());
     // TODO SERVER-92437 ensure this behavior is safe during FCV upgrade/downgrade
     if (resharding::gFeatureFlagReshardingRelaxedMode.isEnabled(
+            VersionContext::getDecoration(getExpCtx()->getOperationContext()),
             serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         spec.setTemporaryReshardingNamespace(_temporaryReshardingNamespace);
     }
@@ -125,8 +118,8 @@ Value DocumentSourceReshardingOwnershipMatch::serialize(const SerializationOptio
 
 DepsTracker::State DocumentSourceReshardingOwnershipMatch::getDependencies(
     DepsTracker* deps) const {
-    for (const auto& skElem : _reshardingKey.toBSON()) {
-        deps->fields.insert(skElem.fieldNameStringData().toString());
+    for (const auto& skElem : _reshardingKey->toBSON()) {
+        deps->fields.insert(std::string{skElem.fieldNameStringData()});
     }
 
     return DepsTracker::State::SEE_NEXT;
@@ -135,38 +128,6 @@ DepsTracker::State DocumentSourceReshardingOwnershipMatch::getDependencies(
 DocumentSource::GetModPathsReturn DocumentSourceReshardingOwnershipMatch::getModifiedPaths() const {
     // This stage does not modify or rename any paths.
     return {DocumentSource::GetModPathsReturn::Type::kFiniteSet, OrderedPathSet{}, {}};
-}
-
-DocumentSource::GetNextResult DocumentSourceReshardingOwnershipMatch::doGetNext() {
-    if (!_tempReshardingChunkMgr) {
-        auto* catalogCache = Grid::get(pExpCtx->getOperationContext())->catalogCache();
-        auto tempNss = _temporaryReshardingNamespace
-            ? _temporaryReshardingNamespace.value()
-            : resharding::constructTemporaryReshardingNss(pExpCtx->getNamespaceString(),
-                                                          *pExpCtx->getUUID());
-        _tempReshardingChunkMgr =
-            uassertStatusOK(catalogCache->getCollectionPlacementInfoWithRefresh(
-                pExpCtx->getOperationContext(), tempNss));
-    }
-
-    auto nextInput = pSource->getNext();
-    for (; nextInput.isAdvanced(); nextInput = pSource->getNext()) {
-        auto shardKey =
-            _reshardingKey.extractShardKeyFromDocThrows(nextInput.getDocument().toBson());
-
-        if (_tempReshardingChunkMgr->keyBelongsToShard(shardKey, _recipientShardId)) {
-            return nextInput;
-        }
-
-        // For performance reasons, a streaming stage must not keep references to documents across
-        // calls to getNext(). Such stages must retrieve a result from their child and then release
-        // it (or return it) before asking for another result. Failing to do so can result in extra
-        // work, since the Document/Value library must copy data on write when that data has a
-        // refcount above one.
-        nextInput.releaseDocument();
-    }
-
-    return nextInput;
 }
 
 }  // namespace mongo

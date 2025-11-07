@@ -30,25 +30,19 @@
 
 #include "mongo/db/collection_index_usage_tracker.h"
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <utility>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/db/commands/server_status_metric.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
+
+#include <utility>
+
+#include <absl/container/flat_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
 
 namespace mongo {
-namespace {
-auto& collectionScansCounter = *MetricBuilder<Counter64>("queryExecutor.collectionScans.total");
-auto& collectionScansNonTailableCounter =
-    *MetricBuilder<Counter64>("queryExecutor.collectionScans.nonTailable");
-}  // namespace
 
 CollectionIndexUsageTracker::CollectionIndexUsageTracker(
     AggregatedIndexUsageTracker* aggregatedIndexUsageTracker, ClockSource* clockSource)
@@ -74,13 +68,11 @@ void CollectionIndexUsageTracker::recordIndexAccess(StringData indexName) const 
 
 void CollectionIndexUsageTracker::recordCollectionScans(unsigned long long collectionScans) const {
     _sharedStats->_collectionScans.fetchAndAdd(collectionScans);
-    collectionScansCounter.increment(collectionScans);
 }
 
 void CollectionIndexUsageTracker::recordCollectionScansNonTailable(
     unsigned long long collectionScansNonTailable) const {
     _sharedStats->_collectionScansNonTailable.fetchAndAdd(collectionScansNonTailable);
-    collectionScansNonTailableCounter.increment(collectionScansNonTailable);
 }
 
 void CollectionIndexUsageTracker::registerIndex(StringData indexName,
@@ -110,6 +102,19 @@ void CollectionIndexUsageTracker::unregisterIndex(StringData indexName) {
 
     // Remove the map entry.
     _indexUsageStatsMap.erase(it);
+}
+
+void CollectionIndexUsageTracker::recordCollectionIndexUsage(
+    long long collectionScans,
+    long long collectionScansNonTailable,
+    const std::set<std::string>& indexesUsed) const {
+    recordCollectionScans(collectionScans);
+    recordCollectionScansNonTailable(collectionScansNonTailable);
+
+    // Record indexes used to fulfill query.
+    for (auto it = indexesUsed.begin(); it != indexesUsed.end(); ++it) {
+        recordIndexAccess(*it);
+    }
 }
 
 const CollectionIndexUsageTracker::CollectionIndexUsageMap&

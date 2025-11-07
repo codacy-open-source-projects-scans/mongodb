@@ -34,12 +34,13 @@
 #else
 #include <windows.h>
 #endif
-#include <string>
-
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/transport/named_pipe/input_object.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <string>
+
+namespace MONGO_MOD_PUBLIC mongo {
 #ifndef _WIN32
 static constexpr auto kDefaultPipePath = "/tmp/"_sd;
 #else
@@ -53,7 +54,7 @@ class NamedPipeOutput {
 public:
     // Searches the named pipe in 'kDefaultPipePath' + 'pipeRelativePath'
     NamedPipeOutput(const std::string& pipeRelativePath)
-        : NamedPipeOutput(kDefaultPipePath.toString(), pipeRelativePath) {}
+        : NamedPipeOutput(std::string{kDefaultPipePath}, pipeRelativePath) {}
 
     // Searches the named pipe in 'pipeDir' + 'pipeRelativePath' in POSIX system'
     NamedPipeOutput(const std::string& pipeDir,
@@ -104,4 +105,4 @@ private:
     bool _isEof : 1;
 #endif
 };
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

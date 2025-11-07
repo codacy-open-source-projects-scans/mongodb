@@ -29,17 +29,18 @@
 
 #pragma once
 
-#include <list>
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/db/service_context.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/functional.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <list>
+#include <string>
+
+namespace MONGO_MOD_PARENT_PRIVATE mongo {
 
 class Status;
 class OperationContext;
@@ -61,15 +62,6 @@ public:
     };
 
     using Task = unique_function<NextAction(OperationContext*, const Status&)>;
-
-    /**
-     * Creates a Task returning kCancel. This is useful in shutting down the task runner after
-     * running a series of tasks.
-     *
-     * Without a cancellation task, the client would need to coordinate the completion of the
-     * last task with calling cancel() on the task runner.
-     */
-    static Task makeCancelTask();
 
     explicit TaskRunner(ThreadPool* threadPool);
 
@@ -163,4 +155,4 @@ private:
 };
 
 }  // namespace repl
-}  // namespace mongo
+}  // namespace MONGO_MOD_PARENT_PRIVATE mongo

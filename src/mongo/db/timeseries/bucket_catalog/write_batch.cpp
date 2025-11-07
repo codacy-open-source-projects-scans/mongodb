@@ -29,19 +29,19 @@
 
 #include "mongo/db/timeseries/bucket_catalog/write_batch.h"
 
-#include <absl/container/node_hash_set.h>
-#include <boost/container/vector.hpp>
-#include <boost/iterator/iterator_facade.hpp>
-#include <boost/iterator/transform_iterator.hpp>
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+
 #include <set>
 #include <string>
 #include <vector>
 
+#include <absl/container/node_hash_set.h>
+#include <boost/container/vector.hpp>
+#include <boost/iterator/iterator_facade.hpp>
+#include <boost/iterator/transform_iterator.hpp>
 #include <boost/move/utility_core.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobjbuilder.h"
 
 namespace mongo::timeseries::bucket_catalog {
 
@@ -63,20 +63,30 @@ BSONObj WriteBatch::toBSON() const {
     auto toFieldName = [](const auto& nameHashPair) {
         return nameHashPair.first;
     };
-    return BSON("docs" << std::vector<BSONObj>(measurements.begin(), measurements.end())
-                       << "bucketMin" << min << "bucketMax" << max << "numCommittedMeasurements"
-                       << int(numPreviouslyCommittedMeasurements) << "newFieldNamesToBeInserted"
-                       << std::set<std::string>(boost::make_transform_iterator(
-                                                    newFieldNamesToBeInserted.begin(), toFieldName),
-                                                boost::make_transform_iterator(
-                                                    newFieldNamesToBeInserted.end(), toFieldName)));
+
+    return BSONObjBuilder{}
+        .append("isReopened", isReopened)
+        .append("bucketIsSortedByTime", bucketIsSortedByTime)
+        .append("openedDueToMetadata", openedDueToMetadata)
+        .append("opId", int(opId))
+        .append("numCommittedMeasurements", int(numPreviouslyCommittedMeasurements))
+        .append("timeField", timeField)
+        .append("bucketMin", min)
+        .append("bucketMax", max)
+        .append("userBatchIndices",
+                std::vector<int>(userBatchIndices.begin(), userBatchIndices.end()))
+        .append("stmtIds", std::vector<int>(stmtIds.begin(), stmtIds.end()))
+        .append("newFieldNamesToBeInserted",
+                std::set<std::string>(
+                    boost::make_transform_iterator(newFieldNamesToBeInserted.begin(), toFieldName),
+                    boost::make_transform_iterator(newFieldNamesToBeInserted.end(), toFieldName)))
+        .append("measurements", std::vector<BSONObj>(measurements.begin(), measurements.end()))
+        .append("bucketOID", bucketId.oid)
+        .append("bucketMetaData", bucketKey.metadata.toBSON())
+        .obj();
 }
 
-bool claimWriteBatchCommitRights(WriteBatch& batch) {
-    return !batch.commitRights.swap(true);
-}
-
-StatusWith<CommitInfo> getWriteBatchResult(WriteBatch& batch) {
+Status getWriteBatchStatus(WriteBatch& batch) {
     if (!batch.promise.getFuture().isReady()) {
         batch.stats.incNumWaits();
     }

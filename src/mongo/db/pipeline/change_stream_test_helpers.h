@@ -29,16 +29,8 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <string>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/json.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -51,14 +43,22 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/util/uuid.h"
 
+#include <cstddef>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
 namespace mongo::change_stream_test_helper {
 static const Timestamp kDefaultTs(100, 1);
+static const Timestamp kDefaultCommitTs(100, 1);
 static const repl::OpTime kDefaultOpTime(kDefaultTs, 1);
 static const NamespaceString nss =
     NamespaceString::createNamespaceString_forTest(boost::none, "unittests.change_stream");
-static const BSONObj kDefaultSpec = fromjson("{$changeStream: {}}");
+static const BSONObj kDefaultSpec = BSON("$changeStream" << BSONObj());
 static const BSONObj kShowExpandedEventsSpec =
-    fromjson("{$changeStream: {showExpandedEvents: true}}");
+    BSON("$changeStream" << BSON("showExpandedEvents" << true));
+static const BSONObj kShowCommitTimestampSpec =
+    BSON("$changeStream" << BSON("showCommitTimestamp" << true));
 
 
 /**

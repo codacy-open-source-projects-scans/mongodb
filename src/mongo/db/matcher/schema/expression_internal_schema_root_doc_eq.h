@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <cstddef>
-#include <memory>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -44,10 +38,15 @@
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_visitor.h"
-#include "mongo/db/matcher/match_details.h"
-#include "mongo/db/matcher/matchable.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstddef>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 
@@ -70,17 +69,6 @@ public:
         BSONObj rhs, clonable_ptr<ErrorAnnotation> annotation = nullptr)
         : MatchExpression(MatchExpression::INTERNAL_SCHEMA_ROOT_DOC_EQ, std::move(annotation)),
           _rhsObj(std::move(rhs)) {}
-
-    bool matches(const MatchableDocument* doc, MatchDetails* details = nullptr) const final;
-
-    /**
-     * This expression should only be used to match full documents, not objects within an array
-     * in the case of $elemMatch.
-     */
-    bool matchesSingleElement(const BSONElement& elem,
-                              MatchDetails* details = nullptr) const final {
-        MONGO_UNREACHABLE;
-    }
 
     std::unique_ptr<MatchExpression> clone() const final;
 
@@ -124,13 +112,11 @@ public:
         return _rhsObj;
     }
 
-private:
-    ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) {
-            return expression;
-        };
+    const BSONObj::ComparatorInterface* getObjCmp() const {
+        return &_objCmp;
     }
 
+private:
     UnorderedFieldsBSONObjComparator _objCmp;
     BSONObj _rhsObj;
 };

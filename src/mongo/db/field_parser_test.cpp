@@ -27,22 +27,21 @@
  *    it in the license file.
  */
 
+#include "mongo/db/field_parser.h"
+
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/exec/mutable_bson/mutable_bson_test_utils.h"
+#include "mongo/platform/decimal128.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/time_support.h"
+
 #include <climits>
 #include <cstring>
 #include <limits>
 #include <map>
 #include <string>
 #include <vector>
-
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/mutable/mutable_bson_test_utils.h"
-#include "mongo/db/field_parser.h"
-#include "mongo/platform/decimal128.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/time_support.h"
 
 namespace {
 
@@ -113,17 +112,13 @@ TEST_F(ExtractionFixture, GetBool) {
 }
 
 TEST_F(ExtractionFixture, GetBSONArray) {
-    BSONField<BSONArray> notThere("otherArray",
-                                  BSON_ARRAY("a"
-                                             << "b"));
+    BSONField<BSONArray> notThere("otherArray", BSON_ARRAY("a" << "b"));
     BSONField<BSONArray> wrongType(aString.name());
     BSONArray val;
     ASSERT_TRUE(FieldParser::extract(doc, anArray, &val));
     ASSERT_BSONOBJ_EQ(val, valArray);
     ASSERT_TRUE(FieldParser::extract(doc, notThere, &val));
-    ASSERT_BSONOBJ_EQ(val,
-                      BSON_ARRAY("a"
-                                 << "b"));
+    ASSERT_BSONOBJ_EQ(val, BSON_ARRAY("a" << "b"));
     ASSERT_FALSE(FieldParser::extract(doc, wrongType, &val));
 }
 
@@ -222,9 +217,8 @@ TEST(ComplexExtraction, GetStringVector) {
 
     BSONObjBuilder bob;
     bob << vectorField()
-        << BSON_ARRAY("a"
-                      << "b"
-                      << "c");
+        << BSON_ARRAY("a" << "b"
+                          << "c");
     BSONObj obj = bob.obj();
 
     vector<string> parsedVector;
@@ -276,9 +270,8 @@ TEST(ComplexExtraction, RoundTripVector) {
     {
         BSONObjBuilder bob;
         bob << vectorField()
-            << BSON_ARRAY("a"
-                          << "b"
-                          << "c");
+            << BSON_ARRAY("a" << "b"
+                              << "c");
         obj = bob.obj();
     }
 
@@ -306,12 +299,11 @@ TEST(ComplexExtraction, GetStringMap) {
 
     BSONObjBuilder bob;
     bob << mapField()
-        << BSON("a"
-                << "a"
-                << "b"
-                << "b"
-                << "c"
-                << "c");
+        << BSON("a" << "a"
+                    << "b"
+                    << "b"
+                    << "c"
+                    << "c");
     BSONObj obj = bob.obj();
 
     map<string, string> parsedMap;
@@ -329,28 +321,15 @@ TEST(ComplexExtraction, GetObjectMap) {
 
     BSONObjBuilder bob;
     bob << mapField()
-        << BSON("a" << BSON("a"
-                            << "a")
-                    << "b"
-                    << BSON("b"
-                            << "b")
-                    << "c"
-                    << BSON("c"
-                            << "c"));
+        << BSON("a" << BSON("a" << "a") << "b" << BSON("b" << "b") << "c" << BSON("c" << "c"));
     BSONObj obj = bob.obj();
 
     map<string, BSONObj> parsedMap;
 
     ASSERT(FieldParser::extract(obj, mapField, &parsedMap));
-    ASSERT_BSONOBJ_EQ(BSON("a"
-                           << "a"),
-                      parsedMap["a"]);
-    ASSERT_BSONOBJ_EQ(BSON("b"
-                           << "b"),
-                      parsedMap["b"]);
-    ASSERT_BSONOBJ_EQ(BSON("c"
-                           << "c"),
-                      parsedMap["c"]);
+    ASSERT_BSONOBJ_EQ(BSON("a" << "a"), parsedMap["a"]);
+    ASSERT_BSONOBJ_EQ(BSON("b" << "b"), parsedMap["b"]);
+    ASSERT_BSONOBJ_EQ(BSON("c" << "c"), parsedMap["c"]);
     ASSERT_EQUALS(parsedMap.size(), static_cast<size_t>(3));
 }
 
@@ -360,10 +339,9 @@ TEST(ComplexExtraction, GetBadMap) {
 
     BSONObjBuilder bob;
     bob << mapField()
-        << BSON("a"
-                << "a"
-                << "b" << 123 << "c"
-                << "c");
+        << BSON("a" << "a"
+                    << "b" << 123 << "c"
+                    << "c");
     BSONObj obj = bob.obj();
 
     map<string, string> parsedMap;
@@ -381,12 +359,11 @@ TEST(ComplexExtraction, RoundTripMap) {
     {
         BSONObjBuilder bob;
         bob << mapField()
-            << BSON("a"
-                    << "a"
-                    << "b"
-                    << "b"
-                    << "c"
-                    << "c");
+            << BSON("a" << "a"
+                        << "b"
+                        << "b"
+                        << "c"
+                        << "c");
         obj = bob.obj();
     }
 
@@ -412,12 +389,11 @@ TEST(ComplexExtraction, GetNestedMap) {
     // Test extraction of complex nested vector and map
     BSONField<vector<map<string, string>>> nestedField("testNested");
 
-    BSONObj nestedMapObj = BSON("a"
-                                << "a"
-                                << "b"
-                                << "b"
-                                << "c"
-                                << "c");
+    BSONObj nestedMapObj = BSON("a" << "a"
+                                    << "b"
+                                    << "b"
+                                    << "c"
+                                    << "c");
 
     BSONObjBuilder bob;
     bob << nestedField() << BSON_ARRAY(nestedMapObj << nestedMapObj << nestedMapObj);
@@ -440,10 +416,9 @@ TEST(ComplexExtraction, GetBadNestedMap) {
     // Test extraction of invalid complex nested vector and map
     BSONField<vector<map<string, string>>> nestedField("testNested");
 
-    BSONObj nestedMapObj = BSON("a"
-                                << "a"
-                                << "b" << 123 << "c"
-                                << "c");
+    BSONObj nestedMapObj = BSON("a" << "a"
+                                    << "b" << 123 << "c"
+                                    << "c");
 
     BSONObjBuilder bob;
     bob << nestedField() << BSON_ARRAY(nestedMapObj << nestedMapObj << nestedMapObj);

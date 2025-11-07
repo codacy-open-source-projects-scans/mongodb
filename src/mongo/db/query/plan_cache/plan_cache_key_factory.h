@@ -30,7 +30,7 @@
 #pragma once
 
 #include "mongo/bson/util/builder_fwd.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collection_query_info.h"
@@ -38,6 +38,7 @@
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
 #include "mongo/db/query/plan_cache/plan_cache_indexability.h"
 #include "mongo/db/query/plan_cache/sbe_plan_cache.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 namespace plan_cache_detail {
@@ -60,14 +61,14 @@ struct PlanCacheKeyTag {};
  * Creates a key for the classic plan cache from the canonical query and a single collection.
  */
 PlanCacheKey make(const CanonicalQuery& query,
-                  const CollectionPtr& collection,
+                  const CollectionAcquisition& collection,
                   PlanCacheKeyTag<PlanCacheKey> tag);
 
 /**
  * Similar to above, but for the SBE plan cache key.
  */
 sbe::PlanCacheKey make(const CanonicalQuery& query,
-                       const CollectionPtr& collection,
+                       const CollectionAcquisition& collection,
                        PlanCacheKeyTag<sbe::PlanCacheKey> tag);
 }  // namespace plan_cache_detail
 
@@ -79,7 +80,7 @@ namespace plan_cache_key_factory {
  * version on the collection (if this is a sharded cluster).
  */
 template <typename Key>
-Key make(const CanonicalQuery& query, const CollectionPtr& collection) {
+Key make(const CanonicalQuery& query, const CollectionAcquisition& collection) {
     return plan_cache_detail::make(query, collection, plan_cache_detail::PlanCacheKeyTag<Key>{});
 }
 

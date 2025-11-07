@@ -27,13 +27,7 @@
  *    it in the license file.
  */
 
-#include <map>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <grpcpp/support/status.h>
+#include "mongo/transport/grpc/mock_server_stream.h"
 
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/rpc/message.h"
@@ -41,10 +35,8 @@
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/grpc/metadata.h"
 #include "mongo/transport/grpc/mock_server_context.h"
-#include "mongo/transport/grpc/mock_server_stream.h"
 #include "mongo/transport/grpc/mock_stub.h"
 #include "mongo/transport/grpc/test_fixtures.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/thread_assertion_monitor.h"
 #include "mongo/unittest/unittest.h"
@@ -56,18 +48,26 @@
 #include "mongo/util/system_clock_source.h"
 #include "mongo/util/uuid.h"
 
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <grpcpp/support/status.h>
+
 namespace mongo::transport::grpc {
 
 template <class Base>
 class MockServerStreamBase : public Base {
 public:
-    virtual void setUp() override {
+    void setUp() override {
         Base::setUp();
 
         MockStubTestFixtures fixtures;
-        _fixtures = fixtures.makeStreamTestFixtures(
-            Base::getServiceContext()->getFastClockSource()->now() + getTimeout(), _clientMetadata);
         _reactor = std::make_shared<GRPCReactor>();
+        _deadline = Base::getServiceContext()->getFastClockSource()->now() + getTimeout();
+        _fixtures = fixtures.makeStreamTestFixtures(_deadline, _clientMetadata, _reactor);
     }
 
     virtual Milliseconds getTimeout() const {
@@ -128,8 +128,11 @@ public:
 
             getServerContext().tryCancel();
 
-            ASSERT_TRUE(opDone.waitFor(opCtx.get(), Milliseconds(25)))
-                << "operation thread should be finished after cancel";
+            // Operation thread should finish after cancel.
+            opDone.get(opCtx.get());
+
+            // Ensure that the operation finished via cancellation rather than the timeout.
+            ASSERT_LT(Base::getServiceContext()->getFastClockSource()->now(), _deadline);
 
             opThread.join();
         });
@@ -140,6 +143,7 @@ private:
     const Message _clientFirstMessage = makeUniqueMessage();
     std::unique_ptr<MockStreamTestFixtures> _fixtures;
     std::shared_ptr<GRPCReactor> _reactor;
+    Date_t _deadline;
 };
 
 class MockServerStreamTest : public MockServerStreamBase<ServiceContextTest> {};
@@ -202,7 +206,7 @@ TEST_F(MockServerStreamTest, SendReceiveInitialMetadata) {
     MetadataView expected = {{"foo", "bar"}, {"baz", "more metadata"}, {"baz", "repeated key"}};
 
     for (auto& kvp : expected) {
-        getServerContext().addInitialMetadataEntry(kvp.first.toString(), kvp.second.toString());
+        getServerContext().addInitialMetadataEntry(std::string{kvp.first}, std::string{kvp.second});
     }
     ASSERT_TRUE(getServerStream().write(makeUniqueMessage().sharedBuffer()));
 

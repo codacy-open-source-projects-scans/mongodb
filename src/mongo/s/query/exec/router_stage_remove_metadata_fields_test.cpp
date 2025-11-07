@@ -27,12 +27,7 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <utility>
-
-#include <absl/container/flat_hash_set.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/s/query/exec/router_stage_remove_metadata_fields.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -42,11 +37,15 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/s/query/exec/router_stage_mock.h"
-#include "mongo/s/query/exec/router_stage_remove_metadata_fields.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
+
+#include <memory>
+#include <utility>
+
+#include <absl/container/flat_hash_set.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -59,9 +58,7 @@ OperationContext* opCtx = nullptr;
 TEST(RouterStageRemoveMetadataFieldsTest, RemovesMetaDataFields) {
     auto mockStage = std::make_unique<RouterStageMock>(opCtx);
     mockStage->queueResult(BSON("a" << 4 << "$sortKey" << 1 << "b" << 3));
-    mockStage->queueResult(BSON("$sortKey" << BSON("" << 3) << "c"
-                                           << BSON("d"
-                                                   << "foo")));
+    mockStage->queueResult(BSON("$sortKey" << BSON("" << 3) << "c" << BSON("d" << "foo")));
     mockStage->queueResult(BSON("a" << 3));
     mockStage->queueResult(BSON("a" << 3 << "$randVal" << 4 << "$sortKey" << 2));
     mockStage->queueResult(
@@ -80,9 +77,7 @@ TEST(RouterStageRemoveMetadataFieldsTest, RemovesMetaDataFields) {
     auto secondResult = sortKeyStage->next();
     ASSERT_OK(secondResult.getStatus());
     ASSERT(secondResult.getValue().getResult());
-    ASSERT_BSONOBJ_EQ(*secondResult.getValue().getResult(),
-                      BSON("c" << BSON("d"
-                                       << "foo")));
+    ASSERT_BSONOBJ_EQ(*secondResult.getValue().getResult(), BSON("c" << BSON("d" << "foo")));
 
     auto thirdResult = sortKeyStage->next();
     ASSERT_OK(thirdResult.getStatus());

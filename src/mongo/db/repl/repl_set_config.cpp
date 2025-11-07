@@ -28,50 +28,48 @@
  */
 
 
-#include <absl/container/node_hash_set.h>
-#include <algorithm>
-#include <boost/cstdint.hpp>
-#include <cstdint>
-#include <fmt/format.h>
-#include <fmt/ranges.h>  // IWYU pragma: keep
-#include <iterator>
-#include <map>
-#include <utility>
-#include <variant>
-
-#include <absl/container/flat_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/repl/repl_set_config.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/repl/member_config_gen.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
-#include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/repl_set_config_params_gen.h"
 #include "mongo/db/repl/repl_set_write_concern_mode_definitions.h"
-#include "mongo/db/repl/split_horizon.h"
+#include "mongo/db/repl/split_horizon/split_horizon.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/net/cidr.h"
 #include "mongo/util/str.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <iterator>
+#include <map>
+#include <utility>
+#include <variant>
+
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/node_hash_set.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+#include <fmt/ranges.h>  // IWYU pragma: keep
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
 
 namespace mongo {
 namespace repl {
-using namespace fmt::literals;
 
 // Allow the heartbeat interval to be forcibly overridden on this node.
 MONGO_FAIL_POINT_DEFINE(forceHeartbeatIntervalMS);
@@ -151,7 +149,7 @@ ReplSetConfig::ReplSetConfig(const BSONObj& cfg,
     // The settings field is optional, but we always serialize it.  Because we can't default it in
     // the IDL, we default it here.
     setSettings(ReplSetConfigSettings());
-    ReplSetConfigBase::parseProtected(IDLParserContext("ReplSetConfig"), cfg);
+    ReplSetConfigBase::parseProtected(cfg, IDLParserContext("ReplSetConfig"));
     uassertStatusOK(_initialize(forInitiate, forceTerm, defaultReplicaSetId));
 }
 
@@ -303,9 +301,7 @@ Status ReplSetConfig::_validate(bool allowSplitHorizonIP) const {
         if (memberI.getHostAndPort().isLocalHost()) {
             ++localhostCount;
         }
-        // Using getBaseNumVotes() here instead of isVoter() because isVoter does not count voting
-        // members with the newlyAdded field while getBaseNumVotes() counts all nodes with votes: 1.
-        if (memberI.getBaseNumVotes()) {
+        if (memberI.isVoter()) {
             ++voterCount;
         }
         // Nodes may be arbiters or electable, or neither, but never both.
@@ -426,7 +422,10 @@ Status ReplSetConfig::_validate(bool allowSplitHorizonIP) const {
                               "servers cannot have a non-zero secondaryDelaySecs");
             }
         }
-        if (!serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
+        // If we are running with replicaSetConfigShardMaintenanceMode then it's safe to restart a
+        // former configserver as a replicaset as we are about to reconfigure.
+        if (!serverGlobalParams.replicaSetConfigShardMaintenanceMode &&
+            !serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
             !skipShardingConfigurationChecks) {
             return Status(ErrorCodes::BadValue,
                           "Nodes being used for config servers must be started with the "
@@ -440,6 +439,7 @@ Status ReplSetConfig::_validate(bool allowSplitHorizonIP) const {
         }
     } else if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer)) {
         // TODO: SERVER-82024 Remove this when master is 8.1.
+        // Remove only the gFeatureFlagAllMongodsAreSharded
         //
         // Skip this check to allow upgrading a 7.0 non auto-bootstrapped replica set node to a 8.0
         // node with auto-bootstrapping enabled despite not having `configsvr:true` in the
@@ -450,7 +450,14 @@ Status ReplSetConfig::_validate(bool allowSplitHorizonIP) const {
         // that all nodes in the replica set eventually have the same cluster role, the server
         // fasserts (on startup or replication) if the shard identity document matches the server's
         // cluster role. For why this is correct and for more context see: SERVER-80249
-        if (!gFeatureFlagAllMongodsAreSharded.isEnabledUseLatestFCVWhenUninitialized(
+        //
+        // If we are running with replicaSetConfigShardMaintenanceMode then it's safe to restart a
+        // former replicaset as a configserver as we are about to reconfigure.
+        if (!serverGlobalParams.replicaSetConfigShardMaintenanceMode &&
+            !gFeatureFlagAllMongodsAreSharded.isEnabledUseLatestFCVWhenUninitialized(
+                // This code will be removed since master is 8.1 already (see SERVER-82024).
+                // Ignore the versionContext for simplicity.
+                kVersionContextIgnored_UNSAFE,
                 serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
             return Status(ErrorCodes::BadValue,
                           "Nodes started with the --configsvr flag must have configsvr:true in "
@@ -551,17 +558,6 @@ int ReplSetConfig::findMemberIndexByHostAndPort(const HostAndPort& hap) const {
     return -1;
 }
 
-int ReplSetConfig::findMemberIndexByConfigId(int configId) const {
-    int x = 0;
-    for (const auto& member : getMembers()) {
-        if (member.getId() == MemberId(configId)) {
-            return x;
-        }
-        ++x;
-    }
-    return -1;
-}
-
 const MemberConfig* ReplSetConfig::findMemberByHostAndPort(const HostAndPort& hap) const {
     int idx = findMemberIndexByHostAndPort(hap);
     return idx != -1 ? &getMemberAt(idx) : nullptr;
@@ -597,8 +593,8 @@ StatusWith<ReplSetTagPattern> ReplSetConfig::findCustomWriteMode(StringData patt
     if (iter == _customWriteConcernModes.end()) {
         return StatusWith<ReplSetTagPattern>(
             ErrorCodes::UnknownReplWriteConcern,
-            "No write concern mode named '{}' found in replica set configuration"_format(
-                str::escape(patternName.toString())));
+            fmt::format("No write concern mode named '{}' found in replica set configuration",
+                        str::escape(std::string{patternName})));
     }
     return StatusWith<ReplSetTagPattern>(iter->second);
 }

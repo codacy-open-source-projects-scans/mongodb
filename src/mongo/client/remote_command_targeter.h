@@ -32,6 +32,7 @@
 #include "mongo/base/status_with.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/client/read_preference.h"
+#include "mongo/client/retry_strategy.h"
 #include "mongo/util/future.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
@@ -61,7 +62,8 @@ public:
      * milliseconds or until the given operation is interrupted or its deadline expires.
      */
     virtual StatusWith<HostAndPort> findHost(OperationContext* opCtx,
-                                             const ReadPreferenceSetting& readPref) = 0;
+                                             const ReadPreferenceSetting& readPref,
+                                             const TargetingMetadata& targetingMetadata) = 0;
 
 
     /**
@@ -72,7 +74,8 @@ public:
      * OperationContext is available.
      */
     virtual SemiFuture<HostAndPort> findHost(const ReadPreferenceSetting& readPref,
-                                             const CancellationToken& cancelToken) = 0;
+                                             const CancellationToken& cancelToken,
+                                             const TargetingMetadata& targetingMetadata) = 0;
 
     virtual SemiFuture<std::vector<HostAndPort>> findHosts(
         const ReadPreferenceSetting& readPref, const CancellationToken& cancelToken) = 0;
@@ -88,8 +91,6 @@ public:
         if (ErrorCodes::isNotPrimaryError(status.code())) {
             markHostNotPrimary(host, status);
         } else if (ErrorCodes::isNetworkError(status.code())) {
-            markHostUnreachable(host, status);
-        } else if (status == ErrorCodes::NetworkInterfaceExceededTimeLimit) {
             markHostUnreachable(host, status);
         } else if (ErrorCodes::isShutdownError(status.code())) {
             markHostShuttingDown(host, status);

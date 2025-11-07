@@ -27,10 +27,6 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <memory>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -42,8 +38,11 @@
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/platform/decimal128.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <cstdint>
+#include <memory>
+#include <string>
 
 namespace mongo::sbe {
 
@@ -203,22 +202,20 @@ TEST_F(SBEReplaceOneExprTest, BsonStrings) {
     };
 
     // Test find and replace string.
-    auto bson = BSON("in"
-                     << "this is a string"
-                     << "find"
-                     << "is"
-                     << "replace"
-                     << "at");
+    auto bson = BSON("in" << "this is a string"
+                          << "find"
+                          << "is"
+                          << "replace"
+                          << "at");
     bindSlots(bson);
     runAndAssertExpression(compiledExpr.get(), "that is a string");
 
     // Test not finding string.
-    bson = BSON("in"
-                << "this is a string"
-                << "find"
-                << "at"
-                << "replace"
-                << "is");
+    bson = BSON("in" << "this is a string"
+                     << "find"
+                     << "at"
+                     << "replace"
+                     << "is");
     bindSlots(bson);
     runAndAssertExpression(compiledExpr.get(), "this is a string");
 }

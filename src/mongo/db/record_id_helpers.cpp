@@ -30,18 +30,12 @@
 
 #include "mongo/db/record_id_helpers.h"
 
-#include <cstdint>
-#include <limits>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bson_validate.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/clustered_collection_util.h"
+#include "mongo/db/local_catalog/clustered_collection_util.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/key_string/key_string.h"
@@ -49,6 +43,12 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/str.h"
+
+#include <cstdint>
+#include <limits>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -78,7 +78,7 @@ StatusWith<RecordId> keyForOptime(const Timestamp& opTime, const KeyFormat keyFo
         case KeyFormat::String: {
             key_string::Builder keyBuilder(key_string::Version::kLatestVersion);
             keyBuilder.appendTimestamp(opTime);
-            return RecordId(keyBuilder.getBuffer(), keyBuilder.getSize());
+            return RecordId(keyBuilder.getView());
         }
         default: {
             MONGO_UNREACHABLE_TASSERT(6521004);
@@ -103,7 +103,7 @@ StatusWith<RecordId> extractKeyOptime(const char* data, int len) {
     const BSONElement elem = obj["ts"];
     if (elem.eoo())
         return {ErrorCodes::BadValue, "no ts field"};
-    if (elem.type() != bsonTimestamp)
+    if (elem.type() != BSONType::timestamp)
         return {ErrorCodes::BadValue, "ts must be a Timestamp"};
 
     return keyForOptime(elem.timestamp(), KeyFormat::Long);
@@ -136,7 +136,7 @@ RecordId keyForElem(const BSONElement& elem) {
     // that compare similarly, but are of different types may not be used concurrently.
     key_string::Builder keyBuilder(key_string::Version::kLatestVersion);
     keyBuilder.appendBSONElement(elem);
-    return RecordId(keyBuilder.getBuffer(), keyBuilder.getSize());
+    return RecordId(keyBuilder.getView());
 }
 
 RecordId keyForObj(const BSONObj& obj) {
@@ -146,13 +146,13 @@ RecordId keyForObj(const BSONObj& obj) {
 RecordId keyForOID(OID oid) {
     key_string::Builder keyBuilder(key_string::Version::kLatestVersion);
     keyBuilder.appendOID(oid);
-    return RecordId(keyBuilder.getBuffer(), keyBuilder.getSize());
+    return RecordId(keyBuilder.getView());
 }
 
 RecordId keyForDate(Date_t date) {
     key_string::Builder keyBuilder(key_string::Version::kLatestVersion);
     keyBuilder.appendDate(date);
-    return RecordId(keyBuilder.getBuffer(), keyBuilder.getSize());
+    return RecordId(keyBuilder.getView());
 }
 
 void appendToBSONAs(const RecordId& rid, BSONObjBuilder* builder, StringData fieldName) {
@@ -185,7 +185,7 @@ RecordId reservedIdFor(ReservationId res, KeyFormat keyFormat) {
         invariant(keyFormat == KeyFormat::String);
         constexpr char reservation[] = {
             kReservedStrPrefix, static_cast<char>(ReservationId::kWildcardMultikeyMetadataId)};
-        return RecordId(reservation, sizeof(reservation));
+        return RecordId(reservation);
     }
 }
 
@@ -196,7 +196,7 @@ RecordId maxRecordId(KeyFormat keyFormat) {
         invariant(keyFormat == KeyFormat::String);
         constexpr char reservation[] = {
             kReservedStrPrefix, static_cast<char>(ReservationId::kWildcardMultikeyMetadataId)};
-        return RecordId(reservation, sizeof(reservation));
+        return RecordId(reservation);
     }
 }
 
@@ -208,8 +208,7 @@ bool isReserved(const RecordId& id) {
         return id.getLong() >= kMinReservedLong && id.getLong() < RecordId::kMaxRepr;
     }
     // All RecordId strings that start with FF are considered reserved.
-    auto strData = id.getStr();
-    return strData.rawData()[0] == kReservedStrPrefix;
+    return id.getStr()[0] == kReservedStrPrefix;
 }
 
 }  // namespace record_id_helpers

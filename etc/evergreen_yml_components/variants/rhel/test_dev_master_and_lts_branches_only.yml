@@ -39,13 +39,11 @@ variables:
   # - etc/evergreen_yml_components/variants/sanitizer/test_dev.yml
   # ANY MODIFICATIONS HERE SHOULD ALSO BE MADE IN THOSE FILES
   - &linux_x86_generic_expansions
-    multiversion_platform: rhel80
-    multiversion_platform_50_or_later: rhel8
+    multiversion_platform: rhel8
     multiversion_edition: enterprise
     repo_edition: enterprise
     large_distro_name: rhel8.8-medium
     core_analyzer_distro_name: rhel8.8-xlarge
-    num_scons_link_jobs_available: 0.99
     compile_variant: *linux_x86_dynamic_compile_variant_name
 
 buildvariants:
@@ -57,20 +55,15 @@ buildvariants:
       - rhel8.8-small
     expansions:
       additional_package_targets: >-
-        archive-mongocryptd
+        archive-mongocryptd-stripped
         archive-mongocryptd-debug
       test_flags: >-
         --storageEngine=inMemory
         --excludeWithAnyTags=requires_persistence,requires_journaling
-      compile_flags: >-
-        --ssl
-        MONGO_DISTMOD=rhel88
-        -j$(grep -c ^processor /proc/cpuinfo)
-        --variables-files=etc/scons/mongodbtoolchain_stable_gcc.vars
-      multiversion_platform: rhel80
-      multiversion_platform_50_or_later: rhel8
+      bazel_compile_flags: >-
+        --define=MONGO_DISTMOD=rhel88
+      multiversion_platform: rhel8
       multiversion_edition: enterprise
-      scons_cache_scope: shared
       large_distro_name: rhel8.8-large
       core_analyzer_distro_name: rhel8.8-xlarge
       compile_variant: enterprise-rhel-8-64-bit-inmem
@@ -82,27 +75,38 @@ buildvariants:
         distros:
           - rhel8.8-large
       - name: .aggfuzzer .common !.feature_flag_guarded
-      - name: .aggregation !.unwind !.encrypt !.feature_flag_guarded
+      - name: .aggregation !.unwind !.encrypt !.feature_flag_guarded !.requires_large_host
+      - name: .aggregation !.unwind !.encrypt !.feature_flag_guarded .requires_large_host
+        distros:
+          - rhel8.8-large
       - name: audit
       - name: .auth !.multiversion
       - name: .causally_consistent !.wo_snapshot !.durable_history
       - name: .change_streams
-      - name: .change_stream_fuzzer !.serverless
-      - name: .misc_js
+      - name: .change_stream_fuzzer
+      - name: .misc_js !.requires_large_host
+      - name: .misc_js .requires_large_host
+        distros:
+          - rhel8.8-large
       - name: .concurrency !.no_txns !.kill_terminate !.incompatible_inmemory !.feature_flag_guarded
         distros:
           - rhel8.8-medium # Some workloads require a lot of memory, use a bigger machine for this suite.
       - name: initial_sync_fuzzer_gen
-      - name: .jscore .common !.decimal
+      - name: .jscore .common !.decimal !.requires_large_host
+      - name: .jscore .common !.decimal .requires_large_host
+        distros:
+          - rhel8.8-large
       - name: jsCore_txns_large_txns_format
       - name: .jstestfuzz !.initsync !.feature_flag_guarded !.incompatible_inmemory
       - name: .multi_shard .common
       - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
-      - name: .read_write_concern !.durable_history
+      - name: .read_write_concern !.durable_history !.requires_large_host
+      - name: .read_write_concern !.durable_history .requires_large_host
+        distros:
+          - rhel8.8-large
       - name: replica_sets_gen
       - name: .replica_sets .common
       - name: .replica_sets .multi_oplog !.encrypt
-      - name: replica_sets_max_mirroring_large_txns_format_gen
       - name: replica_sets_multi_stmt_txn_jscore_passthrough_gen
       - name: replica_sets_multi_stmt_txn_stepdown_jscore_passthrough_gen
         distros:
@@ -151,7 +155,6 @@ buildvariants:
       - name: concurrency_sharded_local_read_write_multi_stmt_txn_with_balancer_gen
       - name: concurrency_sharded_multi_stmt_txn_gen
       - name: concurrency_sharded_multi_stmt_txn_with_balancer_gen
-      - name: concurrency_sharded_multi_stmt_txn_with_stepdowns_gen
       - name: concurrency_sharded_with_stepdowns_gen
       - name: concurrency_sharded_stepdown_terminate_kill_primary_with_balancer_gen
       - name: concurrency_sharded_initial_sync_gen
@@ -160,6 +163,8 @@ buildvariants:
       - name: fcv_upgrade_downgrade_sharding_jscore_passthrough_gen
       - name: fcv_upgrade_downgrade_sharded_collections_jscore_passthrough_gen
       - name: jsCore
+        distros:
+          - rhel8.8-medium
       - name: jsCore_txns
       - name: .multi_shard
       - name: multi_stmt_txn_jscore_passthrough_with_migration_gen
@@ -176,8 +181,6 @@ buildvariants:
       - name: .sharding .txns
       - name: sharding_gen
       - name: sharding_auth_audit_gen
-      - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gen
-      - name: sharding_max_mirroring_opportunistic_secondary_targeting_ese_gcm_gen
       - name: sharding_csrs_continuous_config_stepdown_gen
       - name: sharded_multi_stmt_txn_jscore_passthrough_gen
         distros:

@@ -29,21 +29,21 @@
 global:
     cpp_namespace: "mongo"
     cpp_includes:
-        - "mongo/s/catalog/types_validators.h"
+        - "mongo/db/global_catalog/types_validators.h"
         - "mongo/s/request_types/migration_secondary_throttle_options.h"
 
 imports:
     - "mongo/db/write_concern_options.idl"
     - "mongo/db/basic_types.idl"
-    - "mongo/s/sharding_types.idl"
+    - "mongo/db/sharding_environment/sharding_types.idl"
 
 enums:
     ForceJumbo:
         description: "This enum represents whether or not a migration should attempt to move a large range"
         type: int # Not `string` due to backwards compatibility
         values:
-            kDoNotForce: 0    # do not attempt to migrate a large chunk
-            kForceManual: 1   # manual moveChunk command specified `forceJumbo: true`
+            kDoNotForce: 0 # do not attempt to migrate a large chunk
+            kForceManual: 1 # manual moveChunk command specified `forceJumbo: true`
             kForceBalancer: 2 # balancer specified `forceJumbo: true`
 
 types:
@@ -130,15 +130,9 @@ commands:
         chained_structs:
             MoveRangeRequestBase: MoveRangeRequestBase
         fields:
-            # TODO SERVER-80188: remove _collectionEpoch once 8.0 becomes last-lts.
-            epoch:
-                type: objectid
-                description: "Epoch of the collection"
-                optional: true
             collectionTimestamp:
                 type: timestamp
                 description: "Timestamp of the collection"
-                optional: true
             fromShard:
                 type: shard_id
                 description: "ID of the donor shard"

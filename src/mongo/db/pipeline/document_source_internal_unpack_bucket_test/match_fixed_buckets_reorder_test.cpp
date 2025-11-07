@@ -27,18 +27,17 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <vector>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/util/make_data_structure.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <memory>
+#include <vector>
 
 namespace mongo {
 namespace {
@@ -54,8 +53,9 @@ auto unpackSpecObj = fromjson(R"({
                 fixedBuckets: true
             }
   })");
-auto groupSpecObj =
-    fromjson("{$group: {_id: '$meta1.a.b', accmin: {$min: '$b'}, accmax: {$max: '$c'}}}");
+auto groupSpecObj = fromjson(
+    "{$group: {_id: '$meta1.a.b', accmin: {$min: '$b'}, accmax: {$max: '$c'}, $willBeMerged: "
+    "false}}");
 auto limitSpecObj = fromjson("{$limit: 2}");
 
 TEST_F(InternalUnpackBucketMatchFixedBucketTest, MatchWithGroupLimitRewrite) {
@@ -70,7 +70,7 @@ TEST_F(InternalUnpackBucketMatchFixedBucketTest, MatchWithGroupLimitRewrite) {
     {
         auto pipeline =
             Pipeline::parse(makeVector(unpackSpecObj, matchSpecObj, groupSpecObj), getExpCtx());
-        pipeline->optimizePipeline();
+        pipeline_optimization::optimizePipeline(*pipeline);
 
         auto serialized = pipeline->serializeToBson();
         ASSERT_EQ(2, serialized.size());
@@ -79,7 +79,7 @@ TEST_F(InternalUnpackBucketMatchFixedBucketTest, MatchWithGroupLimitRewrite) {
         ASSERT_TRUE(serialized[0].hasField("$match"));
         auto groupOptimized = fromjson(
             "{$group: {_id: '$meta.a.b', accmin: {$min: '$control.min.b'}, accmax: {$max: "
-            "'$control.max.c'}}}");
+            "'$control.max.c'}, $willBeMerged: false}}");
         ASSERT_BSONOBJ_EQ(groupOptimized, serialized[1]);
     }
 
@@ -87,7 +87,7 @@ TEST_F(InternalUnpackBucketMatchFixedBucketTest, MatchWithGroupLimitRewrite) {
     {
         auto pipeline =
             Pipeline::parse(makeVector(unpackSpecObj, matchSpecObj, limitSpecObj), getExpCtx());
-        pipeline->optimizePipeline();
+        pipeline_optimization::optimizePipeline(*pipeline);
 
         auto serialized = pipeline->serializeToBson();
         ASSERT_EQ(4, serialized.size());
@@ -119,7 +119,7 @@ TEST_F(InternalUnpackBucketMatchFixedBucketTest, MatchWithGroupLimitRewriteNegat
     {
         auto pipeline =
             Pipeline::parse(makeVector(unpackSpecObj, matchSpecObj, groupSpecObj), getExpCtx());
-        pipeline->optimizePipeline();
+        pipeline_optimization::optimizePipeline(*pipeline);
 
         auto serialized = pipeline->serializeToBson();
         ASSERT_EQ(3, serialized.size());
@@ -131,7 +131,7 @@ TEST_F(InternalUnpackBucketMatchFixedBucketTest, MatchWithGroupLimitRewriteNegat
     {
         auto pipeline =
             Pipeline::parse(makeVector(unpackSpecObj, matchSpecObj, limitSpecObj), getExpCtx());
-        pipeline->optimizePipeline();
+        pipeline_optimization::optimizePipeline(*pipeline);
 
         auto serialized = pipeline->serializeToBson();
         ASSERT_EQ(3, serialized.size());

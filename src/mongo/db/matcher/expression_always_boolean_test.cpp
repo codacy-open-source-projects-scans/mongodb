@@ -26,28 +26,18 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#include <string>
+#include "mongo/db/matcher/expression_always_boolean.h"
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/matcher/expression_always_boolean.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <string>
 
 namespace mongo {
 
 namespace {
-
-TEST(AlwaysFalseMatchExpression, RejectsAllObjects) {
-    AlwaysFalseMatchExpression falseExpr;
-
-    ASSERT_FALSE(falseExpr.matchesBSON(BSON("a" << BSONObj())));
-    ASSERT_FALSE(falseExpr.matchesBSON(BSON("a" << 1)));
-    ASSERT_FALSE(falseExpr.matchesBSON(BSON("a"
-                                            << "string")));
-    ASSERT_FALSE(falseExpr.matchesBSON(BSONObj()));
-}
 
 TEST(AlwaysFalseMatchExpression, EquivalentReturnsCorrectResults) {
     auto falseExpr = std::make_unique<AlwaysFalseMatchExpression>();
@@ -56,16 +46,6 @@ TEST(AlwaysFalseMatchExpression, EquivalentReturnsCorrectResults) {
 
     AlwaysTrueMatchExpression trueExpr;
     ASSERT_FALSE(falseExpr->equivalent(&trueExpr));
-}
-
-TEST(AlwaysTrueMatchExpression, AcceptsAllObjects) {
-    AlwaysTrueMatchExpression trueExpr;
-
-    ASSERT_TRUE(trueExpr.matchesBSON(BSON("a" << BSONObj())));
-    ASSERT_TRUE(trueExpr.matchesBSON(BSON("a" << 1)));
-    ASSERT_TRUE(trueExpr.matchesBSON(BSON("a"
-                                          << "string")));
-    ASSERT_TRUE(trueExpr.matchesBSON(BSONObj()));
 }
 
 TEST(AlwaysTrueMatchExpression, EquivalentReturnsCorrectResults) {

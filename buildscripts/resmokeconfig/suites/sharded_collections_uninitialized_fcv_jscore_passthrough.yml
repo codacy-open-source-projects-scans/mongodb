@@ -23,7 +23,7 @@ selector:
     - jstests/core/**/operation_latency_histogram.js
     - jstests/core/**/geo_s2cursorlimitskip.js
     # Having duplicate namespaces is not supported and will cause initial sync to fail.
-    - jstests/core/views/duplicate_ns.js
+    - jstests/core/catalog/views/duplicate_ns.js
     # These tests run getLatestProfilerEntry(). The downstream syncing node affects the profiler.
     - jstests/core/**/profile_agg.js
     - jstests/core/**/profile_count.js
@@ -55,9 +55,7 @@ selector:
     - jstests/core/**/fsync.js # uses fsync.
     - jstests/core/**/geo_s2cursorlimitskip.js # profiling.
     - jstests/core/**/geo_update_btree2.js # notablescan.
-    - jstests/core/**/index9.js # "local" database.
     - jstests/core/**/queryoptimizera.js # "local" database.
-    - jstests/core/**/stages*.js # stageDebug.
     - jstests/core/**/startup_log.js # "local" database.
     - jstests/core/**/tailable_cursor_invalidation.js # capped collections.
     - jstests/core/**/tailable_getmore_batch_size.js # capped collections.
@@ -76,16 +74,8 @@ selector:
     - jstests/core/**/create_indexes.js
     - jstests/core/**/list_indexes_non_existent_ns.js
     - jstests/core/**/mr_preserve_indexes.js
-    # TODO: Remove after fixing SERVER-29449. executionStats.nReturned is incorrect for sharded
-    # queries with a limit or for distinct commands.
+    # TODO: Remove after fixing SERVER-103278. executionStats.nReturned is incorrect for sharded distinct commands.
     - jstests/core/**/distinct_index1.js
-    - jstests/core/**/explain/explain1.js
-    - jstests/core/**/explain4.js
-    - jstests/core/**/sortk.js
-    # TODO: Remove after fixing SERVER-32563. The implementation of explain for the count command is
-    # incorrect on sharded collections.
-    - jstests/core/**/explain/explain_count.js
-    - jstests/core/**/explain_server_params.js
     # TODO SERVER-32311: These tests use plan stage helpers which can't handle sharded explain output.
     - jstests/core/**/expr_index_use.js
     - jstests/core/**/index_multikey.js
@@ -93,11 +83,12 @@ selector:
     - jstests/core/**/sort_array.js
 
     # Will fail all commands including those needed to forward command to initial sync node.
-    - jstests/core/failcommand_failpoint.js
+    - jstests/core/testing/failcommand_failpoint.js
     # Starts MongoCryptD instead of mongod nodes
     - src/mongo/db/modules/*/jstests/fle2/fle2_bulk_write.js
-    # This test runs many aggregations, and the override slows them down enough to hit the timeout.
-    - jstests/core/timeseries/query/timeseries_group_aggregations.js
+
+    # TODO SERVER-110217: Investigate why query_settings_backfill.js is failing in sharded_collections_uninitialized_fcv_jscore_passthrough suite.
+    - jstests/core/query/query_settings/query_settings_backfill.js
 
   exclude_with_any_tags:
     - assumes_standalone_mongod
@@ -116,8 +107,15 @@ selector:
     - assumes_no_implicit_index_creation
     - assumes_unsharded_collection
     - cannot_create_unique_index_when_using_hashed_shard_key
+    # an initial sync node is not a fully initialized shard server
+    - assumes_sharding_initialized
+    # These tests run many aggregations, and the override slows them down enough to hit the evergreen timeout.
+    - query_intensive_pbt
 
 executor:
+  hooks:
+    - class: CleanEveryN
+      n: 20
   config:
     shell_options:
       eval: >-

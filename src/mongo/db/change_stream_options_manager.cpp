@@ -28,6 +28,25 @@
  */
 
 
+#include "mongo/db/change_stream_options_manager.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/change_stream_options_parameter_gen.h"
+#include "mongo/db/client.h"
+#include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/tenant_id.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/str.h"
+
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -36,25 +55,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/change_stream_options_manager.h"
-#include "mongo/db/change_stream_options_parameter_gen.h"
-#include "mongo/db/change_stream_serverless_helpers.h"
-#include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
-#include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/server_options.h"
-#include "mongo/db/tenant_id.h"
-#include "mongo/idl/idl_parser.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/decorable.h"
-#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -90,6 +90,11 @@ StatusWith<ChangeStreamOptions> ChangeStreamOptionsManager::setOptions(
     return _changeStreamOptions;
 }
 
+const LogicalTime& ChangeStreamOptionsManager::getClusterParameterTime() const {
+    stdx::lock_guard<stdx::mutex> L(_mutex);
+    return _changeStreamOptions.getClusterParameterTime();
+}
+
 void ChangeStreamOptionsParameter::append(OperationContext* opCtx,
                                           BSONObjBuilder* bob,
                                           StringData name,
@@ -106,7 +111,7 @@ Status ChangeStreamOptionsParameter::set(const BSONElement& newValueElement,
         ChangeStreamOptionsManager& changeStreamOptionsManager =
             ChangeStreamOptionsManager::get(getGlobalServiceContext());
         ChangeStreamOptions newOptions = ChangeStreamOptions::parse(
-            IDLParserContext("changeStreamOptions"), newValueElement.Obj());
+            newValueElement.Obj(), IDLParserContext("changeStreamOptions"));
 
         return changeStreamOptionsManager
             .setOptions(Client::getCurrent()->getOperationContext(), newOptions)
@@ -136,7 +141,7 @@ Status ChangeStreamOptionsParameter::validate(const BSONElement& newValueElement
             ctxt.throwMissingField("preAndPostImages"_sd);
         }
 
-        ChangeStreamOptions newOptions = ChangeStreamOptions::parse(ctxt, changeStreamOptionsObj);
+        ChangeStreamOptions newOptions = ChangeStreamOptions::parse(changeStreamOptionsObj, ctxt);
         auto preAndPostImages = newOptions.getPreAndPostImages();
         visit(OverloadedVisitor{
                   [&](const std::string& expireAfterSeconds) {
@@ -147,14 +152,6 @@ Status ChangeStreamOptionsParameter::validate(const BSONElement& newValueElement
                       }
                   },
                   [&](const std::int64_t& expireAfterSeconds) {
-                      if (change_stream_serverless_helpers::isServerlessEnvironment()) {
-                          validateStatus = {
-                              ErrorCodes::CommandNotSupported,
-                              "The 'changeStreamOptions.preAndPostImages.expireAfterSeconds' is "
-                              "unsupported in serverless, consider using "
-                              "'changeStreams.expireAfterSeconds' instead."};
-                          return;
-                      }
                       if (expireAfterSeconds <= 0) {
                           validateStatus = {
                               ErrorCodes::BadValue,

@@ -5,9 +5,7 @@
  * ]
  */
 import {createSearchIndex, dropSearchIndex} from "jstests/libs/search.js";
-import {
-    verifyE2ESearchExplainOutput,
-} from "jstests/with_mongot/e2e/lib/explain_utils.js";
+import {verifyE2ESearchExplainOutput} from "jstests/with_mongot/e2e_lib/explain_utils.js";
 
 const coll = db[jsTestName()];
 coll.drop();
@@ -27,14 +25,14 @@ const fireSearchQuery = {
     $search: {
         index: "search-index",
         text: {query: "fire", path: ["element"]},
-    }
+    },
 };
 
 const waterSearchQuery = {
     $search: {
         index: "search-index",
         text: {query: "water", path: ["element"]},
-    }
+    },
 };
 
 function runExplainTest(verbosity) {
@@ -44,13 +42,13 @@ function runExplainTest(verbosity) {
         explainOutput: result,
         stageType: "$_internalSearchMongotRemote",
         verbosity,
-        nReturned: NumberLong(numWaterDocs)
+        nReturned: NumberLong(numWaterDocs),
     });
     verifyE2ESearchExplainOutput({
         explainOutput: result,
         stageType: "$_internalSearchIdLookup",
         verbosity,
-        nReturned: NumberLong(numWaterDocs)
+        nReturned: NumberLong(numWaterDocs),
     });
 
     // There are 10,000 fire docs, so getMore's are issued.
@@ -59,13 +57,13 @@ function runExplainTest(verbosity) {
         explainOutput: result,
         stageType: "$_internalSearchMongotRemote",
         verbosity,
-        nReturned: NumberLong(numFireDocs)
+        nReturned: NumberLong(numFireDocs),
     });
     verifyE2ESearchExplainOutput({
         explainOutput: result,
         stageType: "$_internalSearchIdLookup",
         verbosity,
-        nReturned: NumberLong(numFireDocs)
+        nReturned: NumberLong(numFireDocs),
     });
 
     // Test with $$SEARCH_META variable.
@@ -76,23 +74,23 @@ function runExplainTest(verbosity) {
                 "_id": 0,
                 "ref_id": "$_id",
                 "searchMeta": "$$SEARCH_META",
-            }
-        }
+            },
+        },
     ]);
     verifyE2ESearchExplainOutput({
         explainOutput: result,
         stageType: "$_internalSearchMongotRemote",
         verbosity,
-        nReturned: NumberLong(numFireDocs)
+        nReturned: NumberLong(numFireDocs),
     });
     verifyE2ESearchExplainOutput({
         explainOutput: result,
         stageType: "$_internalSearchIdLookup",
         verbosity,
-        nReturned: NumberLong(numFireDocs)
+        nReturned: NumberLong(numFireDocs),
     });
     // On a sharded cluster, $setVariableFromSubPipeline should be inserted.
-    if (result.hasOwnProperty("shards")) {
+    if (result.hasOwnProperty("splitPipeline") && result["splitPipeline"] !== null) {
         let mergingPipeline = result.splitPipeline.mergerPart;
         assert.eq(["$mergeCursors"], Object.keys(mergingPipeline[0]));
         assert.eq(["$setVariableFromSubPipeline"], Object.keys(mergingPipeline[1]));

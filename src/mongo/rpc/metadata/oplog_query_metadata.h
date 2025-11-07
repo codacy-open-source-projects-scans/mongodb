@@ -29,20 +29,21 @@
 
 #pragma once
 
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/oid.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/util/modules.h"
+
+#include <string>
 
 namespace mongo {
 
 class BSONObj;
 class BSONObjBuilder;
 
-namespace rpc {
+namespace MONGO_MOD_PUBLIC rpc {
 
 extern const char kOplogQueryMetadataFieldName[];
 
@@ -154,5 +155,5 @@ private:
     std::string _currentSyncSourceHost;
 };
 
-}  // namespace rpc
+}  // namespace MONGO_MOD_PUBLIC rpc
 }  // namespace mongo

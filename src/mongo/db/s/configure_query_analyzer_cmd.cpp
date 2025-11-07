@@ -27,13 +27,6 @@
  *    it in the license file.
  */
 
-#include <string>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -44,36 +37,35 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/generic_argument_util.h"
+#include "mongo/db/global_catalog/ddl/ddl_lock_manager.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
 #include "mongo/db/s/analyze_shard_key_util.h"
-#include "mongo/db/s/ddl_lock_manager.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
 #include "mongo/s/analyze_shard_key_documents_gen.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/configure_query_analyzer_cmd_gen.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/clock_source.h"
@@ -85,6 +77,13 @@
 #include "mongo/util/testing_proctor.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -114,7 +113,7 @@ public:
             _autoColl.emplace(opCtx,
                               nss,
                               MODE_IX,
-                              AutoGetCollection::Options{}.viewMode(
+                              auto_get_collection::Options{}.viewMode(
                                   auto_get_collection::ViewMode::kViewsPermitted));
         }
     }
@@ -190,7 +189,21 @@ public:
             // Wait for the metadata for this collection in the CollectionCatalog to be majority
             // committed before validating its options and persisting the configuration.
             waitUntilMajorityLastOpTime(opCtx);
-            auto collUuid = uassertStatusOK(validateCollectionOptions(opCtx, nss));
+            const auto collUuid = [&] {
+                // Routers route the configureQueryAnalyzerCmd to the db-primary shard, with a
+                // 'databaseVersion' attached to the command but no 'shardVersion'. This is okay,
+                // because the db-primary shard is guaranteed to know the correct collection options
+                // and uuid, but we need to enter an IGNORED Shard Role so that we are able to
+                // access the collection metadata.
+                boost::optional<ScopedSetShardRole> optShardRoleIgnore;
+                if (!OperationShardingState::get(opCtx).getShardVersion(nss)) {
+                    ShardVersion shardVersionIgnored;
+                    shardVersionIgnored.setPlacementVersionIgnored();
+                    optShardRoleIgnore.emplace(opCtx, nss, shardVersionIgnored, boost::none);
+                }
+
+                return uassertStatusOK(validateCollectionOptions(opCtx, nss));
+            }();
 
             LOGV2(6915001,
                   "Persisting query analyzer configuration",
@@ -204,7 +217,7 @@ public:
 
             using doc = QueryAnalyzerDocument;
 
-            auto currentTime = opCtx->getServiceContext()->getFastClockSource()->now();
+            auto currentTime = opCtx->fastClockSource().now();
             if (mode == QueryAnalyzerModeEnum::kOff) {
                 request.setUpsert(false);
                 // If the mode is 'off', do not perform the update since that would overwrite the
@@ -254,18 +267,18 @@ public:
 
             auto writeResult = [&] {
                 if (serverGlobalParams.clusterRole.has(ClusterRole::ShardServer)) {
-                    request.setWriteConcern(WriteConcerns::kMajorityWriteConcernNoTimeout);
+                    request.setWriteConcern(defaultMajorityWriteConcern());
 
                     const auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
-                    auto swResponse = configShard->runCommandWithFixedRetryAttempts(
-                        opCtx,
-                        ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                        DatabaseName::kConfig,
-                        request.toBSON(),
-                        Shard::RetryPolicy::kIdempotent);
+                    auto swResponse =
+                        configShard->runCommand(opCtx,
+                                                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                                DatabaseName::kConfig,
+                                                request.toBSON(),
+                                                Shard::RetryPolicy::kIdempotent);
                     uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(swResponse));
                     return write_ops::FindAndModifyCommandReply::parse(
-                        IDLParserContext("configureQueryAnalyzer"), swResponse.getValue().response);
+                        swResponse.getValue().response, IDLParserContext("configureQueryAnalyzer"));
                 }
 
                 DBDirectClient client(opCtx);
@@ -285,7 +298,7 @@ public:
             response.setNewConfiguration(newConfig);
             if (writeResult.getValue()) {
                 auto preImageDoc =
-                    doc::parse(IDLParserContext("configureQueryAnalyzer"), *writeResult.getValue());
+                    doc::parse(*writeResult.getValue(), IDLParserContext("configureQueryAnalyzer"));
                 if (preImageDoc.getCollectionUuid() == collUuid) {
                     response.setOldConfiguration(preImageDoc.getConfiguration());
                 }

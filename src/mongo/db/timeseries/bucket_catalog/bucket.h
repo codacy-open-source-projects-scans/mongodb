@@ -29,18 +29,9 @@
 
 #pragma once
 
-#include <boost/container/small_vector.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <list>
-#include <memory>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/operation_id.h"
-#include "mongo/db/repl/optime.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_identifiers.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_state_registry.h"
 #include "mongo/db/timeseries/bucket_catalog/execution_stats.h"
@@ -49,11 +40,20 @@
 #include "mongo/db/timeseries/bucket_catalog/rollover.h"
 #include "mongo/db/timeseries/bucket_catalog/tracking_contexts.h"
 #include "mongo/db/timeseries/bucket_catalog/write_batch.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/tracking/list.h"
-#include "mongo/util/tracking/set.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <list>
+#include <memory>
+
+#include <boost/container/small_vector.hpp>
+#include <boost/optional/optional.hpp>
+
+MONGO_MOD_PUBLIC;
 namespace mongo::timeseries::bucket_catalog {
 
 /**
@@ -110,10 +110,8 @@ public:
     // True if the bucket already exists and was reopened.
     bool isReopened = false;
 
-    // For always compressed, the total compressed size in bytes of the bucket's BSON serialization,
-    // not including measurements to be inserted until a WriteBatch is committed. With the feature
-    // flag off, the total uncompressed size in bytes of the bucket's BSON serialization, including
-    // measurements to be inserted.
+    // The total compressed size in bytes of the bucket's BSON serialization,
+    // not including measurements to be inserted until a WriteBatch is committed.
     int32_t size = 0;
 
     // The total number of measurements in the bucket, including uncommitted measurements and
@@ -123,10 +121,10 @@ public:
     // The number of committed measurements in the bucket.
     uint32_t numCommittedMeasurements = 0;
 
-    // Whether the bucket has been marked for a rollover action. It can be marked for closure
+    // Whether the bucket has been marked for a rollover reason. It can be marked for closure
     // due to number of measurements, size, or schema changes, or it can be marked for archival
     // due to time range.
-    RolloverAction rolloverAction = RolloverAction::kNone;
+    RolloverReason rolloverReason = RolloverReason::kNone;
 
     // Minimum timestamp over contained measurements.
     const Date_t minTime;
@@ -155,8 +153,8 @@ public:
     const BucketKey key;
 
     // Top-level hashed field names of the measurements that have been inserted into the bucket.
-    // TODO(SERVER-70605): Remove to avoid extra overhead. These are stored as keys in
-    // measurementMap.
+    // These must be kept, in addition to the copies in measurementMap, so
+    // we can still access them while std::move()ing measurementMap.
     tracking::StringSet fieldNames;
 
     // Top-level hashed new field names that have not yet been committed into the bucket.
@@ -200,7 +198,7 @@ bool schemaIncompatible(Bucket& bucket,
  * to overflow, we will create a new bucket and recalculate the change to the bucket size
  * and data fields.
  *
- * For always compressed, it is impossible to know how well a measurement will compress in the
+ * It is impossible to know how well a measurement will compress in the
  * existing bucket ahead of time. We skip adding the element size to the calculation. The cost of
  * adding one more measurement over the limit won't be much, especially as it will get compressed on
  * commit. After committing, the Bucket is updated with the compressed size.

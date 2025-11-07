@@ -27,24 +27,24 @@
  *    it in the license file.
  */
 
-#include <boost/none.hpp>
+#include "mongo/db/op_observer/batched_write_policy.h"
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/storage/record_store.h"
+#include "mongo/unittest/unittest.h"
+
 #include <deque>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/db/op_observer/batched_write_policy.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/repl/oplog.h"
-#include "mongo/db/storage/record_store.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 
 namespace mongo {
 namespace {
@@ -87,7 +87,7 @@ public:
     }
 
     void save() override {}
-    bool restore(bool tolerateCappedRepositioning) override {
+    bool restore(RecoveryUnit& ru, bool tolerateCappedRepositioning) override {
         return true;
     }
     void detachFromOperationContext() override {}
@@ -107,14 +107,12 @@ TEST_F(BatchedWritePolicyTest, TooFewDocumentsTest) {
     auto cm = CursorMock(rp);
     auto record = cm.next();
 
-    buildBatchedWritesWithPolicy(
-        maxSizeBytes, 4, [&cm]() { return cm.next(); }, record, stmts);
+    buildBatchedWritesWithPolicy(maxSizeBytes, 4, [&cm]() { return cm.next(); }, record, stmts);
     ASSERT_EQ(3, stmts.size());
 
     // Exhausted Cursor.
     stmts.clear();
-    buildBatchedWritesWithPolicy(
-        maxSizeBytes, 4, [&cm]() { return cm.next(); }, record, stmts);
+    buildBatchedWritesWithPolicy(maxSizeBytes, 4, [&cm]() { return cm.next(); }, record, stmts);
     ASSERT_EQ(0, stmts.size());
 }
 
@@ -127,13 +125,11 @@ TEST_F(BatchedWritePolicyTest, TooManyDocumentsTest) {
     auto cm = CursorMock(rp);
     auto record = cm.next();
 
-    buildBatchedWritesWithPolicy(
-        maxSizeBytes, 4, [&cm]() { return cm.next(); }, record, stmts);
+    buildBatchedWritesWithPolicy(maxSizeBytes, 4, [&cm]() { return cm.next(); }, record, stmts);
     ASSERT_EQ(4, stmts.size());
 
     stmts.clear();
-    buildBatchedWritesWithPolicy(
-        maxSizeBytes, 4, [&cm]() { return cm.next(); }, record, stmts);
+    buildBatchedWritesWithPolicy(maxSizeBytes, 4, [&cm]() { return cm.next(); }, record, stmts);
     ASSERT_EQ(1, stmts.size());
 }
 
@@ -169,13 +165,11 @@ TEST_F(BatchedWritePolicyTest, TooManyBigDocumentsTest) {
     auto cm = CursorMock(rp);
     auto record = cm.next();
 
-    buildBatchedWritesWithPolicy(
-        4 * 14, maxNumDocs, [&cm]() { return cm.next(); }, record, stmts);
+    buildBatchedWritesWithPolicy(4 * 14, maxNumDocs, [&cm]() { return cm.next(); }, record, stmts);
     ASSERT_EQ(4, stmts.size());
 
     stmts.clear();
-    buildBatchedWritesWithPolicy(
-        4 * 14, maxNumDocs, [&cm]() { return cm.next(); }, record, stmts);
+    buildBatchedWritesWithPolicy(4 * 14, maxNumDocs, [&cm]() { return cm.next(); }, record, stmts);
     ASSERT_EQ(1, stmts.size());
 }
 
@@ -189,18 +183,15 @@ TEST_F(BatchedWritePolicyTest, TooBigDocumentTest) {
     auto cm = CursorMock(rp);
     auto record = cm.next();
 
-    buildBatchedWritesWithPolicy(
-        1, 10, [&cm]() { return cm.next(); }, record, stmts);
+    buildBatchedWritesWithPolicy(1, 10, [&cm]() { return cm.next(); }, record, stmts);
     ASSERT_EQ(1, stmts.size());
 
     stmts.clear();
-    buildBatchedWritesWithPolicy(
-        1, 10, [&cm]() { return cm.next(); }, record, stmts);
+    buildBatchedWritesWithPolicy(1, 10, [&cm]() { return cm.next(); }, record, stmts);
     ASSERT_EQ(1, stmts.size());
 
     stmts.clear();
-    buildBatchedWritesWithPolicy(
-        1, 10, [&cm]() { return cm.next(); }, record, stmts);
+    buildBatchedWritesWithPolicy(1, 10, [&cm]() { return cm.next(); }, record, stmts);
     ASSERT_EQ(1, stmts.size());
 }
 

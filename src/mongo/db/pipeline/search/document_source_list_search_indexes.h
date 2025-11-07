@@ -28,11 +28,12 @@
  */
 
 #pragma once
-#include <queue>
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/search/document_source_list_search_indexes_gen.h"
+#include "mongo/util/modules.h"
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 class DocumentSourceListSearchIndexesSpec;
@@ -43,14 +44,13 @@ public:
     static constexpr StringData kCursorFieldName = "cursor"_sd;
     static constexpr StringData kFirstBatchFieldName = "firstBatch"_sd;
 
-    static void validateListSearchIndexesSpec(const DocumentSourceListSearchIndexesSpec* spec);
     /**
      * A 'LiteParsed' representation of the $listSearchIndexes stage.
      */
     class LiteParsedListSearchIndexes final : public LiteParsedDocumentSource {
     public:
-        static std::unique_ptr<LiteParsedListSearchIndexes> parse(const NamespaceString& nss,
-                                                                  const BSONElement& spec) {
+        static std::unique_ptr<LiteParsedListSearchIndexes> parse(
+            const NamespaceString& nss, const BSONElement& spec, const LiteParserOptions& options) {
             return std::make_unique<LiteParsedListSearchIndexes>(spec.fieldName(), nss);
         }
 
@@ -78,6 +78,10 @@ public:
             transactionNotSupported(getParseTimeName());
         }
 
+        bool isSearchStage() const final {
+            return true;
+        }
+
         explicit LiteParsedListSearchIndexes(std::string parseTimeName, NamespaceString nss)
             : LiteParsedDocumentSource(std::move(parseTimeName)), _nss(std::move(nss)) {}
 
@@ -93,11 +97,13 @@ public:
         : DocumentSource(kStageName, pExpCtx), _cmdObj(cmdObj.getOwned()) {}
 
     const char* getSourceName() const override {
-        return kStageName.rawData();
+        return kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kListSearchIndexes;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
@@ -108,19 +114,13 @@ public:
         return boost::none;
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final;
+    StageConstraints constraints(PipelineSplitState pipeState) const final;
 
 private:
-    GetNextResult doGetNext() final;
-    BSONObj _cmdObj;
-    std::queue<BSONObj> _searchIndexes;
-    bool _eof = false;
+    friend boost::intrusive_ptr<exec::agg::Stage> documentSourceListSearchIndexesToStageFn(
+        const boost::intrusive_ptr<DocumentSource>&);
 
-    // Cache the collection UUID to avoid retrieving the collection UUID for each 'doGetNext' call.
-    boost::optional<UUID> _collectionUUID;
-    // Cache the underlying source collection name, which is necessary for supporting running search
-    // queries on views, to avoid retrieving on each getNext.
-    boost::optional<NamespaceString> _resolvedNamespace;
+    BSONObj _cmdObj;
 };
 
 }  // namespace mongo

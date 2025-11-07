@@ -29,31 +29,34 @@
 
 #pragma once
 
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobj_comparator_interface.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/exec/agg/exec_pipeline.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/global_catalog/type_tags.h"
+#include "mongo/db/keypattern.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/pipeline_factory.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/s/resharding/common_types_gen.h"
+#include "mongo/util/string_map.h"
+#include "mongo/util/uuid.h"
+
 #include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <utility>
 #include <vector>
 
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobj_comparator_interface.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/keypattern.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog/type_tags.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/resharding/common_types_gen.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/util/string_map.h"
-#include "mongo/util/uuid.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -152,8 +155,6 @@ public:
      * Constructor used when generating split points for a hashed-prefix shard key.
      */
     SplitPointsBasedSplitPolicy(
-        const ShardKeyPattern& shardKeyPattern,
-        size_t numShards,
         boost::optional<std::vector<ShardId>> availableShardIds = boost::none);
 
     ShardCollectionConfig createFirstChunks(OperationContext* opCtx,
@@ -259,14 +260,13 @@ private:
  */
 class SamplingBasedSplitPolicy : public InitialSplitPolicy {
 public:
-    using SampleDocumentPipeline = std::unique_ptr<Pipeline, PipelineDeleter>;
+    using SampleDocumentPipeline = std::unique_ptr<Pipeline>;
 
-    // Interface to faciliate testing
+    // Interface to facilitate testing
     class SampleDocumentSource {
     public:
-        virtual ~SampleDocumentSource(){};
+        virtual ~SampleDocumentSource() {};
         virtual boost::optional<BSONObj> getNext() = 0;
-        virtual Pipeline* getPipeline_forTest() = 0;
     };
 
     // Provides documents from a real Pipeline
@@ -275,12 +275,10 @@ public:
         PipelineDocumentSource() = delete;
         PipelineDocumentSource(SampleDocumentPipeline pipeline, int skip);
         boost::optional<BSONObj> getNext() override;
-        Pipeline* getPipeline_forTest() override {
-            return _pipeline.get();
-        }
 
     private:
         SampleDocumentPipeline _pipeline;
+        std::unique_ptr<exec::agg::Pipeline> _execPipeline;
         const int _skip;
     };
 
@@ -306,8 +304,7 @@ public:
      * include MinKey or MaxKey.
      */
     BSONObjSet createFirstSplitPoints(OperationContext* opCtx,
-                                      const ShardKeyPattern& shardKeyPattern,
-                                      const SplitPolicyParams& params);
+                                      const ShardKeyPattern& shardKeyPattern);
 
     ShardCollectionConfig createFirstChunks(OperationContext* opCtx,
                                             const ShardKeyPattern& shardKeyPattern,
@@ -324,6 +321,7 @@ public:
 
     static std::unique_ptr<SampleDocumentSource> makePipelineDocumentSource_forTest(
         OperationContext* opCtx,
+        boost::intrusive_ptr<DocumentSource> initialSource,
         const NamespaceString& ns,
         const ShardKeyPattern& shardKey,
         int numInitialChunks,
@@ -336,7 +334,14 @@ private:
         const ShardKeyPattern& shardKey,
         int numInitialChunks,
         int samplesPerChunk,
-        MakePipelineOptions opts = {});
+        pipeline_factory::MakePipelineOptions opts = {});
+
+    static SampleDocumentPipeline _makePipeline(OperationContext* opCtx,
+                                                const NamespaceString& ns,
+                                                const ShardKeyPattern& shardKey,
+                                                int numInitialChunks,
+                                                int samplesPerChunk,
+                                                pipeline_factory::MakePipelineOptions opts = {});
 
     /**
      * Append split points based from the samples taken from the collection.

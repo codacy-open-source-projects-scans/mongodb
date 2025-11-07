@@ -28,17 +28,7 @@
  */
 
 
-#include <algorithm>
-#include <cstddef>
-#include <fmt/format.h>
-#include <initializer_list>
-#include <list>
-#include <memory>
-#include <utility>
-#include <vector>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
+#include "mongo/executor/task_executor_test_common.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -53,16 +43,12 @@
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/executor/task_executor_test_common.h"
 #include "mongo/executor/task_executor_test_fixture.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/stdx/unordered_map.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/clock_source_mock.h"
@@ -71,6 +57,18 @@
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <initializer_list>
+#include <list>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -220,12 +218,11 @@ auto makeSetStatusOnRemoteExhaustCommandCompletionClosure(
     };
 }
 
-static inline const RemoteCommandRequest kDummyRequest{HostAndPort("localhost", 27017),
-                                                       DatabaseName::createDatabaseName_forTest(
-                                                           boost::none, "mydb"),
-                                                       BSON("whatsUp"
-                                                            << "doc"),
-                                                       nullptr};
+static inline const RemoteCommandRequest kDummyRequest{
+    HostAndPort("localhost", 27017),
+    DatabaseName::createDatabaseName_forTest(boost::none, "mydb"),
+    BSON("whatsUp" << "doc"),
+    nullptr};
 
 COMMON_EXECUTOR_TEST(RunOne) {
     TaskExecutor& executor = getExecutor();

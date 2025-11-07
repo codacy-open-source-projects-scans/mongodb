@@ -29,21 +29,21 @@
 
 #include "mongo/db/admission/throughput_probing.h"
 
+#include "mongo/base/error_codes.h"
+#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/admission/throughput_probing_gen.h"
+#include "mongo/db/local_catalog/lock_manager/dump_lock_manager.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/logv2/log.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/processinfo.h"
+#include "mongo/util/testing_proctor.h"
+
 #include <algorithm>
 #include <cmath>
 #include <utility>
 
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/db/admission/throughput_probing_gen.h"
-#include "mongo/db/dump_lock_manager.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/util/assert_util_core.h"
-#include "mongo/util/processinfo.h"
-#include "mongo/util/testing_proctor.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -98,27 +98,38 @@ ThroughputProbing::ThroughputProbing(ServiceContext* svcCtx,
                                      TicketHolder* readTicketHolder,
                                      TicketHolder* writeTicketHolder,
                                      Milliseconds interval)
-    : _readTicketHolder(readTicketHolder),
+    : _svcCtx(svcCtx),
+      _readTicketHolder(readTicketHolder),
       _writeTicketHolder(writeTicketHolder),
-      _stableConcurrency(
-          gInitialConcurrency
-              ? gInitialConcurrency
-              : std::clamp(static_cast<int32_t>(ProcessInfo::getNumLogicalCores() * 2),
-                           gMinConcurrency * 2,
-                           gMaxConcurrency.load() * 2)),
-      _timer(svcCtx->getTickSource()),
-      _job(svcCtx->getPeriodicRunner()->makeJob(
-          PeriodicRunner::PeriodicJob{"ThroughputProbingTicketHolderMonitor",
-                                      [this](Client* client) { _run(client); },
-                                      interval,
-                                      true /*isKillableByStepdown*/})) {
-    auto client = svcCtx->getService()->makeClient("ThroughputProbingInit");
-    auto opCtx = client->makeOperationContext();
-    _resetConcurrency(opCtx.get());
-}
+      _interval(interval),
+      _timer(svcCtx->getTickSource()) {}
 
 void ThroughputProbing::start() {
-    _job.start();
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+
+    _initState();
+
+    auto client = _svcCtx->getService()->makeClient("ThroughputProbingInit");
+    auto opCtx = client->makeOperationContext();
+    _resetConcurrency(opCtx.get());
+
+    if (!_job.isValid()) {
+        _job = _svcCtx->getPeriodicRunner()->makeJob(
+            PeriodicRunner::PeriodicJob{"ThroughputProbingTicketHolderMonitor",
+                                        [this](Client* client) { _run(client); },
+                                        _interval,
+                                        true /* isKillableByStepdown */});
+        _job.start();
+    }
+}
+
+void ThroughputProbing::stop() {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+
+    if (_job.isValid()) {
+        _job.stop();
+        _job.detach();
+    }
 }
 
 void ThroughputProbing::appendStats(BSONObjBuilder& builder) const {
@@ -196,7 +207,6 @@ std::pair<int32_t, int32_t> newReadWriteConcurrencies(double stableConcurrency, 
 
 void ThroughputProbing::_probeStable(OperationContext* opCtx, double throughput) {
     invariant(_state == ProbingState::kStable);
-
     LOGV2_DEBUG(7346000, 3, "Throughput Probing: stable", "throughput"_attr = throughput);
 
     // Record the baseline reading.
@@ -218,6 +228,8 @@ void ThroughputProbing::_probeStable(OperationContext* opCtx, double throughput)
         _state = ProbingState::kDown;
         _decreaseConcurrency(opCtx);
     }
+    // Due to the time resize concurrency takes, increment after increase/decrease
+    _stats.timesProbedStable.fetchAndAdd(1);
 }
 
 void ThroughputProbing::_probeUp(OperationContext* opCtx, double throughput) {
@@ -249,6 +261,8 @@ void ThroughputProbing::_probeUp(OperationContext* opCtx, double throughput) {
         _state = ProbingState::kStable;
         _resetConcurrency(opCtx);
     }
+    // Due to the time resize concurrency takes, increment after reset
+    _stats.timesProbedUp.fetchAndAdd(1);
 }
 
 void ThroughputProbing::_probeDown(OperationContext* opCtx, double throughput) {
@@ -271,8 +285,8 @@ void ThroughputProbing::_probeDown(OperationContext* opCtx, double throughput) {
         _stableConcurrency = newConcurrency;
         _resetConcurrency(opCtx);
 
-        _stats.timesIncreased.fetchAndAdd(1);
-        _stats.totalAmountIncreased.fetchAndAdd(oldStableConcurrency - _readTicketHolder->outof() -
+        _stats.timesDecreased.fetchAndAdd(1);
+        _stats.totalAmountDecreased.fetchAndAdd(oldStableConcurrency - _readTicketHolder->outof() -
                                                 _writeTicketHolder->outof());
     } else {
         // Decreasing concurrency did not cause throughput to increase, so go back to stable and
@@ -280,6 +294,8 @@ void ThroughputProbing::_probeDown(OperationContext* opCtx, double throughput) {
         _state = ProbingState::kStable;
         _resetConcurrency(opCtx);
     }
+    // Due to the time resize concurrency takes, increment after reset
+    _stats.timesProbedDown.fetchAndAdd(1);
 }
 
 void ThroughputProbing::_resize(OperationContext* opCtx,
@@ -369,32 +385,26 @@ void ThroughputProbing::_decreaseConcurrency(OperationContext* opCtx) {
                 "writeConcurrency"_attr = _writeTicketHolder->outof());
 }
 
+void ThroughputProbing::_initState() {
+    _stableConcurrency = gInitialConcurrency
+        ? gInitialConcurrency
+        : std::clamp(static_cast<int32_t>(ProcessInfo::getNumLogicalCores() * 2),
+                     gMinConcurrency * 2,
+                     gMaxConcurrency.load() * 2);
+    _stableThroughput = 0;
+    _state = ProbingState::kStable;
+    _prevNumFinishedProcessing = -1;
+}
+
 void ThroughputProbing::Stats::serialize(BSONObjBuilder& builder) const {
     builder.append("timesDecreased", static_cast<long long>(timesDecreased.load()));
     builder.append("timesIncreased", static_cast<long long>(timesIncreased.load()));
     builder.append("totalAmountDecreased", static_cast<long long>(totalAmountDecreased.load()));
     builder.append("totalAmountIncreased", static_cast<long long>(totalAmountIncreased.load()));
     builder.append("resizeDurationMicros", static_cast<long long>(resizeDurationMicros.load()));
-}
-
-ThroughputProbingTicketHolderManager::ThroughputProbingTicketHolderManager(
-    ServiceContext* svcCtx,
-    std::unique_ptr<TicketHolder> read,
-    std::unique_ptr<TicketHolder> write,
-    Milliseconds interval)
-    : TicketHolderManager(std::move(read), std::move(write)) {
-    _monitor = std::make_unique<admission::ThroughputProbing>(
-        svcCtx, _readTicketHolder.get(), _writeTicketHolder.get(), interval);
-}
-
-void ThroughputProbingTicketHolderManager::_appendImplStats(BSONObjBuilder& b) const {
-    BSONObjBuilder bbb(b.subobjStart("monitor"));
-    _monitor->appendStats(bbb);
-    bbb.done();
-}
-
-void ThroughputProbingTicketHolderManager::startThroughputProbe() {
-    _monitor->start();
+    builder.append("timesProbedStable", static_cast<long long>(timesProbedStable.load()));
+    builder.append("timesProbedUp", static_cast<long long>(timesProbedUp.load()));
+    builder.append("timesProbedDown", static_cast<long long>(timesProbedDown.load()));
 }
 
 }  // namespace admission

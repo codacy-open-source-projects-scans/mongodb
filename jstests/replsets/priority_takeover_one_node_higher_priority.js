@@ -4,24 +4,18 @@
 // Step down high priority node. Wait for the lower priority electable node to become primary.
 // Eventually high priority node will run a priority takeover election to become primary.
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {
-    verifyServerStatusElectionReasonCounterChange
-} from "jstests/replsets/libs/election_metrics.js";
+import {verifyServerStatusElectionReasonCounterChange} from "jstests/replsets/libs/election_metrics.js";
 
-var name = 'priority_takeover_one_node_higher_priority';
-var replSet = new ReplSetTest({
+let name = "priority_takeover_one_node_higher_priority";
+let replSet = new ReplSetTest({
     name: name,
-    nodes: [
-        {rsConfig: {priority: 3}},
-        {},
-        {rsConfig: {arbiterOnly: true}},
-    ]
+    nodes: [{rsConfig: {priority: 3}}, {}, {rsConfig: {arbiterOnly: true}}],
 });
 replSet.startSet();
 replSet.initiate(null, null, {initiateWithDefaultElectionTimeout: true});
 
 replSet.waitForState(replSet.nodes[0], ReplSetTest.State.PRIMARY);
-var primary = replSet.getPrimary();
+let primary = replSet.getPrimary();
 
 const initialPrimaryStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
 
@@ -29,7 +23,7 @@ replSet.awaitSecondaryNodes();
 replSet.awaitReplication();
 
 // Primary should step down long enough for election to occur on secondary.
-var config = assert.commandWorked(primary.adminCommand({replSetGetConfig: 1})).config;
+let config = assert.commandWorked(primary.adminCommand({replSetGetConfig: 1})).config;
 assert.commandWorked(primary.adminCommand({replSetStepDown: replSet.timeoutMS / 1000}));
 
 // Step down primary and wait for node 1 to be promoted to primary.
@@ -45,11 +39,13 @@ replSet.waitForState(replSet.nodes[0], ReplSetTest.State.PRIMARY);
 // reason counter have been incremented in serverStatus. We allow an increase of more than 1
 // in case a slow election causes a priority takeover to fail.
 const newPrimaryStatus = assert.commandWorked(primary.adminCommand({serverStatus: 1}));
-verifyServerStatusElectionReasonCounterChange(initialPrimaryStatus.electionMetrics,
-                                              newPrimaryStatus.electionMetrics,
-                                              "priorityTakeover",
-                                              1,
-                                              undefined, /* expectedNumSuccessful */
-                                              true /* allowGreater */);
+verifyServerStatusElectionReasonCounterChange(
+    initialPrimaryStatus.electionMetrics,
+    newPrimaryStatus.electionMetrics,
+    "priorityTakeover",
+    1,
+    undefined /* expectedNumSuccessful */,
+    true /* allowGreater */,
+);
 
 replSet.stopSet();

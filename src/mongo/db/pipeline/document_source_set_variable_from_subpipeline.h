@@ -29,34 +29,38 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/exec/agg/exec_pipeline.h"
+#include "mongo/db/exec/agg/pipeline_builder.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/stage_constraints.h"
+#include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
+
 #include <algorithm>
 #include <list>
 #include <memory>
 #include <set>
 #include <utility>
 
-#include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/dependencies.h"
-#include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/pipeline/stage_constraints.h"
-#include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/util/intrusive_counter.h"
-
 namespace mongo {
 
-
+struct SetVariableFromSubPipelineSharedState {
+    std::unique_ptr<exec::agg::Pipeline> _subExecPipeline;
+};
 class DocumentSourceSetVariableFromSubPipeline final : public DocumentSource {
 public:
     static constexpr StringData kStageName = "$setVariableFromSubPipeline"_sd;
@@ -66,7 +70,7 @@ public:
 
     static boost::intrusive_ptr<DocumentSourceSetVariableFromSubPipeline> create(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        std::unique_ptr<Pipeline, PipelineDeleter> subpipeline,
+        std::unique_ptr<Pipeline> subpipeline,
         Variables::Id varID);
 
     ~DocumentSourceSetVariableFromSubPipeline() override = default;
@@ -76,14 +80,16 @@ public:
         return DistributedPlanLogic{nullptr, this, boost::none};
     }
     const char* getSourceName() const final {
-        return kStageName.rawData();
+        return kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kSetVariableFromSubPipeline;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
-    StageConstraints constraints(Pipeline::SplitState) const final {
+    StageConstraints constraints(PipelineSplitState) const final {
         StageConstraints setVariableConstraints(StreamType::kStreaming,
                                                 PositionRequirement::kNone,
                                                 // Set variable can run anywhere as long as it is
@@ -126,28 +132,26 @@ public:
      */
     void addSubPipelineInitialSource(boost::intrusive_ptr<DocumentSource> source);
 
-    void detachFromOperationContext() final;
-    void reattachToOperationContext(OperationContext* opCtx) final;
-    bool validateOperationContext(const OperationContext* opCtx) const final;
+    void detachSourceFromOperationContext() final;
+    void reattachSourceToOperationContext(OperationContext* opCtx) final;
+    bool validateSourceOperationContext(const OperationContext* opCtx) const final;
 
 protected:
     DocumentSourceSetVariableFromSubPipeline(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                             std::unique_ptr<Pipeline, PipelineDeleter> subpipeline,
+                                             std::unique_ptr<Pipeline> subpipeline,
                                              Variables::Id varID)
         : DocumentSource(kStageName, expCtx),
+          _sharedState(std::make_shared<SetVariableFromSubPipelineSharedState>()),
           _subPipeline(std::move(subpipeline)),
           _variableID(varID) {}
 
-    void doDispose() final;
-
-
 private:
-    GetNextResult doGetNext() final;
+    friend boost::intrusive_ptr<exec::agg::Stage> documentSourceSetVariableFromSubPipelineToStageFn(
+        const boost::intrusive_ptr<DocumentSource>& documentSource);
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
-    std::unique_ptr<Pipeline, PipelineDeleter> _subPipeline;
+
+    const std::shared_ptr<SetVariableFromSubPipelineSharedState> _sharedState;
+    std::shared_ptr<Pipeline> _subPipeline;
     Variables::Id _variableID;
-    // $setVariableFromSubPipeline sets the value of $$SEARCH_META only on the first call to
-    // doGetNext().
-    bool _firstCallForInput = true;
 };
 }  // namespace mongo

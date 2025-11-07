@@ -28,21 +28,12 @@
  */
 
 
-#include <boost/version.hpp>
-#include <fmt/format.h>
-#include <iostream>
-#include <memory>
-#include <string>
-#include <typeinfo>
-
 #include "mongo/db/client.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/concurrency/thread_pool.h"
@@ -50,6 +41,14 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
+
+#include <iostream>
+#include <memory>
+#include <string>
+#include <typeinfo>
+
+#include <boost/version.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -71,7 +70,7 @@ public:
         validate();
     }
 
-    virtual ~ThreadedTest(){};  // not necessary, but makes compilers happy
+    virtual ~ThreadedTest() {};  // not necessary, but makes compilers happy
 
 private:
     void launch_subthreads(int remaining) {

@@ -29,14 +29,9 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <functional>
-#include <memory>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/baton.h"
@@ -48,10 +43,18 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/functional.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <functional>
+#include <memory>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #ifdef MONGO_CONFIG_SSL
 #include "mongo/util/net/ssl_manager.h"
@@ -61,10 +64,22 @@ namespace mongo {
 
 class OperationContext;
 
-namespace transport {
+namespace MONGO_MOD_PUBLIC transport {
 
 enum ConnectSSLMode { kGlobalSSLMode, kEnableSSL, kDisableSSL };
 enum class TransportProtocol { MongoRPC, GRPC };
+
+inline StringData connectSSLModeToString(ConnectSSLMode mode) {
+    switch (mode) {
+        case kGlobalSSLMode:
+            return "global"_sd;
+        case kEnableSSL:
+            return "enabled"_sd;
+        case kDisableSSL:
+            return "disabled"_sd;
+    }
+    MONGO_UNREACHABLE;
+}
 
 class Reactor;
 using ReactorHandle = std::shared_ptr<Reactor>;
@@ -242,7 +257,7 @@ private:
  *
  * All Session objects associated with a reactor MUST be ended before the reactor is stopped.
  */
-class Reactor : public OutOfLineExecutor {
+class Reactor : public OutOfLineExecutor, public std::enable_shared_from_this<Reactor> {
 public:
     Reactor(const Reactor&) = delete;
     Reactor& operator=(const Reactor&) = delete;
@@ -252,7 +267,7 @@ public:
     /*
      * Run the event loop of the reactor until stop() is called.
      */
-    virtual void run() noexcept = 0;
+    virtual void run() = 0;
 
     /**
      * Stop the polling loop in run(). drain() must be called after stop() to ensure no outstanding
@@ -281,6 +296,10 @@ public:
      * executed in a thread calling run().
      */
     virtual std::unique_ptr<ReactorTimer> makeTimer() = 0;
+
+    // sleepFor is implemented so that the reactor is compatible with the AsyncTry exponential
+    // backoff API.
+    ExecutorFuture<void> sleepFor(Milliseconds duration, const CancellationToken& token);
 
     /**
      * Get the time according to the clock driving the event engine of the reactor.
@@ -335,5 +354,5 @@ protected:
 };
 
 
-}  // namespace transport
+}  // namespace MONGO_MOD_PUBLIC transport
 }  // namespace mongo

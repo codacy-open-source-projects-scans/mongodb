@@ -28,68 +28,42 @@
  */
 #pragma once
 
-#include <string>
-
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/server_parameter.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/service_context_d_test_fixture.h"
 
 namespace mongo {
 
-/**
- * Test-only class that sets a server parameter to the specified value and allows
- * resetting after the test completes.
- */
-class ServerParameterControllerForTest {
+class DeprecatedServerParameterTest : public ServiceContextMongoDTest {
 public:
-    /**
-     * Constructor setting the server parameter to the specified value.
-     */
-    template <typename T>
-    ServerParameterControllerForTest(const std::string& name, T value)
-        : _serverParam(ServerParameterSet::getNodeParameterSet()->get(name)) {
-        // Save the old value.
-        BSONObjBuilder bob;
-        _serverParam->appendSupportingRoundtrip(nullptr, &bob, name, boost::none);
-        _oldValue = bob.obj();
-
-        // Set server param to the new value.
-        uassertStatusOK(_serverParam->set(BSON(name << value).firstElement(), boost::none));
+    void testParameterIsDeprecated(StringData parameterName) {
+        auto&& m = ServerParameterSet::getNodeParameterSet()->getMap();
+        auto it = m.find(parameterName);
+        ASSERT(it != m.end()) << "Not found: " << parameterName;
+        auto&& [key, sp] = *it;
+        ASSERT_EQ(key, parameterName);
+        ASSERT_EQ(sp->name(), parameterName);
+        ASSERT_TRUE(sp->getIsDeprecated());
     }
 
-    void reset() {
-        // Reset to the old value.
-        auto elem = _oldValue.firstElement();
-        uassertStatusOK(_serverParam->set(elem, boost::none));
+    template <typename ValType>
+    void testSetParameterWarnsOnce(StringData parameterName, ValType value) {
+        unittest::LogCaptureGuard logs;
+        auto opCtx = cc().makeOperationContext();
+        DBDirectClient client(opCtx.get());
+        BSONObj result;
+        auto cmdBSON = BSON("setParameter" << 1 << parameterName << value);
+        ASSERT(client.runCommand(DatabaseName::kAdmin, cmdBSON, result));
+
+        const auto parameterAttrBSON = BSON("attr" << BSON("parameter" << parameterName));
+
+        // Check that the deprecation warning was logged once.
+        ASSERT_EQ(logs.countBSONContainingSubset(parameterAttrBSON), 1);
+
+        ASSERT(client.runCommand(DatabaseName::kAdmin, cmdBSON, result));
+
+        // Check that the deprecation warning is not logged again by a repeated setParameter.
+        ASSERT_EQ(logs.countBSONContainingSubset(parameterAttrBSON), 1);
     }
-
-private:
-    ServerParameter* _serverParam;
-    BSONObj _oldValue;
-};
-
-/**
- * Test-only RAII type that wraps ServerParameterControllerForTest. Upon destruction, the server
- * parameter will be set to its original value.
- */
-class RAIIServerParameterControllerForTest {
-public:
-    /**
-     * Constructor setting the server parameter to the specified value.
-     */
-    template <typename T>
-    RAIIServerParameterControllerForTest(const std::string& name, T value)
-        : _serverParamController(ServerParameterControllerForTest(name, value)) {}
-
-    /**
-     * Destructor resetting the server parameter to the original value.
-     */
-    ~RAIIServerParameterControllerForTest() {
-        _serverParamController.reset();
-    }
-
-private:
-    ServerParameterControllerForTest _serverParamController;
 };
 
 }  // namespace mongo

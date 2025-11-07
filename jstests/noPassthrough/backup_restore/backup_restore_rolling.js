@@ -25,11 +25,11 @@ if (_isWindows()) {
 }
 
 // Grab the storage engine, default is wiredTiger
-var storageEngine = jsTest.options().storageEngine || "wiredTiger";
+let storageEngine = jsTest.options().storageEngine || "wiredTiger";
 
 // if rsync is not available on the host, then this test is skipped
-if (!runProgram('bash', '-c', 'which rsync')) {
-    new BackupRestoreTest({backup: 'rolling', clientTime: 30000}).run();
+if (!runProgram("bash", "-c", "which rsync")) {
+    new BackupRestoreTest({backup: "rolling", clientTime: 30000}).run();
 } else {
-    jsTestLog("Skipping test for " + storageEngine + ' rolling');
+    jsTestLog("Skipping test for " + storageEngine + " rolling");
 }

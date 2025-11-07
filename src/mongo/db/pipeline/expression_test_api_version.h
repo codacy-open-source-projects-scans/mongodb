@@ -29,8 +29,6 @@
 
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -39,6 +37,9 @@
 #include "mongo/db/pipeline/expression_visitor.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/util/modules.h"
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 /**
@@ -50,6 +51,8 @@ class ExpressionTestApiVersion final : public Expression {
 public:
     static constexpr auto kUnstableField = "unstable";
     static constexpr auto kDeprecatedField = "deprecated";
+
+    ExpressionTestApiVersion(ExpressionContext* expCtx, bool unstable, bool deprecated);
 
     static boost::intrusive_ptr<Expression> parse(ExpressionContext* expCtx,
                                                   BSONElement expr,
@@ -67,9 +70,12 @@ public:
         return visitor->visit(this);
     }
 
-private:
-    ExpressionTestApiVersion(ExpressionContext* expCtx, bool unstable, bool deprecated);
+    boost::intrusive_ptr<Expression> clone() const final {
+        return make_intrusive<ExpressionTestApiVersion>(
+            getExpressionContext(), _unstable, _deprecated);
+    }
 
+private:
     bool _unstable;
     bool _deprecated;
 };

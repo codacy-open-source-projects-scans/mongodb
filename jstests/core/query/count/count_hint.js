@@ -7,7 +7,7 @@
  *
  * @tags: [requires_fastcount]
  */
-var coll = db.jstests_count_hint;
+let coll = db.jstests_count_hint;
 coll.drop();
 
 assert.commandWorked(coll.insert({i: 1}));
@@ -37,22 +37,22 @@ assert.eq(0, coll.find({i: 1}).hint("x_1").count());
 assert.eq(0, coll.find({i: 1}).hint({x: 1}).count());
 
 // SERVER-14792: bad hints should cause the count to fail, even if there is no query predicate.
-assert.throws(function() {
+assert.throws(function () {
     coll.find().hint({bad: 1, hint: 1}).count();
 });
-assert.throws(function() {
+assert.throws(function () {
     coll.find({i: 1}).hint({bad: 1, hint: 1}).count();
 });
 
-assert.throws(function() {
+assert.throws(function () {
     coll.find().hint("BAD HINT").count();
 });
-assert.throws(function() {
+assert.throws(function () {
     coll.find({i: 1}).hint("BAD HINT").count();
 });
 
 // Test that a bad hint fails with the correct error code.
 let cmdRes = db.runCommand({count: coll.getName(), hint: {bad: 1, hint: 1}});
 assert.commandFailedWithCode(cmdRes, ErrorCodes.BadValue, tojson(cmdRes));
-var regex = new RegExp("hint provided does not correspond to an existing index");
+let regex = new RegExp("hint provided does not correspond to an existing index");
 assert(regex.test(cmdRes.errmsg));

@@ -15,22 +15,18 @@
  *   requires_scripting,
  *   # Disabled because MapReduce can lose cursors if the primary goes down during the operation.
  *   does_not_support_stepdowns,
- *   # TODO (SERVER-95170): Re-enable this test in txn suites.
- *   does_not_support_transactions,
  *   # TODO (SERVER-91002): server side javascript execution is deprecated, and the balancer is not
  *   # compatible with it, once the incompatibility is taken care off we can re-enable this test
  *   assumes_balancer_off
  * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
-import {
-    $config as $baseConfig
-} from "jstests/concurrency/fsm_workloads/query/map_reduce/map_reduce_replace.js";
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/query/map_reduce/map_reduce_replace.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
     $config.states.remove = function remove(db, collName) {
-        for (var i = 0; i < 20; ++i) {
-            var res = db[collName].remove({_id: Random.randInt(this.numDocs)}, {justOne: true});
+        for (let i = 0; i < 20; ++i) {
+            let res = db[collName].remove({_id: Random.randInt(this.numDocs)}, {justOne: true});
             assert.commandWorked(res);
             assert.lte(0, res.nRemoved, tojson(res));
         }
@@ -39,7 +35,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
     $config.transitions = {
         init: {mapReduce: 0.5, remove: 0.5},
         mapReduce: {mapReduce: 0.5, remove: 0.5},
-        remove: {mapReduce: 0.5, remove: 0.5}
+        remove: {mapReduce: 0.5, remove: 0.5},
     };
 
     return $config;

@@ -6,7 +6,7 @@
  */
 import {ShardedIndexUtil} from "jstests/sharding/libs/sharded_index_util.js";
 
-export var ClusterIndexConsistencyChecker = (function() {
+export var ClusterIndexConsistencyChecker = (function () {
     function run(mongos, keyFile) {
         /**
          * Returns an array of config.collections docs for all collections.
@@ -30,8 +30,7 @@ export var ClusterIndexConsistencyChecker = (function() {
                         // shard is no longer in the cluster. This error should be transient, so it
                         // can be retried on.
                         if (e.code === ErrorCodes.ShardNotFound) {
-                            print("Retrying $indexStats aggregation on ShardNotFound error: " +
-                                  tojson(e));
+                            jsTest.log.info("Retrying $indexStats aggregation on ShardNotFound error", {error: e});
                             continue;
                         }
                         throw e;
@@ -41,29 +40,30 @@ export var ClusterIndexConsistencyChecker = (function() {
         }
 
         mongos.fullOptions = mongos.fullOptions || {};
-        const requiresAuth = keyFile || (mongos.fullOptions.clusterAuthMode === 'x509');
-        const collDocs =
-            requiresAuth ? authutil.asCluster(mongos, keyFile, getCollDocs) : getCollDocs();
+        const requiresAuth = keyFile || mongos.fullOptions.clusterAuthMode === "x509";
+        const collDocs = requiresAuth ? authutil.asCluster(mongos, keyFile, getCollDocs) : getCollDocs();
         for (const collDoc of collDocs) {
             const ns = collDoc._id;
             const getIndexDocsForNs = makeGetIndexDocsFunc(ns);
-            print(`Checking that the indexes for ${ns} are consistent across shards...`);
+            jsTest.log.info(`Checking that the indexes for ${ns} are consistent across shards...`);
 
-            const indexDocs = requiresAuth ? authutil.asCluster(mongos, keyFile, getIndexDocsForNs)
-                                           : getIndexDocsForNs();
+            const indexDocs = requiresAuth
+                ? authutil.asCluster(mongos, keyFile, getIndexDocsForNs)
+                : getIndexDocsForNs();
 
             if (indexDocs.length == 0) {
-                print(`Found no indexes for ${ns}, skipping index consistency check`);
+                jsTest.log.info(`Found no indexes for ${ns}, skipping index consistency check`);
                 continue;
             }
 
-            const inconsistentIndexes =
-                ShardedIndexUtil.findInconsistentIndexesAcrossShards(indexDocs);
+            const inconsistentIndexes = ShardedIndexUtil.findInconsistentIndexesAcrossShards(indexDocs);
 
             for (const shard in inconsistentIndexes) {
                 const shardInconsistentIndexes = inconsistentIndexes[shard];
-                assert(shardInconsistentIndexes.length === 0,
-                       `found inconsistent indexes for ${ns}: ${tojson(inconsistentIndexes)}`);
+                assert(
+                    shardInconsistentIndexes.length === 0,
+                    `found inconsistent indexes for ${ns}: ${tojson(inconsistentIndexes)}`,
+                );
             }
         }
     }

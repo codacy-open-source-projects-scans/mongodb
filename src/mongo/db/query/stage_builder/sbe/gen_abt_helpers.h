@@ -29,72 +29,30 @@
 
 #pragma once
 
-#include <absl/container/node_hash_map.h>
-#include <memory>
+#include "mongo/base/string_data.h"
+#include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/query/stage_builder/sbe/abt/comparison_op.h"
+#include "mongo/db/query/stage_builder/sbe/abt/syntax/expr.h"
+#include "mongo/db/query/stage_builder/sbe/abt/syntax/syntax.h"
+#include "mongo/util/modules.h"
+
 #include <utility>
 #include <vector>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
-#include "mongo/db/exec/sbe/expressions/expression.h"
-#include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/query/optimizer/comparison_op.h"
-#include "mongo/db/query/optimizer/defs.h"
-#include "mongo/db/query/optimizer/syntax/expr.h"
-#include "mongo/db/query/optimizer/syntax/syntax.h"
-#include "mongo/db/query/stage_builder/sbe/sbexpr.h"
-
 namespace mongo::stage_builder {
 
-/**
- * Creates a balanced boolean binary expression tree from given collection of leaf expression.
- */
-SbExpr makeBalancedBooleanOpTree(sbe::EPrimBinary::Op logicOp,
-                                 std::vector<SbExpr> leaves,
-                                 StageBuilderState& state);
-
-template <typename Builder>
-optimizer::ABT makeBalancedTreeImpl(Builder builder,
-                                    std::vector<optimizer::ABT>& leaves,
-                                    size_t from,
-                                    size_t until) {
-    invariant(from < until);
-    if (from + 1 == until) {
-        return std::move(leaves[from]);
-    } else {
-        size_t mid = from + (until - from) / 2;
-        auto lhs = makeBalancedTreeImpl(builder, leaves, from, mid);
-        auto rhs = makeBalancedTreeImpl(builder, leaves, mid, until);
-        return builder(std::move(lhs), std::move(rhs));
-    }
-}
-
-template <typename Builder>
-optimizer::ABT makeBalancedTree(Builder builder, std::vector<optimizer::ABT> leaves) {
-    return makeBalancedTreeImpl(builder, leaves, 0, leaves.size());
-}
-
-inline optimizer::ABT makeBalancedBooleanOpTree(optimizer::Operations logicOp,
-                                                std::vector<optimizer::ABT> leaves) {
-    auto builder = [=](optimizer::ABT lhs, optimizer::ABT rhs) {
-        return optimizer::make<optimizer::BinaryOp>(logicOp, std::move(lhs), std::move(rhs));
-    };
-    return makeBalancedTreeImpl(builder, leaves, 0, leaves.size());
-}
-
-inline auto makeABTFunction(StringData name, optimizer::ABTVector args) {
-    return optimizer::make<optimizer::FunctionCall>(name.toString(), std::move(args));
+inline auto makeABTFunction(StringData name, abt::ABTVector args) {
+    return abt::make<abt::FunctionCall>(std::string{name}, std::move(args));
 }
 
 template <typename... Args>
 inline auto makeABTFunction(StringData name, Args&&... args) {
-    return optimizer::make<optimizer::FunctionCall>(
-        name.toString(), optimizer::makeSeq(std::forward<Args>(args)...));
+    return abt::make<abt::FunctionCall>(std::string{name},
+                                        abt::makeSeq(std::forward<Args>(args)...));
 }
 
 inline auto makeABTConstant(sbe::value::TypeTags tag, sbe::value::Value value) {
-    return optimizer::make<optimizer::Constant>(tag, value);
+    return abt::make<abt::Constant>(tag, value);
 }
 
 inline auto makeABTConstant(StringData str) {
@@ -102,115 +60,18 @@ inline auto makeABTConstant(StringData str) {
     return makeABTConstant(tag, value);
 }
 
-optimizer::ABT makeFillEmpty(optimizer::ABT expr, optimizer::ABT altExpr);
+abt::ABT makeVariable(abt::ProjectionName var);
 
-/**
- * Check if expression returns Nothing and return boolean false if so. Otherwise, return the
- * expression.
- */
-optimizer::ABT makeFillEmptyFalse(optimizer::ABT e);
-/**
- * Check if expression returns Nothing and return boolean true if so. Otherwise, return the
- * expression.
- */
-optimizer::ABT makeFillEmptyTrue(optimizer::ABT e);
-/**
- * Check if expression returns Nothing and return null if so. Otherwise, return the expression.
- */
-optimizer::ABT makeFillEmptyNull(optimizer::ABT e);
+abt::ABT makeUnaryOp(abt::Operations unaryOp, abt::ABT operand);
 
-optimizer::ABT makeFillEmptyUndefined(optimizer::ABT e);
+abt::ABT makeBinaryOp(abt::Operations binaryOp, abt::ABT lhs, abt::ABT rhs);
 
-optimizer::ABT makeNot(optimizer::ABT e);
+abt::ABT makeIf(abt::ABT condExpr, abt::ABT thenExpr, abt::ABT elseExpr);
 
-optimizer::ABT makeVariable(optimizer::ProjectionName var);
+abt::ABT makeLet(const abt::ProjectionName& name, abt::ABT bindExpr, abt::ABT expr);
 
-optimizer::ABT makeUnaryOp(optimizer::Operations unaryOp, optimizer::ABT operand);
-
-optimizer::ABT makeBinaryOp(optimizer::Operations binaryOp, optimizer::ABT lhs, optimizer::ABT rhs);
-
-optimizer::ABT generateABTNullOrMissing(optimizer::ProjectionName var);
-optimizer::ABT generateABTNullOrMissing(optimizer::ABT var);
-
-optimizer::ABT generateABTNullMissingOrUndefined(optimizer::ProjectionName var);
-optimizer::ABT generateABTNullMissingOrUndefined(optimizer::ABT var);
-
-/**
- * Generates an ABT that checks if the input expression is negative assuming that it has already
- * been verified to have numeric type and to not be NaN.
- */
-optimizer::ABT generateABTNegativeCheck(optimizer::ProjectionName var);
-
-optimizer::ABT generateABTNonPositiveCheck(optimizer::ProjectionName var);
-optimizer::ABT generateABTPositiveCheck(optimizer::ABT var);
-optimizer::ABT generateABTNonNumericCheck(optimizer::ProjectionName var);
-optimizer::ABT generateABTLongLongMinCheck(optimizer::ProjectionName var);
-optimizer::ABT generateABTNonArrayCheck(optimizer::ProjectionName var);
-optimizer::ABT generateABTNonObjectCheck(optimizer::ProjectionName var);
-optimizer::ABT generateABTNonStringCheck(optimizer::ProjectionName var);
-optimizer::ABT generateABTNonStringCheck(optimizer::ABT var);
-optimizer::ABT generateABTNonTimestampCheck(optimizer::ProjectionName var);
-optimizer::ABT generateABTNullishOrNotRepresentableInt32Check(optimizer::ProjectionName var);
-/**
- * Generates an ABT to check the given variable is a number between -20 and 100 inclusive, and is a
- * whole number.
- */
-optimizer::ABT generateInvalidRoundPlaceArgCheck(const optimizer::ProjectionName& var);
-/**
- * Generates an ABT that checks if the input expression is NaN _assuming that_ it has
- * already been verified to be numeric.
- */
-optimizer::ABT generateABTNaNCheck(optimizer::ProjectionName var);
-
-optimizer::ABT generateABTInfinityCheck(optimizer::ProjectionName var);
-
-/**
- * A pair representing a 1) true/false condition and 2) the value that should be returned if that
- * condition evaluates to true.
- */
-using ABTCaseValuePair = std::pair<optimizer::ABT, optimizer::ABT>;
-
-/**
- * Convert a list of CaseValuePairs into a chain of optimizer::If expressions, with the final else
- * case evaluating to the 'defaultValue' optimizer::ABT.
- */
-template <typename... Ts>
-optimizer::ABT buildABTMultiBranchConditional(Ts... cases);
-
-template <typename... Ts>
-optimizer::ABT buildABTMultiBranchConditional(ABTCaseValuePair headCase, Ts... rest) {
-    return optimizer::make<optimizer::If>(std::move(headCase.first),
-                                          std::move(headCase.second),
-                                          buildABTMultiBranchConditional(std::move(rest)...));
-}
-
-template <>
-optimizer::ABT buildABTMultiBranchConditional(optimizer::ABT defaultCase);
-
-/**
- * Converts a std::vector of ABTCaseValuePairs into a chain of optimizer::If expressions in the
- * same manner as the 'buildABTMultiBranchConditional()' function.
- */
-optimizer::ABT buildABTMultiBranchConditionalFromCaseValuePairs(
-    std::vector<ABTCaseValuePair> caseValuePairs, optimizer::ABT defaultValue);
-
-optimizer::ABT makeIfNullExpr(std::vector<optimizer::ABT> values,
-                              sbe::value::FrameIdGenerator* frameIdGenerator);
-
-optimizer::ABT makeIf(optimizer::ABT condExpr, optimizer::ABT thenExpr, optimizer::ABT elseExpr);
-
-optimizer::ABT makeLet(const optimizer::ProjectionName& name,
-                       optimizer::ABT bindExpr,
-                       optimizer::ABT expr);
-
-optimizer::ABT makeLet(sbe::FrameId frameId, optimizer::ABT bindExpr, optimizer::ABT expr);
-
-optimizer::ABT makeLet(sbe::FrameId frameId, optimizer::ABTVector bindExprs, optimizer::ABT expr);
-
-optimizer::ABT makeLocalLambda(sbe::FrameId frameId, optimizer::ABT expr);
-
-optimizer::ABT makeNumericConvert(optimizer::ABT expr, sbe::value::TypeTags tag);
-
-optimizer::ABT makeABTFail(ErrorCodes::Error error, StringData errorMessage);
+abt::ABT makeLet(std::vector<abt::ProjectionName> bindNames,
+                 abt::ABTVector bindExprs,
+                 abt::ABT inExpr);
 
 }  // namespace mongo::stage_builder

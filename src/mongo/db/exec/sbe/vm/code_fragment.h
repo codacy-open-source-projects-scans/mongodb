@@ -29,13 +29,13 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-
 #include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/db/exec/sbe/vm/vm_builtin.h"
 #include "mongo/db/exec/sbe/vm/vm_instruction.h"
 #include "mongo/db/exec/sbe/vm/vm_types.h"
+#include "mongo/util/modules.h"
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace sbe {
@@ -63,15 +63,15 @@ public:
 
     void append(CodeFragment&& code);
     void appendNoStack(CodeFragment&& code);
-    // Used when either `lhs` or `rhs` will run, but not both. This method will adjust the stack
-    // size once in this call, rather than twice (once for each CodeFragment). The CodeFragments
+    // Used when only one of the fragments will run, but not more. This method will adjust the stack
+    // size once in this call, rather than N (once for each CodeFragment). The CodeFragments
     // must have the same stack size for us to know how to adjust the stack at compile time.
-    void append(CodeFragment&& lhs, CodeFragment&& rhs);
+    void append(std::vector<CodeFragment>&& fragments);
     void appendConstVal(value::TypeTags tag, value::Value val);
     void appendAccessVal(value::SlotAccessor* accessor);
     void appendMoveVal(value::SlotAccessor* accessor);
     void appendLocalVal(FrameId frameId, int variable, bool moveFrom);
-    void appendLocalLambda(int codePosition);
+    void appendLocalLambda(int codePosition, size_t numArgs);
     void appendPop();
     void appendSwap();
     void appendMakeOwn(Instruction::Parameter arg);
@@ -127,9 +127,9 @@ public:
     void appendCollComparisonKey(Instruction::Parameter lhs, Instruction::Parameter rhs);
     void appendGetFieldOrElement(Instruction::Parameter lhs, Instruction::Parameter rhs);
     void appendTraverseP();
-    void appendTraverseP(int codePosition, Instruction::Constants k);
+    void appendTraverseP(int codePosition, size_t numArgs, Instruction::Constants k);
     void appendTraverseF();
-    void appendTraverseF(int codePosition, Instruction::Constants k);
+    void appendTraverseF(int codePosition, size_t numArgs, Instruction::Constants k);
     void appendMagicTraverseF();
     void appendSetField();
     void appendGetArraySize(Instruction::Parameter input);

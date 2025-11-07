@@ -27,6 +27,15 @@
  *    it in the license file.
  */
 
+#include "mongo/base/string_data.h"
+#include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/crypto/fle_crypto.h"
+#include "mongo/logv2/log.h"
+#include "mongo/platform/decimal128.h"
+#include "mongo/rpc/object_check.h"  // IWYU pragma: keep
+#include "mongo/stdx/unordered_set.h"
+#include "mongo/unittest/unittest.h"
+
 #include <cstdint>
 #include <functional>
 #include <iostream>
@@ -39,18 +48,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/config.h"  // IWYU pragma: keep
-#include "mongo/crypto/fle_crypto.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/platform/decimal128.h"
-#include "mongo/rpc/object_check.h"  // IWYU pragma: keep
-#include "mongo/stdx/unordered_set.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -86,7 +83,7 @@ struct EdgeCalcTestVector {
         }
 
         for (StringData edgeSd : edges) {
-            std::string edge = edgeSd.toString();
+            std::string edge = std::string{edgeSd};
             if (std::all_of(expectedEdges.begin(), expectedEdges.end(), [edge](auto ee) {
                     return edge != ee;
                 })) {
@@ -121,7 +118,7 @@ struct EdgeCalcTestVector {
 
 TEST(EdgeCalcTest, Int32_TestVectors) {
     std::vector<EdgeCalcTestVector<int32_t>> testVectors = {
-#include "test_vectors/edges_int32.cstruct.h"  // IWYU pragma: keep
+#include "mongo/crypto/test_vectors/edges_int32.cstruct.h"  // IWYU pragma: keep
     };
     for (const auto& testVector : testVectors) {
         ASSERT_TRUE(testVector.validate());
@@ -130,7 +127,7 @@ TEST(EdgeCalcTest, Int32_TestVectors) {
 
 TEST(EdgeCalcTest, Int64_TestVectors) {
     std::vector<EdgeCalcTestVector<int64_t>> testVectors = {
-#include "test_vectors/edges_int64.cstruct.h"  // IWYU pragma: keep
+#include "mongo/crypto/test_vectors/edges_int64.cstruct.h"  // IWYU pragma: keep
     };
     for (const auto& testVector : testVectors) {
         ASSERT_TRUE(testVector.validate());
@@ -148,7 +145,7 @@ std::unique_ptr<Edges> getEdgesDoubleForTest(double value,
 
 TEST(EdgeCalcTest, Double_TestVectors) {
     std::vector<EdgeCalcTestVector<double>> testVectors = {
-#include "test_vectors/edges_double.cstruct.h"  // IWYU pragma: keep
+#include "mongo/crypto/test_vectors/edges_double.cstruct.h"  // IWYU pragma: keep
     };
     for (const auto& testVector : testVectors) {
         ASSERT_TRUE(testVector.validate());
@@ -169,7 +166,7 @@ std::unique_ptr<Edges> getEdgesDecimal128ForTest(Decimal128 value,
 
 TEST(EdgeCalcTest, Decimal128_TestVectors) {
     std::vector<EdgeCalcTestVector<Decimal128>> testVectors = {
-#include "test_vectors/edges_decimal128.cstruct.h"  // IWYU pragma: keep
+#include "mongo/crypto/test_vectors/edges_decimal128.cstruct.h"  // IWYU pragma: keep
     };
     for (const auto& testVector : testVectors) {
         ASSERT_TRUE(testVector.validate());
@@ -217,7 +214,7 @@ struct MinCoverTestVector {
 
 TEST(MinCoverCalcTest, Int32_TestVectors) {
     const MinCoverTestVector<int32_t> testVectors[] = {
-#include "test_vectors/mincover_int32.cstruct.h"  // IWYU pragma: keep
+#include "mongo/crypto/test_vectors/mincover_int32.cstruct.h"  // IWYU pragma: keep
     };
     for (const auto& testVector : testVectors) {
         ASSERT_TRUE(testVector.validate(minCoverInt32));
@@ -226,7 +223,7 @@ TEST(MinCoverCalcTest, Int32_TestVectors) {
 
 TEST(MinCoverCalcTest, Int64_TestVectors) {
     const MinCoverTestVector<int64_t> testVectors[] = {
-#include "test_vectors/mincover_int64.cstruct.h"  // IWYU pragma: keep
+#include "mongo/crypto/test_vectors/mincover_int64.cstruct.h"  // IWYU pragma: keep
     };
     for (const auto& testVector : testVectors) {
         ASSERT_TRUE(testVector.validate(minCoverInt64));
@@ -255,7 +252,7 @@ std::vector<std::string> minCoverDoubleForTest(double lowerBound,
 
 TEST(MinCoverCalcTest, Double_TestVectors) {
     MinCoverTestVector<double> testVectors[] = {
-#include "test_vectors/mincover_double.cstruct.h"  // IWYU pragma: keep
+#include "mongo/crypto/test_vectors/mincover_double.cstruct.h"  // IWYU pragma: keep
     };
     for (const auto& testVector : testVectors) {
         ASSERT_TRUE(testVector.validate(minCoverDoubleForTest));
@@ -286,7 +283,7 @@ std::vector<std::string> minCoverDecimal128ForTest(Decimal128 lowerBound,
 
 TEST(MinCoverCalcTest, Decimal128_TestVectors) {
     MinCoverTestVector<Decimal128> testVectors[] = {
-#include "test_vectors/mincover_decimal128.cstruct.h"  // IWYU pragma: keep
+#include "mongo/crypto/test_vectors/mincover_decimal128.cstruct.h"  // IWYU pragma: keep
     };
     for (const auto& testVector : testVectors) {
         ASSERT_TRUE(testVector.validate(minCoverDecimal128ForTest));
@@ -336,7 +333,7 @@ struct MinCoverTestVectorPrecision {
 
 TEST(MinCoverCalcPrecisionTest, Double_TestVectors) {
     MinCoverTestVectorPrecision<double> testVectors[] = {
-#include "test_vectors/mincover_double_precision.cstruct.h"  // IWYU pragma: keep
+#include "mongo/crypto/test_vectors/mincover_double_precision.cstruct.h"  // IWYU pragma: keep
     };
     for (const auto& testVector : testVectors) {
         ASSERT_TRUE(testVector.validate(minCoverDouble));
@@ -345,7 +342,7 @@ TEST(MinCoverCalcPrecisionTest, Double_TestVectors) {
 
 TEST(MinCoverCalcPrecisionTest, Decimal128_TestVectors) {
     MinCoverTestVectorPrecision<Decimal128> testVectors[] = {
-#include "test_vectors/mincover_decimal128_precision.cstruct.h"  // IWYU pragma: keep
+#include "mongo/crypto/test_vectors/mincover_decimal128_precision.cstruct.h"  // IWYU pragma: keep
     };
     for (const auto& testVector : testVectors) {
         ASSERT_TRUE(testVector.validate(minCoverDecimal128));

@@ -29,22 +29,23 @@
 
 #pragma once
 
+#include "mongo/db/exec/plan_stats_visitor.h"
+#include "mongo/db/index/multikey_paths.h"
+#include "mongo/db/pipeline/spilling/spilling_stats.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/eof_node_type.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
+#include "mongo/db/query/plan_summary_stats.h"
+#include "mongo/db/query/query_stats/data_bearing_node_metrics.h"
+#include "mongo/db/query/record_id_bound.h"
+#include "mongo/db/record_id.h"
+#include "mongo/util/container_size_helper.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/time_support.h"
+
 #include <cstdint>
 #include <cstdlib>
 #include <string>
 #include <vector>
-
-#include "mongo/db/exec/plan_stats_visitor.h"
-#include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/db/query/eof_node_type.h"
-#include "mongo/db/query/plan_summary_stats.h"
-#include "mongo/db/query/query_stats/data_bearing_node_metrics.h"
-#include "mongo/db/query/record_id_bound.h"
-#include "mongo/db/query/stage_types.h"
-#include "mongo/db/record_id.h"
-#include "mongo/util/container_size_helper.h"
-#include "mongo/util/time_support.h"
 
 namespace mongo {
 
@@ -59,8 +60,10 @@ using PlanStageKey = const PlanStage*;
 
 /**
  * The interface all specific-to-stage stats provide.
+ *
+ * TODO SERVER-112777: Remove 'atlas_streams' dependency on this struct.
  */
-struct SpecificStats {
+struct MONGO_MOD_NEEDS_REPLACEMENT SpecificStats {
     virtual ~SpecificStats() {}
 
     /**
@@ -72,6 +75,13 @@ struct SpecificStats {
 
     virtual void acceptVisitor(PlanStatsConstVisitor* visitor) const = 0;
     virtual void acceptVisitor(PlanStatsMutableVisitor* visitor) = 0;
+
+    /**
+     * Subclasses that have the ability to fetch should override this to return 'true'.
+     */
+    virtual bool doesFetch() const {
+        return false;
+    }
 };
 
 // Every stage has CommonStats.
@@ -408,7 +418,10 @@ struct CountScanStats : public SpecificStats {
     size_t keysExamined;
 };
 
-struct DeleteStats : public SpecificStats {
+/**
+ * SERVER-112776: Remove 'data_movement' dependency on this struct.
+ */
+struct MONGO_MOD_NEEDS_REPLACEMENT DeleteStats : public SpecificStats {
     DeleteStats() = default;
 
     std::unique_ptr<SpecificStats> clone() const final {
@@ -431,7 +444,10 @@ struct DeleteStats : public SpecificStats {
     size_t bytesDeleted = 0u;
 };
 
-struct BatchedDeleteStats : public DeleteStats {
+/**
+ * SERVER-112776: Remove 'ttl' dependency on this struct.
+ */
+struct MONGO_MOD_NEEDS_REPLACEMENT BatchedDeleteStats : public DeleteStats {
     BatchedDeleteStats() = default;
 
     // Unlike a standard multi:true delete, BatchedDeleteStage can complete with PlanStage::IS_EOF
@@ -476,11 +492,18 @@ struct DistinctScanStats : public SpecificStats {
         visitor->visit(this);
     }
 
+    bool doesFetch() const final {
+        return isFetching;
+    }
+
     // How many keys did we look at while distinct-ing?
     size_t keysExamined = 0;
     // The total number of full documents touched by the embedded fetch stage, if one exists.
     size_t docsExamined = 0;
-    // How many chunk skips were performed while distinct-ing?
+    // Tracks how many times we skipped past orphan chunks.
+    size_t orphanChunkSkips = 0;
+    // Tracks the number of time we filtered out an orphan document (symmetric to
+    // 'ShardingFilterStats').
     size_t chunkSkips = 0;
 
     BSONObj keyPattern;
@@ -529,6 +552,10 @@ struct FetchStats : public SpecificStats {
 
     void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
         visitor->visit(this);
+    }
+
+    bool doesFetch() const final {
+        return true;
     }
 
     // Have we seen anything that already had an object?
@@ -665,6 +692,8 @@ struct IndexScanStats : public SpecificStats {
 
     // Number of times the index cursor is re-positioned during the execution of the scan.
     size_t seeks;
+
+    uint64_t peakTrackedMemBytes = 0u;
 };
 
 struct LimitStats : public SpecificStats {
@@ -752,6 +781,8 @@ struct OrStats : public SpecificStats {
 
     size_t dupsTested = 0u;
     size_t dupsDropped = 0u;
+
+    uint64_t peakTrackedMemBytes = 0;
 };
 
 struct ProjectionStats : public SpecificStats {
@@ -777,7 +808,10 @@ struct ProjectionStats : public SpecificStats {
     BSONObj projObj;
 };
 
-struct SortStats : public SpecificStats {
+/**
+ * TODO SERVER-112777: Remove 'atlas_streams' dependency on this struct.
+ */
+struct MONGO_MOD_NEEDS_REPLACEMENT SortStats : public SpecificStats {
     SortStats() = default;
     SortStats(uint64_t limit, uint64_t maxMemoryUsageBytes)
         : limit(limit), maxMemoryUsageBytes(maxMemoryUsageBytes) {}
@@ -817,14 +851,13 @@ struct SortStats : public SpecificStats {
     // The amount of memory that is currently being used, even prior to being sorted.
     uint64_t memoryUsageBytes = 0u;
 
+    // The maximum amount of memory that was used.
+    uint64_t peakTrackedMemBytes = 0u;
+
     // The number of keys that we've sorted.
     uint64_t keysSorted = 0u;
 
-    // The number of times that we spilled data to disk during the execution of this query.
-    uint64_t spills = 0u;
-
-    // The maximum size of the spill file written to disk, or 0 if no spilling occurred.
-    uint64_t spilledDataStorageSize = 0u;
+    SpillingStats spillingStats;
 };
 
 struct MergeSortStats : public SpecificStats {
@@ -851,6 +884,8 @@ struct MergeSortStats : public SpecificStats {
 
     // The pattern according to which we are sorting.
     BSONObj sortPattern;
+
+    uint64_t peakTrackedMemBytes = 0u;
 };
 
 struct ShardingFilterStats : public SpecificStats {
@@ -936,6 +971,8 @@ struct NearStats : public SpecificStats {
     // btree index version, not geo index version
     int indexVersion;
     BSONObj keyPattern;
+
+    SpillingStats spillingStats;
 };
 
 struct UpdateStats : public SpecificStats {
@@ -1024,6 +1061,9 @@ struct TextOrStats : public SpecificStats {
     }
 
     size_t fetches;
+    SpillingStats spillingStats;
+
+    int64_t peakTrackedMemBytes = 0;
 };
 
 struct TrialStats : public SpecificStats {
@@ -1073,18 +1113,9 @@ struct GroupStats : public SpecificStats {
     // Tracks an estimate of the total size of all documents output by the group stage in bytes.
     size_t totalOutputDataSizeBytes = 0;
 
-    // The size of the file spilled to disk. Note that this is not the same as the number of bytes
-    // spilled to disk, as any data spilled to disk will be compressed before being written to a
-    // file.
-    uint64_t spilledDataStorageSize = 0u;
+    SpillingStats spillingStats;
 
-    // The number of bytes evicted from memory and spilled to disk.
-    uint64_t numBytesSpilledEstimate = 0u;
-
-    // The number of times that we spilled data to disk while grouping the data.
-    uint64_t spills = 0u;
-
-    uint64_t spilledRecords = 0u;
+    int64_t peakTrackedMemBytes = 0;
 };
 
 struct DocumentSourceCursorStats : public SpecificStats {
@@ -1301,17 +1332,10 @@ struct SpoolStats : public SpecificStats {
     // The amount of data we've spooled in bytes.
     uint64_t totalDataSizeBytes = 0u;
 
-    // The number of times that we spilled data to disk during the execution of this query.
-    uint64_t spills = 0u;
+    // The maximum amount of memory that was used.
+    uint64_t peakTrackedMemBytes = 0u;
 
-    // The maximum size of the spill file written to disk, or 0 if no spilling occurred.
-    uint64_t spilledDataStorageSize = 0u;
-
-    // The number of individual records spilled to disk.
-    uint64_t spilledRecords = 0u;
-
-    // The amount of data that has been spilled to the spill file, or 0 if no spilling occurred.
-    uint64_t spilledUncompressedDataSize = 0u;
+    SpillingStats spillingStats;
 };
 
 struct EofStats : public SpecificStats {
@@ -1357,4 +1381,74 @@ struct DocumentSourceIdLookupStats : public SpecificStats {
     // Tracks the cumulative summary stats for the idLookup sub-pipeline.
     PlanSummaryStats planSummaryStats;
 };
+
+struct DocumentSourceGraphLookupStats : public SpecificStats {
+    std::unique_ptr<SpecificStats> clone() const override {
+        return std::make_unique<DocumentSourceGraphLookupStats>(*this);
+    }
+
+    uint64_t estimateObjectSizeInBytes() const override {
+        return sizeof(*this) +
+            (planSummaryStats.estimateObjectSizeInBytes() - sizeof(planSummaryStats));
+    }
+
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
+    }
+
+    // The peak amount of RAM used by the stage during execution.
+    uint64_t maxMemoryUsageBytes = 0;
+
+    SpillingStats spillingStats;
+
+    // Tracks the summary stats in aggregate across all executions of the subpipeline.
+    PlanSummaryStats planSummaryStats;
+};
+
+struct DocumentSourceBucketAutoStats : public SpecificStats {
+    std::unique_ptr<SpecificStats> clone() const override {
+        return std::make_unique<DocumentSourceBucketAutoStats>(*this);
+    }
+
+    uint64_t estimateObjectSizeInBytes() const override {
+        return sizeof(*this);
+    }
+
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
+    }
+
+    SpillingStats spillingStats;
+};
+
+struct DocumentSourceSetWindowFieldsStats : public SpecificStats {
+    std::unique_ptr<SpecificStats> clone() const override {
+        return std::make_unique<DocumentSourceSetWindowFieldsStats>(*this);
+    }
+
+    uint64_t estimateObjectSizeInBytes() const override {
+        return sizeof(*this);
+    }
+
+    void acceptVisitor(PlanStatsConstVisitor* visitor) const final {
+        visitor->visit(this);
+    }
+
+    void acceptVisitor(PlanStatsMutableVisitor* visitor) final {
+        visitor->visit(this);
+    }
+
+    SpillingStats spillingStats;
+
+    int64_t peakTrackedMemBytes = 0;
+};
+
 }  // namespace mongo

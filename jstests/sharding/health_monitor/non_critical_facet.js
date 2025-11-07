@@ -3,8 +3,6 @@
  *
  *  @tags: [
  *    multiversion_incompatible,
- *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
- *    embedded_router_incompatible,
  * ]
  */
 import {ShardingTest} from "jstests/libs/shardingtest.js";
@@ -17,10 +15,10 @@ const params = {
             values: [
                 {type: "test", intensity: "non-critical"},
                 {type: "ldap", intensity: "off"},
-                {type: "dns", intensity: "off"}
-            ]
+                {type: "dns", intensity: "off"},
+            ],
         }),
-    }
+    },
 };
 
 let st = new ShardingTest({
@@ -28,18 +26,19 @@ let st = new ShardingTest({
     shards: 1,
 });
 
-assert.commandWorked(
-    st.s0.adminCommand({"setParameter": 1, activeFaultDurationSecs: ACTIVE_FAULT_DURATION_SECS}));
+assert.commandWorked(st.s0.adminCommand({"setParameter": 1, activeFaultDurationSecs: ACTIVE_FAULT_DURATION_SECS}));
 
 let result = assert.commandWorked(st.s0.adminCommand({serverStatus: 1})).health;
 assert.eq(result.state, "Ok");
 
 // Failpoint returns fault.
-assert.commandWorked(st.s0.adminCommand({
-    "configureFailPoint": 'testHealthObserver',
-    "data": {"code": "InternalError", "msg": "test msg"},
-    "mode": "alwaysOn"
-}));
+assert.commandWorked(
+    st.s0.adminCommand({
+        "configureFailPoint": "testHealthObserver",
+        "data": {"code": "InternalError", "msg": "test msg"},
+        "mode": "alwaysOn",
+    }),
+);
 
 assert.soon(() => {
     result = assert.commandWorked(st.s0.adminCommand({serverStatus: 1})).health;

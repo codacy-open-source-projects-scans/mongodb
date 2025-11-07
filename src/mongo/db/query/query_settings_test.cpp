@@ -36,14 +36,13 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
-#include "mongo/bson/mutable/mutable_bson_test_utils.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/db/exec/mutable_bson/mutable_bson_test_utils.h"
 #include "mongo/db/field_ref.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_names.h"
-#include "mongo/db/query/index_entry.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/unittest/unittest.h"
 
 using mongo::AllowedIndicesFilter;
 using mongo::BSONObj;
@@ -58,7 +57,7 @@ TEST(QuerySettingsTest, AllowedIndicesFilterAllowsIndexesByName) {
     auto keyPat = fromjson("{a:1, b:1}");
     IndexEntry a_idx(keyPat,
                      mongo::IndexNames::nameToType(mongo::IndexNames::findPluginName(keyPat)),
-                     mongo::IndexDescriptor::kLatestIndexVersion,
+                     mongo::IndexConfig::kLatestIndexVersion,
                      false,
                      {},
                      {},
@@ -71,7 +70,7 @@ TEST(QuerySettingsTest, AllowedIndicesFilterAllowsIndexesByName) {
                      nullptr);
     IndexEntry ab_idx(keyPat,
                       mongo::IndexNames::nameToType(mongo::IndexNames::findPluginName(keyPat)),
-                      mongo::IndexDescriptor::kLatestIndexVersion,
+                      mongo::IndexConfig::kLatestIndexVersion,
                       false,
                       {},
                       {},
@@ -93,7 +92,7 @@ TEST(QuerySettingsTest, AllowedIndicesFilterAllowsIndexesByKeyPattern) {
     auto keyPat_a = fromjson("{a:1}");
     IndexEntry a_idx(keyPat_a,
                      mongo::IndexNames::nameToType(mongo::IndexNames::findPluginName(keyPat_a)),
-                     mongo::IndexDescriptor::kLatestIndexVersion,
+                     mongo::IndexConfig::kLatestIndexVersion,
                      false,
                      {},
                      {},
@@ -107,7 +106,7 @@ TEST(QuerySettingsTest, AllowedIndicesFilterAllowsIndexesByKeyPattern) {
     auto keyPat_ab = fromjson("{a:1, b:1}");
     IndexEntry ab_idx(keyPat_ab,
                       mongo::IndexNames::nameToType(mongo::IndexNames::findPluginName(keyPat_ab)),
-                      mongo::IndexDescriptor::kLatestIndexVersion,
+                      mongo::IndexConfig::kLatestIndexVersion,
                       false,
                       {},
                       {},

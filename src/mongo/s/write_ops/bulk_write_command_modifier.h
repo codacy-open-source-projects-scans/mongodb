@@ -29,16 +29,6 @@
 
 #pragma once
 
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-#include <tuple>
-#include <variant>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
@@ -47,18 +37,31 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
+#include "mongo/db/versioning_protocol/database_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/shard_version.h"
 #include "mongo/stdx/unordered_map.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <memory>
+#include <tuple>
+#include <variant>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
 /**
  * Helper functions which add new operations into an existing BulkWriteCommandRequest.
+ * Only used from tests.
  */
-class BulkWriteCommandModifier {
+class MONGO_MOD_FILE_PRIVATE BulkWriteCommandModifier {
 public:
     BulkWriteCommandModifier(BulkWriteCommandRequest* request, size_t capacity = 0)
         : _request(request), _ops(request->getOps()), _nsInfos(request->getNsInfo()) {
@@ -80,9 +83,9 @@ public:
      */
     void finishBuild();
 
-    void addOp(write_ops::InsertCommandRequest insertOp);
-    void addOp(write_ops::UpdateCommandRequest updateOp);
-    void addOp(write_ops::DeleteCommandRequest deleteOp);
+    void addOp(const write_ops::InsertCommandRequest& insertOp);
+    void addOp(const write_ops::UpdateCommandRequest& updateOp);
+    void addOp(const write_ops::DeleteCommandRequest& deleteOp);
 
     void addInsert(const OpMsgRequest& request);
     void addUpdate(const OpMsgRequest& request);

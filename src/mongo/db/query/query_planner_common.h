@@ -29,22 +29,18 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <vector>
-
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/simple_bsonelement_comparator.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
-#include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/projection.h"
-#include "mongo/db/query/query_planner_params.h"
-#include "mongo/db/query/query_solution.h"
+
+#include <cstddef>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -117,15 +113,6 @@ public:
      */
     static void reverseScans(QuerySolutionNode* node, bool reverseCollScans = false);
 
-    /**
-     * Extracts all field names for the sortKey meta-projection and stores them in the returned
-     * array. Returns an empty array if there were no sortKey meta-projection specified in the
-     * given projection 'proj'. For example, given a projection {a:1, b: {$meta: "sortKey"},
-     * c: {$meta: "sortKey"}}, the returned vector will contain two elements ["b", "c"].
-     */
-    static std::vector<FieldPath> extractSortKeyMetaFieldsFromProjection(
-        const projection_ast::Projection& proj);
-
     static bool providesSort(const CanonicalQuery& query, const BSONObj& kp) {
         return query.getFindCommandRequest().getSort().isPrefixOf(
             kp, SimpleBSONElementComparator::kInstance);
@@ -143,8 +130,10 @@ public:
      * index, if so, which direction the scan should be. If the collection is not clustered, or the
      * sort cannot be provided, returns 'boost::none'.
      */
-    static boost::optional<int> determineClusteredScanDirection(const CanonicalQuery& query,
-                                                                const QueryPlannerParams& params);
+    static boost::optional<int> determineClusteredScanDirection(
+        const CanonicalQuery& query,
+        const boost::optional<ClusteredCollectionInfo>& clusteredInfo,
+        const CollatorInterface* clusteredCollectionCollator);
 };
 
 }  // namespace mongo

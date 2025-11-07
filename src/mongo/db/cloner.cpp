@@ -28,16 +28,7 @@
  */
 
 
-#include <algorithm>
-#include <boost/optional.hpp>
-#include <cstdint>
-#include <ctime>
-#include <iterator>
-#include <map>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/cloner.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -51,25 +42,29 @@
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/client/internal_auth.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/cloner.h"
 #include "mongo/db/cloner_gen.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/commands/list_collections_filter.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/ddl/list_collections_filter.h"
+#include "mongo/db/local_catalog/ddl/list_collections_gen.h"
+#include "mongo/db/local_catalog/ddl/list_indexes_gen.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/write_ops/insert.h"
@@ -77,16 +72,11 @@
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/shard_role.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
@@ -96,6 +86,17 @@
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <ctime>
+#include <iterator>
+#include <map>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -115,7 +116,7 @@ BSONObj DefaultClonerImpl::_getIdIndexSpec(const std::list<BSONObj>& indexSpecs)
     for (auto&& indexSpec : indexSpecs) {
         BSONElement indexName;
         uassertStatusOK(bsonExtractTypedField(
-            indexSpec, IndexDescriptor::kIndexNameFieldName, String, &indexName));
+            indexSpec, IndexDescriptor::kIndexNameFieldName, BSONType::string, &indexName));
         if (indexName.valueStringData() == IndexConstants::kIdIndexName) {
             return indexSpec;
         }
@@ -132,30 +133,37 @@ struct DefaultClonerImpl::BatchHandler {
             return acquireCollection(
                 opCtx,
                 CollectionAcquisitionRequest(nss,
-                                             AcquisitionPrerequisites::kPretendUnsharded,
+                                             PlacementConcern::kPretendUnsharded,
                                              repl::ReadConcernArgs::get(opCtx),
                                              AcquisitionPrerequisites::kWrite),
-                MODE_IX);
+                MODE_X);
         };
 
         boost::optional<Lock::DBLock> dbLock;
-        dbLock.emplace(opCtx, _dbName, MODE_X);
+        dbLock.emplace(opCtx, _dbName, MODE_IX);
         uassert(ErrorCodes::NotWritablePrimary,
                 str::stream() << "Not primary while cloning collection "
                               << nss.toStringForErrorMsg(),
                 !opCtx->writesAreReplicated() ||
                     repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, nss));
 
-        // Make sure database still exists after we resume from the temp release
+        boost::optional<CollectionAcquisition> collection;
         auto databaseHolder = DatabaseHolder::get(opCtx);
-        auto db = databaseHolder->openDb(opCtx, _dbName);
-        auto catalog = CollectionCatalog::get(opCtx);
-        boost::optional<CollectionAcquisition> collection = acquireCollectionFn(opCtx);
-        if (!collection->exists()) {
-            writeConflictRetry(opCtx, "createCollection", nss, [&] {
-                opCtx->checkForInterrupt();
+        Database* db;
+        writeConflictRetry(opCtx, "createCollection", nss, [&] {
+            opCtx->checkForInterrupt();
 
+            db = databaseHolder->openDb(opCtx, _dbName);
+            collection = acquireCollectionFn(opCtx);
+
+            // Make sure database still exists after we resume from the temp release
+            if (!collection->exists()) {
+                OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
+                    unsafeCreateCollection(opCtx,
+                                           nss,
+                                           /* forceCSRAsUnknownAfterCollectionCreation */ true);
                 WriteUnitOfWork wunit(opCtx);
+                ScopedLocalCatalogWriteFence fence(opCtx, &collection.get());
                 const bool createDefaultIndexes = true;
                 CollectionOptions collectionOptions = uassertStatusOK(CollectionOptions::parse(
                     from_options, CollectionOptions::ParseKind::parseForCommand));
@@ -164,12 +172,11 @@ struct DefaultClonerImpl::BatchHandler {
                           str::stream() << "collection creation failed during clone ["
                                         << nss.toStringForErrorMsg() << "]");
                 wunit.commit();
-            });
-            collection.emplace(acquireCollectionFn(opCtx));
-            invariant(collection->exists(),
-                      str::stream() << "Missing collection during clone ["
-                                    << nss.toStringForErrorMsg() << "]");
-        }
+            }
+        });
+        invariant(collection->exists(),
+                  str::stream() << "Missing collection during clone [" << nss.toStringForErrorMsg()
+                                << "]");
 
         while (cursor.moreInCurrentBatch()) {
             if (numSeen % 128 == 127) {
@@ -187,7 +194,7 @@ struct DefaultClonerImpl::BatchHandler {
 
                 CurOp::get(opCtx)->yielded();
 
-                dbLock.emplace(opCtx, _dbName, MODE_X);
+                dbLock.emplace(opCtx, _dbName, MODE_IX);
 
                 // Check if everything is still all right.
                 if (opCtx->writesAreReplicated()) {
@@ -198,23 +205,27 @@ struct DefaultClonerImpl::BatchHandler {
                         repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, nss));
                 }
 
-                db = databaseHolder->getDb(opCtx, _dbName);
-                uassert(28593,
-                        str::stream() << "Database " << _dbName.toStringForErrorMsg()
-                                      << " dropped while cloning",
-                        db != nullptr);
+                writeConflictRetry(opCtx, "reAcquireCollection", nss, [&] {
+                    opCtx->checkForInterrupt();
+                    db = databaseHolder->getDb(opCtx, _dbName);
+                    uassert(28593,
+                            str::stream() << "Database " << _dbName.toStringForErrorMsg()
+                                          << " dropped while cloning",
+                            db != nullptr);
 
-                collection.emplace(acquireCollectionFn(opCtx));
-                uassert(28594,
-                        str::stream() << "Collection " << nss.toStringForErrorMsg()
-                                      << " dropped while cloning",
-                        collection->exists());
+                    collection.emplace(acquireCollectionFn(opCtx));
+                    uassert(28594,
+                            str::stream() << "Collection " << nss.toStringForErrorMsg()
+                                          << " dropped while cloning",
+                            collection->exists());
+                });
             }
 
             BSONObj tmp = cursor.nextSafe();
 
             /* assure object is valid.  note this will slow us down a little. */
-            // We allow cloning of collections containing decimal data even if decimal is disabled.
+            // We allow cloning of collections containing decimal data even if decimal is
+            // disabled.
             const Status status = validateBSON(tmp.objdata(), tmp.objsize());
             if (!status.isOK()) {
                 if (gSkipCorruptDocumentsWhenCloning.load()) {
@@ -303,6 +314,9 @@ void DefaultClonerImpl::_copy(OperationContext* opCtx,
     FindCommandRequest findCmd{nss};
     findCmd.setNoCursorTimeout(true);
     findCmd.setReadConcern(repl::ReadConcernArgs::kLocal);
+    if (shouldUseRawDataOperations(VersionContext::getDecoration(opCtx))) {
+        findCmd.setRawData(true);
+    }
     auto cursor = getConn()->find(
         std::move(findCmd), ReadPreferenceSetting{ReadPreference::PrimaryOnly}, ExhaustMode::kOn);
 
@@ -331,20 +345,34 @@ void DefaultClonerImpl::_copyIndexes(OperationContext* opCtx,
     if (from_indexes.empty())
         return;
 
-    CollectionWriter collection(opCtx, nss);
-    invariant(collection,
-              str::stream() << "Missing collection " << nss.toStringForErrorMsg() << " (Cloner)");
-
-    auto indexCatalog = collection->getIndexCatalog();
-    auto indexesToBuild = indexCatalog->removeExistingIndexesNoChecks(
-        opCtx, collection.get(), {std::begin(from_indexes), std::end(from_indexes)});
-    if (indexesToBuild.empty()) {
-        return;
-    }
-
-    auto fromMigrate = false;
     writeConflictRetry(opCtx, "_copyIndexes", nss, [&] {
+        opCtx->checkForInterrupt();
         WriteUnitOfWork wunit(opCtx);
+
+        auto collLock =
+            acquireCollection(opCtx,
+                              CollectionAcquisitionRequest(nss,
+                                                           PlacementConcern::kPretendUnsharded,
+                                                           repl::ReadConcernArgs::get(opCtx),
+                                                           AcquisitionPrerequisites::kWrite),
+                              MODE_X);
+
+        CollectionWriter collection(opCtx, &collLock);
+        invariant(collection,
+                  str::stream() << "Missing collection " << nss.toStringForErrorMsg()
+                                << " (Cloner)");
+        uassert(10659000,
+                str::stream() << "Collection " << nss.toStringForErrorMsg()
+                              << " must be empty before copying indexes",
+                collLock.getCollectionPtr()->isEmpty(opCtx));
+        auto indexCatalog = collection->getIndexCatalog();
+        auto indexesToBuild = indexCatalog->removeExistingIndexesNoChecks(
+            opCtx, collection.get(), {std::begin(from_indexes), std::end(from_indexes)});
+        if (indexesToBuild.empty()) {
+            return;
+        }
+
+        auto fromMigrate = false;
         IndexBuildsCoordinator::get(opCtx)->createIndexesOnEmptyCollection(
             opCtx, collection, indexesToBuild, fromMigrate);
         wunit.commit();
@@ -391,9 +419,8 @@ Status DefaultClonerImpl::_createCollectionsForDb(
     const DatabaseName& dbName) {
     auto databaseHolder = DatabaseHolder::get(opCtx);
     auto db = databaseHolder->openDb(opCtx, dbName);
-    invariant(shard_role_details::getLocker(opCtx)->isDbLockedForMode(dbName, MODE_X));
+    invariant(shard_role_details::getLocker(opCtx)->isDbLockedForMode(dbName, MODE_IX));
 
-    auto catalog = CollectionCatalog::get(opCtx);
     auto collCount = 0;
     for (auto&& params : createCollectionParams) {
         if (MONGO_unlikely(movePrimaryFailPoint.shouldFail()) && collCount > 0) {
@@ -401,18 +428,22 @@ Status DefaultClonerImpl::_createCollectionsForDb(
         }
         collCount++;
 
-        BSONObjBuilder optionsBuilder;
-        optionsBuilder.appendElements(params.collectionInfo["options"].Obj());
-
         const auto nss = NamespaceStringUtil::deserialize(dbName, params.collectionName);
 
-        uassertStatusOK(userAllowedCreateNS(opCtx, nss));
         Status status = writeConflictRetry(opCtx, "createCollection", nss, [&] {
             opCtx->checkForInterrupt();
             WriteUnitOfWork wunit(opCtx);
+            BSONObjBuilder optionsBuilder;
+            optionsBuilder.appendElements(params.collectionInfo["options"].Obj());
 
-            const Collection* collection = catalog->lookupCollectionByNamespace(opCtx, nss);
-            if (collection) {
+            auto collection =
+                acquireCollection(opCtx,
+                                  CollectionAcquisitionRequest(nss,
+                                                               PlacementConcern::kPretendUnsharded,
+                                                               repl::ReadConcernArgs::get(opCtx),
+                                                               AcquisitionPrerequisites::kWrite),
+                                  MODE_IX);
+            if (collection.exists()) {
                 if (!params.trackedColls) {
                     // If the collection is unsharded then we want to fail when a collection
                     // we're trying to create already exists.
@@ -422,47 +453,48 @@ Status DefaultClonerImpl::_createCollectionsForDb(
                 }
 
                 // If the collection is sharded and a collection with the same name already
-                // exists on the target, we check if the existing collection's UUID matches
-                // that of the one we're trying to create. If it does, we treat the create
-                // as a no-op; if it doesn't match, we return an error.
-                const auto& existingOpts = collection->getCollectionOptions();
+                // exists on the target, we check if the existing collection's UUID matches that
+                // of the one we're trying to create. If it does, we treat the create as a
+                // no-op; if it doesn't match, we return an error.
+                const auto& existingOpts = collection.getCollectionPtr()->getCollectionOptions();
                 const UUID clonedUUID =
                     uassertStatusOK(UUID::parse(params.collectionInfo["info"]["uuid"]));
-                if (clonedUUID == existingOpts.uuid)
-                    return Status::OK();
+                if (clonedUUID != existingOpts.uuid) {
+                    return Status(ErrorCodes::InvalidOptions,
+                                  str::stream()
+                                      << "sharded collection with same namespace "
+                                      << nss.toStringForErrorMsg()
+                                      << " already exists, but UUIDs don't match. Existing UUID is "
+                                      << existingOpts.uuid << " and new UUID is " << clonedUUID);
+                }
+            } else {
+                uassertStatusOK(userAllowedCreateNS(opCtx, nss));
 
-                return Status(ErrorCodes::InvalidOptions,
-                              str::stream()
-                                  << "sharded collection with same namespace "
-                                  << nss.toStringForErrorMsg()
-                                  << " already exists, but UUIDs don't match. Existing UUID is "
-                                  << existingOpts.uuid << " and new UUID is " << clonedUUID);
-            }
+                // If the collection does not already exist and is tracked, we create a new
+                // collection on the target shard with the UUID of the original collection and
+                // copy the options and secondary indexes. If the collection does not already
+                // exist and is untracked, we create a new collection with its own UUID and copy
+                // the options and secondary indexes of the original collection.
+                if (params.trackedColls) {
+                    optionsBuilder.append(params.collectionInfo["info"]["uuid"]);
+                }
 
-            // If the collection does not already exist and is tracked, we create a new collection
-            // on the target shard with the UUID of the original collection and copy the options and
-            // secondary indexes. If the collection does not already exist and is untracked, we
-            // create a new collection with its own UUID and copy the options and secondary indexes
-            // of the original collection.
+                const bool createDefaultIndexes = true;
+                auto options = optionsBuilder.obj();
 
-            if (params.trackedColls) {
-                optionsBuilder.append(params.collectionInfo["info"]["uuid"]);
-            }
+                CollectionOptions collectionOptions = uassertStatusOK(CollectionOptions::parse(
+                    options, CollectionOptions::ParseKind::parseForStorage));
 
-            const bool createDefaultIndexes = true;
-            auto options = optionsBuilder.obj();
-
-            CollectionOptions collectionOptions = uassertStatusOK(
-                CollectionOptions::parse(options, CollectionOptions::ParseKind::parseForStorage));
-
-            {
-                OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
-                    unsafeCreateCollection(opCtx,
-                                           /* forceCSRAsUnknownAfterCollectionCreation */ true);
-                Status createStatus = db->userCreateNS(
-                    opCtx, nss, collectionOptions, createDefaultIndexes, params.idIndexSpec);
-                if (!createStatus.isOK()) {
-                    return createStatus;
+                {
+                    OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
+                        unsafeCreateCollection(opCtx,
+                                               nss,
+                                               /* forceCSRAsUnknownAfterCollectionCreation */ true);
+                    Status createStatus = db->userCreateNS(
+                        opCtx, nss, collectionOptions, createDefaultIndexes, params.idIndexSpec);
+                    if (!createStatus.isOK()) {
+                        return createStatus;
+                    }
                 }
             }
 
@@ -536,8 +568,14 @@ StatusWith<std::vector<BSONObj>> DefaultClonerImpl::getListOfCollections(
     }
     // Gather the list of collections to clone
     // No tenant id required as the db cloner is only used for moving primary dbs in sharding.
-    std::list<BSONObj> initialCollections =
-        getConn()->getCollectionInfos(dbName, ListCollectionsFilter::makeTypeCollectionFilter());
+    ListCollections listCollectionsCmd;
+    listCollectionsCmd.setDbName(dbName);
+    listCollectionsCmd.setFilter(ListCollectionsFilter::makeTypeCollectionFilter());
+    if (shouldUseRawDataOperations(VersionContext::getDecoration(opCtx))) {
+        listCollectionsCmd.setRawData(true);
+    }
+    auto initialCollections = uassertStatusOK(getConn()->runExhaustiveCursorCommand(
+        dbName, listCollectionsCmd.toBSON(), QueryOption_SecondaryOk));
     return _filterCollectionsForClone(dbName, initialCollections);
 }
 
@@ -548,8 +586,8 @@ Status DefaultClonerImpl::copyDb(OperationContext* opCtx,
                                  std::set<std::string>* clonedColls) {
     invariant(clonedColls && clonedColls->empty(),
               str::stream() << masterHost << ":" << dbName.toStringForErrorMsg());
-    // This function can potentially block for a long time on network activity, so holding of locks
-    // is disallowed.
+    // This function can potentially block for a long time on network activity, so holding of
+    // locks is disallowed.
     invariant(!shard_role_details::getLocker(opCtx)->isLocked());
     auto toCloneStatus = getListOfCollections(opCtx, dbName, masterHost);
     if (!toCloneStatus.isOK()) {
@@ -578,9 +616,12 @@ Status DefaultClonerImpl::copyDb(OperationContext* opCtx,
     std::map<StringData, std::list<BSONObj>> collectionIndexSpecs;
     for (auto&& params : createCollectionParams) {
         const auto nss = NamespaceStringUtil::deserialize(dbName, params.collectionName);
-        const bool includeBuildUUIDs = false;
-        const int options = 0;
-        auto indexSpecs = getConn()->getIndexSpecs(nss, includeBuildUUIDs, options);
+        ListIndexes listIndexesCmd(nss);
+        if (shouldUseRawDataOperations(VersionContext::getDecoration(opCtx))) {
+            listIndexesCmd.setRawData(true);
+        }
+        auto indexSpecs = uassertStatusOK(
+            getConn()->runExhaustiveCursorCommand(nss.dbName(), listIndexesCmd.toBSON()));
 
         collectionIndexSpecs[params.collectionName] = indexSpecs;
 
@@ -590,7 +631,7 @@ Status DefaultClonerImpl::copyDb(OperationContext* opCtx,
     }
 
     {
-        Lock::DBLock dbXLock(opCtx, dbName, MODE_X);
+        Lock::DBLock dbLock(opCtx, dbName, MODE_IX);
         uassert(ErrorCodes::NotWritablePrimary,
                 str::stream() << "Not primary while cloning database "
                               << dbName.toStringForErrorMsg()
@@ -607,8 +648,9 @@ Status DefaultClonerImpl::copyDb(OperationContext* opCtx,
         // now build the secondary indexes
         for (auto&& params : createCollectionParams) {
 
-            // Indexes of sharded collections are not copied: the primary shard is not required to
-            // have all indexes. The listIndexes cmd is sent to the shard owning the MinKey value.
+            // Indexes of sharded collections are not copied: the primary shard is not required
+            // to have all indexes. The listIndexes cmd is sent to the shard owning the MinKey
+            // value.
             if (params.trackedColls) {
                 continue;
             }
@@ -616,7 +658,6 @@ Status DefaultClonerImpl::copyDb(OperationContext* opCtx,
             LOGV2(20422, "Copying indexes", "collectionInfo"_attr = params.collectionInfo);
 
             const auto nss = NamespaceStringUtil::deserialize(dbName, params.collectionName);
-
 
             _copyIndexes(opCtx,
                          nss,
@@ -646,6 +687,11 @@ Status DefaultClonerImpl::copyDb(OperationContext* opCtx,
     }
 
     return Status::OK();
+}
+
+bool DefaultClonerImpl::shouldUseRawDataOperations(const VersionContext& vCtx) {
+    return gFeatureFlagAllBinariesSupportRawDataOperations.isEnabled(
+        vCtx, serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
 }
 
 Cloner::Cloner() : Cloner(std::make_unique<DefaultClonerImpl>()) {}

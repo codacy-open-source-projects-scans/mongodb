@@ -1,10 +1,9 @@
 /**
  * @tags: [
  *   requires_sharding,
- *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
- *    embedded_router_incompatible,
  *   uses_multi_shard_transaction,
  *   uses_transactions,
+ *   requires_fcv_81,
  * ]
  *
  * Tests that when a load-balanced client disconnects, its in-progress transactions are aborted
@@ -16,16 +15,14 @@ function setupShardedCollection(st, dbName, collName) {
     const fullNss = dbName + "." + collName;
     const admin = st.s.getDB("admin");
     // Shard collection; ensure docs on each shard
-    assert.commandWorked(
-        admin.runCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+    assert.commandWorked(admin.runCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
     assert.commandWorked(admin.runCommand({shardCollection: fullNss, key: {_id: 1}}));
     assert.commandWorked(admin.runCommand({split: fullNss, middle: {_id: 0}}));
-    assert.commandWorked(
-        admin.runCommand({moveChunk: fullNss, find: {_id: 0}, to: st.shard1.shardName}));
+    assert.commandWorked(admin.runCommand({moveChunk: fullNss, find: {_id: 0}, to: st.shard1.shardName}));
 
     // Insert some docs on each shard
     let coll = admin.getSiblingDB(dbName).getCollection(collName);
-    var bulk = coll.initializeUnorderedBulkOp();
+    let bulk = coll.initializeUnorderedBulkOp();
     for (let i = -150; i < 150; i++) {
         bulk.insert({_id: i});
     }
@@ -36,7 +33,9 @@ function startTxn(host, dbName, collName, countdownLatch, appName) {
     jsTestLog("Starting transaction on alternate thread.");
     const newMongo = new Mongo(`mongodb://${host}/?appName=${appName}`);
     assert.commandWorked(
-        newMongo.adminCommand({configureFailPoint: "clientIsFromLoadBalancer", mode: "alwaysOn"}));
+        newMongo.adminCommand({configureFailPoint: "clientIsConnectedToLoadBalancerPort", mode: "alwaysOn"}),
+    );
+    assert.commandWorked(newMongo.adminCommand({configureFailPoint: "clientIsLoadBalancedPeer", mode: "alwaysOn"}));
     // We manually generate a logical session and send it to the server explicitly, to prevent
     // the shell from making its own logical session object which will attempt to explicitly
     // abort the transaction on disconnection. In this way, we simulate a "hard partition"
@@ -51,7 +50,7 @@ function startTxn(host, dbName, collName, countdownLatch, appName) {
         lsid: mySession,
         txnNumber: myTxnNumber,
         startTransaction: true,
-        autocommit: false
+        autocommit: false,
     };
     let cmdRes = newMongo.getDB(dbName).runCommand(findInTxnCmd);
     assert.commandWorked(cmdRes);
@@ -68,7 +67,7 @@ setupShardedCollection(st, dbName, collName);
 let countdownLatch = new CountDownLatch(1);
 
 // capture txn statistics before opening and aborting the txn.
-const beforeTxnStats = admin.adminCommand({'serverStatus': 1}).transactions;
+const beforeTxnStats = admin.adminCommand({"serverStatus": 1}).transactions;
 
 const appName = "load_balanced_disconnect_aborts_txns";
 let txnStartingThread = new Thread(startTxn, st.s.host, dbName, collName, countdownLatch, appName);
@@ -83,7 +82,7 @@ assert.soon(() => {
     const curopCursor = admin.aggregate([
         {$currentOp: {allUsers: true, idleCursors: true, localOps: true, idleSessions: true}},
         {$match: {type: "idleSession"}},
-        {$match: {appName: appName}}
+        {$match: {appName: appName}},
     ]);
     if (curopCursor.hasNext()) {
         idleSession = curopCursor.next();
@@ -106,16 +105,18 @@ assert.eq(idleSession.transaction.parameters.txnNumber, txnNumber);
 
 jsTestLog("Ensure that the transaction has been killed.");
 // Make sure we can't find that txn anymore/it has been killed.
-const numPrevInterrupted = beforeTxnStats.abortCause.hasOwnProperty('Interrupted')
+const numPrevInterrupted = beforeTxnStats.abortCause.hasOwnProperty("Interrupted")
     ? beforeTxnStats.abortCause.Interrupted
     : 0;
 assert.soon(() => {
-    const afterTxnStats = admin.adminCommand({'serverStatus': 1}).transactions;
-    return (afterTxnStats.totalAborted == beforeTxnStats.totalAborted + 1) &&
-        (afterTxnStats.abortCause.Interrupted, numPrevInterrupted + 1);
+    const afterTxnStats = admin.adminCommand({"serverStatus": 1}).transactions;
+    return (
+        afterTxnStats.totalAborted == beforeTxnStats.totalAborted + 1 &&
+        (afterTxnStats.abortCause.Interrupted, numPrevInterrupted + 1)
+    );
 });
 
-assert.commandWorked(
-    admin.adminCommand({configureFailPoint: "clientIsFromLoadBalancer", mode: "off"}));
+assert.commandWorked(admin.adminCommand({configureFailPoint: "clientIsConnectedToLoadBalancerPort", mode: "off"}));
+assert.commandWorked(admin.adminCommand({configureFailPoint: "clientIsLoadBalancedPeer", mode: "off"}));
 
 st.stop();

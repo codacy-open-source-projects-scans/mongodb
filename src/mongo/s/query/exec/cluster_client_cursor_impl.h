@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <queue>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
@@ -43,6 +36,7 @@
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/query_stats/data_bearing_node_metrics.h"
 #include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/repl/read_concern_args.h"
@@ -55,14 +49,26 @@
 #include "mongo/s/query/exec/cluster_query_result.h"
 #include "mongo/s/query/exec/router_exec_stage.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <queue>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
 class RouterStageMock;
 
-class ClusterClientCursorImpl final : public ClusterClientCursor {
+/**
+ * TODO SERVER-111290 Remove external dependencies on this class.
+ */
+class MONGO_MOD_NEEDS_REPLACEMENT ClusterClientCursorImpl final : public ClusterClientCursor {
     ClusterClientCursorImpl(const ClusterClientCursorImpl&) = delete;
     ClusterClientCursorImpl& operator=(const ClusterClientCursorImpl&) = delete;
 
@@ -84,6 +90,8 @@ public:
                                          ClusterClientCursorParams&& params);
 
     StatusWith<ClusterQueryResult> next() final;
+
+    Status releaseMemory() final;
 
     void kill(OperationContext* opCtx) final;
 
@@ -110,11 +118,11 @@ public:
 
     long long getNumReturnedSoFar() const final;
 
-    void queueResult(const ClusterQueryResult& result) final;
+    void queueResult(ClusterQueryResult&& result) final;
 
-    bool remotesExhausted() final;
+    bool remotesExhausted() const final;
 
-    bool hasBeenKilled() final;
+    bool hasBeenKilled() const final;
 
     Status setAwaitDataTimeout(Milliseconds awaitDataTimeout) final;
 
@@ -135,6 +143,8 @@ public:
     void setLastUseDate(Date_t now) final;
 
     boost::optional<uint32_t> getPlanCacheShapeHash() const final;
+
+    boost::optional<query_shape::QueryShapeHash> getQueryShapeHash() const final;
 
     boost::optional<std::size_t> getQueryStatsKeyHash() const final;
 
@@ -200,8 +210,12 @@ private:
     // The time when the cursor was last unpinned, i.e. the end of the last getMore.
     Date_t _lastUseDate;
 
-    // The hash of the query shape to be used for slow query logging;
+    // The hash of the canonical query encoding CanonicalQuery::QueryShapeString. To be used for
+    // slow query logging.
     boost::optional<uint32_t> _planCacheShapeHash;
+
+    // The hash of the query_shape::QueryShape.
+    boost::optional<query_shape::QueryShapeHash> _queryShapeHash;
 
     // Whether ClusterClientCursor::next() was interrupted due to MaxTimeMSExpired.
     bool _maxTimeMSExpired = false;
@@ -217,6 +231,8 @@ private:
     std::unique_ptr<query_stats::Key> _queryStatsKey;
 
     bool _queryStatsWillNeverExhaust = false;
+
+    bool _isChangeStreamQuery = false;
 
     // Tracks if kill() has been called on the cursor. Multiple calls to kill() is an error.
     bool _hasBeenKilled = false;

@@ -29,14 +29,11 @@
 
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/mutable/element.h"
+#include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -44,6 +41,10 @@
 #include "mongo/db/update/modifier_node.h"
 #include "mongo/db/update/update_node.h"
 #include "mongo/db/update/update_node_visitor.h"
+
+#include <memory>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 

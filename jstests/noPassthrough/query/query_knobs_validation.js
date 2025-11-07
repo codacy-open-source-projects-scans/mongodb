@@ -5,17 +5,13 @@
  * parameter's valid bounds.
  */
 
-import {
-    getExpectedPipelineLimit,
-} from "jstests/libs/query/aggregation_pipeline_utils.js";
+import {getExpectedPipelineLimit} from "jstests/libs/query/aggregation_pipeline_utils.js";
 
 const conn = MongoRunner.runMongod();
 const testDB = conn.getDB("admin");
 const expectedParamDefaults = {
     internalQueryPlanEvaluationWorks: 10000,
-    internalQueryPlanEvaluationWorksSbe: 10000,
     internalQueryPlanEvaluationCollFraction: 0.3,
-    internalQueryPlanEvaluationCollFractionSbe: 0.0,
     internalQueryPlanEvaluationMaxResults: 101,
     internalQueryCacheMaxEntriesPerCollection: 5000,
     // This is a deprecated alias for "internalQueryCacheMaxEntriesPerCollection".
@@ -30,6 +26,7 @@ const expectedParamDefaults = {
     internalQueryForceIntersectionPlans: false,
     internalQueryPlannerEnableIndexIntersection: true,
     internalQueryPlannerEnableHashIntersection: false,
+    internalQueryPlannerEnableSortIndexIntersection: false,
     internalQueryPlanOrChildrenIndependently: true,
     internalQueryMaxScansToExplode: 200,
     internalQueryMaxBlockingSortMemoryUsageBytes: 100 * 1024 * 1024,
@@ -70,6 +67,9 @@ const expectedParamDefaults = {
     internalQueryCollectOptimizerMetrics: false,
     internalQueryDisablePlanCache: false,
     internalQueryFindCommandBatchSize: 101,
+    internalQuerySlotBasedExecutionHashAggIncreasedSpilling: "inDebug",
+    internalQueryUnifiedWriteExecutor: false,
+    internalOrStageMaxMemoryBytes: 100 * 1024 * 1024,
 };
 
 function assertDefaultParameterValues() {
@@ -77,8 +77,7 @@ function assertDefaultParameterValues() {
     // 'getParameter' is same as the expected value.
     for (let paramName in expectedParamDefaults) {
         const expectedParamValue = expectedParamDefaults[paramName];
-        const getParamRes =
-            assert.commandWorked(testDB.adminCommand({getParameter: 1, [paramName]: 1}));
+        const getParamRes = assert.commandWorked(testDB.adminCommand({getParameter: 1, [paramName]: 1}));
         assert.eq(getParamRes[paramName], expectedParamValue);
     }
 }
@@ -86,37 +85,29 @@ function assertDefaultParameterValues() {
 function assertSetParameterSucceeds(paramName, value) {
     assert.commandWorked(testDB.adminCommand({setParameter: 1, [paramName]: value}));
     // Verify that the set parameter actually worked by doing a get and verifying the value.
-    const getParamRes =
-        assert.commandWorked(testDB.adminCommand({getParameter: 1, [paramName]: 1}));
+    const getParamRes = assert.commandWorked(testDB.adminCommand({getParameter: 1, [paramName]: 1}));
     assert.eq(getParamRes[paramName], value);
 }
 
 function assertSetParameterFails(paramName, value) {
-    assert.commandFailedWithCode(testDB.adminCommand({setParameter: 1, [paramName]: value}),
-                                 ErrorCodes.BadValue);
+    assert.commandFailedWithCode(testDB.adminCommand({setParameter: 1, [paramName]: value}), ErrorCodes.BadValue);
 }
 
-const getParamRes =
-    assert.commandWorked(testDB.adminCommand({getParameter: 1, internalPipelineLengthLimit: 1}));
+const getParamRes = assert.commandWorked(testDB.adminCommand({getParameter: 1, internalPipelineLengthLimit: 1}));
 assert.eq(getParamRes["internalPipelineLengthLimit"], getExpectedPipelineLimit(testDB));
 
 // Verify that the default values are set as expected when the server starts up.
 assertDefaultParameterValues();
 
-for (let paramName of ["internalQueryPlanEvaluationWorks", "internalQueryPlanEvaluationWorksSbe"]) {
-    assertSetParameterSucceeds(paramName, 11);
-    assertSetParameterFails(paramName, 0);
-    assertSetParameterFails(paramName, -1);
-}
+assertSetParameterSucceeds("internalQueryPlanEvaluationWorks", 11);
+assertSetParameterFails("internalQueryPlanEvaluationWorks", 0);
+assertSetParameterFails("internalQueryPlanEvaluationWorks", -1);
 
-for (let paramName of ["internalQueryPlanEvaluationCollFraction",
-                       "internalQueryPlanEvaluationCollFractionSbe"]) {
-    assertSetParameterSucceeds(paramName, 0.0);
-    assertSetParameterSucceeds(paramName, 0.444);
-    assertSetParameterSucceeds(paramName, 1.0);
-    assertSetParameterFails(paramName, -0.1);
-    assertSetParameterFails(paramName, 1.0001);
-}
+assertSetParameterSucceeds("internalQueryPlanEvaluationCollFraction", 0.0);
+assertSetParameterSucceeds("internalQueryPlanEvaluationCollFraction", 0.444);
+assertSetParameterSucceeds("internalQueryPlanEvaluationCollFraction", 1.0);
+assertSetParameterFails("internalQueryPlanEvaluationCollFraction", -0.1);
+assertSetParameterFails("internalQueryPlanEvaluationCollFraction", 1.0001);
 
 assertSetParameterSucceeds("internalQueryPlanEvaluationMaxResults", 11);
 assertSetParameterSucceeds("internalQueryPlanEvaluationMaxResults", 0);
@@ -228,8 +219,7 @@ const bsonUserSizeLimit = assert.commandWorked(testDB.hello()).maxBsonObjectSize
 const bsonObjMaxInternalSize = bsonUserSizeLimit + 16 * 1024;
 
 assertSetParameterFails("internalLookupStageIntermediateDocumentMaxSizeBytes", 1);
-assertSetParameterSucceeds("internalLookupStageIntermediateDocumentMaxSizeBytes",
-                           bsonObjMaxInternalSize);
+assertSetParameterSucceeds("internalLookupStageIntermediateDocumentMaxSizeBytes", bsonObjMaxInternalSize);
 
 assertSetParameterSucceeds("internalInsertMaxBatchSize", 11);
 assertSetParameterFails("internalInsertMaxBatchSize", 0);
@@ -292,11 +282,9 @@ assertSetParameterSucceeds("internalQueryMaxSpoolDiskUsageBytes", 1);
 assertSetParameterFails("internalQueryMaxSpoolDiskUsageBytes", 0);
 
 assertSetParameterSucceeds("internalQueryDocumentSourceWriterBatchExtraReservedBytes", 10);
-assertSetParameterSucceeds("internalQueryDocumentSourceWriterBatchExtraReservedBytes",
-                           4 * 1024 * 1024);
+assertSetParameterSucceeds("internalQueryDocumentSourceWriterBatchExtraReservedBytes", 4 * 1024 * 1024);
 assertSetParameterFails("internalQueryDocumentSourceWriterBatchExtraReservedBytes", -1);
-assertSetParameterFails("internalQueryDocumentSourceWriterBatchExtraReservedBytes",
-                        9 * 1024 * 1024);
+assertSetParameterFails("internalQueryDocumentSourceWriterBatchExtraReservedBytes", 9 * 1024 * 1024);
 
 assertSetParameterSucceeds("internalQuerySlotBasedExecutionDisableTimeSeriesPushdown", true);
 assertSetParameterSucceeds("internalQuerySlotBasedExecutionDisableTimeSeriesPushdown", false);
@@ -310,5 +298,21 @@ assertSetParameterSucceeds("internalQueryDisablePlanCache", false);
 assertSetParameterSucceeds("internalQueryFindCommandBatchSize", 30);
 assertSetParameterFails("internalQueryFindCommandBatchSize", 0);
 assertSetParameterFails("internalQueryFindCommandBatchSize", -1);
+
+assertSetParameterSucceeds("internalTextOrStageMaxMemoryBytes", 100 * 1024 * 1024);
+assertSetParameterFails("internalTextOrStageMaxMemoryBytes", 0);
+assertSetParameterFails("internalTextOrStageMaxMemoryBytes", -1);
+
+assertSetParameterSucceeds("internalQuerySlotBasedExecutionHashAggIncreasedSpilling", "never");
+assertSetParameterSucceeds("internalQuerySlotBasedExecutionHashAggIncreasedSpilling", "always");
+assertSetParameterSucceeds("internalQuerySlotBasedExecutionHashAggIncreasedSpilling", "inDebug");
+assertSetParameterFails("internalQuerySlotBasedExecutionHashAggIncreasedSpilling", "random");
+
+assertSetParameterSucceeds("internalQueryUnifiedWriteExecutor", true);
+assertSetParameterSucceeds("internalQueryUnifiedWriteExecutor", false);
+
+assertSetParameterSucceeds("internalOrStageMaxMemoryBytes", 11);
+assertSetParameterFails("internalOrStageMaxMemoryBytes", 0);
+assertSetParameterFails("internalOrStageMaxMemoryBytes", -1);
 
 MongoRunner.stopMongod(conn);

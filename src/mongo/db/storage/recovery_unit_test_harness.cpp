@@ -29,25 +29,24 @@
 
 #include "mongo/db/storage/recovery_unit_test_harness.h"
 
-#include <cstring>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstring>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -85,11 +84,11 @@ class TestChange final : public RecoveryUnit::Change {
 public:
     TestChange(int* count) : _count(count) {}
 
-    void commit(OperationContext* opCtx, boost::optional<Timestamp>) override {
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) noexcept override {
         *_count = *_count + 1;
     }
 
-    void rollback(OperationContext* opCtx) override {
+    void rollback(OperationContext* opCtx) noexcept override {
         *_count = *_count - 1;
     }
 
@@ -97,43 +96,29 @@ private:
     int* _count;
 };
 
-class ThrowsOnCommitTestChange final : public RecoveryUnit::Change {
-public:
-    void commit(OperationContext* opCtx, boost::optional<Timestamp>) override {
-        uasserted(ErrorCodes::OperationFailed, "commit handler threw exception");
-    }
-
-    void rollback(OperationContext* opCtx) override {}
-};
-
-class ThrowsOnRollbackTestChange final : public RecoveryUnit::Change {
-public:
-    void commit(OperationContext* opCtx, boost::optional<Timestamp>) override {}
-
-    void rollback(OperationContext* opCtx) override {
-        uasserted(ErrorCodes::OperationFailed, "rollback handler threw exception");
-    }
-};
-
 TEST_F(RecoveryUnitTestHarness, CommitUnitOfWork) {
     const auto rs = harnessHelper->createRecordStore(opCtx.get(), "table1");
     ru->beginUnitOfWork(opCtx->readOnly());
-    StatusWith<RecordId> s = rs->insertRecord(opCtx.get(), "data", 4, Timestamp());
+    StatusWith<RecordId> s = rs->insertRecord(
+        opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()), "data", 4, Timestamp());
     ASSERT_TRUE(s.isOK());
     ASSERT_EQUALS(1, rs->numRecords());
     ru->commitUnitOfWork();
     RecordData rd;
-    ASSERT_TRUE(rs->findRecord(opCtx.get(), s.getValue(), &rd));
+    ASSERT_TRUE(rs->findRecord(
+        opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()), s.getValue(), &rd));
 }
 
 TEST_F(RecoveryUnitTestHarness, AbortUnitOfWork) {
     const auto rs = harnessHelper->createRecordStore(opCtx.get(), "table1");
     ru->beginUnitOfWork(opCtx->readOnly());
-    StatusWith<RecordId> s = rs->insertRecord(opCtx.get(), "data", 4, Timestamp());
+    StatusWith<RecordId> s = rs->insertRecord(
+        opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()), "data", 4, Timestamp());
     ASSERT_TRUE(s.isOK());
     ASSERT_EQUALS(1, rs->numRecords());
     ru->abortUnitOfWork();
-    ASSERT_FALSE(rs->findRecord(opCtx.get(), s.getValue(), nullptr));
+    ASSERT_FALSE(rs->findRecord(
+        opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()), s.getValue(), nullptr));
 }
 
 TEST_F(RecoveryUnitTestHarness, CommitAndRollbackChanges) {
@@ -157,7 +142,8 @@ TEST_F(RecoveryUnitTestHarness, CheckIsActiveWithCommit) {
     const auto rs = harnessHelper->createRecordStore(opCtx.get(), "table1");
     ru->beginUnitOfWork(opCtx->readOnly());
     ASSERT_TRUE(ru->isActive());
-    StatusWith<RecordId> s = rs->insertRecord(opCtx.get(), "data", 4, Timestamp());
+    StatusWith<RecordId> s = rs->insertRecord(
+        opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()), "data", 4, Timestamp());
     ru->commitUnitOfWork();
     ASSERT_FALSE(ru->isActive());
 }
@@ -166,7 +152,8 @@ TEST_F(RecoveryUnitTestHarness, CheckIsActiveWithAbort) {
     const auto rs = harnessHelper->createRecordStore(opCtx.get(), "table1");
     ru->beginUnitOfWork(opCtx->readOnly());
     ASSERT_TRUE(ru->isActive());
-    StatusWith<RecordId> s = rs->insertRecord(opCtx.get(), "data", 4, Timestamp());
+    StatusWith<RecordId> s = rs->insertRecord(
+        opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()), "data", 4, Timestamp());
     ru->abortUnitOfWork();
     ASSERT_FALSE(ru->isActive());
 }
@@ -211,8 +198,10 @@ TEST_F(RecoveryUnitTestHarness, AbandonSnapshotCommitMode) {
 
     const auto rs = harnessHelper->createRecordStore(opCtx.get(), "table1");
     ru->beginUnitOfWork(opCtx->readOnly());
-    StatusWith<RecordId> rid1 = rs->insertRecord(opCtx.get(), "ABC", 3, Timestamp());
-    StatusWith<RecordId> rid2 = rs->insertRecord(opCtx.get(), "123", 3, Timestamp());
+    StatusWith<RecordId> rid1 = rs->insertRecord(
+        opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()), "ABC", 3, Timestamp());
+    StatusWith<RecordId> rid2 = rs->insertRecord(
+        opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()), "123", 3, Timestamp());
     ASSERT_TRUE(rid1.isOK());
     ASSERT_TRUE(rid2.isOK());
     ASSERT_EQUALS(2, rs->numRecords());
@@ -222,7 +211,7 @@ TEST_F(RecoveryUnitTestHarness, AbandonSnapshotCommitMode) {
 
     // Now create a cursor. We will check that the cursor is still positioned after a call to
     // abandonSnapshot().
-    auto cursor = rs->getCursor(opCtx.get());
+    auto cursor = rs->getCursor(opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()));
 
     auto record = cursor->next();
     ASSERT(record);
@@ -300,71 +289,6 @@ DEATH_TEST_F(RecoveryUnitTestHarness, PrepareMustBeInUnitOfWork, "invariant") {
 DEATH_TEST_F(RecoveryUnitTestHarness, AbandonSnapshotMustBeOutOfUnitOfWork, "invariant") {
     ru->beginUnitOfWork(opCtx->readOnly());
     ru->abandonSnapshot();
-}
-
-
-DEATH_TEST_REGEX_F(RecoveryUnitTestHarness,
-                   LogCommitHandlerTypeWithTimestampBeforeTerminatingOnException,
-                   "\"F\".*\"STORAGE\".*8861100.*Custom commit "
-                   "failed.*commitTimestamp.*123.*456.*changeName.*ThrowsOnCommitTestChange") {
-    ru->beginUnitOfWork(opCtx->readOnly());
-    ASSERT_OK(ru->setTimestamp(Timestamp(123, 456)));
-    ru->registerChange(std::make_unique<ThrowsOnCommitTestChange>());
-    ru->commitUnitOfWork();
-}
-
-DEATH_TEST_REGEX_F(RecoveryUnitTestHarness,
-                   LogCommitHandlerTypeBeforeTerminatingOnException,
-                   "\"F\".*\"STORAGE\".*8861100.*Custom commit "
-                   "failed.*commitTimestamp.*null.*changeName.*ThrowsOnCommitTestChange") {
-    ru->beginUnitOfWork(opCtx->readOnly());
-    ru->registerChange(std::make_unique<ThrowsOnCommitTestChange>());
-    ru->commitUnitOfWork();
-}
-
-DEATH_TEST_REGEX_F(RecoveryUnitTestHarness,
-                   LogCommitHandlerTypeBeforeTerminatingOnExceptionCatalogVisibility,
-                   "\"F\".*\"STORAGE\".*8861101.*Custom commit "
-                   "failed.*commitTimestamp.*null.*changeName.*ThrowsOnCommitTestChange") {
-    ru->beginUnitOfWork(opCtx->readOnly());
-    ru->registerChangeForCatalogVisibility(std::make_unique<ThrowsOnCommitTestChange>());
-    ru->commitUnitOfWork();
-}
-
-DEATH_TEST_REGEX_F(RecoveryUnitTestHarness,
-                   LogCommitHandlerTypeBeforeTerminatingOnExceptionTwoPhaseDrop,
-                   "\"F\".*\"STORAGE\".*8861102.*Custom commit "
-                   "failed.*commitTimestamp.*null.*changeName.*ThrowsOnCommitTestChange") {
-    ru->beginUnitOfWork(opCtx->readOnly());
-    ru->registerChangeForTwoPhaseDrop(std::make_unique<ThrowsOnCommitTestChange>());
-    ru->commitUnitOfWork();
-}
-
-DEATH_TEST_REGEX_F(RecoveryUnitTestHarness,
-                   LogRollbackHandlerTypeBeforeTerminatingOnException,
-                   "\"F\".*\"STORAGE\".*9010900.*Custom rollback "
-                   "failed.*changeName.*ThrowsOnRollbackTestChange") {
-    ru->beginUnitOfWork(opCtx->readOnly());
-    ru->registerChange(std::make_unique<ThrowsOnRollbackTestChange>());
-    ru->abortUnitOfWork();
-}
-
-DEATH_TEST_REGEX_F(RecoveryUnitTestHarness,
-                   LogRollbackHandlerTypeBeforeTerminatingOnExceptionCatalogVisibility,
-                   "\"F\".*\"STORAGE\".*9010901.*Custom rollback "
-                   "failed.*changeName.*ThrowsOnRollbackTestChange") {
-    ru->beginUnitOfWork(opCtx->readOnly());
-    ru->registerChangeForCatalogVisibility(std::make_unique<ThrowsOnRollbackTestChange>());
-    ru->abortUnitOfWork();
-}
-
-DEATH_TEST_REGEX_F(RecoveryUnitTestHarness,
-                   LogRollbackHandlerTypeBeforeTerminatingOnExceptionTwoPhaseDrop,
-                   "\"F\".*\"STORAGE\".*9010902.*Custom rollback "
-                   "failed.*changeName.*ThrowsOnRollbackTestChange") {
-    ru->beginUnitOfWork(opCtx->readOnly());
-    ru->registerChangeForTwoPhaseDrop(std::make_unique<ThrowsOnRollbackTestChange>());
-    ru->abortUnitOfWork();
 }
 
 }  // namespace

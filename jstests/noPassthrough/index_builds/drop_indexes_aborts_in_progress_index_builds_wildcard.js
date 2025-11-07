@@ -6,7 +6,7 @@
  * In this file, we test calling "dropIndexes" with the "*" wildcard which will abort all
  * in-progress index builds and remove ready indexes.
  */
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const mongodOptions = {};
 const conn = MongoRunner.runMongod(mongodOptions);
@@ -30,22 +30,24 @@ assert.commandWorked(testDB.getCollection(collName).createIndex({a: 1}));
 
 IndexBuildTest.pauseIndexBuilds(testDB.getMongo());
 
-const awaitFirstIndexBuild = IndexBuildTest.startIndexBuild(
-    testDB.getMongo(), coll.getFullName(), {a: 1, b: 1}, {}, [ErrorCodes.IndexBuildAborted]);
+const awaitFirstIndexBuild = IndexBuildTest.startIndexBuild(testDB.getMongo(), coll.getFullName(), {a: 1, b: 1}, {}, [
+    ErrorCodes.IndexBuildAborted,
+]);
 IndexBuildTest.waitForIndexBuildToScanCollection(testDB, collName, "a_1_b_1");
 
-const awaitSecondIndexBuild = IndexBuildTest.startIndexBuild(
-    testDB.getMongo(), coll.getFullName(), {b: 1}, {}, [ErrorCodes.IndexBuildAborted]);
+const awaitSecondIndexBuild = IndexBuildTest.startIndexBuild(testDB.getMongo(), coll.getFullName(), {b: 1}, {}, [
+    ErrorCodes.IndexBuildAborted,
+]);
 IndexBuildTest.waitForIndexBuildToScanCollection(testDB, collName, "b_1");
 
 jsTest.log("Aborting all index builders and ready indexes with '*' wildcard");
 assert.commandWorked(testDB.runCommand({dropIndexes: collName, index: "*"}));
-checkLog.containsJson(testDB.getMongo(), 23879);  // "About to abort all index builders"
+checkLog.containsJson(testDB.getMongo(), 23879); // "About to abort all index builders"
 
 IndexBuildTest.resumeIndexBuilds(testDB.getMongo());
 awaitFirstIndexBuild();
 awaitSecondIndexBuild();
 
-assert.eq(1, testDB.getCollection(collName).getIndexes().length);  // _id index
+assert.eq(1, testDB.getCollection(collName).getIndexes().length); // _id index
 
 MongoRunner.stopMongod(conn);

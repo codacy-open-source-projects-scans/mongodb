@@ -27,15 +27,6 @@
  *    it in the license file.
  */
 
-#include <list>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -45,22 +36,30 @@
 #include "mongo/client/connection_string.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/client/index_spec.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/index_catalog.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/query_settings/query_settings_manager.h"
+#include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <list>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 
 namespace mongo {
 namespace ClientTests {
@@ -73,7 +72,9 @@ public:
         DBDirectClient db(&opCtx);
 
         db.dropDatabase(DatabaseName::createDatabaseName_forTest(boost::none, "test"));
-        query_settings::QuerySettingsManager::create(opCtx.getServiceContext(), {}, {});
+
+        // Initialize the query settings.
+        query_settings::QuerySettingsService::initializeForTest(opCtx.getServiceContext());
     }
 
     virtual ~Base() {
@@ -141,11 +142,11 @@ public:
         db.insert(nss(), BSON("x" << 1 << "y" << 2));
         db.insert(nss(), BSON("x" << 2 << "y" << 2));
 
-        ASSERT(ctx.getCollection());
+        ASSERT(ctx.getCollection().exists());
         // Helper to refetch the IndexCatalog from the catalog in order to see any changes made to
         // it after a Collection write inside 'createIndex'.
         auto indexCatalog = [&ctx]() -> const IndexCatalog* {
-            return ctx.getCollection()->getIndexCatalog();
+            return ctx.getCollection().getCollectionPtr()->getIndexCatalog();
         };
 
         const bool includeBuildUUIDs = false;
@@ -201,10 +202,7 @@ public:
             NamespaceString::createNamespaceString_forTest("unittests.clienttests.create");
         db.createCollection(nss);
         BSONObj info;
-        ASSERT(db.runCommand(nss.dbName(),
-                             BSON("collstats"
-                                  << "clienttests.create"),
-                             info));
+        ASSERT(db.runCommand(nss.dbName(), BSON("collstats" << "clienttests.create"), info));
     }
 };
 

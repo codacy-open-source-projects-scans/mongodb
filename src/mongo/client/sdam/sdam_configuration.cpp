@@ -26,17 +26,17 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#include "sdam_configuration.h"
+#include "mongo/client/sdam/sdam_configuration.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/util/assert_util.h"
 
 #include <algorithm>
 #include <iterator>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/util/assert_util.h"
 
 namespace mongo::sdam {
 SdamConfiguration::SdamConfiguration(boost::optional<std::vector<HostAndPort>> seedList,

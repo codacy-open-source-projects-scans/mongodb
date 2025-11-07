@@ -28,14 +28,7 @@
  */
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <mutex>
-#include <stdexcept>
-#include <utility>
-#include <vector>
-
+#include "mongo/logv2/log.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
@@ -43,11 +36,147 @@
 #include "mongo/util/functional.h"
 #include "mongo/util/str.h"
 
+#include <memory>
+#include <stdexcept>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kProcessHealth
 namespace mongo {
 namespace process_health {
 
-// Note: this class provides no internal synchronization. If used in a multithreaded context callers
-// must provide their own concurrency control.
+/**
+ * Overview
+ * --------
+ * `StateMachine<InputMessage, State>` implements a state machine, where states are a subset of
+ * `State` values, and transitions between states are driven by the receipt of
+ * `boost::optional<InputMessage>` values.
+ *
+ * Associated with each state is a message handler. When the state machine `accept`s a message,
+ * the message handler of the current state is invoked. The message handler returns a
+ * `boost::optional<State>` indicating to which state, if any, the machine will transition as a
+ * result of accepting the message. If the message handler returns `boost::none`, then the state
+ * machine remains in the same state.
+ *
+ * The set of legal state transitions (e.g. "`A` can transition into `A` and `C` only) is
+ * configured by the
+ * `void StateMachine::validTransitions(const TransitionsContainer& transitions)` member
+ * function.
+ *
+ * When the state machine undergoes a state transition on account of an accepted message,
+ * optionally registered state transition callbacks are invoked. Associated with each state is a
+ * set of callbacks invoked when the state machine transitions out of that state, and another
+ * set of callbacks invoked when the state machine transitions into that state. Note that a
+ * state can transition into itself if its message handler returns the current state, and this
+ * is distinct from returning `boost::none`, which indicates that the state machine remain in
+ * the same state but invoke no state transition callbacks.
+ *
+ * For example, in the diagram below, the state machine is in state `C`. When
+ * `State StateMachine::accept(const OptionalMessageType&)` is invoked, the message handler
+ * registered with state `C` will be invoked.
+ *
+ * - If the handler returns `boost::none`, then the state machine remains in state `C` and no
+ *   transition callbacks are invoked.
+ * - If the handler returns `C`, then the state machine transitions from state `C` into state
+ *   `C` (itself). If any exit callbacks were registered with state `C`, then they are invoked.
+ *   Then, if any enter callbacks were registered with state `C`, they are invoked.
+ * - If instead the handler returns `B`, then the state machine transitions from state `C` into
+ *   state `B`. `C`'s exit callbacks are invoked, if any, and then `B`'s enter callbacks are
+ *   invoked, if any.
+ * - If instead the handler returns `A`, etc.
+ * - If instead the handler returns any other value, then the state machine has encountered an
+ *   illegal state transition. Illegal state transitions will trigger a failure within a test
+ *   suite, but have no effect outside of testing.
+ *
+ * Whichever state the state machine ends up in, the message handler registered with that state
+ * will be invoked the next time `accept` is invoked on the state machine.
+ *
+ * A state machine is constructed with an initial state. If any enter callbacks are associated
+ * with that state, then they will be invoked as soon as the state machine is `start`ed (see the
+ * arrow entering `D` from above in the diagram).
+ *
+ *                                   │
+ *                                   │ onEnter(D)
+ *                                   ▼
+ * ┌─────────────┐  onExit(D)      ┌─────────────────┐
+ * │      B      │  onEnter(B)     │        D        │
+ * │             │ ◀────────────── │ (initial state) │
+ * └─────────────┘                 └─────────────────┘
+ *   ▲                               │
+ *   │ onExit(C)                     │ onExit(D)
+ *   │ onEnter(B)                    │ onEnter(C)
+ *   │                               ▼
+ *   │                             ┌────────────────────────────────┐   onExit(C)
+ *   │                             │                                │   onEnter(C)
+ *   │                             │               C                │ ─────────────┐
+ *   │                             │        (current state)         │              │
+ *   └──────────────────────────── │                                │ ◀────────────┘
+ *                                 └────────────────────────────────┘
+ *                                   │                  ▲
+ *                                   │ onExit(C)        │ onExit(A)
+ *                                   │ onEnter(A)       │ onEnter(C)
+ *                                   ▼                  │
+ *                    onExit(A)    ┌─────────────────┐  │
+ *                    onEnter(A)   │                 │  │
+ *                  ┌───────────── │        A        │  │
+ *                  │              │                 │  │
+ *                  └────────────▶ │                 │ ─┘
+ *                                 └─────────────────┘
+ *
+ * When registering a state's message handler, the state may be marked "transient." A transient
+ * state's message handler is invoked when the state machine transitions into the state, in
+ * addition to when a message is `accept`ed while in the state.
+ *
+ * For example, in the diagram above, if `A` were marked transient, then after a message
+ * accepted in state `C` causes a transition into state `A`, `A`'s message handler would be
+ * invoked with the same message. `A`'s message handler will be invoked recursively until either
+ * `A`'s message handler's return value indicates a different state, or is `boost::none`. The
+ * idea is to transition out of the transient state, hence the name.
+ *
+ * By default, states are not marked "transient."
+ *
+ * Intended Usage
+ * --------------
+ * `StateMachine` has a two stage lifecycle: "before `start`" and "after `start`." Intended
+ * usage is the following:
+ *
+ * - Construct a `StateMachine<InputMessage, State>`, specifying its initial `State`.
+ * - Configure the legal state transitions by calling `validTransitions` with a table of
+ *   adjacency lists.
+ * - Configure state message handlers and enter/exit callbacks by calling `registerHandler`
+ *   for each state. Use the following "fluent" syntax:
+ *   ```
+ *   stateMachine.registerHandler(State::A, onMessageInStateA)
+ *       ->enter(onEnterStateACallback1)
+ *       ->enter(onEnterStateACallback2)
+ *       // ...
+ *       ->exit(onExitStateACallback1)
+ *       // ...
+ *       ->exit(onExitStateACallbackN);
+ *   ```
+ * - Call `void StateMachine::start()`. This will transition the state machine into its initial
+ *   state. It might invoke enter callbacks, but will not invoke any message handlers or exit
+ *   callbacks.
+ *   Now that the state machine is started, `registerHandler` and `validTransitions` cannot be
+ *   called again.
+ * - The following two operations can be called arbitrarily many times in any order.
+ * - Call `State StateMachine::accept(const OptionalMessageType&)`. It returns the resulting
+ *   `State`.
+ * - Query the current state by calling `State StateMachine::state() const`.
+ * - ...
+ * - Destroy the `StateMachine`.
+ *
+ * Concurrency
+ * -----------
+ * `StateMachine` owns a `stdx::recursive_mutex` that it holds a lock on throughout
+ * `accept(...)` and `state()`. This has implications for multi-threaded use of `StateMachine`.
+ * See the comment above the definition of `accept(...)`.
+ *
+ */
+
 template <class InputMessage, typename State>
 class StateMachine {
 public:
@@ -68,7 +197,8 @@ public:
     StateMachine(const StateMachineType&) = delete;
     StateMachineType& operator=(const StateMachineType&) = delete;
 
-    StateMachine(State initialState) : _started(false), _initial(initialState), _current(nullptr){};
+    StateMachine(State initialState)
+        : _started(false), _initial(initialState), _current(nullptr) {};
 
     StateMachine(StateMachineType&& sm) {
         *this = std::move(sm);
@@ -116,16 +246,22 @@ public:
 
     // Define a valid transition.
     // Must be called prior to starting the state machine.
-    void validTransition(State from, State to) noexcept {
-        stdx::lock_guard<stdx::recursive_mutex> lk(_mutex);
-        tassertNotStarted();
-        auto& context = _states[from];
-        context.validTransitions.insert(to);
+    void validTransition(State from, State to) {
+        try {
+            stdx::lock_guard<stdx::recursive_mutex> lk(_mutex);
+            tassertNotStarted();
+            auto& context = _states[from];
+            context.validTransitions.insert(to);
+        } catch (const std::exception& e) {
+            LOGV2_FATAL(9894900,
+                        "Terminating process on invalid state transition",
+                        "except"_attr = e.what());
+        }
     }
 
     // Define valid transitions.
     // Must be called prior to starting the state machine.
-    void validTransitions(const TransitionsContainer& transitions) noexcept {
+    void validTransitions(const TransitionsContainer& transitions) {
         for (const auto& [from, toStates] : transitions) {
             for (auto to : toStates) {
                 validTransition(from, to);
@@ -182,7 +318,7 @@ public:
         // Accepts input message m when state machine is in state _state. Optionally, the
         // state machine transitions to the state specified in the return value. Entry and exit
         // hooks will not fire if this method returns boost::none.
-        virtual boost::optional<State> accept(const OptionalMessageType& message) noexcept = 0;
+        virtual boost::optional<State> accept(const OptionalMessageType& message) = 0;
 
         // The state this handler is defined for
         State state() const {
@@ -194,9 +330,15 @@ public:
             return this;
         }
 
-        void fireEnter(State previous, const OptionalMessageType& m) noexcept {
+        void fireEnter(State previous, const OptionalMessageType& m) {
             for (auto& cb : _onEnter)
-                cb(previous, _state, m);
+                try {
+                    cb(previous, _state, m);
+                } catch (const std::exception& e) {
+                    LOGV2_FATAL(9894901,
+                                "Process health transition handler threw during execution",
+                                "except"_attr = e.what());
+                }
         }
 
         StateEventRegistryPtr exit(StateCallback&& cb) override {
@@ -204,7 +346,7 @@ public:
             return this;
         }
 
-        void fireExit(State newState, const OptionalMessageType& message) noexcept {
+        void fireExit(State newState, const OptionalMessageType& message) {
             for (auto& cb : _onExit)
                 cb(_state, newState, message);
         }
@@ -228,7 +370,7 @@ public:
             : StateHandler(state), _messageHandler(std::move(m)) {}
         ~LambdaStateHandler() override {}
 
-        boost::optional<State> accept(const OptionalMessageType& m) noexcept override {
+        boost::optional<State> accept(const OptionalMessageType& m) override {
             return _messageHandler(m);
         }
 
@@ -329,3 +471,5 @@ protected:
 };
 }  // namespace process_health
 }  // namespace mongo
+
+#undef MONGO_LOGV2_DEFAULT_COMPONENT

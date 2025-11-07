@@ -29,24 +29,24 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/s/migration_destination_manager.h"
 #include "mongo/db/s/resharding/resharding_recipient_service.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk_manager.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/s/resharding/common_types_gen.h"
-#include "mongo/s/sharding_index_catalog_cache.h"
 #include "mongo/util/functional.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -80,8 +80,16 @@ public:
         OperationContext* opCtx,
         const NamespaceString& nss,
         const UUID& uuid,
-        Timestamp afterClusterTime,
+        boost::optional<Timestamp> afterClusterTime,
         StringData reason) = 0;
+
+    virtual MigrationDestinationManager::CollectionOptionsAndUUID getCollectionOptions(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        const UUID& uuid,
+        boost::optional<Timestamp> afterClusterTime,
+        StringData reason,
+        const ShardId& fromShardId) = 0;
 
     virtual MigrationDestinationManager::IndexesAndIdIndex getCollectionIndexes(
         OperationContext* opCtx,
@@ -91,13 +99,11 @@ public:
         StringData reason,
         bool expandSimpleCollation = true) = 0;
 
-    virtual boost::optional<ShardingIndexesCatalogCache> getCollectionIndexInfoWithRefresh(
-        OperationContext* opCtx, const NamespaceString& nss) = 0;
-
-    virtual void withShardVersionRetry(OperationContext* opCtx,
-                                       const NamespaceString& nss,
-                                       StringData reason,
-                                       unique_function<void()> callback) = 0;
+    virtual void route(OperationContext* opCtx,
+                       const NamespaceString& nss,
+                       StringData reason,
+                       unique_function<void(OperationContext* opCtx,
+                                            const CollectionRoutingInfo& cri)> callback) = 0;
 
     virtual void updateCoordinatorDocument(OperationContext* opCtx,
                                            const BSONObj& query,
@@ -105,6 +111,11 @@ public:
 
     virtual void clearFilteringMetadataOnTempReshardingCollection(
         OperationContext* opCtx, const NamespaceString& tempReshardingNss) = 0;
+
+    virtual void ensureReshardingStashCollectionsEmpty(
+        OperationContext* opCtx,
+        const UUID& sourceUUID,
+        const std::vector<DonorShardFetchTimestamp>& donorShards) = 0;
 
     /**
      * Creates the temporary resharding collection locally.
@@ -117,6 +128,18 @@ public:
     void ensureTempReshardingCollectionExistsWithIndexes(OperationContext* opCtx,
                                                          const CommonReshardingMetadata& metadata,
                                                          Timestamp cloneTimestamp);
+
+    virtual std::unique_ptr<ReshardingDataReplicationInterface> makeDataReplication(
+        OperationContext* opCtx,
+        ReshardingMetrics* metrics,
+        ReshardingApplierMetricsMap* applierMetrics,
+        const CommonReshardingMetadata& metadata,
+        const std::vector<DonorShardFetchTimestamp>& donorShards,
+        std::size_t oplogBatchTaskCount,
+        Timestamp cloneTimestamp,
+        bool cloningDone,
+        bool storeOplogFetcherProgress,
+        bool relaxed) = 0;
 };
 
 class RecipientStateMachineExternalStateImpl
@@ -133,8 +156,16 @@ public:
         OperationContext* opCtx,
         const NamespaceString& nss,
         const UUID& uuid,
-        Timestamp afterClusterTime,
+        boost::optional<Timestamp> afterClusterTime,
         StringData reason) override;
+
+    MigrationDestinationManager::CollectionOptionsAndUUID getCollectionOptions(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        const UUID& uuid,
+        boost::optional<Timestamp> afterClusterTime,
+        StringData reason,
+        const ShardId& fromShardId) override;
 
     MigrationDestinationManager::IndexesAndIdIndex getCollectionIndexes(
         OperationContext* opCtx,
@@ -145,13 +176,11 @@ public:
         bool expandSimpleCollation = true) override;
 
 
-    boost::optional<ShardingIndexesCatalogCache> getCollectionIndexInfoWithRefresh(
-        OperationContext* opCtx, const NamespaceString& nss) override;
-
-    void withShardVersionRetry(OperationContext* opCtx,
-                               const NamespaceString& nss,
-                               StringData reason,
-                               unique_function<void()> callback) override;
+    void route(OperationContext* opCtx,
+               const NamespaceString& nss,
+               StringData reason,
+               unique_function<void(OperationContext* opCtx, const CollectionRoutingInfo& cri)>
+                   callback) override;
 
     void updateCoordinatorDocument(OperationContext* opCtx,
                                    const BSONObj& query,
@@ -160,12 +189,22 @@ public:
     void clearFilteringMetadataOnTempReshardingCollection(
         OperationContext* opCtx, const NamespaceString& tempReshardingNss) override;
 
-private:
-    template <typename Callable>
-    auto _withShardVersionRetry(OperationContext* opCtx,
-                                const NamespaceString& nss,
-                                StringData reason,
-                                Callable&& callable);
+    std::unique_ptr<ReshardingDataReplicationInterface> makeDataReplication(
+        OperationContext* opCtx,
+        ReshardingMetrics* metrics,
+        ReshardingApplierMetricsMap* applierMetrics,
+        const CommonReshardingMetadata& metadata,
+        const std::vector<DonorShardFetchTimestamp>& donorShards,
+        std::size_t oplogBatchTaskCount,
+        Timestamp cloneTimestamp,
+        bool cloningDone,
+        bool storeOplogFetcherProgress,
+        bool relaxed) override;
+
+    void ensureReshardingStashCollectionsEmpty(
+        OperationContext* opCtx,
+        const UUID& sourceUUID,
+        const std::vector<DonorShardFetchTimestamp>& donorShards) override;
 };
 
 }  // namespace mongo

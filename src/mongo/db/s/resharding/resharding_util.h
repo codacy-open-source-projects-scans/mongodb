@@ -29,18 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstdint>
-#include <iterator>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -50,7 +38,11 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/bson/unordered_fields_bsonobj_comparator.h"
-#include "mongo/db/catalog_raii.h"
+#include "mongo/db/cancelable_operation_context.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/ddl/shard_key_util.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/global_catalog/type_tags.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -60,22 +52,45 @@
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/s/resharding/coordinator_document_gen.h"
 #include "mongo/db/s/resharding/donor_oplog_id_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/s/catalog/type_tags.h"
-#include "mongo/s/chunk_manager.h"
+#include "mongo/s/request_types/reshard_collection_gen.h"
 #include "mongo/s/resharding/common_types_gen.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/s/resharding/resharding_feature_flag_gen.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/uuid.h"
+
+#include <cstdint>
+#include <iterator>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
 
 namespace mongo {
 namespace resharding {
 
 constexpr auto kReshardFinalOpLogType = "reshardFinalOp"_sd;
-constexpr auto kReshardProgressMark = "reshardProgressMark"_sd;
+constexpr auto kReshardProgressMarkOpLogType = "reshardProgressMark"_sd;
 static const auto kReshardErrorMaxBytes = 2000;
+
+const WriteConcernOptions kMajorityWriteConcern{
+    WriteConcernOptions::kMajority, WriteConcernOptions::SyncMode::UNSET, Seconds(0)};
+
+struct ParticipantShardsAndChunks {
+    std::vector<DonorShardEntry> donorShards;
+    std::vector<RecipientShardEntry> recipientShards;
+    std::vector<ChunkType> initialChunks;
+};
 
 /**
  * Emplaces the 'fetchTimestamp' onto the ClassWithFetchTimestamp if the timestamp has been
@@ -217,7 +232,7 @@ Status getStatusFromAbortReason(ClassWithAbortReason& c) {
     BSONElement errmsgElement = abortReasonObj["errmsg"];
     int code = codeElement.numberInt();
     std::string errmsg;
-    if (errmsgElement.type() == String) {
+    if (errmsgElement.type() == BSONType::string) {
         errmsg = errmsgElement.String();
     } else if (!errmsgElement.eoo()) {
         errmsg = errmsgElement.toString();
@@ -305,13 +320,6 @@ Timestamp getHighestMinFetchTimestamp(const std::vector<DonorShardEntry>& donorS
 void checkForOverlappingZones(std::vector<ReshardingZoneType>& zones);
 
 /**
- * Builds documents to insert into config.tags from zones provided to reshardCollection cmd.
- */
-std::vector<BSONObj> buildTagsDocsFromZones(const NamespaceString& tempNss,
-                                            std::vector<ReshardingZoneType>& zones,
-                                            const ShardKeyPattern& shardKey);
-
-/**
  * Create an array of resharding zones from the existing collection. This is used for forced
  * same-key resharding.
  */
@@ -322,14 +330,28 @@ std::vector<ReshardingZoneType> getZonesFromExistingCollection(OperationContext*
  * Creates a pipeline that can be serialized into a query for fetching oplog entries. `startAfter`
  * may be `Timestamp::isNull()` to fetch from the beginning of the oplog.
  */
-std::unique_ptr<Pipeline, PipelineDeleter> createOplogFetchingPipelineForResharding(
+std::unique_ptr<Pipeline> createOplogFetchingPipelineForResharding(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const ReshardingDonorOplogId& startAfter,
     UUID collUUID,
     const ShardId& recipientShard);
 
 /**
- * Sentinel oplog format:
+ * Returns true if this is a "reshardProgressMark" noop oplog entry on a recipient created after
+ * oplog application has started.
+ * {
+ *   op: "n",
+ *   ns: "<database>.<collection>",
+ *   ui: <existingUUID>,
+ *   o: {msg: "Latest oplog ts from donor's cursor response"},
+ *   o2: {type: "reshardProgressMark", createdAfterOplogApplicationStarted: true},
+ *   fromMigrate: true,
+ * }
+ */
+bool isProgressMarkOplogAfterOplogApplicationStarted(const repl::OplogEntry& oplog);
+
+/**
+ * Returns true if this is a "reshardFinalOp" noop oplog entry on a donor.
  * {
  *   op: "n",
  *   ns: "<database>.<collection>",
@@ -396,12 +418,12 @@ void validateShardDistribution(const std::vector<ShardKeyRange>& shardDistributi
 /**
  * Returns true if the provenance is moveCollection or balancerMoveCollection.
  */
-bool isMoveCollection(const boost::optional<ProvenanceEnum>& provenance);
+bool isMoveCollection(const boost::optional<ReshardingProvenanceEnum>& provenance);
 
 /**
  * Returns true if the provenance is unshardCollection.
  */
-bool isUnshardCollection(const boost::optional<ProvenanceEnum>& provenance);
+bool isUnshardCollection(const boost::optional<ReshardingProvenanceEnum>& provenance);
 
 /**
  * Helper function to create a thread pool for _markKilledExecutor member of resharding POS.
@@ -411,32 +433,32 @@ std::shared_ptr<ThreadPool> makeThreadPoolForMarkKilledExecutor(const std::strin
 boost::optional<Status> coordinatorAbortedError();
 
 /**
- * If 'implicitlyCreateIndex' is false, asserts that
- * featureFlagHashedShardKeyIndexOptionalUponShardingCollection is enabled and the shard key is
- * hashed.
+ * If 'performVerification' is true, asserts that featureFlagReshardingVerification is enabled.
  */
-void validateImplicitlyCreateIndex(bool implicitlyCreateIndex, const BSONObj& shardKey);
+void validatePerformVerification(const VersionContext& vCtx,
+                                 boost::optional<bool> performVerification);
+void validatePerformVerification(const VersionContext& vCtx, bool performVerification);
 
 /**
- * Validates that for each index spec in sourceIndexSpecs, there is an identical spec in
+ * Verifies that for each index spec in sourceIndexSpecs, there is an identical spec in
  * localIndexSpecs. Field order does not matter.
  */
 template <typename InputIterator1, typename InputIterator2>
-void validateIndexSpecsMatch(InputIterator1 sourceIndexSpecsBegin,
-                             InputIterator1 sourceIndexSpecsEnd,
-                             InputIterator2 localIndexSpecsBegin,
-                             InputIterator2 localIndexSpecsEnd) {
+void verifyIndexSpecsMatch(InputIterator1 sourceIndexSpecsBegin,
+                           InputIterator1 sourceIndexSpecsEnd,
+                           InputIterator2 localIndexSpecsBegin,
+                           InputIterator2 localIndexSpecsEnd) {
     stdx::unordered_map<std::string, BSONObj> localIndexSpecMap;
     std::transform(
         localIndexSpecsBegin,
         localIndexSpecsEnd,
         std::inserter(localIndexSpecMap, localIndexSpecMap.end()),
-        [](const auto& spec) { return std::pair(spec.getStringField("name").toString(), spec); });
+        [](const auto& spec) { return std::pair(std::string{spec.getStringField("name")}, spec); });
 
     UnorderedFieldsBSONObjComparator bsonCmp;
     for (auto it = sourceIndexSpecsBegin; it != sourceIndexSpecsEnd; ++it) {
         auto spec = *it;
-        auto specName = spec.getStringField("name").toString();
+        auto specName = std::string{spec.getStringField("name")};
         uassert(9365601,
                 str::stream() << "Resharded collection missing source collection index: "
                               << specName,
@@ -448,6 +470,71 @@ void validateIndexSpecsMatch(InputIterator1 sourceIndexSpecsBegin,
                 bsonCmp.evaluate(spec == localIndexSpecMap.find(specName)->second));
     }
 }
+
+ReshardingCoordinatorDocument createReshardingCoordinatorDoc(
+    OperationContext* opCtx,
+    const ConfigsvrReshardCollection& request,
+    const CollectionType& collEntry,
+    const NamespaceString& nss,
+    const bool& setProvenance);
+
+inline Status validateReshardBlockingWritesO2FieldType(const std::string& value) {
+    if (value != kReshardFinalOpLogType) {
+        return {ErrorCodes::BadValue,
+                str::stream() << "Expected the oplog type to be '" << kReshardFinalOpLogType
+                              << "'"};
+    }
+    return Status::OK();
+}
+
+inline Status validateReshardProgressMarkO2FieldType(const std::string& value) {
+    if (value != kReshardProgressMarkOpLogType) {
+        return {ErrorCodes::BadValue,
+                str::stream() << "Expected the oplog type to be '" << kReshardProgressMarkOpLogType
+                              << "'"};
+    }
+    return Status::OK();
+}
+
+Date_t getCurrentTime();
+
+boost::optional<ReshardingCoordinatorDocument> tryGetCoordinatorDoc(OperationContext* opCtx,
+                                                                    const UUID& reshardingUUID);
+
+ReshardingCoordinatorDocument getCoordinatorDoc(OperationContext* opCtx,
+                                                const UUID& reshardingUUID);
+
+// Waits for majority replication of the latest opTime unless token is cancelled.
+SemiFuture<void> waitForMajority(const CancellationToken& token,
+                                 const CancelableOperationContextFactory& factory);
+
+/**
+ * Waits for the replication lag across all voting members to be below the given threshold.
+ */
+ExecutorFuture<void> waitForReplicationOnVotingMembers(
+    std::shared_ptr<executor::TaskExecutor> executor,
+    const CancellationToken& cancelToken,
+    const CancelableOperationContextFactory& factory,
+    std::function<unsigned()> getMaxLagSecs);
+
+/**
+ * To be called on a primary only. Returns the amount of time between the last applied optime on the
+ * primary and the last majority committed optime.
+ */
+Milliseconds getMajorityReplicationLag(OperationContext* opCtx);
+
+// Returns the number of indexes on the given namespace or boost::none if the collection does not
+// exist.
+boost::optional<int> getIndexCount(OperationContext* opCtx,
+                                   const CollectionAcquisition& acquisition);
+
+
+/**
+ * Re-calculates the exponential moving average based on the previous average and the current value.
+ * Please refer to https://en.wikipedia.org/wiki/Exponential_smoothing for the formula. Throws
+ * an error if the smoothing factor is not greater than 0 and less than 1.
+ */
+double calculateExponentialMovingAverage(double prevAvg, double currVal, double smoothingFactor);
 
 }  // namespace resharding
 }  // namespace mongo

@@ -27,12 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <fmt/format.h>
-#include <iterator>
-#include <memory>
-#include <string>
-
+#include "mongo/db/pipeline/document_source_replace_root.h"
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -40,37 +35,42 @@
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_expr.h"
-#include "mongo/db/matcher/match_expression_dependencies.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source_match.h"
-#include "mongo/db/pipeline/document_source_replace_root.h"
 #include "mongo/db/pipeline/document_source_replace_root_gen.h"
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/query/allowed_contexts.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/dependency_analysis/match_expression_dependencies.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
 
+#include <iterator>
+#include <memory>
+#include <string>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
+
 namespace mongo {
 
 using boost::intrusive_ptr;
-using namespace fmt::literals;
 
 Document ReplaceRootTransformation::applyTransformation(const Document& input) const {
     // Extract subdocument in the form of a Value.
     Value newRoot = _newRoot->evaluate(input, &_expCtx->variables);
     // The newRoot expression, if it exists, must evaluate to an object.
     uassert(40228,
-            fmt::format(kErrorTemplate.rawData(),
+            fmt::format(kErrorTemplate.data(),
                         _errMsgContextForNonObject,
                         newRoot.toString(),
                         typeName(newRoot.getType()),
                         input.toString()),
-            newRoot.getType() == BSONType::Object);
+            newRoot.getType() == BSONType::object);
 
     // Turn the value into a document.
     MutableDocument newDoc(newRoot.getDocument());
@@ -95,14 +95,14 @@ boost::intrusive_ptr<DocumentSourceMatch> ReplaceRootTransformation::createTypeN
     auto matchExpr = std::make_unique<OrMatchExpression>();
     {
         MatcherTypeSet typeSet;
-        typeSet.bsonTypes.insert(BSONType::Array);
+        typeSet.bsonTypes.insert(BSONType::array);
         auto typeIsArrayExpr =
             std::make_unique<TypeMatchExpression>(StringData(expression), typeSet);
         matchExpr->add(std::move(typeIsArrayExpr));
     }
     {
         MatcherTypeSet typeSet;
-        typeSet.bsonTypes.insert(BSONType::Object);
+        typeSet.bsonTypes.insert(BSONType::object);
         auto typeIsObjectExpr =
             std::make_unique<TypeMatchExpression>(StringData(expression), typeSet);
         auto typeIsNotObjectExpr =
@@ -118,18 +118,18 @@ boost::intrusive_ptr<DocumentSourceMatch> ReplaceRootTransformation::createTypeN
 void ReplaceRootTransformation::reportRenames(const MatchExpression* expr,
                                               const std::string& prefixPath,
                                               StringMap<std::string>& renames) {
-    DepsTracker deps = {};
-    match_expression::addDependencies(expr, &deps);
+    DepsTracker deps;
+    dependency_analysis::addDependencies(expr, &deps);
     for (const auto& path : deps.fields) {
         // Only record renames for top level paths.
         const auto oldPathTopLevelField = FieldPath::extractFirstFieldFromDottedPath(path);
-        renames.emplace(
-            std::make_pair(oldPathTopLevelField, "{}.{}"_format(prefixPath, oldPathTopLevelField)));
+        renames.emplace(std::make_pair(oldPathTopLevelField,
+                                       fmt::format("{}.{}", prefixPath, oldPathTopLevelField)));
     }
 }
 
-bool ReplaceRootTransformation::pushDotRenamedMatchBefore(Pipeline::SourceContainer::iterator itr,
-                                                          Pipeline::SourceContainer* container) {
+bool ReplaceRootTransformation::pushDotRenamedMatchBefore(DocumentSourceContainer::iterator itr,
+                                                          DocumentSourceContainer* container) {
     // Attempt to push match stage before replaceRoot/replaceWith stage.
     const auto prospectiveMatch = dynamic_cast<DocumentSourceMatch*>(std::next(itr)->get());
     const auto unnestedPath = unnestsPath();
@@ -174,7 +174,7 @@ bool ReplaceRootTransformation::pushDotRenamedMatchBefore(Pipeline::SourceContai
             // resulted in an error before the optimization are not 'optimized' to cases which do
             // not error. Optimizations should not change the behavior.
             splitMatchForReplaceRoot.first->joinMatchWith(
-                createTypeNEObjectPredicate(prefixPath, _expCtx), "$or"_sd);
+                createTypeNEObjectPredicate(prefixPath, _expCtx), MatchExpression::MatchType::OR);
 
             // Swap the eligible portion of the match stage with the replaceRoot stage. std::swap is
             // used here as it performs reassignment of what the iterators point to in O(1) for
@@ -196,8 +196,8 @@ bool ReplaceRootTransformation::pushDotRenamedMatchBefore(Pipeline::SourceContai
     return false;
 }
 
-Pipeline::SourceContainer::iterator ReplaceRootTransformation::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator ReplaceRootTransformation::doOptimizeAt(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     // Attempt to push match stage before replaceRoot/replaceWith stage.
     if (pushDotRenamedMatchBefore(itr, container)) {
         // Optimize the previous stage. If this is the first stage, optimize the current stage
@@ -235,9 +235,9 @@ intrusive_ptr<DocumentSource> DocumentSourceReplaceRoot::createFromBson(
         uassert(40229,
                 str::stream() << "expected an object as specification for " << kStageName
                               << " stage, got " << typeName(elem.type()),
-                elem.type() == Object);
+                elem.type() == BSONType::object);
 
-        auto spec = ReplaceRootSpec::parse(IDLParserContext(kStageName), elem.embeddedObject());
+        auto spec = ReplaceRootSpec::parse(elem.embeddedObject(), IDLParserContext(kStageName));
 
         // The IDL doesn't give us back the type we need to feed into the expression parser, and
         // the expression parser needs the extra state in 'vps' and 'expCtx', so for now we have
@@ -257,7 +257,7 @@ intrusive_ptr<DocumentSource> DocumentSourceReplaceRoot::createFromBson(
             newRootExpression,
             (stageName == kStageName) ? "'newRoot' expression " : "'replacement document' ",
             expCtx->getSbeCompatibility()),
-        kStageName.rawData(),
+        kStageName.data(),
         isIndependentOfAnyCollection);
 }
 
@@ -273,7 +273,7 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceReplaceRoot::create(
                                                     newRootExpression,
                                                     std::move(errMsgContextForNonObjects),
                                                     expCtx->getSbeCompatibility()),
-        kStageName.rawData(),
+        kStageName.data(),
         isIndependentOfAnyCollection);
 }
 }  // namespace mongo

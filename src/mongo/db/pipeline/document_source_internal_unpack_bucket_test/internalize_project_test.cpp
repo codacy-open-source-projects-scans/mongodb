@@ -27,11 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <vector>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
@@ -41,12 +36,15 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_internal_unpack_bucket.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/util/make_data_structure.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <memory>
+#include <vector>
+
 
 namespace mongo {
 namespace {
@@ -204,7 +202,7 @@ TEST_F(InternalUnpackBucketInternalizeProjectTest, OptimizeCorrectlyInternalizes
                                    fromjson("{$project: {x: true, y: true}}")),
                         getExpCtx());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(1u, serialized.size());
@@ -216,7 +214,7 @@ TEST_F(InternalUnpackBucketInternalizeProjectTest, OptimizeCorrectlyInternalizes
 TEST_F(InternalUnpackBucketInternalizeProjectTest, OptimizeCorrectlyInternalizesDependencyProject) {
     auto projectSpec = fromjson("{$project: {_id: false, x: false}}");
     auto sortSpec = fromjson("{$sort: {y: 1}}");
-    auto groupSpec = fromjson("{$group: {_id: '$y', f: {$first: '$z'}}}");
+    auto groupSpec = fromjson("{$group: {_id: '$y', f: {$first: '$z'}, $willBeMerged: false}}");
     auto pipeline =
         Pipeline::parse(makeVector(fromjson("{$_internalUnpackBucket: { exclude: [], timeField: "
                                             "'foo', bucketMaxSpanSeconds: 3600}}"),
@@ -225,7 +223,7 @@ TEST_F(InternalUnpackBucketInternalizeProjectTest, OptimizeCorrectlyInternalizes
                                    groupSpec),
                         getExpCtx());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(4u, serialized.size());
@@ -245,7 +243,7 @@ TEST_F(InternalUnpackBucketInternalizeProjectTest,
     auto projectSpec = fromjson("{$project: {a: true, _id: false}}");
     auto pipeline = Pipeline::parse(makeVector(unpackSpec, projectSpec), getExpCtx());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(2u, serialized.size());
@@ -261,7 +259,7 @@ TEST_F(InternalUnpackBucketInternalizeProjectTest,
     auto projectSpec = fromjson("{$project: {_id: true, a: true}}");
     auto pipeline = Pipeline::parse(makeVector(unpackSpec, projectSpec), getExpCtx());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     auto serialized = pipeline->serializeToBson();
     ASSERT_EQ(2u, serialized.size());

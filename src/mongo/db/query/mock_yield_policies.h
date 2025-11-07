@@ -30,7 +30,8 @@
 #pragma once
 
 #include "mongo/base/error_codes.h"
-#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -42,14 +43,16 @@ public:
     MockYieldPolicy(OperationContext* opCtx,
                     ClockSource* clockSource,
                     PlanYieldPolicy::YieldPolicy policy)
-        : PlanYieldPolicy(opCtx, policy, clockSource, 0, Milliseconds{0}, nullptr, nullptr) {}
+        : PlanYieldPolicy(opCtx, policy, clockSource, 0, Milliseconds{0}, nullptr) {}
 
 private:
     void saveState(OperationContext* opCtx) final {
         MONGO_UNREACHABLE;
     }
 
-    void restoreState(OperationContext* opCtx, const Yieldable* yieldable) final {
+    void restoreState(OperationContext* opCtx,
+                      const Yieldable* yieldable,
+                      RestoreContext::RestoreType restoreType) final {
         MONGO_UNREACHABLE;
     }
 };
@@ -67,7 +70,12 @@ public:
         return true;
     }
 
-    Status yieldOrInterrupt(OperationContext*, std::function<void()> whileYieldingFn) override {
+    Status yieldOrInterrupt(
+        OperationContext*,
+        const std::function<void()>& whileYieldingFn,
+        RestoreContext::RestoreType restoreType,
+        const std::function<void()>& afterSnapshotAbandonFn = nullptr) override {
+
         return {ErrorCodes::ExceededTimeLimit, "Using AlwaysTimeOutYieldPolicy"};
     }
 };
@@ -85,7 +93,11 @@ public:
         return true;
     }
 
-    Status yieldOrInterrupt(OperationContext*, std::function<void()> whileYieldingFn) override {
+    Status yieldOrInterrupt(
+        OperationContext*,
+        const std::function<void()>& whileYieldingFn,
+        RestoreContext::RestoreType restoreType,
+        const std::function<void()>& afterSnapshotAbandonFn = nullptr) override {
         return {ErrorCodes::QueryPlanKilled, "Using AlwaysPlanKilledYieldPolicy"};
     }
 };
@@ -103,7 +115,11 @@ public:
         return false;
     }
 
-    Status yieldOrInterrupt(OperationContext*, std::function<void()> whileYieldingFn) override {
+    Status yieldOrInterrupt(
+        OperationContext*,
+        const std::function<void()>& whileYieldingFn,
+        RestoreContext::RestoreType restoreType,
+        const std::function<void()>& afterSnapshotAbandonFn = nullptr) override {
         MONGO_UNREACHABLE;
     }
 };

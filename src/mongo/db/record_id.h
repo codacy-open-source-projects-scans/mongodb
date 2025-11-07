@@ -29,24 +29,6 @@
 
 #pragma once
 
-#include <array>
-#include <boost/container_hash/extensions.hpp>
-#include <boost/functional/hash.hpp>
-#include <boost/optional.hpp>
-#include <climits>
-#include <compare>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <fmt/format.h>
-#include <limits>
-#include <new>
-#include <ostream>
-#include <string>
-#include <string_view>
-#include <type_traits>
-#include <utility>
-
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -55,14 +37,33 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
+#include "mongo/db/storage/key_format.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
 #include "mongo/util/hex.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/shared_buffer.h"
 
-namespace mongo {
+#include <array>
+#include <climits>
+#include <compare>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <new>
+#include <ostream>
+#include <span>
+#include <string>
+#include <type_traits>
+#include <utility>
 
-namespace details {
+#include <boost/functional/hash.hpp>
+#include <boost/optional.hpp>
+#include <fmt/format.h>
+
+namespace MONGO_MOD_PUBLIC mongo {
+namespace MONGO_MOD_FILE_PRIVATE record_id_details {
 class RecordIdChecks;
 }
 
@@ -76,7 +77,7 @@ class alignas(int64_t) RecordId {
     // users of the class.
 
     // Class used for static assertions that can only happen when RecordId is completely defined.
-    friend class details::RecordIdChecks;
+    friend class record_id_details::RecordIdChecks;
 
 public:
     // This set of constants define the boundaries of the 'normal' id ranges for the int64_t format.
@@ -111,11 +112,13 @@ public:
         }
     }
 
-    RecordId(RecordId&& other) : _format(other._format), _data(other._data) {
+    RecordId(RecordId&& other)
+        : _format(other._format), _data(_format != Format::kNull ? other._data : Content{}) {
         other._format = kNull;
     }
 
-    RecordId(const RecordId& other) : _format(other._format), _data(other._data) {
+    RecordId(const RecordId& other)
+        : _format(other._format), _data(_format != Format::kNull ? other._data : Content{}) {
         if (_format == Format::kBigStr) {
             // Re-initialize the SharedBuffer to get the correct reference count.
             auto* buffer = &HeapStr::getBufferFrom(_data);
@@ -152,21 +155,21 @@ public:
      * Construct a RecordId that holds a binary string. The raw value for RecordStore storage may be
      * retrieved using getStr().
      */
-    explicit RecordId(const char* str, int32_t size) {
-        uassert(8273007, fmt::format("key size must be greater than 0. size: {}", size), size > 0);
-        uassert(
-            5894900,
-            fmt::format("Size of RecordId ({}) is above limit of {} bytes", size, kBigStrMaxSize),
-            size <= kBigStrMaxSize);
-        if (size <= kSmallStrMaxSize) {
+    explicit RecordId(std::span<const char> buf) {
+        uassert(8273007, "key size must not be empty", buf.size() > 0);
+        uassert(5894900,
+                fmt::format(
+                    "Size of RecordId ({}) is above limit of {} bytes", buf.size(), kBigStrMaxSize),
+                buf.size() <= kBigStrMaxSize);
+        if (buf.size() <= kSmallStrMaxSize) {
             _format = Format::kSmallStr;
-            InlineStr::getSizeFrom(_data) = static_cast<uint8_t>(size);
+            InlineStr::getSizeFrom(_data) = static_cast<uint8_t>(buf.size());
             auto& arr = InlineStr::getArrayFrom(_data);
-            std::memcpy(arr.data(), str, size);
+            std::memcpy(arr.data(), buf.data(), buf.size());
         } else {
             _format = Format::kBigStr;
-            auto buffer = SharedBuffer::allocate(size);
-            std::memcpy(buffer.get(), str, size);
+            auto buffer = SharedBuffer::allocate(buf.size());
+            std::memcpy(buffer.get(), buf.data(), buf.size());
             auto* bufferPtr = &HeapStr::getBufferFrom(_data);
             new (bufferPtr) ConstSharedBuffer(std::move(buffer));
         }
@@ -193,11 +196,11 @@ public:
                 return onLong(_getLongNoCheck());
             case Format::kSmallStr: {
                 auto str = _getSmallStrNoCheck();
-                return onStr(str.rawData(), str.size());
+                return onStr(str.data(), str.size());
             }
             case Format::kBigStr: {
                 auto str = _getBigStrNoCheck();
-                return onStr(str.rawData(), str.size());
+                return onStr(str.data(), str.size());
             }
             default:
                 MONGO_UNREACHABLE;
@@ -212,6 +215,14 @@ public:
     // Returns true if this RecordId is storing a binary string.
     bool isStr() const {
         return _format == Format::kSmallStr || _format == Format::kBigStr;
+    }
+
+    /**
+     * Returns the type of this RecordID as a KeyFormat. Must not be null.
+     */
+    KeyFormat keyFormat() const {
+        invariant(_format != Format::kNull);
+        return isLong() ? KeyFormat::Long : KeyFormat::String;
     }
 
     /**
@@ -321,11 +332,10 @@ public:
 
     size_t hash() const {
         size_t hash = 0;
-        withFormat([](Null n) {},
-                   [&](int64_t rid) { boost::hash_combine(hash, rid); },
-                   [&](const char* str, int size) {
-                       boost::hash_combine(hash, std::string_view(str, size));
-                   });
+        withFormat(
+            [](Null n) {},
+            [&](int64_t rid) { boost::hash_combine(hash, rid); },
+            [&](const char* str, int size) { boost::hash_combine(hash, StringData(str, size)); });
         return hash;
     }
 
@@ -354,12 +364,12 @@ public:
             case Format::kSmallStr: {
                 StringData str = _getSmallStrNoCheck();
                 return "kSmallStr size: " + std::to_string(str.size()) + " string: '" +
-                    std::string(str.rawData()) + "'";
+                    std::string(str.data(), str.size()) + "'";
             }
             case Format::kBigStr: {
                 StringData str = _getBigStrNoCheck();
                 return "kBigStr size: " + std::to_string(str.size()) + " string: '" +
-                    std::string(str.rawData()) + "'";
+                    std::string(str.data(), str.size()) + "'";
             }
             default:
                 MONGO_UNREACHABLE;
@@ -421,10 +431,10 @@ public:
             return RecordId();
         } else if (elem.isNumber()) {
             return RecordId(elem.numberLong());
-        } else if (elem.type() == BSONType::BinData) {
+        } else if (elem.type() == BSONType::binData) {
             int size;
             auto str = elem.binData(size);
-            return RecordId(str, size);
+            return RecordId(std::span(str, size));
         } else {
             uasserted(ErrorCodes::BadValue,
                       fmt::format("Could not deserialize RecordId with type {}", elem.type()));
@@ -442,8 +452,7 @@ public:
             return RecordId(buf.read<LittleEndian<int64_t>>());
         } else if (format == Format::kSmallStr || format == Format::kBigStr) {
             const int size = buf.read<LittleEndian<int>>();
-            const char* str = static_cast<const char*>(buf.skip(size));
-            return RecordId(str, size);
+            return RecordId(buf.readBytes(size));
         } else {
             uasserted(ErrorCodes::BadValue,
                       fmt::format("Could not deserialize RecordId with type {}",
@@ -471,11 +480,9 @@ public:
         return memUsage();
     }
     RecordId getOwned() const {
-        MONGO_UNREACHABLE;
+        return *this;
     }
-    void makeOwned() {
-        MONGO_UNREACHABLE;
-    }
+    void makeOwned() {}
 
 private:
     /**
@@ -594,13 +601,13 @@ private:
     };
 };
 
-namespace details {
+namespace record_id_details {
 // Various assertions of RecordId that can only happen when the type is completely defined.
 class RecordIdChecks {
     static_assert(sizeof(RecordId) == RecordId::kTargetSizeInBytes);
     static_assert(std::alignment_of_v<RecordId> == std::alignment_of_v<int64_t>);
 };
-}  // namespace details
+}  // namespace record_id_details
 
 inline StringBuilder& operator<<(StringBuilder& stream, const RecordId& id) {
     return stream << "RecordId(" << id.toString() << ')';
@@ -610,4 +617,4 @@ inline std::ostream& operator<<(std::ostream& stream, const RecordId& id) {
     return stream << "RecordId(" << id.toString() << ')';
 }
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

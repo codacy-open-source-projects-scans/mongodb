@@ -1,5 +1,7 @@
 // @tags: [
 //   requires_getmore,
+//   # This test relies on query commands returning specific batch-sized responses.
+//   assumes_no_implicit_cursor_exhaustion,
 // ]
 
 // Tests where the QueryOptimizerCursor enters takeover mode during a query rather than a get more.
@@ -7,8 +9,9 @@
 let t = db.jstests_finda;
 t.drop();
 
-const findCommandBatchSize = assert.commandWorked(db.adminCommand(
-    {getParameter: 1, internalQueryFindCommandBatchSize: 1}))["internalQueryFindCommandBatchSize"];
+const findCommandBatchSize = assert.commandWorked(
+    db.adminCommand({getParameter: 1, internalQueryFindCommandBatchSize: 1}),
+)["internalQueryFindCommandBatchSize"];
 let numDocs = 200;
 const maxResultSize = Math.min(findCommandBatchSize, numDocs);
 
@@ -53,8 +56,7 @@ function makeCursor(query, projection, sort, batchSize, returnKey) {
     return cursor;
 }
 
-function checkCursorWithBatchSizeProjection(
-    query, projection, sort, batchSize, expectedLeftInBatch) {
+function checkCursorWithBatchSizeProjection(query, projection, sort, batchSize, expectedLeftInBatch) {
     clearQueryPlanCache();
     let cursor = makeCursor(query, projection, sort, batchSize);
 
@@ -72,10 +74,10 @@ function checkCursorWithBatchSize(query, sort, batchSize, expectedLeftInBatch) {
     if (expectedLeftInBatch > 110) {
         let cursor = makeCursor(query, {}, sort, batchSize, true);
         let lastNonAIndexResult = -1;
-        for (var i = 0; i < expectedLeftInBatch; ++i) {
+        for (let i = 0; i < expectedLeftInBatch; ++i) {
             let next = cursor.next();
             // Identify the query plan used by checking the fields of a returnKey query.
-            if (!friendlyEqual(['a', '_id'], Object.keySet(next))) {
+            if (!friendlyEqual(["a", "_id"], Object.keySet(next))) {
                 lastNonAIndexResult = i;
             }
         }
@@ -86,15 +88,15 @@ function checkCursorWithBatchSize(query, sort, batchSize, expectedLeftInBatch) {
 
 function queryWithPlanTypes(withDups) {
     t.drop();
-    for (var i = 1; i < numDocs; ++i) {
+    for (let i = 1; i < numDocs; ++i) {
         t.save({_id: i, a: i, b: 0});
     }
     if (withDups) {
-        t.save({_id: 0, a: [0, numDocs], b: 0});  // Add a dup on a:1 index.
+        t.save({_id: 0, a: [0, numDocs], b: 0}); // Add a dup on a:1 index.
     } else {
         t.save({_id: 0, a: 0, b: 0});
     }
-    t.createIndex({a: 1, _id: 1});  // Include _id for a covered index projection.
+    t.createIndex({a: 1, _id: 1}); // Include _id for a covered index projection.
 
     // All plans in order.
     checkCursorWithBatchSize({a: {$gte: 0}}, null, 150, 150);

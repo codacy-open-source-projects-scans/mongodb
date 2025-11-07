@@ -4,26 +4,16 @@
  *
  * @tags: [requires_fcv_70]
  */
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 const st = new ShardingTest({mongos: 1, shards: 2, rs: {nodes: 2}});
-
-// Database versioning tests only make sense when all collections are not tracked.
-const isTrackUnshardedUponCreationEnabled = FeatureFlagUtil.isPresentAndEnabled(
-    st.s.getDB('admin'), "TrackUnshardedCollectionsUponCreation");
-if (isTrackUnshardedUponCreationEnabled) {
-    st.stop();
-    quit();
-}
 
 const dbName = "testDb";
 const collName = "testColl";
 const ns = dbName + "." + collName;
 
 // Make shard0 the primary shard.
-assert.commandWorked(
-    st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
 
 const mongos0Coll = st.s.getCollection(ns);
 assert.commandWorked(mongos0Coll.createIndex({x: 1}));
@@ -32,7 +22,7 @@ assert.commandWorked(mongos0Coll.insert([{x: -1}, {x: 1}]));
 const configureCmdObj = {
     configureQueryAnalyzer: ns,
     mode: "full",
-    samplesPerSecond: 1
+    samplesPerSecond: 1,
 };
 
 // Run the configureQueryAnalyzer command.

@@ -33,15 +33,6 @@
 
 #include "mongo/client/dbclient_session.h"
 
-
-#include <cmath>
-#include <memory>
-#include <utility>
-#include <vector>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -61,13 +52,10 @@
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/stats/counters.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/reply_interface.h"
@@ -88,10 +76,28 @@
 #include "mongo/util/time_support.h"
 #include "mongo/util/version.h"
 
+#include <cmath>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
 
 namespace mongo {
+namespace {
+// Tracks the number of times DbClientSession detects that the connection has been broken in
+// ensureConnection() and attempts to reconnect.
+auto& dbClientSessionReconnectAttempts =
+    *MetricBuilder<Counter64>("network.dbClientSessionReconnectAttempts");
+// Tracks the number of times DbClientSession detects that the connection has been broken in
+// ensureConnection() with autoReconnect = false so does not try to reconnect.
+auto& dbClientSessionWithoutAutoReconnectFailures =
+    *MetricBuilder<Counter64>("network.dbClientSessionWithoutAutoReconnectFailures");
+}  // namespace
 
 using std::string;
 
@@ -114,7 +120,7 @@ StatusWith<bool> completeSpeculativeAuth(DBClientSession* conn,
                 str::stream() << "Unexpected hello." << auth::kSpeculativeAuthenticate << " reply"};
     }
 
-    if (specAuthElem.type() != Object) {
+    if (specAuthElem.type() != BSONType::object) {
         return {ErrorCodes::BadValue,
                 str::stream() << "hello." << auth::kSpeculativeAuthenticate
                               << " reply must be an object"};
@@ -220,10 +226,11 @@ executor::RemoteCommandResponse initWireVersion(
                               replyWireVersion.getValue().maxWireVersion);
     }
 
-    if (helloObj.hasField("saslSupportedMechs") && helloObj["saslSupportedMechs"].type() == Array) {
+    if (helloObj.hasField("saslSupportedMechs") &&
+        helloObj["saslSupportedMechs"].type() == BSONType::array) {
         auto array = helloObj["saslSupportedMechs"].Array();
         for (const auto& elem : array) {
-            saslMechsForAuth->push_back(elem.checkAndGetStringData().toString());
+            saslMechsForAuth->push_back(std::string{elem.checkAndGetStringData()});
         }
     }
 
@@ -259,7 +266,7 @@ void DBClientSession::connect(const HostAndPort& serverAddress,
     // 'applicationName' parameter, since the memory that it views within _applicationName will be
     // freed. Do not reference the 'applicationName' parameter after this line. If you need to
     // access the application name, do it through the _applicationName member.
-    _applicationName = applicationName.toString();
+    _applicationName = std::string{applicationName};
 
     auto speculativeAuthType = auth::SpeculativeAuthType::kNone;
     std::shared_ptr<SaslClientSession> saslClientSession;
@@ -302,8 +309,8 @@ void DBClientSession::connect(const HostAndPort& serverAddress,
         }
     }
 
-    auto wireSpec = WireSpec::getWireSpec(getGlobalServiceContext()).get();
-    auto validateStatus = wire_version::validateWireVersion(wireSpec->outgoing, replyWireVersion);
+    auto outgoing = WireSpec::getWireSpec(getGlobalServiceContext()).getOutgoing();
+    auto validateStatus = wire_version::validateWireVersion(outgoing, replyWireVersion);
     if (!validateStatus.isOK()) {
         LOGV2_WARNING(
             20126, "Remote host has incompatible wire version", "error"_attr = validateStatus);
@@ -486,7 +493,7 @@ void DBClientSession::say(Message& toSend, bool isRetry, string* actualServer) {
     toSend.header().setResponseToMsgId(0);
     if (!MONGO_unlikely(dbClientSessionDisableChecksum.shouldFail())) {
 #ifdef MONGO_CONFIG_SSL
-        if (!SSLPeerInfo::forSession(_session).isTLS()) {
+        if (!isTLS()) {
             OpMsg::appendChecksum(&toSend);
         }
 #else
@@ -522,13 +529,14 @@ Message DBClientSession::_call(Message& toSend, string* actualServer) {
     toSend.header().setResponseToMsgId(0);
     if (!MONGO_unlikely(dbClientSessionDisableChecksum.shouldFail())) {
 #ifdef MONGO_CONFIG_SSL
-        if (!SSLPeerInfo::forSession(_session).isTLS()) {
+        if (!isTLS()) {
             OpMsg::appendChecksum(&toSend);
         }
 #else
         OpMsg::appendChecksum(&toSend);
 #endif
     }
+    networkCounter.hitLogicalOut(NetworkCounter::ConnectionType::kEgress, toSend.size());
     auto swm = _compressorManager.compressMessage(toSend);
     uassertStatusOK(swm.getStatus());
 
@@ -560,6 +568,7 @@ Message DBClientSession::_call(Message& toSend, string* actualServer) {
     if (response.operation() == dbCompressed) {
         response = uassertStatusOK(_compressorManager.decompressMessage(response));
     }
+    networkCounter.hitLogicalIn(NetworkCounter::ConnectionType::kEgress, response.size());
 
     killSessionOnError.dismiss();
     return response;
@@ -567,17 +576,29 @@ Message DBClientSession::_call(Message& toSend, string* actualServer) {
 
 #ifdef MONGO_CONFIG_SSL
 const SSLConfiguration* DBClientSession::getSSLConfiguration() {
-    auto& sslManager = _session->getSSLManager();
-    if (!sslManager) {
-        return nullptr;
-    }
-    return &sslManager->getSSLConfiguration();
+    return _session->getSSLConfiguration();
 }
 
 bool DBClientSession::isUsingTransientSSLParams() const {
     return _transientSSLParams.has_value();
 }
 
+bool DBClientSession::isTLS() {
+    auto sslPeerInfo = SSLPeerInfo::forSession(_session);
+    return sslPeerInfo && sslPeerInfo->isTLS();
+}
 #endif
+
+void DBClientSession::ensureConnection() {
+    if (!_failed.load()) {
+        return;
+    }
+    if (!_autoReconnect) {
+        dbClientSessionWithoutAutoReconnectFailures.increment();
+        throwSocketError(SocketErrorKind::FAILED_STATE, toString());
+    }
+    dbClientSessionReconnectAttempts.increment();
+    _reconnectSession();
+}
 
 }  // namespace mongo

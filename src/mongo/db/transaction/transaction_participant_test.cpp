@@ -32,18 +32,12 @@
 #include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/admission/ingress_admission_context.h"
 #include "mongo/db/repl/read_concern_args.h"
+
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <future>
-#include <iterator>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonelement.h"
@@ -51,21 +45,24 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/local_oplog_info.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/global_settings.h"
+#include "mongo/db/local_catalog/catalog_control.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/local_oplog_info.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
@@ -91,35 +88,30 @@
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod.h"
 #include "mongo/db/session/session_txn_record_gen.h"
-#include "mongo/db/shard_role.h"
 #include "mongo/db/storage/durable_history_pin.h"
+#include "mongo/db/storage/execution_context.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/storage_stats.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/transaction/server_transactions_metrics.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_gen.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/db/txn_retry_counter_too_old_info.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/s/session_catalog_router.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/stdx/future.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/barrier.h"
-#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/log_test.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
@@ -130,6 +122,13 @@
 #include "mongo/util/tick_source.h"
 #include "mongo/util/tick_source_mock.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <future>
+#include <iterator>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -155,6 +154,7 @@ repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
         boost::none,                   // uuid
         boost::none,                   // fromMigrate
         boost::none,                   // checkExistenceForDiffInsert
+        boost::none,                   // versionContext
         0,                             // version
         object,                        // o
         boost::none,                   // o2
@@ -226,7 +226,8 @@ public:
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
-                                  bool markFromMigrate) override;
+                                  bool markFromMigrate,
+                                  bool isViewlessTimeseries) override;
 
     const repl::OpTime dropOpTime = {Timestamp(Seconds(100), 1U), 1LL};
 };
@@ -296,7 +297,8 @@ repl::OpTime OpObserverMock::onDropCollection(OperationContext* opCtx,
                                               const NamespaceString& collectionName,
                                               const UUID& uuid,
                                               std::uint64_t numRecords,
-                                              bool markFromMigrate) {
+                                              bool markFromMigrate,
+                                              bool isViewlessTimeseries) {
     // If the oplog is not disabled for this namespace, then we need to reserve an op time for the
     // drop.
     if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, collectionName)) {
@@ -326,7 +328,8 @@ private:
 
 class TxnParticipantTest : public MockReplCoordServerFixture {
 protected:
-    TxnParticipantTest(Options options = {}) : MockReplCoordServerFixture(std::move(options)) {}
+    TxnParticipantTest(Options options = {})
+        : MockReplCoordServerFixture(options.useReplSettings(true)) {}
 
     void setUp() override {
         repl::ReplSettings replSettings;
@@ -341,6 +344,10 @@ protected:
             service,
             std::make_unique<MongoDSessionCatalog>(
                 std::make_unique<MongoDSessionCatalogTransactionInterfaceImpl>()));
+
+        opObserverRegistry()->addObserver(
+            std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
+
         auto mongoDSessionCatalog = MongoDSessionCatalog::get(opCtx());
         mongoDSessionCatalog->onStepUp(opCtx());
 
@@ -371,8 +378,7 @@ protected:
         // Normally, committing a transaction is supposed to usassert if the corresponding prepare
         // has not been majority committed. We excempt our unit tests from this expectation.
         setGlobalFailPoint("skipCommitTxnCheckPrepareMajorityCommitted",
-                           BSON("mode"
-                                << "alwaysOn"));
+                           BSON("mode" << "alwaysOn"));
     }
 
     void tearDown() override {
@@ -383,9 +389,7 @@ protected:
 
         MockReplCoordServerFixture::tearDown();
 
-        setGlobalFailPoint("skipCommitTxnCheckPrepareMajorityCommitted",
-                           BSON("mode"
-                                << "off"));
+        setGlobalFailPoint("skipCommitTxnCheckPrepareMajorityCommitted", BSON("mode" << "off"));
     }
 
     SessionCatalog* catalog() {
@@ -464,13 +468,13 @@ protected:
 
     void assertSessionState(BSONObj obj, DurableTxnStateEnum expectedState) {
         SessionTxnRecord txnRecord =
-            SessionTxnRecord::parse(IDLParserContext("test sessn txn parser"), obj);
+            SessionTxnRecord::parse(obj, IDLParserContext("test sessn txn parser"));
         ASSERT_EQ(expectedState, txnRecord.getState().get());
     }
 
     void assertNotInSessionState(BSONObj obj, DurableTxnStateEnum expectedState) {
         SessionTxnRecord txnRecord =
-            SessionTxnRecord::parse(IDLParserContext("test sessn txn parser"), obj);
+            SessionTxnRecord::parse(obj, IDLParserContext("test sessn txn parser"));
         ASSERT_NE(expectedState, txnRecord.getState().get());
     }
 
@@ -501,8 +505,12 @@ void insertTxnRecord(OperationContext* opCtx, unsigned i, DurableTxnStateEnum st
     auto coll = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
     ASSERT(coll);
     OpDebug* const nullOpDebug = nullptr;
-    ASSERT_OK(collection_internal::insertDocument(
-        opCtx, CollectionPtr(coll), InsertStatement(record.toBSON()), nullOpDebug, false));
+    // TODO(SERVER-103411): Investigate usage validity of CollectionPtr::CollectionPtr_UNSAFE
+    ASSERT_OK(collection_internal::insertDocument(opCtx,
+                                                  CollectionPtr::CollectionPtr_UNSAFE(coll),
+                                                  InsertStatement(record.toBSON()),
+                                                  nullOpDebug,
+                                                  false));
     wuow.commit();
 }
 }  // namespace
@@ -622,11 +630,9 @@ TEST_F(TxnParticipantTest, StashAndUnstashResources) {
     auto sessionCheckout = checkOutSession();
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
     // Perform initial unstash which sets up a WriteUnitOfWork.
@@ -680,7 +686,9 @@ TEST_F(TxnParticipantTest, AutocommitRequiredOnEveryTxnOp) {
     // We must have stashed transaction resources to do a second operation on the transaction.
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.stashTransactionResources(opCtx());
 
     auto txnNum = *opCtx()->getTxnNumber();
@@ -723,7 +731,9 @@ TEST_F(TxnParticipantTest, SameTransactionPreservesStoredStatements) {
     ASSERT_BSONOBJ_EQ(operation.toBSON(),
                       txnParticipant.getTransactionOperationsForTest()[0].toBSON());
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.stashTransactionResources(opCtx());
 
     // Check the transaction operations before re-opening the transaction.
@@ -750,7 +760,9 @@ TEST_F(TxnParticipantTest, AbortClearsStoredStatements) {
                       txnParticipant.getTransactionOperationsForTest()[0].toBSON());
 
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.stashTransactionResources(opCtx());
     txnParticipant.abortTransaction(opCtx());
     ASSERT_TRUE(txnParticipant.getTransactionOperationsForTest().empty());
@@ -765,7 +777,9 @@ TEST_F(TxnParticipantTest, EmptyUnpreparedTransactionCommit) {
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
 
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.commitUnpreparedTransaction(opCtx());
     txnParticipant.stashTransactionResources(opCtx());
 
@@ -780,7 +794,9 @@ TEST_F(TxnParticipantTest, EmptyPreparedTransactionCommit) {
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
 
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     const auto [prepareTimestamp, namespaces] = txnParticipant.prepareTransaction(opCtx(), {});
     const auto commitTS = Timestamp(prepareTimestamp.getSecs(), prepareTimestamp.getInc() + 1);
     txnParticipant.commitPreparedTransaction(opCtx(), commitTS, {});
@@ -848,7 +864,9 @@ TEST_F(TxnParticipantTest, CommitTransactionSetsCommitTimestampOnPreparedTransac
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
 
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     const auto prepareResponse = txnParticipant.prepareTransaction(opCtx(), {});
     const auto& prepareTimestamp = prepareResponse.first;
     const auto commitTS = Timestamp(prepareTimestamp.getSecs(), prepareTimestamp.getInc() + 1);
@@ -883,7 +901,9 @@ TEST_F(TxnParticipantTest, CommitTransactionWithCommitTimestampFailsOnUnprepared
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
 
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     ASSERT_THROWS_CODE(txnParticipant.commitPreparedTransaction(opCtx(), commitTimestamp, {}),
                        AssertionException,
                        ErrorCodes::InvalidOptions);
@@ -904,7 +924,9 @@ TEST_F(TxnParticipantTest, CommitTransactionDoesNotSetCommitTimestampOnUnprepare
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
 
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.commitUnpreparedTransaction(opCtx());
 
     ASSERT(shard_role_details::getRecoveryUnit(opCtx())->getCommitTimestamp().isNull());
@@ -921,7 +943,9 @@ TEST_F(TxnParticipantTest, CommitTransactionWithoutCommitTimestampFailsOnPrepare
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
 
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.prepareTransaction(opCtx(), {});
     ASSERT_THROWS_CODE(txnParticipant.commitUnpreparedTransaction(opCtx()),
                        AssertionException,
@@ -935,7 +959,9 @@ TEST_F(TxnParticipantTest, CommitTransactionWithNullCommitTimestampFailsOnPrepar
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
 
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.prepareTransaction(opCtx(), {});
     ASSERT_THROWS_CODE(txnParticipant.commitPreparedTransaction(opCtx(), Timestamp(), {}),
                        AssertionException,
@@ -950,7 +976,9 @@ TEST_F(TxnParticipantTest,
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
 
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     const auto prepareResponse = txnParticipant.prepareTransaction(opCtx(), {});
     const auto& prepareTimestamp = prepareResponse.first;
     ASSERT_THROWS_CODE(txnParticipant.commitPreparedTransaction(
@@ -967,7 +995,9 @@ TEST_F(TxnParticipantTest, EmptyTransactionAbort) {
     txnParticipant.unstashTransactionResources(opCtx(), "abortTransaction");
 
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.stashTransactionResources(opCtx());
     txnParticipant.abortTransaction(opCtx());
     ASSERT_TRUE(txnParticipant.transactionIsAborted());
@@ -981,7 +1011,9 @@ TEST_F(TxnParticipantTest, EmptyPreparedTransactionAbort) {
     txnParticipant.unstashTransactionResources(opCtx(), "abortTransaction");
 
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.prepareTransaction(opCtx(), {});
     txnParticipant.abortTransaction(opCtx());
     ASSERT_TRUE(txnParticipant.transactionIsAborted());
@@ -1701,11 +1733,9 @@ TEST_F(TxnParticipantTest, StashInNestedSessionIsANoop) {
 
     // Set the readConcern on the OperationContext.
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
     // Perform initial unstash, which sets up a WriteUnitOfWork.
@@ -1935,7 +1965,7 @@ class ShardTxnParticipantTest : public ShardedClusterParticipantTest {
 protected:
     void setUp() final {
         TxnParticipantTest::setUp();
-        serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::RouterServer};
+        serverGlobalParams.clusterRole = ClusterRole::ShardServer;
     }
 
     void tearDown() final {
@@ -2007,8 +2037,7 @@ class ConfigTxnParticipantTest : public ShardedClusterParticipantTest {
 protected:
     void setUp() final {
         TxnParticipantTest::setUp();
-        serverGlobalParams.clusterRole = {
-            ClusterRole::ShardServer, ClusterRole::ConfigServer, ClusterRole::RouterServer};
+        serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
     }
 
     void tearDown() final {
@@ -2577,13 +2606,11 @@ TEST_F(
 
 TEST_F(ShardTxnParticipantTest, StartOrContinueTxnWithMatchingReadConcernShouldContinue) {
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kAfterClusterTimeFieldName
-                                                << LogicalTime(Timestamp(1, 2)).asTimestamp()
-                                                << repl::ReadConcernArgs::kLevelFieldName
-                                                << "majority"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kAfterClusterTimeFieldName
+                            << LogicalTime(Timestamp(1, 2)).asTimestamp()
+                            << repl::ReadConcernArgs::kLevelFieldName << "majority"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
     auto sessionCheckout = checkOutSession();
@@ -2612,11 +2639,10 @@ TEST_F(ShardTxnParticipantTest, StartOrContinueTxnWithMatchingReadConcernShouldC
 TEST_F(ShardTxnParticipantTest, StartOrContinueTxnWithDifferentReadConcernShouldError) {
     repl::ReadConcernArgs originalReadConcernArgs;
     ASSERT_OK(originalReadConcernArgs.initialize(
-        BSON("find"
-             << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-             << BSON(repl::ReadConcernArgs::kAfterClusterTimeFieldName
-                     << LogicalTime(Timestamp(1, 2)).asTimestamp()
-                     << repl::ReadConcernArgs::kLevelFieldName << "majority"))));
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kAfterClusterTimeFieldName
+                            << LogicalTime(Timestamp(1, 2)).asTimestamp()
+                            << repl::ReadConcernArgs::kLevelFieldName << "majority"))));
     repl::ReadConcernArgs::get(opCtx()) = originalReadConcernArgs;
 
     auto sessionCheckout = checkOutSession();
@@ -2631,13 +2657,11 @@ TEST_F(ShardTxnParticipantTest, StartOrContinueTxnWithDifferentReadConcernShould
     // entry point's behavior. The readConcern args on the TxnResourceStash should still be the
     // original readConern.
     repl::ReadConcernArgs newReadConcernArgs;
-    ASSERT_OK(
-        newReadConcernArgs.initialize(BSON("find"
-                                           << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                           << BSON(repl::ReadConcernArgs::kAtClusterTimeFieldName
-                                                   << LogicalTime(Timestamp(1, 2)).asTimestamp()
-                                                   << repl::ReadConcernArgs::kLevelFieldName
-                                                   << "snapshot"))));
+    ASSERT_OK(newReadConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kAtClusterTimeFieldName
+                            << LogicalTime(Timestamp(1, 2)).asTimestamp()
+                            << repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = newReadConcernArgs;
 
     ASSERT_EQ(txnParticipant.getTxnResourceStashReadConcernArgsForTest().getLevel(),
@@ -2660,8 +2684,7 @@ TEST_F(ShardTxnParticipantTest, StartOrContinueTxnWithDifferentReadConcernShould
 
 TEST_F(ShardTxnParticipantTest, StartOrContinueTxnWithEmptyReadConcernShouldContinue) {
     repl::ReadConcernArgs originalReadConcernArgs;
-    ASSERT_OK(originalReadConcernArgs.initialize(BSON("find"
-                                                      << "test")));
+    ASSERT_OK(originalReadConcernArgs.initialize(BSON("find" << "test")));
     repl::ReadConcernArgs::get(opCtx()) = originalReadConcernArgs;
 
     auto sessionCheckout = checkOutSession();
@@ -2899,7 +2922,9 @@ TEST_F(TransactionsMetricsTest, TrackTotalOpenTransactionsWithAbort) {
               beforeTransactionStart + 1U);
 
     // Tests that stashing the transaction resources does not affect the open transactions counter.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.stashTransactionResources(opCtx());
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getCurrentOpen(),
               beforeTransactionStart + 1U);
@@ -2921,7 +2946,9 @@ TEST_F(TransactionsMetricsTest, TrackTotalOpenTransactionsWithCommit) {
               beforeTransactionStart + 1U);
 
     // Tests that stashing the transaction resources does not affect the open transactions counter.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.stashTransactionResources(opCtx());
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getCurrentOpen(),
               beforeTransactionStart + 1U);
@@ -2954,7 +2981,9 @@ TEST_F(TransactionsMetricsTest, TrackTotalActiveAndInactiveTransactionsWithCommi
 
     // Tests that stashing the transaction resources decrements active counter and increments
     // inactive counter.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.stashTransactionResources(opCtx());
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getCurrentActive(), beforeActiveCounter);
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getCurrentInactive(),
@@ -2994,7 +3023,9 @@ TEST_F(TransactionsMetricsTest, TrackTotalActiveAndInactiveTransactionsWithStash
 
     // Tests that stashing the transaction resources decrements active counter and increments
     // inactive counter.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.stashTransactionResources(opCtx());
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getCurrentActive(), beforeActiveCounter);
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getCurrentInactive(),
@@ -3163,7 +3194,9 @@ TEST_F(TransactionsMetricsTest, SingleTransactionStatsDurationShouldBeSetUponCom
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
 
     // Advance the clock.
     tickSource->advance(Microseconds(100));
@@ -3181,7 +3214,9 @@ TEST_F(TransactionsMetricsTest, SingleTransactionStatsPreparedDurationShouldBeSe
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
 
     // Advance the clock.
     tickSource->advance(Microseconds(10));
@@ -3240,7 +3275,9 @@ TEST_F(TransactionsMetricsTest, SingleTransactionStatsDurationShouldKeepIncreasi
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
 
     tickSource->advance(Microseconds(100));
 
@@ -3272,7 +3309,9 @@ TEST_F(TransactionsMetricsTest,
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
 
     // Prepare the transaction and extend the duration in the prepared state.
     const auto [prepareTimestamp, namespaces] = txnParticipant.prepareTransaction(opCtx(), {});
@@ -3306,7 +3345,9 @@ TEST_F(TransactionsMetricsTest, SingleTransactionStatsDurationShouldKeepIncreasi
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
 
     tickSource->advance(Microseconds(100));
 
@@ -3338,7 +3379,9 @@ TEST_F(TransactionsMetricsTest,
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "abortTransaction");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
 
     // Prepare the transaction and extend the duration in the prepared state.
     txnParticipant.prepareTransaction(opCtx(), {});
@@ -3379,7 +3422,9 @@ TEST_F(TransactionsMetricsTest, TimeActiveMicrosShouldBeSetUponUnstashAndStash) 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     tickSource->advance(Microseconds(100));
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.stashTransactionResources(opCtx());
 
     // Advance clock during inactive period.
@@ -3491,7 +3536,9 @@ TEST_F(TransactionsMetricsTest, TimeActiveMicrosShouldIncreaseUntilStash) {
               Microseconds(200));
 
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.stashTransactionResources(opCtx());
 
     tickSource->advance(Microseconds(100));
@@ -3565,7 +3612,9 @@ TEST_F(TransactionsMetricsTest, AdditiveMetricsObjectsShouldBeAddedTogetherUponS
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.stashTransactionResources(opCtx());
 
     ASSERT(txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.equals(
@@ -3592,10 +3641,6 @@ TEST_F(TransactionsMetricsTest, AdditiveMetricsObjectsShouldBeAddedTogetherUponC
     txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.keysInserted =
         1;
     CurOp::get(opCtx())->debug().additiveMetrics.keysInserted = 1;
-    txnParticipant.getSingleTransactionStatsForTest()
-        .getOpDebug()
-        ->additiveMetrics.writeConflicts.store(6);
-    CurOp::get(opCtx())->debug().additiveMetrics.writeConflicts.store(3);
 
     auto additiveMetricsToCompare =
         txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics;
@@ -3603,7 +3648,9 @@ TEST_F(TransactionsMetricsTest, AdditiveMetricsObjectsShouldBeAddedTogetherUponC
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.commitUnpreparedTransaction(opCtx());
 
     ASSERT(txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.equals(
@@ -3630,10 +3677,6 @@ TEST_F(TransactionsMetricsTest, AdditiveMetricsObjectsShouldBeAddedTogetherUponA
     CurOp::get(opCtx())->debug().additiveMetrics.keysInserted = 1;
     txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.keysDeleted = 6;
     CurOp::get(opCtx())->debug().additiveMetrics.keysDeleted = 0;
-    txnParticipant.getSingleTransactionStatsForTest()
-        .getOpDebug()
-        ->additiveMetrics.writeConflicts.store(3);
-    CurOp::get(opCtx())->debug().additiveMetrics.writeConflicts.store(3);
 
     auto additiveMetricsToCompare =
         txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics;
@@ -3641,7 +3684,9 @@ TEST_F(TransactionsMetricsTest, AdditiveMetricsObjectsShouldBeAddedTogetherUponA
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.abortTransaction(opCtx());
 
     ASSERT(txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->additiveMetrics.equals(
@@ -3652,78 +3697,84 @@ TEST_F(TransactionsMetricsTest, StorageMetricsObjectsShouldBeAddedTogetherUponSt
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
 
-    // Initialize field values for both StorageMetrics objects.
-    txnParticipant.getSingleTransactionStatsForTest()
-        .getTransactionStorageMetrics()
-        .incrementPrepareReadConflicts(1);
-    shard_role_details::getRecoveryUnit(opCtx())->getStorageMetrics().incrementPrepareReadConflicts(
-        2);
+    // Initialize field values for transaction StorageMetrics objects.
+    auto& transactionStorageMetrics =
+        txnParticipant.getSingleTransactionStatsForTest().getTransactionStorageMetrics();
+    transactionStorageMetrics.incrementWriteConflicts(2);
+
+    // Update the operation StorageMetrics metrics
+    auto& operationStorageMetrics = StorageExecutionContext::get(opCtx())->getStorageMetrics();
+    operationStorageMetrics.incrementWriteConflicts(3);
 
     auto storageMetricsToCompare =
         txnParticipant.getSingleTransactionStatsForTest().getTransactionStorageMetrics();
-    storageMetricsToCompare += shard_role_details::getRecoveryUnit(opCtx())->getStorageMetrics();
+    storageMetricsToCompare += StorageExecutionContext::get(opCtx())->getStorageMetrics();
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.stashTransactionResources(opCtx());
 
-    ASSERT_EQ(txnParticipant.getSingleTransactionStatsForTest()
-                  .getTransactionStorageMetrics()
-                  .prepareReadConflicts.load(),
-              storageMetricsToCompare.prepareReadConflicts.load());
+    ASSERT(txnParticipant.getSingleTransactionStatsForTest().getTransactionStorageMetrics() ==
+           storageMetricsToCompare);
 }
 
 TEST_F(TransactionsMetricsTest, StorageMetricsObjectsShouldBeAddedTogetherUponCommit) {
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
 
-    // Initialize field values for both StorageMetrics objects.
-    txnParticipant.getSingleTransactionStatsForTest()
-        .getTransactionStorageMetrics()
-        .incrementPrepareReadConflicts(1);
-    shard_role_details::getRecoveryUnit(opCtx())->getStorageMetrics().incrementPrepareReadConflicts(
-        2);
+    // Initialize field values for transaction StorageMetrics objects.
+    auto& transactionStorageMetrics =
+        txnParticipant.getSingleTransactionStatsForTest().getTransactionStorageMetrics();
+    transactionStorageMetrics.incrementWriteConflicts(2);
+
+    // Update the operation StorageMetrics metrics
+    auto& operationStorageMetrics = StorageExecutionContext::get(opCtx())->getStorageMetrics();
+    operationStorageMetrics.incrementWriteConflicts(3);
 
     auto storageMetricsToCompare =
         txnParticipant.getSingleTransactionStatsForTest().getTransactionStorageMetrics();
-    storageMetricsToCompare += shard_role_details::getRecoveryUnit(opCtx())->getStorageMetrics();
+    storageMetricsToCompare += StorageExecutionContext::get(opCtx())->getStorageMetrics();
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.commitUnpreparedTransaction(opCtx());
 
-    ASSERT_EQ(txnParticipant.getSingleTransactionStatsForTest()
-                  .getTransactionStorageMetrics()
-                  .prepareReadConflicts.load(),
-              storageMetricsToCompare.prepareReadConflicts.load());
+    ASSERT(txnParticipant.getSingleTransactionStatsForTest().getTransactionStorageMetrics() ==
+           storageMetricsToCompare);
 }
 
 TEST_F(TransactionsMetricsTest, StorageMetricsObjectsShouldBeAddedTogetherUponAbort) {
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
 
-    // Initialize field values for both StorageMetrics objects.
-    txnParticipant.getSingleTransactionStatsForTest()
-        .getTransactionStorageMetrics()
-        .incrementPrepareReadConflicts(1);
-    shard_role_details::getRecoveryUnit(opCtx())->getStorageMetrics().incrementPrepareReadConflicts(
-        2);
+    // Initialize field values for transaction StorageMetrics objects.
+    auto& transactionStorageMetrics =
+        txnParticipant.getSingleTransactionStatsForTest().getTransactionStorageMetrics();
+    transactionStorageMetrics.incrementWriteConflicts(2);
+
+    // Update the operation StorageMetrics metrics
+    auto& operationStorageMetrics = StorageExecutionContext::get(opCtx())->getStorageMetrics();
+    operationStorageMetrics.incrementWriteConflicts(3);
 
     auto storageMetricsToCompare =
         txnParticipant.getSingleTransactionStatsForTest().getTransactionStorageMetrics();
-    storageMetricsToCompare += shard_role_details::getRecoveryUnit(opCtx())->getStorageMetrics();
+    storageMetricsToCompare += StorageExecutionContext::get(opCtx())->getStorageMetrics();
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.abortTransaction(opCtx());
 
-    ASSERT_EQ(txnParticipant.getSingleTransactionStatsForTest()
-                  .getTransactionStorageMetrics()
-                  .prepareReadConflicts.load(),
-              storageMetricsToCompare.prepareReadConflicts.load());
+    ASSERT(txnParticipant.getSingleTransactionStatsForTest().getTransactionStorageMetrics() ==
+           storageMetricsToCompare);
 }
 
 TEST_F(TransactionsMetricsTest, TimeInactiveMicrosShouldBeSetUponUnstashAndStash) {
@@ -3754,7 +3805,9 @@ TEST_F(TransactionsMetricsTest, TimeInactiveMicrosShouldBeSetUponUnstashAndStash
               Microseconds{200});
 
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.stashTransactionResources(opCtx());
 
     tickSource->advance(Microseconds(100));
@@ -3818,7 +3871,9 @@ TEST_F(TransactionsMetricsTest, TimeInactiveMicrosShouldIncreaseUntilCommit) {
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.commitUnpreparedTransaction(opCtx());
 
     tickSource->advance(Microseconds(100));
@@ -3856,11 +3911,9 @@ TEST_F(TransactionsMetricsTest, ReportStashedResources) {
     ClientMetadata::setAndFinalize(opCtx()->getClient(), std::move(clientMetadata.getValue()));
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
     // Perform initial unstash which sets up a WriteUnitOfWork.
@@ -3883,9 +3936,9 @@ TEST_F(TransactionsMetricsTest, ReportStashedResources) {
     auto transactionDocument = stashedState.getObjectField("transaction");
     auto parametersDocument = transactionDocument.getObjectField("parameters");
 
-    ASSERT_EQ(stashedState.getField("host").valueStringData().toString(),
+    ASSERT_EQ(stashedState.getField("host").valueStringData(),
               prettyHostNameAndPort(opCtx()->getClient()->getLocalPort()));
-    ASSERT_EQ(stashedState.getField("desc").valueStringData().toString(), "inactive transaction");
+    ASSERT_EQ(stashedState.getField("desc").valueStringData(), "inactive transaction");
     ASSERT_BSONOBJ_EQ(stashedState.getField("lsid").Obj(), _sessionId.toBSON());
     ASSERT_EQ(parametersDocument.getField("txnNumber").numberLong(), _txnNumber);
     ASSERT_EQ(parametersDocument.getField("autocommit").boolean(), autocommit);
@@ -3901,9 +3954,9 @@ TEST_F(TransactionsMetricsTest, ReportStashedResources) {
         startTime + Seconds(gTransactionLifetimeLimitSeconds.load()));
     ASSERT_EQ(transactionDocument.getField("timePreparedMicros").numberLong(), preparedDuration);
 
-    ASSERT_EQ(stashedState.getField("client").valueStringData().toString(), "");
+    ASSERT_EQ(stashedState.getField("client").valueStringData(), "");
     ASSERT_EQ(stashedState.getField("connectionId").numberLong(), 0);
-    ASSERT_EQ(stashedState.getField("appName").valueStringData().toString(), "appName");
+    ASSERT_EQ(stashedState.getField("appName").valueStringData(), "appName");
     ASSERT_BSONOBJ_EQ(stashedState.getField("clientMetadata").Obj(), obj.getField("client").Obj());
     ASSERT_EQ(stashedState.getField("waitingForLock").boolean(), false);
     ASSERT_EQ(stashedState.getField("active").boolean(), false);
@@ -3939,11 +3992,9 @@ TEST_F(TransactionsMetricsTest, ReportUnstashedResources) {
     ASSERT(shard_role_details::getRecoveryUnit(opCtx()));
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
     const auto autocommit = false;
@@ -4106,7 +4157,9 @@ TEST_F(TransactionsMetricsTest, LastClientInfoShouldUpdateUponStash) {
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.stashTransactionResources(opCtx());
 
     // LastClientInfo should have been set.
@@ -4140,7 +4193,9 @@ TEST_F(TransactionsMetricsTest, LastClientInfoShouldUpdateUponCommit) {
     auto txnParticipant = TransactionParticipant::get(opCtx());
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
     // The transaction machinery cannot store an empty locker.
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
     txnParticipant.commitUnpreparedTransaction(opCtx());
 
     // LastClientInfo should have been set.
@@ -4182,266 +4237,42 @@ void setupAdditiveMetrics(const int metricValue, OperationContext* opCtx) {
     CurOp::get(opCtx)->debug().additiveMetrics.ndeleted = metricValue;
     CurOp::get(opCtx)->debug().additiveMetrics.keysInserted = metricValue;
     CurOp::get(opCtx)->debug().additiveMetrics.keysDeleted = metricValue;
-    CurOp::get(opCtx)->debug().additiveMetrics.writeConflicts.store(metricValue);
+}
+
+void setupPrepareConflictMetrics(const int metricValue, OperationContext* opCtx) {
+    auto& tracker = StorageExecutionContext::get(opCtx)->getPrepareConflictTracker();
+    auto tickSource = opCtx->getServiceContext()->getTickSource();
+    for (int i = 0; i < metricValue; i++) {
+        tracker.beginPrepareConflict(*tickSource);
+        tracker.endPrepareConflict(*tickSource);
+    }
 }
 
 /*
  * Sets up the storage metrics for Transactions Metrics test.
  */
-void setupStorageMetrics(const int metricValue, RecoveryUnit* ru) {
-    ru->getStorageMetrics().prepareReadConflicts.store(metricValue);
+void setupStorageMetrics(const int metricValue, OperationContext* opCtx) {
+    auto& storageMetrics = StorageExecutionContext::get(opCtx)->getStorageMetrics();
+    storageMetrics.writeConflicts.store(metricValue);
 }
 
 void setupMetrics(const int metricValue, OperationContext* opCtx) {
     setupAdditiveMetrics(metricValue, opCtx);
-    setupStorageMetrics(metricValue, shard_role_details::getRecoveryUnit(opCtx));
-}
-
-/*
- * Builds expected parameters info string.
- */
-void buildParametersInfoString(StringBuilder* sb,
-                               LogicalSessionId sessionId,
-                               const TxnNumberAndRetryCounter txnNumberAndRetryCounter,
-                               const APIParameters apiParameters,
-                               const repl::ReadConcernArgs readConcernArgs,
-                               bool autocommitVal) {
-    BSONObjBuilder lsidBuilder;
-    sessionId.serialize(&lsidBuilder);
-    auto autocommitString = autocommitVal ? "true" : "false";
-    auto apiVersionString = apiParameters.getAPIVersion().value_or("1");
-    auto apiStrictString = apiParameters.getAPIStrict().value_or(false) ? "true" : "false";
-    auto apiDeprecationErrorsString =
-        apiParameters.getAPIDeprecationErrors().value_or(false) ? "true" : "false";
-    (*sb) << "parameters:{ lsid: " << lsidBuilder.done().toString()
-          << ", txnNumber: " << txnNumberAndRetryCounter.getTxnNumber()
-          << ", txnRetryCounter: " << txnNumberAndRetryCounter.getTxnRetryCounter()
-          << ", autocommit: " << autocommitString << ", apiVersion: \"" << apiVersionString
-          << "\", apiStrict: " << apiStrictString
-          << ", apiDeprecationErrors: " << apiDeprecationErrorsString
-          << ", readConcern: " << readConcernArgs.toBSON().getObjectField("readConcern") << " },";
-}
-
-/*
- * Builds expected single transaction stats info string.
- */
-void buildSingleTransactionStatsString(StringBuilder* sb, const int metricValue) {
-    (*sb) << " keysExamined:" << metricValue << " docsExamined:" << metricValue
-          << " nMatched:" << metricValue << " nModified:" << metricValue
-          << " ninserted:" << metricValue << " ndeleted:" << metricValue
-          << " keysInserted:" << metricValue << " keysDeleted:" << metricValue
-          << " writeConflicts:" << metricValue << " prepareReadConflicts:" << metricValue;
-}
-
-/*
- * Builds the time active and time inactive info string.
- */
-void buildTimeActiveInactiveString(StringBuilder* sb,
-                                   TransactionParticipant::Participant txnParticipant,
-                                   TickSource* tickSource,
-                                   TickSource::Tick curTick) {
-    // Add time active micros to string.
-    (*sb) << " timeActiveMicros:"
-          << durationCount<Microseconds>(
-                 txnParticipant.getSingleTransactionStatsForTest().getTimeActiveMicros(tickSource,
-                                                                                       curTick));
-
-    // Add time inactive micros to string.
-    (*sb) << " timeInactiveMicros:"
-          << durationCount<Microseconds>(
-                 txnParticipant.getSingleTransactionStatsForTest().getTimeInactiveMicros(tickSource,
-                                                                                         curTick));
-}
-
-/*
- * Builds the total prepared duration info string.
- */
-void buildPreparedDurationString(StringBuilder* sb,
-                                 TransactionParticipant::Participant txnParticipant,
-                                 TickSource* tickSource,
-                                 TickSource::Tick curTick) {
-    (*sb) << " totalPreparedDurationMicros:"
-          << durationCount<Microseconds>(
-                 txnParticipant.getSingleTransactionStatsForTest().getPreparedDuration(tickSource,
-                                                                                       curTick));
-}
-
-/*
- * Builds the entire expected transaction info string and returns it.
- */
-std::string buildTransactionInfoString(OperationContext* opCtx,
-                                       TransactionParticipant::Participant txnParticipant,
-                                       std::string terminationCause,
-                                       const LogicalSessionId sessionId,
-                                       const TxnNumberAndRetryCounter txnNumberAndRetryCounter,
-                                       const int metricValue,
-                                       const bool wasPrepared,
-                                       bool autocommitVal = false,
-                                       boost::optional<repl::OpTime> prepareOpTime = boost::none) {
-    // Calling transactionInfoForLog to get the actual transaction info string.
-    const auto lockerInfo =
-        shard_role_details::getLocker(opCtx)->getLockerInfo(CurOp::get(*opCtx)->getLockStatsBase());
-    // Building expected transaction info string.
-    StringBuilder parametersInfo;
-    // autocommit must be false for a multi statement transaction, so
-    // getTransactionInfoForLogForTest should theoretically always print false. In certain unit
-    // tests, we compare its output to the output generated in this function.
-    //
-    // Since we clear the state of a transaction on abort, if getTransactionInfoForLogForTest is
-    // called after a transaction is already aborted, it will encounter boost::none for the
-    // autocommit value. In that case, it will print out true.
-    //
-    // In cases where we call getTransactionInfoForLogForTest after aborting a transaction
-    // and check if the output matches this function's output, we must explicitly set autocommitVal
-    // to true.
-    buildParametersInfoString(&parametersInfo,
-                              sessionId,
-                              txnNumberAndRetryCounter,
-                              APIParameters::get(opCtx),
-                              repl::ReadConcernArgs::get(opCtx),
-                              autocommitVal);
-
-    StringBuilder readTimestampInfo;
-    readTimestampInfo
-        << " readTimestamp:"
-        << txnParticipant.getSingleTransactionStatsForTest().getReadTimestamp().toString() << ",";
-
-    StringBuilder singleTransactionStatsInfo;
-    buildSingleTransactionStatsString(&singleTransactionStatsInfo, metricValue);
-
-    auto tickSource = opCtx->getServiceContext()->getTickSource();
-    StringBuilder timeActiveAndInactiveInfo;
-    buildTimeActiveInactiveString(
-        &timeActiveAndInactiveInfo, txnParticipant, tickSource, tickSource->getTicks());
-
-    BSONObjBuilder locks;
-    lockerInfo.stats.report(&locks);
-
-    // Puts all the substrings together into one expected info string. The expected info string will
-    // look something like this:
-    // parameters:{ lsid: { id: UUID("f825288c-100e-49a1-9fd7-b95c108049e6"), uid: BinData(0,
-    // E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855) }, txnNumber: 1,
-    // autocommit: false }, readTimestamp:Timestamp(0, 0), keysExamined:1 docsExamined:1 nMatched:1
-    // nModified:1 ninserted:1 ndeleted:1 keysInserted:1 keysDeleted:1
-    // writeConflicts:1 prepareReadConflicts:1 terminationCause:committed timeActiveMicros:3
-    // timeInactiveMicros:2 numYields:0 locks:{ Global: { acquireCount: { r: 6, w: 4 } }, Database:
-    // { acquireCount: { r: 1, w: 1, W: 2 } }, Collection: { acquireCount: { R: 1 } }, oplog: {
-    // acquireCount: { W: 1 } } } wasPrepared:1 totalPreparedDurationMicros:10
-    // prepareOpTime:<OpTime> 0ms
-    StringBuilder expectedTransactionInfo;
-    expectedTransactionInfo << parametersInfo.str() << readTimestampInfo.str()
-                            << singleTransactionStatsInfo.str()
-                            << " terminationCause:" << terminationCause
-                            << timeActiveAndInactiveInfo.str() << " numYields:" << 0
-                            << " locks:" << locks.done().toString();
-
-    if (auto& storageStats = CurOp::get(opCtx)->debug().storageStats) {
-        expectedTransactionInfo << " storage:" << storageStats->toBSON();
-    }
-
-    expectedTransactionInfo << " wasPrepared:" << wasPrepared;
-
-    if (wasPrepared) {
-        StringBuilder totalPreparedDuration;
-        buildPreparedDurationString(
-            &totalPreparedDuration, txnParticipant, tickSource, tickSource->getTicks());
-        expectedTransactionInfo << totalPreparedDuration.str();
-        expectedTransactionInfo << " prepareOpTime:"
-                                << (prepareOpTime ? prepareOpTime->toString()
-                                                  : txnParticipant.getPrepareOpTime().toString());
-    }
-
-    expectedTransactionInfo
-        << " queues:"
-        << txnParticipant.getSingleTransactionStatsForTest().getQueueStats().toBson().toString();
-
-    expectedTransactionInfo << ", "
-                            << duration_cast<Milliseconds>(
-                                   txnParticipant.getSingleTransactionStatsForTest().getDuration(
-                                       tickSource, tickSource->getTicks()));
-    return expectedTransactionInfo.str();
-}
-
-
-/*
- * Builds expected parameters info BSON.
- */
-void buildParametersInfoBSON(BSONObjBuilder* builder,
-                             LogicalSessionId sessionId,
-                             const TxnNumber txnNum,
-                             const repl::ReadConcernArgs readConcernArgs,
-                             bool autocommitVal) {
-    BSONObjBuilder lsidBuilder;
-    sessionId.serialize(&lsidBuilder);
-    auto autocommitString = autocommitVal ? "true" : "false";
-
-    BSONObjBuilder params = builder->subobjStart("parameters");
-    params.append("lsid", lsidBuilder.obj());
-    params.append("txnNumber", txnNum);
-    params.append("autocommit", autocommitString);
-    readConcernArgs.appendInfo(&params);
-}
-
-/*
- * Builds expected single transaction stats info string.
- */
-void buildSingleTransactionStatsBSON(BSONObjBuilder* builder, const int metricValue) {
-    builder->append("keysExamined", metricValue);
-    builder->append("docsExamined", metricValue);
-    builder->append("nMatched", metricValue);
-    builder->append("nModified", metricValue);
-    builder->append("ninserted", metricValue);
-    builder->append("ndeleted", metricValue);
-    builder->append("keysInserted", metricValue);
-    builder->append("keysDeleted", metricValue);
-    builder->append("writeConflicts", metricValue);
-    builder->append("prepareReadConflicts", metricValue);
-}
-
-/*
- * Builds the time active and time inactive info BSON.
- */
-void buildTimeActiveInactiveBSON(BSONObjBuilder* builder,
-                                 TransactionParticipant::Participant txnParticipant,
-                                 TickSource* tickSource,
-                                 TickSource::Tick curTick) {
-    // Add time active micros to string.
-    builder->append("timeActiveMicros",
-                    durationCount<Microseconds>(
-                        txnParticipant.getSingleTransactionStatsForTest().getTimeActiveMicros(
-                            tickSource, curTick)));
-
-    // Add time inactive micros to string.
-    builder->append("timeInactiveMicros",
-                    durationCount<Microseconds>(
-                        txnParticipant.getSingleTransactionStatsForTest().getTimeInactiveMicros(
-                            tickSource, curTick)));
-}
-
-/*
- * Builds the total prepared duration info BSON.
- */
-void buildPreparedDurationBSON(BSONObjBuilder* builder,
-                               TransactionParticipant::Participant txnParticipant,
-                               TickSource* tickSource,
-                               TickSource::Tick curTick) {
-    builder->append("totalPreparedDurationMicros",
-                    durationCount<Microseconds>(
-                        txnParticipant.getSingleTransactionStatsForTest().getPreparedDuration(
-                            tickSource, curTick)));
+    setupPrepareConflictMetrics(metricValue, opCtx);
+    setupStorageMetrics(metricValue, opCtx);
 }
 
 /*
  * Builds the entire expected transaction info BSON and returns it.
- *
- * Must be kept in sync with TransactionParticipant::Participant::_transactionInfoForLog.
  */
 BSONObj buildTransactionInfoBSON(OperationContext* opCtx,
                                  TransactionParticipant::Participant txnParticipant,
                                  std::string terminationCause,
+                                 const APIParameters apiParameters,
+                                 const repl::ReadConcernArgs readConcernArgs,
                                  const LogicalSessionId sessionId,
-                                 const TxnNumber txnNum,
-                                 const int metricValue,
+                                 const TxnNumberAndRetryCounter txnNumberAndRetryCounter,
+                                 const int64_t metricValue,
                                  const bool wasPrepared,
                                  bool autocommitVal = false,
                                  boost::optional<repl::OpTime> prepareOpTime = boost::none) {
@@ -4464,50 +4295,89 @@ BSONObj buildTransactionInfoBSON(OperationContext* opCtx,
 
     BSONObjBuilder logLine;
     {
-        BSONObjBuilder attrs = logLine.subobjStart("attr");
+        BSONObjBuilder lsidBuilder;
+        sessionId.serialize(&lsidBuilder);
 
-        buildParametersInfoBSON(
-            &attrs, sessionId, txnNum, repl::ReadConcernArgs::get(opCtx), autocommitVal);
+        BSONObjBuilder params = logLine.subobjStart("parameters");
+        params.append("lsid", lsidBuilder.obj());
+        params.append("txnNumber", txnNumberAndRetryCounter.getTxnNumber());
+        params.append("txnRetryCounter", *txnNumberAndRetryCounter.getTxnRetryCounter());
+        params.append("autocommit", autocommitVal);
+        apiParameters.appendInfo(&params);
+        readConcernArgs.appendInfo(&params);
+        params.done();
 
-
-        attrs.append(
+        logLine.append(
             "readTimestamp",
             txnParticipant.getSingleTransactionStatsForTest().getReadTimestamp().toString());
 
-        buildSingleTransactionStatsBSON(&attrs, metricValue);
+        logLine.append("keysExamined", metricValue);
+        logLine.append("docsExamined", metricValue);
+        logLine.append("nMatched", metricValue);
+        logLine.append("nModified", metricValue);
+        logLine.append("ninserted", metricValue);
+        logLine.append("ndeleted", metricValue);
+        logLine.append("keysInserted", metricValue);
+        logLine.append("keysDeleted", metricValue);
+        logLine.append("writeConflicts", metricValue);
+        logLine.append("prepareReadConflicts", metricValue);
+        logLine.append("terminationCause", terminationCause);
 
-        attrs.append("terminationCause", terminationCause);
-        auto tickSource = opCtx->getServiceContext()->getTickSource();
-        buildTimeActiveInactiveBSON(&attrs, txnParticipant, tickSource, tickSource->getTicks());
+        const auto tickSource = opCtx->getServiceContext()->getTickSource();
+        const auto curTick = tickSource->getTicks();
+        logLine.append("timeActiveMicros",
+                       durationCount<Microseconds>(
+                           txnParticipant.getSingleTransactionStatsForTest().getTimeActiveMicros(
+                               tickSource, curTick)));
+        logLine.append("timeInactiveMicros",
+                       durationCount<Microseconds>(
+                           txnParticipant.getSingleTransactionStatsForTest().getTimeInactiveMicros(
+                               tickSource, curTick)));
 
-        attrs.append("numYields", 0);
+        logLine.append("numYields", 0);
 
         BSONObjBuilder locks;
         lockerInfo.stats.report(&locks);
-        attrs.append("locks", locks.obj());
+        logLine.append("locks", locks.obj());
 
-        attrs.append("wasPrepared", wasPrepared);
-
-        if (wasPrepared) {
-            buildPreparedDurationBSON(&attrs, txnParticipant, tickSource, tickSource->getTicks());
-            attrs.append("prepareOpTime",
-                         (prepareOpTime ? prepareOpTime->toBSON()
-                                        : txnParticipant.getPrepareOpTime().toBSON()));
+        if (const auto& stats =
+                txnParticipant.getSingleTransactionStatsForTest().getOpDebug()->storageStats;
+            stats) {
+            logLine.append("storage", stats->toBSON());
         }
 
-        attrs.append("queues",
-                     txnParticipant.getSingleTransactionStatsForTest().getQueueStats().toBson());
+        logLine.append("wasPrepared", wasPrepared);
 
-        attrs.append("durationMillis",
-                     duration_cast<Milliseconds>(
-                         txnParticipant.getSingleTransactionStatsForTest().getDuration(
-                             tickSource, tickSource->getTicks()))
-                         .count());
+        if (wasPrepared) {
+            logLine.append(
+                "totalPreparedDurationMicros",
+                durationCount<Microseconds>(
+                    txnParticipant.getSingleTransactionStatsForTest().getPreparedDuration(
+                        tickSource, curTick)));
+            prepareOpTime.value_or(txnParticipant.getPrepareOpTime())
+                .append("prepareOpTime", &logLine);
+        }
+
+        logLine.append("queues",
+                       txnParticipant.getSingleTransactionStatsForTest().getQueueStats().toBson());
+
+        logLine.append("durationMillis",
+                       duration_cast<Milliseconds>(
+                           txnParticipant.getSingleTransactionStatsForTest().getDuration(
+                               tickSource, tickSource->getTicks()))
+                           .count());
     }
 
     return logLine.obj();
 }
 
+BSONObj formatBSONForLogLine(const BSONObj input) {
+    BSONObjBuilder builder;
+    BSONObjBuilder sub = builder.subobjStart("attr");
+    sub.appendElements(input);
+    sub.done();
+    return builder.obj();
+}
 
 TEST_F(TransactionsMetricsTest, TestTransactionInfoForLogAfterCommit) {
     // Initialize SingleTransactionStats AdditiveMetrics objects.
@@ -4523,11 +4393,9 @@ TEST_F(TransactionsMetricsTest, TestTransactionInfoForLogAfterCommit) {
     APIParameters::get(opCtx()) = apiParameters;
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
 
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
@@ -4537,19 +4405,21 @@ TEST_F(TransactionsMetricsTest, TestTransactionInfoForLogAfterCommit) {
     txnParticipant.commitUnpreparedTransaction(opCtx());
 
     const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
-    std::string testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
+    const auto testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
         opCtx(), &lockerInfo.stats, true, apiParameters, readConcernArgs);
 
-    std::string expectedTransactionInfo =
-        buildTransactionInfoString(opCtx(),
-                                   txnParticipant,
-                                   "committed",
-                                   *opCtx()->getLogicalSessionId(),
-                                   {*opCtx()->getTxnNumber(), *opCtx()->getTxnRetryCounter()},
-                                   metricValue,
-                                   false);
+    const auto expectedTransactionInfo =
+        buildTransactionInfoBSON(opCtx(),
+                                 txnParticipant,
+                                 "committed",
+                                 apiParameters,
+                                 readConcernArgs,
+                                 *opCtx()->getLogicalSessionId(),
+                                 {*opCtx()->getTxnNumber(), *opCtx()->getTxnRetryCounter()},
+                                 metricValue,
+                                 false);
 
-    ASSERT_EQ(testTransactionInfo, expectedTransactionInfo);
+    ASSERT_BSONOBJ_EQ(testTransactionInfo, expectedTransactionInfo);
 }
 
 TEST_F(TransactionsMetricsTest, TestPreparedTransactionInfoForLogAfterCommit) {
@@ -4568,11 +4438,9 @@ TEST_F(TransactionsMetricsTest, TestPreparedTransactionInfoForLogAfterCommit) {
     APIParameters::get(opCtx()) = apiParameters;
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
 
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
@@ -4586,19 +4454,21 @@ TEST_F(TransactionsMetricsTest, TestPreparedTransactionInfoForLogAfterCommit) {
     txnParticipant.commitPreparedTransaction(opCtx(), prepareTimestamp, {});
 
     const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
-    std::string testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
+    const auto testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
         opCtx(), &lockerInfo.stats, true, apiParameters, readConcernArgs);
 
-    std::string expectedTransactionInfo =
-        buildTransactionInfoString(opCtx(),
-                                   txnParticipant,
-                                   "committed",
-                                   *opCtx()->getLogicalSessionId(),
-                                   {*opCtx()->getTxnNumber(), *opCtx()->getTxnRetryCounter()},
-                                   metricValue,
-                                   true);
+    const auto expectedTransactionInfo =
+        buildTransactionInfoBSON(opCtx(),
+                                 txnParticipant,
+                                 "committed",
+                                 apiParameters,
+                                 readConcernArgs,
+                                 *opCtx()->getLogicalSessionId(),
+                                 {*opCtx()->getTxnNumber(), *opCtx()->getTxnRetryCounter()},
+                                 metricValue,
+                                 true);
 
-    ASSERT_EQ(testTransactionInfo, expectedTransactionInfo);
+    ASSERT_BSONOBJ_EQ(testTransactionInfo, expectedTransactionInfo);
 }
 
 TEST_F(TransactionsMetricsTest, TestTransactionInfoForLogAfterAbort) {
@@ -4615,11 +4485,9 @@ TEST_F(TransactionsMetricsTest, TestTransactionInfoForLogAfterAbort) {
     APIParameters::get(opCtx()) = apiParameters;
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -4629,20 +4497,22 @@ TEST_F(TransactionsMetricsTest, TestTransactionInfoForLogAfterAbort) {
 
     const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
 
-    std::string testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
+    const auto testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
         opCtx(), &lockerInfo.stats, false, apiParameters, readConcernArgs);
 
-    std::string expectedTransactionInfo =
-        buildTransactionInfoString(opCtx(),
-                                   txnParticipant,
-                                   "aborted",
-                                   *opCtx()->getLogicalSessionId(),
-                                   {*opCtx()->getTxnNumber(), *opCtx()->getTxnRetryCounter()},
-                                   metricValue,
-                                   false,
-                                   true);
+    const auto expectedTransactionInfo =
+        buildTransactionInfoBSON(opCtx(),
+                                 txnParticipant,
+                                 "aborted",
+                                 apiParameters,
+                                 readConcernArgs,
+                                 *opCtx()->getLogicalSessionId(),
+                                 {*opCtx()->getTxnNumber(), *opCtx()->getTxnRetryCounter()},
+                                 metricValue,
+                                 false,
+                                 true);
 
-    ASSERT_EQ(testTransactionInfo, expectedTransactionInfo);
+    ASSERT_BSONOBJ_EQ(testTransactionInfo, expectedTransactionInfo);
 }
 
 TEST_F(TransactionsMetricsTest, TestPreparedTransactionInfoForLogAfterAbort) {
@@ -4661,11 +4531,9 @@ TEST_F(TransactionsMetricsTest, TestPreparedTransactionInfoForLogAfterAbort) {
     APIParameters::get(opCtx()) = apiParameters;
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
     // Prepare the transaction and extend the duration in the prepared state.
@@ -4678,20 +4546,22 @@ TEST_F(TransactionsMetricsTest, TestPreparedTransactionInfoForLogAfterAbort) {
 
     const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
 
-    std::string testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
+    const auto testTransactionInfo = txnParticipant.getTransactionInfoForLogForTest(
         opCtx(), &lockerInfo.stats, false, apiParameters, readConcernArgs);
 
-    std::string expectedTransactionInfo =
-        buildTransactionInfoString(opCtx(),
-                                   txnParticipant,
-                                   "aborted",
-                                   *opCtx()->getLogicalSessionId(),
-                                   {*opCtx()->getTxnNumber(), *opCtx()->getTxnRetryCounter()},
-                                   metricValue,
-                                   true,
-                                   true);
+    const auto expectedTransactionInfo =
+        buildTransactionInfoBSON(opCtx(),
+                                 txnParticipant,
+                                 "aborted",
+                                 apiParameters,
+                                 readConcernArgs,
+                                 *opCtx()->getLogicalSessionId(),
+                                 {*opCtx()->getTxnNumber(), *opCtx()->getTxnRetryCounter()},
+                                 metricValue,
+                                 true,
+                                 true);
 
-    ASSERT_EQ(testTransactionInfo, expectedTransactionInfo);
+    ASSERT_BSONOBJ_EQ(testTransactionInfo, expectedTransactionInfo);
 }
 
 DEATH_TEST_F(TransactionsMetricsTest, TestTransactionInfoForLogWithNoLockerInfoStats, "invariant") {
@@ -4704,11 +4574,9 @@ DEATH_TEST_F(TransactionsMetricsTest, TestTransactionInfoForLogWithNoLockerInfoS
     APIParameters::get(opCtx()) = apiParameters;
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -4749,21 +4617,18 @@ TEST_F(TransactionsMetricsTest, TransactionLogAggregatesQueueStats) {
     APIParameters::get(opCtx()) = apiParameters;
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
     const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
 
     auto participant = TransactionParticipant::get(opCtx());
-    BSONObj transactionLog = participant.getTransactionInfoBSONForLogForTest(
+    BSONObj transactionLog = participant.getTransactionInfoForLogForTest(
         opCtx(), &lockerInfo.stats, true, apiParameters, readConcernArgs);
 
-    BSONObj logAttr = transactionLog.getObjectField("attr");
-    ASSERT_TRUE(logAttr.getField("queues").isABSONObj());
-    BSONObj queueBsonStats = logAttr.getObjectField("queues");
+    ASSERT_TRUE(transactionLog.getField("queues").isABSONObj());
+    BSONObj queueBsonStats = transactionLog.getObjectField("queues");
 
     int expectedVal = baseValue * numIterations;
     auto expectedBson = BSON(
@@ -4785,11 +4650,9 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterSlowCommit) {
     APIParameters::get(opCtx()) = apiParameters;
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -4818,15 +4681,15 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterSlowCommit) {
 
     tickSource->advance(Microseconds(11 * 1000));
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     txnParticipant.commitUnpreparedTransaction(opCtx());
-    stopCapturingLogMessages();
+    logs.stop();
 
     const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
 
-    BSONObj expected = txnParticipant.getTransactionInfoBSONForLogForTest(
+    BSONObj expected = txnParticipant.getTransactionInfoForLogForTest(
         opCtx(), &lockerInfo.stats, true, apiParameters, readConcernArgs);
-    ASSERT_EQUALS(1, countBSONFormatLogLinesIsSubset(expected));
+    ASSERT_EQUALS(1, logs.countBSONContainingSubset(formatBSONForLogLine(expected)));
 }
 
 TEST_F(TransactionsMetricsTest, LogPreparedTransactionInfoAfterSlowCommit) {
@@ -4841,11 +4704,9 @@ TEST_F(TransactionsMetricsTest, LogPreparedTransactionInfoAfterSlowCommit) {
     APIParameters::get(opCtx()) = apiParameters;
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -4871,28 +4732,31 @@ TEST_F(TransactionsMetricsTest, LogPreparedTransactionInfoAfterSlowCommit) {
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
     const auto [prepareTimestamp, namespaces] = txnParticipant.prepareTransaction(opCtx(), {});
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     txnParticipant.commitPreparedTransaction(opCtx(), prepareTimestamp, {});
-    stopCapturingLogMessages();
+    logs.stop();
 
     const auto lockerInfo = shard_role_details::getLocker(opCtx())->getLockerInfo(boost::none);
 
-    BSONObj expected = txnParticipant.getTransactionInfoBSONForLogForTest(
+    BSONObj expected = txnParticipant.getTransactionInfoForLogForTest(
         opCtx(), &lockerInfo.stats, true, apiParameters, readConcernArgs);
-    ASSERT_EQUALS(1, countBSONFormatLogLinesIsSubset(expected));
+    ASSERT_EQUALS(1, logs.countBSONContainingSubset(formatBSONForLogLine(expected)));
 }
 
 TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterSlowAbort) {
     auto tickSource = mockTickSource();
 
     auto sessionCheckout = checkOutSession();
+    APIParameters apiParameters = APIParameters();
+    apiParameters.setAPIVersion("2");
+    apiParameters.setAPIStrict(true);
+    apiParameters.setAPIDeprecationErrors(true);
+    APIParameters::get(opCtx()) = apiParameters;
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -4917,20 +4781,22 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterSlowAbort) {
 
     tickSource->advance(Microseconds(11 * 1000));
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     txnParticipant.abortTransaction(opCtx());
-    stopCapturingLogMessages();
+    logs.stop();
 
+    const auto expectedTransactionInfo =
+        buildTransactionInfoBSON(opCtx(),
+                                 txnParticipant,
+                                 "aborted",
+                                 apiParameters,
+                                 readConcernArgs,
+                                 *opCtx()->getLogicalSessionId(),
+                                 {*opCtx()->getTxnNumber(), *opCtx()->getTxnRetryCounter()},
+                                 metricValue,
+                                 false);
 
-    auto expectedTransactionInfo = buildTransactionInfoBSON(opCtx(),
-                                                            txnParticipant,
-                                                            "aborted",
-                                                            *opCtx()->getLogicalSessionId(),
-                                                            *opCtx()->getTxnNumber(),
-                                                            metricValue,
-                                                            false);
-
-    ASSERT_EQUALS(1, countBSONFormatLogLinesIsSubset(expectedTransactionInfo));
+    ASSERT_EQUALS(1, logs.countBSONContainingSubset(formatBSONForLogLine(expectedTransactionInfo)));
 }
 
 TEST_F(TransactionsMetricsTest, LogPreparedTransactionInfoAfterSlowAbort) {
@@ -4945,11 +4811,9 @@ TEST_F(TransactionsMetricsTest, LogPreparedTransactionInfoAfterSlowAbort) {
     APIParameters::get(opCtx()) = apiParameters;
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -4977,21 +4841,24 @@ TEST_F(TransactionsMetricsTest, LogPreparedTransactionInfoAfterSlowAbort) {
 
     auto prepareOpTime = txnParticipant.getPrepareOpTime();
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     txnParticipant.abortTransaction(opCtx());
-    stopCapturingLogMessages();
+    logs.stop();
 
+    const auto expectedTransactionInfo =
+        buildTransactionInfoBSON(opCtx(),
+                                 txnParticipant,
+                                 "aborted",
+                                 apiParameters,
+                                 readConcernArgs,
+                                 *opCtx()->getLogicalSessionId(),
+                                 {*opCtx()->getTxnNumber(), *opCtx()->getTxnRetryCounter()},
+                                 metricValue,
+                                 true,
 
-    auto expectedTransactionInfo = buildTransactionInfoBSON(opCtx(),
-                                                            txnParticipant,
-                                                            "aborted",
-                                                            *opCtx()->getLogicalSessionId(),
-                                                            *opCtx()->getTxnNumber(),
-                                                            metricValue,
-                                                            true,
-                                                            false,
-                                                            prepareOpTime);
-    ASSERT_EQUALS(1, countBSONFormatLogLinesIsSubset(expectedTransactionInfo));
+                                 false,
+                                 prepareOpTime);
+    ASSERT_EQUALS(1, logs.countBSONContainingSubset(formatBSONForLogLine(expectedTransactionInfo)));
 }
 
 TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterExceptionInPrepare) {
@@ -5005,11 +4872,9 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterExceptionInPrepare) {
     APIParameters::get(opCtx()) = apiParameters;
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -5036,23 +4901,26 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterExceptionInPrepare) {
 
     _opObserver->postTransactionPrepareThrowsException = true;
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     ASSERT_THROWS_CODE(txnParticipant.prepareTransaction(opCtx(), {}),
                        AssertionException,
                        ErrorCodes::OperationFailed);
     ASSERT_FALSE(_opObserver->transactionPrepared);
     ASSERT(txnParticipant.transactionIsAborted());
-    stopCapturingLogMessages();
+    logs.stop();
 
-    auto expectedTransactionInfo = buildTransactionInfoBSON(opCtx(),
-                                                            txnParticipant,
-                                                            "aborted",
-                                                            *opCtx()->getLogicalSessionId(),
-                                                            *opCtx()->getTxnNumber(),
-                                                            metricValue,
-                                                            false);
+    const auto expectedTransactionInfo =
+        buildTransactionInfoBSON(opCtx(),
+                                 txnParticipant,
+                                 "aborted",
+                                 apiParameters,
+                                 readConcernArgs,
+                                 *opCtx()->getLogicalSessionId(),
+                                 {*opCtx()->getTxnNumber(), *opCtx()->getTxnRetryCounter()},
+                                 metricValue,
+                                 false);
 
-    ASSERT_EQUALS(1, countBSONFormatLogLinesIsSubset(expectedTransactionInfo));
+    ASSERT_EQUALS(1, logs.countBSONContainingSubset(formatBSONForLogLine(expectedTransactionInfo)));
 }
 
 TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterSlowStashedAbort) {
@@ -5067,11 +4935,9 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterSlowStashedAbort) {
     APIParameters::get(opCtx()) = apiParameters;
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -5082,7 +4948,9 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterSlowStashedAbort) {
 
     txnParticipant.unstashTransactionResources(opCtx(), "insert");
 
-    { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
+    {
+        Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow);
+    }
 
     txnParticipant.stashTransactionResources(opCtx());
     const auto txnResourceStashLocker = txnParticipant.getTxnResourceStashLockerForTest();
@@ -5103,11 +4971,11 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterSlowStashedAbort) {
 
     tickSource->advance(Microseconds(11 * 1000));
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     txnParticipant.abortTransaction(opCtx());
-    stopCapturingLogMessages();
+    logs.stop();
 
-    ASSERT_EQUALS(1, countTextFormatLogLinesContaining("transaction"));
+    ASSERT_EQUALS(1, logs.countTextContaining("transaction"));
 }
 
 TEST_F(TransactionsMetricsTest, LogTransactionInfoZeroSampleRate) {
@@ -5133,12 +5001,12 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoZeroSampleRate) {
 
     tickSource->advance(Microseconds(11 * 1000));
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     txnParticipant.commitUnpreparedTransaction(opCtx());
-    stopCapturingLogMessages();
+    logs.stop();
 
     // Test that the transaction is not logged.
-    ASSERT_EQUALS(0, countTextFormatLogLinesContaining("transaction parameters"));
+    ASSERT_EQUALS(0, logs.countTextContaining("transaction parameters"));
 }
 
 TEST_F(TransactionsMetricsTest, LogTransactionInfoVerbosityInfo) {
@@ -5165,12 +5033,12 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoVerbosityInfo) {
 
     txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     txnParticipant.commitUnpreparedTransaction(opCtx());
-    stopCapturingLogMessages();
+    logs.stop();
 
     // Test that the transaction is not logged.
-    ASSERT_EQUALS(0, countTextFormatLogLinesContaining("transaction parameters"));
+    ASSERT_EQUALS(0, logs.countTextContaining("transaction parameters"));
 }
 
 TEST_F(TransactionsMetricsTest, LogTransactionInfoVerbosityDebug) {
@@ -5197,23 +5065,21 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoVerbosityDebug) {
         serverGlobalParams.sampleRate.store(originalSampleRate);
     });
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     txnParticipant.commitUnpreparedTransaction(opCtx());
-    stopCapturingLogMessages();
+    logs.stop();
 
     // Test that the transaction is still logged.
-    ASSERT_EQUALS(1, countTextFormatLogLinesContaining("transaction"));
+    ASSERT_EQUALS(1, logs.countTextContaining("transaction"));
 }
 
 TEST_F(TxnParticipantTest, RollbackResetsInMemoryStateOfPreparedTransaction) {
     auto sessionCheckout = checkOutSession();
 
     repl::ReadConcernArgs readConcernArgs;
-    ASSERT_OK(
-        readConcernArgs.initialize(BSON("find"
-                                        << "test" << repl::ReadConcernArgs::kReadConcernFieldName
-                                        << BSON(repl::ReadConcernArgs::kLevelFieldName
-                                                << "snapshot"))));
+    ASSERT_OK(readConcernArgs.initialize(
+        BSON("find" << "test" << repl::ReadConcernArgs::kReadConcernFieldName
+                    << BSON(repl::ReadConcernArgs::kLevelFieldName << "snapshot"))));
     repl::ReadConcernArgs::get(opCtx()) = readConcernArgs;
 
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -5254,6 +5120,7 @@ TEST_F(TxnParticipantTest, RollbackResetsInMemoryStateOfPreparedTransaction) {
 }
 
 TEST_F(TxnParticipantTest, PrepareTransactionAsSecondarySetsThePrepareOpTime) {
+    repl::ReplClientInfo::forClient(opCtx()->getClient()).clearLastOp();
     const auto prepareOpTime = repl::OpTime({3, 2}, 0);
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -5276,6 +5143,7 @@ TEST_F(TxnParticipantTest, PrepareTransactionAsSecondarySetsThePrepareOpTime) {
 }
 
 TEST_F(TxnParticipantTest, CommitPreparedTransactionAsSecondarySetsTheFinishOpTime) {
+    repl::ReplClientInfo::forClient(opCtx()->getClient()).clearLastOp();
     const auto prepareOpTime = repl::OpTime({3, 2}, 0);
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -5301,6 +5169,7 @@ TEST_F(TxnParticipantTest, CommitPreparedTransactionAsSecondarySetsTheFinishOpTi
 DEATH_TEST_F(TxnParticipantTest,
              CommitPreparedTransactionAsSecondaryWithNullCommitOplogEntryOpTimeShouldFail,
              "invariant") {
+    repl::ReplClientInfo::forClient(opCtx()->getClient()).clearLastOp();
     const auto prepareOpTime = repl::OpTime({3, 2}, 0);
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -5324,6 +5193,7 @@ DEATH_TEST_F(TxnParticipantTest,
 DEATH_TEST_F(TxnParticipantTest,
              CommitPreparedTransactionAsPrimaryWithNonNullCommitOplogEntryOpTimeShouldFail,
              "invariant") {
+    repl::ReplClientInfo::forClient(opCtx()->getClient()).clearLastOp();
     const auto prepareOpTime = repl::OpTime({3, 2}, 0);
     auto sessionCheckout = checkOutSession();
     auto txnParticipant = TransactionParticipant::get(opCtx());
@@ -5468,13 +5338,19 @@ TEST_F(TxnParticipantTest, OldestActiveTransactionTimestamp) {
             }
 
             if (bson["startOpTime"]["ts"].timestamp() == ts) {
-                collection_internal::deleteDocument(
-                    opCtx(), CollectionPtr(coll), kUninitializedStmtId, record->id, nullptr);
+                // TODO(SERVER-103411): Investigate usage validity of
+                // CollectionPtr::CollectionPtr_UNSAFE
+                collection_internal::deleteDocument(opCtx(),
+                                                    CollectionPtr::CollectionPtr_UNSAFE(coll),
+                                                    kUninitializedStmtId,
+                                                    record->id,
+                                                    nullptr);
                 wuow.commit();
                 return;
             }
         }
-        FAIL(str::stream() << "No prepared transaction with start timestamp (1, " << i << ")");
+        FAIL(std::string(str::stream()
+                         << "No prepared transaction with start timestamp (1, " << i << ")"));
     };
 
     auto oldestActiveTransactionTS = [&]() {
@@ -5537,6 +5413,7 @@ TEST_F(TxnParticipantTest, ExitPreparePromiseIsFulfilledOnAbortAfterPrepare) {
     txnParticipant.unstashTransactionResources(opCtx(), "find");
     ASSERT_TRUE(txnParticipant.onExitPrepare().isReady());
 
+    repl::ReplClientInfo::forClient(opCtx()->getClient()).clearLastOp();
     const auto prepareOpTime = repl::OpTime({3, 2}, 0);
     txnParticipant.prepareTransaction(opCtx(), prepareOpTime);
     const auto exitPrepareFuture = txnParticipant.onExitPrepare();
@@ -5567,6 +5444,7 @@ TEST_F(TxnParticipantTest, ExitPreparePromiseIsFulfilledOnCommitAfterPrepare) {
     txnParticipant.unstashTransactionResources(opCtx(), "find");
     ASSERT_TRUE(txnParticipant.onExitPrepare().isReady());
 
+    repl::ReplClientInfo::forClient(opCtx()->getClient()).clearLastOp();
     const auto prepareOpTime = repl::OpTime({3, 2}, 0);
     const auto [prepareTimestamp, namespaces] =
         txnParticipant.prepareTransaction(opCtx(), prepareOpTime);
@@ -6930,6 +6808,16 @@ private:
     OperationContext* _opCtx;
 };
 
+boost::optional<CollectionAcquisition> acquireUserColl(OperationContext* opCtx) {
+    return boost::make_optional<CollectionAcquisition>(acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest(kNss,
+                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     repl::ReadConcernArgs::get(opCtx),
+                                     AcquisitionPrerequisites::kRead),
+        MODE_IX));
+}
+
 TEST_F(TxnParticipantTest, AbortSplitPreparedTransaction) {
     // This test simulates:
     // 1) Preparing a transaction with multiple logical sessions as a secondary.
@@ -6946,8 +6834,6 @@ TEST_F(TxnParticipantTest, AbortSplitPreparedTransaction) {
     OperationContext* opCtx = this->opCtx();
     DurableHistoryRegistry::set(opCtx->getServiceContext(),
                                 std::make_unique<DurableHistoryRegistry>());
-    opObserverRegistry()->addObserver(
-        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
 
     OpDebug* const nullOpDbg = nullptr;
 
@@ -6969,8 +6855,7 @@ TEST_F(TxnParticipantTest, AbortSplitPreparedTransaction) {
     userTxnParticipant.unstashTransactionResources(opCtx, "crud ops");
 
     // Hold the collection lock/datastructure such that it can be released prior to rollback.
-    boost::optional<AutoGetCollection> userColl;
-    userColl.emplace(opCtx, kNss, LockMode::MODE_IX);
+    auto userColl = acquireUserColl(opCtx);
 
     // We split our user session into 2 split sessions.
     const std::vector<uint32_t> requesterIds{1, 3};
@@ -6980,20 +6865,20 @@ TEST_F(TxnParticipantTest, AbortSplitPreparedTransaction) {
         opCtx->getLogicalSessionId().get(), opCtx->getTxnNumber().get(), requesterIds);
     // Insert an `_id: 1` document.
     callUnderSplitSession(splitSessions[0].session, [nullOpDbg](OperationContext* opCtx) {
-        AutoGetCollection userColl(opCtx, kNss, LockMode::MODE_IX);
+        auto userColl = acquireUserColl(opCtx);
         ASSERT_OK(
             collection_internal::insertDocument(opCtx,
-                                                userColl.getCollection(),
+                                                userColl->getCollectionPtr(),
                                                 InsertStatement(BSON("_id" << 1 << "value" << 1)),
                                                 nullOpDbg));
     });
 
     // Insert an `_id: 2` document.
     callUnderSplitSession(splitSessions[1].session, [nullOpDbg](OperationContext* opCtx) {
-        AutoGetCollection userColl(opCtx, kNss, LockMode::MODE_IX);
+        auto userColl = acquireUserColl(opCtx);
         ASSERT_OK(
             collection_internal::insertDocument(opCtx,
-                                                userColl.getCollection(),
+                                                userColl->getCollectionPtr(),
                                                 InsertStatement(BSON("_id" << 2 << "value" << 1)),
                                                 nullOpDbg));
     });
@@ -7047,11 +6932,11 @@ TEST_F(TxnParticipantTest, AbortSplitPreparedTransaction) {
     //    open.
     {
         OneOffRead oor(opCtx, Timestamp());
-        BSONObj userWrite = Helpers::findOneForTesting(
-            opCtx, userColl->getCollection(), BSON("_id" << 1), !invariantOnError);
+        BSONObj userWrite =
+            Helpers::findOneForTesting(opCtx, *userColl, BSON("_id" << 1), !invariantOnError);
         ASSERT(userWrite.isEmpty());
-        userWrite = Helpers::findOneForTesting(
-            opCtx, userColl->getCollection(), BSON("_id" << 2), !invariantOnError);
+        userWrite =
+            Helpers::findOneForTesting(opCtx, *userColl, BSON("_id" << 2), !invariantOnError);
         ASSERT(userWrite.isEmpty());
     }
 
@@ -7059,9 +6944,10 @@ TEST_F(TxnParticipantTest, AbortSplitPreparedTransaction) {
         WriteUnitOfWork wuow(opCtx);
         ASSERT_DOES_NOT_THROW(auto _ = collection_internal::insertDocument(
                                   opCtx,
-                                  userColl->getCollection(),
+                                  userColl->getCollectionPtr(),
                                   InsertStatement(BSON("_id" << 1 << "value" << 1)),
                                   nullOpDbg));
+        wuow.commit();
     }
 
     // Assert that the TxnParticipant for the split sessions are in the "aborted prepared
@@ -7076,13 +6962,18 @@ TEST_F(TxnParticipantTest, AbortSplitPreparedTransaction) {
             });
     }
 
-    AutoGetCollection configTransactions(
-        opCtx, NamespaceString::kSessionTransactionsTableNamespace, LockMode::MODE_IS);
+    auto configTransactions = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest(NamespaceString::kSessionTransactionsTableNamespace,
+                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     repl::ReadConcernArgs::get(opCtx),
+                                     AcquisitionPrerequisites::kRead),
+        MODE_IS);
     {
         OneOffRead oor(opCtx, Timestamp());
         BSONObj userTxnObj =
             Helpers::findOneForTesting(opCtx,
-                                       configTransactions.getCollection(),
+                                       configTransactions,
                                        BSON("_id.id" << opCtx->getLogicalSessionId()->getId()),
                                        !invariantOnError);
         ASSERT(!userTxnObj.isEmpty());
@@ -7095,10 +6986,8 @@ TEST_F(TxnParticipantTest, AbortSplitPreparedTransaction) {
     // "prepared" state.
     for (const LogicalSessionId& splitLSID : splitLSIDs) {
         OneOffRead oor(opCtx, Timestamp());
-        BSONObj splitTxnObj = Helpers::findOneForTesting(opCtx,
-                                                         configTransactions.getCollection(),
-                                                         BSON("_id.id" << splitLSID.getId()),
-                                                         !invariantOnError);
+        BSONObj splitTxnObj = Helpers::findOneForTesting(
+            opCtx, configTransactions, BSON("_id.id" << splitLSID.getId()), !invariantOnError);
         if (!splitTxnObj.isEmpty()) {
             assertNotInSessionState(splitTxnObj, DurableTxnStateEnum::kPrepared);
         }
@@ -7125,8 +7014,6 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
     OperationContext* opCtx = this->opCtx();
     DurableHistoryRegistry::set(opCtx->getServiceContext(),
                                 std::make_unique<DurableHistoryRegistry>());
-    opObserverRegistry()->addObserver(
-        std::make_unique<OpObserverImpl>(std::make_unique<OperationLoggerImpl>()));
 
     OpDebug* const nullOpDbg = nullptr;
 
@@ -7136,7 +7023,8 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
     ASSERT_OK(repl::ReplicationCoordinator::get(opCtx)->updateTerm(opCtx, 1));
 
     // Bump the logical clock for easier visual cues.
-    const Timestamp startTs(100, 1);
+    const Timestamp startTs =
+        repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp().getTimestamp() + 100;
     auto oplogInfo = LocalOplogInfo::get(opCtx);
     oplogInfo->setNewTimestamp(opCtx->getServiceContext(), startTs);
     opCtx->getServiceContext()->getStorageEngine()->setInitialDataTimestamp(startTs);
@@ -7149,8 +7037,7 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
     userTxnParticipant.unstashTransactionResources(opCtx, "crud ops");
 
     // Hold the collection lock/data structure such that it can be released prior to rollback.
-    boost::optional<AutoGetCollection> userColl;
-    userColl.emplace(opCtx, kNss, LockMode::MODE_IX);
+    auto userColl = acquireUserColl(opCtx);
 
     // We split our user session into 2 split sessions.
     const std::vector<uint32_t> requesterIds{1, 3};
@@ -7160,20 +7047,20 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
         opCtx->getLogicalSessionId().get(), opCtx->getTxnNumber().get(), requesterIds);
     // Insert an `_id: 1` document.
     callUnderSplitSession(splitSessions[0].session, [nullOpDbg](OperationContext* opCtx) {
-        AutoGetCollection userColl(opCtx, kNss, LockMode::MODE_IX);
+        auto userColl = acquireUserColl(opCtx);
         ASSERT_OK(
             collection_internal::insertDocument(opCtx,
-                                                userColl.getCollection(),
+                                                userColl->getCollectionPtr(),
                                                 InsertStatement(BSON("_id" << 1 << "value" << 1)),
                                                 nullOpDbg));
     });
 
     // Insert an `_id: 2` document.
     callUnderSplitSession(splitSessions[1].session, [nullOpDbg](OperationContext* opCtx) {
-        AutoGetCollection userColl(opCtx, kNss, LockMode::MODE_IX);
+        auto userColl = acquireUserColl(opCtx);
         ASSERT_OK(
             collection_internal::insertDocument(opCtx,
-                                                userColl.getCollection(),
+                                                userColl->getCollectionPtr(),
                                                 InsertStatement(BSON("_id" << 2 << "value" << 1)),
                                                 nullOpDbg));
     });
@@ -7181,11 +7068,8 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
     // Update `2` to increment its `value` to 2. This must be done in the same split session as the
     // insert.
     callUnderSplitSession(splitSessions[1].session, [nullOpDbg](OperationContext* opCtx) {
-        auto userColl = acquireCollection(
-            opCtx,
-            CollectionAcquisitionRequest::fromOpCtx(opCtx, kNss, AcquisitionPrerequisites::kWrite),
-            MODE_IX);
-        Helpers::update(opCtx, userColl, BSON("_id" << 2), BSON("$inc" << BSON("value" << 1)));
+        auto userColl = acquireUserColl(opCtx);
+        Helpers::update(opCtx, *userColl, BSON("_id" << 2), BSON("$inc" << BSON("value" << 1)));
     });
 
     // Mimic the methods to call for a secondary performing a split prepare. Those are called inside
@@ -7237,10 +7121,10 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
         LOGV2(7274401,
               "Pre-rollback values",
               "readTimestamp"_attr = ts,
-              "Doc(_id: 1)"_attr = Helpers::findOneForTesting(
-                  opCtx, userColl->getCollection(), BSON("_id" << 1), !invariantOnError),
+              "Doc(_id: 1)"_attr =
+                  Helpers::findOneForTesting(opCtx, *userColl, BSON("_id" << 1), !invariantOnError),
               "Doc(_id: 2)"_attr = Helpers::findOneForTesting(
-                  opCtx, userColl->getCollection(), BSON("_id" << 2), !invariantOnError));
+                  opCtx, *userColl, BSON("_id" << 2), !invariantOnError));
     }
 
     // Reading at the prepare timestamp should not see anything.
@@ -7250,12 +7134,10 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
             PrepareConflictBehavior::kIgnoreConflicts);
         ASSERT_BSONOBJ_EQ(
             BSONObj::kEmptyObject,
-            Helpers::findOneForTesting(
-                opCtx, userColl->getCollection(), BSON("_id" << 1), !invariantOnError));
+            Helpers::findOneForTesting(opCtx, *userColl, BSON("_id" << 1), !invariantOnError));
         ASSERT_BSONOBJ_EQ(
             BSONObj::kEmptyObject,
-            Helpers::findOneForTesting(
-                opCtx, userColl->getCollection(), BSON("_id" << 2), !invariantOnError));
+            Helpers::findOneForTesting(opCtx, *userColl, BSON("_id" << 2), !invariantOnError));
     }
 
     // Reading at the visible/commit timestamp should see the inserted and updated documents.
@@ -7263,22 +7145,25 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
         OneOffRead oor(opCtx, visibleTs);
         ASSERT_BSONOBJ_EQ(
             BSON("_id" << 1 << "value" << 1),
-            Helpers::findOneForTesting(
-                opCtx, userColl->getCollection(), BSON("_id" << 1), !invariantOnError));
+            Helpers::findOneForTesting(opCtx, *userColl, BSON("_id" << 1), !invariantOnError));
         ASSERT_BSONOBJ_EQ(
             BSON("_id" << 2 << "value" << 2),
-            Helpers::findOneForTesting(
-                opCtx, userColl->getCollection(), BSON("_id" << 2), !invariantOnError));
+            Helpers::findOneForTesting(opCtx, *userColl, BSON("_id" << 2), !invariantOnError));
     }
 
     {
         // We also assert that the user transaction record is in the committed state.
-        AutoGetCollection configTransactions(
-            opCtx, NamespaceString::kSessionTransactionsTableNamespace, LockMode::MODE_IS);
+        auto configTransactions = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest(NamespaceString::kSessionTransactionsTableNamespace,
+                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         repl::ReadConcernArgs::get(opCtx),
+                                         AcquisitionPrerequisites::kRead),
+            MODE_IS);
         // The user config.transactions document must exist and must be in the "committed" state.
         BSONObj userTxnObj =
             Helpers::findOneForTesting(opCtx,
-                                       configTransactions.getCollection(),
+                                       configTransactions,
                                        BSON("_id.id" << opCtx->getLogicalSessionId()->getId()),
                                        !invariantOnError);
         ASSERT(!userTxnObj.isEmpty());
@@ -7290,7 +7175,7 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
         for (std::size_t idx = 0; idx < splitLSIDs.size(); ++idx) {
             BSONObj splitTxnObj =
                 Helpers::findOneForTesting(opCtx,
-                                           configTransactions.getCollection(),
+                                           configTransactions,
                                            BSON("_id.id" << splitLSIDs[idx].getId()),
                                            !invariantOnError);
             if (!splitTxnObj.isEmpty()) {
@@ -7313,22 +7198,26 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
     opCtx->getServiceContext()->getStorageEngine()->setStableTimestamp(chosenStableTimestamp);
     {
         Lock::GlobalLock globalLock(opCtx, LockMode::MODE_X);
-        ASSERT_OK(opCtx->getServiceContext()->getStorageEngine()->recoverToStableTimestamp(opCtx));
+        auto state = catalog::closeCatalog(opCtx);
+        auto swStableTimestamp =
+            opCtx->getServiceContext()->getStorageEngine()->recoverToStableTimestamp(opCtx);
+        ASSERT_OK(swStableTimestamp);
+        catalog::openCatalog(opCtx, state, swStableTimestamp.getValue());
     }
     opCtx->setLogicalSessionId(lsid);
     opCtx->setTxnNumber(txnNum);
 
     // Again, display read values for diagnostics.
-    userColl.emplace(opCtx, kNss, LockMode::MODE_IX);
+    userColl = acquireUserColl(opCtx);
     for (const auto& ts : std::vector<Timestamp>{prepTs, visibleTs}) {
         OneOffRead oor(opCtx, ts);
         LOGV2(7274402,
               "Post-rollback values",
               "readTimestamp"_attr = ts,
-              "Doc(_id: 1)"_attr = Helpers::findOneForTesting(
-                  opCtx, userColl->getCollection(), BSON("_id" << 1), !invariantOnError),
+              "Doc(_id: 1)"_attr =
+                  Helpers::findOneForTesting(opCtx, *userColl, BSON("_id" << 1), !invariantOnError),
               "Doc(_id: 2)"_attr = Helpers::findOneForTesting(
-                  opCtx, userColl->getCollection(), BSON("_id" << 2), !invariantOnError));
+                  opCtx, *userColl, BSON("_id" << 2), !invariantOnError));
     }
 
     // Now when we read at the commit/visible timestamp, the documents must not exist.
@@ -7336,22 +7225,25 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
         OneOffRead oor(opCtx, visibleTs);
         ASSERT_BSONOBJ_EQ(
             BSONObj::kEmptyObject,
-            Helpers::findOneForTesting(
-                opCtx, userColl->getCollection(), BSON("_id" << 1), !invariantOnError));
+            Helpers::findOneForTesting(opCtx, *userColl, BSON("_id" << 1), !invariantOnError));
         ASSERT_BSONOBJ_EQ(
             BSONObj::kEmptyObject,
-            Helpers::findOneForTesting(
-                opCtx, userColl->getCollection(), BSON("_id" << 2), !invariantOnError));
+            Helpers::findOneForTesting(opCtx, *userColl, BSON("_id" << 2), !invariantOnError));
     }
 
     // We also assert that the user transaction record is in the prepared state. The split sessions
     // are not.
-    AutoGetCollection configTransactions(
-        opCtx, NamespaceString::kSessionTransactionsTableNamespace, LockMode::MODE_IS);
+    auto configTransactions = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest(NamespaceString::kSessionTransactionsTableNamespace,
+                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     repl::ReadConcernArgs::get(opCtx),
+                                     AcquisitionPrerequisites::kRead),
+        MODE_IS);
     // The user `config.transactions` document must be in the "prepared" state.
     BSONObj userTxnObj =
         Helpers::findOneForTesting(opCtx,
-                                   configTransactions.getCollection(),
+                                   configTransactions,
                                    BSON("_id.id" << opCtx->getLogicalSessionId()->getId()),
                                    !invariantOnError);
     ASSERT(!userTxnObj.isEmpty());
@@ -7362,7 +7254,7 @@ TEST_F(TxnParticipantTest, CommitSplitPreparedTransaction) {
     // "prepared" state.
     for (std::size_t idx = 0; idx < splitLSIDs.size(); ++idx) {
         BSONObj splitTxnObj = Helpers::findOneForTesting(opCtx,
-                                                         configTransactions.getCollection(),
+                                                         configTransactions,
                                                          BSON("_id.id" << splitLSIDs[idx].getId()),
                                                          !invariantOnError);
         if (!splitTxnObj.isEmpty()) {
@@ -7404,6 +7296,47 @@ TEST_F(ShardTxnParticipantTest, EagerlyReapRetryableSessionsUponNewClientTransac
     ASSERT_EQ(sessionCatalog->size(), 1);
     ASSERT(doesExistInCatalog(parentLsid, sessionCatalog));
     ASSERT_FALSE(doesExistInCatalog(retryableChildLsid, sessionCatalog));
+}
+
+TEST_F(TxnParticipantTest, LastOpSetWhenUnstashingForAbort) {
+    // Test that unstashing for an abort sets lastOp.
+    auto sessionCheckout = checkOutSession();
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+
+    txnParticipant.unstashTransactionResources(opCtx(), "abortTransaction");
+
+    ASSERT_TRUE(repl::ReplClientInfo::forClient(opCtx()->getClient())
+                    .lastOpWasSetExplicitlyByClientForCurrentOperation(opCtx()));
+}
+
+TEST_F(TxnParticipantTest, LastOpSetWhenUnstashingForAlreadyAbortedTxn) {
+    // Test that unstashing for an abort sets lastOp even if the transaction has already been
+    // aborted.
+    auto sessionCheckout = checkOutSession();
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+
+    txnParticipant.transitionToAbortedWithoutPrepareforTest(opCtx());
+    ASSERT_THROWS_CODE(txnParticipant.unstashTransactionResources(opCtx(), "abortTransaction"),
+                       DBException,
+                       ErrorCodes::NoSuchTransaction);
+
+    ASSERT_TRUE(repl::ReplClientInfo::forClient(opCtx()->getClient())
+                    .lastOpWasSetExplicitlyByClientForCurrentOperation(opCtx()));
+}
+
+TEST_F(TxnParticipantTest, LastOpNotSetWhenUnstashingForNonAbort) {
+    // Test that non-abort commands do not set lastOp when unstashing.
+    repl::ReplClientInfo::forClient(opCtx()->getClient()).clearLastOp();
+    repl::ReplClientInfo::forClient(opCtx()->getClient()).clearLastOpSetFlag_forTest(opCtx());
+    const auto lsid = makeLogicalSessionIdWithTxnUUIDForTest();
+    opCtx()->setLogicalSessionId(lsid);
+    auto sessionCheckout = checkOutSession();
+    auto txnParticipant = TransactionParticipant::get(opCtx());
+
+    txnParticipant.unstashTransactionResources(opCtx(), "commitTransaction");
+
+    ASSERT_FALSE(repl::ReplClientInfo::forClient(opCtx()->getClient())
+                     .lastOpWasSetExplicitlyByClientForCurrentOperation(opCtx()));
 }
 
 TEST_F(ShardTxnParticipantTest, EagerlyReapRetryableSessionsUponNewClientRetryableWrite) {

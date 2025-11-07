@@ -29,25 +29,22 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-#include <functional>
-#include <utility>
-
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/write_ops/parsed_writes_common.h"
-#include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
-#include "mongo/db/timeseries/timeseries_options.h"
-#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <functional>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+MONGO_MOD_PUBLIC;
 
 namespace mongo::timeseries {
 /**
@@ -92,80 +89,10 @@ TimeseriesWritesQueryExprs getMatchExprsForWrites(
     const BSONObj& writeQuery,
     bool fixedBuckets);
 
-template <typename T>
-concept HasGetNamespace = requires(const T& t) {
-    t.getNamespace();
-};
-
-template <typename T>
-concept HasGetNsString = requires(const T& t) {
-    t.getNsString();
-};
-
-// Type requirement 1 for isTimeseriesViewRequest()
-template <typename T>
-concept HasNsGetter = HasGetNamespace<T> || HasGetNsString<T>;
-
-// Type requirement 2 for isTimeseriesViewRequest()
-template <typename T>
-concept HasGetIsTimeseriesNamespace = requires(const T& t) {
-    t.getIsTimeseriesNamespace();
-};
-
-// Type requirements for isTimeseriesViewRequest()
-template <typename T>
-concept IsRequestableOnTimeseriesView = HasNsGetter<T> || HasGetIsTimeseriesNamespace<T>;
-
 /**
- * Returns a pair of (whether 'request' is made on a timeseries view and the timeseries system
- * bucket collection namespace if so).
- *
- * If the 'request' is not made on a timeseries view, the second element of the pair is same as the
- * namespace of the 'request'.
- *
- * Throws if this is a time-series view request but the buckets collection is not valid.
+ * Returns a basic match expression checking against closed buckets for meta-only updates/deletes
  */
-template <typename T>
-requires IsRequestableOnTimeseriesView<T> std::pair<bool, NamespaceString> isTimeseriesViewRequest(
-    OperationContext* opCtx, const T& request) {
-    const auto nss = [&] {
-        if constexpr (HasGetNamespace<T>) {
-            return request.getNamespace();
-        } else {
-            return request.getNsString();
-        }
-    }();
-    uassert(5916400,
-            "'isTimeseriesNamespace' parameter can only be set when the request is sent on "
-            "system.buckets namespace",
-            !request.getIsTimeseriesNamespace() || nss.isTimeseriesBucketsCollection());
+std::unique_ptr<MatchExpression> addClosedBucketExclusionExpr(
+    std::unique_ptr<MatchExpression> base);
 
-    const auto bucketNss =
-        request.getIsTimeseriesNamespace() ? nss : nss.makeTimeseriesBucketsNamespace();
-
-    // If the buckets collection exists now, the time-series insert path will check for the
-    // existence of the buckets collection later on with a lock.
-    // If this check is concurrent with the creation of a time-series collection and the buckets
-    // collection does not yet exist, this check may return false unnecessarily. As a result, an
-    // insert attempt into the time-series namespace will either succeed or fail, depending on who
-    // wins the race.
-    // Hold reference to the catalog for collection lookup without locks to be safe.
-    auto catalog = CollectionCatalog::get(opCtx);
-    auto coll = catalog->lookupCollectionByNamespace(opCtx, bucketNss);
-    if (!coll) {
-        return {false, nss};
-    }
-
-    if (auto options = coll->getTimeseriesOptions()) {
-        uassert(ErrorCodes::InvalidOptions,
-                "Time-series buckets collection is not clustered",
-                coll->isClustered());
-
-        uassertStatusOK(validateBucketingParameters(*options));
-
-        return {true, bucketNss};
-    }
-
-    return {false, nss};
-}
 }  // namespace mongo::timeseries

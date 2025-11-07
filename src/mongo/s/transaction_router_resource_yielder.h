@@ -29,10 +29,11 @@
 
 #pragma once
 
-#include <memory>
-
+#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/resource_yielder.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
 
 namespace mongo {
 
@@ -40,7 +41,7 @@ namespace mongo {
  * Implementation of ResourceYielder that yields resources checked out in the course of running a
  * distributed transaction.
  */
-class TransactionRouterResourceYielder : public ResourceYielder {
+class MONGO_MOD_PUB TransactionRouterResourceYielder : public ResourceYielder {
 public:
     /**
      * The next two methods return a newly allocated yielder for the given yielding scenario.

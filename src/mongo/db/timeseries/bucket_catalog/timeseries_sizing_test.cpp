@@ -28,8 +28,7 @@
  */
 
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 
 namespace mongo::timeseries::bucket_catalog {
 /**
@@ -48,7 +47,7 @@ static constexpr uint64_t kExpectedBSONColumnBuilderPerElement = 552;
 }  // namespace
 
 #if !defined(MONGO_CONFIG_DEBUG_BUILD) && !defined(_MSC_VER) && !defined(__APPLE__) && \
-    !__has_feature(address_sanitizer)
+    !__has_feature(address_sanitizer) && !defined(__s390x__)
 TEST(TimeseriesSizingConstants, OpenBucket) {
     TrackingContexts contexts;
     tracking::Context registryContext;

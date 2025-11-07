@@ -65,7 +65,7 @@ from helper_tiered import TieredConfigMixin, gen_tiered_storage_sources
 def wiredtiger_open_tiered(ignored_self, args):
 
     tiered_storage_sources = gen_tiered_storage_sources()
-    testcase = WiredTigerTestCase.currentTestCase()
+    testcase = WiredTigerTestCase.getCurrentTestCase()
     extension_name = testcase.getTierStorageSource()
     extension_config = testcase.getTierStorageSourceConfig()
 
@@ -158,19 +158,19 @@ def wiredtiger_open_tiered(ignored_self, args):
 #    Except that some tests enable readonly and call these functions, expecting an exception.
 #    So for these "modifying" APIs, we want to actually do the operation (but only when readonly).
 def testcase_is_readonly():
-    testcase = WiredTigerTestCase.currentTestCase()
+    testcase = WiredTigerTestCase.getCurrentTestCase()
     return getattr(testcase, '_readonlyTieredTest', False)
 
 def testcase_has_failed():
-    testcase = WiredTigerTestCase.currentTestCase()
+    testcase = WiredTigerTestCase.getCurrentTestCase()
     return testcase.failed()
 
 def testcase_has_skipped():
-    testcase = WiredTigerTestCase.currentTestCase()
+    testcase = WiredTigerTestCase.getCurrentTestCase()
     return testcase.skipped
 
 def skip_test(comment):
-    testcase = WiredTigerTestCase.currentTestCase()
+    testcase = WiredTigerTestCase.getCurrentTestCase()
     testcase.skipTest(comment)
 
 # Called to replace Connection.close
@@ -297,12 +297,13 @@ class TieredHookCreator(wthooks.WiredTigerHookCreator):
         skip_categories = [
             ("backup",               "Can't backup a tiered table"),
             ("inmem",                "In memory tests don't make sense with tiered storage"),
+            ("live_restore",         "Live restore is not supported with tiered storage"),
             ("modify_smoke_recover", "Copying WT dir doesn't copy the bucket directory"),
-            ("test_salvage",         "Salvage tests directly name files ending in '.wt'"),
             ("test_config_json",     "Tiered hook's create function can't handle a json config string"),
             ("test_cursor_big",      "Cursor caching verified with stats"),
+            ("test_salvage",         "Salvage tests directly name files ending in '.wt'"),
+            ("test_verify",          "Verify not supported on tiered tables (yet)"),
             ("tiered",               "Tiered tests already do tiering."),
-            ("test_verify",          "Verify not supported on tiered tables (yet)")
         ]
 
         for (skip_string, skip_reason) in skip_categories:

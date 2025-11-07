@@ -1,83 +1,90 @@
+#!/usr/bin/env python3
+
 import argparse
-import hashlib
 import os
+import pathlib
 import platform
 import shutil
 import stat
 import sys
-import urllib.request
 
-from retry import retry
+REPO_ROOT = str(pathlib.Path(__file__).parent.parent)
+sys.path.append(REPO_ROOT)
 
-_S3_HASH_MAPPING = {
-    "https://mdb-build-public.s3.amazonaws.com/bazel-binaries/bazel-7.2.1-ppc64le": "4ecc7f1396b8d921c6468b34cc8ed356c4f2dbe8a154c25d681a61ccb5dfc9cb",
-    "https://mdb-build-public.s3.amazonaws.com/bazel-binaries/bazel-7.2.1-s390x": "2f5f7fd747620d96e885766a4027347c75c0f455c68219211a00e72fc6413be9",
-    "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-darwin-amd64": "f2ba5f721a995b54bab68c6b76a340719888aa740310e634771086b6d1528ecd",
-    "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-darwin-arm64": "69fa21cd2ccffc2f0970c21aa3615484ba89e3553ecce1233a9d8ad9570d170e",
-    "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-linux-amd64": "d28b588ac0916abd6bf02defb5433f6eddf7cba35ffa808eabb65a44aab226f7",
-    "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-linux-arm64": "861a16ba9979613e70bd3d2f9d9ab5e3b59fe79471c5753acdc9c431ab6c9d94",
-    "https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-windows-amd64.exe": "d04555245a99dfb628e33da24e2b9198beb8f46d7e7661c313eb045f6a59f5e4",
-}
+from buildscripts.s3_binary.download import download_s3_binary
 
 
-@retry(tries=5, delay=3)
-def _download_path_with_retry(*args, **kwargs):
-    urllib.request.urlretrieve(*args, **kwargs)
+def determine_platform():
+    syst = platform.system()
+    pltf = None
+    if syst == "Darwin":
+        pltf = "darwin"
+    elif syst == "Windows":
+        pltf = "windows"
+    elif syst == "Linux":
+        pltf = "linux"
+    else:
+        return None
+    return pltf
 
 
-def _sha256_file(filename: str) -> str:
-    sha256_hash = hashlib.sha256()
-    with open(filename, "rb") as f:
-        for block in iter(lambda: f.read(4096), b""):
-            sha256_hash.update(block)
-        return sha256_hash.hexdigest()
+def determine_architecture():
+    arch = None
+    machine = platform.machine()
+    if machine in ("AMD64", "x86_64"):
+        arch = "amd64"
+    elif machine in ("arm", "arm64", "aarch64"):
+        arch = "arm64"
+    else:
+        return None
+
+    return arch
 
 
-def _verify_s3_hash(s3_path: str, local_path: str) -> None:
-    if s3_path not in _S3_HASH_MAPPING:
-        raise Exception(
-            f"S3 path not found in hash mapping, unable to verify downloaded for s3 path: {s3_path}"
-        )
+def install_buildozer(download_location: str = "./"):
+    operating_system = determine_platform()
+    architechture = determine_architecture()
+    if operating_system is None or architechture is None:
+        print("Unsupported OS for buildozer, not installing.")
+        return None
 
-    hash_string = _sha256_file(local_path)
-    if hash_string != _S3_HASH_MAPPING[s3_path]:
-        raise Exception(
-            f"Hash mismatch for {s3_path}, expected {_S3_HASH_MAPPING[s3_path]} but got {hash_string}"
-        )
+    if operating_system == "windows" and architechture == "arm64":
+        print("There are no published arm windows releases for buildifier.")
+        return None
+
+    extension = ".exe" if operating_system == "windows" else ""
+    binary_name = f"buildozer-{operating_system}-{architechture}{extension}"
+    url = f"https://mdb-build-public.s3.amazonaws.com/buildozer/v7.3.1/{binary_name}"
+
+    file_location = os.path.join(download_location, f"buildozer{extension}")
+    download_s3_binary(url, file_location)
+    os.chmod(file_location, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    return file_location
 
 
 def install_bazel(binary_directory: str) -> str:
+    install_buildozer(binary_directory)
     normalized_arch = (
         platform.machine().lower().replace("aarch64", "arm64").replace("x86_64", "amd64")
     )
     normalized_os = sys.platform.replace("win32", "windows").replace("darwin", "macos")
-
-    # TODO(SERVER-86050): remove the branch once bazelisk is built on s390x & ppc64le
     is_bazelisk_supported = normalized_arch not in ["ppc64le", "s390x"]
-    binary_filename = "bazelisk" if is_bazelisk_supported else "bazel"
-
+    binary_filename = "bazelisk"
     binary_path = os.path.join(binary_directory, binary_filename)
-    if os.path.exists(binary_path):
-        print(f"{binary_filename} already exists ({binary_path}), skipping download")
-        _set_bazel_permissions(binary_path)
-        return binary_path
 
-    print(f"Downloading {binary_filename}...")
-    # TODO(SERVER-86050): remove the branch once bazelisk is built on s390x & ppc64le
     if is_bazelisk_supported:
+        print(f"Downloading {binary_filename}...")
         ext = ".exe" if normalized_os == "windows" else ""
         os_str = normalized_os.replace("macos", "darwin")
-        s3_path = f"https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.19.0/bazelisk-{os_str}-{normalized_arch}{ext}"
+        s3_path = f"https://mdb-build-public.s3.amazonaws.com/bazelisk-binaries/v1.26.0/bazelisk-{os_str}-{normalized_arch}{ext}"
+        download_s3_binary(s3_path, binary_path)
+        print(f"Downloaded {binary_filename} to {binary_path}")
+
     else:
-        print(
-            "Warning: Bazelisk is not supported on this platform. Installing Bazel directly instead."
-        )
-        s3_path = f"https://mdb-build-public.s3.amazonaws.com/bazel-binaries/bazel-7.2.1-{normalized_arch}"
-
-    _download_path_with_retry(s3_path, binary_path)
-    _verify_s3_hash(s3_path, binary_path)
-
-    print(f"Downloaded {binary_filename} to {binary_path}")
+        print("Using bazel/bazelisk.py on unsupported platform.")
+        repo_dir = os.path.dirname(os.path.dirname(__file__))
+        bazelisk_py = os.path.join(repo_dir, "bazel", "bazelisk.py")
+        shutil.copyfile(bazelisk_py, binary_path)
 
     _set_bazel_permissions(binary_path)
     return binary_path
@@ -143,22 +150,22 @@ def main():
             if sys.platform == "win32":
                 print("To add it to your PATH, run: \n")
                 print(
-                    f'[Environment]::SetEnvironmentVariable("Path", $env:Path + ";{abs_binary_directory}", "Machine")'
+                    f'[Environment]::SetEnvironmentVariable("Path", "{abs_binary_directory};" + $env:Path, "Machine")'
                 )
                 print("refreshenv")
             else:
                 print("To add it to your PATH, run: \n")
                 if os.path.exists(os.path.expanduser("~/.bashrc")):
-                    print(f'echo "export PATH=\\$PATH:{abs_binary_directory}" >> ~/.bashrc')
+                    print(f'echo "export PATH=\\{abs_binary_directory}:$PATH" >> ~/.bashrc')
                     print("source ~/.bashrc")
                 elif os.path.exists(os.path.expanduser("~/.bash_profile")):
-                    print(f'echo "export PATH=\\$PATH:{abs_binary_directory}" >> ~/.bash_profile')
+                    print(f'echo "export PATH=\\{abs_binary_directory}:$PATH" >> ~/.bash_profile')
                     print("source ~/.bash_profile")
                 elif os.path.exists(os.path.expanduser("~/.zshrc")):
-                    print(f'echo "export PATH=\\$PATH:{abs_binary_directory}" >> ~/.zshrc')
+                    print(f'echo "export PATH=\\{abs_binary_directory}:$PATH" >> ~/.zshrc')
                     print("source ~/.zshrc")
                 else:
-                    print(f"export PATH=$PATH:{abs_binary_directory}")
+                    print(f"export PATH={abs_binary_directory}:$PATH")
 
 
 if __name__ == "__main__":

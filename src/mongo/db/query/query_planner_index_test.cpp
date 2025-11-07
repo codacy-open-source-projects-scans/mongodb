@@ -27,10 +27,6 @@
  *    it in the license file.
  */
 
-#include <cstddef>
-#include <memory>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -39,13 +35,17 @@
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_planner_test_fixture.h"
-#include "mongo/db/query/query_solution.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <cstddef>
+#include <memory>
+#include <vector>
 
 namespace mongo {
 namespace {
@@ -155,7 +155,7 @@ TEST_F(QueryPlannerTest, PlannerUsesCoveredIxscanWhenMultikeyIndexSatisfiesNullA
 TEST_F(QueryPlannerTest, PlannerUsesCoveredIxscanFindWhenIndexSatisfiesNullQuery) {
     params.mainCollectionInfo.options &= ~QueryPlannerParams::INCLUDE_COLLSCAN;
     addIndex(fromjson("{x: 1, _id: 1}"));
-    runQuerySortProj(fromjson("{x: null}}"), BSONObj(), fromjson("{_id: 1}}"));
+    runQuerySortProj(fromjson("{x: null}"), BSONObj(), fromjson("{_id: 1}"));
     ASSERT_EQUALS(getNumSolutions(), 1U);
     assertSolutionExists(
         "{proj: {spec: {_id: 1}, node:"
@@ -167,7 +167,7 @@ TEST_F(QueryPlannerTest, PlannerAddsFetchForFindWhenMultikeyIndexSatisfiesNullQu
     params.mainCollectionInfo.options &= ~QueryPlannerParams::INCLUDE_COLLSCAN;
     MultikeyPaths multikeyPaths{{0U}, MultikeyComponents{}};
     addIndex(fromjson("{x: 1, _id: 1}"), multikeyPaths);
-    runQuerySortProj(fromjson("{x: null}}"), BSONObj(), fromjson("{_id: 1}}"));
+    runQuerySortProj(fromjson("{x: null}"), BSONObj(), fromjson("{_id: 1}"));
     ASSERT_EQUALS(getNumSolutions(), 1U);
     assertSolutionExists(
         "{proj: {spec: {_id: 1}, node: {ixscan: {pattern: {x: 1, _id: 1}, bounds: "
@@ -178,7 +178,7 @@ TEST_F(QueryPlannerTest, PlannerAddsFetchFindWhenMultikeyIndexSatisfiesNullEmpty
     params.mainCollectionInfo.options &= ~QueryPlannerParams::INCLUDE_COLLSCAN;
     MultikeyPaths multikeyPaths{{0U}, MultikeyComponents{}};
     addIndex(fromjson("{x: 1, _id: 1}"), multikeyPaths);
-    runQuerySortProj(fromjson("{x: {$in: [null, []]}}}"), BSONObj(), fromjson("{_id: 1}}"));
+    runQuerySortProj(fromjson("{x: {$in: [null, []]}}"), BSONObj(), fromjson("{_id: 1}"));
     ASSERT_EQUALS(getNumSolutions(), 1U);
     assertSolutionExists(
         "{proj: {spec: {_id: 1}, node:"
@@ -191,7 +191,7 @@ TEST_F(QueryPlannerTest,
     params.mainCollectionInfo.options &= ~QueryPlannerParams::INCLUDE_COLLSCAN;
     MultikeyPaths multikeyPaths{{0U}, MultikeyComponents{}};
     addIndex(fromjson("{x: 1, _id: 1}"), multikeyPaths);
-    runQuerySortProj(fromjson("{x: {$in: [null, 2]}}}"), BSONObj(), fromjson("{_id: 1}}"));
+    runQuerySortProj(fromjson("{x: {$in: [null, 2]}}"), BSONObj(), fromjson("{_id: 1}"));
     ASSERT_EQUALS(getNumSolutions(), 1U);
     assertSolutionExists(
         "{proj: {spec: {_id: 1}, node:"
@@ -1028,10 +1028,34 @@ TEST_F(QueryPlannerTest, IntersectCanBeVeryBig) {
     assertNumSolutions(internalQueryEnumerationMaxOrSolutions.load());
 }
 
+// Ensure that disabling AND_SORTED intersection works properly.
+TEST_F(QueryPlannerTest, IntersectDisabledAndSort) {
+    // Disable sort-based intersection.
+    RAIIServerParameterControllerForTest disableSortIntersection(
+        "internalQueryPlannerEnableSortIndexIntersection", false);
+    params.mainCollectionInfo.options =
+        QueryPlannerParams::NO_TABLE_SCAN | QueryPlannerParams::INDEX_INTERSECTION;
+
+    addIndex(BSON("a" << 1));
+    addIndex(BSON("b" << 1));
+    runQuery(fromjson("{a:1, b:1}"));
+
+    assertNumSolutions(3U);
+
+    assertSolutionExists(
+        "{fetch: {filter: {b:1}, node: "
+        "{ixscan: {filter: null, pattern: {a:1}}}}}");
+    assertSolutionExists(
+        "{fetch: {filter: {a:1}, node: "
+        "{ixscan: {filter: null, pattern: {b:1}}}}}");
+    assertSolutionExists(
+        "{fetch: {filter: {a: 1, b: 1}, node: {andHash: {nodes: ["
+        "{ixscan: {filter: null, pattern: {a:1}}},"
+        "{ixscan: {filter: null, pattern: {b:1}}}]}}}}");
+}
+
 // Ensure that disabling AND_HASH intersection works properly.
 TEST_F(QueryPlannerTest, IntersectDisableAndHash) {
-    bool oldEnableHashIntersection = internalQueryPlannerEnableHashIntersection.load();
-
     // Turn index intersection on but disable hash-based intersection.
     internalQueryPlannerEnableHashIntersection.store(false);
     params.mainCollectionInfo.options =
@@ -1058,9 +1082,30 @@ TEST_F(QueryPlannerTest, IntersectDisableAndHash) {
         "{fetch: {filter: {a:{$gt:1}, b: 1, c: 1}, node: {andSorted: {nodes: ["
         "{ixscan: {filter: null, pattern: {b:1}}},"
         "{ixscan: {filter: null, pattern: {c:1}}}]}}}}");
+}
 
-    // Restore the old value of the has intersection switch.
-    internalQueryPlannerEnableHashIntersection.store(oldEnableHashIntersection);
+// Ensure that disabling AND_SORTED and AND_HASHED intersection works properly.
+TEST_F(QueryPlannerTest, IntersectDisabledAndSortAndHash) {
+    // Disable sort and hash based intersection.
+    RAIIServerParameterControllerForTest disableSortIntersection(
+        "internalQueryPlannerEnableSortIndexIntersection", false);
+    RAIIServerParameterControllerForTest disableHashedIntersection(
+        "internalQueryPlannerEnableHashIntersection", false);
+    params.mainCollectionInfo.options =
+        QueryPlannerParams::NO_TABLE_SCAN | QueryPlannerParams::INDEX_INTERSECTION;
+
+    addIndex(BSON("a" << 1));
+    addIndex(BSON("b" << 1));
+    runQuery(fromjson("{a:1, b:1}"));
+
+    assertNumSolutions(2U);
+    // There should be no AND_HASH or AND_SORTED plans.
+    assertSolutionExists(
+        "{fetch: {filter: {b:1}, node: "
+        "{ixscan: {filter: null, pattern: {a:1}}}}}");
+    assertSolutionExists(
+        "{fetch: {filter: {a:1}, node: "
+        "{ixscan: {filter: null, pattern: {b:1}}}}}");
 }
 
 //
@@ -1303,7 +1348,7 @@ TEST_F(QueryPlannerTest, PlansForMultipleIndexesOnTheSameKeyPatternAreGenerated)
     assertNumSolutions(3U);
     assertSolutionExists("{fetch: {node: {ixscan: {name: 'reverse'}}}}");
     assertSolutionExists("{fetch: {node: {ixscan: {name: 'forward'}}}}");
-    assertSolutionExists("{cscan: {dir: 1}}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 
@@ -1311,7 +1356,7 @@ TEST_F(QueryPlannerTest, EmptyQueryWithoutProjectionUsesCollscan) {
     addIndex(BSON("a" << 1));
     runQuery(BSONObj());
     assertNumSolutions(1);
-    assertSolutionExists("{cscan: {dir: 1}}}");
+    assertSolutionExists("{cscan: {dir: 1}}");
 }
 
 TEST_F(QueryPlannerTest, EmptyQueryWithProjectionUsesCoveredIxscanIfEnabled) {
@@ -1438,8 +1483,7 @@ TEST_F(QueryPlannerTest, EmptyQueryWithProjectionUsesCollscanIfIndexIsPartial) {
 
 TEST_F(QueryPlannerTest, EmptyQueryWithProjectionUsesCollscanIfIndexIsText) {
     params.mainCollectionInfo.options = QueryPlannerParams::GENERATE_COVERED_IXSCANS;
-    addIndex(BSON("a"
-                  << "text"));
+    addIndex(BSON("a" << "text"));
     runQueryAsCommand(fromjson("{find: 'testns', projection: {_id: 0, a: 1}}"));
     assertNumSolutions(1);
     assertSolutionExists(
@@ -1449,8 +1493,7 @@ TEST_F(QueryPlannerTest, EmptyQueryWithProjectionUsesCollscanIfIndexIsText) {
 
 TEST_F(QueryPlannerTest, EmptyQueryWithProjectionUsesCollscanIfIndexIsGeo) {
     params.mainCollectionInfo.options = QueryPlannerParams::GENERATE_COVERED_IXSCANS;
-    addIndex(BSON("a"
-                  << "2dsphere"));
+    addIndex(BSON("a" << "2dsphere"));
     runQueryAsCommand(fromjson("{find: 'testns', projection: {_id: 0, a: 1}}"));
     assertNumSolutions(1);
     assertSolutionExists(

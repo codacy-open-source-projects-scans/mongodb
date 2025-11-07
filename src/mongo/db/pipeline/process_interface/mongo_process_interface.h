@@ -29,21 +29,6 @@
 
 #pragma once
 
-#include <boost/intrusive_ptr.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstdint>
-#include <deque>
-#include <list>
-#include <memory>
-#include <set>
-#include <string>
-#include <tuple>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -54,11 +39,12 @@
 #include "mongo/client/dbclient_base.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/collection_index_usage_tracker.h"
-#include "mongo/db/collection_type.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/exec_shard_filter_policy.h"
+#include "mongo/db/local_catalog/collection_type.h"
+#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -76,20 +62,33 @@
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/resource_yielder.h"
 #include "mongo/db/storage/backup_cursor_hooks.h"
 #include "mongo/db/storage/backup_cursor_state.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/spill_table.h"
 #include "mongo/db/storage/storage_engine.h"
-#include "mongo/db/storage/temporary_record_store.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/database_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/shard_version.h"
 #include "mongo/util/uuid.h"
+
+#include <cstdint>
+#include <deque>
+#include <list>
+#include <memory>
+#include <set>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <boost/intrusive_ptr.hpp>
+#include <boost/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -98,7 +97,11 @@ class ExpressionContext;
 class JsExecution;
 
 class Pipeline;
-class PipelineDeleter;
+class RoutingContext;
+// TODO SERVER-112970 Investigate removing 'CatalogResourceHandle' and 'MultipleCollectionAccessor'
+// information from forward declarations.
+class CatalogResourceHandle;
+class MultipleCollectionAccessor;
 class TransactionHistoryIteratorBase;
 
 /**
@@ -180,7 +183,7 @@ public:
     MongoProcessInterface(std::shared_ptr<executor::TaskExecutor> executor)
         : taskExecutor(std::move(executor)) {}
 
-    virtual ~MongoProcessInterface(){};
+    virtual ~MongoProcessInterface() {};
 
     /**
      * Returns an instance of a 'WriteSizeEstimator' interface.
@@ -200,6 +203,8 @@ public:
      * positive. This method will be fixed in the future once it becomes possible to avoid false
      * negatives. Caller should always attach shardVersion when sending request against nss based
      * on this information.
+     *
+     * DO NOT use this function to make a decision that affects query correctness.
      */
     virtual bool isSharded(OperationContext* opCtx, const NamespaceString& ns) = 0;
 
@@ -277,9 +282,9 @@ public:
                                                 StringData host,
                                                 bool addShardName) = 0;
 
-    virtual std::list<BSONObj> getIndexSpecs(OperationContext* opCtx,
-                                             const NamespaceString& ns,
-                                             bool includeBuildUUIDs) = 0;
+    virtual std::vector<BSONObj> getIndexSpecs(OperationContext* opCtx,
+                                               const NamespaceString& ns,
+                                               bool includeBuildUUIDs) = 0;
 
     /**
      * Returns all documents in `_mdb_catalog`.
@@ -342,6 +347,9 @@ public:
      */
     virtual BSONObj getCollectionOptions(OperationContext* opCtx, const NamespaceString& nss) = 0;
 
+    virtual UUID fetchCollectionUUIDFromPrimary(OperationContext* opCtx,
+                                                const NamespaceString& nss) = 0;
+
     /**
      * Returns the query shape collection type in the namespace given by 'nss'. This function holds
      * an acquisition that is freed right after execution, and can't guarantee if the collection or
@@ -363,7 +371,7 @@ public:
         bool dropTarget,
         bool stayTemp,
         const BSONObj& originalCollectionOptions,
-        const std::list<BSONObj>& originalIndexes) = 0;
+        const std::vector<BSONObj>& originalIndexes) = 0;
 
     /**
      * Creates a collection on the given database by running the given command. On shardsvr targets
@@ -414,19 +422,34 @@ public:
 
     /**
      * Accepts a pipeline and returns a new one which will draw input from the underlying
+     * collection. The function will perform pre-optimization rewrites, but behavior for how to
+     * optimize the pipeline before a cursor is attached must be defined inside 'optimizePipeline'.
+     * To attach a cursor this function calls 'preparePipelineForExecution' (see below).
+     *
+     * This function guarantees that optimizing, translating and preparing the pipeline for
+     * execution will use a single snapshot of collection metadata ('CollectionOrViewAcquisition' or
+     * 'RoutingContext').
+     */
+    virtual std::unique_ptr<Pipeline> finalizeAndMaybePreparePipelineForExecution(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        std::unique_ptr<Pipeline> pipeline,
+        bool attachCursorAfterOptimizing,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
+        ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
+        boost::optional<BSONObj> readConcern = boost::none,
+        bool shouldUseCollectionDefaultCollator = false) = 0;
+
+    /**
+     * Accepts a pipeline and returns a new one which will draw input from the underlying
      * collection. Performs no further optimization of the pipeline. NamespaceNotFound will be
      * thrown if ExpressionContext has a UUID and that UUID doesn't exist anymore. That should be
      * the only case where NamespaceNotFound is returned.
      *
-     * This function takes ownership of the 'pipeline' argument as if it were a unique_ptr.
-     * Changing it to a unique_ptr introduces a circular dependency on certain platforms where the
-     * compiler expects to find an implementation of PipelineDeleter.
-     *
      * If `shardTargetingPolicy` is kNotAllowed, the cursor will only be for local reads regardless
      * of whether or not this function is called in a sharded environment.
      */
-    virtual std::unique_ptr<Pipeline, PipelineDeleter> preparePipelineForExecution(
-        Pipeline* pipeline,
+    virtual std::unique_ptr<Pipeline> preparePipelineForExecution(
+        std::unique_ptr<Pipeline> pipeline,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none) = 0;
 
@@ -445,14 +468,11 @@ public:
      * The 'readConcern' parameter specifies the read concern level for the aggregation request. If
      * 'shouldUseCollectionDefaultCollator' is set to true, the default collection collator will be
      * attached to the 'expCtx'.
-     *
-     * This function takes ownership of the 'pipeline' argument, which is expected to be a valid
-     * pointer to a Pipeline object.
      */
-    virtual std::unique_ptr<Pipeline, PipelineDeleter> preparePipelineForExecution(
+    virtual std::unique_ptr<Pipeline> preparePipelineForExecution(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const AggregateCommandRequest& aggRequest,
-        Pipeline* pipeline,
+        std::unique_ptr<Pipeline> pipeline,
         boost::optional<BSONObj> shardCursorsSortSpec = boost::none,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none,
@@ -463,8 +483,26 @@ public:
      * {"pipeline": <explainOutput>}. Note that <explainOutput> can be an object (shardsvr) or an
      * array (non_shardsvr).
      */
-    virtual BSONObj preparePipelineAndExplain(Pipeline* ownedPipeline,
-                                              ExplainOptions::Verbosity verbosity) = 0;
+    virtual BSONObj finalizePipelineAndExplain(
+        std::unique_ptr<Pipeline> pipeline,
+        ExplainOptions::Verbosity verbosity,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr) = 0;
+
+    /**
+     * Accepts a pipeline and returns a new one which will draw input from the underlying
+     * collection _locally_. Trying to run this method on mongos is a programming error. Running
+     * this method on a shard server will only return results which match the pipeline on that
+     * shard.
+     *
+     * Accepts catalog information that will be used for the new returned pipeline.
+     *
+     * Unlike attachCursorSourceToPipelineForLocalRead(), this method does not accept additional
+     * configuration through 'aggRequest' or 'shouldUseCollectionDefaultCollator' parameters.
+     */
+    virtual std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalReadWithCatalog(
+        std::unique_ptr<Pipeline> pipeline,
+        const MultipleCollectionAccessor& collections,
+        const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle) = 0;
 
     /**
      * Accepts a pipeline and returns a new one which will draw input from the underlying
@@ -478,15 +516,30 @@ public:
      *
      * When 'shouldUseCollectionDefaultCollator' is set to true, the collator of the target
      * collection will be used instead of previously provided collator.
-     *
-     * This function takes ownership of the 'pipeline' argument as if it were a unique_ptr.
-     * Changing it to a unique_ptr introduces a circular dependency on certain platforms where the
-     * compiler expects to find an implementation of PipelineDeleter.
      */
-    virtual std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipelineForLocalRead(
-        Pipeline* pipeline,
+    virtual std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalRead(
+        std::unique_ptr<Pipeline> pipeline,
         boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
         bool shouldUseCollectionDefaultCollator = false,
+        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) = 0;
+
+    /**
+     * Accepts a pipeline and returns a new one which will draw input from the underlying collection
+     * _locally_. The function will perform pre-optimization rewrites, but behavior for how to
+     * optimize the pipeline before a cursor is attached must be defined inside 'optimizePipeline'.
+     * To attach a cursor this function calls 'attachCursorSourceToPipelineForLocalRead' (see
+     * below).
+     *
+     * This function guarantees that parsing and preparing the pipeline for execution will use a
+     * single snapshot of collection metadata ('CollectionOrViewAcquisition').
+     */
+    virtual std::unique_ptr<Pipeline> finalizeAndAttachCursorToPipelineForLocalRead(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        std::unique_ptr<Pipeline> pipeline,
+        bool attachCursorAfterOptimizing,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
+        bool shouldUseCollectionDefaultCollator = false,
+        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
         ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) = 0;
 
     /**
@@ -530,7 +583,9 @@ public:
      * CatalogCache.
      */
     virtual std::vector<FieldPath> collectDocumentKeyFieldsActingAsRouter(
-        OperationContext* opCtx, const NamespaceString&) const = 0;
+        OperationContext* opCtx,
+        const NamespaceString&,
+        RoutingContext* routingCtx = nullptr) const = 0;
 
     /**
      * Returns zero or one documents with the document key 'documentKey'. 'documentKey' is treated
@@ -670,41 +725,44 @@ public:
     std::shared_ptr<executor::TaskExecutor> taskExecutor;
 
     /**
-     * Create a temporary record store.
+     * Creates a spill table.
      */
-    virtual std::unique_ptr<TemporaryRecordStore> createTemporaryRecordStore(
+    virtual std::unique_ptr<SpillTable> createSpillTable(
         const boost::intrusive_ptr<ExpressionContext>& expCtx, KeyFormat keyFormat) const = 0;
 
     /**
-     * Write the records in 'records' to the record store. Record store must already exist. Asserts
-     * that the writes succeeded.
+     * Writes the records in 'records' to the spill table. Asserts that the writes succeeded.
      */
-    virtual void writeRecordsToRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                           RecordStore* rs,
-                                           std::vector<Record>* records,
-                                           const std::vector<Timestamp>& ts) const = 0;
+    virtual void writeRecordsToSpillTable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                          SpillTable& spillTable,
+                                          std::vector<Record>* records) const = 0;
 
     /**
-     * Search for the RecordId 'rID' in 'rs'. RecordStore must already exist and be populated.
-     * Asserts that a document was found.
+     * Searches for the RecordId 'rID' in 'spillTable'. Asserts that a document was found.
      */
-    virtual Document readRecordFromRecordStore(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        RecordStore* rs,
-        RecordId rID) const = 0;
+    virtual Document readRecordFromSpillTable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                              const SpillTable& spillTable,
+                                              RecordId rID) const = 0;
 
     /**
-     * Deletes the record with RecordId `rID` from `rs`. RecordStore must already exist.
+     * Checks if the RecordId 'rID' is present in 'spillTable'.
      */
-    virtual void deleteRecordFromRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                             RecordStore* rs,
-                                             RecordId rID) const = 0;
+    virtual bool checkRecordInSpillTable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                         const SpillTable& spillTable,
+                                         RecordId rID) const = 0;
 
     /**
-     * Deletes all Records from `rs`. RecordStore must already exist.
+     * Deletes the record with RecordId `rID` from `spillTable`.
      */
-    virtual void truncateRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                     RecordStore* rs) const = 0;
+    virtual void deleteRecordFromSpillTable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                            SpillTable& spillTable,
+                                            RecordId rID) const = 0;
+
+    /**
+     * Deletes all records from `spillTable`.
+     */
+    virtual void truncateSpillTable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                    SpillTable& spillTable) const = 0;
 };
 
 }  // namespace mongo

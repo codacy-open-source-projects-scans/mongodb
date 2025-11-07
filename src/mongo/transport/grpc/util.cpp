@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <fmt/format.h>
-
 #include "mongo/transport/grpc/util.h"
 
 #include "mongo/client/mongo_uri.h"
@@ -37,7 +35,7 @@
 #include "mongo/util/net/ssl_util.h"
 #include "mongo/util/testing_proctor.h"
 
-using namespace fmt::literals;
+#include <fmt/format.h>
 
 namespace mongo::transport::grpc::util {
 namespace constants {
@@ -125,7 +123,8 @@ ErrorCodes::Error statusToErrorCode(::grpc::StatusCode statusCode) {
             return ::grpc::CANCELLED;
         default:
             invariant(TestingProctor::instance().isEnabled(),
-                      "No known conversion for MongoDB error code: "_format(errorCode));
+                      fmt::format("No known conversion for MongoDB error code: ",
+                                  fmt::underlying(errorCode)));
             return ::grpc::UNKNOWN;
     }
 }

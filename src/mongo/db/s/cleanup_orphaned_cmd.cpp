@@ -27,12 +27,6 @@
  *    it in the license file.
  */
 
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -42,66 +36,65 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/field_parser.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
+#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/s/collection_metadata.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/range_deletion_util.h"
-#include "mongo/db/s/shard_filtering_metadata_refresh.h"
-#include "mongo/db/s/sharding_runtime_d_params_gen.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/topology/sharding_state.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_options.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/sharding_state.h"
+#include "mongo/s/request_types/cleanup_orphaned_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 namespace mongo {
 namespace {
 
-enum class CleanupResult { kDone, kContinue, kError };
-
 /**
  * Waits for all possibly orphaned ranges on 'nss' to be cleaned up.
  *
- * @return CleanupResult::kDone if no orphaned ranges remain
- * @return CleanupResult::kError and 'errMsg' if an error occurred
+ * @return Status::OK() if no orphaned ranges remain
+ * @return ErrorCode::OrphanedRangeCleanUpFailed and 'errMsg' if an error occurred
  *
- * If the collection is not sharded, returns CleanupResult::kDone.
+ * If the collection is not sharded, returns Status::OK().
  */
-CleanupResult cleanupOrphanedData(OperationContext* opCtx,
-                                  const NamespaceString& ns,
-                                  const BSONObj& startingFromKeyConst,
-                                  std::string* errMsg) {
+Status cleanupOrphanedData(OperationContext* opCtx,
+                           const NamespaceString& ns,
+                           const BSONObj& startingFromKeyConst) {
     boost::optional<ChunkRange> range;
     boost::optional<UUID> collectionUuid;
     {
         AutoGetCollection autoColl(opCtx, ns, MODE_IX);
-        if (!autoColl.getCollection()) {
+        if (!*autoColl) {
             LOGV2(4416000,
                   "cleanupOrphaned skipping waiting for orphaned data cleanup because "
                   "collection does not exist",
                   logAttrs(ns));
-            return CleanupResult::kDone;
+            return Status::OK();
         }
-        collectionUuid.emplace(autoColl.getCollection()->uuid());
+        collectionUuid.emplace(autoColl->uuid());
 
         const auto scopedCsr =
             CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, ns);
@@ -111,7 +104,7 @@ CleanupResult cleanupOrphanedData(OperationContext* opCtx,
                   "cleanupOrphaned skipping waiting for orphaned data cleanup because "
                   "collection is not sharded",
                   logAttrs(ns));
-            return CleanupResult::kDone;
+            return Status::OK();
         }
         range.emplace(optCollDescr->getMinKey(), optCollDescr->getMaxKey());
 
@@ -139,11 +132,6 @@ CleanupResult cleanupOrphanedData(OperationContext* opCtx,
     // sleep for a short time and then try waitForClean again.
     while (auto numRemainingDeletionTasks =
                rangedeletionutil::checkForConflictingDeletions(opCtx, *range, *collectionUuid)) {
-        uassert(ErrorCodes::ResumableRangeDeleterDisabled,
-                "Failing cleanupOrphaned because the disableResumableRangeDeleter server parameter "
-                "is set to true and this shard contains range deletion tasks for the collection.",
-                !disableResumableRangeDeleter.load());
-
         LOGV2(4416003,
               "cleanupOrphaned going to wait for range deletion tasks to complete",
               logAttrs(ns),
@@ -154,14 +142,14 @@ CleanupResult cleanupOrphanedData(OperationContext* opCtx,
             opCtx, ns, *collectionUuid, *range, Date_t::max());
 
         if (!status.isOK()) {
-            *errMsg = status.reason();
-            return CleanupResult::kError;
+            std::string errMsg = status.reason();
+            return Status(ErrorCodes::OrphanedRangeCleanUpFailed, errMsg);
         }
 
         opCtx->sleepFor(Milliseconds(1000));
     }
 
-    return CleanupResult::kDone;
+    return Status::OK();
 }
 
 /**
@@ -173,9 +161,61 @@ CleanupResult cleanupOrphanedData(OperationContext* opCtx,
  *
  * Safe to call with the balancer on.
  */
-class CleanupOrphanedCommand : public ErrmsgCommandDeprecated {
+class CleanupOrphanedCommand final : public TypedCommand<CleanupOrphanedCommand> {
+
 public:
-    CleanupOrphanedCommand() : ErrmsgCommandDeprecated("cleanupOrphaned") {}
+    using Request = CleanupOrphaned;
+
+    class Invocation final : public InvocationBase {
+    public:
+        using InvocationBase::InvocationBase;
+
+        void typedRun(OperationContext* opCtx) {
+            const NamespaceString& nss = ns();
+            uassert(ErrorCodes::InvalidNamespace,
+                    str::stream() << "Invalid namespace: " << nss.toStringForErrorMsg(),
+                    nss.isValid());
+
+            ShardingState* const shardingState = ShardingState::get(opCtx);
+
+            uassert(ErrorCodes::ShardingStateNotInitialized,
+                    str::stream() << "server is not part of a sharded cluster or the sharding "
+                                     "metadata is not yet initialized. ",
+                    shardingState->enabled());
+
+            uassertStatusOK(
+                FilteringMetadataCache::get(opCtx)->onCollectionPlacementVersionMismatch(
+                    opCtx, nss, boost::none));
+
+            BSONObj startingFromKey;
+
+            if (request().getStartingFromKey().has_value()) {
+                startingFromKey = request().getStartingFromKey().value();
+            }
+
+            Status cleanupResult = cleanupOrphanedData(opCtx, nss, startingFromKey);
+
+            uassertStatusOK(cleanupResult);
+        }
+
+    private:
+        void doCheckAuthorization(OperationContext* opCtx) const override {
+            uassert(ErrorCodes::Unauthorized,
+                    "Unauthorized",
+                    AuthorizationSession::get(opCtx->getClient())
+                        ->isAuthorizedForActionsOnResource(
+                            ResourcePattern::forClusterResource(request().getDbName().tenantId()),
+                            ActionType::cleanupOrphaned));
+        }
+
+        bool supportsWriteConcern() const override {
+            return true;
+        }
+
+        NamespaceString ns() const override {
+            return request().getCommandParameter();
+        }
+    };
 
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
@@ -184,73 +224,8 @@ public:
     bool adminOnly() const override {
         return true;
     }
-
-    Status checkAuthForOperation(OperationContext* opCtx,
-                                 const DatabaseName& dbName,
-                                 const BSONObj&) const override {
-        if (!AuthorizationSession::get(opCtx->getClient())
-                 ->isAuthorizedForActionsOnResource(
-                     ResourcePattern::forClusterResource(dbName.tenantId()),
-                     ActionType::cleanupOrphaned)) {
-            return Status(ErrorCodes::Unauthorized, "Not authorized for cleanupOrphaned command.");
-        }
-        return Status::OK();
-    }
-
-    bool supportsWriteConcern(const BSONObj& cmd) const override {
-        return true;
-    }
-
-    // Input
-    static BSONField<std::string> nsField;
-    static BSONField<BSONObj> startingFromKeyField;
-
-    bool errmsgRun(OperationContext* opCtx,
-                   const DatabaseName& dbName,
-                   const BSONObj& cmdObj,
-                   std::string& errmsg,
-                   BSONObjBuilder& result) override {
-        std::string ns;
-        if (!FieldParser::extract(cmdObj, nsField, &ns, &errmsg)) {
-            return false;
-        }
-
-        const NamespaceString nss =
-            NamespaceStringUtil::deserialize(boost::none, ns, SerializationContext::stateDefault());
-        uassert(ErrorCodes::InvalidNamespace,
-                str::stream() << "Invalid namespace: " << nss.toStringForErrorMsg(),
-                nss.isValid());
-
-        BSONObj startingFromKey;
-        if (!FieldParser::extract(cmdObj, startingFromKeyField, &startingFromKey, &errmsg)) {
-            return false;
-        }
-
-        ShardingState* const shardingState = ShardingState::get(opCtx);
-
-        if (!shardingState->enabled()) {
-            errmsg = str::stream() << "server is not part of a sharded cluster or "
-                                   << "the sharding metadata is not yet initialized.";
-            return false;
-        }
-
-        uassertStatusOK(FilteringMetadataCache::get(opCtx)->onCollectionPlacementVersionMismatch(
-            opCtx, nss, boost::none));
-
-        CleanupResult cleanupResult = cleanupOrphanedData(opCtx, nss, startingFromKey, &errmsg);
-
-        if (cleanupResult == CleanupResult::kError) {
-            return false;
-        }
-        dassert(cleanupResult == CleanupResult::kDone);
-
-        return true;
-    }
 };
 MONGO_REGISTER_COMMAND(CleanupOrphanedCommand).forShard();
-
-BSONField<std::string> CleanupOrphanedCommand::nsField("cleanupOrphaned");
-BSONField<BSONObj> CleanupOrphanedCommand::startingFromKeyField("startingFromKey");
 
 }  // namespace
 }  // namespace mongo

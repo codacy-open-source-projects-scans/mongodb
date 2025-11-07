@@ -6,7 +6,6 @@ rst.startSet();
 rst.initiate();
 
 let mongoUri = "mongodb://" + rst.nodes.map((node) => node.host).join(",") + "/test";
-let conn = rst.nodes[0];
 
 // There are three ways to enable retryable writes in the mongo shell.
 // 1. (cmdline flag) start mongo shell with --retryWrites
@@ -25,13 +24,12 @@ function runShellScript(uri, cmdArgs, insertShouldHaveTxnNumber, shellFn) {
             if (cmdName === "insert") {
                 insertFound = true;
                 if (insertShouldHaveTxnNumber) {
-                    assert(cmdObjSeen.hasOwnProperty("txnNumber"),
-                           "insert sent without expected txnNumber");
+                    assert(cmdObjSeen.hasOwnProperty("txnNumber"), "insert sent without expected txnNumber");
                 } else {
-                    assert(!cmdObjSeen.hasOwnProperty("txnNumber"),
-                           "insert sent with txnNumber unexpectedly");
+                    assert(!cmdObjSeen.hasOwnProperty("txnNumber"), "insert sent with txnNumber unexpectedly");
                 }
             }
+            // eslint-disable-next-line prefer-rest-params
             return mongoRunCommandOriginal.apply(this, arguments);
         };
 
@@ -57,30 +55,27 @@ runShellScript(mongoUri, ["--retryWrites"], true, function flagWorks() {
 });
 
 // The uri param should override --retryWrites.
-runShellScript(
-    mongoUri + "?retryWrites=false", ["--retryWrites"], false, function flagOverridenByUri() {
-        assert(!db.getSession().getOptions().shouldRetryWrites(), "retryWrites should be false");
-        assert.commandWorked(db.coll.insert({}), "cannot insert");
-    });
+runShellScript(mongoUri + "?retryWrites=false", ["--retryWrites"], false, function flagOverridenByUri() {
+    assert(!db.getSession().getOptions().shouldRetryWrites(), "retryWrites should be false");
+    assert.commandWorked(db.coll.insert({}), "cannot insert");
+});
 
 // Even if initial connection has retryWrites=false in uri, new connections should not be
 // overriden.
-runShellScript(
-    mongoUri + "?retryWrites=false", ["--retryWrites"], true, function flagNotOverridenByNewConn() {
-        let connUri = db.getMongo().host;  // does not have ?retryWrites=false.
-        let sess = new Mongo(connUri).startSession();
-        assert(sess.getOptions().shouldRetryWrites(), "retryWrites should be true");
-        assert.commandWorked(sess.getDatabase("test").coll.insert({}), "cannot insert");
-    });
+runShellScript(mongoUri + "?retryWrites=false", ["--retryWrites"], true, function flagNotOverridenByNewConn() {
+    let connUri = db.getMongo().host; // does not have ?retryWrites=false.
+    let sess = new Mongo(connUri).startSession();
+    assert(sess.getOptions().shouldRetryWrites(), "retryWrites should be true");
+    assert.commandWorked(sess.getDatabase("test").coll.insert({}), "cannot insert");
+});
 
 // Unless that uri also specifies retryWrites.
-runShellScript(
-    mongoUri + "?retryWrites=false", ["--retryWrites"], false, function flagOverridenInNewConn() {
-        let connUri = "mongodb://" + db.getMongo().host + "/test?retryWrites=false";
-        let sess = new Mongo(connUri).startSession();
-        assert(!sess.getOptions().shouldRetryWrites(), "retryWrites should be false");
-        assert.commandWorked(sess.getDatabase("test").coll.insert({}), "cannot insert");
-    });
+runShellScript(mongoUri + "?retryWrites=false", ["--retryWrites"], false, function flagOverridenInNewConn() {
+    let connUri = "mongodb://" + db.getMongo().host + "/test?retryWrites=false";
+    let sess = new Mongo(connUri).startSession();
+    assert(!sess.getOptions().shouldRetryWrites(), "retryWrites should be false");
+    assert.commandWorked(sess.getDatabase("test").coll.insert({}), "cannot insert");
+});
 
 // Session options should override --retryWrites as well.
 runShellScript(mongoUri, ["--retryWrites"], false, function flagOverridenByOpts() {

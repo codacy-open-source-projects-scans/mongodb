@@ -27,20 +27,21 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <memory>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/db/exec/sbe/expression_test_base.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/sbe_block_test_helpers.h"
 #include "mongo/db/exec/sbe/sbe_unittest.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
+#include "mongo/db/exec/sbe/values/cell_interface.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/unittest/unittest.h"
+
+#include <cstdint>
+#include <memory>
+#include <string>
 
 namespace mongo::sbe {
 
@@ -281,7 +282,7 @@ TEST_F(SBEBlockExpressionTest, BlockTypeMatchHeterogeneousTest) {
         "valueBlockTypeMatch",
         sbe::makeEs(makeE<EVariable>(blockSlot),
                     sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt32,
-                                               getBSONTypeMask(BSONType::NumberInt))));
+                                               getBSONTypeMask(BSONType::numberInt))));
 
     auto compiledExpr = compileExpression(*typeMatchExpr);
 
@@ -315,7 +316,7 @@ TEST_F(SBEBlockExpressionTest, BlockTypeMatchHomogeneousTest) {
         "valueBlockTypeMatch",
         sbe::makeEs(makeE<EVariable>(blockSlot),
                     sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::NumberInt32,
-                                               getBSONTypeMask(BSONType::NumberInt))));
+                                               getBSONTypeMask(BSONType::numberInt))));
 
     auto compiledExpr = compileExpression(*typeMatchExpr);
 
@@ -817,8 +818,7 @@ TEST_F(SBEBlockExpressionTest, BlockFillEmptyMonoHomogeneousTest) {
 }
 
 TEST_F(SBEBlockExpressionTest, BlockFillTypeTest) {
-    auto fill = makeObject(BSON("a"
-                                << "replacement for arrays"));
+    auto fill = makeObject(BSON("a" << "replacement for arrays"));
     value::ValueGuard fillGuard{fill.first, fill.second};
 
     value::HeterogeneousBlock block;
@@ -833,7 +833,7 @@ TEST_F(SBEBlockExpressionTest, BlockFillTypeTest) {
     auto extracted = block.extract();
 
     {
-        auto typeMask = makeInt32(getBSONTypeMask(BSONType::Array));
+        auto typeMask = makeInt32(getBSONTypeMask(BSONType::array));
 
         runFillTypeTest(FillTypeTest{
             .inputBlock = &block,
@@ -874,7 +874,7 @@ TEST_F(SBEBlockExpressionTest, BlockFillTypeMonoHomogeneousTest) {
         auto fill = makeDecimal("1234.5678");
         value::ValueGuard fillGuard{fill.first, fill.second};
 
-        auto typeMask = makeInt32(getBSONTypeMask(BSONType::NumberDouble));
+        auto typeMask = makeInt32(getBSONTypeMask(BSONType::numberDouble));
 
         runFillTypeTest(FillTypeTest{
             .inputBlock = &block,
@@ -888,7 +888,7 @@ TEST_F(SBEBlockExpressionTest, BlockFillTypeMonoHomogeneousTest) {
         // Block matches the type mask and fillTag is the same as the block type.
         auto fill = makeInt32(10);
 
-        auto typeMask = makeInt32(getBSONTypeMask(BSONType::NumberInt));
+        auto typeMask = makeInt32(getBSONTypeMask(BSONType::numberInt));
 
         {
             // Input block has Nothing.
@@ -930,7 +930,7 @@ TEST_F(SBEBlockExpressionTest, BlockFillTypeMonoHomogeneousTest) {
         auto fill = makeDecimal("1234.5678");
         value::ValueGuard fillGuard{fill.first, fill.second};
 
-        auto typeMask = makeInt32(getBSONTypeMask(BSONType::NumberInt));
+        auto typeMask = makeInt32(getBSONTypeMask(BSONType::numberInt));
 
         runFillTypeTest(
             FillTypeTest{.inputBlock = &block,
@@ -949,7 +949,7 @@ TEST_F(SBEBlockExpressionTest, BlockFillTypeMonoHomogeneousTest) {
 
         {
             // MonoBlock that doesn't match the type mask.
-            auto typeMask = makeInt32(getBSONTypeMask(BSONType::Array));
+            auto typeMask = makeInt32(getBSONTypeMask(BSONType::array));
 
             runFillTypeTest(FillTypeTest{.inputBlock = &monoBlock,
                                          .typeMask = typeMask,
@@ -959,7 +959,7 @@ TEST_F(SBEBlockExpressionTest, BlockFillTypeMonoHomogeneousTest) {
 
         {
             // MonoBlock that matches the type mask.
-            auto typeMask = makeInt32(getBSONTypeMask(BSONType::String));
+            auto typeMask = makeInt32(getBSONTypeMask(BSONType::string));
 
             runFillTypeTest(FillTypeTest{.inputBlock = &monoBlock,
                                          .typeMask = typeMask,
@@ -2608,7 +2608,9 @@ TEST_F(SBEBlockExpressionTest, ValueBlockAddHeterogeneousTest) {
             EPrimBinary::add, fnName, bitsetBlock.get(), &leftBlock, &rightBlock);
     }
 
-    { testBlockBlockArithmeticOp(EPrimBinary::add, fnName, nullptr, &leftBlock, &rightBlock); }
+    {
+        testBlockBlockArithmeticOp(EPrimBinary::add, fnName, nullptr, &leftBlock, &rightBlock);
+    }
 }
 
 TEST_F(SBEBlockExpressionTest, ValueBlockAddMonoBlockTest) {
@@ -2682,7 +2684,9 @@ TEST_F(SBEBlockExpressionTest, ValueBlockAddScalarTest) {
             EPrimBinary::add, fnName, bitsetBlock.get(), &block, makeInt32(100));
     }
 
-    { testBlockScalarArithmeticOp(EPrimBinary::add, fnName, nullptr, &block, makeInt32(100)); }
+    {
+        testBlockScalarArithmeticOp(EPrimBinary::add, fnName, nullptr, &block, makeInt32(100));
+    }
 
     {
         value::MonoBlock monoBlock(7, value::TypeTags::NumberInt32, value::bitcastFrom<int>(100));
@@ -2742,7 +2746,9 @@ TEST_F(SBEBlockExpressionTest, ValueBlockSubHeterogeneousTest) {
         testBlockBlockArithmeticOp(
             EPrimBinary::sub, fnName, bitsetBlock.get(), &leftBlock, &rightBlock);
     }
-    { testBlockBlockArithmeticOp(EPrimBinary::sub, fnName, nullptr, &leftBlock, &rightBlock); }
+    {
+        testBlockBlockArithmeticOp(EPrimBinary::sub, fnName, nullptr, &leftBlock, &rightBlock);
+    }
 }
 
 TEST_F(SBEBlockExpressionTest, ValueBlockSubMonoBlockTest) {
@@ -2816,7 +2822,9 @@ TEST_F(SBEBlockExpressionTest, ValueBlockSubScalarTest) {
             EPrimBinary::sub, fnName, bitsetBlock.get(), &block, makeInt32(100));
     }
 
-    { testBlockScalarArithmeticOp(EPrimBinary::sub, fnName, nullptr, &block, makeInt32(100)); }
+    {
+        testBlockScalarArithmeticOp(EPrimBinary::sub, fnName, nullptr, &block, makeInt32(100));
+    }
 
     {
         value::MonoBlock monoBlock(7, value::TypeTags::NumberInt32, value::bitcastFrom<int>(100));
@@ -2871,7 +2879,9 @@ TEST_F(SBEBlockExpressionTest, ValueBlockMultHeterogeneousTest) {
             EPrimBinary::mul, fnName, bitsetBlock.get(), &leftBlock, &rightBlock);
     }
 
-    { testBlockBlockArithmeticOp(EPrimBinary::mul, fnName, nullptr, &leftBlock, &rightBlock); }
+    {
+        testBlockBlockArithmeticOp(EPrimBinary::mul, fnName, nullptr, &leftBlock, &rightBlock);
+    }
 }
 
 TEST_F(SBEBlockExpressionTest, ValueBlockMultMonoBlockTest) {
@@ -2945,7 +2955,9 @@ TEST_F(SBEBlockExpressionTest, ValueBlockMultScalarTest) {
             EPrimBinary::mul, fnName, bitsetBlock.get(), &block, makeInt32(100));
     }
 
-    { testBlockScalarArithmeticOp(EPrimBinary::mul, fnName, nullptr, &block, makeInt32(100)); }
+    {
+        testBlockScalarArithmeticOp(EPrimBinary::mul, fnName, nullptr, &block, makeInt32(100));
+    }
 
     {
         value::MonoBlock monoBlock(7, value::TypeTags::NumberInt32, value::bitcastFrom<int>(100));
@@ -3006,7 +3018,9 @@ TEST_F(SBEBlockExpressionTest, ValueBlockDivHeterogeneousTest) {
             EPrimBinary::div, fnName, bitsetBlock.get(), &leftBlock, &rightBlock);
     }
 
-    { testBlockBlockArithmeticOp(EPrimBinary::div, fnName, nullptr, &leftBlock, &rightBlock); }
+    {
+        testBlockBlockArithmeticOp(EPrimBinary::div, fnName, nullptr, &leftBlock, &rightBlock);
+    }
 }
 
 TEST_F(SBEBlockExpressionTest, ValueBlockDivMonoBlockTest) {
@@ -4592,15 +4606,12 @@ TEST_F(SBEBlockExpressionTest, BlockGetSortKey) {
 
 
         auto block = std::make_unique<value::HeterogeneousBlock>();
-        block->push_back(makeArray(BSON_ARRAY("19"
-                                              << "28"
-                                              << "37")));
-        block->push_back(makeArray(BSON_ARRAY("42"
-                                              << "26"
-                                              << "35")));
-        block->push_back(makeArray(BSON_ARRAY("35"
-                                              << "51"
-                                              << "44")));
+        block->push_back(makeArray(BSON_ARRAY("19" << "28"
+                                                   << "37")));
+        block->push_back(makeArray(BSON_ARRAY("42" << "26"
+                                                   << "35")));
+        block->push_back(makeArray(BSON_ARRAY("35" << "51"
+                                                   << "44")));
 
         blockAccessor.reset(value::TypeTags::valueBlock,
                             value::bitcastFrom<value::ValueBlock*>(block.get()));

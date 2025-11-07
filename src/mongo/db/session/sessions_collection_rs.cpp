@@ -27,13 +27,7 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <list>
-#include <memory>
-#include <utility>
-#include <vector>
-
-#include <absl/container/node_hash_map.h>
+#include "mongo/db/session/sessions_collection_rs.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -44,19 +38,27 @@
 #include "mongo/client/internal_auth.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/client/remote_command_targeter_factory_impl.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/session/sessions_collection_rs.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <list>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
 
 namespace mongo {
 
@@ -76,12 +78,12 @@ auto SessionsCollectionRS::_makePrimaryConnection(OperationContext* opCtx) {
     }
 
     auto res = uassertStatusOK(
-        _targeter->findHost(opCtx, ReadPreferenceSetting(ReadPreference::PrimaryOnly)));
+        _targeter->findHost(opCtx, ReadPreferenceSetting(ReadPreference::PrimaryOnly), {}));
 
     auto conn = std::make_unique<ScopedDbConnection>(res.toString());
 
     // Make a connection to the primary, auth, then send
-    if (auth::isInternalAuthSet()) {
+    if (auth::isInternalAuthSet() && !conn->get()->isAuthenticated()) {
         conn->get()->authenticateInternalUser();
     }
 

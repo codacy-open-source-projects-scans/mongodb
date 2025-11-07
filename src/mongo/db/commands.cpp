@@ -29,40 +29,29 @@
 
 #include "mongo/db/commands.h"
 
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <fmt/format.h>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/error_extra_info.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/mutable/algorithm.h"
-#include "mongo/bson/mutable/document.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/audit.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/validated_tenancy_scope.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/curop_diagnostic_printer.h"
 #include "mongo/db/error_labels.h"
+#include "mongo/db/exec/mutable_bson/algorithm.h"
+#include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/db/generic_argument_util.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/db/version_context.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/idl/command_generic_argument.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/metadata/client_metadata.h"
 #include "mongo/rpc/op_msg_rpc_impls.h"
@@ -80,6 +69,17 @@
 #include "mongo/util/string_map.h"
 #include "mongo/util/uuid.h"
 
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <fmt/format.h>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 namespace mongo {
@@ -88,7 +88,6 @@ const std::set<std::string> kNoApiVersions = {};
 const std::set<std::string> kApiVersions1 = {"1"};
 
 namespace {
-using namespace fmt::literals;
 
 const int kFailedFindCommandDebugLevel = 3;
 
@@ -130,6 +129,21 @@ bool checkAuthorizationImplPreParse(
                 (validatedTenancyScope && validatedTenancyScope->hasAuthenticatedUser()));
 
     return false;
+}
+
+void checkAuthForRawData(OperationContext* opCtx,
+                         const GenericArguments& genArg,
+                         const OpMsgRequest& request) {
+    if (!genArg.getRawData())
+        return;
+    auto ns = NamespaceStringUtil::deserialize(request.parseDbName(),
+                                               request.body.firstElement().valueStringDataSafe());
+    auto authSession = AuthorizationSession::get(opCtx->getClient());
+    uassert(
+        ErrorCodes::Unauthorized,
+        "Not authorized to run command with rawData",
+        authSession->isAuthorizedForActionsOnNamespace(ns, ActionType::performRawDataOperations) ||
+            authSession->isAuthorizedForActionsOnNamespace(ns, ActionType::internal));
 }
 
 auto getCommandInvocationHooks =
@@ -241,6 +255,13 @@ void CommandHelpers::runCommandInvocation(OperationContext* opCtx,
         hooks->onBeforeRun(opCtx, invocation);
     }
 
+    // Capture diagnostics for failures such as tasserts, invariants, and segfaults that may occur
+    // during execution of eligible commands. No work is done on the hot-path; all computation of
+    // these diagnostics is done lazily during failure handling. This line just creates an RAII
+    // object which holds references to objects on this stack frame, which will be used to print
+    // diagnostics in the event of a failure.
+    ScopedDebugInfo cmdDiagnostics("curOpDiagnostics", diagnostic_printers::CurOpPrinter{opCtx});
+
     invocation->run(opCtx, response);
 
     if (hooks) {
@@ -275,7 +296,7 @@ void CommandHelpers::auditLogAuthEvent(OperationContext* opCtx,
                 _name = _invocation->definition()->getName();
             } else {
                 _nss = NamespaceString(request.parseDbName());
-                _name = request.getCommandName().toString();
+                _name = std::string{request.getCommandName()};
             }
         }
 
@@ -330,32 +351,17 @@ void CommandHelpers::uassertNoDocumentSequences(StringData commandName,
 }
 
 std::string CommandHelpers::parseNsFullyQualified(const BSONObj& cmdObj) {
-    BSONElement first = cmdObj.firstElement();
-    uassert(ErrorCodes::BadValue,
-            str::stream() << "collection name has invalid type " << typeName(first.type()),
-            first.canonicalType() == canonicalizeBSONType(mongo::String));
-    const auto ns = first.valueStringData();
+    const auto ns = IDLParserContext::checkAndAssertCollectionName(cmdObj.firstElement(), false);
     uassert(ErrorCodes::InvalidNamespace,
             str::stream() << "Invalid namespace specified '" << ns << "'",
             NamespaceString::isValid(ns));
-    return ns.toString();
+    return std::string{ns};
 }
 
 NamespaceString CommandHelpers::parseNsCollectionRequired(const DatabaseName& dbName,
                                                           const BSONObj& cmdObj) {
-    // Accepts both BSON String and Symbol for collection name per SERVER-16260
-    // TODO(kangas) remove Symbol support in MongoDB 3.0 after Ruby driver audit
-    BSONElement first = cmdObj.firstElement();
-    const bool isUUID = (first.canonicalType() == canonicalizeBSONType(mongo::BinData) &&
-                         first.binDataType() == BinDataType::newUUID);
-    uassert(ErrorCodes::InvalidNamespace,
-            str::stream() << "Collection name must be provided. UUID is not valid in this "
-                          << "context",
-            !isUUID);
-    uassert(ErrorCodes::InvalidNamespace,
-            str::stream() << "collection name has invalid type " << typeName(first.type()),
-            first.canonicalType() == canonicalizeBSONType(mongo::String));
-    NamespaceString nss(NamespaceStringUtil::deserialize(dbName, first.valueStringData()));
+    const auto coll = IDLParserContext::checkAndAssertCollectionName(cmdObj.firstElement(), false);
+    NamespaceString nss(NamespaceStringUtil::deserialize(dbName, coll));
     uassert(ErrorCodes::InvalidNamespace,
             str::stream() << "Invalid namespace specified '" << nss.toStringForErrorMsg() << "'",
             nss.isValid());
@@ -365,7 +371,7 @@ NamespaceString CommandHelpers::parseNsCollectionRequired(const DatabaseName& db
 NamespaceStringOrUUID CommandHelpers::parseNsOrUUID(const DatabaseName& dbName,
                                                     const BSONObj& cmdObj) {
     BSONElement first = cmdObj.firstElement();
-    if (first.type() == BinData && first.binDataType() == BinDataType::newUUID) {
+    if (first.type() == BSONType::binData && first.binDataType() == BinDataType::newUUID) {
         return {dbName, uassertStatusOK(UUID::parse(first))};
     } else {
         const NamespaceString nss(parseNsCollectionRequired(dbName, cmdObj));
@@ -385,7 +391,7 @@ void CommandHelpers::ensureValidCollectionName(const NamespaceString& nss) {
 NamespaceString CommandHelpers::parseNsFromCommand(const DatabaseName& dbName,
                                                    const BSONObj& cmdObj) {
     BSONElement first = cmdObj.firstElement();
-    if (first.type() != mongo::String)
+    if (first.type() != BSONType::string)
         return NamespaceString(dbName);
     return NamespaceStringUtil::deserialize(dbName, cmdObj.firstElement().valueStringData());
 }
@@ -413,7 +419,7 @@ bool CommandHelpers::appendCommandStatusNoThrow(BSONObjBuilder& result, const St
     // construct an invalid error reply.
     if (!status.isOK() && getTestCommandsEnabled()) {
         try {
-            ErrorReply::parse(IDLParserContext("appendCommandStatusNoThrow"), result.asTempObj());
+            ErrorReply::parse(result.asTempObj(), IDLParserContext("appendCommandStatusNoThrow"));
         } catch (const DBException&) {
             invariant(false,
                       "invalid error-response to a command constructed in "
@@ -513,15 +519,15 @@ BSONObj CommandHelpers::appendMajorityWriteConcern(const BSONObj& cmdObj,
 
         parsedWC.w = WriteConcernOptions::kMajority;
         return appendWCToObj(cmdObj, parsedWC);
-    } else if (!defaultWC.usedDefaultConstructedWC) {
-        defaultWC.w = WriteConcernOptions::kMajority;
-        if (defaultWC.wTimeout < generic_argument_util::kMajorityWriteConcern.wTimeout) {
-            defaultWC.wTimeout = generic_argument_util::kMajorityWriteConcern.wTimeout;
-        }
-        return appendWCToObj(cmdObj, defaultWC);
-    } else {
-        return appendWCToObj(cmdObj, generic_argument_util::kMajorityWriteConcern);
     }
+
+    auto global = defaultMajorityWriteConcernDoNotUse();
+    if (defaultWC.usedDefaultConstructedWC)
+        return appendWCToObj(cmdObj, global);
+
+    defaultWC.w = WriteConcernOptions::kMajority;
+    defaultWC.wTimeout = std::max(defaultWC.wTimeout, global.wTimeout);
+    return appendWCToObj(cmdObj, defaultWC);
 }
 
 BSONObj CommandHelpers::filterCommandRequestForPassthrough(const BSONObj& cmdObj) {
@@ -582,8 +588,9 @@ bool CommandHelpers::uassertShouldAttemptParse(OperationContext* opCtx,
 void CommandHelpers::uassertCommandRunWithMajority(StringData commandName,
                                                    const WriteConcernOptions& writeConcern) {
     uassert(ErrorCodes::InvalidOptions,
-            "\"{}\" must be called with majority writeConcern, got: {} "_format(
-                commandName, writeConcern.toBSON().toString()),
+            fmt::format("\"{}\" must be called with majority writeConcern, got: {} ",
+                        commandName,
+                        writeConcern.toBSON().toString()),
             writeConcern.isMajority());
 }
 
@@ -697,6 +704,15 @@ bool CommandHelpers::shouldActivateFailCommandFailPoint(const BSONObj& data,
         return false;
     }
 
+    if (client->isInDirectClient()) {
+        bool failDirectClientCommands = data.hasField("failDirectClientCommands")
+            ? data.getBoolField("failDirectClientCommands")
+            : true;
+        if (!failDirectClientCommands) {
+            return false;
+        }
+    }
+
     if (data.hasField("failAllCommands")) {
         LOGV2(6348500,
               "Activating 'failCommand' failpoint for all commands",
@@ -710,7 +726,8 @@ bool CommandHelpers::shouldActivateFailCommandFailPoint(const BSONObj& data,
     }
 
     for (auto&& failCommand : data.getObjectField("failCommands")) {
-        if (failCommand.type() == String && cmd->hasAlias(failCommand.valueStringData())) {
+        if (failCommand.type() == BSONType::string &&
+            cmd->hasAlias(failCommand.valueStringData())) {
             LOGV2(4898500,
                   "Activating 'failCommand' failpoint",
                   "data"_attr = data,
@@ -742,7 +759,7 @@ void CommandHelpers::evaluateFailCommandFailPoint(OperationContext* opCtx,
             rpc::RewriteStateChangeErrors::onActiveFailCommand(opCtx, data);
 
             if (data.hasField(kErrorLabelsFieldName) &&
-                data[kErrorLabelsFieldName].type() == Array) {
+                data[kErrorLabelsFieldName].type() == BSONType::array) {
                 // Propagate error labels specified in the failCommand failpoint to the
                 // OperationContext decoration to override getErrorLabels() behaviors.
                 invariant(!errorLabelsOverride(opCtx));
@@ -751,20 +768,26 @@ void CommandHelpers::evaluateFailCommandFailPoint(OperationContext* opCtx,
             }
 
             if (blockConnection) {
-                long long blockTimeMS = 0;
-                uassert(ErrorCodes::InvalidOptions,
-                        "must specify 'blockTimeMS' when 'blockConnection' is true",
-                        data.hasField("blockTimeMS") &&
+                if (data.hasField("blockTimeMS")) {
+                    long long blockTimeMS = 0;
+                    uassert(ErrorCodes::InvalidOptions,
+                            "Failed to parse 'blockTimeMS'",
                             bsonExtractIntegerField(data, "blockTimeMS", &blockTimeMS).isOK());
-                uassert(ErrorCodes::InvalidOptions,
-                        "'blockTimeMS' must be non-negative",
-                        blockTimeMS >= 0);
+                    uassert(ErrorCodes::InvalidOptions,
+                            "'blockTimeMS' must be non-negative",
+                            blockTimeMS >= 0);
 
-                LOGV2(20432,
-                      "Blocking command via 'failCommand' failpoint",
-                      "command"_attr = cmd->getName(),
-                      "blockTime"_attr = Milliseconds{blockTimeMS});
-                opCtx->sleepFor(Milliseconds{blockTimeMS});
+                    LOGV2(20432,
+                          "Blocking command via 'failCommand' failpoint",
+                          "command"_attr = cmd->getName(),
+                          "blockTime"_attr = Milliseconds{blockTimeMS});
+                    opCtx->sleepFor(Milliseconds{blockTimeMS});
+                } else {
+                    LOGV2(10303900,
+                          "Blocking command via 'failCommand' failpoint until failpoint is unset",
+                          "command"_attr = cmd->getName());
+                    failCommand.pauseWhileSet(opCtx);
+                }
                 LOGV2(20433,
                       "Unblocking command via 'failCommand' failpoint",
                       "command"_attr = cmd->getName());
@@ -801,7 +824,7 @@ void CommandHelpers::evaluateFailCommandFailPoint(OperationContext* opCtx,
 
             auto errorExtraInfo = [&]() -> boost::optional<BSONObj> {
                 BSONElement e;
-                Status st = bsonExtractTypedField(data, "errorExtraInfo", BSONType::Object, &e);
+                Status st = bsonExtractTypedField(data, "errorExtraInfo", BSONType::object, &e);
                 if (st == ErrorCodes::NoSuchKey)
                     return {};  // It's optional. Missing is allowed. Other errors aren't.
                 uassertStatusOK(st);
@@ -917,6 +940,7 @@ void CommandInvocation::checkAuthorization(OperationContext* opCtx,
             // Blanket authorization: don't need to check anything else.
         } else {
             try {
+                checkAuthForRawData(opCtx, getGenericArguments(), request);
                 doCheckAuthorization(opCtx);
             } catch (const ExceptionFor<ErrorCodes::Unauthorized>&) {
                 namespace mmb = mutablebson;
@@ -950,11 +974,12 @@ public:
           _command(command),
           _request(request),
           _dbName(request.parseDbName()),
-          _genericArgs(GenericArguments::parse(IDLParserContext(_command->getName(),
-                                                                request.validatedTenancyScope,
-                                                                request.getValidatedTenantId(),
-                                                                request.getSerializationContext()),
-                                               _request.body)) {}
+          _genericArgs(
+              GenericArguments::parse(_request.body,
+                                      IDLParserContext(_command->getName(),
+                                                       request.validatedTenancyScope,
+                                                       request.getValidatedTenantId(),
+                                                       request.getSerializationContext()))) {}
 
 private:
     void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) override {
@@ -996,6 +1021,10 @@ private:
     ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
                                                  bool isImplicitDefault) const override {
         return _command->supportsReadConcern(cmdObj(), level, isImplicitDefault);
+    }
+
+    bool supportsRawData() const override {
+        return _command->supportsRawData();
     }
 
     bool isSubjectToIngressAdmissionControl() const override {
@@ -1071,7 +1100,7 @@ std::unique_ptr<CommandInvocation> BasicCommandWithReplyBuilderInterface::parse(
 }
 
 Command::Command(StringData name, std::vector<StringData> aliases)
-    : _name(name.toString()), _aliases(std::move(aliases)) {}
+    : _name(std::string{name}), _aliases(std::move(aliases)) {}
 
 void Command::initializeClusterRole(ClusterRole role) {
     for (auto&& [ptr, stat] : {
@@ -1079,7 +1108,7 @@ void Command::initializeClusterRole(ClusterRole role) {
              std::pair{&_commandsFailed, "failed"},
              std::pair{&_commandsRejected, "rejected"},
          })
-        *ptr = &*MetricBuilder<Counter64>{"commands.{}.{}"_format(_name, stat)}.setRole(role);
+        *ptr = &*MetricBuilder<Counter64>{fmt::format("commands.{}.{}", _name, stat)}.setRole(role);
     doInitializeClusterRole(role);
 }
 
@@ -1155,7 +1184,7 @@ void CommandRegistry::registerCommand(Command* command) {
     auto ep = std::make_unique<Entry>();
     ep->command = command;
     auto [cIt, cOk] = _commands.emplace(command, std::move(ep));
-    invariant(cOk, "Command identity collision: {}"_format(name));
+    invariant(cOk, fmt::format("Command identity collision: {}", name));
 
     // When a `Command*` is introduced to `_commands`, its names are introduced
     // to `_commandNames`.
@@ -1164,7 +1193,7 @@ void CommandRegistry::registerCommand(Command* command) {
         if (key.empty())
             continue;
         auto [nIt, nOk] = _commandNames.try_emplace(key, command);
-        invariant(nOk, "Command name collision: {}"_format(key));
+        invariant(nOk, fmt::format("Command name collision: {}", key));
     }
 }
 
@@ -1200,7 +1229,7 @@ BSONObj toBSON(const CommandConstructionPlan::Entry& e) {
     bob.append("expr", e.expr);
     bob.append("roles", toString(e.roles.value_or(ClusterRole::None)));
     if (e.location)
-        bob.append("loc", "{}:{}"_format(e.location->file_name(), e.location->line()));
+        bob.append("loc", fmt::format("{}:{}", e.location->file_name(), e.location->line()));
     return bob.obj();
 }
 
@@ -1208,14 +1237,14 @@ void CommandConstructionPlan::execute(CommandRegistry* registry,
                                       Service* service,
                                       const std::function<bool(const Entry&)>& pred) const {
     LOGV2_DEBUG(8043400, 3, "Constructing Command objects from specs");
+    StringMap<boost::optional<SourceLocation>> dupCheck;
     for (auto&& entry : entries()) {
         if (entry->testOnly && !getTestCommandsEnabled()) {
             LOGV2_DEBUG(8043401, 3, "Skipping test-only command", "entry"_attr = *entry);
             continue;
         }
-        if (entry->featureFlag &&
-            !entry->featureFlag->isEnabledUseLatestFCVWhenUninitialized(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        // Do not register feature-gated commands that cannot become enabled at runtime.
+        if (entry->featureFlag && !entry->featureFlag->canBeEnabled()) {
             LOGV2_DEBUG(8043402, 3, "Skipping FeatureFlag gated command", "entry"_attr = *entry);
             continue;
         }
@@ -1224,6 +1253,19 @@ void CommandConstructionPlan::execute(CommandRegistry* registry,
             continue;
         }
         auto c = entry->construct();
+        {
+            const std::string& name = c->getName();
+            auto&& loc = entry->location;
+            if (auto dup = dupCheck.find(name); dup != dupCheck.end()) {
+                LOGV2_FATAL(10205200,
+                            "Duplicate command",
+                            "name"_attr = name,
+                            "role"_attr = service->role(),
+                            "location"_attr = loc,
+                            "dupLocation"_attr = dup->second);
+            }
+            dupCheck.insert({c->getName(), loc});
+        }
         c->initializeClusterRole(service ? service->role() : ClusterRole{});
         LOGV2_DEBUG(8043404, 3, "Created", "command"_attr = c->getName(), "entry"_attr = *entry);
         registry->registerCommand(&*c);

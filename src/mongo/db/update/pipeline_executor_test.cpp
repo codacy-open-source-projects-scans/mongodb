@@ -27,25 +27,21 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/update/pipeline_executor.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
-#include "mongo/bson/mutable/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
+#include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/update/pipeline_executor.h"
 #include "mongo/db/update/update_node_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
@@ -324,8 +320,7 @@ TEST_F(UpdateTestFixture, CanUseConstantsAcrossMultipleUpdates) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
 
     const std::vector<BSONObj> pipeline{fromjson("{$set: {b: '$$var1'}}")};
-    const auto constants = BSON("var1"
-                                << "foo");
+    const auto constants = BSON("var1" << "foo");
     PipelineExecutor exec(expCtx, pipeline, constants);
 
     // Update first doc.

@@ -29,15 +29,6 @@
 
 #pragma once
 
-#include <absl/container/node_hash_set.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <tuple>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
@@ -50,9 +41,21 @@
 #include "mongo/db/session/kill_sessions_gen.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/session_killer.h"
+#include "mongo/rpc/metadata/audit_user_attrs.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_set.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -77,24 +80,38 @@ class ScopedKillAllSessionsByPatternImpersonator {
 public:
     ScopedKillAllSessionsByPatternImpersonator(OperationContext* opCtx,
                                                const KillAllSessionsByPattern& pattern) {
-        AuthorizationSession* authSession = AuthorizationSession::get(opCtx->getClient());
+        _opCtx = opCtx;
+        // If pattern doesn't contain both user and roles, make sure we don't swap on destruction
+        _active = pattern.getUsers() && pattern.getRoles();
+        if (!_active) {
+            return;
+        }
+        // Save current value of AuditUserAttrs for later restore
+        _attrs = rpc::AuditUserAttrs::get(opCtx);
+        // Set AuditUserAttrs to match the pattern passed in
+        auto [name, roles] = getKillAllSessionsByPatternImpersonateData(pattern);
+        if (name) {
+            rpc::AuditUserAttrs::set(opCtx, *name, roles, true /* isImpersonating */);
+        } else {
+            rpc::AuditUserAttrs::resetToAuthenticatedUser(opCtx);
+        }
+    }
 
-        if (pattern.getUsers() && pattern.getRoles()) {
-            boost::optional<UserName> name;
-            std::tie(name, _roles) = getKillAllSessionsByPatternImpersonateData(pattern);
-
-            if (name) {
-                _name = std::make_shared<UserName>(name.get());
+    ~ScopedKillAllSessionsByPatternImpersonator() {
+        // Ensure the impersonator is active and opCtx is still alive, and swap back.
+        if (_active && _opCtx->checkForInterruptNoAssert().isOK()) {
+            if (_attrs) {
+                rpc::AuditUserAttrs::set(_opCtx, *_attrs);
+            } else {
+                rpc::AuditUserAttrs::resetToAuthenticatedUser(_opCtx);
             }
-
-            _raii.emplace(authSession, &_name, &_roles);
         }
     }
 
 private:
-    std::shared_ptr<UserName> _name;
-    std::vector<RoleName> _roles;
-    boost::optional<AuthorizationSession::ScopedImpersonate> _raii;
+    OperationContext* _opCtx;
+    boost::optional<rpc::AuditUserAttrs> _attrs;
+    bool _active;
 };
 
 /**
@@ -103,7 +120,7 @@ private:
  * two types share no code, but do share enough shape to re-use some boilerplate.
  */
 template <typename Eraser>
-class KillCursorsBySessionAdaptor {
+class MONGO_MOD_PUB KillCursorsBySessionAdaptor {
 public:
     KillCursorsBySessionAdaptor(OperationContext* opCtx,
                                 const SessionKiller::Matcher& matcher,
@@ -177,9 +194,9 @@ private:
 };
 
 template <typename Eraser>
-auto makeKillCursorsBySessionAdaptor(OperationContext* opCtx,
-                                     const SessionKiller::Matcher& matcher,
-                                     Eraser&& eraser) {
+MONGO_MOD_PUB auto makeKillCursorsBySessionAdaptor(OperationContext* opCtx,
+                                                   const SessionKiller::Matcher& matcher,
+                                                   Eraser&& eraser) {
     return KillCursorsBySessionAdaptor<std::decay_t<Eraser>>{
         opCtx, matcher, std::forward<Eraser>(eraser)};
 }

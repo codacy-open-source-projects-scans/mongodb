@@ -32,8 +32,10 @@
 #include "mongo/db/pipeline/visitors/docs_needed_bounds.h"
 #include "mongo/db/query/search/internal_search_mongot_remote_spec_gen.h"
 #include "mongo/executor/task_executor_cursor.h"
+#include "mongo/util/modules.h"
 
-namespace mongo::mongot_cursor {
+namespace mongo {
+namespace MONGO_MOD_PUB mongot_cursor {
 inline auto makeRetryOnNetworkErrorPolicy() {
     return [retried = false](const Status& st) mutable {
         return std::exchange(retried, true) ? false : ErrorCodes::isNetworkError(st);
@@ -53,7 +55,12 @@ static constexpr StringData kDocsRequestedField = "docsRequested"_sd;
 static constexpr StringData kBatchSizeField = "batchSize"_sd;
 static constexpr StringData kRequiresSearchSequenceToken = "requiresSearchSequenceToken"_sd;
 static constexpr StringData kReturnStoredSourceArg = "returnStoredSource"_sd;
+static constexpr StringData kReturnScopeArg = "returnScope"_sd;
 static constexpr StringData kSlowQueryLogFieldName = "slowQueryLog"_sd;
+static constexpr StringData kScoreDetailsFieldName = "scoreDetails"_sd;
+static constexpr StringData kSearchRootDocumentIdFieldName = "searchRootDocumentId"_sd;
+static constexpr StringData kOptimizationFlagsField = "optimizationFlags"_sd;
+static constexpr StringData kOmitSearchDocumentResultsField = "omitSearchDocumentResults"_sd;
 
 static constexpr long long kMinimumMongotBatchSize = 10;
 static constexpr long long kDefaultMongotBatchSize = 101;
@@ -61,6 +68,31 @@ static constexpr long long kDefaultMongotBatchSize = 101;
 // Default sort spec is to sort decreasing by search score.
 static const BSONObj kSortSpec = BSON("$searchScore" << -1);
 static constexpr StringData kSearchSortValuesFieldPrefix = "$searchSortValues."_sd;
+
+/**
+ * Set of OptimizationFlags that can be passed in a mongot search request
+ */
+struct OptimizationFlags {
+    // When true, indicates that mongod is 100% sure that mongot can omit values from the response.
+    // Used primarily for $searchMeta.
+    bool omitSearchDocumentResults = false;
+
+    BSONObj serialize() const {
+        BSONObjBuilder ofBob;
+        ofBob.append(kOmitSearchDocumentResultsField, omitSearchDocumentResults);
+        return ofBob.obj();
+    }
+};
+
+/**
+ * Gets optimization flags for $searchMeta commands.
+ */
+OptimizationFlags getOptimizationFlagsForSearchMeta();
+
+/**
+ * Gets optimization flags for $search commands.
+ */
+OptimizationFlags getOptimizationFlagsForSearch();
 
 /**
  * Create the RemoteCommandRequest for the provided command.
@@ -103,7 +135,8 @@ std::vector<std::unique_ptr<executor::TaskExecutorCursor>> establishCursorsForSe
     const BSONObj& query,
     std::shared_ptr<executor::TaskExecutor> taskExecutor,
     const boost::optional<int>& protocolVersion = boost::none,
-    std::unique_ptr<PlanYieldPolicy> yieldPolicy = nullptr);
+    std::unique_ptr<PlanYieldPolicy> yieldPolicy = nullptr,
+    boost::optional<SearchQueryViewSpec> view = boost::none);
 
 /**
  * Gets the explain information by issuing an explain command to mongot and blocking
@@ -119,7 +152,9 @@ BSONObj getExplainResponse(const ExpressionContext* expCtx,
  */
 BSONObj getSearchExplainResponse(const ExpressionContext* expCtx,
                                  const BSONObj& query,
-                                 executor::TaskExecutor* taskExecutor);
+                                 executor::TaskExecutor* taskExecutor,
+                                 const OptimizationFlags& optimizationFlags,
+                                 boost::optional<SearchQueryViewSpec> view = boost::none);
 
 /**
  * Send the search command `cmdObj` to the remote search server this process is connected to.
@@ -142,4 +177,15 @@ executor::RemoteCommandResponse runSearchCommandWithRetries(
  */
 void throwIfNotRunningWithMongotHostConfigured(
     const boost::intrusive_ptr<ExpressionContext>& expCtx);
-}  // namespace mongo::mongot_cursor
+
+/**
+ * Helper function to determine whether or not pinned connection mode should be used.
+ *
+ * Mongod=>Mongot communication over the MongoDB gRPC protocol requires that all
+ * getMore/killCursor commands must be sent over the same stream as the command that
+ * initiated the cursor(s), which is currently implemented through the pinConnection functionality
+ * in TaskExecutorCursor.
+ */
+bool shouldPinConnection();
+}  // namespace MONGO_MOD_PUB mongot_cursor
+}  // namespace mongo

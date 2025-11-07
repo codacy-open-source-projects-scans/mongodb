@@ -38,35 +38,19 @@ namespace mongo {
 const NamespaceString QueryBenchmarkFixture::kNss =
     NamespaceString::createNamespaceString_forTest("test", "coll");
 
-QueryBenchmarkFixture::QueryBenchmarkFixture() {
-    _setupDone.emplace();
+void QueryBenchmarkFixture::setUpSharedResources(benchmark::State& state) {
+    _fixture.emplace(CatalogScopedGlobalServiceContextForTest::Options{}, false);
+
+    ReadWriteConcernDefaults::create(getGlobalServiceContext()->getService(),
+                                     _lookupMock.getFetchDefaultsFn());
+    _lookupMock.setLookupCallReturnValue({});
+
+    populateCollection(state.range(0), state.range(1));
 }
 
-void QueryBenchmarkFixture::SetUp(benchmark::State& state) {
-    // Only one thread need to do global setup
-    if (state.thread_index == 0) {
-        BenchmarkWithProfiler::SetUp(state);
-        _fixture.emplace(CatalogScopedGlobalServiceContextForTest::Options{}, false);
-
-        ReadWriteConcernDefaults::create(getGlobalServiceContext()->getService(),
-                                         _lookupMock.getFetchDefaultsFn());
-        _lookupMock.setLookupCallReturnValue({});
-
-        populateCollection(state.range(0), state.range(1));
-        _setupDone->set();
-    } else {
-        _setupDone->get();
-    }
-}
-
-void QueryBenchmarkFixture::TearDown(benchmark::State& state) {
-    // Only one thread need to do global teardown
-    if (state.thread_index == 0) {
-        _fixture.reset();
-        _docs.clear();
-        BenchmarkWithProfiler::TearDown(state);
-        _setupDone.emplace();
-    }
+void QueryBenchmarkFixture::tearDownSharedResources(benchmark::State& state) {
+    _fixture.reset();
+    _docs.clear();
 }
 
 void QueryBenchmarkFixture::runBenchmark(BSONObj filter,
@@ -83,10 +67,11 @@ void QueryBenchmarkFixture::runBenchmark(BSONObj filter,
         [&]() {
             Client& client = cc();
             auto opCtx = client.makeOperationContext();
-            auto statusWithResponse = client.getService()
-                                          ->getServiceEntryPoint()
-                                          ->handleRequest(opCtx.get(), msg)
-                                          .getNoThrow();
+            auto statusWithResponse =
+                client.getService()
+                    ->getServiceEntryPoint()
+                    ->handleRequest(opCtx.get(), msg, opCtx->fastClockSource().now())
+                    .getNoThrow();
             iassert(statusWithResponse);
             LOGV2_DEBUG(9278700,
                         1,

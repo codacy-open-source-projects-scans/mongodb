@@ -29,19 +29,21 @@
 
 #pragma once
 
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/s/balancer_configuration_gen.h"
+#include "mongo/s/request_types/migration_secondary_throttle_options.h"
+#include "mongo/stdx/mutex.h"
+
+#include <cstdint>
+
 #include <boost/date_time/posix_time/ptime.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <cstdint>
-
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/s/request_types/migration_secondary_throttle_options.h"
-#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 
@@ -59,22 +61,21 @@ class StatusWith;
  *  stopped: <true|false>,
  *  mode: <full|off>,  // Only consulted if "stopped" is missing or
  * false activeWindow: { start: "<HH:MM>", stop: "<HH:MM>" }
+ * activeWindowDOW: [
+ *   { day: "<day_name>", start: "<HH:MM>", stop: "<HH:MM>" },
+ *   ...
+ * ]
  * }
+ *
+ * Note, the only current use for this class is provide a validator for the collection the balancer
+ * settings doc is in. Therefore this should be kept in sync with the IDL BalancerSettings class.
+ * Once users can use commands to update the balancer settings without having to access the document
+ * directly, this class can be removed.
+ * TODO SERVER-107399 Remove this class once done, as users should no longer directly update this
+ * document.
  */
 class BalancerSettingsType {
 public:
-    // Supported balancer modes
-    enum BalancerMode {
-        kFull,  // Balancer will always try to keep the cluster even
-        kOff,   // Balancer is completely off
-    };
-
-    // The key under which this setting is stored on the config server
-    static const char kKey[];
-
-    // String representation of the balancer modes
-    static const std::vector<std::string> kBalancerModes;
-
     /**
      * Part of schema to enforce on config.settings document relating to documents with _id:
      * "balancer".
@@ -83,6 +84,7 @@ public:
      *                 mode: {bsonType: {enum: ["full", "off"]}},
      *                 stopped: {bsonType: bool},
      *                 activeWindow: {bsonType: object}
+     *                 activeWindowDOW: {bsonType: array}
      *                 _secondaryThrottle: {"oneOf": [{bsonType: bool}, {bsonType: object}]}
      *                 _waitForDelete: {bsonType: bool}
      *                 attemptToBalanceJumboChunks: {bsonType: bool}}
@@ -93,65 +95,8 @@ public:
      */
     static const BSONObj kSchema;
 
-    /**
-     * Constructs a settings object with the default values. To be used when no balancer settings
-     * have been specified.
-     */
-    static BalancerSettingsType createDefault();
-
-    /**
-     * Interprets the BSON content as balancer settings and extracts the respective values.
-     */
-    static StatusWith<BalancerSettingsType> fromBSON(const BSONObj& obj);
-
-    /**
-     * Returns whether the balancer is enabled.
-     */
-    BalancerMode getMode() const {
-        return _mode;
-    }
-
-    /**
-     * Returns true if either 'now' is in the balancing window or if no balancing window exists.
-     */
-    bool isTimeInBalancingWindow(const boost::posix_time::ptime& now) const;
-
-    /**
-     * Returns the secondary throttle options.
-     */
-    const MigrationSecondaryThrottleOptions& getSecondaryThrottle() const {
-        return _secondaryThrottle;
-    }
-
-    /**
-     * Returns whether the balancer should wait for deletions after each completed move.
-     */
-    bool waitForDelete() const {
-        return _waitForDelete;
-    }
-
-    /**
-     * Returns whether the balancer should schedule migrations of chunks that are 'large' rather
-     * than marking these chunks as 'jumbo' (meaning they will not be scheduled for split or
-     * migration).
-     */
-    bool attemptToBalanceJumboChunks() const {
-        return _attemptToBalanceJumboChunks;
-    }
-
 private:
     BalancerSettingsType();
-
-    BalancerMode _mode{kFull};
-
-    boost::optional<boost::posix_time::ptime> _activeWindowStart;
-    boost::optional<boost::posix_time::ptime> _activeWindowStop;
-
-    MigrationSecondaryThrottleOptions _secondaryThrottle;
-
-    bool _waitForDelete{false};
-
-    bool _attemptToBalanceJumboChunks{false};
 };
 
 /**
@@ -250,6 +195,8 @@ class BalancerConfiguration {
     BalancerConfiguration& operator=(const BalancerConfiguration&) = delete;
 
 public:
+    static constexpr const char* kBalancerSettingKey = "balancer";
+
     /**
      * Primes the balancer configuration with some default values. The effective settings may change
      * at a later time after a call to refresh().
@@ -261,19 +208,19 @@ public:
      * Non-blocking method, which checks whether the balancer is enabled (without checking for the
      * balancing window).
      */
-    BalancerSettingsType::BalancerMode getBalancerMode() const;
+    mongo::BalancerModeEnum getBalancerMode() const;
 
     /**
      * Synchronous method, which writes the balancer mode to the configuration data.
      */
-    Status setBalancerMode(OperationContext* opCtx, BalancerSettingsType::BalancerMode mode);
+    Status setBalancerMode(OperationContext* opCtx, mongo::BalancerModeEnum mode);
 
     /**
      * Returns whether balancing is allowed based on both the enabled state of the balancer and the
      * balancing window.
      */
-    bool shouldBalance() const;
-    bool shouldBalanceForAutoMerge() const;
+    bool shouldBalance(OperationContext* opCtx) const;
+    bool shouldBalanceForAutoMerge(OperationContext* opCtx) const;
 
     /**
      * Returns the secondary throttle options for the balancer.
@@ -320,6 +267,32 @@ public:
      */
     Status refreshAndCheck(OperationContext* opCtx);
 
+    /**
+     * Constructs a settings object with the default values. To be used when no balancer settings
+     * have been specified.
+     */
+    BalancerSettings createDefaultSettings();
+
+    /**
+     * Interprets the BSON content as balancer settings and extracts the respective values.
+     */
+    StatusWith<BalancerSettings> getSettingsFromBSON(OperationContext* opCtx, const BSONObj& obj);
+
+    /**
+     * Returns true if either 'now' is in the balancing window or if no balancing window exists.
+     */
+    bool isTimeInBalancingWindow(OperationContext* opCtx,
+                                 const boost::posix_time::ptime& now) const;
+
+
+    /**
+     * Modify the balancer settings directly. This is used for testing purposes only.
+     */
+    void setBalancerSettingsForTest(const BalancerSettings& settings) {
+        stdx::lock_guard<stdx::mutex> lk(_balancerSettingsMutex);
+        _balancerSettings = settings;
+    }
+
 private:
     /**
      * Reloads the balancer configuration from the settings document. Fails if the settings document
@@ -342,7 +315,7 @@ private:
 
     // The latest read balancer settings and a mutex to protect its swaps
     mutable stdx::mutex _balancerSettingsMutex;
-    BalancerSettingsType _balancerSettings;
+    BalancerSettings _balancerSettings;
 
     // Max chunk size after which a chunk would be considered jumbo and won't be moved. This value
     // is read on the critical path after each write operation, that's why it is cached.

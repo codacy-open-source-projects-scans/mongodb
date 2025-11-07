@@ -2,6 +2,8 @@
  * Test explaining various operations against a non-existent collection.
  * @tags: [
  *   assumes_no_implicit_collection_creation_after_drop,
+ *   # explain is a non-retryable command
+ *   requires_non_retryable_commands,
  * ]
  */
 // Ensure db exists (needed for explain to work).
@@ -9,10 +11,10 @@ db.filler_collection.drop();
 assert.commandWorked(db.createCollection("filler_collection"));
 db.filler_collection.drop();
 
-var missingColl = db.explain_null_collection;
+let missingColl = db.explain_null_collection;
 
-var explain;
-var explainColl;
+let explain;
+let explainColl;
 
 // .find()
 missingColl.drop();

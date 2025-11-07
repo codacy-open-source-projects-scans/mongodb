@@ -27,14 +27,6 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -47,22 +39,29 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/async_requests_sender.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 
 namespace mongo {
 namespace {
@@ -119,53 +118,60 @@ public:
              BSONObjBuilder& result) override {
         const NamespaceString nss(parseNs(dbName, cmdObj));
         const BSONObj query;
-        const auto cri =
-            uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
-        auto shardResponses = scatterGatherVersionedTargetByRoutingTable(
-            opCtx,
-            nss.dbName(),
-            nss,
-            cri,
-            applyReadWriteConcern(
-                opCtx, this, CommandHelpers::filterCommandRequestForPassthrough(cmdObj)),
-            ReadPreferenceSetting::get(opCtx),
-            Shard::RetryPolicy::kIdempotent,
-            query,
-            CollationSpec::kSimpleSpec,
-            boost::none /*letParameters*/,
-            boost::none /*runtimeConstants*/);
 
-        // Sort shard responses by shard id.
-        std::sort(shardResponses.begin(),
-                  shardResponses.end(),
-                  [](const AsyncRequestsSender::Response& response1,
-                     const AsyncRequestsSender::Response& response2) {
-                      return response1.shardId < response2.shardId;
-                  });
+        sharding::router::CollectionRouter router{opCtx->getServiceContext(), nss};
+        return router.routeWithRoutingContext(
+            opCtx, getName(), [&](OperationContext* opCtx, RoutingContext& routingCtx) {
+                // Clear the result builder since this lambda function may be retried if the router
+                // cache is stale.
+                result.resetToEmpty();
 
-        // Set value of first shard result's "ok" field.
-        bool clusterCmdResult = true;
+                auto shardResponses = scatterGatherVersionedTargetByRoutingTable(
+                    opCtx,
+                    routingCtx,
+                    nss,
+                    applyReadWriteConcern(
+                        opCtx, this, CommandHelpers::filterCommandRequestForPassthrough(cmdObj)),
+                    ReadPreferenceSetting::get(opCtx),
+                    Shard::RetryPolicy::kIdempotent,
+                    query,
+                    CollationSpec::kSimpleSpec,
+                    boost::none /*letParameters*/,
+                    boost::none /*runtimeConstants*/);
 
-        for (auto i = shardResponses.begin(); i != shardResponses.end(); ++i) {
-            const auto& response = *i;
-            auto status = response.swResponse.getStatus();
-            uassertStatusOK(status.withContext(str::stream() << "failed on: " << response.shardId));
-            const auto& cmdResult = response.swResponse.getValue().data;
+                // Sort shard responses by shard id.
+                std::sort(shardResponses.begin(),
+                          shardResponses.end(),
+                          [](const AsyncRequestsSender::Response& response1,
+                             const AsyncRequestsSender::Response& response2) {
+                              return response1.shardId < response2.shardId;
+                          });
 
-            // XXX: In absence of sensible aggregation strategy,
-            //      promote first shard's result to top level.
-            if (i == shardResponses.begin()) {
-                CommandHelpers::filterCommandReplyForPassthrough(cmdResult, &result);
-                status = getStatusFromCommandResult(cmdResult);
-                clusterCmdResult = status.isOK();
-            }
+                // Set value of first shard result's "ok" field.
+                bool clusterCmdResult = true;
 
-            // Append shard result as a sub object.
-            // Name the field after the shard.
-            result.append(response.shardId, cmdResult);
-        }
+                for (auto i = shardResponses.begin(); i != shardResponses.end(); ++i) {
+                    const auto& response = *i;
+                    auto status = response.swResponse.getStatus();
+                    uassertStatusOK(
+                        status.withContext(str::stream() << "failed on: " << response.shardId));
+                    const auto& cmdResult = response.swResponse.getValue().data;
 
-        return clusterCmdResult;
+                    // XXX: In absence of sensible aggregation strategy,
+                    //      promote first shard's result to top level.
+                    if (i == shardResponses.begin()) {
+                        CommandHelpers::filterCommandReplyForPassthrough(cmdResult, &result);
+                        status = getStatusFromCommandResult(cmdResult);
+                        clusterCmdResult = status.isOK();
+                    }
+
+                    // Append shard result as a sub object.
+                    // Name the field after the shard.
+                    result.append(response.shardId, cmdResult);
+                }
+
+                return clusterCmdResult;
+            });
     }
 
 private:

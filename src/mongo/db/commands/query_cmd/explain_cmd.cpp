@@ -27,15 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <mutex>
-#include <set>
-#include <string>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -50,6 +41,8 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/explain_options.h"
+#include "mongo/db/raw_data_operation.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/rpc/op_msg.h"
@@ -58,6 +51,13 @@
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <utility>
+
 
 namespace mongo {
 namespace {
@@ -112,6 +112,10 @@ public:
         return "explain database reads and writes";
     }
 
+    bool enableDiagnosticPrintingOnFailure() const final {
+        return true;
+    }
+
 private:
     class Invocation;
 };
@@ -130,11 +134,12 @@ public:
           _innerRequest{std::move(innerRequest)},
           _innerInvocation{std::move(innerInvocation)},
           _genericArgs(
-              GenericArguments::parse(IDLParserContext("explain",
+              GenericArguments::parse(_outerRequest->body,
+                                      IDLParserContext("explain",
                                                        _outerRequest->validatedTenancyScope,
                                                        _outerRequest->getValidatedTenantId(),
-                                                       _outerRequest->getSerializationContext()),
-                                      _outerRequest->body)) {}
+                                                       _outerRequest->getSerializationContext()))) {
+    }
 
     void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* result) override {
         // Explain is never allowed in multi-document transactions.
@@ -209,11 +214,11 @@ std::unique_ptr<CommandInvocation> CmdExplain::parse(OperationContext* opCtx,
 
     // To enforce API versioning
     auto cmdObj = idl::parseCommandRequest<ExplainCommandRequest>(
+        request,
         IDLParserContext(ExplainCommandRequest::kCommandName,
                          request.validatedTenancyScope,
                          request.getValidatedTenantId(),
-                         request.getSerializationContext()),
-        request);
+                         request.getSerializationContext()));
     auto const dbName = cmdObj.getDbName();
     ExplainOptions::Verbosity verbosity = cmdObj.getVerbosity();
     auto explainedObj = cmdObj.getCommandParameter();
@@ -243,6 +248,19 @@ std::unique_ptr<CommandInvocation> CmdExplain::parse(OperationContext* opCtx,
     auto innerRequest = std::make_unique<OpMsgRequest>(
         OpMsgRequestBuilder::create(request.validatedTenancyScope, dbName, explainedObj));
     auto innerInvocation = explainedCommand->parseForExplain(opCtx, *innerRequest, verbosity);
+
+    uassert(ErrorCodes::InvalidOptions,
+            "Command does not support the rawData option",
+            !innerInvocation->getGenericArguments().getRawData() ||
+                innerInvocation->supportsRawData());
+    uassert(ErrorCodes::InvalidOptions,
+            "rawData is not enabled",
+            !innerInvocation->getGenericArguments().getRawData() ||
+                gFeatureFlagRawDataCrudOperations.isEnabled());
+    if (innerInvocation->getGenericArguments().getRawData()) {
+        isRawDataOperation(opCtx) = true;
+    }
+
     return std::make_unique<Invocation>(
         this, request, std::move(verbosity), std::move(innerRequest), std::move(innerInvocation));
 }

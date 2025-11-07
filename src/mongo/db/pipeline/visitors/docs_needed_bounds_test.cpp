@@ -29,10 +29,9 @@
 #include "mongo/db/pipeline/visitors/docs_needed_bounds.h"
 
 #include "mongo/bson/bsonmisc.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
 #include <variant>
 
 namespace mongo {
@@ -88,10 +87,9 @@ TEST(DocsNeededBoundsTest, DocsNeededBoundsSerializesCorrectly) {
     docs_needed_bounds::serializeDocsNeededConstraint(101, "otherTestBounds", &objBuilder);
 
     ASSERT_BSONOBJ_EQ(objBuilder.done(),
-                      BSON("minBounds"
-                           << "Unknown"
-                           << "maxBounds"
-                           << "NeedAll"
-                           << "otherTestBounds" << 101));
+                      BSON("minBounds" << "Unknown"
+                                       << "maxBounds"
+                                       << "NeedAll"
+                                       << "otherTestBounds" << 101));
 }
 }  // namespace mongo

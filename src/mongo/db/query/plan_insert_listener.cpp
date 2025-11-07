@@ -27,26 +27,24 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
+#include "mongo/db/query/plan_insert_listener.h"
 
-
-#include "mongo/db/basic_types.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/find_common.h"
 #include "mongo/db/query/plan_executor.h"
-#include "mongo/db/query/plan_insert_listener.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
+
+#include <memory>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -102,7 +100,8 @@ std::unique_ptr<Notifier> getCappedInsertNotifier(OperationContext* opCtx,
         RecoveryUnit::kMajorityCommitted) {
         return std::make_unique<MajorityCommittedPointNotifier>();
     } else {
-        auto collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
+        auto collCatalog = CollectionCatalog::get(opCtx);  // NOLINT TODO SERVER-112937 Remove this.
+        auto collection = collCatalog->lookupCollectionByNamespace(opCtx, nss);
         invariant(collection);
 
         return std::make_unique<LocalCappedInsertNotifier>(
@@ -119,19 +118,23 @@ void waitForInserts(OperationContext* opCtx,
     // notifier version change in order to wait.  This is sufficient to ensure we never wait
     // when data is available.
     notifier->prepareForWait(opCtx);
-    auto yieldResult = yieldPolicy->yieldOrInterrupt(opCtx, [opCtx, &notifier] {
-        const auto deadline = awaitDataState(opCtx).waitForInsertsDeadline;
-        auto curOp = CurOp::get(opCtx);
-        curOp->pauseTimer();
-        ON_BLOCK_EXIT([curOp] { curOp->resumeTimer(); });
-        notifier->waitUntil(opCtx, deadline);
-        if (MONGO_unlikely(planExecutorHangWhileYieldedInWaitForInserts.shouldFail())) {
-            LOGV2(4452903,
-                  "PlanExecutor - planExecutorHangWhileYieldedInWaitForInserts fail point enabled. "
-                  "Blocking until fail point is disabled");
-            planExecutorHangWhileYieldedInWaitForInserts.pauseWhileSet();
-        }
-    });
+    auto yieldResult = yieldPolicy->yieldOrInterrupt(
+        opCtx,
+        [opCtx, &notifier] {
+            const auto deadline = awaitDataState(opCtx).waitForInsertsDeadline;
+            auto curOp = CurOp::get(opCtx);
+            curOp->pauseTimer();
+            ON_BLOCK_EXIT([curOp] { curOp->resumeTimer(); });
+            notifier->waitUntil(opCtx, deadline);
+            if (MONGO_unlikely(planExecutorHangWhileYieldedInWaitForInserts.shouldFail())) {
+                LOGV2(4452903,
+                      "PlanExecutor - planExecutorHangWhileYieldedInWaitForInserts fail point "
+                      "enabled. "
+                      "Blocking until fail point is disabled");
+                planExecutorHangWhileYieldedInWaitForInserts.pauseWhileSet();
+            }
+        },
+        RestoreContext::RestoreType::kYield);
     notifier->doneWaiting(opCtx);
 
     uassertStatusOK(yieldResult);

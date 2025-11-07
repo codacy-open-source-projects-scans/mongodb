@@ -1,18 +1,18 @@
 // Basic sanity check of log component helpers
 
-var mongo = db.getMongo();
+let mongo = db.getMongo();
 
 // Get current log component settings. We will reset to these later.
-var originalSettings =
-    assert.commandWorked(db.adminCommand({getParameter: 1, logComponentVerbosity: 1}))
-        .logComponentVerbosity;
+let originalSettings = assert.commandWorked(
+    db.adminCommand({getParameter: 1, logComponentVerbosity: 1}),
+).logComponentVerbosity;
 
 // getLogComponents
-var components1 = mongo.getLogComponents();
+let components1 = mongo.getLogComponents();
 assert.docEq(originalSettings, components1);
 
 // getLogComponents via db
-var components2 = db.getLogComponents();
+let components2 = db.getLogComponents();
 assert.docEq(originalSettings, components2);
 
 // setLogLevel - default component
@@ -30,10 +30,10 @@ db.setLogLevel(1, "storage.journal");
 assert.eq(mongo.getLogComponents().storage.journal.verbosity, 1);
 
 // setLogLevel - invalid argument
-assert.throws(function() {
+assert.throws(function () {
     mongo.setLogLevel(2, 24);
 });
-assert.throws(function() {
+assert.throws(function () {
     db.setLogLevel(2, ["array", "not.allowed"]);
 });
 

@@ -28,47 +28,28 @@
  */
 
 
-#include <cstddef>
-#include <set>
-#include <tuple>
+#include "mongo/db/query/stage_builder/sbe/gen_coll_scan.h"
 
-#include <absl/container/inlined_vector.h>
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/exec/collection_scan_common.h"
-#include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
-#include "mongo/db/exec/sbe/stages/co_scan.h"
-#include "mongo/db/exec/sbe/stages/filter.h"
-#include "mongo/db/exec/sbe/stages/limit_skip.h"
-#include "mongo/db/exec/sbe/stages/loop_join.h"
-#include "mongo/db/exec/sbe/stages/project.h"
 #include "mongo/db/exec/sbe/stages/scan.h"
-#include "mongo/db/exec/sbe/stages/union.h"
-#include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/matcher/match_expression_dependencies.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/dependencies.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/dependency_analysis/match_expression_dependencies.h"
 #include "mongo/db/query/record_id_bound.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
-#include "mongo/db/query/stage_builder/sbe/gen_coll_scan.h"
 #include "mongo/db/query/stage_builder/sbe/gen_filter.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr_helpers.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/repl/optime.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
+
+#include <cstddef>
+#include <tuple>
+
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -108,110 +89,6 @@ sbe::ScanOpenCallback makeOpenCallbackIfNeeded(const CollectionPtr& collection,
     }
 }
 
-// If the scan should be started after the provided resume RecordId, we will construct a subtree
-// to project out the resume RecordId. This subtree will also perform a check to ensure that the
-// record we're trying to reposition to exists. The caller can then use a LoopJoinStage to combine
-// this subtree wite a ScanStage to actually perform the seek.
-//
-//   limit 1
-//      union [outSeekSlot]
-//         [seekSlot]
-//            nlj
-//               left
-//                  project seekSlot = <resumeRecordIdExpr>
-//                  limit 1
-//                  coscan
-//               right
-//                  seek seekSlot ...
-//         [unusedSlot]
-//            project unusedSlot = efail(KeyNotFound)
-//            limit 1
-//            coscan
-//
-std::pair<SbStage, SbSlot> buildResumeFromRecordIdTree(StageBuilderState& state,
-                                                       const CollectionPtr& collection,
-                                                       const CollectionScanNode* csn,
-                                                       SbExpr resumeRecordIdExpr,
-                                                       bool isResumingTailableScan) {
-    SbBuilder b(state, csn->nodeId());
-
-    const auto forward = csn->direction == CollectionScanParams::FORWARD;
-    invariant(!resumeRecordIdExpr.isNull());
-
-    // Project out the RecordId we want to resume from as 'seekSlot'.
-    auto [projStage, projOutSlots] =
-        b.makeProject(b.makeLimitOneCoScanTree(), std::move(resumeRecordIdExpr));
-    auto seekSlot = projOutSlots[0];
-
-    // Construct a 'seek' branch of the 'union'. If we're succeeded to reposition the cursor,
-    // the branch will output the 'seekSlot' to start the real scan from, otherwise it will
-    // produce EOF.
-    auto [scanStage, _, __, ___] =
-        b.makeScan(collection->uuid(), collection->ns().dbName(), forward, seekSlot);
-
-    auto seekBranch = b.makeLoopJoin(std::move(projStage),
-                                     std::move(scanStage),
-                                     SbExpr::makeSV(seekSlot),
-                                     SbExpr::makeSV(seekSlot));
-
-    // Construct a 'fail' branch of the union. The 'unusedSlot' is needed as each union branch must
-    // have the same number of slots, and we use just one in the 'seek' branch above. This branch
-    // will only be executed if the 'seek' branch produces EOF, which can only happen if the seek
-    // did not find the resume record of a tailable cursor or the record id specified in
-    // $_resumeAfter.
-    auto [errorCode, errorMessage] = [&]() -> std::pair<ErrorCodes::Error, std::string> {
-        if (isResumingTailableScan) {
-            return {ErrorCodes::CappedPositionLost,
-                    "CollectionScan died due to failure to restore tailable cursor position."};
-        }
-        return {ErrorCodes::ErrorCodes::KeyNotFound,
-                str::stream() << "Failed to resume collection scan: the recordId from which we are "
-                                 "attempting to resume no longer exists in the collection: "
-                              << csn->resumeAfterRecordId};
-    }();
-
-    auto [failBranch, failOutSlots] =
-        b.makeProject(b.makeLimitOneCoScanTree(), b.makeFail(errorCode, errorMessage));
-    auto unusedSlot = failOutSlots[0];
-
-    std::vector<SbSlotVector> inputVals;
-    inputVals.emplace_back(SbExpr::makeSV(seekSlot));
-    inputVals.emplace_back(SbExpr::makeSV(unusedSlot));
-
-    // Construct a union stage from the 'seek' and 'fail' branches, and then add a 'limit 1'
-    // stage so that the tree will produce just a single seek recordId.
-    auto [unionStage, outputVals] =
-        b.makeUnion(sbe::makeSs(std::move(seekBranch), std::move(failBranch)), inputVals);
-
-    auto outStage = b.makeLimit(std::move(unionStage), b.makeInt64Constant(1));
-
-    auto outSeekSlot = outputVals[0];
-
-    return {std::move(outStage), outSeekSlot};
-}
-
-SbStage combineResumeRecordIdTreeWithScan(StageBuilderState& state,
-                                          PlanNodeId nodeId,
-                                          SbStage resumeRecordIdTree,
-                                          SbStage scanStage,
-                                          SbSlot seekSlot,
-                                          bool isResumingTailableScan) {
-    SbBuilder b(state, nodeId);
-
-    // Construct the final loop join. Note that for the resume branch of a tailable cursor case
-    // we use the 'seek' stage as an inner branch, since we need to produce all records starting
-    // from the supplied position. For a resume token case we also inject a 'skip 1' stage on
-    // top of the inner branch, as we need to start _after_ the resume RecordId.
-    if (!isResumingTailableScan) {
-        scanStage = b.makeLimitSkip(std::move(scanStage), {} /*limit*/, b.makeInt64Constant(1));
-    }
-
-    return b.makeLoopJoin(std::move(resumeRecordIdTree),
-                          std::move(scanStage),
-                          SbSlotVector{},
-                          SbExpr::makeSV(seekSlot));
-}
-
 /**
  * Creates a collection scan sub-tree optimized for clustered collection scans. Should only be
  * called on clustered collections. We can build an optimized scan when any of the following
@@ -236,44 +113,32 @@ std::pair<SbStage, PlanStageSlots> generateClusteredCollScan(
     StageBuilderState& state,
     const CollectionPtr& collection,
     const CollectionScanNode* csn,
-    std::vector<std::string> scanFieldNames,
-    bool isResumingTailableScan) {
+    std::vector<std::string> scanFieldNames) {
     SbBuilder b(state, csn->nodeId());
 
     const bool forward = csn->direction == CollectionScanParams::FORWARD;
-    sbe::RuntimeEnvironment* env = state.env.runtimeEnv;
 
-    invariant(csn->doClusteredCollectionScanSbe());
-    invariant(!csn->resumeAfterRecordId || forward);
-    invariant(!csn->resumeAfterRecordId || !csn->tailable);
-    // The minRecord and maxRecord optimizations are not compatible with resumeAfterRecordId.
-    invariant(!(csn->resumeAfterRecordId && (csn->minRecord || csn->maxRecord)));
+    tassert(11051828,
+            "Expecting CollectionScanNode to allow clustered collection scan",
+            csn->doClusteredCollectionScanSbe());
+
+    tassert(9884961, "resumeScanPoint not supported in SBE", !csn->resumeScanPoint);
+
+    tassert(9884962,
+            "SBE does not support queries on the oplog",
+            !collection->ns().isOplog() && !csn->shouldTrackLatestOplogTimestamp);
+
+    // The minRecord and maxRecord optimizations are not compatible with resume tokens.
+    tassert(9884902,
+            "'resumeScanPoint' cannot be used with 'minRecord' or 'maxRecord'",
+            !(csn->resumeScanPoint && (csn->minRecord || csn->maxRecord)));
     // 'stopApplyingFilterAfterFirstMatch' is only for oplog scans; this method doesn't do them.
-    invariant(!csn->stopApplyingFilterAfterFirstMatch);
+    tassert(9884903,
+            "Cannot use 'stopApplyingFilterAfterFirstMatch' when generating clustered scan",
+            !csn->stopApplyingFilterAfterFirstMatch);
 
     SbStage resumeRecordIdTree;
     boost::optional<SbSlot> seekSlot;
-
-    // Iff this is a resume or fetch, build the subtree to start the scan from the seekRecordId.
-    if (isResumingTailableScan || csn->resumeAfterRecordId) {
-        // Iff this is a resume or fetch, set 'resumeRecordIdExpr' to the RecordId resume point
-        // of the scan.
-        SbExpr resumeRecordIdExpr;
-        if (isResumingTailableScan) {
-            resumeRecordIdExpr = SbSlot{env->getSlot("resumeRecordId"_sd)};
-        } else if (csn->resumeAfterRecordId) {
-            auto [tag, val] = sbe::value::makeCopyRecordId(*csn->resumeAfterRecordId);
-            resumeRecordIdExpr = b.makeConstant(tag, val);
-        } else {
-            MONGO_UNREACHABLE_TASSERT(9405102);
-        }
-
-        auto [outTree, outSlot] = buildResumeFromRecordIdTree(
-            state, collection, csn, std::move(resumeRecordIdExpr), isResumingTailableScan);
-
-        resumeRecordIdTree = std::move(outTree);
-        seekSlot = outSlot;
-    }
 
     // Create minRecordId and/or maxRecordId slots as needed.
     boost::optional<SbSlot> minRecordSlot;
@@ -313,15 +178,6 @@ std::pair<SbStage, PlanStageSlots> generateClusteredCollScan(
                    scanFieldNames,  // do not std::move - used later
                    std::move(scanBounds));
 
-    if (isResumingTailableScan || csn->resumeAfterRecordId) {
-        stage = combineResumeRecordIdTreeWithScan(state,
-                                                  csn->nodeId(),
-                                                  std::move(resumeRecordIdTree),
-                                                  std::move(stage),
-                                                  *seekSlot,
-                                                  isResumingTailableScan);
-    }
-
     PlanStageSlots outputs;
     outputs.setResultObj(resultSlot);
     outputs.set(PlanStageSlots::kRecordId, recordIdSlot);
@@ -345,28 +201,24 @@ std::pair<SbStage, PlanStageSlots> generateClusteredCollScan(
 
 /**
  * Generates a generic collection scan sub-tree.
- *  - If a resume token has been provided, the scan will start from a RecordId contained within this
- *    token.
- *  - Else if 'isResumingTailableScan' is true, the scan will start from a RecordId contained in
- *    slot "resumeRecordId".
- *  - Otherwise the scan will start from the beginning of the collection.
  */
 std::pair<SbStage, PlanStageSlots> generateGenericCollScan(StageBuilderState& state,
                                                            const CollectionPtr& collection,
                                                            const CollectionScanNode* csn,
-                                                           std::vector<std::string> fields,
-                                                           bool isResumingTailableScan) {
+                                                           std::vector<std::string> fields) {
     SbBuilder b(state, csn->nodeId());
 
     const bool forward = csn->direction == CollectionScanParams::FORWARD;
 
-    invariant(!csn->shouldTrackLatestOplogTimestamp || collection->ns().isOplog());
-    invariant(!csn->resumeAfterRecordId || forward);
-    invariant(!csn->resumeAfterRecordId || !csn->tailable);
+    tassert(9884951, "resumeScanPoint not supported in SBE", !csn->resumeScanPoint);
+
+    tassert(9884952,
+            "SBE does not support queries on the oplog",
+            !collection->ns().isOplog() && !csn->shouldTrackLatestOplogTimestamp);
 
     if (csn->filter) {
         DepsTracker deps;
-        match_expression::addDependencies(csn->filter.get(), &deps);
+        dependency_analysis::addDependencies(csn->filter.get(), &deps);
         // If the filter predicate doesn't need the whole document, then we take all the top-level
         // fields referenced by the filter predicate and we add them to 'fields'.
         if (!deps.needWholeDocument) {
@@ -379,35 +231,7 @@ std::pair<SbStage, PlanStageSlots> generateGenericCollScan(StageBuilderState& st
 
     SbStage resumeRecordIdTree;
     boost::optional<SbSlot> seekSlot;
-
-    if (isResumingTailableScan || csn->resumeAfterRecordId) {
-        SbExpr resumeRecordIdExpr;
-        if (isResumingTailableScan) {
-            resumeRecordIdExpr = SbSlot{state.env->getSlot("resumeRecordId"_sd)};
-        } else if (csn->resumeAfterRecordId) {
-            auto [tag, val] = sbe::value::makeCopyRecordId(*csn->resumeAfterRecordId);
-            resumeRecordIdExpr = b.makeConstant(tag, val);
-        } else {
-            MONGO_UNREACHABLE_TASSERT(9405103);
-        }
-
-        auto [outTree, outSlot] = buildResumeFromRecordIdTree(
-            state, collection, csn, std::move(resumeRecordIdExpr), isResumingTailableScan);
-
-        resumeRecordIdTree = std::move(outTree);
-        seekSlot = outSlot;
-    }
-
     boost::optional<SbSlot> oplogTsSlot;
-    if (csn->shouldTrackLatestOplogTimestamp) {
-        // Add the "ts" field to 'fields' if it's not already present.
-        std::string tsField = repl::OpTime::kTimestampFieldName.toString();
-        fields = appendVectorUnique(std::move(fields), std::vector{std::move(tsField)});
-
-        // Retrieve the "oplogTs" slot so we can pass it to makeScan() below.
-        auto oplogTsSlotId = state.getOplogTsSlot();
-        oplogTsSlot = oplogTsSlotId ? boost::make_optional(SbSlot{*oplogTsSlotId}) : boost::none;
-    }
 
     auto [stage, resultSlot, recordIdSlot, fieldSlots] = b.makeScan(collection->uuid(),
                                                                     collection->ns().dbName(),
@@ -419,15 +243,6 @@ std::pair<SbStage, PlanStageSlots> generateGenericCollScan(StageBuilderState& st
                                                                     std::move(callbacks),
                                                                     oplogTsSlot);
 
-    if (isResumingTailableScan || csn->resumeAfterRecordId) {
-        stage = combineResumeRecordIdTreeWithScan(state,
-                                                  csn->nodeId(),
-                                                  std::move(resumeRecordIdTree),
-                                                  std::move(stage),
-                                                  *seekSlot,
-                                                  isResumingTailableScan);
-    }
-
     PlanStageSlots outputs;
     outputs.setResultObj(resultSlot);
     outputs.set(PlanStageSlots::kRecordId, recordIdSlot);
@@ -437,7 +252,9 @@ std::pair<SbStage, PlanStageSlots> generateGenericCollScan(StageBuilderState& st
 
     if (csn->filter) {
         // 'stopApplyingFilterAfterFirstMatch' is only for oplog scans; this method doesn't do them.
-        invariant(!csn->stopApplyingFilterAfterFirstMatch);
+        tassert(11051827,
+                "Unexpected stopApplyingFilterAfterFirstMatch flag in non-oplog scan",
+                !csn->stopApplyingFilterAfterFirstMatch);
 
         auto filterExpr = generateFilter(state, csn->filter.get(), resultSlot, outputs);
         if (!filterExpr.isNull()) {
@@ -453,15 +270,11 @@ std::pair<SbStage, PlanStageSlots> generateGenericCollScan(StageBuilderState& st
 std::pair<SbStage, PlanStageSlots> generateCollScan(StageBuilderState& state,
                                                     const CollectionPtr& collection,
                                                     const CollectionScanNode* csn,
-                                                    std::vector<std::string> fields,
-                                                    bool isResumingTailableScan) {
-
+                                                    std::vector<std::string> fields) {
     if (csn->doClusteredCollectionScanSbe()) {
-        return generateClusteredCollScan(
-            state, collection, csn, std::move(fields), isResumingTailableScan);
+        return generateClusteredCollScan(state, collection, csn, std::move(fields));
     } else {
-        return generateGenericCollScan(
-            state, collection, csn, std::move(fields), isResumingTailableScan);
+        return generateGenericCollScan(state, collection, csn, std::move(fields));
     }
 }
 }  // namespace mongo::stage_builder

@@ -29,9 +29,6 @@
 
 #include "mongo/db/matcher/expression_geo_serializer.h"
 
-#include <vector>
-
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -42,12 +39,14 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <vector>
+
 namespace mongo {
 namespace {
 void appendGeoNearLegacyArray(BSONObjBuilder& bob,
                               const BSONElement& e,
                               const SerializationOptions& opts) {
-    if (opts.literalPolicy != LiteralSerializationPolicy::kToRepresentativeParseableValue) {
+    if (!opts.isReplacingLiteralsWithRepresentativeValues()) {
         opts.appendLiteral(&bob, e);
     } else {
         // Legacy $geoNear, $nearSphere, and $near require at minimum 2 coordinates to be
@@ -60,7 +59,7 @@ void appendGeoNearLegacyArray(BSONObjBuilder& bob,
 void appendShapeOperator(BSONObjBuilder& bob,
                          const BSONElement& e,
                          const SerializationOptions& opts) {
-    if (opts.literalPolicy != LiteralSerializationPolicy::kToRepresentativeParseableValue) {
+    if (!opts.isReplacingLiteralsWithRepresentativeValues()) {
         opts.appendLiteral(&bob, e);
         return;
     }
@@ -88,7 +87,7 @@ void appendGeoJSONCoordinatesLiteral(BSONObjBuilder& bob,
                                      const BSONElement& coordinatesElem,
                                      const BSONElement& typeElem,
                                      const SerializationOptions& opts) {
-    if (opts.literalPolicy != LiteralSerializationPolicy::kToRepresentativeParseableValue) {
+    if (!opts.isReplacingLiteralsWithRepresentativeValues()) {
         opts.appendLiteral(&bob, coordinatesElem);
         return;
     }
@@ -165,35 +164,35 @@ void appendCRSObject(BSONObjBuilder& bob,
                      const BSONElement& crsObj,
                      const SerializationOptions& opts) {
     // 'crs' is always an object.
-    tassert(7559700, "Expected 'crs' to be an object", crsObj.type() == BSONType::Object);
+    tassert(7559700, "Expected 'crs' to be an object", crsObj.type() == BSONType::object);
     // 'crs' is required to have a 'type' field with the value 'name'.
     // Additionally, it is required to have an object properties field
     // with a single 'name' field.
     tassert(7559701,
             str::stream() << "Expected 'crs' to contain a string 'type' field, got " << crsObj,
-            crsObj[kCrsTypeField] && crsObj[kCrsTypeField].type() == BSONType::String);
+            crsObj[kCrsTypeField] && crsObj[kCrsTypeField].type() == BSONType::string);
     tassert(7559702,
             str::stream() << "Expected 'crs' to contain a 'properties' object, got , " << crsObj,
-            crsObj[kCrsPropertiesField] && crsObj[kCrsPropertiesField].type() == BSONType::Object);
+            crsObj[kCrsPropertiesField] && crsObj[kCrsPropertiesField].type() == BSONType::object);
     tassert(7559703,
             str::stream() << "Expected 'crs.properties' to contain a 'name' "
                              "string field, got "
                           << crsObj[kCrsPropertiesField],
             crsObj[kCrsPropertiesField].Obj()[kCrsNameField] &&
-                crsObj[kCrsPropertiesField].Obj()[kCrsNameField].type() == BSONType::String);
+                crsObj[kCrsPropertiesField].Obj()[kCrsNameField].type() == BSONType::string);
 
     // The CRS "type" and "properties.name" fields must be preserved for
     // kToRepresentativeParseableValue serialization policy so the query
     // shape can be re-parsed (and will be preserved for kUnchanged policy
     // as well).
     BSONObjBuilder crsObjBuilder(bob.subobjStart(kCrsField));
-    if (opts.literalPolicy == LiteralSerializationPolicy::kToDebugTypeString) {
+    if (opts.isSerializingLiteralsAsDebugTypes()) {
         opts.appendLiteral(&crsObjBuilder, crsObj[kCrsTypeField]);
     } else {
         crsObjBuilder.append(crsObj[kCrsTypeField]);
     }
     BSONObjBuilder crsPropBuilder(crsObjBuilder.subobjStart(kCrsPropertiesField));
-    if (opts.literalPolicy == LiteralSerializationPolicy::kToDebugTypeString) {
+    if (opts.isSerializingLiteralsAsDebugTypes()) {
         opts.appendLiteral(&crsPropBuilder, crsObj[kCrsPropertiesField].Obj()[kCrsNameField]);
     } else {
         crsPropBuilder.append(crsObj[kCrsPropertiesField].Obj()[kCrsNameField]);
@@ -243,7 +242,7 @@ void appendGeoJSONObj(BSONObjBuilder& bob,
 void appendGeometryOperator(BSONObjBuilder& bob,
                             const BSONElement& geometryElem,
                             const SerializationOptions& opts) {
-    if (geometryElem.type() == BSONType::Array) {
+    if (geometryElem.type() == BSONType::array) {
         // This would be like {$geometry: [0, 0]} which must be a point.
         auto asArray = geometryElem.Array();
         tassert(7539807,
@@ -283,7 +282,7 @@ void appendGeoNearOperator(BSONObjBuilder& bob,
                            StringData fieldName,
                            const BSONElement& geoNearElem,
                            const SerializationOptions& opts) {
-    if (geoNearElem.type() == mongo::Array) {
+    if (geoNearElem.type() == BSONType::array) {
         appendGeoNearLegacyArray(bob, geoNearElem, opts);
     } else {
         auto geoNearObj = geoNearElem.Obj();
@@ -302,6 +301,14 @@ void appendGeoNearOperator(BSONObjBuilder& bob,
                 // We convert from embedded object {x: 0, y: 0} to legacy array [0, 0] so that those
                 // Point formats have the same query shape.
                 BSONObj legacyCoordinates = BSON(fieldName << BSON_ARRAY(x.number() << y.number()));
+                appendGeoNearLegacyArray(bob, legacyCoordinates.firstElement(), opts);
+                return;
+            }
+            BSONElement maxDist;
+            status = GeoParser::parseLegacyPointWithMaxDistance(geoNearElem, x, y, maxDist);
+            if (status.isOK()) {
+                BSONObj legacyCoordinates =
+                    BSON(fieldName << BSON_ARRAY(x.number() << y.number() << maxDist.number()));
                 appendGeoNearLegacyArray(bob, legacyCoordinates.firstElement(), opts);
                 return;
             }
@@ -383,7 +390,7 @@ void geoExpressionCustomSerialization(BSONObjBuilder& bob,
     BSONObjIterator outerIt(obj);
     BSONElement geoExprElem = outerIt.next();
     tassert(8548502, "Invalid extra fields in geo expression.", !outerIt.more());
-    tassert(8548503, "Geo expression must be an object.", geoExprElem.type() == mongo::Object);
+    tassert(8548503, "Geo expression must be an object.", geoExprElem.type() == BSONType::object);
     auto fieldName = geoExprElem.fieldNameStringData();
 
     BSONObjBuilder subObj = BSONObjBuilder(bob.subobjStart(fieldName));

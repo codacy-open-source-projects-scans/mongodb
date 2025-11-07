@@ -4,8 +4,6 @@
  *
  *  @tags: [
  *    multiversion_incompatible,
- *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
- *    embedded_router_incompatible,
  *    # TODO (SERVER-94095): Re-enable this test in aubsan and tsan once DEVPROD-10102 is resolved.
  *    incompatible_aubsan,
  *    incompatible_tsan,
@@ -31,20 +29,17 @@ TestData.skipCheckShardFilteringMetadata = true;
 const mongosParams = {
     setParameter: {
         healthMonitoringIntensities: tojson({
-            values: [
-                {type: "configServer", intensity: "critical"},
-            ]
+            values: [{type: "configServer", intensity: "critical"}],
         }),
         healthMonitoringIntervals: tojson({values: [{type: "configServer", interval: 1}]}),
         activeFaultDurationSecs: kActiveFaultDurationSec,
-    }
+    },
 };
 
-const faultState = function() {
-    let result =
-        assert.commandWorked(st.s0.adminCommand({serverStatus: 1, health: {details: true}})).health;
-    print(`Server status: ${tojson(result)}`);
-    return result.state;
+const assertFaultState = function (state) {
+    let result = assert.commandWorked(st.s0.adminCommand({serverStatus: 1, health: {details: true}})).health;
+    print(`Server health: ${tojson(result)}`);
+    assert(result.state == state);
 };
 
 var st = new ShardingTest({
@@ -54,11 +49,17 @@ var st = new ShardingTest({
     config: 3,
 });
 
-assert.commandWorked(st.s0.adminCommand(
-    {"setParameter": 1, logComponentVerbosity: {processHealth: {verbosity: 3}}}));
+assert.commandWorked(st.s0.adminCommand({"setParameter": 1, logComponentVerbosity: {processHealth: {verbosity: 3}}}));
 
 const configPrimary = st.configRS.getPrimary();
 const admin = configPrimary.getDB("admin");
+
+// There should be no faults and we should be able to ping mongos.
+assertFaultState("Ok");
+assert.commandWorked(st.s0.adminCommand({"ping": 1}));
+
+let pidsBefore = _runningMongoChildProcessIds();
+let numPidsBefore = pidsBefore.length;
 
 // Set the priority and votes to 0 for secondary config servers so that in the case
 // of an election, they cannot step up. If a different node were to step up, the
@@ -71,79 +72,74 @@ for (let i = 0; i < conf.members.length; i++) {
     }
 }
 reconfig(st.configRS, conf);
-jsTest.log('Partitioning a config server replica from the mongos');
+jsTest.log("Partitioning a config server replica from the mongos");
 st.config0.discardMessagesFrom(st.s, 1.0);
 st.s.discardMessagesFrom(st.config0, 1.0);
-sleep(1000);
 
-// Blocking only one config replica may sometimes transfer to the transient fault.
-assert.soon(() => {
-    return faultState() == 'Ok';
-}, 'Mongos not transitioned to fault state', 12000, 100);
-
-jsTest.log('Partitioning another config server replica from the mongos');
+jsTest.log("Partitioning another config server replica from the mongos");
 st.config1.discardMessagesFrom(st.s, 1.0);
 st.s.discardMessagesFrom(st.config1, 1.0);
 
-const failedChecksCount = function() {
-    let result =
-        assert.commandWorked(st.s0.adminCommand({serverStatus: 1, health: {details: true}})).health;
-    print(`Server status: ${tojson(result)}`);
-    return result.configServer.totalChecksWithFailure;
-};
-
-// Wait for certain count of checks that detected a failure, or network error.
-assert.soon(() => {
-    try {
-        // Checks that the failure can be detected more than once.
-        return failedChecksCount() > 1;
-    } catch (e) {
-        jsTestLog(`Can't fetch server status: ${e}`);
-        return true;  // Server must be down already.
-    }
-}, 'Health observer did not detect several failures', 40000, 1000, {runHangAnalyzer: false});
-
-// Mongos should not crash yet.
-assert.commandWorked(st.s0.adminCommand({"ping": 1}));
-let pidsBefore = _runningMongoChildProcessIds();
-let numPidsBefore = pidsBefore.length;
-
-jsTest.log('Partitioning the final config server replica from the mongos');
+jsTest.log("Partitioning the final config server replica from the mongos");
 st.config2.discardMessagesFrom(st.s, 1.0);
 st.s.discardMessagesFrom(st.config2, 1.0);
 
-// Asserts that the Config server health observer will eventually trigger mongos crash.
+const failedChecksCount = function () {
+    let result = assert.commandWorked(st.s0.adminCommand({serverStatus: 1, health: {details: true}})).health;
+    print(`Server status: ${tojson(result)}`);
+    return result.configServer.totalChecksWithFailure && result.state == "TransientFault";
+};
 
-jsTestLog('Wait until the mongos crashes.');
-assert.soon(() => {
-    try {
-        let res = st.s0.adminCommand({"ping": 1});
-        jsTestLog(`Ping result: ${tojson(res)}`);
-        return res.ok != 1;
-    } catch (e) {
-        jsTestLog(`Ping failed: ${tojson(e)}`);
-        return true;
-    }
-}, 'Mongos is not shutting down as expected', 40000, 400);
+// Wait until a failure is detected.
+assert.soon(
+    () => {
+        return failedChecksCount();
+    },
+    "Health observer did not detect a failure",
+    20000,
+    1000,
+    {runHangAnalyzer: false},
+);
+
+// Asserts that the Config server health observer will eventually trigger mongos crash.
+jsTestLog("Wait until the mongos crashes.");
+assert.soon(
+    () => {
+        try {
+            let res = st.s0.adminCommand({"ping": 1});
+            jsTestLog(`Ping result: ${tojson(res)}`);
+            return res.ok != 1;
+        } catch (e) {
+            jsTestLog(`Ping failed: ${tojson(e)}`);
+            return true;
+        }
+    },
+    "Mongos is not shutting down as expected",
+    30000,
+    2500,
+);
 
 try {
     // Refresh PIDs to force de-registration of the crashed mongos.
     assert.soon(
         () => {
-            var numPidsNow = _runningMongoChildProcessIds().length;
-            return (numPidsBefore - numPidsNow) == 1;
+            let numPidsNow = _runningMongoChildProcessIds().length;
+            return numPidsBefore - numPidsNow == 1;
         },
         () => {
-            var pids = _runningMongoChildProcessIds();
-            return `Encountered incorrect number of running processes. Expected: 11. Running processes: ${
-                tojson(pids)}`;
-        });
-    var pidsNow = _runningMongoChildProcessIds();
+            let pids = _runningMongoChildProcessIds();
+            return `Encountered incorrect number of running processes. Expected: 11. Running processes: ${tojson(
+                pids,
+            )}`;
+        },
+    );
+    let pidsNow = _runningMongoChildProcessIds();
     pidsBefore = pidsBefore.map((e) => e.toNumber());
     pidsNow = pidsNow.map((e) => e.toNumber());
-    var difference = pidsBefore.filter((element) => !pidsNow.includes(element));
+    let difference = pidsBefore.filter((element) => !pidsNow.includes(element));
     waitProgram(difference[0]);
     st.stop({skipValidatingExitCode: true, skipValidation: true});
 } catch (e) {
     jsTestLog(`Exception during shutdown: ${e}`);
+    st.stopOnFail();
 }

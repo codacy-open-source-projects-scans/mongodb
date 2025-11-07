@@ -10,24 +10,22 @@
  * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
-import {
-    $config as $baseConfig
-} from "jstests/concurrency/fsm_workloads/crud/indexed_insert/indexed_insert_base.js";
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/crud/indexed_insert/indexed_insert_base.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
-    $config.data.indexedField = 'indexed_insert_unordered_bulk';
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
+    $config.data.indexedField = "indexed_insert_unordered_bulk";
     $config.data.shardKey = {};
     $config.data.shardKey[$config.data.indexedField] = 1;
 
     $config.states.insert = function insert(db, collName) {
-        var doc = {};
+        let doc = {};
         doc[this.indexedField] = this.indexedValue;
 
-        var bulk = db[collName].initializeUnorderedBulkOp();
-        for (var i = 0; i < this.docsPerInsert; ++i) {
+        let bulk = db[collName].initializeUnorderedBulkOp();
+        for (let i = 0; i < this.docsPerInsert; ++i) {
             bulk.insert(doc);
         }
-        var res = bulk.execute();
+        let res = bulk.execute();
         assert.commandWorked(res);
         assert.eq(this.docsPerInsert, res.nInserted, tojson(res));
 

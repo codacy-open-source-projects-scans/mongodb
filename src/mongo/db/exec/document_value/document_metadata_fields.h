@@ -29,23 +29,21 @@
 
 #pragma once
 
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/oid.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/bson/util/builder_fwd.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/record_id.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/bufreader.h"
+#include "mongo/util/time_support.h"
+
 #include <bitset>
 #include <cstddef>
 #include <iosfwd>
 #include <memory>
 #include <utility>
-
-
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/util/builder.h"
-#include "mongo/bson/util/builder_fwd.h"
-#include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/feature_flag.h"
-#include "mongo/db/query/query_feature_flags_gen.h"
-#include "mongo/db/record_id.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/bufreader.h"
-#include "mongo/util/time_support.h"
 
 namespace mongo {
 /**
@@ -83,6 +81,10 @@ public:
         kVectorSearchScore,
         kSearchSequenceToken,
         kScore,
+        kScoreDetails,
+        kStream,
+        kChangeStreamControlEvent,
+        kSearchRootDocumentId,
 
         // New fields must be added before the kNumFields sentinel.
         kNumFields
@@ -179,7 +181,7 @@ public:
     }
 
     double getTextScore() const {
-        invariant(hasTextScore());
+        tassert(11103304, "textScore must be present in metadata", hasTextScore());
         return _holder->textScore;
     }
 
@@ -195,7 +197,7 @@ public:
     }
 
     double getRandVal() const {
-        invariant(hasRandVal());
+        tassert(11103305, "randVal must be present in metadata", hasRandVal());
         return _holder->randVal;
     }
 
@@ -209,7 +211,7 @@ public:
     }
 
     Value getSortKey() const {
-        invariant(hasSortKey());
+        tassert(9973200, "Attempt to get sort key which has not been populated", hasSortKey());
         return _holder->sortKey;
     }
 
@@ -228,7 +230,7 @@ public:
     }
 
     double getGeoNearDistance() const {
-        invariant(hasGeoNearDistance());
+        tassert(11103314, "geoNearDistance must be present in metadata", hasGeoNearDistance());
         return _holder->geoNearDistance;
     }
 
@@ -242,7 +244,7 @@ public:
     }
 
     Value getGeoNearPoint() const {
-        invariant(hasGeoNearPoint());
+        tassert(11103306, "geoNearPoint must be present in metadata", hasGeoNearPoint());
         return _holder->geoNearPoint;
     }
 
@@ -256,14 +258,14 @@ public:
     }
 
     double getSearchScore() const {
-        invariant(hasSearchScore());
+        tassert(11103307, "searchScore must be present in metadata", hasSearchScore());
         return _holder->searchScore;
     }
 
     void setSearchScore(double score) {
         _setCommon(MetaType::kSearchScore);
         _holder->searchScore = score;
-        // The 'score' metadata field is also set, with the value of the 'textScore'.
+        // The 'score' metadata field is also set, with the value of the 'searchScore'.
         setScore(score);
     }
 
@@ -272,7 +274,7 @@ public:
     }
 
     Value getSearchHighlights() const {
-        invariant(hasSearchHighlights());
+        tassert(11103308, "searchHighlights must be present in metadata", hasSearchHighlights());
         return _holder->searchHighlights;
     }
 
@@ -286,7 +288,7 @@ public:
     }
 
     BSONObj getIndexKey() const {
-        invariant(hasIndexKey());
+        tassert(11103315, "indexKey must be present in metadata", hasIndexKey());
         return _holder->indexKey;
     }
 
@@ -300,7 +302,7 @@ public:
     }
 
     RecordId getRecordId() const {
-        invariant(hasRecordId());
+        tassert(11103309, "recordId must be present in metadata", hasRecordId());
         return _holder->recordId;
     }
 
@@ -314,14 +316,35 @@ public:
     }
 
     BSONObj getSearchScoreDetails() const {
-        invariant(hasSearchScoreDetails());
+        tassert(
+            11103310, "searchScoreDetails must be present in metadata", hasSearchScoreDetails());
         return _holder->searchScoreDetails;
     }
 
     void setSearchScoreDetails(BSONObj details) {
         _setCommon(MetaType::kSearchScoreDetails);
         _holder->searchScoreDetails = details.getOwned();
+        // The 'scoreDetails' metadata field is also set. The Value constructor takes an owned copy
+        // of details.
+        setScoreDetails(Value(details));
     }
+
+    bool hasSearchRootDocumentId() const {
+        return _holder && _holder->metaFields.test(MetaType::kSearchRootDocumentId);
+    }
+
+    Value getSearchRootDocumentId() const {
+        tassert(11103311,
+                "searchRootDocumentId must be present in metadata",
+                hasSearchRootDocumentId());
+        return _holder->searchRootDocumentId;
+    }
+
+    void setSearchRootDocumentId(Value rootDocId) {
+        _setCommon(MetaType::kSearchRootDocumentId);
+        _holder->searchRootDocumentId = std::move(rootDocId);
+    }
+
 
     bool hasTimeseriesBucketMinTime() const {
         return _holder && _holder->metaFields.test(MetaType::kTimeseriesBucketMinTime);
@@ -381,7 +404,7 @@ public:
     void setVectorSearchScore(double vectorSearchScore) {
         _setCommon(MetaType::kVectorSearchScore);
         _holder->vectorSearchScore = vectorSearchScore;
-        // The 'score' metadata field is also set, with the value of the 'textScore'.
+        // The 'score' metadata field is also set, with the value of the 'vectorSearchScore'.
         setScore(vectorSearchScore);
     }
 
@@ -390,7 +413,8 @@ public:
     }
 
     Value getSearchSequenceToken() const {
-        invariant(hasSearchSequenceToken());
+        tassert(
+            11103312, "searchSequenceToken must be present in metadata", hasSearchSequenceToken());
         return _holder->searchSequenceToken;
     }
 
@@ -408,12 +432,52 @@ public:
         return _holder->score;
     }
 
-    void setScore(double score) {
-        if (feature_flags::gFeatureFlagRankFusionFull.isEnabledUseLastLTSFCVWhenUninitialized(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-            _setCommon(MetaType::kScore);
-            _holder->score = score;
-        }
+    // TODO SERVER-85426 Remove all feature flag logic.
+    void setScore(double score, bool featureFlagAlreadyValidated = false);
+
+    bool hasScoreDetails() const {
+        return _holder && _holder->metaFields.test(MetaType::kScoreDetails);
+    }
+
+    Value getScoreDetails() const {
+        tassert(9679301, "score details must be present in metadata", hasScoreDetails());
+        return _holder->scoreDetails;
+    }
+
+    // TODO SERVER-85426 Remove all feature flag logic.
+    void setScoreDetails(Value scoreDetails, bool featureFlagAlreadyValidated = false);
+
+    /**
+     * This sets 'scoreDetails' and retrieves the "value" field from 'scoreDetails' to set the
+     * 'score' meta field as well.
+     *
+     * This is the default way to set 'scoreDetails' (for example, this is used for
+     * {$setMetadata: kScoreDetails}), and will tassert if the "value" field isn't present.
+     * However, setting 'scoreDetails' via 'searchScoreDetails' will just go through
+     * setScoreDetails() without setting the 'score' too.
+     */
+    void setScoreAndScoreDetails(Value scoreDetails);
+
+    bool hasStream() const {
+        return _holder && _holder->metaFields.test(MetaType::kStream);
+    }
+
+    void setStream(Value value) {
+        _setCommon(MetaType::kStream);
+        _holder->stream = std::move(value);
+    }
+
+    Value getStream() const {
+        tassert(9484101, "stream must be present in metadata", hasStream());
+        return _holder->stream;
+    }
+
+    bool isChangeStreamControlEvent() const {
+        return _holder && _holder->metaFields.test(MetaType::kChangeStreamControlEvent);
+    }
+
+    void setChangeStreamControlEvent() {
+        _setCommon(MetaType::kChangeStreamControlEvent);
     }
 
     void serializeForSorter(BufBuilder& buf) const;
@@ -459,12 +523,18 @@ private:
         BSONObj indexKey;
         RecordId recordId;
         BSONObj searchScoreDetails;
+        Value searchRootDocumentId;
         Date_t timeseriesBucketMinTime;
         Date_t timeseriesBucketMaxTime;
         BSONObj searchSortValues;
         double vectorSearchScore{0.0};
         Value searchSequenceToken;
         double score{0.0};
+        // scoreDetails expects a Document as the underlying type, but to avoid dependency cycles,
+        // it's easier to store as Value.
+        Value scoreDetails;
+        // Stream processing related metadata. Only set in Atlas Stream Processing.
+        Value stream;
     };
 
     // Null until the first setter is called, at which point a MetadataHolder struct is allocated.

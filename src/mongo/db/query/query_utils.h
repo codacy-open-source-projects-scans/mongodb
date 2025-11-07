@@ -29,13 +29,13 @@
 
 #pragma once
 
-#include "mongo/db/catalog/clustered_collection_util.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/local_catalog/clustered_collection_util.h"
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
 #include "mongo/db/query/indexability.h"
 #include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/sort_pattern.h"
 
 namespace mongo {
 /**
@@ -50,6 +50,11 @@ bool sortPatternHasPartsWithCommonPrefix(const SortPattern& sortPattern);
 bool isMatchIdHackEligible(MatchExpression* me);
 
 /**
+ * Returns true if 'query' describes an exact-match query on _id.
+ */
+bool isSimpleIdQuery(const BSONObj& query);
+
+/**
  * Returns 'true' if 'query' on the given 'collection' can be answered using a special IDHACK plan,
  * without taking into account the collators.
  */
@@ -58,12 +63,13 @@ inline bool isIdHackEligibleQueryWithoutCollator(const FindCommandRequest& findC
     return !findCommand.getShowRecordId() && findCommand.getHint().isEmpty() &&
         findCommand.getMin().isEmpty() && findCommand.getMax().isEmpty() &&
         !findCommand.getSkip() &&
-        (CanonicalQuery::isSimpleIdQuery(findCommand.getFilter()) || isMatchIdHackEligible(me)) &&
+        (isSimpleIdQuery(findCommand.getFilter()) || isMatchIdHackEligible(me)) &&
         !findCommand.getTailable();
 }
 
 /**
  * Returns 'true' if 'query' on the given 'collection' can be answered using a special IDHACK plan.
+ * TODO: remove this method in favor of ExpCtx::isIdHackQuery() checks.
  */
 inline bool isIdHackEligibleQuery(const CollectionPtr& collection, const CanonicalQuery& cq) {
     return isIdHackEligibleQueryWithoutCollator(cq.getFindCommandRequest(),
@@ -85,12 +91,13 @@ inline bool isEqualityExpressEligibleQuery(const CollectionPtr& collection,
         return false;
     }
 
+    const bool isProjectionEligible = cq.getProj() == nullptr || cq.getProj()->isSimple();
+
     return
         // Properties of the find command.
-        !findCommand.getShowRecordId() && findCommand.getHint().isEmpty() &&
+        isProjectionEligible && !findCommand.getShowRecordId() && findCommand.getHint().isEmpty() &&
         findCommand.getMin().isEmpty() && findCommand.getMax().isEmpty() &&
-        findCommand.getProjection().isEmpty() && findCommand.getSort().isEmpty() &&
-        !findCommand.getSkip() && !findCommand.getTailable() &&
+        findCommand.getSort().isEmpty() && !findCommand.getSkip() && !findCommand.getTailable() &&
         // Properties of the query's match expression.
         me->matchType() == MatchExpression::EQ &&
         Indexability::isExactBoundsGenerating(
@@ -117,6 +124,11 @@ inline ExpressEligibility isExpressEligible(OperationContext* opCtx,
         return ExpressEligibility::Ineligible;
     }
 
+    // If a query needs metadata, it is ineligible for express path.
+    if (cq.metadataDeps().any()) {
+        return ExpressEligibility::Ineligible;
+    }
+
     const auto& findCommandReq = cq.getFindCommandRequest();
 
     if (!coll || findCommandReq.getReturnKey() || findCommandReq.getBatchSize() ||
@@ -138,17 +150,4 @@ inline ExpressEligibility isExpressEligible(OperationContext* opCtx,
 }
 
 bool isSortSbeCompatible(const SortPattern& sortPattern);
-
-/**
- * Checks if the given query can be executed with the SBE engine based on the canonical query.
- *
- * This method determines whether the query may be compatible with SBE based only on high-level
- * information from the canonical query, before query planning has taken place (such as ineligible
- * expressions or collections).
- *
- * If this method returns true, query planning should be done, followed by another layer of
- * validation to make sure the query plan can be executed with SBE. If it returns false, SBE query
- * planning can be short-circuited as it is already known that the query is ineligible for SBE.
- */
-bool isQuerySbeCompatible(const CollectionPtr* collection, const CanonicalQuery* cq);
 }  // namespace mongo

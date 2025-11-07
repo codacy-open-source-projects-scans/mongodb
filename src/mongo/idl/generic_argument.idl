@@ -30,7 +30,7 @@ global:
     cpp_includes:
         - "mongo/db/basic_types.h"
         - "mongo/idl/generic_argument.h"
-        - "mongo/s/shard_version.h"
+        - "mongo/db/versioning_protocol/shard_version.h"
 
 imports:
     - "mongo/client/read_preference_setting.idl"
@@ -39,37 +39,49 @@ imports:
     - "mongo/db/repl/read_concern_args.idl"
     - "mongo/db/repl/replication_types.idl"
     - "mongo/db/session/logical_session_id.idl"
-    - "mongo/db/vector_clock.idl"
-    - "mongo/db/write_concern_options.idl"       
-    - "mongo/rpc/metadata/impersonated_user_metadata.idl"
-    - "mongo/s/sharding_types.idl"
-    - "mongo/s/gossiped_routing_cache.idl"
+    - "mongo/db/vector_clock/vector_clock.idl"
+    - "mongo/db/version_context.idl"
+    - "mongo/db/write_concern_options.idl"
+    - "mongo/rpc/metadata/audit_metadata.idl"
+    - "mongo/db/sharding_environment/sharding_types.idl"
+    - "mongo/db/global_catalog/router_role_api/gossiped_routing_cache.idl"
 
 structs:
     GenericArguments:
         description: "Arguments accepted by all commands."
         strict: false
-        is_generic_cmd_list: "arg" 
-        # Note that the _types_ of these fields are not checked for API version compatability! 
-        # Historically, these types were parsed and serialized directly from BSON by hand-written  
-        # C++ code. The API comapatibility checker does not enforce stability of the types of these fields,
-        # only of their names (i.e. that none are removed or have their name changed). 
+        is_generic_cmd_list: "arg"
+        # Note that the _types_ of these fields are not checked for API version compatibility!
+        # Historically, these types were parsed and serialized directly from BSON by hand-written
+        # C++ code. The API compatibility checker does not enforce stability of the types of these fields,
+        # only of their names (i.e. that none are removed or have their name changed).
         fields:
+            # The only value supported today is "1".
             apiVersion:
                 type: string
                 forward_to_shards: false
                 optional: true
                 stability: "stable"
+            # When set to true, this causes commands outside the declared API version to return an
+            # APIStrictError and causes indexes unsupported by the current API version to be
+            # ignored by the query planner. If this field is specified, 'apiVersion' must also be
+            # specified.
             apiStrict:
                 type: bool
                 forward_to_shards: false
                 optional: true
                 stability: "stable"
+            # When set to true, this causes commands and behaviours that are deprecated in the
+            # current API version to return an APIDeprecationError. If this field is specified,
+            # 'apiVersion' must also be specified.
             apiDeprecationErrors:
                 type: bool
                 forward_to_shards: false
                 optional: true
                 stability: "stable"
+
+            # Common across all commands that target a database resource.
+            # Typical commands will require appropriate privileges on the specified database.
             # The IDL compiler injects this directly into command requests, so we ignore it here.
             # $db:
             #     type: database_name
@@ -77,47 +89,73 @@ structs:
             #     forward_to_shards: false
             #     ignore: true
             #     stability: "stable"
+
+            # A user-specified integer value dictating the maximum time that can be spent executing this query,
+            # in milliseconds.
             maxTimeMS:
                 type: exactInt64
-                validator: { gte: 0, lte: 2147483647 } # [0, 2^31 - 1]
+                validator: {gte: 0, lte: 2147483647} # [0, 2^31 - 1]
                 forward_to_shards: true
                 optional: true
                 stability: "stable"
+            # Specifies the read concern for the operation.
             readConcern:
                 type: ReadConcern
                 forward_to_shards: true
                 optional: true
                 stability: "stable"
+            # Specifies the write concern for the operation. Operations received by shard and config servers should
+            # always have write concern explicitly specified.
+            # 'j' option can only be used when the host has journaling enabled.
+            # w: 1 and w: "majority" are the only write concerns supported on a standalone node.
             writeConcern:
                 type: WriteConcern
                 forward_to_shards: true
-                optional: true            
+                optional: true
                 stability: "stable"
+            # Unique id of the session to attach this operation to. It is invalid to set this in a direct client. If
+            # the uid is included, then the hash must match that of the logged-in user.
             lsid:
                 type: LogicalSessionFromClient
                 forward_to_shards: true
                 optional: true
                 stability: "stable"
+            # Used by mongos to mark the requests it generates as part of a single sharded query.
             clientOperationKey:
                 type: uuid
                 forward_to_shards: true
-                optional: true                
+                optional: true
                 stability: "stable"
+            # Strictly-increasing counter set by the transaction API to match the txnNumber of the corresponding
+            # retryable write or transaction. Only allowed on a replica set member or mongos. Must be nonnegative.
+            # If txnNumber is provided, lsid must also be provided.
             txnNumber:
                 type: TxnNumber
                 forward_to_shards: true
-                optional: true            
+                optional: true
                 stability: "stable"
+            # Retryable writes and transactions share many of the same parameters (lsid, txnNumber, stmtId).
+            # The `autocommit` field is used to differentiate between transactions and retryable writes, in
+            # order to determine how those parameters should be interpreted.
+            # `autocommit: false` indicates that the operation is part of a transaction.
+            # No `autocommit` field indicates that the operation is part of a retryable write (if retryable
+            # writes are enabled).
+            # `autocommit: true` is invalid.
             autocommit:
                 type: bool
                 forward_to_shards: true
                 optional: true
                 stability: "stable"
+            # When set to true, identifies this operation as the first operation in a transaction.
+            # `startTransaction: false` is invalid, the startTransaction field must be unset or set to true.
+            # Requires `autocommit: false`. It is invalid to set this in a direct client.
             startTransaction:
                 type: bool
                 forward_to_shards: true
                 optional: true
                 stability: "stable"
+            # Uniquely identifies an individually retryable operation within a retryable write or transaction.
+            # Should be nonnegative or -1. A value of -1 indicates an uninitialized/unassigned stmtId.
             stmtId:
                 type: StmtId
                 forward_to_shards: true
@@ -130,29 +168,44 @@ structs:
                 # did.
                 ignore: true
                 stability: "stable"
+            # User-specified comment associated to the query.
             comment:
                 type: IDLAnyTypeOwned
                 forward_to_shards: true
                 optional: true
                 stability: "stable"
+            # Describes how clients route read operations to the members of a replica sets. Allowed values: object with
+            # the read preference. Set by the client, or by the node where the operation was generated.
             $readPreference:
                 type: readPreference
                 cpp_name: "readPreference"
                 forward_to_shards: false
                 optional: true
                 stability: "stable"
+            # Top level logical clock of the cluster, it ticks whenever any data-bearing member does a write, it is
+            # gossiped with drivers, so they use causal consistency, and it is persisted by way of the timestamps on
+            # oplog entries on replicated writes. Allowed values: Timestamp with a valid majority write. Set by
+            # primary nodes in a cluster.
             $clusterTime:
                 type: ClusterTime
                 cpp_name: "dollarClusterTime"
                 forward_to_shards: false
                 optional: true
                 stability: "stable"
+            # General container for end user and client information that needs to be propagated from a mongos to a config server
+            # or shard for audit logging.
+            # Allowed values: a BSON object with an optional username, a required
+            # (but possibly empty) array of rolenames, and an optional nested BSON object with an array of IP addresses representing
+            # the source and any intermediate clients a request passed through. See AuditMetadata for more details.
+            # Authorization: The client must possess the `impersonate` action on the `cluster` resource to set this field.
             $audit:
-                type: ImpersonatedUserMetadata
+                type: AuditMetadata
                 cpp_name: "dollarAudit"
                 forward_to_shards: false
                 optional: true
                 stability: "internal"
+            # Optionally encodes ClientMetadata (see src/mongo/rpc/metadata/client_metadata.h).
+            # These are diagnostic and statistical tags, not meant to have functional effects.
             $client:
                 type: object_owned
                 cpp_name: "dollarClient"
@@ -165,39 +218,49 @@ structs:
                 forward_to_shards: false
                 optional: true
                 stability: "internal"
-            allowImplicitCollectionCreation:
-                type: bool
-                forward_to_shards: false
-                optional: true
-                stability: "internal"
+            # See: src/mongo/rpc/metadata/oplog_query_metadata.h.
             $oplogQueryData:
                 type: IDLAnyTypeOwned
                 cpp_name: "dollarOplogQueryData"
                 forward_to_shards: false
                 optional: true
                 stability: "internal"
+            # Object wrapping the directives for the query engine; currently it only accepts a readPreference
+            # field indicating from which node (primary/secondary/nearest) the sharded data should be fetched.
             $queryOptions:
                 type: object_owned
                 cpp_name: unwrappedReadPref
                 forward_to_shards: true
                 optional: true
                 stability: "internal"
+            # See: src/mongo/rpc/metadata/repl_set_metadata.h.
             $replData:
                 type: IDLAnyTypeOwned
                 cpp_name: "dollarReplData"
                 forward_to_shards: false
                 optional: true
                 stability: "internal"
+            # Represents the version of a recently created database. It is changed every time a database is dropped, or
+            # it was moved with a movePrimary DDL. Allowed values: an object with a (UUID, Timestamp, int) that uniquely
+            # identifies an incarnation of a database in a cluster and reflects changes to the database's primary shard.
+            # Set by the config server.
             databaseVersion:
                 type: database_version
                 forward_to_shards: false
                 optional: true
                 stability: "internal"
+            # When set to true, the query engine will not execute the provided query, but rather return a description
+            # of the requested command.
             help:
                 type: bool
                 forward_to_shards: false
                 optional: true
                 stability: "internal"
+            # Represents a point in time where the collection was created and it had a specific data placement within the
+            # cluster. Allowed values: includes a collection generation and a placement version, collection generation
+            # changes under some DDL like refineCollectionShardKey, reshardCollection, renameCollection, drop and recreate.
+            # Placement version is bumped once there is a data movement (a range or a chunk was moved from one shard to
+            # another successfully). Set by the primary node of a shard or the config server in some cases.
             shardVersion:
                 type: shard_version
                 forward_to_shards: false
@@ -208,58 +271,124 @@ structs:
                 forward_to_shards: false
                 optional: true
                 stability: "internal"
+            # Used by mongos to select the current shard as the coordinator for a cross-shard transaction. The coordinator
+            # will coordinate between all shards to ultimately commit or abort the transaction.
             coordinator:
                 type: bool
                 forward_to_shards: true
                 optional: true
                 stability: "internal"
+            # An integer value dictating the maximum time that can be spent executing this query, in milliseconds.
+            # Specified by mongos on each request made to the shards, so that the total execution time doesn't exceed
+            # the user-provided maxTimeMS.
             maxTimeMSOpOnly:
                 type: exactInt64
-                validator: { callback: "::mongo::validateMaxTimeMSOpOnly" }
+                validator: {callback: "::mongo::validateMaxTimeMSOpOnly"}
                 forward_to_shards: false
                 optional: true
                 stability: "internal"
+            # Internal flag signaling that the execution time of the query is constrained by the default setting for
+            # maxTimeMS, not by a user-provided value. When set to true, aborted operations will be reported in a
+            # separate metric.
             usesDefaultMaxTimeMS:
                 type: bool
                 forward_to_shards: false
                 optional: true
                 stability: "internal"
+            # Logical clock based on the majority write of the config server. It ticks when the majority commit point
+            # advances on the config server primary. It is gossiped internally in the cluster in requests and responses
+            # between mongos, config servers and shards. The values are the actual majority point timestamps of the
+            # config server primary node. Allowed values: Timestamp with a valid config server majority write. Set by
+            # the config server.
             $configTime:
                 type: timestamp
                 cpp_name: "dollarConfigTime"
                 forward_to_shards: false
                 optional: true
                 stability: "internal"
+            # Topology logical clock, it is internal to the cluster and is gossiped on requests and responses between
+            # mongos, config servers and shards. It is ticked by the config server primary whenever the topology of the
+            # cluster changes (as in, a shard is added or removed). Allowed values: a Timestamp greater or equal to a
+            # cluster time. It is not  necessarily an oplog time. Set by the config server.
             $topologyTime:
                 type: timestamp
                 cpp_name: "dollarTopologyTime"
                 forward_to_shards: false
                 optional: true
                 stability: "internal"
+            # Retry counter for transactions. Must be nonnegative.
             txnRetryCounter:
                 type: TxnRetryCounter
                 forward_to_shards: true
                 optional: true
                 stability: "internal"
+            # Immutable object that holds metadata related to snapshots of the system state taken by operations aware of
+            # the  feature compatibility version. Allowed values: an object with the version information. Set by the
+            # primary node of a shard.
+            versionContext:
+                type: version_context
+                forward_to_shards: false
+                description: "Snapshot of the FCV used by the operation,
+                    which ensures that feature flag checks are stable through its execution."
+                optional: true
+                stability: "internal"
+            # Indicates whether or not a write-based command should be allowed even if the server is blocking user writes as part
+            # of user write blocking mode.
+            # Allowed values: true or false.
+            # Authorization: This field can only be set if the client possesses action type `internal` on the `cluster` resource.
             mayBypassWriteBlocking:
                 type: bool
                 forward_to_shards: false
                 optional: true
                 stability: "internal"
+            # Specifies whether or not database names are expected to be prefixed with a tenantID
+            # in command requests. The multitenancySupport flag needs to be enabled for expectPrefix
+            # to take effect. Note that since serverless is deprecated, this will likely be removed
+            # entirely in the future.
+            # Allowed values: true or false.
+            # Authorization: The field is only appended when forwarding requests that presented a security token
+            # with the Atlas Proxy protocol. Security tokens are only allowed from internal thread Clients
+            # or if an external client possesses action type `useTenant` on the `cluster` resource.
             expectPrefix:
                 type: bool
                 forward_to_shards: false
                 optional: true
                 stability: "internal"
+            # Specifies an array of strings treated as names of collections; on return, the reply
+            # will contain an extra field 'routingCacheGossip' holding the collection version number
+            # for each of the requested collections, taken from the catalog cache of the server.
             requestGossipRoutingCache:
                 type: array<IDLAnyTypeOwned>
                 forward_to_shards: false
                 optional: true
                 stability: "internal"
+            # Used to add a shard as a participant to a transaction. The originating participant attaches
+            # `startOrContinueTransaction: true` on the request it is sending to the targeted shard.
             startOrContinueTransaction:
                 type: bool
                 forward_to_shards: true
                 optional: true
+                stability: "internal"
+            # OpenTelemetry trace context used for tracking this operation across a replica set or
+            # a sharded cluster for debugging purposes. The propagation of trace contexts is only
+            # supported on mongods, mongoses and legacy shell compiled with ENABLE_OTEL_BUILD set.
+            # Currently, this is only set for testing binaries.
+            $traceCtx:
+                type: object_owned
+                cpp_name: "traceCtx"
+                forward_to_shards: true
+                optional: true
+                stability: "internal"
+            # Requires the action type performRawDataOperations. Specifies whether the operation
+            # should be a "raw data" operation. For collections that store their information in
+            # a different format than what users interact with, "raw data" operations will operate
+            # directly on the stored format. For collections where the storage and interaction
+            # format are the same, 'rawData' has no effect but may still be specified.
+            rawData:
+                type: optionalBool
+                # Even though we do want this field to be forwarded to shards, we set
+                # forward_to_shards to false because it gets manually appended upon egress.
+                forward_to_shards: false
                 stability: "internal"
 
     GenericReplyFields:
@@ -285,6 +414,8 @@ structs:
                 forward_from_shards: false
                 optional: true
                 stability: "stable"
+            # Timed elapsed to initialize the sharding state for the config server. Used for initialization statistics. Allowed
+            # values: Integer with the time elapsed for the initialization.
             $configServerState:
                 type: object_owned
                 cpp_name: "dollarConfigServerState"
@@ -308,7 +439,7 @@ structs:
                 optional: true
                 stability: "internal"
             additionalParticipants:
-                type: array<object_owned> 
+                type: array<object_owned>
                 forward_from_shards: false
                 optional: true
                 stability: "internal"
@@ -346,4 +477,3 @@ structs:
                 forward_from_shards: false
                 optional: true
                 stability: "internal"
-

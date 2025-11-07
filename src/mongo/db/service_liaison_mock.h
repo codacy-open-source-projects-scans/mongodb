@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <absl/container/node_hash_set.h>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <utility>
-
 #include "mongo/base/status.h"
 #include "mongo/crypto/hash_block.h"
 #include "mongo/db/operation_context.h"
@@ -48,8 +43,15 @@
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/periodic_runner.h"
 #include "mongo/util/time_support.h"
+
+#include <memory>
+#include <utility>
+
+#include <absl/container/node_hash_set.h>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 

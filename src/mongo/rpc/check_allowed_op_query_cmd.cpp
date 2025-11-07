@@ -28,18 +28,18 @@
  */
 
 
-#include <algorithm>
-#include <array>
-#include <fmt/format.h>
+#include "mongo/rpc/check_allowed_op_query_cmd.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/db/stats/counters.h"
-#include "mongo/rpc/check_allowed_op_query_cmd.h"
 #include "mongo/util/assert_util.h"
 
-namespace mongo {
+#include <algorithm>
+#include <array>
 
-using namespace fmt::literals;
+#include <fmt/format.h>
+
+namespace mongo {
 
 void checkAllowedOpQueryCommand(Client& client, StringData cmd) {
     static constexpr std::array allowed{
@@ -63,11 +63,11 @@ void checkAllowedOpQueryCommand(Client& client, StringData cmd) {
          temporarilyAllowed.end());
 
     if (!isAllowed && !isTemporarilyAllowed) {
-        uasserted(
-            ErrorCodes::UnsupportedOpQueryCommand,
-            "Unsupported OP_QUERY command: {}. The client driver may require an upgrade. "
-            "For more details see https://dochub.mongodb.org/core/legacy-opcode-removal"_format(
-                cmd));
+        uasserted(ErrorCodes::UnsupportedOpQueryCommand,
+                  fmt::format(
+                      "Unsupported OP_QUERY command: {}. The client driver may require an upgrade. "
+                      "For more details see https://dochub.mongodb.org/core/legacy-opcode-removal",
+                      cmd));
     }
 
     if (isTemporarilyAllowed) {

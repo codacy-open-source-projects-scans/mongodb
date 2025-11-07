@@ -29,14 +29,10 @@
 
 #include "mongo/util/signal_handlers_synchronous.h"
 
-#include "signal_handlers_synchronous.h"
-#include <boost/exception/diagnostic_information.hpp>
-#include <boost/exception/exception.hpp>
 #include <cerrno>
 #include <csignal>
 #include <cstring>
 #include <exception>
-#include <fmt/format.h>
 #include <iostream>
 #include <mutex>
 #include <new>
@@ -44,6 +40,10 @@
 #include <streambuf>
 #include <string>
 #include <typeinfo>
+
+#include <boost/exception/diagnostic_information.hpp>
+#include <boost/exception/exception.hpp>
+#include <fmt/format.h>
 // IWYU pragma: no_include "bits/types/siginfo_t.h"
 
 #ifdef __linux__
@@ -56,10 +56,6 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_detail.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/stdx/exception.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
@@ -76,9 +72,10 @@
 
 namespace mongo {
 
-namespace {
+// Used by `dumpScopedDebugInfo` below to determine if we should log anything.
+Atomic<bool> shouldLogScopedDebugInfoInSignalHandlers{true};
 
-using namespace fmt::literals;
+namespace {
 
 #if defined(_WIN32)
 const char* strsignal(int signalNum) {
@@ -101,42 +98,6 @@ int sehExceptionFilter(unsigned int code, struct _EXCEPTION_POINTERS* excPointer
 // Bit 31-30: 11 = ERROR
 // Bit 29:     1 = Client bit, i.e. a user-defined code
 #define STATUS_EXIT_ABRUPT 0xE0000001
-
-// Historically we relied on raising SEH exception and letting the unhandled exception handler
-// then handle it to that we can dump the process. This works in all but one case. The C++
-// terminate handler runs the terminate handler in a SEH __try/__catch. Therefore, any SEH
-// exceptions we raise become handled. Now, we setup our own SEH handler to quick catch the SEH
-// exception and take the dump bypassing the unhandled exception handler.
-//
-void endProcessWithSignal(int signalNum) {
-
-    __try {
-        RaiseException(STATUS_EXIT_ABRUPT, EXCEPTION_NONCONTINUABLE, 0, nullptr);
-    } __except (sehExceptionFilter(GetExceptionCode(), GetExceptionInformation())) {
-        // The exception filter exits the process
-        quickExit(ExitCode::abrupt);
-    }
-}
-
-#else
-
-void endProcessWithSignal(int signalNum) {
-    // This works by restoring the system-default handler for the given signal, unblocking the
-    // signal, and re-raising it, in order to get the system default termination behavior (i.e.,
-    // dumping core, or just exiting).
-    struct sigaction defaultedSignals;
-    memset(&defaultedSignals, 0, sizeof(defaultedSignals));
-    defaultedSignals.sa_handler = SIG_DFL;
-    sigemptyset(&defaultedSignals.sa_mask);
-    invariant(sigaction(signalNum, &defaultedSignals, nullptr) == 0);
-
-    sigset_t unblockSignalMask;
-    invariant(sigemptyset(&unblockSignalMask) == 0);
-    invariant(sigaddset(&unblockSignalMask, signalNum) == 0);
-    invariant(sigprocmask(SIG_UNBLOCK, &unblockSignalMask, nullptr) == 0);
-
-    raise(signalNum);
-}
 
 #endif
 
@@ -249,13 +210,16 @@ void printSignal(int signalNum) {
 }
 
 void dumpScopedDebugInfo(std::ostream& os) {
+    if (!shouldLogScopedDebugInfoInSignalHandlers.load()) {
+        return;
+    }
     auto diagStack = scopedDebugInfoStack().getAll();
     if (diagStack.empty())
         return;
     os << "ScopedDebugInfo: [";
     StringData sep;
     for (const auto& s : diagStack) {
-        os << sep << "(" << s << ")";
+        os << sep << '"' << s << '"';
         sep = ", "_sd;
     }
     os << "]\n";
@@ -303,9 +267,12 @@ void myInvalidParameterHandler(const wchar_t* expression,
                                unsigned int line,
                                uintptr_t pReserved) {
 
-    logNoRecursion(
-        "Invalid parameter detected in function {} in {} at line {} with expression '{}'\n"_format(
-            toUtf8String(function), toUtf8String(file), line, toUtf8String(expression)));
+    logNoRecursion(fmt::format(
+        "Invalid parameter detected in function {} in {} at line {} with expression '{}'\n",
+        toUtf8String(function),
+        toUtf8String(file),
+        line,
+        toUtf8String(expression)));
 
     abruptQuit(SIGABRT);
 }
@@ -387,6 +354,42 @@ void setupSignalTestingHandler() {
 #endif
 
 }  // namespace
+
+void setDiagnosticLoggingInSignalHandlers(bool newVal) {
+    shouldLogScopedDebugInfoInSignalHandlers.store(newVal);
+}
+
+void endProcessWithSignal(int signalNum) {
+#if defined(_WIN32)
+    // Historically we relied on raising SEH exception and letting the unhandled exception handler
+    // then handle it to that we can dump the process. This works in all but one case. The C++
+    // terminate handler runs the terminate handler in a SEH __try/__catch. Therefore, any SEH
+    // exceptions we raise become handled. Now, we setup our own SEH handler to quick catch the SEH
+    // exception and take the dump bypassing the unhandled exception handler.
+    __try {
+        RaiseException(STATUS_EXIT_ABRUPT, EXCEPTION_NONCONTINUABLE, 0, nullptr);
+    } __except (sehExceptionFilter(GetExceptionCode(), GetExceptionInformation())) {
+        // The exception filter exits the process
+        quickExit(ExitCode::abrupt);
+    }
+#else
+    // This works by restoring the system-default handler for the given signal, unblocking the
+    // signal, and re-raising it, in order to get the system default termination behavior (i.e.,
+    // dumping core, or just exiting).
+    struct sigaction defaultedSignals;
+    memset(&defaultedSignals, 0, sizeof(defaultedSignals));
+    defaultedSignals.sa_handler = SIG_DFL;
+    sigemptyset(&defaultedSignals.sa_mask);
+    invariant(sigaction(signalNum, &defaultedSignals, nullptr) == 0);
+
+    sigset_t unblockSignalMask;
+    invariant(sigemptyset(&unblockSignalMask) == 0);
+    invariant(sigaddset(&unblockSignalMask, signalNum) == 0);
+    invariant(sigprocmask(SIG_UNBLOCK, &unblockSignalMask, nullptr) == 0);
+
+    raise(signalNum);
+#endif
+}
 
 void setupSynchronousSignalHandlers() {
     stdx::set_terminate(myTerminate);

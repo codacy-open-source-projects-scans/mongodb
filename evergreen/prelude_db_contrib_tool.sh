@@ -1,39 +1,63 @@
 function setup_db_contrib_tool {
+    # check if db-contrib-tool is already installed
+    if [[ $(type -P db-contrib-tool) ]]; then
+        return 0
+    fi
 
-  mkdir -p ${workdir}/pipx
-  export PIPX_HOME="${workdir}/pipx"
-  export PIPX_BIN_DIR="${workdir}/pipx/bin"
-  export PATH="$PATH:$PIPX_BIN_DIR"
+    $python evergreen/download_db_contrib_tool.py
+}
 
-  for i in {1..5}; do
-    python -m pip --disable-pip-version-check install "pip==21.0.1" "wheel==0.37.0" && RET=0 && break || RET=$? && sleep 1
-    echo "Failed to install pip and wheel, retrying..."
-  done
+function use_db_contrib_tool_mongot {
+    # Checking that this is not a downstream patch on mongod created by mongot's patch trigger.
+    # In the case that it's not, download latest (eg HEAD of 10gen/mongot) or the
+    # release (eg currently running in production on Atlas) mongot binary.
+    arch=$(uname -i)
+    if [[ ! $(declare -p linux_x86_64_mongot_localdev_binary linux_aarch64_mongot_localdev_binary macos_x86_64_mongot_localdev_binary 2>/dev/null) ]]; then
 
-  if [ $RET -ne 0 ]; then
-    echo "Failed to install pip and wheel"
-    exit $RET
-  fi
+        if [ "${download_mongot_release}" = "true" ]; then
+            mongot_version="release"
+        else
+            mongot_version="latest"
+        fi
 
-  for i in {1..5}; do
-    # We force reinstall here because when we download the previous venv the shebang
-    # in pipx still points to the old machines python location.
-    python -m pip --disable-pip-version-check install --force-reinstall --no-deps "pipx==1.6.0" && RET=0 && break || RET=$? && sleep 1
-    echo "Failed to install pipx, retrying..."
-  done
+        if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+            mongot_platform="linux"
+        elif [[ "$OSTYPE" == "darwin"* ]]; then
+            mongot_platform="macos"
+        else
+            echo "mongot is only supported on linux and mac and does not support ${OSTYPE}"
+            exit 1
+        fi
 
-  if [ $RET -ne 0 ]; then
-    echo "Failed to install pipx"
-    exit $RET
-  fi
-
-  for i in {1..5}; do
-    pipx install --force "db-contrib-tool==0.8.5" --pip-args="--no-cache-dir" && RET=0 && break || RET=$? && sleep 1
-    echo "Failed to install db-contrib-tool, retrying..."
-  done
-
-  if [ $RET -ne 0 ]; then
-    echo "Failed to install db-contrib-tool"
-    exit $RET
-  fi
+        mongot_arch="x86_64"
+        # macos arm64 is not supported by mongot, but macos x86_64 runs on it successfully
+        if [[ $arch == "aarch64"* ]] && [[ "$OSTYPE" != "darwin"* ]]; then
+            mongot_arch="aarch64"
+        fi
+        echo "running: db-contrib-tool setup-mongot-repro-env ${mongot_version} --platform=${mongot_platform} --architecture=${mongot_arch} --installDir=."
+        # This should create the folder mongot-localdev, usually run at the root of mongo directory
+        db-contrib-tool setup-mongot-repro-env ${mongot_version} --platform=${mongot_platform} --architecture=${mongot_arch} --installDir=.
+    else
+        # This is a downstream patch, which means there is a patched mongot binary we need to install.
+        if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+            if [[ $arch == "x86_64"* ]]; then
+                mongot_url=${linux_x86_64_mongot_localdev_binary}
+            elif [[ $arch == "aarch64"* ]]; then
+                mongot_url=${linux_aarch64_mongot_localdev_binary}
+            else
+                echo "mongot-localdev does not support ${arch}"
+                exit 1
+            fi
+        elif [[ "$OSTYPE" == "darwin"* ]]; then
+            mongot_url=${macos_x86_64_mongot_localdev_binary}
+        else
+            echo "mongot-localdev does not support ${OSTYPE}"
+            exit 1
+        fi
+        echo "running curl ${mongot_url} | tar xvz"
+        # This should create the folder mongot-localdev, usually run at the root of mongo directory
+        curl ${mongot_url} | tar xvz
+    fi
+    # Hack to remove BUILD.bazel file that can be lying around in mongot
+    rm -f ./mongot-localdev/bin/jdk/BUILD.bazel
 }

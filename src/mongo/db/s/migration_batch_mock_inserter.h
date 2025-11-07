@@ -27,13 +27,12 @@
  *    it in the license file.
  */
 
-#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/s/migration_batch_inserter.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/logv2/log.h"
-#include "mongo/s/catalog/type_chunk.h"
 
 #pragma once
 
@@ -57,7 +56,6 @@ public:
                                UUID,
                                std::shared_ptr<MigrationCloningProgressSharedState>,
                                UUID,
-                               int,
                                TicketHolder*) {}
 
     static void onCreateThread(const std::string& threadName) {}

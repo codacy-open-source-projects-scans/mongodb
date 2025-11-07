@@ -29,13 +29,6 @@
 
 #include "mongo/util/database_name_util.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -47,9 +40,15 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
 
-using namespace fmt::literals;
 std::string DatabaseNameUtil::serialize(const DatabaseName& dbName,
                                         const SerializationContext& context) {
     if (!gMultitenancySupport)
@@ -190,15 +189,17 @@ DatabaseName DatabaseNameUtil::deserializeForCommands(boost::optional<TenantId> 
                     return DatabaseName(std::move(tenantId), dbName.db(omitTenant));
                 }
 
-                uassert(
-                    8423386,
-                    "TenantId supplied by security token as '{}' but prefixed tenantId also required given expectPrefix is set true"_format(
-                        tenantId->toString()),
-                    dbName.tenantId());
+                uassert(8423386,
+                        fmt::format("TenantId supplied by security token as '{}' but prefixed "
+                                    "tenantId also required given expectPrefix is set true",
+                                    tenantId->toString()),
+                        dbName.tenantId());
                 uassert(
                     8423384,
-                    "TenantId from security token must match prefixed tenantId: {} prefix {}"_format(
-                        tenantId->toString(), dbName.tenantId()->toString()),
+                    fmt::format(
+                        "TenantId from security token must match prefixed tenantId: {} prefix {}",
+                        tenantId->toString(),
+                        dbName.tenantId()->toString()),
                     tenantId == dbName.tenantId());
                 return dbName;
             }

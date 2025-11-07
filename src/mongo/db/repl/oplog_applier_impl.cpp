@@ -30,21 +30,6 @@
 #include "mongo/db/repl/oplog_applier_impl.h"
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <iterator>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -54,11 +39,12 @@
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/commands/fsync.h"
-#include "mongo/db/commands/server_status_metric.h"
-#include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
-#include "mongo/db/repl/initial_syncer.h"
+#include "mongo/db/repl/initial_sync/initial_syncer.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog_applier_batcher.h"
 #include "mongo/db/repl/oplog_applier_utils.h"
@@ -76,14 +62,13 @@
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/validate/validate_state.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
+#include "mongo/logv2/log_util.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
+#include "mongo/platform/random.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
@@ -98,6 +83,22 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <iterator>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -200,7 +201,7 @@ public:
         } else if (_isSkippableDelete(op)) {
             try {
                 retryImageKey = LogicalSessionId::parse(
-                    IDLParserContext("RectifyConfigImagesWrites"), op->getIdElement().Obj());
+                    op->getIdElement().Obj(), IDLParserContext("RectifyConfigImagesWrites"));
             } catch (const ExceptionFor<ErrorCodes::FailedToParse>&) {
                 LOGV2_WARNING(6796201,
                               "Found a delete oplog entry for the config.image_collection which "
@@ -291,7 +292,7 @@ public:
     }
 
     // Should be called after all oplog entries have been processed to handle the deletes that
-    // were not superceded by a later write.
+    // were not superseded by a later write.
     void handleLatestDeletes(std::function<void(OplogEntry*)> handler) {
         std::for_each(_retryImageWrites.begin(),
                       _retryImageWrites.end(),
@@ -360,7 +361,7 @@ namespace {
 class ApplyBatchFinalizer {
 public:
     ApplyBatchFinalizer(ReplicationCoordinator* replCoord) : _replCoord(replCoord) {}
-    virtual ~ApplyBatchFinalizer(){};
+    virtual ~ApplyBatchFinalizer() {};
 
     virtual void record(const OpTimeAndWallTime& newOpTimeAndWallTime) {
         _recordApplied(newOpTimeAndWallTime);
@@ -466,24 +467,17 @@ OplogApplierImpl::OplogApplierImpl(executor::TaskExecutor* executor,
     : OplogApplier(executor, oplogBuffer, observer, options),
       _replCoord(replCoord),
       _workerPool(workerPool),
-      _storageInterface(storageInterface),
-      _consistencyMarkers(consistencyMarkers) {
+      _storageInterface(storageInterface) {
 
-    // Change collections are always written as part of oplog application, even though
-    // in steady state mode where a separate OplogWriter thread is responsible for
-    // writing oplog entries. This is because the OplogWriter thread can be ahead of
-    // oplog application, but DDL ops on change collections (e.g. create/drop) must be
-    // first applied before we can perform writes on those collections.
-    _oplogWriter = std::make_unique<OplogWriterImpl>(
-        nullptr /* executor */,
-        nullptr /* writeBuffer */,
-        nullptr /* applyBuffer */,
-        workerPool,
-        replCoord,
-        storageInterface,
-        consistencyMarkers,
-        &noopOplogWriterObserver,
-        OplogWriter::Options(options.skipWritesToOplog, false /* skipWritesToChangeColl */));
+    _oplogWriter =
+        std::make_unique<OplogWriterImpl>(nullptr /* executor */,
+                                          nullptr /* writeBuffer */,
+                                          nullptr /* applyBuffer */,
+                                          workerPool,
+                                          replCoord,
+                                          storageInterface,
+                                          consistencyMarkers,
+                                          OplogWriter::Options(options.skipWritesToOplog));
 }
 
 void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
@@ -497,8 +491,7 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
     // arbiterOnly field for any member.
     invariant(!_replCoord->getMemberState().arbiter());
 
-    const auto useOplogWriter = feature_flags::gReduceMajorityWriteLatency.isEnabled(
-        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+    const auto useOplogWriter = feature_flags::gReduceMajorityWriteLatency.isEnabled();
 
     // The OplogWriter will take care of journaling when featureFlagReduceMajorityWriteLatency
     // is enabled.
@@ -558,6 +551,23 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
 
         // Make sure the oplog doesn't go back in time or repeat an entry.
         if (firstOpTimeInBatch <= lastAppliedOpTimeAtStartOfBatch) {
+            auto& entry = ops.front();
+            auto obj = entry.getRaw();
+            // TODO: Temporary logging to output as much information as possible before segfault
+            // (see SERVER-108464 and AF-3761).
+            LOGV2(10846400,
+                  "Oplog entry less than our last applied OpTime detected, outputting diagnostic "
+                  "information",
+                  "owned"_attr = obj.isOwned(),
+                  "size"_attr = entry.getRawObjSizeBytes());
+            if (!logv2::shouldRedactLogs() && obj.validateBSONObjSize().isOK()) {
+                LOGV2(10846401, "Outputting raw oplog entry hex", "hex"_attr = obj.hexDump());
+            }
+
+            LOGV2(10180701,
+                  "Oplog entry that is less than our last applied OpTime",
+                  "entry"_attr = redact(obj));
+
             fassert(34361,
                     Status(ErrorCodes::OplogOutOfOrder,
                            str::stream() << "Attempted to apply an oplog entry ("
@@ -568,6 +578,9 @@ void OplogApplierImpl::_run(OplogBuffer* oplogBuffer) {
 
         // Don't allow the fsync+lock thread to see intermediate states of batch application.
         stdx::lock_guard<stdx::mutex> fsynclk(oplogApplierLockedFsync);
+
+        // Obtain the validation lock to synchronise batch application with validation.
+        auto lk = CollectionValidation::ValidateState::obtainExclusiveValidationLock(&opCtx);
 
         // Apply the operations in this batch. '_applyOplogBatch' returns the optime of the
         // last op that was applied, which should be the last optime in the batch.
@@ -631,18 +644,12 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
         // because the spawned threads refer to objects on the stack
         ON_BLOCK_EXIT([&] { _workerPool->waitForIdle(); });
 
-        // Write ops into the oplog collection and change collections if needed.
+        // Write ops into the oplog collection if needed.
         //
         // - In steady state mode, a separate OplogWriter is responsible for writing the oplog
-        // collection, but the change collections must be written as part of oplog application
-        // because DDL ops (e.g. create/drop) on change collections are explicitly replicated,
-        // and so must be first applied before writes are performed to those collections.
-        //
-        // - In initial sync mode, the applier is responsible for writing the oplog collection
-        // as well as the change collections.
-        //
-        // - In recovering modes, there is no need to write to the oplog collection, and the
-        // applier is responsible for writing the change collections.
+        // collection.
+        // - In initial sync mode, the applier is responsible for writing the oplog collection.
+        // - In recovering modes, there is no need to write to the oplog collection.
         bool writtenOplog = _oplogWriter->scheduleWriteOplogBatch(opCtx, ops);
 
         // Holds 'pseudo operations' generated by secondaries to aid in replication.
@@ -666,10 +673,32 @@ StatusWith<OpTime> OplogApplierImpl::_applyOplogBatch(OperationContext* opCtx,
         // Use this fail point to hang after we have written the oplog entries but before we have
         // applied them.
         if (MONGO_unlikely(pauseBatchApplicationAfterWritingOplogEntries.shouldFail())) {
-            LOGV2(21231,
-                  "pauseBatchApplicationAfterWritingOplogEntries fail point enabled. Blocking "
-                  "until fail point is disabled");
-            pauseBatchApplicationAfterWritingOplogEntries.pauseWhileSet(opCtx);
+            pauseBatchApplicationAfterWritingOplogEntries.executeIf(
+                [&](const BSONObj& data) {
+                    // Optional delay before the pause, if blockMS is provided
+                    auto blockDuration =
+                        Milliseconds{data.hasField("blockMS") ? data.getIntField("blockMS") : 0};
+                    if (blockDuration.count() > 0) {
+                        static mongo::PseudoRandom prng(Date_t::now().asInt64());
+                        if (prng.nextInt32(100) == 0) {
+                            LOGV2(1084140,
+                                  "pauseBatchApplicationAfterWritingOplogEntries fail point "
+                                  "enabled with blockMS. "
+                                  "Blocking oplog application",
+                                  "duration"_attr = blockDuration);
+                        }
+                        opCtx->sleepFor(blockDuration);
+                    }
+
+                    LOGV2(21231,
+                          "pauseBatchApplicationAfterWritingOplogEntries fail point enabled. "
+                          "Blocking "
+                          "until fail point is disabled");
+                    pauseBatchApplicationAfterWritingOplogEntries.pauseWhileSet(opCtx);
+
+                    return true;
+                },
+                [](const BSONObj&) { return true; });
         }
 
         // Compare with _minValid Optime.
@@ -997,8 +1026,8 @@ Status applyOplogEntryOrGroupedInserts(OperationContext* opCtx,
         opsAppliedStats.increment(1);
     };
 
-    auto clockSource = opCtx->getServiceContext()->getFastClockSource();
-    auto applyStartTime = clockSource->now();
+    auto& clockSource = opCtx->fastClockSource();
+    auto applyStartTime = clockSource.now();
 
     if (MONGO_unlikely(hangAfterRecordingOpApplicationStartTime.shouldFail())) {
         LOGV2(21233,
@@ -1020,18 +1049,15 @@ Status applyOplogEntryOrGroupedInserts(OperationContext* opCtx,
         // No-ops should never fail application, since there's nothing to do.
         invariant(status);
 
-        auto opObj = op->getObject();
-        if (opObj.hasField(ReplicationCoordinator::newPrimaryMsgField) &&
-            opObj.getField(ReplicationCoordinator::newPrimaryMsgField).str() ==
-                ReplicationCoordinator::newPrimaryMsg) {
-
+        if (op->isNewPrimaryNoop()) {
             ReplicationMetrics::get(opCtx).setParticipantNewTermDates(op->getWallClockTime(),
                                                                       applyStartTime);
         }
 
         return status;
     } else {
-        return finishAndLogApply(opCtx, clockSource, status, applyStartTime, entryOrGroupedInserts);
+        return finishAndLogApply(
+            opCtx, &clockSource, status, applyStartTime, entryOrGroupedInserts);
     }
 }
 

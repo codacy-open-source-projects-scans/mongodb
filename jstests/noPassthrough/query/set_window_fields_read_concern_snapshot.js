@@ -8,10 +8,9 @@
  * ]
  */
 import {assertArrayEq} from "jstests/aggregation/extras/utils.js";
-import {DiscoverTopology} from "jstests/libs/discover_topology.js";
 import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {setParameterOnAllHosts} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
+import {setParameterOnAllNonConfigNodes} from "jstests/noPassthrough/libs/server_parameter_helpers.js";
 
 const rst = new ReplSetTest({nodes: 2});
 rst.startSet();
@@ -26,12 +25,10 @@ function checkProfilerForDiskWrite(dbToCheck) {
     // Verify that this was a $setWindowFields stage as expected.
     if (profileObj.hasOwnProperty("originatingCommand")) {
         const firstStage = profileObj.originatingCommand.pipeline[0];
-        assert(firstStage.hasOwnProperty("$setWindowFields") ||
-               firstStage.hasOwnProperty("$lookup"));
+        assert(firstStage.hasOwnProperty("$setWindowFields") || firstStage.hasOwnProperty("$lookup"));
     } else if (profileObj.hasOwnProperty("command")) {
         const firstStage = profileObj.command.pipeline[0];
-        assert(firstStage.hasOwnProperty("$setWindowFields") ||
-               firstStage.hasOwnProperty("$lookup"));
+        assert(firstStage.hasOwnProperty("$setWindowFields") || firstStage.hasOwnProperty("$lookup"));
     } else {
         assert(false, "Profiler should have had command field", profileObj);
     }
@@ -43,9 +40,7 @@ for (let i = 0; i < 30; i++) {
 }
 assert.commandWorked(coll.insert(documents));
 
-setParameterOnAllHosts(DiscoverTopology.findNonConfigNodes(testDB.getMongo()),
-                       "internalDocumentSourceSetWindowFieldsMaxMemoryBytes",
-                       1500);
+setParameterOnAllNonConfigNodes(testDB.getMongo(), "internalDocumentSourceSetWindowFieldsMaxMemoryBytes", 1500);
 const rsStatus = rst.status();
 const lastClusterTime = rsStatus.optimes.lastCommittedOpTime.ts;
 const lowerBound = -21;
@@ -55,8 +50,8 @@ let pipeline = [
         $setWindowFields: {
             partitionBy: "$partition",
             sortBy: {partition: 1, val: 1},
-            output: {sum: {$sum: "$val", window: {documents: [lowerBound, upperBound]}}}
-        }
+            output: {sum: {$sum: "$val", window: {documents: [lowerBound, upperBound]}}},
+        },
     },
     {$sort: {val: 1, partition: 1}},
 ];
@@ -65,7 +60,7 @@ let aggregationCommand = {
     pipeline: pipeline,
     allowDiskUse: true,
     readConcern: {level: "snapshot", atClusterTime: lastClusterTime},
-    cursor: {}
+    cursor: {},
 };
 
 function resetProfiler() {
@@ -81,7 +76,7 @@ checkProfilerForDiskWrite(testDB);
 let arrayResult = commandResult.cursor.firstBatch;
 let expected = [];
 
-let curSum = (21) * (11);
+let curSum = 21 * 11;
 for (let i = 0; i < 30; i++) {
     expected.push({_id: i, val: i, partition: 1, sum: curSum});
     expected.push({_id: i + 30, val: i, partition: 2, sum: curSum});
@@ -101,7 +96,7 @@ aggregationCommand = {
     pipeline: lookupPipeline,
     allowDiskUse: true,
     readConcern: {level: "snapshot", atClusterTime: lastClusterTime},
-    cursor: {}
+    cursor: {},
 };
 // We're running the same setWindowFields multiple times. Just check if the command doesn't
 // crash the server instead of checking results from here on out.
@@ -128,7 +123,7 @@ aggregationCommand = {
     aggregate: coll.getName(),
     pipeline: lookupPipeline,
     allowDiskUse: true,
-    cursor: {}
+    cursor: {},
 };
 assert.commandWorked(sessionColl.runCommand(aggregationCommand));
 session.abortTransaction();

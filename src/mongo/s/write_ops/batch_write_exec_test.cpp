@@ -27,21 +27,15 @@
  *    it in the license file.
  */
 
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache_test_fixture.h"
+#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
 #include "mongo/rpc/write_concern_error_gen.h"
-#include "mongo/s/catalog_cache_test_fixture.h"
-#include "mongo/s/collection_routing_info_targeter.h"
 #include "mongo/util/fail_point.h"
+
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <cstddef>
-#include <iterator>
-#include <memory>
-#include <string>
-#include <system_error>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -54,6 +48,11 @@
 #include "mongo/db/baton.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/txn_cmds_gen.h"
+#include "mongo/db/global_catalog/catalog_cache/shard_cannot_refresh_due_to_locks_held_exception.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/router_role_api/mock_ns_targeter.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
@@ -63,35 +62,34 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/vector_clock.h"
+#include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
+#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/database_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
+#include "mongo/db/versioning_protocol/shard_version_factory.h"
+#include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/index_version.h"
-#include "mongo/s/mock_ns_targeter.h"
 #include "mongo/s/session_catalog_router.h"
-#include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
-#include "mongo/s/shard_version.h"
-#include "mongo/s/shard_version_factory.h"
-#include "mongo/s/sharding_mongos_test_fixture.h"
-#include "mongo/s/stale_exception.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/s/write_ops/batch_write_exec.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <iterator>
+#include <memory>
+#include <string>
+#include <system_error>
+#include <vector>
 
 namespace mongo {
 namespace {
@@ -140,14 +138,12 @@ BSONObj expectInsertsReturnStaleVersionErrorsBase(const NamespaceString& nss,
     for (itInserted = inserted.begin(); itInserted != inserted.end(); ++itInserted) {
         staleResponse.addToErrDetails(write_ops::WriteError(
             i,
-            Status(StaleConfigInfo(
-                       nss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardId(kShardName1)),
-                   "Stale error")));
+            Status(
+                StaleConfigInfo(nss,
+                                ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0})),
+                                ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0})),
+                                ShardId(kShardName1)),
+                "Stale error")));
         ++i;
     }
 
@@ -379,11 +375,9 @@ public:
     const CollectionGeneration gen{OID::gen(), Timestamp(1, 1)};
     MockNSTargeter singleShardNSTargeter{
         nss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion(gen, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
+        {MockRange(ShardEndpoint(kShardName1,
+                                 ShardVersionFactory::make(ChunkVersion(gen, {100, 200})),
+                                 boost::none),
                    BSON("x" << MINKEY),
                    BSON("x" << MAXKEY))}};
 };
@@ -424,8 +418,7 @@ TEST_F(BatchWriteExecTest, SingleUpdateTargetsShardWithLet) {
     // Try to update the single doc where a let param is used in the shard key.
     const auto let = BSON("y" << 100);
     const auto rtc = LegacyRuntimeConstants{Date_t::now(), Timestamp(1, 1)};
-    const auto q = BSON("x"
-                        << "$$y");
+    const auto q = BSON("x" << "$$y");
     BatchedCommandRequest updateRequest([&] {
         write_ops::UpdateCommandRequest updateOp(nss);
         updateOp.setWriteCommandRequestBase([] {
@@ -436,9 +429,7 @@ TEST_F(BatchWriteExecTest, SingleUpdateTargetsShardWithLet) {
         updateOp.setLet(let);
         updateOp.setLegacyRuntimeConstants(rtc);
         updateOp.setUpdates(std::vector{write_ops::UpdateOpEntry(
-            q,
-            write_ops::UpdateModification::parseFromClassicUpdate(BSON("Key"
-                                                                       << "100")))});
+            q, write_ops::UpdateModification::parseFromClassicUpdate(BSON("Key" << "100")))});
         return updateOp;
     }());
 
@@ -449,35 +440,29 @@ TEST_F(BatchWriteExecTest, SingleUpdateTargetsShardWithLet) {
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
             return std::vector{ShardEndpoint(
                 kShardName2,
-                ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                          boost::optional<CollectionIndexes>(boost::none)),
+                ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
                 boost::none)};
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         nss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << MAXKEY))});
 
     auto future = launchAsync([&] {
         BatchedCommandResponse response;
@@ -489,31 +474,29 @@ TEST_F(BatchWriteExecTest, SingleUpdateTargetsShardWithLet) {
     });
 
     // The update will hit the first shard.
-    onCommandForPoolExecutor(
-        [&](const RemoteCommandRequest& request) {
-            ASSERT_EQ(kTestShardHost2, request.target);
+    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+        ASSERT_EQ(kTestShardHost2, request.target);
 
-            BatchedCommandResponse response;
-            response.setStatus(Status::OK());
-            response.setNModified(1);
+        BatchedCommandResponse response;
+        response.setStatus(Status::OK());
+        response.setNModified(1);
 
-            // Check that let params and runtimeConstants are propigated to shards.
-            const auto opMsgRequest = static_cast<OpMsgRequest>(request);
-            const auto actualBatchedUpdate(BatchedCommandRequest::parseUpdate(opMsgRequest));
-            ASSERT_BSONOBJ_EQ(let, actualBatchedUpdate.getLet().value_or(BSONObj()));
-            ASSERT_EQUALS(actualBatchedUpdate.getLegacyRuntimeConstants()->getLocalNow(),
-                          rtc.getLocalNow());
-            ASSERT_EQUALS(actualBatchedUpdate.getLegacyRuntimeConstants()->getClusterTime(),
-                          rtc.getClusterTime());
+        // Check that let params and runtimeConstants are propigated to shards.
+        const auto opMsgRequest = static_cast<OpMsgRequest>(request);
+        const auto actualBatchedUpdate(BatchedCommandRequest::parseUpdate(opMsgRequest));
+        ASSERT_BSONOBJ_EQ(let, actualBatchedUpdate.getLet().value_or(BSONObj()));
+        ASSERT_EQUALS(actualBatchedUpdate.getLegacyRuntimeConstants()->getLocalNow(),
+                      rtc.getLocalNow());
+        ASSERT_EQUALS(actualBatchedUpdate.getLegacyRuntimeConstants()->getClusterTime(),
+                      rtc.getClusterTime());
 
-            // Check that let params are only forwarded and not evaluated.
-            auto expectedQ = BSON("x"
-                                  << "$$y");
-            for (auto&& u : actualBatchedUpdate.getUpdateRequest().getUpdates())
-                ASSERT_BSONOBJ_EQ(expectedQ, u.getQ());
+        // Check that let params are only forwarded and not evaluated.
+        auto expectedQ = BSON("x" << "$$y");
+        for (auto&& u : actualBatchedUpdate.getUpdateRequest().getUpdates())
+            ASSERT_BSONOBJ_EQ(expectedQ, u.getQ());
 
-            return response.toBSON();
-        });
+        return response.toBSON();
+    });
 
     auto response = future.default_timed_get();
     ASSERT_OK(response.getTopLevelStatus());
@@ -524,8 +507,7 @@ TEST_F(BatchWriteExecTest, SingleDeleteTargetsShardWithLet) {
     // Try to update the single doc where a let param is used in the shard key.
     const auto let = BSON("y" << 100);
     const auto rtc = LegacyRuntimeConstants{Date_t::now(), Timestamp(1, 1)};
-    const auto q = BSON("x"
-                        << "$$y");
+    const auto q = BSON("x" << "$$y");
     BatchedCommandRequest deleteRequest([&] {
         write_ops::DeleteCommandRequest deleteOp(nss);
         deleteOp.setWriteCommandRequestBase([] {
@@ -546,33 +528,27 @@ TEST_F(BatchWriteExecTest, SingleDeleteTargetsShardWithLet) {
         using MockNSTargeter::MockNSTargeter;
 
     protected:
-        std::vector<ShardEndpoint> targetDelete(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
+        NSTargeter::TargetingResult targetDelete(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
             return std::vector{ShardEndpoint(
                 kShardName2,
-                ShardVersionFactory::make(ChunkVersion({epoch, Timestamp(1, 1)}, {101, 200}),
-                                          boost::optional<CollectionIndexes>(boost::none)),
+                ShardVersionFactory::make(ChunkVersion({epoch, Timestamp(1, 1)}, {101, 200})),
                 boost::none)};
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         nss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, Timestamp(1, 1)}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
+        {MockRange(ShardEndpoint(kShardName1,
+                                 ShardVersionFactory::make(
+                                     ChunkVersion({epoch, Timestamp(1, 1)}, {100, 200})),
+                                 boost::none),
                    BSON("x" << MINKEY),
                    BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, Timestamp(1, 1)}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
+         MockRange(ShardEndpoint(kShardName2,
+                                 ShardVersionFactory::make(
+                                     ChunkVersion({epoch, Timestamp(1, 1)}, {101, 200})),
+                                 boost::none),
                    BSON("x" << 0),
                    BSON("x" << MAXKEY))});
 
@@ -586,30 +562,28 @@ TEST_F(BatchWriteExecTest, SingleDeleteTargetsShardWithLet) {
     });
 
     // The update will hit the first shard.
-    onCommandForPoolExecutor(
-        [&](const RemoteCommandRequest& request) {
-            ASSERT_EQ(kTestShardHost2, request.target);
+    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+        ASSERT_EQ(kTestShardHost2, request.target);
 
-            BatchedCommandResponse response;
-            response.setStatus(Status::OK());
+        BatchedCommandResponse response;
+        response.setStatus(Status::OK());
 
-            // Check that let params are propigated to shards.
-            const auto opMsgRequest = static_cast<OpMsgRequest>(request);
-            const auto actualBatchedUpdate(BatchedCommandRequest::parseDelete(opMsgRequest));
-            ASSERT_BSONOBJ_EQ(let, actualBatchedUpdate.getLet().value_or(BSONObj()));
-            ASSERT_EQUALS(actualBatchedUpdate.getLegacyRuntimeConstants()->getLocalNow(),
-                          rtc.getLocalNow());
-            ASSERT_EQUALS(actualBatchedUpdate.getLegacyRuntimeConstants()->getClusterTime(),
-                          rtc.getClusterTime());
+        // Check that let params are propigated to shards.
+        const auto opMsgRequest = static_cast<OpMsgRequest>(request);
+        const auto actualBatchedUpdate(BatchedCommandRequest::parseDelete(opMsgRequest));
+        ASSERT_BSONOBJ_EQ(let, actualBatchedUpdate.getLet().value_or(BSONObj()));
+        ASSERT_EQUALS(actualBatchedUpdate.getLegacyRuntimeConstants()->getLocalNow(),
+                      rtc.getLocalNow());
+        ASSERT_EQUALS(actualBatchedUpdate.getLegacyRuntimeConstants()->getClusterTime(),
+                      rtc.getClusterTime());
 
-            // Check that let params are only forwarded and not evaluated.
-            auto expectedQ = BSON("x"
-                                  << "$$y");
-            for (auto&& u : actualBatchedUpdate.getDeleteRequest().getDeletes())
-                ASSERT_BSONOBJ_EQ(expectedQ, u.getQ());
+        // Check that let params are only forwarded and not evaluated.
+        auto expectedQ = BSON("x" << "$$y");
+        for (auto&& u : actualBatchedUpdate.getDeleteRequest().getDeletes())
+            ASSERT_BSONOBJ_EQ(expectedQ, u.getQ());
 
-            return response.toBSON();
-        });
+        return response.toBSON();
+    });
 
     auto response = future.default_timed_get();
     ASSERT_OK(response.getTopLevelStatus());
@@ -647,8 +621,8 @@ TEST_F(BatchWriteExecTest, MultiOpLargeOrdered) {
         ASSERT_EQUALS(stats.numRounds, 2);
     });
 
-    expectInsertsReturnSuccess(docsToInsert.begin(), docsToInsert.begin() + 66576);
-    expectInsertsReturnSuccess(docsToInsert.begin() + 66576, docsToInsert.end());
+    expectInsertsReturnSuccess(docsToInsert.begin(), docsToInsert.begin() + 66575);
+    expectInsertsReturnSuccess(docsToInsert.begin() + 66575, docsToInsert.end());
 
     future.default_timed_get();
 }
@@ -718,9 +692,9 @@ TEST_F(BatchWriteExecTest, MultiOpLargeUnorderedWithStaleShardVersionError) {
         ASSERT_EQ(kNumDocsToInsert, response.getN());
     });
 
-    expectInsertsReturnStaleVersionErrors({docsToInsert.begin(), docsToInsert.begin() + 60133});
-    expectInsertsReturnSuccess({docsToInsert.begin(), docsToInsert.begin() + 60133});
-    expectInsertsReturnSuccess({docsToInsert.begin() + 60133, docsToInsert.end()});
+    expectInsertsReturnStaleVersionErrors({docsToInsert.begin(), docsToInsert.begin() + 60132});
+    expectInsertsReturnSuccess({docsToInsert.begin(), docsToInsert.begin() + 60132});
+    expectInsertsReturnSuccess({docsToInsert.begin() + 60132, docsToInsert.end()});
 
     future.default_timed_get();
 }
@@ -746,40 +720,33 @@ TEST_F(BatchWriteExecTest, StaleShardVersionReturnedFromBatchWithSingleMultiWrit
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
             return std::vector{ShardEndpoint(kShardName1,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {100, 200})),
                                              boost::none),
                                ShardEndpoint(kShardName2,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {101, 200})),
                                              boost::none)};
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         nss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << MAXKEY))});
 
     auto future = launchAsync([&] {
         BatchedCommandResponse response;
@@ -810,10 +777,8 @@ TEST_F(BatchWriteExecTest, StaleShardVersionReturnedFromBatchWithSingleMultiWrit
             0,
             Status(StaleConfigInfo(
                        nss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200})),
                        ShardId(kShardName2)),
                    "Stale error")));
         return response.toBSON();
@@ -864,9 +829,9 @@ TEST_F(BatchWriteExecTest, MultiOpLargeUnorderedWithCannotRefreshError) {
         ASSERT_EQ(kNumDocsToInsert, response.getN());
     });
 
-    expectInsertsReturnCannotRefreshErrors({docsToInsert.begin(), docsToInsert.begin() + 60133});
-    expectInsertsReturnSuccess({docsToInsert.begin(), docsToInsert.begin() + 60133});
-    expectInsertsReturnSuccess({docsToInsert.begin() + 60133, docsToInsert.end()});
+    expectInsertsReturnCannotRefreshErrors({docsToInsert.begin(), docsToInsert.begin() + 60132});
+    expectInsertsReturnSuccess({docsToInsert.begin(), docsToInsert.begin() + 60132});
+    expectInsertsReturnSuccess({docsToInsert.begin() + 60132, docsToInsert.end()});
 
     future.default_timed_get();
 }
@@ -899,40 +864,33 @@ TEST_F(BatchWriteExecTest,
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
             return std::vector{ShardEndpoint(kShardName1,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {100, 200})),
                                              boost::none),
                                ShardEndpoint(kShardName2,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {101, 200})),
                                              boost::none)};
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         nss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("sk" << MINKEY),
-                   BSON("sk" << 10)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("sk" << 10),
-                   BSON("sk" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("sk" << MINKEY),
+             BSON("sk" << 10)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("sk" << 10),
+             BSON("sk" << MAXKEY))});
 
     auto future = launchAsync([&] {
         BatchedCommandResponse response;
@@ -963,20 +921,16 @@ TEST_F(BatchWriteExecTest,
             0,
             Status(StaleConfigInfo(
                        nss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200})),
                        ShardId(kShardName2)),
                    "Stale error")));
         response.addToErrDetails(write_ops::WriteError(
             1,
             Status(StaleConfigInfo(
                        nss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200})),
                        ShardId(kShardName2)),
                    "Stale error")));
         return response.toBSON();
@@ -1024,40 +978,33 @@ TEST_F(BatchWriteExecTest, RetryableErrorReturnedFromMultiWriteWithShard1Firs) {
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
             return std::vector{ShardEndpoint(kShardName1,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {100, 200})),
                                              boost::none),
                                ShardEndpoint(kShardName2,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {101, 200})),
                                              boost::none)};
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         nss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("sk" << MINKEY),
-                   BSON("sk" << 10)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("sk" << 10),
-                   BSON("sk" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("sk" << MINKEY),
+             BSON("sk" << 10)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("sk" << 10),
+             BSON("sk" << MAXKEY))});
 
     auto future = launchAsync([&] {
         BatchedCommandResponse response;
@@ -1078,10 +1025,8 @@ TEST_F(BatchWriteExecTest, RetryableErrorReturnedFromMultiWriteWithShard1Firs) {
             1,
             Status(StaleConfigInfo(
                        nss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200})),
                        ShardId(kShardName2)),
                    "Stale error")));
         return response.toBSON();
@@ -1097,10 +1042,8 @@ TEST_F(BatchWriteExecTest, RetryableErrorReturnedFromMultiWriteWithShard1Firs) {
             0,
             Status(StaleConfigInfo(
                        nss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200})),
                        ShardId(kShardName2)),
                    "Stale error")));
         return response.toBSON();
@@ -1159,40 +1102,33 @@ TEST_F(BatchWriteExecTest, RetryableErrorReturnedFromMultiWriteWithShard1FirstOK
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
             return std::vector{ShardEndpoint(kShardName1,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {100, 200})),
                                              boost::none),
                                ShardEndpoint(kShardName2,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {101, 200})),
                                              boost::none)};
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         nss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("sk" << MINKEY),
-                   BSON("sk" << 10)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("sk" << 10),
-                   BSON("sk" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("sk" << MINKEY),
+             BSON("sk" << 10)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("sk" << 10),
+             BSON("sk" << MAXKEY))});
 
     auto future = launchAsync([&] {
         BatchedCommandResponse response;
@@ -1213,10 +1149,8 @@ TEST_F(BatchWriteExecTest, RetryableErrorReturnedFromMultiWriteWithShard1FirstOK
             1,
             Status(StaleConfigInfo(
                        nss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200})),
                        ShardId(kShardName2)),
                    "Stale error")));
         return response.toBSON();
@@ -1232,10 +1166,8 @@ TEST_F(BatchWriteExecTest, RetryableErrorReturnedFromMultiWriteWithShard1FirstOK
             1,
             Status(StaleConfigInfo(
                        nss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200})),
                        ShardId(kShardName2)),
                    "Stale error")));
         return response.toBSON();
@@ -1289,28 +1221,21 @@ TEST_F(BatchWriteExecTest, RetryableErrorReturnedFromWriteWithShard1SSVShard2OK)
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
             if (targetAll) {
-                return std::vector{
-                    ShardEndpoint(
-                        kShardName1,
-                        ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                  boost::optional<CollectionIndexes>(boost::none)),
-                        boost::none),
-                    ShardEndpoint(
-                        kShardName2,
-                        ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                  boost::optional<CollectionIndexes>(boost::none)),
-                        boost::none)};
+                return std::vector{ShardEndpoint(kShardName1,
+                                                 ShardVersionFactory::make(
+                                                     ChunkVersion({epoch, timestamp}, {100, 200})),
+                                                 boost::none),
+                                   ShardEndpoint(kShardName2,
+                                                 ShardVersionFactory::make(
+                                                     ChunkVersion({epoch, timestamp}, {101, 200})),
+                                                 boost::none)};
             } else {
                 return std::vector{ShardEndpoint(
                     kShardName2,
-                    ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                              boost::optional<CollectionIndexes>(boost::none)),
+                    ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
                     boost::none)};
             }
         }
@@ -1320,20 +1245,18 @@ TEST_F(BatchWriteExecTest, RetryableErrorReturnedFromWriteWithShard1SSVShard2OK)
 
     MultiShardTargeter multiShardNSTargeter(
         nss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("sk" << MINKEY),
-                   BSON("sk" << 10)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("sk" << 10),
-                   BSON("sk" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("sk" << MINKEY),
+             BSON("sk" << 10)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("sk" << 10),
+             BSON("sk" << MAXKEY))});
 
     auto future = launchAsync([&] {
         BatchedCommandResponse response;
@@ -1355,10 +1278,8 @@ TEST_F(BatchWriteExecTest, RetryableErrorReturnedFromWriteWithShard1SSVShard2OK)
             0,
             Status(StaleConfigInfo(
                        nss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200})),
                        ShardId(kShardName2)),
                    "Stale error")));
 
@@ -1697,8 +1618,8 @@ TEST_F(BatchWriteExecTest, RetryableWritesLargeBatch) {
         ASSERT_EQUALS(stats.numRounds, 2);
     });
 
-    expectInsertsReturnSuccess(docsToInsert.begin(), docsToInsert.begin() + 63791);
-    expectInsertsReturnSuccess(docsToInsert.begin() + 63791, docsToInsert.end());
+    expectInsertsReturnSuccess(docsToInsert.begin(), docsToInsert.begin() + 63790);
+    expectInsertsReturnSuccess(docsToInsert.begin() + 63790, docsToInsert.end());
 
     future.default_timed_get();
 }
@@ -1922,40 +1843,33 @@ TEST_F(BatchWriteExecTest, FireAndForgetBatchUpdateGetsReplyWithOnlyOkStatus) {
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId) const override {
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
             return std::vector{ShardEndpoint(kShardName1,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {100, 200})),
                                              boost::none),
                                ShardEndpoint(kShardName2,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {101, 200})),
                                              boost::none)};
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         nss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << MAXKEY))});
 
     auto future = launchAsync([&] {
         // Set Unacknowledged WC for a "fire & forget" request
@@ -1989,10 +1903,8 @@ TEST_F(BatchWriteExecTest, FireAndForgetBatchUpdateGetsReplyWithOnlyOkStatus) {
             0,
             Status(StaleConfigInfo(
                        nss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {105, 200})),
                        ShardId(kShardName2)),
                    "Stale error")));
         return response.toBSON();
@@ -2022,8 +1934,7 @@ TEST_F(BatchWriteExecTest, FireAndForgetBatchDeleteGetsReplyWithOnlyOkStatus) {
     // Try to update the single doc where a let param is used in the shard key.
     const auto let = BSON("y" << 100);
     const auto rtc = LegacyRuntimeConstants{Date_t::now(), Timestamp(1, 1)};
-    const auto q = BSON("x"
-                        << "$$y");
+    const auto q = BSON("x" << "$$y");
     BatchedCommandRequest deleteRequest([&] {
         write_ops::DeleteCommandRequest deleteOp(nss);
         deleteOp.setWriteCommandRequestBase([] {
@@ -2044,33 +1955,27 @@ TEST_F(BatchWriteExecTest, FireAndForgetBatchDeleteGetsReplyWithOnlyOkStatus) {
         using MockNSTargeter::MockNSTargeter;
 
     protected:
-        std::vector<ShardEndpoint> targetDelete(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId) const override {
+        NSTargeter::TargetingResult targetDelete(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
             return std::vector{ShardEndpoint(
                 kShardName2,
-                ShardVersionFactory::make(ChunkVersion({epoch, Timestamp(1, 1)}, {101, 200}),
-                                          boost::optional<CollectionIndexes>(boost::none)),
+                ShardVersionFactory::make(ChunkVersion({epoch, Timestamp(1, 1)}, {101, 200})),
                 boost::none)};
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         nss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, Timestamp(1, 1)}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
+        {MockRange(ShardEndpoint(kShardName1,
+                                 ShardVersionFactory::make(
+                                     ChunkVersion({epoch, Timestamp(1, 1)}, {100, 200})),
+                                 boost::none),
                    BSON("x" << MINKEY),
                    BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, Timestamp(1, 1)}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
+         MockRange(ShardEndpoint(kShardName2,
+                                 ShardVersionFactory::make(
+                                     ChunkVersion({epoch, Timestamp(1, 1)}, {101, 200})),
+                                 boost::none),
                    BSON("x" << 0),
                    BSON("x" << MAXKEY))});
 
@@ -2089,30 +1994,28 @@ TEST_F(BatchWriteExecTest, FireAndForgetBatchDeleteGetsReplyWithOnlyOkStatus) {
     });
 
     // The update will hit the first shard.
-    onCommandForPoolExecutor(
-        [&](const RemoteCommandRequest& request) {
-            ASSERT_EQ(kTestShardHost2, request.target);
+    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+        ASSERT_EQ(kTestShardHost2, request.target);
 
-            BatchedCommandResponse response;
-            response.setStatus(Status::OK());
+        BatchedCommandResponse response;
+        response.setStatus(Status::OK());
 
-            // Check that let params are propigated to shards.
-            const auto opMsgRequest = static_cast<OpMsgRequest>(request);
-            const auto actualBatchedUpdate(BatchedCommandRequest::parseDelete(opMsgRequest));
-            ASSERT_BSONOBJ_EQ(let, actualBatchedUpdate.getLet().value_or(BSONObj()));
-            ASSERT_EQUALS(actualBatchedUpdate.getLegacyRuntimeConstants()->getLocalNow(),
-                          rtc.getLocalNow());
-            ASSERT_EQUALS(actualBatchedUpdate.getLegacyRuntimeConstants()->getClusterTime(),
-                          rtc.getClusterTime());
+        // Check that let params are propigated to shards.
+        const auto opMsgRequest = static_cast<OpMsgRequest>(request);
+        const auto actualBatchedUpdate(BatchedCommandRequest::parseDelete(opMsgRequest));
+        ASSERT_BSONOBJ_EQ(let, actualBatchedUpdate.getLet().value_or(BSONObj()));
+        ASSERT_EQUALS(actualBatchedUpdate.getLegacyRuntimeConstants()->getLocalNow(),
+                      rtc.getLocalNow());
+        ASSERT_EQUALS(actualBatchedUpdate.getLegacyRuntimeConstants()->getClusterTime(),
+                      rtc.getClusterTime());
 
-            // Check that let params are only forwarded and not evaluated.
-            auto expectedQ = BSON("x"
-                                  << "$$y");
-            for (auto&& u : actualBatchedUpdate.getDeleteRequest().getDeletes())
-                ASSERT_BSONOBJ_EQ(expectedQ, u.getQ());
+        // Check that let params are only forwarded and not evaluated.
+        auto expectedQ = BSON("x" << "$$y");
+        for (auto&& u : actualBatchedUpdate.getDeleteRequest().getDeletes())
+            ASSERT_BSONOBJ_EQ(expectedQ, u.getQ());
 
-            return response.toBSON();
-        });
+        return response.toBSON();
+    });
 
     // The reply should only contain an OK status, without any further detail on
     // the ops actually executed across the cluster.
@@ -2137,63 +2040,46 @@ TEST_F(BatchWriteExecTest, UpdateOneAndDeleteOneWithIdWithoutShardKeyNoMatch) {
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetWriteOp(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{ShardEndpoint(kShardName1,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none),
-                               ShardEndpoint(kShardName2,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none)};
+        NSTargeter::TargetingResult targetWriteOp(OperationContext* opCtx,
+                                                  const BatchItemRef& itemRef) const {
+            return NSTargeter::TargetingResult{
+                std::vector{ShardEndpoint(kShardName1,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {100, 200})),
+                                          boost::none),
+                            ShardEndpoint(kShardName2,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {101, 200})),
+                                          boost::none)},
+                false /* useTwoPhaseWriteProtocol */,
+                true /* isNonTargetedRetryableWriteWithId */};
         }
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
 
-        std::vector<ShardEndpoint> targetDelete(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetDelete(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         kNss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << MAXKEY))});
 
     std::vector<BatchedCommandRequest*> requests;
 
@@ -2279,62 +2165,45 @@ TEST_F(BatchWriteExecTest, UpdateOneAndDeleteOneWithIdWithoutShardKeyWithMatch) 
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetWriteOp(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{ShardEndpoint(kShardName1,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none),
-                               ShardEndpoint(kShardName2,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none)};
+        NSTargeter::TargetingResult targetWriteOp(OperationContext* opCtx,
+                                                  const BatchItemRef& itemRef) const {
+            return NSTargeter::TargetingResult{
+                std::vector{ShardEndpoint(kShardName1,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {100, 200})),
+                                          boost::none),
+                            ShardEndpoint(kShardName2,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {101, 200})),
+                                          boost::none)},
+                false /* useTwoPhaseWriteProtocol */,
+                true /* isNonTargetedRetryableWriteWithId */};
         }
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
 
-        std::vector<ShardEndpoint> targetDelete(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetDelete(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         kNss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << MAXKEY))});
 
     std::vector<BatchedCommandRequest*> requests;
 
@@ -2427,62 +2296,45 @@ TEST_F(BatchWriteExecTest, UpdateOneAndDeleteOneWithIdWithoutShardKeyNoMatchNonR
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetWriteOp(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{ShardEndpoint(kShardName1,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none),
-                               ShardEndpoint(kShardName2,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none)};
+        NSTargeter::TargetingResult targetWriteOp(OperationContext* opCtx,
+                                                  const BatchItemRef& itemRef) const {
+            return NSTargeter::TargetingResult{
+                std::vector{ShardEndpoint(kShardName1,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {100, 200})),
+                                          boost::none),
+                            ShardEndpoint(kShardName2,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {101, 200})),
+                                          boost::none)},
+                false /* useTwoPhaseWriteProtocol */,
+                true /* isNonTargetedRetryableWriteWithId */};
         }
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
 
-        std::vector<ShardEndpoint> targetDelete(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetDelete(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         kNss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << MAXKEY))});
 
     std::vector<BatchedCommandRequest*> requests;
 
@@ -2559,51 +2411,40 @@ TEST_F(BatchWriteExecTest, BatchedUpdateOneWithIdWithoutShardKeyWriteConcernErro
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetWriteOp(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{ShardEndpoint(kShardName1,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none),
-                               ShardEndpoint(kShardName2,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none)};
+        NSTargeter::TargetingResult targetWriteOp(OperationContext* opCtx,
+                                                  const BatchItemRef& itemRef) const {
+            return NSTargeter::TargetingResult{
+                std::vector{ShardEndpoint(kShardName1,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {100, 200})),
+                                          boost::none),
+                            ShardEndpoint(kShardName2,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {101, 200})),
+                                          boost::none)},
+                false /* useTwoPhaseWriteProtocol */,
+                true /* isNonTargetedRetryableWriteWithId */};
         }
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         kNss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << MAXKEY))});
 
     BatchedCommandRequest updateRequest([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
@@ -2670,32 +2511,23 @@ TEST_F(BatchWriteExecTest,
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetWriteOp(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{ShardEndpoint(kShardName1,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none),
-                               ShardEndpoint(kShardName2,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none)};
+        NSTargeter::TargetingResult targetWriteOp(OperationContext* opCtx,
+                                                  const BatchItemRef& itemRef) const {
+            return NSTargeter::TargetingResult{
+                std::vector{ShardEndpoint(kShardName1,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {100, 200})),
+                                          boost::none),
+                            ShardEndpoint(kShardName2,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {101, 200})),
+                                          boost::none)},
+                false /* useTwoPhaseWriteProtocol */,
+                true /* isNonTargetedRetryableWriteWithId */};
         }
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
 
         // Mock a single targeter refresh
@@ -2711,20 +2543,18 @@ TEST_F(BatchWriteExecTest,
 
     MultiShardTargeter multiShardNSTargeter(
         kNss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << MAXKEY))});
 
     BatchedCommandRequest updateRequest([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
@@ -2767,15 +2597,12 @@ TEST_F(BatchWriteExecTest,
         ASSERT_EQ(kTestShardHost2, request.target);
 
         BatchedCommandResponse response;
-        auto status =
-            Status(StaleConfigInfo(
-                       kNss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardId(kShardName1)),
-                   "Stale error");
+        auto status = Status(
+            StaleConfigInfo(kNss,
+                            ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0})),
+                            ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0})),
+                            ShardId(kShardName1)),
+            "Stale error");
 
         response.addToErrDetails(write_ops::WriteError(0, status));
         response.setStatus(Status::OK());
@@ -2819,63 +2646,46 @@ TEST_F(BatchWriteExecTest, UpdateOneAndDeleteOneWithIdWithoutShardKeyNoMatchRetr
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetWriteOp(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{ShardEndpoint(kShardName1,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none),
-                               ShardEndpoint(kShardName2,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none)};
+        NSTargeter::TargetingResult targetWriteOp(OperationContext* opCtx,
+                                                  const BatchItemRef& itemRef) const {
+            return NSTargeter::TargetingResult{
+                std::vector{ShardEndpoint(kShardName1,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {100, 200})),
+                                          boost::none),
+                            ShardEndpoint(kShardName2,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {101, 200})),
+                                          boost::none)},
+                false /* useTwoPhaseWriteProtocol */,
+                true /* isNonTargetedRetryableWriteWithId */};
         }
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
 
-        std::vector<ShardEndpoint> targetDelete(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetDelete(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         kNss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << MAXKEY))});
 
     std::vector<BatchedCommandRequest*> requests;
 
@@ -2922,13 +2732,10 @@ TEST_F(BatchWriteExecTest, UpdateOneAndDeleteOneWithIdWithoutShardKeyNoMatchRetr
             BatchedCommandResponse response;
 
             auto status = Status(
-                StaleConfigInfo(
-                    kNss,
-                    ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
-                                              boost::optional<CollectionIndexes>(boost::none)),
-                    ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0}),
-                                              boost::optional<CollectionIndexes>(boost::none)),
-                    ShardId(kShardName1)),
+                StaleConfigInfo(kNss,
+                                ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0})),
+                                ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0})),
+                                ShardId(kShardName1)),
                 "Stale error");
 
             response.addToErrDetails(write_ops::WriteError(0, status));
@@ -2984,74 +2791,55 @@ TEST_F(BatchWriteExecTest, UpdateOneAndDeleteOneWithIdWithoutShardKeyWithMatchNo
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetWriteOp(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{ShardEndpoint(kShardName1,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none),
-                               ShardEndpoint(kShardName2,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none),
-                               ShardEndpoint(kShardName3,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {102, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none)};
+        NSTargeter::TargetingResult targetWriteOp(OperationContext* opCtx,
+                                                  const BatchItemRef& itemRef) const {
+            return NSTargeter::TargetingResult{
+                std::vector{ShardEndpoint(kShardName1,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {100, 200})),
+                                          boost::none),
+                            ShardEndpoint(kShardName2,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {101, 200})),
+                                          boost::none),
+                            ShardEndpoint(kShardName3,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {102, 200})),
+                                          boost::none)},
+                false /* useTwoPhaseWriteProtocol */,
+                true /* isNonTargetedRetryableWriteWithId */};
         }
 
-        std::vector<ShardEndpoint> targetDelete(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetDelete(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         kNss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << 100)),
-         MockRange(ShardEndpoint(
-                       kShardName3,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {102, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 100),
-                   BSON("x" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << 100)),
+         MockRange(
+             ShardEndpoint(kShardName3,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {102, 200})),
+                           boost::none),
+             BSON("x" << 100),
+             BSON("x" << MAXKEY))});
 
     std::vector<BatchedCommandRequest*> requests;
 
@@ -3157,75 +2945,56 @@ TEST_F(BatchWriteExecTest, UpdateOneAndDeleteOneWithIdWithoutShardKeyWithMatchRe
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetWriteOp(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{ShardEndpoint(kShardName1,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none),
-                               ShardEndpoint(kShardName2,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none),
-                               ShardEndpoint(kShardName3,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {102, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none)};
+        NSTargeter::TargetingResult targetWriteOp(OperationContext* opCtx,
+                                                  const BatchItemRef& itemRef) const {
+            return NSTargeter::TargetingResult{
+                std::vector{ShardEndpoint(kShardName1,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {100, 200})),
+                                          boost::none),
+                            ShardEndpoint(kShardName2,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {101, 200})),
+                                          boost::none),
+                            ShardEndpoint(kShardName3,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {102, 200})),
+                                          boost::none)},
+                false /* useTwoPhaseWriteProtocol */,
+                true /* isNonTargetedRetryableWriteWithId */};
         }
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
 
-        std::vector<ShardEndpoint> targetDelete(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetDelete(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         kNss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << 100)),
-         MockRange(ShardEndpoint(
-                       kShardName3,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {102, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 100),
-                   BSON("x" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << 100)),
+         MockRange(
+             ShardEndpoint(kShardName3,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {102, 200})),
+                           boost::none),
+             BSON("x" << 100),
+             BSON("x" << MAXKEY))});
 
     std::vector<BatchedCommandRequest*> requests;
 
@@ -3276,13 +3045,10 @@ TEST_F(BatchWriteExecTest, UpdateOneAndDeleteOneWithIdWithoutShardKeyWithMatchRe
 
             BatchedCommandResponse response;
             auto status = Status(
-                StaleConfigInfo(
-                    kNss,
-                    ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
-                                              boost::optional<CollectionIndexes>(boost::none)),
-                    ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0}),
-                                              boost::optional<CollectionIndexes>(boost::none)),
-                    ShardId(kShardName1)),
+                StaleConfigInfo(kNss,
+                                ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0})),
+                                ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0})),
+                                ShardId(kShardName1)),
                 "Stale error");
 
             response.addToErrDetails(write_ops::WriteError(0, status));
@@ -3336,52 +3102,41 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyNonRetryableError) {
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetWriteOp(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{ShardEndpoint(kShardName1,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none),
-                               ShardEndpoint(kShardName2,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none)};
+        NSTargeter::TargetingResult targetWriteOp(OperationContext* opCtx,
+                                                  const BatchItemRef& itemRef) const {
+            return NSTargeter::TargetingResult{
+                std::vector{ShardEndpoint(kShardName1,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {100, 200})),
+                                          boost::none),
+                            ShardEndpoint(kShardName2,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {101, 200})),
+                                          boost::none)},
+                false /* useTwoPhaseWriteProtocol */,
+                true /* isNonTargetedRetryableWriteWithId */};
         }
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         kNss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << 100))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << 100))});
 
     BatchedCommandRequest updateRequest([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
@@ -3447,52 +3202,41 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyBatchedSingleNonRetryab
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetWriteOp(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{ShardEndpoint(kShardName1,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none),
-                               ShardEndpoint(kShardName2,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none)};
+        NSTargeter::TargetingResult targetWriteOp(OperationContext* opCtx,
+                                                  const BatchItemRef& itemRef) const {
+            return NSTargeter::TargetingResult{
+                std::vector{ShardEndpoint(kShardName1,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {100, 200})),
+                                          boost::none),
+                            ShardEndpoint(kShardName2,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {101, 200})),
+                                          boost::none)},
+                false /* useTwoPhaseWriteProtocol */,
+                true /* isNonTargetedRetryableWriteWithId */};
         }
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         kNss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << 100))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << 100))});
 
     BatchedCommandRequest updateRequest([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
@@ -3558,33 +3302,24 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyBatchedSingleRetryableE
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetWriteOp(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{ShardEndpoint(kShardName1,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none),
-                               ShardEndpoint(kShardName2,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none)};
+        NSTargeter::TargetingResult targetWriteOp(OperationContext* opCtx,
+                                                  const BatchItemRef& itemRef) const {
+            return NSTargeter::TargetingResult{
+                std::vector{ShardEndpoint(kShardName1,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {100, 200})),
+                                          boost::none),
+                            ShardEndpoint(kShardName2,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {101, 200})),
+                                          boost::none)},
+                false /* useTwoPhaseWriteProtocol */,
+                true /* isNonTargetedRetryableWriteWithId */};
         }
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
 
         // Mock a single targeter refresh
@@ -3600,20 +3335,18 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyBatchedSingleRetryableE
 
     MultiShardTargeter multiShardNSTargeter(
         kNss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << 100))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << 100))});
 
     BatchedCommandRequest updateRequest([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
@@ -3643,15 +3376,12 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyBatchedSingleRetryableE
     onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
         ASSERT_EQ(kTestShardHost1, request.target);
         BatchedCommandResponse response;
-        auto status =
-            Status(StaleConfigInfo(
-                       kNss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardId(kShardName1)),
-                   "Stale error");
+        auto status = Status(
+            StaleConfigInfo(kNss,
+                            ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0})),
+                            ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0})),
+                            ShardId(kShardName1)),
+            "Stale error");
 
         response.addToErrDetails(write_ops::WriteError(0, status));
         response.setStatus(Status::OK());
@@ -3701,33 +3431,24 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyBatchedMultipleRetryabl
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetWriteOp(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{ShardEndpoint(kShardName1,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none),
-                               ShardEndpoint(kShardName2,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none)};
+        NSTargeter::TargetingResult targetWriteOp(OperationContext* opCtx,
+                                                  const BatchItemRef& itemRef) const {
+            return NSTargeter::TargetingResult{
+                std::vector{ShardEndpoint(kShardName1,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {100, 200})),
+                                          boost::none),
+                            ShardEndpoint(kShardName2,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {101, 200})),
+                                          boost::none)},
+                false /* useTwoPhaseWriteProtocol */,
+                true /* isNonTargetedRetryableWriteWithId */};
         }
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
 
         // Mock a single targeter refresh
@@ -3743,20 +3464,18 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyBatchedMultipleRetryabl
 
     MultiShardTargeter multiShardNSTargeter(
         kNss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << 100))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << 100))});
 
     BatchedCommandRequest updateRequest([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
@@ -3786,15 +3505,12 @@ TEST_F(BatchWriteExecTest, UpdateOneWithIdWithoutShardKeyBatchedMultipleRetryabl
     onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
         ASSERT_EQ(kTestShardHost1, request.target);
         BatchedCommandResponse response;
-        auto status =
-            Status(StaleConfigInfo(
-                       kNss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardId(kShardName1)),
-                   "Stale error");
+        auto status = Status(
+            StaleConfigInfo(kNss,
+                            ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0})),
+                            ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0})),
+                            ShardId(kShardName1)),
+            "Stale error");
 
         response.addToErrDetails(write_ops::WriteError(0, status));
         response.addToErrDetails(write_ops::WriteError(1, status));
@@ -3847,33 +3563,24 @@ TEST_F(BatchWriteExecTest,
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetWriteOp(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const {
-            *isNonTargetedWriteWithoutShardKeyWithExactId = true;
-            return std::vector{ShardEndpoint(kShardName1,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none),
-                               ShardEndpoint(kShardName2,
-                                             ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                                             boost::none)};
+        NSTargeter::TargetingResult targetWriteOp(OperationContext* opCtx,
+                                                  const BatchItemRef& itemRef) const {
+            return NSTargeter::TargetingResult{
+                std::vector{ShardEndpoint(kShardName1,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {100, 200})),
+                                          boost::none),
+                            ShardEndpoint(kShardName2,
+                                          ShardVersionFactory::make(
+                                              ChunkVersion({epoch, timestamp}, {101, 200})),
+                                          boost::none)},
+                false /* useTwoPhaseWriteProtocol */,
+                true /* isNonTargetedRetryableWriteWithId */};
         }
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
-            return targetWriteOp(opCtx,
-                                 itemRef,
-                                 useTwoPhaseWriteProtocol,
-                                 isNonTargetedWriteWithoutShardKeyWithExactId);
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
+            return targetWriteOp(opCtx, itemRef);
         }
 
         // Mock a single targeter refresh
@@ -3889,20 +3596,18 @@ TEST_F(BatchWriteExecTest,
 
     MultiShardTargeter multiShardNSTargeter(
         kNss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << 100))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << 100))});
 
     BatchedCommandRequest updateRequest([&] {
         write_ops::UpdateCommandRequest updateOp(kNss);
@@ -3942,15 +3647,12 @@ TEST_F(BatchWriteExecTest,
     onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
         ASSERT_EQ(kTestShardHost2, request.target);
         BatchedCommandResponse response;
-        auto status =
-            Status(StaleConfigInfo(
-                       kNss,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       ShardId(kShardName1)),
-                   "Stale error");
+        auto status = Status(
+            StaleConfigInfo(kNss,
+                            ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 0})),
+                            ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {2, 0})),
+                            ShardId(kShardName1)),
+            "Stale error");
 
         response.addToErrDetails(write_ops::WriteError(1, status));
         response.setStatus(Status::OK());
@@ -4054,40 +3756,33 @@ TEST_F(BatchWriteExecTargeterErrorTest, TargetedFailedAndErrorResponse) {
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
             return std::vector{ShardEndpoint(kShardName1,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {100, 200})),
                                              boost::none),
                                ShardEndpoint(kShardName2,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {101, 200})),
                                              boost::none)};
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         nss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << MAXKEY))});
 
     auto future = launchAsync([&] {
         BatchedCommandResponse response;
@@ -4203,40 +3898,33 @@ TEST_F(BatchWriteExecTransactionTargeterErrorTest, TargetedFailedAndErrorRespons
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
             return std::vector{ShardEndpoint(kShardName1,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {100, 200})),
                                              boost::none),
                                ShardEndpoint(kShardName2,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {101, 200})),
                                              boost::none)};
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         nss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << MAXKEY))});
 
     auto future = launchAsync([&] {
         BatchedCommandResponse response;
@@ -4359,40 +4047,33 @@ TEST_F(BatchWriteExecTransactionMultiShardTest, TargetedSucceededAndErrorRespons
     public:
         using MockNSTargeter::MockNSTargeter;
 
-        std::vector<ShardEndpoint> targetUpdate(
-            OperationContext* opCtx,
-            const BatchItemRef& itemRef,
-            bool* useTwoPhaseWriteProtocol = nullptr,
-            bool* isNonTargetedWriteWithoutShardKeyWithExactId = nullptr) const override {
+        NSTargeter::TargetingResult targetUpdate(OperationContext* opCtx,
+                                                 const BatchItemRef& itemRef) const override {
             return std::vector{ShardEndpoint(kShardName1,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {100, 200})),
                                              boost::none),
                                ShardEndpoint(kShardName2,
                                              ShardVersionFactory::make(
-                                                 ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
+                                                 ChunkVersion({epoch, timestamp}, {101, 200})),
                                              boost::none)};
         }
     };
 
     MultiShardTargeter multiShardNSTargeter(
         nss,
-        {MockRange(ShardEndpoint(
-                       kShardName1,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << MINKEY),
-                   BSON("x" << 0)),
-         MockRange(ShardEndpoint(
-                       kShardName2,
-                       ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200}),
-                                                 boost::optional<CollectionIndexes>(boost::none)),
-                       boost::none),
-                   BSON("x" << 0),
-                   BSON("x" << MAXKEY))});
+        {MockRange(
+             ShardEndpoint(kShardName1,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {100, 200})),
+                           boost::none),
+             BSON("x" << MINKEY),
+             BSON("x" << 0)),
+         MockRange(
+             ShardEndpoint(kShardName2,
+                           ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {101, 200})),
+                           boost::none),
+             BSON("x" << 0),
+             BSON("x" << MAXKEY))});
 
     auto future = launchAsync([&] {
         BatchedCommandResponse response;

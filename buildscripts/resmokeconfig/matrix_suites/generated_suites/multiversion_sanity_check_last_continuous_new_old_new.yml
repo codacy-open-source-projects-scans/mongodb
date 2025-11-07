@@ -18,6 +18,9 @@ executor:
   config:
     shell_options:
       eval: globalThis.testingReplication = true;
+      global_vars:
+        TestData:
+          enableOTELTracing: false
   fixture:
     class: ReplicaSetFixture
     mixed_bin_versions: new_old_new
@@ -44,7 +47,7 @@ selector:
     - jstests/core/**/set_param1.js
     - jstests/core/query/awaitdata_getmore_cmd.js
     - jstests/core/administrative/current_op/currentop.js
-    - jstests/core/fsync.js
+    - jstests/core/administrative/fsync/fsync.js
     - jstests/core/txns/prepare_conflict.js
     - jstests/core/txns/prepare_conflict_aggregation_behavior.js
     - jstests/core/timeseries/write/timeseries_update_multi.js

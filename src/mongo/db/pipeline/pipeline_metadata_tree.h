@@ -34,6 +34,17 @@
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/document_source_facet.h"
+#include "mongo/db/pipeline/document_source_lookup.h"
+#include "mongo/db/pipeline/document_source_union_with.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/pipeline.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/str.h"
+
 #include <algorithm>
 #include <functional>
 #include <iterator>
@@ -43,16 +54,6 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/document_source_facet.h"
-#include "mongo/db/pipeline/document_source_lookup.h"
-#include "mongo/db/pipeline/document_source_union_with.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/pipeline.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
 
 /**
  * A simple representation of an Aggregation Pipeline and functions for building it.
@@ -179,7 +180,8 @@ inline auto makeAdditionalChildren(
             offTheEndContents.push_back(children.back().contents);
         }
 
-        if (lookupSource->hasPipeline()) {
+        if (lookupSource->hasPipeline() &&
+            lookupSource->getResolvedIntrospectionPipeline().size() > 0) {
             auto [child, offTheEndReshaper] = makeTreeWithOffTheEndStage(
                 initialStageContents, lookupSource->getResolvedIntrospectionPipeline(), propagator);
             offTheEndContents.push_back(std::move(offTheEndReshaper(child.get().contents)));
@@ -223,7 +225,7 @@ inline auto makeStage(
     const std::function<T(const T&, const std::vector<T>&, const DocumentSource&)>& propagator) {
     auto contents = (previous)
         ? reshapeContents(previous.get().contents)
-        : findStageContents(source.getContext()->getNamespaceString(), initialStageContents);
+        : findStageContents(source.getExpCtx()->getNamespaceString(), initialStageContents);
 
     auto [additionalChildren, offTheEndContents] =
         makeAdditionalChildren(initialStageContents, source, propagator, contents);
@@ -257,13 +259,13 @@ inline std::pair<boost::optional<Stage<T>>, std::function<T(const T&)>> makeTree
 
 template <typename T>
 inline void walk(Stage<T>* stage,
-                 Pipeline::SourceContainer::iterator* sourceIter,
+                 DocumentSourceContainer::iterator* sourceIter,
                  const std::function<void(Stage<T>*, DocumentSource*)>& zipper) {
     if (stage->principalChild)
         walk(stage->principalChild.get(), sourceIter, zipper);
 
-    if (auto lookupSource = dynamic_cast<DocumentSourceLookUp*>(&***sourceIter);
-        lookupSource && lookupSource->hasPipeline()) {
+    if (auto lookupSource = dynamic_cast<DocumentSourceLookUp*>(&***sourceIter); lookupSource &&
+        lookupSource->hasPipeline() && !lookupSource->getResolvedIntrospectionPipeline().empty()) {
         auto iter = lookupSource->getResolvedIntrospectionPipeline().getSources().begin();
         // The pipeline's schema child is always contained at the last element of the vector for
         // lookup.
@@ -316,7 +318,7 @@ inline std::pair<boost::optional<Stage<T>>, T> makeTree(
     const std::function<T(const T&, const std::vector<T>&, const DocumentSource&)>& propagator) {
     // For empty pipelines, there's no Stage<T> to return and the output schema is the same as the
     // input schema.
-    if (pipeline.getSources().empty()) {
+    if (pipeline.empty()) {
         return std::pair(
             boost::none,
             findStageContents(pipeline.getContext()->getNamespaceString(), initialStageContents));

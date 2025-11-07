@@ -13,27 +13,27 @@ TestData.enableTestCommands = false;
 
 // enableTestCommands not specified.
 assertFails({
-    'setParameter': {
-        AlwaysRecordTraffic: 'false',
+    "setParameter": {
+        requireApiVersion: "false",
     },
 });
 
 // enableTestCommands specified as truthy.
-['1', 'true'].forEach(v => {
+["1", "true"].forEach((v) => {
     assertStarts({
-        'setParameter': {
+        "setParameter": {
             enableTestCommands: v,
-            takeUnstableCheckpointOnShutdown: 'false',
+            requireApiVersion: "false",
         },
     });
 });
 
 // enableTestCommands specified as falsy.
-['0', 'false'].forEach(v => {
+["0", "false"].forEach((v) => {
     assertFails({
-        'setParameter': {
+        "setParameter": {
             enableTestCommands: v,
-            AlwaysRecordTraffic: 'false',
+            requireApiVersion: "false",
         },
     });
 });

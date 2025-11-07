@@ -28,24 +28,25 @@
  */
 
 
-#include <algorithm>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/index_builds/rebuild_indexes.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/index_key_validate.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
-#include "mongo/db/index_builds/rebuild_indexes.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/index_key_validate.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+
+#include <boost/move/utility_core.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 

@@ -27,11 +27,8 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
 
 #include "mongo/util/net/ssl_options.h"
-
-#include <boost/filesystem/operations.hpp>
 
 #include "mongo/base/status.h"
 #include "mongo/config.h"
@@ -39,7 +36,9 @@
 #include "mongo/util/ctype.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/options_parser/startup_options.h"
-#include "mongo/util/text.h"
+
+#include <absl/strings/str_split.h>
+#include <boost/filesystem/operations.hpp>
 
 #if MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_OPENSSL
 #include <openssl/ssl.h>
@@ -77,7 +76,7 @@ Status storeSSLDisabledProtocols(const std::string& disabledProtocols,
 
     // The disabledProtocols field is composed of a comma separated list of protocols to
     // disable. First, tokenize the field.
-    const auto tokens = StringSplitter::split(disabledProtocols, ",");
+    const auto tokens = absl::StrSplit(disabledProtocols, ",", absl::SkipEmpty());
 
     // All universally accepted tokens, and their corresponding enum representation.
     const std::map<std::string, SSLParams::Protocols> validConfigs{
@@ -96,7 +95,8 @@ Status storeSSLDisabledProtocols(const std::string& disabledProtocols,
     };
 
     // Map the tokens to their enum values, and push them onto the list of disabled protocols.
-    for (const std::string& token : tokens) {
+    for (const auto& t : tokens) {
+        std::string token(t);
         auto mappedToken = validConfigs.find(token);
         if (mappedToken != validConfigs.end()) {
             sslGlobalParams.sslDisabledProtocols.push_back(mappedToken->second);
@@ -132,7 +132,7 @@ Status parseCertificateSelector(SSLParams::CertificateSelector* selector,
 
     auto key = value.substr(0, delim);
     if (key == "subject") {
-        selector->subject = value.substr(delim + 1).toString();
+        selector->subject = std::string{value.substr(delim + 1)};
         return Status::OK();
     }
 

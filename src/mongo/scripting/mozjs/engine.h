@@ -29,12 +29,15 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <jsapi.h>
-#include <string>
-
 #include "mongo/scripting/deadline_monitor.h"
 #include "mongo/scripting/engine.h"
+#include "mongo/util/modules.h"
+
+#include <string>
+
+#include <jsapi.h>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace mozjs {
@@ -59,9 +62,6 @@ public:
     void interrupt(ClientLock&, OperationContext*) override;
 
     void interruptAll(ServiceContextLock&) override;
-
-    void enableJIT(bool value) override;
-    bool isJITEnabled() const override;
 
     void enableJavaScriptProtection(bool value) override;
     bool isJavaScriptProtectionEnabled() const override;

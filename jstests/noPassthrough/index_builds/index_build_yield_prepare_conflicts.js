@@ -6,12 +6,14 @@
  *   requires_replication,
  *   uses_transactions,
  *   uses_prepare_transaction,
+ *   # TODO SERVER-111867: Remove once primary-driven index builds support side writes.
+ *   primary_driven_index_builds_incompatible,
  * ]
  */
 import {PrepareHelpers} from "jstests/core/txns/libs/prepare_helpers.js";
 import {kDefaultWaitForFailPointTimeout} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const rst = new ReplSetTest({nodes: 1});
 rst.startSet();
@@ -22,11 +24,11 @@ const collName = "coll";
 
 const primary = rst.getPrimary();
 const primaryDB = primary.getDB(dbName);
-const primaryAdmin = primary.getDB('admin');
+const primaryAdmin = primary.getDB("admin");
 const primaryColl = primaryDB[collName];
 const collNss = primaryColl.getFullName();
 
-for (var i = 0; i < 3; i++) {
+for (let i = 0; i < 3; i++) {
     assert.commandWorked(primaryColl.insert({_id: i, x: i}));
 }
 rst.awaitReplication();
@@ -35,8 +37,9 @@ rst.awaitReplication();
 assert.commandWorked(primary.adminCommand({setParameter: 1, internalQueryExecYieldIterations: 2}));
 
 jsTestLog("Enable setYieldAllLocksHang fail point");
-let res = assert.commandWorked(primaryAdmin.runCommand(
-    {configureFailPoint: "setYieldAllLocksHang", data: {namespace: collNss}, mode: "alwaysOn"}));
+let res = assert.commandWorked(
+    primaryAdmin.runCommand({configureFailPoint: "setYieldAllLocksHang", data: {namespace: collNss}, mode: "alwaysOn"}),
+);
 let timesEntered = res.count;
 
 jsTestLog("Create index");
@@ -44,11 +47,13 @@ const awaitIndex = IndexBuildTest.startIndexBuild(primary, primaryColl.getFullNa
 
 // Wait until index build (collection scan phase) yields.
 jsTestLog("Wait for the index build to yield and hang");
-assert.commandWorked(primaryAdmin.runCommand({
-    waitForFailPoint: "setYieldAllLocksHang",
-    timesEntered: timesEntered + 1,
-    maxTimeMS: kDefaultWaitForFailPointTimeout
-}));
+assert.commandWorked(
+    primaryAdmin.runCommand({
+        waitForFailPoint: "setYieldAllLocksHang",
+        timesEntered: timesEntered + 1,
+        maxTimeMS: kDefaultWaitForFailPointTimeout,
+    }),
+);
 
 jsTestLog("Start a txn");
 const session = primary.startSession();
@@ -61,8 +66,7 @@ jsTestLog("Prepare txn");
 PrepareHelpers.prepareTransaction(session);
 
 // This will make the hybrid build previously started resume.
-assert.commandWorked(
-    primary.adminCommand({configureFailPoint: "setYieldAllLocksHang", mode: "off"}));
+assert.commandWorked(primary.adminCommand({configureFailPoint: "setYieldAllLocksHang", mode: "off"}));
 
 jsTestLog("Wait for index build to complete collection scanning phase");
 checkLog.containsJson(primary, 20391);

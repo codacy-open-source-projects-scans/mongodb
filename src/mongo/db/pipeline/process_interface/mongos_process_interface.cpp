@@ -29,17 +29,6 @@
 
 #include "mongo/db/pipeline/process_interface/mongos_process_interface.h"
 
-#include <absl/container/node_hash_map.h>
-#include <algorithm>
-#include <iterator>
-#include <type_traits>
-#include <typeinfo>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -47,11 +36,17 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source_merge.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
+#include "mongo/db/pipeline/process_interface/common_process_interface.h"
 #include "mongo/db/pipeline/sharded_agg_helpers.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/collation/collation_spec.h"
@@ -61,25 +56,30 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/kill_sessions.h"
 #include "mongo/db/session/session_catalog.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/redaction.h"
 #include "mongo/s/analyze_shard_key_role.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/grid.h"
 #include "mongo/s/query/exec/async_results_merger_params_gen.h"
 #include "mongo/s/query/exec/cluster_cursor_manager.h"
 #include "mongo/s/query/exec/document_source_merge_cursors.h"
 #include "mongo/s/query/exec/establish_cursors.h"
 #include "mongo/s/query_analysis_sample_tracker.h"
-#include "mongo/s/shard_version.h"
-#include "mongo/s/stale_shard_version_helpers.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <iterator>
+#include <type_traits>
+#include <typeinfo>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -90,22 +90,20 @@ namespace {
  * Returns the routing information for the namespace set on the passed ExpressionContext. Also
  * verifies that the ExpressionContext's UUID, if present, matches that of the routing table entry.
  */
-StatusWith<CollectionRoutingInfo> getCollectionRoutingInfo(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
-    auto catalogCache = Grid::get(expCtx->getOperationContext())->catalogCache();
-    auto swRoutingInfo = catalogCache->getCollectionRoutingInfo(expCtx->getOperationContext(),
-                                                                expCtx->getNamespaceString());
+StatusWith<std::unique_ptr<RoutingContext>> getAndValidateRoutingCtx(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx, const CollectionRoutingInfo& cri) {
+    const auto& nss = expCtx->getNamespaceString();
+    auto swRoutingCtx = getRoutingContext(expCtx->getOperationContext(), {nss});
     // Additionally check that the ExpressionContext's UUID matches the collection routing info.
-    if (swRoutingInfo.isOK() && expCtx->getUUID() &&
-        swRoutingInfo.getValue().cm.hasRoutingTable()) {
-        if (!swRoutingInfo.getValue().cm.uuidMatches(*expCtx->getUUID())) {
+    if (swRoutingCtx.isOK()) {
+        if (expCtx->getUUID() && cri.hasRoutingTable() &&
+            !cri.getChunkManager().uuidMatches(*expCtx->getUUID())) {
             return {ErrorCodes::NamespaceNotFound,
-                    str::stream() << "The UUID of collection "
-                                  << expCtx->getNamespaceString().toStringForErrorMsg()
+                    str::stream() << "The UUID of collection " << nss.toStringForErrorMsg()
                                   << " changed; it may have been dropped and re-created."};
         }
     }
-    return swRoutingInfo;
+    return swRoutingCtx;
 }
 
 MongoProcessInterface::SupportingUniqueIndex supportsUniqueKey(
@@ -144,8 +142,30 @@ MongosProcessInterface::getWriteSizeEstimator(OperationContext* opCtx,
     return std::make_unique<TargetPrimaryWriteSizeEstimator>();
 }
 
-std::unique_ptr<Pipeline, PipelineDeleter> MongosProcessInterface::preparePipelineForExecution(
-    Pipeline* ownedPipeline,
+std::unique_ptr<Pipeline> MongosProcessInterface::finalizeAndMaybePreparePipelineForExecution(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    std::unique_ptr<Pipeline> pipeline,
+    bool attachCursorAfterOptimizing,
+    std::function<void(Pipeline* pipeline)> optimizePipeline,
+    ShardTargetingPolicy shardTargetingPolicy,
+    boost::optional<BSONObj> readConcern,
+    bool shouldUseCollectionDefaultCollator) {
+    // On mongos we can't have local cursors.
+    tassert(11028100,
+            "shardTargetingPolicy cannot be kNotAllowed on mongos",
+            shardTargetingPolicy != ShardTargetingPolicy::kNotAllowed);
+    return sharded_agg_helpers::finalizeAndMaybePreparePipelineForExecution(
+        expCtx,
+        std::move(pipeline),
+        attachCursorAfterOptimizing,
+        optimizePipeline,
+        shardTargetingPolicy,
+        readConcern,
+        shouldUseCollectionDefaultCollator);
+}
+
+std::unique_ptr<Pipeline> MongosProcessInterface::preparePipelineForExecution(
+    std::unique_ptr<Pipeline> pipeline,
     ShardTargetingPolicy shardTargetingPolicy,
     boost::optional<BSONObj> readConcern) {
     // On mongos we can't have local cursors.
@@ -154,13 +174,13 @@ std::unique_ptr<Pipeline, PipelineDeleter> MongosProcessInterface::preparePipeli
             shardTargetingPolicy != ShardTargetingPolicy::kNotAllowed);
 
     return sharded_agg_helpers::preparePipelineForExecution(
-        ownedPipeline, shardTargetingPolicy, std::move(readConcern));
+        std::move(pipeline), shardTargetingPolicy, std::move(readConcern));
 }
 
-std::unique_ptr<Pipeline, PipelineDeleter> MongosProcessInterface::preparePipelineForExecution(
+std::unique_ptr<Pipeline> MongosProcessInterface::preparePipelineForExecution(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const AggregateCommandRequest& aggRequest,
-    Pipeline* pipeline,
+    std::unique_ptr<Pipeline> pipeline,
     boost::optional<BSONObj> shardCursorsSortSpec,
     ShardTargetingPolicy shardTargetingPolicy,
     boost::optional<BSONObj> readConcern,
@@ -169,26 +189,28 @@ std::unique_ptr<Pipeline, PipelineDeleter> MongosProcessInterface::preparePipeli
     tassert(7393502,
             "shardTargetingPolicy cannot be kNotAllowed on mongos",
             shardTargetingPolicy != ShardTargetingPolicy::kNotAllowed);
-    std::unique_ptr<Pipeline, PipelineDeleter> targetPipeline(
-        pipeline, PipelineDeleter(expCtx->getOperationContext()));
     return sharded_agg_helpers::targetShardsAndAddMergeCursors(
         expCtx,
-        std::make_pair(aggRequest, std::move(targetPipeline)),
+        std::make_pair(aggRequest, std::move(pipeline)),
         shardCursorsSortSpec,
         shardTargetingPolicy,
         std::move(readConcern));
 }
 
-BSONObj MongosProcessInterface::preparePipelineAndExplain(Pipeline* ownedPipeline,
-                                                          ExplainOptions::Verbosity verbosity) {
-    auto firstStage = ownedPipeline->peekFront();
+BSONObj MongosProcessInterface::finalizePipelineAndExplain(
+    std::unique_ptr<Pipeline> pipeline,
+    ExplainOptions::Verbosity verbosity,
+    std::function<void(Pipeline* pipeline)> optimizePipeline) {
+    auto firstStage = pipeline->peekFront();
+
     // We don't want to serialize and send a MergeCursors stage to the shards.
     if (firstStage &&
         (typeid(*firstStage) == typeid(DocumentSourceMerge) ||
          typeid(*firstStage) == typeid(DocumentSourceMergeCursors))) {
-        ownedPipeline->popFront();
+        pipeline->popFront();
     }
-    return sharded_agg_helpers::targetShardsForExplain(ownedPipeline);
+    return sharded_agg_helpers::finalizePipelineAndTargetShardsForExplain(std::move(pipeline),
+                                                                          optimizePipeline);
 }
 
 boost::optional<Document> MongosProcessInterface::lookupSingleDocument(
@@ -197,7 +219,7 @@ boost::optional<Document> MongosProcessInterface::lookupSingleDocument(
     boost::optional<UUID> collectionUUID,
     const Document& filter,
     boost::optional<BSONObj> readConcern) {
-    auto foreignExpCtx = expCtx->copyWith(nss, collectionUUID);
+    auto foreignExpCtx = makeCopyFromExpressionContext(expCtx, nss, collectionUUID);
 
     // Create the find command to be dispatched to the shard(s) in order to return the post-image.
     auto filterObj = filter.toBson();
@@ -215,35 +237,35 @@ boost::optional<Document> MongosProcessInterface::lookupSingleDocument(
 
     try {
         auto findCmd = cmdBuilder.obj();
-        auto catalogCache = Grid::get(expCtx->getOperationContext())->catalogCache();
-        auto shardResults = shardVersionRetry(
-            expCtx->getOperationContext(),
-            catalogCache,
-            foreignExpCtx->getNamespaceString(),
+        const auto& foreignNss = foreignExpCtx->getNamespaceString();
+        sharding::router::CollectionRouter router(
+            expCtx->getOperationContext()->getServiceContext(), foreignNss);
+        auto shardResults = router.route(
+            foreignExpCtx->getOperationContext(),
             str::stream() << "Looking up document matching " << redact(filter.toBson()),
-            [&]() -> std::vector<RemoteCursor> {
-                // Verify that the collection exists, with the correct UUID.
-                auto cri = uassertStatusOK(getCollectionRoutingInfo(foreignExpCtx));
-
-                // Finalize the 'find' command object based on the routing table information.
-                if (findCmdIsByUuid && cri.cm.hasRoutingTable()) {
-                    // Find by UUID and shard versioning do not work together (SERVER-31946).  In
-                    // the sharded case we've already checked the UUID, so find by namespace is
-                    // safe.  In the unlikely case that the collection has been deleted and a new
-                    // collection with the same name created through a different mongos or the
-                    // collection had its shard key refined, the shard version will be detected as
-                    // stale, as shard versions contain an 'epoch' field unique to the collection.
-                    findCmd = findCmd.addField(BSON("find" << nss.coll()).firstElement());
+            [&](OperationContext* opCtx, const CollectionRoutingInfo& cri) {
+                auto routingCtxPtr = uassertStatusOK(getAndValidateRoutingCtx(foreignExpCtx, cri));
+                // Finalize the 'find' command object based on the routing table
+                // information.
+                if (findCmdIsByUuid && cri.hasRoutingTable()) {
+                    // Find by UUID and shard versioning do not work together
+                    // (SERVER-31946).  In the sharded case we've already checked the UUID,
+                    // so find by namespace is safe.  In the unlikely case that the
+                    // collection has been deleted and a new collection with the same name
+                    // created through a different mongos or the collection had its shard
+                    // key refined, the shard version will be detected as stale, as shard
+                    // versions contain an 'epoch' field unique to the collection.
+                    findCmd = findCmd.addField(BSON("find" << foreignNss.coll()).firstElement());
                     findCmdIsByUuid = false;
                 }
 
-                // Build the versioned requests to be dispatched to the shards. Typically, only a
-                // single shard will be targeted here; however, in certain cases where only the _id
-                // is present, we may need to scatter-gather the query to all shards in order to
-                // find the document.
+                // Build the versioned requests to be dispatched to the shards. Typically,
+                // only a single shard will be targeted here; however, in certain cases
+                // where only the _id is present, we may need to scatter-gather the query to
+                // all shards in order to find the document.
                 auto requests =
                     getVersionedRequestsForTargetedShards(expCtx->getOperationContext(),
-                                                          nss,
+                                                          foreignNss,
                                                           cri,
                                                           findCmd,
                                                           filterObj,
@@ -251,16 +273,17 @@ boost::optional<Document> MongosProcessInterface::lookupSingleDocument(
                                                           boost::none /*letParameters*/,
                                                           boost::none /*runtimeConstants*/);
 
-                // Dispatch the requests. The 'establishCursors' method conveniently prepares the
-                // result into a vector of cursor responses for us.
+                // Dispatch the requests. The 'establishCursors' method conveniently
+                // prepares the result into a vector of cursor responses for us.
                 return establishCursors(expCtx->getOperationContext(),
                                         Grid::get(expCtx->getOperationContext())
                                             ->getExecutorPool()
                                             ->getArbitraryExecutor(),
-                                        nss,
+                                        foreignNss,
                                         ReadPreferenceSetting::get(expCtx->getOperationContext()),
                                         std::move(requests),
-                                        false);
+                                        false,
+                                        routingCtxPtr.get());
             });
 
         // Iterate all shard results and build a single composite batch. We also enforce the
@@ -308,7 +331,7 @@ std::vector<BSONObj> MongosProcessInterface::runListCollections(OperationContext
                                                                 const DatabaseName& db,
                                                                 bool addPrimaryShard) {
     return _runListCollectionsCommandOnAShardedCluster(
-        opCtx, NamespaceStringUtil::deserialize(db, ""), addPrimaryShard);
+        opCtx, NamespaceStringUtil::deserialize(db, ""), {.addPrimaryShard = addPrimaryShard});
 }
 
 BSONObj MongosProcessInterface::_reportCurrentOpForClient(
@@ -383,10 +406,25 @@ std::vector<GenericCursor> MongosProcessInterface::getIdleCursors(
     return cursorManager->getIdleCursors(expCtx->getOperationContext(), userMode);
 }
 
+std::vector<FieldPath> MongosProcessInterface::collectDocumentKeyFieldsActingAsRouter(
+    OperationContext* opCtx, const NamespaceString& nss, RoutingContext* routingCtx) const {
+    tassert(10292900, "RoutingContext has not been acquired.", routingCtx);
+    const auto& cri = routingCtx->getCollectionRoutingInfo(nss);
+    if (cri.isSharded()) {
+        return CommonProcessInterface::shardKeyToDocumentKeyFields(
+            cri.getChunkManager().getShardKeyPattern().getKeyPatternFields());
+    }
+    // We have no evidence this collection is sharded, so the document key is just _id.
+    return {"_id"};
+}
+
 bool MongosProcessInterface::isSharded(OperationContext* opCtx, const NamespaceString& nss) {
-    auto [cm, _] =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
-    return cm.isSharded();
+    // The RoutingContext is acquired and disposed of without validating the routing tables against
+    // a shard here because this isSharded() check is only used for distributed query planning
+    // optimizations; it doesn't affect query correctness. DO NOT use this function to make a
+    // decision that affects query correctness.
+    auto routingCtx = uassertStatusOK(getRoutingContext(opCtx, {nss}));
+    return routingCtx->getCollectionRoutingInfo(nss).isSharded();
 }
 
 MongoProcessInterface::SupportingUniqueIndex
@@ -399,27 +437,31 @@ MongosProcessInterface::fieldsHaveSupportingUniqueIndex(
     // this is any shard that currently owns at least one chunk. This helper sends database and/or
     // shard versions to ensure this router is not stale, but will not automatically retry if either
     // version is stale.
-    const auto cri =
-        uassertStatusOK(Grid::get(expCtx->getOperationContext())
-                            ->catalogCache()
-                            ->getCollectionRoutingInfo(expCtx->getOperationContext(), nss));
-    auto response = loadIndexesFromAuthoritativeShard(expCtx->getOperationContext(), nss, cri);
+    sharding::router::CollectionRouter router{expCtx->getOperationContext()->getServiceContext(),
+                                              nss};
+    return router.routeWithRoutingContext(
+        expCtx->getOperationContext(),
+        "MongosProcessInterface::fieldsHaveSupportingUniqueIndex"_sd,
+        [&](OperationContext* opCtx, RoutingContext& routingCtx) {
+            auto response =
+                loadIndexesFromAuthoritativeShard(expCtx->getOperationContext(), routingCtx, nss);
 
-    // If the namespace does not exist, then the field paths *must* be _id only.
-    if (response.getStatus() == ErrorCodes::NamespaceNotFound) {
-        return fieldPaths == std::set<FieldPath>{"_id"} ? SupportingUniqueIndex::Full
-                                                        : SupportingUniqueIndex::None;
-    }
-    uassertStatusOK(response);
+            // If the namespace does not exist, then the field paths *must* be _id only.
+            if (response.getStatus() == ErrorCodes::NamespaceNotFound) {
+                return fieldPaths == std::set<FieldPath>{"_id"} ? SupportingUniqueIndex::Full
+                                                                : SupportingUniqueIndex::None;
+            }
+            uassertStatusOK(response);
 
-    const auto& indexes = response.getValue().docs;
-    return std::accumulate(indexes.begin(),
-                           indexes.end(),
-                           SupportingUniqueIndex::None,
-                           [&expCtx, &fieldPaths](auto result, const auto& index) {
-                               return std::max(result,
-                                               supportsUniqueKey(expCtx, index, fieldPaths));
-                           });
+            const auto& indexes = response.getValue().docs;
+            return std::accumulate(indexes.begin(),
+                                   indexes.end(),
+                                   SupportingUniqueIndex::None,
+                                   [&expCtx, &fieldPaths](auto result, const auto& index) {
+                                       return std::max(
+                                           result, supportsUniqueKey(expCtx, index, fieldPaths));
+                                   });
+        });
 }
 
 MongosProcessInterface::DocumentKeyResolutionMetadata
@@ -444,6 +486,9 @@ MongosProcessInterface::ensureFieldsUniqueOrResolveDocumentKey(
         return {*fieldPaths, boost::none, supportingUniqueIndex};
     }
 
+    // TODO SERVER-95749 Avoid forced collection cache refresh and validate RoutingContext in
+    // checkRoutingInfoEpochOrThrow().
+    std::unique_ptr<RoutingContext> routingCtx;
     auto placementVersion = [&]() -> boost::optional<ChunkVersion> {
         const auto& catalogCache = Grid::get(expCtx->getOperationContext())->catalogCache();
         // In case there are multiple shards which will perform this stage in parallel, we need to
@@ -460,17 +505,18 @@ MongosProcessInterface::ensureFieldsUniqueOrResolveDocumentKey(
         // off another thread's request to refresh the cache, simply waiting for that request to
         // return instead of forcing another refresh.
         catalogCache->onStaleCollectionVersion(outputNs, boost::none);
-        const auto& cri = uassertStatusOK(
-            catalogCache->getCollectionRoutingInfo(expCtx->getOperationContext(), outputNs));
-        if (!cri.cm.isSharded()) {
+
+        routingCtx = uassertStatusOK(getRoutingContext(expCtx->getOperationContext(), {outputNs}));
+        const auto& cri = routingCtx->getCollectionRoutingInfo(outputNs);
+        if (!cri.isSharded()) {
             return boost::none;
         }
 
         return cri.getCollectionVersion().placementVersion();
     }();
 
-    auto docKeyPaths =
-        collectDocumentKeyFieldsActingAsRouter(expCtx->getOperationContext(), outputNs);
+    auto docKeyPaths = collectDocumentKeyFieldsActingAsRouter(
+        expCtx->getOperationContext(), outputNs, routingCtx.get());
     return {std::set<FieldPath>(std::make_move_iterator(docKeyPaths.begin()),
                                 std::make_move_iterator(docKeyPaths.end())),
             placementVersion,

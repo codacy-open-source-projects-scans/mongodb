@@ -33,6 +33,7 @@
 #include "mongo/db/exec/sbe/values/arith_common.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/vm/code_fragment.h"
+#include "mongo/db/exec/sbe/vm/vm.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -48,8 +49,8 @@ std::pair<value::TypeTags, value::Value> collComparisonKey(value::TypeTags tag,
     using namespace std::literals;
 
     // This function should only be called if 'collator' is non-null and 'tag' is a collatable type.
-    invariant(collator);
-    invariant(value::isCollatableType(tag));
+    tassert(11054001, "Missing collator argument in collComparisonKey", collator);
+    tassert(11086802, "Unexpected value of non-collatable type", value::isCollatableType(tag));
 
     // For strings, call CollatorInterface::getComparisonKey() to obtain the comparison key.
     if (value::isString(tag)) {
@@ -85,7 +86,8 @@ int Instruction::stackOffset[Instruction::Tags::lastInstruction] = {
     1,   // pushMoveVal
     1,   // pushLocalVal
     1,   // pushMoveLocalVal
-    1,   // pushLocalLambda
+    1,   // pushOneArgLambda
+    1,   // pushTwoArgLambda
     -1,  // pop
     0,   // swap
     0,   // makeOwn
@@ -176,7 +178,7 @@ int Instruction::stackOffset[Instruction::Tags::lastInstruction] = {
     0,  // dateTruncImm
 
     -1,  // valueBlockApplyLambda
-};       // int Instruction::stackOffset
+};  // int Instruction::stackOffset
 
 
 MONGO_COMPILER_NORETURN void reportSwapFailure();
@@ -210,10 +212,10 @@ MONGO_COMPILER_NORETURN void reportSwapFailure() {
 
 MONGO_COMPILER_NORETURN void ByteCode::runFailInstruction() {
     auto [ownedCode, tagCode, valCode] = getFromStack(1);
-    invariant(tagCode == value::TypeTags::NumberInt64);
+    tassert(11086801, "Unexpected error code type", tagCode == value::TypeTags::NumberInt64);
 
     auto [ownedMsg, tagMsg, valMsg] = getFromStack(0);
-    invariant(value::isString(tagMsg));
+    tassert(11086800, "Unexpected error message type", value::isString(tagMsg));
 
     ErrorCodes::Error code{static_cast<ErrorCodes::Error>(value::bitcastTo<int64_t>(valCode))};
     std::string message{value::getStringView(tagMsg, valMsg)};
@@ -321,13 +323,22 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 pushStack(owned, tag, val);
                 break;
             }
-            case Instruction::pushLocalLambda: {
+            case Instruction::pushOneArgLambda: {
                 auto offset = readFromMemory<int>(pcPointer);
                 pcPointer += sizeof(offset);
                 auto newPosition = pcPointer - code->instrs().data() + offset;
-
-                pushStack(
-                    false, value::TypeTags::LocalLambda, value::bitcastFrom<int64_t>(newPosition));
+                pushStack(false,
+                          value::TypeTags::LocalOneArgLambda,
+                          value::bitcastFrom<int64_t>(newPosition));
+                break;
+            }
+            case Instruction::pushTwoArgLambda: {
+                auto offset = readFromMemory<int>(pcPointer);
+                pcPointer += sizeof(offset);
+                auto newPosition = pcPointer - code->instrs().data() + offset;
+                pushStack(false,
+                          value::TypeTags::LocalTwoArgLambda,
+                          value::bitcastFrom<int64_t>(newPosition));
                 break;
             }
             case Instruction::pop: {
@@ -819,7 +830,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                                      value::bitcastFrom<int32_t>(1));
                             break;
                         default:
-                            MONGO_UNREACHABLE;
+                            MONGO_UNREACHABLE_TASSERT(11122949);
                     }
                 }
                 break;
@@ -964,6 +975,8 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 break;
             }
             case Instruction::traversePImm: {
+                auto providePosition = readFromMemory<Instruction::Constants>(pcPointer);
+                pcPointer += sizeof(providePosition);
                 auto k = readFromMemory<Instruction::Constants>(pcPointer);
                 pcPointer += sizeof(k);
 
@@ -973,6 +986,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
 
                 traverseP(code,
                           codePosition,
+                          providePosition == Instruction::True ? true : false,
                           k == Instruction::Nothing ? std::numeric_limits<int64_t>::max() : 1);
 
                 break;
@@ -982,6 +996,8 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 break;
             }
             case Instruction::traverseFImm: {
+                auto providePosition = readFromMemory<Instruction::Constants>(pcPointer);
+                pcPointer += sizeof(providePosition);
                 auto k = readFromMemory<Instruction::Constants>(pcPointer);
                 pcPointer += sizeof(k);
 
@@ -989,7 +1005,10 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
                 pcPointer += sizeof(offset);
                 auto codePosition = pcPointer - code->instrs().data() + offset;
 
-                traverseF(code, codePosition, k == Instruction::True ? true : false);
+                traverseF(code,
+                          codePosition,
+                          providePosition == Instruction::True ? true : false,
+                          k == Instruction::True ? true : false);
 
                 break;
             }
@@ -1397,7 +1416,7 @@ void ByteCode::runInternal(const CodeFragment* code, int64_t position) {
             }
 
             default:
-                MONGO_UNREACHABLE;
+                MONGO_UNREACHABLE_TASSERT(11122950);
         }
     }
 }  // ByteCode::runInternal
@@ -1473,8 +1492,10 @@ const char* Instruction::toString() const {
             return "pushLocalVal";
         case pushMoveLocalVal:
             return "pushMoveLocalVal";
-        case pushLocalLambda:
-            return "pushLocalLambda";
+        case pushOneArgLambda:
+            return "pushOneArgLambda";
+        case pushTwoArgLambda:
+            return "pushTwoArgLambda";
         case pop:
             return "pop";
         case swap:

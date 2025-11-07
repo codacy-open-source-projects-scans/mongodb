@@ -27,26 +27,28 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <iterator>
-
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/document_source_plan_cache_stats.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
+#include "mongo/db/exec/agg/pipeline_builder.h"
 #include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/matcher/matcher.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/document_source_plan_cache_stats.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/process_interface/stub_mongo_process_interface.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <algorithm>
+#include <iterator>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -77,7 +79,9 @@ public:
         std::copy_if(_planCacheStats.begin(),
                      _planCacheStats.end(),
                      std::back_inserter(filteredStats),
-                     [&matchExpr](const BSONObj& obj) { return matchExpr->matchesBSON(obj); });
+                     [&matchExpr](const BSONObj& obj) {
+                         return exec::matcher::matchesBSON(matchExpr, obj);
+                     });
         return filteredStats;
     }
 
@@ -163,10 +167,10 @@ TEST_F(DocumentSourcePlanCacheStatsTest, SerializesSuccessfullyAfterAbsorbingMat
         DocumentSourcePlanCacheStats::createFromBson(kEmptySpecObj.firstElement(), getExpCtx());
     auto match = DocumentSourceMatch::create(fromjson("{foo: 'bar'}"), getExpCtx());
     auto pipeline = Pipeline::create({planCacheStats, match}, getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
-    ASSERT_EQ(1u, pipeline->getSources().size());
+    pipeline_optimization::optimizePipeline(*pipeline);
+    ASSERT_EQ(1u, pipeline->size());
 
     auto serialized = pipeline->serialize();
     ASSERT_EQ(2u, serialized.size());
@@ -179,10 +183,10 @@ TEST_F(DocumentSourcePlanCacheStatsTest, SerializesSuccessfullyAfterAbsorbingMat
         DocumentSourcePlanCacheStats::createFromBson(kEmptySpecObj.firstElement(), getExpCtx());
     auto match = DocumentSourceMatch::create(fromjson("{foo: 'bar'}"), getExpCtx());
     auto pipeline = Pipeline::create({planCacheStats, match}, getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
-    ASSERT_EQ(1u, pipeline->getSources().size());
+    pipeline_optimization::optimizePipeline(*pipeline);
+    ASSERT_EQ(1u, pipeline->size());
 
     auto serialized = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(1u, serialized.size());
@@ -196,10 +200,10 @@ TEST_F(DocumentSourcePlanCacheStatsTest, SerializesAllHostsSuccessfullyAfterAbso
         kAllHostsTrueSpecObj.firstElement(), getExpCtx());
     auto match = DocumentSourceMatch::create(fromjson("{foo: 'bar'}"), getExpCtx());
     auto pipeline = Pipeline::create({planCacheStats, match}, getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
-    ASSERT_EQ(1u, pipeline->getSources().size());
+    pipeline_optimization::optimizePipeline(*pipeline);
+    ASSERT_EQ(1u, pipeline->size());
 
     auto serialized = pipeline->serialize();
     ASSERT_EQ(2u, serialized.size());
@@ -214,10 +218,10 @@ TEST_F(DocumentSourcePlanCacheStatsTest,
         kAllHostsTrueSpecObj.firstElement(), getExpCtx());
     auto match = DocumentSourceMatch::create(fromjson("{foo: 'bar'}"), getExpCtx());
     auto pipeline = Pipeline::create({planCacheStats, match}, getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
-    ASSERT_EQ(1u, pipeline->getSources().size());
+    pipeline_optimization::optimizePipeline(*pipeline);
+    ASSERT_EQ(1u, pipeline->size());
 
     auto serialized = pipeline->writeExplainOps(kExplain);
     ASSERT_EQ(1u, serialized.size());
@@ -230,10 +234,10 @@ TEST_F(DocumentSourcePlanCacheStatsTest, RedactsSuccessfullyAfterAbsorbingMatch)
         DocumentSourcePlanCacheStats::createFromBson(kEmptySpecObj.firstElement(), getExpCtx());
     auto match = DocumentSourceMatch::create(fromjson("{foo: 'bar'}"), getExpCtx());
     auto pipeline = Pipeline::create({planCacheStats, match}, getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
-    ASSERT_EQ(1u, pipeline->getSources().size());
+    pipeline_optimization::optimizePipeline(*pipeline);
+    ASSERT_EQ(1u, pipeline->size());
     auto serialized = redactToArray(*pipeline->getSources().front());
     ASSERT_EQ(2u, serialized.size());
 
@@ -246,21 +250,19 @@ TEST_F(DocumentSourcePlanCacheStatsTest, RedactsSuccessfullyAfterAbsorbingMatch)
 TEST_F(DocumentSourcePlanCacheStatsTest, ReturnsImmediateEOFWithEmptyPlanCache) {
     getExpCtx()->setMongoProcessInterface(
         std::make_shared<PlanCacheStatsMongoProcessInterface>(std::vector<BSONObj>{}));
-    auto stage =
+    auto source =
         DocumentSourcePlanCacheStats::createFromBson(kEmptySpecObj.firstElement(), getExpCtx());
+    auto stage = exec::agg::buildStage(source);
     ASSERT(stage->getNext().isEOF());
     ASSERT(stage->getNext().isEOF());
 }
 
 TEST_F(DocumentSourcePlanCacheStatsTest, ReturnsOnlyMatchingStatsAfterAbsorbingMatch) {
     std::vector<BSONObj> stats{BSONObj(),
-                               BSON("foo"
-                                    << "bar"),
-                               BSON("foo"
-                                    << "baz"),
-                               BSON("foo"
-                                    << "bar"
-                                    << "match" << true)};
+                               BSON("foo" << "bar"),
+                               BSON("foo" << "baz"),
+                               BSON("foo" << "bar"
+                                          << "match" << true)};
     getExpCtx()->setMongoProcessInterface(
         std::make_shared<PlanCacheStatsMongoProcessInterface>(stats));
 
@@ -268,50 +270,42 @@ TEST_F(DocumentSourcePlanCacheStatsTest, ReturnsOnlyMatchingStatsAfterAbsorbingM
         DocumentSourcePlanCacheStats::createFromBson(kEmptySpecObj.firstElement(), getExpCtx());
     auto match = DocumentSourceMatch::create(fromjson("{foo: 'bar'}"), getExpCtx());
     auto pipeline = Pipeline::create({planCacheStats, match}, getExpCtx());
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    ASSERT_BSONOBJ_EQ(pipeline->getNext()->toBson(),
-                      BSON("foo"
-                           << "bar"
-                           << "host"
-                           << "testHostName"));
-    ASSERT_BSONOBJ_EQ(pipeline->getNext()->toBson(),
-                      BSON("foo"
-                           << "bar"
-                           << "match" << true << "host"
-                           << "testHostName"));
-    ASSERT(!pipeline->getNext());
+    ASSERT_BSONOBJ_EQ(execPipeline->getNext()->toBson(),
+                      BSON("foo" << "bar"
+                                 << "host"
+                                 << "testHostName"));
+    ASSERT_BSONOBJ_EQ(execPipeline->getNext()->toBson(),
+                      BSON("foo" << "bar"
+                                 << "match" << true << "host"
+                                 << "testHostName"));
+    ASSERT(!execPipeline->getNext());
 }
 
 TEST_F(DocumentSourcePlanCacheStatsTest, ReturnsHostNameWhenNotFromMongos) {
-    std::vector<BSONObj> stats{BSON("foo"
-                                    << "bar"),
-                               BSON("foo"
-                                    << "baz")};
+    std::vector<BSONObj> stats{BSON("foo" << "bar"), BSON("foo" << "baz")};
     getExpCtx()->setMongoProcessInterface(
         std::make_shared<PlanCacheStatsMongoProcessInterface>(stats));
 
     auto planCacheStats =
         DocumentSourcePlanCacheStats::createFromBson(kEmptySpecObj.firstElement(), getExpCtx());
     auto pipeline = Pipeline::create({planCacheStats}, getExpCtx());
-    ASSERT_BSONOBJ_EQ(pipeline->getNext()->toBson(),
-                      BSON("foo"
-                           << "bar"
-                           << "host"
-                           << "testHostName"));
-    ASSERT_BSONOBJ_EQ(pipeline->getNext()->toBson(),
-                      BSON("foo"
-                           << "baz"
-                           << "host"
-                           << "testHostName"));
-    ASSERT(!pipeline->getNext());
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
+    ASSERT_BSONOBJ_EQ(execPipeline->getNext()->toBson(),
+                      BSON("foo" << "bar"
+                                 << "host"
+                                 << "testHostName"));
+    ASSERT_BSONOBJ_EQ(execPipeline->getNext()->toBson(),
+                      BSON("foo" << "baz"
+                                 << "host"
+                                 << "testHostName"));
+    ASSERT(!execPipeline->getNext());
 }
 
 TEST_F(DocumentSourcePlanCacheStatsTest, ReturnsShardAndHostNameWhenFromMongos) {
-    std::vector<BSONObj> stats{BSON("foo"
-                                    << "bar"),
-                               BSON("foo"
-                                    << "baz")};
+    std::vector<BSONObj> stats{BSON("foo" << "bar"), BSON("foo" << "baz")};
     getExpCtx()->setMongoProcessInterface(
         std::make_shared<PlanCacheStatsMongoProcessInterface>(stats));
     getExpCtx()->setFromRouter(true);
@@ -319,21 +313,20 @@ TEST_F(DocumentSourcePlanCacheStatsTest, ReturnsShardAndHostNameWhenFromMongos) 
     auto planCacheStats =
         DocumentSourcePlanCacheStats::createFromBson(kEmptySpecObj.firstElement(), getExpCtx());
     auto pipeline = Pipeline::create({planCacheStats}, getExpCtx());
-    ASSERT_BSONOBJ_EQ(pipeline->getNext()->toBson(),
-                      BSON("foo"
-                           << "bar"
-                           << "host"
-                           << "testHostName"
-                           << "shard"
-                           << "testShardName"));
-    ASSERT_BSONOBJ_EQ(pipeline->getNext()->toBson(),
-                      BSON("foo"
-                           << "baz"
-                           << "host"
-                           << "testHostName"
-                           << "shard"
-                           << "testShardName"));
-    ASSERT(!pipeline->getNext());
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
+    ASSERT_BSONOBJ_EQ(execPipeline->getNext()->toBson(),
+                      BSON("foo" << "bar"
+                                 << "host"
+                                 << "testHostName"
+                                 << "shard"
+                                 << "testShardName"));
+    ASSERT_BSONOBJ_EQ(execPipeline->getNext()->toBson(),
+                      BSON("foo" << "baz"
+                                 << "host"
+                                 << "testHostName"
+                                 << "shard"
+                                 << "testShardName"));
+    ASSERT(!execPipeline->getNext());
 }
 
 }  // namespace mongo

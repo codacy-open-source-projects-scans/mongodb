@@ -29,8 +29,6 @@
 
 #pragma once
 
-#include <variant>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/logv2/constants.h"
@@ -38,12 +36,16 @@
 #include "mongo/stdx/type_traits.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
+
+#include <functional>
+#include <string_view>  // NOLINT
+#include <variant>
 
 #include <boost/container/small_vector.hpp>
-#include <functional>
-#include <string_view>
 
-namespace mongo::logv2 {
+namespace mongo {
+namespace MONGO_MOD_PUBLIC logv2 {
 
 class TypeErasedAttributeStorage;
 
@@ -230,8 +232,8 @@ inline StringData mapValue(StringData value) {
 inline StringData mapValue(std::string const& value) {
     return value;
 }
-inline StringData mapValue(std::string_view value) {
-    return StringData(value.data(), value.size());
+inline StringData mapValue(std::string_view value) {  // NOLINT
+    return toStringDataForInterop(value);
 }
 inline StringData mapValue(char* value) {
     return value;
@@ -266,7 +268,7 @@ inline CustomAttributeValue mapValue(boost::none_t val) {
         builder.appendNull(fieldName);
     };
     custom.toString = [] {
-        return constants::kNullOptionalString.toString();
+        return std::string{constants::kNullOptionalString};
     };
     return custom;
 }
@@ -389,7 +391,7 @@ CustomAttributeValue mapValue(const T& val) {
 }
 
 template <typename It>
-class SequenceContainerLogger {
+class MONGO_MOD_NEEDS_REPLACEMENT SequenceContainerLogger {
 public:
     SequenceContainerLogger(It begin, It end) : _begin(begin), _end(end) {}
 
@@ -454,7 +456,7 @@ public:
                     if (val.stringSerialize) {
                         val.stringSerialize(buffer);
                     } else if (val.toString) {
-                        fmt::format_to(buffer, "{}", val.toString());
+                        fmt::format_to(std::back_inserter(buffer), "{}", val.toString());
                     } else if (val.BSONSerialize) {
                         BSONObjBuilder objBuilder;
                         val.BSONSerialize(objBuilder);
@@ -471,13 +473,13 @@ public:
                     }
 
                 } else if constexpr (isDuration<std::decay_t<decltype(val)>>) {
-                    fmt::format_to(buffer, "{}", val.toString());
+                    fmt::format_to(std::back_inserter(buffer), "{}", val.toString());
                 } else if constexpr (std::is_same_v<std::decay_t<decltype(val)>, BSONObj>) {
                     val.jsonStringBuffer(JsonStringFormat::ExtendedRelaxedV2_0_0, 0, false, buffer);
                 } else if constexpr (std::is_same_v<std::decay_t<decltype(val)>, BSONArray>) {
                     val.jsonStringBuffer(JsonStringFormat::ExtendedRelaxedV2_0_0, 0, true, buffer);
                 } else {
-                    fmt::format_to(buffer, "{}", val);
+                    fmt::format_to(std::back_inserter(buffer), "{}", val);
                 }
             };
 
@@ -565,37 +567,37 @@ public:
             auto append = [&buffer](StringData key, auto&& val) {
                 if constexpr (std::is_same_v<decltype(val), CustomAttributeValue&&>) {
                     if (val.stringSerialize) {
-                        fmt::format_to(buffer, "{}: ", key);
+                        fmt::format_to(std::back_inserter(buffer), "{}: ", key);
                         val.stringSerialize(buffer);
                     } else if (val.toString) {
-                        fmt::format_to(buffer, "{}: {}", key, val.toString());
+                        fmt::format_to(std::back_inserter(buffer), "{}: {}", key, val.toString());
                     } else if (val.BSONSerialize) {
                         BSONObjBuilder objBuilder;
                         val.BSONSerialize(objBuilder);
-                        fmt::format_to(buffer, "{}: ", key);
+                        fmt::format_to(std::back_inserter(buffer), "{}: ", key);
                         objBuilder.done().jsonStringBuffer(
                             JsonStringFormat::ExtendedRelaxedV2_0_0, 0, false, buffer);
                     } else if (val.BSONAppend) {
                         BSONObjBuilder objBuilder;
                         val.BSONAppend(objBuilder, ""_sd);
-                        fmt::format_to(buffer, "{}: ", key);
+                        fmt::format_to(std::back_inserter(buffer), "{}: ", key);
                         objBuilder.done().getField(""_sd).jsonStringBuffer(
                             JsonStringFormat::ExtendedRelaxedV2_0_0, false, false, 0, buffer);
                     } else {
-                        fmt::format_to(buffer, "{}: ", key);
+                        fmt::format_to(std::back_inserter(buffer), "{}: ", key);
                         val.toBSONArray().jsonStringBuffer(
                             JsonStringFormat::ExtendedRelaxedV2_0_0, 0, true, buffer);
                     }
                 } else if constexpr (isDuration<std::decay_t<decltype(val)>>) {
-                    fmt::format_to(buffer, "{}: {}", key, val.toString());
+                    fmt::format_to(std::back_inserter(buffer), "{}: {}", key, val.toString());
                 } else if constexpr (std::is_same_v<std::decay_t<decltype(val)>, BSONObj>) {
-                    fmt::format_to(buffer, "{}: ", key);
+                    fmt::format_to(std::back_inserter(buffer), "{}: ", key);
                     val.jsonStringBuffer(JsonStringFormat::ExtendedRelaxedV2_0_0, 0, false, buffer);
                 } else if constexpr (std::is_same_v<std::decay_t<decltype(val)>, BSONArray>) {
-                    fmt::format_to(buffer, "{}: ", key);
+                    fmt::format_to(std::back_inserter(buffer), "{}: ", key);
                     val.jsonStringBuffer(JsonStringFormat::ExtendedRelaxedV2_0_0, 0, true, buffer);
                 } else {
-                    fmt::format_to(buffer, "{}: {}", key, val);
+                    fmt::format_to(std::back_inserter(buffer), "{}: {}", key, val);
                 }
             };
 
@@ -622,7 +624,7 @@ private:
 };
 
 // Named attribute, storage for a name-value attribute.
-class NamedAttribute {
+class MONGO_MOD_NEEDS_REPLACEMENT NamedAttribute {
 public:
     NamedAttribute() = default;
     NamedAttribute(const char* n, long double val) = delete;
@@ -698,8 +700,8 @@ public:
      * to extend with their own attributes.
      */
     template <typename... Args>
-    DynamicAttributes(DynamicAttributes&& other,
-                      Args&&... args) requires(detail::IsNamedArg<Args>&&...)
+    DynamicAttributes(DynamicAttributes&& other, Args&&... args)
+    requires(detail::IsNamedArg<Args> && ...)
         : _attributes(std::move(other._attributes)),
           _copiedStrings(std::move(other._copiedStrings)) {
         (add(std::forward<Args>(args)), ...);
@@ -840,4 +842,5 @@ auto mapLog(It begin, It end) {
     return detail::AssociativeContainerLogger(begin, end);
 }
 
-}  // namespace mongo::logv2
+}  // namespace MONGO_MOD_PUBLIC logv2
+}  // namespace mongo

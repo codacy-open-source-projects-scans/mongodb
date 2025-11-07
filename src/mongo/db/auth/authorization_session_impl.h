@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <tuple>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -58,6 +52,13 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/time_support.h"
+
+#include <memory>
+#include <tuple>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -87,6 +88,8 @@ public:
     void startRequest(OperationContext* opCtx) override;
 
     void startContractTracking() override;
+
+    void endContractTracking() override;
 
     Status addAndAuthorizeUser(OperationContext* opCtx,
                                std::unique_ptr<UserRequest> userRequest,
@@ -152,24 +155,26 @@ public:
     bool isAuthorizedForClusterActions(const ActionSet& actionSet,
                                        const boost::optional<TenantId>& tenantId) override;
 
-    void setImpersonatedUserData(const UserName& username,
-                                 const std::vector<RoleName>& roles) override;
-
-    boost::optional<UserName> getImpersonatedUserName() override;
-
-    RoleNameIterator getImpersonatedRoleNames() override;
-
-    void clearImpersonatedUserData() override;
-
     bool isCoauthorizedWithClient(Client* opClient, WithLock opClientLock) override;
 
     bool isCoauthorizedWith(const boost::optional<UserName>& userName) override;
 
-    bool isImpersonating() const override;
-
     Status checkCursorSessionPrivilege(OperationContext* opCtx,
                                        boost::optional<LogicalSessionId> cursorSessionId) override;
 
+    /**
+     * Verifies that the authorization session recorded checks are a subset of the allowed contract
+     * passed as a parameter.
+     *
+     * This method validates that the session did NOT perform any unauthorized checks,
+     * but does NOT validate that the session performed all checks in the given parameter contract.
+     *
+     * Example checks scenarios:
+     * 1. Session performed {A, B}, Contract allows {A, B, C} -> PASS (subset)
+     * 2. Session performed {}, Contract allows {A, B, C} -> PASS (empty set is subset of all)
+     * 3. Session performed {A, B, D}, Contract allows {A, B, C} -> FAIL (D not in allowed set)
+     *
+     **/
     void verifyContract(const AuthorizationContract* contract) const override;
 
     bool mayBypassWriteBlockingMode() const override;
@@ -178,6 +183,8 @@ public:
     const boost::optional<Date_t>& getExpiration() const override {
         return _expirationTime;
     }
+
+    const AuthorizationContract& getAuthorizationContract() const override;
 
 protected:
     friend class AuthorizationSessionImplTestHelper;
@@ -214,10 +221,6 @@ private:
     // lock on the admin database (to update out-of-date user privilege information).
     bool _isAuthorizedForPrivilege(const Privilege& privilege);
 
-    std::tuple<std::shared_ptr<UserName>*, std::vector<RoleName>*> _getImpersonations() override {
-        return std::make_tuple(&_impersonatedUserName, &_impersonatedRoleNames);
-    }
-
     // Generates a vector of default privileges that are granted to any user,
     // regardless of which roles that user does or does not possess.
     // If localhost exception is active, the permissions include the ability to create
@@ -227,10 +230,6 @@ private:
 
 private:
     std::unique_ptr<AuthzSessionExternalState> _externalState;
-
-    // These are used in the auditing system. They are not used for authz checks.
-    std::shared_ptr<UserName> _impersonatedUserName;
-    std::vector<RoleName> _impersonatedRoleNames;
 
     // A record of privilege checks and other authorization like function calls made on
     // AuthorizationSession. IDL Typed Commands can optionally define a contract declaring the set

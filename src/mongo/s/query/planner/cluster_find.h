@@ -29,9 +29,6 @@
 
 #pragma once
 
-#include <cstddef>
-#include <vector>
-
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/read_preference.h"
@@ -41,6 +38,9 @@
 #include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/getmore_command_gen.h"
+
+#include <cstddef>
+#include <vector>
 
 namespace mongo {
 
@@ -66,11 +66,13 @@ public:
      * id which the caller can use on subsequent getMore operations. If no cursor needed to be saved
      * (e.g. the cursor was exhausted without need for a getMore), returns a cursor id of 0.
      */
-    static CursorId runQuery(OperationContext* opCtx,
-                             const CanonicalQuery& query,
-                             const ReadPreferenceSetting& readPref,
-                             std::vector<BSONObj>* results,
-                             bool* partialResultsReturned = nullptr);
+    static void runQuery(OperationContext* opCtx,
+                         std::unique_ptr<FindCommandRequest> originalRequest,
+                         const NamespaceString& origNss,
+                         const ReadPreferenceSetting& readPref,
+                         const MatchExpressionParser::AllowedFeatureSet& allowedFeatures,
+                         rpc::ReplyBuilderInterface* result,
+                         bool didDoFLERewrite = false);
 
     /**
      * Executes the getMore command 'cmd', and on success returns a CursorResponse.
@@ -84,6 +86,17 @@ public:
      */
     static StatusWith<std::unique_ptr<FindCommandRequest>> transformQueryForShards(
         const CanonicalQuery& query);
+
+    /**
+     * Generates a CanonicalQuery for the given request
+     */
+    static std::unique_ptr<CanonicalQuery> generateAndValidateCanonicalQuery(
+        OperationContext* opCtx,
+        const NamespaceString& origNss,
+        std::unique_ptr<FindCommandRequest> cmdRequest,
+        boost::optional<ExplainOptions::Verbosity> explain,
+        const MatchExpressionParser::AllowedFeatureSet& allowedFeatures,
+        bool mustRegisterRequestToQueryStats);
 };
 
 }  // namespace mongo

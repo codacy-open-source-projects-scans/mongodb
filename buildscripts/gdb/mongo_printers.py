@@ -14,7 +14,7 @@ ROOT_PATH = str(Path(os.path.abspath(__file__)).parent.parent.parent)
 if ROOT_PATH not in sys.path:
     sys.path.insert(0, ROOT_PATH)
 from src.third_party.immer.dist.tools.gdb_pretty_printers.printers import (
-    ListIter as ImmerListIter,  # pylint: disable=wrong-import-position
+    ListIter as ImmerListIter,
 )
 
 if not gdb:
@@ -367,11 +367,7 @@ class DatabaseNamePrinter(object):
     def _get_storage_data(self):
         """Return the data pointer from the _data Storage class."""
         data = self.val["_data"]
-        footer = data["_footer"]
-        f_size = footer.type.sizeof
-
-        # The last byte of _footer contain the flags (and the size when using small string).
-        flags = footer.cast(gdb.lookup_type("char").array(f_size))[f_size - 1]
+        flags = data["_flags"]
 
         data_ptr = data["_data"]
         if is_small_string(flags):
@@ -384,7 +380,7 @@ class DatabaseNamePrinter(object):
         tenant = data[0] & TENANT_ID_MASK
 
         if tenant:
-            return f"{extract_tenant_id(data)}_{data[1+OBJECT_ID_WIDTH:].decode()}"
+            return f"{extract_tenant_id(data)}_{data[1 + OBJECT_ID_WIDTH :].decode()}"
         else:
             return data[1:].decode()
 
@@ -459,7 +455,7 @@ class WtCursorPrinter(object):
     """
 
     try:
-        with open("./src/third_party/wiredtiger/src/include/wiredtiger.in") as wiredtiger_header:
+        with open("./src/third_party/wiredtiger/src/include/wiredtiger.h.in") as wiredtiger_header:
             file_contents = wiredtiger_header.read()
             cursor_flags_re = re.compile(r"#define\s+WT_CURSTD_(\w+)\s+0x(\d+)u")
             cursor_flags = cursor_flags_re.findall(file_contents)[::-1]
@@ -563,7 +559,7 @@ def absl_insert_version_after_absl(cpp_name):
     """Insert version inline namespace after the first `absl` namespace found in the given string."""
     # See more:
     # https://github.com/abseil/abseil-cpp/blob/929c17cf481222c35ff1652498994871120e832a/absl/base/options.h#L203
-    ABSL_OPTION_INLINE_NAMESPACE_NAME = "lts_20230802"
+    ABSL_OPTION_INLINE_NAMESPACE_NAME = "lts_20250512"
 
     absl_ns_str = "absl::"
     absl_ns_start = cpp_name.find(absl_ns_str)
@@ -590,7 +586,7 @@ def absl_get_settings(val):
         if not err.args[0].startswith("No type named "):
             raise
 
-        # Abseil uses `inline namespace lts_20230802 { ... }` for its container types. This
+        # Abseil uses `inline namespace lts_20250512 { ... }` for its container types. This
         # can inhibit GDB from resolving type names when the inline namespace appears within
         # a template argument.
         common_fields_storage_type = gdb.lookup_type(
@@ -607,7 +603,7 @@ def absl_get_settings(val):
 
 
 def absl_container_size(settings):
-    return settings["compressed_tuple_"]["value"]
+    return settings["size_"]["data_"] >> 17
 
 
 def absl_get_nodes(val):
@@ -619,7 +615,8 @@ def absl_get_nodes(val):
         return
 
     capacity = int(settings["capacity_"])
-    ctrl = settings["control_"]
+    heap = settings["heap_or_soo_"]["heap"]
+    ctrl = heap["control"]
 
     # Derive the underlying type stored in the container.
     slot_type = lookup_type(str(val.type.strip_typedefs()) + "::slot_type").strip_typedefs()
@@ -629,7 +626,7 @@ def absl_get_nodes(val):
     for item in range(capacity):
         ctrl_t = int(ctrl[item])
         if ctrl_t >= 0:
-            yield settings["slots_"].cast(slot_type.pointer())[item]
+            yield heap["slot_array"]["p"].cast(slot_type.pointer())[item]
 
 
 class AbslHashSetPrinterBase(object):
@@ -907,7 +904,7 @@ class WtUpdateToBsonPrinter(object):
         memory = gdb.selected_inferior().read_memory(self.ptr, self.size).tobytes()
         bsonobj = None
         try:
-            bsonobj = next(bson.decode_iter(memory))  # pylint: disable=stop-iteration-return
+            bsonobj = next(bson.decode_iter(memory))
         except bson.errors.InvalidBSON:
             return
 
@@ -1030,7 +1027,12 @@ class SbeCodeFragmentPrinter(object):
 
             # Some instructions have extra arguments, embedded into the ops stream.
             args = ""
-            if op_name in ["pushLocalVal", "pushMoveLocalVal", "pushLocalLambda"]:
+            if op_name in [
+                "pushLocalVal",
+                "pushMoveLocalVal",
+                "pushOneArgLambda",
+                "pushTwoArgLambda",
+            ]:
                 args = "arg: " + str(read_as_integer(cur_op, int_size))
                 cur_op += int_size
             elif op_name in ["jmp", "jmpTrue", "jmpFalse", "jmpNothing", "jmpNotNothing"]:
@@ -1071,10 +1073,14 @@ class SbeCodeFragmentPrinter(object):
                 args = "Instruction::Constants: " + str(read_as_integer(cur_op, uint8_size))
                 cur_op += uint8_size
             elif op_name in ["traverseFImm", "traversePImm"]:
+                position = read_as_integer(cur_op, uint8_size)
+                cur_op += uint8_size
                 const_enum = read_as_integer(cur_op, uint8_size)
                 cur_op += uint8_size
                 args = (
-                    "Instruction::Constants: "
+                    "providePosition: "
+                    + str(position)
+                    + ", Instruction::Constants: "
                     + str(const_enum)
                     + ", offset: "
                     + str(read_as_integer_signed(cur_op, int_size))

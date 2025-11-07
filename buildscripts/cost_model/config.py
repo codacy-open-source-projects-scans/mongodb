@@ -31,8 +31,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, Sequence
+from typing import Any, Callable, Sequence
 
+import pandas as pd
 from random_generator import DataType, RandomDistribution
 
 
@@ -42,7 +43,7 @@ class Config:
 
     database: DatabaseConfig
     data_generator: DataGeneratorConfig
-    abt_calibrator: AbtCalibratorConfig
+    qs_calibrator: QuerySolutionCalibrationConfig
     workload_execution: WorkloadExecutionConfig
 
 
@@ -103,22 +104,26 @@ class FieldTemplate:
 
 
 @dataclass
-class AbtNodeCalibrationConfig:
+class QsNodeCalibrationConfig:
     type: str
-    filter_function: Callable[[any], any] = None
-    variables_override: Sequence[str] = None
+    filter_function: Callable[[Any], Any] = None
+    variables_override: Callable[[pd.DataFrame], pd.DataFrame] = None
+    # The difference between `name` and `type` is that `name` is a unique identifier for whatever is being calibrated,
+    # while `type` is the QSN we will be measuring. These two may not always align, as in the case of
+    # forward/backward scans or the different sort varieties (which are the same node but different calibrations).
+    name: str = None
 
 
 @dataclass
-class AbtCalibratorConfig:
-    """ABT Calibrator configuration."""
+class QuerySolutionCalibrationConfig:
+    """Query Solution Calibration configuration."""
 
     enabled: bool
     # Share of data used for testing the model. Usually it should be around 0.1-0.3.
     test_size: float
     input_collection_name: str
     trace: bool
-    nodes: Sequence[AbtNodeCalibrationConfig]
+    nodes: Sequence[QsNodeCalibrationConfig]
 
 
 class WriteMode(Enum):
@@ -137,31 +142,3 @@ class WorkloadExecutionConfig:
     write_mode: WriteMode
     warmup_runs: int
     runs: int
-
-
-@dataclass
-class BenchmarkConfig:
-    """A/B performance testing config."""
-
-    warmup_runs: int
-    runs: int
-
-
-@dataclass
-class EntToEndTestingConfig:
-    """End 2 End testing config."""
-
-    database: DatabaseConfig
-    data_generator: DataGeneratorConfig
-    workload_execution: WorkloadExecutionConfig
-    processor: End2EndProcessorConfig
-    result_csv_filepath: str
-
-
-@dataclass
-class End2EndProcessorConfig:
-    """Config of End 2 End tesing processor."""
-
-    enabled: bool
-    estimator: Callable[[str, int], float]
-    input_collection_name: str

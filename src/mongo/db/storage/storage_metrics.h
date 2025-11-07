@@ -31,8 +31,9 @@
 
 #include "mongo/db/stats/counter_ops.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 
 /**
  * Statistics that are accumulated and tracked within mongodb as opposed to retrieved directly from
@@ -66,24 +67,52 @@ public:
         return add(other, /*positive*/ false);
     }
 
-    bool isEmpty() const {
-        return (counter_ops::get(prepareReadConflicts) == 0);
+    /**
+     * Increments the time taken to respond to an interrupt.
+     */
+    void incrementInterruptResponseNs(int64_t n) {
+        counter_ops::add(interruptResponseNs, n);
     }
 
     /**
-     * Increments prepareReadConflicts by n.
+     * Time taken for the storage engine to acknowledge an interrupt. Not set if an interrupt was
+     * set but not acknowledged by the storage engine.
      */
-    void incrementPrepareReadConflicts(CounterType n) {
-        counter_ops::add(prepareReadConflicts, n);
+    CounterType interruptResponseNs{0};
+
+    /**
+     * Increments writeConflicts by n.
+     */
+    void incrementWriteConflicts(int64_t n) {
+        counter_ops::add(writeConflicts, n);
     }
 
-    // Number of read conflicts caused by a prepared transaction.
-    CounterType prepareReadConflicts{0};
+    /**
+     * Number of write conflicts.
+     */
+    CounterType writeConflicts{0};
+
+    /**
+     * Increments temporarilyUnavailableErrors by n.
+     */
+    void incrementTemporarilyUnavailableErrors(int64_t n) {
+        counter_ops::add(temporarilyUnavailableErrors, n);
+    }
+
+    /**
+     * Number of write conflicts.
+     */
+    CounterType temporarilyUnavailableErrors{0};
+
+    template <typename LhsType, typename RhsType>
+    friend bool operator==(const StorageMetrics<LhsType>& lhs, const StorageMetrics<RhsType>& rhs);
 
 private:
     template <typename OtherType>
     StorageMetrics& set(const StorageMetrics<OtherType>& other) {
-        counter_ops::set(prepareReadConflicts, other.prepareReadConflicts);
+        counter_ops::set(interruptResponseNs, other.interruptResponseNs);
+        counter_ops::set(writeConflicts, other.writeConflicts);
+        counter_ops::set(temporarilyUnavailableErrors, other.temporarilyUnavailableErrors);
         return *this;
     }
 
@@ -93,8 +122,15 @@ private:
      */
     template <typename OtherType>
     StorageMetrics& add(const StorageMetrics<OtherType>& other, bool positive) {
-        incrementPrepareReadConflicts(positive ? counter_ops::get(other.prepareReadConflicts)
-                                               : -counter_ops::get(other.prepareReadConflicts));
+        incrementInterruptResponseNs(positive ? counter_ops::get(other.interruptResponseNs)
+                                              : -counter_ops::get(other.interruptResponseNs));
+
+        incrementWriteConflicts(positive ? counter_ops::get(other.writeConflicts)
+                                         : -counter_ops::get(other.writeConflicts));
+
+        incrementTemporarilyUnavailableErrors(
+            positive ? counter_ops::get(other.temporarilyUnavailableErrors)
+                     : -counter_ops::get(other.temporarilyUnavailableErrors));
         return *this;
     }
 };
@@ -102,4 +138,12 @@ private:
 typedef StorageMetrics<int64_t> SingleThreadedStorageMetrics;
 typedef StorageMetrics<AtomicWord<long long>> AtomicStorageMetrics;
 
-}  // namespace mongo
+template <typename LhsType, typename RhsType>
+bool operator==(const StorageMetrics<LhsType>& lhs, const StorageMetrics<RhsType>& rhs) {
+    return (counter_ops::get(lhs.interruptResponseNs) ==
+                counter_ops::get(rhs.interruptResponseNs) &&
+            counter_ops::get(lhs.writeConflicts) == counter_ops::get(rhs.writeConflicts) &&
+            counter_ops::get(lhs.temporarilyUnavailableErrors) ==
+                counter_ops::get(rhs.temporarilyUnavailableErrors));
+}
+}  // namespace MONGO_MOD_PUBLIC mongo

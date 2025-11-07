@@ -29,19 +29,12 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
-#include "mongo/db/catalog/collection_operation_source.h"
+#include "mongo/db/local_catalog/collection_operation_source.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/query_settings/query_settings_gen.h"
@@ -55,10 +48,17 @@
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/versioning_protocol/stale_exception.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/s/stale_exception.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <memory>
+#include <vector>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -68,6 +68,11 @@ class DeleteRequest;
 class OpDebug;
 class PlanExecutor;
 class UpdateRequest;
+
+// TODO SERVER-107768: Remove the forward declaration here.
+namespace timeseries {
+class CollectionPreConditions;
+}  // namespace timeseries
 
 namespace write_ops_exec {
 
@@ -108,7 +113,7 @@ bool getFleCrudProcessed(OperationContext* opCtx,
  */
 bool insertBatchAndHandleErrors(OperationContext* opCtx,
                                 const NamespaceString& nss,
-                                const boost::optional<mongo::UUID>& collectionUUID,
+                                const timeseries::CollectionPreConditions& preConditions,
                                 bool ordered,
                                 std::vector<InsertStatement>& batch,
                                 OperationSource source,
@@ -127,7 +132,9 @@ UpdateResult performUpdate(OperationContext* opCtx,
                            bool upsert,
                            const boost::optional<mongo::UUID>& collectionUUID,
                            boost::optional<BSONObj>& docFound,
-                           UpdateRequest* updateRequest);
+                           UpdateRequest* updateRequest,
+                           const timeseries::CollectionPreConditions& preConditions,
+                           bool isTimeseriesLogicalRequest);
 
 /**
  * Executes a delete, supports returning the deleted document. the returned document is placed into
@@ -140,7 +147,9 @@ long long performDelete(OperationContext* opCtx,
                         CurOp* curOp,
                         bool inTransaction,
                         const boost::optional<mongo::UUID>& collectionUUID,
-                        boost::optional<BSONObj>& docFound);
+                        boost::optional<BSONObj>& docFound,
+                        const timeseries::CollectionPreConditions& preConditions,
+                        bool isTimeseriesLogicalRequest = false);
 
 /**
  * Generates a WriteError for a given Status.
@@ -148,7 +157,7 @@ long long performDelete(OperationContext* opCtx,
 boost::optional<write_ops::WriteError> generateError(OperationContext* opCtx,
                                                      const Status& status,
                                                      int index,
-                                                     size_t numErrors) noexcept;
+                                                     size_t numErrors);
 
 /**
  * Updates the retryable write stats if the write op contains retry.
@@ -177,20 +186,33 @@ void logOperationAndProfileIfNeeded(OperationContext* opCtx, CurOp* curOp);
  *
  * Note: performInserts() gets called for both user and internal (like initial sync oplog buffer)
  * inserts.
+ *
+ * Note: these functions do not by themselves handle any logic dealing with recognizing whether an
+ * operation is a logical time-series operation or not. This has to be handled at the layer above
+ * it, and passed in through the CollectionPreConditions parameter. If the CollectionPreCondition
+ * object is not passed in, a CollectionPreCondition object will still be constructed, but it will
+ * be assumed that we are not performing a logical time-series operation.
  */
-WriteResult performInserts(OperationContext* opCtx,
-                           const write_ops::InsertCommandRequest& op,
-                           OperationSource source = OperationSource::kStandard);
-WriteResult performUpdates(OperationContext* opCtx,
-                           const write_ops::UpdateCommandRequest& op,
-                           OperationSource source = OperationSource::kStandard);
-WriteResult performDeletes(OperationContext* opCtx,
-                           const write_ops::DeleteCommandRequest& op,
-                           OperationSource source = OperationSource::kStandard);
+WriteResult performInserts(
+    OperationContext* opCtx,
+    const write_ops::InsertCommandRequest& op,
+    boost::optional<const timeseries::CollectionPreConditions&> preConditions = boost::none,
+    OperationSource source = OperationSource::kStandard);
+WriteResult performUpdates(
+    OperationContext* opCtx,
+    const write_ops::UpdateCommandRequest& op,
+    boost::optional<const timeseries::CollectionPreConditions&> preConditions = boost::none,
+    OperationSource source = OperationSource::kStandard);
+WriteResult performDeletes(
+    OperationContext* opCtx,
+    const write_ops::DeleteCommandRequest& op,
+    boost::optional<const timeseries::CollectionPreConditions&> preConditions = boost::none,
+    OperationSource source = OperationSource::kStandard);
 
 void runTimeseriesRetryableUpdates(OperationContext* opCtx,
-                                   const NamespaceString& bucketNs,
+                                   const NamespaceString& nss,
                                    const write_ops::UpdateCommandRequest& wholeOp,
+                                   const timeseries::CollectionPreConditions& preConditions,
                                    std::shared_ptr<executor::TaskExecutor> executor,
                                    write_ops_exec::WriteResult* reply);
 
@@ -203,7 +225,8 @@ void recordUpdateResultInOpDebug(const UpdateResult& updateResult, OpDebug* opDe
 /**
  * Returns true if an update failure due to a given DuplicateKey error is eligible for retry.
  */
-bool shouldRetryDuplicateKeyException(const UpdateRequest& updateRequest,
+bool shouldRetryDuplicateKeyException(OperationContext* opCtx,
+                                      const UpdateRequest& updateRequest,
                                       const CanonicalQuery& cq,
                                       const DuplicateKeyErrorInfo& errorInfo,
                                       int retryAttempts);
@@ -216,6 +239,7 @@ void explainUpdate(OperationContext* opCtx,
                    bool isTimeseriesViewRequest,
                    const SerializationContext& serializationContext,
                    const BSONObj& command,
+                   const timeseries::CollectionPreConditions& preConditions,
                    ExplainOptions::Verbosity verbosity,
                    rpc::ReplyBuilderInterface* result);
 
@@ -224,6 +248,7 @@ void explainDelete(OperationContext* opCtx,
                    bool isTimeseriesViewRequest,
                    const SerializationContext& serializationContext,
                    const BSONObj& command,
+                   const timeseries::CollectionPreConditions& preConditions,
                    ExplainOptions::Verbosity verbosity,
                    rpc::ReplyBuilderInterface* result);
 

@@ -27,39 +27,38 @@
  *    it in the license file.
  */
 
-#include <boost/optional.hpp>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/timeseries/bucket_catalog/bucket_state_registry.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/oid.h"
-#include "mongo/db/catalog/catalog_test_fixture.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog_internal.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_identifiers.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_metadata.h"
-#include "mongo/db/timeseries/bucket_catalog/bucket_state_registry.h"
 #include "mongo/db/timeseries/bucket_catalog/execution_stats.h"
 #include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/rollover.h"
 #include "mongo/db/timeseries/bucket_catalog/write_batch.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/db/timeseries/timeseries_test_fixture.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/time_support.h"
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo::timeseries::bucket_catalog {
 namespace {
 
-class BucketStateRegistryTest : public GlobalBucketCatalog, public CatalogTestFixture {
+class BucketStateRegistryTest : public GlobalBucketCatalog, public TimeseriesTestFixture {
 public:
     BucketStateRegistryTest() {}
 
@@ -96,9 +95,15 @@ public:
         }
     }
 
-    Bucket& createBucket(InsertContext& info, Date_t time) {
-        auto ptr = &internal::allocateBucket(
-            *this, *stripes[info.stripeNumber], withLock, info, time, nullptr);
+    Bucket& createBucket(BatchedInsertContext& info, Date_t time) {
+        auto ptr = &internal::allocateBucket(*this,
+                                             *stripes[info.stripeNumber],
+                                             withLock,
+                                             info.key,
+                                             info.options,
+                                             time,
+                                             nullptr,
+                                             info.stats);
         ASSERT_FALSE(hasBeenCleared(*ptr));
         return *ptr;
     }
@@ -109,8 +114,7 @@ public:
                                    *stripes[internal::getStripeNumber(*this, bucket.key)],
                                    withLock,
                                    bucket,
-                                   stats(bucket),
-                                   internal::RemovalMode::kAbort);
+                                   stats(bucket));
             return true;
         } else {
             return false;
@@ -134,8 +138,7 @@ public:
                                *stripes[internal::getStripeNumber(*this, bucket.key)],
                                withLock,
                                bucket,
-                               stats(bucket),
-                               internal::RemovalMode::kAbort);
+                               stats(bucket));
     }
 
     bool doesBucketStateMatch(const BucketId& bucketId,
@@ -171,18 +174,27 @@ public:
     BucketKey bucketKey3{uuid3, bucketMetadata};
     Date_t date = Date_t::now();
     TimeseriesOptions options;
-    InsertContext info1{std::move(bucketKey1),
-                        internal::getStripeNumber(*this, bucketKey1),
-                        options,
-                        internal::getOrInitializeExecutionStats(*this, uuid1)};
-    InsertContext info2{std::move(bucketKey2),
-                        internal::getStripeNumber(*this, bucketKey2),
-                        options,
-                        internal::getOrInitializeExecutionStats(*this, uuid2)};
-    InsertContext info3{std::move(bucketKey3),
-                        internal::getStripeNumber(*this, bucketKey3),
-                        options,
-                        internal::getOrInitializeExecutionStats(*this, uuid3)};
+    ExecutionStatsController stats1 = internal::getOrInitializeExecutionStats(*this, uuid1);
+    ExecutionStatsController stats2 = internal::getOrInitializeExecutionStats(*this, uuid1);
+    ExecutionStatsController stats3 = internal::getOrInitializeExecutionStats(*this, uuid1);
+    std::vector<BatchedInsertTuple> measurementsTimesAndIndices1;
+    std::vector<BatchedInsertTuple> measurementsTimesAndIndices2;
+    std::vector<BatchedInsertTuple> measurementsTimesAndIndices3;
+    BatchedInsertContext info1{bucketKey1,
+                               internal::getStripeNumber(*this, bucketKey1),
+                               options,
+                               stats1,
+                               measurementsTimesAndIndices1};
+    BatchedInsertContext info2{bucketKey2,
+                               internal::getStripeNumber(*this, bucketKey2),
+                               options,
+                               stats2,
+                               measurementsTimesAndIndices2};
+    BatchedInsertContext info3{bucketKey3,
+                               internal::getStripeNumber(*this, bucketKey3),
+                               options,
+                               stats3,
+                               measurementsTimesAndIndices3};
 };
 
 
@@ -201,7 +213,7 @@ TEST_F(BucketStateRegistryTest, TransitionsFromUntrackedState) {
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, boost::none));
 
     // We expect transition to 'kNormal' to succeed.
-    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId, /*bucket*/ nullptr));
+    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId));
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, BucketState::kNormal));
     // Reset the state.
     stopTrackingBucketState(bucketStateRegistry, bucket.bucketId);
@@ -236,7 +248,7 @@ DEATH_TEST_F(BucketStateRegistryTest, CannotInitializeAnUnclearedBucket, "invari
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, BucketState::kNormal));
 
     // We expect initialize to invariant.
-    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId, /*bucket*/ nullptr));
+    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId));
 }
 
 TEST_F(BucketStateRegistryTest, TransitionsFromNormalState) {
@@ -248,7 +260,7 @@ TEST_F(BucketStateRegistryTest, TransitionsFromNormalState) {
     stopTrackingBucketState(bucketStateRegistry, bucket.bucketId);
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, boost::none));
     // Reset the state.
-    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId, /*bucket*/ nullptr));
+    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId));
 
     // We expect transition to 'kPrepared' to succeed.
     (void)prepareBucketState(bucketStateRegistry, bucket.bucketId);
@@ -262,7 +274,7 @@ TEST_F(BucketStateRegistryTest, TransitionsFromNormalState) {
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, BucketState::kCleared));
     // Reset the state.
     stopTrackingBucketState(bucketStateRegistry, bucket.bucketId);
-    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId, /*bucket*/ nullptr));
+    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId));
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, BucketState::kNormal));
 
     // We expect direct writes to succeed on 'kNormal' buckets.
@@ -271,7 +283,7 @@ TEST_F(BucketStateRegistryTest, TransitionsFromNormalState) {
     // Reset the state.
     removeDirectWrite(bucketStateRegistry, bucket.bucketId);
     stopTrackingBucketState(bucketStateRegistry, bucket.bucketId);
-    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId, /*bucket*/ nullptr));
+    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId));
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, BucketState::kNormal));
 
     // We expect transition to 'kFrozen' to succeed.
@@ -293,7 +305,7 @@ TEST_F(BucketStateRegistryTest, TransitionsFromClearedState) {
     stopTrackingBucketState(bucketStateRegistry, bucket.bucketId);
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, boost::none));
     // Reset the state.
-    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId, /*bucket*/ nullptr));
+    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId));
     clearBucketState(bucketStateRegistry, bucket.bucketId);
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, BucketState::kCleared));
 
@@ -347,7 +359,7 @@ TEST_F(BucketStateRegistryTest, TransitionsFromFrozenState) {
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, BucketState::kFrozen));
 
     // We cannot initialize bucket state for a bucket that is already frozen.
-    auto status = initializeBucketState(bucketStateRegistry, bucket.bucketId, /*bucket*/ nullptr);
+    auto status = initializeBucketState(bucketStateRegistry, bucket.bucketId);
     ASSERT_NOT_OK(status);
     ASSERT_EQ(status.code(), ErrorCodes::TimeseriesBucketFrozen);
 }
@@ -374,7 +386,7 @@ TEST_F(BucketStateRegistryTest, TransitionsFromPreparedState) {
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, BucketState::kPreparedAndCleared));
     // Reset the state.
     stopTrackingBucketState(bucketStateRegistry, bucket.bucketId);
-    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId, /*bucket*/ nullptr));
+    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId));
     (void)prepareBucketState(bucketStateRegistry, bucket.bucketId);
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, BucketState::kPrepared));
 
@@ -382,7 +394,7 @@ TEST_F(BucketStateRegistryTest, TransitionsFromPreparedState) {
     stopTrackingBucketState(bucketStateRegistry, bucket.bucketId);
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, boost::none));
     // Reset the state.
-    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId, /*bucket*/ nullptr));
+    ASSERT_OK(initializeBucketState(bucketStateRegistry, bucket.bucketId));
     (void)prepareBucketState(bucketStateRegistry, bucket.bucketId);
     ASSERT_TRUE(doesBucketStateMatch(bucket.bucketId, BucketState::kPrepared));
 
@@ -609,7 +621,8 @@ TEST_F(BucketStateRegistryTest, HasBeenClearedFunctionReturnsAsExpected) {
 
     // Sanity check that all this still works with multiple buckets in a namespace being cleared.
     auto& bucket3 = createBucket(info2, date);
-    bucket3.rolloverAction = RolloverAction::kArchive;  // Rollover before opening another bucket
+    bucket3.rolloverReason =
+        RolloverReason::kTimeBackward;  // Rollover before opening another bucket
     auto& bucket4 = createBucket(info2, date);
     ASSERT_EQ(bucket3.lastChecked, 1);
     ASSERT_EQ(bucket4.lastChecked, 1);
@@ -667,22 +680,19 @@ TEST_F(BucketStateRegistryTest, ClearRegistryGarbageCollection) {
     // Era 2 still has bucket4 in it, so its count remains non-zero.
     ASSERT_EQUALS(getClearedSetsCount(bucketStateRegistry), 1);
     auto& bucket5 = createBucket(info1, date);
-    bucket4.rolloverAction = RolloverAction::kArchive;  // Rollover before opening another bucket
+    bucket4.rolloverReason =
+        RolloverReason::kTimeBackward;  // Rollover before opening another bucket
     auto& bucket6 = createBucket(info2, date);
     ASSERT_EQ(bucket5.lastChecked, 3);
     ASSERT_EQ(bucket6.lastChecked, 3);
     clear(*this, uuid1);
     checkAndRemoveClearedBucket(bucket5);
-    if constexpr (!kDebugBuild) {
-        ASSERT_EQ(bucket4.lastChecked, 2);
-        // Eras 2 and 3 still have bucket4 and bucket6 in them respectively, so their counts remain
-        // non-zero.
-        ASSERT_EQUALS(getClearedSetsCount(bucketStateRegistry), 2);
-    } else {
-        ASSERT_EQ(bucket4.lastChecked, 3);  // Debug check advanced this while creating bucket6.
-        // Era3 still has bucket4 and bucket6, so its count remains non-zero.
-        ASSERT_EQUALS(getClearedSetsCount(bucketStateRegistry), 1);
-    }
+
+    ASSERT_EQ(bucket4.lastChecked, 2);
+    // Eras 2 and 3 still have bucket4 and bucket6 in them respectively, so their counts remain
+    // non-zero.
+    ASSERT_EQUALS(getClearedSetsCount(bucketStateRegistry), 2);
+
     clear(*this, uuid2);
     checkAndRemoveClearedBucket(bucket4);
     checkAndRemoveClearedBucket(bucket6);
@@ -745,13 +755,8 @@ TEST_F(BucketStateRegistryTest, ArchivingBucketStopsTrackingState) {
     auto& bucket = createBucket(info1, date);
     auto bucketId = bucket.bucketId;
 
-    ClosedBuckets closedBuckets;
-    internal::archiveBucket(*this,
-                            *stripes[info1.stripeNumber],
-                            WithLock::withoutLock(),
-                            bucket,
-                            stats(bucket),
-                            closedBuckets);
+    internal::archiveBucket(
+        *this, *stripes[info1.stripeNumber], WithLock::withoutLock(), bucket, stats(bucket));
     auto state = getBucketState(bucketStateRegistry, bucketId);
     ASSERT_EQ(state, boost::none);
 }

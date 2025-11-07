@@ -8,7 +8,7 @@ import {
     getCachedPlan,
     getPlanCacheKeyFromShape,
     getPlanCacheShapeHashFromObject,
-    getPlanStage
+    getPlanStage,
 } from "jstests/libs/query/analyze_plan.js";
 import {checkSbeFullFeatureFlagEnabled} from "jstests/libs/query/sbe_util.js";
 
@@ -19,6 +19,17 @@ let coll = assertDropAndRecreateCollection(db, "plan_cache_replanning");
 function getReplannedMetric() {
     const planCacheType = isSbePlanCacheEnabled ? "sbe" : "classic";
     return assert.commandWorked(db.serverStatus()).metrics.query.planCache[planCacheType].replanned;
+}
+
+function getReplannedPlanIsCachedPlanMetric() {
+    const planCacheType = isSbePlanCacheEnabled ? "sbe" : "classic";
+    return assert.commandWorked(db.serverStatus()).metrics.query.planCache[planCacheType].replanned_plan_is_cached_plan;
+}
+
+function getInactiveCachedPlansReplacedMetric() {
+    const planCacheType = isSbePlanCacheEnabled ? "sbe" : "classic";
+    return assert.commandWorked(db.serverStatus()).metrics.query.planCache[planCacheType]
+        .inactive_cached_plans_replaced;
 }
 
 function getCachedPlanForQuery(filter) {
@@ -69,13 +80,13 @@ for (let i = 1000; i < 1100; i++) {
 // each document which has 2 as the value of the 'b' field.
 const aIndexQuery = {
     a: 1099,
-    b: 2
+    b: 2,
 };
 // Opposite of 'aIndexQuery'. Should be quick if the {b: 1} index is used, and slower if the {a: 1}
 // index is used.
 const bIndexQuery = {
     a: 1,
-    b: 1099
+    b: 1099,
 };
 
 assert.commandWorked(coll.createIndex({a: 1}));
@@ -107,11 +118,14 @@ assertPlanHasIxScanStage(entry, "b_1", planCacheShapeHash);
 // current cache entry will be deactivated, and then the cache entry for the {a: 1} will overwrite
 // it (as active).
 let replannedMetric = getReplannedMetric();
+// Replans in this test should never produce the same plan as the currently cached plan.
+const replannedPlanIsCachedPlanMetric = getReplannedPlanIsCachedPlanMetric();
 assert.eq(1, coll.find(aIndexQuery).itcount());
 entry = getCachedPlanForQuery(aIndexQuery);
 assert.eq(entry.isActive, true);
 assertPlanHasIxScanStage(entry, "a_1", planCacheShapeHash);
 assert.eq(replannedMetric + 1, getReplannedMetric());
+assert.eq(replannedPlanIsCachedPlanMetric, getReplannedPlanIsCachedPlanMetric());
 
 // Run the query which should use the {b: 1} index.
 assert.eq(1, coll.find(bIndexQuery).itcount());
@@ -119,6 +133,7 @@ entry = getCachedPlanForQuery(bIndexQuery);
 assert.eq(entry.isActive, true);
 assertPlanHasIxScanStage(entry, "b_1", planCacheShapeHash);
 assert.eq(replannedMetric + 2, getReplannedMetric());
+assert.eq(replannedPlanIsCachedPlanMetric, getReplannedPlanIsCachedPlanMetric());
 
 // The {b: 1} plan is again in the cache. Run the query which should use the {a: 1} index.
 assert.eq(1, coll.find(aIndexQuery).itcount());
@@ -126,6 +141,7 @@ entry = getCachedPlanForQuery(aIndexQuery);
 assert.eq(entry.isActive, true);
 assertPlanHasIxScanStage(entry, "a_1", planCacheShapeHash);
 assert.eq(replannedMetric + 3, getReplannedMetric());
+assert.eq(replannedPlanIsCachedPlanMetric, getReplannedPlanIsCachedPlanMetric());
 
 // The {a: 1} plan is back in the cache. Run the query which would perform better on the plan using
 // the {b: 1} index, and ensure that plan gets written to the cache.
@@ -135,6 +151,7 @@ entryWorks = entry.works;
 assert.eq(entry.isActive, true);
 assertPlanHasIxScanStage(entry, "b_1", planCacheShapeHash);
 assert.eq(replannedMetric + 4, getReplannedMetric());
+assert.eq(replannedPlanIsCachedPlanMetric, getReplannedPlanIsCachedPlanMetric());
 
 // Now run a plan that will perform poorly with both indices (it will be required to scan 500
 // documents). This will result in replanning (and the cache entry being deactivated). However, the
@@ -152,6 +169,33 @@ assertPlanHasIxScanStage(entry, "a_1", planCacheShapeHash);
 
 // The works value should have doubled.
 assert.eq(entry.works, entryWorks * 2);
+
+// Test case for 'inactive_cached_plans_replaced' metric.
+{
+    // Clear the plan cache for the collection.
+    coll.getPlanCache().clear();
+
+    const baseReplacedMetric = getInactiveCachedPlansReplacedMetric();
+
+    // Run a query where the {b: 1} index will easily win.
+    assert.eq(1, coll.find(bIndexQuery).itcount());
+
+    // The plan cache should now hold an inactive entry.
+    let entry = getCachedPlanForQuery(bIndexQuery);
+    let planCacheShapeHash = getPlanCacheShapeHashFromObject(entry);
+    assert.eq(entry.isActive, false);
+    assertPlanHasIxScanStage(entry, "b_1", planCacheShapeHash);
+    assert.eq(baseReplacedMetric, getInactiveCachedPlansReplacedMetric());
+
+    // Now run a query where the {a: 1} index will win. This is faster than the previous plan so we
+    // expect it to replace the inactive entry. The new entry is expected to become active
+    // immediately.
+    assert.eq(1, coll.find(aIndexQuery).itcount());
+    entry = getCachedPlanForQuery(aIndexQuery);
+    assert.eq(entry.isActive, true);
+    assertPlanHasIxScanStage(entry, "a_1", planCacheShapeHash);
+    assert.eq(baseReplacedMetric + 1, getInactiveCachedPlansReplacedMetric());
+}
 
 // Drop and recreate the collection. Now we test that the query system does not replan in cases
 // where the plan is performing only slightly less efficiently than the cached plan.
@@ -179,7 +223,7 @@ coll = assertDropAndRecreateCollection(db, "plan_cache_replanning");
     const filterOnSelectiveKey = {notSelectiveKey: {$lt: 50}, selectiveKey: 3};
     const filterOnSelectiveKeySpecialValue = {
         notSelectiveKey: {$lt: 50},
-        selectiveKey: kSpecialSelectiveKey
+        selectiveKey: kSpecialSelectiveKey,
     };
 
     // Insert 110 documents for each value of selectiveKey from 1-10. We use the number 110 docs
@@ -187,8 +231,7 @@ coll = assertDropAndRecreateCollection(db, "plan_cache_replanning");
     // cached planning and multi-planning.
     for (let i = 0; i < 10; ++i) {
         for (let j = 0; j < 110; ++j) {
-            assert.commandWorked(
-                coll.insert({notSelectiveKey: 10, selectiveKey: i, tiebreak: kTieBreakHigh}));
+            assert.commandWorked(coll.insert({notSelectiveKey: 10, selectiveKey: i, tiebreak: kTieBreakHigh}));
         }
     }
 
@@ -196,8 +239,9 @@ coll = assertDropAndRecreateCollection(db, "plan_cache_replanning");
     // 'selectiveKey' is 'kSpecialSelectiveKey'. We use a low value of 'tiebreak' to ensure that
     // this special, non-matching document is inspected before the documents which do match the
     // filter.
-    assert.commandWorked(coll.insert(
-        {notSelectiveKey: 55, selectiveKey: kSpecialSelectiveKey, tiebreak: kTieBreakLow}));
+    assert.commandWorked(
+        coll.insert({notSelectiveKey: 55, selectiveKey: kSpecialSelectiveKey, tiebreak: kTieBreakLow}),
+    );
 
     // Now we run a query using the special value of 'selectiveKey' until the plan gets cached. We
     // run it twice to make the cache entry active.
@@ -236,9 +280,7 @@ coll = assertDropAndRecreateCollection(db, "plan_cache_replanning");
     // to the old cache entry's, since the query on the special value is slightly less efficient.
     assert.lt(entry.works, specialValueCacheEntryWorks, entry);
     if (!isSbePlanCacheEnabled) {
-        assert.lt(entry.creationExecStats[0].totalKeysExamined,
-                  specialValueCacheEntryKeysExamined,
-                  entry);
+        assert.lt(entry.creationExecStats[0].totalKeysExamined, specialValueCacheEntryKeysExamined, entry);
     }
 
     // Now run the query on the "special" value again and check that replanning does not happen
@@ -252,8 +294,10 @@ coll = assertDropAndRecreateCollection(db, "plan_cache_replanning");
 
     assert.eq(entry.works, entryAfterRunningSpecialQuery.works, entryAfterRunningSpecialQuery);
     if (!isSbePlanCacheEnabled) {
-        assert.eq(entryAfterRunningSpecialQuery.creationExecStats[0].totalKeysExamined,
-                  entry.creationExecStats[0].totalKeysExamined,
-                  entryAfterRunningSpecialQuery);
+        assert.eq(
+            entryAfterRunningSpecialQuery.creationExecStats[0].totalKeysExamined,
+            entry.creationExecStats[0].totalKeysExamined,
+            entryAfterRunningSpecialQuery,
+        );
     }
 }

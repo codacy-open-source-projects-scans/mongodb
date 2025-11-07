@@ -27,16 +27,13 @@
  *    it in the license file.
  */
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/accumulator_for_window_functions.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/window_function/window_function_covariance.h"
 #include "mongo/db/pipeline/window_function/window_function_expression.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
+
 
 namespace mongo {
 
@@ -57,16 +54,6 @@ void AccumulatorCovariance::processInternal(const Value& input, bool merging) {
 AccumulatorCovariance::AccumulatorCovariance(ExpressionContext* const expCtx, bool isSamp)
     : AccumulatorForWindowFunctions(expCtx), _covarianceWF(expCtx, isSamp) {
     _memUsageTracker.set(sizeof(*this));
-}
-
-boost::intrusive_ptr<AccumulatorState> AccumulatorCovarianceSamp::create(
-    ExpressionContext* const expCtx) {
-    return new AccumulatorCovarianceSamp(expCtx);
-}
-
-boost::intrusive_ptr<AccumulatorState> AccumulatorCovariancePop::create(
-    ExpressionContext* const expCtx) {
-    return new AccumulatorCovariancePop(expCtx);
 }
 
 void AccumulatorCovariance::reset() {

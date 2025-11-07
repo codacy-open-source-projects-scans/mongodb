@@ -29,17 +29,17 @@
 
 #include "mongo/db/update/pattern_cmp.h"
 
-#include <cstddef>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/mutable/const_element.h"
+#include "mongo/bson/dotted_path/dotted_path_support.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
+#include "mongo/db/exec/mutable_bson/const_element.h"
 #include "mongo/db/field_ref.h"
-#include "mongo/db/query/bson/dotted_path_support.h"
 #include "mongo/util/str.h"
+
+#include <cstddef>
 
 namespace mongo {
 namespace pattern_cmp {
@@ -83,7 +83,7 @@ PatternElementCmp::PatternElementCmp(const BSONObj& pattern, const CollatorInter
 
 bool PatternElementCmp::operator()(const mutablebson::Element& lhs,
                                    const mutablebson::Element& rhs) const {
-    namespace dps = ::mongo::dotted_path_support;
+    namespace dps = ::mongo::bson;
     if (useWholeValue) {
         const int comparedValue = lhs.compareWithElement(rhs, collator, false);
 
@@ -91,8 +91,10 @@ bool PatternElementCmp::operator()(const mutablebson::Element& lhs,
 
         return (reversed ? comparedValue > 0 : comparedValue < 0);
     } else {
-        BSONObj lhsObj = lhs.getType() == Object ? lhs.getValueObject() : lhs.getValue().wrap("");
-        BSONObj rhsObj = rhs.getType() == Object ? rhs.getValueObject() : rhs.getValue().wrap("");
+        BSONObj lhsObj =
+            lhs.getType() == BSONType::object ? lhs.getValueObject() : lhs.getValue().wrap("");
+        BSONObj rhsObj =
+            rhs.getType() == BSONType::object ? rhs.getValueObject() : rhs.getValue().wrap("");
 
         BSONObj lhsKey = dps::extractElementsBasedOnTemplate(lhsObj, sortPattern, true);
         BSONObj rhsKey = dps::extractElementsBasedOnTemplate(rhsObj, sortPattern, true);
@@ -112,7 +114,7 @@ PatternValueCmp::PatternValueCmp(const BSONObj& pattern,
       collator(collator) {}
 
 bool PatternValueCmp::operator()(const Value& lhs, const Value& rhs) const {
-    namespace dps = ::mongo::dotted_path_support;
+    namespace dps = ::mongo::bson;
     if (useWholeValue) {
         const bool descending = (sortPattern.firstElement().number() < 0);
         return (descending ? ValueComparator(collator).getLessThan()(rhs, lhs)

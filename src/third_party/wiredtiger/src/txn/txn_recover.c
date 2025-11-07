@@ -130,7 +130,7 @@ __txn_backup_post_recovery(WT_RECOVERY *r)
             clear = false;
     }
     if (clear) {
-        F_CLR(conn, WT_CONN_INCR_BACKUP);
+        F_CLR_ATOMIC_32(conn, WT_CONN_INCR_BACKUP);
         F_CLR(&conn->log_mgr, WT_LOG_INCR_BACKUP);
         conn->incr_granularity = 0;
     }
@@ -587,7 +587,8 @@ __recovery_set_oldest_timestamp(WT_RECOVERY *r)
      */
     WT_RET(__wt_meta_read_checkpoint_oldest(r->session, NULL, &oldest_timestamp, NULL));
     conn->txn_global.oldest_timestamp = oldest_timestamp;
-    __wt_atomic_storebool(&conn->txn_global.has_oldest_timestamp, oldest_timestamp != WT_TS_NONE);
+    __wt_atomic_store_bool_relaxed(
+      &conn->txn_global.has_oldest_timestamp, oldest_timestamp != WT_TS_NONE);
 
     __wt_verbose_multi(session, WT_VERB_RECOVERY_ALL, "Set global oldest timestamp: %s",
       __wt_timestamp_to_string(conn->txn_global.oldest_timestamp, ts_string));
@@ -845,7 +846,14 @@ __recovery_file_scan(WT_RECOVERY *r)
      * Set the connection level file id tracker, as such upon creation of a new file we'll begin
      * from the latest file id.
      */
-    S2C(r->session)->next_file_id = r->max_fileid;
+    /*
+     * It's not something specific to this line, but note the places we call the namespace macros.
+     * The boundary is that the on-disk trees have namespace IDs, but the maximum file ID variable
+     * is not namespace. This avoids us having to increment it by a number other than one, among
+     * other annoyances, but they're all solvable problems. We can revisit this decision after using
+     * the tracked namespace file IDs for a while.
+     */
+    S2C(r->session)->next_file_id = WT_BTREE_ID_UNNAMESPACED(r->max_fileid);
 
     __wt_verbose_level_multi(r->session, WT_VERB_RECOVERY_ALL, WT_VERBOSE_INFO,
       "largest file ID found in the metadata %u", r->max_fileid);
@@ -853,13 +861,13 @@ __recovery_file_scan(WT_RECOVERY *r)
 }
 
 /*
- * __hs_exists --
- *     Check whether the history store exists. This function looks for both the history store URI in
- *     the metadata file and for the history store data file itself. If we're running salvage, we'll
- *     attempt to salvage the history store here.
+ * __hs_exists_local --
+ *     Check whether the local history store exists. This function looks for both the history store
+ *     URI in the metadata file and for the history store data file itself. If we're running
+ *     salvage, we'll attempt to salvage the history store here.
  */
 static int
-__hs_exists(WT_SESSION_IMPL *session, WT_CURSOR *metac, const char *cfg[], bool *hs_exists)
+__hs_exists_local(WT_SESSION_IMPL *session, WT_CURSOR *metac, const char *cfg[], bool *hs_exists)
 {
     WT_CONNECTION_IMPL *conn;
     WT_DECL_RET;
@@ -922,7 +930,7 @@ err:
  *     Run recovery.
  */
 int
-__wt_txn_recover(WT_SESSION_IMPL *session, const char *cfg[])
+__wt_txn_recover(WT_SESSION_IMPL *session, const char *cfg[], bool disagg)
 {
     WT_CONNECTION_IMPL *conn;
     WT_CURSOR *metac;
@@ -935,7 +943,7 @@ __wt_txn_recover(WT_SESSION_IMPL *session, const char *cfg[])
     char *config;
     char conn_rts_cfg[16];
     char ts_string[2][WT_TS_INT_STRING_SIZE];
-    bool do_checkpoint, eviction_started, hs_exists, needs_rec, rts_executed, was_backup;
+    bool do_checkpoint, eviction_started, hs_exists_local, needs_rec, rts_executed, was_backup;
 
     conn = S2C(session);
     F_SET(conn, WT_CONN_RECOVERING);
@@ -943,7 +951,7 @@ __wt_txn_recover(WT_SESSION_IMPL *session, const char *cfg[])
     WT_CLEAR(r);
     WT_INIT_LSN(&r.ckpt_lsn);
     config = NULL;
-    do_checkpoint = hs_exists = true;
+    do_checkpoint = hs_exists_local = true;
     rts_executed = false;
     eviction_started = false;
     was_backup = F_ISSET(conn, WT_CONN_WAS_BACKUP);
@@ -992,7 +1000,7 @@ __wt_txn_recover(WT_SESSION_IMPL *session, const char *cfg[])
             WT_ERR(__wt_log_reset(session, __wt_lsn_file(&r.max_ckpt_lsn)));
         else
             do_checkpoint = false;
-        WT_ERR(__hs_exists(session, metac, cfg, &hs_exists));
+        WT_ERR(__hs_exists_local(session, metac, cfg, &hs_exists_local));
         goto done;
     }
 
@@ -1016,6 +1024,13 @@ __wt_txn_recover(WT_SESSION_IMPL *session, const char *cfg[])
         r.metadata_only = true;
         r.backup_only = false;
     }
+
+    /*
+     * Start metadata recovery. Don't allow any Btree files to be opened, they depend on metadata
+     * that might be modified during recovery.
+     */
+    F_SET(conn, WT_CONN_RECOVERING_METADATA);
+
     /*
      * If this is a read-only connection, check if the checkpoint LSN in the metadata file is up to
      * date, indicating a clean shutdown.
@@ -1036,6 +1051,9 @@ __wt_txn_recover(WT_SESSION_IMPL *session, const char *cfg[])
         ret = __wt_log_scan(
           session, &metafile->ckpt_lsn, NULL, WT_LOGSCAN_RECOVER_METADATA, __txn_log_recover, &r);
     }
+    /* We're finished with metadata recovery, so allow other data files to be opened. */
+    F_CLR(conn, WT_CONN_RECOVERING_METADATA);
+
     if (F_ISSET(conn, WT_CONN_SALVAGE))
         ret = 0;
     /* We need to do some work after recovering backup information. Do that now. */
@@ -1045,7 +1063,7 @@ __wt_txn_recover(WT_SESSION_IMPL *session, const char *cfg[])
      * some sort.
      */
     if (ret == ENOENT) {
-        F_SET(conn, WT_CONN_DATA_CORRUPTION);
+        F_SET_ATOMIC_32(conn, WT_CONN_DATA_CORRUPTION);
         ret = WT_ERROR;
     }
 
@@ -1056,14 +1074,14 @@ __wt_txn_recover(WT_SESSION_IMPL *session, const char *cfg[])
     WT_ERR(__recovery_file_scan(&r));
 
     /*
-     * Check whether the history store exists.
+     * Check whether the local history store exists.
      *
      * This will open a dhandle on the history store and initialize its write gen so we must ensure
      * that the connection-wide base write generation is stable at this point. Performing a recovery
      * file scan will involve updating the connection-wide base write generation so we MUST do this
      * before checking for the existence of a history store file.
      */
-    WT_ERR(__hs_exists(session, metac, cfg, &hs_exists));
+    WT_ERR(__hs_exists_local(session, metac, cfg, &hs_exists_local));
 
     /*
      * Clear this out. We no longer need it and it could have been re-allocated when scanning the
@@ -1104,10 +1122,11 @@ __wt_txn_recover(WT_SESSION_IMPL *session, const char *cfg[])
         goto done;
     }
 
-    if (!hs_exists) {
-        __wt_verbose_level_multi(session, WT_VERB_RECOVERY_ALL, WT_VERBOSE_INFO, "%s",
-          "Creating the history store before applying log records. Likely recovering after an"
-          "unclean shutdown on an earlier version");
+    if (!hs_exists_local || disagg) {
+        if (!disagg)
+            __wt_verbose_level_multi(session, WT_VERB_RECOVERY_ALL, WT_VERBOSE_INFO, "%s",
+              "Creating the history store before applying log records. Likely recovering after an"
+              "unclean shutdown on an earlier version");
         /*
          * Create the history store as we might need it while applying log records in recovery.
          */
@@ -1161,7 +1180,7 @@ done:
     /*
      * Set the history store file size as it may already exist after a restart.
      */
-    if (hs_exists) {
+    if (hs_exists_local) {
         WT_ERR(__wt_block_manager_named_size(session, WT_HS_FILE, &hs_size));
         WT_STAT_CONN_SET(session, cache_hs_ondisk, hs_size);
     }
@@ -1171,8 +1190,12 @@ done:
      * 1. The connection is not read-only. A read-only connection expects that there shouldn't be
      *    any changes that need to be done on the database other than reading.
      * 2. The history store file was found in the metadata.
+     * 3. We are not using disaggregated storage or precise checkpoint(In precise checkpoints,
+     * everything is stable except prepared txn. Disagg also uses precise checkpoint, so neither
+     * requires rollback to stable).
      */
-    if (hs_exists && !F_ISSET(conn, WT_CONN_READONLY)) {
+    if (hs_exists_local && !F_ISSET(conn, WT_CONN_READONLY | WT_CONN_PRECISE_CHECKPOINT) &&
+      !disagg) {
         const char *rts_cfg[] = {
           WT_CONFIG_BASE(session, WT_CONNECTION_rollback_to_stable), NULL, NULL};
         __wt_timer_start(session, &rts_timer);
@@ -1205,6 +1228,14 @@ done:
           "recovery rollback to stable has successfully finished and ran for %" PRIu64
           " milliseconds",
           conn->recovery_timeline.rts_ms);
+    } else {
+        /* Although rollback to stable is not needed, we still need to set the durable timestamp. */
+        WT_TXN_GLOBAL *txn_global = &conn->txn_global;
+        txn_global->has_durable_timestamp = txn_global->has_stable_timestamp;
+        txn_global->durable_timestamp = txn_global->stable_timestamp;
+
+        if (disagg)
+            __wt_verbose_info(session, WT_VERB_RTS, "%s", "skipped recovery RTS due to disagg");
     }
 
     /*
@@ -1252,7 +1283,7 @@ done:
 
     /* Time since the recovery has started. */
     __wt_timer_evaluate_ms(session, &timer, &conn->recovery_timeline.recovery_ms);
-    __wt_verbose_level_multi(session, WT_VERB_RECOVERY_ALL, WT_VERBOSE_INFO,
+    __wt_verbose_level_multi_id(session, 1493201, WT_VERB_RECOVERY_ALL, WT_VERBOSE_INFO,
       "recovery was completed successfully and took %" PRIu64 "ms, including %" PRIu64
       "ms for the log replay, %" PRIu64 "ms for the rollback to stable, and %" PRIu64
       "ms for the checkpoint.",

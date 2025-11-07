@@ -29,18 +29,19 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/mutable/element.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/resource_pattern.h"
+#include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/tenant_id.h"
+
+#include <string>
+#include <vector>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -130,5 +131,10 @@ private:
     ResourcePattern _resource;
     ActionSet _actions;  // bitmask of actions this privilege grants
 };
+
+inline bool operator==(const Privilege& lhs, const Privilege& rhs) {
+    return lhs.getResourcePattern() == rhs.getResourcePattern() &&
+        lhs.getActions() == rhs.getActions();
+}
 
 }  // namespace mongo

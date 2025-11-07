@@ -28,20 +28,7 @@
  */
 
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <chrono>
-#include <compare>
-#include <cstdint>
-#include <limits>
-#include <memory>
-#include <mutex>
-#include <ratio>
-#include <string>
-#include <utility>
-#include <vector>
+#include "mongo/db/commands/dbcheck_command.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -54,25 +41,24 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog_helper.h"
-#include "mongo/db/catalog/health_log_gen.h"
-#include "mongo/db/catalog/health_log_interface.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/dbcheck_command.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_constants.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog_helper.h"
+#include "mongo/db/local_catalog/health_log_gen.h"
+#include "mongo/db/local_catalog/health_log_interface.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/read_write_concern_defaults.h"
@@ -87,11 +73,9 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/command_generic_argument.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
@@ -100,6 +84,22 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/progress_meter.h"
 #include "mongo/util/time_support.h"
+
+#include <algorithm>
+#include <chrono>
+#include <compare>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <ratio>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 MONGO_FAIL_POINT_DEFINE(hangBeforeExtraIndexKeysCheck);
@@ -151,8 +151,8 @@ StatusWith<repl::OpTime> _logOp(OperationContext* opCtx,
         AutoGetOplogFastPath oplogWrite(opCtx, OplogAccessMode::kWrite);
         return writeConflictRetry(
             opCtx, "dbCheck oplog entry", NamespaceString::kRsOplogNamespace, [&] {
-                auto const clockSource = opCtx->getServiceContext()->getFastClockSource();
-                oplogEntry.setWallClockTime(clockSource->now());
+                auto& clockSource = opCtx->fastClockSource();
+                oplogEntry.setWallClockTime(clockSource.now());
 
                 WriteUnitOfWork uow(opCtx);
                 repl::OpTime result = repl::logOp(opCtx, &oplogEntry);
@@ -344,17 +344,19 @@ std::unique_ptr<DbCheckRun> singleCollectionRun(OperationContext* opCtx,
 
     boost::optional<UUID> uuid;
     try {
-        AutoGetCollectionForRead agc(opCtx, nss);
+        const auto coll = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kRead),
+            MODE_IS);
+
         uassert(ErrorCodes::NamespaceNotFound,
                 "Collection " + invocation.getColl() + " not found",
-                agc.getCollection());
-        uuid = agc->uuid();
-    } catch (const DBException& ex) {
-        // 'AutoGetCollectionForRead' fails with 'CommandNotSupportedOnView' if the namespace is
+                coll.exists());
+        uuid = coll.uuid();
+    } catch (ExceptionFor<ErrorCodes::CommandNotSupportedOnView>& ex) {
+        // Collection acquisition fails with 'CommandNotSupportedOnView' if the namespace is
         // referring to a view.
-        uassert(ErrorCodes::CommandNotSupportedOnView,
-                invocation.getColl() + " is a view hence 'dbcheck' is not supported.",
-                ex.code() != ErrorCodes::CommandNotSupportedOnView);
+        ex.addContext(invocation.getColl() + " is a view hence 'dbcheck' is not supported.");
         throw;
     }
 
@@ -429,7 +431,7 @@ std::unique_ptr<DbCheckRun> singleCollectionRun(OperationContext* opCtx,
                               maxBatchTimeMillis,
                               _getBatchWriteConcern(opCtx, invocation.getBatchWriteConcern()),
                               secondaryIndexCheckParameters,
-                              {opCtx, [&]() {
+                              {opCtx->fastClockSource().now().toMillisSinceEpoch(), [&]() {
                                    return gMaxDbCheckMBperSec.load();
                                }}};
     auto result = std::make_unique<DbCheckRun>();
@@ -468,7 +470,7 @@ std::unique_ptr<DbCheckRun> fullDatabaseRun(OperationContext* opCtx,
                                    maxBatchTimeMillis,
                                    _getBatchWriteConcern(opCtx, invocation.getBatchWriteConcern()),
                                    boost::none,
-                                   {opCtx, [&]() {
+                                   {opCtx->fastClockSource().now().toMillisSinceEpoch(), [&]() {
                                         return gMaxDbCheckMBperSec.load();
                                     }}};
         result->push_back(info);
@@ -499,25 +501,25 @@ std::unique_ptr<DbCheckRun> getRun(OperationContext* opCtx,
     BSONObj toParse = builder.obj();
 
     // If the dbCheck argument is a string, this is the per-collection form.
-    if (toParse["dbCheck"].type() == BSONType::String) {
+    if (toParse["dbCheck"].type() == BSONType::string) {
         return singleCollectionRun(
             opCtx,
             dbName,
-            DbCheckSingleInvocation::parse(IDLParserContext("",
+            DbCheckSingleInvocation::parse(toParse,
+                                           IDLParserContext("",
                                                             auth::ValidatedTenancyScope::get(opCtx),
                                                             dbName.tenantId(),
-                                                            SerializationContext::stateDefault()),
-                                           toParse));
+                                                            SerializationContext::stateDefault())));
     } else {
         // Otherwise, it's the database-wide form.
         return fullDatabaseRun(
             opCtx,
             dbName,
-            DbCheckAllInvocation::parse(IDLParserContext("",
+            DbCheckAllInvocation::parse(toParse,
+                                        IDLParserContext("",
                                                          auth::ValidatedTenancyScope::get(opCtx),
                                                          dbName.tenantId(),
-                                                         SerializationContext::stateDefault()),
-                                        toParse));
+                                                         SerializationContext::stateDefault())));
     }
 }
 
@@ -678,14 +680,6 @@ void DbChecker::doCollection(OperationContext* opCtx) noexcept {
         }
         HealthLogInterface::get(opCtx)->log(*logEntry);
     }
-}
-
-
-StringData DbChecker::_stripRecordIdFromKeyString(const key_string::Value& keyString,
-                                                  const key_string::Version& version,
-                                                  const Collection* collection) {
-    const size_t keyStringSize = keyString.getSizeWithoutRecordId();
-    return {keyString.getBuffer(), keyStringSize};
 }
 
 void DbChecker::_extraIndexKeysCheck(OperationContext* opCtx) {
@@ -987,7 +981,7 @@ Status DbChecker::_runHashExtraKeyCheck(OperationContext* opCtx,
             return acquisitionSW.getStatus();
         }
 
-        const CollectionPtr& collection = acquisitionSW.getValue()->coll.getCollectionPtr();
+        const CollectionPtr& collection = acquisitionSW.getValue()->collection().getCollectionPtr();
 
         auto readTimestamp =
             shard_role_details::getRecoveryUnit(opCtx)->getPointInTimeReadTimestamp();
@@ -1195,7 +1189,7 @@ Status DbChecker::_getCatalogSnapshotAndRunReverseLookup(
         return acquisitionSW.getStatus();
     }
 
-    const auto collAcquisition = acquisitionSW.getValue()->coll;
+    const auto collAcquisition = acquisitionSW.getValue()->collection();
 
     const CollectionPtr& collection = collAcquisition.getCollectionPtr();
 
@@ -1267,7 +1261,7 @@ Status DbChecker::_getCatalogSnapshotAndRunReverseLookup(
 
     // If we're in the middle of an index check, snapshotFirstKeyWithRecordId should be set.
     // Strip the recordId and seek.
-    if (snapshotFirstKeyWithRecordId.is_initialized()) {
+    if (snapshotFirstKeyWithRecordId) {
         // If this is the beginning of a batch, update the batch first key.
         if (batchStats.batchStartWithRecordId.isEmpty() &&
             batchStats.batchStartBsonWithoutRecordId.isEmpty()) {
@@ -1276,8 +1270,8 @@ Status DbChecker::_getCatalogSnapshotAndRunReverseLookup(
         // Create keystring to seek without recordId. This is because if the index
         // is an older format unique index, the keystring will not have the recordId appended, so we
         // need to seek for the keystring without the recordId.
-        auto snapshotFirstKeyWithoutRecordId = _stripRecordIdFromKeyString(
-            snapshotFirstKeyWithRecordId.get(), version, collection.get());
+        auto snapshotFirstKeyWithoutRecordId =
+            snapshotFirstKeyWithRecordId->getViewWithoutRecordId();
         snapshotFirstKeyStringBsonRehydrated = key_string::rehydrateKey(
             index->keyPattern(),
             _keyStringToBsonSafeHelper(snapshotFirstKeyWithRecordId.get(), ordering));
@@ -1360,6 +1354,7 @@ Status DbChecker::_getCatalogSnapshotAndRunReverseLookup(
                            collection,
                            currIndexKeyWithRecordId.get(),
                            currKeyStringBson,
+                           index,
                            iam,
                            indexCatalogEntry,
                            index->infoObj());
@@ -1386,7 +1381,7 @@ Status DbChecker::_getCatalogSnapshotAndRunReverseLookup(
         // next snapshot's starting key.
         finishSnapshot = _shouldEndCatalogSnapshotOrBatch(opCtx,
                                                           collection,
-                                                          indexName,
+                                                          index->keyPattern(),
                                                           currKeyStringWithRecordId,
                                                           currKeyStringBson,
                                                           numKeysInSnapshot,
@@ -1420,7 +1415,7 @@ Status DbChecker::_getCatalogSnapshotAndRunReverseLookup(
 bool DbChecker::_shouldEndCatalogSnapshotOrBatch(
     OperationContext* opCtx,
     const CollectionPtr& collection,
-    StringData indexName,
+    const BSONObj& indexKeyPattern,
     const key_string::Value& currKeyStringWithRecordId,
     const BSONObj& currKeyStringBson,
     const int64_t numKeysInSnapshot,
@@ -1450,8 +1445,6 @@ bool DbChecker::_shouldEndCatalogSnapshotOrBatch(
         return true;
     }
 
-    const IndexDescriptor* indexDescriptor =
-        collection.get()->getIndexCatalog()->findIndexByName(opCtx, indexName);
     const auto ordering = iam->getSortedDataInterface()->getOrdering();
     const key_string::Version version = iam->getSortedDataInterface()->getKeyStringVersion();
 
@@ -1464,21 +1457,12 @@ bool DbChecker::_shouldEndCatalogSnapshotOrBatch(
         "comparing current keystring to next keystring",
         "curr"_attr = currKeyStringBson,
         "next"_attr = key_string::rehydrateKey(
-            indexDescriptor->keyPattern(),
+            indexKeyPattern,
             _keyStringToBsonSafeHelper(nextIndexKeyWithRecordId.get().keyString, ordering)));
 
-    const bool isDistinctNextKeyString = [&] {
-        switch (collection->getRecordStore()->keyFormat()) {
-            case KeyFormat::Long:
-                return currKeyStringWithRecordId.compareWithoutRecordIdLong(
-                           batchStats.nextKeyToBeCheckedWithRecordId) != 0;
-
-            case KeyFormat::String:
-                return currKeyStringWithRecordId.compareWithoutRecordIdStr(
-                           batchStats.nextKeyToBeCheckedWithRecordId) != 0;
-        }
-        MONGO_UNREACHABLE;
-    }();
+    const bool isDistinctNextKeyString = currKeyStringWithRecordId.compareWithoutRecordId(
+                                             batchStats.nextKeyToBeCheckedWithRecordId,
+                                             collection->getRecordStore()->keyFormat()) != 0;
 
     const bool shouldEndSnapshot =
         numKeysInSnapshot >= repl::dbCheckMaxTotalIndexKeysPerSnapshot.load();
@@ -1560,14 +1544,12 @@ void DbChecker::_reverseLookup(OperationContext* opCtx,
                                const CollectionPtr& collection,
                                const KeyStringEntry& keyStringEntryWithRecordId,
                                const BSONObj& keyStringBson,
+                               const IndexDescriptor* indexDescriptor,
                                const SortedDataIndexAccessMethod* iam,
                                const IndexCatalogEntry* indexCatalogEntry,
                                const BSONObj& indexSpec) {
     auto seekRecordStoreCursor = std::make_unique<SeekableRecordThrottleCursor>(
         opCtx, collection->getRecordStore(), &_info.dataThrottle);
-
-    const IndexDescriptor* indexDescriptor =
-        collection.get()->getIndexCatalog()->findIndexByName(opCtx, indexName);
 
     // WiredTiger always returns a KeyStringEntry with recordID as part of the contract of the
     // indexCursor.
@@ -1791,7 +1773,7 @@ void DbChecker::_dataConsistencyCheck(OperationContext* opCtx) {
         }
 
         // Set up progress tracker.
-        const CollectionAcquisition collAcquisition = acquisitionSW.getValue()->coll;
+        const CollectionAcquisition collAcquisition = acquisitionSW.getValue()->collection();
         stdx::unique_lock<Client> lk(*opCtx->getClient());
         progress.set(
             lk,
@@ -1924,7 +1906,8 @@ StatusWith<DbCheckCollectionBatchStats> DbChecker::_runBatch(OperationContext* o
         }
 
         // The CollectionPtr needs to outlive the DbCheckHasher as it's used internally.
-        const CollectionPtr& collectionPtr = acquisitionSW.getValue()->coll.getCollectionPtr();
+        const CollectionPtr& collectionPtr =
+            acquisitionSW.getValue()->collection().getCollectionPtr();
         if (collectionPtr.get()->uuid() != _info.uuid) {
             const auto msg = "Collection under dbCheck no longer exists";
             return {ErrorCodes::NamespaceNotFound, msg};
@@ -2048,13 +2031,13 @@ StatusWith<std::unique_ptr<DbCheckAcquisition>> DbChecker::_acquireDBCheckLocks(
                                                  // updates to guarantee snapshot isolation.
                                                  PrepareConflictBehavior::kEnforce);
     } catch (const DBException& ex) {
-        // 'AutoGetCollectionForRead' fails with 'CommandNotSupportedOnView' if the namespace is
-        // referring to a view.
+        // 'DbCheckAcquisition' fails with 'CommandNotSupportedOnView' if the namespace is referring
+        // to a view.
         return ex.toStatus();
     }
 
-    if (!acquisition->coll.exists() ||
-        acquisition->coll.getCollectionPtr().get()->uuid() != _info.uuid) {
+    if (!acquisition->collection().exists() ||
+        acquisition->collection().getCollectionPtr().get()->uuid() != _info.uuid) {
         Status status = Status(
             ErrorCodes::NamespaceNotFound,
             str::stream()

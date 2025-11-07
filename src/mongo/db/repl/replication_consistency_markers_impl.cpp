@@ -27,45 +27,44 @@
  *    it in the license file.
  */
 
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <mutex>
-#include <string>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/repl/replication_consistency_markers_impl.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/admission/execution_admission_context.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/index/index_access_method.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/repl/replication_consistency_markers_impl.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_engine.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#include <mutex>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -76,8 +75,7 @@ namespace repl {
 
 namespace {
 const BSONObj kInitialSyncFlag(BSON(MinValidDocument::kInitialSyncFlagFieldName << true));
-const BSONObj kOplogTruncateAfterPointId(BSON("_id"
-                                              << "oplogTruncateAfterPoint"));
+const BSONObj kOplogTruncateAfterPointId(BSON("_id" << "oplogTruncateAfterPoint"));
 }  // namespace
 
 ReplicationConsistencyMarkersImpl::ReplicationConsistencyMarkersImpl(
@@ -109,14 +107,17 @@ boost::optional<MinValidDocument> ReplicationConsistencyMarkersImpl::_getMinVali
         fassertFailedWithStatus(40466, result.getStatus());
     }
 
-    auto minValid =
-        MinValidDocument::parse(IDLParserContext("MinValidDocument"), result.getValue());
+    auto minValid = MinValidDocument::parse(result.getValue());
     return minValid;
 }
 
 void ReplicationConsistencyMarkersImpl::_updateMinValidDocument(OperationContext* opCtx,
                                                                 const BSONObj& updateSpec) {
-    // Writes on minValid document should always be untimestamped.
+    // TODO SERVER-104434: Writes on minValid document should always be untimestamped even if the
+    // collection is timestamped. We allow an untimestamped write in this instance so that WT
+    // doesn't complain about timestamp violations if it encounters a timestamped entry during very
+    // rapid upgrades.
+    shard_role_details::getRecoveryUnit(opCtx)->allowOneUntimestampedWrite();
     Status status = _storageInterface->putSingleton(opCtx, _minValidNss, {updateSpec, Timestamp()});
     invariant(status);
 }
@@ -134,7 +135,7 @@ void ReplicationConsistencyMarkersImpl::initializeMinValidDocument(OperationCont
     BSONObj upsert = BSON("$max" << BSON(MinValidDocument::kMinValidTimestampFieldName
                                          << Timestamp() << MinValidDocument::kMinValidTermFieldName
                                          << OpTime::kUninitializedTerm));
-    fassert(40467, _storageInterface->putSingleton(opCtx, _minValidNss, {upsert, Timestamp()}));
+    _updateMinValidDocument(opCtx, upsert);
 }
 
 bool ReplicationConsistencyMarkersImpl::getInitialSyncFlag(OperationContext* opCtx) const {
@@ -289,8 +290,11 @@ Status ReplicationConsistencyMarkersImpl::_upsertOplogTruncateAfterPointDocument
                 const IndexCatalogEntry* entry = collection->getIndexCatalog()->getEntry(idIndex);
                 auto indexAccess = entry->accessMethod()->asSortedData();
 
-                auto recordId =
-                    indexAccess->findSingle(opCtx, collection, entry, kOplogTruncateAfterPointId);
+                auto recordId = indexAccess->findSingle(opCtx,
+                                                        *shard_role_details::getRecoveryUnit(opCtx),
+                                                        collection,
+                                                        entry,
+                                                        kOplogTruncateAfterPointId);
 
                 if (recordId.isNull()) {
                     // insert case.
@@ -314,7 +318,11 @@ Status ReplicationConsistencyMarkersImpl::_upsertOplogTruncateAfterPointDocument
             // Update the record with the storage engine API to avoid op observers for this
             // non-replicated collection
             uassertStatusOK(collection->getRecordStore()->updateRecord(
-                opCtx, _oplogTruncateRecordId.get(), doc.objdata(), doc.objsize()));
+                opCtx,
+                *shard_role_details::getRecoveryUnit(opCtx),
+                _oplogTruncateRecordId.get(),
+                doc.objdata(),
+                doc.objsize()));
 
             wuow.commit();
 
@@ -333,9 +341,9 @@ Status ReplicationConsistencyMarkersImpl::_setOplogTruncateAfterPoint(
     return _upsertOplogTruncateAfterPointDocument(
         collection,
         opCtx,
-        BSON("_id"
-             << "oplogTruncateAfterPoint"
-             << OplogTruncateAfterPointDocument::kOplogTruncateAfterPointFieldName << timestamp));
+        BSON("_id" << "oplogTruncateAfterPoint"
+                   << OplogTruncateAfterPointDocument::kOplogTruncateAfterPointFieldName
+                   << timestamp));
 }
 
 void ReplicationConsistencyMarkersImpl::setOplogTruncateAfterPoint(OperationContext* opCtx,
@@ -343,7 +351,7 @@ void ReplicationConsistencyMarkersImpl::setOplogTruncateAfterPoint(OperationCont
 
     AutoGetCollection autoTruncateColl(opCtx, _oplogTruncateAfterPointNss, MODE_IX);
 
-    fassert(40512, _setOplogTruncateAfterPoint(autoTruncateColl.getCollection(), opCtx, timestamp));
+    fassert(40512, _setOplogTruncateAfterPoint(*autoTruncateColl, opCtx, timestamp));
 
     if (timestamp != Timestamp::min()) {
         // Update the oplog pin so we don't delete oplog history past the oplogTruncateAfterPoint.
@@ -358,6 +366,7 @@ void ReplicationConsistencyMarkersImpl::setOplogTruncateAfterPoint(OperationCont
     // cached last no-holes oplog entry. This is important so that
     // refreshOplogTruncateAfterPointIfPrimary always returns the latest oplog entry without
     // skipping it.
+    stdx::lock_guard<stdx::mutex> lk(_refreshOplogTruncateAfterPointMutex);
     _lastNoHolesOplogTimestamp = boost::none;
     _lastNoHolesOplogOpTimeAndWallTime = boost::none;
 }
@@ -378,8 +387,7 @@ ReplicationConsistencyMarkersImpl::_getOplogTruncateAfterPointDocument(
         }
     }
 
-    auto oplogTruncateAfterPoint = OplogTruncateAfterPointDocument::parse(
-        IDLParserContext("OplogTruncateAfterPointDocument"), doc.getValue());
+    auto oplogTruncateAfterPoint = OplogTruncateAfterPointDocument::parse(doc.getValue());
     return oplogTruncateAfterPoint;
 }
 
@@ -474,8 +482,7 @@ ReplicationConsistencyMarkersImpl::refreshOplogTruncateAfterPointIfPrimary(
     } else if (truncateTimestamp != Timestamp(StorageEngine::kMinimumTimestamp)) {
         // Throw write interruption errors up to the caller so that durability attempts can be
         // retried.
-        uassertStatusOK(_setOplogTruncateAfterPoint(
-            autoTruncateColl.getCollection(), opCtx, truncateTimestamp));
+        uassertStatusOK(_setOplogTruncateAfterPoint(*autoTruncateColl, opCtx, truncateTimestamp));
     } else {
         // The all_durable timestamp has not yet been set: there have been no oplog writes since
         // this server instance started up. In this case, we will return the current

@@ -703,111 +703,6 @@ class TestParser(testcase.IDLTestcase):
             idl.errors.ERROR_ID_IS_NODE_VALID_NON_NEGATIVE_INT,
         )
 
-    def test_name_collisions_negative(self):
-        # type: () -> None
-        """Negative tests for type collisions."""
-        # Struct after type
-        self.assert_parse_fail(
-            textwrap.dedent("""
-        types:
-            foo1:
-                description: foo
-                cpp_type: foo
-                bson_serialization_type: string
-                serializer: foo
-                deserializer: foo
-                default: foo
-                is_view: false
-
-        structs:
-            foo1:
-                description: foo
-                strict: true
-                fields:
-                    foo: string
-            """),
-            idl.errors.ERROR_ID_DUPLICATE_SYMBOL,
-        )
-
-        # Type after struct
-        self.assert_parse_fail(
-            textwrap.dedent("""
-        structs:
-            foo1:
-                description: foo
-                strict: true
-                fields:
-                    foo: string
-
-        types:
-            foo1:
-                description: foo
-                cpp_type: foo
-                bson_serialization_type: string
-                serializer: foo
-                deserializer: foo
-                default: foo
-                is_view: false
-            """),
-            idl.errors.ERROR_ID_DUPLICATE_SYMBOL,
-        )
-
-    def test_chained_type_positive(self):
-        # type: () -> None
-        """Positive parser chaining test cases."""
-        self.assert_parse(
-            textwrap.dedent("""
-        structs:
-            foo1:
-                description: foo
-                chained_types:
-                    foo1: alias
-                    foo2: alias
-        """)
-        )
-
-    def test_chained_type_negative(self):
-        # type: () -> None
-        """Negative parser chaining test cases."""
-        self.assert_parse_fail(
-            textwrap.dedent("""
-        structs:
-            foo1:
-                description: foo
-                chained_types: foo1
-                fields:
-                    foo: bar
-        """),
-            idl.errors.ERROR_ID_IS_NODE_TYPE,
-        )
-
-        self.assert_parse_fail(
-            textwrap.dedent("""
-        structs:
-            foo1:
-                description: foo
-                chained_types:
-                    - foo1
-                fields:
-                    foo: bar
-        """),
-            idl.errors.ERROR_ID_IS_NODE_TYPE,
-        )
-
-        # Duplicate chained types
-        self.assert_parse_fail(
-            textwrap.dedent("""
-        structs:
-            bar1:
-                description: foo
-                strict: false
-                chained_types:
-                    foo1: alias
-                    foo1: alias
-        """),
-            idl.errors.ERROR_ID_DUPLICATE_NODE,
-        )
-
     def test_chained_struct_positive(self):
         # type: () -> None
         """Positive parser chaining test cases."""
@@ -913,26 +808,6 @@ class TestParser(testcase.IDLTestcase):
     def test_enum_negative(self):
         # type: () -> None
         """Negative enum test cases."""
-
-        # Test duplicate enums
-        self.assert_parse_fail(
-            textwrap.dedent("""
-        enums:
-            foo:
-                description: test
-                type: int
-                values:
-                    v1: 0
-
-            foo:
-                description: test
-                type: int
-                values:
-                    v1: 0
-                """),
-            idl.errors.ERROR_ID_DUPLICATE_SYMBOL,
-        )
-
         # Test scalar fails
         self.assert_parse_fail(
             textwrap.dedent("""
@@ -1022,59 +897,6 @@ class TestParser(testcase.IDLTestcase):
                 type: int
             """),
             idl.errors.ERROR_ID_BAD_EMPTY_ENUM,
-        )
-
-        # Name collision with types
-        self.assert_parse_fail(
-            textwrap.dedent("""
-        types:
-            foo:
-                description: foo
-                cpp_type: foo
-                bson_serialization_type: string
-                serializer: foo
-                deserializer: foo
-                default: foo
-                is_view: false
-
-        enums:
-            foo:
-                description: foo
-                type: foo
-                values:
-                    v1: 0
-            """),
-            idl.errors.ERROR_ID_DUPLICATE_SYMBOL,
-        )
-
-        # Name collision with structs
-        self.assert_parse_fail(
-            textwrap.dedent("""
-        types:
-            string:
-                description: foo
-                cpp_type: foo
-                bson_serialization_type: string
-                serializer: foo
-                deserializer: foo
-                default: foo
-                is_view: false
-
-        structs:
-            foo:
-                description: foo
-                strict: true
-                fields:
-                    foo: string
-
-        enums:
-            foo:
-                description: foo
-                type: foo
-                values:
-                    v1: 0
-            """),
-            idl.errors.ERROR_ID_DUPLICATE_SYMBOL,
         )
 
         # Test int - duplicate names
@@ -1495,75 +1317,6 @@ class TestParser(testcase.IDLTestcase):
             """),
             idl.errors.ERROR_ID_BAD_COMMAND_NAMESPACE,
         )
-
-        # Setup some common types
-        test_preamble = textwrap.dedent("""
-        types:
-            string:
-                description: foo
-                cpp_type: foo
-                bson_serialization_type: string
-                serializer: foo
-                deserializer: foo
-                default: foo
-                is_view: false
-        """)
-
-        # Commands and structs with same name
-        self.assert_parse_fail(
-            test_preamble
-            + textwrap.dedent("""
-            commands:
-                foo:
-                    description: foo
-                    command_name: foo
-                    namespace: ignored
-                    api_version: ""
-                    fields:
-                        foo: string
-
-            structs:
-                foo:
-                    description: foo
-                    fields:
-                        foo: foo
-            """),
-            idl.errors.ERROR_ID_DUPLICATE_SYMBOL,
-        )
-
-        # Commands and types with same name
-        self.assert_parse_fail(
-            test_preamble
-            + textwrap.dedent("""
-            commands:
-                string:
-                    description: foo
-                    command_name: foo
-                    namespace: ignored
-                    api_version: ""
-                    strict: true
-                    fields:
-                        foo: string
-            """),
-            idl.errors.ERROR_ID_DUPLICATE_SYMBOL,
-        )
-
-        self.assert_parse_fail(
-            textwrap.dedent("""
-            commands:
-                foo:
-                    description: foo
-                    command_name: string
-                    namespace: ignored
-                    api_version: ""
-                    strict: true
-                    fields:
-                        foo: string
-            """)
-            + test_preamble,
-            idl.errors.ERROR_ID_DUPLICATE_SYMBOL,
-        )
-
         # Namespace concatenate_with_db
         self.assert_parse_fail(
             textwrap.dedent("""
@@ -1817,19 +1570,7 @@ class TestParser(testcase.IDLTestcase):
         # type: () -> None
         """Test feature flag."""
 
-        # Missing default
-        self.assert_parse_fail(
-            textwrap.dedent("""
-            feature_flags:
-                featureFlagToaster:
-                    description: "Make toast"
-                    cpp_varname: gToaster
-                    shouldBeFCVGated: true
-            """),
-            idl.errors.ERROR_ID_MISSING_REQUIRED_FIELD,
-        )
-
-        # Missing shouldBeFCVGated
+        # Missing fcv_gated
         self.assert_parse_fail(
             textwrap.dedent("""
             feature_flags:
@@ -1861,6 +1602,100 @@ class TestParser(testcase.IDLTestcase):
                 reply_type: foo_reply_struct
             """),
             idl.errors.ERROR_ID_COMMAND_DUPLICATES_NAME_AND_ALIAS,
+        )
+        # The 'command_name' and 'command_alias' fields can be the same
+        self.assert_parse(
+            textwrap.dedent("""
+        commands:
+            foo:
+                description: foo
+                command_name: bar
+                command_alias: foo
+                namespace: ignored
+                api_version: 1
+                fields:
+                    foo:
+                        type: bar
+                reply_type: foo_reply_struct
+            foofoo:
+                description: foofoo
+                command_name: foofoo
+                command_alias: bar
+                namespace: ignored
+                api_version: 1
+                fields:
+                    foo:
+                        type: bar
+                reply_type: foo_reply_struct
+            """),
+        )
+
+    def test_duplicate_command_names_allowed(self):
+        # type: () -> None
+        """Test that duplicate names (command_name, command defintition name) are allowed across different commands."""
+        self.assert_parse(
+            textwrap.dedent("""
+        commands:
+            foo:
+                description: foo
+                command_name: foo  
+                namespace: ignored
+                api_version: 1
+                fields:
+                    foo:
+                        type: bar
+                reply_type: foo_reply_struct
+            bar:
+                description: bar
+                command_name: foo
+                namespace: ignored
+                api_version: 1
+                fields:
+                    baz:
+                        type: bar
+                reply_type: foo_reply_struct
+            foofoo:
+                description: foofoo
+                command_name: foo 
+                namespace: ignored
+                api_version: 1
+                fields:
+                    baz:
+                        type: bar
+                reply_type: foo_reply_struct
+            """)
+        )
+        self.assert_parse(
+            textwrap.dedent("""
+            commands:
+                foo:  
+                    description: first foo command
+                    command_name: foo_command
+                    namespace: ignored
+                    api_version: 1
+                    fields:
+                        field1:
+                            type: string
+                    reply_type: foo_reply_struct
+                foo:  
+                    description: second foo command
+                    command_name: bar_command 
+                    namespace: ignored
+                    api_version: 1
+                    fields:
+                        field2:
+                            type: string
+                    reply_type: foo_reply_struct
+                foo:  # Third command with same name "foo"
+                    description: third foo command
+                    command_name: baz_command  
+                    namespace: ignored
+                    api_version: 1
+                    fields:
+                        field3:
+                            type: string
+                    reply_type: foo_reply_struct
+            """)
         )
 
     def test_access_checks_positive(self):
@@ -2131,7 +1966,6 @@ class TestParser(testcase.IDLTestcase):
             idl.errors.ERROR_ID_EMPTY_ACCESS_CHECK,
         )
 
-    # pylint: disable=invalid-name
     def test_struct_unsafe_dangerous_disable_extra_field_duplicate_checks_negative(self):
         # Test commands and unsafe_dangerous_disable_extra_field_duplicate_checks are disallowed
         self.assert_parse_fail(

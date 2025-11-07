@@ -29,19 +29,20 @@
 
 #include "mongo/db/timeseries/bucket_catalog/bucket.h"
 
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/util/assert_util.h"
+
+#include <utility>
+
 #include <absl/container/node_hash_set.h>
 #include <absl/meta/type_traits.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/optional.hpp>
-#include <utility>
-
 #include <boost/optional/optional.hpp>
-
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
-#include "mongo/db/timeseries/timeseries_gen.h"
-#include "mongo/util/assert_util_core.h"
 
 namespace mongo::timeseries::bucket_catalog {
 
@@ -122,7 +123,12 @@ void calculateBucketFieldsAndSizeChange(TrackingContexts& trackingContexts,
     for (const auto& elem : doc) {
         auto fieldName = elem.fieldNameStringData();
         if (fieldName == metaField) {
-            // Ignore the metadata field since it will not be inserted.
+            // Only account for the meta field size once, on bucket insert, since it is stored
+            // uncompressed at the top-level of the bucket.
+            if (bucket.size == 0) {
+                sizesToBeAdded.uncommittedVerifiedSize +=
+                    kBucketMetaFieldName.size() + elem.size() - elem.fieldNameSize();
+            }
             continue;
         }
 

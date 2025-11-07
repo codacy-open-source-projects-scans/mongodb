@@ -29,27 +29,26 @@
 
 #include "mongo/db/server_parameter_with_storage.h"
 
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/oid.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/cluster_parameters/cluster_server_parameter_gen.h"
+#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_with_storage_test.h"
+#include "mongo/idl/server_parameter_with_storage_test_gen.h"
+#include "mongo/idl/server_parameter_with_storage_test_structs_gen.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/time_support.h"
+
 #include <cstddef>
 #include <cstdint>
-#include <fmt/format.h>
 #include <string>
 
 #include <boost/cstdint.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/oid.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/idl/cluster_server_parameter_gen.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/idl/server_parameter_with_storage_test.h"
-#include "mongo/idl/server_parameter_with_storage_test_gen.h"
-#include "mongo/idl/server_parameter_with_storage_test_structs_gen.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/time_support.h"
+#include <fmt/format.h>
 
 namespace mongo {
 AtomicWord<int> test::gStdIntPreallocated;
@@ -82,8 +81,7 @@ void doStorageTest(StringData name,
 
     // Check type coersion.
     for (const auto& v : valid) {
-        element_type typedVal =
-            uassertStatusOK(idl_server_parameter_detail::coerceFromString<element_type>(v));
+        element_type typedVal = uassertStatusOK(coerceFromString<element_type>(v));
 
         // setFromString() API.
         ASSERT_OK(param.setFromString(v, boost::none));
@@ -95,13 +93,13 @@ void doStorageTest(StringData name,
         // append() API.
         BSONObjBuilder b;
         element_type exp;
-        param.append(nullptr, &b, name.toString(), boost::none);
+        param.append(nullptr, &b, std::string{name}, boost::none);
         ASSERT(b.obj().firstElement().coerce(&exp));
         ASSERT_EQ_OR_NAN(param.getValue(boost::none), exp);
     }
     for (const auto& v : invalid) {
         ASSERT_NOT_OK(param.setFromString(v, boost::none));
-        ASSERT_NOT_OK(idl_server_parameter_detail::coerceFromString<element_type>(v));
+        ASSERT_NOT_OK(coerceFromString<element_type>(v));
     }
 
     // Check onUpdate is invoked.
@@ -119,8 +117,7 @@ void doStorageTest(StringData name,
     // Check failed onUpdate does not block value being set.
     param.setOnUpdate([](const element_type&) { return Status(ErrorCodes::BadValue, "Go away"); });
     for (const auto& v : valid) {
-        auto typedVal =
-            uassertStatusOK(idl_server_parameter_detail::coerceFromString<element_type>(v));
+        auto typedVal = uassertStatusOK(coerceFromString<element_type>(v));
         ASSERT_NOT_OK(param.setFromString(v, boost::none));
         ASSERT_EQ_OR_NAN(param.getValue(boost::none), typedVal);
     }
@@ -174,13 +171,13 @@ TEST(ServerParameterWithStorage, StorageTest) {
 
     doStorageTestByAtomic<AtomicWord<bool>>("AtomicWord<bool>", boolVals, stringVals);
     doStorageTestByAtomic<AtomicWord<int>>("AtomicWord<int>", numberVals, stringVals);
-    doStorageTestByAtomic<AtomicDouble>("AtomicDoubleI", numberVals, stringVals);
-    doStorageTestByAtomic<AtomicDouble>("AtomicDoubleD", doubleVals, stringVals);
+    doStorageTestByAtomic<AtomicWord<double>>("AtomicWord<double>I", numberVals, stringVals);
+    doStorageTestByAtomic<AtomicWord<double>>("AtomicWord<double>D", doubleVals, stringVals);
 }
 
 TEST(ServerParameterWithStorage, BoundsTest) {
-    using idl_server_parameter_detail::GT;
-    using idl_server_parameter_detail::LT;
+    using idl_server_parameter_bounds::GT;
+    using idl_server_parameter_bounds::LT;
 
     int val;
     IDLServerParameterWithStorage<SPT::kStartupOnly, int> param("BoundsTest", val);
@@ -345,25 +342,24 @@ TEST(IDLServerParameterWithStorage, RAIIServerParameterController) {
  */
 TEST(IDLServerParameterWithStorage, CSPStorageTest) {
     // Retrieve the cluster IDLServerParameterWithStorage.
-    auto* clusterParam =
-        dynamic_cast<ClusterParameterWithStorage<test::ChangeStreamOptionsClusterParam>*>(
-            getClusterServerParameter("changeStreamOptions"));
+    auto* clusterParam = dynamic_cast<ClusterParameterWithStorage<test::TestClusterParamStruct>*>(
+        getClusterServerParameter("testClusterServerParameter"));
 
     // Check that current value is the default value.
-    test::ChangeStreamOptionsClusterParam retrievedParam = clusterParam->getValue(boost::none);
+    test::TestClusterParamStruct retrievedParam = clusterParam->getValue(boost::none);
     ASSERT_EQ(retrievedParam.getPreAndPostImages().getExpireAfterSeconds(), 30);
     ASSERT_EQ(retrievedParam.getTestStringField(), "");
     ASSERT_EQ(clusterParam->getClusterParameterTime(boost::none), LogicalTime::kUninitialized);
 
     // Set to new value and check that the updated value is seen on get.
-    test::ChangeStreamOptionsClusterParam updatedParam;
+    test::TestClusterParamStruct updatedParam;
     test::PreAndPostImagesStruct updatedPrePostImgs;
     ClusterServerParameter baseCSP;
 
     updatedPrePostImgs.setExpireAfterSeconds(40);
     LogicalTime updateTime = LogicalTime(Timestamp(Date_t::now()));
     baseCSP.setClusterParameterTime(updateTime);
-    baseCSP.set_id("changeStreamOptions"_sd);
+    baseCSP.set_id("testClusterServerParameter"_sd);
 
     updatedParam.setClusterServerParameter(baseCSP);
     updatedParam.setPreAndPostImages(updatedPrePostImgs);
@@ -383,7 +379,7 @@ TEST(IDLServerParameterWithStorage, CSPStorageTest) {
         clusterParam->append(nullptr, &b, clusterParam->name(), boost::none);
         auto obj = b.obj();
         ASSERT_EQ(obj.nFields(), 4);
-        ASSERT_EQ(obj["_id"_sd].String(), "changeStreamOptions");
+        ASSERT_EQ(obj["_id"_sd].String(), "testClusterServerParameter");
         ASSERT_EQ(obj["preAndPostImages"_sd].Obj()["expireAfterSeconds"].Long(), 40);
         ASSERT_EQ(obj["testStringField"_sd].String(), "testString");
         ASSERT_EQ(obj["clusterParameterTime"_sd].timestamp(), updateTime.asTimestamp());
@@ -402,7 +398,7 @@ TEST(IDLServerParameterWithStorage, CSPStorageTest) {
     ASSERT_EQ(test::count, 2);
 
     // Update the default value. The parameter should automatically reset to the new default value.
-    test::ChangeStreamOptionsClusterParam newDefaultParam;
+    test::TestClusterParamStruct newDefaultParam;
     test::PreAndPostImagesStruct newDefaultPrePostImgs;
 
     newDefaultPrePostImgs.setExpireAfterSeconds(35);
@@ -495,6 +491,14 @@ TEST(IDLServerParameterWithStorage, CSPStorageTest) {
         auto obj = b.obj();
         ASSERT_EQ(obj["preAndPostImages"_sd].Obj()["expireAfterSeconds"].Long(), 45);
     }
+}
+
+TEST_F(DeprecatedServerParameterTest, StorageIntIsDeprecated) {
+    testParameterIsDeprecated("storageIntDeprecated");
+}
+
+TEST_F(DeprecatedServerParameterTest, StorageIntWarnsOnce) {
+    testSetParameterWarnsOnce("storageIntDeprecated", 50);
 }
 
 }  // namespace

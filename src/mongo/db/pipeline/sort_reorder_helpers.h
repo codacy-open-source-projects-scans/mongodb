@@ -27,11 +27,14 @@
  *    it in the license file.
  */
 
+#pragma once
+
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_graph_lookup.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/query/sort_pattern.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -46,7 +49,7 @@ bool checkModifiedPathsSortReorder(const SortPattern& sortPattern,
 /**
  * Tries to swap $lookup or $graphLookup with sort.
  */
-Pipeline::SourceContainer::iterator tryReorderingWithSort(Pipeline::SourceContainer::iterator itr,
-                                                          Pipeline::SourceContainer* container);
+DocumentSourceContainer::iterator tryReorderingWithSort(DocumentSourceContainer::iterator itr,
+                                                        DocumentSourceContainer* container);
 
 }  // namespace mongo

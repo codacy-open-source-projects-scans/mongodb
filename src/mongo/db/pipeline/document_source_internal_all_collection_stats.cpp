@@ -29,29 +29,17 @@
 
 #include "mongo/db/pipeline/document_source_internal_all_collection_stats.h"
 
-#include <boost/smart_ptr.hpp>
-#include <iterator>
-#include <list>
-#include <type_traits>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/matcher/expression.h"
-#include "mongo/db/pipeline/document_source_coll_stats.h"
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
-#include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
-#include "mongo/db/pipeline/transformer_interface.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -67,45 +55,11 @@ REGISTER_DOCUMENT_SOURCE(_internalAllCollectionStats,
                          DocumentSourceInternalAllCollectionStats::LiteParsed::parse,
                          DocumentSourceInternalAllCollectionStats::createFromBsonInternal,
                          AllowedWithApiStrict::kInternal);
+ALLOCATE_DOCUMENT_SOURCE_ID(_internalAllCollectionStats,
+                            DocumentSourceInternalAllCollectionStats::id)
 
-DocumentSource::GetNextResult DocumentSourceInternalAllCollectionStats::doGetNext() {
-    if (!_catalogDocs) {
-        _catalogDocs =
-            pExpCtx->getMongoProcessInterface()->listCatalog(pExpCtx->getOperationContext());
-    }
-
-    while (!_catalogDocs->empty()) {
-        BSONObj obj(std::move(_catalogDocs->front()));
-        const auto nss = NamespaceStringUtil::parseFromStringExpectTenantIdInMultitenancyMode(
-            obj["ns"].String());
-
-        _catalogDocs->pop_front();
-
-        // Avoid computing stats for collections that do not match the absorbed filter on the 'ns'
-        // field.
-        if (_absorbedMatch && !_absorbedMatch->getMatchExpression()->matchesBSON(obj)) {
-            continue;
-        }
-
-        if (const auto& stats = _internalAllCollectionStatsSpec.getStats()) {
-            try {
-                return {Document{DocumentSourceCollStats::makeStatsForNs(
-                    pExpCtx, nss, stats.get(), _projectFilter)}};
-            } catch (const ExceptionFor<ErrorCodes::CommandNotSupportedOnView>&) {
-                // We don't want to retrieve data for views, only for collections.
-                continue;
-            } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
-                // The collection no longer exists.
-                continue;
-            }
-        }
-    }
-
-    return GetNextResult::makeEOF();
-}
-
-Pipeline::SourceContainer::iterator DocumentSourceInternalAllCollectionStats::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator DocumentSourceInternalAllCollectionStats::doOptimizeAt(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     invariant(*itr == this);
 
     if (std::next(itr) == container->end()) {
@@ -138,7 +92,8 @@ Pipeline::SourceContainer::iterator DocumentSourceInternalAllCollectionStats::do
             _absorbedMatch = std::move(splitMatch.second);
         } else {
             // We have already absorbed a $match. We need to join it with splitMatch.second.
-            _absorbedMatch->joinMatchWith(std::move(splitMatch.second), "$and"_sd);
+            _absorbedMatch->joinMatchWith(std::move(splitMatch.second),
+                                          MatchExpression::MatchType::AND);
         }
     }
 
@@ -177,7 +132,7 @@ intrusive_ptr<DocumentSource> DocumentSourceInternalAllCollectionStats::createFr
     uassert(6789103,
             str::stream() << "$_internalAllCollectionStats must take a nested object but found: "
                           << elem,
-            elem.type() == BSONType::Object);
+            elem.type() == BSONType::object);
 
     uassert(6789104,
             "The $_internalAllCollectionStats stage must be run on the admin database",
@@ -185,13 +140,13 @@ intrusive_ptr<DocumentSource> DocumentSourceInternalAllCollectionStats::createFr
                 pExpCtx->getNamespaceString().isCollectionlessAggregateNS());
 
     auto spec = DocumentSourceInternalAllCollectionStatsSpec::parse(
-        IDLParserContext(kStageNameInternal), elem.embeddedObject());
+        elem.embeddedObject(), IDLParserContext(kStageNameInternal));
 
     return make_intrusive<DocumentSourceInternalAllCollectionStats>(pExpCtx, std::move(spec));
 }
 
 const char* DocumentSourceInternalAllCollectionStats::getSourceName() const {
-    return kStageNameInternal.rawData();
+    return kStageNameInternal.data();
 }
 
 Value DocumentSourceInternalAllCollectionStats::serialize(const SerializationOptions& opts) const {

@@ -29,21 +29,21 @@
 
 #pragma once
 
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/storage/temporary_record_store.h"
 #include "mongo/platform/atomic_word.h"
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace mongo {
 
@@ -58,19 +58,10 @@ class DuplicateKeyTracker {
     DuplicateKeyTracker& operator=(const DuplicateKeyTracker&) = delete;
 
 public:
-    /**
-     * Creates a temporary table in which to store any duplicate key constraint violations.
-     */
-    DuplicateKeyTracker(OperationContext* opCtx, const IndexCatalogEntry* indexCatalogEntry);
-
-    /**
-     * Finds the temporary table associated with storing any duplicate key constraint violations for
-     * this index build. Only used when resuming an index build and the temporary table already
-     * exists on disk.
-     */
     DuplicateKeyTracker(OperationContext* opCtx,
                         const IndexCatalogEntry* indexCatalogEntry,
-                        StringData ident);
+                        StringData ident,
+                        bool tableExists);
 
     /**
      * Keeps the temporary table for the duplicate key constraint violations.
@@ -81,8 +72,9 @@ public:
      * Given a duplicate key, insert it into the key constraint table.
      */
     Status recordKey(OperationContext* opCtx,
+                     const CollectionPtr& coll,
                      const IndexCatalogEntry* indexCatalogEntry,
-                     const key_string::Value& key);
+                     const key_string::View& key);
 
     /**
      * Returns boost::none if all previously recorded duplicate key constraint violations have been
@@ -95,7 +87,7 @@ public:
         OperationContext* opCtx, const IndexCatalogEntry* indexCatalogEntry) const;
 
     std::string getTableIdent() const {
-        return _keyConstraintsTable->rs()->getIdent();
+        return std::string{_keyConstraintsTable->rs()->getIdent()};
     }
 
 private:

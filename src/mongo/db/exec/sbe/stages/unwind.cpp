@@ -27,8 +27,7 @@
  *    it in the license file.
  */
 
-#include <absl/container/inlined_vector.h>
-#include <utility>
+#include "mongo/db/exec/sbe/stages/unwind.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -36,10 +35,12 @@
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
-#include "mongo/db/exec/sbe/stages/unwind.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <utility>
+
 
 namespace mongo::sbe {
 UnwindStage::UnwindStage(std::unique_ptr<PlanStage> input,
@@ -225,10 +226,7 @@ std::vector<DebugPrinter::Block> UnwindStage::debugPrint() const {
     return ret;
 }
 
-void UnwindStage::doSaveState(bool relinquishCursor) {
-    if (!relinquishCursor) {
-        return;
-    }
+void UnwindStage::doSaveState() {
     if (_outFieldOutputAccessor) {
         prepareForYielding(*_outFieldOutputAccessor, slotsAccessible());
     }
@@ -237,19 +235,17 @@ void UnwindStage::doSaveState(bool relinquishCursor) {
     }
 }
 
-void UnwindStage::doRestoreState(bool relinquishCursor) {
+void UnwindStage::doRestoreState() {
     if (!_inArray) {
         // If we were once in an array but no longer are, this saves us from doing a refresh() on
         // obsolete slot contents.
         return;
     }
 
-    if (relinquishCursor) {
-        // The child stage will have copied the in-flight contents of this slot because WiredTiger
-        // will free the memory owned by the cursor it points to, so on restore we must update the
-        // embedded array iterator to point to the new memory location.
-        _inArrayAccessor.refresh();
-    }
+    // The child stage will have copied the in-flight contents of this slot because WiredTiger
+    // will free the memory owned by the cursor it points to, so on restore we must update the
+    // embedded array iterator to point to the new memory location.
+    _inArrayAccessor.refresh();
 }
 
 size_t UnwindStage::estimateCompileTimeSize() const {

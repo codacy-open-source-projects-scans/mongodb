@@ -29,12 +29,7 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <cstddef>
-#include <memory>
-#include <string>
-#include <utility>
-
+#include "mongo/base/string_data.h"
 #include "mongo/client/async_client.h"
 #include "mongo/db/service_context.h"
 #include "mongo/executor/connection_metrics.h"
@@ -42,6 +37,7 @@
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/s/sharding_task_executor_pool_controller.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/transport/ssl_connection_context.h"
@@ -53,6 +49,13 @@
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
+
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 namespace executor {
@@ -67,16 +70,19 @@ public:
                   transport::TransportLayer* tl,
                   std::unique_ptr<NetworkConnectionHook> onConnectHook,
                   const ConnectionPool::Options& connPoolOptions,
-                  std::shared_ptr<const transport::SSLConnectionContext> transientSSLContext)
+                  std::shared_ptr<const transport::SSLConnectionContext> transientSSLContext,
+                  StringData instanceName)
         : _executor(std::move(reactor)),
           _tl(tl),
           _onConnectHook(std::move(onConnectHook)),
           _connPoolOptions(connPoolOptions),
-          _transientSSLContext(transientSSLContext) {}
+          _transientSSLContext(transientSSLContext),
+          _instanceName(instanceName) {}
 
     std::shared_ptr<ConnectionPool::ConnectionInterface> makeConnection(
         const HostAndPort& hostAndPort,
         transport::ConnectSSLMode sslMode,
+        PoolConnectionId,
         size_t generation) override;
 
     std::shared_ptr<ConnectionPool::TimerInterface> makeTimer() override;
@@ -95,6 +101,10 @@ public:
     void fasten(Type* type);
     void release(Type* type);
 
+    StringData instanceName() const {
+        return _instanceName;
+    }
+
 private:
     auto reactor();
 
@@ -104,6 +114,7 @@ private:
     // Options originated from instance of NetworkInterfaceTL.
     const ConnectionPool::Options _connPoolOptions;
     std::shared_ptr<const transport::SSLConnectionContext> _transientSSLContext;
+    std::string _instanceName;
 
     mutable stdx::mutex _mutex;
     AtomicWord<bool> _inShutdown{false};
@@ -123,6 +134,10 @@ public:
     void release();
     bool inShutdown() const {
         return _factory->inShutdown();
+    }
+
+    StringData instanceName() const {
+        return _factory->instanceName();
     }
 
     virtual void kill() = 0;
@@ -163,11 +178,12 @@ public:
         ServiceContext* serviceContext,
         HostAndPort peer,
         transport::ConnectSSLMode sslMode,
+        PoolConnectionId id,
         size_t generation,
         NetworkConnectionHook* onConnectHook,
         bool skipAuth,
         std::shared_ptr<const transport::SSLConnectionContext> transientSSLContext = nullptr)
-        : ConnectionInterface(generation),
+        : ConnectionInterface(id, generation),
           TLTypeFactory::Type(factory),
           _reactor(reactor),
           _serviceContext(serviceContext),

@@ -29,27 +29,15 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-
-#include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/exec/agg/exec_pipeline.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/document_source.h"
@@ -61,17 +49,34 @@
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
-#include "mongo/idl/idl_parser.h"
-#include "mongo/s/analyze_shard_key_documents_gen.h"
 #include "mongo/stdx/unordered_set.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
+#include "mongo/util/modules.h"
 
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
+
+// Forward declaration needed due to compiler error caused by namespace difference.
+boost::intrusive_ptr<exec::agg::Stage> documentSourceListSampledQueriesToStageFn(
+    const boost::intrusive_ptr<DocumentSource>& documentSource);
+
 namespace analyze_shard_key {
+
+// TODO: SERVER-105521 Remove this struct as both the '_pipeline' and '_execPipeline' are used only
+// in ListSampledQueriesStage (assuming 'detachSourceFromOperationContext()' and
+// 'reattachSourceToOperationContext()' will be removed as well).
+struct ListSampledQueriesSharedState {
+    std::unique_ptr<Pipeline> pipeline;
+    std::unique_ptr<exec::agg::Pipeline> execPipeline;
+};
 
 class DocumentSourceListSampledQueries final : public DocumentSource {
 public:
@@ -80,7 +85,8 @@ public:
     class LiteParsed final : public LiteParsedDocumentSource {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
-                                                 const BSONElement& specElem);
+                                                 const BSONElement& specElem,
+                                                 const LiteParserOptions& options);
 
         explicit LiteParsed(std::string parseTimeName,
                             NamespaceString nss,
@@ -114,12 +120,13 @@ public:
 
     DocumentSourceListSampledQueries(const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
                                      DocumentSourceListSampledQueriesSpec spec)
-        : DocumentSource(kStageName, pExpCtx), _spec(std::move(spec)) {}
+        : DocumentSource(kStageName, pExpCtx),
+          _spec(std::move(spec)),
+          _sharedState(std::make_shared<ListSampledQueriesSharedState>()) {}
 
     ~DocumentSourceListSampledQueries() override = default;
 
-    StageConstraints constraints(
-        Pipeline::SplitState = Pipeline::SplitState::kUnsplit) const override {
+    StageConstraints constraints(PipelineSplitState = PipelineSplitState::kUnsplit) const override {
         StageConstraints constraints{StreamType::kStreaming,
                                      PositionRequirement::kFirst,
                                      HostTypeRequirement::kNone,
@@ -129,8 +136,8 @@ public:
                                      LookupRequirement::kAllowed,
                                      UnionRequirement::kAllowed};
 
-        constraints.requiresInputDocSource = false;
         constraints.isIndependentOfAnyCollection = true;
+        constraints.setConstraintsForNoInputSources();
         return constraints;
     }
 
@@ -139,11 +146,13 @@ public:
     }
 
     const char* getSourceName() const override {
-        return kStageName.rawData();
+        return kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kListSampledQueries;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
@@ -153,17 +162,20 @@ public:
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
-    void detachFromOperationContext() final;
-    void reattachToOperationContext(OperationContext* opCtx) final;
+    void detachSourceFromOperationContext() final;
+    void reattachSourceToOperationContext(OperationContext* opCtx) final;
 
 private:
-    DocumentSourceListSampledQueries(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : DocumentSource(kStageName, expCtx) {}
+    friend boost::intrusive_ptr<exec::agg::Stage> mongo::documentSourceListSampledQueriesToStageFn(
+        const boost::intrusive_ptr<DocumentSource>& documentSource);
 
-    GetNextResult doGetNext() final;
+    DocumentSourceListSampledQueries(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : DocumentSource(kStageName, expCtx),
+          _sharedState(std::make_shared<ListSampledQueriesSharedState>()) {};
 
     DocumentSourceListSampledQueriesSpec _spec;
-    std::unique_ptr<Pipeline, PipelineDeleter> _pipeline;
+
+    std::shared_ptr<ListSampledQueriesSharedState> _sharedState;
 };
 
 }  // namespace analyze_shard_key

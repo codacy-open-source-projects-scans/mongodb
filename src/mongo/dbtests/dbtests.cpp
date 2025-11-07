@@ -31,13 +31,7 @@
  * Runs db unit tests.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
@@ -49,11 +43,14 @@
 #include "mongo/client/dbclient_base.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/commands/test_commands_enabled.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/db_raii.h"
-#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/index_builds/index_builds_common.h"
 #include "mongo/db/index_builds/multi_index_block.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/profile_settings.h"
 #include "mongo/db/query/client_cursor/cursor_manager.h"
+#include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -63,17 +60,16 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_entry_point_shard_role.h"
 #include "mongo/db/session_manager_mongod.h"
+#include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/db/wire_version.h"
-#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/dbtests/framework.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/transport_layer_manager_impl.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/duration.h"
@@ -84,6 +80,14 @@
 #include "mongo/util/text.h"  // IWYU pragma: keep
 #include "mongo/util/tick_source_mock.h"
 #include "mongo/util/version/releases.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace dbtests {
@@ -126,12 +130,12 @@ Status createIndex(OperationContext* opCtx, StringData ns, const BSONObj& keys, 
 
 Status createIndexFromSpec(OperationContext* opCtx, StringData ns, const BSONObj& spec) {
     NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
-    AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX);
     {
+        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX);
         Lock::CollectionLock collLock(opCtx, nss, MODE_X);
         WriteUnitOfWork wunit(opCtx);
-        auto coll =
-            CollectionCatalog::get(opCtx)->lookupCollectionByNamespaceForMetadataWrite(opCtx, nss);
+        CollectionWriter writer{opCtx, nss};
+        auto coll = writer.getWritableCollection(opCtx);
         if (!coll) {
             auto db = autoDb.ensureDbExists(opCtx);
             invariant(db);
@@ -142,6 +146,7 @@ Status createIndexFromSpec(OperationContext* opCtx, StringData ns, const BSONObj
     }
     MultiIndexBlock indexer;
     ScopeGuard abortOnExit([&] {
+        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX);
         Lock::CollectionLock collLock(opCtx, nss, MODE_X);
         CollectionWriter collection(opCtx, nss);
         WriteUnitOfWork wunit(opCtx);
@@ -150,22 +155,15 @@ Status createIndexFromSpec(OperationContext* opCtx, StringData ns, const BSONObj
     });
     auto status = Status::OK();
     {
+        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX);
         Lock::CollectionLock collLock(opCtx, nss, MODE_X);
         CollectionWriter collection(opCtx, nss);
-        status = indexer
-                     .init(opCtx,
-                           collection,
-                           spec,
-                           [opCtx](const std::vector<BSONObj>& specs) -> Status {
-                               if (shard_role_details::getRecoveryUnit(opCtx)
-                                       ->getCommitTimestamp()
-                                       .isNull()) {
-                                   return shard_role_details::getRecoveryUnit(opCtx)->setTimestamp(
-                                       Timestamp(1, 1));
-                               }
-                               return Status::OK();
-                           })
-                     .getStatus();
+        status = initializeMultiIndexBlock(opCtx, collection, indexer, spec, [opCtx] {
+            if (shard_role_details::getRecoveryUnit(opCtx)->getCommitTimestamp().isNull()) {
+                uassertStatusOK(
+                    shard_role_details::getRecoveryUnit(opCtx)->setTimestamp(Timestamp(1, 1)));
+            }
+        });
         if (status == ErrorCodes::IndexAlreadyExists) {
             return Status::OK();
         }
@@ -174,15 +172,14 @@ Status createIndexFromSpec(OperationContext* opCtx, StringData ns, const BSONObj
         }
     }
     {
-        Lock::CollectionLock collLock(opCtx, nss, MODE_IX);
-        // Using CollectionWriter for convenience here.
-        CollectionWriter collection(opCtx, nss);
-        status = indexer.insertAllDocumentsInCollection(opCtx, collection.get());
+        status = indexer.insertAllDocumentsInCollection(opCtx, nss);
         if (!status.isOK()) {
             return status;
         }
     }
     {
+        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX);
+
         Lock::CollectionLock collLock(opCtx, nss, MODE_X);
         CollectionWriter collection(opCtx, nss);
         status = indexer.retrySkippedRecords(opCtx, collection.get());
@@ -206,18 +203,57 @@ Status createIndexFromSpec(OperationContext* opCtx, StringData ns, const BSONObj
     return Status::OK();
 }
 
+Status initializeMultiIndexBlock(OperationContext* opCtx,
+                                 CollectionWriter& collection,
+                                 MultiIndexBlock& indexer,
+                                 const BSONObj& spec,
+                                 MultiIndexBlock::OnInitFn onInit) {
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    auto indexBuildInfo = IndexBuildInfo(
+        spec, *storageEngine, collection->ns().dbName(), VersionContext::getDecoration(opCtx));
+    return indexer
+        .init(opCtx,
+              collection,
+              {indexBuildInfo},
+              onInit,
+              MultiIndexBlock::InitMode::SteadyState,
+              boost::none,
+              /*generateTableWrites=*/true)
+        .getStatus();
+}
+
 WriteContextForTests::WriteContextForTests(OperationContext* opCtx, StringData ns)
     : _opCtx(opCtx), _nss(NamespaceString::createNamespaceString_forTest(ns)) {
     // Lock the database and collection
     _autoDb.emplace(opCtx, _nss.dbName(), MODE_IX);
-    _collLock.emplace(opCtx, _nss, MODE_X);
 
-    const bool doShardVersionCheck = false;
+    _tracker.emplace(opCtx,
+                     _nss,
+                     Top::LockType::WriteLocked,
+                     AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                     DatabaseProfileSettings::get(opCtx->getServiceContext())
+                         .getDatabaseProfileLevel(_nss.dbName()));
 
-    _clientContext.emplace(opCtx, _nss, doShardVersionCheck);
     auto db = _autoDb->ensureDbExists(opCtx);
     invariant(db, _nss.toStringForErrorMsg());
-    invariant(db == _clientContext->db());
+}
+
+CollectionAcquisition WriteContextForTests::getOrCreateCollection(LockMode mode) {
+    auto coll = getCollection(mode);
+    if (!coll.exists()) {
+        ScopedLocalCatalogWriteFence writeFence(_opCtx, &coll);
+        WriteUnitOfWork wuow(_opCtx);
+        _autoDb->getDb()->createCollection(_opCtx, _nss);
+        wuow.commit();
+    }
+    return coll;
+}
+
+CollectionAcquisition WriteContextForTests::getCollection(LockMode mode) const {
+    return acquireCollection(_opCtx,
+                             CollectionAcquisitionRequest::fromOpCtx(
+                                 _opCtx, _nss, AcquisitionPrerequisites::OperationType::kWrite),
+                             mode);
 }
 
 int dbtestsMain(int argc, char** argv) {
@@ -270,6 +306,9 @@ int dbtestsMain(int argc, char** argv) {
 
     AuthorizationManager::get(service->getService())->setAuthEnabled(false);
     ScriptEngine::setup(ExecutionEnvironment::Server);
+
+    query_settings::QuerySettingsService::initializeForTest(service);
+
     return mongo::dbtests::runDbTests(argc, argv);
 }
 

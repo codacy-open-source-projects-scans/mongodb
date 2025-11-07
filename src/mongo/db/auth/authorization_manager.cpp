@@ -29,13 +29,13 @@
 
 #include "mongo/db/auth/authorization_manager.h"
 
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/shim.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
+
+#include <string>
 
 namespace mongo {
 
@@ -53,7 +53,6 @@ constexpr StringData AuthorizationManager::V1_USER_SOURCE_FIELD_NAME;
 const Status AuthorizationManager::authenticationFailedStatus(ErrorCodes::AuthenticationFailed,
                                                               "Authentication failed.");
 
-const BSONObj AuthorizationManager::versionDocumentQuery = BSON("_id"
-                                                                << "authSchema");
+const BSONObj AuthorizationManager::versionDocumentQuery = BSON("_id" << "authSchema");
 
 }  // namespace mongo

@@ -29,23 +29,19 @@
 
 #include "mongo/db/s/resharding/resharding_oplog_application.h"
 
-#include "mongo/db/catalog_raii.h"
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <memory>
-#include <string>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/batched_write_context.h"
 #include "mongo/db/query/get_executor.h"
@@ -58,30 +54,23 @@
 #include "mongo/db/query/write_ops/update_result.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
-#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/session_catalog_mongod.h"
-#include "mongo/db/shard_role.h"
+#include "mongo/db/storage/exceptions.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/transaction/transaction_operations.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/database_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
+#include "mongo/db/versioning_protocol/shard_version_factory.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/index_version.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/s/shard_version.h"
-#include "mongo/s/shard_version_factory.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/duration.h"
@@ -89,6 +78,14 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
 
@@ -134,10 +131,8 @@ ReshardingOplogApplicationRules::ReshardingOplogApplicationRules(
       _applierMetrics(applierMetrics),
       _isCapped(isCapped) {}
 
-Status ReshardingOplogApplicationRules::applyOperation(
-    OperationContext* opCtx,
-    const boost::optional<ShardingIndexesCatalogCache>& sii,
-    const repl::OplogEntry& op) const {
+Status ReshardingOplogApplicationRules::applyOperation(OperationContext* opCtx,
+                                                       const repl::OplogEntry& op) const {
     LOGV2_DEBUG(49901, 3, "Applying op for resharding", "op"_attr = redact(op.toBSONForLogging()));
 
     invariant(!shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
@@ -149,10 +144,10 @@ Status ReshardingOplogApplicationRules::applyOperation(
             switch (opType) {
                 case repl::OpTypeEnum::kInsert:
                 case repl::OpTypeEnum::kUpdate:
-                    _applyInsertOrUpdate(opCtx, sii, op);
+                    _applyInsertOrUpdate(opCtx, op);
                     break;
                 case repl::OpTypeEnum::kDelete: {
-                    _applyDelete(opCtx, sii, op);
+                    _applyDelete(opCtx, op);
                     _applierMetrics->onDeleteApplied();
                     break;
                 }
@@ -174,10 +169,8 @@ Status ReshardingOplogApplicationRules::applyOperation(
     });
 }
 
-void ReshardingOplogApplicationRules::_applyInsertOrUpdate(
-    OperationContext* opCtx,
-    const boost::optional<ShardingIndexesCatalogCache>& sii,
-    const repl::OplogEntry& op) const {
+void ReshardingOplogApplicationRules::_applyInsertOrUpdate(OperationContext* opCtx,
+                                                           const repl::OplogEntry& op) const {
 
     WriteUnitOfWork wuow(opCtx);
 
@@ -412,10 +405,8 @@ void ReshardingOplogApplicationRules::_applyUpdate_inlock(OperationContext* opCt
     invariant(ur.numMatched != 0);
 }
 
-void ReshardingOplogApplicationRules::_applyDelete(
-    OperationContext* opCtx,
-    const boost::optional<ShardingIndexesCatalogCache>& sii,
-    const repl::OplogEntry& op) const {
+void ReshardingOplogApplicationRules::_applyDelete(OperationContext* opCtx,
+                                                   const repl::OplogEntry& op) const {
     /**
      * The rules to apply ordinary delete operations are as follows:
      *

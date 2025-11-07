@@ -56,11 +56,13 @@ DEFAULTS = {
     "always_use_log_files": False,
     "archive_limit_mb": 5000,
     "archive_limit_tests": 10,
+    "archive_directory": None,
+    "archive_mode": "s3",
     "base_port": 20000,
     "backup_on_restart_dir": None,
-    "embedded_router": None,
     "config_shard": None,
     "continue_on_failure": False,
+    "test_timeout": None,
     "dbpath_prefix": None,
     "dbtest_executable": None,
     "dry_run": None,
@@ -68,6 +70,7 @@ DEFAULTS = {
     "force_excluded_tests": False,
     "skip_excluded_tests": False,
     "skip_tests_covered_by_more_complex_suites": False,
+    "include_fully_disabled_feature_tests": False,
     "skip_symbolization": False,
     "fuzz_mongod_configs": None,
     "fuzz_runtime_params": None,
@@ -89,7 +92,9 @@ DEFAULTS = {
     "mongot-localdev/mongot_executable": None,
     "mongot_set_parameters": [],
     "mongocryptd_set_parameters": [],
+    "mongo_set_parameters": [],
     "mrlog": None,
+    "multiversion_dirs": DEFAULT_MULTIVERSION_DIRS,
     "no_journal": False,
     "num_clients_per_fixture": 1,
     "use_tenant_client": False,
@@ -106,23 +111,37 @@ DEFAULTS = {
     "run_no_feature_flag_tests": False,
     "additional_feature_flags": None,
     "additional_feature_flags_file": None,
-    "disable_feature_flags": None,
+    "excluded_feature_flags": None,
+    "disable_unreleased_ifr_flags": False,
     "seed": int(time.time() * 256),  # Taken from random.py code in Python 2.7.
     "service_executor": None,
+    "shard_count": None,
+    "shard_index": None,
     "shell_conn_string": None,
+    "historic_test_runtimes": None,
     "shell_port": None,
     "shuffle": None,
     "stagger_jobs": None,
     "majority_read_concern": "on",
-    "enable_enterprise_tests": "on",
+    "modules": "default",
+    "resmoke_modules_path": os.path.join("buildscripts", "resmokeconfig", "resmoke_modules.yml"),
+    "enable_evergreen_api_test_selection": False,
+    "test_selection_strategies_array": None,
+    "mongo_version_file": None,
+    "releases_file": None,
     "shell_seed": None,
     "storage_engine": "wiredTiger",
     "storage_engine_cache_size_gb": None,
+    "storage_engine_cache_size_pct": None,
     "mozjs_js_gc_zeal": None,
     "suite_files": "with_server",
     "tag_files": [],
     "test_files": [],
     "user_friendly_output": None,
+    # Output log format.
+    "log_format": None,
+    # Level of log severity.
+    "log_level": None,
     "mixed_bin_versions": None,
     "old_bin_version": None,
     "linear_chain": None,
@@ -136,6 +155,7 @@ DEFAULTS = {
     "shell_tls_certificate_key_file": None,
     "mongos_tls_certificate_key_file": None,
     "mongod_tls_certificate_key_file": None,
+    "validate_selector_paths": True,
     # Internal testing options.
     "internal_params": [],
     # Evergreen options.
@@ -186,6 +206,12 @@ DEFAULTS = {
     "docker_compose_tag": "development",
     # Whether or not this resmoke suite is running against an External System Under Test
     "external_sut": False,
+    # Whether or not to signal tests to pause after dataset population.
+    "pause_after_populate": None,
+    # Regex to filter mocha-style tests to run.
+    "mocha_grep": None,
+    # Loads all test extensions into the server.
+    "load_all_extensions": False,
 }
 
 _SuiteOptions = collections.namedtuple(
@@ -316,6 +342,9 @@ ARCHIVE_LIMIT_MB = None
 # The limit number of tests to archive for an Evergreen task.
 ARCHIVE_LIMIT_TESTS = None
 
+# Mechanism to use for storing archived data files on failures.
+ARCHIVE_MODE = None
+
 # Whether to back up data when restarting a process.
 BACKUP_ON_RESTART_DIR = None
 
@@ -330,6 +359,9 @@ DBPATH_PREFIX = None
 # The path to the dbtest executable used by resmoke.py.
 DBTEST_EXECUTABLE = None
 
+# Directories to search for multiversion binaries
+MULTIVERSION_DIRS = []
+
 # If set to "tests", then resmoke.py will output the tests that would be run by each suite (without
 # actually running them).
 DRY_RUN = None
@@ -337,11 +369,29 @@ DRY_RUN = None
 # If set, specifies which node is the config shard. Can also be set to 'any'.
 CONFIG_SHARD = None
 
-# If set, use mongod's embedded router functionality for all sharding tests instead of mongos.
-EMBEDDED_ROUTER = None
+# path for the resmoke module config, should only be changed in testing.
+MODULES_CONFIG_PATH = None
 
-# if set, enables enterprise jstest to automatically be included
-ENABLE_ENTERPRISE_TESTS = None
+# list of enabled modules
+MODULES = None
+
+# list of dirs from enabled modules to get suites from
+MODULE_SUITE_DIRS = []
+
+# list of dirs from disabled modules to filter out of suite selectors
+MODULE_DISABLED_JSTEST_DIRS = []
+
+# if set, enables test selection using the Evergreen API
+ENABLE_EVERGREEN_API_TEST_SELECTION = None
+
+# If set, requests Evergreen to use the specified test selection strategies.
+EVERGREEN_TEST_SELECTION_STRATEGY = None
+
+# Path to the YAML file containing the current `mongo_version`
+MONGO_VERSION_FILE = ".resmoke_mongo_version.yml"
+
+# Path to the releases YAML file.
+RELEASES_FILE = ".resmoke_mongo_release_values.yml"
 
 # URL to connect to the Evergreen service.
 EVERGREEN_URL = None
@@ -407,6 +457,10 @@ SKIP_EXCLUDED_TESTS = None
 # Only run tests on the given suite that will not be run on a more complex suite.
 SKIP_TESTS_COVERED_BY_MORE_COMPLEX_SUITES = None
 
+# Include tests tagged with features that are in fully_disabled_feature_flags.yml. Used for
+# test discovery during task generation.
+INCLUDE_FULLY_DISABLED_FEATURE_TESTS = None
+
 # Skip symbolizing stacktraces generated during tests.
 SKIP_SYMBOLIZATION = None
 
@@ -415,6 +469,9 @@ EXCLUDED_TAG = "__TEMPORARILY_DISABLED__"
 
 # If true, then a test failure or error will cause resmoke.py to exit and not run any more tests.
 FAIL_FAST = None
+
+# Timeout for execution of a single test, in seconds.
+TEST_TIMEOUT = None
 
 # Defines how to fuzz mongod parameters on startup
 FUZZ_MONGOD_CONFIGS = None
@@ -467,9 +524,9 @@ RUN_NO_FEATURE_FLAG_TESTS = None
 ADDITIONAL_FEATURE_FLAGS_FILE = None
 
 # List of feature flags to disable
-DISABLE_FEATURE_FLAGS = None
+DISABLED_FEATURE_FLAGS = None
 
-# List of enabled feature flags.
+# List of feature flags to enable.
 ENABLED_FEATURE_FLAGS = []
 
 # The path to the mongo executable used by resmoke.py.
@@ -502,6 +559,9 @@ MONGOT_SET_PARAMETERS = []
 # The --setParameter options passed to mongocryptd.
 MONGOCRYPTD_SET_PARAMETERS = []
 
+# The --setParameter options passed to mongo shell.
+MONGO_SET_PARAMETERS = []
+
 # If true, then all mongod's started by resmoke.py and by the mongo shell will not have journaling
 # enabled.
 NO_JOURNAL = None
@@ -512,7 +572,7 @@ NUM_CLIENTS_PER_FIXTURE = None
 # If set, each client will be constructed with a generated tenant id.
 USE_TENANT_CLIENT = False
 
-# Indicates the name of the test suite prior to the suite being split up by uite generation
+# Indicates the name of the test suite prior to the suite being split up by suite generation
 ORIGIN_SUITE = None
 
 # Report file for Cedar.
@@ -554,7 +614,7 @@ SHELL_SEED = None
 
 # If true, then the order the tests run in is randomized. Otherwise the tests will run in
 # alphabetical (case-insensitive) order.
-SHUFFLE = None
+SHUFFLE_STRATEGY = None
 
 # If true, the launching of jobs is staggered in resmoke.py.
 STAGGER_JOBS = None
@@ -610,6 +670,10 @@ STORAGE_ENGINE = None
 # storage engine cache size.
 STORAGE_ENGINE_CACHE_SIZE = None
 
+# If set, then all mongod's started by resmoke.py and by the mongo shell will use the specified
+# storage engine cache size.
+STORAGE_ENGINE_CACHE_SIZE_PCT = None
+
 # Yaml suites that specify how tests should be executed.
 SUITE_FILES = None
 
@@ -648,6 +712,15 @@ EXCLUDE_TAGS_FILE_PATH = None
 # Limit the number of tests to execute
 MAX_TEST_QUEUE_SIZE = None
 
+# The total shard count.
+SHARD_COUNT = None
+
+# The shard index of the shard to run.
+SHARD_INDEX = None
+
+# JSON containing historic test runtimes
+HISTORIC_TEST_RUNTIMES = None
+
 ##
 # Internally used configuration options that aren't exposed to the user
 ##
@@ -657,6 +730,9 @@ ARCHIVE_FILE = "archive.json"
 
 # S3 Bucket to upload archive files.
 ARCHIVE_BUCKET = "mongodatafiles"
+
+# Directory to store archive files.
+ARCHIVE_DIRECTORY = None
 
 # Force archive all files where appropriate. Eventually we want this to be the default option.
 # For now, only the mainline required builders have this option enabled.
@@ -669,24 +745,24 @@ BENCHMARK_OUT_FORMAT = "json"
 ORDER_TESTS_BY_NAME = True
 
 # Default file names for externally generated lists of tests created during the build.
-DEFAULT_BENCHMARK_TEST_LIST = "build/benchmarks.txt"
-DEFAULT_UNIT_TEST_LIST = "build/unittests.txt"
-DEFAULT_INTEGRATION_TEST_LIST = "build/integration_tests.txt"
-DEFAULT_LIBFUZZER_TEST_LIST = "build/libfuzzer_tests.txt"
-DEFAULT_PRETTY_PRINTER_TEST_LIST = "build/pretty_printer_tests.txt"
+DEFAULT_BENCHMARK_TEST_LIST = "bazel-bin/install/install-mongo_benchmark-stripped_test_list.txt"
+DEFAULT_UNIT_TEST_LIST = "bazel-bin/install/install-mongo_unittest_test_list.txt"
+DEFAULT_INTEGRATION_TEST_LIST = "bazel-bin/install/install-mongo_integration_test_test_list.txt"
+DEFAULT_LIBFUZZER_TEST_LIST = "bazel-bin/install/install-mongo_fuzzer_test_test_list.txt"
+DEFAULT_PRETTY_PRINTER_TEST_LIST = "bazel-bin/install/install-dist-test-stripped_test_list.txt"
 SPLIT_UNITTESTS_LISTS = [
-    f"build/{test_group}_quarter_unittests.txt"
-    for test_group in ["first", "second", "third", "fourth"]
+    f"bazel-bin/install/install-mongo_unittest_{test_group}_group_test_list.txt"
+    for test_group in ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth"]
 ]
 BENCHMARK_SUITE_TEST_LISTS = [
-    "build/repl_bm.txt",
-    "build/query_bm.txt",
-    "build/bsoncolumn_bm.txt",
-    "build/first_half_bm.txt",
-    "build/second_half_bm.txt",
-    "build/query_nond_bm.txt",
-    "build/wt_storage_bm.txt",
-    "build/sharding_bm.txt",
+    "bazel-bin/install/install-repl_bm_test_list.txt",
+    "bazel-bin/install/install-query_bm_test_list.txt",
+    "bazel-bin/install/install-bsoncolumn_bm_test_list.txt",
+    "bazel-bin/install/install-first_half_bm_test_list.txt",
+    "bazel-bin/install/install-second_half_bm_test_list.txt",
+    "bazel-bin/install/install-storage_bm_test_list.txt",
+    "bazel-bin/install/install-sharding_bm_test_list.txt",
+    "bazel-bin/install/install-sep_bm_test_list.txt",
 ]
 # External files or executables, used as suite selectors, that are created during the build and
 # therefore might not be available when creating a test membership map.
@@ -758,3 +834,13 @@ CONFIG_FUZZER_ENCRYPTION_OPTS = None
 # we need a way to provide the JS_GC_ZEAL setting provided as part of the mongo_mozjs_opts
 # exclusively to mongod/mongos.
 MOZJS_JS_GC_ZEAL = None
+
+# If resmoke should check that all paths in suite config selectors are valid.
+VALIDATE_SELECTOR_PATHS = True
+
+# If set, resmoke.py will set Testdata.pauseAfterPopulate to allow tests that check this
+# flag to pause after populating their initial datasets.
+PAUSE_AFTER_POPULATE = None
+
+# Loads all test extensions into the server.
+LOAD_ALL_EXTENSIONS = False

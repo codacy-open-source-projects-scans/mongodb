@@ -27,15 +27,7 @@
  *    it in the license file.
  */
 
-#include <cstddef>
-#include <memory>
-#include <set>
-#include <string>
-#include <type_traits>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/commands/query_cmd/analyze_cmd.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -45,23 +37,24 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/query_cmd/analyze_cmd.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/field_ref.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/profile_settings.h"
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/db/query/analyze_command_gen.h"
+#include "mongo/db/query/compiler/stats/scalar_histogram.h"
+#include "mongo/db/query/compiler/stats/stats_catalog.h"
+#include "mongo/db/query/compiler/stats/stats_for_histograms_gen.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
-#include "mongo/db/query/stats/scalar_histogram.h"
-#include "mongo/db/query/stats/stats_catalog.h"
-#include "mongo/db/query/stats/stats_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -70,6 +63,14 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
+#include <cstddef>
+#include <memory>
+#include <set>
+#include <string>
+#include <type_traits>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
 namespace mongo {
 namespace {
 
@@ -174,34 +175,44 @@ public:
 
             // Validate collection
             {
-                AutoGetCollectionForReadMaybeLockFree autoColl(opCtx, nss);
-                const auto& collection = autoColl.getCollection();
+                auto coll = acquireCollectionMaybeLockFree(
+                    opCtx,
+                    CollectionAcquisitionRequest::fromOpCtx(
+                        opCtx, nss, AcquisitionPrerequisites::kRead));
+                AutoStatsTracker statsTracker(
+                    opCtx,
+                    nss,
+                    Top::LockType::ReadLocked,
+                    AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                    DatabaseProfileSettings::get(opCtx->getServiceContext())
+                        .getDatabaseProfileLevel(nss.dbName()));
+                const auto& collectionPtr = coll.getCollectionPtr();
 
                 // Namespace exists
                 uassert(6799700,
                         str::stream() << "Couldn't find collection " << nss.toStringForErrorMsg(),
-                        collection);
+                        coll.exists());
 
                 // Namespace cannot be capped collection
-                const bool isCapped = collection->isCapped();
+                const bool isCapped = collectionPtr->isCapped();
                 uassert(6799701,
                         str::stream() << "Analyze command is not supported on capped collections",
                         !isCapped);
 
                 // Namespace is normal or clustered collection
                 const bool isNormalColl = nss.isNormalCollection();
-                const bool isClusteredColl = collection->isClustered();
+                const bool isClusteredColl = collectionPtr->isClustered();
                 uassert(6799702,
                         str::stream() << nss.toStringForErrorMsg()
                                       << " is not a normal or clustered collection",
                         isNormalColl || isClusteredColl);
 
                 if (sampleSize) {
-                    auto numRecords = collection->numRecords(opCtx);
+                    auto numRecords = collectionPtr->numRecords(opCtx);
                     if (numRecords == 0 || *sampleSize > numRecords) {
                         sampleRate = 1.0;
                     } else {
-                        sampleRate = double(*sampleSize) / collection->numRecords(opCtx);
+                        sampleRate = double(*sampleSize) / collectionPtr->numRecords(opCtx);
                     }
                 }
             }
@@ -238,7 +249,7 @@ public:
                 client.runCommand(
                     nss.dbName(),
                     analyzeCommandAsAggregationCommand(
-                        opCtx, nss.coll(), key->toString(), sampleRate, cmd.getNumberBuckets())
+                        opCtx, nss.coll(), std::string{*key}, sampleRate, cmd.getNumberBuckets())
                         .getValue(),
                     analyzeResult);
 
@@ -251,7 +262,7 @@ public:
 
                 // Invalidate statistics in the cache for the analyzed path
                 stats::StatsCatalog& statsCatalog = stats::StatsCatalog::get(opCtx);
-                uassertStatusOK(statsCatalog.invalidatePath(nss, key->toString()));
+                uassertStatusOK(statsCatalog.invalidatePath(nss, std::string{*key}));
 
             } else if (sampleSize || sampleRate) {
                 uassert(

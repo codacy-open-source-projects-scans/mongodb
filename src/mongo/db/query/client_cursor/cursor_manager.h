@@ -29,18 +29,9 @@
 
 #pragma once
 
-#include <absl/container/node_hash_map.h>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
-#include "mongo/db/catalog/util/partitioned.h"
+#include "mongo/db/local_catalog/util/partitioned.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
@@ -62,6 +53,15 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -129,6 +129,9 @@ public:
      * Returns ErrorCodes::CursorNotFound if the cursor does not exist or
      * ErrorCodes::QueryPlanKilled if the cursor was killed in between uses.
      *
+     * Returns ErrorCodes::CursorInUse if the cursor is already pinned. Only happens if several
+     * getMore and/or releaseMemory commands reference the same cursor.
+     *
      * 'checkPinAllowed' is a function which gives the caller the option to make checks about the
      * cursor before it is pinned. If 'checkPinAllowed' throws an exception, pinCursor() will
      * also throw and the cursor will be left in the cursor manager in the same state as it was
@@ -140,15 +143,12 @@ public:
      * nature of the inaccessability when the cursor is not accessible. If 'kNoCheckSession' is
      * passed for 'checkSessionAuth,' this function does not check if the current session is
      * authorized to access the cursor with the given id.
-     *
-     * Throws a AssertionException if the cursor is already pinned. Callers need not specially
-     * handle this error, as it should only happen if a misbehaving client attempts to
-     * simultaneously issue two operations against the same cursor id.
      */
     enum AuthCheck { kCheckSession = true, kNoCheckSession = false };
     StatusWith<ClientCursorPin> pinCursor(
         OperationContext* opCtx,
         CursorId id,
+        StringData commandName,
         const std::function<void(const ClientCursor&)>& checkPinAllowed = {},
         AuthCheck checkSessionAuth = kCheckSession);
 
@@ -164,10 +164,24 @@ public:
     Status killCursor(OperationContext* opCtx, CursorId id);
 
     /**
+     * Same as 'killCursor' but with an 'authChecker' callback. This is used to recheck
+     * authorization before the cursor is killed.
+     */
+    Status killCursorWithAuthCheck(OperationContext* opCtx,
+                                   CursorId id,
+                                   const std::function<void(const ClientCursor&)>& authChecker);
+
+    /**
      * Returns an OK status if we're authorized to erase the cursor. Otherwise, returns
      * ErrorCodes::Unauthorized.
      */
     Status checkAuthForKillCursors(OperationContext* opCtx, CursorId id);
+
+    /**
+     * Returns an OK status if we're authorized to release memory from the cursor. Otherwise,
+     * returns ErrorCodes::Unauthorized.
+     */
+    Status checkAuthForReleaseMemory(OperationContext* opCtx, CursorId id);
 
     /**
      * Appends sessions that have open cursors in this cursor manager to the given set of lsids.
@@ -188,12 +202,13 @@ public:
     /*
      * Returns a list of all open cursors for the given session.
      */
-    stdx::unordered_set<CursorId> getCursorsForSession(LogicalSessionId lsid) const;
+    stdx::unordered_set<CursorId> getCursorsForSession(const LogicalSessionId& lsid) const;
 
     /*
      * Returns a list of all open cursors for the given set of OperationKeys.
      */
-    stdx::unordered_set<CursorId> getCursorsForOpKeys(std::vector<OperationKey>) const;
+    stdx::unordered_set<CursorId> getCursorsForOpKeys(
+        const std::vector<OperationKey>& opKeys) const;
 
     /**
      * Returns the number of ClientCursors currently registered.
@@ -261,6 +276,10 @@ private:
         }
         map->erase(cursor->cursorid());
     }
+
+    Status _killCursor(OperationContext* opCtx,
+                       CursorId id,
+                       const std::function<void(const ClientCursor&)>& authChecker);
 
     ClockSource* _preciseClockSource;
 

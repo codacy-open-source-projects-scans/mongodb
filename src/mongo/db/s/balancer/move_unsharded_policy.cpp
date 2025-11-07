@@ -32,14 +32,14 @@
 #include "mongo/bson/json.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/list_collections_gen.h"
+#include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
+#include "mongo/db/local_catalog/ddl/list_collections_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/s/balancer/balancer_chunk_selection_policy.h"
-#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/resharding/resharding_server_parameters_gen.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
+#include "mongo/db/topology/shard_registry.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -67,9 +67,7 @@ bool clusterHasShardedCollections(OperationContext* opCtx, bool draining) {
     // Skip config.system.sessions if we are not draining as it isn't balanced as part of the random
     // migrations failpoint. If we are draining shards, though, we need to include this collection.
     if (!draining) {
-        matchBuilder.append(CollectionType::kNssFieldName,
-                            BSON("$regex"
-                                 << "^(?!config\\.).*"));
+        matchBuilder.append(CollectionType::kNssFieldName, BSON("$regex" << "^(?!config\\.).*"));
     }
 
     std::vector<BSONObj> rawPipelineStages{
@@ -105,9 +103,16 @@ std::map<NamespaceString, ListCollectionsReplyItem> getCollectionsFromShard(
     std::map<NamespaceString, ListCollectionsReplyItem> localColls;
     for (auto&& replyItemBson : listCollResponse.docs) {
         auto replyItem =
-            ListCollectionsReplyItem::parse(IDLParserContext("ListCollectionReply"), replyItemBson);
-        if (replyItem.getType() != "collection") {
-            // This entry is not a collection (e.g. view)
+            ListCollectionsReplyItem::parse(replyItemBson, IDLParserContext("ListCollectionReply"));
+        if (replyItem.getType() == "view") {
+            // Do not try to move views
+            continue;
+        }
+        // TODO SERVER-111320: remove the following condition after 9.0 becomes last LTS.
+        // Only viewless timeseries will exists by then.
+        if (replyItem.getType() == "timeseries" &&
+            !(replyItem.getInfo() && replyItem.getInfo()->getUuid())) {
+            // Do not try to move legacy timeseries view
             continue;
         }
         auto nss = NamespaceStringUtil::deserialize(dbName, replyItem.getName());
@@ -214,14 +219,13 @@ std::vector<std::pair<NamespaceString, ChunkType>> getTrackedUnshardedCollection
         //     ],
         //     "as": "chunks",
         // }
-        BSON("$lookup" << BSON("from"
-                               << "chunks"
-                               << "localField" << ChunkType::collectionUUID.name() << "foreignField"
-                               << CollectionType::kUuidFieldName << "pipeline"
-                               << BSON_ARRAY(
-                                      BSON("$match" << BSON(ChunkType::shard.name() << shardId))
+        BSON("$lookup" << BSON(
+                 "from" << "chunks"
+                        << "localField" << ChunkType::collectionUUID.name() << "foreignField"
+                        << CollectionType::kUuidFieldName << "pipeline"
+                        << BSON_ARRAY(BSON("$match" << BSON(ChunkType::shard.name() << shardId))
                                       << BSON("$limit" << 1))
-                               << "as" << chunkFieldName)),
+                        << "as" << chunkFieldName)),
 
         // This stage has two purposes:
         //   - Promote the chunk object to top level field in every collection entry.
@@ -292,9 +296,11 @@ void MoveUnshardedPolicy::applyActionResult(OperationContext* opCtx,
                 // TODO SERVER-89892 Investigate CannotCreateIndex error
                 case ErrorCodes::CannotCreateIndex:
                 case ErrorCodes::CommandNotSupported:
+                case ErrorCodes::ConflictingOperationInProgress:
                 case ErrorCodes::DuplicateKey:
                 case ErrorCodes::FailedToSatisfyReadPreference:
-                // TODO SERVER-90851 Investigate IllegalOperation error
+                // IllegalOperation may happen if moving inconsistent legacy timeseries collections
+                // (SERVER-90862) or temporary resharding collections (SERVER-90851, SERVER-110570).
                 case ErrorCodes::IllegalOperation:
                 case ErrorCodes::LockBusy:
                 case ErrorCodes::NamespaceNotFound:
@@ -307,7 +313,8 @@ void MoveUnshardedPolicy::applyActionResult(OperationContext* opCtx,
                 case ErrorCodes::ShardNotFound:
                 case ErrorCodes::SnapshotTooOld:
                 case ErrorCodes::StaleDbVersion:
-                case ErrorCodes::ConflictingOperationInProgress:
+                case ErrorCodes::TemporarilyUnavailable:
+                case ErrorCodes::TransactionTooLargeForCache:
                 case ErrorCodes::UserWritesBlocked:
                     return true;
                 default:
@@ -331,17 +338,17 @@ boost::optional<MigrateInfo> selectUnsplittableCollectionToMove(
     OperationContext* opCtx,
     stdx::unordered_set<ShardId>* availableShards,
     const std::vector<ShardId>& availableDonors,
-    const std::vector<ShardId>& availableRecipients) {
+    const std::vector<ShardId>& availableRecipients,
+    bool onlyTrackedCollection = false) {
     auto collectionAndChunks = [&]() -> boost::optional<std::pair<NamespaceString, ChunkType>> {
         const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
 
-        if (!feature_flags::gTrackUnshardedCollectionsUponCreation.isEnabled(fcvSnapshot) &&
-            !feature_flags::gTrackUnshardedCollectionsUponMoveCollection.isEnabled(fcvSnapshot)) {
+        if (!feature_flags::gTrackUnshardedCollectionsUponMoveCollection.isEnabled(fcvSnapshot)) {
             return boost::none;
         }
 
         for (const auto& shardId : availableDonors) {
-            if (!feature_flags::gTrackUnshardedCollectionsUponCreation.isEnabled(fcvSnapshot)) {
+            if (!onlyTrackedCollection) {
                 auto randomUntrackedColl = getRandomUntrackedCollectionOnShard(opCtx, shardId);
                 if (randomUntrackedColl) {
                     return randomUntrackedColl;
@@ -397,7 +404,8 @@ boost::optional<MigrateInfo> selectUnsplittableCollectionToMove(
 MigrateInfoVector MoveUnshardedPolicy::selectCollectionsToMove(
     OperationContext* opCtx,
     const std::vector<ClusterStatistics::ShardStatistics>& allShards,
-    stdx::unordered_set<ShardId>* availableShards) {
+    stdx::unordered_set<ShardId>* availableShards,
+    bool onlyTrackedCollection) {
     MigrateInfoVector result;
 
     if (auto sfp = fpBalancerShouldReturnRandomMigrations->scoped();
@@ -432,8 +440,11 @@ MigrateInfoVector MoveUnshardedPolicy::selectCollectionsToMove(
                      opCtx->getClient()->getPrng().urbg());
 
         // Try to move collections off draining shards first.
-        auto drainingShardMigration = selectUnsplittableCollectionToMove(
-            opCtx, availableShards, randomizedDrainingShards, randomizedAvailableShards);
+        auto drainingShardMigration = selectUnsplittableCollectionToMove(opCtx,
+                                                                         availableShards,
+                                                                         randomizedDrainingShards,
+                                                                         randomizedAvailableShards,
+                                                                         onlyTrackedCollection);
         if (drainingShardMigration) {
             result.emplace_back(*drainingShardMigration);
             return result;
@@ -449,8 +460,11 @@ MigrateInfoVector MoveUnshardedPolicy::selectCollectionsToMove(
             return result;
         }
 
-        auto migration = selectUnsplittableCollectionToMove(
-            opCtx, availableShards, randomizedAvailableShards, randomizedAvailableShards);
+        auto migration = selectUnsplittableCollectionToMove(opCtx,
+                                                            availableShards,
+                                                            randomizedAvailableShards,
+                                                            randomizedAvailableShards,
+                                                            onlyTrackedCollection);
         if (migration) {
             result.emplace_back(*migration);
         }

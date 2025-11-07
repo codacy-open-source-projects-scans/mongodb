@@ -29,29 +29,26 @@
 
 #include "mongo/db/exec/write_stage_common.h"
 
-
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/exec/classic/working_set.h"
+#include "mongo/db/exec/classic/working_set_common.h"
+#include "mongo/db/exec/matcher/matcher.h"
 #include "mongo/db/exec/shard_filterer_impl.h"
-#include "mongo/db/exec/working_set.h"
-#include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/keypattern.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/snapshot.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
@@ -128,7 +125,7 @@ void PreWriteFilter::logSkippingDocument(const Document& doc,
                 "stream event",
                 "op"_attr = opKind,
                 logAttrs(collNs),
-                "record"_attr = doc);
+                "record"_attr = redact(doc.toString()));
 }
 
 void PreWriteFilter::logFromMigrate(const Document& doc,
@@ -140,7 +137,7 @@ void PreWriteFilter::logFromMigrate(const Document& doc,
                 "prevent a wrong change stream event",
                 "op"_attr = opKind,
                 logAttrs(collNs),
-                "record"_attr = doc);
+                "record"_attr = redact(doc.toString()));
 }
 
 bool ensureStillMatches(const CollectionPtr& collection,
@@ -161,7 +158,8 @@ bool ensureStillMatches(const CollectionPtr& collection,
 
         // Make sure the re-fetched doc still matches the predicate.
         if (cq &&
-            !cq->getPrimaryMatchExpression()->matchesBSON(member->doc.value().toBson(), nullptr)) {
+            !exec::matcher::matchesBSON(
+                cq->getPrimaryMatchExpression(), member->doc.value().toBson(), nullptr)) {
             // No longer matches.
             return false;
         }

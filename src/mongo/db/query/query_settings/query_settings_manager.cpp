@@ -29,99 +29,46 @@
 
 #include "mongo/db/query/query_settings/query_settings_manager.h"
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-
-#include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/db/client.h"
-#include "mongo/db/commands/server_status.h"
 #include "mongo/db/logical_time.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/query/query_settings/query_settings_cluster_parameter_gen.h"
 #include "mongo/db/query/query_settings/query_settings_gen.h"
-#include "mongo/db/service_context.h"
-#include "mongo/idl/idl_parser.h"
-#include "mongo/util/decorable.h"
+#include "mongo/db/query/query_settings/query_settings_service.h"
+#include "mongo/db/query/query_settings/query_settings_usage_tracker.h"
+
+#include <algorithm>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo::query_settings {
 
 namespace {
-const auto getQuerySettingsManager =
-    ServiceContext::declareDecoration<std::unique_ptr<QuerySettingsManager>>();
-
-class QuerySettingsServerStatusSection final : public ServerStatusSection {
-public:
-    using ServerStatusSection::ServerStatusSection;
-
-    bool includeByDefault() const override {
-        // Only include if Query Settings are enabled.
-        // We need to use isEnabledUseLatestFCVWhenUninitialized instead of isEnabled because
-        // this could run during startup while the FCV is still uninitialized.
-        return feature_flags::gFeatureFlagQuerySettings.isEnabledUseLatestFCVWhenUninitialized(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
-    }
-
-    BSONObj generateSection(OperationContext* opCtx,
-                            const BSONElement& configElement) const override {
-        stdx::lock_guard<stdx::mutex> lk(_mutex);
-        return BSON("count" << _count << "size" << _size << "rejectCount"
-                            << _numSettingsWithReject);
-    }
-
-    void record(int count, int size, int numSettingsWithReject) {
-        stdx::lock_guard<stdx::mutex> lk(_mutex);
-        _count = count;
-        _size = size;
-        _numSettingsWithReject = numSettingsWithReject;
-    }
-
-private:
-    int _count = 0;
-    int _size = 0;
-    int _numSettingsWithReject = 0;
-    mutable stdx::mutex _mutex;
-};
-
-auto& querySettingsServerStatusSection =
-    *ServerStatusSectionBuilder<QuerySettingsServerStatusSection>("querySettings");
-
 auto computeTenantConfiguration(std::vector<QueryShapeConfiguration>&& settingsArray) {
     QueryShapeConfigurationsMap queryShapeConfigurationMap;
     queryShapeConfigurationMap.reserve(settingsArray.size());
     for (auto&& queryShapeConfiguration : settingsArray) {
-        queryShapeConfigurationMap.insert({queryShapeConfiguration.getQueryShapeHash(),
-                                           {queryShapeConfiguration.getSettings(),
-                                            queryShapeConfiguration.getRepresentativeQuery()}});
+        queryShapeConfigurationMap.insert(
+            {queryShapeConfiguration.getQueryShapeHash(),
+             QueryShapeConfigCachedEntry{
+                 .querySettings = queryShapeConfiguration.getSettings(),
+                 .representativeQuery_deprecated = queryShapeConfiguration.getRepresentativeQuery(),
+                 // Initially assume that no representative query is present. If one is present in
+                 // "config.queryShapeRepresentativeQueries", the next backfill attempt will update
+                 // this flag to reflect the correct state.
+                 // TODO SERVER-105065 Populate this flag with the correct state.
+                 .hasRepresentativeQuery = false,
+             }});
     }
     return queryShapeConfigurationMap;
 }
+
+int countMissingRepresentativeQueries(const QueryShapeConfigurationsMap& config) {
+    return std::count_if(config.begin(), config.end(), [](auto&& elem) {
+        return !elem.second.hasRepresentativeQuery;
+    });
+}
 }  // namespace
 
-QuerySettingsManager& QuerySettingsManager::get(ServiceContext* service) {
-    return *getQuerySettingsManager(service);
-}
-
-QuerySettingsManager& QuerySettingsManager::get(OperationContext* opCtx) {
-    return *getQuerySettingsManager(opCtx->getServiceContext());
-}
-
-void QuerySettingsManager::create(
-    ServiceContext* service,
-    std::function<void(OperationContext*)> clusterParameterRefreshFn,
-    std::function<void(std::vector<QueryShapeConfiguration>&)> sanitizeQuerySettingsHintsFn) {
-    getQuerySettingsManager(service) = std::make_unique<QuerySettingsManager>(
-        service, clusterParameterRefreshFn, sanitizeQuerySettingsHintsFn);
-}
-
-boost::optional<QuerySettings> QuerySettingsManager::getQuerySettingsForQueryShapeHash(
+boost::optional<QuerySettingsLookupResult> QuerySettingsManager::getQuerySettingsForQueryShapeHash(
     const query_shape::QueryShapeHash& queryShapeHash,
     const boost::optional<TenantId>& tenantId) const {
     auto readLock = _mutex.readLock();
@@ -133,8 +80,8 @@ boost::optional<QuerySettings> QuerySettingsManager::getQuerySettingsForQuerySha
         _tenantIdToVersionedQueryShapeConfigurationsMap.end()) {
         return boost::none;
     }
-    const auto& queryShapeHashToQueryShapeConfigurationsMap =
-        versionedQueryShapeConfigurationsIt->second.queryShapeHashToQueryShapeConfigurationsMap;
+    const auto& [queryShapeHashToQueryShapeConfigurationsMap, clusterParameterTime] =
+        versionedQueryShapeConfigurationsIt->second;
 
     // Lookup the query shape configuration by the query shape hash.
     const auto queryShapeConfigurationsIt =
@@ -142,67 +89,60 @@ boost::optional<QuerySettings> QuerySettingsManager::getQuerySettingsForQuerySha
     if (queryShapeHashToQueryShapeConfigurationsMap.end() == queryShapeConfigurationsIt) {
         return boost::none;
     }
-    return queryShapeConfigurationsIt->second.first;
+
+    const auto& queryShapeConfiguration = queryShapeConfigurationsIt->second;
+    return QuerySettingsLookupResult{.querySettings = queryShapeConfiguration.querySettings,
+                                     .hasRepresentativeQuery =
+                                         queryShapeConfiguration.hasRepresentativeQuery,
+                                     .clusterParameterTime = clusterParameterTime};
 }
 
-void QuerySettingsManager::setQueryShapeConfigurations(
-    std::vector<QueryShapeConfiguration>&& settingsArray,
-    LogicalTime parameterClusterTime,
+void QuerySettingsManager::setAllQueryShapeConfigurations(
+    QueryShapeConfigurationsWithTimestamp&& config, const boost::optional<TenantId>& tenantId) {
+    // Set the new versioned query shape configurations. Do not enforce the strict time match
+    // as the new 'clusterParameterTime' might've been incremented in the meantime.
+    setVersionedQueryShapeConfigurations</* enforceClusterParameterTimeMatch  */ false>(
+        VersionedQueryShapeConfigurations{
+            computeTenantConfiguration(std::move(config.queryShapeConfigurations)),
+            config.clusterParameterTime},
+        tenantId);
+}
+
+template <bool enforceClusterParameterTimeMatch>
+void QuerySettingsManager::setVersionedQueryShapeConfigurations(
+    VersionedQueryShapeConfigurations&& newQueryShapeConfigurations,
     const boost::optional<TenantId>& tenantId) {
-    // Build new query shape configurations.
-    VersionedQueryShapeConfigurations newQueryShapeConfigurations{
-        computeTenantConfiguration(std::move(settingsArray)), parameterClusterTime};
-
-    // Install the query shape configurations.
-    {
-        auto writeLock = _mutex.writeLock();
-        const auto versionedQueryShapeConfigurationsIt =
-            _tenantIdToVersionedQueryShapeConfigurationsMap.find(tenantId);
-        if (_tenantIdToVersionedQueryShapeConfigurationsMap.end() !=
-            versionedQueryShapeConfigurationsIt) {
-            // Swap the configurations to minimize the time the lock is held in exclusive mode by
-            // deferring the destruction of the previous version of the query shape configurations
-            // to the time when the lock is not held.
-            std::swap(versionedQueryShapeConfigurationsIt->second, newQueryShapeConfigurations);
-        } else {
-            _tenantIdToVersionedQueryShapeConfigurationsMap.emplace(
-                tenantId, std::move(newQueryShapeConfigurations));
-        }
-    }
-}
-
-QueryShapeConfigurationsWithTimestamp QuerySettingsManager::getAllQueryShapeConfigurations(
-    const boost::optional<TenantId>& tenantId) const {
-    auto readLock = _mutex.readLock();
-    return {getAllQueryShapeConfigurations_inlock(tenantId),
-            getClusterParameterTime_inlock(tenantId)};
-}
-
-std::vector<QueryShapeConfiguration> QuerySettingsManager::getAllQueryShapeConfigurations_inlock(
-    const boost::optional<TenantId>& tenantId) const {
-    auto versionedQueryShapeConfigurationsIt =
+    auto&& tracker = QuerySettingsUsageTracker::get(getGlobalServiceContext());
+    const auto missingRepresentativeQueries = countMissingRepresentativeQueries(
+        newQueryShapeConfigurations.queryShapeHashToQueryShapeConfigurationsMap);
+    auto writeLock = _mutex.writeLock();
+    const auto versionedQueryShapeConfigurationsIt =
         _tenantIdToVersionedQueryShapeConfigurationsMap.find(tenantId);
-    if (versionedQueryShapeConfigurationsIt ==
-        _tenantIdToVersionedQueryShapeConfigurationsMap.end()) {
-        return {};
+
+    // Create the configuration if it doesn't already exist.
+    if (_tenantIdToVersionedQueryShapeConfigurationsMap.end() ==
+        versionedQueryShapeConfigurationsIt) {
+        _tenantIdToVersionedQueryShapeConfigurationsMap.emplace(
+            tenantId, std::move(newQueryShapeConfigurations));
+        tracker.setMissingRepresentativeQueries(missingRepresentativeQueries);
+        return;
     }
 
-    const auto& queryShapeHashToQueryShapeConfigurationsMap =
-        versionedQueryShapeConfigurationsIt->second.queryShapeHashToQueryShapeConfigurationsMap;
-    std::vector<QueryShapeConfiguration> configurations;
-    configurations.reserve(queryShapeHashToQueryShapeConfigurationsMap.size());
-    for (const auto& [queryShapeHash, queryShapeConfiguration] :
-         queryShapeHashToQueryShapeConfigurationsMap) {
-        auto& newConfiguration =
-            configurations.emplace_back(queryShapeHash, queryShapeConfiguration.first);
-        newConfiguration.setRepresentativeQuery(queryShapeConfiguration.second);
+    // TODO SERVER-106885 Ensure that 'clusterParameterTime' is monotonous.
+    auto&& currQueryShapeConfigurations = versionedQueryShapeConfigurationsIt->second;
+    if constexpr (enforceClusterParameterTimeMatch) {
+        uassert(ErrorCodes::ConflictingOperationInProgress,
+                "detected concurent operation in progress while marking backfilled "
+                "representative queries",
+                currQueryShapeConfigurations.clusterParameterTime ==
+                    newQueryShapeConfigurations.clusterParameterTime);
     }
-    return configurations;
-}
 
-void QuerySettingsManager::refreshQueryShapeConfigurations(OperationContext* opCtx) {
-    if (_clusterParameterRefreshFn)
-        _clusterParameterRefreshFn(opCtx);
+    // Swap the configurations to minimize the time the lock is held in exclusive mode by
+    // deferring the destruction of the previous version of the query shape configurations
+    // to the time when the lock is not held.
+    std::swap(currQueryShapeConfigurations, newQueryShapeConfigurations);
+    tracker.setMissingRepresentativeQueries(missingRepresentativeQueries);
 }
 
 void QuerySettingsManager::removeAllQueryShapeConfigurations(
@@ -226,6 +166,70 @@ void QuerySettingsManager::removeAllQueryShapeConfigurations(
     }
 }
 
+void QuerySettingsManager::markBackfilledRepresentativeQueries(
+    const std::vector<query_shape::QueryShapeHash>& backfilledHashes,
+    const LogicalTime& clusterParameterTime,
+    const boost::optional<TenantId>& tenantId) {
+    if (backfilledHashes.empty()) {
+        // Nothing to do, just return early to avoid acquiring the locks.
+        return;
+    }
+    auto versionedQueryShapeConfigurations = getVersionedQueryShapeConfigurations(tenantId);
+    uassert(ErrorCodes::ConflictingOperationInProgress,
+            "detected concurent operation in progress while marking backfilled "
+            "representative queries",
+            clusterParameterTime == versionedQueryShapeConfigurations.clusterParameterTime);
+    for (auto&& hash : backfilledHashes) {
+        auto&& it =
+            versionedQueryShapeConfigurations.queryShapeHashToQueryShapeConfigurationsMap.find(
+                hash);
+        tassert(10566101,
+                str::stream() << "missing query shape configuration for " << hash.toHexString(),
+                it !=
+                    versionedQueryShapeConfigurations.queryShapeHashToQueryShapeConfigurationsMap
+                        .end());
+        it->second.hasRepresentativeQuery = true;
+    }
+    // Set the new query shape configuration. Ensure that the new 'clusterParameterTime' matches
+    // its previous value to protect against concurent operations in progress.
+    setVersionedQueryShapeConfigurations</* enforceClusterParameterTimeMatch */ true>(
+        std::move(versionedQueryShapeConfigurations), tenantId);
+}
+
+QueryShapeConfigurationsWithTimestamp QuerySettingsManager::getAllQueryShapeConfigurations(
+    const boost::optional<TenantId>& tenantId) const {
+    auto [queryShapeHashToQueryShapeConfigurationsMap, clusterParameterTime] =
+        getVersionedQueryShapeConfigurations(tenantId);
+
+    std::vector<QueryShapeConfiguration> configurations;
+    configurations.reserve(queryShapeHashToQueryShapeConfigurationsMap.size());
+    for (const auto& [queryShapeHash, queryShapeConfiguration] :
+         queryShapeHashToQueryShapeConfigurationsMap) {
+        auto& newConfiguration =
+            configurations.emplace_back(queryShapeHash, queryShapeConfiguration.querySettings);
+        newConfiguration.setRepresentativeQuery(
+            queryShapeConfiguration.representativeQuery_deprecated);
+    }
+    return QueryShapeConfigurationsWithTimestamp{std::move(configurations), clusterParameterTime};
+}
+
+VersionedQueryShapeConfigurations QuerySettingsManager::getVersionedQueryShapeConfigurations(
+    const boost::optional<TenantId>& tenantId) const {
+    auto readLock = _mutex.readLock();
+    auto versionedQueryShapeConfigurationsIt =
+        _tenantIdToVersionedQueryShapeConfigurationsMap.find(tenantId);
+    if (versionedQueryShapeConfigurationsIt ==
+        _tenantIdToVersionedQueryShapeConfigurationsMap.end()) {
+        return {};
+    }
+
+    const auto& queryShapeHashToQueryShapeConfigurationsMap =
+        versionedQueryShapeConfigurationsIt->second.queryShapeHashToQueryShapeConfigurationsMap;
+    return VersionedQueryShapeConfigurations{
+        .queryShapeHashToQueryShapeConfigurationsMap = queryShapeHashToQueryShapeConfigurationsMap,
+        .clusterParameterTime = getClusterParameterTime_inlock(tenantId)};
+}
+
 LogicalTime QuerySettingsManager::getClusterParameterTime(
     const boost::optional<TenantId>& tenantId) const {
     auto readLock = _mutex.readLock();
@@ -242,76 +246,4 @@ LogicalTime QuerySettingsManager::getClusterParameterTime_inlock(
     }
     return versionedQueryShapeConfigurationsIt->second.clusterParameterTime;
 }
-
-void QuerySettingsManager::appendQuerySettingsClusterParameterValue(
-    BSONObjBuilder* bob, const boost::optional<TenantId>& tenantId) {
-    auto readLock = _mutex.readLock();
-    bob->append("_id"_sd, QuerySettingsManager::kQuerySettingsClusterParameterName);
-    BSONArrayBuilder arrayBuilder(
-        bob->subarrayStart(QuerySettingsClusterParameterValue::kSettingsArrayFieldName));
-    for (auto&& item : getAllQueryShapeConfigurations_inlock(tenantId)) {
-        arrayBuilder.append(item.toBSON());
-    }
-    arrayBuilder.done();
-    bob->append(QuerySettingsClusterParameterValue::kClusterParameterTimeFieldName,
-                getClusterParameterTime_inlock(tenantId).asTimestamp());
-}
-
-void QuerySettingsClusterParameter::append(OperationContext* opCtx,
-                                           BSONObjBuilder* bob,
-                                           StringData name,
-                                           const boost::optional<TenantId>& tenantId) {
-    auto& querySettingsManager = QuerySettingsManager::get(getGlobalServiceContext());
-    querySettingsManager.appendQuerySettingsClusterParameterValue(bob, tenantId);
-}
-
-Status QuerySettingsClusterParameter::set(const BSONElement& newValueElement,
-                                          const boost::optional<TenantId>& tenantId) {
-    auto& querySettingsManager = QuerySettingsManager::get(getGlobalServiceContext());
-    auto newSettings = QuerySettingsClusterParameterValue::parse(
-        IDLParserContext("querySettingsParameterValue",
-                         boost::none /* vts */,
-                         tenantId,
-                         SerializationContext::stateDefault()),
-        newValueElement.Obj());
-    auto& settingsArray = newSettings.getSettingsArray();
-
-    // TODO SERVER-97546 Remove PQS index hint sanitization.
-    querySettingsManager.sanitizeQuerySettingsHints(settingsArray);
-
-    size_t rejectCount = 0;
-    for (const auto& config : settingsArray) {
-        if (config.getSettings().getReject()) {
-            ++rejectCount;
-        }
-    }
-    querySettingsServerStatusSection.record(
-        /* count */ static_cast<int>(settingsArray.size()),
-        /* size */ static_cast<int>(newValueElement.valuesize()),
-        /* numSettingsWithReject */ static_cast<int>(rejectCount));
-    querySettingsManager.setQueryShapeConfigurations(
-        std::move(settingsArray), newSettings.getClusterParameterTime(), tenantId);
-    return Status::OK();
-}
-
-Status QuerySettingsClusterParameter::reset(const boost::optional<TenantId>& tenantId) {
-    auto& querySettingsManager = QuerySettingsManager::get(getGlobalServiceContext());
-    querySettingsManager.removeAllQueryShapeConfigurations(tenantId);
-    return Status::OK();
-}
-
-LogicalTime QuerySettingsClusterParameter::getClusterParameterTime(
-    const boost::optional<TenantId>& tenantId) const {
-    auto& querySettingsManager = QuerySettingsManager::get(getGlobalServiceContext());
-    return querySettingsManager.getClusterParameterTime(tenantId);
-}
-
-// TODO SERVER-97546 Remove PQS index hint sanitization.
-void QuerySettingsManager::sanitizeQuerySettingsHints(
-    std::vector<QueryShapeConfiguration>& queryShapeConfigs) {
-    if (_sanitizeQuerySettingsHintsFn) {
-        _sanitizeQuerySettingsHintsFn(queryShapeConfigs);
-    }
-}
-
 };  // namespace mongo::query_settings

@@ -29,8 +29,8 @@
 
 #pragma once
 
-#include "mongo/base/static_assert.h"
 #include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::stage_builder {
 

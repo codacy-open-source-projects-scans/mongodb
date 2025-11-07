@@ -21,10 +21,12 @@ selector:
 
     # Skip any tests that run with auth explicitly.
     - jstests/multiVersion/genericBinVersion/load_keys_on_upgrade.js
+    - jstests/multiVersion/genericBinVersion/server-security/dollar_audit_mixed_version_mongods.js
 
   exclude_with_any_tags:
     - featureFlagToaster
     - featureFlagSpoon
+    - auth_incompatible
 
 # Multiversion tests start their own mongod's.
 executor:
@@ -34,10 +36,15 @@ executor:
         TestData:
           setParameters:
             bsonTestValidationVersion: 1
+            logComponentVerbosity:
+              accessControl: 2
+              command: 2
           auth: true
           #          authMechanism: SCRAM-SHA-256
           keyFile: *keyFile
           keyFileData: *keyFileData
+          # TODO (SERVER-111403): Enable OpenTelemetry tracing in multiversion suites.
+          enableOTELTracing: false
       authenticationDatabase: local
       #      authenticationMechanism: SCRAM-SHA-256
       password: *keyFileData

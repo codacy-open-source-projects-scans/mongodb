@@ -29,9 +29,10 @@
 
 #pragma once
 
-#include <cstdint>
-
 #include "mongo/db/query/client_cursor/cursor_response_gen.h"
+#include "mongo/util/modules.h"
+
+#include <cstdint>
 
 namespace mongo::query_stats {
 
@@ -40,16 +41,33 @@ namespace mongo::query_stats {
  * are optionally rolled up from the data-bearing nodes to routers, and are aggregated into cursors
  * and OpDebug. This structure represents those metrics and can be used to store and aggregate them.
  */
-struct DataBearingNodeMetrics {
+struct MONGO_MOD_PUB DataBearingNodeMetrics {
     uint64_t keysExamined = 0;
     uint64_t docsExamined = 0;
     uint64_t bytesRead = 0;
     Microseconds readingTime{0};
     Milliseconds clusterWorkingTime{0};
+    // This value will be negative if we are not running on Linux since collecting cpu time is only
+    // supported on Linux systems.
+    Nanoseconds cpuNanos{0};
+
+    uint64_t delinquentAcquisitions{0};
+    Milliseconds totalAcquisitionDelinquency{0};
+    Milliseconds maxAcquisitionDelinquency{0};
+
+    uint64_t numInterruptChecks{0};
+    Milliseconds overdueInterruptApproxMax{0};
+
     bool hasSortStage : 1 = false;
     bool usedDisk : 1 = false;
     bool fromMultiPlanner : 1 = false;
     bool fromPlanCache : 1 = true;
+
+    uint64_t nMatched = 0;
+    uint64_t nUpserted = 0;
+    uint64_t nModified = 0;
+    uint64_t nDeleted = 0;
+    uint64_t nInserted = 0;
 
     /**
      * Adds the fields from the given object into the fields of this object using addition (in the
@@ -61,10 +79,23 @@ struct DataBearingNodeMetrics {
         bytesRead += other.bytesRead;
         readingTime += other.readingTime;
         clusterWorkingTime += other.clusterWorkingTime;
+        cpuNanos += other.cpuNanos;
+        delinquentAcquisitions += other.delinquentAcquisitions;
+        totalAcquisitionDelinquency += other.totalAcquisitionDelinquency;
+        maxAcquisitionDelinquency =
+            std::max(maxAcquisitionDelinquency, other.maxAcquisitionDelinquency);
+        numInterruptChecks += other.numInterruptChecks;
+        overdueInterruptApproxMax =
+            std::max(overdueInterruptApproxMax, other.overdueInterruptApproxMax);
         hasSortStage = hasSortStage || other.hasSortStage;
         usedDisk = usedDisk || other.usedDisk;
         fromMultiPlanner = fromMultiPlanner || other.fromMultiPlanner;
         fromPlanCache = fromPlanCache && other.fromPlanCache;
+        nMatched += other.nMatched;
+        nUpserted += other.nUpserted;
+        nModified += other.nModified;
+        nDeleted += other.nDeleted;
+        nInserted += other.nInserted;
     }
 
     void add(const boost::optional<DataBearingNodeMetrics>& other) {
@@ -83,10 +114,23 @@ struct DataBearingNodeMetrics {
         bytesRead += metrics.getBytesRead();
         readingTime += Microseconds(metrics.getReadingTimeMicros());
         clusterWorkingTime += Milliseconds(metrics.getWorkingTimeMillis());
+        cpuNanos += Nanoseconds(metrics.getCpuNanos());
+        delinquentAcquisitions += metrics.getDelinquentAcquisitions();
+        totalAcquisitionDelinquency += Milliseconds(metrics.getTotalAcquisitionDelinquencyMillis());
+        maxAcquisitionDelinquency = Milliseconds(std::max(
+            maxAcquisitionDelinquency.count(), metrics.getMaxAcquisitionDelinquencyMillis()));
+        numInterruptChecks += metrics.getNumInterruptChecks();
+        overdueInterruptApproxMax = Milliseconds{std::max(
+            overdueInterruptApproxMax.count(), metrics.getOverdueInterruptApproxMaxMillis())};
         hasSortStage = hasSortStage || metrics.getHasSortStage();
         usedDisk = usedDisk || metrics.getUsedDisk();
         fromMultiPlanner = fromMultiPlanner || metrics.getFromMultiPlanner();
         fromPlanCache = fromPlanCache && metrics.getFromPlanCache();
+        nMatched += metrics.getNMatched();
+        nUpserted += metrics.getNUpserted();
+        nModified += metrics.getNModified();
+        nDeleted += metrics.getNDeleted();
+        nInserted += metrics.getNInserted();
     }
 };
 

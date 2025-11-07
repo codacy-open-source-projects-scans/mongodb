@@ -29,61 +29,37 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <set>
-
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/commands/notify_sharding_event_gen.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/global_catalog/ddl/notify_sharding_event_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
-namespace mongo {
+#include <set>
 
-/*
-CommitPhase is used to implement a double oplog entry protocol to support the change stream.
-A first notification is written to the oplog to notify the operation is about to be committed.
-A second notification will eventually confirm the operation is committed or aborted.
-This is necessary to make sure the change stream  will have a cursor open against any shards owning
-data for the nss before the operation is committed (and therefore any insert or update is
-performed on those shards).
-- kPrepare: Before the commit. Not reported to the user.
-- kSuccessful: After the commit. Reported to the user.
-- kAborted: After the abort. Not reported to the user.
-*/
-enum class CommitPhase {
-    kSuccessful,
-    kAborted,
-    kPrepare,
-};
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUB mongo {
 
 /*
  * This function writes a no-op oplog entry on shardCollection event.
  * TODO SERVER-66333: move all other notifyChangeStreams* functions here.
  */
-void notifyChangeStreamsOnShardCollection(
-    OperationContext* opCtx,
-    const NamespaceString& nss,
-    const UUID& uuid,
-    BSONObj cmd,
-    CommitPhase commitPhase,
-    const boost::optional<std::set<ShardId>>& shardIds = boost::none);
+void notifyChangeStreamsOnShardCollection(OperationContext* opCtx,
+                                          const CollectionSharded& notification);
 
 /**
- * Writes a no-op oplog entry to match the addition of a database to the sharding catalog;
- * such database may have been either created or imported into the cluster (as part of an
- * addShard operation).
- * @param dbName the name of the database being added
- * @param primaryShard the primary shard ID assigned to the database being added (it may differ from
- * the shard ID of the RS where this method gets invoked)
- * @param isImported false when dbName is added to the sharding catalog by a database creation
- * request, true when the addition is the result of an addShard operation.
+ * Builds no-op oplog entry corresponding to movePrimary event.
  */
-void notifyChangeStreamsOnDatabaseAdded(OperationContext* opCtx,
-                                        const DatabasesAdded& databasesAddedNotification);
+repl::MutableOplogEntry buildMovePrimaryOplogEntry(OperationContext* opCtx,
+                                                   const DatabaseName& dbName,
+                                                   const ShardId& oldPrimary,
+                                                   const ShardId& newPrimary);
 
 /**
  * Writes a no-op oplog entry on movePrimary event.
@@ -100,6 +76,53 @@ void notifyChangeStreamsOnReshardCollectionComplete(
     OperationContext* opCtx, const CollectionResharded& CollectionReshardedNotification);
 
 /**
+ * Builds no-op oplog entries corresponding to the completion of moveChunk/moveRange operation.
+ * Builds up to three oplog entries:
+ * - moveChunk
+ * - migrateLastChunkFromShard
+ * - migrateChunkToNewShard
+ */
+std::vector<repl::MutableOplogEntry> buildMoveChunkOplogEntries(
+    OperationContext* opCtx,
+    const NamespaceString& collName,
+    const boost::optional<UUID>& collUUID,
+    const ShardId& donor,
+    const ShardId& recipient,
+    bool noMoreCollectionChunksOnDonor,
+    bool firstCollectionChunkOnRecipient);
+
+/**
+ * Writes a a series of no-op oplog entries to match the completion of a moveChunk/moveRange
+ * operation.
+ */
+void notifyChangeStreamsOnChunkMigrated(OperationContext* opCtx,
+                                        const NamespaceString& collName,
+                                        const boost::optional<UUID>& collUUID,
+                                        const ShardId& donor,
+                                        const ShardId& recipient,
+                                        bool noMoreCollectionChunksOnDonor,
+                                        bool firstCollectionChunkOnRecipient);
+
+/**
+ * Builds no-op oplog entry corresponding to NamespacePlacementChanged notification.
+ */
+repl::MutableOplogEntry buildNamespacePlacementChangedOplogEntry(
+    OperationContext* opCtx, const NamespacePlacementChanged& notification);
+
+/**
+ * Writes a no-op oplog entry concerning the commit of a generic placement-changing operation
+ * concerning the namespace and the cluster time reported in the notification.
+ */
+void notifyChangeStreamsOnNamespacePlacementChanged(OperationContext* opCtx,
+                                                    const NamespacePlacementChanged& notification);
+
+/**
+ * Writes a no-op oplog entry concerning the commit of an operation
+ * modifying the operational boundaries of config.placementHistory.
+ */
+void notifyChangeStreamsOnPlacementHistoryMetadataChanged(OperationContext* opCtx);
+
+/**
  * Writes a no-op oplog entry on the end of multi shard transaction.
  **/
 void notifyChangeStreamOnEndOfTransaction(OperationContext* opCtx,
@@ -107,4 +130,4 @@ void notifyChangeStreamOnEndOfTransaction(OperationContext* opCtx,
                                           const TxnNumber& txnNumber,
                                           const std::vector<NamespaceString>& affectedNamespaces);
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

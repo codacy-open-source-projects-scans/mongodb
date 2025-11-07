@@ -29,24 +29,14 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
@@ -58,6 +48,7 @@
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/oplog_entry_or_grouped_inserts.h"
+#include "mongo/db/repl/oplog_writer.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_consistency_markers.h"
 #include "mongo/db/repl/replication_coordinator.h"
@@ -68,11 +59,21 @@
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/session_txn_record_gen.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -103,7 +104,7 @@ public:
 /**
  * OpObserver for OplogApplierImpl test fixture.
  */
-class OplogApplierImplOpObserver : public OpObserverNoop {
+class MONGO_MOD_PUB OplogApplierImplOpObserver : public OpObserverNoop {
 public:
     /**
      * This function is called whenever OplogApplierImpl inserts documents into a collection.
@@ -138,13 +139,15 @@ public:
     /**
      * Called when OplogApplierImpl creates a collection.
      */
-    void onCreateCollection(OperationContext* opCtx,
-                            const CollectionPtr& coll,
-                            const NamespaceString& collectionName,
-                            const CollectionOptions& options,
-                            const BSONObj& idIndex,
-                            const OplogSlot& createOpTime,
-                            bool fromMigrate) override;
+    void onCreateCollection(
+        OperationContext* opCtx,
+        const NamespaceString& collectionName,
+        const CollectionOptions& options,
+        const BSONObj& idIndex,
+        const OplogSlot& createOpTime,
+        const boost::optional<CreateCollCatalogIdentifier>& createCollCatalogIdentifier,
+        bool fromMigrate,
+        bool isViewlessTimeseries) override;
 
     /**
      * Called when OplogApplierImpl renames a collection.
@@ -156,7 +159,8 @@ public:
                             const boost::optional<UUID>& dropTargetUUID,
                             std::uint64_t numRecords,
                             bool stayTemp,
-                            bool markFromMigrate) override;
+                            bool markFromMigrate,
+                            bool isViewlessTimeseries) override;
 
     /**
      * Called when OplogApplierImpl creates an index.
@@ -164,8 +168,9 @@ public:
     void onCreateIndex(OperationContext* opCtx,
                        const NamespaceString& nss,
                        const UUID& uuid,
-                       BSONObj indexDoc,
-                       bool fromMigrate) override;
+                       const IndexBuildInfo& indexBuildInfo,
+                       bool fromMigrate,
+                       bool isViewlessTimeseries) override;
 
     /**
      * Called when OplogApplierImpl drops an index.
@@ -174,7 +179,8 @@ public:
                      const NamespaceString& nss,
                      const UUID& uuid,
                      const std::string& indexName,
-                     const BSONObj& idxDescriptor) override;
+                     const BSONObj& idxDescriptor,
+                     bool isViewlessTimeseries) override;
 
     /**
      * Called when OplogApplierImpl performs a CollMod.
@@ -184,7 +190,8 @@ public:
                    const UUID& uuid,
                    const BSONObj& collModCmd,
                    const CollectionOptions& oldCollOptions,
-                   boost::optional<IndexCollModInfo> indexInfo) override;
+                   boost::optional<IndexCollModInfo> indexInfo,
+                   bool isViewlessTimeseries) override;
 
     // Hooks for OpObserver functions. Defaults to a no-op function but may be overridden to
     // check actual documents mutated.
@@ -200,11 +207,12 @@ public:
 
     std::function<void(OperationContext*, const OplogUpdateEntryArgs&)> onUpdateFn;
 
-    std::function<void(OperationContext*,
-                       const CollectionPtr&,
-                       const NamespaceString&,
-                       const CollectionOptions&,
-                       const BSONObj&)>
+    std::function<void(
+        OperationContext*,
+        const NamespaceString&,
+        const CollectionOptions&,
+        const BSONObj&,
+        const boost::optional<CreateCollCatalogIdentifier>& createCollCatalogIdentifier)>
         onCreateCollectionFn;
 
     std::function<void(OperationContext*,
@@ -217,7 +225,8 @@ public:
                        bool)>
         onRenameCollectionFn;
 
-    std::function<void(OperationContext*, const NamespaceString&, UUID, BSONObj, bool)>
+    std::function<void(
+        OperationContext*, const NamespaceString&, UUID, const IndexBuildInfo&, bool)>
         onCreateIndexFn;
 
     std::function<void(OperationContext*,
@@ -236,7 +245,7 @@ public:
         onCollModFn;
 };
 
-class OplogApplierImplTest : public ServiceContextMongoDTest {
+class MONGO_MOD_OPEN OplogApplierImplTest : public ServiceContextMongoDTest {
 protected:
     explicit OplogApplierImplTest(Options options = {})
         : ServiceContextMongoDTest(options.useReplSettings(true)) {}
@@ -254,6 +263,10 @@ protected:
     std::unique_ptr<ReplicationConsistencyMarkers> _consistencyMarkers;
     ServiceContext* serviceContext;
     OplogApplierImplOpObserver* _opObserver = nullptr;
+    // TODO SERVER-99926: We disable all lock ordering checks for unit tests to avoid having to fix
+    // all instances of lock ordering violations. This is okay to do temporarily as unit tests are
+    // not representative of the actual production lock ordering.
+    boost::optional<DisableLockerRuntimeOrderingChecks> _disableChecks;
 
     template <typename T>
     inline void setServerParameter(const std::string& name, T value) {
@@ -265,6 +278,7 @@ protected:
         return OpTime(Timestamp(Seconds(lastSecond++), 0), 1LL);
     }
 
+    virtual std::unique_ptr<ReplicationCoordinator> makeReplCoord(ServiceContext*);
     void setUp() override;
     void tearDown() override;
 
@@ -277,6 +291,11 @@ protected:
     Status runOpsSteadyState(std::vector<OplogEntry> ops);
     Status runOpInitialSync(const OplogEntry& entry);
     Status runOpsInitialSync(std::vector<OplogEntry> ops);
+
+
+    long getOplogSize();
+    BSONObj getFirstOplogDoc();
+    BSONObj getLastOplogDoc();
 
     UUID kUuid{UUID::gen()};
 
@@ -299,20 +318,20 @@ protected:
 
 // Utility class to allow easily scanning a collection.  Scans in forward order, returns
 // Status::CollectionIsEmpty when scan is exhausted.
-class CollectionReader {
+class MONGO_MOD_PARENT_PRIVATE CollectionReader {
 public:
     CollectionReader(OperationContext* opCtx, const NamespaceString& nss);
 
     StatusWith<BSONObj> next();
 
 private:
-    AutoGetCollectionForRead _collToScan;
+    CollectionAcquisition _collToScan;
     std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> _exec;
 };
 
-Status failedApplyCommand(OperationContext* opCtx,
-                          const BSONObj& theOperation,
-                          OplogApplication::Mode);
+}  // namespace repl
+
+namespace MONGO_MOD_PUB repl {
 
 void checkTxnTable(OperationContext* opCtx,
                    const LogicalSessionId& lsid,
@@ -345,6 +364,22 @@ OplogEntry makeOplogEntry(OpTime opTime,
                           boost::optional<RetryImageEnum> needsRetryImage = boost::none);
 
 OplogEntry makeOplogEntry(OpTypeEnum opType, NamespaceString nss, boost::optional<UUID> uuid);
+
+/**
+ * Generates a 'create' oplog entry for a new collection.
+ */
+OplogEntry makeCreateCollectionOplogEntry(
+    OperationContext* opCtx,
+    const OpTime& opTime,
+    const NamespaceString& nss,
+    const CollectionOptions& collectionOptions,
+    const BSONObj& idIndex = BSONObj(),
+    boost::optional<CreateCollCatalogIdentifier> createCollCatalogIdentifier = boost::none);
+OplogEntry makeCreateCollectionOplogEntry(OperationContext* opCtx,
+                                          const OpTime& opTime,
+                                          const NamespaceString& nss,
+                                          const UUID& uuid = UUID::gen());
+
 
 /**
  * Creates collection options suitable for oplog.
@@ -385,5 +420,13 @@ void createIndex(OperationContext* opCtx,
                  UUID collUUID,
                  const BSONObj& spec);
 
-}  // namespace repl
+/**
+ * Generate a new catalog identifier.
+ */
+CreateCollCatalogIdentifier newCatalogIdentifier(OperationContext* opCtx,
+                                                 const DatabaseName& dbName,
+                                                 bool includeIdIndexIdent);
+
+
+}  // namespace MONGO_MOD_PUB repl
 }  // namespace mongo

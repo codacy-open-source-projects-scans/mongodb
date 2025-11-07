@@ -29,6 +29,8 @@
 
 #pragma once
 
+#include "mongo/platform/compiler.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -39,8 +41,6 @@
 #include <ratio>
 #include <utility>
 #include <vector>
-
-#include "mongo/platform/compiler.h"
 
 /*
  * This Resource system is like `std::pmr::memory_resource`, but not polymorphic.
@@ -53,11 +53,11 @@ namespace mongo::inline_memory {
 class NewDeleteResource {
 public:
     void* allocate(size_t sz, size_t al = alignof(std::max_align_t)) {
-        return ::operator new (sz, std::align_val_t{al});
+        return ::operator new(sz, std::align_val_t{al});
     }
 
     void deallocate(void* p, size_t sz, size_t al) {
-        ::operator delete (p, sz, std::align_val_t{al});
+        ::operator delete(p, sz, std::align_val_t{al});
     }
 
     /** Stateless, so all instances are equal to each other. */

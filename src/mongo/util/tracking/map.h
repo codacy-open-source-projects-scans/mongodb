@@ -29,13 +29,15 @@
 
 #pragma once
 
-#include <map>
-#include <scoped_allocator>
-
+#include "mongo/util/modules.h"
 #include "mongo/util/tracking/allocator.h"
 #include "mongo/util/tracking/context.h"
 
-namespace mongo::tracking {
+#include <map>
+#include <scoped_allocator>
+
+namespace MONGO_MOD_PUB mongo {
+namespace tracking {
 
 template <class Key, class T, class Compare = std::less<Key>>
 using map =
@@ -46,4 +48,5 @@ map<Key, T, Compare> make_map(Context& Context) {
     return map<Key, T, Compare>(Context.makeAllocator<T>());
 }
 
-}  // namespace mongo::tracking
+}  // namespace tracking
+}  // namespace MONGO_MOD_PUB mongo

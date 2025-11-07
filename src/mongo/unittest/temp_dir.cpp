@@ -29,18 +29,16 @@
 
 #include "mongo/unittest/temp_dir.h"
 
+#include "mongo/base/error_codes.h"
+#include "mongo/logv2/log.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/options_parser/value.h"
+#include "mongo/util/str.h"
+
 #include <exception>
 
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/options_parser/value.h"
-#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 

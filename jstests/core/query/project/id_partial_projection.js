@@ -1,6 +1,9 @@
 /**
  * Tests partial inclusion/exclusion of _id.
  * See SERVER-7502 for details.
+ * @tags: [
+ *   requires_getmore,
+ * ]
  */
 const coll = db.id_partial_projection;
 coll.drop();
@@ -20,5 +23,12 @@ checkResults({"_id.b": 1}, [{_id: {b: 1}}, {}]);
 
 // We use docEq() for this assertion in particular because of field ordering differences between the
 // classic engine and SBE.
-checkResults({"_id.a": 0}, [{_id: {b: 1}, sortKey: 1}, {_id: 3, sortKey: 2}], assert.docEq);
+checkResults(
+    {"_id.a": 0},
+    [
+        {_id: {b: 1}, sortKey: 1},
+        {_id: 3, sortKey: 2},
+    ],
+    assert.docEq,
+);
 checkResults({_id: 0}, [{sortKey: 1}, {sortKey: 2}]);

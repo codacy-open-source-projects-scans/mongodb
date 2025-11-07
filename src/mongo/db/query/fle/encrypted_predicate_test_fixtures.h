@@ -36,11 +36,15 @@
 #include "mongo/db/query/fle/equality_predicate.h"
 #include "mongo/db/query/fle/query_rewriter_interface.h"
 #include "mongo/db/query/fle/range_predicate.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/overloaded_visitor.h"
 
 namespace mongo::fle {
+
 using TagMap = std::map<std::pair<StringData, int>, std::vector<PrfBlock>>;
+using StrTagMap = std::map<std::pair<StringData, StringData>, std::vector<PrfBlock>>;
 
 /*
  * The MockServerRewrite allows unit testing individual predicate rewrites without going through the
@@ -76,7 +80,7 @@ private:
     boost::optional<NamespaceString> _mockOptionalNss;
 };
 
-class EncryptedPredicateRewriteTest : public unittest::Test {
+class EncryptedPredicateRewriteTest : public ServiceContextTest {
 public:
     EncryptedPredicateRewriteTest();
     ~EncryptedPredicateRewriteTest() override;
@@ -144,8 +148,8 @@ void toEncryptedBinData(StringData field, EncryptedBinDataType dt, T t, BSONObjB
 // Sample encryption keys for creating mock encrypted payloads.
 constexpr auto kIndexKeyId = "12345678-1234-9876-1234-123456789012"_sd;
 constexpr auto kUserKeyId = "ABCDEFAB-1234-9876-1234-123456789012"_sd;
-static UUID indexKeyId = uassertStatusOK(UUID::parse(kIndexKeyId.toString()));
-static UUID userKeyId = uassertStatusOK(UUID::parse(kUserKeyId.toString()));
+static UUID indexKeyId = uassertStatusOK(UUID::parse(kIndexKeyId));
+static UUID userKeyId = uassertStatusOK(UUID::parse(kUserKeyId));
 
 inline const FLEIndexKey& getIndexKey() {
     static std::string indexVec = hexblob::decode(

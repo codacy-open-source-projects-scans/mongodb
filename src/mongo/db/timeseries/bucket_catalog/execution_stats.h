@@ -31,8 +31,10 @@
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/tracking/memory.h"
 
+MONGO_MOD_PUBLIC;
 namespace mongo::timeseries::bucket_catalog {
 
 struct ExecutionStats {
@@ -73,8 +75,20 @@ struct ExecutionStats {
     AtomicWord<long long> numBucketsQueried;
     AtomicWord<long long> numBucketFetchesFailed;
     AtomicWord<long long> numBucketQueriesFailed;
-    AtomicWord<long long> numBucketReopeningsFailed;
+    AtomicWord<long long> numBucketReopeningsFailedDueToEraMismatch;
+    AtomicWord<long long> numBucketReopeningsFailedDueToMalformedIdField;
+    AtomicWord<long long> numBucketReopeningsFailedDueToHashCollision;
+    AtomicWord<long long> numBucketReopeningsFailedDueToMarkedFrozen;
+    AtomicWord<long long> numBucketReopeningsFailedDueToValidator;
+    AtomicWord<long long> numBucketReopeningsFailedDueToMarkedClosed;
+    AtomicWord<long long> numBucketReopeningsFailedDueToMinMaxCalculation;
+    AtomicWord<long long> numBucketReopeningsFailedDueToSchemaGeneration;
+    AtomicWord<long long> numBucketReopeningsFailedDueToUncompressedTimeColumn;
+    AtomicWord<long long> numBucketReopeningsFailedDueToCompressionFailure;
+    AtomicWord<long long> numBucketReopeningsFailedDueToWriteConflict;
     AtomicWord<long long> numDuplicateBucketsReopened;
+    AtomicWord<long long> numBucketDocumentsTooLargeInsert;
+    AtomicWord<long long> numBucketDocumentsTooLargeUpdate;
 };
 
 class ExecutionStatsController {
@@ -112,12 +126,24 @@ public:
     void incNumBucketsQueried(long long increment = 1);
     void incNumBucketFetchesFailed(long long increment = 1);
     void incNumBucketQueriesFailed(long long increment = 1);
-    void incNumBucketReopeningsFailed(long long increment = 1);
+    void incNumBucketReopeningsFailedDueToEraMismatch(long long increment = 1);
+    void incNumBucketReopeningsFailedDueToMalformedIdField(long long increment = 1);
+    void incNumBucketReopeningsFailedDueToHashCollision(long long increment = 1);
+    void incNumBucketReopeningsFailedDueToMarkedFrozen(long long increment = 1);
+    void incNumBucketReopeningsFailedDueToValidator(long long increment = 1);
+    void incNumBucketReopeningsFailedDueToMarkedClosed(long long increment = 1);
+    void incNumBucketReopeningsFailedDueToMinMaxCalculation(long long increment = 1);
+    void incNumBucketReopeningsFailedDueToSchemaGeneration(long long increment = 1);
+    void incNumBucketReopeningsFailedDueToUncompressedTimeColumn(long long increment = 1);
+    void incNumBucketReopeningsFailedDueToCompressionFailure(long long increment = 1);
+    void incNumBucketReopeningsFailedDueToWriteConflict(long long increment = 1);
     void incNumDuplicateBucketsReopened(long long increment = 1);
+    void incNumBucketDocumentsTooLargeInsert(long long increment = 1);
+    void incNumBucketDocumentsTooLargeUpdate(long long increment = 1);
 
 private:
     tracking::shared_ptr<ExecutionStats> _collectionStats;
-    ExecutionStats* _globalStats;
+    ExecutionStats* _globalStats = nullptr;
 };
 
 void appendExecutionStatsToBuilder(const ExecutionStats& stats, BSONObjBuilder& builder);
@@ -137,6 +163,6 @@ void addCollectionExecutionGauges(ExecutionStats& stats, const ExecutionStats& c
 /**
  * Removes the execution stats classified as gauges from an ExecutionStats.
  */
-void removeCollectionExecutionGauges(ExecutionStats& stats, const ExecutionStats& collStats);
+void removeCollectionExecutionGauges(ExecutionStats& stats, ExecutionStats& collStats);
 
 }  // namespace mongo::timeseries::bucket_catalog

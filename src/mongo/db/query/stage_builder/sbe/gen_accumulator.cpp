@@ -27,23 +27,13 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <functional>
-#include <tuple>
-#include <utility>
-
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <type_traits>
+#include "mongo/db/query/stage_builder/sbe/gen_accumulator.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/sbe/accumulator_sum_value_enum.h"
+#include "mongo/db/exec/sbe/stages/hash_agg_accumulator.h"
 #include "mongo/db/exec/sbe/values/arith_common.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
@@ -54,16 +44,23 @@
 #include "mongo/db/pipeline/window_function/window_function_expression.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
-#include "mongo/db/query/stage_builder/sbe/gen_accumulator.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
+#include "mongo/db/query/stage_builder/sbe/sbexpr.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr_helpers.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
-namespace mongo::stage_builder {
-const StringData kAccumulatorCountName = "$count"_sd;
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <utility>
 
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
+namespace mongo::stage_builder {
 AccumInputs::~AccumInputs() = default;
 
 AccumInputsPtr AddSingleInput::clone() const {
@@ -154,6 +151,12 @@ using BuildFnType =
 
 template <typename ReturnT, typename... Args>
 using BuildNoInputsFnType = std::function<ReturnT(const AccumOp&, StageBuilderState&, Args...)>;
+
+template <typename T>
+using BuildSinglePurposeAccumFnType =
+    BuildFnType<SbHashAggAccumulator, T, std::string, SbSlot, SbSlot>;
+
+using BuildSinglePurposeAccumFn = BuildSinglePurposeAccumFnType<AddSingleInput>;
 
 // std::function type for buildAddExprs() with inputs and without inputs.
 using BuildAccumExprsNoInputsFn = BuildNoInputsFnType<AccumInputsPtr>;
@@ -274,6 +277,8 @@ auto makeBuildFn(FuncT fn) {
  */
 struct AccumOpInfo {
     size_t numAggs = 1;
+    BuildSinglePurposeAccumFn buildSinglePurposeAccum = nullptr;
+    BuildSinglePurposeAccumFn buildSinglePurposeAccumForMerge = nullptr;
     BuildAccumExprsFn buildAddExprs = nullptr;
     BuildAccumBlockExprsFn buildAddBlockExprs = nullptr;
     BuildAccumAggsFn buildAddAggs = nullptr;
@@ -291,11 +296,28 @@ namespace {
 SbExpr nullMissingUndefinedToNothing(SbExpr arg, StageBuilderState& state) {
     SbExprBuilder b(state);
 
-    return b.makeFunction("fillType",
-                          std::move(arg),
-                          b.makeInt32Constant(getBSONTypeMask(BSONType::jstNULL) |
-                                              getBSONTypeMask(BSONType::Undefined)),
-                          b.makeNothingConstant());
+    return b.makeFunction(
+        "fillType",
+        std::move(arg),
+        b.makeInt32Constant(getBSONTypeMask(BSONType::null) | getBSONTypeMask(BSONType::undefined)),
+        b.makeNothingConstant());
+}
+
+template <class Implementation>
+SbHashAggAccumulator buildSinglePurposeAccum(const AccumOp& acc,
+                                             std::unique_ptr<AddSingleInput> inputs,
+                                             StageBuilderState& state,
+                                             std::string fieldName,
+                                             SbSlot outSlot,
+                                             SbSlot spillSlot) {
+    return SbHashAggAccumulator{.fieldName = fieldName,
+                                .outSlot = outSlot,
+                                .spillSlot = std::move(spillSlot),
+                                .resultExpr = SbExpr{outSlot},
+                                .implementation =
+                                    SbHashAggSinglePurposeScalarAccumulator<Implementation>{
+                                        .transform = std::move(inputs->inputExpr),
+                                    }};
 }
 
 /**
@@ -465,9 +487,9 @@ AccumInputsPtr buildAccumExprsAvg(const AccumOp& acc,
     auto binds = SbExpr::makeSeq(inputs->inputExpr.clone());
     auto var = SbVar{frameId, 0};
 
-    auto e = b.makeIf(b.makeBinaryOp(sbe::EPrimBinary::logicOr,
-                                     b.generateNullMissingOrUndefined(var),
-                                     b.generateNonNumericCheck(var)),
+    auto e = b.makeIf(b.makeBooleanOpTree(abt::Operations::Or,
+                                          b.generateNullMissingOrUndefined(var),
+                                          b.generateNonNumericCheck(var)),
                       b.makeInt64Constant(0),
                       b.makeInt64Constant(1));
 
@@ -598,9 +620,9 @@ SbExpr buildFinalizeAvg(const AccumOp& acc,
         // If we've encountered any numeric input, the counter would contain a positive integer.
         // Unlike $sum, when there is no numeric input, $avg should return null.
         auto finalizingExpression =
-            b.makeIf(b.makeBinaryOp(sbe::EPrimBinary::eq, aggSlots[1], b.makeInt64Constant(0)),
+            b.makeIf(b.makeBinaryOp(abt::Operations::Eq, aggSlots[1], b.makeInt64Constant(0)),
                      b.makeNullConstant(),
-                     b.makeBinaryOp(sbe::EPrimBinary::div,
+                     b.makeBinaryOp(abt::Operations::Div,
                                     b.makeFunction("doubleDoubleSumFinalize", aggSlots[0]),
                                     aggSlots[1]));
 
@@ -984,9 +1006,9 @@ SbExpr wrapMergeObjectsArg(SbExpr arg, StageBuilderState& state) {
     auto var = SbVar{frameId, 0};
 
     auto expr =
-        b.makeIf(b.makeBinaryOp(sbe::EPrimBinary::logicOr,
-                                b.generateNullMissingOrUndefined(var),
-                                b.makeFunction("isObject", var)),
+        b.makeIf(b.makeBooleanOpTree(abt::Operations::Or,
+                                     b.generateNullMissingOrUndefined(var),
+                                     b.makeFunction("isObject", var)),
                  SbExpr{var},
                  b.makeFail(ErrorCodes::Error{5911200}, "$mergeObjects only supports objects"));
 
@@ -1054,9 +1076,9 @@ SbExpr::Vector buildInitializeAccumN(const AccumOp& acc,
         auto var = SbVar{frameId, 0};
 
         auto e = b.makeIf(
-            b.makeBinaryOp(sbe::EPrimBinary::logicAnd,
-                           b.makeFunction("exists", var),
-                           b.makeBinaryOp(sbe::EPrimBinary::greater, var, b.makeInt64Constant(0))),
+            b.makeBooleanOpTree(abt::Operations::And,
+                                b.makeFunction("exists", var),
+                                b.makeBinaryOp(abt::Operations::Gt, var, b.makeInt64Constant(0))),
             b.makeFunction("newArray",
                            b.makeFunction("newArray"),
                            b.makeInt64Constant(0),
@@ -1237,7 +1259,8 @@ SbExpr buildFinalizeTopBottomNImpl(const AccumOp& acc,
                            inputVar,
                            std::move(sortSpec));
         if (single) {
-            finalExpr = b.makeFunction("getElement", std::move(finalExpr), b.makeInt32Constant(0));
+            finalExpr = b.makeFillEmptyNull(
+                b.makeFunction("getElement", std::move(finalExpr), b.makeInt32Constant(0)));
         }
         return finalExpr;
     }
@@ -1508,9 +1531,9 @@ SbExpr buildFinalizeDerivative(const AccumOp& acc,
     auto sortByLast = std::move(inputs->sortByLast);
 
     return b.makeIf(
-        b.makeBinaryOp(sbe::EPrimBinary::logicAnd,
-                       b.makeFunction("exists", slots[0]),
-                       b.makeBinaryOp(sbe::EPrimBinary::greater, slots[0], b.makeInt64Constant(0))),
+        b.makeBooleanOpTree(abt::Operations::And,
+                            b.makeFunction("exists", slots[0]),
+                            b.makeBinaryOp(abt::Operations::Gt, slots[0], b.makeInt64Constant(0))),
         b.makeFunction("aggDerivativeFinalize",
                        std::move(unit),
                        std::move(inputFirst),
@@ -1776,16 +1799,24 @@ boost::optional<std::vector<BlockAggAndRowAgg>> buildAccumBlockAggsTopBottomN(
 }
 }  // namespace
 
+// Map from accumulator name (e.g. "$avg" or "$count"), which is currently the only ID we have for
+// accumulators, to functions used for stage building various parts of them.
 static const StringDataMap<AccumOpInfo> accumOpInfoMap = {
     // AddToSet
     {AccumulatorAddToSet::kName,
-     AccumOpInfo{.buildAddAggs = makeBuildFn(&buildAccumAggsAddToSet),
+     AccumOpInfo{.buildSinglePurposeAccum =
+                     makeBuildFn(&buildSinglePurposeAccum<sbe::AddToSetHashAggAccumulator>),
+                 .buildAddAggs = makeBuildFn(&buildAccumAggsAddToSet),
                  .buildFinalize = makeBuildFn(&buildFinalizeCappedAccumulator),
                  .buildCombineAggs = makeBuildFn(&buildCombineAggsAddToSet)}},
 
     // Avg
     {AccumulatorAvg::kName,
-     AccumOpInfo{.numAggs = 2,
+     AccumOpInfo{.numAggs = 2,  // $avg is the only accumulator decomposed into two or more
+                 .buildSinglePurposeAccum = makeBuildFn(
+                     &buildSinglePurposeAccum<sbe::ArithmeticAverageHashAggAccumulatorTerminal>),
+                 .buildSinglePurposeAccumForMerge = makeBuildFn(
+                     &buildSinglePurposeAccum<sbe::ArithmeticAverageHashAggAccumulatorPartial>),
                  .buildAddExprs = makeBuildFn(&buildAccumExprsAvg),
                  .buildAddBlockExprs = makeBuildFn(&buildAccumBlockExprsAvg),
                  .buildAddAggs = makeBuildFn(&buildAccumAggsAvg),
@@ -1819,7 +1850,11 @@ static const StringDataMap<AccumOpInfo> accumOpInfoMap = {
 
     // Count
     {kAccumulatorCountName,
-     AccumOpInfo{.buildAddBlockExprs = makeBuildFn(&buildAccumBlockExprsNoInputs),
+     AccumOpInfo{.buildSinglePurposeAccum =
+                     makeBuildFn(&buildSinglePurposeAccum<sbe::CountHashAggAccumulatorTerminal>),
+                 .buildSinglePurposeAccumForMerge =
+                     makeBuildFn(&buildSinglePurposeAccum<sbe::CountHashAggAccumulatorPartial>),
+                 .buildAddBlockExprs = makeBuildFn(&buildAccumBlockExprsNoInputs),
                  .buildAddAggs = makeBuildFn(&buildAccumAggsCount),
                  .buildAddBlockAggs = makeBuildFn(&buildAccumBlockAggsCount),
                  .buildFinalize = makeBuildFn(&buildFinalizeCount),
@@ -1857,7 +1892,9 @@ static const StringDataMap<AccumOpInfo> accumOpInfoMap = {
 
     // First
     {AccumulatorFirst::kName,
-     AccumOpInfo{.buildAddExprs = makeBuildFn(&buildAccumExprsFirstLast),
+     AccumOpInfo{.buildSinglePurposeAccum =
+                     makeBuildFn(&buildSinglePurposeAccum<sbe::FirstHashAggAccumulator>),
+                 .buildAddExprs = makeBuildFn(&buildAccumExprsFirstLast),
                  .buildAddAggs = makeBuildFn(&buildAccumAggsFirst),
                  .buildCombineAggs = makeBuildFn(&buildCombineAggsFirst)}},
 
@@ -1940,7 +1977,9 @@ static const StringDataMap<AccumOpInfo> accumOpInfoMap = {
 
     // Push
     {AccumulatorPush::kName,
-     AccumOpInfo{.buildAddAggs = makeBuildFn(&buildAccumAggsPush),
+     AccumOpInfo{.buildSinglePurposeAccum =
+                     makeBuildFn(&buildSinglePurposeAccum<sbe::PushHashAggAccumulator>),
+                 .buildAddAggs = makeBuildFn(&buildAccumAggsPush),
                  .buildFinalize = makeBuildFn(&buildFinalizeCappedAccumulator),
                  .buildCombineAggs = makeBuildFn(&buildCombineAggsPush)}},
 
@@ -1992,18 +2031,18 @@ static const StringDataMap<AccumOpInfo> accumOpInfoMap = {
                  .buildInit = makeBuildFn(&buildInitializeAccumN),
                  .buildFinalize = makeBuildFn(&buildFinalizeTopBottomN),
                  .buildCombineAggs = makeBuildFn(&buildCombineAggsTopBottomN)}},
-};
+};  // accumOpInfoMap
 
-std::string getOpNameForAccStmt(const AccumulationStatement& accStmt) {
-    std::string opName = accStmt.expr.name.toString();
+std::string AccumOp::getOpNameForAccStmt(const AccumulationStatement& accStmt) {
+    std::string opName = std::string{accStmt.expr.name};
 
     // The parser transforms "{$count: ..}" into "{$group: {..: {$sum: NumberInt(1)}}}".
     // We pattern match for "{$sum: 1}" here to reverse the transform performed by the parser.
     if (auto constArg = dynamic_cast<ExpressionConstant*>(accStmt.expr.argument.get())) {
         mongo::Value value = constArg->getValue();
-        if (opName == AccumulatorSum::kName && value.getType() == BSONType::NumberInt &&
+        if (opName == AccumulatorSum::kName && value.getType() == BSONType::numberInt &&
             value.coerceToInt() == 1) {
-            return kAccumulatorCountName.toString();
+            return std::string{kAccumulatorCountName};
         }
     }
 
@@ -2030,6 +2069,40 @@ bool AccumOp::hasBuildAddBlockExprs() const {
 
 bool AccumOp::hasBuildAddBlockAggs() const {
     return getOpInfo()->buildAddBlockAggs != nullptr;
+}
+
+bool AccumOp::canBuildSinglePurposeAccumulator() const {
+    return bool{_opInfo->buildSinglePurposeAccum};
+}
+
+SbHashAggAccumulator AccumOp::buildSinglePurposeAccumulator(StageBuilderState& state,
+                                                            SbExpr inputExpression,
+                                                            std::string fieldName,
+                                                            SbSlot outSlot,
+                                                            SbSlot spillSlot) const {
+    return _opInfo->buildSinglePurposeAccum(
+        *this,
+        std::make_unique<AddSingleInput>(std::move(inputExpression)),
+        state,
+        std::move(fieldName),
+        std::move(outSlot),
+        std::move(spillSlot));
+}
+
+SbHashAggAccumulator AccumOp::buildSinglePurposeAccumulatorForMerge(StageBuilderState& state,
+                                                                    SbExpr inputExpression,
+                                                                    std::string fieldName,
+                                                                    SbSlot outSlot,
+                                                                    SbSlot spillSlot) const {
+    auto& builderFunction = _opInfo->buildSinglePurposeAccumForMerge
+        ? _opInfo->buildSinglePurposeAccumForMerge
+        : _opInfo->buildSinglePurposeAccum;
+    return builderFunction(*this,
+                           std::make_unique<AddSingleInput>(std::move(inputExpression)),
+                           state,
+                           std::move(fieldName),
+                           std::move(outSlot),
+                           std::move(spillSlot));
 }
 
 AccumInputsPtr AccumOp::buildAddExprs(StageBuilderState& state, AccumInputsPtr inputs) const {

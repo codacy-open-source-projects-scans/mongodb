@@ -35,16 +35,6 @@
  * rather parameters should be defined in .idl files.
  */
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/parse_number.h"
 #include "mongo/base/status.h"
@@ -57,14 +47,62 @@
 #include "mongo/db/server_parameter.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/platform/atomic_proxy.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/str.h"
 #include "mongo/util/synchronized_value.h"
 
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
 namespace mongo {
+
+namespace MONGO_MOD_PUB idl_server_parameter_bounds {
+// Predicate rules for bounds conditions
+struct GT {
+    static constexpr inline StringData description = "greater than"_sd;
+    template <typename T, typename U>
+    static constexpr bool evaluate(const T& a, const U& b) {
+        return a > b;
+    }
+};
+
+struct LT {
+    static constexpr inline StringData description = "less than"_sd;
+    template <typename T, typename U>
+    static constexpr bool evaluate(const T& a, const U& b) {
+        return a < b;
+    }
+};
+
+struct GTE {
+    static constexpr inline StringData description = "greater than or equal to"_sd;
+    template <typename T, typename U>
+    static constexpr bool evaluate(const T& a, const U& b) {
+        return a >= b;
+    }
+};
+
+struct LTE {
+    static constexpr inline StringData description = "less than or equal to"_sd;
+    template <typename T, typename U>
+    static constexpr bool evaluate(const T& a, const U& b) {
+        return a <= b;
+    }
+};
+}  // namespace MONGO_MOD_PUB idl_server_parameter_bounds
+
+namespace idl_server_parameter_detail {
 
 /**
  * Used to check if the parameter type has the getClusterServerParameter method, which proves
@@ -73,43 +111,7 @@ namespace mongo {
 template <typename T>
 using HasClusterServerParameter = decltype(std::declval<T>().getClusterServerParameter());
 template <typename T>
-constexpr bool hasClusterServerParameter = stdx::is_detected_v<HasClusterServerParameter, T>;
-
-namespace idl_server_parameter_detail {
-
-// Predicate rules for bounds conditions
-
-struct GT {
-    static constexpr StringData description = "greater than"_sd;
-    template <typename T, typename U>
-    static constexpr bool evaluate(const T& a, const U& b) {
-        return a > b;
-    }
-};
-
-struct LT {
-    static constexpr StringData description = "less than"_sd;
-    template <typename T, typename U>
-    static constexpr bool evaluate(const T& a, const U& b) {
-        return a < b;
-    }
-};
-
-struct GTE {
-    static constexpr StringData description = "greater than or equal to"_sd;
-    template <typename T, typename U>
-    static constexpr bool evaluate(const T& a, const U& b) {
-        return a >= b;
-    }
-};
-
-struct LTE {
-    static constexpr StringData description = "less than or equal to"_sd;
-    template <typename T, typename U>
-    static constexpr bool evaluate(const T& a, const U& b) {
-        return a <= b;
-    }
-};
+constexpr inline bool hasClusterServerParameter = stdx::is_detected_v<HasClusterServerParameter, T>;
 
 // Wrapped type unwrappers.
 // e.g. Given AtomicWord<int>, get std::int32_t and normalized store/load methods.
@@ -151,42 +153,6 @@ private:
     U _defaultValue;
 };
 
-// Covers AtomicDouble
-template <typename U, typename P>
-struct storage_wrapper<AtomicProxy<U, P>> {
-    static constexpr bool isTenantAware = false;
-
-    using type = U;
-    storage_wrapper(AtomicProxy<U, P>& storage)
-        : _storage(storage), _defaultValue(storage.load()) {}
-
-    void store(const U& value, const boost::optional<TenantId>& id) {
-        invariant(!id.is_initialized());
-        _storage.store(value);
-    }
-
-    U load(const boost::optional<TenantId>& id) const {
-        invariant(!id.is_initialized());
-        return _storage.load();
-    }
-
-    void reset(const boost::optional<TenantId>& id) {
-        invariant(!id.is_initialized());
-        _storage.store(_defaultValue);
-    }
-
-    // Not thread-safe, will only be called once at most per ServerParameter in its initialization
-    // block.
-    void setDefault(const U& value) {
-        _defaultValue = value;
-    }
-
-private:
-    AtomicProxy<U, P>& _storage;
-
-    // Copy of original value to be read from during resets.
-    U _defaultValue;
-};
 
 template <typename U>
 struct storage_wrapper<synchronized_value<U>> {
@@ -310,7 +276,7 @@ private:
  * Specialization of ServerParameter used by IDL generator.
  */
 template <ServerParameterType paramType, typename T>
-class IDLServerParameterWithStorage : public ServerParameter {
+class MONGO_MOD_PUB IDLServerParameterWithStorage : public ServerParameter {
 private:
     using SPT = ServerParameterType;
     using SW = idl_server_parameter_detail::storage_wrapper<T>;
@@ -323,7 +289,8 @@ public:
 
     // Compile-time assertion to ensure that IDL-defined in-memory storage for CSPs are
     // chained to the ClusterServerParameter base type.
-    static_assert((paramType != SPT::kClusterWide) || hasClusterServerParameter<element_type>,
+    static_assert((paramType != SPT::kClusterWide) ||
+                      idl_server_parameter_detail::hasClusterServerParameter<element_type>,
                   "Cluster server parameter storage must be chained from ClusterServerParameter");
 
     IDLServerParameterWithStorage(StringData name, T& storage)
@@ -411,7 +378,7 @@ public:
         if constexpr (paramType == SPT::kClusterWide) {
             try {
                 BSONObj cspObj = newValueElement.Obj();
-                newValue = element_type::parse(IDLParserContext{"ClusterServerParameter"}, cspObj);
+                newValue = element_type::parse(cspObj, IDLParserContext{"ClusterServerParameter"});
             } catch (const DBException& ex) {
                 return ex.toStatus().withContext(
                     str::stream() << "Failed parsing ClusterServerParameter '" << name() << "'");
@@ -476,7 +443,7 @@ public:
                     "Unable to set a cluster-wide server parameter from the command line or config "
                     "file. See command 'setClusterParameter'"};
         } else {
-            auto swNewValue = idl_server_parameter_detail::coerceFromString<element_type>(str);
+            auto swNewValue = coerceFromString<element_type>(str);
             if (!swNewValue.isOK()) {
                 return swNewValue.getStatus();
             }
@@ -490,7 +457,7 @@ public:
      * storage. All other server parameters simply return the uninitialized LogicalTime.
      */
     LogicalTime getClusterParameterTime(const boost::optional<TenantId>& tenantId) const final {
-        if constexpr (hasClusterServerParameter<element_type>) {
+        if constexpr (idl_server_parameter_detail::hasClusterServerParameter<element_type>) {
             return getValue(tenantId).getClusterParameterTime();
         }
 
@@ -543,7 +510,6 @@ private:
 };
 
 template <typename Storage>
-using ClusterParameterWithStorage =
+using ClusterParameterWithStorage MONGO_MOD_PUB =
     IDLServerParameterWithStorage<ServerParameterType::kClusterWide, TenantIdMap<Storage>>;
-
 }  // namespace mongo

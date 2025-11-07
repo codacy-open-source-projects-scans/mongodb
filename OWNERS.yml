@@ -1,18 +1,30 @@
 version: 1.0.0
 filters:
+  - "*":
+    approvers:
+      - 10gen/mongo-default-approvers
   - "OWNERS.yml":
     approvers:
       - 10gen/server-root-ownership
     metadata:
       emeritus_approvers:
         - visemet # TODO: add back to approvers once project work is finished
+  - "/BUILD.bazel":
+    approvers:
+      - 10gen/devprod-build
+  - ".bazelrc*":
+    approvers:
+      - 10gen/devprod-build
   - ".bazelignore":
     approvers:
       - 10gen/devprod-build
-  - ".bazelrc":
+  - .bazeliskrc:
     approvers:
       - 10gen/devprod-build
-  - ".bazelversion":
+  - .bazelversion:
+    approvers:
+      - 10gen/devprod-build
+  - ".vscode_defaults/**":
     approvers:
       - 10gen/devprod-build
   - ".clang-format":
@@ -21,13 +33,19 @@ filters:
   - ".clang-tidy.in":
     approvers:
       - 10gen/server-programmability
-  - ".eslintignore":
+  - "**/.clang-tidy":
     approvers:
-      - 10gen/devprod-correctness
-  - ".eslintrc.yml":
+      - 10gen/server-programmability
+  - "AGENTS.md":
     approvers:
-      - 10gen/devprod-correctness
-  - ".gitignore":
+      - 10gen/genai-coding-policy
+  - "CLAUDE.md":
+    approvers:
+      - 10gen/genai-coding-policy
+  - "/.editorconfig":
+    approvers:
+      - 10gen/devprod-build
+  - ".git*":
     approvers:
       - 10gen/devprod-build
   - ".mypy.ini":
@@ -47,7 +65,7 @@ filters:
     approvers:
       - IamXander
       - smcclure15
-  - "copy.bara.staging.sky":
+  - "eslint.config.mjs":
     approvers:
       - 10gen/devprod-correctness
   - "jsconfig.json":
@@ -67,10 +85,14 @@ filters:
     approvers:
       - 10gen/devprod-correctness
       - 10gen/devprod-build
+  - "poetry_requirements.txt":
+    approvers:
+      - 10gen/devprod-correctness
+      - 10gen/devprod-build
   - "sbom.json":
     approvers:
       - 10gen/server-security
-  - "SConstruct":
+  - "MODULE.bazel*":
     approvers:
       - 10gen/devprod-build
   - "WORKSPACE.bazel":

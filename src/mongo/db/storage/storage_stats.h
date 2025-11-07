@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/bson/bsonobj.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -37,19 +38,11 @@ namespace mongo {
  * Manages statistics from the storage engine, allowing addition of statistics, serialization to
  * BSON, and access to certain metrics.
  */
-class StorageStats {
+class MONGO_MOD_OPEN StorageStats {
 public:
-    // This is a pure virtual class, so the constructors will never be called directly, and slicing
-    // should not be an issue.
-    StorageStats() = default;
-    StorageStats(const StorageStats&) = default;
-    StorageStats(StorageStats&&) = default;
-
-    StorageStats& operator=(const StorageStats&) = delete;
-    StorageStats& operator=(StorageStats&&) = delete;
-
     virtual ~StorageStats() = default;
 
+    virtual void appendToBsonObjBuilder(BSONObjBuilder& builder) const = 0;
     virtual BSONObj toBSON() const = 0;
 
     virtual uint64_t bytesRead() const = 0;

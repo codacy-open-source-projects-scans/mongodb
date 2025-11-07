@@ -27,15 +27,6 @@
  *    it in the license file.
  */
 
-#include <cstdlib>
-#include <exception>
-#include <iostream>
-#include <string>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -55,6 +46,15 @@
 #include "mongo/util/options_parser/options_parser.h"
 #include "mongo/util/options_parser/value.h"
 #include "mongo/util/str.h"
+
+#include <cstdlib>
+#include <exception>
+#include <iostream>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -166,29 +166,20 @@ void decode(const KSDecodeOptions& options) {
     }
 
     auto builder = key_string::HeapBuilder(key_string::Version::kLatestVersion);
-    builder.resetFromBuffer(options.binKeyString.c_str(), options.binKeyString.size());
+    builder.resetFromBuffer(options.binKeyString);
 
     if (OutputFormat::kExplain == options.outputFormat) {
-        std::cout << key_string::explain(builder.getBuffer(),
-                                         builder.getSize(),
-                                         options.keyPattern,
-                                         typeBits,
-                                         options.keyFormat);
+        std::cout << key_string::explain(
+            builder.getView(), options.keyPattern, typeBits, options.keyFormat);
     } else if (OutputFormat::kBson == options.outputFormat) {
-        auto bson = key_string::toBsonSafe(
-            builder.getBuffer(), builder.getSize(), Ordering::make(options.keyPattern), typeBits);
+        auto bson =
+            key_string::toBsonSafe(builder.getView(), Ordering::make(options.keyPattern), typeBits);
         auto rehydrated = key_string::rehydrateKey(options.keyPattern, bson);
         str::stream out;
         if (options.binKeyString.size() >= 2 && options.keyFormat) {
             BSONObjBuilder bob(rehydrated);
-            RecordId recordId;
-            if (*options.keyFormat == KeyFormat::Long) {
-                recordId = key_string::decodeRecordIdLongAtEnd(options.binKeyString.c_str(),
-                                                               options.binKeyString.size());
-            } else {
-                recordId = key_string::decodeRecordIdStrAtEnd(options.binKeyString.c_str(),
-                                                              options.binKeyString.size());
-            }
+            RecordId recordId =
+                key_string::decodeRecordIdAtEnd(options.binKeyString, *options.keyFormat);
             recordId.serializeToken("$recordId", &bob);
             out << bob.obj();
         } else {
@@ -273,9 +264,9 @@ int ksDecodeMain(int argc, char* argv[]) try {
 
     if (environment.count("output")) {
         auto strVal = environment["output"].as<std::string>();
-        if (StringData(strVal).equalCaseInsensitive("explain")) {
+        if (str::equalCaseInsensitive(strVal, "explain")) {
             options.outputFormat = OutputFormat::kExplain;
-        } else if (StringData(strVal).equalCaseInsensitive("bson")) {
+        } else if (str::equalCaseInsensitive(strVal, "bson")) {
             options.outputFormat = OutputFormat::kBson;
         } else {
             exitWithUsage("Unknown output format");
@@ -293,11 +284,11 @@ int ksDecodeMain(int argc, char* argv[]) try {
 
     if (environment.count("recordId")) {
         std::string strVal = environment["recordId"].as<std::string>();
-        if (StringData(strVal).equalCaseInsensitive("string")) {
+        if (str::equalCaseInsensitive(strVal, "string")) {
             options.keyFormat.emplace(KeyFormat::String);
-        } else if (StringData(strVal).equalCaseInsensitive("long")) {
+        } else if (str::equalCaseInsensitive(strVal, "long")) {
             options.keyFormat.emplace(KeyFormat::Long);
-        } else if (!StringData(strVal).equalCaseInsensitive("none")) {
+        } else if (!str::equalCaseInsensitive(strVal, "none")) {
             exitWithUsage("Unknown RecordId format");
         }
     }

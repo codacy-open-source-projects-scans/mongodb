@@ -27,14 +27,14 @@
  *    it in the license file.
  */
 
+#include "mongo/util/text.h"  // IWYU pragma: keep
+
+#include "mongo/stdx/type_traits.h"
+#include "mongo/unittest/unittest.h"
+
 #include <cstdarg>
 #include <string>
 #include <vector>
-
-#include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/text.h"  // IWYU pragma: keep
 
 using namespace mongo;
 

@@ -92,7 +92,7 @@ boost::intrusive_ptr<Expression> ExpressionLet::parse(ExpressionContext* const e
                                                       const VariablesParseState& vpsIn) {
     MONGO_verify(expr.fieldNameStringData() == "$let");
 
-    uassert(16874, "$let only supports an object as its argument", expr.type() == Object);
+    uassert(16874, "$let only supports an object as its argument", expr.type() == BSONType::object);
     const BSONObj args = expr.embeddedObject();
 
     // varsElem must be parsed before inElem regardless of BSON order.
@@ -113,20 +113,41 @@ boost::intrusive_ptr<Expression> ExpressionLet::parse(ExpressionContext* const e
     uassert(16877, "Missing 'in' parameter to $let", !inElem.eoo());
 
     // parse "vars"
+    std::vector<std::pair<std::string, boost::intrusive_ptr<Expression>>> letVariables;
+    auto&& varsObj = varsElem.embeddedObjectUserCheck();
+    for (auto&& varElem : varsObj) {
+        letVariables.push_back({varElem.fieldName(), parseOperand(expCtx, varElem, vpsIn)});
+    }
+
+    return ExpressionLet::create(
+        expCtx,
+        std::move(letVariables),
+        vpsIn,
+        [&inElem](ExpressionContext* ctx, const VariablesParseState& vpsWithLetVars) {
+            return parseOperand(ctx, inElem, vpsWithLetVars);
+        });
+}
+
+boost::intrusive_ptr<Expression> ExpressionLet::create(
+    ExpressionContext* expCtx,
+    std::vector<std::pair<std::string, boost::intrusive_ptr<Expression>>> letVariables,
+    const VariablesParseState& vpsIn,
+    CreateInExpr createInFunc) {
+    // parse "vars"
     VariablesParseState vpsSub(vpsIn);  // vpsSub gets our vars, vpsIn doesn't.
     VariableMap vars;
     std::vector<boost::intrusive_ptr<Expression>> children;
-    auto&& varsObj = varsElem.embeddedObjectUserCheck();
-    for (auto&& varElem : varsObj)
-        children.push_back(parseOperand(expCtx, varElem, vpsIn));
+    children.reserve(letVariables.size());
+    for (auto&& [varName, expr] : letVariables) {
+        children.push_back(std::move(expr));
+    }
 
     // Make a place in the vector for "in".
     auto& inPtr = children.emplace_back(nullptr);
 
     std::vector<boost::intrusive_ptr<Expression>>::size_type index = 0;
     std::vector<Variables::Id> orderedVariableIds;
-    for (auto&& varElem : varsObj) {
-        const std::string varName = varElem.fieldName();
+    for (const auto& [varName, movedExpr] : letVariables) {
         variableValidation::validateNameForUserWrite(varName);
         Variables::Id id = vpsSub.defineVariable(varName);
 
@@ -136,8 +157,8 @@ boost::intrusive_ptr<Expression> ExpressionLet::parse(ExpressionContext* const e
         ++index;
     }
 
-    // parse "in"
-    inPtr = parseOperand(expCtx, inElem, vpsSub);  // has our vars
+    // create the "in" expression
+    inPtr = createInFunc(expCtx, vpsSub);
 
     return new ExpressionLet(
         expCtx, std::move(vars), std::move(children), std::move(orderedVariableIds));
@@ -145,7 +166,7 @@ boost::intrusive_ptr<Expression> ExpressionLet::parse(ExpressionContext* const e
 
 ExpressionLet::ExpressionLet(ExpressionContext* const expCtx,
                              VariableMap&& vars,
-                             std::vector<boost::intrusive_ptr<Expression>> children,
+                             ExpressionVector&& children,
                              std::vector<Variables::Id> orderedVariableIds)
     : Expression(expCtx, std::move(children)),
       _kSubExpression(_children.size() - 1),

@@ -29,20 +29,21 @@
 
 #pragma once
 
-#include <boost/any.hpp>
-#include <boost/optional/optional.hpp>
-#include <iosfwd>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement_comparator_interface.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/column/bsoncolumn.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/platform/compiler.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
-namespace timeseries {
-namespace dotted_path_support {
+#include <iosfwd>
+
+#include <boost/any.hpp>
+#include <boost/optional/optional.hpp>
+
+MONGO_MOD_PUBLIC;
+
+namespace mongo::timeseries::dotted_path_support {
 /**
  * Expands arrays and unpacks bucketed data along the specified path and adds all elements to the
  * 'elements' set.
@@ -111,6 +112,4 @@ std::ostream& operator<<(std::ostream& s, const Decision& i);
  * 'control.min.a.b.c', etc.
  */
 Decision fieldContainsArrayData(const BSONObj& bucketObj, StringData userField);
-}  // namespace dotted_path_support
-}  // namespace timeseries
-}  // namespace mongo
+}  // namespace mongo::timeseries::dotted_path_support

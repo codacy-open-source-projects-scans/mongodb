@@ -27,11 +27,7 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <memory>
-#include <utility>
-
-#include <absl/container/node_hash_map.h>
+#include "mongo/util/uuid.h"
 
 #include "mongo/base/data_range.h"
 #include "mongo/base/error_codes.h"
@@ -43,10 +39,13 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/stdx/unordered_set.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/uuid.h"
+#include "mongo/unittest/unittest.h"
+
+#include <cstdint>
+#include <memory>
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
 
 namespace mongo {
 namespace {
@@ -182,11 +181,9 @@ TEST(UUIDTest, toAndFromBSON) {
     ASSERT_EQUALS(uuidBSON.woCompare(uuidBSON2), 0);
 
     // UUIDs cannot be constructed from invalid BSON elements
-    auto bson2 = BSON("uuid"
-                      << "sam");
+    auto bson2 = BSON("uuid" << "sam");
     ASSERT_EQUALS(ErrorCodes::InvalidUUID, UUID::parse(bson2.getField("uuid")));
-    auto bson3 = BSON("uuid"
-                      << "dddddddd-eeee-4fff-aaaa-bbbbbbbbbbbb");
+    auto bson3 = BSON("uuid" << "dddddddd-eeee-4fff-aaaa-bbbbbbbbbbbb");
     ASSERT_EQUALS(ErrorCodes::InvalidUUID, UUID::parse(bson3.getField("uuid")));
     auto bson4 = BSON("uuid" << 14);
     ASSERT_EQUALS(ErrorCodes::InvalidUUID, UUID::parse(bson4.getField("uuid")));

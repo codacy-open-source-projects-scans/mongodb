@@ -1,10 +1,14 @@
-var t = db.geob;
+// @tags: [
+//   requires_getmore,
+// ]
+
+let t = db.geob;
 t.drop();
 
-var a = {p: [0, 0]};
-var b = {p: [1, 0]};
-var c = {p: [3, 4]};
-var d = {p: [0, 6]};
+let a = {p: [0, 0]};
+let b = {p: [1, 0]};
+let c = {p: [3, 4]};
+let d = {p: [0, 6]};
 
 t.save(a);
 t.save(b);
@@ -26,9 +30,11 @@ assert.eq(c._id, res[2]._id, "D2");
 assert.close(6, res[3].dis, "E1");
 assert.eq(d._id, res[3]._id, "E2");
 
-res = t.aggregate({
-           $geoNear: {near: [0, 0], distanceField: "dis", distanceMultiplier: 2.0}
-       }).toArray();
+res = t
+    .aggregate({
+        $geoNear: {near: [0, 0], distanceField: "dis", distanceMultiplier: 2.0},
+    })
+    .toArray();
 assert.close(0, res[0].dis, "G");
 assert.close(2, res[1].dis, "H");
 assert.close(10, res[2].dis, "I");

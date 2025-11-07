@@ -27,19 +27,20 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <type_traits>
-
-#include <absl/container/node_hash_map.h>
+#include "mongo/db/matcher/schema/expression_internal_schema_allowed_properties.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/matcher/schema/expression_internal_schema_allowed_properties.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <type_traits>
+
+#include <absl/container/node_hash_map.h>
 
 namespace mongo {
 constexpr StringData InternalSchemaAllowedPropertiesMatchExpression::kName;
@@ -92,44 +93,6 @@ bool InternalSchemaAllowedPropertiesMatchExpression::equivalent(const MatchExpre
                             });
 }
 
-bool InternalSchemaAllowedPropertiesMatchExpression::matches(const MatchableDocument* doc,
-                                                             MatchDetails* details) const {
-    return _matchesBSONObj(doc->toBSON());
-}
-
-bool InternalSchemaAllowedPropertiesMatchExpression::matchesSingleElement(const BSONElement& elem,
-                                                                          MatchDetails*) const {
-    if (elem.type() != BSONType::Object) {
-        return false;
-    }
-
-    return _matchesBSONObj(elem.embeddedObject());
-}
-
-bool InternalSchemaAllowedPropertiesMatchExpression::_matchesBSONObj(const BSONObj& obj) const {
-    for (auto&& property : obj) {
-        bool checkOtherwise = true;
-        for (auto&& constraint : _patternProperties) {
-            if (constraint.first.regex->matchView(property.fieldName())) {
-                checkOtherwise = false;
-                if (!constraint.second->matchesBSONElement(property)) {
-                    return false;
-                }
-            }
-        }
-
-        if (checkOtherwise &&
-            _properties.find(property.fieldNameStringData()) != _properties.end()) {
-            checkOtherwise = false;
-        }
-
-        if (checkOtherwise && !_otherwise->matchesBSONElement(property)) {
-            return false;
-        }
-    }
-    return true;
-}
-
 void InternalSchemaAllowedPropertiesMatchExpression::serialize(BSONObjBuilder* builder,
                                                                const SerializationOptions& opts,
                                                                bool includePath) const {
@@ -175,18 +138,4 @@ std::unique_ptr<MatchExpression> InternalSchemaAllowedPropertiesMatchExpression:
     return {std::move(clone)};
 }
 
-MatchExpression::ExpressionOptimizerFunc
-InternalSchemaAllowedPropertiesMatchExpression::getOptimizer() const {
-    return [](std::unique_ptr<MatchExpression> expression) {
-        auto& allowedPropertiesExpr =
-            static_cast<InternalSchemaAllowedPropertiesMatchExpression&>(*expression);
-
-        for (auto& property : allowedPropertiesExpr._patternProperties) {
-            property.second->optimizeFilter();
-        }
-        allowedPropertiesExpr._otherwise->optimizeFilter();
-
-        return expression;
-    };
-}
 }  // namespace mongo

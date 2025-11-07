@@ -28,25 +28,21 @@
  */
 
 
-#include <boost/move/utility_core.hpp>
-#include <mutex>
-#include <string>
-#include <type_traits>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/index_builds/index_builds_manager.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bson_validate.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/index_repair.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/index_builds/index_builds_manager.h"
+#include "mongo/db/index_builds/index_builds_common.h"
 #include "mongo/db/index_builds/multi_index_block.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/index_repair.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/record_data.h"
@@ -54,16 +50,19 @@
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/storage_repair_observer.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/progress_meter.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
+
+#include <mutex>
+#include <string>
+#include <type_traits>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -101,7 +100,7 @@ IndexBuildsManager::~IndexBuildsManager() {
 
 Status IndexBuildsManager::setUpIndexBuild(OperationContext* opCtx,
                                            CollectionWriter& collection,
-                                           const std::vector<BSONObj>& specs,
+                                           const std::vector<IndexBuildInfo>& indexes,
                                            const UUID& buildUUID,
                                            OnInitFn onInit,
                                            SetupOptions options,
@@ -130,14 +129,13 @@ Status IndexBuildsManager::setUpIndexBuild(OperationContext* opCtx,
 
     builder->setIndexBuildMethod(options.method);
 
-    std::vector<BSONObj> indexes;
     try {
-        indexes = writeConflictRetry(opCtx, "IndexBuildsManager::setUpIndexBuild", nss, [&]() {
+        writeConflictRetry(opCtx, "IndexBuildsManager::setUpIndexBuild", nss, [&]() {
             MultiIndexBlock::InitMode mode = options.forRecovery
                 ? MultiIndexBlock::InitMode::Recovery
                 : MultiIndexBlock::InitMode::SteadyState;
-            return uassertStatusOK(
-                builder->init(opCtx, collection, specs, onInit, mode, resumeInfo));
+            return uassertStatusOK(builder->init(
+                opCtx, collection, indexes, onInit, mode, resumeInfo, options.generateTableWrites));
         });
     } catch (const DBException& ex) {
         return ex.toStatus();
@@ -148,22 +146,25 @@ Status IndexBuildsManager::setUpIndexBuild(OperationContext* opCtx,
 
 Status IndexBuildsManager::startBuildingIndex(
     OperationContext* opCtx,
-    const CollectionPtr& collection,
+    const DatabaseName& dbName,
+    const UUID& collectionUUID,
     const UUID& buildUUID,
     const boost::optional<RecordId>& resumeAfterRecordId) {
     auto builder = invariant(_getBuilder(buildUUID));
-
-    return builder->insertAllDocumentsInCollection(opCtx, collection, resumeAfterRecordId);
+    return builder->insertAllDocumentsInCollection(
+        opCtx, {dbName, collectionUUID}, resumeAfterRecordId);
 }
 
-Status IndexBuildsManager::resumeBuildingIndexFromBulkLoadPhase(OperationContext* opCtx,
-                                                                const CollectionPtr& collection,
-                                                                const UUID& buildUUID) {
+Status IndexBuildsManager::resumeBuildingIndexFromBulkLoadPhase(
+    OperationContext* opCtx, const CollectionAcquisition& collection, const UUID& buildUUID) {
     return invariant(_getBuilder(buildUUID))->dumpInsertsFromBulk(opCtx, collection);
 }
 
 StatusWith<std::pair<long long, long long>> IndexBuildsManager::startBuildingIndexForRecovery(
-    OperationContext* opCtx, const CollectionPtr& coll, const UUID& buildUUID, RepairData repair) {
+    OperationContext* opCtx,
+    const CollectionAcquisition& coll,
+    const UUID& buildUUID,
+    RepairData repair) {
     auto builder = invariant(_getBuilder(buildUUID));
 
     // Iterate all records in the collection. Validate the records and index them
@@ -175,13 +176,15 @@ StatusWith<std::pair<long long, long long>> IndexBuildsManager::startBuildingInd
     ProgressMeterHolder progressMeter;
     {
         stdx::unique_lock<Client> lk(*opCtx->getClient());
-        progressMeter.set(
-            lk, CurOp::get(opCtx)->setProgress(lk, curopMessage, coll->numRecords(opCtx)), opCtx);
+        progressMeter.set(lk,
+                          CurOp::get(opCtx)->setProgress(
+                              lk, curopMessage, coll.getCollectionPtr()->numRecords(opCtx)),
+                          opCtx);
     }
 
-    auto ns = coll->ns();
-    auto rs = coll->getRecordStore();
-    auto cursor = rs->getCursor(opCtx);
+    auto ns = coll.nss();
+    auto rs = coll.getCollectionPtr()->getRecordStore();
+    auto cursor = rs->getCursor(opCtx, *shard_role_details::getRecoveryUnit(opCtx));
     auto record = cursor->next();
     while (record) {
         opCtx->checkForInterrupt();
@@ -209,19 +212,20 @@ StatusWith<std::pair<long long, long long>> IndexBuildsManager::startBuildingInd
                                   "Invalid BSON detected; deleting",
                                   "id"_attr = id,
                                   "error"_attr = redact(validStatus));
-                    rs->deleteRecord(opCtx, id);
+                    rs->deleteRecord(opCtx, *shard_role_details::getRecoveryUnit(opCtx), id);
                     {
                         stdx::unique_lock<Client> lk(*opCtx->getClient());
                         // Must reduce the progress meter's expected total after deleting an invalid
                         // document from the collection.
-                        progressMeter.get(lk)->setTotalWhileRunning(coll->numRecords(opCtx));
+                        progressMeter.get(lk)->setTotalWhileRunning(
+                            coll.getCollectionPtr()->numRecords(opCtx));
                     }
                 } else {
                     numRecords++;
                     dataSize += data.size();
                     auto insertStatus = builder->insertSingleDocumentForInitialSyncOrRecovery(
                         opCtx,
-                        coll,
+                        coll.getCollectionPtr(),
                         data.releaseToBson(),
                         id,
                         [&cursor] { cursor->save(); },
@@ -230,7 +234,9 @@ StatusWith<std::pair<long long, long long>> IndexBuildsManager::startBuildingInd
                                 opCtx,
                                 "insertSingleDocumentForInitialSyncOrRecovery-restoreCursor",
                                 ns,
-                                [&cursor] { cursor->restore(); });
+                                [opCtx, &cursor] {
+                                    cursor->restore(*shard_role_details::getRecoveryUnit(opCtx));
+                                });
                         });
                     if (!insertStatus.isOK()) {
                         return insertStatus;
@@ -251,8 +257,9 @@ StatusWith<std::pair<long long, long long>> IndexBuildsManager::startBuildingInd
             // When this exits via success or WCE, we need to restore the cursor
             ON_BLOCK_EXIT([opCtx, ns, &cursor]() {
                 // restore CAN throw WCE per API
-                writeConflictRetry(
-                    opCtx, "retryRestoreCursor", ns, [&cursor] { cursor->restore(); });
+                writeConflictRetry(opCtx, "retryRestoreCursor", ns, [opCtx, &cursor] {
+                    cursor->restore(*shard_role_details::getRecoveryUnit(opCtx));
+                });
             });
             wunit.commit();
             return Status::OK();
@@ -271,7 +278,7 @@ StatusWith<std::pair<long long, long long>> IndexBuildsManager::startBuildingInd
     long long bytesRemoved = 0;
 
     const NamespaceString lostAndFoundNss =
-        NamespaceString::makeLocalCollection("lost_and_found." + coll->uuid().toString());
+        NamespaceString::makeLocalCollection("lost_and_found." + coll.uuid().toString());
 
     // Delete duplicate record and insert it into local lost and found.
     Status status = [&] {
@@ -417,6 +424,7 @@ void IndexBuildsManager::appendBuildInfo(const UUID& buildUUID, BSONObjBuilder* 
 }
 
 void IndexBuildsManager::verifyNoIndexBuilds_forTestOnly() {
+    std::lock_guard lk(_mutex);
     invariant(_builders.empty());
 }
 

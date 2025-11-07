@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Output C #defines for errors into wiredtiger.in and the associated error
+# Output C #defines for errors into wiredtiger.h.in and the associated error
 # message code in strerror.c.
 
 import os, sys, textwrap
@@ -59,7 +59,7 @@ def check_write_document_errors(tfile, skip, err_type, errors):
 if not [f for f in filter_if_fast([
             "../src/conn/api_strerror.c",
             "../src/docs/error-handling.dox",
-            "../src/include/wiredtiger.in",
+            "../src/include/wiredtiger.h.in",
         ], prefix="../")]:
     sys.exit(0)
 
@@ -132,25 +132,83 @@ errors = [
         setting.'''),
 ]
 
+# To ensure our sub-level error returns do not conflict with any other
+# package or the error returns, we use the range -32,000 to -32,199.
+#
+# These numbers cannot change without breaking backward compatibility,
+# and are listed in error value order.
 sub_errors = [
     Error('WT_NONE', -32000,
-        'last API call was successful', '''
-        This is the default sub-level error code that should be used when there is no
-        sub-level error to pair with an error. It indicates that no further context
-        exists or is necessary.'''),
+        'No additional context', '''
+        This sub-level error code is returned by default and indicates that no
+        further context exists or is necessary.'''),
+    Error('WT_BACKGROUND_COMPACT_ALREADY_RUNNING', -32001,
+        "Background compaction is already running", '''
+        This sub-level error returns when the user tries to reconfigure background
+        compaction while it is already running.'''),
+    Error('WT_CACHE_OVERFLOW', -32002,
+        "Cache capacity has overflown", '''
+        This sub-level error indicates that the configured cache has exceeded full
+        capacity.'''),
+    Error('WT_WRITE_CONFLICT', -32003,
+        "Write conflict between concurrent operations", '''
+        This sub-level error indicates that there is a write conflict on the same
+        page between concurrent operations.'''),
+    Error('WT_OLDEST_FOR_EVICTION', -32004,
+        "Transaction has the oldest pinned transaction ID", '''
+        This sub-level error indicates that a given transaction has the oldest
+        transaction ID and needs to be rolled back.'''),
+    Error('WT_CONFLICT_BACKUP', -32005,
+        "Conflict performing operation due to running backup", '''
+        This sub-level error indicates that there is a conflict performing the operation
+        because of a running backup in the system.'''),
+    Error('WT_CONFLICT_DHANDLE', -32006,
+        "Another thread currently holds the data handle of the table", '''
+        This sub-level error indicates that a concurrent operation is holding the data
+        handle of the table.'''),
+    Error('WT_CONFLICT_SCHEMA_LOCK', -32007,
+        "Conflict performing schema operation", '''
+        This sub-level error indicates that a concurrent operation is performing a schema
+        type operation or currently holds the schema lock.'''),
+    Error('WT_UNCOMMITTED_DATA', -32008,
+        "Table has uncommitted data", '''
+        This sub-level error returns when the table has uncommitted data.'''),
+    Error('WT_DIRTY_DATA', -32009,
+        "Table has dirty data", '''
+        This sub-level error returns when the table has dirty content.'''),
+    Error('WT_CONFLICT_TABLE_LOCK', -32010,
+        "Another thread currently holds the table lock", '''
+        This sub-level error indicates that a concurrent operation is performing
+        a table operation.'''),
+    Error('WT_CONFLICT_CHECKPOINT_LOCK', -32011,
+        "Another thread currently holds the checkpoint lock", '''
+        This sub-level error indicates that a concurrent operation is performing
+        a checkpoint.'''),
+    Error('WT_MODIFY_READ_UNCOMMITTED', -32012,
+        "Read-uncommitted readers do not support reconstructing a record with modifies", '''
+        This sub-level error indicates that a reader with uncommitted isolation 
+        is trying to reconstruct a record with modifies. This is not supported.'''),
+    Error('WT_CONFLICT_LIVE_RESTORE', -32013,
+        "Conflict performing operation due to an in-progress live restore", '''
+        This sub-level error indicates that there is a conflict performing the operation
+        because of a running live restore in the system.'''),
+    Error('WT_CONFLICT_DISAGG', -32014,
+        "Conflict with disaggregated storage", '''
+        This sub-level error indicates that an operation or configuration conflicts with
+        disaggregated storage.'''),     
 ]
 
-# Update the #defines in the wiredtiger.in file.
+# Update the #defines in the wiredtiger.h.in file.
 tmp_file = '__tmp_api_err' + str(os.getpid())
 tfile = open(tmp_file, 'w')
 skip = 0
-for line in open('../src/include/wiredtiger.in', 'r'):
+for line in open('../src/include/wiredtiger.h.in', 'r'):
     if not skip:
         tfile.write(line)
     skip = check_write_errors(tfile, skip, 'Error', errors)
     skip = check_write_errors(tfile, skip, 'Sub-level error', sub_errors)
 tfile.close()
-compare_srcfile(tmp_file, '../src/include/wiredtiger.in')
+compare_srcfile(tmp_file, '../src/include/wiredtiger.h.in')
 
 # Output the wiredtiger_strerror and wiredtiger_sterror_r code.
 tmp_file = '__tmp_api_err' + str(os.getpid())
@@ -207,6 +265,17 @@ wiredtiger_strerror(int error)
 \tstatic char buf[128];
 
 \treturn (__wt_strerror(NULL, error, buf, sizeof(buf)));
+}
+
+/*
+ * __wt_is_valid_sub_level_error --
+ *\tReturn true if the provided error falls within the valid range for sub level error codes, 
+ *\treturn false otherwise.
+ */
+bool
+__wt_is_valid_sub_level_error(int sub_level_err)
+{
+\treturn (sub_level_err <= -32000 && sub_level_err > -32200);
 }
 ''')
 tfile.close()

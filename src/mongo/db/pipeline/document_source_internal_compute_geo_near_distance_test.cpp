@@ -27,18 +27,19 @@
  *    it in the license file.
  */
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/document_source_internal_compute_geo_near_distance.h"
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
+#include "mongo/db/exec/agg/mock_stage.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/document_source_internal_compute_geo_near_distance.h"
 #include "mongo/db/pipeline/document_source_mock.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
+
 
 namespace mongo {
 namespace {
@@ -58,18 +59,18 @@ TEST_F(DocumentSourceInternalGeoNearDistanceTest, DistanceBetweenOverlappingPoin
         }})");
     auto geoDist = DocumentSourceInternalGeoNearDistance::createFromBson(
         computeGeoSpec.firstElement(), getExpCtx());
+    auto geoDistStage = exec::agg::buildStage(geoDist);
 
-    auto mock =
-        DocumentSourceMock::createForTest(DOC("loc" << DOC("type"
-                                                           << "Point"_sd
-                                                           << "coordinates" << DOC_ARRAY(1 << 1))),
-                                          getExpCtx());
+    auto mock = exec::agg::MockStage::createForTest(
+        {DOC("loc" << DOC("type" << "Point"_sd
+                                 << "coordinates" << DOC_ARRAY(1 << 1)))},
+        getExpCtx());
 
-    geoDist->setSource(mock.get());
-    auto next = geoDist->getNext();
+    geoDistStage->setSource(mock.get());
+    auto next = geoDistStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     auto doc = next.getDocument();
-    ASSERT_EQUALS(doc["dist"].getType(), BSONType::NumberDouble);
+    ASSERT_EQUALS(doc["dist"].getType(), BSONType::numberDouble);
     ASSERT_EQUALS(doc["dist"].coerceToDouble(), 0);
 }
 
@@ -86,19 +87,19 @@ TEST_F(DocumentSourceInternalGeoNearDistanceTest, SphericalDistanceBetweenTwoPoi
         }})");
     auto geoDist = DocumentSourceInternalGeoNearDistance::createFromBson(
         computeGeoSpec.firstElement(), getExpCtx());
+    auto geoDistStage = exec::agg::buildStage(geoDist);
 
-    auto mock =
-        DocumentSourceMock::createForTest(DOC("loc" << DOC("type"
-                                                           << "Point"_sd
-                                                           << "coordinates" << DOC_ARRAY(0 << 0))),
-                                          getExpCtx());
+    auto mock = exec::agg::MockStage::createForTest(
+        {DOC("loc" << DOC("type" << "Point"_sd
+                                 << "coordinates" << DOC_ARRAY(0 << 0)))},
+        getExpCtx());
 
-    geoDist->setSource(mock.get());
-    auto next = geoDist->getNext();
+    geoDistStage->setSource(mock.get());
+    auto next = geoDistStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     auto doc = next.getDocument();
     const int meterToLatDegree = 111319;  // Each degree of latitude is approximately 111km.
-    ASSERT_EQUALS(doc["dist"].getType(), BSONType::NumberDouble);
+    ASSERT_EQUALS(doc["dist"].getType(), BSONType::numberDouble);
     ASSERT_APPROX_EQUAL(doc["dist"].coerceToDouble(), meterToLatDegree, 300);
 }
 
@@ -112,14 +113,15 @@ TEST_F(DocumentSourceInternalGeoNearDistanceTest, DistanceBetweenTwoLegacyPoints
         }})");
     auto geoDist = DocumentSourceInternalGeoNearDistance::createFromBson(
         computeGeoSpec.firstElement(), getExpCtx());
+    auto geoDistStage = exec::agg::buildStage(geoDist);
 
-    auto mock = DocumentSourceMock::createForTest(DOC("loc" << DOC_ARRAY(0 << 0)), getExpCtx());
+    auto mock = exec::agg::MockStage::createForTest({DOC("loc" << DOC_ARRAY(0 << 0))}, getExpCtx());
 
-    geoDist->setSource(mock.get());
-    auto next = geoDist->getNext();
+    geoDistStage->setSource(mock.get());
+    auto next = geoDistStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     auto doc = next.getDocument();
-    ASSERT_EQUALS(doc["dist"].getType(), BSONType::NumberDouble);
+    ASSERT_EQUALS(doc["dist"].getType(), BSONType::numberDouble);
     ASSERT_APPROX_EQUAL(doc["dist"].coerceToDouble(), 1.41421, 0.01);
 }
 
@@ -136,15 +138,16 @@ TEST_F(DocumentSourceInternalGeoNearDistanceTest, DistanceBetweenTwoMixedPointsS
         }})");
     auto geoDist = DocumentSourceInternalGeoNearDistance::createFromBson(
         computeGeoSpec.firstElement(), getExpCtx());
+    auto geoDistStage = exec::agg::buildStage(geoDist);
 
-    auto mock = DocumentSourceMock::createForTest(DOC("loc" << DOC_ARRAY(0 << 0)), getExpCtx());
+    auto mock = exec::agg::MockStage::createForTest({DOC("loc" << DOC_ARRAY(0 << 0))}, getExpCtx());
 
-    geoDist->setSource(mock.get());
-    auto next = geoDist->getNext();
+    geoDistStage->setSource(mock.get());
+    auto next = geoDistStage->getNext();
     ASSERT_TRUE(next.isAdvanced());
     auto doc = next.getDocument();
     const int meterToLatDegree = 111319;  // Each degree of latitude is approximately 111km.
-    ASSERT_EQUALS(doc["dist"].getType(), BSONType::NumberDouble);
+    ASSERT_EQUALS(doc["dist"].getType(), BSONType::numberDouble);
     ASSERT_APPROX_EQUAL(doc["dist"].coerceToDouble(), meterToLatDegree, 300);
 }
 

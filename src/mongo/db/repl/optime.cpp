@@ -27,6 +27,19 @@
  *    it in the license file.
  */
 
+#include "mongo/db/repl/optime.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/util/bson_extract.h"
+#include "mongo/db/repl/optime_base_gen.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/util/assert_util.h"
+
 #include <cstdint>
 #include <limits>
 #include <sstream>
@@ -36,20 +49,7 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status_with.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/bson/util/bson_extract.h"
-#include "mongo/db/repl/optime.h"
-#include "mongo/db/repl/optime_base_gen.h"
-#include "mongo/idl/idl_parser.h"
-#include "mongo/util/assert_util.h"
-
-namespace mongo {
-namespace repl {
+namespace mongo::repl {
 
 // static
 OpTime OpTime::max() {
@@ -65,7 +65,7 @@ void OpTime::append(StringData fieldName, BSONObjBuilder* builder) const {
 
 StatusWith<OpTime> OpTime::parseFromOplogEntry(const BSONObj& obj) {
     try {
-        OpTimeBase base = OpTimeBase::parse(IDLParserContext("OpTimeBase"), obj);
+        OpTimeBase base = OpTimeBase::parse(obj);
         long long term = base.getTerm().value_or(kUninitializedTerm);
         return OpTime(base.getTimestamp(), term);
     } catch (...) {
@@ -119,7 +119,7 @@ StatusWith<OpTimeAndWallTime> OpTimeAndWallTime::parseOpTimeAndWallTimeFromOplog
     const BSONObj& obj) {
 
     try {
-        auto base = OpTimeAndWallTimeBase::parse(IDLParserContext("OpTimeAndWallTimeBase"), obj);
+        auto base = OpTimeAndWallTimeBase::parse(obj);
 
         auto opTime =
             OpTime(base.getTimestamp(), base.getTerm().value_or(OpTime::kUninitializedTerm));
@@ -134,10 +134,4 @@ OpTimeAndWallTime OpTimeAndWallTime::parse(const BSONObj& obj) {
     return uassertStatusOK(parseOpTimeAndWallTimeFromOplogEntry(obj));
 }
 
-}  // namespace repl
-
-BSONObjBuilder& operator<<(BSONObjBuilderValueStream& builder, const repl::OpTime& value) {
-    return builder << value.toBSON();
-}
-
-}  // namespace mongo
+}  // namespace mongo::repl

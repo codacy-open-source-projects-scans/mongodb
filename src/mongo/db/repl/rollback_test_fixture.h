@@ -28,26 +28,15 @@
  */
 
 #pragma once
-
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/read_write_concern_defaults_cache_lookup_mock.h"
@@ -60,7 +49,6 @@
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/replication_recovery.h"
-#include "mongo/db/repl/rollback_source.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_d_test_fixture.h"
@@ -72,8 +60,20 @@
 #include "mongo/unittest/log_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace repl {
@@ -166,10 +166,20 @@ protected:
 
 class RollbackTest::StorageInterfaceRollback : public StorageInterfaceImpl {
 public:
+    // Tests can call this function to exercise the unmocked version of setStableTimestamp() and
+    // recoverToStableTimestamp().
+    void unmockStableTimestamp() {
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
+        _mockStableTimestamp = false;
+    }
+
     void setStableTimestamp(ServiceContext* serviceCtx,
                             Timestamp snapshotName,
                             bool force = false) override {
         stdx::lock_guard<stdx::mutex> lock(_mutex);
+        if (!_mockStableTimestamp) {
+            StorageInterfaceImpl::setStableTimestamp(serviceCtx, snapshotName, force);
+        }
         _stableTimestamp = snapshotName;
     }
 
@@ -180,6 +190,11 @@ public:
      */
     Timestamp recoverToStableTimestamp(OperationContext* opCtx) override {
         stdx::lock_guard<stdx::mutex> lock(_mutex);
+        if (!_mockStableTimestamp) {
+            StorageInterfaceImpl::setInitialDataTimestamp(opCtx->getServiceContext(),
+                                                          _stableTimestamp);
+            StorageInterfaceImpl::recoverToStableTimestamp(opCtx);
+        }
         if (_recoverToTimestampStatus) {
             fassert(4584700, _recoverToTimestampStatus.get());
         }
@@ -261,6 +276,8 @@ private:
 
     boost::optional<Status> _setCollectionCountStatus = boost::none;
     boost::optional<UUID> _setCollectionCountStatusUUID = boost::none;
+
+    bool _mockStableTimestamp = true;
 };
 
 /**
@@ -291,28 +308,6 @@ private:
     MemberState _failSetFollowerModeOnThisMemberState = MemberState::RS_UNKNOWN;
 
     ErrorCodes::Error _failSetFollowerModeWithThisCode = ErrorCodes::InternalError;
-};
-
-class RollbackSourceMock : public RollbackSource {
-public:
-    RollbackSourceMock(std::unique_ptr<OplogInterface> oplog);
-    int getRollbackId() const override;
-    const OplogInterface& getOplog() const override;
-    const HostAndPort& getSource() const override;
-    BSONObj getLastOperation() const override;
-    BSONObj findOne(const NamespaceString& nss, const BSONObj& filter) const override;
-
-    std::pair<BSONObj, NamespaceString> findOneByUUID(const DatabaseName& db,
-                                                      UUID uuid,
-                                                      const BSONObj& filter) const override;
-
-    StatusWith<BSONObj> getCollectionInfoByUUID(const DatabaseName& dbName,
-                                                const UUID& uuid) const override;
-    StatusWith<BSONObj> getCollectionInfo(const NamespaceString& nss) const override;
-
-private:
-    std::unique_ptr<OplogInterface> _oplog;
-    HostAndPort _source;
 };
 
 }  // namespace repl

@@ -12,12 +12,11 @@ import {getPlanCacheKeyFromShape} from "jstests/libs/query/analyze_plan.js";
 // the parameter is modified. Along with each parameter, includes a valid new value of the parameter
 // that the test can use when invoking the 'setParameter' command.
 const paramList = [
-    {name: "internalQueryPlanEvaluationWorksSbe", value: 10},
-    {name: "internalQueryPlanEvaluationCollFractionSbe", value: 0.3},
     {name: "internalQueryPlanEvaluationMaxResults", value: 200},
     {name: "internalQueryForceIntersectionPlans", value: true},
     {name: "internalQueryPlannerEnableIndexIntersection", value: false},
     {name: "internalQueryPlannerEnableHashIntersection", value: true},
+    {name: "internalQueryPlannerEnableSortIndexIntersection", value: true},
     {name: "internalQueryPlannerEnableIndexPruning", value: true},
     {name: "internalQueryCacheEvictionRatio", value: 11.0},
     {name: "internalQueryCacheWorksGrowthCoefficient", value: 3.0},
@@ -55,14 +54,13 @@ assert.commandWorked(coll.createIndex({a: 1}));
 
 const filter = {
     a: 1,
-    b: 1
+    b: 1,
 };
 const cacheKey = getPlanCacheKeyFromShape({query: filter, collection: coll, db: db});
 
 function createCacheEntry() {
     assert.eq(0, coll.find(filter).itcount());
-    const cacheContents =
-        coll.aggregate([{$planCacheStats: {}}, {$match: {planCacheKey: cacheKey}}]).toArray();
+    const cacheContents = coll.aggregate([{$planCacheStats: {}}, {$match: {planCacheKey: cacheKey}}]).toArray();
     // We expect to see a single SBE cache entry.
     assert.eq(cacheContents.length, 1, cacheContents);
     const cacheEntry = cacheContents[0];

@@ -29,25 +29,23 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
-#include "mongo/db/query/plan_cache/plan_cache.h"
 #include "mongo/db/query/plan_cache/sbe_plan_cache.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/serialization_context.h"
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
 class Collection;
-class CollectionPtr;
 class MultipleCollectionAccessor;
 class OperationContext;
 class PlanExecutorPipeline;
@@ -58,6 +56,13 @@ struct PlanSummaryStats;
  */
 class Explain {
 public:
+    struct PlannerContext {
+        bool mainCollExists;
+        boost::optional<uint32_t> planCacheShapeHash;
+        boost::optional<uint32_t> planCacheKeyHash;
+        bool indexFilterSet;
+    };
+
     /**
      * Get explain BSON for the execution stages contained by 'exec'. Use this function if you
      * have a PlanExecutor and want to convert it into a human readable explain format. Any
@@ -81,14 +86,6 @@ public:
      * If there is an error during the execution of the query, the error message and code are
      * added to the "executionStats" section of the explain.
      */
-    static void explainStages(PlanExecutor* exec,
-                              const CollectionPtr& collection,
-                              ExplainOptions::Verbosity verbosity,
-                              BSONObj extraInfo,
-                              const SerializationContext& serializationContext,
-                              const BSONObj& command,
-                              BSONObjBuilder* out);
-
     static void explainStages(PlanExecutor* exec,
                               const CollectionAcquisition& collection,
                               ExplainOptions::Verbosity verbosity,
@@ -138,6 +135,21 @@ public:
         BSONObjBuilder* out);
 
     /**
+     * Like the helper above but it accepts cached collection information from the catalog as
+     * context to generate the planner info
+     */
+    static void explainStages(
+        PlanExecutor* exec,
+        const PlannerContext& plannerContext,
+        ExplainOptions::Verbosity verbosity,
+        Status executePlanStatus,
+        boost::optional<PlanExplainer::PlanStatsDetails> winningPlanTrialStats,
+        BSONObj extraInfo,
+        const SerializationContext& serializationContext,
+        const BSONObj& command,
+        BSONObjBuilder* out);
+
+    /**
      * Gets explain BSON for the document sources contained by 'exec'. Use this function if you have
      * a PlanExecutor for a pipeline and want to turn it into a human readable explain format.
      *
@@ -162,6 +174,9 @@ public:
      */
     static void planCacheEntryToBSON(const mongo::PlanCacheEntry& entry, BSONObjBuilder* out);
     static void planCacheEntryToBSON(const mongo::sbe::PlanCacheEntry& entry, BSONObjBuilder* out);
+
+    static Explain::PlannerContext makePlannerContext(
+        const PlanExecutor& exec, const MultipleCollectionAccessor& collections);
 };
 
 }  // namespace mongo

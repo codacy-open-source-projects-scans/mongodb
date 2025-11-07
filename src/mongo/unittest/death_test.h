@@ -29,11 +29,11 @@
 
 #pragma once
 
+#include "mongo/unittest/framework.h"
+
 #include <functional>
 #include <memory>
 #include <string>
-
-#include "mongo/unittest/framework.h"
 
 /**
  * Constructs a single death test named `TEST_NAME` within the test suite `SUITE_NAME`.
@@ -107,7 +107,7 @@
     private:                                                                                   \
         void _doTest() override;                                                               \
         static inline const ::mongo::unittest::TestInfo _testInfo{                             \
-            #SUITE_NAME, #TEST_NAME, __FILE__, __LINE__};                                      \
+            #SUITE_NAME, #TEST_NAME, __FILE__, __LINE__, &typeid(TEST_BASE)};                  \
         static inline const RegistrationAgent<::mongo::unittest::DeathTest<TEST_TYPE>> _agent{ \
             &_testInfo};                                                                       \
     };                                                                                         \

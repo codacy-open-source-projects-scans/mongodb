@@ -28,12 +28,7 @@
  */
 
 
-#include <fmt/format.h>
-#include <list>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/s/sharding_task_executor.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -43,17 +38,22 @@
 #include "mongo/client/remote_command_targeter_mock.h"
 #include "mongo/crypto/sha256_block.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/task_executor_test_fixture.h"
 #include "mongo/executor/thread_pool_mock.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/s/sharding_mongos_test_fixture.h"
-#include "mongo/s/sharding_task_executor.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/uuid.h"
+
+#include <list>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kExecutor
 
@@ -102,7 +102,7 @@ protected:
         ASSERT(opCtxLsid);
 
         auto cmdObjLsid =
-            LogicalSessionFromClient::parse(IDLParserContext{"lsid"}, cmdObj["lsid"].Obj());
+            LogicalSessionFromClient::parse(cmdObj["lsid"].Obj(), IDLParserContext{"lsid"});
 
         ASSERT_EQ(opCtxLsid->getId(), cmdObjLsid.getId());
         ASSERT_EQ(opCtxLsid->getUid(), *cmdObjLsid.getUid());
@@ -123,12 +123,11 @@ TEST_F(ShardingTaskExecutorTest, MissingLsidAddsLsidInCommand) {
 
     NetworkInterfaceMock::InNetworkGuard ing(_network);
 
-    const RemoteCommandRequest request(HostAndPort("localhost", 27017),
-                                       DatabaseName::createDatabaseName_forTest(boost::none,
-                                                                                "mydb"),
-                                       BSON("whatsUp"
-                                            << "doc"),
-                                       operationContext());
+    const RemoteCommandRequest request(
+        HostAndPort("localhost", 27017),
+        DatabaseName::createDatabaseName_forTest(boost::none, "mydb"),
+        BSON("whatsUp" << "doc"),
+        operationContext());
 
     TaskExecutor::CallbackHandle cbHandle =
         unittest::assertGet(getExecutor()->scheduleRemoteCommand(

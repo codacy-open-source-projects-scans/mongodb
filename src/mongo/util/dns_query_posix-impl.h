@@ -27,6 +27,8 @@
  *    it in the license file.
  */
 
+#pragma once
+
 #ifndef MONGO_ALLOW_INCLUDE_UTIL_DNS_QUERY_PLATFORM
 #error Do not include the DNS Query platform implementation headers.  Please use "mongo/util/dns_query.h" instead.
 #endif
@@ -39,11 +41,13 @@
 #include <resolv.h>
 // clang-format on
 
-#include <cstdio>
+#include "mongo/stdx/mutex.h"
+#include "mongo/util/duration.h"
 
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <cstdio>
 #include <exception>
 #include <iostream>
 #include <memory>
@@ -53,9 +57,6 @@
 #include <vector>
 
 #include <boost/noncopyable.hpp>
-
-#include "mongo/stdx/mutex.h"
-#include "mongo/util/duration.h"
 
 namespace mongo {
 namespace dns {

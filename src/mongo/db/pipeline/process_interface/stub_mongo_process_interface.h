@@ -128,9 +128,9 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    std::list<BSONObj> getIndexSpecs(OperationContext* opCtx,
-                                     const NamespaceString& ns,
-                                     bool includeBuildUUIDs) override {
+    std::vector<BSONObj> getIndexSpecs(OperationContext* opCtx,
+                                       const NamespaceString& ns,
+                                       bool includeBuildUUIDs) override {
         MONGO_UNREACHABLE;
     }
 
@@ -188,6 +188,10 @@ public:
         MONGO_UNREACHABLE;
     }
 
+    UUID fetchCollectionUUIDFromPrimary(OperationContext* opCtx, const NamespaceString& nss) final {
+        MONGO_UNREACHABLE;
+    }
+
     query_shape::CollectionType getCollectionType(OperationContext* opCtx,
                                                   const NamespaceString& nss) final {
         MONGO_UNREACHABLE;
@@ -200,7 +204,7 @@ public:
         bool dropTarget,
         bool stayTemp,
         const BSONObj& originalCollectionOptions,
-        const std::list<BSONObj>& originalIndexes) override {
+        const std::vector<BSONObj>& originalIndexes) override {
         MONGO_UNREACHABLE;
     }
 
@@ -231,17 +235,28 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    std::unique_ptr<Pipeline, PipelineDeleter> preparePipelineForExecution(
-        Pipeline* pipeline,
+    std::unique_ptr<Pipeline> finalizeAndMaybePreparePipelineForExecution(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        std::unique_ptr<Pipeline> pipeline,
+        bool attachCursorAfterOptimizing,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
+        ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
+        boost::optional<BSONObj> readConcern = boost::none,
+        bool shouldUseCollectionDefaultCollator = false) override {
+        MONGO_UNREACHABLE;
+    }
+
+    std::unique_ptr<Pipeline> preparePipelineForExecution(
+        std::unique_ptr<Pipeline> pipeline,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none) override {
         MONGO_UNREACHABLE;
     }
 
-    std::unique_ptr<Pipeline, PipelineDeleter> preparePipelineForExecution(
+    std::unique_ptr<Pipeline> preparePipelineForExecution(
         const boost::intrusive_ptr<mongo::ExpressionContext>& expCtx,
         const AggregateCommandRequest& aggRequest,
-        Pipeline* pipeline,
+        std::unique_ptr<Pipeline> pipeline,
         boost::optional<BSONObj> shardCursorsSortSpec = boost::none,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none,
@@ -249,15 +264,35 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    BSONObj preparePipelineAndExplain(Pipeline* ownedPipeline,
-                                      ExplainOptions::Verbosity verbosity) override {
+    BSONObj finalizePipelineAndExplain(
+        std::unique_ptr<Pipeline> pipeline,
+        ExplainOptions::Verbosity verbosity,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr) override {
         MONGO_UNREACHABLE;
     }
 
-    std::unique_ptr<Pipeline, PipelineDeleter> attachCursorSourceToPipelineForLocalRead(
-        Pipeline* pipeline,
+    std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalReadWithCatalog(
+        std::unique_ptr<Pipeline> pipeline,
+        const MultipleCollectionAccessor& collections,
+        const boost::intrusive_ptr<CatalogResourceHandle>& catalogResourceHandle) override {
+        MONGO_UNREACHABLE;
+    }
+
+    std::unique_ptr<Pipeline> attachCursorSourceToPipelineForLocalRead(
+        std::unique_ptr<Pipeline> pipeline,
         boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
         bool shouldUseCollectionDefaultCollator = false,
+        ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) override {
+        MONGO_UNREACHABLE;
+    }
+
+    std::unique_ptr<Pipeline> finalizeAndAttachCursorToPipelineForLocalRead(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        std::unique_ptr<Pipeline> pipeline,
+        bool attachCursorAfterOptimizing,
+        std::function<void(Pipeline* pipeline)> optimizePipeline = nullptr,
+        bool shouldUseCollectionDefaultCollator = false,
+        boost::optional<const AggregateCommandRequest&> aggRequest = boost::none,
         ExecShardFilterPolicy shardFilterPolicy = AutomaticShardFiltering{}) override {
         MONGO_UNREACHABLE;
     }
@@ -288,7 +323,9 @@ public:
     }
 
     std::vector<FieldPath> collectDocumentKeyFieldsActingAsRouter(
-        OperationContext*, const NamespaceString&) const override {
+        OperationContext*,
+        const NamespaceString&,
+        RoutingContext* routingCtx = nullptr) const override {
         MONGO_UNREACHABLE;
     }
 
@@ -382,32 +419,37 @@ public:
         return std::make_unique<ScopedExpectUnshardedCollectionNoop>();
     }
 
-    std::unique_ptr<TemporaryRecordStore> createTemporaryRecordStore(
+    std::unique_ptr<SpillTable> createSpillTable(
         const boost::intrusive_ptr<ExpressionContext>& expCtx, KeyFormat keyFormat) const override {
         MONGO_UNREACHABLE;
     }
 
-    void writeRecordsToRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                   RecordStore* rs,
-                                   std::vector<Record>* records,
-                                   const std::vector<Timestamp>& ts) const override {
+    void writeRecordsToSpillTable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                  SpillTable& spillTable,
+                                  std::vector<Record>* records) const override {
         MONGO_UNREACHABLE;
     }
 
-    Document readRecordFromRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                       RecordStore* rs,
-                                       RecordId rID) const override {
+    Document readRecordFromSpillTable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                      const SpillTable& spillTable,
+                                      RecordId rID) const override {
         MONGO_UNREACHABLE;
     }
 
-    void deleteRecordFromRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                     RecordStore* rs,
-                                     RecordId rID) const override {
+    bool checkRecordInSpillTable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                 const SpillTable& spillTable,
+                                 RecordId rID) const override {
         MONGO_UNREACHABLE;
     }
 
-    void truncateRecordStore(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                             RecordStore* rs) const override {
+    void deleteRecordFromSpillTable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                    SpillTable& spillTable,
+                                    RecordId rID) const override {
+        MONGO_UNREACHABLE;
+    }
+
+    void truncateSpillTable(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                            SpillTable& spillTable) const override {
         MONGO_UNREACHABLE;
     }
 };

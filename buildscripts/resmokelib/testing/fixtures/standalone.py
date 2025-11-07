@@ -12,6 +12,10 @@ import pymongo.errors
 import yaml
 
 from buildscripts.resmokelib import logging
+from buildscripts.resmokelib.extensions import (
+    delete_extension_configs,
+    find_and_generate_extension_configs,
+)
 from buildscripts.resmokelib.testing.fixtures import interface
 from buildscripts.resmokelib.testing.fixtures.fixturelib import FixtureLib
 from buildscripts.resmokelib.utils.history import HistoryDict
@@ -32,6 +36,7 @@ class MongoDFixture(interface.Fixture, interface._DockerComposeInterface):
         preserve_dbpath: bool = False,
         port: Optional[int] = None,
         launch_mongot: bool = False,
+        load_all_extensions: bool = False,
     ):
         """Initialize MongoDFixture with different options for the mongod process.
 
@@ -46,6 +51,7 @@ class MongoDFixture(interface.Fixture, interface._DockerComposeInterface):
             preserve_dbpath (bool, optional): preserve_dbpath. Defaults to False.
             port (Optional[int], optional): Port to use for mongod. Defaults to None.
             launch_mongot (bool, optional): Should mongot be launched as well. Defaults to False.
+            load_all_extensions (bool, optional): Whether to load all test extensions upon startup. Defaults to False.
 
         Raises
             ValueError: _description_
@@ -54,6 +60,14 @@ class MongoDFixture(interface.Fixture, interface._DockerComposeInterface):
         self.mongod_options = self.fixturelib.make_historic(
             self.fixturelib.default_if_none(mongod_options, {})
         )
+
+        self.load_all_extensions = load_all_extensions or self.config.LOAD_ALL_EXTENSIONS
+        if self.load_all_extensions:
+            self.loaded_extensions = find_and_generate_extension_configs(
+                is_evergreen=self.config.EVERGREEN_TASK_ID,
+                logger=self.logger,
+                mongod_options=self.mongod_options,
+            )
 
         if "set_parameters" not in self.mongod_options:
             self.mongod_options["set_parameters"] = {}
@@ -90,25 +104,38 @@ class MongoDFixture(interface.Fixture, interface._DockerComposeInterface):
         self.mongod_options["port"] = self.port
 
         if launch_mongot:
-            self.launch_mongot = True
+            self.launch_mongot_bool = True
+
+            # mongot exposes two ports that it will listen for ingress communication on: "port",
+            # which expects the MongoRPC protocol, and "grpcPort", which expects the MongoDB
+            # gRPC protocol. When useGrpcForSearch is true, mongos and mongod will communicate
+            # with mongot using gRPC, and so we must set the "mongotHost" option to the listening
+            # address that expects the gRPC protocol. However, the testing infrastructure also
+            # communicates with mongot directly using the pymongo driver, which must communicate
+            # using MongoRPC, and so we also setup the "port" on mongot to listen for MongoRPC
+            # connections no matter what.
             self.mongot_port = fixturelib.get_next_port(job_num)
-            self.mongod_options["mongotHost"] = "localhost:" + str(self.mongot_port)
+            if self.mongod_options["set_parameters"].get("useGrpcForSearch"):
+                self.mongot_grpc_port = fixturelib.get_next_port(job_num)
+                self.mongod_options["mongotHost"] = "localhost:" + str(self.mongot_grpc_port)
+            else:
+                self.mongod_options["mongotHost"] = "localhost:" + str(self.mongot_port)
+
             # In future architectures, this could change
             self.mongod_options["searchIndexManagementHostAndPort"] = self.mongod_options[
                 "mongotHost"
             ]
         else:
-            self.launch_mongot = False
-        # If a suite enables launching mongot, the MongoTFixture will be created in setup_mongot,
-        # which gets called by ReplicaSetFixture::setup().
+            self.launch_mongot_bool = False
+        # If a suite enables launching mongot, the necessary startup options for the MongoTFixture will be created in
+        # setup_mongot_params() which is called by the builders after all other fixture types have been setup (and
+        # therefore all other nodes have been assigned ports, which allows mongot to connect to a given mongod or
+        # mongos. The MongoTFixture is then launched by the MongoDFixture in setup().
         self.mongot = None
 
-        self.router_port = None
-        if "routerPort" in self.mongod_options:
-            self.router_port = fixturelib.get_next_port(job_num)
-            mongod_options["routerPort"] = self.router_port
-
-        if "featureFlagGRPC" in self.config.ENABLED_FEATURE_FLAGS:
+        if "featureFlagGRPC" in self.config.ENABLED_FEATURE_FLAGS or self.mongod_options[
+            "set_parameters"
+        ].get("featureFlagGRPC"):
             self.grpcPort = fixturelib.get_next_port(job_num)
             self.mongod_options["grpcPort"] = self.grpcPort
 
@@ -118,7 +145,16 @@ class MongoDFixture(interface.Fixture, interface._DockerComposeInterface):
         )
         self.mongod_options["set_parameters"]["backtraceLogFile"] = backtrace_log_file_name
 
-    def setup(self):
+    def launch_mongot(self):
+        mongot = self.fixturelib.make_fixture(
+            "MongoTFixture", self.logger, self.job_num, mongot_options=self.mongot_options
+        )
+
+        mongot.setup()
+        self.mongot = mongot
+        self.mongot.await_ready()
+
+    def setup(self, temporary_flags={}):
         """Set up the mongod."""
         if not self.preserve_dbpath and os.path.lexists(self._dbpath):
             shutil.rmtree(self._dbpath, ignore_errors=False)
@@ -126,6 +162,10 @@ class MongoDFixture(interface.Fixture, interface._DockerComposeInterface):
         os.makedirs(self._dbpath, exist_ok=True)
 
         launcher = MongodLauncher(self.fixturelib)
+
+        mongod_options = self.mongod_options.copy()
+        mongod_options.update(temporary_flags)
+
         # Second return val is the port, which we ignore because we explicitly created the port above.
         # The port is used to set other mongod_option's here:
         # https://github.com/mongodb/mongo/blob/532a6a8ae7b8e7ab5939e900759c00794862963d/buildscripts/resmokelib/testing/fixtures/replicaset.py#L136
@@ -133,14 +173,14 @@ class MongoDFixture(interface.Fixture, interface._DockerComposeInterface):
             self.logger,
             self.job_num,
             executable=self.mongod_executable,
-            mongod_options=self.mongod_options,
+            mongod_options=mongod_options,
         )
 
         try:
-            msg = f"Starting mongod on port { self.port }{(' with embedded router on port ' + str(self.router_port)) if self.router_port else ''}...\n{ mongod.as_command() }"
+            msg = f"Starting mongod on port { self.port }...\n{ mongod.as_command() }"
             self.logger.info(msg)
             mongod.start()
-            msg = f"mongod started on port { self.port }{(' with embedded router on port ' + str(self.router_port)) if self.router_port else ''} with pid { mongod.pid }"
+            msg = f"mongod started on port { self.port } with pid { mongod.pid }"
             self.logger.info(msg)
         except Exception as err:
             msg = "Failed to start mongod on port {:d}: {}".format(self.port, err)
@@ -148,6 +188,8 @@ class MongoDFixture(interface.Fixture, interface._DockerComposeInterface):
             raise self.fixturelib.ServerFailure(msg)
 
         self.mongod = mongod
+        if self.launch_mongot_bool:
+            self.launch_mongot()
 
     def _all_mongo_d_s_t(self):
         """Return the standalone `mongod` `Process` instance."""
@@ -159,6 +201,12 @@ class MongoDFixture(interface.Fixture, interface._DockerComposeInterface):
         if not out:
             self.logger.debug("Mongod not running when gathering standalone fixture pid.")
         return out
+
+    def get_mongod_options(self):
+        return self.mongod_options
+
+    def set_mongod_options(self, options):
+        self.mongod_options = options
 
     def _handle_await_ready_retry(self, deadline):
         remaining = deadline - time.time()
@@ -172,23 +220,31 @@ class MongoDFixture(interface.Fixture, interface._DockerComposeInterface):
         self.logger.info("Waiting to connect to mongod on port %d.", self.port)
         time.sleep(0.1)  # Wait a little bit before trying again.
 
-    def setup_mongot(self):
+    def setup_mongot_params(self, router_endpoint_for_mongot: Optional[int] = None):
         mongot_options = {}
-        mongot_options["mongodHostAndPort"] = "localhost:" + str(self.port)
+
+        ## Set up mongot's ingress communication for query & index management commands from mongod ##
+        # Set up the listening port on mongot expecting the MongoRPC protocol. This is used for
+        # direct communication from drivers to mongot, and in the Atlas architecture.
         mongot_options["port"] = self.mongot_port
+        # Set up the listening port on mongot expecting the MongoDB gRPC protocol, which will
+        # be used when `useGrpcForSearch` is true on mongos/mongod. This is used in the community
+        # architecture.
+        if self.mongod_options["set_parameters"].get("useGrpcForSearch"):
+            mongot_options["grpcPort"] = self.mongot_grpc_port
+
+        ## Set up mongot's egress communication for change stream/replication commands to mongot ###
+        # Point the mongodHostAndPort and mongosHostAndPort parameters on mongot to the ingress
+        # listening ports of mongod/mongos.
+        mongot_options["mongodHostAndPort"] = "localhost:" + str(self.port)
+        if router_endpoint_for_mongot is not None:
+            mongot_options["mongosHostAndPort"] = "localhost:" + str(router_endpoint_for_mongot)
 
         if "keyFile" not in self.mongod_options:
             raise self.fixturelib.ServerFailure("Cannot launch mongot without providing a keyfile")
 
         mongot_options["keyFile"] = self.mongod_options["keyFile"]
-
-        mongot = self.fixturelib.make_fixture(
-            "MongoTFixture", self.logger, self.job_num, mongot_options=mongot_options
-        )
-
-        mongot.setup()
-        self.mongot = mongot
-        self.mongot.await_ready()
+        self.mongot_options = mongot_options
 
     def await_ready(self):
         """Block until the fixture can be used for testing."""
@@ -220,7 +276,10 @@ class MongoDFixture(interface.Fixture, interface._DockerComposeInterface):
 
         self.logger.info("Successfully contacted the mongod on port %d.", self.port)
 
-    def _do_teardown(self, mode=None):
+    def _do_teardown(self, finished=False, mode=None):
+        if finished and self.load_all_extensions and self.loaded_extensions:
+            delete_extension_configs(self.loaded_extensions, self.logger)
+
         if self.config.NOOP_MONGO_D_S_PROCESSES:
             self.logger.info(
                 "This is running against an External System Under Test setup with `docker-compose.yml` -- skipping teardown."
@@ -290,7 +349,6 @@ class MongoDFixture(interface.Fixture, interface._DockerComposeInterface):
             name=self.logger.name,
             port=self.port,
             pid=self.mongod.pid,
-            router_port=self.router_port,
         )
         return [info]
 
@@ -305,8 +363,8 @@ class MongoDFixture(interface.Fixture, interface._DockerComposeInterface):
         """Return the internal connection string."""
         return f"{self._get_hostname()}:{self.port}"
 
-    def get_shell_connection_string(self):
-        port = self.port if not self.config.SHELL_GRPC else self.grpcPort
+    def get_shell_connection_string(self, use_grpc=False):
+        port = self.port if not (self.config.SHELL_GRPC or use_grpc) else self.grpcPort
         return f"{self._get_hostname()}:{port}"
 
     def get_shell_connection_url(self):
@@ -475,6 +533,7 @@ class MongodLauncher(object):
             shortcut_opts["inMemorySizeGB"] = self.config.STORAGE_ENGINE_CACHE_SIZE
         elif self.config.STORAGE_ENGINE == "wiredTiger" or self.config.STORAGE_ENGINE is None:
             shortcut_opts["wiredTigerCacheSizeGB"] = self.config.STORAGE_ENGINE_CACHE_SIZE
+            shortcut_opts["wiredTigerCacheSizePct"] = self.config.STORAGE_ENGINE_CACHE_SIZE_PCT
 
         # If a JS_GC_ZEAL value has been provided in the configuration under MOZJS_JS_GC_ZEAL,
         # we inject this value directly as an environment variable to be passed to the spawned
@@ -549,3 +608,4 @@ def _add_testing_set_parameters(suite_set_parameters):
     # The placeholder is needed so older versions don't have this option won't have this value set.
     suite_set_parameters.setdefault("backtraceLogFile", True)
     suite_set_parameters.setdefault("disableTransitionFromLatestToLastContinuous", False)
+    suite_set_parameters.setdefault("oplogApplicationEnforcesSteadyStateConstraints", True)

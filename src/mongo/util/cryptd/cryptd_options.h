@@ -28,12 +28,13 @@
  */
 #pragma once
 
+#include "mongo/base/status.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/time_support.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
-
-#include "mongo/base/status.h"
-#include "mongo/util/time_support.h"
 
 namespace mongo {
 

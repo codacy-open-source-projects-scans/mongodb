@@ -30,17 +30,13 @@
 
 #include "mongo/db/op_observer/fcv_op_observer.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/feature_compatibility_version_parser.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/operation_context.h"
@@ -52,12 +48,9 @@
 #include "mongo/db/session/kill_sessions_local.h"
 #include "mongo/db/session/session_killer.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/executor/egress_connection_closer_manager.h"
 #include "mongo/logv2/attribute_storage.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/session_manager.h"
@@ -65,6 +58,12 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
+
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -108,7 +107,9 @@ void FcvOpObserver::_setVersion(OperationContext* opCtx,
         // Close all outgoing connections to servers with binary versions lower than ours.
         pauseBeforeCloseCxns.pauseWhileSet();
 
-        executor::EgressConnectionCloserManager::get(opCtx->getServiceContext()).dropConnections();
+        executor::EgressConnectionCloserManager::get(opCtx->getServiceContext())
+            .dropConnections(Status(ErrorCodes::PooledConnectionsDropped,
+                                    "Closing connection to servers with lower binary versions"));
 
         if (MONGO_unlikely(finishedDropConnections.shouldFail())) {
             LOGV2(575210, "Hit finishedDropConnections failpoint");
@@ -125,7 +126,8 @@ void FcvOpObserver::_setVersion(OperationContext* opCtx,
         if (newFcvSnapshot.isUpgradingOrDowngrading()) {
             SessionKiller::Matcher matcherAllSessions(
                 KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx)});
-            killSessionsAbortUnpreparedTransactions(opCtx, matcherAllSessions);
+            killSessionsAbortUnpreparedTransactions(
+                opCtx, matcherAllSessions, ErrorCodes::InterruptedDueToFCVChange);
         }
     } catch (const DBException&) {
         // Swallow the error when running within a recovery unit to avoid process termination.
@@ -168,7 +170,7 @@ void FcvOpObserver::_setVersion(OperationContext* opCtx,
 
 void FcvOpObserver::_onInsertOrUpdate(OperationContext* opCtx, const BSONObj& doc) {
     auto idElement = doc["_id"];
-    if (idElement.type() != BSONType::String ||
+    if (idElement.type() != BSONType::string ||
         idElement.String() != multiversion::kParameterName) {
         return;
     }
@@ -231,7 +233,7 @@ void FcvOpObserver::onDelete(OperationContext* opCtx,
                              OpStateAccumulator* opAccumulator) {
     if (coll->ns().isServerConfigurationCollection()) {
         auto id = documentKey.getId().firstElement();
-        if (id.type() == BSONType::String && id.String() == multiversion::kParameterName) {
+        if (id.type() == BSONType::string && id.String() == multiversion::kParameterName) {
             uasserted(40670, "removing FeatureCompatibilityVersion document is not allowed");
         }
     }

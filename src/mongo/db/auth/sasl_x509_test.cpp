@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-#include <fmt/format.h>
-#include <memory>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -54,20 +51,21 @@
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_entry_point_shard_role.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/transport/mock_session.h"
 #include "mongo/transport/transport_layer_mock.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <memory>
+
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo::auth {
 
 namespace {
-using namespace fmt::literals;
 
 constexpr auto kX509Str = "x509"_sd;
 constexpr auto kX509Subject = "C=US,ST=New York,L=New York City,O=MongoDB,OU=Kernel,CN=client"_sd;
@@ -76,39 +74,39 @@ constexpr auto kX509UTF8String = 12;
 BSONObj generateX509UserDocument(const StringData username) {
     const auto database = "$external"_sd;
 
-    return BSON("_id"
-                << "{}.{}"_format(database, username) << AuthorizationManager::USER_NAME_FIELD_NAME
-                << username << AuthorizationManager::USER_DB_FIELD_NAME << database << "roles"
-                << BSONArray() << "privileges" << BSONArray() << "credentials"
-                << BSON("external" << true));
+    return BSON("_id" << fmt::format("{}.{}", database, username)
+                      << AuthorizationManager::USER_NAME_FIELD_NAME << username
+                      << AuthorizationManager::USER_DB_FIELD_NAME << database << "roles"
+                      << BSONArray() << "privileges" << BSONArray() << "credentials"
+                      << BSON("external" << true));
 }
 
 // Construct a simple, structured X509 name equivalent to "CN=mongodb.com"
 SSLX509Name buildX509Name() {
     return SSLX509Name(std::vector<std::vector<SSLX509Name::Entry>>(
-        {{{kOID_CommonName.toString(), 19 /* Printable String */, "mongodb.com"}}}));
+        {{{std::string{kOID_CommonName}, 19 /* Printable String */, "mongodb.com"}}}));
 }
 
 // Construct a simple X509 name equivalent to "OU=Kernel,O=MongoDB"
 SSLX509Name buildClusterX509Name() {
     return SSLX509Name(std::vector<std::vector<SSLX509Name::Entry>>(
-        {{{kOID_CountryName.toString(), kX509UTF8String, "US"}},
-         {{kOID_StateName.toString(), kX509UTF8String, "New York"}},
-         {{kOID_LocalityName.toString(), kX509UTF8String, "New York City"}},
-         {{kOID_OName.toString(), kX509UTF8String, "MongoDB"}},
-         {{kOID_OUName.toString(), kX509UTF8String, "Kernel"}},
-         {{kOID_CommonName.toString(), kX509UTF8String, "client"}}}));
+        {{{std::string{kOID_CountryName}, kX509UTF8String, "US"}},
+         {{std::string{kOID_StateName}, kX509UTF8String, "New York"}},
+         {{std::string{kOID_LocalityName}, kX509UTF8String, "New York City"}},
+         {{std::string{kOID_OName}, kX509UTF8String, "MongoDB"}},
+         {{std::string{kOID_OUName}, kX509UTF8String, "Kernel"}},
+         {{std::string{kOID_CommonName}, kX509UTF8String, "client"}}}));
 }
 
 void setX509PeerInfo(const std::shared_ptr<transport::Session>& session, SSLPeerInfo info) {
     auto& sslPeerInfo = SSLPeerInfo::forSession(session);
-    sslPeerInfo = info;
+    sslPeerInfo = std::make_shared<SSLPeerInfo>(info);
 }
 
 
 class SASLX509Test : public mongo::unittest::Test {
 protected:
-    void setUp() final {
+    void setUp() final try {
         auto serviceContextHolder = ServiceContext::make();
         serviceContext = serviceContextHolder.get();
         setGlobalServiceContext(std::move(serviceContextHolder));
@@ -124,8 +122,8 @@ protected:
         params.sslPEMKeyFile = "jstests/libs/server.pem";
         params.sslCAFile = "jstests/libs/ca.pem";
         params.sslClusterFile = "jstests/libs/server.pem";
-        params.clusterAuthX509ExtensionValue = kX509Subject.toString();
-        sslGlobalParams.clusterAuthX509ExtensionValue = kX509Subject.toString();
+        params.clusterAuthX509ExtensionValue = std::string{kX509Subject};
+        sslGlobalParams.clusterAuthX509ExtensionValue = std::string{kX509Subject};
         auto manager = SSLManagerInterface::create(params, true);
 
         session->setSSLManager(manager);
@@ -160,6 +158,10 @@ protected:
                                         "MockServer.test");
         saslClientSession->setParameter(NativeSaslClientSession::parameterServiceHostAndPort,
                                         "MockServer.test:27017");
+    } catch (const DBException& e) {
+        ::mongo::StringBuilder sb;
+        sb << "SASLX509Test Fixture Setup Failed: " << e.what();
+        FAIL(sb.str());
     }
 
 
@@ -177,7 +179,7 @@ protected:
         return saslServerSession->step(opCtx.get(), clientOutput);
     }
 
-    void tearDown() final {
+    ~SASLX509Test() override {
         opCtx.reset();
         Client::releaseCurrent();
         setGlobalServiceContext(nullptr);

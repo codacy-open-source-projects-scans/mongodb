@@ -29,17 +29,12 @@
 
 #include "mongo/db/pipeline/search/search_helper.h"
 
-#include <boost/optional/optional.hpp>
-#include <list>
-#include <set>
-#include <string>
-#include <utility>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/db/exec/shard_filterer_impl.h"
 #include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/document_source_internal_shard_filter.h"
 #include "mongo/db/pipeline/document_source_replace_root.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/search/document_source_internal_search_id_lookup.h"
 #include "mongo/db/pipeline/search/document_source_internal_search_mongot_remote.h"
 #include "mongo/db/pipeline/search/document_source_list_search_indexes.h"
@@ -47,12 +42,21 @@
 #include "mongo/db/pipeline/search/document_source_search_meta.h"
 #include "mongo/db/pipeline/search/document_source_vector_search.h"
 #include "mongo/db/pipeline/search/plan_sharded_search_gen.h"
+#include "mongo/db/pipeline/search/search_helper_bson_obj.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/search/mongot_cursor.h"
 #include "mongo/db/query/search/search_task_executors.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/s/query/exec/document_source_merge_cursors.h"
 #include "mongo/util/assert_util.h"
+
+#include <list>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -67,20 +71,12 @@ void desugarSearchPipeline(Pipeline* pipeline) {
     if (searchStage) {
         auto desugaredPipeline = dynamic_cast<DocumentSourceSearch*>(searchStage.get())->desugar();
         sources.insert(sources.begin(), desugaredPipeline.begin(), desugaredPipeline.end());
-        Pipeline::stitch(&sources);
     }
-    // TODO: SERVER-85426 Take the below code out of the if statement--i.e., it should always
-    // happen.
-    // TODO: BACKPORT-22945 (8.0) Ensure that using this feature inside a view definition is not
-    // permitted.
-    if (enableUnionWithVectorSearch.load()) {
-        auto vectorSearchStage = pipeline->popFrontWithName(DocumentSourceVectorSearch::kStageName);
-        if (vectorSearchStage) {
-            auto desugaredPipeline =
-                dynamic_cast<DocumentSourceVectorSearch*>(vectorSearchStage.get())->desugar();
-            sources.insert(sources.begin(), desugaredPipeline.begin(), desugaredPipeline.end());
-            Pipeline::stitch(&sources);
-        }
+    auto vectorSearchStage = pipeline->popFrontWithName(DocumentSourceVectorSearch::kStageName);
+    if (vectorSearchStage) {
+        auto desugaredPipeline =
+            dynamic_cast<DocumentSourceVectorSearch*>(vectorSearchStage.get())->desugar();
+        sources.insert(sources.begin(), desugaredPipeline.begin(), desugaredPipeline.end());
     }
 }
 
@@ -91,7 +87,7 @@ void desugarSearchPipeline(Pipeline* pipeline) {
 // 'DocumentSourceSetVariableFromSubPipeline' could do the actual setting of the variable, but it
 // can only be generated alongside a 'DocumentSourceInternalSearchMongotRemote'.
 void assertSearchMetaAccessValidHelper(
-    const std::vector<const Pipeline::SourceContainer*>& pipelines) {
+    const std::vector<const DocumentSourceContainer*>& pipelines) {
     // Whether or not there was a sub-pipeline stage previously in this pipeline.
     bool subPipeSeen = false;
     bool searchMetaSet = false;
@@ -146,10 +142,12 @@ void assertSearchMetaAccessValidHelper(
 BSONObj getSearchRemoteExplain(const ExpressionContext* expCtx,
                                const BSONObj& searchQuery,
                                size_t remoteCursorId,
-                               boost::optional<BSONObj> sortSpec) {
+                               boost::optional<BSONObj> sortSpec,
+                               const mongot_cursor::OptimizationFlags& optimizationFlags) {
     auto executor =
         executor::getMongotTaskExecutor(expCtx->getOperationContext()->getServiceContext());
-    auto explainObj = mongot_cursor::getSearchExplainResponse(expCtx, searchQuery, executor.get());
+    auto explainObj = mongot_cursor::getSearchExplainResponse(
+        expCtx, searchQuery, executor.get(), optimizationFlags);
     BSONObjBuilder builder;
     builder << "id" << static_cast<int>(remoteCursorId) << "mongotQuery" << searchQuery << "explain"
             << explainObj;
@@ -200,7 +198,7 @@ void planShardedSearch(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                 5,
                 "planShardedSearch",
                 "ns"_attr = expCtx->getNamespaceString().coll(),
-                "remoteSpec"_attr = remoteSpec->toBSON());
+                "remoteSpec"_attr = redact(remoteSpec->toBSON()));
     // Mongos issues the 'planShardedSearch' command rather than 'search' in order to:
     // * Create the merging pipeline.
     // * Get a sortSpec.
@@ -225,7 +223,8 @@ void planShardedSearch(const boost::intrusive_ptr<ExpressionContext>& expCtx,
 
     remoteSpec->setMetadataMergeProtocolVersion(response.data["protocolVersion"_sd].Int());
     auto rawPipeline = response.data["metaPipeline"];
-    LOGV2_DEBUG(9497009, 5, "planShardedSearch response", "mergePipeline"_attr = rawPipeline);
+    LOGV2_DEBUG(
+        9497009, 5, "planShardedSearch response", "mergePipeline"_attr = redact(rawPipeline));
     auto parsedPipeline = mongo::Pipeline::parseFromArray(rawPipeline, expCtx);
     remoteSpec->setMergingPipeline(parsedPipeline->serializeToBson());
     if (response.data.hasElement("sortSpec")) {
@@ -241,30 +240,37 @@ bool hasReferenceToSearchMeta(const DocumentSource& ds) {
 }
 
 bool isSearchPipeline(const Pipeline* pipeline) {
-    if (!pipeline || pipeline->getSources().empty()) {
+    if (!pipeline || pipeline->empty()) {
         return false;
     }
     return isSearchStage(pipeline->peekFront());
 }
 
 bool isSearchMetaPipeline(const Pipeline* pipeline) {
-    if (!pipeline || pipeline->getSources().empty()) {
+    if (!pipeline || pipeline->empty()) {
         return false;
     }
     return isSearchMetaStage(pipeline->peekFront());
 }
 
-void setResolvedNamespaceForSearch(const NamespaceString& origNss,
-                                   const ResolvedView& resolvedView,
-                                   boost::intrusive_ptr<ExpressionContext> expCtx,
-                                   boost::optional<UUID> uuid) {
-    auto resolvedNamespaces = StringMap<ResolvedNamespace>{{origNss.coll().toString(),
-                                                            {resolvedView.getNamespace(),
-                                                             resolvedView.getPipeline(),
-                                                             uuid,
-                                                             true /*involvedNamespaceIsAView*/}}};
-    expCtx->setResolvedNamespaces(resolvedNamespaces);
-    expCtx->setViewNS(boost::make_optional(origNss));
+void checkAndSetViewOnExpCtx(boost::intrusive_ptr<ExpressionContext> expCtx,
+                             const std::vector<mongo::BSONObj> pipelineObj,
+                             ResolvedView resolvedView,
+                             const NamespaceString& viewName) {
+    auto lpp = LiteParsedPipeline(viewName, pipelineObj);
+
+    // Search queries on views behave differently than non-search aggregations on views.
+    // When a user pipeline contains a $search/$vectorSearch stage, idLookup will apply the
+    // view transforms as part of its subpipeline. In this way, the view stages will always
+    // be applied directly after $_internalSearchMongotRemote and before the remaining
+    // stages of the user pipeline. This is to ensure the stages following
+    // $search/$vectorSearch in the user pipeline will receive the modified documents: when
+    // storedSource is disabled, idLookup will retrieve full/unmodified documents during
+    // (from the _id values returned by mongot), apply the view's data transforms, and pass
+    // said transformed documents through the rest of the user pipeline.
+    if (lpp.hasSearchStage() && !resolvedView.getPipeline().empty()) {
+        expCtx->setView(boost::make_optional(std::make_pair(viewName, resolvedView.getPipeline())));
+    }
 }
 
 bool isStoredSource(const Pipeline* pipeline) {
@@ -283,7 +289,7 @@ bool isStoredSource(const Pipeline* pipeline) {
 }
 
 bool isMongotPipeline(const Pipeline* pipeline) {
-    if (!pipeline || pipeline->getSources().empty()) {
+    if (!pipeline || pipeline->empty()) {
         return false;
     }
     return isMongotStage(pipeline->peekFront());
@@ -294,15 +300,15 @@ bool isMongotPipeline(const Pipeline* pipeline) {
  *    - a 'DocumentSourceSearch'.
  *    - a 'DocumentSourceInternalSearchMongotRemote' and not a 'DocumentSourceSearchMeta'.
  */
-bool isSearchStage(DocumentSource* stage) {
+bool isSearchStage(const DocumentSource* stage) {
     return stage &&
-        (dynamic_cast<mongo::DocumentSourceSearch*>(stage) ||
-         (dynamic_cast<mongo::DocumentSourceInternalSearchMongotRemote*>(stage) &&
-          !dynamic_cast<mongo::DocumentSourceSearchMeta*>(stage)));
+        (dynamic_cast<const mongo::DocumentSourceSearch*>(stage) ||
+         (dynamic_cast<const mongo::DocumentSourceInternalSearchMongotRemote*>(stage) &&
+          !dynamic_cast<const mongo::DocumentSourceSearchMeta*>(stage)));
 }
 
-bool isSearchMetaStage(DocumentSource* stage) {
-    return stage && dynamic_cast<mongo::DocumentSourceSearchMeta*>(stage);
+bool isSearchMetaStage(const DocumentSource* stage) {
+    return stage && dynamic_cast<const mongo::DocumentSourceSearchMeta*>(stage);
 }
 
 bool isMongotStage(DocumentSource* stage) {
@@ -314,7 +320,7 @@ bool isMongotStage(DocumentSource* stage) {
          dynamic_cast<mongo::DocumentSourceSearchMeta*>(stage));
 }
 
-void assertSearchMetaAccessValid(const Pipeline::SourceContainer& pipeline,
+void assertSearchMetaAccessValid(const DocumentSourceContainer& pipeline,
                                  ExpressionContext* expCtx) {
     if (pipeline.empty()) {
         return;
@@ -330,13 +336,13 @@ void assertSearchMetaAccessValid(const Pipeline::SourceContainer& pipeline,
     }
 }
 
-void assertSearchMetaAccessValid(const Pipeline::SourceContainer& shardsPipeline,
-                                 const Pipeline::SourceContainer& mergePipeline,
+void assertSearchMetaAccessValid(const DocumentSourceContainer& shardsPipeline,
+                                 const DocumentSourceContainer& mergePipeline,
                                  ExpressionContext* expCtx) {
     assertSearchMetaAccessValidHelper({&shardsPipeline, &mergePipeline});
 }
 
-std::unique_ptr<Pipeline, PipelineDeleter> prepareSearchForTopLevelPipelineLegacyExecutor(
+std::unique_ptr<Pipeline> prepareSearchForTopLevelPipelineLegacyExecutor(
     boost::intrusive_ptr<ExpressionContext> expCtx,
     Pipeline* origPipeline,
     DocsNeededBounds bounds,
@@ -346,8 +352,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> prepareSearchForTopLevelPipelineLegac
 
     // TODO SERVER-94874 Establish mongot cursor for $searchMeta queries too.
     if ((expCtx->getExplain() &&
-         !feature_flags::gFeatureFlagSearchExplainExecutionStats.isEnabled(
-             serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) ||
+         !feature_flags::gFeatureFlagSearchExplainExecutionStats.isEnabled()) ||
         expCtx->getExplain() == ExplainOptions::Verbosity::kQueryPlanner ||
         !isSearchPipeline(origPipeline)) {
         // This path is for scenarios where we know we only need one cursor. For $search in
@@ -378,7 +383,8 @@ std::unique_ptr<Pipeline, PipelineDeleter> prepareSearchForTopLevelPipelineLegac
             // Construct a duplicate ExpressionContext for our cloned pipeline. This is necessary
             // so that the duplicated pipeline and the cloned pipeline do not accidentally
             // share an OperationContext.
-            auto newExpCtx = expCtx->copyWith(expCtx->getNamespaceString(), expCtx->getUUID());
+            auto newExpCtx = makeCopyFromExpressionContext(
+                expCtx, expCtx->getNamespaceString(), expCtx->getUUID());
             return Pipeline::create({origSearchStage->clone(newExpCtx)}, newExpCtx);
         }
         return nullptr;
@@ -397,11 +403,7 @@ std::unique_ptr<Pipeline, PipelineDeleter> prepareSearchForTopLevelPipelineLegac
     // results and metadata.
     tassert(6253500, "Expected less than or exactly two cursors from mongot", cursors.size() <= 2);
 
-    if (cursors.size() == 0) {
-        origSearchStage->markCollectionEmpty();
-    }
-
-    std::unique_ptr<Pipeline, PipelineDeleter> newPipeline = nullptr;
+    std::unique_ptr<Pipeline> newPipeline = nullptr;
     for (auto& cursor : cursors) {
         auto maybeCursorLabel = cursor->getType();
         if (!maybeCursorLabel) {
@@ -435,8 +437,8 @@ std::unique_ptr<Pipeline, PipelineDeleter> prepareSearchForTopLevelPipelineLegac
                     // Construct a duplicate ExpressionContext for our cloned pipeline. This is
                     // necessary so that the duplicated pipeline and the cloned pipeline do not
                     // accidentally share an OperationContext.
-                    auto newExpCtx =
-                        expCtx->copyWith(expCtx->getNamespaceString(), expCtx->getUUID());
+                    auto newExpCtx = makeCopyFromExpressionContext(
+                        expCtx, expCtx->getNamespaceString(), expCtx->getUUID());
 
                     // Clone the MongotRemote stage and set the metadata cursor.
                     auto newStage =
@@ -599,20 +601,143 @@ std::unique_ptr<RemoteExplainVector> getSearchRemoteExplains(
     auto stage = cqPipeline.front().get();
     if (auto searchStage = dynamic_cast<mongo::DocumentSourceSearch*>(stage)) {
         auto explainMap = std::make_unique<RemoteExplainVector>();
-        explainMap->push_back(getSearchRemoteExplain(expCtx,
-                                                     searchStage->getSearchQuery(),
-                                                     searchStage->getRemoteCursorId(),
-                                                     searchStage->getSortSpec()));
+        explainMap->push_back(
+            getSearchRemoteExplain(expCtx,
+                                   searchStage->getSearchQuery(),
+                                   searchStage->getRemoteCursorId(),
+                                   searchStage->getSortSpec(),
+                                   mongot_cursor::getOptimizationFlagsForSearch()));
         return explainMap;
     } else if (auto searchMetaStage = dynamic_cast<mongo::DocumentSourceSearchMeta*>(stage)) {
         auto explainMap = std::make_unique<RemoteExplainVector>();
-        explainMap->push_back(getSearchRemoteExplain(expCtx,
-                                                     searchMetaStage->getSearchQuery(),
-                                                     searchMetaStage->getRemoteCursorId(),
-                                                     boost::none /* sortSpec */));
+        explainMap->push_back(
+            getSearchRemoteExplain(expCtx,
+                                   searchMetaStage->getSearchQuery(),
+                                   searchMetaStage->getRemoteCursorId(),
+                                   boost::none /* sortSpec */,
+                                   mongot_cursor::getOptimizationFlagsForSearchMeta()));
         return explainMap;
     }
     return nullptr;
 }
+
+boost::optional<SearchQueryViewSpec> getViewFromExpCtx(
+    boost::intrusive_ptr<ExpressionContext> expCtx) {
+    if (expCtx->getView()) {
+        const auto& expCtxView = *expCtx->getView();
+        return boost::make_optional(
+            SearchQueryViewSpec(std::string(expCtxView.first.coll()), expCtxView.second));
+    }
+
+    return boost::none;
+}
+
+boost::optional<SearchQueryViewSpec> getViewFromBSONObj(const BSONObj& spec) {
+    if (spec.hasField(kViewFieldName) && spec[kViewFieldName].type() == BSONType::object) {
+        return SearchQueryViewSpec::parse(spec[kViewFieldName].embeddedObject(),
+                                          IDLParserContext("unpack SearchQueryViewSpec"));
+    }
+
+    return boost::none;
+}
+
+void validateViewNotSetByUser(boost::intrusive_ptr<ExpressionContext> expCtx, const BSONObj& spec) {
+    // During $rankFusion parsing, if there's more than 1 mongot input pipeline, a view key will be
+    // injected during the parsing of that mongot stage (ex: $search, $vectorSearch, $searchMeta).
+    // Since $rankFusion passes the serialized version of the parsed pipeline to a
+    // DocumentSource::UnionWith(..) constructor, that serialized pipeline eventually gets reparsed.
+    // Because the view key already exists in the pipeline and the internal client flag is not set,
+    // this internal client error gets thrown.
+
+    // To avoid that, the isHybridSearch flag is only set after the initial parsing of the
+    // user-provided $rankFusion/$scoreFusion pipeline and its value is checked here to avoid
+    // throwing an internal client error.
+    if (spec.hasField(kViewFieldName) && !expCtx->isHybridSearch()) {
+        assertAllowedInternalIfRequired(
+            expCtx->getOperationContext(), kViewFieldName, AllowedWithClientType::kInternal);
+    }
+}
+
+void validateMongotIndexedViewsFF(boost::intrusive_ptr<ExpressionContext> expCtx,
+                                  const std::vector<BSONObj>& effectivePipeline) {
+    // Queries on views with empty effective pipelines (i.e. identity views) are treated as queries
+    // on the underlying collection, therefore allowed on all FCV versions that support search.
+    uassert(ErrorCodes::OptionNotSupportedOnView,
+            "search stages are unsupported on views",
+            effectivePipeline.empty() || expCtx->isFeatureFlagMongotIndexedViewsEnabled());
+}
+
+void promoteStoredSourceOrAddIdLookup(
+    boost::intrusive_ptr<ExpressionContext> expCtx,
+    std::list<boost::intrusive_ptr<DocumentSource>>& desugaredPipeline,
+    bool isStoredSource,
+    long long limit,
+    boost::optional<SearchQueryViewSpec> view) {
+    // If 'returnStoredSource' is true, we don't want to do idLookup. Instead, promote the fields in
+    // 'storedSource' to root.
+    if (isStoredSource) {
+        // {$replaceRoot: {newRoot: {$ifNull: ["$storedSource", "$$ROOT"]}}
+        // 'storedSource' is not always present in the document from mongot. If it's present, use it
+        // as the root. Otherwise keep the original document.
+        BSONObj replaceRootSpec =
+            BSON("$replaceRoot" << BSON(
+                     "newRoot" << BSON(
+                         "$ifNull" << BSON_ARRAY("$" + kProtocolStoredFieldsName << "$$ROOT"))));
+        desugaredPipeline.push_back(
+            DocumentSourceReplaceRoot::createFromBson(replaceRootSpec.firstElement(), expCtx));
+        // Note: intentionally not including a shard filtering operator here. The isolation
+        // semantics are already weaker here so this was deemed OK. Potentially part of that
+        // conversation: the documents are not guaranteed to have the shard key, and we don't have
+        // an idLookup to go get it.
+    } else {
+        auto shardFilterer = DocumentSourceInternalShardFilter::buildIfNecessary(expCtx);
+        // idLookup must always be immediately after the first stage in the desugared pipeline
+        auto idLookupStage = make_intrusive<DocumentSourceInternalSearchIdLookUp>(
+            expCtx,
+            limit,
+            nullptr /*catalogResourceHandle*/,
+            boost::none /*MultipleCollectionAccessor*/,
+            buildExecShardFilterPolicy(shardFilterer),
+            view);
+        desugaredPipeline.insert(std::next(desugaredPipeline.begin()), idLookupStage);
+        if (shardFilterer) {
+            desugaredPipeline.push_back(std::move(shardFilterer));
+        }
+
+        // Check if the first stage in the pipeline is a mongotRemoteStage (only exists for
+        // $search).
+        auto mongotRemoteStage = dynamic_cast<DocumentSourceInternalSearchMongotRemote*>(
+            desugaredPipeline.front().get());
+        if (mongotRemoteStage) {
+            // Connect the shared search state of these two stages of the pipeline for batch size
+            // tuning.
+            mongotRemoteStage->setSearchIdLookupMetrics(idLookupStage->getSearchIdLookupMetrics());
+        }
+    }
+}
+
+std::unique_ptr<SearchNode> getSearchNode(DocumentSource* stage) {
+    if (search_helpers::isSearchStage(stage)) {
+        auto searchStage = dynamic_cast<mongo::DocumentSourceSearch*>(stage);
+        auto node = std::make_unique<SearchNode>(false,
+                                                 searchStage->getSearchQuery(),
+                                                 searchStage->getLimit(),
+                                                 searchStage->getSortSpec(),
+                                                 searchStage->getRemoteCursorId(),
+                                                 searchStage->getRemoteCursorVars());
+        return node;
+    } else if (search_helpers::isSearchMetaStage(stage)) {
+        auto searchStage = dynamic_cast<mongo::DocumentSourceSearchMeta*>(stage);
+        return std::make_unique<SearchNode>(true,
+                                            searchStage->getSearchQuery(),
+                                            boost::none /* limit */,
+                                            boost::none /* sortSpec */,
+                                            searchStage->getRemoteCursorId(),
+                                            searchStage->getRemoteCursorVars());
+    } else {
+        tasserted(7855801, str::stream() << "Unknown stage type" << stage->getSourceName());
+    }
+}
+
 }  // namespace search_helpers
 }  // namespace mongo

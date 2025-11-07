@@ -29,7 +29,7 @@
 
 #include "mongo/db/query/stage_builder/sbe/vectorizer.h"
 
-#include "mongo/db/query/optimizer/explain.h"
+#include "mongo/db/query/stage_builder/sbe/abt/explain.h"
 #include "mongo/db/query/stage_builder/sbe/gen_abt_helpers.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr.h"
 #include "mongo/logv2/log.h"
@@ -63,12 +63,12 @@ std::string dumpVariables(const Vectorizer::VariableTypes& variableTypes) {
 
 }  // namespace
 
-Vectorizer::Tree Vectorizer::vectorize(optimizer::ABT& node,
+Vectorizer::Tree Vectorizer::vectorize(abt::ABT& node,
                                        const VariableTypes& externalBindings,
                                        boost::optional<SbSlot> externalBitmapSlot) {
     _variableTypes = externalBindings;
     if (externalBitmapSlot) {
-        _activeMasks.push_back(getABTVariableName(*externalBitmapSlot));
+        _activeMasks.push_back(SbVar::makeProjectionName(externalBitmapSlot->getId()));
     }
     auto result = node.visit(*this);
     foldIfNecessary(result, _purpose == Purpose::Filter);
@@ -96,11 +96,11 @@ void Vectorizer::foldIfNecessary(Tree& tree, bool useFoldF) {
     }
 }
 
-optimizer::ABT Vectorizer::generateMaskArg() {
+abt::ABT Vectorizer::generateMaskArg() {
     if (_activeMasks.empty()) {
-        return optimizer::Constant::nothing();
+        return abt::Constant::nothing();
     }
-    boost::optional<optimizer::ABT> tree;
+    boost::optional<abt::ABT> tree;
     for (const auto& var : _activeMasks) {
         if (!tree.has_value()) {
             tree = makeVariable(var);
@@ -111,23 +111,26 @@ optimizer::ABT Vectorizer::generateMaskArg() {
     return std::move(*tree);
 }
 
-void Vectorizer::logUnsupportedConversion(const optimizer::ABT& node) {
+abt::ProjectionName Vectorizer::generateLocalVarName() {
+    return SbVar::makeProjectionName(_frameGenerator->generate(), 0);
+}
+
+void Vectorizer::logUnsupportedConversion(const abt::ABT& node) {
     LOGV2_DEBUG_OPTIONS(8141600,
                         2,
                         {logv2::LogTruncation::Disabled},
                         "Operation is not supported in block-oriented mode",
-                        "node"_attr = optimizer::ExplainGenerator::explainV2(node),
+                        "node"_attr = redact(abt::ExplainGenerator::explainV2(node)),
                         "variables"_attr = dumpVariables(_variableTypes));
 }
 
-Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& node,
-                                        const optimizer::Constant& value) {
+Vectorizer::Tree Vectorizer::operator()(const abt::ABT& node, const abt::Constant& value) {
     // A constant can be used as is.
     auto [tag, val] = value.get();
     return {node, getTypeSignature(tag), {}};
 }
 
-Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer::Variable& var) {
+Vectorizer::Tree Vectorizer::operator()(const abt::ABT& n, const abt::Variable& var) {
     if (auto varIt = _variableTypes.find(var.name()); varIt != _variableTypes.end()) {
         // If the variable holds a cell, extract the block variable from that and propagate the name
         // of the cell variable to the caller to be used when folding back the result.
@@ -148,9 +151,128 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
     return {n, TypeSignature::kAnyScalarType, {}};
 }
 
-Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer::BinaryOp& op) {
+template <typename Lhs, typename Rhs>
+Vectorizer::Tree Vectorizer::vectorizeLogicalOp(abt::Operations opType, Lhs lhsNode, Rhs rhsNode) {
+    Tree lhs = lhsNode();
+    if (!lhs.expr.has_value()) {
+        return lhs;
+    }
+    // An And/Or operation between two blocks has to work at the level of measures, not on
+    // the expanded arrays.
+    foldIfNecessary(lhs, true);
+
+    if (TypeSignature::kBlockType.isSubset(lhs.typeSignature)) {
+        // Treat the result of the left side as the mask to be applied on the right side.
+        // This way, the right side can decide whether to skip the processing of the indexes
+        // where the left side produced a false result.
+        auto lhsVar = generateLocalVarName();
+
+        auto mask = opType == abt::Operations::And ? lhsVar : generateLocalVarName();
+
+        _activeMasks.push_back(mask);
+        Tree rhs = rhsNode();
+        _activeMasks.pop_back();
+        if (!rhs.expr.has_value()) {
+            return rhs;
+        }
+        foldIfNecessary(rhs, true);
+
+        if (TypeSignature::kBlockType.isSubset(rhs.typeSignature)) {
+            return {opType == abt::Operations::And
+                        ? makeLet(lhsVar,
+                                  std::move(*lhs.expr),
+                                  makeABTFunction("valueBlockLogicalAnd"_sd,
+                                                  makeVariable(lhsVar),
+                                                  std::move(*rhs.expr)))
+                        : makeLet(lhsVar,
+                                  std::move(*lhs.expr),
+                                  makeLet(mask,
+                                          makeABTFunction(
+                                              "valueBlockLogicalNot"_sd,
+                                              makeABTFunction("valueBlockFillEmpty"_sd,
+                                                              makeVariable(lhsVar),
+                                                              abt::Constant::boolean(false))),
+                                          makeABTFunction("valueBlockLogicalOr"_sd,
+                                                          makeVariable(lhsVar),
+                                                          std::move(*rhs.expr)))),
+                    TypeSignature::kBlockType.include(TypeSignature::kBooleanType)
+                        .include(lhs.typeSignature.include(rhs.typeSignature)
+                                     .intersect(TypeSignature::kNothingType)),
+                    {}};
+        }
+    } else {
+        Tree rhs = rhsNode();
+        if (!rhs.expr.has_value()) {
+            return rhs;
+        }
+        // Preserve scalar operation, reject vectorization of scalar vs vector.
+        if (!TypeSignature::kBlockType.isSubset(rhs.typeSignature)) {
+            return {
+                make<abt::BinaryOp>(opType, std::move(*lhs.expr), std::move(*rhs.expr)),
+                TypeSignature::kBooleanType.include(lhs.typeSignature.include(rhs.typeSignature)
+                                                        .intersect(TypeSignature::kNothingType)),
+                {}};
+        }
+    }
+    return {{}, TypeSignature::kAnyScalarType, {}};
+}
+
+template <typename Lhs, typename Rhs>
+Vectorizer::Tree Vectorizer::vectorizeArithmeticOp(abt::Operations opType,
+                                                   Lhs lhsNode,
+                                                   Rhs rhsNode) {
+    Tree lhs = lhsNode();
+    if (!lhs.expr.has_value()) {
+        return lhs;
+    }
+    Tree rhs = rhsNode();
+    if (!rhs.expr.has_value()) {
+        return rhs;
+    }
+
+    StringData fnName = [&]() {
+        switch (opType) {
+            case abt::Operations::Add:
+                return "valueBlockAdd"_sd;
+            case abt::Operations::Sub:
+                return "valueBlockSub"_sd;
+            case abt::Operations::Div:
+                return "valueBlockDiv"_sd;
+            case abt::Operations::Mult:
+                return "valueBlockMult"_sd;
+            default:
+                MONGO_UNREACHABLE;
+        }
+    }();
+
+    auto returnTS =
+        TypeSignature::kNumericType.include(getTypeSignature(sbe::value::TypeTags::Date));
+
+    if (TypeSignature::kBlockType.isSubset(lhs.typeSignature) ||
+        TypeSignature::kBlockType.isSubset(rhs.typeSignature)) {
+        boost::optional<abt::ProjectionName> sameCell = lhs.sourceCell.has_value() &&
+                rhs.sourceCell.has_value() && *lhs.sourceCell == *rhs.sourceCell
+            ? lhs.sourceCell
+            : boost::none;
+        // If we can't identify a single cell for both branches, fold them.
+        if (!sameCell.has_value()) {
+            foldIfNecessary(lhs);
+            foldIfNecessary(rhs);
+        }
+        return {
+            makeABTFunction(fnName, generateMaskArg(), std::move(*lhs.expr), std::move(*rhs.expr)),
+            TypeSignature::kBlockType.include(returnTS),
+            sameCell};
+    } else {
+        // Preserve scalar operation.
+        return {
+            make<abt::BinaryOp>(opType, std::move(*lhs.expr), std::move(*rhs.expr)), returnTS, {}};
+    }
+}
+
+Vectorizer::Tree Vectorizer::operator()(const abt::ABT& n, const abt::BinaryOp& op) {
     switch (op.op()) {
-        case optimizer::Operations::FillEmpty: {
+        case abt::Operations::FillEmpty: {
             Tree lhs = op.getLeftChild().visit(*this);
             if (!lhs.expr.has_value()) {
                 return lhs;
@@ -172,16 +294,16 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
             } else {
                 // Preserve scalar operation.
                 if (!TypeSignature::kBlockType.isSubset(rhs.typeSignature)) {
-                    return {make<optimizer::BinaryOp>(
-                                op.op(), std::move(*lhs.expr), std::move(*rhs.expr)),
-                            lhs.typeSignature.exclude(TypeSignature::kNothingType)
-                                .include(rhs.typeSignature),
-                            {}};
+                    return {
+                        make<abt::BinaryOp>(op.op(), std::move(*lhs.expr), std::move(*rhs.expr)),
+                        lhs.typeSignature.exclude(TypeSignature::kNothingType)
+                            .include(rhs.typeSignature),
+                        {}};
                 }
             }
             break;
         }
-        case optimizer::Operations::Cmp3w: {
+        case abt::Operations::Cmp3w: {
             Tree lhs = op.getLeftChild().visit(*this);
             if (!lhs.expr.has_value()) {
                 return lhs;
@@ -236,20 +358,19 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
 
             if (!isBlock(lhs) && !isBlock(rhs)) {
                 // If both args are scalar, preserve scalar operation.
-                return {
-                    make<optimizer::BinaryOp>(op.op(), std::move(*lhs.expr), std::move(*rhs.expr)),
-                    resultType,
-                    {}};
+                return {make<abt::BinaryOp>(op.op(), std::move(*lhs.expr), std::move(*rhs.expr)),
+                        resultType,
+                        {}};
             }
 
             break;
         }
-        case optimizer::Operations::Gt:
-        case optimizer::Operations::Gte:
-        case optimizer::Operations::Eq:
-        case optimizer::Operations::Neq:
-        case optimizer::Operations::Lt:
-        case optimizer::Operations::Lte: {
+        case abt::Operations::Gt:
+        case abt::Operations::Gte:
+        case abt::Operations::Eq:
+        case abt::Operations::Neq:
+        case abt::Operations::Lt:
+        case abt::Operations::Lte: {
 
             Tree lhs = op.getLeftChild().visit(*this);
             if (!lhs.expr.has_value()) {
@@ -285,22 +406,22 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
                     bool flipOp = !isBlock(lhs) && isBlock(rhs);
                     if (flipOp) {
                         std::swap(lhs, rhs);
-                        cmpOp = optimizer::flipComparisonOp(cmpOp);
+                        cmpOp = abt::flipComparisonOp(cmpOp);
                     }
 
                     StringData fnName = [&]() {
                         switch (cmpOp) {
-                            case optimizer::Operations::Gt:
+                            case abt::Operations::Gt:
                                 return "valueBlockGtScalar"_sd;
-                            case optimizer::Operations::Gte:
+                            case abt::Operations::Gte:
                                 return "valueBlockGteScalar"_sd;
-                            case optimizer::Operations::Eq:
+                            case abt::Operations::Eq:
                                 return "valueBlockEqScalar"_sd;
-                            case optimizer::Operations::Neq:
+                            case abt::Operations::Neq:
                                 return "valueBlockNeqScalar"_sd;
-                            case optimizer::Operations::Lt:
+                            case abt::Operations::Lt:
                                 return "valueBlockLtScalar"_sd;
-                            case optimizer::Operations::Lte:
+                            case abt::Operations::Lte:
                                 return "valueBlockLteScalar"_sd;
                             default:
                                 MONGO_UNREACHABLE;
@@ -317,15 +438,14 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
 
             if (!isBlock(lhs) && !isBlock(rhs)) {
                 // If both args are scalar, preserve scalar operation.
-                return {
-                    make<optimizer::BinaryOp>(op.op(), std::move(*lhs.expr), std::move(*rhs.expr)),
-                    resultType,
-                    {}};
+                return {make<abt::BinaryOp>(op.op(), std::move(*lhs.expr), std::move(*rhs.expr)),
+                        resultType,
+                        {}};
             }
 
             break;
         }
-        case optimizer::Operations::EqMember: {
+        case abt::Operations::EqMember: {
             Tree lhs = op.getLeftChild().visit(*this);
             if (!lhs.expr.has_value()) {
                 return lhs;
@@ -345,137 +465,31 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
                             lhs.sourceCell};
                 } else {
                     // Preserve scalar operation.
-                    return {make<optimizer::BinaryOp>(
-                                op.op(), std::move(*lhs.expr), std::move(*rhs.expr)),
-                            TypeSignature::kBooleanType.include(
-                                rhs.typeSignature.intersect(TypeSignature::kNothingType)),
-                            {}};
+                    return {
+                        make<abt::BinaryOp>(op.op(), std::move(*lhs.expr), std::move(*rhs.expr)),
+                        TypeSignature::kBooleanType.include(
+                            rhs.typeSignature.intersect(TypeSignature::kNothingType)),
+                        {}};
                 }
             }
             break;
         }
-        case optimizer::Operations::And:
-        case optimizer::Operations::Or: {
-            Tree lhs = op.getLeftChild().visit(*this);
-            if (!lhs.expr.has_value()) {
-                return lhs;
-            }
-            // An And/Or operation between two blocks has to work at the level of measures, not on
-            // the expanded arrays.
-            foldIfNecessary(lhs, true);
-
-            if (TypeSignature::kBlockType.isSubset(lhs.typeSignature)) {
-                // Treat the result of the left side as the mask to be applied on the right side.
-                // This way, the right side can decide whether to skip the processing of the indexes
-                // where the left side produced a false result.
-                auto lhsVar = getABTLocalVariableName(_frameGenerator->generate(), 0);
-
-                auto mask = op.op() == optimizer::Operations::And
-                    ? lhsVar
-                    : getABTLocalVariableName(_frameGenerator->generate(), 0);
-
-                _activeMasks.push_back(mask);
-                Tree rhs = op.getRightChild().visit(*this);
-                _activeMasks.pop_back();
-                if (!rhs.expr.has_value()) {
-                    return rhs;
-                }
-                foldIfNecessary(rhs, true);
-
-                if (TypeSignature::kBlockType.isSubset(rhs.typeSignature)) {
-                    return {op.op() == optimizer::Operations::And
-                                ? makeLet(lhsVar,
-                                          std::move(*lhs.expr),
-                                          makeABTFunction("valueBlockLogicalAnd"_sd,
-                                                          makeVariable(lhsVar),
-                                                          std::move(*rhs.expr)))
-                                : makeLet(lhsVar,
-                                          std::move(*lhs.expr),
-                                          makeLet(mask,
-                                                  makeABTFunction(
-                                                      "valueBlockLogicalNot"_sd,
-                                                      makeABTFunction(
-                                                          "valueBlockFillEmpty"_sd,
-                                                          makeVariable(lhsVar),
-                                                          optimizer::Constant::boolean(false))),
-                                                  makeABTFunction("valueBlockLogicalOr"_sd,
-                                                                  makeVariable(lhsVar),
-                                                                  std::move(*rhs.expr)))),
-                            TypeSignature::kBlockType.include(TypeSignature::kBooleanType)
-                                .include(lhs.typeSignature.include(rhs.typeSignature)
-                                             .intersect(TypeSignature::kNothingType)),
-                            {}};
-                }
-            } else {
-                Tree rhs = op.getRightChild().visit(*this);
-                if (!rhs.expr.has_value()) {
-                    return rhs;
-                }
-                // Preserve scalar operation, reject vectorization of scalar vs vector.
-                if (!TypeSignature::kBlockType.isSubset(rhs.typeSignature)) {
-                    return {make<optimizer::BinaryOp>(
-                                op.op(), std::move(*lhs.expr), std::move(*rhs.expr)),
-                            TypeSignature::kBooleanType.include(
-                                lhs.typeSignature.include(rhs.typeSignature)
-                                    .intersect(TypeSignature::kNothingType)),
-                            {}};
-                }
-            }
+        case abt::Operations::And:
+        case abt::Operations::Or: {
+            return vectorizeLogicalOp(
+                op.op(),
+                [&]() { return op.getLeftChild().visit(*this); },
+                [&]() { return op.getRightChild().visit(*this); });
             break;
         }
-        case optimizer::Operations::Add:
-        case optimizer::Operations::Sub:
-        case optimizer::Operations::Div:
-        case optimizer::Operations::Mult: {
-            Tree lhs = op.getLeftChild().visit(*this);
-            if (!lhs.expr.has_value()) {
-                return lhs;
-            }
-            Tree rhs = op.getRightChild().visit(*this);
-            if (!rhs.expr.has_value()) {
-                return rhs;
-            }
-
-            StringData fnName = [&]() {
-                switch (op.op()) {
-                    case optimizer::Operations::Add:
-                        return "valueBlockAdd"_sd;
-                    case optimizer::Operations::Sub:
-                        return "valueBlockSub"_sd;
-                    case optimizer::Operations::Div:
-                        return "valueBlockDiv"_sd;
-                    case optimizer::Operations::Mult:
-                        return "valueBlockMult"_sd;
-                    default:
-                        MONGO_UNREACHABLE;
-                }
-            }();
-
-            auto returnTS =
-                TypeSignature::kNumericType.include(getTypeSignature(sbe::value::TypeTags::Date));
-
-            if (TypeSignature::kBlockType.isSubset(lhs.typeSignature) ||
-                TypeSignature::kBlockType.isSubset(rhs.typeSignature)) {
-                boost::optional<optimizer::ProjectionName> sameCell = lhs.sourceCell.has_value() &&
-                        rhs.sourceCell.has_value() && *lhs.sourceCell == *rhs.sourceCell
-                    ? lhs.sourceCell
-                    : boost::none;
-                // If we can't identify a single cell for both branches, fold them.
-                if (!sameCell.has_value()) {
-                    foldIfNecessary(lhs);
-                    foldIfNecessary(rhs);
-                }
-                return {makeABTFunction(
-                            fnName, generateMaskArg(), std::move(*lhs.expr), std::move(*rhs.expr)),
-                        TypeSignature::kBlockType.include(returnTS),
-                        sameCell};
-            } else {
-                // Preserve scalar operation.
-                return {
-                    make<optimizer::BinaryOp>(op.op(), std::move(*lhs.expr), std::move(*rhs.expr)),
-                    returnTS,
-                    {}};
-            }
+        case abt::Operations::Add:
+        case abt::Operations::Sub:
+        case abt::Operations::Div:
+        case abt::Operations::Mult: {
+            return vectorizeArithmeticOp(
+                op.op(),
+                [&]() { return op.getLeftChild().visit(*this); },
+                [&]() { return op.getRightChild().visit(*this); });
             break;
         }
         default:
@@ -485,7 +499,47 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
     return {{}, TypeSignature::kAnyScalarType, {}};
 }
 
-Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer::UnaryOp& op) {
+Vectorizer::Tree Vectorizer::vectorizeNaryHelper(const abt::NaryOp& op, size_t argIdx) {
+    // Verify that we have at least 2 items to process.
+    tassert(10199602, "index out of range", argIdx < op.nodes().size() - 1);
+    auto lhsNode = [&]() {
+        return op.nodes()[argIdx].visit(*this);
+    };
+    auto rhsNode = [&]() {
+        // If this is the last item, process it directly, otherwise recurse simulating
+        // the presence of a nested logical operation.
+        size_t rhsIdx = argIdx + 1;
+        return (rhsIdx == op.nodes().size() - 1) ? op.nodes()[rhsIdx].visit(*this)
+                                                 : vectorizeNaryHelper(op, rhsIdx);
+    };
+    switch (op.op()) {
+        case abt::Operations::And:
+        case abt::Operations::Or:
+            return vectorizeLogicalOp(op.op(), lhsNode, rhsNode);
+        case abt::Operations::Add:
+        case abt::Operations::Mult:
+            return vectorizeArithmeticOp(op.op(), lhsNode, rhsNode);
+        default:
+            MONGO_UNREACHABLE;
+    }
+}
+
+Vectorizer::Tree Vectorizer::operator()(const abt::ABT& n, const abt::NaryOp& op) {
+    switch (op.op()) {
+        case abt::Operations::And:
+        case abt::Operations::Or:
+        case abt::Operations::Add:
+        case abt::Operations::Mult: {
+            return vectorizeNaryHelper(op, 0);
+        }
+        default:
+            break;
+    }
+    logUnsupportedConversion(n);
+    return {{}, TypeSignature::kAnyScalarType, {}};
+}
+
+Vectorizer::Tree Vectorizer::operator()(const abt::ABT& n, const abt::UnaryOp& op) {
     Tree operand = op.getChild().visit(*this);
     if (!operand.expr.has_value()) {
         return operand;
@@ -496,7 +550,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
                 operand.sourceCell};
     }
     switch (op.op()) {
-        case optimizer::Operations::Not: {
+        case abt::Operations::Not: {
             return {makeABTFunction("valueBlockLogicalNot"_sd, std::move(*operand.expr)),
                     TypeSignature::kBlockType.include(TypeSignature::kBooleanType)
                         .include(operand.typeSignature.intersect(TypeSignature::kNothingType)),
@@ -510,8 +564,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
     return {{}, TypeSignature::kAnyScalarType, {}};
 }
 
-Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
-                                        const optimizer::FunctionCall& op) {
+Vectorizer::Tree Vectorizer::operator()(const abt::ABT& n, const abt::FunctionCall& op) {
 
     size_t arity = op.nodes().size();
 
@@ -531,40 +584,41 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
 
         if (TypeSignature::kBlockType.isSubset(argument.typeSignature) &&
             argument.sourceCell.has_value()) {
-            const optimizer::LambdaAbstraction* lambda =
-                op.nodes()[1].cast<optimizer::LambdaAbstraction>();
-            // Reuse the variable name of the lambda so that we don't have to manipulate the code
-            // inside the lambda (and to avoid problems if the expression we are going to iterate
-            // over has side effects and the lambda references it multiple times, as replacing it
-            // directly in code would imply executing more than once). Don't propagate the reference
-            // to the cell slot, as we are going to fold the result and we don't want that the
-            // lambda does it too.
-            _variableTypes.insert_or_assign(lambda->varName(),
-                                            std::make_pair(argument.typeSignature, boost::none));
-            auto lambdaArg = lambda->getBody().visit(*this);
-            _variableTypes.erase(lambda->varName());
-            if (!lambdaArg.expr.has_value()) {
-                return lambdaArg;
+            const abt::LambdaAbstraction* lambda = op.nodes()[1].cast<abt::LambdaAbstraction>();
+            if (lambda->varNames().size() == 1) {
+                // Reuse the variable name of the lambda so that we don't have to manipulate the
+                // code inside the lambda (and to avoid problems if the expression we are going to
+                // iterate over has side effects and the lambda references it multiple times, as
+                // replacing it directly in code would imply executing more than once). Don't
+                // propagate the reference to the cell slot, as we are going to fold the result and
+                // we don't want that the lambda does it too.
+                _variableTypes.insert_or_assign(
+                    lambda->varNames()[0], std::make_pair(argument.typeSignature, boost::none));
+                auto lambdaArg = lambda->getBody().visit(*this);
+                _variableTypes.erase(lambda->varNames()[0]);
+                if (!lambdaArg.expr.has_value()) {
+                    return lambdaArg;
+                }
+                // If the body of the lambda is just a scalar constant, create a block
+                // of the same size of the block argument filled with that value.
+                if (!TypeSignature::kBlockType.isSubset(lambdaArg.typeSignature)) {
+                    lambdaArg.expr = makeABTFunction(
+                        "valueBlockNewFill"_sd,
+                        std::move(*lambdaArg.expr),
+                        makeABTFunction("valueBlockSize"_sd, makeVariable(lambda->varNames()[0])));
+                    lambdaArg.typeSignature =
+                        TypeSignature::kBlockType.include(lambdaArg.typeSignature);
+                    lambdaArg.sourceCell = boost::none;
+                }
+                return {makeLet(lambda->varNames()[0],
+                                std::move(*argument.expr),
+                                makeABTFunction("cellFoldValues_F"_sd,
+                                                std::move(*lambdaArg.expr),
+                                                makeVariable(*argument.sourceCell))),
+                        TypeSignature::kBlockType.include(TypeSignature::kBooleanType)
+                            .include(argument.typeSignature.intersect(TypeSignature::kNothingType)),
+                        {}};
             }
-            // If the body of the lambda is just a scalar constant, create a block
-            // of the same size of the block argument filled with that value.
-            if (!TypeSignature::kBlockType.isSubset(lambdaArg.typeSignature)) {
-                lambdaArg.expr = makeABTFunction(
-                    "valueBlockNewFill"_sd,
-                    std::move(*lambdaArg.expr),
-                    makeABTFunction("valueBlockSize"_sd, makeVariable(lambda->varName())));
-                lambdaArg.typeSignature =
-                    TypeSignature::kBlockType.include(lambdaArg.typeSignature);
-                lambdaArg.sourceCell = boost::none;
-            }
-            return {makeLet(lambda->varName(),
-                            std::move(*argument.expr),
-                            makeABTFunction("cellFoldValues_F"_sd,
-                                            std::move(*lambdaArg.expr),
-                                            makeVariable(*argument.sourceCell))),
-                    TypeSignature::kBlockType.include(TypeSignature::kBooleanType)
-                        .include(argument.typeSignature.intersect(TypeSignature::kNothingType)),
-                    {}};
         }
     }
 
@@ -581,7 +635,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
     if (numOfBlockArgs == 0) {
         // This is a pure scalar function, preserve it as it could be used later as an argument for
         // a block-enabled operation.
-        optimizer::ABTVector functionArgs;
+        abt::ABTVector functionArgs;
         functionArgs.reserve(arity);
         for (size_t i = 0; i < arity; i++) {
             functionArgs.emplace_back(std::move(*args[i].expr));
@@ -607,7 +661,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
 
         if (arity == 6 && op.name() == "dateTrunc"s &&
             TypeSignature::kBlockType.isSubset(args[1].typeSignature)) {
-            optimizer::ABTVector functionArgs;
+            abt::ABTVector functionArgs;
             functionArgs.reserve(7);
             functionArgs.emplace_back(generateMaskArg());
             functionArgs.emplace_back(std::move(*args[1].expr));
@@ -624,7 +678,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
         if ((arity == 5 || arity == 6) && op.name() == "dateDiff"s) {
             // The dateDiff could have the block argument on either date operand.
             if (TypeSignature::kBlockType.isSubset(args[1].typeSignature)) {
-                optimizer::ABTVector functionArgs;
+                abt::ABTVector functionArgs;
                 functionArgs.reserve(arity + 1);
                 functionArgs.emplace_back(generateMaskArg());
                 functionArgs.emplace_back(std::move(*args[1].expr));
@@ -638,7 +692,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
                             .include(TypeSignature::kNothingType),
                         args[1].sourceCell};
             } else if (TypeSignature::kBlockType.isSubset(args[2].typeSignature)) {
-                optimizer::ABTVector functionArgs;
+                abt::ABTVector functionArgs;
                 functionArgs.reserve(arity + 1);
                 functionArgs.emplace_back(generateMaskArg());
                 functionArgs.emplace_back(std::move(*args[2].expr));
@@ -662,7 +716,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
 
         if (arity == 5 && op.name() == "dateAdd"s &&
             TypeSignature::kBlockType.isSubset(args[1].typeSignature)) {
-            optimizer::ABTVector functionArgs;
+            abt::ABTVector functionArgs;
             functionArgs.reserve(6);
             functionArgs.emplace_back(generateMaskArg());
             functionArgs.emplace_back(std::move(*args[1].expr));
@@ -681,7 +735,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
             StringData blockFnName = op.name() == "getSortKeyAsc"s ? "valueBlockGetSortKeyAsc"_sd
                                                                    : "valueBlockGetSortKeyDesc"_sd;
 
-            optimizer::ABTVector functionArgs;
+            abt::ABTVector functionArgs;
             functionArgs.emplace_back(std::move(*args[0].expr));
 
             return {makeABTFunction(blockFnName, std::move(functionArgs)),
@@ -691,7 +745,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
 
         if (arity == 2 && op.name() == "isMember"s &&
             TypeSignature::kBlockType.isSubset(args[0].typeSignature)) {
-            optimizer::ABTVector functionArgs;
+            abt::ABTVector functionArgs;
             functionArgs.reserve(arity);
             functionArgs.emplace_back(std::move(*args[0].expr));
             functionArgs.emplace_back(std::move(*args[1].expr));
@@ -705,7 +759,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
         if (arity == 1 || arity == 2) {
             if (op.name() == "round"s &&
                 TypeSignature::kBlockType.isSubset(args[0].typeSignature)) {
-                optimizer::ABTVector functionArgs;
+                abt::ABTVector functionArgs;
                 functionArgs.reserve(arity);
                 functionArgs.emplace_back(std::move(*args[0].expr));
                 if (arity == 2) {
@@ -720,7 +774,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
 
             if (op.name() == "trunc"s &&
                 TypeSignature::kBlockType.isSubset(args[0].typeSignature)) {
-                optimizer::ABTVector functionArgs;
+                abt::ABTVector functionArgs;
                 functionArgs.reserve(arity);
                 functionArgs.emplace_back(std::move(*args[0].expr));
                 if (arity == 2) {
@@ -736,7 +790,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
 
         if (arity == 2 && op.name() == "mod"s &&
             TypeSignature::kBlockType.isSubset(args[0].typeSignature)) {
-            optimizer::ABTVector functionArgs;
+            abt::ABTVector functionArgs;
             functionArgs.reserve(arity);
             functionArgs.emplace_back(std::move(*args[0].expr));
             functionArgs.emplace_back(std::move(*args[1].expr));
@@ -749,7 +803,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
 
         if (arity == 2 && op.name() == "convert"s &&
             TypeSignature::kBlockType.isSubset(args[0].typeSignature)) {
-            optimizer::ABTVector functionArgs;
+            abt::ABTVector functionArgs;
             functionArgs.reserve(arity);
             functionArgs.emplace_back(std::move(*args[0].expr));
             functionArgs.emplace_back(std::move(*args[1].expr));
@@ -762,7 +816,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
 
         if (arity == 2 && op.name() == "typeMatch"s &&
             TypeSignature::kBlockType.isSubset(args.front().typeSignature)) {
-            optimizer::ABTVector functionArgs;
+            abt::ABTVector functionArgs;
             functionArgs.reserve(arity);
             for (auto& functionArg : args) {
                 functionArgs.emplace_back(std::move(*functionArg.expr));
@@ -776,7 +830,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
 
         if (arity == 2 && op.name() == "isTimezone"s &&
             TypeSignature::kBlockType.isSubset(args.back().typeSignature)) {
-            optimizer::ABTVector functionArgs;
+            abt::ABTVector functionArgs;
             functionArgs.reserve(arity);
             for (auto& functionArg : args) {
                 functionArgs.emplace_back(std::move(*functionArg.expr));
@@ -790,7 +844,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
 
         if (arity == 3 && op.name() == "fillType" &&
             TypeSignature::kBlockType.isSubset(args.front().typeSignature)) {
-            optimizer::ABTVector functionArgs;
+            abt::ABTVector functionArgs;
             functionArgs.reserve(arity);
             for (auto& functionArg : args) {
                 functionArgs.emplace_back(std::move(*functionArg.expr));
@@ -804,23 +858,23 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
 
         static const stdx::unordered_map<std::string, uint32_t> kTypeMask = {
             {"isNumber",
-             getBSONTypeMask(BSONType::NumberInt) | getBSONTypeMask(BSONType::NumberLong) |
-                 getBSONTypeMask(BSONType::NumberDouble) |
-                 getBSONTypeMask(BSONType::NumberDecimal)},
-            {"isDate", getBSONTypeMask(BSONType::Date)},
-            {"isString", getBSONTypeMask(BSONType::String)},
-            {"isTimestamp", getBSONTypeMask(BSONType::bsonTimestamp)},
-            {"isArray", getBSONTypeMask(BSONType::Array)},
-            {"isObject", getBSONTypeMask(BSONType::Object)},
-            {"isNull", getBSONTypeMask(BSONType::jstNULL)},
+             getBSONTypeMask(BSONType::numberInt) | getBSONTypeMask(BSONType::numberLong) |
+                 getBSONTypeMask(BSONType::numberDouble) |
+                 getBSONTypeMask(BSONType::numberDecimal)},
+            {"isDate", getBSONTypeMask(BSONType::date)},
+            {"isString", getBSONTypeMask(BSONType::string)},
+            {"isTimestamp", getBSONTypeMask(BSONType::timestamp)},
+            {"isArray", getBSONTypeMask(BSONType::array)},
+            {"isObject", getBSONTypeMask(BSONType::object)},
+            {"isNull", getBSONTypeMask(BSONType::null)},
         };
 
         if (arity == 1 && kTypeMask.count(op.name()) > 0 &&
             TypeSignature::kBlockType.isSubset(args.front().typeSignature)) {
-            optimizer::ABTVector functionArgs;
+            abt::ABTVector functionArgs;
             functionArgs.reserve(2);
             functionArgs.emplace_back(std::move(*args.front().expr));
-            functionArgs.emplace_back(optimizer::Constant::int32(kTypeMask.at(op.name())));
+            functionArgs.emplace_back(abt::Constant::int32(kTypeMask.at(op.name())));
 
             return {makeABTFunction("valueBlockTypeMatch"_sd, std::move(functionArgs)),
                     TypeSignature::kBlockType.include(TypeSignature::kBooleanType)
@@ -834,7 +888,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n,
     return {{}, TypeSignature::kAnyScalarType, {}};
 }
 
-Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer::Let& op) {
+Vectorizer::Tree Vectorizer::operator()(const abt::ABT& n, const abt::Let& op) {
     // Simply recreate the Let node using the processed inputs.
     auto bind = op.bind().visit(*this);
     if (!bind.expr.has_value()) {
@@ -853,16 +907,55 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
             body.sourceCell};
 }
 
-Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer::If& op) {
-    auto test = op.getCondChild().visit(*this);
+Vectorizer::Tree Vectorizer::operator()(const abt::ABT& n, const abt::MultiLet& op) {
+    // Simply recreate the MultiLet node using the processed inputs.
+    std::vector<Tree> bindVec;
+    bindVec.reserve(op.numBinds());
+
+    for (size_t idx = 0; idx < op.numBinds(); ++idx) {
+        auto bind = op.bind(idx).visit(*this);
+        if (!bind.expr.has_value()) {
+            return bind;
+        }
+        bindVec.emplace_back(std::move(bind));
+        // Forward the inferred type to the subsequent binding expressions.
+        _variableTypes.insert_or_assign(
+            op.varName(idx), std::make_pair(bindVec[idx].typeSignature, bindVec[idx].sourceCell));
+    }
+
+    auto body = op.in().visit(*this);
+
+    for (auto&& name : op.varNames()) {
+        _variableTypes.erase(name);
+    }
+
+    if (!body.expr.has_value()) {
+        return body;
+    }
+
+    abt::ABTVector nodes;
+    nodes.reserve(op.numBinds() + 1);
+
+    for (size_t idx = 0; idx < op.numBinds(); ++idx) {
+        nodes.emplace_back(std::move(*bindVec[idx].expr));
+    }
+
+    return {makeLet(op.varNames(), std::move(nodes), std::move(*body.expr)),
+            body.typeSignature,
+            body.sourceCell};
+}
+
+template <typename Cond, typename Then, typename Else>
+Vectorizer::Tree Vectorizer::vectorizeCond(Cond condNode, Then thenNode, Else elseNode) {
+    auto test = condNode();
     if (!test.expr.has_value()) {
         return test;
     }
     foldIfNecessary(test, true);
 
-    auto blockify = [](Tree& tree, const std::list<optimizer::ProjectionName>& bitmapVars) {
+    auto blockify = [](Tree& tree, const std::list<abt::ProjectionName>& bitmapVars) {
         if (!TypeSignature::kBlockType.isSubset(tree.typeSignature)) {
-            boost::optional<optimizer::ABT> bitmapExpr;
+            boost::optional<abt::ABT> bitmapExpr;
             for (const auto& var : bitmapVars) {
                 if (!bitmapExpr.has_value()) {
                     bitmapExpr = makeVariable(var);
@@ -872,11 +965,11 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
                 }
             }
 
-            if (!tree.expr->cast<optimizer::Constant>()) {
+            if (!tree.expr->cast<abt::Constant>()) {
                 tree.expr = makeIf(makeABTFunction("valueBlockNone"_sd,
                                                    std::move(*bitmapExpr),
-                                                   optimizer::Constant::boolean(true)),
-                                   optimizer::Constant::nothing(),
+                                                   abt::Constant::boolean(true)),
+                                   abt::Constant::nothing(),
                                    std::move(*tree.expr));
             }
 
@@ -891,13 +984,13 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
 
     if (TypeSignature::kBlockType.isSubset(test.typeSignature)) {
         // The bitmap result of the conditions in the path so far.
-        auto previousConditionBitmapVar = getABTLocalVariableName(_frameGenerator->generate(), 0);
+        auto previousConditionBitmapVar = generateLocalVarName();
         auto previousBitmapExpr = generateMaskArg();
 
         // The `then` side will use all the bitmaps seen so far AND the current bitmap.
-        auto thenBranchBitmapVar = getABTLocalVariableName(_frameGenerator->generate(), 0);
+        auto thenBranchBitmapVar = generateLocalVarName();
         _activeMasks.push_back(thenBranchBitmapVar);
-        auto thenBranch = op.getThenChild().visit(*this);
+        auto thenBranch = thenNode();
         _activeMasks.pop_back();
         if (!thenBranch.expr.has_value()) {
             return thenBranch;
@@ -911,9 +1004,9 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
 
         // The `else` side will use all the bitmaps seen so far AND the negation of the current
         // bitmap.
-        auto elseBranchBitmapVar = getABTLocalVariableName(_frameGenerator->generate(), 0);
+        auto elseBranchBitmapVar = generateLocalVarName();
         _activeMasks.push_back(elseBranchBitmapVar);
-        auto elseBranch = op.getElseChild().visit(*this);
+        auto elseBranch = elseNode();
         _activeMasks.pop_back();
         if (!elseBranch.expr.has_value()) {
             return elseBranch;
@@ -925,7 +1018,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
             blockify(elseBranch, {previousConditionBitmapVar, elseBranchBitmapVar});
         }
 
-        boost::optional<optimizer::ProjectionName> sameCell = thenBranch.sourceCell.has_value() &&
+        boost::optional<abt::ProjectionName> sameCell = thenBranch.sourceCell.has_value() &&
                 elseBranch.sourceCell.has_value() &&
                 *thenBranch.sourceCell == *elseBranch.sourceCell
             ? thenBranch.sourceCell
@@ -954,11 +1047,11 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
                 sameCell};
     } else {
         // Scalar test, keep it as it is.
-        auto thenBranch = op.getThenChild().visit(*this);
+        auto thenBranch = thenNode();
         if (!thenBranch.expr.has_value()) {
             return thenBranch;
         }
-        auto elseBranch = op.getElseChild().visit(*this);
+        auto elseBranch = elseNode();
         if (!elseBranch.expr.has_value()) {
             return elseBranch;
         }
@@ -1030,7 +1123,7 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
             return {{}, TypeSignature::kAnyScalarType, {}};
         }
 
-        boost::optional<optimizer::ProjectionName> sameCell;
+        boost::optional<abt::ProjectionName> sameCell;
         if (TypeSignature::kBlockType.isSubset(thenBranch.typeSignature)) {
             sameCell = thenBranch.sourceCell.has_value() && elseBranch.sourceCell.has_value() &&
                     *thenBranch.sourceCell != *elseBranch.sourceCell
@@ -1047,6 +1140,41 @@ Vectorizer::Tree Vectorizer::operator()(const optimizer::ABT& n, const optimizer
             thenBranch.typeSignature.include(elseBranch.typeSignature),
             sameCell};
     }
+}
+
+Vectorizer::Tree Vectorizer::operator()(const abt::ABT& n, const abt::If& op) {
+    return vectorizeCond([&]() { return op.getCondChild().visit(*this); },
+                         [&]() { return op.getThenChild().visit(*this); },
+                         [&]() { return op.getElseChild().visit(*this); });
+}
+
+Vectorizer::Tree Vectorizer::vectorizeSwitchHelper(const abt::Switch& op, size_t branchIdx) {
+    return vectorizeCond([&]() { return op.getCondChild(branchIdx).visit(*this); },
+                         [&]() { return op.getThenChild(branchIdx).visit(*this); },
+                         [&]() {
+                             // When we need to process the last branch, break the recursion:
+                             // the "else" statement is just the final default statement.
+                             // Otherwise, the "else" statement is the next branch.
+                             return (branchIdx == op.getNumBranches() - 1)
+                                 ? op.getDefaultChild().visit(*this)
+                                 : vectorizeSwitchHelper(op, branchIdx + 1);
+                         });
+}
+
+Vectorizer::Tree Vectorizer::operator()(const abt::ABT& n, const abt::Switch& op) {
+    // A switch is syntactic sugar for if(cond0) then then0 else (if (cond1) then then1 else (...)).
+    // We process it using recursion so that we don't risk to generate a vectorized code that
+    // processes a branch on a value that has been guarded by a previous "if" branch.
+    //
+    // e.g.
+    // switch
+    //   case type(val) != number then fail("not a number")
+    //   case val == 0 then fail("division by zero")
+    //   default div(4, val)
+    //
+    // When processing a block { "string", 0, 89 } the branch performing the division should not
+    // attempt to process the first two values.
+    return vectorizeSwitchHelper(op, 0);
 }
 
 }  // namespace mongo::stage_builder

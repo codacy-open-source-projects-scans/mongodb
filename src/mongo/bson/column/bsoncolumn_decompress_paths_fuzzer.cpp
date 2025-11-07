@@ -29,9 +29,9 @@
 
 #include "mongo/bson/bson_validate.h"
 #include "mongo/bson/bsonelement.h"
+#include "mongo/bson/column/bson_element_storage.h"
 #include "mongo/bson/column/bsoncolumn.h"
 #include "mongo/bson/column/bsoncolumn_test_util.h"
-#include "mongo/bson/util/bsonobj_traversal.h"
 #include "mongo/db/exec/sbe/values/value.h"
 
 static bool isDataOnlyInterleaved(const char* binary, size_t size) {
@@ -46,9 +46,9 @@ static bool isDataOnlyInterleaved(const char* binary, size_t size) {
 
     while (pos != end) {
         uint8_t control = *pos;
-        if (control == EOO) {
+        if (control == stdx::to_underlying(BSONType::eoo)) {
             // Reached the end of interleaved mode and this should be the end of the binary.
-            return *(++pos) == EOO;
+            return *(++pos) == stdx::to_underlying(BSONType::eoo);
         }
 
         if (bsoncolumn::isInterleavedStartControlByte(control)) {
@@ -88,25 +88,25 @@ static bool containsDuplicateFields(mongo::BSONObj obj) {
     return false;
 }
 
-static void findAllScalarPaths(std::vector<mongo::sbe::value::CellBlock::Path>& paths,
+static void findAllScalarPaths(std::vector<mongo::sbe::value::Path>& paths,
                                const mongo::BSONElement& elem,
-                               mongo::sbe::value::CellBlock::Path path,
+                               mongo::sbe::value::Path path,
                                bool previousIsArray) {
     using namespace mongo;
     if (!elem.isABSONObj()) {
         // Array elements have a field that is their index in the array. We shouldn't
         // append that field in the 'Path'.
         if (!previousIsArray) {
-            path.push_back(sbe::value::CellBlock::Get{elem.fieldNameStringData().toString()});
+            path.push_back(sbe::value::Get{std::string{elem.fieldNameStringData()}});
         }
-        path.push_back(sbe::value::CellBlock::Id{});
+        path.push_back(sbe::value::Id{});
         paths.push_back(path);
         return;
     }
 
     BSONObj obj = elem.embeddedObject();
 
-    if (elem.type() == Array) {
+    if (elem.type() == BSONType::array) {
         // We only want to decompress an array if there is a single element.
         // TODO SERVER-90044 remove this condition.
         if (obj.nFields() != 1) {
@@ -118,9 +118,9 @@ static void findAllScalarPaths(std::vector<mongo::sbe::value::CellBlock::Path>& 
         // manually track when the element is an array element or an object.
         // If the next element is an object
         if (!previousIsArray) {
-            path.push_back(sbe::value::CellBlock::Get{elem.fieldNameStringData().toString()});
+            path.push_back(sbe::value::Get{std::string{elem.fieldNameStringData()}});
         }
-        path.push_back(sbe::value::CellBlock::Traverse{});
+        path.push_back(sbe::value::Traverse{});
         findAllScalarPaths(paths, obj.firstElement(), path, true);
         return;
     }
@@ -129,8 +129,8 @@ static void findAllScalarPaths(std::vector<mongo::sbe::value::CellBlock::Path>& 
     for (auto&& newElem : obj) {
         auto nPath = path;
         if (!previousIsArray) {
-            nPath.push_back(sbe::value::CellBlock::Get{elem.fieldNameStringData().toString()});
-            nPath.push_back(sbe::value::CellBlock::Traverse{});
+            nPath.push_back(sbe::value::Get{std::string{elem.fieldNameStringData()}});
+            nPath.push_back(sbe::value::Traverse{});
         }
         findAllScalarPaths(paths, newElem, nPath, false);
     }
@@ -164,9 +164,9 @@ extern "C" int LLVMFuzzerTestOneInput(const char* Data, size_t Size) {
     // Required to keep each 'Container' for each 'SBEPath' in scope.
     std::vector<std::vector<SBEColumnMaterializer::Element>> containers;
     // Required to change the results of the iterator API into SBE values.
-    std::vector<sbe::value::CellBlock::PathRequest> pathReqs;
+    std::vector<sbe::value::PathRequest> pathReqs;
     // Holds all the scalar field paths to decompress.
-    std::vector<sbe::value::CellBlock::Path> fieldPaths;
+    std::vector<sbe::value::Path> fieldPaths;
 
     // Find all the fields including fields nested inside objects that we can decompress.
     for (auto&& elem : refObj) {
@@ -179,8 +179,8 @@ extern "C" int LLVMFuzzerTestOneInput(const char* Data, size_t Size) {
     containers.reserve(fieldPaths.size());
     for (auto&& fieldPath : fieldPaths) {
         containers.emplace_back();
-        auto path = sbe::bsoncolumn::SBEPath{sbe::value::CellBlock::PathRequest(
-            sbe::value::CellBlock::PathRequestType::kFilter, fieldPath)};
+        auto path = sbe::bsoncolumn::SBEPath{
+            sbe::value::PathRequest(sbe::value::PathRequestType::kFilter, fieldPath)};
         blockBasedResults.push_back({path, containers.back()});
         pathReqs.push_back(path._pathRequest);
     }
@@ -201,7 +201,7 @@ extern "C" int LLVMFuzzerTestOneInput(const char* Data, size_t Size) {
                 continue;
             }
             // Must be an EOO element.
-            invariant(elem.type() == EOO,
+            invariant(elem.type() == BSONType::eoo,
                       str::stream() << "Iterator API returned data that was not an object nor EOO: "
                                     << elem.toString());
             BSONObjBuilder bob;

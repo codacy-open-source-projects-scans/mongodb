@@ -29,21 +29,21 @@
 
 #pragma once
 
+#include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/util/concurrency/with_lock.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/parking_lot.h"
+
 #include <atomic>
 #include <condition_variable>
 #include <list>
 
-#include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/mutex.h"
-#include "mongo/util/concurrency/with_lock.h"
-#include "mongo/util/parking_lot.h"
-
-namespace mongo {
+namespace MONGO_MOD_PUB mongo {
 
 namespace stdx {
 
-using cv_status = ::std::cv_status;      // NOLINT
-using ::std::notify_all_at_thread_exit;  // NOLINT
+using cv_status = ::std::cv_status;  // NOLINT
 
 /**
  * We wrap std::condition_variable_any to allow us to register Notifiables which can "wait" on the
@@ -98,4 +98,4 @@ private:
 
 using condition_variable_any = stdx::condition_variable;
 }  // namespace stdx
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

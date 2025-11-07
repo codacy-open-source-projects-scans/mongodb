@@ -29,10 +29,6 @@
 
 #pragma once
 
-#include <cstddef>
-#include <functional>
-#include <memory>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
@@ -42,10 +38,16 @@
 #include "mongo/transport/session.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/functional.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/time_support.h"
 
-namespace mongo::transport {
+#include <cstddef>
+#include <functional>
+#include <memory>
+
+namespace mongo {
+namespace MONGO_MOD_PUBLIC transport {
 
 /*
  * This is the interface for all ServiceExecutors.
@@ -57,11 +59,11 @@ public:
     class TaskRunner : public OutOfLineExecutor {
     public:
         /**
-         * Awaits the availability of incoming data for the specified session. On success, it will
-         * schedule the callback on current executor. Otherwise, it will invoke the callback with a
-         * non-okay status on the caller thread.
+         * Runs the task associated with a session. On success, it will schedule the callback on
+         * current executor. Otherwise, it will invoke the callback with a non-okay status on the
+         * caller thread.
          */
-        virtual void runOnDataAvailable(std::shared_ptr<Session> session, Task task) = 0;
+        virtual void runTaskForSession(std::shared_ptr<Session> session, Task task) = 0;
     };
 
     /**
@@ -136,14 +138,14 @@ public:
      *
      * This function is valid to invoke either on the Client thread or with the Client lock.
      */
-    static ServiceExecutorContext* get(Client* client) noexcept;
+    static ServiceExecutorContext* get(Client* client);
 
     /**
      * Set the ServiceExecutorContext for a given client.
      *
      * This function may only be invoked once and only while under the Client lock.
      */
-    static void set(Client* client, std::unique_ptr<ServiceExecutorContext> seCtx) noexcept;
+    static void set(Client* client, std::unique_ptr<ServiceExecutorContext> seCtx);
 
 
     /**
@@ -151,7 +153,7 @@ public:
      *
      * This function may only be invoked once and only while under the Client lock.
      */
-    static void reset(Client* client) noexcept;
+    static void reset(Client* client);
 
     ServiceExecutorContext() = default;
     /** Test only */
@@ -204,4 +206,5 @@ public:
     AtomicWord<std::size_t> limitExempt{0};
 };
 
-}  // namespace mongo::transport
+}  // namespace MONGO_MOD_PUBLIC transport
+}  // namespace mongo

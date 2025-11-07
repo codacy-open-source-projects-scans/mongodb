@@ -27,17 +27,6 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <memory>
-#include <ostream>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <s2cellid.h>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -51,7 +40,6 @@
 #include "mongo/db/matcher/expression_array.h"
 #include "mongo/db/matcher/expression_geo.h"
 #include "mongo/db/matcher/expression_leaf.h"
-#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/expression_tree.h"
 #include "mongo/db/matcher/expression_type.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
@@ -64,13 +52,26 @@
 #include "mongo/db/matcher/schema/expression_internal_schema_unique_items.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_geo_parser.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/index_tag.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/golden_test.h"
 #include "mongo/unittest/golden_test_base.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <cstdint>
+#include <memory>
+#include <ostream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <s2cellid.h>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -138,7 +139,7 @@ TEST(DebugStringTest, ExpressionGeo) {
     BSONObj query = fromjson("{loc:{$within:{$box:[{x: 4, y:4},[6,6]]}}}");
 
     std::unique_ptr<GeoExpression> gq(new GeoExpression);
-    ASSERT_OK(gq->parseFrom(query["loc"].Obj()));
+    ASSERT_OK(parsers::matcher::parseGeoExpressionFromBSON(query["loc"].Obj(), *gq));
 
     GeoMatchExpression ge("a"_sd, gq.release(), query);
     verifyDebugString(gctx, &ge, "GeoMatchExpression");
@@ -149,7 +150,7 @@ TEST(DebugStringTest, ExpressionGeo) {
         "$geometry:{type:\"Point\", coordinates:[0,0]}}}}");
 
     std::unique_ptr<GeoNearExpression> nq(new GeoNearExpression);
-    ASSERT_OK(nq->parseFrom(query["loc"].Obj()));
+    ASSERT_OK(parsers::matcher::parseGeoNearExpressionFromBSON(query["loc"].Obj(), *nq));
 
     GeoNearMatchExpression gne("a"_sd, nq.release(), query);
     verifyDebugString(gctx, &gne, "GeoNearMatchExpression");
@@ -222,8 +223,7 @@ TEST(DebugStringTest, ExpressionLeaf) {
 
 TEST(DebugStringTest, ExpressionText) {
     unittest::GoldenTestContext gctx(&goldenTestConfig);
-    auto expr = BSON("$text" << BSON("$search"
-                                     << "something"));
+    auto expr = BSON("$text" << BSON("$search" << "something"));
     auto tme = uassertStatusOK(
         MatchExpressionParser::parse(expr,
                                      new ExpressionContextForTest(),
@@ -234,10 +234,8 @@ TEST(DebugStringTest, ExpressionText) {
 
 TEST(DebugStringTest, ExpressionTree) {
     unittest::GoldenTestContext gctx(&goldenTestConfig);
-    auto baseOperand1 = BSON("$lt"
-                             << "z1");
-    auto baseOperand2 = BSON("$gt"
-                             << "a1");
+    auto baseOperand1 = BSON("$lt" << "z1");
+    auto baseOperand2 = BSON("$gt" << "a1");
     auto sub1 = std::make_unique<LTMatchExpression>("a"_sd, baseOperand1["$lt"]);
     auto sub2 = std::make_unique<GTMatchExpression>("a"_sd, baseOperand2["$gt"]);
     auto sub3 = std::make_unique<RegexMatchExpression>("a"_sd, "1", "");
@@ -285,8 +283,7 @@ TEST(DebugStringTest, ExpressionType) {
 
 TEST(DebugStringTest, ExpressionWhere) {
     unittest::GoldenTestContext gctx(&goldenTestConfig);
-    auto expr = BSON("$where"
-                     << "function() {print(where);}");
+    auto expr = BSON("$where" << "function() {print(where);}");
     auto whereExpr = uassertStatusOK(
         MatchExpressionParser::parse(expr,
                                      new ExpressionContextForTest(),

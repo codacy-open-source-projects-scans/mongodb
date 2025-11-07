@@ -29,18 +29,19 @@
 
 #pragma once
 
-#include <absl/hash/hash.h>
-#include <absl/strings/string_view.h>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/shared_buffer.h"
 #include "mongo/util/tracking/allocator.h"
 #include "mongo/util/tracking/context.h"
 
+#include <absl/hash/hash.h>
+#include <absl/strings/string_view.h>
+#include <boost/optional/optional.hpp>
+
+MONGO_MOD_PUBLIC;
 namespace mongo::timeseries::bucket_catalog {
 
 struct BucketMetadata {
@@ -50,7 +51,6 @@ public:
                    boost::optional<StringData> trueMetaFieldName);
 
     bool operator==(const BucketMetadata& other) const;
-    bool operator!=(const BucketMetadata& other) const;
 
     BSONObj toBSON() const;
     BSONElement element() const;

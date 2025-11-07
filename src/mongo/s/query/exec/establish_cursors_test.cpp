@@ -31,13 +31,6 @@
 #include <fmt/format.h>
 // IWYU pragma: no_include "cxxabi.h"
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <algorithm>
-#include <cstddef>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <system_error>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -49,21 +42,25 @@
 #include "mongo/client/remote_command_targeter_factory_mock.h"
 #include "mongo/client/remote_command_targeter_mock.h"
 #include "mongo/db/client.h"
+#include "mongo/db/global_catalog/type_shard.h"
+#include "mongo/db/local_catalog/shard_role_api/resource_yielders.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
+#include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/query/exec/establish_cursors.h"
-#include "mongo/s/resource_yielders.h"
-#include "mongo/s/sharding_mongos_test_fixture.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/barrier.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <memory>
+#include <string>
 
 namespace mongo {
 
@@ -165,6 +162,44 @@ public:
         });
     }
 
+    ChunkManager createChunkManager(const UUID& uuid, const NamespaceString& nss) {
+        ShardKeyPattern sk{fromjson("{x: 1, _id: 1}")};
+        std::deque<DocumentSource::GetNextResult> configData{
+            Document(fromjson("{_id: {x: {$minKey: 1}, _id: {$minKey: 1}}, max: {x: 0.0, _id: "
+                              "0.0}, shard: 'shard1'}")),
+            Document(fromjson("{_id: {x: 0.0, _id: 0.0}, max: {x: {$maxKey: 1}, _id: {$maxKey: "
+                              "1}}, shard: 'shard2' }"))};
+        const OID epoch = OID::gen();
+        std::vector<ChunkType> chunks;
+        for (const auto& chunkData : configData) {
+            const auto bson = chunkData.getDocument().toBson();
+            ChunkRange range{bson.getField("_id").Obj().getOwned(),
+                             bson.getField("max").Obj().getOwned()};
+            ShardId shard{std::string{bson.getField("shard").valueStringDataSafe()}};
+            chunks.emplace_back(uuid,
+                                std::move(range),
+                                ChunkVersion({epoch, Timestamp(1, 1)}, {1, 0}),
+                                std::move(shard));
+        }
+
+        auto rt = RoutingTableHistory::makeNew(nss,
+                                               uuid,
+                                               sk.getKeyPattern(),
+                                               false, /* unsplittable */
+                                               nullptr,
+                                               false,
+                                               epoch,
+                                               Timestamp(1, 1),
+                                               boost::none /* timeseriesFields */,
+                                               boost::none /* reshardingFields */,
+                                               false,
+                                               chunks);
+
+        return ChunkManager(
+            ShardingTestFixtureCommon::makeStandaloneRoutingTableHistory(std::move(rt)),
+            boost::none);
+    }
+
 protected:
     const NamespaceString _nss;
     std::vector<RemoteCommandTargeterMock*> _targeters;  // Targeters are owned by the factory.
@@ -209,6 +244,85 @@ TEST_F(EstablishCursorsTest, SingleRemoteRespondsWithSuccess) {
     future.default_timed_get();
 }
 
+TEST_F(EstablishCursorsTest, SingleRemoteRespondsWithInvalidMessage) {
+    BSONObj cmdObj = fromjson("{find: 'testcoll'}");
+    std::vector<AsyncRequestsSender::Request> remotes{{kTestShardIds[0], cmdObj}};
+
+    AsyncRequestsSender::ShardHostMap designatedHosts;
+    auto shard0Secondary = HostAndPort("SecondaryHostShard0", 12345);
+    _targeters[0]->setConnectionStringReturnValue(
+        ConnectionString::forReplicaSet("shard0_rs"_sd, {kTestShardHosts[0], shard0Secondary}));
+    designatedHosts[kTestShardIds[0]] = shard0Secondary;
+
+    // Intentionally throw an exception during validation.
+    FailPointEnableBlock failPoint("throwDuringCursorResponseValidation");
+
+    auto future = launchAsync([&] {
+        ASSERT_THROWS(establishCursors(operationContext(),
+                                       executor(),
+                                       _nss,
+                                       ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                       remotes,
+                                       false,  // allowPartialResults
+                                       nullptr /* RoutingContext */,
+                                       Shard::RetryPolicy::kIdempotent,
+                                       {},  // providedOpKeys
+                                       designatedHosts),
+                      ExceptionFor<ErrorCodes::FailedToParse>);
+    });
+
+    // Remote responds.
+    onCommand([this](const RemoteCommandRequest& request) {
+        ASSERT_EQ(_nss.coll(), request.cmdObj.firstElement().valueStringData());
+
+        std::vector<BSONObj> batch = {fromjson("{_id: 1}")};
+        CursorResponse cursorResponse(_nss, CursorId(123), batch);
+        return cursorResponse.toBSON(CursorResponse::ResponseType::InitialResponse);
+    });
+
+    future.default_timed_get();
+
+    // This ensures the fail point has been hit exactly once.
+    failPoint->waitForTimesEntered(failPoint.initialTimesEntered() + 1);
+}
+
+TEST_F(EstablishCursorsTest, SingleRemoteRespondsWithSuccessWithRoutingContext) {
+    BSONObj cmdObj = fromjson("{find: 'testcoll'}");
+    std::vector<AsyncRequestsSender::Request> remotes{{kTestShardIds[0], cmdObj}};
+
+    auto uuid = UUID::gen();
+    stdx::unordered_map<NamespaceString, CollectionRoutingInfo> criMap = {
+        {_nss,
+         CollectionRoutingInfo(
+             createChunkManager(uuid, _nss),
+             DatabaseTypeValueHandle(DatabaseType{
+                 _nss.dbName(), kTestShardIds[0], DatabaseVersion(uuid, Timestamp{1, 1})}))}};
+    auto routingCtx = RoutingContext::createSynthetic(criMap);
+
+    auto future = launchAsync([&] {
+        auto cursors = establishCursors(operationContext(),
+                                        executor(),
+                                        _nss,
+                                        ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                        remotes,
+                                        false /* allowPartialResults */,
+                                        routingCtx.get());
+        ASSERT_EQUALS(remotes.size(), cursors.size());
+        routingCtx->validateOnContextEnd();
+    });
+
+    // Remote responds.
+    onCommand([this](const RemoteCommandRequest& request) {
+        ASSERT_EQ(_nss.coll(), request.cmdObj.firstElement().valueStringData());
+
+        std::vector<BSONObj> batch = {fromjson("{_id: 1}"), fromjson("{_id: 2}")};
+        CursorResponse cursorResponse(_nss, CursorId(123), batch);
+        return cursorResponse.toBSON(CursorResponse::ResponseType::InitialResponse);
+    });
+
+    future.default_timed_get();
+}
+
 TEST_F(EstablishCursorsTest, SingleRemoteRespondsWithDesignatedHost) {
     BSONObj cmdObj = fromjson("{find: 'testcoll'}");
     std::vector<AsyncRequestsSender::Request> remotes{{kTestShardIds[0], cmdObj}};
@@ -225,6 +339,7 @@ TEST_F(EstablishCursorsTest, SingleRemoteRespondsWithDesignatedHost) {
                                         ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                                         remotes,
                                         false,  // allowPartialResults
+                                        nullptr /* RoutingContext */,
                                         Shard::RetryPolicy::kIdempotent,
                                         {},  // providedOpKeys
                                         designatedHosts);
@@ -552,15 +667,12 @@ TEST_F(EstablishCursorsTest, MultipleRemotesOneRemoteRespondsWithNonretriableErr
 
 TEST_F(EstablishCursorsTest, AcceptsCustomOpKeys) {
     std::vector<UUID> providedOpKeys = {UUID::gen(), UUID::gen()};
-    auto cmdObj0 = BSON("find"
-                        << "testcoll"
-                        << "clientOperationKey" << providedOpKeys[0]);
-    auto cmdObj1 = BSON("find"
-                        << "testcoll"
-                        << "clientOperationKey" << providedOpKeys[1]);
-    auto cmdObj2 = BSON("find"
-                        << "testcoll"
-                        << "clientOperationKey" << providedOpKeys[1]);
+    auto cmdObj0 = BSON("find" << "testcoll"
+                               << "clientOperationKey" << providedOpKeys[0]);
+    auto cmdObj1 = BSON("find" << "testcoll"
+                               << "clientOperationKey" << providedOpKeys[1]);
+    auto cmdObj2 = BSON("find" << "testcoll"
+                               << "clientOperationKey" << providedOpKeys[1]);
     std::vector<AsyncRequestsSender::Request> remotes{
         {kTestShardIds[0], cmdObj0}, {kTestShardIds[1], cmdObj1}, {kTestShardIds[2], cmdObj2}};
 
@@ -571,6 +683,7 @@ TEST_F(EstablishCursorsTest, AcceptsCustomOpKeys) {
                                        ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                                        remotes,
                                        false,  // allowPartialResults
+                                       nullptr /* RoutingContext */,
                                        Shard::RetryPolicy::kIdempotent,
                                        providedOpKeys),
                       ExceptionFor<ErrorCodes::FailedToParse>);

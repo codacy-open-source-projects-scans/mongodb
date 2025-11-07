@@ -27,12 +27,6 @@
  *    it in the license file.
  */
 #pragma once
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <string>
-#include <utility>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/sdam/sdam.h"
@@ -41,6 +35,13 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 class StreamableReplicaSetMonitorErrorHandler {
@@ -63,7 +64,7 @@ public:
                                              const Status& status,
                                              HandshakeStage handshakeStage,
                                              bool isApplicationOperation,
-                                             BSONObj bson) noexcept = 0;
+                                             BSONObj bson) = 0;
 
 protected:
     sdam::HelloOutcome _createErrorHelloOutcome(const HostAndPort& host,
@@ -75,13 +76,13 @@ protected:
 
 class SdamErrorHandler final : public StreamableReplicaSetMonitorErrorHandler {
 public:
-    explicit SdamErrorHandler(std::string setName) : _setName(std::move(setName)){};
+    explicit SdamErrorHandler(std::string setName) : _setName(std::move(setName)) {};
 
     ErrorActions computeErrorActions(const HostAndPort& host,
                                      const Status& status,
                                      HandshakeStage handshakeStage,
                                      bool isApplicationOperation,
-                                     BSONObj bson) noexcept override;
+                                     BSONObj bson) override;
 
 private:
     int _getConsecutiveErrorsWithoutHelloOutcome(const HostAndPort& host) const;

@@ -29,26 +29,24 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <memory>
-#include <set>
-#include <utility>
-#include <vector>
-
-#include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/read_preference.h"
+#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/s/async_requests_sender.h"
-#include "mongo/s/client/shard.h"
 #include "mongo/s/query/exec/async_results_merger_params_gen.h"
-#include "mongo/util/net/hostandport.h"
-#include "mongo/util/time_support.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <set>
+#include <vector>
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 
@@ -71,17 +69,25 @@ namespace mongo {
  * @param allowPartialResults: If true, unreachable hosts are ignored, and only cursors established
  *                             on reachable hosts are returned.
  *
+ * @param routingCtx: An interface that acquires cached routing tables at the start of a routing
+ *                    operation and provides accessors throughout the operation. If provided, we
+ *                    will mark that a request has successfully sent a request to the shards at the
+ *                    end of CursorEstablisher::sendRequests(), in order to validate the
+ *                    RoutingContext.
+ *
  * @param designatedHostsMap: A map of hosts to be targeted for particular shards, overriding
  *                            the read preference setting.
  *
+ * TODO SERVER-111290 Remove external dependencies on this method.
  */
-std::vector<RemoteCursor> establishCursors(
+MONGO_MOD_NEEDS_REPLACEMENT std::vector<RemoteCursor> establishCursors(
     OperationContext* opCtx,
     std::shared_ptr<executor::TaskExecutor> executor,
     const NamespaceString& nss,
     ReadPreferenceSetting readPref,
     const std::vector<AsyncRequestsSender::Request>& remotes,
     bool allowPartialResults,
+    RoutingContext* routingCtx = nullptr,
     Shard::RetryPolicy retryPolicy = Shard::RetryPolicy::kIdempotent,
     std::vector<OperationKey> providedOpKeys = {},
     AsyncRequestsSender::ShardHostMap designatedHostsMap = {});
@@ -99,6 +105,7 @@ std::vector<RemoteCursor> establishCursors(
  */
 std::vector<RemoteCursor> establishCursorsOnAllHosts(
     OperationContext* opCtx,
+    RoutingContext& routingCtx,
     std::shared_ptr<executor::TaskExecutor> executor,
     const NamespaceString& nss,
     const std::set<ShardId>& shardIds,
@@ -120,6 +127,6 @@ void killRemoteCursor(OperationContext* opCtx,
 /**
  * Appends the given operation key to the given request.
  */
-void appendOpKey(const OperationKey& opKey, BSONObjBuilder* cmdBuilder);
+MONGO_MOD_NEEDS_REPLACEMENT void appendOpKey(const OperationKey& opKey, BSONObjBuilder* cmdBuilder);
 
 }  // namespace mongo

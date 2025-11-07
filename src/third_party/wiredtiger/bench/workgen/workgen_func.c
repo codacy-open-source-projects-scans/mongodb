@@ -47,19 +47,19 @@ typedef struct workgen_random_state {
 uint32_t
 workgen_atomic_add32(uint32_t *vp, uint32_t v)
 {
-    return (__wt_atomic_add32(vp, v));
+    return (__wt_atomic_add_uint32(vp, v));
 }
 
 uint64_t
 workgen_atomic_add64(uint64_t *vp, uint64_t v)
 {
-    return (__wt_atomic_add64(vp, v));
+    return (__wt_atomic_add_uint64(vp, v));
 }
 
 uint32_t
 workgen_atomic_sub32(uint32_t *vp, uint32_t v)
 {
-    return (__wt_atomic_sub32(vp, v));
+    return (__wt_atomic_sub_uint32(vp, v));
 }
 
 void
@@ -75,7 +75,7 @@ workgen_epoch(struct timespec *tsp)
 }
 
 uint32_t
-workgen_random(workgen_random_state volatile *rnd_state)
+workgen_random(workgen_random_state *rnd_state)
 {
     return (__wt_random(&rnd_state->state));
 }
@@ -90,7 +90,7 @@ workgen_random_alloc(WT_SESSION *session, workgen_random_state **rnd_state)
         *rnd_state = NULL;
         return (ENOMEM);
     }
-    __wt_random_init_seed((WT_SESSION_IMPL *)session, &state->state);
+    __wt_random_init((WT_SESSION_IMPL *)session, &state->state);
     *rnd_state = state;
     return (0);
 }

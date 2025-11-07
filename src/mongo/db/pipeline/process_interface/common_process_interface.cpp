@@ -28,14 +28,7 @@
  */
 
 
-#include <boost/optional.hpp>
-#include <cstddef>
-#include <mutex>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/process_interface/common_process_interface.h"
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -44,32 +37,40 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/generic_argument_util.h"
-#include "mongo/db/list_collections_gen.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/global_catalog/router_role_api/router_role.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/local_catalog/ddl/list_collections_gen.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/operation_time_tracker.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/process_interface/common_process_interface.h"
 #include "mongo/db/query/client_cursor/generic_cursor_gen.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/router_role.h"
-#include "mongo/s/shard_key_pattern.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/serialization_context.h"
 #include "mongo/util/str.h"
+
+#include <cstddef>
+#include <mutex>
+
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
@@ -180,6 +181,12 @@ std::vector<BSONObj> CommonProcessInterface::getCurrentOps(
             if (auto planSummaryData = cursor.getPlanSummary()) {  // Not present on mongos.
                 cursorObj.append("planSummary", *planSummaryData);
             }
+            if (auto inUseTrackedMemBytes = cursor.getInUseTrackedMemBytes()) {
+                cursorObj.append("inUseTrackedMemBytes", *inUseTrackedMemBytes);
+            }
+            if (auto peakTrackedMemBytes = cursor.getPeakTrackedMemBytes()) {
+                cursorObj.append("peakTrackedMemBytes", *peakTrackedMemBytes);
+            }
 
             // Next, append the stripped-down version of the generic cursor. This will avoid
             // duplicating information reported at the top level.
@@ -206,20 +213,6 @@ std::vector<BSONObj> CommonProcessInterface::getCurrentOps(
     }
 
     return ops;
-}
-
-std::vector<FieldPath> CommonProcessInterface::collectDocumentKeyFieldsActingAsRouter(
-    OperationContext* opCtx, const NamespaceString& nss) const {
-    const auto criSW = Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss);
-    if (criSW.isOK() && criSW.getValue().cm.isSharded()) {
-        return shardKeyToDocumentKeyFields(
-            criSW.getValue().cm.getShardKeyPattern().getKeyPatternFields());
-    } else if (!criSW.isOK() && criSW.getStatus().code() != ErrorCodes::NamespaceNotFound) {
-        uassertStatusOK(criSW);
-    }
-
-    // We have no evidence this collection is sharded, so the document key is just _id.
-    return {"_id"};
 }
 
 void CommonProcessInterface::updateClientOperationTime(OperationContext* opCtx) const {
@@ -276,30 +269,34 @@ boost::optional<ShardId> CommonProcessInterface::findOwningShard(OperationContex
     if (shard_role_details::getLocker(opCtx)->isLocked()) {
         return boost::none;
     }
-    auto* grid = Grid::get(opCtx);
-    tassert(7958000, "Grid should be initialized", grid && grid->isInitialized());
 
-    return CommonProcessInterface::findOwningShard(opCtx, grid->catalogCache(), nss);
+    auto swRoutingCtx = getRoutingContext(opCtx, {nss});
+    if (swRoutingCtx.getStatus().code() == ErrorCodes::NamespaceNotFound) {
+        return boost::none;
+    }
+
+    // The RoutingContext is acquired and disposed of without validating the routing tables against
+    // a shard here because findOwningShard() is only used for distributed query planning
+    // optimizations; it doesn't affect query correctness.
+    uassertStatusOK(swRoutingCtx.getStatus());
+    auto& routingCtx = swRoutingCtx.getValue();
+    return CommonProcessInterface::findOwningShard(opCtx, *routingCtx, nss);
 }
 
 boost::optional<ShardId> CommonProcessInterface::findOwningShard(OperationContext* opCtx,
-                                                                 CatalogCache* catalogCache,
+                                                                 RoutingContext& routingCtx,
                                                                  const NamespaceString& nss) {
-    tassert(7958001, "CatalogCache should be initialized", catalogCache);
-    auto swCRI = catalogCache->getCollectionRoutingInfo(opCtx, nss);
-    if (swCRI.getStatus().code() == ErrorCodes::NamespaceNotFound) {
-        return boost::none;
-    }
-    auto [cm, _] = uassertStatusOK(swCRI);
+    const auto& cri = routingCtx.getCollectionRoutingInfo(nss);
 
-    if (cm.hasRoutingTable()) {
+    if (cri.hasRoutingTable()) {
+        const auto& cm = cri.getChunkManager();
         if (cm.isUnsplittable()) {
             return cm.getMinKeyShardIdWithSimpleCollation();
         } else {
             return boost::none;
         }
     } else {
-        return cm.dbPrimary();
+        return cri.getDbPrimaryShardId();
     }
     return boost::none;
 }
@@ -323,91 +320,99 @@ std::vector<DatabaseName> CommonProcessInterface::_getAllDatabasesOnAShardedClus
                    std::back_inserter(databases),
                    [](const DatabaseType& dbType) -> DatabaseName { return dbType.getDbName(); });
 
+    // Add internal databases.
+    databases.push_back(DatabaseName::kAdmin);
+    databases.push_back(DatabaseName::kConfig);
+
     return databases;
 }
 
 std::vector<BSONObj> CommonProcessInterface::_runListCollectionsCommandOnAShardedCluster(
-    OperationContext* opCtx, const NamespaceString& nss, bool addPrimaryShard) {
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const RunListCollectionsCommandOptions& opts) {
     tassert(9525809, "This method can only run on a sharded cluster", Grid::get(opCtx));
 
-    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
     const bool isCollectionless = nss.coll().empty();
-    return router.route(
-        opCtx,
-        "CommonMongodProcessInterface::_runListCollectionsCommandOnAShardedCluster",
-        [&](OperationContext* opCtx, const CachedDatabaseInfo& cdb) {
-            ListCollections listCollectionsCmd;
-            listCollectionsCmd.setDbName(nss.dbName());
-            if (!isCollectionless) {
-                listCollectionsCmd.setFilter(BSON("name" << nss.coll()));
-            }
 
-            listCollectionsCmd.setReadConcern(std::invoke([opCtx] {
-                const auto& readConcern = repl::ReadConcernArgs::get(opCtx);
-                tassert(9746001,
-                        str::stream() << "listCollections only allows 'local' read concern. Trying "
-                                         "to call it with '"
-                                      << repl::readConcernLevels::toString(readConcern.getLevel())
-                                      << "' read concern level.",
-                        readConcern.getLevel() == repl::ReadConcernLevel::kLocalReadConcern);
-                return readConcern;
-            }));
+    const auto appendPrimaryShardIfRequested = [&opts](const std::vector<BSONObj>& collections,
+                                                       const ShardId& primary) {
+        if (!opts.addPrimaryShard) {
+            return collections;
+        }
 
-            generic_argument_util::setDbVersionIfPresent(listCollectionsCmd, cdb->getVersion());
+        std::vector<BSONObj> collectionsWithPrimaryShard;
+        collectionsWithPrimaryShard.reserve(collections.size());
+        for (const BSONObj& bsonObj : collections) {
+            BSONObjBuilder bob(bsonObj.getOwned());
+            bob.append("primary", primary);
+            collectionsWithPrimaryShard.emplace_back(bob.obj());
+        }
+        return collectionsWithPrimaryShard;
+    };
 
-            const auto shard = uassertStatusOK(
-                Grid::get(opCtx)->shardRegistry()->getShard(opCtx, cdb->getPrimary()));
-            Shard::QueryResponse resultCollections;
+    const auto runListCollectionsFunc = [&](OperationContext* opCtx,
+                                            const CachedDatabaseInfo& cdb) {
+        ListCollections listCollectionsCmd;
+        listCollectionsCmd.setDbName(nss.dbName());
+        if (opts.rawData) {
+            listCollectionsCmd.setRawData(true);
+        }
+        if (!isCollectionless) {
+            listCollectionsCmd.setFilter(BSON("name" << nss.coll()));
+        }
 
-            try {
-                resultCollections = uassertStatusOK(shard->runExhaustiveCursorCommand(
-                    opCtx,
-                    ReadPreferenceSetting::get(opCtx),
-                    nss.dbName(),
-                    listCollectionsCmd.toBSON(),
-                    opCtx->hasDeadline() ? opCtx->getRemainingMaxTimeMillis() : Milliseconds(-1)));
-            } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
-                return std::vector<BSONObj>();
-            }
+        listCollectionsCmd.setReadConcern(std::invoke([opCtx] {
+            const auto& readConcern = repl::ReadConcernArgs::get(opCtx);
+            tassert(9746001,
+                    str::stream() << "listCollections only allows 'local' read concern. Trying "
+                                     "to call it with '"
+                                  << repl::readConcernLevels::toString(readConcern.getLevel())
+                                  << "' read concern level.",
+                    readConcern.getLevel() == repl::ReadConcernLevel::kLocalReadConcern);
+            return readConcern;
+        }));
 
-            auto addPrimaryField = [&cdb](BSONObj obj) {
-                BSONObjBuilder bob(obj.getOwned());
-                bob.append("primary", cdb->getPrimary());
-                return bob.obj();
-            };
+        generic_argument_util::setDbVersionIfPresent(listCollectionsCmd, cdb->getVersion());
 
-            if (isCollectionless) {
-                if (addPrimaryShard) {
-                    std::vector<BSONObj> collections;
-                    collections.reserve(resultCollections.docs.size());
-                    for (BSONObj& bsonObj : resultCollections.docs) {
-                        collections.emplace_back(addPrimaryField(bsonObj.getOwned()));
-                    }
-                    return collections;
-                }
-                return resultCollections.docs;
-            }
+        const auto shard =
+            uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, cdb->getPrimary()));
+        Shard::QueryResponse resultCollections;
 
-            for (BSONObj& bsonObj : resultCollections.docs) {
-                // Return the entire 'listCollections' response for the first element which matches
-                // on name.
-                const BSONElement nameElement = bsonObj["name"];
-                if (!nameElement || nameElement.valueStringDataSafe() != nss.coll()) {
-                    continue;
-                }
+        // Some collections (for example temp collections) only exist on the replica set primary so
+        // we may need to change the read preference to locate these.
+        const ReadPreferenceSetting readPreference = opts.runOnPrimary
+            ? ReadPreferenceSetting(ReadPreference::PrimaryOnly)
+            : ReadPreferenceSetting::get(opCtx);
 
-                return (addPrimaryShard ? std::vector<BSONObj>{addPrimaryField(bsonObj.getOwned())}
-                                        : std::vector<BSONObj>{bsonObj.getOwned()});
+        resultCollections = uassertStatusOK(shard->runExhaustiveCursorCommand(
+            opCtx,
+            readPreference,
+            nss.dbName(),
+            listCollectionsCmd.toBSON(),
+            opCtx->hasDeadline() ? opCtx->getRemainingMaxTimeMillis() : Milliseconds(-1)));
 
-                tassert(5983900,
-                        str::stream()
-                            << "Expected at most one collection with the name "
-                            << nss.toStringForErrorMsg() << ": " << resultCollections.docs.size(),
-                        resultCollections.docs.size() <= 1);
-            }
+        tassert(10898400,
+                str::stream() << "Expected at most one collection with the name "
+                              << nss.toStringForErrorMsg() << ": " << resultCollections.docs.size(),
+                isCollectionless || resultCollections.docs.size() <= 1);
 
-            return std::vector<BSONObj>();
-        });
+        return appendPrimaryShardIfRequested(resultCollections.docs, cdb->getPrimary());
+    };
+
+    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
+    try {
+        return router.route(
+            opCtx,
+            "CommonMongodProcessInterface::_runListCollectionsCommandOnAShardedCluster",
+            runListCollectionsFunc);
+    } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
+        // The listCollections command returns a success status with an empty list when the given
+        // database doesn't exist. Therefore, we must replicate the same behavior here by ignoring
+        // the NamespaceNotFound error that may be thrown during the DBPrimaryRouter::route()
+        // initialization.
+        return std::vector<BSONObj>();
+    }
 }
 
 }  // namespace mongo

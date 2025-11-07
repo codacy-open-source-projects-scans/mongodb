@@ -29,12 +29,9 @@
 
 #pragma once
 
-#include <functional>
-#include <memory>
-#include <string>
-
 #include "mongo/base/status_with.h"
 #include "mongo/config.h"
+#include "mongo/db/ftdc/rolling_stats.h"
 #include "mongo/db/server_options.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
@@ -43,24 +40,17 @@
 #include "mongo/transport/transport_layer.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/hierarchical_acquisition.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/net/ssl_types.h"
 
-namespace asio {
-class io_context;
+#include <functional>
+#include <memory>
+#include <string>
 
-template <typename Protocol>
-class basic_socket_acceptor;
-
-namespace generic {
-class stream_protocol;
-}  // namespace generic
-
-namespace ssl {
-class context;
-}  // namespace ssl
-}  // namespace asio
+#include <asio/basic_socket_acceptor.hpp>
+#include <asio/generic/stream_protocol.hpp>
 
 namespace mongo {
 
@@ -86,7 +76,7 @@ class AsioSession;
 /**
  * A TransportLayer implementation based on ASIO networking primitives.
  */
-class AsioTransportLayer final : public TransportLayer {
+class MONGO_MOD_NEEDS_REPLACEMENT AsioTransportLayer final : public TransportLayer {
     AsioTransportLayer(const AsioTransportLayer&) = delete;
     AsioTransportLayer& operator=(const AsioTransportLayer&) = delete;
 
@@ -114,7 +104,6 @@ public:
 
         int port = ServerGlobalParams::DefaultDBPort;  // port to bind to
         boost::optional<int> loadBalancerPort;         // accepts load balancer connections
-        boost::optional<int> routerPort;               // an optional port for accepting connections
         std::vector<std::string> ipList;               // addresses to bind to
 #ifndef _WIN32
         bool useUnixSockets = true;  // whether to allow UNIX sockets in ipList
@@ -247,14 +236,6 @@ public:
         return _listenerOptions.isEgress();
     }
 
-    /**
-     * Returns the router listening port, if set. This is set and used to separate router from
-     * shard-server traffic when a server acts as both a router and a shard-server.
-     */
-    boost::optional<int> routerPort() const {
-        return _listenerOptions.routerPort;
-    }
-
     std::vector<std::pair<SockAddr, int>> getListenerSocketBacklogQueueDepths() const;
 
 #ifdef __linux__
@@ -282,6 +263,9 @@ public:
 #endif
 
 private:
+    // Tokens help with tracking the number of pending proxy sessions.
+    using TokenType = ScopeGuard<std::function<void()>>;
+
     void _acceptConnection(GenericAcceptor& acceptor);
 
     template <typename Endpoint>
@@ -296,9 +280,13 @@ private:
         SSLParams::SSLModes sslMode,
         bool asyncOCSPStaple) const;
 
-    void _runListener() noexcept;
+    // Returns a token to track the number of connections pending the proxy protocol header. If the
+    // server has already accepted too many of such connections, returns `nullptr`.
+    std::unique_ptr<TokenType> _makeParseProxyTokenIfPossible();
 
-    void _trySetListenerSocketBacklogQueueDepth(GenericAcceptor& acceptor) noexcept;
+    void _runListener();
+
+    void _trySetListenerSocketBacklogQueueDepth(GenericAcceptor& acceptor);
 
     stdx::mutex _mutex;
     void stopAcceptingSessionsWithLock(stdx::unique_lock<stdx::mutex> lk);
@@ -363,13 +351,28 @@ private:
     // The real incoming port in case of _listenerOptions.port==0 (ephemeral).
     int _listenerPort = 0;
 
-    bool _isShutdown = false;
+    Atomic<bool> _isShutdown{false};
 
     const std::unique_ptr<TimerService> _timerService;
 
     // Tracks the cumulative time the listener spends between accepting incoming connections to
     // handing them off to dedicated connection threads.
     AtomicWord<Microseconds> _listenerProcessingTime;
+
+    // Tracks the number of connections that are dropped by the client before the server gets to
+    // process them (e.g. perform TLS handshake).
+    Counter64 _discardedDueToClientDisconnect;
+
+    // Tracks the current number of sessions that were accepted from the proxy port and are pending
+    // the proxy protocol header.
+    int64_t _numConnectionsPendingProxyHeader{0};
+
+    // Counts the aggregate number of proxy connections that were dropped due to the server reaching
+    // the maximum number of proxy connections pending proxy protocol header.
+    Counter64 _discardedDueToMaximumPendingOnProxyHeader;
+
+    // Statistics on dns resolution latency in milliseconds.
+    RollingStats _dnsResolveStatsMillis;
 };
 
 }  // namespace transport

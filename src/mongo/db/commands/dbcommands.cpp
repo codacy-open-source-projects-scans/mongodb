@@ -27,18 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/optional.hpp>
-#include <memory>
-#include <mutex>
-#include <set>
-#include <string>
-#include <type_traits>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -50,44 +38,45 @@
 #include "mongo/db/auth/authorization_checks.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/drop_collection.h"
-#include "mongo/db/catalog/drop_database.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
-#include "mongo/db/coll_mod_gen.h"
-#include "mongo/db/coll_mod_reply_validation.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/buildinfo_common.h"
 #include "mongo/db/commands/test_commands_enabled.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/dbcommands_gen.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/drop_database_gen.h"
-#include "mongo/db/drop_gen.h"
+#include "mongo/db/global_catalog/ddl/shard_key_index_util.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/type_collection.h"
 #include "mongo/db/keypattern.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/coll_mod.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/ddl/coll_mod_gen.h"
+#include "mongo/db/local_catalog/ddl/coll_mod_reply_validation.h"
+#include "mongo/db/local_catalog/ddl/drop_database_gen.h"
+#include "mongo/db/local_catalog/ddl/drop_gen.h"
+#include "mongo/db/local_catalog/ddl/replica_set_ddl_tracker.h"
+#include "mongo/db/local_catalog/drop_collection.h"
+#include "mongo/db/local_catalog/drop_database.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/db/query/explain_verbosity_gen.h"
-#include "mongo/db/query/index_bounds.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/request_execution_context.h"
-#include "mongo/db/s/shard_key_index_util.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/stats/storage_stats.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
@@ -95,18 +84,12 @@
 #include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/timeseries/timeseries_collmod.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/executor/async_request_executor.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_builder_interface.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/shard_key_pattern.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/buildinfo.h"
 #include "mongo/util/debug_util.h"
@@ -117,6 +100,18 @@
 #include "mongo/util/serialization_context.h"
 #include "mongo/util/str.h"
 #include "mongo/util/timer.h"
+
+#include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <type_traits>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -157,6 +152,9 @@ public:
                         ->isAuthorizedForActionsOnNamespace(ns(), ActionType::dropDatabase));
         }
         Reply typedRun(OperationContext* opCtx) final {
+            ReplicaSetDDLTracker::ScopedReplicaSetDDL scopedReplicaSetDDL(
+                opCtx, std::vector<NamespaceString>{ns()});
+
             auto dbName = request().getDbName();
             // disallow dropping the config database
             if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) &&
@@ -229,6 +227,9 @@ public:
                         ->isAuthorizedForActionsOnNamespace(ns, ActionType::dropCollection));
         }
         Reply typedRun(OperationContext* opCtx) final {
+            ReplicaSetDDLTracker::ScopedReplicaSetDDL scopedReplicaSetDDL(
+                opCtx, std::vector<NamespaceString>{ns()});
+
             if (request().getNamespace().isOplog()) {
                 uassert(5255000,
                         "can't drop live oplog while replicating",
@@ -307,10 +308,13 @@ public:
 
             Reply reply;
 
-            AutoGetCollectionForReadCommand autoColl(opCtx, nss);
-            const auto& collection = autoColl.getCollection();
+            const auto collection =
+                acquireCollection(opCtx,
+                                  CollectionAcquisitionRequest::fromOpCtx(
+                                      opCtx, nss, AcquisitionPrerequisites::kRead),
+                                  MODE_IS);
 
-            if (!collection) {
+            if (!collection.exists()) {
                 // Collection does not exist
                 reply.setNumObjects(0);
                 reply.setSize(0);
@@ -318,8 +322,9 @@ public:
                 return reply;
             }
 
-            if (collection.isSharded_DEPRECATED()) {
-                const auto& shardKeyPattern = collection.getShardKeyPattern();
+            const auto& collectionShardingDescription = collection.getShardingDescription();
+            if (collectionShardingDescription.isSharded()) {
+                const auto& shardKeyPattern = collectionShardingDescription.getShardKeyPattern();
                 uassert(ErrorCodes::BadValue,
                         "keyPattern must be empty or must be an object that equals the shard key",
                         keyPattern.isEmpty() ||
@@ -337,7 +342,7 @@ public:
                 max = shardKeyPattern.normalizeShardKey(max);
             }
 
-            const long long numRecords = collection->numRecords(opCtx);
+            const long long numRecords = collection.getCollectionPtr()->numRecords(opCtx);
             reply.setNumObjects(numRecords);
 
             if (numRecords == 0) {
@@ -356,12 +361,13 @@ public:
             std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec;
             if (min.isEmpty() && max.isEmpty()) {
                 if (estimate) {
-                    reply.setSize(static_cast<long long>(collection->dataSize(opCtx)));
+                    reply.setSize(
+                        static_cast<long long>(collection.getCollectionPtr()->dataSize(opCtx)));
                     reply.setMillis(timer.millis());
                     return reply;
                 }
                 exec = InternalPlanner::collectionScan(
-                    opCtx, &collection, PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
+                    opCtx, collection, PlanYieldPolicy::YieldPolicy::YIELD_AUTO);
             } else {
                 if (keyPattern.isEmpty()) {
                     // if keyPattern not provided, try to infer it from the fields in 'min'
@@ -369,7 +375,7 @@ public:
                 }
 
                 const auto shardKeyIdx = findShardKeyPrefixedIndex(opCtx,
-                                                                   collection,
+                                                                   collection.getCollectionPtr(),
                                                                    keyPattern,
                                                                    /*requireSingleKey=*/true);
 
@@ -383,7 +389,7 @@ public:
                 max = Helpers::toKeyFormat(kp.extendRangeBound(max, false));
 
                 exec = InternalPlanner::shardKeyIndexScan(opCtx,
-                                                          &collection,
+                                                          collection,
                                                           *shardKeyIdx,
                                                           min,
                                                           max,
@@ -400,7 +406,7 @@ public:
 
             std::remove_const_t<decltype(maxSize)> size = 0;
             std::remove_const_t<decltype(size)> avgObjSize =
-                collection->dataSize(opCtx) / numRecords;
+                collection.getCollectionPtr()->dataSize(opCtx) / numRecords;
             std::remove_const_t<decltype(maxObjects)> numObjects = 0;
 
             try {
@@ -410,7 +416,11 @@ public:
                     if (estimate) {
                         size += avgObjSize;
                     } else {
-                        size += collection->getRecordStore()->dataFor(opCtx, loc).size();
+                        size +=
+                            collection.getCollectionPtr()
+                                ->getRecordStore()
+                                ->dataFor(opCtx, *shard_role_details::getRecoveryUnit(opCtx), loc)
+                                .size();
                     }
 
                     ++numObjects;
@@ -442,7 +452,7 @@ public:
     }
 
     std::string help() const final {
-        return Request::kCommandDescription.toString();
+        return std::string{Request::kCommandDescription};
     }
 };
 MONGO_REGISTER_COMMAND(CmdDataSize).forShard();
@@ -464,7 +474,7 @@ public:
     }
 
     std::string help() const final {
-        return Request::kCommandDescription.toString();
+        return std::string{Request::kCommandDescription};
     }
 
     bool allowedWithSecurityToken() const final {
@@ -525,130 +535,6 @@ public:
 };
 MONGO_REGISTER_COMMAND(CmdCollStats).forShard();
 
-class CollectionModCommand : public TypedCommand<CollectionModCommand> {
-public:
-    using Request = CollMod;
-    using Reply = CollModReply;
-
-    const std::set<std::string>& apiVersions() const override {
-        return kApiVersions1;
-    }
-
-    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
-        return AllowedOnSecondary::kNever;
-    }
-
-    bool allowedWithSecurityToken() const final {
-        return true;
-    }
-
-    bool collectsResourceConsumptionMetrics() const override {
-        return true;
-    }
-
-    std::string help() const override {
-        return "Sets collection options.\n"
-               "Example: { collMod: 'foo', viewOn: 'bar'} "
-               "Example: { collMod: 'foo', index: {keyPattern: {a: 1}, expireAfterSeconds: 600} "
-               "Example: { collMod: 'foo', index: {name: 'bar', expireAfterSeconds: 600} }\n";
-    }
-
-    const AuthorizationContract* getAuthorizationContract() const final {
-        return &Request::kAuthorizationContract;
-    }
-
-    class Invocation final : public MinimalInvocationBase {
-    public:
-        using MinimalInvocationBase::MinimalInvocationBase;
-        bool supportsWriteConcern() const override {
-            return true;
-        }
-
-        NamespaceString ns() const final {
-            return request().getNamespace();
-        }
-
-        bool isSubjectToIngressAdmissionControl() const override {
-            return true;
-        }
-
-        void doCheckAuthorization(OperationContext* opCtx) const override {
-            uassertStatusOK(auth::checkAuthForCollMod(opCtx,
-                                                      AuthorizationSession::get(opCtx->getClient()),
-                                                      request().getNamespace(),
-                                                      unparsedRequest().body,
-                                                      false,
-                                                      request().getSerializationContext()));
-        }
-
-        void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* reply) final {
-            const auto& cmd = request();
-            const auto& nss = request().getNamespace();
-            // Targeting the underlying buckets collection directly would make the time-series
-            // Collection out of sync with the time-series view document. Additionally, we want to
-            // ultimately obscure/hide the underlying buckets collection from the user, so we're
-            // disallowing targetting it.
-            uassert(ErrorCodes::InvalidNamespace,
-                    "collMod on a time-series collection's underlying buckets collection is not "
-                    "supported.",
-                    !nss.isTimeseriesBucketsCollection());
-
-
-            // Updating granularity on sharded time-series collections is not allowed.
-            auto catalogClient =
-                Grid::get(opCtx)->isInitialized() ? Grid::get(opCtx)->catalogClient() : nullptr;
-            if (catalogClient && cmd.getTimeseries() && cmd.getTimeseries()->getGranularity()) {
-                auto bucketNss = nss.isTimeseriesBucketsCollection()
-                    ? nss
-                    : nss.makeTimeseriesBucketsNamespace();
-                try {
-                    auto coll = catalogClient->getCollection(opCtx, bucketNss);
-                    uassert(ErrorCodes::NotImplemented,
-                            str::stream()
-                                << "Cannot update granularity of a sharded time-series collection.",
-                            !coll.getTimeseriesFields());
-                } catch (const ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
-                    // Collection is not sharded, skip check.
-                }
-            }
-
-            if (cmd.getValidator() || cmd.getValidationLevel() || cmd.getValidationAction()) {
-                // Check for config.settings in the user command since a validator is allowed
-                // internally on this collection but the user may not modify the validator.
-                uassert(ErrorCodes::InvalidOptions,
-                        str::stream() << "Document validators not allowed on system collection "
-                                      << nss.toStringForErrorMsg(),
-                        nss != NamespaceString::kConfigSettingsNamespace);
-            }
-            if (cmd.getValidationAction() == ValidationActionEnum::errorAndLog) {
-                uassert(
-                    ErrorCodes::InvalidOptions,
-                    "Validation action 'errorAndLog' is not supported with current FCV",
-                    gFeatureFlagErrorAndLogValidationAction.isEnabledUseLastLTSFCVWhenUninitialized(
-                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
-            }
-
-            // We do not use the serialization context for reply object serialization as the reply
-            // object doesn't contain any nss or dbName structures.
-            auto result = reply->getBodyBuilder();
-            uassertStatusOK(timeseries::processCollModCommandWithTimeSeriesTranslation(
-                opCtx, nss, cmd, true, &result));
-
-            // Only validate results in test mode so that we don't expose users to errors if we
-            // construct an invalid reply.
-            if (getTestCommandsEnabled()) {
-                validateResult(result.asTempObj());
-            }
-        }
-
-        void validateResult(const BSONObj& resultObj) {
-            auto reply = Reply::parse(IDLParserContext("CollModReply"), resultObj);
-            coll_mod_reply_validation::validateReply(reply);
-        }
-    };
-};
-MONGO_REGISTER_COMMAND(CollectionModCommand).forShard();
-
 class CmdDbStats final : public TypedCommand<CmdDbStats> {
 public:
     using Request = DBStatsCommand;
@@ -690,8 +576,10 @@ public:
             const auto& cmd = request();
             const auto& dbname = cmd.getDbName();
 
-            uassert(
-                ErrorCodes::BadValue, "Scale factor must be greater than zero", cmd.getScale() > 0);
+            // Scale factors valid range (0...2^50] (up to a petabyte)
+            uassert(ErrorCodes::BadValue,
+                    "Scale factor must be greater than zero and less than or equal to 2^50",
+                    cmd.getScale() > 0 && cmd.getScale() <= (1ll << 50));
 
             uassert(ErrorCodes::InvalidNamespace,
                     str::stream() << "Invalid db name: " << dbname.toStringForErrorMsg(),
@@ -763,7 +651,7 @@ public:
     }
 
     std::string help() const final {
-        return Request::kCommandDescription.toString();
+        return std::string{Request::kCommandDescription};
     }
 };
 MONGO_REGISTER_COMMAND(CmdDbStats).forShard();

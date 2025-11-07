@@ -29,22 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <js/AllocPolicy.h>
-#include <js/CallArgs.h>
-#include <js/GCVector.h>
-#include <js/Id.h>
-#include <js/Object.h>
-#include <js/PropertyAndElement.h>
-#include <js/RootingAPI.h>
-#include <js/TypeDecls.h>
-#include <js/ValueArray.h>
-#include <jsapi.h>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -59,6 +43,25 @@
 #include "mongo/scripting/mozjs/internedstring.h"
 #include "mongo/scripting/mozjs/jsstringwrapper.h"
 #include "mongo/scripting/mozjs/lifetimestack.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <string>
+
+#include <jsapi.h>
+
+#include <boost/optional/optional.hpp>
+#include <js/AllocPolicy.h>
+#include <js/CallArgs.h>
+#include <js/GCVector.h>
+#include <js/Id.h>
+#include <js/Object.h>
+#include <js/PropertyAndElement.h>
+#include <js/RootingAPI.h>
+#include <js/TypeDecls.h>
+#include <js/ValueArray.h>
 
 namespace mongo {
 
@@ -77,7 +80,7 @@ class ValueWriter;
  * This wraps a RootedObject, so should only be allocated on the stack and is
  * not movable or copyable
  */
-class ObjectWrapper {
+class MONGO_MOD_PUB ObjectWrapper {
     friend class ValueWriter;
 
 public:

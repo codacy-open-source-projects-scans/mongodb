@@ -29,16 +29,10 @@
 
 #pragma once
 
-#include <cstdint>
-#include <string>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
@@ -47,6 +41,12 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/util/uuid.h"
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -89,20 +89,23 @@ public:
                   const OplogDeleteEntryArgs& args,
                   OpStateAccumulator* opAccumulator = nullptr) final;
 
-    void onCreateCollection(OperationContext* opCtx,
-                            const CollectionPtr& coll,
-                            const NamespaceString& collectionName,
-                            const CollectionOptions& options,
-                            const BSONObj& idIndex,
-                            const OplogSlot& createOpTime,
-                            bool fromMigrate) final;
+    void onCreateCollection(
+        OperationContext* opCtx,
+        const NamespaceString& collectionName,
+        const CollectionOptions& options,
+        const BSONObj& idIndex,
+        const OplogSlot& createOpTime,
+        const boost::optional<CreateCollCatalogIdentifier>& createCollCatalogIdentifier,
+        bool fromMigrate,
+        bool isTimeseries) final;
 
     void onCollMod(OperationContext* opCtx,
                    const NamespaceString& nss,
                    const UUID& uuid,
                    const BSONObj& collModCmd,
                    const CollectionOptions& oldCollOptions,
-                   boost::optional<IndexCollModInfo> indexInfo) final;
+                   boost::optional<IndexCollModInfo> indexInfo,
+                   bool isTimeseries) final;
 
     void onDropDatabase(OperationContext* opCtx,
                         const DatabaseName& dbName,
@@ -112,13 +115,15 @@ public:
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
-                                  bool markFromMigrate) final;
+                                  bool markFromMigrate,
+                                  bool isTimeseries) final;
 
     void onDropIndex(OperationContext* opCtx,
                      const NamespaceString& nss,
                      const UUID& uuid,
                      const std::string& indexName,
-                     const BSONObj& indexInfo) final;
+                     const BSONObj& indexInfo,
+                     bool isTimeseries) final;
 
     void onRenameCollection(OperationContext* opCtx,
                             const NamespaceString& fromCollection,
@@ -127,7 +132,8 @@ public:
                             const boost::optional<UUID>& dropTargetUUID,
                             std::uint64_t numRecords,
                             bool stayTemp,
-                            bool markFromMigrate) final;
+                            bool markFromMigrate,
+                            bool isTimeseries) final;
 
     void onImportCollection(OperationContext* opCtx,
                             const UUID& importUUID,
@@ -136,7 +142,8 @@ public:
                             long long dataSize,
                             const BSONObj& catalogEntry,
                             const BSONObj& storageMetadata,
-                            bool isDryRun) final;
+                            bool isDryRun,
+                            bool isTimeseries) final;
 
     void postRenameCollection(OperationContext* opCtx,
                               const NamespaceString& fromCollection,

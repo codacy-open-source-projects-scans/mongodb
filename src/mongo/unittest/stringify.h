@@ -29,11 +29,14 @@
 
 #pragma once
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/stdx/type_traits.h"
+#include "mongo/util/optional_util.h"
+
 #include <algorithm>
 #include <array>
-#include <boost/optional.hpp>
 #include <cstddef>
-#include <fmt/format.h>
 #include <iterator>
 #include <memory>
 #include <optional>
@@ -44,10 +47,8 @@
 #include <typeinfo>
 #include <utility>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
-#include "mongo/stdx/type_traits.h"
-#include "mongo/util/optional_util.h"
+#include <boost/optional.hpp>
+#include <fmt/format.h>
 
 /**
  * Mechanisms and extensibility hooks used by this library to format arbitrary
@@ -64,7 +65,7 @@ std::string lastResortFormat(const std::type_info& ti, const void* p, size_t sz)
 
 template <typename T>
 std::string doFormat(const T& x) {
-    return format(FMT_STRING("{}"), x);
+    return fmt::format("{}", x);
 }
 
 template <typename T>
@@ -98,7 +99,7 @@ public:
     template <typename T>
     Joiner& operator()(const T& v) {
         // `stringify::` qualification necessary to disable ADL on `v`.
-        _out += format(FMT_STRING("{}{}"), _sep, stringify::invoke(v));
+        _out += fmt::format("{}{}", _sep, stringify::invoke(v));
         _sep = ", ";
         return *this;
     }
@@ -113,18 +114,17 @@ private:
 
 template <typename T>
 std::string doSequence(const T& seq) {
-    std::string r;
     Joiner joiner;
     for (const auto& e : seq)
         joiner(e);
-    return format(FMT_STRING("[{}]"), std::string{joiner});
+    return fmt::format("[{}]", std::string{joiner});
 }
 
 template <typename T, size_t... Is>
 std::string doTuple(const T& tup, std::index_sequence<Is...>) {
     Joiner joiner;
     (joiner(std::get<Is>(tup)), ...);
-    return format(FMT_STRING("({})"), std::string{joiner});
+    return fmt::format("({})", std::string{joiner});
 }
 
 template <typename T>
@@ -134,18 +134,18 @@ std::string doTuple(const T& tup) {
 
 /**
  * The only definitions in this namespace are some "built-in" overloads of
- * `stringifyForAssert`. It defines no types, so ADL will not find it. A
+ * `stringify_forTest`. It defines no types, so ADL will not find it. A
  * `stringify::invoke` call will consider these in the overload set along with
  * any overloads found by ADL on the argument.
  */
 namespace adl_barrier {
 /**
- * The default `stringifyForAssert` implementation.
+ * The default `stringify_forTest` implementation.
  * Encodes the steps by which we determine how to print an object.
  * There's a wildcard branch so everything is printable in some way.
  */
 template <typename T>
-std::string stringifyForAssert(const T& x) {
+std::string stringify_forTest(const T& x) {
     if constexpr (optional_io::canStreamWithExtension<T>) {
         return doOstream(optional_io::Extension{x});
     } else if constexpr (HasToString<T>) {
@@ -166,12 +166,12 @@ std::string stringifyForAssert(const T& x) {
 }
 
 /** Portably support stringifying `nullptr`. */
-inline std::string stringifyForAssert(std::nullptr_t) {
+inline std::string stringify_forTest(std::nullptr_t) {
     return "nullptr";
 }
 
 /** Built-in support to stringify `ErrorCode::Error`. */
-inline std::string stringifyForAssert(ErrorCodes::Error ec) {
+inline std::string stringify_forTest(ErrorCodes::Error ec) {
     return ErrorCodes::errorString(ec);
 }
 }  // namespace adl_barrier
@@ -179,20 +179,20 @@ inline std::string stringifyForAssert(ErrorCodes::Error ec) {
 /**
  * The entry point for the `unittest::stringify` system, this is
  * called to produce a string representation of an arbitrary value
- * `x` through the `stringifyForAssert` extension hook.
+ * `x` through the `stringify_forTest` extension hook.
  *
- * An overload for `stringifyForAssert` is selected from a few
+ * An overload for `stringify_forTest` is selected from a few
  * "built-in" overloads, and then from any that are found in
  * namespaces associated with `x` via argument-dependent lookup.
  *
- * The `stringifyForAssert` name is an ADL extension point for
+ * The `stringify_forTest` name is an ADL extension point for
  * user-defined types, and should not be invoked directly.  Call
  * `stringify::invoke` instead.
  */
 template <typename T>
 std::string invoke(const T& x) {
-    using adl_barrier::stringifyForAssert;
-    return stringifyForAssert(x);
+    using adl_barrier::stringify_forTest;
+    return stringify_forTest(x);
 }
 
 }  // namespace mongo::unittest::stringify

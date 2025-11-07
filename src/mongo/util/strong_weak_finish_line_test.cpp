@@ -27,12 +27,12 @@
  *    it in the license file.
  */
 
-#include <memory>
+#include "mongo/util/strong_weak_finish_line.h"
 
 #include "mongo/base/string_data.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/strong_weak_finish_line.h"
+#include "mongo/unittest/unittest.h"
+
+#include <memory>
 
 namespace mongo {
 namespace {

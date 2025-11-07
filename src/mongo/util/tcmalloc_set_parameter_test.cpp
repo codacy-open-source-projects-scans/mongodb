@@ -27,17 +27,17 @@
  *    it in the license file.
  */
 
+#include "mongo/util/tcmalloc_set_parameter.h"
+
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/config.h"
-#include "mongo/db/commands/server_status.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/db/commands/server_status/server_status.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/tcmalloc_parameters_gen.h"
-#include "mongo/util/tcmalloc_set_parameter.h"
 
 #ifdef MONGO_CONFIG_TCMALLOC_GOOGLE
 #include <tcmalloc/malloc_extension.h>

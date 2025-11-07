@@ -38,11 +38,8 @@ namespace mongo {
  */
 class StorageEngineMock : public StorageEngine {
 public:
-    RecoveryUnit* newRecoveryUnit() final {
+    std::unique_ptr<RecoveryUnit> newRecoveryUnit() final {
         return nullptr;
-    }
-    std::vector<DatabaseName> listDatabases(boost::optional<TenantId> tenantId) const final {
-        return {};
     }
     bool supportsCappedCollections() const final {
         return true;
@@ -53,19 +50,8 @@ public:
     bool isEphemeral() const override {
         return true;
     }
-    void loadCatalog(OperationContext* opCtx,
-                     boost::optional<Timestamp> stableTs,
-                     LastShutdownState lastShutdownState) final {}
-    void closeCatalog(OperationContext* opCtx) final {}
-    Status dropDatabase(OperationContext* opCtx, const DatabaseName& dbName) final {
-        return Status::OK();
-    }
-    Status dropCollectionsWithPrefix(OperationContext* opCtx,
-                                     const DatabaseName& dbName,
-                                     const std::string& collectionNamePrefix) final {
-        return Status(ErrorCodes::CommandNotSupported,
-                      "The current storage engine doesn't support dropCollections");
-    }
+    void loadMDBCatalog(OperationContext* opCtx, LastShutdownState lastShutdownState) final {}
+    void closeMDBCatalog(OperationContext* opCtx) final {}
     void flushAllFiles(OperationContext* opCtx, bool callerHoldsReadLock) final {}
     Status beginBackup() final {
         return Status(ErrorCodes::CommandNotSupported,
@@ -75,6 +61,12 @@ public:
     Status disableIncrementalBackup() override {
         return Status(ErrorCodes::CommandNotSupported,
                       "The current storage engine doesn't support backup mode");
+    }
+    Timestamp getBackupCheckpointTimestamp() override {
+        return Timestamp(0, 0);
+    }
+    BSONObj getStatus(OperationContext* opCtx) const override {
+        return {};
     }
     StatusWith<std::unique_ptr<StorageEngine::StreamingCursor>> beginNonBlockingBackup(
         const StorageEngine::BackupOptions& options) final {
@@ -91,7 +83,17 @@ public:
                              const NamespaceString& ns) final {
         return Status::OK();
     }
+    std::unique_ptr<SpillTable> makeSpillTable(OperationContext* opCtx,
+                                               KeyFormat keyFormat,
+                                               int64_t thresholdBytes) final {
+
+        return {};
+    }
+
+    void dropSpillTable(RecoveryUnit& ru, StringData ident) final {};
+
     std::unique_ptr<TemporaryRecordStore> makeTemporaryRecordStore(OperationContext* opCtx,
+                                                                   StringData ident,
                                                                    KeyFormat keyFormat) final {
         return {};
     }
@@ -103,7 +105,7 @@ public:
         OperationContext* opCtx, StringData ident, KeyFormat keyFormat) final {
         return {};
     }
-    void cleanShutdown(ServiceContext* svcCtx) final {}
+    void cleanShutdown(ServiceContext* svcCtx, bool memLeakAllowed) final {}
     SnapshotManager* getSnapshotManager() const final {
         return nullptr;
     }
@@ -117,10 +119,9 @@ public:
     bool supportsReadConcernSnapshot() const final {
         return false;
     }
-    bool supportsOplogTruncateMarkers() const final {
-        return false;
+    Status immediatelyCompletePendingDrop(OperationContext* opCtx, StringData ident) final {
+        return Status::OK();
     }
-    void clearDropPendingState(OperationContext* opCtx) final {}
     StatusWith<Timestamp> recoverToStableTimestamp(OperationContext* opCtx) final {
         fassertFailed(40547);
     }
@@ -130,7 +131,14 @@ public:
     boost::optional<Timestamp> getLastStableRecoveryTimestamp() const final {
         MONGO_UNREACHABLE;
     }
-    void setStableTimestamp(Timestamp stableTimestamp, bool force = false) final {}
+
+    void setLastMaterializedLsn(uint64_t lsn) final {}
+
+    void setRecoveryCheckpointMetadata(StringData checkpointMetadata) final {}
+
+    void promoteToLeader() final {}
+
+    void setStableTimestamp(Timestamp stableTimestamp, bool force = false) override {}
     Timestamp getStableTimestamp() const override {
         return Timestamp();
     }
@@ -146,10 +154,6 @@ public:
     void setOldestActiveTransactionTimestampCallback(
         OldestActiveTransactionTimestampCallback callback) final {}
 
-    StatusWith<StorageEngine::ReconcileResult> reconcileCatalogAndIdents(
-        OperationContext* opCtx, Timestamp stableTs, LastShutdownState lastShutdownState) final {
-        return ReconcileResult{};
-    }
     Timestamp getAllDurableTimestamp() const final {
         return {};
     }
@@ -162,21 +166,23 @@ public:
     std::string getFilesystemPathForDb(const DatabaseName& dbName) const final {
         return "";
     }
-    std::set<std::string> getDropPendingIdents() const final {
-        return {};
-    }
     size_t getNumDropPendingIdents() const final {
         return 0;
     }
-    void addDropPendingIdent(
-        const std::variant<Timestamp, StorageEngine::CheckpointIteration>& dropTime,
-        std::shared_ptr<Ident> ident,
-        DropIdentCallback&& onDrop) final {}
-    void dropIdentsOlderThan(OperationContext* opCtx, const Timestamp& ts) final {}
+    void dropIdent(RecoveryUnit& ru, StringData ident) final {}
+    void addDropPendingIdent(const DropTime& dropTime,
+                             std::shared_ptr<Ident> ident,
+                             DropIdentCallback&& onDrop) final {}
+    void dropUnknownIdent(RecoveryUnit& ru,
+                          const Timestamp& stableTimestamp,
+                          StringData ident) final {}
     std::shared_ptr<Ident> markIdentInUse(StringData ident) final {
         return nullptr;
     }
-    void startTimestampMonitor() final {}
+    void startTimestampMonitor(
+        std::initializer_list<TimestampMonitor::TimestampListener*> listeners) final {}
+    void stopTimestampMonitor() final {}
+    void restartTimestampMonitor() final {}
 
     void checkpoint() final {}
 
@@ -189,14 +195,28 @@ public:
         return false;
     }
 
-    int64_t sizeOnDiskForDb(OperationContext* opCtx, const DatabaseName& dbName) final {
+    std::string generateNewCollectionIdent(
+        const DatabaseName& dbName,
+        const boost::optional<StringData>& optIdentUniqueTag = boost::none) const final {
+        return "";
+    }
+    std::string generateNewIndexIdent(
+        const DatabaseName& dbName,
+        const boost::optional<StringData>& optIdentUniqueTag = boost::none) const final {
+        return "";
+    }
+    StringData getCollectionIdentUniqueTag(StringData ident,
+                                           const DatabaseName& dbName) const final {
+        return "";
+    };
+    StringData getIndexIdentUniqueTag(StringData ident, const DatabaseName& dbName) const final {
+        return "";
+    }
+    bool storesFilesInDbPath() const final {
+        return false;
+    }
+    int64_t getIdentSize(RecoveryUnit& ru, StringData ident) const final {
         return 0;
-    }
-    bool isUsingDirectoryPerDb() const final {
-        return false;
-    }
-    bool isUsingDirectoryForIndexes() const final {
-        return false;
     }
     KVEngine* getEngine() final {
         return nullptr;
@@ -204,10 +224,16 @@ public:
     const KVEngine* getEngine() const final {
         return nullptr;
     }
-    DurableCatalog* getCatalog() final {
+    KVEngine* getSpillEngine() override {
         return nullptr;
     }
-    const DurableCatalog* getCatalog() const final {
+    const KVEngine* getSpillEngine() const override {
+        return nullptr;
+    }
+    MDBCatalog* getMDBCatalog() final {
+        return nullptr;
+    }
+    const MDBCatalog* getMDBCatalog() const final {
         return nullptr;
     }
 
@@ -241,6 +267,17 @@ public:
         return true;
     }
 
+    BSONObj setFlagToStorageOptions(const BSONObj& storageEngineOptions,
+                                    StringData flagName,
+                                    boost::optional<bool> flagValue) const final {
+        return storageEngineOptions;
+    }
+
+    boost::optional<bool> getFlagFromStorageOptions(const BSONObj& storageEngineOptions,
+                                                    StringData flagName) const final {
+        return boost::none;
+    }
+
     BSONObj getSanitizedStorageOptionsForSecondaryReplication(const BSONObj& options) const final {
         return options;
     }
@@ -249,6 +286,10 @@ public:
 
     Status autoCompact(RecoveryUnit&, const AutoCompactOptions& options) final {
         return Status::OK();
+    }
+
+    bool hasOngoingLiveRestore() final {
+        return false;
     }
 };
 

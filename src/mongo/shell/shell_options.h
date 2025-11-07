@@ -29,13 +29,14 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/util/duration.h"
+
+#include <string>
+#include <vector>
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 
@@ -51,20 +52,25 @@ namespace moe = mongo::optionenvironment;
  * field in shell_options.idl which the generated option parser requires assignment operator for the
  * field to work but AtomicWord<T> does not support assignment operator(s).
  */
-class AssignableAtomicBool : public AtomicWord<bool> {
+class AssignableAtomicBool {
 public:
     AssignableAtomicBool() = default;
-    explicit AssignableAtomicBool(bool value) : AtomicWord<bool>(value) {}
-
-    AssignableAtomicBool(const AssignableAtomicBool&) = delete;
-    AssignableAtomicBool& operator=(const AssignableAtomicBool&) = delete;
-    AssignableAtomicBool(AssignableAtomicBool&&) = delete;
-    AssignableAtomicBool& operator=(AssignableAtomicBool&&) = delete;
+    explicit AssignableAtomicBool(bool value) : _value(value) {}
 
     AssignableAtomicBool& operator=(bool value) {
         store(value);
         return *this;
     }
+
+    bool load() const {
+        return _value.load();
+    }
+    void store(bool value) {
+        _value.store(value);
+    }
+
+private:
+    Atomic<bool> _value;
 };
 
 struct ShellGlobalParams {
@@ -103,7 +109,6 @@ struct ShellGlobalParams {
     AssignableAtomicBool nokillop{false};
     Seconds idleSessionTimeout = Seconds{0};
 
-// TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants
 #ifdef MONGO_CONFIG_GRPC
     bool gRPC = false;
     boost::optional<std::string> gRPCAuthToken;

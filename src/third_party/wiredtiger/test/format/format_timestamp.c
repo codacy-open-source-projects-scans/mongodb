@@ -29,11 +29,11 @@
 #include "format.h"
 
 /*
- * timestamp_maximum_committed --
- *     Return the largest timestamp that's no longer in use.
+ * timestamp_minimum_committed --
+ *     Return the timestamp lesser than the minimum of in-use committed timestamps.
  */
 uint64_t
-timestamp_maximum_committed(void)
+timestamp_minimum_committed(void)
 {
     TINFO **tlp;
     uint64_t commit_ts, ts;
@@ -111,7 +111,7 @@ timestamp_once(WT_SESSION *session, bool allow_lag, bool final)
     conn = g.wts_conn;
 
     /* Get the maximum not-in-use timestamp, noting that it may not be set. */
-    oldest_timestamp = stable_timestamp = timestamp_maximum_committed();
+    oldest_timestamp = stable_timestamp = timestamp_minimum_committed();
     if (oldest_timestamp == 0)
         return;
 
@@ -140,6 +140,9 @@ timestamp_once(WT_SESSION *session, bool allow_lag, bool final)
         if (allow_lag)
             oldest_timestamp -= (oldest_timestamp - g.oldest_timestamp) / 2;
     }
+
+    if (stable_timestamp == 0 && GV(PRECISE_CHECKPOINT))
+        stable_timestamp = 1;
 
     testutil_snprintf(buf, sizeof(buf), "%s%" PRIx64 ",%s%" PRIx64, oldest_timestamp_str,
       oldest_timestamp, stable_timestamp_str, stable_timestamp);
@@ -182,9 +185,12 @@ timestamp(void *arg)
      * back.
      */
     while (!g.workers_finished) {
-        if (!GV(RUNS_PREDICTABLE_REPLAY))
-            random_sleep(&g.extra_rnd, 15);
-        else {
+        if (!GV(RUNS_PREDICTABLE_REPLAY)) {
+            if (GV(PRECISE_CHECKPOINT))
+                random_sleep(&g.extra_rnd, 1);
+            else
+                random_sleep(&g.extra_rnd, 15);
+        } else {
             if ((rng(&g.extra_rnd) & 0x1) == 1)
                 __wt_yield();
             else

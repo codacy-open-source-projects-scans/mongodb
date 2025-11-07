@@ -33,8 +33,26 @@
 
 #pragma once
 
+// IWYU pragma: private, include "mongo/unittest/unittest.h"
+// IWYU pragma: friend "mongo/unittest/.*"
+
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/simple_bsonelement_comparator.h"
+#include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/db/exec/mutable_bson/mutable_bson_test_utils.h"
+#include "mongo/logv2/log_debug.h"
+#include "mongo/logv2/log_detail.h"
+#include "mongo/unittest/framework.h"
+#include "mongo/unittest/stringify.h"
+#include "mongo/unittest/test_info.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/pcre.h"
+#include "mongo/util/str.h"
+
 #include <cmath>
-#include <fmt/format.h>
 #include <functional>
 #include <sstream>
 #include <string>
@@ -43,17 +61,7 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/mutable/mutable_bson_test_utils.h"
-#include "mongo/logv2/log_debug.h"
-#include "mongo/logv2/log_detail.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/unittest/stringify.h"
-#include "mongo/unittest/test_info.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
+#include <fmt/format.h>
 
 /**
  * Fail unconditionally, reporting the given message.
@@ -122,24 +130,6 @@
  * values.
  */
 #define ASSERT_APPROX_EQUAL(a, b, ABSOLUTE_ERR) ASSERT_LTE(std::abs((a) - (b)), ABSOLUTE_ERR)
-
-/**
- * Assert a function call returns its input unchanged.
- */
-#define ASSERT_IDENTITY(INPUT, FUNCTION)                                                  \
-    if (auto ca =                                                                         \
-            [&](const auto& v, const auto& fn) {                                          \
-                return ::mongo::unittest::ComparisonAssertion<                            \
-                    ::mongo::unittest::ComparisonOp::kEq>::make(__FILE__,                 \
-                                                                __LINE__,                 \
-                                                                #INPUT,                   \
-                                                                #FUNCTION "(" #INPUT ")", \
-                                                                v,                        \
-                                                                fn(v));                   \
-            }(INPUT, [&](auto&& x) { return FUNCTION(x); });                              \
-        !ca) {                                                                            \
-    } else                                                                                \
-        ca.failure().stream()
 
 /**
  * Verify that the evaluation of "EXPRESSION" throws an exception of type EXCEPTION_TYPE.
@@ -268,48 +258,49 @@
         FAIL("Expected expression " #EXPRESSION " to throw " #EXCEPTION_TYPE       \
              " but it threw nothing.")
 
-#define ASSERT_STRING_CONTAINS(BIG_STRING, CONTAINS)                            \
-    if (auto tup_ = std::tuple(std::string(BIG_STRING), std::string(CONTAINS)); \
-        std::get<0>(tup_).find(std::get<1>(tup_)) != std::string::npos) {       \
-    } else                                                                      \
-        FAIL(([&] {                                                             \
-            const auto& [haystack, sub] = tup_;                                 \
-            return format(FMT_STRING("Expected to find {} ({}) in {} ({})"),    \
-                          #CONTAINS,                                            \
-                          sub,                                                  \
-                          #BIG_STRING,                                          \
-                          haystack);                                            \
+#define ASSERT_STRING_CONTAINS(BIG_STRING, CONTAINS)                                           \
+    if (auto tup_ = std::tuple(std::string(BIG_STRING), std::string(CONTAINS));                \
+        std::get<0>(tup_).find(std::get<1>(tup_)) != std::string::npos) {                      \
+    } else                                                                                     \
+        FAIL(([&] {                                                                            \
+            const auto& [haystack, sub] = tup_;                                                \
+            return fmt::format(                                                                \
+                "Expected to find {} ({}) in {} ({})", #CONTAINS, sub, #BIG_STRING, haystack); \
         }()))
 
-#define ASSERT_STRING_OMITS(BIG_STRING, OMITS)                                     \
-    if (auto tup_ = std::tuple(std::string(BIG_STRING), std::string(OMITS));       \
-        std::get<0>(tup_).find(std::get<1>(tup_)) == std::string::npos) {          \
-    } else                                                                         \
-        FAIL(([&] {                                                                \
-            const auto& [haystack, omits] = tup_;                                  \
-            return format(FMT_STRING("Did not expect to find {} ({}) in {} ({})"), \
-                          #OMITS,                                                  \
-                          omits,                                                   \
-                          #BIG_STRING,                                             \
-                          haystack);                                               \
+#define ASSERT_STRING_OMITS(BIG_STRING, OMITS)                               \
+    if (auto tup_ = std::tuple(std::string(BIG_STRING), std::string(OMITS)); \
+        std::get<0>(tup_).find(std::get<1>(tup_)) == std::string::npos) {    \
+    } else                                                                   \
+        FAIL(([&] {                                                          \
+            const auto& [haystack, omits] = tup_;                            \
+            return fmt::format("Did not expect to find {} ({}) in {} ({})",  \
+                               #OMITS,                                       \
+                               omits,                                        \
+                               #BIG_STRING,                                  \
+                               haystack);                                    \
         }()))
 
-#define ASSERT_STRING_SEARCH_REGEX(BIG_STRING, REGEX)                                           \
-    if (auto tup_ = std::tuple(std::string(BIG_STRING), std::string(REGEX));                    \
-        ::mongo::unittest::searchRegex(std::get<1>(tup_), std::get<0>(tup_))) {                 \
-    } else                                                                                      \
-        FAIL(([&] {                                                                             \
-            const auto& [haystack, sub] = tup_;                                                 \
-            return format(FMT_STRING("Expected to find regular expression {} /{}/ in {} ({})"), \
-                          #REGEX,                                                               \
-                          sub,                                                                  \
-                          #BIG_STRING,                                                          \
-                          haystack);                                                            \
+#define ASSERT_STRING_SEARCH_REGEX(BIG_STRING, REGEX)                                        \
+    if (auto tup_ = std::tuple(std::string(BIG_STRING), mongo::pcre::Regex(REGEX));          \
+        ::mongo::unittest::searchRegex(std::get<1>(tup_), std::get<0>(tup_))) {              \
+    } else                                                                                   \
+        FAIL(([&] {                                                                          \
+            const auto& [haystack, regex] = tup_;                                            \
+            std::string sub(REGEX);                                                          \
+            if (regex)                                                                       \
+                return fmt::format("Expected to find regular expression {} /{}/ in {} ({})", \
+                                   #REGEX,                                                   \
+                                   sub,                                                      \
+                                   #BIG_STRING,                                              \
+                                   haystack);                                                \
+            else                                                                             \
+                return fmt::format("Invalid regular expression: {} /{}/", #REGEX, sub);      \
         }()))
 
 namespace mongo::unittest {
 
-bool searchRegex(const std::string& pattern, const std::string& string);
+bool searchRegex(const pcre::Regex& pattern, const std::string& string);
 
 class Result;
 
@@ -419,15 +410,15 @@ private:
         if (comparator()(a, b)) {
             return;
         }
-        _assertion = std::make_unique<TestAssertionFailure>(
-            theFile,
-            theLine,
-            format(FMT_STRING("Expected {1} {0} {2} ({3} {0} {4})"),
-                   name(),
-                   aExpression,
-                   bExpression,
-                   stringify::invoke(a),
-                   stringify::invoke(b)));
+        _assertion =
+            std::make_unique<TestAssertionFailure>(theFile,
+                                                   theLine,
+                                                   fmt::format("Expected {1} {0} {2} ({3} {0} {4})",
+                                                               name(),
+                                                               aExpression,
+                                                               bExpression,
+                                                               stringify::invoke(a),
+                                                               stringify::invoke(b)));
     }
 
 public:
@@ -452,16 +443,16 @@ public:
                                     const void* b);
 
     template <typename A, typename B>
-    requires(                                                                              //
-        !(std::is_convertible_v<A, StringData> && std::is_convertible_v<B, StringData>)&&  //
-        !(std::is_pointer_v<A> && std::is_pointer_v<B>)&&                                  //
-        !(std::is_array_v<A> && std::is_array_v<B>))                                       //
-        static ComparisonAssertion make(const char* theFile,
-                                        unsigned theLine,
-                                        StringData aExpression,
-                                        StringData bExpression,
-                                        const A& a,
-                                        const B& b) {
+    requires(                                                                               //
+        !(std::is_convertible_v<A, StringData> && std::is_convertible_v<B, StringData>) &&  //
+        !(std::is_pointer_v<A> && std::is_pointer_v<B>) &&                                  //
+        !(std::is_array_v<A> && std::is_array_v<B>))                                        //
+    static ComparisonAssertion make(const char* theFile,
+                                    unsigned theLine,
+                                    StringData aExpression,
+                                    StringData bExpression,
+                                    const A& a,
+                                    const B& b) {
         return ComparisonAssertion(theFile, theLine, aExpression, bExpression, a, b);
     }
 
@@ -546,4 +537,139 @@ T assertGet(StatusWith<T>&& swt) {
     return std::move(swt.getValue());
 }
 
+
+/**
+ * BSON comparison utility macro. Do not use directly.
+ */
+#define ASSERT_BSON_COMPARISON(NAME, a, b, astr, bstr) \
+    ::mongo::unittest::assertComparison_##NAME(__FILE__, __LINE__, astr, bstr, a, b)
+
+/**
+ * Use to compare two instances of type BSONObj under the default comparator in unit tests.
+ */
+#define ASSERT_BSONOBJ_EQ(a, b) ASSERT_BSON_COMPARISON(BSONObjEQ, a, b, #a, #b)
+#define ASSERT_BSONOBJ_LT(a, b) ASSERT_BSON_COMPARISON(BSONObjLT, a, b, #a, #b)
+#define ASSERT_BSONOBJ_LTE(a, b) ASSERT_BSON_COMPARISON(BSONObjLTE, a, b, #a, #b)
+#define ASSERT_BSONOBJ_GT(a, b) ASSERT_BSON_COMPARISON(BSONObjGT, a, b, #a, #b)
+#define ASSERT_BSONOBJ_GTE(a, b) ASSERT_BSON_COMPARISON(BSONObjGTE, a, b, #a, #b)
+#define ASSERT_BSONOBJ_NE(a, b) ASSERT_BSON_COMPARISON(BSONObjNE, a, b, #a, #b)
+
+/**
+ * Use to compare two instances of type BSONObj with unordered fields in unit tests.
+ */
+#define ASSERT_BSONOBJ_EQ_UNORDERED(a, b) ASSERT_BSON_COMPARISON(BSONObjEQ_UNORDERED, a, b, #a, #b)
+#define ASSERT_BSONOBJ_LT_UNORDERED(a, b) ASSERT_BSON_COMPARISON(BSONObjLT_UNORDERED, a, b, #a, #b)
+#define ASSERT_BSONOBJ_LTE_UNORDERED(a, b) \
+    ASSERT_BSON_COMPARISON(BSONObjLTE_UNORDERED, a, b, #a, #b)
+#define ASSERT_BSONOBJ_GT_UNORDERED(a, b) ASSERT_BSON_COMPARISON(BSONObjGT_UNORDERED, a, b, #a, #b)
+#define ASSERT_BSONOBJ_GTE_UNORDERED(a, b) \
+    ASSERT_BSON_COMPARISON(BSONObjGTE_UNORDERED, a, b, #a, #b)
+#define ASSERT_BSONOBJ_NE_UNORDERED(a, b) ASSERT_BSON_COMPARISON(BSONObjNE_UNORDERED, a, b, #a, #b)
+
+/**
+ * Use to compare two instances of type BSONElement under the default comparator in unit tests.
+ */
+#define ASSERT_BSONELT_EQ(a, b) ASSERT_BSON_COMPARISON(BSONElementEQ, a, b, #a, #b)
+#define ASSERT_BSONELT_LT(a, b) ASSERT_BSON_COMPARISON(BSONElementLT, a, b, #a, #b)
+#define ASSERT_BSONELT_LTE(a, b) ASSERT_BSON_COMPARISON(BSONElementLTE, a, b, #a, #b)
+#define ASSERT_BSONELT_GT(a, b) ASSERT_BSON_COMPARISON(BSONElementGT, a, b, #a, #b)
+#define ASSERT_BSONELT_GTE(a, b) ASSERT_BSON_COMPARISON(BSONElementGTE, a, b, #a, #b)
+#define ASSERT_BSONELT_NE(a, b) ASSERT_BSON_COMPARISON(BSONElementNE, a, b, #a, #b)
+
+#define ASSERT_BSONOBJ_BINARY_EQ(a, b) \
+    ::mongo::unittest::assertComparison_BSONObjBINARY_EQ(__FILE__, __LINE__, #a, #b, a, b)
+
+#define DECLARE_BSON_CMP_FUNC(BSONTYPE, NAME)                          \
+    void assertComparison_##BSONTYPE##NAME(const std::string& theFile, \
+                                           unsigned theLine,           \
+                                           StringData aExpression,     \
+                                           StringData bExpression,     \
+                                           const BSONTYPE& aValue,     \
+                                           const BSONTYPE& bValue);
+
+DECLARE_BSON_CMP_FUNC(BSONObj, EQ);
+DECLARE_BSON_CMP_FUNC(BSONObj, LT);
+DECLARE_BSON_CMP_FUNC(BSONObj, LTE);
+DECLARE_BSON_CMP_FUNC(BSONObj, GT);
+DECLARE_BSON_CMP_FUNC(BSONObj, GTE);
+DECLARE_BSON_CMP_FUNC(BSONObj, NE);
+
+DECLARE_BSON_CMP_FUNC(BSONObj, EQ_UNORDERED);
+DECLARE_BSON_CMP_FUNC(BSONObj, LT_UNORDERED);
+DECLARE_BSON_CMP_FUNC(BSONObj, LTE_UNORDERED);
+DECLARE_BSON_CMP_FUNC(BSONObj, GT_UNORDERED);
+DECLARE_BSON_CMP_FUNC(BSONObj, GTE_UNORDERED);
+DECLARE_BSON_CMP_FUNC(BSONObj, NE_UNORDERED);
+
+DECLARE_BSON_CMP_FUNC(BSONObj, BINARY_EQ);
+
+DECLARE_BSON_CMP_FUNC(BSONElement, EQ);
+DECLARE_BSON_CMP_FUNC(BSONElement, LT);
+DECLARE_BSON_CMP_FUNC(BSONElement, LTE);
+DECLARE_BSON_CMP_FUNC(BSONElement, GT);
+DECLARE_BSON_CMP_FUNC(BSONElement, GTE);
+DECLARE_BSON_CMP_FUNC(BSONElement, NE);
+#undef DECLARE_BSON_CMP_FUNC
+
+/**
+ * Given a BSONObj, return a string that wraps the json form of the BSONObj with
+ * `fromjson(R"(<>)")`.
+ */
+std::string formatJsonStr(const std::string& obj);
+
+#define ASSERT_BSONOBJ_EQ_AUTO(expected, actual)                                     \
+    ASSERT(AUTO_UPDATE_HELPER(::mongo::unittest::formatJsonStr(expected),            \
+                              ::mongo::unittest::formatJsonStr(actual.jsonString()), \
+                              false))
+
+/**
+ * Computes a difference between the expected and actual formatted output and outputs it to the
+ * provide stream instance. Used to display difference between expected and actual format for
+ * auto-update macros. It is exposed in the header here for testability.
+ */
+void outputDiff(std::ostream& os,
+                const std::vector<std::string>& expFormatted,
+                const std::vector<std::string>& actualFormatted,
+                size_t startLineNumber);
+
+bool handleAutoUpdate(const std::string& expected,
+                      const std::string& actual,
+                      const std::string& fileName,
+                      size_t lineNumber,
+                      bool needsEscaping);
+
+bool expandNoPlanMacro(const std::string& fileName, size_t lineNumber);
+
+void updateDelta(const std::string& fileName, size_t lineNumber, int64_t delta);
+
+void expandActualPlan(const SourceLocation& location, const std::string& actual);
+
+// Account for maximum line length after linting. We need to indent, add quotes, etc.
+static constexpr size_t kAutoUpdateMaxLineLength = 88;
+
+/**
+ * Auto update result back in the source file if the assert fails.
+ * The expected result must be a multi-line string in the following form:
+ *
+ * ASSERT_EXPLAIN_V2_AUTO(     // NOLINT
+ *       "BinaryOp [Add]\n"
+ *       "|   Const [2]\n"
+ *       "Const [1]\n",
+ *       tree);
+ *
+ * Limitations:
+ *      1. There should not be any comments or other formatting inside the multi-line string
+ *      constant other than 'NOLINT'. If we have a single-line constant, the auto-updating will
+ *      generate a 'NOLINT' at the end of the line.
+ *      2. The expression which we are explaining ('tree' in the example above) must fit on a single
+ *      line.
+ *      3. The macro should be indented by 4 spaces.
+ */
+#define AUTO_UPDATE_HELPER(expected, actual, needsEscaping) \
+    ::mongo::unittest::handleAutoUpdate(expected, actual, __FILE__, __LINE__, needsEscaping)
+
+#define ASSERT_STR_EQ_AUTO(expected, actual) ASSERT(AUTO_UPDATE_HELPER(expected, actual, true))
+
+#define ASSERT_NUMBER_EQ_AUTO(expected, actual) \
+    ASSERT(AUTO_UPDATE_HELPER(str::stream() << expected, str::stream() << actual, false))
 }  // namespace mongo::unittest

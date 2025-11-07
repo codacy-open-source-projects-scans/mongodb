@@ -29,34 +29,27 @@
 
 #pragma once
 
-#include <boost/container/small_vector.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-
-#include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/oid.h"
 #include "mongo/db/operation_id.h"
-#include "mongo/db/repl/optime.h"
+#include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_identifiers.h"
 #include "mongo/db/timeseries/bucket_catalog/execution_stats.h"
 #include "mongo/db/timeseries/bucket_catalog/measurement_map.h"
 #include "mongo/db/timeseries/bucket_catalog/tracking_contexts.h"
-#include "mongo/platform/atomic_word.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/string_map.h"
 
+#include <cstddef>
+#include <cstdint>
+
+#include <boost/container/small_vector.hpp>
+#include <boost/optional/optional.hpp>
+
+MONGO_MOD_PUBLIC;
 namespace mongo::timeseries::bucket_catalog {
-
-struct Bucket;
-
-struct CommitInfo {
-    boost::optional<repl::OpTime> opTime;
-    boost::optional<OID> electionId;
-};
+using UserBatchIndex = size_t;
 
 struct Sizes {
     // Contains the verified size for:
@@ -80,12 +73,8 @@ struct Sizes {
 /**
  * The basic unit of work for a bucket. Each insert will return a shared_ptr to a WriteBatch.
  * When a writer is finished with all their insertions, they should then take steps to ensure
- * each batch they wrote into is committed. To ensure a batch is committed, a writer should
- * first attempt to claimWriteBatchCommitRights(). If successful, the writer can proceed to commit
- * (or abort) the batch via BucketCatalog::prepareCommit and BucketCatalog::finish. If unsuccessful,
- * it means another writer is in the process of committing. The writer can proceed to do other
- * work (like commit another batch), and when they have no other work to do, they can wait for
- * this batch to be committed by executing the blocking operation getWriteBatchResult().
+ * each batch they wrote into is committed. A writer commits (or aborts) the batch via
+ * BucketCatalog::prepareCommit and BucketCatalog::finish.
  *
  * The order of members of this struct have been optimized for memory alignment, and therefore
  * a low memory footprint. Take extra care if modifying the order or adding or removing fields.
@@ -99,9 +88,8 @@ struct WriteBatch {
                ExecutionStatsController& stats,
                StringData timeField);
 
+    // Only used in testing.
     BSONObj toBSON() const;
-
-    bool generateCompressedDiff = false;
 
     // True if the bucket already exists and was reopened.
     bool isReopened = false;
@@ -117,14 +105,9 @@ struct WriteBatch {
         false;  // If true, bucket has been opened due to the inserted measurement having different
     // metadata than available buckets.
 
-    AtomicWord<bool> commitRights{false};
-
     const OperationId opId;
 
     uint32_t numPreviouslyCommittedMeasurements = 0;
-
-    // For always compressed, adds the compressed measurement sizes while committing.
-    int32_t size = 0;
 
     TrackingContexts& trackingContexts;
 
@@ -134,13 +117,20 @@ struct WriteBatch {
     BSONObj min;  // Batch-local min; full if first batch, updates otherwise.
     BSONObj max;  // Batch-local max; full if first batch, updates otherwise.
 
-    SharedPromise<CommitInfo> promise;
+    SharedPromise<void> promise;
 
     ExecutionStatsController stats;
 
-    // Marginal numbers for this batch only. Uncommitted is a rough estimate of data in this batch,
+    // Indices for measurements in the original user batch. Used for retryability and
+    // error-handling. These two should be the same length when entering commit.
+    std::vector<UserBatchIndex> userBatchIndices;
+    std::vector<StmtId> stmtIds;
+
+    // Marginal numbers for this batch only.
+    // Sizes.uncommittedMeasurementEstimate is a rough estimate of data in this batch,
     // using 0 for anything under threshold, and uncompressed size for anything over threshold.
-    // Committed is 0 until it is populated by intermediate as the delta for committing this batch.
+    // Sizes.uncommittedVerifiedSize is 0 until it is populated by intermediate as the delta
+    // for committing this batch.
     Sizes sizes;
 
     StringMap<std::size_t> newFieldNamesToBeInserted;  // Value is hash of string key
@@ -173,16 +163,8 @@ void setUncompressedBucketDoc(WriteBatch& batch, BSONObj uncompressedBucketDoc);
 bool isWriteBatchFinished(const WriteBatch& batch);
 
 /**
- * Attempts to claim the right to commit a batch. If it returns true, rights are
- * granted. If it returns false, rights are revoked, and the caller should get the result
- * of the batch with getWriteBatchResult(). Non-blocking.
+ * Retrieves the status of the write batch commit. Blocking.
  */
-bool claimWriteBatchCommitRights(WriteBatch& batch);
-
-/**
- * Retrieves the result of the write batch commit. Should be called by any interested party
- * that does not have commit rights. Blocking.
- */
-StatusWith<CommitInfo> getWriteBatchResult(WriteBatch& batch);
+Status getWriteBatchStatus(WriteBatch& batch);
 
 }  // namespace mongo::timeseries::bucket_catalog

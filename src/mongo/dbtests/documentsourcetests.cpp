@@ -32,43 +32,33 @@
  */
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <fmt/format.h>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/client.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/exec/collection_scan.h"
+#include "mongo/db/exec/agg/cursor_stage.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
+#include "mongo/db/exec/classic/collection_scan.h"
+#include "mongo/db/exec/classic/plan_stage.h"
+#include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/exec/working_set.h"
-#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_cursor.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/get_executor.h"
@@ -82,15 +72,25 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_options.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/scopeguard.h"
+
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -100,8 +100,7 @@ using std::vector;
 
 static const NamespaceString nss =
     NamespaceString::createNamespaceString_forTest("unittests.documentsourcetests");
-static const BSONObj metaTextScore = BSON("$meta"
-                                          << "textScore");
+static const BSONObj metaTextScore = BSON("$meta" << "textScore");
 
 BSONObj toBson(const intrusive_ptr<DocumentSource>& source) {
     vector<Value> arr;
@@ -116,7 +115,7 @@ public:
         : client(_opCtx.get()),
           _ctx(new ExpressionContextForTest(
               _opCtx.get(), AggregateCommandRequest(nss, std::vector<mongo::BSONObj>()))) {
-        _ctx->setTempDir(storageGlobalParams.dbpath + "/_tmp");
+        _ctx->setTempDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp");
     }
 
     ~DocumentSourceCursorTest() override {
@@ -124,6 +123,25 @@ public:
     }
 
 protected:
+    intrusive_ptr<DocumentSourceCursor> makeAndInitializeCursor(
+        const MultipleCollectionAccessor& collections,
+        std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec) {
+        auto transactionResourcesStasher =
+            make_intrusive<ShardRoleTransactionResourcesStasherForPipeline>();
+        auto catalogResourceHandle =
+            make_intrusive<DSCursorCatalogResourceHandle>(transactionResourcesStasher);
+
+        auto cursor = DocumentSourceCursor::create(collections,
+                                                   std::move(exec),
+                                                   catalogResourceHandle,
+                                                   _ctx,
+                                                   DocumentSourceCursor::CursorType::kRegular);
+
+        // Stash the ShardRole resources.
+        stashTransactionResourcesFromOperationContext(opCtx(), transactionResourcesStasher.get());
+        return cursor;
+    }
+
     void createSource(boost::optional<BSONObj> hint = boost::none) {
         // clean up first if this was called before
         _source.reset();
@@ -140,15 +158,12 @@ protected:
             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
 
         auto exec = uassertStatusOK(getExecutorFind(opCtx(),
-                                                    MultipleCollectionAccessor{_coll},
+                                                    MultipleCollectionAccessor{*_coll},
                                                     std::move(cq),
                                                     PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                                     QueryPlannerParams::RETURN_OWNED_DATA));
-
-        _source = DocumentSourceCursor::create(MultipleCollectionAccessor(_coll),
-                                               std::move(exec),
-                                               _ctx,
-                                               DocumentSourceCursor::CursorType::kRegular);
+        _source = makeAndInitializeCursor(MultipleCollectionAccessor(*_coll), std::move(exec));
+        _stage = exec::agg::buildStage(_source);
     }
 
     intrusive_ptr<ExpressionContextForTest> ctx() {
@@ -159,12 +174,16 @@ protected:
         return _source.get();
     }
 
+    exec::agg::Stage* stage() {
+        return _stage.get();
+    }
+
     OperationContext* opCtx() {
         return _opCtx.get();
     }
 
     void exhaustCursor() {
-        while (!_source->getNext().isEOF()) {
+        while (!_stage->getNext().isEOF()) {
             // Just pull everything out of the cursor.
         }
     }
@@ -177,7 +196,8 @@ private:
     // It is important that these are ordered to ensure correct destruction order.
     intrusive_ptr<ExpressionContextForTest> _ctx;
     intrusive_ptr<DocumentSourceCursor> _source;
-    CollectionPtr _coll;
+    intrusive_ptr<exec::agg::Stage> _stage;
+    boost::optional<CollectionAcquisition> _coll;
 };
 
 /** Create a DocumentSourceCursor. */
@@ -186,7 +206,7 @@ TEST_F(DocumentSourceCursorTest, Empty) {
     // The DocumentSourceCursor doesn't hold a read lock.
     ASSERT(!shard_role_details::getLocker(opCtx())->isReadLocked());
     // The collection is empty, so the source produces no results.
-    ASSERT(source()->getNext().isEOF());
+    ASSERT(stage()->getNext().isEOF());
     // Exhausting the source releases the read lock.
     ASSERT(!shard_role_details::getLocker(opCtx())->isReadLocked());
 }
@@ -198,11 +218,11 @@ TEST_F(DocumentSourceCursorTest, Iterate) {
     // The DocumentSourceCursor doesn't hold a read lock.
     ASSERT(!shard_role_details::getLocker(opCtx())->isReadLocked());
     // The cursor will produce the expected result.
-    auto next = source()->getNext();
+    auto next = stage()->getNext();
     ASSERT(next.isAdvanced());
     ASSERT_VALUE_EQ(Value(1), next.getDocument().getField("a"));
     // There are no more results.
-    ASSERT(source()->getNext().isEOF());
+    ASSERT(stage()->getNext().isEOF());
     // Exhausting the source releases the read lock.
     ASSERT(!shard_role_details::getLocker(opCtx())->isReadLocked());
 }
@@ -212,11 +232,11 @@ TEST_F(DocumentSourceCursorTest, Dispose) {
     createSource();
     // The DocumentSourceCursor doesn't hold a read lock.
     ASSERT(!shard_role_details::getLocker(opCtx())->isReadLocked());
-    source()->dispose();
+    stage()->dispose();
     // Releasing the cursor releases the read lock.
     ASSERT(!shard_role_details::getLocker(opCtx())->isReadLocked());
     // The source is marked as exhausted.
-    ASSERT(source()->getNext().isEOF());
+    ASSERT(stage()->getNext().isEOF());
 }
 
 /** Iterate a DocumentSourceCursor and then dispose of it. */
@@ -226,20 +246,20 @@ TEST_F(DocumentSourceCursorTest, IterateDispose) {
     client.insert(nss, BSON("a" << 3));
     createSource();
     // The result is as expected.
-    auto next = source()->getNext();
+    auto next = stage()->getNext();
     ASSERT(next.isAdvanced());
     ASSERT_VALUE_EQ(Value(1), next.getDocument().getField("a"));
     // The next result is as expected.
-    next = source()->getNext();
+    next = stage()->getNext();
     ASSERT(next.isAdvanced());
     ASSERT_VALUE_EQ(Value(2), next.getDocument().getField("a"));
     // The DocumentSourceCursor doesn't hold a read lock.
     ASSERT(!shard_role_details::getLocker(opCtx())->isReadLocked());
-    source()->dispose();
+    stage()->dispose();
     // Disposing of the source releases the lock.
     ASSERT(!shard_role_details::getLocker(opCtx())->isReadLocked());
     // The source cannot be advanced further.
-    ASSERT(source()->getNext().isEOF());
+    ASSERT(stage()->getNext().isEOF());
 }
 
 /** Set a value or await an expected value. */
@@ -270,7 +290,7 @@ TEST_F(DocumentSourceCursorTest, SerializationNoExplainLevel) {
     auto explainResult = source()->serialize();
     ASSERT_TRUE(explainResult.missing());
 
-    source()->dispose();
+    stage()->dispose();
 }
 
 TEST_F(DocumentSourceCursorTest, SerializationQueryPlannerExplainLevel) {
@@ -283,7 +303,7 @@ TEST_F(DocumentSourceCursorTest, SerializationQueryPlannerExplainLevel) {
     ASSERT_FALSE(explainResult["$cursor"]["queryPlanner"].missing());
     ASSERT_TRUE(explainResult["$cursor"]["executionStats"].missing());
 
-    source()->dispose();
+    stage()->dispose();
 }
 
 TEST_F(DocumentSourceCursorTest, SerializationExecStatsExplainLevel) {
@@ -300,7 +320,7 @@ TEST_F(DocumentSourceCursorTest, SerializationExecStatsExplainLevel) {
     ASSERT_FALSE(explainResult["$cursor"]["executionStats"].missing());
     ASSERT_TRUE(explainResult["$cursor"]["executionStats"]["allPlansExecution"].missing());
 
-    source()->dispose();
+    stage()->dispose();
 }
 
 TEST_F(DocumentSourceCursorTest, SerializationExecAllPlansExplainLevel) {
@@ -319,7 +339,7 @@ TEST_F(DocumentSourceCursorTest, SerializationExecAllPlansExplainLevel) {
     ASSERT_FALSE(explainResult["$cursor"]["executionStats"].missing());
     ASSERT_FALSE(explainResult["$cursor"]["executionStats"]["allPlansExecution"].missing());
 
-    source()->dispose();
+    stage()->dispose();
 }
 
 TEST_F(DocumentSourceCursorTest, ExpressionContextAndSerializeVerbosityMismatch) {
@@ -349,45 +369,48 @@ TEST_F(DocumentSourceCursorTest, TailableAwaitDataCursorShouldErrorAfterTimeout)
     ASSERT_TRUE(client.createCollection(nss, cappedSize, capped));
     client.insert(nss, BSON("a" << 1));
 
-    // Make a tailable collection scan wrapped up in a PlanExecutor.
-    AutoGetCollectionForRead readLock(opCtx(), nss);
-    auto workingSet = std::make_unique<WorkingSet>();
-    CollectionScanParams collScanParams;
-    collScanParams.tailable = true;
-    auto filter = BSON("a" << 1);
-    auto matchExpression = uassertStatusOK(MatchExpressionParser::parse(filter, ctx()));
-    auto collectionScan = std::make_unique<CollectionScan>(ctx().get(),
-                                                           &readLock.getCollection(),
-                                                           collScanParams,
-                                                           workingSet.get(),
-                                                           matchExpression.get());
-    auto findCommand = std::make_unique<FindCommandRequest>(nss);
-    findCommand->setFilter(filter);
-    query_request_helper::setTailableMode(TailableModeEnum::kTailableAndAwaitData,
-                                          findCommand.get());
-    auto canonicalQuery = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
-        .expCtx = ExpressionContextBuilder{}.fromRequest(opCtx(), *findCommand).build(),
-        .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
-    auto planExecutor =
-        uassertStatusOK(plan_executor_factory::make(std::move(canonicalQuery),
-                                                    std::move(workingSet),
-                                                    std::move(collectionScan),
-                                                    &readLock.getCollection(),
-                                                    PlanYieldPolicy::YieldPolicy::ALWAYS_TIME_OUT,
-                                                    QueryPlannerParams::DEFAULT));
+    auto cursor = [&]() {
+        // Make a tailable collection scan wrapped up in a PlanExecutor.
+        auto coll = acquireCollectionMaybeLockFree(
+            opCtx(),
+            CollectionAcquisitionRequest::fromOpCtx(
+                opCtx(), nss, AcquisitionPrerequisites::OperationType::kRead));
+        auto workingSet = std::make_unique<WorkingSet>();
+        CollectionScanParams collScanParams;
+        collScanParams.tailable = true;
+        auto filter = BSON("a" << 1);
+        auto matchExpression = uassertStatusOK(MatchExpressionParser::parse(filter, ctx()));
+        auto collectionScan = std::make_unique<CollectionScan>(
+            ctx().get(), coll, collScanParams, workingSet.get(), matchExpression.get());
+        auto findCommand = std::make_unique<FindCommandRequest>(nss);
+        findCommand->setFilter(filter);
+        query_request_helper::setTailableMode(TailableModeEnum::kTailableAndAwaitData,
+                                              findCommand.get());
+        auto canonicalQuery = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+            .expCtx = ExpressionContextBuilder{}.fromRequest(opCtx(), *findCommand).build(),
+            .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
+        auto planExecutor = uassertStatusOK(
+            plan_executor_factory::make(std::move(canonicalQuery),
+                                        std::move(workingSet),
+                                        std::move(collectionScan),
+                                        coll,
+                                        PlanYieldPolicy::YieldPolicy::ALWAYS_TIME_OUT,
+                                        QueryPlannerParams::DEFAULT));
 
-    // Make a DocumentSourceCursor.
-    ctx()->setTailableMode(TailableModeEnum::kTailableAndAwaitData);
-    // DocumentSourceCursor expects a PlanExecutor that has had its state saved.
-    planExecutor->saveState();
-    auto cursor = DocumentSourceCursor::create(MultipleCollectionAccessor(readLock.getCollection()),
-                                               std::move(planExecutor),
-                                               ctx(),
-                                               DocumentSourceCursor::CursorType::kRegular);
+        // Make a DocumentSourceCursor.
+        ctx()->setTailableMode(TailableModeEnum::kTailableAndAwaitData);
+        // DocumentSourceCursor expects a PlanExecutor that has had its state saved.
+        planExecutor->saveState();
 
-    ON_BLOCK_EXIT([cursor]() { cursor->dispose(); });
-    ASSERT_THROWS_CODE(
-        cursor->getNext().isEOF(), AssertionException, ErrorCodes::ExceededTimeLimit);
+
+        auto cursor =
+            makeAndInitializeCursor(MultipleCollectionAccessor(coll), std::move(planExecutor));
+        return cursor;
+    }();
+
+    intrusive_ptr<exec::agg::Stage> stage = exec::agg::buildStage(cursor);
+    ON_BLOCK_EXIT([stage]() { stage->dispose(); });
+    ASSERT_THROWS_CODE(stage->getNext().isEOF(), AssertionException, ErrorCodes::ExceededTimeLimit);
 }
 
 TEST_F(DocumentSourceCursorTest, NonAwaitDataCursorShouldErrorAfterTimeout) {
@@ -396,43 +419,46 @@ TEST_F(DocumentSourceCursorTest, NonAwaitDataCursorShouldErrorAfterTimeout) {
     client.insert(nss, BSON("a" << 1));
 
     // Make a tailable collection scan wrapped up in a PlanExecutor.
-    AutoGetCollectionForRead readLock(opCtx(), nss);
-    auto workingSet = std::make_unique<WorkingSet>();
-    CollectionScanParams collScanParams;
-    auto filter = BSON("a" << 1);
-    auto matchExpression = uassertStatusOK(MatchExpressionParser::parse(filter, ctx()));
-    auto collectionScan = std::make_unique<CollectionScan>(ctx().get(),
-                                                           &readLock.getCollection(),
-                                                           collScanParams,
-                                                           workingSet.get(),
-                                                           matchExpression.get());
-    auto findCommand = std::make_unique<FindCommandRequest>(nss);
-    findCommand->setFilter(filter);
-    auto canonicalQuery = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
-        .expCtx = ExpressionContextBuilder{}.fromRequest(opCtx(), *findCommand).build(),
-        .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
-    auto planExecutor =
-        uassertStatusOK(plan_executor_factory::make(std::move(canonicalQuery),
-                                                    std::move(workingSet),
-                                                    std::move(collectionScan),
-                                                    &readLock.getCollection(),
-                                                    PlanYieldPolicy::YieldPolicy::ALWAYS_TIME_OUT,
-                                                    QueryPlannerParams::DEFAULT
+    auto cursor = [&]() {
+        auto coll = acquireCollectionMaybeLockFree(
+            opCtx(),
+            CollectionAcquisitionRequest::fromOpCtx(
+                opCtx(), nss, AcquisitionPrerequisites::OperationType::kRead));
+        auto workingSet = std::make_unique<WorkingSet>();
+        CollectionScanParams collScanParams;
+        auto filter = BSON("a" << 1);
+        auto matchExpression = uassertStatusOK(MatchExpressionParser::parse(filter, ctx()));
+        auto collectionScan = std::make_unique<CollectionScan>(
+            ctx().get(), coll, collScanParams, workingSet.get(), matchExpression.get());
+        auto findCommand = std::make_unique<FindCommandRequest>(nss);
+        findCommand->setFilter(filter);
+        auto canonicalQuery = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+            .expCtx = ExpressionContextBuilder{}.fromRequest(opCtx(), *findCommand).build(),
+            .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
+        auto planExecutor = uassertStatusOK(
+            plan_executor_factory::make(std::move(canonicalQuery),
+                                        std::move(workingSet),
+                                        std::move(collectionScan),
+                                        coll,
+                                        PlanYieldPolicy::YieldPolicy::ALWAYS_TIME_OUT,
+                                        QueryPlannerParams::DEFAULT
 
-                                                    ));
+                                        ));
 
-    // Make a DocumentSourceCursor.
-    ctx()->setTailableMode(TailableModeEnum::kNormal);
-    // DocumentSourceCursor expects a PlanExecutor that has had its state saved.
-    planExecutor->saveState();
-    auto cursor = DocumentSourceCursor::create(MultipleCollectionAccessor(readLock.getCollection()),
-                                               std::move(planExecutor),
-                                               ctx(),
-                                               DocumentSourceCursor::CursorType::kRegular);
+        // Make a DocumentSourceCursor.
+        ctx()->setTailableMode(TailableModeEnum::kNormal);
+        // DocumentSourceCursor expects a PlanExecutor that has had its state saved.
+        planExecutor->saveState();
 
-    ON_BLOCK_EXIT([cursor]() { cursor->dispose(); });
-    ASSERT_THROWS_CODE(
-        cursor->getNext().isEOF(), AssertionException, ErrorCodes::ExceededTimeLimit);
+        auto cursor =
+            makeAndInitializeCursor(MultipleCollectionAccessor(coll), std::move(planExecutor));
+
+        return cursor;
+    }();
+
+    intrusive_ptr<exec::agg::Stage> stage = exec::agg::buildStage(cursor);
+    ON_BLOCK_EXIT([stage]() { stage->dispose(); });
+    ASSERT_THROWS_CODE(stage->getNext().isEOF(), AssertionException, ErrorCodes::ExceededTimeLimit);
 }
 
 TEST_F(DocumentSourceCursorTest, TailableAwaitDataCursorShouldErrorAfterBeingKilled) {
@@ -448,46 +474,49 @@ TEST_F(DocumentSourceCursorTest, TailableAwaitDataCursorShouldErrorAfterBeingKil
     client.insert(nss, BSON("a" << 1));
 
     // Make a tailable collection scan wrapped up in a PlanExecutor.
-    AutoGetCollectionForRead readLock(opCtx(), nss);
-    auto workingSet = std::make_unique<WorkingSet>();
-    CollectionScanParams collScanParams;
-    collScanParams.tailable = true;
-    auto filter = BSON("a" << 1);
-    auto matchExpression = uassertStatusOK(MatchExpressionParser::parse(filter, ctx()));
-    auto collectionScan = std::make_unique<CollectionScan>(ctx().get(),
-                                                           &readLock.getCollection(),
-                                                           collScanParams,
-                                                           workingSet.get(),
-                                                           matchExpression.get());
-    auto findCommand = std::make_unique<FindCommandRequest>(nss);
-    findCommand->setFilter(filter);
-    query_request_helper::setTailableMode(TailableModeEnum::kTailableAndAwaitData,
-                                          findCommand.get());
-    auto canonicalQuery = std::make_unique<CanonicalQuery>(
-        CanonicalQueryParams{.expCtx = ExpressionContextBuilder{}
-                                           .fromRequest(opCtx(), *findCommand)
-                                           .mayDbProfile(true)
-                                           .build(),
-                             .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
-    auto planExecutor = uassertStatusOK(
-        plan_executor_factory::make(std::move(canonicalQuery),
-                                    std::move(workingSet),
-                                    std::move(collectionScan),
-                                    &readLock.getCollection(),
-                                    PlanYieldPolicy::YieldPolicy::ALWAYS_MARK_KILLED,
-                                    QueryPlannerParams::DEFAULT));
+    auto cursor = [&]() {
+        auto coll = acquireCollectionMaybeLockFree(
+            opCtx(),
+            CollectionAcquisitionRequest::fromOpCtx(
+                opCtx(), nss, AcquisitionPrerequisites::OperationType::kRead));
+        auto workingSet = std::make_unique<WorkingSet>();
+        CollectionScanParams collScanParams;
+        collScanParams.tailable = true;
+        auto filter = BSON("a" << 1);
+        auto matchExpression = uassertStatusOK(MatchExpressionParser::parse(filter, ctx()));
+        auto collectionScan = std::make_unique<CollectionScan>(
+            ctx().get(), coll, collScanParams, workingSet.get(), matchExpression.get());
+        auto findCommand = std::make_unique<FindCommandRequest>(nss);
+        findCommand->setFilter(filter);
+        query_request_helper::setTailableMode(TailableModeEnum::kTailableAndAwaitData,
+                                              findCommand.get());
+        auto canonicalQuery = std::make_unique<CanonicalQuery>(
+            CanonicalQueryParams{.expCtx = ExpressionContextBuilder{}
+                                               .fromRequest(opCtx(), *findCommand)
+                                               .mayDbProfile(true)
+                                               .build(),
+                                 .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
+        auto planExecutor = uassertStatusOK(
+            plan_executor_factory::make(std::move(canonicalQuery),
+                                        std::move(workingSet),
+                                        std::move(collectionScan),
+                                        coll,
+                                        PlanYieldPolicy::YieldPolicy::ALWAYS_MARK_KILLED,
+                                        QueryPlannerParams::DEFAULT));
 
-    // Make a DocumentSourceCursor.
-    ctx()->setTailableMode(TailableModeEnum::kTailableAndAwaitData);
-    // DocumentSourceCursor expects a PlanExecutor that has had its state saved.
-    planExecutor->saveState();
-    auto cursor = DocumentSourceCursor::create(MultipleCollectionAccessor(readLock.getCollection()),
-                                               std::move(planExecutor),
-                                               ctx(),
-                                               DocumentSourceCursor::CursorType::kRegular);
+        // Make a DocumentSourceCursor.
+        ctx()->setTailableMode(TailableModeEnum::kTailableAndAwaitData);
+        // DocumentSourceCursor expects a PlanExecutor that has had its state saved.
+        planExecutor->saveState();
 
-    ON_BLOCK_EXIT([cursor]() { cursor->dispose(); });
-    ASSERT_THROWS_CODE(cursor->getNext().isEOF(), AssertionException, ErrorCodes::QueryPlanKilled);
+        auto cursor =
+            makeAndInitializeCursor(MultipleCollectionAccessor(coll), std::move(planExecutor));
+        return cursor;
+    }();
+
+    intrusive_ptr<exec::agg::Stage> stage = exec::agg::buildStage(cursor);
+    ON_BLOCK_EXIT([stage]() { stage->dispose(); });
+    ASSERT_THROWS_CODE(stage->getNext().isEOF(), AssertionException, ErrorCodes::QueryPlanKilled);
 }
 
 TEST_F(DocumentSourceCursorTest, NormalCursorShouldErrorAfterBeingKilled) {
@@ -496,40 +525,43 @@ TEST_F(DocumentSourceCursorTest, NormalCursorShouldErrorAfterBeingKilled) {
     client.insert(nss, BSON("a" << 1));
 
     // Make a tailable collection scan wrapped up in a PlanExecutor.
-    AutoGetCollectionForRead readLock(opCtx(), nss);
-    auto workingSet = std::make_unique<WorkingSet>();
-    CollectionScanParams collScanParams;
-    auto filter = BSON("a" << 1);
-    auto matchExpression = uassertStatusOK(MatchExpressionParser::parse(filter, ctx()));
-    auto collectionScan = std::make_unique<CollectionScan>(ctx().get(),
-                                                           &readLock.getCollection(),
-                                                           collScanParams,
-                                                           workingSet.get(),
-                                                           matchExpression.get());
-    auto findCommand = std::make_unique<FindCommandRequest>(nss);
-    findCommand->setFilter(filter);
-    auto canonicalQuery = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
-        .expCtx = ExpressionContextBuilder{}.fromRequest(opCtx(), *findCommand).build(),
-        .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
-    auto planExecutor = uassertStatusOK(
-        plan_executor_factory::make(std::move(canonicalQuery),
-                                    std::move(workingSet),
-                                    std::move(collectionScan),
-                                    &readLock.getCollection(),
-                                    PlanYieldPolicy::YieldPolicy::ALWAYS_MARK_KILLED,
-                                    QueryPlannerParams::DEFAULT));
+    auto cursor = [&]() {
+        auto coll = acquireCollectionMaybeLockFree(
+            opCtx(),
+            CollectionAcquisitionRequest::fromOpCtx(
+                opCtx(), nss, AcquisitionPrerequisites::OperationType::kRead));
+        auto workingSet = std::make_unique<WorkingSet>();
+        CollectionScanParams collScanParams;
+        auto filter = BSON("a" << 1);
+        auto matchExpression = uassertStatusOK(MatchExpressionParser::parse(filter, ctx()));
+        auto collectionScan = std::make_unique<CollectionScan>(
+            ctx().get(), coll, collScanParams, workingSet.get(), matchExpression.get());
+        auto findCommand = std::make_unique<FindCommandRequest>(nss);
+        findCommand->setFilter(filter);
+        auto canonicalQuery = std::make_unique<CanonicalQuery>(CanonicalQueryParams{
+            .expCtx = ExpressionContextBuilder{}.fromRequest(opCtx(), *findCommand).build(),
+            .parsedFind = ParsedFindCommandParams{std::move(findCommand)}});
+        auto planExecutor = uassertStatusOK(
+            plan_executor_factory::make(std::move(canonicalQuery),
+                                        std::move(workingSet),
+                                        std::move(collectionScan),
+                                        coll,
+                                        PlanYieldPolicy::YieldPolicy::ALWAYS_MARK_KILLED,
+                                        QueryPlannerParams::DEFAULT));
 
-    // Make a DocumentSourceCursor.
-    ctx()->setTailableMode(TailableModeEnum::kNormal);
-    // DocumentSourceCursor expects a PlanExecutor that has had its state saved.
-    planExecutor->saveState();
-    auto cursor = DocumentSourceCursor::create(MultipleCollectionAccessor(readLock.getCollection()),
-                                               std::move(planExecutor),
-                                               ctx(),
-                                               DocumentSourceCursor::CursorType::kRegular);
+        // Make a DocumentSourceCursor.
+        ctx()->setTailableMode(TailableModeEnum::kNormal);
+        // DocumentSourceCursor expects a PlanExecutor that has had its state saved.
+        planExecutor->saveState();
 
-    ON_BLOCK_EXIT([cursor]() { cursor->dispose(); });
-    ASSERT_THROWS_CODE(cursor->getNext().isEOF(), AssertionException, ErrorCodes::QueryPlanKilled);
+        auto cursor =
+            makeAndInitializeCursor(MultipleCollectionAccessor(coll), std::move(planExecutor));
+        return cursor;
+    }();
+
+    intrusive_ptr<exec::agg::Stage> stage = exec::agg::buildStage(cursor);
+    ON_BLOCK_EXIT([stage]() { stage->dispose(); });
+    ASSERT_THROWS_CODE(stage->getNext().isEOF(), AssertionException, ErrorCodes::QueryPlanKilled);
 }
 
 }  // namespace

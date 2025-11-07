@@ -29,43 +29,42 @@
 
 #include "mongo/dbtests/framework.h"
 
+#include "mongo/client/dbclient_base.h"
+#include "mongo/db/client.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/index_builds/index_builds_coordinator.h"
+#include "mongo/db/index_builds/index_builds_coordinator_mongod.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog_helper.h"
+#include "mongo/db/local_catalog/collection_impl.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/database_holder_impl.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state_factory_shard.h"
+#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_state_factory_shard.h"
+#include "mongo/db/op_observer/op_observer.h"
+#include "mongo/db/op_observer/op_observer_registry.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/control/storage_control.h"
+#include "mongo/db/topology/sharding_state.h"
+#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
+#include "mongo/dbtests/framework_options.h"
+#include "mongo/logv2/log.h"
+#include "mongo/scripting/dbdirectclient_factory.h"
+#include "mongo/scripting/engine.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/exit.h"
+#include "mongo/util/exit_code.h"
+#include "mongo/util/periodic_runner.h"
+#include "mongo/util/periodic_runner_factory.h"
+
 #include <cstdlib>
 #include <ctime>
 #include <memory>
 #include <string>
 #include <utility>
 #include <vector>
-
-#include "mongo/client/dbclient_base.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_impl.h"
-#include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/catalog/database_holder_impl.h"
-#include "mongo/db/client.h"
-#include "mongo/db/dbdirectclient.h"
-#include "mongo/db/index_builds/index_builds_coordinator.h"
-#include "mongo/db/index_builds/index_builds_coordinator_mongod.h"
-#include "mongo/db/op_observer/op_observer.h"
-#include "mongo/db/op_observer/op_observer_registry.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/s/collection_sharding_state_factory_shard.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/storage/control/storage_control.h"
-#include "mongo/db/storage/recovery_unit_noop.h"
-#include "mongo/db/storage/storage_engine_init.h"
-#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/dbtests/framework_options.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/s/sharding_state.h"
-#include "mongo/scripting/dbdirectclient_factory.h"
-#include "mongo/scripting/engine.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/exit.h"
-#include "mongo/util/exit_code.h"
-#include "mongo/util/periodic_runner.h"
-#include "mongo/util/periodic_runner_factory.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -94,7 +93,8 @@ int runDbTests(int argc, char** argv) {
         if (!serviceContext->getStorageEngine())
             return;
 
-        shutdownGlobalStorageEngineCleanly(serviceContext);
+        catalog::shutDownCollectionCatalogAndGlobalStorageEngineCleanly(serviceContext,
+                                                                        true /* memLeakAllowed */);
     });
 
     ThreadClient tc("testsuite", serviceContext->getService());
@@ -111,15 +111,7 @@ int runDbTests(int argc, char** argv) {
     auto runner = makePeriodicRunner(serviceContext);
     serviceContext->setPeriodicRunner(std::move(runner));
 
-    {
-        auto initializeStorageEngineOpCtx = serviceContext->makeOperationContext(&cc());
-        shard_role_details::setRecoveryUnit(initializeStorageEngineOpCtx.get(),
-                                            std::make_unique<RecoveryUnitNoop>(),
-                                            WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
-
-        initializeStorageEngine(initializeStorageEngineOpCtx.get(), StorageEngineInitFlags{});
-    }
-
+    catalog::startUpStorageEngineAndCollectionCatalog(serviceContext, &cc());
     StorageControl::startStorageControls(serviceContext, true /*forTestOnly*/);
     DatabaseHolder::set(serviceContext, std::make_unique<DatabaseHolderImpl>());
     Collection::Factory::set(serviceContext, std::make_unique<CollectionImpl::FactoryImpl>());
@@ -129,6 +121,8 @@ int runDbTests(int argc, char** argv) {
     ShardingState::create(serviceContext);
     CollectionShardingStateFactory::set(
         serviceContext, std::make_unique<CollectionShardingStateFactoryShard>(serviceContext));
+    DatabaseShardingStateFactory::set(serviceContext,
+                                      std::make_unique<DatabaseShardingStateFactoryShard>());
 
     int ret = unittest::Suite::run(frameworkGlobalParams.suites,
                                    frameworkGlobalParams.filter,
@@ -137,6 +131,7 @@ int runDbTests(int argc, char** argv) {
 
     // So everything shuts down cleanly
     CollectionShardingStateFactory::clear(serviceContext);
+    DatabaseShardingStateFactory::clear(serviceContext);
     exitCleanly((ExitCode)ret);
     return ret;
 }

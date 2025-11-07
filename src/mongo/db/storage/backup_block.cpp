@@ -29,14 +29,14 @@
 
 #include "mongo/db/storage/backup_block.h"
 
-#include <boost/filesystem/path.hpp>
-#include <set>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/db/storage/storage_options.h"
+
+#include <set>
+
+#include <boost/filesystem/path.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -51,21 +51,11 @@ const std::set<std::string> kRequiredMDBFiles = {"_mdb_catalog.wt", "sizeStorer.
 
 BackupBlock::BackupBlock(boost::optional<NamespaceString> nss,
                          boost::optional<UUID> uuid,
-                         std::string filePath,
-                         std::uint64_t offset,
-                         std::uint64_t length,
-                         std::uint64_t fileSize)
-    : _filePath(filePath),
-      _offset(offset),
-      _length(length),
-      _fileSize(fileSize),
-      _nss(nss),
-      _uuid(uuid) {
-    fassert(6355400, _filePath.has_root_directory());
-}
+                         KVBackupBlock kvBackupBlock)
+    : _nss(nss), _uuid(uuid), _kvBackupBlock(kvBackupBlock) {}
 
 bool BackupBlock::isRequired() const {
-    const std::string filename = _filePath.filename().string();
+    const std::string filename = _kvBackupBlock.fileName();
 
     // Check whether this is a required WiredTiger file.
     if (kRequiredWTFiles.find(filename) != kRequiredWTFiles.end()) {
@@ -73,7 +63,7 @@ bool BackupBlock::isRequired() const {
     }
 
     // Check if this is a journal file.
-    if (StringData(filename).startsWith("WiredTigerLog.")) {
+    if (StringData(filename).starts_with("WiredTigerLog.")) {
         return true;
     }
 
@@ -85,7 +75,7 @@ bool BackupBlock::isRequired() const {
     // All files for the encrypted storage engine are required.
     boost::filesystem::path basePath(storageGlobalParams.dbpath);
     boost::filesystem::path keystoreBasePath(basePath / "key.store");
-    if (StringData(_filePath.string()).startsWith(keystoreBasePath.string())) {
+    if (StringData(_kvBackupBlock.filePath()).starts_with(keystoreBasePath.string())) {
         return true;
     }
 

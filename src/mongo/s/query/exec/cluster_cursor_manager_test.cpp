@@ -27,17 +27,7 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_set.h>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <fmt/format.h>
-#include <iterator>
-#include <list>
-#include <type_traits>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/s/query/exec/cluster_cursor_manager.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -50,13 +40,22 @@
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_cache_noop.h"
 #include "mongo/s/query/exec/cluster_client_cursor_mock.h"
-#include "mongo/s/query/exec/cluster_cursor_manager.h"
 #include "mongo/s/query/exec/cluster_query_result.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/duration.h"
+
+#include <iterator>
+#include <list>
+#include <type_traits>
+#include <vector>
+
+#include <absl/container/node_hash_set.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -75,14 +74,6 @@ protected:
     ~ClusterCursorManagerTest() override {
         _manager.shutdown(_opCtx.get());
     }
-
-    static Status successAuthChecker(const boost::optional<UserName>&) {
-        return Status::OK();
-    };
-
-    static Status failAuthChecker(const boost::optional<UserName>&) {
-        return {ErrorCodes::Unauthorized, "Unauthorized"};
-    };
 
     /**
      * Returns an unowned pointer to the manager owned by this test fixture.
@@ -144,6 +135,10 @@ protected:
         ASSERT_OK(getManager()->killCursor(killCursorOpCtx.get(), cursorId));
     }
 
+    static AuthzCheckFn successAuthChecker;
+    static AuthzCheckFn failAuthChecker;
+    static ReleaseMemoryAuthzCheckFn successReleaseMemoryAuthChecker;
+    static ReleaseMemoryAuthzCheckFn failReleaseMemoryAuthChecker;
 
 private:
     // List of flags representing whether our allocated cursors have been killed yet.  The value of
@@ -155,6 +150,22 @@ private:
     ClockSourceMock _clockSourceMock;
     ClusterCursorManager _manager{&_clockSourceMock};
     ServiceContext::UniqueOperationContext _opCtx;
+};
+
+AuthzCheckFn ClusterCursorManagerTest::successAuthChecker = [](AuthzCheckFnInputType) -> Status {
+    return Status::OK();
+};
+AuthzCheckFn ClusterCursorManagerTest::failAuthChecker = [](AuthzCheckFnInputType) -> Status {
+    return {ErrorCodes::Unauthorized, "Unauthorized"};
+};
+
+ReleaseMemoryAuthzCheckFn ClusterCursorManagerTest::successReleaseMemoryAuthChecker =
+    [](ReleaseMemoryAuthzCheckFnInputType) -> Status {
+    return Status::OK();
+};
+ReleaseMemoryAuthzCheckFn ClusterCursorManagerTest::failReleaseMemoryAuthChecker =
+    [](ReleaseMemoryAuthzCheckFnInputType) -> Status {
+    return {ErrorCodes::Unauthorized, "Unauthorized"};
 };
 
 // Test that registering a cursor and checking it out returns a pin to the same cursor.
@@ -640,6 +651,36 @@ TEST_F(ClusterCursorManagerTest, KillCursorsSatisfyingBasedOnOpKey) {
     for (size_t i = 0; i < numCursors; ++i) {
         ASSERT(isMockCursorKilled(i));
     }
+}
+
+// Tests that killCursors with a passing auth check succeeds.
+TEST_F(ClusterCursorManagerTest, KillCursorsWithAuthCheckSuccessfulAuthCheckSucceeds) {
+    const auto cursorId =
+        assertGet(getManager()->registerCursor(getOperationContext(),
+                                               allocateMockCursor(),
+                                               nss,
+                                               ClusterCursorManager::CursorType::SingleTarget,
+                                               ClusterCursorManager::CursorLifetime::Mortal,
+                                               boost::none));
+    // Kill the cursor and verify that it was successfully killed.
+    ASSERT_OK(
+        getManager()->killCursorWithAuthCheck(getOperationContext(), cursorId, successAuthChecker));
+    ASSERT(isMockCursorKilled(0));
+}
+
+// Tests that killCursors with a failing auth check fails.
+TEST_F(ClusterCursorManagerTest, KillCursorsWithAuthCheckFailingAuthCheckFails) {
+    const auto cursorId =
+        assertGet(getManager()->registerCursor(getOperationContext(),
+                                               allocateMockCursor(),
+                                               nss,
+                                               ClusterCursorManager::CursorType::SingleTarget,
+                                               ClusterCursorManager::CursorLifetime::Mortal,
+                                               boost::none));
+    // Kill the cursor and verify that it was successfully killed.
+    ASSERT_EQ(
+        getManager()->killCursorWithAuthCheck(getOperationContext(), cursorId, failAuthChecker),
+        ErrorCodes::Unauthorized);
 }
 
 // Test that the Client that registered a cursor is correctly recorded.
@@ -1343,14 +1384,31 @@ TEST_F(ClusterCursorManagerTest, CheckAuthForKillCursors) {
                                                ClusterCursorManager::CursorLifetime::Mortal,
                                                boost::none));
 
-    ASSERT_EQ(ErrorCodes::CursorNotFound,
-              getManager()->checkAuthForKillCursors(
-                  getOperationContext(), cursorId + 1, successAuthChecker));
     ASSERT_EQ(
-        ErrorCodes::Unauthorized,
-        getManager()->checkAuthForKillCursors(getOperationContext(), cursorId, failAuthChecker));
-    ASSERT_OK(
-        getManager()->checkAuthForKillCursors(getOperationContext(), cursorId, successAuthChecker));
+        ErrorCodes::CursorNotFound,
+        getManager()->checkAuthCursor(getOperationContext(), cursorId + 1, successAuthChecker));
+    ASSERT_EQ(ErrorCodes::Unauthorized,
+              getManager()->checkAuthCursor(getOperationContext(), cursorId, failAuthChecker));
+    ASSERT_OK(getManager()->checkAuthCursor(getOperationContext(), cursorId, successAuthChecker));
+}
+
+TEST_F(ClusterCursorManagerTest, CheckAuthForReleaseMemory) {
+    auto cursorId =
+        assertGet(getManager()->registerCursor(getOperationContext(),
+                                               allocateMockCursor(),
+                                               nss,
+                                               ClusterCursorManager::CursorType::SingleTarget,
+                                               ClusterCursorManager::CursorLifetime::Mortal,
+                                               boost::none));
+
+    ASSERT_EQ(ErrorCodes::CursorNotFound,
+              getManager()->checkAuthCursor(
+                  getOperationContext(), cursorId + 1, successReleaseMemoryAuthChecker));
+    ASSERT_EQ(ErrorCodes::Unauthorized,
+              getManager()->checkAuthCursor(
+                  getOperationContext(), cursorId, failReleaseMemoryAuthChecker));
+    ASSERT_OK(getManager()->checkAuthCursor(
+        getOperationContext(), cursorId, successReleaseMemoryAuthChecker));
 }
 
 TEST_F(ClusterCursorManagerTest, PinnedCursorReturnsUnderlyingCursorTxnNumber) {

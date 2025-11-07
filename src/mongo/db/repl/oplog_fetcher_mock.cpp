@@ -33,15 +33,15 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <functional>
-#include <mutex>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/db/client.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/util/assert_util.h"
+
+#include <functional>
+#include <mutex>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -95,7 +95,7 @@ void OplogFetcherMock::receiveBatch(CursorId cursorId,
     }
 
     auto validateResult = OplogFetcher::validateDocuments(
-        documents, _first, _getLastOpTimeFetched().getTimestamp(), _startingPoint);
+        documents, _first, getLastOpTimeFetched().getTimestamp(), _startingPoint);
 
     // Set _first to false after receiving the first batch.
     _first = false;
@@ -215,7 +215,7 @@ stdx::mutex* OplogFetcherMock::_getMutex() noexcept {
     return &_mutex;
 }
 
-OpTime OplogFetcherMock::_getLastOpTimeFetched() const {
+OpTime OplogFetcherMock::getLastOpTimeFetched() const {
     stdx::lock_guard<stdx::mutex> lock(_mutex);
     return _lastFetched;
 }

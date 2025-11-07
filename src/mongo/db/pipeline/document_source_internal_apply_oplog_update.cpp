@@ -28,27 +28,20 @@
  */
 
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <utility>
+#include "mongo/db/pipeline/document_source_internal_apply_oplog_update.h"
 
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/mutable/document.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/field_ref_set.h"
-#include "mongo/db/pipeline/document_source_internal_apply_oplog_update.h"
 #include "mongo/db/pipeline/document_source_internal_apply_oplog_update_gen.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/query/allowed_contexts.h"
-#include "mongo/db/query/write_ops/write_ops_parsers.h"
-#include "mongo/db/update/update_driver.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
 
@@ -56,49 +49,24 @@ REGISTER_DOCUMENT_SOURCE(_internalApplyOplogUpdate,
                          LiteParsedDocumentSourceDefault::parse,
                          DocumentSourceInternalApplyOplogUpdate::createFromBson,
                          AllowedWithApiStrict::kNeverInVersion1);
+ALLOCATE_DOCUMENT_SOURCE_ID(_internalApplyOplogUpdate, DocumentSourceInternalApplyOplogUpdate::id)
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceInternalApplyOplogUpdate::createFromBson(
     BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx) {
     uassert(6315901,
             str::stream() << "Argument to " << kStageName
                           << " stage must be an object, but found type: " << typeName(elem.type()),
-            elem.type() == BSONType::Object);
+            elem.type() == BSONType::object);
 
     auto spec =
-        InternalApplyOplogUpdateSpec::parse(IDLParserContext(kStageName), elem.embeddedObject());
+        InternalApplyOplogUpdateSpec::parse(elem.embeddedObject(), IDLParserContext(kStageName));
 
     return new DocumentSourceInternalApplyOplogUpdate(pExpCtx, spec.getOplogUpdate());
 }
 
 DocumentSourceInternalApplyOplogUpdate::DocumentSourceInternalApplyOplogUpdate(
     const boost::intrusive_ptr<ExpressionContext>& pExpCtx, const BSONObj& oplogUpdate)
-    : DocumentSource(kStageName, pExpCtx), _oplogUpdate(oplogUpdate), _updateDriver(pExpCtx) {
-    // Parse the raw oplog update description.
-    const auto updateMod = write_ops::UpdateModification::parseFromOplogEntry(
-        _oplogUpdate, {true /* mustCheckExistenceForInsertOperations */});
-
-    // UpdateDriver only expects to apply a diff in the context of oplog application.
-    _updateDriver.setFromOplogApplication(true);
-    _updateDriver.parse(updateMod, {});
-}
-
-DocumentSource::GetNextResult DocumentSourceInternalApplyOplogUpdate::doGetNext() {
-    auto next = pSource->getNext();
-    if (!next.isAdvanced()) {
-        return next;
-    }
-
-    // Use _updateDriver to apply the update to the document.
-    mutablebson::Document doc(next.getDocument().toBson());
-    uassertStatusOK(_updateDriver.update(pExpCtx->getOperationContext(),
-                                         StringData(),
-                                         &doc,
-                                         false /* validateForStorage */,
-                                         FieldRefSet(),
-                                         false /* isInsert */));
-
-    return Document(doc.getObject());
-}
+    : DocumentSource(kStageName, pExpCtx), _oplogUpdate(oplogUpdate) {}
 
 Value DocumentSourceInternalApplyOplogUpdate::serialize(const SerializationOptions& opts) const {
     return Value(Document{

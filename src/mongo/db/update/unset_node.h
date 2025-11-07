@@ -29,20 +29,14 @@
 
 #pragma once
 
-#include <cstdint>
-#include <memory>
-
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/mutable/const_element.h"
-#include "mongo/bson/mutable/element.h"
+#include "mongo/db/exec/mutable_bson/const_element.h"
+#include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -51,6 +45,12 @@
 #include "mongo/db/update/runtime_update_path.h"
 #include "mongo/db/update/update_node.h"
 #include "mongo/db/update/update_node_visitor.h"
+
+#include <cstdint>
+#include <memory>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 

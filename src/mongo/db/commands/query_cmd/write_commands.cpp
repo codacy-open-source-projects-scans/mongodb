@@ -28,16 +28,6 @@
  */
 
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <functional>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -46,24 +36,24 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/mutable/document.h"
-#include "mongo/bson/mutable/element.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/collection_operation_source.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/query_cmd/update_metrics.h"
 #include "mongo/db/commands/query_cmd/write_commands_common.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/exec/mutable_bson/document.h"
+#include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/fle_crud.h"
+#include "mongo/db/local_catalog/collection_operation_source.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_executor.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/process_interface/replica_set_node_process_interface.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/command_diagnostic_printer.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/plan_yield_policy.h"
@@ -77,23 +67,25 @@
 #include "mongo/db/query/write_ops/write_ops_exec.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
+#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_role.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/timeseries/collection_pre_conditions_util.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
-#include "mongo/db/timeseries/timeseries_update_delete_util.h"
+#include "mongo/db/timeseries/timeseries_request_util.h"
 #include "mongo/db/timeseries/timeseries_write_util.h"
 #include "mongo/db/timeseries/write_ops/timeseries_write_ops.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/transaction/retryable_writes_stats.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/db/transaction_validation.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_builder_interface.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/decorable.h"
@@ -102,6 +94,15 @@
 #include "mongo/util/safe_num.h"
 #include "mongo/util/serialization_context.h"
 #include "mongo/util/str.h"
+
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -260,6 +261,10 @@ public:
         return true;
     }
 
+    bool enableDiagnosticPrintingOnFailure() const final {
+        return true;
+    }
+
     class Invocation final : public InvocationBaseGen {
     public:
         Invocation(OperationContext* opCtx,
@@ -273,6 +278,10 @@ public:
             return true;
         }
 
+        bool supportsRawData() const final {
+            return true;
+        }
+
         bool isSubjectToIngressAdmissionControl() const override {
             return true;
         }
@@ -282,14 +291,6 @@ public:
         }
 
         write_ops::InsertCommandReply typedRun(OperationContext* opCtx) final try {
-            // Capture diagnostics for tassert and invariant failures that may occur during query
-            // parsing, planning or execution. No work is done on the hot-path, all computation of
-            // these diagnostics is done lazily during failure handling. This line just creates an
-            // RAII object which holds references to objects on this stack frame, which will be used
-            // to print diagnostics in the event of a tassert or invariant.
-            ScopedDebugInfo insertCmdDiagnostics("commandDiagnostics",
-                                                 command_diagnostics::Printer{opCtx});
-
             // On debug builds, verify that the estimated size of the insert command is at least as
             // large as the size of the actual, serialized insert command. This ensures that the
             // logic which estimates the size of insert commands is correct.
@@ -303,14 +304,15 @@ public:
                     return insertReply;
                 }
             }
-
-            if (auto [isTimeseriesViewRequest, _] =
-                    timeseries::isTimeseriesViewRequest(opCtx, request());
-                isTimeseriesViewRequest) {
+            auto [preConditions, isTimeseriesLogicalRequest] =
+                timeseries::getCollectionPreConditionsAndIsTimeseriesLogicalRequest(
+                    opCtx, ns(), request(), request().getCollectionUUID());
+            if (isTimeseriesLogicalRequest) {
                 // Re-throw parsing exceptions to be consistent with CmdInsert::Invocation's
                 // constructor.
                 try {
-                    return timeseries::write_ops::performTimeseriesWrites(opCtx, request());
+                    return timeseries::write_ops::performTimeseriesWrites(
+                        opCtx, request(), preConditions);
                 } catch (DBException& ex) {
                     ex.addContext(str::stream()
                                   << "time-series insert failed: " << ns().toStringForErrorMsg());
@@ -325,7 +327,7 @@ public:
                 hangInsertBeforeWrite.pauseWhileSet();
             }
 
-            auto reply = write_ops_exec::performInserts(opCtx, request());
+            auto reply = write_ops_exec::performInserts(opCtx, request(), preConditions);
 
             write_ops::InsertCommandReply insertReply;
             populateReply(opCtx,
@@ -391,6 +393,10 @@ public:
         return true;
     }
 
+    bool enableDiagnosticPrintingOnFailure() const final {
+        return true;
+    }
+
     class Invocation final : public InvocationBaseGen {
     public:
         Invocation(OperationContext* opCtx,
@@ -413,6 +419,10 @@ public:
         }
 
         bool supportsWriteConcern() const final {
+            return true;
+        }
+
+        bool supportsRawData() const final {
             return true;
         }
 
@@ -471,17 +481,12 @@ public:
                 !encryptionInfo.eoo()) {
                 bob->append(encryptionInfo);
             }
+            if (auto&& rawData = _commandObj["rawData"]) {
+                bob->append(rawData);
+            }
         }
 
         write_ops::UpdateCommandReply typedRun(OperationContext* opCtx) final try {
-            // Capture diagnostics for tassert and invariant failures that may occur during query
-            // parsing, planning or execution. No work is done on the hot-path, all computation of
-            // these diagnostics is done lazily during failure handling. This line just creates an
-            // RAII object which holds references to objects on this stack frame, which will be used
-            // to print diagnostics in the event of a tassert or invariant.
-            ScopedDebugInfo updateCmdDiagnostics("commandDiagnostics",
-                                                 command_diagnostics::Printer{opCtx});
-
             // On debug builds, verify that the estimated size of the update command is at least as
             // large as the size of the actual, serialized update command. This ensures that the
             // logic which estimates the size of update commands is correct.
@@ -493,10 +498,12 @@ public:
                 return processFLEUpdate(opCtx, request());
             }
 
-            auto [isTimeseriesViewRequest, bucketNs] =
-                timeseries::isTimeseriesViewRequest(opCtx, request());
-            OperationSource source = isTimeseriesViewRequest ? OperationSource::kTimeseriesUpdate
-                                                             : OperationSource::kStandard;
+            const auto [preConditions, isTimeseriesLogicalRequest] =
+                timeseries::getCollectionPreConditionsAndIsTimeseriesLogicalRequest(
+                    opCtx, ns(), request(), request().getCollectionUUID());
+
+            OperationSource source = isTimeseriesLogicalRequest ? OperationSource::kTimeseriesUpdate
+                                                                : OperationSource::kStandard;
 
             long long nModified = 0;
 
@@ -507,13 +514,10 @@ public:
             write_ops_exec::WriteResult reply;
             // For retryable updates on time-series collections, we needs to run them in
             // transactions to ensure the multiple writes are replicated atomically.
-            bool isTimeseriesRetryableUpdate = isTimeseriesViewRequest &&
+            bool isTimeseriesRetryableUpdate = isTimeseriesLogicalRequest &&
                 opCtx->isRetryableWrite() && !opCtx->inMultiDocumentTransaction();
             if (isTimeseriesRetryableUpdate) {
-                auto executor = serverGlobalParams.clusterRole.has(ClusterRole::None)
-                    ? ReplicaSetNodeProcessInterface::getReplicaSetNodeExecutor(
-                          opCtx->getServiceContext())
-                    : Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+                auto executor = getLocalExecutor(opCtx);
                 ON_BLOCK_EXIT([&] {
                     // Increments the counter if the command contains retries. This is normally done
                     // within write_ops_exec::performUpdates. But for retryable timeseries updates,
@@ -525,7 +529,7 @@ public:
                     }
                 });
                 write_ops_exec::runTimeseriesRetryableUpdates(
-                    opCtx, bucketNs, request(), executor, &reply);
+                    opCtx, ns(), request(), preConditions, executor, &reply);
             } else {
                 if (hangUpdateBeforeWrite.shouldFail([&](const BSONObj& data) {
                         const auto fpNss = NamespaceStringUtil::parseFailPointData(data, "ns"_sd);
@@ -534,14 +538,12 @@ public:
                     hangUpdateBeforeWrite.pauseWhileSet();
                 }
 
-                reply = write_ops_exec::performUpdates(opCtx, request(), source);
+                reply = write_ops_exec::performUpdates(opCtx, request(), preConditions, source);
             }
 
             // Handler to process each 'SingleWriteResult'.
             auto singleWriteHandler = [&](const SingleWriteResult& opResult, int index) {
                 nModified += opResult.getNModified();
-                BSONSizeTracker upsertInfoSizeTracker;
-
                 if (auto idElement = opResult.getUpsertedId().firstElement())
                     upsertedInfoVec.emplace_back(write_ops::Upserted(index, idElement));
             };
@@ -603,11 +605,12 @@ public:
                     "explained write batches must be of size 1",
                     request().getUpdates().size() == 1);
 
-            auto [isTimeseriesViewRequest, nss] =
-                timeseries::isTimeseriesViewRequest(opCtx, request());
+            const auto [preConditions, isTimeseriesLogicalRequest] =
+                timeseries::getCollectionPreConditionsAndIsTimeseriesLogicalRequest(
+                    opCtx, ns(), request(), request().getCollectionUUID());
 
             UpdateRequest updateRequest(request().getUpdates()[0]);
-            updateRequest.setNamespaceString(nss);
+            updateRequest.setNamespaceString(preConditions.getTargetNs(ns()));
             if (prepareForFLERewrite(opCtx, request().getEncryptionInformation())) {
                 updateRequest.setQuery(
                     processFLEWriteExplainD(opCtx,
@@ -625,9 +628,10 @@ public:
 
             write_ops_exec::explainUpdate(opCtx,
                                           updateRequest,
-                                          isTimeseriesViewRequest,
+                                          isTimeseriesLogicalRequest,
                                           request().getSerializationContext(),
                                           _commandObj,
+                                          preConditions,
                                           verbosity,
                                           result);
         }
@@ -687,6 +691,10 @@ public:
         return true;
     }
 
+    bool enableDiagnosticPrintingOnFailure() const final {
+        return true;
+    }
+
     class Invocation final : public InvocationBaseGen {
     public:
         Invocation(OperationContext* opCtx,
@@ -700,6 +708,10 @@ public:
             return true;
         }
 
+        bool supportsRawData() const final {
+            return true;
+        }
+
         bool isSubjectToIngressAdmissionControl() const override {
             return true;
         }
@@ -709,14 +721,6 @@ public:
         }
 
         write_ops::DeleteCommandReply typedRun(OperationContext* opCtx) final try {
-            // Capture diagnostics for tassert and invariant failures that may occur during query
-            // parsing, planning or execution. No work is done on the hot-path, all computation of
-            // these diagnostics is done lazily during failure handling. This line just creates an
-            // RAII object which holds references to objects on this stack frame, which will be used
-            // to print diagnostics in the event of a tassert or invariant.
-            ScopedDebugInfo deleteCmdDiagnostics("commandDiagnostics",
-                                                 command_diagnostics::Printer{opCtx});
-
             // On debug builds, verify that the estimated size of the deletes are at least as large
             // as the actual, serialized size. This ensures that the logic that estimates the size
             // of deletes for batch writes is correct.
@@ -724,20 +728,20 @@ public:
 
             doTransactionValidationForWrites(opCtx, ns());
             write_ops::DeleteCommandReply deleteReply;
-            OperationSource source = OperationSource::kStandard;
 
             if (prepareForFLERewrite(opCtx, request().getEncryptionInformation())) {
                 return processFLEDelete(opCtx, request());
             }
 
-            if (auto [isTimeseriesViewRequest, _] =
-                    timeseries::isTimeseriesViewRequest(opCtx, request());
-                isTimeseriesViewRequest) {
-                source = OperationSource::kTimeseriesDelete;
-            }
+            const auto [preConditions, isTimeseriesLogicalRequest] =
+                timeseries::getCollectionPreConditionsAndIsTimeseriesLogicalRequest(
+                    opCtx, ns(), request(), request().getCollectionUUID());
+
+            OperationSource source = isTimeseriesLogicalRequest ? OperationSource::kTimeseriesDelete
+                                                                : OperationSource::kStandard;
 
 
-            auto reply = write_ops_exec::performDeletes(opCtx, request(), source);
+            auto reply = write_ops_exec::performDeletes(opCtx, request(), preConditions, source);
             populateReply(opCtx,
                           !request().getWriteCommandRequestBase().getOrdered(),
                           request().getDeletes().size(),
@@ -771,11 +775,12 @@ public:
                     "explained write batches must be of size 1",
                     request().getDeletes().size() == 1);
 
-            auto [isTimeseriesViewRequest, nss] =
-                timeseries::isTimeseriesViewRequest(opCtx, request());
+            auto [preConditions, isTimeseriesLogicalRequest] =
+                timeseries::getCollectionPreConditionsAndIsTimeseriesLogicalRequest(
+                    opCtx, ns(), request(), request().getCollectionUUID());
 
             auto deleteRequest = DeleteRequest{};
-            deleteRequest.setNsString(nss);
+            deleteRequest.setNsString(preConditions.getTargetNs(ns()));
             deleteRequest.setLegacyRuntimeConstants(request().getLegacyRuntimeConstants().value_or(
                 Variables::generateRuntimeConstants(opCtx)));
             deleteRequest.setLet(request().getLet());
@@ -797,9 +802,10 @@ public:
 
             write_ops_exec::explainDelete(opCtx,
                                           deleteRequest,
-                                          isTimeseriesViewRequest,
+                                          isTimeseriesLogicalRequest,
                                           request().getSerializationContext(),
                                           _commandObj,
+                                          preConditions,
                                           verbosity,
                                           result);
         }

@@ -28,15 +28,15 @@
  */
 
 #pragma once
-
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace mongo {
 

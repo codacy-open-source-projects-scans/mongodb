@@ -27,19 +27,17 @@
  *    it in the license file.
  */
 
-#include <wiredtiger.h>
-
-#include "mongo/db/client.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/prepare_conflict_tracker.h"
-#include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/storage/storage_metrics.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_prepare_conflict.h"
+
+#include "mongo/db/storage/exceptions.h"
+#include "mongo/db/storage/prepare_conflict_tracker.h"
+#include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/str.h"
+
+#include <wiredtiger.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -62,11 +60,11 @@ void wiredTigerPrepareConflictFailPointLog() {
     LOGV2(22380, "WTPrintPrepareConflictLog fail point enabled.");
 }
 
-int wiredTigerPrepareConflictRetrySlow(OperationContext* opCtx,
+int wiredTigerPrepareConflictRetrySlow(Interruptible& interruptible,
+                                       PrepareConflictTracker& tracker,
                                        RecoveryUnit& ru,
                                        std::function<int()> func) {
     int attempts = 1;
-    ru.getStorageMetrics().incrementPrepareReadConflicts(1);
     wiredTigerPrepareConflictLog(attempts);
 
     if (!ru.getBlockingAllowed()) {
@@ -77,24 +75,8 @@ int wiredTigerPrepareConflictRetrySlow(OperationContext* opCtx,
 
     // If we return from this function, we have either returned successfully or we've returned an
     // error other than WT_PREPARE_CONFLICT. Reset PrepareConflictTracker accordingly.
-    ON_BLOCK_EXIT([opCtx] {
-        PrepareConflictTracker::get(opCtx).endPrepareConflict(
-            *opCtx->getServiceContext()->getTickSource());
-    });
-    PrepareConflictTracker::get(opCtx).beginPrepareConflict(
-        *opCtx->getServiceContext()->getTickSource());
-
-    auto client = opCtx->getClient();
-
-    // All operations that hit a prepare conflict should be killable to prevent deadlocks with
-    // prepared transactions on replica set step up and step down.
-    invariant(client->canKillOperationInStepdown());
-
-    // It is contradictory to be running into a prepare conflict when we are ignoring interruptions,
-    // particularly when running code inside an
-    // OperationContext::runWithoutInterruptionExceptAtGlobalShutdown block. Operations executed in
-    // this way are expected to be set to ignore prepare conflicts.
-    invariant(!opCtx->isIgnoringInterrupts());
+    ON_BLOCK_EXIT([&tracker] { tracker.endPrepareConflict(*globalSystemTickSource()); });
+    tracker.beginPrepareConflict(*globalSystemTickSource());
 
     if (MONGO_unlikely(WTPrintPrepareConflictLog.shouldFail())) {
         wiredTigerPrepareConflictFailPointLog();
@@ -112,20 +94,18 @@ int wiredTigerPrepareConflictRetrySlow(OperationContext* opCtx,
     auto& recoveryUnit = WiredTigerRecoveryUnit::get(ru);
     while (true) {
         attempts++;
-        auto lastCount = recoveryUnit.getSessionCache()->getPrepareCommitOrAbortCount();
+        auto lastCount = recoveryUnit.getConnection()->getPrepareCommitOrAbortCount();
         int ret = WT_READ_CHECK(func());
 
         if (ret != WT_PREPARE_CONFLICT)
             return ret;
-        PrepareConflictTracker::get(opCtx).updatePrepareConflict(
-            *opCtx->getServiceContext()->getTickSource());
+        tracker.updatePrepareConflict(*globalSystemTickSource());
         wiredTigerPrepareConflictLog(attempts);
 
         // Wait on the session cache to signal that a unit of work has been committed or aborted.
-        recoveryUnit.getSessionCache()->waitUntilPreparedUnitOfWorkCommitsOrAborts(*opCtx,
-                                                                                   lastCount);
+        recoveryUnit.getConnection()->waitUntilPreparedUnitOfWorkCommitsOrAborts(interruptible,
+                                                                                 lastCount);
     }
 }
-
 
 }  // namespace mongo

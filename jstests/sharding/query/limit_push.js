@@ -3,7 +3,7 @@
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
 
-var s = new ShardingTest({name: "limit_push", shards: 2, mongos: 1});
+let s = new ShardingTest({name: "limit_push", shards: 2, mongos: 1});
 var db = s.getDB("test");
 s.adminCommand({enablesharding: "test", primaryShard: s.shard1.shardName});
 
@@ -23,12 +23,11 @@ s.adminCommand({
     moveChunk: "test.limit_push",
     find: {x: 51},
     to: s.getOther(s.getPrimaryShard("test")).name,
-    _waitForDelete: true
+    _waitForDelete: true,
 });
 
 // Check that the chunck have split correctly
-assert.eq(
-    2, findChunksUtil.countChunksForNs(s.config, "test.limit_push"), "wrong number of chunks");
+assert.eq(2, findChunksUtil.countChunksForNs(s.config, "test.limit_push"), "wrong number of chunks");
 
 // The query is asking for the maximum value below a given value
 // db.limit_push.find( { x : { $lt : 60} } ).sort( { x:-1} ).limit(1)
@@ -45,14 +44,12 @@ assert.eq(60, db.limit_push.find(q).count(), "Did not find 60 documents");
 let exp = db.limit_push.find(q).sort({x: -1}).limit(1).explain("executionStats");
 printjson(exp);
 
-var execStages = exp.executionStats.executionStages;
+let execStages = exp.executionStats.executionStages;
 assert.eq("SHARD_MERGE_SORT", execStages.stage, "Expected SHARD_MERGE_SORT as root stage");
 
-var k = 0;
-for (var j in execStages.shards) {
-    assert.eq(1,
-              execStages.shards[j].executionStages.nReturned,
-              "'n' is not 1 from shard000" + k.toString());
+let k = 0;
+for (let j in execStages.shards) {
+    assert.eq(1, execStages.shards[j].executionStages.nReturned, "'n' is not 1 from shard000" + k.toString());
     k++;
 }
 

@@ -29,9 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <string>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
@@ -42,9 +39,14 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 
-namespace mongo {
+#include <string>
+
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PARENT_PRIVATE mongo {
 namespace repl {
 
 /**
@@ -133,7 +135,7 @@ public:
     void clearParticipantNewTermDates();
 
 
-    class ElectionMetricsSSS;
+    class MONGO_MOD_PRIVATE ElectionMetricsSSS;
 
 private:
     void _updateAverageCatchUpOps(WithLock lk);
@@ -152,4 +154,4 @@ private:
 };
 
 }  // namespace repl
-}  // namespace mongo
+}  // namespace MONGO_MOD_PARENT_PRIVATE mongo

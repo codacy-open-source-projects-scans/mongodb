@@ -27,11 +27,6 @@
  *    it in the license file.
  */
 
-#include <fmt/format.h>
-#include <memory>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -41,21 +36,26 @@
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/shard_filterer_mock.h"
-#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/query/projection_parser.h"
-#include "mongo/db/query/projection_policies.h"
-#include "mongo/db/query/query_solution.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_parser.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_policies.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/shard_filterer_factory_interface.h"
 #include "mongo/db/query/shard_filterer_factory_mock.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
 #include "mongo/db/query/stage_builder/sbe/tests/sbe_builder_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -287,11 +287,9 @@ TEST_F(SbeShardKeyExpressionTest, NestedShardKeyPattern) {
 }
 
 TEST_F(SbeShardKeyExpressionTest, HashedShardKeyPattern) {
-    runShardKeyExpressionTest(BSON("a"
-                                   << "hashed"),
-                              {BSON("a" << 10 << "b" << 20),
-                               BSON("b" << 20),
-                               BSON("a" << BSON("b" << 20))});
+    runShardKeyExpressionTest(
+        BSON("a" << "hashed"),
+        {BSON("a" << 10 << "b" << 20), BSON("b" << 20), BSON("a" << BSON("b" << 20))});
 }
 
 }  // namespace mongo

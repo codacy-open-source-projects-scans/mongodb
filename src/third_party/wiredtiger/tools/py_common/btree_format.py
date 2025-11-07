@@ -145,7 +145,6 @@ class PageHeader(object):
         h.version = b.read_uint8()
         return h
 
-
 #
 # Block
 #
@@ -161,6 +160,8 @@ class BlockHeader(object):
 
     # Flags
     WT_BLOCK_DATA_CKSUM: typing.Final[int] = 0x1
+    WT_BLOCK_DISAGG_ENCRYPTED: typing.Final[int] = 0x2  # disagg only
+    WT_BLOCK_DISAGG_COMPRESSED: typing.Final[int] = 0x4 # disagg only
 
     def __init__(self) -> None:
         '''
@@ -172,16 +173,29 @@ class BlockHeader(object):
         self.unused = 0
 
     @staticmethod
-    def parse(b: binary_data.BinaryFile) -> 'BlockHeader':
+    def parse(b: binary_data.BinaryFile, disagg = False) -> 'BlockHeader':
         '''
         Parse a block header.
         '''
         # WT_BLOCK_HEADER in block.h (12 bytes)
         h = BlockHeader()
-        h.disk_size = b.read_uint32()
-        h.checksum = b.read_uint32()
-        h.flags = b.read_uint8()
-        h.unused = int.from_bytes(b.read(3), byteorder='little')
+        if disagg:
+            # Disagg sets additional fields.  If they are examined
+            # by non-disagg code, an exception will be thrown (by design).
+            h.disagg_magic = b.read_uint8()
+            h.disagg_version = b.read_uint8()
+            h.disagg_compatible_version = b.read_uint8()
+            h.disagg_header_size = b.read_uint8()
+            h.checksum = b.read_uint32()
+            h.disagg_previous_checksum = b.read_uint32()
+            h.disagg_reconciliation_id = b.read_uint8()
+            h.flags = b.read_uint8()
+            h.unused = int.from_bytes(b.read(2), byteorder='little')
+        else:
+            h.disk_size = b.read_uint32()
+            h.checksum = b.read_uint32()
+            h.flags = b.read_uint8()
+            h.unused = int.from_bytes(b.read(3), byteorder='little')
         return h
 
 

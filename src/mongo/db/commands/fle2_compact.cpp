@@ -28,23 +28,15 @@
  */
 
 
+#include <cstdint>
+
 #include <absl/container/node_hash_set.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr.hpp>
-#include <cstdint>
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <algorithm>
-#include <array>
-#include <functional>
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <tuple>
-#include <utility>
-
 #include "mongo/base/data_builder.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -57,12 +49,13 @@
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/crypto/encryption_fields_gen.h"
+#include "mongo/crypto/encryption_fields_util.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/crypto/fle_options_gen.h"
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/commands/fle2_compact.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/fle_crud.h"
+#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/write_ops/write_ops.h"
@@ -72,8 +65,6 @@
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
@@ -81,9 +72,16 @@
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/str.h"
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
+#include <algorithm>
+#include <array>
+#include <functional>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <tuple>
+#include <utility>
 
-using namespace fmt::literals;
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
 
 MONGO_FAIL_POINT_DEFINE(fleCompactOrCleanupFailBeforeECOCRead);
 MONGO_FAIL_POINT_DEFINE(fleCompactHangBeforeESCAnchorInsert);
@@ -127,6 +125,12 @@ public:
         addInserts(other.getInserted());
         addUpdates(other.getUpdated());
     }
+    void reset() {
+        _stats->setRead(0);
+        _stats->setDeleted(0);
+        _stats->setInserted(0);
+        _stats->setUpdated(0);
+    }
 
 private:
     IDLType* _stats;
@@ -144,6 +148,11 @@ template <>
 void CompactStatsCounter<ECOCStats>::add(const ECOCStats& other) {
     addReads(other.getRead());
     addDeletes(other.getDeleted());
+}
+template <>
+void CompactStatsCounter<ECOCStats>::reset() {
+    _stats->setRead(0);
+    _stats->setDeleted(0);
 }
 
 template <typename T>
@@ -218,14 +227,16 @@ void upsertNullAnchor(FLEQueryInterface* queryImpl,
     }
 }
 
-void checkSchemaAndCompactionTokens(const BSONObj& tokens, const Collection& edc) {
+void checkSchemaAndCompactionOrCleanupTokens(const BSONObj& tokens,
+                                             const Collection& edc,
+                                             StringData tokenType) {
     uassert(6346807,
             "Target namespace is not an encrypted collection",
             edc.getCollectionOptions().encryptedFieldConfig);
 
     // Validate the request contains a compaction token for each encrypted field
     const auto& efc = edc.getCollectionOptions().encryptedFieldConfig.value();
-    CompactionHelpers::validateCompactionTokens(efc, tokens);
+    CompactionHelpers::validateCompactionOrCleanupTokens(efc, tokens, tokenType);
 }
 
 std::shared_ptr<stdx::unordered_set<ECOCCompactionDocumentV2>> readUniqueECOCEntriesInTxn(
@@ -234,8 +245,6 @@ std::shared_ptr<stdx::unordered_set<ECOCCompactionDocumentV2>> readUniqueECOCEnt
     const NamespaceString ecocCompactNss,
     BSONObj compactionTokens,
     ECOCStats* ecocStats) {
-
-    auto innerEcocStats = std::make_shared<ECOCStats>();
     auto uniqueEcocEntries = std::make_shared<stdx::unordered_set<ECOCCompactionDocumentV2>>();
 
     if (MONGO_unlikely(fleCompactOrCleanupFailBeforeECOCRead.shouldFail())) {
@@ -250,16 +259,19 @@ std::shared_ptr<stdx::unordered_set<ECOCCompactionDocumentV2>> readUniqueECOCEnt
     auto sharedBlock = std::make_shared<decltype(argsBlock)>(argsBlock);
     auto service = opCtx->getService();
 
+    auto txnEcocStats = std::make_shared<ECOCStats>();
     auto swResult = trun->runNoThrow(
         opCtx,
-        [service, sharedBlock, uniqueEcocEntries, innerEcocStats](
+        [service, sharedBlock, uniqueEcocEntries, txnEcocStats](
             const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+            // Zero in order to avoid accumulating stats from aborted transactions.
+            CompactStatsCounter<ECOCStats>(txnEcocStats.get()).reset();
             FLEQueryInterfaceImpl queryImpl(txnClient, service);
 
             auto [compactionTokens2, ecocCompactNss2] = *sharedBlock.get();
 
             *uniqueEcocEntries = getUniqueCompactionDocuments(
-                &queryImpl, compactionTokens2, ecocCompactNss2, innerEcocStats.get());
+                &queryImpl, compactionTokens2, ecocCompactNss2, txnEcocStats.get());
 
             return SemiFuture<void>::makeReady();
         });
@@ -268,7 +280,7 @@ std::shared_ptr<stdx::unordered_set<ECOCCompactionDocumentV2>> readUniqueECOCEnt
 
     if (ecocStats) {
         CompactStatsCounter<ECOCStats> ctr(ecocStats);
-        ctr.add(*innerEcocStats);
+        ctr.add(*txnEcocStats);
     }
     return uniqueEcocEntries;
 }
@@ -320,9 +332,9 @@ EncryptedStateCollectionsNamespaces::createFromDataCollection(const Collection& 
     }
 
     namespaces.ecocRenameNss = NamespaceStringUtil::deserialize(
-        dbName, namespaces.ecocNss.coll().toString().append(".compact"));
+        dbName, std::string{namespaces.ecocNss.coll()}.append(".compact"));
     namespaces.ecocLockNss = NamespaceStringUtil::deserialize(
-        dbName, namespaces.ecocNss.coll().toString().append(".lock"));
+        dbName, std::string{namespaces.ecocNss.coll()}.append(".lock"));
     return namespaces;
 }
 
@@ -352,14 +364,18 @@ stdx::unordered_set<ECOCCompactionDocumentV2> getUniqueCompactionDocuments(
 
         for (auto& doc : docs) {
             auto ecocDoc = ECOCCompactionDocumentV2::parseAndDecrypt(doc, compactionToken.token);
-            uassert(
-                8574701,
-                "Compaction token for field '{}' is of type '{}', but ECOCDocument is of type '{}'"_format(
-                    compactionToken.fieldPathName,
-                    compactionToken.isRange() ? "range"_sd : "equality"_sd,
-                    ecocDoc.isRange() ? "range"_sd : "equality"_sd),
-                ecocDoc.isRange() == compactionToken.isRange());
-            if (compactionToken.isRange()) {
+            uassert(8574701,
+                    fmt::format("Compaction token for field '{}' is of type '{}', but ECOCDocument "
+                                "is of type '{}'",
+                                compactionToken.fieldPathName,
+                                compactionToken.hasPaddingToken() ? "range-or-text-search"_sd
+                                                                  : "equality"_sd,
+                                ecocDoc.isRange()            ? "range"_sd
+                                    : ecocDoc.isTextSearch() ? "text-search"_sd
+                                                             : "equality"_sd),
+                    (ecocDoc.isRange() || ecocDoc.isTextSearch()) ==
+                        compactionToken.hasPaddingToken());
+            if (compactionToken.hasPaddingToken()) {
                 ecocDoc.anchorPaddingRootToken = compactionToken.anchorPaddingToken;
             }
             c.insert(std::move(ecocDoc));
@@ -369,6 +385,7 @@ stdx::unordered_set<ECOCCompactionDocumentV2> getUniqueCompactionDocuments(
 }
 
 void compactOneFieldValuePairV2(FLEQueryInterface* queryImpl,
+                                HmacContext* hmacCtx,
                                 const ECOCCompactionDocumentV2& ecocDoc,
                                 const NamespaceString& escNss,
                                 ECStats* escStats) {
@@ -414,11 +431,15 @@ void compactOneFieldValuePairV2(FLEQueryInterface* queryImpl,
             "getQueryableEncryptionCountInfo returned an invalid position for the next anchor",
             countInfo.count > 0);
 
-    auto valueToken = FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(ecocDoc.esc);
+    auto valueToken = ESCTwiceDerivedValueToken::deriveFrom(ecocDoc.esc);
     auto latestCpos = emuBinaryResult.cpos.value();
 
-    auto anchorDoc = ESCCollection::generateAnchorDocument(
-        ESCTwiceDerivedTagToken(countInfo.tagTokenData), valueToken, countInfo.count, latestCpos);
+    auto anchorDoc =
+        ESCCollection::generateAnchorDocument(hmacCtx,
+                                              ESCTwiceDerivedTagToken(countInfo.tagTokenData),
+                                              valueToken,
+                                              countInfo.count,
+                                              latestCpos);
 
     StmtId stmtId = kUninitializedStmtId;
 
@@ -433,37 +454,19 @@ void compactOneFieldValuePairV2(FLEQueryInterface* queryImpl,
     stats.addInserts(1);
 }
 
-
-void compactOneRangeFieldPad(FLEQueryInterface* queryImpl,
-                             const NamespaceString& escNss,
-                             StringData fieldPath,
-                             BSONType fieldType,
-                             const QueryTypeConfig& queryTypeConfig,
-                             double anchorPaddingFactor,
-                             std::size_t uniqueLeaves,
-                             std::size_t uniqueTokens,
-                             const AnchorPaddingRootToken& anchorPaddingRootToken,
-                             ECStats* escStats,
-                             std::size_t maxDocsPerInsert) {
+void padOneField(FLEQueryInterface* queryImpl,
+                 HmacContext* hmacCtx,
+                 const NamespaceString& escNss,
+                 size_t numPads,
+                 const AnchorPaddingRootToken& anchorPaddingRootToken,
+                 ECStats* escStats,
+                 std::size_t maxDocsPerInsert) {
     CompactStatsCounter<ECStats> stats(escStats);
-    // Compact 4.e, Calculate pathLength := #Edges_SPH(lb, lb, uh, prc, theta)
-    const auto pathLength = getEdgesLength(fieldType, fieldPath, queryTypeConfig);
-    // Compact 4.f, Calculate numPads := ceil( gamma * (pathLength * uniqueLeaves - len(C_f)) )
-    // This assumes that (pathLength * uniqueLeaves) >= uniqueTokens
-    dassert((pathLength * uniqueLeaves) >= uniqueTokens);
-    const size_t numPads =
-        std::ceil(anchorPaddingFactor * ((pathLength * uniqueLeaves) - uniqueTokens));
-    if (numPads <= 0) {
-        // Nothing to do.
-        return;
-    }
-
-    // Compact 4.g, Calculate S_1,d := F_s^esc_f,d(1), S_2,d := F_s^esc_f,d(2)
-    const auto anchorPaddingKeyToken =
-        FLEAnchorPaddingDerivedGenerator::generateAnchorPaddingKeyToken(anchorPaddingRootToken);
+    // Compact 4.f.iii/4.g.ii, Calculate S_1,d := F_s^esc_f,d(1), S_2,d := F_s^esc_f,d(2)
+    const auto anchorPaddingKeyToken = AnchorPaddingKeyToken::deriveFrom(anchorPaddingRootToken);
     const auto anchorPaddingValueToken =
-        FLEAnchorPaddingDerivedGenerator::generateAnchorPaddingValueToken(anchorPaddingRootToken);
-    // Compact 4.h, Calculate a := AnchorBinaryHops(AnchorPaddingTokenKey,
+        AnchorPaddingValueToken::deriveFrom(anchorPaddingRootToken);
+    // Compact 4.f.iv/4.g.iii, Calculate a := AnchorBinaryHops(AnchorPaddingTokenKey,
     // AnchorPaddingTokenValue)
     // Use a call to getQueryableEncryptionCountInfo to get count info in one roundtrip rather than
     // using anchorBinaryHops, which would take multiple
@@ -480,16 +483,9 @@ void compactOneRangeFieldPad(FLEQueryInterface* queryImpl,
     // If the apos returned is null, read the null anchor document for correct apos.
     auto apos = optA ? *optA : countInfo.nullAnchorCounts.value().apos;
 
-    // Compact 4.i, for all i in numPads: esc.insert(anchorPaddingDocument)
+    // Compact 4.f.v/4.g.iv, for all i in numPads: esc.insert(anchorPaddingDocument)
     // {_id   : F(AnchorPaddingKeyToken, null || a + i),
     //  value : Enc(AnchorPaddingValueToken, 0 || 0 )}
-    LOGV2_DEBUG(9165601,
-                2,
-                "Inserting padding documents for range field",
-                "edgesLength"_attr = pathLength,
-                "uniqueLeaves"_attr = uniqueLeaves,
-                "uniqueTokens"_attr = uniqueTokens);
-
     std::vector<BSONObj> batchWrite;
     StmtId stmtId = kUninitializedStmtId;
     maxDocsPerInsert = (maxDocsPerInsert > 0) ? std::min(numPads, maxDocsPerInsert) : numPads;
@@ -499,7 +495,7 @@ void compactOneRangeFieldPad(FLEQueryInterface* queryImpl,
 
         for (; i <= numPads && batchWrite.size() < maxDocsPerInsert; i++) {
             batchWrite.push_back(ESCCollectionAnchorPadding::generatePaddingDocument(
-                anchorPaddingKeyToken, anchorPaddingValueToken, apos + i));
+                hmacCtx, anchorPaddingKeyToken, anchorPaddingValueToken, apos + i));
         }
         const auto docsCount = batchWrite.size();
         checkWriteErrors(uassertStatusOK(
@@ -509,21 +505,83 @@ void compactOneRangeFieldPad(FLEQueryInterface* queryImpl,
     }
 }
 
+void compactOneRangeFieldPad(FLEQueryInterface* queryImpl,
+                             HmacContext* hmacCtx,
+                             const NamespaceString& escNss,
+                             StringData fieldPath,
+                             BSONType fieldType,
+                             const QueryTypeConfig& queryTypeConfig,
+                             double anchorPaddingFactor,
+                             std::size_t uniqueLeaves,
+                             std::size_t uniqueTokens,
+                             const AnchorPaddingRootToken& anchorPaddingRootToken,
+                             ECStats* escStats,
+                             std::size_t maxDocsPerInsert) {
+    // Compact 4.f.i, Calculate pathLength := #Edges_SPH(lb, lb, uh, prc, theta)
+    const auto pathLength = getEdgesLength(fieldType, fieldPath, queryTypeConfig);
+    // Compact 4.f.ii, Calculate numPads := ceil( gamma * (pathLength * uniqueLeaves - len(C_f)) )
+    // This assumes that (pathLength * uniqueLeaves) >= uniqueTokens
+    dassert((pathLength * uniqueLeaves) >= uniqueTokens);
+    const size_t numPads =
+        std::ceil(anchorPaddingFactor * ((pathLength * uniqueLeaves) - uniqueTokens));
+    if (numPads <= 0) {
+        // Nothing to do.
+        return;
+    }
+    LOGV2_DEBUG(9165601,
+                2,
+                "Inserting padding documents for range field",
+                "numPads"_attr = numPads,
+                "edgesLength"_attr = pathLength,
+                "uniqueLeaves"_attr = uniqueLeaves,
+                "uniqueTokens"_attr = uniqueTokens);
+
+    padOneField(
+        queryImpl, hmacCtx, escNss, numPads, anchorPaddingRootToken, escStats, maxDocsPerInsert);
+}
+
+void compactOneTextSearchFieldPad(FLEQueryInterface* queryImpl,
+                                  HmacContext* hmacCtx,
+                                  const NamespaceString& escNss,
+                                  StringData fieldPath,
+                                  std::size_t totalMsize,
+                                  std::size_t uniqueTokens,
+                                  const AnchorPaddingRootToken& anchorPaddingRootToken,
+                                  ECStats* escStats,
+                                  std::size_t maxDocsPerInsert) {
+    CompactStatsCounter<ECStats> stats(escStats);
+    // Compact 4.g.i, Calculate numPads := totalMsize - len(C_f)
+    // This assumes that totalMsize >= uniqueTokens
+    dassert(totalMsize >= uniqueTokens);
+    const size_t numPads = totalMsize - uniqueTokens;
+    if (numPads == 0) {
+        // Nothing to do.
+        return;
+    }
+    LOGV2_DEBUG(10523000,
+                2,
+                "Inserting padding documents for text search field",
+                "numPads"_attr = numPads,
+                "totalMsize"_attr = totalMsize,
+                "uniqueTokens"_attr = uniqueTokens);
+
+    padOneField(
+        queryImpl, hmacCtx, escNss, numPads, anchorPaddingRootToken, escStats, maxDocsPerInsert);
+}
 namespace {
 auto generateCompactionTokenPair(const ESCDerivedFromDataTokenAndContentionFactorToken& rootToken) {
-    return std::make_tuple(
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedTagToken(rootToken),
-        FLETwiceDerivedTokenGenerator::generateESCTwiceDerivedValueToken(rootToken));
+    return std::make_tuple(ESCTwiceDerivedTagToken::deriveFrom(rootToken),
+                           ESCTwiceDerivedValueToken::deriveFrom(rootToken));
 }
 
 auto generateCompactionTokenPair(const AnchorPaddingRootToken& rootToken) {
-    return std::make_tuple(
-        FLEAnchorPaddingDerivedGenerator::generateAnchorPaddingKeyToken(rootToken),
-        FLEAnchorPaddingDerivedGenerator::generateAnchorPaddingValueToken(rootToken));
+    return std::make_tuple(AnchorPaddingKeyToken::deriveFrom(rootToken),
+                           AnchorPaddingValueToken::deriveFrom(rootToken));
 }
 
 template <typename Generator, typename T>
 std::vector<PrfBlock> cleanupOneFieldValuePairImpl(FLEQueryInterface* queryImpl,
+                                                   HmacContext* hmacCtx,
                                                    StringData fieldName,
                                                    const T& rootToken,
                                                    const NamespaceString& escNss,
@@ -594,8 +652,8 @@ std::vector<PrfBlock> cleanupOneFieldValuePairImpl(FLEQueryInterface* queryImpl,
         auto latestCpos = countInfo.count;
 
         // Update null anchor with the latest positions
-        auto newAnchor =
-            Generator::generateNullAnchorDocument(tagToken, valueToken, latestApos, latestCpos);
+        auto newAnchor = Generator::generateNullAnchorDocument(
+            hmacCtx, tagToken, valueToken, latestApos, latestCpos);
         upsertNullAnchor(queryImpl, true, newAnchor, escNss, escStats);
 
     } else if (emuBinaryResult.apos.value() == 0) {
@@ -606,8 +664,8 @@ std::vector<PrfBlock> cleanupOneFieldValuePairImpl(FLEQueryInterface* queryImpl,
         auto latestCpos = countInfo.count;
 
         // Insert a new null anchor.
-        auto newAnchor =
-            Generator::generateNullAnchorDocument(tagToken, valueToken, latestApos, latestCpos);
+        auto newAnchor = Generator::generateNullAnchorDocument(
+            hmacCtx, tagToken, valueToken, latestApos, latestCpos);
         upsertNullAnchor(queryImpl, false, newAnchor, escNss, escStats);
 
     } else /* (apos > 0) */ {
@@ -621,8 +679,8 @@ std::vector<PrfBlock> cleanupOneFieldValuePairImpl(FLEQueryInterface* queryImpl,
         bool nullAnchorExists = countInfo.nullAnchorCounts.has_value();
 
         // upsert the null anchor with the latest positions
-        auto newAnchor =
-            Generator::generateNullAnchorDocument(tagToken, valueToken, latestApos, latestCpos);
+        auto newAnchor = Generator::generateNullAnchorDocument(
+            hmacCtx, tagToken, valueToken, latestApos, latestCpos);
         upsertNullAnchor(queryImpl, nullAnchorExists, newAnchor, escNss, escStats);
 
         // insert the _id of stale anchors (anchors in range [bottomApos + 1, latestApos])
@@ -632,11 +690,12 @@ std::vector<PrfBlock> cleanupOneFieldValuePairImpl(FLEQueryInterface* queryImpl,
             bottomApos = countInfo.nullAnchorCounts->apos;
         }
 
+        HmacContext context;
         for (auto i = bottomApos + 1; i <= latestApos; i++) {
             if (anchorsToDelete.size() >= maxAnchorListLength) {
                 break;
             }
-            anchorsToDelete.push_back(Generator::generateAnchorId(tagToken, i));
+            anchorsToDelete.push_back(Generator::generateAnchorId(&context, tagToken, i));
         }
     }
     return anchorsToDelete;
@@ -644,6 +703,7 @@ std::vector<PrfBlock> cleanupOneFieldValuePairImpl(FLEQueryInterface* queryImpl,
 }  // namespace
 
 std::vector<PrfBlock> cleanupOneFieldValuePair(FLEQueryInterface* queryImpl,
+                                               HmacContext* hmacCtx,
                                                const ECOCCompactionDocumentV2& ecocDoc,
                                                const NamespaceString& escNss,
                                                std::size_t maxAnchorListLength,
@@ -652,6 +712,7 @@ std::vector<PrfBlock> cleanupOneFieldValuePair(FLEQueryInterface* queryImpl,
     if (mode == FLECleanupOneMode::kNormal) {
         return cleanupOneFieldValuePairImpl<ESCCollection>(
             queryImpl,
+            hmacCtx,
             ecocDoc.fieldName,
             ecocDoc.esc,
             escNss,
@@ -660,11 +721,13 @@ std::vector<PrfBlock> cleanupOneFieldValuePair(FLEQueryInterface* queryImpl,
             FLEQueryInterface::TagQueryType::kCleanup);
     } else {
         invariant(mode == FLECleanupOneMode::kPadding);
-        if (!ecocDoc.isRange() || !ecocDoc.anchorPaddingRootToken) {
+        if (ecocDoc.isEquality() || !ecocDoc.anchorPaddingRootToken) {
+            // Equality fields are not padded.
             return {};
         }
         return cleanupOneFieldValuePairImpl<ESCCollectionAnchorPadding>(
             queryImpl,
+            hmacCtx,
             ecocDoc.fieldName,
             *ecocDoc.anchorPaddingRootToken,
             escNss,
@@ -680,13 +743,15 @@ void processFLECompactV2(OperationContext* opCtx,
                          const EncryptedStateCollectionsNamespaces& namespaces,
                          ECStats* escStats,
                          ECOCStats* ecocStats) {
-    auto innerEscStats = std::make_shared<ECStats>();
+    ECStats innerEscStats;
+    CompactStatsCounter<ECStats> innerEscStatsCtr(&innerEscStats);
 
     /* uniqueEcocEntries corresponds to the set 'C_f' in OST-1 */
     auto uniqueEcocEntries = readUniqueECOCEntriesInTxn(
         opCtx, getTxn, namespaces.ecocRenameNss, request.getCompactionTokens(), ecocStats);
 
-    // Collect all Range fields, counting unique leaves and tokens.
+    // Collect all range & text search fields, counting unique leaves and tokens for range, and
+    // msize for text search.
     struct RangeFieldInfo {
         std::size_t uniqueLeaves{0};
         std::size_t uniqueTokens{0};
@@ -694,27 +759,41 @@ void processFLECompactV2(OperationContext* opCtx,
         QueryTypeConfig queryTypeConfig;
         BSONType fieldType;
     };
+    struct TextSearchFieldInfo {
+        std::size_t totalMsize{0};
+        std::size_t uniqueTokens{0};
+        boost::optional<AnchorPaddingRootToken> anchorPaddingRootToken;
+    };
     std::map<StringData, RangeFieldInfo> rangeFields;
+    std::map<StringData, TextSearchFieldInfo> textSearchFields;
     for (auto& ecocDoc : *uniqueEcocEntries) {
-        if (!ecocDoc.isRange()) {
-            continue;
-        }
-        auto& rangeField = rangeFields[ecocDoc.fieldName];
-        ++rangeField.uniqueTokens;
-        if (ecocDoc.isLeaf.get_value_or(false)) {
-            // Compact 4.d.iv.B, count uniqueLeaves in range fields
-            ++rangeField.uniqueLeaves;
-        }
-        if (!rangeField.anchorPaddingRootToken) {
-            // Prereq for Compact 4.g, Compute F_s^esc_f,d
-            rangeField.anchorPaddingRootToken = ecocDoc.anchorPaddingRootToken;
+        if (ecocDoc.isRange()) {
+            auto& rangeField = rangeFields[ecocDoc.fieldName];
+            ++rangeField.uniqueTokens;
+            if (ecocDoc.isLeaf.get_value_or(false)) {
+                // Compact 4.d.iv.B, count uniqueLeaves in range fields
+                ++rangeField.uniqueLeaves;
+            }
+            if (!rangeField.anchorPaddingRootToken) {
+                // Prereq for Compact 4.g, Compute F_s^esc_f,d
+                rangeField.anchorPaddingRootToken = ecocDoc.anchorPaddingRootToken;
+            }
+        } else if (ecocDoc.isTextSearch()) {
+            auto& textSearchField = textSearchFields[ecocDoc.fieldName];
+            ++textSearchField.uniqueTokens;
+            textSearchField.totalMsize += ecocDoc.msize.value_or(0);
+            if (!textSearchField.anchorPaddingRootToken) {
+                // Prereq for Compact 4.g, Compute F_s^esc_f,d
+                textSearchField.anchorPaddingRootToken = ecocDoc.anchorPaddingRootToken;
+            }
         }
     }
 
-    // Validate that we have an EncryptedFieldConfig for each range field.
-    if (!rangeFields.empty()) {
+    // Validate that we have an EncryptedFieldConfig for each range and text search field.
+    if (!rangeFields.empty() || !textSearchFields.empty()) {
         uassert(8574702,
-                "Command '{}' requires field '{}' when range fields are present"_format(
+                fmt::format(
+                    "Command '{}' requires field '{}' when range or text search fields are present",
                     CompactStructuredEncryptionData::kCommandName,
                     CompactStructuredEncryptionData::kEncryptionInformationFieldName),
                 request.getEncryptionInformation());
@@ -725,19 +804,37 @@ void processFLECompactV2(OperationContext* opCtx,
             auto fieldConfig = std::find_if(efcFields.begin(), efcFields.end(), [&](const auto& f) {
                 return rfIt.first == f.getPath();
             });
-            uassert(
-                8574705,
-                "Missing range field '{}' in '{}'"_format(
-                    rfIt.first, CompactStructuredEncryptionData::kEncryptionInformationFieldName),
-                fieldConfig != efcFields.end());
+            uassert(8574705,
+                    fmt::format("Missing range field '{}' in '{}'",
+                                rfIt.first,
+                                CompactStructuredEncryptionData::kEncryptionInformationFieldName),
+                    fieldConfig != efcFields.end());
             rfIt.second.queryTypeConfig = getQueryType(*fieldConfig, QueryTypeEnum::Range);
 
-            uassert(
-                9107500,
-                "Missing bsonType for range field '{}' in '{}'"_format(
-                    rfIt.first, CompactStructuredEncryptionData::kEncryptionInformationFieldName),
-                fieldConfig->getBsonType().has_value());
+            uassert(9107500,
+                    fmt::format("Missing bsonType for range field '{}' in '{}'",
+                                rfIt.first,
+                                CompactStructuredEncryptionData::kEncryptionInformationFieldName),
+                    fieldConfig->getBsonType().has_value());
             rfIt.second.fieldType = typeFromName(fieldConfig->getBsonType().value());
+        }
+        for (const auto& [fieldPath, _] : textSearchFields) {
+            auto fieldConfig = std::find_if(efcFields.begin(), efcFields.end(), [&](const auto& f) {
+                return fieldPath == f.getPath();
+            });
+            uassert(10523001,
+                    fmt::format("Missing text search field '{}' in '{}'",
+                                fieldPath,
+                                CompactStructuredEncryptionData::kEncryptionInformationFieldName),
+                    fieldConfig != efcFields.end());
+
+            uassert(
+                10523002,
+                fmt::format(
+                    "Text search field '{}' in '{}' must have at least one text search query type",
+                    fieldPath,
+                    CompactStructuredEncryptionData::kEncryptionInformationFieldName),
+                hasQueryTypeMatching(*fieldConfig, isFLE2TextQueryType));
         }
     }
 
@@ -753,21 +850,29 @@ void processFLECompactV2(OperationContext* opCtx,
         auto sharedBlock = std::make_shared<decltype(argsBlock)>(argsBlock);
         auto service = opCtx->getService();
 
-        auto swResult = trun->runNoThrow(
-            opCtx,
-            [service, sharedBlock, innerEscStats](const txn_api::TransactionClient& txnClient,
-                                                  ExecutorPtr txnExec) {
-                FLEQueryInterfaceImpl queryImpl(txnClient, service);
+        auto txnEscStats = std::make_shared<ECStats>();
+        auto swResult =
+            trun->runNoThrow(opCtx,
+                             [service, sharedBlock, txnEscStats](
+                                 const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+                                 // Zero in order to avoid accumulating stats from aborted
+                                 // transactions.
+                                 CompactStatsCounter<ECStats>(txnEscStats.get()).reset();
+                                 HmacContext hmacCtx;
+                                 FLEQueryInterfaceImpl queryImpl(txnClient, service);
 
-                auto [ecocDoc2, escNss] = *sharedBlock.get();
+                                 auto [ecocDoc2, escNss] = *sharedBlock.get();
 
-                compactOneFieldValuePairV2(&queryImpl, ecocDoc2, escNss, innerEscStats.get());
+                                 compactOneFieldValuePairV2(
+                                     &queryImpl, &hmacCtx, ecocDoc2, escNss, txnEscStats.get());
 
-                return SemiFuture<void>::makeReady();
-            });
+                                 return SemiFuture<void>::makeReady();
+                             });
 
         uassertStatusOK(swResult);
         uassertStatusOK(swResult.getValue().getEffectiveStatus());
+        // If the transaction was successful, update the stats.
+        innerEscStatsCtr.add(*txnEscStats);
 
         if (MONGO_unlikely(fleCompactFailAfterTransactionCommit.shouldFail())) {
             uasserted(7663001, "Failed due to fleCompactFailAfterTransactionCommit fail point");
@@ -784,25 +889,30 @@ void processFLECompactV2(OperationContext* opCtx,
                 .getCompactAnchorPaddingFactor()
                 .get_value_or(kDefaultAnchorPaddingFactor));
         for (const auto& [fieldPath, rangeField] : rangeFields) {
-            // The function that handles the transaction may outlive this function so we need to use
-            // shared_ptrs
+            // The function that handles the transaction may outlive this function so we need to
+            // use shared_ptrs
             auto argsBlock = std::make_tuple(
-                namespaces.escNss, anchorPaddingFactor, rangeField, fieldPath.toString());
+                namespaces.escNss, anchorPaddingFactor, rangeField, std::string{fieldPath});
             auto sharedBlock = std::make_shared<decltype(argsBlock)>(argsBlock);
             auto service = opCtx->getService();
 
             std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxn(opCtx);
+            auto txnEscStats = std::make_shared<ECStats>();
             uassertStatusOK(
                 uassertStatusOK(
                     trun->runNoThrow(
                         opCtx,
-                        [service, sharedBlock, innerEscStats](
+                        [service, sharedBlock, txnEscStats](
                             const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+                            // Zero in order to avoid accumulating stats from aborted transactions.
+                            CompactStatsCounter<ECStats>(txnEscStats.get()).reset();
                             FLEQueryInterfaceImpl queryImpl(txnClient, service);
+                            HmacContext hmacCtx;
 
                             auto [escNss, anchorPaddingFactor, rangeField, fieldPath] =
                                 *sharedBlock.get();
                             compactOneRangeFieldPad(&queryImpl,
+                                                    &hmacCtx,
                                                     escNss,
                                                     fieldPath,
                                                     rangeField.fieldType,
@@ -811,18 +921,57 @@ void processFLECompactV2(OperationContext* opCtx,
                                                     rangeField.uniqueLeaves,
                                                     rangeField.uniqueTokens,
                                                     rangeField.anchorPaddingRootToken.get(),
-                                                    innerEscStats.get());
+                                                    txnEscStats.get());
 
                             return SemiFuture<void>::makeReady();
                         }))
                     .getEffectiveStatus());
+            // If the transaction was successful, update the stats.
+            innerEscStatsCtr.add(*txnEscStats);
         }
+    }
+
+    for (const auto& [fieldPath, tsField] : textSearchFields) {
+        // The function that handles the transaction may outlive this function so we need to use
+        // shared_ptrs
+        auto argsBlock = std::make_tuple(namespaces.escNss, tsField, std::string{fieldPath});
+        auto sharedBlock = std::make_shared<decltype(argsBlock)>(argsBlock);
+        auto service = opCtx->getService();
+
+        std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxn(opCtx);
+        auto txnEscStats = std::make_shared<ECStats>();
+        uassertStatusOK(
+            uassertStatusOK(
+                trun->runNoThrow(
+                    opCtx,
+                    [service, sharedBlock, txnEscStats](const txn_api::TransactionClient& txnClient,
+                                                        ExecutorPtr txnExec) {
+                        // Zero in order to avoid accumulating stats from aborted transactions.
+                        CompactStatsCounter<ECStats>(txnEscStats.get()).reset();
+                        FLEQueryInterfaceImpl queryImpl(txnClient, service);
+                        HmacContext hmacCtx;
+
+                        auto [escNss, tsField, fieldPath] = *sharedBlock.get();
+                        compactOneTextSearchFieldPad(&queryImpl,
+                                                     &hmacCtx,
+                                                     escNss,
+                                                     fieldPath,
+                                                     tsField.totalMsize,
+                                                     tsField.uniqueTokens,
+                                                     tsField.anchorPaddingRootToken.get(),
+                                                     txnEscStats.get());
+
+                        return SemiFuture<void>::makeReady();
+                    }))
+                .getEffectiveStatus());
+        // If the transaction was successful, update the stats.
+        innerEscStatsCtr.add(*txnEscStats);
     }
 
     // Update stats
     if (escStats) {
         CompactStatsCounter<ECStats> ctr(escStats);
-        ctr.add(*innerEscStats);
+        ctr.add(innerEscStats);
     }
 }
 
@@ -833,7 +982,8 @@ FLECleanupESCDeleteQueue processFLECleanup(OperationContext* opCtx,
                                            size_t pqMemoryLimit,
                                            ECStats* escStats,
                                            ECOCStats* ecocStats) {
-    auto innerEscStats = std::make_shared<ECStats>();
+    ECStats innerEscStats;
+    CompactStatsCounter<ECStats> innerEscStatsCtr(&innerEscStats);
 
     /* uniqueEcocEntries corresponds to the set 'C_f' in OST-1 */
     auto uniqueEcocEntries = readUniqueECOCEntriesInTxn(
@@ -846,7 +996,7 @@ FLECleanupESCDeleteQueue processFLECleanup(OperationContext* opCtx,
 
     // Each entry in 'C_f' represents a unique field/value pair. For each field/value pair,
     // compact the ESC entries for that field/value pair in one transaction.
-    auto rangeFieldsToCleanup = std::make_shared<std::map<StringData, AnchorPaddingRootToken>>();
+    auto paddedFieldsToCleanup = std::make_shared<std::map<StringData, AnchorPaddingRootToken>>();
     for (auto& ecocDoc : *uniqueEcocEntries) {
         // start a new transaction
         std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxn(opCtx);
@@ -858,16 +1008,21 @@ FLECleanupESCDeleteQueue processFLECleanup(OperationContext* opCtx,
         auto sharedBlock = std::make_shared<decltype(argsBlock)>(argsBlock);
         auto service = opCtx->getService();
 
-        if (ecocDoc.isRange() && ecocDoc.anchorPaddingRootToken &&
-            (rangeFieldsToCleanup->find(ecocDoc.fieldName) == rangeFieldsToCleanup->end())) {
-            (*rangeFieldsToCleanup)[ecocDoc.fieldName] = ecocDoc.anchorPaddingRootToken.get();
+        if (!ecocDoc.isEquality() && ecocDoc.anchorPaddingRootToken &&
+            (paddedFieldsToCleanup->find(ecocDoc.fieldName) == paddedFieldsToCleanup->end())) {
+            (*paddedFieldsToCleanup)[ecocDoc.fieldName] = ecocDoc.anchorPaddingRootToken.get();
         }
 
+        auto txnEscStats = std::make_shared<ECStats>();
         auto swResult =
             trun->runNoThrow(opCtx,
-                             [service, sharedBlock, innerEscStats, anchorsToRemove](
+                             [service, sharedBlock, txnEscStats, anchorsToRemove](
                                  const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+                                 // Zero in order to avoid accumulating stats from aborted
+                                 // transactions.
+                                 CompactStatsCounter<ECStats>(txnEscStats.get()).reset();
                                  FLEQueryInterfaceImpl queryImpl(txnClient, service);
+                                 HmacContext hmacCtx;
 
                                  auto [ecocDoc2, escNss, maxAnchors2] = *sharedBlock.get();
 
@@ -875,10 +1030,11 @@ FLECleanupESCDeleteQueue processFLECleanup(OperationContext* opCtx,
 
                                  *anchorsToRemove =
                                      cleanupOneFieldValuePair(&queryImpl,
+                                                              &hmacCtx,
                                                               ecocDoc2,
                                                               escNss,
                                                               maxAnchors2,
-                                                              innerEscStats.get(),
+                                                              txnEscStats.get(),
                                                               FLECleanupOneMode::kNormal);
 
                                  return SemiFuture<void>::makeReady();
@@ -886,6 +1042,8 @@ FLECleanupESCDeleteQueue processFLECleanup(OperationContext* opCtx,
 
         uassertStatusOK(swResult);
         uassertStatusOK(swResult.getValue().getEffectiveStatus());
+        // If the transaction was successful, update the stats.
+        innerEscStatsCtr.add(*txnEscStats);
 
         for (auto& anchorId : *anchorsToRemove) {
             pq.emplace(anchorId);
@@ -896,38 +1054,45 @@ FLECleanupESCDeleteQueue processFLECleanup(OperationContext* opCtx,
         }
     }
 
-    // Cleanup padding for field in RangeFields.
-    for (const auto& rangeFieldIt : *rangeFieldsToCleanup) {
+    // Cleanup padding for each padded (range/text search) field.
+    for (const auto& paddedFieldIt : *paddedFieldsToCleanup) {
         std::shared_ptr<txn_api::SyncTransactionWithRetries> trun = getTxn(opCtx);
         auto argsBlock = std::make_tuple(namespaces.escNss,
                                          pqMaxEntries - pq.size(),
-                                         rangeFieldIt.first.toString(),
-                                         rangeFieldIt.second);
+                                         std::string{paddedFieldIt.first},
+                                         paddedFieldIt.second);
         auto sharedBlock = std::make_shared<decltype(argsBlock)>(argsBlock);
+        auto txnEscStats = std::make_shared<ECStats>();
         auto result = uassertStatusOK(trun->runNoThrow(
             opCtx,
             [service = opCtx->getService(),
-             rangeFieldsToCleanup,
-             innerEscStats,
+             paddedFieldsToCleanup,
+             txnEscStats,
              sharedBlock,
              anchorsToRemove](const txn_api::TransactionClient& txnClient, ExecutorPtr txnExec) {
+                // Zero in order to avoid accumulating stats from aborted transactions.
+                CompactStatsCounter<ECStats>(txnEscStats.get()).reset();
                 FLEQueryInterfaceImpl queryImpl(txnClient, service);
+                HmacContext hmacCtx;
 
                 auto [escNss, maxAnchors, fieldName, anchorPaddingRootToken] = *sharedBlock.get();
 
                 anchorsToRemove->clear();
                 *anchorsToRemove = cleanupOneFieldValuePairImpl<ESCCollectionAnchorPadding>(
                     &queryImpl,
+                    &hmacCtx,
                     fieldName,
                     anchorPaddingRootToken,
                     escNss,
                     maxAnchors,
-                    innerEscStats.get(),
+                    txnEscStats.get(),
                     FLEQueryInterface::TagQueryType::kPadding);
 
                 return SemiFuture<void>::makeReady();
             }));
         uassertStatusOK(result.getEffectiveStatus());
+        // If the transaction was successful, update the stats.
+        innerEscStatsCtr.add(*txnEscStats);
 
         for (auto& anchorId : *anchorsToRemove) {
             pq.emplace(std::move(anchorId));
@@ -937,17 +1102,17 @@ FLECleanupESCDeleteQueue processFLECleanup(OperationContext* opCtx,
     // Update stats
     if (escStats) {
         CompactStatsCounter<ECStats> ctr(escStats);
-        ctr.add(*innerEscStats);
+        ctr.add(innerEscStats);
     }
     return pq;
 }
 
 void validateCompactRequest(const CompactStructuredEncryptionData& request, const Collection& edc) {
-    checkSchemaAndCompactionTokens(request.getCompactionTokens(), edc);
+    checkSchemaAndCompactionOrCleanupTokens(request.getCompactionTokens(), edc, "Compact"_sd);
 }
 
 void validateCleanupRequest(const CleanupStructuredEncryptionData& request, const Collection& edc) {
-    checkSchemaAndCompactionTokens(request.getCleanupTokens(), edc);
+    checkSchemaAndCompactionOrCleanupTokens(request.getCleanupTokens(), edc, "Cleanup"_sd);
 }
 
 const PrfBlock& FLECompactESCDeleteSet::at(size_t index) const {
@@ -1005,7 +1170,7 @@ FLECompactESCDeleteSet readRandomESCNonAnchorIds(OperationContext* opCtx,
         do {
             const auto doc = cursor->nextSafe();
             BSONElement id;
-            auto status = bsonExtractTypedField(doc, kId, BinData, &id);
+            auto status = bsonExtractTypedField(doc, kId, BSONType::binData, &id);
             uassertStatusOK(status);
 
             uassert(7293604,

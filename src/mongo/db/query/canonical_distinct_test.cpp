@@ -27,16 +27,9 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/cstdint.hpp>
-#include <cstdint>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/canonical_distinct.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -46,14 +39,19 @@
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/aggregation_request_helper.h"
-#include "mongo/db/query/canonical_distinct.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/parsed_distinct_command.h"
 #include "mongo/db/query/query_test_service_context.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <algorithm>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+
 
 namespace mongo {
 namespace {
@@ -70,7 +68,7 @@ public:
         expCtx = ExpressionContextBuilder{}
                      .opCtx(opCtx)
                      .ns(testns)
-                     .tmpDir(storageGlobalParams.dbpath + "/_tmp")
+                     .tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp")
                      .build();
     }
 
@@ -86,11 +84,11 @@ protected:
 std::unique_ptr<ParsedDistinctCommand> bsonToParsedDistinct(
     const boost::intrusive_ptr<ExpressionContext>& expCtx, const BSONObj& cmd) {
     auto distinctCommand = std::make_unique<DistinctCommandRequest>(DistinctCommandRequest::parse(
+        cmd,
         IDLParserContext("distinctCommandRequest",
                          auth::ValidatedTenancyScope::get(expCtx->getOperationContext()),
                          boost::none,
-                         SerializationContext::stateDefault()),
-        cmd));
+                         SerializationContext::stateDefault())));
     return parsed_distinct_command::parse(expCtx,
                                           std::move(distinctCommand),
                                           ExtensionsCallbackNoop(),
@@ -103,38 +101,31 @@ TEST_F(CanonicalDistinctTest, ConvertToAggregationNoQuery) {
     auto canonicalQuery =
         parsed_distinct_command::parseCanonicalQuery(expCtx, std::move(pdc), nullptr);
 
-    auto agg = parsed_distinct_command::asAggregation(*canonicalQuery);
-    ASSERT_OK(agg);
+    auto agg = parsed_distinct_command::asAggregation(
+        *canonicalQuery, boost::none, SerializationContext::stateCommandRequest());
 
-    auto cmdObj = OpMsgRequestBuilder::create(
-                      auth::ValidatedTenancyScope::kNotRequired, testns.dbName(), agg.getValue())
-                      .body;
-    auto ar = aggregation_request_helper::parseFromBSONForTests(cmdObj);
-    ASSERT_OK(ar.getStatus());
-    ASSERT(!ar.getValue().getExplain());
-    ASSERT_EQ(ar.getValue().getCursor().getBatchSize().value_or(
-                  aggregation_request_helper::kDefaultBatchSize),
-              aggregation_request_helper::kDefaultBatchSize);
-    ASSERT_EQ(ar.getValue().getNamespace(), testns);
-    ASSERT_BSONOBJ_EQ(ar.getValue().getCollation().value_or(BSONObj()), BSONObj());
-    ASSERT(!ar.getValue().getReadConcern().has_value());
-    ASSERT(ar.getValue().getUnwrappedReadPref().value_or(BSONObj()).isEmpty());
-    ASSERT_EQUALS(ar.getValue().getMaxTimeMS().value_or(0), 0u);
+    ASSERT(!agg.getExplain());
+    ASSERT_EQ(
+        agg.getCursor().getBatchSize().value_or(aggregation_request_helper::kDefaultBatchSize),
+        aggregation_request_helper::kDefaultBatchSize);
+    ASSERT_EQ(agg.getNamespace(), testns);
+    ASSERT_BSONOBJ_EQ(agg.getCollation().value_or(BSONObj()), BSONObj());
+    ASSERT(!agg.getReadConcern().has_value());
+    ASSERT(agg.getUnwrappedReadPref().value_or(BSONObj()).isEmpty());
+    ASSERT_EQUALS(agg.getMaxTimeMS().value_or(0), 0u);
 
     std::vector<BSONObj> expectedPipeline{
-        BSON("$replaceRoot" << BSON(
-                 "newRoot" << BSON("_internalUnwoundArray" << BSON("$_internalFindAllValuesAtPath"
-                                                                   << "x")))),
-        BSON("$unwind" << BSON("path"
-                               << "$_internalUnwoundArray"
-                               << "preserveNullAndEmptyArrays" << true)),
+        BSON("$replaceRoot" << BSON("newRoot"
+                                    << BSON("_internalUnwoundArray"
+                                            << BSON("$_internalFindAllValuesAtPath" << "x")))),
+        BSON("$unwind" << BSON("path" << "$_internalUnwoundArray"
+                                      << "preserveNullAndEmptyArrays" << true)),
         BSON("$group" << BSON("_id" << BSONNULL << "distinct"
-                                    << BSON("$addToSet"
-                                            << "$_internalUnwoundArray")))};
+                                    << BSON("$addToSet" << "$_internalUnwoundArray")))};
     ASSERT(std::equal(expectedPipeline.begin(),
                       expectedPipeline.end(),
-                      ar.getValue().getPipeline().begin(),
-                      ar.getValue().getPipeline().end(),
+                      agg.getPipeline().begin(),
+                      agg.getPipeline().end(),
                       SimpleBSONObjComparator::kInstance.makeEqualTo()));
 }
 
@@ -144,100 +135,74 @@ TEST_F(CanonicalDistinctTest, ConvertToAggregationDottedPathNoQuery) {
     auto canonicalQuery =
         parsed_distinct_command::parseCanonicalQuery(expCtx, std::move(pdc), nullptr);
 
-    auto agg = parsed_distinct_command::asAggregation(*canonicalQuery);
-    ASSERT_OK(agg);
+    auto agg = parsed_distinct_command::asAggregation(
+        *canonicalQuery, boost::none, SerializationContext::stateCommandRequest());
 
-    auto cmdObj = OpMsgRequestBuilder::create(
-                      auth::ValidatedTenancyScope::kNotRequired, testns.dbName(), agg.getValue())
-                      .body;
-    auto ar = aggregation_request_helper::parseFromBSONForTests(cmdObj);
-    ASSERT_OK(ar.getStatus());
-    ASSERT(!ar.getValue().getExplain());
-    ASSERT_EQ(ar.getValue().getCursor().getBatchSize().value_or(
-                  aggregation_request_helper::kDefaultBatchSize),
-              aggregation_request_helper::kDefaultBatchSize);
-    ASSERT_EQ(ar.getValue().getNamespace(), testns);
-    ASSERT_BSONOBJ_EQ(ar.getValue().getCollation().value_or(BSONObj()), BSONObj());
-    ASSERT(!ar.getValue().getReadConcern().has_value());
-    ASSERT(ar.getValue().getUnwrappedReadPref().value_or(BSONObj()).isEmpty());
-    ASSERT_EQUALS(ar.getValue().getMaxTimeMS().value_or(0), 0u);
+    ASSERT(!agg.getExplain());
+    ASSERT_EQ(
+        agg.getCursor().getBatchSize().value_or(aggregation_request_helper::kDefaultBatchSize),
+        aggregation_request_helper::kDefaultBatchSize);
+    ASSERT_EQ(agg.getNamespace(), testns);
+    ASSERT_BSONOBJ_EQ(agg.getCollation().value_or(BSONObj()), BSONObj());
+    ASSERT(!agg.getReadConcern().has_value());
+    ASSERT(agg.getUnwrappedReadPref().value_or(BSONObj()).isEmpty());
+    ASSERT_EQUALS(agg.getMaxTimeMS().value_or(0), 0u);
 
     std::vector<BSONObj> expectedPipeline{
-        BSON("$replaceRoot" << BSON(
-                 "newRoot" << BSON("_internalUnwoundArray" << BSON("$_internalFindAllValuesAtPath"
-                                                                   << "x.y.z")))),
-        BSON("$unwind" << BSON("path"
-                               << "$_internalUnwoundArray"
-                               << "preserveNullAndEmptyArrays" << true)),
+        BSON("$replaceRoot" << BSON("newRoot"
+                                    << BSON("_internalUnwoundArray"
+                                            << BSON("$_internalFindAllValuesAtPath" << "x.y.z")))),
+        BSON("$unwind" << BSON("path" << "$_internalUnwoundArray"
+                                      << "preserveNullAndEmptyArrays" << true)),
         BSON("$group" << BSON("_id" << BSONNULL << "distinct"
-                                    << BSON("$addToSet"
-                                            << "$_internalUnwoundArray")))};
+                                    << BSON("$addToSet" << "$_internalUnwoundArray")))};
     ASSERT(std::equal(expectedPipeline.begin(),
                       expectedPipeline.end(),
-                      ar.getValue().getPipeline().begin(),
-                      ar.getValue().getPipeline().end(),
+                      agg.getPipeline().begin(),
+                      agg.getPipeline().end(),
                       SimpleBSONObjComparator::kInstance.makeEqualTo()));
 }
 
 TEST_F(CanonicalDistinctTest, ConvertToAggregationWithAllOptions) {
-    auto rawCmd = BSON("distinct"
-                       << "testcoll"
-                       << "key"
-                       << "x"
-                       << "hint" << BSON("b" << 5) << "collation"
-                       << BSON("locale"
-                               << "en_US")
-                       << "readConcern"
-                       << BSON("level"
-                               << "linearizable")
-                       << "$queryOptions"
-                       << BSON("readPreference"
-                               << "secondary")
-                       << "maxTimeMS" << 100 << "$db"
-                       << "testdb");
+    auto rawCmd =
+        BSON("distinct" << "testcoll"
+                        << "key"
+                        << "x"
+                        << "hint" << BSON("b" << 5) << "collation" << BSON("locale" << "en_US")
+                        << "readConcern" << BSON("level" << "linearizable") << "$queryOptions"
+                        << BSON("readPreference" << "secondary") << "maxTimeMS" << 100 << "$db"
+                        << "testdb");
     auto pdc = bsonToParsedDistinct(expCtx, rawCmd);
     auto canonicalQuery =
         parsed_distinct_command::parseCanonicalQuery(expCtx, std::move(pdc), nullptr);
-    auto agg = parsed_distinct_command::asAggregation(*canonicalQuery);
-    ASSERT_OK(agg);
+    auto agg = parsed_distinct_command::asAggregation(
+        *canonicalQuery, boost::none, SerializationContext::stateCommandRequest());
 
-    auto cmdObj = OpMsgRequestBuilder::create(
-                      auth::ValidatedTenancyScope::kNotRequired, testns.dbName(), agg.getValue())
-                      .body;
-    auto ar = aggregation_request_helper::parseFromBSONForTests(cmdObj);
-    ASSERT_OK(ar.getStatus());
-    ASSERT(!ar.getValue().getExplain());
-    ASSERT_EQ(ar.getValue().getCursor().getBatchSize().value_or(
-                  aggregation_request_helper::kDefaultBatchSize),
-              aggregation_request_helper::kDefaultBatchSize);
-    ASSERT_EQ(ar.getValue().getNamespace(), testns);
-    ASSERT_BSONOBJ_EQ(ar.getValue().getCollation().value_or(BSONObj()),
-                      BSON("locale"
-                           << "en_US"));
-    ASSERT_BSONOBJ_EQ(
-        ar.getValue().getReadConcern().value_or(repl::ReadConcernArgs()).toBSONInner(),
-        BSON("level"
-             << "linearizable"));
-    ASSERT_BSONOBJ_EQ(ar.getValue().getUnwrappedReadPref().value_or(BSONObj()),
-                      BSON("readPreference"
-                           << "secondary"));
-    ASSERT_EQUALS(ar.getValue().getMaxTimeMS().value_or(0), 100u);
-    ASSERT_BSONOBJ_EQ(ar.getValue().getHint().value_or(BSONObj()), fromjson("{ b : 5 }"));
+    ASSERT(!agg.getExplain());
+    ASSERT_EQ(
+        agg.getCursor().getBatchSize().value_or(aggregation_request_helper::kDefaultBatchSize),
+        aggregation_request_helper::kDefaultBatchSize);
+    ASSERT_EQ(agg.getNamespace(), testns);
+    ASSERT_BSONOBJ_EQ(agg.getCollation().value_or(BSONObj()), BSON("locale" << "en_US"));
+    ASSERT_BSONOBJ_EQ(agg.getReadConcern().value_or(repl::ReadConcernArgs()).toBSONInner(),
+                      BSON("level" << "linearizable"));
+    ASSERT_BSONOBJ_EQ(agg.getUnwrappedReadPref().value_or(BSONObj()),
+                      BSON("readPreference" << "secondary"));
+    ASSERT_EQUALS(agg.getMaxTimeMS().value_or(0), 100u);
+    ASSERT_BSONOBJ_EQ(agg.getHint().value_or(BSONObj()), fromjson("{ b : 5 }"));
 
     std::vector<BSONObj> expectedPipeline{
-        BSON("$replaceRoot" << BSON(
-                 "newRoot" << BSON("_internalUnwoundArray" << BSON("$_internalFindAllValuesAtPath"
-                                                                   << "x")))),
-        BSON("$unwind" << BSON("path"
-                               << "$_internalUnwoundArray"
-                               << "preserveNullAndEmptyArrays" << true)),
+        BSON("$replaceRoot" << BSON("newRoot"
+                                    << BSON("_internalUnwoundArray"
+                                            << BSON("$_internalFindAllValuesAtPath" << "x")))),
+        BSON("$unwind" << BSON("path" << "$_internalUnwoundArray"
+                                      << "preserveNullAndEmptyArrays" << true)),
         BSON("$group" << BSON("_id" << BSONNULL << "distinct"
-                                    << BSON("$addToSet"
-                                            << "$_internalUnwoundArray")))};
+                                    << BSON("$addToSet" << "$_internalUnwoundArray")))};
     ASSERT(std::equal(expectedPipeline.begin(),
                       expectedPipeline.end(),
-                      ar.getValue().getPipeline().begin(),
-                      ar.getValue().getPipeline().end(),
+                      agg.getPipeline().begin(),
+                      agg.getPipeline().end(),
                       SimpleBSONObjComparator::kInstance.makeEqualTo()));
 }
 
@@ -247,39 +212,32 @@ TEST_F(CanonicalDistinctTest, ConvertToAggregationWithQuery) {
     auto canonicalQuery =
         parsed_distinct_command::parseCanonicalQuery(expCtx, std::move(pdc), nullptr);
 
-    auto agg = parsed_distinct_command::asAggregation(*canonicalQuery);
-    ASSERT_OK(agg);
+    auto agg = parsed_distinct_command::asAggregation(
+        *canonicalQuery, boost::none, SerializationContext::stateCommandRequest());
 
-    auto cmdObj = OpMsgRequestBuilder::create(
-                      auth::ValidatedTenancyScope::kNotRequired, testns.dbName(), agg.getValue())
-                      .body;
-    auto ar = aggregation_request_helper::parseFromBSONForTests(cmdObj);
-    ASSERT_OK(ar.getStatus());
-    ASSERT(!ar.getValue().getExplain());
-    ASSERT_EQ(ar.getValue().getCursor().getBatchSize().value_or(
-                  aggregation_request_helper::kDefaultBatchSize),
-              aggregation_request_helper::kDefaultBatchSize);
-    ASSERT_EQ(ar.getValue().getNamespace(), testns);
-    ASSERT_BSONOBJ_EQ(ar.getValue().getCollation().value_or(BSONObj()), BSONObj());
-    ASSERT(!ar.getValue().getReadConcern().has_value());
-    ASSERT(ar.getValue().getUnwrappedReadPref().value_or(BSONObj()).isEmpty());
-    ASSERT_EQUALS(ar.getValue().getMaxTimeMS().value_or(0), 0u);
+    ASSERT(!agg.getExplain());
+    ASSERT_EQ(
+        agg.getCursor().getBatchSize().value_or(aggregation_request_helper::kDefaultBatchSize),
+        aggregation_request_helper::kDefaultBatchSize);
+    ASSERT_EQ(agg.getNamespace(), testns);
+    ASSERT_BSONOBJ_EQ(agg.getCollation().value_or(BSONObj()), BSONObj());
+    ASSERT(!agg.getReadConcern().has_value());
+    ASSERT(agg.getUnwrappedReadPref().value_or(BSONObj()).isEmpty());
+    ASSERT_EQUALS(agg.getMaxTimeMS().value_or(0), 0u);
 
     std::vector<BSONObj> expectedPipeline{
         BSON("$match" << BSON("z" << 7)),
-        BSON("$replaceRoot" << BSON(
-                 "newRoot" << BSON("_internalUnwoundArray" << BSON("$_internalFindAllValuesAtPath"
-                                                                   << "y")))),
-        BSON("$unwind" << BSON("path"
-                               << "$_internalUnwoundArray"
-                               << "preserveNullAndEmptyArrays" << true)),
+        BSON("$replaceRoot" << BSON("newRoot"
+                                    << BSON("_internalUnwoundArray"
+                                            << BSON("$_internalFindAllValuesAtPath" << "y")))),
+        BSON("$unwind" << BSON("path" << "$_internalUnwoundArray"
+                                      << "preserveNullAndEmptyArrays" << true)),
         BSON("$group" << BSON("_id" << BSONNULL << "distinct"
-                                    << BSON("$addToSet"
-                                            << "$_internalUnwoundArray")))};
+                                    << BSON("$addToSet" << "$_internalUnwoundArray")))};
     ASSERT(std::equal(expectedPipeline.begin(),
                       expectedPipeline.end(),
-                      ar.getValue().getPipeline().begin(),
-                      ar.getValue().getPipeline().end(),
+                      agg.getPipeline().begin(),
+                      agg.getPipeline().end(),
                       SimpleBSONObjComparator::kInstance.makeEqualTo()));
 }
 
@@ -289,35 +247,50 @@ TEST_F(CanonicalDistinctTest, ExplainNotIncludedWhenConvertingToAggregationComma
     auto canonicalQuery =
         parsed_distinct_command::parseCanonicalQuery(expCtx, std::move(pdc), nullptr);
 
-    auto agg = parsed_distinct_command::asAggregation(*canonicalQuery);
-    ASSERT_OK(agg);
+    auto agg = parsed_distinct_command::asAggregation(
+        *canonicalQuery, boost::none, SerializationContext::stateCommandRequest());
 
-    ASSERT_FALSE(agg.getValue().hasField("explain"));
-
-    auto cmdObj = OpMsgRequestBuilder::create(
-                      auth::ValidatedTenancyScope::kNotRequired, testns.dbName(), agg.getValue())
-                      .body;
-    auto ar = aggregation_request_helper::parseFromBSONForTests(cmdObj);
-    ASSERT_OK(ar.getStatus());
-    ASSERT(!ar.getValue().getExplain());
-    ASSERT_EQ(ar.getValue().getNamespace(), testns);
-    ASSERT_BSONOBJ_EQ(ar.getValue().getCollation().value_or(BSONObj()), BSONObj());
+    ASSERT(!agg.getExplain());
+    ASSERT_EQ(agg.getNamespace(), testns);
+    ASSERT_BSONOBJ_EQ(agg.getCollation().value_or(BSONObj()), BSONObj());
 
     std::vector<BSONObj> expectedPipeline{
-        BSON("$replaceRoot" << BSON(
-                 "newRoot" << BSON("_internalUnwoundArray" << BSON("$_internalFindAllValuesAtPath"
-                                                                   << "x")))),
-        BSON("$unwind" << BSON("path"
-                               << "$_internalUnwoundArray"
-                               << "preserveNullAndEmptyArrays" << true)),
+        BSON("$replaceRoot" << BSON("newRoot"
+                                    << BSON("_internalUnwoundArray"
+                                            << BSON("$_internalFindAllValuesAtPath" << "x")))),
+        BSON("$unwind" << BSON("path" << "$_internalUnwoundArray"
+                                      << "preserveNullAndEmptyArrays" << true)),
         BSON("$group" << BSON("_id" << BSONNULL << "distinct"
-                                    << BSON("$addToSet"
-                                            << "$_internalUnwoundArray")))};
+                                    << BSON("$addToSet" << "$_internalUnwoundArray")))};
     ASSERT(std::equal(expectedPipeline.begin(),
                       expectedPipeline.end(),
-                      ar.getValue().getPipeline().begin(),
-                      ar.getValue().getPipeline().end(),
+                      agg.getPipeline().begin(),
+                      agg.getPipeline().end(),
                       SimpleBSONObjComparator::kInstance.makeEqualTo()));
+}
+
+TEST_F(CanonicalDistinctTest, CopyMaintainsDistinctProperties) {
+    auto rawCmd = fromjson("{distinct: 'testcoll', key: 'x', $db: 'testdb'}");
+    auto pdc = bsonToParsedDistinct(expCtx, rawCmd);
+    auto canonicalQuery =
+        parsed_distinct_command::parseCanonicalQuery(expCtx, std::move(pdc), nullptr);
+    const auto& originalDistinct = canonicalQuery->getDistinct();
+    originalDistinct->setProjectionSpec(BSON("_id" << 0 << "x" << 1));
+    originalDistinct->setSortRequirement(SortPattern(BSON("x" << 1), expCtx));
+
+    const auto& copyDistinct = CanonicalDistinct(*originalDistinct);
+    ASSERT_NE(&originalDistinct, &copyDistinct);
+
+    ASSERT_EQ(originalDistinct->getKey(), copyDistinct.getKey());
+    ASSERT_EQ(originalDistinct->isMirrored(), copyDistinct.isMirrored());
+    ASSERT_EQ(originalDistinct->getSampleId(), copyDistinct.getSampleId());
+    ASSERT_BSONOBJ_EQ(originalDistinct->getProjectionSpec().get(),
+                      copyDistinct.getProjectionSpec().get());
+    ASSERT_EQ(originalDistinct->isDistinctScanDirectionFlipped(),
+              copyDistinct.isDistinctScanDirectionFlipped());
+    ASSERT_EQ(originalDistinct->getSortRequirement(), copyDistinct.getSortRequirement());
+    ASSERT_BSONOBJ_EQ(originalDistinct->getSerializedSortRequirement(),
+                      copyDistinct.getSerializedSortRequirement());
 }
 
 TEST_F(CanonicalDistinctTest, FailsToParseDistinctWithUnknownFields) {

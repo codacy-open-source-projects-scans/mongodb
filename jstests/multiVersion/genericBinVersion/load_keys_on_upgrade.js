@@ -2,29 +2,29 @@ import "jstests/multiVersion/libs/multi_rs.js";
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
-var oldVersion = "last-lts";
+let oldVersion = "last-lts";
 
-var nodes = {
+let nodes = {
     n1: {binVersion: oldVersion},
     n2: {binVersion: oldVersion},
-    n3: {binVersion: oldVersion}
+    n3: {binVersion: oldVersion},
 };
 
-var keyFile = "jstests/libs/key1";
-var rst = new ReplSetTest({nodes: nodes, keyFile: keyFile});
+let keyFile = "jstests/libs/key1";
+let rst = new ReplSetTest({nodes: nodes, keyFile: keyFile});
 
 rst.startSet();
 
-rst.initiate(Object.extend(rst.getReplSetConfig(), {writeConcernMajorityJournalDefault: true}),
-             null,
-             {initiateWithDefaultElectionTimeout: true});
+rst.initiate(Object.extend(rst.getReplSetConfig(), {writeConcernMajorityJournalDefault: true}), null, {
+    initiateWithDefaultElectionTimeout: true,
+});
 
 // Wait for a primary node...
-var primary = rst.getPrimary();
+let primary = rst.getPrimary();
 
 primary.getDB("admin").createUser({user: "root", pwd: "root", roles: ["root"]}, {w: 3});
 
-var rsConn = new Mongo(rst.getURL());
+let rsConn = new Mongo(rst.getURL());
 assert.eq(1, rsConn.getDB("admin").auth("root", "root"));
 assert.commandWorked(rsConn.adminCommand({hello: 1}));
 print("clusterTime: " + tojson(rsConn.getDB("admin").getSession().getClusterTime()));
@@ -44,8 +44,7 @@ TestData.keyFile = undefined;
 
 try {
     rsConn.adminCommand({hello: 1});
-} catch (e) {
-}
+} catch (e) {}
 
 assert.eq(1, rsConn.getDB("admin").auth("root", "root"));
 assert.commandWorked(rsConn.adminCommand({hello: 1}));

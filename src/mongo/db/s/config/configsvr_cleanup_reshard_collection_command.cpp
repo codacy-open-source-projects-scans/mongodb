@@ -28,12 +28,6 @@
  */
 
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-#include <memory>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -42,22 +36,22 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/type_collection.h"
+#include "mongo/db/global_catalog/type_collection_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
-#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/resharding/resharding_manual_cleanup.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/catalog/type_collection_gen.h"
 #include "mongo/s/request_types/cleanup_reshard_collection_gen.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
 #include "mongo/s/write_ops/batched_command_request.h"
@@ -65,13 +59,18 @@
 #include "mongo/util/clock_source.h"
 #include "mongo/util/namespace_string_util.h"
 
+#include <memory>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
 
 namespace mongo {
 namespace {
-
-using namespace fmt::literals;
 
 auto constructFinalMetadataRemovalUpdateOperation(OperationContext* opCtx,
                                                   const NamespaceString& nss) {
@@ -133,11 +132,14 @@ public:
 
             collEntry = catalogClient->getCollection(opCtx, ns());
 
-            uassert(5403504,
+            uassert(
+                5403504,
+                fmt::format(
                     "Expected collection entry for {} to no longer have resharding metadata, but "
                     "metadata documents still exist; please rerun the cleanupReshardCollection "
-                    "command"_format(ns().toStringForErrorMsg()),
-                    !collEntry.getReshardingFields());
+                    "command",
+                    ns().toStringForErrorMsg()),
+                !collEntry.getReshardingFields());
         }
 
     private:

@@ -27,15 +27,7 @@
  *    it in the license file.
  */
 
-#include <array>
-#include <boost/move/utility_core.hpp>
-#include <fmt/format.h>
-#include <ostream>
-#include <thread>
-#include <tuple>
-#include <type_traits>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/util/producer_consumer_queue.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/client.h"
@@ -43,13 +35,21 @@
 #include "mongo/db/service_context.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/duration.h"
-#include "mongo/util/producer_consumer_queue.h"
 #include "mongo/util/time_support.h"
+
+#include <array>
+#include <ostream>
+#include <thread>
+#include <tuple>
+#include <type_traits>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -67,7 +67,7 @@ public:
     template <typename Callback>
     stdx::thread runThread(StringData name, Callback&& cb) {
         return stdx::thread([this, name, cb] {
-            auto client = _serviceCtx->getService()->makeClient(name.toString());
+            auto client = _serviceCtx->getService()->makeClient(std::string{name});
             auto opCtx = client->makeOperationContext();
 
             cb(opCtx.get());
@@ -94,7 +94,7 @@ public:
     template <typename Callback>
     stdx::thread runThread(StringData name, Callback&& cb) {
         return stdx::thread([this, name, cb] {
-            auto client = _serviceCtx->getService()->makeClient(name.toString());
+            auto client = _serviceCtx->getService()->makeClient(std::string{name});
             auto opCtx = client->makeOperationContext();
 
             opCtx->runWithDeadline(
@@ -117,24 +117,24 @@ private:
 template <bool requiresMultiProducer, bool requiresMultiConsumer, typename Callback>
 std::enable_if_t<!requiresMultiProducer && !requiresMultiConsumer> runCallbackWithPerms(
     Callback&& cb) {
-    std::forward<Callback>(cb)(std::true_type{}, std::true_type{});
-    std::forward<Callback>(cb)(std::true_type{}, std::false_type{});
-    std::forward<Callback>(cb)(std::false_type{}, std::true_type{});
-    std::forward<Callback>(cb)(std::false_type{}, std::false_type{});
+    cb(std::true_type{}, std::true_type{});
+    cb(std::true_type{}, std::false_type{});
+    cb(std::false_type{}, std::true_type{});
+    cb(std::false_type{}, std::false_type{});
 }
 
 template <bool requiresMultiProducer, bool requiresMultiConsumer, typename Callback>
 std::enable_if_t<requiresMultiProducer && !requiresMultiConsumer> runCallbackWithPerms(
     Callback&& cb) {
-    std::forward<Callback>(cb)(std::true_type{}, std::true_type{});
-    std::forward<Callback>(cb)(std::true_type{}, std::false_type{});
+    cb(std::true_type{}, std::true_type{});
+    cb(std::true_type{}, std::false_type{});
 }
 
 template <bool requiresMultiProducer, bool requiresMultiConsumer, typename Callback>
 std::enable_if_t<!requiresMultiProducer && requiresMultiConsumer> runCallbackWithPerms(
     Callback&& cb) {
-    std::forward<Callback>(cb)(std::true_type{}, std::true_type{});
-    std::forward<Callback>(cb)(std::false_type{}, std::true_type{});
+    cb(std::true_type{}, std::true_type{});
+    cb(std::false_type{}, std::true_type{});
 }
 
 template <bool requiresMultiProducer, bool requiresMultiConsumer, typename Callback>
@@ -234,7 +234,7 @@ private:
         __VA_ARGS__(name##CB{});                \
     }                                           \
     template <typename Helper>                  \
-    void name##CB::operator()(Helper&& helper)
+    void name##CB::operator()(Helper && helper)
 
 PRODUCER_CONSUMER_QUEUE_TEST(basicPushPop, runPermutations<false, false>) {
     typename Helper::template ProducerConsumerQueue<MoveOnly> pcq{};

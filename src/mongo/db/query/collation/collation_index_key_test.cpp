@@ -27,7 +27,7 @@
  *    it in the license file.
  */
 
-#include <memory>
+#include "mongo/db/query/collation/collation_index_key.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -37,14 +37,13 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
 
 namespace {
 
@@ -74,8 +73,7 @@ void assertKeyStringCollatorThrows(const CollatorInterfaceMock& collator, const 
 }
 
 TEST(CollationIndexKeyTest, IsCollatableTypeShouldBeTrueForString) {
-    BSONObj obj = BSON("foo"
-                       << "string");
+    BSONObj obj = BSON("foo" << "string");
     ASSERT_TRUE(CollationIndexKey::isCollatableType(obj.firstElement().type()));
 }
 
@@ -103,23 +101,16 @@ TEST(CollationIndexKeyTest, CollationAwareAppendCorrectlyAppendsElementWithNullC
 
 TEST(CollationIndexKeyTest, CollationAwareAppendReversesStringWithReverseMockCollator) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
-    BSONObj dataObj = BSON("foo"
-                           << "string");
+    BSONObj dataObj = BSON("foo" << "string");
     BSONObjBuilder out;
     CollationIndexKey::collationAwareIndexKeyAppend(dataObj.firstElement(), &collator, &out);
-    ASSERT_BSONOBJ_EQ(out.obj(),
-                      BSON(""
-                           << "gnirts"));
+    ASSERT_BSONOBJ_EQ(out.obj(), BSON("" << "gnirts"));
 }
 
 TEST(CollationIndexKeyTest, KeyStringAppendReversesStringWithReverseMockCollator) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
-    BSONObj dataObj = BSON("foo"
-                           << "string");
-    assertKeyStringCollatorOutput(collator,
-                                  dataObj,
-                                  BSON(""
-                                       << "gnirts"));
+    BSONObj dataObj = BSON("foo" << "string");
+    assertKeyStringCollatorOutput(collator, dataObj, BSON("" << "gnirts"));
 }
 
 TEST(CollationIndexKeyTest, CollationAwareAppendCorrectlySerializesEmptyComparisonKey) {
@@ -174,10 +165,8 @@ TEST(CollationIndexKeyTest, KeyStringAppendCorrectlySerializesWithEmbeddedNullBy
 
 TEST(CollationIndexKeyTest, CollationAwareAppendCorrectlyReversesSimpleEmbeddedObject) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
-    BSONObj dataObj = BSON("" << BSON("a"
-                                      << "!foo"));
-    BSONObj expected = BSON("" << BSON("a"
-                                       << "oof!"));
+    BSONObj dataObj = BSON("" << BSON("a" << "!foo"));
+    BSONObj expected = BSON("" << BSON("a" << "oof!"));
 
     BSONObjBuilder out;
     CollationIndexKey::collationAwareIndexKeyAppend(dataObj.firstElement(), &collator, &out);
@@ -186,19 +175,15 @@ TEST(CollationIndexKeyTest, CollationAwareAppendCorrectlyReversesSimpleEmbeddedO
 
 TEST(CollationIndexKeyTest, KeyStringAppendCorrectlyReversesSimpleEmbeddedObject) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
-    BSONObj dataObj = BSON("" << BSON("a"
-                                      << "!foo"));
-    BSONObj expected = BSON("" << BSON("a"
-                                       << "oof!"));
+    BSONObj dataObj = BSON("" << BSON("a" << "!foo"));
+    BSONObj expected = BSON("" << BSON("a" << "oof!"));
     assertKeyStringCollatorOutput(collator, dataObj, expected);
 }
 
 TEST(CollationIndexKeyTest, CollationAwareAppendCorrectlyReversesSimpleEmbeddedArray) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
-    BSONObj dataObj = BSON("" << BSON_ARRAY("foo"
-                                            << "bar"));
-    BSONObj expected = BSON("" << BSON_ARRAY("oof"
-                                             << "rab"));
+    BSONObj dataObj = BSON("" << BSON_ARRAY("foo" << "bar"));
+    BSONObj expected = BSON("" << BSON_ARRAY("oof" << "rab"));
 
     BSONObjBuilder out;
     CollationIndexKey::collationAwareIndexKeyAppend(dataObj.firstElement(), &collator, &out);
@@ -207,10 +192,8 @@ TEST(CollationIndexKeyTest, CollationAwareAppendCorrectlyReversesSimpleEmbeddedA
 
 TEST(CollationIndexKeyTest, KeyStringAppendCorrectlyReversesSimpleEmbeddedArray) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
-    BSONObj dataObj = BSON("" << BSON_ARRAY("foo"
-                                            << "bar"));
-    BSONObj expected = BSON("" << BSON_ARRAY("oof"
-                                             << "rab"));
+    BSONObj dataObj = BSON("" << BSON_ARRAY("foo" << "bar"));
+    BSONObj expected = BSON("" << BSON_ARRAY("oof" << "rab"));
     assertKeyStringCollatorOutput(collator, dataObj, expected);
 }
 
@@ -219,11 +202,11 @@ TEST(CollationIndexKeyTest, CollationAwareAppendCorrectlyReversesComplexNesting)
     BSONObj dataObj = fromjson(
         "{ '' : [{'a': 'ha', 'b': 2},"
         "'bar',"
-        "{'c': 2, 'd': 'ah', 'e': 'abc', 'f': ['cba', 'xyz']}]})");
+        "{'c': 2, 'd': 'ah', 'e': 'abc', 'f': ['cba', 'xyz']}]}");
     BSONObj expected = fromjson(
         "{ '' : [{'a': 'ah', 'b': 2},"
         "'rab',"
-        "{'c': 2, 'd': 'ha', 'e': 'cba', 'f': ['abc', 'zyx']}]})");
+        "{'c': 2, 'd': 'ha', 'e': 'cba', 'f': ['abc', 'zyx']}]}");
 
     BSONObjBuilder out;
     CollationIndexKey::collationAwareIndexKeyAppend(dataObj.firstElement(), &collator, &out);
@@ -235,11 +218,11 @@ TEST(CollationIndexKeyTest, KeyStringAppendCorrectlyReversesComplexNesting) {
     BSONObj dataObj = fromjson(
         "{ '' : [{'a': 'ha', 'b': 2},"
         "'bar',"
-        "{'c': 2, 'd': 'ah', 'e': 'abc', 'f': ['cba', 'xyz']}]})");
+        "{'c': 2, 'd': 'ah', 'e': 'abc', 'f': ['cba', 'xyz']}]}");
     BSONObj expected = fromjson(
         "{ '' : [{'a': 'ah', 'b': 2},"
         "'rab',"
-        "{'c': 2, 'd': 'ha', 'e': 'cba', 'f': ['abc', 'zyx']}]})");
+        "{'c': 2, 'd': 'ha', 'e': 'cba', 'f': ['abc', 'zyx']}]}");
     assertKeyStringCollatorOutput(collator, dataObj, expected);
 }
 
@@ -269,9 +252,8 @@ TEST(CollationIndexKeyTest, CollationAwareAppendDoesNotThrowOnSymbolIfNoCollatio
 
 TEST(CollationIndexKeyTest, CollationAwareAppendThrowsIfSymbolInsideObject) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
-    BSONObj dataObj = BSON("" << BSON("a"
-                                      << "foo"
-                                      << "b" << BSONSymbol("mySymbol")));
+    BSONObj dataObj = BSON("" << BSON("a" << "foo"
+                                          << "b" << BSONSymbol("mySymbol")));
     BSONObjBuilder out;
     ASSERT_THROWS_CODE(
         CollationIndexKey::collationAwareIndexKeyAppend(dataObj.firstElement(), &collator, &out),
@@ -281,9 +263,8 @@ TEST(CollationIndexKeyTest, CollationAwareAppendThrowsIfSymbolInsideObject) {
 
 TEST(CollationIndexKeyTest, KeyStringAppendThrowsIfSymbolInsideObject) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kReverseString);
-    BSONObj dataObj = BSON("" << BSON("a"
-                                      << "foo"
-                                      << "b" << BSONSymbol("mySymbol")));
+    BSONObj dataObj = BSON("" << BSON("a" << "foo"
+                                          << "b" << BSONSymbol("mySymbol")));
     assertKeyStringCollatorThrows(collator, dataObj);
 }
 

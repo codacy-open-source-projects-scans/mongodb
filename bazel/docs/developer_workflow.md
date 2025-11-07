@@ -4,9 +4,7 @@ This document describes the Server Developer workflow for modifying Bazel build 
 
 # Creating a new BUILD.bazel file
 
-Similar to SCons, a build target is defined in the directory where its source code exists. To create a target that compiles **src/mongo/hello_world.cpp**, you would create **src/mongo/BUILD.bazel**.
-
-The Bazel equivalent of SConscript files are BUILD.bazel files.
+A build target is defined in the directory where its source code exists. To create a target that compiles **src/mongo/hello_world.cpp**, you would create **src/mongo/BUILD.bazel**.
 
 src/mongo/BUILD.bazel would contain:
 
@@ -32,8 +30,6 @@ The full target name is a combination between the directory of the BUILD.bazel f
 # Adding a New Header / Source File
 
 Bazel makes use of static analysis wherever possible to improve execution and querying speed. As part of this, source and header files must not be declared dynamically (ex. glob, wildcard, etc). Instead, you'll need to manually add a reference to each header or source file you add into your build target.
-
-The divergence from SCons is that now source files have to be declared in addition to header files.
 
     mongo_cc_binary(
         name = "hello_world",
@@ -84,14 +80,6 @@ If a library or binary depends on another library, this must be declared in the 
         ],
     }
 
-## Depending on a Bazel Library in a SCons Build Target
-
-During migration from SCons to Bazel, the Build Team has created an integration layer between the two while working towards converting all SCons targets to Bazel targets.
-
-Targets which are built by bazel will be labeled as ThinTarget builder types. You can reference them by the same name you would use in scons in LIBDEPS lists.
-
-If adding a a new library to the build, check to see if it should be added as a bazel or scons library. This will depend on how deep it is in the dependency tree. You can ask the build team at #ask-devprod-build for advice on if a given library should be added to the bazel or scons part of the build.
-
 ## Running clang-tidy via Bazel
 
 Note: This feature is still in development; see https://jira.mongodb.org/browse/SERVER-80396 for details)
@@ -99,7 +87,7 @@ Note: This feature is still in development; see https://jira.mongodb.org/browse/
 To run clang-tidy via Bazel, do the following:
 
 1. To analyze all code, run `bazel build --config=clang-tidy src/...`
-2. To analyze a single target (e.g.: `fsync_locked`), run the following command (note that `_with_debug` suffix on the target): `bazel build --config=clang-tidy src/mongo/db/commands:fsync_locked_with_debug`
+2. To analyze a single target (e.g.: `environment_buffer`), run the following command (note that `_with_debug` suffix on the target): `bazel build --config=clang-tidy src/mongo/db/commands:environment_buffer_with_debug`
 
 Testing notes:
 
@@ -123,6 +111,6 @@ Follow this loop to figure out where the header needs to be added
 
 ### The header I want to add is referenced in dozens or more locations, and adding it to the proper location requires a large refactor that is blocking critical work, what should I do?
 
-If you've put in a significant amount of work to try to get a header added and have found to get it added to the right place (usually alongside the associated .cpp file, having all dependents add that library as a dep) will take a significant refactor, create a SERVER ticket explaining the problem, solution, and complexity required to resolve it. Then, open up src/mongo/BUILD.bazel and add the header to "\_global_header_bypass" referencing your ticket in a TODO comment.
+If you've put in a significant amount of work to try to get a header added and have found to get it added to the right place (usually alongside the associated .cpp file, having all dependents add that library as a dep) will take a significant refactor, create a SERVER ticket explaining the problem, solution, and complexity required to resolve it. Then, open up src/mongo/BUILD.bazel and add the header to "core_headers" file group referencing your ticket in a TODO comment.
 
 This is very much a last resort and should only be done if the refactor will take a very significant amount of time and is blocking other work.

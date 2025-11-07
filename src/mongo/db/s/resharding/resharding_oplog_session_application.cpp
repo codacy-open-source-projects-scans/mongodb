@@ -27,30 +27,23 @@
  *    it in the license file.
  */
 
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <cstdint>
-#include <utility>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/s/resharding/resharding_oplog_session_application.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/exception_util.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/s/resharding/resharding_data_copy_util.h"
-#include "mongo/db/s/resharding/resharding_oplog_session_application.h"
+#include "mongo/db/s/session_catalog_migration_util.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
@@ -61,6 +54,15 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/str.h"
+
+#include <cstdint>
+#include <utility>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -98,7 +100,7 @@ boost::optional<repl::OpTime> ReshardingOplogSessionApplication::_logPrePostImag
     auto noopEntry = uassertStatusOK(repl::MutableOplogEntry::parse(prePostImageOp.toBSON()));
     // Reset the OpTime so logOp() can assign a new one.
     noopEntry.setOpTime(OplogSlot());
-    noopEntry.setWallClockTime(opCtx->getServiceContext()->getFastClockSource()->now());
+    noopEntry.setWallClockTime(opCtx->fastClockSource().now());
     noopEntry.setFromMigrate(true);
 
     return writeConflictRetry(
@@ -165,8 +167,8 @@ boost::optional<SharedSemiFuture<void>> ReshardingOplogSessionApplication::tryAp
         isRetryableWrite ? op.getStatementIds() : std::vector<StmtId>{kIncompleteHistoryStmtId};
     invariant(!stmtIds.empty());
 
-    auto opId = ReshardingDonorOplogId::parse(IDLParserContext{"ReshardingOplogSessionApplication"},
-                                              op.get_id()->getDocument().toBson());
+    auto opId = ReshardingDonorOplogId::parse(
+        op.get_id()->getDocument().toBson(), IDLParserContext{"ReshardingOplogSessionApplication"});
 
     boost::optional<repl::OpTime> preImageOpTime;
     if (auto originalPreImageOpTime = op.getPreImageOpTime()) {
@@ -178,7 +180,7 @@ boost::optional<SharedSemiFuture<void>> ReshardingOplogSessionApplication::tryAp
         postImageOpTime = _logPrePostImage(opCtx, opId, *originalPostImageOpTime);
     }
 
-    return resharding::data_copy::withSessionCheckedOut(
+    return session_catalog_migration_util::runWithSessionCheckedOutIfStatementNotExecuted(
         opCtx, lsid, txnNumber, stmtIds.front(), [&] {
             resharding::data_copy::updateSessionRecord(opCtx,
                                                        std::move(o2Field),

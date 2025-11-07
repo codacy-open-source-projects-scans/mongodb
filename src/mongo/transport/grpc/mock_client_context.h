@@ -30,7 +30,6 @@
 #pragma once
 
 #include "mongo/transport/grpc/client_context.h"
-
 #include "mongo/transport/grpc/mock_client_stream.h"
 
 namespace mongo::transport::grpc {
@@ -80,7 +79,7 @@ private:
 
     Date_t _deadline;
     MetadataContainer _metadata;
-    MockClientStream* _stream;
+    std::shared_ptr<MockClientStream> _stream;
 };
 
 }  // namespace mongo::transport::grpc

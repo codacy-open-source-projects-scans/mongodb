@@ -27,16 +27,16 @@
  *    it in the license file.
  */
 
-#include <memory>
-
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/db/commands/server_status.h"
+#include "mongo/db/commands/server_status/server_status.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/process_health/fault_manager.h"
 #include "mongo/db/service_context.h"
+
+#include <memory>
 
 namespace mongo {
 
@@ -58,7 +58,7 @@ public:
         BSONObjBuilder result;
 
         bool appendDetails = false;
-        if (configElement.type() == BSONType::Object && configElement.Obj().hasElement("details")) {
+        if (configElement.type() == BSONType::object && configElement.Obj().hasElement("details")) {
             appendDetails = configElement.Obj()["details"].trueValue();
         }
 

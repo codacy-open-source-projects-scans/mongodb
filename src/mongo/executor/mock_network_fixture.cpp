@@ -29,9 +29,12 @@
 
 
 #include "mongo/executor/mock_network_fixture.h"
+
+#include "mongo/db/exec/matcher/matcher.h"
 #include "mongo/db/matcher/matcher.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/util/intrusive_counter.h"
 
@@ -49,7 +52,7 @@ MockNetwork::Matcher::Matcher(const BSONObj& matcherQuery) {
     // Expression matcher doesn't have copy constructor, so wrap it in a shared_ptr for capture.
     auto m = std::make_shared<mongo::Matcher>(matcherQuery, std::move(expCtx));
     _matcherFunc = [=](const BSONObj& request) {
-        return m->matches(request);
+        return exec::matcher::matches(m.get(), request);
     };
 }
 
@@ -132,7 +135,7 @@ void MockNetwork::runUntilIdle() {
     } while (_net->hasReadyNetworkOperations());
 }
 
-void MockNetwork::runUntilExpectationsSatisfied(std::chrono::seconds timeoutSeconds) {
+void MockNetwork::runUntilExpectationsSatisfied(stdx::chrono::seconds timeoutSeconds) {
     Timer timer;
     // If there exist extra threads beside the executor and the mock/test thread, when the
     // network is idle, the extra threads may be running and will schedule new requests. As a

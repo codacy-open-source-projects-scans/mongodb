@@ -33,9 +33,9 @@ TestData.ignoreUnterminatedProcesses = true;
 TestData.skipCheckMetadataConsistency = true;
 TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 
-var doesLogMatchRegex = function(logArray, regex) {
-    for (let i = (logArray.length - 1); i >= 0; i--) {
-        var regexInLine = regex.exec(logArray[i]);
+let doesLogMatchRegex = function (logArray, regex) {
+    for (let i = logArray.length - 1; i >= 0; i--) {
+        let regexInLine = regex.exec(logArray[i]);
         if (regexInLine != null) {
             return true;
         }
@@ -43,20 +43,20 @@ var doesLogMatchRegex = function(logArray, regex) {
     return false;
 };
 
-var checkSocket = function(path) {
-    assert.eq(fileExists(path), true);
-    var conn = new Mongo(path);
-    assert.commandWorked(conn.getDB("admin").runCommand("ping"),
-                         `Expected ping command to succeed for ${path}`);
+let checkSocket = function (path) {
+    const start = new Date();
+    assert(fileExists(path), `${start.toISOString()}: ${path} does not exist`);
+    let conn = new Mongo(path);
+    assert.commandWorked(conn.getDB("admin").runCommand("ping"), `Expected ping command to succeed for ${path}`);
 };
 
-var testSockOptions = function(bindPath, expectSockPath, optDict, bindSep = ',', optMongos) {
+let testSockOptions = function (bindPath, expectSockPath, optDict, bindSep = ",", optMongos) {
     var optDict = optDict || {};
     if (bindPath) {
         optDict["bind_ip"] = `${MongoRunner.dataDir}/${bindPath}${bindSep}127.0.0.1`;
     }
 
-    var conn, shards;
+    let conn, shards;
     if (optMongos) {
         shards = new ShardingTest({shards: 1, mongos: 1, other: {mongosOptions: optDict}});
         assert.neq(shards, null, "Expected cluster to start okay");
@@ -67,9 +67,10 @@ var testSockOptions = function(bindPath, expectSockPath, optDict, bindSep = ',',
 
     assert.neq(conn, null, `Expected ${optMongos ? "mongos" : "mongod"} to start okay`);
 
-    const defaultUNIXSocket = jsTestOptions().shellGRPC ? `/tmp/mongodb-grpc-${conn.port}.sock`
-                                                        : `/tmp/mongodb-${conn.port}.sock`;
-    var checkPath = defaultUNIXSocket;
+    const defaultUNIXSocket = jsTestOptions().shellGRPC
+        ? `/tmp/mongodb-grpc-${conn.port}.sock`
+        : `/tmp/mongodb-${conn.port}.sock`;
+    let checkPath = defaultUNIXSocket;
     if (expectSockPath) {
         checkPath = `${MongoRunner.dataDir}/${expectSockPath}`;
     }
@@ -79,10 +80,10 @@ var testSockOptions = function(bindPath, expectSockPath, optDict, bindSep = ',',
     // Test the naming of the unix socket
     // Due to https://github.com/grpc/grpc/issues/35006, gRPC unix sockets are unnamed.
     if (!jsTestOptions().shellGRPC) {
-        var log = conn.adminCommand({getLog: 'global'});
+        let log = conn.adminCommand({getLog: "global"});
         assert.commandWorked(log, "Expected getting the log to work");
-        var ll = log.log;
-        var re = new RegExp("anonymous unix socket");
+        let ll = log.log;
+        let re = new RegExp("anonymous unix socket");
         assert(doesLogMatchRegex(ll, re), "Log message did not contain 'anonymous unix socket'");
     }
 
@@ -97,33 +98,33 @@ var testSockOptions = function(bindPath, expectSockPath, optDict, bindSep = ',',
 
 // Check that the default unix sockets work
 testSockOptions();
-testSockOptions(undefined, undefined, undefined, ',', true);
+testSockOptions(undefined, undefined, undefined, ",", true);
 
 // Check that a custom unix socket path works
 testSockOptions("testsock.socket", "testsock.socket");
-testSockOptions("testsock.socket", "testsock.socket", undefined, ',', true);
+testSockOptions("testsock.socket", "testsock.socket", undefined, ",", true);
 
 // Check that a custom unix socket path works with spaces
 testSockOptions("test sock.socket", "test sock.socket");
-testSockOptions("test sock.socket", "test sock.socket", undefined, ',', true);
+testSockOptions("test sock.socket", "test sock.socket", undefined, ",", true);
 
 // Check that a custom unix socket path works with spaces before the comma and after
-testSockOptions("testsock.socket ", "testsock.socket", undefined, ', ');
-testSockOptions("testsock.socket ", "testsock.socket", undefined, ', ', true);
+testSockOptions("testsock.socket ", "testsock.socket", undefined, ", ");
+testSockOptions("testsock.socket ", "testsock.socket", undefined, ", ", true);
 
 // Check that a bad UNIX path breaks
-assert.throws(function() {
-    var badname = "a".repeat(200) + ".socket";
+assert.throws(function () {
+    let badname = "a".repeat(200) + ".socket";
     testSockOptions(badname, badname);
 });
 
 // Check that if UNIX sockets are disabled that we aren't able to connect over UNIX sockets
-assert.throws(function() {
+assert.throws(function () {
     testSockOptions(undefined, undefined, {nounixsocket: ""});
 });
 
 // Check the unixSocketPrefix option
-var socketPrefix = `${MongoRunner.dataDir}/socketdir`;
+let socketPrefix = `${MongoRunner.dataDir}/socketdir`;
 mkdir(socketPrefix);
 
 if (jsTestOptions().shellGRPC) {
@@ -139,10 +140,9 @@ if (jsTestOptions().shellGRPC) {
 if (jsTestOptions().shellGRPC) {
     var grpcPort = allocatePort();
     var sockName = `socketdir/mongodb-grpc-${grpcPort}.sock`;
-    testSockOptions(
-        undefined, sockName, {unixSocketPrefix: socketPrefix, grpcPort: grpcPort}, ',', true);
+    testSockOptions(undefined, sockName, {unixSocketPrefix: socketPrefix, grpcPort: grpcPort}, ",", true);
 } else {
     var port = allocatePort();
     var sockName = `socketdir/mongodb-${port}.sock`;
-    testSockOptions(undefined, sockName, {unixSocketPrefix: socketPrefix, port: port}, ',', true);
+    testSockOptions(undefined, sockName, {unixSocketPrefix: socketPrefix, port: port}, ",", true);
 }

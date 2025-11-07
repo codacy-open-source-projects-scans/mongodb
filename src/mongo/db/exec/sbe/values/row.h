@@ -29,14 +29,6 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/base/string_data_comparator.h"
 #include "mongo/bson/util/builder.h"
@@ -46,8 +38,16 @@
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 class BufReader;
@@ -144,7 +144,7 @@ public:
                                 const CollatorInterface* collator = nullptr) const;
 
 protected:
-    void release() {
+    void release() noexcept {
         RowType& self = *static_cast<RowType*>(this);
         for (size_t idx = 0; idx < self.size(); ++idx) {
             if (self.owned()[idx]) {
@@ -198,15 +198,24 @@ public:
         swap(*this, other);
     }
 
-    ~MaterializedRow() noexcept {
+    ~MaterializedRow() {
         if (_state.data) {
             release();
             delete[] _state.data;
         }
     }
 
-    MaterializedRow& operator=(MaterializedRow other) noexcept {
+    MaterializedRow& operator=(MaterializedRow&& other) noexcept {
         swap(*this, other);
+        return *this;
+    }
+
+    MaterializedRow& operator=(const MaterializedRow& other) {
+        if (this == &other)
+            return *this;
+
+        MaterializedRow temp(other);
+        swap(*this, temp);
         return *this;
     }
 
@@ -278,7 +287,7 @@ class FixedSizeRow : public RowBase<FixedSizeRow<N>> {
 
 public:
     FixedSizeRow(size_t size = N) {
-        invariant(size == N);
+        tassert(11089609, "Passing wrong size to the FixedSizeRow", size == N);
     }
 
     FixedSizeRow(const FixedSizeRow<N>& other) {
@@ -300,7 +309,7 @@ public:
         return *this;
     }
 
-    ~FixedSizeRow() noexcept {
+    ~FixedSizeRow() {
         RowBase<FixedSizeRow<N>>::release();
     }
 

@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <functional>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -46,9 +39,16 @@
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/read_concern_level.h"
-#include "mongo/s/client/shard.h"
+#include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/hierarchical_acquisition.h"
+
+#include <functional>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -77,14 +77,15 @@ public:
      * Warning: This method exhausts the cursor and pulls all data into memory.
      * Do not use other than for very small (i.e., admin or metadata) collections.
      */
-    StatusWith<Shard::QueryResponse> queryOnce(OperationContext* opCtx,
-                                               const ReadPreferenceSetting& readPref,
-                                               const repl::ReadConcernLevel& readConcernLevel,
-                                               const NamespaceString& nss,
-                                               const BSONObj& query,
-                                               const BSONObj& sort,
-                                               boost::optional<long long> limit,
-                                               const boost::optional<BSONObj>& hint = boost::none);
+    RetryStrategy::Result<Shard::QueryResponse> queryOnce(
+        OperationContext* opCtx,
+        const ReadPreferenceSetting& readPref,
+        const repl::ReadConcernLevel& readConcernLevel,
+        const NamespaceString& nss,
+        const BSONObj& query,
+        const BSONObj& sort,
+        boost::optional<long long> limit,
+        const boost::optional<BSONObj>& hint = boost::none);
 
     Status runAggregation(
         OperationContext* opCtx,

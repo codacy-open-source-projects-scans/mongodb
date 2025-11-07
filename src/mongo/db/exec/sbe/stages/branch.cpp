@@ -27,13 +27,9 @@
  *    it in the license file.
  */
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/inlined_vector.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <utility>
+#include "mongo/db/exec/sbe/stages/branch.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -41,10 +37,11 @@
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
-#include "mongo/db/exec/sbe/stages/branch.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <utility>
 
 namespace mongo {
 namespace sbe {
@@ -61,8 +58,12 @@ BranchStage::BranchStage(std::unique_ptr<PlanStage> inputThen,
       _inputThenVals(std::move(inputThenVals)),
       _inputElseVals(std::move(inputElseVals)),
       _outputVals(std::move(outputVals)) {
-    invariant(_inputThenVals.size() == _outputVals.size());
-    invariant(_inputElseVals.size() == _outputVals.size());
+    tassert(11094728,
+            "Expect the number of 'then' slots to match the number of output slots",
+            _inputThenVals.size() == _outputVals.size());
+    tassert(11094727,
+            "Expect the number of 'else' slots to match the number of output slots",
+            _inputElseVals.size() == _outputVals.size());
     _children.emplace_back(std::move(inputThen));
     _children.emplace_back(std::move(inputElse));
 }

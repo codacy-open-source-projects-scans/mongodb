@@ -29,29 +29,32 @@
 
 #pragma once
 
+#include "mongo/platform/atomic_word.h"
+#include "mongo/util/modules.h"
+
+#include <string>
+#include <vector>
+
 #include <boost/log/attributes/attribute_value_set.hpp>
 #include <boost/log/core/record_view.hpp>
 #include <boost/log/sinks.hpp>
 #include <boost/log/utility/formatting_ostream.hpp>
 #include <boost/make_shared.hpp>
-#include <string>
-#include <vector>
 
-#include "mongo/platform/atomic_word.h"
-
-namespace mongo::logv2 {
+namespace mongo {
+namespace logv2 {
 
 /*
  * LogLineListener is a wrapper class used in the LogCaptureBackend that defines what to do with
  * log lines upon consumption.
  */
-class LogLineListener {
+class MONGO_MOD_OPEN LogLineListener {
 public:
     virtual ~LogLineListener() = default;
     virtual void accept(const std::string& line) = 0;
 };
 
-class LogCaptureBackend
+class MONGO_MOD_PUBLIC LogCaptureBackend
     : public boost::log::sinks::
           basic_formatted_sink_backend<char, boost::log::sinks::concurrent_feeding> {
 public:
@@ -76,7 +79,10 @@ public:
     }
 
     void setEnabled(bool b) {
+        MONGO_COMPILER_DIAGNOSTIC_PUSH
+        MONGO_COMPILER_DIAGNOSTIC_WORKAROUND_ATOMIC_WRITE
         _enabled.store(b);
+        MONGO_COMPILER_DIAGNOSTIC_POP
     }
 
 private:
@@ -84,4 +90,5 @@ private:
     AtomicWord<bool> _enabled{true};
     AtomicWord<bool> _stripEol;
 };
-}  // namespace mongo::logv2
+}  // namespace logv2
+}  // namespace mongo

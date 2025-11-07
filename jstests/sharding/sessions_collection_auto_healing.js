@@ -3,8 +3,6 @@
  * @tags: [
  *   config_shard_incompatible,
  *   requires_fcv_70,
- *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
- *    embedded_router_incompatible,
  * ]
  */
 import {ReplSetTest} from "jstests/libs/replsettest.js";
@@ -15,17 +13,16 @@ import {ShardingTest} from "jstests/libs/shardingtest.js";
 // implicit sessions.
 TestData.disableImplicitSessions = true;
 
-var st = new ShardingTest({
+let st = new ShardingTest({
     shards: 0,
     other: {
-        mongosOptions:
-            {setParameter: {'failpoint.skipClusterParameterRefresh': "{'mode':'alwaysOn'}"}}
-    }
+        mongosOptions: {setParameter: {"failpoint.skipClusterParameterRefresh": "{'mode':'alwaysOn'}"}},
+    },
 });
-var configSvr = st.configRS.getPrimary();
+let configSvr = st.configRS.getPrimary();
 
-var mongos = st.s;
-var mongosConfig = mongos.getDB("config");
+let mongos = st.s;
+let mongosConfig = mongos.getDB("config");
 
 // Test that we can use sessions on the config server before we add any shards.
 {
@@ -54,8 +51,9 @@ var mongosConfig = mongos.getDB("config");
 {
     assert.eq(mongosConfig.shards.countDocuments({}), 0);
 
-    assert.commandFailedWithCode(configSvr.adminCommand({refreshLogicalSessionCacheNow: 1}),
-                                 [ErrorCodes.ShardNotFound]);
+    assert.commandFailedWithCode(configSvr.adminCommand({refreshLogicalSessionCacheNow: 1}), [
+        ErrorCodes.ShardNotFound,
+    ]);
 
     validateSessionsCollection(configSvr, false, false);
 }
@@ -65,8 +63,8 @@ const rs = new ReplSetTest({nodes: 1});
 rs.startSet({shardsvr: ""});
 rs.initiate();
 
-var shard = rs.getPrimary();
-var shardConfig = shard.getDB("config");
+let shard = rs.getPrimary();
+let shardConfig = shard.getDB("config");
 
 // Test that we can add this shard, even with a local config.system.sessions collection,
 // and test that we drop its local collection
@@ -111,8 +109,9 @@ var shardConfig = shard.getDB("config");
     validateSessionsCollection(configSvr, false, false);
     validateSessionsCollection(shard, false, false);
 
-    assert.commandFailedWithCode(shard.adminCommand({refreshLogicalSessionCacheNow: 1}),
-                                 [ErrorCodes.NamespaceNotSharded]);
+    assert.commandFailedWithCode(shard.adminCommand({refreshLogicalSessionCacheNow: 1}), [
+        ErrorCodes.NamespaceNotSharded,
+    ]);
 
     validateSessionsCollection(configSvr, false, false);
     validateSessionsCollection(shard, false, false);

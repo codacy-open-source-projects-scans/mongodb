@@ -29,13 +29,6 @@
 
 #include "mongo/db/s/resharding/resharding_data_replication.h"
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <ostream>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/counter.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -44,15 +37,17 @@
 #include "mongo/bson/oid.h"
 #include "mongo/crypto/encryption_fields_gen.h"
 #include "mongo/db/basic_types_gen.h"
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/global_catalog/type_collection_common_types_gen.h"
+#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/collation/collator_factory_mock.h"
@@ -71,21 +66,21 @@
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/database_version.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
-#include "mongo/s/type_collection_common_types_gen.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/timer.h"
+
+#include <ostream>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -133,9 +128,7 @@ public:
                                                true /* allowMigrations */,
                                                chunks);
 
-        return ChunkManager(_myDonorId,
-                            DatabaseVersion(UUID::gen(), Timestamp(1, 1)),
-                            makeStandaloneRoutingTableHistory(std::move(rt)),
+        return ChunkManager(makeStandaloneRoutingTableHistory(std::move(rt)),
                             boost::none /* clusterTime */);
     }
 
@@ -202,9 +195,10 @@ protected:
 
         ReshardingApplierMetricsMap applierMetricsMap;
         for (const auto& donor : donorFetchTimestamps) {
-            applierMetricsMap.emplace(donor.getShardId(),
-                                      std::make_unique<ReshardingOplogApplierMetrics>(
-                                          reshardingMetrics.get(), boost::none));
+            applierMetricsMap.emplace(
+                donor.getShardId(),
+                std::make_unique<ReshardingOplogApplierMetrics>(
+                    donor.getShardId(), reshardingMetrics.get(), boost::none));
         }
 
         auto opCtx = makeOperationContext();
@@ -223,15 +217,20 @@ protected:
                                             storeOplogFetcherProgress,
                                             false /* relaxed */);
 
-        AutoGetCollection oplopFetcherProgressColl(
-            opCtx.get(), NamespaceString::kReshardingFetcherProgressNamespace, MODE_IS);
+        const auto oplopFetcherProgressColl =
+            acquireCollection(opCtx.get(),
+                              CollectionAcquisitionRequest::fromOpCtx(
+                                  opCtx.get(),
+                                  NamespaceString::kReshardingFetcherProgressNamespace,
+                                  AcquisitionPrerequisites::kRead),
+                              MODE_IS);
         if (storeOplogFetcherProgress) {
             // The progress collection should have been created but it should not have any
             // documents.
-            ASSERT(oplopFetcherProgressColl);
-            ASSERT(oplopFetcherProgressColl->isEmpty(opCtx.get()));
+            ASSERT(oplopFetcherProgressColl.exists());
+            ASSERT(oplopFetcherProgressColl.getCollectionPtr()->isEmpty(opCtx.get()));
         } else {
-            ASSERT(!oplopFetcherProgressColl);
+            ASSERT(!oplopFetcherProgressColl.exists());
         }
     }
 
@@ -248,7 +247,7 @@ private:
             }
 
             OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
-                unsafeCreateCollection(opCtx);
+                unsafeCreateCollection(opCtx, nss);
             auto db = autoDb.ensureDbExists(opCtx);
             ASSERT(db->createCollection(opCtx, nss)) << nss.toStringForErrorMsg();
             wunit.commit();
@@ -289,11 +288,16 @@ TEST_F(ReshardingDataReplicationTest, StashCollectionsHaveSameCollationAsReshard
 
     for (const auto& nss : stashCollections) {
         auto opCtx = makeOperationContext();
-        AutoGetCollection stashColl(opCtx.get(), nss, MODE_IS);
-        ASSERT_TRUE(bool(stashColl->getDefaultCollator()))
+        const auto stashColl =
+            acquireCollection(opCtx.get(),
+                              CollectionAcquisitionRequest::fromOpCtx(
+                                  opCtx.get(), nss, AcquisitionPrerequisites::kRead),
+                              MODE_IS);
+        ASSERT_TRUE(bool(stashColl.getCollectionPtr()->getDefaultCollator()))
             << "Stash collection was created with 'simple' collation";
-        ASSERT_BSONOBJ_BINARY_EQ(stashColl->getDefaultCollator()->getSpec().toBSON(),
-                                 collator.getSpec().toBSON());
+        ASSERT_BSONOBJ_BINARY_EQ(
+            stashColl.getCollectionPtr()->getDefaultCollator()->getSpec().toBSON(),
+            collator.getSpec().toBSON());
     }
 }
 
@@ -323,11 +327,16 @@ TEST_F(ReshardingDataReplicationTest,
 
                 for (const auto& nss : stashCollections) {
                     auto opCtx = Client::getCurrent()->makeOperationContext();
-                    AutoGetCollection stashColl(opCtx.get(), nss, MODE_IS);
-                    ASSERT_TRUE(bool(stashColl->getDefaultCollator()))
+                    const auto stashColl =
+                        acquireCollection(opCtx.get(),
+                                          CollectionAcquisitionRequest::fromOpCtx(
+                                              opCtx.get(), nss, AcquisitionPrerequisites::kRead),
+                                          MODE_IS);
+                    ASSERT_TRUE(bool(stashColl.getCollectionPtr()->getDefaultCollator()))
                         << "Stash collection was created with 'simple' collation";
-                    ASSERT_BSONOBJ_BINARY_EQ(stashColl->getDefaultCollator()->getSpec().toBSON(),
-                                             collator.getSpec().toBSON());
+                    ASSERT_BSONOBJ_BINARY_EQ(
+                        stashColl.getCollectionPtr()->getDefaultCollator()->getSpec().toBSON(),
+                        collator.getSpec().toBSON());
                 }
             }
         });
@@ -375,10 +384,18 @@ TEST_F(ReshardingDataReplicationTest, GetOplogFetcherResumeId) {
         oplogEntry.setWallClockTime({});
         oplogEntry.set_id(Value(oplogId.toBSON()));
 
-        AutoGetCollection oplogBufferColl(opCtx.get(), oplogBufferNss, MODE_IX);
+        const auto oplogBufferColl = acquireCollection(
+            opCtx.get(),
+            CollectionAcquisitionRequest{oplogBufferNss,
+                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         repl::ReadConcernArgs::get(opCtx.get()),
+                                         AcquisitionPrerequisites::kWrite},
+            MODE_IX);
         WriteUnitOfWork wuow(opCtx.get());
-        ASSERT_OK(collection_internal::insertDocument(
-            opCtx.get(), *oplogBufferColl, InsertStatement{oplogEntry.toBSON()}, nullptr));
+        ASSERT_OK(collection_internal::insertDocument(opCtx.get(),
+                                                      oplogBufferColl.getCollectionPtr(),
+                                                      InsertStatement{oplogEntry.toBSON()},
+                                                      nullptr));
         wuow.commit();
     };
 

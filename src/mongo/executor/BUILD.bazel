@@ -22,9 +22,10 @@ mongo_cc_library(
     deps = [
         "//src/mongo/db:api_parameters",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db/auth:security_token_auth",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/otel",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/otel/traces:tracing",  # TODO(SERVER-93876): Remove.
         "//src/mongo/rpc:metadata",  # TODO(SERVER-93876): Remove.
         "//src/mongo/s:mongos_server_parameters",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/util:fail_point",
         "//src/mongo/util/net:network",  # TODO(SERVER-93876): Remove.
     ],
 )
@@ -55,6 +56,7 @@ mongo_cc_library(
         ":remote_command",
         ":task_executor_interface",  # TODO(SERVER-93876): Remove.
         "//src/mongo:base",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/client:retry_strategy",
         "//src/mongo/util/net:network",  # TODO(SERVER-93876): Remove.
     ],
 )
@@ -69,7 +71,6 @@ mongo_cc_library(
     ],
     deps = [
         ":task_executor_interface",
-        "//src/mongo/util:fail_point",  # TODO(SERVER-93876): Remove.
     ],
 )
 
@@ -83,7 +84,6 @@ mongo_cc_library(
     ],
     deps = [
         ":task_executor_interface",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/util:fail_point",
     ],
 )
 
@@ -99,23 +99,33 @@ mongo_cc_library(
         ":network_interface",  # TODO(SERVER-93876): Remove.
         ":task_executor_interface",
         "//src/mongo/db:service_context",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/util:fail_point",  # TODO(SERVER-93876): Remove.
         "//src/mongo/util:future_util",
     ],
 )
 
 mongo_cc_library(
     name = "inline_executor",
-    srcs = [
-        "inline_executor.cpp",
-        "//src/mongo/util:producer_consumer_queue.h",
-    ],
+    srcs = ["inline_executor.cpp"],
     hdrs = [
         "inline_executor.h",
     ],
+    private_hdrs = ["//src/mongo/util:producer_consumer_queue.h"],
     deps = [
         ":task_executor_interface",
         "//src/mongo:base",  # TODO(SERVER-93876): Remove.
+    ],
+)
+
+mongo_cc_library(
+    name = "pinned_connection_task_executor_registry",
+    srcs = [
+        "pinned_connection_task_executor_registry.cpp",
+    ],
+    hdrs = [
+        "pinned_connection_task_executor_registry.h",
+    ],
+    deps = [
+        ":task_executor_interface",  # TODO(SERVER-93876): Remove.
     ],
 )
 
@@ -164,33 +174,63 @@ mongo_cc_library(
 )
 
 idl_generator(
-    name = "network_interface_tl_gen",
-    src = "network_interface_tl.idl",
+    name = "egress_networking_parameters_gen",
+    src = "egress_networking_parameters.idl",
+)
+
+mongo_cc_library(
+    name = "egress_networking_parameters",
+    srcs = [
+        "egress_networking_parameters.cpp",
+        ":egress_networking_parameters_gen",
+    ],
+    hdrs = [],
+    deps = [
+        "//src/mongo/db:server_base",
+    ],
 )
 
 mongo_cc_library(
     name = "network_interface_tl",
     srcs = [
-        "connection_pool_tl.cpp",
         "exhaust_response_reader_tl.cpp",
         "network_interface_tl.cpp",
-        ":network_interface_tl_gen",
-        "//src/mongo/util:strong_weak_finish_line.h",
     ],
     hdrs = [
-        "connection_pool_tl.h",
         "exhaust_response_reader_tl.h",
         "network_interface_tl.h",
+        "pooled_async_client_factory.h",
     ],
+    private_hdrs = ["//src/mongo/util:strong_weak_finish_line.h"],
     deps = [
-        ":connection_pool_executor",
+        ":async_client_factory",
         ":network_interface",
         "//src/mongo/client:async_client",
         "//src/mongo/db:server_feature_flags",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db/auth",
-        "//src/mongo/db/commands:server_status_core",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/commands/server_status:server_status_core",  # TODO(SERVER-93876): Remove.
         "//src/mongo/transport:transport_layer",  # TODO(SERVER-93876): Remove.
         "//src/mongo/transport:transport_layer_manager",
+    ],
+)
+
+mongo_cc_library(
+    name = "connection_pool_tl",
+    srcs = [
+        "connection_pool_tl.cpp",
+    ],
+    hdrs = [
+        "connection_pool_tl.h",
+        "pooled_async_client_factory.h",
+    ],
+    deps = [
+        ":async_client_factory",
+        ":connection_pool_executor",
+        ":egress_networking_parameters",
+        "//src/mongo/client:async_client",
+        "//src/mongo/db/auth",
+        "//src/mongo/db/commands/server_status:server_status_core",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/transport:transport_layer",  # TODO(SERVER-93876): Remove.
     ],
 )
 
@@ -203,11 +243,16 @@ mongo_cc_library(
         "network_interface_factory.h",
     ],
     deps = [
+        ":async_client_factory",
         ":connection_pool_executor",  # TODO(SERVER-93876): Remove.
+        ":connection_pool_tl",
         ":egress_connection_closer_manager",  # TODO(SERVER-93876): Remove.
         ":network_interface",  # TODO(SERVER-93876): Remove.
         ":network_interface_tl",
-    ],
+    ] + select({
+        "//bazel/config:build_grpc_enabled": ["//src/mongo/transport/grpc:grpc_async_client_factory"],
+        "//conditions:default": [],
+    }),
 )
 
 idl_generator(
@@ -228,6 +273,7 @@ mongo_cc_library(
     ],
     deps = [
         ":pinned_connection_task_executor_factory",
+        ":pinned_connection_task_executor_registry",
         ":task_executor_interface",
         "//src/mongo/db/query:command_request_response",
         "//src/mongo/db/query:plan_yield_policy",  # TODO(SERVER-93876): Remove.
@@ -261,7 +307,6 @@ mongo_cc_library(
     deps = [
         "//src/mongo:base",
         "//src/mongo/db:service_context",
-        "//src/mongo/util:fail_point",  # TODO(SERVER-93876): Remove.
         "//src/mongo/util/concurrency:thread_pool",
     ],
 )
@@ -272,44 +317,38 @@ idl_generator(
 )
 
 mongo_cc_library(
+    name = "async_rpc_util",
+    srcs = [
+        "async_rpc_util.cpp",
+    ],
+    hdrs = [
+        "async_rpc_util.h",
+        "//src/mongo/util:cancellation.h",
+    ],
+    deps = [
+        "//src/mongo:base",
+        "//src/mongo/util:future_util",
+    ],
+)
+
+mongo_cc_library(
     name = "async_rpc_error_info",
     srcs = [
         "async_rpc_error_info.cpp",
     ],
     hdrs = [
         "async_rpc_error_info.h",
-        "//src/mongo/client:read_preference.h",
-        "//src/mongo/client:read_preference_gen",
-        "//src/mongo/client:read_preference_validators.h",
-        "//src/mongo/db:change_stream_state_gen",
-        "//src/mongo/db:json.h",
-        "//src/mongo/db:read_write_concern_provenance_base_gen",
-        "//src/mongo/db:shard_id.h",
+        "//src/mongo:core_headers",
         "//src/mongo/db/auth:parsed_privilege_gen",
-        "//src/mongo/db/auth:role_name_or_string.h",
-        "//src/mongo/db/commands:create_gen",
         "//src/mongo/db/commands/query_cmd:explain_gen",
+        "//src/mongo/db/global_catalog/router_role_api:gossiped_routing_cache_gen",
         "//src/mongo/db/index_builds:resumable_index_builds_gen",
+        "//src/mongo/db/local_catalog/ddl:create_gen",
         "//src/mongo/db/repl:oplog_entry_gen",
         "//src/mongo/db/repl:read_concern_args.h",
         "//src/mongo/db/repl:repl_set_config_gen",
         "//src/mongo/db/sorter:sorter_gen",
         "//src/mongo/executor:remote_command_response.h",
-        "//src/mongo/idl:generic_argument.h",
-        "//src/mongo/idl:generic_argument_gen",
-        "//src/mongo/rpc:get_status_from_command_result.h",
-        "//src/mongo/rpc/metadata:impersonated_user_metadata_gen",
-        "//src/mongo/s:chunk_version.h",
-        "//src/mongo/s:database_version.h",
-        "//src/mongo/s:database_version_base_gen",
-        "//src/mongo/s:gossiped_routing_cache_gen",
-        "//src/mongo/s:index_version.h",
-        "//src/mongo/s:shard_version.h",
-    ],
-    header_deps = [
-        "//src/mongo/bson/column",
-        "//src/mongo/db/concurrency:flow_control_ticketholder",
-        "//src/mongo/db/exec/sbe:query_sbe_plan_stats",
     ],
     deps = [
         "//src/mongo:base",
@@ -322,20 +361,23 @@ mongo_cc_library(
         "network_interface_thread_pool.cpp",
     ],
     hdrs = [
+        "//src/mongo:core_headers",
         "//src/mongo/client:async_client.h",
         "//src/mongo/client:authenticate.h",
         "//src/mongo/client:internal_auth.h",
         "//src/mongo/client:mongo_uri.h",
         "//src/mongo/client:read_preference_gen",
         "//src/mongo/client:sasl_client_session.h",
-        "//src/mongo/db:set_change_stream_state_coordinator_gen",
-        "//src/mongo/db:vector_clock_gen",
         "//src/mongo/db:write_concern_gen",
-        "//src/mongo/db/commands:list_databases_for_all_tenants_gen",
         "//src/mongo/db/commands/query_cmd:explain_gen",
+        "//src/mongo/db/global_catalog/router_role_api:gossiped_routing_cache_gen",
         "//src/mongo/db/index_builds:resumable_index_builds_gen",
+        "//src/mongo/db/local_catalog/ddl:list_databases_for_all_tenants_gen",
         "//src/mongo/db/repl:repl_set_config_gen",
         "//src/mongo/db/sorter:sorter_gen",
+        "//src/mongo/db/vector_clock:vector_clock_gen",
+        "//src/mongo/db/versioning_protocol:database_version_gen",
+        "//src/mongo/db/versioning_protocol:shard_version_gen",
         "//src/mongo/executor:connection_metrics.h",
         "//src/mongo/executor:network_connection_hook.h",
         "//src/mongo/executor:network_interface.h",
@@ -348,16 +390,12 @@ mongo_cc_library(
         "//src/mongo/rpc:protocol.h",
         "//src/mongo/rpc:reply_interface.h",
         "//src/mongo/rpc:unique_message.h",
-        "//src/mongo/s:database_version_gen",
-        "//src/mongo/s:gossiped_routing_cache_gen",
         "//src/mongo/s:refresh_query_analyzer_configuration_cmd_gen",
-        "//src/mongo/s:shard_version_gen",
         "//src/mongo/transport:baton.h",
         "//src/mongo/transport:message_compressor_base.h",
         "//src/mongo/transport:message_compressor_manager.h",
         "//src/mongo/transport:ssl_connection_context.h",
         "//src/mongo/transport:transport_layer.h",
-        "//src/mongo/util:destructor_guard.h",
         "//src/mongo/util/concurrency:thread_pool_interface.h",
         "//src/mongo/util/net:sock.h",
         "//src/mongo/util/net:ssl_manager.h",
@@ -365,8 +403,6 @@ mongo_cc_library(
         "//src/mongo/util/net/ssl:apple.hpp",
     ],
     header_deps = [
-        "//src/mongo/db/concurrency:flow_control_ticketholder",
-        "//src/mongo/db/exec/sbe:query_sbe_plan_stats",
         "//src/mongo/executor:async_rpc_error_info",
         "//src/mongo/platform:visibility_test_libcommon",
     ],
@@ -384,11 +420,27 @@ mongo_cc_library(
         "connection_pool_stats.h",
     ],
     header_deps = [
-        "//src/mongo/db/commands:server_status_core",
+        "//src/mongo/db/commands/server_status:server_status_core",
     ],
     deps = [
         "//src/mongo/db:server_base",
         "//src/mongo/db:server_feature_flags",
+        "//src/mongo/util/net:network",
+    ],
+)
+
+mongo_cc_library(
+    name = "async_client_factory",
+    srcs = [
+    ],
+    hdrs = [
+        "async_client_factory.h",
+    ],
+    deps = [
+        ":connection_pool_stats",
+        ":egress_connection_closer_manager",
+        "//src/mongo/client:async_client",
+        "//src/mongo/db:server_base",
         "//src/mongo/util/net:network",
     ],
 )
@@ -402,12 +454,13 @@ mongo_cc_library(
         "connection_pool.h",
     ],
     deps = [
+        ":async_client_factory",
         ":connection_pool_stats",
         ":egress_connection_closer_manager",
         ":remote_command",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/client:backoff_with_jitter",
         "//src/mongo/db:server_base",
         "//src/mongo/db:server_feature_flags",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/util:fail_point",  # TODO(SERVER-93876): Remove.
         "//src/mongo/util/net:network",  # TODO(SERVER-93876): Remove.
     ],
 )
@@ -442,6 +495,7 @@ mongo_cc_library(
         "//src/mongo/db:server_base",
         "//src/mongo/db/commands:kill_common",
         "//src/mongo/rpc:command_status",
+        "//src/mongo/s/client:shard_interface",
     ],
 )
 
@@ -471,7 +525,9 @@ mongo_cc_library(
         ":network_interface",
         ":task_executor_interface",
         "//src/mongo:base",
+        "//src/mongo/db:expression_context_builder",
         "//src/mongo/db:query_expressions",
+        "//src/mongo/db:query_matcher",
         "//src/mongo/rpc:metadata",
         "//src/mongo/util:clock_source_mock",
         "//src/mongo/util/net:network",
@@ -545,9 +601,11 @@ mongo_cc_library(
 mongo_cc_library(
     name = "network_interface_fixture",
     srcs = [
+        "executor_integration_test_connection_stats.cpp",
         "network_interface_integration_fixture.cpp",
     ],
     hdrs = [
+        "executor_integration_test_connection_stats.h",
         "executor_integration_test_fixture.h",
         "network_interface_integration_fixture.h",
     ],
@@ -556,6 +614,7 @@ mongo_cc_library(
         "//src/mongo/executor:network_interface_thread_pool",
         "//src/mongo/executor:thread_pool_task_executor",
         "//src/mongo/rpc:command_status",
+        "//src/mongo/transport:grpc_connection_stats",
         "//src/mongo/unittest:integration_test_main",
         "//src/mongo/util:version_impl",
         "//src/mongo/util/concurrency:thread_pool",
@@ -565,31 +624,37 @@ mongo_cc_library(
 mongo_cc_unit_test(
     name = "network_executor_test",
     srcs = [
+        "async_multicaster_test.cpp",
         "async_rpc_test.cpp",
-        "async_rpc_test_fixture.h",
         "async_rpc_util_test.cpp",
-        "async_transaction_rpc.h",
         "connection_pool_test.cpp",
         "connection_pool_test_fixture.cpp",
-        "connection_pool_test_fixture.h",
-        "mock_async_rpc.h",
         "mock_async_rpc_test.cpp",
         "mock_network_fixture_test.cpp",
         "network_interface_mock_test.cpp",
         "network_interface_mock_test_fixture.cpp",
-        "network_interface_mock_test_fixture.h",
         "pinned_connection_task_executor_test.cpp",
-        "pinned_connection_task_executor_test_fixture.h",
-        "test_network_connection_hook.h",
+    ],
+    private_hdrs = [
+        ":async_rpc_test_fixture.h",
+        ":async_transaction_rpc.h",
+        ":connection_pool_test_fixture.h",
+        ":mock_async_rpc.h",
+        ":network_interface_mock_test_fixture.h",
+        ":pinned_connection_task_executor_test_fixture.h",
+        ":test_network_connection_hook.h",
         "//src/mongo/transport:mock_session.h",
         "//src/mongo/transport:test_fixtures.h",
         "//src/mongo/transport:transport_layer_mock.h",
         "//src/mongo/unittest:join_thread.h",
         "//src/mongo/util:executor_test_util.h",
     ],
-    tags = ["mongo_unittest_third_group"],
+    tags = [
+        "mongo_unittest_fifth_group",
+    ],
     deps = [
         "async_rpc",
+        "async_rpc_util",
         "connection_pool_executor",
         "egress_connection_closer_manager",
         "network_interface_mock",
@@ -602,8 +667,8 @@ mongo_cc_unit_test(
         "//src/mongo/db:service_context_non_d",
         "//src/mongo/db:service_context_test_fixture",
         "//src/mongo/db/commands:standalone",
-        "//src/mongo/db/repl:hello_command",
         "//src/mongo/db/repl:task_executor_mock",
+        "//src/mongo/db/repl/hello:hello_command",
         "//src/mongo/util:clock_source_mock",
     ],
 )
@@ -611,15 +676,17 @@ mongo_cc_unit_test(
 mongo_cc_unit_test(
     name = "task_executor_test",
     srcs = [
-        "cancelable_executor.h",
         "cancelable_executor_test.cpp",
         "inline_executor_test.cpp",
-        "pinned_connection_task_executor_test_fixture.h",
         "scoped_task_executor_test.cpp",
         "split_timer_test.cpp",
         "task_executor_cursor_test.cpp",
-        "task_executor_cursor_test_fixture.h",
         "thread_pool_task_executor_test.cpp",
+    ],
+    private_hdrs = [
+        ":cancelable_executor.h",
+        ":pinned_connection_task_executor_test_fixture.h",
+        ":task_executor_cursor_test_fixture.h",
         "//src/mongo/transport:mock_session.h",
         "//src/mongo/transport:test_fixtures.h",
         "//src/mongo/transport:transport_layer_mock.h",
@@ -627,7 +694,7 @@ mongo_cc_unit_test(
         "//src/mongo/util:executor_test_util.h",
     ],
     tags = [
-        "mongo_unittest_second_group",
+        "mongo_unittest_fourth_group",
         "server-programmability",
     ],
     deps = [
@@ -667,5 +734,6 @@ mongo_cc_integration_test(
         "//src/mongo/transport:transport_layer_egress_init",
         "//src/mongo/util:version_impl",
         "//src/mongo/util/concurrency:thread_pool",
+        "//src/mongo/util/net:ssl_options_server",
     ],
 )

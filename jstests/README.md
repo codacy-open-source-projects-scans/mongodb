@@ -22,7 +22,7 @@ At MongoDB we write integration tests in JavaScript. These are tests written to 
 
 ### Do not hardcode collection or database names, especially if they are used multiple times throughout a test.
 
-It is best to use variable names that attempt to describe what a value is used for. For example, naming a variable that stores a collection name collectionToDrop is much better than just naming the variable collName.
+It is best to use variable names that attempt to describe what a value is used for. For example, naming a variable that stores a collection named `collectionToDrop` is much better than just naming the variable `collName`.
 
 ### Make every effort to make your test as deterministic as possible.
 
@@ -51,7 +51,17 @@ It is best to use variable names that attempt to describe what a value is used f
 
 All assertions in a test should attempt to verify the most specific property possible. For example, if you are trying to test that a certain collection exists, it is better to assert that the collection’s exact name exists in the list of collections, as opposed to verifying that the collection count is equal to 1. The desired collection’s existence is sufficient for the collection count to be 1, but not necessary (a different collection could exist in its place). Be wary of adding these kind of indirect assertions in a test.
 
-## Modules in Practice
+### Test Isolation
+
+Your JS test will likely be running with many other files before and after it. It's important to start from a known state, and to restore that state (to a reasonable extent) at the end of your test content.
+
+- **Before**: If there are critical assumptions about the environment that your test needs, assert for it explicitly before proceeding to the real test content (instead of debugging side effects of that not being the case)
+  - If you have a precondition on the _environment_, use [`@tags`](./tags.md) instead of just an early-return. This will avoid the test being scheduled in the first place if the environment is not supported.
+- **After**: If you are modifying the fixture, do everything possible to safely restore those changes at the end of your test content, even after a test failure. Resmokes' `--continueOnFailure` flag is used in CI, so the fixture is shared across many test files, and is only torn down at the end.
+  - Note, a fixture _can_ immediately "abort" after a test failure, only if [archiving](../../../../buildscripts/resmokeconfig/suites/README.md#executorarchive) is configured, but that shouldn't be assumed because that is a per-suite configuration (and your test can run in many passthrough suite combinations).
+  - One easy approach to restoring your state is to use the [Mocha-style](#use-mocha-style-constructs) `after` hooks in your test content.
+
+## Modern JS: Modules in Practice
 
 We have fully migrated to the modularized JavaScript world so any new test should use modules and adapt the new style.
 
@@ -85,10 +95,10 @@ Due to legacy, we have a lot of code that is using the old style to do export, l
 
 ```
 const MyModule = (function() {
-function myFeature() {}
-function myOtherFeature() {}
+  function myFeature() {}
+  function myOtherFeature() {}
 
-return {myFeature, myOtherFeature};
+  return {myFeature, myOtherFeature};
 })();
 ```
 
@@ -103,3 +113,84 @@ import * as MyModule from "/path/to/my_module.js";
 ```
 
 This can help the language server to discover the methods and provide code navigation for it.
+
+### Use Mocha-style Constructs
+
+The [mochalite.js](../jstests/libs/mochalite.js) library ports over a subset of [MochaJS](https://mochajs.org/) functionality for the shell, including:
+
+- `it` test contruction
+- `describe` suite structures
+- `it.only` and `describe.only` to run only those suites and tests
+- `it.skip` and `describe.skip` to skip those suites and tests
+- `before` and `after` hooks, to run _once_ around _all_ `it` tests
+- `beforeEach` and `afterEach` hooks, to run around _each_ `it` test
+- The above (excluding `describe` variants) also support `async` functions
+- Resmoke test filtering using the `--mochagrep` flag, which mirrors the [`grep`](https://mochajs.org/#-grep-regexp-g-regexp) flag from MochaJS
+
+Example using several APIs:
+
+```js
+import {
+  after,
+  afterEach,
+  before,
+  beforeEach,
+  describe,
+  it,
+} from "jstests/libs/mochalite.js";
+
+describe("simple inserts and finds", () => {
+  before(() => {
+    this.fixtureDB = startupNewDB();
+  });
+  beforeEach(() => {
+    this.fixtureDB.seed();
+  });
+  afterEach(async () => {
+    await this.fixtureDB.clear();
+  });
+  after(() => {
+    this.fixtureDB.shutdown();
+  });
+  it("should do something", () => {
+    this.fixtureDB.insert({name: "test"});
+    assert.eq(this.fixtureDB.find({name: "test"}).count(), 1);
+  });
+  it("should error on invalid data", () => {
+    const e = assert.throws(() =>
+      this.fixtureDB.insert({notafield: undefined}),
+    );
+    assert.eq(e.message, "Field 'notafield' not found");
+  });
+});
+```
+
+Use `it.only` to run just the one test (eg. during debugging):
+
+```js
+it.only("should do something", () => {
+  this.fixtureDB.insert({name: "test"});
+  assert.eq(this.fixtureDB.find({name: "test"}).count(), 1);
+});
+```
+
+or use the filter from resmoke to avoid any file edits:
+
+```sh
+buildscripts/resmoke.py run --suites=no_passthrough --mochagrep "do something" jstests/noPassthrough/mytest.js
+```
+
+## Test Tags
+
+JS Test files can leverage "tags" that suites can key off of to include and/or exclude as necessary. Not scheduling a test to run is much faster than the test doing an early-return when preconditions are not met.
+
+The simplest use case is having something like the following at the top of your js test file:
+
+```js
+/**
+ * Tests for the XYZ feature
+ * @tags: [requires_fcv_81]
+ */
+```
+
+See [tags.md](./tags.md) for more details.

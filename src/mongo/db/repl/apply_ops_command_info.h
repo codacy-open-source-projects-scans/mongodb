@@ -29,18 +29,23 @@
 
 #pragma once
 
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/repl/apply_ops_gen.h"
 #include "mongo/db/repl/oplog_entry.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <vector>
+
+namespace MONGO_MOD_PUB mongo {
 class BSONObjBuilder;
 class OperationContext;
 
 namespace repl {
+namespace apply_ops_command_info_details {
+bool _parseAreOpsCrudOnly(const BSONObj& applyOpCmd);
+}  // namespace apply_ops_command_info_details
+
 class ApplyOps {
 public:
     static constexpr StringData kOplogApplicationModeFieldName = "oplogApplicationMode"_sd;
@@ -84,4 +89,4 @@ private:
 };
 
 }  // namespace repl
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

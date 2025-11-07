@@ -27,13 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/none.hpp>
-#include <initializer_list>
-#include <memory>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/s/write_ops/bulk_write_command_modifier.h"
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -45,13 +39,17 @@
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/query/write_ops/write_ops_parsers_test_helpers.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/index_version.h"
-#include "mongo/s/shard_version_factory.h"
-#include "mongo/s/write_ops/bulk_write_command_modifier.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/shard_version_factory.h"
+#include "mongo/unittest/unittest.h"
+
+#include <initializer_list>
+#include <memory>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -59,10 +57,9 @@ namespace {
 TEST(BulkWriteCommandModifier, AddInsert) {
     BSONArray insertArray = BSON_ARRAY(BSON("a" << 1) << BSON("b" << 1));
 
-    BSONObj origInsertRequestObj = BSON("insert"
-                                        << "test"
-                                        << "documents" << insertArray << "writeConcern"
-                                        << BSON("w" << 1) << "ordered" << true);
+    BSONObj origInsertRequestObj = BSON("insert" << "test"
+                                                 << "documents" << insertArray << "writeConcern"
+                                                 << BSON("w" << 1) << "ordered" << true);
 
     for (auto docSeq : {false, true}) {
         const auto opMsgRequest(toOpMsg("TestDB", origInsertRequestObj, docSeq));
@@ -128,12 +125,11 @@ TEST(BulkWriteCommandModifier, InsertWithShardVersion) {
     const Timestamp timestamp(2, 2);
     const Timestamp majorAndMinor(1, 2);
 
-    BSONObj origInsertRequestObj = BSON("insert"
-                                        << "test"
-                                        << "documents" << insertArray << "writeConcern"
-                                        << BSON("w" << 1) << "ordered" << true << "shardVersion"
-                                        << BSON("e" << epoch << "t" << timestamp << "v"
-                                                    << majorAndMinor));
+    BSONObj origInsertRequestObj =
+        BSON("insert" << "test"
+                      << "documents" << insertArray << "writeConcern" << BSON("w" << 1) << "ordered"
+                      << true << "shardVersion"
+                      << BSON("e" << epoch << "t" << timestamp << "v" << majorAndMinor));
 
     for (auto docSeq : {false, true}) {
         const auto opMsgRequest(toOpMsg("TestDB", origInsertRequestObj, docSeq));
@@ -148,9 +144,7 @@ TEST(BulkWriteCommandModifier, InsertWithShardVersion) {
         ASSERT_EQ("TestDB", nsInfo[0].getNs().db_forTest());
         ASSERT_EQ("test", nsInfo[0].getNs().coll());
         ASSERT_NE(boost::none, nsInfo[0].getShardVersion());
-        ASSERT_EQ(ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 2}),
-                                            boost::optional<CollectionIndexes>(boost::none))
-                      .toString(),
+        ASSERT_EQ(ShardVersionFactory::make(ChunkVersion({epoch, timestamp}, {1, 2})).toString(),
                   (*nsInfo[0].getShardVersion()).toString());
     }
 }
@@ -159,8 +153,7 @@ TEST(BulkWriteCommandModifier, AddUpdate) {
     auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     const BSONObj query = BSON("x" << 1);
     const BSONObj update = BSON("$inc" << BSON("x" << 1));
-    const BSONObj collation = BSON("locale"
-                                   << "en_US");
+    const BSONObj collation = BSON("locale" << "en_US");
     const BSONObj arrayFilter = BSON("i" << 0);
     const BSONObj sort = BSON("a" << 1);
     for (bool upsert : {false, true}) {
@@ -203,8 +196,7 @@ TEST(BulkWriteCommandModifier, AddOpUpdate) {
     auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     const BSONObj query = BSON("x" << 1);
     const BSONObj update = BSON("$inc" << BSON("x" << 1));
-    const BSONObj collation = BSON("locale"
-                                   << "en_US");
+    const BSONObj collation = BSON("locale" << "en_US");
     const BSONObj arrayFilter = BSON("i" << 0);
     const BSONObj sort = BSON("a" << 1);
 
@@ -252,8 +244,7 @@ TEST(BulkWriteCommandModifier, AddUpdateOps) {
     auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     const BSONObj query = BSON("x" << 1);
     const BSONObj update = BSON("$inc" << BSON("x" << 1));
-    const BSONObj collation = BSON("locale"
-                                   << "en_US");
+    const BSONObj collation = BSON("locale" << "en_US");
     const BSONObj arrayFilter = BSON("i" << 0);
     const BSONObj sort = BSON("a" << 1);
 
@@ -318,8 +309,7 @@ TEST(CommandWriteOpsParsers, BulkWriteUpdateWithPipeline) {
 TEST(BulkWriteCommandModifier, AddDelete) {
     auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     const BSONObj query = BSON("x" << 1);
-    const BSONObj collation = BSON("locale"
-                                   << "en_US");
+    const BSONObj collation = BSON("locale" << "en_US");
     for (bool multi : {false, true}) {
         auto rawDelete =
             BSON("q" << query << "limit" << (multi ? 0 : 1) << "collation" << collation);
@@ -351,8 +341,7 @@ TEST(BulkWriteCommandModifier, AddDelete) {
 TEST(BulkWriteCommandModifier, AddOpDelete) {
     auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     const BSONObj query = BSON("x" << 1);
-    const BSONObj collation = BSON("locale"
-                                   << "en_US");
+    const BSONObj collation = BSON("locale" << "en_US");
 
     auto delOp = write_ops::DeleteOpEntry();
     delOp.setCollation(collation);
@@ -385,8 +374,7 @@ TEST(BulkWriteCommandModifier, AddOpDelete) {
 TEST(BulkWriteCommandModifier, AddDeleteOps) {
     auto nss = NamespaceString::createNamespaceString_forTest("TestDB", "test");
     const BSONObj query = BSON("x" << 1);
-    const BSONObj collation = BSON("locale"
-                                   << "en_US");
+    const BSONObj collation = BSON("locale" << "en_US");
     for (bool multi : {false, true}) {
         BulkWriteCommandRequest request;
         BulkWriteCommandModifier builder(&request);
@@ -414,8 +402,7 @@ TEST(BulkWriteCommandModifier, TestMultiOpsSameNs) {
     docs.emplace_back(BSON("b" << 1));
 
     const BSONObj query = BSON("x" << 1);
-    const BSONObj collation = BSON("locale"
-                                   << "en_US");
+    const BSONObj collation = BSON("locale" << "en_US");
 
     BulkWriteCommandRequest request;
     BulkWriteCommandModifier builder(&request);
@@ -456,8 +443,7 @@ TEST(BulkWriteCommandModifier, TestMultiOpsDifferentNs) {
     docs.emplace_back(BSON("b" << 1));
 
     const BSONObj query = BSON("x" << 1);
-    const BSONObj collation = BSON("locale"
-                                   << "en_US");
+    const BSONObj collation = BSON("locale" << "en_US");
 
     BulkWriteCommandRequest request;
     BulkWriteCommandModifier builder(&request);

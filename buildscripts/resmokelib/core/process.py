@@ -36,6 +36,10 @@ from buildscripts.resmokelib.testing.fixtures import interface as fixture_interf
 # See https://bugs.python.org/issue7213 for more details.
 _POPEN_LOCK = threading.Lock()
 
+# we track the pids that we abort to know which core dumps are high priority to analyze
+core_dump_file_pid_lock = threading.Lock()
+BORING_CORE_DUMP_PIDS_FILE = "boring_core_dumps.txt"
+
 # Job objects are the only reliable way to ensure that processes are terminated on Windows.
 if sys.platform == "win32":
     import win32api
@@ -77,9 +81,7 @@ if sys.platform == "win32":
 class Process(object):
     """Wrapper around subprocess.Popen class."""
 
-    # pylint: disable=protected-access
-
-    def __init__(self, logger, args, env=None, env_vars=None, cwd=None):
+    def __init__(self, logger, args, env=None, env_vars=None, cwd=None, start_new_session=False):
         """Initialize the process with the specified logger, arguments, and environment."""
 
         # Ensure that executable files that don't already have an
@@ -116,6 +118,7 @@ class Process(object):
         self._stdout_pipe = None
         self._stderr_pipe = None
         self._cwd = cwd
+        self._start_new_session = start_new_session
 
         if sys.platform == "win32":
             self._windows_shutdown_event_set = False
@@ -150,6 +153,7 @@ class Process(object):
                 env=self.env,
                 creationflags=creation_flags,
                 cwd=self._cwd,
+                start_new_session=self._start_new_session,
             )
             self.pid = self._process.pid
 
@@ -194,6 +198,15 @@ class Process(object):
                 elif mode == fixture_interface.TeardownMode.TERMINATE:
                     self._process.terminate()
                 elif mode == fixture_interface.TeardownMode.ABORT:
+                    # the core dumps taken when we abort are low prioirty to get analyzed.
+                    # The data files are more useful most of the time.
+                    # We poll the process just to make sure we don't count processes that
+                    # ended prematurely as boring.
+                    if _config.EVERGREEN_TASK_ID and self._process.poll() is None:
+                        with core_dump_file_pid_lock:
+                            pid = str(self._process.pid)
+                            with open(BORING_CORE_DUMP_PIDS_FILE, "a") as file:
+                                file.write(f"{pid}\n")
                     self._process.send_signal(mode.value)
                 else:
                     raise errors.ProcessError(

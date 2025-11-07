@@ -28,20 +28,19 @@
  */
 
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/document_source_current_op.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/db/commands/fsync_locked.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/pipeline/document_source_current_op.h"
 #include "mongo/db/query/allowed_contexts.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -67,14 +66,15 @@ REGISTER_DOCUMENT_SOURCE(currentOp,
                          DocumentSourceCurrentOp::LiteParsed::parse,
                          DocumentSourceCurrentOp::createFromBson,
                          AllowedWithApiStrict::kNeverInVersion1);
+ALLOCATE_DOCUMENT_SOURCE_ID(currentOp, DocumentSourceCurrentOp::id)
 
 constexpr StringData DocumentSourceCurrentOp::kStageName;
 
 std::unique_ptr<DocumentSourceCurrentOp::LiteParsed> DocumentSourceCurrentOp::LiteParsed::parse(
-    const NamespaceString& nss, const BSONElement& spec) {
+    const NamespaceString& nss, const BSONElement& spec, const LiteParserOptions& options) {
     // Need to check the value of allUsers; if true then the inprog privilege is returned by
     // requiredPrivileges(), which is called in the auth subsystem.
-    if (spec.type() != BSONType::Object) {
+    if (spec.type() != BSONType::object) {
         uasserted(ErrorCodes::TypeMismatch,
                   str::stream() << "$currentOp options must be specified in an object, but found: "
                                 << typeName(spec.type()));
@@ -90,7 +90,7 @@ std::unique_ptr<DocumentSourceCurrentOp::LiteParsed> DocumentSourceCurrentOp::Li
     // operations rather than forwarding the request to the shards.
     for (auto&& elem : spec.embeddedObject()) {
         if (elem.fieldNameStringData() == "allUsers"_sd) {
-            if (elem.type() != BSONType::Bool) {
+            if (elem.type() != BSONType::boolean) {
                 uasserted(ErrorCodes::TypeMismatch,
                           str::stream() << "The 'allUsers' parameter of the $currentOp stage "
                                            "must be a boolean value, but found: "
@@ -105,7 +105,7 @@ std::unique_ptr<DocumentSourceCurrentOp::LiteParsed> DocumentSourceCurrentOp::Li
                     str::stream() << "The 'localOps' parameter of the $currentOp stage must be a "
                                      "boolean value, but found: "
                                   << typeName(elem.type()),
-                    elem.type() == BSONType::Bool);
+                    elem.type() == BSONType::boolean);
 
             if (elem.boolean()) {
                 localOps = LocalOpsMode::kLocalMongosOps;
@@ -118,75 +118,7 @@ std::unique_ptr<DocumentSourceCurrentOp::LiteParsed> DocumentSourceCurrentOp::Li
 }
 
 const char* DocumentSourceCurrentOp::getSourceName() const {
-    return kStageName.rawData();
-}
-
-DocumentSource::GetNextResult DocumentSourceCurrentOp::doGetNext() {
-    if (_ops.empty()) {
-        _ops = pExpCtx->getMongoProcessInterface()->getCurrentOps(
-            pExpCtx,
-            _includeIdleConnections.value_or(kDefaultConnMode),
-            _includeIdleSessions.value_or(kDefaultSessionMode),
-            _includeOpsFromAllUsers.value_or(kDefaultUserMode),
-            _truncateOps.value_or(kDefaultTruncationMode),
-            _idleCursors.value_or(kDefaultCursorMode));
-
-        _opsIter = _ops.begin();
-
-        if (pExpCtx->getFromRouter()) {
-            _shardName =
-                pExpCtx->getMongoProcessInterface()->getShardName(pExpCtx->getOperationContext());
-
-            uassert(40465,
-                    "Aggregation request specified 'fromRouter' but unable to retrieve shard name "
-                    "for $currentOp pipeline stage.",
-                    !_shardName.empty());
-        }
-    }
-
-    if (_opsIter != _ops.end()) {
-        if (!pExpCtx->getFromRouter()) {
-            return Document(*_opsIter++);
-        }
-
-        // This $currentOp is running in a sharded context.
-        invariant(!_shardName.empty());
-
-        const BSONObj& op = *_opsIter++;
-        MutableDocument doc;
-
-        // Add the shard name to the output document.
-        doc.addField(kShardFieldName, Value(_shardName));
-
-        if (mongo::lockedForWriting()) {
-            doc.addField(StringData("fsyncLock"), Value(true));
-        }
-
-        // For operations on a shard, we change the opid from the raw numeric form to
-        // 'shardname:opid'. We also change the fieldname 'client' to 'client_s' to indicate
-        // that the IP is that of the mongos which initiated this request.
-        for (auto&& elt : op) {
-            StringData fieldName = elt.fieldNameStringData();
-
-            if (fieldName == kOpIdFieldName) {
-                uassert(ErrorCodes::TypeMismatch,
-                        str::stream() << "expected numeric opid for $currentOp response from '"
-                                      << _shardName << "' but got: " << typeName(elt.type()),
-                        elt.isNumber());
-
-                std::string shardOpID = (str::stream() << _shardName << ":" << elt.numberInt());
-                doc.addField(kOpIdFieldName, Value(shardOpID));
-            } else if (fieldName == kClientFieldName) {
-                doc.addField(kMongosClientFieldName, Value(elt.str()));
-            } else {
-                doc.addField(fieldName, Value(elt));
-            }
-        }
-
-        return doc.freeze();
-    }
-
-    return GetNextResult::makeEOF();
+    return kStageName.data();
 }
 
 intrusive_ptr<DocumentSource> DocumentSourceCurrentOp::createFromBson(
@@ -194,7 +126,7 @@ intrusive_ptr<DocumentSource> DocumentSourceCurrentOp::createFromBson(
     uassert(ErrorCodes::FailedToParse,
             str::stream() << "$currentOp options must be specified in an object, but found: "
                           << typeName(spec.type()),
-            spec.type() == BSONType::Object);
+            spec.type() == BSONType::object);
 
     const NamespaceString& nss = pExpCtx->getNamespaceString();
 
@@ -210,7 +142,7 @@ intrusive_ptr<DocumentSource> DocumentSourceCurrentOp::createFromBson(
     boost::optional<CursorMode> idleCursors;
     boost::optional<bool> targetAllNodes;
 
-    auto currentOpSpec = CurrentOpSpec::parse(IDLParserContext(kStageName), spec.embeddedObject());
+    auto currentOpSpec = CurrentOpSpec::parse(spec.embeddedObject(), IDLParserContext(kStageName));
 
     // Populate the values, if present.
     if (currentOpSpec.getAllUsers().has_value()) {

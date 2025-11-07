@@ -27,14 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <cstdint>
-#include <memory>
-#include <s2cellid.h>
-#include <utility>
-#include <variant>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/query/query_shape/query_shape.h"
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -44,18 +37,26 @@
 #include "mongo/db/matcher/expression_text_base.h"
 #include "mongo/db/matcher/expression_tree.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
-#include "mongo/db/matcher/parsed_match_expression_for_test.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/query/query_shape/query_shape.h"
+#include "mongo/db/query/compiler/parsers/matcher/parsed_match_expression_for_test.h"
+#include "mongo/db/query/compiler/rewrites/matcher/expression_optimizer.h"
 #include "mongo/db/query/query_shape/query_shape_test_gen.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/query_shape/shape_helpers.h"
 #include "mongo/db/service_context_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
+
+#include <cstdint>
+#include <memory>
+#include <utility>
+#include <variant>
+
+#include <s2cellid.h>
+
+
 namespace mongo::query_shape {
 
 namespace {
@@ -182,20 +183,13 @@ void assertRedactedShapeIs(std::string filterJson, BSONObj expectedShape) {
 TEST(QueryPredicateShape, Regex) {
     // Note/warning: 'fromjson' will parse $regex into a /regex/, so these tests can't use
     // auto-updating BSON assertions.
-    assertShapeIs("{a: /a+/}",
-                  BSON("a" << BSON("$regex"
-                                   << "?string")));
+    assertShapeIs("{a: /a+/}", BSON("a" << BSON("$regex" << "?string")));
     assertShapeIs("{a: /a+/i}",
-                  BSON("a" << BSON("$regex"
-                                   << "?string"
-                                   << "$options"
-                                   << "?string")));
-    assertRedactedShapeIs("{a: /a+/}",
-                          BSON("HASH<a>" << BSON("$regex"
-                                                 << "?string")));
-    assertRedactedShapeIs("{a: /a+/}",
-                          BSON("HASH<a>" << BSON("$regex"
-                                                 << "?string")));
+                  BSON("a" << BSON("$regex" << "?string"
+                                            << "$options"
+                                            << "?string")));
+    assertRedactedShapeIs("{a: /a+/}", BSON("HASH<a>" << BSON("$regex" << "?string")));
+    assertRedactedShapeIs("{a: /a+/}", BSON("HASH<a>" << BSON("$regex" << "?string")));
 }
 
 TEST(QueryPredicateShape, Mod) {
@@ -432,7 +426,7 @@ BSONObj queryShapeForOptimizedExprExpression(std::string exprPredicateJson) {
     // not clear we'd want to do optimization before computing the query shape, but we should
     // support the computation on any MatchExpression, and this is the easiest way we can create
     // this type of MatchExpression node.
-    auto optimized = MatchExpression::optimize(expr.release());
+    auto optimized = optimizeMatchExpression(expr.release());
     return predicateShape(optimized.get());
 }
 
@@ -700,7 +694,7 @@ static const NamespaceString kDefaultTestNss =
     NamespaceString::createNamespaceString_forTest("testDB.testColl");
 
 struct DummyShapeSpecificComponents : public query_shape::CmdSpecificShapeComponents {
-    DummyShapeSpecificComponents(){};
+    DummyShapeSpecificComponents() {};
     void HashValue(absl::HashState state) const override {}
     size_t size() const final {
         return sizeof(DummyShapeSpecificComponents);

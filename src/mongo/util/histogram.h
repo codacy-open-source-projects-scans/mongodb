@@ -29,6 +29,10 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/util/assert_util.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cstddef>
@@ -40,10 +44,6 @@
 #include <vector>
 
 #include <fmt/format.h>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -78,11 +78,15 @@ public:
         }
     }
 
-    void increment(const T& data) {
+    void incrementN(const T& data, int64_t count) {
         auto i = std::upper_bound(_partitions.begin(), _partitions.end(), data, _comparator) -
             _partitions.begin();
 
-        ++_counts[i];
+        _counts[i] += count;
+    }
+
+    void increment(const T& data) {
+        incrementN(data, /*count=*/1);
     }
 
     const std::vector<T>& getPartitions() const {
@@ -91,7 +95,8 @@ public:
 
     std::vector<int64_t> getCounts() const {
         std::vector<int64_t> r(_counts.size());
-        std::transform(_counts.begin(), _counts.end(), r.begin(), [](auto&& x) { return x; });
+        std::transform(
+            _counts.begin(), _counts.end(), r.begin(), [](auto&& x) -> int64_t { return x; });
         return r;
     }
 
@@ -178,11 +183,11 @@ void appendHistogram(BSONObjBuilder& bob, const Histogram<Ts...>& hist, const St
     BSONObjBuilder histBob(bob.subobjStart(histKey));
     long long totalCount = 0;
 
-    using namespace fmt::literals;
     for (auto&& [count, lower, upper] : hist) {
-        std::string bucketKey = "{}{}, {})"_format(lower ? "[" : "(",
-                                                   lower ? "{}"_format(*lower) : "-inf",
-                                                   upper ? "{}"_format(*upper) : "inf");
+        std::string bucketKey = fmt::format("{}{}, {})",
+                                            lower ? "[" : "(",
+                                            lower ? fmt::format("{}", *lower) : "-inf",
+                                            upper ? fmt::format("{}", *upper) : "inf");
 
         BSONObjBuilder(histBob.subobjStart(bucketKey))
             .append("count", static_cast<long long>(count));

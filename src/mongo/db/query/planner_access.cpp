@@ -28,30 +28,21 @@
  */
 
 
-#include "mongo/db/matcher/expression_array.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/util/assert_util.h"
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <s2cellid.h>
-// IWYU pragma: no_include "ext/alloc_traits.h"
-#include <algorithm>
-#include <set>
-#include <string>
-#include <tuple>
-#include <utility>
-#include <vector>
 
+#include <memory>
+
+#include <s2cellid.h>
+
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/basic_types.h"
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
-#include "mongo/db/catalog/clustered_collection_util.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/fts/fts_index_format.h"
 #include "mongo/db/fts/fts_query.h"
@@ -59,39 +50,45 @@
 #include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/fts/fts_util.h"
 #include "mongo/db/index_names.h"
+#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/local_catalog/clustered_collection_util.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/expression_geo.h"
-#include "mongo/db/matcher/expression_internal_expr_comparison.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_text_base.h"
 #include "mongo/db/matcher/expression_tree.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/query/bson/dotted_path_support.h"
-#include "mongo/db/query/eof_node_type.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection.h"
+#include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
+#include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/eof_node_type.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
+#include "mongo/db/query/compiler/rewrites/matcher/expression_optimizer.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/index_bounds.h"
-#include "mongo/db/query/index_bounds_builder.h"
 #include "mongo/db/query/index_tag.h"
 #include "mongo/db/query/indexability.h"
 #include "mongo/db/query/planner_access.h"
 #include "mongo/db/query/planner_wildcard_helpers.h"
-#include "mongo/db/query/projection.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/query/record_id_range.h"
-#include "mongo/db/query/stage_types.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/type_traits.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <set>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -237,7 +234,7 @@ std::pair<boost::optional<Timestamp>, boost::optional<Timestamp>> extractTsRange
     }
 
     auto rawElem = static_cast<const ComparisonMatchExpression*>(me)->getData();
-    if (rawElem.type() != BSONType::bsonTimestamp) {
+    if (rawElem.type() != BSONType::timestamp) {
         return {min, max};
     }
 
@@ -274,10 +271,10 @@ bool isOplogTsLowerBoundPred(const mongo::MatchExpression* me) {
 // True if the element type is affected by a collator (i.e. it is or contains a String).
 bool affectedByCollator(const BSONElement& element) {
     switch (element.type()) {
-        case BSONType::String:
+        case BSONType::string:
             return true;
-        case BSONType::Array:
-        case BSONType::Object:
+        case BSONType::array:
+        case BSONType::object:
             for (const auto& sub : element.Obj()) {
                 if (affectedByCollator(sub))
                     return true;
@@ -415,11 +412,11 @@ void QueryPlannerAccess::handleRIDRangeMinMax(const CanonicalQuery& query,
                 allEltsCollationCompatible = false;
 
                 BSONObjBuilder bMin;
-                bMin.appendMinForType("", element.type());
+                bMin.appendMinForType("", stdx::to_underlying(element.type()));
                 setLowestRecord(minBound, bMin.obj());
 
                 BSONObjBuilder bMax;
-                bMax.appendMaxForType("", element.type());
+                bMax.appendMaxForType("", stdx::to_underlying(element.type()));
                 setHighestRecord(maxBound, bMax.obj());
             }
         }
@@ -446,11 +443,11 @@ void QueryPlannerAccess::handleRIDRangeMinMax(const CanonicalQuery& query,
         // For other comparisons which _do_ perform type bracketing, the RecordId bounds
         // may be tightened here.
         BSONObjBuilder minb;
-        minb.appendMinForType("", element.type());
+        minb.appendMinForType("", stdx::to_underlying(element.type()));
         recordRange.maybeNarrowMin(minb.obj(), true /* inclusive */);
 
         BSONObjBuilder maxb;
-        maxb.appendMaxForType("", element.type());
+        maxb.appendMaxForType("", stdx::to_underlying(element.type()));
         recordRange.maybeNarrowMax(maxb.obj(), true /* inclusive */);
     }
 
@@ -530,17 +527,32 @@ void QueryPlannerAccess::simplifyFilter(std::unique_ptr<MatchExpression>& expr,
     }
 }
 
+boost::optional<ResumeScanPoint> getResumePoint(const BSONObj& resumeAfterObj,
+                                                const BSONObj& startAtObj) {
+    tassert(9049501,
+            "Cannot set both $_startAt and $_resumeAfter",
+            resumeAfterObj.isEmpty() || startAtObj.isEmpty());
+    if (!resumeAfterObj.isEmpty()) {
+        BSONElement recordIdElem = resumeAfterObj["$recordId"];
+        return ResumeScanPoint{RecordId::deserializeToken(recordIdElem),
+                               false /* tolerateKeyNotFound */};
+    } else if (!startAtObj.isEmpty()) {
+        BSONElement recordIdElem = startAtObj["$recordId"];
+        return ResumeScanPoint{RecordId::deserializeToken(recordIdElem),
+                               true /* tolerateKeyNotFound */};
+    }
+    return boost::none;
+}
+
 std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeCollectionScan(
     const CanonicalQuery& query,
     bool tailable,
     const QueryPlannerParams& params,
     int direction,
     const MatchExpression* root) {
-
     // The following are expensive to look up, so only do it once for each.
-    const mongo::NamespaceString nss = query.nss();
+    const NamespaceString& nss = query.nss();
     const bool isOplog = nss.isOplog();
-    const bool isChangeCollection = nss.isChangeCollection();
 
     // Make the (only) node, a collection scan.
     auto csn = std::make_unique<CollectionScanNode>();
@@ -563,26 +575,23 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeCollectionScan(
     // the collection scan to return timestamp-based tokens. Otherwise, we should
     // return generic RecordId-based tokens.
     if (query.getFindCommandRequest().getRequestResumeToken()) {
-        csn->shouldTrackLatestOplogTimestamp = (isOplog || isChangeCollection);
+        csn->shouldTrackLatestOplogTimestamp = isOplog;
         csn->requestResumeToken = !csn->shouldTrackLatestOplogTimestamp;
     }
 
-    // Extract and assign the RecordId from the 'resumeAfter' token, if present.
-    const BSONObj& resumeAfterObj = query.getFindCommandRequest().getResumeAfter();
-    if (!resumeAfterObj.isEmpty()) {
-        BSONElement recordIdElem = resumeAfterObj["$recordId"];
-        csn->resumeAfterRecordId = RecordId::deserializeToken(recordIdElem);
-    }
+    // Extract and set the resumeScanPoint from the 'resumeAfter' or 'startAt' token, if present.
+    csn->resumeScanPoint = getResumePoint(query.getFindCommandRequest().getResumeAfter(),
+                                          query.getFindCommandRequest().getStartAt());
 
     const bool assertMinTsHasNotFallenOffOplog = params.mainCollectionInfo.options &
         QueryPlannerParams::ASSERT_MIN_TS_HAS_NOT_FALLEN_OFF_OPLOG;
-    if ((isOplog || isChangeCollection) && csn->direction == 1) {
+    if (isOplog && csn->direction == 1) {
         // Takes Timestamp 'ts' as input, transforms it to the RecordIdBound and assigns it to the
-        // output parameter 'recordId'. The RecordId format for the change collection is a string,
-        // where as the RecordId format for the oplog is a long integer. The timestamp should be
-        // converted to the required format before assigning it to the 'recordId'.
+        // output parameter 'recordId'. The RecordId format for the oplog is a long integer. The
+        // timestamp should be converted to the required format before assigning it to the
+        // 'recordId'.
         auto assignRecordIdFromTimestamp = [&](auto& ts, auto* recordId) {
-            auto keyFormat = isChangeCollection ? KeyFormat::String : KeyFormat::Long;
+            auto keyFormat = KeyFormat::Long;
             auto status = record_id_helpers::keyForOptime(ts, keyFormat);
             if (status.isOK()) {
                 *recordId = RecordIdBound(status.getValue());
@@ -590,8 +599,8 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeCollectionScan(
         };
 
         // Optimizes the start and end location parameters for a collection scan for an oplog
-        // collection. Not compatible with $_resumeAfter so we do not optimize in that case.
-        if (resumeAfterObj.isEmpty()) {
+        // collection. Not compatible with resumeScanPoint, so we do not optimize in that case.
+        if (!csn->resumeScanPoint) {
             auto [minTs, maxTs] = extractTsRange(root);
             if (minTs) {
                 assignRecordIdFromTimestamp(*minTs, &csn->minRecord);
@@ -635,7 +644,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeCollectionScan(
     const bool canSimplifyFilter = csn->hasCompatibleCollation;
     std::set<const MatchExpression*> redundantExprs;
 
-    if (csn->isClustered && !csn->resumeAfterRecordId) {
+    if (csn->isClustered && !csn->resumeScanPoint) {
         // This is a clustered collection. Attempt to perform an efficient, bounded collection scan
         // via minRecord and maxRecord if applicable. During this process, we will check if the
         // query is guaranteed to exclude values of the cluster key which are affected by collation.
@@ -643,7 +652,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeCollectionScan(
         // won't affect the query results. In that case, we can say hasCompatibleCollation is true.
 
         RecordIdRange recordRange;
-        // min/max records may have been set if oplog or change collection.
+        // min/max records may have been set if oplog.
         recordRange.intersectRange(csn->minRecord, csn->maxRecord);
         bool compatibleCollation = handleRIDRangeScan(
             csn->filter.get(),
@@ -696,7 +705,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeLeafNode(
         auto nearExpr = static_cast<const GeoNearMatchExpression*>(expr);
 
         BSONElement elt = index.keyPattern.firstElement();
-        bool indexIs2D = (String == elt.type() && "2d" == elt.String());
+        bool indexIs2D = (BSONType::string == elt.type() && "2d" == elt.String());
 
         if (indexIs2D) {
             auto ret = std::make_unique<GeoNear2DNode>(index);
@@ -719,15 +728,14 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeLeafNode(
         // We must not keep the expression node around.
         *tightnessOut = IndexBoundsBuilder::EXACT;
         auto textExpr = static_cast<const TextMatchExpressionBase*>(expr);
-        auto ret = std::make_unique<TextMatchNode>(
-            index,
-            textExpr->getFTSQuery().clone(),
-            query.metadataDeps()[DocumentMetadataFields::kTextScore]);
+        bool wantTextScore = DepsTracker::needsTextScoreMetadata(query.metadataDeps());
+        auto ret =
+            std::make_unique<TextMatchNode>(index, textExpr->getFTSQuery().clone(), wantTextScore);
         // Count the number of prefix fields before the "text" field.
         for (auto&& keyPatternElt : ret->index.keyPattern) {
             // We know that the only key pattern with a type of String is the _fts field
             // which is immediately after all prefix fields.
-            if (BSONType::String == keyPatternElt.type()) {
+            if (BSONType::string == keyPatternElt.type()) {
                 break;
             }
             ++(ret->numPrefixFields);
@@ -1327,8 +1335,8 @@ std::vector<std::unique_ptr<QuerySolutionNode>> QueryPlannerAccess::collapseEqui
             collapsedFilter->add(std::move(collapseIntoFetch->filter));
 
             // Normalize the filter and add it to 'into'.
-            collapseIntoFetch->filter = MatchExpression::optimize(std::move(collapsedFilter),
-                                                                  /* enableSimplification */ true);
+            collapseIntoFetch->filter = optimizeMatchExpression(std::move(collapsedFilter),
+                                                                /* enableSimplification */ true);
         } else {
             // Scans are not equivalent and can't be collapsed.
             collapsedScans.push_back(std::move(scans[i]));
@@ -1755,7 +1763,7 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::buildIndexedAnd(
                 break;
             }
         }
-        if (allSortedByDiskLoc) {
+        if (allSortedByDiskLoc && internalQueryPlannerEnableSortIndexIntersection.loadRelaxed()) {
             auto asn = std::make_unique<AndSortedNode>();
             asn->addChildren(std::move(ixscanNodes));
             andResult = std::move(asn);
@@ -1778,12 +1786,12 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::buildIndexedAnd(
                 }
             }
         } else {
-            // We can't use sort-based intersection, and hash-based intersection is disabled.
-            // Clean up the index scans and bail out by returning NULL.
+            // Sort-based and hash-based index intersection are both disabled. Bail out by returning
+            // nullptr.
             LOGV2_DEBUG(20947,
                         5,
-                        "Can't build index intersection solution: AND_SORTED is not possible and "
-                        "AND_HASH is disabled");
+                        "Can't build index intersection solution: AND_HASH is disabled and "
+                        "AND_SORTED is either not possible or disabled");
             return nullptr;
         }
     }
@@ -1852,7 +1860,9 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::buildIndexedOr(
         const bool isTailable = query.getFindCommandRequest().getTailable();
         if (clusteredCollection) {
             auto clusteredScanDirection =
-                QueryPlannerCommon::determineClusteredScanDirection(query, params).value_or(1);
+                QueryPlannerCommon::determineClusteredScanDirection(
+                    query, params.clusteredInfo, params.clusteredCollectionCollator)
+                    .value_or(1);
             while (0 < root->numChildren()) {
                 usedClusteredCollScan = true;
                 MatchExpression* child = root->getChild(0);
@@ -1896,10 +1906,6 @@ std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::buildIndexedOr(
         // We won't enumerate an OR without indices for each child, so this isn't an issue, even
         // if we have an AND with an OR child -- we won't get here unless the OR is fully
         // indexed.
-        return nullptr;
-    }
-
-    if (!wcp::expandWildcardFieldBounds(scanNodes)) {
         return nullptr;
     }
 

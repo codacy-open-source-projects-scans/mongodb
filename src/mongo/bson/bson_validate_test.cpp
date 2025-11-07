@@ -28,13 +28,7 @@
  */
 
 
-#include <cstdio>
-#include <cstring>
-#include <ctime>
-#include <memory>
-#include <ostream>
-#include <string>
-#include <utility>
+#include "mongo/bson/bson_validate.h"
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
@@ -42,7 +36,6 @@
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bson_depth.h"
-#include "mongo/bson/bson_validate.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -56,16 +49,21 @@
 #include "mongo/crypto/fle_field_schema_gen.h"
 #include "mongo/db/matcher/expression_type.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/platform/random.h"
 #include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/base64.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <memory>
+#include <ostream>
+#include <string>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -77,7 +75,7 @@ using std::unique_ptr;
 
 void appendInvalidStringElement(const char* fieldName, BufBuilder* bb) {
     // like a BSONObj string, but without a NUL terminator.
-    bb->appendChar(String);
+    bb->appendChar(stdx::to_underlying(BSONType::string));
     bb->appendCStr(fieldName);
     bb->appendNum(4);
     bb->appendStrBytes("asdf");  // Missing required final NUL.
@@ -89,7 +87,7 @@ void appendInvalidStringElement(const char* fieldName, BufBuilder* bb) {
  * minimum 5 bytes expected by the the validator.
  */
 void appendObjectNameAndSize(const char* fieldName, BufBuilder* bb, int objectSize) {
-    bb->appendChar(Object);
+    bb->appendChar(stdx::to_underlying(BSONType::object));
     bb->appendCStr(fieldName);
     bb->appendNum(objectSize);
 }
@@ -201,9 +199,8 @@ TEST(BSONValidate, Fuzz) {
     BSONObj original =
         BSON("one" << 3 << "two" << 5 << "three" << BSONObj() << "four"
                    << BSON("five" << BSON("six" << 11)) << "seven"
-                   << BSON_ARRAY("a"
-                                 << "bb"
-                                 << "ccc" << 5)
+                   << BSON_ARRAY("a" << "bb"
+                                     << "ccc" << 5)
                    << "eight" << BSONDBRef("rrr", OID("01234567890123456789aaaa")) << "_id"
                    << OID("deadbeefdeadbeefdeadbeef") << "nine"
                    << BSONBinData("\x69\xb7", 2, BinDataGeneral) << "ten"
@@ -254,10 +251,9 @@ TEST(BSONValidateExtended, MD5Size) {
 }
 
 TEST(BSONValidateExtended, BSONArrayIndexes) {
-    BSONObj arr = BSON("0"
-                       << "a"
-                       << "1"
-                       << "b");
+    BSONObj arr = BSON("0" << "a"
+                           << "1"
+                           << "b");
     BSONObj x1 = BSON("arr" << BSONArray(arr));
     ASSERT_OK(validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kExtended));
     ASSERT_OK(validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kFull));
@@ -271,77 +267,72 @@ TEST(BSONValidateExtended, BSONArrayIndexes) {
     status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kFull);
     ASSERT_EQ(status, ErrorCodes::NonConformantBSON);
 
-    arr = BSON("1"
-               << "a"
-               << "2"
-               << "b");
+    arr = BSON("1" << "a"
+                   << "2"
+                   << "b");
     x1 = BSON("nonSequentialArray" << BSONArray(arr));
     status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kExtended);
     ASSERT_EQ(status, ErrorCodes::NonConformantBSON);
     status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kFull);
     ASSERT_EQ(status, ErrorCodes::NonConformantBSON);
 
-    x1 = BSON("nestedArraysAndObjects" << BSONArray(BSON("0"
-                                                         << "a"
-                                                         << "1"
-                                                         << BSONArray(BSON("0"
-                                                                           << "a"
-                                                                           << "2"
-                                                                           << "b"))
-                                                         << "2"
-                                                         << "b")));
+    x1 = BSON("nestedArraysAndObjects" << BSONArray(BSON("0" << "a"
+                                                             << "1"
+                                                             << BSONArray(BSON("0" << "a"
+                                                                                   << "2"
+                                                                                   << "b"))
+                                                             << "2"
+                                                             << "b")));
     status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kExtended);
     ASSERT_EQ(status, ErrorCodes::NonConformantBSON);
     status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kFull);
     ASSERT_EQ(status, ErrorCodes::NonConformantBSON);
 
-    x1 = BSON("longArray" << BSONArray(BSON("0"
-                                            << "a"
-                                            << "1"
-                                            << "b"
-                                            << "2"
-                                            << "c"
-                                            << "3"
-                                            << "d"
-                                            << "4"
-                                            << "e"
-                                            << "5"
-                                            << "f"
-                                            << "6"
-                                            << "g"
-                                            << "7"
-                                            << "h"
-                                            << "8"
-                                            << "i"
-                                            << "9"
-                                            << "j"
-                                            << "10"
-                                            << "k")));
+    x1 = BSON("longArray" << BSONArray(BSON("0" << "a"
+                                                << "1"
+                                                << "b"
+                                                << "2"
+                                                << "c"
+                                                << "3"
+                                                << "d"
+                                                << "4"
+                                                << "e"
+                                                << "5"
+                                                << "f"
+                                                << "6"
+                                                << "g"
+                                                << "7"
+                                                << "h"
+                                                << "8"
+                                                << "i"
+                                                << "9"
+                                                << "j"
+                                                << "10"
+                                                << "k")));
     ASSERT_OK(validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kExtended));
     ASSERT_OK(validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kFull));
 
-    x1 = BSON("longNonSequentialArray" << BSONArray(BSON("0"
-                                                         << "a"
-                                                         << "1"
-                                                         << "b"
-                                                         << "2"
-                                                         << "c"
-                                                         << "3"
-                                                         << "d"
-                                                         << "4"
-                                                         << "e"
-                                                         << "5"
-                                                         << "f"
-                                                         << "6"
-                                                         << "g"
-                                                         << "7"
-                                                         << "h"
-                                                         << "8"
-                                                         << "i"
-                                                         << "9"
-                                                         << "j"
-                                                         << "11"
-                                                         << "k")));
+    x1 = BSON("longNonSequentialArray" << BSONArray(BSON("0" << "a"
+                                                             << "1"
+                                                             << "b"
+                                                             << "2"
+                                                             << "c"
+                                                             << "3"
+                                                             << "d"
+                                                             << "4"
+                                                             << "e"
+                                                             << "5"
+                                                             << "f"
+                                                             << "6"
+                                                             << "g"
+                                                             << "7"
+                                                             << "h"
+                                                             << "8"
+                                                             << "i"
+                                                             << "9"
+                                                             << "j"
+                                                             << "11"
+                                                             << "k")));
     status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kExtended);
     ASSERT_EQ(status, ErrorCodes::NonConformantBSON);
     status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kFull);
@@ -349,10 +340,9 @@ TEST(BSONValidateExtended, BSONArrayIndexes) {
 
     x1 = BSON("validNestedArraysAndObjects"
               << BSON("arr" << BSONArray(BSON("0" << BSON("2" << 1 << "1" << 0 << "3"
-                                                              << BSONArray(BSON("0"
-                                                                                << "a"
-                                                                                << "1"
-                                                                                << "b"))
+                                                              << BSONArray(BSON("0" << "a"
+                                                                                    << "1"
+                                                                                    << "b"))
                                                               << "4"
                                                               << "b")))));
     ASSERT_OK(validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kExtended));
@@ -360,10 +350,9 @@ TEST(BSONValidateExtended, BSONArrayIndexes) {
 
     x1 = BSON("invalidNestedArraysAndObjects"
               << BSON("arr" << BSONArray(BSON("0" << BSON("2" << 1 << "1" << 0 << "1"
-                                                              << BSONArray(BSON("0"
-                                                                                << "a"
-                                                                                << "2"
-                                                                                << "b"))
+                                                              << BSONArray(BSON("0" << "a"
+                                                                                    << "2"
+                                                                                    << "b"))
                                                               << "1"
                                                               << "b")))));
     status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kExtended);
@@ -373,56 +362,48 @@ TEST(BSONValidateExtended, BSONArrayIndexes) {
 }
 
 TEST(BSONValidateExtended, BSONUTF8) {
-    auto x1 = BSON("ValidString"
-                   << "\x00"
-                   << "ValidString2"
-                   << "str");
+    auto x1 = BSON("ValidString" << "\x00"
+                                 << "ValidString2"
+                                 << "str");
     ASSERT_OK(validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kExtended));
     ASSERT_OK(validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kFull));
 
     // Invalid UTF-8 - 10000000; leading bit cannot be set for single byte UTF-8.
-    x1 = BSON("InvalidOneByteString"
-              << "\x80");
+    x1 = BSON("InvalidOneByteString" << "\x80");
     auto status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kExtended);
     ASSERT_OK(status);
     status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kFull);
     ASSERT_EQ(status, ErrorCodes::NonConformantBSON);
 
-    x1 = BSON("ValidTwoByteString"
-              << "\x40\x40");
+    x1 = BSON("ValidTwoByteString" << "\x40\x40");
     ASSERT_OK(validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kExtended));
     ASSERT_OK(validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kFull));
 
     // Invalid UTF-8 - 11011111 11001111; second bit of second byte cannot be set.
-    x1 = BSON("InvalidTwoByteString"
-              << "\xDF\xCF");
+    x1 = BSON("InvalidTwoByteString" << "\xDF\xCF");
     status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kExtended);
     ASSERT_OK(status);
     status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kFull);
     ASSERT_EQ(status, ErrorCodes::NonConformantBSON);
 
-    x1 = BSON("ValidThreeByteString"
-              << "\x40\x40\x40");
+    x1 = BSON("ValidThreeByteString" << "\x40\x40\x40");
     ASSERT_OK(validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kExtended));
     ASSERT_OK(validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kFull));
 
     // Invalid UTF-8 - 11101111 10111111 11111111 - second bit of third byte cannot be set.
-    x1 = BSON("InvalidThreeByteString"
-              << "\xEF\xBF\xFF");
+    x1 = BSON("InvalidThreeByteString" << "\xEF\xBF\xFF");
     status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kExtended);
     ASSERT_OK(status);
     status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kFull);
     ASSERT_EQ(status, ErrorCodes::NonConformantBSON);
 
-    x1 = BSON("ValidFourByteString"
-              << "\x40\x40\x40\x40");
+    x1 = BSON("ValidFourByteString" << "\x40\x40\x40\x40");
     ASSERT_OK(validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kExtended));
     ASSERT_OK(validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kFull));
 
     // Invalid UTF-8 - 11110000 10011000 10011010 11111111 - second bit of fourth byte cannot be
     // set.
-    x1 = BSON("InvalidFourByteString"
-              << "\xF0\x98\x9A\xFF");
+    x1 = BSON("InvalidFourByteString" << "\xF0\x98\x9A\xFF");
     status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kExtended);
     ASSERT_OK(status);
     status = validateBSON(x1.objdata(), x1.objsize(), mongo::BSONValidateModeEnum::kFull);
@@ -452,7 +433,7 @@ TEST(BSONValidateFast, Simple0) {
 
 TEST(BSONValidateFast, Simple2) {
     char buf[64];
-    for (int i = 1; i <= JSTypeMax; i++) {
+    for (int i = 1; i <= stdx::to_underlying(BSONType::jsTypeMax); i++) {
         BSONObjBuilder b;
         sprintf(buf, "foo%d", i);
         b.appendMinForType(buf, i);
@@ -467,7 +448,7 @@ TEST(BSONValidateFast, Simple2) {
 TEST(BSONValidateFast, Simple3) {
     BSONObjBuilder b;
     char buf[64];
-    for (int i = 1; i <= JSTypeMax; i++) {
+    for (int i = 1; i <= stdx::to_underlying(BSONType::jsTypeMax); i++) {
         sprintf(buf, "foo%d", i);
         b.appendMinForType(buf, i);
         sprintf(buf, "bar%d", i);
@@ -566,9 +547,7 @@ TEST(BSONValidateFast, ErrorIsInId) {
 TEST(BSONValidateFast, NonTopLevelId) {
     BufBuilder bb;
     BSONObjBuilder ob(bb);
-    ob.append("not_id1",
-              BSON("_id"
-                   << "not the real _id"));
+    ob.append("not_id1", BSON("_id" << "not the real _id"));
     appendInvalidStringElement("not_id2", &bb);
     const BSONObj x = ob.done();
     const Status status = validateBSON(x);
@@ -584,9 +563,7 @@ TEST(BSONValidateFast, UnterminatedStringErrorInNestedObjectWithId) {
     ob.append("x", 2.0);
     appendInvalidStringElement("invalid", &bb);
     const BSONObj nestedInvalid = ob.done();
-    const BSONObj x = BSON("_id" << 1 << "nested"
-                                 << BSON_ARRAY("a"
-                                               << "b" << nestedInvalid));
+    const BSONObj x = BSON("_id" << 1 << "nested" << BSON_ARRAY("a" << "b" << nestedInvalid));
     const Status status = validateBSON(x);
     ASSERT_NOT_OK(status);
     ASSERT_EQUALS(status.reason(),
@@ -600,8 +577,7 @@ TEST(BSONValidateFast, UnterminatedStringErrorInNestedObjectWithoutId) {
     ob.append("x", 2.0);
     appendInvalidStringElement("invalid", &bb);
     const BSONObj nestedInvalid = ob.done();
-    const BSONObj x = BSON("nested" << BSON_ARRAY("a"
-                                                  << "b" << nestedInvalid));
+    const BSONObj x = BSON("nested" << BSON_ARRAY("a" << "b" << nestedInvalid));
     const Status status = validateBSON(x);
     ASSERT_NOT_OK(status);
     ASSERT_EQUALS(status.reason(),
@@ -616,9 +592,7 @@ TEST(BSONValidateFast, InvalidObjectWithInvalidSizeInNestedObjectWithId) {
     // Minimum size to pass validation is 5 bytes.
     appendObjectNameAndSize("invalid", &bb, 4);
     const BSONObj nestedInvalid = ob.done();
-    const BSONObj x = BSON("_id" << 1 << "nested"
-                                 << BSON_ARRAY("a"
-                                               << "b" << nestedInvalid));
+    const BSONObj x = BSON("_id" << 1 << "nested" << BSON_ARRAY("a" << "b" << nestedInvalid));
     const Status status = validateBSON(x);
     ASSERT_NOT_OK(status);
     ASSERT_EQUALS(status.reason(),
@@ -632,9 +606,7 @@ TEST(BSONValidateFast, InvalidObjectWithZeroSizeInNestedObjectWithId) {
     ob.append("x", 2.0);
     appendObjectNameAndSize("invalid", &bb, 0);
     const BSONObj nestedInvalid = ob.done();
-    const BSONObj x = BSON("_id" << 1 << "nested"
-                                 << BSON_ARRAY("a"
-                                               << "b" << nestedInvalid));
+    const BSONObj x = BSON("_id" << 1 << "nested" << BSON_ARRAY("a" << "b" << nestedInvalid));
     const Status status = validateBSON(x);
     ASSERT_NOT_OK(status);
     ASSERT_EQUALS(status.reason(),
@@ -648,9 +620,7 @@ TEST(BSONValidateFast, InvalidObjectWithNegativeSizeInNestedObjectWithId) {
     ob.append("x", 2.0);
     appendObjectNameAndSize("invalid", &bb, -999);
     const BSONObj nestedInvalid = ob.done();
-    const BSONObj x = BSON("_id" << 1 << "nested"
-                                 << BSON_ARRAY("a"
-                                               << "b" << nestedInvalid));
+    const BSONObj x = BSON("_id" << 1 << "nested" << BSON_ARRAY("a" << "b" << nestedInvalid));
     const Status status = validateBSON(x);
     ASSERT_NOT_OK(status);
     ASSERT_EQUALS(status.reason(),
@@ -688,7 +658,7 @@ TEST(BSONValidateFast, InvalidObjectWithNegativeSizeInNestedObjectWithIdTopLevel
 TEST(BSONValidateFast, StringHasSomething) {
     BufBuilder bb;
     BSONObjBuilder ob(bb);
-    bb.appendChar(String);
+    bb.appendChar(stdx::to_underlying(BSONType::string));
     bb.appendCStr("x");
     bb.appendNum(0);
     const BSONObj x = ob.done();
@@ -902,7 +872,7 @@ TEST(BSONValidateExtended, BSONEncryptedValue) {
     {
         // Successful FLE2 Unindexed Encrypted Value
         memset(blob.keyUUID, 0, sizeof(blob.keyUUID));
-        blob.originalBsonType = BSONType::String;
+        blob.originalBsonType = stdx::to_underlying(BSONType::string);
         blob.fleBlobSubtype =
             static_cast<int8_t>(EncryptedBinDataType::kFLE2UnindexedEncryptedValue);
         fle = BSONBinData(
@@ -915,7 +885,7 @@ TEST(BSONValidateExtended, BSONEncryptedValue) {
     {
         // Successful FLE2 Equality Indexed Value
         memset(blob.keyUUID, 0, sizeof(blob.keyUUID));
-        blob.originalBsonType = BSONType::String;
+        blob.originalBsonType = stdx::to_underlying(BSONType::string);
         blob.fleBlobSubtype = static_cast<int8_t>(EncryptedBinDataType::kFLE2EqualityIndexedValue);
         fle = BSONBinData(
             reinterpret_cast<const void*>(&blob), sizeof(FleBlobHeader), BinDataType::Encrypt);
@@ -927,7 +897,7 @@ TEST(BSONValidateExtended, BSONEncryptedValue) {
     {
         // Successful FLE2 Range Indexed Value
         memset(blob.keyUUID, 0, sizeof(blob.keyUUID));
-        blob.originalBsonType = BSONType::NumberInt;
+        blob.originalBsonType = stdx::to_underlying(BSONType::numberInt);
         blob.fleBlobSubtype = static_cast<int8_t>(EncryptedBinDataType::kFLE2RangeIndexedValue);
         fle = BSONBinData(
             reinterpret_cast<const void*>(&blob), sizeof(FleBlobHeader), BinDataType::Encrypt);
@@ -939,7 +909,7 @@ TEST(BSONValidateExtended, BSONEncryptedValue) {
     {
         // Successful FLE2 Equality Indexed Value V2
         memset(blob.keyUUID, 0, sizeof(blob.keyUUID));
-        blob.originalBsonType = BSONType::String;
+        blob.originalBsonType = stdx::to_underlying(BSONType::string);
         blob.fleBlobSubtype =
             static_cast<int8_t>(EncryptedBinDataType::kFLE2EqualityIndexedValueV2);
         fle = BSONBinData(
@@ -952,7 +922,7 @@ TEST(BSONValidateExtended, BSONEncryptedValue) {
     {
         // Successful FLE2 Range Indexed Value V2
         memset(blob.keyUUID, 0, sizeof(blob.keyUUID));
-        blob.originalBsonType = BSONType::NumberInt;
+        blob.originalBsonType = stdx::to_underlying(BSONType::numberInt);
         blob.fleBlobSubtype = static_cast<int8_t>(EncryptedBinDataType::kFLE2RangeIndexedValueV2);
         fle = BSONBinData(
             reinterpret_cast<const void*>(&blob), sizeof(FleBlobHeader), BinDataType::Encrypt);
@@ -964,9 +934,21 @@ TEST(BSONValidateExtended, BSONEncryptedValue) {
     {
         // Successful FLE2 Unindexed Encrypted Value V2
         memset(blob.keyUUID, 0, sizeof(blob.keyUUID));
-        blob.originalBsonType = BSONType::String;
+        blob.originalBsonType = stdx::to_underlying(BSONType::string);
         blob.fleBlobSubtype =
             static_cast<int8_t>(EncryptedBinDataType::kFLE2UnindexedEncryptedValueV2);
+        fle = BSONBinData(
+            reinterpret_cast<const void*>(&blob), sizeof(FleBlobHeader), BinDataType::Encrypt);
+        obj = BSON("a" << fle);
+        status = validateBSON(obj, BSONValidateModeEnum::kExtended);
+        ASSERT_OK(status);
+    }
+
+    {
+        // Successful FLE2 Text Indexed Value
+        memset(blob.keyUUID, 0, sizeof(blob.keyUUID));
+        blob.originalBsonType = stdx::to_underlying(BSONType::string);
+        blob.fleBlobSubtype = static_cast<int8_t>(EncryptedBinDataType::kFLE2TextIndexedValue);
         fle = BSONBinData(
             reinterpret_cast<const void*>(&blob), sizeof(FleBlobHeader), BinDataType::Encrypt);
         obj = BSON("a" << fle);
@@ -986,7 +968,7 @@ TEST(BSONValidateExtended, BSONEncryptedValue) {
 
     {
         // Encrypted BSON value subtype not supposed to persist.
-        blob.originalBsonType = BSONType::String;
+        blob.originalBsonType = stdx::to_underlying(BSONType::string);
         blob.fleBlobSubtype = static_cast<int8_t>(EncryptedBinDataType::kFLE2Placeholder);
         fle = BSONBinData(
             reinterpret_cast<const void*>(&blob), sizeof(FleBlobHeader), BinDataType::Encrypt);
@@ -999,7 +981,7 @@ TEST(BSONValidateExtended, BSONEncryptedValue) {
 
     {
         // Short Encrypted BSON Value.
-        blob.originalBsonType = BSONType::String;
+        blob.originalBsonType = stdx::to_underlying(BSONType::string);
         blob.fleBlobSubtype =
             static_cast<int8_t>(EncryptedBinDataType::kFLE2UnindexedEncryptedValue);
         fle = BSONBinData(
@@ -1013,7 +995,7 @@ TEST(BSONValidateExtended, BSONEncryptedValue) {
 
     {
         // Unsupported original BSON subtype.
-        blob.originalBsonType = BSONType::MaxKey;
+        blob.originalBsonType = stdx::to_underlying(BSONType::maxKey);
         blob.fleBlobSubtype =
             static_cast<int8_t>(EncryptedBinDataType::kFLE2UnindexedEncryptedValue);
         fle = BSONBinData(
@@ -1037,9 +1019,7 @@ TEST(BSONValidateExtended, UnknownBinDataType) {
 
 TEST(BSONValidateColumn, BSONColumnInBSON) {
     BSONColumnBuilder cb;
-    cb.append(BSON("a"
-                   << "deadbeef")
-                  .getField("a"));
+    cb.append(BSON("a" << "deadbeef").getField("a"));
     cb.append(BSON("a" << 1).getField("a"));
     cb.append(BSON("a" << 2).getField("a"));
     cb.append(BSON("a" << 1).getField("a"));
@@ -1065,9 +1045,7 @@ TEST(BSONValidateColumn, BSONColumnInBSON) {
 
 TEST(BSONValidateColumn, BSONColumnInBSONRespectsVersion) {
     BSONColumnBuilder cb;
-    cb.append(BSON("a"
-                   << "deadbeef")
-                  .getField("a"));
+    cb.append(BSON("a" << "deadbeef").getField("a"));
     cb.append(BSON("a" << 1).getField("a"));
     cb.append(BSON("a" << 2).getField("a"));
     cb.append(BSON("a" << 1).getField("a"));
@@ -1105,9 +1083,7 @@ TEST(BSONValidateColumn, BSONColumnInBSONRespectsVersion) {
 
 TEST(BSONValidateColumn, BSONColumnMissingEOO) {
     BSONColumnBuilder cb;
-    cb.append(BSON("a"
-                   << "deadbeef")
-                  .getField("a"));
+    cb.append(BSON("a" << "deadbeef").getField("a"));
     BSONBinData columnData = cb.finalize();
     ASSERT_OK(validateBSONColumn((char*)columnData.data, columnData.length));
 
@@ -1122,9 +1098,7 @@ TEST(BSONValidateColumn, BSONColumnMissingEOO) {
 
 TEST(BSONValidateColumn, BSONColumnFieldnameNotEmpty) {
     BSONColumnBuilder cb;
-    cb.append(BSON("a"
-                   << "deadbeef")
-                  .getField("a"));
+    cb.append(BSON("a" << "deadbeef").getField("a"));
     BSONBinData columnData = cb.finalize();
     ASSERT_OK(validateBSONColumn((char*)columnData.data, columnData.length));
 
@@ -1140,9 +1114,7 @@ TEST(BSONValidateColumn, BSONColumnFieldnameNotEmpty) {
 
 TEST(BSONValidateColumn, BSONColumnNoOverflowMissingAllEOOInColumn) {
     BSONColumnBuilder cb;
-    cb.append(BSON("a"
-                   << "deadbeef")
-                  .getField("a"));
+    cb.append(BSON("a" << "deadbeef").getField("a"));
     BSONBinData columnData = cb.finalize();
     for (int i = 0; i < columnData.length; ++i)
         if (((char*)columnData.data)[i] == 0)
@@ -1154,9 +1126,7 @@ TEST(BSONValidateColumn, BSONColumnNoOverflowMissingAllEOOInColumn) {
 
 TEST(BSONValidateColumn, BSONColumnTrailingGarbage) {
     BSONColumnBuilder cb;
-    cb.append(BSON("a"
-                   << "deadbeef")
-                  .getField("a"));
+    cb.append(BSON("a" << "deadbeef").getField("a"));
     BSONBinData columnData = cb.finalize();
     ASSERT_OK(validateBSONColumn((char*)columnData.data, columnData.length));
     char badData[4096];
@@ -1169,9 +1139,7 @@ TEST(BSONValidateColumn, BSONColumnTrailingGarbage) {
 
 TEST(BSONValidateColumn, BSONColumnNoOverflowBadContent) {
     BSONColumnBuilder cb;
-    cb.append(BSON("a"
-                   << "deadbeef")
-                  .getField("a"));
+    cb.append(BSON("a" << "deadbeef").getField("a"));
     BSONBinData columnData = cb.finalize();
     ASSERT_OK(validateBSONColumn((char*)columnData.data, columnData.length));
 
@@ -1185,8 +1153,7 @@ TEST(BSONValidateColumn, BSONColumnNoOverflowBadContent) {
 
 TEST(BSONValidateColumn, BSONColumnNoOverflowMissingFieldname) {
     BSONColumnBuilder cb;
-    cb.append(BSON("a"
-                   << "deadbeef"));
+    cb.append(BSON("a" << "deadbeef"));
     BSONBinData columnData = cb.finalize();
     ASSERT_OK(validateBSONColumn((char*)columnData.data, columnData.length));
 
@@ -1196,8 +1163,7 @@ TEST(BSONValidateColumn, BSONColumnNoOverflowMissingFieldname) {
 
 TEST(BSONValidateColumn, BSONColumnNoOverflowBadFieldname) {
     BSONColumnBuilder cb;
-    cb.append(BSON("a"
-                   << "deadbeef"));
+    cb.append(BSON("a" << "deadbeef"));
     BSONBinData columnData = cb.finalize();
     ASSERT_OK(validateBSONColumn((char*)columnData.data, columnData.length));
 
@@ -1210,9 +1176,7 @@ TEST(BSONValidateColumn, BSONColumnNoOverflowBadFieldname) {
 
 TEST(BSONValidateColumn, BSONColumnNoOverflowBadLiteral) {
     BSONColumnBuilder cb;
-    cb.append(BSON("a"
-                   << "deadbeef")
-                  .getField("a"));
+    cb.append(BSON("a" << "deadbeef").getField("a"));
     BSONBinData columnData = cb.finalize();
     ASSERT_OK(validateBSONColumn((char*)columnData.data, columnData.length));
 
@@ -1226,30 +1190,21 @@ TEST(BSONValidateColumn, BSONColumnNoOverflowBadLiteral) {
 
 TEST(BSONValidateColumn, BSONColumnInterleavedObjectPasses) {
     BSONColumnBuilder cb;
-    cb.append(BSON("a"
-                   << "deadbeef")
-                  .getField("a"));
-    BSONObj subObj1 = BSON("b"
-                           << "inside");
+    cb.append(BSON("a" << "deadbeef").getField("a"));
+    BSONObj subObj1 = BSON("b" << "inside");
     cb.append(subObj1);
-    BSONObj subObj2 = BSON("b"
-                           << "outside");
+    BSONObj subObj2 = BSON("b" << "outside");
     cb.append(subObj2);
-    BSONObj subObj3 = BSON("b"
-                           << "gone");
+    BSONObj subObj3 = BSON("b" << "gone");
     cb.append(subObj3);
-    cb.append(BSON("c"
-                   << "foobar")
-                  .getField("c"));
+    cb.append(BSON("c" << "foobar").getField("c"));
     BSONBinData columnData = cb.finalize();
     ASSERT_OK(validateBSONColumn((char*)columnData.data, columnData.length));
 }
 
 TEST(BSONValidateColumn, BSONColumnInterleavedArrayPasses) {
     BSONColumnBuilder cb;
-    cb.append(BSON("a"
-                   << "deadbeef")
-                  .getField("a"));
+    cb.append(BSON("a" << "deadbeef").getField("a"));
 
     BSONArrayBuilder array;
     for (int i = 0; i < 10; i++) {
@@ -1257,26 +1212,19 @@ TEST(BSONValidateColumn, BSONColumnInterleavedArrayPasses) {
     }
     array.done();
     cb.append(array.arr());
-    cb.append(BSON("c"
-                   << "foobar")
-                  .getField("c"));
+    cb.append(BSON("c" << "foobar").getField("c"));
     BSONBinData columnData = cb.finalize();
     ASSERT_OK(validateBSONColumn((char*)columnData.data, columnData.length));
 }
 
 TEST(BSONValidateColumn, BSONColumnInterleavedNestedObjectPasses) {
     BSONColumnBuilder cb;
-    cb.append(BSON("a"
-                   << "deadbeef")
-                  .getField("a"));
-    BSONObj subObj1 = BSON("d"
-                           << "inside");
+    cb.append(BSON("a" << "deadbeef").getField("a"));
+    BSONObj subObj1 = BSON("d" << "inside");
     BSONObj subObj2 = BSON("c" << subObj1);
     BSONObj subObj3 = BSON("b" << subObj2);
     cb.append(subObj3);
-    cb.append(BSON("c"
-                   << "foobar")
-                  .getField("c"));
+    cb.append(BSON("c" << "foobar").getField("c"));
     BSONBinData columnData = cb.finalize();
     ASSERT_OK(validateBSONColumn((char*)columnData.data, columnData.length));
 }
@@ -1285,9 +1233,7 @@ TEST(BSONValidateColumn, BSONColumnInterleavedEmptyObjectPasses) {
     BSONColumnBuilder cb;
     BSONObj subObj1;
     cb.append(subObj1);
-    cb.append(BSON("c"
-                   << "foobar")
-                  .getField("c"));
+    cb.append(BSON("c" << "foobar").getField("c"));
     BSONBinData columnData = cb.finalize();
     ASSERT_OK(validateBSONColumn((char*)columnData.data, columnData.length));
 }

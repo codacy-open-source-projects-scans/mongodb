@@ -29,10 +29,11 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/db/query/query_shape/distinct_cmd_shape.h"
 #include "mongo/db/query/query_stats/key.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
 
 
 namespace mongo::query_stats {
@@ -46,13 +47,14 @@ namespace mongo::query_stats {
 class DistinctKey final : public Key {
 public:
     DistinctKey(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                const ParsedDistinctCommand& request,
+                const DistinctCommandRequest& request,
+                std::unique_ptr<query_shape::Shape> distinctShape,
                 query_shape::CollectionType collectionType = query_shape::CollectionType::kUnknown)
         : Key(expCtx->getOperationContext(),
-              std::make_unique<query_shape::DistinctCmdShape>(request, expCtx),
-              request.distinctCommandRequest->getHint(),
-              request.distinctCommandRequest->getReadConcern(),
-              request.distinctCommandRequest->getMaxTimeMS().has_value(),
+              std::move(distinctShape),
+              request.getHint(),
+              request.getReadConcern(),
+              request.getMaxTimeMS().has_value(),
               collectionType),
           _components() {}
 

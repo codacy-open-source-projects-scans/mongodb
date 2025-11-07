@@ -29,6 +29,8 @@
 
 #pragma once
 
+#include "mongo/util/modules.h"
+
 namespace mongo {
 namespace sbe {
 namespace vm {
@@ -48,7 +50,7 @@ T readFromMemory(const uint8_t* ptr) noexcept {
  * Writes directly to memory for the ByteCode VM.
  */
 template <typename T>
-size_t writeToMemory(uint8_t* ptr, const T val) noexcept {
+size_t writeToMemory(void* ptr, const T& val) noexcept {
     static_assert(!IsEndian<T>::value);
 
     memcpy(ptr, &val, sizeof(T));

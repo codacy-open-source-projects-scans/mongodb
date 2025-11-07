@@ -29,18 +29,6 @@
 
 #include "mongo/db/s/balancer/auto_merger_policy.h"
 
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <utility>
-#include <variant>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -50,30 +38,40 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/global_catalog/ddl/sharding_catalog_manager.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/global_catalog/type_collection.h"
+#include "mongo/db/global_catalog/type_collection_gen.h"
+#include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/document_source_lookup.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_unwind.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
-#include "mongo/db/s/config/sharding_catalog_manager.h"
-#include "mongo/db/s/sharding_config_server_parameters_gen.h"
-#include "mongo/db/s/sharding_logging.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/sharding_config_server_parameters_gen.h"
+#include "mongo/db/sharding_environment/sharding_logging.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/catalog/type_collection_gen.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/string_map.h"
+
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <variant>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -266,19 +264,30 @@ void AutoMergerPolicy::_checkInternalUpdatesWithLock(OperationContext* opCtx, Wi
 std::map<ShardId, std::vector<NamespaceString>>
 AutoMergerPolicy::_getNamespacesWithMergeableChunksPerShard(OperationContext* opCtx) {
     std::map<ShardId, std::vector<NamespaceString>> collectionsToMerge;
+    DBDirectClient client(opCtx);
 
-    const auto& shardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
+    // First, get the list of all the shards of the cluster.
+    // Using the DbClient to avoid accessing the ShardRegistry while holding the mutex.
+    std::vector<ShardId> shardIds;
+    {
+        auto cursor = client.find(FindCommandRequest(NamespaceString::kConfigsvrShardsNamespace));
+        while (cursor->more()) {
+            const auto& doc = cursor->nextSafe();
+            shardIds.push_back(doc.getField(ShardType::name()).str());
+        }
+    }
+
     for (const auto& shard : shardIds) {
         // Build an aggregation pipeline to get the collections with mergeable chunks placed on a
         // specific shard
 
-        StringMap<ResolvedNamespace> resolvedNamespaces;
-        resolvedNamespaces[NamespaceString::kConfigsvrChunksNamespace.coll()] = {
+        ResolvedNamespaceMap resolvedNamespaces;
+        resolvedNamespaces[NamespaceString::kConfigsvrChunksNamespace] = {
             NamespaceString::kConfigsvrChunksNamespace, std::vector<BSONObj>()};
-        resolvedNamespaces[CollectionType::ConfigNS.coll()] = {CollectionType::ConfigNS,
-                                                               std::vector<BSONObj>()};
+        resolvedNamespaces[CollectionType::ConfigNS] = {CollectionType::ConfigNS,
+                                                        std::vector<BSONObj>()};
 
-        Pipeline::SourceContainer stages;
+        DocumentSourceContainer stages;
         auto expCtx = ExpressionContextBuilder{}
                           .opCtx(opCtx)
                           .ns(NamespaceString::kConfigsvrChunksNamespace)
@@ -342,18 +351,14 @@ AutoMergerPolicy::_getNamespacesWithMergeableChunksPerShard(OperationContext* op
             expCtx));
 
         // 3. Unwind stage to get the list of collections with mergeable chunks
-        stages.emplace_back(
-            DocumentSourceUnwind::createFromBson(BSON("$unwind" << BSON("path"
-                                                                        << "$chunks"))
-                                                     .firstElement(),
-                                                 expCtx));
+        stages.emplace_back(DocumentSourceUnwind::createFromBson(
+            BSON("$unwind" << BSON("path" << "$chunks")).firstElement(), expCtx));
 
         auto pipeline = Pipeline::create(std::move(stages), expCtx);
         auto aggRequest =
             AggregateCommandRequest(CollectionType::ConfigNS, pipeline->serializeToBson());
         aggRequest.setReadConcern(repl::ReadConcernArgs::kMajority);
 
-        DBDirectClient client(opCtx);
         auto cursor = uassertStatusOKWithContext(
             DBClientCursor::fromAggregationRequest(
                 &client, aggRequest, true /* secondaryOk */, true /* useExhaust */),

@@ -29,18 +29,14 @@
 
 #include <boost/container/small_vector.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-#include <cstddef>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/mutable/algorithm.h"
-#include "mongo/bson/mutable/const_element.h"
-#include "mongo/bson/mutable/document.h"
-#include "mongo/bson/mutable/element.h"
+#include "mongo/db/exec/mutable_bson/algorithm.h"
+#include "mongo/db/exec/mutable_bson/const_element.h"
+#include "mongo/db/exec/mutable_bson/document.h"
+#include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/field_ref_set.h"
 #include "mongo/db/update/field_checker.h"
 #include "mongo/db/update/modifier_node.h"
@@ -51,6 +47,10 @@
 #include "mongo/db/update/update_executor.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <cstddef>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -128,15 +128,14 @@ private:
 Status RenameNode::init(BSONElement modExpr,
                         const boost::intrusive_ptr<ExpressionContext>& expCtx) {
     invariant(modExpr.ok());
-    invariant(BSONType::String == modExpr.type());
+    invariant(BSONType::string == modExpr.type());
 
     FieldRef fromFieldRef(modExpr.fieldName());
     FieldRef toFieldRef(modExpr.String());
 
-    if (modExpr.valueStringData().find('\0') != std::string::npos) {
-        return Status(ErrorCodes::BadValue,
-                      "The 'to' field for $rename cannot contain an embedded null byte");
-    }
+    tassert(9867601,
+            "The 'to' field for $rename cannot contain an embedded null byte",
+            modExpr.valueStringData().find('\0') == std::string::npos);
 
     // Parsing {$rename: {'from': 'to'}} places nodes in the UpdateNode tree for both the "from" and
     // "to" paths via UpdateObjectNode::parseAndMerge(), which will enforce this isUpdatable
@@ -213,7 +212,7 @@ UpdateExecutor::ApplyResult RenameNode::apply(ApplyParams applyParams,
     for (auto currentElement = fromElement.parent(); currentElement != document.root();
          currentElement = currentElement.parent()) {
         invariant(currentElement.ok());
-        if (BSONType::Array == currentElement.getType()) {
+        if (BSONType::array == currentElement.getType()) {
             auto idElem = mutablebson::findFirstChildNamed(document.root(), "_id");
             uasserted(ErrorCodes::BadValue,
                       str::stream() << "The source field cannot be an array element, '"
@@ -233,7 +232,7 @@ UpdateExecutor::ApplyResult RenameNode::apply(ApplyParams applyParams,
          currentElement != document.root();
          currentElement = currentElement.parent()) {
         invariant(currentElement.ok());
-        if (BSONType::Array == currentElement.getType()) {
+        if (BSONType::array == currentElement.getType()) {
             auto idElem = mutablebson::findFirstChildNamed(document.root(), "_id");
             uasserted(ErrorCodes::BadValue,
                       str::stream() << "The destination field cannot be an array element, '"

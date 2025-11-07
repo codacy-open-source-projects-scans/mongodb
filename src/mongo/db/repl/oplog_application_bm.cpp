@@ -27,19 +27,6 @@
  *    it in the license file.
  */
 
-#include <benchmark/benchmark.h>
-#include <chrono>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -49,18 +36,22 @@
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_impl.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/create_collection.h"
-#include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/catalog/database_holder_impl.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/index_builds/index_builds_coordinator_mongod.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog_helper.h"
+#include "mongo/db/local_catalog/collection_impl.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/create_collection.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/database_holder_impl.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state_factory_shard.h"
+#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_state_factory_shard.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_impl.h"
@@ -83,25 +74,19 @@
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
-#include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/s/collection_sharding_state_factory_shard.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_entry_point_shard_role.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod.h"
-#include "mongo/db/session_manager_mongod.h"
-#include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/storage/recovery_unit_noop.h"
-#include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_component_settings.h"
 #include "mongo/logv2/log_manager.h"
 #include "mongo/logv2/log_severity.h"
-#include "mongo/s/sharding_state.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/util/assert_util.h"
@@ -115,6 +100,19 @@
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 #include "mongo/util/version/releases.h"
+
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <benchmark/benchmark.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -166,7 +164,7 @@ public:
 
         _tempDir.emplace("oplog_application_bm_data");
         storageGlobalParams.dbpath = _tempDir->path();
-        storageGlobalParams.ephemeral = false;
+        storageGlobalParams.inMemory = false;
 
         Client::initThread("oplog application main", getGlobalServiceContext()->getService());
         _client = Client::getCurrent();
@@ -179,20 +177,10 @@ public:
         repl::ReplicationCoordinator::set(
             _svcCtx, std::unique_ptr<repl::ReplicationCoordinator>(_replCoord));
 
-        // Disable fast shutdown so that WT can free memory.
-        globalFailPointRegistry().find("WTDisableFastShutDown")->setMode(FailPoint::alwaysOn);
-
-        {
-            auto initializeStorageEngineOpCtx = _svcCtx->makeOperationContext(&cc());
-            shard_role_details::setRecoveryUnit(
-                initializeStorageEngineOpCtx.get(),
-                std::make_unique<RecoveryUnitNoop>(),
-                WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
-
-            initializeStorageEngine(initializeStorageEngineOpCtx.get(),
-                                    StorageEngineInitFlags::kAllowNoLockFile |
-                                        StorageEngineInitFlags::kSkipMetadataFile);
-        }
+        catalog::startUpStorageEngineAndCollectionCatalog(
+            _svcCtx,
+            &cc(),
+            StorageEngineInitFlags::kAllowNoLockFile | StorageEngineInitFlags::kSkipMetadataFile);
 
         DatabaseHolder::set(_svcCtx, std::make_unique<DatabaseHolderImpl>());
         repl::StorageInterface::set(_svcCtx, std::make_unique<repl::StorageInterfaceImpl>());
@@ -207,6 +195,8 @@ public:
         ShardingState::create(_svcCtx);
         CollectionShardingStateFactory::set(
             _svcCtx, std::make_unique<CollectionShardingStateFactoryShard>(_svcCtx));
+        DatabaseShardingStateFactory::set(_svcCtx,
+                                          std::make_unique<DatabaseShardingStateFactoryShard>());
 
         MongoDSessionCatalog::set(
             _svcCtx,
@@ -257,8 +247,9 @@ public:
         auto databaseHolder = DatabaseHolder::get(opCtx);
         databaseHolder->closeAll(opCtx);
 
-        // Shut down storage engine.
-        shutdownGlobalStorageEngineCleanly(_svcCtx);
+        // Shut down storage engine and free memory.
+        catalog::shutDownCollectionCatalogAndGlobalStorageEngineCleanly(_svcCtx,
+                                                                        false /* memLeakAllowed */);
     }
 
     // Shut down the storage engine, clear the dbpath, and restart the storage engine with empty
@@ -272,17 +263,13 @@ public:
         // Restart storage engine.
         _tempDir.emplace("oplog_application_bm_data");
         storageGlobalParams.dbpath = _tempDir->path();
-        storageGlobalParams.ephemeral = false;
+        storageGlobalParams.inMemory = false;
 
-        auto initializeStorageEngineOpCtx = _svcCtx->makeOperationContext(&cc());
-        shard_role_details::setRecoveryUnit(initializeStorageEngineOpCtx.get(),
-                                            std::make_unique<RecoveryUnitNoop>(),
-                                            WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
-
-        initializeStorageEngine(initializeStorageEngineOpCtx.get(),
-                                StorageEngineInitFlags::kAllowNoLockFile |
-                                    StorageEngineInitFlags::kSkipMetadataFile |
-                                    StorageEngineInitFlags::kForRestart);
+        catalog::startUpStorageEngineAndCollectionCatalog(
+            _svcCtx,
+            &cc(),
+            StorageEngineInitFlags::kAllowNoLockFile | StorageEngineInitFlags::kSkipMetadataFile |
+                StorageEngineInitFlags::kForRestart);
     }
 
     ServiceContext* getSvcCtx() {
@@ -331,13 +318,12 @@ public:
     void createBatch(int size) {
         const long long term1 = 1;
         for (int idx = 0; idx < size; ++idx) {
-            _oplogEntries.emplace_back(BSON("op"
-                                            << "i"
-                                            << "ns"
-                                            << "foo.bar"
-                                            << "ui" << _foobarUUID << "o" << makeDoc(idx) << "ts"
-                                            << Timestamp(1, idx) << "t" << term1 << "v" << 2
-                                            << "wall" << Date_t::now()));
+            _oplogEntries.emplace_back(BSON("op" << "i"
+                                                 << "ns"
+                                                 << "foo.bar"
+                                                 << "ui" << _foobarUUID << "o" << makeDoc(idx)
+                                                 << "ts" << Timestamp(1, idx) << "t" << term1 << "v"
+                                                 << 2 << "wall" << Date_t::now()));
         }
     }
 
@@ -364,19 +350,18 @@ public:
         for (int batchNum = 0; opsLeft > 0; ++batchNum) {
             std::vector<BSONObj> applyOpsArray;
             for (int idx = 0; idx < batchSize; ++idx) {
-                applyOpsArray.emplace_back(BSON("op"
-                                                << "i"
-                                                << "ns"
-                                                << "foo.bar"
-                                                << "ui" << _foobarUUID << "o" << makeDoc(idx)));
+                applyOpsArray.emplace_back(BSON("op" << "i"
+                                                     << "ns"
+                                                     << "foo.bar"
+                                                     << "ui" << _foobarUUID << "o"
+                                                     << makeDoc(idx)));
             }
-            _oplogEntries.emplace_back(BSON("op"
-                                            << "c"
-                                            << "ns"
-                                            << "admin.$cmd"
-                                            << "o" << BSON("applyOps" << applyOpsArray) << "ts"
-                                            << Timestamp(1, batchNum) << "t" << term1 << "v" << 2
-                                            << "wall" << Date_t::now()));
+            _oplogEntries.emplace_back(BSON("op" << "c"
+                                                 << "ns"
+                                                 << "admin.$cmd"
+                                                 << "o" << BSON("applyOps" << applyOpsArray) << "ts"
+                                                 << Timestamp(1, batchNum) << "t" << term1 << "v"
+                                                 << 2 << "wall" << Date_t::now()));
             opsLeft -= batchSize;
         }
     }
@@ -389,11 +374,11 @@ public:
         for (int batchNum = 0; opsLeft > 0; ++batchNum) {
             std::vector<BSONObj> applyOpsArray;
             for (int idx = 0; idx < batchSize; ++idx) {
-                applyOpsArray.emplace_back(BSON("op"
-                                                << "i"
-                                                << "ns"
-                                                << "foo.bar"
-                                                << "ui" << _foobarUUID << "o" << makeDoc(idx)));
+                applyOpsArray.emplace_back(BSON("op" << "i"
+                                                     << "ns"
+                                                     << "foo.bar"
+                                                     << "ui" << _foobarUUID << "o"
+                                                     << makeDoc(idx)));
             }
             _oplogEntries.emplace_back(BSON(
                 "lsid" << lsidObj << "txnNumber" << static_cast<long long>(batchNum) << "op"
@@ -430,11 +415,11 @@ public:
 
             std::vector<BSONObj> applyOpsArray;
             for (int idx = 0; idx < batchSize; ++idx) {
-                applyOpsArray.emplace_back(BSON("op"
-                                                << "i"
-                                                << "ns"
-                                                << "foo.bar"
-                                                << "ui" << _foobarUUID << "o" << makeDoc(idx)));
+                applyOpsArray.emplace_back(BSON("op" << "i"
+                                                     << "ns"
+                                                     << "foo.bar"
+                                                     << "ui" << _foobarUUID << "o"
+                                                     << makeDoc(idx)));
             }
             _oplogEntries.emplace_back(BSON(
                 "lsid" << lsidObj << "txnNumber" << txnNumber << "op"
@@ -490,6 +475,20 @@ public:
                        << "o" << BSON("commitTransaction" << 1 << "commitTimestamp" << visibleTs)
                        << "ts" << commitTs << "t" << term1 << "v" << 2 << "wall" << Date_t::now()
                        << "prevOpTime" << BSON("ts" << prepTs << "t" << term1)));
+        }
+    }
+
+    void createCreateIndexBatch() {
+        const int maxIndexCount = 62;
+        const long long term1 = 1;
+        for (int i = 0; i < maxIndexCount; ++i) {
+            auto o = BSON("createIndexes" << _foobarNs.coll() << "v" << 2 << "key"
+                                          << BSON(fmt::format("a_{}", i) << 1) << "name"
+                                          << fmt::format("a_{}_1", i));
+            _oplogEntries.emplace_back(BSON(
+                "op" << "c"
+                     << "ns" << _foobarNs.getCommandNS().toString_forTest() << "o" << o << "ts"
+                     << Timestamp(1, i) << "t" << term1 << "v" << 2 << "wall" << Date_t::now()));
         }
     }
 
@@ -620,6 +619,13 @@ void BM_TestPrepares(benchmark::State& state) {
     runBMTest(testSvcCtx, fixture, state);
 }
 
+void BM_TestCreateIndex(benchmark::State& state) {
+    TestServiceContext testSvcCtx;
+    Fixture fixture(&testSvcCtx);
+    fixture.createCreateIndexBatch();
+    runBMTest(testSvcCtx, fixture, state);
+}
+
 BENCHMARK(BM_TestInserts)->Arg(100 * 1000)->UseManualTime()->Unit(benchmark::kMillisecond);
 
 BENCHMARK(BM_TestApplyOps)
@@ -661,6 +667,8 @@ BENCHMARK(BM_TestPrepares)
     ->Args({500, 100 * 1000, 500})
     ->UseManualTime()
     ->Unit(benchmark::kMillisecond);
+
+BENCHMARK(BM_TestCreateIndex)->UseManualTime()->Unit(benchmark::kMillisecond);
 
 }  // namespace
 }  // namespace mongo

@@ -28,9 +28,10 @@
  */
 
 #include "mongo/db/repl/oplog_buffer_blocking_queue.h"
+
 #include "mongo/db/service_context_d_test_fixture.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
+#include "mongo/unittest/unittest.h"
 
 namespace mongo {
 namespace repl {
@@ -45,6 +46,7 @@ BSONObj makeNoopOplogEntry(int t) {
         boost::none,                                               // uuid
         boost::none,                                               // fromMigrate
         boost::none,                                               // checkExistenceForDiffInsert
+        boost::none,                                               // versionContext
         repl::OplogEntry::kOplogVersion,                           // version
         BSON("data" << t),                                         // o
         boost::none,                                               // o2
@@ -76,6 +78,7 @@ BSONObj makeApplyOpsOplogEntry(int t, int num) {
         boost::none,                                               // uuid
         boost::none,                                               // fromMigrate
         boost::none,                                               // checkExistenceForDiffInsert
+        boost::none,                                               // versionContext
         repl::OplogEntry::kOplogVersion,                           // version
         oField.obj(),                                              // o
         boost::none,                                               // o2

@@ -27,17 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/smart_ptr.hpp>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -50,23 +39,25 @@
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/basic_types.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/query_cmd/update_metrics.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/fle_crud.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/document_validation.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/command_diagnostic_printer.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/find_command.h"
@@ -85,23 +76,22 @@
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/query/write_ops/write_ops_retryability.h"
+#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/shard_role.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
-#include "mongo/db/timeseries/timeseries_update_delete_util.h"
+#include "mongo/db/timeseries/timeseries_request_util.h"
 #include "mongo/db/timeseries/timeseries_write_util.h"
 #include "mongo/db/transaction/retryable_writes_stats.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/db/transaction_validation.h"
 #include "mongo/db/update/update_util.h"
+#include "mongo/db/version_context.h"
 #include "mongo/logv2/log_component.h"
 #include "mongo/logv2/log_severity.h"
 #include "mongo/platform/compiler.h"
@@ -120,6 +110,15 @@
 #include "mongo/util/serialization_context.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -275,6 +274,10 @@ public:
         return true;
     }
 
+    bool enableDiagnosticPrintingOnFailure() const final {
+        return true;
+    }
+
     class Invocation final : public InvocationBaseGen {
     public:
         using InvocationBaseGen::InvocationBaseGen;
@@ -284,6 +287,10 @@ public:
         }
 
         bool supportsReadMirroring() const final {
+            return true;
+        }
+
+        bool supportsRawData() const final {
             return true;
         }
 
@@ -375,8 +382,12 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
         return std::pair{request(), OpMsgRequest()};
     }();
     auto request = requestAndMsg.first;
+    auto nss = request.getNamespace();
+    const auto [preConditions, isTimeseriesLogicalRequest] =
+        timeseries::getCollectionPreConditionsAndIsTimeseriesLogicalRequest(
+            opCtx, nss, request, /*expectedUUID=*/boost::none);
 
-    auto [isTimeseriesViewRequest, nss] = timeseries::isTimeseriesViewRequest(opCtx, request);
+    nss = preConditions.getTargetNs(nss);
 
     uassertStatusOK(userAllowedWriteNS(opCtx, nss));
     OpDebug* const opDebug = &curOp->debug();
@@ -395,12 +406,15 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
                               CollectionAcquisitionRequest::fromOpCtx(
                                   opCtx, nss, AcquisitionPrerequisites::OperationType::kWrite),
                               MODE_IX);
+        timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
+            opCtx, preConditions, collection);
         uassert(ErrorCodes::NamespaceNotFound,
                 str::stream() << "database " << dbName.toStringForErrorMsg() << " does not exist",
                 DatabaseHolder::get(opCtx)->getDb(opCtx, nss.dbName()));
 
-        if (isTimeseriesViewRequest) {
+        if (isTimeseriesLogicalRequest) {
             timeseries::timeseriesRequestChecks<DeleteRequest>(
+                VersionContext::getDecoration(opCtx),
                 collection.getCollectionPtr(),
                 &deleteRequest,
                 timeseries::deleteRequestCheckFunction);
@@ -409,7 +423,7 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
         }
 
         ParsedDelete parsedDelete(
-            opCtx, &deleteRequest, collection.getCollectionPtr(), isTimeseriesViewRequest);
+            opCtx, &deleteRequest, collection.getCollectionPtr(), isTimeseriesLogicalRequest);
         uassertStatusOK(parsedDelete.parseRequest());
 
         CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
@@ -421,7 +435,7 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
         auto bodyBuilder = result->getBodyBuilder();
         Explain::explainStages(
             exec.get(),
-            collection.getCollectionPtr(),
+            collection,
             verbosity,
             BSONObj(),
             SerializationContext::stateCommandReply(request.getSerializationContext()),
@@ -439,11 +453,14 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
                               CollectionAcquisitionRequest::fromOpCtx(
                                   opCtx, nss, AcquisitionPrerequisites::OperationType::kWrite),
                               MODE_IX);
+        timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
+            opCtx, preConditions, collection);
         uassert(ErrorCodes::NamespaceNotFound,
                 str::stream() << "database " << dbName.toStringForErrorMsg() << " does not exist",
                 DatabaseHolder::get(opCtx)->getDb(opCtx, nss.dbName()));
-        if (isTimeseriesViewRequest) {
+        if (isTimeseriesLogicalRequest) {
             timeseries::timeseriesRequestChecks<UpdateRequest>(
+                VersionContext::getDecoration(opCtx),
                 collection.getCollectionPtr(),
                 &updateRequest,
                 timeseries::updateRequestCheckFunction);
@@ -455,7 +472,7 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
                                   &updateRequest,
                                   collection.getCollectionPtr(),
                                   false /*forgoOpCounterIncrements*/,
-                                  isTimeseriesViewRequest);
+                                  isTimeseriesLogicalRequest);
         uassertStatusOK(parsedUpdate.parseRequest());
 
         CollectionShardingState::assertCollectionLockedAndAcquire(opCtx, nss)
@@ -467,7 +484,7 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
         auto bodyBuilder = result->getBodyBuilder();
         Explain::explainStages(
             exec.get(),
-            collection.getCollectionPtr(),
+            collection,
             verbosity,
             BSONObj(),
             SerializationContext::stateCommandReply(request.getSerializationContext()),
@@ -478,14 +495,6 @@ void CmdFindAndModify::Invocation::explain(OperationContext* opCtx,
 
 write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
     OperationContext* opCtx) {
-    // Capture diagnostics for tassert and invariant failures that may occur during query
-    // parsing, planning or execution. No work is done on the hot-path, all computation of
-    // these diagnostics is done lazily during failure handling. This line just creates an
-    // RAII object which holds references to objects on this stack frame, which will be used
-    // to print diagnostics in the event of a tassert or invariant.
-    ScopedDebugInfo findAndModifyCmdDiagnostics("commandDiagnostics",
-                                                command_diagnostics::Printer{opCtx});
-
     const auto& req = request();
 
     validate(req);
@@ -494,6 +503,9 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
     auto& curOp = *CurOp::get(opCtx);
     curOp.beginQueryPlanningTimer();
 
+    auto [preConditions, isTimeseriesLogicalRequest] =
+        timeseries::getCollectionPreConditionsAndIsTimeseriesLogicalRequest(
+            opCtx, req.getNamespace(), request(), /*expectedUUID=*/boost::none);
     if (req.getEncryptionInformation().has_value()) {
         {
             stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -504,7 +516,8 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
         }
     }
 
-    const NamespaceString& nsString = req.getNamespace();
+    auto nsString = req.getNamespace();
+    nsString = preConditions.getTargetNs(nsString);
     uassertStatusOK(userAllowedWriteNS(opCtx, nsString));
 
     static_cast<const CmdFindAndModify*>(definition())->collectMetrics(req);
@@ -587,8 +600,15 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                 deleteRequest.setStmtId(stmtId);
             }
             boost::optional<BSONObj> docFound;
-            write_ops_exec::performDelete(
-                opCtx, nsString, &deleteRequest, &curOp, inTransaction, boost::none, docFound);
+            write_ops_exec::performDelete(opCtx,
+                                          nsString,
+                                          &deleteRequest,
+                                          &curOp,
+                                          inTransaction,
+                                          boost::none,
+                                          docFound,
+                                          preConditions,
+                                          isTimeseriesLogicalRequest);
             recordStatsForTopCommand(opCtx);
             return buildResponse(boost::none, true /* isRemove */, docFound);
         } else {
@@ -627,7 +647,9 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                                                       req.getUpsert().value_or(false),
                                                       boost::none,
                                                       docFound,
-                                                      &updateRequest);
+                                                      &updateRequest,
+                                                      preConditions,
+                                                      isTimeseriesLogicalRequest);
                     recordStatsForTopCommand(opCtx);
                     return buildResponse(updateResult, req.getRemove().value_or(false), docFound);
 
@@ -635,6 +657,7 @@ write_ops::FindAndModifyCommandReply CmdFindAndModify::Invocation::typedRun(
                     auto cq = uassertStatusOK(
                         parseWriteQueryToCQ(opCtx, nullptr /* expCtx */, updateRequest));
                     if (!write_ops_exec::shouldRetryDuplicateKeyException(
+                            opCtx,
                             updateRequest,
                             *cq,
                             *ex.extraInfo<DuplicateKeyErrorInfo>(),
@@ -712,6 +735,8 @@ void CmdFindAndModify::Invocation::appendMirrorableRequest(BSONObjBuilder* bob) 
     if (const auto& databaseVersion = rawCmd.getField("databaseVersion"); !databaseVersion.eoo()) {
         bob->append(databaseVersion);
     }
+    req.getRawData().serializeToBSON(write_ops::FindAndModifyCommandRequest::kRawDataFieldName,
+                                     bob);
 
     // Prevent the find from returning multiple documents since we can
     bob->append("batchSize", 1);

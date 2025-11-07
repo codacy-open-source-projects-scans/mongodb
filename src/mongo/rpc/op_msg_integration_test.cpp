@@ -28,20 +28,6 @@
  */
 
 
-#include <cstddef>
-#include <cstdint>
-#include <fmt/format.h>
-#include <iostream>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -69,17 +55,13 @@
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_interface.h"
 #include "mongo/rpc/unique_message.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/integration_test.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/duration.h"
@@ -88,6 +70,20 @@
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -130,7 +126,7 @@ std::string getThreadNameByAppName(DBClientBase* conn, StringData appName) {
     const auto cursorResponse = CursorResponse::parseFromBSON(curOpReply->getCommandReply());
     ASSERT_OK(cursorResponse.getStatus());
     const auto batch = cursorResponse.getValue().getBatch();
-    return batch.empty() ? "" : batch[0].getStringField("desc").toString();
+    return batch.empty() ? "" : std::string{batch[0].getStringField("desc")};
 }
 
 TEST(OpMsg, UnknownRequiredFlagClosesConnection) {
@@ -287,7 +283,7 @@ TEST(OpMsg, CloseConnectionOnFireAndForgetNotWritablePrimaryError) {
         // conn.call() calculated the request checksum, but setFlag() makes it invalid. Clear the
         // checksum so the next conn.call() recalculates it.
         OpMsg::removeChecksum(&request);
-        ASSERT_THROWS(conn.call(request), ExceptionForCat<ErrorCategory::NetworkError>);
+        ASSERT_THROWS(conn.call(request), ExceptionFor<ErrorCategory::NetworkError>);
 
         conn.connect(host, "integration_test", boost::none);  // Reconnect.
 
@@ -324,7 +320,7 @@ TEST(OpMsg, CloseConnectionOnFireAndForgetNotWritablePrimaryError) {
         // Fire-and-forget should still close connection.
         OpMsg::setFlag(&request, OpMsg::kMoreToCome);
         OpMsg::removeChecksum(&request);
-        ASSERT_THROWS(conn.call(request), ExceptionForCat<ErrorCategory::NetworkError>);
+        ASSERT_THROWS(conn.call(request), ExceptionFor<ErrorCategory::NetworkError>);
 
         break;
     }
@@ -413,7 +409,7 @@ void exhaustGetMoreTest(bool enableChecksum) {
     // Construct getMore request with exhaust flag. Set batch size so we will need multiple batches
     // to exhaust the cursor.
     int batchSize = 2;
-    GetMoreCommandRequest getMoreRequest(cursorId, nss.coll().toString());
+    GetMoreCommandRequest getMoreRequest(cursorId, std::string{nss.coll()});
     getMoreRequest.setBatchSize(batchSize);
     opMsgRequest = OpMsgRequestBuilder::create(
         auth::ValidatedTenancyScope::kNotRequired, nss.dbName(), getMoreRequest.toBSON());
@@ -532,7 +528,7 @@ TEST(OpMsg, ServerDoesNotSetMoreToComeOnErrorInGetMore) {
 
     // Construct getMore request with exhaust flag.
     int batchSize = 2;
-    GetMoreCommandRequest getMoreRequest(cursorId, nss.coll().toString());
+    GetMoreCommandRequest getMoreRequest(cursorId, std::string{nss.coll()});
     getMoreRequest.setBatchSize(batchSize);
     opMsgRequest = OpMsgRequestBuilder::create(
         auth::ValidatedTenancyScope::kNotRequired, nss.dbName(), getMoreRequest.toBSON());
@@ -582,7 +578,7 @@ TEST(OpMsg, ExhaustWorksForAggCursor) {
     // Construct getMore request with exhaust flag. Set batch size so we will need multiple batches
     // to exhaust the cursor.
     int batchSize = 2;
-    GetMoreCommandRequest getMoreRequest(cursorId, nss.coll().toString());
+    GetMoreCommandRequest getMoreRequest(cursorId, std::string{nss.coll()});
     getMoreRequest.setBatchSize(batchSize);
     opMsgRequest = OpMsgRequestBuilder::create(
         auth::ValidatedTenancyScope::kNotRequired, nss.dbName(), getMoreRequest.toBSON());
@@ -921,12 +917,12 @@ void exhaustMetricSwitchingCommandNames(bool useLegacyCommandNameAtStart) {
         ASSERT_EQUALS(1, serverStatusReply["connections"]["exhaustHello"].numberInt());
     }
 
-    const auto failPointObj = BSON("configureFailPoint"
-                                   << "failCommand"
-                                   << "mode" << BSON("times" << 1) << "data"
-                                   << BSON("threadName" << threadName << "errorCode"
-                                                        << ErrorCodes::NotWritablePrimary
-                                                        << "failCommands" << BSON_ARRAY(cmdName)));
+    const auto failPointObj =
+        BSON("configureFailPoint" << "failCommand"
+                                  << "mode" << BSON("times" << 1) << "data"
+                                  << BSON("threadName" << threadName << "errorCode"
+                                                       << ErrorCodes::NotWritablePrimary
+                                                       << "failCommands" << BSON_ARRAY(cmdName)));
     auto response = conn2->runCommand(OpMsgRequestBuilder::create(
         auth::ValidatedTenancyScope::kNotRequired, DatabaseName::kAdmin, failPointObj));
     ASSERT_OK(getStatusFromCommandResult(response->getCommandReply()));
@@ -1060,12 +1056,12 @@ void exhaustMetricDecrementsOnNewOpAfterTerminatingExhaustStream(bool useLegacyC
         ASSERT_EQUALS(1, serverStatusReply["connections"]["exhaustHello"].numberInt());
     }
 
-    const auto failPointObj = BSON("configureFailPoint"
-                                   << "failCommand"
-                                   << "mode" << BSON("times" << 1) << "data"
-                                   << BSON("threadName" << threadName << "errorCode"
-                                                        << ErrorCodes::NotWritablePrimary
-                                                        << "failCommands" << BSON_ARRAY(cmdName)));
+    const auto failPointObj =
+        BSON("configureFailPoint" << "failCommand"
+                                  << "mode" << BSON("times" << 1) << "data"
+                                  << BSON("threadName" << threadName << "errorCode"
+                                                       << ErrorCodes::NotWritablePrimary
+                                                       << "failCommands" << BSON_ARRAY(cmdName)));
     auto response = conn2->runCommand(OpMsgRequestBuilder::create(
         auth::ValidatedTenancyScope::kNotRequired, DatabaseName::kAdmin, failPointObj));
     ASSERT_OK(getStatusFromCommandResult(response->getCommandReply()));
@@ -1175,12 +1171,12 @@ void exhaustMetricOnNewExhaustAfterTerminatingExhaustStream(bool useLegacyComman
         ASSERT_EQUALS(1, serverStatusReply["connections"]["exhaustHello"].numberInt());
     }
 
-    const auto failPointObj = BSON("configureFailPoint"
-                                   << "failCommand"
-                                   << "mode" << BSON("times" << 1) << "data"
-                                   << BSON("threadName" << threadName << "errorCode"
-                                                        << ErrorCodes::NotWritablePrimary
-                                                        << "failCommands" << BSON_ARRAY(cmdName)));
+    const auto failPointObj =
+        BSON("configureFailPoint" << "failCommand"
+                                  << "mode" << BSON("times" << 1) << "data"
+                                  << BSON("threadName" << threadName << "errorCode"
+                                                       << ErrorCodes::NotWritablePrimary
+                                                       << "failCommands" << BSON_ARRAY(cmdName)));
     auto response = conn2->runCommand(OpMsgRequestBuilder::create(
         auth::ValidatedTenancyScope::kNotRequired, DatabaseName::kAdmin, failPointObj));
     ASSERT_OK(getStatusFromCommandResult(response->getCommandReply()));
@@ -1324,16 +1320,13 @@ TEST(OpMsg, ServerHandlesReallyLargeMessagesGracefully) {
                                                      BSON("buildInfo" << 1)))
             ->getCommandReply();
     ASSERT_OK(getStatusFromCommandResult(buildInfo));
-    const auto maxBSONObjSizeFromServer =
-        static_cast<size_t>(buildInfo["maxBsonObjectSize"].Number());
-    const std::string bigData(maxBSONObjSizeFromServer * 2, ' ');
-
+    const std::string bigData(kOpMsgReplyBSONBufferMaxSize + (1024), ' ');
     BSONObjBuilder bob;
     bob << "ismaster" << 1 << "ignoredField" << bigData << "$db"
         << "admin";
     OpMsgRequest request;
     request.body = bob.obj<BSONObj::LargeSizeTrait>();
-    ASSERT_GT(request.body.objsize(), BSONObjMaxInternalSize);
+    ASSERT_GT(request.body.objsize(), kOpMsgReplyBSONBufferMaxSize);
     auto requestMsg = request.serializeWithoutSizeChecking();
 
     Message replyMsg = conn->call(requestMsg);

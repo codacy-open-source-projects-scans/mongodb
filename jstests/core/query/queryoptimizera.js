@@ -6,12 +6,13 @@
 //   not_allowed_with_signed_security_token,
 //   does_not_support_stepdowns,
 //   requires_capped,
+//   requires_getmore,
 // ]
 
 function numWarnings() {
     let logs = db.adminCommand({getLog: "global"}).log;
     let ret = 0;
-    logs.forEach(function(x) {
+    logs.forEach(function (x) {
         if (x.match(warningMatchRegexp)) {
             ++ret;
         }
@@ -23,24 +24,21 @@ let collectionNameIndex = 0;
 
 // Generate a collection name not already present in the log.
 do {
-    var testCollectionName = 'jstests_queryoptimizera__' + collectionNameIndex++;
-    var warningMatchString =
-        'unindexed _id query on capped collection.*collection: test.' + testCollectionName;
+    var testCollectionName = "jstests_queryoptimizera__" + collectionNameIndex++;
+    let warningMatchString = "unindexed _id query on capped collection.*collection: test." + testCollectionName;
     var warningMatchRegexp = new RegExp(warningMatchString);
-
 } while (numWarnings() > 0);
 
 let t = db[testCollectionName];
 t.drop();
 
-let notCappedCollectionName = testCollectionName + '_notCapped';
+let notCappedCollectionName = testCollectionName + "_notCapped";
 
 let notCapped = db.getSiblingDB("local").getCollection(notCappedCollectionName);
 notCapped.drop();
 
 assert.commandWorked(db.createCollection(testCollectionName, {capped: true, size: 1000}));
-assert.commandWorked(
-    notCapped.getDB().createCollection(notCappedCollectionName, {autoIndexId: false}));
+assert.commandWorked(notCapped.getDB().createCollection(notCappedCollectionName));
 
 t.insert({});
 notCapped.insert({});
@@ -96,5 +94,5 @@ assertNoNewWarnings();
 t.find({_id: 0, a: 0}).itcount();
 assertNoNewWarnings();
 
-t.drop();  // cleanup
+t.drop(); // cleanup
 notCapped.drop();

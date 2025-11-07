@@ -28,13 +28,13 @@
  */
 
 
-#include <cstddef>
-#include <utility>
-
+#include "mongo/db/repl/repl_settings.h"
 
 #include "mongo/db/repl/repl_server_parameters_gen.h"
-#include "mongo/db/repl/repl_settings.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
+
+#include <cstddef>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -44,7 +44,6 @@ namespace repl {
 
 
 std::string ReplSettings::ourSetName() const {
-    invariant(!_isServerless);
     size_t sl = _replSetString.find('/');
     if (sl == std::string::npos)
         return _replSetString;
@@ -52,7 +51,7 @@ std::string ReplSettings::ourSetName() const {
 }
 
 bool ReplSettings::isReplSet() const {
-    return _isServerless || !_replSetString.empty() || _shouldAutoInitiate;
+    return !_replSetString.empty() || _shouldAutoInitiate;
 }
 
 /**
@@ -64,16 +63,15 @@ long long ReplSettings::getOplogSizeBytes() const {
 }
 
 std::string ReplSettings::getReplSetString() const {
-    invariant(!_isServerless);
     return _replSetString;
-}
-
-bool ReplSettings::isServerless() const {
-    return _isServerless;
 }
 
 bool ReplSettings::shouldRecoverFromOplogAsStandalone() {
     return recoverFromOplogAsStandalone;
+}
+
+bool ReplSettings::shouldSkipOplogSampling() {
+    return skipOplogSampling;
 }
 
 bool ReplSettings::shouldAutoInitiate() const {
@@ -89,17 +87,10 @@ void ReplSettings::setOplogSizeBytes(long long oplogSizeBytes) {
 }
 
 void ReplSettings::setReplSetString(std::string replSetString) {
-    invariant(!_isServerless);
     _replSetString = std::move(replSetString);
 }
 
-void ReplSettings::setServerlessMode() {
-    invariant(_replSetString.empty());
-    _isServerless = true;
-}
-
 void ReplSettings::setShouldAutoInitiate() {
-    invariant(!_isServerless);
     _shouldAutoInitiate = true;
 }
 

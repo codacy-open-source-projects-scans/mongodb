@@ -29,22 +29,22 @@
 
 #pragma once
 
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
+#include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/s/migration_coordinator_document_gen.h"
 #include "mongo/db/s/migration_session_id.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/chunk_version.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/util/future.h"
 #include "mongo/util/uuid.h"
+
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace migrationutil {
@@ -63,6 +63,7 @@ public:
                          ChunkRange range,
                          ChunkVersion preMigrationChunkVersion,
                          const KeyPattern& shardKeyPattern,
+                         ChunkVersion currentShardVersion,
                          bool waitForDelete);
 
     MigrationCoordinator(const MigrationCoordinatorDocument& doc);
@@ -82,6 +83,15 @@ public:
      * allow the range deletion task to access the shard key pattern.
      */
     void setShardKeyPattern(const boost::optional<KeyPattern>& shardKeyPattern);
+
+    /**
+     * Persistently sets/gets whether this chunk migration will cause the recipent to start owning
+     * data for the parent collection. The value is expected to be set by MigrationSourceManager at
+     * the beginning of the clone phase and consumed upon commit to generate the related op entry
+     * for change stream readers.
+     */
+    void setTransfersFirstCollectionChunkToRecipient(OperationContext* opCtx, bool value);
+    bool getTransfersFirstCollectionChunkToRecipient();
 
     /**
      * Initializes persistent state required to ensure that orphaned ranges are properly handled,
@@ -144,6 +154,7 @@ private:
 
     MigrationCoordinatorDocument _migrationInfo;
     boost::optional<KeyPattern> _shardKeyPattern;
+    ChunkVersion _shardVersionPriorToTheMigration;
     bool _waitForDelete = false;
     boost::optional<ExecutorFuture<void>> _releaseRecipientCriticalSectionFuture;
 };

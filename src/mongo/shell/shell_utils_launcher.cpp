@@ -34,7 +34,7 @@
 #include <csignal>
 #include <cstdint>
 #include <cstring>
-#include <fmt/format.h>
+#include <filesystem>
 #include <fstream>  // IWYU pragma: keep
 #include <iostream>
 #include <iterator>
@@ -45,6 +45,8 @@
 #include <system_error>
 #include <utility>
 #include <vector>
+
+#include <fmt/format.h>
 
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 #include <boost/filesystem/directory.hpp>
@@ -75,8 +77,7 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/traffic_reader.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
+#include "mongo/replay/replay_client.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/shell/named_pipe_test_helper.h"
 #include "mongo/shell/program_runner.h"
@@ -85,7 +86,6 @@
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/named_pipe/named_pipe.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/destructor_guard.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/exit_code.h"
 #include "mongo/util/pcre.h"
@@ -115,8 +115,6 @@ using std::vector;
 namespace shell_utils {
 
 namespace {
-
-using namespace fmt::literals;
 
 #ifdef _WIN32
 
@@ -246,12 +244,14 @@ BSONObj StartMongoProgram(const BSONObj& a, void* data) {
     shellGlobalParams.nokillop.store(true);
     BSONObj args = a;
     BSONObj env{};
+    std::string loggingPrefix;
     BSONElement firstElement = args.firstElement();
 
     if (firstElement.ok() && firstElement.isABSONObj()) {
         BSONObj subobj = firstElement.Obj();
         BSONElement argsElem = subobj["args"];
         BSONElement envElem = subobj["env"];
+        BSONElement loggingPrefixElem = subobj["loggingPrefix"];
         uassert(40098,
                 "If StartMongoProgram is called with a BSONObj, "
                 "it must contain an 'args' subobject." +
@@ -262,10 +262,13 @@ BSONObj StartMongoProgram(const BSONObj& a, void* data) {
         if (envElem.ok() && envElem.isABSONObj()) {
             env = envElem.Obj();
         }
+        if (loggingPrefixElem.ok()) {
+            loggingPrefix = loggingPrefixElem.str();
+        }
     }
 
     auto registry = ProgramRegistry::get(getGlobalServiceContext());
-    auto runner = registry->createProgramRunner(args, env, true);
+    auto runner = registry->createProgramRunner(args, env, /*isMongo=*/true, loggingPrefix);
     runner.start();
     invariant(registry->isPidRegistered(runner.pid()));
     stdx::thread t(runner, registry->getProgramOutputMultiplexer(), true /* shouldLogOutput */);
@@ -276,7 +279,7 @@ BSONObj StartMongoProgram(const BSONObj& a, void* data) {
 BSONObj RunProgram(const BSONObj& a, void* data, bool isMongo, bool isQuiet = false) {
     BSONObj env{};
     auto registry = ProgramRegistry::get(getGlobalServiceContext());
-    auto runner = registry->createProgramRunner(a, env, isMongo);
+    auto runner = registry->createProgramRunner(a, env, isMongo, /*loggingPrefix=*/std::string());
 
     runner.start(!isQuiet);
 
@@ -362,26 +365,26 @@ void copyDir(const boost::filesystem::path& from, const boost::filesystem::path&
     boost::filesystem::directory_iterator i(from);
     while (i != end) {
         boost::filesystem::path p = *i;
-        if (p.leaf() == "metrics.interim" || p.leaf() == "metrics.interim.temp") {
+        if (p.filename() == "metrics.interim" || p.filename() == "metrics.interim.temp") {
             // Ignore any errors for metrics.interim* files as these may disappear during copy
             boost::system::error_code ec;
-            boost::filesystem::copy_file(p, to / p.leaf(), ec);
+            boost::filesystem::copy_file(p, to / p.filename(), ec);
             if (ec) {
                 LOGV2_INFO(22814,
                            "Skipping copying of file from '{from}' to "
                            "'{to}' due to: {error}",
                            "Skipping copying of file due to error"
                            "from"_attr = p.generic_string(),
-                           "to"_attr = (to / p.leaf()).generic_string(),
+                           "to"_attr = (to / p.filename()).generic_string(),
                            "error"_attr = ec.message());
             }
-        } else if (p.leaf() != "mongod.lock" && p.leaf() != "WiredTiger.lock") {
+        } else if (p.filename() != "mongod.lock" && p.filename() != "WiredTiger.lock") {
             if (boost::filesystem::is_directory(p)) {
-                boost::filesystem::path newDir = to / p.leaf();
+                boost::filesystem::path newDir = to / p.filename();
                 boost::filesystem::create_directory(newDir);
                 copyDir(p, newDir);
             } else {
-                boost::filesystem::copy_file(p, to / p.leaf());
+                boost::filesystem::copy_file(p, to / p.filename());
             }
         }
         ++i;
@@ -482,8 +485,9 @@ inline void kill_wrapper(ProcessId pid, int sig, int port, const BSONObj& opt) {
         if (ec == posixError(ESRCH)) {
         } else {
             LOGV2_INFO(22816, "Kill failed", "error"_attr = errorMessage(ec));
-            uasserted(ErrorCodes::UnknownError,
-                      "kill({}, {}) failed: {}"_format(pid.toNative(), sig, errorMessage(ec)));
+            uasserted(
+                ErrorCodes::UnknownError,
+                fmt::format("kill({}, {}) failed: {}", pid.toNative(), sig, errorMessage(ec)));
         }
     }
 
@@ -633,14 +637,14 @@ BSONObj ReadTestPipes(const BSONObj& args, void* unused) {
 
     do {
         pipePathElem = BSONElement(args.getField(std::to_string(fieldNum)));
-        if (pipePathElem.type() == BSONType::String) {
+        if (pipePathElem.type() == BSONType::string) {
             pipeRelativePaths.emplace_back(pipePathElem.str());
-        } else if (pipePathElem.type() != BSONType::EOO) {
+        } else if (pipePathElem.type() != BSONType::eoo) {
             uasserted(ErrorCodes::FailedToParse,
-                      "Argument {} (pipe path) must be a string"_format(fieldNum));
+                      fmt::format("Argument {} (pipe path) must be a string", fieldNum));
         }
         ++fieldNum;
-    } while (pipePathElem.type() != BSONType::EOO);
+    } while (pipePathElem.type() != BSONType::eoo);
 
     if (pipeRelativePaths.size() > 0) {
         return NamedPipeHelper::readFromPipes(pipeRelativePaths);
@@ -661,7 +665,7 @@ BSONObj ReadTestPipes(const BSONObj& args, void* unused) {
 BSONObj WriteTestPipe(const BSONObj& args, void* unused) {
     int nFields = args.nFields();
     uassert(ErrorCodes::FailedToParse,
-            "wrong number of arguments"_format(nFields),
+            fmt::format("wrong number of arguments", nFields),
             nFields >= 2 && nFields <= 5);
 
     const long kStringMaxSize = 16750000;  // max allowed size for generated object's "string" field
@@ -674,7 +678,7 @@ BSONObj WriteTestPipe(const BSONObj& args, void* unused) {
 
     uassert(ErrorCodes::FailedToParse,
             "First argument (pipe path) must be a string",
-            pipePathElem.type() == BSONType::String);
+            pipePathElem.type() == BSONType::string);
     uassert(ErrorCodes::FailedToParse,
             "Second argument (number of objects) must be a number",
             objectsElem.isNumber());
@@ -705,10 +709,10 @@ BSONObj WriteTestPipe(const BSONObj& args, void* unused) {
             BSONElement pipeDirElem(args.getField("4"));
             uassert(ErrorCodes::FailedToParse,
                     "Fifth argument (pipe dir) must be a string",
-                    pipeDirElem.type() == BSONType::String);
+                    pipeDirElem.type() == BSONType::string);
             return pipeDirElem.str();
         } else {
-            return kDefaultPipePath.toString();
+            return std::string{kDefaultPipePath};
         }
     }();
 
@@ -751,7 +755,7 @@ int32_t readBytes(char* buf, int32_t count, std::ifstream& ifs) {
 BSONObj writeTestPipeBsonFileHelper(const BSONObj& args, bool async) {
     int nFields = args.nFields();
     uassert(ErrorCodes::FailedToParse,
-            "Function requires 3 or 4 arguments but {} were given"_format(nFields),
+            fmt::format("Function requires 3 or 4 arguments but {} were given", nFields),
             nFields == 3 || nFields == 4);
 
     BSONElement pipePathElem(args.getField("0"));
@@ -760,32 +764,32 @@ BSONObj writeTestPipeBsonFileHelper(const BSONObj& args, bool async) {
 
     uassert(ErrorCodes::FailedToParse,
             "First argument (pipe path) must be a string",
-            pipePathElem.type() == BSONType::String);
+            pipePathElem.type() == BSONType::string);
     uassert(ErrorCodes::FailedToParse,
             "Second argument (number of objects) must be a number",
             objectsElem.isNumber());
     uassert(ErrorCodes::FailedToParse,
             "Third argument (BSON file path) must be a string",
-            bsonFilePathElem.type() == BSONType::String);
+            bsonFilePathElem.type() == BSONType::string);
 
     std::string pipeDir = [&] {
         if (nFields == 4) {
             BSONElement pipeDirElem(args.getField("3"));
             uassert(ErrorCodes::FailedToParse,
                     "Fourth argument (pipe dir) must be a string",
-                    pipeDirElem.type() == BSONType::String);
+                    pipeDirElem.type() == BSONType::string);
             return pipeDirElem.str();
         } else {
-            return kDefaultPipePath.toString();
+            return std::string{kDefaultPipePath};
         }
     }();
 
     // Open the BSON object file.
     std::ifstream ifs(bsonFilePathElem.str(), std::ios::binary | std::ios::in);
-    uassert(
-        ErrorCodes::FileOpenFailed,
-        "Failed to open '{}': {}"_format(bsonFilePathElem.str(), errorMessage(lastSystemError())),
-        ifs.is_open());
+    uassert(ErrorCodes::FileOpenFailed,
+            fmt::format(
+                "Failed to open '{}': {}", bsonFilePathElem.str(), errorMessage(lastSystemError())),
+            ifs.is_open());
 
     // Read the BSON object file into a vector of BSONObj.
     const int32_t kSizeSize = sizeof(int32_t);
@@ -808,14 +812,14 @@ BSONObj writeTestPipeBsonFileHelper(const BSONObj& args, bool async) {
                 }
             }
             uassert(ErrorCodes::InvalidBSON,
-                    "Expected {} bytes in BSON object but got {}"_format(size, totalRead),
+                    fmt::format("Expected {} bytes in BSON object but got {}", size, totalRead),
                     totalRead == size);
 
             bsonObjs.emplace_back(buf);
         } else {
             eof = true;
             uassert(ErrorCodes::InvalidBSON,
-                    "Expected {} bytes in size field but got {}"_format(kSizeSize, nBytes),
+                    fmt::format("Expected {} bytes in size field but got {}", kSizeSize, nBytes),
                     nBytes == 0);  // 0 is normal EOF
         }
     }  // while !eof
@@ -862,7 +866,7 @@ BSONObj WriteTestPipeBsonFileSync(const BSONObj& args, void* unused) {
 BSONObj WriteTestPipeObjects(const BSONObj& args, void* unused) {
     int nFields = args.nFields();
     uassert(ErrorCodes::FailedToParse,
-            "Function requires 3 to 5 arguments but {} were given"_format(nFields),
+            fmt::format("Function requires 3 to 5 arguments but {} were given", nFields),
             nFields >= 3 && nFields <= 5);
 
     BSONElement pipePathElem(args.getField("0"));
@@ -871,23 +875,23 @@ BSONObj WriteTestPipeObjects(const BSONObj& args, void* unused) {
 
     uassert(ErrorCodes::FailedToParse,
             "First argument (pipe path) must be a string",
-            pipePathElem.type() == BSONType::String);
+            pipePathElem.type() == BSONType::string);
     uassert(ErrorCodes::FailedToParse,
             "Second argument (number of objects) must be a number",
             objectsElem.isNumber());
     uassert(ErrorCodes::FailedToParse,
             "Third argument must be an array of objects to round-robin over",
-            bsonElems.type() == mongo::Array);
+            bsonElems.type() == BSONType::array);
 
     std::string pipeDir = [&] {
         if (nFields >= 4) {
             BSONElement pipeDirElem(args.getField("3"));
             uassert(ErrorCodes::FailedToParse,
                     "Fourth argument (pipe dir) must be a string",
-                    pipeDirElem.type() == BSONType::String);
+                    pipeDirElem.type() == BSONType::string);
             return pipeDirElem.str();
         } else {
-            return kDefaultPipePath.toString();
+            return std::string{kDefaultPipePath};
         }
     }();
 
@@ -896,7 +900,7 @@ BSONObj WriteTestPipeObjects(const BSONObj& args, void* unused) {
             BSONElement persistPipeElem(args.getField("4"));
             uassert(ErrorCodes::FailedToParse,
                     "Fifth argument (persistPipe) must be a bool",
-                    persistPipeElem.type() == BSONType::Bool);
+                    persistPipeElem.type() == BSONType::boolean);
             return persistPipeElem.boolean();
         } else {
             return false;
@@ -969,7 +973,48 @@ BSONObj GetFCVConstants(const BSONObj&, void*) {
 }
 
 MongoProgramScope::~MongoProgramScope() {
-    DESTRUCTOR_GUARD(KillMongoProgramInstances(); ClearRawMongoProgramOutput(BSONObj(), nullptr))
+    try {
+        KillMongoProgramInstances();
+        ClearRawMongoProgramOutput(BSONObj(), nullptr);
+    } catch (...) {
+        reportFailedDestructor(MONGO_SOURCE_LOCATION());
+    }
+}
+
+/**
+ * Command for running a shadow clusters replay client.
+ * should be used as:
+ *   replayWorkloadRecordingFile("filename.bin", "mongo://connection-string")
+ *   replayWorkloadRecordingFile("recording_dir/", "mongo://connection-string")
+ *
+ * This is primarily used for testing.
+ */
+BSONObj ReplayWorkloadRecordingFile(const BSONObj& a, void*) {
+
+    int nFields = a.nFields();
+    uassert(ErrorCodes::FailedToParse,
+            "Exactly two arguments are required (data path, connection string)",
+            nFields == 2);
+
+    std::vector<BSONElement> elems;
+    a.elems(elems);
+
+    uassert(ErrorCodes::FailedToParse,
+            "First argument must be a filename of a recording",
+            elems[0].type() == BSONType::string);
+    uassert(ErrorCodes::FailedToParse,
+            "Second argument must be a connection string",
+            elems[1].type() == BSONType::string);
+
+    std::string input = elems[0].String();
+    std::string cluster = elems[1].String();
+
+    // if the recording directory is passed by param, then we reply all the recordings found in
+    // there.
+
+    mongo::ReplayClient replayClient;
+    replayClient.replayRecording(input, cluster);
+    return BSONObj{};
 }
 
 /**
@@ -1017,6 +1062,7 @@ void installShellUtilsLauncher(Scope& scope) {
     scope.injectNative("_writeTestPipeBsonFile", WriteTestPipeBsonFile);
     scope.injectNative("_writeTestPipeBsonFileSync", WriteTestPipeBsonFileSync);
     scope.injectNative("_writeTestPipeObjects", WriteTestPipeObjects);
+    scope.injectNative("replayWorkloadRecordingFile", ReplayWorkloadRecordingFile);
 }
 }  // namespace shell_utils
 }  // namespace mongo

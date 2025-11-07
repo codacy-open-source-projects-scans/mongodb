@@ -20,13 +20,14 @@ executor:
       global_vars:
         TestData:
           defaultReadConcernLevel: null
+          enableOTELTracing: false
+      setShellParameter: defaultFindReplicaSetHostTimeoutMS=120000
   fixture:
     class: ShardedClusterFixture
     mixed_bin_versions: new_old_old_new
     mongod_options:
       bind_ip_all: ""
       set_parameters:
-        coordinateCommitReturnImmediatelyAfterPersistingDecision: true
         enableTestCommands: 1
         periodicNoopIntervalSecs: 1
         writePeriodicNoops: true

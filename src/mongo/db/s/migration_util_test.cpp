@@ -27,27 +27,27 @@
  *    it in the license file.
  */
 
-#include <initializer_list>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/s/migration_util.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/persistent_task_store.h"
-#include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/range_deletion_util.h"
-#include "mongo/db/s/shard_server_test_fixture.h"
-#include "mongo/db/vector_clock.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/db/sharding_environment/shard_server_test_fixture.h"
+#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/unittest/unittest.h"
+
+#include <initializer_list>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 namespace {
@@ -60,9 +60,9 @@ using MigrationUtilsTest = ShardServerTestFixture;
 UUID getCollectionUuid(OperationContext* opCtx, const NamespaceString& nss) {
     AutoGetCollection autoColl(opCtx, nss, MODE_IS);
 
-    ASSERT(autoColl.getCollection());
+    ASSERT(*autoColl);
 
-    return autoColl.getCollection()->uuid();
+    return autoColl->uuid();
 }
 
 template <typename ShardKey>

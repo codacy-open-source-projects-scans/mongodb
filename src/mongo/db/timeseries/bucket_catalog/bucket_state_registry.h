@@ -29,22 +29,21 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <functional>
-#include <string>
-#include <variant>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_identifiers.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/tracking/map.h"
 #include "mongo/util/tracking/unordered_map.h"
 #include "mongo/util/tracking/vector.h"
 #include "mongo/util/uuid.h"
+
+#include <cstdint>
+#include <string>
+#include <variant>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo::timeseries::bucket_catalog {
 
@@ -89,11 +88,11 @@ enum class BucketState : uint8_t {
     // Cannot accept inserts and will continue to not accept inserts.
     kFrozen,
     // Cannot accept inserts, and has an outstanding prepared commit. This
-    // state will propogate WriteConflictExceptions to all writers aside from
+    // state will propagate WriteConflictExceptions to all writers aside from
     // the writer who prepared the commit.
     kPreparedAndCleared,
     // Cannot accept inserts, and has an outstanding prepared commit. This
-    // state will propogate WriteConflictExceptions to all writers aside from
+    // state will propagate WriteConflictExceptions to all writers aside from
     // the writer who prepared the commit.
     kPreparedAndFrozen,
 };
@@ -102,7 +101,6 @@ enum class BucketState : uint8_t {
  * Writes initiated outside of the BucketCatalog are considered "direct writes" since they are
  * operating directly on the 'system.buckets' collection. We must synchronize these writes with the
  * BucketCatalog to ensure we don't try to insert into a bucket that is currently being written to.
- * We also represent buckets undergoing compression with a DirectWriteCounter.
  *
  * Note: we cannot perform direct writes on prepared buckets and there can be multiple direct writes
  * on the same bucket. Conflicts between multiple simultaneous direct writes are mediated by the
@@ -119,7 +117,6 @@ using DirectWriteCounter = std::int32_t;
  */
 struct BucketStateRegistry {
     using Era = std::uint64_t;
-    using ShouldClearFn = std::function<bool(const UUID&)>;
 
     mutable stdx::mutex mutex;
 
@@ -213,10 +210,11 @@ bool conflictsWithInsertions(std::variant<BucketState, DirectWriteCounter>& stat
  * | PreparedAndFrozen  | TimeseriesBucketFrozen
  * | DirectWriteCounter | WriteConflict
  */
-Status initializeBucketState(BucketStateRegistry& registry,
-                             const BucketId& bucketId,
-                             Bucket* bucket = nullptr,
-                             boost::optional<BucketStateRegistry::Era> targetEra = boost::none);
+Status initializeBucketState(
+    BucketStateRegistry& registry,
+    const BucketId& bucketId,
+    const boost::optional<BucketStateRegistry::Era>& targetEra = boost::none,
+    Bucket* bucket = nullptr);
 
 /**
  * Transitions bucket state to 'kPrepared'. If included, checks if the 'bucket' has been marked as

@@ -29,22 +29,11 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/ordering.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/admission/execution_admission_context.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/stages/collection_helpers.h"
@@ -54,16 +43,25 @@
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/query/index_bounds.h"
+#include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/query/stage_types.h"
 #include "mongo/db/storage/index_entry_comparison.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/sorted_data_interface.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo::sbe {
 
@@ -125,16 +123,17 @@ protected:
     };
 
     // Seeks and returns the first/next index KeyStringEntry or boost::none if no such key exists.
-    virtual SortedDataKeyValueView seek() = 0;
+    virtual SortedDataKeyValueView seek(RecoveryUnit& ru) = 0;
     // Returns true if the 'key' is within the bounds and false otherwise. Implementations may set
     // state internally to reflect whether the scan is done, or whether a new seek point should be
     // used.
     virtual bool validateKey(const SortedDataKeyValueView& key) = 0;
 
-    void doSaveState(bool relinquishCursor) override;
-    void doRestoreState(bool relinquishCursor) final;
+    void doSaveState() override;
+    void doRestoreState() final;
     void doDetachFromOperationContext() final;
     void doAttachToOperationContext(OperationContext* opCtx) final;
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override;
 
     /**
      * When this stage is re-opened after being closed, or during yield recovery, called to verify
@@ -245,8 +244,8 @@ public:
     size_t estimateCompileTimeSize() const override;
 
 protected:
-    void doSaveState(bool relinquishCursor) override;
-    SortedDataKeyValueView seek() override;
+    void doSaveState() override;
+    SortedDataKeyValueView seek(RecoveryUnit& ru) override;
     bool validateKey(const SortedDataKeyValueView& key) override;
 
 private:
@@ -313,7 +312,7 @@ public:
     size_t estimateCompileTimeSize() const override;
 
 protected:
-    SortedDataKeyValueView seek() override;
+    SortedDataKeyValueView seek(RecoveryUnit& ru) override;
     bool validateKey(const SortedDataKeyValueView& key) override;
 
     const GenericIndexScanStageParams _params;

@@ -29,19 +29,9 @@
 
 
 #include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <chrono>
-#include <cstdint>
-#include <future>
-#include <memory>
-#include <mutex>
-#include <system_error>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -63,8 +53,6 @@
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_interface.h"
@@ -72,16 +60,23 @@
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/future.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/integration_test.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/system_clock_source.h"
 #include "mongo/util/time_support.h"
+
+#include <chrono>
+#include <cstdint>
+#include <future>
+#include <memory>
+#include <mutex>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -99,7 +94,7 @@ const NamespaceString testNSS =
 
 const StringData testAppName = "curop_exhaust_cursor_test";
 std::unique_ptr<DBClientBase> connect(StringData appName = testAppName) {
-    auto swConn = unittest::getFixtureConnectionString().connect(appName.toString());
+    auto swConn = unittest::getFixtureConnectionString().connect(std::string{appName});
     uassertStatusOK(swConn.getStatus());
     return std::move(swConn.getValue());
 }
@@ -118,20 +113,18 @@ void initTestCollection(DBClientBase* conn) {
 }
 
 void setWaitWithPinnedCursorDuringGetMoreBatchFailpoint(DBClientBase* conn, bool enable) {
-    auto cmdObj = BSON("configureFailPoint"
-                       << "waitWithPinnedCursorDuringGetMoreBatch"
-                       << "mode" << (enable ? "alwaysOn" : "off") << "data"
-                       << BSON("shouldContinueOnInterrupt" << true));
+    auto cmdObj = BSON("configureFailPoint" << "waitWithPinnedCursorDuringGetMoreBatch"
+                                            << "mode" << (enable ? "alwaysOn" : "off") << "data"
+                                            << BSON("shouldContinueOnInterrupt" << true));
     auto reply = conn->runCommand(OpMsgRequestBuilder::create(
         auth::ValidatedTenancyScope::kNotRequired, DatabaseName::kAdmin, cmdObj));
     ASSERT_OK(getStatusFromCommandResult(reply->getCommandReply()));
 }
 
 void setWaitAfterCommandFinishesExecutionFailpoint(DBClientBase* conn, bool enable) {
-    auto cmdObj = BSON("configureFailPoint"
-                       << "waitAfterCommandFinishesExecution"
-                       << "mode" << (enable ? "alwaysOn" : "off") << "data"
-                       << BSON("ns" << testNSS.toString_forTest()));
+    auto cmdObj = BSON("configureFailPoint" << "waitAfterCommandFinishesExecution"
+                                            << "mode" << (enable ? "alwaysOn" : "off") << "data"
+                                            << BSON("ns" << testNSS.toString_forTest()));
     auto reply = conn->runCommand(OpMsgRequestBuilder::create(
         auth::ValidatedTenancyScope::kNotRequired, DatabaseName::kAdmin, cmdObj));
     ASSERT_OK(getStatusFromCommandResult(reply->getCommandReply()));
@@ -139,9 +132,9 @@ void setWaitAfterCommandFinishesExecutionFailpoint(DBClientBase* conn, bool enab
 
 void setWaitBeforeUnpinningOrDeletingCursorAfterGetMoreBatchFailpoint(DBClientBase* conn,
                                                                       bool enable) {
-    auto cmdObj = BSON("configureFailPoint"
-                       << "waitBeforeUnpinningOrDeletingCursorAfterGetMoreBatch"
-                       << "mode" << (enable ? "alwaysOn" : "off"));
+    auto cmdObj =
+        BSON("configureFailPoint" << "waitBeforeUnpinningOrDeletingCursorAfterGetMoreBatch"
+                                  << "mode" << (enable ? "alwaysOn" : "off"));
     auto reply = conn->runCommand(OpMsgRequestBuilder::create(
         auth::ValidatedTenancyScope::kNotRequired, DatabaseName::kAdmin, cmdObj));
     ASSERT_OK(getStatusFromCommandResult(reply->getCommandReply()));
@@ -398,9 +391,8 @@ void testClientDisconnect(bool disconnectAfterGetMoreBatch) {
     setWaitWithPinnedCursorDuringGetMoreBatchFailpoint(conn.get(), false);
     setWaitBeforeUnpinningOrDeletingCursorAfterGetMoreBatchFailpoint(conn.get(), false);
 
-    curOpMatch = BSON("type"
-                      << "idleCursor"
-                      << "cursor.cursorId" << queryCursorId);
+    curOpMatch = BSON("type" << "idleCursor"
+                             << "cursor.cursorId" << queryCursorId);
     // Confirm that the cursor was cleaned up and does not appear in the $currentOp idleCursor
     // output.
     ASSERT(confirmCurrentOpContents(conn.get(), curOpMatch, expectEmptyResult));

@@ -28,13 +28,6 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
-#include <boost/optional/optional.hpp>
-#include <cstdlib>
-#include <fstream>
-#include <memory>
-
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/init.h"
 #include "mongo/base/status.h"
@@ -56,6 +49,12 @@
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/net/ssl_parameters_gen.h"
 #include "mongo/util/net/ssl_peer_info.h"
+
+#include <cstdlib>
+#include <fstream>
+#include <memory>
+
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -1180,6 +1179,10 @@ public:
         uassertOSStatusOK(status, ErrorCodes::SSLHandshakeFailed);
     }
 
+    void* getConnection() final {
+        return get();
+    }
+
     ::SSLContextRef get() const {
         return const_cast<::SSLContextRef>(_ssl.get());
     }
@@ -1247,8 +1250,9 @@ CFUniquePtr<::CFArrayRef> CreateSecTrustPolicies(const std::string& remoteHost,
     CFUniquePtr<::CFMutableArrayRef> policiesMutable(
         ::CFArrayCreateMutable(nullptr, 2, &::kCFTypeArrayCallBacks));
 
-    // Basic X509 policy.
-    CFUniquePtr<::SecPolicyRef> cfX509Policy(::SecPolicyCreateBasicX509());
+    // SSL certificate chain validation policy.
+    bool isValidatingServerCert = !remoteHost.empty();
+    CFUniquePtr<::SecPolicyRef> cfX509Policy(::SecPolicyCreateSSL(isValidatingServerCert, nullptr));
     ::CFArrayAppendValue(policiesMutable.get(), cfX509Policy.get());
 
     // Set Revocation policy.
@@ -1904,9 +1908,6 @@ SSLInformationToLog SSLManagerApple::getSSLInformationToLog() const {
 
 // Global variable indicating if this is a server or a client instance
 bool isSSLServer = false;
-
-extern SSLManagerInterface* theSSLManager;
-extern SSLManagerCoordinator* theSSLManagerCoordinator;
 
 std::shared_ptr<SSLManagerInterface> SSLManagerInterface::create(
     const SSLParams& params,

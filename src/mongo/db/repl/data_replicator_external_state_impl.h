@@ -29,8 +29,6 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
@@ -50,7 +48,10 @@
 #include "mongo/rpc/metadata/oplog_query_metadata.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <memory>
 
 namespace mongo {
 namespace repl {
@@ -63,7 +64,7 @@ class ReplicationCoordinatorExternalState;
  * Data replicator external state implementation using a replication coordinator.
  */
 
-class DataReplicatorExternalStateImpl : public DataReplicatorExternalState {
+class MONGO_MOD_OPEN DataReplicatorExternalStateImpl : public DataReplicatorExternalState {
 public:
     DataReplicatorExternalStateImpl(
         ReplicationCoordinator* replicationCoordinator,
@@ -112,10 +113,6 @@ public:
     StatusWith<LastVote> loadLocalLastVoteDocument(OperationContext* opCtx) const override;
 
     JournalListener* getReplicationJournalListener() override;
-
-protected:
-    ReplicationCoordinator* getReplicationCoordinator() const;
-    ReplicationCoordinatorExternalState* getReplicationCoordinatorExternalState() const;
 
 private:
     // Not owned by us.

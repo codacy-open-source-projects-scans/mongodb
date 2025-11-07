@@ -28,6 +28,7 @@
  */
 
 #include "mongo/db/auth/authorization_router_impl.h"
+
 #include "mongo/db/auth/authorization_manager_global_parameters_gen.h"
 #include "mongo/db/auth/user_document_parser.h"
 #include "mongo/db/auth/user_request_x509.h"
@@ -43,7 +44,7 @@ MONGO_FAIL_POINT_DEFINE(waitForUserCacheInvalidation);
 void handleWaitForUserCacheInvalidation(OperationContext* opCtx, const UserHandle& user) {
     auto fp = waitForUserCacheInvalidation.scopedIf([&](const auto& bsonData) {
         IDLParserContext ctx("waitForUserCacheInvalidation");
-        auto data = WaitForUserCacheInvalidationFailPoint::parse(ctx, bsonData);
+        auto data = WaitForUserCacheInvalidationFailPoint::parse(bsonData, ctx);
 
         const auto& blockedUserName = data.getUserName();
         return blockedUserName == user->getName();
@@ -284,6 +285,20 @@ OID AuthorizationRouterImpl::getCacheGeneration() {
 namespace {
 MONGO_FAIL_POINT_DEFINE(authUserCacheBypass);
 MONGO_FAIL_POINT_DEFINE(authUserCacheSleep);
+
+struct CurOpPauseGuard {
+    explicit CurOpPauseGuard(CurOp* curOp) : curOp{curOp} {
+        if (curOp && curOp->isStarted()) {
+            curOp->pauseTimer();
+        }
+    }
+    ~CurOpPauseGuard() {
+        if (curOp && curOp->isPaused()) {
+            curOp->resumeTimer();
+        }
+    }
+    CurOp* curOp;
+};
 }  // namespace
 
 StatusWith<UserHandle> AuthorizationRouterImpl::acquireUser(
@@ -317,6 +332,7 @@ StatusWith<UserHandle> AuthorizationRouterImpl::acquireUser(
     // second of delay is added via the failpoint for testing.
     UserAcquisitionStatsHandle userAcquisitionStatsHandle = UserAcquisitionStatsHandle(
         userAcquisitionStats.get(), opCtx->getServiceContext()->getTickSource(), kCache);
+    CurOpPauseGuard curOpPauseGuard{CurOp::get(opCtx)};
     if (authUserCacheSleep.shouldFail()) {
         sleepsecs(1);
     }
@@ -410,7 +426,7 @@ void AuthorizationRouterImpl::invalidateUserCache() {
     _updateCacheGeneration();
 }
 
-Status AuthorizationRouterImpl::refreshExternalUsers(OperationContext* opCtx) {
+Status AuthorizationRouterImpl::refreshExternalUsers(OperationContext* opCtx) try {
     LOGV2_DEBUG(5914801, 2, "Refreshing all users from the $external database");
     // First, get a snapshot of the UserHandles in the cache.
     auto cachedUsers = _userCache.peekLatestCachedIf(
@@ -470,6 +486,8 @@ Status AuthorizationRouterImpl::refreshExternalUsers(OperationContext* opCtx) {
     }
 
     return Status::OK();
+} catch (const DBException& e) {
+    return e.toStatus();
 }
 
 std::vector<AuthorizationRouter::CachedUserInfo> AuthorizationRouterImpl::getUserCacheInfo() const {

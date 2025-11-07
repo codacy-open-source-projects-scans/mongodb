@@ -29,10 +29,6 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <vector>
-
 #include "mongo/bson/oid.h"
 #include "mongo/db/commands/query_cmd/bulk_write_gen.h"
 #include "mongo/db/commands/query_cmd/bulk_write_parser.h"
@@ -42,8 +38,14 @@
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/s/write_ops/bulk_write_exec.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUB mongo {
 namespace cluster {
 
 /**
@@ -65,7 +67,8 @@ void write(OperationContext* opCtx,
 bulk_write_exec::BulkWriteReplyInfo bulkWrite(
     OperationContext* opCtx,
     const BulkWriteCommandRequest& request,
-    const std::vector<std::unique_ptr<NSTargeter>>& targeters);
+    const std::vector<std::unique_ptr<NSTargeter>>& targeters,
+    bulk_write_exec::BulkWriteExecStats& execStats);
 
 }  // namespace cluster
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

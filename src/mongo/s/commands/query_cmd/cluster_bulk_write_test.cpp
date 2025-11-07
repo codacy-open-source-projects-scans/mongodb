@@ -28,8 +28,8 @@
  */
 
 #include "mongo/bson/json.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/s/commands/cluster_command_test_fixture.h"
+#include "mongo/db/sharding_environment/cluster_command_test_fixture.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -95,22 +95,29 @@ protected:
 
 TEST_F(ClusterBulkWriteTest, NoErrors) {
     RAIIServerParameterControllerForTest controller("featureFlagBulkWriteCommand", true);
+    RAIIServerParameterControllerForTest uweController("internalQueryUnifiedWriteExecutor", false);
+
     testNoErrors(kBulkWriteCmdTargeted, kBulkWriteCmdScatterGather);
 }
 
 TEST_F(ClusterBulkWriteTest, AttachesAtClusterTimeForSnapshotReadConcern) {
     RAIIServerParameterControllerForTest controller("featureFlagBulkWriteCommand", true);
+    RAIIServerParameterControllerForTest uweController("internalQueryUnifiedWriteExecutor", false);
+
     testAttachesAtClusterTimeForSnapshotReadConcern(kBulkWriteCmdTargeted,
                                                     kBulkWriteCmdScatterGather);
 }
 
 TEST_F(ClusterBulkWriteTest, SnapshotReadConcernWithAfterClusterTime) {
     RAIIServerParameterControllerForTest controller("featureFlagBulkWriteCommand", true);
+    RAIIServerParameterControllerForTest uweController("internalQueryUnifiedWriteExecutor", false);
+
     testSnapshotReadConcernWithAfterClusterTime(kBulkWriteCmdTargeted, kBulkWriteCmdScatterGather);
 }
 
 TEST_F(ClusterBulkWriteTest, FireAndForgetRequestGetsReplyWithOnlyOkStatus) {
     RAIIServerParameterControllerForTest controller("featureFlagBulkWriteCommand", true);
+    RAIIServerParameterControllerForTest uweController("internalQueryUnifiedWriteExecutor", false);
 
     auto asFireAndForgetRequest = [](const BSONObj& cmdObj) {
         BSONObjBuilder bob(cmdObj);

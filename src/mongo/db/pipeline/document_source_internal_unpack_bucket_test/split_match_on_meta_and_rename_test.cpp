@@ -27,20 +27,19 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/optimization/optimize.h"
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/util/make_data_structure.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <memory>
+#include <vector>
 
 namespace mongo {
 namespace {
@@ -54,9 +53,9 @@ TEST_F(InternalUnpackBucketSplitMatchOnMetaAndRename, OptimizeSplitsMatchAndMaps
     auto pipeline = Pipeline::parse(
         makeVector(unpack, fromjson("{$match: {myMeta: {$gte: 0, $lte: 5}, a: {$lte: 4}}}")),
         getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should split and rename the $match. A separate optimization maps the predicate on 'a' to a
     // predicate on 'control.min.a'. These two created $match stages should be added before
@@ -89,9 +88,9 @@ TEST_F(InternalUnpackBucketSplitMatchOnMetaAndRename, OptimizeMovesMetaMatchBefo
         "bucketMaxSpanSeconds: 3600}}");
     auto pipeline =
         Pipeline::parse(makeVector(unpack, fromjson("{$match: {myMeta: {$gte: 0}}}")), getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // The $match on meta is moved before $_internalUnpackBucket and no other optimization is done.
     auto serialized = pipeline->serializeToBson();
@@ -109,9 +108,9 @@ TEST_F(InternalUnpackBucketSplitMatchOnMetaAndRename,
                                                fromjson("{$project: {data: 1}}"),
                                                fromjson("{$match: {myMeta: {$gte: 0}}}")),
                                     getExpCtx());
-    ASSERT_EQ(3u, pipeline->getSources().size());
+    ASSERT_EQ(3u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // The $match on meta is not moved before $_internalUnpackBucket since the field is excluded.
     auto serialized = pipeline->serializeToBson();
@@ -137,9 +136,9 @@ TEST_F(InternalUnpackBucketSplitMatchOnMetaAndRename,
         "  ]}"
         "]}}");
     auto pipeline = Pipeline::parse(makeVector(unpack, match), getExpCtx());
-    ASSERT_EQ(2u, pipeline->getSources().size());
+    ASSERT_EQ(2u, pipeline->size());
 
-    pipeline->optimizePipeline();
+    pipeline_optimization::optimizePipeline(*pipeline);
 
     // We should fail to split the match because of the $or clause. We should still be able to
     // map the predicate on 'x' to a predicate on the control field.

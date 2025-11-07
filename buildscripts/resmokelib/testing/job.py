@@ -110,7 +110,7 @@ class Job(object):
                     "Received a StopExecution exception when setting up the fixture: %s.", err
                 )
                 setup_succeeded = False
-            except:  # pylint: disable=bare-except
+            except:
                 # Something unexpected happened when setting up the fixture. We don't attempt to run
                 # any tests.
                 self.logger.exception("Encountered an error when setting up the fixture.")
@@ -127,7 +127,7 @@ class Job(object):
                 # Stop running tests immediately.
                 self.logger.error("Received a StopExecution exception: %s.", err)
                 self._interrupt_all_jobs(queue, interrupt_flag)
-            except:  # pylint: disable=bare-except
+            except:
                 # Unknown error, stop execution.
                 self.logger.exception("Encountered an error during test execution.")
                 self._interrupt_all_jobs(queue, interrupt_flag)
@@ -144,7 +144,7 @@ class Job(object):
                     "Received a StopExecution exception when tearing down the fixture: %s.", err
                 )
                 teardown_succeeded = False
-            except:  # pylint: disable=bare-except
+            except:
                 # Something unexpected happened when tearing down the fixture. We indicate back to
                 # the executor thread that teardown has failed. This may mean resmoke.py is exiting
                 # without having terminated all of the child processes it spawned.
@@ -172,15 +172,15 @@ class Job(object):
 
         while not queue.empty() and not interrupt_flag.is_set():
             queue_elem = queue.get_nowait()
+            queue_elem.job_started()
             test_time_start = self._get_time()
+            test = queue_elem.testcase
+            self._requeue_test(queue, queue_elem, interrupt_flag)
             try:
-                test = queue_elem.testcase
                 self._execute_test(test, hook_failure_flag)
             finally:
                 queue_elem.job_completed(self._get_time() - test_time_start)
                 queue.task_done()
-
-            self._requeue_test(queue, queue_elem, interrupt_flag)
 
         self._run_hooks_after_suite(teardown_flag, hook_failure_flag)
 
@@ -236,17 +236,39 @@ class Job(object):
         execute_test_span.set_attributes(attributes=common_test_attributes)
         execute_test_span.set_status(StatusCode.ERROR, "fail_early")
 
-        test.configure(self.fixture, config.NUM_CLIENTS_PER_FIXTURE, config.USE_TENANT_CLIENT)
+        try:
+            test.configure(self.fixture, config.NUM_CLIENTS_PER_FIXTURE, config.USE_TENANT_CLIENT)
+        except:
+            self.logger.error(
+                "%s marked as a failure because it could not be configured.",
+                test.short_description(),
+            )
+            self._fail_test(test, sys.exc_info(), return_code=2)
+            raise errors.StopExecution("Could not configure the test %s" % test.short_description())
 
         self._run_hooks_before_tests(test, hook_failure_flag)
 
         self.report.logging_prefix = create_fixture_table(self.fixture)
 
         with TRACER.start_as_current_span("run_test", attributes=common_test_attributes):
+            if config.TEST_TIMEOUT:
+                timer = threading.Timer(config.TEST_TIMEOUT, test.on_timeout)
+                timer.start()
             test(self.report)
+            if config.TEST_TIMEOUT:
+                timer.cancel()
+                timer.join()
         try:
             if test.propagate_error is not None:
                 raise test.propagate_error
+
+            if test.timed_out.is_set():
+                # Restart the fixture, since it has been killed by the test's timeout handler
+                self.logger.info(
+                    "Restarting the fixture since it is not running after a test timed out."
+                )
+                self.fixture.setup()
+                self.fixture.await_ready()
 
             # We are intentionally only checking the individual 'test' status and not calling
             # report.wasSuccessful() here. It is possible that a thread running in the background as
@@ -262,7 +284,9 @@ class Job(object):
                     "%s marked as a failure because the fixture crashed during the test.",
                     test.short_description(),
                 )
-                self.report.setFailure(test, return_code=2)
+                self.report.setFailure(
+                    test, return_code=2, reason="the fixture crashed during the test"
+                )
                 # Always fail fast if the fixture fails.
                 raise errors.StopExecution(
                     "%s not running after %s" % (self.fixture, test.short_description())
@@ -397,10 +421,14 @@ class Job(object):
                 self.fixture.stop_balancer()
             except:
                 self.logger.exception(
-                    "%s failed while stopping the balancer for end-test hooks",
+                    "%s failed while stopping the balancer for after-test hooks",
                     test.short_description(),
                 )
-                self.report.setFailure(test, return_code=2)
+                self.report.setFailure(
+                    test,
+                    return_code=2,
+                    reason="the balancer failed to stop before running after-test hooks",
+                )
                 if self.archival:
                     result = TestResult(test=test, hook=None, success=False)
                     self.archival.archive(self.logger, result, self.manager)
@@ -418,14 +446,18 @@ class Job(object):
             self.logger.exception(
                 "%s marked as a failure by a hook's after_test.", test.short_description()
             )
-            self.report.setFailure(test, return_code=2)
+            self.report.setFailure(
+                test, return_code=2, reason=f"The hook {hook.REGISTERED_NAME} failed."
+            )
             raise errors.StopExecution("A hook's after_test failed")
 
         except errors.TestFailure:
             self.logger.exception(
                 "%s marked as a failure by a hook's after_test.", test.short_description()
             )
-            self.report.setFailure(test, return_code=1)
+            self.report.setFailure(
+                test, return_code=1, reason=f"The hook {hook.REGISTERED_NAME} failed."
+            )
             if self.suite_options.fail_fast:
                 raise errors.StopExecution("A hook's after_test failed")
 
@@ -442,7 +474,11 @@ class Job(object):
                     "%s failed while re-starting the balancer after end-test hooks",
                     test.short_description(),
                 )
-                self.report.setFailure(test, return_code=2)
+                self.report.setFailure(
+                    test,
+                    return_code=2,
+                    reason="the balancer failed to restart after running after test hooks",
+                )
                 if self.archival:
                     result = TestResult(test=test, hook=None, success=False)
                     self.archival.archive(self.logger, result, self.manager)

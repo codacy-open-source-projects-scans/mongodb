@@ -29,27 +29,6 @@
 
 #pragma once
 
-#include <atomic>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <functional>
-#include <js/CompileOptions.h>
-#include <js/Context.h>
-#include <js/GCAPI.h>
-#include <js/RootingAPI.h>
-#include <js/TypeDecls.h>
-#include <js/Value.h>
-#include <jsapi.h>
-#include <jsfriendapi.h>
-#include <memory>
-#include <mongo/scripting/mozjs/freeOpToJSContext.h>
-#include <string>
-#include <thread>
-#include <type_traits>
-#include <utility>
-#include <vector>
-#include <vm/PosixNSPR.h>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -100,11 +79,44 @@
 #include "mongo/stdx/thread.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/static_immortal.h"
 #include "mongo/util/string_map.h"
 
+#include <atomic>
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <string>
+#include <thread>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <jsapi.h>
+#include <jsfriendapi.h>
+
+#include <boost/optional/optional.hpp>
+#include <js/CompileOptions.h>
+#include <js/Context.h>
+#include <js/GCAPI.h>
+#include <js/RootingAPI.h>
+#include <js/TypeDecls.h>
+#include <js/Value.h>
+#include <mongo/scripting/mozjs/freeOpToJSContext.h>
+#include <vm/PosixNSPR.h>
+
 namespace mongo {
 namespace mozjs {
+
+/**
+ * Error messages or error message prefixes.
+ */
+namespace ErrorMessage {
+const StringData kUncaughtException = "uncaught exception";
+const StringData kOutOfMemory = "Out of memory";
+const StringData kUnknownError = "Unknown Failure from JSInterpreter";
+}  // namespace ErrorMessage
 
 /**
  * Implementation Scope for MozJS
@@ -118,7 +130,7 @@ namespace mozjs {
  *
  * For more information about overriden fields, see mongo::Scope
  */
-class MozJSImplScope final : public Scope {
+class MONGO_MOD_PUB MozJSImplScope final : public Scope {
     MozJSImplScope(const MozJSImplScope&) = delete;
     MozJSImplScope& operator=(const MozJSImplScope&) = delete;
 
@@ -443,6 +455,18 @@ public:
 
     ModuleLoader* getModuleLoader() const;
 
+    /**
+     * getJSContextForTest and getGlobalForTest should only be used from implscope_test.cpp, as we
+     * need a way to expose these members for some JS API calls.
+     */
+    JSContext* getJSContextForTest() {
+        return _context;
+    }
+
+    JS::HandleObject getGlobalForTest() {
+        return _global;
+    }
+
 private:
     template <typename ImplScopeFunction>
     auto _runSafely(ImplScopeFunction&& functionToRun) -> decltype(functionToRun());
@@ -475,6 +499,7 @@ private:
     static bool _interruptCallback(JSContext* cx);
     static void _gcCallback(JSContext* rt, JSGCStatus status, JS::GCReason reason, void* data);
     bool _checkErrorState(bool success, bool reportError = true, bool assertOnError = true);
+    Status _checkForPendingException();
 
     void installDBAccess();
     void installBSONTypes();
@@ -507,7 +532,6 @@ private:
     Status _killStatus;
     mutable stdx::mutex _mutex;
     stdx::condition_variable _sleepCondition;
-    std::string _error;
     OperationContext* _opCtx;         // Op context for DbEval
     stdx::thread::id _opCtxThreadId;  // Id of the thread that owns '_opCtx'
     std::size_t _inOp;
@@ -519,8 +543,6 @@ private:
     bool _requireOwnedObjects;
     std::string _baseURL;
     bool _hasOutOfMemoryException;
-
-    bool _inReportError;
 
     std::unique_ptr<ModuleLoader> _moduleLoader;
     std::unique_ptr<EnvironmentPreparer> _environmentPreparer;
@@ -560,7 +582,7 @@ private:
     WrapType<URIInfo> _uriProto;
 };
 
-inline MozJSImplScope* getScope(JSContext* cx) {
+MONGO_MOD_PUB inline MozJSImplScope* getScope(JSContext* cx) {
     return static_cast<MozJSImplScope*>(JS_GetContextPrivate(cx));
 }
 

@@ -38,10 +38,6 @@
 #endif
 #endif
 
-#include <climits>
-#include <fmt/format.h>
-#include <sstream>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -50,9 +46,12 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/debug_util.h"
+
+#include <climits>
+#include <sstream>
+
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
@@ -130,14 +129,14 @@ const VersionInfoInterface& VersionInfoInterface::instance(NotEnabledAction acti
 }
 
 std::string VersionInfoInterface::makeVersionString(StringData binaryName) const {
-    return format(FMT_STRING("{} v{}"), binaryName, version());
+    return fmt::format("{} v{}", binaryName, version());
 }
 
 std::string VersionInfoInterface::openSSLVersion(StringData prefix, StringData suffix) const {
 #if !defined(MONGO_CONFIG_SSL) || MONGO_CONFIG_SSL_PROVIDER != MONGO_CONFIG_SSL_PROVIDER_OPENSSL
     return "";
 #elif MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_OPENSSL
-    return prefix.toString() + SSLeay_version(SSLEAY_VERSION) + suffix;
+    return std::string{prefix} + SSLeay_version(SSLEAY_VERSION) + suffix;
 #endif
 }
 
@@ -170,7 +169,7 @@ void VersionInfoInterface::logBuildInfo(std::ostream* os) const {
 }
 
 std::string formatVersionString(StringData versioned, const VersionInfoInterface& provider) {
-    return format(FMT_STRING("{} version v{}"), versioned, provider.version());
+    return fmt::format("{} version v{}", versioned, provider.version());
 }
 
 std::string mongoShellVersion(const VersionInfoInterface& provider) {

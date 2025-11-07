@@ -10,6 +10,39 @@ exports_files(
 )
 
 idl_generator(
+    name = "ingress_request_rate_limiter_gen",
+    src = "ingress_request_rate_limiter.idl",
+    deps = [
+        "//src/mongo/db:basic_types_gen",
+    ],
+)
+
+idl_generator(
+    name = "admission_feature_flags_gen",
+    src = "admission_feature_flags.idl",
+)
+
+mongo_cc_library(
+    name = "ingress_request_rate_limiter",
+    srcs = [
+        "ingress_request_rate_limiter.cpp",
+        ":ingress_request_rate_limiter_gen",
+    ],
+    hdrs = [
+        "ingress_request_rate_limiter.h",
+    ],
+    deps = [
+        ":rate_limiter",
+        "//src/mongo:base",
+        "//src/mongo/db:server_feature_flags",
+        "//src/mongo/db:service_context",
+        "//src/mongo/db/auth",
+        "//src/mongo/rpc:client_metadata",
+        "//src/mongo/transport:cidr_range_list_parameter",
+    ],
+)
+
+idl_generator(
     name = "ingress_admission_control_gen",
     src = "ingress_admission_control.idl",
 )
@@ -25,6 +58,7 @@ mongo_cc_library(
     ],
     deps = [
         ":ingress_admission_context",
+        ":rate_limiter",
         "//src/mongo:base",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db:server_base",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db:server_feature_flags",  # TODO(SERVER-93876): Remove.
@@ -34,17 +68,25 @@ mongo_cc_library(
 )
 
 mongo_cc_library(
-    name = "ticketholder_manager",
+    name = "ticketing_system",
     srcs = [
-        "ticketholder_manager.cpp",
+        "admission_feature_flags_gen",
+        "concurrency_adjustment_validator.cpp",
+        "execution_control_parameters_gen",
+        "throughput_probing.cpp",
+        "throughput_probing_gen",
+        "ticketing_system.cpp",
     ],
     hdrs = [
-        "ticketholder_manager.h",
+        "concurrency_adjustment_validator.h",
+        "throughput_probing.h",
+        "ticketing_system.h",
     ],
     no_undefined_ref_DO_NOT_USE = False,
     deps = [
         "//src/mongo/db:server_base",
         "//src/mongo/db/commands:test_commands_enabled",
+        "//src/mongo/util:processinfo",
         "//src/mongo/util/concurrency:ticketholder",
     ],
 )
@@ -56,34 +98,12 @@ mongo_cc_library(
     ],
     deps = [
         ":ingress_admission_control",
-        ":ticketholder_manager",  # TODO(SERVER-93876): Remove.
+        ":ingress_request_rate_limiter",
+        ":ticketing_system",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db:server_feature_flags",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db:service_context",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db/commands:server_status_core",  # TODO(SERVER-93876): Remove.
-    ],
-)
-
-mongo_cc_library(
-    name = "execution_control",
-    srcs = [
-        "concurrency_adjustment_validator.cpp",
-        "execution_control_init.cpp",
-        "execution_control_parameters_gen",
-        "throughput_probing.cpp",
-        "throughput_probing_gen",
-    ],
-    hdrs = [
-        "concurrency_adjustment_validator.h",
-        "execution_control_init.h",
-        "throughput_probing.h",
-    ],
-    deps = [
-        "ticketholder_manager",
-        "//src/mongo/db:server_base",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db:service_context",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db/commands:server_status_core",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/util:processinfo",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/util/concurrency:ticketholder",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/commands/server_status:server_status_core",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/transport:transport_layer_common",
     ],
 )
 
@@ -124,12 +144,75 @@ mongo_cc_library(
     ],
 )
 
+mongo_cc_library(
+    name = "rate_limiter",
+    srcs = [
+        "rate_limiter.cpp",
+    ],
+    hdrs = [
+        "rate_limiter.h",
+    ],
+    deps = [
+        "//src/mongo:base",
+        "//src/mongo/db:server_base",
+        "//src/mongo/db:service_context",
+        "//src/third_party/folly:folly_token_bucket",
+    ],
+)
+
+idl_generator(
+    name = "flow_control_parameters_gen",
+    src = "flow_control_parameters.idl",
+)
+
+mongo_cc_library(
+    name = "flow_control_parameters",
+    srcs = [
+        ":flow_control_parameters_gen",
+    ],
+    deps = [
+        "//src/mongo/db:server_base",
+    ],
+)
+
+mongo_cc_library(
+    name = "flow_control",
+    srcs = [
+        "flow_control.cpp",
+    ],
+    hdrs = [
+        "flow_control.h",
+    ],
+    deps = [
+        ":flow_control_parameters",
+        "//src/mongo/db:server_base",
+        "//src/mongo/db:service_context",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/commands/server_status:server_status_core",
+        "//src/mongo/db/local_catalog/lock_manager:flow_control_ticketholder",
+        "//src/mongo/util:background_job",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "flow_control_test",
+    srcs = [
+        "flow_control_test.cpp",
+    ],
+    tags = ["mongo_unittest_fourth_group"],
+    deps = [
+        ":flow_control",
+        "//src/mongo/db:service_context_d_test_fixture",
+        "//src/mongo/db/repl:replmocks",
+        "//src/mongo/unittest",
+    ],
+)
+
 mongo_cc_unit_test(
     name = "ingress_admission_control_test",
     srcs = [
         "ingress_admission_control_test.cpp",
     ],
-    tags = ["mongo_unittest_second_group"],
+    tags = ["mongo_unittest_third_group"],
     deps = [
         ":ingress_admission_control",
         "//src/mongo/db:service_context_test_fixture",
@@ -142,17 +225,32 @@ mongo_cc_unit_test(
     srcs = [
         "throughput_probing_test.cpp",
     ],
-    tags = ["mongo_unittest_third_group"],
+    tags = ["mongo_unittest_fifth_group"],
     deps = [
-        ":execution_control",
+        ":ticketing_system",
         "//src/mongo/db:service_context",
         "//src/mongo/db:service_context_test_fixture",
         "//src/mongo/db:shard_role_api",
-        "//src/mongo/db/concurrency:lock_manager",
+        "//src/mongo/db/local_catalog/lock_manager",
         "//src/mongo/transport:transport_layer_common",
         "//src/mongo/unittest",
         "//src/mongo/util:mock_periodic_runner",
         "//src/mongo/util/concurrency:ticketholder",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "rate_limiter_util_test",
+    srcs = [
+        "rate_limiter_util_test.cpp",
+    ],
+    tags = [
+        "mongo_unittest_second_group",
+        "server-workload-resilience",
+    ],
+    deps = [
+        ":rate_limiter",
+        "//src/mongo/db:service_context_test_fixture",
     ],
 )
 

@@ -27,24 +27,27 @@
  *    it in the license file.
  */
 
-#include <benchmark/benchmark.h>
+#pragma once
+
+#include "mongo/db/local_catalog/catalog_test_fixture.h"
+#include "mongo/db/read_write_concern_defaults_cache_lookup_mock.h"
+#include "mongo/platform/random.h"
+#include "mongo/unittest/benchmark_util.h"
+#include "mongo/util/modules.h"
+
 #include <string>
 #include <vector>
 
-#include "mongo/db/catalog/catalog_test_fixture.h"
-#include "mongo/db/profiler_bm_fixture.h"
-#include "mongo/db/read_write_concern_defaults_cache_lookup_mock.h"
-#include "mongo/platform/random.h"
+#include <benchmark/benchmark.h>
 
 namespace mongo {
 
-class QueryBenchmarkFixture : public BenchmarkWithProfiler {
+class QueryBenchmarkFixture : public unittest::BenchmarkWithProfiler {
 public:
     static const NamespaceString kNss;
-    QueryBenchmarkFixture();
 
-    void SetUp(benchmark::State& state) override;
-    void TearDown(benchmark::State& state) override;
+    void setUpSharedResources(benchmark::State& state) override;
+    void tearDownSharedResources(benchmark::State& state) override;
 
     void runBenchmark(BSONObj filter, BSONObj projection, benchmark::State& state);
 
@@ -75,7 +78,7 @@ protected:
 
     static BSONObj buildIndexSpec(StringData fieldName, bool unique) {
         return BSONObjBuilder{}
-            .append("v", IndexDescriptor::kLatestIndexVersion)
+            .append("v", IndexConfig::kLatestIndexVersion)
             .append("key", BSON(fieldName << 1))
             .append("name", fieldName + "_1")
             .append("unique", unique)
@@ -93,7 +96,5 @@ private:
     boost::optional<CatalogScopedGlobalServiceContextForTest> _fixture;
     ReadWriteConcernDefaultsLookupMock _lookupMock;
     std::vector<BSONObj> _docs;
-
-    boost::optional<Notification<void>> _setupDone;
 };
 }  // namespace mongo

@@ -27,19 +27,18 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <fstream>  // IWYU pragma: keep
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/storage/storage_engine_metadata.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/storage/storage_engine_metadata.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/temp_dir.h"
+#include "mongo/unittest/unittest.h"
+
+#include <fstream>  // IWYU pragma: keep
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace {
 

@@ -29,19 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <deque>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <type_traits>
-#include <utility>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/operation_context.h"
@@ -50,14 +37,21 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/system_tick_source.h"
 #include "mongo/util/time_support.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <memory>
+#include <type_traits>
+#include <utility>
+
+#include <boost/optional.hpp>
+
 namespace mongo {
-
-class OperationContext;
-
-
 // Keep "markers" against a collection to efficiently remove ranges of old records when the
 // collection grows. This class is meant to be used only with collections that have the following
 // requirements:
@@ -69,7 +63,8 @@ class OperationContext;
 // If these requirements hold then this class can be used to compute and maintain up-to-date markers
 // for ranges of deletions. These markers will be expired and returned to the deleter whenever the
 // implementation defined '_hasExcessMarkers' returns true.
-class CollectionTruncateMarkers : public std::enable_shared_from_this<CollectionTruncateMarkers> {
+class MONGO_MOD_OPEN CollectionTruncateMarkers
+    : public std::enable_shared_from_this<CollectionTruncateMarkers> {
 public:
     /** Markers represent "waypoints" of the collection that contain information between the current
      * marker and the previous one.
@@ -106,7 +101,7 @@ public:
     };
 
     // The method used for creating the initial set of markers.
-    enum class MarkersCreationMethod { EmptyCollection, Scanning, Sampling };
+    enum class MarkersCreationMethod { EmptyCollection, Scanning, Sampling, InProgress };
 
     CollectionTruncateMarkers(std::deque<Marker> markers,
                               int64_t leftoverRecordsCount,
@@ -127,14 +122,17 @@ public:
 
     void popOldestMarker();
 
-    void createNewMarkerIfNeeded(const RecordId& lastRecord, Date_t wallTime);
+    void createNewMarkerIfNeeded(const RecordId& lastRecord,
+                                 Date_t wallTime,
+                                 bool oplogSamplingAsyncEnabled);
 
     // Updates the current marker with the inserted value if the operation commits the WUOW.
     virtual void updateCurrentMarkerAfterInsertOnCommit(OperationContext* opCtx,
                                                         int64_t bytesInserted,
                                                         const RecordId& highestInsertedRecordId,
                                                         Date_t wallTime,
-                                                        int64_t countInserted);
+                                                        int64_t countInserted,
+                                                        bool oplogSamplingAsyncEnabled);
 
     /**
      * Waits for expired markers. See _hasExcessMarkers().
@@ -195,8 +193,10 @@ public:
      * If we were to use query framework scans here we would incur on a layering violation as the
      * storage layer shouldn't have to interact with the query (higher) layer in here.
      */
-    class CollectionIterator {
+    class MONGO_MOD_OPEN CollectionIterator {
     public:
+        virtual ~CollectionIterator() = default;
+
         // Returns the next element in the collection. Behaviour is the same as performing a normal
         // collection scan.
         virtual boost::optional<std::pair<RecordId, BSONObj>> getNext() = 0;
@@ -219,6 +219,16 @@ public:
         }
     };
 
+    /**
+     * Creates an iterator over a record store. If tickSource and yieldInterval are supplied, the
+     * iterator will yield every yieldInterval ms.
+     */
+    static std::unique_ptr<CollectionIterator> makeIterator(
+        OperationContext* opCtx,
+        RecordStore* rs,
+        TickSource* tickSource,
+        boost::optional<Milliseconds> yieldInterval);
+
     // Creates the initial set of markers. This will decide whether to perform a collection scan or
     // sampling based on the size of the collection.
     //
@@ -238,7 +248,8 @@ public:
         OperationContext* opCtx,
         CollectionIterator& collIterator,
         int64_t minBytesPerMarker,
-        std::function<RecordIdAndWallTime(const Record&)> getRecordIdAndWallTime);
+        std::function<RecordIdAndWallTime(const Record&)> getRecordIdAndWallTime,
+        TickSource* tickSource = globalSystemTickSource());
 
     // Creates the initial set of markers by sampling the collection. The set of markers
     // returned will have approximate metrics. The metrics of each marker will be equal and contain
@@ -253,6 +264,10 @@ public:
 
     void setMinBytesPerMarker(int64_t size);
 
+    // Sets the _initialSamplingFinished variable to true. Allows other threads to know that initial
+    // sampling of oplog truncate markers during startup has finished.
+    void initialSamplingFinished();
+
     static constexpr uint64_t kRandomSamplesPerMarker = 10;
 
     Microseconds getCreationProcessingTime() const {
@@ -263,23 +278,26 @@ public:
         return _creationMethod;
     }
 
-    //
-    // The following methods are public only for use in tests.
-    //
-
-    size_t numMarkers_forTest() const {
+    size_t numMarkers() const {
         stdx::lock_guard<stdx::mutex> lk(_markersMutex);
         return _markers.size();
     }
 
+    //
+    // The following methods are public only for use in tests.
+    //
+
+    MONGO_MOD_PUBLIC
     int64_t currentBytes_forTest() const {
         return _currentBytes.load();
     }
 
+    MONGO_MOD_PUBLIC
     int64_t currentRecords_forTest() const {
         return _currentRecords.load();
     }
 
+    MONGO_MOD_PUBLIC
     std::deque<Marker> getMarkers_forTest() const {
         // Return a copy of the vector.
         return _markers;
@@ -295,7 +313,7 @@ private:
 
     // Method used to notify the implementation of a new marker being created. Implementations are
     // free to implement this however they see fit by overriding it. By default this is a no-op.
-    virtual void _notifyNewMarkerCreation(){};
+    virtual void _notifyNewMarkerCreation() {};
 
     // Minimum number of bytes the marker being filled should contain before it gets added to the
     // deque of collection markers.
@@ -304,9 +322,13 @@ private:
     AtomicWord<int64_t> _currentRecords;  // Number of records in the marker being filled.
     AtomicWord<int64_t> _currentBytes;    // Number of bytes in the marker being filled.
 
-    // Protects against concurrent access to the deque of collection markers.
+    // Protects against concurrent access to the deque of collection markers and the
+    // _initialSamplingFinished variable.
     mutable stdx::mutex _markersMutex;
     std::deque<Marker> _markers;  // front = oldest, back = newest.
+
+    // Whether or not the initial set of markers has finished being sampled.
+    bool _initialSamplingFinished = false;
 
 protected:
     struct PartialMarkerMetrics {
@@ -335,7 +357,7 @@ protected:
     }
 
     /**
-     * Returns whether the truncate markers instace has no markers, whether partial or whole. Note
+     * Returns whether the truncate markers instance has no markers, whether partial or whole. Note
      * that this method can provide a stale result unless the caller can guarantee that no more
      * markers will be created.
      */
@@ -355,8 +377,8 @@ protected:
     }
 
     // Amount of time spent scanning and/or sampling the collection during start up, if any.
-    const Microseconds _totalTimeProcessing;
-    const CollectionTruncateMarkers::MarkersCreationMethod _creationMethod;
+    Microseconds _totalTimeProcessing;
+    CollectionTruncateMarkers::MarkersCreationMethod _creationMethod;
 };
 
 /**
@@ -366,7 +388,8 @@ protected:
  * This is useful in time-based expiration systems as there could be low activity collections
  * containing expired data that can't be removed until covered by a full marker.
  */
-class CollectionTruncateMarkersWithPartialExpiration : public CollectionTruncateMarkers {
+class MONGO_MOD_OPEN CollectionTruncateMarkersWithPartialExpiration
+    : public CollectionTruncateMarkers {
 public:
     /**
      * Partial marker expiration depends on tracking the highest seen RecordId and wall time
@@ -376,9 +399,9 @@ public:
      * 'highestRecordId' and 'highestWallTime' are:
      *      . Greater than or equal to the 'lastRecord' and 'wall' of the most recent marker
      *      generated, if any.
-     *      .Initialized provided records have been tracked at any point in time.
+     *      . Initialized provided records have been tracked at any point in time.
      *              * Records are tracked either by full markers, or a non-zero
-     *                'leftoverRecordsCount' or 'leftoveRecordsBytes'.
+     *                'leftoverRecordsCount' or 'leftoverRecordsBytes'.
      *      . Strictly increasing over time.
      *
      * Callers are responsible for ensuring the state requirements are met upon construction.
@@ -408,8 +431,10 @@ public:
                                                 int64_t bytesInserted,
                                                 const RecordId& highestInsertedRecordId,
                                                 Date_t wallTime,
-                                                int64_t countInserted) final;
+                                                int64_t countInserted,
+                                                bool oplogSamplingAsyncEnabled) final;
 
+    MONGO_MOD_PUBLIC
     std::pair<const RecordId&, const Date_t&> getHighestRecordMetrics_forTest() const {
         return {_highestRecordId, _highestWallTime};
     }
@@ -443,51 +468,7 @@ protected:
     void updateCurrentMarker(int64_t bytesAdded,
                              const RecordId& highestRecordId,
                              Date_t highestWallTime,
-                             int64_t numRecordsAdded);
+                             int64_t numRecordsAdded,
+                             bool oplogSamplingAsyncEnabled);
 };
-
-/**
- * A Collection iterator meant to work with raw RecordStores. This iterator will not yield between
- * calls to getNext()/getNextRandom().
- *
- * It is only safe to use when the user is not accepting any user operation. Some examples of when
- * this class can be used are during oplog initialisation, repair, recovery, etc.
- */
-class UnyieldableCollectionIterator : public CollectionTruncateMarkers::CollectionIterator {
-public:
-    UnyieldableCollectionIterator(OperationContext* opCtx, RecordStore* rs) : _rs(rs) {
-        reset(opCtx);
-    }
-
-    boost::optional<std::pair<RecordId, BSONObj>> getNext() final {
-        auto record = _directionalCursor->next();
-        if (!record) {
-            return boost::none;
-        }
-        return std::make_pair(std::move(record->id), record->data.releaseToBson());
-    }
-
-    boost::optional<std::pair<RecordId, BSONObj>> getNextRandom() final {
-        auto record = _randomCursor->next();
-        if (!record) {
-            return boost::none;
-        }
-        return std::make_pair(std::move(record->id), record->data.releaseToBson());
-    }
-
-    RecordStore* getRecordStore() const final {
-        return _rs;
-    }
-
-    void reset(OperationContext* opCtx) final {
-        _directionalCursor = _rs->getCursor(opCtx);
-        _randomCursor = _rs->getRandomCursor(opCtx);
-    }
-
-private:
-    RecordStore* _rs;
-    std::unique_ptr<RecordCursor> _directionalCursor;
-    std::unique_ptr<RecordCursor> _randomCursor;
-};
-
 }  // namespace mongo

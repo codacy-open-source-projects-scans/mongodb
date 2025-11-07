@@ -1,6 +1,11 @@
 /*
  * Verifies the $listClusterCatalog will respect the set maxTimeMS while running internally
  * listCollection.
+ *
+ * @tags: [
+ *    # TODO (SERVER-98651) remove the tag as part of this ticket.
+ *   requires_fcv_81,
+ * ]
  */
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
@@ -20,13 +25,14 @@ function runTest(conn, failPointNode) {
 
     let fp = configureFailPoint(failPointNode, "hangBeforeListCollections");
     const awaitListClusterCatalog = startParallelShell(
-        funWithArgs(function(timeout) {
+        funWithArgs(function (timeout) {
             assert.commandFailedWithCode(
-                db.adminCommand(
-                    "aggregate",
-                    {pipeline: [{$listClusterCatalog: {}}], cursor: {}, maxTimeMS: timeout}),
-                [ErrorCodes.MaxTimeMSExpired]);
-        }, kTimeoutMs), conn.port);
+                db.adminCommand("aggregate", {pipeline: [{$listClusterCatalog: {}}], cursor: {}, maxTimeMS: timeout}),
+                [ErrorCodes.MaxTimeMSExpired],
+            );
+        }, kTimeoutMs),
+        conn.port,
+    );
 
     // Run the first listCollection and wait for it to complete
     jsTest.log("Waiting for hangBeforeListCollections");

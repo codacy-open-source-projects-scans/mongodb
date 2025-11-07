@@ -5,16 +5,13 @@ export function ingressHandshakeMetricsTest(conn, options) {
     // Unpack test options
 
     const {
-        rootCredentials = {user: 'root', pwd: 'root'},
-        guestCredentials = {user: 'guest', pwd: 'guest'},
-        dbName = 'test',
-        collectionName = 'test_coll',
+        rootCredentials = {user: "root", pwd: "root"},
+        guestCredentials = {user: "guest", pwd: "guest"},
+        dbName = "test",
+        collectionName = "test_coll",
         connectionHealthLoggingOn,
         preAuthDelayMillis,
         postAuthDelayMillis,
-        helloProcessingDelayMillis,
-        helloResponseDelayMillis,
-        helloFailPointName,
     } = options;
 
     const totalDelayMillis = preAuthDelayMillis + postAuthDelayMillis;
@@ -22,7 +19,7 @@ export function ingressHandshakeMetricsTest(conn, options) {
     // Define helper functions
 
     function setupTest() {
-        let admin = conn.getDB('admin');
+        let admin = conn.getDB("admin");
         let db = conn.getDB(dbName);
 
         admin.createUser(Object.assign(rootCredentials, {roles: jsTest.adminUserRoles}));
@@ -32,8 +29,9 @@ export function ingressHandshakeMetricsTest(conn, options) {
         db[collectionName].insert({foo: 42});
 
         if (!connectionHealthLoggingOn) {
-            assert.commandWorked(conn.adminCommand(
-                {setParameter: 1, enableDetailedConnectionHealthMetricLogLines: false}));
+            assert.commandWorked(
+                conn.adminCommand({setParameter: 1, enableDetailedConnectionHealthMetricLogLines: false}),
+            );
         }
     }
 
@@ -46,20 +44,17 @@ export function ingressHandshakeMetricsTest(conn, options) {
         db[collectionName].findOne();
     }
 
-    function performHelloTestConnection() {
-        let waitInHelloFailPoint =
-            configureFailPoint(conn, helloFailPointName, {delayMillis: helloProcessingDelayMillis});
-        let delaySendMessageFailPoint = configureFailPoint(
-            conn, 'sessionWorkflowDelayOrFailSendMessage', {millis: helloResponseDelayMillis});
-        let testConn = new Mongo(conn.host);
-        delaySendMessageFailPoint.off();
-        waitInHelloFailPoint.off();
-    }
-
-    function getTotalTimeToFirstNonAuthCommandMillis() {
+    function getIngressHandshakeMetrics() {
         let status = assert.commandWorked(conn.adminCommand({serverStatus: 1}));
-        printjson(status);
-        return status.metrics.network.totalTimeToFirstNonAuthCommandMillis;
+        jsTest.log.info({"status.metrics.network": status.metrics.network});
+        return Object.fromEntries(
+            [
+                "totalTimeToFirstNonAuthCommandMillis",
+                "averageTimeToCompletedTLSHandshakeMicros",
+                "averageTimeToCompletedHelloMicros",
+                "averageTimeToCompletedAuthMicros",
+            ].map((name) => [name, status.metrics.network[name]]),
+        );
     }
 
     function logLineExists(id, predicate) {
@@ -73,19 +68,11 @@ export function ingressHandshakeMetricsTest(conn, options) {
     }
 
     function timingLogLineExists() {
-        return logLineExists(6788700, entry => entry.attr.elapsedMillis >= postAuthDelayMillis);
-    }
-
-    function helloCompletedLogLineExists() {
-        return logLineExists(
-            6724100,
-            entry => (entry.attr.processingDurationMillis >= helloProcessingDelayMillis) &&
-                (entry.attr.sendingDurationMillis >= helloResponseDelayMillis) &&
-                (entry.attr.okCode == 1));
+        return logLineExists(6788700, (entry) => entry.attr.elapsedMillis >= postAuthDelayMillis);
     }
 
     function performAuthMetricsTest() {
-        let metricBeforeTest = getTotalTimeToFirstNonAuthCommandMillis();
+        const before = getIngressHandshakeMetrics();
 
         performAuthTestConnection();
 
@@ -95,33 +82,33 @@ export function ingressHandshakeMetricsTest(conn, options) {
             assert.eq(
                 timingLogLineExists(),
                 false,
-                "Found 'first non-auth command log line' despite disabling connection health logging");
+                "Found 'first non-auth command log line' despite disabling connection health logging",
+            );
         }
 
-        let metricAfterTest = getTotalTimeToFirstNonAuthCommandMillis();
-        assert.gte(metricAfterTest - metricBeforeTest, totalDelayMillis);
-    }
+        const after = getIngressHandshakeMetrics();
 
-    function performHelloMetricsTest() {
-        performHelloTestConnection();
+        // Total time increased by at least as long as we slept.
+        const diffMillis = after.totalTimeToFirstNonAuthCommandMillis - before.totalTimeToFirstNonAuthCommandMillis;
+        assert.gte(diffMillis, totalDelayMillis);
 
-        if (connectionHealthLoggingOn) {
-            assert(helloCompletedLogLineExists, "No matching 'hello completed' log line");
-        } else {
-            assert.eq(
-                helloCompletedLogLineExists(),
-                false,
-                "Found 'hello completed' log line despite disabling conection health logging");
-        }
+        // Average time to hello will be no larger than average time to completed auth.
+        assert.lte(after.averageTimeToCompletedHelloMicros, after.averageTimeToCompletedAuthMicros);
+
+        // Since the average time metrics have values, they are present and non-negative.
+        assert.gte(after.averageTimeToCompletedAuthMicros, 0);
+        assert.gte(after.averageTimeToCompletedHelloMicros, 0);
+
+        // "network.averageTimeToCompletedTLSHandshakeMicros" is not tested here.
+        // See `jstests/ssl/ssl_ingress_conn_metrics.js`.
     }
 
     // Setup the test and return the function that will perform the test when called
 
     setupTest();
 
-    return function() {
-        assert.commandWorked(conn.adminCommand({clearLog: 'global'}));
+    return function () {
+        assert.commandWorked(conn.adminCommand({clearLog: "global"}));
         performAuthMetricsTest();
-        performHelloMetricsTest();
     };
 }

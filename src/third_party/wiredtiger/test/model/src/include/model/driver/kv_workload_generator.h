@@ -47,6 +47,9 @@ namespace model {
  */
 struct kv_workload_generator_spec {
 
+    /* Top-level database configuration. */
+    float disaggregated;
+
     /* The minimum and maximum number of tables. */
     size_t min_tables;
     size_t max_tables;
@@ -69,8 +72,12 @@ struct kv_workload_generator_spec {
     /* The probability of allowing the use of "set commit timestamp" in a transaction. */
     float use_set_commit_timestamp;
 
+    /* The probability of running with connection level logging */
+    float conn_logging;
+
     /* Probabilities of operations within a transaction. */
     float finish_transaction; /* Commit, prepare, or rollback. */
+    float get;
     float insert;
     float remove;
     float set_commit_timestamp; /* If allowed. */
@@ -87,6 +94,7 @@ struct kv_workload_generator_spec {
     float set_stable_timestamp;
 
     /* The probabilities for choosing an existing key, if available. */
+    float get_existing;
     float remove_existing;
     float update_existing;
 
@@ -113,6 +121,7 @@ struct kv_workload_generator_spec {
     float timing_stress_hs_sweep_race;
     float timing_stress_prepare_ckpt_delay;
     float timing_stress_commit_txn_slow;
+    float timing_stress_rec_before_wrapup;
 
     /*
      * kv_workload_generator_spec::kv_workload_generator_spec --
@@ -135,6 +144,7 @@ protected:
     enum class op_category {
         none,
         evict,
+        get,
         remove,
         update,
     };
@@ -444,10 +454,17 @@ public:
     }
 
     static std::string
-    generate_configurations(uint64_t seed = 0)
+    generate_stress_configurations(uint64_t seed = 0)
     {
         kv_workload_generator generator(_default_spec, seed);
-        return generator.generate_connection_config();
+        return generator.generate_connection_stress_config();
+    }
+
+    static std::string
+    generate_log_configurations(uint64_t seed = 0)
+    {
+        kv_workload_generator generator(_default_spec, seed);
+        return generator.generate_connection_log_config();
     }
 
 protected:
@@ -493,10 +510,16 @@ protected:
     void create_table();
 
     /*
-     * kv_workload_generator::generate_connection_config --
-     *     Generate random WiredTiger timing stress configurations.
+     * kv_workload_generator::generate_connection_stress_config --
+     *     Generate random time stress configurations.
      */
-    std::string generate_connection_config();
+    std::string generate_connection_stress_config();
+
+    /*
+     * kv_workload_generator::generate_connection_log_config --
+     *     Generate random WiredTiger log configurations.
+     */
+    std::string generate_connection_log_config();
 
     /*
      * kv_workload_generator::generate_key --
@@ -533,6 +556,7 @@ private:
     kv_workload &_workload;
 
     kv_workload_generator_spec _spec;
+    kv_database_config _database_config;
     random _random;
 
     table_id_t _last_table_id;

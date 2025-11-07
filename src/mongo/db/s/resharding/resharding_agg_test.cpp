@@ -27,24 +27,6 @@
  *    it in the license file.
  */
 
-#include <cstddef>
-#include <cstdint>
-#include <deque>
-#include <iostream>
-#include <iterator>
-#include <map>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <fmt/format.h>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -56,6 +38,7 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/exec/agg/pipeline_builder.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -82,12 +65,10 @@
 #include "mongo/db/s/resharding/resharding_util.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/transaction/transaction_history_iterator.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
@@ -95,13 +76,29 @@
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <iostream>
+#include <iterator>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
+
 namespace mongo {
 namespace {
 
-using namespace fmt::literals;
-
 const NamespaceString kLocalOplogBufferNss = NamespaceString::createNamespaceString_forTest(
-    "config", "{}xxx.yyy"_format(NamespaceString::kReshardingLocalOplogBufferPrefix));
+    fmt::format("config", "{}xxx.yyy", NamespaceString::kReshardingLocalOplogBufferPrefix));
 
 // A mock TransactionHistoryIterator to support DSReshardingIterateTransaction.
 class MockTransactionHistoryIterator : public TransactionHistoryIteratorBase {
@@ -172,27 +169,26 @@ public:
     MockMongoInterface(std::deque<DocumentSource::GetNextResult> mockResults)
         : _mockResults(std::move(mockResults)) {}
 
-    std::unique_ptr<Pipeline, PipelineDeleter> preparePipelineForExecution(
-        Pipeline* ownedPipeline,
+    std::unique_ptr<Pipeline> preparePipelineForExecution(
+        std::unique_ptr<Pipeline> pipeline,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none) final {
-        std::unique_ptr<Pipeline, PipelineDeleter> pipeline(
-            ownedPipeline, PipelineDeleter(ownedPipeline->getContext()->getOperationContext()));
 
         pipeline->addInitialSource(
             DocumentSourceMock::createForTest(_mockResults, pipeline->getContext()));
         return pipeline;
     }
 
-    std::unique_ptr<Pipeline, PipelineDeleter> preparePipelineForExecution(
+    std::unique_ptr<Pipeline> preparePipelineForExecution(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const AggregateCommandRequest& aggRequest,
-        Pipeline* pipeline,
+        std::unique_ptr<Pipeline> pipeline,
         boost::optional<BSONObj> shardCursorsSortSpec = boost::none,
         ShardTargetingPolicy shardTargetingPolicy = ShardTargetingPolicy::kAllowed,
         boost::optional<BSONObj> readConcern = boost::none,
         bool shouldUseDefaultCollectionCollator = false) final {
-        return preparePipelineForExecution(pipeline, shardTargetingPolicy, std::move(readConcern));
+        return preparePipelineForExecution(
+            std::move(pipeline), shardTargetingPolicy, std::move(readConcern));
     }
 
     std::unique_ptr<TransactionHistoryIteratorBase> createTransactionHistoryIterator(
@@ -298,6 +294,7 @@ repl::DurableOplogEntry makeApplyOpsOplog(std::vector<BSONObj> operations,
             UUID::gen(),
             false /* fromMigrate */,
             boost::none,  // checkExistenceForDiffInsert
+            boost::none,  // versionContext
             0 /* version */,
             applyOpsBuilder.obj(), /* o */
             boost::none,           /* o2 */
@@ -317,8 +314,8 @@ bool validateOplogId(const Timestamp& clusterTime,
                      const mongo::Document& sourceDoc,
                      const repl::OplogEntry& oplogEntry) {
     auto oplogIdExpected = ReshardingDonorOplogId{clusterTime, sourceDoc["ts"].getTimestamp()};
-    auto oplogId = ReshardingDonorOplogId::parse(IDLParserContext("ReshardingAggTest"),
-                                                 oplogEntry.get_id()->getDocument().toBson());
+    auto oplogId = ReshardingDonorOplogId::parse(oplogEntry.get_id()->getDocument().toBson(),
+                                                 IDLParserContext("ReshardingAggTest"));
     return oplogIdExpected == oplogId;
 }
 
@@ -412,11 +409,11 @@ protected:
 
 
     ReshardingDonorOplogId getOplogId(const repl::MutableOplogEntry& oplog) {
-        return ReshardingDonorOplogId::parse(IDLParserContext("ReshardingAggTest::getOplogId"),
-                                             oplog.get_id()->getDocument().toBson());
+        return ReshardingDonorOplogId::parse(oplog.get_id()->getDocument().toBson(),
+                                             IDLParserContext("ReshardingAggTest::getOplogId"));
     }
 
-    std::unique_ptr<Pipeline, PipelineDeleter> createPipeline(
+    std::unique_ptr<Pipeline> createPipeline(
         std::deque<DocumentSource::GetNextResult> pipelineSource) {
         // Set up the oplog collection state for $lookup and $graphLookup calls.
         auto expCtx = createExpressionContext();
@@ -454,17 +451,18 @@ TEST_F(ReshardingAggTest, OplogPipelineBasicCRUDOnly) {
     mockResults.emplace_back(Document(deleteOplog.toBSON()));
 
     auto pipeline = makePipelineForReshardingDonorOplogIterator(std::move(mockResults));
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    auto next = pipeline->getNext();
+    auto next = execPipeline->getNext();
     ASSERT_BSONOBJ_BINARY_EQ(insertOplog.toBSON(), next->toBson());
 
-    next = pipeline->getNext();
+    next = execPipeline->getNext();
     ASSERT_BSONOBJ_BINARY_EQ(updateOplog.toBSON(), next->toBson());
 
-    next = pipeline->getNext();
+    next = execPipeline->getNext();
     ASSERT_BSONOBJ_BINARY_EQ(deleteOplog.toBSON(), next->toBson());
 
-    ASSERT(!pipeline->getNext());
+    ASSERT(!execPipeline->getNext());
 }
 
 /**
@@ -482,14 +480,15 @@ TEST_F(ReshardingAggTest, OplogPipelineWithResumeToken) {
 
     auto pipeline = makePipelineForReshardingDonorOplogIterator(std::move(mockResults),
                                                                 getOplogId(insertOplog));
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    auto next = pipeline->getNext();
+    auto next = execPipeline->getNext();
     ASSERT_BSONOBJ_BINARY_EQ((updateOplog.toBSON()), next->toBson());
 
-    next = pipeline->getNext();
+    next = execPipeline->getNext();
     ASSERT_BSONOBJ_BINARY_EQ(deleteOplog.toBSON(), next->toBson());
 
-    ASSERT(!pipeline->getNext());
+    ASSERT(!execPipeline->getNext());
 }
 
 /**
@@ -516,14 +515,15 @@ TEST_F(ReshardingAggTest, OplogPipelineWithResumeTokenClusterTimeNotEqualTs) {
 
     auto pipeline = makePipelineForReshardingDonorOplogIterator(std::move(mockResults),
                                                                 getOplogId(insertOplog));
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    auto next = pipeline->getNext();
+    auto next = execPipeline->getNext();
     ASSERT_BSONOBJ_BINARY_EQ(updateOplog.toBSON(), next->toBson());
 
-    next = pipeline->getNext();
+    next = execPipeline->getNext();
     ASSERT_BSONOBJ_BINARY_EQ(deleteOplog.toBSON(), next->toBson());
 
-    ASSERT(!pipeline->getNext());
+    ASSERT(!execPipeline->getNext());
 }
 
 TEST_F(ReshardingAggTest, VerifyPipelineReturnsStartIndexBuildEntry) {
@@ -548,8 +548,9 @@ TEST_F(ReshardingAggTest, VerifyPipelineReturnsStartIndexBuildEntry) {
     })");
 
     auto pipeline = createPipeline({Document(oplogBSON)});
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    auto doc = pipeline->getNext();
+    auto doc = execPipeline->getNext();
     ASSERT(doc);
 
     auto oplogEntry = uassertStatusOK(repl::OplogEntry::parse(doc->toBson()));
@@ -559,7 +560,7 @@ TEST_F(ReshardingAggTest, VerifyPipelineReturnsStartIndexBuildEntry) {
     ASSERT_EQ(oplogBSON["ts"].timestamp(), oplogEntry.getTimestamp());
     ASSERT(validateOplogId(oplogBSON["ts"].timestamp(), Document(oplogBSON), oplogEntry));
 
-    doc = pipeline->getNext();
+    doc = execPipeline->getNext();
     ASSERT(!doc);
 }
 
@@ -585,14 +586,13 @@ TEST_F(ReshardingAggTest, VerifyPipelineOutputHasOplogSchema) {
     expCtx->setNamespaceString(NamespaceString::kRsOplogNamespace);
     expCtx->setMongoProcessInterface(std::make_shared<MockMongoInterface>(pipelineSource));
 
-    std::unique_ptr<Pipeline, PipelineDeleter> pipeline =
-        resharding::createOplogFetchingPipelineForResharding(
-            expCtx,
-            // Use the test to also exercise the stages for resuming. The timestamp passed in is
-            // excluded from the results.
-            ReshardingDonorOplogId(insertOplog.getTimestamp(), insertOplog.getTimestamp()),
-            _reshardingCollUUID,
-            {_destinedRecipient});
+    std::unique_ptr<Pipeline> pipeline = resharding::createOplogFetchingPipelineForResharding(
+        expCtx,
+        // Use the test to also exercise the stages for resuming. The timestamp passed in is
+        // excluded from the results.
+        ReshardingDonorOplogId(insertOplog.getTimestamp(), insertOplog.getTimestamp()),
+        _reshardingCollUUID,
+        {_destinedRecipient});
     auto bsonPipeline = pipeline->serializeToBson();
     if (debug) {
         std::cout << "Pipeline stages:" << std::endl;
@@ -603,7 +603,9 @@ TEST_F(ReshardingAggTest, VerifyPipelineOutputHasOplogSchema) {
     }
 
     pipeline->addInitialSource(DocumentSourceMock::createForTest(pipelineSource, expCtx));
-    boost::optional<Document> doc = pipeline->getNext();
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
+
+    boost::optional<Document> doc = execPipeline->getNext();
     ASSERT(doc);
     auto bsonDoc = doc->toBson();
     if (debug) {
@@ -614,7 +616,7 @@ TEST_F(ReshardingAggTest, VerifyPipelineOutputHasOplogSchema) {
     // The insert oplog entry is excluded, we first expect the update oplog entry.
     ASSERT_EQ(updateOplog.getTimestamp(), oplogEntry.getTimestamp()) << bsonDoc;
 
-    doc = pipeline->getNext();
+    doc = execPipeline->getNext();
     ASSERT(doc);
     bsonDoc = doc->toBson();
     if (debug) {
@@ -624,7 +626,7 @@ TEST_F(ReshardingAggTest, VerifyPipelineOutputHasOplogSchema) {
     oplogEntry = uassertStatusOK(repl::OplogEntry::parse(bsonDoc));
     ASSERT_EQ(deleteOplog.getTimestamp(), oplogEntry.getTimestamp()) << bsonDoc;
 
-    ASSERT_FALSE(pipeline->getNext());
+    ASSERT_FALSE(execPipeline->getNext());
 }
 
 TEST_F(ReshardingAggTest, VerifyPipelinePreparedTxn) {
@@ -686,16 +688,15 @@ TEST_F(ReshardingAggTest, VerifyPipelinePreparedTxn) {
     expCtx->setNamespaceString(NamespaceString::kRsOplogNamespace);
     expCtx->setMongoProcessInterface(std::make_shared<MockMongoInterface>(pipelineSource));
 
-    std::unique_ptr<Pipeline, PipelineDeleter> pipeline =
-        resharding::createOplogFetchingPipelineForResharding(
-            expCtx,
-            ReshardingDonorOplogId(Timestamp::min(), Timestamp::min()),
-            _reshardingCollUUID,
-            {_destinedRecipient});
+    std::unique_ptr<Pipeline> pipeline = resharding::createOplogFetchingPipelineForResharding(
+        expCtx,
+        ReshardingDonorOplogId(Timestamp::min(), Timestamp::min()),
+        _reshardingCollUUID,
+        {_destinedRecipient});
     if (debug) {
         std::cout << "Pipeline stages:" << std::endl;
         // This is can be changed to process a prefix of the pipeline for debugging.
-        const std::size_t numStagesToKeep = pipeline->getSources().size();
+        const std::size_t numStagesToKeep = pipeline->size();
         pipeline->getSources().resize(numStagesToKeep);
         auto bsonPipeline = pipeline->serializeToBson();
         for (std::size_t idx = 0; idx < bsonPipeline.size(); ++idx) {
@@ -706,9 +707,10 @@ TEST_F(ReshardingAggTest, VerifyPipelinePreparedTxn) {
 
     // Set up the initial input into the pipeline.
     pipeline->addInitialSource(DocumentSourceMock::createForTest(pipelineSource, expCtx));
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
     // The first document should be `prepare: true` and contain two inserts.
-    boost::optional<Document> doc = pipeline->getNext();
+    boost::optional<Document> doc = execPipeline->getNext();
     ASSERT(doc);
     auto bsonDoc = doc->toBson();
     if (debug) {
@@ -725,7 +727,7 @@ TEST_F(ReshardingAggTest, VerifyPipelinePreparedTxn) {
 
     // We should not see the `commitTransaction` entry, since DSReshardingIterateTransaction
     // swallows it.
-    ASSERT(!pipeline->getNext());
+    ASSERT(!execPipeline->getNext());
 }
 
 TEST_F(ReshardingAggTest, VerifyPipelineApplyOps) {
@@ -765,8 +767,9 @@ TEST_F(ReshardingAggTest, VerifyPipelineApplyOps) {
     })");
 
     auto pipeline = createPipeline({Document(oplogBSON)});
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    ASSERT(!pipeline->getNext());
+    ASSERT(!execPipeline->getNext());
 }
 
 TEST_F(ReshardingAggTest, VerifyPipelineSmallTxn) {
@@ -806,8 +809,9 @@ TEST_F(ReshardingAggTest, VerifyPipelineSmallTxn) {
     })");
 
     auto pipeline = createPipeline({Document(oplogBSON)});
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    auto doc = pipeline->getNext();
+    auto doc = execPipeline->getNext();
     ASSERT(doc);
 
     auto oplogEntry = uassertStatusOK(repl::OplogEntry::parse(doc->toBson()));
@@ -819,7 +823,7 @@ TEST_F(ReshardingAggTest, VerifyPipelineSmallTxn) {
     ASSERT_EQ(oplogBSON["ts"].timestamp(), oplogEntry.getTimestamp());
     ASSERT(validateOplogId(oplogBSON["ts"].timestamp(), Document(oplogBSON), oplogEntry));
 
-    doc = pipeline->getNext();
+    doc = execPipeline->getNext();
     ASSERT(!doc);
 }
 
@@ -878,8 +882,9 @@ TEST_F(ReshardingAggTest, VerifyPipelineSmallPreparedTxn) {
 
     auto clusterTime = pipelineSource.back().getDocument()["ts"].getTimestamp();
     auto pipeline = createPipeline(pipelineSource);
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    auto doc = pipeline->getNext();
+    auto doc = execPipeline->getNext();
     ASSERT(doc);
 
     auto oplogEntry = uassertStatusOK(repl::OplogEntry::parse(doc->toBson()));
@@ -894,7 +899,7 @@ TEST_F(ReshardingAggTest, VerifyPipelineSmallPreparedTxn) {
 
     // We should not observe the 'commitTransaction' entry, since DSReshardingIterateTransaction
     // swallows it.
-    ASSERT(!pipeline->getNext());
+    ASSERT(!execPipeline->getNext());
 }
 
 // This test verifies that we don't return oplog entries that are not destined for the specified
@@ -954,10 +959,11 @@ TEST_F(ReshardingAggTest, VerifyPipelinePreparedTxnNoReshardedDocs) {
         })"))};
 
     auto pipeline = createPipeline(pipelineSource);
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
     // We don't see any results since there are no events for the requested destinedRecipient in the
     // 'applyOps' and we swallow the 'commitTransaction' event internally.
-    ASSERT(!pipeline->getNext());
+    ASSERT(!execPipeline->getNext());
 }
 
 TEST_F(ReshardingAggTest, VerifyPipelinePreparedTxnAbort) {
@@ -1004,8 +1010,9 @@ TEST_F(ReshardingAggTest, VerifyPipelinePreparedTxnAbort) {
 
     auto clusterTime = pipelineSource.back().getDocument()["ts"].getTimestamp();
     auto pipeline = createPipeline(pipelineSource);
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    auto doc = pipeline->getNext();
+    auto doc = execPipeline->getNext();
     ASSERT(doc);
 
     auto oplogEntry = uassertStatusOK(repl::OplogEntry::parse(doc->toBson()));
@@ -1017,7 +1024,7 @@ TEST_F(ReshardingAggTest, VerifyPipelinePreparedTxnAbort) {
     ASSERT_EQ(pipelineSource[1].getDocument()["ts"].getTimestamp(), oplogEntry.getTimestamp());
     ASSERT(validateOplogId(clusterTime, pipelineSource[1].getDocument(), oplogEntry));
 
-    ASSERT(!pipeline->getNext());
+    ASSERT(!execPipeline->getNext());
 }
 
 TEST_F(ReshardingAggTest, VerifyPipelineLargePreparedTxn) {
@@ -1123,8 +1130,9 @@ TEST_F(ReshardingAggTest, VerifyPipelineLargePreparedTxn) {
 
     auto clusterTime = pipelineSource.back().getDocument()["ts"].getTimestamp();
     auto pipeline = createPipeline(pipelineSource);
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    auto doc = pipeline->getNext();
+    auto doc = execPipeline->getNext();
     ASSERT(doc);
 
     auto oplogEntry = uassertStatusOK(repl::OplogEntry::parse(doc->toBson()));
@@ -1137,7 +1145,7 @@ TEST_F(ReshardingAggTest, VerifyPipelineLargePreparedTxn) {
     ASSERT_EQ(pipelineSource[0].getDocument()["ts"].getTimestamp(), oplogEntry.getTimestamp());
     ASSERT(validateOplogId(clusterTime, pipelineSource[0].getDocument(), oplogEntry));
 
-    doc = pipeline->getNext();
+    doc = execPipeline->getNext();
     ASSERT(doc);
 
     oplogEntry = uassertStatusOK(repl::OplogEntry::parse(doc->toBson()));
@@ -1152,7 +1160,7 @@ TEST_F(ReshardingAggTest, VerifyPipelineLargePreparedTxn) {
     ASSERT(validateOplogId(clusterTime, pipelineSource[1].getDocument(), oplogEntry));
 
     // We do not expect any further results because we swallow the 'commitTransaction' internally.
-    ASSERT(!pipeline->getNext());
+    ASSERT(!execPipeline->getNext());
 }
 
 TEST_F(ReshardingAggTest, VerifyPipelineLargePreparedTxnAbort) {
@@ -1241,8 +1249,9 @@ TEST_F(ReshardingAggTest, VerifyPipelineLargePreparedTxnAbort) {
 
     auto clusterTime = pipelineSource.back().getDocument()["ts"].getTimestamp();
     auto pipeline = createPipeline(pipelineSource);
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    auto doc = pipeline->getNext();
+    auto doc = execPipeline->getNext();
     ASSERT(doc);
 
     auto oplogEntry = uassertStatusOK(repl::OplogEntry::parse(doc->toBson()));
@@ -1254,7 +1263,7 @@ TEST_F(ReshardingAggTest, VerifyPipelineLargePreparedTxnAbort) {
     ASSERT_EQ(pipelineSource[2].getDocument()["ts"].getTimestamp(), oplogEntry.getTimestamp());
     ASSERT(validateOplogId(clusterTime, pipelineSource[2].getDocument(), oplogEntry));
 
-    doc = pipeline->getNext();
+    doc = execPipeline->getNext();
     ASSERT(!doc);
 }
 
@@ -1325,8 +1334,9 @@ TEST_F(ReshardingAggTest, VerifyPipelineLargeTxn) {
 
     auto clusterTime = pipelineSource.back().getDocument()["ts"].getTimestamp();
     auto pipeline = createPipeline(pipelineSource);
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    auto doc = pipeline->getNext();
+    auto doc = execPipeline->getNext();
     ASSERT(doc);
 
     auto oplogEntry = uassertStatusOK(repl::OplogEntry::parse(doc->toBson()));
@@ -1339,7 +1349,7 @@ TEST_F(ReshardingAggTest, VerifyPipelineLargeTxn) {
     ASSERT_EQ(pipelineSource[0].getDocument()["ts"].getTimestamp(), oplogEntry.getTimestamp());
     ASSERT(validateOplogId(clusterTime, pipelineSource[0].getDocument(), oplogEntry));
 
-    doc = pipeline->getNext();
+    doc = execPipeline->getNext();
     ASSERT(doc);
 
     oplogEntry = uassertStatusOK(repl::OplogEntry::parse(doc->toBson()));
@@ -1351,7 +1361,7 @@ TEST_F(ReshardingAggTest, VerifyPipelineLargeTxn) {
     ASSERT_EQ(pipelineSource[1].getDocument()["ts"].getTimestamp(), oplogEntry.getTimestamp());
     ASSERT(validateOplogId(clusterTime, pipelineSource[1].getDocument(), oplogEntry));
 
-    doc = pipeline->getNext();
+    doc = execPipeline->getNext();
     ASSERT(!doc);
 }
 
@@ -1422,8 +1432,9 @@ TEST_F(ReshardingAggTest, VerifyPipelineLargeBatchedRetryableWrite) {
     })"))};
 
     auto pipeline = createPipeline(pipelineSource);
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    auto doc = pipeline->getNext();
+    auto doc = execPipeline->getNext();
     ASSERT(doc);
 
     auto oplogEntry = uassertStatusOK(repl::OplogEntry::parse(doc->toBson()));
@@ -1438,7 +1449,7 @@ TEST_F(ReshardingAggTest, VerifyPipelineLargeBatchedRetryableWrite) {
     auto timestamp0 = pipelineSource[0].getDocument()["ts"].getTimestamp();
     ASSERT(validateOplogId(timestamp0, pipelineSource[0].getDocument(), oplogEntry));
 
-    doc = pipeline->getNext();
+    doc = execPipeline->getNext();
     ASSERT(doc);
 
     oplogEntry = uassertStatusOK(repl::OplogEntry::parse(doc->toBson()));
@@ -1452,7 +1463,7 @@ TEST_F(ReshardingAggTest, VerifyPipelineLargeBatchedRetryableWrite) {
     auto timestamp1 = pipelineSource[1].getDocument()["ts"].getTimestamp();
     ASSERT(validateOplogId(timestamp1, pipelineSource[1].getDocument(), oplogEntry));
 
-    doc = pipeline->getNext();
+    doc = execPipeline->getNext();
     ASSERT(!doc);
 }
 
@@ -1517,8 +1528,9 @@ TEST_F(ReshardingAggTest, VerifyPipelineLargeTxnAbort) {
 
     auto clusterTime = pipelineSource.back().getDocument()["ts"].getTimestamp();
     auto pipeline = createPipeline(pipelineSource);
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    auto doc = pipeline->getNext();
+    auto doc = execPipeline->getNext();
     ASSERT(doc);
 
     auto oplogEntry = uassertStatusOK(repl::OplogEntry::parse(doc->toBson()));
@@ -1530,7 +1542,7 @@ TEST_F(ReshardingAggTest, VerifyPipelineLargeTxnAbort) {
     ASSERT_EQ(pipelineSource[1].getDocument()["ts"].getTimestamp(), oplogEntry.getTimestamp());
     ASSERT(validateOplogId(clusterTime, pipelineSource[1].getDocument(), oplogEntry));
 
-    doc = pipeline->getNext();
+    doc = execPipeline->getNext();
     ASSERT(!doc);
 }
 
@@ -1572,8 +1584,9 @@ TEST_F(ReshardingAggTest, VerifyPipelineLargeTxnIncomplete) {
     })"))};
 
     auto pipeline = createPipeline(pipelineSource);
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    auto doc = pipeline->getNext();
+    auto doc = execPipeline->getNext();
     ASSERT(!doc);
 }
 
@@ -1612,6 +1625,7 @@ TEST_F(ReshardingAggWithStorageTest, RetryableFindAndModifyWithImageLookup) {
                                   kCrudUUID,
                                   false /* fromMigrate */,
                                   boost::none,  // checkExistenceForDiffInsert
+                                  boost::none,  // versionContext
                                   0 /* version */,
                                   BSON("$set" << BSON("y" << 1)), /* o1 */
                                   BSON("_id" << 2),               /* o2 */
@@ -1643,8 +1657,9 @@ TEST_F(ReshardingAggWithStorageTest, RetryableFindAndModifyWithImageLookup) {
         expCtx, ReshardingDonorOplogId(Timestamp::min(), Timestamp::min()), kCrudUUID, kMyShardId);
 
     pipeline->addInitialSource(DocumentSourceMock::createForTest(pipelineSource, expCtx));
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    auto preImageOplogDoc = pipeline->getNext();
+    auto preImageOplogDoc = execPipeline->getNext();
     ASSERT_TRUE(preImageOplogDoc);
     auto preImageOplogStatus = repl::DurableOplogEntry::parse(preImageOplogDoc->toBson());
     ASSERT_OK(preImageOplogStatus);
@@ -1654,7 +1669,7 @@ TEST_F(ReshardingAggWithStorageTest, RetryableFindAndModifyWithImageLookup) {
     ASSERT_EQ(OpType_serializer(repl::OpTypeEnum::kNoop),
               OpType_serializer(preImageOplog.getOpType()));
 
-    auto updateOplogDoc = pipeline->getNext();
+    auto updateOplogDoc = execPipeline->getNext();
     ASSERT_TRUE(updateOplogDoc);
     auto updateOplogStatus = repl::DurableOplogEntry::parse(updateOplogDoc->toBson());
 
@@ -1674,7 +1689,7 @@ TEST_F(ReshardingAggWithStorageTest, RetryableFindAndModifyWithImageLookup) {
     ASSERT_BSONOBJ_EQ(oplog.getOperationSessionInfo().toBSON(),
                       updateOplog.getOperationSessionInfo().toBSON());
 
-    ASSERT_FALSE(pipeline->getNext());
+    ASSERT_FALSE(execPipeline->getNext());
 }
 
 TEST_F(ReshardingAggWithStorageTest,
@@ -1749,8 +1764,9 @@ TEST_F(ReshardingAggWithStorageTest,
     // Create a pipeline and verify that it outputs the doc for the forged noop oplog entry
     // immediately before the downcoverted doc for the applyOps with the 'needsRetryImage' field.
     auto pipeline = createPipeline(ReshardingDonorOplogId(Timestamp::min(), Timestamp::min()));
+    auto execPipeline = exec::agg::buildPipeline(pipeline->freeze());
 
-    auto applyOpsOplogDoc1 = pipeline->getNext();
+    auto applyOpsOplogDoc1 = execPipeline->getNext();
     ASSERT_TRUE(applyOpsOplogDoc1);
     auto swOutputApplyOpsOplog1 = repl::DurableOplogEntry::parse(applyOpsOplogDoc1->toBson());
     ASSERT_OK(swOutputApplyOpsOplog1);
@@ -1759,7 +1775,7 @@ TEST_F(ReshardingAggWithStorageTest,
                       outputApplyOpsOplog1.toBSON().removeFields(StringDataSet{
                           repl::OplogEntry::kObjectFieldName, repl::OplogEntry::k_idFieldName}));
 
-    auto preImageOplogDoc = pipeline->getNext();
+    auto preImageOplogDoc = execPipeline->getNext();
     ASSERT_TRUE(preImageOplogDoc);
     auto swPreImageOplog = repl::DurableOplogEntry::parse(preImageOplogDoc->toBson());
     ASSERT_OK(swPreImageOplog);
@@ -1768,7 +1784,7 @@ TEST_F(ReshardingAggWithStorageTest,
     ASSERT_EQ(OpType_serializer(repl::OpTypeEnum::kNoop),
               OpType_serializer(preImageOplog.getOpType()));
 
-    auto applyOpsOplogDoc2 = pipeline->getNext();
+    auto applyOpsOplogDoc2 = execPipeline->getNext();
     ASSERT_TRUE(applyOpsOplogDoc2);
     auto swOutputApplyOpsOplog2 = repl::DurableOplogEntry::parse(applyOpsOplogDoc2->toBson());
     ASSERT_OK(swOutputApplyOpsOplog2);
@@ -1781,8 +1797,8 @@ TEST_F(ReshardingAggWithStorageTest,
     auto operationDocs = applyOpsInfo.getOperations();
     ASSERT_EQ(operationDocs.size(), 1U);
     auto outputInnerOp2 = repl::DurableReplOperation::parse(
-        IDLParserContext{"RetryableFindAndModifyInsideInternalTransactionWithImageLookup"},
-        operationDocs[0]);
+        operationDocs[0],
+        IDLParserContext{"RetryableFindAndModifyInsideInternalTransactionWithImageLookup"});
     ASSERT_TRUE(outputInnerOp2.getPreImageOpTime());
     ASSERT_FALSE(outputInnerOp2.getNeedsRetryImage());
     ASSERT_EQ(preImageOplog.getOpTime(), *outputInnerOp2.getPreImageOpTime());
@@ -1792,7 +1808,7 @@ TEST_F(ReshardingAggWithStorageTest,
     ASSERT_TRUE(outputInnerOp2.getObject2());
     ASSERT_BSONOBJ_EQ(*inputInnerOp2.getObject2(), *outputInnerOp2.getObject2());
 
-    auto applyOpsOplogDoc3 = pipeline->getNext();
+    auto applyOpsOplogDoc3 = execPipeline->getNext();
     ASSERT_TRUE(applyOpsOplogDoc3);
     auto swOutputApplyOpsOplog3 = repl::DurableOplogEntry::parse(applyOpsOplogDoc3->toBson());
     ASSERT_OK(swOutputApplyOpsOplog3);
@@ -1801,24 +1817,25 @@ TEST_F(ReshardingAggWithStorageTest,
                       outputApplyOpsOplog3.toBSON().removeFields(StringDataSet{
                           repl::OplogEntry::kObjectFieldName, repl::OplogEntry::k_idFieldName}));
 
-    ASSERT_FALSE(pipeline->getNext());
+    ASSERT_FALSE(execPipeline->getNext());
 
     // Create another pipeline and start fetching from after the doc for the pre-image, and verify
     // that the pipeline does not re-output the applyOps doc that comes before the pre-image doc.
     const auto startAt = ReshardingDonorOplogId::parse(
-        IDLParserContext{"RetryableFindAndModifyInsideInternalTransactionWithImageLookup"},
-        preImageOplog.get_id()->getDocument().toBson());
+        preImageOplog.get_id()->getDocument().toBson(),
+        IDLParserContext{"RetryableFindAndModifyInsideInternalTransactionWithImageLookup"});
     auto newPipeline = createPipeline(startAt);
+    auto newExecPipeline = exec::agg::buildPipeline(newPipeline->freeze());
 
-    auto next = newPipeline->getNext();
+    auto next = newExecPipeline->getNext();
     ASSERT_TRUE(next);
     ASSERT_DOCUMENT_EQ(*next, *applyOpsOplogDoc2);
 
-    next = newPipeline->getNext();
+    next = newExecPipeline->getNext();
     ASSERT_TRUE(next);
     ASSERT_DOCUMENT_EQ(*next, *applyOpsOplogDoc3);
 
-    ASSERT_FALSE(newPipeline->getNext());
+    ASSERT_FALSE(newExecPipeline->getNext());
 }
 
 }  // namespace

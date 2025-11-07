@@ -3,9 +3,18 @@ filters:
   - "*server_parameter*":
     approvers:
       - 10gen/server-programmability
-  - "*index_build*":
-    approvers:
-      - 10gen/server-index-builds
   - "*change_stream*":
     approvers:
       - 10gen/query-execution-change-streams
+  - "*proxy_protocol*":
+    approvers:
+      - 10gen/server-networking-and-observability
+  - "net.*":
+    approvers:
+      - 10gen/server-networking-and-observability
+  - "write_concern*":
+    approvers:
+      - 10gen/server-rw-concerns
+  - "*extension*":
+    approvers:
+      - 10gen/query-integration-extensions-api

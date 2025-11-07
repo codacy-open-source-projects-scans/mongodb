@@ -29,16 +29,15 @@
 
 #include "mongo/db/pipeline/window_function/window_function_exec_derivative.h"
 
-#include <boost/move/utility_core.hpp>
-
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/expression/evaluate.h"
 #include "mongo/db/pipeline/expression_context.h"
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -55,7 +54,7 @@ Value WindowFunctionExecDerivative::getNext(boost::optional<Document> current) {
     // a time. The result has dimension 1/time, which doesn't correspond to any BSON type, so
     // 'unit' tells us how to express the result as a dimensionless BSON number.
     //
-    // However, BSON also can't represent a time (duration) directly. BSONType::Date represents
+    // However, BSON also can't represent a time (duration) directly. BSONType::date represents
     // a point in time, but there is no type that represents an amount of time. Subtracting two
     // Date values implicitly converts them to milliseconds.
 
@@ -75,27 +74,27 @@ Value WindowFunctionExecDerivative::getNext(boost::optional<Document> current) {
         // 'millisecond/unit', then the final answer would be wrong by a factor of 1000.
         uassert(5624900,
                 "$derivative with 'unit' expects the sortBy field to be a Date",
-                leftTime.getType() == BSONType::Date && rightTime.getType() == BSONType::Date);
+                leftTime.getType() == BSONType::date && rightTime.getType() == BSONType::date);
     } else {
         // Without unit, we require both time values to be numeric.
         uassert(5624901,
                 "$derivative where the sortBy is a Date requires an 'unit'",
-                leftTime.getType() != BSONType::Date && rightTime.getType() != BSONType::Date);
+                leftTime.getType() != BSONType::date && rightTime.getType() != BSONType::date);
         uassert(5624902,
                 "$derivative (with no 'unit') expects the sortBy field to be numeric",
                 leftTime.numeric() && rightTime.numeric());
     }
     // Now leftTime and rightTime are either both numeric, or both dates.
     // $subtract on two dates gives us the difference in milliseconds.
-    Value run =
-        uassertStatusOK(ExpressionSubtract::apply(std::move(rightTime), std::move(leftTime)));
+    Value run = uassertStatusOK(
+        exec::expression::evaluateSubtract(std::move(rightTime), std::move(leftTime)));
 
-    Value rise = uassertStatusOK(ExpressionSubtract::apply(
+    Value rise = uassertStatusOK(exec::expression::evaluateSubtract(
         _position->evaluate(rightDoc, &_position->getExpressionContext()->variables),
         _position->evaluate(leftDoc, &_position->getExpressionContext()->variables)));
     uassert(5624903, "$derivative input must not be null or missing", !rise.nullish());
 
-    auto divideStatus = ExpressionDivide::apply(std::move(rise), std::move(run));
+    auto divideStatus = exec::expression::evaluateDivide(std::move(rise), std::move(run));
     if (divideStatus.getStatus().code() == ErrorCodes::BadValue) {
         // Divide by zero can't be an error. On the first document of a partition, a window like
         // 'documents: [-1, 0]' contains only one document, so 'run' is zero.
@@ -108,8 +107,8 @@ Value WindowFunctionExecDerivative::getNext(boost::optional<Document> current) {
         // 1/unit.
 
         // tassert because at this point the result should already be numeric, so if
-        // ExpressionMultiply returns a non-OK Status then something has gone wrong.
-        auto statusWithResult = ExpressionMultiply::apply(result, Value(*_unitMillis));
+        // evaluateMultiply returns a non-OK Status then something has gone wrong.
+        auto statusWithResult = exec::expression::evaluateMultiply(result, Value(*_unitMillis));
         tassert(statusWithResult);
         result = statusWithResult.getValue();
     }

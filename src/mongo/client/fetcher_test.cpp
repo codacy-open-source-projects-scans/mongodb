@@ -27,18 +27,14 @@
  *    it in the license file.
  */
 
-#include <boost/smart_ptr.hpp>
-#include <list>
-#include <memory>
-#include <tuple>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/client/fetcher.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/client/fetcher.h"
+#include "mongo/db/error_labels.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/executor/task_executor_test_fixture.h"
@@ -47,24 +43,27 @@
 #include "mongo/rpc/metadata.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/future_test_utils.h"
+
+#include <list>
+#include <memory>
+#include <tuple>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/smart_ptr.hpp>
 
 namespace {
 
 using namespace mongo;
-using executor::NetworkInterfaceMock;
 using executor::RemoteCommandRequest;
 using executor::TaskExecutor;
 
 using ResponseStatus = TaskExecutor::ResponseStatus;
 
 const HostAndPort source("localhost", -1);
-const BSONObj findCmdObj = BSON("find"
-                                << "coll");
+const BSONObj findCmdObj = BSON("find" << "coll");
 
 class FetcherTest : public executor::ThreadPoolExecutorTest {
 public:
@@ -97,6 +96,8 @@ protected:
     void tearDown() override;
 
     Status status;
+    boost::optional<HostAndPort> target;
+    std::vector<std::string> errorLabels;
     CursorId cursorId;
     NamespaceString nss;
     Fetcher::Documents documents;
@@ -108,7 +109,7 @@ protected:
     Fetcher::CallbackFn callbackHook;
 
 private:
-    void _callback(const StatusWith<Fetcher::QueryResponse>& result,
+    void _callback(const Fetcher::QueryResponseStatus& result,
                    Fetcher::NextAction* nextAction,
                    BSONObjBuilder* getMoreBob);
 };
@@ -186,7 +187,7 @@ void FetcherTest::finishProcessingNetworkResponse(ReadyQueueState readyQueueStat
     ASSERT_EQUALS(fetcherStateAfterProcessing == FetcherState::kActive, fetcher->isActive());
 }
 
-void FetcherTest::_callback(const StatusWith<Fetcher::QueryResponse>& result,
+void FetcherTest::_callback(const Fetcher::QueryResponseStatus& result,
                             Fetcher::NextAction* nextActionFromFetcher,
                             BSONObjBuilder* getMoreBob) {
     status = result.getStatus();
@@ -197,7 +198,13 @@ void FetcherTest::_callback(const StatusWith<Fetcher::QueryResponse>& result,
         documents = batchData.documents;
         elapsedMillis = duration_cast<Milliseconds>(batchData.elapsed);
         first = batchData.first;
+        errorLabels.clear();
+    } else {
+        auto labels = result.getErrorLabels();
+        errorLabels.assign(labels.begin(), labels.end());
     }
+
+    target = result.getOrigin();
 
     if (callbackHook) {
         callbackHook(result, nextActionFromFetcher, getMoreBob);
@@ -208,13 +215,13 @@ void FetcherTest::_callback(const StatusWith<Fetcher::QueryResponse>& result,
     }
 }
 
-void unreachableCallback(const StatusWith<Fetcher::QueryResponse>& fetchResult,
+void unreachableCallback(const Fetcher::QueryResponseStatus& fetchResult,
                          Fetcher::NextAction* nextAction,
                          BSONObjBuilder* getMoreBob) {
     FAIL("should not reach here");
 }
 
-void doNothingCallback(const StatusWith<Fetcher::QueryResponse>& fetchResult,
+void doNothingCallback(const Fetcher::QueryResponseStatus& fetchResult,
                        Fetcher::NextAction* nextAction,
                        BSONObjBuilder* getMoreBob) {}
 
@@ -268,20 +275,19 @@ TEST_F(FetcherTest, InvalidConstruction) {
                                 ErrorCodes::BadValue,
                                 "callback function cannot be null");
 
-    // Retry policy for first command cannot be null.
-    ASSERT_THROWS_CODE_AND_WHAT(
-        Fetcher(&executor,
-                source,
-                DatabaseName::createDatabaseName_forTest(boost::none, "db"),
-                findCmdObj,
-                unreachableCallback,
-                rpc::makeEmptyMetadata(),
-                RemoteCommandRequest::kNoTimeout,
-                RemoteCommandRequest::kNoTimeout,
-                std::unique_ptr<RemoteCommandRetryScheduler::RetryPolicy>()),
-        AssertionException,
-        ErrorCodes::BadValue,
-        "retry policy cannot be null");
+    // Retry strategy for first command cannot be null.
+    ASSERT_THROWS_CODE_AND_WHAT(Fetcher(&executor,
+                                        source,
+                                        DatabaseName::createDatabaseName_forTest(boost::none, "db"),
+                                        findCmdObj,
+                                        unreachableCallback,
+                                        rpc::makeEmptyMetadata(),
+                                        RemoteCommandRequest::kNoTimeout,
+                                        RemoteCommandRequest::kNoTimeout,
+                                        std::unique_ptr<DefaultRetryStrategy>()),
+                                AssertionException,
+                                ErrorCodes::BadValue,
+                                "retry strategy cannot be null");
 }
 
 TEST_F(FetcherTest, FetcherCompletionFutureBecomesReadyAfterCompletingWork) {
@@ -381,8 +387,7 @@ TEST_F(FetcherTest, NonFindCommand) {
     Fetcher f1(&executor,
                source,
                DatabaseName::createDatabaseName_forTest(boost::none, "db"),
-               BSON("listIndexes"
-                    << "coll"),
+               BSON("listIndexes" << "coll"),
                unreachableCallback);
     Fetcher f2(&executor,
                source,
@@ -592,6 +597,25 @@ TEST_F(FetcherTest, FindCommandFailed2) {
     ASSERT_EQUALS("bad hint", status.reason());
 }
 
+TEST_F(FetcherTest, FindCommandFailedWithErrorLabels) {
+    auto responseErrorLabels =
+        std::array{ErrorLabel::kSystemOverloadedError, ErrorLabel::kRetryableError};
+    BSONArrayBuilder labelArray;
+    for (const auto& label : responseErrorLabels) {
+        labelArray << label;
+    }
+
+    ASSERT_OK(fetcher->schedule());
+    processNetworkResponse(BSON("ok" << 0 << "errmsg"
+                                     << "bad hint" << kErrorLabelsFieldName << labelArray.arr()
+                                     << "code" << int(ErrorCodes::AdmissionQueueOverflow)),
+                           ReadyQueueState::kEmpty,
+                           FetcherState::kInactive);
+    ASSERT_EQUALS(ErrorCodes::AdmissionQueueOverflow, status.code());
+    ASSERT_EQUALS(source, target);
+    ASSERT(std::ranges::equal(responseErrorLabels, errorLabels));
+}
+
 TEST_F(FetcherTest, CursorFieldMissing) {
     ASSERT_OK(fetcher->schedule());
     processNetworkResponse(BSON("ok" << 1), ReadyQueueState::kEmpty, FetcherState::kInactive);
@@ -609,9 +633,8 @@ TEST_F(FetcherTest, CursorNotAnObject) {
 
 TEST_F(FetcherTest, CursorIdFieldMissing) {
     ASSERT_OK(fetcher->schedule());
-    processNetworkResponse(BSON("cursor" << BSON("ns"
-                                                 << "db.coll"
-                                                 << "firstBatch" << BSONArray())
+    processNetworkResponse(BSON("cursor" << BSON("ns" << "db.coll"
+                                                      << "firstBatch" << BSONArray())
                                          << "ok" << 1),
                            ReadyQueueState::kEmpty,
                            FetcherState::kInactive);
@@ -971,7 +994,7 @@ TEST_F(FetcherTest, ScheduleGetMoreButShutdown) {
 
 
 TEST_F(FetcherTest, EmptyGetMoreRequestAfterFirstBatchMakesFetcherInactiveAndKillsCursor) {
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     callbackHook = [](const StatusWith<Fetcher::QueryResponse>& fetchResult,
                       Fetcher::NextAction* nextAction,
@@ -1010,7 +1033,7 @@ TEST_F(FetcherTest, EmptyGetMoreRequestAfterFirstBatchMakesFetcherInactiveAndKil
     auto firstElement = cmdObj.firstElement();
     ASSERT_EQUALS("killCursors", firstElement.fieldNameStringData());
     ASSERT_EQUALS(nss.coll(), firstElement.String());
-    ASSERT_EQUALS(mongo::BSONType::Array, cmdObj["cursors"].type());
+    ASSERT_EQUALS(mongo::BSONType::array, cmdObj["cursors"].type());
     auto cursors = cmdObj["cursors"].Array();
     ASSERT_EQUALS(1U, cursors.size());
     ASSERT_EQUALS(cursorId, cursors.front().numberLong());
@@ -1018,8 +1041,7 @@ TEST_F(FetcherTest, EmptyGetMoreRequestAfterFirstBatchMakesFetcherInactiveAndKil
     // killCursors command request will be canceled by executor on shutdown.
     tearDown();
     ASSERT_EQUALS(1,
-                  countBSONFormatLogLinesIsSubset(BSON("msg"
-                                                       << "killCursors command task failed")));
+                  logs.countBSONContainingSubset(BSON("msg" << "killCursors command task failed")));
 }
 
 void setNextActionToNoAction(const StatusWith<Fetcher::QueryResponse>& fetchResult,
@@ -1029,7 +1051,7 @@ void setNextActionToNoAction(const StatusWith<Fetcher::QueryResponse>& fetchResu
 }
 
 TEST_F(FetcherTest, UpdateNextActionAfterSecondBatch) {
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     callbackHook = appendGetMoreRequest;
 
@@ -1081,7 +1103,7 @@ TEST_F(FetcherTest, UpdateNextActionAfterSecondBatch) {
         auto firstElement = cmdObj.firstElement();
         ASSERT_EQUALS("killCursors", firstElement.fieldNameStringData());
         ASSERT_EQUALS(nss.coll(), firstElement.String());
-        ASSERT_EQUALS(mongo::BSONType::Array, cmdObj["cursors"].type());
+        ASSERT_EQUALS(mongo::BSONType::array, cmdObj["cursors"].type());
         auto cursors = cmdObj["cursors"].Array();
         ASSERT_EQUALS(1U, cursors.size());
         ASSERT_EQUALS(cursorId, cursors.front().numberLong());
@@ -1092,12 +1114,10 @@ TEST_F(FetcherTest, UpdateNextActionAfterSecondBatch) {
         getNet()->runReadyNetworkOperations();
     }
 
-    ASSERT_EQUALS(1,
-                  countBSONFormatLogLinesIsSubset(BSON("msg"
-                                                       << "killCursors command failed"
-                                                       << "attr"
-                                                       << BSON("error"
-                                                               << "UnknownError: "))));
+    ASSERT_EQUALS(
+        1,
+        logs.countBSONContainingSubset(BSON("msg" << "killCursors command failed"
+                                                  << "attr" << BSON("error" << "UnknownError: "))));
 }
 
 /**
@@ -1128,7 +1148,7 @@ void shutdownDuringSecondBatch(const StatusWith<Fetcher::QueryResponse>& fetchRe
 }
 
 TEST_F(FetcherTest, ShutdownDuringSecondBatch) {
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
 
     callbackHook = appendGetMoreRequest;
 
@@ -1167,20 +1187,18 @@ TEST_F(FetcherTest, ShutdownDuringSecondBatch) {
     runReadyNetworkOperations();
 
     // Fetcher should attempt (unsuccessfully) to schedule a killCursors command.
-    ASSERT_EQUALS(1,
-                  countBSONFormatLogLinesIsSubset(
-                      BSON("msg"
-                           << "Failed to schedule killCursors command"
-                           << "attr"
-                           << BSON("error"
-                                   << "ShutdownInProgress: TaskExecutor shutdown in progress"))));
+    ASSERT_EQUALS(
+        1,
+        logs.countBSONContainingSubset(BSON(
+            "msg" << "Failed to schedule killCursors command"
+                  << "attr"
+                  << BSON("error" << "ShutdownInProgress: TaskExecutor shutdown in progress"))));
 
     ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, status.code());
 }
 
-TEST_F(FetcherTest, FetcherAppliesRetryPolicyToFirstCommandButNotToGetMoreRequests) {
-    auto policy = RemoteCommandRetryScheduler::makeRetryPolicy<ErrorCategory::RetriableError>(
-        3U, executor::RemoteCommandRequest::kNoTimeout);
+TEST_F(FetcherTest, FetcherAppliesRetryStrategyToFirstCommandButNotToGetMoreRequests) {
+    auto strategy = std::make_unique<DefaultRetryStrategy>(3U);
 
     fetcher = std::make_unique<Fetcher>(&getExecutor(),
                                         source,
@@ -1190,13 +1208,13 @@ TEST_F(FetcherTest, FetcherAppliesRetryPolicyToFirstCommandButNotToGetMoreReques
                                         rpc::makeEmptyMetadata(),
                                         executor::RemoteCommandRequest::kNoTimeout,
                                         executor::RemoteCommandRequest::kNoTimeout,
-                                        std::move(policy));
+                                        std::move(strategy));
 
     callbackHook = appendGetMoreRequest;
 
     ASSERT_OK(fetcher->schedule());
 
-    // Retry policy is applied to find command.
+    // Retry strategy is applied to find command.
     const BSONObj doc = BSON("_id" << 1);
     auto rs =
         ResponseStatus::make_forTest(Status(ErrorCodes::HostUnreachable, "first"), Milliseconds(0));
@@ -1219,7 +1237,7 @@ TEST_F(FetcherTest, FetcherAppliesRetryPolicyToFirstCommandButNotToGetMoreReques
 
     rs = ResponseStatus::make_forTest(Status(ErrorCodes::OperationFailed, "getMore failed"),
                                       Milliseconds(0));
-    // No retry policy for subsequent getMore commands.
+    // No retry strategy for subsequent getMore commands.
     processNetworkResponse(rs, ReadyQueueState::kEmpty, FetcherState::kInactive);
     ASSERT_EQUALS(ErrorCodes::OperationFailed, status);
 }

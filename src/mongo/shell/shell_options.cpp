@@ -28,13 +28,7 @@
  */
 
 
-#include <iostream>
-#include <map>
-#include <set>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
+#include "mongo/shell/shell_options.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -55,7 +49,6 @@
 #include "mongo/logv2/log_manager.h"
 #include "mongo/logv2/log_severity.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/shell/shell_options.h"
 #include "mongo/shell/shell_utils.h"
 #include "mongo/transport/message_compressor_options_client_gen.h"
 #include "mongo/transport/message_compressor_registry.h"
@@ -68,13 +61,19 @@
 #include "mongo/util/str.h"
 #include "mongo/util/version.h"
 
+#include <iostream>
+#include <map>
+#include <set>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 
 namespace mongo {
 
-using std::cout;
-using std::endl;
 using std::string;
 using std::vector;
 
@@ -90,6 +89,7 @@ const std::set<std::string> kSetShellParameterAllowlist = {
     "skipShellCursorFinalize",
     "tlsOCSPSlowResponderWarningSecs",
     "enableDetailedConnectionHealthMetricLogLines",
+    "defaultFindReplicaSetHostTimeoutMS",
     "multitenancySupport"};
 
 std::string getMongoShellHelp(StringData name, const moe::OptionSection& options) {
@@ -206,12 +206,6 @@ Status storeMongoShellOptions(const moe::Environment& params,
     if (params.count("disableJavaScriptProtection")) {
         shellGlobalParams.javascriptProtection = false;
     }
-    if (params.count("disableJavaScriptJIT")) {
-        shellGlobalParams.nojit = true;
-    }
-    if (params.count("enableJavaScriptJIT")) {
-        shellGlobalParams.nojit = false;
-    }
     if (params.count("files")) {
         shellGlobalParams.files = params["files"].as<vector<string>>();
     }
@@ -219,7 +213,6 @@ Status storeMongoShellOptions(const moe::Environment& params,
         shellGlobalParams.shouldUseImplicitSessions = false;
     }
 
-// TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants
 #ifdef MONGO_CONFIG_GRPC
     if (params.count("gRPC")) {
         shellGlobalParams.gRPC = true;

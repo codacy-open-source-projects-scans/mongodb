@@ -28,9 +28,7 @@
  */
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <cstddef>
-#include <mutex>
-#include <string>
+#include "mongo/util/periodic_runner_impl.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -40,12 +38,14 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/barrier.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source_mock.h"
-#include "mongo/util/periodic_runner_impl.h"
+
+#include <cstddef>
+#include <mutex>
+#include <string>
 
 namespace mongo {
 
@@ -74,8 +74,7 @@ private:
 class PeriodicRunnerImplTest : public PeriodicRunnerImplTestNoSetup {
 public:
     auto makeStoppedJob() {
-        PeriodicRunner::PeriodicJob job(
-            "job", [](Client* client) {}, Seconds{1}, false);
+        PeriodicRunner::PeriodicJob job("job", [](Client* client) {}, Seconds{1}, false);
         auto jobAnchor = runner().makeJob(std::move(job));
         jobAnchor.start();
         jobAnchor.stop();
@@ -485,7 +484,7 @@ TEST_F(PeriodicRunnerImplTest, StopProperlyInterruptsOpCtx) {
                 auto opCtx = client->makeOperationContext();
                 stdx::unique_lock<stdx::mutex> lk(mutex);
                 opCtx->waitForConditionOrInterrupt(cv, lk, [] { return false; });
-            } catch (const ExceptionForCat<ErrorCategory::CancellationError>& e) {
+            } catch (const ExceptionFor<ErrorCategory::CancellationError>& e) {
                 ASSERT_EQ(e.code(), ErrorCodes::ClientMarkedKilled);
                 killed.store(true);
                 return;

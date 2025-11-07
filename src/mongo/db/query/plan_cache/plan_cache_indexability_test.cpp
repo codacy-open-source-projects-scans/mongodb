@@ -27,35 +27,29 @@
  *    it in the license file.
  */
 
-#include <boost/smart_ptr.hpp>
-#include <memory>
-#include <type_traits>
-
-#include <absl/container/flat_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/query/plan_cache/plan_cache_indexability.h"
 
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/field_ref.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/wildcard_key_generator.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/matcher/expression.h"
-#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/db/query/index_entry.h"
-#include "mongo/db/query/plan_cache/plan_cache_indexability.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
@@ -75,8 +69,8 @@ std::unique_ptr<MatchExpression> parseMatchExpression(
 
     StatusWithMatchExpression status = MatchExpressionParser::parse(obj, std::move(expCtx));
     if (!status.isOK()) {
-        FAIL(str::stream() << "failed to parse query: " << obj.toString()
-                           << ". Reason: " << status.getStatus().toString());
+        FAIL(std::string(str::stream() << "failed to parse query: " << obj.toString()
+                                       << ". Reason: " << status.getStatus().toString()));
     }
     return std::move(status.getValue());
 }
@@ -90,7 +84,7 @@ auto makeWildcardEntry(BSONObj keyPattern, const MatchExpression* filterExpr = n
         WildcardKeyGenerator::createProjectionExecutor(keyPattern, {}));
     return std::make_pair(IndexEntry(keyPattern,
                                      IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                                     IndexDescriptor::kLatestIndexVersion,
+                                     IndexConfig::kLatestIndexVersion,
                                      false,  // multikey
                                      {},
                                      {},
@@ -111,7 +105,7 @@ TEST(PlanCacheIndexabilityTest, SparseIndexSimple) {
     state.updateDiscriminators(
         {IndexEntry(keyPattern,
                     IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                    IndexDescriptor::kLatestIndexVersion,
+                    IndexConfig::kLatestIndexVersion,
                     false,  // multikey
                     {},
                     {},
@@ -152,7 +146,7 @@ TEST(PlanCacheIndexabilityTest, SparseIndexCompound) {
     state.updateDiscriminators(
         {IndexEntry(keyPattern,
                     IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                    IndexDescriptor::kLatestIndexVersion,
+                    IndexConfig::kLatestIndexVersion,
                     false,  // multikey
                     {},
                     {},
@@ -200,7 +194,7 @@ TEST(PlanCacheIndexabilityTest, PartialIndexSimple) {
     state.updateDiscriminators(
         {IndexEntry(keyPattern,
                     IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                    IndexDescriptor::kLatestIndexVersion,
+                    IndexConfig::kLatestIndexVersion,
                     false,  // multikey
                     {},
                     {},
@@ -255,7 +249,7 @@ TEST(PlanCacheIndexabilityTest, PartialIndexAnd) {
     state.updateDiscriminators(
         {IndexEntry(keyPattern,
                     IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                    IndexDescriptor::kLatestIndexVersion,
+                    IndexConfig::kLatestIndexVersion,
                     false,  // multikey
                     {},
                     {},
@@ -338,7 +332,7 @@ TEST(PlanCacheIndexabilityTest, MultiplePartialIndexes) {
     state.updateDiscriminators(
         {IndexEntry(keyPattern_a,
                     IndexNames::nameToType(IndexNames::findPluginName(keyPattern_a)),
-                    IndexDescriptor::kLatestIndexVersion,
+                    IndexConfig::kLatestIndexVersion,
                     false,  // multikey
                     {},
                     {},
@@ -351,7 +345,7 @@ TEST(PlanCacheIndexabilityTest, MultiplePartialIndexes) {
                     nullptr),
          IndexEntry(keyPattern_b,
                     IndexNames::nameToType(IndexNames::findPluginName(keyPattern_b)),
-                    IndexDescriptor::kLatestIndexVersion,
+                    IndexConfig::kLatestIndexVersion,
                     false,  // multikey
                     {},
                     {},
@@ -436,7 +430,7 @@ TEST(PlanCacheIndexabilityTest, IndexNeitherSparseNorPartial) {
     state.updateDiscriminators(
         {IndexEntry(keyPattern,
                     IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                    IndexDescriptor::kLatestIndexVersion,
+                    IndexConfig::kLatestIndexVersion,
                     false,  // multikey
                     {},
                     {},
@@ -458,7 +452,7 @@ TEST(PlanCacheIndexabilityTest, DiscriminatorForCollationIndicatesWhenCollations
     auto keyPattern = BSON("a" << 1);
     IndexEntry entry(keyPattern,
                      IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                     IndexDescriptor::kLatestIndexVersion,
+                     IndexConfig::kLatestIndexVersion,
                      false,  // multikey
                      {},
                      {},
@@ -491,7 +485,7 @@ TEST(PlanCacheIndexabilityTest, DiscriminatorForCollationIndicatesWhenCollations
                   parseMatchExpression(fromjson("{a: {$in: ['abc', 'xyz']}}"), expCtx).get()));
     ASSERT_EQ(true,
               disc.isMatchCompatibleWithIndex(
-                  parseMatchExpression(fromjson("{a: {$_internalExprEq: 'abc'}}}"), expCtx).get()));
+                  parseMatchExpression(fromjson("{a: {$_internalExprEq: 'abc'}}"), expCtx).get()));
 
     // Expression is not a ComparisonMatchExpression, InternalExprEqMatchExpression or
     // InMatchExpression.
@@ -549,7 +543,7 @@ TEST(PlanCacheIndexabilityTest, CompoundIndexCollationDiscriminator) {
     state.updateDiscriminators(
         {IndexEntry(keyPattern,
                     IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                    IndexDescriptor::kLatestIndexVersion,
+                    IndexConfig::kLatestIndexVersion,
                     false,  // multikey
                     {},
                     {},

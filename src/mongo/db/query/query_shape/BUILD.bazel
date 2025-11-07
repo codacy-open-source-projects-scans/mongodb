@@ -38,19 +38,21 @@ mongo_cc_library(
     srcs = [
         "query_shape.cpp",
         "shape_helpers.cpp",
-        "//src/mongo/db/pipeline:aggregation_request_helper.h",
-        "//src/mongo/db/pipeline:plan_executor_pipeline.h",
-        "//src/mongo/db/pipeline:plan_explainer_pipeline.h",
-        "//src/mongo/db/query:count_request.h",
-        "//src/mongo/db/query:projection_ast_util.h",
     ],
     hdrs = [
         "agg_cmd_shape.h",
-        "cmd_with_let_shape.h",
         "find_cmd_shape.h",
+        "let_shape_component.h",
         "query_shape.h",
         "shape_helpers.h",
         "//src/mongo/db/pipeline:aggregate_command_gen",
+    ],
+    header_deps = [
+        ":query_shape_hash",
+    ],
+    private_hdrs = [
+        "//src/mongo/db/query/compiler/logical_model/projection:projection_ast_util.h",
+        "//src/mongo/db/query:count_request.h",
     ],
     deps = [
         ":query_shape_common",
@@ -58,6 +60,24 @@ mongo_cc_library(
         "//src/mongo/db:server_base",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db/exec/document_value",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db/pipeline:field_path",  # TODO(SERVER-93876): Remove.
+    ],
+)
+
+mongo_cc_library(
+    name = "update_cmd_shape",
+    srcs = ["update_cmd_shape.cpp"],
+    hdrs = [
+        "let_shape_component.h",
+        "update_cmd_shape.h",
+    ],
+    private_hdrs = [
+        "//src/mongo/db/query/compiler/logical_model/projection:projection_ast_util.h",
+        "//src/mongo/db/query:count_request.h",
+    ],
+    deps = [
+        ":query_shape_common",
+        "//src/mongo:base",
+        "//src/mongo/db/query/write_ops:parsed_update_and_delete",
     ],
 )
 
@@ -82,6 +102,9 @@ mongo_cc_library(
     srcs = [
         ":query_shape_hash_gen",
     ],
+    hdrs = [
+        "query_shape_hash.h",
+    ],
     deps = [
         "//src/mongo/crypto:sha256_block",
     ],
@@ -99,12 +122,32 @@ mongo_cc_unit_test(
         "query_shape_test.cpp",
         ":query_shape_test_gen",
     ],
-    tags = ["mongo_unittest_first_group"],
+    tags = ["mongo_unittest_second_group"],
     deps = [
         ":query_shape",
         "//src/mongo/db:service_context_d_test_fixture",
         "//src/mongo/db/auth:authmocks",
-        "//src/mongo/db/matcher:parsed_match_expression_for_test",
         "//src/mongo/db/query:query_test_service_context",
+        "//src/mongo/db/query/compiler/parsers/matcher:parsed_match_expression_for_test",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "query_shape_test",
+    srcs = [
+        "agg_cmd_shape_test.cpp",
+        "count_cmd_shape_test.cpp",
+        "distinct_cmd_shape_test.cpp",
+        "find_cmd_shape_test.cpp",
+        "let_shape_component_test.cpp",
+        "serialization_options_test.cpp",
+        "update_cmd_shape_test.cpp",
+    ],
+    tags = [
+        "mongo_unittest_sixth_group",
+    ],
+    deps = [
+        ":update_cmd_shape",
+        "//src/mongo/db/pipeline:expression_context_for_test",
     ],
 )

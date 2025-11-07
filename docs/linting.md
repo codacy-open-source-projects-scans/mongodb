@@ -2,17 +2,6 @@
 
 ## C++ Linters
 
-### `clang-format`
-
-The `buildscripts/clang_format.py` wrapper script runs the `clang-format` linter. You can see the
-usage message for the wrapper by running `buildscripts/clang_format.py --help`.
-
-Ex: `buildscripts/clang_format.py lint`
-
-| Linter         | Configuration File(s) | Help Command          | Documentation                                                                                |
-| -------------- | --------------------- | --------------------- | -------------------------------------------------------------------------------------------- |
-| `clang-format` | `.clang-format`       | `clang-format --help` | [https://clang.llvm.org/docs/ClangFormat.html](https://clang.llvm.org/docs/ClangFormat.html) |
-
 ### `clang-tidy`
 
 The `buildscripts/clang_tidy.py` shell script runs the `clang-tidy` linter. In order to run
@@ -42,14 +31,11 @@ Ex: `buildscripts/quickmongolint.py lint`
 
 ## Javascript Linters
 
-The `buildscripts/eslint.py` wrapper script runs the `eslint` javascript linter. You can see the
-usage message for the wrapper by running `buildscripts/eslint.py --help`.
+The `bazel run lint` command runs the `eslint` javascript linter.
 
-Ex: `buildscripts/eslint.py lint`
-
-| Linter   | Configuration File(s)           | Help Command    | Documentation                              |
-| -------- | ------------------------------- | --------------- | ------------------------------------------ |
-| `eslint` | `.eslintrc.yml` `.eslintignore` | `eslint --help` | [https://eslint.org/](https://eslint.org/) |
+| Linter   | Configuration File(s) | Help Command | Documentation                              |
+| -------- | --------------------- | ------------ | ------------------------------------------ |
+| `eslint` | `.eslint.config.mjs`  |              | [https://eslint.org/](https://eslint.org/) |
 
 ## Yaml Linters
 
@@ -66,12 +52,12 @@ Ex: `bash buildscripts/yamllinters.sh`
 
 ## Python Linters
 
-The `buildscripts/pylinters.py` wrapper script runs the Python linters. You can
-see the usage message for the wrapper by running the following command:
-`buildscripts/pylinters.py --help`.
+The `bazel run lint` command runs all Python linters as well as several other linters in our code base. You can
+run auto-remediations via:
+`bazel run lint --fix`.
 
-Ex: `buildscripts/pylinters.py lint`
+Ex: `bazel run lint`
 
-| Linter | Configuration File(s) | Help Command  | Documentation                                                |
-| ------ | --------------------- | ------------- | ------------------------------------------------------------ |
-| `ruff` | `pyproject.toml`      | `ruff --help` | [https://docs.astral.sh/ruff/](https://docs.astral.sh/ruff/) |
+| Linter | Configuration File(s) | Help Command | Documentation                                                |
+| ------ | --------------------- | ------------ | ------------------------------------------------------------ |
+| `ruff` | `pyproject.toml`      |              | [https://docs.astral.sh/ruff/](https://docs.astral.sh/ruff/) |

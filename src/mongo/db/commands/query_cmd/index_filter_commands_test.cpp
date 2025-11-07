@@ -31,44 +31,44 @@
  * This file contains tests for mongo/db/commands/query_cmd/index_filter_commands.h
  */
 
-#include <absl/container/node_hash_map.h>
-#include <boost/none.hpp>
-#include <cstddef>
-#include <fmt/format.h>
-#include <functional>
-#include <memory>
-#include <utility>
-#include <variant>
-#include <vector>
+#include "mongo/db/commands/query_cmd/index_filter_commands.h"
 
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/catalog/collection_mock.h"
-#include "mongo/db/commands/query_cmd/index_filter_commands.h"
+#include "mongo/db/exec/plan_cache_callbacks_impl.h"
 #include "mongo/db/exec/plan_cache_util.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
+#include "mongo/db/local_catalog/collection_mock.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role_mock.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/plan_cache/plan_cache.h"
-#include "mongo/db/query/plan_cache/plan_cache_callbacks.h"
 #include "mongo/db/query/plan_cache/plan_cache_debug_info.h"
 #include "mongo/db/query/plan_cache/plan_cache_key_factory.h"
 #include "mongo/db/query/plan_cache/sbe_plan_cache.h"
 #include "mongo/db/query/plan_ranking_decision.h"
-#include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/query_test_service_context.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
-#include "mongo/db/query/stage_types.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source.h"
+
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <utility>
+#include <variant>
+#include <vector>
+
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -79,8 +79,13 @@ protected:
         _queryTestServiceContext = std::make_unique<QueryTestServiceContext>();
         _operationContext = _queryTestServiceContext->makeOperationContext();
         _collection = std::make_unique<CollectionMock>(_nss);
-        _collectionPtr = CollectionPtr(_collection.get());
 
+        // The collection holder is guaranteed to be valid for the lifetime of the test. This
+        // initialization is safe.
+        CollectionPtr collptr = CollectionPtr::CollectionPtr_UNSAFE(_collection.get());
+        _collectionAcq =
+            std::make_unique<CollectionAcquisition>(shard_role_mock::acquireCollectionMocked(
+                _operationContext.get(), _nss, std::move(collptr)));
         _classicPlanCache = std::make_unique<PlanCache>(5000);
         _sbePlanCache = std::make_unique<sbe::PlanCache>(5000);
     }
@@ -89,24 +94,24 @@ protected:
         _sbePlanCache.reset();
         _classicPlanCache.reset();
 
-        _collectionPtr.reset();
+        _collectionAcq.reset();
         _collection.reset();
         _operationContext.reset();
         _queryTestServiceContext.reset();
     }
 
     PlanCacheKey makeClassicKey(const CanonicalQuery& cq) {
-        return plan_cache_key_factory::make<PlanCacheKey>(cq, _collectionPtr);
+        return plan_cache_key_factory::make<PlanCacheKey>(cq, *_collectionAcq);
     }
 
     sbe::PlanCacheKey makeSbeKey(const CanonicalQuery& cq) {
         ASSERT_TRUE(cq.isSbeCompatible());
-        return plan_cache_key_factory::make<sbe::PlanCacheKey>(cq, _collectionPtr);
+        return plan_cache_key_factory::make<sbe::PlanCacheKey>(cq, *_collectionAcq);
     }
 
     Status clearIndexFilter(const std::string& cmdJson) {
         return ClearFilters::clear(_operationContext.get(),
-                                   _collectionPtr,
+                                   _collectionAcq->getCollectionPtr(),
                                    fromjson(cmdJson),
                                    &_querySettings,
                                    _classicPlanCache.get(),
@@ -119,7 +124,7 @@ protected:
      */
     void clearIndexFilterAndAssert(const std::string& cmdJson) {
         ASSERT_OK(ClearFilters::clear(_operationContext.get(),
-                                      _collectionPtr,
+                                      _collectionAcq->getCollectionPtr(),
                                       fromjson(cmdJson),
                                       &_querySettings,
                                       _classicPlanCache.get(),
@@ -128,7 +133,7 @@ protected:
 
     Status setIndexFilter(const std::string& cmdJson) {
         return SetFilter::set(_operationContext.get(),
-                              _collectionPtr,
+                              _collectionAcq->getCollectionPtr(),
                               fromjson(cmdJson),
                               &_querySettings,
                               _classicPlanCache.get(),
@@ -225,7 +230,7 @@ protected:
         ASSERT_OK(ListFilters::list(_querySettings, &bob));
         BSONObj resultObj = bob.obj();
         BSONElement filtersElt = resultObj.getField("filters");
-        ASSERT_EQUALS(filtersElt.type(), mongo::Array);
+        ASSERT_EQUALS(filtersElt.type(), mongo::BSONType::array);
         std::vector<BSONElement> filtersEltArray = filtersElt.Array();
         std::vector<BSONObj> filters;
         for (auto&& elt : filtersEltArray) {
@@ -253,7 +258,7 @@ protected:
 
             // indexes
             BSONElement indexesElt = obj.getField("indexes");
-            ASSERT_EQUALS(indexesElt.type(), mongo::Array);
+            ASSERT_EQUALS(indexesElt.type(), mongo::BSONType::array);
 
             // All fields OK. Append to vector.
             filters.push_back(obj.getOwned());
@@ -310,7 +315,7 @@ private:
             return plan.toString();
         };
         PlanCacheCallbacksImpl<PlanCacheKey, SolutionCacheData, plan_cache_debug_info::DebugInfo>
-            callbacks{*cq, buildDebugInfoFn, printCachedPlanFn};
+            callbacks{*cq, buildDebugInfoFn, printCachedPlanFn, _collectionAcq->getCollectionPtr()};
         ASSERT_OK(_classicPlanCache->set(
             makeClassicKey(*cq),
             std::move(cacheData),
@@ -355,7 +360,7 @@ private:
         PlanCacheCallbacksImpl<sbe::PlanCacheKey,
                                sbe::CachedSbePlan,
                                plan_cache_debug_info::DebugInfoSBE>
-            callbacks{*cq, buildDebugInfoFn, printCachedPlanFn};
+            callbacks{*cq, buildDebugInfoFn, printCachedPlanFn, _collectionAcq->getCollectionPtr()};
 
         ASSERT_OK(_sbePlanCache->set(
             makeSbeKey(*cq),
@@ -371,7 +376,7 @@ private:
 
     ServiceContext::UniqueOperationContext _operationContext;
     std::unique_ptr<Collection> _collection;
-    CollectionPtr _collectionPtr;
+    std::unique_ptr<CollectionAcquisition> _collectionAcq;
 
     std::unique_ptr<PlanCache> _classicPlanCache;
     std::unique_ptr<sbe::PlanCache> _sbePlanCache;
@@ -493,7 +498,7 @@ TEST_F(IndexFilterCommandsTest, SetAndClearFilters) {
     ASSERT_EQ(expectedNumFilters, filters.size());
 
     auto filterIndexes = filters[0]["indexes"];
-    ASSERT(filterIndexes.type() == BSONType::Array);
+    ASSERT(filterIndexes.type() == BSONType::array);
     auto filterArray = filterIndexes.Array();
     ASSERT_EQ(filterArray.size(), 1U);
     ASSERT_BSONOBJ_EQ(filterArray[0].Obj(), fromjson("{a: 1, b: 1}"));

@@ -28,32 +28,31 @@
  */
 
 
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/cstdint.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <type_traits>
+#include "mongo/db/session/session_catalog.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
-#include "mongo/db/session/session_catalog.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <type_traits>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
 
@@ -288,14 +287,15 @@ LogicalSessionIdSet SessionCatalog::scanSessionsForReap(
     }
 }
 
-SessionCatalog::KillToken SessionCatalog::killSession(const LogicalSessionId& lsid) {
+SessionCatalog::KillToken SessionCatalog::killSession(const LogicalSessionId& lsid,
+                                                      ErrorCodes::Error reason) {
     stdx::lock_guard<stdx::mutex> lg(_mutex);
 
     auto sri = _getSessionRuntimeInfo(lg, lsid);
     uassert(ErrorCodes::NoSuchSession, "Session not found", sri);
     auto session = sri->getSession(lg, lsid);
     uassert(ErrorCodes::NoSuchSession, "Session not found", session);
-    return ObservableSession(lg, sri, session).kill();
+    return ObservableSession(lg, sri, session).kill(reason);
 }
 
 size_t SessionCatalog::size() const {

@@ -28,22 +28,21 @@
  */
 
 
-#include <boost/none.hpp>
-#include <memory>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/s/resharding/resharding_oplog_applier_metrics.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/s/metrics/sharding_data_transform_cumulative_metrics.h"
-#include "mongo/db/s/metrics/sharding_data_transform_instance_metrics.h"
-#include "mongo/db/s/metrics/sharding_data_transform_metrics_test_fixture.h"
 #include "mongo/db/s/resharding/resharding_cumulative_metrics.h"
+#include "mongo/db/s/resharding/resharding_metrics_test_fixture.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier_metrics.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -51,12 +50,8 @@
 namespace mongo {
 namespace {
 
-class ReshardingOplogApplierMetricsTest : public ShardingDataTransformMetricsTestFixture {
+class ReshardingOplogApplierMetricsTest : public ReshardingMetricsTestFixture {
 public:
-    std::unique_ptr<ShardingDataTransformCumulativeMetrics> initializeCumulativeMetrics() override {
-        return std::make_unique<ReshardingCumulativeMetrics>();
-    }
-
     std::unique_ptr<ReshardingMetrics> createInstanceMetrics() {
         return std::make_unique<ReshardingMetrics>(UUID::gen(),
                                                    kTestCommand,
@@ -64,8 +59,13 @@ public:
                                                    ReshardingMetrics::Role::kRecipient,
                                                    getClockSource()->now(),
                                                    getClockSource(),
-                                                   _cumulativeMetrics.get());
+                                                   _cumulativeMetrics.get(),
+                                                   RecipientStateEnum::kApplying,
+                                                   ReshardingProvenanceEnum::kReshardCollection);
     }
+
+protected:
+    ShardId donorShardId{"shard0"};
 };
 
 TEST_F(ReshardingOplogApplierMetricsTest,
@@ -75,7 +75,7 @@ TEST_F(ReshardingOplogApplierMetricsTest,
     auto report = metrics->reportForCurrentOp();
     ASSERT_EQ(report.getIntField("insertsApplied"), 0);
 
-    ReshardingOplogApplierMetrics applierMetrics(metrics.get(), boost::none);
+    ReshardingOplogApplierMetrics applierMetrics(donorShardId, metrics.get(), boost::none);
     applierMetrics.onInsertApplied();
 
     ASSERT_EQ(applierMetrics.getInsertsApplied(), 1);
@@ -90,7 +90,7 @@ TEST_F(ReshardingOplogApplierMetricsTest,
     auto report = metrics->reportForCurrentOp();
     ASSERT_EQ(report.getIntField("updatesApplied"), 0);
 
-    ReshardingOplogApplierMetrics applierMetrics(metrics.get(), boost::none);
+    ReshardingOplogApplierMetrics applierMetrics(donorShardId, metrics.get(), boost::none);
     applierMetrics.onUpdateApplied();
 
     ASSERT_EQ(applierMetrics.getUpdatesApplied(), 1);
@@ -105,7 +105,7 @@ TEST_F(ReshardingOplogApplierMetricsTest,
     auto report = metrics->reportForCurrentOp();
     ASSERT_EQ(report.getIntField("deletesApplied"), 0);
 
-    ReshardingOplogApplierMetrics applierMetrics(metrics.get(), boost::none);
+    ReshardingOplogApplierMetrics applierMetrics(donorShardId, metrics.get(), boost::none);
     applierMetrics.onDeleteApplied();
 
     ASSERT_EQ(applierMetrics.getDeletesApplied(), 1);
@@ -118,7 +118,7 @@ TEST_F(ReshardingOplogApplierMetricsTest, ApplierInsertProgressIncrementsIdepend
 
     ReshardingOplogApplierProgress progressDoc;
     progressDoc.setInsertsApplied(12);
-    ReshardingOplogApplierMetrics applierMetrics(metrics.get(), progressDoc);
+    ReshardingOplogApplierMetrics applierMetrics(donorShardId, metrics.get(), progressDoc);
 
     ASSERT_EQ(applierMetrics.getInsertsApplied(), 12);
     auto report = metrics->reportForCurrentOp();
@@ -136,7 +136,7 @@ TEST_F(ReshardingOplogApplierMetricsTest, ApplierUpdateProgressIncrementsIdepend
 
     ReshardingOplogApplierProgress progressDoc;
     progressDoc.setUpdatesApplied(34);
-    ReshardingOplogApplierMetrics applierMetrics(metrics.get(), progressDoc);
+    ReshardingOplogApplierMetrics applierMetrics(donorShardId, metrics.get(), progressDoc);
 
     ASSERT_EQ(applierMetrics.getUpdatesApplied(), 34);
     auto report = metrics->reportForCurrentOp();
@@ -154,7 +154,7 @@ TEST_F(ReshardingOplogApplierMetricsTest, ApplierDeleteProgressIncrementsIdepend
 
     ReshardingOplogApplierProgress progressDoc;
     progressDoc.setDeletesApplied(56);
-    ReshardingOplogApplierMetrics applierMetrics(metrics.get(), progressDoc);
+    ReshardingOplogApplierMetrics applierMetrics(donorShardId, metrics.get(), progressDoc);
 
     ASSERT_EQ(applierMetrics.getDeletesApplied(), 56);
     auto report = metrics->reportForCurrentOp();

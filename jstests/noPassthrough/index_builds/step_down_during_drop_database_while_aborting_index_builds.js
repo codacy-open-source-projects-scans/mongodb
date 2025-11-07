@@ -7,7 +7,7 @@
  * ]
  */
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const dbName = "test";
 const collName = "coll";
@@ -21,16 +21,17 @@ const primary = replSet.getPrimary();
 let testDB = primary.getDB(dbName);
 const testColl = testDB.getCollection(collName);
 
-var bulk = testColl.initializeUnorderedBulkOp();
-for (var i = 0; i < 5; ++i) {
+let bulk = testColl.initializeUnorderedBulkOp();
+for (let i = 0; i < 5; ++i) {
     bulk.insert({x: i});
 }
 assert.commandWorked(bulk.execute());
 replSet.awaitReplication();
 
 IndexBuildTest.pauseIndexBuilds(testDB.getMongo());
-const awaitIndexBuild = IndexBuildTest.startIndexBuild(
-    testDB.getMongo(), testColl.getFullName(), {x: 1}, {}, [ErrorCodes.IndexBuildAborted]);
+const awaitIndexBuild = IndexBuildTest.startIndexBuild(testDB.getMongo(), testColl.getFullName(), {x: 1}, {}, [
+    ErrorCodes.IndexBuildAborted,
+]);
 IndexBuildTest.waitForIndexBuildToScanCollection(testDB, collName, "x_1");
 
 const failpoint = "dropDatabaseHangAfterWaitingForIndexBuilds";
@@ -64,8 +65,7 @@ assert(primary.port != newPrimary.port);
 let indexesRes = assert.commandWorked(newPrimary.getDB(dbName).runCommand({listIndexes: collName}));
 assert.eq(1, indexesRes.cursor.firstBatch.length);
 
-indexesRes =
-    assert.commandWorked(replSet.getSecondary().getDB(dbName).runCommand({listIndexes: collName}));
+indexesRes = assert.commandWorked(replSet.getSecondary().getDB(dbName).runCommand({listIndexes: collName}));
 assert.eq(1, indexesRes.cursor.firstBatch.length);
 
 // Run dropDatabase on the new primary. The secondary (formerly the primary) should be able to

@@ -29,31 +29,22 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <set>
-#include <vector>
-
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/change_stream_constants.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/s/query/exec/async_results_merger_params_gen.h"
-#include "mongo/s/query/exec/document_source_merge_cursors.h"
-#include "mongo/util/intrusive_counter.h"
+
+#include <set>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -80,12 +71,12 @@ public:
         const boost::intrusive_ptr<ExpressionContext>&);
 
     const char* getSourceName() const final {
-        return kStageName.rawData();
+        return kStageName.data();
     }
 
     Value doSerialize(const SerializationOptions& opts = SerializationOptions{}) const final;
 
-    StageConstraints constraints(Pipeline::SplitState) const final;
+    StageConstraints constraints(PipelineSplitState) const final;
 
     GetModPathsReturn getModifiedPaths() const final {
         // This stage neither modifies nor renames any field.
@@ -98,36 +89,13 @@ public:
 
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
 
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
+    }
+
 private:
     DocumentSourceChangeStreamHandleTopologyChange(const boost::intrusive_ptr<ExpressionContext>&);
-
-    GetNextResult doGetNext() final;
-
-    /**
-     * Establish the new cursors and tell the RouterStageMerge about them.
-     */
-    void addNewShardCursors(const Document& newShardDetectedObj);
-
-    /**
-     * Open the cursors on the new shards.
-     */
-    std::vector<RemoteCursor> establishShardCursorsOnNewShards(const Document& newShardDetectedObj);
-
-    /**
-     * Updates the $changeStream stage in the '_originalAggregateCommand' to reflect the start time
-     * for the newly-added shard(s), then generates the final command object to be run on those
-     * shards.
-     */
-    BSONObj createUpdatedCommandForNewShard(Timestamp shardAddedTime);
-
-    /**
-     * Given the '_originalAggregateCommand' and a resume token, returns a new BSON object with the
-     * same command except with the addition of a resumeAfter option containing the resume token.
-     * If there was a previous resumeAfter option, it will be removed.
-     */
-    BSONObj replaceResumeTokenInCommand(Document resumeToken);
-
-    boost::intrusive_ptr<DocumentSourceMergeCursors> _mergeCursors;
-    BSONObj _originalAggregateCommand;
 };
 }  // namespace mongo

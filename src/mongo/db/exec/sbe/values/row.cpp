@@ -27,13 +27,7 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_map.h>
-#include <array>
-#include <cstring>
-#include <string>
-#include <tuple>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/exec/sbe/values/row.h"
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
@@ -49,7 +43,6 @@
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/sort_spec.h"
 #include "mongo/db/exec/sbe/values/bson.h"
-#include "mongo/db/exec/sbe/values/row.h"
 #include "mongo/db/exec/sbe/values/value_builder.h"
 #include "mongo/db/exec/shard_filterer.h"
 #include "mongo/db/fts/fts_matcher.h"
@@ -62,6 +55,13 @@
 #include "mongo/util/pcre.h"
 #include "mongo/util/shared_buffer.h"
 #include "mongo/util/time_support.h"
+
+#include <array>
+#include <cstring>
+#include <string>
+#include <tuple>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo::sbe::value {
 
@@ -261,7 +261,7 @@ static std::pair<TypeTags, Value> deserializeValue(BufReader& buf,
             break;
         }
         default:
-            MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE_TASSERT(11122914);
     }
 
     return {tag, val};
@@ -432,7 +432,7 @@ static void serializeValue(BufBuilder& buf, TypeTags tag, Value val) {
             break;
         }
         default:
-            MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE_TASSERT(11122915);
     }
 }
 
@@ -641,7 +641,7 @@ static void serializeValueIntoKeyString(key_string::Builder& buf,
             break;
         }
         default:
-            MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE_TASSERT(11122916);
     }
 }
 
@@ -694,7 +694,7 @@ template <typename RowType>
 RowType RowBase<RowType>::deserializeFromKeyString(const key_string::Value& keyString,
                                                    BufBuilder* valueBufferBuilder,
                                                    boost::optional<size_t> numPrefixValsToRead) {
-    BufReader reader(keyString.getBuffer(), keyString.getSize());
+    BufReader reader(keyString.getView().data(), keyString.getSize());
     key_string::TypeBits typeBits(keyString.getTypeBits());
     key_string::TypeBits::Reader typeBitsReader(typeBits);
 
@@ -728,7 +728,8 @@ int getApproximateSize(TypeTags tag, Value val) {
         case TypeTags::MinKey:
         case TypeTags::MaxKey:
         case TypeTags::bsonUndefined:
-        case TypeTags::LocalLambda:
+        case TypeTags::LocalOneArgLambda:
+        case TypeTags::LocalTwoArgLambda:
             break;
         // There are deep types.
         case TypeTags::RecordId:
@@ -852,7 +853,7 @@ int getApproximateSize(TypeTags tag, Value val) {
             result += getExtendedTypeOps(tag)->getApproximateSize(val);
             break;
         default:
-            MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE_TASSERT(11122917);
     }
     return result;
 }

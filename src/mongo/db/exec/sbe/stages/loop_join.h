@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <vector>
-
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
@@ -41,7 +36,13 @@
 #include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/vm/vm.h"
-#include "mongo/db/query/stage_types.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <vector>
 
 namespace mongo::sbe {
 enum class JoinType : uint8_t { Inner, Left, Right };
@@ -93,7 +94,7 @@ public:
     void open(bool reOpen) final;
     PlanState getNext() final;
     void close() final;
-    void doSaveState(bool relinquishCursor) final;
+    void doSaveState() final;
 
     std::unique_ptr<PlanStageStats> getStats(bool includeDebugInfo) const final;
     const SpecificStats* getSpecificStats() const final;
@@ -106,6 +107,10 @@ protected:
         // Thus, it is safe to propagate disableSlotAccess to the inner child, but not to the outer
         // child.
         return idx == 1;
+    }
+
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {
+        return;
     }
 
 private:

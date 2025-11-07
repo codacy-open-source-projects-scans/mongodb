@@ -15,7 +15,7 @@ jsTest.log("Starting test");
 replSet.startSet();
 replSet.initiate();
 
-var secondary = replSet.getSecondary();
+let secondary = replSet.getSecondary();
 
 // Start and restart secondary with fail point that throws exception enabled.
 jsTest.log("Stopping secondary");
@@ -23,7 +23,7 @@ replSet.stop(secondary);
 jsTest.log("Re-starting secondary ");
 secondary = replSet.start(secondary, {
     startClean: true,
-    setParameter: {"failpoint.failAfterBulkLoadDocInsert": "{'mode': {'times': 1}}"}
+    setParameter: {"failpoint.failAfterBulkLoadDocInsert": "{'mode': {'times': 1}}"},
 });
 
 // Wait for everything to be synced.

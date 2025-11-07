@@ -29,9 +29,9 @@
 
 #pragma once
 
-#include <string>
-
 #include "mongo/base/string_data.h"
+
+#include <string>
 
 namespace mongo {
 
@@ -53,6 +53,14 @@ enum IndexType {
     INDEX_WILDCARD,
     INDEX_TYPE_COUNT,  // Count of IndexType, not a index
 };
+
+/**
+ * Converts an IndexType to a string.
+ *
+ * This function is used strictly for logging and makes no assumptions about which `IndexType`s
+ * are valid.
+ */
+std::string toString(IndexType indexType);
 
 /**
  * We use the std::string representation of index names all over the place, so we declare them all
@@ -96,7 +104,7 @@ struct WildcardNames {
     static constexpr StringData WILDCARD_FIELD_NAME_SUFFIX = ".$**"_sd;
 
     inline static bool isWildcardFieldName(StringData fieldName) {
-        return fieldName == WILDCARD_FIELD_NAME || fieldName.endsWith(WILDCARD_FIELD_NAME_SUFFIX);
+        return fieldName == WILDCARD_FIELD_NAME || fieldName.ends_with(WILDCARD_FIELD_NAME_SUFFIX);
     }
 };
 

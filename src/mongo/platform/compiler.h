@@ -135,10 +135,13 @@
  *     #define MONGO_COMPILER_API_CALLING_CONVENTION
  *     #endif
  *     #else // ... fall through to the definitions below.
+ * NOTE: Used and retain attributes were added to prevent these symbols from getting discarded by
+ * the compiler and linker when using LTO. See:
+ * https://gcc.gnu.org/onlinedocs/gcc/Common-Function-Attributes.html#index-used-function-attribute
  */
 #define MONGO_COMPILER_API_EXPORT                 \
     MONGO_COMPILER_IF_MSVC(__declspec(dllexport)) \
-    MONGO_COMPILER_IF_GNUC(__attribute__((__visibility__("default"))))
+    MONGO_COMPILER_IF_GNUC(__attribute__((__visibility__("default"), used, retain)))
 
 /**
  *   Instructs the compiler to label the given type, variable or function as imported
@@ -157,12 +160,22 @@
  */
 #define MONGO_COMPILER_ALWAYS_INLINE MONGO_COMPILER_ALWAYS_INLINE_
 #if defined(_MSC_VER)
-#define MONGO_COMPILER_ALWAYS_INLINE_ __forceinline
+#define MONGO_COMPILER_ALWAYS_INLINE_ [[msvc::forceinline]]
 #elif MONGO_COMPILER_HAS_ATTRIBUTE(gnu::always_inline)
 #define MONGO_COMPILER_ALWAYS_INLINE_ [[gnu::always_inline]]
 #else
 #define MONGO_COMPILER_ALWAYS_INLINE_
 #endif
+
+/**
+ * Force a function to be inlined as a temporary measure to buy-back performance regressions
+ * downstream of the switch to using the v5 toolchain.
+ * TODO(SERVER-105707): Reevaluate each use of this macro once we have enabled LTO/PGO and
+ * other post-compilation optimizations; for each, either delete the use or change it to use
+ * MONGO_COMPILER_ALWAYS_INLINE, committing the forced inlining choice permanently. Then delete
+ * this macro definition.
+ */
+#define MONGO_COMPILER_ALWAYS_INLINE_GCC14 MONGO_COMPILER_ALWAYS_INLINE
 
 /**
  * Tells the compiler that it can assume that this line will never execute.
@@ -309,20 +322,10 @@
     MONGO_COMPILER_IF_CLANG(MONGO_COMPILER_PRAGMA(clang diagnostic ignored w))
 
 /**
- * TODO(SERVER-97447): We ignore these warnings on GCC 14 to facilitate
- * transition to the v5 toolchain. They should be investigated more deeply by
- * the teams owning each callsite.
+ * TODO(SERVER-102303): Delete this macro once all its uses have been removed.
  */
 #define MONGO_COMPILER_DIAGNOSTIC_IGNORED_TRANSITIONAL(w) \
     MONGO_COMPILER_IF_GCC14(MONGO_COMPILER_DIAGNOSTIC_IGNORED(w))
-
-/**
- * We selectively ignore `-Wstringop-overread` on GCC 14 due to a known bug
- * affecting `boost::container::small_vector`:
- * https://gcc.gnu.org/bugzilla/show_bug.cgi?id=108197.
- */
-#define MONGO_COMPILER_DIAGNOSTIC_WORKAROUND_BOOST_SMALL_VECTOR \
-    MONGO_COMPILER_IF_GCC14(MONGO_COMPILER_DIAGNOSTIC_IGNORED("-Wstringop-overread"))
 
 /**
  * We selectively ignore `-Wstringop-overflow` on GCC 14 due to strong suspicion
@@ -331,4 +334,13 @@
  * referencing a null pointer.
  */
 #define MONGO_COMPILER_DIAGNOSTIC_WORKAROUND_ATOMIC_READ \
+    MONGO_COMPILER_IF_GCC14(MONGO_COMPILER_DIAGNOSTIC_IGNORED("-Wstringop-overflow"))
+
+/**
+ * We selectively ignore `-Wstringop-overflow` on GCC 14 due to strong suspicion
+ * that they are false-positives. They involve an atomic write overflowing the
+ * destination, likely due to the compiler incorrectly believing they might be
+ * referencing a null pointer.
+ */
+#define MONGO_COMPILER_DIAGNOSTIC_WORKAROUND_ATOMIC_WRITE \
     MONGO_COMPILER_IF_GCC14(MONGO_COMPILER_DIAGNOSTIC_IGNORED("-Wstringop-overflow"))

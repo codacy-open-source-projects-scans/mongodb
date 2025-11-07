@@ -29,13 +29,14 @@
 
 #include "mongo/util/fixed_string.h"
 
-#include <fmt/format.h>
-#include <string>
-#include <utility>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/unittest/unittest.h"
+
+#include <string>
+#include <utility>
+
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -60,17 +61,17 @@ struct HasStringParam {
 };
 
 TEST(FixedString, StringTemplateParameter) {
-    ASSERT_EQ(HasStringParam<"hi">::string(), "hi");
+    ASSERT_EQ(HasStringParam<"hi">::string(), FixedString{"hi"});
 }
 
 TEST(FixedString, Plus) {
-    ASSERT_EQ(FixedString{"abc"} + FixedString{"xyz"}, "abcxyz");
+    ASSERT_EQ(FixedString{"abc"} + FixedString{"xyz"}, FixedString{"abcxyz"});
 
-    ASSERT_EQ(FixedString{"abc"} + "xyz", "abcxyz");
-    ASSERT_EQ("xyz" + FixedString{"abc"}, "xyzabc");
+    ASSERT_EQ(FixedString{"abc"} + "xyz", FixedString{"abcxyz"});
+    ASSERT_EQ("xyz" + FixedString{"abc"}, FixedString{"xyzabc"});
 
-    ASSERT_EQ(FixedString{"abc"} + 'x', "abcx");
-    ASSERT_EQ('x' + FixedString{"abc"}, "xabc");
+    ASSERT_EQ(FixedString{"abc"} + 'x', FixedString{"abcx"});
+    ASSERT_EQ('x' + FixedString{"abc"}, FixedString{"xabc"});
 }
 
 TEST(FixedString, EmbeddedNul) {
@@ -91,11 +92,8 @@ constexpr auto tupleCartesianProduct(auto aTup, auto bTup) {
     return std::apply(
         [&](auto... as) {
             return std::tuple_cat([&](auto a) {
-                return std::apply(
-                    [&](auto... bs) {
-                        return std::tuple{std::tuple{a, bs}...};
-                    },
-                    bTup);
+                return std::apply([&](auto... bs) { return std::tuple{std::tuple{a, bs}...}; },
+                                  bTup);
             }(as)...);
         },
         aTup);

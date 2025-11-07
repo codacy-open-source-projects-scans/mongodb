@@ -1,13 +1,17 @@
 // Cannot implicitly shard accessed collections because of collection existing when none
 // expected.
-// @tags: [assumes_no_implicit_collection_creation_after_drop, requires_fastcount]
+// @tags: [
+//   assumes_no_implicit_collection_creation_after_drop,
+//   requires_fastcount,
+//   requires_getmore,
+// ]
 
 // SERVER-8514: Test the count command returns an error to the user when given an invalid query
 // predicate, even when the collection doesn't exist.
 
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
-var t = db.count11;
+let t = db.count11;
 
 t.drop();
 
@@ -15,11 +19,11 @@ t.drop();
 // of a error.
 if (FixtureHelpers.isMongos(db) || TestData.testingReplicaSetEndpoint) {
     // Create database
-    assert.commandWorked(db.adminCommand({'enableSharding': db.getName()}));
+    assert.commandWorked(db.adminCommand({"enableSharding": db.getName()}));
 }
 
-var validQuery = {a: 1};
-var invalidQuery = {a: {$invalid: 1}};
+let validQuery = {a: 1};
+let invalidQuery = {a: {$invalid: 1}};
 
 // Query non-existing collection with empty query.
 assert.eq(0, t.find().count());
@@ -29,7 +33,7 @@ assert.eq(0, t.find().itcount());
 // Returns 0 on valid syntax query.
 // Fails on invalid syntax query.
 assert.eq(0, t.find(validQuery).count());
-assert.throws(function() {
+assert.throws(function () {
     t.find(invalidQuery).count();
 });
 
@@ -38,6 +42,6 @@ assert.throws(function() {
 // Fails on invalid syntax query.
 assert.commandWorked(db.createCollection(t.getName()));
 assert.eq(0, t.find(validQuery).count());
-assert.throws(function() {
+assert.throws(function () {
     t.find(invalidQuery).count();
 });

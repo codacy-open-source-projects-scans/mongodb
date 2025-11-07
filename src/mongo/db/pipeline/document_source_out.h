@@ -29,17 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <fmt/format.h>
-#include <list>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -71,12 +60,24 @@
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
+
+#include <list>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 /**
  * Implementation for the $out aggregation stage.
  */
-class DocumentSourceOut final : public DocumentSourceWriter<BSONObj> {
+class DocumentSourceOut final : public DocumentSourceWriter {
 public:
     static constexpr StringData kStageName = "$out"_sd;
 
@@ -89,7 +90,8 @@ public:
         using LiteParsedDocumentSourceForeignCollection::LiteParsedDocumentSourceForeignCollection;
 
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
-                                                 const BSONElement& spec);
+                                                 const BSONElement& spec,
+                                                 const LiteParserOptions& options);
 
         Status checkShardedForeignCollAllowed(const NamespaceString& nss,
                                               bool inMultiDocumentTransaction) const final {
@@ -113,12 +115,11 @@ public:
 
         ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
                                                      bool isImplicitDefault) const final {
-            using namespace fmt::literals;
-            return {
-                {level == repl::ReadConcernLevel::kLinearizableReadConcern,
-                 {ErrorCodes::InvalidOptions,
-                  "{} cannot be used with a 'linearizable' read concern level"_format(kStageName)}},
-                Status::OK()};
+            return {{level == repl::ReadConcernLevel::kLinearizableReadConcern,
+                     {ErrorCodes::InvalidOptions,
+                      fmt::format("{} cannot be used with a 'linearizable' read concern level",
+                                  kStageName)}},
+                    Status::OK()};
         }
 
         bool isWriteStage() const override {
@@ -126,9 +127,7 @@ public:
         }
     };
 
-    ~DocumentSourceOut() override;
-
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final;
+    StageConstraints constraints(PipelineSplitState pipeState) const final;
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
 
@@ -147,19 +146,24 @@ public:
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
     const char* getSourceName() const final {
-        return kStageName.rawData();
+        return kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kOut;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
 
 private:
+    friend boost::intrusive_ptr<exec::agg::Stage> documentSourceOutToStageFn(
+        const boost::intrusive_ptr<DocumentSource>& documentSource);
+
     /**
-     * Used to track the $out state for the destructor. $out should clean up different namespaces
-     * depending on when the stage was interrupted or failed.
+     * Used to track the $out state for the destructor. $out should clean up different
+     * namespaces depending on when the stage was interrupted or failed.
      */
     enum class OutCleanUpProgress {
         kTmpCollExists,
@@ -171,99 +175,21 @@ private:
     DocumentSourceOut(NamespaceString outputNs,
                       boost::optional<TimeseriesOptions> timeseries,
                       const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : DocumentSourceWriter(kStageName.rawData(), std::move(outputNs), expCtx),
-          _writeConcern(expCtx->getOperationContext()->getWriteConcern()),
-          _timeseries(std::move(timeseries)) {}
-
-    static DocumentSourceOutSpec parseOutSpecAndResolveTargetNamespace(
-        const BSONElement& spec, const DatabaseName& defaultDB);
-    void initialize() override;
-
-    void finalize() override;
-
-    void flush(BatchedCommandRequest bcr, BatchedObjects batch) override {
-        DocumentSourceWriteBlock writeBlock(pExpCtx->getOperationContext());
-
-        auto insertCommand = bcr.extractInsertRequest();
-        insertCommand->setDocuments(std::move(batch));
-        auto targetEpoch = boost::none;
-
-        if (_timeseries) {
-            uassertStatusOK(pExpCtx->getMongoProcessInterface()->insertTimeseries(
-                pExpCtx, _tempNs, std::move(insertCommand), _writeConcern, targetEpoch));
-        } else {
-            uassertStatusOK(pExpCtx->getMongoProcessInterface()->insert(
-                pExpCtx, _tempNs, std::move(insertCommand), _writeConcern, targetEpoch));
+        : DocumentSourceWriter(kStageName.data(), std::move(outputNs), expCtx) {
+        if (timeseries) {
+            _timeseries = std::make_shared<TimeseriesOptions>(*timeseries);
         }
     }
 
-    std::pair<BSONObj, int> makeBatchObject(Document doc) const override {
-        auto obj = doc.toBson();
-        tassert(6628900, "_writeSizeEstimator should be initialized", _writeSizeEstimator);
-        return {obj, _writeSizeEstimator->estimateInsertSizeBytes(obj)};
-    }
+    static DocumentSourceOutSpec parseOutSpecAndResolveTargetNamespace(
+        const BSONElement& spec, const DatabaseName& defaultDB);
 
-    BatchedCommandRequest makeBatchedWriteRequest() const override;
-
-    void waitWhileFailPointEnabled() override;
 
     /**
-     * Determines if an error exists with the user input and existing collections. This function
-     * sets the '_timeseries' member variable and must be run before referencing '_timeseries'
-     * variable. The function will error if:
-     * 1. The user provides the 'timeseries' field, but a non time-series collection or view exists
-     * in that namespace.
-     * 2. The user provides the 'timeseries' field with a specification that does not match an
-     * existing time-series collection. The function will replace the value of '_timeseries' if the
-     * user does not provide the 'timeseries' field, but a time-series collection exists.
+     * Set if $out is writing to a time-series collection. Its value is passed to the Stage class
+     * and not used in DocumentSource at all.
      */
-    boost::optional<TimeseriesOptions> validateTimeseries();
-
-    NamespaceString makeBucketNsIfTimeseries(const NamespaceString& ns);
-
-    /**
-     * Runs a createCollection command on the temporary namespace. Returns
-     * nothing, but if the function returns, we assume the temporary collection is created.
-     */
-    void createTemporaryCollection();
-
-    /**
-     * Runs a renameCollection from the temporary namespace to the user requested namespace. Returns
-     * nothing, but if the function returns, we assume the rename has succeeded and the temporary
-     * namespace no longer exists.
-     */
-    void renameTemporaryCollection();
-
-    /**
-     * Runs a createCollection command to create the view backing the time-series buckets
-     * collection. This should only be called if $out is writing to a time-series collection. If the
-     * function returns, we assume the view is created.
-     */
-    void createTimeseriesView();
-
-    // Stash the writeConcern of the original command as the operation context may change by the
-    // time we start to flush writes. This is because certain aggregations (e.g. $exchange)
-    // establish cursors with batchSize 0 then run subsequent getMore's which use a new operation
-    // context. The getMore's will not have an attached writeConcern however we still want to
-    // respect the writeConcern of the original command.
-    WriteConcernOptions _writeConcern;
-
-    // Holds on to the original collection options and index specs so we can check they didn't
-    // change during computation. For time-series collection these values will be on the buckets
-    // namespace.
-    BSONObj _originalOutOptions;
-    std::list<BSONObj> _originalIndexes;
-
-    // The temporary namespace for the $out writes.
-    NamespaceString _tempNs;
-
-    // Set if $out is writing to a time-series collection. This is how $out determines if it is
-    // writing to a time-series collection or not. Any reference to this variable **must** be after
-    // 'validateTimeseries', since 'validateTimeseries' sets this value.
-    boost::optional<TimeseriesOptions> _timeseries;
-
-    // Tracks the current state of the temporary collection, and is used for cleanup.
-    OutCleanUpProgress _tmpCleanUpState = OutCleanUpProgress::kComplete;
+    std::shared_ptr<TimeseriesOptions> _timeseries;
 };
 
 }  // namespace mongo

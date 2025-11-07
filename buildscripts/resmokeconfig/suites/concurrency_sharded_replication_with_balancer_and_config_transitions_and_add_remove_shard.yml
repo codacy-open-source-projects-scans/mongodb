@@ -69,7 +69,7 @@ selector:
     # open cursors can finish, such that tests using getMore must be skipped.
 
     # Connects directly to shards that might have been decomissioned, which leads to network errors.
-    - jstests/concurrency/fsm_workloads/cleanup_orphaned_while_migrating.js
+    - jstests/concurrency/fsm_workloads/cleanup_orphaned_with_balancer.js
 
     # Tests that perform shard addition, shard removal, or movePrimary operations,
     # might interfere with the state expected during execution of the ContinuousAddRemoveShard hook.
@@ -89,7 +89,7 @@ selector:
 
     # Exclude tests that run cleanupOrphaned, which can fail running on a config shard if a
     # concurrent migration fails due to the config shard transitioning to dedicated.
-    - jstests/concurrency/fsm_workloads/cleanup_orphaned_while_migrating.js
+    - jstests/concurrency/fsm_workloads/cleanup_orphaned_with_balancer.js
 
   exclude_with_any_tags:
     - requires_standalone
@@ -108,8 +108,9 @@ selector:
     # performed by the ContinuousAddRemoveShard hook.
     - kills_random_sessions
 
-    # TODO SERVER-50144 Not waiting for rangeDeleter. Skip tests using getMore.
-    - requires_getmore
+    # implicitly_retry_on_migration_in_progress.js alters find/aggregate commands
+    # so that the whole result set is returned through a single batch
+    - assumes_no_implicit_cursor_exhaustion
 
 executor:
   archive:
@@ -123,14 +124,15 @@ executor:
       eval: >-
         await import("jstests/libs/override_methods/implicitly_retry_on_shard_transition_errors.js");
         await import("jstests/libs/override_methods/implicitly_shard_accessed_collections.js");
+        await import("jstests/libs/override_methods/implicitly_retry_crud_on_no_progress_made.js");
       global_vars:
         TestData:
           runningWithBalancer: true
           shardsAddedRemoved: true
+          hasRandomShardsAddedRemoved: true
           implicitlyShardOnCreateCollectionOnly: true
           useActionPermittedFile: [ContinuousAddRemoveShard]
           shardCollectionProbability: 0.5
-          fsmPreOverridesLoadedCallback: import("jstests/libs/override_methods/implicitly_retry_on_migration_in_progress.js");
   hooks:
     - class: ContinuousAddRemoveShard
       transition_configsvr: true
@@ -145,6 +147,7 @@ executor:
         global_vars:
           TestData:
             shardsAddedRemoved: true
+            hasRandomShardsAddedRemoved: true
     - class: CheckOrphansDeleted
     - class: CheckRoutingTableConsistency
     - class: ValidateCollections # Validation can interfere with other operations, so this goes last.

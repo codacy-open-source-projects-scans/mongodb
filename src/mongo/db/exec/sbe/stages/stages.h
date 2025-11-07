@@ -36,9 +36,12 @@
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/trial_run_tracker.h"
+#include "mongo/db/memory_tracking/memory_usage_tracker.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/str.h"
 
 namespace mongo {
@@ -179,36 +182,30 @@ public:
      * It is illegal to call work() or isEOF() when a stage is in the "saved" state. May be called
      * before the first call to open(), before execution of the plan has begun.
      *
+     * The 'disableSlotAccess' parameter indicates whether this stage is allowed to discard slot
+     * state before saving.
+     *
      * Propagates to all children, then calls doSaveState().
      *
-     * The 'relinquishCursor' parameter indicates whether cursors should be reset and all data
-     * should be copied.
-     *
-     * When 'relinquishCursor' is true, the 'disableSlotAccess' parameter indicates whether this
-     * stage is allowed to discard slot state before saving. When 'relinquishCursor' is false, the
-     * 'disableSlotAccess' parameter has no effect.
-     *
-     * TODO SERVER-59620: Remove the 'relinquishCursor' parameter once all callers pass 'false'.
      */
-    void saveState(bool relinquishCursor, bool disableSlotAccess = false) {
+    void saveState(bool disableSlotAccess = false) {
         auto stage = static_cast<T*>(this);
         stage->_commonStats.yields++;
 
-        if (relinquishCursor && disableSlotAccess) {
+        if (disableSlotAccess) {
             stage->disableSlotAccess();
         }
 
-        stage->doSaveState(relinquishCursor);
+        stage->doSaveState();
         // Save the children in a right to left order so dependent stages (i.e. one using correlated
         // slots) are saved first.
         auto& children = stage->_children;
         for (auto idx = children.size(); idx-- > 0;) {
-            children[idx]->saveState(relinquishCursor,
-                                     disableSlotAccess ? shouldOptimizeSaveState(idx) : false);
+            children[idx]->saveState(disableSlotAccess ? shouldOptimizeSaveState(idx) : false);
         }
 
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
-        _saveState = relinquishCursor ? SaveState::kSavedFull : SaveState::kSavedNotFull;
+        _saveState = SaveState::kSaved;
 #endif
     }
 
@@ -222,29 +219,21 @@ public:
      * Throws a UserException on failure to restore due to a conflicting event such as a
      * collection drop. May throw a WriteConflictException, in which case the caller may choose to
      * retry.
-     *
-     * The 'relinquishCursor' parameter indicates whether the stages are recovering from a "full
-     * save" or not, as discussed in saveState(). It is the caller's responsibility to pass the same
-     * value for 'relinquishCursor' as was passed in the previous call to saveState().
      */
-    void restoreState(bool relinquishCursor) {
+    void restoreState() {
         auto stage = static_cast<T*>(this);
         stage->_commonStats.unyields++;
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
-        if (relinquishCursor) {
-            invariant(_saveState == SaveState::kSavedFull);
-        } else {
-            invariant(_saveState == SaveState::kSavedNotFull);
-        }
+        invariant(_saveState == SaveState::kSaved);
 #endif
 
         for (auto&& child : stage->_children) {
-            child->restoreState(relinquishCursor);
+            child->restoreState();
         }
 
-        stage->doRestoreState(relinquishCursor);
+        stage->doRestoreState();
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
-        stage->_saveState = SaveState::kNotSaved;
+        stage->_saveState = SaveState::kActive;
 #endif
     }
 
@@ -253,9 +242,17 @@ protected:
     // per stage. This information is only used for sanity checking, so we only run these
     // checks in debug builds.
 #if defined(MONGO_CONFIG_DEBUG_BUILD)
-    // TODO SERVER-59620: Remove this.
-    enum class SaveState { kNotSaved, kSavedFull, kSavedNotFull };
-    SaveState _saveState{SaveState::kNotSaved};
+    enum class SaveState {
+        // The "active" state is when the plan can access storage and operations like
+        // open(), getNext(), close() are permitted.
+        kActive,
+
+        // In the "saved" state, the plan is completely detached from the storage engine, but
+        // cannot be executed. In order to bring the plan back into an active state, restoreState()
+        // must be called.
+        kSaved
+    };
+    SaveState _saveState{SaveState::kActive};
 #endif
 
     virtual bool shouldOptimizeSaveState(size_t idx) const {
@@ -460,8 +457,9 @@ public:
      * execution has started.
      */
     void markShouldCollectTimingInfo() {
-        invariant(durationCount<Microseconds>(_commonStats.executionTime.executionTimeEstimate) ==
-                  0);
+        tassert(11093508,
+                "Execution should not have started",
+                durationCount<Microseconds>(_commonStats.executionTime.executionTimeEstimate) == 0);
 
         if (internalMeasureQueryExecutionTimeInNanoseconds.load()) {
             _commonStats.executionTime.precision = QueryExecTimerPrecision::kNanos;
@@ -491,6 +489,10 @@ public:
 
     bool slotsAccessible() const {
         return _slotsAccessible;
+    }
+
+    const boost::optional<SimpleMemoryUsageTracker>& getMemoryTracker() const {
+        return _memoryTracker;
     }
 
 protected:
@@ -548,7 +550,7 @@ protected:
                 return boost::optional<ScopedTimer>(
                     boost::in_place_init,
                     &_commonStats.executionTime.executionTimeEstimate,
-                    opCtx->getServiceContext()->getFastClockSource());
+                    &opCtx->fastClockSource());
             } else {
                 return boost::optional<ScopedTimer>(
                     boost::in_place_init,
@@ -561,6 +563,8 @@ protected:
     }
 
     CommonStats _commonStats;
+
+    boost::optional<SimpleMemoryUsageTracker> _memoryTracker{boost::none};
 
 private:
     // Attaches the trial run tracker to this specific node if needed.
@@ -659,7 +663,8 @@ public:
             // for interrupt checking, but when disabled we do it ourselves.
             checkForInterruptNoYield(opCtx);
         } else if (_yieldPolicy->shouldYieldOrInterrupt(opCtx)) {
-            uassertStatusOK(_yieldPolicy->yieldOrInterrupt(opCtx));
+            uassertStatusOK(_yieldPolicy->yieldOrInterrupt(
+                opCtx, nullptr, RestoreContext::RestoreType::kYield));
         }
     }
 
@@ -745,6 +750,27 @@ public:
     virtual void open(bool reOpen) = 0;
 
     /**
+     * The stage spills its data and asks from all its children to spill their data as well.
+     */
+    void forceSpill(PlanYieldPolicy* yieldPolicy) {
+        if (yieldPolicy && yieldPolicy->shouldYieldOrInterrupt(_opCtx)) {
+            uassertStatusOK(yieldPolicy->yieldOrInterrupt(
+                _opCtx, nullptr, RestoreContext::RestoreType::kYield));
+        }
+        doForceSpill();
+        for (const auto& child : _children) {
+            child->forceSpill(yieldPolicy);
+        }
+    }
+
+    void attachCollectionAcquisition(const MultipleCollectionAccessor& mca) {
+        doAttachCollectionAcquisition(mca);
+        for (auto&& child : _children) {
+            child->attachCollectionAcquisition(mca);
+        }
+    }
+
+    /**
      * Moves to the next position. If the end is reached then return EOF otherwise ADVANCED. Callers
      * are not required to call getNext until EOF. They can stop consuming results at any time. Once
      * EOF is reached it will stay at EOF unless reopened.
@@ -774,12 +800,26 @@ public:
     friend class CanTrackStats<PlanStage>;
     friend class CanInterrupt<PlanStage>;
 
+private:
+    /**
+     * Spills the stage's data to disk. Stages that can spill their own data need to override this
+     * method.
+     */
+    virtual void doForceSpill() {}
+
 protected:
     // Derived classes can optionally override these methods.
-    virtual void doSaveState(bool relinquishCursor) {}
-    virtual void doRestoreState(bool relinquishCursor) {}
+    virtual void doSaveState() {}
+    virtual void doRestoreState() {}
     virtual void doDetachFromOperationContext() {}
     virtual void doAttachToOperationContext(OperationContext* opCtx) {}
+
+    /**
+     * Allows collection accessing stages to obtain a reference to the collection acquisition. This
+     * should be a no-op for non-collection accessing stages, and needs to be implemented by
+     * collection accessing stages like scan and ixscan.
+     */
+    virtual void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) = 0;
 
     Vector _children;
 };

@@ -27,16 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/none.hpp>
-#include <cmath>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/client/dbclient_connection.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -48,7 +39,6 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/client/authenticate.h"
-#include "mongo/client/dbclient_connection.h"
 #include "mongo/client/replica_set_monitor.h"
 #include "mongo/client/sasl_client_authenticate.h"
 #include "mongo/client/sasl_client_session.h"
@@ -62,10 +52,6 @@
 #include "mongo/db/wire_version.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/metadata/client_metadata.h"
@@ -88,6 +74,17 @@
 #include "mongo/util/time_support.h"
 #include "mongo/util/version.h"
 
+#include <cmath>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
 
@@ -100,7 +97,7 @@ DBClientConnection::DBClientConnection(bool autoReconnect,
                                        MongoURI uri,
                                        const HandshakeValidationHook& hook,
                                        const ClientAPIVersionParameters* apiParameters)
-    : DBClientSession(autoReconnect, soTimeout, uri, hook, apiParameters),
+    : DBClientSession(autoReconnect, soTimeout, std::move(uri), hook, apiParameters),
       _autoReconnectBackoff(Seconds(1), Seconds(2)) {
     _numConnections.fetchAndAdd(1);
 }
@@ -260,19 +257,11 @@ void DBClientConnection::handleNotPrimaryResponse(const BSONObj& replyBody,
 
 #ifdef MONGO_CONFIG_SSL
 const SSLConfiguration* DBClientConnection::getSSLConfiguration() {
-    auto& sslManager = _session->getSSLManager();
-    if (!sslManager) {
-        return nullptr;
-    }
-    return &sslManager->getSSLConfiguration();
+    return _session->getSSLConfiguration();
 }
 
 bool DBClientConnection::isUsingTransientSSLParams() const {
     return _transientSSLParams.has_value();
-}
-
-bool DBClientConnection::isTLS() {
-    return SSLPeerInfo::forSession(_session).isTLS();
 }
 
 #endif

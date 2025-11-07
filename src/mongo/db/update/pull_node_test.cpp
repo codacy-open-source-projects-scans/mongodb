@@ -27,31 +27,31 @@
  *    it in the license file.
  */
 
-#include <utility>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/update/pull_node.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
-#include "mongo/bson/mutable/document.h"
-#include "mongo/bson/mutable/element.h"
+#include "mongo/db/exec/mutable_bson/document.h"
+#include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/db/update/pull_node.h"
 #include "mongo/db/update/update_executor.h"
 #include "mongo/db/update/update_node_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <utility>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
 
 using PullNodeTest = UpdateTestFixture;
 
-TEST(PullNodeTest, InitWithBadMatchExpressionFails) {
+TEST(SimplePullNodeTest, InitWithBadMatchExpressionFails) {
     auto update = fromjson("{$pull: {a: {b: {$foo: 1}}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PullNode node;
@@ -60,7 +60,7 @@ TEST(PullNodeTest, InitWithBadMatchExpressionFails) {
     ASSERT_EQUALS(ErrorCodes::BadValue, status);
 }
 
-TEST(PullNodeTest, InitWithBadTopLevelOperatorFails) {
+TEST(SimplePullNodeTest, InitWithBadTopLevelOperatorFails) {
     auto update = fromjson("{$pull: {a: {$foo: 1}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PullNode node;
@@ -69,7 +69,7 @@ TEST(PullNodeTest, InitWithBadTopLevelOperatorFails) {
     ASSERT_EQUALS(ErrorCodes::BadValue, status);
 }
 
-TEST(PullNodeTest, InitWithTextFails) {
+TEST(SimplePullNodeTest, InitWithTextFails) {
     auto update = fromjson("{$pull: {a: {$text: {$search: 'str'}}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PullNode node;
@@ -78,7 +78,7 @@ TEST(PullNodeTest, InitWithTextFails) {
     ASSERT_EQUALS(ErrorCodes::BadValue, status);
 }
 
-TEST(PullNodeTest, InitWithWhereFails) {
+TEST(SimplePullNodeTest, InitWithWhereFails) {
     auto update = fromjson("{$pull: {a: {$where: 'this.a == this.b'}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PullNode node;
@@ -87,7 +87,7 @@ TEST(PullNodeTest, InitWithWhereFails) {
     ASSERT_EQUALS(ErrorCodes::BadValue, status);
 }
 
-TEST(PullNodeTest, InitWithGeoNearElemFails) {
+TEST(SimplePullNodeTest, InitWithGeoNearElemFails) {
     auto update =
         fromjson("{$pull: {a: {$nearSphere: {$geometry: {type: 'Point', coordinates: [0, 0]}}}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
@@ -97,7 +97,7 @@ TEST(PullNodeTest, InitWithGeoNearElemFails) {
     ASSERT_EQUALS(5626500, status.code());
 }
 
-TEST(PullNodeTest, InitWithGeoNearObjectFails) {
+TEST(SimplePullNodeTest, InitWithGeoNearObjectFails) {
     auto update = fromjson(
         "{$pull: {a: {b: {$nearSphere: {$geometry: {type: 'Point', coordinates: [0, 0]}}}}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
@@ -107,7 +107,7 @@ TEST(PullNodeTest, InitWithGeoNearObjectFails) {
     ASSERT_EQUALS(5626500, status.code());
 }
 
-TEST(PullNodeTest, InitWithExprElemFails) {
+TEST(SimplePullNodeTest, InitWithExprElemFails) {
     auto update = fromjson("{$pull: {a: {$expr: {$eq: [5, 5]}}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PullNode node;
@@ -116,7 +116,7 @@ TEST(PullNodeTest, InitWithExprElemFails) {
     ASSERT_EQUALS(ErrorCodes::QueryFeatureNotAllowed, status);
 }
 
-TEST(PullNodeTest, InitWithExprObjectFails) {
+TEST(SimplePullNodeTest, InitWithExprObjectFails) {
     auto update = fromjson("{$pull: {a: {$expr: {$eq: ['$a', {$literal: {b: 5}}]}}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PullNode node;
@@ -125,7 +125,7 @@ TEST(PullNodeTest, InitWithExprObjectFails) {
     ASSERT_EQUALS(ErrorCodes::QueryFeatureNotAllowed, status);
 }
 
-TEST(PullNodeTest, InitWithJSONSchemaFails) {
+TEST(SimplePullNodeTest, InitWithJSONSchemaFails) {
     auto update = fromjson("{$pull: {a: {$jsonSchema: {}}}}");
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     PullNode node;

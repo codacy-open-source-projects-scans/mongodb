@@ -18,20 +18,21 @@
       # BulkWrite profiling and currentOp output format is not the same as normal writes.
       - jstests/core/**/profile*.js
       - jstests/core/query/comment_field.js
-      - jstests/core/fsync.js
+      - jstests/core/administrative/fsync/fsync.js
       # Runs an update with illegal format (no 'updates'). We could work around this in the override
       # but it is very annoying.
       - jstests/core/write/insert/batch_write_command_insert.js
-      - jstests/core/write/update/batch_write_command_update.js
-      - jstests/core/write/delete/batch_write_command_delete.js
+      - jstests/core/query/batch_write/batch_write_command_update.js
+      - jstests/core/query/batch_write/batch_write_command_delete.js
       # Requires specific commands to be run to trigger failpoint (i.e. requires insert, we run bulkWrite).
-      - jstests/core/failcommand_failpoint.js
+      - jstests/core/testing/failcommand_failpoint.js
       # This test adds unknown fields to insert/update/delete ops which we ignore
-      - jstests/core/write/write_commands_reject_unknown_fields.js
+      - jstests/core/query/parsing/write_commands_reject_unknown_fields.js
       # Expects explain to fail for using UUID instead of collection name.
       - jstests/core/query/explain/explain_uuid.js
       # Checks for specific name in the command that was executed that we override.
       - jstests/core/query/explain/explain_includes_command.js
+      - jstests/core/query/distinct/distinct_collator.js
 
 - name: single_op_txns_excluded_files
   value:
@@ -53,6 +54,9 @@
       - src/mongo/db/modules/enterprise/jstests/fle2/basic_delete.js
       # The way we override explain doesn't work with FLE tests.
       - src/mongo/db/modules/enterprise/jstests/fle2/query/explain*.js
+      # This file is an end to end test for both CSFLE and QE. CSFLE is not supported in bulk_write mode,
+      # and any writes performed are simply for setting up the test collection.
+      - src/mongo/db/modules/enterprise/jstests/fle2/query/aggregate_lookupMultiSchema.js
 
 - name: txn_passthrough_runner_selftest
   value:

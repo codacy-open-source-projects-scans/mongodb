@@ -29,25 +29,8 @@
 
 #pragma once
 
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <functional>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <variant>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
-#include "mongo/base/initializer.h"
-#include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -58,29 +41,40 @@
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/accumulator_for_window_functions.h"
 #include "mongo/db/pipeline/accumulator_multi.h"
-#include "mongo/db/pipeline/accumulator_percentile.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/document_source_set_window_fields_gen.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/expression_dependencies.h"
 #include "mongo/db/pipeline/field_path.h"
-#include "mongo/db/pipeline/percentile_algo.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/pipeline/window_function/window_bounds.h"
 #include "mongo/db/pipeline/window_function/window_function.h"
 #include "mongo/db/pipeline/window_function/window_function_integral.h"
-#include "mongo/db/pipeline/window_function/window_function_min_max_scalar.h"
+#include "mongo/db/pipeline/window_function/window_function_min_max_scaler.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/dependency_analysis/expression_dependencies.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
 #include "mongo/db/query/datetime/date_time_support.h"
-#include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/db/query/sort_pattern.h"
+#include "mongo/db/version_context.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
+
+#include <functional>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 class WindowFunctionExec;
@@ -89,10 +83,11 @@ class PartitionIterator;
 
 #define REGISTER_STABLE_WINDOW_FUNCTION(name, parser) \
     REGISTER_WINDOW_FUNCTION_CONDITIONALLY(           \
-        name, parser, boost::none, AllowedWithApiStrict::kAlways, true)
+        name, parser, nullptr /* featureFlag */, AllowedWithApiStrict::kAlways, true)
 
 #define REGISTER_WINDOW_FUNCTION(name, parser, allowedWithApi) \
-    REGISTER_WINDOW_FUNCTION_CONDITIONALLY(name, parser, boost::none, allowedWithApi, true)
+    REGISTER_WINDOW_FUNCTION_CONDITIONALLY(                    \
+        name, parser, nullptr /* featureFlag */, allowedWithApi, true)
 
 /**
  * We store featureFlag in the parserMap, so that it can be checked at runtime to correctly
@@ -101,20 +96,21 @@ class PartitionIterator;
 #define REGISTER_WINDOW_FUNCTION_WITH_FEATURE_FLAG(name, parser, featureFlag, allowedWithApi) \
     REGISTER_WINDOW_FUNCTION_CONDITIONALLY(name, parser, featureFlag, allowedWithApi, true)
 
-#define REGISTER_WINDOW_FUNCTION_CONDITIONALLY(name, parser, featureFlag, allowedWithApi, ...) \
-    MONGO_INITIALIZER_GENERAL(addToWindowFunctionMap_##name,                                   \
-                              ("BeginWindowFunctionRegistration"),                             \
-                              ("EndWindowFunctionRegistration"))                               \
-    (InitializerContext*) {                                                                    \
-        if (!__VA_ARGS__ ||                                                                    \
-            (boost::optional<FeatureFlag>(featureFlag) != boost::none &&                       \
-             !boost::optional<FeatureFlag>(featureFlag)                                        \
-                  ->isEnabledUseLatestFCVWhenUninitialized(                                    \
-                      serverGlobalParams.featureCompatibility.acquireFCVSnapshot()))) {        \
-            return;                                                                            \
-        }                                                                                      \
-        ::mongo::window_function::Expression::registerParser(                                  \
-            "$" #name, parser, featureFlag, allowedWithApi);                                   \
+#define REGISTER_WINDOW_FUNCTION_CONDITIONALLY(name, parser, featureFlag, allowedWithApi, ...)  \
+    MONGO_INITIALIZER_GENERAL(addToWindowFunctionMap_##name,                                    \
+                              ("BeginWindowFunctionRegistration"),                              \
+                              ("EndWindowFunctionRegistration"))                                \
+    (InitializerContext*) {                                                                     \
+        /* Require 'featureFlag' to be a constexpr. */                                          \
+        constexpr FeatureFlag* constFeatureFlag{featureFlag};                                   \
+        /* This non-constexpr variable works around a bug in GCC when 'featureFlag' is null. */ \
+        FeatureFlag* featureFlagValue{constFeatureFlag};                                        \
+        bool evaluatedCondition{__VA_ARGS__};                                                   \
+        if (!evaluatedCondition || (featureFlagValue && !featureFlagValue->canBeEnabled())) {   \
+            return;                                                                             \
+        }                                                                                       \
+        ::mongo::window_function::Expression::registerParser(                                   \
+            "$" #name, parser, featureFlag, allowedWithApi);                                    \
     }
 
 #define REGISTER_STABLE_REMOVABLE_WINDOW_FUNCTION(name, accumClass, wfClass)           \
@@ -125,7 +121,7 @@ class PartitionIterator;
         ::mongo::window_function::Expression::registerParser(                          \
             "$" #name,                                                                 \
             ::mongo::window_function::ExpressionRemovable<accumClass, wfClass>::parse, \
-            boost::none,                                                               \
+            nullptr, /* featureFlag */                                                 \
             AllowedWithApiStrict::kAlways);                                            \
     }
 
@@ -176,13 +172,13 @@ public:
 
     struct ExpressionParserRegistration {
         Parser parser;
-        boost::optional<FeatureFlag> featureFlag;
+        FeatureFlag* featureFlag;
         AllowedWithApiStrict allowedWithApi;
     };
 
     static void registerParser(std::string functionName,
                                Parser parser,
-                               boost::optional<FeatureFlag> featureFlag,
+                               FeatureFlag* featureFlag,
                                AllowedWithApiStrict allowedWithApi);
 
     /**
@@ -296,11 +292,11 @@ public:
                 "Must specify a window function in output field",
                 accumulatorName);
         return make_intrusive<ExpressionFromAccumulator<NonRemovableType>>(
-            expCtx, accumulatorName->toString(), std::move(input), std::move(bounds));
+            expCtx, std::string{*accumulatorName}, std::move(input), std::move(bounds));
     }
 
     boost::intrusive_ptr<AccumulatorState> buildAccumulatorOnly() const final {
-        return NonRemovableType::create(_expCtx);
+        return make_intrusive<NonRemovableType>(_expCtx);
     }
     std::unique_ptr<WindowFunctionState> buildRemovable() const final {
         uasserted(5461500,
@@ -364,11 +360,11 @@ public:
                 str::stream() << "'window' field is not allowed in " << accumulatorName,
                 windowFieldMissing);
         return make_intrusive<ExpressionFromLeftUnboundedWindowFunction<FunctionType>>(
-            expCtx, accumulatorName->toString(), std::move(input), std::move(bounds));
+            expCtx, std::string{*accumulatorName}, std::move(input), std::move(bounds));
     }
 
     boost::intrusive_ptr<AccumulatorState> buildAccumulatorOnly() const final {
-        return FunctionType::create(_expCtx);
+        return make_intrusive<FunctionType>(_expCtx);
     }
 
     std::unique_ptr<WindowFunctionState> buildRemovable() const final {
@@ -415,7 +411,7 @@ public:
                 "Must specify a window function in output field",
                 accumulatorName);
         return make_intrusive<ExpressionRemovable<NonRemovableType, RemovableType>>(
-            expCtx, accumulatorName->toString(), std::move(input), std::move(bounds));
+            expCtx, std::string{*accumulatorName}, std::move(input), std::move(bounds));
     }
 
     ExpressionRemovable(ExpressionContext* expCtx,
@@ -425,17 +421,41 @@ public:
         : Expression(expCtx, std::move(accumulatorName), std::move(input), std::move(bounds)) {}
 
     boost::intrusive_ptr<AccumulatorState> buildAccumulatorOnly() const final {
-        return NonRemovableType::create(_expCtx);
+        return make_intrusive<NonRemovableType>(_expCtx);
     }
 
     std::unique_ptr<WindowFunctionState> buildRemovable() const final {
-        return RemovableType::create(_expCtx);
+        return std::make_unique<RemovableType>(_expCtx);
     }
 };
 
 template <typename RankType>
 class ExpressionFromRankAccumulator : public Expression {
 public:
+    static auto createLegacyRankWF(ExpressionContext* expCtx,
+                                   StringData accumulatorName,
+                                   const SortPattern& sortBy,
+                                   WindowBounds bounds) {
+        auto sortPatternPart = sortBy[0];
+        if (sortPatternPart.fieldPath) {
+            auto sortExpression = ExpressionFieldPath::createPathFromString(
+                expCtx, sortPatternPart.fieldPath->fullPath(), expCtx->variablesParseState);
+            return make_intrusive<ExpressionFromRankAccumulator<RankType>>(
+                expCtx,
+                std::string{accumulatorName},
+                std::move(sortExpression),
+                sortPatternPart.isAscending,
+                std::move(bounds));
+        } else {
+            return make_intrusive<ExpressionFromRankAccumulator<RankType>>(
+                expCtx,
+                std::string{accumulatorName},
+                sortPatternPart.expression,
+                sortPatternPart.isAscending,
+                std::move(bounds));
+        }
+    }
+
     static boost::intrusive_ptr<Expression> parse(BSONObj obj,
                                                   const boost::optional<SortPattern>& sortBy,
                                                   ExpressionContext* expCtx) {
@@ -451,37 +471,48 @@ public:
             accumulatorName = argName;
             uassert(5371603,
                     str::stream() << accumulatorName << " must be specified with '{}' as the value",
-                    arg.type() == BSONType::Object && arg.embeddedObject().nFields() == 0);
+                    arg.type() == BSONType::object && arg.embeddedObject().nFields() == 0);
         } else {
             tasserted(ErrorCodes::FailedToParse,
                       str::stream() << "Window function found an unknown argument: " << argName);
         }
 
-        // Rank based accumulators use the sort by expression as the input.
+        // TODO SERVER-98562 This 'exactly one element' requirement is outdated (for non-legacy
+        // case), but it needs to be tested.
         uassert(5371602,
                 str::stream() << accumulatorName
                               << " must be specified with a top level sortBy expression with "
                                  "exactly one element",
                 sortBy && sortBy->isSingleElementKey());
-        auto sortPatternPart = sortBy.get()[0];
-        if (sortPatternPart.fieldPath) {
-            auto sortExpression = ExpressionFieldPath::createPathFromString(
-                expCtx, sortPatternPart.fieldPath->fullPath(), expCtx->variablesParseState);
+
+        // Use the new $rank implementation that depends on sort key metadata if
+        // 1) we are the context of a $rankFusion query, or
+        // 2) the feature flag is enabled
+        // #1 is because $rankFusion was backported to 8.0, and we don't want $rankFusion queries to
+        // fail during an FCV-gated upgrade.
+        // #2 is because we still need to preserve FCV-gating for generic $setWindowFields queries
+        // in order to avoid failures during upgrade (this $setWindowFields feature is *only*
+        // enabled for $rankFusion on 8.0, so it is new behavior on this version).
+        // TODO SERVER-85426 Always use the new $rank implementation.
+        if (expCtx->isHybridSearch() || expCtx->isBasicRankFusionFeatureFlagEnabled()) {
+            // The 'modern' way to do $rank is to just use the sort key. But we only support this on
+            // newer versions, since we need to make sure that the $sort stage is giving us the sort
+            // key.
             return make_intrusive<ExpressionFromRankAccumulator<RankType>>(
-                expCtx,
-                accumulatorName->toString(),
-                std::move(sortExpression),
-                sortPatternPart.isAscending,
-                std::move(bounds));
-        } else {
-            return make_intrusive<ExpressionFromRankAccumulator<RankType>>(
-                expCtx,
-                accumulatorName->toString(),
-                sortPatternPart.expression,
-                sortPatternPart.isAscending,
-                std::move(bounds));
+                expCtx, std::string{*accumulatorName}, std::move(bounds));
         }
+        // TODO SERVER-85426 This whole branch/helper can be deleted.
+        return createLegacyRankWF(expCtx, *accumulatorName, *sortBy, std::move(bounds));
     }
+
+    ExpressionFromRankAccumulator(ExpressionContext* expCtx,
+                                  std::string accumulatorName,
+                                  WindowBounds bounds)
+        : Expression(expCtx,
+                     std::move(accumulatorName),
+                     make_intrusive<ExpressionInternalRawSortKey>(expCtx),
+                     std::move(bounds)),
+          _legacyIsAscending(boost::none) {}
 
     ExpressionFromRankAccumulator(ExpressionContext* expCtx,
                                   std::string accumulatorName,
@@ -489,10 +520,13 @@ public:
                                   bool isAscending,
                                   WindowBounds bounds)
         : Expression(expCtx, std::move(accumulatorName), std::move(input), std::move(bounds)),
-          _isAscending(isAscending) {}
+          _legacyIsAscending(isAscending) {}
 
     boost::intrusive_ptr<AccumulatorState> buildAccumulatorOnly() const final {
-        return RankType::create(_expCtx, _isAscending);
+        if (_legacyIsAscending.has_value()) {
+            return make_intrusive<RankType>(_expCtx, *_legacyIsAscending);
+        }
+        return make_intrusive<RankType>(_expCtx);
     }
 
     std::unique_ptr<WindowFunctionState> buildRemovable() const final {
@@ -508,7 +542,9 @@ public:
     }
 
 private:
-    bool _isAscending;
+    // In the old way to compute the rank, we need to keep track of whether the requested sort was
+    // ascending or descending.
+    boost::optional<bool> _legacyIsAscending;
 };
 
 class ExpressionExpMovingAvg : public Expression {
@@ -539,10 +575,10 @@ public:
 
     boost::intrusive_ptr<AccumulatorState> buildAccumulatorOnly() const final {
         if (_N) {
-            return AccumulatorExpMovingAvg::create(
+            return make_intrusive<AccumulatorExpMovingAvg>(
                 _expCtx, Decimal128(2).divide(Decimal128(_N.get()).add(Decimal128(1))));
         } else if (_alpha) {
-            return AccumulatorExpMovingAvg::create(_expCtx, _alpha.get());
+            return make_intrusive<AccumulatorExpMovingAvg>(_expCtx, _alpha.get());
         }
         tasserted(5433602, "ExpMovingAvg neither N nor alpha was set");
     }
@@ -629,7 +665,7 @@ protected:
         {
             uassert(ErrorCodes::FailedToParse,
                     str::stream() << kArgUnit << "' must be a string, but got " << arg.type(),
-                    arg.type() == String);
+                    arg.type() == BSONType::string);
             unit = parseTimeUnit(arg.valueStringData());
             switch (*unit) {
                 // These larger time units vary so much, it doesn't make sense to define a
@@ -707,7 +743,7 @@ public:
         uassert(ErrorCodes::FailedToParse,
                 str::stream() << "$derivative expects an object, but got a "
                               << derivativeArgs.type() << ": " << derivativeArgs,
-                derivativeArgs.type() == BSONType::Object);
+                derivativeArgs.type() == BSONType::object);
 
         boost::intrusive_ptr<::mongo::Expression> input;
         boost::optional<TimeUnit> unit;
@@ -785,7 +821,7 @@ public:
         uassert(ErrorCodes::FailedToParse,
                 str::stream() << "$integral expects an object, but got a " << integralArgs.type()
                               << ": " << integralArgs,
-                integralArgs.type() == BSONType::Object);
+                integralArgs.type() == BSONType::object);
 
         boost::intrusive_ptr<::mongo::Expression> input;
         boost::optional<TimeUnit> unit = boost::none;
@@ -810,7 +846,7 @@ public:
     }
 
     boost::intrusive_ptr<AccumulatorState> buildAccumulatorOnly() const final {
-        return AccumulatorIntegral::create(_expCtx, unitInMillis());
+        return make_intrusive<AccumulatorIntegral>(_expCtx, unitInMillis());
     }
 
     std::unique_ptr<WindowFunctionState> buildRemovable() const final {
@@ -866,7 +902,7 @@ public:
                 sortBy && sortBy->isSingleElementKey());
 
         return make_intrusive<ExpressionLinearFill>(
-            expCtx, accumulatorName->toString(), std::move(input), std::move(bounds));
+            expCtx, std::string{*accumulatorName}, std::move(input), std::move(bounds));
     }
 
     boost::intrusive_ptr<AccumulatorState> buildAccumulatorOnly() const final {
@@ -948,14 +984,14 @@ public:
     }
 };
 
-class ExpressionMinMaxScalar : public Expression {
+class ExpressionMinMaxScaler : public Expression {
 public:
-    static constexpr StringData kWindowFnName = "$minMaxScalar"_sd;
+    static constexpr StringData kWindowFnName = "$minMaxScaler"_sd;
     static constexpr StringData kInputArg = "input"_sd;
     static constexpr StringData kMinArg = "min"_sd;
     static constexpr StringData kMaxArg = "max"_sd;
 
-    ExpressionMinMaxScalar(ExpressionContext* expCtx,
+    ExpressionMinMaxScaler(ExpressionContext* expCtx,
                            boost::intrusive_ptr<::mongo::Expression> input,
                            WindowBounds bounds,
                            std::pair<Value, Value> sMinAndsMax)
@@ -967,25 +1003,25 @@ public:
                                                   ExpressionContext* expCtx);
 
     boost::intrusive_ptr<AccumulatorState> buildAccumulatorOnly() const final {
-        // This function should be unreachable as the $minMaxScalar window function does
+        // This function should be unreachable as the $minMaxScaler window function does
         // not use an accumulator to implement the non-removable version of its execution.
-        // This is because $minMaxScalar relies on the "current" document value being
+        // This is because $minMaxScaler relies on the "current" document value being
         // processed, which implies a 1:1 ratio of input to output documents in the group
         // of documents being operated over, whereas accumulators in general can reduce
         // the number of documents output compared to the input.
-        // Instead $minMaxScalar has a custom WindowFunctionExec class that handles the
+        // Instead $minMaxScaler has a custom WindowFunctionExec class that handles the
         // non-removable implementation that is installed directly in the
         // WindowFunctionExec::create() method.
         MONGO_UNREACHABLE_TASSERT(9459900);
     }
 
     std::unique_ptr<WindowFunctionState> buildRemovable() const final {
-        return WindowFunctionMinMaxScalar::create(_expCtx, _sMinAndsMax);
+        return WindowFunctionMinMaxScaler::create(_expCtx, _sMinAndsMax);
     }
 
     Value serialize(const SerializationOptions& opts) const final {
         MutableDocument result;
-        // $minMaxScalar args
+        // $minMaxScaler args
         result[_accumulatorName][kInputArg] = _input->serialize(opts);
         result[_accumulatorName][kMinArg] = _sMinAndsMax.first;
         result[_accumulatorName][kMaxArg] = _sMinAndsMax.second;
@@ -1008,21 +1044,6 @@ private:
     // Output domain Value is bounded between sMin and sMax (inclusive).
     // First value is min, second value is max.
     std::pair<Value, Value> _sMinAndsMax;
-
-    // Internal parsing helper functions.
-    //
-    // Parses the top level keys to the $minMaxScalar window function BSON.
-    // Expects a '$minMaxScalar' key, and optionally a 'window' key.
-    // First return value of the pair is the unparsed arguments to '$minMaxScalar'.
-    // Second return value of the pair is the parsed WindowBounds.
-    static std::pair<BSONElement, WindowBounds> parseTopLevelKeys(
-        BSONObj obj, const boost::optional<SortPattern>& sortBy, ExpressionContext* expCtx);
-    // Parses the BSON object that is the argument to the '$minMaxScalar' key.
-    // First return value of the pair is the parsed Expression of the 'input' key.
-    // Second return value is the pair representing the sMin and sMax arguments to the window
-    // function.
-    static std::pair<boost::intrusive_ptr<::mongo::Expression>, std::pair<Value, Value>>
-    parseMinMaxScalarArgs(BSONElement minMaxScalarElem, ExpressionContext* expCtx);
 };
 
 /**

@@ -29,28 +29,26 @@
 
 #include "mongo/db/storage/wiredtiger/wiredtiger_index_util.h"
 
-#include <cerrno>
-
-#include <boost/move/utility_core.hpp>
-#include <wiredtiger.h>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
+#include "mongo/db/storage/execution_context.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_connection.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_cursor.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_prepare_conflict.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_session_data.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/str.h"
+
+#include <cerrno>
+
+#include <wiredtiger.h>
+
+#include <boost/move/utility_core.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -65,7 +63,8 @@ bool WiredTigerIndexUtil::appendCustomStats(WiredTigerRecoveryUnit& ru,
                                             const std::string& uri) {
     {
         BSONObjBuilder metadata(output->subobjStart("metadata"));
-        Status status = WiredTigerUtil::getApplicationMetadata(ru, uri, &metadata);
+        Status status =
+            WiredTigerUtil::getApplicationMetadata(*ru.getSessionNoTxn(), uri, &metadata);
         if (!status.isOK()) {
             metadata.append("error", "unable to retrieve metadata");
             metadata.append("code", static_cast<int>(status.code()));
@@ -73,8 +72,9 @@ bool WiredTigerIndexUtil::appendCustomStats(WiredTigerRecoveryUnit& ru,
         }
     }
     std::string type, sourceURI;
-    WiredTigerUtil::fetchTypeAndSourceURI(ru, uri, &type, &sourceURI);
-    StatusWith<std::string> metadataResult = WiredTigerUtil::getMetadataCreate(ru, sourceURI);
+    WiredTigerUtil::fetchTypeAndSourceURI(*ru.getSessionNoTxn(), uri, &type, &sourceURI);
+    StatusWith<std::string> metadataResult =
+        WiredTigerUtil::getMetadataCreate(*ru.getSessionNoTxn(), sourceURI);
     StringData creationStringName("creationString");
     if (!metadataResult.isOK()) {
         BSONObjBuilder creationString(output->subobjStart(creationStringName));
@@ -88,9 +88,8 @@ bool WiredTigerIndexUtil::appendCustomStats(WiredTigerRecoveryUnit& ru,
     }
 
     WiredTigerSession* session = ru.getSession();
-    WT_SESSION* s = session->getSession();
-    Status status =
-        WiredTigerUtil::exportTableToBSON(s, "statistics:" + uri, "statistics=(fast)", *output);
+    Status status = WiredTigerUtil::exportTableToBSON(
+        *session, "statistics:" + uri, "statistics=(fast)", *output);
     if (!status.isOK()) {
         output->append("error", "unable to retrieve statistics");
         output->append("code", static_cast<int>(status.code()));
@@ -99,21 +98,17 @@ bool WiredTigerIndexUtil::appendCustomStats(WiredTigerRecoveryUnit& ru,
     return true;
 }
 
-StatusWith<int64_t> WiredTigerIndexUtil::compact(Interruptible& interruptible,
-                                                 WiredTigerRecoveryUnit& ru,
+StatusWith<int64_t> WiredTigerIndexUtil::compact(OperationContext* opCtx,
+                                                 WiredTigerRecoveryUnit& wtRu,
                                                  const std::string& uri,
                                                  const CompactOptions& options) {
-    WiredTigerSessionCache* cache = ru.getSessionCache();
-    if (cache->isEphemeral()) {
+    WiredTigerConnection* connection = wtRu.getConnection();
+    if (connection->isEphemeral()) {
         return 0;
     }
 
-    WT_SESSION* s = ru.getSession()->getSession();
-    ru.abandonSnapshot();
-
-    // Set a pointer on the WT_SESSION to the interruptible, so that WT::compact can use a
-    // callback to check for interrupts.
-    SessionDataRAII sessionRaii(s, &interruptible);
+    WiredTigerSession* s = wtRu.getSession();
+    wtRu.abandonSnapshot();
 
     StringBuilder config;
     config << "timeout=0";
@@ -123,8 +118,10 @@ StatusWith<int64_t> WiredTigerIndexUtil::compact(Interruptible& interruptible,
     if (options.freeSpaceTargetMB) {
         config << ",free_space_target=" + std::to_string(*options.freeSpaceTargetMB) + "MB";
     }
-    int ret = s->compact(s, uri.c_str(), config.str().c_str());
-    if (ret == WT_ERROR && !interruptible.checkForInterruptNoAssert().isOK()) {
+
+    int ret = s->compact(uri.c_str(), config.str().c_str());
+
+    if (ret == WT_ERROR && !opCtx->checkForInterruptNoAssert().isOK()) {
         return Status(ErrorCodes::Interrupted,
                       str::stream() << "Storage compaction interrupted on " << uri.c_str());
     }
@@ -135,28 +132,27 @@ StatusWith<int64_t> WiredTigerIndexUtil::compact(Interruptible& interruptible,
 
     if (ret == EBUSY) {
         return Status(ErrorCodes::Interrupted,
-                      str::stream() << "Compaction interrupted on " << uri.c_str()
-                                    << " due to cache eviction pressure");
+                      str::stream() << "Compaction interrupted on " << uri.c_str());
     }
 
-    invariantWTOK(ret, s);
+    invariantWTOK(ret, *s);
 
-    return options.dryRun ? WiredTigerUtil::getIdentCompactRewrittenExpectedSize(s, uri) : 0;
+    return options.dryRun ? WiredTigerUtil::getIdentCompactRewrittenExpectedSize(*s, uri) : 0;
 }
 
 bool WiredTigerIndexUtil::isEmpty(OperationContext* opCtx,
+                                  WiredTigerRecoveryUnit& wtRu,
                                   const std::string& uri,
                                   uint64_t tableId) {
-    WiredTigerCursor curwrap(
-        *WiredTigerRecoveryUnit::get(shard_role_details::getRecoveryUnit(opCtx)),
-        uri,
-        tableId,
-        false);
+    auto cursorParams = getWiredTigerCursorParams(wtRu, tableId);
+    WiredTigerCursor curwrap(std::move(cursorParams), uri, *wtRu.getSession());
     WT_CURSOR* c = curwrap.get();
     if (!c)
         return true;
     int ret = wiredTigerPrepareConflictRetry(
-        opCtx, *shard_role_details::getRecoveryUnit(opCtx), [&] { return c->next(c); });
+        *opCtx, StorageExecutionContext::get(opCtx)->getPrepareConflictTracker(), wtRu, [&] {
+            return c->next(c);
+        });
     if (ret == WT_NOTFOUND)
         return true;
     invariantWTOK(ret, c->session);
@@ -168,7 +164,7 @@ void WiredTigerIndexUtil::validateStructure(
     const std::string& uri,
     const boost::optional<std::string>& configurationOverride,
     IndexValidateResults& results) {
-    if (ru.getSessionCache()->isEphemeral()) {
+    if (ru.getConnection()->isEphemeral()) {
         return;
     }
 
@@ -181,8 +177,8 @@ void WiredTigerIndexUtil::validateStructure(
         return;
     }
 
-    auto err =
-        WiredTigerUtil::verifyTable(ru, uri, configurationOverride, results.getErrorsUnsafe());
+    auto err = WiredTigerUtil::verifyTable(
+        *ru.getSession(), uri, configurationOverride, results.getErrorsUnsafe());
     if (err == EBUSY) {
         std::string msg = str::stream()
             << "Could not complete validation of " << uri << ". "

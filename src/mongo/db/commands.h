@@ -29,17 +29,6 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <cstddef>
-#include <fmt/format.h>
-#include <functional>
-#include <memory>
-#include <set>
-#include <string>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
@@ -47,17 +36,16 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/mutable/element.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/basic_types_gen.h"
 #include "mongo/db/client.h"
-#include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/feature_flag.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
@@ -74,6 +62,7 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/platform/source_location.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/rpc/get_status_from_command_result_write_util.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_builder_interface.h"
@@ -82,10 +71,23 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules_incompletely_marked_header.h"
 #include "mongo/util/serialization_context.h"
 #include "mongo/util/static_immortal.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
+
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <set>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <boost/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -166,11 +168,11 @@ public:
 // Would be a namespace, but want to keep it closed rather than open.
 // Some of these may move to the BasicCommand shim if they are only for legacy implementations.
 struct CommandHelpers {
-    // The type of the first field in 'cmdObj' must be mongo::String. The first field is
+    // The type of the first field in 'cmdObj' must be BSONType::string. The first field is
     // interpreted as a collection name.
     static std::string parseNsFullyQualified(const BSONObj& cmdObj);
 
-    // The type of the first field in 'cmdObj' must be mongo::String or Symbol.
+    // The type of the first field in 'cmdObj' must be BSONType::string or Symbol.
     // The first field is interpreted as a collection name.
     static NamespaceString parseNsCollectionRequired(const DatabaseName& dbName,
                                                      const BSONObj& cmdObj);
@@ -185,8 +187,9 @@ struct CommandHelpers {
 
     /**
      * Return the namespace for the command. If the first field in 'cmdObj' is of type
-     * mongo::String, then that field is interpreted as the collection name.
-     * If the first field is not of type mongo::String, then the namespace only has database name.
+     * BSONType::string, then that field is interpreted as the collection name.
+     * If the first field is not of type BSONType::string, then the namespace only has database
+     * name.
      */
     static NamespaceString parseNsFromCommand(const DatabaseName& dbName, const BSONObj& cmdObj);
 
@@ -432,7 +435,7 @@ private:
 /**
  * Serves as a base for server commands. See the constructor for more details.
  */
-class Command {
+class MONGO_MOD_OPEN Command {
 public:
     enum class AllowedOnSecondary { kAlways, kNever, kOptIn };
     enum class HandshakeRole { kNone, kHello, kAuth };
@@ -611,6 +614,14 @@ public:
     virtual void snipForLogging(mutablebson::Document* cmdObj) const;
 
     /**
+     * Return true if this Command type is eligible for diagnostic printing when the command
+     * unexpectedly fails due to a tassert, invariant, or signal such as segfault.
+     */
+    virtual bool enableDiagnosticPrintingOnFailure() const {
+        return false;
+    }
+
+    /**
      * Marks a field name in a cmdObj as sensitive.
      *
      * The default snipForLogging shall remove these field names. Auditing shall not
@@ -763,6 +774,14 @@ public:
         return false;
     }
 
+    /**
+     * Returns false if this command manually opts out of mandatory authorization checks, true
+     otherwise. Will enable mandatory authorization checks by default.
+     */
+    virtual bool requiresAuthzChecks() const {
+        return true;
+    }
+
 protected:
     /** For extended role-dependent initialization. */
     virtual void doInitializeClusterRole(ClusterRole role) {}
@@ -781,7 +800,7 @@ private:
 /**
  * Represents a single invocation of a given command.
  */
-class CommandInvocation {
+class MONGO_MOD_OPEN CommandInvocation {
 public:
     CommandInvocation(const Command* definition) : _definition(definition) {}
 
@@ -889,6 +908,14 @@ public:
     }
 
     /**
+     * Returns whether this invocation supports the rawData command parameter. See
+     * raw_data_operation.h for more information.
+     */
+    virtual bool supportsRawData() const {
+        return false;
+    }
+
+    /**
      * Returns if this invocation can be mirrored to secondaries
      */
     virtual bool supportsReadMirroring() const {
@@ -985,12 +1012,11 @@ public:
     virtual const GenericArguments& getGenericArguments() const = 0;
 
     /**
-     * Returns true when this command is safe to retry on a StaleConfig or
+     * Returns true when this command is safe to retry on a StaleDatabaseVersion, StaleConfig or
      * ShardCannotRefreshDueToLocksHeld error. Commands can override this method with their own
      * retry logic.
      */
-    virtual bool canRetryOnStaleConfigOrShardCannotRefreshDueToLocksHeld(
-        const OpMsgRequest& request) const {
+    virtual bool canRetryOnStaleShardMetadataError(const OpMsgRequest& request) const {
         return true;
     }
 
@@ -1014,7 +1040,7 @@ private:
  * sequences. Commands should implement this class if they require access to the
  * ReplyBuilderInterface (e.g. to set the next invocation for an exhaust command).
  */
-class BasicCommandWithReplyBuilderInterface : public Command {
+class MONGO_MOD_OPEN BasicCommandWithReplyBuilderInterface : public Command {
 private:
     class Invocation;
 
@@ -1074,7 +1100,7 @@ public:
     /**
      * Checks if the client associated with the given OperationContext is authorized to run this
      * command.
-     * Command imlpementations MUST provide a method here, even if no authz checks are required.
+     * Command implementations MUST provide a method here, even if no authz checks are required.
      * Such commands should return Status::OK(), with a comment stating "No auth required".
      */
     virtual Status checkAuthForOperation(OperationContext* opCtx,
@@ -1111,6 +1137,14 @@ public:
             ErrorCodes::InvalidOptions, "cluster wide default read concern not permitted"};
         return {{level != repl::ReadConcernLevel::kLocalReadConcern, kReadConcernNotSupported},
                 {kDefaultReadConcernNotPermitted}};
+    }
+
+    /**
+     * Returns whether this command supports the rawData parameter. See raw_data_operation.h for
+     * more information.
+     */
+    virtual bool supportsRawData() const {
+        return false;
     }
 
     /**
@@ -1156,7 +1190,7 @@ private:
 /**
  * Commands should implement this class if they do not require access to the ReplyBuilderInterface.
  */
-class BasicCommand : public BasicCommandWithReplyBuilderInterface {
+class MONGO_MOD_OPEN BasicCommand : public BasicCommandWithReplyBuilderInterface {
 public:
     using BasicCommandWithReplyBuilderInterface::BasicCommandWithReplyBuilderInterface;
 
@@ -1207,7 +1241,7 @@ public:
  *
  */
 template <typename Derived>
-class BasicCommandWithRequestParser : public BasicCommandWithReplyBuilderInterface {
+class MONGO_MOD_OPEN BasicCommandWithRequestParser : public BasicCommandWithReplyBuilderInterface {
 private:
     static constexpr StringData _commandAlias() {
         using T = typename Derived::Request;
@@ -1277,7 +1311,7 @@ protected:
             auto status = getStatusFromCommandResult(resultObj);
             if (!status.isOK()) {
                 // Will throw if the result doesn't match the ErrorReply.
-                ErrorReply::parse(IDLParserContext("ErrorType", &ctx), resultObj);
+                ErrorReply::parse(resultObj, IDLParserContext("ErrorType", &ctx));
                 return true;
             }
         }
@@ -1303,11 +1337,11 @@ private:
                                      const DatabaseName& dbName,
                                      const BSONObj& cmdObj) {
         return idl::parseCommandDocument<RequestType>(
+            cmdObj,
             IDLParserContext(RequestType::kCommandName,
                              auth::ValidatedTenancyScope::get(opCtx),
                              dbName.tenantId(),
-                             SerializationContext::stateDefault()),
-            cmdObj);
+                             SerializationContext::stateDefault()));
     }
 
     RequestType _request;
@@ -1316,7 +1350,7 @@ private:
 /**
  * Deprecated. Do not add new subclasses.
  */
-class ErrmsgCommandDeprecated : public BasicCommand {
+class MONGO_MOD_OPEN ErrmsgCommandDeprecated : public BasicCommand {
     using BasicCommand::BasicCommand;
     bool run(OperationContext* opCtx,
              const DatabaseName& dbName,
@@ -1359,7 +1393,7 @@ class ErrmsgCommandDeprecated : public BasicCommand {
  *     base classes provided: InvocationBase or MinimalInvocationBase.
  */
 template <typename Derived>
-class TypedCommand : public Command {
+class MONGO_MOD_OPEN TypedCommand : public Command {
 public:
     std::unique_ptr<CommandInvocation> parse(OperationContext* opCtx,
                                              const OpMsgRequest& opMsgRequest) final;
@@ -1420,17 +1454,17 @@ private:
                                     opMsgRequest.validatedTenancyScope,
                                     opMsgRequest.getValidatedTenantId(),
                                     opMsgRequest.getSerializationContext());
-        auto parsed = idl::parseCommandRequest<RequestType>(ctx, opMsgRequest);
+        auto parsed = idl::parseCommandRequest<RequestType>(opMsgRequest, ctx);
 
         auto apiStrict = parsed.getGenericArguments().getApiStrict().value_or(false);
 
         // A command with 'apiStrict' cannot be invoked with alias.
         if (apiStrict && opMsgRequest.getCommandName() != command->getName()) {
             uasserted(ErrorCodes::APIStrictError,
-                      str::stream() << "Command invocation with name '"
-                                    << opMsgRequest.getCommandName().toString()
-                                    << "' is not allowed in 'apiStrict' mode, use '"
-                                    << command->getName() << "' instead");
+                      str::stream()
+                          << "Command invocation with name '" << opMsgRequest.getCommandName()
+                          << "' is not allowed in 'apiStrict' mode, use '" << command->getName()
+                          << "' instead");
         }
 
         return parsed;
@@ -1442,9 +1476,65 @@ private:
 };
 
 template <typename Derived>
-class TypedCommand<Derived>::MinimalInvocationBase : public InvocationBaseInternal {
+class MONGO_MOD_OPEN TypedCommand<Derived>::MinimalInvocationBase : public InvocationBaseInternal {
     // Implemented as just a strong typedef for InvocationBaseInternal.
     using InvocationBaseInternal::InvocationBaseInternal;
+};
+
+/**
+ * Mix-in base for requests containing a `GenericArguments`.
+ * Fills some of the requirements for use as a `TypedCommand`'s `Request` type.
+ */
+class GenericArgumentsTypedRequest {
+public:
+    explicit GenericArgumentsTypedRequest(const OpMsgRequest& req) : _args{_parseArgs(req)} {}
+
+    const GenericArguments& getGenericArguments() const {
+        return _args;
+    }
+    GenericArguments& getGenericArguments() {
+        return _args;
+    }
+    void setGenericArguments(GenericArguments args) {
+        _args = std::move(args);
+    }
+
+private:
+    static GenericArguments _parseArgs(const OpMsgRequest& req) {
+        IDLParserContext ctx("GenericArguments",
+                             req.validatedTenancyScope,
+                             req.getValidatedTenantId(),
+                             req.getSerializationContext());
+        return GenericArguments::parse(req.body, ctx);
+    }
+
+    GenericArguments _args;
+};
+
+/**
+ * Mix-in base for Requests containing a DatabaseName.
+ * Fills some of the requirements for use as a `TypedCommand`'s `Request` type.
+ */
+class DbNameTypedRequest {
+public:
+    explicit DbNameTypedRequest(const OpMsgRequest& req) : _dbName{req.parseDbName()} {}
+
+    const DatabaseName& getDbName() const {
+        return _dbName;
+    }
+
+private:
+    DatabaseName _dbName;
+};
+
+/**
+ * Base for Requests having a `GenericArguments` and a `DatabaseName`.
+ * Fills the `TypedCommand` `Request` requirements.
+ */
+class BasicTypedRequest : public GenericArgumentsTypedRequest, public DbNameTypedRequest {
+public:
+    explicit BasicTypedRequest(const OpMsgRequest& req)
+        : GenericArgumentsTypedRequest{req}, DbNameTypedRequest{req} {}
 };
 
 /*
@@ -1474,7 +1564,7 @@ class TypedCommand<Derived>::MinimalInvocationBase : public InvocationBaseIntern
  *     }
  */
 template <typename Derived>
-class TypedCommand<Derived>::InvocationBase : public InvocationBaseInternal {
+class MONGO_MOD_OPEN TypedCommand<Derived>::InvocationBase : public InvocationBaseInternal {
 public:
     using InvocationBaseInternal::InvocationBaseInternal;
 
@@ -1573,7 +1663,7 @@ class CommandConstructionPlan {
 public:
     struct Entry {
         std::function<std::unique_ptr<Command>()> construct;
-        const FeatureFlag* featureFlag = nullptr;
+        FeatureFlag* featureFlag = nullptr;
         bool testOnly = false;
         boost::optional<ClusterRole> roles;
         const std::type_info* typeInfo = nullptr;
@@ -1632,7 +1722,7 @@ CommandConstructionPlan& globalCommandConstructionPlan();
  * Example:
  *
  *   auto dum = *CommandConstructionPlan::EntryBuilder::make<CmdType>()
- *       .requiresFeatureFlag(&myFeatureFlag)
+ *       .requiresFeatureFlag(myFeatureFlag)
  *       .testOnly();
  */
 class CommandConstructionPlan::EntryBuilder {
@@ -1687,8 +1777,8 @@ public:
      * A command object will be created only if the featureFlag is enabled,
      * regardless of the current FCV.
      */
-    EntryBuilder requiresFeatureFlag(const FeatureFlag* featureFlag) && {
-        _entry->featureFlag = featureFlag;
+    EntryBuilder requiresFeatureFlag(FeatureFlag& featureFlag) && {
+        _entry->featureFlag = &featureFlag;
         return std::move(*this);
     }
 
@@ -1696,7 +1786,7 @@ public:
      * Set the plan into which the entry will be registered. Used for testing.
      * The default is the `globalCommandConstructionPlan()` singleton.
      */
-    EntryBuilder setPlan(CommandConstructionPlan* plan) && {
+    EntryBuilder setPlan_forTest(CommandConstructionPlan* plan) && {
         _plan = plan;
         return std::move(*this);
     }
@@ -1742,6 +1832,6 @@ private:
     static auto MONGO_COMMAND_DUMMY_ID_(mongoRegisterCommand_dummy_, __LINE__) = \
         *::mongo::CommandConstructionPlan::EntryBuilder::make<__VA_ARGS__>()     \
              .expr(#__VA_ARGS__)                                                 \
-             .location(MONGO_SOURCE_LOCATION_NO_FUNC())
+             .location(MONGO_SOURCE_LOCATION())
 
 }  // namespace mongo

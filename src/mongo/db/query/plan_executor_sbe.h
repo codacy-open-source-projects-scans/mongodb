@@ -29,19 +29,11 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <deque>
-#include <memory>
-#include <queue>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/db/exec/classic/multi_plan.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/exec/multi_plan.h"
 #include "mongo/db/exec/plan_stats.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/stages/plan_stats.h"
@@ -51,11 +43,10 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer.h"
-#include "mongo/db/query/plan_explainer_sbe.h"
 #include "mongo/db/query/plan_yield_policy_sbe.h"
-#include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/restore_context.h"
 #include "mongo/db/query/sbe_plan_ranker.h"
 #include "mongo/db/query/stage_builder/sbe/builder_data.h"
@@ -63,6 +54,14 @@
 #include "mongo/db/record_id.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
+
+#include <deque>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 class PlanExecutorSBE final : public PlanExecutor {
@@ -92,7 +91,8 @@ public:
                     boost::optional<size_t> cachedPlanHash,
                     std::unique_ptr<RemoteCursorMap> remoteCursors,
                     std::unique_ptr<RemoteExplainVector> remoteExplains,
-                    std::unique_ptr<MultiPlanStage> classicRuntimePlannerStage);
+                    std::unique_ptr<MultiPlanStage> classicRuntimePlannerStage,
+                    const MultipleCollectionAccessor& mca);
 
     CanonicalQuery* getCanonicalQuery() const override {
         return _cq.get();
@@ -117,9 +117,9 @@ public:
     void reattachToOperationContext(OperationContext* opCtx) override;
 
     ExecState getNext(BSONObj* out, RecordId* dlOut) override;
-    ExecState getNextDocument(Document* objOut, RecordId* dlOut) override;
+    ExecState getNextDocument(Document& objOut) override;
 
-    bool isEOF() override {
+    bool isEOF() const override {
         return isMarkedAsKilled() || (_stash.empty() && _root->getCommonStats()->isEOF);
     }
 
@@ -145,13 +145,17 @@ public:
 
     void dispose(OperationContext* opCtx) override;
 
+    void forceSpill(PlanYieldPolicy* yieldPolicy) override {
+        _root->forceSpill(yieldPolicy);
+    }
+
     void stashResult(const BSONObj& obj) override;
 
     bool isMarkedAsKilled() const override {
         return !_killStatus.isOK();
     }
 
-    Status getKillStatus() override {
+    Status getKillStatus() const override {
         invariant(isMarkedAsKilled());
         return _killStatus;
     }
@@ -176,13 +180,6 @@ public:
         return *_planExplainer;
     }
 
-    void enableSaveRecoveryUnitAcrossCommandsIfSupported() override {
-        _isSaveRecoveryUnitAcrossCommandsEnabled = true;
-    }
-    bool isSaveRecoveryUnitAcrossCommandsEnabled() const override {
-        return _isSaveRecoveryUnitAcrossCommandsEnabled;
-    }
-
     PlanExecutor::QueryFramework getQueryFramework() const final {
         return PlanExecutor::QueryFramework::kSBEOnly;
     }
@@ -190,8 +187,6 @@ public:
     void setReturnOwnedData(bool returnOwnedData) final {
         _mustReturnOwnedBson = returnOwnedData;
     }
-
-    bool usesCollectionAcquisitions() const final;
 
     /**
      * For queries that have multiple executors, this can be used to differentiate between them.
@@ -205,8 +200,7 @@ private:
     ExecState getNextImpl(ObjectType* out, RecordId* dlOut);
 
     void initializeAccessors(MetaDataAccessor& accessor,
-                             const stage_builder::PlanStageMetadataSlots& metadataSlots,
-                             const QueryMetadataBitSet& metadataBit);
+                             const stage_builder::PlanStageMetadataSlots& metadataSlots);
 
     enum class State { kClosed, kOpened };
 
@@ -270,8 +264,6 @@ private:
     std::unique_ptr<PlanExplainer> _planExplainer;
 
     bool _isDisposed{false};
-
-    bool _isSaveRecoveryUnitAcrossCommandsEnabled = false;
 
     /**
      * For commands that return multiple cursors, this value will contain the type of cursor.

@@ -28,12 +28,13 @@
  */
 
 
+#include "mongo/s/query/exec/router_stage_limit.h"
+
+#include "mongo/util/assert_util.h"
+
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
-
-#include "mongo/s/query/exec/router_stage_limit.h"
-#include "mongo/util/assert_util_core.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -44,7 +45,7 @@ RouterStageLimit::RouterStageLimit(OperationContext* opCtx,
                                    std::unique_ptr<RouterExecStage> child,
                                    long long limit)
     : RouterExecStage(opCtx, std::move(child)), _limit(limit) {
-    invariant(limit > 0);
+    tassert(11052347, "Expected positive value for limit", limit > 0);
 }
 
 StatusWith<ClusterQueryResult> RouterStageLimit::next() {

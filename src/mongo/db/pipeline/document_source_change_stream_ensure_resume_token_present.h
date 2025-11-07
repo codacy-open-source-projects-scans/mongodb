@@ -29,19 +29,18 @@
 
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_change_stream_check_resumability.h"
 #include "mongo/db/pipeline/document_source_change_stream_gen.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/resume_token.h"
 #include "mongo/db/pipeline/stage_constraints.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 /**
@@ -56,7 +55,7 @@ public:
 
     const char* getSourceName() const final;
 
-    StageConstraints constraints(Pipeline::SplitState) const final;
+    StageConstraints constraints(PipelineSplitState) const final;
 
     GetModPathsReturn getModifiedPaths() const final {
         // This stage neither modifies nor renames any field.
@@ -69,18 +68,21 @@ public:
 
     Value doSerialize(const SerializationOptions& opts = SerializationOptions{}) const final;
 
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
+    }
+
 private:
+    friend boost::intrusive_ptr<exec::agg::Stage>
+    documentSourceChangeStreamEnsureResumeTokenPresentToStageFn(
+        const boost::intrusive_ptr<DocumentSource>& documentSource);
+
     /**
      * Use the create static method to create a DocumentSourceChangeStreamEnsureResumeTokenPresent.
      */
     DocumentSourceChangeStreamEnsureResumeTokenPresent(
         const boost::intrusive_ptr<ExpressionContext>& expCtx, ResumeTokenData token);
-
-    GetNextResult doGetNext() final;
-
-    GetNextResult _tryGetNext();
-
-    // Records whether we have observed the token in the resumed stream.
-    bool _hasSeenResumeToken = false;
 };
 }  // namespace mongo

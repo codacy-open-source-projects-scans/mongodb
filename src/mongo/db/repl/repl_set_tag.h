@@ -29,6 +29,11 @@
 
 #pragma once
 
+#include "mongo/base/error_extra_info.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/util/modules.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <iosfwd>
@@ -36,11 +41,7 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/error_extra_info.h"
-#include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
-
-namespace mongo {
+namespace MONGO_MOD_PARENT_PRIVATE mongo {
 class BSONObjBuilder;
 
 namespace repl {
@@ -261,7 +262,7 @@ private:
  * class are compatible with other instances of this class that are *copies* of the original
  * instance.
  */
-class ReplSetTagConfig {
+class MONGO_MOD_PUB ReplSetTagConfig {
 public:
     /**
      * Finds or allocates a tag with the given "key" and "value" strings.
@@ -353,4 +354,4 @@ private:
 };
 
 }  // namespace repl
-}  // namespace mongo
+}  // namespace MONGO_MOD_PARENT_PRIVATE mongo

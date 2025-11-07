@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <cstddef>
-#include <map>
-#include <string>
-#include <vector>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/client/sdam/sdam_datatypes.h"
@@ -41,9 +36,15 @@
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/dbtests/mock/mock_remote_db_server.h"
 #include "mongo/util/clock_source.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 
-namespace mongo {
+#include <cstddef>
+#include <map>
+#include <string>
+#include <vector>
+
+namespace MONGO_MOD_PUB mongo {
 
 class ClockSource;
 
@@ -168,4 +169,4 @@ private:
 
     std::string _primaryHost;
 };
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

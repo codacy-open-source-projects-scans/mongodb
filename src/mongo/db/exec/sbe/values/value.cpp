@@ -27,43 +27,35 @@
  *    it in the license file.
  */
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/hash/hash.h>
-#include <absl/strings/string_view.h>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/numeric/conversion/converter_policies.hpp>
-#include <boost/optional/optional.hpp>
-#include <cmath>
+#include "mongo/db/exec/sbe/values/value.h"
 
 #include "mongo/base/compare_numbers.h"
 #include "mongo/base/string_data_comparator.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/db/exec/js_function.h"
-#include "mongo/db/exec/sbe/makeobj_spec.h"
-#include "mongo/db/exec/sbe/sort_spec.h"
 #include "mongo/db/exec/sbe/util/print_options.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/cell_interface.h"
 #include "mongo/db/exec/sbe/values/generic_compare.h"
 #include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/exec/sbe/values/util.h"
 #include "mongo/db/exec/sbe/values/value_builder.h"
 #include "mongo/db/exec/sbe/values/value_printer.h"
 #include "mongo/db/index/btree_key_generator.h"
-#include "mongo/db/index/sort_key_generator.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/datetime/date_time_support.h"
-#include "mongo/db/query/sort_pattern.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/util/bufreader.h"
 #include "mongo/util/duration.h"
-#include "mongo/util/errno_util.h"
-#include "mongo/util/pcre_util.h"
+
+#include <cmath>
+
+#include <absl/container/flat_hash_map.h>
+#include <absl/hash/hash.h>
+#include <absl/strings/string_view.h>
+#include <boost/cstdint.hpp>
+#include <boost/numeric/conversion/converter_policies.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace sbe {
@@ -72,7 +64,7 @@ namespace {
 template <typename T>
 auto abslHash(const T& val) {
     if constexpr (std::is_same_v<T, StringData>) {
-        return absl::Hash<absl::string_view>{}(absl::string_view{val.rawData(), val.size()});
+        return absl::Hash<absl::string_view>{}(absl::string_view{val.data(), val.size()});
     } else if constexpr (IsEndian<T>::value) {
         return abslHash(val.value);
     } else {
@@ -109,8 +101,8 @@ std::pair<TypeTags, Value> makeNewBsonRegex(StringData pattern, StringData flags
     auto rawBuffer = buffer.get();
 
     // Copy pattern first and flags after it.
-    memcpy(rawBuffer, pattern.rawData(), pattern.size());
-    memcpy(rawBuffer + pattern.size() + 1, flags.rawData(), flags.size());
+    memcpy(rawBuffer, pattern.data(), pattern.size());
+    memcpy(rawBuffer + pattern.size() + 1, flags.data(), flags.size());
 
     // Ensure NULL byte is placed after each part.
     rawBuffer[pattern.size()] = '\0';
@@ -134,7 +126,7 @@ std::pair<TypeTags, Value> makeNewBsonDBPointer(StringData ns, const uint8_t* id
     ptr += sizeof(uint32_t);
 
     // Write 'ns' followed by a null terminator.
-    memcpy(ptr, ns.rawData(), nsLen);
+    memcpy(ptr, ns.data(), nsLen);
     ptr[nsLen] = '\0';
     ptr += nsLenWithNull;
 
@@ -161,7 +153,7 @@ std::pair<TypeTags, Value> makeNewBsonCodeWScope(StringData code, const char* sc
     ptr += sizeof(uint32_t);
 
     // Write 'code' followed by a null terminator.
-    memcpy(ptr, code.rawData(), codeLen);
+    memcpy(ptr, code.data(), codeLen);
     ptr[codeLen] = '\0';
     ptr += codeLenWithNull;
 
@@ -202,7 +194,7 @@ std::pair<TypeTags, Value> makeNewRecordId(int64_t rid) {
 }
 
 std::pair<TypeTags, Value> makeNewRecordId(const char* str, int32_t size) {
-    auto val = bitcastFrom<RecordId*>(new RecordId(str, size));
+    auto val = bitcastFrom<RecordId*>(new RecordId(std::span(str, size)));
     return {TypeTags::RecordId, val};
 }
 
@@ -325,65 +317,65 @@ std::string printTagAndVal(const std::pair<TypeTags, Value>& value) {
 BSONType tagToType(TypeTags tag) noexcept {
     switch (tag) {
         case TypeTags::Nothing:
-            return BSONType::EOO;
+            return BSONType::eoo;
         case TypeTags::NumberInt32:
-            return BSONType::NumberInt;
+            return BSONType::numberInt;
         case TypeTags::NumberInt64:
-            return BSONType::NumberLong;
+            return BSONType::numberLong;
         case TypeTags::NumberDouble:
-            return BSONType::NumberDouble;
+            return BSONType::numberDouble;
         case TypeTags::NumberDecimal:
-            return BSONType::NumberDecimal;
+            return BSONType::numberDecimal;
         case TypeTags::Date:
-            return BSONType::Date;
+            return BSONType::date;
         case TypeTags::Timestamp:
-            return BSONType::bsonTimestamp;
+            return BSONType::timestamp;
         case TypeTags::Boolean:
-            return BSONType::Bool;
+            return BSONType::boolean;
         case TypeTags::Null:
-            return BSONType::jstNULL;
+            return BSONType::null;
         case TypeTags::StringSmall:
-            return BSONType::String;
+            return BSONType::string;
         case TypeTags::StringBig:
-            return BSONType::String;
+            return BSONType::string;
         case TypeTags::Array:
-            return BSONType::Array;
+            return BSONType::array;
         case TypeTags::ArraySet:
-            return BSONType::Array;
+            return BSONType::array;
         case TypeTags::ArrayMultiSet:
-            return BSONType::Array;
+            return BSONType::array;
         case TypeTags::Object:
-            return BSONType::Object;
+            return BSONType::object;
         case TypeTags::ObjectId:
-            return BSONType::jstOID;
+            return BSONType::oid;
         case TypeTags::MinKey:
-            return BSONType::MinKey;
+            return BSONType::minKey;
         case TypeTags::MaxKey:
-            return BSONType::MaxKey;
+            return BSONType::maxKey;
         case TypeTags::bsonObject:
-            return BSONType::Object;
+            return BSONType::object;
         case TypeTags::bsonArray:
-            return BSONType::Array;
+            return BSONType::array;
         case TypeTags::bsonString:
-            return BSONType::String;
+            return BSONType::string;
         case TypeTags::bsonSymbol:
-            return BSONType::Symbol;
+            return BSONType::symbol;
         case TypeTags::bsonObjectId:
-            return BSONType::jstOID;
+            return BSONType::oid;
         case TypeTags::bsonBinData:
-            return BSONType::BinData;
+            return BSONType::binData;
         case TypeTags::bsonUndefined:
-            return BSONType::Undefined;
+            return BSONType::undefined;
         case TypeTags::bsonRegex:
-            return BSONType::RegEx;
+            return BSONType::regEx;
         case TypeTags::bsonJavascript:
-            return BSONType::Code;
+            return BSONType::code;
         case TypeTags::bsonDBPointer:
-            return BSONType::DBRef;
+            return BSONType::dbRef;
         case TypeTags::bsonCodeWScope:
-            return BSONType::CodeWScope;
+            return BSONType::codeWScope;
         default:
-            return BSONType::EOO;
+            return BSONType::eoo;
     }
 }
 
@@ -608,7 +600,7 @@ std::pair<TypeTags, Value> compareValue(TypeTags lhsTag,
                 return {TypeTags::NumberInt32, bitcastFrom<int32_t>(result)};
             }
             default:
-                MONGO_UNREACHABLE;
+                MONGO_UNREACHABLE_TASSERT(11122922);
         }
     } else if (isStringOrSymbol(lhsTag) && isStringOrSymbol(rhsTag)) {
         auto lhsStr = getStringOrSymbolView(lhsTag, lhsValue);
@@ -833,6 +825,28 @@ bool ArraySet::push_back(TypeTags tag, Value val) {
     return false;
 }
 
+bool ArraySet::push_back_clone(TypeTags tag, Value val) {
+    if (tag != TypeTags::Nothing) {
+        return _values.insert_lazy({tag, val}, [&]() { return value::copyValue(tag, val); }).second;
+    }
+
+    return false;
+}
+
+std::pair<TypeTags, Value> makeNewArraySet(TypeTags tag,
+                                           Value value,
+                                           const CollatorInterface* collator) {
+    auto [resTag, resVal] = makeNewArraySet(collator);
+    ValueGuard guard(resTag, resVal);
+    ArraySet* setValues = getArraySetView(resVal);
+    setValues->reserve(getArraySize(tag, value));
+    arrayForEach(tag, value, [&](TypeTags elemTag, Value elemVal) {
+        setValues->push_back_clone(elemTag, elemVal);
+    });
+    guard.reset();
+    return {resTag, reinterpret_cast<Value>(setValues)};
+}
+
 std::pair<TypeTags, Value> ArrayEnumerator::getViewOfValue() const {
     if (_array) {
         return _array->getAt(_index);
@@ -925,7 +939,9 @@ void readKeyStringValueIntoAccessors(const SortedDataKeyValueView& keyString,
                                      std::vector<OwnedValueAccessor>* accessors,
                                      boost::optional<IndexKeysInclusionSet> indexKeysToInclude) {
     OwnedValueAccessorValueBuilder valBuilder(valueBufferBuilder);
-    invariant(!indexKeysToInclude || indexKeysToInclude->count() == accessors->size());
+    tassert(11089607,
+            "Number of index keys doesn't match the number of accessors",
+            !indexKeysToInclude || indexKeysToInclude->count() == accessors->size());
 
     auto ks = keyString.getKeyStringWithoutRecordIdView();
     BufReader reader(ks.data(), ks.size());
@@ -948,7 +964,9 @@ void readKeyStringValueIntoAccessors(const SortedDataKeyValueView& keyString,
         keepReading = key_string::readValue(
             &reader, &typeBitsReader, inverted, keyString.getVersion(), &valBuilder);
 
-        invariant(componentIndex < Ordering::kMaxCompoundIndexKeys || !keepReading);
+        tassert(11093607,
+                "Reached 'kMaxCompoundIndexKeys' components, but still reading index keys",
+                componentIndex < Ordering::kMaxCompoundIndexKeys || !keepReading);
 
         // If 'indexKeysToInclude' indicates that this index key component is not part of the
         // projection, remove it from the list of values that will be fed to the 'accessors'

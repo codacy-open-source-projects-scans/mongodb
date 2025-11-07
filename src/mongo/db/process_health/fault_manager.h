@@ -28,17 +28,8 @@
  */
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <functional>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/process_health/fault.h"
-#include "mongo/db/process_health/fault_facet.h"
 #include "mongo/db/process_health/fault_manager_config.h"
 #include "mongo/db/process_health/health_check_status.h"
 #include "mongo/db/process_health/health_monitoring_server_parameters_gen.h"
@@ -47,16 +38,23 @@
 #include "mongo/db/process_health/state_machine.h"
 #include "mongo/db/service_context.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
-#include "mongo/util/hierarchical_acquisition.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
+
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace process_health {
@@ -71,7 +69,7 @@ namespace process_health {
  *
  * If an active fault state persists, FaultManager will terminate the server process.
  */
-class FaultManager : protected StateMachine<HealthCheckStatus, FaultState> {
+class MONGO_MOD_PUBLIC FaultManager : protected StateMachine<HealthCheckStatus, FaultState> {
     FaultManager(const FaultManager&) = delete;
     FaultManager& operator=(const FaultManager&) = delete;
 
@@ -107,9 +105,6 @@ public:
     // specific flags.
     SharedSemiFuture<void> startPeriodicHealthChecks();
 
-    bool isInitialized();
-
-
     static FaultManager* get(ServiceContext* svcCtx);
 
     // Replace the FaultManager for the 'svcCtx'. This functionality
@@ -133,9 +128,6 @@ public:
     // Gets the aggregate configuration for all process health environment.
     const FaultManagerConfig& getConfig() const;
 
-    // Gets the timestamp of the last transition
-    Date_t getLastTransitionTime() const;
-
     /**
      * Generate the `serverStatus` section for the fault manager.
      * @param appendDetails is true when the section is generated with:
@@ -145,25 +137,14 @@ public:
     void appendDescription(BSONObjBuilder* builder, bool appendDetails) const;
 
 protected:
-    // Returns all health observers not configured as Off
-    std::vector<HealthObserver*> getActiveHealthObservers() const;
-    HealthObserver* getHealthObserver(FaultFacetType type) const;
+    // These protected member functions are invoked by this class's test driver, which uses a
+    // derived class to access them.
 
     // Runs a particular health observer.  Then attempts to transition states. Then schedules next
     // run.
     virtual void healthCheck(HealthObserver* observer, CancellationToken token);
 
-    FaultPtr getFault() const;
-
-    FaultPtr createFault();
-
     FaultPtr getOrCreateFault();
-
-    /**
-     * Update the active fault with supplied check result.
-     * Create or delete existing facet depending on the status.
-     */
-    void updateWithCheckStatus(HealthCheckStatus&& checkStatus);
 
     void schedulePeriodicHealthCheckThread();
 
@@ -177,13 +158,31 @@ private:
     // One time init.
     void _init();
 
-    std::unique_ptr<FaultManagerConfig> _config;
+    // Returns all health observers not configured as Off
+    std::vector<HealthObserver*> _getActiveHealthObservers() const;
+
+    HealthObserver* _getHealthObserver(FaultFacetType type) const;
+
+    void _healthMonitoringIntensitiesUpdatedImpl(HealthObserverIntensities oldValue,
+                                                 HealthObserverIntensities newValue);
+
+    FaultPtr _createFault();
+
+    FaultPtr _getFault() const;
+
+    bool _isInitialized();
+
+    /**
+     * Update the active fault with supplied check result.
+     * Create or delete existing facet depending on the status.
+     */
+    void _updateWithCheckStatus(HealthCheckStatus&& checkStatus);
+
+    const std::unique_ptr<FaultManagerConfig> _config;
     ServiceContext* const _svcCtx;
     std::shared_ptr<executor::TaskExecutor> _taskExecutor;
     // Callback used to crash the server.
     std::function<void(std::string cause)> _crashCb;
-
-    mutable stdx::mutex _mutex;
 
     std::shared_ptr<Fault> _fault;
     // This source is canceled before the _taskExecutor shutdown(). It
@@ -192,9 +191,6 @@ private:
     // Manager owns all observer instances.
     std::vector<std::unique_ptr<HealthObserver>> _observers;
     SharedPromise<void> _initialHealthCheckCompletedPromise;
-
-    // Protects the state below.
-    mutable stdx::mutex _stateMutex;
 
     bool _initialized = false;
     Date_t _lastTransitionTime;
@@ -230,7 +226,7 @@ private:
         boost::optional<executor::TaskExecutor::CallbackHandle> callbackHandle;
         HealthCheckContext(std::unique_ptr<SharedSemiFuture<HealthCheckStatus>> future,
                            boost::optional<executor::TaskExecutor::CallbackHandle> cbHandle)
-            : result(std::move(future)), callbackHandle(cbHandle){};
+            : result(std::move(future)), callbackHandle(cbHandle) {};
     };
 
     stdx::unordered_map<FaultFacetType, HealthCheckContext> _healthCheckContexts;

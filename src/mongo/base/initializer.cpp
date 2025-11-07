@@ -27,24 +27,23 @@
  *    it in the license file.
  */
 
-#include <fmt/format.h>
+#include "mongo/base/initializer.h"
+
+#include "mongo/base/dependency_graph.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/logv2/log.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/exit_code.h"
+#include "mongo/util/quick_exit.h"
+
 #include <iostream>
 #include <random>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "mongo/base/dependency_graph.h"
-#include "mongo/base/error_codes.h"
-#include "mongo/base/initializer.h"
-#include "mongo/base/status.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_truncation.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/exit_code.h"
-#include "mongo/util/quick_exit.h"
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -131,12 +130,11 @@ void Initializer::_transition(State expected, State next) {
     if (_lifecycleState != expected)
         uasserted(
             ErrorCodes::IllegalOperation,
-            format(
-                FMT_STRING(
-                    "Invalid initializer state transition. Expected {} -> {}, but currently at {}"),
-                expected,
-                next,
-                _lifecycleState));
+            fmt::format(
+                "Invalid initializer state transition. Expected {} -> {}, but currently at {}",
+                fmt::underlying(expected),
+                fmt::underlying(next),
+                fmt::underlying(_lifecycleState)));
     _lifecycleState = next;
 }
 
@@ -178,7 +176,7 @@ void Initializer::executeInitializers(const std::vector<std::string>& args) {
             continue;  // Legacy initializer without re-initialization support.
 
         uassert(ErrorCodes::InternalError,
-                format(FMT_STRING("node has no init function: \"{}\""), nodeName),
+                fmt::format("node has no init function: \"{}\"", nodeName),
                 node->initFn);
         node->initFn(&context);
 
@@ -219,9 +217,8 @@ InitializerFunction Initializer::getInitializerFunctionForTesting(const std::str
 }
 
 unsigned extractRandomSeedFromOptions(const std::vector<std::string>& args) {
-    using namespace fmt::literals;
     const std::string targetArg{"--initializerShuffleSeed"};
-    const auto errMsg = "Value must be specified for {}"_format(targetArg);
+    const auto errMsg = fmt::format("Value must be specified for {}", targetArg);
 
     for (size_t i = 0; i < args.size(); i++) {
         StringData arg = args[i];

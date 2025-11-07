@@ -11,16 +11,16 @@
  *  assumes_against_mongod_not_mongos,
  * ]
  */
-export const $config = (function() {
+export const $config = (function () {
     function populateData(db, collName) {
-        var coll = db[collName];
+        let coll = db[collName];
 
         try {
-            var bulk = coll.initializeUnorderedBulkOp();
-            for (var i = 0; i < 1000; ++i) {
+            let bulk = coll.initializeUnorderedBulkOp();
+            for (let i = 0; i < 1000; ++i) {
                 bulk.insert({a: 1, b: Random.rand()});
             }
-            var res = bulk.execute();
+            let res = bulk.execute();
             assert.commandWorked(res);
 
             // Create two indexes to force plan caching: The {a: 1} index is
@@ -46,19 +46,19 @@ export const $config = (function() {
         }
     }
 
-    var states = (function() {
+    let states = (function () {
         function count(db, collName) {
-            var coll = db.getSiblingDB(this.planCacheDBName)[collName];
+            let coll = db.getSiblingDB(this.planCacheDBName)[collName];
 
-            var cmdObj = {query: {a: 1, b: {$gt: Random.rand()}}, limit: Random.randInt(10)};
+            let cmdObj = {query: {a: 1, b: {$gt: Random.rand()}}, limit: Random.randInt(10)};
 
             // We can't use assert.commandWorked here because the plan
             // executor can be killed during the count.
-            coll.runCommand('count', cmdObj);
+            coll.runCommand("count", cmdObj);
         }
 
         function dropDB(db, collName) {
-            var myDB = db.getSiblingDB(this.planCacheDBName);
+            let myDB = db.getSiblingDB(this.planCacheDBName);
 
             // We can't assert anything about the dropDatabase return value
             // because the database might not exist due to other threads
@@ -72,12 +72,12 @@ export const $config = (function() {
         return {count: count, dropDB: dropDB};
     })();
 
-    var transitions = {count: {count: 0.95, dropDB: 0.05}, dropDB: {count: 0.95, dropDB: 0.05}};
+    let transitions = {count: {count: 0.95, dropDB: 0.05}, dropDB: {count: 0.95, dropDB: 0.05}};
 
     function setup(db, collName, cluster) {
-        this.planCacheDBName = db.getName() + 'plan_cache_drop_database';
+        this.planCacheDBName = db.getName() + "plan_cache_drop_database";
 
-        var myDB = db.getSiblingDB(this.planCacheDBName);
+        let myDB = db.getSiblingDB(this.planCacheDBName);
         populateData(myDB, collName);
     }
 
@@ -85,7 +85,7 @@ export const $config = (function() {
         threadCount: 10,
         iterations: 50,
         states: states,
-        startState: 'count',
+        startState: "count",
         transitions: transitions,
         setup: setup,
     };

@@ -29,14 +29,13 @@
 
 #pragma once
 
-#include <cstdint>
-#include <string>
-
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/validate/validate_results.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
-#include "mongo/util/interruptible.h"
+#include "mongo/db/validate/validate_results.h"
+
+#include <cstdint>
+#include <string>
 
 namespace mongo {
 
@@ -53,12 +52,15 @@ public:
                                   double scale,
                                   const std::string& uri);
 
-    static StatusWith<int64_t> compact(Interruptible&,
-                                       WiredTigerRecoveryUnit&,
+    static StatusWith<int64_t> compact(OperationContext* opCtx,
+                                       WiredTigerRecoveryUnit& wtRu,
                                        const std::string& uri,
                                        const CompactOptions& options);
 
-    static bool isEmpty(OperationContext* opCtx, const std::string& uri, uint64_t tableId);
+    static bool isEmpty(OperationContext* opCtx,
+                        WiredTigerRecoveryUnit& wtRu,
+                        const std::string& uri,
+                        uint64_t tableId);
 
     static void validateStructure(WiredTigerRecoveryUnit&,
                                   const std::string& uri,

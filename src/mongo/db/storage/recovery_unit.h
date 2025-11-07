@@ -29,15 +29,6 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <cstdlib>
-#include <functional>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/timestamp.h"
@@ -46,6 +37,16 @@
 #include "mongo/db/storage/storage_stats.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
+
+#include <cstdint>
+#include <cstdlib>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -112,6 +113,12 @@ class RecoveryUnit {
     RecoveryUnit& operator=(const RecoveryUnit&) = delete;
 
 public:
+    enum class Isolation {
+        readUncommitted,
+        readCommitted,
+        snapshot,
+    };
+
     virtual ~RecoveryUnit() = default;
 
     /**
@@ -265,7 +272,7 @@ public:
      * Sets the OperationContext that currently owns this RecoveryUnit. Should only be called by the
      * OperationContext.
      */
-    void setOperationContext(OperationContext* opCtx);
+    virtual void setOperationContext(OperationContext* opCtx);
 
     /**
      * Extensible structure for configuring options to begin a new transaction.
@@ -444,13 +451,6 @@ public:
     }
 
     /**
-     * Retrieve metrics from the storage layer.
-     */
-    AtomicStorageMetrics& getStorageMetrics() {
-        return _storageMetrics;
-    }
-
-    /**
      * The ReadSource indicates which external or provided timestamp to read from for future
      * transactions.
      */
@@ -480,10 +480,6 @@ public:
          * Read from the timestamp provided to setTimestampReadSource.
          */
         kProvided,
-        /**
-         * Read from the latest checkpoint.
-         */
-        kCheckpoint
     };
 
     static std::string toString(ReadSource rs) {
@@ -500,8 +496,6 @@ public:
                 return "kAllDurableSnapshot";
             case ReadSource::kProvided:
                 return "kProvided";
-            case ReadSource::kCheckpoint:
-                return "kCheckpoint";
         }
         MONGO_UNREACHABLE;
     }
@@ -545,7 +539,7 @@ public:
      * data, and will attempt to keep higher-priority data from being evicted from the cache. This
      * may not be called in an active transaction.
      */
-    virtual void setReadOnce(bool readOnce){};
+    virtual void setReadOnce(bool readOnce) {};
 
     virtual bool getReadOnce() const {
         return false;
@@ -566,7 +560,21 @@ public:
      *
      * Must be reset when the WriteUnitOfWork is either committed or rolled back.
      */
-    virtual void ignoreAllMultiTimestampConstraints(){};
+    virtual void ignoreAllMultiTimestampConstraints() {}
+
+    /**
+     * This function must be called when a write operation is performed on the active transaction
+     * for the first time.
+     *
+     * Must be reset when the active transaction is either committed or rolled back.
+     */
+    virtual void setTxnModified() {}
+
+    /**
+     * Sets the isolation to use for subsequent operations. The isolation cannot be changed if the
+     * recovery unit is active.
+     */
+    void setIsolation(Isolation);
 
     /**
      * Registers a callback to be called prior to a WriteUnitOfWork committing the storage
@@ -602,8 +610,9 @@ public:
     public:
         virtual ~Change() {}
 
-        virtual void rollback(OperationContext* opCtx) = 0;
-        virtual void commit(OperationContext* opCtx, boost::optional<Timestamp> commitTime) = 0;
+        virtual void rollback(OperationContext* opCtx) noexcept = 0;
+        virtual void commit(OperationContext* opCtx,
+                            boost::optional<Timestamp> commitTime) noexcept = 0;
     };
 
     /**
@@ -627,10 +636,10 @@ public:
         public:
             CallbackChange(CommitCallback&& commit, RollbackCallback&& rollback)
                 : _rollback(std::move(rollback)), _commit(std::move(commit)) {}
-            void rollback(OperationContext* opCtx) final {
+            void rollback(OperationContext* opCtx) noexcept final {
                 _rollback(opCtx);
             }
-            void commit(OperationContext* opCtx, boost::optional<Timestamp> ts) final {
+            void commit(OperationContext* opCtx, boost::optional<Timestamp> ts) noexcept final {
                 _commit(opCtx, ts);
             }
 
@@ -678,10 +687,10 @@ public:
         class OnRollbackChange final : public Change {
         public:
             OnRollbackChange(Callback&& callback) : _callback(std::move(callback)) {}
-            void rollback(OperationContext* opCtx) final {
+            void rollback(OperationContext* opCtx) noexcept final {
                 _callback(opCtx);
             }
-            void commit(OperationContext* opCtx, boost::optional<Timestamp>) final {}
+            void commit(OperationContext* opCtx, boost::optional<Timestamp>) noexcept final {}
 
         private:
             Callback _callback;
@@ -704,8 +713,9 @@ public:
         class OnCommitChange final : public Change {
         public:
             OnCommitChange(Callback&& callback) : _callback(std::move(callback)) {}
-            void rollback(OperationContext* opCtx) final {}
-            void commit(OperationContext* opCtx, boost::optional<Timestamp> commitTime) final {
+            void rollback(OperationContext* opCtx) noexcept final {}
+            void commit(OperationContext* opCtx,
+                        boost::optional<Timestamp> commitTime) noexcept final {
                 _callback(opCtx, commitTime);
             }
 
@@ -728,8 +738,9 @@ public:
         class OnCommitTwoPhaseChange final : public Change {
         public:
             OnCommitTwoPhaseChange(Callback&& callback) : _callback(std::move(callback)) {}
-            void rollback(OperationContext* opCtx) final {}
-            void commit(OperationContext* opCtx, boost::optional<Timestamp> commitTime) final {
+            void rollback(OperationContext* opCtx) noexcept final {}
+            void commit(OperationContext* opCtx,
+                        boost::optional<Timestamp> commitTime) noexcept final {
                 _callback(opCtx, commitTime);
             }
 
@@ -814,12 +825,12 @@ public:
         return _getState();
     }
 
-    void setNoEvictionAfterRollback() {
-        _noEvictionAfterRollback = true;
+    void setNoEvictionAfterCommitOrRollback() {
+        _noEvictionAfterCommitOrRollback = true;
     }
 
-    bool getNoEvictionAfterRollback() const {
-        return _noEvictionAfterRollback;
+    bool getNoEvictionAfterCommitOrRollback() const {
+        return _noEvictionAfterCommitOrRollback;
     }
 
     void setDataCorruptionDetectionMode(DataCorruptionDetectionMode mode) {
@@ -843,6 +854,14 @@ public:
      * If not set (default 0) then the storage engine will block indefinitely.
      */
     virtual void setCacheMaxWaitTimeout(Milliseconds) {}
+
+    /**
+     * Determine the amount of cache memory this recovery unit has dirtied. If this information is
+     * not perfectly accurate, prefer to return a lower bound.
+     */
+    virtual size_t getCacheDirtyBytes() {
+        return 0;
+    }
 
     /**
      * Returns true if currently managed by a WriteUnitOfWork.
@@ -869,6 +888,13 @@ public:
         return _blockingAllowed;
     }
 
+    bool shouldGatherWriteContextForDebugging() const {
+        return _gatherWriteContextForDebugging;
+    }
+
+    void storeWriteContextForDebugging(const BSONObj& info) {
+        _writeContextForDebugging.push_back(info);
+    }
 
 protected:
     RecoveryUnit() = default;
@@ -919,7 +945,7 @@ protected:
      */
     void _executeRollbackHandlers();
 
-    bool _noEvictionAfterRollback = false;
+    bool _noEvictionAfterCommitOrRollback = false;
 
     AbandonSnapshotMode _abandonSnapshotMode = AbandonSnapshotMode::kAbort;
 
@@ -937,11 +963,27 @@ protected:
         _snapshot.reset();
     }
 
+    void setGatherWriteContextForDebugging(bool value) {
+        _gatherWriteContextForDebugging = value;
+    }
+
+    std::vector<BSONObj>& getWriteContextForDebugging() {
+        return _writeContextForDebugging;
+    }
+
+    OperationContext* _opCtx{nullptr};
+    Isolation _isolation{Isolation::snapshot};
+
+    bool _gatherWriteContextForDebugging{false};
+    std::vector<BSONObj> _writeContextForDebugging;
+
 private:
     virtual void doBeginUnitOfWork() = 0;
     virtual void doAbandonSnapshot() = 0;
     virtual void doCommitUnitOfWork() = 0;
     virtual void doAbortUnitOfWork() = 0;
+
+    virtual void _setIsolation(Isolation) = 0;
 
     virtual void validateInUnitOfWork() const;
 
@@ -953,11 +995,9 @@ private:
     Changes _changesForTwoPhaseDrop;
     // Is constructed lazily when accessed or when an underlying storage snapshot is opened.
     boost::optional<Snapshot> _snapshot;
-    State _state = State::kInactive;
-    AtomicStorageMetrics _storageMetrics;
-    OperationContext* _opCtx = nullptr;
-    bool _readOnly = false;
-    bool _blockingAllowed = true;
+    State _state{State::kInactive};
+    bool _readOnly{false};
+    bool _blockingAllowed{true};
 };
 
 /**

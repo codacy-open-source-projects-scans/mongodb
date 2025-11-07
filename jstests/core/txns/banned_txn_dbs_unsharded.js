@@ -8,8 +8,6 @@
 //  assumes_unsharded_collection,
 //  uses_transactions,
 //  # Transactions on config and local dbs are allowed on shardsvrs.
-//  # TODO SERVER-64544: Investigate if we should ban transactions on config and local db's in
-//  # serverless. If yes, we will remove this tag.
 //  directly_against_shardsvrs_incompatible,
 // ]
 
@@ -27,15 +25,12 @@ function runTest(sessionDB) {
     session.startTransaction();
     let error = assert.throws(() => sessionColl.find().itcount());
     assert.commandFailedWithCode(error, ErrorCodes.OperationNotSupportedInTransaction);
-    assert.commandFailedWithCode(session.abortTransaction_forTesting(),
-                                 ErrorCodes.NoSuchTransaction);
+    assert.commandFailedWithCode(session.abortTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
 
     jsTest.log("Testing write commands are forbidden.");
     session.startTransaction();
-    assert.commandFailedWithCode(sessionColl.insert({}),
-                                 ErrorCodes.OperationNotSupportedInTransaction);
-    assert.commandFailedWithCode(session.abortTransaction_forTesting(),
-                                 ErrorCodes.NoSuchTransaction);
+    assert.commandFailedWithCode(sessionColl.insert({}), ErrorCodes.OperationNotSupportedInTransaction);
+    assert.commandFailedWithCode(session.abortTransaction_forTesting(), ErrorCodes.NoSuchTransaction);
 }
 
 if (!TestData.testingReplicaSetEndpoint) {

@@ -33,6 +33,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/util/modules.h"
 
 /**
  * Namespace for static methods that are shared between explain on mongod and on mongos.
@@ -57,7 +58,12 @@ void generateServerParameters(const boost::intrusive_ptr<ExpressionContext>& exp
 /**
  * Adds the 'queryShapeHash' value to the BSON object being built by 'out'.
  */
-void generateQueryShapeHash(const OperationContext* opCtx, BSONObjBuilder* out);
+void generateQueryShapeHash(OperationContext* opCtx, BSONObjBuilder* out);
+
+/**
+ * Adds the 'peakTrackedMemBytes' value to the BSON object being built by 'out'.
+ */
+void generatePeakTrackedMemBytes(const OperationContext* opCtx, BSONObjBuilder* out);
 
 /**
  * Conditionally appends a BSONObj to 'bob' depending on whether or not the maximum user size for a

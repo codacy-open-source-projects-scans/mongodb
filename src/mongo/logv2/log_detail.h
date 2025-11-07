@@ -29,14 +29,6 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <fmt/format.h>
-#include <functional>
-#include <string>
-#include <tuple>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
@@ -47,24 +39,39 @@
 #include "mongo/logv2/log_options.h"
 #include "mongo/logv2/log_severity.h"
 #include "mongo/util/errno_util.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <string>
+#include <tuple>
+
+#include <boost/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo::logv2 {
 
 // Whether there is a doLogImpl call currently on this thread's stack.
-bool loggingInProgress();
+MONGO_MOD_PUBLIC bool loggingInProgress();
 
 // Write message to stderr in a signal-safe manner.
-void signalSafeWriteToStderr(StringData message);
+MONGO_MOD_PUBLIC void signalSafeWriteToStderr(StringData message);
 namespace detail {
 
 using GetTenantIDFn = std::function<std::string()>;
-void setGetTenantIDCallback(GetTenantIDFn&& fn);
+MONGO_MOD_NEEDS_REPLACEMENT void setGetTenantIDCallback(GetTenantIDFn&& fn);
 
-void doLogImpl(int32_t id,
-               LogSeverity const& severity,
-               LogOptions const& options,
-               StringData message,
-               TypeErasedAttributeStorage const& attrs);
+using LogCounterCallback = std::function<void()>;
+// Must be called before other threads start logging
+void setLogCounterCallback(LogCounterCallback);
+
+MONGO_MOD_NEEDS_REPLACEMENT void doLogImpl(int32_t id,
+                                           LogSeverity const& severity,
+                                           LogOptions const& options,
+                                           StringData message,
+                                           TypeErasedAttributeStorage const& attrs,
+                                           bool devStacktraces = false);
 
 void doUnstructuredLogImpl(LogSeverity const& severity,  // NOLINT
                            LogOptions const& options,
@@ -97,11 +104,11 @@ void doLogUnpacked(int32_t id,
 // into just raw attributes for doLogUnpacked. We do this building flat tuples for every argument,
 // concatenating them into a single tuple that we can expand again using apply.
 template <size_t N, typename... Args>
-void doLog(int32_t id,
-           LogSeverity const& severity,
-           LogOptions const& options,
-           const char (&msg)[N],
-           const Args&... args) {
+MONGO_MOD_PUBLIC void doLog(int32_t id,
+                            LogSeverity const& severity,
+                            LogOptions const& options,
+                            const char (&msg)[N],
+                            const Args&... args) {
     std::apply([&](auto&&... tup) { doLogUnpacked(id, severity, options, msg, tup...); },
                std::tuple_cat(toFlatAttributesTupleRef(args)...));
 }

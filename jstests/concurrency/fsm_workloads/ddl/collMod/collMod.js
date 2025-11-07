@@ -11,60 +11,74 @@
 
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 
-export const $config = (function() {
-    var data = {
+export const $config = (function () {
+    let data = {
         numDocs: 1000,
-        maxTTL: 5000  // max time to live
+        maxTTL: 5000, // max time to live
     };
 
-    var states = (function() {
+    let states = (function () {
         function collMod(db, collName) {
-            var newTTL = Random.randInt(this.maxTTL);
-            var res = db.runCommand({
+            let newTTL = Random.randInt(this.maxTTL);
+            let res = db.runCommand({
                 collMod: this.threadCollName,
-                index: {keyPattern: {createdAt: 1}, expireAfterSeconds: newTTL}
+                index: {keyPattern: {createdAt: 1}, expireAfterSeconds: newTTL},
             });
             assert.commandWorkedOrFailedWithCode(res, [ErrorCodes.ConflictingOperationInProgress]);
+            // Check that we are returning {ok: 1} rather than {ok: true}
+            if (res.ok) {
+                assert(res.ok === 1);
+            }
             // only assert if new expireAfterSeconds differs from old one
-            if (res.ok === 1 && res.hasOwnProperty('expireAfterSeconds_new')) {
+            if (res.ok === 1 && res.hasOwnProperty("expireAfterSeconds_new")) {
                 assert.eq(res.expireAfterSeconds_new, newTTL);
             }
 
             // Attempt an invalid collMod which should always fail regardless of whether a WCE
             // occurred. This is meant to reproduce SERVER-56772.
             const encryptSchema = {$jsonSchema: {properties: {_id: {encrypt: {}}}}};
-            assert.commandFailedWithCode(
+            res = assert.commandFailedWithCode(
                 db.runCommand({
                     collMod: this.threadCollName,
                     validator: encryptSchema,
-                    validationAction: "warn"
+                    validationAction: "warn",
                 }),
-                [ErrorCodes.ConflictingOperationInProgress, ErrorCodes.QueryFeatureNotAllowed]);
+                [ErrorCodes.ConflictingOperationInProgress, ErrorCodes.QueryFeatureNotAllowed],
+            );
+            // Check that we are returning {ok: 1} rather than {ok: true}
+            if (res.ok) {
+                assert(res.ok === 1);
+            }
             if (FeatureFlagUtil.isPresentAndEnabled(db, "ErrorAndLogValidationAction")) {
-                assert.commandFailedWithCode(
+                res = assert.commandFailedWithCode(
                     db.runCommand({
                         collMod: this.threadCollName,
                         validator: encryptSchema,
-                        validationAction: "errorAndLog"
+                        validationAction: "errorAndLog",
                     }),
-                    [ErrorCodes.ConflictingOperationInProgress, ErrorCodes.QueryFeatureNotAllowed]);
+                    [ErrorCodes.ConflictingOperationInProgress, ErrorCodes.QueryFeatureNotAllowed],
+                );
+                // Check that we are returning {ok: 1} rather than {ok: true}
+                if (res.ok) {
+                    assert(res.ok === 1);
+                }
             }
         }
 
         return {collMod: collMod};
     })();
 
-    var transitions = {collMod: {collMod: 1}};
+    let transitions = {collMod: {collMod: 1}};
 
     function setup(db, collName, cluster) {
         // other workloads that extend this one might have set 'this.threadCollName'
         this.threadCollName = this.threadCollName || collName;
-        var bulk = db[this.threadCollName].initializeUnorderedBulkOp();
-        for (var i = 0; i < this.numDocs; ++i) {
+        let bulk = db[this.threadCollName].initializeUnorderedBulkOp();
+        for (let i = 0; i < this.numDocs; ++i) {
             bulk.insert({createdAt: new Date()});
         }
 
-        var res = bulk.execute();
+        let res = bulk.execute();
         assert.commandWorked(res);
         assert.eq(this.numDocs, res.nInserted);
 
@@ -77,9 +91,9 @@ export const $config = (function() {
         threadCount: 10,
         iterations: 20,
         data: data,
-        startState: 'collMod',
+        startState: "collMod",
         states: states,
         transitions: transitions,
-        setup: setup
+        setup: setup,
     };
 })();

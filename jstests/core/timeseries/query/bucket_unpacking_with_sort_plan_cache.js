@@ -19,14 +19,13 @@
  *     # We need a timeseries collection.
  *     requires_timeseries,
  *     assumes_balancer_off,
+ *     # The test examines the SBE plan cache, which initial sync may change the contents of.
+ *     examines_sbe_cache
  * ]
  */
+import {getTimeseriesCollForDDLOps} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
-import {
-    getAggPlanStage,
-    getAggPlanStages,
-    getPlanCacheKeyFromExplain
-} from "jstests/libs/query/analyze_plan.js";
+import {getAggPlanStage, getAggPlanStages, getPlanCacheKeyFromExplain} from "jstests/libs/query/analyze_plan.js";
 
 const fields = ["a", "b", "i"];
 
@@ -54,30 +53,25 @@ const setupCollection = (coll, collName, numDocs) => {
 
 const collName = jsTestName();
 const coll = db[collName];
-const bucketsName = "system.buckets." + collName;
 const stageName = "$_internalBoundedSort";
-const bucketsColl = db[bucketsName];
 
 const testBoundedSorterPlanCache = (sortDirection, indexDirection) => {
     // Setup with a few documents.
     const numDocs = 20;
     setupCollection(coll, collName, numDocs);
 
-    assert.commandWorked(
-        coll.createIndex({"m.a": indexDirection, "m.i": indexDirection, t: indexDirection}));
-    assert.commandWorked(
-        coll.createIndex({"m.b": indexDirection, "m.i": indexDirection, t: indexDirection}));
+    assert.commandWorked(coll.createIndex({"m.a": indexDirection, "m.i": indexDirection, t: indexDirection}));
+    assert.commandWorked(coll.createIndex({"m.b": indexDirection, "m.i": indexDirection, t: indexDirection}));
 
     // Check that the rewrite is performed before caching.
-    const pipeline =
-        [{$sort: {"m.i": sortDirection, t: sortDirection}}, {$match: {"m.a": 1, "m.b": 1}}];
+    const pipeline = [{$sort: {"m.i": sortDirection, t: sortDirection}}, {$match: {"m.a": 1, "m.b": 1}}];
     let explain = coll.explain().aggregate(pipeline);
     assert.eq(getAggPlanStages(explain, stageName).length, 1, explain);
     const traversalDirection = sortDirection === indexDirection ? "forward" : "backward";
     assert.eq(getAggPlanStage(explain, "IXSCAN").direction, traversalDirection, explain);
 
     // Check the cache is empty.
-    assert.eq(db[bucketsName].getPlanCache().list().length, 0);
+    assert.eq(getTimeseriesCollForDDLOps(db, coll).getPlanCache().list().length, 0);
 
     // Run the query twice in order to cache and activate the plan.
     for (let i = 0; i < 2; ++i) {
@@ -86,7 +80,7 @@ const testBoundedSorterPlanCache = (sortDirection, indexDirection) => {
     }
 
     // Check the answer was cached.
-    assert.eq(db[bucketsName].getPlanCache().list().length, 1);
+    assert.eq(getTimeseriesCollForDDLOps(db, coll).getPlanCache().list().length, 1);
 
     // Check that the solution still uses internal bounded sort with the correct order.
     explain = coll.explain().aggregate(pipeline);
@@ -95,16 +89,18 @@ const testBoundedSorterPlanCache = (sortDirection, indexDirection) => {
 
     // Get constants needed for replanning.
     const cursorStageName = "$cursor";
-    const planCacheKey =
-        getPlanCacheKeyFromExplain(getAggPlanStage(explain, cursorStageName)[cursorStageName]);
+    const planCacheKey = getPlanCacheKeyFromExplain(getAggPlanStage(explain, cursorStageName)[cursorStageName]);
     const planCacheEntry = (() => {
-        const planCache = bucketsColl.getPlanCache().list([{$match: {planCacheKey}}]);
+        const planCache = getTimeseriesCollForDDLOps(db, coll)
+            .getPlanCache()
+            .list([{$match: {planCacheKey}}]);
         assert.eq(planCache.length, 1, planCache);
         return planCache[0];
     })();
     let ratio = (() => {
         const getParamRes = assert.commandWorked(
-            db.adminCommand({getParameter: 1, internalQueryCacheEvictionRatio: 1}));
+            db.adminCommand({getParameter: 1, internalQueryCacheEvictionRatio: 1}),
+        );
         return getParamRes["internalQueryCacheEvictionRatio"];
     })();
 
@@ -117,8 +113,9 @@ const testBoundedSorterPlanCache = (sortDirection, indexDirection) => {
     // Turn on profiling.
     // Don't profile the setFCV command, which could be run during this test in the
     // fcv_upgrade_downgrade_replica_sets_jscore_passthrough suite.
-    assert.commandWorked(db.setProfilingLevel(
-        1, {filter: {'command.setFeatureCompatibilityVersion': {'$exists': false}}}));
+    assert.commandWorked(
+        db.setProfilingLevel(1, {filter: {"command.setFeatureCompatibilityVersion": {"$exists": false}}}),
+    );
 
     // Rerun command with replanning.
     const comment = jsTestName();
@@ -126,14 +123,12 @@ const testBoundedSorterPlanCache = (sortDirection, indexDirection) => {
     assert.eq(result.length, 0);
 
     // Check that the plan was replanned.
-    const replanProfileEntry = getLatestProfilerEntry(db, {'command.comment': comment});
+    const replanProfileEntry = getLatestProfilerEntry(db, {"command.comment": comment});
     assert(replanProfileEntry.replanned, replanProfileEntry);
 
     // Check that rewrite happens with replanning.
     explain = coll.explain().aggregate(pipeline);
-    assert.eq(getAggPlanStages(explain, stageName).length,
-              1,
-              {explain, stages: getAggPlanStages(explain, stageName)});
+    assert.eq(getAggPlanStages(explain, stageName).length, 1, {explain, stages: getAggPlanStages(explain, stageName)});
     assert.eq(getAggPlanStage(explain, "IXSCAN").direction, traversalDirection, explain);
 };
 

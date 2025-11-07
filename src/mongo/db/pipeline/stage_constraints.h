@@ -29,11 +29,12 @@
 
 #pragma once
 
-#include <boost/intrusive_ptr.hpp>
-#include <numeric>
-
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/util/assert_util.h"
+
+#include <numeric>
+
+#include <boost/intrusive_ptr.hpp>
 
 namespace mongo {
 /**
@@ -154,8 +155,6 @@ struct StageConstraints {
                 std::min(newReqs.lookupRequirement, stageConstraints.lookupRequirement);
             newReqs.unionRequirement =
                 std::min(newReqs.unionRequirement, stageConstraints.unionRequirement);
-            newReqs.noFieldModifications =
-                std::min(newReqs.noFieldModifications, stageConstraints.noFieldModifications);
         }
         return newReqs;
     }
@@ -303,6 +302,15 @@ struct StageConstraints {
         return diskRequirement == DiskUseRequirement::kWritesPersistentData;
     }
 
+    /**
+     * Helper method that sets both 'requiresInputDocSource' and 'consumesLogicalCollectionData', if
+     * the document source generates results itself and does not expect inputs.
+     */
+    void setConstraintsForNoInputSources() {
+        requiresInputDocSource = false;
+        consumesLogicalCollectionData = false;
+    }
+
     // Indicates whether this stage needs to be at a particular position in the pipeline.
     PositionRequirement requiredPosition;
 
@@ -335,11 +343,18 @@ struct StageConstraints {
     StreamType streamType;
 
     // True if this stage does not generate results itself, and instead pulls inputs from an
-    // input DocumentSource (via 'pSource').
+    // input DocumentSource (via 'pSource'). Must be set using the 'setConstraintsForNoInputSources'
+    // helper method.
     bool requiresInputDocSource = true;
 
     // True if this stage operates on a global or database level, like $currentOp.
     bool isIndependentOfAnyCollection = false;
+
+    // True if this stage's input can be standard user-inserted documents. False if the stage
+    // processes collection metadata, or internally created data, such as oplog entries or
+    // timeseries bucket documents. This stage must be also be false if 'requiresInputDocSource' is
+    // false, since this indicates the stage has no input.
+    bool consumesLogicalCollectionData = true;
 
     // True if this stage can ever be safely swapped with a subsequent $match stage, provided
     // that the match does not depend on the paths returned by getModifiedPaths().
@@ -385,9 +400,8 @@ struct StageConstraints {
     // If set, merge should be performed on the specified shard.
     boost::optional<ShardId> mergeShardId = boost::none;
 
-    // If true, then this stage only retrieves and/or reorders documents from a base collection
-    // without making any modifications or transformations to the fields.
-    bool noFieldModifications = false;
+    // If false, then this stage should never run on a timeseries collection.
+    bool canRunOnTimeseries = true;
 
     bool operator==(const StageConstraints& other) const {
         return requiredPosition == other.requiredPosition &&
@@ -406,7 +420,7 @@ struct StageConstraints {
             unionRequirement == other.unionRequirement &&
             preservesOrderAndMetadata == other.preservesOrderAndMetadata &&
             mergeShardId == other.mergeShardId &&
-            noFieldModifications == other.noFieldModifications;
+            consumesLogicalCollectionData == other.consumesLogicalCollectionData;
     }
 };
 }  // namespace mongo

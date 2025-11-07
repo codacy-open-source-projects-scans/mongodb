@@ -30,20 +30,6 @@
 
 #include "mongo/db/mongod_options.h"
 
-#include <algorithm>
-#include <boost/filesystem.hpp>  // IWYU pragma: keep
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-#include <initializer_list>
-#include <iostream>
-#include <iterator>
-#include <map>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
@@ -57,7 +43,6 @@
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/auth/cluster_auth_mode.h"
 #include "mongo/db/cluster_auth_mode_option_gen.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/global_settings.h"
 #include "mongo/db/keyfile_option_gen.h"
 #include "mongo/db/mongod_options_general_gen.h"
@@ -74,17 +59,30 @@
 #include "mongo/db/server_options_nongeneral_gen.h"
 #include "mongo/db/server_options_server_helpers.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/platform/atomic_proxy.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/options_parser/startup_options.h"
 #include "mongo/util/str.h"
 #include "mongo/util/version.h"
+
+#include <algorithm>
+#include <initializer_list>
+#include <iostream>
+#include <iterator>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/filesystem.hpp>  // IWYU pragma: keep
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #if defined(MONGO_CONFIG_HAVE_HEADER_UNISTD_H)
 #include <unistd.h>
@@ -96,7 +94,6 @@
 
 namespace mongo {
 
-using std::endl;
 
 std::string storageDBPathDescription() {
     StringBuilder sb;
@@ -151,14 +148,7 @@ void appendSysInfo(BSONObjBuilder* obj) {
 StatusWith<repl::ReplSettings> populateReplSettings(const moe::Environment& params) {
     repl::ReplSettings replSettings;
 
-    if (params.count("replication.serverless")) {
-        if (params.count("replication.replSet") || params.count("replication.replSetName")) {
-            return Status(ErrorCodes::BadValue,
-                          "serverless cannot be used with replSet or replSetName options");
-        }
-        // Starting a node in "serverless" mode implies it uses a replSet.
-        replSettings.setServerlessMode();
-    } else if (params.count("replication.replSet")) {
+    if (params.count("replication.replSet")) {
         /* seed list of hosts for the repl set */
         replSettings.setReplSetString(params["replication.replSet"].as<std::string>().c_str());
     } else if (params.count("replication.replSetName")) {
@@ -166,6 +156,7 @@ StatusWith<repl::ReplSettings> populateReplSettings(const moe::Environment& para
         // set by the user. Therefore, we only need to check for it if "replSet" in not found.
         replSettings.setReplSetString(params["replication.replSetName"].as<std::string>().c_str());
     } else if (gFeatureFlagAllMongodsAreSharded.isEnabledUseLatestFCVWhenUninitialized(
+                   kNoVersionContext,
                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
                serverGlobalParams.maintenanceMode != ServerGlobalParams::StandaloneMode) {
         replSettings.setShouldAutoInitiate();
@@ -249,19 +240,21 @@ Status validateMongodOptions(const moe::Environment& params) {
         setShardRole = setShardRole || clusterRole == "shardsvr";
     }
 
-    bool setRouterPort = params.count("routerPort") || params.count("net.routerPort");
-
-    if (setRouterPort && !setConfigRole && !setShardRole) {
-        return Status(ErrorCodes::BadValue,
-                      "The embedded router requires the node to act as a shard or config server");
-    }
-
     if (params.count("maintenanceMode")) {
         auto maintenanceMode = params["maintenanceMode"].as<std::string>();
         if (maintenanceMode == "standalone" &&
             (params.count("replSet") || params.count("replication.replSetName"))) {
             return Status(ErrorCodes::BadValue,
                           "Cannot specify both standalone maintenance mode and replica set name");
+        }
+    }
+
+    if (params.count("replicaSetConfigShardMaintenanceMode")) {
+        bool isReplSet = params.count("replSet") || params.count("replication.replSet");
+        if (!isReplSet && !setConfigRole) {
+            return Status(ErrorCodes::BadValue,
+                          "replicaSetConfigShardMaintenanceMode can only be used on replicasets or "
+                          "configservers");
         }
     }
 
@@ -338,19 +331,6 @@ Status canonicalizeMongodOptions(moe::Environment* params) {
             return ret;
         }
         ret = params->remove("shardsvr");
-        if (!ret.isOK()) {
-            return ret;
-        }
-    }
-
-    // If the "--routerPort" option is passed from the command line, override "net.routerPort"
-    // (config file option) as it will be used later.
-    if (params->count("routerPort")) {
-        Status ret = params->set("net.routerPort", moe::Value((*params)["routerPort"].as<int>()));
-        if (!ret.isOK()) {
-            return ret;
-        }
-        ret = params->remove("routerPort");
         if (!ret.isOK()) {
             return ret;
         }
@@ -484,7 +464,7 @@ Status storeMongodOptions(const moe::Environment& params) {
 
 #ifdef _WIN32
     StringData dbpath(storageGlobalParams.dbpath);
-    if (dbpath.size() >= 2 && dbpath.startsWith("\\\\")) {
+    if (dbpath.size() >= 2 && dbpath.starts_with("\\\\")) {
         // Check if the dbpath is on a Windows network share (eg. \\myserver\myshare)
         LOGV2_WARNING_OPTIONS(5808500,
                               {logv2::LogTag::kStartupWarnings},
@@ -509,7 +489,7 @@ Status storeMongodOptions(const moe::Environment& params) {
     }
 
     if (params.count("storage.syncPeriodSecs")) {
-        storageGlobalParams.syncdelay = params["storage.syncPeriodSecs"].as<double>();
+        storageGlobalParams.syncdelay.store(params["storage.syncPeriodSecs"].as<double>());
         Status conflictStatus =
             checkConflictWithSetParameter("storage.syncPeriodSecs", "syncdelay");
         if (!conflictStatus.isOK()) {
@@ -563,6 +543,15 @@ Status storeMongodOptions(const moe::Environment& params) {
     }
     if (params.count("validate") && params["validate"].as<bool>() == true) {
         storageGlobalParams.validate = 1;
+        if (params.count("validateDbName")) {
+            gValidateDbName = params["validateDbName"].as<std::string>();
+            if (params.count("validateCollectionName")) {
+                gValidateCollectionName = params["validateCollectionName"].as<std::string>();
+            }
+        } else if (params.count("validateCollectionName")) {
+            return Status(ErrorCodes::BadValue,
+                          str::stream() << "Cannot specify collection name without DB name");
+        }
     }
     if (params.count("upgrade") && params["upgrade"].as<bool>() == true) {
         storageGlobalParams.upgrade = 1;
@@ -581,7 +570,7 @@ Status storeMongodOptions(const moe::Environment& params) {
 
     if (params.count("maintenanceMode") &&
         gFeatureFlagAllMongodsAreSharded.isEnabledUseLatestFCVWhenUninitialized(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+            kNoVersionContext, serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
         // Setting maintenanceMode will disable sharding by setting 'clusterRole' to
         // 'ClusterRole::None'. If maintenanceMode is set to 'standalone', replication will be
         // disabled as well.
@@ -589,6 +578,9 @@ Status storeMongodOptions(const moe::Environment& params) {
         serverGlobalParams.maintenanceMode = (value == "replicaSet")
             ? ServerGlobalParams::ReplicaSetMode
             : ServerGlobalParams::StandaloneMode;
+    }
+    if (params.count("replicaSetConfigShardMaintenanceMode")) {
+        serverGlobalParams.replicaSetConfigShardMaintenanceMode = true;
     }
 
     const auto replSettingsWithStatus = populateReplSettings(params);
@@ -693,18 +685,16 @@ Status storeMongodOptions(const moe::Environment& params) {
         // - { ShardServer, ConfigServer, RouterServer }
         // - { RouterServer }
         serverGlobalParams.clusterRole += ClusterRole::RouterServer;
-
-        if (params.count("net.routerPort")) {
-            if (feature_flags::gRouterPort.isEnabledUseLatestFCVWhenUninitialized(fcvSnapshot)) {
-                serverGlobalParams.routerPort = params["net.routerPort"].as<int>();
-            }
-        }
     } else if (gFeatureFlagAllMongodsAreSharded.isEnabledUseLatestFCVWhenUninitialized(
-                   fcvSnapshot) &&
+                   kNoVersionContext, fcvSnapshot) &&
                serverGlobalParams.maintenanceMode == ServerGlobalParams::MaintenanceMode::None) {
         serverGlobalParams.doAutoBootstrapSharding = true;
         serverGlobalParams.clusterRole = {
             ClusterRole::ShardServer, ClusterRole::ConfigServer, ClusterRole::RouterServer};
+    }
+
+    if (params.count("net.proxyPort")) {
+        serverGlobalParams.proxyPort = params["net.proxyPort"].as<int>();
     }
 
     if (!params.count("net.port")) {

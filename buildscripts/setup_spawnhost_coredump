@@ -10,7 +10,22 @@ case "${unameOut}" in
     *)          machine="UNKNOWN:${unameOut}"
 esac
 
-TOOLCHAIN_ROOT=/opt/mongodbtoolchain/v4
+HOME_DIR=$(pwd)
+
+# needed for the python install to be successful on windows
+if [[ "${machine}" = "Cygwin" ]]; then
+    # We want everything to be in the Administrator home directory because that is what user they
+    # log in with
+    export USERPROFILE=$(cygpath -w ~Administrator)
+    HOME_DIR=$(cygpath -u $USERPROFILE)
+
+    # the evergreen yml file is only added to the Administrator user on windows and not the actual
+    # user currently running
+    cp ${HOME_DIR}/.evergreen.yml ~/.evergreen.yml
+    cd $HOME_DIR
+fi
+
+TOOLCHAIN_ROOT=/opt/mongodbtoolchain/v5
 
 SRC_DIR=$(ls -d /data/mci/source-* 2>/dev/null)
 ln -s $SRC_DIR src
@@ -21,14 +36,6 @@ popd
 
 echo "# This is a fake expansions file to allow our setup scripts to function correctly." > "/data/mci/expansions.yml"
 echo "spawn_host: \"true\"" >> "/data/mci/expansions.yml"
-
-HOME_DIR=$(pwd)
-
-# needed for the python install to be successful on windows
-if [[ "${machine}" = "Cygwin" ]]; then
-    export USERPROFILE=$(cygpath -w ~)
-    HOME_DIR=$(cygpath -u $USERPROFILE)
-fi
 
 # On some RHEL distros TMPDIR was not being set on the spawnhost.
 # This does not show up during evergreen tasks because evergreen sets this var.
@@ -53,12 +60,20 @@ if [ -f $ARTIFACTS_SCRIPT ]; then
     $python $ARTIFACTS_SCRIPT
 fi
 
+RBE_SYSROOT_SCRIPT="${SRC_DIR}/buildscripts/create_rbe_sysroot.py"
+if [[ -f "${RBE_SYSROOT_SCRIPT}" ]]; then
+    echo "Setting up RBE sysroot for unit test debugging..."
+    $python $RBE_SYSROOT_SCRIPT
+else
+    echo "Failed to find RBE sysroot setup script."
+fi
+
 archive_fail() {
     echo "Error: archive [${1}] not found." >&2
 }
 
 if [[ "${machine}" = "Cygwin" ]]; then
-    echo "source $(pwd)/venv/Scripts/activate" >> ~/.bashrc
+    echo "source $(pwd)/venv/Scripts/activate" >> $HOME_DIR/.bashrc
     out_dir="/cygdrive/c/setup_script_output.txt"
     desktop_dir="/cygdrive/c/Users/Administrator/Desktop"
 
@@ -198,7 +213,7 @@ fi' >> .bash_profile
     cd debug
 
     # As the name suggests, pretty printers. Primarily for boost::optional<T>
-    git clone git@github.com:mongodb-forks/Boost-Pretty-Printer.git --branch mongodb-stable &
+    git clone https://github.com/mongodb-forks/Boost-Pretty-Printer.git --branch mongodb-stable &
 
     # Discover and unarchive necessary files and source code. This will put mongo binaries and their
     # partner .debug files in the same `debug/bin` directory. The `bin` directory will later be symbolic
@@ -227,12 +242,12 @@ fi' >> .bash_profile
         archive_fail "debug"
     fi
 
-    UNITTEST_ARCHIVE=$(ls /data/mci/artifacts-*run_unittests*/mongo-unittests-*.tgz 2>/dev/null)
+    UNITTEST_ARCHIVE=$(ls /data/mci/artifacts-*unit_test*/mongo-unittests-*.tgz 2>/dev/null)
     if [[ -n $UNITTEST_ARCHIVE ]]; then
         tar --wildcards --strip-components=0 -xzf $UNITTEST_ARCHIVE 'bin/*' &
         tar --wildcards -xzf $UNITTEST_ARCHIVE 'lib/*' &
     else
-        archive_fail "unittest"
+        archive_fail "unit_test"
     fi
 
     BENCHMARK_ARCHIVE=$(ls /data/mci/artifacts-*compile_upload_benchmarks/benchmarks-*.tgz 2>/dev/null)
@@ -251,7 +266,6 @@ fi' >> .bash_profile
     else
         archive_fail "src"
     fi
-
 
     set -x
 
@@ -391,4 +405,5 @@ fi
 # to error.
 if [[ -n "${slack_user}" ]]; then
     "$evg_binary_pathname" --config "$evg_credentials_pathname" notify slack -t "@$slack_user" -m "$slack_message"
+    "$evg_binary_pathname" --config "$evg_credentials_pathname" notify slack -t "@$slack_user" -m "If you run into unresolved system library symbols when debugging unit tests, please add -ex 'set sysroot $HOME_DIR/rbe_sysroot/' to your gdb command."
 fi

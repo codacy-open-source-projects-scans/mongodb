@@ -31,19 +31,16 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/admission/execution_admission_context.h"
 #include "mongo/db/client.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_options.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
@@ -53,6 +50,8 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/time_support.h"
+
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -95,7 +94,7 @@ void JournalFlusher::run() {
 
     // The thread must not run and access the service context to create an opCtx while unit test
     // infrastructure is still being set up and expects sole access to the service context (there is
-    // no conurrency control on the service context during this phase).
+    // no concurrency control on the service context during this phase).
     if (_disablePeriodicFlushes) {
         stdx::unique_lock<stdx::mutex> lk(_stateMutex);
         _flushJournalNowCV.wait(lk,
@@ -153,7 +152,7 @@ void JournalFlusher::run() {
                 continue;
             }
 
-            // We want to log errors for debugability.
+            // We want to log errors for debuggability.
             LOGV2_WARNING(
                 6148401,
                 "The JournalFlusher encountered an error attempting to flush data to disk",
@@ -233,6 +232,12 @@ void JournalFlusher::pause() {
     {
         stdx::unique_lock<stdx::mutex> lk(_stateMutex);
         _needToPause = true;
+        if (_disablePeriodicFlushes) {
+            // If periodic flushes are disabled, manually trigger one to wake up the periodic
+            // runner. That way, _state will be updated to Paused which will allow this function to
+            // finish.
+            _triggerJournalFlush(lk);
+        }
         _stateChangeCV.wait(lk,
                             [&] { return _state == States::Paused || _state == States::ShutDown; });
     }

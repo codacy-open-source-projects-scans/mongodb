@@ -27,9 +27,9 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional.hpp>
+#pragma once
 
-#include "mongo/bson/mutable/document.h"
+#include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/db/field_ref_set.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/canonical_query.h"
@@ -38,6 +38,8 @@
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/update/update_driver.h"
 #include "mongo/util/safe_num.h"
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace update {

@@ -7,14 +7,11 @@
  *  requires_sharding,
  *  featureFlagUnshardCollection,
  *  featureFlagMoveCollection,
- *  featureFlagReshardingImprovements,
- *  # TODO (SERVER-87812) Remove multiversion_incompatible tag
- *  multiversion_incompatible,
  *  requires_fcv_80
  * ]
  */
 
-export const $config = (function() {
+export const $config = (function () {
     const kTotalWorkingDocuments = 500;
     const iterations = 20;
     // In the duration moveCollection takes to complete, all the other threads finish running their
@@ -38,29 +35,29 @@ export const $config = (function() {
     }
 
     function calculateToShard(conn, ns) {
-        var config = conn.rsConns.config.getDB('config');
-        var unshardedColl = config.collections.findOne({_id: ns});
+        let config = conn.rsConns.config.getDB("config");
+        let unshardedColl = config.collections.findOne({_id: ns});
         // In case the collection is untracked the current shard is the primary shard.
         let currentShardFn = () => {
             if (unshardedColl === null) {
                 return data.primaryShard;
             } else {
-                var chunk = config.chunks.findOne({uuid: unshardedColl.uuid});
+                let chunk = config.chunks.findOne({uuid: unshardedColl.uuid});
                 if (chunk === null) {
                     return data.primaryShard;
                 }
                 return chunk.shard;
             }
         };
-        var currentShard = currentShardFn();
-        var shards = Object.keys(conn.shards);
-        var destinationShards = shards.filter(function(shard) {
+        let currentShard = currentShardFn();
+        let shards = Object.keys(conn.shards);
+        let destinationShards = shards.filter(function (shard) {
             if (shard !== currentShard) {
                 return shard;
             }
         });
 
-        var toShard = destinationShards[Random.randInt(destinationShards.length)];
+        let toShard = destinationShards[Random.randInt(destinationShards.length)];
         return toShard;
     }
 
@@ -104,8 +101,7 @@ export const $config = (function() {
             print(`Finished inserting documents.`);
         },
         moveCollection: function moveCollection(db, collName, connCache) {
-            const shouldContinueMoveCollection =
-                this.moveCollectionCount <= kMaxMoveCollectionExecutions;
+            const shouldContinueMoveCollection = this.moveCollectionCount <= kMaxMoveCollectionExecutions;
             if (this.tid === 0 && shouldContinueMoveCollection) {
                 const coll = db.getCollection(collName);
                 const toShard = calculateToShard(connCache, coll.getFullName());
@@ -117,34 +113,31 @@ export const $config = (function() {
         untrackUnshardedCollection: function untrackUnshardedCollection(db, collName, connCache) {
             const namespace = `${db}.${collName}`;
             print(`Started to untrack collection ${namespace}`);
-            assert.commandWorkedOrFailedWithCode(
-                db.adminCommand({untrackUnshardedCollection: namespace}), [
-                    // Handles the case where the collection is not located on its primary
-                    ErrorCodes.OperationFailed,
-                    // Handles the case where the collection is sharded
-                    ErrorCodes.InvalidNamespace,
-                    //  TODO (SERVER-96072) remove this error once the command is backported.
-                    ErrorCodes.CommandNotFound,
-                ]);
+            assert.commandWorkedOrFailedWithCode(db.adminCommand({untrackUnshardedCollection: namespace}), [
+                // Handles the case where the collection is not located on its primary
+                ErrorCodes.OperationFailed,
+                // Handles the case where the collection is sharded
+                ErrorCodes.InvalidNamespace,
+            ]);
             print(`Untrack collection completed`);
-        }
+        },
     };
 
     const transitions = {
         moveCollection: {insert: 1.0},
         untrackUnshardedCollection: {insert: 1.0},
-        insert: {insert: 0.75, moveCollection: 0.15, untrackUnshardedCollection: 0.10},
+        insert: {insert: 0.75, moveCollection: 0.15, untrackUnshardedCollection: 0.1},
     };
 
     function setup(db, collName, _cluster) {
-        const ns = db + '.' + collName;
+        const ns = db + "." + collName;
         print(`Started unshardCollection on ${ns}`);
         assert.commandWorked(db.adminCommand({unshardCollection: ns}));
         print(`Finished unshardCollection on ${ns}`);
 
         // Calculate the primary shard
-        var unshardedColl = db.getSiblingDB("config").collections.findOne({_id: ns});
-        var chunk = db.getSiblingDB("config").chunks.findOne({uuid: unshardedColl.uuid});
+        let unshardedColl = db.getSiblingDB("config").collections.findOne({_id: ns});
+        let chunk = db.getSiblingDB("config").chunks.findOne({uuid: unshardedColl.uuid});
         this.primaryShard = chunk.shard;
 
         const coll = db.getCollection(collName);
@@ -154,11 +147,11 @@ export const $config = (function() {
     return {
         threadCount: 15,
         iterations: iterations,
-        startState: 'moveCollection',
+        startState: "moveCollection",
         states: states,
         transitions: transitions,
         setup: setup,
         data: data,
-        passConnectionCache: true
+        passConnectionCache: true,
     };
 })();

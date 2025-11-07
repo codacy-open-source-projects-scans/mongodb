@@ -27,25 +27,22 @@
  *    it in the license file.
  */
 
-#include <absl/container/flat_hash_map.h>
+#include "mongo/db/query/plan_cache/plan_cache_indexability.h"
 
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/index_path_projection.h"
 #include "mongo/db/exec/projection_executor_utils.h"
-#include "mongo/db/feature_flag.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/index_entry.h"
-#include "mongo/db/query/plan_cache/plan_cache_indexability.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
 #include "mongo/db/query/planner_ixselect.h"
-#include "mongo/db/query/query_feature_flags_gen.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -108,7 +105,10 @@ void PlanCacheIndexabilityState::processPartialIndex(const std::string& indexNam
 }
 
 void PlanCacheIndexabilityState::processWildcardIndex(const CoreIndexInfo& cii) {
-    invariant(cii.type == IndexType::INDEX_WILDCARD);
+    tassert(11177604,
+            fmt::format("Expected wildcard index, but found index with key pattern {}",
+                        cii.keyPattern.toString()),
+            cii.type == IndexType::INDEX_WILDCARD);
 
     _wildcardIndexDiscriminators.emplace_back(
         cii.indexPathProjection->exec(), cii.identifier.catalogName, cii.collator);

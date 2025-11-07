@@ -27,18 +27,17 @@
  *    it in the license file.
  */
 
-#include <cmath>
-
-#include <absl/container/flat_hash_map.h>
+#include "mongo/db/write_concern_options.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonmisc.h"
-#include "mongo/db/write_concern_options.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <cmath>
+
+#include <absl/container/flat_hash_map.h>
 
 namespace mongo {
 namespace {
@@ -61,16 +60,12 @@ TEST(WriteConcernOptionsTest, ParseReturnsFailedToParseOnEmptyDocument) {
 }
 
 TEST(WriteConcernOptionsTest, ParseReturnsFailedToParseOnInvalidJValue) {
-    auto status = WriteConcernOptions::parse(BSON("j"
-                                                  << "abc"))
-                      .getStatus();
+    auto status = WriteConcernOptions::parse(BSON("j" << "abc")).getStatus();
     ASSERT_EQUALS(ErrorCodes::TypeMismatch, status);
 }
 
 TEST(WriteConcernOptionsTest, ParseReturnsFailedToParseOnInvalidFSyncValue) {
-    auto status = WriteConcernOptions::parse(BSON("fsync"
-                                                  << "abc"))
-                      .getStatus();
+    auto status = WriteConcernOptions::parse(BSON("fsync" << "abc")).getStatus();
     ASSERT_EQUALS(ErrorCodes::TypeMismatch, status);
 }
 
@@ -140,8 +135,7 @@ TEST(WriteConcernOptionsTest, ParseSetsWNumNodesIfWIsANumber) {
 }
 
 TEST(WriteConcernOptionsTest, ParseSetsWTimeoutToZeroIfWTimeoutIsNotANumber) {
-    auto sw = WriteConcernOptions::parse(BSON("wtimeout"
-                                              << "abc"));
+    auto sw = WriteConcernOptions::parse(BSON("wtimeout" << "abc"));
     ASSERT_OK(sw.getStatus());
     WriteConcernOptions options = sw.getValue();
     ASSERT_TRUE(WriteConcernOptions::SyncMode::UNSET == options.syncMode);
@@ -196,9 +190,7 @@ TEST(WriteConcernOptionsTest, ParseIgnoresSpecialFields) {
 }
 
 TEST(WriteConcernOptionsTest, ParseWithTags) {
-    auto status = WriteConcernOptions::parse(BSON("w" << BSON("abc"
-                                                              << "def")))
-                      .getStatus();
+    auto status = WriteConcernOptions::parse(BSON("w" << BSON("abc" << "def"))).getStatus();
     ASSERT_EQUALS(ErrorCodes::FailedToParse, status);
     ASSERT_STRING_CONTAINS(status.reason(),
                            "tags must be a single level document with only number values");
@@ -222,8 +214,7 @@ TEST(WriteConcernOptionsTest, ParseWithTags) {
     ASSERT(wc == wc2);
     auto wc3 = uassertStatusOK(WriteConcernOptions::parse(BSON("w" << BSON("def" << 1))));
     ASSERT(wc != wc3);
-    auto wc4 = uassertStatusOK(WriteConcernOptions::parse(BSON("w"
-                                                               << "majority")));
+    auto wc4 = uassertStatusOK(WriteConcernOptions::parse(BSON("w" << "majority")));
     ASSERT(wc != wc4);
     auto wc5 = uassertStatusOK(WriteConcernOptions::parse(BSON("w" << 2)));
     ASSERT(wc != wc5);

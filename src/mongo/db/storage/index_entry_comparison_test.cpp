@@ -27,16 +27,16 @@
  *    it in the license file.
  */
 
-#include <memory>
+#include "mongo/db/storage/index_entry_comparison.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
-#include "mongo/db/storage/index_entry_comparison.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/hex.h"
+#include "mongo/util/overloaded_visitor.h"
+
+#include <memory>
 
 namespace mongo {
 
@@ -124,13 +124,11 @@ void duplicateKeyErrorSerializationAndParseReturnTheSameObject(
 
 TEST(IndexEntryComparison, BuildDupKeyErrorSerializeAndParseReturnTheSameObjectWithCollation) {
     auto keyPattern = BSON("a" << 1 << "b" << 1);
-    auto str = "abc";
+    auto str = "abc"_sd;
     auto keyValue = BSON("" << 10 << "" << str);
-    auto collation = BSON("x"
-                          << "y");
+    auto collation = BSON("x" << 'y');
     auto keyValueWithFieldName = BSON("a" << 10 << "b" << str);
-    auto expectedEncodedKeyValueField =
-        BSON("a" << 10 << "b" << StringData(hexblob::encodeLower(str)));
+    auto expectedEncodedKeyValueField = BSON("a" << 10 << "b" << hexblob::encodeLower(str));
     duplicateKeyErrorSerializationAndParseReturnTheSameObject(
         keyPattern, keyValue, collation, keyValueWithFieldName, expectedEncodedKeyValueField);
 }
@@ -141,8 +139,7 @@ TEST(IndexEntryComparison, BuildDupKeyErrorSerializeAndParseReturnTheSameObjectF
     auto keyValue = BSON("" << 10 << "" << str);
     auto collation = BSONObj();
     auto keyValueWithFieldName = BSON("a" << 10 << "b" << str);
-    auto expectedEncodedKeyValueField =
-        BSON("a" << 10 << "b" << StringData(hexblob::encodeLower(str)));
+    auto expectedEncodedKeyValueField = BSON("a" << 10 << "b" << hexblob::encodeLower(str));
     duplicateKeyErrorSerializationAndParseReturnTheSameObject(
         keyPattern, keyValue, collation, keyValueWithFieldName, expectedEncodedKeyValueField);
 }
@@ -154,8 +151,7 @@ TEST(IndexEntryComparison, BuildDupKeyErrorMessageIncludesCollationAndHexEncoded
     std::string indexName("a_1");
     auto keyPattern = BSON("a" << 1);
     auto keyValue = BSON("" << mockCollationKey);
-    auto collation = BSON("locale"
-                          << "en_US");
+    auto collation = BSON("locale" << "en_US");
 
     auto dupKeyStatus = buildDupKeyErrorStatus(keyValue, collNss, indexName, keyPattern, collation);
     ASSERT_NOT_OK(dupKeyStatus);
@@ -182,8 +178,7 @@ TEST(IndexEntryComparison, BuildDupKeyErrorMessageHexEncodesInvalidUTF8ForIndexW
     // The byte sequence c0 16 is invalid UTF-8 since this is an overlong encoding of the letter
     // "a", which should be represented as simply 0x16. The byte 0xc0 is always illegal in UTF-8
     // since it would only ever be used for an overload two-byte encoding of an ASCII character.
-    auto keyValue = BSON(""
-                         << "\xc0\x16");
+    auto keyValue = BSON("" << "\xc0\x16");
     auto dupKeyStatus = buildDupKeyErrorStatus(keyValue, collNss, indexName, keyPattern, BSONObj{});
     ASSERT_NOT_OK(dupKeyStatus);
     ASSERT_EQUALS(dupKeyStatus.code(), ErrorCodes::DuplicateKey);
@@ -196,9 +191,7 @@ TEST(IndexEntryComparison, BuildDupKeyErrorMessageHexEncodesInvalidUTF8ForIndexW
     auto extraInfo = dupKeyStatus.extraInfo<DuplicateKeyErrorInfo>();
     ASSERT(extraInfo);
     ASSERT_BSONOBJ_EQ(extraInfo->getKeyPattern(), keyPattern);
-    ASSERT_BSONOBJ_EQ(extraInfo->getDuplicatedKeyValue(),
-                      BSON("a"
-                           << "\xc0\x16"));
+    ASSERT_BSONOBJ_EQ(extraInfo->getDuplicatedKeyValue(), BSON("a" << "\xc0\x16"));
 }
 
 }  // namespace mongo

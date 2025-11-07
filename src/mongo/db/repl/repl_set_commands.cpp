@@ -32,18 +32,12 @@
     LOGV2_DEBUG_OPTIONS(                               \
         ID, DLEVEL, {logv2::LogComponent::kReplicationHeartbeats}, MESSAGE, ##__VA_ARGS__)
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
 #include <cstdint>
 #include <cstring>
-// IWYU pragma: no_include "ext/alloc_traits.h"
-#include <iosfwd>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
@@ -61,16 +55,19 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/commands/test_commands_enabled.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/repl/parsing_utils.h"
 #include "mongo/db/repl/repl_set_command.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/repl_set_heartbeat_args_v1.h"
@@ -85,11 +82,7 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_engine.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
@@ -101,6 +94,13 @@
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
+
+#include <iosfwd>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -132,6 +132,10 @@ public:
                                  const DatabaseName&,
                                  const BSONObj&) const override {
         return Status::OK();
+    }
+
+    bool requiresAuthzChecks() const override {
+        return false;
     }
 
     CmdReplSetTest() : ReplSetCommand("replSetTest") {}
@@ -175,7 +179,7 @@ public:
                                     Date_t::now() + Milliseconds(5),
                                     Lock::InterruptBehavior::kLeaveUnlocked,
                                     [] {
-                                        Lock::GlobalLockSkipOptions options;
+                                        Lock::GlobalLockOptions options;
                                         options.skipRSTLLock = true;
                                         return options;
                                     }());
@@ -192,7 +196,7 @@ public:
                         "Failed to get last stable recovery timestamp due to lock acquire timeout. "
                         "Note this is expected if shutdown is in progress.");
                 }
-            } catch (const ExceptionForCat<ErrorCategory::CancellationError>& ex) {
+            } catch (const ExceptionFor<ErrorCategory::CancellationError>& ex) {
                 LOGV2_WARNING(
                     6100701,
                     "Failed to get last stable recovery timestamp due to cancellation error. Note "
@@ -314,53 +318,6 @@ HostAndPort someHostAndPortForMe() {
     MONGO_verify(h != "localhost");
     return HostAndPort(h, serverGlobalParams.port);
 }
-
-void parseReplSetSeedList(ReplicationCoordinatorExternalState* externalState,
-                          const std::string& replSetString,
-                          std::string* setname,
-                          std::vector<HostAndPort>* seeds) {
-    const char* p = replSetString.c_str();
-    const char* slash = strchr(p, '/');
-    std::set<HostAndPort> seedSet;
-    if (slash) {
-        *setname = std::string(p, slash - p);
-    } else {
-        *setname = p;
-    }
-
-    if (slash == nullptr) {
-        return;
-    }
-
-    p = slash + 1;
-    while (1) {
-        const char* comma = strchr(p, ',');
-        if (comma == nullptr) {
-            comma = strchr(p, 0);
-        }
-        if (p == comma) {
-            break;
-        }
-        HostAndPort m;
-        try {
-            m = HostAndPort(std::string(p, comma - p));
-        } catch (...) {
-            uassert(13114, "bad --replSet seed hostname", false);
-        }
-        uassert(13096, "bad --replSet command line config string - dups?", seedSet.count(m) == 0);
-        seedSet.insert(m);
-        // uassert(13101, "can't use localhost in replset host list", !m.isLocalHost());
-        if (externalState->isSelf(m, getGlobalServiceContext())) {
-            LOGV2_DEBUG(21576, 1, "Ignoring seed (=self)", "seed"_attr = m.toString());
-        } else {
-            seeds->push_back(m);
-        }
-        if (*comma == 0) {
-            break;
-        }
-        p = comma + 1;
-    }
-}
 }  // namespace
 
 class CmdReplSetInitiate : public ReplSetCommand {
@@ -375,7 +332,7 @@ public:
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         BSONObj configObj;
-        if (cmdObj["replSetInitiate"].type() == Object) {
+        if (cmdObj["replSetInitiate"].type() == BSONType::object) {
             configObj = cmdObj["replSetInitiate"].Obj();
         }
 
@@ -383,11 +340,6 @@ public:
         if (!settings.isReplSet()) {
             uasserted(ErrorCodes::NoReplicationEnabled,
                       "This node was not started with replication enabled.");
-        }
-
-        if (settings.isServerless() && configObj.isEmpty()) {
-            uasserted(ErrorCodes::InvalidReplicaSetConfig,
-                      "A config must be provided when started in serverless mode.");
         }
 
         if (configObj.isEmpty()) {
@@ -404,9 +356,10 @@ public:
             ReplicationCoordinatorExternalStateImpl externalState(opCtx->getServiceContext(),
                                                                   StorageInterface::get(opCtx),
                                                                   ReplicationProcess::get(opCtx));
-            std::string name;
-            std::vector<HostAndPort> seeds;
-            parseReplSetSeedList(&externalState, replSetString, &name, &seeds);  // may throw...
+            auto [name, seeds] = parseReplSetSeedList(
+                &externalState,
+                replSetString);  // May throw on invalid/duplicate seeds, localhost usage, or
+                                 // parsing errors (via HostAndPort::parseThrowing).
 
             BSONObjBuilder b;
             b.append("_id", name);
@@ -468,7 +421,7 @@ public:
         const auto replCoord = ReplicationCoordinator::get(opCtx);
         uassertStatusOK(replCoord->checkReplEnabledForCommand(&result));
 
-        if (cmdObj["replSetReconfig"].type() != Object) {
+        if (cmdObj["replSetReconfig"].type() != BSONType::object) {
             result.append("errmsg", "no configuration specified");
             return false;
         }
@@ -760,8 +713,7 @@ namespace {
  * Used to set the hasData field on replset heartbeat command response.
  */
 bool replHasDatabases(OperationContext* opCtx) {
-    StorageEngine* storageEngine = getGlobalServiceContext()->getStorageEngine();
-    std::vector<DatabaseName> dbNames = storageEngine->listDatabases();
+    std::vector<DatabaseName> dbNames = catalog::listDatabases();
 
     if (dbNames.size() >= 2)
         return true;

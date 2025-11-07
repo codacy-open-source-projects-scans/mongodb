@@ -28,7 +28,6 @@ selector:
     # Prepare is not a command on mongos.
     - uses_prepare_transaction
     - assumes_no_track_upon_creation
-    - creates_unspittable_collections_on_specific_shards
 
 executor:
   archive:
@@ -41,6 +40,7 @@ executor:
       global_vars:
         TestData:
           implicitlyTrackUnshardedCollectionOnCreation: true
+          createsUnsplittableCollectionsOnRandomShards: true
   hooks:
     # We don't execute dbHash or oplog consistency checks since there is only a single replica set
     # node.

@@ -28,14 +28,7 @@
  */
 
 
-#include <boost/optional.hpp>
-#include <cstdint>
-#include <mutex>
-#include <utility>
-
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/write_ops/write_ops_retryability.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
@@ -46,18 +39,22 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
-#include "mongo/db/query/write_ops/write_ops_retryability.h"
 #include "mongo/db/repl/image_collection_entry_gen.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <cstdint>
+#include <mutex>
+#include <utility>
+
+#include <boost/cstdint.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -131,8 +128,9 @@ void validateFindAndModifyRetryability(const write_ops::FindAndModifyCommandRequ
  * oplog.
  */
 BSONObj extractPreOrPostImage(OperationContext* opCtx, const repl::OplogEntry& oplog) {
-    invariant(oplog.getPreImageOpTime() || oplog.getPostImageOpTime() ||
-              oplog.getNeedsRetryImage());
+    tassert(11052024,
+            "Expected OplogEntry with pre or post image",
+            oplog.getPreImageOpTime() || oplog.getPostImageOpTime() || oplog.getNeedsRetryImage());
     DBDirectClient client(opCtx);
     if (oplog.getNeedsRetryImage()) {
         // Extract image from side collection.
@@ -161,7 +159,7 @@ BSONObj extractPreOrPostImage(OperationContext* opCtx, const repl::OplogEntry& o
                     << sessionId.toBSON() << " cannot be found");
         }
 
-        auto entry = repl::ImageEntry::parse(IDLParserContext("ImageEntryForRequest"), imageDoc);
+        auto entry = repl::ImageEntry::parse(imageDoc, IDLParserContext("ImageEntryForRequest"));
         if (entry.getInvalidated()) {
             // This case is expected when a node could not correctly compute a retry image due
             // to data inconsistency while in initial sync.

@@ -29,13 +29,14 @@
 
 #pragma once
 
+#include "mongo/base/status.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/modules_incompletely_marked_header.h"
+
 #include <functional>
 #include <map>
 #include <string>
 #include <vector>
-
-#include "mongo/base/status.h"
-#include "mongo/util/duration.h"
 
 namespace mongo {
 namespace optionenvironment {
@@ -106,7 +107,7 @@ Status readRawFile(const std::string& filename,
  *      // We have overridden port here, otherwise it stays as the default.
  *  }
  */
-class OptionsParser {
+class MONGO_MOD_OPEN OptionsParser {
 public:
     /** Indicates if unknown config options are allowed or not.
      *

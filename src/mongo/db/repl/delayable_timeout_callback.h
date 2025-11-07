@@ -28,19 +28,20 @@
  */
 #pragma once
 
-#include <cstdint>
-#include <functional>
-#include <string>
-#include <utility>
-
 #include "mongo/base/status.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 
-namespace mongo {
+#include <cstdint>
+#include <functional>
+#include <string>
+#include <utility>
+
+namespace MONGO_MOD_PARENT_PRIVATE mongo {
 namespace repl {
 
 /**
@@ -61,7 +62,7 @@ public:
     DelayableTimeoutCallback(executor::TaskExecutor* executor,
                              executor::TaskExecutor::CallbackFn callback,
                              std::string timerName = std::string())
-        : _executor(executor), _callback(std::move(callback)), _timerName(std::move(timerName)){};
+        : _executor(executor), _callback(std::move(callback)), _timerName(std::move(timerName)) {};
 
     ~DelayableTimeoutCallback();
 
@@ -162,4 +163,4 @@ private:
 };
 
 }  // namespace repl
-}  // namespace mongo
+}  // namespace MONGO_MOD_PARENT_PRIVATE mongo

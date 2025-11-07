@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-#include <type_traits>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -44,6 +39,13 @@
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/protocol.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <memory>
+#include <type_traits>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 class BSONObj;
@@ -55,7 +57,7 @@ namespace rpc {
 /**
  * Constructs an RPC Reply.
  */
-class ReplyBuilderInterface {
+class MONGO_MOD_OPEN ReplyBuilderInterface {
     ReplyBuilderInterface(const ReplyBuilderInterface&) = delete;
     ReplyBuilderInterface& operator=(const ReplyBuilderInterface&) = delete;
 

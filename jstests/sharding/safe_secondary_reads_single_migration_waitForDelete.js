@@ -16,8 +16,6 @@
  * - behavior: Must be one of "unshardedOnly", "targetsPrimaryUsesConnectionVersioning" or
  * "versioned". Determines what system profiler checks are performed.
  * @tags: [
- *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
- *    embedded_router_incompatible,
  *    requires_scripting,
  * ]
  */
@@ -27,9 +25,7 @@ import {
     profilerHasZeroMatchingEntriesOrThrow,
 } from "jstests/libs/profiler.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
-import {
-    commandsRemovedFromMongosSinceLastLTS
-} from "jstests/sharding/libs/last_lts_mongos_commands.js";
+import {commandsRemovedFromMongosSinceLastLTS} from "jstests/sharding/libs/last_lts_mongos_commands.js";
 import {ShardVersioningUtil} from "jstests/sharding/libs/shard_versioning_util.js";
 
 let db = "test";
@@ -37,14 +33,16 @@ let coll = "foo";
 let nss = db + "." + coll;
 
 // Check that a test case is well-formed.
-let validateTestCase = function(test) {
-    assert(test.setUp && typeof (test.setUp) === "function");
-    assert(test.command && typeof (test.command) === "object");
-    assert(test.runsAgainstAdminDb ? typeof (test.runsAgainstAdminDb) === "boolean" : true);
-    assert(test.checkResults && typeof (test.checkResults) === "function");
-    assert(test.behavior === "unshardedOnly" ||
-           test.behavior === "targetsPrimaryUsesConnectionVersioning" ||
-           test.behavior === "versioned");
+let validateTestCase = function (test) {
+    assert(test.setUp && typeof test.setUp === "function");
+    assert(test.command && typeof test.command === "object");
+    assert(test.runsAgainstAdminDb ? typeof test.runsAgainstAdminDb === "boolean" : true);
+    assert(test.checkResults && typeof test.checkResults === "function");
+    assert(
+        test.behavior === "unshardedOnly" ||
+            test.behavior === "targetsPrimaryUsesConnectionVersioning" ||
+            test.behavior === "versioned",
+    );
 };
 
 let testCases = {
@@ -64,10 +62,8 @@ let testCases = {
     _configsvrCommitChunksMerge: {skip: "primary only"},
     _configsvrCommitChunkMigration: {skip: "primary only"},
     _configsvrCommitChunkSplit: {skip: "primary only"},
-    _configsvrCommitIndex: {skip: "primary only"},
     _configsvrCommitMergeAllChunksOnShard: {skip: "primary only"},
     _configsvrConfigureCollectionBalancing: {skip: "primary only"},
-    _configsvrDropIndexCatalogEntry: {skip: "primary only"},
     _configsvrMoveRange: {skip: "primary only"},
     _configsvrRemoveChunks: {skip: "primary only"},
     _configsvrRemoveShardFromZone: {skip: "primary only"},
@@ -81,6 +77,7 @@ let testCases = {
     _configsvrTransitionToDedicatedConfigServer: {skip: "primary only"},
     _configsvrUpdateZoneKeyRange: {skip: "primary only"},
     _dropConnectionsToMongot: {skip: "does not return user data"},
+    _dropMirrorMaestroConnections: {skip: "internal command"},
     _flushReshardingStateChange: {skip: "does not return user data"},
     _flushRoutingTableCacheUpdates: {skip: "does not return user data"},
     _flushRoutingTableCacheUpdatesWithWriteConcern: {skip: "does not return user data"},
@@ -90,12 +87,15 @@ let testCases = {
     _killOperations: {skip: "does not return user data"},
     _mergeAuthzCollections: {skip: "primary only"},
     _migrateClone: {skip: "primary only"},
+    _mirrorMaestroConnPoolStats: {skip: "internal command"},
     _mongotConnPoolStats: {skip: "internal command"},
     _shardsvrBeginMigrationBlockingOperation: {skip: "primary only"},
     _shardsvrChangePrimary: {skip: "primary only"},
     _shardsvrCheckMetadataConsistency: {skip: "internal command"},
     _shardsvrCheckMetadataConsistencyParticipant: {skip: "internal command"},
+    _shardsvrFetchCollMetadata: {skip: "internal command"},
     _shardsvrCleanupStructuredEncryptionData: {skip: "primary only"},
+    _shardsvrCloneAuthoritativeMetadata: {skip: "primary only"},
     _shardsvrCoordinateMultiUpdate: {skip: "primary only"},
     _shardsvrCompactStructuredEncryptionData: {skip: "primary only"},
     _shardsvrEndMigrationBlockingOperation: {skip: "primary only"},
@@ -117,20 +117,20 @@ let testCases = {
     addShard: {skip: "primary only"},
     addShardToZone: {skip: "primary only"},
     aggregate: {
-        setUp: function(mongosConn) {
+        setUp: function (mongosConn) {
             assert.commandWorked(mongosConn.getCollection(nss).insert({x: 1}));
         },
         command: {aggregate: coll, pipeline: [{$match: {x: 1}}], cursor: {batchSize: 10}},
-        checkResults: function(res) {
+        checkResults: function (res) {
             // The command should work and return correct results.
             assert.commandWorked(res);
             assert.eq(1, res.cursor.firstBatch.length, tojson(res));
         },
-        behavior: "versioned"
+        behavior: "versioned",
     },
     analyze: {skip: "primary only"},
     analyzeShardKey: {
-        setUp: function(mongosConn) {
+        setUp: function (mongosConn) {
             const docs = [];
             for (let i = 1; i <= 1000; i++) {
                 docs.push({x: i});
@@ -139,12 +139,12 @@ let testCases = {
         },
         command: {analyzeShardKey: nss, key: {x: 1}},
         runsAgainstAdminDb: true,
-        checkResults: function(res) {
+        checkResults: function (res) {
             // The command should work and return correct results.
             assert.commandWorked(res);
             assert.eq(res.keyCharacteristics.numDocsTotal, 1000, res);
         },
-        behavior: "versioned"
+        behavior: "versioned",
     },
     appendOplogNote: {skip: "primary only"},
     applyOps: {skip: "primary only"},
@@ -176,11 +176,14 @@ let testCases = {
     clusterFind: {skip: "already tested by 'find' tests on mongos"},
     clusterGetMore: {skip: "already tested by 'getMore' tests on mongos"},
     clusterInsert: {skip: "already tested by 'insert' tests on mongos"},
+    clusterReleaseMemory: {skip: "already tested by 'releaseMemore' tests on mongos"},
     clusterUpdate: {skip: "already tested by 'update' tests on mongos"},
     collMod: {skip: "primary only"},
     collStats: {skip: "does not return user data"},
     commitReshardCollection: {skip: "primary only"},
+    commitShardRemoval: {skip: "primary only"},
     commitTransaction: {skip: "primary only"},
+    commitTransitionToDedicatedConfigServer: {skip: "primary only"},
     compact: {skip: "does not return user data"},
     compactStructuredEncryptionData: {skip: "does not return user data"},
     configureCollectionBalancing: {skip: "does not return user data"},
@@ -192,16 +195,16 @@ let testCases = {
     convertToCapped: {skip: "primary only"},
     coordinateCommitTransaction: {skip: "unimplemented. Serves only as a stub."},
     count: {
-        setUp: function(mongosConn) {
+        setUp: function (mongosConn) {
             assert.commandWorked(mongosConn.getCollection(nss).insert({x: 1}));
         },
         command: {count: coll, query: {x: 1}},
-        checkResults: function(res) {
+        checkResults: function (res) {
             // The command should work and return correct results.
             assert.commandWorked(res);
             assert.eq(1, res.n, tojson(res));
         },
-        behavior: "versioned"
+        behavior: "versioned",
     },
     cpuload: {skip: "does not return user data"},
     create: {skip: "primary only"},
@@ -216,16 +219,16 @@ let testCases = {
     dbStats: {skip: "does not return user data"},
     delete: {skip: "primary only"},
     distinct: {
-        setUp: function(mongosConn) {
+        setUp: function (mongosConn) {
             assert.commandWorked(mongosConn.getCollection(nss).insert({x: 1}));
             assert.commandWorked(mongosConn.getCollection(nss).insert({x: 1}));
         },
         command: {distinct: coll, key: "x"},
-        checkResults: function(res) {
+        checkResults: function (res) {
             assert.commandWorked(res);
             assert.eq(1, res.values.length, tojson(res));
         },
-        behavior: "versioned"
+        behavior: "versioned",
     },
     drop: {skip: "primary only"},
     dropAllRolesFromDatabase: {skip: "primary only"},
@@ -239,20 +242,21 @@ let testCases = {
     echo: {skip: "does not return user data"},
     enableSharding: {skip: "primary only"},
     endSessions: {skip: "does not return user data"},
+    eseRotateActiveKEK: {skip: "does not return user data"},
     explain: {skip: "test case to be added"},
     features: {skip: "does not return user data"},
     filemd5: {skip: "does not return user data"},
     find: {
-        setUp: function(mongosConn) {
+        setUp: function (mongosConn) {
             assert.commandWorked(mongosConn.getCollection(nss).insert({x: 1}));
         },
         command: {find: coll, filter: {x: 1}},
-        checkResults: function(res) {
+        checkResults: function (res) {
             // The command should work and return correct results.
             assert.commandWorked(res);
             assert.eq(1, res.cursor.firstBatch.length, tojson(res));
         },
-        behavior: "versioned"
+        behavior: "versioned",
     },
     findAndModify: {skip: "primary only"},
     flushRouterConfig: {skip: "does not return user data"},
@@ -260,18 +264,21 @@ let testCases = {
     fsync: {skip: "does not return user data"},
     fsyncUnlock: {skip: "does not return user data"},
     getAuditConfig: {skip: "does not return user data"},
-    getChangeStreamState: {skip: "does not return user data"},
+    getChangeStreamState: {skip: "removed in v8.3"},
     getClusterParameter: {skip: "does not return user data"},
     getCmdLineOpts: {skip: "does not return user data"},
     getDatabaseVersion: {skip: "does not return user data"},
     getDefaultRWConcern: {skip: "does not return user data"},
     getDiagnosticData: {skip: "does not return user data"},
+    getESERotateActiveKEKStatus: {skip: "does not return user data"},
     getLog: {skip: "does not return user data"},
     getMore: {skip: "shard version already established"},
     getParameter: {skip: "does not return user data"},
     getQueryableEncryptionCountInfo: {skip: "primary only"},
     getShardMap: {skip: "does not return user data"},
     getShardVersion: {skip: "primary only"},
+    getTrafficRecordingStatus: {skip: "does not return user data"},
+    getTransitionToDedicatedConfigServerStatus: {skip: "internal command"},
     godinsert: {skip: "for testing only"},
     grantPrivilegesToRole: {skip: "primary only"},
     grantRolesToRole: {skip: "primary only"},
@@ -301,27 +308,27 @@ let testCases = {
     logout: {skip: "does not return user data"},
     makeSnapshot: {skip: "does not return user data"},
     mapReduce: {
-        setUp: function(mongosConn) {
+        setUp: function (mongosConn) {
             assert.commandWorked(mongosConn.getCollection(nss).insert({x: 1}));
             assert.commandWorked(mongosConn.getCollection(nss).insert({x: 1}));
         },
         command: {
             mapReduce: coll,
-            map: function() {
+            map: function () {
                 emit(this.x, 1);
             },
-            reduce: function(key, values) {
+            reduce: function (key, values) {
                 return Array.sum(values);
             },
-            out: {inline: 1}
+            out: {inline: 1},
         },
-        checkResults: function(res) {
+        checkResults: function (res) {
             assert.commandWorked(res);
             assert.eq(1, res.results.length, tojson(res));
             assert.eq(1, res.results[0]._id, tojson(res));
             assert.eq(2, res.results[0].value, tojson(res));
         },
-        behavior: "versioned"
+        behavior: "versioned",
     },
     mergeAllChunksOnShard: {skip: "primary only"},
     mergeChunks: {skip: "primary only"},
@@ -343,10 +350,12 @@ let testCases = {
     refineCollectionShardKey: {skip: "primary only"},
     refreshLogicalSessionCacheNow: {skip: "does not return user data"},
     refreshSessions: {skip: "does not return user data"},
+    releaseMemory: {skip: "does not return user data"},
     removeShard: {skip: "primary only"},
     removeShardFromZone: {skip: "primary only"},
     renameCollection: {skip: "primary only"},
     repairShardedCollectionChunksHistory: {skip: "does not return user data"},
+    replicateSearchIndexCommand: {skip: "for testing only"},
     replSetAbortPrimaryCatchUp: {skip: "does not return user data"},
     replSetFreeze: {skip: "does not return user data"},
     replSetGetConfig: {skip: "does not return user data"},
@@ -385,22 +394,28 @@ let testCases = {
     setProfilingFilterGlobally: {skip: "does not return user data"},
     setParameter: {skip: "does not return user data"},
     setShardVersion: {skip: "does not return user data"},
-    setChangeStreamState: {skip: "does not return user data"},
+    setChangeStreamState: {skip: "removed in v8.3"},
     setClusterParameter: {skip: "does not return user data"},
     setQuerySettings: {skip: "does not return user data"},
     removeQuerySettings: {skip: "does not return user data"},
     setUserWriteBlockMode: {skip: "primary only"},
     shardCollection: {skip: "primary only"},
+    shardDrainingStatus: {skip: "internal command"},
     shardingState: {skip: "does not return user data"},
     shutdown: {skip: "does not return user data"},
     sleep: {skip: "does not return user data"},
     split: {skip: "primary only"},
     splitChunk: {skip: "primary only"},
     splitVector: {skip: "primary only"},
-    stageDebug: {skip: "primary only"},
-    startRecordingTraffic: {skip: "does not return user data"},
+    startRecordingTraffic: {skip: "Renamed to startTrafficRecording"},
+    stopRecordingTraffic: {skip: "Renamed to stopTrafficRecording"},
+    startShardDraining: {skip: "primary only"},
+    startTrafficRecording: {skip: "does not return user data"},
+    startTransitionToDedicatedConfigServer: {skip: "primary only"},
     startSession: {skip: "does not return user data"},
-    stopRecordingTraffic: {skip: "does not return user data"},
+    stopShardDraining: {skip: "primary only"},
+    stopTrafficRecording: {skip: "does not return user data"},
+    stopTransitionToDedicatedConfigServer: {skip: "primary only"},
     sysprofile: {skip: "internal command"},
     testDeprecation: {skip: "does not return user data"},
     testDeprecationInVersion2: {skip: "does not return user data"},
@@ -424,10 +439,10 @@ let testCases = {
     validateDBMetadata: {skip: "does not return user data"},
     waitForFailPoint: {skip: "does not return user data"},
     getShardingReady: {skip: "does not return user data"},
-    whatsmyuri: {skip: "does not return user data"}
+    whatsmyuri: {skip: "does not return user data"},
 };
 
-commandsRemovedFromMongosSinceLastLTS.forEach(function(cmd) {
+commandsRemovedFromMongosSinceLastLTS.forEach(function (cmd) {
     testCases[cmd] = {skip: "must define test coverage for backwards compatibility"};
 });
 
@@ -448,8 +463,7 @@ assert.commandWorked(res);
 let commands = Object.keys(res.commands);
 for (let command of commands) {
     let test = testCases[command];
-    assert(test !== undefined,
-           "coverage failure: must define a safe secondary reads test for " + command);
+    assert(test !== undefined, "coverage failure: must define a safe secondary reads test for " + command);
 
     if (test.skip !== undefined) {
         print("skipping " + command + ": " + test.skip);
@@ -459,8 +473,7 @@ for (let command of commands) {
 
     jsTest.log("testing command " + tojson(test.command));
 
-    assert.commandWorked(
-        staleMongos.adminCommand({enableSharding: db, primaryShard: st.shard0.shardName}));
+    assert.commandWorked(staleMongos.adminCommand({enableSharding: db, primaryShard: st.shard0.shardName}));
     assert.commandWorked(staleMongos.adminCommand({shardCollection: nss, key: {x: 1}}));
 
     // We do this because we expect freshMongos to see that the collection is sharded, which it
@@ -475,8 +488,11 @@ for (let command of commands) {
     // routing table -- the first read to the primary will refresh the mongos' shardVersion,
     // which will then be used against the secondary to ensure the secondary is fresh.
     assert.commandWorked(staleMongos.getDB(db).runCommand({find: coll}));
-    assert.commandWorked(freshMongos.getDB(db).runCommand(
-        {find: coll, $readPreference: {mode: 'secondary'}, readConcern: {'level': 'local'}}));
+    assert.commandWorked(
+        freshMongos
+            .getDB(db)
+            .runCommand({find: coll, $readPreference: {mode: "secondary"}, readConcern: {"level": "local"}}),
+    );
 
     // Do any test-specific setup.
     test.setUp(staleMongos);
@@ -493,19 +509,22 @@ for (let command of commands) {
     // Do a moveChunk from the fresh mongos to make the other mongos stale.
     // Use {w:2} (all) write concern so the metadata change gets persisted to the secondary
     // before stalely versioned commands are sent against the secondary.
-    assert.commandWorked(freshMongos.adminCommand({
-        moveChunk: nss,
-        find: {x: 0},
-        to: st.shard1.shardName,
-        waitForDelete: true,
-        _secondaryThrottle: true,
-        writeConcern: {w: 2},
-    }));
+    assert.commandWorked(
+        freshMongos.adminCommand({
+            moveChunk: nss,
+            find: {x: 0},
+            to: st.shard1.shardName,
+            waitForDelete: true,
+            _secondaryThrottle: true,
+            writeConcern: {w: 2},
+        }),
+    );
 
-    let res = staleMongos.getDB(test.runsAgainstAdminDb ? "admin" : db)
-                  .runCommand(Object.extend(
-                      test.command,
-                      {$readPreference: {mode: 'secondary'}, readConcern: {'level': 'local'}}));
+    let res = staleMongos
+        .getDB(test.runsAgainstAdminDb ? "admin" : db)
+        .runCommand(
+            Object.extend(test.command, {$readPreference: {mode: "secondary"}, readConcern: {"level": "local"}}),
+        );
     test.checkResults(res);
 
     // Build the query to identify the operation in the system profiler.
@@ -514,34 +533,36 @@ for (let command of commands) {
     if (test.behavior === "unshardedOnly") {
         // Check that neither the donor shard secondary nor recipient shard secondary
         // received the request.
-        profilerHasZeroMatchingEntriesOrThrow(
-            {profileDB: donorShardSecondary.getDB(db), filter: commandProfile});
-        profilerHasZeroMatchingEntriesOrThrow(
-            {profileDB: recipientShardSecondary.getDB(db), filter: commandProfile});
+        profilerHasZeroMatchingEntriesOrThrow({profileDB: donorShardSecondary.getDB(db), filter: commandProfile});
+        profilerHasZeroMatchingEntriesOrThrow({profileDB: recipientShardSecondary.getDB(db), filter: commandProfile});
     } else if (test.behavior === "targetsPrimaryUsesConnectionVersioning") {
         // Check that the recipient shard primary received the request without a shardVersion
         // field and returned success.
         profilerHasSingleMatchingEntryOrThrow({
             profileDB: recipientShardPrimary.getDB(db),
-            filter: Object.extend({
-                "command.shardVersion": {"$exists": false},
-                "command.$readPreference": {$exists: false},
-                "command.readConcern": {"level": "local"},
-                "errCode": {"$exists": false},
-            },
-                                  commandProfile)
+            filter: Object.extend(
+                {
+                    "command.shardVersion": {"$exists": false},
+                    "command.$readPreference": {$exists: false},
+                    "command.readConcern": {"level": "local"},
+                    "errCode": {"$exists": false},
+                },
+                commandProfile,
+            ),
         });
     } else if (test.behavior === "versioned") {
         // Check that the donor shard secondary returned stale shardVersion.
         profilerHasSingleMatchingEntryOrThrow({
             profileDB: donorShardSecondary.getDB(db),
-            filter: Object.extend({
-                "command.shardVersion": {"$exists": true},
-                "command.$readPreference": {"mode": "secondary"},
-                "command.readConcern": {"level": "local"},
-                "errCode": ErrorCodes.StaleConfig
-            },
-                                  commandProfile)
+            filter: Object.extend(
+                {
+                    "command.shardVersion": {"$exists": true},
+                    "command.$readPreference": {"mode": "secondary"},
+                    "command.readConcern": {"level": "local"},
+                    "errCode": ErrorCodes.StaleConfig,
+                },
+                commandProfile,
+            ),
         });
 
         // Check that the recipient shard secondary received the request and returned stale
@@ -549,71 +570,71 @@ for (let command of commands) {
         // stale.
         profilerHasSingleMatchingEntryOrThrow({
             profileDB: donorShardSecondary.getDB(db),
-            filter: Object.extend({
-                "command.shardVersion": {"$exists": true},
-                "command.$readPreference": {"mode": "secondary"},
-                "command.readConcern": {"level": "local"},
-                "errCode": ErrorCodes.StaleConfig
-            },
-                                  commandProfile)
+            filter: Object.extend(
+                {
+                    "command.shardVersion": {"$exists": true},
+                    "command.$readPreference": {"mode": "secondary"},
+                    "command.readConcern": {"level": "local"},
+                    "errCode": ErrorCodes.StaleConfig,
+                },
+                commandProfile,
+            ),
         });
 
         // Check that the recipient shard secondary received the request again and returned success
         profilerHasSingleMatchingEntryOrThrow({
             profileDB: recipientShardSecondary.getDB(db),
-            filter: Object.extend({
-                "command.shardVersion": {"$exists": true},
-                "$and": [
-                    {
-                        "$or": [
-                            {
-                                "$and": [
-                                    {"command.shardVersion.0": {"$exists": true}},
-                                    {
-                                        "command.shardVersion.0":
-                                            {$ne: ShardVersioningUtil.kIgnoredShardVersion.v}
-                                    },
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"command.shardVersion.v": {"$exists": true}},
-                                    {
-                                        "command.shardVersion.v":
-                                            {$ne: ShardVersioningUtil.kIgnoredShardVersion.v}
-                                    },
-                                ]
-                            },
-                        ]
-                    },
-                    {
-                        "$or": [
-                            {
-                                "$and": [
-                                    {"command.shardVersion.1": {"$exists": true}},
-                                    {
-                                        "command.shardVersion.1":
-                                            {$ne: ShardVersioningUtil.kIgnoredShardVersion.e}
-                                    },
-                                ]
-                            },
-                            {
-                                "$and": [
-                                    {"command.shardVersion.e": {"$exists": true}},
-                                    {
-                                        "command.shardVersion.e":
-                                            {$ne: ShardVersioningUtil.kIgnoredShardVersion.e}
-                                    },
-                                ]
-                            },
-                        ]
-                    }
-                ],
-                "command.$readPreference": {"mode": "secondary"},
-                "command.readConcern": {"level": "local"},
-                "errCode": {"$ne": ErrorCodes.StaleConfig},
-            },
-                                  commandProfile)
+            filter: Object.extend(
+                {
+                    "command.shardVersion": {"$exists": true},
+                    "$and": [
+                        {
+                            "$or": [
+                                {
+                                    "$and": [
+                                        {"command.shardVersion.0": {"$exists": true}},
+                                        {
+                                            "command.shardVersion.0": {$ne: ShardVersioningUtil.kIgnoredShardVersion.v},
+                                        },
+                                    ],
+                                },
+                                {
+                                    "$and": [
+                                        {"command.shardVersion.v": {"$exists": true}},
+                                        {
+                                            "command.shardVersion.v": {$ne: ShardVersioningUtil.kIgnoredShardVersion.v},
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                        {
+                            "$or": [
+                                {
+                                    "$and": [
+                                        {"command.shardVersion.1": {"$exists": true}},
+                                        {
+                                            "command.shardVersion.1": {$ne: ShardVersioningUtil.kIgnoredShardVersion.e},
+                                        },
+                                    ],
+                                },
+                                {
+                                    "$and": [
+                                        {"command.shardVersion.e": {"$exists": true}},
+                                        {
+                                            "command.shardVersion.e": {$ne: ShardVersioningUtil.kIgnoredShardVersion.e},
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                    ],
+                    "command.$readPreference": {"mode": "secondary"},
+                    "command.readConcern": {"level": "local"},
+                    "errCode": {"$ne": ErrorCodes.StaleConfig},
+                },
+                commandProfile,
+            ),
         });
     }
 

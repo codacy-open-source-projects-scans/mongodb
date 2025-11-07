@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -38,10 +36,10 @@
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/explain_verbosity_gen.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
 
 namespace mongo {
 namespace {
@@ -55,76 +53,72 @@ TEST(ExplainTest, VerbosityEnumToStringReturnsCorrectValues) {
 }
 
 TEST(ExplainTest, ExplainSerializeToBSONCorrectly) {
-    ASSERT_BSONOBJ_EQ(BSON("verbosity"
-                           << "queryPlanner"),
+    ASSERT_BSONOBJ_EQ(BSON("verbosity" << "queryPlanner"),
                       ExplainOptions::toBSON(Verbosity::kQueryPlanner));
-    ASSERT_BSONOBJ_EQ(BSON("verbosity"
-                           << "executionStats"),
+    ASSERT_BSONOBJ_EQ(BSON("verbosity" << "executionStats"),
                       ExplainOptions::toBSON(Verbosity::kExecStats));
-    ASSERT_BSONOBJ_EQ(BSON("verbosity"
-                           << "allPlansExecution"),
+    ASSERT_BSONOBJ_EQ(BSON("verbosity" << "allPlansExecution"),
                       ExplainOptions::toBSON(Verbosity::kExecAllPlans));
 }
 
 TEST(ExplainTest, CanParseExplainVerbosity) {
     auto verbosity = ExplainCommandRequest::parse(
-                         IDLParserContext("explain"),
-                         fromjson("{explain: {}, verbosity: 'queryPlanner', $db: 'dummy'}"))
+                         fromjson("{explain: {}, verbosity: 'queryPlanner', $db: 'dummy'}"),
+                         IDLParserContext("explain"))
                          .getVerbosity();
     ASSERT(verbosity == Verbosity::kQueryPlanner);
     verbosity = ExplainCommandRequest::parse(
-                    IDLParserContext("explain"),
-                    fromjson("{explain: {}, verbosity: 'executionStats', $db: 'dummy'}"))
+                    fromjson("{explain: {}, verbosity: 'executionStats', $db: 'dummy'}"),
+                    IDLParserContext("explain"))
                     .getVerbosity();
     ASSERT(verbosity == Verbosity::kExecStats);
     verbosity = ExplainCommandRequest::parse(
-                    IDLParserContext("explain"),
-                    fromjson("{explain: {}, verbosity: 'allPlansExecution', $db: 'dummy'}"))
+                    fromjson("{explain: {}, verbosity: 'allPlansExecution', $db: 'dummy'}"),
+                    IDLParserContext("explain"))
                     .getVerbosity();
     ASSERT(verbosity == Verbosity::kExecAllPlans);
 }
 
 TEST(ExplainTest, ParsingFailsIfVerbosityIsNotAString) {
-    ASSERT_THROWS_CODE(ExplainCommandRequest::parse(IDLParserContext("explain"),
-                                                    fromjson("{explain: {}, verbosity: 1}")),
+    ASSERT_THROWS_CODE(ExplainCommandRequest::parse(fromjson("{explain: {}, verbosity: 1}"),
+                                                    IDLParserContext("explain")),
                        DBException,
                        ErrorCodes::TypeMismatch);
     ASSERT_THROWS_CODE(
-        ExplainCommandRequest::parse(IDLParserContext("explain"),
-                                     fromjson("{explain: {}, verbosity: {foo: 'bar'}}")),
+        ExplainCommandRequest::parse(fromjson("{explain: {}, verbosity: {foo: 'bar'}}"),
+                                     IDLParserContext("explain")),
         DBException,
         ErrorCodes::TypeMismatch);
 }
 
 TEST(ExplainTest, ParsingFailsIfVerbosityStringIsNotRecognized) {
     ASSERT_THROWS_CODE(
-        ExplainCommandRequest::parse(IDLParserContext("explain"),
-                                     fromjson("{explain: {}, verbosity: 'badVerbosity'}")),
+        ExplainCommandRequest::parse(fromjson("{explain: {}, verbosity: 'badVerbosity'}"),
+                                     IDLParserContext("explain")),
         DBException,
         ErrorCodes::BadValue);
 }
 
 TEST(ExplainTest, ParsingFailsIfFirstElementIsNotAnObject) {
     ASSERT_THROWS_CODE(
-        ExplainCommandRequest::parse(IDLParserContext("explain"),
-                                     fromjson("{explain: 1, verbosity: 'queryPlanner'}")),
+        ExplainCommandRequest::parse(fromjson("{explain: 1, verbosity: 'queryPlanner'}"),
+                                     IDLParserContext("explain")),
         DBException,
         ErrorCodes::IDLFailedToParse);
 }
 
 TEST(ExplainTest, ParsingFailsIfUnknownFieldInCommandObject) {
-    ASSERT_THROWS_CODE(
-        ExplainCommandRequest::parse(
-            IDLParserContext("explain"),
-            fromjson("{explain: {}, verbosity: 'queryPlanner', unknownField: true}")),
-        DBException,
-        ErrorCodes::IDLUnknownField);
+    ASSERT_THROWS_CODE(ExplainCommandRequest::parse(
+                           fromjson("{explain: {}, verbosity: 'queryPlanner', unknownField: true}"),
+                           IDLParserContext("explain")),
+                       DBException,
+                       ErrorCodes::IDLUnknownField);
 }
 
 TEST(ExplainTest, CanParseGenericCommandArguments) {
     ExplainCommandRequest::parse(
-        IDLParserContext("explain"),
-        fromjson("{explain: {}, verbosity: 'queryPlanner', comment: true, $db: 'test'}"));
+        fromjson("{explain: {}, verbosity: 'queryPlanner', comment: true, $db: 'test'}"),
+        IDLParserContext("explain"));
 }
 
 }  // namespace

@@ -29,23 +29,16 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/field_ref.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/multikey_paths.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
@@ -56,6 +49,14 @@
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/util/functional.h"
 #include "mongo/util/shared_buffer_fragment.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -92,13 +93,17 @@ public:
                                                      Status status,
                                                      const BSONObj& obj,
                                                      const boost::optional<RecordId>& loc)>;
-    using KeyHandlerFn = unique_function<Status(const key_string::Value&)>;
+    using KeyHandlerFn =
+        unique_function<Status(const CollectionPtr& coll, const key_string::View&)>;
     using RecordIdHandlerFn = unique_function<Status(const RecordId&)>;
+    using YieldFn = unique_function<std::pair<const CollectionPtr*, const IndexCatalogEntry*>(
+        OperationContext*)>;
 
     IndexAccessMethod() = default;
     virtual ~IndexAccessMethod() = default;
 
     static std::unique_ptr<IndexAccessMethod> make(OperationContext* opCtx,
+                                                   RecoveryUnit& ru,
                                                    const NamespaceString& nss,
                                                    const CollectionOptions& collectionOptions,
                                                    IndexCatalogEntry* entry,
@@ -141,6 +146,7 @@ public:
                         CheckRecordId checkRecordId) = 0;
 
     virtual Status update(OperationContext* opCtx,
+                          RecoveryUnit& ru,
                           SharedBufferFragmentBuilder& pooledBufferBuilder,
                           const BSONObj& oldDoc,
                           const BSONObj& newDoc,
@@ -167,12 +173,14 @@ public:
      * structure.
      */
     virtual IndexValidateResults validate(
-        OperationContext* opCtx, const CollectionValidation::ValidationOptions& options) const = 0;
+        OperationContext* opCtx,
+        RecoveryUnit& ru,
+        const CollectionValidation::ValidationOptions& options) const = 0;
 
     /**
      * Returns the number of keys in the index, traversing the index to do so.
      */
-    virtual int64_t numKeys(OperationContext* opCtx) const = 0;
+    virtual int64_t numKeys(OperationContext* opCtx, RecoveryUnit& ru) const = 0;
 
     /**
      * Add custom statistics about this index to BSON object builder, for display.
@@ -182,6 +190,7 @@ public:
      * Returns true if stats were appended.
      */
     virtual bool appendCustomStats(OperationContext* opCtx,
+                                   RecoveryUnit& ru,
                                    BSONObjBuilder* result,
                                    double scale) const = 0;
 
@@ -189,18 +198,25 @@ public:
      * @return The number of bytes consumed by this index.
      *         Exactly what is counted is not defined based on padding, re-use, etc...
      */
-    virtual long long getSpaceUsedBytes(OperationContext* opCtx) const = 0;
+    virtual long long getSpaceUsedBytes(OperationContext* opCtx, RecoveryUnit& ru) const = 0;
 
     /**
      * The number of unused free bytes consumed by this index on disk.
      */
-    virtual long long getFreeStorageBytes(OperationContext* opCtx) const = 0;
+    virtual long long getFreeStorageBytes(OperationContext* opCtx, RecoveryUnit& ru) const = 0;
 
     /**
      * Attempt compaction to regain disk space if the indexed record store supports
      * compaction-in-place.
      */
-    virtual StatusWith<int64_t> compact(OperationContext* opCtx, const CompactOptions& options) = 0;
+    virtual StatusWith<int64_t> compact(OperationContext* opCtx,
+                                        RecoveryUnit& ru,
+                                        const CompactOptions& options) = 0;
+
+    /**
+     * Removes all entries from the index.
+     */
+    virtual Status truncate(OperationContext* opCtx, RecoveryUnit& ru) = 0;
 
     /**
      * Fetches the Ident for this index.
@@ -251,14 +267,18 @@ public:
          * index.
          * @param onDuplicateRecord - If not nullptr, will be called for each RecordId of uninserted
          * duplicate keys.
+         * @param yieldFn - A function to invoke to request a yield and then restore. It returns the
+         * new CollectionPtr* and IndexCatalogEntry* entry that shall be used from this point on.
          */
         virtual Status commit(OperationContext* opCtx,
-                              const CollectionPtr& collection,
+                              RecoveryUnit& ru,
+                              const CollectionPtr* collection,
                               const IndexCatalogEntry* entry,
                               bool dupsAllowed,
                               int32_t yieldIterations,
                               const KeyHandlerFn& onDuplicateKeyInserted,
-                              const RecordIdHandlerFn& onDuplicateRecord) = 0;
+                              const RecordIdHandlerFn& onDuplicateRecord,
+                              const YieldFn& yieldFn) = 0;
 
         virtual const MultikeyPaths& getMultikeyPaths() const = 0;
 
@@ -274,15 +294,6 @@ public:
         static void countResumedBuildInStats();
         static SorterFileStats* bulkBuilderFileStats();
         static SorterTracker* bulkBuilderTracker();
-
-        /**
-         * Abandon the current snapshot and release then reacquire locks. Tests that target the
-         * behavior of bulk index builds that yield can use failpoints to stall this yield.
-         */
-        [[nodiscard]] static const IndexCatalogEntry* yield(OperationContext* opCtx,
-                                                            const CollectionPtr& collection,
-                                                            const NamespaceString& ns,
-                                                            const IndexCatalogEntry* entry);
     };
 
     /**
@@ -302,7 +313,8 @@ public:
         const IndexCatalogEntry* entry,
         size_t maxMemoryUsageBytes,
         const boost::optional<IndexStateInfo>& stateInfo,
-        const DatabaseName& dbName) = 0;
+        const DatabaseName& dbName,
+        const IndexBuildMethodEnum& method) = 0;
 };
 
 /**
@@ -436,6 +448,7 @@ public:
      */
     Status insertKeys(
         OperationContext* opCtx,
+        RecoveryUnit& ru,
         const CollectionPtr& coll,
         const IndexCatalogEntry* entry,
         const KeyStringSet& keys,
@@ -451,6 +464,7 @@ public:
      */
     Status insertKeysAndUpdateMultikeyPaths(
         OperationContext* opCtx,
+        RecoveryUnit& ru,
         const CollectionPtr& coll,
         const IndexCatalogEntry* entry,
         const KeyStringSet& keys,
@@ -466,6 +480,7 @@ public:
      * 'numDeleted' will be set to the number of keys removed from the index for the provided keys.
      */
     Status removeKeys(OperationContext* opCtx,
+                      RecoveryUnit& ru,
                       const IndexCatalogEntry* entry,
                       const KeyStringSet& keys,
                       const InsertDeleteOptions& options,
@@ -496,6 +511,7 @@ public:
      * 'numDeleted' will be set to the number of keys removed from the index for the document.
      */
     Status doUpdate(OperationContext* opCtx,
+                    RecoveryUnit& ru,
                     const CollectionPtr& coll,
                     const IndexCatalogEntry* entry,
                     const UpdateTicket& ticket,
@@ -503,6 +519,7 @@ public:
                     int64_t* numDeleted);
 
     RecordId findSingle(OperationContext* opCtx,
+                        RecoveryUnit& ru,
                         const CollectionPtr& collection,
                         const IndexCatalogEntry* entry,
                         const BSONObj& key) const;
@@ -511,6 +528,7 @@ public:
      * Returns an unpositioned cursor over 'this' index.
      */
     std::unique_ptr<SortedDataInterface::Cursor> newCursor(OperationContext* opCtx,
+                                                           RecoveryUnit& ru,
                                                            bool isForward = true) const;
 
 
@@ -562,6 +580,7 @@ public:
                 CheckRecordId checkRecordId) final;
 
     Status update(OperationContext* opCtx,
+                  RecoveryUnit& ru,
                   SharedBufferFragmentBuilder& pooledBufferBuilder,
                   const BSONObj& oldDoc,
                   const BSONObj& newDoc,
@@ -576,22 +595,28 @@ public:
 
     IndexValidateResults validate(
         OperationContext* opCtx,
+        RecoveryUnit& ru,
         const CollectionValidation::ValidationOptions& options) const final;
 
-    int64_t numKeys(OperationContext* opCtx) const final;
+    int64_t numKeys(OperationContext* opCtx, RecoveryUnit& ru) const final;
 
     bool appendCustomStats(OperationContext* opCtx,
+                           RecoveryUnit& ru,
                            BSONObjBuilder* result,
                            double scale) const final;
 
-    long long getSpaceUsedBytes(OperationContext* opCtx) const final;
+    long long getSpaceUsedBytes(OperationContext* opCtx, RecoveryUnit& ru) const final;
 
-    long long getFreeStorageBytes(OperationContext* opCtx) const final;
+    long long getFreeStorageBytes(OperationContext* opCtx, RecoveryUnit& ru) const final;
 
     /**
      * Returns an estimated number of bytes when doing a dry run.
      */
-    StatusWith<int64_t> compact(OperationContext* opCtx, const CompactOptions& options) final;
+    StatusWith<int64_t> compact(OperationContext* opCtx,
+                                RecoveryUnit& ru,
+                                const CompactOptions& options) final;
+
+    Status truncate(OperationContext* opCtx, RecoveryUnit& ru) final;
 
     std::shared_ptr<Ident> getSharedIdent() const final;
 
@@ -609,7 +634,10 @@ public:
     std::unique_ptr<BulkBuilder> initiateBulk(const IndexCatalogEntry* entry,
                                               size_t maxMemoryUsageBytes,
                                               const boost::optional<IndexStateInfo>& stateInfo,
-                                              const DatabaseName& dbName) final;
+                                              const DatabaseName& dbName,
+                                              const IndexBuildMethodEnum& method) final;
+
+    static long long getDuplicateKeyErrors_forTest();
 
 protected:
     /**
@@ -646,14 +674,13 @@ protected:
                            const boost::optional<RecordId>& id) const = 0;
 
 private:
-    class BulkBuilderImpl;
-
     /**
      * Removes a single key from the index.
      *
      * Used by remove() only.
      */
     void removeOneKey(OperationContext* opCtx,
+                      RecoveryUnit& ru,
                       const IndexCatalogEntry* entry,
                       const key_string::Value& keyString,
                       bool dupsAllowed) const;

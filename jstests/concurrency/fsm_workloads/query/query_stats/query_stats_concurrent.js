@@ -6,22 +6,23 @@
  * @tags: [
  *  requires_fcv_72,
  *  does_not_support_causal_consistency,
+ *  does_not_support_stepdowns,
  *  requires_getmore,
- *  # TODO (SERVER-95174): Re-enable this test on txn concurrency suites.
- *  does_not_support_transactions,
+ *  uses_getmore_outside_of_transaction,
+ *  # This test relies on aggregations returning specific batch-sized responses.
+ *  assumes_no_implicit_cursor_exhaustion,
+ *  # This test assumes that query stats is enabled, but it may be disabled by the config fuzzer.
+ *  does_not_support_config_fuzzer,
  * ]
- *
  *
  */
 import {setParameterOnAllNodes} from "jstests/concurrency/fsm_workload_helpers/set_parameter.js";
 
-export const $config = (function() {
-    var states = (function() {
-        function init(db, collName) {
-        }
+export const $config = (function () {
+    let states = (function () {
+        function init(db, collName) {}
 
-        function reInit(db, collName) {
-        }
+        function reInit(db, collName) {}
 
         // Runs one find query so that the queryStatsEntry is updated.
         function findOneShape(db, collName) {
@@ -36,7 +37,7 @@ export const $config = (function() {
         // Runs many queries with different shapes to ensure eviction occurs in the queryStats
         // store.
         function multipleShapes(db, collName) {
-            for (var i = 0; i < 2000; i++) {
+            for (let i = 0; i < 2000; i++) {
                 let query = {};
                 query["foo" + i] = "bar";
                 db[collName].aggregate([{$match: query}]).itcount();
@@ -49,17 +50,19 @@ export const $config = (function() {
         function runQueryStatsWithHmac(db, collName) {
             let response = db.adminCommand({
                 aggregate: 1,
-                pipeline: [{
-                    $queryStats: {
-                        transformIdentifiers: {
-                            algorithm: "hmac-sha-256",
-                            hmacKey: BinData(8, "MjM0NTY3ODkxMDExMTIxMzE0MTUxNjE3MTgxOTIwMjE=")
-                        }
-                    }
-                }],
+                pipeline: [
+                    {
+                        $queryStats: {
+                            transformIdentifiers: {
+                                algorithm: "hmac-sha-256",
+                                hmacKey: BinData(8, "MjM0NTY3ODkxMDExMTIxMzE0MTUxNjE3MTgxOTIwMjE="),
+                            },
+                        },
+                    },
+                ],
                 // Use a small batch size to ensure these operations open up a cursor and use
                 // multiple getMores.
-                cursor: {batchSize: 1}
+                cursor: {batchSize: 1},
             });
             assert.commandWorked(response);
             const cursor = new DBCommandCursor(db.getSiblingDB("admin"), response);
@@ -73,7 +76,7 @@ export const $config = (function() {
                 pipeline: [{$queryStats: {}}],
                 // Use a small batch size to ensure these operations open up a cursor and use
                 // multiple getMores.
-                cursor: {batchSize: 1}
+                cursor: {batchSize: 1},
             });
             assert.commandWorked(response);
             const cursor = new DBCommandCursor(db.getSiblingDB("admin"), response);
@@ -87,18 +90,24 @@ export const $config = (function() {
             multipleShapes: multipleShapes,
             aggOneShape: aggOneShape,
             runQueryStatsWithHmac: runQueryStatsWithHmac,
-            runQueryStatsWithoutHmac: runQueryStatsWithoutHmac
+            runQueryStatsWithoutHmac: runQueryStatsWithoutHmac,
         };
     })();
 
-    var internalQueryStatsRateLimit;
-    var internalQueryStatsCacheSize;
+    let internalQueryStatsRateLimit;
+    let internalQueryStatsCacheSize;
 
-    let setup = function(db, collName, cluster) {
-        internalQueryStatsRateLimit = setParameterOnAllNodes(
-            {cluster: cluster, paramName: "internalQueryStatsRateLimit", newValue: -1});
-        internalQueryStatsCacheSize = setParameterOnAllNodes(
-            {cluster: cluster, paramName: "internalQueryStatsCacheSize", newValue: "1MB"});
+    let setup = function (db, collName, cluster) {
+        internalQueryStatsRateLimit = setParameterOnAllNodes({
+            cluster: cluster,
+            paramName: "internalQueryStatsRateLimit",
+            newValue: -1,
+        });
+        internalQueryStatsCacheSize = setParameterOnAllNodes({
+            cluster: cluster,
+            paramName: "internalQueryStatsCacheSize",
+            newValue: "1MB",
+        });
 
         assert.commandWorked(db[collName].createIndex({i: 1}));
         const bulk = db[collName].initializeUnorderedBulkOp();
@@ -108,16 +117,16 @@ export const $config = (function() {
         assert.commandWorked(bulk.execute());
     };
 
-    let teardown = function(db, collName, cluster) {
+    let teardown = function (db, collName, cluster) {
         setParameterOnAllNodes({
             cluster: cluster,
             paramName: "internalQueryStatsRateLimit",
-            newValue: internalQueryStatsRateLimit
+            newValue: internalQueryStatsRateLimit,
         });
         setParameterOnAllNodes({
             cluster: cluster,
             paramName: "internalQueryStatsCacheSize",
-            newValue: internalQueryStatsCacheSize
+            newValue: internalQueryStatsCacheSize,
         });
 
         db[collName].drop();
@@ -136,13 +145,13 @@ export const $config = (function() {
             findOneShape: 0.2,
             multipleShapes: 0.2,
             runQueryStatsWithHmac: 0.2,
-            runQueryStatsWithoutHmac: 0.2
+            runQueryStatsWithoutHmac: 0.2,
         },
         findOneShape: {reInit: 1},
         multipleShapes: {reInit: 1},
         runQueryStatsWithHmac: {reInit: 1},
         runQueryStatsWithoutHmac: {reInit: 1},
-        aggOneShape: {reInit: 1}
+        aggOneShape: {reInit: 1},
     };
 
     return {
@@ -151,6 +160,6 @@ export const $config = (function() {
         states: states,
         setup: setup,
         teardown: teardown,
-        transitions: transitions
+        transitions: transitions,
     };
 })();

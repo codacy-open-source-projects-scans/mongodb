@@ -28,8 +28,25 @@
  */
 
 #include "mongo/db/pipeline/document_source_list_mql_entities.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_list_mql_entities_gen.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/pipeline_split_state.h"
+#include "mongo/db/pipeline/stage_constraints.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
+
+#include <boost/none.hpp>
+#include <boost/none_t.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -37,6 +54,7 @@ namespace mongo {
 REGISTER_TEST_DOCUMENT_SOURCE(listMqlEntities,
                               DocumentSourceListMqlEntities::LiteParsed::parse,
                               DocumentSourceListMqlEntities::createFromBson);
+ALLOCATE_DOCUMENT_SOURCE_ID(listMqlEntities, DocumentSourceListMqlEntities::id)
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceListMqlEntities::createFromBson(
     BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
@@ -48,32 +66,24 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceListMqlEntities::createFromBs
     uassert(9590101,
             str::stream() << "expected an object as specification for " << kStageName
                           << " stage, got " << typeName(elem.type()),
-            elem.type() == Object);
+            elem.type() == BSONType::object);
     const auto& nss = expCtx->getNamespaceString();
     uassert(ErrorCodes::InvalidNamespace,
             "$listMqlEntities must be run against the 'admin' database with {aggregate: 1}",
             nss.isAdminDB() && nss.isCollectionlessAggregateNS());
-    auto spec = ListMqlEntitiesSpec::parse(IDLParserContext(kStageName), elem.embeddedObject());
-    return new DocumentSourceListMqlEntities(expCtx, spec.getEntityType(), parserMap);
+    auto spec = ListMqlEntitiesSpec::parse(elem.embeddedObject(), IDLParserContext(kStageName));
+    return new DocumentSourceListMqlEntities(expCtx, spec.getEntityType());
 }
 
 DocumentSourceListMqlEntities::DocumentSourceListMqlEntities(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    MqlEntityTypeEnum type,
-    const StringMap<ParserRegistration>& docSourceParserMap)
+    const boost::intrusive_ptr<ExpressionContext>& expCtx, MqlEntityTypeEnum type)
     : DocumentSource(kStageName, expCtx), _type(type) {
     if (_type != MqlEntityTypeEnum::aggregationStages) {
         MONGO_UNIMPLEMENTED;
     }
-    for (auto&& [stageName, _] : docSourceParserMap) {
-        _results.push_back(stageName);
-    }
-    // Canonicalize output order of results. Sort in descending order so that we can use a cheap
-    // 'pop_back()' to return the results in order.
-    std::sort(_results.begin(), _results.end(), std::greater<>());
 }
 
-StageConstraints DocumentSourceListMqlEntities::constraints(Pipeline::SplitState pipeState) const {
+StageConstraints DocumentSourceListMqlEntities::constraints(PipelineSplitState pipeState) const {
     auto constraints = StageConstraints{StreamType::kStreaming,
                                         PositionRequirement::kFirst,
                                         HostTypeRequirement::kLocalOnly,
@@ -82,21 +92,17 @@ StageConstraints DocumentSourceListMqlEntities::constraints(Pipeline::SplitState
                                         TransactionRequirement::kNotAllowed,
                                         LookupRequirement::kNotAllowed,
                                         UnionRequirement::kNotAllowed};
-    constraints.requiresInputDocSource = false;
     constraints.isIndependentOfAnyCollection = true;
+    constraints.setConstraintsForNoInputSources();
     return constraints;
 }
 
 const char* DocumentSourceListMqlEntities::getSourceName() const {
-    return kStageName.rawData();
+    return kStageName.data();
 }
 
-DocumentSourceType DocumentSourceListMqlEntities::getType() const {
-    return DocumentSourceType::kListMqlEntities;
-}
-
-Pipeline::SourceContainer::iterator DocumentSourceListMqlEntities::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator DocumentSourceListMqlEntities::doOptimizeAt(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     return std::next(itr);
 }
 
@@ -107,16 +113,6 @@ Value DocumentSourceListMqlEntities::serialize(const SerializationOptions& opts)
 boost::optional<DocumentSource::DistributedPlanLogic>
 DocumentSourceListMqlEntities::distributedPlanLogic() {
     return boost::none;
-}
-
-DocumentSource::GetNextResult DocumentSourceListMqlEntities::doGetNext() {
-    if (_results.empty()) {
-        return GetNextResult::makeEOF();
-    }
-    auto res = Document(
-        BSON("name" << _results.back() << kEntityTypeFieldName << MqlEntityType_serializer(_type)));
-    _results.pop_back();
-    return res;
 }
 
 }  // namespace mongo

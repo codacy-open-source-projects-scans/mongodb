@@ -28,25 +28,12 @@
  */
 
 
-#include <absl/container/flat_hash_map.h>
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <cstring>
-#include <limits>
-#include <memory>
-#include <ostream>
-#include <ratio>
-#include <timelib.h>
-#include <utility>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/datetime/date_time_support.h"
 
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/parse_number.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
-#include "mongo/db/query/datetime/date_time_support.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/overflow_arithmetic.h"
 #include "mongo/util/assert_util.h"
@@ -54,6 +41,20 @@
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <cstring>
+#include <limits>
+#include <memory>
+#include <ostream>
+#include <ratio>
+#include <utility>
+
+#include <timelib.h>
+
+#include <absl/container/flat_hash_map.h>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -67,6 +68,12 @@ const auto getTimeZoneDatabaseDecorable =
 
 std::unique_ptr<_timelib_time, TimeZone::TimelibTimeDeleter> createTimelibTime() {
     return std::unique_ptr<_timelib_time, TimeZone::TimelibTimeDeleter>(timelib_time_ctor());
+}
+
+int getMilliseconds(const Date_t& date) {
+    const int ms = date.toMillisSinceEpoch() % 1000LL;
+    // Add 1000 since dates before 1970 would have negative milliseconds.
+    return ms >= 0 ? ms : 1000 + ms;
 }
 
 // Converts a date to a number of seconds, being careful to round appropriately for negative numbers
@@ -258,7 +265,7 @@ Date_t TimeZoneDatabase::fromString(StringData dateString,
     if (!format) {
         // Without a format, timelib will attempt to parse a string as best as it can, accepting a
         // variety of formats.
-        rawTime = timelib_strtotime(const_cast<char*>(dateString.rawData()),
+        rawTime = timelib_strtotime(const_cast<char*>(dateString.data()),
                                     dateString.size(),
                                     &rawErrors,
                                     _timeZoneDatabase.get(),
@@ -268,8 +275,8 @@ Date_t TimeZoneDatabase::fromString(StringData dateString,
             &kDateFromStringFormatMap[0],
             // Format specifiers must be prefixed by '%'.
             '%'};
-        rawTime = timelib_parse_from_format_with_map(const_cast<char*>(format->rawData()),
-                                                     const_cast<char*>(dateString.rawData()),
+        rawTime = timelib_parse_from_format_with_map(const_cast<char*>(format->data()),
+                                                     const_cast<char*>(dateString.data()),
                                                      dateString.size(),
                                                      &rawErrors,
                                                      _timeZoneDatabase.get(),
@@ -500,9 +507,7 @@ TimeZone::DateParts::DateParts(const timelib_time& timelib_time, Date_t date)
       hour(timelib_time.h),
       minute(timelib_time.i),
       second(timelib_time.s) {
-    const int ms = date.toMillisSinceEpoch() % 1000LL;
-    // Add 1000 since dates before 1970 would have negative milliseconds.
-    millisecond = ms >= 0 ? ms : 1000 + ms;
+    millisecond = getMilliseconds(date);
 }
 
 TimeZone::Iso8601DateParts::Iso8601DateParts(const timelib_time& timelib_time, Date_t date)
@@ -520,10 +525,7 @@ TimeZone::Iso8601DateParts::Iso8601DateParts(const timelib_time& timelib_time, D
     year = static_cast<int>(tmpIsoYear);
     weekOfYear = static_cast<int>(tmpIsoWeekOfYear);
     dayOfWeek = static_cast<int>(tmpIsoDayOfWeek);
-
-    const int ms = date.toMillisSinceEpoch() % 1000LL;
-    // Add 1000 since dates before 1970 would have negative milliseconds.
-    millisecond = ms >= 0 ? ms : 1000 + ms;
+    millisecond = getMilliseconds(date);
 }
 
 
@@ -1175,7 +1177,7 @@ Date_t dateAdd(Date_t date, TimeUnit unit, long long amount, const TimeZone& tim
             isDateAddAmountValid(amount, unit));
 
     auto localTime = timezone.getTimelibTime(date);
-    auto microSec = durationCount<Microseconds>(Milliseconds(date.toMillisSinceEpoch() % 1000));
+    auto microSec = durationCount<Microseconds>(Milliseconds(getMilliseconds(date)));
     localTime->us = microSec;
 
     // Check if an adjustment for the last day of month is necessary.

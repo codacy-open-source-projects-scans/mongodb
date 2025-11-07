@@ -27,18 +27,7 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_map.h>
-#include <boost/exception/exception.hpp>
-#include <boost/move/utility_core.hpp>
-#include <memory>
-#include <numeric>
-#include <stack>
-#include <string>
-#include <typeinfo>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/pipeline_metadata_tree.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -62,12 +51,16 @@
 #include "mongo/db/pipeline/document_source_unwind.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/pipeline/pipeline_metadata_tree.h"
-#include "mongo/s/sharding_state.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/intrusive_counter.h"
-#include "mongo/util/string_map.h"
+#include "mongo/db/topology/sharding_state.h"
+#include "mongo/unittest/unittest.h"
+
+#include <memory>
+#include <numeric>
+#include <stack>
+#include <string>
+#include <typeinfo>
+#include <vector>
+
 
 namespace mongo {
 namespace {
@@ -81,7 +74,7 @@ protected:
     auto jsonToPipeline(StringData jsonArray) {
         const auto inputBson = fromjson("{pipeline: " + jsonArray + "}");
 
-        ASSERT_EQUALS(inputBson["pipeline"].type(), BSONType::Array);
+        ASSERT_EQUALS(inputBson["pipeline"].type(), BSONType::array);
         auto rawPipeline = parsePipelineFromBSON(inputBson["pipeline"]);
         NamespaceString testNss =
             NamespaceString::createNamespaceString_forTest("test", "collection");
@@ -102,12 +95,12 @@ protected:
     void introduceCollection(StringData collectionName) {
         NamespaceString fromNs =
             NamespaceString::createNamespaceString_forTest("test", collectionName);
-        _resolvedNamespaces.insert({fromNs.coll().toString(), {fromNs, std::vector<BSONObj>()}});
+        _resolvedNamespaces.insert({fromNs, {fromNs, std::vector<BSONObj>()}});
         getExpCtx()->setResolvedNamespaces(_resolvedNamespaces);
     }
 
 private:
-    StringMap<ResolvedNamespace> _resolvedNamespaces;
+    ResolvedNamespaceMap _resolvedNamespaces;
 };
 
 using namespace pipeline_metadata_tree;
@@ -533,13 +526,11 @@ TEST_F(PipelineMetadataTreeTest, ZipWalksAPipelineAndTreeInTandemAndInOrder) {
 
 TEST_F(PipelineMetadataTreeTest, MakeTreeWithEmptyPipeline) {
     auto pipeline = Pipeline::parse({}, getExpCtx());
-    auto result = makeTree<std::string>(
-        {{NamespaceString::createNamespaceString_forTest("unittests.pipeline_test"),
-          std::string("input")}},
-        *pipeline,
-        [](const auto&, const auto&, const DocumentSource& source) {
-            return std::string("not called");
-        });
+    auto result = makeTree<std::string>({{getExpCtx()->getNamespaceString(), std::string("input")}},
+                                        *pipeline,
+                                        [](const auto&, const auto&, const DocumentSource& source) {
+                                            return std::string("not called");
+                                        });
     ASSERT_FALSE(result.first);
     ASSERT_EQ(result.second, "input"_sd);
 }

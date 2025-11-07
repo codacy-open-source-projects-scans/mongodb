@@ -27,24 +27,14 @@
  *    it in the license file.
  */
 
+#pragma once
+
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <algorithm>
-#include <deque>
-#include <functional>
-#include <iosfwd>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <tuple>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -74,6 +64,18 @@
 #include "mongo/util/producer_consumer_queue.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <deque>
+#include <functional>
+#include <iosfwd>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 namespace mongo::async_rpc {
 
@@ -138,32 +140,32 @@ public:
         CancellationToken token,
         OperationContext* opCtx,
         Targeter* targeter,
+        const TargetingMetadata& targetingMetadata,
         const DatabaseName& dbName,
         BSONObj cmdBSON,
         BatonHandle,
         boost::optional<UUID> clientOperationKey) final {
         auto [p, f] = makePromiseFuture<BSONObj>();
-        return targeter->resolve(token)
+        return targeter->resolve(token, targetingMetadata)
             .thenRunOn(exec)
-            .onError([](Status s) -> StatusWith<std::vector<HostAndPort>> {
+            .onError([](Status s) -> StatusWith<HostAndPort> {
                 return Status{AsyncRPCErrorInfo(s), "Remote command execution failed"};
             })
             .then([=, this, f = std::move(f), p = std::move(p), dbName = dbName.toString_forTest()](
-                      auto&& targets) mutable {
+                      auto&& target) mutable {
                 stdx::lock_guard lg{_m};
-                _requests.emplace_back(cmdBSON, dbName, targets[0], std::move(p));
+                _requests.emplace_back(cmdBSON, dbName, target, std::move(p));
                 _hasRequestsCV.notify_one();
-                return std::move(f).onCompletion(
-                    [targetUsed = targets[0]](StatusWith<BSONObj> resp) {
-                        if (!resp.isOK()) {
-                            uassertStatusOK(Status{AsyncRPCErrorInfo(resp.getStatus(), targetUsed),
-                                                   "Remote command execution failed"});
-                        }
-                        Status maybeError(detail::makeErrorIfNeeded(executor::RemoteCommandResponse(
-                            targetUsed, resp.getValue(), Microseconds(1))));
-                        uassertStatusOK(maybeError);
-                        return detail::AsyncRPCInternalResponse{resp.getValue(), targetUsed};
-                    });
+                return std::move(f).onCompletion([targetUsed = target](StatusWith<BSONObj> resp) {
+                    if (!resp.isOK()) {
+                        uassertStatusOK(Status{AsyncRPCErrorInfo(resp.getStatus(), targetUsed),
+                                               "Remote command execution failed"});
+                    }
+                    Status maybeError(detail::makeErrorIfNeeded(executor::RemoteCommandResponse(
+                        targetUsed, resp.getValue(), Microseconds(1))));
+                    uassertStatusOK(maybeError);
+                    return detail::AsyncRPCInternalResponse{resp.getValue(), targetUsed};
+                });
             });
     }
 
@@ -248,16 +250,19 @@ public:
         CancellationToken token,
         OperationContext* opCtx,
         Targeter* targeter,
+        const TargetingMetadata& targetingMetadata,
         const DatabaseName& dbName,
         BSONObj cmdBSON,
         BatonHandle,
         boost::optional<UUID> clientOperationKey) final {
         auto [p, f] = makePromiseFuture<BSONObj>();
         auto targetsAttempted = std::make_shared<std::vector<HostAndPort>>();
-        return targeter->resolve(token).thenRunOn(exec).then(
-            [this, p = std::move(p), cmdBSON, dbName = dbName.toString_forTest()](auto&& targets) {
+        return targeter->resolve(token, targetingMetadata)
+            .thenRunOn(exec)
+            .then([this, p = std::move(p), cmdBSON, dbName = dbName.toString_forTest()](
+                      auto&& target) {
                 stdx::lock_guard lg(_m);
-                Request req{dbName, cmdBSON, targets[0]};
+                Request req{dbName, cmdBSON, target};
                 auto expectation =
                     std::find_if(_expectations.begin(),
                                  _expectations.end(),
@@ -275,13 +280,13 @@ public:
                 expectation->promise.emplaceValue();
                 expectation->met = true;
                 if (!ans.isOK()) {
-                    uassertStatusOK(Status{AsyncRPCErrorInfo(ans.getStatus(), targets[0]),
+                    uassertStatusOK(Status{AsyncRPCErrorInfo(ans.getStatus(), target),
                                            "Remote command execution failed"});
                 }
                 Status maybeError(detail::makeErrorIfNeeded(
-                    executor::RemoteCommandResponse(targets[0], ans.getValue(), Microseconds(1))));
+                    executor::RemoteCommandResponse(target, ans.getValue(), Microseconds(1))));
                 uassertStatusOK(maybeError);
-                return detail::AsyncRPCInternalResponse{ans.getValue(), targets[0]};
+                return detail::AsyncRPCInternalResponse{ans.getValue(), target};
             });
     }
 
@@ -403,6 +408,7 @@ public:
         CancellationToken token,
         OperationContext* opCtx,
         Targeter* targeter,
+        const TargetingMetadata& targetingMetadata,
         const DatabaseName& dbName,
         BSONObj cmdBSON,
         BatonHandle,

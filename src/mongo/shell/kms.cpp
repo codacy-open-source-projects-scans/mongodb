@@ -27,17 +27,17 @@
  *    it in the license file.
  */
 
-#include "kms.h"
-
-#include <utility>
-
-#include <absl/container/node_hash_map.h>
+#include "mongo/shell/kms.h"
 
 #include "mongo/idl/idl_parser.h"
 #include "mongo/shell/kms_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/text.h"  // IWYU pragma: keep
+
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
 
 
 namespace mongo {
@@ -66,7 +66,7 @@ void KMSServiceController::registerFactory(KMSProviderEnum provider,
 std::unique_ptr<KMSService> KMSServiceController::createFromClient(StringData kmsProvider,
                                                                    const BSONObj& config) {
     KMSProviderEnum provider =
-        KMSProvider_parse(IDLParserContext("client fle options"), kmsProvider);
+        KMSProvider_parse(kmsProvider, IDLParserContext("client fle options"));
 
     auto service = _factories.at(provider)->create(config);
     uassert(51192, str::stream() << "Cannot find client kms provider " << kmsProvider, service);
@@ -76,7 +76,7 @@ std::unique_ptr<KMSService> KMSServiceController::createFromClient(StringData km
 std::unique_ptr<KMSService> KMSServiceController::createFromDisk(const BSONObj& config,
                                                                  const BSONObj& masterKey) {
     auto providerObj = masterKey.getStringField("provider"_sd);
-    auto provider = KMSProvider_parse(IDLParserContext("root"), providerObj);
+    auto provider = KMSProvider_parse(providerObj, IDLParserContext("root"));
     auto service = _factories.at(provider)->create(config);
     uassert(51193, str::stream() << "Cannot find disk kms provider " << providerObj, service);
     return service;

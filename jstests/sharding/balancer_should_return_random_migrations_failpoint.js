@@ -9,13 +9,14 @@
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 import {findChunksUtil} from "jstests/sharding/libs/find_chunks_util.js";
+import {getTimeseriesCollForDDLOps} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 
 // TODO SERVER-89399: re-enable the hook once it properly serialize with resharding operations
 TestData.skipCheckShardFilteringMetadata = true;
 
 // The mongod secondaries are set to priority 0 to prevent the primaries from stepping down during
 // migrations on slow evergreen builders.
-var st = new ShardingTest({
+let st = new ShardingTest({
     shards: 2,
     other: {
         enableBalancer: true,
@@ -24,18 +25,21 @@ var st = new ShardingTest({
                 "failpoint.balancerShouldReturnRandomMigrations": "{mode: 'alwaysOn'}",
                 "reshardingMinimumOperationDurationMillis": 0,
                 "balancerMigrationsThrottlingMs": 0,
-            }
-        }
-    }
+            },
+        },
+        rsOptions: {setParameter: {"failpoint.balancerShouldReturnRandomMigrations": "{mode: 'alwaysOn'}"}},
+    },
 });
 
 const dbNames = ["db0", "db1"];
 const numDocuments = 25;
-const timeFieldName = 'time';
+const timeFieldName = "time";
 
 // TODO SERVER-84744 remove the feature flag
-const isReshardingForTimeseriesEnabled =
-    FeatureFlagUtil.isPresentAndEnabled(st.shard0.getDB('admin'), 'ReshardingForTimeseries');
+const isReshardingForTimeseriesEnabled = FeatureFlagUtil.isPresentAndEnabled(
+    st.shard0.getDB("admin"),
+    "ReshardingForTimeseries",
+);
 
 // Setup collections
 {
@@ -55,50 +59,73 @@ const isReshardingForTimeseriesEnabled =
         // TODO (SERVER-84744): Remove check for feature flag
         if (isReshardingForTimeseriesEnabled) {
             // Create timeseries collection
-            assert.commandWorked(
-                db.createCollection('timeseries', {timeseries: {timeField: timeFieldName}}));
+            assert.commandWorked(db.createCollection("timeseries", {timeseries: {timeField: timeFieldName}}));
         }
 
         // Create view
-        assert.commandWorked(db.createCollection('view', {viewOn: 'unsharded'}));
+        assert.commandWorked(db.createCollection("view", {viewOn: "unsharded"}));
     }
 }
 
 // Get the data shard for a given collection
-function getDataShard(nss) {
+function getPlacement(nss) {
     // wait until the collection gets tracked
     // We need to wait because collection get tracked only on the db
     assert.soon(() => {
-        return st.s.getCollection('config.collections').countDocuments({_id: nss}) > 0;
+        return st.s.getCollection("config.collections").countDocuments({_id: nss}) > 0;
     }, `Timed out waiting for collection ${nss} to get tracked`);
 
-    let chunk = findChunksUtil.findOneChunkByNs(st.getDB('config'), nss);
-    assert(chunk, `Couldn't find chunk for collection ${nss}`);
-    return chunk.shard;
+    let chunks = findChunksUtil.findChunksByNs(st.getDB("config"), nss).toArray();
+    assert(chunks.length > 0, `Couldn't find chunk for collection ${nss}`);
+    let shards = [];
+    chunks.forEach((chunk) => {
+        if (!shards.includes(chunk.shard)) {
+            shards.push(chunk.shard);
+        }
+    });
+    return {shards: shards, numChunks: chunks.length};
+}
+
+function placementDiffers(currentPlacement, initialPlacement) {
+    let differs = false;
+    if (currentPlacement.shards.length != initialPlacement.shards.length) {
+        differs = true;
+    }
+    if (currentPlacement.numChunks != initialPlacement.numChunks) {
+        differs = true;
+    }
+    initialPlacement.shards.forEach((shard) => {
+        if (!currentPlacement.shards.includes(shard)) {
+            differs = true;
+        }
+    });
+    return differs;
 }
 
 // Store the initial shard for every namespace
 // Map: namespace -> shardId
 let initialPlacements = {};
 
-let trackableCollections = ['unsharded', 'sharded'];
+let trackableCollections = ["unsharded", "sharded"];
 
 if (isReshardingForTimeseriesEnabled) {
-    trackableCollections.push('system.buckets.timeseries');
+    let db = st.s.getDB(dbNames[0]);
+    trackableCollections.push(getTimeseriesCollForDDLOps(db, db["timeseries"]).getName());
 }
 
 for (const dbName of dbNames) {
     for (const collName of trackableCollections) {
         const fullName = `${dbName}.${collName}`;
-        initialPlacements[fullName] = getDataShard(fullName);
+        initialPlacements[fullName] = getPlacement(fullName);
     }
 }
 
-jsTest.log(`Intial placement: ${tojson(initialPlacements)}`);
+jsTest.log(`Initial placement: ${tojson(initialPlacements)}`);
 
-for (const [nss, initialShard] of Object.entries(initialPlacements)) {
+for (const [nss, initialPlacement] of Object.entries(initialPlacements)) {
     assert.soon(() => {
-        return getDataShard(nss) != initialShard;
+        let currentPlacement = getPlacement(nss);
+        return placementDiffers(currentPlacement, initialPlacement);
     }, `Data shard for collection ${nss} didn't change`);
 }
 

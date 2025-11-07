@@ -28,18 +28,17 @@
  */
 
 
-#include <benchmark/benchmark.h>
-
-#include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/query/query_settings/query_settings_manager.h"
-#include "mongo/db/query/query_settings/query_settings_utils.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/query/query_request_helper.h"
+#include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/query/query_shape/find_cmd_shape.h"
 #include "mongo/db/query/query_shape/query_shape.h"
-#include "mongo/db/query/query_test_service_context.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/platform/random.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/processinfo.h"
+
+#include <benchmark/benchmark.h>
 
 namespace mongo::query_settings {
 namespace {
@@ -86,7 +85,7 @@ std::unique_ptr<ParsedFindCommand> generateSmallParsedFindRequest(
     const NamespaceString& nss,
     BSONObjBuilder& bob) {
     auto rawFilter = BSON(generateFieldName() << BSON("$eq" << 1));
-    bob.appendElements(BSON("find" << nss.coll().toString() << "$db"
+    bob.appendElements(BSON("find" << nss.coll() << "$db"
                                    << nss.dbName().serializeWithoutTenantPrefix_UNSAFE() << "filter"
                                    << rawFilter));
     auto findCmd = query_request_helper::makeFromFindCommand(
@@ -120,7 +119,7 @@ std::unique_ptr<ParsedFindCommand> generateMediumParsedFindRequest(
                                               << BSON(generateFieldName() << BSON("$ne" << 1))
                                               << BSON(generateFieldName() << 2)));
     auto rawProjection = BSON("_id" << 0 << generateFieldName() << 1 << generateFieldName() << 1);
-    bob.appendElements(BSON("find" << nss.coll().toString() << "$db"
+    bob.appendElements(BSON("find" << nss.coll() << "$db"
                                    << nss.dbName().serializeWithoutTenantPrefix_UNSAFE() << "filter"
                                    << rawFilter << "projection" << rawProjection));
     auto findCmd = query_request_helper::makeFromFindCommand(
@@ -182,10 +181,9 @@ std::unique_ptr<ParsedFindCommand> generateLargeParsedFindRequest(
                                     << BSON_ARRAY(1 << 2 << 3 << "$field") << "total"
                                     << BSON("$sum" << generateFieldName()));
     auto rawSort = BSON("_id" << 1 << generateFieldName() << -1);
-    bob.appendElements(BSON("find" << nss.coll().toString() << "$db"
-                                   << nss.dbName().serializeWithoutTenantPrefix_UNSAFE() << "filter"
-                                   << rawFilter << "projection" << rawProjection << "sort"
-                                   << rawSort));
+    bob.appendElements(BSON(
+        "find" << nss.coll() << "$db" << nss.dbName().serializeWithoutTenantPrefix_UNSAFE()
+               << "filter" << rawFilter << "projection" << rawProjection << "sort" << rawSort));
     auto findCmd = query_request_helper::makeFromFindCommand(
         std::move(bob.asTempObj()), boost::none /* vts */, nss.tenantId(), kSerializationContext);
     return uassertStatusOK(parsed_find_command::parse(expCtx, {std::move(findCmd)}));
@@ -225,7 +223,7 @@ public:
         setGlobalServiceContext({});
     }
 
-    // Populates the query settings manager with dummy query shape configurations.
+    // Populates the system with dummy query shape configurations.
     void populateQueryShapeConfigurations(benchmark::State& state,
                                           const boost::optional<TenantId>& tenantId,
                                           int dummyQuerySettingsCount) {
@@ -264,10 +262,12 @@ public:
                                benchmark::Counter::Flags::kDefaults,
                                benchmark::Counter::OneK::kIs1024);
 
-        // Update the QuerySettingsManager with the 'queryShapeConfigs'.
-        auto& manager = QuerySettingsManager::get(opCtx.get());
-        manager.setQueryShapeConfigurations(
-            std::move(queryShapeConfigs), LogicalTime(Timestamp(1)), tenantId);
+        // Update the qurey shape configurations present in the system.
+        QuerySettingsService::get(opCtx.get())
+            .setAllQueryShapeConfigurations(
+                QueryShapeConfigurationsWithTimestamp{std::move(queryShapeConfigs),
+                                                      LogicalTime(Timestamp(1))},
+                tenantId);
         benchmark::ClobberMemory();
     }
 
@@ -305,14 +305,18 @@ public:
 
                 // Update the query shape configurations by adding a new one, which will be used for
                 // the lookup.
-                auto& manager = QuerySettingsManager::get(opCtx.get());
                 auto queryShapeConfigurationsWithTimestamp =
-                    manager.getAllQueryShapeConfigurations(tid);
-                auto& queryShapeConfigurations =
+                    query_settings::QuerySettingsService::get(opCtx.get())
+                        .getAllQueryShapeConfigurations(tid);
+                auto&& queryShapeConfigurations =
                     queryShapeConfigurationsWithTimestamp.queryShapeConfigurations;
                 queryShapeConfigurations.push_back(hitQueryShapeConfiguration);
-                manager.setQueryShapeConfigurations(
-                    std::move(queryShapeConfigurations), LogicalTime(Timestamp(2)), tid);
+
+                QuerySettingsService::get(opCtx.get())
+                    .setAllQueryShapeConfigurations(
+                        QueryShapeConfigurationsWithTimestamp{std::move(queryShapeConfigurations),
+                                                              LogicalTime(Timestamp(2))},
+                        tid);
             }
 
             return parsedFindRequest;
@@ -324,9 +328,15 @@ public:
                        << " QueryClass=" << queryClassToString(queryClass) << " Threads="
                        << state.threads << " HitOrMiss=" << (isTestingHitCase ? "Hit" : "Miss"));
 
+        auto& querySettingsService = query_settings::QuerySettingsService::get(opCtx.get());
         while (state.KeepRunning()) {
-            benchmark::DoNotOptimize(
-                query_settings::lookupQuerySettingsForFind(expCtx, *parsedFind, ns));
+            query_shape::DeferredQueryShape deferredShape{[&]() {
+                return shape_helpers::tryMakeShape<query_shape::FindCmdShape>(*parsedFind, expCtx);
+            }};
+            auto queryShapeHash =
+                deferredShape().getValue()->sha256Hash(opCtx.get(), kSerializationContext);
+            benchmark::DoNotOptimize(querySettingsService.lookupQuerySettingsWithRejectionCheck(
+                expCtx, queryShapeHash, ns));
         }
     }
 
@@ -340,6 +350,7 @@ protected:
 
     boost::optional<RAIIServerParameterControllerForTest> _querySettingsFeatureFlag;
     boost::optional<RAIIServerParameterControllerForTest> _multitenancyFeatureFlag;
+    boost::optional<RAIIServerParameterControllerForTest> _internalQuerySettingsDisableBackfillFlag;
 };
 
 class QuerySettingsNotMultitenantLookupBenchmark : public QuerySettingsLookupBenchmark {
@@ -350,12 +361,12 @@ class QuerySettingsNotMultitenantLookupBenchmark : public QuerySettingsLookupBen
             // (Generic FCV reference): required for enabling the feature flag.
             serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLatest);
 
-            // On the first launch, initialize global service context and the QuerySettingsManager.
+            // On the first launch, initialize global service context and initialize the query
+            // settings.
             setGlobalServiceContext(ServiceContext::make());
-            QuerySettingsManager::create(getGlobalServiceContext(), {}, {});
-
-            // Initialize the feature flag.
-            _querySettingsFeatureFlag.emplace("featureFlagQuerySettings", true);
+            query_settings::QuerySettingsService::initializeForTest(getGlobalServiceContext());
+            _internalQuerySettingsDisableBackfillFlag.emplace(
+                "internalQuerySettingsDisableBackfill", true);
 
             // Query settings are populated only for a single tenant (global scope).
             auto numberOfExistingSettings = state.range(0);
@@ -377,14 +388,15 @@ class QuerySettingsMultiTenantLookupBenchmark : public QuerySettingsLookupBenchm
             // (Generic FCV reference): required for enabling the feature flag.
             serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLatest);
 
-            // On the first launched thread, initialize global service context and the
-            // QuerySettingsManager.
+            // On the first launch, initialize global service context and initialize the query
+            // settings.
             setGlobalServiceContext(ServiceContext::make());
-            QuerySettingsManager::create(getGlobalServiceContext(), {}, {});
+            query_settings::QuerySettingsService::initializeForTest(getGlobalServiceContext());
 
             // Initialize the feature flags.
-            _querySettingsFeatureFlag.emplace("featureFlagQuerySettings", true);
             _multitenancyFeatureFlag.emplace("multitenancySupport", true);
+            _internalQuerySettingsDisableBackfillFlag.emplace(
+                "internalQuerySettingsDisableBackfill", true);
         }
 
         // Query settings are populated for every tenant.

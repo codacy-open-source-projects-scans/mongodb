@@ -27,29 +27,30 @@
  *    it in the license file.
  */
 
-#include <fmt/format.h>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/index_builds/index_builds_coordinator_mongod.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/catalog_test_fixture.h"
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/index_builds/commit_quorum_options.h"
-#include "mongo/db/index_builds/index_builds_coordinator_mongod.h"
+#include "mongo/db/local_catalog/catalog_test_fixture.h"
+#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/uuid.h"
+
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -68,6 +69,11 @@ public:
      */
     void createCollection(const NamespaceString& nss, UUID uuid);
 
+    CollectionAcquisition getCollectionExclusive(OperationContext* opCtx,
+                                                 const NamespaceString& nss);
+
+    std::vector<IndexBuildInfo> makeSpecs(std::vector<std::string> keys, std::vector<int32_t> ids);
+
     const UUID _testFooUUID = UUID::gen();
     const NamespaceString _testFooNss = NamespaceString::createNamespaceString_forTest("test.foo");
     const UUID _testBarUUID = UUID::gen();
@@ -80,7 +86,7 @@ public:
         NamespaceString::createNamespaceString_forTest(_tenantId, "test.test");
     const UUID _testFooTenantUUID = UUID::gen();
     const IndexBuildsCoordinator::IndexBuildOptions _indexBuildOptions = {
-        CommitQuorumOptions(CommitQuorumOptions::kDisabled)};
+        .commitQuorum = CommitQuorumOptions(CommitQuorumOptions::kDisabled)};
     std::unique_ptr<IndexBuildsCoordinator> _indexBuildsCoord;
 };
 
@@ -122,14 +128,30 @@ void IndexBuildsCoordinatorMongodTest::createCollection(const NamespaceString& n
                                                  repl::OpTime::kUninitializedTerm));
 }
 
-std::vector<BSONObj> makeSpecs(const NamespaceString& nss, std::vector<std::string> keys) {
+CollectionAcquisition IndexBuildsCoordinatorMongodTest::getCollectionExclusive(
+    OperationContext* opCtx, const NamespaceString& nss) {
+    return acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+        MODE_X);
+}
+
+std::vector<IndexBuildInfo> IndexBuildsCoordinatorMongodTest::makeSpecs(
+    std::vector<std::string> keys, std::vector<int32_t> ids) {
     invariant(keys.size());
-    std::vector<BSONObj> indexSpecs;
-    for (const auto& keyName : keys) {
-        indexSpecs.push_back(
-            BSON("v" << 2 << "key" << BSON(keyName << 1) << "name" << (keyName + "_1")));
+    invariant(keys.size() == ids.size());
+    auto storageEngine = operationContext()->getServiceContext()->getStorageEngine();
+    std::vector<IndexBuildInfo> indexes;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        const auto& keyName = keys[i];
+        IndexBuildInfo indexBuildInfo(
+            BSON("v" << 2 << "key" << BSON(keyName << 1) << "name" << (keyName + "_1")),
+            fmt::format("index-{}", ids[i]));
+        indexBuildInfo.setInternalIdents(*storageEngine,
+                                         VersionContext::getDecoration(operationContext()));
+        indexes.push_back(std::move(indexBuildInfo));
     }
-    return indexSpecs;
+    return indexes;
 }
 
 TEST_F(IndexBuildsCoordinatorMongodTest, AttemptBuildSameIndexFails) {
@@ -140,7 +162,7 @@ TEST_F(IndexBuildsCoordinatorMongodTest, AttemptBuildSameIndexFails) {
         assertGet(_indexBuildsCoord->startIndexBuild(operationContext(),
                                                      _testFooNss.dbName(),
                                                      _testFooUUID,
-                                                     makeSpecs(_testFooNss, {"a", "b"}),
+                                                     makeSpecs({"a", "b"}, {1, 2}),
                                                      UUID::gen(),
                                                      IndexBuildProtocol::kTwoPhase,
                                                      _indexBuildOptions));
@@ -150,7 +172,7 @@ TEST_F(IndexBuildsCoordinatorMongodTest, AttemptBuildSameIndexFails) {
     ASSERT_EQ(_indexBuildsCoord->startIndexBuild(operationContext(),
                                                  _testFooNss.dbName(),
                                                  _testFooUUID,
-                                                 makeSpecs(_testFooNss, {"b"}),
+                                                 makeSpecs({"b"}, {3}),
                                                  UUID::gen(),
                                                  IndexBuildProtocol::kTwoPhase,
                                                  _indexBuildOptions),
@@ -173,7 +195,7 @@ TEST_F(IndexBuildsCoordinatorMongodTest, Registration) {
         assertGet(_indexBuildsCoord->startIndexBuild(operationContext(),
                                                      _testFooNss.dbName(),
                                                      _testFooUUID,
-                                                     makeSpecs(_testFooNss, {"a", "b"}),
+                                                     makeSpecs({"a", "b"}, {1, 2}),
                                                      testFoo1BuildUUID,
                                                      IndexBuildProtocol::kTwoPhase,
                                                      _indexBuildOptions));
@@ -195,7 +217,7 @@ TEST_F(IndexBuildsCoordinatorMongodTest, Registration) {
         assertGet(_indexBuildsCoord->startIndexBuild(operationContext(),
                                                      _testFooNss.dbName(),
                                                      _testFooUUID,
-                                                     makeSpecs(_testFooNss, {"c", "d"}),
+                                                     makeSpecs({"c", "d"}, {3, 4}),
                                                      UUID::gen(),
                                                      IndexBuildProtocol::kTwoPhase,
                                                      _indexBuildOptions));
@@ -211,14 +233,13 @@ TEST_F(IndexBuildsCoordinatorMongodTest, Registration) {
                        ErrorCodes::BackgroundOperationInProgressForDatabase);
 
     // Register an index build on a different collection _testBarNss.
-    auto testBarFuture =
-        assertGet(_indexBuildsCoord->startIndexBuild(operationContext(),
-                                                     _testBarNss.dbName(),
-                                                     _testBarUUID,
-                                                     makeSpecs(_testBarNss, {"x", "y"}),
-                                                     UUID::gen(),
-                                                     IndexBuildProtocol::kTwoPhase,
-                                                     _indexBuildOptions));
+    auto testBarFuture = assertGet(_indexBuildsCoord->startIndexBuild(operationContext(),
+                                                                      _testBarNss.dbName(),
+                                                                      _testBarUUID,
+                                                                      makeSpecs({"x", "y"}, {5, 6}),
+                                                                      UUID::gen(),
+                                                                      IndexBuildProtocol::kTwoPhase,
+                                                                      _indexBuildOptions));
 
     ASSERT_EQ(_indexBuildsCoord->numInProgForDb(_testBarNss.dbName()), 3);
     ASSERT(_indexBuildsCoord->inProgForCollection(_testBarUUID));
@@ -235,7 +256,7 @@ TEST_F(IndexBuildsCoordinatorMongodTest, Registration) {
         assertGet(_indexBuildsCoord->startIndexBuild(operationContext(),
                                                      _othertestFooNss.dbName(),
                                                      _othertestFooUUID,
-                                                     makeSpecs(_othertestFooNss, {"r", "s"}),
+                                                     makeSpecs({"r", "s"}, {7, 8}),
                                                      UUID::gen(),
                                                      IndexBuildProtocol::kTwoPhase,
                                                      _indexBuildOptions));
@@ -307,7 +328,7 @@ TEST_F(IndexBuildsCoordinatorMongodTest, SetCommitQuorumWithBadArguments) {
         assertGet(_indexBuildsCoord->startIndexBuild(operationContext(),
                                                      _testFooNss.dbName(),
                                                      _testFooUUID,
-                                                     makeSpecs(_testFooNss, {"a", "b"}),
+                                                     makeSpecs({"a", "b"}, {1, 2}),
                                                      UUID::gen(),
                                                      IndexBuildProtocol::kTwoPhase,
                                                      _indexBuildOptions));
@@ -334,7 +355,7 @@ TEST_F(IndexBuildsCoordinatorMongodTest, SetCommitQuorumFailsToTurnCommitQuorumF
         assertGet(_indexBuildsCoord->startIndexBuild(operationContext(),
                                                      _testFooNss.dbName(),
                                                      _testFooUUID,
-                                                     makeSpecs(_testFooNss, {"a"}),
+                                                     makeSpecs({"a"}, {1}),
                                                      UUID::gen(),
                                                      IndexBuildProtocol::kTwoPhase,
                                                      _indexBuildOptions));
@@ -352,7 +373,7 @@ TEST_F(IndexBuildsCoordinatorMongodTest, SetCommitQuorumFailsToTurnCommitQuorumF
 TEST_F(IndexBuildsCoordinatorMongodTest, SetCommitQuorumFailsToTurnCommitQuorumFromOnToOff) {
 
     const IndexBuildsCoordinator::IndexBuildOptions indexBuildOptionsWithCQOn = {
-        CommitQuorumOptions(1)};
+        .commitQuorum = CommitQuorumOptions(1)};
     const auto buildUUID = UUID::gen();
 
     // Start an index build on _testFooNss with commit quorum enabled.
@@ -360,7 +381,7 @@ TEST_F(IndexBuildsCoordinatorMongodTest, SetCommitQuorumFailsToTurnCommitQuorumF
         assertGet(_indexBuildsCoord->startIndexBuild(operationContext(),
                                                      _testFooNss.dbName(),
                                                      _testFooUUID,
-                                                     makeSpecs(_testFooNss, {"a"}),
+                                                     makeSpecs({"a"}, {1}),
                                                      buildUUID,
                                                      IndexBuildProtocol::kTwoPhase,
                                                      indexBuildOptionsWithCQOn));

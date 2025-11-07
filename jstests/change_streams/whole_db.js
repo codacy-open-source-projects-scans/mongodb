@@ -1,13 +1,15 @@
 // Basic tests for $changeStream against all collections in a database.
 // Do not run in whole-cluster passthrough since this test assumes that the change stream will be
 // invalidated by a database drop.
-// @tags: [do_not_run_in_whole_cluster_passthrough]
+// @tags: [
+//   do_not_run_in_whole_cluster_passthrough,
+//   requires_profiling,
+//   requires_fcv_81
+// ]
 import {assertDropCollection} from "jstests/libs/collection_drop_recreate.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
-import {
-    assertInvalidChangeStreamNss,
-    ChangeStreamTest
-} from "jstests/libs/query/change_stream_util.js";
+import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
+import {assertInvalidChangeStreamNss, ChangeStreamTest} from "jstests/libs/query/change_stream_util.js";
 
 const testDb = db.getSiblingDB(jsTestName());
 assert.commandWorked(testDb.dropDatabase());
@@ -48,8 +50,8 @@ cst.assertNextChangesEqual({cursor: cursor, expectedChanges: [expected]});
 
 // Test that the change stream returns an inserted doc on a user-created collection whose name
 // includes "system" but is not considered an internal collection.
-const validSystemColls = ["system", "systems.views", "ssystem.views", "test.system"];
-validSystemColls.forEach(collName => {
+const validSystemColls = ["system", "systems.views", "ssystem.views", "test.system", "system_views"];
+validSystemColls.forEach((collName) => {
     cursor = cst.startWatchingChanges({pipeline: [{$changeStream: {}}], collection: 1});
     const coll = testDb.getCollection(collName);
     assert.commandWorked(coll.insert({_id: 0, a: 1}));
@@ -80,5 +82,14 @@ validSystemColls.forEach(collName => {
         },
     });
 });
+
+// Test that getMore commands from the whole-db change stream are logged by the profiler.
+if (!FixtureHelpers.isMongos(testDb)) {
+    assert.commandWorked(testDb.runCommand({profile: 2}));
+    cst.getNextBatch(cursor);
+    const profileEntry = getLatestProfilerEntry(testDb, {op: "getmore"});
+    const firstStage = Object.keys(profileEntry.originatingCommand.pipeline[0])[0];
+    assert(["$changeStream", "$_internalChangeStreamOplogMatch"].includes(firstStage), profileEntry);
+}
 
 cst.cleanUp();

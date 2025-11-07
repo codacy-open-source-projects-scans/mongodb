@@ -27,11 +27,6 @@
  *    it in the license file.
  */
 
-#include <utility>
-#include <vector>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -41,12 +36,12 @@
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 
-namespace mongo {
+#include <utility>
 
-using boost::intrusive_ptr;
+
+namespace mongo {
 
 /* ------------------------- AccumulatorMergeObjects ----------------------------- */
 
@@ -59,10 +54,6 @@ Value ExpressionFromAccumulator<AccumulatorMergeObjects>::evaluate(const Documen
 REGISTER_ACCUMULATOR(mergeObjects,
                      genericParseSingleExpressionAccumulator<AccumulatorMergeObjects>);
 REGISTER_STABLE_EXPRESSION(mergeObjects, ExpressionFromAccumulator<AccumulatorMergeObjects>::parse);
-
-intrusive_ptr<AccumulatorState> AccumulatorMergeObjects::create(ExpressionContext* const expCtx) {
-    return new AccumulatorMergeObjects(expCtx);
-}
 
 AccumulatorMergeObjects::AccumulatorMergeObjects(ExpressionContext* const expCtx)
     : AccumulatorState(expCtx) {
@@ -82,7 +73,7 @@ void AccumulatorMergeObjects::processInternal(const Value& input, bool merging) 
     uassert(40400,
             str::stream() << "$mergeObjects requires object inputs, but input " << input.toString()
                           << " is of type " << typeName(input.getType()),
-            (input.getType() == BSONType::Object));
+            (input.getType() == BSONType::object));
 
     FieldIterator iter = input.getDocument().fieldIterator();
     while (iter.more()) {

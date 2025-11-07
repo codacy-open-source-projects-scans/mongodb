@@ -27,17 +27,19 @@
  *    it in the license file.
  */
 
+#include "mongo/db/record_id.h"
+
+#include "mongo/bson/oid.h"
+#include "mongo/db/record_id_helpers.h"
+
 #include <algorithm>
-#include <benchmark/benchmark.h>
 #include <cstdint>
 #include <cstring>
 #include <random>
 #include <string>
 #include <vector>
 
-#include "mongo/bson/oid.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/record_id_helpers.h"
+#include <benchmark/benchmark.h>
 
 namespace mongo {
 namespace {
@@ -53,8 +55,8 @@ void BM_RecordIdCompareLong(benchmark::State& state) {
 
 void BM_RecordIdCompareSmallStr(benchmark::State& state) {
     std::string str1(20, 'x');
-    RecordId rid1(str1.c_str(), str1.size());
-    RecordId rid2(str1.c_str(), str1.size());
+    RecordId rid1(str1);
+    RecordId rid2(str1);
     for (auto _ : state) {
         benchmark::DoNotOptimize(rid1 > rid2);
         benchmark::ClobberMemory();
@@ -92,7 +94,7 @@ void BM_RecordIdCopyMedString(benchmark::State& state) {
     char buf[bufLen];
     memset(buf, 'x', bufLen);
 
-    RecordId rid = RecordId(buf, bufLen);
+    RecordId rid = RecordId(buf);
     for (auto _ : state) {
         RecordId tmp;
         benchmark::DoNotOptimize(tmp = rid);
@@ -105,7 +107,7 @@ void BM_RecordIdCopyBigString(benchmark::State& state) {
     char buf[bufLen];
     memset(buf, 'x', bufLen);
 
-    RecordId rid = RecordId(buf, bufLen);
+    RecordId rid = RecordId(buf);
     for (auto _ : state) {
         RecordId tmp;
         benchmark::DoNotOptimize(tmp = rid);

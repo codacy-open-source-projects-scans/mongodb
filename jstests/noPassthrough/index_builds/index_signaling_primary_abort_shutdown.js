@@ -3,13 +3,15 @@
  * properly interrupted, without blocking shutdown, and restarted after shutdown.
  *
  * @tags: [
+ *   # TODO(SERVER-109702): Evaluate if a primary-driven index build compatible test should be created.
+ *   requires_commit_quorum,
  *   requires_fcv_71,
  *   requires_replication,
  * ]
  */
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 const rst = new ReplSetTest({
     nodes: [
@@ -20,19 +22,19 @@ const rst = new ReplSetTest({
                 priority: 0,
             },
         },
-    ]
+    ],
 });
 rst.startSet();
 rst.initiate();
 
 const primary = rst.getPrimary();
 
-const testDB = primary.getDB('test');
-const coll = testDB.getCollection('test');
+const testDB = primary.getDB("test");
+const coll = testDB.getCollection("test");
 
 const secondary = rst.getSecondary();
 const secondaryDB = secondary.getDB(testDB.getName());
-let secondaryColl = secondaryDB.getCollection('test');
+let secondaryColl = secondaryDB.getCollection("test");
 
 // Avoid optimization on empty colls.
 assert.commandWorked(coll.insert({a: 1}));
@@ -42,28 +44,28 @@ const failpointHangAfterInit = configureFailPoint(secondaryDB, "hangAfterInitial
 
 // Create the index and start the build. Set commitQuorum of 2 nodes explicitly, otherwise as only
 // primary is voter, it would immediately commit.
-const createIdx = IndexBuildTest.startIndexBuild(primary,
-                                                 coll.getFullName(),
-                                                 {a: 1},
-                                                 {},
-                                                 [ErrorCodes.InterruptedDueToReplStateChange],
-                                                 /*commitQuorum: */ 2);
+const createIdx = IndexBuildTest.startIndexBuild(
+    primary,
+    coll.getFullName(),
+    {a: 1},
+    {},
+    [ErrorCodes.InterruptedDueToReplStateChange],
+    /*commitQuorum: */ 2,
+);
 
 failpointHangAfterInit.wait();
 
 // Extract the index build UUID. Use assertIndexesSoon to retry until the oplog applier is done with
 // the entry, and the index is visible to listIndexes. The failpoint does not ensure this.
-const buildUUID =
-    IndexBuildTest
-        .assertIndexesSoon(secondaryColl, 2, ['_id_'], ['a_1'], {includeBuildUUIDs: true})['a_1']
-        .buildUUID;
+const buildUUID = IndexBuildTest.assertIndexesSoon(secondaryColl, 2, ["_id_"], ["a_1"], {includeBuildUUIDs: true})[
+    "a_1"
+].buildUUID;
 
-const hangBeforePrimarySignal =
-    configureFailPoint(secondaryDB, "hangIndexBuildBeforeSignalingPrimaryForAbort");
-const failSecondaryBuild =
-    configureFailPoint(secondaryDB,
-                       "failIndexBuildWithError",
-                       {buildUUID: buildUUID, error: ErrorCodes.OutOfDiskSpace});
+const hangBeforePrimarySignal = configureFailPoint(secondaryDB, "hangIndexBuildBeforeSignalingPrimaryForAbort");
+const failSecondaryBuild = configureFailPoint(secondaryDB, "failIndexBuildWithError", {
+    buildUUID: buildUUID,
+    error: ErrorCodes.OutOfDiskSpace,
+});
 
 // Unblock index builds, causing the failIndexBuildWithError failpoint to throw an error.
 failpointHangAfterInit.off();
@@ -79,13 +81,13 @@ rst.waitForPrimary();
 // as a slow secondary restart can cause the primary to step down due to heartbeat timeout.
 createIdx();
 
-secondaryColl = rst.getSecondary().getDB(testDB.getName()).getCollection('test');
+secondaryColl = rst.getSecondary().getDB(testDB.getName()).getCollection("test");
 
 // Wait for index build to finish.
 IndexBuildTest.waitForIndexBuildToStop(testDB);
 
 // Assert index is committed.
-IndexBuildTest.assertIndexes(coll, 2, ['_id_', 'a_1'], []);
-IndexBuildTest.assertIndexes(secondaryColl, 2, ['_id_', 'a_1'], []);
+IndexBuildTest.assertIndexes(coll, 2, ["_id_", "a_1"], []);
+IndexBuildTest.assertIndexes(secondaryColl, 2, ["_id_", "a_1"], []);
 
 rst.stopSet();

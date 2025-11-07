@@ -88,7 +88,7 @@ __wti_rts_visibility_page_needs_abort(
     const char *tag;
     bool prepared, result;
 
-    addr = ref->addr;
+    addr = __wt_tsan_suppress_load_wt_addr_ptr(&ref->addr);
     mod = ref->page == NULL ? NULL : ref->page->modify;
     durable_ts = WT_TS_NONE;
     newest_txn = WT_TXN_NONE;
@@ -125,9 +125,8 @@ __wti_rts_visibility_page_needs_abort(
     } else if (mod != NULL && mod->instantiated && !__wt_page_is_modified(ref->page) &&
       ref->page_del != NULL) {
         tag = "page_del info";
-        durable_ts = ref->page_del->durable_timestamp;
-        prepared = ref->page_del->prepare_state == WT_PREPARE_INPROGRESS ||
-          ref->page_del->prepare_state == WT_PREPARE_LOCKED;
+        durable_ts = ref->page_del->pg_del_durable_ts;
+        prepared = ref->page_del->prepare_state == WT_PREPARE_INPROGRESS;
         newest_txn = ref->page_del->txnid;
         result = (durable_ts > rollback_timestamp) || prepared ||
           WT_CHECK_RECOVERY_FLAG_TXNID(session, newest_txn);

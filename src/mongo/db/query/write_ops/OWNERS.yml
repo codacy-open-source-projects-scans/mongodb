@@ -4,7 +4,7 @@ filters:
   # by QO by default.
   - "*":
     approvers:
-      - 10gen/query-optimization-parsers
+      - 10gen/query-optimization
   - "OWNERS.yml":
     approvers:
       - 10gen/query-execution-staff-leads
@@ -17,7 +17,9 @@ filters:
   # by a particular query subteam.
   - "delete.*":
     approvers:
-      - 10gen/query
+      - 10gen/query-optimization
+      - 10gen/query-execution-write-exec
   - "update.*":
     approvers:
-      - 10gen/query
+      - 10gen/query-optimization
+      - 10gen/query-execution-write-exec

@@ -29,35 +29,25 @@
 
 #include "mongo/db/repl/apply_ops.h"
 
-#include <algorithm>
-#include <boost/optional.hpp>
-#include <memory>
-#include <string>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/profile_settings.h"
 #include "mongo/db/repl/apply_ops_command_info.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/shard_role.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
@@ -65,6 +55,15 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -94,7 +93,7 @@ Status _applyOps(OperationContext* opCtx,
     // Apply each op in the given 'applyOps' command object.
     for (const auto& opObj : ops) {
         // Ignore 'n' operations.
-        const char* opType = opObj.getStringField("op").rawData();
+        const char* opType = opObj.getStringField("op").data();
         if (*opType == 'n')
             continue;
 
@@ -102,7 +101,6 @@ Status _applyOps(OperationContext* opCtx,
         const NamespaceString nss(NamespaceStringUtil::deserialize(
             dbName.tenantId(), opObj["ns"].String(), SerializationContext::stateDefault()));
 
-        // Need to check this here, or OldClientContext may fail an invariant.
         if (*opType != 'c' && !nss.isValid())
             return {ErrorCodes::InvalidNamespace, "invalid ns: " + nss.toStringForErrorMsg()};
 
@@ -124,71 +122,128 @@ Status _applyOps(OperationContext* opCtx,
                     }
                     auto entry = uassertStatusOK(OplogEntry::parse(builder.done()));
 
-                    if (*opType == 'c') {
-                        if (entry.getCommandType() == OplogEntry::CommandType::kDropDatabase) {
-                            invariant(info.getOperations().size() == 1,
-                                      "dropDatabase in applyOps must be the only entry");
-                            // This method is explicitly called without locks in spite of the
-                            // _inlock suffix. dropDatabase cannot hold any locks for execution
-                            // of the operation due to potential replication waits.
+                    // VersionContext fixes a FCV snapshot over the opCtx, making FCV-gated feature
+                    // flags checks in secondaries behave as they did on the primary, thus ensuring
+                    // correct application even if the FCV changed due to a concurrent setFCV.
+                    boost::optional<VersionContext::ScopedSetDecoration> scopedVersionContext;
+                    if (entry.getVersionContext()) {
+                        scopedVersionContext.emplace(opCtx, *entry.getVersionContext());
+                    }
+
+                    switch (entry.getOpType()) {
+                        case OpTypeEnum::kContainerInsert:
+                        case OpTypeEnum::kContainerDelete: {
+                            if (const auto fcv =
+                                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+                                !(fcv.isVersionInitialized() &&
+                                  ::mongo::feature_flags::gFeatureFlagPrimaryDrivenIndexBuilds
+                                      .isEnabled(VersionContext::getDecoration(opCtx), fcv)) &&
+                                oplogApplicationMode == OplogApplication::Mode::kApplyOpsCmd) {
+                                uasserted(ErrorCodes::InvalidOptions,
+                                          "Container ops are not enabled");
+                            }
+                            auto coll = acquireCollection(opCtx,
+                                                          {nss,
+                                                           PlacementConcern::kPretendUnsharded,
+                                                           ReadConcernArgs::get(opCtx),
+                                                           AcquisitionPrerequisites::kWrite},
+                                                          MODE_IX);
+                            uassertStatusOK(applyContainerOperation_inlock(
+                                opCtx, ApplierOperation{&entry}, oplogApplicationMode));
+                            return Status::OK();
+                        }
+                        case OpTypeEnum::kCommand: {
+                            if (entry.getCommandType() == OplogEntry::CommandType::kDropDatabase) {
+                                invariant(info.getOperations().size() == 1,
+                                          "dropDatabase in applyOps must be the only entry");
+                                // This method is explicitly called without locks in spite of the
+                                // _inlock suffix. dropDatabase cannot hold any locks for execution
+                                // of the operation due to potential replication waits.
+                                uassertStatusOK(applyCommand_inlock(
+                                    opCtx, ApplierOperation{&entry}, oplogApplicationMode));
+                                return Status::OK();
+                            }
+                            invariant(shard_role_details::getLocker(opCtx)->isW());
+                            if (entry.getCommandType() == OplogEntry::CommandType::kCreate) {
+                                // Allow apply ops for a create oplog entry to create the collection
+                                // locally. This will bypass sharding, but we expect that users
+                                // running applyOps know what they are doing and will handle this.
+                                const auto& ns = OplogApplication::extractNsFromCmd(
+                                    entry.getNss().dbName(), entry.getObject());
+                                OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
+                                    allowCreate(opCtx, ns);
+                                uassertStatusOK(applyCommand_inlock(
+                                    opCtx, ApplierOperation{&entry}, oplogApplicationMode));
+                                return Status::OK();
+                            }
                             uassertStatusOK(applyCommand_inlock(
                                 opCtx, ApplierOperation{&entry}, oplogApplicationMode));
                             return Status::OK();
                         }
-                        invariant(shard_role_details::getLocker(opCtx)->isW());
-                        uassertStatusOK(applyCommand_inlock(
-                            opCtx, ApplierOperation{&entry}, oplogApplicationMode));
-                        return Status::OK();
-                    }
+                        case OpTypeEnum::kInsert:
+                        case OpTypeEnum::kUpdate:
+                        case OpTypeEnum::kDelete: {
+                            // If the namespace and uuid passed into applyOps point to different
+                            // namespaces, throw an error.
+                            auto catalog = CollectionCatalog::get(opCtx);
+                            if (opObj.hasField("ui")) {
+                                auto uuid = UUID::parse(opObj["ui"]).getValue();
+                                auto nssFromUuid = catalog->lookupNSSByUUID(opCtx, uuid);
+                                if (nssFromUuid != nss) {
+                                    return Status{ErrorCodes::Error(3318200),
+                                                  str::stream()
+                                                      << "Namespace '" << nss.toStringForErrorMsg()
+                                                      << "' and UUID '" << uuid.toString()
+                                                      << "' point to different collections"};
+                                }
+                            }
 
-                    // If the namespace and uuid passed into applyOps point to different
-                    // namespaces, throw an error.
-                    auto catalog = CollectionCatalog::get(opCtx);
-                    if (opObj.hasField("ui")) {
-                        auto uuid = UUID::parse(opObj["ui"]).getValue();
-                        auto nssFromUuid = catalog->lookupNSSByUUID(opCtx, uuid);
-                        if (nssFromUuid != nss) {
-                            return Status{ErrorCodes::Error(3318200),
+                            auto collection = acquireCollection(
+                                opCtx,
+                                CollectionAcquisitionRequest(nss,
+                                                             PlacementConcern::kPretendUnsharded,
+                                                             repl::ReadConcernArgs::get(opCtx),
+                                                             AcquisitionPrerequisites::kWrite),
+                                fixLockModeForSystemDotViewsChanges(nss, MODE_IX));
+                            if (!collection.exists()) {
+                                // For idempotency reasons, return success on delete operations.
+                                if (entry.getOpType() == OpTypeEnum::kDelete) {
+                                    return Status::OK();
+                                }
+                                uasserted(ErrorCodes::NamespaceNotFound,
                                           str::stream()
-                                              << "Namespace '" << nss.toStringForErrorMsg()
-                                              << "' and UUID '" << uuid.toString()
-                                              << "' point to different collections"};
-                        }
-                    }
+                                              << "cannot apply insert or update operation on a "
+                                                 "non-existent namespace "
+                                              << nss.toStringForErrorMsg() << ": "
+                                              << mongo::redact(opObj));
+                            }
+                            AutoStatsTracker statsTracker(
+                                opCtx,
+                                nss,
+                                Top::LockType::WriteLocked,
+                                AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                                DatabaseProfileSettings::get(opCtx->getServiceContext())
+                                    .getDatabaseProfileLevel(nss.dbName()));
 
-                    auto collection = acquireCollection(
-                        opCtx,
-                        CollectionAcquisitionRequest(nss,
-                                                     AcquisitionPrerequisites::kPretendUnsharded,
-                                                     repl::ReadConcernArgs::get(opCtx),
-                                                     AcquisitionPrerequisites::kWrite),
-                        fixLockModeForSystemDotViewsChanges(nss, MODE_IX));
-                    if (!collection.exists()) {
-                        // For idempotency reasons, return success on delete operations.
-                        if (*opType == 'd') {
+                            // We return the status rather than merely aborting so failure of CRUD
+                            // ops doesn't stop the applyOps from trying to process the rest of the
+                            // ops.  This is to leave the door open to parallelizing CRUD op
+                            // application in the future.
+                            const bool isDataConsistent = true;
+                            return repl::applyOperation_inlock(opCtx,
+                                                               collection,
+                                                               ApplierOperation{&entry},
+                                                               false, /* alwaysUpsert */
+                                                               oplogApplicationMode,
+                                                               isDataConsistent);
+                        }
+
+                        case OpTypeEnum::kNoop:
                             return Status::OK();
-                        }
-                        uasserted(ErrorCodes::NamespaceNotFound,
-                                  str::stream()
-                                      << "cannot apply insert or update operation on a "
-                                         "non-existent namespace "
-                                      << nss.toStringForErrorMsg() << ": " << mongo::redact(opObj));
                     }
-
-                    OldClientContext ctx(opCtx, nss);
-
-                    // We return the status rather than merely aborting so failure of CRUD
-                    // ops doesn't stop the applyOps from trying to process the rest of the
-                    // ops.  This is to leave the door open to parallelizing CRUD op
-                    // application in the future.
-                    const bool isDataConsistent = true;
-                    return repl::applyOperation_inlock(opCtx,
-                                                       collection,
-                                                       ApplierOperation{&entry},
-                                                       false, /* alwaysUpsert */
-                                                       oplogApplicationMode,
-                                                       isDataConsistent);
-                });
+                    MONGO_UNREACHABLE;
+                },
+                oplogApplicationMode == repl::OplogApplication::Mode::kSecondary);
         } catch (const DBException& ex) {
             ab.append(false);
             result->append("applied", ++(*numApplied));

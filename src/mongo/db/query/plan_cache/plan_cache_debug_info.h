@@ -33,6 +33,7 @@
 #include "mongo/db/query/plan_ranking_decision.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/container_size_helper.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::plan_cache_debug_info {
 /**
@@ -49,19 +50,22 @@ struct CreatedFromQuery {
         size += sort.objsize();
         size += projection.objsize();
         size += collation.objsize();
+        size += distinct.objsize();
         return size;
     }
 
     std::string debugString() const {
         return str::stream() << "query: " << filter.toString() << "; sort: " << sort.toString()
                              << "; projection: " << projection.toString()
-                             << "; collation: " << collation.toString();
+                             << "; collation: " << collation.toString()
+                             << "; distinct: " << distinct.toString();
     }
 
     BSONObj filter;
     BSONObj sort;
     BSONObj projection;
     BSONObj collation;
+    BSONObj distinct;
 };
 
 /**

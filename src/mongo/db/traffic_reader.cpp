@@ -27,16 +27,23 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/util/duration.h"
+
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
-#include <fcntl.h>
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <system_error>
+#include <vector>
+
+#include <fcntl.h>
+
+#include <boost/iostreams/device/mapped_file.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #ifdef _WIN32
 #include <io.h>
@@ -79,17 +86,24 @@ const long long unixToInternal =
 
 namespace mongo {
 
+TrafficReaderPacket readPacket(ConstDataRangeCursor cdr) {
+    // Read the packet
+    cdr.skip<LittleEndian<uint32_t>>();
+    EventType eventType = cdr.readAndAdvance<EventType>();
+    uint64_t id = cdr.readAndAdvance<LittleEndian<uint64_t>>();
+    StringData session = cdr.readAndAdvance<Terminated<'\0', StringData>>();
+    int64_t offsetMicrosCount = cdr.readAndAdvance<LittleEndian<uint64_t>>();
+    Microseconds offset{offsetMicrosCount};
+    uint64_t order = cdr.readAndAdvance<LittleEndian<uint64_t>>();
+    MsgData::ConstView message(cdr.data());
+    tassert(10562701,
+            "The value of 'eventType' can only be a value of existent event type",
+            eventType < EventType::kMax);
+
+    return TrafficReaderPacket{eventType, id, session, offset, order, message};
+}
+
 namespace {
-
-// Packet struct
-struct TrafficReaderPacket {
-    uint64_t id;
-    StringData session;
-    Date_t date;
-    uint64_t order;
-    MsgData::ConstView message;
-};
-
 bool readBytes(size_t toRead, char* buf, int fd) {
     while (toRead) {
 #ifdef _WIN32
@@ -127,17 +141,7 @@ boost::optional<TrafficReaderPacket> readPacket(char* buf, int fd) {
     uassert(
         ErrorCodes::FailedToParse, "could not read full packet", readBytes(len - 4, buf + 4, fd));
 
-    ConstDataRangeCursor cdr(buf, buf + len);
-
-    // Read the packet
-    cdr.skip<LittleEndian<uint32_t>>();
-    uint64_t id = cdr.readAndAdvance<LittleEndian<uint64_t>>();
-    StringData session = cdr.readAndAdvance<Terminated<'\0', StringData>>();
-    uint64_t date = cdr.readAndAdvance<LittleEndian<uint64_t>>();
-    uint64_t order = cdr.readAndAdvance<LittleEndian<uint64_t>>();
-    MsgData::ConstView message(cdr.data());
-
-    return TrafficReaderPacket{id, session, Date_t::fromMillisSinceEpoch(date), order, message};
+    return readPacket(ConstDataRangeCursor(buf, buf + len));
 }
 
 void getBSONObjFromPacket(TrafficReaderPacket& packet, BSONObjBuilder* builder) {
@@ -145,36 +149,27 @@ void getBSONObjFromPacket(TrafficReaderPacket& packet, BSONObjBuilder* builder) 
         // RawOp Field
         BSONObjBuilder rawop(builder->subobjStart("rawop"));
 
-        // Add the header fields to rawOp
-        {
-            BSONObjBuilder header(rawop.subobjStart("header"));
-            header.append("messagelength", static_cast<int32_t>(packet.message.getLen()));
-            header.append("requestid", static_cast<int32_t>(packet.message.getId()));
-            header.append("responseto", static_cast<int32_t>(packet.message.getResponseToMsgId()));
-            header.append("opcode", static_cast<int32_t>(packet.message.getNetworkOp()));
+        // Some special events like session events don't have a Message, so these fields can be
+        // optional.
+        if (packet.eventType == EventType::kRegular) {
+            // Add the header fields to rawOp
+            {
+                BSONObjBuilder header(rawop.subobjStart("header"));
+                header.append("messagelength", static_cast<int32_t>(packet.message.getLen()));
+                header.append("requestid", static_cast<int32_t>(packet.message.getId()));
+                header.append("responseto",
+                              static_cast<int32_t>(packet.message.getResponseToMsgId()));
+                header.append("opcode", static_cast<int32_t>(packet.message.getNetworkOp()));
+            }
+
+            rawop.appendBinData(
+                "body", packet.message.getLen(), BinDataGeneral, packet.message.view2ptr());
         }
-
-        // Add the binary reprentation of the entire message for rawop.body
-        // auto buf = SharedBuffer::allocate(packet.message.getLen());
-        // std::memcpy(buf.get(), packet.message.view2ptr(), packet.message.getLen());
-        // rawop.appendBinData("body", packet.message.getLen(), BinDataGeneral, buf.get());
-        rawop.appendBinData(
-            "body", packet.message.getLen(), BinDataGeneral, packet.message.view2ptr());
     }
 
-    // The seen field represents the time that the operation took place
-    // Trying to re-create the way mongoreplay does this
-    {
-        BSONObjBuilder seen(builder->subobjStart("seen"));
-        seen.append(
-            "sec",
-            static_cast<int64_t>((packet.date.toMillisSinceEpoch() / 1000) + unixToInternal));
-        seen.append("nsec", static_cast<int32_t>(packet.order));
-    }
-
+    builder->append("event", static_cast<int32_t>(packet.eventType));
     builder->append("session", packet.session);
-
-    // Fill out the remaining fields
+    builder->append("offset", durationCount<Microseconds>(packet.offset));
     builder->append("order", static_cast<int64_t>(packet.order));
     builder->append("seenconnectionnum", static_cast<int64_t>(packet.id));
     builder->append("playedconnectionnum", static_cast<int64_t>(0));
@@ -182,6 +177,14 @@ void getBSONObjFromPacket(TrafficReaderPacket& packet, BSONObjBuilder* builder) 
 }
 
 void addOpType(TrafficReaderPacket& packet, BSONObjBuilder* builder) {
+    if (packet.eventType == EventType::kSessionStart) {
+        builder->append("opType", kSessionStartOpType);
+        return;
+    }
+    if (packet.eventType == EventType::kSessionEnd) {
+        builder->append("opType", kSessionEndOpType);
+        return;
+    }
     if (packet.message.getNetworkOp() == dbMsg) {
         Message message;
         message.setData(dbMsg, packet.message.data(), packet.message.dataLen());
@@ -196,27 +199,59 @@ void addOpType(TrafficReaderPacket& packet, BSONObjBuilder* builder) {
 
 }  // namespace
 
+bool operator==(const TrafficReaderPacket& read, const TrafficRecordingPacket& recorded) {
+    std::string_view readData(read.message.data(), read.message.dataLen());
+    MsgData::ConstView recordedView(recorded.message.buf());
+    std::string_view recordedData(recordedView.data(), recordedView.dataLen());
+    return std::tie(read.id, read.session, read.offset, read.order, readData) ==
+        std::tie(recorded.id, recorded.session, recorded.offset, recorded.order, recordedData);
+}
+
 BSONArray trafficRecordingFileToBSONArr(const std::string& inputFile) {
     BSONArrayBuilder builder{};
 
-// Open the connection to the input file
-#ifdef _WIN32
-    auto inputFd = ::open(inputFile.c_str(), O_RDONLY | O_BINARY);
-#else
-    auto inputFd = ::open(inputFile.c_str(), O_RDONLY);
-#endif
-
     uassert(ErrorCodes::FileNotOpen,
-            str::stream() << "Specified file does not exist (" << inputFile << ")",
-            inputFd > 0);
+            str::stream() << "Specified file/directory does not exist (" << inputFile << ")",
+            std::filesystem::exists(inputFile));
 
-    const ScopeGuard guard([&] { ::close(inputFd); });
+    std::vector<std::string> files;
+
+    if (std::filesystem::is_directory(inputFile)) {
+        for (const auto& entry : std::filesystem::directory_iterator{inputFile}) {
+            if (!entry.is_regular_file()) {
+                continue;
+            }
+            if (entry.path().extension() != ".bin") {
+                continue;
+            }
+            files.push_back(entry.path().string());
+        }
+        std::sort(files.begin(), files.end());
+    } else {
+        files.push_back(inputFile);
+    }
 
     auto buf = SharedBuffer::allocate(MaxMessageSizeBytes);
-    while (auto packet = readPacket(buf.get(), inputFd)) {
-        BSONObjBuilder bob(builder.subobjStart());
-        getBSONObjFromPacket(*packet, &bob);
-        addOpType(*packet, &bob);
+
+    for (const auto& file : files) {
+// Open the connection to the input file
+#ifdef _WIN32
+        auto inputFd = ::open(file.c_str(), O_RDONLY | O_BINARY);
+#else
+        auto inputFd = ::open(file.c_str(), O_RDONLY);
+#endif
+
+        uassert(ErrorCodes::FileNotOpen,
+                str::stream() << "Specified file does not exist (" << file << ")",
+                inputFd > 0);
+
+        const ScopeGuard guard([&] { ::close(inputFd); });
+
+        while (auto packet = readPacket(buf.get(), inputFd)) {
+            BSONObjBuilder bob(builder.subobjStart());
+            getBSONObjFromPacket(*packet, &bob);
+            addOpType(*packet, &bob);
+        }
     }
 
     return builder.arr();

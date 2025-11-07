@@ -29,41 +29,37 @@
 
 #include "mongo/db/query/query_stats/query_stats.h"
 
-#include "mongo/db/query/query_stats/optimizer_metrics_stats_entry.h"
-#include <absl/container/node_hash_map.h>
-#include <absl/hash/hash.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <climits>
-#include <list>
-#include <memory>
-
 #include "mongo/base/status_with.h"
-#include "mongo/crypto/hash_block.h"
-#include "mongo/db/catalog/util/partitioned.h"
-#include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/local_catalog/util/partitioned.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/query/lru_key_value.h"
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/query/query_stats/query_stats_failed_to_record_info.h"
 #include "mongo/db/query/query_stats/query_stats_on_parameter_change.h"
+#include "mongo/db/query/query_stats/rate_limiting.h"
 #include "mongo/db/query/util/memory_util.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/buildinfo.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/synchronized_value.h"
+
+#include <climits>
+#include <memory>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/hash/hash.h>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQueryStats
 
@@ -77,15 +73,16 @@ const Decorable<ServiceContext>::Decoration<std::unique_ptr<QueryStatsStoreManag
     QueryStatsStoreManager::get =
         ServiceContext::declareDecoration<std::unique_ptr<QueryStatsStoreManager>>();
 
-const Decorable<ServiceContext>::Decoration<std::unique_ptr<RateLimiting>>
-    QueryStatsStoreManager::getRateLimiter =
-        ServiceContext::declareDecoration<std::unique_ptr<RateLimiting>>();
+const Decorable<ServiceContext>::Decoration<RateLimiter> QueryStatsStoreManager::getRateLimiter =
+    ServiceContext::declareDecoration<RateLimiter>();
 
+// Fail point to mimic the operation fails during 'registerRequest()'.
+MONGO_FAIL_POINT_DEFINE(queryStatsFailToSerializeKey);
 
 namespace {
 
 auto& queryStatsEvictedMetric = *MetricBuilder<Counter64>{"queryStats.numEvicted"};
-auto& queryStatsNumParitionsMetric = *MetricBuilder<Atomic64Metric>{"queryStats.numPartitions"};
+auto& queryStatsNumPartitionsMetric = *MetricBuilder<Atomic64Metric>{"queryStats.numPartitions"};
 auto& queryStatsMaxSizeBytesMetric = *MetricBuilder<Atomic64Metric>{"queryStats.maxSizeBytes"};
 auto& queryStatsRateLimitedRequestsMetric =
     *MetricBuilder<Counter64>{"queryStats.numRateLimitedRequests"};
@@ -137,6 +134,25 @@ void assertConfigurationAllowed() {
             isQueryStatsFeatureEnabled());
 }
 
+/**
+ * Configure the rate limiter. This reads the configured values from the server parameters. To
+ * ensure idempotency when both parameters are set to non-zero values, the sample-based policy takes
+ * precedence over the window-based policy.
+ */
+void configureRateLimiter(ServiceContext* serviceCtx) {
+    auto& limiter = QueryStatsStoreManager::getRateLimiter(serviceCtx);
+
+    const auto configuredRateLimit = internalQueryStatsRateLimit.load();
+    const auto configuredSamplingRate =
+        RateLimiter::roundSampleRateToPerThousand(internalQueryStatsSampleRate.load());
+
+    if (configuredSamplingRate > 0) {
+        limiter.configureSampleBased(configuredSamplingRate, SecureRandom().nextInt32());
+    } else {
+        limiter.configureWindowBased(configuredRateLimit < 0 ? INT_MAX : configuredRateLimit);
+    }
+}
+
 class QueryStatsOnParamChangeUpdaterImpl final : public query_stats_util::OnParamChangeUpdater {
 public:
     void updateCacheSize(ServiceContext* serviceCtx, memory_util::MemorySize memSize) final {
@@ -151,9 +167,9 @@ public:
         // challenging while there is concurrent traffic.
     }
 
-    void updateSamplingRate(ServiceContext* serviceCtx, int samplingRate) override {
+    void updateRateLimiter(ServiceContext* serviceCtx) override {
         assertConfigurationAllowed();
-        QueryStatsStoreManager::getRateLimiter(serviceCtx).get()->setSamplingRate(samplingRate);
+        configureRateLimiter(serviceCtx);
     }
 };
 
@@ -167,7 +183,6 @@ ServiceContext::ConstructorActionRegisterer queryStatsStoreManagerRegisterer{
         // 'internalQueryStatsCacheSize', but we will prevent changing its shape or rate limit at
         // runtime unless the feature flag is enabled (at whatever current FCV when the
         // configuration setParameter command is run).
-
         query_stats_util::queryStatsStoreOnParamChangeUpdater(serviceCtx) =
             std::make_unique<QueryStatsOnParamChangeUpdaterImpl>();
         size_t size = getQueryStatsStoreSize();
@@ -185,13 +200,11 @@ ServiceContext::ConstructorActionRegisterer queryStatsStoreManagerRegisterer{
             numPartitions = numLogicalCores;
         }
         queryStatsMaxSizeBytesMetric.set(size);
-        queryStatsNumParitionsMetric.set(numPartitions);
+        queryStatsNumPartitionsMetric.set(numPartitions);
 
         globalQueryStatsStoreManager =
             std::make_unique<QueryStatsStoreManager>(size, numPartitions);
-        auto configuredSamplingRate = internalQueryStatsRateLimit.load();
-        QueryStatsStoreManager::getRateLimiter(serviceCtx) = std::make_unique<RateLimiting>(
-            configuredSamplingRate < 0 ? INT_MAX : configuredSamplingRate, Seconds{1});
+        configureRateLimiter(serviceCtx);
     }};
 
 /**
@@ -210,10 +223,12 @@ bool isQueryStatsEnabled(const ServiceContext* serviceCtx) {
  * Internal check for whether we should collect metrics. This checks the rate limiting
  * configuration for a global on/off decision and, if enabled, delegates to the rate limiter.
  */
-bool shouldCollect(const ServiceContext* serviceCtx) {
+bool shouldCollect(ServiceContext* serviceCtx) {
+    auto& limiter = QueryStatsStoreManager::getRateLimiter(serviceCtx);
+
     // Cannot collect queryStats if sampling rate is not greater than 0. Note that we do not
     // increment queryStatsRateLimitedRequestsMetric here since queryStats is entirely disabled.
-    auto samplingRate = QueryStatsStoreManager::getRateLimiter(serviceCtx)->getSamplingRate();
+    const auto samplingRate = limiter.getSamplingRate();
     if (samplingRate <= 0) {
         LOGV2_DEBUG(8473001,
                     5,
@@ -221,9 +236,9 @@ bool shouldCollect(const ServiceContext* serviceCtx) {
                     "samplingRate"_attr = samplingRate);
         return false;
     }
+
     // Check if rate limiting allows us to collect queryStats for this request.
-    if (samplingRate < INT_MAX &&
-        !QueryStatsStoreManager::getRateLimiter(serviceCtx)->handleRequestSlidingWindow()) {
+    if (samplingRate < INT_MAX && !limiter.handle()) {
         queryStatsRateLimitedRequestsMetric.increment();
         LOGV2_DEBUG(8473002,
                     5,
@@ -235,6 +250,52 @@ bool shouldCollect(const ServiceContext* serviceCtx) {
     return true;
 }
 
+void updateCursorStatistics(CursorEntry& cursorEntryToUpdate, const QueryStatsSnapshot& snapshot) {
+    cursorEntryToUpdate.firstResponseExecMicros.aggregate(snapshot.firstResponseExecMicros);
+}
+
+void updateQueryExecStatistics(QueryExecEntry& queryExecEntryToUpdate,
+                               const QueryStatsSnapshot& snapshot) {
+    queryExecEntryToUpdate.docsReturned.aggregate(snapshot.docsReturned);
+
+    queryExecEntryToUpdate.keysExamined.aggregate(snapshot.keysExamined);
+    queryExecEntryToUpdate.docsExamined.aggregate(snapshot.docsExamined);
+    queryExecEntryToUpdate.bytesRead.aggregate(snapshot.bytesRead);
+    queryExecEntryToUpdate.readTimeMicros.aggregate(snapshot.readTimeMicros);
+
+    queryExecEntryToUpdate.delinquentAcquisitions.aggregate(snapshot.delinquentAcquisitions);
+    queryExecEntryToUpdate.totalAcquisitionDelinquencyMillis.aggregate(
+        snapshot.totalAcquisitionDelinquencyMillis);
+    queryExecEntryToUpdate.maxAcquisitionDelinquencyMillis.aggregate(
+        snapshot.maxAcquisitionDelinquencyMillis);
+
+    // Store the number of interrupt checks per second as a rate, this can give us a better sense of
+    // how often interrupts are being checked relative to the total execution time across multiple
+    // query runs.
+    auto secondCount = durationCount<Seconds>(Milliseconds{snapshot.workingTimeMillis});
+    auto numInterruptChecksPerSec =
+        secondCount == 0 ? 0 : snapshot.numInterruptChecks / (static_cast<double>(secondCount));
+    queryExecEntryToUpdate.numInterruptChecksPerSec.aggregate(numInterruptChecksPerSec);
+    queryExecEntryToUpdate.overdueInterruptApproxMaxMillis.aggregate(
+        snapshot.overdueInterruptApproxMaxMillis);
+}
+
+void updateQueryPlannerStatistics(QueryPlannerEntry& queryPlannerEntryToUpdate,
+                                  const QueryStatsSnapshot& snapshot) {
+    queryPlannerEntryToUpdate.hasSortStage.aggregate(snapshot.hasSortStage);
+    queryPlannerEntryToUpdate.usedDisk.aggregate(snapshot.usedDisk);
+    queryPlannerEntryToUpdate.fromMultiPlanner.aggregate(snapshot.fromMultiPlanner);
+    queryPlannerEntryToUpdate.fromPlanCache.aggregate(snapshot.fromPlanCache);
+}
+
+void updateWriteStatistics(WritesEntry& writeEntryToUpdate, const QueryStatsSnapshot& snapshot) {
+    writeEntryToUpdate.nMatched.aggregate(snapshot.nMatched);
+    writeEntryToUpdate.nUpserted.aggregate(snapshot.nUpserted);
+    writeEntryToUpdate.nModified.aggregate(snapshot.nModified);
+    writeEntryToUpdate.nDeleted.aggregate(snapshot.nDeleted);
+    writeEntryToUpdate.nInserted.aggregate(snapshot.nInserted);
+}
+
 void updateStatistics(const QueryStatsStore::Partition& proofOfLock,
                       QueryStatsEntry& toUpdate,
                       const QueryStatsSnapshot& snapshot,
@@ -242,19 +303,14 @@ void updateStatistics(const QueryStatsStore::Partition& proofOfLock,
     toUpdate.latestSeenTimestamp = Date_t::now();
     toUpdate.lastExecutionMicros = snapshot.queryExecMicros;
     toUpdate.execCount++;
-    toUpdate.totalExecMicros.aggregate(snapshot.queryExecMicros);
-    toUpdate.firstResponseExecMicros.aggregate(snapshot.firstResponseExecMicros);
-    toUpdate.docsReturned.aggregate(snapshot.docsReturned);
-
-    toUpdate.keysExamined.aggregate(snapshot.keysExamined);
-    toUpdate.docsExamined.aggregate(snapshot.docsExamined);
-    toUpdate.bytesRead.aggregate(snapshot.bytesRead);
-    toUpdate.readTimeMicros.aggregate(snapshot.readTimeMicros);
     toUpdate.workingTimeMillis.aggregate(snapshot.workingTimeMillis);
-    toUpdate.hasSortStage.aggregate(snapshot.hasSortStage);
-    toUpdate.usedDisk.aggregate(snapshot.usedDisk);
-    toUpdate.fromMultiPlanner.aggregate(snapshot.fromMultiPlanner);
-    toUpdate.fromPlanCache.aggregate(snapshot.fromPlanCache);
+    toUpdate.cpuNanos.aggregate(snapshot.cpuNanos);
+    toUpdate.totalExecMicros.aggregate(snapshot.queryExecMicros);
+
+    updateCursorStatistics(toUpdate.cursorStats, snapshot);
+    updateQueryExecStatistics(toUpdate.queryExecStats, snapshot);
+    updateQueryPlannerStatistics(toUpdate.queryPlannerStats, snapshot);
+    updateWriteStatistics(toUpdate.writesStats, snapshot);
 
     for (auto& supplementalStatsEntry : supplementalStats) {
         toUpdate.addSupplementalStats(std::move(supplementalStatsEntry));
@@ -296,7 +352,7 @@ void insertQueryStatsEntry(
 
 void registerRequest(OperationContext* opCtx,
                      const NamespaceString& collection,
-                     std::function<std::unique_ptr<Key>(void)> makeKey,
+                     const std::function<std::unique_ptr<Key>(void)>& makeKey,
                      bool willNeverExhaust) {
     if (!isQueryStatsEnabled(opCtx->getServiceContext())) {
         LOGV2_DEBUG(8473000,
@@ -350,6 +406,11 @@ void registerRequest(OperationContext* opCtx,
     // original query from queryStats metrics collection and let it execute normally.
     try {
         opDebug.queryStatsInfo.key = makeKey();
+        opDebug.queryStatsInfo.keyHash = absl::HashOf(*opDebug.queryStatsInfo.key);
+        if (MONGO_unlikely(queryStatsFailToSerializeKey.shouldFail())) {
+            uasserted(ErrorCodes::FailPointEnabled,
+                      "queryStatsFailToSerializeKey fail point is enabled");
+        }
     } catch (const DBException& ex) {
         queryStatsStoreWriteErrorsMetric.increment();
 
@@ -368,7 +429,7 @@ void registerRequest(OperationContext* opCtx,
                     "Error encountered when creating the Query Stats store key. Metrics will not "
                     "be collected for this command",
                     "status"_attr = status,
-                    "command"_attr = cmdObj);
+                    "command"_attr = redact(cmdObj));
         if (kDebugBuild || internalQueryStatsErrorsAreCommandFatal.load()) {
             // uassert rather than tassert so that we avoid creating fatal failures on queries that
             // were going to fail anyway, but trigger the error here first. A query that ONLY fails
@@ -384,27 +445,26 @@ void registerRequest(OperationContext* opCtx,
                                  cmdObj, status, getBuildInfoVersionOnly().getVersion()),
                              "Failed to create query stats store key"});
         }
-
-        return;
     }
-    opDebug.queryStatsInfo.keyHash = absl::HashOf(*opDebug.queryStatsInfo.key);
-    // TODO look up this query shape (sub-component of query stats store key) in some new shared
-    // data structure that the query settings component could share. See if the query SHAPE hash has
-    // been computed before. If so, record the query shape hash on the opDebug. If not, compute the
-    // hash and store it there so we can avoid re-doing this for each request.
+}
+
+void registerWriteRequest(OperationContext* opCtx,
+                          const NamespaceString& collection,
+                          const std::function<std::unique_ptr<Key>(void)>& makeKey,
+                          bool willNeverExhaust) {
+    // Check if collecting write commands is enabled.
+    if (internalQueryStatsWriteCmdSampleRate.load() != 0.0) {
+        registerRequest(opCtx, collection, makeKey, willNeverExhaust);
+    }
 }
 
 bool shouldRequestRemoteMetrics(const OpDebug& opDebug) {
-    // metricsRequested should only be set to true when the feature flag is set; we don't need to
-    // re-check the feature flag in that case.
     // If the key is non-null, we expect that query stats should be collected at this level of
     // execution. If the keyHash is non-null, then we expect we should forward remote query stats
     // metrics to a higher level of execution, such as running an aggregation for a view, or there
     // are multiple cursors open in a single operation context, such as in $search.
-    return opDebug.queryStatsInfo.metricsRequested ||
-        (feature_flags::gFeatureFlagQueryStatsDataBearingNodes.isEnabled(
-             serverGlobalParams.featureCompatibility.acquireFCVSnapshot()) &&
-         (opDebug.queryStatsInfo.key != nullptr || opDebug.queryStatsInfo.keyHash != boost::none));
+    return opDebug.queryStatsInfo.metricsRequested || opDebug.queryStatsInfo.key != nullptr ||
+        opDebug.queryStatsInfo.keyHash != boost::none;
 }
 
 QueryStatsStore& getQueryStatsStore(OperationContext* opCtx) {
@@ -427,10 +487,21 @@ QueryStatsSnapshot captureMetrics(const OperationContext* opCtx,
         static_cast<uint64_t>(metrics.bytesRead.value_or(0)),
         metrics.readingTime.value_or(Microseconds(0)).count(),
         metrics.clusterWorkingTime.value_or(Milliseconds(0)).count(),
+        nanosecondsToInt64(metrics.cpuNanos),
+        metrics.delinquentAcquisitions.value_or(0),
+        metrics.totalAcquisitionDelinquency.value_or(Milliseconds(0)).count(),
+        metrics.maxAcquisitionDelinquency.value_or(Milliseconds(0)).count(),
+        metrics.numInterruptChecks.value_or(0),
+        metrics.overdueInterruptApproxMax.value_or(Milliseconds(0)).count(),
         metrics.hasSortStage,
         metrics.usedDisk,
         metrics.fromMultiPlanner,
         metrics.fromPlanCache.value_or(false),
+        static_cast<uint64_t>(metrics.nMatched.value_or(0)),
+        static_cast<uint64_t>(metrics.nUpserted.value_or(0)),
+        static_cast<uint64_t>(metrics.nModified.value_or(0)),
+        static_cast<uint64_t>(metrics.ndeleted.value_or(0)),
+        static_cast<uint64_t>(metrics.ninserted.value_or(0)),
     };
 
     return snapshot;
@@ -442,7 +513,6 @@ void writeQueryStats(OperationContext* opCtx,
                      const QueryStatsSnapshot& snapshot,
                      std::vector<std::unique_ptr<SupplementalStatsEntry>> supplementalMetrics,
                      bool willNeverExhaust) {
-
     // Generally we expect a 'key' to write query stats. However, for a change stream query, we
     // expect it has no 'key' after its first writeQueryStats(), but it must have a
     // 'queryStatsKeyHash' for its entry to be updated.

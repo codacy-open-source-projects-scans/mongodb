@@ -27,14 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/optional.hpp>
-#include <memory>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -48,13 +40,19 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/op_msg_test.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace rpc {
@@ -64,13 +62,12 @@ namespace {
 constexpr auto kPingFieldName = "ping"_sd;
 
 std::string makeSecurityToken(const UserName& userName) {
-    return auth::ValidatedTenancyScopeFactory::create(
-               userName,
-               "secret"_sd,
-               auth::ValidatedTenancyScope::TenantProtocol::kDefault,
-               auth::ValidatedTenancyScopeFactory::TokenForTestingTag{})
-        .getOriginalToken()
-        .toString();
+    return std::string{auth::ValidatedTenancyScopeFactory::create(
+                           userName,
+                           "secret"_sd,
+                           auth::ValidatedTenancyScope::TenantProtocol::kDefault,
+                           auth::ValidatedTenancyScopeFactory::TokenForTestingTag{})
+                           .getOriginalToken()};
 }
 
 class SecurityTokenMetadataTest : public ServiceContextTest {

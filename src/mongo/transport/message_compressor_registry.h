@@ -29,6 +29,14 @@
 
 #pragma once
 
+#include "mongo/base/error_extra_info.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/transport/message_compressor_base.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/string_map.h"
+
 #include <array>
 #include <limits>
 #include <map>
@@ -36,14 +44,7 @@
 #include <string>
 #include <vector>
 
-#include "mongo/base/error_extra_info.h"
-#include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/transport/message_compressor_base.h"
-#include "mongo/util/string_map.h"
-
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 
 namespace optionenvironment {
 class OptionSection;
@@ -123,4 +124,4 @@ private:
 
 Status storeMessageCompressionOptions(const std::string& compressors);
 void appendMessageCompressionStats(BSONObjBuilder* b);
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

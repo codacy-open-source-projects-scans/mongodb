@@ -29,12 +29,14 @@
 
 #pragma once
 
+#include "mongo/bson/bsonobj.h"
+#include "mongo/util/modules.h"
+
 #include <cstdint>
 #include <string>
 
-#include "mongo/bson/bsonobj.h"
-
-namespace mongo::logv2 {
+namespace mongo {
+namespace MONGO_MOD_PUBLIC logv2 {
 
 class LogTag {
 public:
@@ -80,4 +82,5 @@ private:
     uint64_t _value;
 };
 
-}  // namespace mongo::logv2
+}  // namespace MONGO_MOD_PUBLIC logv2
+}  // namespace mongo

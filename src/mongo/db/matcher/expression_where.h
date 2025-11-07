@@ -29,18 +29,17 @@
 
 #pragma once
 
-#include <memory>
-#include <utility>
-
 #include "mongo/base/string_data.h"
 #include "mongo/db/exec/js_function.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_visitor.h"
 #include "mongo/db/matcher/expression_where_base.h"
-#include "mongo/db/matcher/match_details.h"
-#include "mongo/db/matcher/matchable.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <utility>
 
 namespace mongo {
 
@@ -49,8 +48,6 @@ class OperationContext;
 class WhereMatchExpression final : public WhereMatchExpressionBase {
 public:
     WhereMatchExpression(OperationContext* opCtx, WhereParams params, const DatabaseName& dbName);
-
-    bool matches(const MatchableDocument* doc, MatchDetails* details = nullptr) const final;
 
     std::unique_ptr<MatchExpression> clone() const final;
 
@@ -76,11 +73,11 @@ public:
         _jsFunction = std::move(jsFunction);
     }
 
-private:
     void validateState() const {
         tassert(6403600, "JsFunction is unavailable", _jsFunction);
     }
 
+private:
     OperationContext* const _opCtx;
     std::unique_ptr<JsFunction> _jsFunction;
 };

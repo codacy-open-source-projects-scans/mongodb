@@ -29,36 +29,28 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/oid.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/namespace_string_reserved.h"
+#include "mongo/db/tenant_id.h"
+#include "mongo/logv2/log.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
+#include "mongo/util/uuid.h"
+
 #include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
+#include <array>
 #include <cstdint>
-#include <cstring>
-#include <fmt/format.h>
-#include <iosfwd>
-#include <mutex>
 #include <string>
 #include <tuple>
 #include <utility>
 #include <variant>
 
-#include "mongo/base/data_view.h"
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/oid.h"
-#include "mongo/bson/util/builder.h"
-#include "mongo/db/database_name.h"
-#include "mongo/db/repl/optime.h"
-#include "mongo/db/server_options.h"
-#include "mongo/db/tenant_id.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
-#include "mongo/util/uuid.h"
+#include <boost/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -82,14 +74,8 @@ public:
     // Name for the system.js collection
     static constexpr StringData kSystemDotJavascriptCollectionName = "system.js"_sd;
 
-    // Name of the pre-images collection.
-    static constexpr StringData kPreImagesCollectionName = "system.preimages"_sd;
-
     // Prefix for the collection storing collection statistics.
     static constexpr StringData kStatisticsCollectionPrefix = "system.statistics."_sd;
-
-    // Name for the change stream change collection.
-    static constexpr StringData kChangeCollectionName = "system.change_collection"_sd;
 
     // Name for the profile collection
     static constexpr StringData kSystemDotProfileCollectionName = "system.profile"_sd;
@@ -126,16 +112,16 @@ public:
 
     // Maintainers Note: The large set of `NamespaceString`-typed static data
     // members of the `NamespaceString` class representing system-reserved
-    // collections is now generated from "namespace_string_reserved.def.h".
+    // collections is now generated from "namespace_string_reserved.h".
     // Please make edits there to add or change such constants.
 
     // The constants are declared as merely `const` but have `constexpr`
     // definitions below. Because the `NamespaceString` class enclosing their
     // type is incomplete, they can't be _declared_ fully constexpr (a constexpr
     // limitation).
-#define NSS_CONSTANT(id, db, coll) static const NamespaceString id;
-#include "namespace_string_reserved.def.h"  // IWYU pragma: keep
-#undef NSS_CONSTANT
+#define X(id, db, coll) static const NamespaceString id;
+    EXPAND_NSS_CONSTANT_TABLE(X)
+#undef X
 
     /**
      * Constructs an empty NamespaceString.
@@ -219,17 +205,6 @@ public:
     static NamespaceString makeCollectionlessAggregateNSS(const DatabaseName& dbName);
 
     /**
-     * Constructs the change collection namespace for the specified tenant.
-     */
-    static NamespaceString makeChangeCollectionNSS(const boost::optional<TenantId>& tenantId);
-
-    /**
-     * Constructs the pre-images collection namespace for a tenant if the 'tenantId' is specified,
-     * otherwise creates a default pre-images collection namespace.
-     */
-    static NamespaceString makePreImageCollectionNSS(const boost::optional<TenantId>& tenantId);
-
-    /**
      * Constructs a NamespaceString representing a listCollections namespace. The format for this
      * namespace is "<dbName>.$cmd.listCollections".
      */
@@ -270,7 +245,7 @@ public:
     static NamespaceString makeMovePrimaryOplogBufferNSS(const UUID& migrationId);
 
     /**
-     * Constructs the NamesapceString to store the collections to clone by the movePrimary op.
+     * Constructs the NamespaceString to store the collections to clone by the movePrimary op.
      */
     static NamespaceString makeMovePrimaryCollectionsToCloneNSS(const UUID& migrationId);
 
@@ -308,14 +283,6 @@ public:
      */
     static NamespaceString makeCommandNamespace(const DatabaseName& dbName);
 
-    /**
-     * Constructs a dummy NamespaceString, "<tenantId>.config.dummy.namespace", to be used where a
-     * placeholder NamespaceString is needed. It must be acceptable for tenantId to be empty, so we
-     * use "config" as the db.
-     */
-    static NamespaceString makeDummyNamespace(const boost::optional<TenantId>& tenantId);
-
-
     boost::optional<TenantId> tenantId() const {
         if (!hasTenantId()) {
             return boost::none;
@@ -329,14 +296,14 @@ public:
     /**
      * This function must only be used in sharding code (src/mongo/s and src/mongo/db/s).
      */
-    StringData db_forSharding() const {
+    StringData db_forSharding() const MONGO_COMPILER_LIFETIME_BOUND {
         return db_deprecated();
     }
 
     /**
      * This function must only be used in unit tests.
      */
-    StringData db_forTest() const {
+    StringData db_forTest() const MONGO_COMPILER_LIFETIME_BOUND {
         return db_deprecated();
     }
 
@@ -344,7 +311,7 @@ public:
         return *this;
     }
 
-    StringData coll() const {
+    StringData coll() const MONGO_COMPILER_LIFETIME_BOUND {
         const auto offset = kDataOffset + dbSize() + 1 + tenantIdSize();
         if (offset > _data.size()) {
             return {};
@@ -353,12 +320,12 @@ public:
         return StringData{_data.data() + offset, _data.size() - offset};
     }
 
-    ConstDataRange asDataRange() const {
+    ConstDataRange asDataRange() const MONGO_COMPILER_LIFETIME_BOUND {
         auto nss = ns();
         return ConstDataRange(nss.data(), nss.size());
     }
 
-    StringData ns_forTest() const {
+    StringData ns_forTest() const MONGO_COMPILER_LIFETIME_BOUND {
         return ns();
     }
 
@@ -394,7 +361,7 @@ public:
     }
 
     /**
-     * This function should only be used when creating a resouce id for nss.
+     * This function should only be used when creating a resource id for nss.
      */
     std::string toStringForResourceId() const {
         return toStringWithTenantId();
@@ -446,10 +413,10 @@ public:
         return isLocalDB() && coll() == "system.healthlog";
     }
     bool isSystem() const {
-        return coll().startsWith("system.");
+        return coll().starts_with("system.");
     }
     bool isNormalCollection() const {
-        return !isSystem() && !(isLocalDB() && coll().startsWith("replset."));
+        return !isSystem() && !(isLocalDB() && coll().starts_with("replset."));
     }
     bool isAdminDB() const {
         return db_deprecated() == DatabaseName::kAdmin.db(omitTenant);
@@ -496,7 +463,7 @@ public:
     }
 
     bool isOrphanCollection() const {
-        return isLocalDB() && coll().startsWith(kOrphanCollectionPrefix);
+        return isLocalDB() && coll().starts_with(kOrphanCollectionPrefix);
     }
 
     /**
@@ -553,11 +520,6 @@ public:
     bool isChangeStreamPreImagesCollection() const;
 
     /**
-     * Returns whether the specified namespace is config.system.changeCollection.
-     */
-    bool isChangeCollection() const;
-
-    /**
      * Returns whether the specified namespace is config.image_collection.
      */
     bool isConfigImagesCollection() const;
@@ -573,11 +535,6 @@ public:
     bool isFLE2StateCollection() const;
 
     static bool isFLE2StateCollection(StringData coll);
-
-    /**
-     * Returns true if the namespace is an oplog or a change collection, false otherwise.
-     */
-    bool isOplogOrChangeCollection() const;
 
     /**
      * Returns true if the namespace is a system.statistics collection, false otherwise.
@@ -628,7 +585,7 @@ public:
      * Returns true if the namespace string is for a "collectionless" cursor.
      */
     bool isCollectionlessCursorNamespace() const {
-        return coll().startsWith("$cmd."_sd);
+        return coll().starts_with("$cmd."_sd);
     }
 
     /**
@@ -680,7 +637,7 @@ public:
      * @return true if the ns is an oplog one, otherwise false.
      */
     static bool oplog(StringData ns) {
-        return ns.startsWith("local.oplog.");
+        return ns.starts_with("local.oplog.");
     }
 
 
@@ -754,7 +711,8 @@ public:
 
     template <typename H>
     friend H AbslHashValue(H h, const NamespaceString& nss) {
-        return H::combine(std::move(h), std::string_view{nss._data.data(), nss._data.size()});
+        return H::combine(std::move(h),
+                          toStdStringViewForInterop({nss._data.data(), nss._data.size()}));
     }
 
     friend auto logAttrs(const NamespaceString& nss) {
@@ -764,7 +722,7 @@ public:
     /**
      * This function removes the tenant id and returns the namespace part of NamespaceString.
      */
-    friend StringData redactTenant(const NamespaceString& nss) {
+    friend StringData redactTenant(const NamespaceString& nss MONGO_COMPILER_LIFETIME_BOUND) {
         return nss.ns();
     }
 
@@ -805,13 +763,13 @@ private:
      * Please refer to NamespaceStringUtil::serialize method or use ns_forTest to satisfy any unit
      * test needing access to ns().
      */
-    StringData ns() const {
+    StringData ns() const MONGO_COMPILER_LIFETIME_BOUND {
         auto offset = kDataOffset + tenantIdSize();
         return StringData{_data.data() + offset, _data.size() - offset};
     }
 
     std::string toString() const {
-        return ns().toString();
+        return std::string{ns()};
     }
 
     std::string toStringWithTenantId() const {
@@ -819,7 +777,7 @@ private:
             return str::stream() << TenantId{OID::from(_data.data() + kDataOffset)} << "_" << ns();
         }
 
-        return ns().toString();
+        return std::string{ns()};
     }
 
     /**
@@ -828,7 +786,7 @@ private:
      * In case you would need to a StringData object instead we strongly recommend taking a look
      * at the DatabaseNameUtil::serialize method which takes in a DatabaseName object.
      */
-    StringData db_deprecated() const {
+    StringData db_deprecated() const MONGO_COMPILER_LIFETIME_BOUND {
         return dbName().db(omitTenant);
     }
 
@@ -838,7 +796,7 @@ private:
 };
 
 /**
- * This class is intented to be used by commands which can accept either a collection name or
+ * This class is intended to be used by commands which can accept either a collection name or
  * database + collection UUID. It will never be initialized with both.
  */
 class NamespaceStringOrUUID {
@@ -899,7 +857,7 @@ public:
         }
     }
 
-    ConstDataRange asDataRange() const {
+    ConstDataRange asDataRange() const MONGO_COMPILER_LIFETIME_BOUND {
         if (isNamespaceString()) {
             return nss().asDataRange();
         }
@@ -931,13 +889,13 @@ inline StringData nsToDatabaseSubstring(StringData ns) {
  * TODO: make this return a StringData
  */
 inline std::string nsToDatabase(StringData ns) {
-    return nsToDatabaseSubstring(ns).toString();
+    return std::string{nsToDatabaseSubstring(ns)};
 }
 
 /**
  * "database.a.b.c" -> "a.b.c"
  */
-inline StringData nsToCollectionSubstring(StringData ns) {
+inline StringData nsToCollectionSubstring(StringData ns MONGO_COMPILER_LIFETIME_BOUND) {
     size_t i = ns.find('.');
     massert(16886, "nsToCollectionSubstring: no .", i != std::string::npos);
     return ns.substr(i + 1);
@@ -987,7 +945,7 @@ inline bool NamespaceString::validCollectionName(StringData coll) {
     return true;
 }
 
-inline std::string stringifyForAssert(const NamespaceString& nss) {
+inline std::string stringify_forTest(const NamespaceString& nss) {
     return toStringForLogging(nss);
 }
 
@@ -1015,17 +973,17 @@ constexpr auto makeNsData(const char* db, const char* coll) {
     return result;
 }
 
-#define NSS_CONSTANT(id, dbname, coll) \
-    constexpr inline auto id##_data =  \
-        makeNsData<dbname.size(), coll.size()>(dbname.db(OmitTenant{}).rawData(), coll.rawData());
-#include "namespace_string_reserved.def.h"
-#undef NSS_CONSTANT
+#define X(id, dbname, coll)           \
+    constexpr inline auto id##_data = \
+        makeNsData<dbname.size(), coll.size()>(dbname.db(OmitTenant{}).data(), coll.data());
+EXPAND_NSS_CONSTANT_TABLE(X)
+#undef X
 }  // namespace namespace_string_data
 
-#define NSS_CONSTANT(id, db, coll)                                                                \
+#define X(id, db, coll)                                                                           \
     constexpr inline NamespaceString NamespaceString::id(namespace_string_data::id##_data.data(), \
                                                          namespace_string_data::id##_data.size());
-#include "namespace_string_reserved.def.h"
-#undef NSS_CONSTANT
+EXPAND_NSS_CONSTANT_TABLE(X)
+#undef X
 
 }  // namespace mongo

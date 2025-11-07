@@ -29,12 +29,13 @@
 #pragma once
 
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/throttle_cursor.h"
-#include "mongo/db/repl/dbcheck.h"
-#include "mongo/db/repl/dbcheck_gen.h"
-#include "mongo/db/repl/dbcheck_idl.h"
+#include "mongo/db/local_catalog/throttle_cursor.h"
+#include "mongo/db/repl/dbcheck/dbcheck.h"
+#include "mongo/db/repl/dbcheck/dbcheck_gen.h"
+#include "mongo/db/repl/dbcheck/dbcheck_idl.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/db/write_concern_options.h"
+#include "mongo/util/background.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/uuid.h"
 
@@ -182,7 +183,7 @@ private:
 
 class DbChecker {
 public:
-    DbChecker(DbCheckCollectionInfo info) : _info(info){};
+    DbChecker(DbCheckCollectionInfo info) : _info(info) {};
 
     /**
      * Runs dbCheck on the collection specified in the DbCheckCollectionInfo struct.
@@ -190,14 +191,6 @@ public:
     void doCollection(OperationContext* opCtx) noexcept;
 
 private:
-    /**
-     * Helper that takes in a keystring WITH a RecordId appended at the end, and returns its
-     * owned buffer without the RecordId appended at the end.
-     */
-    StringData _stripRecordIdFromKeyString(const key_string::Value& keyString,
-                                           const key_string::Version& version,
-                                           const Collection* collection);
-
     /**
      * Runs the secondary extra index keys check
      */
@@ -273,7 +266,7 @@ private:
     bool _shouldEndCatalogSnapshotOrBatch(
         OperationContext* opCtx,
         const CollectionPtr& collection,
-        StringData indexName,
+        const BSONObj& indexKeyPattern,
         const key_string::Value& currKeyStringWithoutRecordId,
         const BSONObj& currKeyStringBson,
         int64_t numKeysInSnapshot,
@@ -292,6 +285,7 @@ private:
                         const CollectionPtr& collection,
                         const KeyStringEntry& keyStringEntryWithRecordId,
                         const BSONObj& keyStringBson,
+                        const IndexDescriptor* indexDescriptor,
                         const SortedDataIndexAccessMethod* iam,
                         const IndexCatalogEntry* indexCatalogEntry,
                         const BSONObj& indexSpec);

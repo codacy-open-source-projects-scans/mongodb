@@ -29,21 +29,21 @@
 
 #include "mongo/db/timeseries/bucket_catalog/bucket_state_registry.h"
 
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <algorithm>
-#include <boost/optional.hpp>
-#include <cstdint>
-#include <fmt/format.h>
-#include <utility>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/with_lock.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo::timeseries::bucket_catalog {
 
@@ -139,7 +139,7 @@ void decrementBucketCountForEra(BucketStateRegistry& registry, BucketStateRegist
 }
 
 BucketStateRegistry::Era getBucketCountForEra(BucketStateRegistry& registry,
-                                              BucketStateRegistry::Era value) {
+                                              const BucketStateRegistry::Era value) {
     stdx::lock_guard lk{registry.mutex};
     auto it = registry.bucketsPerEra.find(value);
     if (it == registry.bucketsPerEra.end()) {
@@ -225,8 +225,8 @@ bool conflictsWithInsertions(std::variant<BucketState, DirectWriteCounter>& stat
 
 Status initializeBucketState(BucketStateRegistry& registry,
                              const BucketId& bucketId,
-                             Bucket* bucket,
-                             boost::optional<BucketStateRegistry::Era> targetEra) {
+                             const boost::optional<BucketStateRegistry::Era>& targetEra,
+                             Bucket* bucket) {
     stdx::lock_guard catalogLock{registry.mutex};
 
     // Returns a WriteConflict error if the target Era is older than the registry Era or if the
@@ -315,7 +315,7 @@ StateChangeSuccessful unprepareBucketState(BucketStateRegistry& registry,
 std::variant<BucketState, DirectWriteCounter> addDirectWrite(
     BucketStateRegistry& registry,
     const BucketId& bucketId,
-    ContinueTrackingBucket continueTrackingBucket) {
+    const ContinueTrackingBucket continueTrackingBucket) {
     stdx::lock_guard catalogLock{registry.mutex};
 
     auto it = registry.bucketStates.find(bucketId);

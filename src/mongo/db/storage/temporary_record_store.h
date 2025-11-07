@@ -30,6 +30,7 @@
 #pragma once
 
 #include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/spill_table.h"
 
 namespace mongo {
 
@@ -39,7 +40,7 @@ namespace mongo {
  */
 class TemporaryRecordStore {
 public:
-    TemporaryRecordStore(std::unique_ptr<RecordStore> rs) : _rs(std::move(rs)){};
+    explicit TemporaryRecordStore(std::unique_ptr<RecordStore> rs) : _rs(std::move(rs)) {}
     virtual ~TemporaryRecordStore() {}
 
     // Not copyable.

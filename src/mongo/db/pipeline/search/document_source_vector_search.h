@@ -29,11 +29,51 @@
 
 #pragma once
 
+#include "mongo/bson/bsonobj.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_limit.h"
-#include "mongo/executor/task_executor_cursor.h"
+#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/db/query/search/internal_search_mongot_remote_spec_gen.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
+
+/**
+ * Interface used to retrieve the execution stats of explain().
+ *
+ * Used to decouple the execution code from the optimization one (so the optimization code does not
+ * need a TaskExecutorCursor for example).
+ * TODO SERVER-107930: It can go away once VectorSearchStage::getExplainOutput() is implemented.
+ */
+class DSVectorSearchExecStatsWrapper {
+public:
+    class StatsProvider {
+    public:
+        virtual boost::optional<BSONObj> getStats() = 0;
+        virtual ~StatsProvider() = default;
+    };
+
+    /**
+     * Retrieves the execution statistics.
+     */
+    boost::optional<BSONObj> getExecStats() {
+        if (!_provider) {
+            return boost::none;
+        }
+        return _provider->getStats();
+    }
+
+    void setStatsProvider(std::unique_ptr<StatsProvider> provider) {
+        _provider = std::move(provider);
+    }
+
+private:
+    std::unique_ptr<StatsProvider> _provider{nullptr};
+};
 
 /**
  * A class to retrieve vector search results from a mongot process.
@@ -46,29 +86,47 @@ public:
     static constexpr StringData kFilterFieldName = "filter"_sd;
     static constexpr StringData kIndexFieldName = "index"_sd;
     static constexpr StringData kNumCandidatesFieldName = "numCandidates"_sd;
+    static constexpr StringData kViewFieldName = "view"_sd;
+    static constexpr StringData kReturnStoredSourceFieldName = "returnStoredSource"_sd;
 
     DocumentSourceVectorSearch(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                std::shared_ptr<executor::TaskExecutor> taskExecutor,
                                BSONObj originalSpec);
 
-    static std::list<boost::intrusive_ptr<DocumentSource>> createFromBson(
+    static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
     std::list<boost::intrusive_ptr<DocumentSource>> desugar();
 
     const char* getSourceName() const override {
-        return kStageName.rawData();
+        return kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kVectorSearch;
+    bool isStoredSource() const {
+        // If the user specifies storedSource: true and the knob is off, we will not error and
+        // simply return false.
+        bool isVectorSearchStoredSourceEnabled =
+            ServerParameterSet::getClusterParameterSet()
+                ->get<ClusterParameterWithStorage<InternalVectorSearchStoredSource>>(
+                    "internalVectorSearchStoredSource")
+                ->getValue(getExpCtx()->getNamespaceString().tenantId())
+                .getEnabled();
+        return isVectorSearchStoredSourceEnabled
+            ? _originalSpec.getBoolField(kReturnStoredSourceFieldName)
+            : false;
+    }
+
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() override {
         DistributedPlanLogic logic;
         logic.shardsStage = this;
         if (_limit) {
-            logic.mergingStages = {DocumentSourceLimit::create(pExpCtx, *_limit)};
+            logic.mergingStages = {DocumentSourceLimit::create(getExpCtx(), *_limit)};
         }
         logic.mergeSortPattern = kSortSpec;
         return logic;
@@ -76,14 +134,25 @@ public:
 
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
 
+    DepsTracker::State getDependencies(DepsTracker* deps) const final {
+        // This stage doesn't currently support tracking field dependencies since mongot is
+        // responsible for determining what fields to return. We do need to track metadata
+        // dependencies though, so downstream stages know they are allowed to access
+        // "vectorSearchScore" metadata.
+        // TODO SERVER-101100 Implement logic for dependency analysis.
+
+        deps->setMetadataAvailable(DocumentMetadataFields::kVectorSearchScore);
+        return DepsTracker::State::NOT_SUPPORTED;
+    }
+
     boost::intrusive_ptr<DocumentSource> clone(
         const boost::intrusive_ptr<ExpressionContext>& newExpCtx) const override {
-        auto expCtx = newExpCtx ? newExpCtx : pExpCtx;
+        auto expCtx = newExpCtx ? newExpCtx : getExpCtx();
         return make_intrusive<DocumentSourceVectorSearch>(
             expCtx, _taskExecutor, _originalSpec.copy());
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         StageConstraints constraints(StreamType::kStreaming,
                                      PositionRequirement::kFirst,
                                      HostTypeRequirement::kAnyShard,
@@ -91,32 +160,23 @@ public:
                                      FacetRequirement::kNotAllowed,
                                      TransactionRequirement::kNotAllowed,
                                      LookupRequirement::kNotAllowed,
-                                     UnionRequirement::kNotAllowed,
+                                     UnionRequirement::kAllowed,
                                      ChangeStreamRequirement::kDenylist);
-        // TODO: SERVER-85426 The constraint should now always be UnionRequirement::kAllowed.
-        // TODO: BACKPORT-22945 (8.0) Ensure that using this feature inside a view definition is not
-        // permitted.
-        if (enableUnionWithVectorSearch.load()) {
-            constraints.unionRequirement = UnionRequirement::kAllowed;
-        }
-        constraints.requiresInputDocSource = false;
-        constraints.noFieldModifications = true;
+        constraints.setConstraintsForNoInputSources();
+        // All search stages are unsupported on timeseries collections.
+        constraints.canRunOnTimeseries = false;
         return constraints;
-    };
+    }
 
 protected:
     Value serialize(const SerializationOptions& opts) const override;
 
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) override;
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) override;
 
 private:
-    // Get the next record from mongot. This will establish the mongot cursor on the first call.
-    GetNextResult doGetNext() final;
-
-    boost::optional<BSONObj> getNext();
-
-    DocumentSource::GetNextResult getNextAfterSetup();
+    friend boost::intrusive_ptr<exec::agg::Stage> documentSourceVectorSearchToStageFn(
+        const boost::intrusive_ptr<DocumentSource>&);
 
     // Initialize metrics related to the $vectorSearch stage on the OpDebug object.
     void initializeOpDebugVectorSearchMetrics();
@@ -135,19 +195,17 @@ private:
      * optimization was successful. If optimization was successful, the container will be modified
      * appropriately.
      */
-    std::pair<Pipeline::SourceContainer::iterator, bool> _attemptSortAfterVectorSearchOptimization(
-        Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container);
+    std::pair<DocumentSourceContainer::iterator, bool> _attemptSortAfterVectorSearchOptimization(
+        DocumentSourceContainer::iterator itr, DocumentSourceContainer* container);
 
     std::unique_ptr<MatchExpression> _filterExpr;
 
     std::shared_ptr<executor::TaskExecutor> _taskExecutor;
 
-    std::unique_ptr<executor::TaskExecutorCursor> _cursor;
-
-    // Store the cursorId. We need to store it on the document source because the id on the
-    // TaskExecutorCursor will be set to zero after the final getMore after the cursor is
-    // exhausted.
-    boost::optional<CursorId> _cursorId{boost::none};
+    // Set when the execution stage is created.
+    // TODO SERVER-107930: Remove it when SourceVectorSearch::getExplainOutput() is
+    // implemented.
+    std::weak_ptr<DSVectorSearchExecStatsWrapper> _execStatsWrapper;
 
     // Limit value for the pipeline as a whole. This is not the limit that we send to mongot,
     // rather, it is used when adding the $limit stage to the merging pipeline in a sharded cluster.

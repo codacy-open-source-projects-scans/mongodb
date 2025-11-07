@@ -30,19 +30,11 @@
 
 #include "mongo/db/query/plan_enumerator/plan_enumerator.h"
 
-#include <absl/meta/type_traits.h>
-// IWYU pragma: no_include "boost/container/detail/flat_tree.hpp"
-#include <absl/container/node_hash_map.h>
 #include <boost/container/flat_set.hpp>
 #include <boost/container/vector.hpp>
-#include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-// IWYU pragma: no_include "ext/alloc_traits.h"
-#include <algorithm>
-#include <ostream>
-#include <set>
 
+// IWYU pragma: no_include "ext/alloc_traits.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -55,13 +47,13 @@
 #include "mongo/db/query/plan_enumerator/memo_prune.h"
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/stdx/type_traits.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
+
+#include <algorithm>
+#include <set>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -362,7 +354,7 @@ unique_ptr<MatchExpression> PlanEnumerator::getNext() {
     tagForSort(tree.get());
 
     _root->resetTag();
-    LOGV2_DEBUG(20943, 5, "Enumerator: memo just before moving", "memo"_attr = dumpMemo());
+    LOGV2_DEBUG(20943, 5, "Enumerator: memo just before moving", "memo"_attr = redact(dumpMemo()));
     _done = nextMemo(memoIDForNode(_root));
     return tree;
 }
@@ -444,7 +436,7 @@ bool PlanEnumerator::prepMemo(MatchExpression* node, const PrepMemoContext& cont
             assign->assignment = std::move(orAssignment);
         }
         return true;
-    } else if (Indexability::arrayUsesIndexOnChildren(node)) {
+    } else if (Indexability::isBoundsGeneratingElemMatchObject(node)) {
         // Add each of our children as a subnode.  We enumerate through each subnode one at a
         // time until it's exhausted then we move on.
         ArrayAssignment aa;
@@ -1293,7 +1285,7 @@ void PlanEnumerator::getIndexedPreds(MatchExpression* node,
             // innermost parent $elemMatch, as well as the
             // inner path prefix.
             rt->elemMatchExpr = context.elemMatchExpr;
-            rt->pathPrefix = getPathPrefix(node->path().toString());
+            rt->pathPrefix = getPathPrefix(std::string{node->path()});
         } else {
             // We're not an $elemMatch context, so we should store
             // the prefix of the full path.

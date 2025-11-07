@@ -28,41 +28,37 @@
  */
 
 
-#include <cstdlib>
-#include <fmt/format.h>
-#include <fmt/printf.h>  // IWYU pragma: keep
-// IWYU pragma: no_include "cxxabi.h"
-#include <functional>
-#include <sstream>
-#include <string>
-#include <string_view>
-#include <vector>
-
-// IWYU pragma: no_include "libunwind-x86_64.h"
-
-#define UNW_LOCAL_ONLY
-#include <libunwind.h>  // IWYU pragma: keep
-
 #include "mongo/base/string_data.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_truncation.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/stacktrace_libunwind_test_functions.h"
 #include "mongo/util/stacktrace_test_helpers.h"
 
+#include <cstdlib>
+#include <functional>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <cxxabi.h>
+#include <libunwind.h>  // IWYU pragma: keep
+
+#include <fmt/format.h>
+#include <fmt/printf.h>  // IWYU pragma: keep
+
+// IWYU pragma: no_include "libunwind-x86_64.h"
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
+#if defined(__s390__) || defined(__s390x__) || defined(__zarch__)
+#define MONGO_S390 1
+#endif
 
 namespace mongo {
 
 // Must be a named namespace so the functions we want to unwind through have external linkage.
 // Without that, the compiler optimizes them away.
 namespace unwind_test_detail {
-
-using namespace fmt::literals;
 
 std::string trace() {
     std::string out;
@@ -79,12 +75,13 @@ std::string trace() {
         if (pc == 0) {
             break;
         }
-        out += "0x{:x}:"_format(pc);
+        out += fmt::format("0x{:x}:", pc);
         char sym[32 << 10];
         char* name = sym;
         int err;
         if ((err = unw_get_proc_name(&cursor, sym, sizeof(sym), &offset)) != 0) {
-            out += " -- error: unable to obtain symbol name for this frame: {:d}\n"_format(err);
+            out +=
+                fmt::format(" -- error: unable to obtain symbol name for this frame: {:d}\n", err);
             continue;
         }
         name = sym;
@@ -93,7 +90,7 @@ std::string trace() {
         if ((demangled_name = abi::__cxa_demangle(sym, nullptr, nullptr, &status))) {
             name = demangled_name;
         }
-        out += " ({:s}+0x{:x})\n"_format(name, offset);
+        out += fmt::format(" ({:s}+0x{:x})\n", name, offset);
         if (name != sym) {
             free(name);  // allocated by abi::__cxa_demangle
         }
@@ -101,17 +98,23 @@ std::string trace() {
     return out;
 }
 
-void assertAndRemovePrefix(std::string_view& v, std::string_view prefix) {
+void assertAndRemovePrefix(StringData& v, StringData prefix) {
     auto pos = v.find(prefix);
-    ASSERT(pos != v.npos) << "expected to find '{}' in '{}'"_format(prefix, v);
+    ASSERT(pos != v.npos) << fmt::format("expected to find '{}' in '{}'", prefix, v);
     v.remove_prefix(pos + prefix.size());
 }
 
-void assertAndRemoveSuffix(std::string_view& v, std::string_view suffix) {
+void assertAndRemoveSuffix(StringData& v, StringData suffix) {
     auto pos = v.rfind(suffix);
-    ASSERT(pos != v.npos) << "expected to find '{}' in '{}'"_format(suffix, v);
+    ASSERT(pos != v.npos) << fmt::format("expected to find '{}' in '{}'", suffix, v);
     v.remove_suffix(v.size() - pos);
 }
+
+// On our current version of libunwind, unw_get_proc_name() is failing
+// consistently on s390. This isn't a problem for our production stack
+// traces, as falling back to dladdr() works. It does, however, break
+// these libunwind-specific tests.
+#ifndef MONGO_S390
 
 TEST(Unwind, Demangled) {
     std::string stacktrace;
@@ -142,7 +145,7 @@ TEST(Unwind, Linkage) {
     normalFunction(os);
     std::string stacktrace = os.str();
 
-    std::string_view view = stacktrace;
+    StringData view = stacktrace;
 
     LOGV2_OPTIONS(31429, {logv2::LogTruncation::Disabled}, "Trace", "trace"_attr = view);
 
@@ -150,7 +153,7 @@ TEST(Unwind, Linkage) {
     assertAndRemovePrefix(view, R"(BACKTRACE: {"backtrace":)");
     assertAndRemovePrefix(view, "}\n");
 
-    std::string_view remainder = stacktrace;
+    StringData remainder = stacktrace;
 
     // Check that these function names appear in the trace, in order. The tracing code which
     // preceded our libunwind integration could *not* symbolize hiddenFunction,
@@ -161,7 +164,7 @@ TEST(Unwind, Linkage) {
     // names otherwise, so we can't do an `unw_backtrace` and then lookup the names in the usual
     // way (i.e. `mergeDlInfo` calling `dladdr`).
     std::string frames[] = {
-        "printStackTrace",
+        "printStructuredStackTrace",
         "staticFunction",
         "anonymousNamespaceFunction",
         "hiddenFunction",
@@ -173,12 +176,14 @@ TEST(Unwind, Linkage) {
         if (pos == remainder.npos) {
             LOGV2_OPTIONS(
                 31378, {logv2::LogTruncation::Disabled}, "BACKTRACE", "trace"_attr = view);
-            FAIL("name '{}' is missing or out of order in sample backtrace"_format(name));
+            FAIL(fmt::format("name '{}' is missing or out of order in sample backtrace", name));
         }
         LOGV2(31379, "Removing prefix", "prefix"_attr = remainder.substr(0, pos));
         remainder.remove_prefix(pos);
     }
 }
+
+#endif  // MONGO_S390
 
 }  // namespace unwind_test_detail
 }  // namespace mongo

@@ -28,18 +28,7 @@
  */
 
 
-#include <algorithm>
-#include <boost/optional.hpp>
-#include <iterator>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-
-#include <absl/container/node_hash_set.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/commands/authentication_commands.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -60,7 +49,6 @@
 #include "mongo/db/auth/x509_protocol_gen.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/authentication_commands.h"
 #include "mongo/db/commands/authentication_commands_gen.h"
 #include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/database_name.h"
@@ -70,8 +58,6 @@
 #include "mongo/db/server_options.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/transport/session.h"
@@ -80,6 +66,19 @@
 #include "mongo/util/decorable.h"
 #include "mongo/util/sequence_util.h"
 #include "mongo/util/time_support.h"
+
+#include <algorithm>
+#include <iterator>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <absl/container/node_hash_set.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
@@ -107,6 +106,10 @@ public:
     // type.
     bool shouldSkipDirectConnectionChecks() const final {
         return true;
+    }
+
+    bool requiresAuthzChecks() const override {
+        return false;
     }
 
     class Invocation final : public InvocationBase {
@@ -164,12 +167,13 @@ std::unique_ptr<UserRequest> getX509UserRequest(OperationContext* opCtx, const U
         return std::make_unique<UserRequestGeneral>(username, boost::none);
     }
 
-    auto& sslPeerInfo = SSLPeerInfo::forSession(session);
-    auto&& peerRoles = sslPeerInfo.roles();
-    if (peerRoles.empty() || (sslPeerInfo.subjectName().toString() != username.getUser())) {
+    auto sslPeerInfo = SSLPeerInfo::forSession(session);
+    if (!sslPeerInfo || sslPeerInfo->roles().empty() ||
+        (sslPeerInfo->subjectName().toString() != username.getUser())) {
         return std::make_unique<UserRequestGeneral>(username, boost::none);
     }
 
+    auto peerRoles = sslPeerInfo->roles();
     auto roles = std::set<RoleName>();
     std::copy(peerRoles.begin(), peerRoles.end(), std::inserter(roles, roles.begin()));
 
@@ -194,32 +198,34 @@ constexpr auto kX509AuthenticationDisabledMessage = "x.509 authentication is dis
 void _authenticateX509(OperationContext* opCtx, AuthenticationSession* session) {
     auto client = opCtx->getClient();
 
-    auto& sslPeerInfo = SSLPeerInfo::forSession(client->session());
-    auto clientName = sslPeerInfo.subjectName();
+    auto sslPeerInfo = SSLPeerInfo::forSession(client->session());
+    uassert(ErrorCodes::AuthenticationFailed, "No SSLPeerInfo available", sslPeerInfo);
+    auto clientName = sslPeerInfo->subjectName();
     uassert(ErrorCodes::AuthenticationFailed,
             "No verified subject name available from client",
             !clientName.empty());
 
     UserName userName = ([&] {
         if (session->getUserName().empty()) {
-            auto user = UserName(clientName.toString(), session->getDatabase().toString());
+            auto user = UserName(clientName.toString(), std::string{session->getDatabase()});
             session->updateUserName(user, true /* isMechX509 */);
             return user;
         } else {
             uassert(ErrorCodes::AuthenticationFailed,
                     "There is no x.509 client certificate matching the user.",
                     session->getUserName() == clientName.toString());
-            return UserName(session->getUserName().toString(), session->getDatabase().toString());
+            return UserName(std::string{session->getUserName()},
+                            std::string{session->getDatabase()});
         }
     })();
 
     uassert(ErrorCodes::ProtocolError,
             "SSL support is required for the MONGODB-X509 mechanism.",
-            opCtx->getClient()->session()->getSSLManager());
+            opCtx->getClient()->session()->getSSLConfiguration());
 
     AuthorizationSession* authorizationSession = AuthorizationSession::get(client);
 
-    auto sslConfiguration = opCtx->getClient()->session()->getSSLManager()->getSSLConfiguration();
+    auto sslConfiguration = opCtx->getClient()->session()->getSSLConfiguration();
 
     uassert(ErrorCodes::ProtocolError,
             "X.509 authentication must always use the $external database.",
@@ -238,7 +244,7 @@ void _authenticateX509(OperationContext* opCtx, AuthenticationSession* session) 
             authorizationSession->addAndAuthorizeUser(opCtx, std::move(request), boost::none));
     };
 
-    if (sslConfiguration.isClusterMember(clientName, sslPeerInfo.getClusterMembership())) {
+    if (sslConfiguration->isClusterMember(clientName, sslPeerInfo->getClusterMembership())) {
         // Handle internal cluster member auth, only applies to server-server connections
         if (!clusterAuthMode.allowsX509()) {
             uassert(ErrorCodes::AuthenticationFailed,
@@ -256,7 +262,7 @@ void _authenticateX509(OperationContext* opCtx, AuthenticationSession* session) 
                     "with cluster membership");
             }
 
-            if (gEnforceUserClusterSeparation && sslConfiguration.isClusterExtensionSet()) {
+            if (gEnforceUserClusterSeparation && sslConfiguration->isClusterExtensionSet()) {
                 auto* am = AuthorizationManager::get(opCtx->getService());
                 BSONObj ignored;
 
@@ -302,12 +308,10 @@ auth::SaslPayload generateSaslPayload(const boost::optional<StringData>& user,
 
 std::string getNameFromPeerInfo(Client* client) {
 #ifdef MONGO_CONFIG_SSL
-    auto& sslPeerInfo = SSLPeerInfo::forSession(client->session());
-    auto& clientName = sslPeerInfo.subjectName();
-
-    // If clientName is empty, that means that there is no certificate for
+    // If the client's subjectName is empty, that means that there is no certificate for
     // the user and they won't be able to use MONGODB-X509 anyways.
-    return clientName.toString();
+    auto sslPeerInfo = SSLPeerInfo::forSession(client->session());
+    return sslPeerInfo ? sslPeerInfo->subjectName().toString() : std::string();
 #else
     uasserted(ErrorCodes::BadValue, "MONGODB-X509 is unsupported on no-ssl builds");
 #endif
@@ -334,10 +338,9 @@ AuthenticateReply authCommand(OperationContext* opCtx,
     auto mechanism = cmd.getMechanism();
 
     // TODO SERVER-78809: remove
-    if (!gFeatureFlagRearchitectUserAcquisition.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+    if (!gFeatureFlagRearchitectUserAcquisition.isEnabled()) {
 
-        auto userStr = user.value_or("").toString();
+        std::string userStr{user.value_or("")};
 
         if (!serverGlobalParams.quiet.load()) {
             LOGV2_DEBUG(5315501,
@@ -419,6 +422,9 @@ public:
         return AllowedOnSecondary::kAlways;
     }
 
+    bool requiresAuthzChecks() const override {
+        return false;
+    }
     class Invocation final : public InvocationBaseGen {
     public:
         using InvocationBaseGen::InvocationBaseGen;
@@ -485,7 +491,7 @@ void doSpeculativeAuthenticate(OperationContext* opCtx,
     }
 
     auto authCmdObj =
-        AuthenticateCommand::parse(IDLParserContext("speculative X509 Authenticate"), cmd.obj());
+        AuthenticateCommand::parse(cmd.obj(), IDLParserContext("speculative X509 Authenticate"));
 
     AuthenticationSession::doStep(
         opCtx, AuthenticationSession::StepType::kSpeculativeAuthenticate, [&](auto session) {

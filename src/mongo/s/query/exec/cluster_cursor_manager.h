@@ -29,16 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <mutex>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/db/auth/user_name.h"
@@ -62,18 +52,44 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/concurrency/with_lock.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 
-namespace mongo {
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUBLIC mongo {
 
 class ClockSource;
 class OperationContext;
 template <typename T>
 class StatusWith;
+
+// 'CursorsAuthzCheckFnInputType' represents the argument of a the 'CursorsAuthzCheckFn' function.
+// The function may be passed into a ClusterCursorManager method which checks whether the
+// current client is authorized to perform the operation in question by checking the user that
+// issues the command against the authorised users.
+using AuthzCheckFnInputType = const boost::optional<UserName>&;
+using AuthzCheckFn = std::function<Status(AuthzCheckFnInputType)>;
+
+// 'ReleaseMemoryAuthzCheckFnInputType' represents the argument of a the 'ReleaseMemoryAuthzCheckFn'
+// function. The function may be passed into a ClusterCursorManager method which checks whether
+// the current client is authorized to perform the operation in question by checking whether the
+// user has privileges over a namespace.
+using ReleaseMemoryAuthzCheckFnInputType = const NamespaceString&;
+using ReleaseMemoryAuthzCheckFn = std::function<Status(ReleaseMemoryAuthzCheckFnInputType)>;
 
 /**
  * ClusterCursorManager is a container for ClusterClientCursor objects.  It manages the lifetime of
@@ -135,11 +151,6 @@ public:
         size_t pinned;
     };
 
-    // Represents a function that may be passed into a ClusterCursorManager method which checks
-    // whether the current client is authorized to perform the operation in question. The function
-    // will be passed the list of users authorized to use the cursor.
-    using AuthzCheckFn = std::function<Status(const boost::optional<UserName>&)>;
-
     /**
      * PinnedCursor is a moveable, non-copyable class representing ownership of a cursor that has
      * been leased from a ClusterCursorManager.
@@ -185,7 +196,16 @@ public:
          * be owned.
          */
         ClusterClientCursor* operator->() const {
-            invariant(_cursor);
+            tassert(11052333, "Expected PinnedCursor to own a cursor", _cursor);
+            return _cursor.get();
+        }
+
+        /**
+         * Returns a pointer to the ClusterClientCursor that this PinnedCursor owns. A cursor must
+         * be owned.
+         */
+        ClusterClientCursor* get() const {
+            tassert(11052334, "Expected PinnedCursor to own a cursor", _cursor);
             return _cursor.get();
         }
 
@@ -256,11 +276,12 @@ public:
               _cursorLifetime(cursorLifetime),
               _lastActive(lastActive),
               _lsid(_cursor->getLsid()),
+              _txnNumber(_cursor->getTxnNumber()),
               _opKey(std::move(opKey)),
               _nss(std::move(nss)),
               _originatingClient(std::move(clientUUID)),
               _authenticatedUser(std::move(authenticatedUser)) {
-            invariant(_cursor);
+            tassert(11052335, "Expected CursorEntry to own a cursor", _cursor);
         }
 
         CursorEntry(const CursorEntry&) = delete;
@@ -296,6 +317,9 @@ public:
         boost::optional<LogicalSessionId> getLsid() const {
             return _lsid;
         }
+        boost::optional<TxnNumber> getTxnNumber() const {
+            return _txnNumber;
+        }
 
         boost::optional<OperationKey> getOperationKey() const {
             return _opKey;
@@ -313,11 +337,13 @@ public:
          * ClusterClientCursorGuard; callers that want to assume ownership over the cursor directly
          * must unpack the cursor from the returned guard.
          */
-        ClusterClientCursorGuard releaseCursor(OperationContext* opCtx) {
+        ClusterClientCursorGuard releaseCursor(OperationContext* opCtx,
+                                               StringData commandName = "") {
             invariant(!_operationUsingCursor);
-            invariant(_cursor);
+            tassert(11052336, "Expected CursorEntry to own a cursor", _cursor);
             invariant(opCtx);
             _operationUsingCursor = opCtx;
+            _commandUsingCursor = std::string{commandName};
             return ClusterClientCursorGuard(opCtx, std::move(_cursor));
         }
 
@@ -333,17 +359,22 @@ public:
             return _operationUsingCursor;
         }
 
+        StringData getCommandUsingCursor() const {
+            return _commandUsingCursor;
+        }
+
         /**
          * Indicate that the cursor is no longer in use by an operation. Once this is called,
          * another operation may check the cursor out.
          */
         void returnCursor(std::unique_ptr<ClusterClientCursor> cursor) {
-            invariant(cursor);
-            invariant(!_cursor);
+            tassert(11052337, "Cursor not available", cursor);
+            tassert(11052338, "Expected CursorEntry to not own a cursor", !_cursor);
             invariant(_operationUsingCursor);
 
             _cursor = std::move(cursor);
             _operationUsingCursor = nullptr;
+            _commandUsingCursor = "";
         }
 
         void setLastActive(Date_t lastActive) {
@@ -364,6 +395,7 @@ public:
         CursorLifetime _cursorLifetime = CursorLifetime::Mortal;
         Date_t _lastActive;
         boost::optional<LogicalSessionId> _lsid;
+        boost::optional<TxnNumber> _txnNumber;
 
         /**
          * The client OperationKey from the OperationContext at the time of registering a cursor.
@@ -376,6 +408,7 @@ public:
          * Current operation using the cursor. Non-null if the cursor is checked out.
          */
         OperationContext* _operationUsingCursor = nullptr;
+        std::string _commandUsingCursor;
 
         /**
          * The UUID of the Client that opened the cursor.
@@ -430,6 +463,9 @@ public:
                                         CursorLifetime cursorLifetime,
                                         const boost::optional<UserName>& authenticatedUser);
 
+    template <typename T>
+    struct AuthzCheckPolicy;
+
     /**
      * Moves the given cursor to the 'pinned' state, and transfers ownership of the cursor to the
      * PinnedCursor object returned.  Cursors that are pinned must later be returned with
@@ -441,14 +477,14 @@ public:
      *
      * Checking out a cursor will attach it to the given operation context.
      *
-     * 'authChecker' is function that will be called with the list of users authorized to use this
-     * cursor. This function should check whether the current client is also authorized to use this
-     * cursor, and if not, return an error status, which will cause checkOutCursor to fail.
+     * 'authChecker' is function that will be called to check whether the current client is
+     * authorized to use this cursor, and if not, return an error status, which will cause
+     * checkOutCursor to fail.
      *
      * If 'checkSessionAuth' is 'kCheckSession' or left unspecified, this function also checks if
      * the current session in the specified 'opCtx' has privilege to access the cursor specified by
      * 'id.' In this case, this function returns a 'mongo::Status' with information regarding the
-     * nature of the inaccessability when the cursor is not accessible. If 'kNoCheckSession' is
+     * nature of the inaccessibility when the cursor is not accessible. If 'kNoCheckSession' is
      * passed for 'checkSessionAuth,' this function does not check if the current session is
      * authorized to access the cursor with the given id.
      *
@@ -457,19 +493,39 @@ public:
      * Does not block.
      */
     enum AuthCheck { kCheckSession = true, kNoCheckSession = false };
+    template <typename T>
     StatusWith<PinnedCursor> checkOutCursor(CursorId cursorId,
                                             OperationContext* opCtx,
-                                            AuthzCheckFn authChecker,
-                                            AuthCheck checkSessionAuth = kCheckSession);
+                                            std::function<Status(T)> authChecker,
+                                            AuthCheck checkSessionAuth = kCheckSession,
+                                            StringData commandName = "");
+
+    /**
+     * Moves the given cursor to the 'pinned' state, and transfers ownership of the cursor to the
+     * PinnedCursor object returned.  Cursors that are pinned must later be returned with
+     * PinnedCursor::returnCursor().
+     *
+     * Only one client may pin a given cursor at a time.  If the given cursor is already pinned,
+     * returns an error Status with code CursorInUse.  If the given cursor is not registered or has
+     * a pending kill, returns an error Status with code CursorNotFound.
+     *
+     * Checking out a cursor will attach it to the given operation context.
+     *
+     * It does not check if the current client is authorized to use this cursor, assuming that this
+     * check has already been done.
+     */
+    StatusWith<PinnedCursor> checkOutCursorNoAuthCheck(CursorId cursorId,
+                                                       OperationContext* opCtx,
+                                                       StringData commandName = "");
 
     /**
      * This method will find the given cursor, and if it exists, call 'authChecker', passing the
      * list of users authorized to use the cursor. Will propagate the return value of authChecker.
      */
-    Status checkAuthForKillCursors(OperationContext* opCtx,
-                                   CursorId cursorId,
-                                   AuthzCheckFn authChecker);
-
+    template <typename T>
+    Status checkAuthCursor(OperationContext* opCtx,
+                           CursorId cursorId,
+                           std::function<Status(T)> authChecker);
 
     /**
      * Informs the manager that the given cursor should be killed.  The cursor need not necessarily
@@ -484,6 +540,14 @@ public:
      * May block waiting for other threads to finish, but does not block on the network.
      */
     Status killCursor(OperationContext* opCtx, CursorId cursorId);
+
+    /**
+     * Same as 'killCursor' but with an 'authChecker' callback that can be used to recheck
+     * authorization before the cursor is killed.
+     */
+    Status killCursorWithAuthCheck(OperationContext* opCtx,
+                                   CursorId cursorId,
+                                   AuthzCheckFn authChecker);
 
     /**
      * Kill the cursors satisfying the given predicate. Returns the number of cursors killed.
@@ -544,6 +608,8 @@ private:
      *
      * If 'cursorState' is 'Exhausted', the cursor will be destroyed.
      *
+     * If 'isReleaseMemory' is true the last use date and last active will not be updated.
+     *
      * Thread-safe.
      *
      * Intentionally private.  Clients should use public methods on PinnedCursor to check a cursor
@@ -551,7 +617,8 @@ private:
      */
     void checkInCursor(std::unique_ptr<ClusterClientCursor> cursor,
                        CursorId cursorId,
-                       CursorState cursorState);
+                       CursorState cursorState,
+                       bool isReleaseMemory = false);
 
     /**
      * Will detach a cursor, release the lock and then call kill() on it.
@@ -591,6 +658,8 @@ private:
      */
     void killOperationUsingCursor(WithLock, CursorEntry* entry);
 
+    Status _killCursor(OperationContext* opCtx, CursorId cursorId, AuthzCheckFn authChecker);
+
     // Clock source.  Used when the 'last active' time for a cursor needs to be set/updated.  May be
     // concurrently accessed by multiple threads.
     ClockSource* _clockSource;
@@ -610,4 +679,26 @@ private:
     size_t _cursorsTimedOut = 0;
 };
 
-}  // namespace mongo
+/* For the killCursors command the list of users authorised to access the cursor is used to
+ * check authorisation*/
+template <>
+struct ClusterCursorManager::AuthzCheckPolicy<AuthzCheckFnInputType> {
+    static Status authzCheck(CursorEntry* entry, const AuthzCheckFn& authChecker) {
+        // Note that getAuthenticatedUser() is thread-safe, so it's okay to call even if there's
+        // an operation using the cursor.
+        return authChecker(entry->getAuthenticatedUser());
+    }
+};
+
+/* For the releaseMemory command the list of namespaces authorised to access the cursor is used
+ * to check authorisation*/
+template <>
+struct ClusterCursorManager::AuthzCheckPolicy<ReleaseMemoryAuthzCheckFnInputType> {
+    static Status authzCheck(CursorEntry* entry, const ReleaseMemoryAuthzCheckFn& authChecker) {
+        // Note that getNamespace() is thread-safe, so it's okay to call even if there's
+        // an operation using the cursor.
+        return authChecker(entry->getNamespace());
+    }
+};
+
+}  // namespace MONGO_MOD_PUBLIC mongo

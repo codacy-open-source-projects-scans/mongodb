@@ -29,14 +29,17 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/util/modules.h"
+
 #include <cstddef>
 #include <cstdint>
-#include <js/TypeDecls.h>
-#include <jsapi.h>
 #include <memory>
 #include <string>
 
-#include "mongo/base/string_data.h"
+#include <jsapi.h>
+
+#include <js/TypeDecls.h>
 
 namespace mongo {
 namespace mozjs {

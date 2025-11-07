@@ -27,21 +27,20 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
-
-
 #include "mongo/db/auth/authz_session_external_state_shard.h"
 
 #include "mongo/base/shim.h"
 #include "mongo/db/auth/authz_session_external_state.h"
 #include "mongo/db/client.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+#include <string>
 
 namespace mongo {
 

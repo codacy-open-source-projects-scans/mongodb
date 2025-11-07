@@ -28,6 +28,7 @@ class MongoTFixture(interface.Fixture, interface._DockerComposeInterface):
         # Default to command line options if the YAML configuration is not passed in.
         self.mongot_executable = self.fixturelib.default_if_none(self.config.MONGOT_EXECUTABLE)
         self.port = self.mongot_options["port"]
+
         # Each mongot requires its own unique config journal to persist index definitions, replication status, etc to disk.
         # If dir passed to --data-dir option doesn't exist, mongot will create it
         self.data_dir = "data/config_journal_" + str(self.port)
@@ -70,7 +71,7 @@ class MongoTFixture(interface.Fixture, interface._DockerComposeInterface):
             self.logger.debug("Mongot not running when gathering mongot fixture pid.")
         return out
 
-    def _do_teardown(self, mode=None):
+    def _do_teardown(self, finished=False, mode=None):
         if self.config.NOOP_MONGO_D_S_PROCESSES:
             self.logger.info(
                 "This is running against an External System Under Test setup with `docker-compose.yml` -- skipping teardown."
@@ -147,7 +148,6 @@ class MongoTFixture(interface.Fixture, interface._DockerComposeInterface):
             name=self.logger.name,
             port=self.port,
             pid=self.mongot.pid,
-            router_port=self.router_port,
         )
         return [info]
 

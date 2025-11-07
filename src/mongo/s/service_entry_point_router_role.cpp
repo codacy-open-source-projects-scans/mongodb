@@ -28,18 +28,7 @@
  */
 
 
-#include <boost/smart_ptr.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <type_traits>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
+#include "mongo/s/service_entry_point_router_role.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -59,23 +48,32 @@
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/session.h"
 #include "mongo/db/session/session_catalog.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/rpc/message.h"
 #include "mongo/s/commands/strategy.h"
-#include "mongo/s/grid.h"
 #include "mongo/s/load_balancer_support.h"
 #include "mongo/s/query/exec/cluster_cursor_manager.h"
-#include "mongo/s/service_entry_point_router_role.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <type_traits>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -84,8 +82,8 @@ namespace mongo {
 
 // Allows for decomposing `handleRequest` into parts and simplifies its execution.
 struct HandleRequest {
-    HandleRequest(OperationContext* opCtx, const Message& message)
-        : rec(opCtx, message),
+    HandleRequest(OperationContext* opCtx, const Message& message, Date_t started)
+        : rec(opCtx, message, started),
           op(message.operation()),
           msgId(message.header().getId()),
           nsString(getNamespaceString(rec.getDbMessage())) {}
@@ -118,23 +116,21 @@ struct HandleRequest {
 };
 
 void HandleRequest::setupEnvironment() {
-    using namespace fmt::literals;
     auto opCtx = rec.getOpCtx();
 
     // This exception will not be returned to the caller, but will be logged and will close the
     // connection
     uassert(ErrorCodes::IllegalOperation,
-            "Message type {} is not supported."_format(op),
+            fmt::format("Message type {} is not supported.", fmt::underlying(op)),
             isSupportedRequestNetworkOp(op) &&
                 op != dbCompressed);  // Decompression should be handled above us.
 
     // Start a new NotPrimaryErrorTracker session. Any exceptions thrown from here onwards will be
     // returned to the caller (if the type of the message permits it).
     auto client = opCtx->getClient();
+    CurOp::get(opCtx)->ensureStarted();
     NotPrimaryErrorTracker::get(client).startRequest();
     AuthorizationSession::get(client)->startRequest(opCtx);
-
-    CurOp::get(opCtx)->ensureStarted();
 }
 
 DbResponse HandleRequest::handleRequest() {
@@ -193,8 +189,9 @@ DbResponse HandleRequest::run() {
 }
 
 Future<DbResponse> ServiceEntryPointRouterRole::handleRequestImpl(OperationContext* opCtx,
-                                                                  const Message& message) try {
-    auto hr = HandleRequest(opCtx, message);
+                                                                  const Message& message,
+                                                                  Date_t started) try {
+    auto hr = HandleRequest(opCtx, message, started);
     return hr.run();
 } catch (const DBException& ex) {
     auto status = ex.toStatus();
@@ -207,8 +204,12 @@ Future<DbResponse> ServiceEntryPointRouterRole::handleRequestImpl(OperationConte
 }
 
 Future<DbResponse> ServiceEntryPointRouterRole::handleRequest(OperationContext* opCtx,
-                                                              const Message& message) noexcept {
-    return handleRequestImpl(opCtx, message);
+                                                              const Message& message,
+                                                              Date_t started) {
+    tassert(9391502,
+            "Invalid ClusterRole in ServiceEntryPointRouterRole",
+            opCtx->getService()->role().hasExclusively(ClusterRole::RouterServer));
+    return handleRequestImpl(opCtx, message, started);
 }
 
 }  // namespace mongo

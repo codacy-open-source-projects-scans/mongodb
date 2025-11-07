@@ -28,8 +28,20 @@
  */
 
 
+#include "mongo/db/repl/oplog_applier.h"
+
+#include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/client.h"
+#include "mongo/db/repl/repl_server_parameters_gen.h"
+#include "mongo/logv2/log.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/thread_name.h"
+#include "mongo/util/debug_util.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/future_impl.h"
+#include "mongo/util/processinfo.h"
+
 #include <algorithm>
-#include <boost/smart_ptr.hpp>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -37,20 +49,7 @@
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
-
-#include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/client.h"
-#include "mongo/db/repl/oplog_applier.h"
-#include "mongo/db/repl/repl_server_parameters_gen.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/thread_name.h"
-#include "mongo/util/debug_util.h"
-#include "mongo/util/fail_point.h"
-#include "mongo/util/future_impl.h"
-#include "mongo/util/processinfo.h"
+#include <boost/smart_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 

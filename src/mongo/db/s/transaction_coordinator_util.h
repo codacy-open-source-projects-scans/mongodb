@@ -27,16 +27,10 @@
  *    it in the license file.
  */
 
+#include "mongo/util/modules.h"
+
+
 #pragma once
-
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <absl/container/flat_hash_set.h>
-#include <absl/hash/hash.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
 
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
@@ -51,8 +45,17 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/util/future.h"
+
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/container/flat_hash_set.h>
+#include <absl/hash/hash.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace txn {

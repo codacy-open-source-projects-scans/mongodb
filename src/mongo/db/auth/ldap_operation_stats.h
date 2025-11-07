@@ -29,18 +29,19 @@
 
 #pragma once
 
-#include <cstdint>
-#include <iostream>
-#include <memory>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/auth/ldap_cumulative_operation_stats.h"
 #include "mongo/db/service_context.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules_incompletely_marked_header.h"
 #include "mongo/util/tick_source.h"
+
+#include <cstdint>
+#include <iostream>
+#include <memory>
 
 namespace mongo {
 /**
@@ -155,6 +156,6 @@ private:
      * Metrics associated with binding and search/querying an LDAP server.
      */
     Stats _bindStats;
-    Stats _searchStats;
+    MONGO_MOD_NEEDS_REPLACEMENT Stats _searchStats;  // Used by a friend-ed test.
 };
 }  // namespace mongo

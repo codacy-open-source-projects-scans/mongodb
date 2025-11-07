@@ -13,25 +13,26 @@ const nestedCWS = Code("function(){return 1;}", {
                                         f: Code("function(){return 11};", {
                                             f: Code("function(){return 12};", {
                                                 f: Code("function(){return 13};", {
-                                                    f: Code("function(){return 14};",
-                                                            {f: Code("function(){return 15};", {})})
-                                                })
-                                            })
-                                        })
-                                    })
-                                })
-                            })
-                        })
-                    })
-                })
-            })
-        })
-    })
+                                                    f: Code("function(){return 14};", {
+                                                        f: Code("function(){return 15};", {}),
+                                                    }),
+                                                }),
+                                            }),
+                                        }),
+                                    }),
+                                }),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    }),
 });
-var conn = MongoRunner.runMongod({setParameter: "maxBSONDepth=30"});
-var testDB = conn.getDB(jsTestName());
+let conn = MongoRunner.runMongod({setParameter: "maxBSONDepth=30"});
+let testDB = conn.getDB(jsTestName());
 const collName = jsTestName();
-var coll = testDB.getCollection(collName);
+let coll = testDB.getCollection(collName);
 coll.insert({_id: nestedCWS});
 
 MongoRunner.stopMongod(conn);

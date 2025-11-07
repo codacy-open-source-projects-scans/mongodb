@@ -29,8 +29,6 @@
 
 #pragma once
 
-#include <absl/container/node_hash_map.h>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -38,11 +36,12 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/idl/command_generic_argument.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
+
+#include <absl/container/node_hash_map.h>
 
 namespace mongo {
 
@@ -111,7 +110,7 @@ Status bsonCheckOnlyHasFieldsForCommand(StringData objectName,
  * Throws a uassert if the type of the elem does not match that provided in expectedType
  */
 inline void checkBSONType(BSONType expectedType, const BSONElement& elem) {
-    uassert(elem.type() == BSONType::EOO ? ErrorCodes::NoSuchKey : ErrorCodes::TypeMismatch,
+    uassert(elem.type() == BSONType::eoo ? ErrorCodes::NoSuchKey : ErrorCodes::TypeMismatch,
             str::stream() << "Wrong type for '" << elem.fieldNameStringData() << "'. Expected a "
                           << typeName(expectedType) << ", got a " << typeName(elem.type()) << '.',
             elem.type() == expectedType);

@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -39,6 +37,8 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/synchronized_value.h"
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -51,7 +51,7 @@ void SamplingConfidenceInterval::append(OperationContext*,
 
 Status SamplingConfidenceInterval::setFromString(StringData value,
                                                  const boost::optional<TenantId>&) {
-    _data = SamplingConfidenceInterval_parse(IDLParserContext("samplingConfidenceInterval"), value);
+    _data = SamplingConfidenceInterval_parse(value, IDLParserContext("samplingConfidenceInterval"));
     return Status::OK();
 }
 

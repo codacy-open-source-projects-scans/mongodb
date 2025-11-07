@@ -28,6 +28,7 @@
  */
 
 #include "mongo/db/commands/db_command_test_fixture.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/profile_filter_impl.h"
 #include "mongo/db/profile_settings.h"
 
@@ -57,7 +58,8 @@ public:
 
     void setDefaultFilter(boost::optional<BSONObj> filter) {
         DatabaseProfileSettings::get(opCtx->getServiceContext())
-            .setDefaultFilter(filter ? std::make_shared<ProfileFilterImpl>(*filter)
+            .setDefaultFilter(filter ? std::make_shared<ProfileFilterImpl>(
+                                           *filter, ExpressionContextBuilder{}.opCtx(opCtx).build())
                                      : std::shared_ptr<ProfileFilterImpl>(nullptr));
     }
 
@@ -80,10 +82,11 @@ public:
 
     void setDatabaseProfileFilter(const DatabaseName& dbName, boost::optional<BSONObj> filter) {
         std::shared_ptr<ProfileFilter> profileFilter = filter
-            ? std::make_shared<ProfileFilterImpl>(*filter)
+            ? std::make_shared<ProfileFilterImpl>(*filter,
+                                                  ExpressionContextBuilder{}.opCtx(opCtx).build())
             : std::shared_ptr<ProfileFilterImpl>(nullptr);
         DatabaseProfileSettings::get(opCtx->getServiceContext())
-            .setDatabaseProfileSettings(dbName, {0, std::move(profileFilter)});
+            .setDatabaseProfileSettings(dbName, {0, std::move(profileFilter), Milliseconds(0)});
     }
 
     std::vector<DatabaseName> databases;

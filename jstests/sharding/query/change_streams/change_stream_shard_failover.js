@@ -22,7 +22,7 @@ const st = new ShardingTest({
     // hours). For this test, we need a shorter election timeout because it relies on nodes running
     // an election when they do not detect an active primary. Therefore, we are setting the
     // electionTimeoutMillis to its default value.
-    initiateWithDefaultElectionTimeout: true
+    initiateWithDefaultElectionTimeout: true,
 });
 
 const sDB = st.s.getDB("test");
@@ -39,11 +39,11 @@ for (let key of Object.keys(ChangeStreamWatchMode)) {
     // Split so ids < nDocs / 2 are for one shard, ids >= nDocs / 2 + 1 for another.
     st.shardColl(
         coll,
-        {_id: 1},              // key
-        {_id: nDocs / 2},      // split
-        {_id: nDocs / 2 + 1},  // move
-        "test",                // dbName
-        false                  // waitForDelete
+        {_id: 1}, // key
+        {_id: nDocs / 2}, // split
+        {_id: nDocs / 2 + 1}, // move
+        "test", // dbName
+        false, // waitForDelete
     );
 
     // Be sure we'll only read from the primaries.
@@ -89,16 +89,17 @@ for (let key of Object.keys(ChangeStreamWatchMode)) {
         assert.docEq({db: sDB.getName(), coll: coll.getName()}, change.ns);
         assert.eq(change.operationType, "insert");
 
+        // Needs to be removed here because of multiversion differences between v8.2.0 and previous/following versions.
+        delete change.collectionUUID;
         docsFoundInOrder.push(change);
     }
 
     // Assert that we found the documents we inserted (in any order).
-    assert.setEq(new Set(kIds), new Set(docsFoundInOrder.map(doc => doc.fullDocument._id)));
+    assert.setEq(new Set(kIds), new Set(docsFoundInOrder.map((doc) => doc.fullDocument._id)));
 
     // Now resume using the resume token from the first change (which was read before the
     // failover). The mongos should talk to the new primary.
-    const resumeCursor =
-        cst.getChangeStream({watchMode: watchMode, coll: coll, resumeAfter: firstChange._id});
+    const resumeCursor = cst.getChangeStream({watchMode: watchMode, coll: coll, resumeAfter: firstChange._id});
 
     // Be sure we can read the remaining changes in the same order as we read them initially.
     cst.assertNextChangesEqual({cursor: resumeCursor, expectedChanges: docsFoundInOrder.splice(1)});

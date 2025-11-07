@@ -27,12 +27,14 @@
  *    it in the license file.
  */
 
-#include <benchmark/benchmark.h>
-
-#include "mongo/db/catalog/catalog_test_fixture.h"
+#include "mongo/db/local_catalog/catalog_test_fixture.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/plan_yield_policy_sbe.h"
+#include "mongo/db/query/query_fcv_environment_for_test.h"
 #include "mongo/db/query/stage_builder/stage_builder_util.h"
+
+#include <benchmark/benchmark.h>
 
 namespace mongo {
 
@@ -75,10 +77,12 @@ public:
     }
 
 private:
-    void _doTest() override{};
+    void _doTest() override {}
 
     void setUp() final {
         CatalogTestFixture::setUp();
+        QueryFCVEnvironmentForTest::setUp();
+
         OperationContext* opCtx = operationContext();
         ASSERT_OK(storageInterface()->createCollection(opCtx, kNss, CollectionOptions{}));
     }
@@ -90,7 +94,7 @@ private:
     IndexEntry createIndexEntry(BSONObj keyPattern, std::string indexName) {
         return IndexEntry(keyPattern,
                           IndexNames::nameToType(IndexNames::findPluginName(keyPattern)),
-                          IndexDescriptor::kLatestIndexVersion,
+                          IndexConfig::kLatestIndexVersion,
                           false /*multikey*/,
                           {} /*mutikeyPaths*/,
                           {} /*multikeyPathSet*/,
@@ -120,7 +124,7 @@ void BM_Simple(benchmark::State& state) {
     ASSERT_OK(indexCatalog
                   ->createIndexOnEmptyCollection(opCtx,
                                                  coll.getWritableCollection(opCtx),
-                                                 BSON("v" << IndexDescriptor::kLatestIndexVersion
+                                                 BSON("v" << IndexConfig::kLatestIndexVersion
                                                           << "key" << BSON("x1" << 1) << "name"
                                                           << "index1"))
                   .getStatus());
@@ -151,10 +155,9 @@ void BM_Simple(benchmark::State& state) {
     solution->setRoot(std::move(root));
     auto yieldPolicy = PlanYieldPolicySBE::make(opCtx,
                                                 PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
-                                                opCtx->getServiceContext()->getFastClockSource(),
+                                                &opCtx->fastClockSource(),
                                                 0,
-                                                Milliseconds::zero(),
-                                                PlanYieldPolicy::YieldThroughAcquisitions{});
+                                                Milliseconds::zero());
 
     for (auto _ : state) {
         auto sbePlanAndData = stage_builder::buildSlotBasedExecutableTree(

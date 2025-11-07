@@ -31,11 +31,12 @@ idl_generator(
 mongo_cc_library(
     name = "ttl_d",
     srcs = [
-        "ttl.cpp",
+        "ttl_monitor.cpp",
         ":ttl_gen",
     ],
     hdrs = [
         "ttl.h",
+        "ttl_monitor.h",
     ],
     deps = [
         ":ttl_collection_cache",
@@ -46,10 +47,10 @@ mongo_cc_library(
         "//src/mongo/db:server_base",
         "//src/mongo/db:service_context",
         "//src/mongo/db:shard_role",
-        "//src/mongo/db/catalog:catalog_helpers",
-        "//src/mongo/db/catalog:index_key_validate",
-        "//src/mongo/db/commands:fsync_locked",
-        "//src/mongo/db/commands:server_status_core",
+        "//src/mongo/db/commands:mongod_fsync",
+        "//src/mongo/db/commands/server_status:server_status_core",
+        "//src/mongo/db/local_catalog:catalog_helpers",
+        "//src/mongo/db/local_catalog:index_key_validate",
         "//src/mongo/db/query/write_ops",
         "//src/mongo/db/repl:replica_set_aware_service",
         "//src/mongo/db/s:sharding_runtime_d",
@@ -62,7 +63,10 @@ mongo_cc_unit_test(
         "ttl_collection_cache_test.cpp",
         "ttl_test.cpp",
     ],
-    tags = ["mongo_unittest_third_group"],
+    tags = [
+        "mongo_unittest_fifth_group",
+        "server-ttl",
+    ],
     deps = [
         ":ttl_collection_cache",
         ":ttl_d",
@@ -72,6 +76,6 @@ mongo_cc_unit_test(
         "//src/mongo/db/index_builds:index_build_entry_helpers",
         "//src/mongo/db/index_builds:index_builds_coordinator_mongod",
         "//src/mongo/db/repl:replmocks",
-        "//src/mongo/idl:server_parameter_test_util",
+        "//src/mongo/idl:server_parameter_test_controller",
     ],
 )

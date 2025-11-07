@@ -33,15 +33,15 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <memory>
-#include <mutex>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/db/repl/replication_coordinator_external_state_mock.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/sequence_util.h"
+
+#include <memory>
+#include <mutex>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -133,11 +133,6 @@ void ReplicationCoordinatorExternalStateMock::addSelfSlow(const HostAndPort& hos
 HostAndPort ReplicationCoordinatorExternalStateMock::getClientHostAndPort(
     const OperationContext* opCtx) {
     return _clientHostAndPort;
-}
-
-void ReplicationCoordinatorExternalStateMock::setClientHostAndPort(
-    const HostAndPort& clientHostAndPort) {
-    _clientHostAndPort = clientHostAndPort;
 }
 
 StatusWith<BSONObj> ReplicationCoordinatorExternalStateMock::loadLocalConfigDocument(
@@ -243,14 +238,6 @@ bool ReplicationCoordinatorExternalStateMock::threadsStarted() const {
 
 void ReplicationCoordinatorExternalStateMock::setStoreLocalLastVoteDocumentStatus(Status status) {
     _storeLocalLastVoteDocumentStatus = status;
-}
-
-void ReplicationCoordinatorExternalStateMock::setStoreLocalLastVoteDocumentToHang(bool hang) {
-    stdx::unique_lock<stdx::mutex> lock(_shouldHangLastVoteMutex);
-    _storeLocalLastVoteDocumentShouldHang = hang;
-    if (!hang) {
-        _shouldHangLastVoteCondVar.notify_all();
-    }
 }
 
 void ReplicationCoordinatorExternalStateMock::setFirstOpTimeOfMyTerm(const OpTime& opTime) {

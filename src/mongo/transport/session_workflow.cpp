@@ -28,18 +28,7 @@
  */
 
 
-#include <array>
-#include <boost/smart_ptr.hpp>
-#include <cstddef>
-#include <fmt/format.h>
-#include <memory>
-#include <ratio>
-#include <string>
-#include <type_traits>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/transport/session_workflow.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -48,37 +37,42 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/admission/ingress_request_rate_limiter.h"
+#include "mongo/db/admission/ingress_request_rate_limiter_gen.h"
 #include "mongo/db/client.h"
 #include "mongo/db/client_strand.h"
-#include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/connection_health_metrics_parameter_gen.h"
 #include "mongo/db/dbmessage.h"
+#include "mongo/db/error_labels.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/query/client_cursor/kill_cursors_gen.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/traffic_recorder.h"
 #include "mongo/executor/split_timer.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
 #include "mongo/logv2/log_severity_suppressor.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
+#include "mongo/rpc/factory.h"
 #include "mongo/rpc/message.h"
+#include "mongo/rpc/op_compressed.h"
 #include "mongo/rpc/op_msg.h"
+#include "mongo/rpc/protocol.h"
 #include "mongo/transport/ingress_handshake_metrics.h"
 #include "mongo/transport/message_compressor_base.h"
 #include "mongo/transport/message_compressor_manager.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/service_executor.h"
 #include "mongo/transport/session.h"
+#include "mongo/transport/session_establishment_rate_limiter.h"
 #include "mongo/transport/session_manager.h"
-#include "mongo/transport/session_workflow.h"
 #include "mongo/transport/transport_layer_manager.h"
+#include "mongo/transport/transport_options_gen.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
@@ -90,6 +84,19 @@
 #include "mongo/util/net/ssl_peer_info.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
+
+#include <array>
+#include <cstddef>
+#include <memory>
+#include <ratio>
+#include <string>
+#include <type_traits>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kExecutor
 
@@ -269,8 +276,8 @@ public:
     void sent(Session& session) {
         _t->notify(TimeSplitId::sentResponse);
         IngressHandshakeMetrics::get(session).onResponseSent(
-            duration_cast<Milliseconds>(*_t->getSplitInterval(IntervalId::processWork)),
-            duration_cast<Milliseconds>(*_t->getSplitInterval(IntervalId::sendResponse)));
+            *_t->getSplitInterval(IntervalId::processWork),
+            *_t->getSplitInterval(IntervalId::sendResponse));
     }
     void yieldedAfterSend() {
         _t->notify(TimeSplitId::yieldedAfterSend);
@@ -309,6 +316,10 @@ boost::optional<Message> makeExhaustMessage(Message requestMsg, DbResponse& resp
     if (!OpMsgRequest::isFlagSet(requestMsg, OpMsg::kExhaustSupported) ||
         !response.shouldRunAgainForExhaust)
         return {};
+
+    int32_t responseOp = response.response.operation();
+    invariant(responseOp == dbMsg,
+              fmt::format("Exhaust response must use OP_MSG opcode, instead used {}", responseOp));
 
     const bool checksumPresent = OpMsg::isFlagSet(requestMsg, OpMsg::kChecksumPresent);
     Message exhaustMessage;
@@ -369,7 +380,8 @@ bool killExhaust(const Message& in, ServiceEntryPoint* sep, Client* client) {
                                                              dbName, body["collection"].String()),
                                                          {CursorId{firstElement.Long()}})
                                    .toBSON())
-                               .serialize())
+                               .serialize(),
+                           client->getServiceContext()->getFastClockSource()->now())
             .get();
         return true;
     } catch (const DBException& e) {
@@ -398,6 +410,8 @@ public:
     }
 
     void start() {
+        // Record a session start event.
+        TrafficRecorder::get(_serviceContext).sessionStarted(*session());
         _scheduleIteration();
     }
 
@@ -435,7 +449,8 @@ public:
 
     bool isTLS() const {
 #ifdef MONGO_CONFIG_SSL
-        return SSLPeerInfo::forSession(session()).isTLS();
+        auto sslPeerInfo = SSLPeerInfo::forSession(session());
+        return sslPeerInfo && sslPeerInfo->isTLS();
 #else
         return false;
 #endif
@@ -502,6 +517,8 @@ private:
     /** Receives a message from the session and creates a new WorkItem from it. */
     std::unique_ptr<WorkItem> _receiveRequest();
 
+    Status _rateLimit() const;
+
     /** Sends work to the ServiceEntryPoint, obtaining a future for its completion. */
     Future<DbResponse> _dispatchWork();
 
@@ -543,6 +560,8 @@ private:
     AtomicWord<bool> _isTerminated{false};
     ClientStrandPtr _clientStrand;
 
+    bool _inFirstIteration = true;
+
     std::unique_ptr<WorkItem> _work;
     std::unique_ptr<WorkItem> _nextWork; /**< created by exhaust responses */
     boost::optional<IterationFrame> _iterationFrame;
@@ -550,7 +569,10 @@ private:
 
 class SessionWorkflow::Impl::WorkItem {
 public:
-    WorkItem(Impl* swf, Message in) : _swf{swf}, _in{std::move(in)} {}
+    WorkItem(Impl* swf, Message in)
+        : _swf{swf},
+          _in{std::move(in)},
+          _started(_swf->_serviceContext->getFastClockSource()->now()) {}
 
     bool isExhaust() const {
         return _isExhaust;
@@ -571,6 +593,10 @@ public:
 
     const Message& in() const {
         return _in;
+    }
+
+    Date_t started() const {
+        return _started;
     }
 
     void decompressRequest() {
@@ -632,6 +658,7 @@ private:
     ServiceContext::UniqueOperationContext _opCtx;
     boost::optional<MessageCompressorId> _compressorId;
     boost::optional<Message> _out;
+    Date_t _started;
 };
 
 std::unique_ptr<SessionWorkflow::Impl::WorkItem> SessionWorkflow::Impl::_receiveRequest() {
@@ -699,20 +726,59 @@ void SessionWorkflow::Impl::_sendResponse() {
     }
 }
 
+Status SessionWorkflow::Impl::_rateLimit() const {
+    if (!gFeatureFlagIngressRateLimiting.isEnabled() || !gIngressRequestRateLimiterEnabled.load()) {
+        return Status::OK();
+    }
+
+    auto& admissionRateLimiter = IngressRequestRateLimiter::get(_serviceContext);
+    return admissionRateLimiter.admitRequest(client());
+}
+
+DbResponse makeDbResponseErrorForRateLimiting(const Message& message, const Status& status) {
+    invariant(!status.isOK());
+
+    // When the MoreToCome flag is set, return an empty response as this is a fire and forget
+    // request.
+    if (OpMsg::isFlagSet(message, OpMsg::kMoreToCome)) {
+        return DbResponse{};
+    }
+
+    const auto replyBuilder = rpc::makeReplyBuilder(rpc::protocolForMessage(message));
+    replyBuilder->setCommandReply(status, {});
+
+    // We need to add error labels manually as ErrorLabelBuilder requires an operation context and
+    // we are still before the creation of the operation context at this point.
+    if (MONGO_likely(status == ErrorCodes::IngressRequestRateLimitExceeded)) {
+        auto commandBodyBob = replyBuilder->getBodyBuilder();
+        {
+            BSONArrayBuilder arrayBuilder(commandBodyBob.subarrayStart(kErrorLabelsFieldName));
+            arrayBuilder.append(ErrorLabel::kSystemOverloadedError);
+            arrayBuilder.append(ErrorLabel::kRetryableError);
+        }
+    }
+
+    return DbResponse{.response = replyBuilder->done()};
+}
+
 Future<DbResponse> SessionWorkflow::Impl::_dispatchWork() {
     invariant(_work);
     invariant(!_work->in().empty());
 
-    TrafficRecorder::get(_serviceContext).observe(session(), _work->in(), _serviceContext);
+    TrafficRecorder::get(_serviceContext).observe(*session(), _work->in());
 
     _work->decompressRequest();
 
-    networkCounter.hitLogicalIn(_work->in().size());
+    if (const auto status = _rateLimit(); !status.isOK()) {
+        return makeDbResponseErrorForRateLimiting(_work->in(), status);
+    }
+
+    networkCounter.hitLogicalIn(NetworkCounter::ConnectionType::kIngress, _work->in().size());
 
     // Pass sourced Message to handler to generate response.
     _work->initOperation();
 
-    return _sep->handleRequest(_work->opCtx(), _work->in());
+    return _sep->handleRequest(_work->opCtx(), _work->in(), _work->started());
 }
 
 void SessionWorkflow::Impl::_acceptResponse(DbResponse response) {
@@ -725,7 +791,12 @@ void SessionWorkflow::Impl::_acceptResponse(DbResponse response) {
     // Note that destroying futures after execution, rather that postponing the destruction
     // until completion of the future-chain, would expose the cost of destroying opCtx to
     // the critical path and result in serious performance implications.
-    _serviceContext->delistOperation(work.opCtx());
+    // It may happen that the opCtx is null, when _dispatchWork is returning a DbResponse before
+    // starting the actual operation. Request rate limiting will do that in order to return a
+    // passable error response without paying the cost of starting the operation.
+    if (const auto opCtx = work.opCtx()) {
+        _serviceContext->delistOperation(opCtx);
+    }
     // Format our response, if we have one
     Message& toSink = response.response;
     if (toSink.empty())
@@ -749,14 +820,14 @@ void SessionWorkflow::Impl::_acceptResponse(DbResponse response) {
     // the dbresponses continue to indicate the exhaust stream should continue.
     _nextWork = work.synthesizeExhaust(response);
 
-    networkCounter.hitLogicalOut(toSink.size());
+    networkCounter.hitLogicalOut(NetworkCounter::ConnectionType::kIngress, toSink.size());
 
     beforeCompressingExhaustResponse.executeIf(
         [&](auto&&) {}, [&](auto&&) { return work.hasCompressorId() && _nextWork; });
 
     toSink = work.compressResponse(toSink);
 
-    TrafficRecorder::get(_serviceContext).observe(session(), toSink, _serviceContext);
+    TrafficRecorder::get(_serviceContext).observe(*session(), toSink);
 
     work.setOut(std::move(toSink));
 }
@@ -797,6 +868,20 @@ void SessionWorkflow::Impl::_scheduleIteration() try {
         }
 
         try {
+            // If this is the first iteration of the session workflow, we must call into
+            // "throttleIfNeeded" to respect connection establishment rate limits.
+            if (MONGO_unlikely(_inFirstIteration)) {
+                if (gFeatureFlagRateLimitIngressConnectionEstablishment.isEnabled() &&
+                    gIngressConnectionEstablishmentRateLimiterEnabled.load()) {
+                    uassertStatusOK(session()
+                                        ->getTransportLayer()
+                                        ->getSessionManager()
+                                        ->getSessionEstablishmentRateLimiter()
+                                        .throttleIfNeeded(client()));
+                }
+                _inFirstIteration = false;
+            }
+
             // All available service executors use dedicated threads, so it's okay to
             // run eager futures in an ordinary loop to bypass scheduler overhead. Loop
             // while we have `_nextWork` in case there have been synthetic exhaust
@@ -811,7 +896,7 @@ void SessionWorkflow::Impl::_scheduleIteration() try {
         }
     });
 
-    taskRunner()->runOnDataAvailable(session(), std::move(runOneIteration));
+    taskRunner()->runTaskForSession(session(), std::move(runOneIteration));
 } catch (const DBException& ex) {
     auto error = ex.toStatus();
     LOGV2_WARNING_OPTIONS(22993,
@@ -824,6 +909,9 @@ void SessionWorkflow::Impl::_scheduleIteration() try {
 void SessionWorkflow::Impl::terminate() {
     if (_isTerminated.swap(true))
         return;
+
+    // Record a session end event.
+    TrafficRecorder::get(_serviceContext).sessionEnded(*session());
 
     session()->end();
 }

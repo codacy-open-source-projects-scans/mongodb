@@ -32,100 +32,87 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <array>
-#include <list>
-#include <mutex>
-#include <ratio>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/cancelable_operation_context.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/document_validation.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/commands/list_indexes_allowed_fields.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/generic_argument_util.h"
+#include "mongo/db/global_catalog/ddl/sharding_recovery_service.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds/index_builds_coordinator.h"
 #include "mongo/db/keypattern.h"
-#include "mongo/db/list_collections_gen.h"
-#include "mongo/db/list_indexes_gen.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/ddl/list_collections_gen.h"
+#include "mongo/db/local_catalog/ddl/list_indexes_allowed_fields.h"
+#include "mongo/db/local_catalog/ddl/list_indexes_gen.h"
+#include "mongo/db/local_catalog/document_validation.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/list_indexes.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
+#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/persistent_task_store.h"
+#include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/write_ops/delete.h"
 #include "mongo/db/query/write_ops/update_result.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/collection_metadata.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/migration_batch_fetcher.h"
 #include "mongo/db/s/migration_destination_manager.h"
 #include "mongo/db/s/migration_util.h"
 #include "mongo/db/s/move_timing_helper.h"
-#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
 #include "mongo/db/s/range_deletion_util.h"
-#include "mongo/db/s/shard_filtering_metadata_refresh.h"
-#include "mongo/db/s/sharding_index_catalog_ddl_util.h"
-#include "mongo/db/s/sharding_recovery_service.h"
-#include "mongo/db/s/sharding_runtime_d_params_gen.h"
-#include "mongo/db/s/sharding_statistics.h"
 #include "mongo/db/s/start_chunk_clone_request.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/session_catalog.h"
 #include "mongo/db/session/session_catalog_mongod.h"
-#include "mongo/db/shard_role.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
+#include "mongo/db/sharding_environment/sharding_statistics.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/topology/shard_registry.h"
+#include "mongo/db/topology/sharding_state.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/db/vector_clock.h"
-#include "mongo/db/write_block_bypass.h"
+#include "mongo/db/user_write_block/write_block_bypass.h"
+#include "mongo/db/vector_clock/vector_clock.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_options.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog/type_index_catalog_gen.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/index_version.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
-#include "mongo/s/sharding_index_catalog_cache.h"
-#include "mongo/s/sharding_state.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/database_name_util.h"
@@ -139,6 +126,12 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#include <array>
+#include <mutex>
+#include <type_traits>
+#include <utility>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kShardingMigration
 
@@ -167,6 +160,100 @@ void checkOutSessionAndVerifyTxnState(OperationContext* opCtx) {
         {*opCtx->getTxnNumber()},
         boost::none /* autocommit */,
         TransactionParticipant::TransactionActions::kNone);
+}
+
+/**
+ * Checks if any documents already exist in the given shard key range on the recipient shard.
+ * This is used to detect spurious documents that may have been incorrectly present due to
+ * historical reasons (e.g., inserts via direct connection) or unforeseen range deleter bugs.
+ *
+ * Returns the shard key of the first document found in the range, or boost::none if no documents
+ * exist.
+ */
+boost::optional<BSONObj> checkForExistingDocumentsInRange(OperationContext* opCtx,
+                                                          const NamespaceString& nss,
+                                                          const UUID& collUuid,
+                                                          const BSONObj& shardKeyPattern,
+                                                          const BSONObj& min,
+                                                          const BSONObj& max) {
+    // Acquire collection to scan for existing documents.
+    auto collection = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kRead),
+        MODE_IS);
+
+    uassert(ErrorCodes::NamespaceNotFound,
+            str::stream() << "Cannot find collection " << nss.toStringForErrorMsg(),
+            collection.exists());
+
+    // Verify collection UUID matches (safety check).
+    uassert(ErrorCodes::InvalidUUID,
+            str::stream() << "Collection UUID mismatch during migration. Expected "
+                          << collUuid.toString() << " but found "
+                          << collection.getCollectionPtr()->uuid().toString(),
+            collection.uuid() == collUuid);
+
+    // Find a shard key prefixed index to use for the scan.
+    const auto shardKeyIdx = findShardKeyPrefixedIndex(
+        opCtx, collection.getCollectionPtr(), shardKeyPattern, false /* requireSingleKey */);
+
+    uassert(ErrorCodes::IndexNotFound,
+            str::stream() << "Could not find shard key index for pattern " << shardKeyPattern
+                          << " on collection " << nss.toStringForErrorMsg(),
+            shardKeyIdx);
+
+    // Use InternalPlanner to scan the shard key index within the range.
+    auto exec = InternalPlanner::shardKeyIndexScan(opCtx,
+                                                   collection,
+                                                   *shardKeyIdx,
+                                                   min,
+                                                   max,
+                                                   BoundInclusion::kIncludeStartKeyOnly,
+                                                   PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
+                                                   InternalPlanner::FORWARD);
+
+    BSONObj doc;
+    PlanExecutor::ExecState state = exec->getNext(&doc, nullptr);
+
+    if (state == PlanExecutor::ADVANCED) {
+        // Found an index key in the range - reconstruct the shard key from index values:
+        // this avoids the need to load the full document in shardKeyIndexScan() with
+        // InternalPlanner::IXSCAN_FETCH. Index key format: {"": value1, "": value2, ...}, we need
+        // to map these to proper field names from the shard key pattern.
+
+        BSONObjBuilder shardKeyBuilder;
+        BSONObjIterator indexKeyIter(doc);
+        BSONObjIterator shardKeyPatternIter(shardKeyPattern);
+
+        // Map index key values to shard key field names.
+        while (indexKeyIter.more() && shardKeyPatternIter.more()) {
+            BSONElement indexValue = indexKeyIter.next();
+            BSONElement shardKeyField = shardKeyPatternIter.next();
+
+            // Append the index value with the proper field name from shard key pattern.
+            shardKeyBuilder.appendAs(indexValue, shardKeyField.fieldName());
+        }
+
+        BSONObj reconstructedShardKey = shardKeyBuilder.obj();
+
+        LOGV2_DEBUG(11095301,
+                    3,
+                    "Found index key in range, reconstructed shard key from index data",
+                    "indexKey"_attr = doc,
+                    "shardKeyPattern"_attr = shardKeyPattern,
+                    "reconstructedShardKey"_attr = reconstructedShardKey);
+
+        return reconstructedShardKey;
+    } else if (state == PlanExecutor::IS_EOF) {
+        // No documents found in the range.
+        return boost::none;
+    } else {
+        // Error occurred during scan.
+        uasserted(ErrorCodes::InternalError,
+                  str::stream() << "Error while scanning for existing documents in range [" << min
+                                << ", " << max << ") on collection " << nss.toStringForErrorMsg()
+                                << ": " << PlanExecutor::stateToStr(state));
+    }
 }
 
 template <typename Callable>
@@ -231,7 +318,7 @@ std::string stateToString(MigrationDestinationManager::State state) {
         case MigrationDestinationManager::kAbort:
             return "abort";
         default:
-            MONGO_UNREACHABLE;
+            MONGO_UNREACHABLE_TASSERT(10083523);
     }
 }
 
@@ -335,36 +422,13 @@ bool migrationRecipientRecoveryDocumentExists(OperationContext* opCtx,
                             << sessionId.toString())) > 0;
 }
 
-void replaceShardingIndexCatalogInShardIfNeeded(OperationContext* opCtx,
-                                                const NamespaceString& nss,
-                                                const UUID& uuid) {
-    auto currentShardHasAnyChunks = [&]() -> bool {
-        AutoGetCollection autoColl(opCtx, nss, MODE_IS);
-        const auto scsr =
-            CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss);
-        const auto optMetadata = scsr->getCurrentMetadataIfKnown();
-        return optMetadata && optMetadata->currentShardHasAnyChunks();
-    }();
-
-    // Early return, this shard already contains chunks, so there is no need for consolidate.
-    if (currentShardHasAnyChunks) {
-        return;
+bool isFirstMigration(OperationContext* opCtx, const NamespaceString& nss) {
+    const auto scopedCsr = CollectionShardingRuntime::acquireShared(opCtx, nss);
+    if (auto optMetadata = scopedCsr->getCurrentMetadataIfKnown()) {
+        const auto& metadata = *optMetadata;
+        return metadata.isSharded() && !metadata.currentShardHasAnyChunks();
     }
-
-    auto optSii = uassertStatusOK(
-        Grid::get(opCtx)->catalogCache()->getCollectionIndexInfoWithRefresh(opCtx, nss));
-
-    if (optSii) {
-        std::vector<IndexCatalogType> indexes;
-        optSii->forEachIndex([&](const auto& index) {
-            indexes.push_back(index);
-            return true;
-        });
-        replaceCollectionShardingIndexCatalog(
-            opCtx, nss, uuid, optSii->getCollectionIndexes().indexVersion(), indexes);
-    } else {
-        clearCollectionShardingIndexCatalog(opCtx, nss, uuid);
-    }
+    return false;
 }
 
 // Throws if this configShard is currently draining.
@@ -426,7 +490,7 @@ void MigrationDestinationManager::_setStateFail(StringData msg) {
     LOGV2(21998, "Error during migration", "error"_attr = redact(msg));
     {
         stdx::lock_guard<stdx::mutex> sl(_mutex);
-        _errmsg = msg.toString();
+        _errmsg = std::string{msg};
         _state = kFail;
         _stateChangedCV.notify_all();
     }
@@ -440,7 +504,7 @@ void MigrationDestinationManager::_setStateFailWarn(StringData msg) {
     LOGV2_WARNING(22010, "Error during migration", "error"_attr = redact(msg));
     {
         stdx::lock_guard<stdx::mutex> sl(_mutex);
-        _errmsg = msg.toString();
+        _errmsg = std::string{msg};
         _state = kFail;
         _stateChangedCV.notify_all();
     }
@@ -571,8 +635,6 @@ Status MigrationDestinationManager::start(OperationContext* opCtx,
     _lsid = cloneRequest.getLsid();
     _txnNumber = cloneRequest.getTxnNumber();
 
-    _parallelFetchersSupported = cloneRequest.parallelFetchingSupported();
-
     _nss = nss;
     _fromShard = cloneRequest.getFromShardId();
     _fromShardConnString =
@@ -600,6 +662,10 @@ Status MigrationDestinationManager::start(OperationContext* opCtx,
 
     invariant(!_migrateThreadFinishedPromise);
     _migrateThreadFinishedPromise = std::make_unique<SharedPromise<State>>();
+
+    // Reset the cancellationSource at the start of every migration to avoid accumulating memory.
+    auto newCancellationSource = CancellationSource();
+    std::swap(_cancellationSource, newCancellationSource);
 
     _sessionMigration = std::make_unique<SessionCatalogMigrationDestination>(
         _nss, _fromShard, *_sessionId, _cancellationSource.token());
@@ -914,6 +980,11 @@ MigrationDestinationManager::IndexesAndIdIndex MigrationDestinationManager::getC
                                    repl::ReadConcernLevel::kLocalReadConcern);
         listIndexesCmd.setReadConcern(args);
     }
+    if (gFeatureFlagAllBinariesSupportRawDataOperations.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        listIndexesCmd.setRawData(true);
+    }
 
     // Get indexes by calling listIndexes against the donor.
     auto indexes = uassertStatusOK(
@@ -929,7 +1000,7 @@ MigrationDestinationManager::IndexesAndIdIndex MigrationDestinationManager::getC
         }
 
         if (auto indexNameElem = spec[IndexDescriptor::kIndexNameFieldName];
-            indexNameElem.type() == BSONType::String &&
+            indexNameElem.type() == BSONType::string &&
             indexNameElem.valueStringData() == IndexConstants::kIdIndexName) {
             // The _id index always uses the collection's default collation and so there is no need
             // to add the collation field to attempt to disambiguate.
@@ -963,16 +1034,6 @@ MigrationDestinationManager::IndexesAndIdIndex MigrationDestinationManager::getC
 MigrationDestinationManager::CollectionOptionsAndUUID
 MigrationDestinationManager::getCollectionOptions(OperationContext* opCtx,
                                                   const NamespaceStringOrUUID& nssOrUUID,
-                                                  boost::optional<Timestamp> afterClusterTime) {
-    const auto dbInfo =
-        uassertStatusOK(Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, nssOrUUID.dbName()));
-    return getCollectionOptions(
-        opCtx, nssOrUUID, dbInfo->getPrimary(), dbInfo->getVersion(), afterClusterTime);
-}
-
-MigrationDestinationManager::CollectionOptionsAndUUID
-MigrationDestinationManager::getCollectionOptions(OperationContext* opCtx,
-                                                  const NamespaceStringOrUUID& nssOrUUID,
                                                   const ShardId& fromShardId,
                                                   const boost::optional<DatabaseVersion>& dbVersion,
                                                   boost::optional<Timestamp> afterClusterTime) {
@@ -987,6 +1048,11 @@ MigrationDestinationManager::getCollectionOptions(OperationContext* opCtx,
         listCollectionsCmd.setFilter(BSON("name" << nssOrUUID.nss().coll()));
     } else {
         listCollectionsCmd.setFilter(BSON("info.uuid" << nssOrUUID.uuid()));
+    }
+    if (gFeatureFlagAllBinariesSupportRawDataOperations.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        listCollectionsCmd.setRawData(true);
     }
 
     if (dbVersion) {
@@ -1045,176 +1111,192 @@ MigrationDestinationManager::getCollectionOptions(OperationContext* opCtx,
     return {fromOptions, UUID::fromCDR(fromUUID)};
 }
 
-void MigrationDestinationManager::_dropLocalIndexesIfNecessary(
-    OperationContext* opCtx,
-    const NamespaceString& nss,
-    const CollectionOptionsAndIndexes& collectionOptionsAndIndexes) {
-    bool dropNonDonorIndexes = [&]() -> bool {
-        AutoGetCollection autoColl(opCtx, nss, MODE_IS);
-        const auto scopedCsr =
-            CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss);
-        // Only attempt to drop a collection's indexes if we have valid metadata and the collection
-        // is sharded
-        if (auto optMetadata = scopedCsr->getCurrentMetadataIfKnown()) {
-            const auto& metadata = *optMetadata;
-            if (metadata.isSharded()) {
-                return !metadata.currentShardHasAnyChunks();
+namespace {
+/**
+ * Drops any index in the collection not included in the given index list.
+ */
+void _dropLocalIndexes(OperationContext* opCtx,
+                       const NamespaceString& nss,
+                       const std::vector<BSONObj>& indexSpecs) {
+    // Determine which indexes exist on the local collection that don't exist on the donor's
+    // collection.
+    DBDirectClient client(opCtx);
+    auto indexes = listIndexesEmptyListIfMissing(opCtx, nss, ListIndexesInclude::kNothing);
+    for (auto&& recipientIndex : indexes) {
+        bool dropIndex = true;
+        for (auto&& donorIndex : indexSpecs) {
+            if (recipientIndex.woCompare(donorIndex) == 0) {
+                dropIndex = false;
+                break;
             }
         }
-        return false;
-    }();
+        // If the local index doesn't exist on the donor and isn't the _id index, drop it.
+        auto indexNameElem = recipientIndex[IndexDescriptor::kIndexNameFieldName];
+        if (indexNameElem.type() == BSONType::string && dropIndex &&
+            !IndexDescriptor::isIdIndexPattern(
+                recipientIndex[IndexDescriptor::kKeyPatternFieldName].Obj())) {
+            DropIndexes dropIndexesCmd{nss};
+            dropIndexesCmd.setIndex(indexNameElem.str());
+            if (gFeatureFlagAllBinariesSupportRawDataOperations.isEnabled(
+                    VersionContext::getDecoration(opCtx),
+                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+                dropIndexesCmd.setRawData(true);
+            }
 
-    if (dropNonDonorIndexes) {
-        // Determine which indexes exist on the local collection that don't exist on the donor's
-        // collection.
-        DBDirectClient client(opCtx);
-        const bool includeBuildUUIDs = false;
-        const int options = 0;
-        auto indexes = client.getIndexSpecs(nss, includeBuildUUIDs, options);
-        for (auto&& recipientIndex : indexes) {
-            bool dropIndex = true;
-            for (auto&& donorIndex : collectionOptionsAndIndexes.indexSpecs) {
-                if (recipientIndex.woCompare(donorIndex) == 0) {
-                    dropIndex = false;
-                    break;
-                }
-            }
-            // If the local index doesn't exist on the donor and isn't the _id index, drop it.
-            auto indexNameElem = recipientIndex[IndexDescriptor::kIndexNameFieldName];
-            if (indexNameElem.type() == BSONType::String && dropIndex &&
-                !IndexDescriptor::isIdIndexPattern(
-                    recipientIndex[IndexDescriptor::kKeyPatternFieldName].Obj())) {
-                BSONObj info;
-                if (!client.runCommand(
-                        nss.dbName(),
-                        BSON("dropIndexes" << nss.coll() << "index" << indexNameElem),
-                        info))
-                    uassertStatusOK(getStatusFromCommandResult(info));
-            }
+            BSONObj info;
+            if (!client.runCommand(nss.dbName(), dropIndexesCmd.toBSON(), info))
+                uassertStatusOK(getStatusFromCommandResult(info));
         }
     }
 }
 
-void MigrationDestinationManager::cloneCollectionIndexesAndOptions(
+/**
+ * Creates the collection on the shard and clones the indexes and options.
+ *
+ * `strictIndexSync` determines how indexes are managed in case the collection already exists:
+ * - If true, the resulting collection's indexes will be made to exactly match the specified specs.
+ *   This involves dropping any indexes from the existing collection not in the specified specs,
+ *   as well as waiting for in-progress index builds to ensure that they complete successfully.
+ * - If false, indexes from the existing collection not in the specified specs are preserved,
+ *   and in-progress index builds are not waited for, and handled as if they were already ready.
+ */
+void _cloneCollectionIndexesAndOptions(
     OperationContext* opCtx,
     const NamespaceString& nss,
-    const CollectionOptionsAndIndexes& collectionOptionsAndIndexes) {
+    const CollectionOptionsAndIndexes& collectionOptionsAndIndexes,
+    bool strictIndexSync) {
+    // 1. Create the collection (if it doesn't already exist) and create any indexes we are
+    // missing (auto-heal indexes).
+
+    // Checks that the collection's UUID matches the donor's.
+    auto checkUUIDsMatch = [&](const Collection* collection) {
+        uassert(ErrorCodes::NotWritablePrimary,
+                str::stream() << "Unable to create collection " << nss.toStringForErrorMsg()
+                              << " because the node is not primary",
+                repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, nss));
+
+        uassert(ErrorCodes::InvalidUUID,
+                str::stream()
+                    << "Cannot create collection " << nss.toStringForErrorMsg()
+                    << " because we already have an identically named collection with UUID "
+                    << collection->uuid() << ", which differs from the donor's UUID "
+                    << collectionOptionsAndIndexes.uuid
+                    << ". Manually drop the collection on this shard if it contains data from "
+                       "a previous incarnation of "
+                    << nss.toStringForErrorMsg(),
+                collection->uuid() == collectionOptionsAndIndexes.uuid);
+    };
+
+    // If synchronizing indexes strictly, drop any indexes not in the specified index specs.
+    if (strictIndexSync) {
+        _dropLocalIndexes(opCtx, nss, collectionOptionsAndIndexes.indexSpecs);
+    }
+
+    // Check if there are missing indexes on the recipient shard from the donor.
+    // For strict index synchronization, do not consider in-progress index builds. Otherwise,
+    // consider in-progress index builds as ready. Then, if there are missing indexes and the
+    // collection is not empty, fail the migration. On the other hand, if the collection is
+    // empty, wait for index builds to finish if synchronizing indexes strictly.
+    bool waitForInProgressIndexBuildCompletion = false;
+
+    auto checkEmptyOrGetMissingIndexesFromDonor = [&](const CollectionPtr& collection) {
+        auto indexCatalog = collection->getIndexCatalog();
+        // We force the index comparison to only use the fields allowed by listIndexes and to
+        // repair our index. Otherwise we might unnecessary fail the chunk migration due to
+        // having some invalid/unused fields in the index spec.
+        IndexCatalog::RemoveExistingIndexesFlags opts{!strictIndexSync,
+                                                      &kAllowedListIndexesFieldNames};
+        auto indexSpecs = indexCatalog->removeExistingIndexesNoChecks(
+            opCtx, collection, collectionOptionsAndIndexes.indexSpecs, opts);
+        if (!indexSpecs.empty()) {
+            // Only allow indexes to be copied if the collection does not have any documents.
+            uassert(ErrorCodes::CannotCreateCollection,
+                    str::stream() << "aborting, shard is missing " << indexSpecs.size()
+                                  << " indexes and "
+                                  << "collection is not empty. Non-trivial "
+                                  << "index creation should be scheduled manually",
+                    collection->isEmpty(opCtx));
+
+            // If synchronizing indexes strictly, mark waitForInProgressIndexBuildCompletion as
+            // true to wait for index builds to be finished after releasing the locks.
+            waitForInProgressIndexBuildCompletion = strictIndexSync;
+        }
+        return indexSpecs;
+    };
+
     {
-        // 1. Create the collection (if it doesn't already exist) and create any indexes we are
-        // missing (auto-heal indexes).
+        auto collection = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kRead),
+            MODE_IS);
 
-        // Checks that the collection's UUID matches the donor's.
-        auto checkUUIDsMatch = [&](const Collection* collection) {
-            uassert(ErrorCodes::NotWritablePrimary,
-                    str::stream() << "Unable to create collection " << nss.toStringForErrorMsg()
-                                  << " because the node is not primary",
-                    repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, nss));
-
-            uassert(ErrorCodes::InvalidUUID,
-                    str::stream()
-                        << "Cannot create collection " << nss.toStringForErrorMsg()
-                        << " because we already have an identically named collection with UUID "
-                        << collection->uuid() << ", which differs from the donor's UUID "
-                        << collectionOptionsAndIndexes.uuid
-                        << ". Manually drop the collection on this shard if it contains data from "
-                           "a previous incarnation of "
-                        << nss.toStringForErrorMsg(),
-                    collection->uuid() == collectionOptionsAndIndexes.uuid);
-        };
-
-        bool isFirstMigration = [&] {
-            AutoGetCollection collection(opCtx, nss, MODE_IS);
-            const auto scopedCsr =
-                CollectionShardingRuntime::assertCollectionLockedAndAcquireShared(opCtx, nss);
-            if (auto optMetadata = scopedCsr->getCurrentMetadataIfKnown()) {
-                const auto& metadata = *optMetadata;
-                return metadata.isSharded() && !metadata.currentShardHasAnyChunks();
-            }
-            return false;
-        }();
-
-        // Check if there are missing indexes on the recipient shard from the donor.
-        // If it is the first migration, do not consider in-progress index builds. Otherwise,
-        // consider in-progress index builds as ready. Then, if there are missing indexes and the
-        // collection is not empty, fail the migration. On the other hand, if the collection is
-        // empty, wait for index builds to finish if it is the first migration.
-        bool waitForInProgressIndexBuildCompletion = false;
-
-        auto checkEmptyOrGetMissingIndexesFromDonor = [&](const CollectionPtr& collection) {
-            auto indexCatalog = collection->getIndexCatalog();
-            // We force the index comparison to only use the fields allowed by listIndexes and to
-            // repair our index. Otherwise we might unnecessary fail the chunk migration due to
-            // having some invalid/unused fields in the index spec.
-            IndexCatalog::RemoveExistingIndexesFlags opts{!isFirstMigration,
-                                                          &kAllowedListIndexesFieldNames};
-            auto indexSpecs = indexCatalog->removeExistingIndexesNoChecks(
-                opCtx, collection, collectionOptionsAndIndexes.indexSpecs, opts);
-            if (!indexSpecs.empty()) {
-                // Only allow indexes to be copied if the collection does not have any documents.
-                uassert(ErrorCodes::CannotCreateCollection,
-                        str::stream()
-                            << "aborting, shard is missing " << indexSpecs.size() << " indexes and "
-                            << "collection is not empty. Non-trivial "
-                            << "index creation should be scheduled manually",
-                        collection->isEmpty(opCtx));
-
-                // If it is the first migration, mark waitForInProgressIndexBuildCompletion as true
-                // to wait for index builds to be finished after releasing the locks.
-                waitForInProgressIndexBuildCompletion = isFirstMigration;
-            }
-            return indexSpecs;
-        };
-
-        {
-            AutoGetCollection collection(opCtx, nss, MODE_IS);
-
-            if (collection) {
-                checkUUIDsMatch(collection.getCollection().get());
-                auto indexSpecs =
-                    checkEmptyOrGetMissingIndexesFromDonor(collection.getCollection());
-                if (indexSpecs.empty()) {
-                    return;
-                }
+        if (collection.exists()) {
+            checkUUIDsMatch(collection.getCollectionPtr().get());
+            auto indexSpecs = checkEmptyOrGetMissingIndexesFromDonor(collection.getCollectionPtr());
+            if (indexSpecs.empty()) {
+                return;
             }
         }
+    }
 
-        // Before acquiring the exclusive collection lock for cloning the remaining indexes, wait
-        // for index builds to finish if it is the first migration.
-        if (waitForInProgressIndexBuildCompletion) {
-            if (MONGO_unlikely(
-                    hangMigrationRecipientBeforeWaitingNoIndexBuildInProgress.shouldFail())) {
-                LOGV2(7677900, "Hanging before waiting for in-progress index builds to finish");
-                hangMigrationRecipientBeforeWaitingNoIndexBuildInProgress.pauseWhileSet();
-            }
-
-            IndexBuildsCoordinator::get(opCtx)->awaitNoIndexBuildInProgressForCollection(
-                opCtx, collectionOptionsAndIndexes.uuid);
+    // Before acquiring the exclusive collection lock for cloning the remaining indexes, wait
+    // for index builds to finish if synchronizing indexes strictly.
+    if (waitForInProgressIndexBuildCompletion) {
+        if (MONGO_unlikely(
+                hangMigrationRecipientBeforeWaitingNoIndexBuildInProgress.shouldFail())) {
+            LOGV2(7677900, "Hanging before waiting for in-progress index builds to finish");
+            hangMigrationRecipientBeforeWaitingNoIndexBuildInProgress.pauseWhileSet();
         }
 
-        // Acquire the exclusive collection lock to eventually create the collection and clone the
-        // remaining indexes.
-        AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX);
-        Lock::CollectionLock collLock(opCtx, nss, MODE_X);
-        auto db = autoDb.ensureDbExists(opCtx);
+        IndexBuildsCoordinator::get(opCtx)->awaitNoIndexBuildInProgressForCollection(
+            opCtx, collectionOptionsAndIndexes.uuid);
+    }
 
-        auto collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
-        if (collection) {
-            checkUUIDsMatch(collection);
-        } else {
-            if (auto collectionByUUID = CollectionCatalog::get(opCtx)->lookupCollectionByUUID(
-                    opCtx, collectionOptionsAndIndexes.uuid)) {
+    // Acquire the exclusive collection lock to eventually create the collection and clone the
+    // remaining indexes.
+    auto lockDeadline = opCtx->getServiceContext()->getPreciseClockSource()->now() +
+        Milliseconds(migrationLockAcquisitionMaxWaitMS.load());
+    AutoGetDb autoDb(opCtx, nss.dbName(), MODE_IX, lockDeadline);
+    auto db = autoDb.ensureDbExists(opCtx);
+
+    auto collection =
+        acquireCollection(opCtx,
+                          CollectionAcquisitionRequest::fromOpCtx(
+                              opCtx, nss, AcquisitionPrerequisites::kWrite, lockDeadline),
+                          MODE_X);
+
+    if (collection.exists()) {
+        checkUUIDsMatch(collection.getCollectionPtr().get());
+    } else {
+        auto& dbName = nss.dbName();
+        auto& uuid = collectionOptionsAndIndexes.uuid;
+        try {
+            auto acquisitionByUuid = acquireCollection(
+                opCtx,
+                CollectionAcquisitionRequest::fromOpCtx(opCtx,
+                                                        NamespaceStringOrUUID{dbName, uuid},
+                                                        AcquisitionPrerequisites::kWrite,
+                                                        lockDeadline),
+                MODE_X);
+            if (acquisitionByUuid.exists()) {
                 uasserted(5860300,
                           str::stream()
                               << "Cannot create collection " << nss.toStringForErrorMsg()
-                              << " with UUID " << collectionOptionsAndIndexes.uuid
+                              << " with UUID " << uuid
                               << " because it conflicts with the UUID of an existing collection "
-                              << collectionByUUID->ns().toStringForErrorMsg());
+                              << acquisitionByUuid.nss().toStringForErrorMsg());
             }
+            MONGO_UNREACHABLE_TASSERT(10339800);
+        } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
 
             // We do not have a collection by this name. Create it with the donor's options.
             OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
-                unsafeCreateCollection(opCtx, true /* forceCSRAsUnknownAfterCollectionCreation */);
+                unsafeCreateCollection(
+                    opCtx, nss, true /* forceCSRAsUnknownAfterCollectionCreation */);
             WriteUnitOfWork wuow(opCtx);
+            // The write fence will invalid and reload the acquisition on destruction, leaving the
+            // acquisition pointing to the latest collection instance
+            ScopedLocalCatalogWriteFence writeFence(opCtx, &collection);
             CollectionOptions collectionOptions = uassertStatusOK(
                 CollectionOptions::parse(collectionOptionsAndIndexes.options,
                                          CollectionOptions::ParseKind::parseForStorage));
@@ -1225,19 +1307,27 @@ void MigrationDestinationManager::cloneCollectionIndexesAndOptions(
                                              collectionOptionsAndIndexes.idIndexSpec,
                                              true /* fromMigrate */));
             wuow.commit();
-
-            collection = CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(opCtx, nss);
-        }
-
-        auto indexSpecs = checkEmptyOrGetMissingIndexesFromDonor(CollectionPtr(collection));
-        if (!indexSpecs.empty()) {
-            WriteUnitOfWork wunit(opCtx);
-            CollectionWriter collWriter(opCtx, collection->uuid());
-            IndexBuildsCoordinator::get(opCtx)->createIndexesOnEmptyCollection(
-                opCtx, collWriter, indexSpecs, true /* fromMigrate */);
-            wunit.commit();
         }
     }
+
+
+    auto indexSpecs = checkEmptyOrGetMissingIndexesFromDonor(collection.getCollectionPtr());
+    if (!indexSpecs.empty()) {
+        WriteUnitOfWork wunit(opCtx);
+        CollectionWriter collWriter(opCtx, &collection);
+        IndexBuildsCoordinator::get(opCtx)->createIndexesOnEmptyCollection(
+            opCtx, collWriter, indexSpecs, true /* fromMigrate */);
+        wunit.commit();
+    }
+}
+}  // namespace
+
+void MigrationDestinationManager::cloneCollectionIndexesAndOptions(
+    OperationContext* opCtx,
+    const NamespaceString& nss,
+    const CollectionOptionsAndIndexes& collectionOptionsAndIndexes) {
+    _cloneCollectionIndexesAndOptions(
+        opCtx, nss, collectionOptionsAndIndexes, /* strictIndexSync = */ true);
 }
 
 void MigrationDestinationManager::_migrateThread(CancellationToken cancellationToken,
@@ -1390,20 +1480,13 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
 
         // 1. Ensure any data which might have been left orphaned in the range being moved has been
         // deleted.
-        const auto rangeDeletionWaitDeadline =
-            outerOpCtx->getServiceContext()->getFastClockSource()->now() +
+        const auto rangeDeletionWaitDeadline = outerOpCtx->fastClockSource().now() +
             Milliseconds(drainOverlappingRangeDeletionsOnStartTimeoutMS.load());
 
         while (runWithoutSession(outerOpCtx, [&] {
             return rangedeletionutil::checkForConflictingDeletions(
                 outerOpCtx, range, donorCollectionOptionsAndIndexes.uuid);
         })) {
-            uassert(ErrorCodes::ResumableRangeDeleterDisabled,
-                    "Failing migration because the disableResumableRangeDeleter server "
-                    "parameter is set to true on the recipient shard, which contains range "
-                    "deletion tasks overlapping the incoming range.",
-                    !disableResumableRangeDeleter.load());
-
             LOGV2(22001,
                   "Migration paused because the requested range overlaps with a range already "
                   "scheduled for deletion",
@@ -1429,8 +1512,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
                 "of the range being migrated that was previously owned by the recipient "
                 "shard.",
                 status != ErrorCodes::ExceededTimeLimit &&
-                    outerOpCtx->getServiceContext()->getFastClockSource()->now() <
-                        rangeDeletionWaitDeadline);
+                    outerOpCtx->fastClockSource().now() < rangeDeletionWaitDeadline);
 
             // If the filtering metadata was cleared while the range deletion task was ongoing, then
             // 'waitForClean' would return immediately even though there really is an ongoing range
@@ -1462,23 +1544,54 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
             auto altOpCtx = CancelableOperationContext(
                 cc().makeOperationContext(), outerOpCtx->getCancellationToken(), executor);
 
+            if (AuthorizationManager::get(altOpCtx->getService())->isAuthEnabled()) {
+                AuthorizationSession::get(altOpCtx->getClient())->grantInternalAuthorization();
+            }
+
             // Enable write blocking bypass to allow migrations to create the collection and indexes
             // even when user writes are blocked.
             WriteBlockBypass::get(altOpCtx.get()).set(true);
 
-            _dropLocalIndexesIfNecessary(altOpCtx.get(), _nss, donorCollectionOptionsAndIndexes);
-            cloneCollectionIndexesAndOptions(
-                altOpCtx.get(), _nss, donorCollectionOptionsAndIndexes);
-
-            // Get the global indexes and install them.
-            if (feature_flags::gGlobalIndexesShardingCatalog.isEnabled(
-                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-                replaceShardingIndexCatalogInShardIfNeeded(
-                    altOpCtx.get(), _nss, donorCollectionOptionsAndIndexes.uuid);
-            }
+            // The first migration must ensure that indexes match the provided specs exactly,
+            // including dropping stale indexes remaining from previous versions of the collection.
+            // Further migrations only do a best-effort attempt to auto-heal missing indexes.
+            bool strictIndexSync = isFirstMigration(altOpCtx.get(), _nss);
+            _cloneCollectionIndexesAndOptions(
+                altOpCtx.get(), _nss, donorCollectionOptionsAndIndexes, strictIndexSync);
 
             timing->done(2);
             migrateThreadHangAtStep2.pauseWhileSet();
+        }
+
+        // Check for existing documents in the range before starting cloning:
+        // this prevents mixing legitimate migration documents with spurious ones that may have
+        // been incorrectly present due to historical reasons or range deleter bugs.
+        {
+            auto existingDocShardKey =
+                checkForExistingDocumentsInRange(outerOpCtx,
+                                                 _nss,
+                                                 donorCollectionOptionsAndIndexes.uuid,
+                                                 _shardKeyPattern,
+                                                 range.getMin(),
+                                                 range.getMax());
+
+            if (existingDocShardKey) {
+                _setStateFail(
+                    str::stream()
+                    << "Migration aborted: found existing document in range being migrated. "
+                    << "Document with shard key " << *existingDocShardKey
+                    << " already exists in range [" << range.getMin() << ", " << range.getMax()
+                    << ") on recipient shard. Please investigate and remove "
+                    << "spurious documents before retrying migration.");
+                return;
+            }
+
+            LOGV2_DEBUG(11095300,
+                        3,
+                        "Pre-cloning check passed: no existing documents found in migration range",
+                        "nss"_attr = _nss,
+                        "range"_attr = range.toString(),
+                        "migrationId"_attr = _migrationId->toBSON());
         }
 
         {
@@ -1494,21 +1607,26 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
             recipientDeletionTask.setTimestamp(currentTime.clusterTime().asTimestamp());
             recipientDeletionTask.setKeyPattern(KeyPattern(_shardKeyPattern));
 
+            // Installing an IGNORED collection version since, if this range deletion task prevails,
+            // it will mean that the migration has been aborted.
+            recipientDeletionTask.setPreMigrationShardVersion(ChunkVersion::IGNORED());
+
             // It is illegal to wait for write concern with a session checked out, so persist the
             // range deletion task with an immediately satsifiable write concern and then wait for
             // majority after yielding the session.
             rangedeletionutil::persistRangeDeletionTaskLocally(
-                outerOpCtx, recipientDeletionTask, WriteConcernOptions());
+                outerOpCtx,
+                recipientDeletionTask,
+                ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter());
 
             runWithoutSession(outerOpCtx, [&] {
                 WriteConcernResult ignoreResult;
                 auto latestOpTime =
                     repl::ReplClientInfo::forClient(outerOpCtx->getClient()).getLastOp();
-                uassertStatusOK(
-                    waitForWriteConcern(outerOpCtx,
-                                        latestOpTime,
-                                        WriteConcerns::kMajorityWriteConcernShardingTimeout,
-                                        &ignoreResult));
+                uassertStatusOK(waitForWriteConcern(outerOpCtx,
+                                                    latestOpTime,
+                                                    defaultMajorityWriteConcernDoNotUse(),
+                                                    &ignoreResult));
             });
 
             timing->done(3);
@@ -1547,7 +1665,6 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
                     *_migrationId,
                     *_collectionUuid,
                     _migrationCloningProgress,
-                    _parallelFetchersSupported,
                     chunkMigrationFetcherMaxBufferedSizeBytesPerThread.load()};
                 fetcher.fetchAndScheduleInsertion();
             }
@@ -1572,11 +1689,12 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
 
             auto fetchBatchFn = [&](OperationContext* opCtx, BSONObj* nextBatch) {
                 auto commandResponse = uassertStatusOKWithContext(
-                    fromShard->runCommand(opCtx,
-                                          ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                          DatabaseName::kAdmin,
-                                          xferModsRequest,
-                                          Shard::RetryPolicy::kNoRetry),
+                    fromShard->runCommandWithIndefiniteRetries(
+                        opCtx,
+                        ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                        DatabaseName::kAdmin,
+                        xferModsRequest,
+                        Shard::RetryPolicy::kStrictlyNotIdempotent),
                     "_transferMods failed: ");
 
                 uassertStatusOKWithContext(
@@ -1661,7 +1779,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
             runWithoutSession(outerOpCtx, [&] {
                 auto awaitReplicationResult =
                     repl::ReplicationCoordinator::get(opCtx)->awaitReplication(
-                        opCtx, lastOpApplied, WriteConcerns::kMajorityWriteConcernShardingTimeout);
+                        opCtx, lastOpApplied, defaultMajorityWriteConcernDoNotUse());
                 uassertStatusOKWithContext(awaitReplicationResult.status,
                                            awaitReplicationResult.status.codeString());
             });
@@ -1697,11 +1815,12 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
                 }
 
                 auto res = uassertStatusOKWithContext(
-                    fromShard->runCommand(opCtx,
-                                          ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-                                          DatabaseName::kAdmin,
-                                          xferModsRequest,
-                                          Shard::RetryPolicy::kNoRetry),
+                    fromShard->runCommandWithIndefiniteRetries(
+                        opCtx,
+                        ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                        DatabaseName::kAdmin,
+                        xferModsRequest,
+                        Shard::RetryPolicy::kStrictlyNotIdempotent),
                     "_transferMods failed in STEADY STATE: ");
 
                 uassertStatusOKWithContext(Shard::CommandResponse::getEffectiveStatus(res),
@@ -1761,11 +1880,16 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
         const auto critSecReason = criticalSectionReason(*_sessionId);
 
         runWithoutSession(outerOpCtx, [&] {
-            // Persist the migration recipient recovery document so that in case of failover, the
-            // new primary will resume the MigrationDestinationManager and retake the critical
-            // section.
-            migrationutil::persistMigrationRecipientRecoveryDocument(
-                opCtx, {*_migrationId, _nss, *_sessionId, range, _fromShard, _lsid, _txnNumber});
+            MigrationRecipientRecoveryDocument recoveryDoc;
+            {
+                stdx::lock_guard<stdx::mutex> lg(_mutex);
+                recoveryDoc = {
+                    *_migrationId, _nss, *_sessionId, range, _fromShard, _lsid, _txnNumber};
+            }
+            // Persist the migration recipient recovery document so that in case of failover,
+            // the new primary will resume the MigrationDestinationManager and retake the
+            // critical section.
+            migrationutil::persistMigrationRecipientRecoveryDocument(opCtx, recoveryDoc);
 
             LOGV2_DEBUG(5899113,
                         2,
@@ -1777,7 +1901,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
             // returns success to the donor, so that if the recipient steps down, the critical
             // section is kept taken while the donor commits the migration.
             ShardingRecoveryService::get(opCtx)->acquireRecoverableCriticalSectionBlockWrites(
-                opCtx, _nss, critSecReason, ShardingCatalogClient::kMajorityWriteConcern);
+                opCtx, _nss, critSecReason, defaultMajorityWriteConcernDoNotUse());
 
             LOGV2(5899114, "Entered migration recipient critical section", logAttrs(_nss));
             timeInCriticalSection.emplace();
@@ -1808,10 +1932,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* outerOpCtx,
         auto opCtx = newOpCtxPtr.get();
 
         ShardingRecoveryService::get(opCtx)->acquireRecoverableCriticalSectionBlockWrites(
-            opCtx,
-            _nss,
-            criticalSectionReason(*_sessionId),
-            ShardingCatalogClient::kMajorityWriteConcern);
+            opCtx, _nss, criticalSectionReason(*_sessionId), defaultMajorityWriteConcernDoNotUse());
 
         LOGV2_DEBUG(6064501,
                     2,
@@ -1869,13 +1990,13 @@ bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx, const
         BSONObjIterator i(xfer["deleted"].Obj());
         while (i.more()) {
             totalDocs++;
-            const auto collection = acquireCollection(
-                opCtx,
-                CollectionAcquisitionRequest(_nss,
-                                             AcquisitionPrerequisites::kPretendUnsharded,
-                                             repl::ReadConcernArgs::get(opCtx),
-                                             AcquisitionPrerequisites::kWrite),
-                MODE_IX);
+            const auto collection =
+                acquireCollection(opCtx,
+                                  CollectionAcquisitionRequest(_nss,
+                                                               PlacementConcern::kPretendUnsharded,
+                                                               repl::ReadConcernArgs::get(opCtx),
+                                                               AcquisitionPrerequisites::kWrite),
+                                  MODE_IX);
             uassert(ErrorCodes::ConflictingOperationInProgress,
                     str::stream() << "Collection " << _nss.toStringForErrorMsg()
                                   << " was dropped in the middle of the migration",
@@ -1913,13 +2034,13 @@ bool MigrationDestinationManager::_applyMigrateOp(OperationContext* opCtx, const
         BSONObjIterator i(xfer["reload"].Obj());
         while (i.more()) {
             totalDocs++;
-            auto collection = acquireCollection(
-                opCtx,
-                CollectionAcquisitionRequest(_nss,
-                                             AcquisitionPrerequisites::kPretendUnsharded,
-                                             repl::ReadConcernArgs::get(opCtx),
-                                             AcquisitionPrerequisites::kWrite),
-                MODE_IX);
+            auto collection =
+                acquireCollection(opCtx,
+                                  CollectionAcquisitionRequest(_nss,
+                                                               PlacementConcern::kPretendUnsharded,
+                                                               repl::ReadConcernArgs::get(opCtx),
+                                                               AcquisitionPrerequisites::kWrite),
+                                  MODE_IX);
             uassert(ErrorCodes::ConflictingOperationInProgress,
                     str::stream() << "Collection " << _nss.toStringForErrorMsg()
                                   << " was dropped in the middle of the migration",
@@ -2044,7 +2165,7 @@ void MigrationDestinationManager::awaitCriticalSectionReleaseSignalAndCompleteMi
         opCtx,
         _nss,
         critSecReason,
-        ShardingCatalogClient::kMajorityWriteConcern,
+        defaultMajorityWriteConcernDoNotUse(),
         ShardingRecoveryService::NoCustomAction());
 
     const auto timeInCriticalSectionMs = timeInCriticalSection.millis();

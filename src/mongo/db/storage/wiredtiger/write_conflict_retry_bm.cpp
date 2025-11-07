@@ -27,20 +27,20 @@
  *    it in the license file.
  */
 
-#include <benchmark/benchmark.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/core.h>
-
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/record_store_test_harness.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/logv2/log_domain_global.h"
 #include "mongo/platform/waitable_atomic.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/unittest/unittest.h"
+
+#include <benchmark/benchmark.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/core.h>
 
 namespace mongo {
 namespace {
@@ -76,10 +76,17 @@ protected:
         WriteUnitOfWork wuow(state.opCtx.get());
 
         RecordData unused;
-        ASSERT(rs->findRecord(state.opCtx.get(), RecordId(1), &unused));
+        ASSERT(rs->findRecord(state.opCtx.get(),
+                              *shard_role_details::getRecoveryUnit(state.opCtx.get()),
+                              RecordId(1),
+                              &unused));
 
         auto data = BSON("tid" << state.threadIndex << "inc" << state.committed);
-        ASSERT_OK(rs->updateRecord(state.opCtx.get(), RecordId(1), data.objdata(), data.objsize()));
+        ASSERT_OK(rs->updateRecord(state.opCtx.get(),
+                                   *shard_role_details::getRecoveryUnit(state.opCtx.get()),
+                                   RecordId(1),
+                                   data.objdata(),
+                                   data.objsize()));
 
         wuow.commit();
         ++state.committed;
@@ -126,8 +133,12 @@ private:
         auto opCtx = harness->newOperationContext(client.get());
         Lock::GlobalLock lk(opCtx.get(), MODE_IS);
         WriteUnitOfWork uow(opCtx.get());
-        ASSERT_OK(rs->insertRecord(
-            opCtx.get(), RecordId(1), data.objdata(), data.objsize(), Timestamp()));
+        ASSERT_OK(rs->insertRecord(opCtx.get(),
+                                   *shard_role_details::getRecoveryUnit(opCtx.get()),
+                                   RecordId(1),
+                                   data.objdata(),
+                                   data.objsize(),
+                                   Timestamp()));
         uow.commit();
 
         _threads.store(state.threads);

@@ -27,20 +27,6 @@
  *    it in the license file.
  */
 
-
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-#include <string>
-#include <utility>
-
-#if defined(__linux__)
-#include <sys/statfs.h>  // IWYU pragma: keep
-#include <sys/vfs.h>     // IWYU pragma: keep
-#endif
-
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -48,6 +34,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_engine_impl.h"
@@ -55,16 +42,33 @@
 #include "mongo/db/storage/storage_engine_lock_file.h"
 #include "mongo/db/storage/storage_engine_metadata.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/storage/wiredtiger/spill_wiredtiger_kv_engine.h"
+#include "mongo/db/storage/wiredtiger/spill_wiredtiger_server_status.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_extensions.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_global_options.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_global_options_gen.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_index.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_record_store.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_server_status.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_tag.h"
 #include "mongo/util/processinfo.h"
+
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <utility>
+
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/optional/optional.hpp>
+
+#if defined(__linux__)
+#include <sys/statfs.h>  // IWYU pragma: keep
+#include <sys/vfs.h>     // IWYU pragma: keep
+#endif
 
 #if __has_feature(address_sanitizer)
 #include <sanitizer/lsan_interface.h>
@@ -77,14 +81,19 @@ namespace mongo {
 
 namespace {
 std::string kWiredTigerBackupFile = "WiredTiger.backup";
-std::once_flag initializeServerStatusSectionFlag;
+std::once_flag wiredTigerServerStatusSectionFlag;
+std::once_flag spillWiredTigerServerStatusSectionFlag;
 
 class WiredTigerFactory : public StorageEngine::Factory {
 public:
     ~WiredTigerFactory() override {}
+
     std::unique_ptr<StorageEngine> create(OperationContext* opCtx,
                                           const StorageGlobalParams& params,
-                                          const StorageEngineLockFile* lockFile) const override {
+                                          const StorageEngineLockFile* lockFile,
+                                          bool isReplSet,
+                                          bool shouldRecoverFromOplogAsStandalone,
+                                          bool inStandaloneMode) const override {
         if (lockFile && lockFile->createdByUncleanShutdown()) {
             LOGV2_WARNING(22302, "Recovering data from the last clean checkpoint.");
 
@@ -121,35 +130,73 @@ public:
         }
 #endif
 
-        size_t cacheMB = WiredTigerUtil::getCacheSizeMB(wiredTigerGlobalOptions.cacheSizeGB);
-        const double memoryThresholdPercentage = 0.8;
+        size_t cacheMB = WiredTigerUtil::getMainCacheSizeMB(wiredTigerGlobalOptions.cacheSizeGB,
+                                                            wiredTigerGlobalOptions.cacheSizePct);
         ProcessInfo p;
         if (p.supported()) {
-            if (cacheMB > memoryThresholdPercentage * p.getMemSizeMB()) {
+            if (cacheMB > WiredTigerUtil::memoryThresholdPercentage * p.getMemSizeMB()) {
                 LOGV2_OPTIONS(22300,
                               {logv2::LogTag::kStartupWarnings},
                               "The configured WiredTiger cache size is more than 80% of available "
                               "RAM. See http://dochub.mongodb.org/core/faq-memory-diagnostics-wt");
             }
         }
-        auto kv =
-            std::make_unique<WiredTigerKVEngine>(getCanonicalName().toString(),
-                                                 params.dbpath,
-                                                 getGlobalServiceContext()->getFastClockSource(),
-                                                 wiredTigerGlobalOptions.engineConfig,
-                                                 cacheMB,
-                                                 wiredTigerGlobalOptions.getMaxHistoryFileSizeMB(),
-                                                 params.ephemeral,
-                                                 params.repair);
-        kv->setRecordStoreExtraOptions(wiredTigerGlobalOptions.collectionConfig);
-        kv->setSortedDataInterfaceExtraOptions(wiredTigerGlobalOptions.indexConfig);
+
+        auto& provider = rss::ReplicatedStorageService::get(opCtx).getPersistenceProvider();
+        WiredTigerKVEngineBase::WiredTigerConfig wtConfig =
+            getWiredTigerConfigFromStartupOptions(provider);
+        wtConfig.cacheSizeMB = cacheMB;
+        wtConfig.inMemory = params.inMemory;
+        if (params.inMemory) {
+            wtConfig.logEnabled = false;
+        }
+        wtConfig.zstdCompressorLevel = wiredTigerGlobalOptions.zstdCompressorLevel;
+        auto kv = std::make_unique<WiredTigerKVEngine>(
+            std::string{getCanonicalName()},
+            params.dbpath,
+            &opCtx->fastClockSource(),
+            std::move(wtConfig),
+            WiredTigerExtensions::get(opCtx->getServiceContext()),
+            provider,
+            params.repair,
+            isReplSet,
+            shouldRecoverFromOplogAsStandalone,
+            inStandaloneMode);
+        std::string extraRecordStoreOptions = WiredTigerUtil::concatConfigs(
+            wiredTigerGlobalOptions.collectionConfig, provider.getMainWiredTigerTableSettings());
+        kv->setRecordStoreExtraOptions(std::move(extraRecordStoreOptions));
+
+        std::string extraIndexOptions = WiredTigerUtil::concatConfigs(
+            wiredTigerGlobalOptions.indexConfig, provider.getMainWiredTigerTableSettings());
+        kv->setSortedDataInterfaceExtraOptions(std::move(extraIndexOptions));
+
+        boost::system::error_code ec;
+        boost::filesystem::remove_all(params.getSpillDbPath(), ec);
+        if (ec) {
+            LOGV2_WARNING(10380300,
+                          "Failed to clear dbpath of the internal WiredTiger instance",
+                          "error"_attr = ec.message());
+        }
+
+        auto spillWiredTigerKVEngine = std::make_unique<SpillWiredTigerKVEngine>(
+            std::string{getCanonicalName()},
+            params.getSpillDbPath().string(),
+            &opCtx->fastClockSource(),
+            getSpillWiredTigerConfigFromStartupOptions(),
+            SpillWiredTigerExtensions::get(opCtx->getServiceContext()));
+
+        std::call_once(spillWiredTigerServerStatusSectionFlag, [] {
+            *ServerStatusSectionBuilder<SpillWiredTigerServerStatusSection>(
+                 std::string{SpillWiredTigerServerStatusSection::kServerStatusSectionName})
+                 .forShard();
+        });
 
         // We're using the WT engine; register the ServerStatusSection for it.
         // Only do so once; even if we re-create the StorageEngine for FCBIS. The section is
         // stateless.
-        std::call_once(initializeServerStatusSectionFlag, [] {
+        std::call_once(wiredTigerServerStatusSectionFlag, [] {
             *ServerStatusSectionBuilder<WiredTigerServerStatusSection>(
-                 std::string{kWiredTigerEngineName})
+                 std::string{WiredTigerServerStatusSection::kServerStatusSectionName})
                  .forShard();
         });
 
@@ -159,7 +206,8 @@ public:
         options.forRepair = params.repair;
         options.forRestore = params.restore;
         options.lockFileCreatedByUncleanShutdown = lockFile && lockFile->createdByUncleanShutdown();
-        return std::make_unique<StorageEngineImpl>(opCtx, std::move(kv), options);
+        return std::make_unique<StorageEngineImpl>(
+            opCtx, std::move(kv), std::move(spillWiredTigerKVEngine), options);
     }
 
     StringData getCanonicalName() const override {

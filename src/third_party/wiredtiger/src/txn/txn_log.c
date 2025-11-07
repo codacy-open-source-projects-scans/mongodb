@@ -189,7 +189,7 @@ __wt_txn_op_free(WT_SESSION_IMPL *session, WT_TXN_OP *op)
         break;
     }
 
-    (void)__wt_atomic_subi32(&op->btree->dhandle->session_inuse, 1);
+    (void)__wt_atomic_sub_int32(&op->btree->dhandle->session_inuse, 1);
 
     op->type = WT_TXN_OP_NONE;
     op->flags = 0;
@@ -213,7 +213,7 @@ __txn_logrec_init(WT_SESSION_IMPL *session)
     rectype = WT_LOGREC_COMMIT;
     fmt = WT_UNCHECKED_STRING(Iq);
 
-    if (txn->logrec != NULL) {
+    if (txn->txn_log.logrec != NULL) {
         WT_ASSERT(session, F_ISSET(txn, WT_TXN_HAS_ID));
         return (0);
     }
@@ -233,7 +233,7 @@ __txn_logrec_init(WT_SESSION_IMPL *session)
     WT_ERR(__wt_struct_pack(
       session, (uint8_t *)logrec->data + logrec->size, header_size, fmt, rectype, txn->id));
     logrec->size += (uint32_t)header_size;
-    txn->logrec = logrec;
+    txn->txn_log.logrec = logrec;
 
     if (0) {
 err:
@@ -275,7 +275,7 @@ __wt_txn_log_op(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt)
         FLD_SET(fileid, WT_LOGOP_IGNORE);
 
     WT_RET(__txn_logrec_init(session));
-    logrec = txn->logrec;
+    logrec = txn->txn_log.logrec;
 
     switch (op->type) {
     case WT_TXN_OP_NONE:
@@ -305,20 +305,19 @@ __wt_txn_log_op(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt)
  *     Write the operations of a transaction to the log at commit time.
  */
 int
-__wti_txn_log_commit(WT_SESSION_IMPL *session, const char *cfg[])
+__wti_txn_log_commit(WT_SESSION_IMPL *session)
 {
     WT_TXN *txn;
 
-    WT_UNUSED(cfg);
     txn = session->txn;
     /*
      * If there are no log records there is nothing to do.
      */
-    if (txn->logrec == NULL)
+    if (txn->txn_log.logrec == NULL)
         return (0);
 
     /* Write updates to the log. */
-    return (__wt_log_write(session, txn->logrec, NULL, txn->txn_logsync));
+    return (__wt_log_write(session, txn->txn_log.logrec, NULL, txn->txn_log.txn_logsync));
 }
 
 /*
@@ -407,7 +406,7 @@ __wti_txn_ts_log(WT_SESSION_IMPL *session)
         return (0);
 
     WT_RET(__txn_logrec_init(session));
-    logrec = txn->logrec;
+    logrec = txn->txn_log.logrec;
     commit = durable = first_commit = prepare = read = WT_TS_NONE;
     if (F_ISSET(txn, WT_TXN_HAS_TS_COMMIT)) {
         commit = txn->commit_timestamp;
@@ -426,11 +425,11 @@ __wti_txn_ts_log(WT_SESSION_IMPL *session)
 }
 
 /*
- * __wt_txn_checkpoint_log --
+ * __wt_checkpoint_log --
  *     Write a log record for a checkpoint operation.
  */
 int
-__wt_txn_checkpoint_log(WT_SESSION_IMPL *session, bool full, uint32_t flags, WT_LSN *lsnp)
+__wt_checkpoint_log(WT_SESSION_IMPL *session, bool full, uint32_t flags, WT_LSN *lsnp)
 {
     WT_CONNECTION_IMPL *conn;
     WT_DECL_ITEM(logrec);
@@ -545,7 +544,7 @@ __wt_txn_checkpoint_log(WT_SESSION_IMPL *session, bool full, uint32_t flags, WT_
          * connection close, only during a full checkpoint. A clean close may not update any
          * metadata LSN and we do not want to remove log files in that case.
          */
-        if (__wt_atomic_load64(&conn->hot_backup_start) == 0 &&
+        if (__wt_atomic_load_uint64_relaxed(&conn->hot_backup_start) == 0 &&
           (!F_ISSET(&conn->log_mgr, WT_LOG_RECOVER_DIRTY) ||
             F_ISSET(&conn->log_mgr, WT_LOG_FORCE_DOWNGRADE)) &&
           txn->full_ckpt)
@@ -563,6 +562,9 @@ __wt_txn_checkpoint_log(WT_SESSION_IMPL *session, bool full, uint32_t flags, WT_
     }
 
 err:
+#ifdef HAVE_DIAGNOSTIC
+    WT_CONN_CLOSE_ABORT(session, ret);
+#endif
     __wt_logrec_free(session, &logrec);
     return (ret);
 }

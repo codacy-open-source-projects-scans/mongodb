@@ -24,7 +24,7 @@ const rst = new ReplSetTest({
     useBridge: true,
     // We shorten the election timeout period so the tests with an unhealthy set run and recover
     // faster.
-    settings: {electionTimeoutMillis: 2000, heartbeatIntervalMillis: 400}
+    settings: {electionTimeoutMillis: 2000, heartbeatIntervalMillis: 400},
 });
 rst.startSet();
 rst.initiate();
@@ -59,8 +59,12 @@ function testAddWithSnapshot(secondariesDown) {
     jsTestLog("Making snapshot of primary");
     backupData(primary, newdbpath);
     // Add some data after the backup.
-    assert.commandWorked(testDb[testName].insert({addWithSnapshotAfterSnapshot: secondariesDown},
-                                                 {writeConcern: {w: 1}}));
+    assert.commandWorked(
+        testDb[testName].insert(
+            {addWithSnapshotAfterSnapshot: secondariesDown, msg: "Data written after backup"},
+            {writeConcern: {w: 1}},
+        ),
+    );
     let config = rst.getReplSetConfigFromNode();
     secondariesDown = secondariesDown || 0;
     disconnectSecondaries(secondariesDown);
@@ -70,16 +74,16 @@ function testAddWithSnapshot(secondariesDown) {
         rst.awaitSecondaryNodes(null, [primary]);
     }
     // Atlas always adds nodes with 0 votes and priority
-    const newNode =
-        rst.add({rsConfig: {votes: 0, priority: 0}, noCleanData: true, dbpath: newdbpath});
+    const newNode = rst.add({rsConfig: {votes: 0, priority: 0}, noCleanData: true, dbpath: newdbpath});
     // The second disconnect ensures we can't reach the new node from the 'down' nodes.
     disconnectSecondaries(secondariesDown);
     const newConfig = rst.getReplSetConfig();
     config.members = newConfig.members;
     config.version += 1;
     jsTestLog("Reconfiguring set to add node.");
-    assert.commandWorked(primary.adminCommand(
-        {replSetReconfig: config, maxTimeMS: ReplSetTest.kDefaultTimeoutMS, force: useForce}));
+    assert.commandWorked(
+        primary.adminCommand({replSetReconfig: config, maxTimeMS: ReplSetTest.kDefaultTimeoutMS, force: useForce}),
+    );
 
     jsTestLog("Waiting for node to sync.");
     rst.awaitSecondaryNodes(null, [newNode]);
@@ -88,13 +92,18 @@ function testAddWithSnapshot(secondariesDown) {
     config = rst.getReplSetConfigFromNode(primary.nodeId);
     config.version += 1;
     config.members[3].votes = 1;
-    assert.commandWorked(primary.adminCommand(
-        {replSetReconfig: config, maxTimeMS: ReplSetTest.kDefaultTimeoutMS, force: useForce}));
+    assert.commandWorked(
+        primary.adminCommand({replSetReconfig: config, maxTimeMS: ReplSetTest.kDefaultTimeoutMS, force: useForce}),
+    );
     if (!useForce) {
         // Make sure we can replicate to it.  This only works if the set was healthy, otherwise we
         // can't.
         assert.commandWorked(
-            testDb[testName].insert({addWithSnapshot: secondariesDown}, {writeConcern: {w: 1}}));
+            testDb[testName].insert(
+                {addWithSnapshot: secondariesDown, msg: "Replicating write to new node"},
+                {writeConcern: {w: 1}},
+            ),
+        );
         rst.awaitReplication(undefined, undefined, [newNode]);
     }
 
@@ -104,6 +113,10 @@ function testAddWithSnapshot(secondariesDown) {
     assert.soon(() => primary == rst.getPrimary());
     rst.checkOplogs();
     rst.checkReplicatedDataHashes();
+
+    // Stabilize the cluster before removing the new node.
+    assert.commandWorked(testDb[testName].insert({addWithSnapshot: secondariesDown, msg: "Reconnected secondaries"}));
+    rst.awaitReplication();
 
     // Remove our extra node.
     rst.stop(newNode);
@@ -121,8 +134,7 @@ function testReplaceWithSnapshot(node, secondariesDown) {
     jsTestLog("Backing up the primary node");
     backupData(primary, backupdbpath);
     // Add some data after the backup.
-    assert.commandWorked(
-        testDb[testName].insert({replaceWithSnapshot: secondariesDown}, {writeConcern: {w: 1}}));
+    assert.commandWorked(testDb[testName].insert({replaceWithSnapshot: secondariesDown}, {writeConcern: {w: 1}}));
     disconnectSecondaries(secondariesDown);
     if (useForce) {
         // Wait for the set to become unhealthy.

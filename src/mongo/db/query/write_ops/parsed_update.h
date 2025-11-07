@@ -29,15 +29,9 @@
 
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <map>
-#include <memory>
-#include <type_traits>
-#include <utility>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_with_placeholder.h"
 #include "mongo/db/matcher/extensions_callback.h"
@@ -46,13 +40,18 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/canonical_query.h"
-#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/write_ops/parsed_writes_common.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/update/update_driver.h"
-#include "mongo/util/assert_util_core.h"
-#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/assert_util.h"
+
+#include <map>
+#include <memory>
+#include <type_traits>
+#include <utility>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -129,7 +128,7 @@ public:
      * Returns a const pointer to the canonical query. Requires that hasParsedQuery() is true.
      */
     const CanonicalQuery* getParsedQuery() const {
-        invariant(_canonicalQuery);
+        tassert(11052008, "Expected CanonicalQuery to exist", _canonicalQuery);
         return _canonicalQuery.get();
     }
 
@@ -189,6 +188,11 @@ private:
      */
     void maybeTranslateTimeseriesUpdate();
 
+    /**
+     * Adds closed bucket filtering to query for timeseries multi-updates
+     */
+    std::unique_ptr<MatchExpression> getClosedBucketFilteredExpr();
+
     // Unowned pointer to the transactional context.
     OperationContext* _opCtx;
 
@@ -227,7 +231,7 @@ private:
 
 template <typename T, typename... Ts>
 requires std::is_same_v<T, ExtensionsCallbackNoop> || std::is_same_v<T, ExtensionsCallbackReal>
-    std::unique_ptr<ExtensionsCallback> makeExtensionsCallback(Ts&&... args) {
+std::unique_ptr<ExtensionsCallback> makeExtensionsCallback(Ts&&... args) {
     return std::make_unique<T>(std::forward<Ts>(args)...);
 }
 

@@ -26,22 +26,23 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
-#include "mongo/stdx/thread.h"
-#include "mongo/util/system_tick_source.h"
-#include <concepts>
-#include <memory>
-
-#include "mongo/db/service_context_test_fixture.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/concurrency/ticketholder.h"
+
+#include "mongo/db/server_feature_flags_gen.h"
+#include "mongo/db/service_context_test_fixture.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/concurrency/ticketholder_parameters_gen.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future_util.h"
 #include "mongo/util/packaged_task.h"
+#include "mongo/util/system_tick_source.h"
 #include "mongo/util/tick_source_mock.h"
 
-#include "mongo/unittest/assert.h"
-#include "mongo/util/assert_util.h"
+#include <concepts>
+#include <memory>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -113,6 +114,7 @@ public:
                                               initialNumTickets,
                                               false /* trackPeakUsed */,
                                               TicketHolder::kDefaultMaxQueueDepth,
+                                              nullptr /* delinquentCallback */,
                                               TicketHolder::ResizePolicy::kImmediate);
     }
 
@@ -142,18 +144,40 @@ private:
  */
 class TicketHolderTest::Stats {
 public:
-    Stats(TicketHolder* holder) : _holder(holder){};
+    static constexpr auto kNormalPriorityName = "normalPriority"_sd;
+    static constexpr auto kExemptPriorityName = "exempt"_sd;
+    Stats(TicketHolder* holder) : _holder(holder) {};
 
     long long operator[](StringData field) const {
         BSONObjBuilder bob;
-        _holder->appendStats(bob);
+        _holder->appendTicketStats(bob);
+        {
+            BSONObjBuilder bb(bob.subobjStart(kNormalPriorityName));
+            _holder->appendHolderStats(bob);
+            bb.done();
+        }
+        {
+            BSONObjBuilder bb(bob.subobjStart(kExemptPriorityName));
+            _holder->appendExemptStats(bob);
+            bb.done();
+        }
         auto stats = bob.obj();
         return stats[field].numberLong();
     }
 
     BSONObj getStats() const {
         BSONObjBuilder bob;
-        _holder->appendStats(bob);
+        _holder->appendTicketStats(bob);
+        {
+            BSONObjBuilder bb(bob.subobjStart(kNormalPriorityName));
+            _holder->appendHolderStats(bob);
+            bb.done();
+        }
+        {
+            BSONObjBuilder bb(bob.subobjStart(kExemptPriorityName));
+            _holder->appendExemptStats(bob);
+            bb.done();
+        }
         return bob.obj();
     }
 
@@ -246,6 +270,85 @@ TEST_F(TicketHolderTest, BasicTimeout) {
     ASSERT_EQ(holder->used(), 0);
     ASSERT_EQ(holder->available(), 1);
     ASSERT_EQ(holder->outof(), 1);
+}
+
+TEST_F(TicketHolderTest, DelinquentAcquisitionStats) {
+    // Enable the feature flag for delinquent ticket metrics.
+    gFeatureFlagRecordDelinquentMetrics.setForServerParameter(true);
+
+    auto holder = std::make_unique<TicketHolder>(
+        getServiceContext(),
+        1 /* numTickets */,
+        false /* trackPeakUsed */,
+        TicketHolder::kDefaultMaxQueueDepth,
+        [](AdmissionContext* admCtx, Milliseconds delta) {
+            static_cast<MockAdmissionContext*>(admCtx)->recordDelinquentAcquisition(delta);
+        });
+    OperationContext* opCtx = _opCtx.get();
+    auto tickSource = getTickSource();
+    Stats stats(holder.get());
+    MockAdmissionContext admCtx{};
+    auto threshold = gDelinquentAcquisitionIntervalMillis.load();
+    {
+        // Ticket releases within the threshold, no delinquent metric is collected.
+        boost::optional<Ticket> ticket = holder->waitForTicket(opCtx, &admCtx);
+        tickSource->advance(Milliseconds{threshold / 2});
+        ticket.reset();
+
+        ASSERT_EQ(admCtx.delinquentAcquisitions, 0);
+        ASSERT_EQ(admCtx.totalAcquisitionDelinquencyMillis, 0);
+        ASSERT_EQ(admCtx.maxAcquisitionDelinquencyMillis, 0);
+
+        auto currentStats = stats.getNonTicketStats();
+        ASSERT_EQ(currentStats["normalPriority"]["totalDelinquentAcquisitions"].Long(), 0);
+        ASSERT_EQ(currentStats["normalPriority"]["totalAcquisitionDelinquencyMillis"].Long(), 0);
+        ASSERT_EQ(currentStats["normalPriority"]["maxAcquisitionDelinquencyMillis"].Long(), 0);
+    }
+    {
+        // Ticket releases after the threshold, delinquent metric should be collected.
+        boost::optional<Ticket> ticket = holder->waitForTicket(opCtx, &admCtx);
+        tickSource->advance(Milliseconds{threshold * 2});
+        ticket.reset();
+
+        ASSERT_EQ(admCtx.delinquentAcquisitions, 1);
+        ASSERT_EQ(admCtx.totalAcquisitionDelinquencyMillis, threshold * 2);
+        ASSERT_EQ(admCtx.maxAcquisitionDelinquencyMillis, threshold * 2);
+
+        // Normally an operation will call this as it completes.
+        holder->incrementDelinquencyStats(admCtx.delinquentAcquisitions,
+                                          Milliseconds(admCtx.totalAcquisitionDelinquencyMillis),
+                                          Milliseconds(admCtx.maxAcquisitionDelinquencyMillis));
+
+        auto currentStats = stats.getNonTicketStats();
+        ASSERT_EQ(currentStats["normalPriority"]["totalDelinquentAcquisitions"].Long(), 1);
+        ASSERT_EQ(currentStats["normalPriority"]["totalAcquisitionDelinquencyMillis"].Long(),
+                  threshold * 2);
+        ASSERT_EQ(currentStats["normalPriority"]["maxAcquisitionDelinquencyMillis"].Long(),
+                  threshold * 2);
+    }
+    {
+        // Ticket with a different AdmissionContext releases beyond the threshold, aggregated
+        // delinquent metric should be updated.
+        MockAdmissionContext admCtx2{};
+        boost::optional<Ticket> ticket = holder->waitForTicket(opCtx, &admCtx2);
+        tickSource->advance(Milliseconds{threshold * 5});
+        ticket.reset();
+
+        ASSERT_EQ(admCtx2.delinquentAcquisitions, 1);
+        ASSERT_EQ(admCtx2.totalAcquisitionDelinquencyMillis, threshold * 5);
+        ASSERT_EQ(admCtx2.maxAcquisitionDelinquencyMillis, threshold * 5);
+
+        holder->incrementDelinquencyStats(admCtx2.delinquentAcquisitions,
+                                          Milliseconds(admCtx2.totalAcquisitionDelinquencyMillis),
+                                          Milliseconds(admCtx2.maxAcquisitionDelinquencyMillis));
+
+        auto currentStats = stats.getNonTicketStats();
+        ASSERT_EQ(currentStats["normalPriority"]["totalDelinquentAcquisitions"].Long(), 2);
+        ASSERT_EQ(currentStats["normalPriority"]["totalAcquisitionDelinquencyMillis"].Long(),
+                  threshold * 7);
+        ASSERT_EQ(currentStats["normalPriority"]["maxAcquisitionDelinquencyMillis"].Long(),
+                  threshold * 5);
+    }
 }
 
 /**
@@ -390,14 +493,19 @@ TEST_F(TicketHolderTest, HighlyConcurrentAcquireReleaseTicket) {
     constexpr int numThreads = 10;
 
     Hotel hotel{numRooms};
-    OperationContext* opCtx = _opCtx.get();
     auto holder = std::make_unique<TicketHolder>(getServiceContext(),
                                                  numRooms,
                                                  false /* trackPeakUsed */,
                                                  TicketHolder::kDefaultMaxQueueDepth);
 
     for (size_t i = 0; i < numThreads; ++i) {
-        threads.emplace_back([&, numCheckIns]() {
+        threads.emplace_back([&, i, numCheckIns]() {
+            std::string clientName = "Client ";
+            clientName += std::to_string(i);
+            auto client = getService()->makeClient(clientName);
+            ServiceContext::UniqueOperationContext opCtxOwned = client->makeOperationContext();
+            OperationContext* opCtx = opCtxOwned.get();
+
             MockAdmissionContext admCtx{};
             for (size_t checkIn = 0; checkIn < numCheckIns; checkIn++) {
                 auto ticket = holder->waitForTicket(opCtx, &admCtx);
@@ -700,6 +808,7 @@ TEST_F(TicketHolderImmediateResizeTest, WaitQueueMax0) {
                                                  initialNumTickets,
                                                  false /* trackPeakUsed */,
                                                  maxNumberOfWaiters,
+                                                 nullptr /* delinquentCallback */,
                                                  TicketHolder::ResizePolicy::kImmediate);
 
     // acquire 4 tickets
@@ -734,6 +843,7 @@ TEST_F(TicketHolderImmediateResizeTest, WaitQueueMax1) {
                                                  initialNumTickets,
                                                  false /* trackPeakUsed */,
                                                  maxNumberOfWaiters,
+                                                 nullptr /* delinquentCallback */,
                                                  TicketHolder::ResizePolicy::kImmediate);
 
     // acquire 4 tickets
@@ -796,6 +906,7 @@ TEST_F(TicketHolderImmediateResizeTest, WaitQueueMaxChange) {
                                                  initialNumTickets,
                                                  false /* trackPeakUsed */,
                                                  TicketHolder::kDefaultMaxQueueDepth,
+                                                 nullptr /* delinquentCallback */,
                                                  TicketHolder::ResizePolicy::kImmediate);
 
     // acquire 4 tickets
@@ -875,6 +986,7 @@ TEST_F(TicketHolderTestTick, TotalTimeQueueMicrosAccumulated) {
                                                  initialNumTickets,
                                                  false /* trackPeakUsed */,
                                                  TicketHolder::kDefaultMaxQueueDepth,
+                                                 nullptr /* delinquentCallback */,
                                                  TicketHolder::ResizePolicy::kImmediate);
 
 

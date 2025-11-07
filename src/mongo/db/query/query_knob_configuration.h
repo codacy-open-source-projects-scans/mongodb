@@ -31,6 +31,7 @@
 
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_settings/query_settings_gen.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 /**
@@ -48,6 +49,10 @@ public:
     QueryFrameworkControlEnum getInternalQueryFrameworkControlForOp() const;
     QueryPlanRankerModeEnum getPlanRankerMode() const;
     SamplingConfidenceIntervalEnum getConfidenceInterval() const;
+    SamplingCEMethodEnum getInternalQuerySamplingCEMethod() const;
+    double getSamplingMarginOfError() const;
+    int64_t getNumChunksForChunkBasedSampling() const;
+    SbeHashAggIncreasedSpillingModeEnum getSbeHashAggIncreasedSpillingMode() const;
 
     bool getSbeDisableGroupPushdownForOp() const;
     bool getSbeDisableLookupPushdownForOp() const;
@@ -59,7 +64,16 @@ public:
      */
     bool isForceClassicEngineEnabled() const;
     size_t getPlanEvaluationMaxResultsForOp() const;
+    size_t getPlannerMaxIndexedSolutions() const;
+    double getPlanEvaluationCollFraction() const;
+    double getPlanTotalEvaluationCollFraction() const;
     size_t getMaxScansToExplodeForOp() const;
+
+    /**
+     * Query knobs configuring join reordering.
+     */
+    bool isJoinOrderingEnabled() const;
+    size_t getRandomJoinOrderSeed() const;
 
     /**
      * Returns whether we can push down fully compatible stages to sbe. This is only true when the
@@ -67,14 +81,26 @@ public:
      */
     bool canPushDownFullyCompatibleStages() const;
 
+    int64_t getInternalQuerySpillingMinAvailableDiskSpaceBytes() const;
+
 private:
     QueryFrameworkControlEnum _queryFrameworkControlValue;
     QueryPlanRankerModeEnum _planRankerMode;
     SamplingConfidenceIntervalEnum _samplingConfidenceInterval;
+    SamplingCEMethodEnum _samplingCEMethod;
+    int64_t _numChunksForChunkBasedSampling;
+    double _samplingMarginOfError;
+    SbeHashAggIncreasedSpillingModeEnum _sbeHashAggIncreasedSpillingMode;
     size_t _planEvaluationMaxResults;
+    size_t _plannerMaxIndexedSolutions;
+    double _planEvaluationCollFraction;
+    double _planTotalEvaluationCollFraction;
     size_t _maxScansToExplodeValue;
     bool _sbeDisableGroupPushdownValue;
     bool _sbeDisableLookupPushdownValue;
     bool _sbeDisableTimeSeriesValue;
+    bool _isJoinOrderingEnabled;
+    int64_t _randomJoinOrderSeed;
+    int64_t _internalQuerySpillingMinAvailableDiskSpaceBytes;
 };
 }  // namespace mongo

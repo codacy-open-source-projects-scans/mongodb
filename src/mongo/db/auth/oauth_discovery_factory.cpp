@@ -29,10 +29,6 @@
 
 #include "mongo/db/auth/oauth_discovery_factory.h"
 
-#include <fmt/format.h>
-
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/data_builder.h"
 #include "mongo/base/data_range_cursor.h"
 #include "mongo/base/string_data.h"
@@ -40,11 +36,10 @@
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
 
-namespace mongo {
+#include <boost/move/utility_core.hpp>
+#include <fmt/format.h>
 
-namespace {
-using namespace fmt::literals;
-}  // namespace
+namespace mongo {
 
 OAuthAuthorizationServerMetadata OAuthDiscoveryFactory::acquire(StringData issuer) {
     // RFC8414 declares that the well-known addresses defined by OpenID Connect are valid for
@@ -59,13 +54,13 @@ OAuthAuthorizationServerMetadata OAuthDiscoveryFactory::acquire(StringData issue
         issuer.remove_suffix(1);
     }
 
-    auto openIDConfiguationEndpoint = "{}/.well-known/openid-configuration"_format(issuer);
+    auto openIDConfiguationEndpoint = fmt::format("{}/.well-known/openid-configuration", issuer);
 
     DataBuilder results = _client->get(openIDConfiguationEndpoint);
     StringData textResult =
         uassertStatusOK(results.getCursor().readAndAdvanceNoThrow<StringData>());
-    return OAuthAuthorizationServerMetadata::parseOwned(IDLParserContext("metadata"),
-                                                        fromjson(textResult));
+    return OAuthAuthorizationServerMetadata::parseOwned(fromjson(textResult),
+                                                        IDLParserContext("metadata"));
 }
 
 }  // namespace mongo

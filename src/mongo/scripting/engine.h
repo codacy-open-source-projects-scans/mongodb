@@ -29,8 +29,20 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes_util.h"
+#include "mongo/bson/oid.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/service_context.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/platform/decimal128.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/time_support.h"
+
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -39,19 +51,8 @@
 #include <string>
 #include <utility>
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/bsontypes_util.h"
-#include "mongo/bson/oid.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/db/service_context.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/platform/decimal128.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/time_support.h"
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 typedef unsigned long long ScriptingFunction;
@@ -61,7 +62,7 @@ typedef std::map<std::string, ScriptingFunction> FunctionCacheMap;
 class DBClientBase;
 class OperationContext;
 
-struct JSFile {
+struct MONGO_MOD_NEEDS_REPLACEMENT JSFile {
     const char* name;
     const StringData source;
 };
@@ -75,7 +76,7 @@ struct JSRegEx {
         : pattern(std::move(pattern)), flags(std::move(flags)) {}
 };
 
-class Scope {
+class MONGO_MOD_PUB Scope {
     Scope(const Scope&) = delete;
     Scope& operator=(const Scope&) = delete;
 
@@ -234,9 +235,9 @@ protected:
     bool _lastRetIsNativeCode;  // v8 only: set to true if eval'd script returns a native func
 };
 
-enum class ExecutionEnvironment { Server, TestRunner };
+enum class MONGO_MOD_PUB ExecutionEnvironment { Server, TestRunner };
 
-class ScriptEngine : public KillOpListenerInterface {
+class MONGO_MOD_PUB ScriptEngine : public KillOpListenerInterface {
     ScriptEngine(const ScriptEngine&) = delete;
     ScriptEngine& operator=(const ScriptEngine&) = delete;
 
@@ -259,9 +260,6 @@ public:
     virtual void runTest() = 0;
 
     virtual bool utf8Ok() const = 0;
-
-    virtual void enableJIT(bool value) = 0;
-    virtual bool isJITEnabled() const = 0;
 
     virtual void enableJavaScriptProtection(bool value) = 0;
     virtual bool isJavaScriptProtectionEnabled() const = 0;
@@ -323,7 +321,7 @@ void installGlobalUtils(Scope& scope);
 bool hasJSReturn(const std::string& s);
 const char* jsSkipWhiteSpace(const char* raw);
 
-ScriptEngine* getGlobalScriptEngine();
+MONGO_MOD_PUB ScriptEngine* getGlobalScriptEngine();
 void setGlobalScriptEngine(ScriptEngine* impl);
 
 }  // namespace mongo

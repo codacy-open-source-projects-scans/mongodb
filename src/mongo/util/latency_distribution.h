@@ -28,13 +28,13 @@
  */
 #pragma once
 
+#include "mongo/util/duration.h"
+
 #include <cstdint>
 #include <iterator>
 #include <map>
 #include <ratio>
 #include <utility>
-
-#include "mongo/util/duration.h"
 
 namespace mongo {
 /**
@@ -43,7 +43,7 @@ namespace mongo {
  */
 class LatencyPercentileDistribution {
 public:
-    LatencyPercentileDistribution(Microseconds resolution) : _resolution(resolution){};
+    LatencyPercentileDistribution(Microseconds resolution) : _resolution(resolution) {};
 
     // Adds the provided duration entry into the distribution
     void addEntry(Microseconds duration) {

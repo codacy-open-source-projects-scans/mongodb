@@ -31,9 +31,6 @@
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "cxxabi.h"
-#include <mutex>
-#include <system_error>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -48,14 +45,15 @@
 #include "mongo/s/query/exec/blocking_results_merger.h"
 #include "mongo/s/query/exec/results_merger_test_fixture.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/time_support.h"
+
+#include <mutex>
+#include <system_error>
 
 namespace mongo {
 
@@ -239,7 +237,7 @@ TEST_F(ResultsMergerTestFixture, ShouldBeInterruptibleDuringBlockingNext) {
         // Wait for the kill to schedule it's killCursors. It may schedule a getMore first before
         // cancelling it, so wait until the pending request is actually a killCursors.
     }
-    assertKillCusorsCmdHasCursorId(getNthPendingRequest(0u).cmdObj, 1);
+    assertKillCursorsCmdHasCursorId(getNthPendingRequest(0u).cmdObj, 1);
 
     // Run the callback for the killCursors. We don't actually inspect the value so we don't have to
     // schedule a response.

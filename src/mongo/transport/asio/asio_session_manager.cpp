@@ -29,7 +29,7 @@
 
 #include "mongo/transport/asio/asio_session_manager.h"
 
-#include "mongo/db/commands/server_status.h"
+#include "mongo/db/commands/server_status/server_status.h"
 #include "mongo/transport/hello_metrics.h"
 #include "mongo/transport/service_executor.h"
 #include "mongo/transport/service_executor_reserved.h"
@@ -68,14 +68,11 @@ auto& connections = *ServerStatusSectionBuilder<Connections>("connections");
 }  // namespace
 
 std::string AsioSessionManager::getClientThreadName(const Session& session) const {
-    using namespace fmt::literals;
-    return "conn{}"_format(session.id());
+    return fmt::format("conn{}", session.id());
 }
 
 void AsioSessionManager::configureServiceExecutorContext(Client* client,
                                                          bool isPrivilegedSession) const {
-    // TODO SERVER-77921: use the return value of `Session::isFromRouterPort()` to choose an
-    // instance of `ServiceEntryPoint`.
     auto seCtx = std::make_unique<ServiceExecutorContext>();
     seCtx->setThreadModel(ServiceExecutorContext::kSynchronous);
     seCtx->setCanUseReserved(isPrivilegedSession);
@@ -90,19 +87,21 @@ void AsioSessionManager::appendStats(BSONObjBuilder* bob) const {
         bob->append(n, static_cast<int>(v));
     };
 
-    appendInt("current", sessionCount);
+    appendInt("current", sessionCount - _sessionEstablishmentRateLimiter.queued());
     appendInt("available", maxOpenSessions() - sessionCount);
     appendInt("totalCreated", numCreatedSessions());
-    appendInt("rejected", numRejectedSessions());
+    appendInt("rejected", numRejectedSessions() + _sessionEstablishmentRateLimiter.rejected());
 
-    appendInt("active", getActiveOperations());
+    appendInt("active", getActiveOperations() - _sessionEstablishmentRateLimiter.queued());
+
+    _sessionEstablishmentRateLimiter.appendStatsConnections(bob);
 
     // Historically, this number may have differed from "current" since
     // some sessions would have used the non-threaded ServiceExecutorFixed.
     // Currently all sessions are threaded, so this number is redundant.
-    appendInt("threaded", sessionCount);
-    auto maxConnsOverride = serverGlobalParams.maxConnsOverride.makeSnapshot();
-    if (maxConnsOverride && !maxConnsOverride->empty()) {
+    appendInt("threaded", sessionCount - _sessionEstablishmentRateLimiter.queued());
+    auto maxIncomingConnsOverride = serverGlobalParams.maxIncomingConnsOverride.makeSnapshot();
+    if (maxIncomingConnsOverride && !maxIncomingConnsOverride->empty()) {
         appendInt("limitExempt", serviceExecutorStats.limitExempt.load());
     }
 
@@ -117,17 +116,39 @@ void AsioSessionManager::appendStats(BSONObjBuilder* bob) const {
     bob->append("loadBalanced", _loadBalancedConnections.get());
 }
 
+void AsioSessionManager::incrementLBConnections() {
+    _loadBalancedConnections.increment();
+}
+
+void AsioSessionManager::decrementLBConnections() {
+    _loadBalancedConnections.decrement();
+}
+
+/**
+ * In practice, we will never pass "isLoadBalancerPeer" on connect,
+ * because the client hasn't performed a "hello: {loadBalancer: true} yet.
+ *
+ * This increment does happen in CommonAsioSession::setisLoadBalancerPeer()
+ * in response to a hello command with a truthful loadBalancer option.
+ * This increment will then be balanced in the destructor further below.
+ *
+ * load_balancer_support::handleHello bridges the mongos hello with the
+ * setIsLoadBalancerPeer() function.
+ *
+ * Keep this phantom increment here as a natural bookend to the decrement
+ * in the destructor.
+ */
 void AsioSessionManager::onClientConnect(Client* client) {
     auto session = client->session();
-    if (session && session->isFromLoadBalancer()) {
-        _loadBalancedConnections.increment();
+    if (session && session->isLoadBalancerPeer()) {
+        incrementLBConnections();
     }
 }
 
 void AsioSessionManager::onClientDisconnect(Client* client) {
     auto session = client->session();
-    if (session && session->isFromLoadBalancer()) {
-        _loadBalancedConnections.decrement();
+    if (session && session->isLoadBalancerPeer()) {
+        decrementLBConnections();
     }
 }
 

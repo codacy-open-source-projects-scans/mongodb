@@ -16,12 +16,10 @@
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {
-    DataCenter,
-    delayMessagesBetweenDataCenters,
-    forceSyncSource
-} from "jstests/replsets/libs/sync_source.js";
+import {DataCenter, delayMessagesBetweenDataCenters, forceSyncSource} from "jstests/replsets/libs/sync_source.js";
 import {setLogVerbosity} from "jstests/replsets/rslib.js";
+
+const changeSyncSourceThresholdMillis = 50;
 
 const name = jsTestName();
 const rst = new ReplSetTest({
@@ -35,16 +33,17 @@ const rst = new ReplSetTest({
             // Set 'changeSyncSourceThresholdMillis' to a higher value to mitigate failures due to
             // network jitter. As we rely on ping times to select a sync source, a smaller threshold
             // may result in unexpected sync source selections due to small network delays.
-            // We now consider nodes with ping difference <20ms to be in the same data center.
-            changeSyncSourceThresholdMillis: 20,
-        }
+            // We now consider nodes with ping difference < changeSyncSourceThresholdMillis to be in
+            // the same data center.
+            changeSyncSourceThresholdMillis: changeSyncSourceThresholdMillis,
+        },
     },
     settings: {
         // Set the heartbeat interval to a low value to reduce the amount of time spent waiting for
         // a heartbeat from sync source candidates.
         heartbeatIntervalMillis: 100,
     },
-    useBridge: true
+    useBridge: true,
 });
 
 rst.startSet();
@@ -54,8 +53,9 @@ const primary = rst.getPrimary();
 const [testNode, secondary, farSecondary] = rst.getSecondaries();
 
 // The default WC is majority and this test can't satisfy majority writes.
-assert.commandWorked(primary.adminCommand(
-    {setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}, writeConcern: {w: "majority"}}));
+assert.commandWorked(
+    primary.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}, writeConcern: {w: "majority"}}),
+);
 rst.awaitReplication();
 
 const primaryDB = primary.getDB(name);
@@ -65,10 +65,6 @@ assert.commandWorked(primaryColl.insert({"steady": "state"}, {writeConcern: {w: 
 
 // Ensure we see the sync source progress logs.
 setLogVerbosity(rst.nodes, {"replication": {"verbosity": 2}});
-
-let serverStatus = assert.commandWorked(testNode.adminCommand({serverStatus: 1})).metrics.repl;
-const numSyncSourceChanges =
-    serverStatus.syncSource.numSyncSourceChangesDueToSignificantlyCloserNode;
 
 jsTestLog("Forcing sync sources for the secondaries");
 forceSyncSource(rst, secondary, primary);
@@ -89,14 +85,16 @@ const eastDC = new DataCenter("east", [testNode]);
 // data center and central data center very minimal.
 delayMessagesBetweenDataCenters(westDC, centralDC, 50 /* delayMillis */);
 delayMessagesBetweenDataCenters(centralDC, eastDC, 50 /* delayMillis */);
-delayMessagesBetweenDataCenters(westDC, eastCentralDC, 52 /* delayMillis */);
-delayMessagesBetweenDataCenters(eastCentralDC, eastDC, 48 /* delayMillis */);
-delayMessagesBetweenDataCenters(centralDC, eastCentralDC, 2 /* delayMillis */);
+delayMessagesBetweenDataCenters(westDC, eastCentralDC, 55 /* delayMillis */);
+delayMessagesBetweenDataCenters(eastCentralDC, eastDC, 45 /* delayMillis */);
+delayMessagesBetweenDataCenters(centralDC, eastCentralDC, 5 /* delayMillis */);
 delayMessagesBetweenDataCenters(westDC, eastDC, 300 /* delayMillis */);
 
 // Hang 'testNode' in the oplog fetcher to ensure that sync source candidates are ahead of us.
-const hangOplogFetcherBeforeAdvancingLastFetched =
-    configureFailPoint(testNode, "hangOplogFetcherBeforeAdvancingLastFetched");
+const hangOplogFetcherBeforeAdvancingLastFetched = configureFailPoint(
+    testNode,
+    "hangOplogFetcherBeforeAdvancingLastFetched",
+);
 
 // Do a write to reduce the time spent waiting for a batch.
 assert.commandWorked(primaryColl.insert({"make": "batch"}, {writeConcern: {w: 3}}));
@@ -104,12 +102,15 @@ assert.commandWorked(primaryColl.insert({"make": "batch"}, {writeConcern: {w: 3}
 hangOplogFetcherBeforeAdvancingLastFetched.wait();
 testNodeForceSyncSource.off();
 
-const advancedTimestamp =
-    assert.commandWorked(primaryColl.runCommand("insert", {documents: [{"advance": "timestamp"}]}))
-        .operationTime;
+const advancedTimestamp = assert.commandWorked(
+    primaryColl.runCommand("insert", {documents: [{"advance": "timestamp"}]}),
+).operationTime;
 jsTestLog(
-    `Waiting for 'testNode' to receive heartbeats. The target sync source should have advanced its optime to ${
-        tojson(advancedTimestamp)}`);
+    `Waiting for 'testNode' to receive heartbeats. The target sync source should have advanced its optime to ${tojson(
+        advancedTimestamp,
+    )}`,
+);
+
 assert.soon(() => {
     const replSetGetStatus = assert.commandWorked(testNode.adminCommand({replSetGetStatus: 1}));
 
@@ -118,27 +119,63 @@ assert.soon(() => {
     // target sync source is ahead of itself, and as a result, it can decide to sync from the target
     // sync source.
     const primaryTimestamp = replSetGetStatus.members[0].optime.ts;
-    const receivedCentralHb = (bsonWoCompare(primaryTimestamp, advancedTimestamp) >= 0);
+    const receivedCentralHb = bsonWoCompare(primaryTimestamp, advancedTimestamp) >= 0;
+
+    if (!receivedCentralHb) {
+        jsTestLog("receivedCentralHb check failed");
+        return false;
+    }
 
     // Wait for enough heartbeats from the test node's current sync source so that our understanding
     // of the ping time is over 60 ms. This makes it likely to re-evaluate the sync source.
     const syncSourcePingTime = replSetGetStatus.members[3].pingMs;
-    const receivedSyncSourceHb = (syncSourcePingTime > 60);
+    const receivedSyncSourceHb = syncSourcePingTime > 60;
+
+    if (!receivedSyncSourceHb) {
+        jsTestLog("receivedSyncSourceHb check failed: syncSourcePingTime " + syncSourcePingTime);
+        return false;
+    }
 
     // Wait for enough heartbeats from the desired sync source so that our understanding of the
     // ping time to that node is at least 'changeSyncSourceThresholdMillis' less than the ping time
     // to our current sync source.
     const primaryPingTime = replSetGetStatus.members[0].pingMs;
-    const exceedsChangeSyncSourceThreshold = (syncSourcePingTime - primaryPingTime > 20);
+    const exceedsChangeSyncSourceThreshold = syncSourcePingTime - primaryPingTime > changeSyncSourceThresholdMillis;
+
+    if (!exceedsChangeSyncSourceThreshold) {
+        jsTestLog(
+            "exceedsChangeSyncSourceThreshold check failed: syncSourcePingTime " +
+                syncSourcePingTime +
+                " primaryPingTime " +
+                primaryPingTime,
+        );
+        return false;
+    }
+
     // Wait for primary ping to be larger than secondary ping, and their difference to be
     // considerably less than 'changeSyncSourceThresholdMillis' to ensure they are understood
     // as nodes in the same data center.
     const secondaryPingTime = replSetGetStatus.members[2].pingMs;
     const centralWithinChangeSyncSourceThreshold =
-        (primaryPingTime - secondaryPingTime >= 0) && (primaryPingTime - secondaryPingTime < 20);
+        primaryPingTime - secondaryPingTime >= 0 &&
+        primaryPingTime - secondaryPingTime < changeSyncSourceThresholdMillis;
 
-    return (receivedCentralHb && receivedSyncSourceHb && exceedsChangeSyncSourceThreshold &&
-            centralWithinChangeSyncSourceThreshold);
+    if (!centralWithinChangeSyncSourceThreshold) {
+        jsTestLog(
+            "centralWithinChangeSyncSourceThreshold check failed: primaryPing " +
+                primaryPingTime +
+                ", secondaryPing " +
+                secondaryPingTime,
+        );
+        return false;
+    }
+
+    return (
+        receivedCentralHb &&
+        receivedSyncSourceHb &&
+        exceedsChangeSyncSourceThreshold &&
+        centralWithinChangeSyncSourceThreshold
+    );
 });
 
 const replSetGetStatus = assert.commandWorked(testNode.adminCommand({replSetGetStatus: 1}));
@@ -148,10 +185,5 @@ hangOplogFetcherBeforeAdvancingLastFetched.off();
 
 jsTestLog("Verifying that the node eventually syncs from primary");
 rst.awaitSyncSource(testNode, primary);
-
-// Verify that the metric was incremented correctly.
-serverStatus = assert.commandWorked(testNode.adminCommand({serverStatus: 1})).metrics.repl;
-assert.eq(numSyncSourceChanges + 1,
-          serverStatus.syncSource.numSyncSourceChangesDueToSignificantlyCloserNode);
 
 rst.stopSet();

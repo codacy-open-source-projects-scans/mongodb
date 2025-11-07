@@ -14,22 +14,19 @@
  * ]
  */
 
-var testServer = MongoRunner.runMongod({setParameter: "javascriptProtection=true"});
-assert.neq(
-    null, testServer, "failed to start mongod with --setParameter=javascriptProtection=true");
+let testServer = MongoRunner.runMongod({setParameter: "javascriptProtection=true"});
+assert.neq(null, testServer, "failed to start mongod with --setParameter=javascriptProtection=true");
 
 var db = testServer.getDB("test");
-var t = db.js_protection;
+let t = db.js_protection;
 
 function assertMongoClientCorrect() {
     /* eslint-disable */
-    var functionToEval = function() {
+    var functionToEval = function () {
         var doc = db.js_protection.findOne({_id: 0});
         assert.neq(null, doc);
         assert(doc.hasOwnProperty("myFunc"));
-        assert.neq("function",
-                   typeof doc.myFunc,
-                   "value of BSON type Code shouldn't have been eval()ed automatically");
+        assert.neq("function", typeof doc.myFunc, "value of BSON type Code shouldn't have been eval()ed automatically");
 
         assert.eq("undefined", typeof addOne, "addOne function has already been defined");
         db.loadServerScripts();
@@ -38,33 +35,37 @@ function assertMongoClientCorrect() {
     };
     /* eslint-enable */
 
-    var exitCode = runMongoProgram("mongo",
-                                   "--port",
-                                   testServer.port,
-                                   "--enableJavaScriptProtection",
-                                   "--eval",
-                                   "(" + functionToEval.toString() + ")();");
+    let exitCode = runMongoProgram(
+        "mongo",
+        "--port",
+        testServer.port,
+        "--enableJavaScriptProtection",
+        "--eval",
+        "(" + functionToEval.toString() + ")();",
+    );
     assert.eq(0, exitCode);
 }
 
 function assertNoStoredWhere() {
     t.insertOne({name: "testdoc", val: 0, y: 0});
 
-    var res = t.update({$where: "addOne(this.val) === 1"}, {$set: {y: 100}}, false, true);
+    let res = t.update({$where: "addOne(this.val) === 1"}, {$set: {y: 100}}, false, true);
     assert.writeError(res);
 
-    var doc = t.findOne({name: "testdoc"});
+    let doc = t.findOne({name: "testdoc"});
     assert.neq(null, doc);
     assert.eq(0, doc.y, tojson(doc));
 
-    res = t.update({
-        $where: function() {
-            return this.val === 0;
-        }
-    },
-                   {$set: {y: 100}},
-                   false,
-                   true);
+    res = t.update(
+        {
+            $where: function () {
+                return this.val === 0;
+            },
+        },
+        {$set: {y: 100}},
+        false,
+        true,
+    );
     assert.commandWorked(res);
 
     doc = t.findOne({name: "testdoc"});
@@ -78,16 +79,16 @@ function assertNoStoredWhere() {
 
 db.system.js.insertOne({
     _id: "addOne",
-    value: function(x) {
+    value: function (x) {
         return x + 1;
-    }
+    },
 });
 
 t.insertOne({
     _id: 0,
-    myFunc: function() {
+    myFunc: function () {
         return "testval";
-    }
+    },
 });
 
 assertMongoClientCorrect();

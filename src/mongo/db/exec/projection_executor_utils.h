@@ -29,10 +29,6 @@
 
 #pragma once
 
-#include <string>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -40,6 +36,11 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/util/modules.h"
+
+#include <string>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo::projection_executor_utils {
 /**
@@ -53,9 +54,9 @@ bool applyProjectionToOneField(projection_executor::ProjectionExecutor* executor
  * if the projection would allow that field to remain in a document.
  **/
 template <typename Container>
-stdx::unordered_set<std::string> applyProjectionToFields(
-    projection_executor::ProjectionExecutor* executor, Container const& fields) {
-    stdx::unordered_set<std::string> out;
+std::set<std::string> applyProjectionToFields(projection_executor::ProjectionExecutor* executor,
+                                              Container const& fields) {
+    std::set<std::string> out;
     for (const auto& field : fields) {
         if (applyProjectionToOneField(executor, field)) {
             out.insert(field);

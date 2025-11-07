@@ -31,8 +31,9 @@
 
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+namespace MONGO_MOD_PUB mongo {
 
 class OperationContext;
 
@@ -40,7 +41,7 @@ class OperationContext;
  * An iterator class that traverses backwards through a transaction's oplog entries by following the
  * "prevOpTime" link in each entry.
  */
-class TransactionHistoryIteratorBase {
+class MONGO_MOD_OPEN TransactionHistoryIteratorBase {
 public:
     virtual ~TransactionHistoryIteratorBase() = default;
 
@@ -67,8 +68,9 @@ class TransactionHistoryIterator : public TransactionHistoryIteratorBase {
 public:
     /**
      * Creates a new iterator starting with an oplog entry with the given start opTime.
+     * TODO SERVER-104970: If permitYield can't be deleted, change the default to 'false'.
      */
-    TransactionHistoryIterator(repl::OpTime startingOpTime, bool permitYield = false);
+    TransactionHistoryIterator(repl::OpTime startingOpTime, bool permitYield = true);
     ~TransactionHistoryIterator() override = default;
 
     bool hasNext() const override;
@@ -84,9 +86,10 @@ private:
     // Clients can set this to allow PlanExecutors created by this TransactionHistoryIterator to
     // have a YIELD_AUTO yield policy. It is only safe to set this if next() will never be called
     // while holding a lock that should not be yielded.
+    // TODO SERVER-104970: Determine whether this can be removed.
     bool _permitYield;
 
     repl::OpTime _nextOpTime;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

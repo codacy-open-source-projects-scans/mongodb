@@ -29,22 +29,6 @@
 
 #pragma once
 
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <map>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <tuple>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -55,14 +39,15 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/repl/auto_get_rstl_for_stepup_stepdown.h"
 #include "mongo/db/repl/delayable_timeout_callback.h"
-#include "mongo/db/repl/hello_response.h"
-#include "mongo/db/repl/initial_syncer.h"
-#include "mongo/db/repl/initial_syncer_interface.h"
+#include "mongo/db/repl/hello/hello_response.h"
+#include "mongo/db/repl/initial_sync/initial_syncer.h"
+#include "mongo/db/repl/initial_sync/initial_syncer_interface.h"
+#include "mongo/db/repl/intent_registry.h"
 #include "mongo/db/repl/last_vote.h"
 #include "mongo/db/repl/member_config.h"
 #include "mongo/db/repl/member_data.h"
@@ -80,7 +65,7 @@
 #include "mongo/db/repl/replication_coordinator_external_state.h"
 #include "mongo/db/repl/replication_metrics_gen.h"
 #include "mongo/db/repl/replication_process.h"
-#include "mongo/db/repl/split_horizon.h"
+#include "mongo/db/repl/split_horizon/split_horizon.h"
 #include "mongo/db/repl/split_prepare_session_manager.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/sync_source_resolver.h"
@@ -88,6 +73,7 @@
 #include "mongo/db/repl/topology_coordinator.h"
 #include "mongo/db/repl/update_position_args.h"
 #include "mongo/db/repl/vote_requester.h"
+#include "mongo/db/replication_state_transition_lock_guard.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/write_concern_options.h"
@@ -101,17 +87,36 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/stdx/unordered_set.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/interruptible.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
+#include "mongo/util/observable_mutex.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 #include "mongo/util/versioned_value.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
 
 namespace mongo {
 
@@ -176,7 +181,8 @@ class SyncSourceFeedback;
 class StorageInterface;
 class TopologyCoordinator;
 
-class ReplicationCoordinatorImpl : public ReplicationCoordinator {
+class MONGO_MOD_PUB ReplicationCoordinatorImpl : public ReplicationCoordinator,
+                                                 public StepUpStepDownCoordinator {
     ReplicationCoordinatorImpl(const ReplicationCoordinatorImpl&) = delete;
     ReplicationCoordinatorImpl& operator=(const ReplicationCoordinatorImpl&) = delete;
 
@@ -335,7 +341,6 @@ public:
     void appendSecondaryInfoData(BSONObjBuilder* result) override;
 
     ReplSetConfig getConfig() const override;
-    ReplSetConfig getConfig(WithLock) const;
 
     ConnectionString getConfigConnectionString() const override;
 
@@ -425,6 +430,9 @@ public:
                              const OpTime& lastOpTimeFromClient,
                              BSONObjBuilder* builder) const override;
 
+
+    void setOldestTimestamp(const Timestamp& timestamp) override;
+
     Status processHeartbeatV1(const ReplSetHeartbeatArgsV1& args,
                               ReplSetHeartbeatResponse* response) override;
 
@@ -505,7 +513,7 @@ public:
                                             OnRemoteCmdScheduledFn onRemoteCmdScheduled,
                                             OnRemoteCmdCompleteFn onRemoteCmdComplete) override;
 
-    void restartScheduledHeartbeats_forTest() override;
+    MONGO_MOD_PRIVATE void restartScheduledHeartbeats_forTest() override;
 
     void recordIfCWWCIsSetOnConfigServerOnStartup(OperationContext* opCtx) final;
 
@@ -515,12 +523,12 @@ public:
 
     // ==================== Private API ===================
     // Called by AutoGetRstlForStepUpStepDown before taking RSTL when making stepdown transitions
-    void autoGetRstlEnterStepDown();
+    MONGO_MOD_PRIVATE void autoGetRstlEnterStepDown() final;
 
     // Called by AutoGetRstlForStepUpStepDown before releasing RSTL when making stepdown
     // transitions.  Also called in case of failure to acquire RSTL.  There will be one call to this
     // method for each call to autoGetRSTLEnterStepDown.
-    void autoGetRstlExitStepDown();
+    MONGO_MOD_PRIVATE void autoGetRstlExitStepDown() final;
 
     // ================== Test support API ===================
 
@@ -528,69 +536,69 @@ public:
      * If called after startReplication(), blocks until all asynchronous
      * activities associated with replication start-up complete.
      */
-    void waitForStartUpComplete_forTest();
+    MONGO_MOD_PRIVATE void waitForStartUpComplete_forTest();
 
     /**
      * Gets the replica set configuration in use by the node.
      */
-    ReplSetConfig getReplicaSetConfig_forTest();
+    MONGO_MOD_PRIVATE ReplSetConfig getReplicaSetConfig_forTest();
 
     /**
      * Returns scheduled time of election timeout callback.
      * Returns Date_t() if callback is not scheduled.
      */
-    Date_t getElectionTimeout_forTest() const;
+    MONGO_MOD_NEEDS_REPLACEMENT Date_t getElectionTimeout_forTest() const;
 
     /*
      * Return a randomized offset amount that is scaled in proportion to the size of the
      * _electionTimeoutPeriod.
      */
-    Milliseconds getRandomizedElectionOffset_forTest();
+    MONGO_MOD_PRIVATE Milliseconds getRandomizedElectionOffset_forTest();
 
     /**
      * Returns the scheduled time of the priority takeover callback. If a priority
      * takeover has not been scheduled, returns boost::none.
      */
-    boost::optional<Date_t> getPriorityTakeover_forTest() const;
+    MONGO_MOD_PRIVATE boost::optional<Date_t> getPriorityTakeover_forTest() const;
 
     /**
      * Returns the scheduled time of the catchup takeover callback. If a catchup
      * takeover has not been scheduled, returns boost::none.
      */
-    boost::optional<Date_t> getCatchupTakeover_forTest() const;
+    MONGO_MOD_PRIVATE boost::optional<Date_t> getCatchupTakeover_forTest() const;
 
     /**
      * Returns the catchup takeover CallbackHandle.
      */
-    executor::TaskExecutor::CallbackHandle getCatchupTakeoverCbh_forTest() const;
+    MONGO_MOD_PRIVATE executor::TaskExecutor::CallbackHandle getCatchupTakeoverCbh_forTest() const;
 
     /**
      * Returns the cached horizon topology version from most recent SplitHorizonChange.
      */
-    int64_t getLastHorizonChange_forTest() const;
+    MONGO_MOD_PRIVATE int64_t getLastHorizonChange_forTest() const;
 
     /**
      * Simple wrappers around _setLastOptimeForMember to make it easier to test.
      */
-    Status setLastAppliedOptime_forTest(long long cfgVer,
-                                        long long memberId,
-                                        const OpTime& opTime,
-                                        Date_t wallTime = Date_t());
-    Status setLastWrittenOptime_forTest(long long cfgVer,
-                                        long long memberId,
-                                        const OpTime& opTime,
-                                        Date_t wallTime = Date_t());
-    Status setLastDurableOptime_forTest(long long cfgVer,
-                                        long long memberId,
-                                        const OpTime& opTime,
-                                        Date_t wallTime = Date_t());
+    MONGO_MOD_PRIVATE Status setLastAppliedOptime_forTest(long long cfgVer,
+                                                          long long memberId,
+                                                          const OpTime& opTime,
+                                                          Date_t wallTime = Date_t());
+    MONGO_MOD_PRIVATE Status setLastWrittenOptime_forTest(long long cfgVer,
+                                                          long long memberId,
+                                                          const OpTime& opTime,
+                                                          Date_t wallTime = Date_t());
+    MONGO_MOD_PRIVATE Status setLastDurableOptime_forTest(long long cfgVer,
+                                                          long long memberId,
+                                                          const OpTime& opTime,
+                                                          Date_t wallTime = Date_t());
 
     /**
      * Simple test wrappers that expose private methods.
      */
-    void handleHeartbeatResponse_forTest(BSONObj response,
-                                         int targetIndex,
-                                         Milliseconds ping = Milliseconds(100));
+    MONGO_MOD_PRIVATE void handleHeartbeatResponse_forTest(BSONObj response,
+                                                           int targetIndex,
+                                                           Milliseconds ping = Milliseconds(100));
 
     /**
      * Non-blocking version of updateTerm.
@@ -598,45 +606,52 @@ public:
      * When the operation is complete (waitForEvent() returns), 'updateResult' will be set
      * to a status telling if the term increased or a stepdown was triggered.
      */
-    executor::TaskExecutor::EventHandle updateTerm_forTest(
+    MONGO_MOD_PRIVATE executor::TaskExecutor::EventHandle updateTerm_forTest(
         long long term, TopologyCoordinator::UpdateTermResult* updateResult);
 
     /**
      * If called after ElectionState::start(), blocks until all asynchronous
      * activities associated with election complete.
      */
-    void waitForElectionFinish_forTest();
+    MONGO_MOD_PRIVATE void waitForElectionFinish_forTest();
 
     /**
      * If called after ElectionState::start(), blocks until all asynchronous
      * activities associated with election dry run complete, including writing
      * last vote and scheduling the real election.
      */
-    void waitForElectionDryRunFinish_forTest();
+    MONGO_MOD_PRIVATE void waitForElectionDryRunFinish_forTest();
 
     /**
      * Waits until a stepdown attempt has begun. Callers should ensure that the stepdown attempt
      * won't fully complete before this method is called, or this method may never return.
      */
-    void waitForStepDownAttempt_forTest();
+    MONGO_MOD_PRIVATE void waitForStepDownAttempt_forTest();
 
     /**
      * Cancels all future processing work of the VoteRequester and sets the election state to
      * kCanceled.
      */
-    void cancelElection_forTest();
+    MONGO_MOD_PRIVATE void cancelElection_forTest();
+
+
+    /**
+     * Returns a pointer to the topology coordinator used by this replication coordinator.
+     */
+    MONGO_MOD_PRIVATE TopologyCoordinator* getTopologyCoordinator_forTest();
 
     /**
      * Runs the repl set initiate internal function.
      */
-    Status runReplSetInitiate_forTest(const BSONObj& configObj, BSONObjBuilder* resultObj);
+    MONGO_MOD_PRIVATE Status runReplSetInitiate_forTest(const BSONObj& configObj,
+                                                        BSONObjBuilder* resultObj);
 
     /**
      * Implementation of an interface used to synchronize changes to custom write concern tags in
      * the config and custom default write concern settings.
      * See base class fore more information.
      */
-    class WriteConcernTagChangesImpl : public WriteConcernTagChanges {
+    class MONGO_MOD_PRIVATE WriteConcernTagChangesImpl : public WriteConcernTagChanges {
     public:
         WriteConcernTagChangesImpl() = default;
         ~WriteConcernTagChangesImpl() override = default;
@@ -704,7 +719,10 @@ public:
 
     void setConsistentDataAvailable(OperationContext* opCtx, bool isDataMajorityCommitted) override;
     bool isDataConsistent() const override;
-    void setConsistentDataAvailable_forTest();
+    MONGO_MOD_PRIVATE void setConsistentDataAvailable_forTest();
+
+    MONGO_MOD_PRIVATE ReplicationCoordinatorExternalState* getExternalState_forTest();
+    MONGO_MOD_PRIVATE executor::TaskExecutor* getReplExecutor_forTest();
 
 private:
     using CallbackFn = executor::TaskExecutor::CallbackFn;
@@ -760,119 +778,6 @@ private:
         kActionStartSingleNodeElection
     };
 
-    // This object acquires RSTL in X mode to perform state transition to (step up)/from (step down)
-    // primary. In order to acquire RSTL, it also starts "RstlKillOpthread" which kills conflicting
-    // operations (user/system) and aborts stashed running transactions.
-    class AutoGetRstlForStepUpStepDown {
-    public:
-        AutoGetRstlForStepUpStepDown(
-            ReplicationCoordinatorImpl* repl,
-            OperationContext* opCtx,
-            ReplicationCoordinator::OpsKillingStateTransitionEnum stateTransition,
-            Date_t deadline = Date_t::max());
-
-        ~AutoGetRstlForStepUpStepDown();
-
-        // Disallows copying.
-        AutoGetRstlForStepUpStepDown(const AutoGetRstlForStepUpStepDown&) = delete;
-        AutoGetRstlForStepUpStepDown& operator=(const AutoGetRstlForStepUpStepDown&) = delete;
-
-        /*
-         * Releases RSTL lock.
-         */
-        void rstlRelease();
-
-        /*
-         * Reacquires RSTL lock.
-         */
-        void rstlReacquire();
-
-        /*
-         * Returns _totalOpsKilled value.
-         */
-        size_t getTotalOpsKilled() const;
-
-        /*
-         * Increments _totalOpsKilled by val.
-         */
-        void incrementTotalOpsKilled(size_t val = 1);
-
-        /*
-         * Returns _totalOpsRunning value.
-         */
-        size_t getTotalOpsRunning() const;
-
-        /*
-         * Increments _totalOpsRunning by val.
-         */
-        void incrementTotalOpsRunning(size_t val = 1);
-
-        /*
-         * Returns the step up/step down opCtx.
-         */
-        const OperationContext* getOpCtx() const;
-
-    private:
-        /**
-         * It will spawn a new thread killOpThread to kill operations that conflict with state
-         * transitions (step up and step down).
-         */
-        void _startKillOpThread();
-
-        /**
-         * On state transition, we need to kill all write operations and all transactional
-         * operations, so that unprepared and prepared transactions can release or yield their
-         * locks. The required ordering between step up/step down steps are:
-         * 1) Enqueue RSTL in X mode.
-         * 2) Kill all conflicting operations.
-         *       - Write operation that takes global lock in IX and X mode.
-         *       - Read operations that takes global lock in S mode.
-         *       - Operations(read/write) that are blocked on prepare conflict.
-         * 3) Abort unprepared transactions.
-         * 4) Repeat step 2) and 3) until the step up/step down thread can acquire RSTL.
-         * 5) Yield locks of all prepared transactions. This applies only to step down as on
-         * secondary we currently yield locks for prepared transactions.
-         *
-         * Since prepared transactions don't hold RSTL, step 1) to step 3) make sure all
-         * running transactions that may hold RSTL finish, get killed or yield their locks,
-         * so that we can acquire RSTL at step 4). Holding the locks of prepared transactions
-         * until step 5) guarantees if any conflict operations (e.g. DDL operations) failed
-         * to be killed for any reason, we will get a deadlock instead of a silent data corruption.
-         *
-         * Loops continuously to kill all conflicting operations. And, aborts all stashed (inactive)
-         * transactions.
-         * Terminates once killSignaled is set true.
-         */
-        void _killOpThreadFn();
-
-        /*
-         * Signals killOpThread to stop killing operations.
-         */
-        void _stopAndWaitForKillOpThread();
-
-        ReplicationCoordinatorImpl* const _replCord;  // not owned.
-        // step up/step down opCtx.
-        OperationContext* const _opCtx;  // not owned.
-        // This field is optional because we need to start killOpThread to kill operations after
-        // RSTL enqueue.
-        boost::optional<ReplicationStateTransitionLockGuard> _rstlLock;
-        // Thread that will run killOpThreadFn().
-        std::unique_ptr<stdx::thread> _killOpThread;
-        // Tracks number of operations killed on step up / step down.
-        size_t _totalOpsKilled = 0;
-        // Tracks number of operations left running on step up / step down.
-        size_t _totalOpsRunning = 0;
-        // Protects killSignaled and stopKillingOps cond. variable.
-        stdx::mutex _mutex;
-        // Signals thread about the change of killSignaled value.
-        stdx::condition_variable _stopKillingOps;
-        // Once this is set to true, the killOpThreadFn method will terminate.
-        bool _killSignaled = false;
-        // The state transition that is in progress. Should never be set to rollback within this
-        // class.
-        ReplicationCoordinator::OpsKillingStateTransitionEnum _stateTransition;
-    };
-
     struct Waiter {
         Promise<void> promise;
         boost::optional<WriteConcernOptions> writeConcern;
@@ -903,8 +808,6 @@ private:
             WithLock lk,
             std::function<bool(WithLock, const OpTime&, const SharedWaiterHandle&)> func,
             boost::optional<OpTime> opTime = boost::none);
-        // Signals all waiters from the list and fulfills promises with OK status.
-        void setValueAll(WithLock lk);
         // Signals all waiters from the list and fulfills promises with Error status.
         void setErrorAll(WithLock lk, Status status);
 
@@ -941,8 +844,6 @@ private:
             WithLock lk,
             std::function<bool(WithLock, const OpTime&, const WriteConcernOptions&)> func,
             boost::optional<OpTime> opTime = boost::none);
-        // Signals all waiters from the list and fulfills promises with OK status.
-        void setValueAll(WithLock lk);
         // Signals all waiters from the list and fulfills promises with Error status.
         void setErrorAll(WithLock lk, Status status);
 
@@ -1301,7 +1202,7 @@ private:
      * When prioritized is set to true, the reporter will try to schedule an updatePosition request
      * even there is already one in flight.
      */
-    void _reportUpstream(stdx::unique_lock<stdx::mutex> lock, bool prioritized);
+    void _reportUpstream(stdx::unique_lock<ObservableMutex<stdx::mutex>> lock, bool prioritized);
 
     /**
      * Helpers to set the last written, applied and durable OpTime.
@@ -1337,6 +1238,9 @@ private:
      */
     void _handleHeartbeatResponse(const executor::TaskExecutor::RemoteCommandCallbackArgs& cbData,
                                   const std::string& replSetName);
+
+    rss::consensus::ReplicationStateTransitionGuard _killConflictingOperations(
+        rss::consensus::IntentRegistry::InterruptionType interrupt, OperationContext* opCtx);
 
     void _trackHeartbeatHandle(WithLock,
                                const StatusWith<executor::TaskExecutor::CallbackHandle>& handle,
@@ -1541,14 +1445,6 @@ private:
     executor::TaskExecutor::EventHandle _stepDownStart();
 
     /**
-     * kill all conflicting operations that are blocked either on prepare conflict or have taken
-     * global lock not in MODE_IS. The conflicting operations can be either user or system
-     * operations marked as killable.
-     */
-    void _killConflictingOpsOnStepUpAndStepDown(AutoGetRstlForStepUpStepDown* arsc,
-                                                ErrorCodes::Error reason);
-
-    /**
      * Completes a step-down of the current node.  Must be run with a global
      * shared or global exclusive lock.
      * Signals 'finishedEvent' on successful completion.
@@ -1618,10 +1514,10 @@ private:
      *
      * Requires "lock" to own _mutex, and returns the same unique_lock.
      */
-    stdx::unique_lock<stdx::mutex> _handleHeartbeatResponseAction(
+    stdx::unique_lock<ObservableMutex<stdx::mutex>> _handleHeartbeatResponseAction(
         const HeartbeatResponseAction& action,
         const StatusWith<ReplSetHeartbeatResponse>& responseStatus,
-        stdx::unique_lock<stdx::mutex> lock);
+        stdx::unique_lock<ObservableMutex<stdx::mutex>> lock);
 
     /**
      * Updates the last committed OpTime to be 'committedOpTime' if it is more recent than the
@@ -1758,12 +1654,6 @@ private:
     EventHandle _makeEvent();
 
     /**
-     * Wrap a function into executor callback.
-     * If the callback is cancelled, the given function won't run.
-     */
-    executor::TaskExecutor::CallbackFn _wrapAsCallbackFn(const std::function<void()>& work);
-
-    /**
      * Finish catch-up mode and start drain mode.
      */
     void _enterDrainMode(WithLock);
@@ -1880,7 +1770,7 @@ private:
     // (I)  Independently synchronized, see member variable comment.
 
     // Protects member data of this ReplicationCoordinator.
-    mutable stdx::mutex _mutex;  // (S)
+    mutable ObservableMutex<stdx::mutex> _mutex;  // (S)
 
     // Handles to actively queued heartbeats.
     size_t _maxSeenHeartbeatQSize = 0;
@@ -2083,6 +1973,7 @@ private:
     // from an unstable checkpoint.
     AtomicWord<bool> _isDataConsistent{false};
 
+    rss::consensus::IntentRegistry& _intentRegistry;
     /**
      * Manages tracking for whether this node is able to serve (non-stale) majority reads with
      * primary read preference.

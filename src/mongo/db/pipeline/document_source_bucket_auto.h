@@ -29,37 +29,29 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstdint>
-#include <exception>
-#include <memory>
-#include <set>
-#include <system_error>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
-#include "mongo/db/pipeline/accumulator.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/granularity_rounder.h"
-#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/db/sorter/sorter.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
+
+#include <cstdint>
+#include <set>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -79,11 +71,13 @@ public:
     const char* getSourceName() const final;
     boost::intrusive_ptr<DocumentSource> optimize() final;
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kBucketAuto;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         return {StreamType::kBlocking,
                 PositionRequirement::kNone,
                 HostTypeRequirement::kNone,
@@ -102,8 +96,6 @@ public:
         return DistributedPlanLogic{nullptr, this, boost::none};
     }
 
-    static const uint64_t kDefaultMaxMemoryUsageBytes = 100 * 1024 * 1024;
-
     /**
      * Convenience method to create a $bucketAuto stage.
      *
@@ -115,8 +107,7 @@ public:
         const boost::intrusive_ptr<Expression>& groupByExpression,
         int numBuckets,
         std::vector<AccumulationStatement> accumulationStatements = {},
-        const boost::intrusive_ptr<GranularityRounder>& granularityRounder = nullptr,
-        uint64_t maxMemoryUsageBytes = kDefaultMaxMemoryUsageBytes);
+        const boost::intrusive_ptr<GranularityRounder>& granularityRounder = nullptr);
 
     /**
      * Parses a $bucketAuto stage from the user-supplied BSON.
@@ -137,81 +128,22 @@ public:
     const std::vector<AccumulationStatement>& getAccumulationStatements() const;
     std::vector<AccumulationStatement>& getMutableAccumulationStatements();
 
-protected:
-    GetNextResult doGetNext() final;
-    void doDispose() final;
-
 private:
+    friend boost::intrusive_ptr<exec::agg::Stage> documentSourceBucketAutoToStageFn(
+        const boost::intrusive_ptr<DocumentSource>& documentSource);
+
     DocumentSourceBucketAuto(const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
                              const boost::intrusive_ptr<Expression>& groupByExpression,
                              int numBuckets,
                              std::vector<AccumulationStatement> accumulationStatements,
-                             const boost::intrusive_ptr<GranularityRounder>& granularityRounder,
-                             uint64_t maxMemoryUsageBytes);
+                             const boost::intrusive_ptr<GranularityRounder>& granularityRounder);
 
-    // struct for holding information about a bucket.
-    struct Bucket {
-        Bucket(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-               Value min,
-               Value max,
-               const std::vector<AccumulationStatement>& accumulationStatements);
-        Value _min;
-        Value _max;
-        std::vector<boost::intrusive_ptr<AccumulatorState>> _accums;
-    };
+    std::shared_ptr<std::vector<AccumulationStatement>> _accumulatedFields;
 
-    struct BucketDetails {
-        int currentBucketNum;
-        long long approxBucketSize = 0;
-        boost::optional<Value> previousMax;
-        boost::optional<std::pair<Value, Document>> currentMin;
-    };
-
-    /**
-     * Consumes all of the documents from the source in the pipeline and sorts them by their
-     * 'groupBy' value. This method might not be able to finish populating the sorter in a single
-     * call if 'pSource' returns a DocumentSource::GetNextResult::kPauseExecution, so this returns
-     * the last GetNextResult encountered, which may be either kEOF or kPauseExecution.
-     */
-    GetNextResult populateSorter();
-
-    void initializeBucketIteration();
-
-    /**
-     * Computes the 'groupBy' expression value for 'doc'.
-     */
-    Value extractKey(const Document& doc);
-
-    /**
-     * Returns the next bucket if exists. boost::none if none exist.
-     */
-    boost::optional<Bucket> populateNextBucket();
-
-    boost::optional<std::pair<Value, Document>> adjustBoundariesAndGetMinForNextBucket(
-        Bucket* currentBucket);
-    /**
-     * Adds the document in 'entry' to 'bucket' by updating the accumulators in 'bucket'.
-     */
-    void addDocumentToBucket(const std::pair<Value, Document>& entry, Bucket& bucket);
-
-    /**
-     * Makes a document using the information from bucket. This is what is returned when getNext()
-     * is called.
-     */
-    Document makeDocument(const Bucket& bucket);
-
-    std::unique_ptr<Sorter<Value, Document>> _sorter;
-    std::unique_ptr<Sorter<Value, Document>::Iterator> _sortedInput;
-
-    std::vector<AccumulationStatement> _accumulatedFields;
-
-    uint64_t _maxMemoryUsageBytes;
-    bool _populated = false;
+    std::shared_ptr<bool> _populated;
     boost::intrusive_ptr<Expression> _groupByExpression;
     boost::intrusive_ptr<GranularityRounder> _granularityRounder;
     int _nBuckets;
-    long long _nDocuments = 0;
-    BucketDetails _currentBucketDetails;
 };
 
 }  // namespace mongo

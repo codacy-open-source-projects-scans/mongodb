@@ -11,10 +11,14 @@ if (determineSSLProvider() === "apple") {
 }
 
 const ocsp_options = {
-    sslMode: "requireSSL",
-    sslPEMKeyFile: OCSP_SERVER_CERT,
-    sslCAFile: OCSP_CA_CERT,
-    sslAllowInvalidHostnames: "",
+    tlsMode: "requireTLS",
+    tlsCertificateKeyFile: OCSP_SERVER_CERT,
+    tlsCAFile: OCSP_CA_CERT,
+    tlsAllowInvalidHostnames: "",
+    setParameter: {
+        "failpoint.disableStapling": "{'mode':'alwaysOn'}",
+        "ocspEnabled": "true",
+    },
 };
 
 const sharding_config = {
@@ -24,7 +28,7 @@ const sharding_config = {
         configOptions: ocsp_options,
         mongosOptions: ocsp_options,
         rsOptions: ocsp_options,
-    }
+    },
 };
 
 function test() {
@@ -57,7 +61,7 @@ clearOCSPCache();
 
 // Leave the OCSP responder on so that the other nodes all have valid responses.
 jsTest.log("Test another ShardingTest with MockOCSPServer and expect to have valid OCSP response.");
-var st = new ShardingTest(sharding_config);
+let st = new ShardingTest(sharding_config);
 
 mock_ocsp.stop();
 mock_ocsp = new MockOCSPServer(FAULT_REVOKED, 1);
@@ -68,7 +72,7 @@ sleep(2000);
 
 jsTest.log("Restart the mongos with MockOCSPServer and expect to have REVOKED response.");
 const err = assert.throws(() => {
-    st.restartMongos(0);
+    st.restartMongos(0, {restart: true, waitForConnect: true, waitForConnectTimeoutMS: 5000});
 });
 
 mock_ocsp.stop();
@@ -84,9 +88,13 @@ MongoRunner.runHangAnalyzer.enable();
 mock_ocsp = new MockOCSPServer("", 10000);
 mock_ocsp.start();
 
+clearOCSPCache();
+
 // Get the mongos back up again so that we can shutdown the ShardingTest.
 jsTest.log("Restart the mongos with MockOCSPServer and expect to have valid OCSP response.");
 st.restartMongos(0);
+
+clearOCSPCache();
 
 mock_ocsp.stop();
 st.stop();

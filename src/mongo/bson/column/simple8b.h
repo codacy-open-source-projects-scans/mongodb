@@ -29,19 +29,18 @@
 
 #pragma once
 
-#include <array>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <iterator>
-
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
 #include "mongo/bson/column/simple8b_helpers.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <iterator>
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 
@@ -195,7 +194,9 @@ void Simple8b<T>::Iterator::_loadBlock() {
     _current = ConstDataView(_pos).read<LittleEndian<uint64_t>>();
 
     _selector = _current & kBaseSelectorMask;
-    uassert(8787300, "invalid selector 0", _selector);
+    uassert(ErrorCodes::InvalidBSONColumn,
+            "invalid selector 0 while loading simple8b block",
+            _selector);
     uint8_t selectorExtension = ((_current >> kSelectorBits) & kBaseSelectorMask);
 
     // If RLE selector, just load remaining count. Keep value from previous.
@@ -213,7 +214,9 @@ void Simple8b<T>::Iterator::_loadBlock() {
     // If Selectors 7 or 8 check if we are using extended selectors
     if (_selector == 7 || _selector == 8) {
         _extensionType = kSelectorToExtension[_selector - 7][selectorExtension];
-        uassert(8787301, "invalid extended selector", _extensionType != kInvalidSelector);
+        uassert(ErrorCodes::InvalidBSONColumn,
+                "invalid extended selector while loading simple8b block",
+                _extensionType != kInvalidSelector);
         // Use the extended selector if extension is != 0
         if (_extensionType != kBaseSelector) {
             _selector = selectorExtension;
@@ -346,10 +349,13 @@ typename Simple8b<T>::Iterator Simple8b<T>::end() const {
 
 namespace simple8b {
 // Constant for a simple8b block containing a single 'missing' value.
-static constexpr uint64_t kSingleSkip = 0xFFFFFFFFFFFFFFFE;
+inline constexpr uint64_t kSingleSkip = 0xFFFFFFFFFFFFFFFE;
 
 // Constant for a simple8b block containing a single zero value.
-static constexpr uint64_t kSingleZero = 0xE;
+inline constexpr uint64_t kSingleZero = 0xE;
+
+// Constant for an invalid simple8b block, trying to read this will throw.
+static constexpr uint64_t kInvalidSimple8b = 0;
 
 /**
  * Visits all values in sequence with provided callbacks
@@ -368,19 +374,25 @@ inline size_t visitAll(const char* buffer,
                        const VisitMissing& visitMissing);
 
 template <typename T, typename Visit, typename VisitMissing>
-inline size_t visitAll(const char* buffer,
-                       size_t size,
-                       uint64_t& prevNonRLE,
-                       const Visit& visit,
-                       const VisitMissing& visitMissing) {
-    return visitAll<T>(
-        buffer, size, prevNonRLE, visit, [&visit]() { visit(0); }, visitMissing);
+MONGO_COMPILER_ALWAYS_INLINE_GCC14 inline size_t visitAll(const char* buffer,
+                                                          size_t size,
+                                                          uint64_t& prevNonRLE,
+                                                          const Visit& visit,
+                                                          const VisitMissing& visitMissing) {
+    return visitAll<T>(buffer, size, prevNonRLE, visit, [&visit]() { visit(0); }, visitMissing);
 }
 
 /**
  * Returns the total number of values over multiple Simple8b blocks including missing values.
  */
 inline size_t count(const char* buffer, size_t size);
+
+/**
+ * Returns the last value (can be missing) over multiple Simple8b blocks. If called with unsigned T
+ * it returns the encoded value in this slot. If called with signed T it returns the decoded value.
+ */
+template <typename T>
+boost::optional<T> last(const char* buffer, size_t size, uint64_t& prevNonRLE);
 
 /**
  * Calculates the sum for multiple simple8b blocks in a buffer. 'prevNonRLE' should be initialized
@@ -399,8 +411,20 @@ T sum(const char* buffer, size_t size, uint64_t& prevNonRLE);
  */
 template <typename T>
 T prefixSum(const char* buffer, size_t size, T& prefix, uint64_t& prevNonRLE);
+
+/**
+ * Helper that performs signed addition as unsigned to get the defined wrap-around overflow behavior
+ * rather than overflow, which is undefined behavior.
+ */
+inline constexpr int64_t add(int64_t lhs, int64_t rhs) {
+    return static_cast<int64_t>(static_cast<uint64_t>(lhs) + static_cast<uint64_t>(rhs));
+}
+inline constexpr int128_t add(int128_t lhs, int128_t rhs) {
+    return static_cast<int128_t>(static_cast<uint128_t>(lhs) + static_cast<uint128_t>(rhs));
+}
+
 }  // namespace simple8b
 
 }  // namespace mongo
 
-#include "simple8b.inl"
+#include "mongo/bson/column/simple8b.inl"

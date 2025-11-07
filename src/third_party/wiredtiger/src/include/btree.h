@@ -99,6 +99,14 @@ typedef enum { /* Start position for eviction walk */
 /* An invalid btree file ID value. ID 0 is reserved for the metadata file. */
 #define WT_BTREE_ID_INVALID UINT32_MAX
 
+#define WT_BTREE_ID_NAMESPACE_BITS 3
+#define WT_BTREE_ID_NAMESPACE_SHARED 1
+
+#define WT_BTREE_ID_NAMESPACED(x) ((x) << WT_BTREE_ID_NAMESPACE_BITS)
+#define WT_BTREE_ID_UNNAMESPACED(x) ((x) >> WT_BTREE_ID_NAMESPACE_BITS)
+#define WT_BTREE_ID_NAMESPACE_ID(x) ((x) & ((1 << WT_BTREE_ID_NAMESPACE_BITS) - 1))
+#define WT_BTREE_ID_SHARED(x) (WT_BTREE_ID_NAMESPACE_ID(x) == WT_BTREE_ID_NAMESPACE_SHARED)
+
 /*
  * WT_BTREE --
  *	A btree handle.
@@ -139,6 +147,10 @@ struct __wt_btree {
     bool prefix_compression;      /* Prefix compression */
     u_int prefix_compression_min; /* Prefix compression min */
 
+    /* FIXME-WT-15633: Combine `prune_timestamp` and `ckpt_timestamp` into one variable */
+    wt_shared wt_timestamp_t prune_timestamp; /* Ingest table GC collection timestamp */
+    wt_timestamp_t checkpoint_timestamp;      /* Stable table checkpoint timestamp */
+
 #define WT_SPLIT_DEEPEN_MIN_CHILD_DEF (10 * WT_THOUSAND)
     u_int split_deepen_min_child; /* Minimum entries to deepen tree */
 #define WT_SPLIT_DEEPEN_PER_CHILD_DEF 100
@@ -156,8 +168,10 @@ struct __wt_btree {
     bool intlpage_compadjust;     /* Run-time compression adjustment */
     uint64_t maxintlpage_precomp; /* Internal page pre-compression size */
 
-    WT_BUCKET_STORAGE *bstorage;    /* Tiered storage source */
+    WT_BUCKET_STORAGE *bstorage;    /* Bucket storage source */
     WT_KEYED_ENCRYPTOR *kencryptor; /* Page encryptor */
+
+    WT_PAGE_LOG *page_log; /* Page and log service for disaggregated storage */
 
     WT_RWLOCK ovfl_lock; /* Overflow lock */
 
@@ -193,19 +207,21 @@ struct __wt_btree {
  * WT_SESSION_BTREE_SYNC_SAFE checks whether it is safe to perform an operation that would conflict
  * with a sync.
  */
-#define WT_BTREE_SYNCING(btree) (__wt_atomic_load_enum(&(btree)->syncing) != WT_BTREE_SYNC_OFF)
+#define WT_BTREE_SYNCING(btree) \
+    (__wt_atomic_load_enum_relaxed(&(btree)->syncing) != WT_BTREE_SYNC_OFF)
 #define WT_SESSION_BTREE_SYNC(session) \
-    (__wt_atomic_load_pointer(&S2BT(session)->sync_session) == (session))
-#define WT_SESSION_BTREE_SYNC_SAFE(session, btree)                        \
-    (__wt_atomic_load_enum(&(btree)->syncing) != WT_BTREE_SYNC_RUNNING || \
-      __wt_atomic_load_pointer(&(btree)->sync_session) == (session))
+    (__wt_atomic_load_ptr_relaxed(&S2BT(session)->sync_session) == (session))
+#define WT_SESSION_BTREE_SYNC_SAFE(session, btree)                                \
+    (__wt_atomic_load_enum_relaxed(&(btree)->syncing) != WT_BTREE_SYNC_RUNNING || \
+      __wt_atomic_load_ptr_relaxed(&(btree)->sync_session) == (session))
 
-    wt_shared uint64_t bytes_dirty_intl;  /* Bytes in dirty internal pages. */
-    wt_shared uint64_t bytes_dirty_leaf;  /* Bytes in dirty leaf pages. */
-    wt_shared uint64_t bytes_dirty_total; /* Bytes ever dirtied in cache. */
-    wt_shared uint64_t bytes_inmem;       /* Cache bytes in memory. */
-    wt_shared uint64_t bytes_internal;    /* Bytes in internal pages. */
-    wt_shared uint64_t bytes_updates;     /* Bytes in updates. */
+    wt_shared uint64_t bytes_dirty_intl;    /* Bytes in dirty internal pages. */
+    wt_shared uint64_t bytes_dirty_leaf;    /* Bytes in dirty leaf pages. */
+    wt_shared uint64_t bytes_dirty_total;   /* Bytes ever dirtied in cache. */
+    wt_shared uint64_t bytes_inmem;         /* Cache bytes in memory. */
+    wt_shared uint64_t bytes_internal;      /* Bytes in internal pages. */
+    wt_shared uint64_t bytes_updates;       /* Bytes in updates. */
+    wt_shared uint64_t bytes_delta_updates; /* Bytes of updates reconstructed from deltas */
 
     uint64_t max_upd_txn; /* Transaction ID for the latest update on the btree. */
 
@@ -275,24 +291,30 @@ struct __wt_btree {
     wt_shared volatile uint32_t evict_busy;    /* Count of threads in eviction */
     wt_shared volatile uint32_t prefetch_busy; /* Count of threads in prefetch */
     WT_EVICT_WALK_TYPE evict_start_type;
+    uint32_t last_evict_walk_flags; /* A copy of the cache flags from the prior walk */
+
+    /* The next page ID available for allocation in disaggregated storage for this tree. */
+    wt_shared uint64_t next_page_id;
 
 /*
  * Flag values up to 0xfff are reserved for WT_DHANDLE_XXX. See comment with dhandle flags for an
  * explanation.
  */
 /* AUTOMATIC FLAG VALUE GENERATION START 12 */
-#define WT_BTREE_BULK 0x001000u           /* Bulk-load handle */
-#define WT_BTREE_CLOSED 0x002000u         /* Handle closed */
-#define WT_BTREE_IGNORE_CACHE 0x004000u   /* Cache-resident object */
-#define WT_BTREE_IN_MEMORY 0x008000u      /* Cache-resident object */
-#define WT_BTREE_LOGGED 0x010000u         /* Commit-level durability without timestamps */
-#define WT_BTREE_NO_CHECKPOINT 0x020000u  /* Disable checkpoints */
-#define WT_BTREE_OBSOLETE_PAGES 0x040000u /* Handle has obsolete pages */
-#define WT_BTREE_READONLY 0x080000u       /* Handle is readonly */
-#define WT_BTREE_SALVAGE 0x100000u        /* Handle is for salvage */
-#define WT_BTREE_SKIP_CKPT 0x200000u      /* Handle skipped checkpoint */
-#define WT_BTREE_VERIFY 0x400000u         /* Handle is for verify */
-                                          /* AUTOMATIC FLAG VALUE GENERATION STOP 32 */
+#define WT_BTREE_BULK 0x0001000u            /* Bulk-load handle */
+#define WT_BTREE_CLOSED 0x0002000u          /* Handle closed */
+#define WT_BTREE_DISAGGREGATED 0x0004000u   /* In disaggregated storage */
+#define WT_BTREE_GARBAGE_COLLECT 0x0008000u /* Content becomes obsolete automatically */
+#define WT_BTREE_IGNORE_CACHE 0x0010000u    /* Cache-resident object */
+#define WT_BTREE_IN_MEMORY 0x0020000u       /* Cache-resident object */
+#define WT_BTREE_LOGGED 0x0040000u          /* Commit-level durability without timestamps */
+#define WT_BTREE_NO_CHECKPOINT 0x0080000u   /* Disable checkpoints */
+#define WT_BTREE_NO_EVICT 0x0100000u        /* Cache-resident object. Never run eviction on it. */
+#define WT_BTREE_READONLY 0x0200000u        /* Handle is readonly */
+#define WT_BTREE_SALVAGE 0x0400000u         /* Handle is for salvage */
+#define WT_BTREE_SKIP_CKPT 0x0800000u       /* Handle skipped checkpoint */
+#define WT_BTREE_VERIFY 0x1000000u          /* Handle is for verify */
+                                            /* AUTOMATIC FLAG VALUE GENERATION STOP 32 */
     uint32_t flags;
 };
 
@@ -310,3 +332,14 @@ struct __wt_salvage_cookie {
 
     bool done; /* Ignore the rest */
 };
+
+#define WT_DELTA_LEAF_ENABLED(session)                 \
+    (F_ISSET(S2BT(session), WT_BTREE_DISAGGREGATED) && \
+      F_ISSET(&S2C(session)->page_delta, WT_LEAF_PAGE_DELTA))
+
+#define WT_DELTA_INT_ENABLED(btree, conn) \
+    (F_ISSET(btree, WT_BTREE_DISAGGREGATED) && F_ISSET(&conn->page_delta, WT_INTERNAL_PAGE_DELTA))
+
+#define WT_DELTA_ENABLED_FOR_PAGE(session, type)                   \
+    ((type) == WT_PAGE_ROW_LEAF ? WT_DELTA_LEAF_ENABLED(session) : \
+                                  WT_DELTA_INT_ENABLED(S2BT(session), S2C(session)))

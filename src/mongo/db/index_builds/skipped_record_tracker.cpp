@@ -28,43 +28,44 @@
  */
 
 
-#include <boost/container/flat_set.hpp>
-#include <mutex>
-
-#include <boost/container/small_vector.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/index_builds/skipped_record_tracker.h"
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/collection_crud/container_write.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/index_builds/skipped_record_tracker.h"
+#include "mongo/db/index/preallocated_container_pool.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/storage/execution_context.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/storage_engine.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/progress_meter.h"
 #include "mongo/util/shared_buffer_fragment.h"
+
+#include <mutex>
+
+#include <boost/container/flat_set.hpp>
+#include <boost/container/small_vector.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
 
@@ -75,16 +76,32 @@ static constexpr StringData kRecordIdField = "recordId"_sd;
 }
 
 SkippedRecordTracker::SkippedRecordTracker(OperationContext* opCtx,
-                                           boost::optional<StringData> ident) {
-    if (!ident) {
+                                           StringData ident,
+                                           bool tableExists)
+    : _ident(std::string{ident}) {
+    if (!tableExists) {
+        // TODO(SERVER-110289): Use utility function instead of checking fcvSnapshot.
+        const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+        auto isPrimaryDrivenIndexBuild = fcvSnapshot.isVersionInitialized() &&
+            feature_flags::gFeatureFlagPrimaryDrivenIndexBuilds.isEnabled(
+                VersionContext::getDecoration(opCtx), fcvSnapshot);
+        if (isPrimaryDrivenIndexBuild) {
+            // Proactively create the table in case of primary driven index builds so that the table
+            // gets created at the same timestamp on all replicas.
+            // TODO(SERVER-111080): We should ideally do this for hybrid index builds as well to
+            // keep things simple.
+            _skippedRecordsTable =
+                opCtx->getServiceContext()->getStorageEngine()->makeTemporaryRecordStore(
+                    opCtx, _ident, KeyFormat::Long);
+        }
         return;
     }
 
-    // Only initialize the table when resuming an index build if an ident already exists. Otherwise,
-    // lazily initialize table when we record the first document.
+    // Only initialize the table if it already exists. Otherwise, lazily initialize table when we
+    // record the first document.
     _skippedRecordsTable =
         opCtx->getServiceContext()->getStorageEngine()->makeTemporaryRecordStoreFromExistingIdent(
-            opCtx, ident.value(), KeyFormat::Long);
+            opCtx, _ident, KeyFormat::Long);
 }
 
 void SkippedRecordTracker::keepTemporaryTable() {
@@ -93,7 +110,9 @@ void SkippedRecordTracker::keepTemporaryTable() {
     }
 }
 
-void SkippedRecordTracker::record(OperationContext* opCtx, const RecordId& recordId) {
+void SkippedRecordTracker::record(OperationContext* opCtx,
+                                  const CollectionPtr& coll,
+                                  const RecordId& recordId) {
     BSONObjBuilder builder;
     recordId.serializeToken(kRecordIdField, &builder);
     BSONObj toInsert = builder.obj();
@@ -102,16 +121,52 @@ void SkippedRecordTracker::record(OperationContext* opCtx, const RecordId& recor
     if (!_skippedRecordsTable) {
         _skippedRecordsTable =
             opCtx->getServiceContext()->getStorageEngine()->makeTemporaryRecordStore(
-                opCtx, KeyFormat::Long);
+                opCtx, _ident, KeyFormat::Long);
     }
 
     writeConflictRetry(
         opCtx, "recordSkippedRecordTracker", NamespaceString::kIndexBuildEntryNamespace, [&]() {
             WriteUnitOfWork wuow(opCtx);
-            uassertStatusOK(
-                _skippedRecordsTable->rs()
-                    ->insertRecord(opCtx, toInsert.objdata(), toInsert.objsize(), Timestamp::min())
-                    .getStatus());
+            // TODO(SERVER-110289): Use utility function instead of checking fcvSnapshot.
+            auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+            if (fcvSnapshot.isVersionInitialized() &&
+                feature_flags::gFeatureFlagPrimaryDrivenIndexBuilds.isEnabled(
+                    VersionContext::getDecoration(opCtx), fcvSnapshot)) {
+                LOGV2_DEBUG(
+                    10966701,
+                    1,
+                    "Index build: writing to skipped record tracker container for primary-driven "
+                    "index build.");
+
+                // We guarantee that the container is an integer container because the skipped
+                // record tracker initialized above has KeyFormat::Long.
+                invariant(_skippedRecordsTable->rs()->keyFormat() == KeyFormat::Long);
+                IntegerKeyedContainer& container =
+                    std::get<std::reference_wrapper<IntegerKeyedContainer>>(
+                        _skippedRecordsTable->rs()->getContainer())
+                        .get();
+
+                std::vector<RecordId> reservedRidBlock;
+                _skippedRecordsTable->rs()->reserveRecordIds(
+                    opCtx, *shard_role_details::getRecoveryUnit(opCtx), &reservedRidBlock, 1);
+                invariant(reservedRidBlock.size() == 1);
+
+                uassertStatusOK(container_write::insert(
+                    opCtx,
+                    *shard_role_details::getRecoveryUnit(opCtx),
+                    coll,
+                    container,
+                    reservedRidBlock[0].getLong(),
+                    std::span<const char>(toInsert.objdata(), toInsert.objsize())));
+            } else {
+                uassertStatusOK(_skippedRecordsTable->rs()
+                                    ->insertRecord(opCtx,
+                                                   *shard_role_details::getRecoveryUnit(opCtx),
+                                                   toInsert.objdata(),
+                                                   toInsert.objsize(),
+                                                   Timestamp::min())
+                                    .getStatus());
+            }
             wuow.commit();
         });
 }
@@ -120,7 +175,8 @@ bool SkippedRecordTracker::areAllRecordsApplied(OperationContext* opCtx) const {
     if (!_skippedRecordsTable) {
         return true;
     }
-    auto cursor = _skippedRecordsTable->rs()->getCursor(opCtx);
+    auto cursor =
+        _skippedRecordsTable->rs()->getCursor(opCtx, *shard_role_details::getRecoveryUnit(opCtx));
     auto record = cursor->next();
 
     // The table is empty only when all writes are applied.
@@ -174,10 +230,10 @@ Status SkippedRecordTracker::retrySkippedRecords(OperationContext* opCtx,
     };
 
     SharedBufferFragmentBuilder pooledBuilder(key_string::HeapBuilder::kHeapAllocatorDefaultBytes);
-    auto& executionCtx = StorageExecutionContext::get(opCtx);
+    auto& containerPool = PreallocatedContainerPool::get(opCtx);
 
     auto recordStore = _skippedRecordsTable->rs();
-    auto cursor = recordStore->getCursor(opCtx);
+    auto cursor = recordStore->getCursor(opCtx, *shard_role_details::getRecoveryUnit(opCtx));
     while (auto record = cursor->next()) {
         const BSONObj doc = record->data.toBson();
 
@@ -201,9 +257,9 @@ Status SkippedRecordTracker::retrySkippedRecords(OperationContext* opCtx,
                         "skippedRecordId"_attr = skippedRecordId,
                         "skippedDoc"_attr = skippedDoc);
 
-            auto keys = executionCtx.keys();
-            auto multikeyMetadataKeys = executionCtx.multikeyMetadataKeys();
-            auto multikeyPaths = executionCtx.multikeyPaths();
+            auto keys = containerPool.keys();
+            auto multikeyMetadataKeys = containerPool.multikeyMetadataKeys();
+            auto multikeyPaths = containerPool.multikeyPaths();
             auto iam = indexCatalogEntry->accessMethod()->asSortedData();
 
             try {
@@ -227,13 +283,15 @@ Status SkippedRecordTracker::retrySkippedRecords(OperationContext* opCtx,
                     onResolved();
                     continue;
                 }
+                auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
                 auto status = iam->insertKeys(
-                    opCtx, collection, indexCatalogEntry, *keys, options, nullptr, nullptr);
+                    opCtx, ru, collection, indexCatalogEntry, *keys, options, nullptr, nullptr);
                 if (!status.isOK()) {
                     return status;
                 }
 
                 status = iam->insertKeys(opCtx,
+                                         ru,
                                          collection,
                                          indexCatalogEntry,
                                          *multikeyMetadataKeys,
@@ -258,11 +316,11 @@ Status SkippedRecordTracker::retrySkippedRecords(OperationContext* opCtx,
         }
 
         // Delete the record so that it is not applied more than once.
-        recordStore->deleteRecord(opCtx, record->id);
+        recordStore->deleteRecord(opCtx, *shard_role_details::getRecoveryUnit(opCtx), record->id);
 
         cursor->save();
         wuow->commit();
-        cursor->restore();
+        cursor->restore(*shard_role_details::getRecoveryUnit(opCtx));
 
         onResolved();
     }

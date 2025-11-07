@@ -29,14 +29,10 @@
 
 #pragma once
 
-#include <boost/intrusive_ptr.hpp>
-#include <boost/optional.hpp>
-#include <forward_list>
-#include <type_traits>
-
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
+#include "mongo/config.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/stdx/condition_variable.h"
@@ -52,48 +48,13 @@
 #include "mongo/util/modules.h"
 #include "mongo/util/scopeguard.h"
 
+#include <forward_list>
+#include <type_traits>
+
+#include <boost/intrusive_ptr.hpp>
+#include <boost/optional.hpp>
+
 namespace mongo {
-
-struct FuturePolicy {};
-
-template <typename T>
-inline constexpr bool isFuturePolicy = std::is_base_of_v<FuturePolicy, T>;
-
-/**
- * Transitional tags for specifying destruction order semantics for continuations.
- * The long-term goal is to eliminate `destroyWeak` via manual review of existing
- * continuations.
- * A continuation can be switched to `destroyStrong` when it has been determined
- * that subsequent continuations do not depend on the lifetime of its captures.
- * The plan is to remove these transitional tags altogether after _all_ continuations
- * have been thus converted to the strong semantics specification.
- */
-template <bool strongCleanupValue>
-struct CleanupFuturePolicy : FuturePolicy {
-    static constexpr bool strongCleanup = strongCleanupValue;
-};
-using WeakFuturePolicy = CleanupFuturePolicy<false>;
-using StrongFuturePolicy = CleanupFuturePolicy<true>;
-
-/**
- * The passed-in continuation function may or may not be cleared
- * immediately after the function runs. In some contexts the entire
- * continuation chain will run and callbacks are destroyed as the stack
- * unwinds. In other contexts, each stage of the continuation will destroy its
- * callback immediately following execution.
- */
-inline constexpr WeakFuturePolicy destroyWeak{};
-
-/**
- * The passed-in continuation function will always be cleared
- * immediately after the function runs, and before the subsequent continuation runs.
- */
-inline constexpr StrongFuturePolicy destroyStrong{};
-
-/**
- * Used by Future implementation details to apply a consistent default FuturePolicy.
- */
-inline constexpr WeakFuturePolicy destroyDefault{};
 
 template <typename T>
 class Promise;
@@ -113,7 +74,7 @@ class SharedPromise;
 template <typename T>
 class SharedSemiFuture;
 
-namespace MONGO_MOD_PRIVATE future_details {
+namespace future_details {
 
 template <typename T>
 class FutureImpl;
@@ -281,8 +242,8 @@ inline constexpr bool isCallableR =
 
 // Like isCallableR, but doesn't unwrap the result type.
 template <typename Ret, typename Func, typename Arg>
-inline constexpr bool isCallableExactR = (isCallable<Func, Arg> &&
-                                          std::is_same_v<FriendlyInvokeResult<Func, Arg>, Ret>);
+inline constexpr bool isCallableExactR =
+    (isCallable<Func, Arg> && std::is_same_v<FriendlyInvokeResult<Func, Arg>, Ret>);
 
 /**
  * call() normalizes arguments to hide the FakeVoid shenanigans from users of Futures.
@@ -416,7 +377,7 @@ public:
     // Only called by future side, but may be called multiple times if waiting times out and is
     // retried.
     void wait(Interruptible* interruptible) {
-        if (state.load(std::memory_order_acquire) == SSBState::kFinished)
+        if (loadState(std::memory_order_acquire) == SSBState::kFinished)
             return;
 
         stdx::unique_lock lk(mx);
@@ -439,13 +400,13 @@ public:
             // Someone has already created the cv and put us in the waiting state. The promise may
             // also have completed after we checked above, so we can't assume we aren't at
             // kFinished.
-            dassert(state.load() != SSBState::kInit);
+            dassert(loadState() != SSBState::kInit);
         }
 
         interruptible->waitForConditionOrInterrupt(*cv, lk, [&] {
             // The mx locking above is insufficient to establish an acquire if state transitions to
             // kFinished before we get here, but we aquire mx before the producer does.
-            return state.load(std::memory_order_acquire) == SSBState::kFinished;
+            return loadState(std::memory_order_acquire) == SSBState::kFinished;
         });
     }
 
@@ -458,6 +419,13 @@ public:
         dassert(oldState == SSBState::kWaitingOrHaveChildren ||
                 oldState == SSBState::kHaveCallback);
 
+        // Antithesis uses adversarial scheduling which trips this condition more than would happen
+        // in the real world. We set an artificially low limit here, orders of magnitude lower than
+        // the actual limit where correctness issues could arise, to make it more likely to trip
+        // with variable length chains during normal testing. We could use a higher limit on
+        // Antithesis, but this is an O(N^2) check (technically each check is linear, but it runs N
+        // times), so making the limit higher can significantly slow down execution.
+#ifndef MONGO_CONFIG_ANTITHESIS
         if (kDebugBuild) {
             // If you hit this limit one of two things has probably happened
             //
@@ -470,7 +438,7 @@ public:
 
             size_t depth = 0;
             for (auto ssb = continuation.get(); ssb;
-                 ssb = ssb->state.load(std::memory_order_acquire) == SSBState::kHaveCallback
+                 ssb = ssb->loadState(std::memory_order_acquire) == SSBState::kHaveCallback
                      ? ssb->continuation.get()
                      : nullptr) {
                 depth++;
@@ -478,6 +446,7 @@ public:
                 invariant(depth < kMaxDepth);
             }
         }
+#endif
 
         if (oldState == SSBState::kHaveCallback) {
             dassert(children.empty());
@@ -505,9 +474,16 @@ public:
 
     void setError(Status statusArg) noexcept {
         invariant(!statusArg.isOK());
-        dassert(state.load() < SSBState::kFinished, statusArg.toString());
+        dassert(loadState() < SSBState::kFinished, statusArg.toString());
         status = std::move(statusArg);
         transitionToFinished();
+    }
+
+    SSBState loadState(std::memory_order memoryOrder = std::memory_order_seq_cst) const {
+        MONGO_COMPILER_DIAGNOSTIC_PUSH
+        MONGO_COMPILER_DIAGNOSTIC_WORKAROUND_ATOMIC_READ
+        return state.load(memoryOrder);
+        MONGO_COMPILER_DIAGNOSTIC_POP
     }
 
     //
@@ -565,14 +541,14 @@ struct SharedStateImpl final : SharedStateBase {
         invariant(!callback);
 
         auto out = make_intrusive<SharedState<T>>();
-        if (state.load(std::memory_order_acquire) == SSBState::kFinished) {
+        if (loadState(std::memory_order_acquire) == SSBState::kFinished) {
             out->fillFromConst(*this);
             return out;
         }
 
         auto lk = stdx::unique_lock(mx);
 
-        auto oldState = state.load(std::memory_order_acquire);
+        auto oldState = loadState(std::memory_order_acquire);
         if (oldState == SSBState::kInit) {
             // On the success path, our reads and writes to children are protected by the mutex
             //
@@ -604,8 +580,8 @@ struct SharedStateImpl final : SharedStateBase {
 
     // fillFromConst and fillFromMove are identical other than using as_const() vs move().
     void fillFromConst(const SharedState<T>& other) {
-        dassert(state.load() < SSBState::kFinished);
-        dassert(other.state.load() == SSBState::kFinished);
+        dassert(loadState() < SSBState::kFinished);
+        dassert(other.loadState() == SSBState::kFinished);
         if (other.status.isOK()) {
             data.emplace(std::as_const(*other.data));
         } else {
@@ -614,8 +590,8 @@ struct SharedStateImpl final : SharedStateBase {
         transitionToFinished();
     }
     void fillFromMove(SharedState<T>&& other) {
-        dassert(state.load() < SSBState::kFinished);
-        dassert(other.state.load() == SSBState::kFinished);
+        dassert(loadState() < SSBState::kFinished);
+        dassert(other.loadState() == SSBState::kFinished);
         if (other.status.isOK()) {
             data.emplace(std::move(*other.data));
         } else {
@@ -626,7 +602,7 @@ struct SharedStateImpl final : SharedStateBase {
 
     template <typename... Args>
     void emplaceValue(Args&&... args) noexcept {
-        dassert(state.load() < SSBState::kFinished);
+        dassert(loadState() < SSBState::kFinished);
         try {
             data.emplace(std::forward<Args>(args)...);
         } catch (const DBException& ex) {
@@ -696,7 +672,7 @@ public:
 
     bool isReady() const {
         invariant(_shared);
-        return _shared->state.load(std::memory_order_acquire) == SSBState::kFinished;
+        return _shared->loadState(std::memory_order_acquire) == SSBState::kFinished;
     }
 
     bool valid() const {
@@ -945,9 +921,8 @@ public:
         return _shared.getNoThrow(interruptible);
     }
 
-    template <typename Policy, typename Func>
-    requires isFuturePolicy<Policy>
-    void getAsync(Policy policy, Func&& func) && noexcept {
+    template <typename Func>
+    void getAsync(Func&& func) && noexcept {
         static_assert(std::is_void<decltype(call(func, std::declval<StatusWith<T>>()))>::value,
                       "func passed to getAsync must return void");
 
@@ -970,9 +945,8 @@ public:
             });
     }
 
-    template <typename Policy, typename Func>
-    requires isFuturePolicy<Policy>
-    auto then(Policy policy, Func&& func) && noexcept {
+    template <typename Func>
+    auto then(Func&& func) && noexcept {
         using Result = NormalizedCallResult<Func, T>;
         if constexpr (!isFutureLike<Result>) {
             return generalImpl(
@@ -1028,9 +1002,8 @@ public:
         }
     }
 
-    template <typename Policy, typename Func>
-    requires isFuturePolicy<Policy>
-    auto onCompletion(Policy policy, Func&& func) && noexcept {
+    template <typename Func>
+    auto onCompletion(Func&& func) && noexcept {
         using Wrapper = StatusOrStatusWith<T>;
         using Result = NormalizedCallResult<Func, StatusOrStatusWith<T>>;
         if constexpr (!isFutureLike<Result>) {
@@ -1106,9 +1079,8 @@ public:
         }
     }
 
-    template <typename Policy, typename Func>
-    requires isFuturePolicy<Policy> FutureImpl<FakeVoidToVoid<T>> onError(Policy policy,
-                                                                          Func&& func) && noexcept {
+    template <typename Func>
+    FutureImpl<FakeVoidToVoid<T>> onError(Func&& func) && noexcept {
         using Result = NormalizedCallResult<Func, Status>;
         static_assert(
             std::is_same<VoidToFakeVoid<UnwrappedType<Result>>, T>::value,
@@ -1163,9 +1135,8 @@ public:
         }
     }
 
-    template <ErrorCodes::Error code, typename Policy, typename Func>
-    requires isFuturePolicy<Policy> FutureImpl<FakeVoidToVoid<T>> onError(Policy policy,
-                                                                          Func&& func) && noexcept {
+    template <ErrorCodes::Error code, typename Func>
+    FutureImpl<FakeVoidToVoid<T>> onError(Func&& func) && noexcept {
         using Result = NormalizedCallResult<Func, Status>;
         static_assert(
             std::is_same_v<UnwrappedType<Result>, FakeVoidToVoid<T>>,
@@ -1176,17 +1147,15 @@ public:
 
         // TODO in C++17 with constexpr if this can be done cleaner and more efficiently by not
         // throwing.
-        return std::move(*this).onError(policy,
-                                        [func = std::forward<Func>(func)](Status&& status) mutable {
-                                            if (status != code)
-                                                uassertStatusOK(status);
-                                            return throwingCall(func, std::move(status));
-                                        });
+        return std::move(*this).onError([func = std::forward<Func>(func)](Status&& status) mutable {
+            if (status != code)
+                uassertStatusOK(status);
+            return throwingCall(func, std::move(status));
+        });
     }
 
-    template <ErrorCategory category, typename Policy, typename Func>
-    requires isFuturePolicy<Policy> FutureImpl<FakeVoidToVoid<T>> onErrorCategory(
-        Policy policy, Func&& func) && noexcept {
+    template <ErrorCategory category, typename Func>
+    FutureImpl<FakeVoidToVoid<T>> onErrorCategory(Func&& func) && noexcept {
         using Result = NormalizedCallResult<Func, Status>;
         static_assert(std::is_same_v<UnwrappedType<Result>, FakeVoidToVoid<T>>,
                       "func passed to Future<T>::onErrorCategory must return T, StatusWith<T>, "
@@ -1195,17 +1164,15 @@ public:
         if (_immediate || (isReady() && _shared->status.isOK()))
             return std::move(*this);
 
-        return std::move(*this).onError(policy,
-                                        [func = std::forward<Func>(func)](Status&& status) mutable {
-                                            if (!ErrorCodes::isA<category>(status))
-                                                uassertStatusOK(status);
-                                            return throwingCall(func, std::move(status));
-                                        });
+        return std::move(*this).onError([func = std::forward<Func>(func)](Status&& status) mutable {
+            if (!ErrorCodes::isA<category>(status))
+                uassertStatusOK(status);
+            return throwingCall(func, std::move(status));
+        });
     }
 
-    template <typename Policy, typename Func>
-    requires isFuturePolicy<Policy> FutureImpl<FakeVoidToVoid<T>> tap(Policy policy,
-                                                                      Func&& func) && noexcept {
+    template <typename Func>
+    FutureImpl<FakeVoidToVoid<T>> tap(Func&& func) && noexcept {
         static_assert(std::is_void<decltype(call(func, std::declval<const T&>()))>::value,
                       "func passed to tap must return void");
 
@@ -1215,9 +1182,8 @@ public:
             [](Func&& failFunc, const Status& status) noexcept {});
     }
 
-    template <typename Policy, typename Func>
-    requires isFuturePolicy<Policy> FutureImpl<FakeVoidToVoid<T>> tapError(
-        Policy policy, Func&& func) && noexcept {
+    template <typename Func>
+    FutureImpl<FakeVoidToVoid<T>> tapError(Func&& func) && noexcept {
         static_assert(std::is_void<decltype(call(func, std::declval<const Status&>()))>::value,
                       "func passed to tapError must return void");
 
@@ -1227,9 +1193,8 @@ public:
             [](Func&& failFunc, const Status& status) noexcept { call(failFunc, status); });
     }
 
-    template <typename Policy, typename Func>
-    requires isFuturePolicy<Policy> FutureImpl<FakeVoidToVoid<T>> tapAll(Policy policy,
-                                                                         Func&& func) && noexcept {
+    template <typename Func>
+    FutureImpl<FakeVoidToVoid<T>> tapAll(Func&& func) && noexcept {
         static_assert(
             std::is_void<decltype(call(func, std::declval<const StatusOrStatusWith<T>&>()))>::value,
             "func passed to tapAll must return void");
@@ -1289,7 +1254,7 @@ private:
             return success(*std::exchange(_immediate, {}));
         }
 
-        auto oldState = _shared->state.load(std::memory_order_acquire);
+        auto oldState = _shared->loadState(std::memory_order_acquire);
         dassert(oldState != SSBState::kHaveCallback);
         if (oldState == SSBState::kFinished) {
             auto sharedState = std::move(_shared);
@@ -1381,12 +1346,9 @@ private:
         using Base::Base;
         using Base::operator=;
 
-        MONGO_COMPILER_DIAGNOSTIC_PUSH
-        MONGO_COMPILER_DIAGNOSTIC_IGNORED_TRANSITIONAL("-Wuninitialized")
         ResetOnMoveOptional(ResetOnMoveOptional&& other) noexcept(
             std::is_nothrow_move_constructible_v<Base>)
             : Base(std::exchange(other._base(), {})) {}
-        MONGO_COMPILER_DIAGNOSTIC_POP
 
         ResetOnMoveOptional& operator=(ResetOnMoveOptional&& other) noexcept(
             std::is_nothrow_move_assignable_v<Base>) {
@@ -1468,7 +1430,7 @@ private:
 
 template <typename T>
 inline FutureImpl<void> FutureImpl<T>::ignoreValue() && noexcept {
-    return std::move(*this).then(destroyDefault, [](auto&&) {});
+    return std::move(*this).then([](auto&&) {});
 }
 
 }  // namespace future_details

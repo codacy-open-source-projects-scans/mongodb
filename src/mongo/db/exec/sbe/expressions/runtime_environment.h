@@ -29,23 +29,23 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/util/builder_fwd.h"
+#include "mongo/db/exec/sbe/slots_provider.h"
+#include "mongo/db/exec/sbe/values/slot.h"
+#include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/str.h"
+#include "mongo/util/string_map.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <memory>
 #include <utility>
 #include <vector>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/util/builder_fwd.h"
-#include "mongo/db/exec/sbe/abt/slots_provider.h"
-#include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
-#include "mongo/util/string_map.h"
 
 namespace mongo::sbe {
 /**
@@ -67,7 +67,7 @@ namespace mongo::sbe {
  * If the runtime environment is used in a serial plan, modification of the slots is allowed.
  */
 using InputParamToSlotMap = stdx::unordered_map<MatchExpression::InputParamId, sbe::value::SlotId>;
-class RuntimeEnvironment final : public optimizer::SlotsProvider {
+class RuntimeEnvironment final : public SlotsProvider {
 public:
     RuntimeEnvironment() = default;
     RuntimeEnvironment(RuntimeEnvironment&&) = delete;
@@ -186,7 +186,7 @@ public:
     /**
      * Dumps all the slots currently defined in this environment into the given string builder.
      */
-    void debugString(StringBuilder* builder) const;
+    void debugString(StringBuilder* builder, boost::optional<size_t> lengthCap = boost::none) const;
     std::string toDebugString() const;
 
 private:

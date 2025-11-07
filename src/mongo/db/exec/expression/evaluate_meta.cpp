@@ -76,6 +76,9 @@ Value evaluate(const ExpressionMeta& expr, const Document& root, Variables* vari
         case DocumentMetadataFields::MetaType::kSearchScoreDetails:
             return metadata.hasSearchScoreDetails() ? Value(metadata.getSearchScoreDetails())
                                                     : Value();
+        case DocumentMetadataFields::MetaType::kSearchRootDocumentId:
+            return metadata.hasSearchRootDocumentId() ? Value(metadata.getSearchRootDocumentId())
+                                                      : Value();
         case DocumentMetadataFields::MetaType::kSearchSequenceToken:
             return metadata.hasSearchSequenceToken() ? Value(metadata.getSearchSequenceToken())
                                                      : Value();
@@ -87,15 +90,42 @@ Value evaluate(const ExpressionMeta& expr, const Document& root, Variables* vari
             return metadata.hasTimeseriesBucketMaxTime()
                 ? Value(metadata.getTimeseriesBucketMaxTime())
                 : Value();
+        case DocumentMetadataFields::MetaType::kScoreDetails:
+            return metadata.hasScoreDetails() ? metadata.getScoreDetails() : Value();
+        case DocumentMetadataFields::MetaType::kStream:
+            return metadata.hasStream() ? metadata.getStream() : Value();
+        case DocumentMetadataFields::MetaType::kChangeStreamControlEvent:
+            return Value(metadata.isChangeStreamControlEvent());
+
         default:
             MONGO_UNREACHABLE;
     }
     MONGO_UNREACHABLE;
 }
 
+Value evaluate(const ExpressionInternalRawSortKey& expr,
+               const Document& root,
+               Variables* variables) {
+    return root.metadata().getSortKey();
+}
+
 Value evaluate(const ExpressionType& expr, const Document& root, Variables* variables) {
     Value val(expr.getChildren()[0]->evaluate(root, variables));
     return Value(StringData(typeName(val.getType())));
+}
+
+Value evaluate(const ExpressionSubtype& expr, const Document& root, Variables* variables) {
+    Value val(expr.getChildren()[0]->evaluate(root, variables));
+    if (val.nullish()) {
+        return Value(BSONNULL);
+    }
+
+    uassert(10389300,
+            str::stream() << "Provided value: " << val.toString()
+                          << ", does not have a subtype, but $subtype was used.",
+            val.getType() == BSONType::binData);
+
+    return Value(static_cast<int>(val.getBinData().type));
 }
 
 Value evaluate(const ExpressionTestApiVersion& expr, const Document& root, Variables* variables) {
@@ -110,6 +140,10 @@ Value evaluate(const ExpressionLet& expr, const Document& root, Variables* varia
     }
 
     return expr.getSubExpression()->evaluate(root, variables);
+}
+
+Value evaluate(const ExpressionTestFeatureFlags& expr, const Document& root, Variables* variables) {
+    return Value(1);
 }
 
 }  // namespace exec::expression

@@ -37,14 +37,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <string>
-#include <utility>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/namespace_string.h"
@@ -62,6 +54,15 @@
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/ssl_peer_info.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -169,13 +170,6 @@ public:
     }
 
     /**
-     * Returns true if this client is connected to the router port of a mongod with router role.
-     */
-    bool isRouterClient() const {
-        return _isRouterClient;
-    }
-
-    /**
      * Returns the ServiceContext that owns this client session context.
      */
     ServiceContext* getServiceContext() const {
@@ -190,7 +184,8 @@ public:
     }
 
     boost::optional<std::string> getSniNameForSession() const {
-        return _session ? SSLPeerInfo::forSession(_session).sniName() : boost::none;
+        auto sslPeerInfo = _session ? SSLPeerInfo::forSession(_session) : nullptr;
+        return sslPeerInfo ? sslPeerInfo->sniName() : boost::none;
     }
 
     std::shared_ptr<transport::Session> session() && {
@@ -283,7 +278,7 @@ public:
      * Signal the client's OperationContext that it has been killed.
      * Any future OperationContext on this client will also receive a kill signal.
      */
-    void setKilled() noexcept;
+    void setKilled();
 
     /**
      * Get the state for killing the client's OperationContext.
@@ -426,9 +421,6 @@ private:
     // Whether this client used { helloOk: true } when opening its connection, indicating that
     // it supports the hello command.
     bool _supportsHello = false;
-
-    // Whether this client is connected to the router port of a mongod with router role.
-    const bool _isRouterClient = false;
 
     UUID _uuid;
 

@@ -29,16 +29,16 @@
 
 #pragma once
 
-#include <algorithm>
-#include <concepts>
-#include <cstdint>
-#include <limits>
-#include <type_traits>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/platform/decimal128.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/summation.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <type_traits>
 
 namespace mongo::query_stats {
 namespace agg_metric_detail {
@@ -131,6 +131,12 @@ public:
             .append("max", bsonValue(max))
             .append("min", bsonValue(min))
             .append("sumOfSquares", bsonValue(sumOfSquares));
+    }
+
+    void appendToIfNonNegative(BSONObjBuilder& builder, StringData fieldName) const {
+        if (sum >= 0) {
+            appendTo(builder, fieldName);
+        }
     }
 
 private:

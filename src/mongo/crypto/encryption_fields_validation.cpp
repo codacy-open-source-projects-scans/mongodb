@@ -27,9 +27,7 @@
  *    it in the license file.
  */
 
-#include "encryption_fields_validation.h"
-
-#include <fmt/format.h>
+#include "mongo/crypto/encryption_fields_validation.h"
 
 #include <cmath>
 #include <cstdint>
@@ -41,12 +39,8 @@
 #include <absl/container/node_hash_map.h>
 #include <boost/container/small_vector.hpp>
 #include <boost/cstdint.hpp>
-// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-#include <boost/move/utility_core.hpp>
-#include <boost/multiprecision/cpp_int.hpp>
-#include <boost/optional/optional.hpp>
 #include <fmt/format.h>
-
+// IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/crypto/encryption_fields_gen.h"
@@ -54,15 +48,18 @@
 #include "mongo/crypto/fle_numeric.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
 
+#include <boost/move/utility_core.hpp>
+#include <boost/multiprecision/cpp_int.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
+
 namespace mongo {
 
-using namespace fmt::literals;
 
 Value coerceValueToRangeIndexTypes(Value val, BSONType fieldType) {
     BSONType valType = val.getType();
@@ -70,7 +67,7 @@ Value coerceValueToRangeIndexTypes(Value val, BSONType fieldType) {
     if (valType == fieldType)
         return val;
 
-    if (valType == Date || fieldType == Date) {
+    if (valType == BSONType::date || fieldType == BSONType::date) {
         uassert(6720002,
                 "If the value type is a date, the type of the index must also be date (and vice "
                 "versa). ",
@@ -85,8 +82,8 @@ Value coerceValueToRangeIndexTypes(Value val, BSONType fieldType) {
 
     // If we get to this point, we've already established that valType and fieldType are NOT the
     // same type, so if either of them is a double or a decimal we can't coerce.
-    if (valType == NumberDecimal || valType == NumberDouble || fieldType == NumberDecimal ||
-        fieldType == NumberDouble) {
+    if (valType == BSONType::numberDecimal || valType == BSONType::numberDouble ||
+        fieldType == BSONType::numberDecimal || fieldType == BSONType::numberDouble) {
         uasserted(
             6742002,
             str::stream() << "If the value type and the field type are not the same type and one "
@@ -95,9 +92,9 @@ Value coerceValueToRangeIndexTypes(Value val, BSONType fieldType) {
     }
 
     switch (fieldType) {
-        case NumberInt:
+        case BSONType::numberInt:
             return Value(val.coerceToInt());
-        case NumberLong:
+        case BSONType::numberLong:
             return Value(val.coerceToLong());
         default:
             MONGO_UNREACHABLE;
@@ -170,19 +167,19 @@ uint32_t getNumberOfBitsInDomain(const boost::optional<Decimal128>& min,
 
 std::pair<mongo::Value, mongo::Value> getRangeMinMaxDefaults(BSONType fieldType) {
     switch (fieldType) {
-        case NumberDouble:
+        case BSONType::numberDouble:
             return {mongo::Value(std::numeric_limits<double>::lowest()),
                     mongo::Value(std::numeric_limits<double>::max())};
-        case NumberDecimal:
+        case BSONType::numberDecimal:
             return {mongo::Value(Decimal128::kLargestNegative),
                     mongo::Value(Decimal128::kLargestPositive)};
-        case NumberInt:
+        case BSONType::numberInt:
             return {mongo::Value(std::numeric_limits<int>::min()),
                     mongo::Value(std::numeric_limits<int>::max())};
-        case NumberLong:
+        case BSONType::numberLong:
             return {mongo::Value(std::numeric_limits<long long>::min()),
                     mongo::Value(std::numeric_limits<long long>::max())};
-        case Date:
+        case BSONType::date:
             return {mongo::Value(Date_t::min()), mongo::Value(Date_t::max())};
         default:
             uasserted(7018202, "Range index only supports numeric types and the Date type.");
@@ -278,17 +275,18 @@ uint32_t getNumberOfBitsInDomain(BSONType fieldType,
                                  const boost::optional<uint32_t>& precision) {
     uassert(8574112,
             "Precision may only be set when type is double or decimal",
-            !precision || fieldType == NumberDouble || fieldType == NumberDecimal);
+            !precision || fieldType == BSONType::numberDouble ||
+                fieldType == BSONType::numberDecimal);
     switch (fieldType) {
-        case NumberInt:
+        case BSONType::numberInt:
             return getNumberOfBitsInDomain(min.map(bsonToInt), max.map(bsonToInt));
-        case NumberLong:
+        case BSONType::numberLong:
             return getNumberOfBitsInDomain(min.map(bsonToLong), max.map(bsonToLong));
-        case Date:
+        case BSONType::date:
             return getNumberOfBitsInDomain(min.map(bsonToDateToLong), max.map(bsonToDateToLong));
-        case NumberDouble:
+        case BSONType::numberDouble:
             return getNumberOfBitsInDomain(min.map(bsonToDouble), max.map(bsonToDouble), precision);
-        case NumberDecimal:
+        case BSONType::numberDecimal:
             return getNumberOfBitsInDomain(
                 min.map(bsonToDecimal), max.map(bsonToDecimal), precision);
         default:
@@ -304,17 +302,18 @@ uint32_t getNumberOfBitsInDomain(BSONType fieldType,
                                  const boost::optional<uint32_t>& precision) {
     uassert(8574113,
             "Precision may only be set when type is double or decimal",
-            !precision || fieldType == NumberDouble || fieldType == NumberDecimal);
+            !precision || fieldType == BSONType::numberDouble ||
+                fieldType == BSONType::numberDecimal);
     switch (fieldType) {
-        case NumberInt:
+        case BSONType::numberInt:
             return getNumberOfBitsInDomain(min.map(valToInt), max.map(valToInt));
-        case NumberLong:
+        case BSONType::numberLong:
             return getNumberOfBitsInDomain(min.map(valToLong), max.map(valToLong));
-        case Date:
+        case BSONType::date:
             return getNumberOfBitsInDomain(min.map(valToDateToLong), max.map(valToDateToLong));
-        case NumberDouble:
+        case BSONType::numberDouble:
             return getNumberOfBitsInDomain(min.map(valToDouble), max.map(valToDouble), precision);
-        case NumberDecimal:
+        case BSONType::numberDecimal:
             return getNumberOfBitsInDomain(min.map(valToDecimal), max.map(valToDecimal), precision);
         default:
             uasserted(8574114,
@@ -324,8 +323,25 @@ uint32_t getNumberOfBitsInDomain(BSONType fieldType,
 
 void validateRangeIndex(BSONType fieldType, StringData fieldPath, QueryTypeConfig& query) {
     uassert(6775201,
-            "Type '{}' is not a supported range indexed type"_format(typeName(fieldType)),
+            fmt::format("Type '{}' is not a supported range indexed type", typeName(fieldType)),
             isFLE2RangeIndexedSupportedType(fieldType));
+
+    // Text search fields are not allowed.
+    uassert(10774906,
+            "The field 'strMaxLength' is not allowed for range index but is present",
+            !query.getStrMaxLength().has_value());
+    uassert(10774907,
+            "The field 'strMinQueryLength' is not allowed for range index but is present",
+            !query.getStrMinQueryLength().has_value());
+    uassert(10774908,
+            "The field 'strMaxQueryLength' is not allowed for range index but is present",
+            !query.getStrMaxQueryLength().has_value());
+    uassert(10774909,
+            "The field 'caseSensitive' is not allowed for range index but is present",
+            !query.getCaseSensitive().has_value());
+    uassert(10774910,
+            "The field 'diacriticSensitive' is not allowed for range index but is present",
+            !query.getDiacriticSensitive().has_value());
 
     auto& indexMin = query.getMin();
     auto& indexMax = query.getMax();
@@ -338,14 +354,16 @@ void validateRangeIndex(BSONType fieldType, StringData fieldPath, QueryTypeConfi
 
     if (indexMin) {
         uassert(7018200,
-                "Range field type '{}' does not match the min value type '{}'"_format(
-                    typeName(fieldType), typeName(indexMin->getType())),
+                fmt::format("Range field type '{}' does not match the min value type '{}'",
+                            typeName(fieldType),
+                            typeName(indexMin->getType())),
                 fieldType == indexMin->getType());
     }
     if (indexMax) {
         uassert(7018201,
-                "Range field type '{}' does not match the max value type '{}'"_format(
-                    typeName(fieldType), typeName(indexMax->getType())),
+                fmt::format("Range field type '{}' does not match the max value type '{}'",
+                            typeName(fieldType),
+                            typeName(indexMax->getType())),
                 fieldType == indexMax->getType());
     }
     if (indexMin && indexMax) {
@@ -354,7 +372,7 @@ void validateRangeIndex(BSONType fieldType, StringData fieldPath, QueryTypeConfi
                 Value::compare(*indexMin, *indexMax, nullptr) < 0);
     }
 
-    if (fieldType == NumberDouble || fieldType == NumberDecimal) {
+    if (fieldType == BSONType::numberDouble || fieldType == BSONType::numberDecimal) {
         if (!((indexMin.has_value() == indexMax.has_value()) &&
               (indexMin.has_value() == query.getPrecision().has_value()))) {
             uasserted(6967100,
@@ -363,40 +381,46 @@ void validateRangeIndex(BSONType fieldType, StringData fieldPath, QueryTypeConfi
         }
         if (query.getPrecision().has_value()) {
             uint32_t precision = query.getPrecision().value();
-            if (fieldType == NumberDouble) {
+            if (fieldType == BSONType::numberDouble) {
                 auto min = query.getMin()->coerceToDouble();
                 uassert(6966805,
-                        "The number of decimal digits for minimum value of field '{}' "
-                        "must be less than or equal to precision"_format(fieldPath),
+                        fmt::format("The number of decimal digits for minimum value of field '{}' "
+                                    "must be less than or equal to precision",
+                                    fieldPath),
                         validateDoublePrecisionRange(min, precision));
                 auto max = query.getMax()->coerceToDouble();
                 uassert(6966806,
-                        "The number of decimal digits for maximum value of field '{}' "
-                        "must be less than or equal to precision"_format(fieldPath),
+                        fmt::format("The number of decimal digits for maximum value of field '{}' "
+                                    "must be less than or equal to precision",
+                                    fieldPath),
                         validateDoublePrecisionRange(max, precision));
-                uassert(
-                    9157100,
-                    "The domain of double values specified by the min, max, and precision "
-                    "for field '{}' cannot be represented in fewer than 64 bits"_format(fieldPath),
-                    query.getQueryType() == QueryTypeEnum::RangePreviewDeprecated ||
-                        canUsePrecisionMode(min, max, precision));
+                uassert(9157100,
+                        fmt::format(
+                            "The domain of double values specified by the min, max, and precision "
+                            "for field '{}' cannot be represented in fewer than 64 bits",
+                            fieldPath),
+                        query.getQueryType() == QueryTypeEnum::RangePreviewDeprecated ||
+                            canUsePrecisionMode(min, max, precision));
             } else {
                 auto minDecimal = query.getMin()->coerceToDecimal();
                 uassert(6966807,
-                        "The number of decimal digits for minimum value of field '{}' "
-                        "must be less than or equal to precision"_format(fieldPath),
+                        fmt::format("The number of decimal digits for minimum value of field '{}' "
+                                    "must be less than or equal to precision",
+                                    fieldPath),
                         validateDecimal128PrecisionRange(minDecimal, precision));
                 auto maxDecimal = query.getMax()->coerceToDecimal();
                 uassert(6966808,
-                        "The number of decimal digits for maximum value of field '{}' "
-                        "must be less than or equal to precision"_format(fieldPath),
+                        fmt::format("The number of decimal digits for maximum value of field '{}' "
+                                    "must be less than or equal to precision",
+                                    fieldPath),
                         validateDecimal128PrecisionRange(maxDecimal, precision));
-                uassert(
-                    9157101,
-                    "The domain of decimal values specified by the min, max, and precision "
-                    "for field '{}' cannot be represented in fewer than 128 bits"_format(fieldPath),
-                    query.getQueryType() == QueryTypeEnum::RangePreviewDeprecated ||
-                        canUsePrecisionMode(minDecimal, maxDecimal, precision));
+                uassert(9157101,
+                        fmt::format(
+                            "The domain of decimal values specified by the min, max, and precision "
+                            "for field '{}' cannot be represented in fewer than 128 bits",
+                            fieldPath),
+                        query.getQueryType() == QueryTypeEnum::RangePreviewDeprecated ||
+                            canUsePrecisionMode(minDecimal, maxDecimal, precision));
             }
         }
     }
@@ -431,10 +455,29 @@ void validateTextSearchIndex(BSONType fieldType,
                              boost::optional<bool> previousCaseSensitivity,
                              boost::optional<bool> previousDiacriticSensitivity,
                              boost::optional<std::int64_t> previousContention) {
-    uassert(9783400,
-            "Type '{}' is not a supported type for text search indexed encrypted field {}"_format(
-                typeName(fieldType), fieldPath),
-            fieldType == BSONType::String);
+    uassert(
+        9783400,
+        fmt::format("Type '{}' is not a supported type for text search indexed encrypted field {}",
+                    typeName(fieldType),
+                    fieldPath),
+        fieldType == BSONType::string);
+
+    // Range search fields not allowed.
+    uassert(10774911,
+            "The field 'sparsity' is not allowed for text-based index but is present",
+            !query.getSparsity().has_value());
+    uassert(10774912,
+            "The field 'min' is not allowed for text-based index but is present",
+            !query.getMin().has_value());
+    uassert(10774913,
+            "The field 'max' is not allowed for text-based index but is present",
+            !query.getMax().has_value());
+    uassert(10774914,
+            "The field 'trimFactor' is not allowed for text-based index but is present",
+            !query.getTrimFactor().has_value());
+    uassert(10774915,
+            "The field 'precision' is not allowed for text-based index but is present",
+            !query.getPrecision().has_value());
     auto qTypeStr = QueryType_serializer(query.getQueryType());
 
     uassert(9783401,
@@ -442,20 +485,24 @@ void validateTextSearchIndex(BSONType fieldType,
             isTextSearchQueryType(query.getQueryType()));
 
     uassert(9783402,
-            "strMinQueryLength parameter is required for {} query type of field {}"_format(
-                qTypeStr, fieldPath),
+            fmt::format("strMinQueryLength parameter is required for {} query type of field {}",
+                        qTypeStr,
+                        fieldPath),
             query.getStrMinQueryLength().has_value());
     uassert(9783403,
-            "strMaxQueryLength parameter is required for {} query type of field {}"_format(
-                qTypeStr, fieldPath),
+            fmt::format("strMaxQueryLength parameter is required for {} query type of field {}",
+                        qTypeStr,
+                        fieldPath),
             query.getStrMaxQueryLength().has_value());
     uassert(9783404,
-            "caseSensitive parameter is required for {} query type of field {}"_format(qTypeStr,
-                                                                                       fieldPath),
+            fmt::format("caseSensitive parameter is required for {} query type of field {}",
+                        qTypeStr,
+                        fieldPath),
             query.getCaseSensitive().has_value());
     uassert(9783405,
-            "diacriticSensitive parameter is required for {} query type of field {}"_format(
-                qTypeStr, fieldPath),
+            fmt::format("diacriticSensitive parameter is required for {} query type of field {}",
+                        qTypeStr,
+                        fieldPath),
             query.getDiacriticSensitive().has_value());
     uassert(9783406,
             "strMinQueryLength cannot be greater than strMaxQueryLength",
@@ -463,8 +510,9 @@ void validateTextSearchIndex(BSONType fieldType,
 
     if (query.getQueryType() == QueryTypeEnum::SubstringPreview) {
         uassert(9783407,
-                "strMaxLength parameter is required for {} query type of field {}"_format(
-                    qTypeStr, fieldPath),
+                fmt::format("strMaxLength parameter is required for {} query type of field {}",
+                            qTypeStr,
+                            fieldPath),
                 query.getStrMaxLength().has_value());
         uassert(9783408,
                 "strMaxQueryLength cannot be greater than strMaxLength",
@@ -473,21 +521,24 @@ void validateTextSearchIndex(BSONType fieldType,
 
     if (previousCaseSensitivity.has_value() &&
         query.getCaseSensitive().value() != *previousCaseSensitivity) {
-        uasserted(9783409,
-                  "caseSensitive parameter must be the same for all query types of field {}"_format(
-                      fieldPath));
+        uasserted(
+            9783409,
+            fmt::format("caseSensitive parameter must be the same for all query types of field {}",
+                        fieldPath));
     }
     if (previousDiacriticSensitivity.has_value() &&
         query.getDiacriticSensitive().value() != *previousDiacriticSensitivity) {
         uasserted(
             9783410,
-            "diacriticSensitive parameter must be the same for all query types of field {}"_format(
+            fmt::format(
+                "diacriticSensitive parameter must be the same for all query types of field {}",
                 fieldPath));
     }
     if (previousContention.has_value() && query.getContention() != *previousContention) {
-        uasserted(9783411,
-                  "contention parameter must be the same for all query types of field {}"_format(
-                      fieldPath));
+        uasserted(
+            9783411,
+            fmt::format("contention parameter must be the same for all query types of field {}",
+                        fieldPath));
     };
 }
 
@@ -519,9 +570,9 @@ void validateEncryptedField(const EncryptedField* field) {
             auto qtype1 = queryTypeConfigs.front().getQueryType();
             auto qtype2 = queryTypeConfigs.back().getQueryType();
             uassert(9783414,
-                    "Multiple query types may only include the {} and {} query types"_format(
-                        QueryType_serializer(QueryTypeEnum::SuffixPreview),
-                        QueryType_serializer(QueryTypeEnum::PrefixPreview)),
+                    fmt::format("Multiple query types may only include the {} and {} query types",
+                                QueryType_serializer(QueryTypeEnum::SuffixPreview),
+                                QueryType_serializer(QueryTypeEnum::PrefixPreview)),
                     (qtype1 == QueryTypeEnum::SuffixPreview &&
                      qtype2 == QueryTypeEnum::PrefixPreview) ||
                         (qtype2 == QueryTypeEnum::SuffixPreview &&
@@ -560,6 +611,28 @@ void validateEncryptedField(const EncryptedField* field) {
                 uassert(8574104,
                         "The field 'trimFactor' is not allowed for equality index but is present",
                         !encryptedIndex.getTrimFactor().has_value());
+                uassert(10774900,
+                        "The field 'precision' is not allowed for equality index but is present",
+                        !encryptedIndex.getPrecision().has_value());
+                uassert(10774901,
+                        "The field 'strMaxLength' is not allowed for equality index but is present",
+                        !encryptedIndex.getStrMaxLength().has_value());
+                uassert(10774902,
+                        "The field 'strMinQueryLength' is not allowed for equality index but is "
+                        "present",
+                        !encryptedIndex.getStrMinQueryLength().has_value());
+                uassert(10774903,
+                        "The field 'strMaxQueryLength' is not allowed for equality index but is "
+                        "present",
+                        !encryptedIndex.getStrMaxQueryLength().has_value());
+                uassert(
+                    10774904,
+                    "The field 'caseSensitive' is not allowed for equality index but is present",
+                    !encryptedIndex.getCaseSensitive().has_value());
+                uassert(10774905,
+                        "The field 'diacriticSensitive' is not allowed for equality index but is "
+                        "present",
+                        !encryptedIndex.getDiacriticSensitive().has_value());
                 break;
             case QueryTypeEnum::RangePreviewDeprecated:
                 // rangePreview is renamed to range in Range V2, but we still need to accept it as
@@ -672,19 +745,19 @@ void validateRangeBounds(BSONType fieldType,
                          uint32_t trimFactor,
                          const boost::optional<uint32_t>& precision) {
     switch (fieldType) {
-        case NumberInt:
+        case BSONType::numberInt:
             return validateRangeBoundsInt32(
                 min.map(valToInt), max.map(valToInt), sparsity, trimFactor);
-        case NumberLong:
+        case BSONType::numberLong:
             return validateRangeBoundsInt64(
                 min.map(valToLong), max.map(valToLong), sparsity, trimFactor);
-        case Date:
+        case BSONType::date:
             return validateRangeBoundsInt64(
                 min.map(valToDateToLong), max.map(valToDateToLong), sparsity, trimFactor);
-        case NumberDouble:
+        case BSONType::numberDouble:
             return validateRangeBoundsDouble(
                 min.map(valToDouble), max.map(valToDouble), sparsity, trimFactor, precision);
-        case NumberDecimal:
+        case BSONType::numberDecimal:
             return validateRangeBoundsDecimal128(
                 min.map(valToDecimal), max.map(valToDecimal), sparsity, trimFactor, precision);
         default:

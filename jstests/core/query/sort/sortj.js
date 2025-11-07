@@ -3,6 +3,7 @@
 // @tags: [
 //   # in memory variants won't treat this workload the same and may not fail.
 //   requires_persistence,
+//   requires_getmore,
 // ]
 //
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
@@ -31,5 +32,11 @@ for (let i = 0; i < 1200 * numShards; ++i) {
 }
 
 assert.throwsWithCode(
-    () => collection.find({a: {$gte: 0}, c: null}).sort({d: 1}).allowDiskUse(false).itcount(),
-    ErrorCodes.QueryExceededMemoryLimitNoDiskUseAllowed);
+    () =>
+        collection
+            .find({a: {$gte: 0}, c: null})
+            .sort({d: 1})
+            .allowDiskUse(false)
+            .itcount(),
+    ErrorCodes.QueryExceededMemoryLimitNoDiskUseAllowed,
+);

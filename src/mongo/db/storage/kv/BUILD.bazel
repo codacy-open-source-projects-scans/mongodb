@@ -13,7 +13,6 @@ mongo_cc_library(
     name = "kv_drop_pending_ident_reaper",
     srcs = [
         "kv_drop_pending_ident_reaper.cpp",
-        "//src/mongo/db/catalog:import_options.h",
     ],
     hdrs = [
         "kv_drop_pending_ident_reaper.h",
@@ -21,9 +20,8 @@ mongo_cc_library(
     ],
     deps = [
         "//src/mongo/db:shard_role_api",
-        "//src/mongo/db/concurrency:exception_util",
-        "//src/mongo/db/concurrency:lock_manager",
-        "//src/mongo/db/query/query_stats",
+        "//src/mongo/db/local_catalog/lock_manager",
+        "//src/mongo/db/local_catalog/lock_manager:exception_util",
     ],
 )
 
@@ -35,18 +33,18 @@ mongo_cc_library(
     ],
     hdrs = [
         "kv_engine_test_harness.h",
-        "//src/mongo/db/storage:sorted_data_interface_test_assert.h",
     ],
     deps = [
         "//src/mongo/db:multitenancy",
         "//src/mongo/db:service_context_d",
         "//src/mongo/db:service_context_test_fixture",
         "//src/mongo/db:shard_role_api",
-        "//src/mongo/db/catalog:catalog_impl",
-        "//src/mongo/db/concurrency:lock_manager",
-        "//src/mongo/db/index:index_access_method",
-        "//src/mongo/db/storage:durable_catalog",
+        "//src/mongo/db/local_catalog:catalog_impl",
+        "//src/mongo/db/local_catalog:durable_catalog",
+        "//src/mongo/db/local_catalog/lock_manager",
+        "//src/mongo/db/storage:mdb_catalog",
         "//src/mongo/db/storage:record_store_base",
+        "//src/mongo/db/storage:sorted_data_interface_test_assert",
         "//src/mongo/db/storage:storage_options",
         "//src/mongo/db/storage/key_string",
         "//src/mongo/unittest",

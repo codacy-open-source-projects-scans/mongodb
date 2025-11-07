@@ -20,6 +20,8 @@ executor:
       global_vars:
         TestData:
           defaultReadConcernLevel: null
+          enableOTELTracing: false
+      setShellParameter: defaultFindReplicaSetHostTimeoutMS=120000
   fixture:
     class: ReplicaSetFixture
     mixed_bin_versions: old_new_new

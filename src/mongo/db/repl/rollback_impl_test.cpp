@@ -27,21 +27,7 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_map.h>
-#include <absl/container/node_hash_set.h>
-#include <algorithm>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <fmt/format.h>
-#include <functional>
-#include <list>
-#include <memory>
-#include <ostream>
-#include <utility>
-#include <vector>
+#include "mongo/db/repl/rollback_impl.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -50,16 +36,19 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/bson/oid.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_mock.h"
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/client.h"
-#include "mongo/db/cluster_role.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/global_catalog/type_shard_identity.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_mock.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
+#include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog.h"
@@ -69,34 +58,42 @@
 #include "mongo/db/repl/oplog_interface_mock.h"
 #include "mongo/db/repl/replication_consistency_markers.h"
 #include "mongo/db/repl/replication_process.h"
-#include "mongo/db/repl/rollback_impl.h"
 #include "mongo/db/repl/rollback_test_fixture.h"
-#include "mongo/db/s/operation_sharding_state.h"
-#include "mongo/db/s/type_shard_identity.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/session/logical_session_id_helpers.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/storage/durable_history_pin.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/transport_layer_mock.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <functional>
+#include <list>
+#include <memory>
+#include <ostream>
+#include <utility>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplicationRollback
 
@@ -208,7 +205,7 @@ protected:
         CollectionOptions options;
         options.uuid = uuid;
         OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE unsafeCreateCollection(
-            opCtx);
+            opCtx, nss);
         ASSERT_OK(_storageInterface->createCollection(opCtx, nss, options));
 
         // Initialize a mock collection.
@@ -794,6 +791,67 @@ TEST_F(RollbackImplTest, RollbackCallsRecoverToStableTimestamp) {
     ASSERT_EQUALS(stableTimestamp, _stableTimestamp);
 }
 
+class RollbackTestingDurableHistoryPin : public DurableHistoryPin {
+public:
+    bool reconciled = false;
+
+    RollbackTestingDurableHistoryPin(StorageInterface* storageInterface)
+        : _storageInterface(storageInterface) {}
+
+    void expectDocument(BSONObj&& obj) {
+        _expectedDoc = std::move(obj);
+    }
+
+    std::string getName() override {
+        return "testing";
+    }
+
+    // Test that documents inserted before rollback are still visible during execution of
+    // DurableHistoryRegistry::reconcilePins()
+    boost::optional<Timestamp> calculatePin(OperationContext* opCtx) override {
+        auto document = _storageInterface->findById(opCtx, nss, _expectedDoc["_id"]);
+        ASSERT_OK(document);
+        ASSERT_BSONOBJ_EQ(_expectedDoc, document.getValue());
+        reconciled = true;
+        return _oldestTimestamp;
+    }
+
+private:
+    StorageInterface* _storageInterface;
+    BSONObj _expectedDoc;
+    Timestamp _oldestTimestamp = Timestamp(0, 2);
+};
+
+TEST_F(RollbackImplTest, RollbackReconcilesHistoryPins) {
+    // Test StorageInterfaceImpl::recoverToStableTimestamp instead of the mocked version
+    _storageInterface->unmockStableTimestamp();
+    auto uuid = kGenericUUID;
+    auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
+
+    // Register the testing pin
+    auto service = getServiceContext();
+    DurableHistoryRegistry::set(service, std::make_unique<DurableHistoryRegistry>());
+    auto uniquePinPointer = std::make_unique<RollbackTestingDurableHistoryPin>(_storageInterface);
+    auto pin = uniquePinPointer.get();
+    DurableHistoryRegistry::get(service)->registerPin(std::move(uniquePinPointer));
+
+    // Insert a document at Timestamp(1, 1)
+    auto obj = BSON("_id" << 0 << "name" << "kyle");
+    _insertDocAndGenerateOplogEntry(obj, uuid, nss, 1);
+
+    // Set stable timestamp at Timestamp(1, 1)
+    const auto commonOp = makeOpAndRecordId(1);
+    _remoteOplog->setOperations({commonOp});
+    _storageInterface->setStableTimestamp(service, commonOp.first["ts"].timestamp());
+
+    // Make sure rollback opened the catalog and reconciled the pins in the right order
+    pin->expectDocument(std::move(obj));
+    ASSERT_FALSE(pin->reconciled);
+    ASSERT_OK(_rollback->runRollback(_opCtx.get()));
+    // Make sure calculatePin() was called
+    ASSERT(pin->reconciled);
+}
+
 DEATH_TEST_REGEX_F(RollbackImplTest,
                    RollbackFassertsIfRecoverToStableTimestampFails,
                    "Fatal assertion.*4584700") {
@@ -1231,8 +1289,7 @@ TEST_F(RollbackImplTest, RollbackProperlySavesFilesWhenCollectionIsRenamed) {
         _initializeCollection(_opCtx.get(), uuidBeforeRename, nssBeforeRename);
 
     // Insert a document into the collection.
-    const auto objInRenamedCollection = BSON("_id"
-                                             << "kyle");
+    const auto objInRenamedCollection = BSON("_id" << "kyle");
     _insertDocAndGenerateOplogEntry(objInRenamedCollection, uuidBeforeRename, nssBeforeRename, 2);
 
     // Rename the original collection.
@@ -1251,8 +1308,7 @@ TEST_F(RollbackImplTest, RollbackProperlySavesFilesWhenCollectionIsRenamed) {
         _initializeCollection(_opCtx.get(), uuidAfterRename, nssBeforeRename);
 
     // Insert a different document into the new collection.
-    const auto objInNewCollection = BSON("_id"
-                                         << "jungsoo");
+    const auto objInNewCollection = BSON("_id" << "jungsoo");
     _insertDocAndGenerateOplogEntry(objInNewCollection, uuidAfterRename, nssBeforeRename, 4);
 
     ASSERT_OK(_rollback->runRollback(_opCtx.get()));
@@ -1284,12 +1340,8 @@ TEST_F(RollbackImplTest, RollbackProperlySavesFilesWhenCreateCollAndInsertsAreRo
     ASSERT_OK(_insertOplogEntry(oplogEntry));
 
     // Insert documents into the collection.
-    const std::vector<BSONObj> objs({BSON("_id"
-                                          << "kyle"),
-                                     BSON("_id"
-                                          << "jungsoo"),
-                                     BSON("_id"
-                                          << "erjon")});
+    const std::vector<BSONObj> objs(
+        {BSON("_id" << "kyle"), BSON("_id" << "jungsoo"), BSON("_id" << "erjon")});
     for (auto&& obj : objs) {
         _insertDocAndGenerateOplogEntry(obj, uuid, nss);
     }
@@ -1528,6 +1580,7 @@ RollbackImplTest::_setUpUnpreparedTransactionForCountTest(UUID collId) {
                                                 boost::none,            // uuid
                                                 boost::none,            // fromMigrate
                                                 boost::none,  // checkExistenceForDiffInsert
+                                                boost::none,  // versionContext
                                                 OplogEntry::kOplogVersion,  // version
                                                 partialApplyOpsObj,         // oField
                                                 boost::none,                // o2Field
@@ -1563,6 +1616,7 @@ RollbackImplTest::_setUpUnpreparedTransactionForCountTest(UUID collId) {
         boost::none,                // uuid
         boost::none,                // fromMigrate
         boost::none,                // checkExistenceForDiffInsert
+        boost::none,                // versionContext
         OplogEntry::kOplogVersion,  // version
         commitApplyOpsObj,          // oField
         boost::none,                // o2Field
@@ -1621,6 +1675,7 @@ RollbackImplTest::_setUpBatchedRetryableWriteForCountTest(UUID collId) {
                                           boost::none,                // uuid
                                           boost::none,                // fromMigrate
                                           boost::none,                // checkExistenceForDiffInsert
+                                          boost::none,                // versionContext
                                           OplogEntry::kOplogVersion,  // version
                                           applyOps0Obj,               // oField
                                           boost::none,                // o2Field
@@ -1655,6 +1710,7 @@ RollbackImplTest::_setUpBatchedRetryableWriteForCountTest(UUID collId) {
                                           boost::none,                // uuid
                                           boost::none,                // fromMigrate
                                           boost::none,                // checkExistenceForDiffInsert
+                                          boost::none,                // versionContext
                                           OplogEntry::kOplogVersion,  // version
                                           applyOps1Obj,               // oField
                                           boost::none,                // o2Field
@@ -1724,6 +1780,9 @@ TEST_F(RollbackImplTest, RollbackFixesCountForBatchedRetryableWriteApplyOpsChain
 }
 
 TEST_F(RollbackImplTest, RollbackFixesCountForBatchedRetryableWriteApplyOpsChain2) {
+    const auto nss = NamespaceString::kSessionTransactionsTableNamespace;
+    _initializeCollection(_opCtx.get(), UUID::gen(), nss);
+
     auto collId = UUID::gen();
     auto ops = _setUpBatchedRetryableWriteForCountTest(collId);
 
@@ -1732,9 +1791,22 @@ TEST_F(RollbackImplTest, RollbackFixesCountForBatchedRetryableWriteApplyOpsChain
     const auto& commonOp = ops[1];
     _storageInterface->setStableTimestamp(nullptr, commonOp.first["ts"].timestamp());
     _remoteOplog->setOperations({commonOp});
+    // The 'config.transactions' table is currently empty.
+    ASSERT_NOT_OK(_storageInterface->findSingleton(_opCtx.get(), nss));
     ASSERT_OK(_rollback->runRollback(_opCtx.get()));
 
     ASSERT_EQ(_storageInterface->getFinalCollectionCount(collId), 2);
+
+    auto swDoc = _storageInterface->findById(_opCtx.get(), nss, commonOp.first.getField("lsid"));
+    ASSERT_OK(swDoc);
+    auto sessionsEntryBson = swDoc.getValue();
+    // New sessions entry should match the session information retrieved from the retryable writes
+    // oplog entry from the 'stableTimestamp'.
+    ASSERT_EQUALS(sessionsEntryBson["txnNum"].numberInt(), commonOp.first["txnNumber"].numberInt());
+    ASSERT_EQ(sessionsEntryBson["lastWriteOpTime"]["ts"].timestamp(),
+              commonOp.first["ts"].timestamp());
+    ASSERT_EQ(sessionsEntryBson["lastWriteOpTime"]["t"].numberInt(),
+              commonOp.first["t"].numberInt());
 }
 
 TEST_F(RollbackImplTest, RollbackRestoresTxnTableEntryToBeConsistentWithStableTimestamp) {
@@ -2176,12 +2248,11 @@ TEST_F(RollbackImplObserverInfoTest,
        NamespacesAndUUIDsForOpsExtractsNamespaceAndUUIDOfCreateIndexOplogEntry) {
     auto nss = NamespaceString::createNamespaceString_forTest("test", "coll");
     auto uuid = UUID::gen();
-    auto indexObj =
-        BSON("createIndexes" << nss.coll() << "v"
-                             << static_cast<int>(IndexDescriptor::IndexVersion::kV2) << "key"
-                             << "x"
-                             << "name"
-                             << "x_1");
+
+    BSONObj indexObj = BSON("createIndexes" << nss.coll() << "v" << 2 << "key"
+                                            << "x"
+                                            << "name"
+                                            << "x_1");
     auto cmdOp = makeCommandOp(Timestamp(2, 2), uuid, nss.getCommandNS(), indexObj, 2);
 
     std::set<NamespaceString> expectedNamespaces = {nss};
@@ -2406,8 +2477,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackFailsOnMalformedApplyOpsOplogEntry)
         makeCommandOp(Timestamp(2, 2),
                       boost::none,
                       NamespaceString::createNamespaceString_forTest(DatabaseName::kAdmin, "$cmd"),
-                      BSON("applyOps" << BSON("not"
-                                              << "array")),
+                      BSON("applyOps" << BSON("not" << "array")),
                       2);
 
     auto status = rollbackOps({applyOpsCmdOp});
@@ -2500,7 +2570,7 @@ TEST_F(RollbackImplObserverInfoTest,
 }
 
 TEST_F(RollbackImplObserverInfoTest, RollbackRecordsShardIdentityRollback) {
-    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::RouterServer};
+    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
     const auto uuid = UUID::gen();
     const auto nss = NamespaceString::kServerConfigurationNamespace;
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
@@ -2512,7 +2582,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackRecordsShardIdentityRollback) {
 }
 
 TEST_F(RollbackImplObserverInfoTest, RollbackDoesntRecordShardIdentityRollbackForNormalDocument) {
-    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::RouterServer};
+    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
     const auto nss = NamespaceString::kServerConfigurationNamespace;
     const auto uuid = UUID::gen();
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
@@ -2520,8 +2590,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackDoesntRecordShardIdentityRollbackFo
                                Timestamp(2, 2),
                                uuid,
                                redactTenant(nss),
-                               BSON("_id"
-                                    << "not_the_shard_id_document"),
+                               BSON("_id" << "not_the_shard_id_document"),
                                boost::none,
                                2);
     ASSERT_OK(rollbackOps({deleteOp}));
@@ -2529,8 +2598,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackDoesntRecordShardIdentityRollbackFo
 }
 
 TEST_F(RollbackImplObserverInfoTest, RollbackRecordsConfigVersionRollback) {
-    serverGlobalParams.clusterRole = {
-        ClusterRole::ShardServer, ClusterRole::ConfigServer, ClusterRole::RouterServer};
+    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
     const auto uuid = UUID::gen();
     const auto nss = NamespaceString::kConfigVersionNamespace;
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
@@ -2538,8 +2606,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackRecordsConfigVersionRollback) {
                                Timestamp(2, 2),
                                uuid,
                                nss.ns_forTest(),
-                               BSON("_id"
-                                    << "a"),
+                               BSON("_id" << "a"),
                                boost::none,
                                2);
 
@@ -2548,7 +2615,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackRecordsConfigVersionRollback) {
 }
 
 TEST_F(RollbackImplObserverInfoTest, RollbackDoesntRecordConfigVersionRollbackForShardServer) {
-    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::RouterServer};
+    serverGlobalParams.clusterRole = ClusterRole::ShardServer;
     const auto uuid = UUID::gen();
     const auto nss = NamespaceString::kConfigVersionNamespace;
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
@@ -2556,8 +2623,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackDoesntRecordConfigVersionRollbackFo
                                Timestamp(2, 2),
                                uuid,
                                nss.ns_forTest(),
-                               BSON("_id"
-                                    << "a"),
+                               BSON("_id" << "a"),
                                boost::none,
                                2);
     ASSERT_OK(rollbackOps({insertOp}));
@@ -2565,8 +2631,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackDoesntRecordConfigVersionRollbackFo
 }
 
 TEST_F(RollbackImplObserverInfoTest, RollbackDoesntRecordConfigVersionRollbackForNonInsert) {
-    serverGlobalParams.clusterRole = {
-        ClusterRole::ShardServer, ClusterRole::ConfigServer, ClusterRole::RouterServer};
+    serverGlobalParams.clusterRole = {ClusterRole::ShardServer, ClusterRole::ConfigServer};
     const auto uuid = UUID::gen();
     const auto nss = NamespaceString::kConfigVersionNamespace;
     const auto coll = _initializeCollection(_opCtx.get(), uuid, nss);
@@ -2574,8 +2639,7 @@ TEST_F(RollbackImplObserverInfoTest, RollbackDoesntRecordConfigVersionRollbackFo
                                Timestamp(2, 2),
                                uuid,
                                nss.ns_forTest(),
-                               BSON("_id"
-                                    << "a"),
+                               BSON("_id" << "a"),
                                boost::none,
                                2);
     ASSERT_OK(rollbackOps({deleteOp}));
@@ -2586,15 +2650,13 @@ TEST_F(RollbackImplObserverInfoTest, RollbackRecordsInsertOpsInUUIDToIdMap) {
     const auto nss1 = NamespaceString::createNamespaceString_forTest("db.people");
     const auto uuid1 = UUID::gen();
     const auto coll1 = _initializeCollection(_opCtx.get(), uuid1, nss1);
-    const auto obj1 = BSON("_id"
-                           << "kyle");
+    const auto obj1 = BSON("_id" << "kyle");
     const auto insertOp1 = _insertDocAndReturnOplogEntry(obj1, uuid1, nss1, 2);
 
     const auto nss2 = NamespaceString::createNamespaceString_forTest("db.persons");
     const auto uuid2 = UUID::gen();
     const auto coll2 = _initializeCollection(_opCtx.get(), uuid2, nss2);
-    const auto obj2 = BSON("_id"
-                           << "jungsoo");
+    const auto obj2 = BSON("_id" << "jungsoo");
     const auto insertOp2 = _insertDocAndReturnOplogEntry(obj2, uuid2, nss2, 3);
 
     ASSERT_OK(rollbackOps({insertOp2, insertOp1}));

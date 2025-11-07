@@ -303,7 +303,15 @@ __config_next(WT_CONFIG *conf, WT_CONFIG_ITEM *key, WT_CONFIG_ITEM *value)
             break;
 
         case A_BAD:
-            return (__config_err(conf, "Unexpected character", EINVAL));
+            switch (*conf->cur) {
+            case '\b':
+            case '\n':
+            case '\r':
+            case '\t':
+                return (__config_err(conf, "Unexpected escaped character", EINVAL));
+            default:
+                return (__config_err(conf, "Unexpected character", EINVAL));
+            }
 
         case A_DOWN:
             if (conf->top == -1)
@@ -510,7 +518,7 @@ nonum:
 int
 __wt_config_next(WT_CONFIG *conf, WT_CONFIG_ITEM *key, WT_CONFIG_ITEM *value)
 {
-    WT_RET(__config_next(conf, key, value));
+    WT_RET_NOLOG(__config_next(conf, key, value));
     __config_process_value(value);
     return (0);
 }

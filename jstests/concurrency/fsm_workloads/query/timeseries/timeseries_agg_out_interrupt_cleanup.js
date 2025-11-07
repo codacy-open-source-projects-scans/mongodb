@@ -6,21 +6,22 @@
  *
  * @tags: [
  *   requires_timeseries,
- *   does_not_support_transactions,
  *   does_not_support_stepdowns,
+ *   does_not_support_transactions,
  *   uses_curop_agg_stage,
  *   # TODO Undenylist (SERVER-38852).
  *   assumes_against_mongod_not_mongos,
+ *   requires_getmore,
+ *   uses_getmore_outside_of_transaction,
  * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
-import {
-    $config as $baseConfig
-} from "jstests/concurrency/fsm_workloads/query/agg/agg_out_interrupt_cleanup.js";
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/query/agg/agg_out_interrupt_cleanup.js";
+import {areViewlessTimeseriesEnabled} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
-    const timeFieldName = 'time';
-    const metaFieldName = 'tag';
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
+    const timeFieldName = "time";
+    const metaFieldName = "tag";
     const numDocs = 100;
 
     $config.states.aggregate = function aggregate(db, collName) {
@@ -30,14 +31,16 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         // $out to the same collection so that concurrent aggregate commands would cause congestion.
         db[collName].runCommand({
             aggregate: collName,
-            pipeline: [{
-                $out: {
-                    db: db.getName(),
-                    coll: "interrupt_temp_out",
-                    timeseries: {timeField: timeFieldName, metaField: metaFieldName}
-                }
-            }],
-            cursor: {}
+            pipeline: [
+                {
+                    $out: {
+                        db: db.getName(),
+                        coll: "interrupt_temp_out",
+                        timeseries: {timeField: timeFieldName, metaField: metaFieldName},
+                    },
+                },
+            ],
+            cursor: {},
         });
     };
 
@@ -49,14 +52,14 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
             op: "command",
             active: true,
             $or: [
-                {"ns": db.getName() + ".interrupt_temp_out"},  // For the view.
-                {"ns": db.getName() + "." + collName},         // For input collection.
+                {"ns": db.getName() + ".interrupt_temp_out"}, // For the view.
+                {"ns": db.getName() + "." + collName}, // For input collection.
                 // For the tmp collection.
-                {"ns": {$regex: "^" + db.getName() + "\.system.buckets\.tmp\.agg_out.*"}}
+                {"ns": {$regex: "^" + db.getName() + "\.system.buckets\.tmp\.agg_out.*"}},
             ],
             "command.drop": {
-                $exists: false
-            }  // Exclude 'drop' command from the filter to make sure that we don't kill the the
+                $exists: false,
+            }, // Exclude 'drop' command from the filter to make sure that we don't kill the the
             // drop command which is responsible for dropping the temporary collection in the
             // destructor. This won't prevent any drop commands run internally (with the same
             // operation context) by $out, such as in renameCollection.
@@ -82,12 +85,23 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         }
 
         const collNames = db.getCollectionNames();
-        // Ensure that a temporary collection is not left behind.
-        assert.eq(collNames.filter(coll => coll.includes('system.buckets.tmp.agg_out')).length, 0);
+        const temporaryAggCollections = collNames.filter((coll) => coll.includes("tmp.agg_out"));
+        assert.eq(
+            temporaryAggCollections.length,
+            0,
+            "Temporary agg collection left behind: " + tojson(temporaryAggCollections),
+        );
 
-        // Ensure that for the buckets collection there is a corresponding view.
-        assert(!(collNames.includes('system.buckets.interrupt_temp_out') &&
-                 !collNames.includes('interrupt_temp_out')));
+        // TODO SERVER-101784 remove these checks once only viewless timeseries exist.
+        if (!areViewlessTimeseriesEnabled(db)) {
+            // Check that if the buckets collection exists then the view also exists
+            const bucketCollectionPresent = collNames.includes("system.buckets.interrupt_temp_out");
+            const viewPresent = collNames.includes("interrupt_temp_out");
+            assert(
+                !bucketCollectionPresent || viewPresent,
+                "View must be present if bucket collection is present: " + tojson(collNames),
+            );
+        }
     };
 
     /**
@@ -95,13 +109,14 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
      */
     $config.setup = function setup(db, collName, cluster) {
         db[collName].drop();
-        assert.commandWorked(db.createCollection(
-            collName, {timeseries: {timeField: timeFieldName, metaField: metaFieldName}}));
+        assert.commandWorked(
+            db.createCollection(collName, {timeseries: {timeField: timeFieldName, metaField: metaFieldName}}),
+        );
         const docs = [];
         for (let i = 0; i < numDocs; ++i) {
             docs.push({
                 [timeFieldName]: ISODate(),
-                [metaFieldName]: (this.tid * numDocs) + i,
+                [metaFieldName]: this.tid * numDocs + i,
             });
         }
         assert.commandWorked(db.runCommand({insert: collName, documents: docs, ordered: false}));

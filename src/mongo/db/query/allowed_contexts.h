@@ -29,23 +29,23 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <functional>
-
-#include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
+#include <functional>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 /**
  * Flags to mark language features with different allowance constraints when API versioning is
  * enabled.
  */
-enum class AllowedWithApiStrict {
+enum class MONGO_MOD_PUB AllowedWithApiStrict {
     // The stage is always allowed in the pipeline regardless of API versions.
     kAlways,
     // This stage can be allowed in a stable API version, depending on the parameters.
@@ -61,7 +61,7 @@ enum class AllowedWithApiStrict {
  * request. Ensures that only internal clients are permitted to send or deserialize certain
  * stages.
  */
-enum class AllowedWithClientType {
+enum class MONGO_MOD_PUB AllowedWithClientType {
     // The stage can be specified in the command request of any client.
     kAny,
     // The stage can be specified in the command request of an internal client only.

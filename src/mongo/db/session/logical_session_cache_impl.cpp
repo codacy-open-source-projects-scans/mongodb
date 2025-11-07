@@ -28,13 +28,29 @@
  */
 
 
-#include <absl/container/node_hash_map.h>
-#include <absl/container/node_hash_set.h>
-#include <absl/meta/type_traits.h>
+#include "mongo/db/session/logical_session_cache_impl.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/repl/member_state.h"
+#include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/session/kill_sessions.h"
+#include "mongo/db/session/logical_session_cache_gen.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/db/session/logical_session_id_helpers.h"
+#include "mongo/db/session/session_killer.h"
+#include "mongo/db/storage/storage_options.h"
+#include "mongo/logv2/log.h"
+#include "mongo/logv2/log_severity_suppressor.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/scopeguard.h"
+#include "mongo/util/str.h"
+
 #include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
 #include <iterator>
 #include <mutex>
 #include <shared_mutex>
@@ -42,30 +58,12 @@
 #include <type_traits>
 #include <utility>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/repl/member_state.h"
-#include "mongo/db/repl/repl_settings.h"
-#include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/operation_sharding_state.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/session/kill_sessions.h"
-#include "mongo/db/session/logical_session_cache_gen.h"
-#include "mongo/db/session/logical_session_cache_impl.h"
-#include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/session/logical_session_id_helpers.h"
-#include "mongo/db/session/session_killer.h"
-#include "mongo/db/storage/storage_options.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/logv2/log_severity_suppressor.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/scopeguard.h"
-#include "mongo/util/str.h"
+#include <absl/container/node_hash_map.h>
+#include <absl/container/node_hash_set.h>
+#include <absl/meta/type_traits.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kControl
 
@@ -92,10 +90,11 @@ LogicalSessionCacheImpl::LogicalSessionCacheImpl(std::unique_ptr<ServiceLiaison>
     _stats.setLastSessionsCollectionJobTimestamp(_service->now());
     _stats.setLastTransactionReaperJobTimestamp(_service->now());
 
-    // Skip initializing this background thread when using 'recoverFromOplogAsStandalone=true' or
-    // --magicRestore as the server is put in read-only mode after oplog recovery.
+    // Skip initializing this background thread when using 'recoverFromOplogAsStandalone=true',
+    // --magicRestore, or --queryableBackupMode as the server is put in read-only mode after oplog
+    // recovery.
     if (repl::ReplSettings::shouldRecoverFromOplogAsStandalone() ||
-        storageGlobalParams.magicRestore) {
+        storageGlobalParams.magicRestore || storageGlobalParams.queryableBackupMode) {
         return;
     }
 
@@ -147,6 +146,7 @@ Status LogicalSessionCacheImpl::vivify(OperationContext* opCtx, const LogicalSes
 
 Status LogicalSessionCacheImpl::refreshNow(OperationContext* opCtx) {
     try {
+        LOGV2_DEBUG(10720700, 1, "Refreshing logical session cache");
         _refresh(opCtx->getClient());
     } catch (const DBException& ex) {
         LOGV2(20714,
@@ -170,6 +170,7 @@ size_t LogicalSessionCacheImpl::size() {
 
 void LogicalSessionCacheImpl::_periodicRefresh(Client* client) {
     try {
+        LOGV2_DEBUG(10720701, 1, "Refreshing logical session cache due to periodic refresh");
         _refresh(client);
     } catch (const DBException& ex) {
         LOGV2(20710,

@@ -7,6 +7,7 @@
  *   references_foreign_collection,
  * ]
  */
+import {assertArrayEq} from "jstests/aggregation/extras/utils.js";
 import {TimeseriesTest} from "jstests/core/timeseries/libs/timeseries.js";
 
 TimeseriesTest.run((insert) => {
@@ -16,7 +17,7 @@ TimeseriesTest.run((insert) => {
     const hostIdFieldName = "hostid";
     const nonTimeseriesCollOption = null;
     const timeseriesCollOption = {
-        timeseries: {timeField: timeFieldName, metaField: hostIdFieldName}
+        timeseries: {timeField: timeFieldName, metaField: hostIdFieldName},
     };
     const numHosts = 10;
     const numDocs = 200;
@@ -24,7 +25,7 @@ TimeseriesTest.run((insert) => {
     Random.setRandomSeed();
     const hosts = TimeseriesTest.generateHosts(numHosts);
 
-    let testFunc = function(collAOption, collBOption) {
+    let testFunc = function (collAOption, collBOption) {
         // Prepares two collections. Each collection can be either a time-series or a non
         // time-series collection, depending on collAOption/collBOption.
         const collA = testDB.getCollection("a");
@@ -34,30 +35,45 @@ TimeseriesTest.run((insert) => {
         assert.commandWorked(testDB.createCollection(collA.getName(), collAOption));
         assert.commandWorked(testDB.createCollection(collB.getName(), collBOption));
         let entryCountPerHost = new Array(numHosts).fill(0);
+        let entryCountPerInfo = new Array(numHosts).fill(0);
         let entryCountOver80AndExistsIdlePerHost = new Array(numHosts).fill(0);
 
         // Inserts into collA, one entry per host.
         for (let i = 0; i < numHosts; i++) {
             let host = hosts[i];
-            assert.commandWorked(insert(collA, {time: ISODate(), hostid: host.tags.hostid}));
+            assert.commandWorked(
+                insert(collA, {time: ISODate(), hostid: host.tags.hostid, info: host.tags.hostid * 11}),
+            );
         }
 
         // Inserts some random documents to collB. The 'idle' measurement is inserted only when
-        // usage is odd.
+        // usage is odd. 'info' field is used to match the documents on a non-meta field.
         for (let i = 0; i < numDocs; i++) {
             let host = TimeseriesTest.getRandomElem(hosts);
             let usage = TimeseriesTest.getRandomUsage();
             if (usage % 2) {
-                assert.commandWorked(insert(
-                    collB,
-                    {time: ISODate(), hostid: host.tags.hostid, cpu: usage, idle: 100 - usage}));
+                assert.commandWorked(
+                    insert(collB, {
+                        time: ISODate(),
+                        hostid: host.tags.hostid,
+                        cpu: usage,
+                        idle: 100 - usage,
+                        info: host.tags.hostid * 11,
+                    }),
+                );
             } else {
                 assert.commandWorked(
-                    insert(collB, {time: ISODate(), hostid: host.tags.hostid, cpu: usage}));
+                    insert(collB, {time: ISODate(), hostid: host.tags.hostid, cpu: usage, info: host.tags.hostid - 11}),
+                );
             }
 
             // These counts are to test metaField match.
             entryCountPerHost[host.tags.hostid]++;
+
+            // These counts are to test measurement field match.
+            if (usage % 2) {
+                entryCountPerInfo[host.tags.hostid]++;
+            }
 
             // These counts are to test measurement fields match which are specified by
             // $graphLookup's restrictSearchWithMatch.
@@ -67,7 +83,8 @@ TimeseriesTest.run((insert) => {
         }
 
         // Verifies that a meta field "hostid" works with $graphLookup.
-        let results = collA.aggregate([
+        let results = collA
+            .aggregate([
                 {
                     $graphLookup: {
                         from: collB.getName(),
@@ -75,66 +92,114 @@ TimeseriesTest.run((insert) => {
                         connectFromField: "hostid",
                         connectToField: "hostid",
                         as: "matchedB",
-                        maxDepth: 0
-                    }
-                }, {
+                        maxDepth: 0,
+                    },
+                },
+                {
                     $project: {
                         _id: 0,
                         hostid: 1,
                         matchedB: {
-                            $size: "$matchedB"
-                        }
-                    }
+                            $size: "$matchedB",
+                        },
+                    },
                 },
-                {$sort: {hostid: 1}}
-            ]).toArray();
+                {$sort: {hostid: 1}},
+            ])
+            .toArray();
 
-        assert.eq(numHosts, results.length, results);
+        let expected = Array.from({length: numHosts}, (_, i) => ({
+            hostid: i,
+            matchedB: entryCountPerHost[i],
+        }));
+        assertArrayEq({
+            actual: results,
+            expected: expected,
+            extraErrorMsg: "unexpected results with $graphLookup on a metaField",
+        });
 
-        for (let i = 0; i < numHosts; i++) {
-            assert.eq({hostid: i, matchedB: entryCountPerHost[i]}, results[i], results);
-        }
+        // Verifies that a measurement field "info" works with $graphLookup.
+        results = collA
+            .aggregate([
+                {
+                    $graphLookup: {
+                        from: collB.getName(),
+                        startWith: "$info",
+                        connectFromField: "info",
+                        connectToField: "info",
+                        as: "matchedB",
+                        maxDepth: 0,
+                    },
+                },
+                {
+                    $project: {
+                        _id: 0,
+                        hostid: 1,
+                        info: 1,
+                        matchedB: {
+                            $size: "$matchedB",
+                        },
+                    },
+                },
+                {$sort: {hostid: 1}},
+            ])
+            .toArray();
+
+        expected = Array.from({length: numHosts}, (_, i) => ({
+            hostid: i,
+            info: i * 11,
+            matchedB: entryCountPerInfo[i],
+        }));
+        assertArrayEq({
+            actual: results,
+            expected: expected,
+            extraErrorMsg: "unexpected results with $graphLookup on a measurement field",
+        });
 
         // Verifies that measurement fields "cpu" and "idle" work with $graphLookup as expected.
-        results = collA.aggregate([
-            {
-                $graphLookup: {
-                    from: collB.getName(),
-                    startWith: "$hostid",
-                    connectFromField: "hostid",
-                    connectToField: "hostid",
-                    as: "matchedB",
-                    maxDepth: 0,
-                    restrictSearchWithMatch: {
-                        cpu: {$gt: 80},             // Tests measurement "cpu".
-                        idle: {$exists: true}       // Tests the existence of measurement "idle".
-                    }
-                }
-            }, {
-                $project: {
-                    _id: 0,
-                    hostid: 1,
-                    matchedB: {
-                        $size: "$matchedB"
-                    }
-                }
-            },
-            {$sort: {hostid: 1}}
-        ]).toArray();
+        results = collA
+            .aggregate([
+                {
+                    $graphLookup: {
+                        from: collB.getName(),
+                        startWith: "$hostid",
+                        connectFromField: "hostid",
+                        connectToField: "hostid",
+                        as: "matchedB",
+                        maxDepth: 0,
+                        restrictSearchWithMatch: {
+                            cpu: {$gt: 80}, // Tests measurement "cpu".
+                            idle: {$exists: true}, // Tests the existence of measurement "idle".
+                        },
+                    },
+                },
+                {
+                    $project: {
+                        _id: 0,
+                        hostid: 1,
+                        matchedB: {
+                            $size: "$matchedB",
+                        },
+                    },
+                },
+                {$sort: {hostid: 1}},
+            ])
+            .toArray();
 
-        assert.eq(numHosts, results.length, results);
-
-        for (let i = 0; i < numHosts; i++) {
-            let expectedCount = entryCountOver80AndExistsIdlePerHost[i];
-            assert.eq({hostid: i, matchedB: expectedCount},
-                      results[i],
-                      entryCountOver80AndExistsIdlePerHost);
-        }
+        expected = Array.from({length: numHosts}, (_, i) => ({
+            hostid: i,
+            matchedB: entryCountOver80AndExistsIdlePerHost[i],
+        }));
+        assertArrayEq({
+            actual: results,
+            expected: expected,
+            extraErrorMsg: "unexpected results with $graphLookup with 'restrictSearchWithMatch'",
+        });
     };
 
     // Tests case #1: collA: non time-series, collB: time-series
-    var collAOption = nonTimeseriesCollOption;
-    var collBOption = timeseriesCollOption;
+    let collAOption = nonTimeseriesCollOption;
+    let collBOption = timeseriesCollOption;
     testFunc(collAOption, collBOption);
 
     // Tests case #2: collA: time-series, collB: non time-series

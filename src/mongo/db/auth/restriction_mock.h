@@ -27,11 +27,12 @@
  *    it in the license file.
  */
 
+#pragma once
+
+#include "mongo/base/status.h"
 #include "mongo/db/auth/restriction.h"
 
 #include <string>
-
-#include "mongo/base/status.h"
 
 namespace mongo {
 

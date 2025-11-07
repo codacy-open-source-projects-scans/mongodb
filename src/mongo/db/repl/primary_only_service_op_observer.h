@@ -29,10 +29,8 @@
 
 #pragma once
 
-#include <cstdint>
-
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
@@ -40,7 +38,10 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
+
+#include <cstdint>
 
 namespace mongo {
 namespace repl {
@@ -50,7 +51,7 @@ class PrimaryOnlyServiceRegistry;
 /**
  * OpObserver for PrimaryOnlyService.
  */
-class PrimaryOnlyServiceOpObserver final : public OpObserverNoop {
+class MONGO_MOD_PUB PrimaryOnlyServiceOpObserver final : public OpObserverNoop {
     PrimaryOnlyServiceOpObserver(const PrimaryOnlyServiceOpObserver&) = delete;
     PrimaryOnlyServiceOpObserver& operator=(const PrimaryOnlyServiceOpObserver&) = delete;
 
@@ -74,7 +75,8 @@ public:
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
-                                  bool markFromMigrate) final;
+                                  bool markFromMigrate,
+                                  bool isViewlessTimeseries) final;
 
 private:
     PrimaryOnlyServiceRegistry* _registry;

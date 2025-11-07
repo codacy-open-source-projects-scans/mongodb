@@ -34,15 +34,6 @@
 
 #include "mongo/db/query/query_planner_test_lib.h"
 
-#include <cstddef>
-#include <memory>
-#include <set>
-#include <utility>
-#include <vector>
-
-#include <absl/container/flat_hash_map.h>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -56,33 +47,36 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/expression_hasher.h"
-#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
 #include "mongo/db/pipeline/expression.h"
-#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/query/collation/collator_factory_mock.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/index_entry.h"
-#include "mongo/db/query/interval.h"
-#include "mongo/db/query/projection.h"
-#include "mongo/db/query/projection_ast.h"
-#include "mongo/db/query/projection_ast_util.h"
-#include "mongo/db/query/projection_parser.h"
-#include "mongo/db/query/projection_policies.h"
-#include "mongo/db/query/query_solution.h"
-#include "mongo/db/query/stage_types.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_ast_util.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_parser.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_policies.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
+#include "mongo/db/query/compiler/physical_model/interval/interval.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
+#include "mongo/db/query/compiler/rewrites/matcher/expression_optimizer.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/stdx/type_traits.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 #include "mongo/util/string_map.h"
+
+#include <cstddef>
+#include <memory>
+#include <set>
+#include <utility>
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -100,7 +94,7 @@ Status filterMatches(const BSONObj& testFilter,
         return {ErrorCodes::Error{6298503}, "actual (true) filter was null"};
     }
     std::unique_ptr<MatchExpression> trueFilterClone(trueFilter->clone());
-    MatchExpression::sortTree(trueFilterClone.get());
+    sortMatchExpressionTree(trueFilterClone.get());
 
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     expCtx->setCollator(std::move(collator));
@@ -113,9 +107,9 @@ Status filterMatches(const BSONObj& testFilter,
     if (root->matchType() == mongo::MatchExpression::NOT) {
         // Ideally we would optimize() everything, but some of the tests depend on structural
         // equivalence of single-arg $or expressions.
-        root = MatchExpression::optimize(std::move(root));
+        root = optimizeMatchExpression(std::move(root));
     }
-    MatchExpression::sortTree(root.get());
+    sortMatchExpressionTree(root.get());
     if (!trueFilterClone->equivalent(root.get())) {
         return {ErrorCodes::Error{5619211},
                 str::stream()
@@ -161,7 +155,7 @@ Status columnIxScanFiltersByPathMatch(
 
     for (auto&& expectedElem : expectedFiltersByPath) {
         const auto expectedPath = expectedElem.fieldNameStringData();
-        if (expectedElem.type() != BSONType::Object)
+        if (expectedElem.type() != BSONType::object)
             return {ErrorCodes::Error{6412405},
                     str::stream() << "invalid filter for path '" << expectedPath
                                   << "' given to 'filtersByPath' argument to 'column_scan' "
@@ -199,7 +193,7 @@ Status columnIxScanFiltersByPathMatch(
 }
 
 Status indexNamesMatch(BSONElement expectedIndexName, std::string actualIndexName) {
-    if (expectedIndexName.type() != BSONType::String) {
+    if (expectedIndexName.type() != BSONType::string) {
         return {ErrorCodes::Error{5619234},
                 str::stream() << "Provided JSON gave a 'ixscan' with a 'name', but the name "
                                  "was not an string: "
@@ -240,7 +234,7 @@ Status stringSetsMatch(BSONElement expectedStringArrElem,
 }
 
 void appendIntervalBound(BSONObjBuilder& bob, BSONElement& el) {
-    if (el.type() == String) {
+    if (el.type() == BSONType::string) {
         std::string data = el.String();
         if (data == "MaxKey") {
             bob.appendMaxKey("");
@@ -405,7 +399,7 @@ Status QueryPlannerTestLib::boundsMatch(const BSONObj& testBounds,
 
         {
             auto minElt = it.next();
-            if (minElt.type() != BSONType::Object) {
+            if (minElt.type() != BSONType::object) {
                 return {ErrorCodes::Error{5920205}, str::stream() << "Expected min obj"};
             }
 
@@ -419,7 +413,7 @@ Status QueryPlannerTestLib::boundsMatch(const BSONObj& testBounds,
 
         {
             auto maxElt = it.next();
-            if (maxElt.type() != BSONType::Object) {
+            if (maxElt.type() != BSONType::object) {
                 return {ErrorCodes::Error{5920204}, str::stream() << "Expected max obj"};
             }
 
@@ -446,7 +440,7 @@ Status QueryPlannerTestLib::boundsMatch(const BSONObj& testBounds,
                                   << "' but found '" << trueBounds.getFieldName(fieldItCount)
                                   << "'"};
         }
-        if (arrEl.type() != Array) {
+        if (arrEl.type() != BSONType::array) {
             return {ErrorCodes::Error{5619223},
                     str::stream() << "bounds are expected to be arrays. Found: " << arrEl
                                   << " (type " << arrEl.type() << ")"};
@@ -456,7 +450,7 @@ Status QueryPlannerTestLib::boundsMatch(const BSONObj& testBounds,
         size_t oilItCount = 0;
         while (oilIt.more()) {
             BSONElement intervalEl = oilIt.next();
-            if (intervalEl.type() != Array) {
+            if (intervalEl.type() != BSONType::array) {
                 return {ErrorCodes::Error{5619224},
                         str::stream()
                             << "intervals within bounds are expected to be arrays. Found: "
@@ -621,9 +615,7 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
         }
 
         BSONElement filter = ixscanObj["filter"];
-        if (filter.eoo()) {
-            return Status::OK();
-        } else if (filter.isNull()) {
+        if (filter.isNull() || filter.eoo()) {
             if (ixn->filter == nullptr) {
                 return Status::OK();
             }
@@ -1108,11 +1100,8 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
         BSONElement isAdditionElt = projObj["isAddition"];
         const bool isAddition = isAdditionElt.trueValue();
 
-        // Create an empty/dummy expression context without access to the operation context and
-        // collator. This should be sufficient to parse a projection.
-        auto expCtx = ExpressionContextBuilder{}
-                          .ns(NamespaceString::createNamespaceString_forTest("test.dummy"))
-                          .build();
+        boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest(
+            NamespaceString::createNamespaceString_forTest("test.dummy")));
         auto projection = projection_ast::parseAndAnalyze(
             expCtx,
             spec.Obj(),
@@ -1161,7 +1150,7 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
 
         BSONElement sortType = sortObj["type"];
         if (sortType) {
-            if (sortType.type() != BSONType::String) {
+            if (sortType.type() != BSONType::string) {
                 return {ErrorCodes::Error{5619283},
                         str::stream()
                             << "found a sort stage in the solution but 'type' was not a string: "
@@ -1428,7 +1417,7 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
         auto expectedEqLookupSoln = expectedElem.Obj();
         auto expectedForeignCollection = expectedEqLookupSoln["foreignCollection"];
         if (expectedForeignCollection.eoo() ||
-            expectedForeignCollection.type() != BSONType::String) {
+            expectedForeignCollection.type() != BSONType::string) {
             return {ErrorCodes::Error{6267501},
                     str::stream() << "Test solution for eq_lookup should have a "
                                      "'foreignCollection' field that is "
@@ -1447,7 +1436,7 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
         }
 
         auto expectedLocalField = expectedEqLookupSoln["joinFieldLocal"];
-        if (expectedLocalField.eoo() || expectedLocalField.type() != BSONType::String) {
+        if (expectedLocalField.eoo() || expectedLocalField.type() != BSONType::string) {
             return {
                 ErrorCodes::Error{6267503},
                 str::stream()
@@ -1466,7 +1455,7 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
         }
 
         auto expectedForeignField = expectedEqLookupSoln["joinFieldForeign"];
-        if (expectedForeignField.eoo() || expectedForeignField.type() != BSONType::String) {
+        if (expectedForeignField.eoo() || expectedForeignField.type() != BSONType::string) {
             return {
                 ErrorCodes::Error{6267505},
                 str::stream()
@@ -1484,7 +1473,7 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
         }
 
         auto expectedAsField = expectedEqLookupSoln["joinField"];
-        if (expectedAsField.eoo() || expectedAsField.type() != BSONType::String) {
+        if (expectedAsField.eoo() || expectedAsField.type() != BSONType::string) {
             return {ErrorCodes::Error{6267507},
                     str::stream()
                         << "Test solution for eq_lookup should have a 'joinField' field that is "
@@ -1501,7 +1490,7 @@ Status QueryPlannerTestLib::solutionMatches(const BSONObj& testSoln,
         }
 
         auto expectedStrategy = expectedEqLookupSoln["strategy"];
-        if (expectedStrategy.eoo() || expectedStrategy.type() != BSONType::String) {
+        if (expectedStrategy.eoo() || expectedStrategy.type() != BSONType::string) {
             return {ErrorCodes::Error{6267509},
                     str::stream()
                         << "Test solution for eq_lookup should have a 'strategy' field that is "

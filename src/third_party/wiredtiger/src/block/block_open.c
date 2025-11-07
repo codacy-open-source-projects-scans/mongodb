@@ -155,9 +155,9 @@ __wti_block_configure_first_fit(WT_BLOCK *block, bool on)
      * first-fit allocation as long as any operation wants it.
      */
     if (on)
-        (void)__wt_atomic_add32(&block->allocfirst, 1);
+        (void)__wt_atomic_add_uint32(&block->allocfirst, 1);
     else
-        (void)__wt_atomic_sub32(&block->allocfirst, 1);
+        (void)__wt_atomic_sub_uint32(&block->allocfirst, 1);
 }
 
 /*
@@ -167,7 +167,7 @@ __wti_block_configure_first_fit(WT_BLOCK *block, bool on)
 int
 __wt_block_open(WT_SESSION_IMPL *session, const char *filename, uint32_t objectid,
   const char *cfg[], bool forced_salvage, bool readonly, bool fixed, uint32_t allocsize,
-  WT_BLOCK **blockp)
+  WT_LIVE_RESTORE_FH_META *lr_fh_meta, WT_BLOCK **blockp)
 {
     WT_BLOCK *block;
     WT_CONFIG_ITEM cval;
@@ -177,6 +177,8 @@ __wt_block_open(WT_SESSION_IMPL *session, const char *filename, uint32_t objecti
     uint32_t flags;
 
     *blockp = NULL;
+
+    WT_ASSERT(session, filename != NULL);
 
     __wt_verbose(session, WT_VERB_BLOCK, "open: %s", filename);
 
@@ -245,6 +247,13 @@ __wt_block_open(WT_SESSION_IMPL *session, const char *filename, uint32_t objecti
     }
     WT_ERR(__wt_open(session, filename, WT_FS_OPEN_FILE_TYPE_DATA, flags, &block->fh));
 
+    /*
+     * We need to do this as close to __wt_open as possible as there is a descriptor block read
+     * further down which requires the extent lists to be initialized. Even if the extent list is
+     * NULL there is bookkeeping to do.
+     */
+    WT_ERR(__wt_live_restore_metadata_to_fh(session, block->fh->handle, lr_fh_meta));
+
     /* Set the file's size. */
     WT_ERR(__wt_filesize(session, block->fh, &block->size));
     /*
@@ -252,7 +261,7 @@ __wt_block_open(WT_SESSION_IMPL *session, const char *filename, uint32_t objecti
      * indicate this so that the first checkpoint is sure to set all the bits as dirty to cover the
      * header so that the header gets copied.
      */
-    if (block->size == allocsize && F_ISSET(conn, WT_CONN_INCR_BACKUP))
+    if (block->size == allocsize && F_ISSET_ATOMIC_32(conn, WT_CONN_INCR_BACKUP))
         block->created_during_backup = true;
 
     /* Initialize the live checkpoint's lock. */
@@ -371,7 +380,7 @@ __desc_read(WT_SESSION_IMPL *session, uint32_t allocsize, WT_BLOCK *block)
             ret = ENOENT;
         else {
             ret = WT_ERROR;
-            F_SET(S2C(session), WT_CONN_DATA_CORRUPTION);
+            F_SET_ATOMIC_32(S2C(session), WT_CONN_DATA_CORRUPTION);
         }
         WT_RET_MSG(session, ret,
           "File %s is smaller than allocation size; file size=%" PRId64 ", alloc size=%" PRIu32,

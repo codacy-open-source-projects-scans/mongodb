@@ -29,26 +29,44 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/global_catalog/router_role_api/sharding_write_router.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/op_observer/op_observer.h"
+#include "mongo/db/rss/persistence_provider.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/decorable.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/modules.h"
+
 #include <memory>
 #include <utility>
 
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer/op_observer.h"
-#include "mongo/db/s/sharding_write_router.h"
-#include "mongo/util/assert_util_core.h"
-#include "mongo/util/decorable.h"
-#include "mongo/util/fail_point.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
-namespace mongo {
+namespace MONGO_MOD_PUB mongo {
 
 // Common fail points for logOp() and logInsertOps().
 extern FailPoint addDestinedRecipient;
 extern FailPoint sleepBetweenInsertOpTimeGenerationAndLogOp;
+
+/**
+ * Returns true when local catalog identifiers should be replicated through the oplog.
+ */
+bool shouldReplicateLocalCatalogIdentifiers(const rss::PersistenceProvider&);
+
+/**
+ * Returns true when ranged truncates should be replicated through the oplog.
+ */
+bool shouldReplicateRangeTruncates(const rss::PersistenceProvider&, const VersionContext& vCtx);
+
+/**
+ * Returns true if gFeatureFlagPrimaryDrivenIndexBuilds is enabled.
+ */
+bool isPrimaryDrivenIndexBuildEnabled(const VersionContext& vCtx);
 
 BSONObj makeCollModCmdObj(const BSONObj& collModCmd,
                           const CollectionOptions& oldCollOptions,
@@ -93,4 +111,4 @@ DocumentKey getDocumentKey(const ShardKeyPattern& shardKeyPattern, BSONObj const
 extern const OpStateAccumulator::Decoration<std::unique_ptr<ShardingWriteRouter>>
     shardingWriteRouterOpStateAccumulatorDecoration;
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

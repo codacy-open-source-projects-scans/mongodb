@@ -29,23 +29,21 @@
 
 #pragma once
 
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/import_options.h"
+#include "mongo/db/rss/persistence_provider.h"
 #include "mongo/db/storage/compact_options.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/db/storage/storage_engine.h"
 
+#include <memory>
+#include <string>
+#include <vector>
+
 namespace mongo {
 
-class IndexDescriptor;
 class JournalListener;
 class OperationContext;
 class RecoveryUnit;
@@ -53,6 +51,8 @@ class SnapshotManager;
 
 class KVEngine {
 public:
+    using IdentKey = std::variant<std::span<const char>, int64_t>;
+
     /**
      * During the startup process, the storage engine is one of the first components to be started
      * up and fully initialized. But that fully initialized storage engine may not be recognized as
@@ -78,38 +78,50 @@ public:
      */
     virtual void notifyReplStartupRecoveryComplete(RecoveryUnit&) {}
 
-    virtual RecoveryUnit* newRecoveryUnit() = 0;
+    /**
+     * The storage engine can save several elements of ReplSettings on construction.  Standalone
+     * mode is one such setting that can change after construction and need to be updated.
+     */
+    virtual void setInStandaloneMode() {}
+
+    virtual std::unique_ptr<RecoveryUnit> newRecoveryUnit() {
+        MONGO_UNREACHABLE;
+    }
 
     /**
-     * Requesting multiple copies for the same ns/ident is a rules violation; Calling on a
-     * non-created ident is invalid and may crash.
+     * Creates a RecordStore instance for the given ident. The ident must exist, and the behavior if
+     * it does not is undefined.
      *
-     * Trying to access this record store in the future will retreive the pointer from the
-     * collection object, and therefore this function can only be called once per namespace.
+     * At most one non-point-in-time RecordStore should exist for a given ident at a time. Multiple
+     * instances do not synchronize with each other, and writing via multiple instances or writing
+     * via one instance while reading from another (non-PIT) instance may break in surprising ways.
      *
-     * @param ident Will be created if it does not already exist.
+     * Instantiating RecordStores is expensive, and the returned pointer should be cached by the
+     * caller if it will be used multiple times. In normal usage, this is managed by Collection and
+     * RecordSTore instances should be obtained via that.
      */
     virtual std::unique_ptr<RecordStore> getRecordStore(OperationContext* opCtx,
                                                         const NamespaceString& nss,
                                                         StringData ident,
-                                                        const CollectionOptions& options) = 0;
-
+                                                        const RecordStore::Options& options,
+                                                        boost::optional<UUID> uuid) = 0;
     /**
      * Opens an existing ident as a temporary record store. Must be used for record stores created
      * with `makeTemporaryRecordStore`. Using `getRecordStore` would cause the record store to use
      * the same settings as a regular collection, and would differ in behaviour as when it was
      * originally created with `makeTemporaryRecordStore`.
      */
-    virtual std::unique_ptr<RecordStore> getTemporaryRecordStore(OperationContext* opCtx,
+    virtual std::unique_ptr<RecordStore> getTemporaryRecordStore(RecoveryUnit& ru,
                                                                  StringData ident,
                                                                  KeyFormat keyFormat) = 0;
 
-    virtual std::unique_ptr<SortedDataInterface> getSortedDataInterface(
-        OperationContext* opCtx,
-        const NamespaceString& nss,
-        const CollectionOptions& collOptions,
-        StringData ident,
-        const IndexDescriptor* desc) = 0;
+    virtual std::unique_ptr<SortedDataInterface> getSortedDataInterface(OperationContext* opCtx,
+                                                                        RecoveryUnit& ru,
+                                                                        const NamespaceString& nss,
+                                                                        const UUID& uuid,
+                                                                        StringData ident,
+                                                                        const IndexConfig& config,
+                                                                        KeyFormat keyFormat) = 0;
 
     /**
      * The create and drop methods on KVEngine are not transactional. Transactional semantics
@@ -117,17 +129,19 @@ public:
      * called if a create is rolled back. A higher-level drop operation will only propagate to a
      * drop call on the KVEngine once the WUOW commits. Therefore drops will never be rolled
      * back and it is safe to immediately reclaim storage.
+     *
+     * Creates a 'RecordStore' and generated from the provided 'options'.
      */
-    virtual Status createRecordStore(const NamespaceString& nss,
+    virtual Status createRecordStore(const rss::PersistenceProvider&,
+                                     const NamespaceString& nss,
                                      StringData ident,
-                                     const CollectionOptions& options,
-                                     KeyFormat keyFormat = KeyFormat::Long) = 0;
+                                     const RecordStore::Options& options) = 0;
 
     /**
      * RecordStores initially created with `makeTemporaryRecordStore` must be opened with
      * `getTemporaryRecordStore`.
      */
-    virtual std::unique_ptr<RecordStore> makeTemporaryRecordStore(OperationContext* opCtx,
+    virtual std::unique_ptr<RecordStore> makeTemporaryRecordStore(RecoveryUnit& ru,
                                                                   StringData ident,
                                                                   KeyFormat keyFormat) = 0;
 
@@ -137,7 +151,8 @@ public:
      */
     virtual Status importRecordStore(StringData ident,
                                      const BSONObj& storageMetadata,
-                                     const ImportOptions& importOptions) {
+                                     bool panicOnCorruptWtMetadata,
+                                     bool repair) {
         MONGO_UNREACHABLE;
     }
 
@@ -190,11 +205,16 @@ public:
     virtual bool waitUntilUnjournaledWritesDurable(OperationContext* opCtx,
                                                    bool stableCheckpoint) = 0;
 
-    virtual Status createSortedDataInterface(RecoveryUnit&,
-                                             const NamespaceString& nss,
-                                             const CollectionOptions& collOptions,
-                                             StringData ident,
-                                             const IndexDescriptor* desc) = 0;
+    virtual bool underCachePressure(int concurrentOpOuts) = 0;
+
+    virtual Status createSortedDataInterface(
+        const rss::PersistenceProvider&,
+        RecoveryUnit&,
+        const NamespaceString& nss,
+        const UUID& uuid,
+        StringData ident,
+        const IndexConfig& indexConfig,
+        const boost::optional<mongo::BSONObj>& storageEngineIndexOptions) = 0;
 
     /**
      * Similar to createSortedDataInterface but this imports from an existing table with the
@@ -203,7 +223,8 @@ public:
     virtual Status importSortedDataInterface(RecoveryUnit&,
                                              StringData ident,
                                              const BSONObj& storageMetadata,
-                                             const ImportOptions& importOptions) {
+                                             bool panicOnCorruptWtMetadata,
+                                             bool repair) {
         MONGO_UNREACHABLE;
     }
 
@@ -223,7 +244,7 @@ public:
      * removal immediately, we enqueue it to be removed at a later time. If a callback is specified,
      * it will be run upon the drop if this function returns an OK status.
      */
-    virtual Status dropIdent(RecoveryUnit* ru,
+    virtual Status dropIdent(RecoveryUnit& ru,
                              StringData ident,
                              bool identHasSizeInfo,
                              const StorageEngine::DropIdentCallback& onDrop = nullptr) = 0;
@@ -244,10 +265,11 @@ public:
      * This recovery process makes no guarantees about the integrity of data recovered or even that
      * it still exists when recovered.
      */
-    virtual Status recoverOrphanedIdent(const NamespaceString& nss,
+    virtual Status recoverOrphanedIdent(const rss::PersistenceProvider& provider,
+                                        const NamespaceString& nss,
                                         StringData ident,
-                                        const CollectionOptions& options) {
-        auto status = createRecordStore(nss, ident, options);
+                                        const RecordStore::Options& recordStoreOptions) {
+        auto status = createRecordStore(provider, nss, ident, recordStoreOptions);
         if (status.isOK()) {
             return {ErrorCodes::DataModifiedByRepair, "Orphan recovery created a new record store"};
         }
@@ -256,7 +278,7 @@ public:
 
     virtual void alterIdentMetadata(RecoveryUnit&,
                                     StringData ident,
-                                    const IndexDescriptor* desc,
+                                    const IndexConfig& config,
                                     bool isForceUpdateMetadata) {}
 
     /**
@@ -278,6 +300,8 @@ public:
     virtual void endBackup() {
         MONGO_UNREACHABLE;
     }
+
+    virtual Timestamp getBackupCheckpointTimestamp() = 0;
 
     virtual Status disableIncrementalBackup() {
         MONGO_UNREACHABLE;
@@ -329,13 +353,6 @@ public:
         return true;
     }
 
-    /**
-     * Returns true if storage engine supports --directoryperdb.
-     * See:
-     *     http://docs.mongodb.org/manual/reference/program/mongod/#cmdoption--directoryperdb
-     */
-    virtual bool supportsDirectoryPerDB() const = 0;
-
     virtual bool hasIdent(RecoveryUnit&, StringData ident) const = 0;
 
     virtual std::vector<std::string> getAllIdents(RecoveryUnit&) const = 0;
@@ -345,9 +362,12 @@ public:
      * override this method if they have clean-up to do that is different from unclean shutdown.
      * MongoDB will not call into the storage subsystem after calling this function.
      *
+     * The storage engine is allowed to leak memory for faster shutdown, except when the process is
+     * not exiting or when running tools to look for memory leaks.
+     *
      * There is intentionally no uncleanShutdown().
      */
-    virtual void cleanShutdown() = 0;
+    virtual void cleanShutdown(bool memLeakAllowed) = 0;
 
     /**
      * Return the SnapshotManager for this KVEngine or NULL if not supported.
@@ -363,6 +383,22 @@ public:
      * system about journaled write progress.
      */
     virtual void setJournalListener(JournalListener* jl) = 0;
+
+    /**
+     * See `StorageEngine::setLastMaterializedLsn`
+     */
+    virtual void setLastMaterializedLsn(uint64_t lsn) {}
+
+    /**
+     * Configures the specified checkpoint as the starting point for recovery.
+     */
+    virtual void setRecoveryCheckpointMetadata(StringData checkpointMetadata) {}
+
+    /**
+     * Configures the storage engine as the leader, allowing it to flush checkpoints to remote
+     * storage.
+     */
+    virtual void promoteToLeader() {}
 
     /**
      * See `StorageEngine::setStableTimestamp`
@@ -390,7 +426,7 @@ public:
      * See `StorageEngine::setOldestActiveTransactionTimestampCallback`
      */
     virtual void setOldestActiveTransactionTimestampCallback(
-        StorageEngine::OldestActiveTransactionTimestampCallback callback){};
+        StorageEngine::OldestActiveTransactionTimestampCallback callback) {};
 
     /**
      * See `StorageEngine::setOldestTimestamp`
@@ -457,13 +493,6 @@ public:
     }
 
     /**
-     * See `StorageEngine::supportsOplogTruncateMarkers`
-     */
-    virtual bool supportsOplogTruncateMarkers() const {
-        return false;
-    }
-
-    /**
      * Methods to access the storage engine's timestamps.
      */
     virtual Timestamp getCheckpointTimestamp() const {
@@ -481,18 +510,45 @@ public:
     virtual StatusWith<Timestamp> pinOldestTimestamp(RecoveryUnit&,
                                                      const std::string& requestingServiceName,
                                                      Timestamp requestedTimestamp,
-                                                     bool roundUpIfTooOld) {
-        MONGO_UNREACHABLE;
-    }
+                                                     bool roundUpIfTooOld) = 0;
 
-    virtual void unpinOldestTimestamp(const std::string& requestingServiceName) {
-        MONGO_UNREACHABLE
-    }
+    virtual void unpinOldestTimestamp(const std::string& requestingServiceName) = 0;
 
     /**
      * See `StorageEngine::setPinnedOplogTimestamp`
      */
     virtual void setPinnedOplogTimestamp(const Timestamp& pinnedTimestamp) = 0;
+
+    /**
+     * Inserts a key-value pair into the specified 'ident'. Must be called from within a
+     * storage transaction. Duplicate keys (and by extension, updates) are not allowed.
+     *
+     * Returns OK on success, 'DuplicateKey' if the key already exists, or the error returned by
+     * the underlying storage engine on other failures.
+     */
+    virtual Status insertIntoIdent(RecoveryUnit& ru,
+                                   StringData ident,
+                                   IdentKey key,
+                                   std::span<const char> value) = 0;
+
+    /**
+     * Retrieves the value associated with 'key' from the specified 'ident'.
+     *
+     * Returns a 'UniqueBuffer' containing the value on success, 'KeyNotFound' if the key does not
+     * exist, or the error returned by the underlying storage engine on other failures.
+     */
+    virtual StatusWith<UniqueBuffer> getFromIdent(RecoveryUnit& ru,
+                                                  StringData ident,
+                                                  IdentKey key) = 0;
+
+    /**
+     * Deletes the key from the specified 'ident'.
+     *
+     * Returns OK on success, 'KeyNotFound' if the key does not exist, or the error returned by the
+     * underlying storage engine on other failures. Must be called from within a storage
+     * transaction.
+     */
+    virtual Status deleteFromIdent(RecoveryUnit& ru, StringData ident, IdentKey key) = 0;
 
     /**
      * See `StorageEngine::dump`
@@ -527,6 +583,31 @@ public:
     }
 
     /**
+     * Sets an optional boolean value (true / false / unset) associated to an arbitrary
+     * `flagName` key on the storage engine options BSON object of a collection / index.
+     * The way the flag is stored in the BSON object is engine-specific, and callers should only
+     * assume that the persisted value can be later recovered using `getFlagFromStorageOptions`.
+     *
+     * This method only exists to support a critical fix (SERVER-91195), which required introducing
+     * a backportable way to persist boolean flags; do not add new usages.
+     * TODO SERVER-92265 evaluate getting rid of this method.
+     */
+    virtual BSONObj setFlagToStorageOptions(const BSONObj& storageEngineOptions,
+                                            StringData flagName,
+                                            boost::optional<bool> flagValue) const = 0;
+
+    /**
+     * Gets an optional boolean flag (true / false / unset) associated to an arbitrary
+     * `flagName` key on the storage engine options BSON object of a collection / index,
+     * as previously set by `setFlagToStorageOptions`.
+     * The default value, if one has not been previously set, is the unset state (`boost::none`).
+     *
+     * TODO SERVER-92265 evaluate getting rid of this method.
+     */
+    virtual boost::optional<bool> getFlagFromStorageOptions(const BSONObj& storageEngineOptions,
+                                                            StringData flagName) const = 0;
+
+    /**
      * Returns the input storage engine options, sanitized to remove options that may not apply to
      * this node, such as encryption. Might be called for both collection and index options. See
      * SERVER-68122.
@@ -552,5 +633,12 @@ public:
      * cleanShutdown() hasn't been called.
      */
     virtual ~KVEngine() {}
+
+    /**
+     * Returns whether the kv-engine is currently trying to live-restore its database.
+     */
+    virtual bool hasOngoingLiveRestore() {
+        return false;
+    }
 };
 }  // namespace mongo

@@ -80,6 +80,16 @@
     } while (0)
 #endif
 
+#ifdef __GNUC__
+#if __GNUC__ == 14
+/*
+ * !!!
+ * GCC with -Warray-bounds complains about calls to __wt_vunpack_uint in this file.
+ * This is a GCC compiler bug referenced in https://gcc.gnu.org/bugzilla/show_bug.cgi?id=117829.
+ */
+#pragma GCC diagnostic ignored "-Warray-bounds"
+#endif
+#endif
 /*
  * __wt_vpack_posint --
  *     Packs a positive variable-length integer in the specified location.
@@ -380,4 +390,52 @@ __wt_vsize_int(int64_t x)
         return (1);
     /* For non-negative values, use the unsigned code above. */
     return (__wt_vsize_uint((uint64_t)x));
+}
+
+/*
+ * __wt_pack_fixed_uint32 --
+ *     Pack a fixed-length 32-bit unsigned integer.
+ */
+static WT_INLINE int
+__wt_pack_fixed_uint32(uint8_t **pp, size_t maxlen, uint32_t value)
+{
+    uint32_t v;
+    uint8_t *p;
+    p = *pp;
+
+    v = value;
+#ifdef WORDS_BIGENDIAN
+    v = __wt_bswap32(v);
+#endif
+
+    WT_SIZE_CHECK_PACK(4, maxlen);
+    memcpy(p, &v, sizeof(v));
+    p += sizeof(v);
+
+    *pp = p;
+    return (0);
+}
+
+/*
+ * __wt_unpack_fixed_uint32 --
+ *     Unpack a fixed-length 32-bit unsigned integer.
+ */
+static WT_INLINE int
+__wt_unpack_fixed_uint32(const uint8_t **pp, size_t maxlen, uint32_t *valuep)
+{
+    uint32_t v;
+    const uint8_t *p;
+    p = *pp;
+
+    WT_SIZE_CHECK_UNPACK(4, maxlen);
+    memcpy(&v, p, sizeof(v));
+    p += sizeof(v);
+
+#ifdef WORDS_BIGENDIAN
+    v = __wt_bswap32(v);
+#endif
+
+    *valuep = v;
+    *pp = p;
+    return (0);
 }

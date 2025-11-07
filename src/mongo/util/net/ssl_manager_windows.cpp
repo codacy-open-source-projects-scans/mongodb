@@ -28,19 +28,6 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/util/net/ssl_manager.h"
-
-#include <asio.hpp>
-#include <boost/algorithm/string/replace.hpp>
-#include <fstream>
-#include <memory>
-#include <string>
-#include <tuple>
-#include <vector>
-#include <winhttp.h>
-
 #include "mongo/base/init.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
@@ -58,6 +45,7 @@
 #include "mongo/util/net/sockaddr.h"
 #include "mongo/util/net/socket_exception.h"
 #include "mongo/util/net/ssl.hpp"
+#include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/net/ssl_parameters_gen.h"
 #include "mongo/util/net/ssl_peer_info.h"
@@ -67,14 +55,23 @@
 #include "mongo/util/text.h"
 #include "mongo/util/uuid.h"
 
+#include <fstream>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <vector>
+
+#include <asio.hpp>
+#include <winhttp.h>
+
+#include <boost/algorithm/string/replace.hpp>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
 
 namespace mongo {
 
 using transport::SSLConnectionContext;
-
-extern SSLManagerCoordinator* theSSLManagerCoordinator;
 
 namespace {
 
@@ -259,6 +256,10 @@ public:
     std::vector<char> _tempBuffer;
 
     SSLConnectionWindows(SCHANNEL_CRED* cred, Socket* sock, const char* initialBytes, int len);
+
+    void* getConnection() final {
+        return _engine.native_handle();
+    }
 
     ~SSLConnectionWindows();
 };
@@ -637,7 +638,7 @@ StatusWith<std::vector<BYTE>> decodePEMBlob(StringData blob) {
     DWORD decodeLen{0};
 
     if (!CryptStringToBinaryA(
-            blob.rawData(), blob.size(), CRYPT_STRING_BASE64HEADER, NULL, &decodeLen, NULL, NULL)) {
+            blob.data(), blob.size(), CRYPT_STRING_BASE64HEADER, NULL, &decodeLen, NULL, NULL)) {
         auto ec = lastSystemError();
         if (ec != systemError(ERROR_MORE_DATA)) {
             return Status(ErrorCodes::InvalidSSLConfiguration,
@@ -649,7 +650,7 @@ StatusWith<std::vector<BYTE>> decodePEMBlob(StringData blob) {
     std::vector<BYTE> binaryBlobBuf;
     binaryBlobBuf.resize(decodeLen);
 
-    if (!CryptStringToBinaryA(blob.rawData(),
+    if (!CryptStringToBinaryA(blob.data(),
                               blob.size(),
                               CRYPT_STRING_BASE64HEADER,
                               binaryBlobBuf.data(),
@@ -727,7 +728,7 @@ StatusWith<std::vector<UniqueCertificate>> readCAPEMBuffer(StringData buffer) {
             return {std::move(certs)};
         }
 
-        pos = (blobBuf.rawData() + blobBuf.size()) - buffer.rawData();
+        pos = (blobBuf.data() + blobBuf.size()) - buffer.data();
 
         auto swCert = decodePEMBlob(blobBuf);
         if (!swCert.isOK()) {
@@ -793,7 +794,7 @@ StatusWith<UniqueCertificateWithPrivateKey> readCertPEMFile(StringData fileName,
     // Multiple certificates in a PEM file are not supported since these certs need to be in the ca
     // file.
     auto secondPublicKeyBlobPosition =
-        buf.find("CERTIFICATE", (publicKeyBlob.rawData() + publicKeyBlob.size()) - buf.data());
+        buf.find("CERTIFICATE", (publicKeyBlob.data() + publicKeyBlob.size()) - buf.data());
     std::vector<UniqueCertificate> extraCertificates;
     if (secondPublicKeyBlobPosition != std::string::npos) {
         // Read in extra certificates
@@ -1767,16 +1768,27 @@ Status validatePeerCertificate(const std::string& remoteHost,
 
     // szOID_PKIX_KP_SERVER_AUTH ("1.3.6.1.5.5.7.3.1") - means the certificate can be used for
     // server authentication
-    LPSTR usage[] = {
+    LPSTR serverUsage[] = {
         const_cast<LPSTR>(szOID_PKIX_KP_SERVER_AUTH),
+    };
+
+    // szOID_PKIX_KP_CLIENT_AUTH ("1.3.6.1.5.5.7.3.2") - means the certificate can be used for
+    // client authentication
+    LPSTR clientUsage[] = {
+        const_cast<LPSTR>(szOID_PKIX_KP_CLIENT_AUTH),
     };
 
     // If remoteHost is not empty, then this is running on the client side, and we want to verify
     // the server cert.
     if (!remoteHost.empty()) {
         certChainPara.RequestedUsage.dwType = USAGE_MATCH_TYPE_AND;
-        certChainPara.RequestedUsage.Usage.cUsageIdentifier = _countof(usage);
-        certChainPara.RequestedUsage.Usage.rgpszUsageIdentifier = usage;
+        certChainPara.RequestedUsage.Usage.cUsageIdentifier = _countof(serverUsage);
+        certChainPara.RequestedUsage.Usage.rgpszUsageIdentifier = serverUsage;
+    }  // else, this is running on the server side, validate the client cert
+    else {
+        certChainPara.RequestedUsage.dwType = USAGE_MATCH_TYPE_AND;
+        certChainPara.RequestedUsage.Usage.cUsageIdentifier = _countof(clientUsage);
+        certChainPara.RequestedUsage.Usage.rgpszUsageIdentifier = clientUsage;
     }
 
     certChainPara.dwUrlRetrievalTimeout = gTLSOCSPVerifyTimeoutSecs * 1000;

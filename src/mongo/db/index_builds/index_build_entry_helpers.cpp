@@ -27,14 +27,7 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/index_builds/index_build_entry_helpers.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -43,40 +36,47 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/local_oplog_info.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/index_builds/commit_quorum_options.h"
 #include "mongo/db/index_builds/index_build_entry_gen.h"
-#include "mongo/db/index_builds/index_build_entry_helpers.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/local_oplog_info.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/shard_role.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/shard_version.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/interruptible.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -239,7 +239,9 @@ void ensureIndexBuildEntriesNamespaceExists(OperationContext* opCtx) {
                 AutoGetCollection autoColl(
                     opCtx, NamespaceString::kIndexBuildEntryNamespace, LockMode::MODE_IX);
                 CollectionOptions defaultCollectionOptions;
-                CollectionPtr collection = CollectionPtr(db->createCollection(
+                // TODO(SERVER-103400): Investigate usage validity of
+                // CollectionPtr::CollectionPtr_UNSAFE
+                CollectionPtr collection = CollectionPtr::CollectionPtr_UNSAFE(db->createCollection(
                     opCtx, NamespaceString::kIndexBuildEntryNamespace, defaultCollectionOptions));
 
                 // Ensure the collection exists.
@@ -352,14 +354,20 @@ StatusWith<IndexBuildEntry> getIndexBuildEntry(OperationContext* opCtx, UUID ind
     }};
     opCtx->setEnforceConstraints(false);
 
-    AutoGetCollectionForRead collection(opCtx, NamespaceString::kIndexBuildEntryNamespace);
+    const auto indexBuildsCollection = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest(NamespaceString::kIndexBuildEntryNamespace,
+                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     repl::ReadConcernArgs::get(opCtx),
+                                     AcquisitionPrerequisites::kRead),
+        MODE_IS);
 
     // Must not be interruptible. This fail point is used to test the scenario where the index
     // build's OperationContext is interrupted by an abort, which will subsequently remove index
     // build entry from the config db collection.
     hangBeforeGettingIndexBuildEntry.pauseWhileSet(Interruptible::notInterruptible());
 
-    if (!collection) {
+    if (!indexBuildsCollection.exists()) {
         str::stream ss;
         ss << "Collection not found: " << redactTenant(NamespaceString::kIndexBuildEntryNamespace);
         return Status(ErrorCodes::NamespaceNotFound, ss);
@@ -371,7 +379,7 @@ StatusWith<IndexBuildEntry> getIndexBuildEntry(OperationContext* opCtx, UUID ind
     bool foundObj = writeConflictRetry(
         opCtx, "getIndexBuildEntry", NamespaceString::kIndexBuildEntryNamespace, [&]() {
             return Helpers::findOne(
-                opCtx, collection.getCollection(), BSON("_id" << indexBuildUUID), obj);
+                opCtx, indexBuildsCollection, BSON("_id" << indexBuildUUID), obj);
         });
 
     if (!foundObj) {
@@ -382,7 +390,7 @@ StatusWith<IndexBuildEntry> getIndexBuildEntry(OperationContext* opCtx, UUID ind
 
     try {
         IDLParserContext ctx("IndexBuildsEntry Parser");
-        IndexBuildEntry indexBuildEntry = IndexBuildEntry::parse(ctx, obj);
+        IndexBuildEntry indexBuildEntry = IndexBuildEntry::parse(obj, ctx);
         return indexBuildEntry;
     } catch (DBException& ex) {
         str::stream ss;
@@ -393,6 +401,16 @@ StatusWith<IndexBuildEntry> getIndexBuildEntry(OperationContext* opCtx, UUID ind
 }
 
 StatusWith<CommitQuorumOptions> getCommitQuorum(OperationContext* opCtx, UUID indexBuildUUID) {
+    // Avoid reading config.systems.indexBuilds and return a kDisabled commit quorum when its a
+    // primary-driven index build.
+    // TODO(SERVER-109664): Do not use the feature-flag to disable commit quorum for
+    // primary-driven index builds.
+    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
+    if (fcvSnapshot.isVersionInitialized() &&
+        feature_flags::gFeatureFlagPrimaryDrivenIndexBuilds.isEnabled(
+            VersionContext::getDecoration(opCtx), fcvSnapshot)) {
+        return CommitQuorumOptions(CommitQuorumOptions::kDisabled);
+    }
     StatusWith<IndexBuildEntry> status = getIndexBuildEntry(opCtx, indexBuildUUID);
     if (!status.isOK()) {
         return status.getStatus();

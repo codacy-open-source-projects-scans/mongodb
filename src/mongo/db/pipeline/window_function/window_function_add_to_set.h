@@ -29,18 +29,18 @@
 
 #pragma once
 
-#include <map>
-#include <memory>
-#include <utility>
-#include <vector>
-
-
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/memory_token_container_util.h"
 #include "mongo/db/pipeline/window_function/window_function.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
+#include <map>
+#include <memory>
+#include <utility>
+#include <vector>
 
 namespace mongo {
 
@@ -53,7 +53,7 @@ public:
     }
 
     explicit WindowFunctionAddToSet(ExpressionContext* const expCtx)
-        : WindowFunctionState(expCtx),
+        : WindowFunctionState(expCtx, internalQueryMaxAddToSetBytes.load()),
           _values(MemoryTokenValueComparator(&_expCtx->getValueComparator())) {
         _memUsageTracker.set(sizeof(*this));
     }
@@ -61,6 +61,12 @@ public:
     void add(Value value) override {
         _values.emplace(SimpleMemoryUsageToken{value.getApproximateSize(), &_memUsageTracker},
                         std::move(value));
+        uassert(ErrorCodes::ExceededMemoryLimit,
+                str::stream() << "$addToSet used too much memory and cannot spill to disk. Used: "
+                              << _memUsageTracker.inUseTrackedMemoryBytes()
+                              << " bytes. Memory limit: "
+                              << _memUsageTracker.maxAllowedMemoryUsageBytes() << " bytes",
+                _memUsageTracker.withinMemoryLimit());
     }
 
     /**

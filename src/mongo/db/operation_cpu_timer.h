@@ -29,14 +29,15 @@
 
 #pragma once
 
+#include "mongo/util/duration.h"
+#include "mongo/util/inline_memory.h"
+#include "mongo/util/modules.h"
+
 #include <cstddef>
 #include <list>
 #include <memory>
 
-#include "mongo/util/duration.h"
-#include "mongo/util/inline_memory.h"
-
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 
 class OperationContext;
 
@@ -141,4 +142,4 @@ private:
     Nanoseconds _elapsedAdjustment;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

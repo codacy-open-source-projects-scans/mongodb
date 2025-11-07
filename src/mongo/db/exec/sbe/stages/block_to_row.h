@@ -29,12 +29,13 @@
 
 #pragma once
 
-#include <cstddef>
-#include <vector>
-
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/slot.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <vector>
 
 namespace mongo::sbe {
 /**
@@ -75,7 +76,11 @@ public:
     size_t estimateCompileTimeSize() const final;
 
 protected:
-    void doSaveState(bool relinquishCursor) override;
+    void doSaveState() override;
+
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override {
+        return;
+    }
 
 private:
     PlanState getNextFromDeblockedValues();

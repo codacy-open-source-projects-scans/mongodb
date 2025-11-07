@@ -29,28 +29,36 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/client.h"
+#include "mongo/db/client_strand.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/util/concurrency/notification.h"
+#include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/future.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/time_support.h"
+
 #include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <tuple>
 #include <vector>
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/client.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/util/time_support.h"
+#include <boost/optional.hpp>
 
 namespace mongo {
-
-enum UseMultiServiceSchema : bool {};
 
 /**
  * BSON Collector interface
  *
  * Provides an interface to collect BSONObjs from system providers
  */
-class FTDCCollectorInterface {
+class MONGO_MOD_OPEN FTDCCollectorInterface {
     FTDCCollectorInterface(const FTDCCollectorInterface&) = delete;
     FTDCCollectorInterface& operator=(const FTDCCollectorInterface&) = delete;
 
@@ -85,28 +93,6 @@ protected:
     FTDCCollectorInterface() = default;
 };
 
-class FTDCCollectorCollectionSet {
-public:
-    /**
-     * Returns the sequence of collectors for the specified `role`.
-     * The `role` must be exactly one of None, ShardServer, or RouterServer.
-     */
-    std::vector<std::unique_ptr<FTDCCollectorInterface>>& operator[](ClusterRole role) {
-        if (role.hasExclusively(ClusterRole::None))
-            return _none;
-        if (role.hasExclusively(ClusterRole::ShardServer))
-            return _shard;
-        if (role.hasExclusively(ClusterRole::RouterServer))
-            return _router;
-        MONGO_UNREACHABLE;
-    }
-
-private:
-    std::vector<std::unique_ptr<FTDCCollectorInterface>> _none;
-    std::vector<std::unique_ptr<FTDCCollectorInterface>> _shard;
-    std::vector<std::unique_ptr<FTDCCollectorInterface>> _router;
-};
-
 /**
  * Collector filter, used to disable specific collectors at runtime,
  * e.g. when a daemon takes an Arbiter role.
@@ -137,7 +123,7 @@ private:
 };
 
 /**
- * Manages the set of BSON collectors
+ * Interface to manage the set of BSON collectors
  *
  * Not Thread-Safe. Locking is owner's responsibility.
  */
@@ -146,18 +132,15 @@ class FTDCCollectorCollection {
     FTDCCollectorCollection& operator=(const FTDCCollectorCollection&) = delete;
 
 public:
-    FTDCCollectorCollection() = default;
+    virtual ~FTDCCollectorCollection() = default;
 
     /**
      * Add a metric collector to the collection.
      * Must be called before collect. Cannot be called after collect is called.
-     *
-     * If the collector has characteristics of the process depending of the acting role, it requires
-     * passing a ClusterRole::ShardServer or a ClusterRole::RouterServer role. On the other hand, if
-     * the collector is composed by indicators that are specific to the underlying hardware or to
-     * the process, it requires a ClusterRole::None.
      */
-    void add(std::unique_ptr<FTDCCollectorInterface> collector, ClusterRole role);
+    virtual void add(std::unique_ptr<FTDCCollectorInterface> collector) = 0;
+
+    virtual bool empty() = 0;
 
     /**
      * Collect a sample from all collectors. Called after all adding is complete.
@@ -175,11 +158,139 @@ public:
      *    "end" : Date_t,      <- Time at which all collecting ended
      * }
      */
-    std::tuple<BSONObj, Date_t> collect(Client* client, UseMultiServiceSchema multiServiceSchema);
+    std::tuple<BSONObj, Date_t> collect(Client* client,
+                                        std::vector<std::pair<std::string, int>>& sectionSizes);
+
+protected:
+    FTDCCollectorCollection() = default;
+
+private:
+    virtual void _collect(OperationContext* opCtx,
+                          BSONObjBuilder* builder,
+                          std::vector<std::pair<std::string, int>>& sectionSizes) = 0;
+};
+
+class SampleCollectorCache {
+public:
+    using DeferredSampleEntry = boost::optional<SemiFuture<BSONObj>>;
+    using SampleCollectFn = std::function<void(OperationContext*, BSONObjBuilder*)>;
+
+    struct SampleCollector {
+        boost::intrusive_ptr<ClientStrand> clientStrand;
+        DeferredSampleEntry updatedValue;
+        SampleCollectFn collectFn;
+        int timesSkipped;
+        bool hasData;
+    };
+
+    SampleCollectorCache(Milliseconds maxSampleWaitMS, size_t minThreads, size_t maxThreads);
+
+    ~SampleCollectorCache();
+
+    /**
+     * Registers a new SampleCollector.
+     */
+    void addCollector(StringData name, bool hasData, SampleCollectFn&& fn);
+
+    /**
+     * Refreshes the data in each SampleCollector and writes the results to builder.
+     */
+    void refresh(OperationContext* opCtx, BSONObjBuilder* builder);
+
+    void updateSampleTimeout(Milliseconds newValue) {
+        _maxSampleWaitMS.store(newValue);
+    }
+
+    void updateMinThreads(size_t newValue) {
+        stdx::lock_guard lk(_mutex);
+        _minThreads = newValue;
+
+        _shutdownPool_inlock(lk);
+        _startNewPool(newValue, _maxThreads);
+    }
+
+    void updateMaxThreads(size_t newValue) {
+        stdx::lock_guard lk(_mutex);
+        _maxThreads = newValue;
+
+        _shutdownPool_inlock(lk);
+        _startNewPool(_minThreads, newValue);
+    }
+
+private:
+    void _shutdownPool_inlock(WithLock) {
+        _pool->shutdown();
+        _pool->join();
+    }
+
+    void _startNewPool(size_t minThreads, size_t maxThreads);
+
+    std::map<std::string, SampleCollector> _sampleCollectors;
+
+    Atomic<Milliseconds> _maxSampleWaitMS;
+    size_t _minThreads;
+    size_t _maxThreads;
+
+    stdx::mutex _mutex;
+    std::unique_ptr<ThreadPool> _pool;
+};
+
+class AsyncFTDCCollectorCollection : public FTDCCollectorCollection {
+public:
+    AsyncFTDCCollectorCollection(Milliseconds maxSampleWait, size_t minThreads, size_t maxThreads)
+        : _collectorCache(std::make_unique<SampleCollectorCache>(
+              std::move(maxSampleWait), minThreads, maxThreads)) {}
+
+    void add(std::unique_ptr<FTDCCollectorInterface> collector) override;
+
+    bool empty() override {
+        return _collectors.empty();
+    }
+
+    void updateSampleTimeout(Milliseconds newValue) {
+        _collectorCache->updateSampleTimeout(newValue);
+    }
+
+    void updateMinThreads(size_t newValue) {
+        _collectorCache->updateMinThreads(newValue);
+    }
+
+    void updateMaxThreads(size_t newValue) {
+        _collectorCache->updateMaxThreads(newValue);
+    }
+
+private:
+    void _collect(OperationContext* opCtx,
+                  BSONObjBuilder* builder,
+                  std::vector<std::pair<std::string, int>>& sectionsSize) override;
+
+    std::vector<std::unique_ptr<FTDCCollectorInterface>> _collectors;
+
+    // This must be declared after _collectors so that it is destructed first.
+    std::unique_ptr<SampleCollectorCache> _collectorCache;
+};
+
+class SyncFTDCCollectorCollection : public FTDCCollectorCollection {
+    SyncFTDCCollectorCollection(const SyncFTDCCollectorCollection&) = delete;
+    SyncFTDCCollectorCollection& operator=(const SyncFTDCCollectorCollection&) = delete;
+
+public:
+    SyncFTDCCollectorCollection() = default;
+
+    void add(std::unique_ptr<FTDCCollectorInterface> collector) override;
+
+    bool empty() override {
+        return _collectors.empty();
+    }
+
+private:
+    void _collect(OperationContext* opCtx,
+                  BSONObjBuilder* builder,
+                  std::vector<std::pair<std::string, int>>& sectionsSize) override;
 
 private:
     // collection of collectors
-    FTDCCollectorCollectionSet _collectors;
+    std::vector<std::unique_ptr<FTDCCollectorInterface>> _collectors;
 };
 
 }  // namespace mongo

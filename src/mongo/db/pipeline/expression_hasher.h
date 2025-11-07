@@ -36,18 +36,9 @@
 #include "mongo/db/pipeline/expression_function.h"
 #include "mongo/db/pipeline/expression_visitor.h"
 #include "mongo/db/query/expression_walker.h"
-#include "mongo/util/hash_utils.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
-template <typename H>
-H AbslHashValue(H h, const Value& value) {
-    return H::combine(std::move(h), ValueComparator{}.hash(value));
-}
-
-template <typename H>
-H AbslHashValue(H h, const TimeZone& value) {
-    return H::combine(std::move(h), value.toString());
-}
 
 template <typename H>
 class ExpressionHashVisitor : public ExpressionConstVisitor {
@@ -100,6 +91,11 @@ public:
         kLog10,
         kInternalFLEBetween,
         kInternalFLEEqual,
+        kEncStrStartsWith,
+        kEncStrEndsWith,
+        kEncStrContains,
+        kEncStrNormalizedEq,
+        kInternalRawSortKey,
         kMap,
         kMeta,
         kMod,
@@ -117,9 +113,16 @@ public:
         kSetIntersection,
         kSetIsSubset,
         kSetUnion,
+        kDotProduct,
+        kCosineSimilarity,
+        kEuclideanDistance,
         kSize,
         kReverseArray,
         kSortArray,
+        kTopN,
+        kTop,
+        kBottomN,
+        kBottom,
         kSlice,
         kIsArray,
         kInternalFindAllValuesAtPath,
@@ -140,6 +143,7 @@ public:
         kTrim,
         kTrunc,
         kType,
+        kSubtype,
         kZip,
         kConvert,
         kRegexFind,
@@ -202,6 +206,11 @@ public:
         kInternalOwningShard,
         kInternalIndexKey,
         kInternalKeyStringValue,
+        kCurrentDate,
+        kUUID,
+        kOID,
+        kTestFeatureFlagLatest,
+        kTestFeatureFlagLastLTS
     };
 
     explicit ExpressionHashVisitor(H hashState) : _hashState(std::move(hashState)) {}
@@ -280,10 +289,6 @@ public:
 
     void visit(const ExpressionCeil* expr) final {
         combine(OpType::kCeil);
-    }
-
-    void visit(const ExpressionCoerceToBool* expr) final {
-        combine(OpType::kCoerceToBool);
     }
 
     void visit(const ExpressionCompare* expr) final {
@@ -412,6 +417,26 @@ public:
         combine(OpType::kInternalFLEEqual);
     }
 
+    void visit(const ExpressionEncStrStartsWith* expr) final {
+        combine(OpType::kEncStrStartsWith);
+    }
+
+    void visit(const ExpressionEncStrEndsWith* expr) final {
+        combine(OpType::kEncStrEndsWith);
+    }
+
+    void visit(const ExpressionEncStrContains* expr) final {
+        combine(OpType::kEncStrContains);
+    }
+
+    void visit(const ExpressionEncStrNormalizedEq* expr) final {
+        combine(OpType::kEncStrNormalizedEq);
+    }
+
+    void visit(const ExpressionInternalRawSortKey* expr) final {
+        combine(OpType::kInternalRawSortKey);
+    }
+
     void visit(const ExpressionMap* expr) final {
         combine(OpType::kMap, expr->_varId, expr->_varName);
     }
@@ -485,6 +510,18 @@ public:
         combine(OpType::kSetUnion);
     }
 
+    void visit(const ExpressionSimilarityDotProduct* expr) final {
+        combine(OpType::kDotProduct);
+    }
+
+    void visit(const ExpressionSimilarityCosine* expr) final {
+        combine(OpType::kCosineSimilarity);
+    }
+
+    void visit(const ExpressionSimilarityEuclidean* expr) final {
+        combine(OpType::kEuclideanDistance);
+    }
+
     void visit(const ExpressionSize* expr) final {
         combine(OpType::kSize);
     }
@@ -495,6 +532,22 @@ public:
 
     void visit(const ExpressionSortArray* expr) final {
         combine(OpType::kSortArray);
+    }
+
+    void visit(const ExpressionTopN* expr) final {
+        combine(OpType::kTopN);
+    }
+
+    void visit(const ExpressionTop* expr) final {
+        combine(OpType::kTop);
+    }
+
+    void visit(const ExpressionBottomN* expr) final {
+        combine(OpType::kBottomN);
+    }
+
+    void visit(const ExpressionBottom* expr) final {
+        combine(OpType::kBottom);
     }
 
     void visit(const ExpressionSlice* expr) final {
@@ -511,6 +564,10 @@ public:
 
     void visit(const ExpressionRandom* expr) final {
         combine(OpType::kRandom);
+    }
+
+    void visit(const ExpressionCurrentDate* expr) final {
+        combine(OpType::kCurrentDate);
     }
 
     void visit(const ExpressionRound* expr) final {
@@ -575,6 +632,10 @@ public:
 
     void visit(const ExpressionType* expr) final {
         combine(OpType::kType);
+    }
+
+    void visit(const ExpressionSubtype* expr) final {
+        combine(OpType::kSubtype);
     }
 
     void visit(const ExpressionZip* expr) final {
@@ -828,14 +889,64 @@ public:
         combine(OpType::kInternalKeyStringValue);
     }
 
+    void visit(const ExpressionCreateUUID* expr) final {
+        combine(OpType::kUUID);
+    }
+
+    void visit(const ExpressionCreateObjectId* expr) final {
+        combine(OpType::kOID);
+    }
+
+    void visit(const ExpressionTestFeatureFlagLatest* expr) final {
+        combine(OpType::kTestFeatureFlagLatest);
+    }
+
+    void visit(const ExpressionTestFeatureFlagLastLTS* expr) final {
+        combine(OpType::kTestFeatureFlagLastLTS);
+    }
+
     H moveHashState() {
         return std::move(_hashState);
     }
 
 private:
+    template <typename T>
+    class PrivateHash {
+    private:
+        /** Fallback */
+        template <typename TT>
+        static H _doHash(H h, const TT& x) {
+            return H::combine(std::move(h), x);
+        }
+
+        static H _doHash(H h, const Value& value) {
+            return H::combine(std::move(h), ValueComparator{}.hash(value));
+        }
+
+        static H _doHash(H h, const TimeZone& tz) {
+            return H::combine(std::move(h), tz.toString());
+        }
+
+        template <typename TT>
+        static H _doHash(H h, const boost::optional<TT>& x) {
+            if (x)
+                h = _doHash(std::move(h), *x);
+            h = _doHash(std::move(h), bool{x});
+            return h;
+        }
+
+        template <typename HH>
+        friend HH AbslHashValue(HH h, const PrivateHash& hashable) {
+            return _doHash(std::move(h), hashable.value);
+        }
+
+    public:
+        const T& value;
+    };
+
     template <typename... Ts>
     void combine(const Ts&... values) {
-        _hashState = H::combine(std::move(_hashState), values...);
+        _hashState = H::combine(std::move(_hashState), PrivateHash<Ts>{values}...);
     }
 
     H _hashState;

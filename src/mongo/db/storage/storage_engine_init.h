@@ -29,10 +29,6 @@
 
 #pragma once
 
-#include <functional>
-#include <memory>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -40,6 +36,10 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/stdx/utility.h"
+
+#include <functional>
+#include <memory>
+#include <vector>
 
 namespace mongo {
 
@@ -52,13 +52,11 @@ enum class StorageEngineInitFlags {
     kForRestart = 1 << 2,  // Used by reinitialzeStorageEngine only.
 };
 
-constexpr StorageEngineInitFlags operator&(StorageEngineInitFlags a,
-                                           StorageEngineInitFlags b) noexcept {
+constexpr StorageEngineInitFlags operator&(StorageEngineInitFlags a, StorageEngineInitFlags b) {
     return StorageEngineInitFlags{stdx::to_underlying(a) & stdx::to_underlying(b)};
 }
 
-constexpr StorageEngineInitFlags operator|(StorageEngineInitFlags a,
-                                           StorageEngineInitFlags b) noexcept {
+constexpr StorageEngineInitFlags operator|(StorageEngineInitFlags a, StorageEngineInitFlags b) {
     return StorageEngineInitFlags{stdx::to_underlying(a) | stdx::to_underlying(b)};
 }
 
@@ -71,12 +69,16 @@ constexpr StorageEngineInitFlags operator|(StorageEngineInitFlags a,
 StorageEngine::LastShutdownState initializeStorageEngine(
     OperationContext* opCtx,
     StorageEngineInitFlags initFlags,
+    bool isReplSet,
+    bool shouldRecoverFromOplogAsStandalone,
+    bool inStandaloneMode,
     BSONObjBuilder* startupTimeElapsedBuilder = nullptr);
 
 /**
  * Shuts down storage engine cleanly and releases any locks on mongod.lock.
+ * Set `memLeakAllowed` to true for faster shutdown.
  */
-void shutdownGlobalStorageEngineCleanly(ServiceContext* service);
+void shutdownGlobalStorageEngineCleanly(ServiceContext* service, bool memLeakAllowed);
 
 /**
  * Changes the storage engine for the given service by shutting down the old one and starting
@@ -90,6 +92,10 @@ void shutdownGlobalStorageEngineCleanly(ServiceContext* service);
 StorageEngine::LastShutdownState reinitializeStorageEngine(
     OperationContext* opCtx,
     StorageEngineInitFlags initFlags,
+    bool isReplSet,
+    bool shouldRecoverFromOplogAsStandalone,
+    bool shouldSkipOplogSampling,
+    bool inStandaloneMode,
     std::function<void()> changeConfigurationCallback = [] {});
 
 /**

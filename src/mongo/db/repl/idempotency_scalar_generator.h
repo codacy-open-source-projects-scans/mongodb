@@ -28,10 +28,10 @@
  */
 
 #pragma once
+#include "mongo/platform/random.h"
+#include "mongo/util/modules.h"
 
 #include <string>
-
-#include "mongo/platform/random.h"
 
 namespace mongo {
 

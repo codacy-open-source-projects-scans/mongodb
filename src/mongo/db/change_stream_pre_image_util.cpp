@@ -29,16 +29,6 @@
 
 #include "mongo/db/change_stream_pre_image_util.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <limits>
-#include <memory>
-#include <string>
-#include <utility>
-#include <variant>
-
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -47,21 +37,25 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/change_stream_options_gen.h"
 #include "mongo/db/change_stream_options_manager.h"
-#include "mongo/db/change_stream_serverless_helpers.h"
-#include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/collection_crud/collection_write_path.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/record_id_helpers.h"
-#include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/str.h"
+
+#include <cstdint>
+#include <limits>
+#include <string>
+#include <utility>
+#include <variant>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -72,11 +66,9 @@ MONGO_FAIL_POINT_DEFINE(changeStreamPreImageRemoverCurrentTime);
 namespace change_stream_pre_image_util {
 
 namespace {
-
-// Get the 'expireAfterSeconds' for a single-tenant environment from the 'ChangeStreamOptions' if
-// not 'off', boost::none otherwise.
+// Get the 'expireAfterSeconds' from the 'ChangeStreamOptions' if not 'off', boost::none otherwise.
 boost::optional<std::int64_t> getExpireAfterSecondsFromChangeStreamOptions(
-    ChangeStreamOptions& changeStreamOptions) {
+    const ChangeStreamOptions& changeStreamOptions) {
     const std::variant<std::string, std::int64_t>& expireAfterSeconds =
         changeStreamOptions.getPreAndPostImages().getExpireAfterSeconds();
 
@@ -88,27 +80,16 @@ boost::optional<std::int64_t> getExpireAfterSecondsFromChangeStreamOptions(
 }
 }  // namespace
 
-boost::optional<Seconds> getExpireAfterSeconds(OperationContext* opCtx,
-                                               boost::optional<TenantId> tenantId) {
-    if (tenantId) {
-        return Seconds{change_stream_serverless_helpers::getExpireAfterSeconds(tenantId.get())};
-    }
-
-    // Get the expiration time directly from the change stream manager for a single-tenant
-    // environment.
-    auto changeStreamOptions = ChangeStreamOptionsManager::get(opCtx).getOptions(opCtx);
-    auto expireAfterSeconds = getExpireAfterSecondsFromChangeStreamOptions(changeStreamOptions);
+boost::optional<Seconds> getExpireAfterSeconds(OperationContext* opCtx) {
+    const auto changeStreamOptions = ChangeStreamOptionsManager::get(opCtx).getOptions(opCtx);
+    const auto expireAfterSeconds =
+        getExpireAfterSecondsFromChangeStreamOptions(changeStreamOptions);
     return expireAfterSeconds ? boost::optional<Seconds>(*expireAfterSeconds) : boost::none;
 }
 
 boost::optional<Date_t> getPreImageOpTimeExpirationDate(OperationContext* opCtx,
-                                                        boost::optional<TenantId> tenantId,
                                                         Date_t currentTime) {
-    auto expireAfterSeconds = getExpireAfterSeconds(opCtx, tenantId);
-
-    // In a serverless environment, 'expireAfterSeconds' must always be specified.
-    invariant((tenantId && expireAfterSeconds) || !tenantId);
-
+    auto expireAfterSeconds = getExpireAfterSeconds(opCtx);
     if (expireAfterSeconds) {
         return currentTime - *expireAfterSeconds;
     }
@@ -148,19 +129,6 @@ RecordIdBound getAbsoluteMaxPreImageRecordIdBoundForNs(const UUID& nsUUID) {
         ChangeStreamPreImageId(nsUUID, Timestamp::max(), std::numeric_limits<int64_t>::max())));
 }
 
-void truncateRange(OperationContext* opCtx,
-                   const CollectionPtr& preImagesColl,
-                   const RecordId& minRecordId,
-                   const RecordId& maxRecordId,
-                   int64_t bytesDeleted,
-                   int64_t docsDeleted) {
-    WriteUnitOfWork wuow(opCtx);
-    auto rs = preImagesColl->getRecordStore();
-    auto status = rs->rangeTruncate(opCtx, minRecordId, maxRecordId, -bytesDeleted, -docsDeleted);
-    invariantStatusOK(status);
-    wuow.commit();
-}
-
 void truncatePreImagesByTimestampExpirationApproximation(
     OperationContext* opCtx,
     const CollectionAcquisition& preImagesCollection,
@@ -182,12 +150,15 @@ void truncatePreImagesByTimestampExpirationApproximation(
         // Truncation is based on Timestamp expiration approximation -
         // meaning there isn't a good estimate of the number of bytes and
         // documents to be truncated, so default to 0.
-        truncateRange(opCtx,
-                      preImagesCollection.getCollectionPtr(),
-                      minRecordId,
-                      maxRecordIdApproximation,
-                      0,
-                      0);
+        repl::UnreplicatedWritesBlock uwb(opCtx);
+        WriteUnitOfWork wuow(opCtx);
+        collection_internal::truncateRange(opCtx,
+                                           preImagesCollection.getCollectionPtr(),
+                                           minRecordId,
+                                           maxRecordIdApproximation,
+                                           0,
+                                           0);
+        wuow.commit();
     }
 }
 
@@ -199,7 +170,7 @@ UUID getPreImageNsUUID(const BSONObj& preImageObj) {
 }
 
 boost::optional<UUID> findNextCollectionUUID(OperationContext* opCtx,
-                                             const CollectionPtr* preImagesCollPtr,
+                                             const CollectionAcquisition& preImagesColl,
                                              boost::optional<UUID> currentNsUUID,
                                              Date_t& firstDocWallTime) {
     BSONObj preImageObj;
@@ -213,7 +184,7 @@ boost::optional<UUID> findNextCollectionUUID(OperationContext* opCtx,
         : boost::none;
     auto planExecutor =
         InternalPlanner::collectionScan(opCtx,
-                                        preImagesCollPtr,
+                                        preImagesColl,
                                         PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY,
                                         InternalPlanner::Direction::FORWARD,
                                         boost::none /* resumeAfterRecordId */,
@@ -232,22 +203,19 @@ stdx::unordered_set<UUID, UUID::Hash> getNsUUIDs(OperationContext* opCtx,
     boost::optional<UUID> currentCollectionUUID = boost::none;
     Date_t firstWallTime{};
     while ((currentCollectionUUID = change_stream_pre_image_util::findNextCollectionUUID(
-                opCtx,
-                &preImagesCollection.getCollectionPtr(),
-                currentCollectionUUID,
-                firstWallTime))) {
+                opCtx, preImagesCollection, currentCollectionUUID, firstWallTime))) {
         nsUUIDs.emplace(*currentCollectionUUID);
     }
     return nsUUIDs;
 }
 
 Date_t getCurrentTimeForPreImageRemoval(OperationContext* opCtx) {
-    auto currentTime = opCtx->getServiceContext()->getFastClockSource()->now();
+    auto currentTime = opCtx->fastClockSource().now();
     changeStreamPreImageRemoverCurrentTime.execute([&](const BSONObj& data) {
         // Populate the current time for time based expiration of pre-images.
         if (auto currentTimeElem = data["currentTimeForTimeBasedExpiration"]) {
             const BSONType bsonType = currentTimeElem.type();
-            if (bsonType == BSONType::String) {
+            if (bsonType == BSONType::string) {
                 auto stringDate = currentTimeElem.String();
                 currentTime = dateFromISOString(stringDate).getValue();
             } else {
@@ -256,7 +224,7 @@ Date_t getCurrentTimeForPreImageRemoval(OperationContext* opCtx) {
                             << "Expected type for 'currentTimeForTimeBasedExpiration' is "
                                "'date' or a 'string' representation of ISODate, but found: "
                             << bsonType,
-                        bsonType == BSONType::Date);
+                        bsonType == BSONType::date);
 
                 currentTime = currentTimeElem.Date();
             }

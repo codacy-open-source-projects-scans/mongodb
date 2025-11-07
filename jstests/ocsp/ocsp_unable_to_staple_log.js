@@ -5,7 +5,7 @@ import {
     OCSP_CA_PEM,
     OCSP_SERVER_SIGNED_BY_INTERMEDIATE_CA_PEM,
     supportsStapling,
-    waitForServer
+    waitForServer,
 } from "jstests/ocsp/lib/ocsp_helpers.js";
 
 if (!supportsStapling()) {
@@ -16,10 +16,10 @@ const logPath = MongoRunner.dataPath + "mongod.log";
 
 const ocsp_options = {
     logpath: logPath,
-    sslMode: "requireSSL",
-    sslPEMKeyFile: OCSP_SERVER_SIGNED_BY_INTERMEDIATE_CA_PEM,
-    sslCAFile: OCSP_CA_PEM,
-    sslAllowInvalidHostnames: "",
+    tlsMode: "requireTLS",
+    tlsCertificateKeyFile: OCSP_SERVER_SIGNED_BY_INTERMEDIATE_CA_PEM,
+    tlsCAFile: OCSP_CA_PEM,
+    tlsAllowInvalidHostnames: "",
     waitForConnect: false,
 };
 
@@ -38,7 +38,10 @@ assert.soon(() => {
     }
 });
 assert.soon(() => {
-    return cat(logPath).trim().split("\n").some((line) => JSON.parse(line).id === failedToStapleID);
+    return cat(logPath)
+        .trim()
+        .split("\n")
+        .some((line) => JSON.parse(line).id === failedToStapleID);
 });
 
 MongoRunner.stopMongod(conn);

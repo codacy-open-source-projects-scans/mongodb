@@ -29,27 +29,28 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/auth/cluster_auth_mode.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/logv2/log_format.h"
+#include "mongo/platform/atomic.h"
+#include "mongo/platform/process_id.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/net/cidr.h"
+#include "mongo/util/version/releases.h"
+#include "mongo/util/versioned_value.h"
+
 #include <algorithm>
+#include <ctime>
+#include <string>
+#include <vector>
+
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional.hpp>
 #include <boost/optional/optional.hpp>
-#include <ctime>
-#include <string>
-#include <variant>
-#include <vector>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/auth/cluster_auth_mode.h"
-#include "mongo/db/cluster_role.h"
-#include "mongo/logv2/log_format.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/platform/process_id.h"
-#include "mongo/util/assert_util_core.h"
-#include "mongo/util/net/cidr.h"
-#include "mongo/util/version/releases.h"
-#include "mongo/util/versioned_value.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -59,21 +60,19 @@
 
 namespace mongo {
 
-const int DEFAULT_UNIX_PERMS = 0700;
-constexpr size_t DEFAULT_MAX_CONN = 1000000;
+MONGO_MOD_PUB constexpr inline int DEFAULT_UNIX_PERMS = 0700;
+MONGO_MOD_PUB constexpr inline size_t DEFAULT_MAX_CONN = 1000000;
 
-struct ServerGlobalParams {
+struct MONGO_MOD_PUB ServerGlobalParams {
     std::string binaryName;  // mongod or mongos
     std::string cwd;         // cwd of when process started
 
     int port = DefaultDBPort;  // --port
     enum {
-        RouterPort = 27016,
         DefaultDBPort = 27017,
         ShardServerPort = 27018,
         ConfigServerPort = 27019,
         CryptDServerPort = 27020,
-// TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants
 #ifdef MONGO_CONFIG_GRPC
         DefaultGRPCServerPort = 27021,
 #endif
@@ -88,15 +87,17 @@ struct ServerGlobalParams {
     bool enableIPv6 = false;
     bool rest = false;  // --rest
 
-    int listenBacklog = SOMAXCONN;  // --listenBacklog
+    boost::optional<int> listenBacklog;  // --listenBacklog
 
-    AtomicWord<bool> quiet{false};  // --quiet
+    Atomic<bool> quiet{false};  // --quiet
 
-    ClusterRole clusterRole = ClusterRole::None;  // --configsvr/--shardsvr
-    MaintenanceMode maintenanceMode;              // --maintenanceMode
+    ClusterRole clusterRole = ClusterRole::None;       // --configsvr/--shardsvr
+    MaintenanceMode maintenanceMode;                   // --maintenanceMode
+    bool replicaSetConfigShardMaintenanceMode{false};  // --replicaSetConfigShardMaintenanceMode
 
-    boost::optional<int> routerPort;      // --routerPort
-    bool doAutoBootstrapSharding{false};  // This is derived from other settings during startup.
+    boost::optional<int> proxyPort;        // --proxyPort
+    boost::optional<int> maintenancePort;  // --maintenancePort
+    bool doAutoBootstrapSharding{false};   // This is derived from other settings during startup.
 
     bool objcheck = true;  // --objcheck
 
@@ -109,10 +110,14 @@ struct ServerGlobalParams {
 
     int defaultProfile = 0;  // --profile
     boost::optional<BSONObj> defaultProfileFilter;
-    AtomicWord<int> slowMS{100};           // --time in ms that is "slow"
-    AtomicWord<double> sampleRate{1.0};    // --samplerate rate at which to sample slow queries
+    Atomic<int> slowMS{100};  // --time in ms that is "slow"
+    Atomic<int> defaultSlowInProgMS{
+        5000};                       // --time in ms that is "slow" to log a query in-progress.
+    Atomic<double> sampleRate{1.0};  // --samplerate rate at which to sample slow queries
     int defaultLocalThresholdMillis = 15;  // --localThreshold in ms to consider a node local
 
+    Atomic<int> slowTaskExecutorWaitTimeProfilingMs{
+        50};                    // --time in ms that is "slow" for a task to begin execution
     bool noUnixSocket = false;  // --nounixsocket
     bool doFork = false;        // --fork
     bool isMongoBridge = false;
@@ -120,7 +125,7 @@ struct ServerGlobalParams {
     std::string socket = "/tmp";  // UNIX domain socket directory
 
     size_t maxConns = DEFAULT_MAX_CONN;  // Maximum number of simultaneous open connections.
-    VersionedValue<std::vector<std::variant<CIDR, std::string>>> maxConnsOverride;
+    VersionedValue<CIDRList> maxIncomingConnsOverride;
     int reservedAdminThreads = 0;
 
     int unixSocketPermissions = DEFAULT_UNIX_PERMS;  // permissions for the UNIX domain socket
@@ -158,13 +163,11 @@ struct ServerGlobalParams {
     // queryableBackupMode.
     BSONObj overrideShardIdentity;
 
-    // True if the current binary version is an LTS Version.
-    static constexpr bool kIsLTSBinaryVersion = false;
-
-// TODO: SERVER-80343 Remove this ifdef once gRPC is compiled on all variants
 #ifdef MONGO_CONFIG_GRPC
     int grpcPort = DefaultGRPCServerPort;
     int grpcServerMaxThreads = 1000;
+    int grpcKeepAliveTimeMs = INT_MAX;
+    int grpcKeepAliveTimeoutMs = 20000;
 #endif
 
     /**
@@ -301,7 +304,7 @@ struct ServerGlobalParams {
         }
 
     private:
-        AtomicWord<FCV> _version{FCV::kUnsetDefaultLastLTSBehavior};
+        Atomic<FCV> _version{FCV::kUnsetDefaultLastLTSBehavior};
 
     } mutableFCV;
 
@@ -312,23 +315,14 @@ struct ServerGlobalParams {
     // primaries can accept user-initiated writes and validate based on the feature compatibility
     // version. A secondary always validates in the upgraded mode so that it can sync new features,
     // even when in the downgraded feature compatibility mode.
-    AtomicWord<bool> validateFeaturesAsPrimary{true};
+    Atomic<bool> validateFeaturesAsPrimary{true};
 
     std::vector<std::string> disabledSecureAllocatorDomains;
+
+    // List of absolute paths to extension shared object files. These will be loaded during startup.
+    std::vector<std::string> extensions;
 };
 
-extern ServerGlobalParams serverGlobalParams;
-
-template <typename NameTrait>
-struct TraitNamedDomain {
-    static bool peg() {
-        const auto& dsmd = serverGlobalParams.disabledSecureAllocatorDomains;
-        const auto contains = [&](StringData dt) {
-            return std::find(dsmd.begin(), dsmd.end(), dt) != dsmd.end();
-        };
-        static const bool ret = !(contains("*"_sd) || contains(NameTrait::DomainType));
-        return ret;
-    }
-};
+MONGO_MOD_PUB extern ServerGlobalParams serverGlobalParams;
 
 }  // namespace mongo

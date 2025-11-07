@@ -28,21 +28,6 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
-#include "mongo/util/future.h"
-#include "mongo/util/net/ssl_manager.h"
-
-#include <boost/algorithm/string.hpp>
-#include <boost/date_time/posix_time/posix_time.hpp>
-#include <fstream>
-#include <iostream>
-#include <memory>
-#include <sstream>
-#include <stack>
-#include <string>
-#include <vector>
-
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/init.h"
 #include "mongo/base/secure_allocator.h"
@@ -58,12 +43,14 @@
 #include "mongo/util/debug_util.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/future.h"
 #include "mongo/util/net/cidr.h"
 #include "mongo/util/net/dh_openssl.h"
 #include "mongo/util/net/ocsp/ocsp_manager.h"
 #include "mongo/util/net/private/ssl_expiration.h"
 #include "mongo/util/net/socket_exception.h"
 #include "mongo/util/net/socket_utils.h"
+#include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/net/ssl_parameters_gen.h"
 #include "mongo/util/net/ssl_peer_info.h"
@@ -75,7 +62,17 @@
 #include "mongo/util/strong_weak_finish_line.h"
 #include "mongo/util/text.h"
 
+#include <fstream>
+#include <iostream>
+#include <memory>
+#include <sstream>
+#include <stack>
+#include <string>
+#include <vector>
+
 #include <arpa/inet.h>
+#include <boost/algorithm/string.hpp>
+#include <boost/date_time/posix_time/posix_time.hpp>
 #include <netinet/in.h>
 #include <openssl/asn1.h>
 #include <openssl/asn1t.h>
@@ -101,8 +98,6 @@ int SSL_CTX_set_ciphersuites(SSL_CTX*, const char*) {
     return 0;
 }
 #endif
-
-using namespace fmt::literals;
 
 namespace mongo {
 
@@ -457,6 +452,10 @@ public:
     Socket* socket;
 
     SSLConnectionOpenSSL(SSL_CTX* ctx, Socket* sock, const char* initialBytes, int len);
+
+    void* getConnection() final {
+        return ssl;
+    }
 
     ~SSLConnectionOpenSSL() override;
 };
@@ -1356,7 +1355,7 @@ private:
     public:
         PasswordFetcher(StringData configParameter, StringData prompt)
             : _password(configParameter.begin(), configParameter.end()),
-              _prompt(prompt.toString()) {
+              _prompt(std::string{prompt}) {
             invariant(!prompt.empty());
         }
 
@@ -1595,8 +1594,6 @@ private:
 
 // Global variable indicating if this is a server or a client instance
 bool isSSLServer = false;
-
-extern SSLManagerCoordinator* theSSLManagerCoordinator;
 
 MONGO_INITIALIZER_WITH_PREREQUISITES(SSLManager, ("SetupOpenSSL", "EndStartupOptionHandling"))
 (InitializerContext*) {
@@ -2494,18 +2491,25 @@ Status SSLManagerOpenSSL::initSSLContext(SSL_CTX* context,
     // SSL_OP_NO_SSLv3 - Disable SSL v3 support
     long options = SSL_OP_ALL | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3;
 
-    // Set the supported TLS protocols. Allow --sslDisabledProtocols to disable selected
-    // ciphers.
+    // Checks if all valid TLS modes are disabled.
+    bool tls10 = true, tls11 = true, tls12 = true, tls13 = true;
     for (const SSLParams::Protocols& protocol : *disabledProtocols) {
         if (protocol == SSLParams::Protocols::TLS1_0) {
             options |= SSL_OP_NO_TLSv1;
+            tls10 = false;
         } else if (protocol == SSLParams::Protocols::TLS1_1) {
             options |= SSL_OP_NO_TLSv1_1;
+            tls11 = false;
         } else if (protocol == SSLParams::Protocols::TLS1_2) {
             options |= SSL_OP_NO_TLSv1_2;
+            tls12 = false;
         } else if (protocol == SSLParams::Protocols::TLS1_3) {
             options |= SSL_OP_NO_TLSv1_3;
+            tls13 = false;
         }
+    }
+    if (!tls10 && !tls11 && !tls12 && !tls13) {
+        return {ErrorCodes::InvalidSSLConfiguration, "All valid TLS modes disabled"};
     }
 
 #if OPENSSL_VERSION_NUMBER >= 0x10100000
@@ -2716,15 +2720,16 @@ Status SSLManagerOpenSSL::_parseAndValidateCertificate(const std::string& keyFil
                                                        Date_t* serverCertificateExpirationDate) {
     UniqueBIO inBio(BIO_new(BIO_s_file()));
     if (!inBio) {
-        return Status(
-            ErrorCodes::InvalidSSLConfiguration,
-            "Failed to allocate BIO object. error: {}"_format(getSSLErrorMessage(ERR_get_error())));
+        return Status(ErrorCodes::InvalidSSLConfiguration,
+                      fmt::format("Failed to allocate BIO object. error: {}",
+                                  getSSLErrorMessage(ERR_get_error())));
     }
 
     if (BIO_read_filename(inBio.get(), keyFile.c_str()) <= 0) {
         return Status(ErrorCodes::InvalidSSLConfiguration,
-                      "Cannot read key file '{}' when setting subject name. error: {}"_format(
-                          keyFile, getSSLErrorMessage(ERR_get_error())));
+                      fmt::format("Cannot read key file '{}' when setting subject name. error: {}",
+                                  keyFile,
+                                  getSSLErrorMessage(ERR_get_error())));
     }
 
     return _parseAndValidateCertificateFromBIO(std::move(inBio),
@@ -2744,16 +2749,16 @@ Status SSLManagerOpenSSL::_parseAndValidateCertificateFromMemory(
     logv2::DynamicAttributes errorAttrs;
 
 #if OPENSSL_VERSION_NUMBER <= 0x1000114fL
-    UniqueBIO inBio(BIO_new_mem_buf(const_cast<char*>(buffer.rawData()), buffer.size()));
+    UniqueBIO inBio(BIO_new_mem_buf(const_cast<char*>(buffer.data()), buffer.size()));
 #else
-    UniqueBIO inBio(BIO_new_mem_buf(buffer.rawData(), buffer.size()));
+    UniqueBIO inBio(BIO_new_mem_buf(buffer.data(), buffer.size()));
 #endif
 
     if (!inBio) {
         CaptureSSLErrorInAttrs capture(errorAttrs);
         return Status(ErrorCodes::InvalidSSLConfiguration,
-                      "Failed to allocate BIO object from in-memory payload. error: {}"_format(
-                          getSSLErrorMessage(ERR_get_error())));
+                      fmt::format("Failed to allocate BIO object from in-memory payload. error: {}",
+                                  getSSLErrorMessage(ERR_get_error())));
     }
 
     return _parseAndValidateCertificateFromBIO(std::move(inBio),
@@ -2774,10 +2779,11 @@ Status SSLManagerOpenSSL::_parseAndValidateCertificateFromBIO(
     UniqueX509 x509(PEM_read_bio_X509(
         inBio.get(), nullptr, &SSLManagerOpenSSL::password_cb, static_cast<void*>(&keyPassword)));
     if (x509 == nullptr) {
-        return Status(
-            ErrorCodes::InvalidSSLConfiguration,
-            "Cannot retrieve certificate from keyfile '{}' when setting subject name. error: {}"_format(
-                fileNameForLogging, getSSLErrorMessage(ERR_get_error())));
+        return Status(ErrorCodes::InvalidSSLConfiguration,
+                      fmt::format("Cannot retrieve certificate from keyfile '{}' when setting "
+                                  "subject name. error: {}",
+                                  fileNameForLogging,
+                                  getSSLErrorMessage(ERR_get_error())));
     }
 
     *subjectName = getCertificateSubjectX509Name(x509.get());
@@ -2814,10 +2820,11 @@ Status SSLManagerOpenSSL::_parseAndValidateCertificateFromBIO(
 
     auto now = Date_t::now();
     if ((notBeforeMillis > now) || (now > notAfterMillis)) {
-        return Status(
-            ErrorCodes::InvalidSSLConfiguration,
-            "The provided SSL certificate is expired or not yet valid. notBefore {}, notAfter {}"_format(
-                notBeforeMillis.toString(), notAfterMillis.toString()));
+        return Status(ErrorCodes::InvalidSSLConfiguration,
+                      fmt::format("The provided SSL certificate is expired or not yet valid. "
+                                  "notBefore {}, notAfter {}",
+                                  notBeforeMillis.toString(),
+                                  notAfterMillis.toString()));
     }
 
     if (serverCertificateExpirationDate != nullptr) {
@@ -3256,7 +3263,7 @@ Status _validatePeerRoles(const stdx::unordered_set<RoleName>& embeddedRoles, SS
                           << " is not authorized to grant any roles due to tlsCATrusts parameter"};
     }
 
-    auto allowedRoles = it->second;
+    auto& allowedRoles = it->second;
     // See TLSCATrustsSetParameter::set() for a description of tlsCATrusts format.
     if (allowedRoles.count(RoleName())) {
         // CA is authorized for all role assignments.
@@ -3650,7 +3657,7 @@ UniqueX509 SSLManagerOpenSSL::_getX509Object(StringData keyFile,
     }
 
     ON_BLOCK_EXIT([&] { BIO_free(inBIO); });
-    if (BIO_read_filename(inBIO, keyFile.toString().c_str()) <= 0) {
+    if (BIO_read_filename(inBIO, std::string{keyFile}.c_str()) <= 0) {
         uasserted(4913001,
                   str::stream() << "cannot read key file when setting subject name: " << keyFile
                                 << " " << SSLManagerInterface::getSSLErrorMessage(ERR_get_error()));
@@ -3700,9 +3707,9 @@ void SSLManagerOpenSSL::_getX509CertInfo(UniqueX509& x509,
     uassert(4913004, "date conversion failed", notAfterMillis != Date_t());
 
     if (keyFile)
-        info->keyFile = keyFile->toString();
+        info->keyFile = std::string{*keyFile};
     if (targetClusterURI)
-        info->targetClusterURI = targetClusterURI->toString();
+        info->targetClusterURI = std::string{*targetClusterURI};
 }
 
 
@@ -3714,7 +3721,7 @@ void SSLManagerOpenSSL::_getCRLInfo(StringData crlFile, CRLInformationToLog* inf
 
     ON_BLOCK_EXIT([&] { BIO_free(inBIO); });
 
-    if (BIO_read_filename(inBIO, crlFile.toString().c_str()) <= 0) {
+    if (BIO_read_filename(inBIO, std::string{crlFile}.c_str()) <= 0) {
         uasserted(4913006,
                   str::stream() << "cannot read crl file when setting subject name: " << crlFile
                                 << " " << SSLManagerInterface::getSSLErrorMessage(ERR_get_error()));

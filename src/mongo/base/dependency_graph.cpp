@@ -29,10 +29,13 @@
 
 #include "mongo/base/dependency_graph.h"
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/string_map.h"
+
 #include <algorithm>
 #include <compare>
-#include <fmt/format.h>
-#include <fmt/ranges.h>  // IWYU pragma: keep
 #include <iterator>
 #include <random>
 #include <utility>
@@ -40,17 +43,14 @@
 #include <absl/container/node_hash_map.h>
 #include <absl/container/node_hash_set.h>
 #include <absl/meta/type_traits.h>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/string_map.h"
+#include <fmt/format.h>
+#include <fmt/ranges.h>  // IWYU pragma: keep
 
 namespace mongo {
 
-void DependencyGraph::addNode(std::string name,
-                              std::vector<std::string> prerequisites,
-                              std::vector<std::string> dependents,
+void DependencyGraph::addNode(const std::string& name,
+                              const std::vector<std::string>& prerequisites,
+                              const std::vector<std::string>& dependents,
                               std::unique_ptr<Payload> payload) {
     if (!payload) {
         struct DummyPayload : Payload {};
@@ -67,14 +67,13 @@ void DependencyGraph::addNode(std::string name,
 
 namespace {
 
-using namespace fmt::literals;
 
 template <typename Seq>
 void strAppendJoin(std::string& out, StringData separator, const Seq& sequence) {
     StringData currSep;
     for (StringData str : sequence) {
-        out.append(currSep.rawData(), currSep.size());
-        out.append(str.rawData(), str.size());
+        out.append(currSep.data(), currSep.size());
+        out.append(str.data(), str.size());
         currSep = separator;
     }
 }
@@ -88,7 +87,7 @@ void throwGraphContainsCycle(Iter first, Iter last, std::vector<std::string>* cy
         *cycle = names;
     names.push_back((*first)->name());
     uasserted(ErrorCodes::GraphContainsCycle,
-              format(FMT_STRING("Cycle in dependency graph: {}"), fmt::join(names, " -> ")));
+              fmt::format("Cycle in dependency graph: {}", fmt::join(names, " -> ")));
 }
 
 }  // namespace
@@ -123,7 +122,7 @@ std::vector<std::string> DependencyGraph::topSort(unsigned randomSeed,
     elementsStore.reserve(_nodes.size());
     for (auto iter = _nodes.begin(); iter != _nodes.end(); ++iter) {
         uassert(ErrorCodes::BadValue,
-                "node {} was mentioned but never added"_format(iter->first),
+                fmt::format("node {} was mentioned but never added", iter->first),
                 iter->second.payload);
         elementsStore.push_back(Element{iter});
     }
@@ -141,8 +140,9 @@ std::vector<std::string> DependencyGraph::topSort(unsigned randomSeed,
                            [&](StringData childName) {
                                auto iter = byName.find(childName);
                                uassert(ErrorCodes::BadValue,
-                                       "node {} depends on missing node {}"_format(
-                                           element.nodeIter->first, childName),
+                                       fmt::format("node {} depends on missing node {}",
+                                                   element.nodeIter->first,
+                                                   childName),
                                        iter != byName.end());
                                return iter->second;
                            });

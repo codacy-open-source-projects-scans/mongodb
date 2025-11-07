@@ -4,33 +4,39 @@
  */
 
 // Randomized property testing.
-var conn = MongoRunner.runMongod();
+let conn = MongoRunner.runMongod();
 const dbName = jsTestName();
 const testDB = conn.getDB(dbName);
-const coll = testDB.getCollection('coll');
+const coll = testDB.getCollection("coll");
 coll.drop();
 
 function assertPipelineCorrect(pipeline, v) {
     coll.drop();
     coll.insert({v});
     testDB.adminCommand({
-        configureFailPoint: 'disablePipelineOptimization',
-        mode: 'off',
+        configureFailPoint: "disablePipelineOptimization",
+        mode: "off",
     });
     let optimizedResults = coll.aggregate(pipeline).toArray();
     testDB.adminCommand({
-        configureFailPoint: 'disablePipelineOptimization',
-        mode: 'alwaysOn',
+        configureFailPoint: "disablePipelineOptimization",
+        mode: "alwaysOn",
     });
     let unoptimizedResults = coll.aggregate(pipeline).toArray();
     testDB.adminCommand({
-        configureFailPoint: 'disablePipelineOptimization',
-        mode: 'off',
+        configureFailPoint: "disablePipelineOptimization",
+        mode: "off",
     });
     assert.eq(unoptimizedResults.length, 1);
     assert.eq(optimizedResults.length, 1);
 
-    assert.eq(unoptimizedResults[0]._id, optimizedResults[0]._id, tojson(pipeline));
+    // It is possible for optimization to cause the floating point results to differ slightly due to
+    // precision limitations, so we must only assert an equality violation when the delta is not
+    // infinitesimal. We have observed values differing by one in the 16th significant digit.
+    if (Math.abs(unoptimizedResults[0]._id - optimizedResults[0]._id) > 1e-14) {
+        // This will now fail, but we know the difference is more than 1e-14 so we actually care.
+        assert.eq(unoptimizedResults[0]._id, optimizedResults[0]._id, tojson(pipeline));
+    }
 }
 
 /**
@@ -72,12 +78,14 @@ function runRandomizedPropertyTest({op, min, max}) {
     const pos = Math.floor(numbers.length * Math.random());
     const args = [].concat(numbers.slice(0, pos), ["$v"], numbers.slice(pos));
 
-    const pipeline = [{
-        $group: {
-            _id: {[op]: args},
-            sum: {$sum: 1},
+    const pipeline = [
+        {
+            $group: {
+                _id: {[op]: args},
+                sum: {$sum: 1},
+            },
         },
-    }];
+    ];
     coll.drop();
     const v = generateNumber();
     assertPipelineCorrect(pipeline, v);

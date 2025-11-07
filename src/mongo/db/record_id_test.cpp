@@ -31,14 +31,12 @@
 
 #include "mongo/db/record_id.h"
 
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/oid.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/storage/key_format.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/debug_util.h"
 
 namespace mongo {
@@ -183,8 +181,8 @@ TEST(RecordId, ReservationsLong) {
 
 TEST(RecordId, ReservationsStr) {
     // It's important that reserved IDs like this never change.
-    constexpr char buf[] = {static_cast<char>(0xFF), 0};
-    RecordId ridReserved(buf, sizeof(buf));
+    const char buf[] = {static_cast<char>(0xFF), 0};
+    RecordId ridReserved(buf);
     ASSERT_EQ(
         ridReserved,
         record_id_helpers::reservedIdFor(
@@ -193,8 +191,8 @@ TEST(RecordId, ReservationsStr) {
     ASSERT(ridReserved.isValid());
 
     // Create a new RecordId in the reserved range and ensure it is considered reserved and unique.
-    constexpr char buf2[] = {static_cast<char>(0xFF), static_cast<char>(0xFF)};
-    RecordId inReservedRange(buf2, sizeof(buf2));
+    const char buf2[] = {static_cast<char>(0xFF), static_cast<char>(0xFF)};
+    RecordId inReservedRange(buf2);
     ASSERT(record_id_helpers::isReserved(inReservedRange));
     ASSERT(inReservedRange.isValid());
     ASSERT_NE(
@@ -238,7 +236,7 @@ TEST(RecordId, RoundTripSerialize) {
 
     {
         char buf[1024] = {'x'};
-        RecordId id(buf, sizeof(buf));
+        RecordId id(buf);
         BSONObjBuilder builder;
         id.serializeToken("rid", &builder);
         BSONObj obj = builder.done();
@@ -289,7 +287,7 @@ TEST(RecordId, RoundTripSerializeBinary) {
 
     {
         char buf[1024] = {'x'};
-        RecordId id(buf, sizeof(buf));
+        RecordId id(buf);
         BufBuilder builder;
         id.serializeToken(builder);
         BufReader reader(builder.buf(), builder.len());
@@ -297,17 +295,18 @@ TEST(RecordId, RoundTripSerializeBinary) {
     }
 }
 TEST(RecordId, RecordIdBigStr) {
-    char buf[1024] = {'x'};
+    const char rawBuf[1024] = {'x'};
+    std::span buf(rawBuf);
 
     // This string should be just enough to qualify for the small string optimization.
-    RecordId smallId(buf, RecordId::kSmallStrMaxSize);
+    RecordId smallId(buf.first(RecordId::kSmallStrMaxSize));
     ASSERT_TRUE(smallId.isInlineAllocated_forTest());
     ASSERT_EQ(smallId.getStr().size(), RecordId::kSmallStrMaxSize);
     ASSERT_EQ(sizeof(RecordId), smallId.memUsage());
 
     // At a certain size RecordId strings should expand beyond the size of the struct and start
     // using a heap buffer.
-    RecordId bigId(buf, RecordId::kSmallStrMaxSize + 1);
+    RecordId bigId(buf.first(RecordId::kSmallStrMaxSize + 1));
     ASSERT_FALSE(bigId.isInlineAllocated_forTest());
     ASSERT_EQ(bigId.getStr().size(), RecordId::kSmallStrMaxSize + 1);
     ASSERT_EQ(sizeof(RecordId) + bigId.getStr().size(), bigId.memUsage());
@@ -318,7 +317,7 @@ TEST(RecordId, RecordIdBigStr) {
     RecordId bigCopy = bigId;
     ASSERT_FALSE(bigId.isInlineAllocated_forTest());
     ASSERT_FALSE(bigCopy.isInlineAllocated_forTest());
-    ASSERT_EQ(bigId.getStr().rawData(), bigCopy.getStr().rawData());
+    ASSERT_EQ(bigId.getStr().data(), bigCopy.getStr().data());
     ASSERT_EQ(bigId.getStr().size(), bigCopy.getStr().size());
     ASSERT_EQ(sizeof(RecordId) + bigId.getStr().size(), bigCopy.memUsage());
 
@@ -329,7 +328,7 @@ TEST(RecordId, RecordIdBigStr) {
 
     // Ensure there is a limit and it is enforced.
     std::string huge(RecordId::kBigStrMaxSize + 1, 'x');
-    ASSERT_THROWS_CODE(RecordId(huge.c_str(), huge.size()), AssertionException, 5894900);
+    ASSERT_THROWS_CODE(RecordId(huge), AssertionException, 5894900);
 }
 
 // RecordIds of different formats may not be compared.

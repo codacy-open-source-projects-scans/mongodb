@@ -30,22 +30,21 @@
 #include <absl/container/node_hash_map.h>
 #include <boost/move/utility_core.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <memory>
-#include <ostream>
-#include <set>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/s/balancer/cluster_statistics_impl.h"
 #include "mongo/db/s/balancer/migration_test_fixture.h"
 #include "mongo/db/s/balancer/move_unsharded_policy.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <ostream>
+#include <set>
+#include <string>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -76,9 +75,6 @@ protected:
 
 TEST_F(MoveUnshardedPolicyTest, MigrateUnsplittableCollection) {
 
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagTrackUnshardedCollectionsUponCreation", true);
-
     RAIIServerParameterControllerForTest serverParamController{
         "reshardingMinimumOperationDurationMillis", 5000};
 
@@ -102,17 +98,17 @@ TEST_F(MoveUnshardedPolicyTest, MigrateUnsplittableCollection) {
     }
 
     auto availableShards = getAllShardIds(operationContext());
-    const auto& migrateInfoVector = _unshardedPolicy.selectCollectionsToMove(
-        operationContext(), getShardStats(operationContext()), &availableShards);
+    const auto& migrateInfoVector =
+        _unshardedPolicy.selectCollectionsToMove(operationContext(),
+                                                 getShardStats(operationContext()),
+                                                 &availableShards,
+                                                 true /*onlyTrackedCollections*/);
     ASSERT_EQ(1, migrateInfoVector.size());
     ASSERT_EQ(collections[0].getUuid(), migrateInfoVector[0].uuid);
 }
 
 
 TEST_F(MoveUnshardedPolicyTest, MigrateAnyCollectionFPOn) {
-
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagTrackUnshardedCollectionsUponCreation", true);
 
     RAIIServerParameterControllerForTest serverParamController{
         "reshardingMinimumOperationDurationMillis", 5000};
@@ -153,8 +149,11 @@ TEST_F(MoveUnshardedPolicyTest, MigrateAnyCollectionFPOn) {
 
         auto availableShards = getAllShardIds(operationContext());
 
-        const auto& migrateInfoVector = _unshardedPolicy.selectCollectionsToMove(
-            operationContext(), getShardStats(operationContext()), &availableShards);
+        const auto& migrateInfoVector =
+            _unshardedPolicy.selectCollectionsToMove(operationContext(),
+                                                     getShardStats(operationContext()),
+                                                     &availableShards,
+                                                     true /*onlyTrackedCollections*/);
 
         ASSERT_EQ(1, migrateInfoVector.size());
         std::cout << "Removing " << migrateInfoVector[0].nss.toString_forTest() << std::endl;
@@ -167,10 +166,6 @@ TEST_F(MoveUnshardedPolicyTest, MigrateAnyCollectionFPOn) {
 }
 
 TEST_F(MoveUnshardedPolicyTest, DontMigrateAnyCollectionIfReshardingMinimumDurationIsTooLarge) {
-
-    RAIIServerParameterControllerForTest featureFlagController(
-        "featureFlagTrackUnshardedCollectionsUponCreation", true);
-
     RAIIServerParameterControllerForTest serverParamController{
         "reshardingMinimumOperationDurationMillis", 5001};
 
@@ -194,8 +189,11 @@ TEST_F(MoveUnshardedPolicyTest, DontMigrateAnyCollectionIfReshardingMinimumDurat
     }
 
     auto availableShards = getAllShardIds(operationContext());
-    const auto& migrateInfoVector = _unshardedPolicy.selectCollectionsToMove(
-        operationContext(), getShardStats(operationContext()), &availableShards);
+    const auto& migrateInfoVector =
+        _unshardedPolicy.selectCollectionsToMove(operationContext(),
+                                                 getShardStats(operationContext()),
+                                                 &availableShards,
+                                                 true /*onlyTrackedCollections*/);
     ASSERT_EQ(0, migrateInfoVector.size());
 }
 

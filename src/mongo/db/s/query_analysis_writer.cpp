@@ -27,18 +27,7 @@
  *    it in the license file.
  */
 
-#include "mongo/db/query/write_ops/write_ops_gen.h"
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <cstdint>
-#include <functional>
-#include <set>
-#include <tuple>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/s/query_analysis_writer.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -46,21 +35,18 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/s/analyze_shard_key_util.h"
-#include "mongo/db/s/query_analysis_writer.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/update/document_diff_calculator.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -79,8 +65,21 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/future_util.h"
+#include "mongo/util/scoped_unlock.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdint>
+#include <functional>
+#include <set>
+#include <tuple>
+#include <utility>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -99,6 +98,7 @@ static ReplicaSetAwareServiceRegistry::Registerer<QueryAnalysisWriter>
 
 MONGO_FAIL_POINT_DEFINE(disableQueryAnalysisWriter);
 MONGO_FAIL_POINT_DEFINE(disableQueryAnalysisWriterFlusher);
+MONGO_FAIL_POINT_DEFINE(queryAnalysisWriterMockInsertCommandResponse);
 MONGO_FAIL_POINT_DEFINE(queryAnalysisWriterSkipActiveSamplingCheck);
 
 const Backoff kExponentialBackoff(Seconds(1), Milliseconds::max());
@@ -110,10 +110,9 @@ BSONObj createIndex(OperationContext* opCtx, const NamespaceString& nss, const B
     BSONObj resObj;
 
     DBDirectClient client(opCtx);
-    client.runCommand(
-        nss.dbName(),
-        BSON("createIndexes" << nss.coll().toString() << "indexes" << BSON_ARRAY(indexSpec)),
-        resObj);
+    client.runCommand(nss.dbName(),
+                      BSON("createIndexes" << nss.coll() << "indexes" << BSON_ARRAY(indexSpec)),
+                      resObj);
 
     LOGV2_DEBUG(7078401,
                 1,
@@ -286,6 +285,122 @@ bool shouldPersistSample(OperationContext* opCtx,
         QueryAnalysisSampleTracker::get(opCtx).isSamplingActive(nss, *collUuid);
 }
 
+/**
+ * Returns true if the writer should not retry inserting the document(s) that failed with the
+ * given error again.
+ */
+bool isNonRetryableInsertError(const ErrorCodes::Error& errorCode) {
+    return QueryAnalysisWriter::kNonRetryableInsertErrorCodes.find(errorCode) !=
+        QueryAnalysisWriter::kNonRetryableInsertErrorCodes.end();
+}
+
+/**
+ * Inserts the documents in buffer into the collection it is associated with in batches. Also remove
+ * succesful documents from the buffer and also keeps track of indexes to invalid entries.
+ */
+void flushBuffer(OperationContext* opCtx,
+                 QueryAnalysisWriter::Buffer* tmpBuffer,
+                 std::set<int>* invalidDocIndexes) {
+    const auto nss = tmpBuffer->getNss();
+
+    // Insert the documents in batches from the back of the buffer so that we don't need to move the
+    // documents forward after each batch.
+    size_t baseIndex = tmpBuffer->getCount() - 1;
+    size_t maxBatchSize = gQueryAnalysisWriterMaxBatchSize.load();
+
+    while (!tmpBuffer->isEmpty()) {
+        std::vector<BSONObj> docsToInsert;
+        long long objSize = 0;
+
+        size_t lastIndex = tmpBuffer->getCount();  // inclusive
+        while (lastIndex > 0 && docsToInsert.size() < maxBatchSize) {
+            // Check if the next document can fit in the batch.
+            auto doc = tmpBuffer->at(lastIndex - 1);
+            if (doc.objsize() + objSize >= kMaxBSONObjSizePerInsertBatch) {
+                break;
+            }
+            lastIndex--;
+            objSize += doc.objsize();
+            docsToInsert.push_back(std::move(doc));
+        }
+        // We don't add a document that is above the size limit to the buffer so we should have
+        // added at least one document to 'docsToInsert'.
+        invariant(!docsToInsert.empty());
+        LOGV2_DEBUG(
+            6876102, 2, "Persisting samples", logAttrs(nss), "numDocs"_attr = docsToInsert.size());
+
+        QueryAnalysisClient::get(opCtx).insert(
+            opCtx, nss, docsToInsert, [&](const BSONObj& resObj) {
+                BatchedCommandResponse res;
+                std::string errMsg;
+
+                if (!res.parseBSON(resObj, &errMsg)) {
+                    uasserted(ErrorCodes::FailedToParse, errMsg);
+                }
+
+                queryAnalysisWriterMockInsertCommandResponse.executeIf(
+                    [&](const BSONObj& data) {
+                        if (data.hasField("errorDetails")) {
+                            auto mockErrDetailsObj = data["errorDetails"].Obj();
+                            res.addToErrDetails(write_ops::WriteError::parse(mockErrDetailsObj));
+                        } else {
+                            uasserted(9881700,
+                                      str::stream() << "Expected the failpoint to specify "
+                                                       "'errorDetails'"
+                                                    << data);
+                        }
+                    },
+                    [&](const BSONObj& data) {
+                        for (const auto& doc : docsToInsert) {
+                            auto docId = doc["_id"].wrap();
+                            auto docIdToMatch = data["_id"].wrap();
+                            if (docId.woCompare(docIdToMatch) == 0) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    });
+
+                if (res.isErrDetailsSet() && res.sizeErrDetails() > 0) {
+                    boost::optional<write_ops::WriteError> firstWriteErr;
+
+                    for (const auto& err : res.getErrDetails()) {
+                        if (isNonRetryableInsertError(err.getStatus().code())) {
+                            int actualIndex = baseIndex - err.getIndex();
+                            LOGV2(7075402,
+                                  "Ignoring insert error",
+                                  "actualIndex"_attr = actualIndex,
+                                  "error"_attr = redact(err.getStatus()));
+                            dassert(actualIndex >= 0,
+                                    str::stream() << "Found an invalid index " << actualIndex);
+                            dassert(actualIndex < tmpBuffer->getCount(),
+                                    str::stream() << "Found an invalid index " << actualIndex);
+                            invalidDocIndexes->insert(actualIndex);
+                            continue;
+                        }
+                        if (!firstWriteErr) {
+                            // Save the error for later. Go through the rest of the errors to see if
+                            // there are any invalid documents so they can be discarded from the
+                            // buffer.
+                            firstWriteErr.emplace(err);
+                        }
+                    }
+                    if (firstWriteErr) {
+                        uassertStatusOK(firstWriteErr->getStatus());
+                    }
+                } else {
+                    if (isNonRetryableInsertError(res.toStatus().code())) {
+                        return;
+                    }
+                    uassertStatusOK(res.toStatus());
+                }
+            });
+
+        tmpBuffer->truncate(lastIndex, objSize);
+        baseIndex = tmpBuffer->getCount() - 1;
+    }
+}
+
 }  // namespace
 
 const std::string QueryAnalysisWriter::kSampledQueriesTTLIndexName = "SampledQueriesTTLIndex";
@@ -310,6 +425,11 @@ const std::map<NamespaceString, BSONObj> QueryAnalysisWriter::kTTLIndexes = {
     {NamespaceString::kConfigSampledQueriesDiffNamespace, kSampledQueriesDiffTTLIndexSpec},
     {NamespaceString::kConfigAnalyzeShardKeySplitPointsNamespace,
      kAnalyzeShardKeySplitPointsTTLIndexSpec}};
+
+// Do not retry upon getting an error indicating that the documents are invalid since the inserts
+// are not going to succeed in the next try anyway.
+const std::set<ErrorCodes::Error> QueryAnalysisWriter::kNonRetryableInsertErrorCodes = {
+    ErrorCodes::BSONObjectTooLarge, ErrorCodes::BadValue, ErrorCodes::DuplicateKey};
 
 QueryAnalysisWriter* QueryAnalysisWriter::get(OperationContext* opCtx) {
     return get(opCtx->getServiceContext());
@@ -409,6 +529,7 @@ void QueryAnalysisWriter::onStartup(OperationContext* opCtx) {
 }
 
 void QueryAnalysisWriter::onShutdown() {
+    _isPrimary.store(false);
     if (_executor) {
         _executor->shutdown();
         _executor->join();
@@ -426,6 +547,7 @@ void QueryAnalysisWriter::onStepUpComplete(OperationContext* opCtx, long long te
         return;
     }
 
+    _isPrimary.store(true);
     createTTLIndexes(opCtx).getAsync([](auto) {});
 }
 
@@ -433,6 +555,7 @@ ExecutorFuture<void> QueryAnalysisWriter::createTTLIndexes(OperationContext* opC
     invariant(_executor);
 
     static unsigned int tryCount = 0;
+
     auto future =
         AsyncTry([this] {
             ++tryCount;
@@ -450,17 +573,19 @@ ExecutorFuture<void> QueryAnalysisWriter::createTTLIndexes(OperationContext* opC
                                       "{specification}.",
                                       logAttrs(nss),
                                       "specification"_attr = indexSpec,
-                                      "tries"_attr = tryCount);
+                                      "tries"_attr = tryCount,
+                                      "isPrimary"_attr = _isPrimary.load());
                     }
                     return status;
                 }
             }
             return Status::OK();
         })
-            .until([](Status status) {
+            .until([this](Status status) {
                 // Stop retrying if index creation succeeds, or if server is no longer
                 // primary.
-                return (status.isOK() || ErrorCodes::isNotPrimaryError(status));
+                return (status.isOK() ||
+                        (ErrorCodes::isNotPrimaryError(status) && !_isPrimary.load()));
             })
             .withBackoffBetweenIterations(kExponentialBackoff)
             .on(_executor, CancellationToken::uncancelable());
@@ -469,7 +594,8 @@ ExecutorFuture<void> QueryAnalysisWriter::createTTLIndexes(OperationContext* opC
 
 void QueryAnalysisWriter::_flushQueries(OperationContext* opCtx) {
     try {
-        _flush(opCtx, &_queries);
+        stdx::unique_lock lk(_mutex);
+        _flush(opCtx, lk, &_queries);
     } catch (DBException& ex) {
         LOGV2(7047300,
               "Failed to flush queries, will try again at the next interval",
@@ -479,7 +605,8 @@ void QueryAnalysisWriter::_flushQueries(OperationContext* opCtx) {
 
 void QueryAnalysisWriter::_flushDiffs(OperationContext* opCtx) {
     try {
-        _flush(opCtx, &_diffs);
+        stdx::unique_lock lk(_mutex);
+        _flush(opCtx, lk, &_diffs);
     } catch (DBException& ex) {
         LOGV2(7075400,
               "Failed to flush diffs, will try again at the next interval",
@@ -487,101 +614,40 @@ void QueryAnalysisWriter::_flushDiffs(OperationContext* opCtx) {
     }
 }
 
-void QueryAnalysisWriter::_flush(OperationContext* opCtx, Buffer* buffer) {
+void QueryAnalysisWriter::_flush(OperationContext* opCtx,
+                                 stdx::unique_lock<stdx::mutex>& lk,
+                                 Buffer* buffer) {
+    invariant(lk.owns_lock());
     const auto nss = buffer->getNss();
 
     Buffer tmpBuffer(nss);
     // The indices of invalid documents, e.g. documents that fail to insert with DuplicateKey errors
     // (i.e. duplicates) and BadValue errors. Such documents should not get added back to the buffer
     // when the inserts below fail.
-    std::set<int> invalid;
-    {
-        stdx::lock_guard<stdx::mutex> lk(_mutex);
-        if (buffer->isEmpty()) {
-            return;
-        }
-
-        LOGV2_DEBUG(7372300,
-                    1,
-                    "About to flush the sample buffer",
-                    logAttrs(nss),
-                    "numDocs"_attr = buffer->getCount());
-
-        std::swap(tmpBuffer, *buffer);
+    std::set<int> invalidDocIndexes;
+    if (buffer->isEmpty()) {
+        return;
     }
+
+    LOGV2_DEBUG(7372300,
+                1,
+                "About to flush the sample buffer",
+                logAttrs(nss),
+                "numDocs"_attr = buffer->getCount());
+
+    std::swap(tmpBuffer, *buffer);
+
     ScopeGuard backSwapper([&] {
-        stdx::lock_guard<stdx::mutex> lk(_mutex);
         for (int i = 0; i < tmpBuffer.getCount(); i++) {
-            if (invalid.find(i) == invalid.end()) {
+            if (invalidDocIndexes.find(i) == invalidDocIndexes.end()) {
                 buffer->add(tmpBuffer.at(i));
             }
         }
     });
 
-    // Insert the documents in batches from the back of the buffer so that we don't need to move the
-    // documents forward after each batch.
-    size_t baseIndex = tmpBuffer.getCount() - 1;
-    size_t maxBatchSize = gQueryAnalysisWriterMaxBatchSize.load();
-
-    while (!tmpBuffer.isEmpty()) {
-        std::vector<BSONObj> docsToInsert;
-        long long objSize = 0;
-
-        size_t lastIndex = tmpBuffer.getCount();  // inclusive
-        while (lastIndex > 0 && docsToInsert.size() < maxBatchSize) {
-            // Check if the next document can fit in the batch.
-            auto doc = tmpBuffer.at(lastIndex - 1);
-            if (doc.objsize() + objSize >= kMaxBSONObjSizePerInsertBatch) {
-                break;
-            }
-            lastIndex--;
-            objSize += doc.objsize();
-            docsToInsert.push_back(std::move(doc));
-        }
-        // We don't add a document that is above the size limit to the buffer so we should have
-        // added at least one document to 'docsToInsert'.
-        invariant(!docsToInsert.empty());
-        LOGV2_DEBUG(
-            6876102, 2, "Persisting samples", logAttrs(nss), "numDocs"_attr = docsToInsert.size());
-
-        QueryAnalysisClient::get(opCtx).insert(
-            opCtx, nss, docsToInsert, [&](const BSONObj& resObj) {
-                BatchedCommandResponse res;
-                std::string errMsg;
-
-                if (!res.parseBSON(resObj, &errMsg)) {
-                    uasserted(ErrorCodes::FailedToParse, errMsg);
-                }
-
-                if (res.isErrDetailsSet() && res.sizeErrDetails() > 0) {
-                    boost::optional<write_ops::WriteError> firstWriteErr;
-
-                    for (const auto& err : res.getErrDetails()) {
-                        if (err.getStatus() == ErrorCodes::DuplicateKey ||
-                            err.getStatus() == ErrorCodes::BadValue) {
-                            LOGV2(7075402,
-                                  "Ignoring insert error",
-                                  "error"_attr = redact(err.getStatus()));
-                            invalid.insert(baseIndex - err.getIndex());
-                            continue;
-                        }
-                        if (!firstWriteErr) {
-                            // Save the error for later. Go through the rest of the errors to see if
-                            // there are any invalid documents so they can be discarded from the
-                            // buffer.
-                            firstWriteErr.emplace(err);
-                        }
-                    }
-                    if (firstWriteErr) {
-                        uassertStatusOK(firstWriteErr->getStatus());
-                    }
-                } else {
-                    uassertStatusOK(res.toStatus());
-                }
-            });
-
-        tmpBuffer.truncate(lastIndex, objSize);
-        baseIndex -= lastIndex;
+    {
+        ScopedUnlock unlockBlock(lk);
+        flushBuffer(opCtx, &tmpBuffer, &invalidDocIndexes);
     }
 
     backSwapper.dismiss();
@@ -674,8 +740,8 @@ ExecutorFuture<void> QueryAnalysisWriter::_addReadQuery(
                 return;
             }
 
-            auto expireAt = opCtx->getServiceContext()->getFastClockSource()->now() +
-                mongo::Milliseconds(gQueryAnalysisSampleExpirationSecs.load() * 1000);
+            auto expireAt = opCtx->fastClockSource().now() +
+                mongo::Seconds(gQueryAnalysisSampleExpirationSecs.load());
             auto doc = SampledQueryDocument{sampledReadCmd.sampleId,
                                             sampledReadCmd.nss,
                                             *collUuid,
@@ -722,8 +788,8 @@ ExecutorFuture<void> QueryAnalysisWriter::addUpdateQuery(SampledCommandNameEnum 
                     return;
                 }
 
-                auto expireAt = opCtx->getServiceContext()->getFastClockSource()->now() +
-                    mongo::Milliseconds(gQueryAnalysisSampleExpirationSecs.load() * 1000);
+                auto expireAt = opCtx->fastClockSource().now() +
+                    mongo::Seconds(gQueryAnalysisSampleExpirationSecs.load());
                 auto doc = SampledQueryDocument{sampledUpdateCmd.sampleId,
                                                 sampledUpdateCmd.nss,
                                                 *collUuid,
@@ -789,8 +855,8 @@ ExecutorFuture<void> QueryAnalysisWriter::addDeleteQuery(SampledCommandNameEnum 
                     return;
                 }
 
-                auto expireAt = opCtx->getServiceContext()->getFastClockSource()->now() +
-                    mongo::Milliseconds(gQueryAnalysisSampleExpirationSecs.load() * 1000);
+                auto expireAt = opCtx->fastClockSource().now() +
+                    mongo::Seconds(gQueryAnalysisSampleExpirationSecs.load());
                 auto doc = SampledQueryDocument{sampledDeleteCmd.sampleId,
                                                 sampledDeleteCmd.nss,
                                                 *collUuid,
@@ -855,8 +921,8 @@ ExecutorFuture<void> QueryAnalysisWriter::addFindAndModifyQuery(
                 return;
             }
 
-            auto expireAt = opCtx->getServiceContext()->getFastClockSource()->now() +
-                mongo::Milliseconds(gQueryAnalysisSampleExpirationSecs.load() * 1000);
+            auto expireAt = opCtx->fastClockSource().now() +
+                mongo::Seconds(gQueryAnalysisSampleExpirationSecs.load());
             auto doc = SampledQueryDocument{sampledFindAndModifyCmd.sampleId,
                                             sampledFindAndModifyCmd.nss,
                                             *collUuid,
@@ -922,8 +988,8 @@ ExecutorFuture<void> QueryAnalysisWriter::addDiff(const UUID& sampleId,
                 return;
             }
 
-            auto expireAt = opCtx->getServiceContext()->getFastClockSource()->now() +
-                mongo::Milliseconds(gQueryAnalysisSampleExpirationSecs.load() * 1000);
+            auto expireAt = opCtx->fastClockSource().now() +
+                mongo::Seconds(gQueryAnalysisSampleExpirationSecs.load());
             auto doc =
                 SampledQueryDiffDocument{sampleId, nss, collUuid, std::move(*diff), expireAt};
 

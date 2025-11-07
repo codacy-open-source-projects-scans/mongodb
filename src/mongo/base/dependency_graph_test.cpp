@@ -33,12 +33,12 @@
 
 #include <algorithm>
 #include <cstddef>
-#include <fmt/ranges.h>  // IWYU pragma: keep
 #include <random>
 #include <string>
 #include <vector>
 
 #include <fmt/format.h>
+#include <fmt/ranges.h>  // IWYU pragma: keep
 // IWYU pragma: no_include "format.h"
 
 #include "mongo/base/dependency_graph.h"
@@ -46,8 +46,7 @@
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/string_data.h"
 #include "mongo/logv2/log.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault

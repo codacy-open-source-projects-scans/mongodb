@@ -29,6 +29,16 @@
 
 #pragma once
 
+#include "mongo/db/exec/sbe/stages/plan_stats.h"
+#include "mongo/db/exec/sbe/util/spilling.h"
+#include "mongo/db/exec/sbe/values/row.h"
+#include "mongo/db/exec/sbe/values/slot.h"
+#include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/stage_memory_limit_knobs/knobs.h"
+#include "mongo/util/modules.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -38,14 +48,6 @@
 #include <vector>
 
 #include <boost/optional/optional.hpp>
-
-#include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/exec/sbe/util/spilling.h"
-#include "mongo/db/exec/sbe/values/row.h"
-#include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/query/collation/collator_interface.h"
 
 namespace mongo::sbe {
 using HashTableType = std::unordered_map<value::MaterializedRow,  // NOLINT
@@ -113,6 +115,7 @@ public:
 
     /**
      * Resets the iterator state to the start of a (new) outer key or key array.
+     * Must be called before "getNextMatchingIndex()" or "getAllMatchingIndices()" are called.
      */
     void reset(const value::TypeTags& outerKeyTag, const value::Value& outerKeyVal);
 
@@ -134,20 +137,19 @@ private:
     // The LookupHashTable instance this is iterating, so we can call some methods in it.
     LookupHashTable& _hashTable;
 
-    // Have we looked for the current individual key yet ('_hashTableMatchXyz' members are valid)?
-    bool _hashTableSearched;
-
     // Tag of the current outer key, which may be a scalar or array.
-    value::TypeTags _outerKeyTag;
+    value::TypeTags _outerKeyTag = value::TypeTags::Nothing;
     // Value of the current outer key, which may be a scalar or array.
-    value::Value _outerKeyVal;
+    value::Value _outerKeyVal = 0;
     // Indicates whether the outer key is a scalar or array.
-    bool _outerKeyIsArray;
+    bool _outerKeyIsArray = false;
+    // Have we looked for the current individual key yet ('_hashTableMatchXyz' members are valid)?
+    bool _hashTableSearched = false;
 
     // If '_outerKeyIsArray' is false, a sorted vector of inner key match buffer indices.
     std::vector<size_t> _hashTableMatchVector;
     // If '_outerKeyIsArray' is false, the current position's index into '_hashTableMatchVector'.
-    size_t _hashTableMatchVectorIdx;
+    size_t _hashTableMatchVectorIdx = 0;
     // If '_outerKeyIsArray' is true, a sorted set of inner key match buffer indices.
     std::set<size_t> _hashTableMatchSet;
     // If '_outerKeyIsArray' is true, the current position in '_hashTableMatchSet'.
@@ -188,8 +190,7 @@ public:
      */
     size_t bufferValueOrSpill(value::MaterializedRow& value);
 
-    void doSaveState(bool relinquishCursor);
-    void doRestoreState(bool relinquishCursor);
+    void forceSpill();
 
     const HashLookupStats* getHashLookupStats() const {
         return &_hashLookupStats;
@@ -213,13 +214,7 @@ public:
      * Opens a new, empty hash table, with a collator if one was provided.
      */
     void open() {
-        if (_collator) {
-            const value::MaterializedRowHasher hasher(_collator);
-            const value::MaterializedRowEq equator(_collator);
-            _memoryHt.emplace(0, hasher, equator);
-        } else {
-            _memoryHt.emplace();
-        }
+        init();
     }
 
     void reset(bool fromClose);
@@ -251,7 +246,21 @@ public:
      */
     LookupHashTableIter htIter{*this};
 
+    int64_t getMemUsage() const {
+        return _computedTotalMemUsage;
+    }
+
 private:
+    void init() {
+        if (_collator) {
+            const value::MaterializedRowHasher hasher(_collator);
+            const value::MaterializedRowEq equator(_collator);
+            _memoryHt.emplace(0, hasher, equator);
+        } else {
+            _memoryHt.emplace();
+        }
+    }
+
     inline bool hasSpilledBufToDisk() {
         return _recordStoreBuf != nullptr;
     }
@@ -317,7 +326,7 @@ private:
 
     // Memory tracking and spilling to disk.
     long long _memoryUseInBytesBeforeSpill =
-        internalQuerySBELookupApproxMemoryUseInBytesBeforeSpill.load();
+        loadMemoryLimit(StageMemoryLimit::QuerySBELookupApproxMemoryUseInBytesBeforeSpill);
 
     // The portion of the inner collection hash table that has spilled to disk.
     std::unique_ptr<SpillingStore> _recordStoreHt;

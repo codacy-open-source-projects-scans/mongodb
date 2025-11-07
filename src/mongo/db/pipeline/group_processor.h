@@ -29,15 +29,16 @@
 
 #pragma once
 
+#include "mongo/db/pipeline/group_processor_base.h"
+#include "mongo/db/sorter/sorter.h"
+#include "mongo/util/modules.h"
+
 #include <memory>
 #include <utility>
 
 #include <boost/optional.hpp>
 
-#include "mongo/db/pipeline/group_processor_base.h"
-#include "mongo/db/sorter/sorter.h"
-
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 
 /**
  * This class is used by the aggregation framework and streams enterprise module to perform the
@@ -84,8 +85,15 @@ public:
      * Returns true if this GroupProcessor stage used disk during execution and false otherwise.
      */
     bool usedDisk() const {
-        return _stats.spills > 0;
+        return _stats.spillingStats.getSpills() > 0;
     }
+
+    /**
+     * Spills the GroupsMap to a new file and empties the map so that subsequent groups can be added
+     * to it. Later when the groups need to be returned back to the caller, all groups in all the
+     * spilled files are read, merged and returned to the caller.
+     */
+    void spill();
 
 private:
     boost::optional<Document> getNextSpilled();
@@ -105,19 +113,15 @@ private:
      */
     bool shouldSpillOnEveryDuplicateId(bool isNewGroup);
 
-    /**
-     * Spills the GroupsMap to a new file and empties the map so that subsequent groups can be added
-     * to it. Later when the groups need to be returned back to the caller, all groups in all the
-     * spilled files are read, merged and returned to the caller.
-     */
-    void spill();
+    // Are groups ready to be returned?
+    bool _groupsReady{false};
 
     // Only used when '_spilled' is false.
-    boost::optional<GroupProcessorBase::GroupsMap::iterator> _groupsIterator;
+    GroupProcessorBase::GroupsMap::iterator _groupsIterator{_groups.end()};
 
     // Tracks the size of the spill file.
     std::unique_ptr<SorterFileStats> _spillStats;
-    std::shared_ptr<Sorter<Value, Value>::File> _file;
+    std::shared_ptr<SorterFile> _file;
     std::vector<std::shared_ptr<Sorter<Value, Value>::Iterator>> _sortedFiles;
     bool _spilled{false};
 
@@ -127,4 +131,4 @@ private:
     GroupProcessorBase::Accumulators _currentAccumulators;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

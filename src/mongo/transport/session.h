@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <variant>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/config.h"  // IWYU pragma: keep
@@ -46,10 +40,17 @@
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/cidr.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/sockaddr.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+
+#include <boost/optional/optional.hpp>
 #ifdef MONGO_CONFIG_SSL
 #include "mongo/util/net/ssl_types.h"
 #endif
@@ -64,11 +65,17 @@ class Session;
 class SessionManager;
 class TransportLayer;
 
+struct SessionManagerOpCounters {
+    Atomic<std::size_t> total{0};
+    Atomic<std::size_t> completed{0};
+};
+
 /**
  * This type contains data needed to associate Messages with connections
  * (on the transport side) and Messages with Client objects (on the database side).
  */
-class Session : public std::enable_shared_from_this<Session>, public Decorable<Session> {
+class MONGO_MOD_PUBLIC Session : public std::enable_shared_from_this<Session>,
+                                 public Decorable<Session> {
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
 
@@ -117,23 +124,22 @@ public:
     /**
      * Source (receive) a new Message from the remote host for this Session.
      */
-    virtual StatusWith<Message> sourceMessage() noexcept = 0;
-    virtual Future<Message> asyncSourceMessage(const BatonHandle& handle = nullptr) noexcept = 0;
+    virtual StatusWith<Message> sourceMessage() = 0;
+    virtual Future<Message> asyncSourceMessage(const BatonHandle& handle = nullptr) = 0;
 
     /**
      * Waits for the availability of incoming data.
      */
-    virtual Status waitForData() noexcept = 0;
-    virtual Future<void> asyncWaitForData() noexcept = 0;
+    virtual Status waitForData() = 0;
+    virtual Future<void> asyncWaitForData() = 0;
 
     /**
      * Sink (send) a Message to the remote host for this Session.
      *
      * Async version will keep the buffer alive until the operation completes.
      */
-    virtual Status sinkMessage(Message message) noexcept = 0;
-    virtual Future<void> asyncSinkMessage(Message message,
-                                          const BatonHandle& handle = nullptr) noexcept = 0;
+    virtual Status sinkMessage(Message message) = 0;
+    virtual Future<void> asyncSinkMessage(Message message, const BatonHandle& handle = nullptr) = 0;
 
     /**
      * Cancel any outstanding async operations. There is no way to cancel synchronous calls.
@@ -165,7 +171,17 @@ public:
     /**
      * Returns true if this session was connected through an L4 load balancer.
      */
-    virtual bool isFromLoadBalancer() const = 0;
+    virtual bool isLoadBalancerPeer() const = 0;
+
+    /**
+     * Returns true if the connection is on a load balancer port.
+     */
+    virtual bool isConnectedToLoadBalancerPort() const = 0;
+
+    /**
+     * Signal the session that the client declared being from a load balancer.
+     */
+    virtual void setisLoadBalancerPeer(bool helloHasLoadBalancedOption) = 0;
 
     /**
      * Returns true if this session binds to the operation state, which implies open cursors and
@@ -174,13 +190,48 @@ public:
     virtual bool bindsToOperationState() const = 0;
 
     /**
-     * Returns true if this session corresponds to a connection accepted from the router port.
+     * Returns the HostAndPort of the directly-connected remote
+     * to this session.
      */
-    virtual bool isFromRouterPort() const {
-        return false;
+    virtual const HostAndPort& remote() const = 0;
+
+    /**
+     * Returns the HostAndPort of the local endpoint of this session.
+     */
+    virtual const HostAndPort& local() const = 0;
+
+    /**
+     * Returns the source remote endpoint. The server determines the
+     * source remote endpoint via the following set of rules:
+     *  1. If the connection was accepted via the load balancer port:
+     *      a. If the TCP packet presented a valid proxy protocol header, then
+     *         the source remote endpoint is a HostAndPort constructed from the
+     *         source IP address and source port presented in that header.
+     *      b. If the TCP packet did not present a valid proxy protocol header,
+     *         then the transport layer will fail to parse and fail session establishment.
+     *  2. If the connection was NOT accepted via the load balancer port:
+     *      a. The source remote endpoint is always remote(). The proxy protocol
+     *         header is only parsed if presented by a load balancer connection.
+     */
+    virtual const HostAndPort& getSourceRemoteEndpoint() const {
+        return remote();
     }
 
-    virtual const HostAndPort& remote() const = 0;
+    /**
+     * Returns the proxy endpoint. The server determines the
+     * proxy endpoint via the following set of rules:
+     *  1. If the connection was accepted via the load balancer port:
+     *      a. If the TCP packet presented a valid proxy protocol header, then
+     *         the proxy endpoint is a HostAndPort constructed from the
+     *         destination IP address and destination port presented in that header.
+     *      b. If the TCP packet did not present a valid proxy protocol header,
+     *         then the transport layer will fail to parse and fail session establishment.
+     *  2. If the connection was NOT accepted via the load balancer port:
+     *      a. The proxy endpoint is always boost::none since there are no proxies.
+     */
+    virtual boost::optional<const HostAndPort&> getProxiedDstEndpoint() const {
+        return boost::none;
+    }
 
     virtual void appendToBSON(BSONObjBuilder& bb) const = 0;
 
@@ -190,14 +241,13 @@ public:
         return builder.obj();
     }
 
-    virtual bool shouldOverrideMaxConns(
-        const std::vector<std::variant<CIDR, std::string>>& exemptions) const = 0;
+    virtual bool isExemptedByCIDRList(const CIDRList& exemptions) const = 0;
 
 #ifdef MONGO_CONFIG_SSL
     /**
-     * Get the SSL manager associated with this session.
+     * Get the SSL configuration associated with this session, if any.
      */
-    virtual const std::shared_ptr<SSLManagerInterface>& getSSLManager() const = 0;
+    virtual const SSLConfiguration* getSSLConfiguration() const = 0;
 #endif
 
     virtual const RestrictionEnvironment& getAuthEnvironment() const = 0;
@@ -208,7 +258,7 @@ protected:
 private:
     const Id _id;
     bool _inOperation{false};
-    std::weak_ptr<SessionManager> _sessionManager;
+    std::shared_ptr<SessionManagerOpCounters> _opCounters;
 };
 
 }  // namespace transport

@@ -27,15 +27,16 @@
  *    it in the license file.
  */
 
-#include <utility>
-
 #include "mongo/db/query/plan_yield_policy_remote_cursor.h"
+
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/restore_context.h"
 #include "mongo/db/query/yield_policy_callbacks_impl.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/duration.h"
+
+#include <utility>
 
 namespace mongo {
 
@@ -45,30 +46,21 @@ std::unique_ptr<PlanYieldPolicyRemoteCursor> PlanYieldPolicyRemoteCursor::make(
     const MultipleCollectionAccessor& collections,
     NamespaceString nss,
     PlanExecutor* exec) {
-    std::variant<const Yieldable*, PlanYieldPolicy::YieldThroughAcquisitions> yieldable;
-    if (collections.isAcquisition()) {
-        yieldable = PlanYieldPolicy::YieldThroughAcquisitions{};
-    } else {
-        yieldable = &collections.getMainCollection();
-    }
-
     auto yieldPolicy = std::unique_ptr<PlanYieldPolicyRemoteCursor>(new PlanYieldPolicyRemoteCursor(
-        opCtx, policy, yieldable, std::make_unique<YieldPolicyCallbacksImpl>(nss), exec));
+        opCtx, policy, std::make_unique<YieldPolicyCallbacksImpl>(std::move(nss)), exec));
     return yieldPolicy;
 }
 
 PlanYieldPolicyRemoteCursor::PlanYieldPolicyRemoteCursor(
     OperationContext* opCtx,
     PlanYieldPolicy::YieldPolicy policy,
-    std::variant<const Yieldable*, YieldThroughAcquisitions> yieldable,
     std::unique_ptr<YieldPolicyCallbacks> callbacks,
     PlanExecutor* exec)
     : PlanYieldPolicy(opCtx,
                       policy,
-                      opCtx->getServiceContext()->getFastClockSource(),
+                      &opCtx->fastClockSource(),
                       internalQueryExecYieldIterations.load(),
                       Milliseconds{internalQueryExecYieldPeriodMS.load()},
-                      yieldable,
                       std::move(callbacks)),
       _exec(exec) {}
 
@@ -79,11 +71,12 @@ void PlanYieldPolicyRemoteCursor::saveState(OperationContext* opCtx) {
 }
 
 void PlanYieldPolicyRemoteCursor::restoreState(OperationContext* opCtx,
-                                               const Yieldable* yieldable) {
+                                               const Yieldable* yieldable,
+                                               RestoreContext::RestoreType restoreType) {
     if (_exec) {
         // collPtr is expected to be null, if yieldable is not CollectionPtr.
         auto collPtr = dynamic_cast<const CollectionPtr*>(yieldable);
-        _exec->restoreState({RestoreContext::RestoreType::kYield, collPtr});
+        _exec->restoreState({restoreType, collPtr});
     }
 }
 

@@ -6,6 +6,12 @@
         num_nodes: 3
         old_bin_version: last_lts
         mixed_bin_versions: new_new_old
+      config:
+        shell_options:
+          global_vars:
+            TestData:
+              # TODO (SERVER-111403): Enable OpenTelemetry tracing in multiversion suites.
+              enableOTELTracing: false
 
 - name: replica_fixture_last_lts_new_old_new
   value:
@@ -14,6 +20,12 @@
         num_nodes: 3
         old_bin_version: last_lts
         mixed_bin_versions: new_old_new
+      config:
+        shell_options:
+          global_vars:
+            TestData:
+              # TODO (SERVER-111403): Enable OpenTelemetry tracing in multiversion suites.
+              enableOTELTracing: false
 
 - name: replica_fixture_last_lts_old_new_new
   value:
@@ -22,6 +34,12 @@
         num_nodes: 3
         old_bin_version: last_lts
         mixed_bin_versions: old_new_new
+      config:
+        shell_options:
+          global_vars:
+            TestData:
+              # TODO (SERVER-111403): Enable OpenTelemetry tracing in multiversion suites.
+              enableOTELTracing: false
 
 - name: replica_fixture_last_continuous_new_new_old
   value:
@@ -30,6 +48,12 @@
         num_nodes: 3
         old_bin_version: last_continuous
         mixed_bin_versions: new_new_old
+      config:
+        shell_options:
+          global_vars:
+            TestData:
+              # TODO (SERVER-111403): Enable OpenTelemetry tracing in multiversion suites.
+              enableOTELTracing: false
 
 - name: replica_fixture_last_continuous_new_old_new
   value:
@@ -38,6 +62,12 @@
         num_nodes: 3
         old_bin_version: last_continuous
         mixed_bin_versions: new_old_new
+      config:
+        shell_options:
+          global_vars:
+            TestData:
+              # TODO (SERVER-111403): Enable OpenTelemetry tracing in multiversion suites.
+              enableOTELTracing: false
 
 - name: replica_fixture_last_continuous_old_new_new
   value:
@@ -46,6 +76,12 @@
         num_nodes: 3
         old_bin_version: last_continuous
         mixed_bin_versions: old_new_new
+      config:
+        shell_options:
+          global_vars:
+            TestData:
+              # TODO (SERVER-111403): Enable OpenTelemetry tracing in multiversion suites.
+              enableOTELTracing: false
 
 - name: sharded_fixture_last_lts_new_old_old_new
   value:
@@ -55,6 +91,12 @@
         num_rs_nodes_per_shard: 2
         old_bin_version: last_lts
         mixed_bin_versions: new_old_old_new
+      config:
+        shell_options:
+          global_vars:
+            TestData:
+              # TODO (SERVER-111403): Enable OpenTelemetry tracing in multiversion suites.
+              enableOTELTracing: false
 
 - name: sharded_fixture_last_continuous_new_old_old_new
   value:
@@ -64,42 +106,111 @@
         num_rs_nodes_per_shard: 2
         old_bin_version: last_continuous
         mixed_bin_versions: new_old_old_new
+      config:
+        shell_options:
+          global_vars:
+            TestData:
+              # TODO (SERVER-111403): Enable OpenTelemetry tracing in multiversion suites.
+              enableOTELTracing: false
+
+- name: sharded_fixture_last_lts_3_nodes
+  value:
+    executor:
+      fixture:
+        num_shards: 2
+        num_rs_nodes_per_shard: 3
+        old_bin_version: last_lts
+        mixed_bin_versions: new_old_old_old_old_new
+      config:
+        shell_options:
+          global_vars:
+            TestData:
+              nonClusteredConfigTransactions: true
+              # TODO (SERVER-111403): Enable OpenTelemetry tracing in multiversion suites.
+              enableOTELTracing: false
+
+- name: sharded_fixture_last_continuous_3_nodes
+  value:
+    executor:
+      fixture:
+        num_shards: 2
+        num_rs_nodes_per_shard: 3
+        old_bin_version: last_continuous
+        mixed_bin_versions: new_old_old_old_old_new
+      config:
+        shell_options:
+          global_vars:
+            TestData:
+              nonClusteredConfigTransactions: true
+              # TODO (SERVER-111403): Enable OpenTelemetry tracing in multiversion suites.
+              enableOTELTracing: false
 
 ### Suite-specific overrides ###
-- name: multiversion_future_git_tag_exclude_files
+- name: replica_sets_temporarily_disable_due_to_fcv_upgrade
   value:
     selector:
-      exclude_files:
-        # Do not execute files with helper functions.
-        - jstests/multiVersion/libs/*.js
-
-        # TODO: SERVER-28104
-        - jstests/multiVersion/genericBinVersion/minor_version_tags_new_old_new.js
-
-        # TODO SERVER-42919: recent work on the ReplicaSetMonitor means that mongoS no longer crashes when
-        # it attempts to connect to an upgraded mongoD. Un-denylist when SERVER-42919 fixes this issue.
-        - jstests/multiVersion/genericSetFCVUsage/crash_mongos_against_upgraded_cluster.js
       exclude_with_any_tags:
+        - assumes_standalone_mongod
+        - requires_profiling
         - DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE
+
+- name: sharded_collections_temporarily_disable_due_to_fcv_upgrade
+  value:
+    selector:
+      exclude_with_any_tags:
+        - assumes_standalone_mongod
+        - assumes_against_mongod_not_mongos
+        - assumes_no_implicit_collection_creation_on_get_collection
+        - assumes_no_implicit_collection_creation_after_drop
+        - assumes_no_implicit_index_creation
+        - assumes_unsharded_collection
+        - cannot_create_unique_index_when_using_hashed_shard_key
+        - requires_profiling
+        - requires_capped
+        - DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE
+
+- name: sharding_temporarily_disable_due_to_fcv_upgrade
+  value:
+    selector:
+      exclude_with_any_tags:
+        - assumes_standalone_mongod
+        - assumes_against_mongod_not_mongos
+        - requires_profiling
+        - DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE
+
+- name: multiversion_future_git_tag_exclude_files
+  value:
+    exclude_files:
+      # Do not execute files with helper functions.
+      - jstests/multiVersion/libs/*.js
+
+      # TODO: SERVER-28104
+      - jstests/multiVersion/genericBinVersion/minor_version_tags_new_old_new.js
+
+      # TODO SERVER-42919: recent work on the ReplicaSetMonitor means that mongoS no longer crashes when
+      # it attempts to connect to an upgraded mongoD. Un-denylist when SERVER-42919 fixes this issue.
+      - jstests/multiVersion/genericSetFCVUsage/crash_mongos_against_upgraded_cluster.js
+    exclude_with_any_tags:
+      - DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE
 
 - name: multiversion_auth_future_git_tag_exclude_files
   value:
-    selector:
-      exclude_files:
-        # Do not execute files with helper functions.
-        - jstests/multiVersion/libs/*.js
+    exclude_files:
+      # Do not execute files with helper functions.
+      - jstests/multiVersion/libs/*.js
 
-        # TODO: SERVER-28104
-        - jstests/multiVersion/genericBinVersion/minor_version_tags_new_old_new.js
+      # TODO: SERVER-28104
+      - jstests/multiVersion/genericBinVersion/minor_version_tags_new_old_new.js
 
-        # TODO SERVER-42919: recent work on the ReplicaSetMonitor means that mongoS no longer crashes when
-        # it attempts to connect to an upgraded mongoD. Un-denylist when SERVER-42919 fixes this issue.
-        - jstests/multiVersion/genericSetFCVUsage/crash_mongos_against_upgraded_cluster.js
+      # TODO SERVER-42919: recent work on the ReplicaSetMonitor means that mongoS no longer crashes when
+      # it attempts to connect to an upgraded mongoD. Un-denylist when SERVER-42919 fixes this issue.
+      - jstests/multiVersion/genericSetFCVUsage/crash_mongos_against_upgraded_cluster.js
 
-        # Skip any tests that run with auth explicitly.
-        - jstests/multiVersion/genericBinVersion/load_keys_on_upgrade.js
-      exclude_with_any_tags:
-        - DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE
+      # Skip any tests that run with auth explicitly.
+      - jstests/multiVersion/genericBinVersion/load_keys_on_upgrade.js
+      - jstests/multiVersion/genericBinVersion/server-security/dollar_audit_mixed_version_mongods.js
+    exclude_with_any_tags:
+      - DISABLED_TEMPORARILY_DUE_TO_FCV_UPGRADE
 
 - name: multiversion_sanity_check_selector
   value:
@@ -124,6 +235,13 @@
         - jstests/replsets/invalidate_sessions_on_stepdown.js
         - jstests/replsets/initial_sync_fails_unclean_restart.js
 
+- name: replica_sets_multiversion_last_continuous_selector
+  value:
+    exclude_files:
+      - jstests/replsets/test_only_repl_commands.js
+      - jstests/replsets/transactions_only_allowed_on_primaries.js
+      - jstests/replsets/prepare_conflict_read_concern_behavior.js
+
 - name: replica_sets_multiversion_testdata_last_lts
   value:
     executor:
@@ -132,6 +250,9 @@
           global_vars:
             TestData:
               useRandomBinVersionsWithinReplicaSet: "last-lts"
+              # Since a test in replica_sets could start up a sharded cluster, we
+              # need to set this variable so that the right version of mongos is chosen.
+              mongosBinVersion: "last-lts"
 
 - name: replica_sets_multiversion_testdata_last_continuous
   value:
@@ -141,6 +262,9 @@
           global_vars:
             TestData:
               useRandomBinVersionsWithinReplicaSet: "last-continuous"
+              # Since a test in replica_sets could start up a sharded cluster, we
+              # need to set this variable so that the right version of mongos is chosen.
+              mongosBinVersion: "last-continuous"
 
 - name: rollback_multiversion_fuzzer_testdata_last_lts
   value:
@@ -215,6 +339,24 @@
               useRandomBinVersionsWithinReplicaSet: "last-continuous"
               mongosBinVersion: "last-continuous"
 
+- name: sharding_multiversion_mongos_testdata_last_lts
+  value:
+    executor:
+      config:
+        shell_options:
+          global_vars:
+            TestData:
+              mongosBinVersion: "last-lts"
+
+- name: sharding_multiversion_mongos_testdata_last_continuous
+  value:
+    executor:
+      config:
+        shell_options:
+          global_vars:
+            TestData:
+              mongosBinVersion: "last-continuous"
+
 - name: jstestfuzz_replication_multiversion_hooks
   value:
     executor:
@@ -255,3 +397,13 @@
             global_vars:
               TestData:
                 skipValidationOnInvalidViewDefinitions: true
+
+- name: otel_tracing
+  value:
+    executor:
+      config:
+        shell_options:
+          global_vars:
+            TestData:
+              # TODO (SERVER-111403): Enable OpenTelemetry tracing in multiversion suites.
+              enableOTELTracing: false

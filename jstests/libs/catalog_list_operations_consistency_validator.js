@@ -20,8 +20,13 @@
  * * We ensure that the computed output from `$listCatalog` matches the actual output from
  *   `listCollections` and `listIndexes` (modulo ordering differences).
  */
+import {
+    areViewlessTimeseriesEnabled,
+    getTimeseriesBucketsColl,
+} from "jstests/core/timeseries/libs/viewless_timeseries_util.js";
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+import {getRawOperationSpec} from "jstests/libs/raw_operation_utils.js";
 
 function assertNoUnrecognizedFields(restParameters, sourceName, targetName, sourceObject) {
     assert(
@@ -29,7 +34,9 @@ function assertNoUnrecognizedFields(restParameters, sourceName, targetName, sour
         `The ${sourceName} contains unrecognized fields: ${Object.keys(restParameters)}. ` +
             `Please check whether they should be mapped to a field in ${targetName}, ` +
             "which is essential for collection cloning during initial sync, resharding, and so on. " +
-            "See SERVER-90768 for more information. Source object: " + tojson(sourceObject));
+            "See SERVER-90768 for more information. Source object: " +
+            tojson(sourceObject),
+    );
 }
 
 function mapListCatalogToListCollectionsEntry(listCatalogEntry, listCatalogMap, isDbReadOnly) {
@@ -48,7 +55,10 @@ function mapListCatalogToListCollectionsEntry(listCatalogEntry, listCatalogMap, 
         ...nsRest
     } = listCatalogEntry;
 
-    if (nsType === 'collection') {
+    // TODO SERVER-101594 remove the viewOn condition once 9.0 becomes lastLTS
+    // Once only viewless timeseries collection exists we won't possibly have
+    // collection that have both "type=timeseries" and the viewOn property.
+    if (nsType === "collection" || (nsType === "timeseries" && !("viewOn" in nsRest))) {
         const {
             md: collMd,
             // Ident information can be safely thrown away.
@@ -56,10 +66,12 @@ function mapListCatalogToListCollectionsEntry(listCatalogEntry, listCatalogMap, 
             idxIdent: _coll2,
             ...collUnrecognized
         } = nsRest;
-        assertNoUnrecognizedFields(collUnrecognized,
-                                   "`$listCatalog` collection entry",
-                                   "listCollections",
-                                   listCatalogEntry);
+        assertNoUnrecognizedFields(
+            collUnrecognized,
+            "`$listCatalog` collection entry",
+            "listCollections",
+            listCatalogEntry,
+        );
 
         // Destructure the nested `md` field and validate that we recognize all fields.
         const {
@@ -79,17 +91,25 @@ function mapListCatalogToListCollectionsEntry(listCatalogEntry, listCatalogMap, 
             prefix: _md4,
             ...mdUnrecognized
         } = collMd;
-        assertNoUnrecognizedFields(mdUnrecognized,
-                                   "`md` field from `listCatalog` entry",
-                                   "listCollection",
-                                   listCatalogEntry);
+        assertNoUnrecognizedFields(
+            mdUnrecognized,
+            "`md` field from `listCatalog` entry",
+            "listCollection",
+            listCatalogEntry,
+        );
 
         // The `_id` index is included in the `idIndex` field from `listCollections`.
         // Note that clustered or capped collections do not have an id index.
-        const idIndex = mdIndexes.find(k => k.spec.name === "_id_");
+        const idIndex = mdIndexes.find((k) => k.spec.name === "_id_");
 
         // The `uuid` from `md.options` is moved to the `info` field from `listCollections`.
         const {uuid: mdOptionsUuid, ...mdOptionsRest} = mdOptions;
+
+        // `listCollections` only lists the options provided by the user to `createCollection`,
+        // so it will hide remove any fields we add internally for timeseries collections
+        if (nsType == "timeseries") {
+            delete mdOptionsRest.clusteredIndex;
+        }
 
         return {
             name: nsName,
@@ -98,11 +118,11 @@ function mapListCatalogToListCollectionsEntry(listCatalogEntry, listCatalogMap, 
             info: {
                 readOnly: isDbReadOnly,
                 uuid: mdOptionsUuid,
-                ...(nsConfigDebugDump !== undefined && {configDebugDump: nsConfigDebugDump})
+                ...(nsConfigDebugDump !== undefined && {configDebugDump: nsConfigDebugDump}),
             },
             ...(idIndex !== undefined && {idIndex: idIndex.spec}),
         };
-    } else if (nsType === 'view') {
+    } else if (nsType === "view") {
         const {
             _id: _view1,
             viewOn: viewViewOn,
@@ -110,8 +130,7 @@ function mapListCatalogToListCollectionsEntry(listCatalogEntry, listCatalogMap, 
             collation: viewCollation,
             ...viewUnrecognized
         } = nsRest;
-        assertNoUnrecognizedFields(
-            viewUnrecognized, "`$listCatalog` view entry", "listCollections", listCatalogEntry);
+        assertNoUnrecognizedFields(viewUnrecognized, "`$listCatalog` view entry", "listCollections", listCatalogEntry);
 
         return {
             name: nsName,
@@ -123,7 +142,10 @@ function mapListCatalogToListCollectionsEntry(listCatalogEntry, listCatalogMap, 
             },
             info: {readOnly: true},
         };
-    } else if (nsType === 'timeseries') {
+    } else if (nsType === "timeseries") {
+        // TODO SERVER-101594 remove once 9.0 becomes lastLTS
+        // Once only viewless timeseries collection exists,
+        // we can process timeseries collection and normal collection with the same code.
         const {
             _id: _ts1,
             viewOn: tsViewOn,
@@ -133,7 +155,11 @@ function mapListCatalogToListCollectionsEntry(listCatalogEntry, listCatalogMap, 
             ...tsUnrecognized
         } = nsRest;
         assertNoUnrecognizedFields(
-            tsUnrecognized, "`$listCatalog` timeseries entry", "listCollections", listCatalogEntry);
+            tsUnrecognized,
+            "`$listCatalog` timeseries entry",
+            "listCollections",
+            listCatalogEntry,
+        );
 
         const tsOptions = (() => {
             const tsBucketsCollection = listCatalogMap.get(tsViewOn);
@@ -171,8 +197,28 @@ function mapListCatalogToListCollectionsEntry(listCatalogEntry, listCatalogMap, 
     }
 }
 
+/**
+ * Some `createIndexes` fields are of type `safeBool`, which accepts either a boolean or a number,
+ * and persist the value in the catalog. When retrieving it, `$listCatalog` returns the raw value,
+ * while `listIndexes` converts it to a boolean. This function replicates this logic.
+ */
+function safeBoolToBool(value) {
+    if (typeof value === "boolean") {
+        return value;
+    }
+    if (
+        typeof value === "number" ||
+        value instanceof NumberInt ||
+        value instanceof NumberLong ||
+        value instanceof NumberDecimal
+    ) {
+        return bsonWoCompare(value, 0) !== 0; // 0 is false, any other value is true
+    }
+    assert(false, `Unexpected value for boolean-or-numeric field: ${tojsononeline(value)}`);
+}
+
 function mapListCatalogToListIndexesEntry(listCatalogEntry) {
-    const indexes = listCatalogEntry.md.indexes.map(mdIndex => {
+    const indexes = listCatalogEntry.md.indexes.map((mdIndex) => {
         const {
             spec: mdIndexSpec,
             // Index build status information can safely be thrown away.
@@ -198,15 +244,17 @@ function mapListCatalogToListIndexesEntry(listCatalogEntry) {
             ...mdIndexesUnrecognized
         } = mdIndex;
 
-        assertNoUnrecognizedFields(mdIndexesUnrecognized,
-                                   "`md.indexes` field from `$listCatalog` entry",
-                                   "listIndexes",
-                                   listCatalogEntry);
+        assertNoUnrecognizedFields(
+            mdIndexesUnrecognized,
+            "`md.indexes` field from `$listCatalog` entry",
+            "listIndexes",
+            listCatalogEntry,
+        );
 
         // Certain options intended for plugins such as 2d, text, etc.. are allowed by createIndex
         // and persisted in the catalog, but don't appear in listCollections' output. Remove them.
         // TODO(SERVER-97084): Remove when options for index plugins are denied in basic indexes.
-        const indexPlugin = Object.values(mdIndexSpec.key).find(x => typeof x === "string");
+        const indexPlugin = Object.values(mdIndexSpec.key).find((x) => typeof x === "string");
         if (indexPlugin !== "2dsphere" && indexPlugin !== "2dsphere_bucket") {
             delete mdIndexSpec["2dsphereIndexVersion"];
         }
@@ -214,6 +262,10 @@ function mapListCatalogToListIndexesEntry(listCatalogEntry) {
             delete mdIndexSpec.bits;
             delete mdIndexSpec.min;
             delete mdIndexSpec.max;
+        }
+        if (indexPlugin !== "2dsphere") {
+            delete mdIndexSpec.coarsestIndexedLevel;
+            delete mdIndexSpec.finestIndexedLevel;
         }
         if (indexPlugin !== "text") {
             delete mdIndexSpec.textIndexVersion;
@@ -233,14 +285,14 @@ function mapListCatalogToListIndexesEntry(listCatalogEntry) {
             // TODO (SERVER-97749) Add the background field once it's properly handled.
             // Handle various mapping quirks of `listIndexes` vs the raw catalog. See also:
             // https://github.com/mongodb/mongo/blob/96893c43d288b84fccb4242b51c8d7c57df5887d/src/mongo/db/catalog/README.md#examples-of-differences-between-listindexes-and-listcatalog-results
-            ...(typeof mdIndexSpec.sparse === "number" && {sparse: mdIndexSpec.sparse !== 0}),
+            ...(mdIndexSpec.sparse !== undefined && {sparse: safeBoolToBool(mdIndexSpec.sparse)}),
             ...(typeof mdIndexSpec.bits === "number" && {bits: Math.floor(mdIndexSpec.bits)}),
             // For more details on the history and handling of NaN on TTL indexes, see:
             // https://www.mongodb.com/docs/v8.0/tutorial/expire-data/#indexes-configured-using-nan
             ...(typeof mdIndexSpec.expireAfterSeconds === "number" && {
                 expireAfterSeconds: !isNaN(mdIndexSpec.expireAfterSeconds)
                     ? Math.floor(mdIndexSpec.expireAfterSeconds)
-                    : 2147483647
+                    : 2147483647,
             }),
         };
     });
@@ -249,22 +301,22 @@ function mapListCatalogToListIndexesEntry(listCatalogEntry) {
 
     // Clustered indexes are not stored in the `indexes` field of the catalog, but rather as
     // part of the collection options. However, they are returned by `listIndexes`.
-    if ((typeof mdOptions.clusteredIndex === "object" || mdOptions.clusteredIndex === true) &&
-        !mdOptions.timeseries) {
+    if ((typeof mdOptions.clusteredIndex === "object" || mdOptions.clusteredIndex === true) && !mdOptions.timeseries) {
         indexes.push({
-            ...(typeof mdOptions.clusteredIndex === "object" ? mdOptions.clusteredIndex : {
-                // `{clusteredIndex: true}` legacy index format means a canonical _id index.
-                v: 2,
-                key: {
-                    _id: 1,
-                },
-                name: "_id_",
-                unique: true
-            }),
+            ...(typeof mdOptions.clusteredIndex === "object"
+                ? mdOptions.clusteredIndex
+                : {
+                      // `{clusteredIndex: true}` legacy index format means a canonical _id index.
+                      v: 2,
+                      key: {
+                          _id: 1,
+                      },
+                      name: "_id_",
+                      unique: true,
+                  }),
             ...(mdOptions.collation !== undefined && {collation: mdOptions.collation}),
-            ...(mdOptions.expireAfterSeconds !== undefined &&
-                {expireAfterSeconds: mdOptions.expireAfterSeconds}),
-            clustered: true
+            ...(mdOptions.expireAfterSeconds !== undefined && {expireAfterSeconds: mdOptions.expireAfterSeconds}),
+            clustered: true,
         });
     }
 
@@ -279,90 +331,132 @@ function mapListCatalogToListIndexesEntry(listCatalogEntry) {
  * while `listCollections` only returns one per collection (and similarly for `listIndexes`).
  */
 function removeDuplicateDocuments(docList) {
-    return docList.filter((item, index) =>
-                              index === 0 || bsonWoCompare(docList[index - 1], item) !== 0);
+    return docList.filter((item, index) => index === 0 || bsonWoCompare(docList[index - 1], item) !== 0);
 }
 
-function validateListCatalogToListCollectionsConsistency(
-    listCatalog, listCollections, isDbReadOnly, shouldAssert) {
+// Some tests create a large amount and/or very bloated collection/index definitions,
+// so that comparing it all at once fails due to it exceeding the BSON document size limit.
+// This works around the issue by running the comparison element by element.
+function bsonUnorderedFieldArrayEquals(a, b) {
+    return a.length === b.length && a.every((item, index) => bsonUnorderedFieldsCompare(item, b[index]) === 0);
+}
+
+function validateListCatalogToListCollectionsConsistency(listCatalog, listCollections, isDbReadOnly, shouldAssert) {
     // Sorting function to ignore irrelevant ordering differences while comparing.
     function sortCollectionsInPlace(collectionList) {
         return collectionList.sort((a, b) => a.name.localeCompare(b.name));
     }
 
-    // Create a map for looking up $listCatalog namespaces by name. We use this for time series
-    // collections, which inherit their options from their buckets collection in listCollections.
-    const listCatalogMap = new Map(listCatalog.map(c => [c.name, c]));
+    // TODO SERVER-101594 Remove the listCatalogMap indirection once 9.0 becomes lastLTS.
+    // We create a map for looking up $listCatalog namespaces by name. This map is used to handle
+    // legacy time series collections, which inherit their options from their buckets collection in
+    // listCollections. This becomes redundant once only viewless timeseries collections exist.
+    const listCatalogMap = new Map(listCatalog.map((c) => [c.name, c]));
 
-    const listCollectionsFromListCatalog =
-        removeDuplicateDocuments(sortCollectionsInPlace(listCatalog.map(
-            ci => mapListCatalogToListCollectionsEntry(ci, listCatalogMap, isDbReadOnly))));
+    const listCollectionsFromListCatalog = removeDuplicateDocuments(
+        sortCollectionsInPlace(
+            listCatalog.map((ci) => mapListCatalogToListCollectionsEntry(ci, listCatalogMap, isDbReadOnly)),
+        ),
+    );
     const sortedListCollections = sortCollectionsInPlace([...listCollections]);
 
-    const equals = bsonWoCompare(listCollectionsFromListCatalog, sortedListCollections) === 0;
+    const equals = bsonUnorderedFieldArrayEquals(listCollectionsFromListCatalog, sortedListCollections);
     if (!equals) {
-        const message = "$listCatalog to listCollections consistency check failed.\n" +
-            "expected (from $listCatalog): " + tojson(listCollectionsFromListCatalog) + "\n" +
-            "actual (listCollections): " + tojson(sortedListCollections) + "\n" +
-            "full $listCatalog output: " + tojson(listCatalog);
+        const message =
+            "$listCatalog to listCollections consistency check failed.\n" +
+            "expected (from $listCatalog): " +
+            tojson(listCollectionsFromListCatalog) +
+            "\n" +
+            "actual (listCollections): " +
+            tojson(sortedListCollections) +
+            "\n" +
+            "full $listCatalog output: " +
+            tojson(listCatalog);
         if (shouldAssert !== false) {
             doassert(message);
         }
-        print(message);
+        jsTest.log.info({message});
     }
     return equals;
+}
+
+/**
+ * Returns whether the listCollections/$listCatalog entry corresponds to a view.
+ * This includes legacy timeseries views, which are shown as 'type: `timeseries` in
+ * listCollections/$listCatalog, so they do not persist indexes or chunks on their own.
+ *
+ * TODO(SERVER-101594): Simplify to `entry.type === 'view'`
+ */
+function isViewListCollectionsEntry(listCollectionsEntry) {
+    return !listCollectionsEntry.info.uuid;
+}
+
+function isViewListCatalogEntry(listCatalogEntry) {
+    return !listCatalogEntry.md?.options.uuid;
 }
 
 function validateListCatalogToListIndexesConsistency(listCatalog, listIndexes, shouldAssert) {
     // Sorting function to ignore irrelevant ordering differences while comparing.
     function sortCollectionIndexesInPlace(indexList) {
-        indexList.sort((a, b) => a.name.localeCompare(b.name));  // Sort by collection.
-        indexList.forEach(  // Sort the indexes of each collection.
-            ci => ci.indexes.sort((ia, ib) => ia.name.localeCompare(ib.name)));
+        indexList.sort((a, b) => a.name.localeCompare(b.name)); // Sort by collection.
+        indexList.forEach(
+            // Sort the indexes of each collection.
+            (ci) => ci.indexes.sort((ia, ib) => ia.name.localeCompare(ib.name)),
+        );
         return indexList;
     }
 
-    // Some tests create a large amount of collections or indexes, and/or very bloated indexes,
-    // so that comparing it all at once fails due to it exceeding the BSON document size limit.
-    // This works around the issue by running the comparison element by element.
-    function bsonUnorderedFieldArrayEquals(a, b) {
-        return a.length === b.length &&
-            a.every((item, index) => bsonUnorderedFieldsCompare(item, b[index]) === 0);
-    }
-
-    const listIndexesFromListCatalog = removeDuplicateDocuments(sortCollectionIndexesInPlace(
-        listCatalog.filter(lc => lc.type === 'collection').map(mapListCatalogToListIndexesEntry)));
+    const listIndexesFromListCatalog = removeDuplicateDocuments(
+        sortCollectionIndexesInPlace(
+            listCatalog.filter((e) => !isViewListCatalogEntry(e)).map(mapListCatalogToListIndexesEntry),
+        ),
+    );
     const sortedListIndexes = sortCollectionIndexesInPlace(
         // Shallow-copy to avoid modifying the list given by the caller.
-        listIndexes.map(ci => ({
-                            name: ci.name,
-                            indexes: [...ci.indexes.map(index => {
-                                // TODO (SERVER-97749): Don't delete 'background' field once we
-                                // handle it properly
-                                delete index.background;
-                                return index;
-                            })]
-                        })));
+        listIndexes.map((ci) => ({
+            name: ci.name,
+            indexes: [
+                ...ci.indexes.map((index) => {
+                    // TODO (SERVER-97749): Don't delete 'background' field once we
+                    // handle it properly
+                    delete index.background;
+                    return index;
+                }),
+            ],
+        })),
+    );
 
     const equals = bsonUnorderedFieldArrayEquals(listIndexesFromListCatalog, sortedListIndexes);
     if (!equals) {
-        const message = "$listCatalog to listIndexes consistency check failed.\n" +
-            "expected (from $listCatalog): " + tojson(listIndexesFromListCatalog) + "\n" +
-            "actual (listIndexes): " + tojson(sortedListIndexes) + "\n" +
-            "full $listCatalog output: " + tojson(listCatalog);
+        const message =
+            "$listCatalog to listIndexes consistency check failed.\n" +
+            "expected (from $listCatalog): " +
+            tojson(listIndexesFromListCatalog) +
+            "\n" +
+            "actual (listIndexes): " +
+            tojson(sortedListIndexes) +
+            "\n" +
+            "full $listCatalog output: " +
+            tojson(listCatalog);
         if (shouldAssert !== false) {
             doassert(message);
         }
-        print(message);
+        jsTest.log.info({message});
     }
     return equals;
 }
 
 function validateCatalogListOperationsConsistency(
-    listCatalog, listCollections, listIndexes, isDbReadOnly, shouldAssert) {
-    return validateListCatalogToListCollectionsConsistency(
-               listCatalog, listCollections, isDbReadOnly, shouldAssert) &&
-        validateListCatalogToListIndexesConsistency(listCatalog, listIndexes, shouldAssert);
+    listCatalog,
+    listCollections,
+    listIndexes,
+    isDbReadOnly,
+    shouldAssert,
+) {
+    return (
+        validateListCatalogToListCollectionsConsistency(listCatalog, listCollections, isDbReadOnly, shouldAssert) &&
+        validateListCatalogToListIndexesConsistency(listCatalog, listIndexes, shouldAssert)
+    );
 }
 
 // TODO(SERVER-64980): Remove once collectionless $listCatalog removes shards without chunks.
@@ -373,11 +467,16 @@ function filterListCatalogEntriesFromShardsWithoutChunks(db, listCatalog) {
     // In contrast, $listCatalog over a specific collection follows the Shard Versioning
     // Protocol, and therefore only returns non-stale entries from shards that own chunks.
     // We re-run a 'collectionful' $listCatalog on each collection to clean up stale entries.
-    const collectionsFromListCatalog =
-        [...new Set(listCatalog.filter(e => e.type === 'collection').map(e => e.name))];
-    const refetchedListCatalog = collectionsFromListCatalog.flatMap(
-        collName => db.getCollection(collName).aggregate([{$listCatalog: {}}]).toArray());
-    return listCatalog.filter(e => e.type !== 'collection').concat(refetchedListCatalog);
+    const collectionsFromListCatalog = [
+        ...new Set(listCatalog.filter((e) => !isViewListCatalogEntry(e)).map((e) => e.name)),
+    ];
+    const refetchedListCatalog = collectionsFromListCatalog.flatMap((collName) =>
+        db
+            .getCollection(collName)
+            .aggregate([{$listCatalog: {}}])
+            .toArray(),
+    );
+    return listCatalog.filter((e) => isViewListCatalogEntry(e)).concat(refetchedListCatalog);
 }
 
 /**
@@ -386,33 +485,32 @@ function filterListCatalogEntriesFromShardsWithoutChunks(db, listCatalog) {
  * (as otherwise, each operation may observe the collection at a different point in time).
  */
 export function assertCatalogListOperationsConsistencyForCollection(collection) {
-    // For time series collections, also check their associated buckets namespace.
-    const collectionNames = collection.exists().type === "timeseries"
-        ? [collection.getName(), "system.buckets." + collection.getName()]
-        : [collection.getName()];
+    // TODO SERVER-101594 Remove 'collectionNames' and pass the collection name directly
+    const collectionNames = [collection.getName()];
+    if (!areViewlessTimeseriesEnabled(db) && collection.getMetadata().type === "timeseries") {
+        collectionNames.push(getTimeseriesBucketsColl(collection).getName());
+    }
 
     // The database is read only when using standalone recovery options like --queryableBackupMode,
     // so we can assume that the database is not read-only when running a sharded cluster.
     const isDbReadOnly = !FixtureHelpers.isMongos(db) && db.serverStatus().storageEngine.readOnly;
 
     const listCollections = db.getCollectionInfos({name: {$in: collectionNames}});
-    const listIndexes =
-        listCollections
-            // Note that while time series collections have indexes from the user's point of view,
-            // at the catalog level they only exist in the associated buckets collection.
-            .filter(c => c.type === 'collection')
-            .map(coll => ({name: coll.name, indexes: db.getCollection(coll.name).getIndexes()}));
+    const listIndexes = listCollections
+        .filter((e) => !isViewListCollectionsEntry(e))
+        .map((coll) => ({
+            name: coll.name,
+            indexes: db.getCollection(coll.name).getIndexes(getRawOperationSpec(db)),
+        }));
 
-    let listCatalog =
-        db.getSiblingDB("admin")
-            .aggregate(
-                [{$listCatalog: {}}, {$match: {db: db.getName(), name: {$in: collectionNames}}}])
-            .toArray();
+    let listCatalog = db
+        .getSiblingDB("admin")
+        .aggregate([{$listCatalog: {}}, {$match: {db: db.getName(), name: {$in: collectionNames}}}])
+        .toArray();
 
     listCatalog = filterListCatalogEntriesFromShardsWithoutChunks(db, listCatalog);
 
-    validateCatalogListOperationsConsistency(
-        listCatalog, listCollections, listIndexes, isDbReadOnly, true);
+    validateCatalogListOperationsConsistency(listCatalog, listCollections, listIndexes, isDbReadOnly, true);
 }
 
 export function assertCatalogListOperationsConsistencyForDb(db, tenantId) {
@@ -423,56 +521,72 @@ export function assertCatalogListOperationsConsistencyForDb(db, tenantId) {
             // Happens on api_strict suites since $listCatalog is not part of the stable API.
             ErrorCodes.APIStrictError,
             // Happens on multiversion suites as $listCatalog only exists since MongoDB 6.0.
-            40324,  // "Unrecognized pipeline stage name: ..."
+            40324, // "Unrecognized pipeline stage name: ..."
             // Happens on tests that launch mongod with a very low `maxBSONDepth` server param.
-            5729100,  // "FieldPath is too long"
+            5729100, // "FieldPath is too long"
         ];
-        try {
-            const nsPrefix = (tenantId ? tenantId + "_" + db.getName() : db.getName()) + ".";
-            let listCatalog =
-                db.getSiblingDB("admin")
+        let allowedNetworkErrorRetries = 3;
+        while (true) {
+            try {
+                const nsPrefix = (tenantId ? tenantId + "_" + db.getName() : db.getName()) + ".";
+                let listCatalog = db
+                    .getSiblingDB("admin")
                     .aggregate([
                         {$listCatalog: {}},
                         {
-                            $match:
-                                {...filter, ns: {$regex: new RegExp(`^${RegExp.escape(nsPrefix)}`)}}
-                        }
+                            $match: {
+                                ...filter,
+                                ns: {$regex: new RegExp(`^${RegExp.escape(nsPrefix)}`)},
+                            },
+                        },
                     ])
                     .toArray();
 
-            // We don't need to call `filterListCatalogEntriesFromShardsWithoutChunks` here,
-            // as currently the only part the catalog that is inconsistent in shards without chunks
-            // are indexes, and we already skip validating those due to SERVER-75675.
+                // We don't need to call `filterListCatalogEntriesFromShardsWithoutChunks` here,
+                // as currently the only part the catalog that is inconsistent in shards without
+                // chunks are indexes, and we already skip validating those due to SERVER-75675.
 
-            return listCatalog;
-        } catch (ex) {
-            if (acceptableErrorCodes.includes(ex.code)) {
-                return null;
+                return listCatalog;
+            } catch (ex) {
+                if (acceptableErrorCodes.includes(ex.code)) {
+                    return null;
+                }
+                if (
+                    (isNetworkError(ex) || ErrorCodes.isNetworkTimeoutError(ex.code)) &&
+                    allowedNetworkErrorRetries > 0
+                ) {
+                    --allowedNetworkErrorRetries;
+                    jsTest.log.info("Retrying $listCatalog due to network error: " + ex);
+                    continue;
+                }
+                throw ex;
             }
-            throw ex;
         }
     }
 
     // For the `listCollections` to `$listCatalog` consistency check, we need to know if the DB
     // is read-only, as `listCollections` reports this information even though it is not part
     // of the catalog, so we need to fetch it separately.
-    const isDbReadOnly = !isMongos &&
-        assert
-            .commandWorked(db.serverStatus({
+    const isDbReadOnly =
+        !isMongos &&
+        assert.commandWorked(
+            db.serverStatus({
                 // This server status section attempts to get WiredTiger storage size statistics,
                 // and fails if a validate is in progress, similarly to the ObjectIsBusy error
                 // below. Since we don't need it, we can just exclude it from the output.
-                changeStreamPreImages: 0
-            }))
-            .storageEngine.readOnly;
+                changeStreamPreImages: 0,
+            }),
+        ).storageEngine.readOnly;
 
     // Don't check these DBs on mongos since it will mirror them from the config server for
     // listCollections & listIndexes, but will return the data from the shards on $listCatalog.
-    if (isMongos && ["admin", "config"].includes(db.getName()))
-        return;
+    if (isMongos && ["admin", "config"].includes(db.getName())) return;
 
-    print("Running catalog operations consistency check for DB " + db.getName() +
-          (tenantId ? " of tenant " + tenantId : ""));
+    jsTest.log.info(
+        "Running catalog operations consistency check for DB " +
+            db.getName() +
+            (tenantId ? " of tenant " + tenantId : ""),
+    );
 
     let consistencyCheckAttempts = 0;
     assert.soon(() => {
@@ -494,12 +608,17 @@ export function assertCatalogListOperationsConsistencyForDb(db, tenantId) {
             }
             collInfo = db.getCollectionInfos(filter);
             catalogInfo = getCatalogInfoIfAvailable(filter);
+            if (catalogInfo === null) {
+                return true;
+            }
             // TODO SERVER-75675: do not skip index consistency check on sharded clusters.
-            collIndexes = (catalogInfo && !isMongos)
-                ? collInfo.filter(coll => coll.type === "collection")
-                      .map(
-                          coll => (
-                              {name: coll.name, indexes: db.getCollection(coll.name).getIndexes()}))
+            collIndexes = !isMongos
+                ? collInfo
+                      .filter((e) => !isViewListCollectionsEntry(e))
+                      .map((coll) => ({
+                          name: coll.name,
+                          indexes: db.getCollection(coll.name).getIndexes(getRawOperationSpec(db)),
+                      }))
                 : null;
         } catch (ex) {
             // In a sharded cluster with in-progress validate command for the config database
@@ -522,14 +641,31 @@ export function assertCatalogListOperationsConsistencyForDb(db, tenantId) {
             throw ex;
         }
 
-        // Replica set endpoints with profiling enabled on an empty database do not show the
+        // Replica set with profiling enabled on an empty database do not show the
         // system.profile collection in listCollections, but they do in $listCatalog.
         // TODO(SERVER-97721): Remove this workaround.
-        if (collInfo.length === 0 && catalogInfo !== null && catalogInfo.length === 1 &&
-            catalogInfo[0].name === "system.profile" &&
-            FeatureFlagUtil.isEnabled(db, "ReplicaSetEndpoint")) {
-            print("Skipped consistency check: Stray system.profile on RSEndpoint (SERVER-97721)");
+        if (collInfo.length === 0 && catalogInfo.length === 1 && catalogInfo[0].name === "system.profile") {
+            jsTest.log.info("Skipped consistency check: Stray system.profile on replica set (SERVER-97721)");
             return true;
+        }
+
+        // Skip checks for non-timeseries namespaces having an accompanying buckets namespace, as
+        // several operations behave anomalously on those, including listIndexes.
+        // TODO(SERVER-90862): Remove this workaround once this situation can not happen.
+        // TODO(SERVER-101594): Remove this workaround once only viewless timeseries exist.
+        const namespaceSet = new Set(catalogInfo.map((c) => c.name));
+        const nsWithUnexpectedBucketsSet = new Set(
+            catalogInfo
+                .filter((c) => c.type !== "timeseries" && namespaceSet.has("system.buckets." + c.name))
+                .map((c) => c.name),
+        );
+        if (nsWithUnexpectedBucketsSet.size > 0) {
+            jsTest.log.info("Ignored namespaces with unexpected buckets", {nsWithUnexpectedBucketsSet});
+            collInfo = collInfo.filter((c) => !nsWithUnexpectedBucketsSet.has(c.name));
+            catalogInfo = catalogInfo.filter((c) => !nsWithUnexpectedBucketsSet.has(c.name));
+            if (collIndexes !== null) {
+                collIndexes = collIndexes.filter((c) => !nsWithUnexpectedBucketsSet.has(c.name));
+            }
         }
 
         // Check consistency between `listCollections`, `listIndexes` and `$listCatalog` results.
@@ -538,15 +674,15 @@ export function assertCatalogListOperationsConsistencyForDb(db, tenantId) {
         // So, we may need to retry a few times until we converge to a consistent result set.
         // But, if we repeatedly fail, don't stall the test for too long but fail fast instead.
         const shouldAssert = consistencyCheckAttempts++ > 20;
-        if (catalogInfo !== null &&
-            !validateListCatalogToListCollectionsConsistency(
-                catalogInfo, collInfo, isDbReadOnly, shouldAssert)) {
-            print("$listCatalog/listCollections consistency check failed, retrying...");
+        if (!validateListCatalogToListCollectionsConsistency(catalogInfo, collInfo, isDbReadOnly, shouldAssert)) {
+            jsTest.log.info("$listCatalog/listCollections consistency check failed, retrying...");
             return false;
         }
-        if (catalogInfo !== null && collIndexes !== null &&
-            !validateListCatalogToListIndexesConsistency(catalogInfo, collIndexes, shouldAssert)) {
-            print("$listCatalog/listIndexes consistency check failed, retrying...");
+        if (
+            collIndexes !== null &&
+            !validateListCatalogToListIndexesConsistency(catalogInfo, collIndexes, shouldAssert)
+        ) {
+            jsTest.log.info("$listCatalog/listIndexes consistency check failed, retrying...");
             return false;
         }
 

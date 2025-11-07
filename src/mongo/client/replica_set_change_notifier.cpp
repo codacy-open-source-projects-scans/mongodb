@@ -28,15 +28,14 @@
  */
 
 
+#include "mongo/client/replica_set_change_notifier.h"
+
+#include "mongo/logv2/log.h"
+#include "mongo/util/assert_util.h"
+
 #include <mutex>
 
 #include <absl/container/node_hash_map.h>
-
-#include "mongo/client/replica_set_change_notifier.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/util/assert_util_core.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -47,10 +46,10 @@ void ReplicaSetChangeNotifier::_addListener(std::shared_ptr<Listener> listener) 
     stdx::lock_guard lk(_mutex);
 
     listener->init(this);
-    _listeners.push_back(listener);
+    _listeners.push_back(std::move(listener));
 }
 
-void ReplicaSetChangeNotifier::onFoundSet(const std::string& name) noexcept {
+void ReplicaSetChangeNotifier::onFoundSet(const std::string& name) {
     LOGV2_DEBUG(20158, 2, "Signaling found set", "replicaSet"_attr = name);
 
     stdx::unique_lock<stdx::mutex> lk(_mutex);
@@ -67,7 +66,7 @@ void ReplicaSetChangeNotifier::onFoundSet(const std::string& name) noexcept {
     };
 }
 
-void ReplicaSetChangeNotifier::onPossibleSet(ConnectionString connectionString) noexcept {
+void ReplicaSetChangeNotifier::onPossibleSet(ConnectionString connectionString) {
     LOGV2_DEBUG(20159, 2, "Signaling possible set", "connectionString"_attr = connectionString);
 
     const auto& name = connectionString.getSetName();
@@ -96,7 +95,7 @@ void ReplicaSetChangeNotifier::onPossibleSet(ConnectionString connectionString) 
 
 void ReplicaSetChangeNotifier::onConfirmedSet(ConnectionString connectionString,
                                               HostAndPort primary,
-                                              std::set<HostAndPort> passives) noexcept {
+                                              std::set<HostAndPort> passives) {
     LOGV2_DEBUG(20160,
                 2,
                 "Signaling confirmed set with primary",
@@ -127,7 +126,7 @@ void ReplicaSetChangeNotifier::onConfirmedSet(ConnectionString connectionString,
     };
 }
 
-void ReplicaSetChangeNotifier::onDroppedSet(const std::string& name) noexcept {
+void ReplicaSetChangeNotifier::onDroppedSet(const std::string& name) {
     LOGV2_DEBUG(20161, 2, "Signaling dropped set", "replicaSet"_attr = name);
 
     stdx::unique_lock<stdx::mutex> lk(_mutex);

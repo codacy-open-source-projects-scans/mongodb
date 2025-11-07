@@ -30,9 +30,11 @@
 #include "mongo/s/client_metadata_propagation_egress_hook.h"
 
 #include "mongo/db/operation_context.h"
-#include "mongo/db/write_block_bypass.h"
+#include "mongo/db/raw_data_operation.h"
+#include "mongo/db/user_write_block/write_block_bypass.h"
+#include "mongo/idl/generic_argument_gen.h"
+#include "mongo/rpc/metadata/audit_metadata.h"
 #include "mongo/rpc/metadata/client_metadata.h"
-#include "mongo/rpc/metadata/impersonated_user_metadata.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -45,13 +47,24 @@ Status ClientMetadataPropagationEgressHook::writeRequestMetadata(OperationContex
     }
 
     try {
-        writeAuthDataToImpersonatedUserMetadata(opCtx, metadataBob);
+        writeAuditMetadata(opCtx, metadataBob);
 
         if (auto metadata = ClientMetadata::get(opCtx->getClient())) {
             metadata->writeToMetadata(metadataBob);
         }
 
+        if (auto& vCtx = VersionContext::getDecoration(opCtx); vCtx.isInitialized()) {
+            tassert(11144301,
+                    "Expected VersionContext with propagation across shards",
+                    vCtx.canPropagateAcrossShards());
+            metadataBob->append(GenericArguments::kVersionContextFieldName, vCtx.toBSON());
+        }
+
         WriteBlockBypass::get(opCtx).writeAsMetadata(metadataBob);
+
+        if (isRawDataOperation(opCtx)) {
+            metadataBob->append(kRawDataFieldName, true);
+        }
 
         // If the request is using the 'defaultMaxTimeMS' value, attaches the field so shards can
         // record the metrics correctly.

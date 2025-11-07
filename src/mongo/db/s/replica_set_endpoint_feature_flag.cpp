@@ -30,15 +30,15 @@
 #include "mongo/db/s/replica_set_endpoint_feature_flag.h"
 
 #include "mongo/db/feature_flag.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 
 namespace mongo {
 namespace replica_set_endpoint {
 
-bool isFeatureFlagEnabled() {
+bool isFeatureFlagEnabled(const VersionContext& vCtx) {
     const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-    return fcvSnapshot.isVersionInitialized() &&
-        feature_flags::gFeatureFlagReplicaSetEndpoint.isEnabled(fcvSnapshot);
+    return feature_flags::gFeatureFlagReplicaSetEndpoint.isEnabledUseLastLTSFCVWhenUninitialized(
+        vCtx, fcvSnapshot);
 }
 
 bool isFeatureFlagEnabledIgnoreFCV() {

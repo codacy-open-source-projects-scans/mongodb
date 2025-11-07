@@ -11,7 +11,9 @@
 //  # Multi clients run concurrently and may modify the serverStatus metrices read in this test.
 //  multi_clients_incompatible,
 //  # oplog queries could affect the statistics
-//  assumes_standalone_mongod
+//  assumes_standalone_mongod,
+//  # Test asserts on serverStatus().metrics, which requires a completely undisturbed mongod
+//  does_not_support_config_fuzzer
 // ]
 
 const testDB = db.getSiblingDB("facet_stats");
@@ -19,14 +21,14 @@ const local = testDB.facetLookupLocal;
 const foreign = testDB.facetLookupForeign;
 testDB.dropDatabase();
 
-let runFacetPipeline = function() {
+let runFacetPipeline = function () {
     const lookup = {
         $lookup: {
             from: foreign.getName(),
             let: {id1: "$_id"},
             pipeline: [{$match: {$expr: {$eq: ["$$id1", "$foreignKey"]}}}],
-            as: "joined"
-        }
+            as: "joined",
+        },
     };
 
     return local.aggregate([{$facet: {nested: [lookup]}}]).itcount();

@@ -31,14 +31,14 @@
 
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/multitenancy_gen.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/replica_set_endpoint_sharding_state.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/util/namespace_string_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
@@ -120,38 +120,12 @@ ScopedSetRouterService::~ScopedSetRouterService() {
     _opCtx->setRoutedByReplicaSetEndpoint(false);
 }
 
-bool isReplicaSetEndpointClient(Client* client) {
-    if (client->isRouterClient()) {
-        return false;
-    }
-    return replica_set_endpoint::ReplicaSetEndpointShardingState::get(client->getServiceContext())
-        ->supportsReplicaSetEndpoint();
+bool isReplicaSetEndpointClient(const VersionContext& vCtx, Client* client) {
+    return false;
 }
 
 bool shouldRouteRequest(OperationContext* opCtx, const OpMsgRequest& opMsgReq) {
-    // The request must have come in through a client on the shard port.
-    invariant(!opCtx->getClient()->isRouterClient());
-
-    if (!replica_set_endpoint::ReplicaSetEndpointShardingState::get(opCtx)
-             ->supportsReplicaSetEndpoint()) {
-        return false;
-    }
-
-    if (!Grid::get(opCtx)->isShardingInitialized()) {
-        return false;
-    }
-
-    if (isInternalClient(opCtx) || isLocalDatabaseCommandRequest(opMsgReq) ||
-        isTargetedCommandRequest(opCtx, opMsgReq) || !isRoutableCommandRequest(opCtx, opMsgReq)) {
-        return false;
-    }
-
-    // There is nothing that will prevent the cluster from becoming multi-shard (i.e. no longer
-    // supporting as replica set endpoint) after the check here is done. However, the contract is
-    // that users must have transitioned to the sharded connection string (i.e. connect to mongoses
-    // and/or router port of mongods) before adding a second shard. Also, commands that make it to
-    // here should be safe to route even when the cluster has more than one shard.
-    return true;
+    return false;
 }
 
 void checkIfCanRunCommand(OperationContext* opCtx, const OpMsgRequest& opMsgReq) {

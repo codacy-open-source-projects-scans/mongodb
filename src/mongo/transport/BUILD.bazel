@@ -14,19 +14,27 @@ mongo_cc_library(
     srcs = [
         "hello_metrics.cpp",
         "session.cpp",
+        "session_establishment_rate_limiter.cpp",
         "transport_layer.cpp",
+        "transport_options.cpp",
+        "transport_options_gen",
     ],
     hdrs = [
         "hello_metrics.h",
         "session.h",
+        "session_establishment_rate_limiter.h",
         "session_manager.h",
         "transport_layer.h",
+        "transport_options.h",
     ],
     deps = [
+        ":cidr_range_list_parameter",
         "//src/mongo:base",
         "//src/mongo/db:connection_health_metrics_parameter",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db:service_context",
         "//src/mongo/db:wire_version",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/admission:rate_limiter",
+        "//src/mongo/util:future_util",
         "//src/mongo/util/net:ssl_manager",  # TODO(SERVER-93876): Remove.
     ],
 )
@@ -45,7 +53,8 @@ mongo_cc_library(
         ":transport_layer",
         "//src/mongo/db:server_base",
         "//src/mongo/rpc:client_metadata",
-        "//src/third_party/asio-master:asio",
+        "//src/mongo/s:load_balancer_support",
+        "//src/third_party/asio",
     ] + select({
         "//bazel/config:build_grpc_enabled": [
             "//src/mongo/transport/grpc:grpc_transport_layer",
@@ -72,6 +81,11 @@ mongo_cc_library(
 idl_generator(
     name = "transport_options_gen",
     src = "transport_options.idl",
+)
+
+idl_generator(
+    name = "cidr_range_list_parameter_gen",
+    src = "cidr_range_list_parameter.idl",
     deps = [
         "//src/mongo/db:basic_types_gen",
     ],
@@ -81,14 +95,11 @@ mongo_cc_library(
     name = "transport_layer",
     srcs = [
         "proxy_protocol_header_parser.cpp",
-        ":transport_options.cpp",
-        ":transport_options_gen",
         "//src/mongo/transport/asio:asio_session_impl.cpp",
         "//src/mongo/transport/asio:asio_session_manager.cpp",
         "//src/mongo/transport/asio:asio_tcp_fast_open.cpp",
         "//src/mongo/transport/asio:asio_transport_layer.cpp",
         "//src/mongo/transport/asio:asio_utils.cpp",
-        "//src/mongo/util:strong_weak_finish_line.h",
     ] + select({
         "@platforms//os:linux": [
             "//src/mongo/transport/asio:asio_networking_baton.cpp",
@@ -105,6 +116,7 @@ mongo_cc_library(
         "//src/mongo/transport/asio:asio_transport_layer.h",
         "//src/mongo/transport/asio:asio_utils.h",
     ],
+    private_hdrs = ["//src/mongo/util:strong_weak_finish_line.h"],
     deps = [
         ":service_executor",  # TODO(SERVER-93876): Remove.
         ":session_manager",
@@ -115,14 +127,16 @@ mongo_cc_library(
         "//src/mongo/db:server_feature_flags",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db:server_options",
         "//src/mongo/db:service_context",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db/commands:server_status_core",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/commands/server_status:server_status_core",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/ftdc:rolling_stats",
         "//src/mongo/db/stats:counters",  # TODO(SERVER-93876): Remove.
         "//src/mongo/s:common_s",  # TODO(SERVER-93876): Remove.
         "//src/mongo/util:executor_stats",
+        "//src/mongo/util:processinfo",
         "//src/mongo/util/concurrency:spin_lock",  # TODO(SERVER-93876): Remove.
         "//src/mongo/util/net:ssl_manager",  # TODO(SERVER-93876): Remove.
         "//src/mongo/util/options_parser",  # TODO(SERVER-93876): Remove.
-        "//src/third_party/asio-master:asio",
+        "//src/third_party/asio",
     ],
 )
 
@@ -146,7 +160,7 @@ mongo_cc_library(
         "//src/mongo/db:service_context",  # TODO(SERVER-93876): Remove.
         "//src/mongo/util:processinfo",  # TODO(SERVER-93876): Remove.
         "//src/mongo/util/concurrency:thread_pool",  # TODO(SERVER-93876): Remove.
-        "//src/third_party/asio-master:asio",  # TODO(SERVER-93876): Remove.
+        "//src/third_party/asio",  # TODO(SERVER-93876): Remove.
     ],
 )
 
@@ -176,6 +190,7 @@ mongo_cc_library(
     ],
     deps = [
         "//src/mongo:base",
+        "//src/mongo/rpc:message",
         "//src/mongo/util/options_parser",
         "//src/third_party/snappy",
         "//src/third_party/zlib",  # TODO(SERVER-93876): Remove.
@@ -191,6 +206,43 @@ idl_generator(
 idl_generator(
     name = "message_compressor_options_server_gen",
     src = "message_compressor_options_server.idl",
+)
+
+idl_generator(
+    name = "grpc_connection_stats_gen",
+    src = "grpc_connection_stats.idl",
+    deps = [
+        "//src/mongo/db:basic_types_gen",
+    ],
+)
+
+mongo_cc_library(
+    name = "grpc_connection_stats",
+    srcs = [
+        ":grpc_connection_stats_gen",
+    ],
+    hdrs = [
+        ":grpc_connection_stats_gen",
+    ],
+    deps = [
+        "//src/mongo/idl:idl_parser",
+    ],
+)
+
+mongo_cc_library(
+    name = "cidr_range_list_parameter",
+    srcs = [
+        "cidr_range_list_parameter.cpp",
+        "cidr_range_list_parameter_gen",
+    ],
+    hdrs = [
+        "cidr_range_list_parameter.h",
+    ],
+    deps = [
+        "//src/mongo:base",
+        "//src/mongo:core_headers_library",
+        "//src/mongo/util/net:network",
+    ],
 )
 
 mongo_cc_library(
@@ -220,7 +272,7 @@ mongo_cc_library(
         "//src/mongo:base",
         "//src/mongo/db:commands",
         "//src/mongo/db:server_feature_flags",
-        "//src/mongo/db/commands:server_status_core",
+        "//src/mongo/db/commands/server_status:server_status_core",
         "//src/mongo/util:clock_sources",
     ],
 )
@@ -265,15 +317,16 @@ mongo_cc_library(
         ":message_compressor",
         ":service_executor",
         ":transport_layer_common",
+        "//src/mongo/db:error_labels",
         "//src/mongo/db:server_base",
         "//src/mongo/db:server_feature_flags",
         "//src/mongo/db:service_context",
         "//src/mongo/db:traffic_recorder",
+        "//src/mongo/db/admission:ingress_request_rate_limiter",
         "//src/mongo/db/query:command_request_response",
         "//src/mongo/db/stats:counters",
         "//src/mongo/rpc:client_metadata",
         "//src/mongo/rpc:message",
-        "//src/mongo/util:fail_point",
         "//src/mongo/util:processinfo",
         "//src/mongo/util/concurrency:spin_lock",
         "//src/mongo/util/net:ssl_manager",
@@ -281,7 +334,7 @@ mongo_cc_library(
 )
 
 # This library will initialize an egress transport layer in a mongo initializer
-# for C++ tests that require networking.
+# for C++ integration tests that require networking.
 mongo_cc_library(
     name = "transport_layer_egress_init",
     srcs = [
@@ -289,24 +342,52 @@ mongo_cc_library(
     ],
     deps = [
         ":transport_layer_manager",
-    ],
+        "//src/mongo/unittest:integration_test_main",
+    ] + select({
+        "//bazel/config:build_grpc_enabled": [
+            "//src/mongo/transport/grpc:grpc_transport_layer",
+            "//src/mongo/util:periodic_runner_factory",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 mongo_cc_library(
     name = "service_entry_point_test_fixture",
-    srcs = [
-        "service_entry_point_test_fixture.cpp",
-        "service_entry_point_test_fixture.h",
+    srcs = ["service_entry_point_test_fixture.cpp"],
+    private_hdrs = [
+        ":service_entry_point_test_fixture.h",
         "//src/mongo/db/storage:storage_engine_mock.h",
     ],
     deps = [
         "//src/mongo/db:read_write_concern_defaults_mock",
         "//src/mongo/db:service_context_test_fixture",
-        "//src/mongo/db/repl:hello_command",
         "//src/mongo/db/repl:replmocks",
+        "//src/mongo/db/repl/hello:hello_command",
+        "//src/mongo/otel",
+        "//src/mongo/otel/traces:tracing",
         "//src/mongo/rpc:client_metadata",
         "//src/mongo/transport:transport_layer_mock",
         "//src/mongo/util:clock_source_mock",
+    ],
+)
+
+mongo_cc_library(
+    name = "transport_layer_integration_test_fixture",
+    srcs = ["transport_layer_integration_test_fixture.cpp"],
+    hdrs = [
+        "transport_layer_integration_test_fixture.h",
+    ],
+    private_hdrs = [
+        ":test_fixtures.h",
+        ":transport_layer_mock.h",
+    ],
+    deps = [
+        "//src/mongo/client:async_client",
+        "//src/mongo/executor:task_executor_interface",
+        "//src/mongo/unittest:integration_test_main",
+        "//src/mongo/util:version_impl",
+        "//src/mongo/util/net:network",
     ],
 )
 
@@ -319,20 +400,23 @@ mongo_cc_unit_test(
         "message_compressor_registry_test.cpp",
         "proxy_protocol_header_parser_test.cpp",
         "service_executor_test.cpp",
-        "session_manager_common_mock.h",
         "session_manager_test.cpp",
         "session_workflow_test.cpp",
-        "session_workflow_test_util.h",
-        "test_fixtures.h",
         "transport_layer_manager_test.cpp",
         "//src/mongo/transport/asio:asio_transport_layer_test.cpp",
         "//src/mongo/transport/asio:asio_utils_test.cpp",
-        "//src/mongo/unittest:join_thread.h",
     ] + select({
         "@platforms//os:linux": ["session_manager_common_test.cpp"],
         "//conditions:default": [],
     }),
-    tags = ["mongo_unittest_second_group"],
+    data = ["//jstests/libs:test_pem_files"],
+    private_hdrs = [
+        ":session_manager_common_mock.h",
+        ":session_workflow_test_util.h",
+        ":test_fixtures.h",
+        "//src/mongo/unittest:join_thread.h",
+    ],
+    tags = ["mongo_unittest_fourth_group"],
     deps = [
         ":message_compressor",
         ":message_compressor_options_server",
@@ -348,39 +432,27 @@ mongo_cc_unit_test(
         "//src/mongo/db:service_context_non_d",
         "//src/mongo/db:service_context_test_fixture",
         "//src/mongo/db/auth:authmocks",
-        "//src/mongo/idl:server_parameter_test_util",
+        "//src/mongo/idl:server_parameter_test_controller",
         "//src/mongo/rpc",
         "//src/mongo/rpc:message",
+        "//src/mongo/transport/asio:asio_socket_test_util",
         "//src/mongo/util:clock_source_mock",
+        "//src/mongo/util:periodic_runner_factory",
         "//src/mongo/util/concurrency:thread_pool",
-        "//src/third_party/asio-master:asio",
+        "//src/third_party/asio",
     ],
 )
 
 mongo_cc_integration_test(
-    name = "transport_integration_test",
+    name = "asio_transport_integration_test",
     srcs = [
         "//src/mongo/transport/asio:asio_transport_layer_integration_test.cpp",
     ],
-    copts = select({
-        "@platforms//os:windows": [],
-        "//conditions:default": [
-            # TODO(SERVER-54659): Work around casted nullptrs in
-            # asio/impl/connect.hpp, which has an open PR upstream
-            # https://github.com/chriskohlhoff/asio/pull/882, and will
-            # hopefully arrive in a future released version to which we will
-            # upgrade per SERVER-54569.
-            "-Wno-nonnull",
-        ],
-    }),
     deps = [
         ":transport_layer_egress_init",
+        ":transport_layer_integration_test_fixture",
         "//src/mongo:base",
-        "//src/mongo/client:async_client",
-        "//src/mongo/executor:task_executor_interface",
-        "//src/mongo/util:version_impl",
-        "//src/mongo/util/net:network",
-        "//src/third_party/asio-master:asio",
+        "//src/third_party/asio",
     ],
 )
 
@@ -400,10 +472,10 @@ mongo_cc_benchmark(
 
 mongo_cc_benchmark(
     name = "session_workflow_bm",
-    srcs = [
-        "session_workflow_bm.cpp",
-        "session_workflow_test_util.h",
-        "test_fixtures.h",
+    srcs = ["session_workflow_bm.cpp"],
+    private_hdrs = [
+        ":session_workflow_test_util.h",
+        ":test_fixtures.h",
         "//src/mongo/unittest:join_thread.h",
     ],
     tags = ["second_half_bm"],

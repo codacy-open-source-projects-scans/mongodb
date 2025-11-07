@@ -29,12 +29,13 @@
 
 #pragma once
 
-#include <js/Class.h>
-#include <js/TypeDecls.h>
-
 #include "mongo/base/status.h"
 #include "mongo/scripting/mozjs/base.h"
 #include "mongo/scripting/mozjs/wraptype.h"
+#include "mongo/util/modules.h"
+
+#include <js/Class.h>
+#include <js/TypeDecls.h>
 
 namespace mongo {
 namespace mozjs {

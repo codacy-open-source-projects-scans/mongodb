@@ -29,6 +29,40 @@
 
 #include "mongo/db/profile_collection.h"
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/client.h"
+#include "mongo/db/collection_crud/collection_write_path.h"
+#include "mongo/db/commands/server_status/server_status.h"
+#include "mongo/db/curop.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/lock_manager/locker.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
+#include "mongo/logv2/log.h"
+#include "mongo/rpc/metadata/client_metadata.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/scopeguard.h"
+#include "mongo/util/str.h"
+#include "mongo/util/time_support.h"
+
 #include <memory>
 #include <mutex>
 #include <ostream>
@@ -39,46 +73,36 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/util/builder.h"
-#include "mongo/db/auth/authorization_session.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/client.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/locker.h"
-#include "mongo/db/curop.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/repl/oplog.h"
-#include "mongo/db/repl/read_concern_args.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/shard_role.h"
-#include "mongo/db/stats/resource_consumption_metrics.h"
-#include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/rpc/metadata/client_metadata.h"
-#include "mongo/s/shard_version.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/scopeguard.h"
-#include "mongo/util/str.h"
-#include "mongo/util/time_support.h"
-
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
 namespace mongo::profile_collection {
+
+namespace {
+
+AtomicWord<int64_t> profilerWritesTotal{0};
+AtomicWord<int64_t> profilerWritesActive{0};
+
+class ProfilerSection : public ServerStatusSection {
+public:
+    using ServerStatusSection::ServerStatusSection;
+
+    ~ProfilerSection() override = default;
+
+    bool includeByDefault() const override {
+        return true;
+    }
+
+    BSONObj generateSection(OperationContext* opCtx,
+                            const BSONElement& configElement) const override {
+        BSONObjBuilder bob;
+        bob.append("totalWrites", profilerWritesTotal.loadRelaxed());
+        bob.append("activeWriters", profilerWritesActive.loadRelaxed());
+        return bob.obj();
+    }
+};
+
+auto& profilerSection = *ServerStatusSectionBuilder<ProfilerSection>("profiler").forShard();
+}  // namespace
 
 void profile(OperationContext* opCtx, NetworkOp op) {
     // Initialize with 1kb at start in order to avoid realloc later
@@ -98,19 +122,12 @@ void profile(OperationContext* opCtx, NetworkOp op) {
                               lockerInfo.stats,
                               shard_role_details::getLocker(opCtx)->getFlowControlStats(),
                               storageMetrics,
+                              curOp->getPrepareReadConflicts(),
                               false /*omitCommand*/,
                               b);
     }
 
-    auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-    if (metricsCollector.hasCollectedMetrics()) {
-        BSONObjBuilder metricsBuilder = b.subobjStart("operationMetrics");
-        const auto& metrics = metricsCollector.getMetrics();
-        metrics.toBson(&metricsBuilder);
-        metricsBuilder.done();
-    }
-
-    b.appendDate("ts", jsTime());
+    b.appendDate("ts", Date_t::now());
     b.append("client", opCtx->getClient()->clientAddress());
 
     if (auto clientMetadata = ClientMetadata::get(opCtx->getClient())) {
@@ -148,6 +165,9 @@ void profile(OperationContext* opCtx, NetworkOp op) {
         AlternativeClientRegion acr(newClient);
         const auto dbProfilingNS = NamespaceString::makeSystemDotProfileNamespace(ns.dbName());
 
+        profilerWritesActive.fetchAndAddRelaxed(1);
+        ON_BLOCK_EXIT([&] { profilerWritesActive.fetchAndSubtractRelaxed(1); });
+
         boost::optional<CollectionAcquisition> profileCollection;
         while (true) {
             profileCollection.emplace(
@@ -156,7 +176,7 @@ void profile(OperationContext* opCtx, NetworkOp op) {
                                       dbProfilingNS,
                                       PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
                                       repl::ReadConcernArgs::get(newCtx.get()),
-                                      AcquisitionPrerequisites::kWrite),
+                                      AcquisitionPrerequisites::kUnreplicatedWrite),
                                   MODE_IX));
 
             Database* const db =
@@ -186,6 +206,7 @@ void profile(OperationContext* opCtx, NetworkOp op) {
                                                             nullOpDebug,
                                                             false));
         wuow.commit();
+        profilerWritesTotal.fetchAndAddRelaxed(1);
     } catch (const AssertionException& assertionEx) {
         LOGV2_WARNING(20703,
                       "Caught Assertion while trying to profile operation",

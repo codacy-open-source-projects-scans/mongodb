@@ -28,21 +28,20 @@
  */
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <memory>
-
 #include "mongo/bson/bsonmisc.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/primary_only_service.h"
-#include "mongo/db/s/collection_metadata.h"
 #include "mongo/db/s/resharding/donor_document_gen.h"
 #include "mongo/db/s/resharding/recipient_document_gen.h"
-#include "mongo/db/s/resharding/resharding_donor_service.h"
-#include "mongo/db/s/resharding/resharding_recipient_service.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace resharding {
@@ -102,12 +101,13 @@ boost::optional<std::shared_ptr<StateMachine>> tryGetReshardingStateMachineAndTh
  * The following functions construct a ReshardingDocument from the given 'reshardingFields'.
  */
 ReshardingDonorDocument constructDonorDocumentFromReshardingFields(
+    const VersionContext& vCtx,
     const NamespaceString& nss,
     const CollectionMetadata& metadata,
     const ReshardingFields& reshardingFields);
 
 ReshardingRecipientDocument constructRecipientDocumentFromReshardingFields(
-    OperationContext* opCtx,
+    const VersionContext& vCtx,
     const NamespaceString& nss,
     const CollectionMetadata& metadata,
     const ReshardingFields& reshardingFields);

@@ -31,7 +31,7 @@ _NAMED_SUITES = None
 
 def get_named_suites() -> List[SuiteName]:
     """Return a list of the suites names."""
-    global _NAMED_SUITES  # pylint: disable=global-statement
+    global _NAMED_SUITES
 
     if _NAMED_SUITES is None:
         # Skip "with_*server" and "no_server" because they do not define any test files to run.
@@ -88,10 +88,16 @@ def create_test_membership_map(fail_on_missing_selector=False, test_kind=None):
             # We ignore errors from missing files referenced in the test suite's "selector"
             # section. Certain test suites (e.g. unittests.yml) have a dedicated text file to
             # capture the list of tests they run; the text file may not be available if the
-            # associated SCons target hasn't been built yet.
+            # associated bazel target hasn't been built yet.
             if err.filename in _config.EXTERNAL_SUITE_SELECTORS:
                 if not fail_on_missing_selector:
                     continue
+            raise
+        except KeyError as e:
+            # For example, `test_kind` might be missing from their yaml config
+            loggers.ROOT_EXECUTOR_LOGGER.error(
+                "Error occurred while processing suite '%s': Field %s not found.", suite_name, e
+            )
             raise
     return test_membership
 
@@ -136,7 +142,7 @@ def get_suites(suite_names_or_paths: list[str], test_files: list[str]) -> List[_
             if using_nested_test_suites:
                 flattened_tests = list(itertools.chain.from_iterable(override_suite.tests))
             else:
-                flattened_tests = override_suite.tests
+                flattened_tests = copy.deepcopy(override_suite.tests)
             for test in flattened_tests:
                 if test in suite.excluded:
                     if _config.FORCE_EXCLUDED_TESTS:
@@ -267,14 +273,19 @@ class ExplicitSuiteConfig(SuiteConfigInterface):
         """Populate the named suites by scanning config_dir/suites."""
         with cls._name_suites_lock:
             if not cls._named_suites:
-                suites_dir = os.path.join(_config.CONFIG_DIR, "suites")
-                root = os.path.abspath(suites_dir)
-                files = os.listdir(root)
-                for filename in files:
-                    (short_name, ext) = os.path.splitext(filename)
-                    if ext in (".yml", ".yaml"):
-                        pathname = os.path.join(root, filename)
-                        cls._named_suites[short_name] = pathname
+                suites_dirs = [
+                    os.path.join(_config.CONFIG_DIR, "suites")
+                ] + _config.MODULE_SUITE_DIRS
+                for suites_dir in suites_dirs:
+                    root = os.path.abspath(suites_dir)
+                    if not os.path.exists(root):
+                        continue
+                    files = os.listdir(root)
+                    for filename in files:
+                        (short_name, ext) = os.path.splitext(filename)
+                        if ext in (".yml", ".yaml"):
+                            pathname = os.path.join(root, filename)
+                            cls._named_suites[short_name] = pathname
 
             return cls._named_suites
 
@@ -329,7 +340,7 @@ class MatrixSuiteConfig(SuiteConfigInterface):
         new_text = cls.generate_matrix_suite_text(suite_name)
         new_yaml = yaml.safe_load(new_text)
 
-        with open(generated_path, "r") as file:
+        with open(generated_path, "r", encoding="utf8") as file:
             old_text = file.read()
             old_yaml = yaml.safe_load(old_text)
             if new_yaml != old_yaml:
@@ -348,6 +359,8 @@ class MatrixSuiteConfig(SuiteConfigInterface):
     def get_config_obj_no_verify(cls, suite_name):
         """Get the suite config object in the given file."""
         suites_dir = cls.get_suites_dir()
+        if not os.path.exists(suites_dir):
+            return None
         matrix_suite = cls.parse_mappings_file(suites_dir, suite_name)
         if not matrix_suite:
             return None

@@ -28,16 +28,18 @@
  */
 
 
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
 #include <cerrno>
 #include <exception>
 #include <memory>
 #include <string>
 #include <system_error>
 
+#include <boost/filesystem/operations.hpp>
+#include <boost/filesystem/path.hpp>
+
 #ifndef _WIN32
 #include <fcntl.h>
+
 #include <sys/file.h>
 #include <sys/stat.h>
 #endif
@@ -48,9 +50,6 @@
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/storage/storage_engine_lock_file.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_tag.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/errno_util.h"
 #include "mongo/util/str.h"
@@ -72,7 +71,7 @@ void flushMyDirectory(const boost::filesystem::path& file) {
     // if called without a fully qualified path it asserts; that makes mongoperf fail.
     // so make a warning. need a better solution longer term.
     // massert(40389, str::stream() << "Couldn't find parent dir for file: " << file.string(),);
-    if (!file.has_branch_path()) {
+    if (!file.has_parent_path()) {
         LOGV2(22274,
               "flushMyDirectory couldn't find parent dir for file",
               "file"_attr = file.generic_string());
@@ -80,7 +79,7 @@ void flushMyDirectory(const boost::filesystem::path& file) {
     }
 
 
-    boost::filesystem::path dir = file.branch_path();  // parent_path in new boosts
+    boost::filesystem::path dir = file.parent_path();
 
     LOGV2_DEBUG(22275, 1, "flushing directory {dir_string}", "dir_string"_attr = dir.string());
 
@@ -129,9 +128,9 @@ public:
     int _fd;
 };
 
-StorageEngineLockFile::StorageEngineLockFile(const std::string& dbpath, StringData fileName)
+StorageEngineLockFile::StorageEngineLockFile(StringData dbpath, StringData fileName)
     : _dbpath(dbpath),
-      _filespec((boost::filesystem::path(_dbpath) / fileName.toString()).string()),
+      _filespec((boost::filesystem::path(_dbpath) / std::string{fileName}).string()),
       _uncleanShutdown(boost::filesystem::exists(_filespec) &&
                        boost::filesystem::file_size(_filespec) > 0),
       _lockFileHandle(new LockFileHandle()) {}
@@ -215,7 +214,7 @@ Status StorageEngineLockFile::writeString(StringData str) {
                                     << _filespec << ' ' << errorMessage(ec));
     }
 
-    int bytesWritten = ::write(_lockFileHandle->_fd, str.rawData(), str.size());
+    int bytesWritten = ::write(_lockFileHandle->_fd, str.data(), str.size());
     if (bytesWritten < 0) {
         auto ec = lastPosixError();
         return Status(ErrorCodes::FileStreamFailed,

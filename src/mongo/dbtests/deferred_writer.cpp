@@ -27,6 +27,30 @@
  *    it in the license file.
  */
 
+#include "mongo/db/deferred_writer.h"
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/db/client.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/query/internal_plans.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/service_context.h"
+#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
+#include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/unittest/unittest.h"
+
 #include <chrono>
 #include <compare>
 #include <cstddef>
@@ -37,30 +61,6 @@
 #include <thread>
 #include <utility>
 #include <vector>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/client.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/deferred_writer.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/dbdirectclient.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/query/internal_plans.h"
-#include "mongo/db/query/plan_executor.h"
-#include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/service_context.h"
-#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/thread.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 
 namespace mongo {
 namespace deferred_writer_tests {
@@ -124,7 +124,7 @@ public:
     }
 
     void dropCollection(void) {
-        if (AutoGetCollection(_opCtx.get(), kTestNamespace, MODE_IS).getCollection()) {
+        if (*AutoGetCollection(_opCtx.get(), kTestNamespace, MODE_IS)) {
             _client.dropCollection(kTestNamespace);
         }
     }
@@ -138,11 +138,18 @@ public:
      * Just read the whole collection into memory.
      */
     std::vector<BSONObj> readCollection(void) {
-        AutoGetCollection agc(_opCtx.get(), kTestNamespace, MODE_IS);
-        ASSERT_TRUE(agc.getCollection());
+        const auto opCtx = _opCtx.get();
+        const auto coll = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest(kTestNamespace,
+                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         repl::ReadConcernArgs::get(opCtx),
+                                         AcquisitionPrerequisites::kRead),
+            MODE_IS);
+        ASSERT_TRUE(coll.exists());
 
         auto plan = InternalPlanner::collectionScan(
-            _opCtx.get(), &agc.getCollection(), PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
+            _opCtx.get(), coll, PlanYieldPolicy::YieldPolicy::INTERRUPT_ONLY);
 
         std::vector<BSONObj> result;
         BSONObj i;
@@ -195,7 +202,7 @@ private:
  */
 class DeferredWriterTestEmpty : public DeferredWriterTestBase {
 public:
-    ~DeferredWriterTestEmpty() override{};
+    ~DeferredWriterTestEmpty() override {};
 
     void run() override {
         {
@@ -203,7 +210,7 @@ public:
             auto writer = gw.get();
             writer->insertDocument(getObj());
         }
-        ASSERT_TRUE(AutoGetCollection(_opCtx.get(), kTestNamespace, MODE_IS).getCollection());
+        ASSERT_TRUE(*AutoGetCollection(_opCtx.get(), kTestNamespace, MODE_IS));
         ASSERT_TRUE(readCollection().size() == 1);
     }
 };
@@ -213,7 +220,7 @@ public:
  */
 class DeferredWriterTestConcurrent : public DeferredWriterTestBase {
 public:
-    ~DeferredWriterTestConcurrent() override{};
+    ~DeferredWriterTestConcurrent() override {};
 
     void worker(DeferredWriter* writer) {
         for (int i = 0; i < kDocsPerWorker; ++i) {

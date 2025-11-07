@@ -9,10 +9,9 @@ let gotError = null;
 
 for (let x = 0; x < 100; x++) {
     print(x + " pushes");
-    var res = t.update({}, {$push: {a: s}});
+    let res = t.update({}, {$push: {a: s}});
     gotError = res.hasWriteError();
-    if (gotError)
-        break;
+    if (gotError) break;
 }
 
 assert(gotError, "should have gotten error");

@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <cstddef>
-#include <memory>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -48,6 +42,12 @@
 #include "mongo/util/cancellation.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <memory>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 
@@ -56,7 +56,7 @@ namespace mongo {
  * 'stateDocumentNs'.
  */
 template <typename StateDocumentType>
-class PrimaryOnlyServiceStateStore {
+class MONGO_MOD_OPEN PrimaryOnlyServiceStateStore {
 public:
     explicit PrimaryOnlyServiceStateStore(const NamespaceString& stateDocumentNs)
         : _stateDocumentNs{stateDocumentNs} {}
@@ -64,10 +64,9 @@ public:
     /**
      * Stores the state document 'addDoc' on the provided namespace.
      */
-    void add(
-        OperationContext* opCtx,
-        const StateDocumentType& addDoc,
-        const WriteConcernOptions& writeConcern = WriteConcerns::kMajorityWriteConcernNoTimeout) {
+    void add(OperationContext* opCtx,
+             const StateDocumentType& addDoc,
+             const WriteConcernOptions& writeConcern = defaultMajorityWriteConcern()) {
         PersistentTaskStore<StateDocumentType> store(_stateDocumentNs);
         store.add(opCtx, addDoc, writeConcern);
     }
@@ -75,10 +74,9 @@ public:
     /**
      * Removes the state document matching the criteria stated in the 'removeDoc'.
      */
-    void remove(
-        OperationContext* opCtx,
-        const BSONObj& removeDoc,
-        const WriteConcernOptions& writeConcern = WriteConcerns::kMajorityWriteConcernNoTimeout) {
+    void remove(OperationContext* opCtx,
+                const BSONObj& removeDoc,
+                const WriteConcernOptions& writeConcern = defaultMajorityWriteConcern()) {
         PersistentTaskStore<StateDocumentType> store(_stateDocumentNs);
         store.remove(opCtx, removeDoc, writeConcern);
     }
@@ -86,11 +84,10 @@ public:
     /**
      * Updates the state document 'updateDoc' using the provided filter criteria 'filter'.
      */
-    void update(
-        OperationContext* opCtx,
-        const BSONObj& filter,
-        const BSONObj& updateDoc,
-        const WriteConcernOptions& writeConcern = WriteConcerns::kMajorityWriteConcernNoTimeout) {
+    void update(OperationContext* opCtx,
+                const BSONObj& filter,
+                const BSONObj& updateDoc,
+                const WriteConcernOptions& writeConcern = defaultMajorityWriteConcern()) {
         PersistentTaskStore<StateDocumentType> store(_stateDocumentNs);
         store.update(opCtx, filter, updateDoc, writeConcern);
     }
@@ -112,7 +109,7 @@ private:
  * A helper that provides a default implementation for the set of methods to create the
  * 'PrimaryOnlyService::Instance'.
  */
-class DefaultPrimaryOnlyServiceInstance
+class MONGO_MOD_PRIVATE DefaultPrimaryOnlyServiceInstance
     : public repl::PrimaryOnlyService::TypedInstance<DefaultPrimaryOnlyServiceInstance> {
 public:
     ~DefaultPrimaryOnlyServiceInstance() override;

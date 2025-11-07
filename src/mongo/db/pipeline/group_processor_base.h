@@ -29,12 +29,13 @@
 
 #pragma once
 
-#include <utility>
-
 #include "mongo/db/exec/plan_stats.h"
+#include "mongo/db/memory_tracking/memory_usage_tracker.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
 #include "mongo/db/pipeline/accumulator.h"
-#include "mongo/util/memory_usage_tracker.h"
+#include "mongo/util/modules.h"
+
+#include <utility>
 
 namespace mongo {
 
@@ -42,7 +43,7 @@ namespace mongo {
  * Base class of all GroupProcessor implementations. This class is used by the aggregation framework
  * and streams enterprise module to perform the document processing needed for $group.
  */
-class GroupProcessorBase {
+class MONGO_MOD_OPEN GroupProcessorBase {
 public:
     using Accumulators = std::vector<boost::intrusive_ptr<AccumulatorState>>;
     using GroupsMap = ValueUnorderedMap<Accumulators>;
@@ -51,7 +52,18 @@ public:
                        int64_t maxMemoryUsageBytes);
 
     GroupProcessorBase(GroupProcessorBase&& other) = default;
-    GroupProcessorBase(GroupProcessorBase& other) = default;
+    GroupProcessorBase(const GroupProcessorBase& other)
+        : _expCtx(other._expCtx),
+          _idFieldNames(other._idFieldNames),
+          _idExpressions(other._idExpressions),
+          _accumulatedFields(other._accumulatedFields),
+          _accumulatedFieldMemoryTrackers(other._accumulatedFieldMemoryTrackers),
+          _doingMerge(other._doingMerge),
+          _willBeMerged(other._willBeMerged),
+          _memoryTracker(other._memoryTracker.makeFreshMemoryUsageTracker()),
+          _executionStarted(other._executionStarted),
+          _groups(other._groups),
+          _stats(other._stats) {}
 
     /**
      * Sets the expression to use to determine the group id of each document.
@@ -218,7 +230,7 @@ protected:
     std::vector<AccumulationStatement> _accumulatedFields;
     // Per-field memory trackers corresponding to each AccumulationStatement in _accumulatedFields.
     // Caching these helps avoid lookups in the map in MemoryUsageTracker for every input document.
-    std::vector<MemoryUsageTracker::Impl*> _accumulatedFieldMemoryTrackers;
+    std::vector<SimpleMemoryUsageTracker*> _accumulatedFieldMemoryTrackers;
 
     // Only set to true for a merging $group when a $group is split by distributedPlanLogic().
     bool _doingMerge{false};

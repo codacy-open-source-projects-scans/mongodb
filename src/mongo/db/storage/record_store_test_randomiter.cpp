@@ -27,6 +27,14 @@
  *    it in the license file.
  */
 
+#include "mongo/base/status_with.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/record_store_test_harness.h"
+#include "mongo/unittest/unittest.h"
+
 #include <memory>
 #include <ostream>
 #include <set>
@@ -34,15 +42,6 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/status_with.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/storage/record_store.h"
-#include "mongo/db/storage/record_store_test_harness.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 
 namespace mongo {
 namespace {
@@ -53,7 +52,7 @@ using std::stringstream;
 using std::unique_ptr;
 
 // Create a random iterator for empty record store.
-TEST(RecordStoreTestHarness, GetRandomIteratorEmpty) {
+TEST(RecordStoreTest, GetRandomIteratorEmpty) {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
 
@@ -61,7 +60,8 @@ TEST(RecordStoreTestHarness, GetRandomIteratorEmpty) {
 
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        auto cursor = rs->getRandomCursor(opCtx.get());
+        auto cursor =
+            rs->getRandomCursor(opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()));
         // returns NULL if getRandomCursor is not supported
         if (!cursor) {
             return;
@@ -71,7 +71,7 @@ TEST(RecordStoreTestHarness, GetRandomIteratorEmpty) {
 }
 
 // Insert multiple records and create a random iterator for the record store
-TEST(RecordStoreTestHarness, GetRandomIteratorNonEmpty) {
+TEST(RecordStoreTest, GetRandomIteratorNonEmpty) {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
 
@@ -90,7 +90,11 @@ TEST(RecordStoreTestHarness, GetRandomIteratorNonEmpty) {
 
             StorageWriteTransaction txn(ru);
             StatusWith<RecordId> res =
-                rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, Timestamp());
+                rs->insertRecord(opCtx.get(),
+                                 *shard_role_details::getRecoveryUnit(opCtx.get()),
+                                 data.c_str(),
+                                 data.size() + 1,
+                                 Timestamp());
             ASSERT_OK(res.getStatus());
             locs[i] = res.getValue();
             txn.commit();
@@ -102,7 +106,8 @@ TEST(RecordStoreTestHarness, GetRandomIteratorNonEmpty) {
     set<RecordId> remain(locs, locs + nToInsert);
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        auto cursor = rs->getRandomCursor(opCtx.get());
+        auto cursor =
+            rs->getRandomCursor(opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()));
         // returns NULL if getRandomCursor is not supported
         if (!cursor) {
             return;
@@ -112,7 +117,8 @@ TEST(RecordStoreTestHarness, GetRandomIteratorNonEmpty) {
         for (unsigned i = 0; i < nToInsert - 1; i++) {
             // Get a new cursor once in a while, shouldn't affect things
             if (i % (nToInsert / 8) == 0) {
-                cursor = rs->getRandomCursor(opCtx.get());
+                cursor = rs->getRandomCursor(opCtx.get(),
+                                             *shard_role_details::getRecoveryUnit(opCtx.get()));
             }
             remain.erase(cursor->next()->id);  // can happen more than once per doc
         }
@@ -127,7 +133,7 @@ TEST(RecordStoreTestHarness, GetRandomIteratorNonEmpty) {
 
 // Insert a single record. Create a random iterator pointing to that single record.
 // Then check we'll retrieve the record.
-TEST(RecordStoreTestHarness, GetRandomIteratorSingleton) {
+TEST(RecordStoreTest, GetRandomIteratorSingleton) {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
 
@@ -139,7 +145,12 @@ TEST(RecordStoreTestHarness, GetRandomIteratorSingleton) {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         auto& ru = *shard_role_details::getRecoveryUnit(opCtx.get());
         StorageWriteTransaction txn(ru);
-        StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), "some data", 10, Timestamp());
+        StatusWith<RecordId> res =
+            rs->insertRecord(opCtx.get(),
+                             *shard_role_details::getRecoveryUnit(opCtx.get()),
+                             "some data",
+                             10,
+                             Timestamp());
         ASSERT_OK(res.getStatus());
         idToRetrieve = res.getValue();
         txn.commit();
@@ -150,7 +161,8 @@ TEST(RecordStoreTestHarness, GetRandomIteratorSingleton) {
 
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
-        auto cursor = rs->getRandomCursor(opCtx.get());
+        auto cursor =
+            rs->getRandomCursor(opCtx.get(), *shard_role_details::getRecoveryUnit(opCtx.get()));
         // returns NULL if getRandomCursor is not supported
         if (!cursor) {
             return;
@@ -164,7 +176,7 @@ TEST(RecordStoreTestHarness, GetRandomIteratorSingleton) {
         opCtx.reset();
         opCtx = harnessHelper->newOperationContext();
         cursor->reattachToOperationContext(opCtx.get());
-        ASSERT_TRUE(cursor->restore());
+        ASSERT_TRUE(cursor->restore(*shard_role_details::getRecoveryUnit(opCtx.get())));
 
         auto record = cursor->next();
         ASSERT_EQUALS(record->id, idToRetrieve);

@@ -29,16 +29,16 @@
 
 #include "mongo/db/service_context_test_fixture.h"
 
-#include <utility>
-
 #include "mongo/client/replica_set_monitor_manager.h"
 #include "mongo/db/auth/authorization_backend_interface.h"
 #include "mongo/db/auth/authorization_manager_factory_mock.h"
-#include "mongo/db/query/query_settings/query_settings_manager.h"
+#include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/transport/transport_layer_manager_impl.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/tick_source_mock.h"
+
+#include <utility>
 
 namespace mongo {
 
@@ -75,7 +75,7 @@ ScopedGlobalServiceContextForTest::ScopedGlobalServiceContextForTest(
     auth::AuthorizationBackendInterface::set(
         getService(), globalAuthzManagerFactory->createBackendInterface(getService()));
 
-    query_settings::QuerySettingsManager::create(getServiceContext(), {}, {});
+    query_settings::QuerySettingsService::initializeForTest(getServiceContext());
 }
 
 ScopedGlobalServiceContextForTest::~ScopedGlobalServiceContextForTest() {

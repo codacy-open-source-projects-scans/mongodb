@@ -29,26 +29,25 @@
 
 #include "mongo/db/query/plan_cache/plan_cache_key_factory.h"
 
-#include <cstddef>
-#include <map>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
-#include <absl/container/flat_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/query/canonical_query_encoder.h"
 #include "mongo/db/query/collection_query_info.h"
+#include "mongo/db/query/indexability.h"
 #include "mongo/db/query/plan_cache/plan_cache_key_info.h"
 #include "mongo/db/query/planner_ixselect.h"
 #include "mongo/db/query/query_settings/query_settings_gen.h"
-#include "mongo/db/s/operation_sharding_state.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/shard_version.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
+
+#include <cstddef>
+#include <map>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace plan_cache_detail {
@@ -76,7 +75,7 @@ void encodeIndexabilityRecursive(const MatchExpression* tree,
         if (parentPath.empty()) {
             path = tree->path();
         } else {
-            fullPath = parentPath.toString() + "." + tree->path();
+            fullPath = std::string{parentPath} + "." + tree->path();
             path = fullPath;
         }
     } else {
@@ -113,6 +112,53 @@ void encodeIndexabilityRecursive(const MatchExpression* tree,
     }
 }
 
+void encodePartialIndexDiscriminatorHelper(
+    const MatchExpression* tree,
+    CompositeIndexabilityDiscriminator partialIndexDiscriminator,
+    bool inNegationOrElemMatchObj,
+    StringBuilder* keyBuilder) {
+    // At this point, we know the subexpression is not a subset of the partial filter. Mark this in
+    // discriminator.
+    *keyBuilder << false;
+    inNegationOrElemMatchObj |= Indexability::nodeIsNegationOrElemMatchObj(tree);
+    const bool isOrExpression = tree->matchType() == MatchExpression::OR;
+    for (size_t i = 0; i < tree->numChildren(); ++i) {
+        const auto curChild = tree->getChild(i);
+        // If a subexpression is an $or that is not under $elemMatch, $not, or $nor, then mark it as
+        // eligible, just like the planner does.
+        if (!inNegationOrElemMatchObj && isOrExpression &&
+            partialIndexDiscriminator.isMatchCompatibleWithIndex(curChild)) {
+            *keyBuilder << true;
+            continue;
+        }
+        // Recursively encode the query's children. There may be a subexpression deeper in the tree
+        // that is eligible for the partial index.
+        encodePartialIndexDiscriminatorHelper(
+            curChild, partialIndexDiscriminator, inNegationOrElemMatchObj, keyBuilder);
+    }
+}
+
+// Encode partial index discriminator using the same algorithm that is used in
+// 'QueryPlannerIXSelect::stripInvalidAssignmentsToPartialIndexRoot()'. This is to ensure that the
+// plan cache key agrees with the decisions that the planner makes around index eligibility.
+void encodePartialIndexDiscriminator(const MatchExpression* tree,
+                                     CompositeIndexabilityDiscriminator partialIndexDiscriminator,
+                                     StringBuilder* keyBuilder) {
+    // If the query is a subset of the partial filter, then we are done.
+    if (partialIndexDiscriminator.isMatchCompatibleWithIndex(tree)) {
+        *keyBuilder << true;
+        return;
+    }
+    // Otherwise, walk the query and check if subexpressions are subsets of the partial filter and
+    // encode the subexpressions' eligibility in the discriminator. This matches the planner's
+    // ability to use a partial index for a subexpression of a query even when the original query is
+    // not a subset of the partial filter expression.
+    encodePartialIndexDiscriminatorHelper(tree,
+                                          partialIndexDiscriminator,
+                                          Indexability::nodeIsNegationOrElemMatchObj(tree),
+                                          keyBuilder);
+}
+
 void encodeIndexability(const MatchExpression* tree,
                         const PlanCacheIndexabilityState& indexabilityState,
                         StringBuilder* keyBuilder) {
@@ -123,7 +169,7 @@ void encodeIndexability(const MatchExpression* tree,
     if (!globalDiscriminators.empty()) {
         *keyBuilder << kEncodeGlobalDiscriminatorsBegin;
         for (auto&& indexAndDiscriminatorPair : globalDiscriminators) {
-            *keyBuilder << indexAndDiscriminatorPair.second.isMatchCompatibleWithIndex(tree);
+            encodePartialIndexDiscriminator(tree, indexAndDiscriminatorPair.second, keyBuilder);
         }
         *keyBuilder << kEncodeGlobalDiscriminatorsEnd;
     }
@@ -146,43 +192,42 @@ PlanCacheKeyInfo makePlanCacheKeyInfo(CanonicalQuery::QueryShapeString&& shapeSt
 }
 
 namespace {
-// TODO: SERVER-77571 use acquisitions APIs for retrieving the shardVersion.
 sbe::PlanCacheKeyCollectionState computeCollectionState(OperationContext* opCtx,
-                                                        const CollectionPtr& collection,
+                                                        const CollectionAcquisition& collection,
                                                         bool isSecondaryColl) {
     boost::optional<sbe::PlanCacheKeyShardingEpoch> keyShardingEpoch;
     // We don't version secondary collections in the current shard versioning protocol. Also, since
     // currently we only push down $lookup to SBE when secondary collections (and main collection)
     // are unsharded, it's OK to not encode the sharding information here.
     if (!isSecondaryColl) {
-        const auto shardVersion{
-            OperationShardingState::get(opCtx).getShardVersion(collection->ns())};
+        const auto& shardVersion = collection.getShardVersion();
         if (shardVersion) {
             keyShardingEpoch =
                 sbe::PlanCacheKeyShardingEpoch{shardVersion->placementVersion().epoch(),
                                                shardVersion->placementVersion().getTimestamp()};
         }
     }
-    return {collection->uuid(),
-            CollectionQueryInfo::get(collection).getPlanCacheInvalidatorVersion(),
-            keyShardingEpoch};
+    return {
+        collection.uuid(),
+        CollectionQueryInfo::get(collection.getCollectionPtr()).getPlanCacheInvalidatorVersion(),
+        keyShardingEpoch};
 }
 }  // namespace
 
 PlanCacheKey make(const CanonicalQuery& query,
-                  const CollectionPtr& collection,
+                  const CollectionAcquisition& collection,
                   PlanCacheKeyTag<PlanCacheKey> tag) {
     auto shapeString = canonical_query_encoder::encodeClassic(query);
     return {
         plan_cache_detail::makePlanCacheKeyInfo(std::move(shapeString),
                                                 query.getPrimaryMatchExpression(),
-                                                collection,
+                                                collection.getCollectionPtr(),
                                                 query.getExpCtx()->getQuerySettings()),
     };
 }
 
 sbe::PlanCacheKey make(const CanonicalQuery& query,
-                       const CollectionPtr& collection,
+                       const CollectionAcquisition& collection,
                        PlanCacheKeyTag<sbe::PlanCacheKey> tag) {
     return plan_cache_key_factory::make(query, MultipleCollectionAccessor(collection));
 }
@@ -193,15 +238,15 @@ namespace plan_cache_key_factory {
 std::tuple<sbe::PlanCacheKeyCollectionState, std::vector<sbe::PlanCacheKeyCollectionState>>
 getCollectionState(OperationContext* opCtx, const MultipleCollectionAccessor& collections) {
     auto mainCollectionState = plan_cache_detail::computeCollectionState(
-        opCtx, collections.getMainCollection(), false /* isSecondaryColl */);
+        opCtx, collections.getMainCollectionAcquisition(), false /* isSecondaryColl */);
     std::vector<sbe::PlanCacheKeyCollectionState> secondaryCollectionStates;
-    secondaryCollectionStates.reserve(collections.getSecondaryCollections().size());
+    secondaryCollectionStates.reserve(collections.getSecondaryCollectionAcquisitions().size());
     // We always use the collection order saved in MultipleCollectionAccessor to populate the plan
     // cache key, which is ordered by the secondary collection namespaces.
-    for (auto& [_, collection] : collections.getSecondaryCollections()) {
-        if (collection) {
+    for (auto& [_, collectionOrView] : collections.getSecondaryCollectionAcquisitions()) {
+        if (collectionOrView.collectionExists()) {
             secondaryCollectionStates.emplace_back(plan_cache_detail::computeCollectionState(
-                opCtx, collection, true /* isSecondaryColl */));
+                opCtx, collectionOrView.getCollection(), true /* isSecondaryColl */));
         }
     }
     secondaryCollectionStates.shrink_to_fit();

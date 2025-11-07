@@ -28,23 +28,21 @@
  */
 
 
+#include "mongo/db/repl/insert_group.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/query/write_ops/write_ops.h"
+#include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/repl/oplog_entry_gen.h"
+#include "mongo/logv2/log.h"
+#include "mongo/util/assert_util.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
 
 #include <boost/move/utility_core.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/query/write_ops/write_ops.h"
-#include "mongo/db/repl/insert_group.h"
-#include "mongo/db/repl/oplog_entry.h"
-#include "mongo/db/repl/oplog_entry_gen.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/util/assert_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -100,6 +98,7 @@ StatusWith<InsertGroup::ConstIterator> InsertGroup::groupAndApplyInserts(
     size_t groupSize = op->getObject().objsize();
     auto opCount = std::vector<ApplierOperation>::size_type(1);
     auto groupNamespace = op->getNss();
+    auto& groupVCtx = op->getVersionContext();
 
     /**
      * Search for the op that delimits this insert group, and save its position
@@ -124,6 +123,7 @@ StatusWith<InsertGroup::ConstIterator> InsertGroup::groupAndApplyInserts(
             // Only add the op to this group if it passes the criteria.
             return nextOp->getOpType() != OpTypeEnum::kInsert  // Must be an insert.
                 || opNamespace != groupNamespace               // Must be in the same namespace.
+                || nextOp->getVersionContext() != groupVCtx    // Must be in the same Operation FCV.
                 || groupSize > kInsertGroupMaxGroupSize  // Must not create too large an object.
                 || opCount > kInsertGroupMaxOpCount;     // Limit number of ops in a single group.
         });

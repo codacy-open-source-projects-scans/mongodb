@@ -29,26 +29,14 @@
 
 #include "mongo/transport/asio/asio_transport_layer.h"
 
-#include <exception>
-#include <fstream>
-#include <queue>
-#include <system_error>
-#include <utility>
-#include <vector>
-
-#include <asio.hpp>
-#include <fmt/format.h>
-
 #include "mongo/client/dbclient_connection.h"
 #include "mongo/config.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context_test_fixture.h"
-#include "mongo/db/stats/counters.h"
-#include "mongo/idl/server_parameter_test_util.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/platform/basic.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/asio/asio_session.h"
@@ -59,8 +47,6 @@
 #include "mongo/transport/transport_layer.h"
 #include "mongo/transport/transport_layer_manager_impl.h"
 #include "mongo/transport/transport_options_gen.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/assert_that.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/thread_assertion_monitor.h"
 #include "mongo/unittest/unittest.h"
@@ -73,12 +59,21 @@
 #include "mongo/util/time_support.h"
 #include "mongo/util/waitable.h"
 
+#include <exception>
+#include <fstream>
+#include <queue>
+#include <system_error>
+#include <utility>
+#include <vector>
+
+#include <asio.hpp>
+
+#include <fmt/format.h>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo::transport {
 namespace {
-
-using namespace fmt::literals;
 
 #ifdef _WIN32
 using SetsockoptPtr = char*;
@@ -116,7 +111,7 @@ std::string loadFile(std::string filename) try {
     return {std::istreambuf_iterator<char>{f}, std::istreambuf_iterator<char>{}};
 } catch (const std::ifstream::failure& ex) {
     auto ec = lastSystemError();
-    FAIL("Failed to load file: \"{}\": {}: {}"_format(filename, ex.what(), errorMessage(ec)));
+    FAIL(fmt::format("Failed to load file: \"{}\": {}: {}", filename, ex.what(), errorMessage(ec)));
     MONGO_UNREACHABLE;
 }
 
@@ -181,7 +176,7 @@ class SyncClient {
 public:
     explicit SyncClient(int port) {
         std::error_code ec;
-        _sock.connect(asio::ip::tcp::endpoint(testHostAddr(), port), ec);
+        (void)_sock.connect(asio::ip::tcp::endpoint(testHostAddr(), port), ec);
         ASSERT_FALSE(ec) << errorMessage(ec);
         LOGV2(6109504, "sync client connected");
     }
@@ -279,6 +274,49 @@ public:
         _hangDuringAccept.setMode(FailPoint::off);
     }
 
+    auto getDiscardedDueToClientDisconnect() {
+        BSONObjBuilder bob;
+        tla().appendStatsForServerStatus(&bob);
+        return bob.obj()["connsDiscardedDueToClientDisconnect"].Long();
+    }
+
+    void runTestWithClientDroppingConnectionBeforeServerCreatesSession(
+        std::function<void(ConnectionThread&)> closeClientFunc,
+        std::function<void(ConnectionThread&)> onConnectFunc = nullptr) {
+        WaitableAtomic<int> sessionsCreated;
+        sessionManager().setOnStartSession([&](auto&&) {
+            sessionsCreated.fetchAndAdd(1);
+            sessionsCreated.notifyAll();
+        });
+
+        // Temporarily enable `pessimisticConnectivityCheckForAcceptedConnections` for this test.
+        const auto oldValue = gPessimisticConnectivityCheckForAcceptedConnections.swap(true);
+        ON_BLOCK_EXIT([&] { gPessimisticConnectivityCheckForAcceptedConnections.store(oldValue); });
+
+        const auto discardedBefore = getDiscardedDueToClientDisconnect();
+
+        LOGV2(6109515, "creating test client connection");
+        auto& fp = asioTransportLayerHangDuringAcceptCallback;
+        auto timesEntered = fp.setMode(FailPoint::alwaysOn);
+        ConnectionThread connectThread(tla().listenerPort(), onConnectFunc);
+        fp.waitForTimesEntered(timesEntered + 1);
+        connectThread.wait();
+
+        LOGV2(6109516, "closing test client connection");
+        closeClientFunc(connectThread);
+        sleepFor(Milliseconds{1});
+        fp.setMode(FailPoint::off);
+
+        // Using a second connection as a means to wait for the server to process the closed
+        // connection and move on to accept the next connection.
+        ConnectionThread dummyConnection(tla().listenerPort(), nullptr);
+        dummyConnection.wait();
+        sessionsCreated.wait(0);
+
+        ASSERT_EQ(sessionsCreated.load(), 1);
+        ASSERT_EQ(getDiscardedDueToClientDisconnect() - discardedBefore, 1);
+    }
+
 private:
     std::unique_ptr<AsioTransportLayer> _tla;
     test::MockSessionManager* _sessionManager;
@@ -316,31 +354,59 @@ void setNoLinger(ConnectionThread& conn) {
     }
 }
 
+#ifdef __linux__
+
 /**
  * Test that the server appropriately handles a client-side socket disconnection, and that the
  * client sends an RST packet when the socket is forcibly closed.
  */
 TEST(AsioTransportLayer, TCPResetAfterConnectionIsSilentlySwallowed) {
     TestFixture tf;
-
-    AtomicWord<int> sessionsCreated{0};
-    tf.sessionManager().setOnStartSession([&](auto&&) { sessionsCreated.fetchAndAdd(1); });
-
-    LOGV2(6109515, "connecting");
-    auto& fp = asioTransportLayerHangDuringAcceptCallback;
-    auto timesEntered = fp.setMode(FailPoint::alwaysOn);
-    ConnectionThread connectThread(tf.tla().listenerPort(), &setNoLinger);
-    fp.waitForTimesEntered(timesEntered + 1);
-    // Test case thread does not close socket until client thread has set options to ensure that an
-    // RST packet will be set on close.
-    connectThread.wait();
-
-    LOGV2(6109516, "closing");
-    connectThread.close();
-    fp.setMode(FailPoint::off);
-
-    ASSERT_EQ(sessionsCreated.load(), 0);
+    tf.runTestWithClientDroppingConnectionBeforeServerCreatesSession(
+        [](ConnectionThread& client) { client.close(); }, &setNoLinger);
 }
+
+/**
+ * Test that the server doesn't create a session when the client is gracefully closed before
+ * accepting.
+ */
+TEST(AsioTransportLayer, CheckGracefulClientClose) {
+    TestFixture tf;
+    tf.runTestWithClientDroppingConnectionBeforeServerCreatesSession(
+        [](ConnectionThread& client) { client.close(); });
+}
+
+TEST(AsioTransportLayer, CheckClientWriteThenGracefulClientClose) {
+    TestFixture tf;
+    tf.runTestWithClientDroppingConnectionBeforeServerCreatesSession([&](ConnectionThread& client) {
+        OpMsgRequest request;
+        request.body = BSON("ping" << 1 << "$db"
+                                   << "admin");
+        auto msg = request.serialize();
+        msg.header().setResponseToMsgId(0);
+        client.socket().send(msg.buf(), msg.size(), "writing to the socket before closing it");
+        client.close();
+    });
+}
+
+TEST(AsioTransportLayer, CheckClientCloseWithoutShutdown) {
+    TestFixture tf;
+    tf.runTestWithClientDroppingConnectionBeforeServerCreatesSession(
+        [&](ConnectionThread& client) { ::close(client.socket().rawFD()); });
+}
+
+TEST(AsioTransportLayer, CheckClientRDWRShutdownWithoutClose) {
+    TestFixture tf;
+    tf.runTestWithClientDroppingConnectionBeforeServerCreatesSession(
+        [&](ConnectionThread& client) { shutdown(client.socket().rawFD(), SHUT_RDWR); });
+}
+
+TEST(AsioTransportLayer, CheckClientWRShutdownWithoutClose) {
+    TestFixture tf;
+    tf.runTestWithClientDroppingConnectionBeforeServerCreatesSession(
+        [&](ConnectionThread& client) { shutdown(client.socket().rawFD(), SHUT_WR); });
+}
+#endif  // __linux__
 
 TEST(AsioTransportLayer, StopAcceptingSessionsBeforeStart) {
     auto sm = std::make_unique<test::MockSessionManager>();
@@ -368,6 +434,11 @@ TEST(AsioTransportLayer, TCPCheckQueueDepth) {
     LOGV2(6400501, "Starting and hanging three connection threads");
     tf.setUpHangDuringAcceptingFirstConnection();
 
+    ON_BLOCK_EXIT([&] {
+        LOGV2(6400503, "Stopping failpoints, shutting down test");
+        tf.stopHangDuringAcceptingConnection();
+    });
+
     ConnectionThread connectThread1(tf.tla().listenerPort());
     ConnectionThread connectThread2(tf.tla().listenerPort());
     ConnectionThread connectThread3(tf.tla().listenerPort());
@@ -390,7 +461,7 @@ TEST(AsioTransportLayer, TCPCheckQueueDepth) {
 
 
     BSONObjBuilder tlaFTDCBuilder;
-    tf.tla().appendStatsForFTDC(tlaFTDCBuilder);
+    tf.tla().appendStatsForServerStatus(&tlaFTDCBuilder);
     BSONObj tlaFTDCStats = tlaFTDCBuilder.obj();
 
     const auto& queueDepthsArray =
@@ -400,10 +471,6 @@ TEST(AsioTransportLayer, TCPCheckQueueDepth) {
     const auto& queueDepthObj = queueDepthsArray[0].Obj();
     ASSERT_EQ(HostAndPort(queueDepthObj.firstElementFieldName()).port(), tf.tla().listenerPort());
     ASSERT_EQ(queueDepthObj.firstElement().Int(), 2);
-
-    LOGV2(6400503, "Stopping failpoints, shutting down test");
-
-    tf.stopHangDuringAcceptingConnection();
 }
 #endif
 
@@ -445,6 +512,39 @@ TEST(AsioTransportLayer, SourceSyncTimeoutTimesOut) {
     ASSERT_EQ(received.get().getStatus(), ErrorCodes::NetworkTimeout);
 }
 
+/**
+ * Check that a ShutdownInProgress error returns when the ASIOReactorTimer is set after reactor
+ * shutdown.
+ */
+TEST(AsioTransportLayer, UseTimerAfterReactorShutdown) {
+    TestFixture tf;
+    Notification<void> shutdown;
+    auto reactor = tf.tla().getReactor(TransportLayer::kNewReactor);
+    auto timer = reactor->makeTimer();
+    auto reactorThread = stdx::thread([reactor, &shutdown] {
+        LOGV2(9701500, "running reactor");
+        reactor->run();
+        LOGV2(9701501, "reactor stopped, draining");
+        reactor->drain();
+        LOGV2(9701502, "reactor drain complete");
+        shutdown.set();
+    });
+
+    auto timer1 = timer->waitUntil(Date_t::now() + Seconds(5));
+    std::move(timer1).get();
+    LOGV2(9701503, "first timer fired");
+
+    LOGV2(9701504, "shutting down reactor");
+    reactor->stop();
+    shutdown.get();
+
+    LOGV2(9701505, "setting second timer");
+    auto timer2 = timer->waitUntil(Date_t::now() + Seconds(5));
+    ASSERT_EQ(std::move(timer2).getNoThrow().code(), ErrorCodes::ShutdownInProgress);
+    LOGV2(9701506, "second timer fired");
+    reactorThread.join();
+}
+
 /* check that timeouts don't time out unless there's an actual timeout */
 TEST(AsioTransportLayer, SourceSyncTimeoutSucceeds) {
     TestFixture tf;
@@ -456,6 +556,48 @@ TEST(AsioTransportLayer, SourceSyncTimeoutSucceeds) {
     SyncClient conn(tf.tla().listenerPort());
     ping(conn);  // This time we send a message
     ASSERT_OK(received.get().getStatus());
+}
+
+TEST(AsioTransportLayer, IngressPhysicalNetworkMetricsTest) {
+    Message req = []() {
+        auto omb = OpMsgBuilder{};
+        omb.setBody(BSON("ping" << 1));
+        Message msg = omb.finish();
+        msg.header().setResponseToMsgId(0);
+        msg.header().setId(0);
+        OpMsg::appendChecksum(&msg);
+        return msg;
+    }();
+
+    Message resp = []() {
+        auto omb = OpMsgBuilder{};
+        omb.setBody(BSONObjBuilder{}.append("ok", 1).obj());
+        return omb.finish();
+    }();
+
+    TestFixture tf;
+    auto received = makePromiseFuture<Message>();
+    auto responsed = makePromiseFuture<void>();
+
+    tf.sessionManager().setOnStartSession([&](test::SessionThread& st) {
+        st.schedule([&](auto& session) {
+            received.promise.setFrom(session.sourceMessage());
+            responsed.promise.setFrom(session.sinkMessage(resp));
+        });
+    });
+    SyncClient conn(tf.tla().listenerPort());
+    auto stats = test::NetworkConnectionStats::get(NetworkCounter::ConnectionType::kIngress);
+    auto ec = conn.write(req.buf(), req.size());
+    ASSERT_FALSE(ec) << errorMessage(ec);
+    ASSERT_OK(received.future.getNoThrow());
+    ASSERT_OK(responsed.future.getNoThrow());
+    auto diff = test::NetworkConnectionStats::get(NetworkCounter::ConnectionType::kIngress)
+                    .getDifference(stats);
+
+    ASSERT_EQ(diff.physicalBytesIn, req.size());
+    ASSERT_EQ(diff.physicalBytesOut, resp.size());
+    // The transport layer should not increase the numRequests of network metrics.
+    ASSERT_EQ(diff.numRequests, 0);
 }
 
 /** Switching from timeouts to no timeouts must reset the timeout to unlimited. */
@@ -502,7 +644,8 @@ TEST(AsioTransportLayer, SwitchTimeoutModes) {
 class Acceptor {
 public:
     struct Connection {
-        explicit Connection(asio::io_context& ioCtx) : socket(ioCtx) {}
+        template <typename Executor>
+        explicit Connection(const Executor& executor) : socket(executor) {}
         asio::ip::tcp::socket socket;
     };
 
@@ -527,7 +670,7 @@ public:
 
 private:
     void _acceptLoop() {
-        auto conn = std::make_shared<Connection>(_acceptor.get_executor().context());
+        auto conn = std::make_shared<Connection>(_acceptor.get_executor());
         LOGV2(6101603, "Acceptor: await connection");
         _acceptor.async_accept(conn->socket, [this, conn](const asio::error_code& ec) {
             if (ec != asio::error_code{}) {
@@ -554,14 +697,14 @@ public:
         std::error_code ec;
         auto ep = asio::ip::tcp::endpoint(testHostAddr(), port);
 
-        _sock.open(ep.protocol(), ec);
+        (void)_sock.open(ep.protocol(), ec);
         ASSERT_FALSE(ec) << errorMessage(ec);
 
         ec = tfo::initOutgoingSocket(_sock);
         ASSERT_FALSE(ec) << errorMessage(ec);
 
         _sock.non_blocking(true);
-        _sock.connect(ep, ec);
+        (void)_sock.connect(ep, ec);
         ASSERT_FALSE(ec) << errorMessage(ec);
         LOGV2(7097407, "TFO client connected");
         _sock.non_blocking(false);
@@ -742,7 +885,7 @@ TEST(AsioTransportLayer, ConfirmSocketSetOptionOnResetConnections) {
     auto thrown = caught.get();
     LOGV2(6101610,
           "ASIO set_option response on peer-reset connection",
-          "msg"_attr = "{}"_format(thrown ? thrown->message() : ""));
+          "msg"_attr = fmt::format("{}", thrown ? thrown->message() : ""));
 }
 
 // TODO SERVER-97299: Remove this test in favor of
@@ -846,7 +989,9 @@ public:
 
 TEST_F(AsioTransportLayerWithServiceContextTest, TimerServiceDoesNotSpawnThreadsBeforeStart) {
     ThreadCounter counter;
-    { AsioTransportLayer::TimerService service{{counter.makeSpawnFunc()}}; }
+    {
+        AsioTransportLayer::TimerService service{{counter.makeSpawnFunc()}};
+    }
     ASSERT_EQ(counter.created(), 0);
 }
 
@@ -900,7 +1045,8 @@ TEST_F(AsioTransportLayerWithServiceContextTest, ShutdownDuringSSLHandshake) {
      * Creates a server and a client thread:
      * - The server listens for incoming connections, but doesn't participate in SSL handshake.
      * - The client connects to the server, and is configured to perform SSL handshake.
-     * The server never writes on the socket in response to the handshake request, thus the client
+     * The server never writes on the socket in response to the handshake request, thus the
+     client
      * should block until it is timed out.
      * The goal is to simulate a server crash, and verify the behavior of the client, during the
      * handshake process.
@@ -922,73 +1068,6 @@ TEST_F(AsioTransportLayerWithServiceContextTest, ShutdownDuringSSLHandshake) {
 }
 #endif  // MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_OPENSSL
 #endif  // MONGO_CONFIG_SSL
-
-class AsioTransportLayerWithRouterPortTest : public ServiceContextTest {
-public:
-    // We opted to use static ports for simplicity. If this results in test failures due to busy
-    // ports, we may change the fixture, as well as the underlying transport layer, to dynamically
-    // choose the listening ports.
-    static constexpr auto kMainPort = 22000;
-    static constexpr auto kRouterPort = 22001;
-
-    void setUp() override {
-        auto options = defaultTLAOptions();
-        options.port = kMainPort;
-        options.routerPort = kRouterPort;
-        _fixture = std::make_unique<TestFixture>(options);
-    }
-
-    void tearDown() override {
-        _fixture.reset();
-    }
-
-    test::MockSessionManager& sessionManager() {
-        return _fixture->sessionManager();
-    }
-
-    StatusWith<std::shared_ptr<Session>> connect(HostAndPort remote) {
-        return _fixture->tla().connect(remote, ConnectSSLMode::kDisableSSL, Seconds{10}, {});
-    }
-
-    void doDifferentiatesConnectionsCase(bool useRouterPort) {
-        auto onStartSession = std::make_shared<Notification<void>>();
-        sessionManager().setOnStartSession([&](test::SessionThread& st) {
-            ASSERT_EQ(st.session()->isFromRouterPort(), useRouterPort);
-
-            auto client =
-                getServiceContext()->getService()->makeClient("RouterPortTest", st.session());
-            ASSERT_EQ(client->isRouterClient(), useRouterPort);
-
-            onStartSession->set();
-        });
-        HostAndPort target{testHostName(), useRouterPort ? kRouterPort : kMainPort};
-        auto conn = connect(target);
-        ASSERT_OK(conn) << " target={}"_format(target);
-        onStartSession->get();
-    }
-
-private:
-    RAIIServerParameterControllerForTest _scopedFeature{"featureFlagRouterPort", true};
-    ScopedValueGuard<ClusterRole> _scopedClusterRole{
-        serverGlobalParams.clusterRole, {ClusterRole::RouterServer, ClusterRole::ShardServer}};
-    std::shared_ptr<void> _disableTfo = tfo::setConfigForTest(0, 0, 0, 1024, Status::OK());
-    std::unique_ptr<TestFixture> _fixture;
-};
-
-TEST_F(AsioTransportLayerWithRouterPortTest, ListensOnBothPorts) {
-    for (auto port : {kRouterPort, kMainPort}) {
-        HostAndPort remote(testHostName(), port);
-        ASSERT_OK(connect(remote).getStatus()) << "Unable to connect to " << remote;
-    }
-}
-
-TEST_F(AsioTransportLayerWithRouterPortTest, DifferentiatesConnectionsMainPort) {
-    doDifferentiatesConnectionsCase(false);
-}
-
-TEST_F(AsioTransportLayerWithRouterPortTest, DifferentiatesConnectionsRouterPort) {
-    doDifferentiatesConnectionsCase(true);
-}
 
 #ifdef __linux__
 
@@ -1042,6 +1121,10 @@ public:
 
         void setAllowMultipleSessions() {
             _allowMultipleSessions = true;
+        }
+
+        std::vector<std::pair<SessionId, std::string>> getOpenSessionIDs() const override {
+            return {};
         }
 
     private:
@@ -1699,6 +1782,40 @@ TEST_F(EgressAsioNetworkingBatonTest, AsyncOpsMakeProgressWhenSessionAddedToDeta
     // `asyncOpMutex`) and is blocked by `fp`. Once we return from this function, that thread is
     // unblocked and will run `Baton::addSession` on a detached baton.
     opCtx.reset();
+}
+
+class NetworkOperationTest : public AsioNetworkingBatonTest {};
+
+/**
+ * Creates a connection and interrupts the server side while it awaits the second half of a message.
+ * The expected behavior for the server thread is to continue picking up data from the wire after
+ * receiving the interruption.
+ */
+TEST_F(NetworkOperationTest, InterruptDuringRead) {
+    connection().wait();
+
+    auto pf = makePromiseFuture<Message>();
+    test::JoinThread serverThread([&] { pf.promise.setFrom(client().session()->sourceMessage()); });
+
+    auto msg = [] {
+        OpMsgRequest request;
+        request.body = BSON("ping" << 1 << "$db"
+                                   << "admin");
+        auto msg = request.serialize();
+        msg.header().setResponseToMsgId(0);
+        return msg;
+    }();
+
+    const auto kChunkSize = msg.size() / 2;
+    connection().socket().send(msg.buf(), kChunkSize, "sending the first batch");
+    // Wait before signaling to make it more likely for the server thread to be waiting for the next
+    // batch while receiving the interruption signal.
+    sleepFor(Milliseconds(10));
+    pthread_kill(serverThread.native_handle(), SIGRTMIN);
+    connection().socket().send(msg.buf() + kChunkSize, msg.size() - kChunkSize, "sending the rest");
+
+    auto received = pf.future.get();
+    ASSERT_EQ(received.opMsgDebugString(), msg.opMsgDebugString());
 }
 
 #endif  // __linux__

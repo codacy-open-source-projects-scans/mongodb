@@ -29,23 +29,22 @@
 
 // IWYU pragma: no_include "cxxabi.h"
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <absl/container/inlined_vector.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr.hpp>
-#include <functional>
-#include <mutex>
-#include <string>
+#include "mongo/db/exec/sbe/stages/exchange.h"
 
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
-#include "mongo/db/exec/sbe/stages/exchange.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/future_impl.h"
+
+#include <functional>
+#include <mutex>
+#include <string>
+
 
 namespace mongo::sbe {
 std::unique_ptr<ThreadPool> s_globalThreadPool;
@@ -293,7 +292,9 @@ void ExchangeConsumer::open(bool reOpen) {
             }
 
             // Start n producers.
-            invariant(_state->producerCompileCtxs().size() == _state->numOfProducers());
+            tassert(11093503,
+                    "Number of producer contexts doesn't match the number of producers",
+                    _state->producerCompileCtxs().size() == _state->numOfProducers());
             for (size_t idx = 0; idx < _state->numOfProducers(); ++idx) {
                 auto pf = makePromiseFuture<void>();
                 s_globalThreadPool->schedule(
@@ -646,7 +647,7 @@ PlanState ExchangeProducer::getNext() {
                 }
             } break;
             default:
-                MONGO_UNREACHABLE;
+                MONGO_UNREACHABLE_TASSERT(11122907);
                 break;
         }
     }

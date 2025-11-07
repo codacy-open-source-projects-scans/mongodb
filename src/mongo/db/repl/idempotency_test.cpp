@@ -28,17 +28,6 @@
  */
 
 
-#include <cstddef>
-#include <cstdint>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -49,11 +38,10 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/dbhelpers.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/idempotency_test_fixture.h"
 #include "mongo/db/repl/member_state.h"
@@ -64,12 +52,19 @@
 #include "mongo/db/update/document_diff_test_helpers.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/random.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -104,9 +99,9 @@ BSONObj canonicalizeBSONObjForDataHash(const BSONObj& obj);
 BSONArray canonicalizeArrayForDataHash(const BSONObj& arr) {
     BSONArrayBuilder arrBuilder;
     for (auto&& elem : arr) {
-        if (elem.type() == mongo::Array) {
+        if (elem.type() == BSONType::array) {
             arrBuilder.append(canonicalizeArrayForDataHash(elem.embeddedObject()));
-        } else if (elem.type() == mongo::Object) {
+        } else if (elem.type() == BSONType::object) {
             arrBuilder.append(canonicalizeBSONObjForDataHash(elem.embeddedObject()));
         } else {
             arrBuilder.append(elem);
@@ -121,7 +116,7 @@ BSONObj canonicalizeBSONObjForDataHash(const BSONObj& obj) {
     while (iter.more()) {
         auto elem = iter.next();
         if (elem.isABSONObj()) {
-            if (elem.type() == mongo::Array) {
+            if (elem.type() == BSONType::array) {
                 objBuilder.append(elem.fieldName(),
                                   canonicalizeArrayForDataHash(elem.embeddedObject()));
             } else {
@@ -141,7 +136,13 @@ BSONObj RandomizedIdempotencyTest::canonicalizeDocumentForDataHash(const BSONObj
     return canonicalizeBSONObjForDataHash(obj);
 }
 BSONObj RandomizedIdempotencyTest::getDoc() {
-    AutoGetCollectionForReadCommand autoColl(_opCtx.get(), _nss);
+    auto coll = acquireCollection(
+        _opCtx.get(),
+        CollectionAcquisitionRequest(_nss,
+                                     PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                     repl::ReadConcernArgs::get(_opCtx.get()),
+                                     AcquisitionPrerequisites::kRead),
+        MODE_IS);
     BSONObj doc;
     Helpers::findById(_opCtx.get(), _nss, kDocIdQuery, doc);
     return doc.getOwned();
@@ -197,8 +198,7 @@ Status RandomizedIdempotencyTest::resetState() {
             // before creating it.
             auto uuid = catalog.lookupUUIDByNSS(_opCtx.get(), _nss);
             if (uuid) {
-                catalog.deregisterCollection(
-                    _opCtx.get(), *uuid, /*isDropPending=*/false, /*commitTime=*/boost::none);
+                catalog.deregisterCollection(_opCtx.get(), *uuid, /*commitTime=*/boost::none);
             }
         });
     }
@@ -242,6 +242,14 @@ void RandomizedIdempotencyTest::runUpdateV2IdempotencyTestCase() {
             auto diffOutput = doc_diff::computeOplogDiff(
                 oldDoc, *generatedDoc, update_oplog_entry::kSizeOfDeltaOplogEntryMetadata);
             ASSERT(diffOutput);
+            if (diffOutput->isEmpty()) {
+                // The computeOplogDiff function returns an empty diff object when the size of the
+                // computed diff is larger than the 'post' image. Retrying because the diff field
+                // can't be empty in an update oplog.
+                LOGV2(9873500, "Retrying because the diff field can't be empty.");
+                i--;
+                continue;
+            }
             oplogDiff = BSON("$v" << 2 << "diff" << *diffOutput);
             auto op = update(kDocId, oplogDiff);
             ASSERT_OK(runOpInitialSync(op));

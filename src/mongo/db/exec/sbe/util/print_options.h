@@ -29,9 +29,10 @@
 
 #pragma once
 
+#include "mongo/util/modules.h"
+
 #include <cstddef>
 
-#include "mongo/platform/basic.h"
 
 namespace mongo::sbe {
 

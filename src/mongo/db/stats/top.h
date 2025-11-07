@@ -33,10 +33,6 @@
  * DB usage monitor.
  */
 
-#include <boost/date_time/posix_time/posix_time.hpp>
-#include <cstdint>
-#include <span>
-
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/namespace_string.h"
@@ -45,16 +41,26 @@
 #include "mongo/db/stats/operation_latency_histogram.h"
 #include "mongo/rpc/message.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/observable_mutex.h"
+#include "mongo/util/observable_mutex_registry.h"
 #include "mongo/util/string_map.h"
+
+#include <cstdint>
+#include <span>
+
+#include <boost/date_time/posix_time/posix_time.hpp>
 
 namespace mongo {
 
 /**
  * Tracks cumulative latency statistics for a Service (shard-role or router-role).
  */
-class ServiceLatencyTracker {
+class MONGO_MOD_PUB ServiceLatencyTracker {
 public:
     static ServiceLatencyTracker& getDecoration(Service* service);
+
+    ServiceLatencyTracker();
 
     /**
      * Increments the cumulative histograms only if the operation came from a user.
@@ -92,7 +98,7 @@ private:
 /**
  * Tracks shard-role usage by collection.
  */
-class Top {
+class MONGO_MOD_PUB Top {
 public:
     struct UsageData {
         long long time{0};
@@ -129,6 +135,10 @@ public:
     };
 
     typedef StringMap<CollectionData> UsageMap;
+
+    Top() {
+        ObservableMutexRegistry::get().add("Top::_lockUsage", _lockUsage);
+    }
 
     static Top& getDecoration(OperationContext* opCtx);
 
@@ -183,7 +193,7 @@ public:
 
 private:
     // _lockUsage should always be acquired before using _usage.
-    stdx::mutex _lockUsage;
+    ObservableMutex<stdx::mutex> _lockUsage;
     UsageMap _usage;
 };
 

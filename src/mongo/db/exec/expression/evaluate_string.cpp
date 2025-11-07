@@ -27,12 +27,12 @@
  *    it in the license file.
  */
 
-#include <boost/algorithm/string/case_conv.hpp>
-
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/expression/evaluate.h"
-#include "mongo/db/query/str_trim_utils.h"
-#include "mongo/db/query/substr_utils.h"
+#include "mongo/db/exec/str_trim_utils.h"
+#include "mongo/db/exec/substr_utils.h"
+
+#include <boost/algorithm/string/case_conv.hpp>
 
 namespace mongo {
 
@@ -51,107 +51,12 @@ Value evaluate(const ExpressionConcat& expr, const Document& root, Variables* va
 
         uassert(16702,
                 str::stream() << "$concat only supports strings, not " << typeName(val.getType()),
-                val.getType() == String);
+                val.getType() == BSONType::string);
 
         result << val.coerceToString();
     }
 
-    return Value(result.str());
-}
-
-namespace {
-
-template <typename ExpressionReplace>
-Value evaluateReplace(ExpressionReplace& expr,
-                      const Document& root,
-                      Variables* variables,
-                      std::function<Value(StringData, StringData, StringData)> replaceOp) {
-    Value input = expr.getInput()->evaluate(root, variables);
-    Value find = expr.getFind()->evaluate(root, variables);
-    Value replacement = expr.getReplacement()->evaluate(root, variables);
-
-    // Throw an error if any arg is non-string, non-nullish.
-    uassert(51746,
-            str::stream() << expr.getOpName()
-                          << " requires that 'input' be a string, found: " << input.toString(),
-            input.getType() == BSONType::String || input.nullish());
-    uassert(51745,
-            str::stream() << expr.getOpName()
-                          << " requires that 'find' be a string, found: " << find.toString(),
-            find.getType() == BSONType::String || find.nullish());
-    uassert(51744,
-            str::stream() << expr.getOpName() << " requires that 'replacement' be a string, found: "
-                          << replacement.toString(),
-            replacement.getType() == BSONType::String || replacement.nullish());
-
-    // Return null if any arg is nullish.
-    if (input.nullish()) {
-        return Value(BSONNULL);
-    }
-    if (find.nullish()) {
-        return Value(BSONNULL);
-    }
-    if (replacement.nullish()) {
-        return Value(BSONNULL);
-    }
-
-    return replaceOp(input.getStringData(), find.getStringData(), replacement.getStringData());
-}
-
-}  // namespace
-
-Value evaluate(const ExpressionReplaceOne& expr, const Document& root, Variables* variables) {
-    auto replaceOneOp = [](StringData input, StringData find, StringData replacement) -> Value {
-        size_t startIndex = input.find(find);
-        if (startIndex == std::string::npos) {
-            return Value(StringData(input));
-        }
-
-        // An empty string matches at every position, so replaceOne should insert the replacement
-        // text at position 0. input.find correctly returns position 0 when 'find' is empty, so we
-        // don't need any special case to handle this.
-        size_t endIndex = startIndex + find.size();
-        StringBuilder output;
-        output << input.substr(0, startIndex);
-        output << replacement;
-        output << input.substr(endIndex);
-        return Value(output.stringData());
-    };
-    return evaluateReplace(expr, root, variables, replaceOneOp);
-}
-
-Value evaluate(const ExpressionReplaceAll& expr, const Document& root, Variables* variables) {
-    auto replaceAllOp = [](StringData input, StringData find, StringData replacement) -> Value {
-        // An empty string matches at every position, so replaceAll should insert 'replacement' at
-        // every position when 'find' is empty. Handling this as a special case lets us assume
-        // 'find' is nonempty in the usual case.
-        if (find.size() == 0) {
-            StringBuilder output;
-            for (char c : input) {
-                output << replacement << c;
-            }
-            output << replacement;
-            return Value(output.stringData());
-        }
-
-        StringBuilder output;
-        for (;;) {
-            size_t startIndex = input.find(find);
-            if (startIndex == std::string::npos) {
-                output << input;
-                break;
-            }
-
-            size_t endIndex = startIndex + find.size();
-            output << input.substr(0, startIndex);
-            output << replacement;
-            // This step assumes 'find' is nonempty. If 'find' were empty then input.find would
-            // always find a match at position 0, and the input would never shrink.
-            input = input.substr(endIndex);
-        }
-        return Value(output.stringData());
-    };
-    return evaluateReplace(expr, root, variables, replaceAllOp);
+    return Value(result.stringData());
 }
 
 Value evaluate(const ExpressionStrcasecmp& expr, const Document& root, Variables* variables) {
@@ -222,7 +127,7 @@ Value evaluate(const ExpressionSubstrBytes& expr, const Document& root, Variable
         // empty string if lower is not a valid string index.
         return Value(StringData());
     }
-    return Value(str.substr(lower, length));
+    return Value(StringData(str).substr(lower, length));
 }
 
 Value evaluate(const ExpressionSubstrCP& expr, const Document& root, Variables* variables) {
@@ -284,7 +189,7 @@ Value evaluate(const ExpressionStrLenBytes& expr, const Document& root, Variable
     uassert(34473,
             str::stream() << "$strLenBytes requires a string argument, found: "
                           << typeName(str.getType()),
-            str.getType() == BSONType::String);
+            str.getType() == BSONType::string);
 
     return strLenBytes(str.getStringData());
 }
@@ -298,9 +203,9 @@ Value evaluate(const ExpressionBinarySize& expr, const Document& root, Variables
     uassert(51276,
             str::stream() << "$binarySize requires a string or BinData argument, found: "
                           << typeName(arg.getType()),
-            arg.getType() == BSONType::BinData || arg.getType() == BSONType::String);
+            arg.getType() == BSONType::binData || arg.getType() == BSONType::string);
 
-    if (arg.getType() == BSONType::String) {
+    if (arg.getType() == BSONType::string) {
         return strLenBytes(arg.getStringData());
     }
 
@@ -314,7 +219,7 @@ Value evaluate(const ExpressionStrLenCP& expr, const Document& root, Variables* 
     uassert(34471,
             str::stream() << "$strLenCP requires a string argument, found: "
                           << typeName(val.getType()),
-            val.getType() == String);
+            val.getType() == BSONType::string);
 
     std::string stringVal = val.getString();
     size_t strLen = str::lengthInUTF8CodePoints(stringVal);
@@ -349,7 +254,7 @@ Value evaluate(const ExpressionTrim& expr, const Document& root, Variables* vari
             str::stream() << expr.getName() << " requires its input to be a string, got "
                           << unvalidatedInput.toString() << " (of type "
                           << typeName(unvalidatedInput.getType()) << ") instead.",
-            unvalidatedInput.getType() == BSONType::String);
+            unvalidatedInput.getType() == BSONType::string);
     const StringData input(unvalidatedInput.getStringData());
 
     auto trimType = expr.getTrimType();
@@ -369,7 +274,7 @@ Value evaluate(const ExpressionTrim& expr, const Document& root, Variables* vari
             str::stream() << expr.getName() << " requires 'chars' to be a string, got "
                           << unvalidatedUserChars.toString() << " (of type "
                           << typeName(unvalidatedUserChars.getType()) << ") instead.",
-            unvalidatedUserChars.getType() == BSONType::String);
+            unvalidatedUserChars.getType() == BSONType::string);
 
     return Value(str_trim_utils::doTrim(
         input,
@@ -377,50 +282,6 @@ Value evaluate(const ExpressionTrim& expr, const Document& root, Variables* vari
         trimType == ExpressionTrim::TrimType::kBoth || trimType == ExpressionTrim::TrimType::kLeft,
         trimType == ExpressionTrim::TrimType::kBoth ||
             trimType == ExpressionTrim::TrimType::kRight));
-}
-
-Value evaluate(const ExpressionSplit& expr, const Document& root, Variables* variables) {
-    auto& children = expr.getChildren();
-    Value inputArg = children[0]->evaluate(root, variables);
-    Value separatorArg = children[1]->evaluate(root, variables);
-
-    if (inputArg.nullish() || separatorArg.nullish()) {
-        return Value(BSONNULL);
-    }
-
-    uassert(40085,
-            str::stream() << "$split requires an expression that evaluates to a string as a first "
-                             "argument, found: "
-                          << typeName(inputArg.getType()),
-            inputArg.getType() == BSONType::String);
-    uassert(40086,
-            str::stream() << "$split requires an expression that evaluates to a string as a second "
-                             "argument, found: "
-                          << typeName(separatorArg.getType()),
-            separatorArg.getType() == BSONType::String);
-
-    StringData input = inputArg.getStringData();
-    StringData separator = separatorArg.getStringData();
-
-    uassert(40087, "$split requires a non-empty separator", !separator.empty());
-
-    std::vector<Value> output;
-
-    const char* needle = separator.rawData();
-    const char* const needleEnd = needle + separator.size();
-    const char* remainingHaystack = input.rawData();
-    const char* const haystackEnd = remainingHaystack + input.size();
-
-    const char* it = remainingHaystack;
-    while ((it = std::search(remainingHaystack, haystackEnd, needle, needleEnd)) != haystackEnd) {
-        StringData sd(remainingHaystack, it - remainingHaystack);
-        output.push_back(Value(sd));
-        remainingHaystack = it + separator.size();
-    }
-
-    StringData splitString(remainingHaystack, input.size() - (remainingHaystack - input.rawData()));
-    output.push_back(Value(splitString));
-    return Value(std::move(output));
 }
 
 namespace {
@@ -459,14 +320,14 @@ Value evaluate(const ExpressionIndexOfBytes& expr, const Document& root, Variabl
     uassert(40091,
             str::stream() << "$indexOfBytes requires a string as the first argument, found: "
                           << typeName(stringArg.getType()),
-            stringArg.getType() == String);
+            stringArg.getType() == BSONType::string);
     const std::string& input = stringArg.getString();
 
     Value tokenArg = children[1]->evaluate(root, variables);
     uassert(40092,
             str::stream() << "$indexOfBytes requires a string as the second argument, found: "
                           << typeName(tokenArg.getType()),
-            tokenArg.getType() == String);
+            tokenArg.getType() == BSONType::string);
     const std::string& token = tokenArg.getString();
 
     size_t startIndex = 0;
@@ -507,14 +368,14 @@ Value evaluate(const ExpressionIndexOfCP& expr, const Document& root, Variables*
     uassert(40093,
             str::stream() << "$indexOfCP requires a string as the first argument, found: "
                           << typeName(stringArg.getType()),
-            stringArg.getType() == String);
+            stringArg.getType() == BSONType::string);
     const std::string& input = stringArg.getString();
 
     Value tokenArg = children[1]->evaluate(root, variables);
     uassert(40094,
             str::stream() << "$indexOfCP requires a string as the second argument, found: "
                           << typeName(tokenArg.getType()),
-            tokenArg.getType() == String);
+            tokenArg.getType() == BSONType::string);
     const std::string& token = tokenArg.getString();
 
     size_t startCodePointIndex = 0;

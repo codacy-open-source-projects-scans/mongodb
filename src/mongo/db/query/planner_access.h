@@ -29,27 +29,26 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
+#include "mongo/db/query/compiler/optimizer/index_bounds_builder/interval_evaluation_tree.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
+#include "mongo/db/query/index_tag.h"
+#include "mongo/db/query/query_planner_params.h"
+#include "mongo/db/query/record_id_range.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
 #include <cstddef>
 #include <memory>
 #include <vector>
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/exec/collection_scan_common.h"
-#include "mongo/db/matcher/expression.h"
-#include "mongo/db/query/canonical_query.h"
-#include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/index_bounds_builder.h"
-#include "mongo/db/query/index_entry.h"
-#include "mongo/db/query/index_tag.h"
-#include "mongo/db/query/interval_evaluation_tree.h"
-#include "mongo/db/query/query_planner.h"
-#include "mongo/db/query/query_planner_params.h"
-#include "mongo/db/query/query_solution.h"
-#include "mongo/db/query/record_id_bound.h"
-#include "mongo/db/query/record_id_range.h"
-#include "mongo/util/assert_util.h"
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -526,12 +525,12 @@ private:
     static void handleFilter(ScanBuildingState* scanState);
 
     /**
-     * Implements handleFilter(...) for OR queries.
+     * Implements handleFilter(...) for AND queries.
      */
     static void handleFilterAnd(ScanBuildingState* scanState);
 
     /**
-     * Implements handleFilter(...) for AND queries.
+     * Implements handleFilter(...) for OR queries.
      */
     static void handleFilterOr(ScanBuildingState* scanState);
 };

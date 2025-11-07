@@ -29,8 +29,20 @@
 
 #pragma once
 
-#include <absl/container/node_hash_map.h>
-#include <boost/optional/optional.hpp>
+#include "mongo/base/status.h"
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/index_tag.h"
+#include "mongo/db/query/plan_enumerator/enumerator_memo.h"
+#include "mongo/db/query/plan_enumerator/plan_enumerator_explain_info.h"
+#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/modules.h"
+
 #include <cstddef>
 #include <deque>
 #include <map>
@@ -40,17 +52,7 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/status.h"
-#include "mongo/db/matcher/expression.h"
-#include "mongo/db/query/canonical_query.h"
-#include "mongo/db/query/index_entry.h"
-#include "mongo/db/query/index_tag.h"
-#include "mongo/db/query/plan_enumerator/enumerator_memo.h"
-#include "mongo/db/query/plan_enumerator/plan_enumerator_explain_info.h"
-#include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/unordered_map.h"
-#include "mongo/util/fail_point.h"
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace plan_enumerator {
@@ -505,7 +507,7 @@ private:
 
     // If true, there are no further enumeration states, and getNext should return false.
     // We could be _done immediately after init if we're unable to output an indexed plan.
-    bool _done;
+    bool _done = false;
 
     //
     // Data used by all enumeration strategies

@@ -29,21 +29,17 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <string>
-#include <tuple>
-#include <utility>
-#include <vector>
-
 #include "mongo/db/exec/sbe/expressions/expression.h"
-#include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_visitor.h"
-#include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
+#include "mongo/util/modules.h"
+
+#include <utility>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo::stage_builder {
 class PlanStageSlots;
@@ -79,7 +75,7 @@ std::pair<sbe::value::TypeTags, sbe::value::Value> convertBitTestBitPositions(
  */
 SbExpr generateComparisonExpr(StageBuilderState& state,
                               const ComparisonMatchExpression* expr,
-                              sbe::EPrimBinary::Op binaryOp,
+                              abt::Operations binaryOp,
                               SbExpr inputExpr);
 SbExpr generateInExpr(StageBuilderState& state, const InMatchExpression* expr, SbExpr inputExpr);
 SbExpr generateBitTestExpr(StageBuilderState& state,

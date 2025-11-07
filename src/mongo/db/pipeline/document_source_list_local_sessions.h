@@ -29,19 +29,8 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
 #include "mongo/crypto/sha256_block.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -51,16 +40,24 @@
 #include "mongo/db/pipeline/document_source_list_sessions_gen.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
-#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_level.h"
-#include "mongo/db/session/logical_session_cache.h"
-#include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -81,7 +78,8 @@ public:
     class LiteParsed final : public LiteParsedDocumentSource {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
-                                                 const BSONElement& spec) {
+                                                 const BSONElement& spec,
+                                                 const LiteParserOptions& options) {
 
             return std::make_unique<LiteParsed>(
                 spec.fieldName(),
@@ -105,6 +103,10 @@ public:
             return _privileges;
         }
 
+        bool requiresAuthzChecks() const override {
+            return false;
+        }
+
         bool isInitialSource() const final {
             return true;
         }
@@ -124,18 +126,20 @@ public:
     };
 
     const char* getSourceName() const final {
-        return DocumentSourceListLocalSessions::kStageName.rawData();
+        return DocumentSourceListLocalSessions::kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kListLocalSessions;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final {
         return Value(Document{{getSourceName(), _spec.toBSON(opts)}});
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         StageConstraints constraints(StreamType::kStreaming,
                                      PositionRequirement::kFirst,
                                      HostTypeRequirement::kLocalOnly,
@@ -146,7 +150,7 @@ public:
                                      UnionRequirement::kNotAllowed);
 
         constraints.isIndependentOfAnyCollection = true;
-        constraints.requiresInputDocSource = false;
+        constraints.setConstraintsForNoInputSources();
         return constraints;
     }
 
@@ -159,15 +163,14 @@ public:
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
+    const ListSessionsSpec& getSpec() const {
+        return _spec;
+    }
+
 private:
     DocumentSourceListLocalSessions(const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
                                     const ListSessionsSpec& spec);
-
-    GetNextResult doGetNext() final;
-
     const ListSessionsSpec _spec;
-    const LogicalSessionCache* _cache;
-    std::vector<LogicalSessionId> _ids;
 };
 
 }  // namespace mongo

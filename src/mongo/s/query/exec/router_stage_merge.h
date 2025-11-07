@@ -29,15 +29,16 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/db/query/query_stats/data_bearing_node_metrics.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/s/query/exec/blocking_results_merger.h"
 #include "mongo/s/query/exec/cluster_client_cursor_params.h"
 #include "mongo/s/query/exec/router_exec_stage.h"
 #include "mongo/s/transaction_router_resource_yielder.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <memory>
 
 namespace mongo {
 
@@ -60,11 +61,16 @@ public:
         return _resultsMerger.next(getOpCtx());
     }
 
+    Status releaseMemory() final {
+        auto res = _resultsMerger.releaseMemory();
+        return res;
+    }
+
     void kill(OperationContext* opCtx) final {
         _resultsMerger.kill(opCtx);
     }
 
-    bool remotesExhausted() final {
+    bool remotesExhausted() const final {
         return _resultsMerger.remotesExhausted();
     }
 

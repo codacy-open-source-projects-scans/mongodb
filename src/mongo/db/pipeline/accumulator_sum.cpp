@@ -27,12 +27,6 @@
  *    it in the license file.
  */
 
-#include <cmath>
-#include <memory>
-#include <vector>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -47,8 +41,12 @@
 #include "mongo/db/pipeline/window_function/window_function_sum.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 #include "mongo/util/summation.h"
+
+#include <cmath>
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -74,7 +72,7 @@ void applyPartialSum(const std::vector<Value>& arr,
                      Decimal128& decimalTotal) {
     tassert(6294002,
             "The partial sum's first element must be an int",
-            arr[AggSumValueElems::kNonDecimalTotalTag].getType() == NumberInt);
+            arr[AggSumValueElems::kNonDecimalTotalTag].getType() == BSONType::numberInt);
     nonDecimalTotalType = Value::getWidestNumeric(
         nonDecimalTotalType,
         static_cast<BSONType>(arr[AggSumValueElems::kNonDecimalTotalTag].getInt()));
@@ -82,10 +80,10 @@ void applyPartialSum(const std::vector<Value>& arr,
 
     tassert(6294003,
             "The partial sum's second element must be a double",
-            arr[AggSumValueElems::kNonDecimalTotalSum].getType() == NumberDouble);
+            arr[AggSumValueElems::kNonDecimalTotalSum].getType() == BSONType::numberDouble);
     tassert(6294004,
             "The partial sum's third element must be a double",
-            arr[AggSumValueElems::kNonDecimalTotalAddend].getType() == NumberDouble);
+            arr[AggSumValueElems::kNonDecimalTotalAddend].getType() == BSONType::numberDouble);
 
     auto sum = arr[AggSumValueElems::kNonDecimalTotalSum].getDouble();
     auto addend = arr[AggSumValueElems::kNonDecimalTotalAddend].getDouble();
@@ -100,10 +98,10 @@ void applyPartialSum(const std::vector<Value>& arr,
     }
 
     if (arr.size() == AggSumValueElems::kMaxSizeOfArray) {
-        totalType = NumberDecimal;
+        totalType = BSONType::numberDecimal;
         tassert(6294005,
                 "The partial sum's last element must be a decimal",
-                arr[AggSumValueElems::kDecimalTotal].getType() == NumberDecimal);
+                arr[AggSumValueElems::kDecimalTotal].getType() == BSONType::numberDecimal);
         decimalTotal = decimalTotal.add(arr[AggSumValueElems::kDecimalTotal].getDecimal());
     }
 }
@@ -112,13 +110,13 @@ DoubleDoubleSummation AccumulatorSum::_constantSumToDoubleDoubleSummation() {
     auto constantSum = getValue(false /* toBeMerged */);
     DoubleDoubleSummation dds;
     switch (totalType) {
-        case NumberInt:
+        case BSONType::numberInt:
             dds.addInt(constantSum.getInt());
             break;
-        case NumberLong:
+        case BSONType::numberLong:
             dds.addLong(constantSum.getLong());
             break;
-        case NumberDouble:
+        case BSONType::numberDouble:
             dds.addDouble(constantSum.getDouble());
             break;
         default:
@@ -130,7 +128,7 @@ DoubleDoubleSummation AccumulatorSum::_constantSumToDoubleDoubleSummation() {
 void AccumulatorSum::_processInternalConstant(const Value& input,
                                               AccumulatorSum::ConstantSumState& constantTotal) {
     switch (totalType) {
-        case NumberInt: {
+        case BSONType::numberInt: {
             int intTotal = std::get<int>(constantTotal);
             if (int newIntTotal = 0; !overflow::add(intTotal, input.getInt(), &newIntTotal)) {
                 constantTotal = newIntTotal;
@@ -138,11 +136,11 @@ void AccumulatorSum::_processInternalConstant(const Value& input,
             }
             // Upconvert to long on overflow.
             constantTotal = static_cast<long long>(intTotal);
-            totalType = NumberLong;
+            totalType = BSONType::numberLong;
             nonDecimalTotalType = totalType;
             [[fallthrough]];
         }
-        case NumberLong: {
+        case BSONType::numberLong: {
             auto longTotal = std::get<long long>(constantTotal);
             if (long long newLongTotal = 0;
                 !overflow::add(longTotal, input.coerceToLong(), &newLongTotal)) {
@@ -151,11 +149,11 @@ void AccumulatorSum::_processInternalConstant(const Value& input,
             }
             // Upconvert to double on overflow.
             constantTotal = static_cast<double>(longTotal);
-            totalType = NumberDouble;
+            totalType = BSONType::numberDouble;
             nonDecimalTotalType = totalType;
             [[fallthrough]];
         }
-        case NumberDouble:
+        case BSONType::numberDouble:
             // Here we do not check for overflow because we assume that any double addition that
             // would overflow would produce an INF value.
             constantTotal = std::get<double>(constantTotal) + input.coerceToDouble();
@@ -174,20 +172,20 @@ void AccumulatorSum::_processInternalNonConstant(
 
     // Keep the nonDecimalTotal's type so that the type information can be serialized too for
     // 'toBeMerged' scenarios.
-    if (input.getType() != NumberDecimal) {
+    if (input.getType() != BSONType::numberDecimal) {
         nonDecimalTotalType = Value::getWidestNumeric(nonDecimalTotalType, input.getType());
     }
     switch (input.getType()) {
-        case NumberLong:
+        case BSONType::numberLong:
             nonDecimalTotal.addLong(input.getLong());
             break;
-        case NumberInt:
+        case BSONType::numberInt:
             nonDecimalTotal.addInt(input.getInt());
             break;
-        case NumberDouble:
+        case BSONType::numberDouble:
             nonDecimalTotal.addDouble(input.getDouble());
             break;
-        case NumberDecimal:
+        case BSONType::numberDecimal:
             decimalTotal = decimalTotal.add(input.coerceToDecimal());
             break;
         default:
@@ -205,14 +203,11 @@ void AccumulatorSum::processInternal(const Value& input, bool merging) {
         auto& nonConst = std::get<AccumulatorSum::NonConstantSumState>(sum);
         auto& nonDecimalTotal = nonConst.first;
         auto& decimalTotal = nonConst.second;
-        if (input.getType() == BSONType::Array) {
-            // The merge-side must be ready to process the full state of a partial sum from a
-            // shard-side.
-            applyPartialSum(
-                input.getArray(), nonDecimalTotalType, totalType, nonDecimalTotal, decimalTotal);
-        } else {
-            MONGO_UNREACHABLE_TASSERT(7720303);
-        }
+        assertMergingInputType(input, BSONType::array);
+        // The merge-side must be ready to process the full state of a partial sum from a
+        // shard-side.
+        applyPartialSum(
+            input.getArray(), nonDecimalTotalType, totalType, nonDecimalTotal, decimalTotal);
         return;
     }
 
@@ -232,15 +227,6 @@ void AccumulatorSum::processInternal(const Value& input, bool merging) {
           sum);
 }
 
-intrusive_ptr<AccumulatorState> AccumulatorSum::create(ExpressionContext* const expCtx) {
-    return new AccumulatorSum(expCtx);
-}
-
-intrusive_ptr<AccumulatorState> AccumulatorSum::create(ExpressionContext* expCtx,
-                                                       boost::optional<Value> constantAddend) {
-    return new AccumulatorSum(expCtx, constantAddend);
-}
-
 Value serializePartialSum(BSONType nonDecimalTotalType,
                           BSONType totalType,
                           const DoubleDoubleSummation& nonDecimalTotal,
@@ -255,7 +241,7 @@ Value serializePartialSum(BSONType nonDecimalTotalType,
     // is 'NumberDecimal'.
     auto valueArrayStream = ValueArrayStream();
     valueArrayStream << static_cast<int>(nonDecimalTotalType) << sum << addend;
-    if (totalType == NumberDecimal) {
+    if (totalType == BSONType::numberDecimal) {
         valueArrayStream << decimalTotal;
     }
 
@@ -312,21 +298,21 @@ Value AccumulatorSum::getValue(bool toBeMerged) {
                           [&](AccumulatorSum::NonConstantSumState& nonConstantSum) -> Value {
                               auto& nonDecimalTotal = nonConstantSum.first;
                               switch (totalType) {
-                                  case NumberInt:
+                                  case BSONType::numberInt:
                                       if (nonDecimalTotal.fitsLong())
                                           return Value::createIntOrLong(nonDecimalTotal.getLong());
                                       [[fallthrough]];
-                                  case NumberLong:
+                                  case BSONType::numberLong:
                                       if (nonDecimalTotal.fitsLong())
                                           return Value(nonDecimalTotal.getLong());
 
                                       // Sum doesn't fit a NumberLong, so return a NumberDouble
                                       // instead.
                                       [[fallthrough]];
-                                  case NumberDouble: {
+                                  case BSONType::numberDouble: {
                                       return Value(nonDecimalTotal.getDouble());
                                   }
-                                  case NumberDecimal: {
+                                  case BSONType::numberDecimal: {
                                       return Value(
                                           nonConstantSum.second.add(nonDecimalTotal.getDecimal()));
                                   }
@@ -344,15 +330,15 @@ AccumulatorSum::AccumulatorSum(ExpressionContext* const expCtx) : AccumulatorSta
 
 void AccumulatorSum::_initConstant(const BSONType& type) {
     switch (totalType) {
-        case NumberInt: {
+        case BSONType::numberInt: {
             sum = static_cast<int>(0);
             break;
         }
-        case NumberLong: {
+        case BSONType::numberLong: {
             sum = static_cast<long long>(0);
             break;
         }
-        case NumberDouble: {
+        case BSONType::numberDouble: {
             sum = static_cast<double>(0.0);
             break;
         }
@@ -385,8 +371,8 @@ void AccumulatorSum::reset() {
         nonDecimalTotalType = type;
         _initConstant(totalType);
     } else {
-        totalType = NumberInt;
-        nonDecimalTotalType = NumberInt;
+        totalType = BSONType::numberInt;
+        nonDecimalTotalType = BSONType::numberInt;
         sum = std::make_pair<DoubleDoubleSummation, Decimal128>({}, {});
     }
 }
@@ -402,8 +388,8 @@ boost::optional<Value> AccumulatorSum::getConstantArgument(boost::intrusive_ptr<
     // NumberDouble.
     auto value = constArg->getValue();
     auto type = value.getType();
-    if (type == BSONType::NumberInt || type == BSONType::NumberLong ||
-        type == BSONType::NumberDouble) {
+    if (type == BSONType::numberInt || type == BSONType::numberLong ||
+        type == BSONType::numberDouble) {
         return value;
     }
 

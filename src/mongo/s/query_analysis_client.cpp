@@ -29,21 +29,17 @@
 
 #include "mongo/s/query_analysis_client.h"
 
-#include <boost/smart_ptr.hpp>
-#include <string>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
+#include "mongo/db/repl/intent_guard.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/replication_state_transition_lock_guard.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/util/assert_util.h"
@@ -54,6 +50,12 @@
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/smart_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -92,6 +94,10 @@ void QueryAnalysisClient::setTaskExecutor(ServiceContext* service,
 }
 
 bool QueryAnalysisClient::_canAcceptWrites(OperationContext* opCtx, const DatabaseName& dbName) {
+    if (gFeatureFlagIntentRegistration.isEnabled()) {
+        return rss::consensus::IntentRegistry::get(opCtx->getServiceContext())
+            .canDeclareIntent(rss::consensus::IntentRegistry::Intent::Write, opCtx);
+    }
     repl::ReplicationStateTransitionLockGuard rstl(opCtx, MODE_IX);
     return mongo::repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesForDatabase(opCtx,
                                                                                        dbName);

@@ -15,7 +15,7 @@
  */
 import {kDefaultWaitForFailPointTimeout} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 // Use a 3-node replica set config to ensure that the primary waits for the secondaries when the
 // commit quorum is in effect.
@@ -24,39 +24,41 @@ rst.startSet();
 rst.initiate();
 
 const primary = rst.getPrimary();
-const testDB = primary.getDB('test');
-const coll = testDB.getCollection('test');
+const testDB = primary.getDB("test");
+const coll = testDB.getCollection("test");
 
 assert.commandWorked(coll.insert({a: 1}));
 
-const res = assert.commandWorked(primary.adminCommand(
-    {configureFailPoint: 'hangBeforeInitializingIndexBuild', mode: 'alwaysOn'}));
+const res = assert.commandWorked(
+    primary.adminCommand({configureFailPoint: "hangBeforeInitializingIndexBuild", mode: "alwaysOn"}),
+);
 const failpointTimesEntered = res.count;
 
 const createIdx = IndexBuildTest.startIndexBuild(primary, coll.getFullName(), {a: 1});
 
 try {
-    assert.commandWorked(primary.adminCommand({
-        waitForFailPoint: "hangBeforeInitializingIndexBuild",
-        timesEntered: failpointTimesEntered + 1,
-        maxTimeMS: kDefaultWaitForFailPointTimeout
-    }));
+    assert.commandWorked(
+        primary.adminCommand({
+            waitForFailPoint: "hangBeforeInitializingIndexBuild",
+            timesEntered: failpointTimesEntered + 1,
+            maxTimeMS: kDefaultWaitForFailPointTimeout,
+        }),
+    );
 
     // Remove the document from the collection so that the secondary sees an empty collection.
     assert.commandWorked(coll.remove({a: 1}));
 } finally {
-    assert.commandWorked(primary.adminCommand(
-        {configureFailPoint: 'hangBeforeInitializingIndexBuild', mode: 'off'}));
+    assert.commandWorked(primary.adminCommand({configureFailPoint: "hangBeforeInitializingIndexBuild", mode: "off"}));
 }
 
 // Expect successful createIndex command invocation in parallel shell. A new index should be
 // present on the primary.
 createIdx();
-IndexBuildTest.assertIndexes(coll, 2, ['_id_', 'a_1']);
+IndexBuildTest.assertIndexes(coll, 2, ["_id_", "a_1"]);
 
 rst.awaitReplication();
 const secondary = rst.getSecondary();
 const secondaryColl = secondary.getCollection(coll.getFullName());
-IndexBuildTest.assertIndexes(secondaryColl, 2, ['_id_', 'a_1']);
+IndexBuildTest.assertIndexes(secondaryColl, 2, ["_id_", "a_1"]);
 
 rst.stopSet();

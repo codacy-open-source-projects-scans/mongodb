@@ -27,16 +27,18 @@
  *    it in the license file.
  */
 
-#include "mongo/db/query/client_cursor/cursor_response.h"
-#include "mongo/db/query/find.h"
-#include "mongo/db/query/plan_executor.h"
-#include <cstddef>
+#pragma once
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/query/client_cursor/cursor_response.h"
+#include "mongo/db/query/find.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
 
 namespace mongo {
 
@@ -59,7 +61,6 @@ struct AwaitDataState {
 
 extern const OperationContext::Decoration<AwaitDataState> awaitDataState;
 
-class BSONObj;
 class CanonicalQuery;
 class FindCommandRequest;
 
@@ -92,7 +93,7 @@ extern FailPoint failGetMoreAfterCursorCheckout;
 /**
  * Suite of find/getMore related functions used in both the mongod and mongos query paths.
  */
-class FindCommon {
+class MONGO_MOD_NEEDS_REPLACEMENT FindCommon {
 public:
     // The maximum amount of user data to return to a client in a single batch.
     //
@@ -124,16 +125,12 @@ public:
      */
     class BSONObjCursorAppender {
     public:
-        BSONObjCursorAppender(const bool alwaysAcceptFirstDoc,
-                              PlanExecutor* exec,
+        BSONObjCursorAppender(bool alwaysAcceptFirstDoc,
                               CursorResponseBuilder* builder,
-                              ResourceConsumption::DocumentUnitCounter* docUnitsReturned,
                               BSONObj& pbrt,
                               bool& failedToAppend)
             : _alwaysAcceptFirstDoc{alwaysAcceptFirstDoc},
-              _exec{exec},
               _builder{builder},
-              _docUnitsReturned{docUnitsReturned},
               _pbrt{pbrt},
               _failedToAppend{failedToAppend} {}
 
@@ -143,7 +140,7 @@ public:
 
         MONGO_COMPILER_ALWAYS_INLINE bool operator()(const BSONObj& obj,
                                                      const BSONObj& nextPostBatchResumeToken,
-                                                     const size_t numAppended) {
+                                                     size_t numAppended) {
             objSize = obj.objsize();
 
             if (MONGO_unlikely(
@@ -157,7 +154,6 @@ public:
             }
 
             _builder->append(obj);
-            _docUnitsReturned->observeOne(objSize);
 
             // If this executor produces a postBatchResumeToken, store it. We will set the
             // latest valid 'pbrt' on the batch at the end of batched execution.
@@ -166,16 +162,15 @@ public:
         }
 
     private:
-        // State not owned by us.
         const bool _alwaysAcceptFirstDoc;
-        PlanExecutor* _exec;
+
+        // State not owned by us.
         CursorResponseBuilder* _builder;
-        ResourceConsumption::DocumentUnitCounter* _docUnitsReturned;
         BSONObj& _pbrt;
         bool& _failedToAppend;
 
         // State within append() calls.
-        size_t objSize;
+        size_t objSize = 0;
     };
 
     MONGO_COMPILER_ALWAYS_INLINE static bool fitsInBatch(size_t bytesBuffered, size_t objSize) {

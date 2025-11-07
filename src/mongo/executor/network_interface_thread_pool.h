@@ -29,16 +29,17 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <cstdint>
-#include <mutex>
-#include <vector>
-
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/thread_pool_interface.h"
 #include "mongo/util/hierarchical_acquisition.h"
 #include "mongo/util/out_of_line_executor.h"
+
+#include <cstdint>
+#include <mutex>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 namespace executor {
@@ -65,7 +66,7 @@ public:
 
 private:
     void _consumeTasks(stdx::unique_lock<stdx::mutex> lk);
-    void _consumeTasksInline(stdx::unique_lock<stdx::mutex> lk) noexcept;
+    void _consumeTasksInline(stdx::unique_lock<stdx::mutex> lk);
     void _dtorImpl();
 
     NetworkInterface* const _net;

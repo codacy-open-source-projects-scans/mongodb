@@ -34,10 +34,11 @@
 #include "mongo/bson/bson_depth.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/mutable/algorithm.h"
-#include "mongo/bson/mutable/const_element.h"
-#include "mongo/bson/mutable/document.h"
+#include "mongo/db/exec/mutable_bson/algorithm.h"
+#include "mongo/db/exec/mutable_bson/const_element.h"
+#include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/db/query/dbref.h"
+#include "mongo/db/query/util/validate_id.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 
@@ -87,7 +88,7 @@ void validateDollarPrefixElement(mutablebson::ConstElement elem) {
         uassert(ErrorCodes::InvalidDBRef,
                 str::stream() << "The DBRef $db field must be a String, not a "
                               << typeName(curr.getType()),
-                curr.getType() == BSONType::String);
+                curr.getType() == BSONType::string);
         curr = curr.leftSibling();
 
         uassert(ErrorCodes::InvalidDBRef,
@@ -112,7 +113,7 @@ void validateDollarPrefixElement(mutablebson::ConstElement elem) {
         uassert(ErrorCodes::InvalidDBRef,
                 str::stream() << "The DBRef $ref field must be a String, not a "
                               << typeName(curr.getType()),
-                curr.getType() == BSONType::String);
+                curr.getType() == BSONType::string);
 
         uassert(ErrorCodes::InvalidDBRef,
                 "The DBRef $ref field must be followed by a $id field",
@@ -129,29 +130,6 @@ void validateDollarPrefixElement(mutablebson::ConstElement elem) {
 }
 }  // namespace
 
-Status storageValidIdField(const mongo::BSONElement& element) {
-    switch (element.type()) {
-        case BSONType::RegEx:
-        case BSONType::Array:
-        case BSONType::Undefined:
-            return Status(ErrorCodes::InvalidIdField,
-                          str::stream()
-                              << "The '_id' value cannot be of type " << typeName(element.type()));
-        case BSONType::Object: {
-            auto status = element.Obj().storageValidEmbedded();
-            if (!status.isOK() && status.code() == ErrorCodes::DollarPrefixedFieldName) {
-                return Status(status.code(),
-                              str::stream() << "_id fields may not contain '$'-prefixed fields: "
-                                            << status.reason());
-            }
-            return status;
-        }
-        default:
-            break;
-    }
-    return Status::OK();
-}
-
 void scanDocument(const mutablebson::Document& doc,
                   const bool allowTopLevelDollarPrefixes,
                   const bool shouldValidate,
@@ -160,7 +138,7 @@ void scanDocument(const mutablebson::Document& doc,
     auto currElem = doc.root().leftChild();
     while (currElem.ok()) {
         if (currElem.getFieldName() == idFieldName && shouldValidate) {
-            if (currElem.getType() == BSONType::Object) {
+            if (currElem.getType() == BSONType::object) {
                 // We need to recursively validate the _id field while ensuring we disallow
                 // top-level $-prefix fields in the _id object.
                 scanDocument(currElem,
@@ -171,7 +149,7 @@ void scanDocument(const mutablebson::Document& doc,
                              true /* Indicates the element is embedded inside an _id field. */,
                              containsDotsAndDollarsField);
             } else {
-                uassertStatusOK(storageValidIdField(currElem.getValue()));
+                uassertStatusOK(validIdField(currElem.getValue()));
             }
             uassert(ErrorCodes::BadValue, "Can't have multiple _id fields in one document", !hasId);
             hasId = true;
@@ -211,7 +189,7 @@ void scanDocument(mutablebson::ConstElement elem,
     // Field names of elements inside arrays are not meaningful in mutable bson,
     // so we do not want to validate them.
     const mutablebson::ConstElement& parent = elem.parent();
-    const bool childOfArray = parent.ok() ? (parent.getType() == BSONType::Array) : false;
+    const bool childOfArray = parent.ok() ? (parent.getType() == BSONType::array) : false;
 
     // Only check top-level fields if 'allowTopLevelDollarPrefixes' is false, and don't validate any
     // fields for '$'-prefixes if 'allowTopLevelDollarPrefixes' is true. If 'isEmbeddedInIdField' is

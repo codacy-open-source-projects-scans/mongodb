@@ -29,9 +29,6 @@
 
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_text_base.h"
 #include "mongo/db/matcher/expression_where_base.h"
@@ -39,9 +36,13 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
-
 class NamespaceString;
 class OperationContext;
 
@@ -49,7 +50,7 @@ class OperationContext;
  * ExtensionsCallbackReal uses the provided OperationContext and namespace to capture context
  * necessary for parsing $text and $where clauses.
  */
-class ExtensionsCallbackReal : public ExtensionsCallback {
+class MONGO_MOD_PUB ExtensionsCallbackReal : public ExtensionsCallback {
 public:
     /**
      * Does not take ownership of 'nss' or 'opCtx'.
@@ -60,7 +61,7 @@ public:
      */
     ExtensionsCallbackReal(OperationContext* opCtx, const NamespaceString* nss);
 
-    ~ExtensionsCallbackReal() override{};
+    ~ExtensionsCallbackReal() override {};
 
     std::unique_ptr<MatchExpression> createText(
         TextMatchExpressionBase::TextParams text) const final;

@@ -27,37 +27,26 @@
  *    it in the license file.
  */
 
+#include "mongo/db/pipeline/document_source.h"
 
-#include <absl/meta/type_traits.h>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/base/initializer.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/feature_compatibility_version_documentation.h"
+#include "mongo/db/feature_flag.h"
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/pipeline/change_stream_constants.h"
-#include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_group.h"
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/document_source_redact.h"
 #include "mongo/db/pipeline/document_source_sample.h"
 #include "mongo/db/pipeline/document_source_single_document_transformation.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/lite_parsed_document_source.h"
-#include "mongo/db/query/allowed_contexts.h"
+#include "mongo/db/pipeline/search/document_source_vector_search.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/plan_summary_stats_visitor.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/string_map.h"
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -65,55 +54,66 @@
 namespace mongo {
 
 using boost::intrusive_ptr;
-using std::list;
-using std::string;
-using std::vector;
 
 StringMap<DocumentSource::ParserRegistration> DocumentSource::parserMap;
 
-DocumentSource::DocumentSource(const StringData stageName,
-                               const intrusive_ptr<ExpressionContext>& pCtx)
-    : pSource(nullptr), pExpCtx(pCtx), _commonStats(stageName.rawData()) {
-    if (pExpCtx->shouldCollectDocumentSourceExecStats()) {
-        if (internalMeasureQueryExecutionTimeInNanoseconds.load()) {
-            _commonStats.executionTime.precision = QueryExecTimerPrecision::kNanos;
-        } else {
-            _commonStats.executionTime.precision = QueryExecTimerPrecision::kMillis;
-        }
-    }
+DocumentSource::DocumentSource(StringData stageName, const intrusive_ptr<ExpressionContext>& pCtx)
+    : _expCtx(pCtx) {}
+
+void DocumentSource::unregisterParser_forTest(const std::string& name) {
+    parserMap.erase(name);
 }
 
-void accumulatePipelinePlanSummaryStats(const Pipeline& pipeline,
-                                        PlanSummaryStats& planSummaryStats) {
-    auto visitor = PlanSummaryStatsVisitor(planSummaryStats);
-    for (auto&& source : pipeline.getSources()) {
-        if (auto specificStats = source->getSpecificStats()) {
-            specificStats->acceptVisitor(&visitor);
-        }
-    }
-}
-
-void DocumentSource::registerParser(string name,
+void DocumentSource::registerParser(std::string name,
                                     Parser parser,
-                                    boost::optional<FeatureFlag> featureFlag) {
-    auto it = parserMap.find(name);
-    massert(28707,
-            str::stream() << "Duplicate document source (" << name << ") registered.",
-            it == parserMap.end());
-    parserMap[name] = {parser, featureFlag};
-}
-void DocumentSource::registerParser(string name,
-                                    SimpleParser simpleParser,
-                                    boost::optional<FeatureFlag> featureFlag) {
+                                    FeatureFlag* featureFlag,
+                                    bool skipIfExists) {
+    // Set of aggregation stages that are allowed to be overridden (via extensions).
+    static const stdx::unordered_set<StringData> allowedOverrideStages = {
+        DocumentSourceVectorSearch::kStageName,
+    };
 
-    Parser parser =
-        [simpleParser = std::move(simpleParser)](
-            BSONElement stageSpec,
-            const intrusive_ptr<ExpressionContext>& expCtx) -> list<intrusive_ptr<DocumentSource>> {
+    auto it = parserMap.find(name);
+    if (skipIfExists && it != parserMap.end()) {
+        // Short-circuit if the stage is already registered and skipIfExists is true.
+        LOGV2_DEBUG(10918508,
+                    2,
+                    "Silently skipping registration of parser since name already exists",
+                    "name"_attr = name);
+        return;
+    }
+
+    // Allow override only for stages in the allowed list, otherwise assert on duplicates.
+    if (it != parserMap.end() && !allowedOverrideStages.contains(name)) {
+        // Parser registration only takes place during startup, so any issues with parser
+        // registration should fail startup completely. For clarity, that is why we use fassert
+        // (shuts down the whole process) instead of tassert (fails an individual operation),
+        // although a tassert would technically fail the process anyways.
+        LOGV2_FATAL(28707, "Cannot register duplicate aggregation stage.", "stageName"_attr = name);
+    }
+
+    parserMap[std::move(name)] = {std::move(parser), featureFlag};
+}
+
+void DocumentSource::registerParser(std::string name,
+                                    SimpleParser simpleParser,
+                                    FeatureFlag* featureFlag,
+                                    bool skipIfExists) {
+    Parser parser = [simpleParser = std::move(simpleParser)](
+                        BSONElement stageSpec, const intrusive_ptr<ExpressionContext>& expCtx)
+        -> std::list<intrusive_ptr<DocumentSource>> {
         return {simpleParser(std::move(stageSpec), expCtx)};
     };
-    return registerParser(std::move(name), std::move(parser), std::move(featureFlag));
+    return registerParser(std::move(name), std::move(parser), std::move(featureFlag), skipIfExists);
 }
+
+DocumentSource::Id DocumentSource::allocateId(StringData name) {
+    static AtomicWord<Id> next{kUnallocatedId + 1};
+    auto id = next.fetchAndAdd(1);
+    LOGV2_DEBUG(9901900, 5, "Allocating DocumentSourceId", "id"_attr = id, "name"_attr = name);
+    return id;
+}
+
 bool DocumentSource::hasQuery() const {
     return false;
 }
@@ -122,7 +122,7 @@ BSONObj DocumentSource::getQuery() const {
     MONGO_UNREACHABLE;
 }
 
-list<intrusive_ptr<DocumentSource>> DocumentSource::parse(
+std::list<intrusive_ptr<DocumentSource>> DocumentSource::parse(
     const intrusive_ptr<ExpressionContext>& expCtx, BSONObj stageObj) {
     uassert(16435,
             "A pipeline stage specification object must contain exactly one field.",
@@ -138,7 +138,9 @@ list<intrusive_ptr<DocumentSource>> DocumentSource::parse(
             it != parserMap.end());
 
     auto& entry = it->second;
-    expCtx->throwIfFeatureFlagIsNotEnabledOnFCV(stageName, entry.featureFlag);
+    if (entry.featureFlag) {
+        expCtx->ignoreFeatureInParserOrRejectAndThrow(stageName, *entry.featureFlag);
+    }
 
     return it->second.parser(stageSpec, expCtx);
 }
@@ -165,18 +167,47 @@ namespace {
  * ---->
  *   {$match: {x: {$exists: true}}
  *   {$group: {_id: "$x"}}
-
+ * However with a compound _id spec (something of the form {_id: {x: ..., y: ..., ...}}) existence
+ * predicates would be correct to push before as these preserve missing.
+ * Note: singular id specs can also be of the form {_id: {x: ...}}.
+ *
  * For $type, the $type operator can distinguish between values that compare equal in the $group
  * stage, meaning documents that are regarded unequally in the $match stage are equated in the
  * $group stage. This leads to varied results depending on the order of the $match and $group.
+ * Type predicates are incorrect to push ahead regardless of _id spec.
  */
 bool groupMatchSwapVerified(const DocumentSourceMatch& nextMatch,
                             const DocumentSourceGroup& thisGroup) {
+    // Construct a set of id fields.
+    OrderedPathSet idFields;
+    for (const auto& key : thisGroup.getIdFieldNames()) {
+        idFields.insert(std::string("_id.").append(key));
+    }
+
+    // getIdFieldsNames will be 0 if the spec is of the forms {_id: ...}.
+    if (idFields.empty()) {
+        idFields.insert("_id");
+    }
+
+    // If there's any type predicate we cannot swap.
+    if (expression::hasPredicateOnPaths(*(nextMatch.getMatchExpression()),
+                                        MatchExpression::MatchType::TYPE_OPERATOR,
+                                        idFields)) {
+        return false;
+    }
+
+    /**
+     * If there's a compound _id spec (e.g. {_id: {x: ..., y: ..., ...}}), we can swap regardless of
+     * existence predicate.
+     * getIdFields will be 1 if the spec is of the forms {_id: ...} or {_id: {x: ...}}.
+     */
     if (thisGroup.getIdFields().size() != 1) {
         return true;
     }
-    return !expression::hasExistenceOrTypePredicateOnPath(*(nextMatch.getMatchExpression()),
-                                                          "_id"_sd);
+
+    // If there's an existence predicate in a non-compound _id spec, we cannot swap.
+    return !expression::hasPredicateOnPaths(
+        *(nextMatch.getMatchExpression()), MatchExpression::MatchType::EXISTS, idFields);
 }
 
 /**
@@ -188,8 +219,8 @@ bool isChangeStreamRouterPipelineStage(StringData stageName) {
 }
 }  // namespace
 
-bool DocumentSource::pushMatchBefore(Pipeline::SourceContainer::iterator itr,
-                                     Pipeline::SourceContainer* container) {
+bool DocumentSource::pushMatchBefore(DocumentSourceContainer::iterator itr,
+                                     DocumentSourceContainer* container) {
     if (!constraints().canSwapWithMatch) {
         return false;
     }
@@ -252,8 +283,8 @@ bool DocumentSource::pushMatchBefore(Pipeline::SourceContainer::iterator itr,
     return true;
 }
 
-bool DocumentSource::pushSampleBefore(Pipeline::SourceContainer::iterator itr,
-                                      Pipeline::SourceContainer* container) {
+bool DocumentSource::pushSampleBefore(DocumentSourceContainer::iterator itr,
+                                      DocumentSourceContainer* container) {
     auto nextSample = dynamic_cast<DocumentSourceSample*>((*std::next(itr)).get());
     if (constraints().canSwapWithSkippingOrLimitingStage && nextSample) {
 
@@ -284,7 +315,7 @@ BSONObj DocumentSource::serializeToBSONForDebug() const {
 }
 
 bool DocumentSource::pushSingleDocumentTransformOrRedactBefore(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     if (constraints().canSwapWithSingleDocTransformOrRedact) {
         auto nextItr = std::next(itr);
         if (dynamic_cast<DocumentSourceSingleDocumentTransformation*>(nextItr->get()) ||
@@ -305,8 +336,8 @@ bool DocumentSource::pushSingleDocumentTransformOrRedactBefore(
     return false;
 }
 
-Pipeline::SourceContainer::iterator DocumentSource::optimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator DocumentSource::optimizeAt(DocumentSourceContainer::iterator itr,
+                                                             DocumentSourceContainer* container) {
     invariant(*itr == this);
 
     // Attempt to swap 'itr' with a subsequent stage, if applicable.
@@ -319,26 +350,20 @@ Pipeline::SourceContainer::iterator DocumentSource::optimizeAt(
     return doOptimizeAt(itr, container);
 }
 
-void DocumentSource::serializeToArray(vector<Value>& array,
+void DocumentSource::serializeToArray(std::vector<Value>& array,
                                       const SerializationOptions& opts) const {
     Value entry = serialize(opts);
     if (!entry.missing()) {
-        array.push_back(entry);
+        array.push_back(std::move(entry));
     }
 }
 
-namespace {
-std::list<boost::intrusive_ptr<DocumentSource>> throwOnParse(
-    BSONElement spec, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
-    uasserted(6047400, spec.fieldNameStringData() + " stage is only allowed on MongoDB Atlas");
-}
-std::unique_ptr<LiteParsedDocumentSource> throwOnParseLite(NamespaceString nss,
-                                                           const BSONElement& spec) {
-    uasserted(6047401, spec.fieldNameStringData() + " stage is only allowed on MongoDB Atlas");
-}
-}  // namespace
 MONGO_INITIALIZER_GROUP(BeginDocumentSourceRegistration,
                         ("default"),
                         ("EndDocumentSourceRegistration"))
 MONGO_INITIALIZER_GROUP(EndDocumentSourceRegistration, ("BeginDocumentSourceRegistration"), ())
+MONGO_INITIALIZER_GROUP(BeginDocumentSourceIdAllocation,
+                        ("default"),
+                        ("EndDocumentSourceIdAllocation"))
+MONGO_INITIALIZER_GROUP(EndDocumentSourceIdAllocation, ("BeginDocumentSourceIdAllocation"), ())
 }  // namespace mongo

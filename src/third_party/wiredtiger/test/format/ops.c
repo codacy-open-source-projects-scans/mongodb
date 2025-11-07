@@ -40,7 +40,7 @@ static int col_update(TINFO *, bool);
 static int nextprev(TINFO *, bool);
 static WT_THREAD_RET ops(void *);
 static int read_row(TINFO *);
-static void rollback_transaction(TINFO *);
+static void rollback_transaction(TINFO *, bool);
 static int row_insert(TINFO *, bool);
 static int row_modify(TINFO *, bool);
 static int row_remove(TINFO *, bool);
@@ -230,12 +230,28 @@ tinfo_teardown(void)
 static void
 rollback_to_stable(WT_SESSION *session)
 {
+    u_int num_threads;
+    char cfg[32];
+
     /* Rollback-to-stable only makes sense for timestamps. */
     if (!g.transaction_timestamps_config)
         return;
 
-    /* Rollback the system. */
-    testutil_check(g.wts_conn->rollback_to_stable(g.wts_conn, NULL));
+    /* Rollback-to-stable is not supported for disaggregated storage. */
+    if (g.disagg_storage_config)
+        return;
+
+    /* Rollback-to-stable is not supported for precise checkpoint. */
+    if (GV(PRECISE_CHECKPOINT))
+        return;
+
+    /*
+     * Rollback the system using up to 10 threads. Extend to 11 values to cover the NULL config
+     * case.
+     */
+    num_threads = mmrand(&g.extra_rnd, 0, 11);
+    testutil_snprintf(cfg, sizeof(cfg), "threads=%" PRIu32, num_threads);
+    testutil_check(g.wts_conn->rollback_to_stable(g.wts_conn, num_threads == 11 ? NULL : cfg));
 
     /*
      * Get the stable timestamp, and update ours. They should be the same, but there's no point in
@@ -267,8 +283,8 @@ operations(u_int ops_seconds, u_int run_current, u_int run_total)
     TINFO *tinfo, total;
     WT_CONNECTION *conn;
     WT_SESSION *session;
-    wt_thread_t alter_tid, background_compact_tid, backup_tid, checkpoint_tid, compact_tid, hs_tid,
-      import_tid, random_tid;
+    wt_thread_t alter_tid, background_compact_tid, backup_tid, checkpoint_tid, compact_tid,
+      follower_tid, hs_tid, import_tid, random_tid;
     wt_thread_t timestamp_tid;
     int64_t fourths, quit_fourths, thread_ops;
     uint32_t i;
@@ -286,6 +302,7 @@ operations(u_int ops_seconds, u_int run_current, u_int run_total)
     memset(&backup_tid, 0, sizeof(backup_tid));
     memset(&checkpoint_tid, 0, sizeof(checkpoint_tid));
     memset(&compact_tid, 0, sizeof(compact_tid));
+    memset(&follower_tid, 0, sizeof(follower_tid));
     memset(&hs_tid, 0, sizeof(hs_tid));
     memset(&import_tid, 0, sizeof(import_tid));
     memset(&random_tid, 0, sizeof(random_tid));
@@ -354,6 +371,8 @@ operations(u_int ops_seconds, u_int run_current, u_int run_total)
         testutil_check(__wt_thread_create(NULL, &backup_tid, backup, NULL));
     if (GV(OPS_COMPACTION))
         testutil_check(__wt_thread_create(NULL, &compact_tid, compact, NULL));
+    if (disagg_is_multi_node() && !g.disagg_leader)
+        testutil_check(__wt_thread_create(NULL, &follower_tid, follower, NULL));
     if (GV(OPS_HS_CURSOR))
         testutil_check(__wt_thread_create(NULL, &hs_tid, hs_cursor, NULL));
     if (GV(IMPORT))
@@ -455,6 +474,8 @@ operations(u_int ops_seconds, u_int run_current, u_int run_total)
         testutil_check(__wt_thread_join(NULL, &checkpoint_tid));
     if (GV(OPS_COMPACTION))
         testutil_check(__wt_thread_join(NULL, &compact_tid));
+    if (disagg_is_multi_node() && !g.disagg_leader)
+        testutil_check(__wt_thread_join(NULL, &follower_tid));
     if (GV(OPS_HS_CURSOR))
         testutil_check(__wt_thread_join(NULL, &hs_tid));
     if (GV(IMPORT))
@@ -500,6 +521,7 @@ begin_transaction_ts(TINFO *tinfo)
     WT_DECL_RET;
     WT_SESSION *session;
     uint64_t ts;
+    const char *config;
 
     session = tinfo->session;
 
@@ -514,9 +536,18 @@ begin_transaction_ts(TINFO *tinfo)
          * both modes: 75% of the time, pick a read timestamp before any commit timestamp still in
          * use, 25% of the time don't set a timestamp at all.
          */
-        ts = mmrand(&tinfo->data_rnd, 1, 4) == 1 ? 0 : timestamp_maximum_committed();
+        ts = mmrand(&tinfo->data_rnd, 1, 4) == 1 ? 0 : timestamp_minimum_committed();
     if (ts != 0) {
-        wt_wrap_begin_transaction(session, NULL);
+        /* 10% of times configure ignore_prepare */
+        if (GV(OPS_PREPARE) && (mmrand(&tinfo->data_rnd, 1, 10) == 1)) {
+            config = "ignore_prepare=true";
+            tinfo->ignore_prepare = true;
+        } else {
+            config = NULL;
+            tinfo->ignore_prepare = false;
+        }
+
+        wt_wrap_begin_transaction(session, config);
 
         /*
          * If the timestamp has aged out of the system, we'll get EINVAL when we try and set it.
@@ -528,7 +559,6 @@ begin_transaction_ts(TINFO *tinfo)
             trace_uri_op(tinfo, NULL, "begin snapshot read-ts=%" PRIu64 " (repeatable)", ts);
             return;
         }
-
         testutil_assert(ret == EINVAL);
         testutil_check(session->rollback_transaction(session, NULL));
     }
@@ -569,6 +599,7 @@ commit_transaction(TINFO *tinfo, bool prepared)
     session = tinfo->session;
 
     ++tinfo->commit;
+    tinfo->ignore_prepare = false;
 
     ts = 0; /* -Wconditional-uninitialized */
     if (g.transaction_timestamps_config) {
@@ -578,7 +609,7 @@ commit_transaction(TINFO *tinfo, bool prepared)
         if (GV(RUNS_PREDICTABLE_REPLAY))
             ts = replay_commit_ts(tinfo);
         else
-            ts = __wt_atomic_addv64(&g.timestamp, 1);
+            ts = __wt_atomic_add_uint64_v(&g.timestamp, 1);
         testutil_check(session->timestamp_transaction_uint(session, WT_TS_TXN_TYPE_COMMIT, ts));
 
         if (prepared)
@@ -607,18 +638,30 @@ commit_transaction(TINFO *tinfo, bool prepared)
  *     Rollback a transaction.
  */
 static void
-rollback_transaction(TINFO *tinfo)
+rollback_transaction(TINFO *tinfo, bool prepared)
 {
     WT_SESSION *session;
+    uint64_t ts;
 
     session = tinfo->session;
+    ts = 0;
 
     ++tinfo->rollback;
+    tinfo->ignore_prepare = false;
 
+    if (prepared) {
+        if (GV(RUNS_PREDICTABLE_REPLAY))
+            ts = replay_rollback_ts(tinfo);
+        else
+            ts = __wt_atomic_add_uint64_v(&g.timestamp, 1);
+
+        testutil_check(session->timestamp_transaction_uint(session, WT_TS_TXN_TYPE_ROLLBACK, ts));
+    }
     testutil_check(session->rollback_transaction(session, NULL));
     replay_rollback(tinfo);
 
-    trace_uri_op(tinfo, NULL, "abort read-ts=%" PRIu64, tinfo->read_ts);
+    trace_uri_op(
+      tinfo, NULL, "abort read-ts=%" PRIu64 ", rollback-ts=%" PRIu64, tinfo->read_ts, ts);
 }
 
 /*
@@ -630,25 +673,28 @@ prepare_transaction(TINFO *tinfo)
 {
     WT_DECL_RET;
     WT_SESSION *session;
-    uint64_t ts;
+    uint64_t prepared_id, ts;
 
     session = tinfo->session;
 
     ++tinfo->prepare;
 
+    prepared_id = __wt_atomic_add_uint64_v(&g.prepared_id, 1);
     if (GV(RUNS_PREDICTABLE_REPLAY))
         ts = replay_prepare_ts(tinfo);
     else
         /*
-         * Prepare timestamps must be less than or equal to the eventual commit timestamp. Set the
-         * prepare timestamp to whatever the global value is now. The subsequent commit will
-         * increment it, ensuring correctness.
+         * Prepare timestamps must be less than or equal to the eventual commit timestamp but larger
+         * than the current stable timestamp. Increase the global value to ensure it is larger than
+         * the stable timestamp. The subsequent commit will increment it again, ensuring
+         * correctness.
          */
-        ts = __wt_atomic_fetch_addv64(&g.timestamp, 1);
+        ts = __wt_atomic_add_uint64_v(&g.timestamp, 1);
     testutil_check(session->timestamp_transaction_uint(session, WT_TS_TXN_TYPE_PREPARE, ts));
+    testutil_check(session->prepared_id_transaction_uint(session, prepared_id));
     ret = session->prepare_transaction(session, NULL);
 
-    trace_uri_op(tinfo, NULL, "prepare ts=%" PRIu64, ts);
+    trace_uri_op(tinfo, NULL, "prepare ts=%" PRIu64 ", prepared id=%" PRIu64, ts, prepared_id);
 
     return (ret);
 }
@@ -747,9 +793,10 @@ table_op(TINFO *tinfo, bool intxn, iso_level_t iso_level, thread_op op)
          * If we're in a snapshot-isolation transaction, optionally reserve a row (it's an update so
          * can't be done at lower isolation levels). Reserving a row in an implicit transaction will
          * work, but doesn't make sense. Reserving a row before a read won't be useful but it's not
-         * unexpected.
+         * unexpected. A row cannot be reserved with ignore prepare.
          */
-        if (intxn && iso_level == ISOLATION_SNAPSHOT && mmrand(&tinfo->data_rnd, 0, 20) == 1) {
+        if (intxn && iso_level == ISOLATION_SNAPSHOT && tinfo->ignore_prepare == false &&
+          mmrand(&tinfo->data_rnd, 0, 20) == 1) {
             switch (table->type) {
             case ROW:
                 ret = row_reserve(tinfo, positioned);
@@ -1008,6 +1055,7 @@ ops(void *arg)
             __wt_sleep(throttle_delay / WT_MILLION, throttle_delay % WT_MILLION);
         }
 rollback_retry:
+        prepared = false;
         mirrored_truncate = false;
         if (tinfo->quit)
             break;
@@ -1112,18 +1160,19 @@ rollback_retry:
         }
 
         /*
-         * Select an operation: updates cannot happen at lower isolation levels and modify must be
-         * in an explicit transaction.
+         * Select an operation: updates cannot happen at lower isolation levels or with
+         * ignore_prepare and modify must be in an explicit transaction.
          */
         op = READ;
-        if (iso_level == ISOLATION_IMPLICIT || iso_level == ISOLATION_SNAPSHOT) {
+        if ((iso_level == ISOLATION_IMPLICIT || iso_level == ISOLATION_SNAPSHOT) &&
+          (tinfo->ignore_prepare == false)) {
             i = mmrand(&tinfo->data_rnd, 1, 100);
             if (i < TV(OPS_PCT_DELETE)) {
                 op = REMOVE;
                 if (TV(OPS_TRUNCATE) && tinfo->ops > truncate_op) {
                     /* Limit test runs to a maximum of 4 truncation operations at a time. */
-                    if (__wt_atomic_addv64(&g.truncate_cnt, 1) > 4)
-                        (void)__wt_atomic_subv64(&g.truncate_cnt, 1);
+                    if (__wt_atomic_add_uint64_v(&g.truncate_cnt, 1) > 4)
+                        (void)__wt_atomic_sub_uint64_v(&g.truncate_cnt, 1);
                     else
                         op = TRUNCATE;
 
@@ -1324,7 +1373,7 @@ skip_operation:
 
         /* Release the truncate operation counter. */
         if (op == TRUNCATE)
-            (void)__wt_atomic_subv64(&g.truncate_cnt, 1);
+            (void)__wt_atomic_sub_uint64_v(&g.truncate_cnt, 1);
 
         /* Drain any pending column-store inserts. */
         if (g.column_store_config)
@@ -1372,7 +1421,6 @@ skip_operation:
          * If prepare configured, prepare the transaction 10% of the time. Note prepare requires a
          * timestamped world, which means we're in a snapshot-isolation transaction by definition.
          */
-        prepared = false;
         if (GV(OPS_PREPARE) && mmrand(&tinfo->data_rnd, 1, 10) == 1) {
             if ((ret = prepare_transaction(tinfo)) != 0) {
                 testutil_assert(ret == WT_ROLLBACK);
@@ -1401,7 +1449,7 @@ rollback:
                     goto loop_exit;
                 /* Force a rollback */
                 testutil_assert(intxn);
-                rollback_transaction(tinfo);
+                rollback_transaction(tinfo, prepared);
                 intxn = false;
                 ++ntries;
                 replay_pause_after_rollback(tinfo, ntries);
@@ -1409,7 +1457,7 @@ rollback:
                 goto rollback_retry;
             }
             __wt_yield(); /* Encourage races */
-            rollback_transaction(tinfo);
+            rollback_transaction(tinfo, prepared);
             snap_repeat_update(tinfo, false);
             break;
         }
@@ -2088,7 +2136,7 @@ col_insert_resolve(TABLE *table, void *arg)
             if (*p > 0 && *p <= max_rows + 1) {
                 if (*p == max_rows + 1)
                     testutil_assert(
-                      __wt_atomic_casv32(&table->rows_current, max_rows, max_rows + 1));
+                      __wt_atomic_cas_uint32_v(&table->rows_current, max_rows, max_rows + 1));
                 *p = 0;
                 --cip->insert_list_cnt;
                 break;

@@ -29,6 +29,18 @@
 
 #include "mongo/db/admission/throughput_probing.h"
 
+#include "mongo/base/string_data.h"
+#include "mongo/db/admission/throughput_probing_gen.h"
+#include "mongo/db/service_context_test_fixture.h"
+#include "mongo/unittest/death_test.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/mock_periodic_runner.h"
+#include "mongo/util/scopeguard.h"
+#include "mongo/util/testing_proctor.h"
+#include "mongo/util/tick_source.h"
+#include "mongo/util/tick_source_mock.h"
+
 #include <cmath>
 #include <functional>
 #include <memory>
@@ -36,22 +48,7 @@
 
 #include <boost/move/utility_core.hpp>
 
-#include "mongo/base/string_data.h"
-#include "mongo/db/admission/throughput_probing_gen.h"
-#include "mongo/db/service_context_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/util/assert_util_core.h"
-#include "mongo/util/mock_periodic_runner.h"
-#include "mongo/util/scopeguard.h"
-#include "mongo/util/testing_proctor.h"
-#include "mongo/util/tick_source.h"
-#include "mongo/util/tick_source_mock.h"
-
 namespace mongo::admission::throughput_probing {
-namespace {
 
 TEST(ThroughputProbingParameterTest, InitialConcurrency) {
     ASSERT_OK(validateInitialConcurrency(gMinConcurrency, {}));
@@ -86,6 +83,19 @@ protected:
         throughput_probing::gReadWriteRatio.store(readWriteRatio);
         _throughputProbing = std::make_unique<ThroughputProbing>(
             _svcCtx, &_readTicketHolder, &_writeTicketHolder, Milliseconds{1});
+
+        {
+            auto client = _svcCtx->getService()->makeClient("ThroughputProbingInit");
+            auto opCtx = client->makeOperationContext();
+            _throughputProbing->_job =
+                _svcCtx->getPeriodicRunner()->makeJob(PeriodicRunner::PeriodicJob{
+                    "ThroughputProbingTicketHolderMonitor",
+                    [this](Client* client) { _throughputProbing->_run(client); },
+                    Milliseconds{1},
+                    true /* isKillableByStepdown */});
+            _throughputProbing->_initState();
+            _throughputProbing->_resetConcurrency(opCtx.get());
+        }
 
         // We need to advance the ticks to something other than zero, since that is used to
         // determine the if we're in the first iteration or not.
@@ -145,6 +155,10 @@ protected:
             return !concurrencyIncreased() && !concurrencyDecreased();
         }
 
+        bool probeIncemented(std::string a) const {
+            return _stats[a].Long() > _prevStats[a].Long();
+        }
+
         std::string toString() const {
             return str::stream() << "Stats: " << _stats << ", previous stats: " << _prevStats;
         }
@@ -152,10 +166,12 @@ protected:
     private:
         BSONObj _stats =
             BSON("timesDecreased" << 0ll << "timesIncreased" << 0ll << "totalAmountDecreased" << 0ll
-                                  << "totalAmountIncreased" << 0ll);
+                                  << "totalAmountIncreased" << 0ll << "timesProbedStable" << 0ll
+                                  << "timesProbedUp" << 0ll << "timesProbedDown" << 0ll);
         BSONObj _prevStats =
             BSON("timesDecreased" << 0ll << "timesIncreased" << 0ll << "totalAmountDecreased" << 0ll
-                                  << "totalAmountIncreased" << 0ll);
+                                  << "totalAmountIncreased" << 0ll << "timesProbedStable" << 0ll
+                                  << "timesProbedUp" << 0ll << "timesProbedDown" << 0ll);
     } _statsTester;
 };
 
@@ -208,6 +224,9 @@ TEST_F(ThroughputProbingTest, ProbeUpSucceeds) {
     ASSERT_GT(_readTicketHolder.outof(), initialSize);
     ASSERT_LT(_writeTicketHolder.outof(), size);
     ASSERT_GT(_writeTicketHolder.outof(), initialSize);
+    ASSERT_TRUE(_statsTester.probeIncemented("timesProbedUp"));
+    ASSERT_FALSE(_statsTester.probeIncemented("timesProbedDown"));
+    ASSERT_FALSE(_statsTester.probeIncemented("timesProbedStable"));
     ASSERT(_statsTester.concurrencyIncreased()) << _statsTester.toString();
 }
 
@@ -231,6 +250,9 @@ TEST_F(ThroughputProbingTest, ProbeUpFails) {
     _run();
     ASSERT_EQ(_readTicketHolder.outof(), size);
     ASSERT_EQ(_writeTicketHolder.outof(), size);
+    ASSERT_TRUE(_statsTester.probeIncemented("timesProbedUp"));
+    ASSERT_FALSE(_statsTester.probeIncemented("timesProbedDown"));
+    ASSERT_FALSE(_statsTester.probeIncemented("timesProbedStable"));
     ASSERT(_statsTester.concurrencyKept()) << _statsTester.toString();
 }
 
@@ -259,7 +281,10 @@ TEST_F(ThroughputProbingTest, ProbeDownSucceeds) {
     ASSERT_GT(_readTicketHolder.outof(), size);
     ASSERT_LT(_writeTicketHolder.outof(), initialSize);
     ASSERT_GT(_writeTicketHolder.outof(), size);
-    ASSERT(_statsTester.concurrencyIncreased()) << _statsTester.toString();
+    ASSERT_TRUE(_statsTester.probeIncemented("timesProbedDown"));
+    ASSERT_FALSE(_statsTester.probeIncemented("timesProbedUp"));
+    ASSERT_FALSE(_statsTester.probeIncemented("timesProbedStable"));
+    ASSERT(_statsTester.concurrencyDecreased()) << _statsTester.toString();
 }
 
 TEST_F(ThroughputProbingTest, ProbeDownFails) {
@@ -282,6 +307,9 @@ TEST_F(ThroughputProbingTest, ProbeDownFails) {
     _run();
     ASSERT_EQ(_readTicketHolder.outof(), size);
     ASSERT_EQ(_writeTicketHolder.outof(), size);
+    ASSERT_TRUE(_statsTester.probeIncemented("timesProbedDown"));
+    ASSERT_FALSE(_statsTester.probeIncemented("timesProbedUp"));
+    ASSERT_FALSE(_statsTester.probeIncemented("timesProbedStable"));
     ASSERT(_statsTester.concurrencyKept()) << _statsTester.toString();
 }
 
@@ -295,6 +323,8 @@ TEST_F(ThroughputProbingMaxConcurrencyTest, NoProbeUp) {
     // Stable. Probe down since concurrency is already at its maximum allowed value, even though
     // ticktes are exhausted.
     _run();
+    ASSERT_TRUE(_statsTester.probeIncemented("timesProbedStable"));
+    ASSERT_FALSE(_statsTester.probeIncemented("timesProbedUp"));
     ASSERT_LT(_readTicketHolder.outof(), size);
     ASSERT_LT(_writeTicketHolder.outof(), size);
 }
@@ -309,6 +339,8 @@ TEST_F(ThroughputProbingMinConcurrencyTest, NoProbeDown) {
     // Stable. Do not probe in either direction since tickets are not exhausted but concurrency is
     // already at its minimum allowed value.
     _run();
+    ASSERT_TRUE(_statsTester.probeIncemented("timesProbedStable"));
+    ASSERT_FALSE(_statsTester.probeIncemented("timesProbedDown"));
     ASSERT_EQ(_readTicketHolder.outof(), size);
     ASSERT_EQ(_writeTicketHolder.outof(), size);
 }
@@ -499,5 +531,4 @@ TEST_F(ThroughputProbingWriteHeavyTest, StepSizeNonZeroDecreasing) {
     ASSERT_LT(_writeTicketHolder.outof(), writes);
 }
 
-}  // namespace
 }  // namespace mongo::admission::throughput_probing

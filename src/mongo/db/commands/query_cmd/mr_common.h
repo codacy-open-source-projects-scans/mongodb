@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -41,11 +36,17 @@
 #include "mongo/db/commands/query_cmd/map_reduce_gen.h"
 #include "mongo/db/commands/query_cmd/map_reduce_out_options.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::map_reduce_common {
 
@@ -74,7 +75,7 @@ bool mrSupportsWriteConcern(const BSONObj& cmd);
  * Accepts a parsed mapReduce command and returns the equivalent aggregation pipeline. Note that the
  * returned pipeline does *not* contain a $cursor stage and thus is not runnable.
  */
-std::unique_ptr<Pipeline, PipelineDeleter> translateFromMR(
-    MapReduceCommandRequest parsedMr, boost::intrusive_ptr<ExpressionContext> expCtx);
+std::unique_ptr<Pipeline> translateFromMR(MapReduceCommandRequest parsedMr,
+                                          boost::intrusive_ptr<ExpressionContext> expCtx);
 
 }  // namespace mongo::map_reduce_common

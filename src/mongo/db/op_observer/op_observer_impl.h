@@ -29,19 +29,12 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/operation_logger.h"
@@ -53,10 +46,19 @@
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
 #include "mongo/db/transaction/transaction_operations.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
 
-namespace mongo {
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUB mongo {
 namespace repl {
 
 class ReplOperation;
@@ -75,23 +77,20 @@ public:
         return {NamespaceFilter::kAll, NamespaceFilter::kAll};
     }
 
-    void onModifyCollectionShardingIndexCatalog(OperationContext* opCtx,
-                                                const NamespaceString& nss,
-                                                const UUID& uuid,
-                                                BSONObj indexDoc) final;
-
     void onCreateIndex(OperationContext* opCtx,
                        const NamespaceString& nss,
                        const UUID& uuid,
-                       BSONObj indexDoc,
-                       bool fromMigrate) final;
+                       const IndexBuildInfo& indexBuildInfo,
+                       bool fromMigrate,
+                       bool isTimeseries = false) final;
 
     void onStartIndexBuild(OperationContext* opCtx,
                            const NamespaceString& nss,
                            const UUID& collUUID,
                            const UUID& indexBuildUUID,
-                           const std::vector<BSONObj>& indexes,
-                           bool fromMigrate) final;
+                           const std::vector<IndexBuildInfo>& indexes,
+                           bool fromMigrate,
+                           bool isTimeseries = false) final;
     void onStartIndexBuildSinglePhase(OperationContext* opCtx, const NamespaceString& nss) final;
 
     void onCommitIndexBuild(OperationContext* opCtx,
@@ -99,7 +98,9 @@ public:
                             const UUID& collUUID,
                             const UUID& indexBuildUUID,
                             const std::vector<BSONObj>& indexes,
-                            bool fromMigrate) final;
+                            const std::vector<boost::optional<BSONObj>>& multikey,
+                            bool fromMigrate,
+                            bool isTimeseries = false) final;
 
     void onAbortIndexBuild(OperationContext* opCtx,
                            const NamespaceString& nss,
@@ -107,7 +108,8 @@ public:
                            const UUID& indexBuildUUID,
                            const std::vector<BSONObj>& indexes,
                            const Status& cause,
-                           bool fromMigrate) final;
+                           bool fromMigrate,
+                           bool isTimeseries = false) final;
 
     void onInserts(OperationContext* opCtx,
                    const CollectionPtr& coll,
@@ -128,6 +130,33 @@ public:
                   const DocumentKey& documentKey,
                   const OplogDeleteEntryArgs& args,
                   OpStateAccumulator* opAccumulator = nullptr) final;
+
+    void onContainerInsert(OperationContext* opCtx,
+                           const NamespaceString& ns,
+                           const UUID& collUUID,
+                           StringData ident,
+                           int64_t key,
+                           std::span<const char> value) final;
+
+    void onContainerInsert(OperationContext* opCtx,
+                           const NamespaceString& ns,
+                           const UUID& collUUID,
+                           StringData ident,
+                           std::span<const char> key,
+                           std::span<const char> value) final;
+
+    void onContainerDelete(OperationContext* opCtx,
+                           const NamespaceString& ns,
+                           const UUID& collUUID,
+                           StringData ident,
+                           int64_t key) final;
+
+    void onContainerDelete(OperationContext* opCtx,
+                           const NamespaceString& ns,
+                           const UUID& collUUID,
+                           StringData ident,
+                           std::span<const char> key) final;
+
     void onInternalOpMessage(OperationContext* opCtx,
                              const NamespaceString& nss,
                              const boost::optional<UUID>& uuid,
@@ -137,19 +166,26 @@ public:
                              boost::optional<repl::OpTime> postImageOpTime,
                              boost::optional<repl::OpTime> prevWriteOpTimeInTransaction,
                              boost::optional<OplogSlot> slot) final;
-    void onCreateCollection(OperationContext* opCtx,
-                            const CollectionPtr& coll,
-                            const NamespaceString& collectionName,
-                            const CollectionOptions& options,
-                            const BSONObj& idIndex,
-                            const OplogSlot& createOpTime,
-                            bool fromMigrate) final;
+    /**
+     * Enforces that 'createCollCatalogIdentifier' must be present to log the creation of a
+     * replicated collection when 'featureFlagReplicateLocalCatalogIdentifier' is enabled.
+     */
+    void onCreateCollection(
+        OperationContext* opCtx,
+        const NamespaceString& collectionName,
+        const CollectionOptions& options,
+        const BSONObj& idIndex,
+        const OplogSlot& createOpTime,
+        const boost::optional<CreateCollCatalogIdentifier>& createCollCatalogIdentifier,
+        bool fromMigrate,
+        bool isTimeseries = false) final;
     void onCollMod(OperationContext* opCtx,
                    const NamespaceString& nss,
                    const UUID& uuid,
                    const BSONObj& collModCmd,
                    const CollectionOptions& oldCollOptions,
-                   boost::optional<IndexCollModInfo> indexInfo) final;
+                   boost::optional<IndexCollModInfo> indexInfo,
+                   bool isTimeseries = false) final;
     void onDropDatabase(OperationContext* opCtx,
                         const DatabaseName& dbName,
                         bool markFromMigrate) final;
@@ -157,12 +193,14 @@ public:
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
-                                  bool markFromMigrate) final;
+                                  bool markFromMigrate,
+                                  bool isTimeseries = false) final;
     void onDropIndex(OperationContext* opCtx,
                      const NamespaceString& nss,
                      const UUID& uuid,
                      const std::string& indexName,
-                     const BSONObj& indexInfo) final;
+                     const BSONObj& indexInfo,
+                     bool isTimeseries = false) final;
     repl::OpTime preRenameCollection(OperationContext* opCtx,
                                      const NamespaceString& fromCollection,
                                      const NamespaceString& toCollection,
@@ -170,7 +208,8 @@ public:
                                      const boost::optional<UUID>& dropTargetUUID,
                                      std::uint64_t numRecords,
                                      bool stayTemp,
-                                     bool markFromMigrate) final;
+                                     bool markFromMigrate,
+                                     bool isTimeseries = false) final;
     void postRenameCollection(OperationContext* opCtx,
                               const NamespaceString& fromCollection,
                               const NamespaceString& toCollection,
@@ -184,7 +223,8 @@ public:
                             const boost::optional<UUID>& dropTargetUUID,
                             std::uint64_t numRecords,
                             bool stayTemp,
-                            bool markFromMigrate) final;
+                            bool markFromMigrate,
+                            bool isTimeseries) final;
     void onImportCollection(OperationContext* opCtx,
                             const UUID& importUUID,
                             const NamespaceString& nss,
@@ -192,7 +232,8 @@ public:
                             long long dataSize,
                             const BSONObj& catalogEntry,
                             const BSONObj& storageMetadata,
-                            bool isDryRun) final;
+                            bool isDryRun,
+                            bool isTimeseries) final;
     void onTransactionStart(OperationContext* opCtx) final;
     void onUnpreparedTransactionCommit(
         OperationContext* opCtx,
@@ -242,8 +283,20 @@ public:
     void onMajorityCommitPointUpdate(ServiceContext* service,
                                      const repl::OpTime& newCommitPoint) final {}
 
+    void onCreateDatabaseMetadata(OperationContext* opCtx, const repl::OplogEntry& op) final {}
+
+    void onDropDatabaseMetadata(OperationContext* opCtx, const repl::OplogEntry& op) final {}
+
+    void onTruncateRange(OperationContext* opCtx,
+                         const CollectionPtr& coll,
+                         const RecordId& minRecordId,
+                         const RecordId& maxRecordId,
+                         int64_t bytesDeleted,
+                         int64_t docsDeleted,
+                         repl::OpTime& opTime) final;
+
 private:
     std::unique_ptr<OperationLogger> _operationLogger;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

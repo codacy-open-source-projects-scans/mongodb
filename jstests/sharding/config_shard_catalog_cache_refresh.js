@@ -23,15 +23,14 @@ function forceReadPreferenceNearestToTargetPrimary(replSet) {
     //
     // Turn on serverPingMonitorSetRTT on primary to simulate slow 'ping' from secondaries.
     const kDelayMicros = 200 * 1000;
-    var hosts = {};
+    let hosts = {};
     replSet.getSecondaries().forEach((sec) => {
         // Current RTT accounts for kRttAlpha(0.2) of new RTT.
         // Use a value large enough so the computation is guaranteed to exceed
         // defaultLocalThresholdMillis in a single iteration.
         hosts[sec.host] = kDelayMicros;
     });
-    const monitorDelayFailPoint =
-        configureFailPoint(replSet.getPrimary(), "serverPingMonitorSetRTT", hosts);
+    const monitorDelayFailPoint = configureFailPoint(replSet.getPrimary(), "serverPingMonitorSetRTT", hosts);
     // Wait for a refresh on each node.
     monitorDelayFailPoint.wait({timesEntered: 3});
 
@@ -41,11 +40,13 @@ function forceReadPreferenceNearestToTargetPrimary(replSet) {
 }
 
 const logLevel = tojson({sharding: {shardingCatalogRefresh: 1}, command: 2, query: 1});
-var st = new ShardingTest({
+let st = new ShardingTest({
     shards: 1,
     rs: {
         nodes: [
-            {/* primary */},
+            {
+                /* primary */
+            },
             {/* secondary */ rsConfig: {priority: 0}},
             {/* secondary */ rsConfig: {priority: 0}},
         ],
@@ -90,16 +91,23 @@ const cacheFP = configureFailPoint(configShard, "blockCollectionCacheLookup", {n
 // Issue parallel queries to all test collections.
 let parallelShellArr = collections.map((coll) => {
     return startParallelShell(
-        funWithArgs(function(dbName, collName) {
-            // We want the query to happen on the primary.
-            db.getMongo().setReadPref("primary");
-            const testDB = db.getSiblingDB(dbName);
-            // Use a $unionWith to cause the shard to perform some routing internally. Otherwise
-            // there is no need for a refresh on the shard.
-            assert.commandWorked(testDB.runCommand(
-                {aggregate: collName, pipeline: [{$unionWith: {coll: collName}}], cursor: {}}));
-            jsTestLog("Finished query for " + collName);
-        }, dbName, coll), st.s.port);
+        funWithArgs(
+            function (dbName, collName) {
+                // We want the query to happen on the primary.
+                db.getMongo().setReadPref("primary");
+                const testDB = db.getSiblingDB(dbName);
+                // Use a $unionWith to cause the shard to perform some routing internally. Otherwise
+                // there is no need for a refresh on the shard.
+                assert.commandWorked(
+                    testDB.runCommand({aggregate: collName, pipeline: [{$unionWith: {coll: collName}}], cursor: {}}),
+                );
+                jsTestLog("Finished query for " + collName);
+            },
+            dbName,
+            coll,
+        ),
+        st.s.port,
+    );
 });
 
 // Wait for all queries to refresh. Each thread hits the failpoint twice: once to test the

@@ -7,20 +7,21 @@
 //  requires_pipeline_optimization,
 // ]
 import {arrayEq, orderedArrayEq} from "jstests/aggregation/extras/utils.js";
-
 import {aggPlanHasStage} from "jstests/libs/query/analyze_plan.js";
 
 const coll = db.graphlookup_rewrite;
 coll.drop();
 
-assert.commandWorked(coll.insertMany([
-    {"_id": 1, "from": "a", "foo": 1},
-    {"_id": 2, "from": "b", "to": "a", "foo": 2},
-    {"_id": 3, "from": "c", "to": "b", "foo": 3},
-    {"_id": 4, "from": "d", "to": "b", "foo": 4},
-    {"_id": 5, "from": "e", "to": "c", "foo": 5},
-    {"_id": 6, "from": "f", "to": "d", "foo": 6}
-]));
+assert.commandWorked(
+    coll.insertMany([
+        {"_id": 1, "from": "a", "foo": 1},
+        {"_id": 2, "from": "b", "to": "a", "foo": 2},
+        {"_id": 3, "from": "c", "to": "b", "foo": 3},
+        {"_id": 4, "from": "d", "to": "b", "foo": 4},
+        {"_id": 5, "from": "e", "to": "c", "foo": 5},
+        {"_id": 6, "from": "f", "to": "d", "foo": 6},
+    ]),
+);
 
 function assertStagesAndOutput({
     pipeline = [],
@@ -29,18 +30,16 @@ function assertStagesAndOutput({
     expectedOutput = [],
     orderedArrayComparison = true,
     fieldsToSkip = [],
-    msg = ""
+    msg = "",
 }) {
     const explain = coll.explain().aggregate(pipeline);
     const output = coll.aggregate(pipeline).toArray();
 
     for (const stage of expectedStages) {
-        assert(aggPlanHasStage(explain, stage),
-               `${msg}: missing stage ${stage}: ${tojson(explain)}`);
+        assert(aggPlanHasStage(explain, stage), `${msg}: missing stage ${stage}: ${tojson(explain)}`);
     }
     for (const stage of optimizedAwayStages) {
-        assert(!aggPlanHasStage(explain, stage),
-               `${msg}: stage ${stage} not optimized away: ${tojson(explain)}`);
+        assert(!aggPlanHasStage(explain, stage), `${msg}: stage ${stage} not optimized away: ${tojson(explain)}`);
     }
 
     const res = orderedArrayComparison
@@ -55,8 +54,8 @@ const graphLookup = {
         startWith: "$from",
         connectFromField: "from",
         connectToField: "to",
-        as: "out"
-    }
+        as: "out",
+    },
 };
 
 assertStagesAndOutput({
@@ -73,8 +72,8 @@ assertStagesAndOutput({
                 {"_id": 3, "from": "c", "to": "b", "foo": 3},
                 {"_id": 5, "from": "e", "to": "c", "foo": 5},
                 {"_id": 6, "from": "f", "to": "d", "foo": 6},
-                {"_id": 4, "from": "d", "to": "b", "foo": 4}
-            ]
+                {"_id": 4, "from": "d", "to": "b", "foo": 4},
+            ],
         },
         {
             "_id": 2,
@@ -85,27 +84,27 @@ assertStagesAndOutput({
                 {"_id": 6, "from": "f", "to": "d", "foo": 6},
                 {"_id": 3, "from": "c", "to": "b", "foo": 3},
                 {"_id": 5, "from": "e", "to": "c", "foo": 5},
-                {"_id": 4, "from": "d", "to": "b", "foo": 4}
-            ]
+                {"_id": 4, "from": "d", "to": "b", "foo": 4},
+            ],
         },
         {
             "_id": 3,
             "from": "c",
             "to": "b",
             "foo": 3,
-            "out": [{"_id": 5, "from": "e", "to": "c", "foo": 5}]
+            "out": [{"_id": 5, "from": "e", "to": "c", "foo": 5}],
         },
         {
             "_id": 4,
             "from": "d",
             "to": "b",
             "foo": 4,
-            "out": [{"_id": 6, "from": "f", "to": "d", "foo": 6}]
+            "out": [{"_id": 6, "from": "f", "to": "d", "foo": 6}],
         },
         {"_id": 5, "from": "e", "to": "c", "foo": 5, "out": []},
-        {"_id": 6, "from": "f", "to": "d", "foo": 6, "out": []}
+        {"_id": 6, "from": "f", "to": "d", "foo": 6, "out": []},
     ],
-    msg: "$graphLookup should swap with $sort if there is no internal $unwind"
+    msg: "$graphLookup should swap with $sort if there is no internal $unwind",
 });
 
 assertStagesAndOutput({
@@ -123,8 +122,8 @@ assertStagesAndOutput({
                 {"_id": 3, "from": "c", "to": "b", "foo": 3},
                 {"_id": 5, "from": "e", "to": "c", "foo": 5},
                 {"_id": 6, "from": "f", "to": "d", "foo": 6},
-                {"_id": 4, "from": "d", "to": "b", "foo": 4}
-            ]
+                {"_id": 4, "from": "d", "to": "b", "foo": 4},
+            ],
         },
         {
             "_id": 2,
@@ -135,27 +134,27 @@ assertStagesAndOutput({
                 {"_id": 5, "from": "e", "to": "c", "foo": 5},
                 {"_id": 3, "from": "c", "to": "b", "foo": 3},
                 {"_id": 6, "from": "f", "to": "d", "foo": 6},
-                {"_id": 4, "from": "d", "to": "b", "foo": 4}
-            ]
+                {"_id": 4, "from": "d", "to": "b", "foo": 4},
+            ],
         },
         {
             "_id": 3,
             "from": "c",
             "to": "b",
             "foo": 3,
-            "out": [{"_id": 5, "from": "e", "to": "c", "foo": 5}]
+            "out": [{"_id": 5, "from": "e", "to": "c", "foo": 5}],
         },
         {
             "_id": 4,
             "from": "d",
             "to": "b",
             "foo": 4,
-            "out": [{"_id": 6, "from": "f", "to": "d", "foo": 6}]
+            "out": [{"_id": 6, "from": "f", "to": "d", "foo": 6}],
         },
         {"_id": 5, "from": "e", "to": "c", "foo": 5, "out": []},
-        {"_id": 6, "from": "f", "to": "d", "foo": 6, "out": []}
+        {"_id": 6, "from": "f", "to": "d", "foo": 6, "out": []},
     ],
-    msg: "$graphLookup should swap with $limit if there is no internal $unwind"
+    msg: "$graphLookup should swap with $limit if there is no internal $unwind",
 });
 
 assertStagesAndOutput({
@@ -163,7 +162,7 @@ assertStagesAndOutput({
     expectedStages: ["SKIP", "COLLSCAN", "$graphLookup"],
     optimizedAwayStages: ["$skip"],
     expectedOutput: [],
-    msg: "$graphLookup should swap with $skip if there is no internal $unwind"
+    msg: "$graphLookup should swap with $skip if there is no internal $unwind",
 });
 
 assertStagesAndOutput({
@@ -180,8 +179,8 @@ assertStagesAndOutput({
                 {"_id": 2, "from": "b", "to": "a", "foo": 2},
                 {"_id": 4, "from": "d", "to": "b", "foo": 4},
                 {"_id": 5, "from": "e", "to": "c", "foo": 5},
-                {"_id": 3, "from": "c", "to": "b", "foo": 3}
-            ]
+                {"_id": 3, "from": "c", "to": "b", "foo": 3},
+            ],
         },
         {
             "_id": 2,
@@ -192,28 +191,29 @@ assertStagesAndOutput({
                 {"_id": 6, "from": "f", "to": "d", "foo": 6},
                 {"_id": 4, "from": "d", "to": "b", "foo": 4},
                 {"_id": 5, "from": "e", "to": "c", "foo": 5},
-                {"_id": 3, "from": "c", "to": "b", "foo": 3}
-            ]
+                {"_id": 3, "from": "c", "to": "b", "foo": 3},
+            ],
         },
         {
             "_id": 3,
             "from": "c",
             "to": "b",
             "foo": 3,
-            "out": [{"_id": 5, "from": "e", "to": "c", "foo": 5}]
+            "out": [{"_id": 5, "from": "e", "to": "c", "foo": 5}],
         },
         {
             "_id": 4,
             "from": "d",
             "to": "b",
             "foo": 4,
-            "out": [{"_id": 6, "from": "f", "to": "d", "foo": 6}]
+            "out": [{"_id": 6, "from": "f", "to": "d", "foo": 6}],
         },
         {"_id": 5, "from": "e", "to": "c", "foo": 5, "out": []},
-        {"_id": 6, "from": "f", "to": "d", "foo": 6, "out": []}
+        {"_id": 6, "from": "f", "to": "d", "foo": 6, "out": []},
     ],
-    msg: "$graphLookup should swap with $limit and $sort, and $sort should absorb $limit if " +
-        "there is no internal $unwind"
+    msg:
+        "$graphLookup should swap with $limit and $sort, and $sort should absorb $limit if " +
+        "there is no internal $unwind",
 });
 
 assertStagesAndOutput({
@@ -231,8 +231,8 @@ assertStagesAndOutput({
                 {"_id": 2, "from": "b", "to": "a", "foo": 2},
                 {"_id": 4, "from": "d", "to": "b", "foo": 4},
                 {"_id": 5, "from": "e", "to": "c", "foo": 5},
-                {"_id": 3, "from": "c", "to": "b", "foo": 3}
-            ]
+                {"_id": 3, "from": "c", "to": "b", "foo": 3},
+            ],
         },
         {
             "_id": 2,
@@ -243,25 +243,25 @@ assertStagesAndOutput({
                 {"_id": 6, "from": "f", "to": "d", "foo": 6},
                 {"_id": 4, "from": "d", "to": "b", "foo": 4},
                 {"_id": 5, "from": "e", "to": "c", "foo": 5},
-                {"_id": 3, "from": "c", "to": "b", "foo": 3}
-            ]
+                {"_id": 3, "from": "c", "to": "b", "foo": 3},
+            ],
         },
         {
             "_id": 3,
             "from": "c",
             "to": "b",
             "foo": 3,
-            "out": [{"_id": 5, "from": "e", "to": "c", "foo": 5}]
+            "out": [{"_id": 5, "from": "e", "to": "c", "foo": 5}],
         },
         {
             "_id": 4,
             "from": "d",
             "to": "b",
             "foo": 4,
-            "out": [{"_id": 6, "from": "f", "to": "d", "foo": 6}]
-        }
+            "out": [{"_id": 6, "from": "f", "to": "d", "foo": 6}],
+        },
     ],
-    msg: "$graphLookup should not swap with $sort if sort uses fields created by $graphLookup"
+    msg: "$graphLookup should not swap with $sort if sort uses fields created by $graphLookup",
 });
 
 assertStagesAndOutput({
@@ -278,44 +278,44 @@ assertStagesAndOutput({
             "from": "b",
             "to": "a",
             "foo": 2,
-            "out": {"_id": 6, "from": "f", "to": "d", "foo": 6}
+            "out": {"_id": 6, "from": "f", "to": "d", "foo": 6},
         },
         {
             "_id": 2,
             "from": "b",
             "to": "a",
             "foo": 2,
-            "out": {"_id": 4, "from": "d", "to": "b", "foo": 4}
+            "out": {"_id": 4, "from": "d", "to": "b", "foo": 4},
         },
         {
             "_id": 2,
             "from": "b",
             "to": "a",
             "foo": 2,
-            "out": {"_id": 5, "from": "e", "to": "c", "foo": 5}
+            "out": {"_id": 5, "from": "e", "to": "c", "foo": 5},
         },
         {
             "_id": 2,
             "from": "b",
             "to": "a",
             "foo": 2,
-            "out": {"_id": 3, "from": "c", "to": "b", "foo": 3}
+            "out": {"_id": 3, "from": "c", "to": "b", "foo": 3},
         },
         {
             "_id": 3,
             "from": "c",
             "to": "b",
             "foo": 3,
-            "out": {"_id": 5, "from": "e", "to": "c", "foo": 5}
+            "out": {"_id": 5, "from": "e", "to": "c", "foo": 5},
         },
         {
             "_id": 4,
             "from": "d",
             "to": "b",
             "foo": 4,
-            "out": {"_id": 6, "from": "f", "to": "d", "foo": 6}
-        }
+            "out": {"_id": 6, "from": "f", "to": "d", "foo": 6},
+        },
     ],
     msg: "$graphLookup with an internal $unwind should not swap with $sort",
-    fieldsToSkip: ["out"]
+    fieldsToSkip: ["out"],
 });

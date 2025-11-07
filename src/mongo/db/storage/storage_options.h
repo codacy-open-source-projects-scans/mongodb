@@ -29,10 +29,12 @@
 
 #pragma once
 
+#include "mongo/platform/atomic_word.h"
+#include "mongo/util/modules.h"
+
 #include <string>
 
-#include "mongo/platform/atomic_proxy.h"
-#include "mongo/platform/atomic_word.h"
+#include <boost/filesystem/path.hpp>
 
 /*
  * This file defines the storage for options that come from the command line related to data file
@@ -41,11 +43,14 @@
  * that allow the user to change a different subset of these options.
  */
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 
 struct StorageGlobalParams {
     StorageGlobalParams();
-    void reset();
+    MONGO_MOD_PUBLIC void reset_forTest();
+
+    // Returns the directory path used by the spill storage engine to store spilled data.
+    boost::filesystem::path getSpillDbPath() const;
 
     // Default data directory for mongod when running in non-config server mode.
     static const char* kDefaultDbPath;
@@ -86,8 +91,8 @@ struct StorageGlobalParams {
     // --magicRestore
     bool magicRestore;
 
-    // Whether the Storage Engine selected should be ephemeral in nature or not.
-    bool ephemeral = false;
+    // Whether the Storage Engine selected should be in-memory in nature or not.
+    bool inMemory = false;
 
     // --journalCommitInterval
     // This parameter is both a server parameter and a configuration parameter, and to resolve
@@ -107,13 +112,14 @@ struct StorageGlobalParams {
 
     // --syncdelay
     // Delay in seconds between triggering the next checkpoint after the completion of the previous
-    // one. A value of 0 indicates that checkpointing will be skipped.
+    // one. A value of 0 indicates that checkpointing will be skipped. A value <0
+    // will result in using the default value for the configured persistence provider.
     // Do not set this value on production systems.
     // In almost every situation, you should use the default setting.
     // This parameter is both a server parameter and a configuration parameter, and to resolve
-    // conflicts between the two the default must be set here.
+    // conflicts between the two, a default sentinel (<0) must be set here.
     static constexpr double kMaxSyncdelaySecs = 60 * 60;  // 1hr
-    AtomicDouble syncdelay{60.0};                         // seconds between checkpoints
+    AtomicWord<double> syncdelay{-1.0};                   // seconds between checkpoints
 
     // --queryableBackupMode
     // Prevents user-originating operations from performing writes to the server. Internally
@@ -135,13 +141,13 @@ struct StorageGlobalParams {
     // Controls whether we allow the OplogTruncateMarkers mechanism to delete oplog history on WT.
     bool allowOplogTruncation;
 
-    // Disables lock-free reads.
-    bool disableLockFreeReads = false;
-
     // Test-only option. Disables table logging.
     bool forceDisableTableLogging = false;
+
+private:
+    void _reset();
 };
 
 extern StorageGlobalParams storageGlobalParams;
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

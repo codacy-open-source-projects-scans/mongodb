@@ -2,8 +2,8 @@
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
-var SERVER_CERT = "jstests/libs/server.pem";
-var CA_CERT = "jstests/libs/ca.pem";
+let SERVER_CERT = "jstests/libs/server.pem";
+let CA_CERT = "jstests/libs/ca.pem";
 
 class TransportMode {
     constructor(sslName, tlsName) {
@@ -27,13 +27,12 @@ const prefered = new TransportMode("preferSSL", "preferTLS");
 const required = new TransportMode("requireSSL", "requireTLS");
 
 function testTransportTransitionStandalone(scheme, oldMode, newMode, shouldSucceed) {
-    var conn =
-        MongoRunner.runMongod({sslMode: oldMode, sslPEMKeyFile: SERVER_CERT, sslCAFile: CA_CERT});
+    let conn = MongoRunner.runMongod({sslMode: oldMode, sslPEMKeyFile: SERVER_CERT, sslCAFile: CA_CERT});
 
-    var adminDB = conn.getDB("admin");
-    adminDB.createUser({user: "root", pwd: "pwd", roles: ['root']});
+    let adminDB = conn.getDB("admin");
+    adminDB.createUser({user: "root", pwd: "pwd", roles: ["root"]});
     adminDB.auth("root", "pwd");
-    var res = adminDB.runCommand({"setParameter": 1, [scheme]: newMode[scheme]});
+    let res = adminDB.runCommand({"setParameter": 1, [scheme]: newMode[scheme]});
 
     assert(res["ok"] == shouldSucceed, tojson(res));
     if (!shouldSucceed) {
@@ -53,7 +52,7 @@ function testTransportTransitionStandalone(scheme, oldMode, newMode, shouldSucce
 }
 
 function testTransportTransitionCluster(scheme, oldMode, newMode) {
-    var rst = new ReplSetTest({
+    let rst = new ReplSetTest({
         name: "switch",
         nodes: 3,
         nodeOptions: {
@@ -86,40 +85,40 @@ function testTransportTransition(scheme, oldMode, newMode, shouldSucceed) {
 }
 
 function testAuthModeTransition(oldMode, newMode, sslMode, shouldSucceed) {
-    const keyFile = 'jstests/libs/key1';
+    const keyFile = "jstests/libs/key1";
 
     let config = {
         sslMode: sslMode,
         sslPEMKeyFile: SERVER_CERT,
         sslCAFile: CA_CERT,
-        clusterAuthMode: oldMode
+        clusterAuthMode: oldMode,
     };
 
-    if (oldMode != 'x509') {
+    if (oldMode != "x509") {
         config.keyFile = keyFile;
     }
 
     const conn = MongoRunner.runMongod(config);
     const adminDB = conn.getDB("admin");
-    let authAsKeyFileCluster = function() {
+    let authAsKeyFileCluster = function () {
         const authParams = {
-            user: '__system',
-            mechanism: 'SCRAM-SHA-256',
-            pwd: cat(keyFile).replace(/[\011-\015\040]/g, '')
+            user: "__system",
+            mechanism: "SCRAM-SHA-256",
+            pwd: cat(keyFile).replace(/[\011-\015\040]/g, ""),
         };
 
         return adminDB.auth(authParams);
     };
 
-    if (oldMode != 'x509') {
+    if (oldMode != "x509") {
         assert(authAsKeyFileCluster());
     }
 
-    var res = adminDB.runCommand({"setParameter": 1, "clusterAuthMode": newMode});
+    let res = adminDB.runCommand({"setParameter": 1, "clusterAuthMode": newMode});
     assert(res["ok"] == shouldSucceed, tojson(res));
 
-    if (shouldSucceed && oldMode != 'x509') {
-        if (newMode == 'x509') {
+    if (shouldSucceed && oldMode != "x509") {
+        if (newMode == "x509") {
             assert(!authAsKeyFileCluster(), "Key file cluster auth should no longer work");
         } else {
             assert(authAsKeyFileCluster(), "Key file cluster auth should still work");

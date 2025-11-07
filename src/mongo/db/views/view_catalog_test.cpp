@@ -27,17 +27,6 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/status.h"
@@ -49,14 +38,14 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/basic_types_gen.h"
-#include "mongo/db/catalog/catalog_test_fixture.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/resource_catalog.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/catalog_test_fixture.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/lock_manager/resource_catalog.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
@@ -74,13 +63,22 @@
 #include "mongo/db/views/view.h"
 #include "mongo/db/views/view_catalog_helpers.h"
 #include "mongo/db/views/view_graph.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
+
+#include <cstdint>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -283,11 +281,10 @@ TEST_F(ViewCatalogFixture, CanCreateViewWithLookupUsingPipelineSyntax) {
     ASSERT_OK(createView(operationContext(),
                          NamespaceString::createNamespaceString_forTest("db.view"),
                          viewOn,
-                         BSON_ARRAY(BSON("$lookup" << BSON("from"
-                                                           << "fcoll"
-                                                           << "as"
-                                                           << "as"
-                                                           << "pipeline" << BSONArray()))),
+                         BSON_ARRAY(BSON("$lookup" << BSON("from" << "fcoll"
+                                                                  << "as"
+                                                                  << "as"
+                                                                  << "pipeline" << BSONArray()))),
                          emptyCollation));
 }
 
@@ -367,16 +364,14 @@ TEST_F(ReplViewCatalogFixture, CreateViewWithPipelineFailsOnIneligibleStagePersi
     const NamespaceString viewOn = NamespaceString::createNamespaceString_forTest("db.coll");
 
     // $out cannot be used in a view definition pipeline.
-    auto invalidPipeline = BSON_ARRAY(BSON("$out"
-                                           << "someOtherCollection"));
+    auto invalidPipeline = BSON_ARRAY(BSON("$out" << "someOtherCollection"));
 
     ASSERT_THROWS_CODE(
         createView(operationContext(), viewName, viewOn, invalidPipeline, emptyCollation),
         AssertionException,
         ErrorCodes::OptionNotSupportedOnView);
 
-    invalidPipeline = BSON_ARRAY(BSON("$merge"
-                                      << "someOtherCollection"));
+    invalidPipeline = BSON_ARRAY(BSON("$merge" << "someOtherCollection"));
 
     ASSERT_THROWS_CODE(
         createView(operationContext(), viewName, viewOn, invalidPipeline, emptyCollation),
@@ -645,8 +640,7 @@ TEST_F(ViewCatalogFixture, LookupRIDAfterDropRollback) {
         WriteUnitOfWork wunit(operationContext());
         ASSERT_OK(createView(operationContext(), viewName, viewOn, emptyPipeline, emptyCollation));
         wunit.commit();
-        ASSERT_EQ(ResourceCatalog::get().name(resourceID).value(),
-                  viewName.ns_forTest().toString());
+        ASSERT_EQ(ResourceCatalog::get().name(resourceID).value(), viewName.ns_forTest());
     }
 
     {
@@ -662,7 +656,7 @@ TEST_F(ViewCatalogFixture, LookupRIDAfterDropRollback) {
         // Do not commit, rollback.
     }
     // Make sure drop was rolled back and view is still in catalog.
-    ASSERT_EQ(ResourceCatalog::get().name(resourceID), viewName.ns_forTest().toString());
+    ASSERT_EQ(ResourceCatalog::get().name(resourceID), std::string{viewName.ns_forTest()});
 }
 
 TEST_F(ViewCatalogFixture, LookupRIDAfterModify) {
@@ -674,7 +668,7 @@ TEST_F(ViewCatalogFixture, LookupRIDAfterModify) {
                    NamespaceString::createNamespaceString_forTest(boost::none, "db.view"));
     ASSERT_OK(createView(operationContext(), viewName, viewOn, emptyPipeline, emptyCollation));
     ASSERT_OK(modifyView(operationContext(), viewName, viewOn, emptyPipeline));
-    ASSERT_EQ(ResourceCatalog::get().name(resourceID), viewName.ns_forTest().toString());
+    ASSERT_EQ(ResourceCatalog::get().name(resourceID), std::string{viewName.ns_forTest()});
 }
 
 TEST_F(ViewCatalogFixture, LookupRIDAfterModifyRollback) {
@@ -688,7 +682,7 @@ TEST_F(ViewCatalogFixture, LookupRIDAfterModifyRollback) {
         WriteUnitOfWork wunit(operationContext());
         ASSERT_OK(createView(operationContext(), viewName, viewOn, emptyPipeline, emptyCollation));
         wunit.commit();
-        ASSERT_EQ(ResourceCatalog::get().name(resourceID), viewName.ns_forTest().toString());
+        ASSERT_EQ(ResourceCatalog::get().name(resourceID), std::string{viewName.ns_forTest()});
     }
 
     {
@@ -705,11 +699,11 @@ TEST_F(ViewCatalogFixture, LookupRIDAfterModifyRollback) {
                                            viewOn,
                                            emptyPipeline,
                                            view_catalog_helpers::validatePipeline));
-        ASSERT_EQ(ResourceCatalog::get().name(resourceID), viewName.ns_forTest().toString());
+        ASSERT_EQ(ResourceCatalog::get().name(resourceID), std::string{viewName.ns_forTest()});
         // Do not commit, rollback.
     }
     // Make sure view resource is still available after rollback.
-    ASSERT_EQ(ResourceCatalog::get().name(resourceID), viewName.ns_forTest().toString());
+    ASSERT_EQ(ResourceCatalog::get().name(resourceID), std::string{viewName.ns_forTest()});
 }
 
 TEST_F(ViewCatalogFixture, CreateViewThenDropAndLookup) {
@@ -803,8 +797,7 @@ TEST_F(ViewCatalogFixture, ResolveViewCorrectlyExtractsDefaultCollation) {
     pipeline1 << BSON("$match" << BSON("foo" << 1));
     pipeline2 << BSON("$match" << BSON("foo" << 2));
 
-    BSONObj collation = BSON("locale"
-                             << "en_US");
+    BSONObj collation = BSON("locale" << "en_US");
 
     ASSERT_OK(createView(operationContext(), view1, viewOn, pipeline1.arr(), collation));
     ASSERT_OK(createView(operationContext(), view2, view1, pipeline2.arr(), collation));

@@ -29,16 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <functional>
-#include <map>
-#include <memory>
-#include <ostream>
-#include <string>
-#include <utility>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -52,7 +42,6 @@
 #include "mongo/client/read_preference.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/dbmessage.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/logv2/log_severity.h"
@@ -73,6 +62,17 @@
 #include "mongo/util/net/ssl_types.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdint>
+#include <functional>
+#include <map>
+#include <memory>
+#include <ostream>
+#include <string>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -187,6 +187,10 @@ public:
         return _serverAddress;
     }
 
+    std::string getLocalAddress() const override {
+        return _session->local().toString();
+    }
+
     void say(Message& toSend, bool isRetry = false, std::string* actualServer = nullptr) override;
     Message recv(int lastRequestId) override;
 
@@ -209,14 +213,7 @@ public:
     }
 
     // Throws a NetworkException if in failed state and not reconnecting or if waiting to reconnect.
-    void ensureConnection() override {
-        if (_failed.load()) {
-            if (!_autoReconnect) {
-                throwSocketError(SocketErrorKind::FAILED_STATE, toString());
-            }
-            _reconnectSession();
-        }
-    }
+    void ensureConnection() override;
 
     bool isReplicaSetMember() const override {
         return _isReplicaSetMember;
@@ -240,6 +237,8 @@ public:
     const SSLConfiguration* getSSLConfiguration() override;
 
     bool isUsingTransientSSLParams() const override;
+
+    bool isTLS() override;
 #endif
 
 protected:

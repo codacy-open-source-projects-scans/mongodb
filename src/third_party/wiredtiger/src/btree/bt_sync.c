@@ -32,15 +32,17 @@ __sync_checkpoint_can_skip(WT_SESSION_IMPL *session, WT_REF *ref)
     /*
      * This is the history store btree. As part of the checkpointing the data store, we will move
      * the older values into the history store without using any transactions, we shouldn't ignore
-     * them for consistency
+     * them for consistency. Same goes for disaggregated storage metadata.
      */
     if (WT_IS_HS(session->dhandle))
+        return (false);
+    if (WT_IS_DISAGG_META(session->dhandle))
         return (false);
 
     /* The checkpoint's snapshot includes the first dirty update on the page. */
     txn = session->txn;
     mod = ref->page->modify;
-    if (!WT_TXNID_LT(txn->snapshot_data.snap_max, mod->first_dirty_txn))
+    if (txn->snapshot_data.snap_max >= mod->first_dirty_txn)
         return (false);
 
     /*
@@ -55,13 +57,14 @@ __sync_checkpoint_can_skip(WT_SESSION_IMPL *session, WT_REF *ref)
      */
     if (mod->rec_result == WT_PM_REC_MULTIBLOCK)
         for (multi = mod->mod_multi, i = 0; i < mod->mod_multi_entries; ++multi, ++i)
-            if (multi->addr.addr == NULL)
+            if (multi->addr.block_cookie == NULL)
                 return (false);
 
     /* RTS, recovery or shutdown should not leave anything dirty behind. */
     if (F_ISSET(session, WT_SESSION_ROLLBACK_TO_STABLE))
         return (false);
-    if (F_ISSET(S2C(session), WT_CONN_RECOVERING | WT_CONN_CLOSING_CHECKPOINT))
+    if (F_ISSET(S2C(session), WT_CONN_RECOVERING) ||
+      F_ISSET_ATOMIC_32(S2C(session), WT_CONN_CLOSING_CHECKPOINT))
         return (false);
 
     /*
@@ -154,7 +157,7 @@ __wt_sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 
     internal_bytes = leaf_bytes = 0;
     internal_pages = leaf_pages = 0;
-    saved_pinned_id = __wt_atomic_loadv64(&WT_SESSION_TXN_SHARED(session)->pinned_id);
+    saved_pinned_id = __wt_atomic_load_uint64_v_relaxed(&WT_SESSION_TXN_SHARED(session)->pinned_id);
     time_start = WT_VERBOSE_ISSET(session, WT_VERB_CHECKPOINT) ? __wt_clock(session) : 0;
 
     switch (syncop) {
@@ -197,10 +200,10 @@ __wt_sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
              */
             page = walk->page;
             if (__wt_page_is_modified(page) &&
-              WT_TXNID_LT(__wt_atomic_load64(&page->modify->update_txn), oldest_id)) {
+              __wt_atomic_load_uint64_relaxed(&page->modify->update_txn) < oldest_id) {
                 if (txn->isolation == WT_ISO_READ_COMMITTED)
                     __wt_txn_get_snapshot(session);
-                leaf_bytes += __wt_atomic_loadsize(&page->memory_footprint);
+                leaf_bytes += __wt_atomic_load_size_relaxed(&page->memory_footprint);
                 ++leaf_pages;
                 WT_ERR(__wt_reconcile(session, walk, NULL, WT_REC_CHECKPOINT));
             }
@@ -237,21 +240,21 @@ __wt_sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
          * wait for any problematic eviction or page splits to complete.
          */
         WT_ASSERT(session,
-          __wt_atomic_load_enum(&btree->syncing) == WT_BTREE_SYNC_OFF &&
-            __wt_atomic_load_pointer(&btree->sync_session) == NULL);
+          __wt_atomic_load_enum_relaxed(&btree->syncing) == WT_BTREE_SYNC_OFF &&
+            __wt_atomic_load_ptr_relaxed(&btree->sync_session) == NULL);
 
-        __wt_atomic_store_pointer(&btree->sync_session, session);
-        __wt_atomic_store_enum(&btree->syncing, WT_BTREE_SYNC_WAIT);
+        __wt_atomic_store_ptr_relaxed(&btree->sync_session, session);
+        __wt_atomic_store_enum_relaxed(&btree->syncing, WT_BTREE_SYNC_WAIT);
         __wt_gen_next_drain(session, WT_GEN_EVICT);
-        __wt_atomic_store_enum(&btree->syncing, WT_BTREE_SYNC_RUNNING);
+        __wt_atomic_store_enum_relaxed(&btree->syncing, WT_BTREE_SYNC_RUNNING);
 
         /*
          * Reset the number of obsolete time window pages to let the eviction threads and checkpoint
          * cleanup operation to continue marking the clean obsolete time window pages as dirty once
          * the checkpoint is finished.
          */
-        __wt_atomic_store32(&btree->eviction_obsolete_tw_pages, 0);
-        __wt_atomic_store32(&btree->checkpoint_cleanup_obsolete_tw_pages, 0);
+        __wt_atomic_store_uint32_relaxed(&btree->eviction_obsolete_tw_pages, 0);
+        __wt_atomic_store_uint32_relaxed(&btree->checkpoint_cleanup_obsolete_tw_pages, 0);
         is_hs = WT_IS_HS(btree->dhandle);
 
         /* Add in history store reconciliation for standard files. */
@@ -313,13 +316,13 @@ __wt_sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
             }
 
             if (is_internal) {
-                internal_bytes += __wt_atomic_loadsize(&page->memory_footprint);
+                internal_bytes += __wt_atomic_load_size_relaxed(&page->memory_footprint);
                 ++internal_pages;
                 /* Slow down checkpoints. */
                 if (FLD_ISSET(conn->debug_flags, WT_CONN_DEBUG_SLOW_CKPT))
                     __wt_sleep(0, 10 * WT_THOUSAND);
             } else {
-                leaf_bytes += __wt_atomic_loadsize(&page->memory_footprint);
+                leaf_bytes += __wt_atomic_load_size_relaxed(&page->memory_footprint);
                 ++leaf_pages;
             }
 
@@ -353,23 +356,17 @@ __wt_sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
             tried_eviction = false;
 
             WT_STAT_CONN_INCR(session, checkpoint_pages_reconciled);
+            WT_STAT_CONN_INCRV(session, checkpoint_pages_reconciled_bytes, page->memory_footprint);
             WT_STATP_DSRC_INCR(session, btree->dhandle->stats, btree_checkpoint_pages_reconciled);
-            if (FLD_ISSET(rec_flags, WT_REC_HS))
+            if (WT_IS_HS(btree->dhandle))
                 WT_STAT_CONN_INCR(session, checkpoint_hs_pages_reconciled);
 
             WT_ERR(__wt_reconcile(session, walk, NULL, rec_flags));
 
-            /*
-             * Update checkpoint IO tracking data if configured to log verbose progress messages.
-             */
-            if (conn->ckpt.timer_start.tv_sec > 0) {
-                conn->ckpt.write_bytes += __wt_atomic_loadsize(&page->memory_footprint);
-                ++conn->ckpt.write_pages;
-
-                /* Periodically log checkpoint progress. */
-                if (conn->ckpt.write_pages % (5 * WT_THOUSAND) == 0)
-                    __wt_checkpoint_progress(session, false);
-            }
+            /* Update checkpoint IO tracking data. */
+            if (__wt_checkpoint_verbose_timer_started(session))
+                __wt_checkpoint_progress_stats(
+                  session, __wt_atomic_load_size_relaxed(&page->memory_footprint));
         }
 
         /*
@@ -382,7 +379,8 @@ __wt_sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
          * Do not mark the tree dirty if there is no change to stable timestamp compared to the last
          * checkpoint.
          */
-        if (!btree->modified && !F_ISSET(conn, WT_CONN_RECOVERING | WT_CONN_CLOSING_CHECKPOINT) &&
+        if (!btree->modified && !F_ISSET(conn, WT_CONN_RECOVERING) &&
+          !F_ISSET_ATOMIC_32(conn, WT_CONN_CLOSING_CHECKPOINT) &&
           (btree->rec_max_txn >= txn->snapshot_data.snap_min ||
             (conn->txn_global.checkpoint_timestamp != conn->txn_global.last_ckpt_timestamp &&
               btree->rec_max_timestamp > conn->txn_global.checkpoint_timestamp)))
@@ -416,8 +414,8 @@ err:
         __wt_txn_release_snapshot(session);
 
     /* Clear the checkpoint flag. */
-    __wt_atomic_store_enum(&btree->syncing, WT_BTREE_SYNC_OFF);
-    __wt_atomic_store_pointer(&btree->sync_session, NULL);
+    __wt_atomic_store_enum_relaxed(&btree->syncing, WT_BTREE_SYNC_OFF);
+    __wt_atomic_store_ptr_relaxed(&btree->sync_session, NULL);
 
     __wt_spin_unlock(session, &btree->flush_lock);
 

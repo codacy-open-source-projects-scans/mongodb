@@ -27,14 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
@@ -43,6 +35,8 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/global_catalog/router_role_api/router_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
@@ -50,17 +44,22 @@
 #include "mongo/db/query/query_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/client/shard.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/async_requests_sender.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 
 namespace mongo {
 namespace {
@@ -96,31 +95,34 @@ public:
         void typedRun(OperationContext* opCtx) {
             const NamespaceString& nss = ns();
 
-            auto cri = uassertStatusOK(
-                Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
-
             auto& cmd = request();
             setReadWriteConcern(opCtx, cmd, this);
-            auto shardResponses = scatterGatherVersionedTargetByRoutingTable(
+
+            sharding::router::CollectionRouter router{opCtx->getServiceContext(), nss};
+            router.routeWithRoutingContext(
                 opCtx,
-                nss.dbName(),
-                nss,
-                cri,
-                CommandHelpers::filterCommandRequestForPassthrough(cmd.toBSON()),
-                ReadPreferenceSetting::get(opCtx),
-                Shard::RetryPolicy::kIdempotent,
-                BSONObj() /*query*/,
-                BSONObj() /*collation*/,
-                boost::none /*letParameters*/,
-                boost::none /*runtimeConstants*/);
+                Request::kCommandName,
+                [&](OperationContext* opCtx, RoutingContext& routingCtx) {
+                    auto shardResponses = scatterGatherVersionedTargetByRoutingTable(
+                        opCtx,
+                        routingCtx,
+                        nss,
+                        CommandHelpers::filterCommandRequestForPassthrough(cmd.toBSON()),
+                        ReadPreferenceSetting::get(opCtx),
+                        Shard::RetryPolicy::kIdempotent,
+                        BSONObj() /*query*/,
+                        BSONObj() /*collation*/,
+                        boost::none /*letParameters*/,
+                        boost::none /*runtimeConstants*/);
 
-            for (const auto& shardResult : shardResponses) {
-                const auto& shardResponse = uassertStatusOK(std::move(shardResult.swResponse));
+                    for (const auto& shardResult : shardResponses) {
+                        const auto& shardResponse =
+                            uassertStatusOK(std::move(shardResult.swResponse));
 
-                uassertStatusOK(shardResponse.status);
-
-                uassertStatusOK(getStatusFromCommandResult(shardResponse.data));
-            }
+                        uassertStatusOK(shardResponse.status);
+                        uassertStatusOK(getStatusFromCommandResult(shardResponse.data));
+                    }
+                });
         }
 
     private:

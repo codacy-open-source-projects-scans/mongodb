@@ -30,8 +30,41 @@
 
 #include "mongo/db/s/resharding/resharding_manual_cleanup.h"
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/client/read_preference.h"
+#include "mongo/db/commands.h"
+#include "mongo/db/database_name.h"
+#include "mongo/db/generic_argument_util.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/ddl/sharded_ddl_commands_gen.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/type_collection.h"
+#include "mongo/db/local_catalog/shard_role_api/resource_yielder.h"
+#include "mongo/db/repl/read_concern_level.h"
+#include "mongo/db/s/resharding/resharding_coordinator.h"
+#include "mongo/db/s/resharding/resharding_data_copy_util.h"
+#include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
+#include "mongo/db/s/resharding/resharding_util.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/executor/remote_command_response.h"
+#include "mongo/executor/task_executor_pool.h"
+#include "mongo/logv2/log.h"
+#include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/s/async_requests_sender.h"
+#include "mongo/s/request_types/cleanup_reshard_collection_gen.h"
+#include "mongo/s/resharding/common_types_gen.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/future.h"
+
 #include <algorithm>
-#include <fmt/format.h>
 #include <iterator>
 #include <memory>
 #include <set>
@@ -42,42 +75,7 @@
 
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/client/read_preference.h"
-#include "mongo/db/cluster_role.h"
-#include "mongo/db/commands.h"
-#include "mongo/db/database_name.h"
-#include "mongo/db/generic_argument_util.h"
-#include "mongo/db/repl/read_concern_level.h"
-#include "mongo/db/resource_yielder.h"
-#include "mongo/db/s/resharding/resharding_data_copy_util.h"
-#include "mongo/db/s/resharding/resharding_donor_recipient_common.h"
-#include "mongo/db/s/resharding/resharding_util.h"
-#include "mongo/db/server_options.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/executor/remote_command_response.h"
-#include "mongo/executor/task_executor_pool.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/async_requests_sender.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/cluster_commands_helpers.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/request_types/cleanup_reshard_collection_gen.h"
-#include "mongo/s/request_types/sharded_ddl_commands_gen.h"
-#include "mongo/s/resharding/common_types_gen.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/future.h"
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
 
@@ -116,9 +114,10 @@ std::vector<AsyncRequestsSender::Request> createShardCleanupRequests(
 void assertResponseOK(const NamespaceString& nss,
                       StatusWith<executor::RemoteCommandResponse> response,
                       ShardId shardId) {
-    using namespace fmt::literals;
-    auto errorContext = "Unable to cleanup reshard collection for namespace {} on shard {}"_format(
-        nss.toStringForErrorMsg(), shardId.toString());
+    auto errorContext =
+        fmt::format("Unable to cleanup reshard collection for namespace {} on shard {}",
+                    nss.toStringForErrorMsg(),
+                    shardId.toString());
     auto shardResponse = uassertStatusOKWithContext(std::move(response), errorContext);
 
     auto status = getStatusFromCommandResult(shardResponse.data);
@@ -286,19 +285,23 @@ void ReshardingCoordinatorCleaner::_dropTemporaryReshardingCollection(
     generic_argument_util::setMajorityWriteConcern(dropCollectionCommand,
                                                    &opCtx->getWriteConcern());
 
-    const auto dbInfo = uassertStatusOK(
-        Grid::get(opCtx)->catalogCache()->getDatabase(opCtx, tempReshardingNss.dbName()));
+    sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(),
+                                             tempReshardingNss.dbName());
+    router.route(opCtx,
+                 "dropTemporaryReshardingCollection"_sd,
+                 [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
+                     auto cmdResponse = executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
+                         opCtx,
+                         tempReshardingNss.dbName(),
+                         dbInfo,
+                         dropCollectionCommand.toBSON(),
+                         ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                         Shard::RetryPolicy::kIdempotent);
 
-    auto cmdResponse = executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
-        opCtx,
-        tempReshardingNss.dbName(),
-        dbInfo,
-        dropCollectionCommand.toBSON(),
-        ReadPreferenceSetting(ReadPreference::PrimaryOnly),
-        Shard::RetryPolicy::kIdempotent);
-
-    assertResponseOK(
-        _originalCollectionNss, std::move(cmdResponse.swResponse), std::move(cmdResponse.shardId));
+                     assertResponseOK(_originalCollectionNss,
+                                      std::move(cmdResponse.swResponse),
+                                      std::move(cmdResponse.shardId));
+                 });
 }
 
 ReshardingDonorCleaner::ReshardingDonorCleaner(NamespaceString nss, UUID reshardingUUID)

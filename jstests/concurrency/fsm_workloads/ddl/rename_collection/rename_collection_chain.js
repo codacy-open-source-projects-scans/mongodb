@@ -9,16 +9,16 @@
  *   assumes_unsharded_collection,
  * ]
  */
-export const $config = (function() {
-    var data = {
+export const $config = (function () {
+    let data = {
         // Use the workload name as a prefix for the collection name,
         // since the workload name is assumed to be unique.
-        prefix: 'rename_collection_chain'
+        prefix: "rename_collection_chain",
     };
 
-    var states = (function() {
+    let states = (function () {
         function uniqueCollectionName(prefix, tid, num) {
-            return prefix + tid + '_' + num;
+            return prefix + tid + "_" + num;
         }
 
         function init(db, collName) {
@@ -28,8 +28,8 @@ export const $config = (function() {
         }
 
         function rename(db, collName) {
-            var toCollName = uniqueCollectionName(this.prefix, this.tid, this.num++);
-            var res = db[this.fromCollName].renameCollection(toCollName, false /* dropTarget */);
+            let toCollName = uniqueCollectionName(this.prefix, this.tid, this.num++);
+            let res = db[this.fromCollName].renameCollection(toCollName, false /* dropTarget */);
 
             // SERVER-57128: NamespaceNotFound is an acceptable error if the mongos retries
             // the rename after the coordinator has already fulfilled the original request
@@ -43,13 +43,10 @@ export const $config = (function() {
             if (!this.allCollectionsInitialized) {
                 if (collectionInfos.length === this.threadCount) {
                     this.allCollectionsInitialized = true;
-                    jsTestLog(`All collections visible to thread ${this.tid}: ${
-                        tojsononeline(collectionInfos)}`);
+                    jsTestLog(`All collections visible to thread ${this.tid}: ${tojsononeline(collectionInfos)}`);
                 }
             } else {
-                const numColls =
-                    collectionInfos.filter((collInfo) => collInfo.name.startsWith(this.prefix))
-                        .length;
+                const numColls = collectionInfos.filter((collInfo) => collInfo.name.startsWith(this.prefix)).length;
                 assert.eq(numColls, this.threadCount, () => tojson(collectionInfos));
             }
         }
@@ -57,7 +54,7 @@ export const $config = (function() {
         return {init: init, rename: rename, listCollections: listCollections};
     })();
 
-    var transitions = {
+    let transitions = {
         init: {rename: 1},
         rename: {rename: 0.9, listCollections: 0.1},
         listCollections: {rename: 1},

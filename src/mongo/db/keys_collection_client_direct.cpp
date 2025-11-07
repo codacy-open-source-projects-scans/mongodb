@@ -27,33 +27,30 @@
  *    it in the license file.
  */
 
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/keys_collection_client_direct.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/db/keys_collection_client_direct.h"
+#include "mongo/db/generic_argument_util.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
 #include "mongo/db/keys_collection_document_gen.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/assert_util.h"
+
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -138,7 +135,7 @@ StatusWith<std::vector<KeyDocumentType>> KeysCollectionClientDirect::_getNewKeys
     for (auto&& keyDoc : keyDocs) {
         KeyDocumentType key;
         try {
-            key = KeyDocumentType::parse(IDLParserContext("keyDoc"), keyDoc);
+            key = KeyDocumentType::parse(keyDoc, IDLParserContext("keyDoc"));
         } catch (...) {
             return exceptionToStatus();
         }
@@ -218,7 +215,7 @@ Status KeysCollectionClientDirect::_insert(OperationContext* opCtx,
 }
 
 Status KeysCollectionClientDirect::insertNewKey(OperationContext* opCtx, const BSONObj& doc) {
-    return _insert(opCtx, doc, ShardingCatalogClient::kMajorityWriteConcern);
+    return _insert(opCtx, doc, defaultMajorityWriteConcernDoNotUse());
 }
 
 }  // namespace mongo

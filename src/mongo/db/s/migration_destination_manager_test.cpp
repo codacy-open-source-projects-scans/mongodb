@@ -31,23 +31,21 @@
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <system_error>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache_test_fixture.h"
 #include "mongo/db/index/index_constants.h"
 #include "mongo/db/s/migration_destination_manager.h"
-#include "mongo/db/s/shard_server_test_fixture.h"
+#include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/s/catalog_cache_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/str.h"
+
+#include <system_error>
 
 namespace mongo {
 namespace {

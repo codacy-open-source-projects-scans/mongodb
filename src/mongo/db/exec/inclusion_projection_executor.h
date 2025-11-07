@@ -29,21 +29,12 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
+
+#include "mongo/util/modules.h"
+
 #include <boost/container/small_vector.hpp>
 #include <boost/smart_ptr.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-#include <list>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -54,19 +45,29 @@
 #include "mongo/db/exec/projection_executor.h"
 #include "mongo/db/exec/projection_node.h"
 #include "mongo/db/field_ref.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/expression_dependencies.h"
 #include "mongo/db/pipeline/expression_walker.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/transformer_interface.h"
 #include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/dependency_analysis/expression_dependencies.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_ast.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_policies.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/projection_ast.h"
-#include "mongo/db/query/projection_policies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/string_map.h"
+
+#include <cstddef>
+#include <list>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::projection_executor {
 /**
@@ -255,7 +256,7 @@ public:
         // ambiguity in the expected behavior of the serialized projection.
         _root->serialize(&output, options);
         auto idFieldName = options.serializeFieldPath("_id");
-        if (output.peek()[idFieldName].missing()) {
+        if (output.peek()[StringData{idFieldName}].missing()) {
             output.addField(idFieldName, Value{false});
         }
 

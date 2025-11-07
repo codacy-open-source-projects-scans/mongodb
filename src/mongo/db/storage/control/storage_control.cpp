@@ -28,19 +28,21 @@
  */
 
 
-#include <memory>
-#include <utility>
-
+#include "mongo/db/storage/control/storage_control.h"
 
 #include "mongo/base/status.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/checkpointer.h"
 #include "mongo/db/storage/control/journal_flusher.h"
-#include "mongo/db/storage/control/storage_control.h"
+#include "mongo/db/storage/oplog_cap_maintainer_thread.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_options.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
+
+#include <memory>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 

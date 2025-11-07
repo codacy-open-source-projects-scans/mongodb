@@ -29,21 +29,18 @@
 
 #pragma once
 
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
+#include "mongo/db/query/compiler/optimizer/index_bounds_builder/interval_evaluation_tree.h"
+#include "mongo/db/query/compiler/physical_model/index_bounds/index_bounds.h"
+#include "mongo/db/query/compiler/physical_model/interval/interval.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
+#include "mongo/util/modules.h"
+
 #include <cstddef>
 #include <memory>
 #include <string>
 #include <vector>
-
-#include "mongo/bson/bsonelement.h"
-#include "mongo/db/field_ref.h"
-#include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/query/index_bounds.h"
-#include "mongo/db/query/index_bounds_builder.h"
-#include "mongo/db/query/index_entry.h"
-#include "mongo/db/query/interval.h"
-#include "mongo/db/query/interval_evaluation_tree.h"
-#include "mongo/db/query/query_solution.h"
-#include "mongo/stdx/unordered_set.h"
 
 namespace mongo {
 namespace wildcard_planning {
@@ -61,7 +58,7 @@ static constexpr size_t kWildcardMaxArrayIndexTraversalDepth = 8u;
  * IndexEntry for each of the query fields and add them into the provided vector.
  */
 void expandWildcardIndexEntry(const IndexEntry& wildcardIndex,
-                              const stdx::unordered_set<std::string>& fields,
+                              const std::set<std::string>& fields,
                               std::vector<IndexEntry>* out);
 
 /**
@@ -87,26 +84,10 @@ void finalizeWildcardIndexScanConfiguration(
     IndexScanNode* scan, std::vector<interval_evaluation_tree::Builder>* ietBuilders);
 
 /**
- * Returns true if the given IndexScanNode is a $** scan whose bounds overlap the object type
- * bracket. Scans whose bounds include the object bracket have certain limitations for planning
- * purposes; for instance, they cannot provide covered results or be converted to DISTINCT_SCAN.
- */
-bool isWildcardObjectSubpathScan(const IndexScanNode* node);
-
-bool isWildcardObjectSubpathScan(const IndexEntry& index, const IndexBounds& bounds);
-
-/**
  * This helper generates index intervals for the "$_path" field to scan all keys indexing a
  * document. The index intervals will be ['[MinKey, MinKey]', '["", {})]' ]. The "MinKey" key value
  * is for documents missing the wildcard field.
  */
 std::vector<Interval> makeAllValuesForPath();
-
-/**
- * If the compound wildcard index is expanded to any known field and the index is used to answer a
- * $or query, we should expand the index bounds of the wildcard field in such IndexEntry to include
- * all keys. Returns false if the query plan cannot use the index.
- */
-bool expandWildcardFieldBounds(std::vector<std::unique_ptr<QuerySolutionNode>>& ixscanNodes);
 }  // namespace wildcard_planning
 }  // namespace mongo

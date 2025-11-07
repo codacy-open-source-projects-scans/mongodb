@@ -2,18 +2,26 @@
 BUILD files in the "src/" subtree.
 """
 
+load("//bazel/toolchains/cc:mongo_defines.bzl", "MONGO_GLOBAL_DEFINES")
+load(
+    "//bazel/toolchains/cc:mongo_errors.bzl",
+    "REQUIRED_SETTINGS_LIBUNWIND_ERROR_MESSAGE",
+)
+load(
+    "//bazel/toolchains/cc:mongo_compiler_flags.bzl",
+    "get_copts",
+    "get_linkopts",
+)
+load("@bazel_skylib//lib:selects.bzl", "selects")
 load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
 load("@com_github_grpc_grpc//bazel:generate_cc.bzl", "generate_cc")
-load("@com_github_grpc_grpc//bazel:protobuf.bzl", "well_known_proto_libs")
 load("@poetry//:dependencies.bzl", "dependency")
 load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
 load("@rules_proto//proto:defs.bzl", "proto_library")
 load(
     "//bazel:header_deps.bzl",
     "HEADER_DEP_SUFFIX",
-    "LINK_DEP_SUFFIX",
     "create_header_dep",
-    "create_link_deps",
 )
 load(
     "//bazel:separate_debug.bzl",
@@ -24,737 +32,11 @@ load(
     "extract_debuginfo_binary",
     "extract_debuginfo_test",
 )
-
-# https://learn.microsoft.com/en-us/cpp/build/reference/md-mt-ld-use-run-time-library?view=msvc-170
-#   /MD defines _MT and _DLL and links in MSVCRT.lib into each .obj file
-#   /MDd defines _DEBUG, _MT, and _DLL and link MSVCRTD.lib into each .obj file
-WINDOWS_MULTITHREAD_RUNTIME_COPTS = select({
-    "//bazel/config:windows_dbg_disabled": [
-        "/MD",
-    ],
-    "//bazel/config:windows_dbg_enabled": [
-        "/MDd",
-    ],
-    "//conditions:default": [],
-})
-
-# /O1 optimize for size
-# /O2 optimize for speed (as opposed to size)
-# /Oy- disable frame pointer optimization (overrides /O2, only affects 32-bit)
-# /Zo enables optimizations with modifications to make debugging easier
-WINDOWS_OPT_COPTS = select({
-    # This is opt=debug, not to be confused with (opt=on && dbg=on)
-    "//bazel/config:windows_opt_debug": [
-        "/Ox",
-        "/Zo",
-        "/Oy-",
-    ],
-    "//bazel/config:windows_opt_off": [
-        "/Od",
-    ],
-    "//bazel/config:windows_opt_on": [
-        "/O2",
-        "/Oy-",
-    ],
-    "//bazel/config:windows_opt_size": [
-        "/Os",
-        "/Oy-",
-    ],
-    "//conditions:default": [],
-})
-
-# Enable Stack Frame Run-Time Error Checking; Reports when a variable is used
-# without having been initialized (implies /Od: no optimizations)
-WINDOWS_RUNTIME_ERROR_CHECK_COPTS = select({
-    "//bazel/config:windows_opt_off_dbg_enabled": [
-        "/RTC1",
-    ],
-    "//conditions:default": [],
-})
-
-WINDOWS_GENERAL_COPTS = select({
-    "@platforms//os:windows": [
-        # /EHsc exception handling style for visual studio
-        "/EHsc",
-
-        # /W3 warning level
-        "/W3",
-
-        # Support large object files since some unit-test sources contain a lot
-        # of code
-        "/bigobj",
-
-        # Set Source and Executable character sets to UTF-8, this will produce a
-        # warning C4828 if the file contains invalid UTF-8.
-        "/utf-8",
-
-        # Specify standards conformance mode to the compiler.
-        "/permissive-",
-
-        # Enables the __cplusplus preprocessor macro to report an updated value
-        # for recent C++ language standards support.
-        "/Zc:__cplusplus",
-
-        # Tells the compiler to preferentially call global operator delete or
-        # operator delete[] functions that have a second parameter of type
-        # size_t when the size of the object is available.
-        "/Zc:sizedDealloc",
-
-        # Treat volatile according to the ISO standard and do not guarantee
-        # acquire/release semantics.
-        "/volatile:iso",
-
-        # Tell CL to produce more useful error messages.
-        "/diagnostics:caret",
-
-        # Don't send error reports in case of internal compiler error
-        "/errorReport:none",
-    ],
-    "//conditions:default": [],
-})
-
-WINDOWS_DEBUG_COPTS = select({
-    "//bazel/config:windows_debug_symbols_enabled": [
-        # Generate debug info into the object files
-        "/Z7",
-    ],
-    "//conditions:default": [],
-})
-
-# Suppress some warnings we don't like, or find necessary to
-# suppress. Please keep this list alphabetized and commented.
-WINDOWS_SUPRESSED_WARNINGS_COPTS = select({
-    "@platforms//os:windows": [
-        # C4068: unknown pragma. added so that we can specify unknown
-        # pragmas for other compilers.
-        "/wd4068",
-
-        # C4244: 'conversion' conversion from 'type1' to 'type2', possible loss
-        # of data. An integer type is converted to a smaller integer type.
-        "/wd4244",
-
-        # C4267: 'var' : conversion from 'size_t' to 'type', possible loss of
-        # data. When compiling with /Wp64, or when compiling on a 64-bit
-        # operating system, type is 32 bits but size_t is 64 bits when compiling
-        # for 64-bit targets. To fix this warning, use size_t instead of a type.
-        "/wd4267",
-
-        # C4290: C++ exception specification ignored except to indicate a
-        # function is not __declspec(nothrow). A function is declared using
-        # exception specification, which Visual C++ accepts but does not
-        # implement.
-        "/wd4290",
-
-        # C4351: On extremely old versions of MSVC (pre 2k5), default
-        # constructing an array member in a constructor's initialization list
-        # would not zero the array members "in some cases". Since we don't
-        # target MSVC versions that old, this warning is safe to ignore.
-        "/wd4351",
-
-        # C4355: 'this' : used in base member initializer list. The this pointer
-        # is valid only within nonstatic member functions. It cannot be used in
-        # the initializer list for a base class.
-        "/wd4355",
-
-        # C4373: Older versions of MSVC would fail to make a function in a
-        # derived class override a virtual function in the parent, when defined
-        # inline and at least one of the parameters is made const. The behavior
-        # is incorrect under the standard. MSVC is fixed now, and the warning
-        # exists merely to alert users who may have relied upon the older,
-        # non-compliant behavior. Our code should not have any problems with the
-        # older behavior, so we can just disable this warning.
-        "/wd4373",
-
-        # C4800: 'type' : forcing value to bool 'true' or 'false' (performance
-        # warning). This warning is generated when a value that is not bool is
-        # assigned or coerced into type bool.
-        "/wd4800",
-
-        # C4251: This warning attempts to prevent usage of CRT (C++ standard
-        # library) types in DLL interfaces. That is a good idea for DLLs you
-        # ship to others, but in our case, we know that all DLLs are built
-        # consistently. Suppress the warning.
-        "/wd4251",
-
-        # mozjs requires the following
-        #  'declaration' : no matching operator delete found; memory will not be
-        #                  freed if initialization throws an exception
-        "/wd4291",
-    ],
-    "//conditions:default": [],
-})
-
-WINDOWS_WARNINGS_AS_ERRORS_COPTS = select({
-    "@platforms//os:windows": [
-        # some warnings we should treat as errors:
-        # c4013
-        #  'function' undefined; assuming extern returning int
-        #
-        # This warning occurs when files compiled for the C language use
-        # functions not defined in a header file.
-        "/we4013",
-
-        # c4099
-        #  'identifier' : type name first seen using 'objecttype1' now seen
-        #                 using 'objecttype2'
-        #
-        # This warning occurs when classes and structs are declared with a mix
-        # of struct and classwhich can cause linker failures
-        "/we4099",
-
-        # c4930
-        #  'identifier': prototyped function not called (was a variable
-        #                definition intended?)
-        #
-        # This warning indicates a most-vexing parse error, where a user
-        # declared a function that was probably intended as a variable
-        # definition. A common example is accidentally declaring a function
-        # called lock that takes a mutex when one meant to create a guard object
-        # called lock on the stack.
-        "/we4930",
-    ],
-    "//conditions:default": [],
-})
-
-MSVC_OPT_COPTS = select({
-    "//bazel/config:msvc_opt": [
-        # https://devblogs.microsoft.com/cppblog/introducing-gw-compiler-switch/
-        "/Gw",
-        "/Gy",
-
-        # https://devblogs.microsoft.com/cppblog/linker-enhancements-in-visual-studio-2013-update-2-ctp2/
-        "/Zc:inline",
-    ],
-    "//conditions:default": [],
-})
-
-WINDOWS_COPTS = (
-    WINDOWS_GENERAL_COPTS +
-    WINDOWS_DEBUG_COPTS +
-    WINDOWS_OPT_COPTS +
-    WINDOWS_MULTITHREAD_RUNTIME_COPTS +
-    WINDOWS_RUNTIME_ERROR_CHECK_COPTS +
-    WINDOWS_SUPRESSED_WARNINGS_COPTS +
-    WINDOWS_WARNINGS_AS_ERRORS_COPTS +
-    MSVC_OPT_COPTS
-)
-
-WINDOWS_DEFAULT_LINKFLAGS = select({
-    "//bazel/config:windows_debug_symbols_enabled": [
-        # /DEBUG will tell the linker to create a .pdb file which WinDbg and
-        # Visual Studio will use to resolve symbols if you want to debug a
-        # release-mode image.
-        #
-        # Note that this means we can't do parallel links in the build.
-        #
-        # Also note that this has nothing to do with _DEBUG or optimization.
-
-        # If the user set a /DEBUG flag explicitly, don't add another. Otherwise
-        # use the standard /DEBUG flag, since we always want PDBs.
-        "/DEBUG",
-    ],
-    "//conditions:default": [],
-})
-
-# Windows non optimized builds will cause the PDB to blow up in size, this
-# allows a larger PDB. The flag is undocumented at the time of writing but the
-# microsoft thread which brought about its creation can be found here:
-# https://developercommunity.visualstudio.com/t/pdb-limit-of-4-gib-is-likely-to-be-a-problem-in-a/904784
-#
-# Without this flag MSVC will report a red herring error message, about disk
-# space or invalid path.
-WINDOWS_PDB_PAGE_SIZE_LINKOPT = select({
-    "//bazel/config:windows_opt_off": [
-        "/pdbpagesize:16384",
-    ],
-    "//conditions:default": [],
-})
-
-# Disable incremental link - avoid the level of indirection for function calls
-WINDOWS_INCREMENTAL_LINKOPT = select({
-    "//bazel/config:windows_opt_any": [
-        "/INCREMENTAL:NO",
-    ],
-    "//conditions:default": [],
-})
-
-# This gives 32-bit programs 4 GB of user address space in WOW64, ignored in
-# 64-bit builds.
-WINDOWS_LARGE_ADDRESS_AWARE_LINKFLAG = select({
-    "@platforms//os:windows": [
-        "/LARGEADDRESSAWARE",
-    ],
-    "//conditions:default": [],
-})
-
-MSVC_OPT_LINKFLAGS = select({
-    "//bazel/config:msvc_opt": [
-        # https://devblogs.microsoft.com/cppblog/introducing-gw-compiler-switch/
-        "/OPT:REF",
-    ],
-    "//conditions:default": [],
-})
-
-SASL_WINDOWS_COPTS = select({
-    "@platforms//os:windows": ["-Iexternal/windows_sasl/include"],
-    "//conditions:default": [],
-})
-
-SASL_WINDOWS_LINKFLAGS = select({
-    "@platforms//os:windows": ["/LIBPATH:external/windows_sasl/lib"],
-    "//conditions:default": [],
-})
-
-GLOBAL_WINDOWS_LIBRAY_LINKFLAGS = select({
-    "@platforms//os:windows": [
-        "bcrypt.lib",
-        "Dnsapi.lib",
-        "Crypt32.lib",
-        "Version.lib",
-        "Winmm.lib",
-        "Iphlpapi.lib",
-        "Pdh.lib",
-        "kernel32.lib",
-        "shell32.lib",
-        "ws2_32.lib",
-        "DbgHelp.lib",
-        "Psapi.lib",
-        "Secur32.lib",
-    ],
-    "//conditions:default": [],
-})
-
-WINDOWS_LINKFLAGS = (
-    WINDOWS_DEFAULT_LINKFLAGS +
-    WINDOWS_PDB_PAGE_SIZE_LINKOPT +
-    WINDOWS_INCREMENTAL_LINKOPT +
-    WINDOWS_LARGE_ADDRESS_AWARE_LINKFLAG +
-    MSVC_OPT_LINKFLAGS
-)
-
-WINDOWS_DEFINES = select({
-    "@platforms//os:windows": [
-        # This tells the Windows compiler not to link against the .lib files and
-        # to use boost as a bunch of header-only libraries
-        "BOOST_ALL_NO_LIB",
-        "_UNICODE",
-        "UNICODE",
-
-        # Temporary fixes to allow compilation with VS2017
-        "_SILENCE_CXX17_ALLOCATOR_VOID_DEPRECATION_WARNING",
-        "_SILENCE_CXX17_OLD_ALLOCATOR_MEMBERS_DEPRECATION_WARNING",
-        "_SILENCE_CXX17_CODECVT_HEADER_DEPRECATION_WARNING",
-
-        # TODO(SERVER-60151): Until we are fully in C++20 mode, it is easier to
-        # simply suppress C++20 deprecations. After we have switched over we
-        # should address any actual deprecated usages and then remove this flag.
-        "_SILENCE_ALL_CXX20_DEPRECATION_WARNINGS",
-        "_CONSOLE",
-        "_CRT_SECURE_NO_WARNINGS",
-        "_ENABLE_EXTENDED_ALIGNED_STORAGE",
-        "_SCL_SECURE_NO_WARNINGS",
-    ],
-    "//conditions:default": [],
-})
-
-LINUX_DEFINES = select({
-    "@platforms//os:linux": [
-        # On linux, C code compiled with gcc/clang -std=c11 causes
-        # __STRICT_ANSI__ to be set, and that drops out all of the feature test
-        # definitions, resulting in confusing errors when we run C language
-        # configure checks and expect to be able to find newer POSIX things.
-        # Explicitly enabling _XOPEN_SOURCE fixes that, and should be mostly
-        # harmless as on Linux, these macros are cumulative. The C++ compiler
-        # already sets _XOPEN_SOURCE, and, notably, setting it again does not
-        # disable any other feature test macros, so this is safe to do. Other
-        # platforms like macOS and BSD have crazy rules, so don't try this
-        # there.
-        #
-        # Furthermore, as both C++ compilers appear to define _GNU_SOURCE
-        # unconditionally (because libstdc++ requires it), it seems prudent to
-        # explicitly add that too, so that C language checks see a consistent
-        # set of definitions.
-        "_XOPEN_SOURCE=700",
-        "_GNU_SOURCE",
-    ],
-    "//conditions:default": [],
-})
-
-MACOS_DEFINES = select({
-    "@platforms//os:macos": [
-        # TODO SERVER-54659 - ASIO depends on std::result_of which was removed
-        # in C++ 20. xcode15 does not have backwards compatibility
-        "ASIO_HAS_STD_INVOKE_RESULT",
-        # This is needed to compile boost on the newer xcodes
-        "BOOST_NO_CXX98_FUNCTION_BASE",
-    ],
-    "//conditions:default": [],
-})
-
-ABSEIL_DEFINES = [
-    "ABSL_FORCE_ALIGNED_ACCESS",
-]
-
-BOOST_DEFINES = [
-    "BOOST_ENABLE_ASSERT_DEBUG_HANDLER",
-    # TODO: Ideally, we could not set this define in C++20 builds, but at least
-    # our current Xcode 12 doesn't offer std::atomic_ref, so we cannot.
-    "BOOST_FILESYSTEM_NO_CXX20_ATOMIC_REF",
-    "BOOST_LOG_NO_SHORTHAND_NAMES",
-    "BOOST_LOG_USE_NATIVE_SYSLOG",
-    "BOOST_LOG_WITHOUT_THREAD_ATTR",
-    "BOOST_MATH_NO_LONG_DOUBLE_MATH_FUNCTIONS",
-    "BOOST_SYSTEM_NO_DEPRECATED",
-    "BOOST_THREAD_USES_DATETIME",
-    "BOOST_THREAD_VERSION=5",
-] + select({
-    "//bazel/config:linkdynamic_not_shared_archive": ["BOOST_LOG_DYN_LINK"],
-    "//conditions:default": [],
-}) + select({
-    "@platforms//os:windows": ["BOOST_ALL_NO_LIB"],
-    "//conditions:default": [],
-})
-
-ENTERPRISE_DEFINES = select({
-    "//bazel/config:build_enterprise_enabled": ["MONGO_ENTERPRISE_VERSION=1"],
-    "//conditions:default": [],
-}) + select({
-    "//bazel/config:enterprise_feature_audit_enabled": ["MONGO_ENTERPRISE_AUDIT=1"],
-    "//conditions:default": [],
-}) + select({
-    "//bazel/config:enterprise_feature_encryptdb_enabled": ["MONGO_ENTERPRISE_ENCRYPTDB=1"],
-    "//conditions:default": [],
-})
-
-# Fortify only possibly makes sense on POSIX systems, and we know that clang is
-# not a valid combination:
-# http://lists.llvm.org/pipermail/cfe-dev/2015-November/045852.html
-GCC_OPT_DEFINES = select({
-    "//bazel/config:gcc_opt": ["_FORTIFY_SOURCE=2"],
-    "//conditions:default": [],
-})
-
-LINUX_OPT_COPTS = select({
-    # This is opt=debug, not to be confused with (opt=on && dbg=on)
-    "//bazel/config:gcc_or_clang_opt_debug": [
-        "-Og",
-    ],
-    "//bazel/config:gcc_or_clang_opt_off": [
-        "-O0",
-    ],
-    "//bazel/config:gcc_or_clang_opt_on": [
-        "-O2",
-    ],
-    "//bazel/config:gcc_or_clang_opt_size": [
-        "-Os",
-    ],
-    "//conditions:default": [],
-})
-
-GCC_OR_CLANG_WARNINGS_COPTS = select({
-    "//bazel/config:gcc_or_clang": [
-        # Enable all warnings by default.
-        "-Wall",
-
-        # Warn on comparison between signed and unsigned integer expressions.
-        "-Wsign-compare",
-
-        # Do not warn on unknown pragmas.
-        "-Wno-unknown-pragmas",
-
-        # Warn if a precompiled header (see Precompiled Headers) is found in the
-        # search path but can't be used.
-        "-Winvalid-pch",
-
-        # This warning was added in g++-4.8.
-        "-Wno-unused-local-typedefs",
-
-        # Clang likes to warn about unused functions, which seems a tad
-        # aggressive and breaks -Werror, which we want to be able to use.
-        "-Wno-unused-function",
-
-        # Prevents warning about using deprecated features (such as auto_ptr in
-        # c++11) Using -Wno-error=deprecated-declarations does not seem to work
-        # on some compilers, including at least g++-4.6.
-        "-Wno-deprecated-declarations",
-
-        # New in clang-3.4, trips up things mostly in third_party, but in a few
-        # places in the primary mongo sources as well.
-        "-Wno-unused-const-variable",
-
-        # This has been suppressed in gcc 4.8, due to false positives, but not
-        # in clang. So we explicitly disable it here.
-        "-Wno-missing-braces",
-
-        # SERVER-76472 we don't try to maintain ABI so disable warnings about
-        # possible ABI issues.
-        "-Wno-psabi",
-
-        # TODO(SERVER-97447): Remove this once we're fully on the v5 toolchain.
-        # In the meantime, we need to suppress some warnings that are only
-        # recognized by the new compilers.
-        "-Wno-unknown-warning-option",
-    ],
-    "//conditions:default": [],
-})
-
-CLANG_WARNINGS_COPTS = select({
-    "//bazel/config:compiler_type_clang": [
-        # SERVER-44856: Our windows builds complain about unused
-        # exception parameters, but GCC and clang don't seem to do
-        # that for us automatically. In the interest of making it more
-        # likely to catch these errors early, add the (currently clang
-        # only) flag that turns it on.
-        "-Wunused-exception-parameter",
-
-        # TODO: Note that the following two flags are added to CCFLAGS even
-        # though they are really C++ specific. We need to do this because SCons
-        # passes CXXFLAGS *before* CCFLAGS, but CCFLAGS contains -Wall, which
-        # re-enables the warnings we are trying to suppress. In the future, we
-        # should move all warning flags to CCWARNFLAGS and CXXWARNFLAGS and add
-        # these to CCOM and CXXCOM as appropriate.
-        #
-        # Clang likes to warn about unused private fields, but some of our
-        # third_party libraries have such things.
-        "-Wno-unused-private-field",
-
-        # As of clang-3.4, this warning appears in v8, and gets escalated to an
-        # error.
-        "-Wno-tautological-constant-out-of-range-compare",
-
-        # As of clang in Android NDK 17, these warnings appears in boost and/or
-        # ICU, and get escalated to errors
-        "-Wno-tautological-constant-compare",
-        "-Wno-tautological-unsigned-zero-compare",
-        "-Wno-tautological-unsigned-enum-zero-compare",
-
-        # Suppress warnings about not consistently using override everywhere in
-        # a class. It seems very pedantic, and we have a fair number of
-        # instances.
-        "-Wno-inconsistent-missing-override",
-
-        # Don't issue warnings about potentially evaluated expressions
-        "-Wno-potentially-evaluated-expression",
-
-        # Disable warning about templates that can't be implicitly instantiated.
-        # It is an attempt to make a link error into an easier-to-debug compiler
-        # failure, but it triggers false positives if explicit instantiation is
-        # used in a TU that can see the full definition. This is a problem at
-        # least for the S2 headers.
-        "-Wno-undefined-var-template",
-
-        # This warning was added in clang-4.0, but it warns about code that is
-        # required on some platforms. Since the warning just states that
-        # 'explicit instantiation of [a template] that occurs after an explicit
-        # specialization has no effect', it is harmless on platforms where it
-        # isn't required
-        "-Wno-instantiation-after-specialization",
-
-        # This warning was added in clang-5 and flags many of our lambdas. Since
-        # it isn't actively harmful to capture unused variables we are
-        # suppressing for now with a plan to fix later.
-        "-Wno-unused-lambda-capture",
-
-        # This warning was added in Apple clang version 11 and flags many
-        # explicitly defaulted move constructors and assignment operators for
-        # being implicitly deleted, which is not useful.
-        "-Wno-defaulted-function-deleted",
-    ],
-    "//conditions:default": [],
-})
-
-GCC_WARNINGS_COPTS = select({
-    "//bazel/config:compiler_type_gcc": [
-        # Disable warning about variables that may not be initialized
-        # Failures are triggered in the case of boost::optional
-        "-Wno-maybe-uninitialized",
-
-        # Prevents warning about unused but set variables found in boost version
-        # 1.49 in boost/date_time/format_date_parser.hpp which does not work for
-        # compilers GCC >= 4.6. Error explained in
-        # https://svn.boost.org/trac/boost/ticket/6136 .
-        "-Wno-unused-but-set-variable",
-    ],
-    "//conditions:default": [],
-})
-
-CLANG_FNO_LIMIT_DEBUG_INFO = select({
-    "//bazel/config:compiler_type_clang": [
-        # We add this flag to make clang emit debug info for c++ stl types so
-        # that our pretty printers will work with newer clang's which omit this
-        # debug info. This does increase the overall debug info size.
-        "-fno-limit-debug-info",
-    ],
-    "//conditions:default": [],
-})
-
-MACOS_WARNINGS_COPTS = select({
-    "@platforms//os:macos": [
-        # As of XCode 9, this flag must be present (it is not enabled by -Wall),
-        # in order to enforce that -mXXX-version-min=YYY will enforce that you
-        # don't use APIs from ZZZ.
-        "-Wunguarded-availability",
-        "-Wno-enum-constexpr-conversion",
-    ],
-    "//conditions:default": [],
-})
-
-GCC_OR_CLANG_GENERAL_COPTS = select({
-    "//bazel/config:gcc_or_clang": [
-        # Generate unwind table in DWARF format, if supported by target machine.
-        # The table is exact at each instruction boundary, so it can be used for
-        # stack unwinding from asynchronous events (such as debugger or garbage
-        # collector).
-        "-fasynchronous-unwind-tables",
-
-        # For debug builds with tcmalloc, we need the frame pointer so it can
-        # record the stack of allocations. We also need the stack pointer for
-        # stack traces unless libunwind is enabled. Enable frame pointers by
-        # default.
-        "-fno-omit-frame-pointer",
-
-        # Enable strong by default, this may need to be softened to
-        # -fstack-protector-all if we run into compatibility issues.
-        "-fstack-protector-strong",
-
-        # Disable TBAA optimization
-        "-fno-strict-aliasing",
-
-        # Show colors even though bazel captures stdout/stderr
-        "-fdiagnostics-color",
-    ],
-    "//conditions:default": [],
-})
-
-LINUX_PTHREAD_LINKFLAG = select({
-    "@platforms//os:linux": [
-        # Adds support for multithreading with the pthreads library. This option
-        # sets flags for both the preprocessor and linker.
-        "-pthread",
-    ],
-    "//conditions:default": [],
-})
-
-RDYNAMIC_LINKFLAG = select({
-    # Use rdynamic for backtraces with glibc unless we have libunwind.
-    "@platforms//os:linux": [
-        # Pass the flag -export-dynamic to the ELF linker, on targets that
-        # support it. This instructs the linker to add all symbols, not only
-        # used ones, to the dynamic symbol table. This option is needed for some
-        # uses of dlopen or to allow obtaining backtraces from within a program.
-        "-rdynamic",
-    ],
-    "//conditions:default": [],
-})
-
-# These are added to both copts and linker flags.
-DWARF_VERSION_FEATURES = select({
-    "//bazel/config:dwarf_version_4_linux": [
-        "dwarf-4",
-    ],
-    "//bazel/config:dwarf_version_5_linux": [
-        "dwarf-5",
-    ],
-    "//conditions:default": [],
-})
-
-# Set the debug level for copts and linker
-DEBUG_LEVEL_FEATURES = select({
-    "//bazel/config:gcc_or_clang_dbg_level_0": [
-        "g0",
-    ],
-    "//bazel/config:gcc_or_clang_dbg_level_1": [
-        "g1",
-    ],
-    "//bazel/config:gcc_or_clang_dbg_level_2": [
-        "g2",
-    ],
-    "//bazel/config:gcc_or_clang_dbg_level_3": [
-        "g3",
-    ],
-    "//conditions:default": [],
-})
-
-# SERVER-9761: Ensure early detection of missing symbols in dependent libraries
-# at program startup. For non-release dynamic builds we disable this behavior in
-# the interest of improved mongod startup times. Xcode15 removed bind_at_load
-# functionality so we cannot have a selection for macosx here
-# ld: warning: -bind_at_load is deprecated on macOS
-# TODO: SERVER-90596 reenable loading at startup
-BIND_AT_LOAD_LINKFLAGS = select({
-    "//bazel/config:linkstatic_enabled_linux": [
-        "-Wl,-z,now",
-    ],
-    "//conditions:default": [],
-})
-
-# Disable floating-point contractions such as forming of fused multiply-add
-# operations.
-FLOATING_POINT_COPTS = select({
-    "//bazel/config:compiler_type_clang": ["-ffp-contract=off"],
-    "//bazel/config:compiler_type_gcc": ["-ffp-contract=off"],
-
-    # msvc defaults to /fp:precise. Visual Studio 2022 does not emit
-    # floating-point contractions with /fp:precise, but previous versions can.
-    # Disable contractions altogether by using /fp:strict.
-    "//bazel/config:compiler_type_msvc": ["/fp:strict"],
-})
-
-IMPLICIT_FALLTHROUGH_COPTS = select({
-    "//bazel/config:compiler_type_clang": ["-Wimplicit-fallthrough"],
-    "//bazel/config:compiler_type_gcc": ["-Wimplicit-fallthrough=5"],
-    "//conditions:default": [],
-})
-
-EXTRA_GLOBAL_LIBS_LINKFLAGS = select({
-    "@platforms//os:linux": [
-        "-lm",
-        "-lresolv",
-        "-latomic",
-    ],
-    "@platforms//os:macos": [
-        "-lresolv",
-    ],
-    "//conditions:default": [],
-})
-
-# TODO(SERVER-85340): Fix this error message when libc++ is readded to the
-#                     toolchain.
-LIBCXX_ERROR_MESSAGE = """
-Error:
-    libc++ is not currently supported in the mongo toolchain. Follow this ticket
-    to see when support is being added SERVER-85340 We currently only support
-    passing the libcxx config on macos for compatibility reasons.
-
-    libc++ requires these configuration: --//bazel/config:compiler_type=clang
-"""
-
-LIBCXX_COPTS = select({
-    "//bazel/config:use_libcxx_required_settings": ["-stdlib=libc++"],
-    "//bazel/config:use_libcxx_disabled": [],
-}, no_match_error = LIBCXX_ERROR_MESSAGE)
-
-LIBCXX_LINKFLAGS = LIBCXX_COPTS
-
-# TODO(SERVER-54659): ASIO depends on std::result_of which was removed in C++ 20
-LIBCXX_DEFINES = select({
-    "//bazel/config:use_libcxx_required_settings": ["ASIO_HAS_STD_INVOKE_RESULT"],
-    "//bazel/config:use_libcxx_disabled": [],
-}, no_match_error = LIBCXX_ERROR_MESSAGE)
-
-DEBUG_DEFINES = select({
-    "//bazel/config:dbg_enabled": [],
-    "//conditions:default": ["NDEBUG"],
-})
-
-PCRE2_DEFINES = ["PCRE2_STATIC"]
-
-SAFEINT_DEFINES = ["SAFEINT_USE_INTRINSICS=0"]
-
-REQUIRED_SETTINGS_LIBUNWIND_ERROR_MESSAGE = """
-Error:
-  libunwind=on is only supported on linux"
-"""
+load("@local_host_values//:local_host_values_set.bzl", "NUM_CPUS")
+load("@evergreen_variables//:evergreen_variables.bzl", "UNSAFE_COMPILE_VARIANT", "UNSAFE_VERSION_ID")
+load("//bazel/toolchains/cc/mongo_windows:mongo_windows_cc_toolchain_config.bzl", "MIN_VER_MAP")
+load("@bazel_skylib//rules:common_settings.bzl", "BuildSettingInfo")
+load("//bazel/config:generate_config_header.bzl", "generate_config_header")
 
 # These will throw an error if the following condition is not met:
 # (libunwind == on && os == linux) || libunwind == off || libunwind == auto
@@ -763,220 +45,6 @@ LIBUNWIND_DEPS = select({
     "//bazel/config:_libunwind_off": [],
     "//bazel/config:libunwind_enabled": ["//src/third_party/unwind:unwind"],
 }, no_match_error = REQUIRED_SETTINGS_LIBUNWIND_ERROR_MESSAGE)
-
-REQUIRED_SETTINGS_SANITIZER_ERROR_MESSAGE = """
-Error:
-  any sanitizer requires these configurations:
-      --//bazel/config:compiler_type=clang
-      --//bazel/config:opt=on [OR] --//bazel/config:opt=debug
-"""
-
-# -fno-omit-frame-pointer should be added if any sanitizer flag is used by user
-ANY_SANITIZER_AVAILABLE_COPTS = select({
-    "//bazel/config:any_sanitizer_required_setting": [
-        "-fno-omit-frame-pointer",
-    ],
-    "//bazel/config:no_enabled_sanitizer": [],
-}, no_match_error = REQUIRED_SETTINGS_SANITIZER_ERROR_MESSAGE)
-
-ANY_SANITIZER_AVAILABLE_LINKFLAGS = select({
-    # Sanitizer libs may inject undefined refs (for hooks) at link time, but the
-    # symbols will be available at runtime via the compiler runtime lib.
-    "//bazel/config:any_sanitizer_required_setting": [
-        "-Wl,--allow-shlib-undefined",
-    ],
-    "//bazel/config:no_enabled_sanitizer": [],
-}, no_match_error = REQUIRED_SETTINGS_SANITIZER_ERROR_MESSAGE)
-
-ANY_SANITIZER_GCC_LINKFLAGS = select({
-    # GCC's implementation of ASAN depends on libdl.
-    "//bazel/config:any_sanitizer_gcc": ["-ldl"],
-    "//conditions:default": [],
-})
-
-SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE = """
-Error:
-  address and memory sanitizers require these configurations:
-      --//bazel/config:allocator=system
-"""
-
-ADDRESS_SANITIZER_COPTS = select({
-    "//bazel/config:asan_disabled": [],
-    "//bazel/config:sanitize_address_required_settings": [
-        "-fsanitize=address",
-        "-fsanitize-blacklist=$(location //etc:asan_denylist_h)",
-    ],
-}, no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE)
-
-ADDRESS_SANITIZER_LINKFLAGS = select({
-    "//bazel/config:asan_disabled": [],
-    "//bazel/config:sanitize_address_required_settings": ["-fsanitize=address"],
-}, no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE)
-
-# Unfortunately, abseil requires that we make these macros (this, and THREAD_
-# and UNDEFINED_BEHAVIOR_ below) set, because apparently it is too hard to query
-# the running compiler. We do this unconditionally because abseil is basically
-# pervasive via the 'base' library.
-ADDRESS_SANITIZER_DEFINES = select({
-    "//bazel/config:sanitize_address_required_settings": ["ADDRESS_SANITIZER"],
-    "//bazel/config:asan_disabled": [],
-}, no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE)
-
-# Makes it easier to debug memory failures at the cost of some perf:
-#   -fsanitize-memory-track-origins
-MEMORY_SANITIZER_COPTS = select({
-    "//bazel/config:msan_disabled": [],
-    "//bazel/config:sanitize_memory_required_settings": [
-        "-fsanitize=memory",
-        "-fsanitize-memory-track-origins",
-        "-fsanitize-blacklist=$(location //etc:msan_denylist_h)",
-    ],
-}, no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE)
-
-# Makes it easier to debug memory failures at the cost of some perf:
-#   -fsanitize-memory-track-origins
-MEMORY_SANITIZER_LINKFLAGS = select({
-    "//bazel/config:sanitize_memory_required_settings": ["-fsanitize=memory"],
-    "//bazel/config:msan_disabled": [],
-}, no_match_error = SYSTEM_ALLOCATOR_SANITIZER_ERROR_MESSAGE)
-
-GENERIC_SANITIZER_ERROR_MESSAGE = "Failed to enable sanitizers with flag: "
-
-# We can't include the fuzzer flag with the other sanitize flags. The libfuzzer
-# library already has a main function, which will cause the dependencies check
-# to fail
-FUZZER_SANITIZER_COPTS = select({
-    "//bazel/config:sanitize_fuzzer_required_settings": [
-        "-fsanitize=fuzzer-no-link",
-        "-fprofile-instr-generate",
-        "-fcoverage-mapping",
-    ],
-    "//bazel/config:fsan_disabled": [],
-}, no_match_error = GENERIC_SANITIZER_ERROR_MESSAGE + "fuzzer")
-
-# These flags are needed to generate a coverage report
-FUZZER_SANITIZER_LINKFLAGS = select({
-    "//bazel/config:sanitize_fuzzer_required_settings": [
-        "-fsanitize=fuzzer-no-link",
-        "-fprofile-instr-generate",
-        "-fcoverage-mapping",
-    ],
-    "//bazel/config:fsan_disabled": [],
-}, no_match_error = GENERIC_SANITIZER_ERROR_MESSAGE + "fuzzer")
-
-# Combines following two conditions -
-# 1.
-# TODO: SERVER-48622
-#
-# See https://github.com/google/sanitizers/issues/943 for why we disallow
-# combining TSAN with libunwind. We could, atlernatively, have added logic to
-# automate the decision about whether to enable libunwind based on whether TSAN
-# is enabled, but that logic is already complex, and it feels better to make it
-# explicit that using TSAN means you won't get the benefits of libunwind.
-#
-# 2.
-# We add supressions based on the library file in etc/tsan.suppressions so the
-# link-model needs to be dynamic.
-
-THREAD_SANITIZER_ERROR_MESSAGE = """
-Error:
-  Build failed due to either -
-    - Cannot use libunwind with TSAN, please add
-        --//bazel/config:use_libunwind=False to your compile flags or
-    - TSAN is only supported with dynamic link models, please add
-        --//bazel/config:linkstatic=False to your compile flags.
-"""
-
-THREAD_SANITIZER_COPTS = select({
-    "//bazel/config:sanitize_thread_required_settings": [
-        "-fsanitize=thread",
-        "-fsanitize-blacklist=$(location //etc:tsan_denylist_h)",
-    ],
-    "//bazel/config:tsan_disabled": [],
-}, no_match_error = THREAD_SANITIZER_ERROR_MESSAGE)
-
-THREAD_SANITIZER_LINKFLAGS = select({
-    "//bazel/config:sanitize_thread_required_settings": ["-fsanitize=thread"],
-    "//bazel/config:tsan_disabled": [],
-}, no_match_error = THREAD_SANITIZER_ERROR_MESSAGE)
-
-THREAD_SANITIZER_DEFINES = select({
-    "//bazel/config:sanitize_thread_required_settings": ["THREAD_SANITIZER"],
-    "//bazel/config:tsan_disabled": [],
-}, no_match_error = THREAD_SANITIZER_ERROR_MESSAGE)
-
-UNDEFINED_SANITIZER_DEFINES = select({
-    "//bazel/config:ubsan_enabled": ["UNDEFINED_BEHAVIOR_SANITIZER"],
-    "//bazel/config:ubsan_disabled": [],
-})
-
-# By default, undefined behavior sanitizer doesn't stop on the first error. Make
-# it so. Newer versions of clang have renamed the flag. However, this flag
-# cannot be included when using the fuzzer sanitizer if we want to suppress
-# errors to uncover new ones.
-
-# In dynamic builds, the `vptr` sanitizer check can require additional
-# dependency edges. That is very inconvenient, because such builds can't use
-# z,defs. The result is a very fragile link graph, where refactoring the link
-# graph in one place can have surprising effects in others. Instead, we just
-# disable the `vptr` sanitizer for dynamic builds. We tried some other
-# approaches in SERVER-49798 of adding a new descriptor type, but that didn't
-# address the fundamental issue that the correct link graph for a dynamic+ubsan
-# build isn't the same as the correct link graph for a regular dynamic build.
-
-UNDEFINED_SANITIZER_COPTS = select({
-    "//bazel/config:ubsan_enabled": ["-fsanitize=undefined"],
-    "//conditions:default": [],
-}) + select({
-    "//bazel/config:sanitize_undefined_dynamic_link_settings": [
-        "-fno-sanitize=vptr",
-    ],
-    "//conditions:default": [],
-}) + select({
-    "//bazel/config:sanitize_undefined_without_fuzzer_settings": [
-        "-fno-sanitize-recover",
-    ],
-    "//conditions:default": [],
-}) + select({
-    "//bazel/config:ubsan_enabled": [
-        "-fsanitize-blacklist=$(location //etc:ubsan_denylist_h)",
-    ],
-    "//conditions:default": [],
-})
-
-UNDEFINED_SANITIZER_LINKFLAGS = select({
-    "//bazel/config:ubsan_enabled": ["-fsanitize=undefined"],
-    "//conditions:default": [],
-}) + select({
-    "//bazel/config:sanitize_undefined_dynamic_link_settings": [
-        "-fno-sanitize=vptr",
-    ],
-    "//conditions:default": [],
-})
-
-# Used as both link flags and copts
-# Suppress the function sanitizer check for third party libraries, because:
-#
-# - mongod (a C++ binary) links in WiredTiger (a C library)
-# - If/when mongod--built under ubsan--fails, the sanitizer will by
-#   default analyze the failed execution for undefined behavior related to
-#   function pointer usage. See:
-#   https://clang.llvm.org/docs/UndefinedBehaviorSanitizer.html#available-checks
-# - When this happens, the sanitizer will attempt to dynamically load to perform
-#   the analysis.
-# - However, since WT was built as a C library, is not linked with the function
-#   sanitizer library symbols despite its C++ dependencies referencing them.
-# - This will cause the sanitizer itself to fail, resulting in debug information
-#   being unavailable.
-# - So by suppressing the function ubsan check, we won't reference symbols
-#   defined in the unavailable ubsan function sanitier library and will get
-#   useful debugging information.
-UBSAN_OPTS_THIRD_PARTY = select({
-    "//bazel/config:sanitize_undefined_dynamic_link_settings": [
-        "-fno-sanitize=function",
-    ],
-    "//conditions:default": [],
-})
 
 REQUIRED_SETTINGS_DYNAMIC_LINK_ERROR_MESSAGE = """
 Error:
@@ -1001,10 +69,124 @@ SANITIZER_DENYLIST_HEADERS = select({
     "//conditions:default": [],
 })
 
+ASAN_OPTIONS = [
+    "detect_leaks=1",
+    "check_initialization_order=true",
+    "strict_init_order=true",
+    "abort_on_error=1",
+    "disable_coredump=0",
+    "handle_abort=1",
+    "strict_string_checks=true",
+    "detect_invalid_pointer_pairs=1",
+]
+
+LSAN_OPTIONS = [
+    "report_objects=1",
+    "suppressions=$(location //etc:lsan.suppressions)",
+]
+
+MSAN_OPTIONS = []
+
+UBSAN_OPTIONS = [
+    "print_stacktrace=1",
+]
+
+TSAN_OPTIONS = [
+    "abort_on_error=1",
+    "disable_coredump=0",
+    "handle_abort=1",
+    "halt_on_error=1",
+    "report_thread_leaks=0",
+    "die_after_fork=0",
+    "history_size=4",
+    "suppressions=$(location //etc:tsan.suppressions)",
+]
+
+LLVM_SYMBOLIZER_OPTION = [
+    "external_symbolizer_path=$(location //:llvm_symbolizer)",
+]
+
+ASAN_ENV = select({
+    "//bazel/config:asan_enabled": {
+        "ASAN_OPTIONS": ":".join(ASAN_OPTIONS),
+        "LSAN_OPTIONS": ":".join(LSAN_OPTIONS),
+    },
+    "//bazel/config:asan_enabled_clang": {
+        "ASAN_OPTIONS": ":".join(ASAN_OPTIONS + LLVM_SYMBOLIZER_OPTION),
+        "LSAN_OPTIONS": ":".join(LSAN_OPTIONS + LLVM_SYMBOLIZER_OPTION),
+    },
+    "//conditions:default": {},
+})
+
+MSAN_ENV = select({
+    "//bazel/config:msan_enabled": {
+        "MSAN_OPTIONS": ":".join(MSAN_OPTIONS),
+    },
+    "//bazel/config:msan_enabled_clang": {
+        "MSAN_OPTIONS": ":".join(MSAN_OPTIONS + LLVM_SYMBOLIZER_OPTION),
+    },
+    "//conditions:default": {},
+})
+
+TSAN_ENV = select({
+    "//bazel/config:tsan_enabled": {
+        "TSAN_OPTIONS": ":".join(TSAN_OPTIONS),
+    },
+    "//bazel/config:tsan_enabled_clang": {
+        "TSAN_OPTIONS": ":".join(TSAN_OPTIONS + LLVM_SYMBOLIZER_OPTION),
+    },
+    "//conditions:default": {},
+})
+
+UBSAN_ENV = select({
+    "//bazel/config:ubsan_enabled": {
+        "UBSAN_OPTIONS": ":".join(UBSAN_OPTIONS),
+    },
+    "//bazel/config:ubsan_enabled_clang": {
+        "UBSAN_OPTIONS": ":".join(UBSAN_OPTIONS + LLVM_SYMBOLIZER_OPTION),
+    },
+    "//conditions:default": {},
+})
+
+ASAN_DATA = select({
+    "//bazel/config:asan_enabled": [
+        "//etc:lsan.suppressions",
+    ],
+    "//conditions:default": [],
+})
+
+TSAN_DATA = select({
+    "//bazel/config:tsan_enabled": [
+        "//etc:tsan.suppressions",
+    ],
+    "//conditions:default": [],
+})
+
+ANY_SAN_DATA = select({
+    "//bazel/config:any_sanitizer_clang": [
+        "//:llvm_symbolizer",
+        "//:llvm_symbolizer_libs",
+    ],
+    "//conditions:default": [],
+})
+
+SANITIZER_ENV = ASAN_ENV | MSAN_ENV | TSAN_ENV | UBSAN_ENV
+SANITIZER_DATA = ASAN_DATA + TSAN_DATA + ANY_SAN_DATA
+
 LINKSTATIC_ENABLED = select({
     "//bazel/config:linkdynamic_required_settings": False,
     "//bazel/config:linkstatic_enabled": True,
 }, no_match_error = REQUIRED_SETTINGS_DYNAMIC_LINK_ERROR_MESSAGE)
+
+SKIP_ARCHIVE_ENABLED = select({
+    "//bazel/config:skip_archive_linkstatic_not_windows": True,
+    "//conditions:default": False,
+})
+
+SKIP_ARCHIVE_FEATURE = select({
+    "//bazel/config:skip_archive_linkstatic_not_windows": ["supports_start_end_lib"],
+    "//conditions:default": [],
+})
 
 SEPARATE_DEBUG_ENABLED = select({
     "//bazel/config:separate_debug_enabled": True,
@@ -1020,11 +202,11 @@ TCMALLOC_ERROR_MESSAGE = """
 Error:\n" +
     Build failed due to unsupported platform for current allocator selection:
 
-    '--//bazel/config:allocator=tcmalloc-google' is supported on linux with
+    '--allocator=tcmalloc-google' is supported on linux with
         aarch64 or x86_64
-    '--//bazel/config:allocator=tcmalloc-gperf' is supported on windows or
+    '--allocator=tcmalloc-gperf' is supported on windows or
         linux, but not macos
-    '--//bazel/config:allocator=system' can be used on any platform
+    '--allocator=system' can be used on any platform
 """
 
 TCMALLOC_DEPS = select({
@@ -1039,240 +221,26 @@ TCMALLOC_DEPS = select({
     ],
 }, no_match_error = TCMALLOC_ERROR_MESSAGE)
 
-TCMALLOC_DEFINES = select({
-    "//bazel/config:tcmalloc_google_enabled": ["ABSL_ALLOCATOR_NOTHROW"],
-    "//conditions:default": [],
-})
-
-#TODO SERVER-84714 add message about using the toolchain version of C++ libs
-GLIBCXX_DEBUG_ERROR_MESSAGE = """
-Error:
-    glibcxx_debug requires these configurations:
-        --//bazel/config:dbg=True
-        --//bazel/config:use_libcxx=False
-"""
-
-GLIBCXX_DEBUG_DEFINES = select({
-    ("//bazel/config:use_glibcxx_debug_required_settings"): ["_GLIBCXX_DEBUG"],
-    ("//bazel/config:use_glibcxx_debug_disabled"): [],
-}, no_match_error = GLIBCXX_DEBUG_ERROR_MESSAGE)
-
-DETECT_ODR_VIOLATIONS_ERROR_MESSAGE = """
-Error:
-    detect_odr_violations requires these configurations:
-        --//bazel/config:opt=off
-        --//bazel/config:linker=gold
-"""
-
-DETECT_ODR_VIOLATIONS_LINKFLAGS = select({
-    "//bazel/config:detect_odr_violations_required_settings": [
-        "-Wl,--detect-odr-violations",
-    ],
-    "//bazel/config:detect_odr_violations_disabled": [],
-}, no_match_error = DETECT_ODR_VIOLATIONS_ERROR_MESSAGE)
-
-# These are added as both copts and linker flags.
-GDWARF_FEATURES = select({
-    "//bazel/config:linux_clang": ["dwarf32"],
-    "//bazel/config:linux_gcc_fission": ["dwarf32"],  # gdb crashes with -gsplit-dwarf and -gdwarf64
-    # SCons implementation originally used a compiler check to verify that
-    # -gdwarf64 was supported. If this creates incompatibility issues, we may
-    # need to fallback to -gdwarf32 in certain cases.
-    "//bazel/config:linux_gcc": ["dwarf64"],
-    # SUSE15 builds system libraries with dwarf32, use dwarf32 to be keep consistent
-    "//bazel/config:suse15_gcc": ["dwarf32"],
-    "//conditions:default": [],
-})
-
-# These are added as both copts and linker flags. This should also be added after any debugging flags on the command
-# line to ensure debugging is disabled.
-DISABLE_DEBUGGING_SYMBOLS_FEATURE = select({
-    "//bazel/config:not_windows_debug_symbols_disabled": ["disable_debug_symbols", "-per_object_debug_info"],
-    "//conditions:default": [],
-})
-
-OVERLOADED_VIRTUAL_FEATURES = select({
-    "@platforms//os:linux": ["overloaded_virtual_warning"],
-    "//conditions:default": [],
-})
-
-DEBUG_TYPES_SECTION_FLAGS = select({
-    "//bazel/config:linux_clang_linkstatic": [
-        "-fdebug-types-section",
-    ],
-    # SUSE15 gcc builds system libraries with dwarf32 and needs -fdebug-types-section to keep
-    # the size of the debug information under the 4GB limit.
-    "//bazel/config:suse15_gcc_linkstatic": [
-        "-fdebug-types-section",
-    ],
-    "//conditions:default": [],
-})
-
-GCC_OR_CLANG_LINKFLAGS = select({
-    "//bazel/config:linux_gcc_or_clang": [
-        # Explicitly enable GNU build id's if the linker supports it.
-        "-Wl,--build-id",
-
-        # Explicitly use the new gnu hash section if the linker offers it.
-        "-Wl,--hash-style=gnu",
-
-        # Disallow an executable stack. Also, issue a warning if any files are
-        # found that would cause the stack to become executable if the
-        # noexecstack flag was not in play, so that we can find them and fix
-        # them. We do this here after we check for ld.gold because the
-        # --warn-execstack is currently only offered with gold.
-        "-Wl,-z,noexecstack",
-        "-Wl,--warn-execstack",
-
-        # If possible with the current linker, mark relocations as read-only.
-        "-Wl,-z,relro",
-    ],
-    "//conditions:default": [],
-})
-
-COMPRESS_DEBUG_COPTS = select({
-    # Disable debug compression in assembler by default unless using debug fission.
-    # Debug compression significantly reduces .o, .dwo, and .a sizes, and with
-    # fission enabled, the linker sees so little of the dwarf that decompression
-    # isn't a problem.
-    "//bazel/config:fission_enabled": [
-        "-Wa,--compress-debug-sections",
-    ],
-    "//bazel/config:linux_gcc": [
-        "-Wa,--nocompress-debug-sections",
-    ],
-    # subsumes both of the two above - if both are true, we want compression
-    "//bazel/config:linux_gcc_fission": [
-        "-Wa,--compress-debug-sections",
-    ],
-    "//conditions:default": [],
-})
-
-COMPRESS_DEBUG_LINKFLAGS = select({
-    # Disable debug compression in both the assembler and linker
-    # by default.
-    "@platforms//os:linux": [
-        "-Wl,--compress-debug-sections=none",
-    ],
-    "//conditions:default": [],
-})
-
-# Avoid deduping symbols on OS X debug builds, as it takes a long time.
-DEDUPE_SYMBOL_LINKFLAGS = select({
-    "//bazel/config:macos_opt_off": ["-Wl,-no_deduplicate"],
-    "//conditions:default": [],
-})
-
-DISABLE_SOURCE_WARNING_AS_ERRORS_COPTS = select({
-    "//bazel/config:disable_warnings_as_errors_linux": ["-Werror"],
-    # TODO(SERVER-90183): Enable once MacOS has a custom Bazel toolchain config.
-    # "//bazel/config:disable_warnings_as_errors_macos": ["-Werror"],
-    "//bazel/config:disable_warnings_as_errors_windows": ["/WX"],
-    "//bazel/config:warnings_as_errors_disabled": [],
-    "//conditions:default": [],
-})
-
-# Enable sized deallocation support.
-#
-# Bazel doesn't allow for defining C++-only flags without a custom toolchain
-# config. This is setup in the Linux toolchain, but currently there is no custom
-# MacOS toolchain. Enabling warnings-as-errors will fail the build if this flag
-# is passed to the compiler when building C code. Define it here on MacOS only
-# to allow us to configure warnings-as-errors on Linux.
-#
-# TODO(SERVER-90183): Remove this once custom toolchain configuration is
-#                     implemented on MacOS.
-FSIZED_DEALLOCATION_COPT = select({
-    "@platforms//os:macos": ["-fsized-deallocation"],
-    "//conditions:default": [],
-})
-
-DISABLE_SOURCE_WARNING_AS_ERRORS_LINKFLAGS = select({
-    "//bazel/config:disable_warnings_as_errors_linux": ["-Wl,--fatal-warnings"],
-    "//bazel/config:warnings_as_errors_disabled": [],
-    "//conditions:default": [],
-})
-
-MTUNE_MARCH_COPTS = select({
-    "//bazel/config:linux_aarch64": [
-        "-march=armv8.2-a",
-        "-mtune=generic",
-    ],
-    "//bazel/config:linux_ppc64le": [
-        "-mcpu=power8",
-        "-mtune=power8",
-        "-mcmodel=medium",
-    ],
-    "//bazel/config:linux_s390x": [
-        "-march=z196",
-        "-mtune=zEC12",
-    ],
-    # If we are enabling vectorization in sandybridge mode, we'd rather not hit
-    # the 256 wide vector instructions because the heavy versions can cause
-    # clock speed reductions.
-    "//bazel/config:linux_x86_64": [
-        "-march=sandybridge",
-        "-mtune=generic",
-        "-mprefer-vector-width=128",
-    ],
-    "//conditions:default": [],
-})
-
-THIN_LTO_FLAGS = select({
-    "//bazel/config:thin_lto_enabled": ["-flto=thin"],
-    "//conditions:default": [],
-})
-
-SYMBOL_ORDER_COPTS = select({
-    "//bazel/config:symbol_ordering_file_enabled": ["-ffunction-sections"],
-    "//conditions:default": [],
-})
-
-SYMBOL_ORDER_LINKFLAGS = select({
-    "//bazel/config:symbol_ordering_file_enabled": [
-        "-Wl,--symbol-ordering-file=$(location //:symbols.orderfile)",
-        "-Wl,--no-warn-symbol-ordering",
-    ],
-    "//conditions:default": [],
-})
-
 SYMBOL_ORDER_FILES = [
-    "//:symbols.orderfile",
+    "//buildscripts:symbols.orderfile",
+    "//buildscripts:symbols-al2023.orderfile",
 ]
 
-# Passed to both the compiler and linker
-COVERAGE_FLAGS = select({
-    "//bazel/config:gcov_enabled": ["--coverage", "-fprofile-update=single"],
-    "//conditions:default": [],
-})
-
-# Passed to both the compiler and linker
-PGO_PROFILE_FLAGS = select({
-    "//bazel/config:pgo_profile_enabled": [
-        "-fprofile-instr-generate",
+# These are warnings are disabled globally at the toolchain level to allow external repository compilation.
+# Re-enable them for MongoDB source code.
+RE_ENABLE_DISABLED_3RD_PARTY_WARNINGS_FEATURES = select({
+    "//bazel/config:compiler_type_clang": [
+        "-disable_warnings_for_third_party_libraries_clang",
+    ],
+    "//bazel/config:compiler_type_gcc": [
+        "-disable_warnings_for_third_party_libraries_gcc",
     ],
     "//conditions:default": [],
 })
-
-MACOS_SSL_LINKFLAGS = select({
-    "//bazel/config:ssl_enabled_macos": [
-        "-framework CoreFoundation",
-        "-framework Security",
-    ],
-    "//conditions:default": [],
-})
-
-MONGO_GLOBAL_INCLUDE_DIRECTORIES = [
-    "-Isrc",
-    "-I$(GENDIR)/src",
-    "-I$(GENDIR)/src/mongo/db/modules/enterprise/src",
-    "-Isrc/mongo/db/modules/enterprise/src",
-    "-Isrc/third_party/valgrind/include",
-]
 
 MONGO_GLOBAL_SRC_DEPS = [
     "//src/third_party/abseil-cpp:absl_base",
-    "//src/third_party/boost:boost_system",
+    "//src/third_party/boost:headers",
     "//src/third_party/croaring:croaring",
     "//src/third_party/fmt:fmt",
     "//src/third_party/libstemmer_c:stemmer",
@@ -1282,115 +250,16 @@ MONGO_GLOBAL_SRC_DEPS = [
     "//src/third_party/SafeInt:headers",
     "//src/third_party/sasl:windows_sasl",
     "//src/third_party/valgrind:headers",
+    "//src/third_party/abseil-cpp:absl_local_repo_deps",
 ]
-
-MONGO_GLOBAL_DEFINES = (
-    DEBUG_DEFINES +
-    LIBCXX_DEFINES +
-    ADDRESS_SANITIZER_DEFINES +
-    THREAD_SANITIZER_DEFINES +
-    UNDEFINED_SANITIZER_DEFINES +
-    GLIBCXX_DEBUG_DEFINES +
-    WINDOWS_DEFINES +
-    MACOS_DEFINES +
-    TCMALLOC_DEFINES +
-    LINUX_DEFINES +
-    GCC_OPT_DEFINES +
-    BOOST_DEFINES +
-    ABSEIL_DEFINES +
-    PCRE2_DEFINES +
-    SAFEINT_DEFINES +
-    ENTERPRISE_DEFINES
-)
-
-MONGO_GLOBAL_COPTS = (
-    MONGO_GLOBAL_INCLUDE_DIRECTORIES +
-    WINDOWS_COPTS +
-    LIBCXX_COPTS +
-    ADDRESS_SANITIZER_COPTS +
-    MEMORY_SANITIZER_COPTS +
-    FUZZER_SANITIZER_COPTS +
-    UNDEFINED_SANITIZER_COPTS +
-    THREAD_SANITIZER_COPTS +
-    ANY_SANITIZER_AVAILABLE_COPTS +
-    LINUX_OPT_COPTS +
-    GCC_OR_CLANG_WARNINGS_COPTS +
-    GCC_OR_CLANG_GENERAL_COPTS +
-    FLOATING_POINT_COPTS +
-    MACOS_WARNINGS_COPTS +
-    CLANG_WARNINGS_COPTS +
-    CLANG_FNO_LIMIT_DEBUG_INFO +
-    COMPRESS_DEBUG_COPTS +
-    DEBUG_TYPES_SECTION_FLAGS +
-    IMPLICIT_FALLTHROUGH_COPTS +
-    MTUNE_MARCH_COPTS +
-    DISABLE_SOURCE_WARNING_AS_ERRORS_COPTS +
-    FSIZED_DEALLOCATION_COPT +
-    THIN_LTO_FLAGS +
-    SYMBOL_ORDER_COPTS +
-    GCC_WARNINGS_COPTS +
-    SASL_WINDOWS_COPTS +
-    COVERAGE_FLAGS +
-    PGO_PROFILE_FLAGS
-)
-
-MONGO_GLOBAL_LINKFLAGS = (
-    MEMORY_SANITIZER_LINKFLAGS +
-    ADDRESS_SANITIZER_LINKFLAGS +
-    FUZZER_SANITIZER_LINKFLAGS +
-    UNDEFINED_SANITIZER_LINKFLAGS +
-    THREAD_SANITIZER_LINKFLAGS +
-    LIBCXX_LINKFLAGS +
-    DETECT_ODR_VIOLATIONS_LINKFLAGS +
-    WINDOWS_LINKFLAGS +
-    BIND_AT_LOAD_LINKFLAGS +
-    RDYNAMIC_LINKFLAG +
-    LINUX_PTHREAD_LINKFLAG +
-    EXTRA_GLOBAL_LIBS_LINKFLAGS +
-    ANY_SANITIZER_AVAILABLE_LINKFLAGS +
-    ANY_SANITIZER_GCC_LINKFLAGS +
-    GCC_OR_CLANG_LINKFLAGS +
-    COMPRESS_DEBUG_LINKFLAGS +
-    DEDUPE_SYMBOL_LINKFLAGS +
-    DEBUG_TYPES_SECTION_FLAGS +
-    DISABLE_SOURCE_WARNING_AS_ERRORS_LINKFLAGS +
-    THIN_LTO_FLAGS +
-    SYMBOL_ORDER_LINKFLAGS +
-    COVERAGE_FLAGS +
-    GLOBAL_WINDOWS_LIBRAY_LINKFLAGS +
-    SASL_WINDOWS_LINKFLAGS +
-    MACOS_SSL_LINKFLAGS +
-    PGO_PROFILE_FLAGS
-)
 
 MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS = SYMBOL_ORDER_FILES
 
-MONGO_GLOBAL_FEATURES = GDWARF_FEATURES + DWARF_VERSION_FEATURES + DEBUG_LEVEL_FEATURES + OVERLOADED_VIRTUAL_FEATURES + DISABLE_DEBUGGING_SYMBOLS_FEATURE
-
-MONGO_COPTS_THIRD_PARTY = UBSAN_OPTS_THIRD_PARTY
-
-MONGO_LINKFLAGS_THIRD_PARTY = UBSAN_OPTS_THIRD_PARTY
-
-def force_includes_copt(package_name, name):
-    if package_name.startswith("src/mongo"):
-        basic_h = "mongo/platform/basic.h"
-        return select({
-            "@platforms//os:windows": ["/FI" + basic_h],
-            "//conditions:default": ["-include", basic_h],
-        })
-
-    if name in ["scripting", "scripting_mozjs_test", "encrypted_dbclient"]:
-        return select({
-            "//bazel/config:linux_aarch64": ["-include", "third_party/mozjs/platform/aarch64/linux/build/js-config.h"],
-            "//bazel/config:linux_ppc64le": ["-include", "third_party/mozjs/platform/ppc64le/linux/build/js-config.h"],
-            "//bazel/config:linux_s390x": ["-include", "third_party/mozjs/platform/s390x/linux/build/js-config.h"],
-            "//bazel/config:linux_x86_64": ["-include", "third_party/mozjs/platform/x86_64/linux/build/js-config.h"],
-            "//bazel/config:macos_aarch64": ["-include", "third_party/mozjs/platform/aarch64/macOS/build/js-config.h"],
-            "//bazel/config:macos_x86_64": ["-include", "third_party/mozjs/platform/x86_64/macOS/build/js-config.h"],
-            "//bazel/config:windows_x86_64": ["/FI" + "third_party/mozjs/platform/x86_64/windows/build/js-config.h"],
-        })
-
-    return []
+def hex32(val):
+    """Returns zero-padded 8-character lowercase hex string of 32-bit hash."""
+    v = val & 0xFFFFFFFF  # wrap to 32-bit unsigned
+    s = "%x" % v
+    return ("0" * (8 - len(s))) + s
 
 def force_includes_hdr(package_name, name):
     if package_name.startswith("src/mongo"):
@@ -1415,17 +284,159 @@ def force_includes_hdr(package_name, name):
 
     return []
 
-def package_specific_copt(package_name):
-    if package_name.startswith("src/third_party"):
-        return MONGO_COPTS_THIRD_PARTY
+def remap_linker_inputs_ownership_impl(ctx):
+    cc_toolchain = find_cpp_toolchain(ctx)
+    feature_configuration = cc_common.configure_features(
+        ctx = ctx,
+        cc_toolchain = cc_toolchain,
+        requested_features = ctx.features,
+        unsupported_features = ctx.disabled_features,
+    )
 
-    return []
+    linker_inputs = []
+    for linker_input in ctx.attr.input[CcInfo].linking_context.linker_inputs.to_list():
+        linker_input = cc_common.create_linker_input(
+            owner = Label(ctx.attr.new_owner),
+            libraries = depset(linker_input.libraries),
+            user_link_flags = linker_input.user_link_flags,
+            additional_inputs = depset(linker_input.additional_inputs),
+        )
+        linker_inputs += [linker_input]
 
-def package_specific_linkflag(package_name):
-    if package_name.startswith("src/third_party"):
-        return MONGO_LINKFLAGS_THIRD_PARTY
+    linking_context = cc_common.create_linking_context(linker_inputs = depset(direct = linker_inputs, transitive = []))
 
-    return []
+    output = [DefaultInfo(files = ctx.attr.input.files), CcInfo(
+        compilation_context = ctx.attr.input[CcInfo].compilation_context,
+        linking_context = linking_context,
+    )]
+
+    return output
+
+# Bazel cc_shared_library's implementation ignores static linker inputs that
+# are owned by a different target than the cc_shared_library itself. Since we
+# need to transitively collect the list of static linker inputs for the shared
+# archive implementation, we need to transtiively remap ownership of each linker
+# input to make Bazel actually link them in.
+#
+# Ex:
+# mongo_crypt_v1.so
+# -> libserver_base.a (linker input owned by mongo_crypt_v1.so)
+#    -> libbase.a (linker input owned by libserver_base.a, will be ignored normally)
+#
+# Since we effectively want to flatten this down into:
+# mongo_crypt_v1.so
+# -> libserver_base.a, libbase.a
+#
+# We need to the remap libbase.a linker input to be owned by mongo_crypt_v1.so
+remap_linker_inputs_ownership = rule(
+    remap_linker_inputs_ownership_impl,
+    attrs = {
+        "input": attr.label(
+            providers = [CcInfo],
+        ),
+        "new_owner": attr.string(),
+    },
+    provides = [CcInfo],
+    toolchains = ["@bazel_tools//tools/cpp:toolchain_type"],
+    fragments = ["cpp"],
+)
+
+def tidy_config_filegroup():
+    if native.existing_rule("clang_tidy_config") == None:
+        native.filegroup(
+            name = "clang_tidy_config",
+            srcs = native.glob(
+                [".clang-tidy"],
+                allow_empty = True,
+            ),
+            visibility = ["//visibility:public"],
+        )
+
+def _all_headers_label_for_pkg(pkg):
+    if pkg.startswith("src/mongo/db/modules/enterprise"):
+        return ["//src/mongo/db/modules/enterprise/.auto_header:all_headers"]
+    elif pkg.startswith("src/mongo/db/modules/atlas"):
+        return ["//src/mongo/db/modules/atlas/.auto_header:all_headers"]
+    else:
+        return ["//bazel/auto_header/.auto_header:all_headers"]
+
+def _maybe_all_headers(name, hdrs, srcs, private_hdrs):
+    pkg = native.package_name()
+    if not (pkg.startswith("src/mongo") or "third_party" in pkg):
+        return hdrs, srcs + private_hdrs
+
+    # 1) Wrap user-provided (possibly configurable) hdrs into a helper filegroup.
+    #    This isolates any select(...) inside the filegroup's srcs where it's legal.
+    hdr_wrap = name + "_hdrs_wrap"
+    native.filegroup(
+        name = hdr_wrap,
+        srcs = hdrs,  # hdrs may already have select(...) — that's fine here
+        visibility = ["//visibility:private"],
+    )
+
+    # 2) Always-on config header (added outside the select to avoid duplication)
+    mongo_cfg_hdr = ["//src/mongo:mongo_config_header"]
+
+    # 3) Select between the per-package all_headers filegroup and the wrapped hdrs.
+    #    IMPORTANT: both branches are *plain label lists* -> no nested selects.
+    final_hdrs = (
+        mongo_cfg_hdr +
+        select({
+            "//bazel/config:all_headers_enabled": _all_headers_label_for_pkg(pkg),
+            "//conditions:default": [":" + hdr_wrap],
+        })
+    )
+
+    # 4) For srcs: include private_hdrs only when NOT all_headers.
+    #    Again, wrap the potentially-configurable list in a filegroup.
+    if private_hdrs:
+        priv_wrap = name + "_private_hdrs_wrap"
+        native.filegroup(
+            name = priv_wrap,
+            srcs = private_hdrs,
+            visibility = ["//visibility:private"],
+        )
+        extra_srcs = select({
+            "//bazel/config:all_headers_enabled": [],
+            "//conditions:default": [":" + priv_wrap],
+        })
+    else:
+        extra_srcs = []
+
+    final_srcs = srcs + extra_srcs
+    return final_hdrs, final_srcs
+
+def _binary_srcs_with_all_headers(name, srcs, private_hdrs):
+    pkg = native.package_name()
+    if not (pkg.startswith("src/mongo") or "third_party" in pkg):
+        return srcs + private_hdrs
+
+    # Always include the config header via srcs
+    mongo_cfg_hdr = ["//src/mongo:mongo_config_header"]
+
+    # Wrap private_hdrs so any select(...) inside is contained.
+    if private_hdrs:
+        priv_wrap = name + "_private_hdrs_wrap"
+        native.filegroup(
+            name = priv_wrap,
+            srcs = private_hdrs,
+            visibility = ["//visibility:private"],
+        )
+        maybe_priv = select({
+            "//bazel/config:all_headers_enabled": [],
+            "//conditions:default": [":" + priv_wrap],
+        })
+    else:
+        maybe_priv = []
+
+    # Add the per-package all_headers only when all_headers mode is on.
+    # Both branches are plain lists → no nested selects.
+    all_hdrs_branch = select({
+        "//bazel/config:all_headers_enabled": _all_headers_label_for_pkg(pkg),
+        "//conditions:default": [],
+    })
+
+    return srcs + mongo_cfg_hdr + maybe_priv + all_hdrs_branch
 
 def mongo_cc_library(
         name,
@@ -1435,11 +446,13 @@ def mongo_cc_library(
         deps = [],
         cc_deps = [],
         header_deps = [],
+        private_hdrs = [],
         testonly = False,
         visibility = None,
         data = [],
         tags = [],
         copts = [],
+        cxxopts = [],
         linkopts = [],
         includes = [],
         linkstatic = False,
@@ -1453,6 +466,10 @@ def mongo_cc_library(
         features = [],
         exec_properties = {},
         no_undefined_ref_DO_NOT_USE = True,
+        linkshared = False,
+        skip_windows_crt_flags = False,
+        shared_lib_name = "",
+        win_def_file = None,
         **kwargs):
     """Wrapper around cc_library.
 
@@ -1494,8 +511,10 @@ def mongo_cc_library(
         depend on this.
       additional_linker_inputs: Any additional files that you may want to pass
         to the linker, for example, linker scripts.
+      linkshared: force this library to be linked dynamically, regardless of
+        configuration. This should only be used for shared archive support,
+        aka. a shared library with all of its dependencies linked to it statically.
     """
-
     if linkstatic == True:
         fail("""Linking specific targets statically is not supported.
         The mongo build must link entirely statically or entirely dynamically.
@@ -1508,49 +527,30 @@ def mongo_cc_library(
         deps += TCMALLOC_DEPS
 
     if native.package_name().startswith("src/mongo"):
-        hdrs = hdrs + ["//src/mongo:mongo_config_header"]
-        if name != "boost_assert_shim":
+        if "third_party" not in native.package_name():
+            hdrs, srcs = _maybe_all_headers(name, hdrs, srcs, private_hdrs)
+
+        if name != "boost_assert_shim" and name != "mongoca" and name != "cyrus_sasl_windows_test_plugin":
             deps += MONGO_GLOBAL_SRC_DEPS
-            if name != "_global_header_bypass":
-                deps += ["//src/mongo:_global_header_bypass"]
+        features = features + RE_ENABLE_DISABLED_3RD_PARTY_WARNINGS_FEATURES
 
     if "modules/enterprise" in native.package_name():
-        enterprise_compatible = select({
+        target_compatible_with += select({
             "//bazel/config:build_enterprise_enabled": [],
             "//conditions:default": ["@platforms//:incompatible"],
         })
-    else:
-        enterprise_compatible = []
+    elif "modules/atlas" in native.package_name():
+        target_compatible_with += select({
+            "//bazel/config:build_atlas_enabled": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        })
 
     if "third_party" in native.package_name():
         tags = tags + ["third_party"]
 
-    if "compile_requires_large_memory_gcc" in tags:
-        exec_properties |= select({
-            "//bazel/config:gcc_x86_64": {
-                "Pool": "large_mem_x86_64",
-            },
-            "//bazel/config:gcc_aarch64": {
-                "Pool": "large_memory_arm64",
-            },
-            "//conditions:default": {},
-        })
-
-    if "compile_requires_large_memory_sanitizer" in tags:
-        exec_properties |= select({
-            "//bazel/config:any_sanitizer_x86_64": {
-                "Pool": "large_mem_x86_64",
-            },
-            "//bazel/config:any_sanitizer_aarch64": {
-                "Pool": "large_memory_arm64",
-            },
-            "//conditions:default": {},
-        })
-
-    fincludes_copt = force_includes_copt(native.package_name(), name)
+    copts = get_copts(name, native.package_name(), copts, skip_windows_crt_flags)
     fincludes_hdr = force_includes_hdr(native.package_name(), name)
-    package_specific_copts = package_specific_copt(native.package_name())
-    package_specific_linkflags = package_specific_linkflag(native.package_name())
+    linkopts = get_linkopts(native.package_name(), linkopts)
 
     if mongo_api_name:
         visibility_support_defines_list = ["MONGO_USE_VISIBILITY", "MONGO_API_" + mongo_api_name]
@@ -1606,13 +606,7 @@ def mongo_cc_library(
         header_deps = header_deps,
     )
 
-    create_link_deps(
-        name = name + LINK_DEP_SUFFIX,
-        target_name = name,
-        link_deps = [name] + deps + cc_deps,
-        tags = ["scons_link_lists"],
-        target_compatible_with = target_compatible_with + enterprise_compatible,
-    )
+    tidy_config_filegroup()
 
     # Create a cc_library entry to generate a shared archive of the target.
     cc_library(
@@ -1623,23 +617,30 @@ def mongo_cc_library(
         textual_hdrs = textual_hdrs,
         visibility = visibility,
         testonly = testonly,
-        copts = MONGO_GLOBAL_COPTS + package_specific_copts + copts + fincludes_copt,
+        copts = copts,
+        cxxopts = cxxopts,
         data = data,
-        tags = tags,
-        linkopts = MONGO_GLOBAL_LINKFLAGS + package_specific_linkflags + linkopts,
+        tags = tags + ["mongo_library"],
+        linkopts = linkopts,
         linkstatic = True,
         local_defines = MONGO_GLOBAL_DEFINES + visibility_support_defines + local_defines,
         defines = defines,
         includes = includes,
-        features = MONGO_GLOBAL_FEATURES + ["supports_pic", "pic"] + features,
+        features = features,
         target_compatible_with = select({
             "//bazel/config:shared_archive_enabled": [],
             "//conditions:default": ["@platforms//:incompatible"],
-        }) + target_compatible_with + enterprise_compatible,
+        }) + target_compatible_with,
         additional_linker_inputs = additional_linker_inputs + MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS,
         exec_properties = exec_properties,
         **kwargs
     )
+
+    # Did not want to expose alwayslink for cc_library as it ends up getting
+    # modified in extract_debuginfo
+    if "alwayslink" not in kwargs:
+        kwargs["alwayslink"] = SKIP_ARCHIVE_ENABLED
+
     cc_library(
         name = name + WITH_DEBUG_SUFFIX,
         srcs = srcs + SANITIZER_DENYLIST_HEADERS,
@@ -1648,24 +649,39 @@ def mongo_cc_library(
         textual_hdrs = textual_hdrs,
         visibility = visibility,
         testonly = testonly,
-        copts = MONGO_GLOBAL_COPTS + package_specific_copts + copts + fincludes_copt,
+        copts = copts,
+        cxxopts = cxxopts,
         data = data,
-        tags = tags,
-        linkopts = MONGO_GLOBAL_LINKFLAGS + package_specific_linkflags + linkopts,
+        tags = tags + ["mongo_library"],
+        linkopts = linkopts,
         linkstatic = True,
         local_defines = MONGO_GLOBAL_DEFINES + local_defines,
         defines = defines,
         includes = includes,
-        features = MONGO_GLOBAL_FEATURES + select({
-            "//bazel/config:linkstatic_disabled": ["supports_pic", "pic"],
-            "//bazel/config:shared_archive_enabled": ["supports_pic", "pic"],
-            "//conditions:default": ["-pic", "pie"],
-        }) + features,
-        target_compatible_with = target_compatible_with + enterprise_compatible,
+        features = SKIP_ARCHIVE_FEATURE + features,
+        target_compatible_with = target_compatible_with,
         additional_linker_inputs = additional_linker_inputs + MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS,
         exec_properties = exec_properties,
         **kwargs
     )
+
+    dynamic_deps = deps
+    shared_library_compatible_with = select({
+        "//bazel/config:linkstatic_disabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    })
+
+    # Always build shared if specified & remove dynamic deps to allow
+    # for static linking dependencies.
+    if linkshared:
+        shared_library_compatible_with = []
+        dynamic_deps = []
+
+        remap_linker_inputs_ownership(
+            name = name + WITH_DEBUG_SUFFIX + "_ownership_remapped",
+            input = name + WITH_DEBUG_SUFFIX,
+            new_owner = "//" + native.package_name() + ":" + name + WITH_DEBUG_SUFFIX,
+        )
 
     # Creates a shared library version of our target only if
     # //bazel/config:linkstatic_disabled is true. This uses the
@@ -1673,22 +689,44 @@ def mongo_cc_library(
     # all dependencies in dynamic_deps.
     native.cc_shared_library(
         name = name + CC_SHARED_LIBRARY_SUFFIX + WITH_DEBUG_SUFFIX,
-        deps = [name + WITH_DEBUG_SUFFIX],
+        deps = [name + WITH_DEBUG_SUFFIX + "_ownership_remapped"] if linkshared else [name + WITH_DEBUG_SUFFIX],
         visibility = visibility,
-        tags = tags,
-        user_link_flags = MONGO_GLOBAL_LINKFLAGS + package_specific_linkflags + undefined_ref_flag + non_transitive_dyn_linkopts + rpath_flags + visibility_support_shared_flags,
-        target_compatible_with = select({
-            "//bazel/config:linkstatic_disabled": [],
-            "//conditions:default": ["@platforms//:incompatible"],
-        }) + target_compatible_with + enterprise_compatible,
-        dynamic_deps = deps,
+        tags = tags + ["mongo_library"],
+        user_link_flags = get_linkopts(native.package_name()) + undefined_ref_flag + non_transitive_dyn_linkopts + rpath_flags + visibility_support_shared_flags + select({
+            "//bazel/config:simple_build_id_enabled": ["-Wl,--build-id=0x" +
+                                                       hex32(hash(name)) +
+                                                       hex32(hash(name)) +
+                                                       hex32(hash(str(UNSAFE_VERSION_ID) + str(UNSAFE_COMPILE_VARIANT)))],
+            "//conditions:default": [],
+        }),
+        target_compatible_with = shared_library_compatible_with + target_compatible_with,
+        dynamic_deps = dynamic_deps,
+        shared_lib_name = shared_lib_name,
         features = select({
             "//bazel/config:windows_debug_symbols_enabled": ["generate_pdb_file"],
+            "//conditions:default": [],
+        }) + select({
+            "//bazel/config:simple_build_id_enabled": ["-build_id"],
             "//conditions:default": [],
         }),
         additional_linker_inputs = additional_linker_inputs + MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS,
         exec_properties = exec_properties,
+        win_def_file = win_def_file,
     )
+
+    shared_library = select({
+        "//bazel/config:linkstatic_disabled": ":" + name + CC_SHARED_LIBRARY_SUFFIX + WITH_DEBUG_SUFFIX,
+        "//conditions:default": None,
+    })
+
+    shared_archive = select({
+        "//bazel/config:shared_archive_enabled": ":" + name + SHARED_ARCHIVE_SUFFIX,
+        "//conditions:default": None,
+    })
+
+    if linkshared:
+        shared_library = name + CC_SHARED_LIBRARY_SUFFIX + WITH_DEBUG_SUFFIX
+        shared_archive = None
 
     extract_debuginfo(
         name = name,
@@ -1697,16 +735,12 @@ def mongo_cc_library(
         tags = tags + ["mongo_library"],
         enabled = SEPARATE_DEBUG_ENABLED,
         enable_pdb = PDB_GENERATION_ENABLED,
-        cc_shared_library = select({
-            "//bazel/config:linkstatic_disabled": ":" + name + CC_SHARED_LIBRARY_SUFFIX + WITH_DEBUG_SUFFIX,
-            "//conditions:default": None,
-        }),
-        shared_archive = select({
-            "//bazel/config:shared_archive_enabled": ":" + name + SHARED_ARCHIVE_SUFFIX,
-            "//conditions:default": None,
-        }),
+        cc_shared_library = shared_library,
+        shared_archive = shared_archive,
+        skip_archive = SKIP_ARCHIVE_ENABLED,
         visibility = visibility,
         deps = deps + cc_deps + [name + HEADER_DEP_SUFFIX],
+        exec_properties = exec_properties,
     )
 
 def write_sources_impl(ctx):
@@ -1730,11 +764,12 @@ write_sources = rule(
     },
 )
 
-def _mongo_cc_binary_and_program(
+def _mongo_cc_binary_and_test(
         name,
         srcs = [],
         deps = [],
         header_deps = [],
+        private_hdrs = [],
         testonly = False,
         visibility = None,
         data = [],
@@ -1750,7 +785,9 @@ def _mongo_cc_binary_and_program(
         features = [],
         exec_properties = {},
         skip_global_deps = [],
+        env = {},
         _program_type = "",
+        skip_windows_crt_flags = False,
         **kwargs):
     if linkstatic == True:
         fail("""Linking specific targets statically is not supported.
@@ -1758,12 +795,13 @@ def _mongo_cc_binary_and_program(
         This can be configured via //config/bazel:linkstatic.""")
 
     if native.package_name().startswith("src/mongo"):
-        srcs = srcs + ["//src/mongo:mongo_config_header"]
+        if "third_party" not in native.package_name():
+            srcs = _binary_srcs_with_all_headers(name, srcs, private_hdrs)
         deps += MONGO_GLOBAL_SRC_DEPS
-        deps += ["//src/mongo:_global_header_bypass"]
+        features = features + RE_ENABLE_DISABLED_3RD_PARTY_WARNINGS_FEATURES
 
     if "modules/enterprise" in native.package_name():
-        enterprise_compatible = select({
+        target_compatible_with += select({
             "//bazel/config:build_enterprise_enabled": [],
             "//conditions:default": ["@platforms//:incompatible"],
         })
@@ -1773,35 +811,10 @@ def _mongo_cc_binary_and_program(
                 "//bazel/config:ssl_enabled": [],
                 "//conditions:default": ["@platforms//:incompatible"],
             })
-    else:
-        enterprise_compatible = []
 
-    if "compile_requires_large_memory_gcc" in tags:
-        exec_properties |= select({
-            "//bazel/config:gcc_x86_64": {
-                "Pool": "large_mem_x86_64",
-            },
-            "//bazel/config:gcc_aarch64": {
-                "Pool": "large_memory_arm64",
-            },
-            "//conditions:default": {},
-        })
-
-    if "compile_requires_large_memory_sanitizer" in tags:
-        exec_properties |= select({
-            "//bazel/config:any_sanitizer_x86_64": {
-                "Pool": "large_mem_x86_64",
-            },
-            "//bazel/config:any_sanitizer_aarch64": {
-                "Pool": "large_memory_arm64",
-            },
-            "//conditions:default": {},
-        })
-
-    fincludes_copt = force_includes_copt(native.package_name(), name)
+    copts = get_copts(name, native.package_name(), copts, skip_windows_crt_flags)
     fincludes_hdr = force_includes_hdr(native.package_name(), name)
-    package_specific_copts = package_specific_copt(native.package_name())
-    package_specific_linkflags = package_specific_linkflag(native.package_name())
+    linkopts = get_linkopts(native.package_name(), linkopts)
 
     all_deps = deps
 
@@ -1840,62 +853,86 @@ def _mongo_cc_binary_and_program(
         "//conditions:default": {},
     })
 
+    # This is used as a tool in part of the shared archive build, so it needs to be marked
+    # as compatible with a shared archive build.
+    if name in ["grpc_cpp_plugin", "protobuf_compiler"]:
+        features = features + ["-pie", "pic"]
+    else:
+        target_compatible_with += select({
+            "//bazel/config:shared_archive_enabled": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        })
+
     args = {
         "name": name + WITH_DEBUG_SUFFIX,
         "srcs": srcs + fincludes_hdr + SANITIZER_DENYLIST_HEADERS,
         "deps": all_deps + [name + HEADER_DEP_SUFFIX],
         "visibility": visibility,
         "testonly": testonly,
-        "copts": MONGO_GLOBAL_COPTS + package_specific_copts + copts + fincludes_copt,
-        "data": data,
+        "copts": copts,
+        "data": data + SANITIZER_DATA + select({
+            "//bazel/platforms:use_mongo_toolchain": ["//:gdb"],
+            "//conditions:default": [],
+        }),
         "tags": tags,
-        "linkopts": MONGO_GLOBAL_LINKFLAGS + package_specific_linkflags + linkopts + rpath_flags,
+        "linkopts": linkopts + rpath_flags + select({
+            "//bazel/config:thin_lto_enabled": ["-Wl,--threads=" + str(NUM_CPUS)],
+            "//conditions:default": [],
+        }) + select({
+            "//bazel/config:simple_build_id_enabled": ["-Wl,--build-id=0x" +
+                                                       hex32(hash(name)) +
+                                                       hex32(hash(name)) +
+                                                       hex32(hash(str(UNSAFE_VERSION_ID) + str(UNSAFE_COMPILE_VARIANT)))],
+            "//conditions:default": [],
+        }),
         "linkstatic": LINKSTATIC_ENABLED,
         "local_defines": MONGO_GLOBAL_DEFINES + local_defines,
         "defines": defines,
         "includes": includes,
-        "features": MONGO_GLOBAL_FEATURES + ["-pic", "pie"] + features + select({
+        "features": SKIP_ARCHIVE_FEATURE + ["-pic", "pie"] + features + select({
             "//bazel/config:windows_debug_symbols_enabled": ["generate_pdb_file"],
+            "//conditions:default": [],
+        }) + select({
+            "//bazel/config:simple_build_id_enabled": ["-build_id"],
             "//conditions:default": [],
         }),
         "dynamic_deps": select({
             "//bazel/config:linkstatic_disabled": deps,
             "//conditions:default": [],
         }),
-        "target_compatible_with": target_compatible_with + enterprise_compatible + select({
-            "//bazel/config:shared_archive_enabled": ["@platforms//:incompatible"],
-            "//conditions:default": [],
-        }),
+        "target_compatible_with": target_compatible_with,
         "additional_linker_inputs": additional_linker_inputs + MONGO_GLOBAL_ADDITIONAL_LINKER_INPUTS,
-        "exec_properties": exec_properties,
+        "exec_properties": exec_properties | select({
+            "//bazel/config:remote_link_enabled": {},
+            "//bazel/config:dtlto_enabled": {},
+            "@platforms//os:windows": {"cpp_link.coefficient": "1.0"},
+            "//conditions:default": {"cpp_link.coefficient": "18.0"},
+        }) | select({
+            "//bazel/config:thin_lto_enabled": {"cpp_link.cpus": str(NUM_CPUS)},
+            "//conditions:default": {},
+        }) | select({
+            "//bazel/config:remote_link_arm_linux_linkstatic": {"cpp_link.Pool": "arm_linker"},
+            "//conditions:default": {},
+        }),
+        "env": env | SANITIZER_ENV,
     } | kwargs
 
-    create_link_deps(
-        name = name + LINK_DEP_SUFFIX,
-        target_name = name,
-        link_deps = all_deps,
-        tags = ["scons_link_lists"],
-        testonly = testonly,
-        target_compatible_with = target_compatible_with + enterprise_compatible,
-    )
-
-    write_sources(
-        name = name + "_sources_list",
-        sources = srcs,
-        tags = ["scons_link_lists"],
-    )
-
+    # we dont want the intermediate build targets to be picked up by tags
+    # so we empty it out
+    original_tags = list(args["tags"])
+    args["tags"] = ["intermediate_debug"] + [tag + "_debug" for tag in original_tags]
     if _program_type == "binary":
         cc_binary(**args)
         extract_debuginfo_binary(
             name = name,
             binary_with_debug = ":" + name + WITH_DEBUG_SUFFIX,
             type = "program",
-            tags = tags,
+            tags = original_tags + ["final_target"],
             enabled = SEPARATE_DEBUG_ENABLED,
             enable_pdb = PDB_GENERATION_ENABLED,
             deps = all_deps,
             visibility = visibility,
+            exec_properties = exec_properties,
         )
     else:
         native.cc_test(**args)
@@ -1903,11 +940,28 @@ def _mongo_cc_binary_and_program(
             name = name,
             binary_with_debug = ":" + name + WITH_DEBUG_SUFFIX,
             type = "program",
-            tags = tags,
+            tags = original_tags + ["final_target"],
             enabled = SEPARATE_DEBUG_ENABLED,
             enable_pdb = PDB_GENERATION_ENABLED,
             deps = all_deps,
             visibility = visibility,
+            exec_properties = exec_properties,
+        )
+
+        native.sh_test(
+            name = name + "_ci_wrapper",
+            srcs = [
+                "//bazel:test_wrapper",
+            ],
+            tags = original_tags + ["wrapper_target"],
+            args = [
+                "$(location " + name + ")",
+            ],
+            data = args["data"] + [name],
+            env = args["env"],
+            target_compatible_with = target_compatible_with,
+            visibility = visibility,
+            exec_properties = exec_properties,
         )
 
 def mongo_cc_binary(
@@ -1915,6 +969,7 @@ def mongo_cc_binary(
         srcs = [],
         deps = [],
         header_deps = [],
+        private_hdrs = [],
         testonly = False,
         visibility = None,
         data = [],
@@ -1930,6 +985,7 @@ def mongo_cc_binary(
         features = [],
         exec_properties = {},
         skip_global_deps = [],
+        env = {},
         **kwargs):
     """Wrapper around cc_binary.
 
@@ -1959,12 +1015,15 @@ def mongo_cc_binary(
         to the linker, for example, linker scripts.
       skip_global_deps: Globally injected dependencies to skip adding as a
         dependency (options: "libunwind", "allocator").
+      env: environment variables to pass to the binary when running through
+        bazel.
     """
-    _mongo_cc_binary_and_program(
+    _mongo_cc_binary_and_test(
         name,
         srcs,
         deps,
         header_deps,
+        private_hdrs,
         testonly,
         visibility,
         data,
@@ -1980,6 +1039,7 @@ def mongo_cc_binary(
         features,
         exec_properties,
         skip_global_deps,
+        env,
         _program_type = "binary",
         **kwargs
     )
@@ -1989,6 +1049,7 @@ def mongo_cc_test(
         srcs = [],
         deps = [],
         header_deps = [],
+        private_hdrs = [],
         visibility = None,
         data = [],
         tags = [],
@@ -2002,6 +1063,9 @@ def mongo_cc_test(
         additional_linker_inputs = [],
         features = [],
         exec_properties = {},
+        skip_global_deps = [],
+        env = {},
+        minimum_test_resources = {},
         **kwargs):
     """Wrapper around cc_test.
 
@@ -2028,12 +1092,49 @@ def mongo_cc_test(
         depend on this.
       additional_linker_inputs: Any additional files that you may want to pass
         to the linker, for example, linker scripts.
+      skip_global_deps: Globally injected dependencies to skip adding as a
+        dependency (options: "libunwind", "allocator").
+      env: environment variables to pass to the binary when running through
+        bazel.
+      minimum_test_resources: a dict of key/value pairs defining execution
+        requirements for the test. The only currently supported key is "cpu_cores".
     """
-    _mongo_cc_binary_and_program(
+    minimum_core_count = 1
+    if "cpu_cores" in minimum_test_resources:
+        minimum_core_count = minimum_test_resources["cpu_cores"]
+
+    if minimum_core_count == 2:
+        exec_properties = exec_properties | select({
+            "@platforms//cpu:x86_64": {
+                "test.Pool": "large_mem_2core_x86_64",
+            },
+            "@platforms//cpu:aarch64": {
+                "test.Pool": "large_memory_2core_arm64",
+            },
+            "//conditions:default": {},
+        })
+    elif minimum_core_count > 2:
+        fail("minimum_test_resources[\"cpu_cores\"] > 2 is not supported")
+    else:
+        # TSAN will use more memory and EngFlow currently does not surface a good
+        # error message to users when an OOM occurs.
+        # TOOD(SERVER-112889): Remove this once OOM errors are better surfaced by EngFlow
+        exec_properties = exec_properties | select({
+            "//bazel/config:tsan_enabled_x86_64": {
+                "test.Pool": "large_mem_x86_64",
+            },
+            "//bazel/config:tsan_enabled_arm64": {
+                "test.Pool": "large_memory_arm64",
+            },
+            "//conditions:default": {},
+        })
+
+    _mongo_cc_binary_and_test(
         name,
         srcs,
         deps,
         header_deps,
+        private_hdrs,
         True,
         visibility,
         data,
@@ -2048,6 +1149,24 @@ def mongo_cc_test(
         additional_linker_inputs,
         features,
         exec_properties,
+        skip_global_deps,
+        env | {
+            # This flag is already always set when running bazel test. Setting it
+            # here ensures that it is also set when running bazel run. This avoids
+            # test-setup.sh piping stdout through tee, so that the binary will be
+            # directly connected to the terminal and able to detect color support.
+            # We can remove this once we are on bazel 9 because it has removed the
+            # logic that looks for this var always behaves as if it is set.
+            "EXPERIMENTAL_SPLIT_XML_GENERATION": "1",
+        } | select({
+            "//bazel/config:dev_stacktrace_enabled": {
+                # Forcing bazel's test environment setup script to run from the
+                # unsandboxed directory allows access to split DWARF files and source
+                # files.
+                "RUNTEST_PRESERVE_CWD": "1",
+            },
+            "//conditions:default": {},
+        }),
         _program_type = "test",
         **kwargs
     )
@@ -2057,7 +1176,8 @@ def mongo_cc_unit_test(
         srcs = [],
         deps = [],
         header_deps = [],
-        visibility = None,
+        private_hdrs = [],
+        visibility = ["//visibility:public"],
         data = [],
         tags = [],
         copts = [],
@@ -2077,6 +1197,7 @@ def mongo_cc_unit_test(
         srcs = srcs,
         deps = deps + ([] if has_custom_mainline else ["//src/mongo/unittest:unittest_main"]),
         header_deps = header_deps,
+        private_hdrs = private_hdrs,
         visibility = visibility,
         data = data,
         tags = tags + ["mongo_unittest"],
@@ -2188,38 +1309,17 @@ idl_generator_rule = rule(
             default = [],
         ),
     },
+    outputs = {
+        # These create addressable file labels:
+        "gen_hdr": "%{name}.h",
+        "gen_src": "%{name}.cpp",
+    },
     doc = "Generates header/source files from IDL files.",
     toolchains = ["@bazel_tools//tools/python:toolchain_type"],
     fragments = ["py"],
 )
 
-def write_target_impl(ctx):
-    out = ctx.actions.declare_file(ctx.label.name + ".gen_source_list")
-    ctx.actions.write(
-        out,
-        "//" + ctx.label.package + ":" + ctx.attr.target_name,
-    )
-    return [
-        DefaultInfo(
-            files = depset([out]),
-        ),
-    ]
-
-write_target = rule(
-    write_target_impl,
-    attrs = {
-        "target_name": attr.string(
-            doc = "the name of the target to record",
-        ),
-    },
-)
-
 def idl_generator(name, tags = [], **kwargs):
-    write_target(
-        name = name + "_gen_source_tag",
-        target_name = name,
-        tags = ["scons_link_lists"],
-    )
     idl_generator_rule(
         name = name,
         tags = tags + ["gen_source"],
@@ -2277,6 +1377,7 @@ strip_deps = rule(
         "input": attr.label(
             providers = [CcInfo],
         ),
+        "linkstatic": attr.bool(),
     },
     provides = [CcInfo],
     toolchains = ["@bazel_tools//tools/cpp:toolchain_type"],
@@ -2310,14 +1411,8 @@ def mongo_proto_library(
         name = name,
         srcs = srcs,
         tags = tags + ["gen_source"],
-        features = features + MONGO_GLOBAL_FEATURES,
+        features = features,
         **kwargs
-    )
-
-    dummy_file(
-        name = name + "_exclude_link",
-        output = "lib" + name + ".so.exclude_lib",
-        tags = ["scons_link_lists"],
     )
 
 def mongo_cc_proto_library(
@@ -2328,12 +1423,12 @@ def mongo_cc_proto_library(
     native.cc_proto_library(
         name = name + "_raw",
         deps = deps,
-        tags = tags + ["gen_source"],
         **kwargs
     )
     strip_deps(
         name = name,
         input = name + "_raw",
+        tags = tags + ["gen_source"],
     )
 
 def mongo_cc_grpc_library(
@@ -2349,6 +1444,17 @@ def mongo_cc_grpc_library(
         no_undefined_ref_DO_NOT_USE = True,
         **kwargs):
     codegen_grpc_target = "_" + name + "_grpc_codegen"
+
+    # TODO(SERVER-100148): Re-enable sandboxing on protobuf compilation
+    # once we can rely on //external:grpc_cpp_plugin.
+    #
+    # TSAN is currently being applied to protoc which is failing to run
+    # under Bazel's sandbox due to the system call to disable ASLR
+    # failing.
+    #
+    # To workaround this issue, disable the sandbox only when compiling
+    # protobufs, since we don't care about threading issues in the
+    # proto compiler itself.
     generate_cc(
         name = codegen_grpc_target,
         srcs = srcs,
@@ -2356,6 +1462,10 @@ def mongo_cc_grpc_library(
         well_known_protos = well_known_protos,
         generate_mocks = generate_mocks,
         tags = tags + ["gen_source"],
+        disable_sandbox = select({
+            "//bazel/config:tsan_enabled": True,
+            "//conditions:default": False,
+        }),
         **kwargs
     )
 
@@ -2415,6 +1525,7 @@ def mongo_cc_benchmark(
         srcs = [],
         deps = [],
         header_deps = [],
+        private_hdrs = [],
         visibility = None,
         data = [],
         tags = [],
@@ -2435,6 +1546,7 @@ def mongo_cc_benchmark(
         srcs = srcs,
         deps = deps + ([] if has_custom_mainline else ["//src/mongo/unittest:benchmark_main"]),
         header_deps = header_deps,
+        private_hdrs = private_hdrs,
         visibility = visibility,
         data = data,
         tags = tags + ["mongo_benchmark"],
@@ -2456,6 +1568,7 @@ def mongo_cc_integration_test(
         srcs = [],
         deps = [],
         header_deps = [],
+        private_hdrs = [],
         visibility = None,
         data = [],
         tags = [],
@@ -2476,6 +1589,7 @@ def mongo_cc_integration_test(
         srcs = srcs,
         deps = deps + ([] if has_custom_mainline else ["//src/mongo/unittest:integration_test_main"]),
         header_deps = header_deps,
+        private_hdrs = private_hdrs,
         visibility = visibility,
         data = data,
         tags = tags + ["mongo_integration_test"],
@@ -2490,4 +1604,294 @@ def mongo_cc_integration_test(
         features = features,
         exec_properties = exec_properties,
         **kwargs
+    )
+
+def mongo_cc_fuzzer_test(
+        name,
+        srcs = [],
+        deps = [],
+        header_deps = [],
+        private_hdrs = [],
+        visibility = None,
+        data = [],
+        tags = [],
+        copts = [],
+        linkopts = [],
+        includes = [],
+        linkstatic = False,
+        local_defines = [],
+        target_compatible_with = [],
+        defines = [],
+        additional_linker_inputs = [],
+        features = [],
+        exec_properties = {},
+        has_custom_mainline = False,
+        **kwargs):
+    mongo_cc_test(
+        name = name,
+        srcs = srcs,
+        deps = deps,
+        header_deps = header_deps,
+        private_hdrs = private_hdrs,
+        visibility = visibility,
+        data = data,
+        tags = tags + ["mongo_fuzzer_test"],
+        copts = copts,
+        linkopts = linkopts + ["-fsanitize=fuzzer"],
+        includes = includes,
+        linkstatic = linkstatic,
+        local_defines = local_defines,
+        target_compatible_with = target_compatible_with + select({
+            "//bazel/config:fsan_enabled": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+        defines = defines,
+        additional_linker_inputs = additional_linker_inputs,
+        features = features,
+        exec_properties = exec_properties,
+        **kwargs
+    )
+
+# Note: For these extensions to load successfully in the server, they must be built with
+# --allocator=system. Otherwise, the extensions will get a local instance of tcmalloc which
+# fails to run properly because there isn't enough TLS space available for both the host and
+# extension's tcmalloc. In transitions.bzl, we define a Bazel transition for managing the allocator
+# and other extension-specific options.
+def mongo_cc_extension_shared_library(
+        name,
+        srcs = [],
+        deps = [],
+        header_deps = [],
+        private_hdrs = [],
+        visibility = None,
+        data = [],
+        tags = [],
+        copts = [],
+        linkopts = [],
+        includes = [],
+        linkstatic = False,
+        local_defines = [],
+        target_compatible_with = [],
+        defines = [],
+        additional_linker_inputs = [],
+        features = [],
+        exec_properties = {},
+        **kwargs):
+    mongo_cc_library(
+        name = name,
+        srcs = srcs,
+        deps = deps + [
+            "//src/mongo/db/extension/public:extensions_api_public",
+            "//src/mongo/db/extension/sdk:sdk_cpp",
+        ],
+        header_deps = header_deps,
+        private_hdrs = private_hdrs,
+        visibility = visibility,
+        data = data,
+        tags = tags,
+        copts = copts,
+        linkopts = linkopts,
+        includes = includes,
+        linkstatic = linkstatic,
+        local_defines = local_defines,
+        defines = defines,
+        features = features,
+        exec_properties = exec_properties,
+        additional_linker_inputs = additional_linker_inputs + select({
+            "@platforms//os:linux": [
+                ":test_extensions.version_script.lds",
+            ],
+            "//conditions:default": [],
+        }) + select({
+            "@platforms//os:macos": [
+                ":test_extensions.exported_symbols_list.lds",
+            ],
+            "//conditions:default": [],
+        }),
+        # linkshared produces a shared library as the output.
+        # TODO SERVER-109255 Make sure the test extensions are statically linked, as we expect
+        # all extensions to be.
+        linkshared = True,
+        non_transitive_dyn_linkopts = select({
+            "@platforms//os:linux": [
+                "-Wl,--version-script=$(location :test_extensions.version_script.lds)",
+            ],
+            "//conditions:default": [],
+        }) + select({
+            "@platforms//os:macos": [
+                "-Wl,-exported_symbols_list,$(location :test_extensions.exported_symbols_list.lds)",
+            ],
+            "//conditions:default": [],
+        }),
+        skip_global_deps = [
+            # This is a globally injected dependency. We don't want a special allocator linked
+            # here. Instead, the allocator should be overriden at load time.
+            "allocator",
+            "libunwind",
+        ],
+        target_compatible_with = target_compatible_with + select({
+            "//bazel/config:shared_archive_or_link_dynamic": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }) + select({
+            "@platforms//os:linux": [],
+            "//conditions:default": ["@platforms//:incompatible"],
+        }),
+    )
+
+def _compute_win_defines(ver):
+    if ver not in MIN_VER_MAP:
+        fail("Unsupported windows_version_minimal=%r; supported: %r" %
+             (ver, sorted(MIN_VER_MAP.keys())))
+    m = MIN_VER_MAP[ver]
+    return [
+        "_WIN32_WINNT=%s" % m["win"],
+        "BOOST_USE_WINAPI_VERSION=%s" % m["win"],
+        "NTDDI_VERSION=%s" % m["ddi"],
+    ]
+
+def _uniq_dirs(files):
+    d = {}
+    for f in files:
+        d[f.dirname] = True
+    return sorted(d.keys())
+
+def _rc_impl(ctx):
+    # No-op on non-Windows
+    if not ctx.target_platform_has_constraint(
+        ctx.attr._os_windows[platform_common.ConstraintValueInfo],
+    ):
+        li = cc_common.create_linker_input(
+            owner = ctx.label,
+            user_link_flags = [],
+            additional_inputs = depset(),  # and declare it as a link input
+        )
+        new_cc_shared_info = CcSharedLibraryInfo(
+            dynamic_deps = depset(),
+            exports = [],
+            linker_input = li,
+            link_once_static_libs = {},
+        )
+
+        return [DefaultInfo(files = depset([])), CcInfo(), new_cc_shared_info]
+
+    new_cc_shared_info = CcSharedLibraryInfo(
+        dynamic_deps = depset(),
+        exports = [],
+        linker_input = None,
+        link_once_static_libs = {},
+    )
+
+    # On Windows we need an rc executable
+    if ctx.executable.rc == None:
+        fail("windows_rc: 'rc' tool not provided. Pass rc = '@mongo_windows_toolchain//:rc' (or your wrapper).")
+
+    out = ctx.actions.declare_file(ctx.label.name + ".res")
+
+    defines = []
+    if ctx.attr.windows_version_minimal:
+        ver = ctx.attr.windows_version_minimal[BuildSettingInfo].value
+        defines += _compute_win_defines(ver)
+    defines += ctx.attr.defines
+
+    include_dirs = ["src", ctx.file.src.dirname]
+
+    # Add $(GENDIR)/src (use backslashes for rc.exe friendliness)
+    gen_src = ctx.var["GENDIR"] + "\\src"
+    include_dirs.append(gen_src)
+
+    args = ctx.actions.args()
+    args.add("/nologo")
+    for inc in include_dirs:
+        args.add("/I", inc)
+    for d in defines:
+        args.add("/d", d)
+    args.add("/fo" + out.path)  # /fo must be joined
+    args.add(ctx.file.src.path)
+
+    ctx.actions.run(
+        executable = ctx.executable.rc,  # your wrapper
+        arguments = [args],
+        inputs = [ctx.file.src] + ctx.files.resources,
+        outputs = [out],
+        mnemonic = "WindowsRC",
+    )
+
+    li = cc_common.create_linker_input(
+        owner = ctx.label,
+        user_link_flags = [out.path],  # put .res on the link line
+        additional_inputs = depset([out]),  # and declare it as a link input
+    )
+    lc = cc_common.create_linking_context(linker_inputs = depset([li]))
+    new_cc_shared_info = CcSharedLibraryInfo(
+        dynamic_deps = depset(),
+        exports = [],
+        linker_input = li,
+        link_once_static_libs = {},
+    )
+
+    return [DefaultInfo(files = depset([out])), CcInfo(linking_context = lc), new_cc_shared_info]
+
+windows_rc_rule = rule(
+    implementation = _rc_impl,
+    attrs = {
+        "src": attr.label(mandatory = True, allow_single_file = [".rc"]),
+        "resources": attr.label_list(allow_files = True),
+        "defines": attr.string_list(),
+        "rc": attr.label(executable = True, cfg = "exec", allow_files = True),
+        "windows_version_minimal": attr.label(),
+        "_os_windows": attr.label(
+            default = Label("@platforms//os:windows"),
+            providers = [platform_common.ConstraintValueInfo],
+        ),
+    },
+    provides = [CcInfo],
+    fragments = ["cpp"],
+)
+
+def windows_rc(name, src, manifest_in = None, icon = None):
+    if manifest_in:
+        # Turn "foo.manifest.in" into "foo.manifest"
+        out_manifest = manifest_in[:-3] if manifest_in.endswith(".in") else manifest_in
+
+        generate_config_header(
+            name = name + "_manifest_gen",
+            checks = "//src/mongo/util:version_constants_gen.py",
+            cpp_defines = [],
+            cpp_linkflags = [],
+            cpp_opts = [],
+            extra_definitions = {
+                "MONGO_DISTMOD": "$(MONGO_DISTMOD)",
+                "MONGO_VERSION": "$(MONGO_VERSION)",
+                "GIT_COMMIT_HASH": "$(GIT_COMMIT_HASH)",
+            } | select({
+                "//bazel/config:js_engine_mozjs": {"js_engine_ver": "mozjs"},
+                "//conditions:default": {"js_engine_ver": "none"},
+            }) | select({
+                "//bazel/config:tcmalloc_google_enabled": {"MONGO_ALLOCATOR": "tcmalloc-google"},
+                "//bazel/config:tcmalloc_gperf_enabled": {"MONGO_ALLOCATOR": "tcmalloc-gperf"},
+                "//conditions:default": {"MONGO_ALLOCATOR": "system"},
+            }) | select({
+                "//bazel/config:build_enterprise_enabled": {"build_enterprise_enabled": "1"},
+                "//conditions:default": {},
+            }),
+            logfile = name + "_manifest_gen.log",
+            output = out_manifest,
+            template = manifest_in,
+        )
+
+    resources = ["//src/mongo/util:rc_constants_gen"]
+    if manifest_in:
+        resources.append(name + "_manifest_gen")
+    if icon:
+        resources.append(icon)
+
+    windows_rc_rule(
+        name = name,
+        src = src,
+        resources = resources,
+        rc = select({
+            "@platforms//os:windows": "@mongo_windows_toolchain//:rc",
+            "//conditions:default": None,
+        }),
+        windows_version_minimal = "//bazel/config:win_min_version",
     )

@@ -29,14 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
@@ -44,15 +36,24 @@
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/plan_cache/plan_cache_debug_info.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
-#include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/sbe_plan_ranker.h"
 #include "mongo/db/query/stage_builder/sbe/builder_data.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -81,16 +82,32 @@ public:
                                   PlanSummaryStats* statsOut) const override;
     PlanStatsDetails getWinningPlanStats(ExplainOptions::Verbosity verbosity) const final;
 
-protected:
-    static boost::optional<BSONObj> buildExecPlanDebugInfo(
-        const sbe::PlanStage* root, const stage_builder::PlanStageData* data) {
-        if (root && data) {
-            return BSON("slots" << data->debugString() << "stages"
-                                << sbe::DebugPrinter().print(*root));
+    static BSONObj buildExecPlanDebugInfo(const sbe::PlanStage* root,
+                                          const stage_builder::PlanStageData* data,
+                                          size_t lengthCap) {
+        tassert(10111200, "encountered unexpected missing sbe plan stage root", root);
+        tassert(10111201, "encountered unexpected missing sbe plan stage data", data);
+        BSONObjBuilder bob;
+        std::string slots = data->debugString(lengthCap);
+        if (static_cast<size_t>(bob.len()) + slots.size() > lengthCap) {
+            bob.append("warning", "exceeded explain BSON size cap");
+            return bob.obj();
         }
-        return boost::none;
+        bob.append("slots", slots);
+        if (static_cast<size_t>(bob.len()) >= lengthCap) {
+            bob.append("warning", "exceeded explain BSON size cap");
+            return bob.obj();
+        }
+        std::string stages = sbe::DebugPrinter().print(*root);
+        if (static_cast<size_t>(bob.len()) + stages.size() > lengthCap) {
+            bob.append("warning", "exceeded explain BSON size cap");
+            return bob.obj();
+        }
+        bob.append("stages", stages);
+        return bob.obj();
     }
 
+protected:
     boost::optional<BSONArray> buildRemotePlanInfo() const;
 
     // These fields are are owned elsewhere (e.g. the PlanExecutor or CandidatePlan).
@@ -129,4 +146,9 @@ private:
     const std::unique_ptr<PlanStage> _classicRuntimePlannerStage;
     const std::unique_ptr<PlanExplainer> _classicRuntimePlannerExplainer;
 };
+
+// Exposed only for testing purposes.
+void statsToBSON(const QuerySolutionNode* node,
+                 BSONObjBuilder* bob,
+                 const BSONObjBuilder* topLevelBob);
 }  // namespace mongo

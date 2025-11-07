@@ -12,13 +12,9 @@ class TestSummarize(unittest.TestCase):
             "Scope 4": [0.0, 0.0, 0.0],
         }
 
-        summary = under_test.MonitorBuildStatusOrchestrator._summarize(scope_percentages)
+        summary = under_test.MonitorBuildStatusOrchestrator._summarize("scope", scope_percentages)
 
-        expected_summary = (
-            f"{under_test.SummaryMsg.PREFIX.value} "
-            f"{under_test.SummaryMsg.BELOW_THRESHOLDS.value}\n\n"
-            f"{under_test.SummaryMsg.PLAYBOOK_REFERENCE.value}\n"
-        )
+        expected_summary = f"`SUMMARY [scope]` " f"{under_test.SummaryMsg.BELOW_THRESHOLDS.value}"
 
         self.assertEqual(summary, expected_summary)
 
@@ -30,13 +26,9 @@ class TestSummarize(unittest.TestCase):
             "Scope 4": [100.0, 100.0, 100.0],
         }
 
-        summary = under_test.MonitorBuildStatusOrchestrator._summarize(scope_percentages)
+        summary = under_test.MonitorBuildStatusOrchestrator._summarize("scope", scope_percentages)
 
-        expected_summary = (
-            f"{under_test.SummaryMsg.PREFIX.value} "
-            f"{under_test.SummaryMsg.BELOW_THRESHOLDS.value}\n\n"
-            f"{under_test.SummaryMsg.PLAYBOOK_REFERENCE.value}\n"
-        )
+        expected_summary = f"`SUMMARY [scope]` " f"{under_test.SummaryMsg.BELOW_THRESHOLDS.value}"
 
         self.assertEqual(summary, expected_summary)
 
@@ -48,13 +40,12 @@ class TestSummarize(unittest.TestCase):
             "Scope 4": [0.0, 0.0, 0.0],
         }
 
-        summary = under_test.MonitorBuildStatusOrchestrator._summarize(scope_percentages)
+        summary = under_test.MonitorBuildStatusOrchestrator._summarize("scope", scope_percentages)
 
         expected_summary = (
-            f"{under_test.SummaryMsg.PREFIX.value} "
+            f"`SUMMARY [scope]` "
             f"{under_test.SummaryMsg.THRESHOLD_EXCEEDED.value}\n"
-            f"\t- Scope 1\n\t- Scope 2\n\t- Scope 3\n\n"
-            f"{under_test.SummaryMsg.PLAYBOOK_REFERENCE.value}\n"
+            f"\t- Scope 1\n\t- Scope 2\n\t- Scope 3"
         )
 
         self.assertEqual(summary, expected_summary)

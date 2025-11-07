@@ -27,10 +27,7 @@
  *    it in the license file.
  */
 
-#include <functional>
-#include <string>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/update/document_diff_calculator.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bson_depth.h"
@@ -41,11 +38,12 @@
 #include "mongo/bson/unordered_fields_bsonobj_comparator.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/field_ref.h"
-#include "mongo/db/update/document_diff_calculator.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <functional>
+#include <string>
+
 
 namespace mongo {
 namespace {
@@ -554,6 +552,125 @@ TEST(IndexUpdateIdentifierTest, DiffForWildcardIndexCombination) {
     ASSERT_EQ(2, affected.count());
 }
 
+TEST(IndexUpdateIdentifierTest, BinaryDiffForSingleIndex) {
+    // Constant for a binary diff at offset 0 with some binary change. We need to use a constant as
+    // computeOplogDiff does not compute binary diffs.
+    const BSONObj kBinaryDiffObj = BSON(
+        "elem" << BSON("o" << 0 << "d" << BSONBinData("abcdef", 6, BinDataType::BinDataGeneral)));
+    const BSONElement kBinaryDiffElem = kBinaryDiffObj["elem"];
+
+    // Generate a binary diff at 'a'
+    diff_tree::DocumentSubDiffNode diffNode;
+    diffNode.addBinary("a", kBinaryDiffElem);
+    auto oplogDiff = diffNode.serialize();
+
+    {
+        doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
+        {
+            UpdateIndexData uid;
+            uid.addPath(FieldRef("a"));
+            updateIdentifier.addIndex(0, uid);
+        }
+
+        doc_diff::IndexSet affected = updateIdentifier.determineAffectedIndexes(oplogDiff);
+        ASSERT_TRUE(affected[0]);
+        ASSERT_EQ(1, affected.count());
+    }
+
+    {
+        doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
+        {
+            UpdateIndexData uid;
+            uid.addPathComponent("a"_sd);
+            updateIdentifier.addIndex(0, uid);
+        }
+
+        doc_diff::IndexSet affected = updateIdentifier.determineAffectedIndexes(oplogDiff);
+        ASSERT_TRUE(affected[0]);
+        ASSERT_EQ(1, affected.count());
+    }
+}
+
+TEST(IndexUpdateIdentifierTest, BinaryDiffForSingleIndexDottedField) {
+    // Constant for a binary diff at offset 0 with some binary change. We need to use a constant as
+    // computeOplogDiff does not compute binary diffs.
+    const BSONObj kBinaryDiffObj = BSON(
+        "elem" << BSON("o" << 0 << "d" << BSONBinData("abcdef", 6, BinDataType::BinDataGeneral)));
+    const BSONElement kBinaryDiffElem = kBinaryDiffObj["elem"];
+
+    // Generate a binary diff at 'a.b'
+    diff_tree::DocumentSubDiffNode diffRoot;
+    auto diffNode = std::make_unique<diff_tree::DocumentSubDiffNode>();
+    diffNode->addBinary("b", kBinaryDiffElem);
+    diffRoot.addChild("a", std::move(diffNode));
+    auto oplogDiff = diffRoot.serialize();
+
+    {
+        doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
+        {
+            UpdateIndexData uid;
+            uid.addPath(FieldRef("a.b"));
+            updateIdentifier.addIndex(0, uid);
+        }
+
+        doc_diff::IndexSet affected = updateIdentifier.determineAffectedIndexes(oplogDiff);
+        ASSERT_TRUE(affected[0]);
+        ASSERT_EQ(1, affected.count());
+    }
+
+    {
+        doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
+        {
+            UpdateIndexData uid;
+            uid.addPath(FieldRef("b.a"));
+            updateIdentifier.addIndex(0, uid);
+        }
+
+        doc_diff::IndexSet affected = updateIdentifier.determineAffectedIndexes(oplogDiff);
+        ASSERT_FALSE(affected[0]);
+        ASSERT_EQ(0, affected.count());
+    }
+
+    {
+        doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
+        {
+            UpdateIndexData uid;
+            uid.addPathComponent("a"_sd);
+            updateIdentifier.addIndex(0, uid);
+        }
+
+        doc_diff::IndexSet affected = updateIdentifier.determineAffectedIndexes(oplogDiff);
+        ASSERT_TRUE(affected[0]);
+        ASSERT_EQ(1, affected.count());
+    }
+
+    {
+        doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
+        {
+            UpdateIndexData uid;
+            uid.addPathComponent("b"_sd);
+            updateIdentifier.addIndex(0, uid);
+        }
+
+        doc_diff::IndexSet affected = updateIdentifier.determineAffectedIndexes(oplogDiff);
+        ASSERT_TRUE(affected[0]);
+        ASSERT_EQ(1, affected.count());
+    }
+
+    {
+        doc_diff::IndexUpdateIdentifier updateIdentifier(1 /* numIndexes */);
+        {
+            UpdateIndexData uid;
+            uid.addPathComponent("c"_sd);
+            updateIdentifier.addIndex(0, uid);
+        }
+
+        doc_diff::IndexSet affected = updateIdentifier.determineAffectedIndexes(oplogDiff);
+        ASSERT_FALSE(affected[0]);
+        ASSERT_EQ(0, affected.count());
+    }
+}
+
 DEATH_TEST_REGEX(IndexUpdateIdentifierTest,
                  FailsWhenAnIndexIsAddedWIthWrongCounter,
                  R"#(Tripwire assertion.*7639000.*indexCounter should be less than _numIndexes)#") {
@@ -606,8 +723,8 @@ TEST(DocumentDiffCalculatorTest, SimpleInsert) {
 }
 
 TEST(DocumentDiffCalculatorTest, SimpleUpdate) {
-    auto preObj = fromjson("{a: {b: 1}, c: 1}}");
-    auto postObj = fromjson("{a: {b: 1}, c: 2}}");
+    auto preObj = fromjson("{a: {b: 1}, c: 1}");
+    auto postObj = fromjson("{a: {b: 1}, c: 2}");
     auto oplogDiff = doc_diff::computeOplogDiff(preObj, postObj, 0);
     ASSERT(oplogDiff);
     ASSERT_BSONOBJ_BINARY_EQ(*oplogDiff, fromjson("{u: {c: 2}}"));
@@ -617,8 +734,8 @@ TEST(DocumentDiffCalculatorTest, SimpleUpdate) {
 }
 
 TEST(DocumentDiffCalculatorTest, SimpleDelete) {
-    auto preObj = fromjson("{a: {b: 1}, c: 1}}");
-    auto postObj = fromjson("{a: {b: 1}}}");
+    auto preObj = fromjson("{a: {b: 1}, c: 1}");
+    auto postObj = fromjson("{a: {b: 1}}");
     auto oplogDiff = doc_diff::computeOplogDiff(preObj, postObj, 0);
     ASSERT(oplogDiff);
     ASSERT_BSONOBJ_BINARY_EQ(*oplogDiff, fromjson("{d: {c: false}}"));
@@ -691,7 +808,7 @@ TEST(DocumentDiffCalculatorTest, ReplaceAllFieldsLargeDelta) {
     auto inlineDiff = doc_diff::computeInlineDiff(preObj, postObj);
     ASSERT(inlineDiff);
     assertBsonObjEqualUnordered(*inlineDiff,
-                                fromjson("{a: 'd', b: 'd', c: 'd', A: 'i', B: 'i', C: 'i'}}"));
+                                fromjson("{a: 'd', b: 'd', c: 'd', A: 'i', B: 'i', C: 'i'}"));
 }
 
 TEST(DocumentDiffCalculatorTest, InsertFrontFieldLargeDelta) {

@@ -14,48 +14,24 @@
  *   does_not_support_transactions,
  *  ]
  */
-import {BalancerHelper} from "jstests/concurrency/fsm_workload_helpers/balancer.js";
 
-const numChunks = 20;
-const documentsPerChunk = 5;
-const dbNames = ['db0', 'db1'];
-const collNames =
-    ['rename_sharded_collectionA', 'rename_sharded_collectionB', 'rename_sharded_collectionC'];
+const numDocs = 100;
+const dbNames = ["db0", "db1"];
+const collNames = ["rename_sharded_collectionA", "rename_sharded_collectionB", "rename_sharded_collectionC"];
 
 /*
  * Initialize a collection with expected number of chunks/documents and randomly distribute chunks
  */
-function initAndFillShardedCollection(db, collName, shardNames) {
+function initAndFillShardedCollection(db, collName) {
     const coll = db[collName];
     const ns = coll.getFullName();
     db.adminCommand({shardCollection: ns, key: {x: 1}});
 
-    // Disallow balancing 'ns' during $setup so it does not interfere with the splits.
-    BalancerHelper.disableBalancerForCollection(db, ns);
-    BalancerHelper.joinBalancerRound(db);
-
-    var nextShardKeyValue = 0;
-    for (var i = 0; i < numChunks; i++) {
-        for (var j = 0; j < documentsPerChunk; j++) {
-            coll.insert({x: nextShardKeyValue++});
-        }
-
-        assert.commandWorked(db.adminCommand({split: ns, middle: {x: nextShardKeyValue}}));
-
-        const lastInsertedShardKeyValue = nextShardKeyValue - 1;
-
-        // When balancer is enabled, move chunks could overlap and fail with
-        // ConflictingOperationInProgress
-        const res = db.adminCommand({
-            moveChunk: ns,
-            find: {x: lastInsertedShardKeyValue},
-            to: shardNames[Random.randInt(shardNames.length)],
-        });
-        assert.commandWorkedOrFailedWithCode(res, ErrorCodes.ConflictingOperationInProgress);
+    let bulk = coll.initializeUnorderedBulkOp();
+    for (let i = 0; i < numDocs; i++) {
+        bulk.insert({x: i});
     }
-
-    // Allow balancing 'ns' again.
-    BalancerHelper.enableBalancerForCollection(db, ns);
+    assert.commandWorked(bulk.execute());
 }
 
 /*
@@ -74,10 +50,9 @@ function getRandomCollName(tid) {
 /*
  * Keep track of raised exceptions in a collection to be checked during teardown.
  */
-const expectedExceptions =
-    [ErrorCodes.NamespaceNotFound, ErrorCodes.ConflictingOperationInProgress];
-const logExceptionsDBName = 'exceptions';
-const logExceptionsCollName = 'log';
+const expectedExceptions = [ErrorCodes.NamespaceNotFound, ErrorCodes.ConflictingOperationInProgress];
+const logExceptionsDBName = "exceptions";
+const logExceptionsCollName = "log";
 
 function logException(db, exceptionCode) {
     db = db.getSiblingDB(logExceptionsDBName);
@@ -89,16 +64,16 @@ function checkExceptionHasBeenThrown(db, exceptionCode) {
     db = db.getSiblingDB(logExceptionsDBName);
     const coll = db[logExceptionsCollName];
     const count = coll.countDocuments({code: exceptionCode});
-    assert.gte(count, 1, 'No exception with error code ' + exceptionCode + ' has been thrown');
+    assert.gte(count, 1, "No exception with error code " + exceptionCode + " has been thrown");
 }
 
-export const $config = (function() {
+export const $config = (function () {
     let states = {
-        rename: function(db, collName, connCache) {
+        rename: function (db, collName, connCache) {
             const dbName = getRandomDbName(this.threadCount);
             db = db.getSiblingDB(dbName);
             collName = getRandomCollName(this.threadCount);
-            var srcColl = db[collName];
+            let srcColl = db[collName];
             const destCollName = getRandomCollName(this.threadCount);
             try {
                 assert.commandWorked(srcColl.renameCollection(destCollName));
@@ -108,7 +83,8 @@ export const $config = (function() {
                     assert.eq(
                         collName,
                         destCollName,
-                        "The FSM thread can fail with IllegalOperation just if a rename collection is happening on the same collection.");
+                        "The FSM thread can fail with IllegalOperation just if a rename collection is happening on the same collection.",
+                    );
                     return;
                 }
                 if (exceptionCode) {
@@ -119,40 +95,36 @@ export const $config = (function() {
                 }
                 throw e;
             }
-        }
+        },
     };
 
-    let setup = function(db, collName, cluster) {
-        const shardNames = Object.keys(cluster.getSerializedCluster().shards);
-        const numShards = shardNames.length;
-
+    let setup = function (db, collName, cluster) {
         // Initialize databases
-        for (var i = 0; i < dbNames.length; i++) {
+        for (let i = 0; i < dbNames.length; i++) {
             const dbName = dbNames[i];
             const newDb = db.getSiblingDB(dbName);
-            newDb.adminCommand({enablesharding: dbName, primaryShard: shardNames[i % numShards]});
+
             // Initialize one sharded collection per db
-            initAndFillShardedCollection(
-                newDb, collNames[Random.randInt(collNames.length)], shardNames);
+            initAndFillShardedCollection(newDb, collNames[Random.randInt(collNames.length)]);
         }
     };
 
-    let teardown = function(db, collName, cluster) {
+    let teardown = function (db, collName, cluster) {
         // Ensure that NamespaceNotFound and ConflictingOperationInProgress have been raised at
         // least once: with a high level of concurrency, it's too improbable for such exceptions to
         // never be thrown (in that case, it's very likely that a bug has been introduced).
-        expectedExceptions.forEach(errCode => checkExceptionHasBeenThrown(db, errCode));
+        expectedExceptions.forEach((errCode) => checkExceptionHasBeenThrown(db, errCode));
 
         // Check that at most one collection per test DB is present and that no data has been lost
         // upon multiple renames.
-        for (var i = 0; i < dbNames.length; i++) {
+        for (let i = 0; i < dbNames.length; i++) {
             const dbName = dbNames[i];
             db = db.getSiblingDB(dbName);
             const listColl = db.getCollectionNames();
             assert.eq(1, listColl.length);
             collName = listColl[0];
-            const numDocs = db[collName].countDocuments({});
-            assert.eq(numChunks * documentsPerChunk, numDocs, 'Unexpected number of chunks');
+            const docCount = db[collName].countDocuments({});
+            assert.eq(numDocs, docCount, "Unexpected number of chunks");
         }
     };
 
@@ -161,12 +133,12 @@ export const $config = (function() {
     return {
         threadCount: 12,
         iterations: 64,
-        startState: 'rename',
+        startState: "rename",
         states: states,
         transitions: transitions,
         data: {},
         setup: setup,
         teardown: teardown,
-        passConnectionCache: true
+        passConnectionCache: true,
     };
 })();

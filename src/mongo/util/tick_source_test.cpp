@@ -29,27 +29,24 @@
 
 #include "mongo/util/tick_source.h"
 
+#include "mongo/base/string_data.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/duration.h"
+#include "mongo/util/system_tick_source.h"
+#include "mongo/util/tick_source_mock.h"
+
 #include <algorithm>
 #include <chrono>  // NOLINT
 #include <cstddef>
-#include <fmt/chrono.h>  // IWYU pragma: keep
-#include <fmt/format.h>
 #include <memory>
 #include <ratio>
 #include <sstream>
 #include <string>
 #include <vector>
 
-#include "mongo/base/string_data.h"
-#include "mongo/stdx/thread.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/assert_that.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/unittest/matcher.h"
-#include "mongo/unittest/matcher_core.h"
-#include "mongo/util/duration.h"
-#include "mongo/util/system_tick_source.h"
-#include "mongo/util/tick_source_mock.h"
+#include <fmt/chrono.h>  // IWYU pragma: keep
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -77,14 +74,16 @@ TEST(SystemTickSourceTest, TicksPerSecond) {
 }
 
 TEST(SystemTickSourceTest, GetTicks) {
-    using namespace fmt::literals;
     using namespace std::chrono_literals;
 #ifdef _WIN32
     // Error upper bound increased for Windows systems because sleep_for is known to possibly
     // sleep longer than the duration specified with high margin of error.
     const static double kMaxError = 5.0;
 #else
-    const static double kMaxError = 0.1;
+    // Even if sleep is strict, there's no guarantee the scheduler will
+    // immediately schedule your process when it's done sleeping. We
+    // need to allow for that in the upper bound.
+    const static double kMaxError = 0.3;
 #endif
     // Because sleep_for guarantees blocking for at least sleep duration, the error lower
     // bound only needs to account for the potential time difference between the intervals
@@ -100,7 +99,7 @@ TEST(SystemTickSourceTest, GetTicks) {
         auto dt = (n1 - n0) * tTick;
         double err = (dt - delay) / delay;
         ASSERT_THAT(err, m::AllOf(m::Ge(kMinError), m::Le(kMaxError)))
-            << " n0={}, n1={}, tTick={}, delay={}, dt={}"_format(n0, n1, tTick, delay, dt);
+            << fmt::format(" n0={}, n1={}, tTick={}, delay={}, dt={}", n0, n1, tTick, delay, dt);
     }
 }
 

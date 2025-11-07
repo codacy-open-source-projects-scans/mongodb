@@ -31,17 +31,6 @@
  * This file includes integration testing between the MockDBClientBase and MockRemoteDB.
  */
 
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -62,15 +51,24 @@
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/socket_exception.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 using std::string;
 using std::vector;
@@ -251,19 +249,13 @@ TEST(MockDBClientConnTest, MultiNSInsertAndQuery) {
     {
         MockDBClientConnection conn(&server);
         conn.insert(nss1, BSON("a" << 1));
-        conn.insert(nss2,
-                    BSON("ef"
-                         << "gh"));
+        conn.insert(nss2, BSON("ef" << "gh"));
         conn.insert(nss3, BSON("x" << 2));
 
         conn.insert(nss1, BSON("b" << 3));
-        conn.insert(nss2,
-                    BSON("jk"
-                         << "lm"));
+        conn.insert(nss2, BSON("jk" << "lm"));
 
-        conn.insert(nss2,
-                    BSON("x"
-                         << "yz"));
+        conn.insert(nss2, BSON("x" << "yz"));
     }
 
     {
@@ -355,19 +347,13 @@ TEST(MockDBClientConnTest, MultiNSRemove) {
     {
         MockDBClientConnection conn(&server);
         conn.insert(nss1, BSON("a" << 1));
-        conn.insert(nss2,
-                    BSON("ef"
-                         << "gh"));
+        conn.insert(nss2, BSON("ef" << "gh"));
         conn.insert(nss3, BSON("x" << 2));
 
         conn.insert(nss1, BSON("b" << 3));
-        conn.insert(nss2,
-                    BSON("jk"
-                         << "lm"));
+        conn.insert(nss2, BSON("jk" << "lm"));
 
-        conn.insert(nss2,
-                    BSON("x"
-                         << "yz"));
+        conn.insert(nss2, BSON("x" << "yz"));
     }
 
     {
@@ -413,9 +399,7 @@ TEST(MockDBClientConnTest, InsertAfterRemove) {
         MockDBClientConnection conn(&server);
         conn.insert(nss, BSON("a" << 1));
         conn.insert(nss, BSON("b" << 3));
-        conn.insert(nss,
-                    BSON("x"
-                         << "yz"));
+        conn.insert(nss, BSON("x" << "yz"));
     }
 
     {
@@ -489,12 +473,10 @@ TEST(MockDBClientConnTest, CyclingCmd) {
 
     {
         vector<mongo::StatusWith<BSONObj>> helloReplySequence;
-        helloReplySequence.push_back(BSON("set"
-                                          << "a"
-                                          << "isWritablePrimary" << true << "ok" << 1));
-        helloReplySequence.push_back(BSON("set"
-                                          << "a"
-                                          << "isWritablePrimary" << false << "ok" << 1));
+        helloReplySequence.push_back(BSON("set" << "a"
+                                                << "isWritablePrimary" << true << "ok" << 1));
+        helloReplySequence.push_back(BSON("set" << "a"
+                                                << "isWritablePrimary" << false << "ok" << 1));
         server.setCommandReply("hello", helloReplySequence);
     }
 
@@ -856,12 +838,15 @@ TEST(MockDBClientConnTest, SimulateRecvErrors) {
         ASSERT_STRING_CONTAINS(exception.what(), "Fake socket timeout");
     });
     // Cursor is still valid on network exceptions.
+    ASSERT_FALSE(cursor.wasError());
     ASSERT_FALSE(cursor.isDead());
 
     // Throw exception on non-OK response.
     ASSERT_THROWS_CODE(cursor.more(), mongo::DBException, mongo::ErrorCodes::Interrupted);
-    // Cursor is dead on command errors.
-    ASSERT_TRUE(cursor.isDead());
+    // Cursor indicates error on command errors.
+    ASSERT_TRUE(cursor.wasError());
+    // The cursor still isn't dead, it will be killed on destruction
+    ASSERT_FALSE(cursor.isDead());
 }
 
 bool blockedOnNetworkSoon(MockDBClientConnection* conn) {

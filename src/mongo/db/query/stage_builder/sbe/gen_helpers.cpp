@@ -32,59 +32,40 @@
 #include <absl/container/inlined_vector.h>
 #include <absl/meta/type_traits.h>
 #include <boost/container/flat_set.hpp>
-#include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <algorithm>
-#include <iterator>
-#include <numeric>
-#include <sstream>
-#include <string_view>
-
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/health_log_gen.h"
-#include "mongo/db/catalog/health_log_interface.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/exec/docval_to_sbeval.h"
-#include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/matcher/matcher_type_set.h"
+#include "mongo/db/index/preallocated_container_pool.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/pipeline/expression_dependencies.h"
 #include "mongo/db/pipeline/window_function/window_function_top_bottom_n.h"
-#include "mongo/db/query/bson_typemask.h"
-#include "mongo/db/query/projection.h"
-#include "mongo/db/query/projection_ast.h"
-#include "mongo/db/query/projection_ast_path_tracking_visitor.h"
-#include "mongo/db/query/projection_ast_visitor.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_ast.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_ast_path_tracking_visitor.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection_ast_visitor.h"
 #include "mongo/db/query/query_utils.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr_helpers.h"
 #include "mongo/db/query/tree_walker.h"
 #include "mongo/db/record_id.h"
-#include "mongo/db/storage/execution_context.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/snapshot.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_options.h"
-#include "mongo/util/debug_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/shared_buffer_fragment.h"
-#include "mongo/util/stacktrace.h"
 #include "mongo/util/str.h"
-#include "mongo/util/time_support.h"
+
+#include <algorithm>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -196,22 +177,6 @@ void indexKeyCorruptionCheckCallback(OperationContext* opCtx,
                                                     keyString->getVersion());
             auto hydratedKey = IndexKeyEntry::rehydrateKey(bsonKeyPattern, bsonKeyString);
 
-            HealthLogEntry entry;
-            entry.setNss(nss);
-            entry.setTimestamp(Date_t::now());
-            entry.setSeverity(SeverityEnum::Error);
-            entry.setScope(ScopeEnum::Index);
-            entry.setOperation("Index scan");
-            entry.setMsg("Erroneous index key found with reference to non-existent record id");
-
-            BSONObjBuilder bob;
-            bob.append("recordId", rid.toString());
-            bob.append("indexKeyData", hydratedKey);
-            bob.appendElements(getStackTrace().getBSONRepresentation());
-            entry.setData(bob.obj());
-
-            HealthLogInterface::get(opCtx)->log(entry);
-
             LOGV2_ERROR_OPTIONS(
                 5113709,
                 {logv2::UserAssertAfterLog(ErrorCodes::DataCorruptionDetected)},
@@ -294,8 +259,8 @@ bool indexKeyConsistencyCheckCallback(OperationContext* opCtx,
                                   << indexIdent,
                     iam);
 
-            auto& executionCtx = StorageExecutionContext::get(opCtx);
-            auto keys = executionCtx.keys();
+            auto& containerPool = PreallocatedContainerPool::get(opCtx);
+            auto keys = containerPool.keys();
             SharedBufferFragmentBuilder pooledBuilder(
                 key_string::HeapBuilder::kHeapAllocatorDefaultBytes);
 
@@ -454,7 +419,7 @@ SbExpr generateArrayCheckForSort(StageBuilderState& state,
                                  FieldIndex level,
                                  sbe::value::FrameIdGenerator* frameIdGenerator,
                                  boost::optional<SbSlot> fieldSlot = boost::none) {
-    invariant(level < fp.getPathLength());
+    tassert(11051803, "FieldPath length is too short", level < fp.getPathLength());
 
     tassert(8102000,
             "Expected either 'inputExpr' or 'fieldSlot' to be defined",
@@ -473,10 +438,10 @@ SbExpr generateArrayCheckForSort(StageBuilderState& state,
         return b.makeLet(
             frameId,
             SbExpr::makeSeq(std::move(fieldExpr)),
-            b.makeBinaryOp(sbe::EPrimBinary::logicOr,
-                           b.makeFunction("isArray"_sd, SbVar{frameId, 0}),
-                           generateArrayCheckForSort(
-                               state, SbVar{frameId, 0}, fp, level + 1, frameIdGenerator)));
+            b.makeBooleanOpTree(abt::Operations::Or,
+                                b.makeFunction("isArray"_sd, SbVar{frameId, 0}),
+                                generateArrayCheckForSort(
+                                    state, SbVar{frameId, 0}, fp, level + 1, frameIdGenerator)));
     }();
 
     if (level == 0) {
@@ -498,7 +463,7 @@ SbExpr generateSortTraverse(boost::optional<SbVar> inputVar,
                             boost::optional<SbSlot> fieldSlot = boost::none) {
     using namespace std::literals;
 
-    invariant(level < fp.getPathLength());
+    tassert(11051802, "FieldPath length is too short", level < fp.getPathLength());
 
     tassert(8102001,
             "Expected either 'inputVar' or 'fieldSlot' to be defined",
@@ -640,16 +605,16 @@ SortKeysExprs buildSortKeys(StageBuilderState& state,
                             std::make_pair(PlanStageSlots::kField, fp.getFieldName(0)))));
                 };
 
-                return b.makeBinaryOp(sbe::EPrimBinary::logicOr,
-                                      makeIsNotArrayCheck(*sortPattern[0].fieldPath),
-                                      makeIsNotArrayCheck(*sortPattern[1].fieldPath));
+                return b.makeBooleanOpTree(abt::Operations::Or,
+                                           makeIsNotArrayCheck(*sortPattern[0].fieldPath),
+                                           makeIsNotArrayCheck(*sortPattern[1].fieldPath));
             } else {
                 // If the sort pattern has three or more parts, we generate an expression to
                 // perform the "parallel arrays" check that works (and scales well) for an
                 // arbitrary number of sort pattern parts.
                 auto makeIsArrayCheck = [&](const FieldPath& fp) {
                     return b.makeBinaryOp(
-                        sbe::EPrimBinary::cmp3w,
+                        abt::Operations::Cmp3w,
                         generateArrayCheckForSort(state,
                                                   SbExpr{},
                                                   fp,
@@ -660,15 +625,15 @@ SortKeysExprs buildSortKeys(StageBuilderState& state,
                         b.makeBoolConstant(false));
                 };
 
-                auto numArraysExpr = makeIsArrayCheck(*sortPattern[0].fieldPath);
-                for (size_t idx = 1; idx < sortPattern.size(); ++idx) {
-                    numArraysExpr = b.makeBinaryOp(sbe::EPrimBinary::add,
-                                                   std::move(numArraysExpr),
-                                                   makeIsArrayCheck(*sortPattern[idx].fieldPath));
+                SbExpr::Vector args;
+                for (size_t idx = 0; idx < sortPattern.size(); ++idx) {
+                    args.emplace_back(makeIsArrayCheck(*sortPattern[idx].fieldPath));
                 }
 
+                auto numArraysExpr = b.makeNaryOp(abt::Operations::Add, std::move(args));
+
                 return b.makeBinaryOp(
-                    sbe::EPrimBinary::lessEq, std::move(numArraysExpr), b.makeInt32Constant(1));
+                    abt::Operations::Lte, std::move(numArraysExpr), b.makeInt32Constant(1));
             }
         }();
 
@@ -996,6 +961,7 @@ std::pair<std::vector<std::string>, std::vector<ProjectNode>> getProjectNodes(
 
 std::vector<ProjectNode> cloneProjectNodes(const std::vector<ProjectNode>& nodes) {
     std::vector<ProjectNode> clonedNodes;
+    clonedNodes.reserve(nodes.size());
     for (const auto& node : nodes) {
         clonedNodes.emplace_back(node.clone());
     }
@@ -1029,7 +995,7 @@ std::pair<SbStage, SbSlotVector> projectFieldsToSlots(SbStage stage,
         fields.begin(), fields.end(), [](auto&& s) { return s.find('.') == std::string::npos; });
 
     if (topLevelFieldsOnly) {
-        SbExprOptSbSlotVector projects;
+        SbExprOptSlotVector projects;
 
         for (size_t i = 0; i < fields.size(); ++i) {
             auto name = std::make_pair(PlanStageSlots::kField, StringData(fields[i]));
@@ -1097,7 +1063,7 @@ std::pair<SbStage, SbSlotVector> projectFieldsToSlots(SbStage stage,
         visitPathTreeNodes(treeRoot.get(), preVisit, postVisit);
     }
 
-    std::vector<SbExprOptSbSlotVector> stackOfProjects;
+    std::vector<SbExprOptSlotVector> stackOfProjects;
     using DfsState = std::vector<std::pair<Node*, size_t>>;
     size_t depth = 0;
 

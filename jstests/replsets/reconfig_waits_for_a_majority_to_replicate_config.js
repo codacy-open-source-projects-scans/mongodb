@@ -7,13 +7,13 @@ import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {isConfigCommitted} from "jstests/replsets/rslib.js";
 
-var replTest = new ReplSetTest({nodes: 2, useBridge: true});
+let replTest = new ReplSetTest({nodes: 2, useBridge: true});
 replTest.startSet();
 // Initiating with a high election timeout prevents unnecessary elections and also prevents
 // the primary from stepping down if it cannot communicate with the secondary.
 replTest.initiate();
-var primary = replTest.getPrimary();
-var secondary = replTest.getSecondary();
+let primary = replTest.getPrimary();
+let secondary = replTest.getSecondary();
 
 // Disconnect the secondary from the primary.
 secondary.disconnect(primary);
@@ -27,7 +27,8 @@ var config = primary.getDB("local").system.replset.findOne();
 config.version++;
 assert.commandFailedWithCode(
     primary.getDB("admin").runCommand({replSetReconfig: config, maxTimeMS: 5000}),
-    ErrorCodes.MaxTimeMSExpired);
+    ErrorCodes.MaxTimeMSExpired,
+);
 assert.eq(isConfigCommitted(primary), false);
 
 // Try to run another reconfig, which should also time out because the previous config is
@@ -36,7 +37,8 @@ var config = primary.getDB("local").system.replset.findOne();
 config.version++;
 assert.commandFailedWithCode(
     primary.getDB("admin").runCommand({replSetReconfig: config, maxTimeMS: 5000}),
-    ErrorCodes.CurrentConfigNotCommittedYet);
+    ErrorCodes.CurrentConfigNotCommittedYet,
+);
 assert.eq(isConfigCommitted(primary), false);
 
 // Reconnect the secondary to the primary.

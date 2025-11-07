@@ -1,5 +1,12 @@
 load("@bazel_tools//tools/cpp:toolchain_utils.bzl", "find_cpp_toolchain")
 
+TagInfo = provider(
+    doc = "A rule provider to pass around tags that were passed to rules.",
+    fields = {
+        "tags": "Bazel tags that were attached to the rule.",
+    },
+)
+
 WITH_DEBUG_SUFFIX = "_with_debug"
 CC_SHARED_LIBRARY_SUFFIX = "_shared"
 SHARED_ARCHIVE_SUFFIX = "_shared_archive"
@@ -94,6 +101,20 @@ def get_transitive_dyn_libs(deps):
                 if library.dynamic_library:
                     transitive_dyn_libs.append(library.dynamic_library)
     return transitive_dyn_libs
+
+def get_transitive_debug_files(deps):
+    """
+    Get a transitive list of all dynamic library files under a set of dependencies.
+    """
+
+    # TODO(SERVER-85819): Investigate to see if it's possible to merge the depset without looping over all transitive
+    # dependencies.
+    transitive_debugs = []
+    for dep in deps:
+        for input in dep[DefaultInfo].files.to_list():
+            if input.basename.endswith(".debug"):
+                transitive_debugs.append(input)
+    return transitive_debugs
 
 def symlink_shared_archive(ctx, shared_ext, static_ext):
     """
@@ -250,6 +271,23 @@ def create_new_cc_shared_library_info(ctx, cc_toolchain, output_shared_lib, orig
         linker_input = linker_input,
     )
 
+# TODO(SERVER-101906): We assume the worst-case resource usage to avoid OOMs. Figure out if we can
+# generalize numInputs for all link configurations so that this can more intelligently set resource
+# expectations.
+def linux_extract_resource_set(os, numInputs):
+    return {
+        "cpu": 6,
+        "memory": 20 * 1024,  # 20 GB
+        "local_test": 1,
+    }
+
+def linux_strip_resource_set(os, numInputs):
+    return {
+        "cpu": 3,
+        "memory": 10 * 1024,  # 10 GB
+        "local_test": 1,
+    }
+
 def linux_extraction(ctx, cc_toolchain, inputs):
     outputs = []
     unstripped_static_bin = None
@@ -262,6 +300,7 @@ def linux_extraction(ctx, cc_toolchain, inputs):
                 executable = cc_toolchain.objcopy_executable,
                 outputs = [debug_info],
                 inputs = inputs,
+                resource_set = linux_extract_resource_set if ctx.attr.type == "program" else None,
                 arguments = [
                     "--only-keep-debug",
                     input_bin.path,
@@ -274,6 +313,7 @@ def linux_extraction(ctx, cc_toolchain, inputs):
                 executable = cc_toolchain.objcopy_executable,
                 outputs = [output_bin],
                 inputs = depset([debug_info], transitive = [inputs]),
+                resource_set = linux_strip_resource_set if ctx.attr.type == "program" else None,
                 arguments = [
                     "--strip-debug",
                     "--add-gnu-debuglink",
@@ -311,12 +351,21 @@ def linux_extraction(ctx, cc_toolchain, inputs):
 
     provided_info = [
         DefaultInfo(
-            files = depset(outputs),
+            files = depset(outputs, transitive = [depset(get_transitive_debug_files(ctx.attr.deps))]),
             runfiles = dynamic_deps_runfiles,
             executable = output_bin if ctx.attr.type == "program" else None,
         ),
         create_new_ccinfo_library(ctx, cc_toolchain, output_bin, unstripped_static_bin, ctx.attr.cc_shared_library),
     ]
+
+    if ctx.attr.type == "program":
+        provided_info += [
+            RunEnvironmentInfo(
+                environment = ctx.attr.binary_with_debug[RunEnvironmentInfo].environment,
+                inherited_environment = ctx.attr.binary_with_debug[RunEnvironmentInfo].inherited_environment,
+            ),
+        ]
+        provided_info += [ctx.attr.binary_with_debug[DebugPackageInfo]]
 
     if ctx.attr.cc_shared_library != None:
         provided_info.append(
@@ -389,9 +438,18 @@ def macos_extraction(ctx, cc_toolchain, inputs):
         DefaultInfo(
             files = depset(outputs),
             executable = output_bin if ctx.attr.type == "program" else None,
+            runfiles = ctx.attr.binary_with_debug[DefaultInfo].data_runfiles,
         ),
         create_new_ccinfo_library(ctx, cc_toolchain, output_bin, unstripped_static_bin, ctx.attr.cc_shared_library),
     ]
+
+    if ctx.attr.type == "program":
+        provided_info += [
+            RunEnvironmentInfo(
+                environment = ctx.attr.binary_with_debug[RunEnvironmentInfo].environment,
+                inherited_environment = ctx.attr.binary_with_debug[RunEnvironmentInfo].inherited_environment,
+            ),
+        ]
 
     if ctx.attr.cc_shared_library != None:
         provided_info.append(
@@ -404,6 +462,8 @@ def windows_extraction(ctx, cc_toolchain, inputs):
     pdb = None
     if ctx.attr.type == "library":
         ext = ".lib"
+        if ctx.attr.cc_shared_library and ctx.attr.enable_pdb:
+            pdb = ctx.attr.cc_shared_library[OutputGroupInfo].pdb_file
     elif ctx.attr.type == "program":
         ext = ".exe"
         if ctx.attr.enable_pdb:
@@ -429,19 +489,33 @@ def windows_extraction(ctx, cc_toolchain, inputs):
 
             if ext == ".lib":
                 output_library = output
-            if ext == ".dll":
-                output_dynamic_library = output
-                # TODO support PDB outputs for dynamic windows builds when we are on bazel 7.2
-                # https://github.com/bazelbuild/bazel/pull/21900/files
 
             ctx.actions.symlink(
                 output = output,
                 target_file = input,
             )
 
+        if ctx.attr.cc_shared_library != None:
+            for file in ctx.attr.cc_shared_library.files.to_list():
+                if file.path.endswith(".dll"):
+                    basename = file.basename[:-len(WITH_DEBUG_SUFFIX + CC_SHARED_LIBRARY_SUFFIX + ".dll")]
+                    output = ctx.actions.declare_file(basename + ".dll")
+                    outputs.append(output)
+
+                    output_dynamic_library = output
+
+                    ctx.actions.symlink(
+                        output = output,
+                        target_file = file,
+                    )
+
         if pdb:
-            basename = input.basename[:-len(WITH_DEBUG_SUFFIX + ext)]
-            pdb_output = ctx.actions.declare_file(basename + ".pdb")
+            if ctx.attr.cc_shared_library != None:
+                basename = input.basename[:-len(WITH_DEBUG_SUFFIX + ".pdb")]
+                pdb_output = ctx.actions.declare_file(basename + ".dll.pdb")
+            else:
+                basename = input.basename[:-len(WITH_DEBUG_SUFFIX + ext)]
+                pdb_output = ctx.actions.declare_file(basename + ".pdb")
             outputs.append(pdb_output)
 
             ctx.actions.symlink(
@@ -461,6 +535,14 @@ def windows_extraction(ctx, cc_toolchain, inputs):
         ),
         create_new_ccinfo_library(ctx, cc_toolchain, output_dynamic_library, output_library, ctx.attr.cc_shared_library),
     ]
+
+    if ctx.attr.type == "program":
+        provided_info += [
+            RunEnvironmentInfo(
+                environment = ctx.attr.binary_with_debug[RunEnvironmentInfo].environment,
+                inherited_environment = ctx.attr.binary_with_debug[RunEnvironmentInfo].inherited_environment,
+            ),
+        ]
 
     if ctx.attr.cc_shared_library != None:
         provided_info.append(
@@ -482,11 +564,24 @@ def extract_debuginfo_impl(ctx):
     windows_constraint = ctx.attr._windows_constraint[platform_common.ConstraintValueInfo]
 
     if ctx.target_platform_has_constraint(linux_constraint):
-        return linux_extraction(ctx, cc_toolchain, inputs)
+        # When skipping the archives we have to skip modifying debug info
+        # for the intermediates because we end up taking a dependency
+        # on the _with_debug .a files
+        if ctx.attr.skip_archive and ctx.attr.cc_shared_library == None:
+            return_info = [ctx.attr.binary_with_debug[CcInfo]]
+        else:
+            return_info = linux_extraction(ctx, cc_toolchain, inputs)
     elif ctx.target_platform_has_constraint(macos_constraint):
-        return macos_extraction(ctx, cc_toolchain, inputs)
+        if ctx.attr.skip_archive and ctx.attr.cc_shared_library == None:
+            return_info = [ctx.attr.binary_with_debug[CcInfo]]
+        else:
+            return_info = macos_extraction(ctx, cc_toolchain, inputs)
     elif ctx.target_platform_has_constraint(windows_constraint):
-        return windows_extraction(ctx, cc_toolchain, inputs)
+        return_info = windows_extraction(ctx, cc_toolchain, inputs)
+
+    tag_provider = TagInfo(tags = ctx.attr.tags)
+    return_info.append(tag_provider)
+    return return_info
 
 extract_debuginfo = rule(
     extract_debuginfo_impl,
@@ -509,6 +604,7 @@ extract_debuginfo = rule(
             doc = "If generating a shared archive(.so.a/.dll.lib), the shared archive's cc_library. Otherwise empty.",
             allow_files = True,
         ),
+        "skip_archive": attr.bool(default = False, doc = "Flag to skip generating archives."),
         "_cc_toolchain": attr.label(default = "@bazel_tools//tools/cpp:current_cc_toolchain"),
         "_linux_constraint": attr.label(default = "@platforms//os:linux"),
         "_macos_constraint": attr.label(default = "@platforms//os:macos"),
@@ -540,6 +636,7 @@ extract_debuginfo_binary = rule(
             doc = "If generating a shared archive(.so.a/.dll.lib), the shared archive's cc_library. Otherwise empty.",
             allow_files = True,
         ),
+        "skip_archive": attr.bool(default = False, doc = "Flag to skip generating archives."),
         "_cc_toolchain": attr.label(default = "@bazel_tools//tools/cpp:current_cc_toolchain"),
         "_linux_constraint": attr.label(default = "@platforms//os:linux"),
         "_macos_constraint": attr.label(default = "@platforms//os:macos"),
@@ -572,6 +669,7 @@ extract_debuginfo_test = rule(
             doc = "If generating a shared archive(.so.a/.dll.lib), the shared archive's cc_library. Otherwise empty.",
             allow_files = True,
         ),
+        "skip_archive": attr.bool(default = False, doc = "Flag to skip generating archives."),
         "_cc_toolchain": attr.label(default = "@bazel_tools//tools/cpp:current_cc_toolchain"),
         "_linux_constraint": attr.label(default = "@platforms//os:linux"),
         "_macos_constraint": attr.label(default = "@platforms//os:macos"),

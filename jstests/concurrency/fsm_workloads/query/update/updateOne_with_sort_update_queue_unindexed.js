@@ -17,14 +17,14 @@
  * @tags: [
  *   # PM-1632 was delivered in 7.1, resolving the issue about assumes_unsharded_collection.
  *   requires_fcv_81,
+ *   requires_getmore,
+ *   uses_getmore_outside_of_transaction,
  * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
-import {
-    $config as $baseConfig
-} from "jstests/concurrency/fsm_workloads/query/update/updateOne_with_sort_update_queue.js";
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/query/update/updateOne_with_sort_update_queue.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
     // Use the same workload name as the database name, since the workload
     // name is assumed to be unique.
     $config.data.uniqueDBName = jsTestName();

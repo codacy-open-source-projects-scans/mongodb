@@ -29,14 +29,15 @@
 
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
-#include <vector>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands/query_cmd/bulk_write_gen.h"
 #include "mongo/db/commands/query_cmd/bulk_write_parser.h"
+#include "mongo/db/stats/counters.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <vector>
 
 /**
  * Contains common functionality shared between the bulkWrite command in mongos and mongod.
@@ -91,6 +92,15 @@ write_ops::InsertCommandRequest makeInsertCommandRequestForFLE(
 write_ops::UpdateOpEntry makeUpdateOpEntryFromUpdateOp(const BulkWriteUpdateOp* op);
 
 /**
+ * Helper function to build an BulkWriteUpdateOp based off the UpdateOpEntry passed in.
+ */
+BulkWriteUpdateOp toBulkWriteUpdate(const write_ops::UpdateOpEntry& op);
+
+/**
+ * Helper function to build an BulkWriteDeleteOp based off the DeleteOpEntry passed in.
+ */
+BulkWriteDeleteOp toBulkWriteDelete(const write_ops::DeleteOpEntry& op);
+/**
  * Helper function to build an UpdateRequest based off the BulkWriteUpdateOp passed in and its
  * namespace and top-level 'let' parameter.
  */
@@ -116,7 +126,10 @@ DeleteRequest makeDeleteRequestFromDeleteOp(OperationContext* opCtx,
  * request at index currentOpIdx.
  */
 write_ops::UpdateCommandRequest makeUpdateCommandRequestFromUpdateOp(
-    const BulkWriteUpdateOp* op, const BulkWriteCommandRequest& req, size_t currentOpIdx);
+    OperationContext* opCtx,
+    const BulkWriteUpdateOp* op,
+    const BulkWriteCommandRequest& req,
+    size_t currentOpIdx);
 
 /**
  * Helper for FLE support. Build a DeleteCommandRequest from a BulkWriteDeleteOp.
@@ -134,9 +147,11 @@ BulkWriteCommandRequest makeSingleOpBulkWriteCommandRequest(
  * Helper for bulkWrite use of incrementUpdateMetrics.
  */
 void incrementBulkWriteUpdateMetrics(
+    QueryCounters& queryCounters,
     ClusterRole role,
     const write_ops::UpdateModification& updateMod,
     const mongo::NamespaceString& ns,
-    const boost::optional<std::vector<mongo::BSONObj>>& arrayFilters);
+    const boost::optional<std::vector<mongo::BSONObj>>& arrayFilters,
+    bool isMulti);
 }  // namespace bulk_write_common
 }  // namespace mongo

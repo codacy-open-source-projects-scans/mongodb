@@ -30,22 +30,23 @@
 #include "mongo/shell/program_runner.h"
 
 #include <algorithm>
-#include <boost/filesystem/operations.hpp>
-#include <boost/iostreams/device/file_descriptor.hpp>
-#include <boost/iostreams/stream_buffer.hpp>
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
-#include <fcntl.h>
 #include <iostream>
 #include <iterator>
 #include <memory>
 #include <utility>
 
+#include <fcntl.h>
+
 #include <absl/container/node_hash_map.h>
 #include <absl/container/node_hash_set.h>
 #include <absl/meta/type_traits.h>
+#include <boost/filesystem/operations.hpp>
+#include <boost/iostreams/device/file_descriptor.hpp>
+#include <boost/iostreams/stream_buffer.hpp>
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 #include <boost/core/typeinfo.hpp>
 #include <boost/filesystem/path.hpp>
@@ -71,11 +72,6 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_options.h"
-#include "mongo/logv2/log_tag.h"
-#include "mongo/logv2/log_truncation.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/errno_util.h"
@@ -112,7 +108,6 @@ inline int pipe(int fds[2]) {
 #endif
 
 namespace {
-using namespace fmt::literals;
 
 void safeClose(int fd) {
 #ifndef _WIN32
@@ -157,8 +152,11 @@ ProgramOutputMultiplexer* ProgramRegistry::getProgramOutputMultiplexer() {
     return &_programOutputMultiplexer;
 }
 
-ProgramRunner ProgramRegistry::createProgramRunner(BSONObj args, BSONObj env, bool isMongo) {
-    return ProgramRunner(args, env, isMongo, this);
+ProgramRunner ProgramRegistry::createProgramRunner(BSONObj args,
+                                                   BSONObj env,
+                                                   bool isMongo,
+                                                   const std::string& loggingPrefix) {
+    return ProgramRunner(args, env, isMongo, loggingPrefix, this);
 }
 
 bool ProgramRegistry::isPortRegistered(int port) const {
@@ -348,8 +346,9 @@ HANDLE ProgramRegistry::getHandleForPid(ProcessId pid) const {
     stdx::lock_guard<stdx::recursive_mutex> lk(_mutex);
 
     auto iter = _handles.find(pid);
-    uassert(
-        ErrorCodes::BadValue, "Unregistered pid {}"_format(pid.toNative()), iter != _handles.end());
+    uassert(ErrorCodes::BadValue,
+            fmt::format("Unregistered pid {}", pid.toNative()),
+            iter != _handles.end());
     return iter->second;
 }
 
@@ -402,7 +401,11 @@ void ProgramOutputMultiplexer::clear() {
     _buffer.str("");
 }
 
-ProgramRunner::ProgramRunner(BSONObj args, BSONObj env, bool isMongo, ProgramRegistry* registry)
+ProgramRunner::ProgramRunner(BSONObj args,
+                             BSONObj env,
+                             bool isMongo,
+                             const std::string& loggingPrefix,
+                             ProgramRegistry* registry)
     : _parentRegistry(registry) {
     uassert(ErrorCodes::FailedToParse,
             "cannot pass an empty argument to ProgramRunner",
@@ -431,7 +434,8 @@ ProgramRunner::ProgramRunner(BSONObj args, BSONObj env, bool isMongo, ProgramReg
         (string("mongotmock") == programName ||
          programName.string().compare(0, prefix.size(), prefix) == 0);
 
-    parseName(isMongo, isMongodProgram, isMongosProgram, isMongotMockProgram, programName);
+    parseName(
+        isMongo, isMongodProgram, isMongosProgram, isMongotMockProgram, loggingPrefix, programName);
 
     _argv.push_back(programPath.string());
 
@@ -801,7 +805,7 @@ void ProgramRunner::loadEnvironmentVariables(BSONObj env) {
     for (const BSONElement& e : env) {
         uassert(ErrorCodes::FailedToParse,
                 "Environment variable values must be strings",
-                e.type() == mongo::String);
+                e.type() == BSONType::string);
 
         _envp.emplace(std::string(e.fieldName()), e.str());
     }
@@ -853,6 +857,7 @@ void ProgramRunner::parseName(bool isMongo,
                               bool isMongodProgram,
                               bool isMongosProgram,
                               bool isMongotMockProgram,
+                              const std::string& loggingPrefix,
                               const boost::filesystem::path& programName) {
     if (!isMongo) {
         _name = "sh";
@@ -864,6 +869,8 @@ void ProgramRunner::parseName(bool isMongo,
         _name = "tm";
     } else if (programName == "mongobridge") {
         _name = "b";
+    } else if (!loggingPrefix.empty()) {
+        _name = "sh_" + loggingPrefix + ":";
     } else {
         _name = "sh";
     }
@@ -884,7 +891,7 @@ void ProgramRunner::parseArgs(BSONObj args, bool isMongo, bool isMongodProgram) 
         } else {
             uassert(ErrorCodes::FailedToParse,
                     "Program arguments must be strings",
-                    e.type() == mongo::String);
+                    e.type() == BSONType::string);
             str = e.str();
         }
         if (isMongo) {

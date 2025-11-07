@@ -51,6 +51,11 @@ rules:
     dependencies:
       generate resmoke tasks: ["version_gen", "archive_dist_test"]
 
+  - rule: "enforce-tasks-distro-with-special-tag"
+    tags:
+      - task_tag_name: "requires_large_host"
+        allowed_distro_regex: "(.*-x*large|.*-medium|macos-.*|ubi.*)"
+
   - rule: "enforce-tags-for-tasks"
     tag_groups:
       # Every task should have team assignment tag
@@ -73,7 +78,8 @@ rules:
           - assigned_to_jira_team_server_programmability
           - assigned_to_jira_team_server_workload_scheduling
           - assigned_to_jira_team_server_networking_and_observability
-          - assigned_to_jira_team_server_rss_sydney
+          - assigned_to_jira_team_server_integration
+          - assigned_to_jira_team_server_disagg
 
           # https://github.com/10gen/mothra/blob/main/mothra/teams/rnd_dev_prod.yaml
           - assigned_to_jira_team_devprod_build
@@ -82,7 +88,7 @@ rules:
           - assigned_to_jira_team_devprod_evergreen_app
           - assigned_to_jira_team_devprod_evergreen_ui
           - assigned_to_jira_team_devprod_performance_infrastructure
-          - assigned_to_jira_team_devprod_performance_analysis
+          - assigned_to_jira_team_devprod_last_mile
           - assigned_to_jira_team_devprod_release_infrastructure
           - assigned_to_jira_team_devprod_runtime_environments
           - assigned_to_jira_team_devprod_services_integrations
@@ -125,6 +131,7 @@ rules:
           - incompatible_inmemory
           - incompatible_all_feature_flags
           - incompatible_development_variant
+          - incompatible_disaggregated_storage
           - requires_compile_variant
           - requires_large_host
           - requires_large_host_tsan
@@ -151,12 +158,11 @@ rules:
       - variant_tag_name: "forbid_tasks_tagged_with_experimental"
         forbidden_task_tag: "experimental"
         ignored_tasks: [
-            # TODO: remove this exception when SERVER-94576 is resolved
-            "search_end_to_end_sharded_cluster",
-            "search_end_to_end_single_node",
             # TODO: remove this exception when SERVER-94572 is resolved
-            "streams_kafka",
+            "streams_kafka_gen",
             "streams_kafka_gwproxy",
+            "streams_lambda",
+            "streams_s3",
             # TODO: remove these exceptions when SERVER-94573 is resolved
             "selinux_rhel9_enterprise",
             "selinux_rhel8_org",

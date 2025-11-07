@@ -31,23 +31,19 @@
 
 #include <boost/container/small_vector.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-#include <boost/move/utility_core.hpp>
-#include <cstddef>
-#include <memory>
-
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
 #include "mongo/db/query/plan_cache/plan_cache_indexability.h"
 #include "mongo/db/query/plan_cache/plan_cache_invalidator.h"
 #include "mongo/util/decorable.h"
 
+#include <cstddef>
+#include <memory>
+
+
 namespace mongo {
 
-class IndexCatalogEntry;
-class IndexDescriptor;
 class OperationContext;
-struct PlanSummaryStats;
-class UpdateIndexData;
 
 /**
  * Query information for a particular point-in-time view of a collection.
@@ -66,12 +62,6 @@ public:
     static CollectionQueryInfo& get(Collection* collection) {
         return CollectionQueryInfo::getCollectionQueryInfo(collection);
     }
-    /**
-     * Populate the outData structure using the index keys found in the index definition.
-     */
-    static void computeUpdateIndexData(const IndexCatalogEntry* entry,
-                                       const IndexAccessMethod* accessMethod,
-                                       UpdateIndexData* outData);
 
     /**
      * Gets the PlanCache for this collection.
@@ -114,16 +104,6 @@ public:
      * and has its own concurrency handling.
      */
     void clearQueryCacheForSetMultikey(const CollectionPtr& coll) const;
-
-    /**
-     * Notify of a query so as to record statistics. The first overload records the statistics
-     * from the given PlanSummaryStats while the second records stats previously stored in the
-     * OpDebug.
-     */
-    void notifyOfQuery(OperationContext* opCtx,
-                       const CollectionPtr& coll,
-                       const PlanSummaryStats& summaryStats) const;
-    void notifyOfQuery(const CollectionPtr& coll, const OpDebug& debug) const;
 
 private:
     /**

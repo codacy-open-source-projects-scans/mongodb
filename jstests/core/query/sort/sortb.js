@@ -1,5 +1,10 @@
 // Test that the in memory sort capacity limit is checked for all "top N" sort candidates.
 // SERVER-4716
+// @tags: [
+//   requires_getmore,
+//   # Getting 'Incomplete history detected for transaction' when this test runs with txns.
+//   does_not_support_retryable_writes,
+// ]
 
 // TODO SERVER-92452: This test fails in burn-in with the 'inMemory' engine with the 'WT_CACHE_FULL'
 // error. This is a known issue and can be ignored. Remove this comment once SERVER-92452 is fixed.
@@ -19,7 +24,7 @@ assert.commandWorked(t.insert(docs));
 const numShards = FixtureHelpers.numberOfShardsForCollection(t);
 const numLargeDocumentsToWrite = 120 * numShards;
 
-jsTestLog('numShards = ' + numShards + '; numLargeDocumentsToWrite = ' + numLargeDocumentsToWrite);
+jsTestLog("numShards = " + numShards + "; numLargeDocumentsToWrite = " + numLargeDocumentsToWrite);
 
 // These large documents will not be part of the initial set of "top 100" matches, and they will
 // not be part of the final set of "top 100" matches returned to the client.  However, they are
@@ -38,13 +43,19 @@ docs = Array.from({length: 100}, (_, i) => {
 });
 assert.commandWorked(t.insert(docs));
 
-jsTestLog('Collection ' + t.getFullName() + ' populated with ' + t.countDocuments({}) +
-          ' documents. Checking allowDiskUse=false behavior.');
+jsTestLog(
+    "Collection " +
+        t.getFullName() +
+        " populated with " +
+        t.countDocuments({}) +
+        " documents. Checking allowDiskUse=false behavior.",
+);
 
 assert.throwsWithCode(
     () => t.find().sort({a: -1}).allowDiskUse(false).hint({b: 1}).limit(100).itcount(),
-    ErrorCodes.QueryExceededMemoryLimitNoDiskUseAllowed);
+    ErrorCodes.QueryExceededMemoryLimitNoDiskUseAllowed,
+);
 assert.throwsWithCode(
-    () =>
-        t.find().sort({a: -1}).allowDiskUse(false).hint({b: 1}).showDiskLoc().limit(100).itcount(),
-    ErrorCodes.QueryExceededMemoryLimitNoDiskUseAllowed);
+    () => t.find().sort({a: -1}).allowDiskUse(false).hint({b: 1}).showDiskLoc().limit(100).itcount(),
+    ErrorCodes.QueryExceededMemoryLimitNoDiskUseAllowed,
+);

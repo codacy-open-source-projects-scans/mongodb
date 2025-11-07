@@ -28,7 +28,7 @@
  */
 
 
-#include "mongo/platform/basic.h"
+#include "mongo/util/net/sockaddr.h"
 
 #include <iterator>
 #include <memory>
@@ -36,12 +36,12 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/util/net/sockaddr.h"
-
 #if !defined(_WIN32)
-#include <arpa/inet.h>
 #include <cerrno>
+
 #include <netdb.h>
+
+#include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
@@ -82,7 +82,7 @@ AddrInfoPtr resolveAddrInfo(StringData hostOrIp, int port, sa_family_t familyHin
     const auto hostString = std::string(hostOrIp);
     const auto portString = ItoA(port).toString();
 
-    auto tryResolve = [&](bool allowDns) noexcept {
+    auto tryResolve = [&](bool allowDns) {
         AddrError result;
 
         addrinfo hints;
@@ -93,6 +93,10 @@ AddrInfoPtr resolveAddrInfo(StringData hostOrIp, int port, sa_family_t familyHin
         hints.ai_family = familyHint;
 
         addrinfo* addrs = nullptr;
+        // For IPv6 link-local addresses, the scope id will be specified as part of the address,
+        // e.g. fe80::1%en0. getaddrinfo() will parse the scope id from the address string and set
+        // it in the resulting sockaddr_in6 struct in the sin6_scope_id field. We don't need to do
+        // anything special here
         result.err = getaddrinfo(hostString.c_str(), portString.c_str(), &hints, &addrs);
         result.addr = AddrInfoPtr(addrs);
         return result;
@@ -213,7 +217,7 @@ SockAddr::SockAddr(const sockaddr* other, socklen_t size) : addressSize(size), _
 }
 
 SockAddr::SockAddr(const sockaddr* other, socklen_t size, StringData hostOrIp)
-    : addressSize(size), _hostOrIp(hostOrIp.toString()), sa() {
+    : addressSize(size), _hostOrIp(std::string{hostOrIp}), sa() {
     memcpy(&sa, other, size);
     _isValid = true;
 }

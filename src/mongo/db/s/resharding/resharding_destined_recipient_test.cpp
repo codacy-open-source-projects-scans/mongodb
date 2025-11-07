@@ -27,16 +27,6 @@
  *    it in the license file.
  */
 
-#include <fmt/format.h>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -49,15 +39,27 @@
 #include "mongo/client/connection_string.h"
 #include "mongo/client/remote_command_targeter_factory_mock.h"
 #include "mongo/client/remote_command_targeter_mock.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/create_collection.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache_loader.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache_loader_mock.h"
+#include "mongo/db/global_catalog/catalog_cache/shard_cannot_refresh_due_to_locks_held_exception.h"
+#include "mongo/db/global_catalog/router_role_api/sharding_write_router.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/sharding_catalog_client_mock.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/global_catalog/type_collection.h"
+#include "mongo/db/global_catalog/type_database_gen.h"
+#include "mongo/db/global_catalog/type_shard.h"
+#include "mongo/db/local_catalog/create_collection.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
+#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
@@ -71,45 +73,39 @@
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
-#include "mongo/db/s/operation_sharding_state.h"
-#include "mongo/db/s/shard_filtering_metadata_refresh.h"
-#include "mongo/db/s/shard_server_test_fixture.h"
-#include "mongo/db/s/sharding_mongod_test_fixture.h"
-#include "mongo/db/s/sharding_write_router.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/session_catalog_mongod.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/db/shard_role.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/shard_server_test_fixture.h"
+#include "mongo/db/sharding_environment/sharding_mongod_test_fixture.h"
 #include "mongo/db/storage/write_unit_of_work.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/db/transaction/transaction_participant.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/database_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
+#include "mongo/db/versioning_protocol/shard_version_factory.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/sharding_catalog_client_mock.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/catalog/type_collection.h"
-#include "mongo/s/catalog/type_database_gen.h"
-#include "mongo/s/catalog/type_index_catalog_gen.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/catalog_cache_loader.h"
-#include "mongo/s/catalog_cache_loader_mock.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/database_version.h"
-#include "mongo/s/index_version.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
-#include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
-#include "mongo/s/shard_version.h"
-#include "mongo/s/shard_version_factory.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/s/would_change_owning_shard_exception.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -174,10 +170,9 @@ public:
     public:
         StaticCatalogClient(std::vector<ShardType> shards) : _shards(std::move(shards)) {}
 
-        StatusWith<repl::OpTimeWith<std::vector<ShardType>>> getAllShards(
-            OperationContext* opCtx,
-            repl::ReadConcernLevel readConcern,
-            bool excludeDraining) override {
+        repl::OpTimeWith<std::vector<ShardType>> getAllShards(OperationContext* opCtx,
+                                                              repl::ReadConcernLevel readConcern,
+                                                              BSONObj filter) override {
             return repl::OpTimeWith<std::vector<ShardType>>(_shards);
         }
         std::vector<CollectionType> getShardedCollections(OperationContext* opCtx,
@@ -196,14 +191,6 @@ public:
 
         void setCollections(std::vector<CollectionType> colls) {
             _colls = std::move(colls);
-        }
-
-        std::pair<CollectionType, std::vector<IndexCatalogType>>
-        getCollectionAndShardingIndexCatalogEntries(
-            OperationContext* opCtx,
-            const NamespaceString& nss,
-            const repl::ReadConcernArgs& readConcern) override {
-            return std::make_pair(CollectionType(), std::vector<IndexCatalogType>());
         }
 
     private:
@@ -241,16 +228,14 @@ protected:
         DatabaseVersion dbVersion{UUID::gen(), Timestamp(1, 1)};
     };
 
-    ReshardingEnv setupReshardingEnv(OperationContext* opCtx, bool refreshTempNss) {
+    ReshardingEnv setupReshardingEnv(OperationContext* opCtx,
+                                     bool refreshTempNss,
+                                     bool runInTransaction = false) {
         DBDirectClient client(opCtx);
         ASSERT(client.createCollection(NamespaceString::kSessionTransactionsTableNamespace));
         client.createIndexes(NamespaceString::kSessionTransactionsTableNamespace,
                              {MongoDSessionCatalog::getConfigTxnPartialIndexSpec()});
-
-        OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE unsafeCreateCollection(
-            opCtx);
-        Status status =
-            createCollection(operationContext(), kNss.dbName(), BSON("create" << kNss.coll()));
+        Status status = createTestCollectionNoThrow(opCtx, kNss);
         if (status != ErrorCodes::NamespaceExists) {
             uassertStatusOK(status);
         }
@@ -258,16 +243,14 @@ protected:
         ReshardingEnv env(CollectionCatalog::get(opCtx)->lookupUUIDByNSS(opCtx, kNss).value());
         env.destShard = kShardList[1].getName();
         CollectionGeneration gen(OID::gen(), Timestamp(1, 1));
-        env.version = ShardVersionFactory::make(ChunkVersion(gen, {1, 0}),
-                                                boost::optional<CollectionIndexes>(boost::none));
+        env.version = ShardVersionFactory::make(ChunkVersion(gen, {1, 0}));
         env.tempNss = NamespaceString::createNamespaceString_forTest(
             kNss.db_forTest(),
             fmt::format("{}{}",
                         NamespaceString::kTemporaryReshardingCollectionPrefix,
                         env.sourceUuid.toString()));
 
-        uassertStatusOK(createCollection(
-            operationContext(), env.tempNss.dbName(), BSON("create" << env.tempNss.coll())));
+        createTestCollection(opCtx, env.tempNss);
 
         TypeCollectionReshardingFields reshardingFields;
         reshardingFields.setReshardingUUID(UUID::gen());
@@ -284,6 +267,13 @@ protected:
                             env.sourceUuid,
                             BSON(kShardKey << 1));
         coll.setAllowMigrations(false);
+
+        // When running in transaction, the db version must carry a PlacementConflictTime.
+        if (runInTransaction) {
+            env.dbVersion.setPlacementConflictTime(LogicalTime(Timestamp{0, 0}));
+        }
+        getConfigServerCatalogCacheLoaderMock()->setDatabaseRefreshReturnValue(
+            DatabaseType(kNss.dbName(), kShardList[0].getName(), env.dbVersion));
 
         getCatalogCacheLoaderMock()->setDatabaseRefreshReturnValue(
             DatabaseType(kNss.dbName(), kShardList[0].getName(), env.dbVersion));
@@ -304,12 +294,21 @@ protected:
                          "y"),
             boost::none);
 
-        ASSERT_OK(FilteringMetadataCache::get(opCtx)->onDbVersionMismatch(
-            opCtx, kNss.dbName(), boost::none));
+        // Refresh the filtering metadata for the nss.
+        ASSERT_OK(FilteringMetadataCache::get(opCtx)->forceDatabaseMetadataRefresh_DEPRECATED(
+            opCtx, kNss.dbName()));
         FilteringMetadataCache::get(opCtx)->forceCollectionPlacementRefresh(opCtx, kNss);
 
-        if (refreshTempNss)
+        // Also refresh the routing information.
+        const auto catalogCache = Grid::get(opCtx)->catalogCache();
+        catalogCache->onStaleCollectionVersion(kNss, boost::none);
+        (void)catalogCache->getCollectionRoutingInfo(opCtx, kNss);
+
+        if (refreshTempNss) {
             FilteringMetadataCache::get(opCtx)->forceCollectionPlacementRefresh(opCtx, env.tempNss);
+            catalogCache->onStaleCollectionVersion(env.tempNss, boost::none);
+            (void)catalogCache->getCollectionRoutingInfo(opCtx, env.tempNss);
+        }
 
         return env;
     }
@@ -318,9 +317,13 @@ protected:
                   const NamespaceString& nss,
                   const BSONObj& doc,
                   const ReshardingEnv& env) {
-        AutoGetCollection coll(opCtx, nss, MODE_IX);
+        const auto coll = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_IX);
         WriteUnitOfWork wuow(opCtx);
-        ASSERT_OK(collection_internal::insertDocument(opCtx, *coll, InsertStatement(doc), nullptr));
+        ASSERT_OK(collection_internal::insertDocument(
+            opCtx, coll.getCollectionPtr(), InsertStatement(doc), nullptr));
         wuow.commit();
     }
 
@@ -340,14 +343,17 @@ protected:
                    const NamespaceString& nss,
                    const BSONObj& query,
                    const ReshardingEnv& env) {
-        AutoGetCollection coll(opCtx, nss, MODE_IX);
-
-        RecordId rid = Helpers::findOne(opCtx, coll.getCollection(), query);
+        const auto coll = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kWrite),
+            MODE_IX);
+        RecordId rid = Helpers::findOne(opCtx, coll, query);
         ASSERT(!rid.isNull());
 
         WriteUnitOfWork wuow(opCtx);
         OpDebug opDebug;
-        collection_internal::deleteDocument(opCtx, *coll, kUninitializedStmtId, rid, &opDebug);
+        collection_internal::deleteDocument(
+            opCtx, coll.getCollectionPtr(), kUninitializedStmtId, rid, &opDebug);
         wuow.commit();
     }
 
@@ -364,7 +370,10 @@ TEST_F(DestinedRecipientTest, TestGetDestinedRecipient) {
     auto opCtx = operationContext();
     auto env = setupReshardingEnv(opCtx, true);
 
-    AutoGetCollection coll(opCtx, kNss, MODE_IX);
+    const auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, kNss, AcquisitionPrerequisites::kWrite),
+        MODE_IX);
     OperationShardingState::setShardRole(opCtx, kNss, env.version, env.dbVersion);
     ShardingWriteRouter shardingWriteRouter(opCtx, kNss);
 
@@ -378,7 +387,10 @@ TEST_F(DestinedRecipientTest, TestGetDestinedRecipientThrowsOnBlockedRefresh) {
     auto opCtx = operationContext();
     auto env = setupReshardingEnv(opCtx, false);
 
-    AutoGetCollection coll(opCtx, kNss, MODE_IX);
+    const auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, kNss, AcquisitionPrerequisites::kWrite),
+        MODE_IX);
     OperationShardingState::setShardRole(opCtx, kNss, env.version, env.dbVersion);
 
     FailPointEnableBlock failPoint("blockCollectionCacheLookup");
@@ -408,7 +420,7 @@ TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnInserts) {
 
 TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnInsertsInTransaction) {
     auto opCtx = operationContext();
-    auto env = setupReshardingEnv(opCtx, true);
+    auto env = setupReshardingEnv(opCtx, true, true);
 
     OperationShardingState::setShardRole(opCtx, kNss, env.version, env.dbVersion);
     runInTransaction(
@@ -421,7 +433,7 @@ TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnInsertsInTran
     auto info = repl::ApplyOpsCommandInfo::parse(entry.getOperationToApply());
 
     auto ops = info.getOperations();
-    auto replOp = repl::ReplOperation::parse(IDLParserContext("insertOp"), ops[0]);
+    auto replOp = repl::ReplOperation::parse(ops[0], IDLParserContext("insertOp"));
     ASSERT_EQ(replOp.getNss(), kNss);
 
     auto recipShard = replOp.getDestinedRecipient();
@@ -457,10 +469,7 @@ TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnMultiUpdates)
     auto env = setupReshardingEnv(opCtx, true);
 
     OperationShardingState::setShardRole(
-        opCtx,
-        kNss,
-        ShardVersionFactory::make(ChunkVersion::IGNORED(), boost::none),
-        env.dbVersion);
+        opCtx, kNss, ShardVersionFactory::make(ChunkVersion::IGNORED()), env.dbVersion);
     client.update(
         kNss, BSON("x" << 0), BSON("$set" << BSON("z" << 5)), false /*upsert*/, true /*multi*/);
 
@@ -495,7 +504,7 @@ TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnUpdatesInTran
     DBDirectClient client(opCtx);
     client.insert(kNss, BSON("_id" << 0 << "x" << 2 << "y" << 10 << "z" << 4));
 
-    auto env = setupReshardingEnv(opCtx, true);
+    auto env = setupReshardingEnv(opCtx, true, true);
 
     OperationShardingState::setShardRole(opCtx, kNss, env.version, env.dbVersion);
     runInTransaction(opCtx, [&]() {
@@ -509,7 +518,7 @@ TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnUpdatesInTran
     auto info = repl::ApplyOpsCommandInfo::parse(entry.getOperationToApply());
 
     auto ops = info.getOperations();
-    auto replOp = repl::ReplOperation::parse(IDLParserContext("insertOp"), ops[0]);
+    auto replOp = repl::ReplOperation::parse(ops[0], IDLParserContext("insertOp"));
     ASSERT_EQ(replOp.getNss(), kNss);
 
     auto recipShard = replOp.getDestinedRecipient();
@@ -541,7 +550,7 @@ TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnDeletesInTran
     DBDirectClient client(opCtx);
     client.insert(kNss, BSON("_id" << 0 << "x" << 2 << "y" << 10));
 
-    auto env = setupReshardingEnv(opCtx, true);
+    auto env = setupReshardingEnv(opCtx, true, true);
 
     OperationShardingState::setShardRole(
         opCtx, kNss, env.version /* shardVersion */, env.dbVersion /* databaseVersion */);
@@ -554,7 +563,7 @@ TEST_F(DestinedRecipientTest, TestOpObserverSetsDestinedRecipientOnDeletesInTran
     auto info = repl::ApplyOpsCommandInfo::parse(entry.getOperationToApply());
 
     auto ops = info.getOperations();
-    auto replOp = repl::ReplOperation::parse(IDLParserContext("deleteOp"), ops[0]);
+    auto replOp = repl::ReplOperation::parse(ops[0], IDLParserContext("deleteOp"));
     ASSERT_EQ(replOp.getNss(), kNss);
 
     auto recipShard = replOp.getDestinedRecipient();
@@ -568,7 +577,7 @@ TEST_F(DestinedRecipientTest, TestUpdateChangesOwningShardThrows) {
     DBDirectClient client(opCtx);
     client.insert(kNss, BSON("_id" << 0 << "x" << 2 << "y" << 2 << "z" << 4));
 
-    auto env = setupReshardingEnv(opCtx, true);
+    auto env = setupReshardingEnv(opCtx, true, true);
 
     OperationShardingState::setShardRole(opCtx, kNss, env.version, env.dbVersion);
     ASSERT_THROWS(runInTransaction(opCtx,
@@ -582,13 +591,37 @@ TEST_F(DestinedRecipientTest, TestUpdateChangesOwningShardThrows) {
                   ExceptionFor<ErrorCodes::WouldChangeOwningShard>);
 }
 
+TEST_F(DestinedRecipientTest, TestUpdateChangesOwningShardReturnsCorrectDestinedShard) {
+    auto opCtx = operationContext();
+
+    DBDirectClient client(opCtx);
+    client.insert(kNss, BSON("_id" << 0 << "x" << 2 << "y" << 2 << "z" << 4));
+
+    auto env = setupReshardingEnv(opCtx, true, true);
+
+    OperationShardingState::setShardRole(opCtx, kNss, env.version, env.dbVersion);
+    try {
+        runInTransaction(opCtx, [&]() {
+            updateDoc(
+                opCtx, kNss, BSON("_id" << 0 << "x" << 2), BSON("$set" << BSON("y" << 50)), env);
+        });
+        ASSERT_TRUE(false);
+    } catch (const ExceptionFor<ErrorCodes::WouldChangeOwningShard>& ex) {
+        auto wouldChangeOwningShardInfo = ex.extraInfo<WouldChangeOwningShardInfo>();
+        ASSERT_TRUE(wouldChangeOwningShardInfo);
+        ASSERT_TRUE(wouldChangeOwningShardInfo->getPreImageReshardingDestinedShard());
+        ASSERT_EQ(*wouldChangeOwningShardInfo->getPreImageReshardingDestinedShard(),
+                  kShardList[0].getName());
+    }
+}
+
 TEST_F(DestinedRecipientTest, TestUpdateSameOwningShard) {
     auto opCtx = operationContext();
 
     DBDirectClient client(opCtx);
     client.insert(kNss, BSON("_id" << 0 << "x" << 2 << "y" << 2 << "z" << 4));
 
-    auto env = setupReshardingEnv(opCtx, true);
+    auto env = setupReshardingEnv(opCtx, true, true);
 
     OperationShardingState::setShardRole(opCtx, kNss, env.version, env.dbVersion);
     runInTransaction(opCtx, [&]() {

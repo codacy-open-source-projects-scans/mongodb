@@ -4,17 +4,19 @@
 //     assumes_no_implicit_collection_creation_after_drop,
 //     # Asserts on the output of listIndexes.
 //     assumes_no_implicit_index_creation,
-//     requires_getmore
+//     requires_getmore,
+//     # This test relies on listIncex command returning specific batch-sized responses.
+//     assumes_no_implicit_cursor_exhaustion,
 // ]
 
 // Basic functional tests for the listIndexes command.
 
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 
-var coll = db.list_indexes1;
-var cursor;
-var res;
-var specs;
+let coll = db.list_indexes1;
+let cursor;
+let res;
+let specs;
 
 //
 // Test basic command output.
@@ -24,9 +26,9 @@ coll.drop();
 assert.commandWorked(coll.getDB().createCollection(coll.getName()));
 res = coll.runCommand("listIndexes");
 assert.commandWorked(res);
-assert.eq("object", typeof (res.cursor));
+assert.eq("object", typeof res.cursor);
 assert.eq(0, res.cursor.id);
-assert.eq("string", typeof (res.cursor.ns));
+assert.eq(coll.getFullName(), res.cursor.ns);
 assert.eq(1, res.cursor.firstBatch.length);
 assert.eq("_id_", res.cursor.firstBatch[0].name);
 
@@ -34,19 +36,18 @@ assert.eq("_id_", res.cursor.firstBatch[0].name);
 // Test basic usage with DBCommandCursor.
 //
 
-var getListIndexesCursor = function(coll, options, subsequentBatchSize) {
-    return new DBCommandCursor(
-        coll.getDB(), coll.runCommand("listIndexes", options), subsequentBatchSize);
+let getListIndexesCursor = function (coll, options, subsequentBatchSize) {
+    return new DBCommandCursor(coll.getDB(), coll.runCommand("listIndexes", options), subsequentBatchSize);
 };
 
-var cursorGetIndexSpecs = function(cursor) {
-    return cursor.toArray().sort(function(a, b) {
+let cursorGetIndexSpecs = function (cursor) {
+    return cursor.toArray().sort(function (a, b) {
         return a.name > b.name;
     });
 };
 
-var cursorGetIndexNames = function(cursor) {
-    return cursorGetIndexSpecs(cursor).map(function(spec) {
+let cursorGetIndexNames = function (cursor) {
+    return cursorGetIndexSpecs(cursor).map(function (spec) {
         return spec.name;
     });
 };
@@ -151,19 +152,6 @@ cursor.next();
 assert(!cursor.hasNext());
 
 //
-// Test on collection with no indexes.  The local database is not accessible via mongos.
-//
-
-if (!FixtureHelpers.isMongos(db)) {
-    let localColl = db.getSiblingDB("local").getCollection("list_indexes1");
-    localColl.drop();
-    assert.commandWorked(
-        localColl.getDB().createCollection(localColl.getName(), {autoIndexId: false}));
-    assert.eq([], cursorGetIndexNames(getListIndexesCursor(localColl)));
-    localColl.drop();
-}
-
-//
 // Test killCursors against a listCollections cursor.
 //
 
@@ -177,6 +165,6 @@ res = coll.runCommand("listIndexes", {cursor: {batchSize: 0}});
 cursor = new DBCommandCursor(coll.getDB(), res, 2);
 cursor.close();
 cursor = new DBCommandCursor(coll.getDB(), res, 2);
-assert.throws(function() {
+assert.throws(function () {
     cursor.hasNext();
 });

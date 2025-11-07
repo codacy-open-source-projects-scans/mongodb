@@ -31,6 +31,28 @@
  * unit tests relating to update requests
  */
 
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/dotted_path/dotted_path_support.h"
+#include "mongo/bson/json.h"
+#include "mongo/client/dbclient_cursor.h"
+#include "mongo/db/client.h"
+#include "mongo/db/dbdirectclient.h"
+#include "mongo/db/exec/mutable_bson/mutable_bson_test_utils.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/query/find_command.h"
+#include "mongo/db/query/query_settings/query_settings_service.h"
+#include "mongo/db/service_context.h"
+#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
+#include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/unittest/unittest.h"
+
 #include <algorithm>
 #include <iostream>
 #include <limits>
@@ -39,38 +61,14 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/bson/json.h"
-#include "mongo/bson/mutable/mutable_bson_test_utils.h"
-#include "mongo/client/dbclient_cursor.h"
-#include "mongo/db/client.h"
-#include "mongo/db/dbdirectclient.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/query/bson/dotted_path_support.h"
-#include "mongo/db/query/find_command.h"
-#include "mongo/db/query/query_settings/query_settings_manager.h"
-#include "mongo/db/service_context.h"
-#include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-
 namespace mongo {
 namespace UpdateTests {
-
-namespace dps = ::mongo::dotted_path_support;
 
 class ClientBase {
 public:
     ClientBase() : _client(&_opCtx) {
-        query_settings::QuerySettingsManager::create(_opCtx.getServiceContext(), {}, {});
+        // Initialize the query settings.
+        query_settings::QuerySettingsService::initializeForTest(_opCtx.getServiceContext());
     }
 
 protected:
@@ -189,47 +187,25 @@ public:
 class SetString : public SetBase {
 public:
     void run() {
-        _client.insert(nss(),
-                       BSON("a"
-                            << "b"));
-        _client.update(nss(),
-                       BSON("a"
-                            << "b"),
-                       BSON("$set" << BSON("a"
-                                           << "c")));
-        ASSERT(!_client
-                    .findOne(nss(),
-                             BSON("a"
-                                  << "c"))
-                    .isEmpty());
+        _client.insert(nss(), BSON("a" << "b"));
+        _client.update(nss(), BSON("a" << "b"), BSON("$set" << BSON("a" << "c")));
+        ASSERT(!_client.findOne(nss(), BSON("a" << "c")).isEmpty());
     }
 };
 
 class SetStringDifferentLength : public SetBase {
 public:
     void run() {
-        _client.insert(nss(),
-                       BSON("a"
-                            << "b"));
-        _client.update(nss(),
-                       BSON("a"
-                            << "b"),
-                       BSON("$set" << BSON("a"
-                                           << "cd")));
-        ASSERT(!_client
-                    .findOne(nss(),
-                             BSON("a"
-                                  << "cd"))
-                    .isEmpty());
+        _client.insert(nss(), BSON("a" << "b"));
+        _client.update(nss(), BSON("a" << "b"), BSON("$set" << BSON("a" << "cd")));
+        ASSERT(!_client.findOne(nss(), BSON("a" << "cd")).isEmpty());
     }
 };
 
 class SetStringToNum : public SetBase {
 public:
     void run() {
-        _client.insert(nss(),
-                       BSON("a"
-                            << "b"));
+        _client.insert(nss(), BSON("a" << "b"));
         _client.update(nss(), BSONObj{} /*filter*/, BSON("$set" << BSON("a" << 5)));
         ASSERT(!_client.findOne(nss(), BSON("a" << 5)).isEmpty());
     }
@@ -238,9 +214,7 @@ public:
 class SetStringToNumInPlace : public SetBase {
 public:
     void run() {
-        _client.insert(nss(),
-                       BSON("a"
-                            << "bcd"));
+        _client.insert(nss(), BSON("a" << "bcd"));
         _client.update(nss(), BSONObj{} /*filter*/, BSON("$set" << BSON("a" << 5.0)));
         ASSERT(!_client.findOne(nss(), BSON("a" << 5.0)).isEmpty());
     }
@@ -366,15 +340,8 @@ class SetInPlaceDotted : public SetBase {
 public:
     void run() {
         _client.insert(nss(), fromjson("{a:{b:'cdef'}}"));
-        _client.update(nss(),
-                       BSONObj{} /*filter*/,
-                       BSON("$set" << BSON("a.b"
-                                           << "llll")));
-        ASSERT(!_client
-                    .findOne(nss(),
-                             BSON("a.b"
-                                  << "llll"))
-                    .isEmpty());
+        _client.update(nss(), BSONObj{} /*filter*/, BSON("$set" << BSON("a.b" << "llll")));
+        ASSERT(!_client.findOne(nss(), BSON("a.b" << "llll")).isEmpty());
     }
 };
 
@@ -382,14 +349,8 @@ class SetRecreateDotted : public SetBase {
 public:
     void run() {
         _client.insert(nss(), fromjson("{'_id':0,a:{b:'cdef'}}"));
-        _client.update(nss(),
-                       BSONObj{} /*filter*/,
-                       BSON("$set" << BSON("a.b"
-                                           << "lllll")));
-        ASSERT(_client
-                   .findOne(nss(),
-                            BSON("a.b"
-                                 << "lllll"))
+        _client.update(nss(), BSONObj{} /*filter*/, BSON("$set" << BSON("a.b" << "lllll")));
+        ASSERT(_client.findOne(nss(), BSON("a.b" << "lllll"))
                    .woCompare(fromjson("{'_id':0,a:{b:'lllll'}}")) == 0);
     }
 };
@@ -398,14 +359,8 @@ class SetMissingDotted : public SetBase {
 public:
     void run() {
         _client.insert(nss(), fromjson("{'_id':0}"));
-        _client.update(nss(),
-                       BSONObj(),
-                       BSON("$set" << BSON("a.b"
-                                           << "lllll")));
-        ASSERT(_client
-                   .findOne(nss(),
-                            BSON("a.b"
-                                 << "lllll"))
+        _client.update(nss(), BSONObj(), BSON("$set" << BSON("a.b" << "lllll")));
+        ASSERT(_client.findOne(nss(), BSON("a.b" << "lllll"))
                    .woCompare(fromjson("{'_id':0,a:{b:'lllll'}}")) == 0);
     }
 };
@@ -414,13 +369,8 @@ class SetAdjacentDotted : public SetBase {
 public:
     void run() {
         _client.insert(nss(), fromjson("{'_id':0,a:{c:4}}"));
-        _client.update(nss(),
-                       BSONObj{} /*filter*/,
-                       BSON("$set" << BSON("a.b"
-                                           << "lllll")));
-        ASSERT_EQUALS(mutablebson::unordered(_client.findOne(nss(),
-                                                             BSON("a.b"
-                                                                  << "lllll"))),
+        _client.update(nss(), BSONObj{} /*filter*/, BSON("$set" << BSON("a.b" << "lllll")));
+        ASSERT_EQUALS(mutablebson::unordered(_client.findOne(nss(), BSON("a.b" << "lllll"))),
                       mutablebson::unordered(fromjson("{'_id':0,a:{b:'lllll',c:4}}")));
     }
 };
@@ -498,10 +448,7 @@ class ArrayEmbeddedSet : public SetBase {
 public:
     void run() {
         _client.insert(nss(), fromjson("{'_id':0,z:[4,'b']}"));
-        _client.update(nss(),
-                       BSONObj{} /*filter*/,
-                       BSON("$set" << BSON("z.0"
-                                           << "a")));
+        _client.update(nss(), BSONObj{} /*filter*/, BSON("$set" << BSON("z.0" << "a")));
         ASSERT_BSONOBJ_EQ(_client.findOne(nss(), BSONObj{} /*filter*/),
                           fromjson("{'_id':0,z:['a','b']}"));
     }
@@ -1051,11 +998,7 @@ public:
         // With the following parameters
         //            fields in              values in
         //          the each array           each array       field to sort   size
-        setParams(BSON_ARRAY("a"
-                             << "b"),
-                  BSON_ARRAY(2),
-                  BSON_ARRAY("b"),
-                  3);
+        setParams(BSON_ARRAY("a" << "b"), BSON_ARRAY(2), BSON_ARRAY("b"), 3);
 
         // Generates the four variations below (but for now we're only using negative slice).
         // TOPK_ASC:     $push: { x: { $each: [ {a:2,b:2} ], $slice:-3, $sort: { b:1 } } }
@@ -1096,11 +1039,7 @@ public:
         // With the following parameters
         //            fields in           values in
         //          the each array        each array       field to sort   size
-        setParams(BSON_ARRAY("a"
-                             << "b"),
-                  BSON_ARRAY(2),
-                  BSON_ARRAY("b"),
-                  2);
+        setParams(BSON_ARRAY("a" << "b"), BSON_ARRAY(2), BSON_ARRAY("b"), 2);
 
         // Generates the four variations below (but for now we're only using negative slice).
         // TOPK_ASC:     $push: { x: { $each: [ {a:2,b:2} ], $slice:-2, $sort: { b:1 } } }
@@ -1141,11 +1080,7 @@ public:
         // With the following parameters
         //            fields in            values in
         //          the each array         each array       field to sort   size
-        setParams(BSON_ARRAY("a"
-                             << "b"),
-                  BSON_ARRAY(2),
-                  BSON_ARRAY("b"),
-                  2);
+        setParams(BSON_ARRAY("a" << "b"), BSON_ARRAY(2), BSON_ARRAY("b"), 2);
 
         // Generates the four variations below (but for now we're only using negative slice).
         // TOPK_ASC:     $push: { x: { $each: [ {a:2,b:2} ], $slice:-2, $sort: { b:1 } } }
@@ -1189,11 +1124,7 @@ public:
         // With the following parameters
         //            fields in           values in
         //          the each array        each array      field to sort      size
-        setParams(BSON_ARRAY("a"
-                             << "b"),
-                  BSON_ARRAY(2),
-                  BSON_ARRAY("b"),
-                  0);
+        setParams(BSON_ARRAY("a" << "b"), BSON_ARRAY(2), BSON_ARRAY("b"), 0);
 
         // Generates the four variations below (but for now we're only using negative slice).
         // TOPK_ASC:     $push: { x: { $each: [ {a:2,b:2} ], $slice:0, $sort: { b:1 } } }
@@ -1222,11 +1153,7 @@ public:
         // With the following parameters
         //            fields in           values in
         //          the each array        each array      field to sort       size
-        setParams(BSON_ARRAY("a"
-                             << "b"),
-                  BSON_ARRAY(2),
-                  BSON_ARRAY("b"),
-                  0);
+        setParams(BSON_ARRAY("a" << "b"), BSON_ARRAY(2), BSON_ARRAY("b"), 0);
 
         // Generates the four variations below (but for now we're only using negative slice).
         // TOPK_ASC:     $push: { x: { $each: [ {a:2,b:2} ], $slice:0, $sort: { b:1 } } }
@@ -1255,11 +1182,7 @@ public:
         // With the following parameters
         //            fields in           values in
         //          the each array        each array            field to sort     size
-        setParams(BSON_ARRAY("a"
-                             << "b"),
-                  BSON_ARRAY(2 << 1),
-                  BSON_ARRAY("b"),
-                  2);
+        setParams(BSON_ARRAY("a" << "b"), BSON_ARRAY(2 << 1), BSON_ARRAY("b"), 2);
 
         // Generates the four variations below (but for now we're only using negative slice).
         // <genarr> = [ {a:2,b:2}, {a:1,b:1} ]
@@ -1302,11 +1225,7 @@ public:
         // With the following parameters
         //            fields in           values in
         //          the each array        each array                field to sort     size
-        setParams(BSON_ARRAY("a"
-                             << "b"),
-                  BSON_ARRAY(2 << 1 << 3),
-                  BSON_ARRAY("b"),
-                  2);
+        setParams(BSON_ARRAY("a" << "b"), BSON_ARRAY(2 << 1 << 3), BSON_ARRAY("b"), 2);
 
         // Generates the four variations below (but for now we're only using negative slice).
         // <genarr> = [ {a:2,b:2}, {a:1,b:1}, {a:3,b:3} ]
@@ -1351,11 +1270,7 @@ public:
         // With the following parameters
         //            fields in           values in
         //          the each array        each array            field to sort     size
-        setParams(BSON_ARRAY("a"
-                             << "b"),
-                  BSON_ARRAY(2 << 1),
-                  BSON_ARRAY("b"),
-                  2);
+        setParams(BSON_ARRAY("a" << "b"), BSON_ARRAY(2 << 1), BSON_ARRAY("b"), 2);
 
         // Generates the four variations below (but for now we're only using negative slice).
         // <genarr> = [ {a:2,b:2}, {a:1,b:1} ]
@@ -1397,11 +1312,7 @@ public:
         // With the following parameters
         //            fields in           values in
         //          the each array        each array                 field to sort   size
-        setParams(BSON_ARRAY("a"
-                             << "b"),
-                  BSON_ARRAY(2 << 1 << 3),
-                  BSON_ARRAY("b"),
-                  2);
+        setParams(BSON_ARRAY("a" << "b"), BSON_ARRAY(2 << 1 << 3), BSON_ARRAY("b"), 2);
 
         // Generates the four variations below (but for now we're only using negative slice).
         // <genarr> = [ {a:2,b:2}, {a:1,b:1}, {a:3,b:3} ]
@@ -1455,8 +1366,8 @@ struct ProjectKeyCmp {
     ProjectKeyCmp(BSONObj pattern) : sortPattern(pattern) {}
 
     int operator()(const BSONObj& left, const BSONObj& right) const {
-        BSONObj keyLeft = dps::extractElementsBasedOnTemplate(left, sortPattern, true);
-        BSONObj keyRight = dps::extractElementsBasedOnTemplate(right, sortPattern, true);
+        BSONObj keyLeft = ::mongo::bson::extractElementsBasedOnTemplate(left, sortPattern, true);
+        BSONObj keyRight = ::mongo::bson::extractElementsBasedOnTemplate(right, sortPattern, true);
         return keyLeft.woCompare(keyRight, sortPattern) < 0;
     }
 };
@@ -1818,7 +1729,7 @@ public:
     void run() {
         _client.insert(nss(), BSON("a" << 5));
         _client.update(nss(), BSON("a" << 5), fromjson("{$set:{b:null}}"));
-        ASSERT_EQUALS(jstNULL, _client.findOne(nss(), BSON("a" << 5)).getField("b").type());
+        ASSERT_EQUALS(BSONType::null, _client.findOne(nss(), BSON("a" << 5)).getField("b").type());
     }
 };
 
@@ -2016,7 +1927,7 @@ class inc6 : public Base {
         long long max = std::numeric_limits<int>::max() + 5ll;
 
         _client.insert(nss(), BSON("x" << (int)start));
-        ASSERT(findOne()["x"].type() == NumberInt);
+        ASSERT(findOne()["x"].type() == BSONType::numberInt);
 
         while (start < max) {
             update(BSON("$inc" << BSON("x" << 1)));
@@ -2024,7 +1935,7 @@ class inc6 : public Base {
             ASSERT_EQUALS(start, findOne()["x"].numberLong());  // SERVER-2005
         }
 
-        ASSERT(findOne()["x"].type() == NumberLong);
+        ASSERT(findOne()["x"].type() == BSONType::numberLong);
     }
 };
 

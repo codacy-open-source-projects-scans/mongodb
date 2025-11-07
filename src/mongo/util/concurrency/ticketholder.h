@@ -28,21 +28,21 @@
  */
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <limits>
-
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/waitable_atomic.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/admission_context.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/tick_source.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdint>
+#include <limits>
+
+#include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
 namespace mongo {
@@ -58,6 +58,8 @@ class TicketHolder {
     friend class Ticket;
 
 public:
+    using DelinquentCallback = std::function<void(AdmissionContext*, Milliseconds)>;
+
     /**
      * Describes the algorithm used to update the TicketHolder when the size of the ticket pool
      * changes.
@@ -81,6 +83,7 @@ public:
                  int numTickets,
                  bool trackPeakUsed,
                  std::int32_t maxQueueDepth,
+                 DelinquentCallback delinquentCallback = nullptr,
                  ResizePolicy resizePolicy = ResizePolicy::kGradual);
 
     /**
@@ -181,6 +184,31 @@ public:
     void setPeakUsed_forTest(int32_t used);
 
     /**
+     * Appends all queue and delinquency stats.
+     */
+    void appendHolderStats(BSONObjBuilder& b) const;
+
+    /**
+     * Appends number of tickets available, out and total.
+     */
+    void appendTicketStats(BSONObjBuilder& b) const;
+
+    /**
+     * Append TicketHolder exempt statistics.
+     */
+    void appendExemptStats(BSONObjBuilder& b) const;
+
+    /**
+     * Bumps the delinquency counters associated with this queue. This intended to be called when
+     * an operation completes, with the value of each of the delinquency counters accumulated
+     * during its execution.
+     */
+    void incrementDelinquencyStats(int64_t delinquentAcquisitions,
+                                   Milliseconds totalAcquisitionDelinquency,
+                                   Milliseconds maxAcquisitionDelinquency);
+
+private:
+    /**
      * Statistics for queueing mechanisms in the TicketHolder implementations. The term "Queue" is a
      * loose abstraction for the way in which operations are queued when there are no available
      * tickets.
@@ -197,18 +225,25 @@ public:
     };
 
     /**
-     * Append TicketHolder statistics to the provided builder.
+     * Tracks stats around normal-priority operations that were delinquent in returning their
+     * ticket.
      */
-    void appendStats(BSONObjBuilder& b) const;
+    struct DelinquencyStats {
+        AtomicWord<std::int64_t> totalDelinquentAcquisitions{0};
+        AtomicWord<std::int64_t> totalAcquisitionDelinquencyMillis{0};
+        AtomicWord<std::int64_t> maxAcquisitionDelinquencyMillis{0};
+    };
 
-private:
     /**
      * Releases a ticket back into the ticket pool and updates queueing statistics. Tickets
      * issued for exempt operations do not get deposited back to the pool.
+     * This function must not throw.
      */
-    void _releaseTicketUpdateStats(Ticket& ticket) noexcept;
-
-    void _releaseNormalPriorityTicket(AdmissionContext* admCtx) noexcept;
+    void _releaseTicketUpdateStats(Ticket& ticket);
+    /**
+     * This function must not throw.
+     */
+    void _releaseNormalPriorityTicket(AdmissionContext* admCtx);
 
     boost::optional<Ticket> _tryAcquireNormalPriorityTicket(AdmissionContext* admCtx);
 
@@ -243,8 +278,8 @@ private:
      */
     Ticket _makeTicket(AdmissionContext* admCtx);
 
-    QueueStats _normalPriorityQueueStats;
-    QueueStats _exemptQueueStats;
+    QueueStats _holderStats;
+    QueueStats _exemptStats;
     ResizePolicy _resizePolicy;
     ServiceContext* _serviceContext;
 
@@ -256,6 +291,10 @@ private:
     Atomic<int32_t> _waiterCount{0};
     Atomic<int32_t> _outof;
     Atomic<int32_t> _peakUsed;
+    bool _enabledDelinquent{false};
+    Milliseconds _delinquentMs{0};
+    DelinquentCallback _reportDelinquentOpCallback{nullptr};
+    DelinquencyStats _delinquencyStats;
 };
 
 /**
@@ -310,6 +349,10 @@ public:
      */
     AdmissionContext::Priority getPriority() const {
         return _priority;
+    }
+
+    AdmissionContext* getAdmissionContext() const {
+        return _admissionContext;
     }
 
 private:

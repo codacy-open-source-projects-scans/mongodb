@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <functional>
-#include <memory>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
@@ -55,7 +49,15 @@
 #include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/thread_pool.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <functional>
+#include <memory>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 namespace repl {
@@ -66,7 +68,8 @@ class ReplicationCoordinator;
  * Data replicator external state implementation for testing.
  */
 
-class DataReplicatorExternalStateMock : public DataReplicatorExternalState {
+class MONGO_MOD_PARENT_PRIVATE DataReplicatorExternalStateMock
+    : public DataReplicatorExternalState {
 public:
     DataReplicatorExternalStateMock();
 

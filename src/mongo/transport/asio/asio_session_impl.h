@@ -29,13 +29,15 @@
 
 #pragma once
 
-#include <asio.hpp>
-#include <utility>
-
 #include "mongo/config.h"
 #include "mongo/transport/asio/asio_session.h"
 #include "mongo/transport/asio/asio_transport_layer.h"
 #include "mongo/transport/baton.h"
+#include "mongo/util/modules.h"
+
+#include <utility>
+
+#include <asio.hpp>
 
 #ifdef MONGO_CONFIG_SSL
 #include "mongo/util/net/ssl.hpp"
@@ -49,7 +51,7 @@ namespace mongo::transport {
  * NOTE: This functionality is currently provided by inheritance, but composition might be a
  * preferred approach after more refactoring.
  */
-class CommonAsioSession : public AsioSession {
+class MONGO_MOD_NEEDS_REPLACEMENT CommonAsioSession : public AsioSession {
 public:
     /**
      * If the socket is disconnected while any of these options are being set, this constructor
@@ -72,7 +74,35 @@ public:
         return _remote;
     }
 
+    const HostAndPort& local() const override {
+        return _local;
+    }
+
+    const HostAndPort& getSourceRemoteEndpoint() const override {
+        if (_proxiedSrcEndpoint) {
+            return _proxiedSrcEndpoint.value();
+        }
+
+        return remote();
+    }
+
+    boost::optional<const HostAndPort&> getProxiedDstEndpoint() const override {
+        if (_proxiedDstEndpoint) {
+            return _proxiedDstEndpoint.value();
+        }
+
+        return boost::none;
+    }
+
     const SockAddr& remoteAddr() const {
+        return _remoteAddr;
+    }
+
+    const SockAddr& getProxiedSrcRemoteAddr() const {
+        if (_proxiedSrcRemoteAddr) {
+            return *_proxiedSrcRemoteAddr;
+        }
+
         return _remoteAddr;
     }
 
@@ -87,18 +117,17 @@ public:
 
     void end() override;
 
-    StatusWith<Message> sourceMessage() noexcept override;
+    StatusWith<Message> sourceMessage() override;
 
-    Future<Message> asyncSourceMessage(const BatonHandle& baton = nullptr) noexcept override;
+    Future<Message> asyncSourceMessage(const BatonHandle& baton = nullptr) override;
 
-    Status waitForData() noexcept override;
+    Status waitForData() override;
 
-    Future<void> asyncWaitForData() noexcept override;
+    Future<void> asyncWaitForData() override;
 
-    Status sinkMessage(Message message) noexcept override;
+    Status sinkMessage(Message message) override;
 
-    Future<void> asyncSinkMessage(Message message,
-                                  const BatonHandle& baton = nullptr) noexcept override;
+    Future<void> asyncSinkMessage(Message message, const BatonHandle& baton = nullptr) override;
 
     void cancelAsyncOperations(const BatonHandle& baton = nullptr) override;
 
@@ -106,23 +135,23 @@ public:
 
     bool isConnected() override;
 
-    bool isFromLoadBalancer() const override;
+    bool isConnectedToLoadBalancerPort() const override;
+
+    bool isLoadBalancerPeer() const override;
+
+    void setisLoadBalancerPeer(bool helloHasLoadBalancedOption) override;
 
     bool bindsToOperationState() const override {
-        return isFromLoadBalancer();
-    }
-
-    bool isFromRouterPort() const override {
-        auto routerPort = _tl->routerPort();
-        return _isIngressSession && routerPort && *routerPort == _local.port();
+        return isLoadBalancerPeer();
     }
 
 #ifdef MONGO_CONFIG_SSL
-    const std::shared_ptr<SSLManagerInterface>& getSSLManager() const override;
+    const SSLConfiguration* getSSLConfiguration() const override;
 #endif
 
 protected:
 #ifdef MONGO_CONFIG_SSL
+    const std::shared_ptr<SSLManagerInterface>& getSSLManager() const;
     /** Constructs a SSL socket required to initiate SSL handshake for egress connections. */
     Status buildSSLSocket(const HostAndPort& target) override;
     Future<void> handshakeSSLForEgress(const HostAndPort& target,
@@ -241,15 +270,7 @@ protected:
     template <typename Buffer>
     bool checkForHTTPRequest(const Buffer& buffers);
 
-    /**
-     * Called from read() to send an HTTP response back to a client that's trying to use HTTP
-     * over a native MongoDB port. This returns a Future<Message> to match its only caller, but it
-     * always contains an error, so it could really return Future<Anything>
-     */
-    Future<Message> sendHTTPResponse(const BatonHandle& baton = nullptr);
-
-    bool shouldOverrideMaxConns(
-        const std::vector<std::variant<CIDR, std::string>>& exemptions) const override;
+    bool isExemptedByCIDRList(const CIDRList& exemptions) const override;
 
     enum BlockingMode {
         unknown,
@@ -288,9 +309,20 @@ protected:
 
     AsioTransportLayer* const _tl;
     bool _isIngressSession;
-    bool _isFromLoadBalancer = false;
-    boost::optional<SockAddr> _proxiedSrcEndpoint;
-    boost::optional<SockAddr> _proxiedDstEndpoint;
+
+    /**
+     * We have a distinction here. A load balancer port can accept connections that are
+     * either attempting to connect to a load balancer or as a normal targeted connection.
+     * The bools below describe if 1/ the connection is connecting to the load balancer port,
+     * and 2/ the connection is a load balancer type connection. We only find out if the
+     * connection is a LoadBalancerConnection if the hello command parses {loadBalancer: 1}.
+     */
+    bool _isConnectedToLoadBalancerPort = false;
+    bool _isLoadBalancerPeer = false;
+    boost::optional<HostAndPort> _proxiedSrcEndpoint;
+    boost::optional<HostAndPort> _proxiedDstEndpoint;
+
+    boost::optional<SockAddr> _proxiedSrcRemoteAddr;
 
     AsyncOperationState _asyncOpState;
 

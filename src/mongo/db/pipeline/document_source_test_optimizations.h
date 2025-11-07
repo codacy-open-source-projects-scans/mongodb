@@ -30,7 +30,7 @@
 #pragma once
 
 #include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 /**
@@ -44,17 +44,14 @@ public:
         : DocumentSource(DocumentSourceTestOptimizations::kStageName, expCtx) {}
     ~DocumentSourceTestOptimizations() override = default;
     const char* getSourceName() const override {
-        return DocumentSourceTestOptimizations::kStageName.rawData();
+        return DocumentSourceTestOptimizations::kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kTestOptimizations;
+    Id getId() const override {
+        return kUnallocatedId;
     }
 
-    GetNextResult doGetNext() override {
-        MONGO_UNREACHABLE;
-    }
-    StageConstraints constraints(Pipeline::SplitState) const override {
+    StageConstraints constraints(PipelineSplitState) const override {
         // Return the default constraints so that this can be used in test pipelines. Constructing a
         // pipeline needs to do some validation that depends on this.
         return StageConstraints{StreamType::kStreaming,

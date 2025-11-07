@@ -31,23 +31,14 @@
 
 #include <boost/container/small_vector.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/type_traits/decay.hpp>
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
+#include "mongo/db/collection_crud/container_write.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index_builds/duplicate_key_tracker.h"
 #include "mongo/db/index_builds/skipped_record_tracker.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/repl/oplog.h"
@@ -59,10 +50,22 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/fail_point.h"
 
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/type_traits/decay.hpp>
+
 namespace mongo {
 
 class BSONObj;
 class IndexAccessMethod;
+struct IndexBuildInfo;
 struct InsertDeleteOptions;
 class OperationContext;
 
@@ -85,23 +88,22 @@ public:
     enum class TrackDuplicates { kNoTrack, kTrack };
 
     /**
-     * Creates a temporary table for writes during an index build. Additionally creates a temporary
-     * table to store any duplicate key constraint violations found during the build, if the index
-     * being built has uniqueness constraints.
-     */
-    IndexBuildInterceptor(OperationContext* opCtx, const IndexCatalogEntry* entry);
-
-    /**
-     * Finds the temporary table associated with storing writes during this index build. Only used
-     * Only used when resuming an index build and the temporary table already exists on disk.
-     * Additionally will find the temporary table associated with storing duplicate key constraint
-     * violations found during the build, if the index being built has uniqueness constraints.
+     * If 'resume' is false, creates temporary tables needed during an index build. If 'resume' is
+     * true, uses the temporary tables that were previously created.
      */
     IndexBuildInterceptor(OperationContext* opCtx,
                           const IndexCatalogEntry* entry,
-                          StringData sideWritesIdent,
-                          boost::optional<StringData> duplicateKeyTrackerIdent,
-                          boost::optional<StringData> skippedRecordTrackerIdent);
+                          const IndexBuildInfo& indexBuildInfo,
+                          bool resume,
+                          bool generateTableWrites);
+
+    /**
+     * Returns true if this node is allowed to perform side writes during the ongoing index build.
+     * Side writes are not permitted on a secondary in case of a primary driven index build.
+     */
+    bool sideWritesAllowed() const {
+        return _generateTableWrites;
+    }
 
     /**
      * Keeps the temporary side writes and duplicate key constraint violations tables.
@@ -129,8 +131,9 @@ public:
      * checkDuplicateKeyConstraints();
      */
     Status recordDuplicateKey(OperationContext* opCtx,
+                              const CollectionPtr& coll,
                               const IndexCatalogEntry* indexCatalogEntry,
-                              const key_string::Value& key) const;
+                              const key_string::View& key) const;
 
     /**
      * Returns Status::OK if all previously recorded duplicate key constraint violations have been
@@ -197,7 +200,7 @@ public:
     boost::optional<MultikeyPaths> getMultikeyPaths() const;
 
     std::string getSideWritesTableIdent() const {
-        return _sideWritesTable->rs()->getIdent();
+        return std::string{_sideWritesTable->rs()->getIdent()};
     }
 
     boost::optional<std::string> getDuplicateKeyTrackerTableIdent() const {
@@ -234,6 +237,13 @@ private:
     Status _finishSideWrite(OperationContext* opCtx,
                             const IndexCatalogEntry* indexCatalogEntry,
                             const std::vector<BSONObj>& toInsert);
+
+    // Indicates whether this node should produce any table writes during the index build. When
+    // this is false, it means that this node is a secondary and is only applying writes received
+    // from the primary via the oplog.
+    // TODO(SERVER-111304): We might be able to remove this field by not creating an instance of
+    // IndexBuildInterceptor on a standby in case of primary driven index builds.
+    bool _generateTableWrites{true};
 
     // This temporary record store records intercepted keys that will be written into the index by
     // calling drainWritesIntoIndex(). It is owned by the interceptor and dropped along with it.

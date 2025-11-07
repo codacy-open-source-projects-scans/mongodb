@@ -28,19 +28,20 @@
  */
 
 
-#include <utility>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/s/write_ops/bulk_write_command_modifier.h"
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/commands/query_cmd/bulk_write_gen.h"
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
-#include "mongo/s/write_ops/bulk_write_command_modifier.h"
 #include "mongo/util/assert_util.h"
+
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -87,8 +88,8 @@ void BulkWriteCommandModifier::finishBuild() {
     _request->setNsInfo(std::move(_nsInfos));
 }
 
-void BulkWriteCommandModifier::addOp(write_ops::InsertCommandRequest insertOp) {
-    auto nss = insertOp.getNamespace();
+void BulkWriteCommandModifier::addOp(const write_ops::InsertCommandRequest& insertOp) {
+    const auto& nss = insertOp.getNamespace();
     auto [nsInfoEntry, idx] = getNsInfoEntry(nss);
     nsInfoEntry.setEncryptionInformation(insertOp.getEncryptionInformation());
 
@@ -98,8 +99,8 @@ void BulkWriteCommandModifier::addOp(write_ops::InsertCommandRequest insertOp) {
     }
 }
 
-void BulkWriteCommandModifier::addOp(write_ops::UpdateCommandRequest updateOp) {
-    auto nss = updateOp.getNamespace();
+void BulkWriteCommandModifier::addOp(const write_ops::UpdateCommandRequest& updateOp) {
+    const auto& nss = updateOp.getNamespace();
     auto [nsInfoEntry, idx] = getNsInfoEntry(nss);
     nsInfoEntry.setEncryptionInformation(updateOp.getEncryptionInformation());
 
@@ -118,8 +119,8 @@ void BulkWriteCommandModifier::addOp(write_ops::UpdateCommandRequest updateOp) {
     }
 }
 
-void BulkWriteCommandModifier::addOp(write_ops::DeleteCommandRequest deleteOp) {
-    auto nss = deleteOp.getNamespace();
+void BulkWriteCommandModifier::addOp(const write_ops::DeleteCommandRequest& deleteOp) {
+    const auto& nss = deleteOp.getNamespace();
     auto [nsInfoEntry, idx] = getNsInfoEntry(nss);
     nsInfoEntry.setEncryptionInformation(deleteOp.getEncryptionInformation());
 
@@ -206,7 +207,6 @@ void BulkWriteCommandModifier::addPipelineUpdateOps(const NamespaceString& nss,
                                                     bool useMultiUpdate) {
     auto [nsInfoEntry, idx] = getNsInfoEntry(nss);
 
-    auto updateMod = write_ops::UpdateModification();
     auto op = BulkWriteUpdateOp(idx, query, updates);
 
     op.setUpsert(upsert);

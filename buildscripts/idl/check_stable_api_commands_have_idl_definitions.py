@@ -41,8 +41,6 @@ from pymongo import MongoClient
 
 # Permit imports from "buildscripts".
 sys.path.append(os.path.normpath(os.path.join(os.path.abspath(__file__), "../../..")))
-
-# pylint: disable=wrong-import-position
 from idl import syntax
 
 from buildscripts.idl.lib import list_idls, parse_idl
@@ -50,8 +48,6 @@ from buildscripts.resmokelib import configure_resmoke
 from buildscripts.resmokelib.logging import loggers
 from buildscripts.resmokelib.testing.fixtures import interface
 from buildscripts.resmokelib.testing.fixtures.fixturelib import FixtureLib
-
-# pylint: enable=wrong-import-position
 
 LOGGER_NAME = "check-idl-definitions"
 LOGGER = logging.getLogger(LOGGER_NAME)
@@ -198,15 +194,12 @@ def main():
     arg_parser.add_argument("api_version", metavar="API_VERSION", help="API Version to check")
     args = arg_parser.parse_args()
 
-    class FakeArgs:
-        """Fake argparse.Namespace-like class to pass arguments to _update_config_vars."""
+    fake_args = {
+        "INSTALL_DIR": args.install_dir,
+        "command": "",
+    }
 
-        def __init__(self):
-            self.INSTALL_DIR = args.install_dir  # pylint: disable=invalid-name
-            self.command = ""
-
-    # pylint: disable=protected-access
-    configure_resmoke._update_config_vars(arg_parser, FakeArgs())
+    configure_resmoke._update_config_vars(arg_parser, fake_args)
     configure_resmoke._set_logging_config()
 
     # Configure Fixture logging.

@@ -29,25 +29,25 @@
 
 #pragma once
 
-#include <array>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <fmt/format.h>
-#include <functional>
-#include <type_traits>
-#include <utility>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/timer.h"
+
+#include <array>
+#include <cstddef>
+#include <functional>
+#include <type_traits>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -115,7 +115,7 @@ private:
  *  - nonstatic makeTimer to initialize Timer.
  */
 template <typename Policy>
-class SplitTimer {
+class MONGO_MOD_PUBLIC SplitTimer {
 private:
     template <typename E>
     static constexpr size_t _idx(E e) {
@@ -151,10 +151,10 @@ public:
      * TimerSplit::start and TimerSplit::done.
      */
     void notify(TimeSplitIdType split) {
-        using namespace fmt::literals;
         invariant(!_topSplit || _idx(*_topSplit) <= _idx(split),
-                  "Notify out of order: {} then {}"_format(_policy.getName(*_topSplit),
-                                                           _policy.getName(split)));
+                  fmt::format("Notify out of order: {} then {}",
+                              _policy.getName(*_topSplit),
+                              _policy.getName(split)));
         _topSplit = split;
 
         _splits[_idx(split)] = _timer.elapsed();
@@ -175,7 +175,6 @@ public:
      * Logs the whole builder if there's a problem.
      */
     void appendIntervals(BSONObjBuilder& builder) const {
-        using namespace fmt::literals;
         for (size_t i = 0; i != Policy::numIntervalIds; ++i) {
             IntervalIdType iId{i};
             auto dt = getSplitInterval(iId);

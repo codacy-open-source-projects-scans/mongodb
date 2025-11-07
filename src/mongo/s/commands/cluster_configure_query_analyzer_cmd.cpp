@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
@@ -39,22 +36,25 @@
 #include "mongo/db/auth/resource_pattern.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/global_catalog/catalog_cache/catalog_cache.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/router_role_api/cluster_commands_helpers.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/topology/shard_registry.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/cluster_commands_helpers.h"
 #include "mongo/s/configure_query_analyzer_cmd_gen.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/shard_version.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+#include <string>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -69,7 +69,7 @@ namespace {
  * info.
  */
 BSONObj makeVersionedCmdObj(const CollectionRoutingInfo& cri, const BSONObj& unversionedCmdObj) {
-    return appendDbVersionIfPresent(unversionedCmdObj, cri.cm.dbVersion());
+    return appendDbVersionIfPresent(unversionedCmdObj, cri.getDbVersion());
 }
 
 class ConfigureQueryAnalyzerCmd : public TypedCommand<ConfigureQueryAnalyzerCmd> {
@@ -85,26 +85,30 @@ public:
             const auto& nss = ns();
             uassertStatusOK(validateNamespace(nss));
 
-            const auto cri = uassertStatusOK(
-                Grid::get(opCtx)->catalogCache()->getCollectionRoutingInfo(opCtx, nss));
-            const auto primaryShardId = cri.cm.dbPrimary();
-
-            auto shard =
-                uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, primaryShardId));
-            auto versionedCmdObj = makeVersionedCmdObj(
-                cri, CommandHelpers::filterCommandRequestForPassthrough(request().toBSON()));
-            auto swResponse = shard->runCommandWithFixedRetryAttempts(
+            sharding::router::DBPrimaryRouter router(opCtx->getServiceContext(), nss.dbName());
+            return router.route(
                 opCtx,
-                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                DatabaseName::kAdmin,
-                versionedCmdObj,
-                Shard::RetryPolicy::kIdempotent);
+                Request::kCommandName,
+                [&](OperationContext* opCtx, const CachedDatabaseInfo& dbInfo) {
+                    auto cmdObj =
+                        CommandHelpers::filterCommandRequestForPassthrough(request().toBSON());
 
-            uassertStatusOK(Shard::CommandResponse::getEffectiveStatus(swResponse));
+                    const auto swResponse =
+                        executeCommandAgainstDatabasePrimaryOnlyAttachingDbVersion(
+                            opCtx,
+                            DatabaseName::kAdmin,
+                            dbInfo,
+                            cmdObj,
+                            ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+                            Shard::RetryPolicy::kIdempotent);
 
-            auto response = ConfigureQueryAnalyzerResponse::parse(
-                IDLParserContext("clusterConfigureQueryAnalyzer"), swResponse.getValue().response);
-            return response;
+                    uassertStatusOK(AsyncRequestsSender::Response::getEffectiveStatus(swResponse));
+
+                    auto remoteResponse = uassertStatusOK(swResponse.swResponse).data;
+                    auto response = ConfigureQueryAnalyzerResponse::parse(
+                        remoteResponse, IDLParserContext("clusterConfigureQueryAnalyzer"));
+                    return response;
+                });
         }
 
     private:

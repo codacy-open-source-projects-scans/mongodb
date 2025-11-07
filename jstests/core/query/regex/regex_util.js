@@ -1,6 +1,6 @@
 // Tests for RegExp.escape
 
-var TEST_STRINGS = [
+let TEST_STRINGS = [
     "[db]",
     "{ab}",
     "<c2>",
@@ -14,11 +14,11 @@ var TEST_STRINGS = [
     "****word+",
     "\t| |\n\r",
     "Mongo-db",
-    "[{(<>)}]!@#%^&*+\\"
+    "[{(<>)}]!@#%^&*+\\",
 ];
 
-TEST_STRINGS.forEach(function(str) {
-    var escaped = RegExp.escape(str);
-    var regex = new RegExp(escaped);
+TEST_STRINGS.forEach(function (str) {
+    let escaped = RegExp.escape(str);
+    let regex = new RegExp(escaped);
     assert(regex.test(str), "Wrong escape for " + str);
 });

@@ -29,12 +29,13 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-
 #include "mongo/transport/session.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/ssl_types.h"
 
-namespace mongo {
+#include <boost/optional.hpp>
+
+namespace MONGO_MOD_PUBLIC mongo {
 /**
  * Contains information extracted from the peer certificate which is consumed by subsystems
  * outside of the networking stack.
@@ -69,8 +70,10 @@ public:
         return _roles;
     }
 
-    static SSLPeerInfo& forSession(const std::shared_ptr<transport::Session>& session);
-    static const SSLPeerInfo& forSession(const std::shared_ptr<const transport::Session>& session);
+    static std::shared_ptr<const SSLPeerInfo>& forSession(
+        const std::shared_ptr<transport::Session>& session);
+    static std::shared_ptr<const SSLPeerInfo> forSession(
+        const std::shared_ptr<const transport::Session>& session);
 
     const boost::optional<std::string>& getClusterMembership() const {
         return _clusterMembership;
@@ -94,4 +97,4 @@ private:
     stdx::unordered_set<RoleName> _roles;
     boost::optional<std::string> _clusterMembership;
 };
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

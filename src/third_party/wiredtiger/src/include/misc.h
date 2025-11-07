@@ -6,8 +6,7 @@
  * See the file LICENSE for redistribution information.
  */
 
-#ifndef __WT_MISC_H
-#define __WT_MISC_H
+#pragma once
 
 /*
  * When compiling for code coverage measurement it is necessary to ensure that inline functions in
@@ -54,6 +53,7 @@
 
 /* Basic constants. */
 #define WT_MILLION_LITERAL 1000000
+#define WT_HUNDRED (100)
 #define WT_THOUSAND (1000)
 #define WT_MILLION (WT_MILLION_LITERAL)
 #define WT_BILLION (1000000000)
@@ -101,6 +101,9 @@
 #define WT_MIN(a, b) ((a) < (b) ? (a) : (b))
 #define WT_MAX(a, b) ((a) < (b) ? (b) : (a))
 #define WT_CLAMP(x, low, high) (WT_MIN(WT_MAX((x), (low)), (high)))
+
+/* Check and reset, implicitly reset to 0. */
+#define WT_CHECK_AND_RESET(a, v) ((a) == (v) ? ((a) = 0, true) : false)
 
 /* Ceil for unsigned/positive real numbers. */
 #define WT_CEIL_POS(a) ((a) - (double)(uintmax_t)(a) > 0.0 ? (uintmax_t)(a) + 1 : (uintmax_t)(a))
@@ -209,10 +212,11 @@
  * with a large performance cost. Define these atomics only for TSan builds as they aren't
  * performance critical and we'll investigate a long term solution separately.
  */
-#define FLD_CLR(field, mask) (void)__wt_atomic_and_generic(&field, (__typeof__(field))(~(mask)))
-#define FLD_MASK(field, mask) (__wt_atomic_load_generic(&field) & (mask))
+#define FLD_CLR(field, mask) \
+    (void)__wt_atomic_and_generic_relaxed(&field, (__typeof__(field))(~(mask)))
+#define FLD_MASK(field, mask) (__wt_atomic_load_generic_relaxed(&field) & (mask))
 #define FLD_ISSET(field, mask) (FLD_MASK(field, (mask)) != 0)
-#define FLD_SET(field, mask) ((void)__wt_atomic_or_generic(&field, (mask)))
+#define FLD_SET(field, mask) ((void)__wt_atomic_or_generic_relaxed(&field, (mask)))
 #else
 #define FLD_CLR(field, mask) ((void)((field) &= ~(mask)))
 #define FLD_MASK(field, mask) ((field) & (mask))
@@ -320,7 +324,7 @@ FLD_AREALLSET(uint64_t field, uint64_t mask)
 
 /* Check if a string matches a suffix. */
 #define WT_SUFFIX_MATCH(str, sfx) \
-    (strlen(str) >= strlen(sfx) && strcmp(&str[strlen(str) - strlen(sfx)], sfx) == 0)
+    (strlen(str) >= strlen(sfx) && strcmp(&(str)[strlen(str) - strlen(sfx)], sfx) == 0)
 
 /* Check if a string matches a prefix, and move past it. */
 #define WT_PREFIX_SKIP(str, pfx) (WT_PREFIX_MATCH(str, pfx) ? ((str) += strlen(pfx), 1) : 0)
@@ -389,6 +393,13 @@ __wt_string_match(const char *str, const char *bytes, size_t len)
     do {                         \
         (dst).data = (src).data; \
         (dst).size = (src).size; \
+    } while (0)
+
+/* Transfer ownership of an item. */
+#define WT_ITEM_MOVE(dst, src) \
+    do {                       \
+        (dst) = (src);         \
+        WT_CLEAR(src);         \
     } while (0)
 
 /*
@@ -483,5 +494,31 @@ union __wt_rand_state {
             WT_ERR(__wt_buf_extend(session, buf, (buf)->size + __len + 1));     \
         }                                                                       \
     } while (0)
+/*
+ * __wt_atomic_decrement_if_positive --
+ *     Use compare and swap to atomically decrement value by 1 if it's positive.
+ */
+static WT_INLINE void
+__wt_atomic_decrement_if_positive(uint32_t *valuep)
+{
+    uint32_t old_value;
+    do {
+        old_value = __wt_atomic_load_uint32_relaxed(valuep);
+        if (old_value == 0)
+            break;
+    } while (!__wt_atomic_cas_uint32(valuep, old_value, old_value - 1));
+}
 
-#endif /* __WT_MISC_H */
+/*
+ * __wt_atomic_stats_max --
+ *     Calculate max statistic values. Currently we use load + store for that purpose since
+ *     statistic is allowed to be fuzzy. FIXME-WT-15755: Consider using relaxed CAS instead to
+ *     ensure it is lossless.
+ */
+static inline void
+__wt_atomic_stats_max(uint64_t *stat, uint64_t value)
+{
+    if (value > __wt_atomic_load_uint64_relaxed(stat)) {
+        __wt_atomic_store_uint64_relaxed(stat, value);
+    }
+}

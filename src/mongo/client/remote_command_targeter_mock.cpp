@@ -27,17 +27,38 @@
  *    it in the license file.
  */
 
+#include "mongo/client/remote_command_targeter_mock.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/client/retry_strategy.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/future_impl.h"
+
+#include <algorithm>
 #include <mutex>
 #include <utility>
 
 #include <boost/move/utility_core.hpp>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/client/remote_command_targeter_mock.h"
-#include "mongo/util/assert_util_core.h"
-#include "mongo/util/future_impl.h"
-
 namespace mongo {
+namespace {
+
+HostAndPort getPrioritizedHostAndPort(const std::vector<HostAndPort>& hosts,
+                                      const TargetingMetadata& targetingMetadata) {
+    invariant(!hosts.empty());
+
+    const auto notDeprioritized = [&](const HostAndPort& server) {
+        return !targetingMetadata.deprioritizedServers.contains(server);
+    };
+
+    if (auto it = std::ranges::find_if(hosts, notDeprioritized); it != hosts.end()) {
+        return *it;
+    }
+
+    return hosts.front();
+}
+
+}  // namespace
 
 RemoteCommandTargeterMock::RemoteCommandTargeterMock()
     : _findHostReturnValue(Status(ErrorCodes::InternalError, "No return value set")) {}
@@ -56,22 +77,26 @@ ConnectionString RemoteCommandTargeterMock::connectionString() {
     return _connectionStringReturnValue;
 }
 
-StatusWith<HostAndPort> RemoteCommandTargeterMock::findHost(OperationContext* opCtx,
-                                                            const ReadPreferenceSetting& readPref) {
+StatusWith<HostAndPort> RemoteCommandTargeterMock::findHost(
+    OperationContext* opCtx,
+    const ReadPreferenceSetting& readPref,
+    const TargetingMetadata& targetingMetadata) {
     if (!_findHostReturnValue.isOK()) {
         return _findHostReturnValue.getStatus();
     }
 
-    return _findHostReturnValue.getValue()[0];
+    return getPrioritizedHostAndPort(_findHostReturnValue.getValue(), targetingMetadata);
 }
 
-SemiFuture<HostAndPort> RemoteCommandTargeterMock::findHost(const ReadPreferenceSetting&,
-                                                            const CancellationToken&) {
+SemiFuture<HostAndPort> RemoteCommandTargeterMock::findHost(
+    const ReadPreferenceSetting&,
+    const CancellationToken&,
+    const TargetingMetadata& targetingMetadata) {
     if (!_findHostReturnValue.isOK()) {
         return _findHostReturnValue.getStatus();
     }
 
-    return _findHostReturnValue.getValue()[0];
+    return getPrioritizedHostAndPort(_findHostReturnValue.getValue(), targetingMetadata);
 }
 
 SemiFuture<std::vector<HostAndPort>> RemoteCommandTargeterMock::findHosts(

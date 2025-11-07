@@ -27,28 +27,16 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <fmt/format.h>
-#include <iterator>
-#include <map>
-#include <memory>
-#include <mutex>
-#include <ostream>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/repl/oplog.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/create_collection.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/repl/member_state.h"
-#include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/oplog_interface.h"
@@ -59,19 +47,32 @@
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/barrier.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/decorable.h"
+
+#include <algorithm>
+#include <iterator>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <ostream>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace repl {
 namespace {
 
 class OplogTest : public ServiceContextMongoDTest {
-private:
+protected:
     void setUp() override;
 };
 
@@ -109,8 +110,7 @@ TEST_F(OplogTest, LogOpReturnsOpTimeOnSuccessfulInsertIntoOplogCollection) {
     auto opCtx = cc().makeOperationContext();
 
     const NamespaceString nss = NamespaceString::createNamespaceString_forTest("test.coll");
-    auto msgObj = BSON("msg"
-                       << "hello, world!");
+    auto msgObj = BSON("msg" << "hello, world!");
 
     // Write to the oplog.
     OpTime opTime;
@@ -372,6 +372,104 @@ TEST_F(OplogTest, ConcurrentLogOpRevertLastOplogEntry) {
         1U);
 
     _checkOplogEntry(oplogEntries[0], *(opTimeNssMap.cbegin()));
+}
+
+class CreateIndexForApplyOpsTest : public OplogTest {
+public:
+    void setUp() override {
+        OplogTest::setUp();
+
+        auto opCtx = cc().makeOperationContext();
+
+        auto uuid = UUID::gen();
+        Lock::DBLock lock(opCtx.get(), _nss.dbName(), MODE_X);
+        ASSERT_OK(createCollectionForApplyOps(opCtx.get(),
+                                              _nss.dbName(),
+                                              boost::none,
+                                              BSON("create" << _nss.coll() << "uuid" << uuid),
+                                              /*allowRenameOutOfTheWay*/ false));
+
+        auto replCoord = ReplicationCoordinator::get(opCtx.get());
+        ASSERT_OK(replCoord->setFollowerMode(MemberState::RS_SECONDARY));
+    }
+
+    NamespaceString _nss = NamespaceString::createNamespaceString_forTest("test.coll");
+};
+
+TEST_F(CreateIndexForApplyOpsTest, GeneratesNewIdentIfNone) {
+    auto opCtx = cc().makeOperationContext();
+    {
+        Lock::DBLock lock(opCtx.get(), _nss.dbName(), MODE_X);
+        createIndexForApplyOps(opCtx.get(),
+                               BSON("v" << 2 << "key" << BSON("a" << 1) << "name"
+                                        << "a_1"),
+                               boost::none,
+                               _nss,
+                               OplogApplication::Mode::kSecondary);
+    }
+
+    auto collection = acquireCollection(
+        opCtx.get(),
+        CollectionAcquisitionRequest::fromOpCtx(opCtx.get(), _nss, AcquisitionPrerequisites::kRead),
+        MODE_IS);
+    auto index =
+        collection.getCollectionPtr()->getIndexCatalog()->findIndexByName(opCtx.get(), "a_1");
+    ASSERT(index);
+    ASSERT(index->getEntry()->getIdent().starts_with("index-"));
+}
+
+TEST_F(CreateIndexForApplyOpsTest, UsesIdentIfSpecified) {
+    auto opCtx = cc().makeOperationContext();
+
+    const std::string ident = "index-test-ident";
+    const std::string identUniqueTag = "test-ident";
+    {
+        Lock::DBLock lock(opCtx.get(), _nss.dbName(), MODE_X);
+        createIndexForApplyOps(opCtx.get(),
+                               BSON("v" << 2 << "key" << BSON("a" << 1) << "name"
+                                        << "a_1"),
+                               BSON("indexIdent" << identUniqueTag),
+                               _nss,
+                               OplogApplication::Mode::kSecondary);
+    }
+
+    auto collection = acquireCollection(
+        opCtx.get(),
+        CollectionAcquisitionRequest::fromOpCtx(opCtx.get(), _nss, AcquisitionPrerequisites::kRead),
+        MODE_IS);
+    auto catalog = collection.getCollectionPtr()->getIndexCatalog();
+    ASSERT(catalog->findIndexByIdent(opCtx.get(), ident));
+    auto index = catalog->findIndexByName(opCtx.get(), "a_1");
+    ASSERT(index);
+    ASSERT_EQ(index->getEntry()->getIdent(), ident);
+}
+
+TEST_F(CreateIndexForApplyOpsTest, MetadataValidation) {
+    auto opCtx = cc().makeOperationContext();
+    Lock::DBLock lock(opCtx.get(), _nss.dbName(), MODE_X);
+    auto spec = BSON("v" << 2 << "key" << BSON("a" << 1) << "name"
+                         << "a_1");
+    ASSERT_THROWS_CODE(createIndexForApplyOps(
+                           opCtx.get(), spec, BSONObj(), _nss, OplogApplication::Mode::kSecondary),
+                       AssertionException,
+                       ErrorCodes::IDLFailedToParse);
+    ASSERT_THROWS_CODE(
+        createIndexForApplyOps(
+            opCtx.get(), spec, BSON("indexIdent" << 1), _nss, OplogApplication::Mode::kSecondary),
+        AssertionException,
+        ErrorCodes::TypeMismatch);
+    ASSERT_THROWS_CODE(
+        createIndexForApplyOps(
+            opCtx.get(), spec, BSON("indexIdent" << ""), _nss, OplogApplication::Mode::kSecondary),
+        AssertionException,
+        ErrorCodes::BadValue);
+    ASSERT_THROWS_CODE(createIndexForApplyOps(opCtx.get(),
+                                              spec,
+                                              BSON("ident" << "malformed-ident"),
+                                              _nss,
+                                              OplogApplication::Mode::kSecondary),
+                       AssertionException,
+                       ErrorCodes::IDLFailedToParse);
 }
 
 }  // namespace

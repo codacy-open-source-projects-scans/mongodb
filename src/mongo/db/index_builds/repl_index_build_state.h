@@ -29,24 +29,15 @@
 
 #pragma once
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <list>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds/commit_quorum_options.h"
+#include "mongo/db/index_builds/index_builds_common.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/operation_id.h"
@@ -60,6 +51,17 @@
 #include "mongo/util/future_impl.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <list>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -195,6 +197,20 @@ public:
                   boost::optional<Timestamp> timestamp = boost::none,
                   boost::optional<Status> abortStatus = boost::none);
 
+    /**
+     * Sets the multikey information for this index build.
+     *
+     * TODO (SERVER-111304): Remove this function.
+     */
+    void setMultikey(std::vector<boost::optional<MultikeyPaths>> multikey);
+
+    /**
+     * Returns the multikey information for this index build.
+     *
+     * TODO (SERVER-111304): Remove this function.
+     */
+    const std::vector<boost::optional<MultikeyPaths>>& getMultikey() const;
+
     bool isApplyingCommitOplogEntry() const {
         return _state == kApplyCommitOplogEntry;
     }
@@ -292,6 +308,8 @@ private:
     boost::optional<Timestamp> _timestamp;
     // Reason for abort, if any.
     Status _abortStatus = Status::OK();
+    // TODO (SERVER-111304): Remove multikey information from IndexBuildState.
+    std::vector<boost::optional<MultikeyPaths>> _multikey;
 };
 
 /**
@@ -309,8 +327,12 @@ public:
     ReplIndexBuildState(const UUID& indexBuildUUID,
                         const UUID& collUUID,
                         const DatabaseName& dbName,
-                        const std::vector<BSONObj>& specs,
+                        std::vector<IndexBuildInfo> indexes,
                         IndexBuildProtocol protocol);
+
+    const std::vector<IndexBuildInfo>& getIndexes() const {
+        return _indexes;
+    }
 
     /**
      * The index build thread has been scheduled, from now on it should be possible to interrupt the
@@ -330,6 +352,16 @@ public:
      * build is already killed.
      */
     void setInProgress(OperationContext* opCtx);
+
+    /**
+     * Sets '_generateTableWrites' to the specified value.
+     */
+    void setGenerateTableWrites(bool generateTableWrites);
+
+    /**
+     * Returns the value of '_generateTableWrites'.
+     */
+    bool getGenerateTableWrites() const;
 
     /**
      * Transition the index build to kFailureCleanUp state if the build isn't already in kAborted,
@@ -463,7 +495,7 @@ public:
     enum class TryAbortResult { kRetry, kAlreadyAborted, kNotAborted, kContinueAbort };
     TryAbortResult tryAbort(OperationContext* opCtx,
                             IndexBuildAction signalAction,
-                            std::string reason);
+                            Status abortStatus);
 
     /**
      * Force an index build to abort on its own. Will return after signalling the index build or if
@@ -525,6 +557,20 @@ public:
      */
     void appendBuildInfo(BSONObjBuilder* builder) const;
 
+    /**
+     * Sets the multikey information for this index build.
+     *
+     * TODO (SERVER-111304): Remove this function.
+     */
+    void setMultikey(std::vector<boost::optional<MultikeyPaths>> multikey);
+
+    /**
+     * Returns the multikey information for this index build.
+     *
+     * TODO (SERVER-111304): Remove this function.
+     */
+    const std::vector<boost::optional<MultikeyPaths>>& getMultikey() const;
+
     // Uniquely identifies this index build across replica set members.
     const UUID buildUUID;
 
@@ -535,13 +581,6 @@ public:
     // Identifies the database containing the index being built. Unlike collections, databases
     // cannot be renamed.
     const DatabaseName dbName;
-
-    // The names of the indexes being built.
-    const std::vector<std::string> indexNames;
-
-    // The specs of the index(es) being built. Facilitates new callers joining an active index
-    // build.
-    const std::vector<BSONObj> indexSpecs;
 
     // Whether to do a two phase index build or a single phase index build like in v4.0. The FCV
     // at the start of the index build will determine this setting.
@@ -601,6 +640,9 @@ private:
      */
     void _cancelAndClearVoteRequestCbk(WithLock, OperationContext* opCtx);
 
+    // Tracks all the indexes being built.
+    const std::vector<IndexBuildInfo> _indexes;
+
     // Protects the state below.
     mutable stdx::mutex _mutex;
 
@@ -609,6 +651,12 @@ private:
 
     // Maintains the state of the index build.
     IndexBuildState _indexBuildState;
+
+    // Indicates whether this node should produce any table writes during the index build. When
+    // this is false, it means that this node is a secondary and is only applying writes received
+    // from the primary via the oplog.
+    // TODO(SERVER-111304): Remove this field.
+    bool _generateTableWrites{true};
 
     // Represents the callback handle for scheduled remote command "voteCommitIndexBuild".
     executor::TaskExecutor::CallbackHandle _voteCmdCbkHandle;

@@ -29,14 +29,15 @@
 
 #pragma once
 
-#include <memory>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/error_extra_info.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <string>
 
 namespace mongo {
 
@@ -46,7 +47,7 @@ namespace mongo {
  * query. The extra info here can be helpful for our test infrastructure to decide how seriously to
  * treat it.
  */
-class QueryStatsFailedToRecordInfo final : public ErrorExtraInfo {
+class MONGO_MOD_PUB QueryStatsFailedToRecordInfo final : public ErrorExtraInfo {
 public:
     static constexpr auto code = ErrorCodes::QueryStatsFailedToRecord;
 

@@ -1,10 +1,15 @@
 // Basic tests for $changeStream against all databases in the cluster.
+// @tags: [
+//   requires_profiling,
+//   requires_fcv_81
+// ]
 import {assertDropAndRecreateCollection} from "jstests/libs/collection_drop_recreate.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+import {getLatestProfilerEntry} from "jstests/libs/profiler.js";
 import {
     assertInvalidChangeStreamNss,
     assertValidChangeStreamNss,
-    ChangeStreamTest
+    ChangeStreamTest,
 } from "jstests/libs/query/change_stream_util.js";
 
 const testDb = db.getSiblingDB(jsTestName());
@@ -53,18 +58,8 @@ cst.assertNextChangesEqual({cursor: cursor, expectedChanges: [expected]});
 
 // Test that the change stream returns an inserted doc on a user-created database whose name
 // includes 'admin', 'local', or 'config'.
-const validUserDBs = [
-    "admin1",
-    "1admin",
-    "_admin_",
-    "local_",
-    "_local",
-    "_local_",
-    "config_",
-    "_config",
-    "_config_"
-];
-validUserDBs.forEach(dbName => {
+const validUserDBs = ["admin1", "1admin", "_admin_", "local_", "_local", "_local_", "config_", "_config", "_config_"];
+validUserDBs.forEach((dbName) => {
     assert.commandWorked(testDb.getSiblingDB(dbName).test.insert({_id: 0, a: 1}));
     expected = [
         {
@@ -79,8 +74,8 @@ validUserDBs.forEach(dbName => {
 
 // Test that the change stream returns an inserted doc on a user-created collection whose name
 // includes "system" but is not considered an internal collection.
-const validSystemColls = ["system", "systems.views", "ssystem.views", "test.system"];
-validSystemColls.forEach(collName => {
+const validSystemColls = ["system", "systems.views", "ssystem.views", "test.system", "system_views"];
+validSystemColls.forEach((collName) => {
     assert.commandWorked(testDb.getCollection(collName).insert({_id: 0, a: 1}));
     expected = [
         {
@@ -96,10 +91,9 @@ validSystemColls.forEach(collName => {
 // Test that the change stream filters out operations on any collection in the 'admin', 'local',
 // or 'config' databases.
 const filteredDBs = ["admin", "local", "config"];
-filteredDBs.forEach(dbName => {
+filteredDBs.forEach((dbName) => {
     // Not allowed to use 'local' db through mongos.
-    if (FixtureHelpers.isMongos(testDb) && dbName == "local")
-        return;
+    if (FixtureHelpers.isMongos(testDb) && dbName == "local") return;
 
     assert.commandWorked(testDb.getSiblingDB(dbName).test.insert({_id: 0, a: 1}));
     // Insert to the test collection to ensure that the change stream has something to
@@ -125,7 +119,17 @@ cst.assertDatabaseDrop({cursor: cursor, db: otherDB});
 
 // Drop the remaining databases and clean up the test.
 assert.commandWorked(testDb.dropDatabase());
-validUserDBs.forEach(dbName => {
+validUserDBs.forEach((dbName) => {
     testDb.getSiblingDB(dbName).dropDatabase();
 });
+
+// Test that getMore commands from the whole-cluster change stream are logged by the profiler.
+if (!FixtureHelpers.isMongos(adminDB)) {
+    assert.commandWorked(adminDB.runCommand({profile: 2}));
+    cst.getNextBatch(cursor);
+    const profileEntry = getLatestProfilerEntry(adminDB, {op: "getmore"});
+    const firstStage = Object.keys(profileEntry.originatingCommand.pipeline[0])[0];
+    assert(["$changeStream", "$_internalChangeStreamOplogMatch"].includes(firstStage), profileEntry);
+}
+
 cst.cleanUp();

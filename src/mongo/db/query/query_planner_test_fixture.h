@@ -29,36 +29,34 @@
 
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-#include <memory>
-#include <ostream>
-#include <string>
-#include <tuple>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/index/multikey_paths.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/db/json.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/index_entry.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/query_planner_params.h"
-#include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/query_test_service_context.h"
 #include "mongo/db/service_context.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/idl/server_parameter_test_util.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/assert_util_core.h"
-#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/str.h"
+
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -357,6 +355,11 @@ protected:
     QueryTestServiceContext serviceContext;
     ServiceContext::UniqueOperationContext opCtx;
     boost::intrusive_ptr<ExpressionContext> expCtx;
+
+    RAIIServerParameterControllerForTest enableHashIntersection{
+        "internalQueryPlannerEnableHashIntersection", true};
+    RAIIServerParameterControllerForTest enableSortIntersection{
+        "internalQueryPlannerEnableSortIndexIntersection", true};
 
     BSONObj queryObj;
     std::unique_ptr<CanonicalQuery> cq;

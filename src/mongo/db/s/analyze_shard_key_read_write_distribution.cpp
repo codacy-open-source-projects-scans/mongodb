@@ -29,27 +29,28 @@
 
 #include "mongo/db/s/analyze_shard_key_read_write_distribution.h"
 
-#include <memory>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status_with.h"
 #include "mongo/db/commands/query_cmd/bulk_write_crud_op.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
+#include "mongo/db/global_catalog/shard_key_pattern_query_util.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_parsers.h"
 #include "mongo/db/s/analyze_shard_key_util.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
-#include "mongo/s/collection_routing_info_targeter.h"
-#include "mongo/s/shard_key_pattern_query_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <memory>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -94,18 +95,19 @@ DistributionMetricsCalculator<DistributionMetricsType, SampleSizeType>::_getTarg
         return uassertStatusOK(
             CollatorFactoryInterface::get(opCtx->getServiceContext())->makeFromBSON(collation));
     }();
+    const auto& cm = _getChunkManager();
     auto expCtx =
         ExpressionContextBuilder{}
             .opCtx(opCtx)
             .collator(std::move(cif))
-            .ns(_getChunkManager().getNss())
+            .ns(cm.getNss())
             .runtimeConstants(runtimeConstants.value_or(Variables::generateRuntimeConstants(opCtx)))
             .letParameters(letParameters)
             .build();
 
     std::set<ShardId> shardIds;  // This is not used.
     QueryTargetingInfo info;
-    getShardIdsAndChunksForQuery(expCtx, filter, collation, _getChunkManager(), &shardIds, &info);
+    getShardIdsAndChunksForQuery(expCtx, filter, collation, cm, &shardIds, &info);
 
     return info;
 }
@@ -177,8 +179,8 @@ void ReadDistributionMetricsCalculator::addQuery(OperationContext* opCtx,
             MONGO_UNREACHABLE;
     }
 
-    auto cmd = SampledReadCommand::parse(IDLParserContext("ReadDistributionMetricsCalculator"),
-                                         doc.getCmd());
+    auto cmd = SampledReadCommand::parse(doc.getCmd(),
+                                         IDLParserContext("ReadDistributionMetricsCalculator"));
     auto info = _getTargetingInfoForQuery(opCtx, cmd.getFilter(), cmd.getCollation(), cmd.getLet());
     _incrementMetricsForQuery(info);
 }
@@ -214,25 +216,25 @@ void WriteDistributionMetricsCalculator::addQuery(OperationContext* opCtx,
     switch (doc.getCmdName()) {
         case SampledCommandNameEnum::kUpdate: {
             auto cmd = write_ops::UpdateCommandRequest::parse(
-                IDLParserContext("WriteDistributionMetricsCalculator"), doc.getCmd());
+                doc.getCmd(), IDLParserContext("WriteDistributionMetricsCalculator"));
             _addUpdateQuery(opCtx, cmd);
             break;
         }
         case SampledCommandNameEnum::kDelete: {
             auto cmd = write_ops::DeleteCommandRequest::parse(
-                IDLParserContext("WriteDistributionMetricsCalculator"), doc.getCmd());
+                doc.getCmd(), IDLParserContext("WriteDistributionMetricsCalculator"));
             _addDeleteQuery(opCtx, cmd);
             break;
         }
         case SampledCommandNameEnum::kFindAndModify: {
             auto cmd = write_ops::FindAndModifyCommandRequest::parse(
-                IDLParserContext("WriteDistributionMetricsCalculator"), doc.getCmd());
+                doc.getCmd(), IDLParserContext("WriteDistributionMetricsCalculator"));
             _addFindAndModifyQuery(opCtx, cmd);
             break;
         }
         case SampledCommandNameEnum::kBulkWrite: {
             auto cmd = BulkWriteCommandRequest::parse(
-                IDLParserContext("WriteDistributionMetricsCalculator"), doc.getCmd());
+                doc.getCmd(), IDLParserContext("WriteDistributionMetricsCalculator"));
             _addBulkWriteQuery(opCtx, cmd);
             break;
         }
@@ -338,7 +340,7 @@ void WriteDistributionMetricsCalculator::_addBulkWriteQuery(OperationContext* op
         auto opType = op.getType();
         if (opType == BulkWriteCRUDOp::kUpdate) {
             auto updateOp = op.getUpdate();
-            const auto nsIdx = updateOp->getUpdate();
+            const auto nsIdx = updateOp->getNsInfoIdx();
             const auto& nsEntry = nsInfo[nsIdx];
             _addUpdateQuery(opCtx,
                             nsEntry.getNs(),

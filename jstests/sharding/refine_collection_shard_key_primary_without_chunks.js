@@ -3,9 +3,6 @@
 
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
-// Cannot run the filtering metadata check on tests that run refineCollectionShardKey.
-TestData.skipCheckShardFilteringMetadata = true;
-
 const st = new ShardingTest({shards: 2});
 
 // The orphan hook assumes every shard has the shard key index, which is not true for test_primary
@@ -17,8 +14,7 @@ const collName = "foo";
 const ns = dbName + "." + collName;
 
 // Create a sharded collection with all chunks on the non-primary shard, shard1.
-assert.commandWorked(
-    st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
+assert.commandWorked(st.s.adminCommand({enableSharding: dbName, primaryShard: st.shard0.shardName}));
 assert.commandWorked(st.s.adminCommand({shardCollection: ns, key: {x: 1}}));
 
 // Move the last chunk away from the primary shard and create an index compatible with the refined

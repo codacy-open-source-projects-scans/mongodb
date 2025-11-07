@@ -29,13 +29,15 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/ftdc/collector.h"
+#include "mongo/util/modules.h"
+
 #include <cstddef>
 #include <cstdint>
 
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/ftdc/collector.h"
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -54,17 +56,10 @@ namespace mongo {
  */
 class FTDCMetadataCompressor {
 public:
-    explicit FTDCMetadataCompressor(UseMultiServiceSchema multiServiceSchema)
-        : _multiServiceSchema(multiServiceSchema) {}
-
     boost::optional<BSONObj> addSample(const BSONObj& sample);
 
     std::uint32_t getDeltaCount() const {
         return _deltaCount;
-    }
-
-    bool isMultiService() const {
-        return _multiServiceSchema;
     }
 
     /**
@@ -83,8 +78,5 @@ private:
 
     // Number of deltas recorded
     std::uint32_t _deltaCount{0};
-
-    // Whether or not to expect the multi-service schema for input samples
-    UseMultiServiceSchema _multiServiceSchema;
 };
 }  // namespace mongo

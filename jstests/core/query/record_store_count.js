@@ -9,7 +9,7 @@
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
 import {planHasStage} from "jstests/libs/query/analyze_plan.js";
 
-var coll = db.record_store_count;
+let coll = db.record_store_count;
 coll.drop();
 
 assert.commandWorked(coll.insert({x: 0}));
@@ -23,7 +23,7 @@ assert.commandWorked(coll.createIndex({x: 1}));
 // If the collection is sharded, however, then we can't use fast count, since we need to perform
 // shard filtering to avoid counting data that is not logically owned by the shard.
 //
-var explain = coll.explain().count({});
+let explain = coll.explain().count({});
 assert(!planHasStage(db, explain.queryPlanner.winningPlan, "COLLSCAN"));
 if (!FixtureHelpers.isMongos(db) || !FixtureHelpers.isSharded(coll)) {
     assert(planHasStage(db, explain.queryPlanner.winningPlan, "RECORD_STORE_FAST_COUNT"));
@@ -56,11 +56,9 @@ function testExplainAndExpectStage({expectedStages, unexpectedStages, hintIndex}
     checkPlan(explain.queryPlanner.winningPlan, expectedStages, unexpectedStages);
 }
 
-if ((!FixtureHelpers.isMongos(db) && !TestData.testingReplicaSetEndpoint) ||
-    !FixtureHelpers.isSharded(coll)) {
+if ((!FixtureHelpers.isMongos(db) && !TestData.testingReplicaSetEndpoint) || !FixtureHelpers.isSharded(coll)) {
     // In an unsharded collection we can use the COUNT_SCAN stage.
-    testExplainAndExpectStage(
-        {expectedStages: ["COUNT_SCAN"], unexpectedStages: [], hintIndex: {x: 1}});
+    testExplainAndExpectStage({expectedStages: ["COUNT_SCAN"], unexpectedStages: [], hintIndex: {x: 1}});
     quit();
 }
 
@@ -70,18 +68,18 @@ if ((!FixtureHelpers.isMongos(db) && !TestData.testingReplicaSetEndpoint) ||
 testExplainAndExpectStage({
     expectedStages: ["COUNT", "SHARDING_FILTER", "FETCH"],
     unexpectedStages: [],
-    hintIndex: {x: 1}
+    hintIndex: {x: 1},
 });
 
 // Add an index which includes the shard key. This means the FETCH should no longer be necesary
 // since the SHARDING_FILTER can get the shard key straight from the index.
 const kNewIndexSpec = {
     x: 1,
-    _id: 1
+    _id: 1,
 };
 assert.commandWorked(coll.createIndex(kNewIndexSpec));
 testExplainAndExpectStage({
     expectedStages: ["COUNT", "SHARDING_FILTER"],
     unexpectedStages: ["FETCH"],
-    hintIndex: kNewIndexSpec
+    hintIndex: kNewIndexSpec,
 });

@@ -29,16 +29,16 @@
 
 #pragma once
 
-#include <boost/dynamic_bitset/dynamic_bitset.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-
 #include "mongo/base/compare_numbers.h"
-#include "mongo/db/exec/sbe/values/cell_interface.h"
 #include "mongo/db/exec/sbe/values/column_op.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstddef>
+#include <memory>
+
+#include <boost/dynamic_bitset/dynamic_bitset.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo::sbe::value {
 /**
@@ -364,7 +364,6 @@ protected:
 std::unique_ptr<ValueBlock> buildBlockFromStorage(std::vector<value::TypeTags> tags,
                                                   std::vector<value::Value> vals);
 
-// TODO SERVER-83799 Remove TypeTags::Boolean
 inline constexpr bool validHomogeneousType(TypeTags tag) {
     return tag == TypeTags::NumberInt32 || tag == TypeTags::NumberInt64 || tag == TypeTags::Date ||
         tag == TypeTags::NumberDouble || tag == TypeTags::Boolean;
@@ -384,7 +383,7 @@ public:
     }
 
     MonoBlock(MonoBlock&& o)
-        : ValueBlock(std::move(o)), _tag(o._tag), _val(o._val), _count(o._count) {
+        : ValueBlock(static_cast<ValueBlock&&>(o)), _tag(o._tag), _val(o._val), _count(o._count) {
         o._tag = TypeTags::Nothing;
         o._val = 0;
     }
@@ -477,7 +476,7 @@ public:
     }
 
     std::pair<value::TypeTags, value::Value> at(size_t idx) override {
-        invariant(idx < _count);
+        tassert(11089617, "Out of bounds read in MonoBlock", idx < _count);
         return {_tag, _val};
     }
 
@@ -507,7 +506,9 @@ public:
     }
 
     HeterogeneousBlock(HeterogeneousBlock&& o)
-        : ValueBlock(std::move(o)), _vals(std::move(o._vals)), _tags(std::move(o._tags)) {
+        : ValueBlock(static_cast<HeterogeneousBlock&&>(o)),
+          _vals(std::move(o._vals)),
+          _tags(std::move(o._tags)) {
         o._vals = {};
         o._tags = {};
     }
@@ -584,7 +585,6 @@ public:
         o._presentBitset = {};
     }
 
-    // TODO SERVER-83799 Remove this constructor. Should only be used to create BoolBlocks.
     HomogeneousBlock(std::vector<bool> input) {
         if constexpr (TypeTag == TypeTags::Boolean) {
             _vals.resize(input.size());
@@ -599,7 +599,6 @@ public:
         }
     }
 
-    // TODO SERVER-83799 Remove this constructor. Should only be used to create BoolBlocks.
     HomogeneousBlock(std::vector<bool> input, HomogeneousBlockBitset bitset) {
         if constexpr (TypeTag == TypeTags::Boolean) {
             _vals.resize(input.size());
@@ -736,7 +735,6 @@ public:
             vals[i] = value::bitcastFrom<bool>(_presentBitset[i]);
         }
 
-        // TODO SERVER-83799 Return a BitsetBlock.
         return std::make_unique<HomogeneousBlock<bool, TypeTags::Boolean>>(std::move(vals));
     }
 
@@ -783,7 +781,6 @@ private:
     HomogeneousBlockBitset _presentBitset;
 };
 
-// TODO SERVER-83799 Remove BoolBlock.
 using BoolBlock = HomogeneousBlock<bool, TypeTags::Boolean>;
 using Int32Block = HomogeneousBlock<int32_t, TypeTags::NumberInt32>;
 using Int64Block = HomogeneousBlock<int64_t, TypeTags::NumberInt64>;

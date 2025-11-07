@@ -27,20 +27,20 @@
  *    it in the license file.
  */
 
-#include <functional>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/expression_function.h"
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/pipeline/expression_function.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/str.h"
+
+#include <functional>
+
 
 namespace mongo {
 
@@ -50,10 +50,9 @@ TEST(ExpressionFunction, SerializeAndRedactArgs) {
     SerializationOptions options = SerializationOptions::kDebugShapeAndMarkIdentifiers_FOR_TEST;
 
     auto expCtx = ExpressionContextForTest();
-    auto expr = BSON("$function" << BSON("body"
-                                         << "function(age) {return age >= 21;}"
-                                         << "args" << BSON_ARRAY("$age") << "lang"
-                                         << "js"));
+    auto expr = BSON("$function" << BSON("body" << "function(age) {return age >= 21;}"
+                                                << "args" << BSON_ARRAY("$age") << "lang"
+                                                << "js"));
     VariablesParseState vps = expCtx.variablesParseState;
     auto exprFunc = ExpressionFunction::parse(&expCtx, expr.firstElement(), vps);
     ASSERT_DOCUMENT_EQ_AUTO(  // NOLINT

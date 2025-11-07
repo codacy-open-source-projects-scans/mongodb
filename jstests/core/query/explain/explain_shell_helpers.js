@@ -3,6 +3,9 @@
  * against a sharded collection is wrapped in a "shards" object with keys for each shard.
  *
  * @tags: [
+ *   # The 'totalDocsExamined' values reported by explain queries can be higher than expected by
+ *   # this test if the balancer moves chunks around while the explain queries are running.
+ *   assumes_balancer_off,
  *   assumes_unsharded_collection,
  *   does_not_support_stepdowns,
  *   requires_fastcount,
@@ -21,17 +24,17 @@ import {
     getSingleNodeExplain,
     getWinningPlanFromExplain,
     isIxscan,
-    planHasStage
+    planHasStage,
 } from "jstests/libs/query/analyze_plan.js";
 
-var t = db.jstests_explain_helpers;
+let t = db.jstests_explain_helpers;
 t.drop();
 
-var explain;
+let explain;
 var stage;
 
 t.createIndex({a: 1});
-for (var i = 0; i < 10; i++) {
+for (let i = 0; i < 10; i++) {
     t.insert({_id: i, a: i, b: 1});
 }
 
@@ -183,10 +186,12 @@ assert.commandWorked(explain);
 
 // .maxTimeMS()
 // Provide longer maxTime when the test runs in suites which can affect query execution time.
+// In slow suites set the maxTime to at least 5s to account for the suites' overhead.
 const numConn = db.serverStatus().connections.current;
-explain = t.explain().find().maxTimeMS(200 * numConn).finish();
+const maxTimeMS = Math.max(500 * numConn, 5000);
+explain = t.explain().find().maxTimeMS(maxTimeMS).finish();
 assert.commandWorked(explain);
-explain = t.find().maxTimeMS(200 * numConn).explain();
+explain = t.find().maxTimeMS(maxTimeMS).explain();
 assert.commandWorked(explain);
 
 // .readPref()
@@ -207,16 +212,18 @@ assert.commandWorked(explain);
 assert("queryPlanner" in explain);
 
 // .hasNext()
-var explainQuery = t.explain().find();
+let explainQuery = t.explain().find();
 assert(explainQuery.hasNext());
 assert.commandWorked(explainQuery.next());
 assert(!explainQuery.hasNext());
 
 // .forEach()
-var results = [];
-t.explain().find().forEach(function(res) {
-    results.push(res);
-});
+let results = [];
+t.explain()
+    .find()
+    .forEach(function (res) {
+        results.push(res);
+    });
 assert.eq(1, results.length);
 assert.commandWorked(results[0]);
 
@@ -227,8 +234,7 @@ assert.commandWorked(results[0]);
 // optimizations with '$_internalInhibitOptimization' stage.
 //
 
-explain = t.explain().aggregate(
-    [{$_internalInhibitOptimization: {}}, {$match: {a: 3}}, {$group: {_id: null}}]);
+explain = t.explain().aggregate([{$_internalInhibitOptimization: {}}, {$match: {a: 3}}, {$group: {_id: null}}]);
 assert.commandWorked(explain);
 explain = getSingleNodeExplain(explain);
 assert.eq(4, explain.stages.length);
@@ -241,17 +247,16 @@ explain = getSingleNodeExplain(explain);
 assert.eq(3, explain.stages.length);
 assert("queryPlanner" in explain.stages[0].$cursor);
 
-explain = t.explain().aggregate(
-    {$_internalInhibitOptimization: {}}, {$project: {a: 3}}, {$group: {_id: null}});
+explain = t.explain().aggregate({$_internalInhibitOptimization: {}}, {$project: {a: 3}}, {$group: {_id: null}});
 assert.commandWorked(explain);
 explain = getSingleNodeExplain(explain);
 assert.eq(4, explain.stages.length);
 assert("queryPlanner" in explain.stages[0].$cursor);
 
 // Options already provided.
-explain = t.explain().aggregate(
-    [{$_internalInhibitOptimization: {}}, {$match: {a: 3}}, {$group: {_id: null}}],
-    {allowDiskUse: true});
+explain = t
+    .explain()
+    .aggregate([{$_internalInhibitOptimization: {}}, {$match: {a: 3}}, {$group: {_id: null}}], {allowDiskUse: true});
 assert.commandWorked(explain);
 explain = getSingleNodeExplain(explain);
 assert.eq(4, explain.stages.length);
@@ -302,17 +307,17 @@ assert.commandWorked(t.dropIndex({c: 1}));
 // .distinct()
 //
 
-explain = t.explain().distinct('_id');
+explain = t.explain().distinct("_id");
 assert.commandWorked(explain);
 assert(planHasStage(db, getWinningPlanFromExplain(explain), "PROJECTION_COVERED"));
 assert(planHasStage(db, getWinningPlanFromExplain(explain), "DISTINCT_SCAN"));
 
-explain = t.explain().distinct('a');
+explain = t.explain().distinct("a");
 assert.commandWorked(explain);
 assert(planHasStage(db, getWinningPlanFromExplain(explain), "PROJECTION_COVERED"));
 assert(planHasStage(db, getWinningPlanFromExplain(explain), "DISTINCT_SCAN"));
 
-explain = t.explain().distinct('b');
+explain = t.explain().distinct("b");
 assert.commandWorked(explain);
 assert(planHasStage(db, getWinningPlanFromExplain(explain), "COLLSCAN"));
 
@@ -431,8 +436,7 @@ assert.eq(1, explain.executionStats.totalDocsExamined);
 assert.eq(10, t.count());
 
 // findAndModify with upsert flag set that should do an insert.
-explain = t.explain("executionStats")
-              .findAndModify({query: {a: 15}, update: {$set: {b: 3}}, upsert: true});
+explain = t.explain("executionStats").findAndModify({query: {a: 15}, update: {$set: {b: 3}}, upsert: true});
 assert.commandWorked(explain);
 stage = explain.executionStats.executionStages;
 if ("SINGLE_SHARD" === stage.stage) {
@@ -449,21 +453,21 @@ assert.eq(10, t.count());
 //
 
 // Can't explain an update without a query.
-assert.throws(function() {
+assert.throws(function () {
     t.explain().update();
 });
 
 // Can't explain an update without mods.
-assert.throws(function() {
+assert.throws(function () {
     t.explain().update({a: 3});
 });
 
 // Can't add fourth arg when using document-style specification of update options.
-assert.throws(function() {
+assert.throws(function () {
     t.explain().update({a: 3}, {$set: {b: 4}}, {multi: true}, true);
 });
 
 // Can't specify both remove and update in a findAndModify
-assert.throws(function() {
+assert.throws(function () {
     t.explain().findAndModify({remove: true, update: {$set: {b: 3}}});
 });

@@ -29,29 +29,30 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <set>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/change_stream_event_transform.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
 #include "mongo/db/pipeline/document_source_change_stream_gen.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
+
+#include <memory>
+#include <set>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
-class DocumentSourceChangeStreamTransform : public DocumentSourceInternalChangeStreamStage {
+class DocumentSourceChangeStreamTransform final : public DocumentSourceInternalChangeStreamStage {
 public:
     static constexpr StringData kStageName = "$_internalChangeStreamTransform"_sd;
 
@@ -82,27 +83,39 @@ public:
         MONGO_UNREACHABLE;
     }
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final;
+    StageConstraints constraints(PipelineSplitState pipeState) const final;
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
         return boost::none;
     }
 
     const char* getSourceName() const final {
-        return kStageName.rawData();
+        return kStageName.data();
     }
 
-protected:
-    DocumentSource::GetNextResult doGetNext() override;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
+    }
+
+    const ChangeStreamEventTransformation::SupportedEvents& getSupportedEvents_forTest() const {
+        return _transformer->getSupportedEvents_forTest();
+    }
 
 private:
+    friend boost::intrusive_ptr<exec::agg::Stage> documentSourceChangeStreamTransformToStageFn(
+        const boost::intrusive_ptr<DocumentSource>& documentSource);
+
     // This constructor is private, callers should use the 'create()' method above.
     DocumentSourceChangeStreamTransform(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                         DocumentSourceChangeStreamSpec spec);
 
     DocumentSourceChangeStreamSpec _changeStreamSpec;
 
-    ChangeStreamEventTransformer _transformer;
+    // TODO SERVER-105521: Check if we can change from 'std::shared_ptr' to 'std::unique_ptr', and
+    // std::move the transformer to the Stage.
+    std::shared_ptr<ChangeStreamEventTransformer> _transformer;
 
     // Set to true if this transformation stage can be run on the collectionless namespace.
     bool _isIndependentOfAnyCollection;

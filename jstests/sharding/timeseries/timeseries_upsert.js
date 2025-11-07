@@ -12,12 +12,14 @@ import {
     setUpShardedCluster,
     st,
     testDB,
-    timeFieldName
+    timeFieldName,
 } from "jstests/core/timeseries/libs/timeseries_writes_util.js";
 
 setUpShardedCluster();
 
-const collName = 'sharded_timeseries_upsert';
+const uweEnabled = TestData.setParametersMongos.internalQueryUnifiedWriteExecutor;
+
+const collName = "sharded_timeseries_upsert";
 const dateTime = new ISODate();
 
 function generateDocsForTestCase(collConfig) {
@@ -27,21 +29,21 @@ function generateDocsForTestCase(collConfig) {
             _id: i,
             [metaFieldName]: collConfig.metaGenerator(i),
             [timeFieldName]: dateTime,
-            f: i
+            f: i,
         });
     }
     return documents;
 }
 
 const metaShardKey = {
-    metaGenerator: (id => id),
+    metaGenerator: (id) => id,
     shardKey: {[metaFieldName]: 1},
     splitPoint: {meta: 2},
 };
 const metaSubFieldShardKey = {
-    metaGenerator: (index => ({a: index})),
-    shardKey: {[metaFieldName + '.a']: 1},
-    splitPoint: {'meta.a': 2},
+    metaGenerator: (index) => ({a: index}),
+    shardKey: {[metaFieldName + ".a"]: 1},
+    splitPoint: {"meta.a": 2},
 };
 
 function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey = false}) {
@@ -51,7 +53,7 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
         collName,
         initialDocList: documents,
         shardKey: collConfig.shardKey,
-        splitPoint: collConfig.splitPoint
+        splitPoint: collConfig.splitPoint,
     });
 
     // Performs updates.
@@ -84,8 +86,7 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
     const resultDocs = coll.find().toArray();
     assert.eq(resultDocs.length, documents.length);
 
-    assert.sameMembers(
-        resultDocs, documents, "Collection contents did not match expected after upsert");
+    assert.sameMembers(resultDocs, documents, "Collection contents did not match expected after upsert");
 }
 
 //
@@ -107,7 +108,7 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
             q: {[metaFieldName]: {$gt: 0}, f: 1000},
             u: {$set: {[timeFieldName]: dateTime}},
             multi: true,
-            upsert: true
+            upsert: true,
         },
         errorCode: ErrorCodes.ShardKeyNotFound,
     });
@@ -120,7 +121,7 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
             q: {[metaFieldName]: -1},
             u: [{$set: {[timeFieldName]: dateTime, f: 15}}, {$unset: metaFieldName}],
             multi: true,
-            upsert: true
+            upsert: true,
         },
         upsertedDoc: {[timeFieldName]: dateTime, f: 15},
     });
@@ -133,7 +134,7 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
             q: {[metaFieldName]: -1},
             u: {$set: {[timeFieldName]: dateTime, f: 15}},
             multi: true,
-            upsert: true
+            upsert: true,
         },
         upsertedDoc: {[metaFieldName]: -1, [timeFieldName]: dateTime, f: 15},
     });
@@ -146,7 +147,7 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
             q: {[metaFieldName]: -1},
             u: {$set: {[metaFieldName]: -10, [timeFieldName]: dateTime, f: 15}},
             multi: true,
-            upsert: true
+            upsert: true,
         },
         upsertedDoc: {[metaFieldName]: -10, [timeFieldName]: dateTime, f: 15},
     });
@@ -159,7 +160,7 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
             q: {[metaFieldName]: -1},
             u: {$set: {[metaFieldName]: [1, 2, 3], [timeFieldName]: dateTime, f: 15}},
             multi: true,
-            upsert: true
+            upsert: true,
         },
         errorCode: ErrorCodes.NotSingleValueField,
     });
@@ -176,7 +177,7 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
             q: {[metaFieldName]: 1},
             u: {$set: {[timeFieldName]: dateTime}},
             multi: true,
-            upsert: true
+            upsert: true,
         },
         errorCode: ErrorCodes.ShardKeyNotFound,
     });
@@ -186,10 +187,10 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
     runTest({
         collConfig: metaSubFieldShardKey,
         updateOp: {
-            q: {[metaFieldName + '.a']: {$gt: 0}, f: 1000},
+            q: {[metaFieldName + ".a"]: {$gt: 0}, f: 1000},
             u: {$set: {[timeFieldName]: dateTime}},
             multi: true,
-            upsert: true
+            upsert: true,
         },
         errorCode: ErrorCodes.ShardKeyNotFound,
     });
@@ -199,13 +200,10 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
     runTest({
         collConfig: metaSubFieldShardKey,
         updateOp: {
-            q: {[metaFieldName + '.a']: -1},
-            u: [
-                {$set: {[metaFieldName + '.b']: 10, [timeFieldName]: dateTime, f: 15}},
-                {$unset: metaFieldName + '.a'}
-            ],
+            q: {[metaFieldName + ".a"]: -1},
+            u: [{$set: {[metaFieldName + ".b"]: 10, [timeFieldName]: dateTime, f: 15}}, {$unset: metaFieldName + ".a"}],
             multi: true,
-            upsert: true
+            upsert: true,
         },
         upsertedDoc: {[metaFieldName]: {b: 10}, [timeFieldName]: dateTime, f: 15},
     });
@@ -215,10 +213,10 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
     runTest({
         collConfig: metaSubFieldShardKey,
         updateOp: {
-            q: {[metaFieldName + '.a']: -1},
+            q: {[metaFieldName + ".a"]: -1},
             u: {$set: {[timeFieldName]: dateTime, f: 15}},
             multi: true,
-            upsert: true
+            upsert: true,
         },
         upsertedDoc: {[metaFieldName]: {a: -1}, [timeFieldName]: dateTime, f: 15},
     });
@@ -228,10 +226,10 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
     runTest({
         collConfig: metaSubFieldShardKey,
         updateOp: {
-            q: {[metaFieldName + '.a']: -1},
-            u: {$set: {[metaFieldName + '.a']: -10, [timeFieldName]: dateTime, f: 15}},
+            q: {[metaFieldName + ".a"]: -1},
+            u: {$set: {[metaFieldName + ".a"]: -10, [timeFieldName]: dateTime, f: 15}},
             multi: true,
-            upsert: true
+            upsert: true,
         },
         upsertedDoc: {[metaFieldName]: {a: -10}, [timeFieldName]: dateTime, f: 15},
     });
@@ -241,10 +239,10 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
     runTest({
         collConfig: metaSubFieldShardKey,
         updateOp: {
-            q: {[metaFieldName + '.a']: -1},
-            u: {$set: {[metaFieldName + '.a']: [1, 2, 3], [timeFieldName]: dateTime, f: 15}},
+            q: {[metaFieldName + ".a"]: -1},
+            u: {$set: {[metaFieldName + ".a"]: [1, 2, 3], [timeFieldName]: dateTime, f: 15}},
             multi: true,
-            upsert: true
+            upsert: true,
         },
         errorCode: ErrorCodes.NotSingleValueField,
     });
@@ -257,8 +255,7 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
 (function testSingleUpdateNoShardKey() {
     runTest({
         collConfig: metaShardKey,
-        updateOp:
-            {q: {f: 1000}, u: {$set: {[timeFieldName]: dateTime}}, multi: false, upsert: true},
+        updateOp: {q: {f: 1000}, u: {$set: {[timeFieldName]: dateTime}}, multi: false, upsert: true},
         upsertedDoc: {f: 1000, [timeFieldName]: dateTime},
     });
 })();
@@ -270,7 +267,7 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
             q: {[metaFieldName]: {$gt: 0}, f: 1000},
             u: {$set: {[timeFieldName]: dateTime}},
             multi: false,
-            upsert: true
+            upsert: true,
         },
         upsertedDoc: {f: 1000, [timeFieldName]: dateTime},
     });
@@ -283,25 +280,28 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
             q: {[metaFieldName]: -1},
             u: {$set: {[metaFieldName]: -10, [timeFieldName]: dateTime, f: 15}},
             multi: false,
-            upsert: true
+            upsert: true,
         },
         upsertedDoc: {[metaFieldName]: -10, [timeFieldName]: dateTime, f: 15},
     });
 })();
 
-(function testSingleUpdateReplacementDocWouldChangeOwningShard() {
-    runTest({
-        collConfig: metaShardKey,
-        updateOp: {
-            q: {[metaFieldName]: -1},
-            u: {[metaFieldName]: 10, [timeFieldName]: dateTime, f: 15},
-            multi: false,
-            upsert: true
-        },
-        upsertedDoc: {[metaFieldName]: 10, [timeFieldName]: dateTime, f: 15},
-        updateShardKey: true,
-    });
-})();
+// TODO SERVER-104122: Handle WCOS error in UWE.
+if (!uweEnabled) {
+    (function testSingleUpdateReplacementDocWouldChangeOwningShard() {
+        runTest({
+            collConfig: metaShardKey,
+            updateOp: {
+                q: {[metaFieldName]: -1},
+                u: {[metaFieldName]: 10, [timeFieldName]: dateTime, f: 15},
+                multi: false,
+                upsert: true,
+            },
+            upsertedDoc: {[metaFieldName]: 10, [timeFieldName]: dateTime, f: 15},
+            updateShardKey: true,
+        });
+    })();
+}
 
 (function testSingleUpdateReplacementDocWithNoShardKey() {
     runTest({
@@ -310,9 +310,9 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
             q: {[metaFieldName]: -1},
             u: {[timeFieldName]: dateTime, f: 15},
             multi: false,
-            upsert: true
+            upsert: true,
         },
-        upsertedDoc: {[timeFieldName]: dateTime, f: 15}
+        upsertedDoc: {[timeFieldName]: dateTime, f: 15},
     });
 })();
 
@@ -327,7 +327,7 @@ function runTest({collConfig, updateOp, upsertedDoc, errorCode, updateShardKey =
             upsertSupplied: true,
             c: {new: {[timeFieldName]: dateTime, f: 15}},
         },
-        upsertedDoc: {[timeFieldName]: dateTime, f: 15}
+        upsertedDoc: {[timeFieldName]: dateTime, f: 15},
     });
 })();
 

@@ -27,12 +27,7 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <memory>
-#include <mutex>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/keys_collection_manager.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -44,20 +39,23 @@
 #include "mongo/db/key_generator.h"
 #include "mongo/db/keys_collection_cache.h"
 #include "mongo/db/keys_collection_client.h"
-#include "mongo/db/keys_collection_manager.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/vector_clock.h"
+#include "mongo/db/vector_clock/vector_clock.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <memory>
+#include <mutex>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -220,7 +218,7 @@ void KeysCollectionManager::enableKeyGenerator(OperationContext* opCtx, bool doE
         _refresher.switchFunc(
             opCtx, [this](OperationContext* opCtx) { return _keysCache.refresh(opCtx); });
     }
-} catch (const ExceptionForCat<ErrorCategory::ShutdownError>& ex) {
+} catch (const ExceptionFor<ErrorCategory::ShutdownError>& ex) {
     LOGV2(518091, "Exception during key generation", "error"_attr = ex, "enable"_attr = doEnable);
     return;
 }
@@ -335,10 +333,12 @@ void KeysCollectionManager::PeriodicRunner::_doPeriodicRefresh(ServiceContext* s
             } else {
                 totalErrorCount += 1;
 
-                nextRefreshInterval =
-                    Milliseconds(kRefreshIntervalIfErrored.count() * totalErrorCount);
-                if (nextRefreshInterval > kMaxRefreshWaitTimeIfErrored) {
-                    nextRefreshInterval = kMaxRefreshWaitTimeIfErrored;
+                if (latestKeyStatus != ErrorCodes::NotWritablePrimary) {
+                    nextRefreshInterval =
+                        Milliseconds(kRefreshIntervalIfErrored.count() * totalErrorCount);
+                    if (nextRefreshInterval > kMaxRefreshWaitTimeIfErrored) {
+                        nextRefreshInterval = kMaxRefreshWaitTimeIfErrored;
+                    }
                 }
                 LOGV2(4939300,
                       "Failed to refresh key cache",
@@ -431,7 +431,7 @@ void KeysCollectionManager::PeriodicRunner::stop() {
     _backgroundThread.join();
 }
 
-bool KeysCollectionManager::PeriodicRunner::hasSeenKeys() const noexcept {
+bool KeysCollectionManager::PeriodicRunner::hasSeenKeys() const {
     return _hasSeenKeys.load();
 }
 

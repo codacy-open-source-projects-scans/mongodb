@@ -29,23 +29,18 @@
 
 #include "mongo/db/repl/rollback_test_fixture.h"
 
-#include <cstdint>
-#include <string>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/checked_cast.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
@@ -61,14 +56,19 @@
 #include "mongo/db/repl/replication_recovery.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/session/session_catalog_mongod.h"
-#include "mongo/db/shard_role.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/transaction/session_catalog_mongod_transaction_interface_impl.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace repl {
@@ -85,13 +85,18 @@ ReplSettings createReplSettings() {
     return settings;
 }
 
+StorageEngine::TimestampMonitor::TimestampListener mockTimestampListener(
+    StorageEngine::TimestampMonitor::TimestampType::kOldest,
+    [](OperationContext* opCtx, Timestamp timestamp) {});
+
 class RollbackTestOpObserver : public OpObserverNoop {
 public:
     repl::OpTime onDropCollection(OperationContext* opCtx,
                                   const NamespaceString& collectionName,
                                   const UUID& uuid,
                                   std::uint64_t numRecords,
-                                  bool markFromMigrate) override {
+                                  bool markFromMigrate,
+                                  bool isViewlessTimeseries) override {
         // If the oplog is not disabled for this namespace, then we need to reserve an op time for
         // the drop.
         if (!repl::ReplicationCoordinator::get(opCtx)->isOplogDisabledFor(opCtx, collectionName)) {
@@ -111,6 +116,7 @@ void RollbackTest::setUp() {
 
     _storageInterface = new StorageInterfaceRollback();
     auto serviceContext = getServiceContext();
+    serviceContext->getStorageEngine()->startTimestampMonitor({&mockTimestampListener});
     auto consistencyMarkers = std::make_unique<ReplicationConsistencyMarkersMock>();
     auto recovery =
         std::make_unique<ReplicationRecoveryImpl>(_storageInterface, consistencyMarkers.get());
@@ -246,36 +252,6 @@ Collection* RollbackTest::_createCollection(OperationContext* opCtx,
     return coll;
 }
 
-Collection* RollbackTest::_createCollection(OperationContext* opCtx,
-                                            const std::string& nss,
-                                            const CollectionOptions& options) {
-    return _createCollection(opCtx, NamespaceString::createNamespaceString_forTest(nss), options);
-}
-
-void RollbackTest::_insertDocument(OperationContext* opCtx,
-                                   const NamespaceString& nss,
-                                   const BSONObj& doc) {
-    const auto collection = [&]() {
-        while (true) {
-            auto collection = acquireCollection(opCtx,
-                                                CollectionAcquisitionRequest::fromOpCtx(
-                                                    opCtx, nss, AcquisitionPrerequisites::kWrite),
-                                                MODE_IX);
-            if (collection.exists()) {
-                return collection;
-            }
-
-            CollectionOptions options;
-            options.uuid = UUID::gen();
-            _createCollection(opCtx, nss, options);
-        }
-    }();
-
-    WriteUnitOfWork wuow(opCtx);
-    ASSERT_OK(Helpers::insert(opCtx, collection, doc));
-    wuow.commit();
-}
-
 Status RollbackTest::_insertOplogEntry(const BSONObj& doc) {
     TimestampedBSONObj obj;
     obj.obj = doc;
@@ -284,45 +260,5 @@ Status RollbackTest::_insertOplogEntry(const BSONObj& doc) {
         _opCtx.get(), NamespaceString::kRsOplogNamespace, obj, 0);
 }
 
-RollbackSourceMock::RollbackSourceMock(std::unique_ptr<OplogInterface> oplog)
-    : _oplog(std::move(oplog)) {}
-
-const OplogInterface& RollbackSourceMock::getOplog() const {
-    return *_oplog;
-}
-
-const HostAndPort& RollbackSourceMock::getSource() const {
-    return _source;
-}
-
-int RollbackSourceMock::getRollbackId() const {
-    return 0;
-}
-
-BSONObj RollbackSourceMock::getLastOperation() const {
-    auto iter = _oplog->makeIterator();
-    auto result = iter->next();
-    ASSERT_OK(result.getStatus());
-    return result.getValue().first;
-}
-
-BSONObj RollbackSourceMock::findOne(const NamespaceString& nss, const BSONObj& filter) const {
-    return BSONObj();
-}
-
-std::pair<BSONObj, NamespaceString> RollbackSourceMock::findOneByUUID(const DatabaseName& db,
-                                                                      UUID uuid,
-                                                                      const BSONObj& filter) const {
-    return {BSONObj(), NamespaceString::kEmpty};
-}
-
-StatusWith<BSONObj> RollbackSourceMock::getCollectionInfo(const NamespaceString& nss) const {
-    return BSON("name" << nss.ns_forTest() << "options" << BSONObj());
-}
-
-StatusWith<BSONObj> RollbackSourceMock::getCollectionInfoByUUID(const DatabaseName& dbName,
-                                                                const UUID& uuid) const {
-    return BSON("options" << BSONObj() << "info" << BSON("uuid" << uuid));
-}
 }  // namespace repl
 }  // namespace mongo

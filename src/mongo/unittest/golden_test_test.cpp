@@ -27,27 +27,26 @@
  *    it in the license file.
  */
 
-#include <exception>
-#include <ostream>
-#include <string>
-
-#include <boost/filesystem/path.hpp>
-#include <boost/filesystem/path_traits.hpp>
-#include <fmt/format.h>
+#include "mongo/unittest/golden_test.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/unittest/assert.h"
 #include "mongo/unittest/framework.h"
-#include "mongo/unittest/golden_test.h"
 #include "mongo/unittest/golden_test_base.h"
 #include "mongo/unittest/test_info.h"
 #include "mongo/util/assert_util.h"
+
+#include <exception>
+#include <ostream>
+#include <string>
+
+#include <boost/filesystem.hpp>
+#include <fmt/format.h>
 
 namespace mongo::unittest {
 namespace {
 
 namespace fs = boost::filesystem;
-using namespace fmt::literals;
 
 GoldenTestConfig goldenTestConfig{"src/mongo/unittest/expected_output"};
 
@@ -91,7 +90,7 @@ TEST(GoldenSelfTest, GoldenTestContextGetPath) {
     // Verify that names with invalid characters fail with test asertion.
     std::string badChars = "./\\*~`!@#$%^&*()";
     for (char c : badChars) {
-        std::string badName = "Bad{}Name"_format(c);
+        std::string badName = fmt::format("Bad{}Name", c);
 
         {
             TestInfo testInfo(badName, "TestName"_sd, __FILE__, __LINE__);

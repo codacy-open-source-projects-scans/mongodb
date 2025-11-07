@@ -28,13 +28,6 @@
  */
 
 
-#include <algorithm>
-#include <cstddef>
-#include <random>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -42,12 +35,14 @@
 #include "mongo/db/update/document_diff_test_helpers.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/random.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <random>
+#include <vector>
+
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -94,18 +89,18 @@ std::vector<BSONObj> getDocumentsRepo() {
                                  "{level1Field1: {}}, field3: {level1Field3: ['val']}}"),
         createObjWithLargePrefix(
             "{field3: {level1Field1: [{level1Field1: [1, 2]}]}, field1: "
-            "{level1Field1: {}}, field2: {level1Field3: ['val']}}, field4: [[]]"),
+            "{level1Field1: {}}, field2: {level1Field3: ['val']}, field4: [[]]}"),
 
         // Unrelated documents.
         createObjWithLargePrefix(
             "{newField1: {level1Field1: [{level1Field1: [1, 2]}]}, newField2: {level1Field1: {}}, "
-            "newField4: {level1Field3: ['val']}}, newField3: [[]]"),
+            "newField4: {level1Field3: ['val']}, newField3: [[]]}"),
         createObjWithLargePrefix(
             "{newField2: {level1Field1: {}}, newField1: {level1Field1: [{level1Field1: [1, 2]}]},"
-            "newField4: {level1Field3: ['val']}}, newField3: [[]]"),
+            "newField4: {level1Field3: ['val']}, newField3: [[]]}"),
         createObjWithLargePrefix(
             "{newField3: {level1Field1: [{level1Field1: [1, 2]}]}, newField2: {level1Field1: {}}, "
-            "newField4: {level1Field3: ['val']}}, newField1: [[]]"),
+            "newField4: {level1Field3: ['val']}, newField1: [[]]}"),
     };
     return documents;
 }
@@ -122,8 +117,8 @@ std::vector<BSONObj> getDocumentsRepoAppendOnly() {
         createObjWithLargePrefix(
             "{field1: {level1Field1: {level1Field1: 1}, level1Field2: 'val2'}, field2: "
             "{level1Field1: {level2Field1: {}}}, field3: {level1Field3: 'va2', level1Field4: "
-            "'va4'}, field4: ['arrayVal1', 'arrayVal2', 'arrayVal3', 'arrayVal4', 'arrayVal5']}, "
-            "field5: {}, field6: 'va6'"),
+            "'va4'}, field4: ['arrayVal1', 'arrayVal2', 'arrayVal3', 'arrayVal4', 'arrayVal5'], "
+            "field5: {}, field6: 'va6'}"),
     };
     return documents;
 }

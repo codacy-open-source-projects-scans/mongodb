@@ -29,53 +29,41 @@
 
 #include "mongo/db/s/range_deleter_service.h"
 
-#include <absl/container/node_hash_map.h>
-#include <absl/meta/type_traits.h>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <iterator>
-#include <tuple>
-#include <type_traits>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/checked_cast.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/dbclient_cursor.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/global_catalog/shard_key_pattern.h"
 #include "mongo/db/keypattern.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
+#include "mongo/db/local_catalog/shard_role_catalog/shard_filtering_metadata_refresh.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_registry.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/repl/repl_client_info.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
-#include "mongo/db/s/collection_metadata.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/range_deleter_service_op_observer.h"
+#include "mongo/db/s/range_deletion.h"
 #include "mongo/db/s/range_deletion_util.h"
-#include "mongo/db/s/shard_filtering_metadata_refresh.h"
-#include "mongo/db/s/sharding_runtime_d_params_gen.h"
+#include "mongo/db/sharding_environment/sharding_runtime_d_params_gen.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/network_interface_thread_pool.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/shard_key_pattern.h"
 #include "mongo/util/cancellation.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
@@ -84,11 +72,26 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 
+#include <iterator>
+#include <tuple>
+#include <type_traits>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <absl/meta/type_traits.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kShardingRangeDeleter
 
 namespace mongo {
 namespace {
 const auto rangeDeleterServiceDecorator = ServiceContext::declareDecoration<RangeDeleterService>();
+
+const Seconds kCheckForEnabledServiceInterval(10);
+const Seconds kMissingIndexRetryInterval(10);
 
 BSONObj getShardKeyPattern(OperationContext* opCtx,
                            const DatabaseName& dbName,
@@ -130,8 +133,10 @@ RangeDeleterService* RangeDeleterService::get(OperationContext* opCtx) {
 }
 
 RangeDeleterService::ReadyRangeDeletionsProcessor::ReadyRangeDeletionsProcessor(
-    OperationContext* opCtx)
-    : _service(opCtx->getServiceContext()), _thread([this] { _runRangeDeletions(); }) {}
+    OperationContext* opCtx, std::shared_ptr<executor::TaskExecutor> executor)
+    : _service(opCtx->getServiceContext()),
+      _thread([this] { _runRangeDeletions(); }),
+      _executor(executor) {}
 
 RangeDeleterService::ReadyRangeDeletionsProcessor::~ReadyRangeDeletionsProcessor() {
     shutdown();
@@ -207,6 +212,14 @@ void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
             }
         }
 
+        // Once passing this check, the range deletion will be processed without being halted, even
+        // if the range deleter gets disabled halfway through.
+        if (RangeDeleterService::get(opCtx)->isDisabled()) {
+            MONGO_IDLE_THREAD_BLOCK;
+            sleepFor(kCheckForEnabledServiceInterval);
+            continue;
+        }
+
         auto task = _queue.front();
         const auto dbName = task.getNss().dbName();
         const auto collectionUuid = task.getCollectionUuid();
@@ -224,19 +237,36 @@ void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
                 bool orphansRemovalCompleted = false;
                 while (!orphansRemovalCompleted) {
                     try {
-                        LOGV2_DEBUG(6872501,
-                                    2,
-                                    "Beginning deletion of documents in orphan range",
-                                    "dbName"_attr = dbName,
-                                    "collectionUUID"_attr = collectionUuid.toString(),
-                                    "range"_attr = redact(range.toString()));
+                        NamespaceString nss;
+                        {
+                            AutoGetCollection collection(
+                                opCtx, NamespaceStringOrUUID{dbName, collectionUuid}, MODE_IS);
+                            // It's possible for the namespace to become outdated if a concurrent
+                            // rename of collection occurs, because rangeDeletion is not
+                            // synchronized with DDL operations. We are using the nss variable
+                            // solely for logging purposes.
+                            nss = collection.getNss();
+                        }
+                        LOGV2_INFO(6872501,
+                                   "Beginning deletion of documents in orphan range",
+                                   "namespace"_attr = nss,
+                                   "collectionUUID"_attr = collectionUuid.toString(),
+                                   "range"_attr = redact(range.toString()));
 
                         auto shardKeyPattern =
                             (optKeyPattern ? (*optKeyPattern).toBSON()
                                            : getShardKeyPattern(opCtx, dbName, collectionUuid));
 
-                        uassertStatusOK(rangedeletionutil::deleteRangeInBatches(
-                            opCtx, dbName, collectionUuid, shardKeyPattern, range));
+                        auto numDocsAndBytesDeleted =
+                            uassertStatusOK(rangedeletionutil::deleteRangeInBatches(
+                                opCtx, dbName, collectionUuid, shardKeyPattern, range));
+                        LOGV2_INFO(9239400,
+                                   "Finished deletion of documents in orphan range",
+                                   "namespace"_attr = nss,
+                                   "collectionUUID"_attr = collectionUuid.toString(),
+                                   "range"_attr = redact(range.toString()),
+                                   "docsDeleted"_attr = numDocsAndBytesDeleted.first,
+                                   "bytesDeleted"_attr = numDocsAndBytesDeleted.second);
                         orphansRemovalCompleted = true;
                     } catch (ExceptionFor<ErrorCodes::NamespaceNotFound>&) {
                         // No orphaned documents to remove from a dropped collection
@@ -293,9 +323,11 @@ void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
 
                 // Remove persistent range deletion task
                 try {
-                    RangeDeleterService::get(opCtx)->deregisterTask(collectionUuid, range);
-                    rangedeletionutil::removePersistentRangeDeletionTask(
-                        opCtx, collectionUuid, range);
+                    auto* self = RangeDeleterService::get(opCtx);
+                    auto task = self->completeTask(collectionUuid, range);
+                    if (task) {
+                        rangedeletionutil::removePersistentTask(opCtx, task->getTaskId());
+                    }
 
                     LOGV2_DEBUG(6872504,
                                 2,
@@ -319,7 +351,21 @@ void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
                 // recoverable for a range shard key. This index may be rebuilt in the future, so
                 // reschedule the task at the end of the queue.
                 _completedRangeDeletion();
-                emplaceRangeDeletion(task);
+
+                sleepFor(_executor, kMissingIndexRetryInterval)
+                    .getAsync([this, task](Status status) {
+                        if (!status.isOK()) {
+                            LOGV2_WARNING(9962300,
+                                          "Encountered an error while retrying a range deletion "
+                                          "task that previously failed due to missing index",
+                                          "status"_attr = status,
+                                          "task"_attr = task.toBSON());
+                            return;
+                        }
+
+                        emplaceRangeDeletion(task);
+                    });
+
                 break;
             } catch (const DBException&) {
                 // Release the thread only in case the operation context has been interrupted, as
@@ -340,23 +386,12 @@ void RangeDeleterService::ReadyRangeDeletionsProcessor::_runRangeDeletions() {
 }
 
 void RangeDeleterService::onStartup(OperationContext* opCtx) {
-    if (disableResumableRangeDeleter.load()) {
-        return;
-    }
-
     auto opObserverRegistry =
         checked_cast<OpObserverRegistry*>(opCtx->getServiceContext()->getOpObserver());
     opObserverRegistry->addObserver(std::make_unique<RangeDeleterServiceOpObserver>());
 }
 
 void RangeDeleterService::onStepUpComplete(OperationContext* opCtx, long long term) {
-    if (disableResumableRangeDeleter.load()) {
-        LOGV2_INFO(
-            6872508,
-            "Not resuming range deletions on step-up because `disableResumableRangeDeleter=true`");
-        return;
-    }
-
     // Wait until all tasks and thread from previous term drain
     _joinAndResetState();
 
@@ -373,9 +408,14 @@ void RangeDeleterService::onStepUpComplete(OperationContext* opCtx, long long te
     _executor->startup();
 
     // Initialize the range deletion processor to allow enqueueing ready task
-    _readyRangeDeletionsProcessorPtr = std::make_unique<ReadyRangeDeletionsProcessor>(opCtx);
+    _readyRangeDeletionsProcessorPtr =
+        std::make_unique<ReadyRangeDeletionsProcessor>(opCtx, _executor);
 
     _recoverRangeDeletionsOnStepUp(opCtx);
+}
+
+bool RangeDeleterService::isDisabled() {
+    return disableResumableRangeDeleter.load();
 }
 
 void RangeDeleterService::_recoverRangeDeletionsOnStepUp(OperationContext* opCtx) {
@@ -422,8 +462,8 @@ void RangeDeleterService::_recoverRangeDeletionsOnStepUp(OperationContext* opCtx
 
                     while (cursor->more()) {
                         auto completionFuture = this->registerTask(
-                            RangeDeletionTask::parse(IDLParserContext("rangeDeletionRecovery"),
-                                                     cursor->next()),
+                            RangeDeletionTask::parse(cursor->next(),
+                                                     IDLParserContext("rangeDeletionRecovery")),
                             SemiFuture<void>::makeReady(),
                             true /* fromResubmitOnStepUp */);
                         nRescheduledTasks++;
@@ -454,8 +494,8 @@ void RangeDeleterService::_recoverRangeDeletionsOnStepUp(OperationContext* opCtx
                     auto cursor = client.find(std::move(findCommand));
                     while (cursor->more()) {
                         (void)this->registerTask(
-                            RangeDeletionTask::parse(IDLParserContext("rangeDeletionRecovery"),
-                                                     cursor->next()),
+                            RangeDeletionTask::parse(cursor->next(),
+                                                     IDLParserContext("rangeDeletionRecovery")),
                             processingTasksCompletionFuture.thenRunOn(_executor).semi(),
                             true /* fromResubmitOnStepUp */);
                     }
@@ -528,25 +568,12 @@ void RangeDeleterService::onShutdown() {
 
 BSONObj RangeDeleterService::dumpState() {
     auto lock = _acquireMutexFailIfServiceNotUp();
-
-    BSONObjBuilder builder;
-    for (const auto& [collUUID, chunkRanges] : _rangeDeletionTasks) {
-        BSONArrayBuilder subBuilder(builder.subarrayStart(collUUID.toString()));
-        for (const auto& chunkRange : chunkRanges) {
-            subBuilder.append(chunkRange->toBSON());
-        }
-    }
-    return builder.obj();
+    return _rangeDeletionTasks.getAllTasksBSON();
 }
 
 long long RangeDeleterService::totalNumOfRegisteredTasks() {
     auto lock = _acquireMutexFailIfServiceNotUp();
-
-    long long counter = 0;
-    for (const auto& [collUUID, ranges] : _rangeDeletionTasks) {
-        counter += ranges.size();
-    }
-    return counter;
+    return _rangeDeletionTasks.getTaskCount();
 }
 
 SharedSemiFuture<void> RangeDeleterService::registerTask(
@@ -554,17 +581,6 @@ SharedSemiFuture<void> RangeDeleterService::registerTask(
     SemiFuture<void>&& waitForActiveQueriesToComplete,
     bool fromResubmitOnStepUp,
     bool pending) {
-
-    if (disableResumableRangeDeleter.load()) {
-        LOGV2_INFO(6872509,
-                   "Not scheduling range deletion because `disableResumableRangeDeleter=true`");
-        return SemiFuture<void>::makeReady(
-                   Status(ErrorCodes::ResumableRangeDeleterDisabled,
-                          "Not submitting any range deletion task because the "
-                          "disableResumableRangeDeleter server parameter is set to true"))
-            .share();
-    }
-
     auto scheduleRangeDeletionChain = [&](SharedSemiFuture<void> pendingFuture) {
         (void)pendingFuture.thenRunOn(_executor)
             .then([this,
@@ -618,13 +634,10 @@ SharedSemiFuture<void> RangeDeleterService::registerTask(
                 "range"_attr = redact(rdt.getRange().toString()),
                 "pending"_attr = pending);
 
-    auto [registeredTask, firstRegistration] =
-        _rangeDeletionTasks[rdt.getCollectionUuid()].insert(std::make_shared<RangeDeletion>(rdt));
+    auto [task, registrationResult] = _rangeDeletionTasks.registerTask(rdt);
 
-    auto task = static_cast<RangeDeletion*>(registeredTask->get());
-
-    // Register the task on the service only once, duplicate registrations will join
-    if (firstRegistration) {
+    // Register the task on the service only once, duplicate registrations will join.
+    if (registrationResult == RangeDeletionTaskTracker::kRegisteredNewTask) {
         scheduleRangeDeletionChain(task->getPendingFuture());
     }
 
@@ -636,70 +649,43 @@ SharedSemiFuture<void> RangeDeleterService::registerTask(
     return task->getCompletionFuture();
 }
 
-void RangeDeleterService::deregisterTask(const UUID& collUUID, const ChunkRange& range) {
+std::shared_ptr<RangeDeletion> RangeDeleterService::completeTask(const UUID& collUUID,
+                                                                 const ChunkRange& range) {
     auto lock = _acquireMutexFailIfServiceNotUp();
-    auto& rangeDeletionTasksForCollection = _rangeDeletionTasks[collUUID];
-    auto it = rangeDeletionTasksForCollection.find(std::make_shared<ChunkRange>(range));
-    if (it != rangeDeletionTasksForCollection.end()) {
-        static_cast<RangeDeletion*>(it->get())->makeReady();
-        rangeDeletionTasksForCollection.erase(it);
+    auto task = _rangeDeletionTasks.removeTask(collUUID, range);
+    if (task) {
+        task->markComplete();
     }
-    if (rangeDeletionTasksForCollection.size() == 0) {
-        _rangeDeletionTasks.erase(collUUID);
-    }
+    return task;
 }
 
 int RangeDeleterService::getNumRangeDeletionTasksForCollection(const UUID& collectionUUID) {
     auto lock = _acquireMutexFailIfServiceNotUp();
-    auto tasksSet = _rangeDeletionTasks.find(collectionUUID);
-    if (tasksSet == _rangeDeletionTasks.end()) {
-        return 0;
-    }
-    return tasksSet->second.size();
+    return _rangeDeletionTasks.getTaskCountForCollection(collectionUUID);
 }
 
 SharedSemiFuture<void> RangeDeleterService::getOverlappingRangeDeletionsFuture(
     const UUID& collectionUUID, const ChunkRange& range) {
-
-    if (disableResumableRangeDeleter.load()) {
+    if (isDisabled()) {
         return SemiFuture<void>::makeReady(
                    Status(ErrorCodes::ResumableRangeDeleterDisabled,
-                          "Not submitting any range deletion task because the "
-                          "disableResumableRangeDeleter server parameter is set to true"))
+                          "Not waiting for overlapping range deletion tasks because the resumable "
+                          "range deleter is disabled"))
             .share();
     }
 
     auto lock = _acquireMutexFailIfServiceNotUp();
 
-    auto mapEntry = _rangeDeletionTasks.find(collectionUUID);
-    if (mapEntry == _rangeDeletionTasks.end() || mapEntry->second.size() == 0) {
-        // No tasks scheduled for the specified collection
+    auto tasks = _rangeDeletionTasks.getOverlappingTasks(collectionUUID, range);
+    if (tasks.empty()) {
         return SemiFuture<void>::makeReady().share();
     }
 
-    std::vector<ExecutorFuture<void>> overlappingRangeDeletionsFutures;
-    auto addOverlappingRangeDeletionFuture = [&](std::shared_ptr<ChunkRange> range) {
-        auto future = static_cast<RangeDeletion*>(range.get())->getCompletionFuture();
-        // Scheduling wait on the current executor so that it gets invalidated on step-down
-        overlappingRangeDeletionsFutures.push_back(future.thenRunOn(_executor));
-    };
-
-    auto& rangeDeletions = mapEntry->second;
-    const auto rangeSharedPtr = std::make_shared<ChunkRange>(range);
-    auto forwardIt = rangeDeletions.lower_bound(rangeSharedPtr);
-    if (forwardIt != rangeDeletions.begin() && (std::prev(forwardIt)->get()->overlapWith(range))) {
-        addOverlappingRangeDeletionFuture(*std::prev(forwardIt));
+    std::vector<ExecutorFuture<void>> futures;
+    for (const auto& [_, task] : tasks) {
+        futures.emplace_back(task->getCompletionFuture().thenRunOn(_executor));
     }
-
-    while (forwardIt != rangeDeletions.end() && forwardIt->get()->overlapWith(range)) {
-        addOverlappingRangeDeletionFuture(*forwardIt);
-        forwardIt++;
-    }
-
-    if (overlappingRangeDeletionsFutures.size() == 0) {
-        return SemiFuture<void>::makeReady().share();
-    }
-    return whenAllSucceed(std::move(overlappingRangeDeletionsFutures)).share();
+    return whenAllSucceed(std::move(futures)).share();
 }
 
 }  // namespace mongo

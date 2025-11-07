@@ -29,11 +29,6 @@
 
 #include "mongo/db/auth/auth_op_observer.h"
 
-#include <memory>
-#include <set>
-
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -45,12 +40,13 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_impl.h"
 #include "mongo/db/auth/authorization_router_impl_for_test.h"
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/op_observer/op_observer_util.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/oplog.h"
@@ -64,11 +60,14 @@
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+#include <set>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 namespace {
@@ -146,10 +145,9 @@ public:
                                         "v2read",
                                         "test",
                                         credentials,
-                                        BSON_ARRAY(BSON("role"
-                                                        << "read"
-                                                        << "db"
-                                                        << "test")));
+                                        BSON_ARRAY(BSON("role" << "read"
+                                                               << "db"
+                                                               << "test")));
     }
 
     void doInsert(const NamespaceString& nss,
@@ -320,10 +318,9 @@ TEST_F(AuthOpObserverTest, OnUpdate) {
                                               "v2read",
                                               "test",
                                               credentials,
-                                              BSON_ARRAY(BSON("role"
-                                                              << "readwrite"
-                                                              << "db"
-                                                              << "test")));
+                                              BSON_ARRAY(BSON("role" << "readwrite"
+                                                                     << "db"
+                                                                     << "test")));
 
     doUpdate(usersNss, userDocument, updatedUserDoc, true);
 
@@ -333,8 +330,7 @@ TEST_F(AuthOpObserverTest, OnUpdate) {
 
 TEST_F(AuthOpObserverTest, OnDelete) {
     // Deleting a user document should trigger cache invalidation after the WUOW commits.
-    auto userDoc = BSON("_id"
-                        << "admin.v2read");
+    auto userDoc = BSON("_id" << "admin.v2read");
     doDelete(usersNss, userDoc, true);
 
     // Deleting a random document in the test collection should not trigger cache invalidation.

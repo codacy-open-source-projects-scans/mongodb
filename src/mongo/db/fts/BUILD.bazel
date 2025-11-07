@@ -17,7 +17,6 @@ mongo_cc_library(
         "fts_query.h",
         "fts_query_noop.h",
         "fts_util.h",
-        "//src/mongo/db:jsobj.h",
     ],
     deps = [
         "//src/mongo:base",
@@ -102,10 +101,12 @@ mongo_cc_library(
     ],
     deps = [
         "//src/mongo:base",
+        "//src/mongo/bson/dotted_path:dotted_path_support",
         "//src/mongo/db:common",
         "//src/mongo/db:query_expressions",
         "//src/mongo/db/fts/unicode",
-        "//src/mongo/db/query/bson:dotted_path_support",
+        "//src/mongo/db/query/bson:multikey_dotted_path_support",
+        "//src/mongo/db/query/compiler/parsers/matcher:matcher_parser",
         "//src/mongo/util:md5",
     ],
 )
@@ -139,7 +140,7 @@ mongo_cc_unit_test(
         "stop_words_test.cpp",
         "tokenizer_test.cpp",
     ],
-    tags = ["mongo_unittest_third_group"],
+    tags = ["mongo_unittest_fifth_group"],
     deps = [
         ":base_fts",
         "//src/mongo/db:query_expressions",

@@ -27,34 +27,26 @@
  *    it in the license file.
  */
 
-#include <fmt/format.h>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/timeseries/timeseries_update_delete_util.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/client.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/service_context_d_test_fixture.h"
-#include "mongo/db/timeseries/timeseries_update_delete_util.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/db/timeseries/timeseries_test_fixture.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <boost/move/utility_core.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
 
-class TimeseriesUpdateDeleteUtilTest : public ServiceContextMongoDTest {
+class TimeseriesUpdateDeleteUtilTest : public timeseries::TimeseriesTestFixture {
 protected:
-    void setUp() override {
-        ServiceContextMongoDTest::setUp();
-        _opCtx = cc().makeOperationContext();
-    }
-
     BSONObj _toBSON(const char* obj) const {
-        return fromjson(fmt::format(obj, _metaField));
+        return fromjson(fmt::format(fmt::runtime(obj), _metaField));
     }
 
     BSONObj _translateQuery(const char* query) const {
@@ -86,14 +78,14 @@ protected:
      * expected to be untranslated and still remain the metaField.
      */
     void _testTranslate(const char* obj, std::function<BSONObj(const BSONObj&)> translateFn) const {
-        ASSERT_BSONOBJ_EQ(
-            translateFn(fromjson(fmt::format(obj, _metaField, _metaField, _metaField))),
-            fromjson(fmt::format(obj, "meta", "meta", _metaField)));
+        ASSERT_BSONOBJ_EQ(translateFn(fromjson(
+                              fmt::format(fmt::runtime(obj), _metaField, _metaField, _metaField))),
+                          fromjson(fmt::format(fmt::runtime(obj), "meta", "meta", _metaField)));
 
-        ASSERT_THROWS_CODE(
-            translateFn(fromjson(fmt::format(obj, _metaField, "notMetaField", _metaField))),
-            AssertionException,
-            ErrorCodes::InvalidOptions);
+        ASSERT_THROWS_CODE(translateFn(fromjson(fmt::format(
+                               fmt::runtime(obj), _metaField, "notMetaField", _metaField))),
+                           AssertionException,
+                           ErrorCodes::InvalidOptions);
     }
 
     void _testTranslateQuery(const char* query) const {
@@ -105,11 +97,6 @@ protected:
     void _testTranslateUpdate(const char* update) const {
         _testTranslate(update, [this](const BSONObj& update) { return _translateUpdate(update); });
     }
-
-    ServiceContext::UniqueOperationContext _opCtx;
-    StringData _metaField = "tag";
-    NamespaceString _ns = NamespaceString::createNamespaceString_forTest(
-        "timeseries_update_delete_util_test", "system.buckets.t");
 };
 
 TEST_F(TimeseriesUpdateDeleteUtilTest, TranslateQueryEmpty) {

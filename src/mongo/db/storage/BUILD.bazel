@@ -1,4 +1,4 @@
-load("//bazel:mongo_src_rules.bzl", "idl_generator", "mongo_cc_library", "mongo_cc_unit_test")
+load("//bazel:mongo_src_rules.bzl", "idl_generator", "mongo_cc_benchmark", "mongo_cc_library", "mongo_cc_unit_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -10,24 +10,9 @@ exports_files(
 )
 
 mongo_cc_library(
-    name = "bson_collection_catalog_entry",
-    srcs = [
-        "bson_collection_catalog_entry.cpp",
-    ],
-    hdrs = [
-        "bson_collection_catalog_entry.h",
-    ],
-    deps = [
-        "//src/mongo/db:common",
-        "//src/mongo/db/catalog:collection_options",
-    ],
-)
-
-mongo_cc_library(
     name = "recovery_unit_base",
     srcs = [
         "recovery_unit.cpp",
-        "recovery_unit_noop.cpp",
     ],
     hdrs = [
         "recovery_unit.h",
@@ -37,14 +22,19 @@ mongo_cc_library(
     deps = [
         "//src/mongo:base",
         "//src/mongo/db:server_base",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/util:fail_point",
     ],
+)
+
+idl_generator(
+    name = "collection_truncate_markers_parameters_gen",
+    src = "collection_truncate_markers_parameters.idl",
 )
 
 mongo_cc_library(
     name = "record_store_base",
     srcs = [
         "collection_truncate_markers.cpp",
+        "collection_truncate_markers_parameters_gen",
         "record_store.cpp",
         "record_store_base.cpp",
     ],
@@ -65,6 +55,14 @@ mongo_cc_library(
     srcs = [],
     hdrs = [
         "damage_vector.h",
+    ],
+)
+
+mongo_cc_library(
+    name = "exceptions",
+    srcs = [],
+    hdrs = [
+        "exceptions.h",
     ],
 )
 
@@ -97,7 +95,6 @@ mongo_cc_library(
         "//src/mongo/db:service_context",
         "//src/mongo/db/admission:execution_admission_context",  # TODO(SERVER-93876): Remove.
         "//src/mongo/util:background_job",
-        "//src/mongo/util:fail_point",  # TODO(SERVER-93876): Remove.
         "//src/mongo/util/concurrency:spin_lock",  # TODO(SERVER-93876): Remove.
     ],
 )
@@ -137,56 +134,6 @@ idl_generator(
 )
 
 mongo_cc_library(
-    name = "capped_snapshots",
-    srcs = [
-        "capped_snapshots.cpp",
-    ],
-    hdrs = [
-        "capped_snapshots.h",
-    ],
-    deps = [
-        ":recovery_unit_base",  # TODO(SERVER-93876): Remove.
-        "//src/mongo:base",
-        "//src/mongo/db/concurrency:lock_manager",
-    ],
-)
-
-idl_generator(
-    name = "flow_control_parameters_gen",
-    src = "flow_control_parameters.idl",
-)
-
-mongo_cc_library(
-    name = "flow_control_parameters",
-    srcs = [
-        ":flow_control_parameters_gen",
-    ],
-    deps = [
-        "//src/mongo/db:server_base",
-    ],
-)
-
-mongo_cc_library(
-    name = "flow_control",
-    srcs = [
-        "flow_control.cpp",
-    ],
-    hdrs = [
-        "flow_control.h",
-    ],
-    deps = [
-        ":flow_control_parameters",
-        "//src/mongo/db:server_base",
-        "//src/mongo/db:service_context",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db:shard_role_api",
-        "//src/mongo/db/commands:server_status_core",
-        "//src/mongo/db/concurrency:flow_control_ticketholder",
-        "//src/mongo/util:background_job",
-        "//src/mongo/util:fail_point",
-    ],
-)
-
-mongo_cc_library(
     name = "storage_file_util",
     srcs = [
         "storage_file_util.cpp",
@@ -211,9 +158,6 @@ mongo_cc_library(
         ":storage_file_util",
         "//src/mongo:base",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db:service_context",
-        "//src/mongo/db/repl:replica_set_messages",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db/repl:storage_interface",
-        "//src/mongo/db/storage:journal_flusher",
     ],
 )
 
@@ -224,9 +168,7 @@ mongo_cc_library(
     ],
     hdrs = [
         "duplicate_key_error_info.h",
-    ],
-    header_deps = [
-        "//src/mongo/db/concurrency:flow_control_ticketholder",
+        "//src/mongo:core_headers",
     ],
     deps = [
         "//src/mongo:base",
@@ -243,6 +185,7 @@ mongo_cc_library(
         "//src/mongo/util:auto_clear_ptr.h",
     ],
     deps = [
+        ":prepare_conflict_tracker",
         "//src/mongo:base",
         "//src/mongo/db/storage/key_string",
     ],
@@ -252,10 +195,6 @@ mongo_cc_library(
     name = "index_entry_comparison",
     srcs = [
         "index_entry_comparison.cpp",
-        "//src/mongo/db/catalog:index_catalog.h",
-        "//src/mongo/db/catalog:index_catalog_entry.h",
-        "//src/mongo/db/index:index_descriptor.h",
-        "//src/mongo/db/index:index_descriptor_fwd.h",
     ],
     hdrs = [
         "index_entry_comparison.h",
@@ -279,8 +218,8 @@ mongo_cc_library(
     ],
     deps = [
         "//src/mongo/bson:bson_validate",
+        "//src/mongo/bson/dotted_path:dotted_path_support",
         "//src/mongo/db:server_base",
-        "//src/mongo/db/query/bson:dotted_path_support",
     ],
 )
 
@@ -308,7 +247,6 @@ mongo_cc_library(
         ":storage_parameters_gen",
     ],
     hdrs = [
-        "storage_engine_interface.h",
         "storage_options.h",
     ],
     deps = [
@@ -317,21 +255,29 @@ mongo_cc_library(
 )
 
 mongo_cc_library(
-    name = "durable_catalog",
-    srcs = [
-        "durable_catalog.cpp",
-        "//src/mongo/db/catalog:import_options.h",
-        "//src/mongo/db/storage/kv:kv_engine.h",
-    ],
+    name = "kv_backup_block",
+    srcs = [],
     hdrs = [
-        "durable_catalog.h",
+        "kv_backup_block.h",
     ],
     deps = [
-        ":bson_collection_catalog_entry",
+    ],
+)
+
+mongo_cc_library(
+    name = "mdb_catalog",
+    srcs = ["mdb_catalog.cpp"],
+    hdrs = [
+        "mdb_catalog.h",
+    ],
+    private_hdrs = [
+        "//src/mongo/db/rss:persistence_provider.h",
+        "//src/mongo/db/storage/kv:kv_engine.h",
+    ],
+    deps = [
         ":record_store_base",
-        ":storage_options",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db:server_base",
-        "//src/mongo/db/concurrency:lock_manager",
+        "//src/mongo/db/rss:replicated_storage_service",
         "//src/mongo/db/storage:feature_document_util",
         "//src/mongo/db/storage:ident",
     ],
@@ -345,20 +291,17 @@ mongo_cc_library(
     deps = [
         ":backup_cursor_hooks",  # TODO(SERVER-93876): Remove.
         ":storage_options",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db/commands:server_status_core",
+        "//src/mongo/db/commands/server_status:server_status_core",
     ],
 )
 
 mongo_cc_library(
     name = "disk_space_util",
-    srcs = [
-        "disk_space_util.cpp",
-        "disk_space_util.h",
-    ],
+    srcs = ["disk_space_util.cpp"],
+    private_hdrs = [":disk_space_util.h"],
     deps = [
         ":storage_options",  # TODO(SERVER-93876): Remove.
         "//src/mongo:base",
-        "//src/mongo/util:fail_point",
     ],
 )
 
@@ -375,7 +318,7 @@ mongo_cc_library(
         ":storage_options",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db:server_base",  # TODO(SERVER-93876): Remove.
         "//src/mongo/db:service_context",  # TODO(SERVER-93876): Remove.
-        "//src/mongo/db/commands:server_status_core",
+        "//src/mongo/db/commands/server_status:server_status_core",
     ],
 )
 
@@ -392,7 +335,6 @@ mongo_cc_library(
         "//src/mongo/db:server_base",
         "//src/mongo/db:service_context",  # TODO(SERVER-93876): Remove.
         "//src/mongo/util:background_job",
-        "//src/mongo/util:fail_point",  # TODO(SERVER-93876): Remove.
         "//src/mongo/util/concurrency:spin_lock",  # TODO(SERVER-93876): Remove.
     ],
 )
@@ -414,6 +356,7 @@ mongo_cc_library(
         "//src/mongo:base",
         "//src/mongo/db:service_context",
         "//src/mongo/db/commands:test_commands_enabled",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/storage:oplog_truncation",
     ],
 )
 
@@ -426,7 +369,7 @@ mongo_cc_library(
         "write_unit_of_work.h",
     ],
     header_deps = [
-        "//src/mongo/db/commands:server_status_core",
+        "//src/mongo/db/commands/server_status:server_status_core",
         "//src/mongo/db/op_observer:op_observer",
     ],
     deps = [
@@ -446,9 +389,9 @@ mongo_cc_library(
         "backup_block.h",
     ],
     deps = [
+        ":kv_backup_block",
         ":storage_options",
         "//src/mongo/db:server_base",
-        "//src/mongo/db:shard_role_api",
     ],
 )
 
@@ -466,11 +409,32 @@ mongo_cc_library(
         "//src/mongo/db:server_base",
         "//src/mongo/db:service_context",
         "//src/mongo/db:shard_role",
-        "//src/mongo/db/catalog:collection_catalog",
-        "//src/mongo/db/catalog:local_oplog_info",
-        "//src/mongo/db/commands:server_status_core",
-        "//src/mongo/db/concurrency:lock_manager",
+        "//src/mongo/db/commands/server_status:server_status_core",
+        "//src/mongo/db/local_catalog:collection_catalog",
+        "//src/mongo/db/local_catalog:local_oplog_info",
+        "//src/mongo/db/local_catalog/lock_manager",
         "//src/mongo/util:background_job",
+    ],
+)
+
+idl_generator(
+    name = "oplog_truncate_marker_parameters_gen",
+    src = "oplog_truncate_marker_parameters.idl",
+)
+
+mongo_cc_library(
+    name = "oplog_truncate_markers",
+    srcs = [
+        "oplog_truncate_marker_parameters_gen",
+        "oplog_truncate_markers.cpp",
+    ],
+    hdrs = [
+        "oplog_truncate_markers.h",
+        "//src/mongo/db/rss:persistence_provider.h",
+        "//src/mongo/db/storage/kv:kv_engine.h",
+    ],
+    deps = [
+        ":record_store_base",
     ],
 )
 
@@ -499,17 +463,28 @@ mongo_cc_library(
 
 mongo_cc_library(
     name = "storage_util",
-    srcs = [
-        "storage_util.cpp",
-    ],
+    srcs = [],
     hdrs = [
         "storage_util.h",
     ],
     deps = [
-        ":durable_catalog",
         ":storage_options",
-        "//src/mongo/db/catalog:collection_catalog",
         "//src/mongo/db/storage/kv:kv_drop_pending_ident_reaper",
+    ],
+)
+
+mongo_cc_library(
+    name = "spill_table",
+    srcs = [
+        "spill_table.cpp",
+    ],
+    hdrs = [
+        "spill_table.h",
+    ],
+    deps = [
+        ":disk_space_monitor",
+        ":record_store_base",
+        "//src/mongo/db/local_catalog/lock_manager:exception_util",
     ],
 )
 
@@ -522,25 +497,19 @@ mongo_cc_library(
     hdrs = [
         "deferred_drop_record_store.h",
         "journal_listener.h",
+        "snapshot_manager.h",
         "storage_engine_impl.h",
     ],
     deps = [
-        ":backup_block",
-        ":durable_catalog",
+        ":backup_cursor_hooks",
+        ":disk_space_monitor",
+        ":mdb_catalog",
+        ":spill_table",
         ":storage_control",
-        ":storage_options",
         ":storage_repair_observer",
-        ":storage_util",
-        "//src/mongo/db:audit",
         "//src/mongo/db:server_base",
-        "//src/mongo/db:server_feature_flags",
         "//src/mongo/db:shard_role",
-        "//src/mongo/db:vector_clock",
-        "//src/mongo/db/catalog:catalog_control",
-        "//src/mongo/db/catalog:catalog_helpers",
-        "//src/mongo/db/catalog:index_catalog",
-        "//src/mongo/db/index_builds:resumable_index_builds_idl",
-        "//src/mongo/db/index_builds:two_phase_index_build_knobs_idl",
+        "//src/mongo/db/rss:replicated_storage_service",
         "//src/mongo/db/storage/kv:kv_drop_pending_ident_reaper",
     ],
 )
@@ -561,15 +530,100 @@ mongo_cc_library(
 )
 
 mongo_cc_library(
+    name = "storage_engine_direct_crud",
+    srcs = [
+        "storage_engine_direct_crud.cpp",
+    ],
+    hdrs = [
+        "storage_engine_direct_crud.h",
+    ],
+    deps = [
+        "//src/mongo:base",
+        "//src/mongo/db/storage:recovery_unit_base",
+        "//src/mongo/db/storage/kv:kv_drop_pending_ident_reaper",
+    ],
+)
+
+mongo_cc_library(
     name = "ident",
     srcs = [
         "ident.cpp",
     ],
     hdrs = [
         "ident.h",
-        "//src/mongo/base:string_data.h",
     ],
     deps = [
+        "//src/mongo/db:common",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "ident_test",
+    srcs = [
+        "ident_test.cpp",
+    ],
+    tags = [
+        "mongo_unittest_fifth_group",
+        "server-storage-engine-integration",
+    ],
+    deps = [
+        ":ident",
+        "//src/mongo/unittest",
+    ],
+)
+
+mongo_cc_library(
+    name = "prepare_conflict_tracker",
+    srcs = [
+        "prepare_conflict_tracker.cpp",
+    ],
+    hdrs = [
+        "prepare_conflict_tracker.h",
+    ],
+    deps = [
+        "//src/mongo:base",  # TODO(SERVER-93876): Remove.
+        "//src/mongo/db/commands/server_status:server_status_core",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "prepare_conflict_tracker_test",
+    srcs = [
+        "prepare_conflict_tracker_test.cpp",
+    ],
+    tags = [
+        "mongo_unittest_eighth_group",
+        "server-storage-engine-integration",
+    ],
+    deps = [
+        ":execution_context",
+        ":prepare_conflict_tracker",
+        "//src/mongo/db:service_context",
+        "//src/mongo/util:tick_source_mock",
+    ],
+)
+
+mongo_cc_library(
+    name = "stub_container",
+    hdrs = [
+        "stub_container.h",
+    ],
+    deps = [
+        ":container",
+    ],
+)
+
+mongo_cc_library(
+    name = "container",
+    srcs = [
+        "container_base.cpp",
+    ],
+    hdrs = [
+        "container.h",
+        "container_base.h",
+    ],
+    deps = [
+        ":recovery_unit_base",
         "//src/mongo:base",
     ],
 )
@@ -577,11 +631,27 @@ mongo_cc_library(
 mongo_cc_library(
     name = "record_store_test_harness",
     srcs = [
-        "oplog_truncation_test.cpp",
+        "record_store_test_harness.cpp",
+    ],
+    hdrs = [
+        "record_store_test_harness.h",
+        "test_harness_helper.h",
+    ],
+    deps = [
+        ":record_store_base",
+        "//src/mongo/db:service_context",
+        "//src/mongo/db:service_context_test_fixture",
+        "//src/mongo/unittest",
+    ],
+)
+
+mongo_cc_library(
+    name = "record_store_tests",
+    srcs = [
+        "record_store_test_basic.cpp",
         "record_store_test_datafor.cpp",
         "record_store_test_datasize.cpp",
         "record_store_test_deleterecord.cpp",
-        "record_store_test_harness.cpp",
         "record_store_test_insertrecord.cpp",
         "record_store_test_oplog.cpp",
         "record_store_test_randomiter.cpp",
@@ -592,23 +662,13 @@ mongo_cc_library(
         "record_store_test_updaterecord.cpp",
         "record_store_test_updatewithdamages.cpp",
     ],
-    hdrs = [
-        "record_store_test_harness.h",
-        "test_harness_helper.h",
-    ],
     deps = [
-        ":oplog_truncation",
-        ":record_store_base",
+        ":record_store_test_harness",
         ":storage_options",
         "//src/mongo/db:record_id_helpers",
-        "//src/mongo/db:service_context",
-        "//src/mongo/db:service_context_test_fixture",
         "//src/mongo/db:shard_role_api",
-        "//src/mongo/db/catalog:collection_options",
-        "//src/mongo/db/catalog:health_log_interface",
-        "//src/mongo/db/catalog:health_log_mock",
+        "//src/mongo/db/local_catalog:collection_options",
         "//src/mongo/db/update:update_document_diff",
-        "//src/mongo/unittest",
     ],
 )
 
@@ -633,15 +693,15 @@ mongo_cc_library(
 mongo_cc_library(
     name = "sorted_data_interface_test_harness",
     srcs = [
-        "sorted_data_interface_test_assert.h",
         "sorted_data_interface_test_harness.cpp",
-        "test_harness_helper.h",
     ],
     hdrs = [
         "sorted_data_interface_test_harness.h",
+        "test_harness_helper.h",
     ],
     deps = [
         ":index_entry_comparison",
+        ":sorted_data_interface_test_assert",
         ":storage_options",
         "//src/mongo/db:record_id_helpers",
         "//src/mongo/db:service_context",
@@ -684,22 +744,25 @@ mongo_cc_unit_test(
     srcs = [
         "collection_truncate_markers_test.cpp",
         "disk_space_monitor_test.cpp",
-        "flow_control_test.cpp",
         "index_entry_comparison_test.cpp",
+        "mdb_catalog_test.cpp",
+        "spill_table_test.cpp",
         "storage_engine_lock_file_test.cpp",
         "storage_engine_metadata_test.cpp",
-        "storage_engine_test_fixture.h",
         "storage_repair_observer_test.cpp",
         "//src/mongo/db/storage/kv:durable_catalog_test.cpp",
         "//src/mongo/db/storage/kv:kv_drop_pending_ident_reaper_test.cpp",
         "//src/mongo/db/storage/kv:storage_engine_test.cpp",
     ],
-    tags = ["mongo_unittest_first_group"],
+    private_hdrs = [":storage_engine_test_fixture.h"],
+    tags = [
+        "mongo_unittest_first_group",
+        "server-storage-engine-integration",
+    ],
     deps = [
         ":disk_space_monitor",
-        ":flow_control",
-        ":flow_control_parameters",
         ":record_store_base",
+        ":spill_table",
         ":storage_engine_common",
         ":storage_engine_lock_file",
         ":storage_engine_metadata",
@@ -710,16 +773,16 @@ mongo_cc_unit_test(
         "//src/mongo/db:service_context_d_test_fixture",
         "//src/mongo/db:shard_role",
         "//src/mongo/db:startup_recovery",
-        "//src/mongo/db/auth:authmocks",
-        "//src/mongo/db/catalog:catalog_impl",
-        "//src/mongo/db/catalog:catalog_test_fixture",
-        "//src/mongo/db/catalog:collection_options",
-        "//src/mongo/db/concurrency:flow_control_ticketholder",
         "//src/mongo/db/index_builds:resumable_index_builds_idl",
-        "//src/mongo/db/repl:replmocks",
-        "//src/mongo/db/repl:topology_coordinator",
-        "//src/mongo/db/storage:durable_catalog",
+        "//src/mongo/db/local_catalog:catalog_impl",
+        "//src/mongo/db/local_catalog:catalog_repair",
+        "//src/mongo/db/local_catalog:catalog_test_fixture",
+        "//src/mongo/db/local_catalog:collection_options",
+        "//src/mongo/db/local_catalog:durable_catalog",
+        "//src/mongo/db/rss:persistence_provider_impl",
+        "//src/mongo/db/rss:service_lifecycle_impl",
         "//src/mongo/db/storage:storage_control",
+        "//src/mongo/db/storage:storage_engine_direct_crud",
         "//src/mongo/db/storage:storage_engine_impl",
         "//src/mongo/db/storage:storage_repair_observer",
         "//src/mongo/db/storage/devnull:storage_devnull_core",
@@ -729,8 +792,34 @@ mongo_cc_unit_test(
         "//src/mongo/db/timeseries:timeseries_options",
         "//src/mongo/executor:network_interface_factory",
         "//src/mongo/executor:network_interface_mock",
-        "//src/mongo/idl:server_parameter_test_util",
+        "//src/mongo/idl:server_parameter_test_controller",
         "//src/mongo/util:periodic_runner_factory",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "oplog_truncation_test",
+    srcs = [
+        "oplog_truncation_test.cpp",
+    ],
+    tags = ["mongo_unittest_second_group"],
+    deps = [
+        "//src/mongo/db/repl:oplog_applier_impl_test_fixture",
+        "//src/mongo/db/repl:replication_recovery",
+        "//src/mongo/db/repl:storage_interface",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "oplog_async_sampling_test",
+    srcs = [
+        "oplog_async_sampling_test.cpp",
+    ],
+    tags = ["mongo_unittest_sixth_group"],
+    deps = [
+        "//src/mongo/db/repl:oplog_applier_impl_test_fixture",
+        "//src/mongo/db/repl:replication_recovery",
+        "//src/mongo/db/repl:storage_interface",
     ],
 )
 
@@ -738,6 +827,45 @@ mongo_cc_library(
     name = "sorted_data_interface_test_assert",
     hdrs = [
         "sorted_data_interface_test_assert.h",
+    ],
+)
+
+mongo_cc_library(
+    name = "sorted_data_interface_bm",
+    srcs = [
+        "sorted_data_interface_bm.cpp",
+    ],
+    deps = [
+        ":sorted_data_interface_test_harness",
+        "//src/mongo/db:shard_role_api",
+        "//src/third_party/benchmark",
+    ],
+)
+
+mongo_cc_library(
+    name = "record_store_bm",
+    srcs = [
+        "record_store_bm_cursor.cpp",
+    ],
+    deps = [
+        ":record_store_test_harness",
+        "//src/mongo/db:shard_role_api",
+        "//src/third_party/benchmark",
+    ],
+)
+
+mongo_cc_benchmark(
+    name = "storage_record_id_bm",
+    srcs = [
+        "record_id_bm.cpp",
+    ],
+    tags = [
+        "first_half_bm",
+    ],
+    deps = [
+        "//src/mongo/db:record_id_helpers",
+        "//src/mongo/db:server_base",
+        "//src/mongo/db/local_catalog/lock_manager",
     ],
 )
 
@@ -757,4 +885,22 @@ filegroup(
 filegroup(
     name = "write_unit_of_work_hdrs",
     srcs = [":write_unit_of_work.h"],
+)
+
+idl_generator(
+    name = "snapshot_window_options_gen",
+    src = "snapshot_window_options.idl",
+    deps = [
+        "//src/mongo/db:basic_types_gen",
+    ],
+)
+
+mongo_cc_library(
+    name = "snapshot_window_options",
+    srcs = [
+        ":snapshot_window_options_gen",
+    ],
+    deps = [
+        "//src/mongo/db:server_base",
+    ],
 )

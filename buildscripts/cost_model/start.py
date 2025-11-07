@@ -33,14 +33,15 @@ import dataclasses
 import os
 from typing import Mapping, Sequence
 
-import abt_calibrator
-import parameters_extractor
+import numpy as np
+import parameters_extractor_classic
+import qsn_calibrator
 import workload_execution
 from calibration_settings import main_config
-from config import WriteMode
+from config import DataType, WriteMode
 from cost_estimator import CostModelParameters, ExecutionStats
 from data_generator import CollectionInfo, DataGenerator
-from database_instance import DatabaseInstance
+from database_instance import DatabaseInstance, get_database_parameter
 from workload_execution import Query, QueryParameters
 
 __all__ = []
@@ -48,135 +49,441 @@ __all__ = []
 
 def save_to_csv(parameters: Mapping[str, Sequence[CostModelParameters]], filepath: str) -> None:
     """Save model input parameters to a csv file."""
-    abt_type_name = "abt_type"
+    qsn_type_name = "qsn_type"
     fieldnames = [
-        abt_type_name,
+        qsn_type_name,
         *[f.name for f in dataclasses.fields(ExecutionStats)],
         *[f.name for f in dataclasses.fields(QueryParameters)],
     ]
     with open(filepath, "w", newline="") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
-        for abt_type, type_params_list in parameters.items():
+        for qsn_type, type_params_list in parameters.items():
             for type_params in type_params_list:
                 fields = dataclasses.asdict(type_params.execution_stats) | dataclasses.asdict(
                     type_params.query_params
                 )
-                fields[abt_type_name] = abt_type
+                fields[qsn_type_name] = qsn_type
                 writer.writerow(fields)
 
 
-async def execute_index_scan_queries(
-    database: DatabaseInstance, collections: Sequence[CollectionInfo]
-):
-    collection = [ci for ci in collections if ci.name.startswith("index_scan")][0]
-    fields = [f for f in collection.fields if f.name == "choice"]
+async def execute_index_seeks(database: DatabaseInstance, collections: Sequence[CollectionInfo]):
+    collections = [c for c in collections if c.name == "index_scan_10000"]
+    assert len(collections) == 1
 
     requests = []
-
-    for field in fields:
-        for val in field.distribution.get_values():
-            if val.startswith("_"):
-                continue
-            keys_length = len(val) + 2
+    cards = [25, 50, 100, 200, 300, 400, 500] + list(range(1000, 10_001, 1000))
+    # For every query, we run it as both a forward and backward scan.
+    for direction, note in [(1, "FORWARD"), (-1, "BACKWARD")]:
+        for card in cards:
             requests.append(
                 Query(
-                    pipeline=[{"$match": {field.name: val}}],
-                    keys_length_in_bytes=keys_length,
-                    note="IndexScan",
+                    {"filter": {"a": {"$lt": card}}, "sort": {"a": direction}, "hint": {"a": 1}},
+                    note=f"IXSCAN_{note}",
+                    expected_stage={"IXSCAN": {"direction": note.lower()}},
                 )
             )
 
-    await workload_execution.execute(
-        database, main_config.workload_execution, [collection], requests
-    )
-
-
-async def execute_physical_scan_queries(
-    database: DatabaseInstance, collections: Sequence[CollectionInfo]
-):
-    collections = [ci for ci in collections if ci.name.startswith("physical_scan")]
-    fields = [f for f in collections[0].fields if f.name == "choice"]
-    requests = []
-    for field in fields:
-        for val in field.distribution.get_values()[::3]:
-            if val.startswith("_"):
-                continue
-            keys_length = len(val) + 2
+            # In order to calibrate the cost of seeks, we uniformly sample for an $in query so that the
+            # index scan will examine the same number of keys as the range query,
+            # but instead of being able to traverse the leaves, it has to do a seek for each one.
+            # The reason for the `// 2` is because on each seek it examines 2 keys, after the first one it additionally checks the next key
+            # to try and avoid an unnecessary seek. Lastly, the casting is due to BSON not understanding numpy integer types.
+            seeks = [
+                int(key)
+                for key in np.linspace(
+                    0,
+                    collections[0].documents_count,
+                    endpoint=False,
+                    dtype=np.dtype(int),
+                    # We need this max as otherwise we will generate an empty $in query (which turns into an EOF plan) for
+                    # cardinality 1.
+                    num=max(1, card // 2),
+                )
+            ]
             requests.append(
                 Query(
-                    pipeline=[{"$match": {field.name: val}}, {"$limit": 10}],
-                    keys_length_in_bytes=keys_length,
-                    note="PhysicalScan",
+                    {"filter": {"a": {"$in": seeks}}, "sort": {"a": direction}, "hint": {"a": 1}},
+                    note=f"IXSCAN_{note}",
+                    expected_stage={"IXSCAN": {"direction": note.lower()}},
                 )
             )
+
+            if direction == 1:
+                # In order to calibrate the cost of a filter on an ixscan, we add a predicate to the
+                # queries above that will always be true. We expect that the cost of a filter on an
+                # ixscan should be the same whether the direction is forwards or backwards, so we only
+                # calibrate in the forwards case.
+                requests.append(
+                    Query(
+                        {
+                            "filter": {
+                                "a": {"$lt": card, "$mod": [1, 0]},
+                            },
+                            "sort": {"a": direction},
+                            "hint": {"a": 1},
+                        },
+                        note="IXSCAN_W_FILTER",
+                        expected_stage={
+                            "IXSCAN": {
+                                "direction": note.lower(),
+                                "filter": {"a": {"$mod": [1, 0]}},
+                            }
+                        },
+                    )
+                )
+                requests.append(
+                    Query(
+                        {
+                            "filter": {"a": {"$in": seeks, "$mod": [1, 0]}},
+                            "sort": {"a": direction},
+                            "hint": {"a": 1},
+                        },
+                        note="IXSCAN_W_FILTER",
+                        expected_stage={
+                            "IXSCAN": {"direction": note.lower(), "filter": {"a": {"$mod": [1, 0]}}}
+                        },
+                    )
+                )
 
     await workload_execution.execute(
         database, main_config.workload_execution, collections, requests
     )
 
 
-async def execute_index_intersections_with_requests(
-    database: DatabaseInstance, collections: Sequence[CollectionInfo], requests: Sequence[Query]
+async def execute_collection_scans(
+    database: DatabaseInstance, collections: Sequence[CollectionInfo]
 ):
-    try:
-        await database.set_parameter(
-            "internalCostModelCoefficients", '{"filterIncrementalCost": 10000.0}'
+    collections = [c for c in collections if c.name == "doc_scan_200000"]
+    assert len(collections) == 1
+
+    # We use higher numbers here to be representative of how COLLSCANs are used and to avoid
+    # the instability we experienced when using smaller numbers.
+    limits = [100_000, 110_000, 120_000, 130_000, 140_000, 150_000]
+    requests = []
+    for direction, dir_text in [(1, "FORWARD"), (-1, "BACKWARD")]:
+        note = f"COLLSCAN_{dir_text}"
+        for limit in limits:
+            requests.append(
+                Query(
+                    {"limit": limit, "sort": {"$natural": direction}},
+                    note=note,
+                    expected_stage={"COLLSCAN": {"direction": dir_text.lower()}},
+                )
+            )
+
+            if direction == 1:
+                # We expect that the cost of a filter on a collscan should be the same whether
+                # the direction is forwards or backwards, so we only calibrate in the forwards case.
+                requests.append(
+                    Query(
+                        {
+                            "limit": limit,
+                            "filter": {"int_uniform_unindexed": {"$gt": 0, "$lt": 2}},
+                            "sort": {"$natural": direction},
+                        },
+                        note="COLLSCAN_W_FILTER",
+                        expected_stage={
+                            "COLLSCAN": {
+                                "direction": dir_text.lower(),
+                                "filter": {
+                                    "$and": [
+                                        {"int_uniform_unindexed": {"$lt": 2}},
+                                        {"int_uniform_unindexed": {"$gt": 0}},
+                                    ]
+                                },
+                            }
+                        },
+                    )
+                )
+    await workload_execution.execute(
+        database, main_config.workload_execution, collections, requests
+    )
+
+
+async def execute_limits(database: DatabaseInstance, collections: Sequence[CollectionInfo]):
+    collections = [c for c in collections if c.name == "index_scan_10000"]
+    assert len(collections) == 1
+
+    limits = [1, 2, 5, 10, 15, 20, 25, 50, 100, 250, 500] + list(range(1000, 10001, 1000))
+
+    requests = [
+        Query(
+            {"limit": limit},
+            note="LIMIT",
+            expected_stage="LIMIT",
+        )
+        for limit in limits
+    ]
+    await workload_execution.execute(
+        database, main_config.workload_execution, collections, requests
+    )
+
+
+async def execute_skips(database: DatabaseInstance, collections: Sequence[CollectionInfo]):
+    collections = [c for c in collections if c.name == "index_scan_10000"]
+    assert len(collections) == 1
+
+    skips = [5, 10, 15, 20, 25, 50, 75, 100, 500, 1000, 2500, 5000]
+    limits = [5, 10, 15, 20, 50, 75, 100, 250, 500, 1000]
+    requests = []
+    # We add a LIMIT on top of the SKIP in order to easily vary the number of processed documents.
+    for limit in limits:
+        for skip in skips:
+            requests.append(
+                Query(
+                    find_cmd={"skip": skip, "limit": limit},
+                    note="SKIP",
+                    expected_stage="SKIP",
+                )
+            )
+    await workload_execution.execute(
+        database, main_config.workload_execution, collections, requests
+    )
+
+
+async def execute_projections(database: DatabaseInstance, collections: Sequence[CollectionInfo]):
+    collections = [c for c in collections if c.name == "projection_30000"]
+    assert len(collections) == 1
+
+    limits = [5, 10, 50, 75, 100, 150, 300, 500] + list(range(1000, 10001, 1000))
+
+    # We calibrate using projections on the last field since this means the node does a nontrivial amount of work.
+    # This is because non-covered projections iterate over the fields in a given document as part of its work.
+    field = collections[0].fields[-1]
+    requests = []
+    # Simple projections, these do not contain any computed fields and are not fully covered by an index.
+    for limit in limits:
+        requests.append(
+            Query(
+                {"limit": limit, "projection": {field.name: 1}},
+                note="PROJECTION_SIMPLE",
+                expected_stage="PROJECTION_SIMPLE",
+            )
         )
 
+    # Covered projections, these are inclusions that are fully covered by an index.
+    field = [f for f in collections[0].fields if f.indexed][-1]
+    for limit in limits:
+        requests.append(
+            Query(
+                {"limit": limit, "projection": {"_id": 0, field.name: 1}, "hint": {field.name: 1}},
+                note="PROJECTION_COVERED",
+                expected_stage="PROJECTION_COVERED",
+            )
+        )
+
+    # Default projections, these are the only ones that can handle computed projections,
+    # so that is how we calibrate them. We assume that the computation will be constant across
+    # the enumerated plans and thus keep it very simple.
+    fields = [f for f in collections[0].fields if f.type == DataType.INTEGER]
+    for limit in limits:
+        requests.append(
+            Query(
+                {"limit": limit, "projection": {"out": {"$add": [f"${f.name}" for f in fields]}}},
+                note="PROJECTION_DEFAULT",
+                expected_stage="PROJECTION_DEFAULT",
+            )
+        )
+    await workload_execution.execute(
+        database, main_config.workload_execution, collections, requests
+    )
+
+
+async def execute_sorts(database: DatabaseInstance, collections: Sequence[CollectionInfo]):
+    # Using collections of varying sizes instead of limits, as the limit + sort combination
+    # would trigger the optimized top-K sorting algorithm, which is calibrated separately below.
+    collections = [c for c in collections if c.name.startswith("sort")]
+    assert len(collections) == 11
+
+    requests = [
+        # A standard sort applies the simple sort algorithm.
+        Query({"sort": {"payload": 1}}, note="SORT_SIMPLE", expected_stage="SORT"),
+        # Including the recordId explicitly forces the use of the default sort algorithm.
+        Query(
+            {"projection": {"$recordId": {"$meta": "recordId"}}, "sort": {"payload": 1}},
+            note="SORT_DEFAULT",
+            expected_stage="SORT",
+        ),
+    ]
+
+    # By combining a sort with a limit, we trigger the top-K sorting algorithm, which works
+    # for both the simple and default sort algorithms.
+    limits = [5, 10, 50, 75, 100, 150, 300, 500, 1000]
+    for limit in limits:
+        requests.append(
+            Query(
+                {"sort": {"payload": 1}, "limit": limit},
+                note="SORT_LIMIT_SIMPLE",
+                expected_stage="SORT",
+            )
+        )
+        requests.append(
+            Query(
+                {
+                    "projection": {"$recordId": {"$meta": "recordId"}},
+                    "sort": {"payload": 1},
+                    "limit": limit,
+                },
+                note="SORT_LIMIT_DEFAULT",
+                expected_stage="SORT",
+            )
+        )
+
+    await workload_execution.execute(
+        database, main_config.workload_execution, collections, requests
+    )
+
+
+async def execute_merge_sorts(database: DatabaseInstance, collections: Sequence[CollectionInfo]):
+    collections = [c for c in collections if c.name.startswith("merge_sort")]
+    assert len(collections) == 11
+
+    fields = collections[0].fields
+
+    requests = []
+    for num_merge_inputs in range(2, len(fields)):
+        requests.append(
+            Query(
+                find_cmd={
+                    "filter": {"$or": [{f.name: 1} for f in fields[:num_merge_inputs]]},
+                    "sort": {"sort_field": 1},
+                },
+                note="SORT_MERGE",
+                expected_stage="SORT_MERGE",
+            )
+        )
+
+    await workload_execution.execute(
+        database, main_config.workload_execution, collections, requests
+    )
+
+
+async def execute_ors(database: DatabaseInstance, collections: Sequence[CollectionInfo]):
+    # Using collections of varying sizes instead of limits, as a limit would prevent subsequent
+    # OR branches from being executed if earlier branches already satisfy the limit requirement.
+    collections = [c for c in collections if c.name.startswith("or")]
+    assert len(collections) == 20
+
+    requests = [
+        Query(
+            find_cmd={"filter": {"$or": [{"a": 1}, {"b": 1}]}},
+            note="OR",
+            expected_stage="OR",
+        )
+    ]
+
+    await workload_execution.execute(
+        database, main_config.workload_execution, collections, requests
+    )
+
+
+async def execute_sort_intersections(
+    database: DatabaseInstance, collections: Sequence[CollectionInfo]
+):
+    collections = [ci for ci in collections if ci.name.startswith("intersection_sorted")]
+    assert len(collections) == 4
+
+    # Values ranging from 1 to 10
+    values = collections[0].fields[0].distribution.get_values()
+
+    requests = []
+    for i in values:
+        for j in values:
+            requests.append(
+                Query(
+                    find_cmd={"filter": {"a": i, "b": j}},
+                    note="AND_SORTED",
+                    expected_stage="AND_SORTED",
+                )
+            )
+
+    async with (
+        get_database_parameter(
+            database, "internalQueryForceIntersectionPlans"
+        ) as force_intersection_param,
+        get_database_parameter(
+            database, "internalQueryPlannerEnableSortIndexIntersection"
+        ) as enable_sort_intersection_param,
+    ):
+        await force_intersection_param.set(True)
+        await enable_sort_intersection_param.set(True)
         await workload_execution.execute(
             database, main_config.workload_execution, collections, requests
         )
 
-        main_config.workload_execution.write_mode = WriteMode.APPEND
-        await workload_execution.execute(
-            database, main_config.workload_execution, collections, requests[::4]
-        )
 
-    finally:
-        await database.set_parameter("internalCostModelCoefficients", "")
-
-
-async def execute_index_intersections(
+async def execute_hash_intersections(
     database: DatabaseInstance, collections: Sequence[CollectionInfo]
 ):
-    collections = [ci for ci in collections if ci.name.startswith("c_int")]
+    collections = [ci for ci in collections if ci.name == "intersection_hash_1000"]
+    assert len(collections) == 1
+
+    # Values ranging from 1 to 10
+    values = collections[0].fields[0].distribution.get_values()
+
+    requests = []
+    for i in values:
+        for j in values:
+            requests.append(
+                Query(
+                    find_cmd={"filter": {"a": {"$lte": i}, "b": {"$lte": j}}},
+                    note="AND_HASH",
+                    expected_stage="AND_HASH",
+                )
+            )
+
+    async with (
+        get_database_parameter(
+            database, "internalQueryForceIntersectionPlans"
+        ) as force_intersection_param,
+        get_database_parameter(
+            database, "internalQueryPlannerEnableHashIntersection"
+        ) as enable_hash_intersection_param,
+    ):
+        await force_intersection_param.set(True)
+        await enable_hash_intersection_param.set(True)
+        await workload_execution.execute(
+            database, main_config.workload_execution, collections, requests
+        )
+
+
+async def execute_fetches(database: DatabaseInstance, collections: Sequence[CollectionInfo]):
+    collections = [c for c in collections if c.name == "doc_scan_100000"]
+    assert len(collections) == 1
 
     requests = []
 
-    for i in range(0, 1000, 100):
-        requests.append(Query(pipeline=[{"$match": {"in1": i, "in2": i}}], keys_length_in_bytes=1))
-
-        requests.append(
-            Query(pipeline=[{"$match": {"in1": i, "in2": 1000 - i}}], keys_length_in_bytes=1)
-        )
-
+    cards = [10, 50, 100, 500, 1000, 5000, 10000, 15000]
+    for card in cards:
         requests.append(
             Query(
-                pipeline=[{"$match": {"in1": {"$lte": i}, "in2": 1000 - i}}], keys_length_in_bytes=1
+                {"filter": {"int_uniform": {"$lt": card}}},
+                note="FETCH",
+                expected_stage="FETCH",
             )
         )
 
         requests.append(
             Query(
-                pipeline=[{"$match": {"in1": i, "in2": {"$gt": 1000 - i}}}], keys_length_in_bytes=1
-            )
-        )
-
-    await execute_index_intersections_with_requests(database, collections, requests)
-
-
-async def execute_evaluation(database: DatabaseInstance, collections: Sequence[CollectionInfo]):
-    collections = [ci for ci in collections if ci.name.startswith("c_int_05")]
-    requests = []
-
-    for i in [100, 500, 1000]:
-        requests.append(
-            Query(
-                pipeline=[{"$project": {"uniform1": 1, "mixed2": 1}}, {"$limit": i}],
-                keys_length_in_bytes=1,
-                number_of_fields=1,
-                note="Evaluation",
+                # 'int_uniform_unindexed' is not indexed, so the fetch will have a filter.
+                {
+                    "filter": {
+                        "int_uniform": {"$lt": card},
+                        "int_uniform_unindexed": {"$gt": 0, "$lt": 2},
+                    }
+                },
+                note="FETCH_W_FILTER",
+                expected_stage={
+                    "FETCH": {
+                        "filter": {
+                            "$and": [
+                                {"int_uniform_unindexed": {"$lt": 2}},
+                                {"int_uniform_unindexed": {"$gt": 0}},
+                            ]
+                        }
+                    }
+                },
             )
         )
 
@@ -185,46 +492,28 @@ async def execute_evaluation(database: DatabaseInstance, collections: Sequence[C
     )
 
 
-async def execute_unwind(database: DatabaseInstance, collections: Sequence[CollectionInfo]):
-    collections = [ci for ci in collections if ci.name.startswith("c_arr_01")]
-    requests = []
-    # average size of arrays in the collection
-    average_size_of_arrays = 10
+async def execute_index_scans_w_diff_num_fields(
+    database: DatabaseInstance, collections: Sequence[CollectionInfo]
+):
+    collections = [c for c in collections if c.name == "index_scan_10000"]
+    assert len(collections) == 1
 
-    for _ in range(500, 1000, 100):
+    requests = []
+
+    # The compound_indexes list does not contain the single-field index {a: 1}.
+    for index in ["a"] + collections[0].compound_indexes:
+        hint_obj = {key: 1 for key in index}
+
         requests.append(
-            Query(pipeline=[{"$unwind": "$as"}], number_of_fields=average_size_of_arrays)
+            Query(
+                {"filter": {"a": {"$lt": 10000}}, "hint": hint_obj},
+                note="IXSCANS_W_DIFF_NUM_FIELDS",
+                expected_stage="IXSCAN",
+            )
         )
 
     await workload_execution.execute(
         database, main_config.workload_execution, collections, requests
-    )
-
-
-async def execute_unique(database: DatabaseInstance, collections: Sequence[CollectionInfo]):
-    collections = [ci for ci in collections if ci.name.startswith("c_arr_01")]
-    requests = []
-
-    for i in range(500, 1000, 200):
-        requests.append(Query(pipeline=[{"$match": {"as": {"$gt": i}}}]))
-
-    await workload_execution.execute(
-        database, main_config.workload_execution, collections, requests
-    )
-
-
-async def execute_limitskip(database: DatabaseInstance, collections: Sequence[CollectionInfo]):
-    collection = [ci for ci in collections if ci.name.startswith("index_scan")][0]
-    limits = [5, 10, 15, 20]
-    skips = [5, 10, 15, 20]
-    requests = []
-
-    for limit in limits:
-        for skip in skips:
-            requests.append(Query(pipeline=[{"$skip": skip}, {"$limit": limit}], note="LimitSkip"))
-
-    await workload_execution.execute(
-        database, main_config.workload_execution, [collection], requests
     )
 
 
@@ -239,31 +528,36 @@ async def main():
         # 2. Data generation (optional), generates random data and populates collections with it.
         generator = DataGenerator(database, main_config.data_generator)
         await generator.populate_collections()
-
         # 3. Collecting data for calibration (optional).
         # It runs the pipelines and stores explains to the database.
         execution_query_functions = [
-            execute_index_scan_queries,
-            execute_physical_scan_queries,
-            execute_index_intersections,
-            execute_evaluation,
-            execute_unwind,
-            execute_unique,
-            execute_limitskip,
+            execute_index_seeks,
+            execute_projections,
+            execute_collection_scans,
+            execute_limits,
+            execute_skips,
+            execute_sorts,
+            execute_merge_sorts,
+            execute_ors,
+            execute_sort_intersections,
+            execute_hash_intersections,
+            execute_fetches,
+            execute_index_scans_w_diff_num_fields,
         ]
         for execute_query in execution_query_functions:
             await execute_query(database, generator.collection_infos)
             main_config.workload_execution.write_mode = WriteMode.APPEND
-
         # Calibration phase (optional).
         # Reads the explains stored on the previous step (this run and/or previous runs),
-        # aparses the explains, nd calibrates the cost model for the ABT nodes.
-        models = await abt_calibrator.calibrate(main_config.abt_calibrator, database)
-        for abt, model in models.items():
-            print(f"{abt}\t\t{model}")
+        # parses the explains, and calibrates the cost model for the QS nodes.
+        models = await qsn_calibrator.calibrate(main_config.qs_calibrator, database)
+        # Pad all QSN names to be nice and pretty.
+        pad = max(len(node) for node in models) + 8
+        for qsn, model in models.items():
+            print(f"{qsn:<{pad}}{model}")
 
-        parameters = await parameters_extractor.extract_parameters(
-            main_config.abt_calibrator, database, []
+        parameters = await parameters_extractor_classic.extract_parameters(
+            main_config.qs_calibrator, database, []
         )
         save_to_csv(parameters, "parameters.csv")
 

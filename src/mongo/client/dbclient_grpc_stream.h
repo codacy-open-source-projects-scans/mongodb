@@ -29,10 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/authenticate.h"
@@ -41,6 +37,10 @@
 #include "mongo/transport/grpc/grpc_session.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/ssl_options.h"
+
+#include <string>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -58,10 +58,10 @@ public:
                        MongoURI uri = {},
                        const HandshakeValidationHook& hook = HandshakeValidationHook(),
                        const ClientAPIVersionParameters* apiParameters = nullptr)
-        : DBClientSession(_autoReconnect, so_timeout, uri, hook, apiParameters),
+        : DBClientSession(_autoReconnect, so_timeout, std::move(uri), hook, apiParameters),
           _authToken{std::move(authToken)} {}
 
-    ~DBClientGRPCStream();
+    ~DBClientGRPCStream() override;
 
     /**
      * Logout is not implemented for gRPC, throws an exception.
@@ -90,11 +90,11 @@ public:
     int getMaxWireVersion() override;
 
 #ifdef MONGO_CONFIG_SSL
-    /**
-     * Returns nullptr. SSL config is handled by gRPC.
-     */
     const SSLConfiguration* getSSLConfiguration() override {
-        return nullptr;
+        if (!_session) {
+            return nullptr;
+        }
+        return _session->getSSLConfiguration();
     }
 
     bool isTLS() override {

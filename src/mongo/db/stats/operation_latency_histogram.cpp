@@ -27,14 +27,15 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <cstddef>
-#include <cstdint>
+#include "mongo/db/stats/operation_latency_histogram.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/stats/operation_latency_histogram.h"
 #include "mongo/platform/bits.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
 
 namespace mongo {
 namespace {
@@ -163,6 +164,7 @@ void appendHistogram(const HistogramDataType& data,
                      StringType key,
                      bool includeHistograms,
                      bool slowMSBucketsOnly,
+                     bool includeEmptyBuckets,
                      BSONObjBuilder& builder) {
     BSONObjBuilder histogramBuilder(builder.subobjStart(key));
     const uint64_t slowMicros = static_cast<uint64_t>(serverGlobalParams.slowMS.load()) * 1000;
@@ -183,7 +185,7 @@ void appendHistogram(const HistogramDataType& data,
                 }
             }();
 
-            if (bucketValue == 0) {
+            if (!includeEmptyBuckets && bucketValue == 0) {
                 continue;
             }
 
@@ -239,6 +241,7 @@ template <typename HistogramsType>
 void appendHistograms(HistogramsType& histograms,
                       bool includeHistograms,
                       bool slowMSBucketsOnly,
+                      bool includeEmptyBuckets,
                       BSONObjBuilder& builder) {
     static_assert(static_cast<int>(Command::ReadWriteType::kCommand) == 0);
     static_assert(static_cast<int>(Command::ReadWriteType::kRead) == 1);
@@ -248,7 +251,12 @@ void appendHistograms(HistogramsType& histograms,
         kNames = {"commands"_sd, "reads"_sd, "writes"_sd, "transactions"_sd};
 
     for (size_t i = 0; i < kNames.size(); ++i) {
-        appendHistogram(histograms[i], kNames[i], includeHistograms, slowMSBucketsOnly, builder);
+        appendHistogram(histograms[i],
+                        kNames[i],
+                        includeHistograms,
+                        slowMSBucketsOnly,
+                        includeEmptyBuckets,
+                        builder);
     }
 }
 }  // namespace
@@ -259,6 +267,9 @@ std::array<uint64_t, operation_latency_histogram_details::kMaxBuckets> getLowerB
 }
 }  // namespace operation_latency_histogram_details
 
+OperationLatencyHistogram::OperationLatencyHistogram(const Options& options)
+    : _includeEmptyBuckets(options.includeEmptyBuckets) {}
+
 void OperationLatencyHistogram::increment(uint64_t latency,
                                           Command::ReadWriteType type,
                                           bool isQueryableEncryptionOperation) {
@@ -268,8 +279,12 @@ void OperationLatencyHistogram::increment(uint64_t latency,
 void OperationLatencyHistogram::append(bool includeHistograms,
                                        bool slowMSBucketsOnly,
                                        BSONObjBuilder* builder) const {
-    appendHistograms(_histograms, includeHistograms, slowMSBucketsOnly, *builder);
+    appendHistograms(
+        _histograms, includeHistograms, slowMSBucketsOnly, _includeEmptyBuckets, *builder);
 }
+
+AtomicOperationLatencyHistogram::AtomicOperationLatencyHistogram(const Options& options)
+    : _includeEmptyBuckets(options.includeEmptyBuckets) {}
 
 void AtomicOperationLatencyHistogram::increment(uint64_t latency,
                                                 Command::ReadWriteType type,
@@ -280,7 +295,8 @@ void AtomicOperationLatencyHistogram::increment(uint64_t latency,
 void AtomicOperationLatencyHistogram::append(bool includeHistograms,
                                              bool slowMSBucketsOnly,
                                              BSONObjBuilder* builder) const {
-    appendHistograms(_histograms, includeHistograms, slowMSBucketsOnly, *builder);
+    appendHistograms(
+        _histograms, includeHistograms, slowMSBucketsOnly, _includeEmptyBuckets, *builder);
 }
 
 }  // namespace mongo

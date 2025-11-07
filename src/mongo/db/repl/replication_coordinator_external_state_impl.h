@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
@@ -60,7 +55,14 @@
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <cstddef>
+#include <memory>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace repl {
@@ -70,14 +72,23 @@ class StorageInterface;
 
 class NoopWriter;
 
-class ReplicationCoordinatorExternalStateImpl final : public ReplicationCoordinatorExternalState,
-                                                      public JournalListener {
+class MONGO_MOD_PUB ReplicationCoordinatorExternalStateImpl final
+    : public ReplicationCoordinatorExternalState,
+      public JournalListener {
     ReplicationCoordinatorExternalStateImpl(const ReplicationCoordinatorExternalStateImpl&) =
         delete;
     ReplicationCoordinatorExternalStateImpl& operator=(
         const ReplicationCoordinatorExternalStateImpl&) = delete;
 
 public:
+    class MONGO_MOD_PRIVATE ReplDurabilityToken : public JournalListener::Token {
+    public:
+        ReplDurabilityToken(OpTimeAndWallTime opTimeAndWallTime, bool isPrimary)
+            : opTimeAndWallTime(opTimeAndWallTime), isPrimary(isPrimary) {}
+        OpTimeAndWallTime opTimeAndWallTime;
+        bool isPrimary;
+    };
+
     ReplicationCoordinatorExternalStateImpl(ServiceContext* service,
                                             StorageInterface* storageInterface,
                                             ReplicationProcess* replicationProcess);
@@ -135,7 +146,7 @@ public:
 
 
     // Methods from JournalListener.
-    JournalListener::Token getToken(OperationContext* opCtx) override;
+    std::unique_ptr<JournalListener::Token> getToken(OperationContext* opCtx) override;
     void onDurable(const JournalListener::Token& token) override;
 
     void setupNoopWriter(Seconds waitTime) override;
@@ -153,27 +164,12 @@ private:
     void _stopDataReplication(OperationContext* opCtx, stdx::unique_lock<stdx::mutex>& lock);
 
     /**
-     * Called when the instance transitions to primary in order to notify a potentially sharded host
-     * to perform respective state changes, such as starting the balancer, etc.
-     *
-     * Throws on errors.
-     */
-    void _shardingOnTransitionToPrimaryHook(OperationContext* opCtx, long long term);
-
-    /**
      * Drops all temporary collections on all databases except "local".
      *
      * The implementation may assume that the caller has acquired the global exclusive lock
      * for "opCtx".
      */
     void _dropAllTempCollections(OperationContext* opCtx);
-
-    /**
-     * Resets any active sharding metadata on this server and stops any sharding-related threads
-     * (such as the balancer). It is called after stepDown to ensure that if the node becomes
-     * primary again in the future it will recover its state from a clean slate.
-     */
-    void _shardingOnStepDownHook();
 
     /**
      * Stops asynchronous updates to and then clears the oplogTruncateAfterPoint.
@@ -250,11 +246,6 @@ private:
     std::shared_ptr<executor::TaskExecutor> _oplogApplierTaskExecutor;
     std::unique_ptr<OplogApplier> _oplogApplier;
     Future<void> _oplogApplierShutdownFuture;
-
-    // Mutex guarding the _nextThreadId value to prevent concurrent incrementing.
-    stdx::mutex _nextThreadIdMutex;
-    // Number used to uniquely name threads.
-    long long _nextThreadId = 0;
 
     // Task executor used to run replication tasks.
     std::shared_ptr<executor::TaskExecutor> _taskExecutor;

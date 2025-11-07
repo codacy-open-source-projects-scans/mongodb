@@ -27,10 +27,21 @@
  *    it in the license file.
  */
 
-#include <absl/container/flat_hash_map.h>
+#include "mongo/db/pipeline/semantic_analysis.h"
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/util/builder.h"
+#include "mongo/bson/util/builder_fwd.h"
+#include "mongo/db/matcher/expression_algo.h"
+#include "mongo/db/pipeline/document_source_replace_root.h"
+#include "mongo/db/pipeline/document_source_single_document_transformation.h"
+#include "mongo/db/pipeline/expression.h"
+#include "mongo/db/pipeline/field_path.h"
+#include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/util/assert_util.h"
+
 #include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <cstddef>
 #include <list>
 #include <set>
@@ -38,19 +49,7 @@
 
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/util/builder.h"
-#include "mongo/bson/util/builder_fwd.h"
-#include "mongo/db/matcher/expression_algo.h"
-#include "mongo/db/pipeline/dependencies.h"
-#include "mongo/db/pipeline/document_source_replace_root.h"
-#include "mongo/db/pipeline/document_source_single_document_transformation.h"
-#include "mongo/db/pipeline/expression.h"
-#include "mongo/db/pipeline/field_path.h"
-#include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/pipeline/semantic_analysis.h"
-#include "mongo/util/assert_util.h"
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::semantic_analysis {
 
@@ -364,7 +363,7 @@ PartitionedDependencies extractModifiedDependencies(const OrderedPathSet& depend
     // should not be included in the modified dependencies.
     for (auto&& dependency : dependencies) {
         bool preserved = false;
-        auto firstField = FieldPath::extractFirstFieldFromDottedPath(dependency).toString();
+        auto firstField = std::string{FieldPath::extractFirstFieldFromDottedPath(dependency)};
         // Because a path is preserved if the object it points to is preserved, if a prefix to a
         // path is preserved, then the path itself must be preserved. So we search for any prefixes
         // of 'dependency' as well. 'preservedPaths' is an *ordered* set, so we only have to search
@@ -486,8 +485,8 @@ boost::optional<StringMap<std::string>> renamedPaths(
 }
 
 boost::optional<StringMap<std::string>> renamedPaths(
-    const Pipeline::SourceContainer::const_iterator start,
-    const Pipeline::SourceContainer::const_iterator end,
+    const DocumentSourceContainer::const_iterator start,
+    const DocumentSourceContainer::const_iterator end,
     const OrderedPathSet& pathsOfInterest,
     boost::optional<std::function<bool(DocumentSource*)>> additionalStageValidatorCallback) {
     return renamedPathsFullPipeline(
@@ -495,15 +494,15 @@ boost::optional<StringMap<std::string>> renamedPaths(
 }
 
 boost::optional<StringMap<std::string>> renamedPaths(
-    const Pipeline::SourceContainer::const_reverse_iterator start,
-    const Pipeline::SourceContainer::const_reverse_iterator end,
+    const DocumentSourceContainer::const_reverse_iterator start,
+    const DocumentSourceContainer::const_reverse_iterator end,
     const OrderedPathSet& pathsOfInterest,
     boost::optional<std::function<bool(DocumentSource*)>> additionalStageValidatorCallback) {
     return renamedPathsFullPipeline(
         start, end, pathsOfInterest, Direction::kBackward, additionalStageValidatorCallback);
 }
 
-OrderedPathSet traceOriginatingPaths(const Pipeline::SourceContainer& pipeline,
+OrderedPathSet traceOriginatingPaths(const DocumentSourceContainer& pipeline,
                                      const OrderedPathSet& pathsOfInterest) {
     const auto optMap = renamedPathsFullPipeline(std::rbegin(pipeline),
                                                  std::rend(pipeline),
@@ -528,10 +527,10 @@ OrderedPathSet traceOriginatingPaths(const Pipeline::SourceContainer& pipeline,
     return res;
 }
 
-std::pair<Pipeline::SourceContainer::const_iterator, StringMap<std::string>>
+std::pair<DocumentSourceContainer::const_iterator, StringMap<std::string>>
 findLongestViablePrefixPreservingPaths(
-    const Pipeline::SourceContainer::const_iterator start,
-    const Pipeline::SourceContainer::const_iterator end,
+    const DocumentSourceContainer::const_iterator start,
+    const DocumentSourceContainer::const_iterator end,
     const OrderedPathSet& pathsOfInterest,
     boost::optional<std::function<bool(DocumentSource*)>> additionalStageValidatorCallback) {
     return multiStageRenamedPaths(

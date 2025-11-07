@@ -27,17 +27,13 @@
  *    it in the license file.
  */
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
 #include "mongo/db/pipeline/accumulator.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/util/intrusive_counter.h"
+
 
 namespace mongo {
-
-using boost::intrusive_ptr;
 
 REGISTER_ACCUMULATOR(first, genericParseSingleExpressionAccumulator<AccumulatorFirst>);
 
@@ -67,8 +63,4 @@ void AccumulatorFirst::reset() {
     _memUsageTracker.set(sizeof(*this));
 }
 
-
-intrusive_ptr<AccumulatorState> AccumulatorFirst::create(ExpressionContext* const expCtx) {
-    return new AccumulatorFirst(expCtx);
-}
 }  // namespace mongo

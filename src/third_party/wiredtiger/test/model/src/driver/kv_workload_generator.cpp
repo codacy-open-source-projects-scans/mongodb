@@ -39,6 +39,8 @@ namespace model {
  */
 kv_workload_generator_spec::kv_workload_generator_spec()
 {
+    disaggregated = 0; /* FIXME-WT-15042 Enable this when ready. */
+
     min_tables = 3;
     max_tables = 10;
 
@@ -53,6 +55,7 @@ kv_workload_generator_spec::kv_workload_generator_spec()
     column_var = 0.1;
 
     finish_transaction = 0.08;
+    get = 0.5;
     insert = 0.75;
     remove = 0.15;
     set_commit_timestamp = 0.05;
@@ -67,8 +70,11 @@ kv_workload_generator_spec::kv_workload_generator_spec()
     set_oldest_timestamp = 0.1;
     set_stable_timestamp = 0.2;
 
+    get_existing = 0.9;
     remove_existing = 0.9;
     update_existing = 0.1;
+
+    conn_logging = 0.5;
 
     prepared_transaction = 0.25;
     max_delay_after_prepare = 25; /* FIXME-WT-13232 This must be a small number until it's fixed. */
@@ -87,6 +93,7 @@ kv_workload_generator_spec::kv_workload_generator_spec()
     timing_stress_hs_sweep_race = 0.1;
     timing_stress_prepare_ckpt_delay = 0.1;
     timing_stress_commit_txn_slow = 0.1;
+    timing_stress_rec_before_wrapup = 0.1;
 }
 
 /*
@@ -325,11 +332,11 @@ kv_workload_generator::choose_table(kv_workload_sequence_ptr txn)
 }
 
 /*
- * kv_workload_generator::generate_connection_config --
- *     Generate random WiredTiger connection configurations.
+ * kv_workload_generator::generate_connection_stress_config --
+ *     Generate random time stress configurations.
  */
 std::string
-kv_workload_generator::generate_connection_config()
+kv_workload_generator::generate_connection_stress_config()
 {
     std::string wt_env_config;
     probability_switch(_random.next_float())
@@ -354,7 +361,24 @@ kv_workload_generator::generate_connection_config()
           "timing_stress_for_test=[prepare_checkpoint_delay]";
         probability_case(_spec.timing_stress_commit_txn_slow) wt_env_config +=
           "timing_stress_for_test=[commit_transaction_slow]";
+        probability_case(_spec.timing_stress_rec_before_wrapup) wt_env_config +=
+          "timing_stress_for_test=[failpoint_rec_before_wrapup]";
     }
+    return wt_env_config;
+}
+
+/*
+ * kv_workload_generator::generate_connection_log_config --
+ *     Generate random WiredTiger log configurations.
+ */
+std::string
+kv_workload_generator::generate_connection_log_config()
+{
+    std::string wt_env_config;
+
+    if (_spec.conn_logging > _random.next_float())
+        wt_env_config = model::join(wt_env_config, "log=(enabled=true)");
+
     return wt_env_config;
 }
 
@@ -421,7 +445,7 @@ kv_workload_generator::generate_transaction(size_t seq_no)
     /* Add all operations. But do not actually fill in timestamps; we'll do that later. */
     bool done = false;
     while (!done) {
-        float total = _spec.finish_transaction + _spec.insert + _spec.remove +
+        float total = _spec.finish_transaction + _spec.get + _spec.insert + _spec.remove +
           _spec.set_commit_timestamp + _spec.truncate;
         probability_switch(_random.next_float() * total)
         {
@@ -448,6 +472,21 @@ kv_workload_generator::generate_transaction(size_t seq_no)
                 } else
                     txn << operation::commit_transaction(txn_id);
                 done = true;
+            }
+            probability_case(_spec.get)
+            {
+                table_context_ptr table = choose_table(txn_ptr);
+                /*
+                 * FIXME-WT-14903 Under FLCS, get operations expose some relatively complex effects.
+                 * For instance, eviction changes implicit records to explicit. To re-enable this,
+                 * check that all FLCS interactions are accounted for.
+                 */
+                if (table->type() == kv_table_type::column_fix)
+                    break;
+
+                data_value key = generate_key(table, op_category::get);
+                /* A get operation shouldn't affect context. */
+                txn << operation::get(table->id(), txn_id, key);
             }
             probability_case(_spec.insert)
             {
@@ -510,6 +549,20 @@ kv_workload_generator::generate_transaction(size_t seq_no)
 void
 kv_workload_generator::run()
 {
+    /* Top-level configuration. */
+    if (_random.next_float() < _spec.disaggregated) {
+        _database_config.disaggregated = true;
+        _workload << operation::config("database", "disaggregated=true");
+
+        /* Adjust the specs based on what's not supported. */
+        _spec.column_fix = 0;
+        _spec.column_var = 0;
+        _spec.rollback_to_stable = 0;
+
+        /* FIXME-WT-15040 Prepared transactions are not yet supported. */
+        _spec.prepared_transaction = 0;
+    }
+
     /* Create tables. */
     uint64_t num_tables = _random.next_uint64(_spec.min_tables, _spec.max_tables);
     for (uint64_t i = 0; i < num_tables; i++)
@@ -539,32 +592,55 @@ kv_workload_generator::run()
      * kinds of database states that can be generated. We would like to generate states and tree
      * shapes that cannot be generated by existing workload generators, so that we can explore as
      * many interesting corner cases as possible.
+     *
+     * For disaggregated storage, we need to ensure that the stable timestamp is set before the
+     * first checkpoint (as this is required by precise checkpoints), and that the checkpoint is
+     * taken before the first crash (as this is required for the tables to exist after crash).
      */
     uint64_t num_sequences = _random.next_uint64(_spec.min_sequences, _spec.max_sequences);
+    bool has_checkpoint = false;
+    bool has_stable_timestamp = false;
     for (uint64_t i = 0; i < num_sequences; i++)
         probability_switch(_random.next_float())
         {
             probability_case(_spec.checkpoint)
             {
+                if (_database_config.disaggregated && !has_stable_timestamp)
+                    break;
+
                 kv_workload_sequence_ptr p = std::make_shared<kv_workload_sequence>(
                   _sequences.size(), kv_workload_sequence_type::checkpoint);
                 *p << operation::checkpoint();
                 _sequences.push_back(p);
+
+                has_checkpoint = true;
             }
             probability_case(_spec.checkpoint_crash)
             {
+                if (_database_config.disaggregated && !has_checkpoint)
+                    break;
+
                 kv_workload_sequence_ptr p = std::make_shared<kv_workload_sequence>(
                   _sequences.size(), kv_workload_sequence_type::checkpoint_crash);
                 uint64_t random_number = _random.next_uint64(1000);
                 *p << operation::checkpoint_crash(random_number);
                 _sequences.push_back(p);
+
+                if (!has_checkpoint)
+                    has_stable_timestamp = false;
             }
             probability_case(_spec.crash)
             {
+                if (_database_config.disaggregated && !has_checkpoint)
+                    break;
+
                 kv_workload_sequence_ptr p = std::make_shared<kv_workload_sequence>(
                   _sequences.size(), kv_workload_sequence_type::crash);
                 *p << operation::crash();
                 _sequences.push_back(p);
+
+                if (!has_checkpoint)
+                    has_stable_timestamp = false;
             }
             probability_case(_spec.evict)
             {
@@ -577,10 +653,15 @@ kv_workload_generator::run()
             }
             probability_case(_spec.restart)
             {
+                if (_database_config.disaggregated && !has_stable_timestamp)
+                    break; /* Need stable timestamp before shutdown takes a checkpoint. */
+
                 kv_workload_sequence_ptr p = std::make_shared<kv_workload_sequence>(
                   _sequences.size(), kv_workload_sequence_type::restart);
                 *p << operation::restart();
                 _sequences.push_back(p);
+
+                has_checkpoint = true; /* Shutdown takes a checkpoint. */
             }
             probability_case(_spec.rollback_to_stable)
             {
@@ -602,12 +683,23 @@ kv_workload_generator::run()
                   _sequences.size(), kv_workload_sequence_type::set_stable_timestamp);
                 *p << operation::set_stable_timestamp(k_timestamp_none); /* Placeholder. */
                 _sequences.push_back(p);
+
+                has_stable_timestamp = true;
             }
             probability_default
             {
                 _sequences.push_back(generate_transaction(_sequences.size()));
             }
         }
+
+    /* Ensure that the stable timestamp is set for disaggregated storage. */
+    if (_database_config.disaggregated && !has_stable_timestamp) {
+        kv_workload_sequence_ptr p = std::make_shared<kv_workload_sequence>(
+          _sequences.size(), kv_workload_sequence_type::set_stable_timestamp);
+        *p << operation::set_stable_timestamp(k_timestamp_none); /* Placeholder. */
+        _sequences.push_back(p);
+        has_stable_timestamp = true;
+    }
 
     /*
      * Now that we have a serial-equivalent schedule, we need to ensure that special,
@@ -733,8 +825,11 @@ kv_workload_generator::run()
             t.complete_one(s);
     }
 
-    /* Validate that we filled in the timestamps in the correct order. */
-    _workload.assert_timestamps();
+    /*
+     * Validate that the workload is correct, such checking that we filled in the timestamps in the
+     * correct order.
+     */
+    _workload.verify();
 }
 
 /*
@@ -753,6 +848,10 @@ kv_workload_generator::generate_key(table_context_ptr table, op_category op)
 
     case op_category::evict:
         p_existing = 1.0;
+        break;
+
+    case op_category::get:
+        p_existing = _spec.get_existing;
         break;
 
     case op_category::remove:

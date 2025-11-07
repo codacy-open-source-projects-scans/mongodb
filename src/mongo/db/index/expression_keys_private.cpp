@@ -32,8 +32,33 @@
 
 #include <absl/container/node_hash_map.h>
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
-#include <boost/container/flat_set.hpp>
-#include <boost/container/vector.hpp>
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement_comparator_interface.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/dotted_path/dotted_path_support.h"
+#include "mongo/db/feature_flag.h"
+#include "mongo/db/field_ref.h"
+#include "mongo/db/fts/fts_index_format.h"
+#include "mongo/db/fts/fts_spec.h"
+#include "mongo/db/index_names.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/query/collation/collation_index_key.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
+#include "mongo/db/timeseries/timeseries_constants.h"
+#include "mongo/db/timeseries/timeseries_dotted_path_support.h"
+#include "mongo/db/timeseries/timeseries_gen.h"
+#include "mongo/logv2/log.h"
+#include "mongo/stdx/type_traits.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/str.h"
+#include "mongo/util/string_map.h"
+
 #include <cstddef>
 #include <functional>
 #include <iterator>
@@ -43,42 +68,13 @@
 #include <utility>
 #include <vector>
 
+#include <boost/container/flat_set.hpp>
+#include <boost/container/vector.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement_comparator_interface.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/feature_flag.h"
-#include "mongo/db/field_ref.h"
-#include "mongo/db/fts/fts_index_format.h"
-#include "mongo/db/fts/fts_spec.h"
-#include "mongo/db/index_names.h"
-#include "mongo/db/query/bson/dotted_path_support.h"
-#include "mongo/db/query/collation/collation_index_key.h"
-#include "mongo/db/server_options.h"
-#include "mongo/db/storage/storage_parameters_gen.h"
-#include "mongo/db/timeseries/timeseries_constants.h"
-#include "mongo/db/timeseries/timeseries_dotted_path_support.h"
-#include "mongo/db/timeseries/timeseries_gen.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_options.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/stdx/type_traits.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/fail_point.h"
-#include "mongo/util/str.h"
-#include "mongo/util/string_map.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kIndex
 namespace mongo {
-namespace dps = ::mongo::dotted_path_support;
+namespace dps = ::mongo::bson;
 
 // static
 void ExpressionKeysPrivate::validateDocumentCommon(const CollectionPtr& collection,
@@ -98,9 +94,9 @@ void ExpressionKeysPrivate::validateDocumentCommon(const CollectionPtr& collecti
                 StringData field = keyElem.fieldName();
                 StringData userField;
 
-                if (field.startsWith(timeseries::kControlMaxFieldNamePrefix)) {
+                if (field.starts_with(timeseries::kControlMaxFieldNamePrefix)) {
                     userField = field.substr(timeseries::kControlMaxFieldNamePrefix.size());
-                } else if (field.startsWith(timeseries::kControlMinFieldNamePrefix)) {
+                } else if (field.starts_with(timeseries::kControlMinFieldNamePrefix)) {
                     userField = field.substr(timeseries::kControlMinFieldNamePrefix.size());
                 }
 
@@ -162,8 +158,8 @@ void ExpressionKeysPrivate::getHashKeys(SharedBufferFragmentBuilder& pooledBuffe
     key_string::PooledBuilder keyString(pooledBufferBuilder, keyStringVersion, ordering);
     for (auto&& indexEntry : keyPattern) {
         auto indexPath = indexEntry.fieldNameStringData();
-        auto* cstr = indexPath.rawData();
-        auto fieldVal = dps::extractElementAtPathOrArrayAlongPath(obj, cstr);
+        auto* cstr = indexPath.data();
+        auto fieldVal = dps::extractElementAtOrArrayAlongDottedPath(obj, cstr);
 
         // If we hit an array while traversing the path, 'cstr' will point to the path component
         // immediately following the array, or the null termination byte if the terminal path
@@ -176,7 +172,7 @@ void ExpressionKeysPrivate::getHashKeys(SharedBufferFragmentBuilder& pooledBuffe
         // upgrade, allowing users to recover from the possible index corruption. The old behaviour
         // before SERVER-44050 was to store 'null' index key if we encountered an array along the
         // index field path. We will use the same logic in the context of removing index keys.
-        if (ignoreArraysAlongPath && fieldVal.type() == BSONType::Array && !remainingPath.empty()) {
+        if (ignoreArraysAlongPath && fieldVal.type() == BSONType::array && !remainingPath.empty()) {
             fieldVal = nullObj.firstElement();
         }
 
@@ -187,7 +183,7 @@ void ExpressionKeysPrivate::getHashKeys(SharedBufferFragmentBuilder& pooledBuffe
                               << indexPath.substr(0,
                                                   indexPath.size() - remainingPath.size() -
                                                       !remainingPath.empty()),
-                fieldVal.type() != BSONType::Array);
+                fieldVal.type() != BSONType::array);
 
         BSONObj fieldValObj;
         if (fieldVal.eoo()) {

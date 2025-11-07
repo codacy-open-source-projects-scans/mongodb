@@ -23,9 +23,9 @@
 import {supportsCommittedReads} from "jstests/concurrency/fsm_workload_helpers/server_types.js";
 import {TxnUtil} from "jstests/libs/txns/txn_util.js";
 
-export const $config = (function() {
+export const $config = (function () {
     // Use the workload name as the collection name.
-    var uniqueCollectionName = 'secondary_reads';
+    let uniqueCollectionName = "secondary_reads";
 
     function isWriterThread() {
         return this.tid === 0;
@@ -48,8 +48,7 @@ export const $config = (function() {
         this.buildIndex(db, {x: 1});
 
         let bulk = db[this.collName].initializeOrderedBulkOp();
-        for (let i = this.nDocumentsInTotal; i < this.nDocumentsInTotal + this.nDocumentsToInsert;
-             i++) {
+        for (let i = this.nDocumentsInTotal; i < this.nDocumentsInTotal + this.nDocumentsToInsert; i++) {
             bulk.insert({_id: i, x: i});
         }
         let res = bulk.execute(writeConcern);
@@ -63,13 +62,13 @@ export const $config = (function() {
         assert.soon(() => {
             try {
                 arr = db[this.collName]
-                          .find()
-                          .readPref('secondary')
-                          .readConcern(readConcernLevel)
-                          .sort({x: -1})
-                          .hint({x: 1})
-                          .limit(this.nDocumentsToCheck)
-                          .toArray();
+                    .find()
+                    .readPref("secondary")
+                    .readConcern(readConcernLevel)
+                    .sort({x: -1})
+                    .hint({x: 1})
+                    .limit(this.nDocumentsToCheck)
+                    .toArray();
                 return true;
             } catch (e) {
                 // We propagate TransientTransactionErrors to allow the state function to
@@ -89,17 +88,17 @@ export const $config = (function() {
     }
 
     function getReadConcernLevel(supportsCommittedReads) {
-        const readConcernLevels = ['local'];
+        const readConcernLevels = ["local"];
         if (!TestData.runningWithCausalConsistency && !TestData.runInsideTransaction) {
-            readConcernLevels.push('available');
+            readConcernLevels.push("available");
         }
         if (supportsCommittedReads) {
-            readConcernLevels.push('majority');
+            readConcernLevels.push("majority");
         }
         return readConcernLevels[Random.randInt(readConcernLevels.length)];
     }
 
-    var states = (function() {
+    let states = (function () {
         // One thread is dedicated to writing and other threads perform reads on
         // secondaries with a randomly chosen readConcern level.
         function readFromSecondaries(db, collName) {
@@ -113,9 +112,9 @@ export const $config = (function() {
         return {readFromSecondaries: readFromSecondaries};
     })();
 
-    var transitions = {readFromSecondaries: {readFromSecondaries: 1}};
+    let transitions = {readFromSecondaries: {readFromSecondaries: 1}};
 
-    var setup = function setup(db, collName, cluster) {
+    let setup = function setup(db, collName, cluster) {
         this.nDocumentsInTotal = 0;
         // Start write workloads to activate oplog application on secondaries
         // before any reads.
@@ -125,7 +124,7 @@ export const $config = (function() {
     return {
         threadCount: 30,
         iterations: 10,
-        startState: 'readFromSecondaries',
+        startState: "readFromSecondaries",
         states: states,
         data: {
             nDocumentsToInsert: 2000,
@@ -135,7 +134,7 @@ export const $config = (function() {
             buildIndex: buildIndex,
             readFromSecondaries: readFromSecondaries,
             assertSecondaryReadOk: assertSecondaryReadOk,
-            collName: uniqueCollectionName
+            collName: uniqueCollectionName,
         },
         transitions: transitions,
         setup: setup,

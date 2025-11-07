@@ -27,11 +27,7 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
+#include "mongo/db/views/view_graph.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
@@ -48,10 +44,14 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/db/views/view.h"
-#include "mongo/db/views/view_graph.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/unittest.h"
+
+#include <memory>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 
 namespace mongo {
 namespace {
@@ -65,8 +65,7 @@ const auto kBarNamespace = NamespaceString::createNamespaceString_forTest(kTestD
 const auto kQuxNamespace = NamespaceString::createNamespaceString_forTest(kTestDb, kQuxName);
 const auto kEmptyPipeline = BSONArray();
 const auto kBinaryCollation = BSONObj();
-const auto kFilipinoCollation = BSON("locale"
-                                     << "fil");
+const auto kFilipinoCollation = BSON("locale" << "fil");
 
 class ViewGraphFixture : public unittest::Test {
 public:

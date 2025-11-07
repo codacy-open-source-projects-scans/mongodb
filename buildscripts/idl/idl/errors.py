@@ -45,7 +45,6 @@ from . import common
 # Error codes must be unique, validated  _assert_unique_error_messages on file load.
 #
 ERROR_ID_UNKNOWN_ROOT = "ID0001"
-ERROR_ID_DUPLICATE_SYMBOL = "ID0002"
 ERROR_ID_IS_NODE_TYPE = "ID0003"
 ERROR_ID_IS_NODE_TYPE_SCALAR_OR_SEQUENCE = "ID0004"
 ERROR_ID_DUPLICATE_NODE = "ID0005"
@@ -69,13 +68,9 @@ ERROR_ID_BAD_ARRAY_TYPE_NAME = "ID0023"
 ERROR_ID_ARRAY_NO_DEFAULT = "ID0024"
 ERROR_ID_BAD_IMPORT = "ID0025"
 ERROR_ID_BAD_BINDATA_DEFAULT = "ID0026"
-ERROR_ID_CHAINED_TYPE_NOT_FOUND = "ID0027"
-ERROR_ID_CHAINED_TYPE_WRONG_BSON_TYPE = "ID0028"
 ERROR_ID_CHAINED_DUPLICATE_FIELD = "ID0029"
-ERROR_ID_CHAINED_NO_TYPE_STRICT = "ID0030"
 ERROR_ID_CHAINED_STRUCT_NOT_FOUND = "ID0031"
 ERROR_ID_CHAINED_NO_NESTED_STRUCT_STRICT = "ID0032"
-ERROR_ID_CHAINED_NO_NESTED_CHAINED = "ID0033"
 ERROR_ID_BAD_EMPTY_ENUM = "ID0034"
 ERROR_ID_NO_ARRAY_ENUM = "ID0035"
 ERROR_ID_ENUM_BAD_TYPE = "ID0036"
@@ -136,9 +131,16 @@ ERROR_ID_QUERY_SHAPE_PROPERTIES_MUTUALLY_EXCLUSIVE = "ID0097"
 ERROR_ID_QUERY_SHAPE_PROPERTY_CANNOT_BE_FALSE = "ID0098"
 ERROR_ID_STRICT_AND_DISABLE_CHECK_NOT_ALLOWED = "ID0099"
 ERROR_ID_INHERITANCE_AND_DISABLE_CHECK_NOT_ALLOWED = "ID0100"
-ERROR_ID_FEATURE_FLAG_SHOULD_BE_FCV_GATED_FALSE_HAS_VERSION = "ID0101"
+ERROR_ID_FEATURE_FLAG_SHOULD_BE_FCV_GATED_FALSE_HAS_UNSUPPORTED_OPTION = "ID0101"
 ERROR_ID_QUERY_SHAPE_INVALID_VALUE = "ID0102"
 ERROR_ID_BAD_CPP_NAMESPACE = "ID0103"
+ERROR_ID_INCREMENTAL_ROLLOUT_PHASE_INVALID_VALUE = "ID0104"
+ERROR_ID_ILLEGALLY_FCV_GATED_FEATURE_FLAG = "ID0105"
+ERROR_ID_INCREMENTAL_FEATURE_FLAG_DEFAULT_VALUE = "ID0106"
+ERROR_ID_FEATURE_FLAG_WITHOUT_DEFAULT_VALUE = "ID0107"
+ERROR_ID_IFR_FLAG_WITH_VERSION = "ID108"
+ERROR_ID_BAD_VISIBILITY = "ID109"
+ERROR_ID_FEATURE_FLAG_ENABLED_ON_TRANSITIONAL_FCV_MISSING_SAFETY_EXPLANATION = "ID110"
 
 
 class IDLError(Exception):
@@ -285,16 +287,6 @@ class ParserContext(object):
             node,
             ERROR_ID_UNKNOWN_NODE,
             "Unknown IDL node '%s' for YAML entity '%s'" % (node.value, name),
-        )
-
-    def add_duplicate_symbol_error(self, location, name, duplicate_class_name, original_class_name):
-        # type: (common.SourceLocation, str, str, str) -> None
-        """Add an error about a duplicate symbol."""
-        self._add_error(
-            location,
-            ERROR_ID_DUPLICATE_SYMBOL,
-            "%s '%s' is a duplicate symbol of an existing %s"
-            % (duplicate_class_name, name, original_class_name),
         )
 
     def add_unknown_type_error(self, location, field_name, type_name):
@@ -559,7 +551,7 @@ class ParserContext(object):
             % (name),
         )
 
-    def add_not_custom_scalar_serialization_not_supported_error(  # pylint: disable=invalid-name
+    def add_not_custom_scalar_serialization_not_supported_error(
         self, location, ast_type, ast_parent, bson_type_name
     ):
         # type: (common.SourceLocation, str, str, str) -> None
@@ -641,28 +633,6 @@ class ParserContext(object):
             ("Default values are not allowed for %s '%s'") % (ast_type, ast_parent),
         )
 
-    def add_chained_type_not_found_error(self, location, type_name):
-        # type: (common.SourceLocation, str) -> None
-        """Add an error about a chained_type not found."""
-        self._add_error(
-            location,
-            ERROR_ID_CHAINED_TYPE_NOT_FOUND,
-            ("Type '%s' is not a valid chained type") % (type_name),
-        )
-
-    def add_chained_type_wrong_type_error(self, location, type_name, bson_type_name):
-        # type: (common.SourceLocation, str, str) -> None
-        """Add an error about a chained_type being the wrong type."""
-        self._add_error(
-            location,
-            ERROR_ID_CHAINED_TYPE_WRONG_BSON_TYPE,
-            (
-                "Chained Type '%s' has the wrong bson serialization type '%s', only"
-                + "'chain' is supported for chained types."
-            )
-            % (type_name, bson_type_name),
-        )
-
     def add_duplicate_field_error(self, location, field_container, field_name, duplicate_location):
         # type: (common.SourceLocation, str, str, common.SourceLocation) -> None
         """Add an error about duplicate fields as a result of chained structs/types."""
@@ -671,19 +641,6 @@ class ParserContext(object):
             ERROR_ID_CHAINED_DUPLICATE_FIELD,
             ("Chained Struct or Type '%s' duplicates an existing field '%s' at location" + "'%s'.")
             % (field_container, field_name, duplicate_location),
-        )
-
-    def add_chained_type_no_strict_error(self, location, struct_name):
-        # type: (common.SourceLocation, str) -> None
-        """Add an error about strict parser validate and chained types."""
-        self._add_error(
-            location,
-            ERROR_ID_CHAINED_NO_TYPE_STRICT,
-            (
-                "Strict IDL parser validation is not supported with chained types for "
-                + "struct '%s'. Specify 'strict: false' for this struct."
-            )
-            % (struct_name),
         )
 
     def add_chained_struct_not_found_error(self, location, struct_name):
@@ -706,19 +663,6 @@ class ParserContext(object):
                 + " contained by struct '%s'. Specify 'strict: false' for this struct."
             )
             % (nested_struct_name, struct_name),
-        )
-
-    def add_chained_nested_struct_no_nested_error(self, location, struct_name, chained_name):
-        # type: (common.SourceLocation, str, str) -> None
-        """Add an error about struct's chaining being a struct with nested chaining."""
-        self._add_error(
-            location,
-            ERROR_ID_CHAINED_NO_NESTED_CHAINED,
-            (
-                "Struct '%s' is not allowed to nest struct '%s' since it has chained"
-                + " structs and/or types."
-            )
-            % (struct_name, chained_name),
         )
 
     def add_empty_enum_error(self, node, name):
@@ -859,7 +803,7 @@ class ParserContext(object):
             ("Command '%s' cannot have the same name as a field.") % (command_name),
         )
 
-    def add_bad_field_non_const_getter_in_immutable_struct_error(  # pylint: disable=invalid-name
+    def add_bad_field_non_const_getter_in_immutable_struct_error(
         self, location, struct_name, field_name
     ):
         # type: (common.SourceLocation, str, str) -> None
@@ -1112,14 +1056,94 @@ class ParserContext(object):
             ("The 'version' attribute is not allowed for feature flag that defaults to false"),
         )
 
-    def add_feature_flag_fcv_gated_false_has_version(self, location):
+    def add_feature_flag_fcv_gated_false_has_unsupported_option(self, location, option_name):
         # type: (common.SourceLocation) -> None
-        """Add an error about a feature flag that should not be FCV gated but has a version."""
+        """Add an error about a feature flag that should not be FCV gated but has an option for FCV gated feature flags."""
         self._add_error(
             location,
-            ERROR_ID_FEATURE_FLAG_SHOULD_BE_FCV_GATED_FALSE_HAS_VERSION,
+            ERROR_ID_FEATURE_FLAG_SHOULD_BE_FCV_GATED_FALSE_HAS_UNSUPPORTED_OPTION,
             (
-                "The 'version' attribute is not allowed for feature flag that should not be FCV gated"
+                "The '%s' attribute is not allowed for feature flag that should not be FCV gated"
+                % (option_name)
+            ),
+        )
+
+    def add_feature_flag_enabled_on_transitional_fcv_missing_safety_explanation(self, location):
+        # type: (common.SourceLocation) -> None
+        """Add an error about a FCV gated feature flag enabled on transitional FCV with no safety explanation."""
+        self._add_error(
+            location,
+            ERROR_ID_FEATURE_FLAG_ENABLED_ON_TRANSITIONAL_FCV_MISSING_SAFETY_EXPLANATION,
+            (
+                "Feature flags enabled on transitional FCV must be accompanied by a description containing the text"
+                "'(Enable on transitional FCV): ' followed by a justification for why the use of the property is safe."
+            ),
+        )
+
+    def add_invalid_incremental_rollout_phase_value(
+        self, location, incremental_rollout_phase_value
+    ):
+        """
+        Add an error for a failure to parse a feature flag's 'incremental_rollout_phase' property.
+        """
+        self._add_error(
+            location,
+            ERROR_ID_INCREMENTAL_ROLLOUT_PHASE_INVALID_VALUE,
+            (
+                f"'{incremental_rollout_phase_value}' is not a valid value for the "
+                "'incremental_rollout_phase' property."
+            ),
+        )
+
+    def add_illegally_fcv_gated_feature_flag(self, location):
+        """
+        Add an error resulting from a feature flag both sets and incremental rollout phase and
+        enables FCV gating.
+        """
+        self._add_error(
+            location,
+            ERROR_ID_ILLEGALLY_FCV_GATED_FEATURE_FLAG,
+            (
+                "A feature flag in any phase other than the default ('not_for_incremental_rollout') "
+                "must not also set 'fcv_gated' to true."
+            ),
+        )
+
+    def add_invalid_feature_flag_default_value(self, location, flag_kind, desired_value):
+        # type: (common.SourceLocation, str, bool) -> None
+        """
+        Add an error about an incremental rollout feature flag with an incompatible 'default'
+        setting.
+        """
+        self._add_error(
+            location,
+            ERROR_ID_INCREMENTAL_FEATURE_FLAG_DEFAULT_VALUE,
+            f"A feature_flag in phase '{flag_kind}' must have its 'default' set to {desired_value}",
+        )
+
+    def add_feature_flag_without_default_value(self, location):
+        """Add an error for a feature flag that needs a default value but does not have one."""
+        self._add_error(
+            location,
+            ERROR_ID_FEATURE_FLAG_WITHOUT_DEFAULT_VALUE,
+            (
+                "The 'default' property is required for feature flags that do not specify an "
+                "'incremental_rollout_phase' other than the default 'not_for_incremental_rollout' "
+                "option"
+            ),
+        )
+
+    def add_ifr_flag_with_version(self, location):
+        """
+        Add an error resulting from a feature flag both sets and incremental rollout phase and a
+        version.
+        """
+        self._add_error(
+            location,
+            ERROR_ID_IFR_FLAG_WITH_VERSION,
+            (
+                "A feature flag in any phase other than the default ('not_for_incremental_rollout') "
+                "must not also set a 'version' value."
             ),
         )
 
@@ -1304,6 +1328,14 @@ class ParserContext(object):
             ERROR_ID_BAD_CPP_NAMESPACE,
             "cpp_namespace must start with 'mongo::' or be just 'mongo', namespace '%s' is not supported"
             % (namespace),
+        )
+
+    def add_bad_visibility(self, node: yaml.nodes.Node, mod_visibility: str):
+        """Add an error about a bad visibility value."""
+        self._add_node_error(
+            node,
+            ERROR_ID_BAD_VISIBILITY,
+            f"Bad visibility value '{mod_visibility}', only public, public_for_technical_reasons, private, file_private, needs_replacement, and use_replacement(...) are accepted",
         )
 
 

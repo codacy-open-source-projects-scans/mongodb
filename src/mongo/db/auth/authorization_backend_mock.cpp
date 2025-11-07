@@ -29,16 +29,18 @@
 
 #include "mongo/db/auth/authorization_backend_mock.h"
 
-#include <string>
-#include <utility>
-
+#include "mongo/db/exec/matcher/matcher.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/field_ref_set.h"
 #include "mongo/db/matcher/expression.h"
-#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/expression_with_placeholder.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/update/update_driver.h"
+
+#include <string>
+#include <utility>
 
 
 namespace mongo::auth {
@@ -204,7 +206,7 @@ Status AuthorizationBackendMock::_queryVector(OperationContext* opCtx,
 
     for (BSONObjCollection::iterator vecIt = mapIt->second.begin(); vecIt != mapIt->second.end();
          ++vecIt) {
-        if (matcher->matchesBSON(*vecIt)) {
+        if (exec::matcher::matchesBSON(matcher.get(), *vecIt)) {
             result->push_back(vecIt);
         }
     }

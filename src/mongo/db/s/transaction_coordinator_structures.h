@@ -27,17 +27,21 @@
  *    it in the license file.
  */
 
-#pragma once
+#include "mongo/util/modules.h"
 
-#include <boost/optional.hpp>
-#include <vector>
+
+#pragma once
 
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+
+#include <vector>
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 namespace txn {
@@ -58,12 +62,6 @@ using CommitDecision = PrepareVote;
  */
 CommitDecision readCommitDecisionEnumProperty(StringData decision);
 StringData writeCommitDecisionEnumProperty(CommitDecision decision);
-
-/**
- * Optional serializer/deserializer for the generic server 'Status' type.
- */
-Status readStatusProperty(const BSONElement& statusBSON);
-void writeStatusProperty(const Status& status, StringData fieldName, BSONObjBuilder* builder);
 
 }  // namespace txn
 }  // namespace mongo

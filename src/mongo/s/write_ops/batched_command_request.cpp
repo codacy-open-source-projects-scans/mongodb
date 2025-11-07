@@ -29,19 +29,21 @@
 
 #include "mongo/s/write_ops/batched_command_request.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/oid.h"
 #include "mongo/db/basic_types.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/query/compiler/dependency_analysis/expression_dependencies.h"
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -71,7 +73,9 @@ BSONObj freezeLet(OperationContext* opCtx,
                       .runtimeConstants(legacyRuntimeConstants)
                       .letParameters(let)
                       .build();
-    expCtx->variables.seedVariablesWithLetParameters(expCtx.get(), let);
+    expCtx->variables.seedVariablesWithLetParameters(expCtx.get(), let, [](const Expression* expr) {
+        return expression::getDependencies(expr).hasNoRequirements();
+    });
     return expCtx->variables.toBSON(expCtx->variablesParseState, let);
 }
 
@@ -93,12 +97,20 @@ BatchedCommandRequest BatchedCommandRequest::parseDelete(const OpMsgRequest& req
     return constructBatchedCommandRequest<DeleteOp>(request);
 }
 
+bool BatchedCommandRequest::getOrdered() const {
+    return _visit([](auto&& op) -> decltype(auto) { return op.getOrdered(); });
+}
+
 bool BatchedCommandRequest::getBypassDocumentValidation() const {
     return _visit([](auto&& op) -> decltype(auto) { return op.getBypassDocumentValidation(); });
 }
 
 const NamespaceString& BatchedCommandRequest::getNS() const {
     return _visit([](auto&& op) -> decltype(auto) { return op.getNamespace(); });
+}
+
+const boost::optional<UUID>& BatchedCommandRequest::getCollectionUUID() const {
+    return _visit([](auto&& op) -> decltype(auto) { return op.getCollectionUUID(); });
 }
 
 bool BatchedCommandRequest::hasEncryptionInformation() const {
@@ -181,18 +193,26 @@ const boost::optional<BSONObj>& BatchedCommandRequest::getLet() const {
     return _visit(Visitor{});
 };
 
+void BatchedCommandRequest::setLet(boost::optional<mongo::BSONObj> value) {
+    _visit(OverloadedVisitor{[&](write_ops::InsertCommandRequest& op) {},
+                             [&](write_ops::UpdateCommandRequest& op) { op.setLet(value); },
+                             [&](write_ops::DeleteCommandRequest& op) {
+                                 op.setLet(value);
+                             }});
+}
+
 void BatchedCommandRequest::evaluateAndReplaceLetParams(OperationContext* opCtx) {
     switch (_batchType) {
         case BatchedCommandRequest::BatchType_Insert:
             break;
         case BatchedCommandRequest::BatchType_Update:
-            if (auto let = _updateReq->getLet()) {
+            if (const auto& let = _updateReq->getLet()) {
                 _updateReq->setLet(
                     freezeLet(opCtx, *let, _updateReq->getLegacyRuntimeConstants(), getNS()));
             }
             break;
         case BatchedCommandRequest::BatchType_Delete:
-            if (auto let = _deleteReq->getLet()) {
+            if (const auto& let = _deleteReq->getLet()) {
                 _deleteReq->setLet(
                     freezeLet(opCtx, *let, _deleteReq->getLegacyRuntimeConstants(), getNS()));
             }
@@ -367,103 +387,47 @@ BatchedCommandRequest BatchedCommandRequest::buildPipelineUpdateOp(
     }());
 }
 
-BatchItemRef::BatchItemRef(const BatchedCommandRequest* request, int index)
-    : _batchedRequest(*request), _index(index), _batchType(_batchedRequest->getBatchType()) {
-    invariant(index < int(request->sizeWriteOps()));
-}
+int BatchedCommandRequest::getBaseCommandSizeEstimate(OperationContext* opCtx) const {
+    // For simplicity, we build a dummy batched write command request that contains all the common
+    // fields and serialize it to get the base command size.
+    // We only bother to copy over variable-size and/or optional fields, since the value of fields
+    // that are fixed-size and always present (e.g. 'ordered') won't affect the size calculation.
+    auto nss = getNS();
+    auto request =
+        _visit(OverloadedVisitor{[&](const write_ops::InsertCommandRequest& op) {
+                                     return BatchedCommandRequest(write_ops::InsertCommandRequest{
+                                         nss, std::vector<BSONObj>{}});
+                                 },
+                                 [&](const write_ops::UpdateCommandRequest& op) {
+                                     return BatchedCommandRequest(write_ops::UpdateCommandRequest{
+                                         nss, std::vector<mongo::write_ops::UpdateOpEntry>{}});
+                                 },
+                                 [&](const write_ops::DeleteCommandRequest& op) {
+                                     return BatchedCommandRequest(write_ops::DeleteCommandRequest{
+                                         nss, std::vector<mongo::write_ops::DeleteOpEntry>{}});
+                                 }});
 
-BatchItemRef::BatchItemRef(const BulkWriteCommandRequest* request, int index)
-    : _bulkWriteRequest(*request), _index(index) {
-    invariant(index < int(request->getOps().size()));
-    _batchType = convertOpType(BulkWriteCRUDOp(request->getOps()[index]).getType());
-}
-
-int BatchItemRef::getSizeForBatchWriteBytes() const {
-    tassert(7328113, "Invalid BatchedCommandRequest reference", _batchedRequest);
-
-    switch (_batchType) {
-        case BatchedCommandRequest::BatchType_Insert:
-            return getDocument().objsize();
-
-        case BatchedCommandRequest::BatchType_Update: {
-            auto& update = _batchedRequest->getUpdateRequest().getUpdates()[_index];
-            auto estSize = write_ops::getUpdateSizeEstimate(
-                update.getQ(),
-                update.getU(),
-                update.getC(),
-                update.getUpsertSupplied().has_value(),
-                update.getCollation(),
-                update.getArrayFilters(),
-                update.getSort(),
-                update.getHint(),
-                update.getSampleId(),
-                update.getAllowShardKeyUpdatesWithoutFullShardKeyInQuery().has_value());
-            // When running a debug build, verify that estSize is at least the BSON serialization
-            // size.
-            dassert(estSize >= update.toBSON().objsize());
-            return estSize;
-        }
-
-        case BatchedCommandRequest::BatchType_Delete: {
-            auto& deleteOp = _batchedRequest->getDeleteRequest().getDeletes()[_index];
-            auto estSize = write_ops::getDeleteSizeEstimate(deleteOp.getQ(),
-                                                            deleteOp.getCollation(),
-                                                            deleteOp.getHint(),
-                                                            deleteOp.getSampleId());
-            // When running a debug build, verify that estSize is at least the BSON serialization
-            // size.
-            dassert(estSize >= deleteOp.toBSON().objsize());
-            return estSize;
-        }
-        default:
-            MONGO_UNREACHABLE;
+    write_ops::WriteCommandRequestBase baseRequest;
+    if (opCtx->isRetryableWrite()) {
+        // We'll account for the size to store each individual stmtId as we add ops, so similar to
+        // above with ops, we just put an empty vector as a placeholder for now.
+        baseRequest.setStmtIds({});
     }
-}
+    baseRequest.setEncryptionInformation(
+        request.getWriteCommandRequestBase().getEncryptionInformation());
+    request.setWriteCommandRequestBase(std::move(baseRequest));
 
-int BatchItemRef::getSizeForBulkWriteBytes() const {
-    tassert(7353600, "Invalid BulkWriteCommandRequest reference", _bulkWriteRequest);
-
-    switch (_batchType) {
-        case BatchedCommandRequest::BatchType_Insert: {
-            auto& insertOp = *BulkWriteCRUDOp(_bulkWriteRequest->getOps()[_index]).getInsert();
-            auto estSize = write_ops::getBulkWriteInsertSizeEstimate(insertOp.getDocument());
-            // When running a debug build, verify that estSize is at least the BSON serialization
-            // size.
-            dassert(estSize >= insertOp.toBSON().objsize());
-            return estSize;
-        }
-
-        case BatchedCommandRequest::BatchType_Update: {
-            auto& updateOp = *BulkWriteCRUDOp(_bulkWriteRequest->getOps()[_index]).getUpdate();
-            auto estSize =
-                write_ops::getBulkWriteUpdateSizeEstimate(updateOp.getFilter(),
-                                                          updateOp.getUpdateMods(),
-                                                          updateOp.getConstants(),
-                                                          updateOp.getUpsertSupplied().has_value(),
-                                                          updateOp.getCollation(),
-                                                          updateOp.getArrayFilters(),
-                                                          updateOp.getSort(),
-                                                          updateOp.getHint(),
-                                                          updateOp.getSampleId());
-            // When running a debug build, verify that estSize is at least the BSON serialization
-            // size.
-            dassert(estSize >= updateOp.toBSON().objsize());
-            return estSize;
-        }
-        case BatchedCommandRequest::BatchType_Delete: {
-            auto& deleteOp = *BulkWriteCRUDOp(_bulkWriteRequest->getOps()[_index]).getDelete();
-            auto estSize = write_ops::getBulkWriteDeleteSizeEstimate(deleteOp.getFilter(),
-                                                                     deleteOp.getCollation(),
-                                                                     deleteOp.getHint(),
-                                                                     deleteOp.getSampleId());
-            // When running a debug build, verify that estSize is at least the BSON serialization
-            // size.
-            dassert(estSize >= deleteOp.toBSON().objsize());
-            return estSize;
-        }
-        default:
-            MONGO_UNREACHABLE;
+    request.setLet(getLet());
+    if (hasLegacyRuntimeConstants()) {
+        request.setLegacyRuntimeConstants(*getLegacyRuntimeConstants());
     }
+
+    BSONObjBuilder builder;
+    request.serialize(&builder);
+    // Add writeConcern and lsid/txnNumber to ensure we save space for them.
+    logical_session_id_helpers::serializeLsidAndTxnNumber(opCtx, &builder);
+    builder.append(WriteConcernOptions::kWriteConcernField, opCtx->getWriteConcern().toBSON());
+    return builder.obj().objsize();
 }
 
 BatchedCommandRequest::BatchType convertOpType(BulkWriteCRUDOp::OpType opType) {
@@ -474,7 +438,6 @@ BatchedCommandRequest::BatchType convertOpType(BulkWriteCRUDOp::OpType opType) {
             return BatchedCommandRequest::BatchType_Update;
         case BulkWriteCRUDOp::OpType::kDelete:
             return BatchedCommandRequest::BatchType_Delete;
-            break;
         default:
             MONGO_UNREACHABLE;
     }

@@ -29,29 +29,30 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <memory>
-
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/global_catalog/type_chunk.h"
 #include "mongo/db/keypattern.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/s/balancer_stats_registry.h"
-#include "mongo/db/s/collection_metadata.h"
 #include "mongo/db/s/migration_coordinator_document_gen.h"
 #include "mongo/db/s/migration_recipient_recovery_document_gen.h"
 #include "mongo/db/s/migration_session_id.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/executor/thread_pool_task_executor.h"
-#include "mongo/s/catalog/type_chunk.h"
 #include "mongo/util/future.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <memory>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -108,30 +109,17 @@ BSONObj makeMigrationStatusDocumentDestination(
     boost::optional<long long> sessionOplogEntriesMigrated);
 
 /**
- * Returns a chunk range with extended or truncated boundaries to match the number of fields in the
- * given metadata's shard key pattern.
- */
-ChunkRange extendOrTruncateBoundsForMetadata(const CollectionMetadata& metadata,
-                                             const ChunkRange& range);
-
-/**
- * Returns an executor to be used to run commands related to submitting tasks to the range deleter.
- * The executor is initialized on the first call to this function. Uses a shared_ptr because a
- * shared_ptr is required to work with ExecutorFutures.
- */
-std::shared_ptr<executor::ThreadPoolTaskExecutor> getMigrationUtilExecutor(
-    ServiceContext* serviceContext);
-
-/**
  * Writes the migration coordinator document to config.migrationCoordinators and waits for majority
  * write concern.
  */
-void persistMigrationCoordinatorLocally(OperationContext* opCtx,
-                                        const MigrationCoordinatorDocument& migrationDoc);
+void insertMigrationCoordinatorDoc(OperationContext* opCtx,
+                                   const MigrationCoordinatorDocument& migrationDoc);
+void updateMigrationCoordinatorDoc(OperationContext* opCtx,
+                                   const MigrationCoordinatorDocument& migrationdoc);
 
 /**
- * Updates the migration coordinator document to set the decision field to "committed" and waits for
- * majority writeConcern.
+ * Updates the migration coordinator document to set the decision field to "committed" and waits
+ * for majority writeConcern.
  */
 void persistCommitDecision(OperationContext* opCtx,
                            const MigrationCoordinatorDocument& migrationDoc);
@@ -196,27 +184,15 @@ void drainMigrationsPendingRecovery(OperationContext* opCtx);
 /**
  * Submits an asynchronous task to recover the migration until it succeeds or the node steps down.
  */
-void asyncRecoverMigrationUntilSuccessOrStepDown(OperationContext* opCtx,
-                                                 const NamespaceString& nss) noexcept;
+SemiFuture<void> asyncRecoverMigrationUntilSuccessOrStepDown(OperationContext* opCtx,
+                                                             const NamespaceString& nss);
 
 /**
- * This function writes a no-op message to the oplog when migrating a first chunk to the recipient
- * (i.e., the recipient didn't have any * chunks), so that change stream will notice that and close
- * the cursor in order to notify mongos to target the new shard as well.
+ * Exhaust any active and recovery-pending migration. This method is meant to be exclusively called
+ * within the context of a FCV downgrade.
+ * TODO SERVER-103838 Remove this method and its invocations once 9.0 becomes LTS.
  */
-void notifyChangeStreamsOnRecipientFirstChunk(OperationContext* opCtx,
-                                              const NamespaceString& collNss,
-                                              const ShardId& fromShardId,
-                                              const ShardId& toShardId,
-                                              boost::optional<UUID> collUUID);
+void drainMigrationsOnFcvDowngrade(OperationContext* opCtx);
 
-/**
- * This function writes a no-op message to the oplog when during migration the last chunk of the
- * collection collNss is migrated off the off the donor and hence the  donor has no more chunks.
- */
-void notifyChangeStreamsOnDonorLastChunk(OperationContext* opCtx,
-                                         const NamespaceString& collNss,
-                                         const ShardId& donorShardId,
-                                         boost::optional<UUID> collUUID);
 }  // namespace migrationutil
 }  // namespace mongo

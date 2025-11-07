@@ -2,6 +2,10 @@
 // s2 rejects shapes with duplicate adjacent points as invalid, but they are
 // valid in GeoJSON.  We store the duplicates, but internally remove them
 // before indexing or querying.
+// @tags: [
+//   requires_getmore,
+// ]
+
 let t = db.geo_s2dupe_points;
 t.drop();
 t.createIndex({geo: "2dsphere"});
@@ -24,38 +28,87 @@ function testDuplicates(shapeName, shapeWithDupes, shapeWithoutDupes) {
 }
 
 // LineString
-var lineWithDupes = {
+let lineWithDupes = {
     _id: "line",
-    geo: {type: "LineString", coordinates: [[40, 5], [40, 5], [40, 5], [41, 6], [41, 6]]}
+    geo: {
+        type: "LineString",
+        coordinates: [
+            [40, 5],
+            [40, 5],
+            [40, 5],
+            [41, 6],
+            [41, 6],
+        ],
+    },
 };
-var lineWithoutDupes = {type: "LineString", coordinates: [[40, 5], [41, 6]]};
+let lineWithoutDupes = {
+    type: "LineString",
+    coordinates: [
+        [40, 5],
+        [41, 6],
+    ],
+};
 
 // Polygon
-var polygonWithDupes = {
+let polygonWithDupes = {
     _id: "poly",
     geo: {
         type: "Polygon",
         coordinates: [
-            [[-3.0, -3.0], [3.0, -3.0], [3.0, 3.0], [-3.0, 3.0], [-3.0, -3.0]],
-            [[-2.0, -2.0], [2.0, -2.0], [2.0, 2.0], [-2.0, 2.0], [-2.0, -2.0], [-2.0, -2.0]]
-        ]
-    }
+            [
+                [-3.0, -3.0],
+                [3.0, -3.0],
+                [3.0, 3.0],
+                [-3.0, 3.0],
+                [-3.0, -3.0],
+            ],
+            [
+                [-2.0, -2.0],
+                [2.0, -2.0],
+                [2.0, 2.0],
+                [-2.0, 2.0],
+                [-2.0, -2.0],
+                [-2.0, -2.0],
+            ],
+        ],
+    },
 };
-var polygonWithoutDupes = {
+let polygonWithoutDupes = {
     type: "Polygon",
     coordinates: [
-        [[-3.0, -3.0], [3.0, -3.0], [3.0, 3.0], [-3.0, 3.0], [-3.0, -3.0]],
-        [[-2.0, -2.0], [2.0, -2.0], [2.0, 2.0], [-2.0, 2.0], [-2.0, -2.0]]
-    ]
+        [
+            [-3.0, -3.0],
+            [3.0, -3.0],
+            [3.0, 3.0],
+            [-3.0, 3.0],
+            [-3.0, -3.0],
+        ],
+        [
+            [-2.0, -2.0],
+            [2.0, -2.0],
+            [2.0, 2.0],
+            [-2.0, 2.0],
+            [-2.0, -2.0],
+        ],
+    ],
 };
 
 // MultiPolygon
-var multiPolygonWithDupes = {
+let multiPolygonWithDupes = {
     _id: "multi",
     geo: {
         type: "MultiPolygon",
         coordinates: [
-            [[[102.0, 2.0], [103.0, 2.0], [103.0, 2.0], [103.0, 3.0], [102.0, 3.0], [102.0, 2.0]]],
+            [
+                [
+                    [102.0, 2.0],
+                    [103.0, 2.0],
+                    [103.0, 2.0],
+                    [103.0, 3.0],
+                    [102.0, 3.0],
+                    [102.0, 2.0],
+                ],
+            ],
             [
                 [
                     [100.0, 0.0],
@@ -63,7 +116,7 @@ var multiPolygonWithDupes = {
                     [101.0, 1.0],
                     [101.0, 1.0],
                     [100.0, 1.0],
-                    [100.0, 0.0]
+                    [100.0, 0.0],
                 ],
                 [
                     [100.2, 0.2],
@@ -72,21 +125,41 @@ var multiPolygonWithDupes = {
                     [100.8, 0.8],
                     [100.8, 0.8],
                     [100.2, 0.8],
-                    [100.2, 0.2]
-                ]
-            ]
-        ]
-    }
+                    [100.2, 0.2],
+                ],
+            ],
+        ],
+    },
 };
-var multiPolygonWithoutDupes = {
+let multiPolygonWithoutDupes = {
     type: "MultiPolygon",
     coordinates: [
-        [[[102.0, 2.0], [103.0, 2.0], [103.0, 3.0], [102.0, 3.0], [102.0, 2.0]]],
         [
-            [[100.0, 0.0], [101.0, 0.0], [101.0, 1.0], [100.0, 1.0], [100.0, 0.0]],
-            [[100.2, 0.2], [100.8, 0.2], [100.8, 0.8], [100.2, 0.8], [100.2, 0.2]]
-        ]
-    ]
+            [
+                [102.0, 2.0],
+                [103.0, 2.0],
+                [103.0, 3.0],
+                [102.0, 3.0],
+                [102.0, 2.0],
+            ],
+        ],
+        [
+            [
+                [100.0, 0.0],
+                [101.0, 0.0],
+                [101.0, 1.0],
+                [100.0, 1.0],
+                [100.0, 0.0],
+            ],
+            [
+                [100.2, 0.2],
+                [100.8, 0.2],
+                [100.8, 0.8],
+                [100.2, 0.8],
+                [100.2, 0.2],
+            ],
+        ],
+    ],
 };
 
 testDuplicates("line", lineWithDupes, lineWithoutDupes);

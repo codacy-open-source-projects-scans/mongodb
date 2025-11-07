@@ -29,16 +29,6 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <cstdlib>
-#include <memory>
-#include <ostream>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -48,6 +38,17 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdint>
+#include <cstdlib>
+#include <memory>
+#include <ostream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 struct _timelib_error_container;
 struct _timelib_time;
@@ -273,8 +274,10 @@ public:
                 continue;
             }
 
-            ++it;                           // next character is format modifier
-            invariant(it != format.end());  // checked in validateFormat
+            ++it;  // next character is format modifier
+            tassert(11177400,
+                    fmt::format("Invalid format '{}', expected format specifier after %", format),
+                    it != format.end());  // checked in validateFormat
 
             switch (*it) {
                 case '%':  // Escaped literal %
@@ -364,7 +367,7 @@ public:
                     break;
                 default:
                     // Should never happen as format is pre-validated
-                    MONGO_UNREACHABLE;
+                    MONGO_UNREACHABLE_TASSERT(11177401);
             }
         }
         return Status::OK();
@@ -398,9 +401,9 @@ private:
      */
     template <typename OutputStream>
     static auto insertPadded(OutputStream& os, int number, int width) {
-        invariant(width >= 1);
-        invariant(width <= 4);
-
+        tassert(11177402,
+                fmt::format("Expected width to be in the [1, 4] range, but found {}", width),
+                1 <= width && width <= 4);
         if ((number < 0) || (number > 9999))
             return Status{ErrorCodes::Error{18537},
                           "Could not convert date to string: date component was outside "
@@ -425,7 +428,7 @@ private:
     }
 
     template <typename OutputStream>
-    static auto insertString(OutputStream& os, std::string str) {
+    static auto insertString(OutputStream& os, const std::string& str) {
         if (str.length() == 0) {
             return Status{ErrorCodes::Error{7340200}, "Cannot append empty string"};
         }
@@ -531,6 +534,12 @@ public:
 
     std::vector<std::string> getTimeZoneStrings() const;
 
+    /**
+     * Tries to find a UTC offset in 'offsetSpec' in an ISO8601 format (±HH, ±HHMM, or ±HH:MM) and
+     * returns it as an offset to UTC in seconds.
+     */
+    boost::optional<Seconds> parseUtcOffset(StringData offsetSpec) const;
+
 private:
     struct TimelibTZInfoDeleter {
         void operator()(_timelib_tzinfo* tzInfo);
@@ -541,12 +550,6 @@ private:
      * 'timeZoneDatabase'.
      */
     void loadTimeZoneInfo(std::unique_ptr<_timelib_tzdb, TimeZoneDBDeleter> timeZoneDatabase);
-
-    /**
-     * Tries to find a UTC offset in 'offsetSpec' in an ISO8601 format (±HH, ±HHMM, or ±HH:MM) and
-     * returns it as an offset to UTC in seconds.
-     */
-    boost::optional<Seconds> parseUtcOffset(StringData offsetSpec) const;
 
     // A map from the time zone name to the struct describing the timezone. These are pre-populated
     // at startup to avoid reading the source files repeatedly.

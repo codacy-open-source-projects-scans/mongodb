@@ -29,19 +29,20 @@
 
 #pragma once
 
-#include <iosfwd>
-#include <memory>
-#include <string>
-#include <type_traits>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/static_assert.h"
 #include "mongo/base/status.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#include <iosfwd>
+#include <memory>
+#include <string>
+#include <type_traits>
 
 namespace mongo {
 namespace repl {
@@ -54,7 +55,7 @@ namespace repl {
  * The _state variable in this class is protected by the concrete class's mutex (returned by
  * _getMutex()).
  */
-class AbstractAsyncComponent {
+class MONGO_MOD_OPEN AbstractAsyncComponent {
     AbstractAsyncComponent(const AbstractAsyncComponent&) = delete;
     AbstractAsyncComponent& operator=(const AbstractAsyncComponent&) = delete;
 
@@ -73,7 +74,7 @@ public:
      * _doStartup() defined in the concrete class. If _doStartup() fails, this
      * component will transition to Complete and any restarts after this will be disallowed.
      */
-    Status startup() noexcept;
+    Status startup();
 
     /**
      * Signals this component to begin shutting down. If the transition from Running to ShuttingDown
@@ -106,11 +107,6 @@ protected:
      * Returns task executor.
      */
     executor::TaskExecutor* _getExecutor();
-
-    /**
-     * Returns the name of the component passed in at construction.
-     */
-    std::string _getComponentName() const;
 
     /**
      * Returns true if this component is currently running or in the process of shutting down.

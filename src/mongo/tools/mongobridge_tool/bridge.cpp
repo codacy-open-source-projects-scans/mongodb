@@ -28,18 +28,6 @@
  */
 
 
-#include <cstdint>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
 #include "mongo/base/status.h"
@@ -54,9 +42,6 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/random.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/message.h"
@@ -90,6 +75,18 @@
 #include "mongo/util/text.h"  // IWYU pragma: keep
 #include "mongo/util/time_support.h"
 
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kBridge
 
 
@@ -106,7 +103,7 @@ boost::optional<HostAndPort> extractHostInfo(const OpMsgRequest& request) {
     }
 
     if (auto hostInfoElem = request.body["hostInfo"]) {
-        if (hostInfoElem.type() == String) {
+        if (hostInfoElem.type() == BSONType::string) {
             return HostAndPort{hostInfoElem.valueStringData()};
         }
     }
@@ -227,7 +224,7 @@ public:
         }
 
         if (auto hostInfoElem = request.body["hostInfo"]) {
-            if (hostInfoElem.type() == String) {
+            if (hostInfoElem.type() == BSONType::string) {
                 _host = HostAndPort{hostInfoElem.valueStringData()};
             }
         }
@@ -290,11 +287,13 @@ ProxiedConnection& ProxiedConnection::get(const std::shared_ptr<transport::Sessi
 class ServiceEntryPointBridge final : public ServiceEntryPoint {
 public:
     Future<DbResponse> handleRequest(OperationContext* opCtx,
-                                     const Message& request) noexcept final;
+                                     const Message& request,
+                                     Date_t started) noexcept final;
 };
 
 Future<DbResponse> ServiceEntryPointBridge::handleRequest(OperationContext* opCtx,
-                                                          const Message& request) noexcept try {
+                                                          const Message& request,
+                                                          Date_t started) noexcept try {
     if (request.operation() == dbQuery) {
         DbMessage d(request);
         QueryMessage q(d);

@@ -32,12 +32,13 @@
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/pipeline/search/document_source_internal_search_mongot_remote.h"
 #include "mongo/db/pipeline/search/lite_parsed_search.h"
 #include "mongo/db/pipeline/search/search_helper.h"
-#include "mongo/db/query/client_cursor/cursor_response_gen.h"
 #include "mongo/db/query/search/mongot_cursor.h"
+#include "mongo/db/query/search/search_index_view_validation.h"
 #include "mongo/db/query/search/search_task_executors.h"
+
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -53,9 +54,9 @@ namespace {
  */
 auto cloneEachOne(std::list<boost::intrusive_ptr<DocumentSource>> stages, const auto& expCtx) {
     std::list<boost::intrusive_ptr<DocumentSource>> cloned;
-    std::for_each(stages.begin(), stages.end(), [&](const auto& stage) {
+    for (const auto& stage : stages) {
         cloned.push_back(stage->clone(expCtx));
-    });
+    }
     return cloned;
 }
 }  // namespace
@@ -65,8 +66,9 @@ REGISTER_DOCUMENT_SOURCE_CONDITIONALLY(searchMeta,
                                        DocumentSourceSearchMeta::createFromBson,
                                        AllowedWithApiStrict::kNeverInVersion1,
                                        AllowedWithClientType::kAny,
-                                       boost::none,
+                                       nullptr,  // featureFlag
                                        true);
+ALLOCATE_DOCUMENT_SOURCE_ID(searchMeta, DocumentSourceSearchMeta::id)
 
 boost::optional<DocumentSource::DistributedPlanLogic>
 DocumentSourceSearchMeta::distributedPlanLogic() {
@@ -78,70 +80,76 @@ DocumentSourceSearchMeta::distributedPlanLogic() {
     // serialized and sent to a remote shard, which causes "_mergingPipeline" to go out of scope and
     // dispose() each stage. That screws up the other pointers to these stages who now have disposed
     // DocumentSources which are expected to immediately return EOF.
-    logic.mergingStages = cloneEachOne(_mergingPipeline->getSources(), pExpCtx);
+    logic.mergingStages = cloneEachOne(_mergingPipeline->getSources(), getExpCtx());
     return logic;
 }
 
-std::unique_ptr<executor::TaskExecutorCursor> DocumentSourceSearchMeta::establishCursor() {
-    // TODO SERVER-94875 We should be able to remove any cursor establishment logic from
-    // DocumentSourceSearchMeta if we establish the cursors during search_helper
-    // pipeline preparation instead.
-    auto cursors = mongot_cursor::establishCursorsForSearchMetaStage(
-        pExpCtx, getSearchQuery(), getTaskExecutor(), getIntermediateResultsProtocolVersion());
+namespace {
+InternalSearchMongotRemoteSpec prepareInternalSearchMetaMongotSpec(
+    const BSONObj& spec, const intrusive_ptr<ExpressionContext>& expCtx) {
+    search_helpers::validateViewNotSetByUser(expCtx, spec);
 
-    // TODO SERVER-91594: Since mongot will no longer only return explain, remove this block. Mongot
-    // can return only an explain object or an explain with a cursor. If mongot returned the explain
-    // object only, the cursor will not have attached vars. Since there's a possibility of not
-    // having vars for explain, we skip the check.
-    if (pExpCtx->getExplain() && cursors.size() == 1) {
-        return std::move(*cursors.begin());
-    }
-    if (cursors.size() == 1) {
-        const auto& cursor = *cursors.begin();
-        tassert(6448010,
-                "If there's one cursor we expect to get SEARCH_META from the attached vars",
-                !getIntermediateResultsProtocolVersion() && !cursor->getType() &&
-                    cursor->getCursorVars());
-        return std::move(*cursors.begin());
-    }
-    for (auto&& cursor : cursors) {
-        auto maybeCursorType = cursor->getType();
-        tassert(6448008, "Expected every mongot cursor to come back with a type", maybeCursorType);
-        if (*maybeCursorType == CursorTypeEnum::SearchMetaResult) {
-            // Note this may leak the other cursor(s). Should look into whether we can
-            // killCursors.
-            return std::move(cursor);
+    if (spec.hasField(InternalSearchMongotRemoteSpec::kMongotQueryFieldName)) {
+        // The existence of this field name indicates that this spec was already serialized from a
+        // mongos process. Parse out of the IDL spec format, rather than just expecting only the
+        // mongot query (as a user would provide).
+        auto params = InternalSearchMongotRemoteSpec::parseOwned(
+            spec.getOwned(), IDLParserContext(DocumentSourceSearchMeta::kStageName));
+        LOGV2_DEBUG(8569405,
+                    4,
+                    "Parsing as $internalSearchMongotRemote",
+                    "params"_attr = redact(params.toBSON()));
+
+        // Get the view from the expCtx if it doesn't already exist on the spec. getViewFromExpCtx
+        // will return boost::none if no view exists there either.
+        if (!params.getView()) {
+            params.setView(search_helpers::getViewFromExpCtx(expCtx));
         }
-    }
-    tasserted(6448009, "Expected to get a metadata cursor back from mongot, found none");
-}
 
-DocumentSource::GetNextResult DocumentSourceSearchMeta::getNextAfterSetup() {
-    if (pExpCtx->getNeedsMerge()) {
-        // When we are merging $searchMeta we have established a cursor which only returns metadata
-        // results (see 'establishCursor()'). So just iterate that cursor normally.
-        return DocumentSourceInternalSearchMongotRemote::getNextAfterSetup();
-    }
-
-    if (!_returnedAlready) {
-        tryToSetSearchMetaVar();
-        auto& vars = pExpCtx->variables;
-
-        // TODO SERVER-91594: Remove this explain specific block.
-        // If mongot only returns an explain object, it will not have any attached vars and we
-        // should return EOF.
-        if (pExpCtx->getExplain() && !vars.hasConstantValue(Variables::kSearchMetaId)) {
-            return GetNextResult::makeEOF();
+        if (auto view = params.getView()) {
+            search_helpers::validateMongotIndexedViewsFF(expCtx, view->getEffectivePipeline());
+            search_index_view_validation::validate(*view);
         }
-        tassert(6448005,
-                "Expected SEARCH_META to be set for $searchMeta stage",
-                vars.hasConstantValue(Variables::kSearchMetaId) &&
-                    vars.getValue(Variables::kSearchMetaId).isObject());
-        _returnedAlready = true;
-        return {vars.getValue(Variables::kSearchMetaId).getDocument()};
+
+        return params;
     }
-    return GetNextResult::makeEOF();
+
+    // See note in DocumentSourceSearch::createFromBson() about making sure mongotQuery is owned
+    // within the mongot remote spec.
+    InternalSearchMongotRemoteSpec internalSpec(spec.getOwned());
+
+    if (expCtx->getIsParsingViewDefinition()) {
+        // $searchMeta is possible to be parsed from the user visible stage.  In this case, just
+        // return the mongot query itself parsed into IDL.
+        return internalSpec;
+    }
+
+    uassert(6600901,
+            "Running $searchMeta command in non-allowed context (update pipeline)",
+            !expCtx->getIsParsingPipelineUpdate());
+
+    // If 'searchReturnEofImmediately' is set, we return this stage as is because we don't expect to
+    // return any results. More precisely, we wish to avoid calling 'planShardedSearch' when no
+    // mongot is set up.
+    if (expCtx->getMongoProcessInterface()->isExpectedToExecuteQueries() &&
+        expCtx->getMongoProcessInterface()->inShardedEnvironment(expCtx->getOperationContext()) &&
+        !MONGO_unlikely(searchReturnEofImmediately.shouldFail())) {
+        // This query is executing in a sharded environment. We need to consult a mongot to
+        // construct such a merging pipeline for us to use later. Send a planShardedSearch command
+        // to mongot to get the relevant planning information, including the metadata merging
+        // pipeline and the optional merge sort spec.
+        search_helpers::planShardedSearch(expCtx, &internalSpec);
+    } else {
+        // This is an unsharded environment or there is no mongot. If the case is the former, this
+        // is only called from user pipelines during desugaring of $search/$searchMeta, so the
+        // `specObj` should be the search query itself. If 'searchReturnEofImmediately' is set, we
+        // return this stage as is because we don't expect to return any results. More precisely, we
+        // wish to avoid calling 'planShardedSearch' when no mongot is set up.
+    }
+
+    return internalSpec;
 }
+}  // namespace
 
 std::list<intrusive_ptr<DocumentSource>> DocumentSourceSearchMeta::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& expCtx) {
@@ -150,38 +158,15 @@ std::list<intrusive_ptr<DocumentSource>> DocumentSourceSearchMeta::createFromBso
     uassert(ErrorCodes::FailedToParse,
             str::stream() << "$searchMeta value must be an object. Found: "
                           << typeName(elem.type()),
-            elem.type() == BSONType::Object);
+            elem.type() == BSONType::object);
 
     auto specObj = elem.embeddedObject();
+    auto executor =
+        executor::getMongotTaskExecutor(expCtx->getOperationContext()->getServiceContext());
+    auto internalRemoteSpec = prepareInternalSearchMetaMongotSpec(specObj, expCtx);
 
-    // Note that the $searchMeta stage has two parsing options: one for the user visible stage and
-    // the second (longer) form which is serialized from mongos to the shards and includes more
-    // information such as merging pipeline.
-
-    // See note in DocumentSourceSearch::createFromBson() about making sure mongotQuery is owned
-    // within the mongot remote spec.
-
-    // Avoid any calls to mongot during desugaring.
-    if (expCtx->getIsParsingViewDefinition()) {
-        auto executor =
-            executor::getMongotTaskExecutor(expCtx->getOperationContext()->getServiceContext());
-        return {make_intrusive<DocumentSourceSearchMeta>(specObj.getOwned(), expCtx, executor)};
-    }
-
-    // If we have this field it suggests we were serialized from a mongos process. We should parse
-    // out of the IDL spec format, rather than just expecting only the mongot query (as a user would
-    // provide).
-    if (specObj.hasField(InternalSearchMongotRemoteSpec::kMongotQueryFieldName)) {
-        auto params = InternalSearchMongotRemoteSpec::parse(IDLParserContext(kStageName), specObj);
-        LOGV2_DEBUG(8569405, 4, "Parsing as $internalSearchMongotRemote", "params"_attr = params);
-        auto executor =
-            executor::getMongotTaskExecutor(expCtx->getOperationContext()->getServiceContext());
-        return {make_intrusive<DocumentSourceSearchMeta>(std::move(params), expCtx, executor)};
-    }
-
-    // Otherwise, we need to call this helper to determine if this is a sharded environment. If so,
-    // we need to consult a mongot to construct such a merging pipeline for us to use later.
-    return search_helpers::createInitialSearchPipeline<DocumentSourceSearchMeta>(specObj, expCtx);
+    return {
+        make_intrusive<DocumentSourceSearchMeta>(std::move(internalRemoteSpec), expCtx, executor)};
 }
 
 }  // namespace mongo

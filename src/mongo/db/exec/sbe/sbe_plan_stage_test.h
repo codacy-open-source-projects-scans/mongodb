@@ -33,6 +33,7 @@
 
 #pragma once
 
+#include <concepts>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -41,9 +42,10 @@
 
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
 
+#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/catalog_test_fixture.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
+#include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/expressions/runtime_environment.h"
 #include "mongo/db/exec/sbe/stages/co_scan.h"
 #include "mongo/db/exec/sbe/stages/limit_skip.h"
@@ -53,6 +55,7 @@
 #include "mongo/db/exec/sbe/values/bson.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/local_catalog/catalog_test_fixture.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/plan_yield_policy_sbe.h"
@@ -74,6 +77,11 @@ inline auto makeInt32Constant(int32_t num) {
 inline auto makeBoolConstant(bool boolVal) {
     auto val = sbe::value::bitcastFrom<bool>(boolVal);
     return sbe::makeE<sbe::EConstant>(sbe::value::TypeTags::Boolean, val);
+}
+
+inline auto makeStringConstant(StringData value) {
+    auto [tag, val] = value::makeNewString(value);
+    return sbe::makeE<sbe::EConstant>(tag, val);
 }
 
 inline auto makeConstant(sbe::value::TypeTags tag, sbe::value::Value val) {
@@ -102,6 +110,17 @@ inline std::unique_ptr<sbe::EExpression> makeVariable(sbe::FrameId frameId,
 template <typename T>
 using MakeStageFn = std::function<std::pair<T, std::unique_ptr<PlanStage>>(
     T scanSlots, std::unique_ptr<PlanStage> scanStage)>;
+
+using AssertStageStatsFn = std::function<void(const SpecificStats*)>;
+
+template <class... ACCUMULATOR>
+requires(std::convertible_to<std::decay_t<ACCUMULATOR>, std::unique_ptr<HashAggAccumulator>> && ...)
+inline std::vector<std::unique_ptr<HashAggAccumulator>> makeHashAggAccumulatorList(
+    ACCUMULATOR&&... contents) {
+    std::vector<std::unique_ptr<HashAggAccumulator>> result;
+    (result.emplace_back(std::move(contents)), ...);
+    return result;
+}
 
 /**
  * PlanStageTestFixture is a unittest framework for testing sbe::PlanStages.
@@ -134,7 +153,7 @@ using MakeStageFn = std::function<std::pair<T, std::unique_ptr<PlanStage>>(
  */
 class PlanStageTestFixture : public CatalogTestFixture {
 public:
-    PlanStageTestFixture(bool enableYield = true) : _enableYield(enableYield){};
+    PlanStageTestFixture(bool enableYield = true) : _enableYield(enableYield) {};
 
     void setUp() override {
         CatalogTestFixture::setUp();
@@ -269,7 +288,7 @@ public:
      * Note that the caller assumes ownership of the SBE array returned.
      */
     std::pair<value::TypeTags, value::Value> getAllResultsMulti(
-        PlanStage* stage, std::vector<value::SlotAccessor*> accessors);
+        PlanStage* stage, std::vector<value::SlotAccessor*> accessors, bool forceSpill = false);
 
     /**
      * This method is intended to make it easy to write basic tests. The caller passes in an input
@@ -309,14 +328,18 @@ public:
                       value::Value inputVal,
                       value::TypeTags expectedTag,
                       value::Value expectedVal,
-                      const MakeStageFn<value::SlotVector>& makeStageMulti);
+                      const MakeStageFn<value::SlotVector>& makeStageMulti,
+                      bool forceSpill = false,
+                      const AssertStageStatsFn& assertStageStats = AssertStageStatsFn{});
 
     // Similar to above method but returns the result instead of comparing to an expected.
     std::pair<value::TypeTags, value::Value> runTestMulti(
         size_t numInputSlots,
         value::TypeTags inputTag,
         value::Value inputVal,
-        const MakeStageFn<value::SlotVector>& makeStageMulti);
+        const MakeStageFn<value::SlotVector>& makeStageMulti,
+        bool forceSpill = false,
+        const AssertStageStatsFn& assertStageStats = AssertStageStatsFn{});
 
     value::SlotIdGenerator* getSlotIdGenerator() {
         return _slotIdGenerator.get();
@@ -329,8 +352,7 @@ protected:
             PlanYieldPolicy::YieldPolicy::YIELD_AUTO,
             operationContext()->getServiceContext()->getFastClockSource(),
             0,
-            Milliseconds::zero(),
-            &_yieldable);
+            Milliseconds::zero());
     }
 
 private:

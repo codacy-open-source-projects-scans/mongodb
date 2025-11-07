@@ -27,6 +27,8 @@
  *    it in the license file.
  */
 
+#include "mongo/db/exec/sbe/values/ts_block.h"
+
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/column/bsoncolumn.h"
 #include "mongo/bson/json.h"
@@ -35,16 +37,14 @@
 #include "mongo/db/exec/sbe/sbe_unittest.h"
 #include "mongo/db/exec/sbe/values/bsoncolumn_materializer.h"
 #include "mongo/db/exec/sbe/values/cell_interface.h"
-#include "mongo/db/exec/sbe/values/ts_block.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/stage_builder/sbe/tests/sbe_builder_test_fixture.h"
 #include "mongo/db/timeseries/bucket_compression.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 
 namespace mongo::sbe {
 
-class SbeValueTest : public SbeStageBuilderTestFixture {};
+class TsSbeValueTest : public SbeStageBuilderTestFixture {};
 
 // This is just a made up example, and is not actually a valid bucket. There's no min/max and
 // no time field.
@@ -74,10 +74,10 @@ std::unique_ptr<value::TsBlock> makeTsBlockFromBucket(const BSONObj& bucket, Str
     const auto nFields = [&bucket]() -> size_t {
         // Use a dense field.
         const BSONElement timeField = bucket["data"]["time"];
-        if (timeField.type() == BSONType::Object) {
+        if (timeField.type() == BSONType::object) {
             return timeField.embeddedObject().nFields();
         } else {
-            invariant(timeField.type() == BSONType::BinData);
+            invariant(timeField.type() == BSONType::binData);
             BSONColumn col(timeField);
             return col.size();
         }
@@ -108,7 +108,7 @@ std::unique_ptr<value::TsBlock> makeTsBlockFromBucket(const BSONObj& bucket, Str
                                             max);
 }
 
-TEST_F(SbeValueTest, CloneCreatesIndependentCopy) {
+TEST_F(TsSbeValueTest, CloneCreatesIndependentCopy) {
     // A TsCellBlockForTopLevelField can be created in an "unowned" state.
 
     auto tsBlock = makeTsBlockFromBucket(kSampleBucket, "_id");
@@ -192,7 +192,7 @@ const BSONObj kBucketWithMinMaxV1 = fromjson(R"(
         }
 })");
 
-TEST_F(SbeValueTest, TsBlockMinMaxV1Schema) {
+TEST_F(TsSbeValueTest, TsBlockMinMaxV1Schema) {
     {
         auto tsBlock = makeTsBlockFromBucket(kBucketWithMinMaxV1, "_id");
         auto cellBlockId = std::make_unique<value::TsCellBlockForTopLevelField>(tsBlock.get());
@@ -268,7 +268,7 @@ TEST_F(SbeValueTest, TsBlockMinMaxV1Schema) {
     }
 }
 
-TEST_F(SbeValueTest, TsBlockMinMaxV2Schema) {
+TEST_F(TsSbeValueTest, TsBlockMinMaxV2Schema) {
     auto compressedBucketOpt =
         timeseries::compressBucket(kBucketWithMinMaxV1, "time"_sd, {}, false).compressedBucket;
     ASSERT(compressedBucketOpt) << "Should have been able to create compressed v2 bucket";
@@ -352,7 +352,7 @@ TEST_F(SbeValueTest, TsBlockMinMaxV2Schema) {
     }
 }
 
-TEST_F(SbeValueTest, TsBlockMinMaxV3Schema) {
+TEST_F(TsSbeValueTest, TsBlockMinMaxV3Schema) {
     auto compressedBucketOpt =
         timeseries::compressBucket(kBucketWithMinMaxV1, "time"_sd, {}, false).compressedBucket;
     ASSERT(compressedBucketOpt) << "Should have been able to create compressed v2 bucket";
@@ -467,7 +467,7 @@ const BSONObj kBucketWithMinMaxPre1970 = fromjson(R"(
         }
 })");
 
-TEST_F(SbeValueTest, TsBlockMaxTimePre1970) {
+TEST_F(TsSbeValueTest, TsBlockMaxTimePre1970) {
     auto tsBlock = makeTsBlockFromBucket(kBucketWithMinMaxPre1970, "time");
     auto cellBlockTime = std::make_unique<value::TsCellBlockForTopLevelField>(tsBlock.get());
 
@@ -534,7 +534,7 @@ const BSONObj kBucketWithMinMaxAndArrays = fromjson(R"(
         }
 })");
 
-TEST_F(SbeValueTest, TsBlockHasArray) {
+TEST_F(TsSbeValueTest, TsBlockHasArray) {
     {
         auto tsBlock = makeTsBlockFromBucket(kBucketWithMinMaxAndArrays, "_id");
         boost::optional<bool> hasArrayRes = tsBlock->tryHasArray();
@@ -550,7 +550,7 @@ TEST_F(SbeValueTest, TsBlockHasArray) {
     }
 }
 
-TEST_F(SbeValueTest, TsBlockFillEmpty) {
+TEST_F(TsSbeValueTest, TsBlockFillEmpty) {
     {
         auto tsBlock = makeTsBlockFromBucket(kBucketWithMinMaxAndArrays, "_id");
         // Already dense fields should return nullptr when fillEmpty'd.
@@ -605,7 +605,7 @@ const BSONObj kBucketWithMixedNumbers = fromjson(R"(
     }
 })");
 
-TEST_F(SbeValueTest, FillType) {
+TEST_F(TsSbeValueTest, FillType) {
     {
         // Tests on the "time" field.
         auto timeBlock = makeTsBlockFromBucket(kBucketWithMixedNumbers, "time");
@@ -615,7 +615,7 @@ TEST_F(SbeValueTest, FillType) {
 
         {
             uint32_t nullUndefinedTypeMask = static_cast<uint32_t>(
-                getBSONTypeMask(BSONType::jstNULL) | getBSONTypeMask(BSONType::Undefined));
+                getBSONTypeMask(BSONType::null) | getBSONTypeMask(BSONType::undefined));
 
             auto out = timeBlock->fillType(nullUndefinedTypeMask, fillTag, fillVal);
 
@@ -624,7 +624,7 @@ TEST_F(SbeValueTest, FillType) {
         }
 
         {
-            uint32_t dateTypeMask = static_cast<uint32_t>(getBSONTypeMask(BSONType::Date));
+            uint32_t dateTypeMask = static_cast<uint32_t>(getBSONTypeMask(BSONType::date));
 
             auto out = timeBlock->fillType(dateTypeMask, fillTag, fillVal);
             ASSERT_NE(out, nullptr);
@@ -645,8 +645,8 @@ TEST_F(SbeValueTest, FillType) {
         value::ValueGuard fillGuard{fillTag, fillVal};
 
         {
-            uint32_t arrayStringTypeMask = static_cast<uint32_t>(getBSONTypeMask(BSONType::Array) |
-                                                                 getBSONTypeMask(BSONType::String));
+            uint32_t arrayStringTypeMask = static_cast<uint32_t>(getBSONTypeMask(BSONType::array) |
+                                                                 getBSONTypeMask(BSONType::string));
 
             auto out = numBlock->fillType(arrayStringTypeMask, fillTag, fillVal);
 
@@ -657,7 +657,7 @@ TEST_F(SbeValueTest, FillType) {
         {
             // The min and max won't match this tag since they are NumberLongs but there is a value
             // in the block that should match this tag.
-            uint32_t int32TypeMask = static_cast<uint32_t>(getBSONTypeMask(BSONType::NumberInt));
+            uint32_t int32TypeMask = static_cast<uint32_t>(getBSONTypeMask(BSONType::numberInt));
 
             auto out = numBlock->fillType(int32TypeMask, fillTag, fillVal);
             ASSERT_NE(out, nullptr);
@@ -704,7 +704,7 @@ const BSONObj kBucketWithArrs = fromjson(R"(
     }
 })");
 
-TEST_F(SbeValueTest, TsBlockMiscTest) {
+TEST_F(TsSbeValueTest, TsBlockMiscTest) {
     {
         // Tests on the "time" field.
         auto timeBlock = makeTsBlockFromBucket(kBucketWithArrs, "time");
@@ -769,7 +769,7 @@ const BSONObj kBucketWithBigScalars = fromjson(R"(
 })");
 
 
-TEST_F(SbeValueTest, VerifyDecompressedBlockType) {
+TEST_F(TsSbeValueTest, VerifyDecompressedBlockType) {
     {
         // Extracting from an uncompressed bucket always does the copy.
         auto tsBlock = makeTsBlockFromBucket(kBucketWithBigScalars, "bigString");

@@ -30,17 +30,6 @@
 
 #pragma once
 
-#include <cstdlib>
-#include <functional>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -48,19 +37,28 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/index/multikey_paths.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/query/index_bounds.h"
 #include "mongo/db/repl/collection_bulk_loader.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
+
+#include <cstdlib>
+#include <functional>
+#include <memory>
+#include <span>
+#include <string>
+#include <utility>
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 namespace repl {
@@ -77,24 +75,18 @@ class CollectionBulkLoaderMock : public CollectionBulkLoader {
 
 public:
     explicit CollectionBulkLoaderMock(std::shared_ptr<CollectionMockStats> collStats)
-        : stats(std::move(collStats)){};
+        : stats(std::move(collStats)) {}
     ~CollectionBulkLoaderMock() override = default;
-    Status init(const std::vector<BSONObj>& secondaryIndexSpecs) override;
+    Status init(const std::vector<BSONObj>& secondaryIndexSpecs);
 
-    Status insertDocuments(std::vector<BSONObj>::const_iterator begin,
-                           std::vector<BSONObj>::const_iterator end,
-                           ParseRecordIdAndDocFunc fn) override;
+    Status insertDocuments(std::span<BSONObj> docs, ParseRecordIdAndDocFunc fn) override;
     Status commit() override;
 
     std::shared_ptr<CollectionMockStats> stats;
 
     // Override functions.
-    std::function<Status(std::vector<BSONObj>::const_iterator,
-                         std::vector<BSONObj>::const_iterator,
-                         ParseRecordIdAndDocFunc fn)>
-        insertDocsFn = [](const std::vector<BSONObj>::const_iterator,
-                          const std::vector<BSONObj>::const_iterator,
-                          ParseRecordIdAndDocFunc fn) {
+    std::function<Status(std::span<BSONObj>, ParseRecordIdAndDocFunc fn)> insertDocsFn =
+        [](std::span<BSONObj>, ParseRecordIdAndDocFunc fn) {
             return Status::OK();
         };
     std::function<Status()> abortFn = []() {
@@ -105,7 +97,7 @@ public:
     };
 };
 
-class StorageInterfaceMock : public StorageInterface {
+class MONGO_MOD_PUB StorageInterfaceMock : public StorageInterface {
     StorageInterfaceMock(const StorageInterfaceMock&) = delete;
     StorageInterfaceMock& operator=(const StorageInterfaceMock&) = delete;
 
@@ -378,8 +370,6 @@ public:
         return false;
     }
 
-    void initializeStorageControlsForReplication(ServiceContext* serviceCtx) const override {}
-
     boost::optional<Timestamp> getRecoveryTimestamp(ServiceContext* serviceCtx) const override {
         return boost::none;
     }
@@ -439,12 +429,13 @@ public:
         [](OperationContext* opCtx, const NamespaceString& nss, const CollectionOptions& options) {
             return Status{ErrorCodes::IllegalOperation, "CreateCollectionFn not implemented."};
         };
-    CreateIndexesOnEmptyCollectionFn createIndexesOnEmptyCollFn = [](OperationContext* opCtx,
-                                                                     const NamespaceString& nss,
-                                                                     const std::vector<BSONObj>&
-                                                                         secondaryIndexSpecs) {
-        return Status{ErrorCodes::IllegalOperation, "createIndexesOnEmptyCollFn not implemented."};
-    };
+    CreateIndexesOnEmptyCollectionFn createIndexesOnEmptyCollFn =
+        [](OperationContext* opCtx,
+           const NamespaceString& nss,
+           const std::vector<BSONObj>& secondaryIndexSpecs) {
+            return Status{ErrorCodes::IllegalOperation,
+                          "createIndexesOnEmptyCollFn not implemented."};
+        };
     TruncateCollectionFn truncateCollFn = [](OperationContext* opCtx, const NamespaceString& nss) {
         return Status{ErrorCodes::IllegalOperation, "TruncateCollectionFn not implemented."};
     };

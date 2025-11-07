@@ -29,14 +29,15 @@
 
 
 // IWYU pragma: no_include <bits/types/clockid_t.h>
+#include <memory>
+#include <string>
+#include <thread>
+#include <utility>
+
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
-#include <memory>
-#include <string>
 #include <sys/types.h>
-#include <thread>
-#include <utility>
 
 #if defined(__linux__)
 #include <ctime>
@@ -47,8 +48,6 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/operation_cpu_timer.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
@@ -59,7 +58,6 @@
 
 namespace mongo {
 
-using namespace fmt::literals;
 
 #if defined(__linux__)
 

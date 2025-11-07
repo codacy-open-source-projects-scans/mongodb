@@ -29,41 +29,33 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-#include <type_traits>
-#include <utility>
-#include <variant>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/document_validation.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/exec/classic/projection.h"
+#include "mongo/db/exec/classic/update_stage.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/exec/projection.h"
-#include "mongo/db/exec/update_stage.h"
 #include "mongo/db/exec/write_stage_common.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_constants.h"
-#include "mongo/db/internal_transactions_feature_flag_gen.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/document_validation.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_catalog/scoped_collection_metadata.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/query/index_bounds_builder.h"
+#include "mongo/db/query/compiler/logical_model/projection/projection.h"
+#include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
 #include "mongo/db/query/plan_explainer_express.h"
-#include "mongo/db/query/plan_summary_stats.h"
-#include "mongo/db/query/projection.h"
 #include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/record_id_helpers.h"
-#include "mongo/db/s/scoped_collection_metadata.h"
 #include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/shard_role.h"
 #include "mongo/db/storage/damage_vector.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/snapshot.h"
@@ -71,6 +63,14 @@
 #include "mongo/db/update/update_driver.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
 #include "mongo/db/update/update_util.h"
+#include "mongo/util/modules.h"
+
+#include <type_traits>
+#include <utility>
+#include <variant>
+
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 
 namespace mongo {
@@ -185,17 +185,11 @@ struct WrapInOptionalIfNeeded {
 };
 
 template <class T>
-requires(std::is_default_constructible_v<T>) struct WrapInOptionalIfNeeded<T> {
+requires(std::is_default_constructible_v<T>)
+struct WrapInOptionalIfNeeded<T> {
     using type = T;
 };
 
-/**
- * The overloads below provide ways for the iterator classes to interact with a CollectionType
- * object that may be either a CollectionAcquisition or a CollectionPtr.
- *
- * TODO SERVER-76397: Once all PlanExecutors use CollectionAcquisition exclusively, these adapaters
- * won't be necessary.
- */
 inline const CollectionAcquisition& unwrapCollection(
     const boost::optional<CollectionAcquisition>& collectionAcquisition) {
     tassert(8375913,
@@ -204,41 +198,13 @@ inline const CollectionAcquisition& unwrapCollection(
     return *collectionAcquisition;
 }
 
-inline const CollectionPtr* unwrapCollection(const CollectionPtr* collectionPtr) {
-    tassert(8375912,
-            "Access to invalided plan: plan is not yet open or is yielded",
-            collectionPtr != nullptr);
-    return collectionPtr;
-}
-
-inline const Collection& accessCollection(const CollectionPtr* collectionPtr) {
-    return *collectionPtr->get();
-}
-
 inline const Collection& accessCollection(const CollectionAcquisition& collectionAcquisition) {
     return *collectionAcquisition.getCollectionPtr().get();
-}
-
-inline const CollectionPtr& accessCollectionPtr(const CollectionPtr* collectionPtr) {
-    return *collectionPtr;
 }
 
 inline const CollectionPtr& accessCollectionPtr(
     const CollectionAcquisition& collectionAcquisition) {
     return collectionAcquisition.getCollectionPtr();
-}
-
-inline void prepareForCollectionInvalidation(CollectionPtr const*& referenceToCollectionPtr) {
-    // Any caller holding a raw pointer to a CollectionPtr should destroy that pointer before any
-    // operation that can invalidate it in order to avoid the bad practice of storing a dangling
-    // pointer.
-    referenceToCollectionPtr = nullptr;
-}
-
-inline void prepareForCollectionInvalidation(const boost::optional<CollectionAcquisition>&) {
-    // When collection resources are released, an associated CollectionAcquisition that was valid
-    // before the release becomes valid again after the collection is restored, so it is safe to
-    // leave the CollectionAcquisition as is.
 }
 
 inline void checkRestoredCollection(OperationContext* opCtx,
@@ -266,16 +232,6 @@ inline void checkRestoredCollection(OperationContext* opCtx,
 }
 
 inline void restoreInvalidatedCollection(OperationContext* opCtx,
-                                         CollectionPtr const*& referenceToCollectionPtr,
-                                         const CollectionPtr* restoredCollectionPtr,
-                                         const UUID& expectedUUID,
-                                         const NamespaceString& expectedNss) {
-
-    checkRestoredCollection(opCtx, *restoredCollectionPtr, expectedUUID, expectedNss);
-    referenceToCollectionPtr = restoredCollectionPtr;
-}
-
-inline void restoreInvalidatedCollection(OperationContext* opCtx,
                                          const boost::optional<CollectionAcquisition>& collAcq,
                                          const CollectionPtr*,
                                          const UUID& expectedUUID,
@@ -287,54 +243,8 @@ inline void restoreInvalidatedCollection(OperationContext* opCtx,
 
 template <class Callable>
 void temporarilyYieldCollection(OperationContext* opCtx,
-                                const CollectionPtr* collection,
-                                Callable whileYieldedCallback) {
-
-    tassert(8375910,
-            "Cannot yield inside a write unit of work",
-            !shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
-
-    collection->yield();
-    shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
-
-    opCtx->checkForInterrupt();
-
-    Locker* locker = shard_role_details::getLocker(opCtx);
-    Locker::LockSnapshot lockSnapshot;
-    locker->saveLockStateAndUnlock(&lockSnapshot);
-
-    // All PlanExecutor resources are now free.
-    CurOp::get(opCtx)->yielded();  // Count the yield in the operation's metrics.
-    whileYieldedCallback();  // Perform any work that we intended to do while resources are yielded.
-
-    // Keep trying to recover the yielded resources until we succeed or encounter an
-    // unrecoverable error.
-    for (int attempt = 1; true; ++attempt) {
-        try {
-            locker->restoreLockState(opCtx, lockSnapshot);
-            collection->restore();
-
-            return;
-        } catch (const StorageUnavailableException& exception) {
-            CurOp::get(opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
-            logWriteConflictAndBackoff(attempt,
-                                       "query yield"_sd,
-                                       exception.reason(),
-                                       NamespaceStringOrUUID(NamespaceString::kEmpty));
-        }
-    }
-}
-
-template <class Callable>
-void temporarilyYieldCollection(OperationContext* opCtx,
                                 const CollectionAcquisition& acquisition,
                                 Callable whileYieldedCallback) {
-
-    tassert(8375911,
-            "Cannot yield inside a write unit of work",
-            !shard_role_details::getLocker(opCtx)->inAWriteUnitOfWork());
-    shard_role_details::getRecoveryUnit(opCtx)->abandonSnapshot();
-
     opCtx->checkForInterrupt();
 
     auto yieldedTransactionResources = yieldTransactionResourcesFromOperationContext(opCtx);
@@ -366,7 +276,7 @@ PlanProgress recoverFromNonFatalWriteException(
     try {
         writeFunction();
     } catch (ExceptionFor<ErrorCodes::WriteConflict>& exception) {
-        CurOp::get(opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
+        recordWriteConflict(opCtx);
         return exceptionRecoveryPolicy.recoverIfPossible(exception);
     } catch (ExceptionFor<ErrorCodes::TemporarilyUnavailable>& exception) {
         if (opCtx->inMultiDocumentTransaction()) {
@@ -398,20 +308,12 @@ PlanProgress recoverFromNonFatalWriteException(
  * unique, so the iterator will produce at most one document.
  *
  * The iterator owns the resources associated with the collection it iterates.
- *
- * TODO SERVER-76397: The CollectionType template parameter allows the iterator to hold collection
- * resources as either a <const CollectionPtr*> or a <const CollectionAcquisition>. Once
- * PlanExecutors use CollectionAcquisition exclusively, this parameter will no longer need to be
- * templated.
  */
-template <class CollectionType>
 class IdLookupViaIndex {
 public:
-    using CollectionTypeChoice = CollectionType;
-
     IdLookupViaIndex(const BSONObj& queryFilter) : _queryFilter(queryFilter.getOwned()) {}
 
-    void open(OperationContext* opCtx, CollectionType collection, IteratorStats* stats) {
+    void open(OperationContext* opCtx, CollectionAcquisition collection, IteratorStats* stats) {
         _indexCatalogEntry =
             IdLookupViaIndex::getIndexCatalogEntryForIdIndex(opCtx, accessCollection(collection));
         _collection = std::move(collection);
@@ -436,7 +338,11 @@ public:
                 "Id lookup query filter must contain a single field",
                 _queryFilter.nFields() == 1);
         auto rid = _indexCatalogEntry->accessMethod()->asSortedData()->findSingle(
-            opCtx, accessCollectionPtr(collection), _indexCatalogEntry, _queryFilter);
+            opCtx,
+            *shard_role_details::getRecoveryUnit(opCtx),
+            accessCollectionPtr(collection),
+            _indexCatalogEntry,
+            _queryFilter);
         if (rid.isNull()) {
             _exhausted = true;
             return Exhausted();
@@ -474,7 +380,6 @@ public:
     };
 
     void releaseResources() {
-        prepareForCollectionInvalidation(_collection);
         _indexCatalogEntry = nullptr;
     }
 
@@ -515,7 +420,7 @@ private:
 
     BSONObj _queryFilter;  // Owned BSON.
 
-    typename WrapInOptionalIfNeeded<CollectionType>::type _collection;
+    typename WrapInOptionalIfNeeded<CollectionAcquisition>::type _collection{};
     boost::optional<UUID> _collectionUUID;
     uint64_t _catalogEpoch{0};
     const IndexCatalogEntry* _indexCatalogEntry{nullptr};  // Unowned.
@@ -529,21 +434,13 @@ private:
  * so the iterator will produce at most one document.
  *
  * The iterator owns the resources associated with the collection it iterates.
- *
- * TODO SERVER-76397: The CollectionType template parameter allows the iterator to hold collection
- * resources as either a <const CollectionPtr*> or a <const CollectionAcquisition>. Once
- * PlanExecutors use CollectionAcquisition exclusively, this class will no longer need to be
- * templated.
  */
-template <class CollectionType>
 class IdLookupOnClusteredCollection {
 public:
-    using CollectionTypeChoice = CollectionType;
-
     IdLookupOnClusteredCollection(const BSONObj& queryFilter)
         : _queryFilter(queryFilter.getOwned()) {}
 
-    void open(OperationContext* opCtx, CollectionType collection, IteratorStats* stats) {
+    void open(OperationContext* opCtx, CollectionAcquisition collection, IteratorStats* stats) {
         _collection = std::move(collection);
         _collectionUUID = accessCollection(unwrapCollection(_collection)).uuid();
         _catalogEpoch = CollectionCatalog::get(opCtx)->getEpoch();
@@ -587,9 +484,7 @@ public:
         return _exhausted;
     };
 
-    void releaseResources() {
-        prepareForCollectionInvalidation(_collection);
-    }
+    void releaseResources() {}
 
     void restoreResources(OperationContext* opCtx,
                           const CollectionPtr* collection,
@@ -613,13 +508,75 @@ public:
 private:
     BSONObj _queryFilter;  // Owned BSON.
 
-    typename WrapInOptionalIfNeeded<CollectionType>::type _collection;
+    typename WrapInOptionalIfNeeded<CollectionAcquisition>::type _collection{};
     boost::optional<UUID> _collectionUUID;
     uint64_t _catalogEpoch{0};
 
     bool _exhausted{false};
 
     IteratorStats* _stats{nullptr};
+};
+
+struct CreateDocumentFromIndexKey {
+    bool operator()(OperationContext* opCtx,
+                    const CollectionAcquisition& _,
+                    const IndexCatalogEntry* indexCatalogEntry,
+                    const SortedDataKeyValueView& keyEntry,
+                    const projection_ast::Projection* projection,
+                    Snapshotted<BSONObj>& obj,
+                    IteratorStats* stats) {
+        tassert(10399101,
+                "Only simple inclusion projections are supported",
+                projection && projection->isSimple() && projection->isInclusionOnly());
+
+        StringSet projFields{projection->getRequiredFields().begin(),
+                             projection->getRequiredFields().end()};
+
+        const auto& keyPattern = indexCatalogEntry->descriptor()->keyPattern();
+        auto dehydratedKey = key_string::toBson(keyEntry.getKeyStringWithoutRecordIdView(),
+                                                Ordering::make(keyPattern),
+                                                keyEntry.getTypeBitsView(),
+                                                keyEntry.getVersion());
+
+        BSONObjBuilder bob;
+        BSONObjIterator keyIter(keyPattern);
+        BSONObjIterator valueIter(dehydratedKey);
+
+        while (keyIter.more() && valueIter.more()) {
+            StringData fieldName = keyIter.next().fieldNameStringData();
+            auto nextValue = valueIter.next();
+
+            // Erase the element to support indexes with duplicate fields.
+            if (projFields.erase(fieldName) > 0) {
+                bob.appendAs(nextValue, fieldName);
+                if (projFields.empty()) {
+                    break;
+                }
+            }
+        }
+
+        tassert(10399102, "Selected index did not cover the projection", projFields.empty());
+
+        obj.setValue(bob.obj());
+        return true;
+    }
+};
+
+struct FetchFromCollectionCallback {
+    bool operator()(OperationContext* opCtx,
+                    const CollectionAcquisition& collection,
+                    const IndexCatalogEntry* _,
+                    const SortedDataKeyValueView& keyEntry,
+                    const projection_ast::Projection* projection,
+                    Snapshotted<BSONObj>& obj,
+                    IteratorStats* stats) {
+        auto rid = keyEntry.getRecordId();
+        tassert(8884402, "Index entry with null record id", rid && !rid->isNull());
+        // Projection is applied later by the executor.
+        bool found = accessCollection(collection).findDoc(opCtx, *rid, &obj);
+        stats->incNumDocumentsFetched(found);
+        return found;
+    }
 };
 
 /**
@@ -629,27 +586,22 @@ private:
  * documents.
  *
  * The iterator owns the resources associated with the collection it iterates.
- *
- * TODO SERVER-76397: The CollectionType template parameter allows the iterator to hold collection
- * resources as either a <const CollectionPtr*> or a <const CollectionAcquisition>. Once
- * PlanExecutors use CollectionAcquisition exclusively, this class will no longer need to be
- * templated.
  */
-template <class CollectionType>
+template <class FetchCallback>
 class LookupViaUserIndex {
 public:
-    using CollectionTypeChoice = CollectionType;
-
     LookupViaUserIndex(const BSONElement& filterValue,
                        std::string indexIdent,
                        std::string indexName,
-                       const CollatorInterface* collator)
+                       const CollatorInterface* collator,
+                       const projection_ast::Projection* projection)
         : _filterValue(filterValue),
           _indexIdent(std::move(indexIdent)),
           _indexName(std::move(indexName)),
-          _collator(collator) {}
+          _collator(collator),
+          _projection(projection) {}
 
-    void open(OperationContext* opCtx, CollectionType collection, IteratorStats* stats) {
+    void open(OperationContext* opCtx, CollectionAcquisition collection, IteratorStats* stats) {
         _indexCatalogEntry = LookupViaUserIndex::getIndexCatalogEntryForUserIndex(
             opCtx, accessCollection(collection), _indexIdent, _indexName);
         _collection = std::move(collection);
@@ -661,6 +613,9 @@ public:
         _stats->setIndexName(_indexName);
         _stats->setIndexKeyPattern(
             KeyPattern::toString(_indexCatalogEntry->descriptor()->keyPattern()));
+        if constexpr (std::is_same_v<FetchCallback, CreateDocumentFromIndexKey>) {
+            _stats->setProjectionCovered(true);
+        }
     }
 
     template <class Continuation>
@@ -691,7 +646,8 @@ public:
 
         // Now seek to the first matching key in the index.
         auto sortedAccessMethod = _indexCatalogEntry->accessMethod()->asSortedData();
-        auto indexCursor = sortedAccessMethod->newCursor(opCtx, true /* forward */);
+        auto& ru = *shard_role_details::getRecoveryUnit(opCtx);
+        auto indexCursor = sortedAccessMethod->newCursor(opCtx, ru, true /* forward */);
         indexCursor->setEndPosition(endKey, true /* endKeyInclusive */);
         key_string::Builder builder(
             sortedAccessMethod->getSortedDataInterface()->getKeyStringVersion());
@@ -702,18 +658,16 @@ public:
             true /* startKeyInclusive */,
             builder);
 
-        auto keyEntry = indexCursor->seekForKeyValueView(keyStringForSeek);
+        auto keyEntry = indexCursor->seekForKeyValueView(ru, keyStringForSeek);
         if (keyEntry.isEmpty()) {
             _exhausted = true;
             return Exhausted();
         }
         _stats->incNumKeysExamined(1);
 
-        auto rid = keyEntry.getRecordId();
-        tassert(8884402, "Index entry with null record id", rid && !rid->isNull());
-
         Snapshotted<BSONObj> obj;
-        bool found = accessCollection(collection).findDoc(opCtx, *rid, &obj);
+        bool found = FetchCallback{}(
+            opCtx, collection, _indexCatalogEntry, keyEntry, _projection, obj, _stats);
         if (!found) {
             const auto& keyPattern = _indexCatalogEntry->descriptor()->keyPattern();
             auto dehydratedKp = key_string::toBson(keyEntry.getKeyStringWithoutRecordIdView(),
@@ -722,16 +676,14 @@ public:
                                                    keyEntry.getVersion());
 
             logRecordNotFound(opCtx,
-                              *rid,
+                              *keyEntry.getRecordId(),
                               IndexKeyEntry::rehydrateKey(keyPattern, dehydratedKp),
                               keyPattern,
                               accessCollection(collection).ns());
             return Ready();
         }
 
-        _stats->incNumDocumentsFetched(1);
-
-        auto progress = continuation(collection, *rid, std::move(obj));
+        auto progress = continuation(collection, *keyEntry.getRecordId(), std::move(obj));
 
         // Only advance the iterator if the continuation completely processed its item, as indicated
         // by its return value.
@@ -748,7 +700,6 @@ public:
     };
 
     void releaseResources() {
-        prepareForCollectionInvalidation(_collection);
         _indexCatalogEntry = nullptr;
     }
 
@@ -795,12 +746,13 @@ private:
     const std::string _indexIdent;
     const std::string _indexName;
 
-    typename WrapInOptionalIfNeeded<CollectionType>::type _collection;
+    typename WrapInOptionalIfNeeded<CollectionAcquisition>::type _collection{};
     boost::optional<UUID> _collectionUUID;
     uint64_t _catalogEpoch{0};
     const IndexCatalogEntry* _indexCatalogEntry{nullptr};  // Unowned.
 
-    const CollatorInterface* _collator;  // Owned by the query's ExpressionContext.
+    const CollatorInterface* _collator;             // Owned by the query's ExpressionContext.
+    const projection_ast::Projection* _projection;  // Owned by the CanonicalQuery.
 
     bool _exhausted{false};
 
@@ -1087,7 +1039,7 @@ public:
         } else {
             newObj = doc.getObject();
             if (!DocumentValidationSettings::get(opCtx).isInternalValidationDisabled()) {
-                uassert(8375908,
+                uassert(ErrorCodes::BSONObjectTooLarge,
                         str::stream() << "Resulting document after update is larger than "
                                       << BSONObjMaxUserSize,
                         newObj.objsize() <= BSONObjMaxUserSize);
@@ -1142,7 +1094,7 @@ private:
     const OperationSource _source;
     const boost::optional<UUID> _sampleId;
 
-    WriteOperationStats* _stats;
+    WriteOperationStats* _stats{nullptr};
 };
 
 class DeleteOperation {
@@ -1214,7 +1166,7 @@ private:
     bool _fromMigrate;
     bool _returnDeleted;
 
-    WriteOperationStats* _stats;
+    WriteOperationStats* _stats{nullptr};
 };
 
 class DummyDeleteOperationForExplain {
@@ -1249,7 +1201,7 @@ public:
 private:
     bool _returnDeleted;
 
-    WriteOperationStats* _stats;
+    WriteOperationStats* _stats{nullptr};
 };
 
 class NoWriteOperation {
@@ -1307,8 +1259,6 @@ template <class IteratorChoice,
           class ProjectionChoice>
 class ExpressPlan {
 public:
-    using CollectionType = typename IteratorChoice::CollectionTypeChoice;
-
     ExpressPlan(IteratorChoice iterator,
                 WriteOperationChoice writeOperation,
                 ShardFilterChoice shardFilter,
@@ -1319,7 +1269,7 @@ public:
           _projection(std::move(projection)) {}
 
     void open(OperationContext* opCtx,
-              CollectionType collection,
+              CollectionAcquisition collection,
               const ExceptionRecoveryPolicy* exceptionRecoveryPolicy,
               PlanStats* planStats,
               IteratorStats* iteratorStats,

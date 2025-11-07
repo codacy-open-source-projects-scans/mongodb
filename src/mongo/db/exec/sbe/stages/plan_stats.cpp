@@ -27,10 +27,9 @@
  *    it in the license file.
  */
 
-#include <vector>
+#include "mongo/db/exec/sbe/stages/plan_stats.h"
 
 #include "mongo/db/exec/plan_stats_walker.h"
-#include "mongo/db/exec/sbe/stages/plan_stats.h"
 #include "mongo/db/query/plan_summary_stats_visitor.h"
 #include "mongo/db/query/tree_walker.h"
 

@@ -27,29 +27,28 @@
  *    it in the license file.
  */
 
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/database_name.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#include <string>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -88,6 +87,10 @@ public:
                                  const DatabaseName&,
                                  const BSONObj&) const override {
         return Status::OK();
+    }
+
+    bool requiresAuthzChecks() const final {
+        return false;
     }
 
     /**
@@ -162,21 +165,21 @@ public:
 
             if (auto secsElem = cmdObj["secs"]) {
                 uassert(34344, "'secs' must be a number.", secsElem.isNumber());
-                msToSleep += secsElem.numberLong() * 1000;
+                msToSleep += secsElem.safeNumberLong() * 1000;
             } else if (auto secondsElem = cmdObj["seconds"]) {
                 uassert(51154, "'seconds' must be a number.", secondsElem.isNumber());
-                msToSleep += secondsElem.numberLong() * 1000;
+                msToSleep += secondsElem.safeNumberLong() * 1000;
             }
 
             if (auto millisElem = cmdObj["millis"]) {
                 uassert(34345, "'millis' must be a number.", millisElem.isNumber());
-                msToSleep += millisElem.numberLong();
+                msToSleep += millisElem.safeNumberLong();
             }
         } else {
             msToSleep = 10 * 1000;
         }
 
-        auto now = opCtx->getServiceContext()->getFastClockSource()->now();
+        auto now = opCtx->fastClockSource().now();
         auto deadline = now + Milliseconds(msToSleep);
 
         // Note that if the system clock moves _backwards_ (which has been known to happen), this
@@ -192,15 +195,14 @@ public:
                                   << " ms during sleep command",
                     msRemaining.count() < msToSleep + threshold.count());
 
-            ON_BLOCK_EXIT(
-                [&now, opCtx] { now = opCtx->getServiceContext()->getFastClockSource()->now(); });
+            ON_BLOCK_EXIT([&now, opCtx] { now = opCtx->fastClockSource().now(); });
 
             StringData lockTarget;
             if (cmdObj["lockTarget"]) {
                 lockTarget = cmdObj["lockTarget"].checkAndGetStringData();
             }
 
-            if (lockTarget == "RSTL") {
+            if (!gFeatureFlagIntentRegistration.isEnabled() && lockTarget == "RSTL") {
                 _sleepInRSTL(opCtx, msRemaining.count());
                 continue;
             }

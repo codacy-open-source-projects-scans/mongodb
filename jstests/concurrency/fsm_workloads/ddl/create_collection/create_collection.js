@@ -3,16 +3,16 @@
  *
  * Repeatedly creates a collection.
  */
-export const $config = (function() {
-    var data = {
+export const $config = (function () {
+    let data = {
         // Use the workload name as a prefix for the collection name,
         // since the workload name is assumed to be unique.
-        prefix: 'create_collection'
+        prefix: "create_collection",
     };
 
-    var states = (function() {
+    let states = (function () {
         function uniqueCollectionName(prefix, tid, num) {
-            return prefix + tid + '_' + num;
+            return prefix + tid + "_" + num;
         }
 
         function init(db, collName) {
@@ -22,14 +22,14 @@ export const $config = (function() {
         // TODO: how to avoid having too many files open?
         function create(db, collName) {
             // TODO: should we ever do something different?
-            var myCollName = uniqueCollectionName(this.prefix, this.tid, this.num++);
+            let myCollName = uniqueCollectionName(this.prefix, this.tid, this.num++);
             assert.commandWorked(db.createCollection(myCollName));
         }
 
         return {init: init, create: create};
     })();
 
-    var transitions = {init: {create: 1}, create: {create: 1}};
+    let transitions = {init: {create: 1}, create: {create: 1}};
 
     return {
         threadCount: 5,

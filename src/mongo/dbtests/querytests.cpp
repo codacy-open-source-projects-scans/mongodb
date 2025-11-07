@@ -27,20 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <fmt/format.h>
-#include <iostream>
-#include <list>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -57,30 +43,31 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/dbclient_cursor.h"
 #include "mongo/client/index_spec.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builds/index_build_interceptor.h"
 #include "mongo/db/index_builds/multi_index_block.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/client_cursor/clientcursor.h"
 #include "mongo/db/query/client_cursor/cursor_id.h"
 #include "mongo/db/query/client_cursor/cursor_manager.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/query/query_settings/query_settings_manager.h"
+#include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/repl/oplog.h"
@@ -95,13 +82,27 @@
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_interface.h"
 #include "mongo/rpc/unique_message.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/timer.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <iostream>
+#include <list>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -113,6 +114,13 @@ void insertOplogDocument(OperationContext* opCtx, Timestamp ts, StringData ns) {
     InsertStatement stmt;
     stmt.doc = doc;
     stmt.oplogSlot = OplogSlot{ts, OplogSlot::kInitialTerm};
+
+    if (coll->needsCappedLock()) {
+        // TODO SERVER-106004: Revisit this when cleaning up code around reserving oplog slots for
+        // inserts into capped collections.
+        Lock::ResourceLock heldUntilEndOfWUOW{
+            opCtx, ResourceId(RESOURCE_METADATA, coll->ns()), MODE_X};
+    }
     auto status = collection_internal::insertDocument(opCtx, *coll, stmt, nullptr);
     if (!status.isOK()) {
         std::cout << "Failed to insert oplog document: " << status.toString() << std::endl;
@@ -129,6 +137,15 @@ void deleteAll(OperationContext& opCtx, const NamespaceString& ns) {
     }
 }
 
+Database* getDbOrCreate(OperationContext* opCtx, const NamespaceString& nss) {
+    auto db = DatabaseHolder::get(opCtx)->getDb(opCtx, nss.dbName());
+
+    if (!db) {
+        return DatabaseHolder::get(opCtx)->openDb(opCtx, nss.dbName(), nullptr);
+    }
+    return db;
+}
+
 using std::endl;
 using std::string;
 using std::unique_ptr;
@@ -136,20 +153,25 @@ using std::vector;
 
 class Base {
 public:
-    Base() : _lk(&_opCtx), _context(&_opCtx, nss()) {
+    Base() : _lk(&_opCtx) {
         {
+            _database = getDbOrCreate(&_opCtx, nss());
             WriteUnitOfWork wunit(&_opCtx);
-            _database = _context.db();
-            CollectionPtr collection(
+            // TODO(SERVER-103403): Investigate usage validity of
+            // CollectionPtr::CollectionPtr_UNSAFE
+            CollectionPtr collection = CollectionPtr::CollectionPtr_UNSAFE(
                 CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss()));
             if (collection) {
                 _database->dropCollection(&_opCtx, nss()).transitional_ignore();
             }
-            collection = CollectionPtr(_database->createCollection(&_opCtx, nss()));
+            _database->createCollection(&_opCtx, nss());
             wunit.commit();
-            _collection = std::move(collection);
         }
-
+        _collection = acquireCollection(&_opCtx,
+                                        CollectionAcquisitionRequest::fromOpCtx(
+                                            &_opCtx, nss(), AcquisitionPrerequisites::kWrite),
+                                        MODE_IX);
+        ASSERT(_collection->exists());
         addIndex(IndexSpec().addKey("a").unique(false));
     }
 
@@ -170,21 +192,20 @@ protected:
 
     void addIndex(const IndexSpec& spec) {
         BSONObjBuilder builder(spec.toBSON());
-        builder.append("v", int(IndexDescriptor::kLatestIndexVersion));
+        builder.append("v", int(IndexConfig::kLatestIndexVersion));
         auto specObj = builder.obj();
 
-        CollectionWriter collection(&_opCtx, _collection->ns());
+        CollectionWriter collection(&_opCtx, &(*_collection));
         MultiIndexBlock indexer;
         ScopeGuard abortOnExit([&] {
             indexer.abortIndexBuild(&_opCtx, collection, MultiIndexBlock::kNoopOnCleanUpFn);
         });
         {
             WriteUnitOfWork wunit(&_opCtx);
-            uassertStatusOK(
-                indexer.init(&_opCtx, collection, specObj, MultiIndexBlock::kNoopOnInitFn));
+            ASSERT_OK(dbtests::initializeMultiIndexBlock(&_opCtx, collection, indexer, specObj));
             wunit.commit();
         }
-        uassertStatusOK(indexer.insertAllDocumentsInCollection(&_opCtx, collection.get()));
+        uassertStatusOK(indexer.insertAllDocumentsInCollection(&_opCtx, _collection->nss()));
         uassertStatusOK(
             indexer.drainBackgroundWrites(&_opCtx,
                                           RecoveryUnit::ReadSource::kNoTimestamp,
@@ -199,7 +220,6 @@ protected:
             wunit.commit();
         }
         abortOnExit.dismiss();
-        _collection = CollectionPtr(collection.get().get());
     }
 
     void insert(const char* s) {
@@ -215,12 +235,15 @@ protected:
             oid.init();
             b.appendOID("_id", &oid);
             b.appendElements(o);
-            collection_internal::insertDocument(
-                &_opCtx, _collection, InsertStatement(b.obj()), nullOpDebug, false)
+            collection_internal::insertDocument(&_opCtx,
+                                                _collection->getCollectionPtr(),
+                                                InsertStatement(b.obj()),
+                                                nullOpDebug,
+                                                false)
                 .transitional_ignore();
         } else {
             collection_internal::insertDocument(
-                &_opCtx, _collection, InsertStatement(o), nullOpDebug, false)
+                &_opCtx, _collection->getCollectionPtr(), InsertStatement(o), nullOpDebug, false)
                 .transitional_ignore();
         }
         wunit.commit();
@@ -231,10 +254,9 @@ protected:
     const ServiceContext::UniqueOperationContext _opCtxPtr = cc().makeOperationContext();
     OperationContext& _opCtx = *_opCtxPtr;
     Lock::GlobalWrite _lk;
-    OldClientContext _context;
 
     Database* _database;
-    CollectionPtr _collection;
+    boost::optional<CollectionAcquisition> _collection;
 };
 
 class FindOneOr : public Base {
@@ -248,12 +270,13 @@ public:
         BSONObj query = fromjson("{$or:[{b:2},{c:3}]}");
         BSONObj ret;
         // Check findOne() returning object.
-        ASSERT(Helpers::findOne(&_opCtx, _collection, query, ret));
+        ASSERT(Helpers::findOne(&_opCtx, *_collection, query, ret));
         ASSERT_EQUALS(string("b"), ret.firstElement().fieldName());
         // Cross check with findOne() returning location.
-        ASSERT_BSONOBJ_EQ(
-            ret,
-            _collection->docFor(&_opCtx, Helpers::findOne(&_opCtx, _collection, query)).value());
+        ASSERT_BSONOBJ_EQ(ret,
+                          _collection->getCollectionPtr()
+                              ->docFor(&_opCtx, Helpers::findOne(&_opCtx, *_collection, query))
+                              .value());
     }
 };
 
@@ -263,45 +286,46 @@ public:
         // We don't normally allow empty objects in the database, but test that we can find
         // an empty object (one might be allowed inside a reserved namespace at some point).
         Lock::GlobalWrite lk(&_opCtx);
-        OldClientContext ctx(&_opCtx, nss());
-
         {
             WriteUnitOfWork wunit(&_opCtx);
-            Database* db = ctx.db();
+            Database* db = getDbOrCreate(&_opCtx, nss());
             if (CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, nss())) {
-                _collection = CollectionPtr();
+                _collection.reset();
                 db->dropCollection(&_opCtx, nss()).transitional_ignore();
             }
-            _collection =
-                CollectionPtr(db->createCollection(&_opCtx, nss(), CollectionOptions(), false));
+            db->createCollection(&_opCtx, nss(), CollectionOptions(), false);
             wunit.commit();
         }
-        ASSERT(_collection);
 
         DBDirectClient cl(&_opCtx);
         BSONObj info;
         bool ok = cl.runCommand(nss().dbName(),
-                                BSON("godinsert"
-                                     << "querytests"
-                                     << "obj" << BSONObj()),
+                                BSON("godinsert" << "querytests"
+                                                 << "obj" << BSONObj()),
                                 info);
         ASSERT(ok);
-
+        _collection = acquireCollection(&_opCtx,
+                                        CollectionAcquisitionRequest::fromOpCtx(
+                                            &_opCtx, nss(), AcquisitionPrerequisites::kRead),
+                                        MODE_IS);
+        ASSERT(_collection->exists());
         insert(BSONObj());
         BSONObj query;
         BSONObj ret;
-        ASSERT(Helpers::findOne(&_opCtx, _collection, query, ret));
+        ASSERT(Helpers::findOne(&_opCtx, *_collection, query, ret));
         ASSERT(ret.isEmpty());
-        ASSERT_BSONOBJ_EQ(
-            ret,
-            _collection->docFor(&_opCtx, Helpers::findOne(&_opCtx, _collection, query)).value());
+        ASSERT_BSONOBJ_EQ(ret,
+                          _collection->getCollectionPtr()
+                              ->docFor(&_opCtx, Helpers::findOne(&_opCtx, *_collection, query))
+                              .value());
     }
 };
 
 class ClientBase {
 public:
     ClientBase() : _client(&_opCtx) {
-        query_settings::QuerySettingsManager::create(_opCtx.getServiceContext(), {}, {});
+        // Initialize the query settings.
+        query_settings::QuerySettingsService::initializeForTest(_opCtx.getServiceContext());
     }
 
 protected:
@@ -354,8 +378,8 @@ public:
         {
             // Check that a cursor has been registered with the global cursor manager, and has
             // already returned its first batch of results.
-            auto pinnedCursor =
-                unittest::assertGet(CursorManager::get(&_opCtx)->pinCursor(&_opCtx, cursorId));
+            auto pinnedCursor = unittest::assertGet(
+                CursorManager::get(&_opCtx)->pinCursor(&_opCtx, cursorId, "getMore"));
             ASSERT_EQUALS(1ull, pinnedCursor.getCursor()->getNBatches());
         }
 
@@ -417,67 +441,6 @@ private:
         NamespaceString::createNamespaceString_forTest("unittests.querytests.GetMoreKillOp");
 };
 
-/**
- * A get more exception caused by an invalid or unauthorized get more request does not cause
- * the get more's ClientCursor to be destroyed.  This prevents an unauthorized user from
- * improperly killing a cursor by issuing an invalid get more request.
- */
-class GetMoreInvalidRequest : public ClientBase {
-public:
-    ~GetMoreInvalidRequest() {
-        _opCtx.getServiceContext()->unsetKillAllOperations();
-        _client.dropCollection(_nss);
-    }
-    void run() {
-        auto startNumCursors = CursorManager::get(&_opCtx)->numCursors();
-
-        // Create a collection with some data.
-        for (int i = 0; i < 1000; ++i) {
-            insert(_nss, BSON("a" << i));
-        }
-
-        // Create a cursor on the collection, with a batch size of 200.
-        FindCommandRequest findRequest{_nss};
-        findRequest.setBatchSize(200);
-        auto cursor = _client.find(std::move(findRequest));
-        CursorId cursorId = cursor->getCursorId();
-
-        // Count 500 results, spanning a few batches of documents.
-        int count = 0;
-        for (int i = 0; i < 500; ++i) {
-            ASSERT(cursor->more());
-            cursor->next();
-            ++count;
-        }
-
-        // Send a getMore with a namespace that is incorrect ('spoofed') for this cursor id.
-        ASSERT_THROWS(
-            _client.getMore(
-                NamespaceString::createNamespaceString_forTest(
-                    "unittests.querytests.GetMoreInvalidRequest_WRONG_NAMESPACE_FOR_CURSOR"),
-                cursor->getCursorId()),
-            AssertionException);
-
-        // Check that the cursor still exists.
-        ASSERT_EQ(startNumCursors + 1, CursorManager::get(&_opCtx)->numCursors());
-        ASSERT_OK(CursorManager::get(&_opCtx)->pinCursor(&_opCtx, cursorId).getStatus());
-
-        // Check that the cursor can be iterated until all documents are returned.
-        while (cursor->more()) {
-            cursor->next();
-            ++count;
-        }
-        ASSERT_EQUALS(1000, count);
-
-        // The cursor should no longer exist, since we exhausted it.
-        ASSERT_EQ(startNumCursors, CursorManager::get(&_opCtx)->numCursors());
-    }
-
-private:
-    const NamespaceString _nss = NamespaceString::createNamespaceString_forTest(
-        "unittests.querytests.GetMoreInvalidRequest");
-};
-
 class PositiveLimit : public ClientBase {
 public:
     PositiveLimit() {}
@@ -494,7 +457,7 @@ public:
     void run() {
         const int collSize = 1000;
         for (int i = 0; i < collSize; i++)
-            insert(_nss, BSON(GENOID << "i" << i));
+            insert(_nss, BSON("_id" << OID::gen() << "i" << i));
 
         testLimit(1, 1);
         testLimit(10, 10);
@@ -731,9 +694,8 @@ public:
 
         BSONObj info;
         _client.runCommand(_nss.dbName(),
-                           BSON("create"
-                                << "querytests.TailableQueryOnId"
-                                << "capped" << true << "size" << 8192 << "autoIndexId" << true),
+                           BSON("create" << "querytests.TailableQueryOnId"
+                                         << "capped" << true << "size" << 8192),
                            info);
         insertA(_nss, 0);
         insertA(_nss, 1);
@@ -845,10 +807,9 @@ public:
         insertOplogDocument(&_opCtx, Timestamp(1000, 2), ns);
 
         BSONObj explainCmdObj =
-            BSON("explain" << BSON("find"
-                                   << "oplog.querytests.OplogScanGtTsExplain"
-                                   << "filter" << BSON("ts" << GT << Timestamp(1000, 1)) << "hint"
-                                   << BSON("$natural" << 1))
+            BSON("explain" << BSON("find" << "oplog.querytests.OplogScanGtTsExplain"
+                                          << "filter" << BSON("ts" << GT << Timestamp(1000, 1))
+                                          << "hint" << BSON("$natural" << 1))
                            << "verbosity"
                            << "executionStats");
 
@@ -1228,8 +1189,15 @@ private:
         ASSERT_EQUALS(1U, _client.count(_nss, code()));
         ASSERT_EQUALS(1U, _client.count(_nss, codeWScope()));
 
-        ASSERT_EQUALS(1U, _client.count(_nss, BSON("a" << BSON("$type" << (int)Code))));
-        ASSERT_EQUALS(1U, _client.count(_nss, BSON("a" << BSON("$type" << (int)CodeWScope))));
+        ASSERT_EQUALS(
+            1U,
+            _client.count(_nss,
+                          BSON("a" << BSON("$type" << int(stdx::to_underlying(BSONType::code))))));
+        ASSERT_EQUALS(
+            1U,
+            _client.count(
+                _nss,
+                BSON("a" << BSON("$type" << int(stdx::to_underlying(BSONType::codeWScope))))));
     }
     BSONObj code() const {
         BSONObjBuilder codeBuilder;
@@ -1262,7 +1230,10 @@ private:
         _client.remove(_nss, BSONObj());
         _client.insert(_nss, dbref());
         ASSERT_EQUALS(1U, _client.count(_nss, dbref()));
-        ASSERT_EQUALS(1U, _client.count(_nss, BSON("a" << BSON("$type" << (int)DBRef))));
+        ASSERT_EQUALS(
+            1U,
+            _client.count(_nss,
+                          BSON("a" << BSON("$type" << int(stdx::to_underlying(BSONType::dbRef))))));
     }
     BSONObj dbref() const {
         BSONObjBuilder b;
@@ -1278,10 +1249,10 @@ class DirectLocking : public ClientBase {
 public:
     void run() {
         Lock::GlobalWrite lk(&_opCtx);
-        OldClientContext ctx(
-            &_opCtx, NamespaceString::createNamespaceString_forTest("unittests.DirectLocking"));
         _client.remove(NamespaceString::createNamespaceString_forTest("a.b"), BSONObj());
-        ASSERT_EQUALS("unittests", ctx.db()->name().toString_forTest());
+        auto db = getDbOrCreate(
+            &_opCtx, NamespaceString::createNamespaceString_forTest("unittests.DirectLocking"));
+        ASSERT_EQUALS("unittests", db->name().toString_forTest());
     }
     const char* ns;
 };
@@ -1292,9 +1263,7 @@ public:
         _client.dropCollection(_nss);
     }
     void run() {
-        _client.insert(_nss,
-                       BSON("i"
-                            << "a"));
+        _client.insert(_nss, BSON("i" << "a"));
         ASSERT_OK(dbtests::createIndex(&_opCtx, _nss.ns_forTest(), BSON("i" << 1)));
         ASSERT_EQUALS(1U, _client.count(_nss, fromjson("{i:{$in:['a']}}")));
     }
@@ -1314,14 +1283,8 @@ public:
         _client.insert(_nss, fromjson("{foo:{bar:['spam','eggs']}}"));
         _client.insert(_nss, fromjson("{bar:['spam']}"));
         _client.insert(_nss, fromjson("{bar:['spam','eggs']}"));
-        ASSERT_EQUALS(2U,
-                      _client.count(_nss,
-                                    BSON("bar"
-                                         << "spam")));
-        ASSERT_EQUALS(2U,
-                      _client.count(_nss,
-                                    BSON("foo.bar"
-                                         << "spam")));
+        ASSERT_EQUALS(2U, _client.count(_nss, BSON("bar" << "spam")));
+        ASSERT_EQUALS(2U, _client.count(_nss, BSON("foo.bar" << "spam")));
     }
 
 private:
@@ -1432,19 +1395,9 @@ public:
             b.appendSymbol("x", "eliot");
             ASSERT_EQUALS(17, _client.findOne(nss(), b.obj())["z"].number());
         }
-        ASSERT_EQUALS(17,
-                      _client
-                          .findOne(nss(),
-                                   BSON("x"
-                                        << "eliot"))["z"]
-                          .number());
+        ASSERT_EQUALS(17, _client.findOne(nss(), BSON("x" << "eliot"))["z"].number());
         ASSERT_OK(dbtests::createIndex(&_opCtx, ns(), BSON("x" << 1)));
-        ASSERT_EQUALS(17,
-                      _client
-                          .findOne(nss(),
-                                   BSON("x"
-                                        << "eliot"))["z"]
-                          .number());
+        ASSERT_EQUALS(17, _client.findOne(nss(), BSON("x" << "eliot"))["z"].number());
     }
 };
 
@@ -1462,6 +1415,7 @@ public:
 
         string err;
         dbtests::WriteContextForTests ctx(&_opCtx, ns());
+        auto coll = ctx.getCollection();
 
         // note that extents are always at least 4KB now - so this will get rounded up
         // a bit.
@@ -1614,11 +1568,9 @@ public:
         }
 
         BSONObj info;
-        // Must use local db so that the collection is not replicated, to allow autoIndexId:false.
         _client.runCommand(DatabaseName::kLocal,
-                           BSON("create"
-                                << "oplog.querytests.findingstart"
-                                << "capped" << true << "size" << 4096 << "autoIndexId" << false),
+                           BSON("create" << "oplog.querytests.findingstart"
+                                         << "capped" << true << "size" << 4096),
                            info);
         // WiredTiger storage engines forbid dropping of the oplog. Evergreen reuses nodes for
         // testing, so the oplog may already exist on the test node; in this case, trying to create
@@ -1681,11 +1633,9 @@ public:
         size_t startNumCursors = numCursorsOpen();
 
         BSONObj info;
-        // Must use local db so that the collection is not replicated, to allow autoIndexId:false.
         _client.runCommand(DatabaseName::kLocal,
-                           BSON("create"
-                                << "oplog.querytests.findingstart"
-                                << "capped" << true << "size" << 4096 << "autoIndexId" << false),
+                           BSON("create" << "oplog.querytests.findingstart"
+                                         << "capped" << true << "size" << 4096),
                            info);
         // WiredTiger storage engines forbid dropping of the oplog. Evergreen reuses nodes for
         // testing, so the oplog may already exist on the test node; in this case, trying to create
@@ -1749,11 +1699,9 @@ public:
         ASSERT(!c0->more());
 
         BSONObj info;
-        // Must use local db so that the collection is not replicated, to allow autoIndexId:false.
         _client.runCommand(DatabaseName::kLocal,
-                           BSON("create"
-                                << "oplog.querytests.findingstart"
-                                << "capped" << true << "size" << 4096 << "autoIndexId" << false),
+                           BSON("create" << "oplog.querytests.findingstart"
+                                         << "capped" << true << "size" << 4096),
                            info);
         // WiredTiger storage engines forbid dropping of the oplog. Evergreen reuses nodes for
         // testing, so the oplog may already exist on the test node; in this case, trying to create
@@ -1814,9 +1762,9 @@ public:
         coll_opts.uuid = UUID::gen();
         {
             Lock::GlobalWrite lk(&_opCtx);
-            OldClientContext context(&_opCtx, nss());
+            auto db = getDbOrCreate(&_opCtx, nss());
             WriteUnitOfWork wunit(&_opCtx);
-            context.db()->createCollection(&_opCtx, nss(), coll_opts, false);
+            db->createCollection(&_opCtx, nss(), coll_opts, false);
             wunit.commit();
         }
         insert(nss(), BSON("a" << 1));
@@ -1843,9 +1791,9 @@ public:
         coll_opts.uuid = UUID::gen();
         {
             Lock::GlobalWrite lk(&_opCtx);
-            OldClientContext context(&_opCtx, nss());
+            auto db = getDbOrCreate(&_opCtx, nss());
             WriteUnitOfWork wunit(&_opCtx);
-            context.db()->createCollection(&_opCtx, nss(), coll_opts, false);
+            db->createCollection(&_opCtx, nss(), coll_opts, false);
             wunit.commit();
         }
         insert(nss(), BSON("a" << 1));
@@ -1871,9 +1819,9 @@ public:
         coll_opts.uuid = UUID::gen();
         {
             Lock::GlobalWrite lk(&_opCtx);
-            OldClientContext context(&_opCtx, nss());
+            auto db = getDbOrCreate(&_opCtx, nss());
             WriteUnitOfWork wunit(&_opCtx);
-            context.db()->createCollection(&_opCtx, nss(), coll_opts, true);
+            db->createCollection(&_opCtx, nss(), coll_opts, true);
             wunit.commit();
         }
         insert(nss(), BSON("a" << 1));
@@ -1904,9 +1852,10 @@ public:
             NamespaceString::createNamespaceString_forTest("unittestsdb1.querytests.coll1");
         {
             Lock::GlobalWrite lk(&_opCtx);
-            OldClientContext context(&_opCtx, nss1);
+            auto db = getDbOrCreate(&_opCtx, nss1);
+
             WriteUnitOfWork wunit(&_opCtx);
-            context.db()->createCollection(&_opCtx, nss1);
+            db->createCollection(&_opCtx, nss1);
             wunit.commit();
         }
         insert(nss1, BSON("a" << 1));
@@ -1918,9 +1867,9 @@ public:
             NamespaceString::createNamespaceString_forTest("unittestsdb2.querytests.coll2");
         {
             Lock::GlobalWrite lk(&_opCtx);
-            OldClientContext context(&_opCtx, nss2);
+            auto db = getDbOrCreate(&_opCtx, nss2);
             WriteUnitOfWork wunit(&_opCtx);
-            context.db()->createCollection(&_opCtx, nss2);
+            db->createCollection(&_opCtx, nss2);
             wunit.commit();
         }
         insert(nss2, BSON("b" << 2));
@@ -1932,9 +1881,9 @@ public:
             NamespaceString::createNamespaceString_forTest("unittestsdb3.querytests.coll3");
         {
             Lock::GlobalWrite lk(&_opCtx);
-            OldClientContext context(&_opCtx, nss3);
+            auto db = getDbOrCreate(&_opCtx, nss3);
             WriteUnitOfWork wunit(&_opCtx);
-            context.db()->createCollection(&_opCtx, nss3);
+            db->createCollection(&_opCtx, nss3);
             wunit.commit();
         }
         insert(nss3, BSON("c" << 3));
@@ -1957,12 +1906,12 @@ class CollectionInternalBase : public CollectionBase {
 public:
     CollectionInternalBase(const char* nsLeaf)
         : CollectionBase(nsLeaf),
-          _lk(&_opCtx, DatabaseName::createDatabaseName_forTest(boost::none, "unittests"), MODE_X),
-          _ctx(&_opCtx, nss()) {}
+          _autodb(
+              &_opCtx, DatabaseName::createDatabaseName_forTest(boost::none, "unittests"), MODE_X) {
+    }
 
 private:
-    Lock::DBLock _lk;
-    OldClientContext _ctx;
+    AutoGetDb _autodb;
 };
 
 class QueryReadsAll : public CollectionBase {
@@ -2036,7 +1985,6 @@ public:
         add<BoundedKey>();
         add<GetMore>();
         add<GetMoreKillOp>();
-        add<GetMoreInvalidRequest>();
         add<PositiveLimit>();
         add<TailNotAtEnd>();
         add<EmptyTail>();

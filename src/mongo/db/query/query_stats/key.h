@@ -29,33 +29,25 @@
 
 #pragma once
 
-#include <absl/hash/hash.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <utility>
-
-#include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/util/builder.h"
-#include "mongo/client/read_preference.h"
 #include "mongo/db/api_parameters.h"
-#include "mongo/db/collection_type.h"
-#include "mongo/db/namespace_string.h"
+#include "mongo/db/local_catalog/collection_type.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/db/query/query_shape/shape_helpers.h"
-#include "mongo/db/query/query_stats/transform_algorithm_gen.h"
+#include "mongo/db/repl/read_concern_args.h"
 #include "mongo/rpc/metadata/client_metadata.h"
-#include "mongo/util/decorable.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <utility>
+
+#include <absl/hash/hash.h>
+#include <boost/optional/optional.hpp>
 
 namespace mongo::query_stats {
 
@@ -217,7 +209,7 @@ static_assert(
  * A sub-class used for commmands without any specific key components, such as count and distinct.
  */
 struct EmptyCmdComponents : public SpecificKeyComponents {
-    EmptyCmdComponents(){};
+    EmptyCmdComponents() {};
 
     std::size_t size() const override {
         return sizeof(EmptyCmdComponents);
@@ -309,8 +301,8 @@ protected:
      */
     Key(OperationContext* opCtx,
         std::unique_ptr<query_shape::Shape> queryShape,
-        boost::optional<BSONObj> hint,
-        boost::optional<repl::ReadConcernArgs> readConcern,
+        const boost::optional<BSONObj>& hint,
+        const boost::optional<repl::ReadConcernArgs>& readConcern,
         bool hasMaxTimeMS,
         query_shape::CollectionType collectionType = query_shape::CollectionType::kUnknown);
 

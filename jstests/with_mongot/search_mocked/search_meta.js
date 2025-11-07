@@ -27,35 +27,66 @@ assert.commandWorked(coll.insert({"_id": 3, "title": "vegetables"}));
 const collUUID = getUUIDFromListCollections(testDB, coll.getName());
 const searchQuery = {
     query: "cakes",
-    path: "title"
+    path: "title",
 };
 
 const explainContents = {
-    content: "test"
+    content: "test",
 };
 const cursorId = NumberLong(17);
 
+// Verify that $searchMeta does not *require* documents to be returned by mongot.
+{
+    const history = [
+        {
+            expectedCommand: mongotCommandForQuery({
+                query: searchQuery,
+                collName: collName,
+                db: dbName,
+                collectionUUID: collUUID,
+                optimizationFlags: {omitSearchDocumentResults: true},
+            }),
+            response: {
+                ok: 1,
+                cursor: {id: NumberLong(0), ns: coll.getFullName(), nextBatch: []},
+                vars: {SEARCH_META: {value: 42}},
+            },
+        },
+    ];
+    assert.commandWorked(mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}));
+
+    let cursorMeta = coll.aggregate([{$searchMeta: searchQuery}], {cursor: {}});
+    const expectedMeta = [{value: 42}];
+    assert.eq(expectedMeta, cursorMeta.toArray());
+}
+
 // Verify that $searchMeta evaluates into SEARCH_META variable returned by mongot.
 {
-    const history = [{
-        expectedCommand: mongotCommandForQuery(
-            {query: searchQuery, collName: collName, db: dbName, collectionUUID: collUUID}),
-        response: {
-            ok: 1,
-            cursor: {
-                id: NumberLong(0),
-                ns: coll.getFullName(),
-                nextBatch: [
-                    {_id: 2, $searchScore: 0.654},
-                    {_id: 1, $searchScore: 0.321},
-                    {_id: 3, $searchScore: 0.123}
-                ]
+    const history = [
+        {
+            expectedCommand: mongotCommandForQuery({
+                query: searchQuery,
+                collName: collName,
+                db: dbName,
+                collectionUUID: collUUID,
+                optimizationFlags: {omitSearchDocumentResults: true},
+            }),
+            response: {
+                ok: 1,
+                cursor: {
+                    id: NumberLong(0),
+                    ns: coll.getFullName(),
+                    nextBatch: [
+                        {_id: 2, $searchScore: 0.654},
+                        {_id: 1, $searchScore: 0.321},
+                        {_id: 3, $searchScore: 0.123},
+                    ],
+                },
+                vars: {SEARCH_META: {value: 42}},
             },
-            vars: {SEARCH_META: {value: 42}}
-        }
-    }];
-    assert.commandWorked(
-        mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}));
+        },
+    ];
+    assert.commandWorked(mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}));
 
     let cursorMeta = coll.aggregate([{$searchMeta: searchQuery}], {cursor: {}});
     const expectedMeta = [{value: 42}];
@@ -63,24 +94,28 @@ const cursorId = NumberLong(17);
 }
 
 {
-    const history = [{
-        expectedCommand: mongotCommandForQuery({
-            query: searchQuery,
-            collName: collName,
-            db: dbName,
-            collectionUUID: collUUID,
-            explainVerbosity: {verbosity: "queryPlanner"}
-        }),
-        response: {explain: explainContents, ok: 1}
-    }];
+    const history = [
+        {
+            expectedCommand: mongotCommandForQuery({
+                query: searchQuery,
+                collName: collName,
+                db: dbName,
+                collectionUUID: collUUID,
+                explainVerbosity: {verbosity: "queryPlanner"},
+                optimizationFlags: {omitSearchDocumentResults: true},
+            }),
+            response: {explain: explainContents, ok: 1},
+        },
+    ];
 
-    assert.commandWorked(
-        mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}));
+    assert.commandWorked(mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}));
 
     const explain = coll.explain("queryPlanner").aggregate([{$searchMeta: searchQuery}]);
 
-    if (checkSbeRestrictedOrFullyEnabled(testDB) &&
-        FeatureFlagUtil.isPresentAndEnabled(testDB.getMongo(), 'SearchInSbe')) {
+    if (
+        checkSbeRestrictedOrFullyEnabled(testDB) &&
+        FeatureFlagUtil.isPresentAndEnabled(testDB.getMongo(), "SearchInSbe")
+    ) {
         const winningPlan = explain.queryPlanner.winningPlan;
         const searchPlan = getPlanStages(winningPlan.queryPlan, "SEARCH");
         assert.eq(1, searchPlan.length, searchPlan);
@@ -98,31 +133,36 @@ const cursorId = NumberLong(17);
 // Verify that the count from SEARCH_META winds up in the slow query logs even on a normal search
 // command.
 {
-    const history = [{
-        expectedCommand: mongotCommandForQuery(
-            {query: searchQuery, collName: collName, db: dbName, collectionUUID: collUUID}),
-        response: {
-            ok: 1,
-            cursor: {
-                id: NumberLong(0),
-                ns: coll.getFullName(),
-                nextBatch: [
-                    {_id: 2, $searchScore: 0.654},
-                    {_id: 1, $searchScore: 0.321},
-                    {_id: 3, $searchScore: 0.123}
-                ]
+    const history = [
+        {
+            expectedCommand: mongotCommandForQuery({
+                query: searchQuery,
+                collName: collName,
+                db: dbName,
+                collectionUUID: collUUID,
+            }),
+            response: {
+                ok: 1,
+                cursor: {
+                    id: NumberLong(0),
+                    ns: coll.getFullName(),
+                    nextBatch: [
+                        {_id: 2, $searchScore: 0.654},
+                        {_id: 1, $searchScore: 0.321},
+                        {_id: 3, $searchScore: 0.123},
+                    ],
+                },
+                vars: {
+                    SEARCH_META: {
+                        value: 42,
+                        "count": {"lowerBound": 3},
+                        "slowQueryLog": {"msg": "Arbitrary payload"},
+                    },
+                },
             },
-            vars: {
-                SEARCH_META: {
-                    value: 42,
-                    "count": {"lowerBound": 3},
-                    "slowQueryLog": {"msg": "Arbitrary payload"}
-                }
-            }
-        }
-    }];
-    assert.commandWorked(
-        mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}));
+        },
+    ];
+    assert.commandWorked(mongotConn.adminCommand({setMockResponses: 1, cursorId, history: history}));
 
     // Make sure we capture all queries in slow logs.
     testDB.runCommand({profile: 0, slowms: -1});
@@ -131,12 +171,16 @@ const cursorId = NumberLong(17);
     assert(logs["log"], "no log field");
     const arrayLog = logs["log"];
     assert.gt(arrayLog.length, 0, "no log lines");
-    assert(arrayLog.some(function(v) {
-        return v.includes("Slow query") && v.includes("resultCount");
-    }));
-    assert(arrayLog.some(function(v) {
-        return v.includes("Slow query") && v.includes("slowQueryLog");
-    }));
+    assert(
+        arrayLog.some(function (v) {
+            return v.includes("Slow query") && v.includes("resultCount");
+        }),
+    );
+    assert(
+        arrayLog.some(function (v) {
+            return v.includes("Slow query") && v.includes("slowQueryLog");
+        }),
+    );
     testDB.runCommand({profile: 0, slowms: 200});
 }
 

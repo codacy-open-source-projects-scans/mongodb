@@ -32,6 +32,7 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
+#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/stats/counters.h"
@@ -41,7 +42,8 @@ namespace mongo {
 GroupProcessorBase::GroupProcessorBase(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                        int64_t maxMemoryUsageBytes)
     : _expCtx(expCtx),
-      _memoryTracker{expCtx->getAllowDiskUse() && !expCtx->getInRouter(), maxMemoryUsageBytes},
+      _memoryTracker{OperationMemoryUsageTracker::createMemoryUsageTrackerForStage(
+          *expCtx, expCtx->getAllowDiskUse() && !expCtx->getInRouter(), maxMemoryUsageBytes)},
       _groups(expCtx->getValueComparator().makeUnorderedValueMap<Accumulators>()) {}
 
 void GroupProcessorBase::addAccumulationStatement(AccumulationStatement accumulationStatement) {
@@ -124,6 +126,9 @@ boost::intrusive_ptr<Expression> GroupProcessorBase::getIdExpression() const {
 }
 
 void GroupProcessorBase::reset() {
+    // Before we clear the memory tracker, update GroupStats so explain has $group-level statistics.
+    _stats.peakTrackedMemBytes = _memoryTracker.peakTrackedMemoryBytes();
+
     // Free our resources.
     _groups = _expCtx->getValueComparator().makeUnorderedValueMap<Accumulators>();
     _memoryTracker.resetCurrent();
@@ -157,7 +162,7 @@ std::pair<GroupProcessorBase::GroupsMap::iterator, bool> GroupProcessorBase::fin
         // Initialize and add the accumulators
         Value expandedId = expandId(key);
         Document idDoc =
-            expandedId.getType() == BSONType::Object ? expandedId.getDocument() : Document();
+            expandedId.getType() == BSONType::object ? expandedId.getDocument() : Document();
         group.reserve(numAccumulators);
         for (size_t i = 0; i < numAccumulators; i++) {
             const auto& accumulatedField = _accumulatedFields[i];

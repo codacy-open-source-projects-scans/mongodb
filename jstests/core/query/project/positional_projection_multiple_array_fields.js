@@ -4,6 +4,11 @@
  *
  * Note that the user's query/filter document may only contain _ONE_ array field for positional
  * projection to work correctly.
+ * @tags: [
+ *   requires_getmore,
+ *   # $slice is not supported on views.
+ *   incompatible_with_views,
+ * ]
  */
 import "jstests/libs/query/sbe_assert_error_override.js";
 
@@ -23,15 +28,28 @@ testSingleDocument({z: 13}, {a: {$slice: 2}, "z.$": 1}, {_id: 0, a: [1, 2], z: [
 assert(coll.drop());
 
 coll.insert({_id: 0, importing: [{foo: "a"}, {foo: "b"}], "jobs": [{num: 1}, {num: 2}, {num: 3}]});
-testSingleDocument({"importing.foo": "b"},
-                   {jobs: {'$slice': 2}, 'importing.$': 1},
-                   {_id: 0, importing: [{foo: "b"}], jobs: [{num: 1}, {num: 2}]});
-testSingleDocument({"importing.foo": "b"},
-                   {jobs: {'$slice': -1}, 'importing.$': 1},
-                   {_id: 0, importing: [{foo: "b"}], jobs: [{num: 3}]});
+testSingleDocument(
+    {"importing.foo": "b"},
+    {jobs: {"$slice": 2}, "importing.$": 1},
+    {_id: 0, importing: [{foo: "b"}], jobs: [{num: 1}, {num: 2}]},
+);
+testSingleDocument(
+    {"importing.foo": "b"},
+    {jobs: {"$slice": -1}, "importing.$": 1},
+    {_id: 0, importing: [{foo: "b"}], jobs: [{num: 3}]},
+);
 
 assert(coll.drop());
-assert.commandWorked(coll.insert({_id: 1, a: [{b: 1, c: 2}, {b: 3, c: 4}], z: [11, 12, 13]}));
+assert.commandWorked(
+    coll.insert({
+        _id: 1,
+        a: [
+            {b: 1, c: 2},
+            {b: 3, c: 4},
+        ],
+        z: [11, 12, 13],
+    }),
+);
 testSingleDocument({z: 12}, {"a.b": 1}, {_id: 1, a: [{"b": 1}, {"b": 3}]});
 
 // The positional projection on 'z' which limits it to one element shouldn't be applied to 'a' as

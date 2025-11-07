@@ -27,14 +27,7 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/stats/storage_stats.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
@@ -42,32 +35,40 @@
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/basic_types_gen.h"
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
-#include "mongo/db/catalog/clustered_collection_util.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/cluster_role.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/local_catalog/clustered_collection_util.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/profile_settings.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/s/balancer_stats_registry.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/stats/storage_stats.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
+#include "mongo/db/topology/cluster_role.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/namespace_string_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kFTDC
 
@@ -241,7 +242,7 @@ void _appendInProgressIndexesStats(OperationContext* opCtx,
         collection.get()->ns().isFLE2StateCollection();
 
     auto numIndexes = indexCatalog->numIndexesTotal();
-    if (collection->isClustered() && !collection->ns().isTimeseriesBucketsCollection()) {
+    if (collection->isClustered() && !collection->isTimeseriesCollection()) {
         // There is an implicit 'clustered' index on a clustered collection. Increment the total
         // index count to reflect that.
         numIndexes++;
@@ -262,8 +263,8 @@ void _appendInProgressIndexesStats(OperationContext* opCtx,
     }
     result->append("nindexes", numIndexes);
 
-    auto it = indexCatalog->getIndexIterator(
-        opCtx, IndexCatalog::InclusionPolicy::kReady | IndexCatalog::InclusionPolicy::kUnfinished);
+    auto it = indexCatalog->getIndexIterator(IndexCatalog::InclusionPolicy::kReady |
+                                             IndexCatalog::InclusionPolicy::kUnfinished);
     while (it->more()) {
         const IndexCatalogEntry* entry = it->next();
         const IndexDescriptor* descriptor = entry->descriptor();
@@ -271,7 +272,8 @@ void _appendInProgressIndexesStats(OperationContext* opCtx,
         invariant(iam);
 
         BSONObjBuilder bob;
-        if (iam->appendCustomStats(opCtx, &bob, scale)) {
+        if (iam->appendCustomStats(
+                opCtx, *shard_role_details::getRecoveryUnit(opCtx), &bob, scale)) {
             if (redactForQE) {
                 indexDetails.append(descriptor->indexName(), filterQEIndexStats(bob.obj()));
             } else {
@@ -323,14 +325,16 @@ Status appendCollectionStorageStats(OperationContext* opCtx,
     bool numericOnly = storageStatsSpec.getNumericOnly();
     static constexpr auto kStorageStatsField = "storageStats"_sd;
 
+    // TODO(SERVER-110087): Remove this legacy timeseries translation logic once v9.0 is last LTS
     const auto bucketNss =
         nss.isTimeseriesBucketsCollection() ? nss : nss.makeTimeseriesBucketsNamespace();
     // Hold reference to the catalog for collection lookup without locks to be safe.
     auto catalog = CollectionCatalog::get(opCtx);
     auto bucketsColl = catalog->lookupCollectionByNamespace(opCtx, bucketNss);
-    const bool mayBeTimeseries = bucketsColl && bucketsColl->getTimeseriesOptions();
-    const auto collNss =
-        (mayBeTimeseries && !nss.isTimeseriesBucketsCollection()) ? std::move(bucketNss) : nss;
+    const bool mayBeLegacyTimeseries = bucketsColl && bucketsColl->getTimeseriesOptions();
+    const auto collNss = (mayBeLegacyTimeseries && !nss.isTimeseriesBucketsCollection())
+        ? std::move(bucketNss)
+        : nss;
 
     auto failed = [&](const DBException& ex) {
         LOGV2_DEBUG(3088801,
@@ -341,20 +345,30 @@ Status appendCollectionStorageStats(OperationContext* opCtx,
         return Status::OK();
     };
 
-    boost::optional<AutoGetCollectionForReadCommandMaybeLockFree> autoColl;
+    boost::optional<CollectionAcquisition> collectionAcquisition;
     try {
-        autoColl.emplace(
+        collectionAcquisition = acquireCollectionMaybeLockFree(
             opCtx,
-            collNss,
-            AutoGetCollection::Options{}.deadline(waitForLock ? Date_t::max() : Date_t::now()));
+            CollectionAcquisitionRequest::fromOpCtx(opCtx,
+                                                    collNss,
+                                                    AcquisitionPrerequisites::kRead,
+                                                    waitForLock ? Date_t::max() : Date_t::now()));
     } catch (const ExceptionFor<ErrorCodes::LockTimeout>& ex) {
         return failed(ex);
     } catch (const ExceptionFor<ErrorCodes::MaxTimeMSExpired>& ex) {
         return failed(ex);
     }
 
-    const auto& collection = autoColl->getCollection();  // Will be set if present
-    const bool isTimeseries = collection && collection->getTimeseriesOptions().has_value();
+    AutoStatsTracker statsTracker(opCtx,
+                                  collNss,
+                                  Top::LockType::ReadLocked,
+                                  AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                                  DatabaseProfileSettings::get(opCtx->getServiceContext())
+                                      .getDatabaseProfileLevel(collNss.dbName()));
+
+    const auto& collectionPtr =
+        collectionAcquisition->getCollectionPtr();  // Will be set if present
+    const bool isTimeseries = collectionPtr && collectionPtr->getTimeseriesOptions().has_value();
 
     // We decided the requested namespace was a time series view, so we redirected to the underlying
     // buckets collection. However, when we tried to acquire that collection, it did not exist or it
@@ -362,7 +376,7 @@ Status appendCollectionStorageStats(OperationContext* opCtx,
     // between the two calls. Logically, the collection that we were looking for does not exist.
     bool logicallyNotFound = collNss != nss && !isTimeseries;
 
-    if (!collection || logicallyNotFound) {
+    if (!collectionPtr || logicallyNotFound) {
         result->appendNumber("size", 0);
         result->appendNumber("count", 0);
         result->appendNumber("numOrphanDocs", 0);
@@ -408,7 +422,7 @@ Status appendCollectionStorageStats(OperationContext* opCtx,
         switch (group) {
             case StorageStatsGroups::kRecordStatsField:
                 _appendRecordStats(opCtx,
-                                   collection,
+                                   collectionPtr,
                                    collNss,
                                    serializationCtx,
                                    nss.isNamespaceAlwaysUntracked(),
@@ -417,13 +431,13 @@ Status appendCollectionStorageStats(OperationContext* opCtx,
                                    result);
                 break;
             case StorageStatsGroups::kRecordStoreField:
-                _appendRecordStore(opCtx, collection, verbose, scale, numericOnly, result);
+                _appendRecordStore(opCtx, collectionPtr, verbose, scale, numericOnly, result);
                 break;
             case StorageStatsGroups::kInProgressIndexesField:
-                _appendInProgressIndexesStats(opCtx, collection, scale, result);
+                _appendInProgressIndexesStats(opCtx, collectionPtr, scale, result);
                 break;
             case StorageStatsGroups::kTotalSizeField:
-                _appendTotalSize(opCtx, collection, verbose, scale, result);
+                _appendTotalSize(opCtx, collectionPtr, verbose, scale, result);
                 break;
         }
     }
@@ -433,13 +447,22 @@ Status appendCollectionStorageStats(OperationContext* opCtx,
 Status appendCollectionRecordCount(OperationContext* opCtx,
                                    const NamespaceString& nss,
                                    BSONObjBuilder* result) {
-    AutoGetCollectionForReadCommandMaybeLockFree collection(opCtx, nss);
-    if (!collection) {
+    const auto collection = acquireCollectionMaybeLockFree(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kRead));
+    AutoStatsTracker statsTracker(opCtx,
+                                  nss,
+                                  Top::LockType::ReadLocked,
+                                  AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                                  DatabaseProfileSettings::get(opCtx->getServiceContext())
+                                      .getDatabaseProfileLevel(nss.dbName()));
+    if (!collection.exists()) {
         return {ErrorCodes::NamespaceNotFound,
                 str::stream() << "Collection [" << nss.toStringForErrorMsg() << "] not found."};
     }
 
-    result->appendNumber("count", static_cast<long long>(collection->numRecords(opCtx)));
+    result->appendNumber("count",
+                         static_cast<long long>(collection.getCollectionPtr()->numRecords(opCtx)));
 
     return Status::OK();
 }

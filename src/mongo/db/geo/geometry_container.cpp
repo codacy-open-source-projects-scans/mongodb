@@ -31,6 +31,7 @@
 #include "mongo/db/geo/geometry_container.h"
 
 #include <cstddef>
+
 #include <s1angle.h>
 #include <s2.h>
 #include <s2cap.h>
@@ -42,12 +43,10 @@
 #include <s2polyline.h>
 #include <s2region.h>
 #include <s2regionunion.h>
+
 #include <util/math/vector3-inl.h>
 #include <util/math/vector3.h>
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <set>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement_comparator_interface.h"
@@ -55,14 +54,14 @@
 #include "mongo/db/geo/big_polygon.h"
 #include "mongo/db/geo/geoconstants.h"
 #include "mongo/db/geo/geoparser.h"
-#include "mongo/db/query/bson/dotted_path_support.h"
+#include "mongo/db/query/bson/multikey_dotted_path_support.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
 #include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
+
+#include <set>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -78,7 +77,7 @@ bool GeometryContainer::isPoint() const {
 }
 
 PointWithCRS GeometryContainer::getPoint() const {
-    invariant(isPoint());
+    tassert(9911939, "", isPoint());
     return *_point;
 }
 
@@ -113,7 +112,7 @@ const S2Region& GeometryContainer::getS2Region() const {
     } else if (nullptr != _multiPolygon) {
         return *_s2Region;
     } else {
-        invariant(nullptr != _geometryCollection);
+        tassert(9911928, "", nullptr != _geometryCollection);
         return *_s2Region;
     }
 }
@@ -1010,8 +1009,7 @@ Status GeometryContainer::parseFromGeoJSON(bool skipValidation) {
             }
         }
     } else {
-        // Should not reach here.
-        MONGO_UNREACHABLE;
+        MONGO_UNREACHABLE_TASSERT(9911954);
     }
 
     // Check parsing result.
@@ -1063,7 +1061,7 @@ Status GeometryContainer::parseFromQuery(const BSONElement& elem) {
         status = GeoParser::parseCenterSphere(obj, _cap.get());
     } else if (GeoParser::GEOMETRY == specifier) {
         // GeoJSON geometry or legacy point
-        if (Array == elem.type() || obj.firstElement().isNumber()) {
+        if (BSONType::array == elem.type() || obj.firstElement().isNumber()) {
             // legacy point
             _point.reset(new PointWithCRS());
             status = GeoParser::parseQueryPoint(elem, _point.get());
@@ -1099,20 +1097,38 @@ Status GeometryContainer::parseFromStorage(const BSONElement& elem, bool skipVal
 
     _geoElm = elem;
     Status status = Status::OK();
-    if (Array == elem.type() || elem.Obj().firstElement().isNumber()) {
+    if (BSONType::object == elem.type()) {
+        // GeoJSON
+        // { location: { type: “Point”, coordinates: [...] } }
+        status = parseFromGeoJSON(skipValidation);
+
+        // It's possible that we are dealing with a legacy point. e.g
+        // { location: {x: 1, y: 2, type: “Point” } }
+        // { location: {x: 1, y: 2} }
+        if (status == ErrorCodes::BadValue) {
+            // We must reset _point each time we attempt to re-parse, since it may retain info from
+            // previous attempts.
+            _point.reset(new PointWithCRS());
+            Status legacyParsingStatus = GeoParser::parseLegacyPoint(elem, _point.get(), true);
+            if (legacyParsingStatus.isOK()) {
+                status = legacyParsingStatus;
+            } else {
+                // Return the original error status, as we may be dealing with an invalid GeoJSON
+                // document. e.g. {type: "Point", coordinates: "hello"}
+                return status;
+            }
+        }
+    } else {
         // Legacy point
         // { location: [1, 2] }
         // { location: [1, 2, 3] }
-        // { location: {x: 1, y: 2} }
-        // { location: {x: 1, y: 2, type: "Point" } }
-        _point.reset(new PointWithCRS());
         // Allow more than two dimensions or extra fields, like [1, 2, 3]
+        // We must reset _point each time we attempt to re-parse, since it may retain info from
+        // previous attempts.
+        _point.reset(new PointWithCRS());
         status = GeoParser::parseLegacyPoint(elem, _point.get(), true);
-    } else {
-        // GeoJSON
-        // { location: { type: "Point", coordinates: [...] } }
-        status = parseFromGeoJSON(skipValidation);
     }
+
     if (!status.isOK())
         return status;
 
@@ -1143,7 +1159,7 @@ string GeometryContainer::getDebugType() const {
     } else if (nullptr != _geometryCollection) {
         return "gc";
     } else {
-        MONGO_UNREACHABLE;
+        MONGO_UNREACHABLE_TASSERT(9911955);
         return "";
     }
 }
@@ -1170,7 +1186,7 @@ CRS GeometryContainer::getNativeCRS() const {
     } else if (nullptr != _geometryCollection) {
         return SPHERE;
     } else {
-        MONGO_UNREACHABLE;
+        MONGO_UNREACHABLE_TASSERT(9911956);
         return FLAT;
     }
 }
@@ -1195,7 +1211,7 @@ bool GeometryContainer::supportsProject(CRS otherCRS) const {
     } else if (nullptr != _multiPolygon) {
         return _multiPolygon->crs == otherCRS;
     } else {
-        invariant(nullptr != _geometryCollection);
+        tassert(9911929, "", nullptr != _geometryCollection);
         return SPHERE == otherCRS;
     }
 }
@@ -1209,7 +1225,7 @@ void GeometryContainer::projectInto(CRS otherCRS) {
         return;
     }
 
-    invariant(nullptr != _point);
+    tassert(9911930, "", nullptr != _point);
     ShapeProjection::projectInto(_point.get(), otherCRS);
 }
 
@@ -1257,7 +1273,7 @@ static double s2MinDistanceRad(const S2Point& s2Point,
     for (vector<PointWithCRS>::const_iterator it = geometryCollection.points.begin();
          it != geometryCollection.points.end();
          ++it) {
-        invariant(SPHERE == it->crs);
+        tassert(9911931, "", SPHERE == it->crs);
         double nextDistance = S2Distance::distanceRad(s2Point, it->point);
         if (minDistance < 0 || nextDistance < minDistance) {
             minDistance = nextDistance;
@@ -1265,7 +1281,7 @@ static double s2MinDistanceRad(const S2Point& s2Point,
     }
 
     for (const auto& line : geometryCollection.lines) {
-        invariant(SPHERE == line->crs);
+        tassert(9911932, "", SPHERE == line->crs);
         double nextDistance = S2Distance::minDistanceRad(s2Point, line->line);
         if (minDistance < 0 || nextDistance < minDistance) {
             minDistance = nextDistance;
@@ -1273,9 +1289,9 @@ static double s2MinDistanceRad(const S2Point& s2Point,
     }
 
     for (const auto& polygon : geometryCollection.polygons) {
-        invariant(SPHERE == polygon->crs);
+        tassert(9911933, "", SPHERE == polygon->crs);
         // We don't support distances for big polygons yet.
-        invariant(polygon->s2Polygon);
+        tassert(9911934, "", polygon->s2Polygon);
         double nextDistance = S2Distance::minDistanceRad(s2Point, *(polygon->s2Polygon));
         if (minDistance < 0 || nextDistance < minDistance) {
             minDistance = nextDistance;
@@ -1310,7 +1326,7 @@ double GeometryContainer::minDistance(const PointWithCRS& otherPoint) const {
     const CRS crs = getNativeCRS();
 
     if (FLAT == crs) {
-        invariant(nullptr != _point);
+        tassert(9911935, "", nullptr != _point);
 
         if (FLAT == otherPoint.crs) {
             return distance(_point->oldPoint, otherPoint.oldPoint);
@@ -1320,7 +1336,7 @@ double GeometryContainer::minDistance(const PointWithCRS& otherPoint) const {
                             Point(latLng.lng().degrees(), latLng.lat().degrees()));
         }
     } else {
-        invariant(SPHERE == crs);
+        tassert(9911936, "", SPHERE == crs);
 
         double minDistance = -1;
 
@@ -1338,7 +1354,7 @@ double GeometryContainer::minDistance(const PointWithCRS& otherPoint) const {
             minDistance = S2Distance::minDistanceRad(otherPoint.point, _line->line);
         } else if (nullptr != _polygon) {
             // We don't support distances for big polygons yet.
-            invariant(nullptr != _polygon->s2Polygon);
+            tassert(9911937, "", nullptr != _polygon->s2Polygon);
             minDistance = S2Distance::minDistanceRad(otherPoint.point, *_polygon->s2Polygon);
         } else if (nullptr != _cap) {
             minDistance = S2Distance::minDistanceRad(otherPoint.point, _cap->cap);
@@ -1352,7 +1368,7 @@ double GeometryContainer::minDistance(const PointWithCRS& otherPoint) const {
             minDistance = s2MinDistanceRad(otherPoint.point, *_geometryCollection);
         }
 
-        invariant(minDistance != -1);
+        tassert(9911938, "", minDistance != -1);
         return minDistance * kRadiusOfEarthInMeters;
     }
 }
@@ -1382,7 +1398,7 @@ void StoredGeometry::extractGeometries(const BSONObj& doc,
     BSONElementSet geomElements;
     // NOTE: Annoyingly, we cannot just expand arrays b/c single 2d points are arrays, we need
     // to manually expand all results to check if they are geometries
-    ::mongo::dotted_path_support::extractAllElementsAlongPath(
+    ::mongo::multikey_dotted_path_support::extractAllElementsAlongPath(
         doc, path, geomElements, false /* expand arrays */);
 
     for (BSONElementSet::iterator it = geomElements.begin(); it != geomElements.end(); ++it) {
@@ -1392,7 +1408,7 @@ void StoredGeometry::extractGeometries(const BSONObj& doc,
         if (stored.get()) {
             // Valid geometry element
             geometries->push_back(std::move(stored));
-        } else if (el.type() == Array) {
+        } else if (el.type() == BSONType::array) {
             // Many geometries may be in an array
             BSONObjIterator arrIt(el.Obj());
             while (arrIt.more()) {

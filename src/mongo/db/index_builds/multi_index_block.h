@@ -29,9 +29,27 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/index/index_access_method.h"
+#include "mongo/db/index_builds/index_build_block.h"
+#include "mongo/db/index_builds/index_build_interceptor.h"
+#include "mongo/db/index_builds/resumable_index_builds_gen.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/matcher/expression.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/storage/recovery_unit.h"
+#include "mongo/util/fail_point.h"
+#include "mongo/util/uuid.h"
+
 #include <functional>
 #include <iosfwd>
 #include <memory>
@@ -39,26 +57,9 @@
 #include <string>
 #include <vector>
 
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/index/index_access_method.h"
-#include "mongo/db/index_builds/index_build_block.h"
-#include "mongo/db/index_builds/index_build_interceptor.h"
-#include "mongo/db/index_builds/resumable_index_builds_gen.h"
-#include "mongo/db/matcher/expression.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/storage/recovery_unit.h"
-#include "mongo/util/fail_point.h"
-#include "mongo/util/uuid.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -67,8 +68,8 @@ class CollectionPtr;
 class MatchExpression;
 class NamespaceString;
 class OperationContext;
-
 class ProgressMeterHolder;
+struct IndexBuildInfo;
 
 /**
  * Builds one or more indexes.
@@ -92,6 +93,15 @@ public:
     ~MultiIndexBlock();
 
     /**
+     * Gets total allowed memory usage for all index builds from
+     * the server parameter 'maxIndexBuildMemoryUsageMegabytes'.
+     *
+     * This function does all bounds checking on the server
+     * parameter and computes a percentage-based value, if set.
+     */
+    static size_t getTotalIndexBuildMaxMemoryUsageBytes();
+
+    /**
      * When this is called:
      * For hybrid index builds, the index interceptor will not track duplicates.
      * For foreground index builds, the uniqueness constraint will be relaxed.
@@ -106,7 +116,7 @@ public:
         _buildUUID = indexBuildUUID;
     }
 
-    using OnInitFn = std::function<Status(std::vector<BSONObj>& specs)>;
+    using OnInitFn = std::function<void()>;
     enum class InitMode { SteadyState, InitialSync, Recovery };
 
     /**
@@ -117,6 +127,10 @@ public:
      * all indexes have been initialized. For callers that timestamp this write, use
      * 'makeTimestampedIndexOnInitFn', otherwise use 'kNoopOnInitFn'.
      *
+     * Callers can optionally limit the memory usage via 'maxMemoryUsageBytes'. If omitted, the
+     * default memory limit is controlled by the 'maxIndexBuildMemoryUsageMegabytes' server
+     * parameter.
+     *
      * Does not need to be called inside of a WriteUnitOfWork (but can be due to nesting).
      *
      * Requires holding an exclusive lock on the collection.
@@ -124,19 +138,17 @@ public:
     StatusWith<std::vector<BSONObj>> init(
         OperationContext* opCtx,
         CollectionWriter& collection,
-        const std::vector<BSONObj>& specs,
+        const std::vector<IndexBuildInfo>& indexes,
         OnInitFn onInit,
-        InitMode initMode = InitMode::SteadyState,
-        const boost::optional<ResumeIndexInfo>& resumeInfo = boost::none);
-    StatusWith<std::vector<BSONObj>> init(OperationContext* opCtx,
-                                          CollectionWriter& collection,
-                                          const BSONObj& spec,
-                                          OnInitFn onInit);
+        InitMode initMode,
+        const boost::optional<ResumeIndexInfo>& resumeInfo,
+        bool generateTableWrites,
+        boost::optional<size_t> maxMemoryUsageBytes = boost::none);
     /**
      * Not all index initializations need an OnInitFn, in particular index builds that do not need
      * to timestamp catalog writes. This is a no-op.
      */
-    static OnInitFn kNoopOnInitFn;
+    static const inline OnInitFn kNoopOnInitFn = nullptr;
 
     /**
      * Returns an OnInit function for initialization when this index build should be timestamped.
@@ -160,7 +172,7 @@ public:
      */
     Status insertAllDocumentsInCollection(
         OperationContext* opCtx,
-        const CollectionPtr& collection,
+        const NamespaceStringOrUUID& nssOrUUID,
         const boost::optional<RecordId>& resumeAfterRecordId = boost::none);
 
     /**
@@ -195,9 +207,9 @@ public:
      *
      * Should not be called inside of a WriteUnitOfWork.
      */
-    Status dumpInsertsFromBulk(OperationContext* opCtx, const CollectionPtr& collection);
+    Status dumpInsertsFromBulk(OperationContext* opCtx, const CollectionAcquisition& collection);
     Status dumpInsertsFromBulk(OperationContext* opCtx,
-                               const CollectionPtr& collection,
+                               const CollectionAcquisition& collection,
                                const IndexAccessMethod::RecordIdHandlerFn& onDuplicateRecord);
     /**
      * For background indexes using an IndexBuildInterceptor to capture inserts during a build,
@@ -206,8 +218,8 @@ public:
      * before calling commit(), stop writes on the collection by holding a S or X while calling this
      * method.
      *
-     * When 'readSource' is not kUnset, perform the drain by reading at the timestamp described by
-     * the ReadSource.
+     * When 'readSource' is not kNoTimestamp, perform the drain by reading at the timestamp
+     * described by the ReadSource.
      *
      * Must not be in a WriteUnitOfWork.
      */
@@ -254,8 +266,9 @@ public:
      *
      * Requires holding an exclusive lock on the collection.
      */
-    using OnCommitFn = std::function<void()>;
-    using OnCreateEachFn = std::function<void(const BSONObj& spec)>;
+    using OnCommitFn = function_ref<void()>;
+    using OnCreateEachFn = function_ref<void(
+        const BSONObj& spec, IndexCatalogEntry& entry, boost::optional<MultikeyPaths>&& multikey)>;
     Status commit(OperationContext* opCtx,
                   Collection* collection,
                   OnCreateEachFn onCreateEach,
@@ -308,7 +321,7 @@ public:
      */
     bool isBackgroundBuilding() const;
 
-    void setIndexBuildMethod(IndexBuildMethod indexBuildMethod);
+    void setIndexBuildMethod(IndexBuildMethodEnum indexBuildMethod);
 
     /**
      * Appends the current state information of the index build to the builder.
@@ -353,7 +366,7 @@ private:
      * the external sorter.
      */
     void _doCollectionScan(OperationContext* opCtx,
-                           const CollectionPtr& collection,
+                           const CollectionAcquisition& collection,
                            const boost::optional<RecordId>& resumeAfterRecordId,
                            ProgressMeterHolder* progress);
 
@@ -362,7 +375,7 @@ private:
 
     std::vector<IndexToBuild> _indexes;
 
-    IndexBuildMethod _method = IndexBuildMethod::kHybrid;
+    IndexBuildMethodEnum _method = IndexBuildMethodEnum::kHybrid;
 
     bool _ignoreUnique = false;
 

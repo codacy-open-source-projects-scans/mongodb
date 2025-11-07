@@ -27,14 +27,7 @@
  *    it in the license file.
  */
 
-#include <boost/none.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <tuple>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/plan_executor_sbe.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
@@ -42,29 +35,20 @@
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/bson/oid.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/sbe/values/bson.h"
-#include "mongo/db/feature_flag.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/query/plan_executor_sbe.h"
 #include "mongo/db/query/plan_explainer_factory.h"
 #include "mongo/db/query/plan_insert_listener.h"
-#include "mongo/db/query/plan_ranker.h"
 #include "mongo/db/query/plan_yield_policy_remote_cursor.h"
 #include "mongo/db/query/sbe_plan_ranker.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/server_options.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/platform/decimal128.h"
-#include "mongo/s/resharding/resharding_feature_flag_gen.h"
 #include "mongo/s/resharding/resume_token_gen.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/namespace_string_util.h"
@@ -72,6 +56,14 @@
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <tuple>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -90,7 +82,8 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
                                  boost::optional<size_t> cachedPlanHash,
                                  std::unique_ptr<RemoteCursorMap> remoteCursors,
                                  std::unique_ptr<RemoteExplainVector> remoteExplains,
-                                 std::unique_ptr<MultiPlanStage> classicRuntimePlannerStage)
+                                 std::unique_ptr<MultiPlanStage> classicRuntimePlannerStage,
+                                 const MultipleCollectionAccessor& mca)
     : _state{isOpen ? State::kOpened : State::kClosed},
       _opCtx(opCtx),
       _nss(std::move(nss)),
@@ -105,7 +98,7 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
       _remoteExplains(std::move(remoteExplains)) {
     invariant(!_nss.isEmpty());
     invariant(_root);
-
+    _root->attachCollectionAcquisition(mca);
     auto& env = _rootData.env;
     if (auto slot = _rootData.staticData->resultSlot) {
         _result = _root->getAccessor(env.ctx, *slot);
@@ -117,20 +110,11 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
         uassert(4822866, "Query does not have recordId slot.", _resultRecordId);
     }
 
-    if (_rootData.staticData->shouldTrackLatestOplogTimestamp) {
-        _oplogTs = env->getAccessor(env->getSlot("oplogTs"_sd));
-    }
-
-    if (_rootData.staticData->shouldUseTailableScan) {
-        _resumeRecordIdSlot = env->getSlot("resumeRecordId"_sd);
-    }
     _minRecordIdSlot = env->getSlotIfExists("minRecordId"_sd);
     _maxRecordIdSlot = env->getSlotIfExists("maxRecordId"_sd);
 
     if (_cq) {
-        initializeAccessors(_metadataAccessors,
-                            _rootData.staticData->metadataSlots,
-                            _cq->remainingSearchMetadata());
+        initializeAccessors(_metadataAccessors, _rootData.staticData->metadataSlots);
     }
 
     if (!_stash.empty()) {
@@ -155,13 +139,17 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
         classicRuntimePlannerStage.reset();
     }
 
+    // '_solution' can be a nullptr. The following stunt using the "querySolutionPtr" variable is
+    // necessary to pacify a Coverity check.
+    const QuerySolution* querySolutionPtr = nullptr;
     if (_solution) {
         _secondaryNssVector = _solution->getAllSecondaryNamespaces(_nss);
+        querySolutionPtr = _solution.get();
     }
 
     _planExplainer = plan_explainer_factory::make(_root.get(),
                                                   &_rootData,
-                                                  _solution.get(),
+                                                  querySolutionPtr,  ///< May be a nullptr.
                                                   isMultiPlan,
                                                   isCachedCandidate,
                                                   cachedPlanHash,
@@ -181,52 +169,15 @@ PlanExecutorSBE::PlanExecutorSBE(OperationContext* opCtx,
 }
 
 void PlanExecutorSBE::saveState() {
-    if (_isSaveRecoveryUnitAcrossCommandsEnabled) {
-        _root->saveState(false /* NOT relinquishing cursor */);
-
-        // Put the RU into 'kCommit' mode so that subsequent calls to abandonSnapshot() keep
-        // cursors positioned. This ensures that no pointers into memory owned by the storage
-        // engine held by the SBE PlanStage tree become invalid while the executor is in a saved
-        // state.
-        shard_role_details::getRecoveryUnit(_opCtx)->setAbandonSnapshotMode(
-            RecoveryUnit::AbandonSnapshotMode::kCommit);
-        shard_role_details::getRecoveryUnit(_opCtx)->abandonSnapshot();
-    } else {
-        // Discard the slots as we won't access them before subsequent PlanExecutorSBE::getNext()
-        // method call.
-        const bool relinquishCursor = true;
-        const bool discardSlotState = true;
-        _root->saveState(relinquishCursor, discardSlotState);
-    }
-
-    if (_yieldPolicy && !_yieldPolicy->usesCollectionAcquisitions()) {
-        _yieldPolicy->setYieldable(nullptr);
-    }
+    // Discard the slots as we won't access them before subsequent PlanExecutorSBE::getNext()
+    // method call.
+    const bool discardSlotState = true;
+    _root->saveState(discardSlotState);
     _lastGetNext = BSONObj();
 }
 
 void PlanExecutorSBE::restoreState(const RestoreContext& context) {
-    if (_yieldPolicy && !_yieldPolicy->usesCollectionAcquisitions()) {
-        _yieldPolicy->setYieldable(context.collection());
-    }
-
-    if (_remoteCursors) {
-        for (auto& [_, cursor] : *_remoteCursors) {
-            cursor->setYieldable(context.collection());
-        }
-    }
-
-    if (_isSaveRecoveryUnitAcrossCommandsEnabled) {
-        _root->restoreState(false /* NOT relinquishing cursor */);
-
-        // Put the RU back into 'kAbort' mode. Since the executor is now in a restored state, calls
-        // to doAbandonSnapshot() only happen if the query has failed and the executor will not be
-        // used again. In this case, we do not rely on the guarantees provided by 'kCommit' mode.
-        shard_role_details::getRecoveryUnit(_opCtx)->setAbandonSnapshotMode(
-            RecoveryUnit::AbandonSnapshotMode::kAbort);
-    } else {
-        _root->restoreState(true /* relinquish cursor */);
-    }
+    _root->restoreState();
 }
 
 void PlanExecutorSBE::detachFromOperationContext() {
@@ -264,17 +215,12 @@ void PlanExecutorSBE::stashResult(const BSONObj& obj) {
     _stash.push_front({obj.getOwned(), boost::none});
 }
 
-PlanExecutor::ExecState PlanExecutorSBE::getNextDocument(Document* objOut, RecordId* dlOut) {
+PlanExecutor::ExecState PlanExecutorSBE::getNextDocument(Document& objOut) {
     invariant(!_isDisposed);
 
     checkFailPointPlanExecAlwaysFails();
 
-    Document obj;
-    auto result = getNextImpl(&obj, dlOut);
-    if (objOut && result == PlanExecutor::ExecState::ADVANCED) {
-        *objOut = std::move(obj);
-    }
-    return result;
+    return getNextImpl(&objOut, nullptr);
 }
 
 PlanExecutor::ExecState PlanExecutorSBE::getNext(BSONObj* out, RecordId* dlOut) {
@@ -439,61 +385,11 @@ template PlanExecutor::ExecState PlanExecutorSBE::getNextImpl<Document>(Document
                                                                         RecordId* dlOut);
 
 Timestamp PlanExecutorSBE::getLatestOplogTimestamp() const {
-    if (_rootData.staticData->shouldTrackLatestOplogTimestamp) {
-        tassert(5567201,
-                "The '_oplogTs' accessor should be populated when "
-                "'shouldTrackLatestOplogTimestamp' is true",
-                _oplogTs);
-
-        auto [tag, val] = _oplogTs->getViewOfValue();
-        if (tag != sbe::value::TypeTags::Nothing) {
-            const auto msgTag = tag;
-            uassert(4822868,
-                    str::stream() << "Collection scan was asked to track latest operation time, "
-                                     "but found a result without a valid 'ts' field: "
-                                  << msgTag,
-                    tag == sbe::value::TypeTags::Timestamp);
-            return Timestamp{sbe::value::bitcastTo<uint64_t>(val)};
-        }
-    }
     return {};
 }
 
 BSONObj PlanExecutorSBE::getPostBatchResumeToken() const {
-    if (_rootData.staticData->shouldTrackResumeToken) {
-        invariant(_resultRecordId);
-
-        auto [tag, val] = _resultRecordId->getViewOfValue();
-        if (tag != sbe::value::TypeTags::Nothing) {
-            const auto msgTag = tag;
-            uassert(4822869,
-                    str::stream() << "Collection scan was asked to track resume token, "
-                                     "but found a result without a valid RecordId: "
-                                  << msgTag,
-                    tag == sbe::value::TypeTags::RecordId);
-            BSONObjBuilder builder;
-            sbe::value::getRecordIdView(val)->serializeToken("$recordId", &builder);
-            if (resharding::gFeatureFlagReshardingImprovements.isEnabled(
-                    serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-                auto initialSyncId =
-                    repl::ReplicationCoordinator::get(_opCtx)->getInitialSyncId(_opCtx);
-                if (initialSyncId) {
-                    initialSyncId.value().appendToBuilder(&builder, "$initialSyncId");
-                }
-            }
-            return builder.obj();
-        }
-    }
-
-    if (_rootData.staticData->shouldTrackLatestOplogTimestamp) {
-        return ResumeTokenOplogTimestamp{getLatestOplogTimestamp()}.toBSON();
-    }
-
     return {};
-}
-
-bool PlanExecutorSBE::usesCollectionAcquisitions() const {
-    return _yieldPolicy && _yieldPolicy->usesCollectionAcquisitions();
 }
 
 namespace {
@@ -613,25 +509,20 @@ Document convertToDocument(const sbe::value::Object& obj) {
 }  // namespace
 
 void PlanExecutorSBE::initializeAccessors(
-    MetaDataAccessor& accessor,
-    const stage_builder::PlanStageMetadataSlots& metadataSlots,
-    const QueryMetadataBitSet& metadataBit) {
-    bool needsMerge = _cq->getExpCtxRaw()->getNeedsMerge();
-
-    if (auto slot = metadataSlots.searchScoreSlot;
-        slot && (needsMerge || metadataBit.test(DocumentMetadataFields::MetaType::kSearchScore))) {
+    MetaDataAccessor& accessor, const stage_builder::PlanStageMetadataSlots& metadataSlots) {
+    // If Search in SBE is used, we should only initialize these metadata slots if the metadata type
+    // is requested by the pipeline. However, since Search in SBE is currently not in use,
+    // SERVER-99589 changed it to always initialize these slots, for simplicity of a refactor.
+    if (auto slot = metadataSlots.searchScoreSlot) {
         accessor.metadataSearchScore = _root->getAccessor(_rootData.env.ctx, *slot);
     }
-    if (auto slot = metadataSlots.searchHighlightsSlot; slot &&
-        (needsMerge || metadataBit.test(DocumentMetadataFields::MetaType::kSearchHighlights))) {
+    if (auto slot = metadataSlots.searchHighlightsSlot) {
         accessor.metadataSearchHighlights = _root->getAccessor(_rootData.env.ctx, *slot);
     }
-    if (auto slot = metadataSlots.searchDetailsSlot; slot &&
-        (needsMerge || metadataBit.test(DocumentMetadataFields::MetaType::kSearchScoreDetails))) {
+    if (auto slot = metadataSlots.searchDetailsSlot) {
         accessor.metadataSearchDetails = _root->getAccessor(_rootData.env.ctx, *slot);
     }
-    if (auto slot = metadataSlots.searchSortValuesSlot; slot &&
-        (needsMerge || metadataBit.test(DocumentMetadataFields::MetaType::kSearchSortValues))) {
+    if (auto slot = metadataSlots.searchSortValuesSlot) {
         accessor.metadataSearchSortValues = _root->getAccessor(_rootData.env.ctx, *slot);
     }
     if (auto slot = metadataSlots.sortKeySlot) {
@@ -648,8 +539,7 @@ void PlanExecutorSBE::initializeAccessors(
             }
         }
     }
-    if (auto slot = metadataSlots.searchSequenceToken; slot &&
-        (needsMerge || metadataBit.test(DocumentMetadataFields::MetaType::kSearchSequenceToken))) {
+    if (auto slot = metadataSlots.searchSequenceToken) {
         accessor.metadataSearchSequenceToken = _root->getAccessor(_rootData.env.ctx, *slot);
     }
 }

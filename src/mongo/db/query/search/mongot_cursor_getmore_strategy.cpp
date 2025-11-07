@@ -62,7 +62,7 @@ BSONObj MongotTaskExecutorCursorGetMoreStrategy::createGetMoreRequest(
     const NamespaceString& nss,
     long long prevBatchNumReceived,
     long long totalNumReceived) {
-    GetMoreCommandRequest getMoreRequest(cursorId, nss.coll().toString());
+    GetMoreCommandRequest getMoreRequest(cursorId, std::string{nss.coll()});
 
     boost::optional<long long> docsNeeded = _getNextDocsRequested(totalNumReceived);
 
@@ -110,7 +110,7 @@ long long MongotTaskExecutorCursorGetMoreStrategy::_getNextBatchSize(
         // mongod to satisfy the query. In this next batch, we use the number of docs we still need,
         // and the success rate of docs previously found to infer a best guess of the least number
         // of additional docs we need from mongot to complete the search query.
-        if (_searchIdLookupMetrics->getDocsReturnedByIdLookup() == 0) {
+        if (_searchIdLookupMetrics->getIdLookupSuccessRate() == 0) {
             // Very unlikely case where no docs at all were found on mongod. We need to handle this
             // so we don't divide by zero.
             _currentBatchSize = maxNextBatchSize;

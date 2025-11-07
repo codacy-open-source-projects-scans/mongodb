@@ -29,12 +29,13 @@
 
 #pragma once
 
-#include <boost/intrusive_ptr.hpp>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/pipeline/expression.h"
+
+#include <string>
+
+#include <boost/intrusive_ptr.hpp>
 
 namespace mongo {
 class BSONObjBuilder;
@@ -59,7 +60,7 @@ class BSONElement;
 class NameExpression {
 public:
     NameExpression() = default;
-    NameExpression(const std::string& name) : NameExpression(BSON("" << name).firstElement()){};
+    NameExpression(const std::string& name) : NameExpression(BSON("" << name).firstElement()) {};
     NameExpression(const BSONElement& nameElem);
     NameExpression(const NameExpression&) = default;
     NameExpression(NameExpression&& other)
@@ -99,8 +100,8 @@ public:
      * Returns the string literal if the name expression is a string literal.
      */
     std::string getLiteral() const {
-        using namespace fmt::literals;
-        tassert(8117103, "Non string literal name expression: {}"_format(toString()), _isLiteral);
+        tassert(
+            8117103, fmt::format("Non string literal name expression: {}", toString()), _isLiteral);
         return _name.getElement().str();
     }
 

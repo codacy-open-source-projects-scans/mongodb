@@ -29,29 +29,14 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/base/error_codes.h"
-#include "mongo/db/generic_argument_util.h"
-#include "mongo/db/session/logical_session_id_gen.h"
-#include "mongo/db/write_concern_options.h"
-#include "mongo/executor/async_rpc.h"
-#include "mongo/executor/async_rpc_error_info.h"
-#include "mongo/executor/async_rpc_retry_policy.h"
-#include "mongo/executor/async_rpc_targeter.h"
-#include "mongo/executor/remote_command_response.h"
-#include "mongo/executor/task_executor.h"
-#include "mongo/idl/generic_argument_gen.h"
-#include "mongo/logv2/log.h"
-#include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/async_rpc_shard_targeter.h"
-#include "mongo/s/transaction_router.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/cancellation.h"
+#include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_util.h"
-#include "mongo/util/net/hostandport.h"
-#include "mongo/util/time_support.h"
+
+#include <memory>
 
 namespace mongo::async_rpc {
 
@@ -71,10 +56,10 @@ Future<ResultType> processMultipleFutures(std::vector<ExecutorFuture<FutureType>
         std::move(futures[i])
             .unsafeToInlineFuture()  // always process the result, even if an executor is rejecting
                                      // work
-            .getAsync(
-                [index = i, sharedPromise, processStatusWith](StatusOrStatusWith<FutureType> sw) {
-                    processStatusWith(sw, sharedPromise, index);
-                });
+            .getAsync([index = i, sharedPromise, processStatusWith](
+                          StatusOrStatusWith<FutureType> sw) mutable {
+                processStatusWith(sw, sharedPromise, index);
+            });
     }
     return std::move(resultFuture);
 }
@@ -106,54 +91,51 @@ Future<ResultType> whenAnyThat(std::vector<ExecutorFuture<ResultType>>&& futures
     return processMultipleFutures<ResultType>(std::move(futures), std::move(processSW));
 }
 
+void logErrorDetails(int responsesLeft, Status errorStatus);
+
 /**
- * Given a vector of input Futures and a processResponse callable, processes the responses
- * from each of the futures and pushes the results onto a vector. Cancels early on error
- * status, but waits until other futures resolve. Caller must manually create a
- * CancellationSource wrapping the sendCommand cancellation token.
+ * Given a vector of input Futures and a processResponse callable, processes the responses from each
+ * of the futures and pushes the results onto a vector. Does not handle cancellation itself and
+ * relies on the caller to do so if needed. If the processResponse callable throws an exception, the
+ * returned future will fail with the error status.
  */
 template <typename SingleResult, typename FutureType, typename ProcessResponseCallable>
-Future<std::vector<SingleResult>> getAllResponsesOrFirstErrorWithCancellation(
-    std::vector<ExecutorFuture<FutureType>>&& futures,
-    CancellationSource cancelSource,
-    ProcessResponseCallable&& processResponse) {
+Future<std::vector<SingleResult>> getAllResponses(std::vector<ExecutorFuture<FutureType>>&& futures,
+                                                  ProcessResponseCallable&& processResponse) {
 
     struct SharedUtil {
-        SharedUtil(int responsesLeft, CancellationSource cancelSource)
-            : responsesLeft(responsesLeft), source(cancelSource) {}
+        SharedUtil(int responsesLeft) : responsesLeft(responsesLeft) {}
         stdx::mutex mutex;
         int responsesLeft;
         StatusWith<std::vector<SingleResult>> results =
             StatusWith<std::vector<SingleResult>>(std::vector<SingleResult>());
-        CancellationSource source;
     };
 
-    auto sharedUtil = std::make_shared<SharedUtil>(futures.size(), cancelSource);
+    auto sharedUtil = std::make_shared<SharedUtil>(futures.size());
     auto processWrapper = [sharedUtil, processResponse](
                               StatusOrStatusWith<FutureType> sw,
                               std::shared_ptr<Promise<std::vector<SingleResult>>> sharedPromise,
-                              size_t index) {
+                              size_t index) mutable {
         if (!sw.isOK()) {
-            sharedUtil->source.cancel();
+            // TODO(SERVER-98556): Debug statement for the purpose of helping with diagnosing BFs.
             stdx::lock_guard<stdx::mutex> lk(sharedUtil->mutex);
-            if (sharedUtil->results.getStatus() == Status::OK()) {
-                sharedUtil->results = sw.getStatus();
-            }
-            // Need to wait for all responses to protect against pending work after promise is
-            // fulfilled.
-            if (--sharedUtil->responsesLeft == 0) {
-                sharedPromise->setFrom(sharedUtil->results);
-            }
-            return;
+            logErrorDetails(sharedUtil->responsesLeft, sw.getStatus());
         }
 
-        auto reply = sw.getValue();
-        auto response = processResponse(reply, index);
+        try {
+            auto response = processResponse(sw, index);
+            stdx::lock_guard<stdx::mutex> lk(sharedUtil->mutex);
+            if (sharedUtil->results.getStatus().isOK()) {
+                sharedUtil->results.getValue().push_back(response);
+            }
+        } catch (const DBException& ex) {
+            stdx::lock_guard<stdx::mutex> lk(sharedUtil->mutex);
+            if (sharedUtil->results.getStatus().isOK()) {
+                sharedUtil->results = ex.toStatus();
+            }
+        }
 
         stdx::lock_guard<stdx::mutex> lk(sharedUtil->mutex);
-        if (sharedUtil->results.getStatus() == Status::OK()) {
-            sharedUtil->results.getValue().push_back(response);
-        }
         if (--sharedUtil->responsesLeft == 0) {
             sharedPromise->setFrom(sharedUtil->results);
         }
@@ -161,6 +143,32 @@ Future<std::vector<SingleResult>> getAllResponsesOrFirstErrorWithCancellation(
 
     return processMultipleFutures<std::vector<SingleResult>>(std::move(futures),
                                                              std::move(processWrapper));
+}
+
+/**
+ * Given a vector of input Futures and a processResponse callable, processes the responses
+ * from each of the futures and pushes the results onto a vector. In case of an error response from
+ * one of the futures or an exception thrown by the processResponse handler, the provided
+ * cancellation source will be cancelled and the returned future will fail with the error status. It
+ * will still wait for all other futures to resolve before returning. Caller must manually create a
+ * CancellationSource wrapping the sendCommand cancellation token.
+ */
+template <typename SingleResult, typename FutureType, typename ProcessResponseCallable>
+Future<std::vector<SingleResult>> getAllResponsesOrFirstErrorWithCancellation(
+    std::vector<ExecutorFuture<FutureType>>&& futures,
+    CancellationSource cancelSource,
+    ProcessResponseCallable&& processResponse) {
+    return getAllResponses<SingleResult>(
+        std::move(futures),
+        [cancelSource, processResponse = std::move(processResponse)](
+            StatusOrStatusWith<FutureType> swr, size_t index) mutable -> SingleResult {
+            try {
+                return processResponse(uassertStatusOK(swr), index);
+            } catch (const DBException&) {
+                cancelSource.cancel();
+                throw;
+            }
+        });
 }
 
 }  // namespace mongo::async_rpc

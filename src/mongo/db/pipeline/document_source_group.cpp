@@ -29,19 +29,10 @@
 
 #include "mongo/db/pipeline/document_source_group.h"
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/inlined_vector.h>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <fmt/format.h>
-#include <utility>
-
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
 #include "mongo/db/pipeline/accumulator.h"
-#include "mongo/db/pipeline/accumulator_js_reduce.h"
 #include "mongo/db/pipeline/accumulator_multi.h"
 #include "mongo/db/pipeline/document_source_add_fields.h"
 #include "mongo/db/pipeline/document_source_match.h"
@@ -51,8 +42,16 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/query/allowed_contexts.h"
-#include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
+
+#include <utility>
+
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/inlined_vector.h>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -62,21 +61,24 @@ REGISTER_DOCUMENT_SOURCE(group,
                          LiteParsedDocumentSourceDefault::parse,
                          DocumentSourceGroup::createFromBson,
                          AllowedWithApiStrict::kAlways);
+ALLOCATE_DOCUMENT_SOURCE_ID(group, DocumentSourceGroup::id)
 
 const char* DocumentSourceGroup::getSourceName() const {
-    return kStageName.rawData();
+    return kStageName.data();
 }
 
 boost::intrusive_ptr<DocumentSourceGroup> DocumentSourceGroup::create(
     const boost::intrusive_ptr<ExpressionContext>& expCtx,
     const boost::intrusive_ptr<Expression>& groupByExpression,
     std::vector<AccumulationStatement> accumulationStatements,
+    bool willBeMerged,
     boost::optional<int64_t> maxMemoryUsageBytes) {
     boost::intrusive_ptr<DocumentSourceGroup> groupStage =
         new DocumentSourceGroup(expCtx, maxMemoryUsageBytes);
-    groupStage->_groupProcessor.setIdExpression(groupByExpression);
+    groupStage->_groupProcessor->setIdExpression(groupByExpression);
+    groupStage->_groupProcessor->setWillBeMerged(willBeMerged);
     for (auto&& statement : accumulationStatements) {
-        groupStage->_groupProcessor.addAccumulationStatement(statement);
+        groupStage->_groupProcessor->addAccumulationStatement(statement);
     }
 
     return groupStage;
@@ -84,15 +86,15 @@ boost::intrusive_ptr<DocumentSourceGroup> DocumentSourceGroup::create(
 
 DocumentSourceGroup::DocumentSourceGroup(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                          boost::optional<int64_t> maxMemoryUsageBytes)
-    : DocumentSourceGroupBase(kStageName, expCtx, maxMemoryUsageBytes), _groupsReady(false) {}
+    : DocumentSourceGroupBase(kStageName, expCtx, maxMemoryUsageBytes) {}
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceGroup::createFromBson(
     BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
     return createFromBsonWithMaxMemoryUsage(std::move(elem), expCtx, boost::none);
 }
 
-Pipeline::SourceContainer::iterator DocumentSourceGroup::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator DocumentSourceGroup::doOptimizeAt(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     invariant(*itr == this);
 
     if (pushDotRenamedMatch(itr, container)) {
@@ -110,8 +112,8 @@ Pipeline::SourceContainer::iterator DocumentSourceGroup::doOptimizeAt(
     return std::next(itr);
 }
 
-bool DocumentSourceGroup::pushDotRenamedMatch(Pipeline::SourceContainer::iterator itr,
-                                              Pipeline::SourceContainer* container) {
+bool DocumentSourceGroup::pushDotRenamedMatch(DocumentSourceContainer::iterator itr,
+                                              DocumentSourceContainer* container) {
     if (std::next(itr) == container->end() || std::next(std::next(itr)) == container->end()) {
         return false;
     }
@@ -144,7 +146,7 @@ bool DocumentSourceGroup::pushDotRenamedMatch(Pipeline::SourceContainer::iterato
 
     // Perform all changes on a copy of the match source.
     boost::intrusive_ptr<DocumentSource> currentMatchCopyDocument =
-        prospectiveMatch->clone(prospectiveMatch->getContext());
+        prospectiveMatch->clone(prospectiveMatch->getExpCtx());
 
     auto currentMatchCopyDocumentMatch =
         dynamic_cast<DocumentSourceMatch*>(currentMatchCopyDocument.get());
@@ -215,10 +217,9 @@ AccumulationStatement makeAccStmtForTopBottom(boost::intrusive_ptr<ExpressionCon
 }
 }  // namespace
 
-bool DocumentSourceGroup::tryToAbsorbTopKSort(
-    DocumentSourceSort* prospectiveSort,
-    Pipeline::SourceContainer::iterator prospectiveSortItr,
-    Pipeline::SourceContainer* container) {
+bool DocumentSourceGroup::tryToAbsorbTopKSort(DocumentSourceSort* prospectiveSort,
+                                              DocumentSourceContainer::iterator prospectiveSortItr,
+                                              DocumentSourceContainer* container) {
     invariant(prospectiveSort);
 
     // If the $sort has a limit, we cannot absorb it into the $group since we know the selected
@@ -237,7 +238,7 @@ bool DocumentSourceGroup::tryToAbsorbTopKSort(
 
     // Collects all $first and $last accumulators. Does not support either $firstN or $lastN
     // accumulators yet.
-    auto& accumulators = _groupProcessor.getMutableAccumulationStatements();
+    auto& accumulators = _groupProcessor->getMutableAccumulationStatements();
     std::vector<size_t> firstLastAccumulatorIndices;
     for (size_t i = 0; i < accumulators.size(); ++i) {
         if (accumulators[i].expr.name == AccumulatorFirst::kName ||
@@ -259,10 +260,10 @@ bool DocumentSourceGroup::tryToAbsorbTopKSort(
     for (auto i : firstLastAccumulatorIndices) {
         if (accumulators[i].expr.name == AccumulatorFirst::kName) {
             accumulators[i] = makeAccStmtForTopBottom<TopBottomSense::kTop>(
-                pExpCtx, sortPattern, accumulators[i].fieldName, accumulators[i].expr.argument);
+                getExpCtx(), sortPattern, accumulators[i].fieldName, accumulators[i].expr.argument);
         } else if (accumulators[i].expr.name == AccumulatorLast::kName) {
             accumulators[i] = makeAccStmtForTopBottom<TopBottomSense::kBottom>(
-                pExpCtx, sortPattern, accumulators[i].fieldName, accumulators[i].expr.argument);
+                getExpCtx(), sortPattern, accumulators[i].fieldName, accumulators[i].expr.argument);
         }
     }
 
@@ -346,7 +347,6 @@ constexpr StringData getMergeFieldNameForAcc() {
 };
 
 boost::intrusive_ptr<Expression> getOutputArgExpr(boost::intrusive_ptr<Expression> argExpr) {
-    using namespace fmt::literals;
     auto exprObj = dynamic_cast<ExpressionObject*>(argExpr.get());
     tassert(8808700, "Expected object-type expression", exprObj);
     auto&& exprs = exprObj->getChildExpressions();
@@ -354,7 +354,7 @@ boost::intrusive_ptr<Expression> getOutputArgExpr(boost::intrusive_ptr<Expressio
         return expr.first == AccumulatorN::kFieldNameOutput;
     });
     tassert(8808701,
-            "'{}' field not found"_format(AccumulatorN::kFieldNameOutput),
+            fmt::format("'{}' field not found", AccumulatorN::kFieldNameOutput),
             outputArgExprIt != exprs.end());
     return outputArgExprIt->second;
 };
@@ -415,10 +415,9 @@ AccumulationStatement mergeAccStmtFor(boost::intrusive_ptr<ExpressionContext> pE
 
                     // Recomputes the rewritten nested accumulator fields to the user-requested
                     // fields.
-                    using namespace fmt::literals;
                     prjArgsBuilder.append(
                         accStmts[accIdx].fieldName,
-                        "${}.{}"_format(mergeFieldName, accStmts[accIdx].fieldName));
+                        fmt::format("${}.{}", mergeFieldName, accStmts[accIdx].fieldName));
                 }
                 outputBuilder.doneFast();
             }
@@ -510,12 +509,12 @@ AccConversionFunction createAccConversionFunction(boost::intrusive_ptr<Expressio
 }
 }  // namespace
 
-bool DocumentSourceGroup::tryToGenerateCommonSortKey(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) {
+bool DocumentSourceGroup::tryToGenerateCommonSortKey(DocumentSourceContainer::iterator itr,
+                                                     DocumentSourceContainer* container) {
     auto& accStmts = getMutableAccumulationStatements();
 
     TopBottomAccKeyToAccIndicesMap topBottomAccKeyToAccIndicesMap(
-        0, Hasher(pExpCtx->getValueComparator()), EqualTo(pExpCtx->getValueComparator()));
+        0, Hasher(getExpCtx()->getValueComparator()), EqualTo(getExpCtx()->getValueComparator()));
     std::vector<size_t> ineligibleAccIndices;
     bool foundDupSortPattern = false;
     for (size_t accIdx = 0; accIdx < accStmts.size(); ++accIdx) {
@@ -578,16 +577,16 @@ bool DocumentSourceGroup::tryToGenerateCommonSortKey(Pipeline::SourceContainer::
             switch (key.accType) {
                 case AccumulatorN::AccumulatorType::kTop:
                     return mergeAccStmtFor<TopBottomSense::kTop, true>(
-                        pExpCtx, accStmts, key.n, key.sortPattern, accIndices, prjArgsBuilder);
+                        getExpCtx(), accStmts, key.n, key.sortPattern, accIndices, prjArgsBuilder);
                 case AccumulatorN::AccumulatorType::kTopN:
                     return mergeAccStmtFor<TopBottomSense::kTop, false>(
-                        pExpCtx, accStmts, key.n, key.sortPattern, accIndices, prjArgsBuilder);
+                        getExpCtx(), accStmts, key.n, key.sortPattern, accIndices, prjArgsBuilder);
                 case AccumulatorN::AccumulatorType::kBottom:
                     return mergeAccStmtFor<TopBottomSense::kBottom, true>(
-                        pExpCtx, accStmts, key.n, key.sortPattern, accIndices, prjArgsBuilder);
+                        getExpCtx(), accStmts, key.n, key.sortPattern, accIndices, prjArgsBuilder);
                 case AccumulatorN::AccumulatorType::kBottomN:
                     return mergeAccStmtFor<TopBottomSense::kBottom, false>(
-                        pExpCtx, accStmts, key.n, key.sortPattern, accIndices, prjArgsBuilder);
+                        getExpCtx(), accStmts, key.n, key.sortPattern, accIndices, prjArgsBuilder);
                 default:
                     MONGO_UNREACHABLE;
             }
@@ -598,14 +597,14 @@ bool DocumentSourceGroup::tryToGenerateCommonSortKey(Pipeline::SourceContainer::
     accStmts = std::move(newAccStmts);
     auto prjStageSpec = prjArgsBuilder.done();
     auto prjStage = DocumentSourceProject::create(
-        std::move(prjStageSpec), pExpCtx, DocumentSourceProject::kStageName);
+        std::move(prjStageSpec), getExpCtx(), DocumentSourceProject::kStageName);
     container->insert(std::next(itr), prjStage);
 
     return true;
 }
 
-bool DocumentSourceGroup::tryToOptimizeAccN(Pipeline::SourceContainer::iterator itr,
-                                            Pipeline::SourceContainer* container) {
+bool DocumentSourceGroup::tryToOptimizeAccN(DocumentSourceContainer::iterator itr,
+                                            DocumentSourceContainer* container) {
     auto& accumulators = getMutableAccumulationStatements();
     if (accumulators.empty()) {
         return false;
@@ -669,7 +668,7 @@ bool DocumentSourceGroup::tryToOptimizeAccN(Pipeline::SourceContainer::iterator 
     // this does not add new fields, but merely overwrites the existing field(s). For example:
     // {$addFields: {myField: ["$myField"]}.
     const auto convertAccFunc =
-        createAccConversionFunction(pExpCtx, firstAccInfoItr->second.sense, sortPattern);
+        createAccConversionFunction(getExpCtx(), firstAccInfoItr->second.sense, sortPattern);
     BSONObjBuilder addFieldsArgsBuilder;
     for (auto& acc : accumulators) {
         // Non-multi accumulators (e.g. $top) don't need conversion.
@@ -686,7 +685,7 @@ bool DocumentSourceGroup::tryToOptimizeAccN(Pipeline::SourceContainer::iterator 
 
     auto addFieldsStageSpec = addFieldsArgsBuilder.done();
     auto addFieldsStage = DocumentSourceAddFields::create(
-        std::move(addFieldsStageSpec), pExpCtx, DocumentSourceAddFields::kStageName);
+        std::move(addFieldsStageSpec), getExpCtx(), DocumentSourceAddFields::kStageName);
     container->insert(std::next(itr), addFieldsStage);
 
     return true;
@@ -700,60 +699,6 @@ boost::intrusive_ptr<DocumentSource> DocumentSourceGroup::createFromBsonWithMaxM
         new DocumentSourceGroup(expCtx, maxMemoryUsageBytes));
     groupStage->initializeFromBson(elem);
     return groupStage;
-}
-
-DocumentSource::GetNextResult DocumentSourceGroup::doGetNext() {
-    if (!_groupsReady) {
-        auto initializationResult = performBlockingGroup();
-        if (initializationResult.isPaused()) {
-            return initializationResult;
-        }
-        invariant(initializationResult.isEOF());
-    }
-
-    auto result = _groupProcessor.getNext();
-    if (!result) {
-        dispose();
-        return GetNextResult::makeEOF();
-    }
-    return GetNextResult(std::move(*result));
-}
-
-DocumentSource::GetNextResult DocumentSourceGroup::performBlockingGroup() {
-    GetNextResult input = pSource->getNext();
-    return performBlockingGroupSelf(input);
-}
-
-// This separate NOINLINE function is used here to decrease stack utilization of
-// performBlockingGroup() and prevent stack overflows.
-MONGO_COMPILER_NOINLINE DocumentSource::GetNextResult DocumentSourceGroup::performBlockingGroupSelf(
-    GetNextResult input) {
-    _groupProcessor.setExecutionStarted();
-    // Barring any pausing, this loop exhausts 'pSource' and populates '_groups'.
-    for (; input.isAdvanced(); input = pSource->getNext()) {
-        // We release the result document here so that it does not outlive the end of this loop
-        // iteration. Not releasing could lead to an array copy when this group follows an unwind.
-        auto rootDocument = input.releaseDocument();
-        Value groupKey = _groupProcessor.computeGroupKey(rootDocument);
-        _groupProcessor.add(groupKey, rootDocument);
-    }
-
-    switch (input.getStatus()) {
-        case DocumentSource::GetNextResult::ReturnStatus::kAdvanced: {
-            MONGO_UNREACHABLE;  // We consumed all advances above.
-        }
-        case DocumentSource::GetNextResult::ReturnStatus::kPauseExecution: {
-            return input;  // Propagate pause.
-        }
-        case DocumentSource::GetNextResult::ReturnStatus::kEOF: {
-            _groupProcessor.readyGroups();
-            // This must happen last so that, unless control gets here, we will re-enter
-            // initialization after getting a GetNextResult::ResultState::kPauseExecution.
-            _groupsReady = true;
-            return input;
-        }
-    }
-    MONGO_UNREACHABLE;
 }
 
 }  // namespace mongo

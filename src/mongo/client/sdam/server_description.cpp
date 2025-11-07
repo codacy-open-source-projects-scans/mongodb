@@ -29,17 +29,6 @@
 
 #include "mongo/client/sdam/server_description.h"
 
-#include <algorithm>
-#include <boost/optional.hpp>
-#include <iterator>
-#include <set>
-#include <tuple>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -47,10 +36,19 @@
 #include "mongo/bson/oid.h"
 #include "mongo/client/sdam/sdam_datatypes.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+
+#include <algorithm>
+#include <iterator>
+#include <set>
+#include <tuple>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -87,22 +85,22 @@ ServerDescription::ServerDescription(ClockSource* clockSource,
         saveElectionId(response.getField("electionId"));
 
         auto lsTimeoutField = response.getField("logicalSessionTimeoutMinutes");
-        if (lsTimeoutField.type() == BSONType::NumberInt) {
+        if (lsTimeoutField.type() == BSONType::numberInt) {
             _logicalSessionTimeoutMinutes = lsTimeoutField.numberInt();
         }
 
         auto setVersionField = response.getField("setVersion");
-        if (setVersionField.type() == BSONType::NumberInt) {
+        if (setVersionField.type() == BSONType::numberInt) {
             _setVersion = response["setVersion"].numberInt();
         }
 
         auto setNameField = response.getField("setName");
-        if (setNameField.type() == BSONType::String) {
+        if (setNameField.type() == BSONType::string) {
             _setName = response["setName"].str();
         }
 
         auto primaryField = response.getField("primary");
-        if (primaryField.type() == BSONType::String) {
+        if (primaryField.type() == BSONType::string) {
             _primary = HostAndPort(response.getStringField("primary"));
         }
     } else {
@@ -142,7 +140,7 @@ void ServerDescription::saveHosts(const BSONObj response) {
 void ServerDescription::saveTags(BSONObj tagsObj) {
     const auto keys = tagsObj.getFieldNames<std::set<std::string>>();
     for (const auto& key : keys) {
-        _tags[key] = tagsObj.getStringField(key).toString();
+        _tags[key] = std::string{tagsObj.getStringField(key)};
     }
 }
 
@@ -155,7 +153,7 @@ void ServerDescription::appendBsonTags(BSONObjBuilder& builder) const {
 }
 
 void ServerDescription::saveElectionId(BSONElement electionId) {
-    if (electionId.type() == jstOID) {
+    if (electionId.type() == BSONType::oid) {
         _electionId = electionId.OID();
     }
 }
@@ -198,7 +196,7 @@ void ServerDescription::calculateRtt(const boost::optional<HelloRTT> currentRtt,
 
 void ServerDescription::saveLastWriteInfo(BSONObj lastWriteBson) {
     const auto lastWriteDateField = lastWriteBson.getField("lastWriteDate");
-    if (lastWriteDateField.type() == BSONType::Date) {
+    if (lastWriteDateField.type() == BSONType::date) {
         _lastWriteDate = lastWriteDateField.date();
     }
 

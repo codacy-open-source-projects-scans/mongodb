@@ -27,35 +27,35 @@
  *    it in the license file.
  */
 
-#include <utility>
-
+#include "mongo/s/multi_statement_transaction_requests_sender.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/db/baton.h"
+#include "mongo/db/local_catalog/shard_role_api/resource_yielders.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/executor/remote_command_response.h"
-#include "mongo/s/multi_statement_transaction_requests_sender.h"
-#include "mongo/s/resource_yielders.h"
 #include "mongo/s/transaction_router.h"
-#include "mongo/s/transaction_router_resource_yielder.h"
-#include "mongo/util/assert_util_core.h"
-#include "mongo/util/database_name_util.h"
+#include "mongo/util/assert_util.h"
+
+#include <utility>
 
 namespace mongo {
 
 namespace transaction_request_sender_details {
 namespace {
-void processReplyMetadata(OperationContext* opCtx,
-                          const ShardId& shardId,
-                          const BSONObj& responseBson,
-                          bool forAsyncGetMore = false) {
+
+void processReplyMetadata(
+    OperationContext* opCtx,
+    const ShardId& shardId,
+    const TransactionRouter::ParsedParticipantResponseMetadata& parsedResponse,
+    bool forAsyncGetMore = false) {
     auto txnRouter = TransactionRouter::get(opCtx);
     if (!txnRouter) {
         return;
     }
 
-    txnRouter.processParticipantResponse(opCtx, shardId, responseBson, forAsyncGetMore);
+    txnRouter.processParticipantResponse(opCtx, shardId, parsedResponse, forAsyncGetMore);
 }
 }  // namespace
 
@@ -96,14 +96,18 @@ void processReplyMetadata(OperationContext* opCtx,
         return;
     }
 
-    processReplyMetadata(
-        opCtx, response.shardId, response.swResponse.getValue().data, forAsyncGetMore);
+    processReplyMetadata(opCtx,
+                         response.shardId,
+                         TransactionRouter::Router::parseParticipantResponseMetadata(
+                             response.swResponse.getValue().data),
+                         forAsyncGetMore);
 }
 
-void processReplyMetadataForAsyncGetMore(OperationContext* opCtx,
-                                         const ShardId& shardId,
-                                         const BSONObj& responseBson) {
-    processReplyMetadata(opCtx, shardId, responseBson, true /* forAsyncGetMore */);
+void processReplyMetadataForAsyncGetMore(
+    OperationContext* opCtx,
+    const ShardId& shardId,
+    const TransactionRouter::ParsedParticipantResponseMetadata& parsedResponse) {
+    processReplyMetadata(opCtx, shardId, parsedResponse, true /* forAsyncGetMore */);
 }
 
 }  // namespace transaction_request_sender_details
@@ -124,7 +128,9 @@ MultiStatementTransactionRequestsSender::MultiStatementTransactionRequestsSender
           transaction_request_sender_details::attachTxnDetails(opCtx, requests),
           readPreference,
           retryPolicy,
-          ResourceYielderFactory::get(*opCtx->getService()).make(opCtx, "request-sender"),
+          ResourceYielderFactory::get(*opCtx->getService())
+              ? ResourceYielderFactory::get(*opCtx->getService())->make(opCtx, "request-sender")
+              : nullptr,
           designatedHostsMap)) {}
 
 MultiStatementTransactionRequestsSender::~MultiStatementTransactionRequestsSender() {
@@ -137,14 +143,23 @@ MultiStatementTransactionRequestsSender::~MultiStatementTransactionRequestsSende
     baton->schedule([ars = std::move(_ars)](Status) mutable { ars.reset(); });
 }
 
-bool MultiStatementTransactionRequestsSender::done() {
+bool MultiStatementTransactionRequestsSender::done() const {
     return _ars->done();
 }
 
 AsyncRequestsSender::Response MultiStatementTransactionRequestsSender::next(bool forMergeCursors) {
-    auto response = _ars->next();
-    transaction_request_sender_details::processReplyMetadata(_opCtx, response, forMergeCursors);
+    auto response = nextResponse();
+    validateResponse(response, forMergeCursors);
     return response;
+}
+
+AsyncRequestsSender::Response MultiStatementTransactionRequestsSender::nextResponse() {
+    return _ars->next();
+}
+
+void MultiStatementTransactionRequestsSender::validateResponse(
+    const AsyncRequestsSender::Response& response, bool forMergeCursors) const {
+    transaction_request_sender_details::processReplyMetadata(_opCtx, response, forMergeCursors);
 }
 
 void MultiStatementTransactionRequestsSender::stopRetrying() {

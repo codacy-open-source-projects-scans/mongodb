@@ -29,23 +29,11 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-#include <deque>
-#include <functional>
-#include <iterator>
-#include <map>
-#include <tuple>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/exec/document_value/value_comparator.h"
 #include "mongo/db/exec/sort_key_comparator.h"
 #include "mongo/db/index/sort_key_generator.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
@@ -54,8 +42,18 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/memory_token_container_util.h"
 #include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/db/query/sort_pattern.h"
+#include "mongo/util/modules.h"
+
+#include <deque>
+#include <functional>
+#include <map>
+#include <tuple>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -115,9 +113,6 @@ protected:
     // accumulators.
     static std::tuple<boost::intrusive_ptr<Expression>, boost::intrusive_ptr<Expression>> parseArgs(
         ExpressionContext* expCtx, const BSONObj& args, VariablesParseState vps);
-
-    // Utility to check that memory limit isn't exceeded.
-    void checkMemUsage();
 
     // Stores the limit of how many values we will return. This value is initialized to
     // 'boost::none' on construction and is only set during 'startNewGroup'.
@@ -189,8 +184,6 @@ public:
     AccumulatorType getAccumulatorType() const override {
         return AccumulatorType::kMinN;
     }
-
-    static boost::intrusive_ptr<AccumulatorState> create(ExpressionContext* expCtx);
 };
 
 class AccumulatorMaxN : public AccumulatorMinMaxN {
@@ -204,8 +197,6 @@ public:
     AccumulatorType getAccumulatorType() const override {
         return AccumulatorType::kMaxN;
     }
-
-    static boost::intrusive_ptr<AccumulatorState> create(ExpressionContext* expCtx);
 };
 
 class AccumulatorFirstLastN : public AccumulatorN {
@@ -267,8 +258,6 @@ public:
     AccumulatorType getAccumulatorType() const override {
         return AccumulatorType::kFirstN;
     }
-
-    static boost::intrusive_ptr<AccumulatorState> create(ExpressionContext* expCtx);
 };
 
 class AccumulatorLastN : public AccumulatorFirstLastN {
@@ -282,8 +271,6 @@ public:
     AccumulatorType getAccumulatorType() const override {
         return AccumulatorType::kLastN;
     }
-
-    static boost::intrusive_ptr<AccumulatorState> create(ExpressionContext* expCtx);
 };
 
 enum TopBottomSense {
@@ -297,13 +284,8 @@ public:
     // pair of (sortKey, output) for storing in AccumulatorTopBottomN's internal multimap.
     using KeyOutPair = std::pair<Value, Value>;
 
-    AccumulatorTopBottomN(ExpressionContext* expCtx, SortPattern sp, bool isRemovable);
-
-    static boost::intrusive_ptr<AccumulatorState> create(ExpressionContext* expCtx,
-                                                         BSONObj sortPattern,
-                                                         bool isRemovable = false);
-    static boost::intrusive_ptr<AccumulatorState> create(ExpressionContext* expCtx,
-                                                         SortPattern sortPattern);
+    AccumulatorTopBottomN(ExpressionContext* expCtx, SortPattern sp, bool isRemovable = false);
+    AccumulatorTopBottomN(ExpressionContext* expCtx, BSONObj sortPattern, bool isRemovable = false);
 
     /**
      * Verifies that 'elem' is an object, delegates argument parsing to 'accumulatorNParseArgs',
@@ -429,10 +411,9 @@ SortPattern getAccSortPattern(AccumulatorN* accN) {
 }
 
 inline SortPattern getAccSortPattern(const boost::intrusive_ptr<AccumulatorState>& accState) {
-    using namespace fmt::literals;
     auto accN = dynamic_cast<AccumulatorN*>(accState.get());
     tassert(8434700,
-            "Expected AccumulatorN but the accumulator is {}"_format(accState->getOpName()),
+            fmt::format("Expected AccumulatorN but the accumulator is {}", accState->getOpName()),
             accN);
     switch (accN->getAccumulatorType()) {
         case AccumulatorN::kTop:

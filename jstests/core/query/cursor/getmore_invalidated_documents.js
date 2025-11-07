@@ -1,17 +1,19 @@
 // @tags: [
 //   requires_getmore,
 //   requires_non_retryable_writes,
+//   # $text is not supported on views.
+//   incompatible_with_views,
 // ]
 
 // Tests for invalidation during a getmore. This behavior is storage-engine dependent.
 // See SERVER-16675.
-var t = db.getmore_invalidated_documents;
+let t = db.getmore_invalidated_documents;
 
-var count;
-var cursor;
-var nextDoc;
-var x;
-var y;
+let count;
+let cursor;
+let nextDoc;
+let x;
+let y;
 
 // Case #1: Text search with deletion invalidation.
 t.drop();
@@ -58,7 +60,10 @@ assert.commandWorked(t.insert({a: 1, b: 2}));
 assert.commandWorked(t.insert({a: 2, b: 3}));
 assert.commandWorked(t.insert({a: 2, b: 4}));
 
-cursor = t.find({a: {$in: [1, 2]}}).sort({b: 1}).batchSize(2);
+cursor = t
+    .find({a: {$in: [1, 2]}})
+    .sort({b: 1})
+    .batchSize(2);
 cursor.next();
 cursor.next();
 
@@ -75,7 +80,10 @@ assert.commandWorked(t.insert({a: 1, b: 2}));
 assert.commandWorked(t.insert({a: 2, b: 3}));
 assert.commandWorked(t.insert({a: 2, b: 4}));
 
-cursor = t.find({a: {$in: [1, 2]}}).sort({b: 1}).batchSize(2);
+cursor = t
+    .find({a: {$in: [1, 2]}})
+    .sort({b: 1})
+    .batchSize(2);
 cursor.next();
 cursor.next();
 
@@ -202,7 +210,10 @@ t.insert({a: 1, b: 2});
 t.insert({a: 3, b: 3});
 t.insert({a: 2, b: 1});
 
-cursor = t.find({a: {$in: [1, 2, 3]}}).sort({b: 1}).batchSize(2);
+cursor = t
+    .find({a: {$in: [1, 2, 3]}})
+    .sort({b: 1})
+    .batchSize(2);
 cursor.next();
 cursor.next();
 
@@ -219,7 +230,10 @@ t.insert({a: 1, b: 2});
 t.insert({a: 3, b: 3});
 t.insert({a: 2, b: 1});
 
-cursor = t.find({a: {$in: [1, 2, 3]}}).sort({b: 1}).batchSize(2);
+cursor = t
+    .find({a: {$in: [1, 2, 3]}})
+    .sort({b: 1})
+    .batchSize(2);
 cursor.next();
 cursor.next();
 

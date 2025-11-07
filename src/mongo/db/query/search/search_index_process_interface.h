@@ -27,8 +27,12 @@
  *    it in the license file.
  */
 
+#pragma once
+
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/views/resolved_view.h"
+#include "mongo/util/modules.h"
 
 namespace mongo {
 
@@ -43,37 +47,25 @@ public:
     static SearchIndexProcessInterface* get(OperationContext* opCtx);
 
     static void set(Service* service, std::unique_ptr<SearchIndexProcessInterface> impl);
-    /*
-     * TODO SERVER-93637 remove fetchCollectionUUIDOrThrow and fetchCollectionUUID from the
-     * interface and all derived classes once all search index commands can support sharded views.
-     */
 
     /**
-     * Returns the collection UUID or throws a NamespaceNotFound error.
-     */
-    virtual UUID fetchCollectionUUIDOrThrow(OperationContext* opCtx,
-                                            const NamespaceString& nss) = 0;
-
-    /**
-     * Returns the collection UUID or boost::none if no collection is found.
-     */
-    virtual boost::optional<UUID> fetchCollectionUUID(OperationContext* opCtx,
-                                                      const NamespaceString& nss) = 0;
-
-    /**
-     * Returns the collection UUID and optionally an underlying NSS (if query is on a view). If no
+     * Returns the collection UUID and optionally a ResolvedView (if query is on a view). If no
      * UUID, throws a NamespaceNotFound error.
      */
-    virtual std::pair<UUID, boost::optional<NamespaceString>>
-    fetchCollectionUUIDAndResolveViewOrThrow(OperationContext* opCtx,
-                                             const NamespaceString& nss) = 0;
+    virtual std::pair<UUID, boost::optional<ResolvedView>> fetchCollectionUUIDAndResolveViewOrThrow(
+        OperationContext* opCtx, const NamespaceString& nss) = 0;
     /**
-     * Returns the collection UUID (or boost::none if no collection is found) and the underlying
-     * source collection NSS if query is on a view (or boost::none if query is on a normal
-     * collection).
+     * Returns the collection UUID (or boost::none if no collection is found) and optionally a
+     * ResolvedView if query is on a view (or boost::none if query is on a normal collection).
+     *
+     * Search related operations on timeseries collections may either fail or act as a no-op;
+     * so the 'failOnTsColl' flag indicates which behavior is appropriate if the collection
+     * ends up being timeseries upon lookup.
      */
-    virtual std::pair<boost::optional<UUID>, boost::optional<NamespaceString>>
-    fetchCollectionUUIDAndResolveView(OperationContext* opCtx, const NamespaceString& nss) = 0;
+    virtual std::pair<boost::optional<UUID>, boost::optional<ResolvedView>>
+    fetchCollectionUUIDAndResolveView(OperationContext* opCtx,
+                                      const NamespaceString& nss,
+                                      bool failOnTsColl = true) = 0;
 };
 
 }  // namespace mongo

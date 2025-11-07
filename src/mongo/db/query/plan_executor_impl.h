@@ -29,43 +29,44 @@
 
 #pragma once
 
-#include "mongo/db/query/plan_insert_listener.h"
-#include <boost/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <deque>
-#include <memory>
-#include <queue>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/exec/classic/multi_plan.h"
+#include "mongo/db/exec/classic/plan_stage.h"
+#include "mongo/db/exec/classic/working_set.h"
 #include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/exec/multi_plan.h"
-#include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/exec/working_set.h"
+#include "mongo/db/global_catalog/catalog_cache/shard_cannot_refresh_due_to_locks_held_exception.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
+#include "mongo/db/query/oplog_wait_config.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer.h"
+#include "mongo/db/query/plan_insert_listener.h"
 #include "mongo/db/query/plan_yield_policy.h"
 #include "mongo/db/query/query_planner.h"
-#include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/restore_context.h"
+#include "mongo/db/query/stage_builder/classic_stage_builder.h"
 #include "mongo/db/query/write_ops/update_result.h"
 #include "mongo/db/record_id.h"
-#include "mongo/db/shard_role.h"
-#include "mongo/db/storage/snapshot.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/db/yieldable.h"
-#include "mongo/s/shard_cannot_refresh_due_to_locks_held_exception.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
+
+#include <deque>
+#include <memory>
+#include <vector>
+
+#include <boost/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -92,7 +93,7 @@ template <typename F, typename H>
     try {
         return f();
     } catch (const ExceptionFor<ErrorCodes::WriteConflict>&) {
-        CurOp::get(opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
+        recordWriteConflict(opCtx);
         yieldHandler();
         return PlanStage::NEED_YIELD;
     } catch (const ExceptionFor<ErrorCodes::TemporarilyUnavailable>& e) {
@@ -149,7 +150,7 @@ public:
                      std::unique_ptr<QuerySolution> qs,
                      std::unique_ptr<CanonicalQuery> cq,
                      const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                     VariantCollectionPtrOrAcquisition collection,
+                     const boost::optional<CollectionAcquisition>& collection,
                      bool returnOwnedBson,
                      NamespaceString nss,
                      PlanYieldPolicy::YieldPolicy yieldPolicy,
@@ -168,24 +169,27 @@ public:
     void detachFromOperationContext() final;
     void reattachToOperationContext(OperationContext* opCtx) final;
 
-    ExecState getNextDocument(Document* objOut, RecordId* dlOut) final;
+    ExecState getNextDocument(Document& objOut) final;
     ExecState getNext(BSONObj* out, RecordId* dlOut) final;
     size_t getNextBatch(size_t batchSize, AppendBSONObjFn append) final;
 
-    bool isEOF() final;
+    bool isEOF() const final;
     long long executeCount() override;
     UpdateResult getUpdateResult() const override;
     long long getDeleteResult() const override;
     BatchedDeleteStats getBatchedDeleteStats() override;
     void markAsKilled(Status killStatus) final;
     void dispose(OperationContext* opCtx) final;
+    void forceSpill(PlanYieldPolicy* yieldPolicy) final {
+        _root->forceSpill(yieldPolicy);
+    }
     void stashResult(const BSONObj& obj) final;
 
     MONGO_COMPILER_ALWAYS_INLINE bool isMarkedAsKilled() const final {
         return !_killStatus.isOK();
     }
 
-    Status getKillStatus() final;
+    Status getKillStatus() const final;
     bool isDisposed() const final;
     Timestamp getLatestOplogTimestamp() const final;
     BSONObj getPostBatchResumeToken() const final;
@@ -201,7 +205,7 @@ public:
      *
      * This is only public for PlanYieldPolicy. DO NOT CALL ANYWHERE ELSE.
      */
-    void restoreStateWithoutRetrying(const RestoreContext& context, const Yieldable* yieldable);
+    void restoreStateWithoutRetrying(const RestoreContext& context);
 
     /**
      * Return a pointer to this executor's MultiPlanStage, or nullptr if it does not have one.
@@ -210,19 +214,12 @@ public:
 
     PlanStage* getRootStage() const;
 
-    void enableSaveRecoveryUnitAcrossCommandsIfSupported() override {}
-    bool isSaveRecoveryUnitAcrossCommandsEnabled() const override {
-        return false;
-    }
-
     void setReturnOwnedData(bool returnOwnedData) final {
         _mustReturnOwnedBson = returnOwnedData;
     }
 
-    bool usesCollectionAcquisitions() const final;
-
     /**
-     * It is used to detect if the plan excutor obtained after multiplanning is using a distinct
+     * It is used to detect if the plan executor obtained after multiplanning is using a distinct
      * scan stage. That's because in this scenario modifications to the pipeline in the context of
      * aggregation need to be made.
      */
@@ -242,7 +239,7 @@ private:
         return nullptr;
     }
 
-    ExecState _getNextImpl(Snapshotted<Document>* objOut, RecordId* dlOut);
+    ExecState _getNextImpl(Document* objOut, RecordId* dlOut);
 
     // Helper for handling the NEED_YIELD stage state.
     void _handleNeedYield(size_t& writeConflictsInARow, size_t& tempUnavailErrorsInARow);
@@ -251,18 +248,26 @@ private:
     bool _handleEOFAndExit(PlanStage::StageState code,
                            std::unique_ptr<insert_listener::Notifier>& notifier);
 
-    MONGO_COMPILER_ALWAYS_INLINE void _checkIfMustYield(std::function<void()> whileYieldingFn) {
+    // Function which waits for oplog visiblity. It assumes that it is invoked following snapshot
+    // abandonment, but before yielding any resources.
+    void _waitForAllEarlierOplogWritesToBeVisible();
+
+    MONGO_COMPILER_ALWAYS_INLINE void _checkIfMustYield(
+        const std::function<void()>& whileYieldingFn) {
         // These are the conditions which can cause us to yield:
         //   1) The yield policy's timer elapsed, or
         //   2) some stage requested a yield, or
         //   3) we need to yield and retry due to a WriteConflictException.
         // In all cases, the actual yielding happens here.
         if (_yieldPolicy->shouldYieldOrInterrupt(_opCtx)) {
-            uassertStatusOK(_yieldPolicy->yieldOrInterrupt(_opCtx, whileYieldingFn));
+            uassertStatusOK(_yieldPolicy->yieldOrInterrupt(_opCtx,
+                                                           whileYieldingFn,
+                                                           RestoreContext::RestoreType::kYield,
+                                                           _afterSnapshotAbandonFn));
         }
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE void _checkIfKilled() {
+    MONGO_COMPILER_ALWAYS_INLINE void _checkIfKilled() const {
         if (MONGO_unlikely(isMarkedAsKilled())) {
             uassertStatusOK(_killStatus);
         }
@@ -316,7 +321,15 @@ private:
     // otherwise. We cache it to avoid the need to traverse the execution tree in runtime when the
     // executor is requested to return the oplog tracking info. Since this info is provided by
     // either of these stages, the executor will simply delegate the request to the cached stage.
-    const CollectionScan* _collScanStage{nullptr};
+    CollectionScan* _collScanStage{nullptr};
+
+    // Used to coordinate waiting for oplog visiblity. Note that this is owned by the collection
+    // scan (if one exists). Initialized only if this executor is doing a collection scan over the
+    // oplog, nullptr otherwise.
+    OplogWaitConfig* _oplogWaitConfig{nullptr};
+
+    // Function used to wait for oplog visibility in between snapshot abandonment and
+    std::function<void()> _afterSnapshotAbandonFn{nullptr};
 };
 
 }  // namespace mongo

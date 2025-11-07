@@ -10,8 +10,6 @@
  * @tags: [
  *   config_shard_incompatible,
  *   requires_persistence,
- *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
- *    embedded_router_incompatible,
  *   uses_atclustertime,
  * ]
  */
@@ -51,6 +49,7 @@ reshardingTest.withReshardingInBackground(
         for (let i = 0; i < numRestarts; ++i) {
             reshardingTest.shutdownAndRestartPrimaryOnShard(primaryShard);
         }
-    });
+    },
+);
 
 reshardingTest.teardown();

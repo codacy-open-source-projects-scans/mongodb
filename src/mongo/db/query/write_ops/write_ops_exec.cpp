@@ -29,75 +29,68 @@
 
 #include "mongo/db/query/write_ops/write_ops_exec.h"
 
-#include "mongo/base/error_codes.h"
-#include <absl/container/flat_hash_map.h>
-#include <absl/hash/hash.h>
-#include <algorithm>
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <cstdint>
-#include <fmt/format.h>
-#include <functional>
-#include <iterator>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <tuple>
-#include <type_traits>
-#include <utility>
-
 #include "mongo/base/counter.h"
+#include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonelement_comparator.h"
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/oid.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
-#include "mongo/db/catalog/clustered_collection_util.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/collection_uuid_mismatch.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/catalog/document_validation.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/feature_compatibility_version.h"
-#include "mongo/db/commands/server_status_metric.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/curop_metrics.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/error_labels.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/global_catalog/type_collection_common_types_gen.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/local_catalog/clustered_collection_util.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/collection_uuid_mismatch.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/document_validation.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/not_primary_error_tracker.h"
+#include "mongo/db/pipeline/expression_context_diagnostic_printer.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/profile_collection.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/db/query/canonical_query.h"
-#include "mongo/db/query/collection_query_info.h"
+#include "mongo/db/query/client_cursor/collect_query_stats_mongod.h"
+#include "mongo/db/query/collection_index_usage_tracker_decoration.h"
+#include "mongo/db/query/explain.h"
+#include "mongo/db/query/explain_diagnostic_printer.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_explainer.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/query_shape/query_shape.h"
+#include "mongo/db/query/query_shape/shape_helpers.h"
+#include "mongo/db/query/query_shape/update_cmd_shape.h"
+#include "mongo/db/query/query_stats/query_stats.h"
+#include "mongo/db/query/query_stats/update_key.h"
+#include "mongo/db/query/shard_key_diagnostic_printer.h"
 #include "mongo/db/query/write_ops/delete_request_gen.h"
 #include "mongo/db/query/write_ops/insert.h"
 #include "mongo/db/query/write_ops/parsed_delete.h"
@@ -107,58 +100,44 @@
 #include "mongo/db/query/write_ops/write_ops.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/query/write_ops/write_ops_retryability.h"
-#include "mongo/db/record_id_helpers.h"
+#include "mongo/db/raw_data_operation.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/resource_yielder.h"
-#include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/query_analysis_writer.h"
-#include "mongo/db/s/scoped_collection_metadata.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/shard_role.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/stats/counters.h"
-#include "mongo/db/stats/resource_consumption_metrics.h"
 #include "mongo/db/stats/server_write_concern_metrics.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/duplicate_key_error_info.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/storage/snapshot.h"
 #include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/timeseries/bucket_catalog/bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_catalog/global_bucket_catalog.h"
 #include "mongo/db/timeseries/bucket_compression_failure.h"
-#include "mongo/db/timeseries/timeseries_update_delete_util.h"
+#include "mongo/db/timeseries/collection_pre_conditions_util.h"
+#include "mongo/db/timeseries/timeseries_request_util.h"
 #include "mongo/db/timeseries/timeseries_write_util.h"
-#include "mongo/db/timeseries/write_ops/timeseries_write_ops.h"
 #include "mongo/db/timeseries/write_ops/timeseries_write_ops_utils.h"
 #include "mongo/db/transaction/retryable_writes_stats.h"
 #include "mongo/db/transaction/transaction_api.h"
 #include "mongo/db/transaction/transaction_participant.h"
 #include "mongo/db/transaction/transaction_participant_resource_yielder.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/db/update/document_diff_applier.h"
 #include "mongo/db/update/path_support.h"
-#include "mongo/db/update/update_oplog_entry_serialization.h"
+#include "mongo/db/version_context.h"
 #include "mongo/executor/inline_executor.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/rpc/message.h"
 #include "mongo/s/analyze_shard_key_common_gen.h"
 #include "mongo/s/analyze_shard_key_role.h"
 #include "mongo/s/query_analysis_sampler_util.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
-#include "mongo/s/type_collection_common_types_gen.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/s/write_ops/batched_upsert_detail.h"
-#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
@@ -169,6 +148,21 @@
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/timer.h"
+
+#include <algorithm>
+#include <functional>
+#include <iterator>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+#include <boost/cstdint.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
 
@@ -271,11 +265,18 @@ void finishCurOp(OperationContext* opCtx, CurOp* curOp) {
 void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
     writeConflictRetry(opCtx, "implicit collection creation", ns, [&opCtx, &ns] {
         AutoGetDb autoDb(opCtx, ns.dbName(), MODE_IX);
-        Lock::CollectionLock collLock(opCtx, ns, MODE_IX);
 
-        assertCanWrite_inlock(opCtx, ns);
-        if (!CollectionCatalog::get(opCtx)->lookupCollectionByNamespace(
-                opCtx, ns)) {  // someone else may have beat us to it.
+        auto collection = acquireCollection(
+            opCtx,
+            CollectionAcquisitionRequest::fromOpCtx(opCtx, ns, AcquisitionPrerequisites::kWrite),
+            MODE_IX);
+
+        uassert(ErrorCodes::PrimarySteppedDown,
+                str::stream() << "Not primary while writing to " << ns.toStringForErrorMsg(),
+                repl::ReplicationCoordinator::get(opCtx->getServiceContext())
+                    ->canAcceptWritesFor(opCtx, ns));
+
+        if (!collection.exists()) {  // someone else may have beat us to it.
             uassertStatusOK(userAllowedCreateNS(opCtx, ns));
             // TODO (SERVER-77915): Remove once 8.0 becomes last LTS.
             // TODO (SERVER-82066): Update handling for direct connections.
@@ -287,12 +288,13 @@ void makeCollection(OperationContext* opCtx, const NamespaceString& ns) {
                 !feature_flags::g80CollectionCreationPath.isEnabled(fcvSnapshot) ||
                 !OperationShardingState::get(opCtx).isComingFromRouter(opCtx) ||
                 (opCtx->inMultiDocumentTransaction() || opCtx->isRetryableWrite())) {
-                allowCollectionCreation.emplace(opCtx);
+                allowCollectionCreation.emplace(opCtx, ns);
             }
             WriteUnitOfWork wuow(opCtx);
             CollectionOptions defaultCollectionOptions;
-            if (auto fp = globalFailPointRegistry().find("clusterAllCollectionsByDefault");
-                fp && fp->shouldFail() && !clustered_util::requiresLegacyFormat(ns)) {
+            if (auto fp = globalFailPointRegistry().find("clusterAllCollectionsByDefault"); fp &&
+                fp->shouldFail() &&
+                !clustered_util::requiresLegacyFormat(ns, defaultCollectionOptions)) {
                 defaultCollectionOptions.clusteredIndex =
                     clustered_util::makeDefaultClusteredIdIndex();
             }
@@ -363,13 +365,9 @@ void insertDocumentsAtomically(OperationContext* opCtx,
     const bool oplogDisabled = replCoord->isOplogDisabledFor(opCtx, collection.nss());
     WriteUnitOfWork::OplogEntryGroupType oplogEntryGroupType = WriteUnitOfWork::kDontGroup;
 
-    const auto fcvSnapshot = serverGlobalParams.featureCompatibility.acquireFCVSnapshot();
-    const bool replicateVectoredInsertsTransactionally = fcvSnapshot.isVersionInitialized() &&
-        repl::feature_flags::gReplicateVectoredInsertsTransactionally.isEnabled(fcvSnapshot);
     // For multiple inserts not part of a multi-document transaction, the inserts will be
     // batched into a single applyOps oplog entry.
-    if (replicateVectoredInsertsTransactionally && !inTransaction && batchSize > 1 &&
-        !oplogDisabled) {
+    if (!inTransaction && batchSize > 1 && !oplogDisabled) {
         oplogEntryGroupType = WriteUnitOfWork::kGroupForPossiblyRetryableOperations;
     }
 
@@ -381,9 +379,13 @@ void insertDocumentsAtomically(OperationContext* opCtx,
     // insert. In order to avoid that delete generating a second timestamp in a WUOW which
     // has un-timestamped writes (which is a violation of multi-timestamp constraints),
     // we must reserve the timestamp for the insert in advance.
+    // We take an exclusive lock on the metadata resource before reserving the timestamp.
+    if (collection.getCollectionPtr()->needsCappedLock()) {
+        Lock::ResourceLock heldUntilEndOfWUOW{
+            opCtx, ResourceId(RESOURCE_METADATA, collection.getCollectionPtr()->ns()), MODE_X};
+    }
     if (oplogEntryGroupType != WriteUnitOfWork::kGroupForPossiblyRetryableOperations &&
-        !inTransaction && !oplogDisabled &&
-        (!replicateVectoredInsertsTransactionally || collection.getCollectionPtr()->isCapped())) {
+        !inTransaction && !oplogDisabled && collection.getCollectionPtr()->isCapped()) {
         acquireOplogSlotsForInserts(opCtx, collection, begin, end);
     }
 
@@ -465,7 +467,9 @@ bool handleError(OperationContext* opCtx,
             // shard owning the post-image doc. As a result, this update will not show up in the
             // OpObserver as an update.
             auto wouldChangeOwningShardInfo = ex.extraInfo<WouldChangeOwningShardInfo>();
-            invariant(wouldChangeOwningShardInfo);
+            tassert(11052012,
+                    "Expected extraInfo of type WouldChangeOwningShardInfo",
+                    wouldChangeOwningShardInfo);
 
             analyze_shard_key::QueryAnalysisWriter::get(opCtx)
                 ->addDiff(*sampleId,
@@ -542,7 +546,7 @@ bool getFleCrudProcessed(OperationContext* opCtx,
  */
 bool insertBatchAndHandleErrors(OperationContext* opCtx,
                                 const NamespaceString& nss,
-                                const boost::optional<mongo::UUID>& collectionUUID,
+                                const timeseries::CollectionPreConditions& preConditions,
                                 bool ordered,
                                 std::vector<InsertStatement>& batch,
                                 OperationSource source,
@@ -565,21 +569,16 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
         },
         nss);
 
-    if (auto scoped = failAllInserts.scoped(); MONGO_unlikely(scoped.isActive())) {
-        tassert(9276700,
-                "failAllInserts failpoint active!",
-                !scoped.getData().hasField("tassert") || !scoped.getData().getBoolField("tassert"));
-        uasserted(ErrorCodes::InternalError, "failAllInserts failpoint active!");
-    }
-
     boost::optional<CollectionAcquisition> collection;
     auto acquireCollection = [&] {
         while (true) {
             collection.emplace(mongo::acquireCollection(
                 opCtx,
                 CollectionAcquisitionRequest::fromOpCtx(
-                    opCtx, nss, AcquisitionPrerequisites::kWrite, collectionUUID),
+                    opCtx, nss, AcquisitionPrerequisites::kWrite, preConditions.expectedUUID()),
                 fixLockModeForSystemDotViewsChanges(nss, MODE_IX)));
+            timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
+                opCtx, preConditions, *collection);
             if (collection->exists()) {
                 break;
             }
@@ -630,6 +629,43 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
         if (ex.code() == ErrorCodes::Unauthorized) {
             throw;
         }
+        // In a time-series context, this particular CollectionUUIDMismatch is re-thrown differently
+        // because there is already a check for this error higher up, which means this error must
+        // come from the guards installed to enforce that time-series operations are prepared
+        // and committed on the same collection.
+        if (ex.code() == ErrorCodes::CollectionUUIDMismatch &&
+            source == OperationSource::kTimeseriesInsert) {
+            uasserted(9748801, "Collection was changed during insert");
+        }
+
+        // We want to fail a write in the scenario where:
+        // 1) a collection with the ns that we are inserting to doesn't exist, so we choose to
+        // insert into it as normal collection and create it implicitly
+        // 2) a collection with this ns is created as a time-series collection
+        // 3) we acquire this time-series collection to insert into in the regular collection write
+        // path.
+        // We should fail the insert in this scenario to avoid writing normal documents into a
+        // time-series collection. We also fail in any scenario where it originally was a
+        // time-series/normal collection and was re-created as the alternative.
+        if (ex.code() == 10685100 || ex.code() == 106851001) {
+            throw;
+        }
+    }
+
+    // Create an RAII object that prints the collection's shard key in the case of a tassert
+    // or crash.
+    ScopedDebugInfo shardKeyDiagnostics(
+        "ShardKeyDiagnostics",
+        diagnostic_printers::ShardKeyDiagnosticPrinter{
+            collection.has_value() && collection->getShardingDescription().isSharded()
+                ? collection.value().getShardingDescription().getKeyPattern()
+                : BSONObj()});
+
+    if (auto scoped = failAllInserts.scoped(); MONGO_unlikely(scoped.isActive())) {
+        tassert(9276700,
+                "failAllInserts failpoint active!",
+                !scoped.getData().hasField("tassert") || !scoped.getData().getBoolField("tassert"));
+        uasserted(ErrorCodes::InternalError, "failAllInserts failpoint active!");
     }
 
     if (shouldProceedWithBatchInsert) {
@@ -721,19 +757,15 @@ UpdateResult performUpdate(OperationContext* opCtx,
                            bool upsert,
                            const boost::optional<mongo::UUID>& collectionUUID,
                            boost::optional<BSONObj>& docFound,
-                           UpdateRequest* updateRequest) {
-    auto [isTimeseriesViewUpdate, nsString] =
-        timeseries::isTimeseriesViewRequest(opCtx, *updateRequest);
-
-    if (isTimeseriesViewUpdate) {
-        checkCollectionUUIDMismatch(
-            opCtx, nsString.getTimeseriesViewNamespace(), nullptr, collectionUUID);
-    }
+                           UpdateRequest* updateRequest,
+                           const timeseries::CollectionPreConditions& preConditions,
+                           bool isTimeseriesLogicalRequest) {
+    auto nsString = preConditions.getTargetNs(nss);
 
     // TODO SERVER-76583: Remove this check.
     uassert(7314600,
             "Retryable findAndModify on a timeseries is not supported",
-            !isTimeseriesViewUpdate || !updateRequest->shouldReturnAnyDocs() ||
+            !isTimeseriesLogicalRequest || !updateRequest->shouldReturnAnyDocs() ||
                 !opCtx->isRetryableWrite());
 
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
@@ -748,33 +780,37 @@ UpdateResult performUpdate(OperationContext* opCtx,
         },
         nss);
 
-    if (auto scoped = failAllUpdates.scoped(); MONGO_unlikely(scoped.isActive())) {
-        tassert(9276701,
-                "failAllUpdates failpoint active!",
-                !scoped.getData().hasField("tassert") || !scoped.getData().getBoolField("tassert"));
-        uasserted(ErrorCodes::InternalError, "failAllUpdates failpoint active!");
-    }
 
     auto collection =
         acquireCollection(opCtx,
                           CollectionAcquisitionRequest::fromOpCtx(
                               opCtx, nsString, AcquisitionPrerequisites::kWrite, collectionUUID),
                           MODE_IX);
+    timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
+        opCtx, preConditions, collection);
     auto dbName = nsString.dbName();
     Database* db = [&]() {
         AutoGetDb autoDb(opCtx, dbName, MODE_IX);
         return autoDb.ensureDbExists(opCtx);
     }();
 
-    invariant(DatabaseHolder::get(opCtx)->getDb(opCtx, dbName));
+    // Create an RAII object that prints the collection's shard key in the case of a tassert
+    // or crash.
+    ScopedDebugInfo shardKeyDiagnostics(
+        "ShardKeyDiagnostics",
+        diagnostic_printers::ShardKeyDiagnosticPrinter{
+            collection.getShardingDescription().isSharded()
+                ? collection.getShardingDescription().getKeyPattern()
+                : BSONObj()});
+
+    tassert(11052013,
+            fmt::format("Expected database {} to exist", dbName.toStringForErrorMsg()),
+            DatabaseHolder::get(opCtx)->getDb(opCtx, dbName));
     curOp->raiseDbProfileLevel(
         DatabaseProfileSettings::get(opCtx->getServiceContext()).getDatabaseProfileLevel(dbName));
 
     assertCanWrite_inlock(opCtx, nsString);
 
-    // TODO SERVER-50983: Create abstraction for creating collection when using
-    // AutoGetCollection Create the collection if it does not exist when performing an upsert
-    // because the update stage does not create its own collection
     if (!collection.exists() && upsert) {
         CollectionWriter collectionWriter(opCtx, &collection);
         uassertStatusOK(userAllowedCreateNS(opCtx, nsString));
@@ -788,7 +824,7 @@ UpdateResult performUpdate(OperationContext* opCtx,
             !feature_flags::g80CollectionCreationPath.isEnabled(fcvSnapshot) ||
             !OperationShardingState::get(opCtx).isComingFromRouter(opCtx) ||
             (opCtx->inMultiDocumentTransaction() || opCtx->isRetryableWrite())) {
-            allowCollectionCreation.emplace(opCtx);
+            allowCollectionCreation.emplace(opCtx, nsString);
         }
         WriteUnitOfWork wuow(opCtx);
         ScopedLocalCatalogWriteFence scopedLocalCatalogWriteFence(opCtx, &collection);
@@ -806,9 +842,11 @@ UpdateResult performUpdate(OperationContext* opCtx,
             !inTransaction);
     }
 
-    if (isTimeseriesViewUpdate) {
-        timeseries::timeseriesRequestChecks<UpdateRequest>(
-            collection.getCollectionPtr(), updateRequest, timeseries::updateRequestCheckFunction);
+    if (isTimeseriesLogicalRequest) {
+        timeseries::timeseriesRequestChecks<UpdateRequest>(VersionContext::getDecoration(opCtx),
+                                                           collection.getCollectionPtr(),
+                                                           updateRequest,
+                                                           timeseries::updateRequestCheckFunction);
         timeseries::timeseriesHintTranslation<UpdateRequest>(collection.getCollectionPtr(),
                                                              updateRequest);
     }
@@ -817,12 +855,27 @@ UpdateResult performUpdate(OperationContext* opCtx,
                               updateRequest,
                               collection.getCollectionPtr(),
                               false /*forgoOpCounterIncrements*/,
-                              isTimeseriesViewUpdate);
+                              isTimeseriesLogicalRequest);
     uassertStatusOK(parsedUpdate.parseRequest());
+
+    // Create an RAII object that prints useful information about the ExpressionContext in the case
+    // of a tassert or crash.
+    ScopedDebugInfo expCtxDiagnostics(
+        "ExpCtxDiagnostics", diagnostic_printers::ExpressionContextPrinter{parsedUpdate.expCtx()});
+
+    if (auto scoped = failAllUpdates.scoped(); MONGO_unlikely(scoped.isActive())) {
+        tassert(9276701,
+                "failAllUpdates failpoint active!",
+                !scoped.getData().hasField("tassert") || !scoped.getData().getBoolField("tassert"));
+        uasserted(ErrorCodes::InternalError, "failAllUpdates failpoint active!");
+    }
 
     const auto exec = uassertStatusOK(
         getExecutorUpdate(&curOp->debug(), collection, &parsedUpdate, boost::none /* verbosity
         */));
+    // Capture diagnostics to be logged in the case of a failure.
+    ScopedDebugInfo explainDiagnostics("explainDiagnostics",
+                                       diagnostic_printers::ExplainDiagnosticPrinter{exec.get()});
 
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -831,6 +884,7 @@ UpdateResult performUpdate(OperationContext* opCtx,
 
     if (updateRequest->shouldReturnAnyDocs()) {
         docFound = exec->executeFindAndModify();
+        curOp->debug().additiveMetrics.nreturned = docFound ? 1 : 0;
     } else {
         // The 'UpdateResult' object will be obtained later, so discard the return value.
         (void)exec->executeUpdate();
@@ -843,8 +897,11 @@ UpdateResult performUpdate(OperationContext* opCtx,
     auto&& explainer = exec->getPlanExplainer();
     explainer.getSummaryStats(&summaryStats);
     if (collection.exists()) {
-        CollectionQueryInfo::get(collection.getCollectionPtr())
-            .notifyOfQuery(opCtx, collection.getCollectionPtr(), summaryStats);
+        CollectionIndexUsageTrackerDecoration::recordCollectionIndexUsage(
+            collection.getCollectionPtr().get(),
+            summaryStats.collectionScans,
+            summaryStats.collectionScansNonTailable,
+            summaryStats.indexesUsed);
     }
     auto updateResult = exec->getUpdateResult();
 
@@ -862,14 +919,6 @@ UpdateResult performUpdate(OperationContext* opCtx,
         curOp->debug().execStats = std::move(stats);
     }
 
-    if (docFound) {
-        ResourceConsumption::DocumentUnitCounter docUnitsReturned;
-        docUnitsReturned.observeOne(docFound->objsize());
-
-        auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-        metricsCollector.incrementDocUnitsReturned(curOp->getNS(), docUnitsReturned);
-    }
-
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &hangAfterBatchUpdate, opCtx, "hangAfterBatchUpdate");
 
@@ -882,19 +931,15 @@ long long performDelete(OperationContext* opCtx,
                         CurOp* curOp,
                         bool inTransaction,
                         const boost::optional<mongo::UUID>& collectionUUID,
-                        boost::optional<BSONObj>& docFound) {
-    auto [isTimeseriesViewDelete, nsString] =
-        timeseries::isTimeseriesViewRequest(opCtx, *deleteRequest);
-
-    if (isTimeseriesViewDelete) {
-        checkCollectionUUIDMismatch(
-            opCtx, nsString.getTimeseriesViewNamespace(), nullptr, collectionUUID);
-    }
+                        boost::optional<BSONObj>& docFound,
+                        const timeseries::CollectionPreConditions& preConditions,
+                        bool isTimeseriesLogicalRequest) {
+    auto nsString = preConditions.getTargetNs(nss);
 
     // TODO SERVER-76583: Remove this check.
     uassert(7308305,
             "Retryable findAndModify on a timeseries is not supported",
-            !isTimeseriesViewDelete || !deleteRequest->getReturnDeleted() ||
+            !isTimeseriesLogicalRequest || !deleteRequest->getReturnDeleted() ||
                 !opCtx->isRetryableWrite());
 
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
@@ -903,18 +948,23 @@ long long performDelete(OperationContext* opCtx,
                   "Batch remove - hangDuringBatchRemove fail point enabled. Blocking until fail "
                   "point is disabled");
         });
-    if (auto scoped = failAllRemoves.scoped(); MONGO_unlikely(scoped.isActive())) {
-        tassert(9276703,
-                "failAllRemoves failpoint active!",
-                !scoped.getData().hasField("tassert") || !scoped.getData().getBoolField("tassert"));
-        uasserted(ErrorCodes::InternalError, "failAllRemoves failpoint active!");
-    }
 
     const auto collection =
         acquireCollection(opCtx,
                           CollectionAcquisitionRequest::fromOpCtx(
                               opCtx, nsString, AcquisitionPrerequisites::kWrite, collectionUUID),
                           MODE_IX);
+    timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
+        opCtx, preConditions, collection);
+    // Create an RAII object that prints the collection's shard key in the case of a tassert
+    // or crash.
+    ScopedDebugInfo shardKeyDiagnostics(
+        "ShardKeyDiagnostics",
+        diagnostic_printers::ShardKeyDiagnosticPrinter{
+            collection.getShardingDescription().isSharded()
+                ? collection.getShardingDescription().getKeyPattern()
+                : BSONObj()});
+
     const auto& collectionPtr = collection.getCollectionPtr();
 
     if (const auto& coll = collection.getCollectionPtr()) {
@@ -922,15 +972,29 @@ long long performDelete(OperationContext* opCtx,
         uassertStatusOK(checkIfTransactionOnCappedColl(opCtx, coll));
     }
 
-    if (isTimeseriesViewDelete) {
-        timeseries::timeseriesRequestChecks<DeleteRequest>(
-            collection.getCollectionPtr(), deleteRequest, timeseries::deleteRequestCheckFunction);
+    if (isTimeseriesLogicalRequest) {
+        timeseries::timeseriesRequestChecks<DeleteRequest>(VersionContext::getDecoration(opCtx),
+                                                           collection.getCollectionPtr(),
+                                                           deleteRequest,
+                                                           timeseries::deleteRequestCheckFunction);
         timeseries::timeseriesHintTranslation<DeleteRequest>(collection.getCollectionPtr(),
                                                              deleteRequest);
     }
 
-    ParsedDelete parsedDelete(opCtx, deleteRequest, collectionPtr, isTimeseriesViewDelete);
+    ParsedDelete parsedDelete(opCtx, deleteRequest, collectionPtr, isTimeseriesLogicalRequest);
     uassertStatusOK(parsedDelete.parseRequest());
+
+    // Create an RAII object that prints useful information about the ExpressionContext in the case
+    // of a tassert or crash.
+    ScopedDebugInfo expCtxDiagnostics(
+        "ExpCtxDiagnostics", diagnostic_printers::ExpressionContextPrinter{parsedDelete.expCtx()});
+
+    if (auto scoped = failAllRemoves.scoped(); MONGO_unlikely(scoped.isActive())) {
+        tassert(9276703,
+                "failAllRemoves failpoint active!",
+                !scoped.getData().hasField("tassert") || !scoped.getData().getBoolField("tassert"));
+        uasserted(ErrorCodes::InternalError, "failAllRemoves failpoint active!");
+    }
 
     auto dbName = nsString.dbName();
     if (DatabaseHolder::get(opCtx)->getDb(opCtx, dbName)) {
@@ -943,6 +1007,9 @@ long long performDelete(OperationContext* opCtx,
     const auto exec = uassertStatusOK(
         getExecutorDelete(&curOp->debug(), collection, &parsedDelete, boost::none /* verbosity
         */));
+    // Capture diagnostics to be logged in the case of a failure.
+    ScopedDebugInfo explainDiagnostics("explainDiagnostics",
+                                       diagnostic_printers::ExplainDiagnosticPrinter{exec.get()});
 
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -951,6 +1018,7 @@ long long performDelete(OperationContext* opCtx,
 
     if (deleteRequest->getReturnDeleted()) {
         docFound = exec->executeFindAndModify();
+        curOp->debug().additiveMetrics.nreturned = docFound ? 1 : 0;
     } else {
         // The number of deleted documents will be obtained from the plan executor later, so discard
         // the return value.
@@ -963,7 +1031,11 @@ long long performDelete(OperationContext* opCtx,
     PlanSummaryStats summaryStats;
     exec->getPlanExplainer().getSummaryStats(&summaryStats);
     if (const auto& coll = collectionPtr) {
-        CollectionQueryInfo::get(coll).notifyOfQuery(opCtx, coll, summaryStats);
+        CollectionIndexUsageTrackerDecoration::recordCollectionIndexUsage(
+            coll.get(),
+            summaryStats.collectionScans,
+            summaryStats.collectionScansNonTailable,
+            summaryStats.indexesUsed);
     }
     curOp->debug().setPlanSummaryMetrics(std::move(summaryStats));
 
@@ -977,21 +1049,13 @@ long long performDelete(OperationContext* opCtx,
         curOp->debug().execStats = std::move(stats);
     }
 
-    if (docFound) {
-        ResourceConsumption::DocumentUnitCounter docUnitsReturned;
-        docUnitsReturned.observeOne(docFound->objsize());
-
-        auto& metricsCollector = ResourceConsumption::MetricsCollector::get(opCtx);
-        metricsCollector.incrementDocUnitsReturned(curOp->getNS(), docUnitsReturned);
-    }
-
     return nDeleted;
 }
 
 boost::optional<write_ops::WriteError> generateError(OperationContext* opCtx,
                                                      const Status& status,
                                                      int index,
-                                                     size_t numErrors) noexcept {
+                                                     size_t numErrors) {
     if (status.isOK()) {
         return boost::none;
     }
@@ -1049,7 +1113,7 @@ StatusWith<int> getIndexCountForCollectionBatchTuning(OperationContext* opCtx,
             opCtx,
             CollectionAcquisitionRequest(nss,
                                          collectionUUID,
-                                         AcquisitionPrerequisites::kPretendUnsharded,
+                                         PlacementConcern::kPretendUnsharded,
                                          repl::ReadConcernArgs::get(opCtx),
                                          AcquisitionPrerequisites::kRead),
             MODE_IS);
@@ -1105,9 +1169,22 @@ size_t getTunedMaxBatchSize(OperationContext* opCtx,
 }
 }  // namespace
 
-WriteResult performInserts(OperationContext* opCtx,
-                           const write_ops::InsertCommandRequest& wholeOp,
-                           OperationSource source) {
+WriteResult performInserts(
+    OperationContext* opCtx,
+    const write_ops::InsertCommandRequest& wholeOp,
+    boost::optional<const timeseries::CollectionPreConditions&> preConditionsOptional,
+    OperationSource source) {
+    auto actualNs = wholeOp.getNamespace();
+
+    timeseries::CollectionPreConditions preConditions = preConditionsOptional
+        ? *preConditionsOptional
+        : timeseries::CollectionPreConditions::getCollectionPreConditions(
+              opCtx, wholeOp.getNamespace(), wholeOp.getCollectionUUID());
+
+    if (isRawDataOperation(opCtx)) {
+        actualNs = preConditions.getTargetNs(wholeOp.getNamespace());
+    }
+
     // Insert performs its own retries, so we should only be within a WriteUnitOfWork when run in a
     // transaction.
     auto txnParticipant = TransactionParticipant::get(opCtx);
@@ -1115,14 +1192,14 @@ WriteResult performInserts(OperationContext* opCtx,
               (txnParticipant && opCtx->inMultiDocumentTransaction()));
 
     auto& curOp = *CurOp::get(opCtx);
-    ON_BLOCK_EXIT([&] {
+    ON_BLOCK_EXIT([&, &actualNs = actualNs] {
         // Timeseries inserts already did as part of performTimeseriesWrites.
         if (source != OperationSource::kTimeseriesInsert) {
             // This is the only part of finishCurOp we need to do for inserts because they
             // reuse the top-level curOp. The rest is handled by the top-level entrypoint.
             curOp.done();
             Top::getDecoration(opCtx).record(opCtx,
-                                             wholeOp.getNamespace(),
+                                             actualNs,
                                              LogicalOp::opInsert,
                                              Top::LockType::WriteLocked,
                                              curOp.elapsedTimeExcludingPauses(),
@@ -1134,14 +1211,14 @@ WriteResult performInserts(OperationContext* opCtx,
     // Timeseries inserts already did as part of performTimeseriesWrites.
     if (source != OperationSource::kTimeseriesInsert) {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
-        curOp.setNS(lk, wholeOp.getNamespace());
+        curOp.setNS(lk, actualNs);
         curOp.setLogicalOp(lk, LogicalOp::opInsert);
         curOp.ensureStarted();
         // Initialize 'ninserted' for the operation if is not yet.
         curOp.debug().additiveMetrics.incrementNinserted(0);
     }
 
-    uassertStatusOK(userAllowedWriteNS(opCtx, wholeOp.getNamespace()));
+    uassertStatusOK(userAllowedWriteNS(opCtx, actualNs));
 
     const auto [disableDocumentValidation, fleCrudProcessed] = getDocumentValidationFlags(
         opCtx, wholeOp.getWriteCommandRequestBase(), wholeOp.getDbName().tenantId());
@@ -1212,8 +1289,8 @@ WriteResult performInserts(OperationContext* opCtx,
         }
 
         out.canContinue = insertBatchAndHandleErrors(opCtx,
-                                                     wholeOp.getNamespace(),
-                                                     wholeOp.getCollectionUUID(),
+                                                     actualNs,
+                                                     preConditions,
                                                      wholeOp.getOrdered(),
                                                      batch,
                                                      source,
@@ -1240,7 +1317,7 @@ WriteResult performInserts(OperationContext* opCtx,
             } catch (const DBException& ex) {
                 out.canContinue = handleError(opCtx,
                                               ex,
-                                              wholeOp.getNamespace(),
+                                              actualNs,
                                               wholeOp.getOrdered(),
                                               false /* multiUpdate */,
                                               boost::none /* sampleId */,
@@ -1257,7 +1334,7 @@ WriteResult performInserts(OperationContext* opCtx,
             out.results.emplace_back(makeWriteResultForInsertOrDeleteRetry());
         }
     }
-    invariant(batch.empty());
+    tassert(11052014, "Expected empty batch", batch.empty());
 
     return out;
 }
@@ -1273,6 +1350,9 @@ static SingleWriteResult performSingleUpdateOpNoRetry(OperationContext* opCtx,
                                                       bool* containsDotsAndDollarsField) {
     auto exec = uassertStatusOK(
         getExecutorUpdate(&curOp.debug(), collection, &parsedUpdate, boost::none /* verbosity */));
+    // Capture diagnostics to be logged in the case of a failure.
+    ScopedDebugInfo explainDiagnostics("explainDiagnostics",
+                                       diagnostic_printers::ExplainDiagnosticPrinter{exec.get()});
 
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -1285,7 +1365,11 @@ static SingleWriteResult performSingleUpdateOpNoRetry(OperationContext* opCtx,
     auto&& explainer = exec->getPlanExplainer();
     explainer.getSummaryStats(&summary);
     if (const auto& coll = collection.getCollectionPtr()) {
-        CollectionQueryInfo::get(coll).notifyOfQuery(opCtx, coll, summary);
+        CollectionIndexUsageTrackerDecoration::recordCollectionIndexUsage(
+            coll.get(),
+            summary.collectionScans,
+            summary.collectionScansNonTailable,
+            summary.indexesUsed);
     }
 
     if (curOp.shouldDBProfile()) {
@@ -1312,19 +1396,91 @@ static SingleWriteResult performSingleUpdateOpNoRetry(OperationContext* opCtx,
         *containsDotsAndDollarsField = true;
     }
 
+    // Collect query stats for the update operation if a QueryStats key was generated during
+    // registration. This ensures that we minimize the overhead of query stats collection for
+    // updates even if it does not have query stats enabled.
+    auto key = std::move(curOp.debug().queryStatsInfo.key);
+    if (key) {
+        curOp.setEndOfOpMetrics(0 /* no documents returned */);
+        collectQueryStatsMongod(opCtx, parsedUpdate.expCtx(), std::move(key));
+    }
+
     return result;
+}
+
+void registerRequestForQueryStats(OperationContext* opCtx,
+                                  const NamespaceString& ns,
+                                  const CollectionAcquisition& collection,
+                                  const write_ops::UpdateCommandRequest& wholeOp,
+                                  const ParsedUpdate& parsedUpdate) {
+    // Skip registering for query stats when the feature flag is disabled.
+    if (!feature_flags::gFeatureFlagQueryStatsUpdateCommand.isEnabledUseLastLTSFCVWhenUninitialized(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        return;
+    }
+
+    // TODO(SERVER-111930): Support recording query stats for updates with simple ID query
+    // Skip if the parse query is unavailable. This could happen if the query is a simple Id query:
+    // an exact-match query on _id.
+    if (!parsedUpdate.hasParsedQuery()) {
+        return;
+    }
+
+    // Skip registering the request with encrypted fields as indicated by the inclusion of
+    // encryptionInformation. It is important to do this before canonicalizing and optimizing the
+    // query, each of which would alter the query shape.
+    if (wholeOp.getEncryptionInformation()) {
+        return;
+    }
+
+    // Skip unsupported update types.
+    // TODO(SERVER-110343) and TODO(SERVER-110344) Support pipeline and modifier updates.
+    if (parsedUpdate.getRequest()->getUpdateModification().type() !=
+        write_ops::UpdateModification::Type::kReplacement) {
+        return;
+    }
+
+    // Compute QueryShapeHash and record it in CurOp.
+    query_shape::DeferredQueryShape deferredShape{[&]() {
+        return shape_helpers::tryMakeShape<query_shape::UpdateCmdShape>(
+            wholeOp, parsedUpdate, parsedUpdate.expCtx());
+    }};
+
+    // QueryShapeHash(QSH) will be recorded in CurOp, but it is not being used for anything else
+    // downstream yet until we support updates in PQS. Using std::ignore to indicate that discarding
+    // the returned QSH is intended.
+    std::ignore = CurOp::get(opCtx)->debug().ensureQueryShapeHash(opCtx, [&]() {
+        return shape_helpers::computeQueryShapeHash(
+            parsedUpdate.expCtx(), deferredShape, wholeOp.getNamespace());
+    });
+
+
+    // Register query stats collection.
+    query_stats::registerWriteRequest(opCtx, ns, [&]() {
+        uassertStatusOKWithContext(deferredShape->getStatus(), "Failed to compute query shape");
+        return std::make_unique<query_stats::UpdateKey>(parsedUpdate.expCtx(),
+                                                        wholeOp,
+                                                        parsedUpdate.getRequest()->getHint(),
+                                                        std::move(deferredShape->getValue()),
+                                                        collection.getCollectionType());
+    });
+
+    // TODO(SERVER-110348) Support collecting data-bearing node metrics here.
 }
 
 /**
  * Performs a single update, sometimes retrying failure due to WriteConflictException.
  */
-static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
-                                               const NamespaceString& ns,
-                                               const boost::optional<mongo::UUID>& opCollectionUUID,
-                                               UpdateRequest* updateRequest,
-                                               OperationSource source,
-                                               bool forgoOpCounterIncrements,
-                                               bool* containsDotsAndDollarsField) {
+static SingleWriteResult performSingleUpdateOp(
+    OperationContext* opCtx,
+    const NamespaceString& ns,
+    const timeseries::CollectionPreConditions& preConditions,
+    const write_ops::UpdateCommandRequest& wholeOp,
+    UpdateRequest* updateRequest,
+    OperationSource source,
+    bool forgoOpCounterIncrements,
+    bool* containsDotsAndDollarsField) {
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &hangDuringBatchUpdate,
         opCtx,
@@ -1336,28 +1492,17 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
                   logAttrs(ns));
         },
         ns);
-
-    if (auto scoped = failAllUpdates.scoped(); MONGO_unlikely(scoped.isActive())) {
-        tassert(9276702,
-                "failAllUpdates failpoint active!",
-                !scoped.getData().hasField("tassert") || !scoped.getData().getBoolField("tassert"));
-        uasserted(ErrorCodes::InternalError, "failAllUpdates failpoint active!");
-    }
-
     const CollectionAcquisition collection = [&]() {
         const auto acquisitionRequest = CollectionAcquisitionRequest::fromOpCtx(
-            opCtx, ns, AcquisitionPrerequisites::kWrite, opCollectionUUID);
+            opCtx, ns, AcquisitionPrerequisites::kWrite, preConditions.expectedUUID());
         while (true) {
             {
                 auto acquisition = acquireCollection(
                     opCtx, acquisitionRequest, fixLockModeForSystemDotViewsChanges(ns, MODE_IX));
+                timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
+                    opCtx, preConditions, acquisition);
                 if (acquisition.exists()) {
                     return acquisition;
-                }
-
-                if (source == OperationSource::kTimeseriesInsert ||
-                    source == OperationSource::kTimeseriesUpdate) {
-                    timeseries::write_ops::assertTimeseriesBucketsCollectionNotFound(ns);
                 }
 
                 // If this is an upsert, which is an insert, we must have a collection.
@@ -1377,9 +1522,20 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
         }
     }();
 
+    // Create an RAII object that prints the collection's shard key in the case of a tassert
+    // or crash.
+    ScopedDebugInfo shardKeyDiagnostics(
+        "ShardKeyDiagnostics",
+        diagnostic_printers::ShardKeyDiagnosticPrinter{
+            collection.getShardingDescription().isSharded()
+                ? collection.getShardingDescription().getKeyPattern()
+                : BSONObj()});
+
     if (source == OperationSource::kTimeseriesUpdate) {
-        timeseries::timeseriesRequestChecks<UpdateRequest>(
-            collection.getCollectionPtr(), updateRequest, timeseries::updateRequestCheckFunction);
+        timeseries::timeseriesRequestChecks<UpdateRequest>(VersionContext::getDecoration(opCtx),
+                                                           collection.getCollectionPtr(),
+                                                           updateRequest,
+                                                           timeseries::updateRequestCheckFunction);
         timeseries::timeseriesHintTranslation<UpdateRequest>(collection.getCollectionPtr(),
                                                              updateRequest);
     }
@@ -1403,6 +1559,23 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
                               forgoOpCounterIncrements,
                               updateRequest->source() == OperationSource::kTimeseriesUpdate);
     uassertStatusOK(parsedUpdate.parseRequest());
+
+    // Register query shape here once we obtain the ParsedUpdate, before executing the update
+    // command. After parsedUpdate.parseRequest(), the parsed query and the update driver become
+    // available for computing query shape.
+    registerRequestForQueryStats(opCtx, ns, collection, wholeOp, parsedUpdate);
+
+    // Create an RAII object that prints useful information about the ExpressionContext in the case
+    // of a tassert or crash.
+    ScopedDebugInfo expCtxDiagnostics(
+        "ExpCtxDiagnostics", diagnostic_printers::ExpressionContextPrinter{parsedUpdate.expCtx()});
+
+    if (auto scoped = failAllUpdates.scoped(); MONGO_unlikely(scoped.isActive())) {
+        tassert(9276702,
+                "failAllUpdates failpoint active!",
+                !scoped.getData().hasField("tassert") || !scoped.getData().getBoolField("tassert"));
+        uasserted(ErrorCodes::InternalError, "failAllUpdates failpoint active!");
+    }
 
     CurOpFailpointHelpers::waitWhileFailPointEnabled(
         &hangWithLockDuringBatchUpdate, opCtx, "hangWithLockDuringBatchUpdate");
@@ -1440,9 +1613,10 @@ static SingleWriteResult performSingleUpdateOp(OperationContext* opCtx,
 static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
     OperationContext* opCtx,
     const NamespaceString& ns,
-    const boost::optional<mongo::UUID>& opCollectionUUID,
     const std::vector<StmtId>& stmtIds,
+    const write_ops::UpdateCommandRequest& wholeOp,
     const write_ops::UpdateOpEntry& op,
+    const timeseries::CollectionPreConditions& preConditions,
     LegacyRuntimeConstants runtimeConstants,
     const boost::optional<BSONObj>& letParams,
     const OptionalBool& bypassEmptyTsReplacement,
@@ -1455,9 +1629,11 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
         ServerWriteConcernMetrics::get(opCtx)->recordWriteConcernForUpdate(
             opCtx->getWriteConcern());
         stdx::lock_guard<Client> lk(*opCtx->getClient());
-        curOp.setNS(lk,
-                    source == OperationSource::kTimeseriesUpdate ? ns.getTimeseriesViewNamespace()
-                                                                 : ns);
+        curOp.setNS(
+            lk,
+            (source == OperationSource::kTimeseriesUpdate && ns.isTimeseriesBucketsCollection())
+                ? ns.getTimeseriesViewNamespace()
+                : ns);
         curOp.setNetworkOp(lk, dbUpdate);
         curOp.setLogicalOp(lk, LogicalOp::opUpdate);
         curOp.setOpDescription(lk, op.toBSON());
@@ -1474,7 +1650,7 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
     request.setNamespaceString(ns);
     request.setLegacyRuntimeConstants(std::move(runtimeConstants));
     if (letParams) {
-        request.setLetParameters(std::move(letParams));
+        request.setLetParameters(letParams);
     }
     request.setBypassEmptyTsReplacement(bypassEmptyTsReplacement);
     request.setStmtIds(stmtIds);
@@ -1492,7 +1668,8 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
             bool containsDotsAndDollarsField = false;
             auto ret = performSingleUpdateOp(opCtx,
                                              ns,
-                                             opCollectionUUID,
+                                             preConditions,
+                                             wholeOp,
                                              &request,
                                              source,
                                              forgoOpCounterIncrements,
@@ -1508,7 +1685,7 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
             auto cq = uassertStatusOK(parseWriteQueryToCQ(opCtx, nullptr /* expCtx */, request));
 
             if (!write_ops_exec::shouldRetryDuplicateKeyException(
-                    request, *cq, *ex.extraInfo<DuplicateKeyErrorInfo>(), retryAttempts)) {
+                    opCtx, request, *cq, *ex.extraInfo<DuplicateKeyErrorInfo>(), retryAttempts)) {
                 throw;
             }
 
@@ -1518,6 +1695,15 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
                           retryAttempts,
                           "Caught DuplicateKey exception during upsert",
                           logAttrs(ns));
+        } catch (const ExceptionFor<ErrorCodes::CollectionUUIDMismatch>&) {
+            // In a time-series context, this particular CollectionUUIDMismatch is re-thrown
+            // differently because there is already a check for this error higher up, which means
+            // this error must come from the guards installed to enforce that time-series operations
+            // are prepared and committed on the same collection.
+            uassert(9748802,
+                    "Collection was changed during insert",
+                    source != OperationSource::kTimeseriesInsert);
+            throw;
         }
     }
 
@@ -1525,16 +1711,21 @@ static SingleWriteResult performSingleUpdateOpWithDupKeyRetry(
 }
 
 void runTimeseriesRetryableUpdates(OperationContext* opCtx,
-                                   const NamespaceString& bucketNs,
+                                   const NamespaceString& nss,
                                    const write_ops::UpdateCommandRequest& wholeOp,
+                                   const timeseries::CollectionPreConditions& preConditions,
                                    std::shared_ptr<executor::TaskExecutor> executor,
                                    write_ops_exec::WriteResult* reply) {
-    checkCollectionUUIDMismatch(
-        opCtx, bucketNs.getTimeseriesViewNamespace(), nullptr, wholeOp.getCollectionUUID());
-
+    if (preConditions.isLegacyTimeseriesCollection()) {
+        checkCollectionUUIDMismatch(opCtx,
+                                    preConditions.getTargetNs(nss).getTimeseriesViewNamespace(),
+                                    nullptr,
+                                    preConditions.expectedUUID());
+    }
     size_t nextOpIndex = 0;
     for (auto&& singleOp : wholeOp.getUpdates()) {
         auto singleUpdateOp = timeseries::write_ops::buildSingleUpdateOp(wholeOp, nextOpIndex);
+        singleUpdateOp.setCollectionUUID(preConditions.expectedUUID());
         const auto stmtId = write_ops::getStmtIdForWriteAt(wholeOp, nextOpIndex++);
 
         auto inlineExecutor = std::make_shared<executor::InlineExecutor>();
@@ -1571,7 +1762,7 @@ void runTimeseriesRetryableUpdates(OperationContext* opCtx,
         } catch (const DBException& ex) {
             reply->canContinue = handleError(opCtx,
                                              ex,
-                                             bucketNs,
+                                             preConditions.getTargetNs(nss),
                                              wholeOp.getOrdered(),
                                              singleOp.getMulti(),
                                              singleOp.getSampleId(),
@@ -1583,20 +1774,24 @@ void runTimeseriesRetryableUpdates(OperationContext* opCtx,
     }
 }
 
-WriteResult performUpdates(OperationContext* opCtx,
-                           const write_ops::UpdateCommandRequest& wholeOp,
-                           OperationSource source) {
-    auto ns = wholeOp.getNamespace();
-    NamespaceString originalNs;
-    if (source == OperationSource::kTimeseriesUpdate) {
-        originalNs = ns;
-        if (!ns.isTimeseriesBucketsCollection()) {
-            ns = ns.makeTimeseriesBucketsNamespace();
-        }
+WriteResult performUpdates(
+    OperationContext* opCtx,
+    const write_ops::UpdateCommandRequest& wholeOp,
+    boost::optional<const timeseries::CollectionPreConditions&> preConditionsOptional,
+    OperationSource source) {
 
-        checkCollectionUUIDMismatch(
-            opCtx, ns.getTimeseriesViewNamespace(), nullptr, wholeOp.getCollectionUUID());
-    }
+    tassert(10912000,
+            fmt::format("Performing a logical time-series update operation without passing in the "
+                        "CollectionPreConditions object with request on collection {}",
+                        wholeOp.getNamespace().toStringForErrorMsg()),
+            source != OperationSource::kTimeseriesUpdate || preConditionsOptional);
+
+    timeseries::CollectionPreConditions preConditions = preConditionsOptional
+        ? *preConditionsOptional
+        : timeseries::CollectionPreConditions::getCollectionPreConditions(
+              opCtx, wholeOp.getNamespace(), wholeOp.getCollectionUUID());
+
+    auto ns = preConditions.getTargetNs(wholeOp.getNamespace());
 
     // Update performs its own retries, so we should not be in a WriteUnitOfWork unless run in a
     // transaction.
@@ -1651,11 +1846,12 @@ WriteResult performUpdates(OperationContext* opCtx,
         if (opCtx->isRetryableWrite()) {
             if (auto entry =
                     txnParticipant.checkStatementExecutedAndFetchOplogEntry(opCtx, stmtId)) {
-                // For non-sharded user time-series updates, handles the metrics of the command at
-                // the caller since each statement will run as a command through the internal
-                // transaction API.
+                // Set containsRetry to true for all types of operations except for user-facing
+                // time-series updates on a non-sharded cluster. For non-sharded user time-series
+                // updates, handles the metrics of the command at the caller since each statement
+                // will run as a command through the internal transaction API.
                 containsRetry = source != OperationSource::kTimeseriesUpdate ||
-                    originalNs.isTimeseriesBucketsCollection();
+                    !preConditions.getIsTimeseriesLogicalRequest() || wholeOp.getShardVersion();
                 RetryableWritesStats::get(opCtx)->incrementRetriedStatementsCount();
                 // Returns the '_id' of the user measurement for time-series upserts.
                 boost::optional<BSONElement> upsertedId;
@@ -1712,9 +1908,10 @@ WriteResult performUpdates(OperationContext* opCtx,
             const SingleWriteResult&& reply =
                 performSingleUpdateOpWithDupKeyRetry(opCtx,
                                                      ns,
-                                                     wholeOp.getCollectionUUID(),
                                                      stmtIds,
+                                                     wholeOp,
                                                      singleOp,
+                                                     preConditions,
                                                      runtimeConstants,
                                                      wholeOp.getLet(),
                                                      wholeOp.getBypassEmptyTsReplacement(),
@@ -1730,14 +1927,7 @@ WriteResult performUpdates(OperationContext* opCtx,
                 collectMultiUpdateDeleteMetrics(timer->elapsed(), reply.getNModified());
             }
         } catch (const ExceptionFor<ErrorCodes::TimeseriesBucketCompressionFailed>& ex) {
-            // Do not handle errors for time-series bucket compressions. They need to be transparent
-            // to users to not interfere with any decisions around operation retry. It is OK to
-            // leave bucket uncompressed in these edge cases. We just record the status to the
-            // result vector so we can keep track of statistics for failed bucket compressions.
-            if (source == OperationSource::kTimeseriesBucketCompression) {
-                out.results.emplace_back(ex.toStatus());
-                break;
-            } else if (source == OperationSource::kTimeseriesInsert) {
+            if (source == OperationSource::kTimeseriesInsert) {
                 // Special case for failed attempt to compress a reopened bucket.
                 throw;
             } else if (source == OperationSource::kTimeseriesUpdate) {
@@ -1763,14 +1953,6 @@ WriteResult performUpdates(OperationContext* opCtx,
                 break;
             }
         } catch (const DBException& ex) {
-            // Do not handle errors for time-series bucket compressions. They need to be transparent
-            // to users to not interfere with any decisions around operation retry. It is OK to
-            // leave bucket uncompressed in these edge cases. We just record the status to the
-            // result vector so we can keep track of statistics for failed bucket compressions.
-            if (source == OperationSource::kTimeseriesBucketCompression) {
-                out.results.emplace_back(ex.toStatus());
-                break;
-            }
             out.canContinue = handleError(opCtx,
                                           ex,
                                           ns,
@@ -1787,14 +1969,15 @@ WriteResult performUpdates(OperationContext* opCtx,
     return out;
 }
 
-static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
-                                               const NamespaceString& ns,
-                                               const boost::optional<mongo::UUID>& opCollectionUUID,
-                                               StmtId stmtId,
-                                               const write_ops::DeleteOpEntry& op,
-                                               const LegacyRuntimeConstants& runtimeConstants,
-                                               const boost::optional<BSONObj>& letParams,
-                                               OperationSource source) {
+static SingleWriteResult performSingleDeleteOp(
+    OperationContext* opCtx,
+    const NamespaceString& ns,
+    StmtId stmtId,
+    const write_ops::DeleteOpEntry& op,
+    const LegacyRuntimeConstants& runtimeConstants,
+    const boost::optional<BSONObj>& letParams,
+    const timeseries::CollectionPreConditions& preConditions,
+    OperationSource source) {
     uassert(ErrorCodes::InvalidOptions,
             "Cannot use (or request) retryable writes with limit=0",
             !opCtx->isRetryableWrite() || !op.getMulti() || stmtId == kUninitializedStmtId);
@@ -1805,8 +1988,10 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
         curOp.setNS(lk,
-                    source == OperationSource::kTimeseriesDelete ? ns.getTimeseriesViewNamespace()
-                                                                 : ns);
+                    (preConditions.isLegacyTimeseriesCollection() &&
+                             source == OperationSource::kTimeseriesDelete
+                         ? ns.getTimeseriesViewNamespace()
+                         : ns));
         curOp.setNetworkOp(lk, dbDelete);
         curOp.setLogicalOp(lk, LogicalOp::opDelete);
         curOp.setOpDescription(lk, op.toBSON());
@@ -1831,21 +2016,28 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
                   "Batch remove - hangDuringBatchRemove fail point enabled. Blocking until fail "
                   "point is disabled");
         });
-    if (auto scoped = failAllRemoves.scoped(); MONGO_unlikely(scoped.isActive())) {
-        tassert(9276704,
-                "failAllRemoves failpoint active!",
-                !scoped.getData().hasField("tassert") || !scoped.getData().getBoolField("tassert"));
-        uasserted(ErrorCodes::InternalError, "failAllRemoves failpoint active!");
-    }
 
     auto acquisitionRequest = CollectionAcquisitionRequest::fromOpCtx(
-        opCtx, ns, AcquisitionPrerequisites::kWrite, opCollectionUUID);
+        opCtx, ns, AcquisitionPrerequisites::kWrite, preConditions.expectedUUID());
     const auto collection = acquireCollection(
         opCtx, acquisitionRequest, fixLockModeForSystemDotViewsChanges(ns, MODE_IX));
+    timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
+        opCtx, preConditions, collection);
+
+    // Create an RAII object that prints the collection's shard key in the case of a tassert
+    // or crash.
+    ScopedDebugInfo shardKeyDiagnostics(
+        "ShardKeyDiagnostics",
+        diagnostic_printers::ShardKeyDiagnosticPrinter{
+            collection.getShardingDescription().isSharded()
+                ? collection.getShardingDescription().getKeyPattern()
+                : BSONObj()});
 
     if (source == OperationSource::kTimeseriesDelete) {
-        timeseries::timeseriesRequestChecks<DeleteRequest>(
-            collection.getCollectionPtr(), &request, timeseries::deleteRequestCheckFunction);
+        timeseries::timeseriesRequestChecks<DeleteRequest>(VersionContext::getDecoration(opCtx),
+                                                           collection.getCollectionPtr(),
+                                                           &request,
+                                                           timeseries::deleteRequestCheckFunction);
         timeseries::timeseriesHintTranslation<DeleteRequest>(collection.getCollectionPtr(),
                                                              &request);
     }
@@ -1855,6 +2047,18 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
                               collection.getCollectionPtr(),
                               source == OperationSource::kTimeseriesDelete);
     uassertStatusOK(parsedDelete.parseRequest());
+
+    // Create an RAII object that prints useful information about the ExpressionContext in the case
+    // of a tassert or crash.
+    ScopedDebugInfo expCtxDiagnostics(
+        "ExpCtxDiagnostics", diagnostic_printers::ExpressionContextPrinter{parsedDelete.expCtx()});
+
+    if (auto scoped = failAllRemoves.scoped(); MONGO_unlikely(scoped.isActive())) {
+        tassert(9276704,
+                "failAllRemoves failpoint active!",
+                !scoped.getData().hasField("tassert") || !scoped.getData().getBoolField("tassert"));
+        uasserted(ErrorCodes::InternalError, "failAllRemoves failpoint active!");
+    }
 
     if (DatabaseHolder::get(opCtx)->getDb(opCtx, ns.dbName())) {
         curOp.raiseDbProfileLevel(DatabaseProfileSettings::get(opCtx->getServiceContext())
@@ -1868,6 +2072,9 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
 
     auto exec = uassertStatusOK(
         getExecutorDelete(&curOp.debug(), collection, &parsedDelete, boost::none /* verbosity */));
+    // Capture diagnostics to be logged in the case of a failure.
+    ScopedDebugInfo explainDiagnostics("explainDiagnostics",
+                                       diagnostic_printers::ExplainDiagnosticPrinter{exec.get()});
 
     {
         stdx::lock_guard<Client> lk(*opCtx->getClient());
@@ -1881,7 +2088,11 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
     auto&& explainer = exec->getPlanExplainer();
     explainer.getSummaryStats(&summary);
     if (const auto& coll = collection.getCollectionPtr()) {
-        CollectionQueryInfo::get(coll).notifyOfQuery(opCtx, coll, summary);
+        CollectionIndexUsageTrackerDecoration::recordCollectionIndexUsage(
+            coll.get(),
+            summary.collectionScans,
+            summary.collectionScansNonTailable,
+            summary.indexesUsed);
     }
     curOp.debug().setPlanSummaryMetrics(std::move(summary));
 
@@ -1895,19 +2106,18 @@ static SingleWriteResult performSingleDeleteOp(OperationContext* opCtx,
     return result;
 }
 
-WriteResult performDeletes(OperationContext* opCtx,
-                           const write_ops::DeleteCommandRequest& wholeOp,
-                           OperationSource source) {
-    auto ns = wholeOp.getNamespace();
-    if (source == OperationSource::kTimeseriesDelete) {
-        if (!ns.isTimeseriesBucketsCollection()) {
-            ns = ns.makeTimeseriesBucketsNamespace();
-        }
+WriteResult performDeletes(
+    OperationContext* opCtx,
+    const write_ops::DeleteCommandRequest& wholeOp,
+    boost::optional<const timeseries::CollectionPreConditions&> preConditionsOptional,
+    OperationSource source) {
 
-        checkCollectionUUIDMismatch(
-            opCtx, ns.getTimeseriesViewNamespace(), nullptr, wholeOp.getCollectionUUID());
-    }
+    timeseries::CollectionPreConditions preConditions = preConditionsOptional
+        ? *preConditionsOptional
+        : timeseries::CollectionPreConditions::getCollectionPreConditions(
+              opCtx, wholeOp.getNamespace(), wholeOp.getCollectionUUID());
 
+    auto ns = preConditions.getTargetNs(wholeOp.getNamespace());
     // Delete performs its own retries, so we should not be in a WriteUnitOfWork unless we are in a
     // transaction.
     auto txnParticipant = TransactionParticipant::get(opCtx);
@@ -1995,11 +2205,11 @@ WriteResult performDeletes(OperationContext* opCtx,
 
             const SingleWriteResult&& reply = performSingleDeleteOp(opCtx,
                                                                     ns,
-                                                                    wholeOp.getCollectionUUID(),
                                                                     stmtId,
                                                                     singleOp,
                                                                     runtimeConstants,
                                                                     wholeOp.getLet(),
+                                                                    preConditions,
                                                                     source);
             out.results.push_back(reply);
             lastOpFixer.finishedOpSuccessfully();
@@ -2030,7 +2240,7 @@ WriteResult performDeletes(OperationContext* opCtx,
 }
 
 void recordUpdateResultInOpDebug(const UpdateResult& updateResult, OpDebug* opDebug) {
-    invariant(opDebug);
+    tassert(11052015, "Expected non-null OpDebug pointer", opDebug);
     opDebug->additiveMetrics.nMatched = updateResult.numMatched;
     opDebug->additiveMetrics.nModified = updateResult.numDocsModified;
     opDebug->additiveMetrics.nUpserted = static_cast<long long>(!updateResult.upsertedId.isEmpty());
@@ -2060,12 +2270,21 @@ bool matchContainsOnlyAndedEqualityNodes(const MatchExpression& root) {
 }
 }  // namespace
 
-bool shouldRetryDuplicateKeyException(const UpdateRequest& updateRequest,
+bool shouldRetryDuplicateKeyException(OperationContext* opCtx,
+                                      const UpdateRequest& updateRequest,
                                       const CanonicalQuery& cq,
                                       const DuplicateKeyErrorInfo& errorInfo,
                                       int retryAttempts) {
     // In order to be retryable, the update must be an upsert with multi:false.
     if (!updateRequest.isUpsert() || updateRequest.isMulti()) {
+        return false;
+    }
+
+    // In multi document transactions, there is an outer WriteUnitOfWork and inner WriteUnitOfWork.
+    // The inner WriteUnitOfWork exists per-document. Aborting the inner one necessitates aborting
+    // the outer one. Otherwise, retrying the inner one will read the writes of the
+    // previously-aborted inner WriteUnitOfWork.
+    if (opCtx->inMultiDocumentTransaction()) {
         return false;
     }
 
@@ -2084,7 +2303,7 @@ bool shouldRetryDuplicateKeyException(const UpdateRequest& updateRequest,
     }
 
     auto matchExpr = cq.getPrimaryMatchExpression();
-    invariant(matchExpr);
+    tassert(11052016, "Expected a match expression", matchExpr);
 
     // In order to be retryable, the update query must contain no expressions other than AND and EQ.
     if (!matchContainsOnlyAndedEqualityNodes(*matchExpr)) {
@@ -2100,7 +2319,7 @@ bool shouldRetryDuplicateKeyException(const UpdateRequest& updateRequest,
         return false;
     }
 
-    auto keyPattern = errorInfo.getKeyPattern();
+    const auto& keyPattern = errorInfo.getKeyPattern();
     if (equalities.size() != static_cast<size_t>(keyPattern.nFields())) {
         return false;
     }
@@ -2122,7 +2341,7 @@ bool shouldRetryDuplicateKeyException(const UpdateRequest& updateRequest,
         }
     }
 
-    auto keyValue = errorInfo.getDuplicatedKeyValue();
+    const auto& keyValue = errorInfo.getDuplicatedKeyValue();
 
     BSONObjIterator keyPatternIter(keyPattern);
     BSONObjIterator keyValueIter(keyValue);
@@ -2139,8 +2358,8 @@ bool shouldRetryDuplicateKeyException(const UpdateRequest& updateRequest,
 
         // If the index have collation and we are comparing strings, we need to compare
         // ComparisonStrings instead of the raw value to respect collation.
-        if (!indexHasSimpleCollator && equalityElem.type() == mongo::String) {
-            if (keyValueElem.type() != BSONType::String) {
+        if (!indexHasSimpleCollator && equalityElem.type() == BSONType::string) {
+            if (keyValueElem.type() != BSONType::string) {
                 return false;
             }
             auto equalityComparisonString =
@@ -2156,8 +2375,12 @@ bool shouldRetryDuplicateKeyException(const UpdateRequest& updateRequest,
             }
         }
     }
-    invariant(!keyPatternIter.more());
-    invariant(!keyValueIter.more());
+    tassert(11052017,
+            fmt::format("Expected number of elements in keyPattern {} to match number of elements "
+                        "in keyValue {}",
+                        keyPattern.toString(),
+                        keyValue.toString()),
+            !keyPatternIter.more() && !keyValueIter.more());
 
     return true;
 }
@@ -2167,6 +2390,7 @@ void explainUpdate(OperationContext* opCtx,
                    bool isTimeseriesViewRequest,
                    const SerializationContext& serializationContext,
                    const BSONObj& command,
+                   const timeseries::CollectionPreConditions& preConditions,
                    ExplainOptions::Verbosity verbosity,
                    rpc::ReplyBuilderInterface* result) {
 
@@ -2174,13 +2398,20 @@ void explainUpdate(OperationContext* opCtx,
     // info is more accurate.
     const auto collection = acquireCollection(
         opCtx,
-        CollectionAcquisitionRequest::fromOpCtx(
-            opCtx, updateRequest.getNamespaceString(), AcquisitionPrerequisites::kWrite),
+        CollectionAcquisitionRequest::fromOpCtx(opCtx,
+                                                updateRequest.getNamespaceString(),
+                                                AcquisitionPrerequisites::kWrite,
+                                                preConditions.expectedUUID()),
         MODE_IX);
 
+    timeseries::CollectionPreConditions::checkAcquisitionAgainstPreConditions(
+        opCtx, preConditions, collection);
+
     if (isTimeseriesViewRequest) {
-        timeseries::timeseriesRequestChecks<UpdateRequest>(
-            collection.getCollectionPtr(), &updateRequest, timeseries::updateRequestCheckFunction);
+        timeseries::timeseriesRequestChecks<UpdateRequest>(VersionContext::getDecoration(opCtx),
+                                                           collection.getCollectionPtr(),
+                                                           &updateRequest,
+                                                           timeseries::updateRequestCheckFunction);
         timeseries::timeseriesHintTranslation<UpdateRequest>(collection.getCollectionPtr(),
                                                              &updateRequest);
     }
@@ -2196,8 +2427,11 @@ void explainUpdate(OperationContext* opCtx,
         getExecutorUpdate(&CurOp::get(opCtx)->debug(), collection, &parsedUpdate, verbosity));
     auto bodyBuilder = result->getBodyBuilder();
 
+    // Capture diagnostics to be logged in the case of a failure.
+    ScopedDebugInfo explainDiagnostics("explainDiagnostics",
+                                       diagnostic_printers::ExplainDiagnosticPrinter{exec.get()});
     Explain::explainStages(exec.get(),
-                           collection.getCollectionPtr(),
+                           collection,
                            verbosity,
                            BSONObj(),
                            SerializationContext::stateCommandReply(serializationContext),
@@ -2210,19 +2444,24 @@ void explainDelete(OperationContext* opCtx,
                    bool isTimeseriesViewRequest,
                    const SerializationContext& serializationContext,
                    const BSONObj& command,
+                   const timeseries::CollectionPreConditions& preConditions,
                    ExplainOptions::Verbosity verbosity,
                    rpc::ReplyBuilderInterface* result) {
     // Explains of write commands are read-only, but we take write locks so that timing
     // info is more accurate.
     const auto collection =
         acquireCollection(opCtx,
-                          CollectionAcquisitionRequest::fromOpCtx(
-                              opCtx, deleteRequest.getNsString(), AcquisitionPrerequisites::kWrite),
+                          CollectionAcquisitionRequest::fromOpCtx(opCtx,
+                                                                  deleteRequest.getNsString(),
+                                                                  AcquisitionPrerequisites::kWrite,
+                                                                  preConditions.expectedUUID()),
                           MODE_IX);
 
     if (isTimeseriesViewRequest) {
-        timeseries::timeseriesRequestChecks<DeleteRequest>(
-            collection.getCollectionPtr(), &deleteRequest, timeseries::deleteRequestCheckFunction);
+        timeseries::timeseriesRequestChecks<DeleteRequest>(VersionContext::getDecoration(opCtx),
+                                                           collection.getCollectionPtr(),
+                                                           &deleteRequest,
+                                                           timeseries::deleteRequestCheckFunction);
         timeseries::timeseriesHintTranslation<DeleteRequest>(collection.getCollectionPtr(),
                                                              &deleteRequest);
     }
@@ -2236,8 +2475,11 @@ void explainDelete(OperationContext* opCtx,
         getExecutorDelete(&CurOp::get(opCtx)->debug(), collection, &parsedDelete, verbosity));
     auto bodyBuilder = result->getBodyBuilder();
 
+    // Capture diagnostics to be logged in the case of a failure.
+    ScopedDebugInfo explainDiagnostics("explainDiagnostics",
+                                       diagnostic_printers::ExplainDiagnosticPrinter{exec.get()});
     Explain::explainStages(exec.get(),
-                           collection.getCollectionPtr(),
+                           collection,
                            verbosity,
                            BSONObj(),
                            SerializationContext::stateCommandReply(serializationContext),

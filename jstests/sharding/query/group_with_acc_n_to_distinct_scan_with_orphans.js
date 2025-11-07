@@ -9,15 +9,12 @@
  *   expects_explicit_underscore_id_index,
  *   # Index filter commands do not support causal consistency.
  *   does_not_support_causal_consistency,
+ *   requires_fcv_82
  * ]
  */
 
-import {
-    prepareShardedCollectionWithOrphans
-} from "jstests/libs/query/group_to_distinct_scan_utils.js";
-import {
-    runGroupWithAccNToDistinctScanTests
-} from "jstests/libs/query/group_with_acc_n_to_distinct_scan.js";
+import {prepareShardedCollectionWithOrphans} from "jstests/libs/query/group_to_distinct_scan_utils.js";
+import {runGroupWithAccNToDistinctScanTests} from "jstests/libs/query/group_with_acc_n_to_distinct_scan.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 TestData.skipCheckOrphans = true;

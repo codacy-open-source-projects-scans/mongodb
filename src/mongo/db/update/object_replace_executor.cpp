@@ -27,9 +27,7 @@
  *    it in the license file.
  */
 
-#include <cstddef>
-#include <map>
-
+#include "mongo/db/update/object_replace_executor.h"
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
@@ -37,20 +35,22 @@
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/mutable/document.h"
-#include "mongo/bson/mutable/element.h"
+#include "mongo/bson/dotted_path/dotted_path_support.h"
 #include "mongo/bson/timestamp.h"
+#include "mongo/db/exec/mutable_bson/document.h"
+#include "mongo/db/exec/mutable_bson/element.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/field_ref_set.h"
 #include "mongo/db/logical_time.h"
-#include "mongo/db/query/bson/dotted_path_support.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/update/object_replace_executor.h"
 #include "mongo/db/update/storage_validation.h"
 #include "mongo/db/update/update_oplog_entry_serialization.h"
-#include "mongo/db/vector_clock_mutable.h"
+#include "mongo/db/vector_clock/vector_clock_mutable.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <cstddef>
+#include <map>
 
 namespace mongo {
 
@@ -75,7 +75,7 @@ ObjectReplaceExecutor::ObjectReplaceExecutor(BSONObj replacement, bool bypassEmp
         // exactly as it was recorded (even if it contains zero-valued timestamps). Therefore,
         // we should only replace zero-valued timestamps with the current time when
         // '_bypassEmptyTsReplacement' is false.
-        if (!_bypassEmptyTsReplacement && elem.type() == BSONType::bsonTimestamp) {
+        if (!_bypassEmptyTsReplacement && elem.type() == BSONType::timestamp) {
             auto timestampView = DataView(const_cast<char*>(elem.value()));
 
             // We don't need to do an endian-safe read here, because 0 is 0 either way.
@@ -148,11 +148,10 @@ UpdateExecutor::ApplyResult ObjectReplaceExecutor::applyReplacementUpdate(
                         << "After applying the update to the document, the (immutable) field '"
                         << (*path)->dottedField()
                         << "' was found to be an array or array descendant.",
-                    newElem.getType() != BSONType::Array);
+                    newElem.getType() != BSONType::array);
         }
 
-        auto oldElem =
-            dotted_path_support::extractElementAtPath(originalDoc, (*path)->dottedField());
+        auto oldElem = bson::extractElementAtDottedPath(originalDoc, (*path)->dottedField());
 
         uassert(ErrorCodes::ImmutableField,
                 str::stream() << "After applying the update, the '" << (*path)->dottedField()

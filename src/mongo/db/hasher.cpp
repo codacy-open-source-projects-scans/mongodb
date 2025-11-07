@@ -33,15 +33,15 @@
 
 #include "mongo/db/hasher.h"
 
-#include <cstddef>
-#include <memory>
-
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/platform/endian.h"
 #include "mongo/util/md5.h"
+
+#include <cstddef>
+#include <memory>
 
 namespace mongo {
 
@@ -55,7 +55,7 @@ class Hasher {
 
 public:
     explicit Hasher(HashSeed seed);
-    ~Hasher(){};
+    ~Hasher() {};
 
     // pointer to next part of input key, length in bytes to read
     void addData(const void* keyData, size_t numBytes);
@@ -81,16 +81,15 @@ private:
     void addIntegerData(T number);
 
     md5_state_t _md5State;
-    HashSeed _seed;
 };
 
-Hasher::Hasher(HashSeed seed) : _seed(seed) {
-    md5_init_state(&_md5State);
+Hasher::Hasher(HashSeed seed) {
+    md5_init_state_deprecated(&_md5State);
     addSeed(seed);
 }
 
 void Hasher::addData(const void* keyData, size_t numBytes) {
-    md5_append(&_md5State, static_cast<const md5_byte_t*>(keyData), numBytes);
+    md5_append_deprecated(&_md5State, static_cast<const md5_byte_t*>(keyData), numBytes);
 }
 
 template <typename T>
@@ -100,7 +99,7 @@ void Hasher::addIntegerData(T number) {
 }
 
 void Hasher::finish(HashDigest out) {
-    md5_finish(&_md5State, out);
+    md5_finish_deprecated(&_md5State, out);
 }
 
 void recursiveHash(Hasher* h, const BSONElement& e, bool includeFieldName) {
@@ -126,7 +125,7 @@ void recursiveHash(Hasher* h, const BSONElement& e, bool includeFieldName) {
         // then each sub-element
         // then finish with the EOO element.
         BSONObj b;
-        if (e.type() == CodeWScope) {
+        if (e.type() == BSONType::codeWScope) {
             h->addData(e.codeWScopeCode(), e.codeWScopeCodeLen());
             b = e.codeWScopeObject();
         } else {

@@ -27,24 +27,22 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <string>
-#include <tuple>
-#include <utility>
-#include <vector>
+#include "mongo/db/s/range_deletion_util.h"
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/create_collection.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/type_collection_common_types_gen.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/create_collection.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_metadata.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_runtime.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/persistent_task_store.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -52,26 +50,28 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
-#include "mongo/db/s/collection_metadata.h"
-#include "mongo/db/s/collection_sharding_runtime.h"
-#include "mongo/db/s/migration_util.h"
-#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/range_deletion_task_gen.h"
-#include "mongo/db/s/range_deletion_util.h"
-#include "mongo/db/s/shard_server_test_fixture.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/db/vector_clock.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/sharding_environment/shard_server_test_fixture.h"
+#include "mongo/db/vector_clock/vector_clock.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/database_version.h"
 #include "mongo/executor/thread_pool_task_executor.h"
 #include "mongo/platform/random.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/database_version.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
-#include "mongo/s/type_collection_common_types_gen.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
+
+#include <cstdint>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -101,24 +101,15 @@ public:
         });
         repl::ReplicationCoordinator::set(getServiceContext(), std::move(replCoord));
 
-        {
-            OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
-                unsafeCreateCollection(_opCtx);
-            uassertStatusOK(createCollection(_opCtx, kNss.dbName(), BSON("create" << kNss.coll())));
-        }
+        createTestCollection(_opCtx, kNss);
 
         AutoGetCollection autoColl(_opCtx, kNss, MODE_IX);
-        _uuid = autoColl.getCollection()->uuid();
+        _uuid = autoColl->uuid();
     }
 
     void tearDown() override {
         DBDirectClient client(_opCtx);
         client.dropCollection(kNss);
-
-        while (migrationutil::getMigrationUtilExecutor(getServiceContext())->hasTasks()) {
-            continue;
-        }
-
         WaitForMajorityService::get(getServiceContext()).shutDown();
         ShardServerTestFixture::tearDown();
     }
@@ -143,10 +134,7 @@ public:
                        ChunkRange{BSON(kShardKey << MINKEY), BSON(kShardKey << MAXKEY)},
                        ChunkVersion({epoch, Timestamp(1, 1)}, {1, 0}),
                        ShardId("dummyShardId")}});
-        ChunkManager cm(ShardId("dummyShardId"),
-                        DatabaseVersion(UUID::gen(), Timestamp(1, 1)),
-                        makeStandaloneRoutingTableHistory(std::move(rt)),
-                        boost::none);
+        ChunkManager cm(makeStandaloneRoutingTableHistory(std::move(rt)), boost::none);
         AutoGetDb autoDb(_opCtx, kNss.dbName(), MODE_IX);
         Lock::CollectionLock collLock(_opCtx, kNss, MODE_IX);
         CollectionShardingRuntime::assertCollectionLockedAndAcquireExclusive(_opCtx, kNss)
@@ -648,5 +636,40 @@ TEST_F(RenameRangeDeletionsTest, TestInvalidUUID) {
         store.count(opCtx, rangedeletionutil::overlappingRangeDeletionsQuery(range, wrongUuid));
     ASSERT_EQ(results, 0);
     ASSERT_FALSE(rangedeletionutil::checkForConflictingDeletions(opCtx, range, wrongUuid));
+}
+
+/**
+ * Test helper functions to set and unset preMigrationShardVersion field for Upgrade/Downgrade.
+ *
+ * TODO SERVER-103046: Remove once 9.0 becomes last lts.
+ */
+TEST_F(RangeDeleterTest, PreMigrationShardVersionUpgradeDowngradeTest) {
+    auto opCtx = operationContext();
+    const auto uuid = UUID::gen();
+    PersistentTaskStore<RangeDeletionTask> store(NamespaceString::kRangeDeletionNamespace);
+
+    store.add(opCtx,
+              createDeletionTask(
+                  opCtx, NamespaceString::createNamespaceString_forTest("one"), uuid, 0, 10));
+    store.add(opCtx,
+              createDeletionTask(
+                  opCtx, NamespaceString::createNamespaceString_forTest("two"), uuid, 10, 20));
+    store.add(opCtx,
+              createDeletionTask(
+                  opCtx, NamespaceString::createNamespaceString_forTest("three"), uuid, 40, 50));
+
+    ASSERT_EQ(store.count(opCtx), 3);
+
+    store.forEach(opCtx, BSONObj(), [&](const RangeDeletionTask& rangeDeletionTask) {
+        ASSERT_FALSE(rangeDeletionTask.getPreMigrationShardVersion().has_value());
+        return true;
+    });
+
+    rangedeletionutil::setPreMigrationShardVersionOnRangeDeletionTasks(opCtx);
+    store.forEach(opCtx, BSONObj(), [&](const RangeDeletionTask& rangeDeletionTask) {
+        ASSERT(rangeDeletionTask.getPreMigrationShardVersion().has_value());
+        ASSERT_EQ(ChunkVersion::IGNORED(), rangeDeletionTask.getPreMigrationShardVersion().get());
+        return true;
+    });
 }
 }  // namespace mongo

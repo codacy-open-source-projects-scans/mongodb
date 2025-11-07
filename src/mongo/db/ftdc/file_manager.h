@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <boost/filesystem/path.hpp>
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <tuple>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -44,8 +37,16 @@
 #include "mongo/db/ftdc/config.h"
 #include "mongo/db/ftdc/file_writer.h"
 #include "mongo/db/ftdc/util.h"
-#include "mongo/db/jsobj.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <vector>
+
+#include <boost/filesystem/path.hpp>
 
 namespace mongo {
 
@@ -73,12 +74,10 @@ public:
      * Recovers data from the interim file as needed.
      * Rotates files if needed.
      */
-    static StatusWith<std::unique_ptr<FTDCFileManager>> create(
-        const FTDCConfig* config,
-        const boost::filesystem::path& path,
-        FTDCCollectorCollection* collection,
-        Client* client,
-        UseMultiServiceSchema multiServiceSchema);
+    static StatusWith<std::unique_ptr<FTDCFileManager>> create(const FTDCConfig* config,
+                                                               const boost::filesystem::path& path,
+                                                               FTDCCollectorCollection* collection,
+                                                               Client* client);
 
     /**
      * Rotates files
@@ -112,8 +111,7 @@ public:
 private:
     FTDCFileManager(const FTDCConfig* config,
                     const boost::filesystem::path& path,
-                    FTDCCollectorCollection* collection,
-                    UseMultiServiceSchema multiServiceSchema);
+                    FTDCCollectorCollection* collection);
 
     /**
      * Gets a list of metrics files in a directory.
@@ -166,9 +164,6 @@ private:
 
     // collection of collectors to add to new files on rotation, and server restart
     FTDCCollectorCollection* const _rotateCollectors;
-
-    // Whether or not to use the multiversion schema for FTDC file output
-    UseMultiServiceSchema _multiServiceSchema;
 };
 
 }  // namespace mongo

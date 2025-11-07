@@ -27,16 +27,17 @@
  *    it in the license file.
  */
 
-#include <limits>
-#include <list>
+#include "mongo/db/operation_id.h"
 
 #include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/operation_id.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/testing_proctor.h"
+
+#include <limits>
+#include <list>
 
 namespace mongo {
 
@@ -44,7 +45,7 @@ namespace {
 const auto getOperationIdManager = ServiceContext::declareDecoration<OperationIdManager>();
 }  // namespace
 
-OperationIdManager& OperationIdManager::get(ServiceContext* svcCtx) noexcept {
+OperationIdManager& OperationIdManager::get(ServiceContext* svcCtx) {
     return (*svcCtx)[getOperationIdManager];
 }
 
@@ -102,7 +103,7 @@ namespace {
 const auto getClientState = Client::declareDecoration<ClientState>();
 }  // namespace
 
-OperationId OperationIdManager::issueForClient(Client* client) noexcept {
+OperationId OperationIdManager::issueForClient(Client* client) {
     auto getLease = [this, client](Lease* oldLease) {
         stdx::lock_guard lk(_mutex);
         auto lease = _pool->lease(lk);

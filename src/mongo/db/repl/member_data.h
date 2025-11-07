@@ -29,27 +29,28 @@
 
 #pragma once
 
-#include <string>
-
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/repl/member_id.h"
 #include "mongo/db/repl/member_state.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/repl_set_heartbeat_response.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 
-namespace mongo {
+#include <string>
+
+namespace MONGO_MOD_PUB mongo {
 namespace repl {
 
 /**
  * This class contains the data from heartbeat responses and replSetUpdatePosition commands for one
  * member of a replica set.
  **/
-class MemberData {
+class MONGO_MOD_PUB MemberData {
 public:
-    class HeartbeatChanges {
+    class MONGO_MOD_PARENT_PRIVATE HeartbeatChanges {
     public:
         HeartbeatChanges(bool opTimeAdvanced, bool configChanged, bool memberStateChanged)
             : _opTimeAdvanced(opTimeAdvanced),
@@ -376,4 +377,4 @@ private:
 };
 
 }  // namespace repl
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

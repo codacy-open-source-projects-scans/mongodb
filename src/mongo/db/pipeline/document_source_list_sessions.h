@@ -29,15 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <string>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -56,6 +47,16 @@
 #include "mongo/db/tenant_id.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -81,10 +82,17 @@ public:
 
     static constexpr StringData kStageName = "$listSessions"_sd;
 
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
+    }
+
     class LiteParsed final : public LiteParsedDocumentSource {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
-                                                 const BSONElement& spec) {
+                                                 const BSONElement& spec,
+                                                 const LiteParserOptions& options) {
             return std::make_unique<LiteParsed>(
                 spec.fieldName(),
                 nss.tenantId(),
@@ -107,6 +115,10 @@ public:
             return _privileges;
         }
 
+        bool requiresAuthzChecks() const override {
+            return false;
+        }
+
         bool isInitialSource() const final {
             return true;
         }
@@ -117,20 +129,23 @@ public:
     };
 
     const char* getSourceName() const final {
-        return DocumentSourceListSessions::kStageName.rawData();
+        return DocumentSourceListSessions::kStageName.data();
     }
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final;
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
-        return {StreamType::kStreaming,
-                PositionRequirement::kFirst,
-                HostTypeRequirement::kNone,
-                DiskUseRequirement::kNoDiskUse,
-                FacetRequirement::kNotAllowed,
-                TransactionRequirement::kNotAllowed,
-                LookupRequirement::kAllowed,
-                UnionRequirement::kAllowed};
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
+        StageConstraints constraints(StreamType::kStreaming,
+                                     PositionRequirement::kFirst,
+                                     HostTypeRequirement::kNone,
+                                     DiskUseRequirement::kNoDiskUse,
+                                     FacetRequirement::kNotAllowed,
+                                     TransactionRequirement::kNotAllowed,
+                                     LookupRequirement::kAllowed,
+                                     UnionRequirement::kAllowed);
+
+        constraints.consumesLogicalCollectionData = false;
+        return constraints;
     }
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(

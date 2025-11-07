@@ -29,22 +29,19 @@
 
 #pragma once
 
-#include <cmath>
-#include <memory>
-#include <utility>
-
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/pipeline/accumulator.h"
-#include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/window_function/window_function.h"
 #include "mongo/db/pipeline/window_function/window_function_sum.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/modules.h"
+
+#include <cmath>
+#include <memory>
+#include <utility>
 
 namespace mongo {
 
@@ -83,17 +80,17 @@ public:
         }
         Value sum = RemovableSum::getValue(current);
         switch (sum.getType()) {
-            case NumberInt:
-            case NumberLong:
+            case BSONType::numberInt:
+            case BSONType::numberLong:
                 return Value(sum.coerceToDouble() / static_cast<double>(_count));
-            case NumberDouble: {
+            case BSONType::numberDouble: {
                 double internalSum = sum.getDouble();
                 if (std::isnan(internalSum) || std::isinf(internalSum)) {
                     return sum;
                 }
                 return Value(internalSum / static_cast<double>(_count));
             }
-            case NumberDecimal: {
+            case BSONType::numberDecimal: {
                 Decimal128 internalSum = sum.getDecimal();
                 if (internalSum.isNaN() || internalSum.isInfinite()) {
                     return sum;

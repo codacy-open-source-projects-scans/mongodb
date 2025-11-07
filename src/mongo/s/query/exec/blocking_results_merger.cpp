@@ -27,17 +27,16 @@
  *    it in the license file.
  */
 
-#include <future>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/s/query/exec/blocking_results_merger.h"
 
 #include "mongo/db/curop.h"
 #include "mongo/db/query/find_common.h"
-#include "mongo/s/query/exec/blocking_results_merger.h"
+#include "mongo/s/query/exec/next_high_watermark_determining_strategy.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/decorable.h"
 #include "mongo/util/scopeguard.h"
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -47,11 +46,23 @@ BlockingResultsMerger::BlockingResultsMerger(OperationContext* opCtx,
                                              std::unique_ptr<ResourceYielder> resourceYielder)
     : _tailableMode(armParams.getTailableMode().value_or(TailableModeEnum::kNormal)),
       _executor(executor),
-      _arm(opCtx, std::move(executor), std::move(armParams)),
+      _arm(AsyncResultsMerger::create(opCtx, std::move(executor), std::move(armParams))),
       _resourceYielder(std::move(resourceYielder)) {}
 
+BlockingResultsMerger::~BlockingResultsMerger() = default;
+
 const AsyncResultsMergerParams& BlockingResultsMerger::asyncResultsMergerParams() const {
-    return _arm.params();
+    return _arm->params();
+}
+
+void BlockingResultsMerger::setInitialHighWaterMark(const BSONObj& highWaterMark) {
+    _arm->setInitialHighWaterMark(highWaterMark);
+}
+
+void BlockingResultsMerger::recognizeControlEvents() {
+    _arm->setNextHighWaterMarkDeterminingStrategy(
+        NextHighWaterMarkDeterminingStrategyFactory::createForChangeStream(
+            _arm->getCompareWholeSortKey(), true /* recognizeControlEvents */));
 }
 
 StatusWith<stdx::cv_status> BlockingResultsMerger::doWaiting(
@@ -76,7 +87,7 @@ StatusWith<stdx::cv_status> BlockingResultsMerger::doWaiting(
         // This shouldn't throw, but we cannot enforce that.
         result = waitFn();
     } catch (const DBException&) {
-        MONGO_UNREACHABLE;
+        MONGO_UNREACHABLE_TASSERT(9993800);
     }
 
     if (_resourceYielder) {
@@ -92,10 +103,12 @@ StatusWith<stdx::cv_status> BlockingResultsMerger::doWaiting(
 
 StatusWith<ClusterQueryResult> BlockingResultsMerger::awaitNextWithTimeout(
     OperationContext* opCtx) {
-    invariant(_tailableMode == TailableModeEnum::kTailableAndAwaitData);
+    tassert(11052317,
+            "Expected tailable awaitData cursor mode",
+            _tailableMode == TailableModeEnum::kTailableAndAwaitData);
     // If we should wait for inserts and the ARM is not ready, we don't block. Fall straight through
     // to the return statement.
-    while (!_arm.ready() && awaitDataState(opCtx).shouldWaitForInserts) {
+    while (!_arm->ready() && awaitDataState(opCtx).shouldWaitForInserts) {
         auto nextEventStatus = getNextEvent();
         if (!nextEventStatus.isOK()) {
             return nextEventStatus.getStatus();
@@ -126,12 +139,12 @@ StatusWith<ClusterQueryResult> BlockingResultsMerger::awaitNextWithTimeout(
     // We reach this point either if the ARM is ready, or if the ARM is !ready and we are in
     // kInitialFind or kGetMoreWithAtLeastOneResultInBatch ExecContext. In the latter case, we
     // return EOF immediately rather than blocking for further results.
-    return _arm.ready() ? _arm.nextReady() : ClusterQueryResult{};
+    return _arm->ready() ? _arm->nextReady() : ClusterQueryResult{};
 }
 
 StatusWith<ClusterQueryResult> BlockingResultsMerger::blockUntilNext(OperationContext* opCtx) {
-    while (!_arm.ready()) {
-        auto nextEventStatus = _arm.nextEvent();
+    while (!_arm->ready()) {
+        auto nextEventStatus = _arm->nextEvent();
         if (!nextEventStatus.isOK()) {
             return nextEventStatus.getStatus();
         }
@@ -147,11 +160,14 @@ StatusWith<ClusterQueryResult> BlockingResultsMerger::blockUntilNext(OperationCo
 
         // We have not provided a deadline, so if the wait returns without interruption, we do not
         // expect to have timed out.
-        invariant(status.getValue() == stdx::cv_status::no_timeout);
+        tassert(11052318,
+                "Expected to not have timed out",
+                status.getValue() == stdx::cv_status::no_timeout);
     }
 
-    return _arm.nextReady();
+    return _arm->nextReady();
 }
+
 StatusWith<ClusterQueryResult> BlockingResultsMerger::next(OperationContext* opCtx) {
     CurOp::get(opCtx)->ensureRecordRemoteOpWait();
 
@@ -161,17 +177,23 @@ StatusWith<ClusterQueryResult> BlockingResultsMerger::next(OperationContext* opC
                                                                      : blockUntilNext(opCtx));
 }
 
+Status BlockingResultsMerger::releaseMemory() {
+    return _arm->releaseMemory();
+}
+
 StatusWith<executor::TaskExecutor::EventHandle> BlockingResultsMerger::getNextEvent() {
     // If we abandoned a previous event due to a mongoS-side timeout, wait for it first.
     if (_leftoverEventFromLastTimeout) {
-        invariant(_tailableMode == TailableModeEnum::kTailableAndAwaitData);
+        tassert(11052319,
+                "Expected tailable awaitData cursor mode",
+                _tailableMode == TailableModeEnum::kTailableAndAwaitData);
         // If we have an outstanding event from last time, then we might have to manually schedule
         // some getMores for the cursors. If a remote response came back while we were between
         // getMores (from the user to mongos), the response may have been an empty batch, and the
         // ARM would not be able to ask for the next batch immediately since it is not attached to
         // an OperationContext. Now that we have a valid OperationContext, we schedule the getMores
         // ourselves.
-        Status getMoreStatus = _arm.scheduleGetMores();
+        Status getMoreStatus = _arm->scheduleGetMores();
         if (!getMoreStatus.isOK()) {
             return getMoreStatus;
         }
@@ -182,11 +204,11 @@ StatusWith<executor::TaskExecutor::EventHandle> BlockingResultsMerger::getNextEv
         return event;
     }
 
-    return _arm.nextEvent();
+    return _arm->nextEvent();
 }
 
 void BlockingResultsMerger::kill(OperationContext* opCtx) {
-    _arm.kill(opCtx).wait();
+    _arm->kill(opCtx).wait();
 }
 
 }  // namespace mongo

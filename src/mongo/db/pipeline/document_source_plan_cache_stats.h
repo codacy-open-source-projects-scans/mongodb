@@ -29,6 +29,26 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/privilege.h"
+#include "mongo/db/auth/resource_pattern.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/document_source.h"
+#include "mongo/db/pipeline/document_source_match.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/lite_parsed_document_source.h"
+#include "mongo/db/pipeline/stage_constraints.h"
+#include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/db/read_concern_support_result.h"
+#include "mongo/db/repl/read_concern_level.h"
+#include "mongo/stdx/unordered_set.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/modules.h"
+
 #include <memory>
 #include <set>
 #include <string>
@@ -39,28 +59,6 @@
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/auth/action_type.h"
-#include "mongo/db/auth/privilege.h"
-#include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/pipeline/document_source.h"
-#include "mongo/db/pipeline/document_source_match.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/pipeline/lite_parsed_document_source.h"
-#include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/pipeline/stage_constraints.h"
-#include "mongo/db/pipeline/variables.h"
-#include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/db/read_concern_support_result.h"
-#include "mongo/db/repl/read_concern_level.h"
-#include "mongo/stdx/unordered_set.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
-
 namespace mongo {
 
 class DocumentSourcePlanCacheStats final : public DocumentSource {
@@ -70,7 +68,8 @@ public:
     class LiteParsed final : public LiteParsedDocumentSource {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
-                                                 const BSONElement& spec) {
+                                                 const BSONElement& spec,
+                                                 const LiteParserOptions& options) {
             return std::make_unique<LiteParsed>(spec.fieldName(), nss);
         }
 
@@ -109,8 +108,7 @@ public:
 
     ~DocumentSourcePlanCacheStats() override = default;
 
-    StageConstraints constraints(
-        Pipeline::SplitState = Pipeline::SplitState::kUnsplit) const override {
+    StageConstraints constraints(PipelineSplitState = PipelineSplitState::kUnsplit) const override {
         StageConstraints constraints{StreamType::kStreaming,
                                      PositionRequirement::kFirst,
                                      _allHosts ? HostTypeRequirement::kAllShardHosts
@@ -121,7 +119,7 @@ public:
                                      LookupRequirement::kAllowed,
                                      UnionRequirement::kAllowed};
 
-        constraints.requiresInputDocSource = false;
+        constraints.setConstraintsForNoInputSources();
         return constraints;
     }
 
@@ -130,19 +128,21 @@ public:
     }
 
     const char* getSourceName() const override {
-        return DocumentSourcePlanCacheStats::kStageName.rawData();
+        return DocumentSourcePlanCacheStats::kStageName.data();
     }
 
-    DocumentSourceType getType() const override {
-        return DocumentSourceType::kPlanCacheStats;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
     /**
      * Absorbs a subsequent $match, in order to avoid copying the entire contents of the plan cache
      * prior to filtering.
      */
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) override;
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) override;
 
     void serializeToArray(std::vector<Value>& array,
                           const SerializationOptions& opts = SerializationOptions{}) const final;
@@ -150,10 +150,11 @@ public:
     void addVariableRefs(std::set<Variables::Id>* refs) const final {}
 
 private:
+    friend boost::intrusive_ptr<exec::agg::Stage> documentSourcePlanCacheStatsToStageFn(
+        const boost::intrusive_ptr<DocumentSource>&);
+
     DocumentSourcePlanCacheStats(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                                  bool allHosts);
-
-    GetNextResult doGetNext() final;
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final {
         MONGO_UNREACHABLE_TASSERT(7484303);  // Should call serializeToArray instead.
@@ -162,24 +163,6 @@ private:
     // If true, requests plan cache stats from all data-bearing nodes, primary and secondary.
     // Otherwise, follows read preference.
     const bool _allHosts;
-
-    // If running through mongos in a sharded cluster, stores the shard name so that it can be
-    // appended to each plan cache entry document.
-    std::string _shardName;
-
-    // If running through mongos in a sharded cluster, stores the "host:port" string so that it can
-    // be appended to each plan cache entry document.
-    std::string _hostAndPort;
-
-    // The result set for this change is produced through the mongo process interface on the first
-    // call to getNext(), and then held by this data member.
-    std::vector<BSONObj> _results;
-
-    // Whether '_results' has been populated yet.
-    bool _haveRetrievedStats = false;
-
-    // Used to spool out '_results' as calls to getNext() are made.
-    std::vector<BSONObj>::iterator _resultsIter;
 
     // $planCacheStats can push a match down into the plan cache layer, in order to avoid copying
     // the entire contents of the cache.

@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <list>
-#include <memory>
-
-#include <grpc/support/time.h>
-#include <grpcpp/alarm.h>
-#include <grpcpp/completion_queue.h>
-
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/baton.h"
 #include "mongo/platform/atomic.h"
@@ -47,25 +40,33 @@
 #include "mongo/util/future.h"
 #include "mongo/util/time_support.h"
 
+#include <list>
+#include <memory>
+
+#include <grpc/support/time.h>
+#include <grpcpp/alarm.h>
+#include <grpcpp/completion_queue.h>
+
 namespace mongo::transport::grpc {
 
 class GRPCReactor;
 
 class GRPCReactorTimer : public ReactorTimer {
 public:
-    GRPCReactorTimer(std::weak_ptr<GRPCReactor> reactor) : _reactor(reactor) {}
+    GRPCReactorTimer(std::shared_ptr<Reactor> reactor)
+        : _reactor(dynamic_pointer_cast<GRPCReactor>(reactor)) {}
 
-    ~GRPCReactorTimer() {
+    ~GRPCReactorTimer() override {
         cancel();
     }
 
-    void cancel(const BatonHandle& baton = nullptr) {
+    void cancel(const BatonHandle& baton = nullptr) override {
         if (_alarm) {
             _alarm->Cancel();
         }
     };
 
-    Future<void> waitUntil(Date_t deadline, const BatonHandle& baton = nullptr);
+    Future<void> waitUntil(Date_t deadline, const BatonHandle& baton = nullptr) override;
 
 private:
     std::shared_ptr<::grpc::Alarm> _alarm;
@@ -84,7 +85,7 @@ private:
  * completion queue on construction and notifies CompletionQueueEntry tags that are provided in
  * calls to startCall/read/write/finish.
  */
-class GRPCReactor : public Reactor, public std::enable_shared_from_this<GRPCReactor> {
+class GRPCReactor : public Reactor {
 public:
     // The following classes are friends because they must be allowed to request notification for
     // the completion of async work via the completion queue. However, this functionality is not
@@ -93,6 +94,8 @@ public:
     friend class StubFactoryImpl;
     friend class EgressSession;
     friend class MockClientStream;
+    friend class Client;
+    friend class Channel;
 
     /**
      * The CompletionQueueEntry is the tag type we provide to gRPC functions. It contains a Promise
@@ -110,30 +113,18 @@ public:
 
     public:
         friend class GRPCReactor;
-        friend class MockClientStream;
 
         CompletionQueueEntry() = delete;
         CompletionQueueEntry(Passkey, Promise<void> promise) : _promise(std::move(promise)) {}
 
     private:
-        /**
-         * This function will fulfill the Promise associated with a tag, but does not remove it from
-         * the _cqTaskStash. This is a workaround to introducing a mock grpc::CompletionQueue that
-         * the MockClientStream interacts with, because at the MockClientStream layer we have no
-         * access to which reactor this tag is associated with and just care about filling the
-         * promise.
-         */
-        void _setPromise_forTest(Status s) {
-            _promise.setFrom(s);
-        }
-
         Promise<void> _promise;
         std::list<std::unique_ptr<CompletionQueueEntry>>::iterator _iter;
     };
 
     GRPCReactor() : _clkSource(this), _stats(&_clkSource), _cq() {}
 
-    void run() noexcept override;
+    void run() override;
 
     /**
      * Once stop() is called, all calls to schedule() will fail the task with a ShutdownInProgress
@@ -147,7 +138,7 @@ public:
     void schedule(Task task) override;
 
     std::unique_ptr<ReactorTimer> makeTimer() override {
-        return std::make_unique<GRPCReactorTimer>(weak_from_this());
+        return std::make_unique<GRPCReactorTimer>(shared_from_this());
     }
 
     Date_t now() override {

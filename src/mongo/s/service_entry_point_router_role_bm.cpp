@@ -27,15 +27,16 @@
  *    it in the license file.
  */
 
-#include "mongo/db/service_entry_point_bm_fixture.h"
 #include "mongo/s/service_entry_point_router_role.h"
+
+#include "mongo/db/service_entry_point_bm_fixture.h"
 
 namespace mongo {
 
 class ServiceEntryPointRouterRoleBenchmarkFixture : public ServiceEntryPointBenchmarkFixture {
 public:
-    void setServiceEntryPoint(ServiceContext* service) const override {
-        service->getService(getClusterRole())
+    void setUpServiceContext(ServiceContext* sc) override {
+        sc->getService(getClusterRole())
             ->setServiceEntryPoint(std::make_unique<ServiceEntryPointRouterRole>());
     }
 
@@ -50,7 +51,7 @@ BENCHMARK_DEFINE_F(ServiceEntryPointRouterRoleBenchmarkFixture, BM_SEP_PING)
 }
 
 BENCHMARK_REGISTER_F(ServiceEntryPointRouterRoleBenchmarkFixture, BM_SEP_PING)
-    ->ThreadRange(1, kSEPBMMaxThreads);
+    ->ThreadRange(1, kCommandBMMaxThreads);
 
 // Needed in the initializers chain, but we don't need its behavior. Make it no-op.
 MONGO_INITIALIZER_GENERAL(CoreOptions_Store,

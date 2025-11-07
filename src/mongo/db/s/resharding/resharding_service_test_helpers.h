@@ -29,10 +29,10 @@
 
 #pragma once
 
-#include "mongo/platform/basic.h"
 
 #include "mongo/db/op_observer/op_observer_noop.h"
 #include "mongo/logv2/log.h"
+#include "mongo/util/modules.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kResharding
 
@@ -162,7 +162,7 @@ public:
         }
 
         auto doc = StateDocument::parse(
-            IDLParserContext{"StateTransitionControllerOpObserver::onInserts"}, begin->doc);
+            begin->doc, IDLParserContext{"StateTransitionControllerOpObserver::onInserts"});
         _controller->_notifyNewStateAndWaitUntilUnpaused(opCtx, _getState(doc));
         invariant(++begin == end);  // No support for inserting more than one state document yet.
     }
@@ -175,8 +175,8 @@ public:
         }
 
         auto doc =
-            StateDocument::parse(IDLParserContext{"StateTransitionControllerOpObserver::onUpdate"},
-                                 args.updateArgs->updatedDoc);
+            StateDocument::parse(args.updateArgs->updatedDoc,
+                                 IDLParserContext{"StateTransitionControllerOpObserver::onUpdate"});
         _controller->_notifyNewStateAndWaitUntilUnpaused(opCtx, _getState(doc));
     }
 

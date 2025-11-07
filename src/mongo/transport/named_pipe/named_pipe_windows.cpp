@@ -28,19 +28,19 @@
  */
 
 #ifdef _WIN32
-#include "named_pipe.h"
-
-#include <fmt/format.h>
-#include <string>
-#include <system_error>
-
 #include "mongo/logv2/log.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/named_pipe/io_error_message.h"
 #include "mongo/util/errno_util.h"
 
+#include <string>
+#include <system_error>
+
+#include "named_pipe.h"
+
+#include <fmt/format.h>
+
 namespace mongo {
-using namespace fmt::literals;
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -49,7 +49,7 @@ using namespace fmt::literals;
 NamedPipeOutput::NamedPipeOutput(const std::string&,
                                  const std::string& pipeRelativePath,
                                  bool persistPipe)
-    : _pipeAbsolutePath(kDefaultPipePath.toString() + pipeRelativePath),
+    : _pipeAbsolutePath(std::string{kDefaultPipePath} + pipeRelativePath),
       _pipe(CreateNamedPipeA(_pipeAbsolutePath.c_str(),
                              PIPE_ACCESS_OUTBOUND,
                              (PIPE_TYPE_BYTE | PIPE_WAIT),
@@ -60,8 +60,8 @@ NamedPipeOutput::NamedPipeOutput(const std::string&,
                              nullptr)),  // lpSecurityAttributes
       _isOpen(false) {
     uassert(7005006,
-            "Failed to create a named pipe, error: {}"_format(
-                getLastSystemErrorMessageFormatted("CreateNamedPipe", _pipeAbsolutePath)),
+            fmt::format("Failed to create a named pipe, error: {}",
+                        getLastSystemErrorMessageFormatted("CreateNamedPipe", _pipeAbsolutePath)),
             _pipe != INVALID_HANDLE_VALUE);
 }
 
@@ -100,8 +100,8 @@ int NamedPipeOutput::write(const char* data, int size) {
 
     if (!succeeded || size != nWritten) {
         uasserted(7239301,
-                  "Failed to write to a named pipe, error: {}"_format(
-                      getLastSystemErrorMessageFormatted("write", _pipeAbsolutePath)));
+                  fmt::format("Failed to write to a named pipe, error: {}",
+                              getLastSystemErrorMessageFormatted("write", _pipeAbsolutePath)));
         return -1;
     }
 
@@ -130,7 +130,7 @@ NamedPipeInput::NamedPipeInput(const std::string& pipeRelativePath)
       _isGood(false),
       _isEof(false) {
     uassert(7001101,
-            "Pipe path must not include '..' but {} does"_format(_pipeAbsolutePath),
+            fmt::format("Pipe path must not include '..' but {} does", _pipeAbsolutePath),
             _pipeAbsolutePath.find("..") == std::string::npos);
 }
 

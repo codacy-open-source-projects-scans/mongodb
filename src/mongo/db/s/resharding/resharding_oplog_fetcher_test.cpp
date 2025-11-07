@@ -33,12 +33,6 @@
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 #include <fmt/format.h>
 // IWYU pragma: no_include "cxxabi.h"
-#include <cstdint>
-#include <ostream>
-#include <string>
-#include <system_error>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -50,23 +44,30 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/client/remote_command_targeter_mock.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/dbhelpers.h"
+#include "mongo/db/global_catalog/sharding_catalog_client.h"
+#include "mongo/db/global_catalog/sharding_catalog_client_mock.h"
+#include "mongo/db/global_catalog/type_shard.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
+#include "mongo/db/local_catalog/shard_role_catalog/operation_sharding_state.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/query/client_cursor/cursor_id.h"
+#include "mongo/db/query/client_cursor/kill_cursors_gen.h"
+#include "mongo/db/query/getmore_command_gen.h"
 #include "mongo/db/repl/oplog.h"
+#include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/optime_with.h"
 #include "mongo/db/repl/read_concern_level.h"
@@ -74,32 +75,29 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_impl.h"
 #include "mongo/db/repl/wait_for_majority_service.h"
-#include "mongo/db/s/metrics/sharding_data_transform_instance_metrics.h"
-#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
+#include "mongo/db/s/resharding/resharding_noop_o2_field_gen.h"
 #include "mongo/db/s/resharding/resharding_oplog_fetcher.h"
 #include "mongo/db/s/resharding/resharding_oplog_fetcher_progress_gen.h"
 #include "mongo/db/s/resharding/resharding_util.h"
-#include "mongo/db/s/shard_server_test_fixture.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_cache.h"
 #include "mongo/db/session/logical_session_cache_noop.h"
 #include "mongo/db/session/session_catalog_mongod.h"
+#include "mongo/db/sharding_environment/shard_server_test_fixture.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/sharding_catalog_client_mock.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/executor/thread_pool_task_executor_test_fixture.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/logv2/log.h"
+#include "mongo/s/sharding_task_executor.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/concurrency/thread_pool.h"
@@ -109,6 +107,13 @@
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/str.h"
+
+#include <cstdint>
+#include <cstdlib>
+#include <ostream>
+#include <string>
+#include <system_error>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -120,6 +125,7 @@ repl::MutableOplogEntry makeOplog(const NamespaceString& nss,
                                   const repl::OpTypeEnum& opType,
                                   const BSONObj& oField,
                                   const BSONObj& o2Field,
+                                  const Date_t wallClockTime,
                                   const ReshardingDonorOplogId& oplogId) {
     repl::MutableOplogEntry oplogEntry;
     oplogEntry.setNss(nss);
@@ -132,7 +138,7 @@ repl::MutableOplogEntry makeOplog(const NamespaceString& nss,
     }
 
     oplogEntry.setOpTime({{}, {}});
-    oplogEntry.setWallClockTime({});
+    oplogEntry.setWallClockTime(wallClockTime);
     oplogEntry.set_id(Value(oplogId.toBSON()));
 
     return oplogEntry;
@@ -143,8 +149,18 @@ repl::MutableOplogEntry makeOplog(const NamespaceString& nss,
  */
 class OneOffRead {
 public:
-    OneOffRead(OperationContext* opCtx, const Timestamp& ts) : _opCtx(opCtx) {
+    OneOffRead(OperationContext* opCtx, const Timestamp& ts, bool waitForOplog = false)
+        : _opCtx(opCtx) {
         shard_role_details::getRecoveryUnit(_opCtx)->abandonSnapshot();
+        if (waitForOplog) {
+            auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+            LocalOplogInfo* oplogInfo = LocalOplogInfo::get(opCtx);
+
+            // Oplog should be available in this test.
+            invariant(oplogInfo);
+            storageEngine->waitForAllEarlierOplogWritesToBeVisible(opCtx,
+                                                                   oplogInfo->getRecordStore());
+        }
         if (ts.isNull()) {
             shard_role_details::getRecoveryUnit(_opCtx)->setTimestampReadSource(
                 RecoveryUnit::ReadSource::kNoTimestamp);
@@ -166,15 +182,14 @@ private:
 
 class ReshardingOplogFetcherTest : public ShardServerTestFixture {
 public:
+    ReshardingOplogFetcherTest()
+        : ShardServerTestFixture(
+              Options{}.useMockClock(true).useMockTickSource<Milliseconds>(true)) {}
+
     void setUp() override {
         ShardServerTestFixture::setUp();
         _opCtx = operationContext();
         _svcCtx = _opCtx->getServiceContext();
-
-        {
-            Lock::GlobalWrite lk(_opCtx);
-            OldClientContext ctx(_opCtx, NamespaceString::kRsOplogNamespace);
-        }
 
         for (const auto& shardId : kTwoShardIdList) {
             auto shardTargeter = RemoteCommandTargeterMock::get(
@@ -205,19 +220,31 @@ public:
 
     void resetResharding() {
         _reshardingUUID = UUID::gen();
-        _metrics = ReshardingMetrics::makeInstance(_reshardingUUID,
-                                                   kShardKey,
-                                                   NamespaceString::kEmpty,
-                                                   ReshardingMetrics::Role::kRecipient,
-                                                   getServiceContext()->getFastClockSource()->now(),
-                                                   getServiceContext());
+        _metrics = ReshardingMetrics::makeInstance_forTest(
+            _reshardingUUID,
+            kShardKey,
+            NamespaceString::kEmpty,
+            ReshardingMetrics::Role::kRecipient,
+            getServiceContext()->getFastClockSource()->now(),
+            getServiceContext());
         _fetchTimestamp = queryOplog(BSONObj())["ts"].timestamp();
         _donorShard = kTwoShardIdList[0];
         _destinationShard = kTwoShardIdList[1];
+        _metrics->registerDonors({_donorShard});
     }
 
     auto makeFetcherEnv() {
         return std::make_unique<ReshardingOplogFetcher::Env>(_svcCtx, _metrics.get());
+    }
+
+    auto makeExecutor() {
+        ThreadPool::Options threadPoolOpts;
+        threadPoolOpts.maxThreads = 100;
+        threadPoolOpts.threadNamePrefix = "ReshardingOplogFetcherTest-";
+        threadPoolOpts.poolName = "ReshardingOplogFetcherTestThreadPool";
+        return executor::ThreadPoolTaskExecutor::create(
+            std::make_unique<ThreadPool>(threadPoolOpts),
+            std::make_unique<executor::NetworkInterfaceMock>());
     }
 
     /**
@@ -232,10 +259,10 @@ public:
         public:
             StaticCatalogClient(std::vector<ShardId> shardIds) : _shardIds(std::move(shardIds)) {}
 
-            StatusWith<repl::OpTimeWith<std::vector<ShardType>>> getAllShards(
+            repl::OpTimeWith<std::vector<ShardType>> getAllShards(
                 OperationContext* opCtx,
                 repl::ReadConcernLevel readConcern,
-                bool excludeDraining) override {
+                BSONObj filter) override {
                 std::vector<ShardType> shardTypes;
                 for (const auto& shardId : _shardIds) {
                     const ConnectionString cs = ConnectionString::forReplicaSet(
@@ -265,9 +292,14 @@ public:
 
     BSONObj queryCollection(NamespaceString nss, const BSONObj& query) {
         BSONObj ret;
-        ASSERT_TRUE(Helpers::findOne(
-            _opCtx, AutoGetCollectionForRead(_opCtx, nss).getCollection(), query, ret))
-            << "Query: " << query;
+        const auto coll = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest(nss,
+                                         PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                         repl::ReadConcernArgs::get(_opCtx),
+                                         AcquisitionPrerequisites::kRead),
+            MODE_IS);
+        ASSERT_TRUE(Helpers::findOne(_opCtx, coll, query, ret)) << "Query: " << query;
         return ret;
     }
 
@@ -278,7 +310,7 @@ public:
     }
 
     BSONObj queryOplog(const BSONObj& query) {
-        OneOffRead oor(_opCtx, Timestamp::min());
+        OneOffRead oor(_opCtx, Timestamp::min(), true);
         return queryCollection(NamespaceString::kRsOplogNamespace, query);
     }
 
@@ -295,7 +327,7 @@ public:
     }
 
     int itcount(NamespaceString nss, BSONObj filter = BSONObj()) {
-        OneOffRead oof(_opCtx, Timestamp::min());
+        OneOffRead oof(_opCtx, Timestamp::min(), nss.isOplog());
 
         DBDirectClient client(_opCtx);
         FindCommandRequest findRequest{nss};
@@ -322,11 +354,45 @@ public:
             }
 
             OperationShardingState::ScopedAllowImplicitCollectionCreate_UNSAFE
-                unsafeCreateCollection(_opCtx);
+                unsafeCreateCollection(_opCtx, nss);
             auto db = autoDb.ensureDbExists(_opCtx);
             ASSERT(db->createCollection(_opCtx, nss)) << nss.toStringForErrorMsg();
             wunit.commit();
         });
+    }
+
+    BSONObj makeMockAggregateResponse(Timestamp postBatchResumeToken,
+                                      BSONArray oplogEntries,
+                                      CursorId cursorId = 0) {
+        return BSON("cursor" << BSON("firstBatch"
+                                     << oplogEntries << "postBatchResumeToken"
+                                     << BSON("ts" << postBatchResumeToken) << "id" << cursorId
+                                     << "ns"
+                                     << NamespaceString::kRsOplogNamespace.toString_forTest()));
+    };
+
+    BSONObj makeMockGetMoreResponse(Timestamp postBatchResumeToken,
+                                    BSONArray oplogEntries,
+                                    CursorId cursorId = 0) {
+        return BSON("cursor" << BSON("nextBatch"
+                                     << oplogEntries << "postBatchResumeToken"
+                                     << BSON("ts" << postBatchResumeToken) << "id" << cursorId
+                                     << "ns"
+                                     << NamespaceString::kRsOplogNamespace.toString_forTest()));
+    };
+
+    BSONObj makeFinalNoopOplogEntry(const NamespaceString& nss,
+                                    const UUID& collectionUUID,
+                                    Timestamp postBatchResumeToken) {
+        return makeOplog(nss,
+                         collectionUUID,
+                         repl::OpTypeEnum::kNoop,
+                         BSONObj(),
+                         BSON("type" << resharding::kReshardFinalOpLogType << "reshardingUUID"
+                                     << _reshardingUUID),
+                         now(),
+                         ReshardingDonorOplogId(postBatchResumeToken, postBatchResumeToken))
+            .toBSON();
     }
 
     template <typename T>
@@ -380,7 +446,14 @@ public:
         _fetchTimestamp = repl::StorageInterface::get(_svcCtx)->getLatestOplogTimestamp(_opCtx);
 
         {
-            AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+            const auto dataColl =
+                acquireCollection(_opCtx,
+                                  CollectionAcquisitionRequest{
+                                      dataCollectionNss,
+                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                      repl::ReadConcernArgs::get(_opCtx),
+                                      AcquisitionPrerequisites::kWrite},
+                                  MODE_IX);
 
             // Set a failpoint to tack a `destinedRecipient` onto oplog entries.
             setGlobalFailPoint("addDestinedRecipient",
@@ -388,14 +461,15 @@ public:
                                     << "alwaysOn"
                                     << "data"
                                     << BSON("destinedRecipient" << destinedRecipient.toString())));
-
+            auto const& nss = dataColl.nss();
+            auto const& uuid = dataColl.uuid();
             // Generate insert oplog entries by inserting documents.
             {
                 for (std::int32_t num = 0; num < numInsertOplogEntriesBeforeFinalOplogEntry;
                      ++num) {
                     WriteUnitOfWork wuow(_opCtx);
                     insertDocument(
-                        dataColl.getCollection(),
+                        dataColl.getCollectionPtr(),
                         InsertStatement(
                             BSON("_id" << num << std::string(approxInsertOplogEntrySizeBytes, 'a')
                                        << num)));
@@ -408,11 +482,11 @@ public:
                 WriteUnitOfWork wuow(_opCtx);
                 _opCtx->getServiceContext()->getOpObserver()->onInternalOpMessage(
                     _opCtx,
-                    dataColl.getCollection()->ns(),
-                    dataColl.getCollection()->uuid(),
+                    nss,
+                    uuid,
                     BSON(
                         "msg" << fmt::format("Writes to {} are temporarily blocked for resharding.",
-                                             dataColl.getCollection()->ns().toString_forTest())),
+                                             nss.toString_forTest())),
                     BSON("type" << resharding::kReshardFinalOpLogType << "reshardingUUID"
                                 << _reshardingUUID),
                     boost::none,
@@ -428,10 +502,9 @@ public:
                     WriteUnitOfWork wuow(_opCtx);
                     _opCtx->getServiceContext()->getOpObserver()->onInternalOpMessage(
                         _opCtx,
-                        dataColl.getCollection()->ns(),
-                        dataColl.getCollection()->uuid(),
-                        BSON("msg"
-                             << "other noop"),
+                        nss,
+                        uuid,
+                        BSON("msg" << "other noop"),
                         boost::none /* o2 */,
                         boost::none,
                         boost::none,
@@ -445,22 +518,18 @@ public:
         repl::StorageInterface::get(_opCtx)->waitForAllEarlierOplogWritesToBeVisible(_opCtx);
 
         // Disable the failpoint.
-        setGlobalFailPoint("addDestinedRecipient",
-                           BSON("mode"
-                                << "off"));
+        setGlobalFailPoint("addDestinedRecipient", BSON("mode" << "off"));
     }
 
     void assertUsedApplyOpsToBatchInsert(NamespaceString nss, int numApplyOpsOplogEntries) {
         ASSERT_EQ(0,
                   itcount(NamespaceString::kRsOplogNamespace,
-                          BSON("op"
-                               << "i"
-                               << "ns" << nss.ns_forTest())));
+                          BSON("op" << "i"
+                                    << "ns" << nss.ns_forTest())));
         ASSERT_EQ(numApplyOpsOplogEntries,
                   itcount(NamespaceString::kRsOplogNamespace,
-                          BSON("o.applyOps.op"
-                               << "i"
-                               << "o.applyOps.ns" << nss.ns_forTest())));
+                          BSON("o.applyOps.op" << "i"
+                                               << "o.applyOps.ns" << nss.ns_forTest())));
     }
 
     long long currentOpFetchedCount() const {
@@ -494,18 +563,75 @@ public:
     }
 
 protected:
+    ClockSourceMock* clockSource() {
+        return dynamic_cast<ClockSourceMock*>(getServiceContext()->getFastClockSource());
+    }
+
+    TickSourceMock<Milliseconds>* tickSource() {
+        return dynamic_cast<TickSourceMock<Milliseconds>*>(getServiceContext()->getTickSource());
+    }
+
+    Date_t now() {
+        return clockSource()->now();
+    }
+
+    void advanceTime(Milliseconds millis) {
+        clockSource()->advance(millis);
+        tickSource()->advance(millis);
+    }
+
+    /**
+     * Advances the mock clock forward to the next whole second.
+     *
+     * If the current time is already at a second boundary, the clock is not advanced. Otherwise,
+     * the clock is advanced by the number of milliseconds needed so that the time is rounded up to
+     * the next second (i.e. the milliseconds component becomes zero).
+     */
+    void advanceTimeToNextSecond() {
+        long long currentMillis = now().toMillisSinceEpoch();
+        long long millisToNextSecond =
+            (1000 - (currentMillis % 1000)) % 1000;  // 0 if already at second boundary
+
+        if (millisToNextSecond > 0) {
+            advanceTime(Milliseconds(millisToNextSecond));
+            tickSource()->advance(Milliseconds(millisToNextSecond));
+        }
+    }
+
+    /**
+     * Makes a cluster timestamp at the given timestamp. Guarantees the "i" field, which is an
+     * increasing increment for differentiating operations within the same second, is strictly
+     * increasing.
+     */
+    Timestamp makeClusterTimestampAt(Date_t date) {
+        return Timestamp(date.toMillisSinceEpoch() / 1000, _clusterTimestampInc++);
+    }
+
+    /**
+     * Makes a cluster timestamp at the current timestamp.
+     */
+    Timestamp makeClusterTimestampAtNow() {
+        return makeClusterTimestampAt(now());
+    }
+
     void testFetcherBasic(const NamespaceString& outputCollectionNss,
                           const NamespaceString& dataCollectionNss,
                           bool storeProgress,
                           boost::optional<int> initialAggregateBatchSize,
                           int expectedNumFetchedOplogEntries,
                           int expectedNumApplyOpsOplogEntries) {
-        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+        const auto dataColl = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest{dataCollectionNss,
+                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         repl::ReadConcernArgs::get(_opCtx),
+                                         AcquisitionPrerequisites::kWrite},
+            MODE_IX);
         auto fetcherJob = launchAsync([&, this] {
             ThreadClient tc("RefetchRunner", _svcCtx->getService(), Client::noSession());
             ReshardingOplogFetcher fetcher(makeFetcherEnv(),
                                            _reshardingUUID,
-                                           dataColl->uuid(),
+                                           dataColl.uuid(),
                                            {_fetchTimestamp, _fetchTimestamp},
                                            _donorShard,
                                            _destinationShard,
@@ -530,6 +656,23 @@ protected:
         assertUsedApplyOpsToBatchInsert(outputCollectionNss, expectedNumApplyOpsOplogEntries);
     }
 
+    void assertAggregateReadPreference(const executor::RemoteCommandRequest& request,
+                                       const ReadPreferenceSetting& expectedReadPref) {
+        auto parsedRequest = AggregateCommandRequest::parse(
+            request.cmdObj.addFields(BSON("$db" << request.dbname.toString_forTest())),
+            IDLParserContext("ReshardingOplogFetcherTest"));
+        ASSERT_BSONOBJ_EQ(*parsedRequest.getUnwrappedReadPref(),
+                          BSON("$readPreference" << expectedReadPref.toInnerBSON()));
+    }
+
+    void assertGetMoreCursorId(const executor::RemoteCommandRequest& request,
+                               CursorId expectedCursorId) {
+        auto parsedRequest = GetMoreCommandRequest::parse(
+            request.cmdObj.addFields(BSON("$db" << request.dbname.toString_forTest())),
+            IDLParserContext("ReshardingOplogFetcherTest"));
+        ASSERT_EQ(parsedRequest.getCommandParameter(), expectedCursorId);
+    }
+
     const std::vector<ShardId> kTwoShardIdList{{"s1"}, {"s2"}};
     const BSONObj kShardKey = BSON("skey" << 1);
 
@@ -539,11 +682,20 @@ protected:
     // To be reset per test case.
     UUID _reshardingUUID = UUID::gen();
     std::unique_ptr<ReshardingMetrics> _metrics;
+
     Timestamp _fetchTimestamp;
+    int32_t _clusterTimestampInc = 0;
+
     ShardId _donorShard;
     ShardId _destinationShard;
 
 private:
+    // Set the sleep to 0 to speed up the tests.
+    RAIIServerParameterControllerForTest _sleepMillisBeforeCriticalSection{
+        "reshardingOplogFetcherSleepMillisBeforeCriticalSection", 0};
+    RAIIServerParameterControllerForTest _sleepMillisDuringCriticalSection{
+        "reshardingOplogFetcherSleepMillisDuringCriticalSection", 0};
+
     static HostAndPort makeHostAndPort(const ShardId& shardId) {
         return HostAndPort(str::stream() << shardId << ":123");
     }
@@ -739,7 +891,13 @@ TEST_F(ReshardingOplogFetcherTest, TestTrackLastSeen) {
 
     setupBasic(outputCollectionNss, dataCollectionNss, _destinationShard);
 
-    AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+    const auto dataColl = acquireCollection(
+        _opCtx,
+        CollectionAcquisitionRequest{dataCollectionNss,
+                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     repl::ReadConcernArgs::get(_opCtx),
+                                     AcquisitionPrerequisites::kWrite},
+        MODE_IX);
 
     const int maxBatches = 1;
     auto fetcherJob = launchAsync([&, this] {
@@ -747,7 +905,7 @@ TEST_F(ReshardingOplogFetcherTest, TestTrackLastSeen) {
 
         ReshardingOplogFetcher fetcher(makeFetcherEnv(),
                                        _reshardingUUID,
-                                       dataColl->uuid(),
+                                       dataColl.uuid(),
                                        {_fetchTimestamp, _fetchTimestamp},
                                        _donorShard,
                                        _destinationShard,
@@ -780,7 +938,13 @@ TEST_F(ReshardingOplogFetcherTest, TestFallingOffOplog) {
 
     setupBasic(outputCollectionNss, dataCollectionNss, _destinationShard);
 
-    AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+    const auto dataColl = acquireCollection(
+        _opCtx,
+        CollectionAcquisitionRequest{dataCollectionNss,
+                                     PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                     repl::ReadConcernArgs::get(_opCtx),
+                                     AcquisitionPrerequisites::kWrite},
+        MODE_IX);
 
     auto fetcherJob = launchAsync([&, this] {
         ThreadClient tc("RefetcherRunner", _svcCtx->getService(), Client::noSession());
@@ -788,7 +952,7 @@ TEST_F(ReshardingOplogFetcherTest, TestFallingOffOplog) {
         const Timestamp doesNotExist(1, 1);
         ReshardingOplogFetcher fetcher(makeFetcherEnv(),
                                        _reshardingUUID,
-                                       dataColl->uuid(),
+                                       dataColl.uuid(),
                                        {doesNotExist, doesNotExist},
                                        _donorShard,
                                        _destinationShard,
@@ -827,8 +991,14 @@ TEST_F(ReshardingOplogFetcherTest, TestAwaitInsert) {
     _fetchTimestamp = repl::StorageInterface::get(_svcCtx)->getLatestOplogTimestamp(_opCtx);
 
     const auto& collectionUUID = [&] {
-        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
-        return dataColl->uuid();
+        const auto dataColl = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest{dataCollectionNss,
+                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         repl::ReadConcernArgs::get(_opCtx),
+                                         AcquisitionPrerequisites::kWrite},
+            MODE_IX);
+        return dataColl.uuid();
     }();
 
     ReshardingDonorOplogId startAt{_fetchTimestamp, _fetchTimestamp};
@@ -866,9 +1036,17 @@ TEST_F(ReshardingOplogFetcherTest, TestAwaitInsert) {
                                 BSON("destinedRecipient" << _destinationShard.toString()));
 
         {
-            AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+            const auto dataColl =
+                acquireCollection(_opCtx,
+                                  CollectionAcquisitionRequest{
+                                      dataCollectionNss,
+                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                      repl::ReadConcernArgs::get(_opCtx),
+                                      AcquisitionPrerequisites::kWrite},
+                                  MODE_IX);
             WriteUnitOfWork wuow(_opCtx);
-            insertDocument(dataColl.getCollection(), InsertStatement(BSON("_id" << 1 << "a" << 1)));
+            insertDocument(dataColl.getCollectionPtr(),
+                           InsertStatement(BSON("_id" << 1 << "a" << 1)));
             wuow.commit();
         }
 
@@ -894,129 +1072,6 @@ TEST_F(ReshardingOplogFetcherTest, TestAwaitInsert) {
     ASSERT_FALSE(fetcher.awaitInsert({dataWriteTimestamp, dataWriteTimestamp}).isReady());
 }
 
-TEST_F(ReshardingOplogFetcherTest, TestProgressMarkOplogInsert) {
-    for (bool storeProgress : {false, true}) {
-        LOGV2(9480005, "Running case", "storeProgress"_attr = storeProgress);
-
-        const NamespaceString outputCollectionNss = NamespaceString::createNamespaceString_forTest(
-            "dbtests.outputCollection" + std::to_string(storeProgress));
-        const NamespaceString dataCollectionNss = NamespaceString::createNamespaceString_forTest(
-            "dbtests.runFetchIteration" + std::to_string(storeProgress));
-
-        create(outputCollectionNss);
-        create(dataCollectionNss);
-
-        const auto& collectionUUID = [&] {
-            AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
-            return dataColl->uuid();
-        }();
-
-        auto buildMockResponse = [](Timestamp postBatchResumeToken, BSONArray oplogEntries) {
-            return BSON("cursor" << BSON("firstBatch"
-                                         << oplogEntries << "postBatchResumeToken"
-                                         << BSON("ts" << postBatchResumeToken) << "id" << 0LL
-                                         << "ns"
-                                         << NamespaceString::kRsOplogNamespace.toString_forTest()));
-        };
-
-        ReshardingDonorOplogId startAt{_fetchTimestamp, _fetchTimestamp};
-        ReshardingOplogFetcher fetcher(makeFetcherEnv(),
-                                       _reshardingUUID,
-                                       collectionUUID,
-                                       startAt,
-                                       _donorShard,
-                                       _destinationShard,
-                                       outputCollectionNss,
-                                       storeProgress);
-
-        // A progressMarkOplog should not be inserted if the donor's cursor response has the same
-        // timestamp as the initial startAt timestamp.
-        auto postBatchResumeToken = startAt.getTs();
-        auto oplogEntries = BSONArrayBuilder().arr();
-        auto mockCursorResponse = buildMockResponse(postBatchResumeToken, oplogEntries);
-        ASSERT_EQ(postBatchResumeToken, startAt.getTs());
-
-        auto fetcherJob = launchAsync([&, this] {
-            ThreadClient tc("RunnerForFetcher", _svcCtx->getService(), Client::noSession());
-            auto factory = makeCancelableOpCtx();
-            return fetcher.iterate(&cc(), factory);
-        });
-        ASSERT_TRUE(requestPassthroughHandler(fetcherJob, -1, mockCursorResponse));
-        ASSERT_EQ(0, currentOpFetchedCount()) << " Verify currentOp metrics";
-        ASSERT_EQ(0, persistedFetchedCount(_opCtx)) << " Verify persisted metrics";
-        assertUsedApplyOpsToBatchInsert(outputCollectionNss, 0 /* numApplyOpsOplogEntries */);
-        ASSERT_TRUE(getLast(outputCollectionNss).isEmpty());
-
-        // A progressMarkOplog should be inserted if the donor's cursor response has an empty batch,
-        // and a timestamp larger than the lastSeenTimestamp.
-        postBatchResumeToken = _fetchTimestamp + 1;
-        oplogEntries = BSONArrayBuilder().arr();
-        mockCursorResponse = buildMockResponse(postBatchResumeToken, oplogEntries);
-        ASSERT_GT(postBatchResumeToken, fetcher.getLastSeenTimestamp().getTs());
-
-        fetcherJob = launchAsync([&, this] {
-            ThreadClient tc("RunnerForFetcher", _svcCtx->getService(), Client::noSession());
-            auto factory = makeCancelableOpCtx();
-            return fetcher.iterate(&cc(), factory);
-        });
-        ASSERT_TRUE(requestPassthroughHandler(fetcherJob, -1, mockCursorResponse));
-        ASSERT_EQ(1, currentOpFetchedCount()) << " Verify currentOp metrics";
-        ASSERT_EQ(storeProgress ? 1 : 0, persistedFetchedCount(_opCtx))
-            << " Verify persisted metrics";
-        assertUsedApplyOpsToBatchInsert(outputCollectionNss, 1 /* numApplyOpsOplogEntries */);
-        auto lastOplogInOuptut = getLast(outputCollectionNss);
-        ASSERT_EQ(resharding::kReshardProgressMark,
-                  lastOplogInOuptut.getObjectField("o2").getField("type").String());
-        ASSERT_EQ(postBatchResumeToken,
-                  lastOplogInOuptut.getObjectField("_id").getField("ts").timestamp());
-
-        // A progressMarkOplog should not be inserted if the donor's cursor response has a non-empty
-        // batch.
-        postBatchResumeToken = _fetchTimestamp + 2;
-        auto oplog = makeOplog(dataCollectionNss,
-                               collectionUUID,
-                               repl::OpTypeEnum::kInsert,
-                               BSONObj(),
-                               BSONObj(),
-                               ReshardingDonorOplogId(postBatchResumeToken, postBatchResumeToken))
-                         .toBSON();
-        oplogEntries = BSON_ARRAY(oplog);
-        mockCursorResponse = buildMockResponse(postBatchResumeToken, oplogEntries);
-
-        fetcherJob = launchAsync([&, this] {
-            ThreadClient tc("RunnerForFetcher", _svcCtx->getService(), Client::noSession());
-            auto factory = makeCancelableOpCtx();
-            return fetcher.iterate(&cc(), factory);
-        });
-        ASSERT_TRUE(requestPassthroughHandler(fetcherJob, -1, mockCursorResponse));
-        ASSERT_EQ(2, currentOpFetchedCount()) << " Verify currentOp metrics";
-        ASSERT_EQ(storeProgress ? 2 : 0, persistedFetchedCount(_opCtx))
-            << " Verify persisted metrics";
-        assertUsedApplyOpsToBatchInsert(outputCollectionNss, 2 /* numApplyOpsOplogEntries */);
-        ASSERT_EQ(getLast(outputCollectionNss).woCompare(oplog), 0);
-
-        // A progressMarkOplog should not be inserted if the donor's cursor response has the same
-        // timestamp as the lastSeenTimestamp.
-        oplogEntries = BSONArrayBuilder().arr();
-        mockCursorResponse = buildMockResponse(postBatchResumeToken, oplogEntries);
-        ASSERT_EQ(postBatchResumeToken, fetcher.getLastSeenTimestamp().getTs());
-
-        fetcherJob = launchAsync([&, this] {
-            ThreadClient tc("RunnerForFetcher", _svcCtx->getService(), Client::noSession());
-            auto factory = makeCancelableOpCtx();
-            return fetcher.iterate(&cc(), factory);
-        });
-        ASSERT_TRUE(requestPassthroughHandler(fetcherJob, -1, mockCursorResponse));
-        ASSERT_EQ(2, currentOpFetchedCount()) << " Verify currentOp metrics";
-        ASSERT_EQ(storeProgress ? 2 : 0, persistedFetchedCount(_opCtx))
-            << " Verify persisted metrics";
-        assertUsedApplyOpsToBatchInsert(outputCollectionNss, 2 /* numApplyOpsOplogEntries */);
-        ASSERT_EQ(getLast(outputCollectionNss).woCompare(oplog), 0);
-
-        resetResharding();
-    }
-}
-
 TEST_F(ReshardingOplogFetcherTest, TestStartAtUpdatedWithProgressMarkOplogTs) {
     for (bool storeProgress : {false, true}) {
         LOGV2(9480006, "Running case", "storeProgress"_attr = storeProgress);
@@ -1034,8 +1089,15 @@ TEST_F(ReshardingOplogFetcherTest, TestStartAtUpdatedWithProgressMarkOplogTs) {
         _fetchTimestamp = repl::StorageInterface::get(_svcCtx)->getLatestOplogTimestamp(_opCtx);
 
         const auto& collectionUUID = [&] {
-            AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
-            return dataColl->uuid();
+            const auto dataColl =
+                acquireCollection(_opCtx,
+                                  CollectionAcquisitionRequest{
+                                      dataCollectionNss,
+                                      PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                      repl::ReadConcernArgs::get(_opCtx),
+                                      AcquisitionPrerequisites::kWrite},
+                                  MODE_IX);
+            return dataColl.uuid();
         }();
 
         ReshardingDonorOplogId startAt{_fetchTimestamp, _fetchTimestamp};
@@ -1055,9 +1117,16 @@ TEST_F(ReshardingOplogFetcherTest, TestStartAtUpdatedWithProgressMarkOplogTs) {
                                     BSON("destinedRecipient" << _destinationShard.toString()));
 
             {
-                AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+                const auto dataColl =
+                    acquireCollection(_opCtx,
+                                      CollectionAcquisitionRequest{
+                                          dataCollectionNss,
+                                          PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                          repl::ReadConcernArgs::get(_opCtx),
+                                          AcquisitionPrerequisites::kWrite},
+                                      MODE_IX);
                 WriteUnitOfWork wuow(_opCtx);
-                insertDocument(dataColl.getCollection(),
+                insertDocument(dataColl.getCollectionPtr(),
                                InsertStatement(BSON("_id" << 1 << "a" << 1)));
                 wuow.commit();
             }
@@ -1086,9 +1155,16 @@ TEST_F(ReshardingOplogFetcherTest, TestStartAtUpdatedWithProgressMarkOplogTs) {
         // Now, insert a document into a different collection that is not involved in resharding.
         auto writeToOtherCollectionTs = [&] {
             {
-                AutoGetCollection dataColl(_opCtx, otherCollection, LockMode::MODE_IX);
+                const auto dataColl =
+                    acquireCollection(_opCtx,
+                                      CollectionAcquisitionRequest{
+                                          otherCollection,
+                                          PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                          repl::ReadConcernArgs::get(_opCtx),
+                                          AcquisitionPrerequisites::kWrite},
+                                      MODE_IX);
                 WriteUnitOfWork wuow(_opCtx);
-                insertDocument(dataColl.getCollection(),
+                insertDocument(dataColl.getCollectionPtr(),
                                InsertStatement(BSON("_id" << 1 << "a" << 1)));
                 wuow.commit();
             }
@@ -1142,8 +1218,14 @@ TEST_F(ReshardingOplogFetcherTest, RetriesOnRemoteInterruptionError) {
     _fetchTimestamp = repl::StorageInterface::get(_svcCtx)->getLatestOplogTimestamp(_opCtx);
 
     const auto& collectionUUID = [&] {
-        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
-        return dataColl->uuid();
+        const auto dataColl = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest{dataCollectionNss,
+                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         repl::ReadConcernArgs::get(_opCtx),
+                                         AcquisitionPrerequisites::kWrite},
+            MODE_IX);
+        return dataColl.uuid();
     }();
 
     auto fetcherJob = launchAsync([&, this] {
@@ -1185,8 +1267,14 @@ TEST_F(ReshardingOplogFetcherTest, RetriesOnNetworkTimeoutError) {
     _fetchTimestamp = repl::StorageInterface::get(_svcCtx)->getLatestOplogTimestamp(_opCtx);
 
     const auto& collectionUUID = [&] {
-        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
-        return dataColl->uuid();
+        const auto dataColl = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest{dataCollectionNss,
+                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         repl::ReadConcernArgs::get(_opCtx),
+                                         AcquisitionPrerequisites::kWrite},
+            MODE_IX);
+        return dataColl.uuid();
     }();
 
     auto fetcherJob = launchAsync([&, this] {
@@ -1226,8 +1314,14 @@ TEST_F(ReshardingOplogFetcherTest, ImmediatelyDoneWhenFinalOpHasAlreadyBeenFetch
     _fetchTimestamp = repl::StorageInterface::get(_svcCtx)->getLatestOplogTimestamp(_opCtx);
 
     const auto& collectionUUID = [&] {
-        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
-        return dataColl->uuid();
+        const auto dataColl = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest{dataCollectionNss,
+                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         repl::ReadConcernArgs::get(_opCtx),
+                                         AcquisitionPrerequisites::kWrite},
+            MODE_IX);
+        return dataColl.uuid();
     }();
 
     ReshardingOplogFetcher fetcher(makeFetcherEnv(),
@@ -1239,8 +1333,7 @@ TEST_F(ReshardingOplogFetcherTest, ImmediatelyDoneWhenFinalOpHasAlreadyBeenFetch
                                    outputCollectionNss,
                                    true /* storeProgress */);
 
-    auto factory = makeCancelableOpCtx();
-    auto future = fetcher.schedule(nullptr, CancellationToken::uncancelable(), factory);
+    auto future = fetcher.schedule(nullptr, CancellationToken::uncancelable());
 
     ASSERT_TRUE(future.isReady());
     ASSERT_OK(future.getNoThrow());
@@ -1259,8 +1352,14 @@ DEATH_TEST_REGEX_F(ReshardingOplogFetcherTest,
     _fetchTimestamp = repl::StorageInterface::get(_svcCtx)->getLatestOplogTimestamp(_opCtx);
 
     const auto& collectionUUID = [&] {
-        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
-        return dataColl->uuid();
+        const auto dataColl = acquireCollection(
+            _opCtx,
+            CollectionAcquisitionRequest{dataCollectionNss,
+                                         PlacementConcern{boost::none, ShardVersion::UNSHARDED()},
+                                         repl::ReadConcernArgs::get(_opCtx),
+                                         AcquisitionPrerequisites::kWrite},
+            MODE_IX);
+        return dataColl.uuid();
     }();
 
     auto fetcherJob = launchAsync([&, this] {
@@ -1288,6 +1387,1600 @@ DEATH_TEST_REGEX_F(ReshardingOplogFetcherTest,
     });
 
     (void)fetcherJob.timed_get(Seconds(5));
+}
+
+TEST_F(ReshardingOplogFetcherTest, ReadPreferenceBeforeAfterCriticalSection_TargetPrimary) {
+    // Not set the reshardingOplogFetcherTargetPrimaryDuringCriticalSection to test that the
+    // default is true.
+    const NamespaceString outputCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.outputCollection");
+    const NamespaceString dataCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.runFetchIteration");
+
+    create(outputCollectionNss);
+    create(dataCollectionNss);
+
+    const auto& collectionUUID = [&] {
+        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+        return dataColl->uuid();
+    }();
+
+    ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                   _reshardingUUID,
+                                   collectionUUID,
+                                   {_fetchTimestamp, _fetchTimestamp},
+                                   _donorShard,
+                                   _destinationShard,
+                                   outputCollectionNss,
+                                   true /* storeProgress */);
+    auto executor = makeExecutor();
+    executor->startup();
+    auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
+
+    // Make the cursor for the the aggregate command below have a non-zero id to test that
+    // prepareForCriticalSection() interrupts the in-progress aggregation. So the fetcher should not
+    // schedule a getMore command after this.
+    auto cursorIdBeforePrepare = 123;
+    auto aggBeforePrepareFuture = launchAsync([&, this] {
+        onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+            auto expectedReadPref = ReadPreferenceSetting{
+                ReadPreference::Nearest, ReadPreferenceSetting::kMinimalMaxStalenessValue};
+            assertAggregateReadPreference(request, expectedReadPref);
+
+            fetcher.prepareForCriticalSection();
+
+            auto postBatchResumeToken = _fetchTimestamp + 1;
+            return makeMockAggregateResponse(
+                postBatchResumeToken, {} /* oplogEntries */, cursorIdBeforePrepare);
+        });
+    });
+
+    aggBeforePrepareFuture.default_timed_get();
+
+    // Depending on when the interrupt occurs, the fetcher may still try to kill the cursor after
+    // the cancellation. In that case, schedule a response for the killCursor command.
+    auto makeKillCursorResponse = [&](const executor::RemoteCommandRequest& request) {
+        auto parsedRequest = KillCursorsCommandRequest::parse(
+            request.cmdObj.addFields(BSON("$db" << request.dbname.toString_forTest())),
+            IDLParserContext(unittest::getTestName()));
+
+        ASSERT_EQ(parsedRequest.getNamespace().ns_forTest(),
+                  NamespaceString::kRsOplogNamespace.toString_forTest());
+        ASSERT_EQ(parsedRequest.getCursorIds().size(), 1U);
+        ASSERT_EQ(parsedRequest.getCursorIds()[0], cursorIdBeforePrepare);
+        return BSONObj{};
+    };
+
+    // Make the cursor for the the aggregate command below have a non-zero id to test that the
+    // fetcher does not schedule a getMore command after seeing the final oplog entry.
+    auto cursorIdAfterPrepare = 456;
+    auto makeAggResponse = [&](const executor::RemoteCommandRequest& request) {
+        auto expectedReadPref = ReadPreferenceSetting{ReadPreference::PrimaryOnly};
+        assertAggregateReadPreference(request, expectedReadPref);
+
+        auto postBatchResumeToken = _fetchTimestamp + 2;
+        auto oplogEntries = BSON_ARRAY(
+            makeFinalNoopOplogEntry(dataCollectionNss, collectionUUID, postBatchResumeToken));
+        return makeMockAggregateResponse(postBatchResumeToken, oplogEntries, cursorIdAfterPrepare);
+    };
+
+    bool scheduledAggResponse = false;
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        auto cmdName = request.cmdObj.firstElementFieldName();
+        if (cmdName == "killCursors"_sd) {
+            return makeKillCursorResponse(request);
+        } else if (cmdName == "aggregate"_sd) {
+            scheduledAggResponse = true;
+            return makeAggResponse(request);
+        }
+        return {ErrorCodes::InternalError,
+                str::stream() << "Unexpected command request " << request.toString()};
+    });
+    if (!scheduledAggResponse) {
+        onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+            return makeAggResponse(request);
+        });
+    }
+
+    ASSERT_OK(fetcherFuture.getNoThrow());
+    executor->shutdown();
+    executor->join();
+}
+
+TEST_F(ReshardingOplogFetcherTest, ReadPreferenceBeforeAfterCriticalSection_NotTargetPrimary) {
+    RAIIServerParameterControllerForTest targetPrimaryDuringCriticalSection{
+        "reshardingOplogFetcherTargetPrimaryDuringCriticalSection", false};
+
+    const NamespaceString outputCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.outputCollection");
+    const NamespaceString dataCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.runFetchIteration");
+
+    create(outputCollectionNss);
+    create(dataCollectionNss);
+
+    const auto& collectionUUID = [&] {
+        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+        return dataColl->uuid();
+    }();
+
+    ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                   _reshardingUUID,
+                                   collectionUUID,
+                                   {_fetchTimestamp, _fetchTimestamp},
+                                   _donorShard,
+                                   _destinationShard,
+                                   outputCollectionNss,
+                                   true /* storeProgress */);
+    auto executor = makeExecutor();
+    executor->startup();
+    auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
+
+    // Make the cursor for the the aggregate command below have a non-zero id to test that
+    // prepareForCriticalSection() does not interrupt the in-progress aggregation. The fetcher
+    // should schedule a getMore command after this.
+    auto cursorIdBeforePrepare = 123;
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        auto expectedReadPref = ReadPreferenceSetting{
+            ReadPreference::Nearest, ReadPreferenceSetting::kMinimalMaxStalenessValue};
+        assertAggregateReadPreference(request, expectedReadPref);
+
+        fetcher.prepareForCriticalSection();
+
+        auto postBatchResumeToken = _fetchTimestamp + 1;
+        return makeMockAggregateResponse(
+            postBatchResumeToken, {} /* oplogEntries */, cursorIdBeforePrepare);
+    });
+
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        assertGetMoreCursorId(request, cursorIdBeforePrepare);
+        auto postBatchResumeToken = _fetchTimestamp + 2;
+        return makeMockAggregateResponse(
+            postBatchResumeToken, {} /* oplogEntries */, cursorIdBeforePrepare);
+    });
+
+    // The fetcher should kill the cursor after exhausting it.
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        auto parsedRequest = KillCursorsCommandRequest::parse(
+            request.cmdObj.addFields(BSON("$db" << request.dbname.toString_forTest())),
+            IDLParserContext(unittest::getTestName()));
+
+        ASSERT_EQ(parsedRequest.getNamespace().ns_forTest(),
+                  NamespaceString::kRsOplogNamespace.toString_forTest());
+        ASSERT_EQ(parsedRequest.getCursorIds().size(), 1U);
+        ASSERT_EQ(parsedRequest.getCursorIds()[0], cursorIdBeforePrepare);
+        return BSONObj{};
+    });
+
+    // Make the cursor for the the aggregate command below have a non-zero id to test that the
+    // fetcher does not schedule a getMore command after seeing the final oplog entry.
+    auto cursorIdAfterPrepare = 456;
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        auto expectedReadPref = ReadPreferenceSetting{
+            ReadPreference::Nearest, ReadPreferenceSetting::kMinimalMaxStalenessValue};
+        assertAggregateReadPreference(request, expectedReadPref);
+
+        auto postBatchResumeToken = _fetchTimestamp + 2;
+        auto oplogEntries = BSON_ARRAY(
+            makeFinalNoopOplogEntry(dataCollectionNss, collectionUUID, postBatchResumeToken));
+        return makeMockAggregateResponse(postBatchResumeToken, oplogEntries, cursorIdAfterPrepare);
+    });
+
+    ASSERT_OK(fetcherFuture.getNoThrow());
+    executor->shutdown();
+    executor->join();
+}
+
+TEST_F(ReshardingOplogFetcherTest, PrepareForCriticalSectionBeforeScheduling) {
+    const NamespaceString outputCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.outputCollection");
+    const NamespaceString dataCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.runFetchIteration");
+
+    create(outputCollectionNss);
+    create(dataCollectionNss);
+
+    const auto& collectionUUID = [&] {
+        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+        return dataColl->uuid();
+    }();
+
+    ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                   _reshardingUUID,
+                                   collectionUUID,
+                                   {_fetchTimestamp, _fetchTimestamp},
+                                   _donorShard,
+                                   _destinationShard,
+                                   outputCollectionNss,
+                                   true /* storeProgress */);
+    fetcher.prepareForCriticalSection();
+
+    auto executor = makeExecutor();
+    executor->startup();
+    auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
+
+    // Make the cursor for the the aggregate command below have a non-zero id to test that the
+    // fetcher does not schedule a getMore command after seeing the final oplog entry.
+    auto cursorIdAfterPrepare = 123;
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        auto expectedReadPref = ReadPreferenceSetting{ReadPreference::PrimaryOnly};
+        assertAggregateReadPreference(request, expectedReadPref);
+
+        auto postBatchResumeToken = _fetchTimestamp + 1;
+        auto oplogEntries = BSON_ARRAY(
+            makeFinalNoopOplogEntry(dataCollectionNss, collectionUUID, postBatchResumeToken));
+        return makeMockAggregateResponse(postBatchResumeToken, oplogEntries, cursorIdAfterPrepare);
+    });
+
+    ASSERT_OK(fetcherFuture.getNoThrow());
+    executor->shutdown();
+    executor->join();
+}
+
+TEST_F(ReshardingOplogFetcherTest, PrepareForCriticalSectionMoreThanOnce) {
+    const NamespaceString outputCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.outputCollection");
+    const NamespaceString dataCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.runFetchIteration");
+
+    create(outputCollectionNss);
+    create(dataCollectionNss);
+
+    const auto& collectionUUID = [&] {
+        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+        return dataColl->uuid();
+    }();
+
+    ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                   _reshardingUUID,
+                                   collectionUUID,
+                                   {_fetchTimestamp, _fetchTimestamp},
+                                   _donorShard,
+                                   _destinationShard,
+                                   outputCollectionNss,
+                                   true /* storeProgress */);
+    auto executor = makeExecutor();
+    executor->startup();
+    auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
+
+    // Make the cursor for the the aggregate command below have id 0 to make the fetcher not
+    // schedule a getMore command so that the test does not need to also schedule a getMore
+    // response.
+    auto cursorIdBeforePrepare = 0;
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        auto expectedReadPref = ReadPreferenceSetting{
+            ReadPreference::Nearest, ReadPreferenceSetting::kMinimalMaxStalenessValue};
+        assertAggregateReadPreference(request, expectedReadPref);
+
+        // This should interrupt the in-progress aggregation.
+        fetcher.prepareForCriticalSection();
+        // This should not interrupt the in-progress aggregation since it has already been
+        // interrupted.
+        fetcher.prepareForCriticalSection();
+
+        auto postBatchResumeToken = _fetchTimestamp + 1;
+        return makeMockAggregateResponse(
+            postBatchResumeToken, {} /* oplogEntries */, cursorIdBeforePrepare);
+    });
+
+    // Make the cursor for the the aggregate command below have a non-zero id to test that the
+    // fetcher does not schedule a getMore command after seeing the final oplog entry.
+    auto cursorIdAfterPrepare = 123;
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        auto expectedReadPref = ReadPreferenceSetting{ReadPreference::PrimaryOnly};
+        assertAggregateReadPreference(request, expectedReadPref);
+
+        // This should not interrupt the in-progress aggregation.
+        fetcher.prepareForCriticalSection();
+
+        auto postBatchResumeToken = _fetchTimestamp + 2;
+        auto oplogEntries = BSON_ARRAY(
+            makeFinalNoopOplogEntry(dataCollectionNss, collectionUUID, postBatchResumeToken));
+        return makeMockAggregateResponse(postBatchResumeToken, oplogEntries, cursorIdAfterPrepare);
+    });
+
+    ASSERT_OK(fetcherFuture.getNoThrow());
+    fetcher.prepareForCriticalSection();
+    executor->shutdown();
+    executor->join();
+}
+
+TEST_F(ReshardingOplogFetcherTest, PrepareForCriticalSectionAfterFetchingFinalOplogEntry) {
+    for (bool targetPrimary : {false, true}) {
+        LOGV2(10355403, "Running case", "targetPrimary"_attr = targetPrimary);
+
+        RAIIServerParameterControllerForTest targetPrimaryDuringCriticalSection{
+            "reshardingOplogFetcherTargetPrimaryDuringCriticalSection", targetPrimary};
+
+        const NamespaceString outputCollectionNss = NamespaceString::createNamespaceString_forTest(
+            "dbtests.outputCollection" + std::to_string(targetPrimary));
+        const NamespaceString dataCollectionNss = NamespaceString::createNamespaceString_forTest(
+            "dbtests.runFetchIteration" + std::to_string(targetPrimary));
+
+        create(outputCollectionNss);
+        create(dataCollectionNss);
+
+        const auto& collectionUUID = [&] {
+            AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+            return dataColl->uuid();
+        }();
+
+        ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                       _reshardingUUID,
+                                       collectionUUID,
+                                       {_fetchTimestamp, _fetchTimestamp},
+                                       _donorShard,
+                                       _destinationShard,
+                                       outputCollectionNss,
+                                       true /* storeProgress */);
+        auto executor = makeExecutor();
+        executor->startup();
+
+        // Invoke onPrepareCriticalSection() after the fetcher has consumed the final oplog entry.
+        auto fp = globalFailPointRegistry().find("pauseReshardingOplogFetcherAfterConsuming");
+        auto timesEnteredBefore = fp->setMode(FailPoint::alwaysOn);
+
+        auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
+
+        auto cursorId = 123;
+        auto aggBeforePrepareFuture = launchAsync([&, this] {
+            onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+                auto expectedReadPref = ReadPreferenceSetting{
+                    ReadPreference::Nearest, ReadPreferenceSetting::kMinimalMaxStalenessValue};
+                assertAggregateReadPreference(request, expectedReadPref);
+
+                auto postBatchResumeToken = _fetchTimestamp + 1;
+                auto oplogEntries = BSON_ARRAY(makeFinalNoopOplogEntry(
+                    dataCollectionNss, collectionUUID, postBatchResumeToken));
+                return makeMockAggregateResponse(postBatchResumeToken, oplogEntries, cursorId);
+            });
+        });
+
+        fp->waitForTimesEntered(timesEnteredBefore + 1);
+
+        fetcher.prepareForCriticalSection();
+        auto timesEnteredAfter = fp->setMode(FailPoint::off);
+        ASSERT_EQ(timesEnteredAfter, timesEnteredBefore + 1);
+
+        // The thread below would block without the time advancing.
+        advanceTime(Seconds{1});
+        aggBeforePrepareFuture.default_timed_get();
+
+        // Schedule a response for the killCursor command to prevent its request from interfering
+        // with the next test case.
+        onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+            auto parsedRequest = KillCursorsCommandRequest::parse(
+                request.cmdObj.addFields(BSON("$db" << request.dbname.toString_forTest())),
+                IDLParserContext(unittest::getTestName()));
+
+            ASSERT_EQ(parsedRequest.getNamespace().ns_forTest(),
+                      NamespaceString::kRsOplogNamespace.toString_forTest());
+            ASSERT_EQ(parsedRequest.getCursorIds().size(), 1U);
+            ASSERT_EQ(parsedRequest.getCursorIds()[0], cursorId);
+            return BSONObj{};
+        });
+
+        // The fetcher should not schedule another aggregate command. If it does, it would get stuck
+        // waiting for the aggregate response which the test does not schedule.
+        ASSERT_OK(fetcherFuture.getNoThrow());
+        executor->shutdown();
+        executor->join();
+
+        resetResharding();
+    }
+}
+
+// TODO (SERVER-106341): Uncomment the assertions in all UpdateAverageTime* unit tests.
+
+TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchCursorAdvancedBasic) {
+    auto smoothingFactor = 0.5;
+    const RAIIServerParameterControllerForTest smoothingFactorServerParameter{
+        "reshardingExponentialMovingAverageTimeToFetchAndApplySmoothingFactor", smoothingFactor};
+
+    const NamespaceString outputCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.outputCollection");
+    const NamespaceString dataCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.runFetchIteration");
+
+    create(outputCollectionNss);
+    create(dataCollectionNss);
+
+    const auto& collectionUUID = [&] {
+        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+        return dataColl->uuid();
+    }();
+
+    // To make the time difference calculation in this test work as expected, advance the clock to
+    // the next second since a clusterTime timestamp only has second granularity, as the "t" field
+    // is the number of seconds since epoch and the "i" field is just an increasing increment for
+    // differentiating operations within the same second.
+    advanceTimeToNextSecond();
+
+    advanceTime(Seconds{60});
+    _fetchTimestamp = makeClusterTimestampAtNow();
+
+    ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                   _reshardingUUID,
+                                   collectionUUID,
+                                   {_fetchTimestamp, _fetchTimestamp},
+                                   _donorShard,
+                                   _destinationShard,
+                                   outputCollectionNss,
+                                   true /* storeProgress */);
+    auto executor = makeExecutor();
+    executor->startup();
+    auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
+
+    // Verify that the average started out uninitialized.
+    ASSERT_FALSE(_metrics->getAverageTimeToFetchOplogEntries(_donorShard));
+
+    auto cursorId = 123;
+    advanceTime(Seconds{10});
+    auto postBatchResumeToken0 = makeClusterTimestampAtNow();
+
+    // Advance the clock before mocking a response with the resume token above.
+    auto timeToFetch0 = Milliseconds(5000);
+    advanceTime(timeToFetch0);
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        return makeMockAggregateResponse(postBatchResumeToken0, {} /* oplogEntries */, cursorId);
+    });
+
+    // Verify that the average got initialized based on the difference between the current timestamp
+    // and the latest resume timestamp.
+    // auto avgTimeToFetch0 = timeToFetch0;
+    // ASSERT_EQ(_metrics->getAverageTimeToFetchOplogEntries(_donorShard), avgTimeToFetch0);
+
+    advanceTime(Seconds{5});
+    auto postBatchResumeToken1 = makeClusterTimestampAtNow();
+
+    // Advance the clock before mocking a response with the resume token above.
+    auto timeToFetch1 = Milliseconds(2000);
+    advanceTime(timeToFetch1);
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        return makeMockGetMoreResponse(postBatchResumeToken1, {} /* oplogEntries */, cursorId);
+    });
+
+    // Verify that the average got updated based on the difference between the current timestamp
+    // and the latest resume timestamp.
+    // auto avgTimeToFetch1 = Milliseconds((int)resharding::calculateExponentialMovingAverage(
+    //    avgTimeToFetch0.count(), timeToFetch1.count(), smoothingFactor));
+    // ASSERT_EQ(_metrics->getAverageTimeToFetchOplogEntries(_donorShard),
+    //           Milliseconds(avgTimeToFetch1));
+
+    advanceTime(Seconds{1});
+    auto postBatchResumeToken2 = makeClusterTimestampAtNow();
+
+    // Advance the clock before mocking a response with the resume token above.
+    auto timeToFetch2 = Milliseconds(1000);
+    advanceTime(timeToFetch2);
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        auto oplogEntries = BSON_ARRAY(
+            makeFinalNoopOplogEntry(dataCollectionNss, collectionUUID, postBatchResumeToken2));
+        return makeMockGetMoreResponse(postBatchResumeToken2, oplogEntries, cursorId);
+    });
+
+    ASSERT_OK(fetcherFuture.getNoThrow());
+    executor->shutdown();
+    executor->join();
+
+    // Verify that the average did not get updated when the fetcher joined.
+    // ASSERT_EQ(_metrics->getAverageTimeToFetchOplogEntries(_donorShard),
+    //          Milliseconds(avgTimeToFetch1));
+}
+
+TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchAdvancedDelayLessThanOneSecond) {
+    const NamespaceString outputCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.outputCollection");
+    const NamespaceString dataCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.runFetchIteration");
+
+    create(outputCollectionNss);
+    create(dataCollectionNss);
+
+    const auto& collectionUUID = [&] {
+        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+        return dataColl->uuid();
+    }();
+
+    // To make the time difference calculation in this test work as expected, advance the clock to
+    // the next second since a clusterTime timestamp only has second granularity, as the "t" field
+    // is the number of seconds since epoch and the "i" field is just an increasing increment for
+    // differentiating operations within the same second.
+    advanceTimeToNextSecond();
+
+    advanceTime(Seconds{60});
+    _fetchTimestamp = makeClusterTimestampAtNow();
+
+    ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                   _reshardingUUID,
+                                   collectionUUID,
+                                   {_fetchTimestamp, _fetchTimestamp},
+                                   _donorShard,
+                                   _destinationShard,
+                                   outputCollectionNss,
+                                   true /* storeProgress */);
+    auto executor = makeExecutor();
+    executor->startup();
+    auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
+
+    // Verify that the average started out uninitialized.
+    ASSERT_FALSE(_metrics->getAverageTimeToFetchOplogEntries(_donorShard));
+
+    auto cursorId = 123;
+    advanceTime(Seconds{10});
+    auto postBatchResumeToken0 = makeClusterTimestampAtNow();
+
+    // Advance the clock by less than one second before mocking a response with the resume token
+    // above.
+    auto timeToFetch0 = Milliseconds(321);
+    advanceTime(timeToFetch0);
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        return makeMockAggregateResponse(postBatchResumeToken0, {} /* oplogEntries */, cursorId);
+    });
+
+    // Verify that the average got initialized based on the difference between the current timestamp
+    // and the latest resume timestamp.
+    // auto avgTimeToFetch0 = timeToFetch0;
+    // ASSERT_EQ(_metrics->getAverageTimeToFetchOplogEntries(_donorShard), avgTimeToFetch0);
+
+    // Mock a response with the final oplog entry so the fetcher can join.
+    advanceTime(Seconds{1});
+    auto postBatchResumeToken1 = makeClusterTimestampAtNow();
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        auto oplogEntries = BSON_ARRAY(
+            makeFinalNoopOplogEntry(dataCollectionNss, collectionUUID, postBatchResumeToken1));
+        return makeMockGetMoreResponse(postBatchResumeToken1, oplogEntries, cursorId);
+    });
+
+    ASSERT_OK(fetcherFuture.getNoThrow());
+    executor->shutdown();
+    executor->join();
+}
+
+TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchAdvancedDelayZeroSecond) {
+    const NamespaceString outputCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.outputCollection");
+    const NamespaceString dataCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.runFetchIteration");
+
+    create(outputCollectionNss);
+    create(dataCollectionNss);
+
+    const auto& collectionUUID = [&] {
+        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+        return dataColl->uuid();
+    }();
+
+    // To make the time difference calculation in this test work as expected, advance the clock to
+    // the next second since a clusterTime timestamp only has second granularity, as the "t" field
+    // is the number of seconds since epoch and the "i" field is just an increasing increment for
+    // differentiating operations within the same second.
+    advanceTimeToNextSecond();
+
+    advanceTime(Seconds{60});
+    _fetchTimestamp = makeClusterTimestampAtNow();
+
+    ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                   _reshardingUUID,
+                                   collectionUUID,
+                                   {_fetchTimestamp, _fetchTimestamp},
+                                   _donorShard,
+                                   _destinationShard,
+                                   outputCollectionNss,
+                                   true /* storeProgress */);
+    auto executor = makeExecutor();
+    executor->startup();
+    auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
+
+    // Verify that the average started out uninitialized.
+    ASSERT_FALSE(_metrics->getAverageTimeToFetchOplogEntries(_donorShard));
+
+    auto cursorId = 123;
+    advanceTime(Seconds{10});
+    auto postBatchResumeToken0 = makeClusterTimestampAtNow();
+
+    // Do not advance the clock before mocking a response with the resume token above.
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        return makeMockAggregateResponse(postBatchResumeToken0, {} /* oplogEntries */, cursorId);
+    });
+
+    // Verify that the average got initialized based on the difference between the current timestamp
+    // and the latest resume timestamp which is 0.
+    // auto avgTimeToFetch0 = Milliseconds(0);
+    // ASSERT_EQ(_metrics->getAverageTimeToFetchOplogEntries(_donorShard), avgTimeToFetch0);
+
+    // Mock a response with the final oplog entry so the fetcher can join.
+    advanceTime(Seconds{1});
+    auto postBatchResumeToken1 = makeClusterTimestampAtNow();
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        auto oplogEntries = BSON_ARRAY(
+            makeFinalNoopOplogEntry(dataCollectionNss, collectionUUID, postBatchResumeToken1));
+        return makeMockGetMoreResponse(postBatchResumeToken1, oplogEntries, cursorId);
+    });
+
+    ASSERT_OK(fetcherFuture.getNoThrow());
+    executor->shutdown();
+    executor->join();
+}
+
+TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchAdvancedDelayNegativeClockSkew) {
+    const NamespaceString outputCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.outputCollection");
+    const NamespaceString dataCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.runFetchIteration");
+
+    create(outputCollectionNss);
+    create(dataCollectionNss);
+
+    const auto& collectionUUID = [&] {
+        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+        return dataColl->uuid();
+    }();
+
+    // To make the time difference calculation in this test work as expected, advance the clock to
+    // the next second since a clusterTime timestamp only has second granularity, as the "t" field
+    // is the number of seconds since epoch and the "i" field is just an increasing increment for
+    // differentiating operations within the same second.
+    advanceTimeToNextSecond();
+
+    advanceTime(Seconds{60});
+    _fetchTimestamp = makeClusterTimestampAtNow();
+
+    ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                   _reshardingUUID,
+                                   collectionUUID,
+                                   {_fetchTimestamp, _fetchTimestamp},
+                                   _donorShard,
+                                   _destinationShard,
+                                   outputCollectionNss,
+                                   true /* storeProgress */);
+    auto executor = makeExecutor();
+    executor->startup();
+    auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
+
+    // Verify that the average started out uninitialized.
+    ASSERT_FALSE(_metrics->getAverageTimeToFetchOplogEntries(_donorShard));
+
+    auto cursorId = 123;
+    advanceTime(Seconds{10});
+    // Make the resume timestamp greater than the current time on the recipient.
+    auto postBatchResumeToken0 = makeClusterTimestampAt(now() + Seconds(5));
+
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        return makeMockAggregateResponse(postBatchResumeToken0, {} /* oplogEntries */, cursorId);
+    });
+
+    // Verify that the average got initialized based on the difference between the current timestamp
+    // and the latest resume timestamp. The difference was negative but got capped at 0.
+    // auto avgTimeToFetch0 = Milliseconds(0);
+    // ASSERT_EQ(_metrics->getAverageTimeToFetchOplogEntries(_donorShard), avgTimeToFetch0);
+
+    // Mock a response with the final oplog entry so the fetcher can join.
+    advanceTime(Seconds{1});
+    auto postBatchResumeToken1 = makeClusterTimestampAtNow();
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        auto oplogEntries = BSON_ARRAY(
+            makeFinalNoopOplogEntry(dataCollectionNss, collectionUUID, postBatchResumeToken1));
+        return makeMockGetMoreResponse(postBatchResumeToken1, oplogEntries, cursorId);
+    });
+
+    ASSERT_OK(fetcherFuture.getNoThrow());
+    executor->shutdown();
+    executor->join();
+}
+
+TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchCursorNotAdvanced) {
+    auto smoothingFactor = 0.6;
+    const RAIIServerParameterControllerForTest smoothingFactorServerParameter{
+        "reshardingExponentialMovingAverageTimeToFetchAndApplySmoothingFactor", smoothingFactor};
+
+    const NamespaceString outputCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.outputCollection");
+    const NamespaceString dataCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.runFetchIteration");
+
+    create(outputCollectionNss);
+    create(dataCollectionNss);
+
+    const auto& collectionUUID = [&] {
+        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+        return dataColl->uuid();
+    }();
+
+    // To make the time difference calculation in this test work as expected, advance the clock to
+    // the next second since a clusterTime timestamp only has second granularity, as the "t" field
+    // is the number of seconds since epoch and the "i" field is just an increasing increment for
+    // differentiating operations within the same second.
+    advanceTimeToNextSecond();
+
+    advanceTime(Seconds{60});
+    _fetchTimestamp = makeClusterTimestampAtNow();
+
+    ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                   _reshardingUUID,
+                                   collectionUUID,
+                                   {_fetchTimestamp, _fetchTimestamp},
+                                   _donorShard,
+                                   _destinationShard,
+                                   outputCollectionNss,
+                                   true /* storeProgress */);
+    auto executor = makeExecutor();
+    executor->startup();
+    auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
+
+    // Verify that the average started out uninitialized.
+    ASSERT_FALSE(_metrics->getAverageTimeToFetchOplogEntries(_donorShard));
+
+    auto cursorId = 123;
+    advanceTime(Seconds{10});
+    auto postBatchResumeToken0 = makeClusterTimestampAtNow();
+
+    // Advance the clock before mocking a response with the resume token above.
+    auto timeToFetch0 = Milliseconds(5000);
+    advanceTime(timeToFetch0);
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        return makeMockAggregateResponse(postBatchResumeToken0, {} /* oplogEntries */, cursorId);
+    });
+
+    // Verify that the average got initialized based on the difference between the current timestamp
+    // and the latest resume timestamp.
+    // auto avgTimeToFetch0 = timeToFetch0;
+    // ASSERT_EQ(_metrics->getAverageTimeToFetchOplogEntries(_donorShard), avgTimeToFetch0);
+
+    // Make the cursor not advance.
+    auto postBatchResumeToken1 = postBatchResumeToken0;
+    auto getMoreDuration1 = Milliseconds(5);
+    // auto timeToFetch1 = getMoreDuration1;
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        // Advance the clock before mocking a response with the resume token above.
+        advanceTime(getMoreDuration1);
+        return makeMockGetMoreResponse(postBatchResumeToken1, {} /* oplogEntries */, cursorId);
+    });
+
+    // Verify that the average got updated based on the time taken for the getMore command to
+    // return.
+    // auto avgTimeToFetch1 = Milliseconds((int)resharding::calculateExponentialMovingAverage(
+    //     avgTimeToFetch0.count(), timeToFetch1.count(), smoothingFactor));
+    // ASSERT_EQ(_metrics->getAverageTimeToFetchOplogEntries(_donorShard),
+    //           Milliseconds(avgTimeToFetch1));
+
+    // Make the cursor not advance again.
+    auto postBatchResumeToken2 = postBatchResumeToken0;
+    auto getMoreDuration2 = Milliseconds(1);
+    // auto timeToFetch2 = getMoreDuration2;
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        // Advance the clock before mocking a response with the resume token above.
+        advanceTime(getMoreDuration2);
+        return makeMockGetMoreResponse(postBatchResumeToken2, {} /* oplogEntries */, cursorId);
+    });
+
+    // Verify that the average got updated based on the time taken for the getMore command to
+    // return.
+    // auto avgTimeToFetch2 = Milliseconds((int)resharding::calculateExponentialMovingAverage(
+    //     avgTimeToFetch1.count(), timeToFetch2.count(), smoothingFactor));
+    // ASSERT_EQ(_metrics->getAverageTimeToFetchOplogEntries(_donorShard),
+    //           Milliseconds(avgTimeToFetch2));
+
+    // Mock a response with the final oplog entry so the fetcher can join.
+    advanceTime(Seconds{1});
+    auto postBatchResumeToken3 = makeClusterTimestampAtNow();
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        auto oplogEntries = BSON_ARRAY(
+            makeFinalNoopOplogEntry(dataCollectionNss, collectionUUID, postBatchResumeToken3));
+        return makeMockGetMoreResponse(postBatchResumeToken3, oplogEntries, cursorId);
+    });
+
+    ASSERT_OK(fetcherFuture.getNoThrow());
+    executor->shutdown();
+    executor->join();
+}
+
+TEST_F(ReshardingOplogFetcherTest, UpdateAverageTimeToFetchMultipleCursors) {
+    auto smoothingFactor = 0.7;
+    const RAIIServerParameterControllerForTest smoothingFactorServerParameter{
+        "reshardingExponentialMovingAverageTimeToFetchAndApplySmoothingFactor", smoothingFactor};
+
+    const NamespaceString outputCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.outputCollection");
+    const NamespaceString dataCollectionNss =
+        NamespaceString::createNamespaceString_forTest("dbtests.runFetchIteration");
+
+    create(outputCollectionNss);
+    create(dataCollectionNss);
+
+    const auto& collectionUUID = [&] {
+        AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+        return dataColl->uuid();
+    }();
+
+    // To make the time difference calculation in this test work as expected, advance the clock to
+    // the next second since a clusterTime timestamp only has second granularity, as the "t" field
+    // is the number of seconds since epoch and the "i" field is just an increasing increment for
+    // differentiating operations within the same second.
+    advanceTimeToNextSecond();
+
+    advanceTime(Seconds{60});
+    _fetchTimestamp = makeClusterTimestampAtNow();
+
+    ReshardingOplogFetcher fetcher(makeFetcherEnv(),
+                                   _reshardingUUID,
+                                   collectionUUID,
+                                   {_fetchTimestamp, _fetchTimestamp},
+                                   _donorShard,
+                                   _destinationShard,
+                                   outputCollectionNss,
+                                   true /* storeProgress */);
+    auto executor = makeExecutor();
+    executor->startup();
+    auto fetcherFuture = fetcher.schedule(executor, CancellationToken::uncancelable());
+
+    // Verify that the average started out uninitialized.
+    ASSERT_FALSE(_metrics->getAverageTimeToFetchOplogEntries(_donorShard));
+
+    auto cursorId0 = 0;
+    advanceTime(Seconds{10});
+    auto postBatchResumeToken0 = makeClusterTimestampAtNow();
+
+    // Advance the clock before mocking a response with the resume token above.
+    auto timeToFetch0 = Milliseconds(3000);
+    advanceTime(timeToFetch0);
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        return makeMockAggregateResponse(postBatchResumeToken0, {} /* oplogEntries */, cursorId0);
+    });
+
+    // Verify that the average got initialized based on the difference between the current timestamp
+    // and the latest resume timestamp.
+    // auto avgTimeToFetch0 = timeToFetch0;
+    // ASSERT_EQ(_metrics->getAverageTimeToFetchOplogEntries(_donorShard), avgTimeToFetch0);
+
+    auto cursorId1 = 123;
+    advanceTime(Seconds{5});
+    auto postBatchResumeToken1 = makeClusterTimestampAtNow();
+
+    // Advance the clock before mocking a response with the resume token above.
+    auto timeToFetch1 = Milliseconds(2000);
+    advanceTime(timeToFetch1);
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        return makeMockAggregateResponse(postBatchResumeToken1, {} /* oplogEntries */, cursorId1);
+    });
+
+    // Verify that the average got updated based on the difference between the current timestamp
+    // and the latest resume timestamp.
+    // auto avgTimeToFetch1 = Milliseconds((int)resharding::calculateExponentialMovingAverage(
+    //     avgTimeToFetch0.count(), timeToFetch1.count(), smoothingFactor));
+    // ASSERT_EQ(_metrics->getAverageTimeToFetchOplogEntries(_donorShard),
+    //           Milliseconds(avgTimeToFetch1));
+
+    // Mock a response with the final oplog entry so the fetcher can join.
+    advanceTime(Seconds{1});
+    auto postBatchResumeToken2 = makeClusterTimestampAtNow();
+    onCommand([&](const executor::RemoteCommandRequest& request) -> StatusWith<BSONObj> {
+        auto oplogEntries = BSON_ARRAY(
+            makeFinalNoopOplogEntry(dataCollectionNss, collectionUUID, postBatchResumeToken2));
+        return makeMockGetMoreResponse(postBatchResumeToken2, oplogEntries, cursorId1);
+    });
+
+    ASSERT_OK(fetcherFuture.getNoThrow());
+    executor->shutdown();
+    executor->join();
+}
+
+class ReshardingOplogFetcherProgressMarkOplogTest : public ReshardingOplogFetcherTest {
+protected:
+    struct OplogFetcherState {
+        bool oplogApplicationStarted;
+        bool storedProgress;
+        int lastFetchedCount;
+        ReshardingDonorOplogId lastFetchedOplogId;
+        Date_t lastFetchedOplogWallClockTime;
+        boost::optional<repl::MutableOplogEntry> lastFetchedOplogEntry;
+    };
+
+    struct TestOptions {
+        bool storeProgress;
+        bool movingAvgFeatureFlag;
+        bool movingAvgServerParameter;
+
+        BSONObj toBSON() const {
+            BSONObjBuilder bob;
+            bob.append("storeProgress", storeProgress);
+            bob.append("movingAvgFeatureFlag", movingAvgFeatureFlag);
+            bob.append("movingAvgServerParameter", movingAvgServerParameter);
+            return bob.obj();
+        }
+    };
+
+    struct TestContext {
+        TestContext(std::unique_ptr<ReshardingOplogFetcher> fetcher_,
+                    ReshardingDonorOplogId startAt_,
+                    NamespaceString outputCollectionNss_,
+                    NamespaceString dataCollectionNss_,
+                    UUID dataCollectionUUID_,
+                    bool movingAvgFeatureFlag_,
+                    bool movingAvgServerParameter_)
+            : fetcher(std::move(fetcher_)),
+              startAt(startAt_),
+              outputCollectionNss(outputCollectionNss_),
+              dataCollectionNss(dataCollectionNss_),
+              dataCollectionUUID(dataCollectionUUID_),
+              movingAvgFeatureFlag("featureFlagReshardingRemainingTimeEstimateBasedOnMovingAverage",
+                                   movingAvgFeatureFlag_),
+              movingAvgServerParameter("reshardingRemainingTimeEstimateBasedOnMovingAverage",
+                                       movingAvgServerParameter_) {}
+
+        std::unique_ptr<ReshardingOplogFetcher> fetcher;
+        ReshardingDonorOplogId startAt;
+        NamespaceString outputCollectionNss;
+        NamespaceString dataCollectionNss;
+        UUID dataCollectionUUID;
+        RAIIServerParameterControllerForTest movingAvgFeatureFlag;
+        RAIIServerParameterControllerForTest movingAvgServerParameter;
+    };
+
+    std::vector<TestOptions> makeAllTestOptions() {
+        std::vector<TestOptions> testOptions;
+        for (bool storeProgress : {false, true}) {
+            for (bool movingAvgFeatureFlag : {false, true}) {
+                for (bool movingAvgServerParameter : {false, true}) {
+                    testOptions.push_back(
+                        {storeProgress, movingAvgFeatureFlag, movingAvgServerParameter});
+                }
+            }
+        }
+        return testOptions;
+    }
+
+    TestContext makeTestContext(int testNum, TestOptions testOptions) {
+        auto outputCollectionNss = NamespaceString::createNamespaceString_forTest(
+            "dbtests.outputCollection" + std::to_string(testNum));
+        auto dataCollectionNss = NamespaceString::createNamespaceString_forTest(
+            "dbtests.runFetchIteration" + std::to_string(testNum));
+        create(outputCollectionNss);
+        create(dataCollectionNss);
+
+        auto dataCollectionUUID = [&] {
+            AutoGetCollection dataColl(_opCtx, dataCollectionNss, LockMode::MODE_IX);
+            return dataColl->uuid();
+        }();
+
+        auto startAt = ReshardingDonorOplogId{_fetchTimestamp, _fetchTimestamp};
+        auto fetcher = std::make_unique<ReshardingOplogFetcher>(makeFetcherEnv(),
+                                                                _reshardingUUID,
+                                                                dataCollectionUUID,
+                                                                startAt,
+                                                                _donorShard,
+                                                                _destinationShard,
+                                                                outputCollectionNss,
+                                                                testOptions.storeProgress);
+
+        return {std::move(fetcher),
+                startAt,
+                outputCollectionNss,
+                dataCollectionNss,
+                dataCollectionUUID,
+                testOptions.movingAvgFeatureFlag,
+                testOptions.movingAvgServerParameter};
+    }
+
+    void runFetcher(ReshardingOplogFetcher* fetcher, const BSONObj& mockCursorResponse) {
+        auto fetcherJob = launchAsync([&, this] {
+            ThreadClient tc("RunnerForFetcher", _svcCtx->getService(), Client::noSession());
+            auto factory = makeCancelableOpCtx();
+            return fetcher->iterate(&cc(), factory);
+        });
+        ASSERT_TRUE(requestPassthroughHandler(fetcherJob, -1, mockCursorResponse));
+    }
+
+    void assertOplogEntriesCount(const NamespaceString& outputNss,
+                                 const OplogFetcherState& expected) {
+        ASSERT_EQ(currentOpFetchedCount(), expected.lastFetchedCount);
+        ASSERT_EQ(persistedFetchedCount(_opCtx),
+                  expected.storedProgress ? expected.lastFetchedCount : 0);
+        assertUsedApplyOpsToBatchInsert(outputNss, expected.lastFetchedCount);
+    }
+
+    void assertNoOplogEntries(const NamespaceString& outputNss) {
+        assertOplogEntriesCount(outputNss, OplogFetcherState{.lastFetchedCount = 0});
+        ASSERT_TRUE(getLast(outputNss).isEmpty());
+    }
+
+    void assertLastOplogEntryProgressMark(const NamespaceString& outputNss,
+                                          const OplogFetcherState& expected) {
+        auto lastOplogEntryBson = getLast(outputNss);
+        auto lastOplogEntry = uassertStatusOK(repl::OplogEntry::parse(lastOplogEntryBson));
+
+        ASSERT_EQ(lastOplogEntry.getOpType(), repl::OpTypeEnum::kNoop);
+        ASSERT_BSONOBJ_EQ(lastOplogEntry.get_id()->getDocument().toBson(),
+                          expected.lastFetchedOplogId.toBSON());
+
+        ASSERT_EQ(lastOplogEntry.getWallClockTime(), expected.lastFetchedOplogWallClockTime);
+        ReshardProgressMarkO2Field o2Field;
+        o2Field.setType(resharding::kReshardProgressMarkOpLogType);
+        if (expected.oplogApplicationStarted) {
+            o2Field.setCreatedAfterOplogApplicationStarted(true);
+        }
+        ASSERT_BSONOBJ_EQ(*lastOplogEntry.getObject2(), o2Field.toBSON());
+    }
+
+    void assertLastOplogNotProgressMark(const NamespaceString& outputNss,
+                                        const OplogFetcherState& expected) {
+        auto lastOplogEntryBson = getLast(outputNss);
+        auto lastOplogEntry = uassertStatusOK(repl::OplogEntry::parse(lastOplogEntryBson));
+
+        ASSERT_EQ(lastOplogEntry.getWallClockTime(), expected.lastFetchedOplogWallClockTime);
+
+        // Exclude the 'wallClockTime' field from the BSON comparison, as it is expected to be set
+        // to the current time by the fetcher.
+        auto actualLastOplogEntryBson =
+            lastOplogEntryBson.removeField(repl::OplogEntry::kWallClockTimeFieldName);
+        auto expectedLastOplogEntryBson = expected.lastFetchedOplogEntry->toBSON().removeField(
+            repl::OplogEntry::kWallClockTimeFieldName);
+        ASSERT_BSONOBJ_EQ(actualLastOplogEntryBson, expectedLastOplogEntryBson);
+    }
+};
+
+TEST_F(
+    ReshardingOplogFetcherProgressMarkOplogTest,
+    BeforeOplogApplication_NotInsertProgressMarkOplog_EmptyBatchAndResumeTimestampEqualToStartAt) {
+    auto testNum = 0;
+    for (const auto& testOptions : makeAllTestOptions()) {
+        LOGV2(10635001,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "testOptions"_attr = testOptions);
+
+        testNum++;
+        auto testCtx = makeTestContext(testNum, testOptions);
+
+        auto postBatchResumeToken = testCtx.startAt.getTs();
+        auto oplogEntries = BSONArrayBuilder().arr();
+        auto mockCursorResponse = makeMockAggregateResponse(postBatchResumeToken, oplogEntries);
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse);
+
+        assertNoOplogEntries(testCtx.outputCollectionNss);
+
+        resetResharding();
+    }
+}
+
+TEST_F(ReshardingOplogFetcherProgressMarkOplogTest,
+       BeforeOplogApplication_InsertProgressMark_BatchEmptyAndResumeTimestampGreaterThanStartAt) {
+    auto testNum = 0;
+    for (const auto& testOptions : makeAllTestOptions()) {
+        LOGV2(10635002,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "testOptions"_attr = testOptions);
+
+        testNum++;
+        auto testCtx = makeTestContext(testNum, testOptions);
+
+        auto postBatchResumeToken = testCtx.startAt.getTs() + 1;
+        auto oplogEntries = BSONArrayBuilder().arr();
+        auto mockCursorResponse = makeMockAggregateResponse(postBatchResumeToken, oplogEntries);
+        // Advance the clock to verify that the fetcher sets the wall clock time of the
+        // 'reshardProgressMark' oplog entry to the current time.
+        advanceTime(Milliseconds(1500));
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse);
+
+        OplogFetcherState expected;
+        expected.oplogApplicationStarted = false;
+        expected.storedProgress = testOptions.storeProgress;
+        expected.lastFetchedCount = 1;
+        expected.lastFetchedOplogId = {postBatchResumeToken, postBatchResumeToken};
+        expected.lastFetchedOplogWallClockTime = now();
+
+        assertOplogEntriesCount(testCtx.outputCollectionNss, expected);
+        assertLastOplogEntryProgressMark(testCtx.outputCollectionNss, expected);
+
+        resetResharding();
+    }
+}
+
+TEST_F(
+    ReshardingOplogFetcherProgressMarkOplogTest,
+    BeforeOplogApplication_NotInsertProgressMarkOplog_BatchNotEmptyAndResumeTimestampEqualToLastOplogTimestamp) {
+    auto testNum = 0;
+    for (const auto& testOptions : makeAllTestOptions()) {
+        LOGV2(10635003,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "testOptions"_attr = testOptions);
+
+        testNum++;
+        auto testCtx = makeTestContext(testNum, testOptions);
+
+        auto oplogTs = testCtx.startAt.getTs() + 1;
+        auto postBatchResumeToken = oplogTs;
+        auto oplogId = ReshardingDonorOplogId(oplogTs, oplogTs);
+        auto oplogWallClockTime =
+            Date_t::fromMillisSinceEpoch(postBatchResumeToken.getSecs() * 1000);
+        auto oplogEntry = makeOplog(testCtx.dataCollectionNss,
+                                    testCtx.dataCollectionUUID,
+                                    repl::OpTypeEnum::kInsert,
+                                    BSONObj() /* oField */,
+                                    BSONObj() /* o2Field */,
+                                    oplogWallClockTime,
+                                    oplogId);
+        auto oplogEntries = BSON_ARRAY(oplogEntry.toBSON());
+        auto mockCursorResponse = makeMockAggregateResponse(postBatchResumeToken, oplogEntries);
+        // Advance the clock to verify that the fetcher sets the wall clock time of every oplog
+        // entry it fetches to the current time. It should not insert a 'reshardProgressMark' oplog
+        // entry since the batch is not empty.
+        advanceTime(Milliseconds(1500));
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse);
+
+        OplogFetcherState expected;
+        expected.oplogApplicationStarted = false;
+        expected.storedProgress = testOptions.storeProgress;
+        expected.lastFetchedCount = 1;
+        expected.lastFetchedOplogId = oplogId;
+        expected.lastFetchedOplogWallClockTime = now();
+        expected.lastFetchedOplogEntry = oplogEntry;
+
+        assertOplogEntriesCount(testCtx.outputCollectionNss, expected);
+        assertLastOplogNotProgressMark(testCtx.outputCollectionNss, expected);
+
+        resetResharding();
+    }
+}
+
+TEST_F(
+    ReshardingOplogFetcherProgressMarkOplogTest,
+    BeforeOplogApplication_NotInsertProgressMarkOplog_BatchNotEmptyAndResumeTimestampGreaterThanLastOplogTimestamp) {
+    auto testNum = 0;
+    for (const auto& testOptions : makeAllTestOptions()) {
+        LOGV2(10634900,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "testOptions"_attr = testOptions);
+
+        testNum++;
+        auto testCtx = makeTestContext(testNum, testOptions);
+
+        auto oplogTs = testCtx.startAt.getTs() + 1;
+        auto postBatchResumeToken = oplogTs + 1;
+        auto oplogId = ReshardingDonorOplogId(oplogTs, oplogTs);
+        auto oplogWallClockTime =
+            Date_t::fromMillisSinceEpoch(postBatchResumeToken.getSecs() * 1000);
+        auto oplogEntry = makeOplog(testCtx.dataCollectionNss,
+                                    testCtx.dataCollectionUUID,
+                                    repl::OpTypeEnum::kInsert,
+                                    BSONObj() /* oField */,
+                                    BSONObj() /* o2Field */,
+                                    oplogWallClockTime,
+                                    oplogId);
+        auto oplogEntries = BSON_ARRAY(oplogEntry.toBSON());
+        auto mockCursorResponse = makeMockAggregateResponse(postBatchResumeToken, oplogEntries);
+        // Advance the clock to verify that the fetcher sets the wall clock time of every oplog
+        // entry it fetches to the current time. It should not insert a 'reshardProgressMark' oplog
+        // entry since the batch is not empty.
+        advanceTime(Milliseconds(1500));
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse);
+
+        OplogFetcherState expected;
+        expected.oplogApplicationStarted = false;
+        expected.storedProgress = testOptions.storeProgress;
+        expected.lastFetchedCount = 1;
+        expected.lastFetchedOplogId = oplogId;
+        expected.lastFetchedOplogWallClockTime = now();
+        expected.lastFetchedOplogEntry = oplogEntry;
+
+        assertOplogEntriesCount(testCtx.outputCollectionNss, expected);
+        assertLastOplogNotProgressMark(testCtx.outputCollectionNss, expected);
+
+        resetResharding();
+    }
+}
+
+TEST_F(ReshardingOplogFetcherProgressMarkOplogTest,
+       BeforeOplogApplication_NotInsertProgressMarkOplog_BatchEmptyAndTimestampEqualToLastSeen) {
+    auto testNum = 0;
+    for (const auto& testOptions : makeAllTestOptions()) {
+        LOGV2(10635004,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "testOptions"_attr = testOptions);
+
+        testNum++;
+        auto testCtx = makeTestContext(testNum, testOptions);
+
+        // Mock a non-empty batch so that the last seen timestamp advances.
+        auto postBatchResumeToken0 = testCtx.startAt.getTs() + 1;
+        auto oplogId0 = ReshardingDonorOplogId(postBatchResumeToken0, postBatchResumeToken0);
+        auto oplogWallClockTime0 =
+            Date_t::fromMillisSinceEpoch(postBatchResumeToken0.getSecs() * 1000);
+        auto oplogEntry0 = makeOplog(testCtx.dataCollectionNss,
+                                     testCtx.dataCollectionUUID,
+                                     repl::OpTypeEnum::kInsert,
+                                     BSONObj() /* oField */,
+                                     BSONObj() /* o2Field */,
+                                     oplogWallClockTime0,
+                                     oplogId0);
+        auto oplogEntries0 = BSON_ARRAY(oplogEntry0.toBSON());
+        auto mockCursorResponse0 = makeMockAggregateResponse(postBatchResumeToken0, oplogEntries0);
+        // Advance the clock to verify that the fetcher sets the wall clock time of every oplog
+        // entry it fetches to the current time. It should not insert a 'reshardProgressMark' oplog
+        // entry since the batch is not empty.
+        advanceTime(Milliseconds(1500));
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse0);
+
+        OplogFetcherState expected;
+        expected.oplogApplicationStarted = false;
+        expected.storedProgress = testOptions.storeProgress;
+        expected.lastFetchedCount = 1;
+        expected.lastFetchedOplogId = oplogId0;
+        expected.lastFetchedOplogWallClockTime = now();
+        expected.lastFetchedOplogEntry = oplogEntry0;
+
+        assertOplogEntriesCount(testCtx.outputCollectionNss, expected);
+        assertLastOplogNotProgressMark(testCtx.outputCollectionNss, expected);
+
+        // Mock an empty batch and verify that the fetcher does not insert a 'reshardProgressMark'
+        // oplog entry.
+        auto oplogEntries1 = BSONArrayBuilder().arr();
+        auto mockCursorResponse1 = makeMockAggregateResponse(postBatchResumeToken0, oplogEntries1);
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse1);
+
+        assertOplogEntriesCount(testCtx.outputCollectionNss, expected);
+        assertLastOplogNotProgressMark(testCtx.outputCollectionNss, expected);
+
+        resetResharding();
+    }
+}
+
+TEST_F(ReshardingOplogFetcherProgressMarkOplogTest,
+       BeforeOplogApplication_InsertProgressMarkOplog_BatchEmptyAndTimestampGreaterThanLastSeen) {
+    auto testNum = 0;
+    for (const auto& testOptions : makeAllTestOptions()) {
+        LOGV2(10635005,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "testOptions"_attr = testOptions);
+
+        testNum++;
+        auto testCtx = makeTestContext(testNum, testOptions);
+
+        // Mock a non-empty batch so that the last seen timestamp advances.
+        auto postBatchResumeToken0 = testCtx.startAt.getTs() + 1;
+        auto oplogId0 = ReshardingDonorOplogId(postBatchResumeToken0, postBatchResumeToken0);
+        auto oplogWallClockTime0 =
+            Date_t::fromMillisSinceEpoch(postBatchResumeToken0.getSecs() * 1000);
+        auto oplogEntry0 = makeOplog(testCtx.dataCollectionNss,
+                                     testCtx.dataCollectionUUID,
+                                     repl::OpTypeEnum::kInsert,
+                                     BSONObj() /* oField */,
+                                     BSONObj() /* o2Field */,
+                                     oplogWallClockTime0,
+                                     oplogId0);
+        auto oplogEntries0 = BSON_ARRAY(oplogEntry0.toBSON());
+        auto mockCursorResponse0 = makeMockAggregateResponse(postBatchResumeToken0, oplogEntries0);
+        // Advance the clock to verify that the fetcher sets the wall clock time of every oplog
+        // entry it fetches to the current time. It should not insert a 'reshardProgressMark' oplog
+        // entry since the batch is not empty.
+        advanceTime(Milliseconds(1500));
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse0);
+
+        OplogFetcherState expected;
+        expected.oplogApplicationStarted = false;
+        expected.storedProgress = testOptions.storeProgress;
+        expected.lastFetchedCount = 1;
+        expected.lastFetchedOplogId = oplogId0;
+        expected.lastFetchedOplogWallClockTime = now();
+        expected.lastFetchedOplogEntry = oplogEntry0;
+
+        assertOplogEntriesCount(testCtx.outputCollectionNss, expected);
+        assertLastOplogNotProgressMark(testCtx.outputCollectionNss, expected);
+
+        // Mock an empty batch but with a resume timestamp greater than the last seen timestamp and
+        // verify that the fetcher inserts a 'reshardProgressMark' oplog entry.
+        auto postBatchResumeToken1 = postBatchResumeToken0 + 1;
+        auto oplogEntries1 = BSONArrayBuilder().arr();
+        auto mockCursorResponse1 = makeMockAggregateResponse(postBatchResumeToken1, oplogEntries1);
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse1);
+
+        expected.lastFetchedCount = 2;
+        expected.lastFetchedOplogId = {postBatchResumeToken1, postBatchResumeToken1};
+        expected.lastFetchedOplogWallClockTime = now();
+
+        assertOplogEntriesCount(testCtx.outputCollectionNss, expected);
+        assertLastOplogEntryProgressMark(testCtx.outputCollectionNss, expected);
+
+        resetResharding();
+    }
+}
+
+TEST_F(ReshardingOplogFetcherProgressMarkOplogTest,
+       DuringOplogApplication_EmptyBatchAndResumeTimestampEqualToStartAt) {
+    auto testNum = 0;
+    for (const auto& testOptions : makeAllTestOptions()) {
+        LOGV2(10634901,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "testOptions"_attr = testOptions);
+
+        testNum++;
+        auto testCtx = makeTestContext(testNum, testOptions);
+        testCtx.fetcher->onStartingOplogApplication();
+
+        auto postBatchResumeToken = testCtx.startAt.getTs();
+        auto oplogEntries = BSONArrayBuilder().arr();
+        auto mockCursorResponse = makeMockAggregateResponse(postBatchResumeToken, oplogEntries);
+        // Advance the clock to verify that the fetcher it sets the wall clock time of the
+        // 'reshardProgressMark' to the current time.
+        advanceTime(Milliseconds(1500));
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse);
+
+        if (testOptions.movingAvgFeatureFlag && testOptions.movingAvgServerParameter) {
+            // If the recipient has been configured to estimate the remaining time based on moving
+            // average, then the fetcher needs to insert a 'reshardProgressMark' oplog entry at
+            // least once within the configured interval. So it is expected to insert a
+            // 'reshardProgressMark' oplog entry after getting the first batch.
+            OplogFetcherState expected;
+            expected.oplogApplicationStarted = true;
+            expected.storedProgress = testOptions.storeProgress;
+            expected.lastFetchedCount = 1;
+            expected.lastFetchedOplogId = {postBatchResumeToken, postBatchResumeToken};
+            expected.lastFetchedOplogId.setProgressMarkId(0);
+            expected.lastFetchedOplogWallClockTime = now();
+
+            assertLastOplogEntryProgressMark(testCtx.outputCollectionNss, expected);
+            assertOplogEntriesCount(testCtx.outputCollectionNss, expected);
+        } else {
+            assertNoOplogEntries(testCtx.outputCollectionNss);
+        }
+
+        resetResharding();
+    }
+}
+
+TEST_F(
+    ReshardingOplogFetcherProgressMarkOplogTest,
+    DuringOplogApplication_InsertProgressMarkOplog_BatchEmptyAndResumeTimestampGreaterThanStartAt) {
+    auto testNum = 0;
+    for (const auto& testOptions : makeAllTestOptions()) {
+        LOGV2(10634902,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "testOptions"_attr = testOptions);
+
+        testNum++;
+        auto testCtx = makeTestContext(testNum, testOptions);
+        testCtx.fetcher->onStartingOplogApplication();
+
+        auto postBatchResumeToken = testCtx.startAt.getTs() + 1;
+        auto oplogEntries = BSONArrayBuilder().arr();
+        auto mockCursorResponse = makeMockAggregateResponse(postBatchResumeToken, oplogEntries);
+        // Advance the clock to verify that the fetcher sets the wall clock time of the
+        // 'reshardProgressMark' to the current time.
+        advanceTime(Milliseconds(1500));
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse);
+
+        OplogFetcherState expected;
+        expected.oplogApplicationStarted = true;
+        expected.storedProgress = testOptions.storeProgress;
+        expected.lastFetchedCount = 1;
+        expected.lastFetchedOplogId = {postBatchResumeToken, postBatchResumeToken};
+        if (testOptions.movingAvgFeatureFlag && testOptions.movingAvgServerParameter) {
+            expected.lastFetchedOplogId.setProgressMarkId(0);
+        }
+        expected.lastFetchedOplogWallClockTime = now();
+
+        assertLastOplogEntryProgressMark(testCtx.outputCollectionNss, expected);
+        assertOplogEntriesCount(testCtx.outputCollectionNss, expected);
+
+        resetResharding();
+    }
+}
+
+TEST_F(
+    ReshardingOplogFetcherProgressMarkOplogTest,
+    DuringOplogApplication_NotInsertProgressMarkOplog_BatchNotEmptyAndResumeTimestampEqualToLastOplogTimestamp) {
+    auto testNum = 0;
+    for (const auto& testOptions : makeAllTestOptions()) {
+        LOGV2(10634903,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "testOptions"_attr = testOptions);
+
+        testNum++;
+        auto testCtx = makeTestContext(testNum, testOptions);
+        testCtx.fetcher->onStartingOplogApplication();
+
+        auto oplogTs = testCtx.startAt.getTs() + 1;
+        auto postBatchResumeToken = oplogTs;
+        auto oplogId = ReshardingDonorOplogId(oplogTs, oplogTs);
+        auto oplogWallClockTime =
+            Date_t::fromMillisSinceEpoch(postBatchResumeToken.getSecs() * 1000);
+        auto oplogEntry = makeOplog(testCtx.dataCollectionNss,
+                                    testCtx.dataCollectionUUID,
+                                    repl::OpTypeEnum::kInsert,
+                                    BSONObj() /* oField */,
+                                    BSONObj() /* o2Field */,
+                                    oplogWallClockTime,
+                                    oplogId);
+        auto oplogEntries = BSON_ARRAY(oplogEntry.toBSON());
+        auto mockCursorResponse = makeMockAggregateResponse(postBatchResumeToken, oplogEntries);
+        // Advance the clock to verify that the fetcher sets the wall clock time of every oplog
+        // entry it fetches to the current time. It should not insert a 'reshardProgressMark' oplog
+        // entry since the batch is not empty.
+        advanceTime(Milliseconds(1500));
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse);
+
+        OplogFetcherState expected;
+        expected.oplogApplicationStarted = true;
+        expected.storedProgress = testOptions.storeProgress;
+
+        expected.lastFetchedCount = 1;
+        expected.lastFetchedOplogId = oplogId;
+        expected.lastFetchedOplogWallClockTime = now();
+        expected.lastFetchedOplogEntry = oplogEntry;
+
+        assertLastOplogNotProgressMark(testCtx.outputCollectionNss, expected);
+        assertOplogEntriesCount(testCtx.outputCollectionNss, expected);
+
+        resetResharding();
+    }
+}
+
+TEST_F(
+    ReshardingOplogFetcherProgressMarkOplogTest,
+    DuringOplogApplication_NotInsertProgressMarkOplog_BatchNotEmptyAndResumeTimestampGreaterThanLastOplogTimestamp) {
+    auto testNum = 0;
+    for (const auto& testOptions : makeAllTestOptions()) {
+        LOGV2(10634904,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "testOptions"_attr = testOptions);
+
+        testNum++;
+        auto testCtx = makeTestContext(testNum, testOptions);
+        testCtx.fetcher->onStartingOplogApplication();
+
+        auto oplogTs = testCtx.startAt.getTs() + 1;
+        auto postBatchResumeToken = oplogTs + 1;
+        auto oplogId = ReshardingDonorOplogId(oplogTs, oplogTs);
+        auto oplogWallClockTime =
+            Date_t::fromMillisSinceEpoch(postBatchResumeToken.getSecs() * 1000);
+        auto oplogEntry = makeOplog(testCtx.dataCollectionNss,
+                                    testCtx.dataCollectionUUID,
+                                    repl::OpTypeEnum::kInsert,
+                                    BSONObj() /* oField */,
+                                    BSONObj() /* o2Field */,
+                                    oplogWallClockTime,
+                                    oplogId);
+        auto oplogEntries = BSON_ARRAY(oplogEntry.toBSON());
+        auto mockCursorResponse = makeMockAggregateResponse(postBatchResumeToken, oplogEntries);
+        // Advance the clock to verify that the fetcher sets the wall clock time of every oplog
+        // entry it fetches to the current time. It should not insert a 'reshardProgressMark' oplog
+        // entry since the batch is not empty.
+        advanceTime(Milliseconds(1500));
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse);
+
+        OplogFetcherState expected;
+        expected.oplogApplicationStarted = true;
+        expected.storedProgress = testOptions.storeProgress;
+        expected.lastFetchedCount = 1;
+        expected.lastFetchedOplogId = oplogId;
+        expected.lastFetchedOplogWallClockTime = now();
+        expected.lastFetchedOplogEntry = oplogEntry;
+
+        assertLastOplogNotProgressMark(testCtx.outputCollectionNss, expected);
+        assertOplogEntriesCount(testCtx.outputCollectionNss, expected);
+
+        resetResharding();
+    }
+}
+
+TEST_F(ReshardingOplogFetcherProgressMarkOplogTest,
+       DuringOplogApplication_BatchEmptyAndTimestampEqualToLastSeen) {
+    auto movingAvgInterval = Milliseconds(50);
+    RAIIServerParameterControllerForTest intervalMillisServerParameter{
+        "reshardingExponentialMovingAverageTimeToFetchAndApplyIntervalMillis",
+        movingAvgInterval.count()};
+
+    auto testNum = 0;
+    for (const auto& testOptions : makeAllTestOptions()) {
+        LOGV2(10634905,
+              "Running case",
+              "test"_attr = unittest::getTestName(),
+              "testOptions"_attr = testOptions);
+
+        testNum++;
+        auto testCtx = makeTestContext(testNum, testOptions);
+        testCtx.fetcher->onStartingOplogApplication();
+
+        // Mock a non-empty batch so that the last seen timestamp advances.
+        auto postBatchResumeToken0 = testCtx.startAt.getTs() + 1;
+        auto oplogId0 = ReshardingDonorOplogId(postBatchResumeToken0, postBatchResumeToken0);
+        auto oplogWallClockTime0 =
+            Date_t::fromMillisSinceEpoch(postBatchResumeToken0.getSecs() * 1000);
+        auto oplogEntry0 = makeOplog(testCtx.dataCollectionNss,
+                                     testCtx.dataCollectionUUID,
+                                     repl::OpTypeEnum::kInsert,
+                                     BSONObj() /* oField */,
+                                     BSONObj() /* o2Field */,
+                                     oplogWallClockTime0,
+                                     oplogId0);
+        auto oplogEntries0 = BSON_ARRAY(oplogEntry0.toBSON());
+        auto mockCursorResponse0 = makeMockAggregateResponse(postBatchResumeToken0, oplogEntries0);
+        // Advance the clock to verify that the fetcher sets the wall clock time of every oplog
+        // entry it fetches to the current time. It should not insert a 'reshardProgressMark' oplog
+        // entry since the batch is not empty.
+        advanceTime(Milliseconds(1500));
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse0);
+
+        OplogFetcherState expected;
+        expected.oplogApplicationStarted = true;
+        expected.storedProgress = testOptions.storeProgress;
+        expected.lastFetchedOplogId = oplogId0;
+        expected.lastFetchedCount = 1;
+        expected.lastFetchedOplogWallClockTime = now();
+        expected.lastFetchedOplogEntry = oplogEntry0;
+
+        assertLastOplogNotProgressMark(testCtx.outputCollectionNss, expected);
+        assertOplogEntriesCount(testCtx.outputCollectionNss, expected);
+
+        // Mock an empty batch immediately and verify that the fetcher only inserts a
+        // 'reshardProgressMark' oplog entry if the recipient has been configured to estimate
+        // the remaining time based on moving average.
+        auto oplogEntries1 = BSONArrayBuilder().arr();
+        auto mockCursorResponse1 = makeMockAggregateResponse(postBatchResumeToken0, oplogEntries1);
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse1);
+
+        if (testOptions.movingAvgFeatureFlag && testOptions.movingAvgServerParameter) {
+            // If the recipient has been configured to estimate the remaining time based on moving
+            // average, then the fetcher needs to insert a 'reshardProgressMark' oplog entry at
+            // least once within the configured interval. So it is expected to insert a
+            // 'reshardProgressMark' oplog entry after getting the first batch.
+            expected.lastFetchedCount = 2;
+            expected.lastFetchedOplogId.setProgressMarkId(0);
+            expected.lastFetchedOplogWallClockTime = now();
+
+            assertLastOplogEntryProgressMark(testCtx.outputCollectionNss, expected);
+        } else {
+            assertLastOplogNotProgressMark(testCtx.outputCollectionNss, expected);
+        }
+        assertOplogEntriesCount(testCtx.outputCollectionNss, expected);
+
+        // Mock another empty batch immediately and verify that the fetcher does not insert a
+        // 'reshardProgressMark' oplog entry, even if the recipient has been configured to estimate
+        // the remaining time based on moving average.
+        auto oplogEntries2 = BSONArrayBuilder().arr();
+        auto mockCursorResponse2 = makeMockAggregateResponse(postBatchResumeToken0, oplogEntries2);
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse1);
+
+        if (testOptions.movingAvgFeatureFlag && testOptions.movingAvgServerParameter) {
+            assertLastOplogEntryProgressMark(testCtx.outputCollectionNss, expected);
+        } else {
+            assertLastOplogNotProgressMark(testCtx.outputCollectionNss, expected);
+        }
+        assertOplogEntriesCount(testCtx.outputCollectionNss, expected);
+
+        // Mock another empty batch after advancing the clock by the interval for updating the
+        // exponential moving average time to fetch and apply oplog entries, and then verify that
+        // the fetcher only inserts a 'reshardProgressMark' oplog entry if the recipient has been
+        // configured to estimate the remaining time based on moving average.
+        advanceTime(movingAvgInterval);
+
+        auto oplogEntries3 = BSONArrayBuilder().arr();
+        auto mockCursorResponse3 = makeMockAggregateResponse(postBatchResumeToken0, oplogEntries3);
+        runFetcher(testCtx.fetcher.get(), mockCursorResponse3);
+
+        if (testOptions.movingAvgFeatureFlag && testOptions.movingAvgServerParameter) {
+            expected.lastFetchedCount = 3;
+            // The new 'reshardProgressMark' oplog entry should have progress mark id equal to 1
+            // instead of 0, and the wall clock time equal to the current time.
+            expected.lastFetchedOplogId.setProgressMarkId(1);
+            expected.lastFetchedOplogWallClockTime = now();
+            assertLastOplogEntryProgressMark(testCtx.outputCollectionNss, expected);
+        } else {
+            assertLastOplogNotProgressMark(testCtx.outputCollectionNss, expected);
+        }
+        assertOplogEntriesCount(testCtx.outputCollectionNss, expected);
+
+        resetResharding();
+    }
 }
 
 }  // namespace

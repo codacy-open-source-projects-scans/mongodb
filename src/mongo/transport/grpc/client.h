@@ -29,12 +29,12 @@
 
 #pragma once
 
-#include <memory>
-
-#include <boost/optional.hpp>
-
+#include "mongo/base/counter.h"
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
 #include "mongo/db/service_context.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/transport/grpc/channel_pool.h"
 #include "mongo/transport/grpc/client_stream.h"
 #include "mongo/transport/grpc/grpc_client_context.h"
@@ -42,20 +42,35 @@
 #include "mongo/transport/grpc/grpc_session.h"
 #include "mongo/transport/grpc/reactor.h"
 #include "mongo/transport/grpc/serialization.h"
+#include "mongo/transport/grpc_connection_stats_gen.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/util/duration.h"
-#include "mongo/util/net/ssl_util.h"
+#include "mongo/util/net/ssl_types.h"
 #include "mongo/util/uuid.h"
 
+#include <memory>
+
+#include <boost/optional.hpp>
+
 namespace mongo::transport::grpc {
+
+constexpr auto kStreamsSubsectionFieldName = "streams"_sd;
 
 class Client : public std::enable_shared_from_this<Client> {
 public:
     static constexpr auto kDefaultChannelTimeout = Minutes(30);
 
-    using CtxAndStream = std::pair<std::shared_ptr<ClientContext>, std::shared_ptr<ClientStream>>;
+    /**
+     * State related to an invocation of one of CommandService's methods.
+     */
+    struct CallContext {
+        std::shared_ptr<ClientContext> ctx;
+        std::shared_ptr<ClientStream> stream;
+        boost::optional<SSLConfiguration> sslConfig;
+        UUID channelUUID;
+    };
 
-    explicit Client(TransportLayer* tl, const BSONObj& clientMetadata);
+    explicit Client(TransportLayer* tl, ServiceContext* svcCtx, const BSONObj& clientMetadata);
 
     virtual ~Client() = default;
 
@@ -63,7 +78,7 @@ public:
         return _id;
     }
 
-    virtual void start(ServiceContext*) = 0;
+    virtual void start() = 0;
 
     /**
      * Cancels all outstanding sessions created from this client and blocks until they all have been
@@ -72,15 +87,24 @@ public:
      */
     virtual void shutdown();
 
+    virtual void appendStats(GRPCConnectionStats& stats) const = 0;
+
+#ifdef MONGO_CONFIG_SSL
+    virtual Status rotateCertificates(const SSLConfiguration& sslConfig) = 0;
+#endif
+
     struct ConnectOptions {
         boost::optional<std::string> authToken = {};
         ConnectSSLMode sslMode = ConnectSSLMode::kGlobalSSLMode;
     };
 
-    std::shared_ptr<EgressSession> connect(const HostAndPort& remote,
-                                           const std::shared_ptr<GRPCReactor>& reactor,
-                                           Milliseconds timeout,
-                                           ConnectOptions options);
+    Future<std::shared_ptr<EgressSession>> connect(
+        const HostAndPort& remote,
+        const std::shared_ptr<GRPCReactor>& reactor,
+        Milliseconds timeout,
+        ConnectOptions options,
+        const CancellationToken& token = CancellationToken::uncancelable(),
+        std::shared_ptr<ConnectionMetrics> connectionMetrics = nullptr);
 
     /**
      * Get this client's current idea of what the cluster's maxWireVersion is. This will be updated
@@ -90,6 +114,22 @@ public:
      */
     int getClusterMaxWireVersion() const;
 
+    size_t getPendingStreamEstablishments(const HostAndPort& target);
+
+    virtual void dropConnections(const Status& status) = 0;
+    void dropConnections() {
+        dropConnections(Status(ErrorCodes::PooledConnectionsDropped, "Drop all connections"));
+    }
+
+    virtual void dropConnections(const HostAndPort& target, const Status& status) = 0;
+    void dropConnections(const HostAndPort& target) {
+        dropConnections(
+            target,
+            Status(ErrorCodes::PooledConnectionsDropped, "Drop connections to a specific target"));
+    }
+
+    virtual void setKeepOpen(const HostAndPort& hostAndPort, bool keepOpen) = 0;
+
 protected:
     /**
      * Adds entries to the provided `ClientContext's` metadata as defined in the MongoDB gRPC
@@ -97,13 +137,108 @@ protected:
      */
     void setMetadataOnClientContext(ClientContext& ctx, const ConnectOptions& options);
 
+    class PendingStreamState : public enable_shared_from_this<PendingStreamState> {
+    public:
+        explicit PendingStreamState(HostAndPort remote,
+                                    ConnectSSLMode sslMode,
+                                    std::shared_ptr<ConnectionMetrics> connectionMetrics,
+                                    const CancellationToken& token)
+            : _remote(std::move(remote)),
+              _sslMode(std::move(sslMode)),
+              _connectionMetrics(std::move(connectionMetrics)),
+              _cancelSource(token) {
+            if (_connectionMetrics) {
+                _connectionMetrics->onConnectionStarted();
+            }
+        }
+
+        // The WithLock corresponds to the Client's mutex, not the PendingStreamState's.
+        void registerWithClient(WithLock, const HostAndPort& remote, Client& client);
+
+        // The WithLock corresponds to the Client's mutex, not the PendingStreamState's.
+        void unregisterFromClient(WithLock, const HostAndPort& remote, Client& client);
+
+        void cancel(Status reason);
+
+        Status getCancellationReason();
+
+        CancellationToken getCancellationToken() {
+            return _cancelSource.token();
+        }
+
+        void setTimer(std::shared_ptr<ReactorTimer> timer) {
+            _timer = std::move(timer);
+        }
+
+        ReactorTimer* getTimer() {
+            return _timer.get();
+        }
+
+        void cancelTimer() {
+            if (_timer) {
+                _timer->cancel();
+            }
+        }
+
+        const HostAndPort& getRemote() {
+            return _remote;
+        }
+
+        void setDeadline(Date_t deadline) {
+            _deadline = deadline;
+        }
+
+        const boost::optional<Date_t>& getDeadline() {
+            return _deadline;
+        }
+
+        const ConnectSSLMode& getSSLMode() {
+            return _sslMode;
+        }
+
+        const std::shared_ptr<ConnectionMetrics>& getConnectionMetrics() {
+            return _connectionMetrics;
+        }
+
+    private:
+        std::list<std::shared_ptr<PendingStreamState>>::iterator _iter;
+
+        HostAndPort _remote;
+        boost::optional<Date_t> _deadline;
+        ConnectSSLMode _sslMode;
+        std::shared_ptr<ConnectionMetrics> _connectionMetrics;
+
+        stdx::mutex _mutex;
+        Status _cancellationReason = Status::OK();
+        CancellationSource _cancelSource;
+
+        std::shared_ptr<ReactorTimer> _timer;
+    };
+
+    Counter64 _numActiveStreams;
+    Counter64 _numSuccessfulStreams;
+    Counter64 _numFailedStreams;
+
+    // The below members are protected so that dropConnections() can access them.
+    mutable stdx::mutex _mutex;
+
+    struct RemoteState {
+        std::list<std::shared_ptr<PendingStreamState>> pendingStreamStates;
+        bool keepOpen = false;
+    };
+
+    // This list corresponds to ongoing stream establishment attempts, and holds the timeout and
+    // cancellation state for those attemps.
+    stdx::unordered_map<HostAndPort, RemoteState> _remoteStates;
+
 private:
     enum class ClientState { kUninitialized, kStarted, kShutdown };
 
-    virtual CtxAndStream _streamFactory(const HostAndPort&,
-                                        const std::shared_ptr<GRPCReactor>&,
-                                        Milliseconds,
-                                        const ConnectOptions&) = 0;
+    virtual Future<CallContext> _streamFactory(const HostAndPort& remote,
+                                               const std::shared_ptr<GRPCReactor>& reactor,
+                                               boost::optional<Date_t> deadline,
+                                               const ConnectOptions& connectOptions,
+                                               const CancellationToken& token) = 0;
 
     /**
      * Returns whether all outstanding sessions created by this client have been destroyed and this
@@ -112,14 +247,16 @@ private:
     bool _isShutdownComplete_inlock();
 
     TransportLayer* const _tl;
+    ServiceContext* const _svcCtx;
     const UUID _id;
     std::string _clientMetadata;
     std::shared_ptr<EgressSession::SharedState> _sharedState;
 
-    mutable stdx::mutex _mutex;
+    // All accesses of _numPendingStreams must be guarded by the mutex.
+    std::uint64_t _numPendingStreams{0};
+
     stdx::condition_variable _shutdownCV;
     ClientState _state = ClientState::kUninitialized;
-    size_t _ongoingConnects = 0;
     std::list<std::weak_ptr<EgressSession>> _sessions;
 };
 
@@ -137,16 +274,38 @@ public:
         bool tlsAllowInvalidHostnames = false;
     };
 
-    GRPCClient(TransportLayer* tl, const BSONObj& clientMetadata, Options options);
+    GRPCClient(TransportLayer* tl,
+               ServiceContext* svcCtx,
+               const BSONObj& clientMetadata,
+               Options options);
 
-    void start(ServiceContext* svcCtx) override;
+    void start() override;
     void shutdown() override;
+    void appendStats(GRPCConnectionStats& stats) const override;
+#ifdef MONGO_CONFIG_SSL
+    Status rotateCertificates(const SSLConfiguration& sslConfig) override;
+#endif
+
+    void dropConnections(const Status& status) override;
+    void dropConnections() {
+        dropConnections(Status(ErrorCodes::PooledConnectionsDropped, "Drop all connections"));
+    }
+    void dropConnections(const HostAndPort& target, const Status& status) override;
+    void dropConnections(const HostAndPort& target) {
+        dropConnections(
+            target,
+            Status(ErrorCodes::PooledConnectionsDropped, "Drop connections to a specific target"));
+    }
+    void setKeepOpen(const HostAndPort& hostAndPort, bool keepOpen) override;
 
 private:
-    CtxAndStream _streamFactory(const HostAndPort&,
-                                const std::shared_ptr<GRPCReactor>&,
-                                Milliseconds,
-                                const ConnectOptions&) override;
+    Future<CallContext> _streamFactory(const HostAndPort& remote,
+                                       const std::shared_ptr<GRPCReactor>& reactor,
+                                       boost::optional<Date_t> deadline,
+                                       const ConnectOptions& connectOptions,
+                                       const CancellationToken& token) override;
+
+    void _dropPendingStreamEstablishments(std::function<bool(const HostAndPort&)> shouldDrop);
 
     std::unique_ptr<StubFactory> _stubFactory;
 };

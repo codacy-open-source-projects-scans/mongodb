@@ -27,8 +27,8 @@
  *    it in the license file.
  */
 
+#pragma once
 
-#include <functional>
 
 #include "mongo/base/status.h"
 #include "mongo/db/dbmessage.h"
@@ -36,6 +36,8 @@
 #include "mongo/transport/session_manager_common.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/transport/transport_layer_mock.h"
+
+#include <functional>
 
 namespace mongo {
 namespace transport {
@@ -59,6 +61,11 @@ private:
 
 class CallbackMockSession : public MockSessionBase {
 public:
+    CallbackMockSession() = default;
+
+    CallbackMockSession(HostAndPort remote, SockAddr remoteAddr, SockAddr localAddr)
+        : MockSessionBase(remote, remoteAddr, localAddr) {}
+
     TransportLayer* getTransportLayer() const override {
         return getTransportLayerCb();
     }
@@ -71,27 +78,27 @@ public:
         return isConnectedCb();
     }
 
-    Status waitForData() noexcept override {
+    Status waitForData() override {
         return waitForDataCb();
     }
 
-    StatusWith<Message> sourceMessage() noexcept override {
+    StatusWith<Message> sourceMessage() override {
         return sourceMessageCb();
     }
 
-    Status sinkMessage(Message message) noexcept override {
+    Status sinkMessage(Message message) override {
         return sinkMessageCb(std::move(message));
     }
 
-    Future<void> asyncWaitForData() noexcept override {
+    Future<void> asyncWaitForData() override {
         return asyncWaitForDataCb();
     }
 
-    Future<Message> asyncSourceMessage(const BatonHandle& handle) noexcept override {
+    Future<Message> asyncSourceMessage(const BatonHandle& handle) override {
         return asyncSourceMessageCb(handle);
     }
 
-    Future<void> asyncSinkMessage(Message message, const BatonHandle& handle) noexcept override {
+    Future<void> asyncSinkMessage(Message message, const BatonHandle& handle) override {
         return asyncSinkMessageCb(std::move(message), handle);
     }
 
@@ -109,7 +116,8 @@ public:
 class MockServiceEntryPoint : public ServiceEntryPoint {
 public:
     Future<DbResponse> handleRequest(OperationContext* opCtx,
-                                     const Message& request) noexcept override {
+                                     const Message& request,
+                                     Date_t started) override {
         return handleRequestCb(opCtx, request);
     }
 

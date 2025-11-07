@@ -3,21 +3,21 @@
 // @tags: [requires_scripting]
 import {resultsEq} from "jstests/aggregation/extras/utils.js";
 
-var runner = MongoRunner.runMongod({setParameter: "notablescan=1"});
+let runner = MongoRunner.runMongod({setParameter: "notablescan=1"});
 const db = runner.getDB("test");
-var coll = db[jsTestName()];
-var ret;
+let coll = db[jsTestName()];
+let ret;
 
 coll.drop();
 db.getCollection("mrOutput").drop();
 
 assert.commandWorked(coll.createIndex({x: 1}, {partialFilterExpression: {a: 1}}));
 
-assert.commandWorked(coll.insert({_id: 1, x: 5, a: 2}));  // Not in index.
-assert.commandWorked(coll.insert({_id: 2, x: 6, a: 1}));  // In index.
+assert.commandWorked(coll.insert({_id: 1, x: 5, a: 2})); // Not in index.
+assert.commandWorked(coll.insert({_id: 2, x: 6, a: 1})); // In index.
 
 // Verify we will throw if the partial index can't be used.
-assert.throws(function() {
+assert.throws(function () {
     coll.find({x: {$gt: 1}, a: 2}).itcount();
 });
 
@@ -25,15 +25,14 @@ assert.throws(function() {
 // Test mapReduce.
 //
 
-var mapFunc = function() {
+let mapFunc = function () {
     emit(this._id, 1);
 };
-var reduceFunc = function(keyId, countArray) {
+let reduceFunc = function (keyId, countArray) {
     return Array.sum(countArray);
 };
 
-assert.commandWorked(
-    coll.mapReduce(mapFunc, reduceFunc, {out: "mrOutput", query: {x: {$gt: 1}, a: 1}}));
+assert.commandWorked(coll.mapReduce(mapFunc, reduceFunc, {out: "mrOutput", query: {x: {$gt: 1}, a: 1}}));
 assert(resultsEq([{"_id": 2, "value": 1}], db.getCollection("mrOutput").find().toArray()));
 
 //
@@ -44,10 +43,10 @@ ret = coll.distinct("a", {x: {$gt: 1}, a: 1});
 assert.eq(1, ret.length);
 ret = coll.distinct("x", {x: {$gt: 1}, a: 1});
 assert.eq(1, ret.length);
-assert.throws(function() {
+assert.throws(function () {
     printjson(coll.distinct("a", {a: 0}));
 });
-assert.throws(function() {
+assert.throws(function () {
     printjson(coll.distinct("x", {a: 0}));
 });
 

@@ -29,24 +29,22 @@
 
 #include "mongo/transport/grpc/server.h"
 
+#include "mongo/base/error_codes.h"
+#include "mongo/logv2/log.h"
+#include "mongo/transport/grpc/util.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/net/socket_utils.h"
+#include "mongo/util/net/ssl_util.h"
+
 #include <grpc/compression.h>
 #include <grpc/grpc_security_constants.h>
 #include <grpcpp/resource_quota.h>
 #include <grpcpp/security/credentials.h>
 #include <grpcpp/server_builder.h>
-
-#include "src/core/lib/security/credentials/ssl/ssl_credentials.h"
-#include "src/core/lib/security/security_connector/ssl_utils.h"
-#include "src/core/tsi/ssl_transport_security.h"
-#include "src/cpp/server/secure_server_credentials.h"
-
-#include "mongo/base/error_codes.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_options.h"
-#include "mongo/transport/grpc/util.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/net/socket_utils.h"
-#include "mongo/util/net/ssl_util.h"
+#include <src/core/lib/security/credentials/ssl/ssl_credentials.h>
+#include <src/core/lib/security/security_connector/ssl_utils.h>
+#include <src/core/tsi/ssl_transport_security.h>
+#include <src/cpp/server/secure_server_credentials.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -184,6 +182,8 @@ std::shared_ptr<::grpc::ServerCredentials> Server::_makeServerCredentialsWithFet
 }
 
 Status Server::rotateCertificates() {
+    LOGV2_DEBUG(
+        9886805, 3, "Rotating gRPC server TLS certificates", "addresses"_attr = _options.addresses);
     auto swNewCertificates =
         _readCertificatesFromDisk(*_options.tlsCAFile, _options.tlsCertificateKeyFile);
     if (!swNewCertificates.isOK()) {

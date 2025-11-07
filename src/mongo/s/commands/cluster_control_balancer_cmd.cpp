@@ -28,9 +28,6 @@
  */
 
 
-#include <memory>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
@@ -48,13 +45,14 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+#include <string>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -114,12 +112,12 @@ public:
                   "About to run balancer control command",
                   "cmd"_attr = _configsvrCommandName);
 
-        auto cmdResponse = uassertStatusOK(
-            configShard->runCommandWithFixedRetryAttempts(opCtx,
-                                                          kPrimaryOnlyReadPreference,
-                                                          DatabaseName::kAdmin,
-                                                          BSON(_configsvrCommandName << 1),
-                                                          Shard::RetryPolicy::kIdempotent));
+        auto cmdResponse =
+            uassertStatusOK(configShard->runCommand(opCtx,
+                                                    kPrimaryOnlyReadPreference,
+                                                    DatabaseName::kAdmin,
+                                                    BSON(_configsvrCommandName << 1),
+                                                    Shard::RetryPolicy::kIdempotent));
         uassertStatusOK(cmdResponse.commandStatus);
 
         // Append any return value from the response, which the config server returned

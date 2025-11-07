@@ -9,15 +9,15 @@ import {
     OCSP_CA_PEM,
     OCSP_SERVER_CERT,
     OCSP_SERVER_CERT_REVOKED,
-    waitForServer
+    waitForServer,
 } from "jstests/ocsp/lib/ocsp_helpers.js";
 import {determineSSLProvider} from "jstests/ssl/libs/ssl_helpers.js";
 
-var ocsp_options = {
-    sslMode: "requireSSL",
-    sslPEMKeyFile: OCSP_SERVER_CERT,
-    sslCAFile: OCSP_CA_PEM,
-    sslAllowInvalidHostnames: "",
+let ocsp_options = {
+    tlsMode: "requireTLS",
+    tlsCertificateKeyFile: OCSP_SERVER_CERT,
+    tlsCAFile: OCSP_CA_PEM,
+    tlsAllowInvalidHostnames: "",
     setParameter: {
         "failpoint.disableStapling": "{'mode':'alwaysOn'}",
         "ocspEnabled": "true",
@@ -27,7 +27,7 @@ var ocsp_options = {
 let mock_ocsp = new MockOCSPServer("", 1);
 mock_ocsp.start();
 
-var conn = null;
+let conn = null;
 
 assert.doesNotThrow(() => {
     conn = MongoRunner.runMongod(ocsp_options);
@@ -39,7 +39,7 @@ mock_ocsp.stop();
 // We need to test different certificates for revoked and not
 // revoked on OSX, so we may as well run this test on all platforms.
 Object.extend(ocsp_options, {waitForConnect: false});
-ocsp_options.sslPEMKeyFile = OCSP_SERVER_CERT_REVOKED;
+ocsp_options.tlsCertificateKeyFile = OCSP_SERVER_CERT_REVOKED;
 
 print("Restarting MockOCSPServer with FAULT_REVOKED option");
 mock_ocsp = new MockOCSPServer(FAULT_REVOKED, 1);
@@ -72,7 +72,7 @@ clearOCSPCache();
 sleep(1000);
 
 // Test that soft fail works.
-ocsp_options.sslPEMKeyFile = OCSP_SERVER_CERT;
+ocsp_options.tlsCertificateKeyFile = OCSP_SERVER_CERT;
 
 assert.doesNotThrow(() => {
     conn = MongoRunner.runMongod(ocsp_options);

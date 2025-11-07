@@ -3,35 +3,32 @@
  *
  * Repeatedly remove a document from the collection.
  *
- * @tags: [
- *   assumes_balancer_off,
- *   # TODO SERVER-84348: allow this test to run in concurrency_sharded_* suites.
- *   assumes_unsharded_collection,
- * ]
+ * @tags: [assumes_balancer_off]
  */
-export const $config = (function() {
-    var states = {
+export const $config = (function () {
+    let states = {
         remove: function remove(db, collName) {
             // try removing a random document
-            var res = this.doRemove(db, collName, {rand: {$gte: Random.rand()}}, {justOne: true});
-            assert.lte(res.nRemoved, 1);
+            let res = assert.commandWorked(this.doRemove(db, collName, {rand: {$gte: Random.rand()}}, {justOne: true}));
+
+            assert.lte(res.nRemoved, 1, res);
             if (res.nRemoved === 0) {
                 // The above remove() can fail to remove a document when the random value
                 // in the query is greater than any of the random values in the collection.
                 // When that situation occurs, just remove an arbitrary document instead.
-                res = this.doRemove(db, collName, {}, {justOne: true});
-                assert.lte(res.nRemoved, 1);
+                res = assert.commandWorked(this.doRemove(db, collName, {}, {justOne: true}));
+                assert.lte(res.nRemoved, 1, res);
             }
             this.assertResult(res);
-        }
+        },
     };
 
-    var transitions = {remove: {remove: 1}};
+    let transitions = {remove: {remove: 1}};
 
     function setup(db, collName, cluster) {
         // insert enough documents so that each thread can remove exactly one per iteration
-        var num = this.threadCount * this.iterations;
-        for (var i = 0; i < num; ++i) {
+        let num = this.threadCount * this.iterations;
+        for (let i = 0; i < num; ++i) {
             db[collName].insert({i: i, rand: Random.rand()});
         }
         assert.eq(db[collName].find().itcount(), num);
@@ -52,8 +49,8 @@ export const $config = (function() {
                 // when running on its own collection,
                 // this iteration should remove exactly one document
                 assert.eq(1, res.nRemoved, tojson(res));
-            }
+            },
         },
-        startState: 'remove'
+        startState: "remove",
     };
 })();

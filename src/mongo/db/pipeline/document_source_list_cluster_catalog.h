@@ -29,14 +29,6 @@
 
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <list>
-#include <memory>
-#include <string>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/auth/action_type.h"
@@ -48,6 +40,14 @@
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/stdx/unordered_set.h"
+
+#include <list>
+#include <memory>
+#include <string>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -61,7 +61,9 @@ static constexpr StringData kStageName = "$listClusterCatalog"_sd;
 
 class LiteParsed final : public LiteParsedDocumentSource {
 public:
-    static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss, const BSONElement& spec) {
+    static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
+                                             const BSONElement& spec,
+                                             const LiteParserOptions& options) {
         return std::make_unique<LiteParsed>(spec.fieldName(), nss);
     }
 
@@ -69,9 +71,17 @@ public:
         : LiteParsedDocumentSource(std::move(parseTimeName)) {
 
         if (nss.dbName() != DatabaseName::kAdmin) {
-            _privileges.emplace_back(Privilege(ResourcePattern::forDatabaseName(nss.dbName()),
-                                               ActionType::listCollections));
-
+            if (nss.isCollectionlessAggregateNS()) {
+                _privileges.emplace_back(Privilege(ResourcePattern::forDatabaseName(nss.dbName()),
+                                                   ActionType::listCollections));
+            } else {
+                // This stage is designed to operate only on database-level namespaces (without
+                // collections). By authorizing any users to run $listClusterCatalog when a
+                // collection is specified, we allow the stage to fail correctly and warn the user
+                // that only a database name should be provided instead of failing with
+                // authorization issues.
+                _privileges.emplace_back(Privilege());
+            }
         } else {
             _privileges.emplace_back(Privilege(ResourcePattern::forClusterResource(nss.tenantId()),
                                                ActionType::listClusterCatalog));
@@ -89,6 +99,20 @@ public:
 
     bool isInitialSource() const final {
         return true;
+    }
+
+    bool generatesOwnDataOnce() const final {
+        return true;
+    }
+
+    ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
+                                                 bool isImplicitDefault) const override {
+        // The listCollections command that runs under the hood only accepts 'local' read concern.
+        return onlyReadConcernLocalSupported(kStageName, level, isImplicitDefault);
+    }
+
+    void assertSupportsMultiDocumentTransaction() const override {
+        transactionNotSupported(kStageName);
     }
 
 private:

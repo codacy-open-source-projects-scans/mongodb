@@ -27,19 +27,19 @@
  *    it in the license file.
  */
 
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/client.h"
-#include "mongo/db/commands/server_status.h"
+#include "mongo/db/commands/server_status/server_status.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/backup_cursor_hooks.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_options.h"
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -54,27 +54,8 @@ public:
         return true;
     }
 
-    BSONObj generateSection(OperationContext* opCtx,
-                            const BSONElement& configElement) const override {
-        auto svcCtx = opCtx->getClient()->getServiceContext();
-        auto engine = svcCtx->getStorageEngine();
-        auto oldestRequiredTimestampForCrashRecovery = engine->getOplogNeededForCrashRecovery();
-        auto backupCursorHooks = BackupCursorHooks::get(svcCtx);
-
-        BSONObjBuilder bob;
-        bob.append("name", storageGlobalParams.engine);
-        bob.append("supportsCommittedReads", true);
-        bob.append("oldestRequiredTimestampForCrashRecovery",
-                   oldestRequiredTimestampForCrashRecovery
-                       ? *oldestRequiredTimestampForCrashRecovery
-                       : Timestamp());
-        bob.append("dropPendingIdents", static_cast<long long>(engine->getNumDropPendingIdents()));
-        bob.append("supportsSnapshotReadConcern", engine->supportsReadConcernSnapshot());
-        bob.append("readOnly", !opCtx->getServiceContext()->userWritesAllowed());
-        bob.append("persistent", !engine->isEphemeral());
-        bob.append("backupCursorOpen", backupCursorHooks->isBackupCursorOpen());
-
-        return bob.obj();
+    BSONObj generateSection(OperationContext* opCtx, const BSONElement&) const override {
+        return opCtx->getServiceContext()->getStorageEngine()->getStatus(opCtx);
     }
 };
 auto& storageSSS = *ServerStatusSectionBuilder<StorageSSS>("storageEngine").forShard();

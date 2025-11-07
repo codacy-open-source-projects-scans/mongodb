@@ -27,26 +27,22 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <cstdint>
-#include <fmt/format.h>
-#include <memory>
-#include <utility>
-#include <vector>
-
-#include <absl/container/inlined_vector.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/exec/sbe/expression_test_base.h"
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/values/value.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo::sbe {
 
@@ -228,10 +224,9 @@ TEST_F(SBEBuiltinExtractSubArrayTest, NotArray) {
 
 TEST_F(SBEBuiltinExtractSubArrayTest, MemoryManagement) {
     {
-        auto array = makeArray(BSON_ARRAY("Item#1"
-                                          << "Item#2"
-                                          << "Item#3"
-                                          << "Item#4"));
+        auto array = makeArray(BSON_ARRAY("Item#1" << "Item#2"
+                                                   << "Item#3"
+                                                   << "Item#4"));
 
         // Use 'extractSubArray' to create a stack owned array and extract object from it, then test
         // if 'getElement' can return the value with correct memory management.

@@ -30,13 +30,10 @@
 #include "mongo/db/repl/oplog_writer_impl.h"
 
 #include "mongo/db/admission/execution_admission_context.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/change_stream_change_collection_manager.h"
-#include "mongo/db/change_stream_serverless_helpers.h"
-#include "mongo/db/collection_crud/collection_write_path.h"
 #include "mongo/db/commands/fsync.h"
-#include "mongo/db/commands/server_status_metric.h"
-#include "mongo/db/repl/initial_syncer.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/repl/initial_sync/initial_syncer.h"
 #include "mongo/db/storage/control/journal_flusher.h"
 #include "mongo/db/storage/storage_util.h"
 #include "mongo/stdx/mutex.h"
@@ -51,56 +48,49 @@ namespace {
 constexpr size_t kMinOpsPerThread = 16;
 
 auto checkFeatureFlagReduceMajorityWriteLatencyFn = [] {
-    return feature_flags::gReduceMajorityWriteLatency.isEnabled(
-        serverGlobalParams.featureCompatibility.acquireFCVSnapshot());
+    return feature_flags::gReduceMajorityWriteLatency.isEnabled();
 };
 
 auto& oplogWriterMetric = *MetricBuilder<OplogWriterStats>{"repl.write"}.setPredicate(
     checkFeatureFlagReduceMajorityWriteLatencyFn);
 
-Status insertDocsToOplogAndChangeCollections(OperationContext* opCtx,
-                                             std::vector<InsertStatement>::const_iterator begin,
-                                             std::vector<InsertStatement>::const_iterator end,
-                                             bool writeOplogColl,
-                                             bool writeChangeColl,
-                                             OplogWriter::Observer* observer) {
+Status insertDocsToOplog(OperationContext* opCtx,
+                         std::vector<InsertStatement>::const_iterator begin,
+                         std::vector<InsertStatement>::const_iterator end) {
     WriteUnitOfWork wuow(opCtx);
     boost::optional<AutoGetOplogFastPath> autoOplog;
-    boost::optional<ChangeStreamChangeCollectionManager::ChangeCollectionsWriter> ccw;
 
     // Acquire locks. We must acquire the locks for all collections we intend to write to before
     // performing any writes. This avoids potential deadlocks created by waiting for locks while
     // having generated oplog holes.
-    if (writeOplogColl) {
-        autoOplog.emplace(opCtx, OplogAccessMode::kWrite);
-    }
-    if (writeChangeColl) {
-        ccw.emplace(ChangeStreamChangeCollectionManager::get(opCtx).createChangeCollectionsWriter(
-            opCtx, begin, end, nullptr /* opDebug */));
-        ccw->acquireLocks();
-    }
+    autoOplog.emplace(opCtx,
+                      OplogAccessMode::kWrite,
+                      Date_t::max(),
+                      AutoGetOplogFastPathOptions{
+                          .explicitIntent = rss::consensus::IntentRegistry::Intent::LocalWrite});
 
     // Write the oplog entries to the oplog collection.
-    if (writeOplogColl) {
+    {
         auto& oplogColl = autoOplog->getCollection();
         if (!oplogColl) {
             return {ErrorCodes::NamespaceNotFound, "Oplog collection does not exist"};
         }
-        auto status = collection_internal::insertDocuments(
-            opCtx, oplogColl, begin, end, nullptr /* OpDebug */, false /* fromMigrate */);
-        if (!status.isOK()) {
-            return status;
-        }
-        observer->onWriteOplogCollection(begin, end);
-    }
 
-    // Write the oplog entries to the tenant respective change collections.
-    if (writeChangeColl) {
-        auto status = ccw->write();
+        const size_t count = std::distance(begin, end);
+        std::vector<Record> records;
+        records.reserve(count);
+        std::vector<Timestamp> timestamps;
+        timestamps.reserve(count);
+        for (auto it = begin; it != end; it++) {
+            const auto& doc = it->doc;
+            records.emplace_back(Record{RecordId(), RecordData(doc.objdata(), doc.objsize())});
+            timestamps.emplace_back(it->oplogSlot.getTimestamp());
+        }
+
+        auto status = internal::insertDocumentsForOplog(opCtx, oplogColl, &records, timestamps);
         if (!status.isOK()) {
             return status;
         }
-        observer->onWriteChangeCollections(begin, end);
     }
 
     wuow.commit();
@@ -162,15 +152,13 @@ OplogWriterImpl::OplogWriterImpl(executor::TaskExecutor* executor,
                                  ReplicationCoordinator* replCoord,
                                  StorageInterface* storageInterface,
                                  ReplicationConsistencyMarkers* consistencyMarkers,
-                                 Observer* observer,
                                  const OplogWriter::Options& options)
     : OplogWriter(executor, writeBuffer, options),
       _applyBuffer(applyBuffer),
       _workerPool(workerPool),
       _replCoord(replCoord),
       _storageInterface(storageInterface),
-      _consistencyMarkers(consistencyMarkers),
-      _observer(observer) {}
+      _consistencyMarkers(consistencyMarkers) {}
 
 void OplogWriterImpl::_run() {
     // We don't start data replication for arbiters at all and it's not allowed to reconfig
@@ -237,14 +225,13 @@ void OplogWriterImpl::_run() {
 bool OplogWriterImpl::writeOplogBatch(OperationContext* opCtx, const std::vector<BSONObj>& ops) {
     invariant(!ops.empty());
 
-    // Don't do anything if not writing to the oplog collection nor the change collections.
-    auto [writeOplogColl, writeChangeColl] = _checkWriteOptions();
-    if (!writeOplogColl && !writeChangeColl) {
+    // Don't do anything if not writing to the oplog collection.
+    if (!_checkWriteOptions(VersionContext::getDecoration(opCtx))) {
         return false;
     }
 
-    // Write to the oplog and/or change collections in the same storage transaction.
-    _writeOplogBatchForRange(opCtx, ops, 0, ops.size(), writeOplogColl, writeChangeColl);
+    // Write to the oplog.
+    _writeOplogBatchForRange(opCtx, ops, 0, ops.size());
 
     return true;
 }
@@ -253,31 +240,25 @@ bool OplogWriterImpl::scheduleWriteOplogBatch(OperationContext* opCtx,
                                               const std::vector<OplogEntry>& ops) {
     invariant(!ops.empty());
 
-    // Don't do anything if not writing to the oplog collection nor the change collections.
-    auto [writeOplogColl, writeChangeColl] = _checkWriteOptions();
-    if (!writeOplogColl && !writeChangeColl) {
+    // Don't do anything if not writing to the oplog collection.
+    if (!_checkWriteOptions(VersionContext::getDecoration(opCtx))) {
         return false;
     }
 
-    // Write to the oplog collection and/or change collections using the thread pool.
+    // Write to the oplog collection using the thread pool.
 
     // When performing writes with multiple threads, we must set oplogTruncateAfterPoint
     // in case the server crashes before all the threads finish. In such cases the oplog
     // will be truncated after this opTime during startup recovery in order to make sure
     // there are no holes in the oplog.
-    if (writeOplogColl) {
-        _consistencyMarkers->setOplogTruncateAfterPoint(
-            opCtx, _replCoord->getMyLastWrittenOpTime().getTimestamp());
-    }
+    _consistencyMarkers->setOplogTruncateAfterPoint(
+        opCtx, _replCoord->getMyLastWrittenOpTime().getTimestamp());
 
-    auto makeOplogWriteForRange = [this,
-                                   &ops,
-                                   writeOplogColl = writeOplogColl,
-                                   writeChangeColl = writeChangeColl](size_t begin, size_t end) {
+    auto makeOplogWriteForRange = [this, &ops](size_t begin, size_t end) {
         return [=, this, &ops](auto status) {
             invariant(status);
             auto opCtx = cc().makeOperationContext();
-            _writeOplogBatchForRange(opCtx.get(), ops, begin, end, writeOplogColl, writeChangeColl);
+            _writeOplogBatchForRange(opCtx.get(), ops, begin, end);
         };
     };
 
@@ -305,8 +286,7 @@ void OplogWriterImpl::waitForScheduledWrites(OperationContext* opCtx) {
     _workerPool->waitForIdle();
 
     // Reset oplogTruncateAfterPoint after writes are complete.
-    bool writeOplogColl = !getOptions().skipWritesToOplogColl;
-    if (writeOplogColl) {
+    if (!getOptions().skipWritesToOplogColl) {
         _consistencyMarkers->setOplogTruncateAfterPoint(opCtx, Timestamp());
     }
 }
@@ -330,21 +310,15 @@ void OplogWriterImpl::finalizeOplogBatch(OperationContext* opCtx,
     }
 }
 
-std::pair<bool, bool> OplogWriterImpl::_checkWriteOptions() {
-    bool writeOplogColl = !getOptions().skipWritesToOplogColl;
-    bool writeChangeColl = !getOptions().skipWritesToChangeColl &&
-        change_stream_serverless_helpers::isChangeCollectionsModeActive();
-
-    return {writeOplogColl, writeChangeColl};
+bool OplogWriterImpl::_checkWriteOptions(const VersionContext& vCtx) {
+    return !getOptions().skipWritesToOplogColl;
 }
 
 template <typename T>
 void OplogWriterImpl::_writeOplogBatchForRange(OperationContext* opCtx,
                                                const std::vector<T>& ops,
                                                size_t begin,
-                                               size_t end,
-                                               bool writeOplogColl,
-                                               bool writeChangeColl) {
+                                               size_t end) {
     // Oplog writes are crucial to the stability of the replica set. We give the operations
     // Immediate priority so that it skips waiting for ticket acquisition and flow control.
     ScopedAdmissionPriority<ExecutionAdmissionContext> priority(
@@ -354,19 +328,13 @@ void OplogWriterImpl::_writeOplogBatchForRange(OperationContext* opCtx,
     auto docs = makeInsertStatements(ops, begin, end);
 
     // The 'nsOrUUID' is used only to log the debug message when retrying inserts on the
-    // oplog and change collections. The 'writeConflictRetry' helper assumes operations
-    // are done on a single namespace. But the provided insert function can do
-    // inserts on the oplog and/or multiple change collections, ie. multiple namespaces.
-    // As such 'writeConflictRetry' will not log the correct namespace when retrying.
-    NamespaceStringOrUUID nsOrUUID = writeOplogColl
-        ? NamespaceString::kRsOplogNamespace
-        : NamespaceString::makeChangeCollectionNSS(boost::none /* tenantId */);
+    // oplog.
+    NamespaceStringOrUUID nsOrUUID = NamespaceString::kRsOplogNamespace;
 
     fassert(8792300,
             storage_helpers::insertBatchAndHandleRetry(
                 opCtx, nsOrUUID, docs, [&](auto* opCtx, auto begin, auto end) {
-                    return insertDocsToOplogAndChangeCollections(
-                        opCtx, begin, end, writeOplogColl, writeChangeColl, _observer);
+                    return insertDocsToOplog(opCtx, begin, end);
                 }));
 }
 

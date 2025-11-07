@@ -30,13 +30,6 @@
 
 #include "mongo/db/auth/authentication_session.h"
 
-#include <algorithm>
-#include <ratio>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/client/authenticate.h"
 #include "mongo/db/audit.h"
@@ -46,13 +39,17 @@
 #include "mongo/db/connection_health_metrics_parameter_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <ratio>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kAccessControl
 
@@ -62,7 +59,7 @@ constexpr auto kDiagnosticLogLevel = 3;
 
 Status crossVerifyUserNames(const UserName& oldUser,
                             const UserName& newUser,
-                            const bool isMechX509) noexcept {
+                            const bool isMechX509) {
     if (oldUser.empty()) {
         return Status::OK();
     }
@@ -263,7 +260,7 @@ void AuthenticationSession::setMechanismName(StringData mechanismName) {
             "Attempt to change the mechanism name",
             _mechName.empty() || _mechName == mechanismName);
 
-    _mechName = mechanismName.toString();
+    _mechName = std::string{mechanismName};
     _mechCounter = authCounter.getMechanismCounter(_mechName);
     _mechCounter->incAuthenticateReceived();
     if (_isSpeculative) {
@@ -370,6 +367,7 @@ void AuthenticationSession::markSuccessful() {
             _mech->appendExtraInfo(&extraInfoBob);
         }
 
+        auto metadata = ClientMetadata::get(_client);
         LOGV2(5286306,
               "Successfully authenticated",
               "client"_attr = _client->getRemote(),
@@ -380,17 +378,19 @@ void AuthenticationSession::markSuccessful() {
               "db"_attr = _userName.getDB(),
               "result"_attr = Status::OK().code(),
               "metrics"_attr = metrics,
+              "doc"_attr = metadata ? metadata->getDocument() : BSONObj(),
               "extraInfo"_attr = extraInfoBob.obj());
     }
 }
 
-void AuthenticationSession::markFailed(const Status& status) {
+void AuthenticationSession::markFailed(const Status& status,
+                                       boost::optional<StepType> currentStep) {
     _finish();
 
     // If we have made it to SaslContinue, that means that the attempt
     // is effectively no longer speculative. We should continue auditing
     // in this case.
-    if (!_isSpeculative || (_lastStep && _lastStep == StepType::kSaslContinue)) {
+    if (!_isSpeculative || (currentStep && currentStep == StepType::kSaslContinue)) {
         auto event = audit::AuthenticateEvent(
             _mechName, _userName, makeAppender(_mech.get()), status.code());
         audit::logAuthentication(_client, event);
@@ -404,6 +404,7 @@ void AuthenticationSession::markFailed(const Status& status) {
             _mech->appendExtraInfo(&extraInfoBob);
         }
 
+        auto metadata = ClientMetadata::get(_client);
         LOGV2(5286307,
               "Failed to authenticate",
               "client"_attr = _client->getRemote(),
@@ -415,6 +416,7 @@ void AuthenticationSession::markFailed(const Status& status) {
               "error"_attr = redact(status),
               "result"_attr = status.code(),
               "metrics"_attr = metrics,
+              "doc"_attr = metadata ? metadata->getDocument() : BSONObj(),
               "extraInfo"_attr = extraInfoBob.obj());
     }
 }

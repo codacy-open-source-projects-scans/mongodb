@@ -29,14 +29,15 @@
 
 #pragma once
 
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_entry_or_grouped_inserts.h"
+#include "mongo/util/modules.h"
+
+#include <utility>
+#include <vector>
 
 namespace mongo {
 
@@ -91,5 +92,6 @@ Status applyPrepareTransaction(OperationContext* opCtx,
  * transactions should be in the prepared state, getting the corresponding oplog entry and applying
  * the operations. Called at the end of rollback, startup recovery and initial sync.
  */
-void reconstructPreparedTransactions(OperationContext* opCtx, repl::OplogApplication::Mode mode);
+MONGO_MOD_OPEN void reconstructPreparedTransactions(OperationContext* opCtx,
+                                                    repl::OplogApplication::Mode mode);
 }  // namespace mongo

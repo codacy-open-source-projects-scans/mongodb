@@ -27,25 +27,28 @@
  *    it in the license file.
  */
 
-#include <iterator>
-#include <list>
-#include <utility>
+#include "mongo/db/pipeline/document_source_sequential_document_cache.h"
 
-#include <boost/optional/optional.hpp>
+#include "mongo/base/init.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/pipeline/search/document_source_search.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+
+#include <list>
+#include <set>
+
 #include <boost/smart_ptr/intrusive_ptr.hpp>
 
-#include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/pipeline/dependencies.h"
-#include "mongo/db/pipeline/document_source_sequential_document_cache.h"
-#include "mongo/db/pipeline/search/document_source_search.h"
-
 namespace mongo {
+
+ALLOCATE_DOCUMENT_SOURCE_ID(sequentialCache, DocumentSourceSequentialDocumentCache::id)
 
 constexpr StringData DocumentSourceSequentialDocumentCache::kStageName;
 
 DocumentSourceSequentialDocumentCache::DocumentSourceSequentialDocumentCache(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx, SequentialDocumentCache* cache)
-    : DocumentSource(kStageName, expCtx), _cache(cache) {
+    const boost::intrusive_ptr<ExpressionContext>& expCtx, SequentialDocumentCachePtr cache)
+    : DocumentSource(kStageName, expCtx), _cache(std::move(cache)) {
     invariant(_cache);
 
     if (_cache->isServing()) {
@@ -57,52 +60,14 @@ DocumentSourceSequentialDocumentCache::DocumentSourceSequentialDocumentCache(
         !searchMetaVal.missing()) {
         tassert(6381601,
                 "SEARCH_META variable should not have been set in this expCtx yet.",
-                pExpCtx->variables.getValue(Variables::kSearchMetaId).missing());
-        pExpCtx->variables.setReservedValue(Variables::kSearchMetaId, searchMetaVal, true);
+                expCtx->variables.getValue(Variables::kSearchMetaId).missing());
+        expCtx->variables.setReservedValue(Variables::kSearchMetaId, searchMetaVal, true);
     }
 }
 
-DocumentSource::GetNextResult DocumentSourceSequentialDocumentCache::doGetNext() {
-    // Either we're reading from the cache, or we have an input source to build the cache from.
-    invariant(pSource || _cache->isServing());
 
-    if (_cacheIsEOF) {
-        return GetNextResult::makeEOF();
-    }
-
-    if (_cache->isServing()) {
-        auto nextDoc = _cache->getNext();
-        if (nextDoc) {
-            return std::move(*nextDoc);
-        }
-        _cacheIsEOF = true;
-        return GetNextResult::makeEOF();
-    }
-
-    auto nextResult = pSource->getNext();
-
-    if (!_cache->isAbandoned()) {
-        if (nextResult.isEOF()) {
-            _cache->freeze();
-            _cacheIsEOF = true;
-
-            // SearchMeta may be set in the expCtx, and it should be persisted through the cache. If
-            // not persisted, SearchMeta will be missing when it may be needed for future executions
-            // of the pipeline.
-            if (auto searchMetaVal = pExpCtx->variables.getValue(Variables::kSearchMetaId);
-                !searchMetaVal.missing()) {
-                _cache->setCachedVariableValue(Variables::kSearchMetaId, searchMetaVal);
-            }
-        } else {
-            _cache->add(nextResult.getDocument());
-        }
-    }
-
-    return nextResult;
-}
-
-Pipeline::SourceContainer::iterator DocumentSourceSequentialDocumentCache::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator DocumentSourceSequentialDocumentCache::doOptimizeAt(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     // The DocumentSourceSequentialDocumentCache relies on all other stages in the pipeline being at
     // the final positions which they would have occupied if no cache stage was present. This should
     // be the case when we reach this function. The cache should always be the last stage in the
@@ -128,17 +93,11 @@ Pipeline::SourceContainer::iterator DocumentSourceSequentialDocumentCache::doOpt
     container->erase(itr);
 
     // Get all variable IDs defined in this scope.
-    auto varIDs = pExpCtx->variablesParseState.getDefinedVariableIDs();
+    auto varIDs = getExpCtx()->variablesParseState.getDefinedVariableIDs();
 
     auto prefixSplit = container->begin();
 
-    // In the context of this optimization, we are only interested in figuring out
-    // which external variables are referenced in the pipeline. We are not attempting
-    // to enforce that any referenced metadata are in fact unavailable, this is done
-    // elsewhere. So without knowledge of what metadata is in fact unavailable, here
-    // we "lie" and say that all metadata is available to avoid tripping any
-    // assertions.
-    DepsTracker deps(DepsTracker::kNoMetadata);
+    DepsTracker deps;
 
     // Iterate through the pipeline stages until we find one which cannot be cached.
     // A stage cannot be cached if it either:
@@ -146,7 +105,6 @@ Pipeline::SourceContainer::iterator DocumentSourceSequentialDocumentCache::doOpt
     //     $search is an exception to rule 1, as it doesn't depend on other stages.
     //  2. depends on a variable defined in this scope, or
     //  3. generates random numbers.
-    DocumentSource* lastPtr = nullptr;
     std::set<Variables::Id> prefixVarRefs;
     for (; prefixSplit != container->end(); ++prefixSplit) {
         (*prefixSplit)->addVariableRefs(&prefixVarRefs);
@@ -160,23 +118,20 @@ Pipeline::SourceContainer::iterator DocumentSourceSequentialDocumentCache::doOpt
               deps.needRandomGenerator))) {
             break;
         }
-
-        lastPtr = prefixSplit->get();
     }
 
     // The 'prefixSplit' iterator is now pointing to the first stage of the correlated suffix. If
     // the split point is the first stage, then the entire pipeline is correlated and we should not
-    // attempt to perform any caching. Abandon the cache and return.
-    if (prefixSplit == container->begin()) {
+    // attempt to perform any caching. Abandon the cache and return. If the cache is already serving
+    // documents, it should not be abandoned, because it must be the case that the the documents are
+    // uncorrelated.
+    if (prefixSplit == container->begin() && !_cache->isServing()) {
         _cache->abandon();
         return container->end();
     }
 
     // If the cache has been populated and is serving results, remove the non-correlated prefix.
     if (_cache->isServing()) {
-        // Need to dispose last stage to be removed.
-        Pipeline::stitch(container);
-        lastPtr->dispose();
         container->erase(container->begin(), prefixSplit);
     }
 
@@ -186,7 +141,7 @@ Pipeline::SourceContainer::iterator DocumentSourceSequentialDocumentCache::doOpt
 }
 
 Value DocumentSourceSequentialDocumentCache::serialize(const SerializationOptions& opts) const {
-    if (opts.verbosity) {
+    if (opts.isSerializingForExplain()) {
         return Value(Document{
             {kStageName,
              Document{{"maxSizeBytes"_sd,

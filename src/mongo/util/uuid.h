@@ -29,6 +29,18 @@
 
 #pragma once
 
+#include "mongo/base/data_range.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/util/builder_fwd.h"
+#include "mongo/logv2/log_attr.h"
+#include "mongo/stdx/type_traits.h"
+#include "mongo/util/assert_util.h"
+
 #include <array>
 #include <compare>
 #include <cstdint>
@@ -36,18 +48,6 @@
 #include <functional>
 #include <iosfwd>
 #include <string>
-
-#include "mongo/base/data_range.h"
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/bson/util/builder_fwd.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/stdx/type_traits.h"
-#include "mongo/util/assert_util_core.h"
 
 namespace mongo {
 
@@ -197,6 +197,14 @@ public:
         return "uuid"_attr = uuid;
     }
 
+    /**
+     * Supports use of UUID with the BSON macro:
+     *     BSON("uuid" << uuid) -> { uuid: BinData(4, "...") }
+     */
+    friend void appendToBson(BSONObjBuilder& bob, StringData fieldName, const UUID& value) {
+        value.appendToBuilder(&bob, fieldName);
+    }
+
 private:
     using UUIDStorage = std::array<unsigned char, kNumBytes>;
 
@@ -214,15 +222,9 @@ inline std::ostream& operator<<(std::ostream& s, const UUID& uuid) {
     return (s << uuid.toString());
 }
 
-inline StringBuilder& operator<<(StringBuilder& s, const UUID& uuid) {
+template <typename Allocator>
+StringBuilderImpl<Allocator>& operator<<(StringBuilderImpl<Allocator>& s, const UUID& uuid) {
     return (s << uuid.toString());
 }
-
-/**
- * Supports use of UUID with the BSON macro:
- *     BSON("uuid" << uuid) -> { uuid: BinData(4, "...") }
- */
-template <>
-BSONObjBuilder& BSONObjBuilderValueStream::operator<<<UUID>(UUID value);
 
 }  // namespace mongo

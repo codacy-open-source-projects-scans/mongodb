@@ -1,7 +1,7 @@
 # Query Stats
 
 This directory is the home of the infrastructure related to recording runtime query statistics for
-the database. It is not to be confused with `src/mongo/db/query/stats/` which is the home of the
+the database. It is not to be confused with `src/mongo/db/query/compiler/stats/` which is the home of the
 logic for computing and maintaining statistics about a collection or index's data distribution - for
 use by the query planner.
 
@@ -31,7 +31,8 @@ db.example.findOne({x: 53});
 then the `QueryStatsStore` should contain an entry for a single query shape which would record 2
 executions and some related statistics (see [`QueryStatsEntry`](query_stats_entry.h) for details).
 
-For more information on query shape, see the [query_shape](../query_shape/README.md) directory.
+For more information on query shape and the overlap here, see
+[query shape disambiguation][disambiguation] and [query shape docs][query shape].
 
 The query stats store has _more_ dimensions (i.e. more granularity) to group incoming queries than
 just the query shape. For example, these queries would all three have the same shape but the first
@@ -45,6 +46,8 @@ db.example.find({x: 55}).batchSize(3);
 
 There are two distinct query stats store entries here - both the examples which include the batch
 size will be treated separately from the example which does not specify a batch size.
+
+#### Engineering Considerations
 
 The dimensions considered will depend on the command, but can generally be found in the
 [`KeyGenerator`](key_generator.h) interface, which will generate the query stats store keys by which
@@ -88,12 +91,11 @@ metrics it receives into those it includes in its response.
 ### Rate Limiting
 
 Whether or not query stats will be recorded for a specific query execution depends on a Rate
-Limiter, which limits the number of recordings per second based on the server parameter
-[internalQueryStatsRateLimit](#server-parameters). The goal of the rate limiter is to minimize
-impact to overall system performance through restricting excessive traffic. If a query is run but
-the rate limit has been reached, the query will still execute as expected but query stats will not
-be updated in the query stats store. Our rate limiter uses the sliding window algorithm; see details
-[here](rate_limiting.h#82-87).
+Limiter, which limits the number of recordings based on the [server parameters](#server-parameters). The goal of the rate limiter
+is to minimize impact to overall system performance through restricting traffic. Our rate limiter provides two algorithms:
+Window-based policy and sample-based policy. Window-based policy limits the number of recordings per second, whereas sample-based
+policy limits the fraction of queries to be recorded. If a query is run but the rate limiter decides not to record it, the query
+will still execute as expected but query stats will not be updated in the query stats store. See details [here](rate_limiting.h).
 
 ### Explain
 
@@ -155,7 +157,7 @@ db.adminCommand({
           hmacKey: BinData(
             8,
             "87c4082f169d3fef0eef34dc8e23458cbb457c3sf3n2",
-          ) /* bindata 
+          ) /* bindata
                 subtype 8 - a new type for sensitive data */,
         },
       },
@@ -237,6 +239,25 @@ following way:
   while executing this query, including getMores.
 - `metrics.lastExecutionMicros`: Estimated time spent processing the latest query (akin to
   "totalExecMicros", not "firstResponseExecMicros").
+- `metrics.cpuNanos`: Estimated total CPU time spent by a query operation in nanoseconds. This value
+  should always be greater than 0 and will not be returned on platforms other than Linux, since collecting
+  cpu time is only supported on Linux.
+- `metrics.delinquentAcquisitions`: Numbers of time that an execution ticket acquisition overdue by
+  a query operation, including getMores.
+- `metrics.totalAcquisitionDelinquencyMillis`: Total time in milliseconds that an execution ticket
+  acquisition overdue by a query operation, including getMores.
+- `metrics.maxAcquisitionDelinquencyMillis`: Maximum time in milliseconds that an execution ticket
+  acquisition overdue by a query operation, including getMores.
+- `metrics.numInterruptChecksPerSec`: Number of times checkForInterrupt is called per second by a
+  query operation, including getMores.
+- `metrics.overdueInterruptApproxMaxMillis`: Maximum time in milliseconds that checkForInterrupt was
+  delayed for a sampled query operation, including getMores.
+- `metrics.writes`: Contains the metrics relevant to writes.
+- `metrics.writes.nMatched`: The number of documents selected for update.
+- `metrics.writes.nUpserted`: The number of documents inserted by an upsert.
+- `metrics.writes.nModified`: The number of existing documents updated.
+- `metrics.writes.nDeleted`: The number of documents deleted.
+- `metrics.writes.nInserted`: The number of documents inserted (excluding upserts).
 
 #### Permissions
 
@@ -261,6 +282,29 @@ following way:
   - The rate limit is an integer which imposes a maximum number of recordings per second. Default is
     0 which has the effect of disabling query stats collection. Setting the parameter to -1 means
     there will be no rate limit.
+
+- `internalQueryStatsSampleRate`:
+
+  - The sample rate is a floating-point number between 0.0 and 1.0, representing the fraction of
+    queries for which stats will be recorded.
+    - `0.0` - No query stats are recorded via sampling (0%).
+    - `1.0` - All queries are recorded (100%).
+  - When both `internalQueryStatsSampleRate` and `internalQueryStatsRateLimit` are set to non-zero
+    values, the sampling-based policy (`internalQueryStatsSampleRate`) takes precedence over the
+    window-based rate limiter.
+  - The default value is `0`. When set to `0`, sampling-based rate limiting is disabled and query
+    stats rate limiting falls back to the window-based policy controlled by
+    `internalQueryStatsRateLimit`.
+
+- `internalQueryStatsWriteCmdSampleRate`:
+
+  - This parameter is an integer number either 0 or 1. It controls whether query stats are collected
+    for write commands.
+    - `0` - Disable recording write commands.
+    - `1` - Enable recording write commands.
+  - This parameter is only effective if query stats is already enabled via `internalQueryStatsRateLimit`
+    or `internalQueryStatsSampleRate`.
+  - This parameter may become a floating point value to support percentage-based sampling in the future.
 
 - `logComponentVerbosity.queryStats`:
   - Controls the logging behavior for query stats. See [Logging](#logging) for details.
@@ -312,9 +356,11 @@ output one document per query stats key - output in the "key" field.
 
 <!-- Links -->
 
-[query stats store]: https://github.com/10gen/mongo/blob/3cc7cd2a439e25fff9dd26fb1f94057d837a06f9/src/mongo/db/query/query_stats/query_stats.h#L100-L104
-[partition calculation comment]: https://github.com/10gen/mongo/blob/3cc7cd2a439e25fff9dd26fb1f94057d837a06f9/src/mongo/db/query/query_stats/query_stats.cpp#L173-179
-[register request]: https://github.com/10gen/mongo/blob/3cc7cd2a439e25fff9dd26fb1f94057d837a06f9/src/mongo/db/query/query_stats/query_stats.h#L196-L199
-[write query stats]: https://github.com/10gen/mongo/blob/3cc7cd2a439e25fff9dd26fb1f94057d837a06f9/src/mongo/db/query/query_stats/query_stats.h#L253-L258
-[write query stats comments]: https://github.com/10gen/mongo/blob/3cc7cd2a439e25fff9dd26fb1f94057d837a06f9/src/mongo/db/query/query_stats/query_stats.h#L243-L252
-[query stats will never exhaust]: https://github.com/10gen/mongo/blob/8be794e1983e2b24938489ad2b018b630ea9b563/src/mongo/db/clientcursor.h#L510
+[disambiguation]: /src/mongo/db/query/README_query_shape_disambiguation.md
+[query shape]: /src/mongo/db/query/query_shape/README.md
+[query stats store]: https://github.com/mongodb/mongo/blob/3cc7cd2a439e25fff9dd26fb1f94057d837a06f9/src/mongo/db/query/query_stats/query_stats.h#L100-L104
+[partition calculation comment]: https://github.com/mongodb/mongo/blob/3cc7cd2a439e25fff9dd26fb1f94057d837a06f9/src/mongo/db/query/query_stats/query_stats.cpp#L173-179
+[register request]: https://github.com/mongodb/mongo/blob/3cc7cd2a439e25fff9dd26fb1f94057d837a06f9/src/mongo/db/query/query_stats/query_stats.h#L196-L199
+[write query stats]: https://github.com/mongodb/mongo/blob/3cc7cd2a439e25fff9dd26fb1f94057d837a06f9/src/mongo/db/query/query_stats/query_stats.h#L253-L258
+[write query stats comments]: https://github.com/mongodb/mongo/blob/3cc7cd2a439e25fff9dd26fb1f94057d837a06f9/src/mongo/db/query/query_stats/query_stats.h#L243-L252
+[query stats will never exhaust]: https://github.com/mongodb/mongo/blob/8be794e1983e2b24938489ad2b018b630ea9b563/src/mongo/db/clientcursor.h#L510

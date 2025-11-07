@@ -31,18 +31,6 @@
  * This file contains tests for sbe::HashJoinStage.
  */
 
-#include <cstddef>
-#include <cstdint>
-#include <initializer_list>
-#include <memory>
-#include <string>
-#include <string_view>
-#include <utility>
-#include <vector>
-
-#include <absl/container/inlined_vector.h>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/exec/sbe/expressions/compile_ctx.h"
@@ -54,10 +42,19 @@
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
-#include "mongo/db/query/stage_types.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <initializer_list>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo::sbe {
 
@@ -66,14 +63,12 @@ using HashJoinStageTest = PlanStageTestFixture;
 TEST_F(HashJoinStageTest, HashJoinCollationTest) {
     using namespace std::literals;
     for (auto useCollator : {false, true}) {
-        auto [innerTag, innerVal] = stage_builder::makeValue(BSON_ARRAY("a"
-                                                                        << "b"
-                                                                        << "c"));
+        auto [innerTag, innerVal] = stage_builder::makeValue(BSON_ARRAY("a" << "b"
+                                                                            << "c"));
         value::ValueGuard innerGuard{innerTag, innerVal};
 
-        auto [outerTag, outerVal] = stage_builder::makeValue(BSON_ARRAY("a"
-                                                                        << "b"
-                                                                        << "A"));
+        auto [outerTag, outerVal] = stage_builder::makeValue(BSON_ARRAY("a" << "b"
+                                                                            << "A"));
         value::ValueGuard outerGuard{outerTag, outerVal};
 
         // After running the join we expect to get back pairs of the keys that were

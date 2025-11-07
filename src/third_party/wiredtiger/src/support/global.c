@@ -33,18 +33,24 @@ const WT_NAME_FLAG __wt_stress_types[] = {
   {"checkpoint_stop", WT_TIMING_STRESS_CHECKPOINT_STOP},
   {"commit_transaction_slow", WT_TIMING_STRESS_COMMIT_TRANSACTION_SLOW},
   {"compact_slow", WT_TIMING_STRESS_COMPACT_SLOW},
+  {"conn_close_stress_log_printf", WT_TIMING_STRESS_CLOSE_STRESS_LOG},
   {"evict_reposition", WT_TIMING_STRESS_EVICT_REPOSITION},
   {"failpoint_eviction_split", WT_TIMING_STRESS_FAILPOINT_EVICTION_SPLIT},
   {"failpoint_history_delete_key_from_ts",
     WT_TIMING_STRESS_FAILPOINT_HISTORY_STORE_DELETE_KEY_FROM_TS},
+  {"failpoint_rec_before_wrapup", WT_TIMING_STRESS_FAILPOINT_REC_BEFORE_WRAPUP},
+  {"failpoint_rec_split_write", WT_TIMING_STRESS_FAILPOINT_REC_SPLIT_WRITE},
   {"history_store_checkpoint_delay", WT_TIMING_STRESS_HS_CHECKPOINT_DELAY},
   {"history_store_search", WT_TIMING_STRESS_HS_SEARCH},
   {"history_store_sweep_race", WT_TIMING_STRESS_HS_SWEEP},
+  {"live_restore_clean_up", WT_TIMING_STRESS_LIVE_RESTORE_CLEAN_UP},
+  {"open_index_slow", WT_TIMING_STRESS_OPEN_INDEX_SLOW},
   {"prefetch_1", WT_TIMING_STRESS_PREFETCH_1}, {"prefetch_2", WT_TIMING_STRESS_PREFETCH_2},
   {"prefetch_3", WT_TIMING_STRESS_PREFETCH_3}, {"prefix_compare", WT_TIMING_STRESS_PREFIX_COMPARE},
   {"prepare_checkpoint_delay", WT_TIMING_STRESS_PREPARE_CHECKPOINT_DELAY},
   {"prepare_resolution_1", WT_TIMING_STRESS_PREPARE_RESOLUTION_1},
   {"prepare_resolution_2", WT_TIMING_STRESS_PREPARE_RESOLUTION_2},
+  {"session_alter_slow", WT_TIMING_STRESS_SESSION_ALTER_SLOW},
   {"sleep_before_read_overflow_onpage", WT_TIMING_STRESS_SLEEP_BEFORE_READ_OVERFLOW_ONPAGE},
   {"split_1", WT_TIMING_STRESS_SPLIT_1}, {"split_2", WT_TIMING_STRESS_SPLIT_2},
   {"split_3", WT_TIMING_STRESS_SPLIT_3}, {"split_4", WT_TIMING_STRESS_SPLIT_4},
@@ -345,7 +351,6 @@ __global_once(void)
 
     /* Run-time configuration. */
 #ifdef WT_STANDALONE_BUILD
-    __wt_process.fast_truncate_2022 = true;
     __wt_process.tiered_shared_2023 = true;
 #endif
 }

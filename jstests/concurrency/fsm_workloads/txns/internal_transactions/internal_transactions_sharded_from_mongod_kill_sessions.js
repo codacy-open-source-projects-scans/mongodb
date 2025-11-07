@@ -17,13 +17,10 @@ import "jstests/libs/override_methods/retry_on_killed_session.js";
 
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
 import {fsm} from "jstests/concurrency/fsm_libs/fsm.js";
-import {
-    $config as $baseConfig
-} from
-    "jstests/concurrency/fsm_workloads/txns/internal_transactions/internal_transactions_sharded_from_mongod.js";
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/txns/internal_transactions/internal_transactions_sharded_from_mongod.js";
 import {KilledSessionUtil} from "jstests/libs/killed_session_util.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
     $config.data.retryOnKilledSession = true;
 
     // Insert initial documents during setup instead of the init state, otherwise the insert could
@@ -44,22 +41,23 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         [$super.data.executionContextTypes.kClientSession]: true,
     };
 
+    // Threads only begin killing sessions once every thread has finished init(), where a thread
+    // will decrement killCountdownLatch.
+    $config.data.killCountdown = new CountDownLatch($config.threadCount);
+
     $config.data.runInternalTransaction = function runInternalTransaction(
-        defaultDb, collName, executionCtxType, crudOp) {
+        defaultDb,
+        collName,
+        executionCtxType,
+        crudOp,
+    ) {
         assert.neq(executionCtxType, this.executionContextTypes.kClientRetryableWrite);
         assert.neq(executionCtxType, this.executionContextTypes.kClientTransaction);
         try {
             $super.data.runInternalTransaction.apply(this, arguments);
         } catch (e) {
-            if (e.code == ErrorCodes.Interrupted) {
+            if (KilledSessionUtil.hasKilledSessionError(e) || KilledSessionUtil.hasKilledSessionWCError(e)) {
                 return;
-            }
-            if (e.writeErrors) {
-                for (let writeError of e.writeErrors) {
-                    if (writeError.code == ErrorCodes.Interrupted) {
-                        return;
-                    }
-                }
             }
             throw e;
         }
@@ -74,25 +72,32 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
         });
     };
 
-    $config.states.killSession = function(db, collName, connCache) {
+    $config.states.killSession = function (db, collName, connCache) {
+        if ($config.data.killCountdown.getCount() > 0) {
+            return;
+        }
         fsm.forceRunningOutsideTransaction(this);
 
         print("Starting killSession");
-        let ourSessionWasKilled;
+        let shouldRetry;
         do {
-            ourSessionWasKilled = false;
+            shouldRetry = false;
 
             try {
                 print("Starting refreshLogicalSessionCacheNow command");
                 let res = this.mongo.adminCommand({refreshLogicalSessionCacheNow: 1});
                 if (res.ok === 1) {
                     assert.commandWorked(res);
-                } else if (res.code === 18630 || res.code === 18631) {
+                } else if (res.code === 18630 || res.code === 18631 || res.code === 203) {
                     // Refreshing the logical session cache may trigger sharding the sessions
                     // collection, which can fail with 18630 or 18631 if its session is killed while
                     // running DBClientBase::getCollectionInfos() or DBClientBase::getIndexSpecs(),
                     // respectively. This means the collection is not set up, so retry.
-                    ourSessionWasKilled = true;
+                    //
+                    // If this test is running in a suite with ContinousInitialSync we might call
+                    // refreshLogicalSessionCacheNow before initial sync has a chance to copy over
+                    // the shard identity doc and we will fail with 203.
+                    shouldRetry = true;
                     continue;
                 } else {
                     assert.commandFailedWithCode(res, ErrorCodes.DuplicateKey);
@@ -100,22 +105,21 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
                 print("Finished refreshLogicalSessionCacheNow command");
 
                 print("Starting listSessions");
-                const sessions =
-                    db.getSiblingDB("config")
-                        .system.sessions
-                        .aggregate([
-                            {$listSessions: {}},
-                            {
-                                $match: {
-                                    $and: [
-                                        {lastUse: {$gt: this.initTime}},
-                                        {"_id.id": {$ne: db.getSession().getSessionId().id}}
-                                    ]
-                                }
+                const sessions = db
+                    .getSiblingDB("config")
+                    .system.sessions.aggregate([
+                        {$listSessions: {}},
+                        {
+                            $match: {
+                                $and: [
+                                    {lastUse: {$gt: this.initTime}},
+                                    {"_id.id": {$ne: db.getSession().getSessionId().id}},
+                                ],
                             },
-                            {$sample: {size: 1}},
-                        ])
-                        .toArray();
+                        },
+                        {$sample: {size: 1}},
+                    ])
+                    .toArray();
                 print("Finished listSessions " + tojsononeline(sessions));
 
                 if (sessions.length === 0) {
@@ -130,7 +134,7 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
                 print("killSessions error " + tojsononeline(e));
                 if (isNetworkError(e) || isRetryableError(e)) {
                     print("Starting new sessions after listSessions or killSessions error");
-                    this.startSessions();
+                    this.startSessions(db);
                     // When causal consistency is required, the verifyDocuments state would perform
                     // reads against mongos with afterClusterTime equal to the max of the
                     // clusterTimes of all sessions that it has created on the shard that it uses to
@@ -145,13 +149,18 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
                 if (KilledSessionUtil.isKilledSessionCode(e.code)) {
                     // This session was killed when running either listSessions or killSesssions.
                     // We should retry.
-                    ourSessionWasKilled = true;
+                    shouldRetry = true;
                     continue;
                 }
                 throw e;
             }
-        } while (ourSessionWasKilled);
+        } while (shouldRetry);
         print("Finished killSession");
+    };
+
+    $config.states.init = function init(db, collName, connCache) {
+        $super.states.init.apply(this, arguments);
+        $config.data.killCountdown.countDown();
     };
 
     $config.transitions = {
@@ -165,42 +174,42 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
             internalTransactionForInsert: 0.25,
             internalTransactionForUpdate: 0.25,
             internalTransactionForDelete: 0.25,
-            verifyDocuments: 0.25
+            verifyDocuments: 0.25,
         },
         internalTransactionForInsert: {
             killSession: 0.4,
             internalTransactionForInsert: 0.15,
             internalTransactionForUpdate: 0.15,
             internalTransactionForDelete: 0.15,
-            verifyDocuments: 0.15
+            verifyDocuments: 0.15,
         },
         internalTransactionForUpdate: {
             killSession: 0.4,
             internalTransactionForInsert: 0.15,
             internalTransactionForUpdate: 0.15,
             internalTransactionForDelete: 0.15,
-            verifyDocuments: 0.15
+            verifyDocuments: 0.15,
         },
         internalTransactionForDelete: {
             killSession: 0.4,
             internalTransactionForInsert: 0.15,
             internalTransactionForUpdate: 0.15,
             internalTransactionForDelete: 0.15,
-            verifyDocuments: 0.15
+            verifyDocuments: 0.15,
         },
         internalTransactionForFindAndModify: {
             killSession: 0.4,
             internalTransactionForInsert: 0.15,
             internalTransactionForUpdate: 0.15,
             internalTransactionForDelete: 0.15,
-            verifyDocuments: 0.15
+            verifyDocuments: 0.15,
         },
         verifyDocuments: {
             killSession: 0.25,
             internalTransactionForInsert: 0.25,
             internalTransactionForUpdate: 0.25,
             internalTransactionForDelete: 0.25,
-        }
+        },
     };
 
     return $config;

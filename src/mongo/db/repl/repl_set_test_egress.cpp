@@ -28,11 +28,6 @@
  */
 
 
-#include <memory>
-#include <vector>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -46,14 +41,17 @@
 #include "mongo/executor/network_interface.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -100,7 +98,7 @@ HostAndPort validateTarget(OperationContext* opCtx, StringData targetStr) {
 constexpr auto kReplSetTestEgress = "replSetTestEgress"_sd;
 auto getNetworkInterface() {
     static auto uniqueNI = ([] {
-        auto ret = executor::makeNetworkInterface(kReplSetTestEgress.toString());
+        auto ret = executor::makeNetworkInterface(std::string{kReplSetTestEgress});
         ret->startup();
         return ret;
     })();
@@ -134,7 +132,8 @@ public:
             auto net = getNetworkInterface();
             LOGV2_DEBUG(
                 4697203, 4, "Dropping any existing connections", "target"_attr = target.toString());
-            net->dropConnections(target);
+            net->dropConnections(
+                target, Status(ErrorCodes::PooledConnectionsDropped, kDisconnectStatus.reason()));
             LOGV2_DEBUG(4697204,
                         4,
                         "Opening test egress connection",
@@ -166,6 +165,10 @@ public:
 
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
         return AllowedOnSecondary::kAlways;
+    }
+
+    bool requiresAuthzChecks() const override {
+        return false;
     }
 };
 

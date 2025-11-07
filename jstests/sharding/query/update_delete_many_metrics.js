@@ -3,8 +3,6 @@
  * counters for updateMany and deleteMany
  * @tags: [
  *   multiversion_incompatible,
- *    # TODO (SERVER-97257): Re-enable this test or add an explanation why it is incompatible.
- *    embedded_router_incompatible,
  * ]
  */
 
@@ -14,15 +12,14 @@ import {ShardingTest} from "jstests/libs/shardingtest.js";
 {
     const st = new ShardingTest({shards: 2, rs: {nodes: 2}});
     const mongodConns = [];
-    st.rs0.nodes.forEach(node => mongodConns.push(node));
-    st.rs1.nodes.forEach(node => mongodConns.push(node));
+    st.rs0.nodes.forEach((node) => mongodConns.push(node));
+    st.rs1.nodes.forEach((node) => mongodConns.push(node));
 
     const testDB = st.s.getDB("test");
     const shardedColl = testDB.shardedColl;
     const unshardedColl = testDB.unshardedColl;
 
-    assert.commandWorked(
-        st.s0.adminCommand({enableSharding: testDB.getName(), primaryShard: st.shard0.shardName}));
+    assert.commandWorked(st.s0.adminCommand({enableSharding: testDB.getName(), primaryShard: st.shard0.shardName}));
 
     // Shard shardedColl on {x:1}, split it at {x:0}, and move chunk {x:1} to shard1.
     st.shardColl(shardedColl, {x: 1}, {x: 0}, {x: 1});
@@ -60,15 +57,18 @@ import {ShardingTest} from "jstests/libs/shardingtest.js";
     assert.eq(4, shardedColl.find({a: 4}).count());
 
     // 2 updateMany calls.
-    assert.commandWorked(shardedColl.updateMany({}, {$set: {array: 'string', doc: 'string'}}));
-    assert.commandWorked(unshardedColl.updateMany({}, {$set: {array: 'string', doc: 'string'}}));
+    assert.commandWorked(shardedColl.updateMany({}, {$set: {array: "string", doc: "string"}}));
+    assert.commandWorked(unshardedColl.updateMany({}, {$set: {array: "string", doc: "string"}}));
 
     // batch update: 2 more, so 7 updates in total
-    var request = {
+    let request = {
         update: shardedColl.getName(),
-        updates: [{q: {}, u: {$set: {c: 3}}, multi: true}, {q: {}, u: {$set: {a: 5}}, multi: true}],
+        updates: [
+            {q: {}, u: {$set: {c: 3}}, multi: true},
+            {q: {}, u: {$set: {a: 5}}, multi: true},
+        ],
         writeConcern: {w: 1},
-        ordered: false
+        ordered: false,
     };
     shardedColl.runCommand(request);
     assert.eq(4, shardedColl.find({a: 5}).count());
@@ -86,10 +86,37 @@ import {ShardingTest} from "jstests/libs/shardingtest.js";
     // Next call will not increase count.
     assert.commandWorked(unshardedColl.deleteOne({_id: 1}));
 
+    // Check that metrics are updated for bulk write.
+    assert.commandWorked(
+        testDB.adminCommand({
+            bulkWrite: 1,
+            ops: [
+                {update: 0, filter: {_id: {$lt: 0}}, updateMods: {$set: {q: 10}}, multi: true},
+                {delete: 0, filter: {_id: {$lt: 0}}, multi: true},
+            ],
+            nsInfo: [{ns: "test.shardedColl"}],
+            writeConcern: {w: "majority"},
+            errorsOnly: true,
+        }),
+    );
+
+    assert.commandWorked(
+        testDB.adminCommand({
+            bulkWrite: 1,
+            ops: [
+                {update: 0, filter: {_id: {$lt: 2}}, updateMods: {$set: {q: 10}}, multi: true},
+                {delete: 0, filter: {_id: {$lt: 2}}, multi: true},
+            ],
+            nsInfo: [{ns: "test.unshardedColl"}],
+            writeConcern: {w: "majority"},
+            errorsOnly: true,
+        }),
+    );
+
     mongosServerStatus = testDB.adminCommand({serverStatus: 1});
     // Verification for metrics.
-    assert.eq(7, mongosServerStatus.metrics.query.updateManyCount);
-    assert.eq(2, mongosServerStatus.metrics.query.deleteManyCount);
+    assert.eq(9, mongosServerStatus.metrics.query.updateManyCount);
+    assert.eq(4, mongosServerStatus.metrics.query.deleteManyCount);
 
     st.stop();
 }
@@ -130,14 +157,17 @@ import {ShardingTest} from "jstests/libs/shardingtest.js";
     assert.eq(4, testColl.find({a: 4}).count());
 
     // 1 updateMany call.
-    assert.commandWorked(testColl.updateMany({}, {$set: {array: 'string', doc: 'string'}}));
+    assert.commandWorked(testColl.updateMany({}, {$set: {array: "string", doc: "string"}}));
 
     // batch update: 2 more, so 5 updates in total
     let request = {
         update: testColl.getName(),
-        updates: [{q: {}, u: {$set: {c: 3}}, multi: true}, {q: {}, u: {$set: {a: 5}}, multi: true}],
+        updates: [
+            {q: {}, u: {$set: {c: 3}}, multi: true},
+            {q: {}, u: {$set: {a: 5}}, multi: true},
+        ],
         writeConcern: {w: 1},
-        ordered: false
+        ordered: false,
     };
     testColl.runCommand(request);
     assert.eq(4, testColl.find({a: 5}).count());
@@ -150,11 +180,24 @@ import {ShardingTest} from "jstests/libs/shardingtest.js";
     // Next call will not increase count.
     assert.commandWorked(testColl.deleteOne({_id: 1}));
 
+    assert.commandWorked(
+        testDB.adminCommand({
+            bulkWrite: 1,
+            ops: [
+                {update: 0, filter: {_id: {$gt: 0}}, updateMods: {$set: {q: 10}}, multi: true},
+                {delete: 0, filter: {_id: {$gt: 0}}, multi: true},
+            ],
+            nsInfo: [{ns: "test.testColl"}],
+            writeConcern: {w: "majority"},
+            errorsOnly: true,
+        }),
+    );
+
     mongosServerStatus = testDB.adminCommand({serverStatus: 1});
 
     // Verification for final metric values.
-    assert.eq(5, mongosServerStatus.metrics.query.updateManyCount);
-    assert.eq(1, mongosServerStatus.metrics.query.deleteManyCount);
+    assert.eq(6, mongosServerStatus.metrics.query.updateManyCount);
+    assert.eq(2, mongosServerStatus.metrics.query.deleteManyCount);
     assert.eq(4, mongosServerStatus.metrics.query.updateDeleteManyDocumentsMaxCount);
     assert(mongosServerStatus.metrics.query.hasOwnProperty("updateDeleteManyDurationMaxMs"));
     assert.lte(0, mongosServerStatus.metrics.query.updateDeleteManyDurationMaxMs);

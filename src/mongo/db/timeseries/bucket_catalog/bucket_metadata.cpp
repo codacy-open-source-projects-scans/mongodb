@@ -29,10 +29,6 @@
 
 #include "mongo/db/timeseries/bucket_catalog/bucket_metadata.h"
 
-#include <boost/move/utility_core.hpp>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/db/timeseries/metadata.h"

@@ -28,12 +28,6 @@
  */
 
 
-#include <cstdint>
-#include <memory>
-#include <string>
-#include <utility>
-
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -43,22 +37,27 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/query_cmd/plan_cache_commands.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/db_raii.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/profile_settings.h"
 #include "mongo/db/query/canonical_query_encoder.h"
 #include "mongo/db/query/collection_query_info.h"
 #include "mongo/db/query/plan_cache/classic_plan_cache.h"
 #include "mongo/db/query/plan_cache/sbe_plan_cache.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
 
@@ -191,14 +190,23 @@ bool PlanCacheClearCommand::run(OperationContext* opCtx,
     const NamespaceString nss(CommandHelpers::parseNsCollectionRequired(dbName, cmdObj));
 
     // This is a read lock. The query cache is owned by the collection.
-    AutoGetCollectionForReadCommand ctx(opCtx, nss);
-    if (!ctx.getCollection()) {
+    auto ctx = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kRead),
+        MODE_IS);
+    AutoStatsTracker statsTracker(opCtx,
+                                  nss,
+                                  Top::LockType::ReadLocked,
+                                  AutoStatsTracker::LogMode::kUpdateTopAndCurOp,
+                                  DatabaseProfileSettings::get(opCtx->getServiceContext())
+                                      .getDatabaseProfileLevel(nss.dbName()));
+    if (!ctx.exists()) {
         // Clearing a non-existent collection always succeeds.
         return true;
     }
 
-    auto planCache = getPlanCache(opCtx, ctx.getCollection());
-    uassertStatusOK(clear(opCtx, ctx.getCollection(), planCache, nss, cmdObj));
+    auto planCache = getPlanCache(opCtx, ctx.getCollectionPtr());
+    uassertStatusOK(clear(opCtx, ctx.getCollectionPtr(), planCache, nss, cmdObj));
     return true;
 }
 

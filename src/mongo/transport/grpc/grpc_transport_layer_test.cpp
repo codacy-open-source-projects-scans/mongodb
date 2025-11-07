@@ -27,46 +27,51 @@
  *    it in the license file.
  */
 
-#include <fcntl.h>
-#include <memory>
-#include <sys/stat.h>
-#include <vector>
-
-#include <boost/filesystem.hpp>
-
+#include "mongo/client/async_client.h"
 #include "mongo/db/server_options.h"
 #include "mongo/logv2/log.h"
 #include "mongo/transport/grpc/client_cache.h"
 #include "mongo/transport/grpc/grpc_session.h"
 #include "mongo/transport/grpc/grpc_session_manager.h"
 #include "mongo/transport/grpc/grpc_transport_layer_impl.h"
+#include "mongo/transport/grpc/grpc_transport_layer_mock.h"
 #include "mongo/transport/grpc/test_fixtures.h"
 #include "mongo/transport/grpc/wire_version_provider.h"
 #include "mongo/transport/service_executor.h"
+#include "mongo/transport/session.h"
 #include "mongo/transport/session_workflow_test_util.h"
 #include "mongo/transport/test_fixtures.h"
 #include "mongo/transport/transport_layer.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/transport/transport_layer_manager_impl.h"
+#include "mongo/unittest/log_test.h"
 #include "mongo/unittest/thread_assertion_monitor.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/errno_util.h"
+#include "mongo/util/fail_point.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/socket_utils.h"
+#include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/periodic_runner_factory.h"
 #include "mongo/util/scopeguard.h"
+
+#include <memory>
+#include <vector>
+
+#include <fcntl.h>
+
+#include <boost/filesystem.hpp>
+#include <sys/stat.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo::transport::grpc {
 namespace {
 
-class GRPCTransportLayerTest : public ServiceContextWithClockSourceMockTest {
+class GRPCTransportLayerTest : public ServiceContextTest {
 public:
     void setUp() override {
-        ServiceContextWithClockSourceMockTest::setUp();
-
         auto svcCtx = getServiceContext();
 
         // Default SEP behavior is to fail.
@@ -87,7 +92,6 @@ public:
     }
 
     void tearDown() override {
-        ServiceContextWithClockSourceMockTest::tearDown();
         ServiceExecutor::shutdownAll(getServiceContext(), Seconds{10});
     }
 
@@ -104,10 +108,11 @@ public:
         auto sm = options.enableIngress
             ? std::make_unique<GRPCSessionManager>(svcCtx, clientCache, std::move(observers))
             : nullptr;
+        bool enableIngress = options.enableIngress;
         auto tl =
             std::make_unique<GRPCTransportLayerImpl>(svcCtx, std::move(options), std::move(sm));
 
-        if (options.enableIngress) {
+        if (enableIngress) {
             uassertStatusOK(tl->registerService(
                 std::make_unique<CommandService>(tl.get(),
                                                  std::move(serverCb),
@@ -208,15 +213,20 @@ public:
         };
 
         auto cb = [&](GRPCTransportLayer& tl) {
-            auto client = std::make_shared<GRPCClient>(
-                &tl, makeClientMetadataDocument(), CommandServiceTestFixtures::makeClientOptions());
-            client->start(getServiceContext());
+            auto client =
+                std::make_shared<GRPCClient>(&tl,
+                                             getServiceContext(),
+                                             makeClientMetadataDocument(),
+                                             CommandServiceTestFixtures::makeClientOptions());
+            client->start();
             ON_BLOCK_EXIT([&] { client->shutdown(); });
 
-            auto session = client->connect(tl.getListeningAddresses().at(0),
-                                           getGRPCEgressReactor(&tl),
-                                           CommandServiceTestFixtures::kDefaultConnectTimeout,
-                                           {});
+            auto session = client
+                               ->connect(tl.getListeningAddresses().at(0),
+                                         getGRPCEgressReactor(&tl),
+                                         CommandServiceTestFixtures::kDefaultConnectTimeout,
+                                         {})
+                               .get();
 
             ASSERT_OK(session->sinkMessage(makeMessage(BSON(kCommandName << message))));
             auto replyMessage = uassertStatusOK(session->sourceMessage());
@@ -231,6 +241,8 @@ public:
 
     MockServiceEntryPoint* serviceEntryPoint;
     test::SSLGlobalParamsGuard _sslGlobalParamsGuard;
+    unittest::MinimumLoggedSeverityGuard logSeverityGuardNetwork{logv2::LogComponent::kNetwork,
+                                                                 logv2::LogSeverity::Debug(3)};
 };
 
 TEST_F(GRPCTransportLayerTest, startupIngressAndEgress) {
@@ -288,6 +300,17 @@ TEST_F(GRPCTransportLayerTest, TransportLayerStartsEgressReactor) {
             ASSERT_OK(std::move(pf.future).getNoThrow());
         },
         CommandServiceTestFixtures::makeTLOptions());
+}
+
+TEST_F(GRPCTransportLayerTest, StopAfterSetup) {
+    auto options = CommandServiceTestFixtures::makeTLOptions();
+    options.enableEgress = true;
+    options.enableIngress = true;
+
+    auto tl =
+        std::make_unique<GRPCTransportLayerImpl>(getServiceContext(), std::move(options), nullptr);
+    ASSERT_OK(tl->setup());
+    tl->shutdown();
 }
 
 /**
@@ -376,7 +399,6 @@ public:
 
     void tearDown() override {
         _tl.reset();
-        ServiceContextWithClockSourceMockTest::tearDown();
     }
 
     GRPCTransportLayer& transportLayer() {
@@ -482,6 +504,60 @@ TEST_F(GRPCTransportLayerTest, DefaultIPList) {
         std::move(noIPListOptions));
 }
 
+TEST_F(GRPCTransportLayerTest, ConcurrentAsyncConnectsSucceed) {
+    runWithTL(
+        CommandServiceTestFixtures::makeEchoHandler(),
+        [&](auto& tl) {
+            const size_t kNumConcurrentStreamEstablishments = 20;
+            std::vector<Future<std::shared_ptr<Session>>> streamFutures;
+
+            for (size_t i = 0; i < kNumConcurrentStreamEstablishments; i++) {
+                streamFutures.push_back(
+                    tl.asyncConnect(tl.getListeningAddresses().at(0),
+                                    ConnectSSLMode::kGlobalSSLMode,
+                                    tl.getReactor(TransportLayer::WhichReactor::kEgress),
+                                    CommandServiceTestFixtures::kDefaultConnectTimeout,
+                                    nullptr /** connectionMetrics */,
+                                    nullptr /** transientSSLContext */));
+            }
+
+            for (auto& fut : streamFutures) {
+                auto swSession = fut.getNoThrow();
+                ASSERT_OK(swSession.getStatus());
+
+                // Ensure the sessions are useable.
+                std::shared_ptr<EgressSession> session =
+                    checked_pointer_cast<EgressSession>(swSession.getValue());
+                assertEchoSucceeds(*session);
+                ASSERT_OK(session->finish());
+            }
+        },
+        CommandServiceTestFixtures::makeTLOptions());
+}
+
+TEST_F(GRPCTransportLayerTest, AsyncConnectConnectionMetrics) {
+    runWithTL(
+        makeNoopRPCHandler(),
+        [&](auto& tl) {
+            auto connMetrics =
+                std::make_shared<ConnectionMetrics>(getServiceContext()->getFastClockSource());
+            auto fut = tl.asyncConnect(tl.getListeningAddresses().at(0),
+                                       ConnectSSLMode::kGlobalSSLMode,
+                                       tl.getReactor(TransportLayer::WhichReactor::kEgress),
+                                       CommandServiceTestFixtures::kDefaultConnectTimeout,
+                                       connMetrics,
+                                       nullptr /** transientSSLContext */);
+            auto swSession = fut.getNoThrow();
+            ASSERT_OK(swSession.getStatus());
+
+            ASSERT_GT(connMetrics->dnsResolution().get(), Milliseconds(0));
+            // These timers are resolved immediately after the dnsResolution timer.
+            ASSERT_GTE(connMetrics->tcpConnection().get(), Milliseconds(0));
+            ASSERT_GTE(connMetrics->tlsHandshake().get(), Milliseconds(0));
+        },
+        CommandServiceTestFixtures::makeTLOptions());
+}
+
 TEST_F(GRPCTransportLayerTest, ConnectionError) {
     runWithTL(
         makeNoopRPCHandler(),
@@ -491,11 +567,31 @@ TEST_F(GRPCTransportLayerTest, ConnectionError) {
                                          ConnectSSLMode::kGlobalSSLMode,
                                          Milliseconds(50));
                 ASSERT_NOT_OK(status);
-                ASSERT_TRUE(ErrorCodes::isNetworkError(status.getStatus()));
+                ASSERT_EQ(status.getStatus().code(), ErrorCodes::HostUnreachable);
             };
             tryConnect();
             // Ensure second attempt on already created channel object also gracefully fails.
             tryConnect();
+        },
+        CommandServiceTestFixtures::makeTLOptions());
+}
+
+TEST_F(GRPCTransportLayerTest, CancelBadConnectAttempt) {
+    runWithTL(
+        makeNoopRPCHandler(),
+        [&](auto& tl) {
+            CancellationSource cancelSource;
+            auto fut =
+                tl.asyncConnectWithAuthToken(HostAndPort("localhost", 1235),
+                                             ConnectSSLMode::kGlobalSSLMode,
+                                             tl.getReactor(TransportLayer::WhichReactor::kEgress),
+                                             Milliseconds::max(),  // no timeout
+                                             nullptr,
+                                             cancelSource.token());
+            cancelSource.cancel();
+            auto status = fut.getNoThrow();
+            ASSERT_NOT_OK(status);
+            ASSERT_EQ(status.getStatus().code(), ErrorCodes::CallbackCanceled);
         },
         CommandServiceTestFixtures::makeTLOptions());
 }
@@ -509,7 +605,7 @@ TEST_F(GRPCTransportLayerTest, SSLModeMismatch) {
                                          ConnectSSLMode::kDisableSSL,
                                          CommandServiceTestFixtures::kDefaultConnectTimeout);
                 ASSERT_NOT_OK(status);
-                ASSERT_TRUE(ErrorCodes::isNetworkError(status.getStatus()));
+                ASSERT_EQ(status.getStatus().code(), ErrorCodes::HostUnreachable);
             };
             tryConnect();
             // Ensure second attempt on already created channel object also gracefully fails.
@@ -520,9 +616,11 @@ TEST_F(GRPCTransportLayerTest, SSLModeMismatch) {
 
 TEST_F(GRPCTransportLayerTest, GRPCTransportLayerShutdown) {
     auto tl = makeTL();
-    auto client = std::make_shared<GRPCClient>(
-        tl.get(), makeClientMetadataDocument(), CommandServiceTestFixtures::makeClientOptions());
-    client->start(getServiceContext());
+    auto client = std::make_shared<GRPCClient>(tl.get(),
+                                               getServiceContext(),
+                                               makeClientMetadataDocument(),
+                                               CommandServiceTestFixtures::makeClientOptions());
+    client->start();
     ON_BLOCK_EXIT([&] { client->shutdown(); });
 
     HostAndPort addr;
@@ -532,17 +630,20 @@ TEST_F(GRPCTransportLayerTest, GRPCTransportLayerShutdown) {
         ON_BLOCK_EXIT([&] { tl->shutdown(); });
         addr = tl->getListeningAddresses().at(0);
 
-        auto session = client->connect(addr,
-                                       getGRPCEgressReactor(tl.get()),
-                                       CommandServiceTestFixtures::kDefaultConnectTimeout,
-                                       {});
+        auto session = client
+                           ->connect(addr,
+                                     getGRPCEgressReactor(tl.get()),
+                                     CommandServiceTestFixtures::kDefaultConnectTimeout,
+                                     {})
+                           .get();
         ASSERT_OK(session->finish());
         session.reset();
     }
 
-    ASSERT_THROWS_CODE(client->connect(addr, getGRPCEgressReactor(tl.get()), Milliseconds(50), {}),
-                       DBException,
-                       ErrorCodes::NetworkTimeout);
+    ASSERT_THROWS_CODE(
+        client->connect(addr, getGRPCEgressReactor(tl.get()), Milliseconds(50), {}).get(),
+        DBException,
+        ErrorCodes::ShutdownInProgress);
     ASSERT_NOT_OK(tl->connect(addr, ConnectSSLMode::kGlobalSSLMode, Milliseconds(50)));
 }
 
@@ -663,18 +764,27 @@ public:
         _tempDir =
             test::copyCertsToTempDir(grpc::CommandServiceTestFixtures::kCAFile,
                                      grpc::CommandServiceTestFixtures::kServerCertificateKeyFile,
+                                     grpc::CommandServiceTestFixtures::kClientCertificateKeyFile,
                                      "grpc");
 
-        sslGlobalParams.sslCAFile = _tempDir->getCAFile().toString();
-        sslGlobalParams.sslPEMKeyFile = _tempDir->getPEMKeyFile().toString();
+        sslGlobalParams.sslCAFile = std::string{_tempDir->getCAFile()};
+        sslGlobalParams.sslPEMKeyFile = std::string{_tempDir->getPEMKeyFile()};
     }
 
-    StringData getFilePathCA() {
-        return _tempDir->getCAFile();
+    const test::TempCertificatesDir& getCertificatesDir() const {
+        return *_tempDir;
     }
 
-    StringData getFilePathPEM() {
-        return _tempDir->getPEMKeyFile();
+    std::shared_ptr<GRPCClient> startClient() {
+        GRPCClient::Options options{};
+        options.tlsCAFile = sslGlobalParams.sslCAFile;
+        options.tlsCertificateKeyFile = getCertificatesDir().getClientPEMKeyFile();
+        auto client = std::make_shared<GRPCClient>(nullptr /* transport layer */,
+                                                   getServiceContext(),
+                                                   makeClientMetadataDocument(),
+                                                   std::move(options));
+        client->start();
+        return client;
     }
 
 private:
@@ -703,10 +813,10 @@ TEST_F(RotateCertificatesGRPCTransportLayerTest, RotateCertificatesSucceeds) {
 
             // Overwrite the tmp files to hold new certs.
             boost::filesystem::copy_file(kTrustedCAFile,
-                                         getFilePathCA().toString(),
+                                         std::string{getCertificatesDir().getCAFile()},
                                          boost::filesystem::copy_options::overwrite_existing);
             boost::filesystem::copy_file(kTrustedPEMFile,
-                                         getFilePathPEM().toString(),
+                                         std::string{getCertificatesDir().getPEMKeyFile()},
                                          boost::filesystem::copy_options::overwrite_existing);
 
             ASSERT_OK(tl.rotateCertificates(SSLManagerCoordinator::get()->getSSLManager(), false));
@@ -753,7 +863,7 @@ TEST_F(RotateCertificatesGRPCTransportLayerTest, RotateCertificatesThrowsAndUses
                 CommandServiceTestFixtures::kClientCertificateKeyFile);
             ASSERT_GRPC_STUB_CONNECTED(stub);
 
-            boost::filesystem::resize_file(getFilePathCA().toString(), 0);
+            boost::filesystem::resize_file(std::string{getCertificatesDir().getCAFile()}, 0);
 
             ASSERT_EQ(
                 tl.rotateCertificates(SSLManagerCoordinator::get()->getSSLManager(), false).code(),
@@ -776,6 +886,9 @@ TEST_F(RotateCertificatesGRPCTransportLayerTest,
         makeNoopRPCHandler(),
         [&](auto& tl) {
             auto addr = tl.getListeningAddresses().at(0);
+            auto client = startClient();
+            auto reactor = checked_pointer_cast<GRPCReactor>(
+                tl.getReactor(GRPCTransportLayer::WhichReactor::kEgress));
 
             // Connect using the existing certs.
             auto stub = CommandServiceTestFixtures::makeStubWithCerts(
@@ -784,23 +897,125 @@ TEST_F(RotateCertificatesGRPCTransportLayerTest,
                 CommandServiceTestFixtures::kClientCertificateKeyFile);
             ASSERT_GRPC_STUB_CONNECTED(stub);
 
+            ASSERT_OK(client->connect(addr, reactor, Milliseconds(500), {}).getNoThrow());
+            client->dropConnections();
+
             // Overwrite the tmp files to hold new, invalid certs.
             boost::filesystem::copy_file(kInvalidPEMFile,
-                                         getFilePathPEM().toString(),
+                                         std::string{getCertificatesDir().getPEMKeyFile()},
+                                         boost::filesystem::copy_options::overwrite_existing);
+            boost::filesystem::copy_file(kInvalidPEMFile,
+                                         std::string{getCertificatesDir().getClientPEMKeyFile()},
                                          boost::filesystem::copy_options::overwrite_existing);
 
             ASSERT_EQ(
                 tl.rotateCertificates(SSLManagerCoordinator::get()->getSSLManager(), false).code(),
                 ErrorCodes::InvalidSSLConfiguration);
 
-            // Make sure we can still connect with the initial certs used before the bad rotation.
+            SSLConfiguration newConfig{};
+            newConfig.serverCertificateExpirationDate =
+                Date_t::fromDurationSinceEpoch(Milliseconds(1234));
+            ASSERT_EQ(client->rotateCertificates(newConfig), ErrorCodes::InvalidSSLConfiguration);
+
+            // Make sure we can still connect with the initial certs used before the bad
+            // rotation.
             auto stub2 = CommandServiceTestFixtures::makeStubWithCerts(
                 addr,
                 CommandServiceTestFixtures::kCAFile,
                 CommandServiceTestFixtures::kClientCertificateKeyFile);
             ASSERT_GRPC_STUB_CONNECTED(stub2);
+
+            // The already-existing client should also also still be using the old certs after a
+            // failed rotation.
+            auto swSession = client->connect(addr, reactor, Milliseconds(500), {}).getNoThrow();
+            ASSERT_OK(swSession);
+
+            // SSLConfiguration should remain unchanged.
+            ASSERT_NE(swSession.getValue()->getSSLConfiguration()->serverCertificateExpirationDate,
+                      newConfig.serverCertificateExpirationDate);
         },
         CommandServiceTestFixtures::makeTLOptions());
+}
+
+TEST_F(RotateCertificatesGRPCTransportLayerTest, ClientUsesOldCertsUntilRotate) {
+    // Ceritificates that we wil rotate to.
+    const std::string kTrustedCAFile = "jstests/libs/trusted-ca.pem";
+    const std::string kTrustedPEMFile = "jstests/libs/trusted-server.pem";
+    const std::string kTrustedClientPEMFile = "jstests/libs/trusted-client.pem";
+
+    runWithTL(
+        makeNoopRPCHandler(),
+        [&](GRPCTransportLayer& tl) {
+            auto addr = tl.getListeningAddresses().at(0);
+
+            auto reactor = checked_pointer_cast<GRPCReactor>(
+                tl.getReactor(GRPCTransportLayer::WhichReactor::kEgress));
+
+            auto client = startClient();
+
+            // First connect should succeed.
+            ASSERT_OK(
+                client
+                    ->connect(addr, reactor, CommandServiceTestFixtures::kDefaultConnectTimeout, {})
+                    .getNoThrow());
+
+            // Overwrite the tmp files to hold new certs.
+            boost::filesystem::copy_file(kTrustedCAFile,
+                                         std::string{getCertificatesDir().getCAFile()},
+                                         boost::filesystem::copy_options::overwrite_existing);
+            boost::filesystem::copy_file(kTrustedPEMFile,
+                                         std::string{getCertificatesDir().getPEMKeyFile()},
+                                         boost::filesystem::copy_options::overwrite_existing);
+            boost::filesystem::copy_file(kTrustedClientPEMFile,
+                                         std::string{getCertificatesDir().getClientPEMKeyFile()},
+                                         boost::filesystem::copy_options::overwrite_existing);
+            // Rotate the certificates server side.
+            ASSERT_OK(tl.rotateCertificates(SSLManagerCoordinator::get()->getSSLManager(), false));
+
+            // After rotating on the server side, connecting from the client should fail, as it is
+            // still using the old certificates.
+            client->dropConnections();
+            ASSERT_NOT_OK(
+                client
+                    ->connect(addr, reactor, CommandServiceTestFixtures::kDefaultConnectTimeout, {})
+                    .getNoThrow());
+
+            // After rotation, connection should now succeed.
+            client->dropConnections();
+
+            SSLConfiguration newConfig{};
+            newConfig.serverCertificateExpirationDate = Date_t::fromMillisSinceEpoch(1234);
+            ASSERT_OK(client->rotateCertificates(newConfig));
+            auto swSession =
+                client
+                    ->connect(addr, reactor, CommandServiceTestFixtures::kDefaultConnectTimeout, {})
+                    .getNoThrow();
+            ASSERT_OK(swSession);
+            ASSERT_EQ(swSession.getValue()->getSSLConfiguration()->serverCertificateExpirationDate,
+                      newConfig.serverCertificateExpirationDate);
+        },
+        CommandServiceTestFixtures::makeTLOptions());
+}
+
+TEST_F(MockGRPCTransportLayerTest, ConnectionTimeout) {
+    runTestWithMockServer([this]() {
+        FailPointEnableBlock fp("grpcHangOnStreamEstablishment");
+
+        auto tl = getServiceContext()->getTransportLayerManager()->getTransportLayer(
+            transport::TransportProtocol::GRPC);
+        auto client =
+            AsyncDBClient::connect(kServerHostAndPort,
+                                   transport::ConnectSSLMode::kGlobalSSLMode,
+                                   getServiceContext(),
+                                   tl,
+                                   tl->getReactor(transport::TransportLayer::WhichReactor::kEgress),
+                                   Milliseconds(500),
+                                   nullptr);
+
+        auto status = client.getNoThrow();
+        ASSERT_NOT_OK(status);
+        ASSERT_EQ(status.getStatus().code(), ErrorCodes::ExceededTimeLimit);
+    });
 }
 
 }  // namespace

@@ -29,8 +29,8 @@
 
 #include "mongo/db/replica_set_endpoint_sharding_state.h"
 
+#include "mongo/db/cluster_parameters/sharding_cluster_parameters_gen.h"
 #include "mongo/db/multitenancy_gen.h"
-#include "mongo/s/sharding_cluster_parameters_gen.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -78,8 +78,8 @@ void ReplicaSetEndpointShardingState::setIsReplicaSetMember(bool value) {
     _isReplicaSetMember = value;
 }
 
-bool ReplicaSetEndpointShardingState::supportsReplicaSetEndpoint() {
-    if (!isFeatureFlagEnabled()) {
+bool ReplicaSetEndpointShardingState::supportsReplicaSetEndpoint(const VersionContext& vCtx) {
+    if (!isFeatureFlagEnabled(vCtx)) {
         return false;
     }
     if (gMultitenancySupport) {

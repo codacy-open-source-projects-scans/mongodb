@@ -29,15 +29,6 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -57,7 +48,7 @@
 #include "mongo/db/repl/repl_set_heartbeat_response.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator_fwd.h"
-#include "mongo/db/repl/split_horizon.h"
+#include "mongo/db/repl/split_horizon/split_horizon.h"
 #include "mongo/db/repl/split_prepare_session_manager.h"
 #include "mongo/db/repl/sync_source_selector.h"
 #include "mongo/db/service_context.h"
@@ -71,9 +62,20 @@
 #include "mongo/util/duration.h"
 #include "mongo/util/future.h"
 #include "mongo/util/interruptible.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -122,7 +124,7 @@ class UpdatePositionArgs;
  * with the rest of the system.  The public methods on ReplicationCoordinator are the public
  * API that the replication subsystem presents to the rest of the codebase.
  */
-class ReplicationCoordinator : public SyncSourceSelector {
+class MONGO_MOD_PUB ReplicationCoordinator : public SyncSourceSelector {
     ReplicationCoordinator(const ReplicationCoordinator&) = delete;
     ReplicationCoordinator& operator=(const ReplicationCoordinator&) = delete;
 
@@ -228,6 +230,7 @@ public:
      * Version which does not check for the RSTL. Without the RSTL, the return value may be
      * inaccurate by the time the function returns.
      */
+    MONGO_MOD_USE_REPLACEMENT(ReplicationCoordinator::isInPrimaryOrSecondaryState)
     virtual bool isInPrimaryOrSecondaryState_UNSAFE() const = 0;
 
     /**
@@ -263,6 +266,12 @@ public:
     virtual SharedSemiFuture<void> awaitReplicationAsyncNoWTimeout(
         const OpTime& opTime, const WriteConcernOptions& writeConcern) = 0;
 
+
+    /**
+     * Sets oldest timestamp value
+     */
+    virtual void setOldestTimestamp(const Timestamp& timestamp);
+
     /**
      * Causes this node to relinquish being primary for at least 'stepdownTime'.  If 'force' is
      * false, before doing so it will wait for 'waitTime' for one other electable node to be caught
@@ -297,6 +306,7 @@ public:
      * Version which does not check for the RSTL.  Do not use in new code. Without the RSTL, the
      * return value may be inaccurate by the time the function returns.
      */
+    MONGO_MOD_USE_REPLACEMENT(ReplicationCoordinator::canAcceptWritesForDatabase)
     virtual bool canAcceptWritesForDatabase_UNSAFE(OperationContext* opCtx,
                                                    const DatabaseName& dbName) = 0;
 
@@ -313,6 +323,7 @@ public:
      * Version which does not check for the RSTL.  Do not use in new code. Without the RSTL held,
      * the return value may be inaccurate by the time the function returns.
      */
+    MONGO_MOD_USE_REPLACEMENT(ReplicationCoordinator::canAcceptWritesFor)
     virtual bool canAcceptWritesFor_UNSAFE(OperationContext* opCtx,
                                            const NamespaceStringOrUUID& nsOrUUID) = 0;
 
@@ -357,6 +368,7 @@ public:
      * Version which does not check for the RSTL.  Do not use in new code. Without the RSTL held,
      * the return value may be inaccurate by the time the function returns.
      */
+    MONGO_MOD_USE_REPLACEMENT(ReplicationCoordinator::checkCanServeReadsFor)
     virtual Status checkCanServeReadsFor_UNSAFE(OperationContext* opCtx,
                                                 const NamespaceString& ns,
                                                 bool secondaryOk) = 0;
@@ -520,7 +532,7 @@ public:
      * this node and changes every time we become primary.
      * TODO(spencer): Use term instead.
      */
-    virtual OID getElectionId() = 0;
+    MONGO_MOD_USE_REPLACEMENT(ReplicationCoordinator::getTerm) virtual OID getElectionId() = 0;
 
     /**
      * Returns the id for this node as specified in the current replica set configuration.
@@ -726,8 +738,8 @@ public:
      * internal structure that could change at any time, and getting member information is
      * inherently racy; member configuration can change at any time.
      */
-    virtual boost::optional<MemberConfig> findConfigMemberByHostAndPort_deprecated(
-        const HostAndPort& hap) const = 0;
+    MONGO_MOD_NEEDS_REPLACEMENT virtual boost::optional<MemberConfig>
+    findConfigMemberByHostAndPort_deprecated(const HostAndPort& hap) const = 0;
 
     /**
      * Handles an incoming replSetGetConfig command. Adds BSON to 'result'.
@@ -1075,16 +1087,6 @@ public:
      */
     virtual void finishRecoveryIfEligible(OperationContext* opCtx) = 0;
 
-    /**
-     * Field name of the newPrimaryMsg within the 'o' field in the new term oplog entry.
-     */
-    inline static constexpr StringData newPrimaryMsgField = "msg"_sd;
-
-    /**
-     * Message string passed in the new term oplog entry after a primary has stepped up.
-     */
-    inline static constexpr StringData newPrimaryMsg = "new primary"_sd;
-
     /*
      * Specifies the state transitions that kill user operations. Used for tracking state transition
      * metrics.
@@ -1172,7 +1174,7 @@ public:
     /**
      * A testing only function that cancels and reschedules replication heartbeats immediately.
      */
-    virtual void restartScheduledHeartbeats_forTest() = 0;
+    MONGO_MOD_NEEDS_REPLACEMENT virtual void restartScheduledHeartbeats_forTest() = 0;
 
     /**
      * Records if the cluster-wide write concern is set during sharding initialization.
@@ -1190,7 +1192,7 @@ public:
      * Use [reserve|release]ConfigWriteConcernTagChanges when executing a reconfig that
      * could potentially change read/write concern tags.
      */
-    class WriteConcernTagChanges {
+    class MONGO_MOD_PUB WriteConcernTagChanges {
     public:
         WriteConcernTagChanges() = default;
         virtual ~WriteConcernTagChanges() = default;

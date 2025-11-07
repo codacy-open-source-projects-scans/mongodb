@@ -29,13 +29,15 @@
 
 #pragma once
 
-#include <scoped_allocator>
-
 #include "mongo/stdx/unordered_map.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/tracking/allocator.h"
 #include "mongo/util/tracking/context.h"
 
-namespace mongo::tracking {
+#include <scoped_allocator>
+
+namespace MONGO_MOD_PUB mongo {
+namespace tracking {
 
 template <class Key,
           class Value,
@@ -56,4 +58,5 @@ unordered_map<Key, Value, Hasher> make_unordered_map(Context& Context) {
     return unordered_map<Key, Value, Hasher, KeyEqual>(Context.makeAllocator<Value>());
 }
 
-}  // namespace mongo::tracking
+}  // namespace tracking
+}  // namespace MONGO_MOD_PUB mongo

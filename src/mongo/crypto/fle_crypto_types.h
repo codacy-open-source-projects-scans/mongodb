@@ -29,17 +29,18 @@
 
 #pragma once
 
-#include <array>
-#include <cstdint>
-#include <fmt/format.h>
-#include <vector>
-
 #include "mongo/base/secure_allocator.h"
 #include "mongo/crypto/aead_encryption.h"
 #include "mongo/crypto/fle_key_types.h"
 #include "mongo/crypto/fle_stats_gen.h"
 #include "mongo/crypto/fle_tokens.h"
 #include "mongo/util/uuid.h"
+
+#include <array>
+#include <cstdint>
+#include <vector>
+
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -59,6 +60,10 @@ using FLECounter = std::uint64_t;
 struct FLEEdgePrfBlock {
     PrfBlock esc;                   // ESCDerivedFromDataTokenAndContentionFactorToken
     boost::optional<PrfBlock> edc;  // EDCDerivedFromDataTokenAndContentionFactorToken
+
+    // Text search tokens sets may contain multiple identical "padding" esc & edc tokens.
+    // This zero-based counter can be used to number & disambiguate those padding tokens.
+    uint32_t paddingIndex = 0;
 };
 
 /**

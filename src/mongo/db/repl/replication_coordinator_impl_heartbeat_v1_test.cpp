@@ -27,23 +27,6 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/smart_ptr.hpp>
-#include <cstddef>
-#include <fmt/format.h>
-#include <list>
-#include <memory>
-#include <ostream>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -56,11 +39,10 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/client.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/concurrency/replication_state_transition_lock_guard.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/repl/hello_response.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/repl/hello/hello_response.h"
 #include "mongo/db/repl/member_config.h"
 #include "mongo/db/repl/member_id.h"
 #include "mongo/db/repl/member_state.h"
@@ -75,22 +57,18 @@
 #include "mongo/db/repl/replication_coordinator_impl.h"
 #include "mongo/db/repl/replication_coordinator_test_fixture.h"
 #include "mongo/db/repl/topology_coordinator.h"
+#include "mongo/db/replication_state_transition_lock_guard.h"
 #include "mongo/db/service_context_d_test_fixture.h"
 #include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/remote_command_response.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/rpc/topology_version_gen.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/log_test.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/duration.h"
@@ -100,6 +78,23 @@
 #include "mongo/util/interruptible.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <list>
+#include <memory>
+#include <ostream>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -217,16 +212,16 @@ TEST_F(ReplCoordHBV1Test,
        NodeJoinsExistingReplSetWhenReceivingAConfigContainingTheNodeViaHeartbeat) {
     auto severityGuard = unittest::MinimumLoggedSeverityGuard{logv2::LogComponent::kDefault,
                                                               logv2::LogSeverity::Debug(3)};
-    ReplSetConfig rsConfig = assertMakeRSConfig(BSON("_id"
-                                                     << "mySet"
-                                                     << "version" << 3 << "members"
-                                                     << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                              << "h1:1")
-                                                                   << BSON("_id" << 2 << "host"
-                                                                                 << "h2:1")
-                                                                   << BSON("_id" << 3 << "host"
-                                                                                 << "h3:1"))
-                                                     << "protocolVersion" << 1));
+    ReplSetConfig rsConfig =
+        assertMakeRSConfig(BSON("_id" << "mySet"
+                                      << "version" << 3 << "members"
+                                      << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                               << "h1:1")
+                                                    << BSON("_id" << 2 << "host"
+                                                                  << "h2:1")
+                                                    << BSON("_id" << 3 << "host"
+                                                                  << "h3:1"))
+                                      << "protocolVersion" << 1));
     init("mySet");
     addSelf(HostAndPort("h2", 1));
     start();
@@ -255,65 +250,18 @@ TEST_F(ReplCoordHBV1Test,
     ASSERT_TRUE(getExternalState()->threadsStarted());
 }
 
-TEST_F(ReplCoordHBV1Test,
-       ServerlessNodeJoinsExistingReplSetWhenReceivingAConfigContainingTheNodeViaHeartbeat) {
-    auto severityGuard = unittest::MinimumLoggedSeverityGuard{logv2::LogComponent::kDefault,
-                                                              logv2::LogSeverity::Debug(3)};
-    ReplSetConfig rsConfig = assertMakeRSConfig(BSON("_id"
-                                                     << "mySet"
-                                                     << "version" << 3 << "members"
-                                                     << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                              << "h1:1")
-                                                                   << BSON("_id" << 2 << "host"
-                                                                                 << "h2:1")
-                                                                   << BSON("_id" << 3 << "host"
-                                                                                 << "h3:1"))
-                                                     << "protocolVersion" << 1));
-
-    ReplSettings settings;
-    settings.setServerlessMode();
-    init(settings);
-    addSelf(HostAndPort("h2", 1));
-    start();
-    enterNetwork();
-    assertMemberState(MemberState::RS_STARTUP);
-    NetworkInterfaceMock* net = getNet();
-    ASSERT_FALSE(net->hasReadyRequests());
-    exitNetwork();
-    receiveHeartbeatFrom(rsConfig, 1, HostAndPort("h1", 1));
-
-    enterNetwork();
-
-    processResponseFromPrimary(rsConfig);
-
-    performSyncToFinishReconfigHeartbeat();
-
-    assertMemberState(MemberState::RS_STARTUP2);
-    auto opCtx{makeOperationContext()};
-    auto storedConfig = ReplSetConfig::parse(
-        unittest::assertGet(getExternalState()->loadLocalConfigDocument(opCtx.get())));
-    ASSERT_OK(storedConfig.validate());
-    ASSERT_EQUALS(3, storedConfig.getConfigVersion());
-    ASSERT_EQUALS(3, storedConfig.getNumMembers());
-    ASSERT_EQUALS("mySet", storedConfig.getReplSetName());
-    exitNetwork();
-
-    ASSERT_TRUE(getExternalState()->threadsStarted());
-}
-
 TEST_F(ReplCoordHBV1Test, RestartingHeartbeatsShouldOnlyCancelScheduledHeartbeats) {
     auto replAllSeverityGuard = unittest::MinimumLoggedSeverityGuard{
         logv2::LogComponent::kReplication, logv2::LogSeverity::Debug(3)};
 
-    auto replConfigBson = BSON("_id"
-                               << "mySet"
-                               << "protocolVersion" << 1 << "version" << 1 << "members"
-                               << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                        << "node1:12345")
-                                             << BSON("_id" << 2 << "host"
-                                                           << "node2:12345")
-                                             << BSON("_id" << 3 << "host"
-                                                           << "node3:12345")));
+    auto replConfigBson = BSON("_id" << "mySet"
+                                     << "protocolVersion" << 1 << "version" << 1 << "members"
+                                     << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                              << "node1:12345")
+                                                   << BSON("_id" << 2 << "host"
+                                                                 << "node2:12345")
+                                                   << BSON("_id" << 3 << "host"
+                                                                 << "node3:12345")));
 
     assertStartSuccess(replConfigBson, HostAndPort("node1", 12345));
     ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
@@ -388,15 +336,14 @@ TEST_F(ReplCoordHBV1Test,
     auto replAllSeverityGuard = unittest::MinimumLoggedSeverityGuard{
         logv2::LogComponent::kReplication, logv2::LogSeverity::Debug(3)};
 
-    auto replConfigBson = BSON("_id"
-                               << "mySet"
-                               << "protocolVersion" << 1 << "version" << 1 << "members"
-                               << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                        << "node1:12345")
-                                             << BSON("_id" << 2 << "host"
-                                                           << "node2:12345")
-                                             << BSON("_id" << 3 << "host"
-                                                           << "node3:12345")));
+    auto replConfigBson = BSON("_id" << "mySet"
+                                     << "protocolVersion" << 1 << "version" << 1 << "members"
+                                     << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                              << "node1:12345")
+                                                   << BSON("_id" << 2 << "host"
+                                                                 << "node2:12345")
+                                                   << BSON("_id" << 3 << "host"
+                                                                 << "node3:12345")));
 
     assertStartSuccess(replConfigBson, HostAndPort("node1", 12345));
     ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
@@ -459,15 +406,14 @@ TEST_F(
     SecondaryReceivesHeartbeatRequestFromSecondaryWithDifferentPrimaryIdDoesNotRestartHeartbeats) {
     auto replAllSeverityGuard = unittest::MinimumLoggedSeverityGuard{
         logv2::LogComponent::kReplication, logv2::LogSeverity::Debug(3)};
-    auto replConfigBson = BSON("_id"
-                               << "mySet"
-                               << "protocolVersion" << 1 << "version" << 1 << "members"
-                               << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                        << "node1:12345")
-                                             << BSON("_id" << 2 << "host"
-                                                           << "node2:12345")
-                                             << BSON("_id" << 3 << "host"
-                                                           << "node3:12345")));
+    auto replConfigBson = BSON("_id" << "mySet"
+                                     << "protocolVersion" << 1 << "version" << 1 << "members"
+                                     << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                              << "node1:12345")
+                                                   << BSON("_id" << 2 << "host"
+                                                                 << "node2:12345")
+                                                   << BSON("_id" << 3 << "host"
+                                                                 << "node3:12345")));
 
     assertStartSuccess(replConfigBson, HostAndPort("node1", 12345));
     ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
@@ -499,11 +445,11 @@ class ReplCoordHBV1SplitConfigTest : public ReplCoordHBV1Test {
 public:
     void startUp(const std::string& hostAndPort) {
         ReplSettings settings;
-        settings.setServerlessMode();
+        settings.setReplSetString(_replSetName);
         init(settings);
 
         BSONObj configBson =
-            BSON("_id" << _donorSetName << "version" << _configVersion << "term" << _configTerm
+            BSON("_id" << _replSetName << "version" << _configVersion << "term" << _configTerm
                        << "members" << _members << "protocolVersion" << 1);
         ReplSetConfig rsConfig = assertMakeRSConfig(configBson);
         assertStartSuccess(configBson, HostAndPort(hostAndPort));
@@ -547,32 +493,12 @@ public:
         return noi;
     }
 
-    BSONObj makeHeartbeatResponseWithConfig(const ReplSetConfig& config) {
-        ReplSetHeartbeatResponse hbResp;
-        hbResp.setSetName(_donorSetName);
-        hbResp.setState(MemberState::RS_PRIMARY);
-        hbResp.setConfigVersion(config.getConfigVersion());
-        hbResp.setConfigTerm(config.getConfigTerm());
-        // The smallest valid optime in PV1.
-        OpTime opTime(Timestamp(1, 1), 0);
-        hbResp.setAppliedOpTimeAndWallTime({opTime, Date_t() + Seconds{1}});
-        hbResp.setWrittenOpTimeAndWallTime({opTime, Date_t() + Seconds{1}});
-        hbResp.setDurableOpTimeAndWallTime({opTime, Date_t() + Seconds{1}});
-
-        BSONObjBuilder responseBuilder;
-        responseBuilder << "ok" << 1;
-        hbResp.addToBSON(&responseBuilder);
-        responseBuilder.append("config", config.toBSON());
-        return responseBuilder.obj();
-    }
-
     BSONObj makeConfigObj(long long version, boost::optional<long long> term) {
         BSONObjBuilder bob;
-        bob.appendElements(BSON("_id"
-                                << "mySet"
-                                << "version" << version << "members" << _members
-                                << "protocolVersion" << 1 << "settings"
-                                << BSON("replicaSetId" << OID::gen())));
+        bob.appendElements(BSON("_id" << "mySet"
+                                      << "version" << version << "members" << _members
+                                      << "protocolVersion" << 1 << "settings"
+                                      << BSON("replicaSetId" << OID::gen())));
         if (term) {
             bob.append("term", *term);
         }
@@ -589,38 +515,30 @@ public:
     int _configVersion = 2;
     int _configTerm = 2;
 
-    BSONArray _members = BSON_ARRAY(BSON("_id" << 1 << "host"
-                                               << "h1:1")
-                                    << BSON("_id" << 2 << "host"
-                                                  << "h2:1")
-                                    << BSON("_id" << 3 << "host"
-                                                  << "h3:1")
-                                    << BSON("_id" << 4 << "host"
-                                                  << "h4:1"
-                                                  << "votes" << 0 << "priority" << 0 << "tags"
-                                                  << BSON("recip"
-                                                          << "tag2"))
-                                    << BSON("_id" << 5 << "host"
-                                                  << "h5:1"
-                                                  << "votes" << 0 << "priority" << 0 << "tags"
-                                                  << BSON("recip"
-                                                          << "tag2"))
-                                    << BSON("_id" << 6 << "host"
-                                                  << "h6:1"
-                                                  << "votes" << 0 << "priority" << 0 << "tags"
-                                                  << BSON("recip"
-                                                          << "tag2")));
+    BSONArray _members = BSON_ARRAY(
+        BSON("_id" << 1 << "host"
+                   << "h1:1")
+        << BSON("_id" << 2 << "host"
+                      << "h2:1")
+        << BSON("_id" << 3 << "host"
+                      << "h3:1")
+        << BSON("_id" << 4 << "host"
+                      << "h4:1"
+                      << "votes" << 0 << "priority" << 0 << "tags" << BSON("recip" << "tag2"))
+        << BSON("_id" << 5 << "host"
+                      << "h5:1"
+                      << "votes" << 0 << "priority" << 0 << "tags" << BSON("recip" << "tag2"))
+        << BSON("_id" << 6 << "host"
+                      << "h6:1"
+                      << "votes" << 0 << "priority" << 0 << "tags" << BSON("recip" << "tag2")));
 
 protected:
-    const std::string _donorSetName{"mySet"};
-    const std::string _recipientSetName{"newSet"};
-    const std::string _recipientTag{"recip"};
-    const std::string _donorSecondaryNode{"h2:1"};
-    const std::string _recipientSecondaryNode{"h4:1"};
+    const std::string _replSetName{"mySet"};
 };
 
 TEST_F(ReplCoordHBV1SplitConfigTest, RejectMismatchedSetNameInHeartbeatResponse) {
-    startUp(_recipientSecondaryNode);
+    const std::string otherNode{"h4:1"};
+    startUp(otherNode);
 
     // Receive a heartbeat request that tells us about a config with a newer version
     ReplSetConfig rsConfig =
@@ -632,7 +550,7 @@ TEST_F(ReplCoordHBV1SplitConfigTest, RejectMismatchedSetNameInHeartbeatResponse)
 
         // The received heartbeat has a greater (term, version), so verify that the next request
         // targets that host to retrieve the new config.
-        auto noi = validateNextRequest("h1", _donorSetName, _configVersion, _configTerm);
+        auto noi = validateNextRequest("h1", _replSetName, _configVersion, _configTerm);
 
         // Schedule a heartbeat response which reports the higher (term, version) but wrong setName
         auto response = [&]() {
@@ -653,10 +571,10 @@ TEST_F(ReplCoordHBV1SplitConfigTest, RejectMismatchedSetNameInHeartbeatResponse)
 class ReplCoordHBV1ReconfigTest : public ReplCoordHBV1Test {
 public:
     void setUp() override {
-        BSONObj configBson = BSON("_id"
-                                  << "mySet"
-                                  << "version" << initConfigVersion << "term" << initConfigTerm
-                                  << "members" << members << "protocolVersion" << 1);
+        BSONObj configBson =
+            BSON("_id" << "mySet"
+                       << "version" << initConfigVersion << "term" << initConfigTerm << "members"
+                       << members << "protocolVersion" << 1);
         ReplSetConfig rsConfig = assertMakeRSConfig(configBson);
         assertStartSuccess(configBson, HostAndPort("h2", 1));
         ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
@@ -671,10 +589,9 @@ public:
 
     BSONObj makeConfigObj(long long version, boost::optional<long long> term) {
         BSONObjBuilder bob;
-        bob.appendElements(BSON("_id"
-                                << "mySet"
-                                << "version" << version << "members" << members << "protocolVersion"
-                                << 1));
+        bob.appendElements(BSON("_id" << "mySet"
+                                      << "version" << version << "members" << members
+                                      << "protocolVersion" << 1));
         if (term) {
             bob.append("term", *term);
         }
@@ -718,7 +635,7 @@ TEST_F(ReplCoordHBV1ReconfigTest,
     ASSERT_EQUALS("mySet", hbArgs.getSetName());
     ASSERT_EQUALS(initConfigVersion, hbArgs.getConfigVersion());
     ASSERT_EQUALS(initConfigTerm, hbArgs.getConfigTerm());
-    ASSERT_EQUALS(OpTime::kInitialTerm, hbArgs.getTerm());
+    ASSERT_EQUALS(initConfigTerm, hbArgs.getTerm());
 
     // Schedule and deliver the heartbeat response containing the newer config.
     auto response = makePrimaryHeartbeatResponseFrom(rsConfig);
@@ -746,7 +663,7 @@ TEST_F(ReplCoordHBV1ReconfigTest,
     ASSERT_EQUALS("mySet", hbArgs.getSetName());
     ASSERT_EQUALS(initConfigVersion, hbArgs.getConfigVersion());
     ASSERT_EQUALS(initConfigTerm, hbArgs.getConfigTerm());
-    ASSERT_EQUALS(OpTime::kInitialTerm, hbArgs.getTerm());
+    ASSERT_EQUALS(initConfigTerm, hbArgs.getTerm());
 
     // Schedule and deliver the heartbeat response containing the new config.
     auto response = makePrimaryHeartbeatResponseFrom(rsConfig);
@@ -783,7 +700,7 @@ TEST_F(
     ASSERT_EQUALS("mySet", hbArgs.getSetName());
     ASSERT_EQUALS(initConfigVersion, hbArgs.getConfigVersion());
     ASSERT_EQUALS(initConfigTerm, hbArgs.getConfigTerm());
-    ASSERT_EQUALS(OpTime::kInitialTerm, hbArgs.getTerm());
+    ASSERT_EQUALS(initConfigTerm, hbArgs.getTerm());
 
     // Schedule and deliver the heartbeat response containing the newer config.
     auto response = makePrimaryHeartbeatResponseFrom(rsConfig);
@@ -813,7 +730,7 @@ TEST_F(
     ASSERT_EQUALS("mySet", hbArgs.getSetName());
     ASSERT_EQUALS(initConfigVersion, hbArgs.getConfigVersion());
     ASSERT_EQUALS(initConfigTerm, hbArgs.getConfigTerm());
-    ASSERT_EQUALS(OpTime::kInitialTerm, hbArgs.getTerm());
+    ASSERT_EQUALS(initConfigTerm, hbArgs.getTerm());
 
     // Schedule and deliver the heartbeat response containing the newer config.
     auto response = makePrimaryHeartbeatResponseFrom(rsConfig);
@@ -842,7 +759,7 @@ TEST_F(ReplCoordHBV1ReconfigTest,
     ASSERT_EQUALS("mySet", hbArgs.getSetName());
     ASSERT_EQUALS(initConfigVersion, hbArgs.getConfigVersion());
     ASSERT_EQUALS(initConfigTerm, hbArgs.getConfigTerm());
-    ASSERT_EQUALS(OpTime::kInitialTerm, hbArgs.getTerm());
+    ASSERT_EQUALS(initConfigTerm, hbArgs.getTerm());
 
     auto origResObj = makePrimaryHeartbeatResponseFrom(rsConfig);
 
@@ -894,7 +811,7 @@ TEST_F(ReplCoordHBV1ReconfigTest, ConfigWithTermAndVersionChangeOnlyDoesntCallIs
     ASSERT_EQUALS("mySet", hbArgs.getSetName());
     ASSERT_EQUALS(initConfigVersion, hbArgs.getConfigVersion());
     ASSERT_EQUALS(initConfigTerm, hbArgs.getConfigTerm());
-    ASSERT_EQUALS(OpTime::kInitialTerm, hbArgs.getTerm());
+    ASSERT_EQUALS(initConfigTerm, hbArgs.getTerm());
 
     // Make isSelf not work.
     getExternalState()->clearSelfHosts();
@@ -934,7 +851,7 @@ TEST_F(ReplCoordHBV1ReconfigTest, ConfigWithSignificantChangeDoesCallIsSelf) {
     ASSERT_EQUALS("mySet", hbArgs.getSetName());
     ASSERT_EQUALS(initConfigVersion, hbArgs.getConfigVersion());
     ASSERT_EQUALS(initConfigTerm, hbArgs.getConfigTerm());
-    ASSERT_EQUALS(OpTime::kInitialTerm, hbArgs.getTerm());
+    ASSERT_EQUALS(initConfigTerm, hbArgs.getTerm());
 
     // Schedule and deliver the heartbeat response containing the newer config.
     auto response = makePrimaryHeartbeatResponseFrom(rsConfig);
@@ -1032,11 +949,10 @@ TEST_F(ReplCoordHBV1ReconfigTest, FindOwnHostForHeartbeatReconfigQuick) {
         auto response = makePrimaryHeartbeatResponseFrom(newConfig);
         getNet()->scheduleResponse(noi, getNet()->now(), makeResponseStatus(response));
 
-        startCapturingLogMessages();
+        unittest::LogCaptureGuard logs;
         getNet()->runReadyNetworkOperations();
-        stopCapturingLogMessages();
-        ASSERT_EQUALS(
-            1, countTextFormatLogLinesContaining("Was able to quickly find new index in config"));
+        logs.stop();
+        ASSERT_EQUALS(1, logs.countTextContaining("Was able to quickly find new index in config"));
     }
 }
 
@@ -1069,15 +985,15 @@ TEST_F(ReplCoordHBV1Test, RejectHeartbeatReconfigDuringElection) {
     hbResp.setDurableOpTimeAndWallTime({time1, getNet()->now()});
     auto hbRespObj = (BSONObjBuilder(hbResp.toBSON()) << "ok" << 1).obj();
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     getReplCoord()->handleHeartbeatResponse_forTest(hbRespObj, 1);
     getNet()->enterNetwork();
     getNet()->runReadyNetworkOperations();
     getNet()->exitNetwork();
-    stopCapturingLogMessages();
-    ASSERT_EQUALS(1,
-                  countTextFormatLogLinesContaining(
-                      "Not scheduling a heartbeat reconfig when running for election"));
+    logs.stop();
+    ASSERT_EQUALS(
+        1,
+        logs.countTextContaining("Not scheduling a heartbeat reconfig when running for election"));
 
     auto net = getNet();
     net->enterNetwork();
@@ -1102,15 +1018,12 @@ TEST_F(ReplCoordHBV1Test, RejectHeartbeatReconfigDuringElection) {
 
 TEST_F(ReplCoordHBV1Test, AwaitHelloReturnsResponseOnReconfigViaHeartbeat) {
     init();
-    assertStartSuccess(BSON("_id"
-                            << "mySet"
-                            << "version" << 2 << "members"
-                            << BSON_ARRAY(BSON("host"
-                                               << "node1:12345"
-                                               << "_id" << 0)
-                                          << BSON("host"
-                                                  << "node2:12345"
-                                                  << "_id" << 1))),
+    assertStartSuccess(BSON("_id" << "mySet"
+                                  << "version" << 2 << "members"
+                                  << BSON_ARRAY(BSON("host" << "node1:12345"
+                                                            << "_id" << 0)
+                                                << BSON("host" << "node2:12345"
+                                                               << "_id" << 1))),
                        HostAndPort("node1", 12345));
 
     // Become primary.
@@ -1146,16 +1059,15 @@ TEST_F(ReplCoordHBV1Test, AwaitHelloReturnsResponseOnReconfigViaHeartbeat) {
     auto severityGuard = unittest::MinimumLoggedSeverityGuard{logv2::LogComponent::kDefault,
                                                               logv2::LogSeverity::Debug(3)};
     ReplSetConfig rsConfig =
-        assertMakeRSConfig(BSON("_id"
-                                << "mySet"
-                                << "version" << 3 << "protocolVersion" << 1 << "members"
-                                << BSON_ARRAY(BSON("_id" << 0 << "host"
-                                                         << "node1:12345"
-                                                         << "priority" << 3)
-                                              << BSON("_id" << 1 << "host"
-                                                            << "node2:12345")
-                                              << BSON("_id" << 2 << "host"
-                                                            << "node3:12345"))));
+        assertMakeRSConfig(BSON("_id" << "mySet"
+                                      << "version" << 3 << "protocolVersion" << 1 << "members"
+                                      << BSON_ARRAY(BSON("_id" << 0 << "host"
+                                                               << "node1:12345"
+                                                               << "priority" << 3)
+                                                    << BSON("_id" << 1 << "host"
+                                                                  << "node2:12345")
+                                                    << BSON("_id" << 2 << "host"
+                                                                  << "node3:12345"))));
     const Date_t startDate = getNet()->now();
 
     enterNetwork();
@@ -1182,17 +1094,16 @@ TEST_F(ReplCoordHBV1Test,
     auto severityGuard = unittest::MinimumLoggedSeverityGuard{logv2::LogComponent::kDefault,
                                                               logv2::LogSeverity::Debug(3)};
     ReplSetConfig rsConfig =
-        assertMakeRSConfig(BSON("_id"
-                                << "mySet"
-                                << "version" << 3 << "members"
-                                << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                         << "h1:1")
-                                              << BSON("_id" << 2 << "host"
-                                                            << "h2:1"
-                                                            << "arbiterOnly" << true)
-                                              << BSON("_id" << 3 << "host"
-                                                            << "h3:1"))
-                                << "protocolVersion" << 1));
+        assertMakeRSConfig(BSON("_id" << "mySet"
+                                      << "version" << 3 << "members"
+                                      << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                               << "h1:1")
+                                                    << BSON("_id" << 2 << "host"
+                                                                  << "h2:1"
+                                                                  << "arbiterOnly" << true)
+                                                    << BSON("_id" << 3 << "host"
+                                                                  << "h3:1"))
+                                      << "protocolVersion" << 1));
     init("mySet");
     addSelf(HostAndPort("h2", 1));
     start();
@@ -1227,16 +1138,16 @@ TEST_F(ReplCoordHBV1Test,
     // configuration that does not contain it.
     auto severityGuard = unittest::MinimumLoggedSeverityGuard{logv2::LogComponent::kDefault,
                                                               logv2::LogSeverity::Debug(3)};
-    ReplSetConfig rsConfig = assertMakeRSConfig(BSON("_id"
-                                                     << "mySet"
-                                                     << "version" << 3 << "members"
-                                                     << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                                              << "h1:1")
-                                                                   << BSON("_id" << 2 << "host"
-                                                                                 << "h2:1")
-                                                                   << BSON("_id" << 3 << "host"
-                                                                                 << "h3:1"))
-                                                     << "protocolVersion" << 1));
+    ReplSetConfig rsConfig =
+        assertMakeRSConfig(BSON("_id" << "mySet"
+                                      << "version" << 3 << "members"
+                                      << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                               << "h1:1")
+                                                    << BSON("_id" << 2 << "host"
+                                                                  << "h2:1")
+                                                    << BSON("_id" << 3 << "host"
+                                                                  << "h3:1"))
+                                      << "protocolVersion" << 1));
     init("mySet");
     addSelf(HostAndPort("h4", 1));
     const Date_t startDate = getNet()->now();
@@ -1293,13 +1204,12 @@ TEST_F(ReplCoordHBV1Test,
     // Tests that a node that only has auth error heartbeats is recovering
     auto severityGuard = unittest::MinimumLoggedSeverityGuard{logv2::LogComponent::kDefault,
                                                               logv2::LogSeverity::Debug(3)};
-    assertStartSuccess(BSON("_id"
-                            << "mySet"
-                            << "version" << 1 << "members"
-                            << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                     << "node1:12345")
-                                          << BSON("_id" << 2 << "host"
-                                                        << "node2:12345"))),
+    assertStartSuccess(BSON("_id" << "mySet"
+                                  << "version" << 1 << "members"
+                                  << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                           << "node1:12345")
+                                                << BSON("_id" << 2 << "host"
+                                                              << "node2:12345"))),
                        HostAndPort("node1", 12345));
     ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
 
@@ -1337,14 +1247,13 @@ TEST_F(ReplCoordHBV1Test, IgnoreTheContentsOfMetadataWhenItsReplicaSetIdDoesNotM
     // Tests that a secondary node will not update its committed optime from the heartbeat metadata
     // if the replica set ID is inconsistent with the existing configuration.
     HostAndPort host2("node2:12345");
-    assertStartSuccess(BSON("_id"
-                            << "mySet"
-                            << "version" << 1 << "members"
-                            << BSON_ARRAY(BSON("_id" << 1 << "host"
-                                                     << "node1:12345")
-                                          << BSON("_id" << 2 << "host" << host2.toString()))
-                            << "settings" << BSON("replicaSetId" << OID::gen()) << "protocolVersion"
-                            << 1),
+    assertStartSuccess(BSON("_id" << "mySet"
+                                  << "version" << 1 << "members"
+                                  << BSON_ARRAY(BSON("_id" << 1 << "host"
+                                                           << "node1:12345")
+                                                << BSON("_id" << 2 << "host" << host2.toString()))
+                                  << "settings" << BSON("replicaSetId" << OID::gen())
+                                  << "protocolVersion" << 1),
                        HostAndPort("node1", 12345));
     ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
 
@@ -1417,7 +1326,7 @@ TEST_F(ReplCoordHBV1Test, IgnoreTheContentsOfMetadataWhenItsReplicaSetIdDoesNotM
     auto statusObj = statusBuilder.obj();
     LOGV2(21495, "replica set status = {statusObj}", "statusObj"_attr = statusObj);
 
-    ASSERT_EQ(mongo::Array, statusObj["members"].type());
+    ASSERT_EQ(mongo::BSONType::array, statusObj["members"].type());
     auto members = statusObj["members"].Array();
     ASSERT_EQ(2U, members.size());
     ASSERT_TRUE(members[1].isABSONObj());
@@ -1430,16 +1339,13 @@ TEST_F(ReplCoordHBV1Test, IgnoreTheContentsOfMetadataWhenItsReplicaSetIdDoesNotM
 TEST_F(ReplCoordHBV1Test,
        LastCommittedOpTimeOnlyUpdatesFromHeartbeatWhenLastAppliedHasTheSameTerm) {
     // Ensure that the metadata is processed if it is contained in a heartbeat response.
-    assertStartSuccess(BSON("_id"
-                            << "mySet"
-                            << "version" << 2 << "members"
-                            << BSON_ARRAY(BSON("host"
-                                               << "node1:12345"
-                                               << "_id" << 0)
-                                          << BSON("host"
-                                                  << "node2:12345"
-                                                  << "_id" << 1))
-                            << "protocolVersion" << 1),
+    assertStartSuccess(BSON("_id" << "mySet"
+                                  << "version" << 2 << "members"
+                                  << BSON_ARRAY(BSON("host" << "node1:12345"
+                                                            << "_id" << 0)
+                                                << BSON("host" << "node2:12345"
+                                                               << "_id" << 1))
+                                  << "protocolVersion" << 1),
                        HostAndPort("node1", 12345));
     ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     ASSERT_EQUALS(OpTime(), getReplCoord()->getLastCommittedOpTime());
@@ -1508,16 +1414,13 @@ TEST_F(ReplCoordHBV1Test,
 TEST_F(ReplCoordHBV1Test, LastCommittedOpTimeOnlyUpdatesFromHeartbeatIfNotInStartup) {
     // Ensure that the metadata is not processed if it is contained in a heartbeat response,
     // if we are in STARTUP2.
-    assertStartSuccess(BSON("_id"
-                            << "mySet"
-                            << "version" << 2 << "members"
-                            << BSON_ARRAY(BSON("host"
-                                               << "node1:12345"
-                                               << "_id" << 0)
-                                          << BSON("host"
-                                                  << "node2:12345"
-                                                  << "_id" << 1))
-                            << "protocolVersion" << 1),
+    assertStartSuccess(BSON("_id" << "mySet"
+                                  << "version" << 2 << "members"
+                                  << BSON_ARRAY(BSON("host" << "node1:12345"
+                                                            << "_id" << 0)
+                                                << BSON("host" << "node2:12345"
+                                                               << "_id" << 1))
+                                  << "protocolVersion" << 1),
                        HostAndPort("node1", 12345));
     ASSERT_EQUALS(OpTime(), getReplCoord()->getLastCommittedOpTime());
 
@@ -1584,16 +1487,13 @@ TEST_F(ReplCoordHBV1Test, LastCommittedOpTimeOnlyUpdatesFromHeartbeatIfNotInStar
 }
 
 TEST_F(ReplCoordHBV1Test, DoNotAttemptToUpdateLastCommittedOpTimeFromHeartbeatIfInRollbackState) {
-    assertStartSuccess(BSON("_id"
-                            << "mySet"
-                            << "version" << 2 << "members"
-                            << BSON_ARRAY(BSON("host"
-                                               << "node1:12345"
-                                               << "_id" << 0)
-                                          << BSON("host"
-                                                  << "node2:12345"
-                                                  << "_id" << 1))
-                            << "protocolVersion" << 1),
+    assertStartSuccess(BSON("_id" << "mySet"
+                                  << "version" << 2 << "members"
+                                  << BSON_ARRAY(BSON("host" << "node1:12345"
+                                                            << "_id" << 0)
+                                                << BSON("host" << "node2:12345"
+                                                               << "_id" << 1))
+                                  << "protocolVersion" << 1),
                        HostAndPort("node1", 12345));
     ASSERT_EQUALS(OpTime(), getReplCoord()->getLastCommittedOpTime());
 
@@ -1670,15 +1570,12 @@ TEST_F(ReplCoordHBV1Test, DoNotAttemptToUpdateLastCommittedOpTimeFromHeartbeatIf
 
 TEST_F(ReplCoordHBV1Test, handleHeartbeatResponseForTestEnqueuesValidHandle) {
     init();
-    assertStartSuccess(BSON("_id"
-                            << "mySet"
-                            << "version" << 2 << "members"
-                            << BSON_ARRAY(BSON("host"
-                                               << "node1:12345"
-                                               << "_id" << 0)
-                                          << BSON("host"
-                                                  << "node2:12345"
-                                                  << "_id" << 1))),
+    assertStartSuccess(BSON("_id" << "mySet"
+                                  << "version" << 2 << "members"
+                                  << BSON_ARRAY(BSON("host" << "node1:12345"
+                                                            << "_id" << 0)
+                                                << BSON("host" << "node2:12345"
+                                                               << "_id" << 1))),
                        HostAndPort("node1", 12345));
 
     OpTime opTime1(Timestamp(100, 1), 0);
@@ -1726,16 +1623,13 @@ TEST_F(ReplCoordHBV1Test, NotifiesExternalStateOfChangeOnlyWhenDataChanges) {
     unittest::MinimumLoggedSeverityGuard replLogSeverityGuard{logv2::LogComponent::kReplication,
                                                               logv2::LogSeverity::Debug(3)};
     // Ensure that the metadata is processed if it is contained in a heartbeat response.
-    assertStartSuccess(BSON("_id"
-                            << "mySet"
-                            << "term" << 1 << "version" << 2 << "members"
-                            << BSON_ARRAY(BSON("host"
-                                               << "node1:12345"
-                                               << "_id" << 0)
-                                          << BSON("host"
-                                                  << "node2:12345"
-                                                  << "_id" << 1))
-                            << "protocolVersion" << 1),
+    assertStartSuccess(BSON("_id" << "mySet"
+                                  << "term" << 1 << "version" << 2 << "members"
+                                  << BSON_ARRAY(BSON("host" << "node1:12345"
+                                                            << "_id" << 0)
+                                                << BSON("host" << "node2:12345"
+                                                               << "_id" << 1))
+                                  << "protocolVersion" << 1),
                        HostAndPort("node1", 12345));
     ASSERT_OK(getReplCoord()->setFollowerMode(MemberState::RS_SECONDARY));
     ASSERT_EQUALS(OpTime(), getReplCoord()->getLastCommittedOpTime());
@@ -1911,19 +1805,15 @@ protected:
     void assertSteppedDown();
     void assertConfigStored();
 
-    const BSONObj _initialConfig = BSON("_id"
-                                        << "mySet"
-                                        << "version" << 2 << "members"
-                                        << BSON_ARRAY(BSON("host"
-                                                           << "node0:12345"
-                                                           << "_id" << 0)
-                                                      << BSON("host"
-                                                              << "node1:12345"
-                                                              << "_id" << 1)
-                                                      << BSON("host"
-                                                              << "node2:12345"
-                                                              << "_id" << 2))
-                                        << "protocolVersion" << 1);
+    const BSONObj _initialConfig = BSON("_id" << "mySet"
+                                              << "version" << 2 << "members"
+                                              << BSON_ARRAY(BSON("host" << "node0:12345"
+                                                                        << "_id" << 0)
+                                                            << BSON("host" << "node1:12345"
+                                                                           << "_id" << 1)
+                                                            << BSON("host" << "node2:12345"
+                                                                           << "_id" << 2))
+                                              << "protocolVersion" << 1);
 
     OpTime _commitPoint = OpTime(Timestamp(100, 1), 0);
     Date_t _wallTime = Date_t() + Seconds(100);
@@ -2090,9 +1980,23 @@ TEST_F(HBStepdownAndReconfigTest, HBStepdownThenHBReconfig) {
 }
 
 TEST_F(HBStepdownAndReconfigTest, HBReconfigThenHBStepdown) {
+    auto reconfigFp = globalFailPointRegistry().find("hangHeartbeatReconfigStore");
+    auto timesEnteredReconfig = reconfigFp->setMode(FailPoint::alwaysOn);
+
     // A node has started to reconfig then learns about a new term via heartbeat.
     sendHBResponseWithNewConfig();
+
+    // Wait for the mock repl executor to be in _heartbeatReconfigStore() and hang it there.
+    reconfigFp->waitForTimesEntered(timesEnteredReconfig + 1);
+
+    // Issue the heartbeat with the new term. This will schedule the stepDown task in the repl
+    // executor, ensuring it is scheduled before the new config is installed and cancels all
+    // heartbeats.
     sendHBResponseWithNewTerm();
+
+    // Turn the failpoint off so that we can proceed with reconfig.
+    reconfigFp->setMode(FailPoint::off);
+
     assertSteppedDown();
     assertConfigStored();
 }

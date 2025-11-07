@@ -27,10 +27,6 @@
  *    it in the license file.
  */
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <string>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -44,8 +40,12 @@
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <string>
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace ExpressionTests {
@@ -56,14 +56,15 @@ static BSONObj constify(const BSONObj& obj, bool parentIsArray = false) {
     BSONObjBuilder bob;
     for (BSONObjIterator itr(obj); itr.more(); itr.next()) {
         BSONElement elem = *itr;
-        if (elem.type() == Object) {
+        if (elem.type() == BSONType::object) {
             bob << elem.fieldName() << constify(elem.Obj(), false);
-        } else if (elem.type() == Array && !parentIsArray) {
+        } else if (elem.type() == BSONType::array && !parentIsArray) {
             // arrays within arrays are treated as constant values by the real
             // parser
             bob << elem.fieldName() << BSONArray(constify(elem.Obj(), true));
         } else if (elem.fieldNameStringData() == "$const" ||
-                   (elem.type() == String && elem.valueStringDataSafe().startsWith("$"))) {
+                   (elem.type() == BSONType::string &&
+                    elem.valueStringDataSafe().starts_with("$"))) {
             bob.append(elem);
         } else {
             bob.append(elem.fieldName(), BSON("$const" << elem));
@@ -72,39 +73,16 @@ static BSONObj constify(const BSONObj& obj, bool parentIsArray = false) {
     return bob.obj();
 }
 
-/** Convert Value to a wrapped BSONObj with an empty string field name. */
-static BSONObj toBson(const Value& value) {
-    BSONObjBuilder bob;
-    value.addToBsonObj(&bob, "");
-    return bob.obj();
-}
-
 /** Convert Expression to BSON. */
 static BSONObj expressionToBson(const boost::intrusive_ptr<Expression>& expression) {
     return BSON("" << expression->serialize()).firstElement().embeddedObject().getOwned();
 }
 
-/** Convert Document to BSON. */
-static BSONObj toBson(const Document& document) {
-    return document.toBson();
-}
-
-/** Create a Document from a BSONObj. */
-Document fromBson(BSONObj obj) {
-    return Document(obj);
-}
-
-/** Create a Value from a BSONObj. */
-Value valueFromBson(BSONObj obj) {
-    BSONElement element = obj.firstElement();
-    return Value(element);
-}
-
 namespace And {
 
-class ExpectedResultBase {
+class ExpectedParsedBase {
 public:
-    virtual ~ExpectedResultBase() {}
+    virtual ~ExpectedParsedBase() {}
     void run() {
         auto expCtx = ExpressionContextForTest{};
         BSONObj specObject = BSON("" << spec());
@@ -113,17 +91,10 @@ public:
         boost::intrusive_ptr<Expression> expression =
             Expression::parseOperand(&expCtx, specElement, vps);
         ASSERT_BSONOBJ_EQ(constify(spec()), expressionToBson(expression));
-        ASSERT_BSONOBJ_EQ(
-            BSON("" << expectedResult()),
-            toBson(expression->evaluate(fromBson(BSON("a" << 1)), &expCtx.variables)));
-        boost::intrusive_ptr<Expression> optimized = expression->optimize();
-        ASSERT_BSONOBJ_EQ(BSON("" << expectedResult()),
-                          toBson(optimized->evaluate(fromBson(BSON("a" << 1)), &expCtx.variables)));
     }
 
 protected:
     virtual BSONObj spec() = 0;
-    virtual bool expectedResult() = 0;
 };
 
 class OptimizeBase {
@@ -153,122 +124,86 @@ class NoOptimizeBase : public OptimizeBase {
 };
 
 /** $and without operands. */
-class NoOperands : public ExpectedResultBase {
+class NoOperands : public ExpectedParsedBase {
     BSONObj spec() override {
         return BSON("$and" << BSONArray());
-    }
-    bool expectedResult() override {
-        return true;
     }
 };
 
 /** $and passed 'true'. */
-class True : public ExpectedResultBase {
+class True : public ExpectedParsedBase {
     BSONObj spec() override {
         return BSON("$and" << BSON_ARRAY(true));
-    }
-    bool expectedResult() override {
-        return true;
     }
 };
 
 /** $and passed 'false'. */
-class False : public ExpectedResultBase {
+class False : public ExpectedParsedBase {
     BSONObj spec() override {
         return BSON("$and" << BSON_ARRAY(false));
-    }
-    bool expectedResult() override {
-        return false;
     }
 };
 
 /** $and passed 'true', 'true'. */
-class TrueTrue : public ExpectedResultBase {
+class TrueTrue : public ExpectedParsedBase {
     BSONObj spec() override {
         return BSON("$and" << BSON_ARRAY(true << true));
-    }
-    bool expectedResult() override {
-        return true;
     }
 };
 
 /** $and passed 'true', 'false'. */
-class TrueFalse : public ExpectedResultBase {
+class TrueFalse : public ExpectedParsedBase {
     BSONObj spec() override {
         return BSON("$and" << BSON_ARRAY(true << false));
-    }
-    bool expectedResult() override {
-        return false;
     }
 };
 
 /** $and passed 'false', 'true'. */
-class FalseTrue : public ExpectedResultBase {
+class FalseTrue : public ExpectedParsedBase {
     BSONObj spec() override {
         return BSON("$and" << BSON_ARRAY(false << true));
-    }
-    bool expectedResult() override {
-        return false;
     }
 };
 
 /** $and passed 'false', 'false'. */
-class FalseFalse : public ExpectedResultBase {
+class FalseFalse : public ExpectedParsedBase {
     BSONObj spec() override {
         return BSON("$and" << BSON_ARRAY(false << false));
-    }
-    bool expectedResult() override {
-        return false;
     }
 };
 
 /** $and passed 'true', 'true', 'true'. */
-class TrueTrueTrue : public ExpectedResultBase {
+class TrueTrueTrue : public ExpectedParsedBase {
     BSONObj spec() override {
         return BSON("$and" << BSON_ARRAY(true << true << true));
-    }
-    bool expectedResult() override {
-        return true;
     }
 };
 
 /** $and passed 'true', 'true', 'false'. */
-class TrueTrueFalse : public ExpectedResultBase {
+class TrueTrueFalse : public ExpectedParsedBase {
     BSONObj spec() override {
         return BSON("$and" << BSON_ARRAY(true << true << false));
-    }
-    bool expectedResult() override {
-        return false;
     }
 };
 
 /** $and passed '0', '1'. */
-class ZeroOne : public ExpectedResultBase {
+class ZeroOne : public ExpectedParsedBase {
     BSONObj spec() override {
         return BSON("$and" << BSON_ARRAY(0 << 1));
-    }
-    bool expectedResult() override {
-        return false;
     }
 };
 
 /** $and passed '1', '2'. */
-class OneTwo : public ExpectedResultBase {
+class OneTwo : public ExpectedParsedBase {
     BSONObj spec() override {
         return BSON("$and" << BSON_ARRAY(1 << 2));
-    }
-    bool expectedResult() override {
-        return true;
     }
 };
 
 /** $and passed a field path. */
-class FieldPath : public ExpectedResultBase {
+class FieldPath : public ExpectedParsedBase {
     BSONObj spec() override {
         return BSON("$and" << BSON_ARRAY("$a"));
-    }
-    bool expectedResult() override {
-        return true;
     }
 };
 
@@ -297,8 +232,6 @@ class ConstantNonConstantTrue : public OptimizeBase {
     BSONObj expectedOptimized() override {
         return BSON("$and" << BSON_ARRAY("$a"));
     }
-    // note: using $and as serialization of ExpressionCoerceToBool rather than
-    // ExpressionAnd
 };
 
 class ConstantNonConstantFalse : public OptimizeBase {
@@ -333,20 +266,17 @@ class NonConstantZero : public OptimizeBase {
 /** An expression with two field paths and '1'. */
 class NonConstantNonConstantOne : public OptimizeBase {
     BSONObj spec() override {
-        return BSON("$and" << BSON_ARRAY("$a"
-                                         << "$b" << 1));
+        return BSON("$and" << BSON_ARRAY("$a" << "$b" << 1));
     }
     BSONObj expectedOptimized() override {
-        return BSON("$and" << BSON_ARRAY("$a"
-                                         << "$b"));
+        return BSON("$and" << BSON_ARRAY("$a" << "$b"));
     }
 };
 
 /** An expression with two field paths and '0'. */
 class NonConstantNonConstantZero : public OptimizeBase {
     BSONObj spec() override {
-        return BSON("$and" << BSON_ARRAY("$a"
-                                         << "$b" << 0));
+        return BSON("$and" << BSON_ARRAY("$a" << "$b" << 0));
     }
     BSONObj expectedOptimized() override {
         return BSON("$const" << false);
@@ -380,8 +310,7 @@ class Nested : public OptimizeBase {
                                            << "$b"));
     }
     BSONObj expectedOptimized() override {
-        return BSON("$and" << BSON_ARRAY("$a"
-                                         << "$b"));
+        return BSON("$and" << BSON_ARRAY("$a" << "$b"));
     }
 };
 

@@ -29,13 +29,6 @@
 
 #include "mongo/db/validate_api_parameters.h"
 
-#include <memory>
-#include <set>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -53,6 +46,13 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <set>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -80,7 +80,7 @@ void validateAPIParameters(const CommandInvocation& invocation) {
 
     if (genericArgs.getApiStrict().value_or(false)) {
         auto& cmdApiVersions = command->apiVersions();
-        auto apiVersionFromClient = genericArgs.getApiVersion()->toString();
+        auto apiVersionFromClient = std::string{*genericArgs.getApiVersion()};
         bool strictAssert = (cmdApiVersions.find(apiVersionFromClient) != cmdApiVersions.end());
         uassert(ErrorCodes::APIStrictError,
                 fmt::format("Provided apiStrict:true, but the command {} is not in API Version {}. "
@@ -103,7 +103,7 @@ void validateAPIParameters(const CommandInvocation& invocation) {
 
     if (genericArgs.getApiDeprecationErrors().value_or(false)) {
         auto& cmdDepApiVersions = command->deprecatedApiVersions();
-        auto apiVersionFromClient = genericArgs.getApiVersion()->toString();
+        auto apiVersionFromClient = std::string{*genericArgs.getApiVersion()};
         bool deprecationAssert =
             (cmdDepApiVersions.find(apiVersionFromClient) == cmdDepApiVersions.end());
         uassert(ErrorCodes::APIDeprecationError,
@@ -124,44 +124,38 @@ APIParametersFromClient parseAndValidateAPIParameters(const CommandInvocation& i
     return apiParams;
 }
 
-void enforceRequireAPIVersion(OperationContext* opCtx, Command* command) {
+void enforceRequireAPIVersion(OperationContext* opCtx,
+                              Command* command,
+                              const OpMsgRequest& request) {
     auto client = opCtx->getClient();
-    const bool isInternalThreadOrClient = [&] {
-        // No Transport Session indicates this command is internally sourced.
-        if (!client->session()) {
-            return true;
-        }
 
-        // Pre-auth commands are allowed to trust the {hello: 1, internalClient: ...}
-        // claim without auth validation.
-        if (command && !command->requiresAuth() &&
-            client->isPossiblyUnauthenticatedInternalClient()) {
-            return true;
-        }
+    if (gRequireApiVersion.load() && !client->isInDirectClient()) {
+        const bool isInternalThreadOrClient = [&] {
+            // No Transport Session indicates this command is internally sourced.
+            if (!client->session()) {
+                return true;
+            }
 
-        // Otherwise, only authenticated client authorized to claim internality are
-        // treated as internal.
-        return client->isInternalClient();
-    }();
+            if (command && !command->requiresAuth()) {
+                // Pre-auth commands are allowed to trust the {hello: 1, internalClient: ...}
+                // claim without auth validation.
+                if (client->isPossiblyUnauthenticatedInternalClient() ||
+                    (command->handshakeRole() == BasicCommand::HandshakeRole::kHello &&
+                     request.body["internalClient"].trueValue())) {
+                    return true;
+                }
+            }
 
-    if (gRequireApiVersion.load() && !client->isInDirectClient() && !isInternalThreadOrClient) {
-        // TODO This log aims to give more diagnostics for BF-32357, and will be removed when
-        // the BF has been resolved.
-        if (getTestCommandsEnabled()) {
-            LOGV2(9451900,
-                  "apiVersion parameter requirement check failed.",
-                  "clientDesc"_attr = client->desc(),
-                  "session"_attr = client->hasRemote() ? client->session()->toBSON().toString()
-                                                       : "No session exists.",
-                  "isPossiblyUnauthenticatedInternalClient"_attr =
-                      client->isPossiblyUnauthenticatedInternalClient(),
-                  "commandPassed"_attr = !!command,
-                  "commandRequiresAuth"_attr = command ? command->requiresAuth() : true);
+            // Otherwise, only authenticated client authorized to claim internality are
+            // treated as internal.
+            return client->isInternalClient();
+        }();
+        if (!isInternalThreadOrClient) {
+            uassert(498870,
+                    "The apiVersion parameter is required, please configure your MongoClient's API "
+                    "version",
+                    APIParameters::get(opCtx).getParamsPassed());
         }
-        uassert(
-            498870,
-            "The apiVersion parameter is required, please configure your MongoClient's API version",
-            APIParameters::get(opCtx).getParamsPassed());
     }
 }
 }  // namespace mongo

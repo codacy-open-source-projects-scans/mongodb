@@ -27,13 +27,16 @@
  *    it in the license file.
  */
 
-#include <boost/filesystem.hpp>
-#include <boost/filesystem/path.hpp>
-#include <vector>
+#pragma once
 
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/util/modules.h"
+
+#include <vector>
+
+#include <boost/filesystem.hpp>
+#include <boost/filesystem/path.hpp>
 
 namespace mongo {
 

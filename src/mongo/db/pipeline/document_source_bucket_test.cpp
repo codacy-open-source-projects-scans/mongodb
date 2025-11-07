@@ -27,28 +27,29 @@
  *    it in the license file.
  */
 
+#include "mongo/db/pipeline/document_source_bucket.h"
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/json.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
+#include "mongo/db/exec/agg/mock_stage.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/document_value_test_util.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/pipeline/aggregation_context_fixture.h"
+#include "mongo/db/pipeline/document_source_group.h"
+#include "mongo/db/pipeline/document_source_sort.h"
+#include "mongo/db/query/explain_options.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/intrusive_counter.h"
+
 #include <algorithm>
 #include <memory>
 #include <vector>
 
 #include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/json.h"
-#include "mongo/db/exec/document_value/document.h"
-#include "mongo/db/exec/document_value/document_value_test_util.h"
-#include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/document_source_bucket.h"
-#include "mongo/db/pipeline/document_source_group.h"
-#include "mongo/db/pipeline/document_source_mock.h"
-#include "mongo/db/pipeline/document_source_sort.h"
-#include "mongo/db/query/explain_options.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 
 namespace mongo {
 namespace {
@@ -106,7 +107,8 @@ TEST_F(BucketReturnsGroupAndSort,
     const auto spec = fromjson(
         "{$bucket : {groupBy : {$const : 6}, boundaries : [ 1, 5, 8 ], default : 'other'}}");
 
-    auto expectedGroupWithOpt = Value(fromjson("{_id: {$const: 5}, count: {$sum: {$const: 1}}}"));
+    auto expectedGroupWithOpt =
+        Value(fromjson("{_id: {$const: 5}, count: {$sum: {$const: 1}}, $willBeMerged: false}"));
 
     testCreateFromBsonResult(spec, expectedGroupWithOpt, true);
 }
@@ -116,8 +118,8 @@ TEST_F(BucketReturnsGroupAndSort,
     const auto spec = fromjson(
         "{$bucket : {groupBy : {$const : 9}, boundaries : [ 1, 5, 8 ], default : 'other'}}");
 
-    auto expectedGroupWithOpt =
-        Value(fromjson("{_id: {$const: 'other'}, count: {$sum: {$const: 1}}}"));
+    auto expectedGroupWithOpt = Value(
+        fromjson("{_id: {$const: 'other'}, count: {$sum: {$const: 1}}, $willBeMerged: false}"));
 
     testCreateFromBsonResult(spec, expectedGroupWithOpt, true);
 }
@@ -149,7 +151,8 @@ TEST_F(BucketReturnsGroupAndSort, BucketWithAllConstantsIsCorrectlyOptimizedAfte
     const auto spec = fromjson(
         "{$bucket : {groupBy : {$add: [2, 4]}, boundaries : [ 1, 5, 8 ], default : 'other'}}");
 
-    auto expectedGroupWithOpt = Value(fromjson("{_id: {$const: 5}, count: {$sum: {$const: 1}}}"));
+    auto expectedGroupWithOpt =
+        Value(fromjson("{_id: {$const: 5}, count: {$sum: {$const: 1}}, $willBeMerged: false}"));
 
     testCreateFromBsonResult(spec, expectedGroupWithOpt, true);
 }
@@ -158,7 +161,8 @@ TEST_F(BucketReturnsGroupAndSort,
        BucketWithAllConstantsAndNoDefaultIsCorrectlyOptimizedAfterSwitch) {
     const auto spec = fromjson("{$bucket : {groupBy : {$add: [2, 4]}, boundaries : [ 1, 5, 8 ]}}");
 
-    auto expectedGroupWithOpt = Value(fromjson("{_id: {$const: 5}, count: {$sum: {$const: 1}}}"));
+    auto expectedGroupWithOpt =
+        Value(fromjson("{_id: {$const: 5}, count: {$sum: {$const: 1}}, $willBeMerged: false}"));
 
     testCreateFromBsonResult(spec, expectedGroupWithOpt, true);
 }
@@ -166,10 +170,10 @@ TEST_F(BucketReturnsGroupAndSort,
 TEST_F(BucketReturnsGroupAndSort, BucketUsesDefaultOutputWhenNoOutputSpecified) {
     const auto spec =
         fromjson("{$bucket : {groupBy :'$x', boundaries : [ 0, 2 ], default : 'other'}}");
-    auto expectedGroupExplain =
-        Value(fromjson("{_id : {$switch : {branches : [{case : {$and : [{$gte : ['$x', {$const : "
-                       "0}]}, {$lt : ['$x', {$const : 2}]}]}, then : {$const : 0}}], default : "
-                       "{$const : 'other'}}}, count : {$sum : {$const : 1}}}"));
+    auto expectedGroupExplain = Value(
+        fromjson("{_id : {$switch : {branches : [{case : {$and : [{$gte : ['$x', {$const : "
+                 "0}]}, {$lt : ['$x', {$const : 2}]}]}, then : {$const : 0}}], default : "
+                 "{$const : 'other'}}}, count : {$sum : {$const : 1}}, $willBeMerged: false}"));
 
     testCreateFromBsonResult(spec, expectedGroupExplain);
 }
@@ -179,7 +183,8 @@ TEST_F(BucketReturnsGroupAndSort, BucketSucceedsWhenOutputSpecified) {
         "{$bucket : {groupBy : '$x', boundaries : [0, 2], output : { number : {$sum : 1}}}}");
     auto expectedGroupExplain = Value(fromjson(
         "{_id : {$switch : {branches : [{case : {$and : [{$gte : ['$x', {$const : 0}]}, {$lt : "
-        "['$x', {$const : 2}]}]}, then : {$const : 0}}]}}, number : {$sum : {$const : 1}}}"));
+        "['$x', {$const : 2}]}]}, then : {$const : 0}}]}}, number : {$sum : {$const : 1}}, "
+        "$willBeMerged: false}"));
 
     testCreateFromBsonResult(spec, expectedGroupExplain);
 }
@@ -188,7 +193,8 @@ TEST_F(BucketReturnsGroupAndSort, BucketSucceedsWhenNoDefaultSpecified) {
     const auto spec = fromjson("{$bucket : { groupBy : '$x', boundaries : [0, 2]}}");
     auto expectedGroupExplain = Value(fromjson(
         "{_id : {$switch : {branches : [{case : {$and : [{$gte : ['$x', {$const : 0}]}, {$lt : "
-        "['$x', {$const : 2}]}]}, then : {$const : 0}}]}}, count : {$sum : {$const : 1}}}"));
+        "['$x', {$const : 2}]}]}, then : {$const : 0}}]}}, count : {$sum : {$const : 1}}, "
+        "$willBeMerged: false}"));
 
     testCreateFromBsonResult(spec, expectedGroupExplain);
 }
@@ -197,7 +203,8 @@ TEST_F(BucketReturnsGroupAndSort, BucketSucceedsWhenBoundariesAreSameCanonicalTy
     const auto spec = fromjson("{$bucket : {groupBy : '$x', boundaries : [0, 1.5]}}");
     auto expectedGroupExplain = Value(fromjson(
         "{_id : {$switch : {branches : [{case : {$and : [{$gte : ['$x', {$const : 0}]}, {$lt : "
-        "['$x', {$const : 1.5}]}]}, then : {$const : 0}}]}},count : {$sum : {$const : 1}}}"));
+        "['$x', {$const : 1.5}]}]}, then : {$const : 0}}]}},count : {$sum : {$const : 1}}, "
+        "$willBeMerged: false}"));
 
     testCreateFromBsonResult(spec, expectedGroupExplain);
 }
@@ -206,7 +213,8 @@ TEST_F(BucketReturnsGroupAndSort, BucketSucceedsWhenBoundariesAreConstantExpress
     const auto spec = fromjson("{$bucket : {groupBy : '$x', boundaries : [0, {$add : [4, 5]}]}}");
     auto expectedGroupExplain = Value(fromjson(
         "{_id : {$switch : {branches : [{case : {$and : [{$gte : ['$x', {$const : 0}]}, {$lt : "
-        "['$x', {$const : 9}]}]}, then : {$const : 0}}]}}, count : {$sum : {$const : 1}}}"));
+        "['$x', {$const : 9}]}]}, then : {$const : 0}}]}}, count : {$sum : {$const : 1}}, "
+        "$willBeMerged: false}"));
 
     testCreateFromBsonResult(spec, expectedGroupExplain);
 }
@@ -217,7 +225,7 @@ TEST_F(BucketReturnsGroupAndSort, BucketSucceedsWhenDefaultIsConstantExpression)
     auto expectedGroupExplain =
         Value(fromjson("{_id : {$switch : {branches : [{case : {$and : [{$gte : ['$x', {$const :"
                        "0}]}, {$lt : ['$x', {$const : 1}]}]}, then : {$const : 0}}], default : "
-                       "{$const : 9}}}, count : {$sum : {$const : 1}}}"));
+                       "{$const : 9}}}, count : {$sum : {$const : 1}}, $willBeMerged: false}"));
 
     testCreateFromBsonResult(spec, expectedGroupExplain);
 }
@@ -228,7 +236,7 @@ TEST_F(BucketReturnsGroupAndSort, BucketSucceedsWithMultipleBoundaryValues) {
         Value(fromjson("{_id : {$switch : {branches : [{case : {$and : [{$gte : ['$x', {$const : "
                        "0}]}, {$lt : ['$x', {$const : 1}]}]}, then : {$const : 0}}, {case : {$and "
                        ": [{$gte : ['$x', {$const : 1}]}, {$lt : ['$x', {$const : 2}]}]}, then : "
-                       "{$const : 1}}]}}, count : {$sum : {$const : 1}}}"));
+                       "{$const : 1}}]}}, count : {$sum : {$const : 1}}, $willBeMerged: false}"));
 
     testCreateFromBsonResult(spec, expectedGroupExplain);
 }
@@ -367,15 +375,16 @@ TEST_F(InvalidBucketSpec, SwitchFailsForBucketWhenNoDefaultSpecified) {
 
     ASSERT_EQUALS(bucketStages.size(), 2UL);
 
-    auto* groupStage = dynamic_cast<DocumentSourceGroup*>(bucketStages.front().get());
+    auto groupStage = exec::agg::buildStage(bucketStages.front());
     ASSERT(groupStage);
 
     const auto* sortStage = dynamic_cast<DocumentSourceSort*>(bucketStages.back().get());
     ASSERT(sortStage);
 
     auto doc = Document{{"x", 4}};
-    auto source = DocumentSourceMock::createForTest(doc, getExpCtx());
-    groupStage->setSource(source.get());
+    auto stage = exec::agg::MockStage::createForTest(doc, getExpCtx());
+
+    groupStage->setSource(stage.get());
     ASSERT_THROWS_CODE(groupStage->getNext(), AssertionException, 40066);
 }
 }  // namespace

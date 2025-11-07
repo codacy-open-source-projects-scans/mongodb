@@ -31,21 +31,19 @@
 
 namespace mongo {
 
+ALLOCATE_DOCUMENT_SOURCE_ID(_internalReplaceRoot, DocumentSourceInternalReplaceRoot::id)
+
 const char* DocumentSourceInternalReplaceRoot::getSourceName() const {
-    return kStageNameInternal.rawData();
+    return kStageNameInternal.data();
 }
 
-Pipeline::SourceContainer::iterator DocumentSourceInternalReplaceRoot::doOptimizeAt(
-    Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
+DocumentSourceContainer::iterator DocumentSourceInternalReplaceRoot::doOptimizeAt(
+    DocumentSourceContainer::iterator itr, DocumentSourceContainer* container) {
     invariant(*itr == this);
     return itr;
 }
 
 Value DocumentSourceInternalReplaceRoot::serialize(const SerializationOptions& opts) const {
     return Value(Document{{getSourceName(), _newRoot->serialize()}});
-}
-
-DocumentSource::GetNextResult DocumentSourceInternalReplaceRoot::doGetNext() {
-    tasserted(8105803, "Execution reached non-executable pipeline stage");
 }
 }  // namespace mongo

@@ -29,9 +29,9 @@
 
 #pragma once
 
-#include <grpcpp/support/sync_stream.h>
-
 #include "mongo/transport/grpc/server_stream.h"
+
+#include <grpcpp/support/sync_stream.h>
 
 namespace mongo::transport::grpc {
 
@@ -40,7 +40,7 @@ public:
     explicit GRPCServerStream(::grpc::ServerReaderWriter<ConstSharedBuffer, SharedBuffer>* stream)
         : _stream{stream} {}
 
-    ~GRPCServerStream() = default;
+    ~GRPCServerStream() override = default;
 
     boost::optional<SharedBuffer> read() override {
         SharedBuffer msg;

@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -41,9 +39,10 @@
 #include "mongo/db/logical_time.h"
 #include "mongo/db/time_proof_service.h"
 #include "mongo/idl/idl_parser.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
+
+#include <string>
 
 namespace mongo {
 namespace {
@@ -65,7 +64,7 @@ TEST(KeysCollectionDocument, Roundtrip) {
     keysCollectionDoc.setKeysCollectionDocumentBase({purpose, key, expiresAt});
 
     auto serializedObj = keysCollectionDoc.toBSON();
-    auto parsedKey = KeysCollectionDocument::parse(IDLParserContext("keyDoc"), serializedObj);
+    auto parsedKey = KeysCollectionDocument::parse(serializedObj, IDLParserContext("keyDoc"));
 
     ASSERT_EQ(keyId, parsedKey.getKeyId());
     ASSERT_EQ(purpose, parsedKey.getPurpose());
@@ -88,7 +87,7 @@ TEST(KeysCollectionDocument, MissingKeyIdShouldFailToParse) {
     expiresAt.asTimestamp().append(builder.bb(), "expiresAt");
 
     auto serializedObj = builder.done();
-    ASSERT_THROWS_CODE(KeysCollectionDocument::parse(IDLParserContext("keyDoc"), serializedObj),
+    ASSERT_THROWS_CODE(KeysCollectionDocument::parse(serializedObj, IDLParserContext("keyDoc")),
                        AssertionException,
                        ErrorCodes::IDLFailedToParse);
 }
@@ -108,7 +107,7 @@ TEST(KeysCollectionDocument, MissingPurposeShouldFailToParse) {
     expiresAt.asTimestamp().append(builder.bb(), "expiresAt");
 
     auto serializedObj = builder.done();
-    ASSERT_THROWS_CODE(KeysCollectionDocument::parse(IDLParserContext("keyDoc"), serializedObj),
+    ASSERT_THROWS_CODE(KeysCollectionDocument::parse(serializedObj, IDLParserContext("keyDoc")),
                        AssertionException,
                        ErrorCodes::IDLFailedToParse);
 }
@@ -126,7 +125,7 @@ TEST(KeysCollectionDocument, MissingKeyShouldFailToParse) {
     expiresAt.asTimestamp().append(builder.bb(), "expiresAt");
 
     auto serializedObj = builder.done();
-    ASSERT_THROWS_CODE(KeysCollectionDocument::parse(IDLParserContext("keyDoc"), serializedObj),
+    ASSERT_THROWS_CODE(KeysCollectionDocument::parse(serializedObj, IDLParserContext("keyDoc")),
                        AssertionException,
                        ErrorCodes::IDLFailedToParse);
 }
@@ -146,7 +145,7 @@ TEST(KeysCollectionDocument, MissingExpiresAtShouldFailToParse) {
     builder.append("key", BSONBinData(key.data(), key.size(), BinDataGeneral));
 
     auto serializedObj = builder.done();
-    ASSERT_THROWS_CODE(KeysCollectionDocument::parse(IDLParserContext("keyDoc"), serializedObj),
+    ASSERT_THROWS_CODE(KeysCollectionDocument::parse(serializedObj, IDLParserContext("keyDoc")),
                        AssertionException,
                        ErrorCodes::IDLFailedToParse);
 }

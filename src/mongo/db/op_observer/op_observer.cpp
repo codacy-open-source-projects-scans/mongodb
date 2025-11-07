@@ -29,10 +29,9 @@
 
 #include "mongo/db/op_observer/op_observer.h"
 
+#include "mongo/util/assert_util.h"
+
 #include <utility>
-
-
-#include "mongo/util/assert_util_core.h"
 
 namespace mongo {
 namespace {
@@ -53,7 +52,8 @@ OpObserver::ReservedTimes::ReservedTimes(OperationContext* const opCtx)
     }
 
     invariant(_times._recursionDepth > 0);
-    invariant(_times._recursionDepth == 1 || !opCtx->writesAreReplicated());
+    invariant(_times._recursionDepth == 1 || !opCtx->writesAreReplicated(),
+              str::stream() << "writes are replicated: " << opCtx->writesAreReplicated());
 }
 
 OpObserver::ReservedTimes::~ReservedTimes() {

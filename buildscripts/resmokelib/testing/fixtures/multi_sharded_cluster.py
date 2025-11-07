@@ -65,6 +65,8 @@ class MultiShardedClusterFixture(interface.MultiClusterFixture):
                         self.job_num,
                         dbpath_prefix=dbpath_prefix,
                         cluster_logging_prefix=cluster_name,
+                        configsvr_replset_name=f"{cluster_name}-shard-rs",
+                        shard_replset_name_prefix=f"{cluster_name}-config-rs",
                         mongod_options=mongod_options,
                         **sharded_cluster_options,
                     )
@@ -107,7 +109,7 @@ class MultiShardedClusterFixture(interface.MultiClusterFixture):
                 return False
         return True
 
-    def _do_teardown(self, mode=None):
+    def _do_teardown(self, finished=False, mode=None):
         """Shut down the sharded clusters."""
         self.logger.info("Stopping all sharded clusters...")
 

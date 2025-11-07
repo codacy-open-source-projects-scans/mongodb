@@ -30,7 +30,7 @@
 #include "mongo/db/query/shard_filterer_factory_impl.h"
 
 #include "mongo/db/exec/shard_filterer_impl.h"
-#include "mongo/db/s/collection_sharding_state.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state.h"
 
 namespace mongo {
 
@@ -47,20 +47,11 @@ void populateShardFiltererSlot(OperationContext* opCtx,
                                sbe::value::SlotId shardFiltererSlot,
                                const MultipleCollectionAccessor& collections) {
     auto shardFilterer = [&]() -> std::unique_ptr<ShardFilterer> {
-        if (collections.isAcquisition()) {
-            auto acquisition = collections.getMainAcquisition();
-            tassert(7900701,
-                    "Setting shard filterer slot on un-sharded collection",
-                    acquisition.getShardingDescription().isSharded());
-            return std::make_unique<ShardFiltererImpl>(*acquisition.getShardingFilter());
-        } else {
-            const auto& collection = collections.getMainCollection();
-            tassert(6108307,
-                    "Setting shard filterer slot on un-sharded collection",
-                    collection.isSharded_DEPRECATED());
-            ShardFiltererFactoryImpl shardFiltererFactory(collection);
-            return shardFiltererFactory.makeShardFilterer(opCtx);
-        }
+        const auto& acquisition = collections.getMainCollectionAcquisition();
+        tassert(7900701,
+                "Setting shard filterer slot on un-sharded collection",
+                acquisition.getShardingDescription().isSharded());
+        return std::make_unique<ShardFiltererImpl>(*acquisition.getShardingFilter());
     }();
     env.resetSlot(shardFiltererSlot,
                   sbe::value::TypeTags::shardFilterer,

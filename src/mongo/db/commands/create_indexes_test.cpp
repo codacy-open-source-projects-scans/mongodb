@@ -27,25 +27,24 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/catalog_test_fixture.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/dbdirectclient.h"
-#include "mongo/db/index/index_descriptor.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/catalog_test_fixture.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 namespace {
@@ -84,10 +83,10 @@ TEST_F(CreateIndexesTest, CreateIndexesFailsWhenIndexBuildsCollectionIsMissing) 
             "createIndexes" << nss.coll() << "indexes" << BSON_ARRAY(index) << "commitQuorum" << 0);
         BSONObj result;
         // This should fail since config.system.indexBuilds does not exist.
-        startCapturingLogMessages();
+        unittest::LogCaptureGuard logs;
         ASSERT_FALSE(client.runCommand(nss.dbName(), createIndexesCmdObj, result)) << result;
-        stopCapturingLogMessages();
-        ASSERT_EQ(1, countBSONFormatLogLinesIsSubset(BSON("id" << 7564400)));
+        logs.stop();
+        ASSERT_EQ(1, logs.countBSONContainingSubset(BSON("id" << 7564400)));
         ASSERT(result.hasField("code"));
         ASSERT_EQ(result.getIntField("code"), 6325700);
     }

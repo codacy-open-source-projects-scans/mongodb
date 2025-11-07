@@ -28,30 +28,31 @@
  */
 
 
-#include <memory>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/write_ops/update.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/concurrency/exception_util.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/write_ops/parsed_update.h"
-#include "mongo/db/query/write_ops/update.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+
+#include <boost/none.hpp>
+
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kWrite
 
@@ -62,7 +63,7 @@ UpdateResult update(OperationContext* opCtx,
                     CollectionAcquisition& coll,
                     const UpdateRequest& request) {
     // Explain should never use this helper.
-    invariant(!request.explain());
+    tassert(11052009, "Unexpected explain on UpdateRequest", !request.explain());
 
     const NamespaceString& nsString = request.getNamespaceString();
     invariant(shard_role_details::getLocker(opCtx)->isCollectionLockedForMode(nsString, MODE_IX));
@@ -85,13 +86,17 @@ UpdateResult update(OperationContext* opCtx,
             WriteUnitOfWork wuow(opCtx);
             auto db = DatabaseHolder::get(opCtx)->openDb(opCtx, coll.nss().dbName());
             auto newCollectionPtr = db->createCollection(opCtx, nsString, CollectionOptions());
-            invariant(newCollectionPtr);
+            tassert(11052010,
+                    fmt::format("Expected collection {} to be created", nsString.coll()),
+                    newCollectionPtr);
             wuow.commit();
         }
     });
 
     // If this is an upsert, at this point the collection must exist.
-    invariant(coll.exists() || !request.isUpsert());
+    tassert(11052011,
+            fmt::format("Expected collection {} to exist for an upsert operation", nsString.coll()),
+            coll.exists() || !request.isUpsert());
 
     // Parse the update, get an executor for it, run the executor, get stats out.
     ParsedUpdate parsedUpdate(opCtx, &request, coll.getCollectionPtr());

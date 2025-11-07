@@ -29,26 +29,14 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <cstddef>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/exec/document_value/value_comparator.h"
-#include "mongo/db/exec/plan_stats.h"
+#include "mongo/db/memory_tracking/memory_usage_tracker.h"
 #include "mongo/db/pipeline/accumulation_statement.h"
 #include "mongo/db/pipeline/accumulator.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
@@ -57,11 +45,38 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/logical_model/sort_pattern/sort_pattern.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
-#include "mongo/util/memory_usage_tracker.h"
 #include "mongo/util/string_map.h"
 
+#include <cstddef>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
+
 namespace mongo {
+
+/**
+ * Return type of the 'rewriteGroupAsTransformOnFirstDocument' function. See the function
+ * documentation for details of the rewrite.
+ */
+struct RewriteOnFirstDocumentResult {
+    // The optional SortPattern of $group's $top or $bottom.
+    boost::optional<SortPattern> sortPattern;
+
+    // True if the directions of the sortPattern and the previous sort stage are different.
+    bool sortDirectionChangeIsRequired;
+
+    // The rewritten $group stage. nullptr is the rewrite is impossible.
+    std::unique_ptr<GroupFromFirstDocumentTransformation> rewrittenGroupStage;
+};
 
 /**
  * This class represents a $group stage generically - could be a streaming or hash based group.
@@ -113,7 +128,7 @@ public:
      */
     std::vector<AccumulationStatement>& getMutableAccumulationStatements();
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+    StageConstraints constraints(PipelineSplitState pipeState) const final {
         StageConstraints constraints(StreamType::kBlocking,
                                      PositionRequirement::kNone,
                                      HostTypeRequirement::kNone,
@@ -127,7 +142,7 @@ public:
     }
 
     GroupProcessor* getGroupProcessor() {
-        return &_groupProcessor;
+        return _groupProcessor.get();
     }
 
     /**
@@ -140,25 +155,14 @@ public:
      * results from earlier partial groups.
      */
     bool doingMerge() const {
-        return _groupProcessor.doingMerge();
-    }
-
-    const SpecificStats* getSpecificStats() const final {
-        return &_groupProcessor.getStats();
-    }
-
-    /**
-     * Returns true if this $group stage used disk during execution and false otherwise.
-     */
-    bool usedDisk() final {
-        return _groupProcessor.usedDisk();
+        return _groupProcessor->doingMerge();
     }
 
     /**
      * Returns maximum allowed memory footprint.
      */
     size_t getMaxMemoryUsageBytes() const {
-        return _groupProcessor.getMemoryTracker().maxAllowedMemoryUsageBytes();
+        return _groupProcessor->getMemoryTracker().maxAllowedMemoryUsageBytes();
     }
 
     /**
@@ -166,7 +170,7 @@ public:
      * return an empty vector.
      */
     const std::vector<std::string>& getIdFieldNames() const {
-        return _groupProcessor.getIdFieldNames();
+        return _groupProcessor->getIdFieldNames();
     }
 
     /**
@@ -174,7 +178,7 @@ public:
      * this will return a vector with one element.
      */
     const std::vector<boost::intrusive_ptr<Expression>>& getIdExpressions() const {
-        return _groupProcessor.getIdExpressions();
+        return _groupProcessor->getIdExpressions();
     }
 
     /**
@@ -192,7 +196,7 @@ public:
     /**
      * When possible, creates a document transformer that transforms the first document in a group
      * into one of the output documents of the $group stage. This is possible when we are grouping
-     * on a single field and all accumulators are $first or $top (or there are no accumluators).
+     * on a single field and all accumulators are $first or $top (or there are no accumulators).
      *
      * It is sometimes possible to use a DISTINCT_SCAN to scan the first document of each group,
      * in which case this transformation can replace the actual $group stage in the pipeline
@@ -201,12 +205,10 @@ public:
      * If a $group with $top/$bottom accumulator is transformed, its SortPattern is necessary to
      * create a DISTINCT_SCAN plan.
      *
-     * Returns:
-     * - first: the optional SortPattern of $group's $top or $bottom.
-     * - second: The rewritten $group stage.
+     * Returns RewriteOnFirstDocumentResult.
      */
-    std::pair<boost::optional<SortPattern>, std::unique_ptr<GroupFromFirstDocumentTransformation>>
-    rewriteGroupAsTransformOnFirstDocument() const;
+    RewriteOnFirstDocumentResult rewriteGroupAsTransformOnFirstDocument(
+        boost::optional<SortPattern> sortStagePattern) const;
 
     // True if this $group can be pushed down to SBE.
     SbeCompatibility sbeCompatibility() const {
@@ -218,7 +220,7 @@ public:
     }
 
     bool willBeMerged() const {
-        return _groupProcessor.willBeMerged();
+        return _groupProcessor->willBeMerged();
     }
 
     bool groupIsOnShardKey(const Pipeline& pipeline,
@@ -229,12 +231,8 @@ protected:
                             const boost::intrusive_ptr<ExpressionContext>& expCtx,
                             boost::optional<int64_t> maxMemoryUsageBytes = boost::none);
 
-    ~DocumentSourceGroupBase() override;
-
     void initializeFromBson(BSONElement elem);
     virtual bool isSpecFieldReserved(StringData fieldName) = 0;
-
-    void doDispose() final;
 
     virtual void serializeAdditionalFields(
         MutableDocument& out, const SerializationOptions& opts = SerializationOptions{}) const {};
@@ -251,7 +249,7 @@ protected:
      */
     boost::optional<RewriteGroupRequirements> getRewriteGroupRequirements() const;
 
-    GroupProcessor _groupProcessor;
+    std::shared_ptr<GroupProcessor> _groupProcessor;
 
 private:
     static constexpr StringData kDoingMergeSpecField = "$doingMerge"_sd;

@@ -29,19 +29,19 @@
 
 #pragma once
 
-#include <boost/filesystem.hpp>
-#include <boost/filesystem/path.hpp>
-#include <map>
-#include <set>
-#include <string>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/client/mongo_uri.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/stdx/mutex.h"
+
+#include <map>
+#include <set>
+#include <string>
+
+#include <boost/filesystem.hpp>
+#include <boost/filesystem/path.hpp>
 
 namespace mongo {
 
@@ -113,6 +113,8 @@ struct GoldenTestContextShellFailure {
     void diff() const;
 };
 
+void closeMochaStyleTestContext(Scope& scope);
+
 enum class NormalizationOpts : uint32_t {
     kResults = 0,
     // Set this bit to sort an array of results. Used in QueryTester.
@@ -125,6 +127,12 @@ enum class NormalizationOpts : uint32_t {
     kNormalizeNumerics = 1 << 3,
     // Set this bit to treat null and missing as the same value.
     kConflateNullAndMissing = 1 << 4,
+    // Set this bit to round floating points to 15 digits of precision.
+    kRoundFloatingPointNumerics = 1 << 5,
+    // Set this bit to run explain of the original query instead.
+    kExplain = 1 << 6,
+    // Set this bit to compare only the 'queryShapeHash' results.
+    kQueryShapeHash = 1 << 7,
 };
 using NormalizationOptsSet = NormalizationOpts;
 
@@ -156,5 +164,11 @@ void sortQueryResults(std::vector<BSONObj>& input);
  */
 BSONObj normalizeBSONObj(const BSONObj& input,
                          NormalizationOptsSet opts = NormalizationOpts::kResults);
+
+
+std::string getURIFromArgs(const std::string& arg,
+                           const std::string& host,
+                           const std::string& port);
+
 }  // namespace shell_utils
 }  // namespace mongo

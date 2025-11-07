@@ -5,25 +5,27 @@
  * with the same name as the old primary.
  *
  * @tags: [
+ *   # TODO(SERVER-109702): Evaluate if a primary-driven index build compatible test should be created.
+ *   requires_commit_quorum,
  *   requires_replication,
  * ]
  */
 
 import {configureFailPoint} from "jstests/libs/fail_point_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
-import {IndexBuildTest} from "jstests/noPassthrough/libs/index_build.js";
+import {IndexBuildTest} from "jstests/noPassthrough/libs/index_builds/index_build.js";
 
 // The index build conflict is only an issue when oplogApplicationEnforcesSteadyStateConstraints is
 // false. This is false by default outside of our testing.
 const rst = new ReplSetTest({
     nodes: 3,
-    nodeOptions: {setParameter: {oplogApplicationEnforcesSteadyStateConstraints: false}}
+    nodeOptions: {setParameter: {oplogApplicationEnforcesSteadyStateConstraints: false}},
 });
 rst.startSet();
 rst.initiate();
 
-const dbName = 'test';
-const collName = 'coll';
+const dbName = "test";
+const collName = "coll";
 const primary = rst.getPrimary();
 const primaryDB = primary.getDB(dbName);
 const primaryColl = primaryDB.getCollection(collName);
@@ -36,12 +38,13 @@ const secondary = rst.getSecondary();
 const secondaryDB = secondary.getDB(dbName);
 const secondaryColl = secondaryDB.getCollection(collName);
 
-const hangFpOnSetup = configureFailPoint(primary, 'hangIndexBuildOnSetupBeforeTakingLocks');
-const hangFpOnConflict = configureFailPoint(primary, 'hangAfterIndexBuildConflict');
+const hangFpOnSetup = configureFailPoint(primary, "hangIndexBuildOnSetupBeforeTakingLocks");
+const hangFpOnConflict = configureFailPoint(primary, "hangAfterIndexBuildConflict");
 
 jsTestLog("Starting index build");
-let awaitIndexBuild = IndexBuildTest.startIndexBuild(
-    primary, primaryColl.getFullName(), {a: 1}, null, [ErrorCodes.InterruptedDueToReplStateChange]);
+let awaitIndexBuild = IndexBuildTest.startIndexBuild(primary, primaryColl.getFullName(), {a: 1}, null, [
+    ErrorCodes.InterruptedDueToReplStateChange,
+]);
 
 jsTestLog("Waiting for primary to register the index build");
 hangFpOnSetup.wait();
@@ -50,8 +53,14 @@ jsTestLog("Stepping up the secondary");
 rst.stepUp(secondary);
 
 jsTestLog("Waiting for new primary to start index build with the same name");
-let awaitSecondaryIndexBuild =
-    IndexBuildTest.startIndexBuild(secondary, secondaryColl.getFullName(), {a: 1}, null, null, 2);
+let awaitSecondaryIndexBuild = IndexBuildTest.startIndexBuild(
+    secondary,
+    secondaryColl.getFullName(),
+    {a: 1},
+    null,
+    null,
+    2,
+);
 IndexBuildTest.waitForIndexBuildToStart(primaryDB, collName, "a_1");
 
 // Wait for the index builds to conflict on the old primary.

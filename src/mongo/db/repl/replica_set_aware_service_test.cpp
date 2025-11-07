@@ -27,29 +27,32 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <ratio>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/db/repl/replica_set_aware_service.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/database_holder.h"
-#include "mongo/db/catalog/database_holder_mock.h"
+#include "mongo/db/local_catalog/database_holder.h"
+#include "mongo/db/local_catalog/database_holder_mock.h"
+#include "mongo/db/local_catalog/shard_role_catalog/collection_sharding_state_factory_shard.h"
+#include "mongo/db/local_catalog/shard_role_catalog/database_sharding_state_factory_mock.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
 #include "mongo/db/repl/repl_set_config.h"
-#include "mongo/db/repl/replica_set_aware_service.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/topology/sharding_state.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/time_support.h"
+
+#include <memory>
+#include <ratio>
+
+#include <boost/move/utility_core.hpp>
 
 namespace mongo {
 
@@ -252,9 +255,14 @@ public:
         _stepUpCompleteSleepDuration = duration;
     }
 
+    void setStepDownSleepDuration(Duration<std::milli> duration) {
+        _stepDownSleepDuration = duration;
+    }
+
 private:
     Duration<std::milli> _stepUpBeginSleepDuration = Milliseconds(0);
     Duration<std::milli> _stepUpCompleteSleepDuration = Milliseconds(0);
+    Duration<std::milli> _stepDownSleepDuration = Milliseconds(0);
 
     ServiceContext* getServiceContext();
 
@@ -274,6 +282,11 @@ private:
     void onStepUpComplete(OperationContext* opCtx, long long term) final {
         sleepFor(_stepUpCompleteSleepDuration);
         TestService::onStepUpComplete(opCtx, term);
+    }
+
+    void onStepDown() final {
+        sleepFor(_stepDownSleepDuration);
+        TestService::onStepDown();
     }
 };
 
@@ -300,6 +313,14 @@ public:
         repl::ReplicationCoordinator::set(serviceContext, std::move(replCoord));
 
         DatabaseHolder::set(getServiceContext(), std::make_unique<DatabaseHolderMock>());
+
+        DatabaseShardingStateFactory::set(getServiceContext(),
+                                          std::make_unique<DatabaseShardingStateFactoryMock>());
+
+        CollectionShardingStateFactory::set(
+            getServiceContext(),
+            std::make_unique<CollectionShardingStateFactoryShard>(getServiceContext()));
+        ShardingState::create(getServiceContext());
     }
 
 protected:
@@ -404,6 +425,9 @@ TEST_F(ReplicaSetAwareServiceTest, ReplicaSetAwareServiceLogSlowServices) {
     std::string slowSingleServiceStepUpBeginMsg =
         "Duration spent in ReplicaSetAwareServiceRegistry::onStepUpBegin for service exceeded "
         "slowServiceOnStepUpBeginThresholdMS";
+    std::string slowSingleServiceStepDownMsg =
+        "Duration spent in ReplicaSetAwareServiceRegistry::onStepDown for service exceeded "
+        "slowServiceOnStepDownThresholdMS";
     std::string slowSingleServiceStepUpCompleteMsg =
         "Duration spent in ReplicaSetAwareServiceRegistry::onStepUpComplete for service "
         "exceeded slowServiceOnStepUpCompleteThresholdMS";
@@ -423,17 +447,17 @@ TEST_F(ReplicaSetAwareServiceTest, ReplicaSetAwareServiceLogSlowServices) {
     ASSERT_EQ(0, slowService->numCallsOnStepUpComplete);
 
     // With the default sleep interval (no sleep) we don't log anything.
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     ReplicaSetAwareServiceRegistry::get(sc).onStepUpBegin(opCtx, _term);
     ReplicaSetAwareServiceRegistry::get(sc).onStepUpComplete(opCtx, _term);
-    stopCapturingLogMessages();
+    logs.stop();
     ASSERT_EQ(1, slowService->numCallsOnStepUpBegin);
     ASSERT_EQ(1, slowService->numCallsOnStepUpComplete);
     ASSERT_EQ(0,
-              countTextFormatLogLinesContaining(
+              logs.countTextContaining(
                   "Duration spent in ReplicaSetAwareServiceRegistry::onStepUpBegin"));
     ASSERT_EQ(0,
-              countTextFormatLogLinesContaining(
+              logs.countTextContaining(
                   "Duration spent in ReplicaSetAwareServiceRegistry::onStepUpComplete"));
 
     // Introduce delays at the minimum thresholds at which we will log for a single service.
@@ -441,28 +465,32 @@ TEST_F(ReplicaSetAwareServiceTest, ReplicaSetAwareServiceLogSlowServices) {
         Milliseconds(repl::slowServiceOnStepUpBeginThresholdMS.load() + 1));
     slowService->setStepUpCompleteSleepDuration(
         Milliseconds(repl::slowServiceOnStepUpCompleteThresholdMS.load() + 1));
-    startCapturingLogMessages();
+    slowService->setStepDownSleepDuration(
+        Milliseconds(repl::slowServiceOnStepDownThresholdMS.load() + 1));
+    logs.start();
     ReplicaSetAwareServiceRegistry::get(sc).onStepUpBegin(opCtx, _term);
     ReplicaSetAwareServiceRegistry::get(sc).onStepUpComplete(opCtx, _term);
-    stopCapturingLogMessages();
+    ReplicaSetAwareServiceRegistry::get(sc).onStepDown();
+    logs.stop();
     ASSERT_EQ(2, slowService->numCallsOnStepUpBegin);
     ASSERT_EQ(2, slowService->numCallsOnStepUpComplete);
-    ASSERT_EQ(1, countTextFormatLogLinesContaining(slowSingleServiceStepUpBeginMsg));
-    ASSERT_EQ(1, countTextFormatLogLinesContaining(slowSingleServiceStepUpCompleteMsg));
+    ASSERT_EQ(1, logs.countTextContaining(slowSingleServiceStepUpBeginMsg));
+    ASSERT_EQ(1, logs.countTextContaining(slowSingleServiceStepUpCompleteMsg));
+    ASSERT_EQ(1, logs.countTextContaining(slowSingleServiceStepDownMsg));
 
     // Introduce a delay that should cause us to log for the total time across all services.
     slowService->setStepUpBeginSleepDuration(
         Milliseconds(repl::slowTotalOnStepUpBeginThresholdMS.load() + 1));
     slowService->setStepUpCompleteSleepDuration(
         Milliseconds(repl::slowTotalOnStepUpCompleteThresholdMS.load() + 1));
-    startCapturingLogMessages();
+    logs.start();
     ReplicaSetAwareServiceRegistry::get(sc).onStepUpBegin(opCtx, _term);
     ReplicaSetAwareServiceRegistry::get(sc).onStepUpComplete(opCtx, _term);
-    stopCapturingLogMessages();
+    logs.stop();
     ASSERT_EQ(3, slowService->numCallsOnStepUpBegin);
     ASSERT_EQ(3, slowService->numCallsOnStepUpComplete);
-    ASSERT_EQ(1, countTextFormatLogLinesContaining(slowTotalTimeStepUpBeginMsg));
-    ASSERT_EQ(1, countTextFormatLogLinesContaining(slowTotalTimeStepUpCompleteMsg));
+    ASSERT_EQ(1, logs.countTextContaining(slowTotalTimeStepUpBeginMsg));
+    ASSERT_EQ(1, logs.countTextContaining(slowTotalTimeStepUpCompleteMsg));
 }
 
 }  // namespace

@@ -29,22 +29,23 @@
 
 #pragma once
 
-#include <vector>
-
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/op_observer/op_observer.h"
 #include "mongo/db/op_observer/op_observer_noop.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/session/logical_session_id.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/version/releases.h"
 
-namespace mongo {
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUB mongo {
 
 /**
  * OpObserver for Feature Compatibility Version (FCV).
@@ -107,4 +108,4 @@ private:
     static void _onInsertOrUpdate(OperationContext* opCtx, const BSONObj& doc);
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

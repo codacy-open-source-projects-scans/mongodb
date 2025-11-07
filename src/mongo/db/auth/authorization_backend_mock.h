@@ -28,13 +28,6 @@
  */
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <functional>
-#include <map>
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/auth/authorization_backend_interface.h"
@@ -42,6 +35,14 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+
+#include <functional>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo::auth {
 
@@ -101,8 +102,8 @@ public:
     }
 
 protected:
-    RolesLocks _lockRoles(OperationContext* opCtx, const boost::optional<TenantId>&) override {
-        return RolesLocks();
+    RolesSnapshot _snapshotRoles(OperationContext* opCtx) override {
+        return RolesSnapshot();
     }
 
 private:

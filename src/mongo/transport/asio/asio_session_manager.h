@@ -30,17 +30,25 @@
 #pragma once
 
 #include "mongo/transport/session_manager_common.h"
+#include "mongo/util/modules.h"
 
 namespace mongo::transport {
 
 /**
  * ASIO specialization of SessionManagerCommon.
  */
-class AsioSessionManager : public SessionManagerCommon {
+class MONGO_MOD_NEEDS_REPLACEMENT AsioSessionManager : public SessionManagerCommon {
 public:
     using SessionManagerCommon::SessionManagerCommon;
 
     void appendStats(BSONObjBuilder* bob) const;
+
+    /**
+     * Increments and decrements the count of total Load Balanced connections.
+     * Currently only implemented in asio_session_manager.
+     */
+    void incrementLBConnections();
+    void decrementLBConnections();
 
 protected:
     std::string getClientThreadName(const Session&) const override;

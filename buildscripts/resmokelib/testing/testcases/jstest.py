@@ -3,7 +3,9 @@
 import copy
 import os
 import os.path
+import random
 import shutil
+import string
 import sys
 import threading
 import uuid
@@ -67,6 +69,9 @@ class _SingleJSTestCase(interface.ProcessTestCase):
         global_vars["MongoRunner.dataPath"] = data_path
 
         test_data = global_vars.get("TestData", {}).copy()
+        test_run_id = "".join(random.choices(string.ascii_letters + string.digits, k=10))
+        self.fixture.test_run_id = test_run_id
+        test_data["test_run_id"] = test_run_id
         test_data["minPort"] = core.network.PortAllocator.min_test_port(self.fixture.job_num)
         test_data["maxPort"] = core.network.PortAllocator.max_test_port(self.fixture.job_num)
         test_data["peerPids"] = self.fixture.pids()
@@ -114,6 +119,8 @@ class _SingleJSTestCase(interface.ProcessTestCase):
                 pass
 
             process_kwargs["env_vars"]["KRB5CCNAME"] = "DIR:" + krb5_dir
+
+        interface.append_process_tracking_options(process_kwargs, self._id)
 
         self.shell_options["process_kwargs"] = process_kwargs
 
@@ -167,7 +174,7 @@ class JSTestCaseBuilder(interface.TestCaseFactory):
 
     def make_process(self) -> "process.Process":
         # This function should only be called by MultiClientsTestCase's _make_process().
-        return self.test_case_template._make_process()  # pylint: disable=protected-access
+        return self.test_case_template._make_process()
 
     def create_test_case(self, logger: logging.Logger, shell_options: dict) -> _SingleJSTestCase:
         test_case = _SingleJSTestCase(
@@ -200,7 +207,7 @@ class MultiClientsTestCase(interface.TestCase):
             """Run the jstest."""
             try:
                 threading.Thread.run(self)
-            except:  # pylint: disable=bare-except
+            except:
                 self.exc_info = sys.exc_info()
 
     def __init__(
@@ -217,8 +224,9 @@ class MultiClientsTestCase(interface.TestCase):
         self.num_clients = MultiClientsTestCase.DEFAULT_CLIENT_NUM
         self.use_tenant_client = False
         self._factory = factory
+        self._child_test_cases = []
 
-    def configure(  # pylint: disable=arguments-differ,keyword-arg-before-vararg
+    def configure(
         self,
         fixture: "interface.Fixture",
         num_clients: int = DEFAULT_CLIENT_NUM,
@@ -234,13 +242,14 @@ class MultiClientsTestCase(interface.TestCase):
 
     def _make_process(self):
         # This function should only be called by interface.py's as_command().
-        return self._factory.make_process()  # pylint: disable=protected-access
+        return self._factory.make_process()
 
     def _run_single_copy(self):
         tenant_id = str(ObjectId()) if self.use_tenant_client else None
         test_case = self._factory.create_test_case_for_thread(
             self.logger, num_clients=1, thread_id=0, tenant_id=tenant_id
         )
+        self._child_test_cases = [test_case]
 
         try:
             test_case.run_test()
@@ -251,7 +260,6 @@ class MultiClientsTestCase(interface.TestCase):
 
     def _run_multiple_copies(self):
         threads = []
-        test_cases = []
         try:
             # If there are multiple clients, make a new thread for each client.
             for thread_id in range(self.num_clients):
@@ -262,7 +270,7 @@ class MultiClientsTestCase(interface.TestCase):
                 test_case = self._factory.create_test_case_for_thread(
                     logger, num_clients=self.num_clients, thread_id=thread_id, tenant_id=tenant_id
                 )
-                test_cases.append(test_case)
+                self._child_test_cases.append(test_case)
 
                 thread = self.ThreadWithException(target=test_case.run_test)
                 threads.append(thread)
@@ -278,7 +286,7 @@ class MultiClientsTestCase(interface.TestCase):
 
             # Go through each test's return codes, asserting safe exits and storing the last nonzero code.
             return_code = 0
-            for test_case in test_cases:
+            for test_case in self._child_test_cases:
                 if test_case.return_code != 0:
                     self._raise_if_unsafe_exit(return_code)
                     return_code = test_case.return_code
@@ -302,8 +310,17 @@ class MultiClientsTestCase(interface.TestCase):
         else:
             self._run_multiple_copies()
 
+    def on_timeout(self):
+        self.timed_out.set()
+        for testcase in self._child_test_cases:
+            testcase.on_timeout()
+
     def _raise_if_unsafe_exit(self, return_code: int):
         """Determine if a return code represents and unsafe exit."""
+        if self.timed_out.is_set():
+            # If the test timed out, it is assumed a non-zero exit code is
+            # from the hang-analyzer intentionally killing the process.
+            return
         # 252 and 253 may be returned in failed test executions.
         # (i.e. -4 and -3 in mongo_main.cpp)
         if return_code not in (252, 253, 0):
@@ -311,7 +328,7 @@ class MultiClientsTestCase(interface.TestCase):
                 f"Mongo shell exited with code {return_code} while running jstest {self.basename()}."
                 " Further test execution may be unsafe."
             )
-            raise self.propagate_error  # pylint: disable=raising-bad-type
+            raise self.propagate_error
 
 
 class JSTestCase(MultiClientsTestCase):
@@ -349,7 +366,7 @@ class AllVersionsJSTestCase(JSTestCase):
     """
     Alias for JSTestCase for multiversion passthrough suites.
 
-    It run with all combinations of versions of replica sets and sharded clusters.
+    It runs with all combinations of versions of replica sets and sharded clusters.
     The distinct name is picked up by task generation.
     """
 

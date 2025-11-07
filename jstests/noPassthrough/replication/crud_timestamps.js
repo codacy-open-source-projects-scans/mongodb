@@ -3,7 +3,6 @@
 // Test the correct timestamping of insert, update, and delete writes along with their accompanying
 // index updates.
 //
-import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
 const dbName = "test";
@@ -26,10 +25,12 @@ if (!testDB.serverStatus().storageEngine.supportsSnapshotReadConcern) {
 }
 
 // Turn off timestamp reaping.
-assert.commandWorked(testDB.adminCommand({
-    configureFailPoint: "WTPreserveSnapshotHistoryIndefinitely",
-    mode: "alwaysOn",
-}));
+assert.commandWorked(
+    testDB.adminCommand({
+        configureFailPoint: "WTPreserveSnapshotHistoryIndefinitely",
+        mode: "alwaysOn",
+    }),
+);
 
 const session = testDB.getMongo().startSession({causalConsistency: false});
 const sessionDb = session.getDatabase(dbName);
@@ -39,9 +40,8 @@ const startTime = response.operationTime;
 function check(atClusterTime, expected) {
     session.startTransaction({readConcern: {level: "snapshot", atClusterTime: atClusterTime}});
     // Check both a collection scan and scanning the _id index.
-    [{$natural: 1}, {_id: 1}].forEach(sort => {
-        let response = assert.commandWorked(
-            sessionDb.runCommand({find: collName, sort: sort, singleBatch: true}));
+    [{$natural: 1}, {_id: 1}].forEach((sort) => {
+        let response = assert.commandWorked(sessionDb.runCommand({find: collName, sort: sort, singleBatch: true}));
         assert.eq(expected, response.cursor.firstBatch);
     });
     assert.commandWorked(session.commitTransaction_forTesting());
@@ -54,7 +54,7 @@ assert.commandWorked(coll.runCommand(request));
 request = {
     insert: coll.getName(),
     documents: [{_id: 2}],
-    ordered: false
+    ordered: false,
 };
 assert.commandWorked(coll.runCommand(request));
 
@@ -72,9 +72,9 @@ request = {
     update: coll.getName(),
     updates: [
         {q: {_id: 3, a: 1}, u: {$set: {a: 2}}, upsert: true},
-        {q: {_id: 4, a: 1}, u: {$set: {a: 3}}, upsert: true}
+        {q: {_id: 4, a: 1}, u: {$set: {a: 3}}, upsert: true},
     ],
-    ordered: true
+    ordered: true,
 };
 assert.commandWorked(coll.runCommand(request));
 
@@ -88,13 +88,16 @@ check(ts2, [{_id: 1}, {_id: 2}, {_id: 3, a: 2}, {_id: 4, a: 3}]);
 
 request = {
     update: coll.getName(),
-    updates: [{q: {_id: 3, a: 2}, u: {$set: {a: 4}}}, {q: {_id: 4, a: 3}, u: {$set: {a: 5}}}],
-    ordered: true
+    updates: [
+        {q: {_id: 3, a: 2}, u: {$set: {a: 4}}},
+        {q: {_id: 4, a: 3}, u: {$set: {a: 5}}},
+    ],
+    ordered: true,
 };
 assert.commandWorked(coll.runCommand(request));
 
-ts1 = oplog.findOne({op: 'u', o2: {_id: 3}}).ts;
-ts2 = oplog.findOne({op: 'u', o2: {_id: 4}}).ts;
+ts1 = oplog.findOne({op: "u", o2: {_id: 3}}).ts;
+ts2 = oplog.findOne({op: "u", o2: {_id: 4}}).ts;
 
 check(ts1, [{_id: 1}, {_id: 2}, {_id: 3, a: 4}, {_id: 4, a: 3}]);
 check(ts2, [{_id: 1}, {_id: 2}, {_id: 3, a: 4}, {_id: 4, a: 5}]);
@@ -103,42 +106,30 @@ check(ts2, [{_id: 1}, {_id: 2}, {_id: 3, a: 4}, {_id: 4, a: 5}]);
 request = {
     insert: coll.getName(),
     documents: [{_id: 5}, {_id: 6}, {_id: 7}],
-    ordered: false
+    ordered: false,
 };
-if (FeatureFlagUtil.isEnabled(testDB, "ReplicateVectoredInsertsTransactionally")) {
-    assert.commandWorked(testDB.adminCommand({setParameter: 1, internalInsertMaxBatchSize: 2}));
-    assert.commandWorked(coll.runCommand(request));
-    // First two inserts will be in an applyOps, last will be on its own.
-    ts1 = oplog.findOne({"o.applyOps.o": {_id: 5}}).ts;
-    ts2 = oplog.findOne({o: {_id: 7}}).ts;
+assert.commandWorked(testDB.adminCommand({setParameter: 1, internalInsertMaxBatchSize: 2}));
+assert.commandWorked(coll.runCommand(request));
+// First two inserts will be in an applyOps, last will be on its own.
+ts1 = oplog.findOne({"o.applyOps.o": {_id: 5}}).ts;
+ts2 = oplog.findOne({o: {_id: 7}}).ts;
 
-    check(startTime, []);
-    check(ts1, [{_id: 1}, {_id: 2}, {_id: 3, a: 4}, {_id: 4, a: 5}, {_id: 5}, {_id: 6}]);
-    check(ts2, [{_id: 1}, {_id: 2}, {_id: 3, a: 4}, {_id: 4, a: 5}, {_id: 5}, {_id: 6}, {_id: 7}]);
-} else {
-    assert.commandWorked(coll.runCommand(request));
-    ts1 = oplog.findOne({o: {_id: 5}}).ts;
-    ts2 = oplog.findOne({o: {_id: 6}}).ts;
-    let ts3 = oplog.findOne({o: {_id: 7}}).ts;
-
-    check(startTime, []);
-    check(ts1, [{_id: 1}, {_id: 2}, {_id: 3, a: 4}, {_id: 4, a: 5}, {_id: 5}]);
-    check(ts2, [{_id: 1}, {_id: 2}, {_id: 3, a: 4}, {_id: 4, a: 5}, {_id: 5}, {_id: 6}]);
-    check(ts3, [{_id: 1}, {_id: 2}, {_id: 3, a: 4}, {_id: 4, a: 5}, {_id: 5}, {_id: 6}, {_id: 7}]);
-}
+check(startTime, []);
+check(ts1, [{_id: 1}, {_id: 2}, {_id: 3, a: 4}, {_id: 4, a: 5}, {_id: 5}, {_id: 6}]);
+check(ts2, [{_id: 1}, {_id: 2}, {_id: 3, a: 4}, {_id: 4, a: 5}, {_id: 5}, {_id: 6}, {_id: 7}]);
 
 // delete
 
 request = {
     delete: coll.getName(),
     deletes: [{q: {}, limit: 0}],
-    ordered: false
+    ordered: false,
 };
 
 assert.commandWorked(coll.runCommand(request));
 
-const applyOps = oplog.findOne({op: 'c', ns: 'admin.$cmd', 'o.applyOps.op': 'd'});
-const ts = applyOps['ts'];
+const applyOps = oplog.findOne({op: "c", ns: "admin.$cmd", "o.applyOps.op": "d"});
+const ts = applyOps["ts"];
 check(ts, []);
 
 session.endSession();

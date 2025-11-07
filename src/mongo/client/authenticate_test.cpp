@@ -27,23 +27,22 @@
  *    it in the license file.
  */
 
-#include <queue>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
+#include "mongo/client/authenticate.h"
 
 #include "mongo/bson/bsonmisc.h"
-#include "mongo/client/authenticate.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/md5.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/password_digest.h"
+
+#include <queue>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
 
 namespace {
 
@@ -72,11 +71,12 @@ public:
         md5digest d;
         {
             md5_state_t st;
-            md5_init_state(&st);
-            md5_append(&st, (const md5_byte_t*)_nonce.c_str(), _nonce.size());
-            md5_append(&st, (const md5_byte_t*)_username.c_str(), _username.size());
-            md5_append(&st, (const md5_byte_t*)_password_digest.c_str(), _password_digest.size());
-            md5_finish(&st, d);
+            md5_init_state_deprecated(&st);
+            md5_append_deprecated(&st, (const md5_byte_t*)_nonce.c_str(), _nonce.size());
+            md5_append_deprecated(&st, (const md5_byte_t*)_username.c_str(), _username.size());
+            md5_append_deprecated(
+                &st, (const md5_byte_t*)_password_digest.c_str(), _password_digest.size());
+            md5_finish_deprecated(&st, d);
         }
         _digest = digestToString(d);
     }
@@ -123,11 +123,10 @@ public:
         pushResponse(BSON("ok" << 1));
 
         // Call clientAuthenticate()
-        return BSON("mechanism"
-                    << "MONGODB-X509"
-                    << "db"
-                    << "$external"
-                    << "user" << _username);
+        return BSON("mechanism" << "MONGODB-X509"
+                                << "db"
+                                << "$external"
+                                << "user" << _username);
     }
 
 

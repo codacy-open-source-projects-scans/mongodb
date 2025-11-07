@@ -29,10 +29,6 @@
 
 #include "mongo/db/pipeline/document_source_documents.h"
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/pipeline/document_source.h"
@@ -44,6 +40,8 @@
 #include "mongo/db/query/allowed_contexts.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/uuid.h"
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -77,6 +75,19 @@ std::list<intrusive_ptr<DocumentSource>> DocumentSourceDocuments::createFromBson
                     expCtx.get(), kGenFieldName, expCtx->variablesParseState),
                 "elements within the array passed to $documents",
                 SbeCompatibility::noRequirements)};
+}
+
+
+boost::optional<std::vector<BSONObj>> DocumentSourceDocuments::extractDesugaredStagesFromPipeline(
+    const std::vector<BSONObj>& pipeline) {
+    if (pipeline.size() >= 4 && pipeline[0].hasField(DocumentSourceQueue::kStageName) &&
+        pipeline[1].hasField(DocumentSourceProject::kStageName) &&
+        pipeline[1][DocumentSourceProject::kStageName].Obj().hasField(
+            DocumentSourceDocuments::kGenFieldName)) {
+        return boost::optional<std::vector<BSONObj>>(
+            {pipeline[0], pipeline[1], pipeline[2], pipeline[3]});
+    }
+    return boost::none;
 }
 
 }  // namespace mongo

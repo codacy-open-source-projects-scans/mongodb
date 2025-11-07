@@ -3,10 +3,12 @@
  * the index should not be visible on the secondary until it has processed the commitIndexBuild
  * oplog entry.
  * @tags: [
+ *   # TODO(SERVER-110840): Primary-driven index builds don't support draining side writes yet.
+ *   primary_driven_index_builds_incompatible,
  *   requires_replication,
  * ]
  */
-import {IndexInitialSyncTest} from "jstests/noPassthrough/libs/index_initial_sync.js";
+import {IndexInitialSyncTest} from "jstests/noPassthrough/libs/index_builds/index_initial_sync.js";
 
 const nodes = [
     {},

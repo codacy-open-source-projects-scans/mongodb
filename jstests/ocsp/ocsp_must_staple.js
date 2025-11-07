@@ -6,7 +6,7 @@ import {
     OCSP_CA_PEM,
     OCSP_SERVER_MUSTSTAPLE_CERT,
     supportsStapling,
-    waitForServer
+    waitForServer,
 } from "jstests/ocsp/lib/ocsp_helpers.js";
 
 if (!supportsStapling()) {
@@ -17,10 +17,10 @@ let mock_ocsp = new MockOCSPServer();
 mock_ocsp.start();
 
 let ocsp_options = {
-    sslMode: "requireSSL",
-    sslPEMKeyFile: OCSP_SERVER_MUSTSTAPLE_CERT,
-    sslCAFile: OCSP_CA_PEM,
-    sslAllowInvalidHostnames: "",
+    tlsMode: "requireTLS",
+    tlsCertificateKeyFile: OCSP_SERVER_MUSTSTAPLE_CERT,
+    tlsCAFile: OCSP_CA_PEM,
+    tlsAllowInvalidHostnames: "",
     setParameter: {
         "ocspEnabled": "true",
     },
@@ -36,20 +36,22 @@ MongoRunner.stopMongod(conn);
 
 ocsp_options = Object.merge(ocsp_options, {
     setParameter: {ocspEnabled: true, "failpoint.disableStapling": "{mode: 'alwaysOn'}"},
-    waitForConnect: false
+    waitForConnect: false,
 });
 
 assert.doesNotThrow(() => {
     conn = MongoRunner.runMongod(ocsp_options);
 });
 jsTestLog(
-    "Testing that a client can connect to a server using a MustStaple certificate and tlsAllowInvalidCertificates enabled.");
+    "Testing that a client can connect to a server using a MustStaple certificate and tlsAllowInvalidCertificates enabled.",
+);
 waitForServer(conn);
 
 // assert that trying to connect to a server using a MustStaple certificate without a stapled OCSP
 // response will fail
 jsTestLog(
-    "Testing that a client cannot connect to a server using a MustStaple certificate without a stapled response.");
+    "Testing that a client cannot connect to a server using a MustStaple certificate without a stapled response.",
+);
 assert.throws(() => {
     new Mongo(conn.host);
 });

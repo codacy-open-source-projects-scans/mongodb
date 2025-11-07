@@ -27,27 +27,24 @@
  *    it in the license file.
  */
 
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/exec/add_fields_projection_executor.h"
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/exec/add_fields_projection_executor.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_metadata_fields.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <vector>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::projection_executor {
 namespace {
@@ -112,14 +109,24 @@ TEST(AddFieldsProjectionExecutorSpec, ThrowsOnCreationWithInvalidObjectsOrExpres
     ASSERT_THROWS(AddFieldsProjectionExecutor::create(
                       expCtx, BSON("a" << BSON("$add" << BSON_ARRAY(4 << 2) << "b" << 1))),
                   AssertionException);
-    ASSERT_THROWS(
-        AddFieldsProjectionExecutor::create(expCtx,
-                                            BSON("a" << BSON("$gt" << BSON("bad"
-                                                                           << "arguments")))),
-        AssertionException);
+    ASSERT_THROWS(AddFieldsProjectionExecutor::create(
+                      expCtx, BSON("a" << BSON("$gt" << BSON("bad" << "arguments")))),
+                  AssertionException);
     ASSERT_THROWS(AddFieldsProjectionExecutor::create(
                       expCtx, BSON("a" << false << "b" << BSON("$unknown" << BSON_ARRAY(4 << 2)))),
                   AssertionException);
+}
+
+TEST(AddFieldsProjectionExecutorSpec, EmbeddedNullBytes) {
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    // Literals with embedded nulls are allowed as values.
+    AddFieldsProjectionExecutor::create(expCtx, BSON("a" << BSON("b" << "a\0b"_sd)));
+    // Embedded nulls are not allowed in field path expressions.
+    ASSERT_THROWS(AddFieldsProjectionExecutor::create(expCtx, BSON("a" << BSON("b" << "$a\0b"_sd))),
+                  AssertionException);
+    // It's not possible to construct a BSONObj with embedded nulls in field names, so such objects
+    // are not possible inputs to 'AddFieldsProjectionExecutor::create()'.
+    ASSERT_THROWS(BSON("a\0b"_sd << 1), AssertionException);
 }
 
 TEST(AddFieldsProjectionExecutor, DoesNotErrorOnEmptySpec) {
@@ -177,10 +184,9 @@ TEST(AddFieldsProjectionExecutorDeps, IncludesTopLevelFieldInDependenciesWhenAdd
 TEST(AddFieldsProjectionExecutorDeps, AddsDependenciesForComputedFields) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddFieldsProjectionExecutor addition(expCtx);
-    addition.parse(BSON("x.y"
-                        << "$z"
-                        << "a"
-                        << "$b"));
+    addition.parse(BSON("x.y" << "$z"
+                              << "a"
+                              << "$b"));
 
     DepsTracker deps;
     addition.addDependencies(&deps);
@@ -375,10 +381,9 @@ TEST(AddFieldsProjectionExecutorExecutionTest,
      ReplacesMultipleFieldsWhilePreservingInputFieldOrder) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddFieldsProjectionExecutor addition(expCtx);
-    addition.parse(BSON("second"
-                        << "SECOND"
-                        << "first"
-                        << "FIRST"));
+    addition.parse(BSON("second" << "SECOND"
+                                 << "first"
+                                 << "FIRST"));
     auto result = addition.applyProjection(Document{{"first", 0}, {"second", 1}, {"third", 2}});
     auto expectedResult = Document{{"first", "FIRST"_sd}, {"second", "SECOND"_sd}, {"third", 2}};
     ASSERT_DOCUMENT_EQ(result, expectedResult);
@@ -388,10 +393,9 @@ TEST(AddFieldsProjectionExecutorExecutionTest,
 TEST(AddFieldsProjectionExecutorExecutionTest, AddsNewFieldsAfterExistingFieldsInOrderSpecified) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddFieldsProjectionExecutor addition(expCtx);
-    addition.parse(BSON("firstComputed"
-                        << "FIRST"
-                        << "secondComputed"
-                        << "SECOND"));
+    addition.parse(BSON("firstComputed" << "FIRST"
+                                        << "secondComputed"
+                                        << "SECOND"));
     auto result = addition.applyProjection(Document{{"first", 0}, {"second", 1}, {"third", 2}});
     auto expectedResult = Document{{"first", 0},
                                    {"second", 1},
@@ -407,10 +411,9 @@ TEST(AddFieldsProjectionExecutorExecutionTest,
      ReplacesAndAddsNewFieldsWithSameOrderingRulesAsSeparately) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddFieldsProjectionExecutor addition(expCtx);
-    addition.parse(BSON("firstComputed"
-                        << "FIRST"
-                        << "second"
-                        << "SECOND"));
+    addition.parse(BSON("firstComputed" << "FIRST"
+                                        << "second"
+                                        << "SECOND"));
     auto result = addition.applyProjection(Document{{"first", 0}, {"second", 1}, {"third", 2}});
     auto expectedResult = Document{
         {"first", 0}, {"second", "SECOND"_sd}, {"third", 2}, {"firstComputed", "FIRST"_sd}};
@@ -422,8 +425,7 @@ TEST(AddFieldsProjectionExecutorExecutionTest,
 TEST(AddFieldsProjectionExecutorExecutionTest, IdFieldIsKeptInOrderItAppearsInInputDocument) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddFieldsProjectionExecutor addition(expCtx);
-    addition.parse(BSON("newField"
-                        << "computedVal"));
+    addition.parse(BSON("newField" << "computedVal"));
     auto result = addition.applyProjection(Document{{"_id", "ID"_sd}, {"a", 1}});
     auto expectedResult = Document{{"_id", "ID"_sd}, {"a", 1}, {"newField", "computedVal"_sd}};
     ASSERT_DOCUMENT_EQ(result, expectedResult);
@@ -437,8 +439,7 @@ TEST(AddFieldsProjectionExecutorExecutionTest, IdFieldIsKeptInOrderItAppearsInIn
 TEST(AddFieldsProjectionExecutorExecutionTest, ShouldReplaceIdWithComputedId) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddFieldsProjectionExecutor addition(expCtx);
-    addition.parse(BSON("_id"
-                        << "newId"));
+    addition.parse(BSON("_id" << "newId"));
     auto result = addition.applyProjection(Document{{"_id", "ID"_sd}, {"a", 1}});
     auto expectedResult = Document{{"_id", "newId"_sd}, {"a", 1}};
     ASSERT_DOCUMENT_EQ(result, expectedResult);
@@ -531,8 +532,7 @@ TEST(AddFieldsProjectionExecutorExecutionTest, AppliesDottedAdditionToEachElemen
 TEST(AddFieldsProjectionExecutorExecutionTest, CreatesNestedSubDocumentsAllTheWayToAddedField) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddFieldsProjectionExecutor addition(expCtx);
-    addition.parse(BSON("a.b.c.d"
-                        << "computedVal"));
+    addition.parse(BSON("a.b.c.d" << "computedVal"));
 
     // Should add the path if it doesn't exist.
     auto result = addition.applyProjection(Document{});
@@ -592,10 +592,9 @@ TEST(AddFieldsProjectionExecutorExecutionTest, ShouldAllowMixedNestedAndDottedFi
 TEST(AddFieldsProjectionExecutorExecutionTest, AddsNestedAddedFieldsInOrderSpecified) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddFieldsProjectionExecutor addition(expCtx);
-    addition.parse(BSON("b.d"
-                        << "FIRST"
-                        << "b.c"
-                        << "SECOND"));
+    addition.parse(BSON("b.d" << "FIRST"
+                              << "b.c"
+                              << "SECOND"));
     auto result = addition.applyProjection(Document{});
     auto expectedResult = Document{{"b", Document{{"d", "FIRST"_sd}, {"c", "SECOND"_sd}}}};
     ASSERT_DOCUMENT_EQ(result, expectedResult);
@@ -627,8 +626,7 @@ TEST(AddFieldsProjectionExecutorExecutionTest, AlwaysKeepsMetadataFromOriginalDo
 TEST(AddFieldsProjectionExecutorExecutionTest, ExtractComputedProjections) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddFieldsProjectionExecutor addFields(expCtx);
-    addFields.parse(BSON("meta1" << BSON("$toUpper"
-                                         << "$myMeta.x")));
+    addFields.parse(BSON("meta1" << BSON("$toUpper" << "$myMeta.x")));
 
     const std::set<StringData> reservedNames{};
     auto [extractedAddFields, deleteFlag] =
@@ -645,9 +643,8 @@ TEST(AddFieldsProjectionExecutorExecutionTest, ExtractComputedProjections) {
 TEST(AddFieldsProjectionExecutorExecutionTest, ExtractComputedProjectionsPrefix) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddFieldsProjectionExecutor addFields(expCtx);
-    addFields.parse(BSON("meta1" << BSON("$toUpper"
-                                         << "$myMeta.x")
-                                 << "computed2" << BSON("$add" << BSON_ARRAY("$c" << 1))));
+    addFields.parse(BSON("meta1" << BSON("$toUpper" << "$myMeta.x") << "computed2"
+                                 << BSON("$add" << BSON_ARRAY("$c" << 1))));
 
     const std::set<StringData> reservedNames{};
     auto [extractedAddFields, deleteFlag] =
@@ -666,8 +663,7 @@ TEST(AddFieldsProjectionExecutorExecutionTest, DoNotExtractComputedProjectionsSu
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddFieldsProjectionExecutor addFields(expCtx);
     addFields.parse(BSON("computed1" << BSON("$add" << BSON_ARRAY("$c" << 1)) << "meta2"
-                                     << BSON("$toUpper"
-                                             << "$myMeta.x")));
+                                     << BSON("$toUpper" << "$myMeta.x")));
 
     const std::set<StringData> reservedNames{};
     auto [extractedAddFields, deleteFlag] =
@@ -684,11 +680,8 @@ TEST(AddFieldsProjectionExecutorExecutionTest, DoNotExtractComputedProjectionsSu
 TEST(AddFieldsProjectionExecutorExecutionTest, DoNotExtractComputedProjectionWithReservedName) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddFieldsProjectionExecutor addFields(expCtx);
-    addFields.parse(BSON("meta1" << BSON("$toUpper"
-                                         << "$myMeta.x")
-                                 << "data"
-                                 << BSON("$toUpper"
-                                         << "$myMeta.y")));
+    addFields.parse(BSON("meta1" << BSON("$toUpper" << "$myMeta.x") << "data"
+                                 << BSON("$toUpper" << "$myMeta.y")));
 
     const std::set<StringData> reservedNames{"data"};
     auto [extractedAddFields, deleteFlag] =
@@ -707,9 +700,8 @@ TEST(AddFieldsProjectionExecutorExecutionTest,
      ExtractComputedProjectionShouldNotHideDependentSubFields) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddFieldsProjectionExecutor addFields(expCtx);
-    addFields.parse(BSON("obj"
-                         << "$myMeta"
-                         << "b" << BSON("$add" << BSON_ARRAY("$obj.a" << 1))));
+    addFields.parse(BSON("obj" << "$myMeta"
+                               << "b" << BSON("$add" << BSON_ARRAY("$obj.a" << 1))));
 
     const std::set<StringData> reservedNames{};
     auto [extractedAddFields, deleteFlag] =
@@ -727,10 +719,9 @@ TEST(AddFieldsProjectionExecutorExecutionTest,
      ExtractComputedProjectionShouldNotHideDependentFieldsWithDottedSibling) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddFieldsProjectionExecutor addFields(expCtx);
-    addFields.parse(BSON("a"
-                         << "$myMeta"
-                         << "c.b"
-                         << "$a.x"));
+    addFields.parse(BSON("a" << "$myMeta"
+                             << "c.b"
+                             << "$a.x"));
 
     const std::set<StringData> reservedNames{};
     auto [extractedAddFields, deleteFlag] =
@@ -746,8 +737,7 @@ TEST(AddFieldsProjectionExecutorExecutionTest,
 TEST(AddFieldsProjectionExecutorExecutionTest, ExtractComputedProjectionShouldNotIncludeId) {
     boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     AddFieldsProjectionExecutor addFields(expCtx);
-    addFields.parse(BSON("a" << BSON("$sum" << BSON_ARRAY("$myMeta"
-                                                          << "$_id"))));
+    addFields.parse(BSON("a" << BSON("$sum" << BSON_ARRAY("$myMeta" << "$_id"))));
 
     const std::set<StringData> reservedNames{};
     auto [extractedAddFields, deleteFlag] =

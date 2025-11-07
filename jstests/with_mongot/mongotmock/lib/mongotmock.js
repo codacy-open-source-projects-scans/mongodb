@@ -1,11 +1,13 @@
 /**
  * Control mongotmock.
+ * @tags: [
+ *   # Unix domain sockets are not available on windows.
+ *   incompatible_with_windows_tls
+ * ]
  */
 
-import {
-    getDefaultExplainContents,
-    getDefaultLastExplainContents
-} from "jstests/with_mongot/mongotmock/lib/utils.js";
+import {CA_CERT, CLIENT_CERT, SERVER_CERT} from "jstests/ssl/libs/ssl_helpers.js";
+import {getDefaultExplainContents, getDefaultLastExplainContents} from "jstests/with_mongot/mongotmock/lib/utils.js";
 
 /**
  * Helper to create an expected command for mongot.
@@ -19,6 +21,7 @@ import {
  *     as number of requested docs.
  * @param {Object} explainVerbosity - Optional: contains explain verbosity object, i.e. {verbosity:
  *     "queryPlanner"}
+ * @param {Object} optimizationFlags - Optional: contains optimization options for mongot
  */
 export function mongotCommandForQuery({
     query,
@@ -28,7 +31,8 @@ export function mongotCommandForQuery({
     protocolVersion = null,
     cursorOptions = null,
     explainVerbosity = null,
-    viewName = null
+    viewName = null,
+    optimizationFlags = null,
 }) {
     let cmd = {search: collName, $db: db, collectionUUID, query};
     if (protocolVersion != null) {
@@ -42,6 +46,9 @@ export function mongotCommandForQuery({
     }
     if (viewName != null) {
         cmd.viewName = viewName;
+    }
+    if (optimizationFlags != null) {
+        cmd.optimizationFlags = optimizationFlags;
     }
     return cmd;
 }
@@ -70,28 +77,28 @@ export function mongotResponseForBatch(nextBatch, id, ns, ok, explainContents = 
 /**
  * Same as above but for multiple cursors.
  */
-export function mongotMultiCursorResponseForBatch(firstCursorBatch,
-                                                  firstId,
-                                                  secondCursorBatch,
-                                                  secondId,
-                                                  ns,
-                                                  ok,
-                                                  explainContents = null,
-                                                  metaExplainContents = null) {
+export function mongotMultiCursorResponseForBatch(
+    firstCursorBatch,
+    firstId,
+    secondCursorBatch,
+    secondId,
+    ns,
+    ok,
+    explainContents = null,
+    metaExplainContents = null,
+) {
     let resultsCursor = {
         cursor: {id: firstId, ns, nextBatch: firstCursorBatch, type: "results"},
-        ok
+        ok,
     };
     let metaCursor = {cursor: {id: secondId, ns, nextBatch: secondCursorBatch, type: "meta"}, ok};
     if (explainContents != null) {
         resultsCursor.explain = explainContents;
-        assert(metaExplainContents,
-               "metaExplainContents should not be null as explainContents is not null");
+        assert(metaExplainContents, "metaExplainContents should not be null as explainContents is not null");
     }
     if (metaExplainContents != null) {
         metaCursor.explain = metaExplainContents;
-        assert(explainContents,
-               "explainContents should not be null as metaExplainContents is not null");
+        assert(explainContents, "explainContents should not be null as metaExplainContents is not null");
     }
     return {ok, cursors: [resultsCursor, metaCursor]};
 }
@@ -110,7 +117,7 @@ export function mongotKillCursorResponse(collName, cursorId) {
             cursorsAlive: [],
             cursorsUnknown: [],
             ok: 1,
-        }
+        },
     };
 }
 
@@ -136,27 +143,34 @@ export function getDefaultProtocolVersionForPlanShardedSearch() {
  * @param {bool} maybeUnused
  * @param {Object} explainVerbosity should be of the form {explain: explainVerbosity}
  */
-export function mockPlanShardedSearchResponseOnConn(collName,
-                                                    query,
-                                                    dbName,
-                                                    sortSpec,
-                                                    stWithMock,
-                                                    conn,
-                                                    maybeUnused = false,
-                                                    explainVerbosity = null) {
+export function mockPlanShardedSearchResponseOnConn(
+    collName,
+    query,
+    dbName,
+    sortSpec,
+    stWithMock,
+    conn,
+    maybeUnused = false,
+    explainVerbosity = null,
+    hasSearchMetaStage = false,
+) {
     mockPlanShardedSearchResponse.cursorId++;
     let resp = {
         ok: 1,
         protocolVersion: protocolVersion,
         // Tests calling this don't use metadata. Give a trivial pipeline.
-        metaPipeline: [{$limit: 1}]
+        metaPipeline: [{$limit: 1}],
     };
     if (sortSpec != undefined) {
         resp["sortSpec"] = sortSpec;
     }
 
-    let expectedCommand =
-        {planShardedSearch: collName, query: query, $db: dbName, searchFeatures: {shardedSort: 1}};
+    let expectedCommand = {planShardedSearch: collName, query: query, $db: dbName, searchFeatures: {shardedSort: 1}};
+
+    if (hasSearchMetaStage) {
+        expectedCommand.optimizationFlags = {omitSearchDocumentResults: true};
+    }
+
     if (explainVerbosity != null) {
         expectedCommand.explain = explainVerbosity;
     }
@@ -171,15 +185,26 @@ export function mockPlanShardedSearchResponseOnConn(collName,
  * mongos, which is the most common usage.
  */
 export function mockPlanShardedSearchResponse(
-    collName, query, dbName, sortSpec, stWithMock, maybeUnused = false, explainVerbosity = null) {
-    mockPlanShardedSearchResponseOnConn(collName,
-                                        query,
-                                        dbName,
-                                        sortSpec,
-                                        stWithMock,
-                                        stWithMock.st.s,
-                                        maybeUnused,
-                                        explainVerbosity);
+    collName,
+    query,
+    dbName,
+    sortSpec,
+    stWithMock,
+    maybeUnused = false,
+    explainVerbosity = null,
+    hasSearchMetaStage = false,
+) {
+    mockPlanShardedSearchResponseOnConn(
+        collName,
+        query,
+        dbName,
+        sortSpec,
+        stWithMock,
+        stWithMock.st.s,
+        maybeUnused,
+        explainVerbosity,
+        hasSearchMetaStage,
+    );
 }
 
 mockPlanShardedSearchResponse.cursorId = 1423;
@@ -192,9 +217,10 @@ export function mongotCommandForVectorSearchQuery({
     index = null,
     filter = null,
     explain = null,
+    returnStoredSource = null,
     collName,
     dbName,
-    collectionUUID
+    collectionUUID,
 }) {
     assert.eq(arguments.length, 1, "Expected one argument to mongotCommandForVectorSearchQuery()");
     let cmd = {
@@ -222,6 +248,10 @@ export function mongotCommandForVectorSearchQuery({
         cmd.explain = explain;
     }
 
+    if (returnStoredSource !== null) {
+        cmd.returnStoredSource = returnStoredSource;
+    }
+
     return cmd;
 }
 
@@ -234,7 +264,7 @@ export function mockAllRequestsWithBatchSizes({
     expectedBatchSizes,
     cursorId,
     mongotMockConn,
-    explainVerbosity = null
+    explainVerbosity = null,
 }) {
     const responseOk = 1;
 
@@ -257,7 +287,7 @@ export function mockAllRequestsWithBatchSizes({
                 db: dbName,
                 collectionUUID,
                 cursorOptions: {batchSize},
-                explainVerbosity
+                explainVerbosity,
             });
         } else {
             expectedCommand = {getMore: cursorId, collection: collName, cursorOptions: {batchSize}};
@@ -266,19 +296,21 @@ export function mockAllRequestsWithBatchSizes({
         // If this batch exhausts the remaining mongot results, return a response with cursorId = 0
         // to indicate the results have been fully exhausted. Otherwise, return the cursorId.
         if (docIndex + batchSize > documents.length) {
-            response =
-                mongotResponseForBatch(documents.slice(docIndex),
-                                       NumberLong(0),
-                                       dbName + "." + collName,
-                                       responseOk,
-                                       explainVerbosity ? getDefaultLastExplainContents() : null);
+            response = mongotResponseForBatch(
+                documents.slice(docIndex),
+                NumberLong(0),
+                dbName + "." + collName,
+                responseOk,
+                explainVerbosity ? getDefaultLastExplainContents() : null,
+            );
         } else {
-            response =
-                mongotResponseForBatch(documents.slice(docIndex, docIndex + batchSize),
-                                       cursorId,
-                                       dbName + "." + collName,
-                                       responseOk,
-                                       explainVerbosity ? getDefaultExplainContents() : null);
+            response = mongotResponseForBatch(
+                documents.slice(docIndex, docIndex + batchSize),
+                cursorId,
+                dbName + "." + collName,
+                responseOk,
+                explainVerbosity ? getDefaultExplainContents() : null,
+            );
             docIndex += batchSize;
         }
 
@@ -288,6 +320,9 @@ export function mockAllRequestsWithBatchSizes({
     mongotMockConn.setMockResponses(history, cursorId);
 }
 
+const tlsModeOptions = ["disabled", "allowTLS", "preferTLS", "requireTLS"];
+const kSIGTERM = 15;
+
 export class MongotMock {
     /**
      * Create a new mongotmock.
@@ -296,33 +331,73 @@ export class MongotMock {
         this.mongotMock = "mongotmock";
         this.pid = undefined;
         this.port = allocatePort();
+        if (this.useGRPC()) {
+            this.gRPCPort = allocatePort();
+        }
         this.conn = undefined;
         this.dataDir = (options && options.dataDir) || MongoRunner.dataDir + "/mongotmock";
         if (!pathExists(this.dataDir)) {
             resetDbpath(this.dataDir);
         }
-        this.dataDir = this.dataDir + "/" + this.port;
+        // Select the correct ingress listening port to communicate with based on whether or not
+        // we are using gRPC or MongoRPC to communicate.
+        this.dataDir = this.dataDir + "/" + (this.useGRPC() ? this.gRPCPort : this.port);
         resetDbpath(this.dataDir);
     }
 
     /**
      *  Start mongotmock and wait for it to start.
      */
-    start(opts = {bypassAuth: false}) {
-        print("mongotmock: " + this.port);
+    start(opts = {bypassAuth: false, tlsMode: "disabled"}) {
+        print("mongotmock: " + (this.useGRPC() ? this.gRPCPort : this.port));
+        const tlsEnabled = tlsModeOptions.includes(opts.tlsMode) && opts.tlsMode != "disabled";
 
-        const conn_str = this.dataDir + "/mongocryptd.sock";
+        // The search_ssl suite automatically enables TLS for connections to mongo processes,
+        // including mongotmock. We need to control TLS usage for mongotmock connections to test
+        // scenarios with TLS disabled on mongot but enabled on mongod. Therefore, we use host:port
+        // configurations when enabling TLS on mongot, and use mongocryptd.sock otherwise, as it
+        // doesn't use TLS for mongotmock connections. Similar to what we do for the dataDir, when
+        // using host:port, we must communicate with the ingress port listening for gRPC when
+        // useGRPC is true, and communicate with the ingress port expecting MongoRPC otherwise.
+        const conn_str = tlsEnabled
+            ? "localhost:" + (this.useGRPC() ? this.gRPCPort : this.port)
+            : this.dataDir + "/mongocryptd.sock";
         const args = [this.mongotMock];
 
         args.push("--port=" + this.port);
+        if (this.useGRPC()) {
+            args.push("--grpcPort=" + this.gRPCPort);
+        }
         // mongotmock uses mongocryptd.sock.
         args.push("--unixSocketPrefix=" + this.dataDir);
+
+        if (this.useGRPC()) {
+            // We set up mongotmock with ingress gRPC to enable testing the community architecture,
+            // but this is still gated behind a feature flag.
+            args.push("--setParameter");
+            args.push("featureFlagGRPC=1");
+        }
 
         args.push("--setParameter");
         args.push("enableTestCommands=1");
         args.push("-vvv");
 
         args.push("--pidfilepath=" + this.dataDir + "/cryptd.pid");
+
+        if (tlsEnabled || this.useGRPC()) {
+            args.push("--tlsMode");
+            if (this.useGRPC() && !tlsEnabled) {
+                jsTestLog("Overriding tlsMode=disabled due to mongotmock gRPC server requiring TLS");
+                args.push("allowTLS"); // "disabled" is not a valid setting for ingress gRPC
+            } else {
+                args.push(opts.tlsMode);
+            }
+            args.push("--tlsCertificateKeyFile");
+            args.push(SERVER_CERT);
+            args.push("--tlsCAFile");
+            args.push(CA_CERT);
+            args.push("--tlsAllowConnectionsWithoutCertificates");
+        }
 
         if (TestData && TestData.auth && !opts.bypassAuth) {
             args.push("--clusterAuthMode=keyFile");
@@ -334,43 +409,58 @@ export class MongotMock {
         assert(checkProgram(this.pid));
 
         // Wait for connection to be established with server
-        var conn = null;
+        let conn = null;
         const pid = this.pid;
-        const port = this.port;
+        const useGRPC = this.useGRPC();
 
-        assert.soon(function() {
-            try {
-                conn = new Mongo(conn_str);
-                if (TestData && TestData.auth && opts.bypassAuth) {
-                    // if Mongot is opting out of auth, we don't need to
-                    // authenticate our connection to it.
-                    conn.authenticated = true;
-                }
-                conn.pid = pid;
-                return true;
-            } catch (e) {
-                var res = checkProgram(pid);
-                if (!res.alive) {
-                    print("Could not start mongo program at " + conn_str +
-                          ", process ended with exit code: " + res.exitCode);
+        assert.soon(
+            function () {
+                try {
+                    if (!tlsEnabled) {
+                        conn = new Mongo(conn_str, undefined, {gRPC: useGRPC});
+                    } else {
+                        conn = new Mongo(conn_str, undefined, {
+                            tls: {certificateKeyFile: CLIENT_CERT, CAFile: CA_CERT},
+                            gRPC: useGRPC,
+                        });
+                    }
+                    if (TestData && TestData.auth && opts.bypassAuth) {
+                        // if Mongot is opting out of auth, we don't need to
+                        // authenticate our connection to it.
+                        conn.authenticated = true;
+                    }
+                    conn.pid = pid;
                     return true;
+                } catch (e) {
+                    let res = checkProgram(pid);
+                    if (!res.alive) {
+                        print(
+                            "Could not start mongo program at " +
+                                conn_str +
+                                ", process ended with exit code: " +
+                                res.exitCode,
+                        );
+                        return true;
+                    }
                 }
-            }
-            return false;
-        }, "unable to connect to mongo program on port " + conn_str, 30 * 1000);
+                return false;
+            },
+            "unable to connect to mongo program on port " + conn_str,
+            30 * 1000,
+        );
 
         this.conn = conn;
         print("mongotmock sucessfully started.");
     }
 
     /**
-     *  Stop mongotmock, asserting that it shutdown cleanly.
+     *  Stop mongotmock, asserting that it shutdown cleanly or with the provided code.
      */
-    stop() {
+    stop(code = kSIGTERM) {
         // Check the remaining history on the mock. There should be 0 remaining queued commands.
         this.assertEmpty();
 
-        return stopMongoProgramByPid(this.pid);
+        return stopMongoProgramByPid(this.pid, code);
     }
 
     /**
@@ -378,6 +468,10 @@ export class MongotMock {
      */
     getConnection() {
         return this.conn;
+    }
+
+    useGRPC() {
+        return TestData && TestData.setParameters && TestData.setParameters.useGrpcForSearch;
     }
 
     /**
@@ -398,10 +492,12 @@ export class MongotMock {
         };
         assert.commandWorked(connection.getDB("mongotmock").runCommand(setMockResponsesCommand));
         if (additionalCursorId !== 0) {
-            assert.commandWorked(connection.getDB("mongotmock").runCommand({
-                allowMultiCursorResponse: 1,
-                cursorId: NumberLong(additionalCursorId)
-            }));
+            assert.commandWorked(
+                connection.getDB("mongotmock").runCommand({
+                    allowMultiCursorResponse: 1,
+                    cursorId: NumberLong(additionalCursorId),
+                }),
+            );
         }
     }
 
@@ -414,6 +510,12 @@ export class MongotMock {
     }
     disableOrderCheck() {
         this.setOrderCheck(false);
+    }
+
+    clearQueuedResponses() {
+        const connection = this.getConnection();
+        assert.commandWorked(connection.getDB("mongotmock").runCommand({clearQueuedResponses: {}}));
+        this.assertEmpty();
     }
 
     /**
@@ -440,8 +542,10 @@ export class MongotMock {
             for (const key in mockResponses) {
                 let r = mockResponses[key];
 
-                assert(r.hasOwnProperty("maybeUnused") && r["maybeUnused"],
-                       `found unused response for ${cursorId}: ${tojson(r)}`);
+                assert(
+                    r.hasOwnProperty("maybeUnused") && r["maybeUnused"],
+                    `found unused response for ${cursorId}: ${tojson(r)}`,
+                );
             }
         }
     }
@@ -454,10 +558,9 @@ export class MongotMock {
         const connection = this.getConnection();
         const setManageSearchIndexResponseCommand = {
             setManageSearchIndexResponse: 1,
-            manageSearchIndexResponse: expectedManageSearchIndexResponse
+            manageSearchIndexResponse: expectedManageSearchIndexResponse,
         };
-        assert.commandWorked(
-            connection.getDB('mongotmock').runCommand(setManageSearchIndexResponseCommand));
+        assert.commandWorked(connection.getDB("mongotmock").runCommand(setManageSearchIndexResponseCommand));
     }
 
     /**
@@ -470,8 +573,7 @@ export class MongotMock {
             collectionUUID: UUID(),
             userCommand: {"user-command-field": "user-command-value"},
         };
-        return assert.commandWorked(
-            connection.getDB('mongotmock').runCommand(manageSearchIndexCommand));
+        return assert.commandWorked(connection.getDB("mongotmock").runCommand(manageSearchIndexCommand));
     }
 
     /**
@@ -480,7 +582,6 @@ export class MongotMock {
      */
     closeConnectionInResponseToNextNRequests(n) {
         const connection = this.getConnection();
-        assert.commandWorked(
-            connection.adminCommand({closeConnectionOnNextRequests: NumberInt(n)}));
+        assert.commandWorked(connection.adminCommand({closeConnectionOnNextRequests: NumberInt(n)}));
     }
 }

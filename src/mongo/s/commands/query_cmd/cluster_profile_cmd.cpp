@@ -27,19 +27,20 @@
  *    it in the license file.
  */
 
-#include <memory>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/db/commands/profile_common.h"
 #include "mongo/db/commands/profile_gen.h"
 #include "mongo/db/commands/set_profiling_filter_globally_cmd.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/profile_filter_impl.h"
 #include "mongo/db/profile_settings.h"
 #include "mongo/util/assert_util.h"
+
+#include <memory>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -71,14 +72,22 @@ protected:
 
         auto& dbProfileSettings = DatabaseProfileSettings::get(opCtx->getServiceContext());
         auto oldSettings = dbProfileSettings.getDatabaseProfileSettings(dbName);
+        auto newSettings = oldSettings;
 
         if (auto filterOrUnset = request.getFilter()) {
-            auto newSettings = oldSettings;
             if (auto filter = filterOrUnset->obj) {
-                newSettings.filter = std::make_shared<ProfileFilterImpl>(*filter);
+                newSettings.filter = std::make_shared<ProfileFilterImpl>(
+                    *filter, ExpressionContextBuilder{}.opCtx(opCtx).build());
             } else {
                 newSettings.filter = nullptr;
             }
+        }
+
+        if (auto slowOpInProgMS = request.getSlowinprogms()) {
+            newSettings.slowOpInProgressThreshold = Milliseconds(*slowOpInProgMS);
+        }
+
+        if (oldSettings != newSettings) {
             dbProfileSettings.setDatabaseProfileSettings(dbName, newSettings);
         }
 

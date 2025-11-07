@@ -28,7 +28,7 @@
  */
 
 
-#include <ostream>
+#include "mongo/logv2/redaction.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -36,11 +36,9 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/logv2/log_util.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/util/assert_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
-
 
 namespace mongo {
 
@@ -88,10 +86,10 @@ std::string redact(const DBException& exceptionToRedact) {
         return exceptionToRedact.toString();
     }
 
-    // Construct an exception representation with the what()
-    std::stringstream ss;
-    ss << exceptionToRedact.code() << " " << kRedactionDefaultMask;
-    return ss.str();
+    // Construct an exception representation without the what()
+    StringBuilder sb;
+    sb << exceptionToRedact.code() << " " << kRedactionDefaultMask;
+    return sb.str();
 }
 
 }  // namespace mongo

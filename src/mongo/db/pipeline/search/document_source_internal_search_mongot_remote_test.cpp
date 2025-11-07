@@ -27,13 +27,14 @@
  *    it in the license file.
  */
 
+#include "mongo/db/pipeline/search/document_source_internal_search_mongot_remote.h"
+
 #include "mongo/bson/json.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
 #include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/pipeline/search/document_source_internal_search_mongot_remote.h"
 #include "mongo/db/query/search/mongot_options.h"
-#include "mongo/unittest/death_test.h"
 
 namespace mongo {
 namespace {
@@ -42,6 +43,10 @@ class InternalSearchMongotRemoteTest : service_context_test::WithSetupTransportL
                                        public AggregationContextFixture {
     void setUp() override {
         executor::startupSearchExecutorsIfNeeded(getServiceContext());
+    }
+
+    void tearDown() override {
+        executor::shutdownSearchExecutorsIfNeeded(getServiceContext());
     }
 };
 
@@ -52,7 +57,7 @@ boost::intrusive_ptr<DocumentSource> createFromBson(
     auto executor = executor::getMongotTaskExecutor(serviceContext);
     // The serialization for unsharded search does not contain a 'mongotQuery' field.
     InternalSearchMongotRemoteSpec spec = InternalSearchMongotRemoteSpec::parse(
-        IDLParserContext(DocumentSourceInternalSearchMongotRemote::kStageName), specObj);
+        specObj, IDLParserContext(DocumentSourceInternalSearchMongotRemote::kStageName));
     return new DocumentSourceInternalSearchMongotRemote(std::move(spec), expCtx, executor);
 }
 
@@ -86,7 +91,8 @@ TEST_F(InternalSearchMongotRemoteTest, SearchMongotRemoteAllowsUnknownFields) {
     // Because internalSearchMongotRemoteSpec is {strict: false}, the superfluous fields on the
     // request should be ignored and the DocumentSourceInternalSearchMongotRemote stage should be
     // serialized successfully.
-    auto mongotRemoteStage = createFromBson(spec, expCtx);
+    auto mongotRemote = createFromBson(spec, expCtx);
+    auto mongotRemoteStage = exec::agg::buildStage(mongotRemote);
     ASSERT_TRUE(mongotRemoteStage->getNext().isEOF());
 }
 
@@ -100,7 +106,8 @@ TEST_F(InternalSearchMongotRemoteTest, SearchMongotRemoteReturnsEOFWhenCollDoesN
     auto spec = specObj.firstElement();
 
     // Set up the mongotRemote stage.
-    auto mongotRemoteStage = createFromBson(spec, expCtx);
+    auto mongotRemote = createFromBson(spec, expCtx);
+    auto mongotRemoteStage = exec::agg::buildStage(mongotRemote);
     ASSERT_TRUE(mongotRemoteStage->getNext().isEOF());
 }
 

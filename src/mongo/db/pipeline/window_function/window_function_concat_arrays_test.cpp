@@ -27,9 +27,10 @@
  *    it in the license file.
  */
 
+#include "mongo/db/pipeline/window_function/window_function_concat_arrays.h"
+
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/window_function/window_function_concat_arrays.h"
 #include "mongo/unittest/death_test.h"
 
 namespace mongo {
@@ -155,20 +156,20 @@ TEST_F(WindowFunctionConcatArraysTest, RemoveExactlyAllValuesInWindow) {
     ASSERT_VALUE_EQ(concatArrays.getValue(), Value(std::vector<Value>({})));
 }
 
-DEATH_TEST_F(WindowFunctionConcatArraysTest, CannotRemoveFromEmptyWindowFunction, "tassert") {
-    ASSERT_VALUE_EQ(concatArrays.getValue(), Value(std::vector<Value>({})));
+DEATH_TEST_F(WindowFunctionConcatArraysTest, CannotRemoveFromEmptyWindowFunction, "1628401") {
+    concatArrays.reset();
 
     std::vector<Value> attemptToRemove = {Value(1), Value(2), Value(2)};
-    ASSERT_THROWS_CODE(concatArrays.remove(Value(attemptToRemove)), AssertionException, 1628401);
+    concatArrays.remove(Value(attemptToRemove));
 }
 
-DEATH_TEST_F(WindowFunctionConcatArraysTest, CannotRemoveNonArrayFromWindow, "tassert") {
+DEATH_TEST_F(WindowFunctionConcatArraysTest, CannotRemoveNonArrayFromWindow, "1628400") {
+    concatArrays.reset();
+
     std::vector<Value> value = {Value(1), Value(2)};
-
     concatArrays.add(Value(value));
-    ASSERT_VALUE_EQ(concatArrays.getValue(), Value(value));
 
-    ASSERT_THROWS_CODE(concatArrays.remove(Value(1)), AssertionException, 1628400);
+    concatArrays.remove(Value(1));
 }
 
 TEST_F(WindowFunctionConcatArraysTest, ConcatArraysOnlyAcceptsArrays) {

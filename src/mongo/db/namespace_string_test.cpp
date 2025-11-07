@@ -27,24 +27,23 @@
  *    it in the license file.
  */
 
+#include "mongo/db/namespace_string.h"
+
+#include "mongo/base/status.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/timestamp.h"
+#include "mongo/db/repl/optime.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/logv2/log.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/duration.h"
+
 #include <memory>
 
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
-
-#include "mongo/base/status.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/repl/optime.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/duration.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -77,7 +76,6 @@ protected:
 
 namespace {
 
-using namespace fmt::literals;
 
 TEST_F(NamespaceStringTest, createNamespaceString_forTest) {
     TenantId tenantId(OID::gen());
@@ -101,14 +99,13 @@ TEST_F(NamespaceStringTest, CheckNamespaceStringLogAttrs) {
     DatabaseName dbName = DatabaseName::createDatabaseName_forTest(tenantId, "foo");
     NamespaceString nss = makeNamespaceString(dbName, "bar");
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     LOGV2(7311500, "Msg nss:", logAttrs(nss));
 
     std::string nssAsString = str::stream() << *(nss.tenantId()) << '_' << nss.ns_forTest();
 
-    ASSERT_EQUALS(
-        1, countBSONFormatLogLinesIsSubset(BSON("attr" << BSON("namespace" << nssAsString))));
-    stopCapturingLogMessages();
+    ASSERT_EQUALS(1,
+                  logs.countBSONContainingSubset(BSON("attr" << BSON("namespace" << nssAsString))));
 }
 
 TEST_F(NamespaceStringTest, Oplog) {
@@ -379,7 +376,7 @@ TEST_F(NamespaceStringTest, NSSWithTenantId) {
         ASSERT_EQ(nss4.size(), 3);
         ASSERT_EQ(nss4.ns_forTest(), "foo");
         ASSERT_EQ(nss4.toString_forTest(), "foo");
-        ASSERT_EQ(nss4.toStringWithTenantId_forTest(), "{}_foo"_format(tenantId.toString()));
+        ASSERT_EQ(nss4.toStringWithTenantId_forTest(), fmt::format("{}_foo", tenantId.toString()));
         ASSERT_EQ(nss4.db_forTest(), "foo");
         ASSERT_EQ(nss4.coll(), "");
         ASSERT_EQ(nss4.dbName().toString_forTest(), "foo");
@@ -396,7 +393,7 @@ TEST_F(NamespaceStringTest, NSSWithTenantId) {
         ASSERT_EQ(multiNss.ns_forTest(), "config.system.change_collection");
         ASSERT_EQ(multiNss.toString_forTest(), "config.system.change_collection");
         ASSERT_EQ(multiNss.toStringWithTenantId_forTest(),
-                  "{}_config.system.change_collection"_format(tenantId.toString()));
+                  fmt::format("{}_config.system.change_collection", tenantId.toString()));
         ASSERT_EQ(multiNss.db_forTest(), "config");
         ASSERT_EQ(multiNss.coll(), "system.change_collection");
         ASSERT_EQ(multiNss.dbName().toString_forTest(), "config");
@@ -426,12 +423,12 @@ TEST_F(NamespaceStringTest, NSSWithTenantId) {
         ASSERT_EQ(*emptyWithTenant.tenantId(), tenantId);
         ASSERT_EQ(emptyWithTenant.toString_forTest(), "");
         ASSERT_EQ(emptyWithTenant.toStringWithTenantId_forTest(),
-                  "{}_"_format(tenantId.toString()));
+                  fmt::format("{}_", tenantId.toString()));
         ASSERT(emptyWithTenant.dbName().tenantId());
         ASSERT_EQ(emptyWithTenant.dbName().tenantId(), tenantId);
         ASSERT_EQ(emptyWithTenant.dbName().toString_forTest(), "");
         ASSERT_EQ(emptyWithTenant.dbName().toStringWithTenantId_forTest(),
-                  "{}_"_format(tenantId.toString()));
+                  fmt::format("{}_", tenantId.toString()));
     }
 
     {

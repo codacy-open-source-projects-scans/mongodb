@@ -29,17 +29,6 @@
 
 #pragma once
 
-#include <algorithm>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <set>
-#include <string>
-#include <tuple>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -56,9 +45,21 @@
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/base64.h"
 #include "mongo/util/read_through_cache.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <set>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 
 namespace mongo {
@@ -427,7 +428,7 @@ public:
     /**
      * Gets any set authentication restrictions.
      */
-    const RestrictionDocuments& getRestrictions() const& noexcept {
+    const RestrictionDocuments& getRestrictions() const& {
         return _restrictions;
     }
 
@@ -439,7 +440,7 @@ public:
     /**
      * Gets any set authentication restrictions.
      */
-    const RestrictionDocuments& getIndirectRestrictions() const& noexcept {
+    const RestrictionDocuments& getIndirectRestrictions() const& {
         return _indirectRestrictions;
     }
 

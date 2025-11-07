@@ -28,11 +28,11 @@
  */
 
 #include "mongo/db/query/timeseries/bucket_level_id_predicate_generator.h"
+
 #include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_tree.h"
 #include "mongo/db/matcher/expression_visitor.h"
-#include "mongo/db/matcher/match_expression_walker.h"
 #include "mongo/db/query/timeseries/bucket_level_comparison_predicate_generator.h"
 #include "mongo/db/query/tree_walker.h"
 #include "mongo/db/timeseries/timeseries_constants.h"
@@ -90,9 +90,9 @@ auto constructObjectIdValue(const BSONElement& rhs, int bucketMaxSpanSeconds) {
         oid.init(date, maxOrMin == OIDInit::max);
         return oid;
     };
-    // Make an ObjectId corresponding to a date value adjusted by the max bucket value for the
-    // time series view that this query operates on. This predicate can be used in a comparison
-    // to gauge a max value for a given bucket, rather than a min value.
+    // Make an ObjectId corresponding to a date value adjusted by the max bucket value. This
+    // predicate can be used in a comparison to gauge a max value for a given bucket, rather than a
+    // min value.
     auto makeMaxAdjustedDateOID = [&](auto&& date, auto&& maxOrMin) {
         // Ensure we don't underflow.
         if (date.toDurationSinceEpoch() >= Seconds{bucketMaxSpanSeconds})
@@ -106,8 +106,12 @@ auto constructObjectIdValue(const BSONElement& rhs, int bucketMaxSpanSeconds) {
     };
 
     // Because the OID timestamp is only 4 bytes, we can't convert larger dates
-    invariant(rhs.date().toMillisSinceEpoch() >= 0LL);
-    invariant(rhs.date().toMillisSinceEpoch() <= max32BitEpochMillis);
+    const auto millisSinceEpoch = rhs.date().toMillisSinceEpoch();
+    tassert(11177900,
+            fmt::format("Expected rhs to be in the [0,{}] range, but found {}",
+                        max32BitEpochMillis,
+                        millisSinceEpoch),
+            0LL <= millisSinceEpoch && millisSinceEpoch <= max32BitEpochMillis);
 
     // An ObjectId consists of a 4-byte timestamp, as well as a unique value and a counter, thus
     // two ObjectIds initialized with the same date will have different values. To ensure that we
@@ -289,7 +293,7 @@ private:
 class TimePredicateMutableWalker {
 public:
     TimePredicateMutableWalker(TimePredicateVisitor* visitor) : _visitor{visitor} {
-        invariant(_visitor);
+        tassert(11177902, "visitor must not be null", _visitor);
     }
 
     void preVisit(MatchExpression* expr) {

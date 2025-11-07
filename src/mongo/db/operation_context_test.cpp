@@ -29,10 +29,40 @@
 
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/operation_context.h"
+
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/client.h"
+#include "mongo/db/curop.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context_group.h"
+#include "mongo/db/operation_context_options_gen.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
+#include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/service_context.h"
+#include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/session/logical_session_id.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/logv2/log.h"
+#include "mongo/stdx/future.h"  // IWYU pragma: keep
+#include "mongo/stdx/mutex.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/transport/session.h"
+#include "mongo/transport/transport_layer_mock.h"
+#include "mongo/unittest/barrier.h"
+#include "mongo/unittest/death_test.h"
+#include "mongo/unittest/join_thread.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/clock_source.h"
+#include "mongo/util/clock_source_mock.h"
+#include "mongo/util/future.h"
+#include "mongo/util/intrusive_counter.h"
+#include "mongo/util/tick_source.h"
+#include "mongo/util/tick_source_mock.h"
+#include "mongo/util/time_support.h"
+
 #include <functional>
 #include <future>
 #include <initializer_list>
@@ -43,38 +73,10 @@
 #include <string>
 #include <type_traits>
 
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/client.h"
-#include "mongo/db/curop.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/operation_context_group.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/query/collation/collator_interface.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/service_context_test_fixture.h"
-#include "mongo/db/session/logical_session_id.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/stdx/future.h"  // IWYU pragma: keep
-#include "mongo/stdx/mutex.h"
-#include "mongo/stdx/thread.h"
-#include "mongo/transport/session.h"
-#include "mongo/transport/transport_layer_mock.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/barrier.h"
-#include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/unittest/join_thread.h"
-#include "mongo/util/clock_source.h"
-#include "mongo/util/clock_source_mock.h"
-#include "mongo/util/future.h"
-#include "mongo/util/intrusive_counter.h"
-#include "mongo/util/tick_source.h"
-#include "mongo/util/tick_source_mock.h"
-#include "mongo/util/time_support.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -202,24 +204,6 @@ TEST_F(OperationContextTest, OpCtxGroup) {
         ASSERT(opCtx.opCtx() == nullptr);
         ASSERT_TRUE(group2.isEmpty());
     }
-
-    OperationContextGroup group3;
-    OperationContextGroup group4;
-    {
-        auto serviceCtx = ServiceContext::make();
-        auto client = serviceCtx->getService()->makeClient("OperationContextTest");
-        auto opCtx1 = group3.makeOperationContext(*client);
-        auto p1 = opCtx1.opCtx();
-        auto opCtx2 = group4.take(std::move(opCtx1));
-        ASSERT_EQ(p1, opCtx2.opCtx());
-        ASSERT(opCtx1.opCtx() == nullptr);  // NOLINT(bugprone-use-after-move)
-        ASSERT_TRUE(group3.isEmpty());
-        ASSERT_FALSE(group4.isEmpty());
-        group3.interrupt(ErrorCodes::InternalError);
-        ASSERT_TRUE(opCtx2->checkForInterruptNoAssert().isOK());
-        group4.interrupt(ErrorCodes::InternalError);
-        ASSERT_FALSE(opCtx2->checkForInterruptNoAssert().isOK());
-    }
 }
 
 TEST_F(OperationContextTest, IgnoreInterruptsWorks) {
@@ -287,11 +271,11 @@ TEST_F(OperationContextTest, CancellationTokenIsCancelableAtFirst) {
     ASSERT_TRUE(cancelToken.isCancelable());
 }
 
-class OperationDeadlineTests : public OperationContextTest {
+class OperationTestWithMockClock : public OperationContextTest {
     // This constructor lets us give a variable name to mockClock so we can copy the same
     // shared_ptr into SharedClockSourceAdapters we give to ServiceContext::make and the
     // mockClock member variable.
-    explicit OperationDeadlineTests(std::shared_ptr<ClockSourceMock> mockClock)
+    explicit OperationTestWithMockClock(std::shared_ptr<ClockSourceMock> mockClock)
         : OperationContextTest(std::make_unique<ScopedGlobalServiceContextForTest>(
               ServiceContext::make(std::make_unique<SharedClockSourceAdapter>(mockClock),
                                    std::make_unique<SharedClockSourceAdapter>(mockClock),
@@ -299,10 +283,15 @@ class OperationDeadlineTests : public OperationContextTest {
           mockClock(std::move(mockClock)) {}
 
 public:
-    OperationDeadlineTests() : OperationDeadlineTests(std::make_shared<ClockSourceMock>()) {}
+    OperationTestWithMockClock()
+        : OperationTestWithMockClock(std::make_shared<ClockSourceMock>()) {}
 
     void setUp() override {
         client = getServiceContext()->getService()->makeClient("OperationDeadlineTest");
+    }
+
+    TickSourceMock<>* mockTickSource() {
+        return checked_cast<TickSourceMock<>*>(getServiceContext()->getTickSource());
     }
 
     void checkForInterruptForTimeout(OperationContext* opCtx) {
@@ -315,6 +304,7 @@ public:
     const std::shared_ptr<ClockSourceMock> mockClock;
     ServiceContext::UniqueClient client;
 };
+using OperationDeadlineTests = OperationTestWithMockClock;
 
 TEST_F(OperationDeadlineTests, OperationDeadlineExpiration) {
     auto opCtx = client->makeOperationContext();
@@ -387,6 +377,22 @@ TEST_F(OperationDeadlineTests,
 
     // Should be canceled now.
     ASSERT_TRUE(cancelToken.isCanceled());
+}
+
+TEST_F(OperationDeadlineTests, InterruptLatency) {
+    auto tickSource = checked_cast<TickSourceMock<>*>(getServiceContext()->getTickSource());
+    auto opCtx = client->makeOperationContext();
+
+    tickSource->advance(Milliseconds(5));
+    ASSERT_EQ(0, opCtx->getKillTime());
+
+    opCtx->markKilled();
+    ASSERT_NE(opCtx->getKillTime(), 0);
+    ASSERT_EQ(tickSource->getTicks(), opCtx->getKillTime());
+    tickSource->advance(Milliseconds(8));
+
+    ASSERT_EQ(tickSource->ticksTo<Milliseconds>(tickSource->getTicks() - opCtx->getKillTime()),
+              Milliseconds(8));
 }
 
 template <typename D>
@@ -751,6 +757,24 @@ TEST_F(OperationDeadlineTests, DuringWaitMaxTimeExpirationDominatesUntilExpirati
     ASSERT_TRUE(opCtx->getCancellationToken().isCanceled());
 }
 
+TEST_F(OperationDeadlineTests, MaxTimeRestoredAfterDeadlineGuard) {
+    auto tickSource = checked_cast<TickSourceMock<>*>(getServiceContext()->getTickSource());
+    auto opCtx = client->makeOperationContext();
+    auto originDeadline = mockClock->now() + Seconds{1};
+    opCtx->setDeadlineByDate(originDeadline, ErrorCodes::MaxTimeMSExpired);
+
+    ASSERT_EQ(Seconds{1}, opCtx->getRemainingMaxTimeMicros());
+
+    auto newDeadline = mockClock->now() + Milliseconds{500};
+    opCtx->runWithDeadline(newDeadline, ErrorCodes::MaxTimeMSExpired, [&]() -> void {
+        tickSource->advance(Milliseconds(300));
+        mockClock->advance(Milliseconds(300));
+    });
+
+    ASSERT_EQ(originDeadline, opCtx->getDeadline());
+    ASSERT_EQ(Milliseconds{700}, opCtx->getRemainingMaxTimeMicros());
+}
+
 class ThreadedOperationDeadlineTests : public OperationDeadlineTests {
 public:
     using CvPred = std::function<bool()>;
@@ -769,7 +793,7 @@ public:
                                  boost::optional<Date_t> maxTime,
                                  WaitFn waitFn) {
             auto barrier = std::make_shared<unittest::Barrier>(2);
-            task = stdx::packaged_task<bool()>([=, this] {
+            task = std::packaged_task<bool()>([=, this] {  // NOLINT
                 if (maxTime)
                     opCtx->setDeadlineByDate(*maxTime, ErrorCodes::ExceededTimeLimit);
                 stdx::unique_lock<stdx::mutex> lk(mutex);
@@ -794,7 +818,7 @@ public:
         stdx::mutex mutex;
         stdx::condition_variable cv;
         bool isSignaled = false;
-        stdx::packaged_task<bool()> task;
+        std::packaged_task<bool()> task;  // NOLINT
         JoinThread waiter;
     };
 
@@ -1143,6 +1167,252 @@ TEST_F(OperationContextTest, CurrentOpExcludesKilledOperations) {
     }
 }
 
-}  // namespace
+TEST_F(OperationTestWithMockClock, InterruptCheckOnTime) {
+    RAIIServerParameterControllerForTest enableDelinquentTracking(
+        "featureFlagRecordDelinquentMetrics", true);
+    RAIIServerParameterControllerForTest alwaysTrackInterrupts("overdueInterruptCheckSamplingRate",
+                                                               1);
+    auto client = getService()->makeClient("MainClient");
+    auto opCtx = client->makeOperationContext();
+    opCtx->trackOverdueInterruptChecks(mockTickSource()->getTicks());
 
+    opCtx->checkForInterrupt();
+    {
+        auto stats = opCtx->overdueInterruptCheckStats();
+        ASSERT(stats);
+        ASSERT_EQ(opCtx->numInterruptChecks(), 1);
+        ASSERT_EQ(stats->overdueInterruptChecks.loadRelaxed(), 0);
+        ASSERT_EQ(stats->overdueAccumulator.loadRelaxed(), Milliseconds{0});
+        ASSERT_EQ(stats->overdueMaxTime.loadRelaxed(), Milliseconds{0});
+    }
+
+    mockTickSource()->advance(Milliseconds(1));
+
+    opCtx->checkForInterrupt();
+    {
+        auto stats = opCtx->overdueInterruptCheckStats();
+        ASSERT(stats);
+        ASSERT_EQ(opCtx->numInterruptChecks(), 2);
+        ASSERT_EQ(stats->overdueInterruptChecks.loadRelaxed(), 0);
+        ASSERT_EQ(stats->overdueAccumulator.loadRelaxed(), Milliseconds{0});
+        ASSERT_EQ(stats->overdueMaxTime.loadRelaxed(), Milliseconds{0});
+    }
+}
+
+TEST_F(OperationTestWithMockClock, InfrequentInterruptChecks) {
+    RAIIServerParameterControllerForTest enableDelinquentTracking(
+        "featureFlagRecordDelinquentMetrics", true);
+    RAIIServerParameterControllerForTest alwaysTrackInterrupts("overdueInterruptCheckSamplingRate",
+                                                               1);
+    auto client = getService()->makeClient("MainClient");
+    auto opCtx = client->makeOperationContext();
+    opCtx->trackOverdueInterruptChecks(mockTickSource()->getTicks());
+
+    opCtx->checkForInterrupt();
+    {
+        auto stats = opCtx->overdueInterruptCheckStats();
+        ASSERT(stats);
+        ASSERT_EQ(opCtx->numInterruptChecks(), 1);
+        ASSERT_EQ(stats->overdueInterruptChecks.loadRelaxed(), 0);
+        ASSERT_EQ(stats->overdueAccumulator.loadRelaxed(), Milliseconds{0});
+        ASSERT_EQ(stats->overdueMaxTime.loadRelaxed(), Milliseconds{0});
+    }
+
+    const Milliseconds interval{gOverdueInterruptCheckIntervalMillis.load()};
+    mockTickSource()->advance(5 * interval);
+
+    opCtx->checkForInterrupt();
+    {
+        auto stats = opCtx->overdueInterruptCheckStats();
+        ASSERT(stats);
+        ASSERT_EQ(opCtx->numInterruptChecks(), 2);
+        ASSERT_EQ(stats->overdueInterruptChecks.loadRelaxed(), 1);
+        ASSERT_EQ(stats->overdueAccumulator.loadRelaxed(), 4 * interval);
+        ASSERT_EQ(stats->overdueMaxTime.loadRelaxed(), 4 * interval);
+    }
+}
+
+TEST_F(OperationTestWithMockClock, FirstInterruptCheckOverdue) {
+    // Create an OperationContext that does not check for interrupt for awhile after creation.
+    auto client = getService()->makeClient("MainClient");
+    auto opCtx = client->makeOperationContext();
+    opCtx->trackOverdueInterruptChecks(mockTickSource()->getTicks());
+
+    const Milliseconds interval{gOverdueInterruptCheckIntervalMillis.load()};
+    mockTickSource()->advance(interval * 5);
+
+    opCtx->checkForInterrupt();
+    {
+        auto stats = opCtx->overdueInterruptCheckStats();
+        ASSERT(stats);
+
+        ASSERT_EQ(opCtx->numInterruptChecks(), 1);
+        ASSERT_EQ(stats->overdueInterruptChecks.loadRelaxed(), 1);
+        ASSERT_EQ(stats->overdueAccumulator.loadRelaxed(), 4 * interval);
+        ASSERT_EQ(stats->overdueMaxTime.loadRelaxed(), 4 * interval);
+    }
+}
+
+TEST_F(OperationTestWithMockClock, NeverChecksForInterrupt) {
+    auto client = getService()->makeClient("MainClient");
+    auto opCtx = client->makeOperationContext();
+    opCtx->trackOverdueInterruptChecks(mockTickSource()->getTicks());
+
+    const Milliseconds interval{gOverdueInterruptCheckIntervalMillis.load()};
+    mockTickSource()->advance(interval * 5);
+
+    // Simulate the operation "completing" without ever having checked for interrupt by using
+    // updateOverdueInterruptCheckCounters().
+    opCtx->updateInterruptCheckCounters();
+    {
+        auto stats = opCtx->overdueInterruptCheckStats();
+        ASSERT(stats);
+        ASSERT_EQ(opCtx->numInterruptChecks(), 0);
+        ASSERT_EQ(stats->overdueInterruptChecks.loadRelaxed(), 1);
+        ASSERT_EQ(stats->overdueAccumulator.loadRelaxed(), 4 * interval);
+        ASSERT_EQ(stats->overdueMaxTime.loadRelaxed(), 4 * interval);
+    }
+}
+
+TEST_F(OperationTestWithMockClock, KilledOperationWithOverdueInterruptCheck) {
+    // Create an OperationContext that does not check for interrupt for awhile after creation.
+    auto client = getService()->makeClient("MainClient");
+    auto opCtx = client->makeOperationContext();
+    opCtx->trackOverdueInterruptChecks(mockTickSource()->getTicks());
+
+    opCtx->markKilled(ErrorCodes::BadValue);
+
+    const Milliseconds interval{gOverdueInterruptCheckIntervalMillis.load()};
+    mockTickSource()->advance(interval * 5);
+
+    auto killStatus = opCtx->checkForInterruptNoAssert();
+    ASSERT_EQUALS(killStatus, ErrorCodes::BadValue);
+
+    {
+        auto stats = opCtx->overdueInterruptCheckStats();
+        ASSERT(stats);
+        ASSERT_EQ(opCtx->numInterruptChecks(), 1);
+        ASSERT_EQ(stats->overdueInterruptChecks.loadRelaxed(), 1);
+        ASSERT_EQ(stats->overdueAccumulator.loadRelaxed(), 4 * interval);
+        ASSERT_EQ(stats->overdueMaxTime.loadRelaxed(), 4 * interval);
+    }
+}
+
+TEST_F(OperationTestWithMockClock, RunWithoutInterruptNotMarkedOverdue) {
+    auto client = getService()->makeClient("MainClient");
+    auto opCtx = client->makeOperationContext();
+    opCtx->trackOverdueInterruptChecks(mockTickSource()->getTicks());
+
+    opCtx->runWithoutInterruptionExceptAtGlobalShutdown([&] {
+        const Milliseconds interval{gOverdueInterruptCheckIntervalMillis.load()};
+        mockTickSource()->advance(interval * 5);
+
+        ASSERT_OK(opCtx->checkForInterruptNoAssert());
+        ASSERT_OK(opCtx->getKillStatus());
+
+        {
+            auto stats = opCtx->overdueInterruptCheckStats();
+            ASSERT(stats);
+            ASSERT_EQ(opCtx->numInterruptChecks(), 1);
+            ASSERT_EQ(stats->overdueInterruptChecks.loadRelaxed(), 0);
+            ASSERT_EQ(stats->overdueAccumulator.loadRelaxed(), Milliseconds{0});
+            ASSERT_EQ(stats->overdueMaxTime.loadRelaxed(), Milliseconds{0});
+        }
+    });
+
+    {
+        auto stats = opCtx->overdueInterruptCheckStats();
+        ASSERT(stats);
+        ASSERT_EQ(opCtx->numInterruptChecks(), 1);
+        ASSERT_EQ(stats->overdueInterruptChecks.loadRelaxed(), 0);
+        ASSERT_EQ(stats->overdueAccumulator.loadRelaxed(), Milliseconds{0});
+        ASSERT_EQ(stats->overdueMaxTime.loadRelaxed(), Milliseconds{0});
+    }
+}
+
+
+using OverdueInterruptTestWithInterruptibleWait = ThreadedOperationDeadlineTests;
+TEST_F(OverdueInterruptTestWithInterruptibleWait, InterruptibleSleepNotMarkedOverdue) {
+    auto opCtx = client->makeOperationContext();
+    opCtx->trackOverdueInterruptChecks(mockTickSource()->getTicks());
+    ASSERT_OK(opCtx->checkForInterruptNoAssert());
+
+    const Milliseconds interval{gOverdueInterruptCheckIntervalMillis.load()};
+    WaitTestState state;
+    auto fut = state.start(&*opCtx, {}, waitDurationFn(interval * 5));
+    mockTickSource()->advance(interval * 5 + Milliseconds{1});
+    mockClock->advance(interval * 5 + Milliseconds{1});
+    ASSERT_FALSE(fut.get());
+
+    // An interrupt check here should not be considered overdue even though a long time
+    // passed since the last one. The operation was in an interruptible sleep, so this
+    // interrupt check is not overdue.
+    ASSERT_OK(opCtx->checkForInterruptNoAssert());
+
+
+    {
+        auto stats = opCtx->overdueInterruptCheckStats();
+        ASSERT(stats);
+        ASSERT_GTE(opCtx->numInterruptChecks(), 2);
+        ASSERT_EQ(stats->overdueInterruptChecks.loadRelaxed(), 0);
+        ASSERT_EQ(stats->overdueAccumulator.loadRelaxed(), Milliseconds{0});
+        ASSERT_EQ(stats->overdueMaxTime.loadRelaxed(), Milliseconds{0});
+    }
+
+    // After the thread wakes up from the sleep, the overdue "timer" resets. The thread should be
+    // able to go nearly the entire interval without checking for interrupt and not be considered
+    // overdue.
+    mockTickSource()->advance(interval - Milliseconds{1});
+    ASSERT_OK(opCtx->checkForInterruptNoAssert());
+    {
+        auto stats = opCtx->overdueInterruptCheckStats();
+        ASSERT(stats);
+        ASSERT_GTE(opCtx->numInterruptChecks(), 2);
+        ASSERT_EQ(stats->overdueInterruptChecks.loadRelaxed(), 0);
+        ASSERT_EQ(stats->overdueAccumulator.loadRelaxed(), Milliseconds{0});
+        ASSERT_EQ(stats->overdueMaxTime.loadRelaxed(), Milliseconds{0});
+    }
+}
+
+TEST_F(OverdueInterruptTestWithInterruptibleWait, KillDuringInterruptibleSleepNotMarkedOverdue) {
+    auto client = getService()->makeClient("MainClient");
+    auto opCtx = client->makeOperationContext();
+    opCtx->trackOverdueInterruptChecks(mockTickSource()->getTicks());
+
+    const Milliseconds interval{gOverdueInterruptCheckIntervalMillis.load()};
+
+    // Start a thread which will be killed during an interruptible wait that is longer than the
+    // interrupt period.
+    auto task = stdx::packaged_task<void()>(
+        [&] { WaitTestState{}.start(&*opCtx, {}, waitDurationFn(interval * 5)).get(); });
+
+    auto result = task.get_future();
+    JoinThread thread([&task] { task(); });
+
+    // Advance the clock by an amount shorter than the second thread's wait time, and then kill the
+    // opCtx.
+    mockTickSource()->advance(interval * 2);
+
+    {
+        stdx::lock_guard<Client> clientLock(*opCtx->getClient());
+        opCtx->markKilled();
+    }
+    thread.join();
+
+    ASSERT_THROWS_CODE(result.get(), DBException, ErrorCodes::Interrupted);
+    ASSERT_TRUE(opCtx->getCancellationToken().isCanceled());
+
+    // The opCtx should not be considered overdue. Even though it did go longer than the
+    // expected checkForInterrupt interval without calling checkForInterrupt, it was in an
+    // interruptible wait.
+    {
+        auto stats = opCtx->overdueInterruptCheckStats();
+        ASSERT(stats);
+        ASSERT_GT(opCtx->numInterruptChecks(), 0);
+        ASSERT_EQ(stats->overdueInterruptChecks.loadRelaxed(), 0);
+        ASSERT_EQ(stats->overdueAccumulator.loadRelaxed(), Milliseconds{0});
+        ASSERT_EQ(stats->overdueMaxTime.loadRelaxed(), Milliseconds{0});
+    }
+}
+}  // namespace
 }  // namespace mongo

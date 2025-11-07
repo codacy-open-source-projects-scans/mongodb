@@ -27,14 +27,14 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-
 #include "mongo/db/sorter/sorter_stats.h"
 
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
+
+#include <algorithm>
 
 namespace mongo {
-SorterFileStats::SorterFileStats(SorterTracker* sorterTracker) : _sorterTracker(sorterTracker){};
+SorterFileStats::SorterFileStats(SorterTracker* sorterTracker) : _sorterTracker(sorterTracker) {};
 
 void SorterFileStats::addSpilledDataSize(long long data) {
     _bytesSpilled.fetchAndAdd(data);
@@ -50,7 +50,7 @@ void SorterFileStats::addSpilledDataSizeUncompressed(long long data) {
     }
 }
 
-SorterStats::SorterStats(SorterTracker* sorterTracker) : _sorterTracker(sorterTracker){};
+SorterStats::SorterStats(SorterTracker* sorterTracker) : _sorterTracker(sorterTracker) {};
 
 void SorterStats::incrementSpilledRanges() {
     _spilledRanges++;
@@ -77,6 +77,17 @@ void SorterStats::setSpilledRanges(uint64_t spills) {
 
 uint64_t SorterStats::spilledRanges() const {
     return _spilledRanges;
+}
+
+void SorterStats::incrementSpilledKeyValuePairs(uint64_t records) {
+    _spilledKeyValuePairs += records;
+    if (_sorterTracker) {
+        _sorterTracker->spilledKeyValuePairs.fetchAndAdd(records);
+    }
+}
+
+uint64_t SorterStats::spilledKeyValuePairs() const {
+    return _spilledKeyValuePairs;
 }
 
 void SorterStats::incrementNumSorted(uint64_t sortedKeys) {

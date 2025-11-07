@@ -29,61 +29,29 @@
 
 #pragma once
 
+#include "mongo/util/modules.h"
+
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "boost/container/detail/std_fwd.hpp"
+#include "mongo/base/status.h"
+#include "mongo/db/exec/classic/plan_stage.h"
+#include "mongo/db/exec/classic/working_set.h"
+#include "mongo/db/exec/plan_stats.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
+#include "mongo/db/query/query_knobs_gen.h"
+#include "mongo/platform/atomic_word.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <deque>
 #include <functional>
 #include <memory>
-#include <queue>
 #include <string>
 
-#include "mongo/base/status.h"
-#include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/exec/sbe/stages/plan_stats.h"
-#include "mongo/db/exec/working_set.h"
-#include "mongo/db/query/explain.h"
-#include "mongo/db/query/plan_executor.h"
-#include "mongo/db/query/plan_ranking_decision.h"
-#include "mongo/db/query/query_knobs_gen.h"
-#include "mongo/db/query/query_solution.h"
-#include "mongo/db/query/stage_types.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/util/container_size_helper.h"
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo::plan_ranker {
-// The logging facility enforces the rule that logging should not be done in a header file. Since
-// template classes and functions below must be defined in the header file and since they use the
-// logging facility, we have to define the helper functions below to perform the actual logging
-// operation from template code.
-// Note that we pass std::function callback instead of string values to avoid spending time
-// generating log output that may never actually be written to the logs, depending on the current
-// log level.
-namespace log_detail {
-void logScoreFormula(std::function<std::string()> formula,
-                     double score,
-                     double baseScore,
-                     double productivity,
-                     double noFetchBonus,
-                     double noSortBonus,
-                     double noIxisectBonus,
-                     double tieBreakers);
-void logScoreBoost(double score);
-void logScoringPlan(std::function<std::string()> solution,
-                    std::function<std::string()> explain,
-                    std::function<std::string()> planSummary,
-                    size_t planIndex,
-                    bool isEOF);
-void logScore(double score);
-void logEOFBonus(double eofBonus);
-void logFailedPlan(std::function<std::string()> planSummary);
-void logTieBreaking(double score,
-                    double docsFetchedBonus,
-                    double indexPrefixBonus,
-                    bool isPlanTied);
-}  // namespace log_detail
 
 // Constant used for tie breakers.
 const double kBonusEpsilon = 1e-4;
@@ -102,7 +70,7 @@ public:
     PlanScorer() = default;
     virtual ~PlanScorer() = default;
 
-    double calculateScore(const PlanStageStatsType* stats) const {
+    double calculateScore(const PlanStageStatsType* stats, const CanonicalQuery& cq) const {
         // We start all scores at 1.  Our "no plan selected" score is 0 and we want all plans to
         // be greater than that.
         const double baseScore = 1;
@@ -114,10 +82,7 @@ public:
 
 
         // We prefer queries that don't require a fetch stage.
-        double noFetchBonus = epsilon;
-        if (hasStage(STAGE_FETCH, stats)) {
-            noFetchBonus = 0;
-        }
+        const double noFetchBonus = hasFetch(stats) ? 0 : epsilon;
 
         // In the case of ties, prefer solutions without a blocking sort
         // to solutions with a blocking sort.
@@ -141,35 +106,57 @@ public:
         }
 
         const double tieBreakers = noFetchBonus + noSortBonus + noIxisectBonus;
-        double score = baseScore + productivity + tieBreakers;
+        boost::optional<double> groupByDistinctBonus;
 
-        log_detail::logScoreFormula([this, stats] { return getProductivityFormula(stats); },
-                                    score,
-                                    baseScore,
-                                    productivity,
-                                    noFetchBonus,
-                                    noSortBonus,
-                                    noIxisectBonus,
-                                    tieBreakers);
+        // Apply a large bonus to DISTINCT_SCAN plans in an aggregation context, as the
+        // $groupByDistinct rewrite can reduce the amount of overall work the query needs to do.
+        if (cq.getExpCtx()->isFeatureFlagShardFilteringDistinctScanEnabled() && cq.getDistinct() &&
+            !cq.cqPipeline().empty() && hasStage(STAGE_DISTINCT_SCAN, stats)) {
+            // Assume that every advance in a distinct scan is 5x as productive as the
+            // equivalent index scan, up to the number of works actually done by the
+            // distinct scan, in order to favor distinct scans. The maximum bonus is 0.8
+            // (productivity = 0.2), while the minimum bonus is 0 (productivity = 1). If the
+            // distinct scan is not very productive (< 0.2) we don't want to prioritize it
+            // too much; conversely, if it is very productive, we don't need a huge bonus.
+            constexpr auto productivityRatio = 5;
+            groupByDistinctBonus =
+                std::min(1 - productivity, productivity * (productivityRatio - 1));
+            LOGV2_DEBUG(9961700,
+                        5,
+                        "Adding groupByDistinctBonus, boost formula is: std::min(1 - productivity, "
+                        "productivity * (productivityRatio - 1))",
+                        "groupByDistinctBonus"_attr = *groupByDistinctBonus,
+                        "productivityRatio"_attr = productivityRatio);
+        }
+
+        double score = baseScore + productivity + tieBreakers + groupByDistinctBonus.value_or(0.0);
+
+        LOGV2_DEBUG(
+            20961, 2, "Score formula", "formula"_attr = [&]() {
+                StringBuilder sb;
+                sb << "score(" << str::convertDoubleToString(score) << ") = baseScore("
+                   << str::convertDoubleToString(baseScore) << ")"
+                   << " + productivity(" << getProductivityFormula(stats) << " = "
+                   << str::convertDoubleToString(productivity) << ")"
+                   << " + tieBreakers(" << str::convertDoubleToString(noFetchBonus)
+                   << " noFetchBonus + " << str::convertDoubleToString(noSortBonus)
+                   << " noSortBonus + " << str::convertDoubleToString(noIxisectBonus)
+                   << " noIxisectBonus = " << str::convertDoubleToString(tieBreakers) << ")";
+                if (groupByDistinctBonus) {
+                    sb << " + groupByDistinctBonus(" << *groupByDistinctBonus << ")";
+                }
+                return sb.str();
+            }());
+
 
         if (internalQueryForceIntersectionPlans.load()) {
             if (hasStage(STAGE_AND_HASH, stats) || hasStage(STAGE_AND_SORTED, stats)) {
                 // The boost should be >2.001 to make absolutely sure the ixisect plan will win due
                 // to the combination of 1) productivity, 2) eof bonus, and 3) no ixisect bonus.
                 score += 3;
-                log_detail::logScoreBoost(score);
+                LOGV2_DEBUG(
+                    20962, 5, "Score boosted due to intersection forcing", "newScore"_attr = score);
             }
-        }
-        // In the case of ties (notably covered DISTINCT_SCAN vs covered IXSCAN), prefer
-        // solutions that use a DISTINCT_SCAN.
-        if (hasStage(STAGE_DISTINCT_SCAN, stats)) {
-            tassert(9246800,
-                    "STAGE_DISTINCT_SCAN found with distinct multiplanning disabled",
-                    feature_flags::gFeatureFlagShardFilteringDistinctScan
-                        .isEnabledUseLastLTSFCVWhenUninitialized(
-                            serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
-            score += epsilon;
-            log_detail::logScoreBoost(score);
         }
 
         return score;
@@ -183,8 +170,8 @@ protected:
     virtual double calculateProductivity(const PlanStageStatsType* stats) const = 0;
 
     /**
-     * Returns a string desribing a formula to calculte plan producivity. It can be used for the log
-     * output, for example.
+     * Returns a string describing a formula to calculate plan productivity. It can be used for the
+     * log output, for example.
      */
     virtual std::string getProductivityFormula(const PlanStageStatsType* stats) const = 0;
 
@@ -198,6 +185,10 @@ protected:
      * True, if the plan stage stats tree represents a plan stage of the given 'type'.
      */
     virtual bool hasStage(StageType type, const PlanStageStatsType* stats) const = 0;
+
+    virtual bool hasFetch(const PlanStageStatsType* stats) const {
+        return hasStage(STAGE_FETCH, stats);
+    }
 };
 
 /**
@@ -244,3 +235,5 @@ using CandidatePlan = BaseCandidatePlan<PlanStage*, WorkingSetID, WorkingSet*>;
  */
 std::vector<size_t> applyIndexPrefixHeuristic(const std::vector<const QuerySolution*>& solutions);
 }  // namespace mongo::plan_ranker
+
+#undef MONGO_LOGV2_DEFAULT_COMPONENT

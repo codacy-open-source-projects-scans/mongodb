@@ -28,26 +28,26 @@
  */
 
 
-#include <asio.hpp>
-#include <boost/filesystem.hpp>
-#include <fstream>
-
-#include "mongo/config.h"
-#include "mongo/platform/basic.h"
+#include "mongo/util/net/ssl_manager.h"
 
 #include "mongo/bson/json.h"
+#include "mongo/config.h"
+#include "mongo/logv2/log.h"
 #include "mongo/transport/asio/asio_transport_layer.h"
 #include "mongo/transport/session_manager.h"
 #include "mongo/transport/transport_layer_manager.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/net/sock_test_utils.h"
 #include "mongo/util/net/ssl/context.hpp"
 #include "mongo/util/net/ssl/stream.hpp"
-#include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/net/ssl_options.h"
-
-#include "mongo/logv2/log.h"
-#include "mongo/unittest/unittest.h"
 #include "mongo/util/net/ssl_types.h"
+
+#include <fstream>
+
+#include <asio.hpp>
+
+#include <boost/filesystem.hpp>
 
 #if MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_OPENSSL
 #include "mongo/util/net/dh_openssl.h"
@@ -122,6 +122,10 @@ public:
     void waitForConnect() {
         stdx::unique_lock<stdx::mutex> lock(_mutex);
         _cv.wait(lock, [&] { return !_sessions.empty(); });
+    }
+
+    std::vector<std::pair<transport::SessionId, std::string>> getOpenSessionIDs() const override {
+        return {};
     }
 
 private:
@@ -1040,15 +1044,15 @@ TEST(SSLManager, InitContextSanWarning) {
     params.sslCAFile = "jstests/libs/ca.pem";
     params.sslPEMKeyFile = "jstests/libs/server_no_SAN.pem";
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     auto manager = SSLManagerInterface::create(params, true);
     auto egress = std::make_unique<asio::ssl::context>(asio::ssl::context::sslv23);
 
     uassertStatusOK(manager->initSSLContext(
         egress->native_handle(), params, SSLManagerInterface::ConnectionDirection::kIncoming));
-    stopCapturingLogMessages();
+    logs.stop();
 
-    ASSERT_TRUE(isSanWarningWritten(getCapturedTextFormatLogMessages()));
+    ASSERT_TRUE(isSanWarningWritten(logs.getText()));
 }
 
 // This test verifies there is no startup warning if Subject Alternative Name is present
@@ -1058,15 +1062,15 @@ TEST(SSLManager, InitContextNoSanWarning) {
     params.sslCAFile = "jstests/libs/ca.pem";
     params.sslPEMKeyFile = "jstests/libs/server.pem";
 
-    startCapturingLogMessages();
+    unittest::LogCaptureGuard logs;
     auto manager = SSLManagerInterface::create(params, true);
     auto egress = std::make_unique<asio::ssl::context>(asio::ssl::context::sslv23);
 
     uassertStatusOK(manager->initSSLContext(
         egress->native_handle(), params, SSLManagerInterface::ConnectionDirection::kIncoming));
-    stopCapturingLogMessages();
+    logs.stop();
 
-    ASSERT_FALSE(isSanWarningWritten(getCapturedTextFormatLogMessages()));
+    ASSERT_FALSE(isSanWarningWritten(logs.getText()));
 }
 
 class SSLTestFixture {

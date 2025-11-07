@@ -27,21 +27,20 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_map.h>
-#include <absl/container/node_hash_set.h>
-#include <string>
-#include <utility>
-#include <vector>
+#include "mongo/db/exec/document_value/value_comparator.h"
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
-#include "mongo/db/exec/document_value/value_comparator.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <string>
+#include <utility>
+#include <vector>
+
 
 namespace mongo {
 namespace {
@@ -281,24 +280,16 @@ TEST(ValueComparatorTest, UnorderedMapOfValueRespectsCollation) {
 TEST(ValueComparatorTest, ComparingCodeWScopeShouldNotRespectCollation) {
     const CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kAlwaysEqual);
     const ValueComparator comparator(&collator);
-    const Value val1{BSONCodeWScope("js code",
-                                    BSON("foo"
-                                         << "bar"))};
-    const Value val2{BSONCodeWScope("js code",
-                                    BSON("foo"
-                                         << "not bar"))};
+    const Value val1{BSONCodeWScope("js code", BSON("foo" << "bar"))};
+    const Value val2{BSONCodeWScope("js code", BSON("foo" << "not bar"))};
     ASSERT_TRUE(comparator.evaluate(val1 != val2));
 }
 
 TEST(ValueComparatorTest, HashingCodeWScopeShouldNotRespectCollation) {
     const CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kAlwaysEqual);
     const ValueComparator comparator(&collator);
-    const Value val1{BSONCodeWScope("js code",
-                                    BSON("foo"
-                                         << "bar"))};
-    const Value val2{BSONCodeWScope("js code",
-                                    BSON("foo"
-                                         << "not bar"))};
+    const Value val1{BSONCodeWScope("js code", BSON("foo" << "bar"))};
+    const Value val2{BSONCodeWScope("js code", BSON("foo" << "not bar"))};
     ASSERT_NE(comparator.hash(val1), comparator.hash(val2));
 }
 

@@ -29,16 +29,17 @@
 
 #pragma once
 
-#include <array>
-#include <bitset>
-#include <initializer_list>
-
 #include "mongo/db/auth/access_checks_gen.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/action_type_gen.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/concurrency/with_lock.h"
+
+#include <array>
+#include <bitset>
+#include <initializer_list>
 
 namespace mongo {
 
@@ -54,11 +55,14 @@ namespace mongo {
  * This class is a lossy set.
  * 1. It does not record a count of times a check has been performed.
  * 2. It does not record which namespace a check is performed against.
+ *
+ * When commands execute other commands via DBDirectClient, we only want
+ * the top-level command to accumulate authorization checks.
  */
 class AuthorizationContract {
 public:
     AuthorizationContract() = default;
-    AuthorizationContract(bool isTestModeEnabled) : _isTestModeEnabled(isTestModeEnabled){};
+    AuthorizationContract(bool isTestModeEnabled) : _isTestModeEnabled(isTestModeEnabled) {};
 
     template <typename Checks, typename Privileges>
     AuthorizationContract(const Checks& checks, const Privileges& privileges) {
@@ -71,9 +75,24 @@ public:
     }
 
     AuthorizationContract(const AuthorizationContract& other) {
+        stdx::lock_guard<stdx::mutex> lck(other._mutex);
         _checks = other._checks;
         _privilegeChecks = other._privilegeChecks;
+        _isPermissionChecked = other._isPermissionChecked;
+        _commandDepth = other._commandDepth;
     }
+
+    /**
+     * Start tracking permissions and privileges in the authorization contract.
+     * Will only track top level commands to prevent nested direct client operations from polluting
+     * the parent command's authorization contract.
+     */
+    void enterCommandScope();
+
+    /**
+     * Stops tracking the contract and reduces the command depth counter.
+     */
+    void exitCommandScope();
 
     /**
      * Clear the authorization contract
@@ -81,7 +100,7 @@ public:
     void clear();
 
     /**
-     * Add a access check to the contract.
+     * Add an access check to the contract.
      */
     void addAccessCheck(AccessCheckEnum check);
 
@@ -105,7 +124,72 @@ public:
      */
     bool contains(const AuthorizationContract& other) const;
 
+    /**
+     * Return true if PermissionCheckStatus is Checked.
+     */
+    bool isPermissionChecked() const;
+
+    /**
+     * Get the set of common access checks that are performed by code common to all commands.
+     */
+    static const std::vector<AccessCheckEnum>& getCommonAccessChecks() {
+        static const std::vector<AccessCheckEnum> commonAccessChecks = {
+            // The first two checks are done by initializeOperationSessionInfo
+            AccessCheckEnum::kIsUsingLocalhostBypass,
+            AccessCheckEnum::kIsAuthenticated,
+            // These checks are done by auditing
+            AccessCheckEnum::kGetAuthenticatedUserName,
+            AccessCheckEnum::kGetAuthenticatedRoleNames,
+            // Since internal sessions are started by the server...
+            AccessCheckEnum::kGetAuthenticatedUser,
+            AccessCheckEnum::kLookupUser};
+        return commonAccessChecks;
+    }
+
+    /**
+     * Get the set of common privileges checks that are performed by code common to all commands.
+     */
+    static const std::vector<Privilege>& getCommonPrivileges() {
+        static const std::vector<Privilege> commonPrivileges = {
+            // "internal" comes from readRequestMetadata and sharded clusters
+            // "advanceClusterTime" is an implicit check in clusters in metadata handling
+            Privilege(ResourcePattern::forClusterResource(boost::none),
+                      {ActionType::advanceClusterTime, ActionType::internal}),
+            // Implicitly checked often to keep mayBypassWriteBlockingMode() fast
+            Privilege(ResourcePattern::forClusterResource(boost::none),
+                      ActionType::bypassWriteBlockingMode),
+            // Operations which do not specify a maxTimeMS check if the defaultMaxTimeMS can be
+            // bypassed.
+            Privilege(ResourcePattern::forClusterResource(boost::none),
+                      ActionType::bypassDefaultMaxTimeMS),
+            // Implicitly checked often to keep useTenant checks fast
+            Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::useTenant),
+            // makeLogicalSessionId checks for impersonate privileges
+            Privilege(ResourcePattern::forClusterResource(boost::none), ActionType::impersonate),
+            // Needed for internal sessions started by the server.
+            Privilege(ResourcePattern::forClusterResource(boost::none),
+                      ActionType::issueDirectShardOperations),
+            Privilege(ResourcePattern::forExactNamespace(NamespaceString::kEmpty),
+                      {ActionType::performRawDataOperations, ActionType::internal})};
+        return commonPrivileges;
+    }
+
 private:
+    // Clear the authorization contract.
+    void clear(WithLock lk);
+
+    /**
+     * Determines if an access check is part of kCommonAccessChecks which are common to all commands
+     * and don't trigger authz checks tracking.
+     */
+    bool isCommonAccessCheck(AccessCheckEnum check) const;
+
+    /**
+     * Determines if a privilege is part of kCommonPrivileges which are common to all commands and
+     * don't trigger authz checks tracking.
+     */
+    bool isCommonPrivilege(const Privilege& p) const;
+
     mutable stdx::mutex _mutex;
 
     // Set of access checks performed
@@ -114,8 +198,14 @@ private:
     // Set of privileges performed per resource pattern type
     std::array<ActionSet, idlEnumCount<MatchTypeEnum>> _privilegeChecks;
 
+    // Current status of permission check, updated on added access check, added privilege, or clear
+    bool _isPermissionChecked{false};
+
     // If false accounting and mutex guards are disabled
     bool _isTestModeEnabled{true};
+
+    // Depth of commands running as DBDirectClient.
+    int _commandDepth{0};
 };
 
 }  // namespace mongo

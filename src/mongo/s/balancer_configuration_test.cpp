@@ -29,17 +29,6 @@
 
 #include <boost/date_time/posix_time/posix_time_types.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <boost/date_time/gregorian/greg_date.hpp>
-#include <boost/date_time/posix_time/posix_time_duration.hpp>
-#include <boost/date_time/posix_time/ptime.hpp>
-#include <boost/date_time/time_duration.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <fmt/format.h>
-#include <memory>
-#include <system_error>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -50,17 +39,28 @@
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/query/query_request_helper.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/vector_clock.h"
+#include "mongo/db/sharding_environment/sharding_mongos_test_fixture.h"
+#include "mongo/db/vector_clock/vector_clock.h"
 #include "mongo/executor/network_test_env.h"
 #include "mongo/executor/remote_command_request.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/s/balancer_configuration.h"
-#include "mongo/s/sharding_mongos_test_fixture.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <memory>
+#include <system_error>
+#include <vector>
+
+#include <boost/date_time/gregorian/greg_date.hpp>
+#include <boost/date_time/posix_time/posix_time_duration.hpp>
+#include <boost/date_time/posix_time/ptime.hpp>
+#include <boost/date_time/time_duration.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 namespace {
@@ -73,6 +73,19 @@ boost::gregorian::date currentDate() {
     boost::posix_time::ptime now = boost::posix_time::second_clock::local_time();
     return now.date();
 }
+class BalancerSettingsTestFixture : public ServiceContextTest {
+public:
+    OperationContext* opCtx() {
+        if (!_opCtx) {
+            _opCtx = makeOperationContext();
+        }
+        return _opCtx.get();
+    }
+
+protected:
+    ServiceContext::UniqueOperationContext _opCtx;
+};
+
 
 class BalancerConfigurationTestFixture : public ShardingTestFixture {
 protected:
@@ -113,13 +126,13 @@ TEST_F(BalancerConfigurationTestFixture, NoConfigurationDocuments) {
 
     auto future = launchAsync([&] { ASSERT_OK(config.refreshAndCheck(operationContext())); });
 
-    expectSettingsQuery(BalancerSettingsType::kKey, boost::optional<BSONObj>());
+    expectSettingsQuery(BalancerConfiguration::kBalancerSettingKey, boost::optional<BSONObj>());
     expectSettingsQuery(ChunkSizeSettingsType::kKey, boost::optional<BSONObj>());
     expectSettingsQuery(AutoMergeSettingsType::kKey, boost::optional<BSONObj>());
 
     future.default_timed_get();
 
-    ASSERT(config.shouldBalance());
+    ASSERT(config.shouldBalance(operationContext()));
     ASSERT_EQ(MigrationSecondaryThrottleOptions::kDefault,
               config.getSecondaryThrottle().getSecondaryThrottle());
     ASSERT_EQ(ChunkSizeSettingsType::kDefaultMaxChunkSizeBytes, config.getMaxChunkSizeBytes());
@@ -132,13 +145,13 @@ TEST_F(BalancerConfigurationTestFixture, ChunkSizeSettingsDocumentOnly) {
 
     auto future = launchAsync([&] { ASSERT_OK(config.refreshAndCheck(operationContext())); });
 
-    expectSettingsQuery(BalancerSettingsType::kKey, boost::optional<BSONObj>());
+    expectSettingsQuery(BalancerConfiguration::kBalancerSettingKey, boost::optional<BSONObj>());
     expectSettingsQuery(ChunkSizeSettingsType::kKey, boost::optional<BSONObj>(BSON("value" << 3)));
     expectSettingsQuery(AutoMergeSettingsType::kKey, boost::optional<BSONObj>());
 
     future.default_timed_get();
 
-    ASSERT(config.shouldBalance());
+    ASSERT(config.shouldBalance(operationContext()));
     ASSERT_EQ(MigrationSecondaryThrottleOptions::kDefault,
               config.getSecondaryThrottle().getSecondaryThrottle());
     ASSERT_EQ(3 * 1024 * 1024ULL, config.getMaxChunkSizeBytes());
@@ -151,135 +164,242 @@ TEST_F(BalancerConfigurationTestFixture, BalancerSettingsDocumentOnly) {
 
     auto future = launchAsync([&] { ASSERT_OK(config.refreshAndCheck(operationContext())); });
 
-    expectSettingsQuery(BalancerSettingsType::kKey,
+    expectSettingsQuery(BalancerConfiguration::kBalancerSettingKey,
                         boost::optional<BSONObj>(BSON("stopped" << true)));
     expectSettingsQuery(ChunkSizeSettingsType::kKey, boost::optional<BSONObj>());
     expectSettingsQuery(AutoMergeSettingsType::kKey, boost::optional<BSONObj>());
 
     future.default_timed_get();
 
-    ASSERT(!config.shouldBalance());
+    ASSERT(!config.shouldBalance(operationContext()));
     ASSERT_EQ(MigrationSecondaryThrottleOptions::kDefault,
               config.getSecondaryThrottle().getSecondaryThrottle());
     ASSERT_EQ(ChunkSizeSettingsType::kDefaultMaxChunkSizeBytes, config.getMaxChunkSizeBytes());
 }
 
-TEST(BalancerSettingsType, Defaults) {
-    BalancerSettingsType settings = assertGet(BalancerSettingsType::fromBSON(BSONObj()));
-    ASSERT_EQ(BalancerSettingsType::kFull, settings.getMode());
+TEST_F(BalancerSettingsTestFixture, Defaults) {
+    BalancerConfiguration config;
+    BalancerSettings settings = assertGet(config.getSettingsFromBSON(opCtx(), BSONObj()));
+
+    ASSERT_EQ(BalancerModeEnum::kFull, settings.getMode());
+
     ASSERT_EQ(MigrationSecondaryThrottleOptions::kDefault,
-              settings.getSecondaryThrottle().getSecondaryThrottle());
-    ASSERT(!settings.getSecondaryThrottle().isWriteConcernSpecified());
+              settings.get_secondaryThrottle()->getSecondaryThrottle());
+    ASSERT(!settings.get_secondaryThrottle()->isWriteConcernSpecified());
+
+    ASSERT(config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(12) + boost::posix_time::minutes(0))));
 }
 
-TEST(BalancerSettingsType, BalancerDisabledThroughStoppedOption) {
-    BalancerSettingsType settings =
-        assertGet(BalancerSettingsType::fromBSON(BSON("stopped" << true)));
-    ASSERT_EQ(BalancerSettingsType::kOff, settings.getMode());
+
+TEST_F(BalancerSettingsTestFixture, BalancerDisabledThroughStoppedOption) {
+    BalancerConfiguration config;
+
+    BalancerSettings settings =
+        assertGet(config.getSettingsFromBSON(opCtx(), BSON("stopped" << true)));
+    ASSERT_EQ(BalancerModeEnum::kOff, settings.getMode());
 }
 
-TEST(BalancerSettingsType, AllValidBalancerModeOptions) {
-    ASSERT_EQ(BalancerSettingsType::kFull,
-              assertGet(BalancerSettingsType::fromBSON(BSON("mode"
-                                                            << "full")))
-                  .getMode());
-    ASSERT_EQ(BalancerSettingsType::kOff,
-              assertGet(BalancerSettingsType::fromBSON(BSON("mode"
-                                                            << "off")))
-                  .getMode());
+TEST_F(BalancerSettingsTestFixture, AllValidBalancerModeOptions) {
+    BalancerConfiguration config;
+    ASSERT_EQ(BalancerModeEnum::kFull,
+              assertGet(config.getSettingsFromBSON(opCtx(), BSON("mode" << "full"))).getMode());
+    ASSERT_EQ(BalancerModeEnum::kOff,
+              assertGet(config.getSettingsFromBSON(opCtx(), BSON("mode" << "off"))).getMode());
 }
 
-TEST(BalancerSettingsType, InvalidBalancerModeOption) {
-    startCapturingLogMessages();
-    ASSERT_EQ(BalancerSettingsType::kOff,
-              assertGet(BalancerSettingsType::fromBSON(BSON("mode"
-                                                            << "BAD")))
-                  .getMode());
-    stopCapturingLogMessages();
-    ASSERT_EQ(1,
-              countTextFormatLogLinesContaining(
-                  "Balancer turned off because currently set balancing mode is not valid"));
+TEST_F(BalancerSettingsTestFixture, IDLRoundTripTest) {
+    BSONObj originalBSON = BSON(
+        "mode" << "full" << "stopped" << false << "activeWindow"
+               << BSON("start" << "9:00" << "stop" << "17:00") << "activeWindowDOW"
+               << BSON_ARRAY(BSON("day" << "Monday" << "start" << "9:00" << "stop" << "17:00")
+                             << BSON("day" << "Friday" << "start" << "14:00" << "stop" << "18:00"))
+               << "_secondaryThrottle" << BSON("w" << 2 << "j" << true << "wtimeout" << 1)
+               << "_waitForDelete" << true << "attemptToBalanceJumboChunks" << false);
+
+    IDLParserContext ctxt("BalancerSettings");
+    BalancerSettings settings = BalancerSettings::parse(originalBSON, ctxt);
+
+    BSONObj roundTripBSON = settings.toBSON();
+
+    ASSERT_BSONOBJ_EQ(originalBSON, roundTripBSON);
 }
 
-TEST(BalancerSettingsType, BalancingWindowStartLessThanStop) {
-    BalancerSettingsType settings =
-        assertGet(BalancerSettingsType::fromBSON(BSON("activeWindow" << BSON("start"
-                                                                             << "9:00"
-                                                                             << "stop"
-                                                                             << "19:00"))));
+TEST_F(BalancerSettingsTestFixture, IDLParsingModeThrowsDBException) {
+    BalancerConfiguration config;
 
-    ASSERT(settings.isTimeInBalancingWindow(boost::posix_time::ptime(
-        currentDate(), boost::posix_time::hours(9) + boost::posix_time::minutes(0))));
-    ASSERT(settings.isTimeInBalancingWindow(boost::posix_time::ptime(
-        currentDate(), boost::posix_time::hours(10) + boost::posix_time::minutes(30))));
-    ASSERT(settings.isTimeInBalancingWindow(boost::posix_time::ptime(
-        currentDate(), boost::posix_time::hours(19) + boost::posix_time::minutes(0))));
+    BSONObj invalidBSON = BSON("mode" << 123);
 
-    ASSERT(!settings.isTimeInBalancingWindow(boost::posix_time::ptime(
-        currentDate(), boost::posix_time::hours(8) + boost::posix_time::minutes(59))));
-    ASSERT(!settings.isTimeInBalancingWindow(boost::posix_time::ptime(
-        currentDate(), boost::posix_time::hours(19) + boost::posix_time::minutes(1))));
+    auto status = config.getSettingsFromBSON(opCtx(), invalidBSON).getStatus();
+
+    ASSERT_NOT_OK(status);
+    ASSERT_EQUALS(ErrorCodes::TypeMismatch, status);
+    ASSERT_STRING_CONTAINS(status.reason(), "mode");
 }
 
-TEST(BalancerSettingsType, BalancingWindowStopLessThanStart) {
-    BalancerSettingsType settings =
-        assertGet(BalancerSettingsType::fromBSON(BSON("activeWindow" << BSON("start"
-                                                                             << "23:00"
-                                                                             << "stop"
-                                                                             << "8:00"))));
+TEST_F(BalancerSettingsTestFixture, IDLParsingStoppedThrowsDBException) {
+    BalancerConfiguration config;
 
-    ASSERT(settings.isTimeInBalancingWindow(boost::posix_time::ptime(
-        currentDate(), boost::posix_time::hours(23) + boost::posix_time::minutes(0))));
-    ASSERT(settings.isTimeInBalancingWindow(boost::posix_time::ptime(
-        currentDate(), boost::posix_time::hours(2) + boost::posix_time::minutes(30))));
-    ASSERT(settings.isTimeInBalancingWindow(boost::posix_time::ptime(
-        currentDate(), boost::posix_time::hours(7) + boost::posix_time::minutes(59))));
+    BSONObj invalidBSON = BSON("stopped" << "full");
 
-    ASSERT(!settings.isTimeInBalancingWindow(boost::posix_time::ptime(
-        currentDate(), boost::posix_time::hours(8) + boost::posix_time::minutes(1))));
-    ASSERT(!settings.isTimeInBalancingWindow(boost::posix_time::ptime(
-        currentDate(), boost::posix_time::hours(22) + boost::posix_time::minutes(00))));
+    auto status = config.getSettingsFromBSON(opCtx(), invalidBSON).getStatus();
+
+    ASSERT_NOT_OK(status);
+    ASSERT_EQUALS(ErrorCodes::TypeMismatch, status);
+    ASSERT_STRING_CONTAINS(status.reason(), "stopped");
 }
 
-TEST(BalancerSettingsType, InvalidBalancingWindowStartEqualsStop) {
-    ASSERT_NOT_OK(BalancerSettingsType::fromBSON(BSON("activeWindow" << BSON("start"
-                                                                             << "00:00"
-                                                                             << "stop"
-                                                                             << "00:00")))
-                      .getStatus());
+TEST_F(BalancerSettingsTestFixture, IDLParsingActiveWindowThrowsDBException) {
+    BalancerConfiguration config;
+
+    BSONObj invalidBSON = BSON("activeWindow" << "foo");
+
+    auto status = config.getSettingsFromBSON(opCtx(), invalidBSON).getStatus();
+
+    ASSERT_NOT_OK(status);
+    ASSERT_EQUALS(ErrorCodes::TypeMismatch, status);
+    ASSERT_STRING_CONTAINS(status.reason(), "activeWindow");
 }
 
-TEST(BalancerSettingsType, InvalidBalancingWindowTimeFormat) {
-    ASSERT_NOT_OK(BalancerSettingsType::fromBSON(BSON("activeWindow" << BSON("start"
-                                                                             << "23"
-                                                                             << "stop"
-                                                                             << "6")))
-                      .getStatus());
+TEST_F(BalancerSettingsTestFixture, IDLParsingActiveWindowDOWThrowsDBException) {
+    BalancerConfiguration config;
 
-    ASSERT_NOT_OK(
-        BalancerSettingsType::fromBSON(BSON("activeWindow" << BSON("start" << 23LL << "stop"
-                                                                           << "6:00")))
-            .getStatus());
+    BSONObj invalidBSON = BSON("activeWindowDOW" << "foo");
 
-    ASSERT_NOT_OK(BalancerSettingsType::fromBSON(BSON("activeWindow" << BSON("start"
-                                                                             << "23:00"
-                                                                             << "stop" << 6LL)))
-                      .getStatus());
+    auto status = config.getSettingsFromBSON(opCtx(), invalidBSON).getStatus();
+
+    ASSERT_NOT_OK(status);
+    ASSERT_EQUALS(ErrorCodes::TypeMismatch, status);
+    ASSERT_STRING_CONTAINS(status.reason(), "activeWindowDOW");
 }
 
-TEST(BalancerSettingsType, InvalidBalancingWindowFormat) {
-    ASSERT_NOT_OK(BalancerSettingsType::fromBSON(BSON("activeWindow" << BSON("begin"
-                                                                             << "23:00"
-                                                                             << "stop"
-                                                                             << "6:00")))
-                      .getStatus());
+TEST_F(BalancerSettingsTestFixture, IDLParsingSecondaryThrottleThrowsDBException) {
+    BalancerConfiguration config;
 
-    ASSERT_NOT_OK(BalancerSettingsType::fromBSON(BSON("activeWindow" << BSON("start"
-                                                                             << "23:00"
-                                                                             << "end"
-                                                                             << "6:00")))
-                      .getStatus());
+    BSONObj invalidBSON = BSON("_secondaryThrottle" << "foo");
+
+    auto status = config.getSettingsFromBSON(opCtx(), invalidBSON).getStatus();
+
+    ASSERT_NOT_OK(status);
+    ASSERT_EQUALS(ErrorCodes::BadValue, status);
+    ASSERT_STRING_CONTAINS(status.reason(), "_secondaryThrottle");
 }
+
+TEST_F(BalancerSettingsTestFixture, IDLParsingWaitForDeleteThrowsDBException) {
+    BalancerConfiguration config;
+
+    BSONObj invalidBSON = BSON("_waitForDelete" << "foo");
+
+    auto status = config.getSettingsFromBSON(opCtx(), invalidBSON).getStatus();
+
+    ASSERT_NOT_OK(status);
+    ASSERT_EQUALS(ErrorCodes::TypeMismatch, status);
+    ASSERT_STRING_CONTAINS(status.reason(), "_waitForDelete");
+}
+
+TEST_F(BalancerSettingsTestFixture, IDLParsingAttemptToBalanceJumboChunksThrowsDBException) {
+    BalancerConfiguration config;
+
+    BSONObj invalidBSON = BSON("attemptToBalanceJumboChunks" << "foo");
+
+    auto status = config.getSettingsFromBSON(opCtx(), invalidBSON).getStatus();
+
+    ASSERT_NOT_OK(status);
+    ASSERT_EQUALS(ErrorCodes::TypeMismatch, status);
+    ASSERT_STRING_CONTAINS(status.reason(), "attemptToBalanceJumboChunks");
+}
+
+TEST_F(BalancerSettingsTestFixture, BalancingWindowStartLessThanStop) {
+    BalancerConfiguration config;
+    BalancerSettings settings =
+        assertGet(config.getSettingsFromBSON(opCtx(),
+                                             BSON("activeWindow" << BSON("start" << "9:00"
+                                                                                 << "stop"
+                                                                                 << "19:00"))));
+    config.setBalancerSettingsForTest(settings);
+    ASSERT(config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(9) + boost::posix_time::minutes(0))));
+    ASSERT(config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(10) + boost::posix_time::minutes(30))));
+    ASSERT(config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(19) + boost::posix_time::minutes(0))));
+
+    ASSERT(!config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(8) + boost::posix_time::minutes(59))));
+    ASSERT(!config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(19) + boost::posix_time::minutes(1))));
+}
+
+TEST_F(BalancerSettingsTestFixture, BalancingWindowStopLessThanStart) {
+    BalancerConfiguration config;
+    BalancerSettings settings =
+        assertGet(config.getSettingsFromBSON(opCtx(),
+                                             BSON("activeWindow" << BSON("start" << "23:00"
+                                                                                 << "stop"
+                                                                                 << "8:00"))));
+    config.setBalancerSettingsForTest(settings);
+
+    ASSERT(config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(23) + boost::posix_time::minutes(0))));
+    ASSERT(config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(2) + boost::posix_time::minutes(30))));
+    ASSERT(config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(7) + boost::posix_time::minutes(59))));
+
+    ASSERT(!config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(8) + boost::posix_time::minutes(1))));
+    ASSERT(!config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(22) + boost::posix_time::minutes(00))));
+}
+
+TEST_F(BalancerSettingsTestFixture, InvalidBalancingWindowStartEqualsStop) {
+    BalancerConfiguration config;
+    auto status = config
+                      .getSettingsFromBSON(opCtx(),
+                                           BSON("activeWindow" << BSON("start" << "00:00"
+                                                                               << "stop"
+                                                                               << "00:00")))
+                      .getStatus();
+    ASSERT_NOT_OK(status);
+    ASSERT_EQUALS(ErrorCodes::BadValue, status);
+    ASSERT_EQ(status.reason(), "start and stop times must be different");
+}
+
+TEST_F(BalancerSettingsTestFixture, InvalidBalancingWindowTimeFormat) {
+    BalancerConfiguration config;
+    auto status1 = config
+                       .getSettingsFromBSON(opCtx(),
+                                            BSON("activeWindow" << BSON("start" << "23"
+                                                                                << "stop"
+                                                                                << "6")))
+                       .getStatus();
+    ASSERT_NOT_OK(status1);
+    ASSERT_EQUALS(ErrorCodes::BadValue, status1);
+    ASSERT_EQ(status1.reason(), "activeWindow format is { start: \"hh:mm\" , stop: \"hh:mm\" }");
+}
+
 
 TEST(ChunkSizeSettingsType, NormalValues) {
     ASSERT_EQ(
@@ -301,14 +421,400 @@ TEST(ChunkSizeSettingsType, BackwardsCompatibilityDueToExtraKeys) {
 }
 
 TEST(ChunkSizeSettingsType, IllegalValues) {
-    ASSERT_NOT_OK(ChunkSizeSettingsType::fromBSON(BSON("value" << 0)).getStatus());
-    ASSERT_NOT_OK(ChunkSizeSettingsType::fromBSON(BSON("value" << -1)).getStatus());
-    ASSERT_NOT_OK(ChunkSizeSettingsType::fromBSON(BSON("value" << 1025)).getStatus());
-    ASSERT_NOT_OK(ChunkSizeSettingsType::fromBSON(BSON("value"
-                                                       << "WrongType"))
-                      .getStatus());
-    ASSERT_NOT_OK(ChunkSizeSettingsType::fromBSON(BSON("IllegalKey" << 1)).getStatus());
+    auto status1 = ChunkSizeSettingsType::fromBSON(BSON("value" << 0)).getStatus();
+    ASSERT_NOT_OK(status1);
+    ASSERT_EQUALS(ErrorCodes::BadValue, status1);
+    ASSERT_STRING_CONTAINS(status1.reason(), "is not a valid value for chunksize");
+
+    auto status2 = ChunkSizeSettingsType::fromBSON(BSON("value" << -1)).getStatus();
+    ASSERT_NOT_OK(status2);
+    ASSERT_EQUALS(ErrorCodes::BadValue, status2);
+    ASSERT_STRING_CONTAINS(status2.reason(), "is not a valid value for chunksize");
+
+    auto status3 = ChunkSizeSettingsType::fromBSON(BSON("value" << 1025)).getStatus();
+    ASSERT_NOT_OK(status3);
+    ASSERT_EQUALS(ErrorCodes::BadValue, status3);
+    ASSERT_STRING_CONTAINS(status3.reason(), "is not a valid value for chunksize");
 }
 
+TEST_F(BalancerSettingsTestFixture, StoppedOverridesMode) {
+    BalancerConfiguration config;
+
+    auto settings =
+        assertGet(config.getSettingsFromBSON(opCtx(), BSON("stopped" << true << "mode" << "full")));
+    ASSERT_EQ(BalancerModeEnum::kOff, settings.getMode());
+
+    auto settings2 =
+        assertGet(config.getSettingsFromBSON(opCtx(), BSON("stopped" << false << "mode" << "off")));
+    ASSERT_EQ(BalancerModeEnum::kOff, settings2.getMode());
+}
+
+TEST_F(BalancerSettingsTestFixture, TimeFormatEdgeCases) {
+    BalancerConfiguration config;
+
+    auto validSettings = assertGet(config.getSettingsFromBSON(
+        opCtx(), BSON("activeWindow" << BSON("start" << "00:00" << "stop" << "23:59"))));
+    ASSERT(validSettings.getActiveWindow().has_value());
+
+    auto status1 =
+        config
+            .getSettingsFromBSON(
+                opCtx(), BSON("activeWindow" << BSON("start" << "24:00" << "stop" << "23:00")))
+            .getStatus();
+    ASSERT_NOT_OK(status1);
+
+    auto status2 =
+        config
+            .getSettingsFromBSON(
+                opCtx(), BSON("activeWindow" << BSON("start" << "12:60" << "stop" << "13:00")))
+            .getStatus();
+    ASSERT_NOT_OK(status2);
+}
+
+TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWSingleDay) {
+    BalancerConfiguration config;
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
+                                                               true);
+    BalancerSettings settings = assertGet(
+        config.getSettingsFromBSON(opCtx(),
+                                   BSON("activeWindowDOW" << BSON_ARRAY(BSON("day" << "Monday"
+                                                                                   << "start"
+                                                                                   << "9:00"
+                                                                                   << "stop"
+                                                                                   << "17:00")))));
+    config.setBalancerSettingsForTest(settings);
+    auto today = currentDate();
+    bool isMondayToday = (today.day_of_week() == 1);
+    if (isMondayToday) {
+        ASSERT(config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(currentDate(),
+                                     boost::posix_time::hours(9) + boost::posix_time::minutes(0))));
+        ASSERT(config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(12) + boost::posix_time::minutes(0))));
+        ASSERT(config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(17) + boost::posix_time::minutes(0))));
+
+        ASSERT(!config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(8) + boost::posix_time::minutes(59))));
+        ASSERT(!config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(17) + boost::posix_time::minutes(1))));
+    } else {
+        ASSERT(!config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(12) + boost::posix_time::minutes(0))));
+    }
+}
+
+TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWMultipleDays) {
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
+                                                               true);
+
+    BalancerConfiguration config;
+    BalancerSettings settings = assertGet(config.getSettingsFromBSON(
+        opCtx(),
+        BSON("activeWindowDOW" << BSON_ARRAY(BSON("day" << "Monday"
+                                                        << "start"
+                                                        << "9:00"
+                                                        << "stop"
+                                                        << "17:00")
+                                             << BSON("day" << "Wednesday"
+                                                           << "start"
+                                                           << "9:00"
+                                                           << "stop"
+                                                           << "17:00")
+                                             << BSON("day" << "Friday"
+                                                           << "start"
+                                                           << "9:00"
+                                                           << "stop"
+                                                           << "17:00")))));
+    config.setBalancerSettingsForTest(settings);
+    auto today = currentDate();
+    int dayOfWeek = today.day_of_week();
+    bool isActiveToday = (dayOfWeek == 1 || dayOfWeek == 3 || dayOfWeek == 5);
+
+    if (isActiveToday) {
+        ASSERT(config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(12) + boost::posix_time::minutes(0))));
+    } else {
+        ASSERT(!config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(12) + boost::posix_time::minutes(0))));
+    }
+}
+
+TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWTimeValidation) {
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
+                                                               true);
+    BalancerConfiguration config;
+
+    auto status1 = config
+                       .getSettingsFromBSON(
+                           opCtx(),
+                           BSON("activeWindowDOW" << BSON_ARRAY(BSON("day" << "Monday"
+                                                                           << "start" << "9"
+                                                                           << "stop" << "17:00"))))
+                       .getStatus();
+    ASSERT_NOT_OK(status1);
+    ASSERT_EQ(status1.reason(), "time format must be \"hh:mm\" in activeWindowDOW");
+
+    auto status2 = config
+                       .getSettingsFromBSON(
+                           opCtx(),
+                           BSON("activeWindowDOW" << BSON_ARRAY(BSON("day" << "Monday"
+                                                                           << "start" << "9:00"
+                                                                           << "stop" << "9:00"))))
+                       .getStatus();
+    ASSERT_NOT_OK(status2);
+    ASSERT_EQ(status2.reason(), "start and stop times must be different in activeWindowDOW");
+}
+
+TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWOvernightWindow) {
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
+                                                               true);
+    BalancerConfiguration config;
+    BalancerSettings settings = assertGet(config.getSettingsFromBSON(
+        opCtx(),
+        BSON("activeWindowDOW" << BSON_ARRAY(BSON("day" << "Monday"
+                                                        << "start"
+                                                        << "22:00"
+                                                        << "stop"
+                                                        << "23:59")
+                                             << BSON("day" << "Tuesday"
+                                                           << "start"
+                                                           << "00:00"
+                                                           << "stop"
+                                                           << "6:00")))));
+    config.setBalancerSettingsForTest(settings);
+
+    auto today = currentDate();
+    int dayOfWeek = today.day_of_week();
+    bool isMonday = (dayOfWeek == 1);
+    bool isTuesday = (dayOfWeek == 2);
+
+    if (isMonday) {
+        ASSERT(config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(22) + boost::posix_time::minutes(30))));
+
+        ASSERT(!config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(12) + boost::posix_time::minutes(0))));
+    } else if (isTuesday) {
+        ASSERT(config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(5) + boost::posix_time::minutes(30))));
+
+        ASSERT(!config.isTimeInBalancingWindow(
+            opCtx(),
+            (boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(12) + boost::posix_time::minutes(0)))));
+    } else {
+        ASSERT(!config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(12) + boost::posix_time::minutes(0))));
+    }
+}
+
+TEST_F(BalancerSettingsTestFixture, MultipleTimeWindowsForSameDay) {
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
+                                                               true);
+    BalancerConfiguration config;
+    BalancerSettings settings = assertGet(config.getSettingsFromBSON(
+        opCtx(),
+        BSON("activeWindowDOW" << BSON_ARRAY(BSON("day" << "Monday"
+                                                        << "start"
+                                                        << "09:00"
+                                                        << "stop"
+                                                        << "11:00")
+                                             << BSON("day" << "Monday"
+                                                           << "start"
+                                                           << "14:00"
+                                                           << "stop"
+                                                           << "16:00")))));
+    config.setBalancerSettingsForTest(settings);
+    auto today = currentDate();
+    bool isMondayToday = (today.day_of_week() == 1);
+
+    if (isMondayToday) {
+        ASSERT(config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(9) + boost::posix_time::minutes(30))));
+        ASSERT(config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(10) + boost::posix_time::minutes(45))));
+
+        ASSERT(config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(14) + boost::posix_time::minutes(15))));
+        ASSERT(config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(15) + boost::posix_time::minutes(59))));
+
+        ASSERT(!config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(8) + boost::posix_time::minutes(59))));
+        ASSERT(!config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(12) + boost::posix_time::minutes(0))));
+        ASSERT(!config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(16) + boost::posix_time::minutes(1))));
+    } else {
+        ASSERT(!config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(10) + boost::posix_time::minutes(0))));
+        ASSERT(!config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(15) + boost::posix_time::minutes(0))));
+    }
+}
+
+TEST_F(BalancerSettingsTestFixture, ActiveWindowAndActiveWindowDOWPrecedence) {
+    RAIIServerParameterControllerForTest featureFlagController("featureFlagBalancerWindowDOW",
+                                                               true);
+    BalancerConfiguration config;
+    BalancerSettings settings = assertGet(
+        config.getSettingsFromBSON(opCtx(),
+                                   BSON("activeWindow" << BSON("start" << "9:00"
+                                                                       << "stop"
+                                                                       << "17:00")
+                                                       << "activeWindowDOW"
+                                                       << BSON_ARRAY(BSON("day" << "Saturday"
+                                                                                << "start"
+                                                                                << "10:00"
+                                                                                << "stop"
+                                                                                << "18:00")
+                                                                     << BSON("day" << "Sunday"
+                                                                                   << "start"
+                                                                                   << "10:00"
+                                                                                   << "stop"
+                                                                                   << "18:00")))));
+    config.setBalancerSettingsForTest(settings);
+
+    auto today = currentDate();
+    int dayOfWeek = today.day_of_week();
+    bool isWeekend = (dayOfWeek == 0 || dayOfWeek == 6);
+
+    if (isWeekend) {
+        ASSERT(config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(12) + boost::posix_time::minutes(0))));
+
+        ASSERT(!config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(currentDate(),
+                                     boost::posix_time::hours(8) + boost::posix_time::minutes(0))));
+    } else {
+        ASSERT(!config.isTimeInBalancingWindow(
+            opCtx(),
+            boost::posix_time::ptime(
+                currentDate(), boost::posix_time::hours(12) + boost::posix_time::minutes(0))));
+    }
+}
+
+
+// ===== Feature Flag Disabled Tests =====
+TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWDisabled_IgnoresActiveWindowDOW) {
+    BalancerConfiguration config;
+    unittest::LogCaptureGuard logs;
+    BalancerSettings settings = assertGet(
+        config.getSettingsFromBSON(opCtx(),
+                                   BSON("activeWindowDOW" << BSON_ARRAY(BSON("day" << "Monday"
+                                                                                   << "start"
+                                                                                   << "9:00"
+                                                                                   << "stop"
+                                                                                   << "17:00")))));
+
+    logs.stop();
+    ASSERT_EQ(1,
+              logs.countTextContaining("Ignoring activeWindowDOW settings for versions under 8.3"));
+}
+
+
+TEST_F(BalancerSettingsTestFixture, BalancingWindowDOWDisabled_FallsBackToActiveWindow) {
+    BalancerConfiguration config;
+    unittest::LogCaptureGuard logs;
+
+    BalancerSettings settings = assertGet(
+        config.getSettingsFromBSON(opCtx(),
+                                   BSON("activeWindow" << BSON("start" << "9:00"
+                                                                       << "stop"
+                                                                       << "17:00")
+                                                       << "activeWindowDOW"
+                                                       << BSON_ARRAY(BSON("day" << "Monday"
+                                                                                << "start"
+                                                                                << "22:00"
+                                                                                << "stop"
+                                                                                << "23:00")))));
+    config.setBalancerSettingsForTest(settings);
+    logs.stop();
+
+    ASSERT_EQ(1,
+              logs.countTextContaining("Ignoring activeWindowDOW settings for versions under 8.3"));
+
+    ASSERT(config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(12) + boost::posix_time::minutes(0))));
+
+    ASSERT(!config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(8) + boost::posix_time::minutes(0))));
+    ASSERT(!config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(18) + boost::posix_time::minutes(0))));
+
+    ASSERT(!config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(22) + boost::posix_time::minutes(30))));
+}
+
+TEST_F(BalancerSettingsTestFixture, NoBalancingWindowConfigured_AlwaysOn) {
+    BalancerConfiguration config;
+    BalancerSettings settings = assertGet(config.getSettingsFromBSON(opCtx(), BSONObj()));
+    config.setBalancerSettingsForTest(settings);
+    ASSERT(config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(0) + boost::posix_time::minutes(0))));
+    ASSERT(config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(12) + boost::posix_time::minutes(0))));
+    ASSERT(config.isTimeInBalancingWindow(
+        opCtx(),
+        boost::posix_time::ptime(currentDate(),
+                                 boost::posix_time::hours(23) + boost::posix_time::minutes(59))));
+}
 }  // namespace
 }  // namespace mongo

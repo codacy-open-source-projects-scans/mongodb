@@ -28,9 +28,8 @@
  */
 
 #include "mongo/db/exec/express/express_plan.h"
-#include "mongo/db/catalog/health_log_gen.h"
-#include "mongo/db/catalog/health_log_interface.h"
-#include "mongo/db/transaction_resources.h"
+
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/util/stacktrace.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
@@ -68,27 +67,6 @@ void logRecordNotFound(OperationContext* opCtx,
         return;
     }
 
-    HealthLogEntry entry;
-    entry.setNss(ns);
-    entry.setTimestamp(Date_t::now());
-    entry.setSeverity(SeverityEnum::Error);
-    entry.setScope(ScopeEnum::Index);
-    entry.setOperation("Index scan");
-    entry.setMsg("Erroneous index key found with reference to non-existent record id");
-
-    BSONObjBuilder builder;
-    builder.append("key"_sd, redact(indexKey));
-    builder.append("pattern"_sd, keyPattern);
-    const BSONObj indexKeyData = builder.obj();
-
-    BSONObjBuilder bob;
-    bob.append("recordId", rid.toString());
-    bob.append("indexKeyData", indexKeyData);
-    bob.appendElements(getStackTrace().getBSONRepresentation());
-    entry.setData(bob.obj());
-
-    HealthLogInterface::get(opCtx)->log(entry);
-
     auto options = [&] {
         if (shard_role_details::getRecoveryUnit(opCtx)->getDataCorruptionDetectionMode() ==
             DataCorruptionDetectionMode::kThrow) {
@@ -97,6 +75,11 @@ void logRecordNotFound(OperationContext* opCtx,
             return logv2::LogOptions(logv2::LogComponent::kAutomaticDetermination);
         }
     }();
+
+    BSONObjBuilder builder;
+    builder.append("key"_sd, redact(indexKey));
+    builder.append("pattern"_sd, keyPattern);
+    const BSONObj indexKeyData = builder.obj();
     LOGV2_ERROR_OPTIONS(
         8944500,
         options,
@@ -105,7 +88,7 @@ void logRecordNotFound(OperationContext* opCtx,
         "collection.",
         logAttrs(ns),
         "recordId"_attr = rid,
-        "indexKeyData"_attr = indexKeyData);
+        "indexKeyData"_attr = redact(indexKeyData));
 }
 
 }  // namespace express

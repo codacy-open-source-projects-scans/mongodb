@@ -29,10 +29,6 @@
 
 #pragma once
 
-#include <memory>
-#include <string>
-#include <vector>
-
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/document_source_merge_modes_gen.h"
@@ -40,12 +36,17 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
 #include "mongo/db/write_concern_options.h"
-#include "mongo/s/chunk_version.h"
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/stdx/unordered_map.h"
+#include "mongo/util/modules.h"
 
-namespace mongo {
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace MONGO_MOD_PUBLIC mongo {
 
 // A descriptor for a merge strategy. Holds a merge strategy function and a set of actions the
 // client should be authorized to perform in order to be able to execute a merge operation using
@@ -213,4 +214,4 @@ private:
     bool _allowMergeOnNullishValues;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

@@ -28,15 +28,6 @@
  */
 
 
-#include <memory>
-#include <set>
-#include <type_traits>
-#include <utility>
-#include <variant>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -49,24 +40,26 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
-#include "mongo/db/catalog/clustered_collection_options_gen.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/create_collection.h"
-#include "mongo/db/catalog/drop_collection.h"
-#include "mongo/db/catalog/rename_collection.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/commands/create_gen.h"
 #include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/commands/fle2_cleanup_gen.h"
 #include "mongo/db/commands/fle2_compact.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
-#include "mongo/db/drop_gen.h"
 #include "mongo/db/feature_flag.h"
 #include "mongo/db/fle_crud.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/clustered_collection_options_gen.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/create_collection.h"
+#include "mongo/db/local_catalog/ddl/create_gen.h"
+#include "mongo/db/local_catalog/ddl/drop_gen.h"
+#include "mongo/db/local_catalog/ddl/replica_set_ddl_tracker.h"
+#include "mongo/db/local_catalog/drop_collection.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/rename_collection.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/server_options.h"
@@ -74,13 +67,20 @@
 #include "mongo/db/server_parameter_with_storage.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/tenant_id.h"
+#include "mongo/db/topology/sharding_state.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/s/sharding_state.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <memory>
+#include <set>
+#include <type_traits>
+#include <utility>
+#include <variant>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -190,6 +190,14 @@ CleanupStats cleanupEncryptedCollection(OperationContext* opCtx,
             uassertStatusOK(EncryptedStateCollectionsNamespaces::createFromDataCollection(*edc));
     }
 
+    ReplicaSetDDLTracker::ScopedReplicaSetDDL scopedReplicaSetDDL(
+        opCtx,
+        std::vector<NamespaceString>{namespaces.edcNss,
+                                     namespaces.escNss,
+                                     namespaces.ecocNss,
+                                     namespaces.ecocRenameNss,
+                                     namespaces.ecocLockNss});
+
     // Acquire exclusive lock on the associated 'ecoc.lock' namespace to serialize calls
     // to cleanup and compact on the same EDC namespace.
     Lock::CollectionLock compactionLock(opCtx, namespaces.ecocLockNss, MODE_X);
@@ -207,17 +215,20 @@ CleanupStats cleanupEncryptedCollection(OperationContext* opCtx,
 
     bool createEcoc = false;
     bool renameEcoc = false;
+
     {
-        // Acquire IS locks on ecocNss and ecocRenameNss in ascending resourceId order
-        std::vector<NamespaceStringOrUUID> secondaryNss = {namespaces.ecocRenameNss};
-        AutoGetCollection ecoc(opCtx,
-                               namespaces.ecocNss,
-                               MODE_IS,
-                               AutoGetCollection::Options{}.secondaryNssOrUUIDs(
-                                   secondaryNss.cbegin(), secondaryNss.cend()));
-        auto catalog = CollectionCatalog::get(opCtx);
-        auto ecocCompact =
-            CollectionPtr(catalog->lookupCollectionByNamespace(opCtx, namespaces.ecocRenameNss));
+        CollectionAcquisitionRequests acquisitionRequests = {
+            CollectionAcquisitionRequest::fromOpCtx(
+                opCtx, namespaces.ecocNss, AcquisitionPrerequisites::OperationType::kRead),
+            CollectionAcquisitionRequest::fromOpCtx(
+                opCtx, namespaces.ecocRenameNss, AcquisitionPrerequisites::OperationType::kRead)};
+        // acquireCollections changes the order provided by acquisitionRequests and returns a
+        // vector sorted by the ResourceId. Creates the map to access the corresponding collection.
+        auto acquisitions =
+            makeAcquisitionMap(acquireCollectionsMaybeLockFree(opCtx, acquisitionRequests));
+
+        const auto& ecoc = acquisitions.at(namespaces.ecocNss).getCollectionPtr();
+        const auto& ecocCompact = acquisitions.at(namespaces.ecocRenameNss).getCollectionPtr();
 
         // Early exit if there's no ECOC
         if (!ecoc && !ecocCompact) {
@@ -269,7 +280,7 @@ CleanupStats cleanupEncryptedCollection(OperationContext* opCtx,
                 str::stream() << "Renamed encrypted compaction collection "
                               << namespaces.ecocRenameNss.toStringForErrorMsg()
                               << " no longer exists prior to cleanup",
-                ecocCompact.getCollection());
+                *ecocCompact);
 
         auto pqMemLimit =
             ServerParameterSet::getClusterParameterSet()

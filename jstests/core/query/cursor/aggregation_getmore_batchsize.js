@@ -1,25 +1,28 @@
-// @tags: [requires_getmore]
+// @tags: [
+//     requires_getmore,
+//     # This test relies on aggregate commands returning specific batch-sized responses.
+//     assumes_no_implicit_cursor_exhaustion,
+// ]
 
 // this is a simple test to make sure that batchSize gets propagated to the cursors returned
 // from the aggregate sell helper
 
-var coll = db["aggregation_getmore_batchsize"];
+let coll = db["aggregation_getmore_batchsize"];
 
 // Insert some data to query for
 assert.commandWorked(coll.insert([{a: 1}, {a: 1}, {a: 1}, {a: 1}, {a: 1}, {a: 1}]));
 
 // Create a cursor with a batch size of 2 (should require three full batches to return all
 // documents).
-var cursor = coll.aggregate([{$match: {a: 1}}, {$limit: 6}], {cursor: {batchSize: 2}});
-var curCount = 2;
+let cursor = coll.aggregate([{$match: {a: 1}}, {$limit: 6}], {cursor: {batchSize: 2}});
+let curCount = 2;
 
 // Check that each batch has only two documents in it.
-for (var i = 0; i < 6; i++) {
+for (let i = 0; i < 6; i++) {
     print(tojson(cursor.next()));
     jsTestLog("Expecting " + (curCount - 1));
     assert.eq(cursor.objsLeftInBatch(), --curCount);
-    if (curCount == 0)
-        curCount = 2;
+    if (curCount == 0) curCount = 2;
 }
 
 // Create a cursor with a batch size of 0 (should only return one full batch of documents).

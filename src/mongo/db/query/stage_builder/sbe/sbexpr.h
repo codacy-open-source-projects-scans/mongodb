@@ -29,17 +29,18 @@
 
 #pragma once
 
+#include "mongo/db/exec/sbe/expressions/expression.h"
+#include "mongo/db/exec/sbe/stages/hash_agg_accumulator.h"
+#include "mongo/db/exec/sbe/values/slot.h"
+#include "mongo/db/query/stage_builder/sbe/abt/syntax/syntax.h"
+#include "mongo/db/query/stage_builder/sbe/abt_defs.h"
+#include "mongo/db/query/stage_builder/sbe/type_signature.h"
+#include "mongo/util/modules.h"
+
+#include <variant>
 #include <vector>
 
-#include "mongo/db/exec/sbe/expressions/expression.h"
-#include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/query/stage_builder/sbe/abt_holder_def.h"
-#include "mongo/db/query/stage_builder/sbe/type_signature.h"
-
-#include "mongo/db/exec/sbe/abt/abt_lower_defs.h"
-#include "mongo/db/exec/sbe/abt/slots_provider.h"
-#include "mongo/db/query/optimizer/syntax/expr.h"
-#include "mongo/db/query/optimizer/syntax/syntax.h"
+#include <boost/optional/optional.hpp>
 
 namespace mongo::stage_builder {
 
@@ -58,7 +59,7 @@ class SbExpr;
  */
 class PrefixId {
     using IdType = uint64_t;
-    using PrefixMapType = optimizer::opt::unordered_map<std::string, IdType>;
+    using PrefixMapType = abt::opt::unordered_map<std::string, IdType>;
 
 public:
     static PrefixId create(const bool useDescriptiveVarNames) {
@@ -69,14 +70,13 @@ public:
     }
 
     template <size_t N>
-    optimizer::ProjectionName getNextId(const char (&prefix)[N]) {
-        return optimizer::ProjectionName{visit(
+    abt::ProjectionName getNextId(const char (&prefix)[N]) {
+        return abt::ProjectionName{visit(
             [&]<typename T>(T& v) -> std::string {
-                using namespace fmt::literals;
                 if constexpr (std::is_same_v<T, IdType>)
-                    return "p{}"_format(v++);
+                    return fmt::format("p{}", v++);
                 else if constexpr (std::is_same_v<T, PrefixMapType>)
-                    return "{}_{}"_format(prefix, v[prefix]++);
+                    return fmt::format("{}_{}", prefix, v[prefix]++);
             },
             _ids)};
     }
@@ -99,39 +99,41 @@ private:
     std::variant<IdType, PrefixMapType> _ids;
 };
 
-optimizer::ProjectionName getABTVariableName(SbSlot s);
-
-optimizer::ProjectionName getABTVariableName(sbe::value::SlotId slotId);
-
-optimizer::ProjectionName getABTLocalVariableName(sbe::FrameId frameId, sbe::value::SlotId slotId);
-
-boost::optional<sbe::value::SlotId> getSbeVariableInfo(const optimizer::ProjectionName& var);
-
-boost::optional<std::pair<sbe::FrameId, sbe::value::SlotId>> getSbeLocalVariableInfo(
-    const optimizer::ProjectionName& var);
-
-optimizer::ABT makeABTVariable(SbSlot s);
-
-optimizer::ABT makeABTVariable(sbe::value::SlotId slotId);
-
-using VariableTypes = stdx::
-    unordered_map<optimizer::ProjectionName, TypeSignature, optimizer::ProjectionName::Hasher>;
+using VariableTypes =
+    stdx::unordered_map<abt::ProjectionName, TypeSignature, abt::ProjectionName::Hasher>;
 
 // Run constant folding on the provided ABT tree and return its type signature. If the type
 // information for the visible slots is available in the slotInfo argument, it is used to perform a
 // more precise type checking optimization. On return, the abt argument points to the modified tree.
-TypeSignature constantFold(optimizer::ABT& abt,
+TypeSignature constantFold(abt::ABT& abt,
                            StageBuilderState& state,
                            const VariableTypes* slotInfo = nullptr);
+
+/**
+ * This base class is inherited from by the SbSlot, SbLocalVar, SbVar, and SbExpr classes below.
+ * It contains some common type aliases and static methods.
+ */
+class SbBase {
+public:
+    using SlotId = sbe::value::SlotId;
+    using FrameId = sbe::FrameId;
+    using LocalVarInfo = std::pair<int32_t, int32_t>;
+
+    static abt::ProjectionName makeProjectionName(SlotId slotId);
+
+    static abt::ProjectionName makeProjectionName(FrameId frameId, SlotId slotId);
+
+    static abt::ProjectionName makeProjectionName(boost::optional<FrameId> frameId, SlotId slotId) {
+        return frameId ? makeProjectionName(*frameId, slotId) : makeProjectionName(slotId);
+    }
+};
 
 /**
  * The SbSlot struct is used to represent slot variables in the SBE stage builder. "SbSlot" is short
  * for "stage builder slot".
  */
-class SbSlot {
+class SbSlot : public SbBase {
 public:
-    using SlotId = sbe::value::SlotId;
-
     struct Less {
         bool operator()(const SbSlot& lhs, const SbSlot& rhs) const {
             return lhs.getId() < rhs.getId();
@@ -143,6 +145,8 @@ public:
             return lhs.getId() == rhs.getId();
         }
     };
+
+    static boost::optional<SbSlot> fromProjectionName(const abt::ProjectionName& var);
 
     SbSlot() = default;
 
@@ -163,6 +167,10 @@ public:
     }
 
     SbVar toVar() const;
+
+    abt::ProjectionName toProjectionName() const {
+        return makeProjectionName(slotId);
+    }
 
     SlotId getId() const {
         return slotId;
@@ -192,10 +200,9 @@ using SbSlotVector = absl::InlinedVector<SbSlot, 2>;
  * The SbLocalVar class is used to represent local variables in the SBE stage builder. "SbLocalVar"
  * is short for "stage builder local variable".
  */
-class SbLocalVar {
+class SbLocalVar : public SbBase {
 public:
-    using SlotId = sbe::value::SlotId;
-    using FrameId = sbe::FrameId;
+    static boost::optional<SbLocalVar> fromProjectionName(const abt::ProjectionName& var);
 
     SbLocalVar() = default;
 
@@ -218,6 +225,10 @@ public:
     }
 
     SbVar toVar() const;
+
+    abt::ProjectionName toProjectionName() const {
+        return makeProjectionName(_frameId, _slotId);
+    }
 
     FrameId getFrameId() const {
         return _frameId;
@@ -254,10 +265,9 @@ private:
  * An SbVar can be constructed from an EVariable or ProjectionName, and likewise an SbVar can be
  * converted to EVariable or ProjectionName.
  */
-class SbVar {
+class SbVar : public SbBase {
 public:
-    using SlotId = sbe::value::SlotId;
-    using FrameId = sbe::FrameId;
+    static boost::optional<SbVar> fromProjectionName(const abt::ProjectionName& var);
 
     explicit SbVar(SlotId slotId, boost::optional<TypeSignature> typeSig = boost::none)
         : _slotId(slotId), _typeSig(typeSig) {}
@@ -269,9 +279,6 @@ public:
 
     SbVar(const sbe::EVariable& var, boost::optional<TypeSignature> typeSig = boost::none)
         : _frameId(var.getFrameId()), _slotId(var.getSlotId()), _typeSig(typeSig) {}
-
-    SbVar(const optimizer::ProjectionName& name,
-          boost::optional<TypeSignature> typeSig = boost::none);
 
     SbVar(SbSlot s) : _slotId(s.getId()), _typeSig(s.getTypeSignature()) {}
 
@@ -317,12 +324,8 @@ public:
         return SbLocalVar{*_frameId, _slotId, getTypeSignature()};
     }
 
-    optimizer::ProjectionName getABTName() const {
-        return _frameId ? getABTLocalVariableName(*_frameId, _slotId) : getABTVariableName(_slotId);
-    }
-
-    operator optimizer::ProjectionName() const {
-        return getABTName();
+    abt::ProjectionName toProjectionName() const {
+        return makeProjectionName(_frameId, _slotId);
     }
 
     bool hasTypeSignature() const {
@@ -351,29 +354,29 @@ inline SbVar SbLocalVar::toVar() const {
     return SbVar{*this};
 }
 
+using SbExprPair = std::pair<SbExpr, SbExpr>;
+
 /**
  * The SbExpr class is used to represent expressions in the SBE stage builder. "SbExpr" is short
- * for "stage builder expression".
+ * for "stage builder expression". This will only get converted to an EExpression when an
+ * sbe::PlanStage is created, by calling SbExpr::lower(). It can also be null, i.e. representing no
+ * expression, which can be checked using the isNull() method.
  */
-class SbExpr {
+class SbExpr : public SbBase {
 public:
     using Vector = std::vector<SbExpr>;
-    using CaseValuePair = std::pair<SbExpr, SbExpr>;
-
-    using SlotId = sbe::value::SlotId;
-    using FrameId = sbe::FrameId;
-    using LocalVarInfo = std::pair<int32_t, int32_t>;
+    using CaseValuePair = SbExprPair;
 
     struct Abt {
-        abt::HolderPtr ptr;
+        abt::ABT ptr;
     };
     struct OptimizedAbt {
-        abt::HolderPtr ptr;
+        abt::ABT ptr;
     };
 
     /**
      * At any given time, an SbExpr object can be in one of 5 states:
-     *  1) Null - The SbExpr doesn't hold anything.
+     *  1) Null - The SbExpr doesn't hold anything (see the isNull() method).
      *  2) Slot - The SbExpr holds a slot variable (slot ID).
      *  3) LocalVar - The SbExpr holds a local variable (frame ID and slot ID).
      *  4) Abt - The SbExpr holds an ABT expression.
@@ -394,6 +397,39 @@ public:
         SbSlotVector sv;
         (sv.emplace_back(std::forward<Args>(args)), ...);
         return sv;
+    }
+
+    template <typename... Args>
+    static std::vector<SbExprPair> makeExprPairVector(Args&&... args) {
+        std::vector<SbExprPair> vec;
+        (vec.emplace_back(std::forward<Args>(args)), ...);
+        return vec;
+    }
+
+private:
+    template <typename Builder>
+    static SbExpr makeBalancedTreeImpl(Builder builder,
+                                       SbExpr::Vector& leaves,
+                                       size_t from,
+                                       size_t until) {
+        tassert(10668300, "Expected at least one expression in range", from < until);
+
+        if (from + 1 == until) {
+            return std::move(leaves[from]);
+        }
+
+        size_t mid = from + (until - from) / 2;
+        auto lhs = makeBalancedTreeImpl(builder, leaves, from, mid);
+        auto rhs = makeBalancedTreeImpl(builder, leaves, mid, until);
+        return builder(std::move(lhs), std::move(rhs));
+    }
+
+public:
+    template <typename Builder>
+    static SbExpr makeBalancedTree(Builder builder, SbExpr::Vector leaves) {
+        tassert(10668301, "Expected at least one expression", !leaves.empty());
+
+        return makeBalancedTreeImpl(builder, leaves, 0, leaves.size());
     }
 
     SbExpr() noexcept = default;
@@ -426,9 +462,9 @@ public:
 
     SbExpr(boost::optional<SbVar> var) : SbExpr(var ? SbExpr{*var} : SbExpr{}) {}
 
-    SbExpr(const abt::HolderPtr& a, boost::optional<TypeSignature> typeSig = boost::none);
+    SbExpr(const abt::ABT& a, boost::optional<TypeSignature> typeSig = boost::none);
 
-    SbExpr(abt::HolderPtr&& a, boost::optional<TypeSignature> typeSig = boost::none) noexcept;
+    SbExpr(abt::ABT&& a, boost::optional<TypeSignature> typeSig = boost::none) noexcept;
 
     SbExpr(Abt a, boost::optional<TypeSignature> typeSig = boost::none) noexcept;
 
@@ -484,9 +520,9 @@ public:
         return *this;
     }
 
-    SbExpr& operator=(const abt::HolderPtr& a);
+    SbExpr& operator=(const abt::ABT& a);
 
-    SbExpr& operator=(abt::HolderPtr&& a) noexcept;
+    SbExpr& operator=(abt::ABT&& a) noexcept;
 
     SbExpr& operator=(Abt a) noexcept;
 
@@ -536,7 +572,7 @@ public:
      * As its name suggests, extractABT() should be treated like a "move-from" style operation
      * that leaves 'this' in a valid but indeterminate state.
      */
-    abt::HolderPtr extractABT();
+    abt::ABT extractABT();
 
     bool hasTypeSignature() const {
         return _typeSig.has_value();
@@ -578,19 +614,32 @@ private:
         return holds_alternative<Abt>(_storage) || holds_alternative<OptimizedAbt>(_storage);
     }
 
-    const abt::HolderPtr& getAbtInternal() const {
+    const abt::ABT& getAbtInternal() const {
         tassert(8455819, "Expected ABT expression", holdsAbtInternal());
         return holds_alternative<Abt>(_storage) ? get<Abt>(_storage).ptr
                                                 : get<OptimizedAbt>(_storage).ptr;
     }
 
-    abt::HolderPtr& getAbtInternal() {
+    abt::ABT& getAbtInternal() {
         tassert(8455820, "Expected ABT expression", holdsAbtInternal());
         return holds_alternative<Abt>(_storage) ? get<Abt>(_storage).ptr
                                                 : get<OptimizedAbt>(_storage).ptr;
     }
 
+    /**
+     * Holds the definition of the expression, which can be of various forms documented in the
+     * comment header for VariantType above.
+     */
     VariantType _storage;
+
+    /**
+     * Holds a bitmap set of possible sbe::value::TypeTags types this expression can produce. If no
+     * type inference has been done, all the bits will be set, but if type inference has been done,
+     * some bits may have been cleared. In the best case all but one bit has been cleared, so the
+     * remaining 1 bit indicates the single type this expression will always produce. This info is
+     * used by block processing mode (e.g. to avoid vectorizing a constant into a block of copies)
+     * and to perform some expression tree simplifying rewrites such as constant folding.
+     */
     OptTypeSignature _typeSig;
 };
 
@@ -603,23 +652,63 @@ using SbStage = std::unique_ptr<sbe::PlanStage>;
  * For a number of EExpression-related structures, we have corresponding "SbExpr" versions
  * of these structures. Here is a list:
  *    EExpression::Vector -> SbExpr::Vector
- *    SlotExprPairVector  -> SbExprSbSlotVector or SbExprOptSbSlotVector
- *    AggExprPair         -> SbAggExpr
- *    AggExprVector       -> SbAggExprVector
+ *    SlotExprPairVector  -> SbExprSlotVector or SbExprOptSlotVector
+ *    AggExprPair         -> SbBlockAggExpr
+ *    AggExprVector       -> SbBlockAggExprVector
  */
-using SbExprSbSlotPair = std::pair<SbExpr, SbSlot>;
-using SbExprSbSlotVector = std::vector<SbExprSbSlotPair>;
+using SbExprSlotPair = std::pair<SbExpr, SbSlot>;
+using SbExprSlotVector = std::vector<SbExprSlotPair>;
 
-using SbExprOptSbSlotPair = std::pair<SbExpr, boost::optional<SbSlot>>;
-using SbExprOptSbSlotVector = std::vector<SbExprOptSbSlotPair>;
+using SbExprOptSlotPair = std::pair<SbExpr, boost::optional<SbSlot>>;
+using SbExprOptSlotVector = std::vector<SbExprOptSlotPair>;
 
-struct SbAggExpr {
+struct SbBlockAggExpr {
     SbExpr init;
     SbExpr blockAgg;
     SbExpr agg;
 };
 
-using SbAggExprVector = std::vector<std::pair<SbAggExpr, boost::optional<SbSlot>>>;
+using SbBlockAggExprPair = std::pair<SbBlockAggExpr, boost::optional<SbSlot>>;
+using SbBlockAggExprVector = std::vector<SbBlockAggExprPair>;
+
+struct SbHashAggCompiledAccumulator {
+    SbExpr init;
+    SbExpr agg;
+    SbExpr merge;
+};
+
+template <class Implementation>
+struct SbHashAggSinglePurposeScalarAccumulator {
+    SbExpr transform;
+};
+
+/**
+ * An object that can be lowered into the execute HashAggAccumulator object used by an SBE
+ * HashAggStage.
+ */
+struct SbHashAggAccumulator {
+    std::string fieldName;
+    boost::optional<SbSlot> outSlot;
+    SbSlot spillSlot;
+    SbExpr resultExpr;
+
+    /**
+     * Each HashAggStage accumulator can compute the accumulated value on the VM (as a compiled
+     * EExpression program) or using one of several fixed-definition accumulators that are natively
+     * implemented.
+     */
+    std::variant<
+        SbHashAggCompiledAccumulator,
+        SbHashAggSinglePurposeScalarAccumulator<sbe::AddToSetHashAggAccumulator>,
+        SbHashAggSinglePurposeScalarAccumulator<sbe::ArithmeticAverageHashAggAccumulatorTerminal>,
+        SbHashAggSinglePurposeScalarAccumulator<sbe::ArithmeticAverageHashAggAccumulatorPartial>,
+        SbHashAggSinglePurposeScalarAccumulator<sbe::CountHashAggAccumulatorTerminal>,
+        SbHashAggSinglePurposeScalarAccumulator<sbe::CountHashAggAccumulatorPartial>,
+        SbHashAggSinglePurposeScalarAccumulator<sbe::FirstHashAggAccumulator>,
+        SbHashAggSinglePurposeScalarAccumulator<sbe::PushHashAggAccumulator>>
+        implementation;
+};
+using SbHashAggAccumulatorVector = std::vector<SbHashAggAccumulator>;
 
 struct SbWindow {
     SbSlotVector windowExprSlots;
@@ -634,14 +723,14 @@ struct SbWindow {
 
 inline void addVariableTypesHelper(VariableTypes& varTypes, SbSlot slot) {
     if (auto typeSig = slot.getTypeSignature()) {
-        varTypes[getABTVariableName(slot)] = *typeSig;
+        varTypes[slot.toProjectionName()] = *typeSig;
     }
 }
 
 inline void addVariableTypesHelper(VariableTypes& varTypes, boost::optional<SbSlot> slot) {
     if (slot) {
         if (auto typeSig = slot->getTypeSignature()) {
-            varTypes[getABTVariableName(*slot)] = *typeSig;
+            varTypes[slot->toProjectionName()] = *typeSig;
         }
     }
 }

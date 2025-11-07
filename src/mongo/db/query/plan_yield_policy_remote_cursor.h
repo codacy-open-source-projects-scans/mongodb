@@ -29,12 +29,13 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
 
 namespace mongo {
 
@@ -57,13 +58,14 @@ public:
 private:
     PlanYieldPolicyRemoteCursor(OperationContext* opCtx,
                                 PlanYieldPolicy::YieldPolicy policy,
-                                std::variant<const Yieldable*, YieldThroughAcquisitions> yieldable,
                                 std::unique_ptr<YieldPolicyCallbacks> callbacks,
                                 PlanExecutor* exec = nullptr);
 
     void saveState(OperationContext* opCtx) override;
 
-    void restoreState(OperationContext* opCtx, const Yieldable* yieldable) override;
+    void restoreState(OperationContext* opCtx,
+                      const Yieldable* yieldable,
+                      RestoreContext::RestoreType restoreType) override;
 
     // The plan executor which this yield policy is responsible for yielding.
     PlanExecutor* _exec;

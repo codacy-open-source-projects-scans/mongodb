@@ -27,10 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <ostream>
-#include <string>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/client/read_preference.h"
@@ -45,13 +41,17 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/topology/shard_registry.h"
 #include "mongo/rpc/op_msg.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/version/releases.h"
+
+#include <memory>
+#include <ostream>
+#include <string>
 
 namespace mongo {
 
@@ -110,7 +110,7 @@ public:
 
             // Forward to config shard, which will forward to all shards.
             auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
-            auto response = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
+            auto response = uassertStatusOK(configShard->runCommand(
                 opCtx,
                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                 cmd.getDbName(),

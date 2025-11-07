@@ -29,28 +29,22 @@
 
 #pragma once
 
-#include <cstdint>
-#include <memory>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/cancelable_operation_context.h"
+#include "mongo/db/global_catalog/ddl/sharding_recovery_service.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/repl/primary_only_service.h"
 #include "mongo/db/s/resharding/donor_document_gen.h"
+#include "mongo/db/s/resharding/resharding_change_streams_monitor.h"
+#include "mongo/db/s/resharding/resharding_future_util.h"
 #include "mongo/db/s/resharding/resharding_metrics.h"
-#include "mongo/db/s/sharding_recovery_service.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/scoped_task_executor.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/s/resharding/type_collection_fields_gen.h"
@@ -59,6 +53,14 @@
 #include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
+
+#include <cstdint>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -137,7 +139,26 @@ public:
 
     SharedSemiFuture<void> awaitCriticalSectionPromoted();
 
-    SharedSemiFuture<void> awaitFinalOplogEntriesWritten();
+    /**
+     * To be used by the _shardsvrReshardingDonorStartChangeStreamsMonitor command sent by the
+     * coordinator. Notifies the donor to start the change streams monitor, and then waits for the
+     * monitor to start. Throws an error if verification is not enabled.
+     */
+    SharedSemiFuture<void> createAndStartChangeStreamsMonitor(const Timestamp& cloneTimestamp);
+
+    /**
+     * To be used in testing only. Waits for the monitor to start. Throws an error if verification
+     * is not enabled.
+     */
+    SharedSemiFuture<void> awaitChangeStreamsMonitorStarted();
+
+    /**
+     * To be used by the _shardsvrReshardingDonorFetchFinalCollectionStats command sent by the
+     * coordinator. Waits for the monitor to complete and gets back the change in the number of
+     * documents between the start of the cloning phase and the start of the critical section on
+     * this donor. Throws an error if verification is not enabled.
+     */
+    SharedSemiFuture<int64_t> awaitChangeStreamsMonitorCompleted();
 
     /**
      * Returns a Future fulfilled once the donor locally persists its final state before the
@@ -170,7 +191,7 @@ private:
      */
     ExecutorFuture<void> _runUntilBlockingWritesOrErrored(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken) noexcept;
+        const CancellationToken& abortToken);
 
     /**
      * Notifies the coordinator if the donor is in kBlockingWrites or kError and waits for
@@ -179,7 +200,7 @@ private:
      */
     ExecutorFuture<void> _notifyCoordinatorAndAwaitDecision(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken) noexcept;
+        const CancellationToken& abortToken);
 
     /**
      * Finishes the work left remaining on the donor after the coordinator persists its decision to
@@ -188,59 +209,94 @@ private:
     ExecutorFuture<void> _finishReshardingOperation(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
         const CancellationToken& stepdownToken,
-        bool aborted) noexcept;
+        bool aborted);
 
     /**
      * The work inside this function must be run regardless of any work on _scopedExecutor ever
      * running.
      */
-    Status _runMandatoryCleanup(Status status, const CancellationToken& stepdownToken);
+    ExecutorFuture<void> _runMandatoryCleanup(Status status,
+                                              const CancellationToken& stepdownToken);
 
     // The following functions correspond to the actions to take at a particular donor state.
     void _transitionToPreparingToDonate();
 
-    void _onPreparingToDonateCalculateTimestampThenTransitionToDonatingInitialData();
+    void _onPreparingToDonateCalculateTimestampThenTransitionToDonatingInitialData(
+        const CancelableOperationContextFactory& factory);
+
+    /**
+     * If verification is enabled, waits for the coordinator to notify this recipient to start the
+     * change streams monitor, and then initializes and start the change streams monitor.
+     */
+    ExecutorFuture<void> _createAndStartChangeStreamsMonitor(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        const CancellationToken& abortToken,
+        const CancelableOperationContextFactory& factory);
 
     ExecutorFuture<void> _awaitAllRecipientsDoneCloningThenTransitionToDonatingOplogEntries(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken);
+        const CancellationToken& abortToken,
+        const CancelableOperationContextFactory& factory);
 
     ExecutorFuture<void> _awaitAllRecipientsDoneApplyingThenTransitionToPreparingToBlockWrites(
         const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
-        const CancellationToken& abortToken);
+        const CancellationToken& abortToken,
+        const CancelableOperationContextFactory& factory);
 
-    void _writeTransactionOplogEntryThenTransitionToBlockingWrites();
+    void _writeTransactionOplogEntryThenTransitionToBlockingWrites(
+        const CancelableOperationContextFactory& factory);
+
+    /**
+     * If verification is enabled, waits for the the change streams monitor to complete.
+     */
+    ExecutorFuture<void> _awaitChangeStreamsMonitorCompleted(
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        const CancellationToken& abortToken);
 
     // Drops the original collection and throws if the returned status is not either Status::OK()
     // or NamespaceNotFound.
-    void _dropOriginalCollectionThenTransitionToDone();
+    void _dropOriginalCollectionThenTransitionToDone(
+        const CancelableOperationContextFactory& factory);
 
     // Transitions the on-disk and in-memory state to 'newState'.
-    void _transitionState(DonorStateEnum newState);
+    void _transitionState(DonorStateEnum newState,
+                          const CancelableOperationContextFactory& factory);
 
-    void _transitionState(DonorShardContext&& newDonorCtx);
+    void _transitionState(DonorShardContext&& newDonorCtx,
+                          const CancelableOperationContextFactory& factory);
 
     // Transitions the on-disk and in-memory state to DonorStateEnum::kDonatingInitialData.
     void _transitionToDonatingInitialData(Timestamp minFetchTimestamp,
                                           int64_t bytesToClone,
-                                          int64_t documentsToClone);
+                                          int64_t documentsToClone,
+                                          int64_t indexCount,
+                                          const CancelableOperationContextFactory& factory);
 
     // Transitions the on-disk and in-memory state to DonorStateEnum::kError.
-    void _transitionToError(Status abortReason);
+    void _transitionToError(Status abortReason, const CancelableOperationContextFactory& factory);
 
     // Transitions the on-disk and in-memory state to DonorStateEnum::kDone.
-    void _transitionToDone(bool aborted);
+    void _transitionToDone(bool aborted, const CancelableOperationContextFactory& factory);
 
     BSONObj _makeQueryForCoordinatorUpdate(const ShardId& shardId, DonorStateEnum newState);
 
     ExecutorFuture<void> _updateCoordinator(
-        OperationContext* opCtx, const std::shared_ptr<executor::ScopedTaskExecutor>& executor);
+        OperationContext* opCtx,
+        const std::shared_ptr<executor::ScopedTaskExecutor>& executor,
+        const CancelableOperationContextFactory& factory);
 
-    // Updates the mutable portion of the on-disk and in-memory donor document with 'newDonorCtx'.
-    void _updateDonorDocument(DonorShardContext&& newDonorCtx);
+    // Updates the mutable portion of the on-disk and in-memory donor document with 'newDonorCtx'
+    // and 'newChangeStreamsMonitorCtx'.
+    void _updateDonorDocument(DonorShardContext&& newDonorCtx,
+                              const CancelableOperationContextFactory& factory);
+    void _updateDonorDocument(OperationContext* opCtx,
+                              ChangeStreamsMonitorContext&& newChangeStreamsMonitorCtx);
+    void _updateDonorDocument(OperationContext* opCtx, const BSONObj& updateMod);
 
     // Removes the local donor document from disk.
-    void _removeDonorDocument(const CancellationToken& stepdownToken, bool aborted);
+    void _removeDonorDocument(const CancellationToken& stepdownToken,
+                              bool aborted,
+                              const CancelableOperationContextFactory& factory);
 
     // Initializes the _abortSource and generates a token from it to return back the caller. If an
     // abort was reported prior to the initialization, automatically cancels the _abortSource before
@@ -264,17 +320,21 @@ private:
     // The in-memory representation of the mutable portion of the document in
     // config.localReshardingOperations.donor.
     DonorShardContext _donorCtx;
+    boost::optional<ChangeStreamsMonitorContext> _changeStreamsMonitorCtx;
 
     // This is only used to restore metrics on a stepup.
     const ReshardingDonorMetrics _donorMetricsToRestore;
 
     const std::unique_ptr<DonorStateMachineExternalState> _externalState;
+    std::shared_ptr<ReshardingChangeStreamsMonitor> _changeStreamsMonitor;
 
     // ThreadPool used by CancelableOperationContext.
     // CancelableOperationContext must have a thread that is always available to it to mark its
     // opCtx as killed when the cancelToken has been cancelled.
     const std::shared_ptr<ThreadPool> _markKilledExecutor;
-    boost::optional<CancelableOperationContextFactory> _cancelableOpCtxFactory;
+    boost::optional<resharding::RetryingCancelableOperationContextFactory>
+        _retryingCancelableOpCtxFactory;
+
 
     // Protects the state below
     stdx::mutex _mutex;
@@ -297,9 +357,12 @@ private:
 
     SharedPromise<void> _allRecipientsDoneApplying;
 
-    SharedPromise<void> _finalOplogEntriesWritten;
-
     SharedPromise<void> _inBlockingWritesOrError;
+
+    SharedPromise<Timestamp> _changeStreamMonitorStartTimeSelected;
+    SharedPromise<void> _changeStreamsMonitorStarted;
+    SharedPromise<int64_t> _changeStreamsMonitorCompleted;
+    SharedSemiFuture<void> _changeStreamsMonitorQuiesced;
 
     SharedPromise<void> _coordinatorHasDecisionPersisted;
 
@@ -325,8 +388,6 @@ public:
 
     virtual ShardId myShardId(ServiceContext* serviceContext) const = 0;
 
-    virtual void refreshCatalogCache(OperationContext* opCtx, const NamespaceString& nss) = 0;
-
     virtual void waitForCollectionFlush(OperationContext* opCtx, const NamespaceString& nss) = 0;
 
     virtual void updateCoordinatorDocument(OperationContext* opCtx,
@@ -338,6 +399,8 @@ public:
 
     virtual void refreshCollectionPlacementInfo(OperationContext* opCtx,
                                                 const NamespaceString& sourceNss) = 0;
+
+    virtual void abortUnpreparedTransactionIfNecessary(OperationContext* opCtx) = 0;
 };
 
 }  // namespace mongo

@@ -27,33 +27,19 @@
  *    it in the license file.
  */
 
-#include <array>
-#include <benchmark/benchmark.h>
-#include <boost/smart_ptr.hpp>
-#include <cstddef>
-#include <initializer_list>
-#include <memory>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/admission/ingress_request_rate_limiter.h"
+#include "mongo/db/admission/ingress_request_rate_limiter_gen.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/service_context.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_component_settings.h"
-#include "mongo/logv2/log_manager.h"
-#include "mongo/logv2/log_severity.h"
 #include "mongo/rpc/message.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/stdx/mutex.h"
@@ -74,6 +60,18 @@
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/time_support.h"
+
+#include <array>
+#include <cstddef>
+#include <initializer_list>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <benchmark/benchmark.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kExecutor
 
@@ -121,19 +119,27 @@ public:
         void end() override {
             _observeEnd.promise.emplaceValue();
         }
-        Status waitForData() noexcept override {
+        Status waitForData() override {
             return Status::OK();
         }
-        Status sinkMessage(Message) noexcept override {
+        Status sinkMessage(Message) override {
             return Status::OK();
         }
-        Future<void> asyncWaitForData() noexcept override {
+        Future<void> asyncWaitForData() override {
             return {};
         }
-        StatusWith<Message> sourceMessage() noexcept override {
+        StatusWith<Message> sourceMessage() override {
             LOGV2_DEBUG(7015132, 3, "sourceMessage", "rounds"_attr = _rounds);
             if (!_rounds)
                 return makeClosedSessionError();
+
+            // If only one round is left, we don't have more exhaust loops to fulfill.
+            // Decrement the number of rounds to allow the session to close before reaching
+            // handleRequest.
+            if (_rounds == 1) {
+                _rounds--;
+            }
+
             return _request;
         }
 
@@ -168,15 +174,17 @@ public:
         explicit Sep(MockCoordinator* mc) : MockServiceEntryPoint(), _mc{mc} {}
 
         Future<DbResponse> handleRequest(OperationContext* opCtx,
-                                         const Message& request) noexcept override {
+                                         const Message& request,
+                                         Date_t started) override {
             DbResponse response;
             response.response = request;
 
             auto session = _mc->opCtxToSession(opCtx);
             invariant(session);
-            if (int& rounds = session->rounds(); --rounds) {
+            if (auto& rounds = session->rounds()) {
                 response.nextInvocation = BSONObjBuilder{}.append("ping", 1).obj();
                 response.shouldRunAgainForExhaust = true;
+                rounds--;
             }
             return Future{std::move(response)};
         }
@@ -231,7 +239,11 @@ public:
         sc->getService()->setServiceEntryPoint(
             std::make_unique<MockCoordinator::Sep>(_coordinator.get()));
         _initTransportLayerManager(sc);
+
+        doConfigureServerParameters(sc);
     }
+
+    virtual void doConfigureServerParameters(ServiceContext*) {}
 
     void _initTransportLayerManager(ServiceContext* svcCtx) {
         auto sm = std::make_unique<AsioSessionManager>(svcCtx);
@@ -289,6 +301,36 @@ private:
 };
 
 /**
+ * This benchmark enables the ingress request rate limiter, which is set by default to accept all
+ * requests.
+ */
+class SessionWorkflowRateLimitAcceptAllBm : public SessionWorkflowBm {
+    void doConfigureServerParameters(ServiceContext* sc) override {
+        gFeatureFlagIngressRateLimiting.setForServerParameter(true);
+        gIngressRequestRateLimiterEnabled.store(true);
+    }
+};
+
+/**
+ * This benchmark enables the ingress request rate limiter, and also sets parameters such that
+ * every request will get rejected.
+ */
+class SessionWorkflowRateLimitRejectAllBm : public SessionWorkflowBm {
+    void doConfigureServerParameters(ServiceContext* sc) override {
+        gFeatureFlagIngressRateLimiting.setForServerParameter(true);
+        gIngressRequestRateLimiterEnabled.store(true);
+
+        auto& rateLimiter = IngressRequestRateLimiter::get(getGlobalServiceContext());
+
+        auto const verySlowRatePerSec = 5e-6;
+        auto const smallestPossibleBurstSize = 1.0;
+        auto const smallestPossibleBurstCapacitySecs =
+            smallestPossibleBurstSize / verySlowRatePerSec;
+        rateLimiter.updateRateParameters(verySlowRatePerSec, smallestPossibleBurstCapacitySecs);
+    }
+};
+
+/**
  * ASAN can't handle the # of threads the benchmark creates.
  * With sanitizers, run this in a diminished "correctness check" mode.
  */
@@ -301,22 +343,43 @@ const auto kMaxThreads = 2 * ProcessInfo::getNumLogicalCores();
 constexpr std::array exhaustRounds{0, 1, 8};
 #endif
 
+static void benchmarkExhaustInnerLoop(benchmark::internal::Benchmark* b, int exhaust) {
+    std::vector<int> res{0};
+#if TRANSITIONAL_SERVICE_EXECUTOR_SYNCHRONOUS_HAS_RESERVE
+    res = {0, 1, 4, 16};
+#endif
+    for (int reserved : res)
+        b->Args({exhaust, reserved});
+}
+
+static void benchmarkLoop(benchmark::internal::Benchmark* b) {
+    b->ArgNames({"ExhaustRounds", "ReservedThreads"});
+    for (int exhaust : exhaustRounds) {
+        benchmarkExhaustInnerLoop(b, exhaust);
+    }
+    b->ThreadRange(1, kMaxThreads);
+}
+
+static void benchmarkLoopNoExhaust(benchmark::internal::Benchmark* b) {
+    b->ArgNames({"ExhaustRounds", "ReservedThreads"});
+    benchmarkExhaustInnerLoop(b, 0);
+    b->ThreadRange(1, kMaxThreads);
+}
+
 BENCHMARK_DEFINE_F(SessionWorkflowBm, Loop)(benchmark::State& state) {
     run(state);
 }
+BENCHMARK_REGISTER_F(SessionWorkflowBm, Loop)->Apply(benchmarkLoop);
 
-BENCHMARK_REGISTER_F(SessionWorkflowBm, Loop)->Apply([](auto* b) {
-    b->ArgNames({"ExhaustRounds", "ReservedThreads"});
-    for (int exhaust : exhaustRounds) {
-        std::vector<int> res{0};
-#if TRANSITIONAL_SERVICE_EXECUTOR_SYNCHRONOUS_HAS_RESERVE
-        res = {0, 1, 4, 16};
-#endif
-        for (int reserved : res)
-            b->Args({exhaust, reserved});
-    }
-    b->ThreadRange(1, kMaxThreads);
-});
+BENCHMARK_DEFINE_F(SessionWorkflowRateLimitAcceptAllBm, Loop)(benchmark::State& state) {
+    run(state);
+}
+BENCHMARK_REGISTER_F(SessionWorkflowRateLimitAcceptAllBm, Loop)->Apply(benchmarkLoop);
+
+BENCHMARK_DEFINE_F(SessionWorkflowRateLimitRejectAllBm, Loop)(benchmark::State& state) {
+    run(state);
+}
+BENCHMARK_REGISTER_F(SessionWorkflowRateLimitRejectAllBm, Loop)->Apply(benchmarkLoopNoExhaust);
 
 }  // namespace
 }  // namespace mongo::transport

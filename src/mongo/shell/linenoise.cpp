@@ -99,8 +99,10 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
-#include <sys/ioctl.h>
+
 #include <termios.h>
+
+#include <sys/ioctl.h>
 
 #endif /* _WIN32 */
 
@@ -113,12 +115,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <cwctype>
-#include <fcntl.h>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <system_error>
 #include <vector>
+
+#include <fcntl.h>
 // IWYU pragma: no_include "ext/alloc_traits.h"
 
 #include "mongo/base/data_view.h"
@@ -1341,7 +1344,7 @@ static UChar32 linenoiseReadChar(void) {
                     return modifierKeys | PAGE_DOWN_KEY;
                 default:
                     continue;  // in raw mode, ReadConsoleInput shows shift, ctrl ...
-            }                  //  ... ignore them
+            }  //  ... ignore them
         } else if (rec.Event.KeyEvent.uChar.UnicodeChar ==
                    ctrlChar('[')) {  // ESC, set flag for later
             escSeen = true;

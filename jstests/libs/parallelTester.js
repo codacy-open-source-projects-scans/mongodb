@@ -11,8 +11,8 @@ if (typeof _threadInject != "undefined") {
             if (arg instanceof Code) {
                 return eval("(" + arg.code + ")");
             } else if (arg !== null && isObject(arg) && !(arg instanceof Date)) {
-                var newArg = arg instanceof Array ? [] : {};
-                for (var prop in arg) {
+                let newArg = arg instanceof Array ? [] : {};
+                for (let prop in arg) {
                     if (arg.hasOwnProperty(prop)) {
                         newArg[prop] = evalCodeArgs(arg[prop]);
                     }
@@ -21,11 +21,11 @@ if (typeof _threadInject != "undefined") {
             }
             return arg;
         }
-        var realStartFn;
-        var newArgs = [];
+        let realStartFn;
+        let newArgs = [];
         // We skip the first argument, which is always TestData.
         TestData = evalCodeArgs(testData);
-        for (var i = 1, l = arguments.length; i < l; i++) {
+        for (let i = 1, l = arguments.length; i < l; i++) {
             newArgs.push(evalCodeArgs(arguments[i]));
         }
         if (TestData && TestData["shellGRPC"]) {
@@ -35,8 +35,8 @@ if (typeof _threadInject != "undefined") {
         return realStartFn.apply(this, newArgs);
     }
 
-    Thread = function() {
-        var args = Array.prototype.slice.call(arguments);
+    Thread = function () {
+        let args = Array.prototype.slice.call(arguments);
         // Always pass TestData as the first argument.
         args.unshift(TestData);
         args.unshift(_threadStartWrapper);
@@ -45,7 +45,7 @@ if (typeof _threadInject != "undefined") {
     _threadInject(Thread.prototype);
 }
 
-globalThis.CountDownLatch = Object.extend(function(count) {
+globalThis.CountDownLatch = Object.extend(function (count) {
     if (!(this instanceof CountDownLatch)) {
         return new CountDownLatch(count);
     }
@@ -56,13 +56,13 @@ globalThis.CountDownLatch = Object.extend(function(count) {
     //       prototype are lost during the serialization to BSON that occurs
     //       when passing data to a child thread.
 
-    this.await = function() {
+    this.await = function () {
         CountDownLatch._await(this._descriptor);
     };
-    this.countDown = function() {
+    this.countDown = function () {
         CountDownLatch._countDown(this._descriptor);
     };
-    this.getCount = function() {
+    this.getCount = function () {
         return CountDownLatch._getCount(this._descriptor);
     };
 }, CountDownLatch);

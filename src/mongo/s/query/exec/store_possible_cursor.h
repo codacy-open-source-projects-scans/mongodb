@@ -29,24 +29,25 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <memory>
-
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/query/tailable_mode.h"
 #include "mongo/db/query/tailable_mode_gen.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/s/grid.h"
 #include "mongo/s/query/exec/owned_remote_cursor.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
 
-namespace mongo {
+#include <memory>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUBLIC mongo {
 
 class BSONObj;
 class ClusterCursorManager;
@@ -106,7 +107,7 @@ StatusWith<BSONObj> storePossibleCursor(OperationContext* opCtx,
 StatusWith<BSONObj> storePossibleCursor(OperationContext* opCtx,
                                         const ShardId& shardId,
                                         const HostAndPort& server,
-                                        const CursorResponse& incomingCursorResponse,
+                                        CursorResponse&& incomingCursorResponse,
                                         const NamespaceString& requestedNss,
                                         std::shared_ptr<executor::TaskExecutor> executor,
                                         ClusterCursorManager* cursorManager,
@@ -126,4 +127,4 @@ StatusWith<BSONObj> storePossibleCursor(OperationContext* opCtx,
                                         PrivilegeVector privileges,
                                         TailableModeEnum tailableMode);
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

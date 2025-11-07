@@ -27,104 +27,49 @@
  *    it in the license file.
  */
 
-#include "document_source_query_settings.h"
+#include "mongo/db/pipeline/document_source_query_settings.h"
 
-#include <algorithm>
-#include <iterator>
-
-#include "mongo/db/feature_compatibility_version_documentation.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/db/exec/document_value/document.h"
+#include "mongo/db/exec/document_value/value.h"
+#include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_query_settings_gen.h"
-#include "mongo/db/pipeline/document_source_queue.h"
-#include "mongo/db/pipeline/lite_parsed_document_source.h"
-#include "mongo/db/query/bson/bson_helper.h"
-#include "mongo/db/query/query_settings/query_settings_manager.h"
-#include "mongo/db/query/query_settings/query_settings_utils.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/query/allowed_contexts.h"
+#include "mongo/db/query/query_shape/serialization_options.h"
+#include "mongo/idl/idl_parser.h"
+#include "mongo/util/assert_util.h"
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
 using namespace query_settings;
 
-REGISTER_DOCUMENT_SOURCE_WITH_FEATURE_FLAG(querySettings,
-                                           DocumentSourceQuerySettings::LiteParsed::parse,
-                                           DocumentSourceQuerySettings::createFromBson,
-                                           AllowedWithApiStrict::kNeverInVersion1,
-                                           feature_flags::gFeatureFlagQuerySettings);
+REGISTER_DOCUMENT_SOURCE(querySettings,
+                         DocumentSourceQuerySettings::LiteParsed::parse,
+                         DocumentSourceQuerySettings::createFromBson,
+                         AllowedWithApiStrict::kNeverInVersion1);
+ALLOCATE_DOCUMENT_SOURCE_ID(querySettings, DocumentSourceQuerySettings::id)
 
-namespace {
-BSONObj createDebugQueryShape(const BSONObj& representativeQuery,
-                              OperationContext* opCtx,
-                              const boost::optional<TenantId>& tenantId) {
-    // Get the serialized query shape by creating the representative information for the given
-    // representative query.
-    const auto representativeInfo =
-        query_settings::createRepresentativeInfo(opCtx, representativeQuery, tenantId);
-    return representativeInfo.serializedQueryShape;
-}
-
-DocumentSource::GetNextResult createResult(OperationContext* opCtx,
-                                           const boost::optional<TenantId>& tenantId,
-                                           QueryShapeConfiguration&& configuration,
-                                           bool includeDebugQueryShape) try {
-    BSONObjBuilder bob;
-    configuration.serialize(&bob);
-    if (includeDebugQueryShape && configuration.getRepresentativeQuery()) {
-        bob.append(DocumentSourceQuerySettings::kDebugQueryShapeFieldName,
-                   createDebugQueryShape(*configuration.getRepresentativeQuery(), opCtx, tenantId));
-    }
-    return Document{bob.obj()};
-} catch (const ExceptionFor<ErrorCodes::BSONObjectTooLarge>&) {
-    uasserted(ErrorCodes::BSONObjectTooLarge,
-              str::stream() << "query settings object exceeds " << BSONObjMaxInternalSize
-                            << " bytes"
-                            << (includeDebugQueryShape
-                                    ? "; consider not setting 'showDebugQueryShape' to true"
-                                    : ""));
-}
-}  // namespace
+DocumentSourceQuerySettings::DocumentSourceQuerySettings(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx, bool showDebugQueryShape)
+    : DocumentSource(kStageName, expCtx), _showDebugQueryShape(showDebugQueryShape) {}
 
 boost::intrusive_ptr<DocumentSource> DocumentSourceQuerySettings::createFromBson(
     BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
     uassert(7746801,
             "$querySettings stage expects a document as argument",
-            elem.type() == BSONType::Object);
+            elem.type() == BSONType::object);
 
     // Resolve whether to include the debug query shape or not.
-    bool includeDebugQueryShape = DocumentSourceQuerySettingsSpec::parse(
-                                      IDLParserContext("$querySettings"), elem.embeddedObject())
-                                      .getShowDebugQueryShape();
+    bool showDebugQueryShape = DocumentSourceQuerySettingsSpec::parse(
+                                   elem.embeddedObject(), IDLParserContext("$querySettings"))
+                                   .getShowDebugQueryShape();
+    return make_intrusive<DocumentSourceQuerySettings>(expCtx, showDebugQueryShape);
+}
 
-    // Alias this stage to a 'DocumentSourceQueue'. The queue must be initialized in a deferred
-    // manner in order to avoid creating a infinite recursion loop.
-    //
-    // Creating a debug query shape requires re-parsing the representative query, then serializing
-    // it back with debug options. Doing so triggers in turn a call to
-    // 'DocumentSourceQuerySettings::createFromBson()' hence triggering the infinite recursion.
-    DocumentSourceQueue::DeferredQueue deferredQueue{[expCtx, includeDebugQueryShape]() {
-        // Get all query shape configurations owned by 'tenantId' and map them over a queue of
-        // results.
-        auto tenantId = expCtx->getNamespaceString().tenantId();
-        auto& manager = QuerySettingsManager::get(expCtx->getOperationContext());
-        auto settingsArray =
-            std::move(manager.getAllQueryShapeConfigurations(tenantId).queryShapeConfigurations);
-        std::deque<DocumentSource::GetNextResult> queue;
-        std::transform(std::make_move_iterator(settingsArray.begin()),
-                       std::make_move_iterator(settingsArray.end()),
-                       std::back_inserter(queue),
-                       [&](auto&& config) {
-                           return createResult(expCtx->getOperationContext(),
-                                               tenantId,
-                                               std::move(config),
-                                               includeDebugQueryShape);
-                       });
-        return queue;
-    }};
-
-    // Alias this stage to 'DocumentSourceQueue' with the appropriate stage constraints. Override
-    // the serialization such that it gets displayed as '{$querySettings: <options>}'.
-    return make_intrusive<DocumentSourceQueue>(std::move(deferredQueue),
-                                               expCtx,
-                                               /* stageNameOverride */ kStageName,
-                                               /* serializeOverride */ Value{elem.wrap()},
-                                               /* constraintsOverride */ constraints());
+Value DocumentSourceQuerySettings::serialize(const SerializationOptions& opts) const {
+    return Value(DOC(getSourceName() << DOC("showDebugQueryShape" << Value(_showDebugQueryShape))));
 }
 }  // namespace mongo

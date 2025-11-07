@@ -8,6 +8,10 @@
  *   assumes_unsharded_collection,
  *   # We're testing the explain plan, not the query results, so the facet passthrough would fail.
  *   do_not_wrap_aggregations_in_facets,
+ *   # This feature flag adjusts the desugaring a bit - requesting 'outputSortKeyMetadata' from the
+ *   # $sort stage.
+ *   featureFlagRankFusionBasic,
+ *   requires_fcv_81,
  * ]
  */
 import {getSingleNodeExplain} from "jstests/libs/query/analyze_plan.js";
@@ -45,19 +49,17 @@ function extractTmp(stages) {
 }
 
 // No partitionBy and no sortBy means we don't need to sort the input.
-assert.eq(desugar({$setWindowFields: {output: {}}}), [
-    {$_internalSetWindowFields: {output: {}}},
-]);
+assert.eq(desugar({$setWindowFields: {output: {}}}), [{$_internalSetWindowFields: {output: {}}}]);
 
 // 'sortBy' becomes an explicit $sort stage.
 assert.eq(desugar({$setWindowFields: {sortBy: {ts: 1}, output: {}}}), [
-    {$sort: {sortKey: {ts: 1}}},
+    {$sort: {sortKey: {ts: 1}, outputSortKeyMetadata: true}},
     {$_internalSetWindowFields: {sortBy: {ts: 1}, output: {}}},
 ]);
 
 // 'partitionBy' a field becomes an explicit $sort stage.
 assert.eq(desugar({$setWindowFields: {partitionBy: "$zip", output: {}}}), [
-    {$sort: {sortKey: {zip: 1}}},
+    {$sort: {sortKey: {zip: 1}, outputSortKeyMetadata: true}},
     {$_internalSetWindowFields: {partitionBy: "$zip", output: {}}},
 ]);
 
@@ -67,25 +69,24 @@ let stages = desugar({$setWindowFields: {partitionBy: {$toLower: "$country"}, ou
 let tmp = extractTmp(stages);
 assert.eq(stages, [
     {$addFields: {[tmp]: {$toLower: ["$country"]}}},
-    {$sort: {sortKey: {[tmp]: 1}}},
-    {$_internalSetWindowFields: {partitionBy: '$' + tmp, output: {}}},
+    {$sort: {sortKey: {[tmp]: 1}, outputSortKeyMetadata: true}},
+    {$_internalSetWindowFields: {partitionBy: "$" + tmp, output: {}}},
     {$project: {[tmp]: false, _id: true}},
 ]);
 
 // $sort first by partitionBy, then sortBy, because we sort within each partition.
-assert.eq(
-    desugar({$setWindowFields: {partitionBy: "$zip", sortBy: {ts: -1, _id: 1}, output: {}}}), [
-        {$sort: {sortKey: {zip: 1, ts: -1, _id: 1}}},
-        {$_internalSetWindowFields: {partitionBy: "$zip", sortBy: {ts: -1, _id: 1}, output: {}}},
-    ]);
+assert.eq(desugar({$setWindowFields: {partitionBy: "$zip", sortBy: {ts: -1, _id: 1}, output: {}}}), [
+    {$sort: {sortKey: {zip: 1, ts: -1, _id: 1}, outputSortKeyMetadata: true}},
+    {$_internalSetWindowFields: {partitionBy: "$zip", sortBy: {ts: -1, _id: 1}, output: {}}},
+]);
 
 stages = desugar({
-    $setWindowFields: {partitionBy: {$toLower: "$country"}, sortBy: {ts: -1, _id: 1}, output: {}}
+    $setWindowFields: {partitionBy: {$toLower: "$country"}, sortBy: {ts: -1, _id: 1}, output: {}},
 });
 tmp = extractTmp(stages);
 assert.eq(stages, [
     {$addFields: {[tmp]: {$toLower: ["$country"]}}},
-    {$sort: {sortKey: {[tmp]: 1, ts: -1, _id: 1}}},
-    {$_internalSetWindowFields: {partitionBy: '$' + tmp, sortBy: {ts: -1, _id: 1}, output: {}}},
+    {$sort: {sortKey: {[tmp]: 1, ts: -1, _id: 1}, outputSortKeyMetadata: true}},
+    {$_internalSetWindowFields: {partitionBy: "$" + tmp, sortBy: {ts: -1, _id: 1}, output: {}}},
     {$project: {[tmp]: false, _id: true}},
 ]);

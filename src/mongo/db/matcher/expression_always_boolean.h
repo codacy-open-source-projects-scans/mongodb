@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <cstddef>
-#include <memory>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -43,19 +37,22 @@
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_visitor.h"
-#include "mongo/db/matcher/match_details.h"
-#include "mongo/db/matcher/matchable.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/util/assert_util.h"
+
+#include <cstddef>
+#include <memory>
+#include <utility>
+#include <vector>
+
+#include <boost/optional.hpp>
 
 namespace mongo {
 
 class AlwaysBooleanMatchExpression : public MatchExpression {
 public:
-    AlwaysBooleanMatchExpression(MatchType type,
-                                 bool value,
-                                 clonable_ptr<ErrorAnnotation> annotation = nullptr)
-        : MatchExpression(type, std::move(annotation)), _value(value) {}
+    AlwaysBooleanMatchExpression(MatchType type, clonable_ptr<ErrorAnnotation> annotation = nullptr)
+        : MatchExpression(type, std::move(annotation)) {}
 
     ~AlwaysBooleanMatchExpression() override = default;
 
@@ -63,14 +60,6 @@ public:
      * The name of this MatchExpression.
      */
     virtual StringData name() const = 0;
-
-    bool matches(const MatchableDocument* doc, MatchDetails* details = nullptr) const final {
-        return _value;
-    }
-
-    bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final {
-        return _value;
-    }
 
     void debugString(StringBuilder& debug, int indentationLevel = 0) const final {
         _debugAddSpace(debug, indentationLevel);
@@ -107,15 +96,6 @@ public:
     std::vector<std::unique_ptr<MatchExpression>>* getChildVector() final {
         return nullptr;
     }
-
-private:
-    ExpressionOptimizerFunc getOptimizer() const final {
-        return [](std::unique_ptr<MatchExpression> expression) {
-            return expression;
-        };
-    }
-
-    bool _value;
 };
 
 class AlwaysFalseMatchExpression final : public AlwaysBooleanMatchExpression {
@@ -123,7 +103,7 @@ public:
     static constexpr StringData kName = "$alwaysFalse"_sd;
 
     AlwaysFalseMatchExpression(clonable_ptr<ErrorAnnotation> annotation = nullptr)
-        : AlwaysBooleanMatchExpression(MatchType::ALWAYS_FALSE, false, std::move(annotation)) {}
+        : AlwaysBooleanMatchExpression(MatchType::ALWAYS_FALSE, std::move(annotation)) {}
 
     StringData name() const final {
         return kName;
@@ -151,7 +131,7 @@ public:
     static constexpr StringData kName = "$alwaysTrue"_sd;
 
     AlwaysTrueMatchExpression(clonable_ptr<ErrorAnnotation> annotation = nullptr)
-        : AlwaysBooleanMatchExpression(MatchType::ALWAYS_TRUE, true, std::move(annotation)) {}
+        : AlwaysBooleanMatchExpression(MatchType::ALWAYS_TRUE, std::move(annotation)) {}
 
     StringData name() const final {
         return kName;

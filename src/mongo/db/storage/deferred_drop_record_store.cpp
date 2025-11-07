@@ -34,8 +34,6 @@
 #include "mongo/db/storage/ident.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/util/assert_util.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
@@ -47,9 +45,6 @@ DeferredDropRecordStore::~DeferredDropRecordStore() {
         return;
     }
     try {
-        // TODO SERVER-81373: Multi-document transactions will cause the log to be spammed with
-        // EBUSY errors. This should ideally be replaced with a recoveryUnit onCommit handler if
-        // within a WUOW.
         _storageEngine->addDropPendingIdent(
             Timestamp::min(), std::make_shared<Ident>(_rs->getIdent()), nullptr);
     } catch (...) {

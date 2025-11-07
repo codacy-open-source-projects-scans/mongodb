@@ -29,12 +29,27 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobj_comparator_interface.h"
+#include "mongo/db/auth/validated_tenancy_scope.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/global_catalog/type_chunk.h"
+#include "mongo/db/keypattern.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/s/balancer/cluster_statistics.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
+#include "mongo/s/request_types/get_stats_for_balancing_gen.h"
+#include "mongo/s/request_types/move_range_request_gen.h"
+#include "mongo/stdx/unordered_set.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/uuid.h"
+
 #include <cstddef>
 #include <cstdint>
-#include <fmt/format.h>
 #include <map>
 #include <set>
 #include <string>
@@ -43,29 +58,14 @@
 #include <variant>
 #include <vector>
 
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobj_comparator_interface.h"
-#include "mongo/db/auth/validated_tenancy_scope.h"
-#include "mongo/db/keypattern.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/s/balancer/cluster_statistics.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/s/request_types/get_stats_for_balancing_gen.h"
-#include "mongo/s/request_types/move_range_request_gen.h"
-#include "mongo/s/shard_version.h"
-#include "mongo/stdx/unordered_set.h"
-#include "mongo/util/uuid.h"
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 
-using namespace fmt::literals;
-
-struct ZoneRange {
+struct MONGO_MOD_PUBLIC ZoneRange {
     ZoneRange(const BSONObj& a_min, const BSONObj& a_max, const std::string& _zone);
 
     std::string toString() const;
@@ -257,7 +257,7 @@ ShardDataSizeMap getStatsForBalancing(
 /**
  * Keeps track of zones for a collection.
  */
-class ZoneInfo {
+class MONGO_MOD_PUBLIC ZoneInfo {
 public:
     static const std::string kNoZoneName;
 
@@ -385,11 +385,13 @@ public:
             const auto isFirstRange = (normalizedZoneIt == initialZoneIt);
 
             if (isFirstRange) {
-                tassert(
-                    8236530,
-                    "Unexpected first normalized zone for shard '{}'. Expected '{}' but found '{}'"_format(
-                        shardId.toString(), zoneName, zoneRange.zone),
-                    zoneRange.zone == zoneName);
+                tassert(8236530,
+                        fmt::format("Unexpected first normalized zone for shard '{}'. Expected "
+                                    "'{}' but found '{}'",
+                                    shardId.toString(),
+                                    zoneName,
+                                    zoneRange.zone),
+                        zoneRange.zone == zoneName);
             } else if (zoneRange.zone != zoneName) {
                 continue;
             }

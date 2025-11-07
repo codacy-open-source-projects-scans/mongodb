@@ -1,6 +1,7 @@
 // @tags: [
 //   operations_longer_than_stepdown_interval_in_txns,
 //   requires_fastcount,
+//   requires_getmore,
 // ]
 
 let t = db.geo3;
@@ -8,8 +9,8 @@ t.drop();
 
 let n = 1;
 let arr = [];
-for (var x = -100; x < 100; x += 2) {
-    for (var y = -100; y < 100; y += 2) {
+for (let x = -100; x < 100; x += 2) {
+    for (let y = -100; y < 100; y += 2) {
         arr.push({_id: n++, loc: [x, y], a: Math.abs(x) % 5, b: Math.abs(y) % 5});
     }
 }
@@ -21,22 +22,20 @@ t.createIndex({loc: "2d"});
 
 // Test the "query" parameter in $geoNear.
 
-let res = t.aggregate([
-               {$geoNear: {near: [50, 50], distanceField: "dist", query: {a: 2}}},
-               {$limit: 10},
-           ]).toArray();
+let res = t.aggregate([{$geoNear: {near: [50, 50], distanceField: "dist", query: {a: 2}}}, {$limit: 10}]).toArray();
 assert.eq(10, res.length, tojson(res));
-res.forEach(doc => assert.eq(2, doc.a, tojson(doc)));
+res.forEach((doc) => assert.eq(2, doc.a, tojson(doc)));
 
 function avgA(q, len) {
-    if (!len)
-        len = 10;
-    var realq = {loc: {$near: [50, 50]}};
-    if (q)
-        Object.extend(realq, q);
-    var as = t.find(realq).limit(len).map(function(z) {
-        return z.a;
-    });
+    if (!len) len = 10;
+    let realq = {loc: {$near: [50, 50]}};
+    if (q) Object.extend(realq, q);
+    let as = t
+        .find(realq)
+        .limit(len)
+        .map(function (z) {
+            return z.a;
+        });
     assert.eq(len, as.length, "length in avgA");
     return Array.avg(as);
 }
@@ -52,12 +51,9 @@ testFiltering("just loc");
 assert.commandWorked(t.dropIndex({loc: "2d"}));
 assert.commandWorked(t.createIndex({loc: "2d", a: 1}));
 
-res = t.aggregate([
-           {$geoNear: {near: [50, 50], distanceField: "dist", query: {a: 2}}},
-           {$limit: 10},
-       ]).toArray();
+res = t.aggregate([{$geoNear: {near: [50, 50], distanceField: "dist", query: {a: 2}}}, {$limit: 10}]).toArray();
 assert.eq(10, res.length, "B3");
-res.forEach(doc => assert.eq(2, doc.a, tojson(doc)));
+res.forEach((doc) => assert.eq(2, doc.a, tojson(doc)));
 
 testFiltering("loc and a");
 

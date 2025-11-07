@@ -27,6 +27,21 @@
  *    it in the license file.
  */
 
+#include "mongo/db/fts/fts_spec.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/bson/bsonelement.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/bsontypes.h"
+#include "mongo/bson/dotted_path/dotted_path_support.h"
+#include "mongo/db/field_ref.h"
+#include "mongo/db/fts/fts_element_iterator.h"
+#include "mongo/db/fts/fts_tokenizer.h"
+#include "mongo/db/fts/fts_util.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/str.h"
+
 #include <memory>
 #include <utility>
 
@@ -34,27 +49,12 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 
-#include "mongo/base/error_codes.h"
-#include "mongo/bson/bsonelement.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/bson/bsontypes.h"
-#include "mongo/db/field_ref.h"
-#include "mongo/db/fts/fts_element_iterator.h"
-#include "mongo/db/fts/fts_spec.h"
-#include "mongo/db/fts/fts_tokenizer.h"
-#include "mongo/db/fts/fts_util.h"
-#include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/query/bson/dotted_path_support.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/str.h"
-
 namespace mongo {
 
 namespace fts {
 
 using std::map;
 using std::string;
-namespace dps = ::mongo::dotted_path_support;
 
 const double DEFAULT_WEIGHT = 1;
 const double MAX_WEIGHT = 1000000000;
@@ -118,7 +118,7 @@ FTSSpec::FTSSpec(const BSONObj& indexInfo) {
                                    " correct options.");
     }
 
-    _languageOverrideField = indexInfo.getStringField("language_override").toString();
+    _languageOverrideField = std::string{indexInfo.getStringField("language_override")};
 
     _wildcard = false;
 
@@ -171,7 +171,7 @@ const FTSLanguage* FTSSpec::_getLanguageToUseV2(const BSONObj& userDoc,
     }
     uassert(17261,
             "found language override field in document with non-string type",
-            e.type() == mongo::String);
+            e.type() == BSONType::string);
     try {
         return &FTSLanguage::make(e.String(), getTextIndexVersion());
     } catch (DBException&) {
@@ -201,7 +201,7 @@ void FTSSpec::_scoreStringV2(FTSTokenizer* tokenizer,
 
     unsigned numTokens = 0;
 
-    tokenizer->reset(raw.rawData(), FTSTokenizer::kFilterStopWords);
+    tokenizer->reset(raw.data(), FTSTokenizer::kFilterStopWords);
 
     while (tokenizer->moveNext()) {
         StringData term = tokenizer->get();
@@ -232,7 +232,7 @@ void FTSSpec::_scoreStringV2(FTSTokenizer* tokenizer,
         // if term is identical to the raw form of the
         // field (untokenized) give it a small boost.
         double adjustment = 1;
-        if (raw.size() == term.length() && raw.equalCaseInsensitive(term))
+        if (str::equalCaseInsensitive(raw, term))
             adjustment += 0.1;
 
         double& score = (*docScores)[term];
@@ -249,7 +249,7 @@ Status FTSSpec::getIndexPrefix(const BSONObj& query, BSONObj* out) const {
 
     BSONObjBuilder b;
     for (unsigned i = 0; i < numExtraBefore(); i++) {
-        BSONElement e = dps::extractElementAtPath(query, extraBefore(i));
+        BSONElement e = ::mongo::bson::extractElementAtDottedPath(query, extraBefore(i));
         if (e.eoo())
             return Status(ErrorCodes::BadValue,
                           str::stream() << "need have an equality filter on: " << extraBefore(i));
@@ -309,7 +309,7 @@ StatusWith<BSONObj> FTSSpec::fixSpec(const BSONObj& spec) {
                         return {ErrorCodes::CannotCreateIndex, "expecting _ftsx:1"};
                     }
                     b.append(e);
-                } else if (e.type() == String && INDEX_NAME == e.str()) {
+                } else if (e.type() == BSONType::string && INDEX_NAME == e.str()) {
                     if (!addedFtsStuff) {
                         _addFTSStuff(&b);
                         addedFtsStuff = true;
@@ -337,7 +337,7 @@ StatusWith<BSONObj> FTSSpec::fixSpec(const BSONObj& spec) {
             BSONElement e = i.next();
 
             // extraBefore fields
-            while (String != e.type()) {
+            while (BSONType::string != e.type()) {
                 Status notReservedStatus = verifyFieldNameNotReserved(e.fieldNameStringData());
                 if (!notReservedStatus.isOK()) {
                     return notReservedStatus;
@@ -369,12 +369,12 @@ StatusWith<BSONObj> FTSSpec::fixSpec(const BSONObj& spec) {
                         return notReservedStatus;
                     }
                     e = i.next();
-                } while (!e.eoo() && e.type() == String);
+                } while (!e.eoo() && e.type() == BSONType::string);
             }
 
             // extraAfterFields
             while (!e.eoo()) {
-                if (e.type() == BSONType::String) {
+                if (e.type() == BSONType::string) {
                     return {ErrorCodes::CannotCreateIndex,
                             "'text' fields in index must all be adjacent"};
                 }
@@ -387,7 +387,7 @@ StatusWith<BSONObj> FTSSpec::fixSpec(const BSONObj& spec) {
         }
     }
 
-    if (spec["weights"].type() == Object) {
+    if (spec["weights"].type() == BSONType::object) {
         BSONObjIterator i(spec["weights"].Obj());
         while (i.more()) {
             BSONElement e = i.next();
@@ -431,7 +431,7 @@ StatusWith<BSONObj> FTSSpec::fixSpec(const BSONObj& spec) {
                                 "weight cannot have empty path component"};
                     }
 
-                    if (part.startsWith("$")) {
+                    if (part.starts_with("$")) {
                         return {ErrorCodes::CannotCreateIndex,
                                 "weight cannot have path component with $ prefix"};
                     }
@@ -447,7 +447,7 @@ StatusWith<BSONObj> FTSSpec::fixSpec(const BSONObj& spec) {
     string default_language(default_language_elt.str());
     if (default_language_elt.eoo()) {
         default_language = moduleDefaultLanguage;
-    } else if (default_language_elt.type() != BSONType::String) {
+    } else if (default_language_elt.type() != BSONType::string) {
         return {ErrorCodes::CannotCreateIndex, "default_language needs a string type"};
     }
 
@@ -461,7 +461,7 @@ StatusWith<BSONObj> FTSSpec::fixSpec(const BSONObj& spec) {
     string language_override(language_override_elt.str());
     if (language_override_elt.eoo()) {
         language_override = "language";
-    } else if (language_override_elt.type() != BSONType::String) {
+    } else if (language_override_elt.type() != BSONType::string) {
         return {ErrorCodes::CannotCreateIndex, "language_override must be a string"};
     } else if (!validateOverride(language_override)) {
         return {ErrorCodes::CannotCreateIndex, "language_override is not valid"};

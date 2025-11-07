@@ -29,19 +29,7 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <deque>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
@@ -51,13 +39,21 @@
 #include "mongo/db/pipeline/document_source_match.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
-#include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/stage_constraints.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/stdx/unordered_set.h"
-#include "mongo/util/intrusive_counter.h"
+
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -75,7 +71,8 @@ public:
     class LiteParsed final : public LiteParsedDocumentSource {
     public:
         static std::unique_ptr<LiteParsed> parse(const NamespaceString& nss,
-                                                 const BSONElement& spec) {
+                                                 const BSONElement& spec,
+                                                 const LiteParserOptions& options) {
             return std::make_unique<LiteParsed>(spec.fieldName(), nss.tenantId());
         }
 
@@ -97,10 +94,14 @@ public:
             return true;
         }
 
+        bool generatesOwnDataOnce() const final {
+            return true;
+        }
+
         ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
                                                      bool isImplicitDefault) const override {
-            // TODO (SERVER-97061): Update this once we support snapshot read concern on
-            // $listClusterCatalog.
+            // The listCollections command that runs under the hood only accepts 'local' read
+            // concern.
             return onlyReadConcernLocalSupported(kStageNameInternal, level, isImplicitDefault);
         }
 
@@ -110,11 +111,13 @@ public:
 
     const char* getSourceName() const final;
 
-    DocumentSourceType getType() const final {
-        return DocumentSourceType::kInternalListCollections;
+    static const Id& id;
+
+    Id getId() const override {
+        return id;
     }
 
-    void addVariableRefs(std::set<Variables::Id>* refs) const final{};
+    void addVariableRefs(std::set<Variables::Id>* refs) const final {};
 
     Value serialize(const SerializationOptions& opts = SerializationOptions{}) const final {
         // Since this DocumentSource is serialized to more than one stage, the single-stage has no
@@ -124,23 +127,22 @@ public:
 
     void serializeToArray(std::vector<Value>& array, const SerializationOptions& opts) const final;
 
-    StageConstraints constraints(Pipeline::SplitState pipeState) const override {
+    StageConstraints constraints(PipelineSplitState pipeState) const override {
         StageConstraints constraints{StreamType::kStreaming,
                                      PositionRequirement::kFirst,
-                                     // TODO (SERVER-97356): Replace with kRunOnceAnyNode
-                                     HostTypeRequirement::kLocalOnly,
+                                     HostTypeRequirement::kRunOnceAnyNode,
                                      DiskUseRequirement::kNoDiskUse,
                                      FacetRequirement::kNotAllowed,
                                      TransactionRequirement::kNotAllowed,
                                      LookupRequirement::kAllowed,
                                      UnionRequirement::kAllowed};
-        constraints.requiresInputDocSource = false;
         constraints.isIndependentOfAnyCollection = true;
+        constraints.setConstraintsForNoInputSources();
         return constraints;
     }
 
     boost::optional<DistributedPlanLogic> distributedPlanLogic() final {
-        // This stage will run once on the entire cluster since we've set `kLocalOnly` as the
+        // This stage will run once on the entire cluster since we've set `kRunOnceAnyNode` as the
         // `HostTypeRequirement` constraint.
         return boost::none;
     }
@@ -148,20 +150,15 @@ public:
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) final;
+    DocumentSourceContainer::iterator doOptimizeAt(DocumentSourceContainer::iterator itr,
+                                                   DocumentSourceContainer* container) final;
 
 private:
-    GetNextResult doGetNext() final;
-
-    void _buildCollectionsToReplyForDb(const DatabaseName& db,
-                                       std::vector<BSONObj>& collectionsToReply);
+    friend boost::intrusive_ptr<exec::agg::Stage> documentSourceInternalListCollectionsToStageFn(
+        const boost::intrusive_ptr<DocumentSource>& documentSource);
 
     // A $match stage can be absorbed in order to avoid unnecessarily computing the databases
     // that do not match that predicate.
     boost::intrusive_ptr<DocumentSourceMatch> _absorbedMatch;
-
-    boost::optional<std::vector<DatabaseName>> _databases;
-    std::vector<BSONObj> _collectionsToReply;
 };
 }  // namespace mongo

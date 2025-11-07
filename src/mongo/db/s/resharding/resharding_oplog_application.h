@@ -29,28 +29,29 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <functional>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/shard_role_api/shard_role.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/resharding/resharding_oplog_applier_metrics.h"
-#include "mongo/db/shard_id.h"
-#include "mongo/db/shard_role.h"
-#include "mongo/s/chunk_manager.h"
-#include "mongo/s/sharding_index_catalog_cache.h"
+#include "mongo/db/sharding_environment/shard_id.h"
+#include "mongo/util/modules.h"
+
+#include <cstddef>
+#include <functional>
+#include <string>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 class Collection;
@@ -79,15 +80,11 @@ public:
      * Wraps the op application in a writeConflictRetry loop and is responsible for creating and
      * committing the WUOW.
      */
-    Status applyOperation(OperationContext* opCtx,
-                          const boost::optional<ShardingIndexesCatalogCache>& gii,
-                          const repl::OplogEntry& op) const;
+    Status applyOperation(OperationContext* opCtx, const repl::OplogEntry& op) const;
 
 private:
     // Applies an insert or update operation
-    void _applyInsertOrUpdate(OperationContext* opCtx,
-                              const boost::optional<ShardingIndexesCatalogCache>& gii,
-                              const repl::OplogEntry& op) const;
+    void _applyInsertOrUpdate(OperationContext* opCtx, const repl::OplogEntry& op) const;
     // Applies an insert operation
     void _applyInsert_inlock(OperationContext* opCtx,
                              CollectionAcquisition& outputColl,
@@ -101,9 +98,7 @@ private:
                              const repl::OplogEntry& op) const;
 
     // Applies a delete operation
-    void _applyDelete(OperationContext* opCtx,
-                      const boost::optional<ShardingIndexesCatalogCache>& gii,
-                      const repl::OplogEntry& op) const;
+    void _applyDelete(OperationContext* opCtx, const repl::OplogEntry& op) const;
 
     // Queries '_stashNss' using 'idQuery'.
     BSONObj _queryStashCollById(OperationContext* opCtx,

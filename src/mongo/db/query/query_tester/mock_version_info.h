@@ -27,6 +27,9 @@
  *    it in the license file.
  */
 
+#pragma once
+
+#include "mongo/util/modules.h"
 #include "mongo/util/version.h"
 
 namespace mongo::query_tester {

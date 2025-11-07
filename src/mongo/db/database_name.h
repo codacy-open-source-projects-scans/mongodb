@@ -28,30 +28,34 @@
  */
 
 #pragma once
-#include <algorithm>
-#include <boost/algorithm/string/predicate.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <cstring>
-#include <fmt/format.h>
-#include <iosfwd>
-#include <mutex>
-#include <string>
-#include <utility>
 
 #include "mongo/base/data_view.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/util/builder_fwd.h"
+#include "mongo/db/database_name_reserved.h"
 #include "mongo/db/tenant_id.h"
 #include "mongo/logv2/log_attr.h"
+#include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/static_immortal.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <iosfwd>
+#include <mutex>
+#include <string>
+#include <utility>
+
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 namespace mongo {
 
@@ -75,9 +79,9 @@ protected:
     class Storage;
 
 public:
-#define DBNAME_CONSTANT(id, db) static const DatabaseName id;
-#include "database_name_reserved.def.h"  // IWYU pragma: keep
-#undef DBNAME_CONSTANT
+#define X(id, db) static const DatabaseName id;
+    EXPAND_DBNAME_CONSTANT_TABLE(X)
+#undef X
 
     static constexpr size_t kMaxDatabaseNameLength = 63;
 
@@ -108,8 +112,7 @@ public:
             _data = Storage(dbName._data, dbName.sizeWithTenant() + kDataOffset);
         } else if (dbName._data.isSmallString()) {
             _data = dbName._data;
-            _data.updateFooter(database_name::kSmallStringFlag,
-                               dbName.sizeWithTenant() + kDataOffset);
+            _data.setFlags(database_name::kSmallStringFlag, dbName.sizeWithTenant() + kDataOffset);
         } else {
             _data = dbName._data;
         }
@@ -211,7 +214,7 @@ public:
      * tolerated in the serialized output, and should otherwise be avoided whenever possible.
      */
     std::string serializeWithoutTenantPrefix_UNSAFE() const {
-        return db(omitTenant).toString();
+        return std::string{db(omitTenant)};
     }
 
     /**
@@ -261,7 +264,7 @@ public:
      */
     bool equalCaseInsensitive(const DatabaseName& other) const {
         return tenantIdView() == other.tenantIdView() &&
-            db(omitTenant).equalCaseInsensitive(other.db(omitTenant));
+            str::equalCaseInsensitive(db(omitTenant), other.db(omitTenant));
     }
 
     int compare(const DatabaseName& other) const {
@@ -303,7 +306,7 @@ public:
         //  _data might contain a collection : only hash the discriminator, tenant and database.
         return H::combine(
             std::move(h),
-            std::string_view{obj.view().substr(0, obj.sizeWithTenant() + kDataOffset)});
+            toStdStringViewForInterop(obj.view().substr(0, obj.sizeWithTenant() + kDataOffset)));
     }
 
     // Adds support for boost::Hash.
@@ -318,7 +321,7 @@ public:
      * DatabaseName that can never contain a tenant id (such as global database constants) otherwise
      * data isolation between tenant can break.
      */
-    constexpr StringData db(OmitTenant) const {
+    constexpr StringData db(OmitTenant) const MONGO_COMPILER_LIFETIME_BOUND {
         return view().substr(dbNameOffsetStart(), size());
     }
 
@@ -359,7 +362,7 @@ protected:
     /**
      * Returns a view of the internal string.
      */
-    constexpr StringData view() const {
+    constexpr StringData view() const MONGO_COMPILER_LIFETIME_BOUND {
         return StringData{_data.data(), _data.size()};
     }
 
@@ -396,7 +399,7 @@ protected:
      */
     DatabaseName(const Storage& data, size_t size, TrustedInitTag) noexcept : _data(data, size) {}
 
-    StringData tenantIdView() const {
+    StringData tenantIdView() const MONGO_COMPILER_LIFETIME_BOUND {
         if (!hasTenantId()) {
             return {};
         }
@@ -405,7 +408,7 @@ protected:
     }
 
     std::string toString() const {
-        return db(omitTenant).toString();
+        return std::string{db(omitTenant)};
     }
 
     std::string toStringWithTenantId() const {
@@ -414,7 +417,7 @@ protected:
             return str::stream() << tenantId.toString() << "_" << db(omitTenant);
         }
 
-        return db(omitTenant).toString();
+        return std::string{db(omitTenant)};
     }
 
     static constexpr size_t kDataOffset = sizeof(uint8_t);
@@ -457,12 +460,12 @@ protected:
         constexpr Storage(const char* data, size_t length) noexcept
             : _data(data),
               _length(length),
-              _footer(createFooter(database_name::kStaticAllocFlag, 0)) {}
+              _flags(createFlags(database_name::kStaticAllocFlag, 0)) {}
 
         Storage() noexcept
             : _data(nullptr),
               _length(0),
-              _footer(createFooter(database_name::kSmallStringFlag, kDataOffset)) {}
+              _flags(createFlags(database_name::kSmallStringFlag, kDataOffset)) {}
 
         constexpr ~Storage() {
             if (!std::is_constant_evaluated()) {
@@ -479,14 +482,18 @@ protected:
          * a collection and we are only trying to copy the database part from it.
          */
         Storage(const Storage& other, const size_t newSize)
-            : _data(other._data), _length(other._length), _footer(other._footer) {
+            : _data(other._data),
+              _length(other._length),
+              _padding(other._padding),
+              _flags(other._flags) {
             if (other.isStaticAlloc() && other.size() == newSize) {
                 return;
             } else if (other.isSmallString()) {
-                updateFooter(database_name::kSmallStringFlag, newSize);
+                setFlags(database_name::kSmallStringFlag, newSize);
             } else if (newSize < kSmallStringSize) {
-                setFooter(database_name::kSmallStringFlag, newSize);
-                memcpy(mutableDataptr(), other._data, newSize);
+                setFlags(database_name::kSmallStringFlag, newSize);
+                clearPadding();
+                memcpy(smallStringDataptr(), other._data, newSize);
             } else if (other.isDynamicAlloc()) {
                 char* dataptr = new char[newSize];
                 _data = dataptr;
@@ -496,7 +503,10 @@ protected:
         }
 
         Storage(Storage&& other) noexcept
-            : _data(other._data), _length(other._length), _footer(other._footer) {
+            : _data(other._data),
+              _length(other._length),
+              _padding(other._padding),
+              _flags(other._flags) {
             if (other.isDynamicAlloc()) {
                 other.reset();
             }
@@ -528,39 +538,33 @@ protected:
         void copy(const Storage& other) noexcept {
             _data = other._data;
             _length = other._length;
-            _footer = other._footer;
+            _padding = other._padding;
+            _flags = other._flags;
         }
 
         /**
-         * Returns a word with a valid flag byte and the rest of the data cleared.
+         * Returns flagsIn, optionally with the length mixed-in if flagsIn indicate small string
+         * optimization.
          */
-        constexpr size_t createFooter(unsigned char flagsIn, unsigned char length) {
+        constexpr unsigned char createFlags(unsigned char flagsIn, unsigned char length) {
             if (flagsIn & database_name::kSmallStringFlag) {
                 flagsIn |= (length << 2);
             }
-
-            char byteflags[sizeof(size_t)] = {0};
-            byteflags[sizeof(size_t) - 1] = flagsIn;
-            return absl::bit_cast<size_t>(byteflags);
+            return flagsIn;
         }
 
         /**
-         * Sets the footer field with the correct flags and length. Clear the first sizeof(_footer)
-         * - 1 bytes which might store data when using the small string optimisation.
+         * Clear _padding, which might store data when using the small string optimisation.
          */
-        void setFooter(unsigned char flagsIn, unsigned char length = 0) {
-            _footer = createFooter(flagsIn, length);
+        void clearPadding() {
+            std::fill(_padding.begin(), _padding.end(), 0);
         }
 
         /**
-         * Sets the flag and length of the footer field without changing the first sizeof(_footer) -
-         * 1 bytes which might contain data.
+         * Sets the flags and length of the _flags field.
          */
-        void updateFooter(unsigned char flagsIn, unsigned char length) {
-            if (flagsIn & database_name::kSmallStringFlag) {
-                flagsIn |= (length << 2);
-            }
-            reinterpret_cast<unsigned char*>(&_footer)[sizeof(size_t) - 1] = flagsIn;
+        void setFlags(unsigned char flagsIn, unsigned char length) {
+            _flags = createFlags(flagsIn, length);
         }
 
         /**
@@ -625,12 +629,13 @@ protected:
                 dataptr = new char[length];
                 data._data = dataptr;
                 data._length = length;
-                data._footer = 0;
+                data._flags = 0;
             } else {
-                data.setFooter(database_name::kSmallStringFlag, static_cast<unsigned char>(length));
-                dataptr = data.mutableDataptr();
+                data.setFlags(database_name::kSmallStringFlag, static_cast<unsigned char>(length));
+                data.clearPadding();
+                dataptr = data.smallStringDataptr();
             }
-            invariant(dataptr == data.mutableDataptr());
+            invariant(dataptr == data.data());
 
             *dataptr = details;
             if (hasTenant) {
@@ -644,7 +649,7 @@ protected:
             if (!collectionName.empty()) {
                 *(dataptr + dbStartIndex + db.size()) = '.';
                 std::memcpy(dataptr + dbStartIndex + db.size() + dotSize,
-                            collectionName.rawData(),
+                            collectionName.data(),
                             collectionName.size());
             }
 
@@ -685,17 +690,12 @@ protected:
         }
 
     private:
-        /**
-         * Extracts the flags's byte from the _footer field.
-         */
         constexpr unsigned char getFlags() const {
-            return absl::bit_cast<std::array<char, sizeof(size_t)>>(_footer)[sizeof(size_t) - 1];
+            return _flags;
         }
 
-        char* mutableDataptr() {
-            if (isSmallString())
-                return reinterpret_cast<char*>(&_data);
-            return const_cast<char*>(_data);
+        char* smallStringDataptr() {
+            return reinterpret_cast<char*>(&_data);
         }
 
         /**
@@ -704,7 +704,8 @@ protected:
         void reset() {
             _data = nullptr;
             _length = 0;
-            setFooter(database_name::kSmallStringFlag, kDataOffset);
+            setFlags(database_name::kSmallStringFlag, kDataOffset);
+            clearPadding();
         }
 
         void deallocate() {
@@ -715,9 +716,10 @@ protected:
         }
 
         /**
-         * Storage can work in three different mode (dynamic allocation, static allocation or
-         * small-string optimisation) depending on the flag bits (the last two bits of _footer) :
-         *     Flags value given by _footer[sizeof(_footer) - 1] & 0x00000011:
+         * Storage can work in three different modes (dynamic allocation, static allocation or
+         * small-string optimisation) depending on the flag bits (the two least significant bits of
+         * _flags):
+         *     Flags value given by _flags & 0b11:
          *         0: the data is dynamically allocated.
          *         1: the data is statically allocated.
          *         2: the data is packed using the small string optimisation
@@ -725,13 +727,13 @@ protected:
          * When using static of dynamic allocation, _data is a pointer to the actual data and
          * _length contains its size.
          *
-         * When using the small string optimisation the data is packed in _data, _length and the
-         * first sizeof(_footer)-1 bytes of _footer. The size of the data is contained in the first
-         * 6 bits of the last byte of _footer :
+         * When using the small string optimisation the data is packed in _data, _length and
+         * _padding. The size of the data is contained in 6 most significant bits of _flags.
          */
         const char* _data;
         size_t _length;
-        size_t _footer;
+        std::array<char, sizeof(size_t) - 1> _padding{};
+        unsigned char _flags;
     };
     Storage _data;
 
@@ -739,7 +741,7 @@ protected:
         std::min(sizeof(Storage) - sizeof(char), size_t(63));
 };
 
-inline std::string stringifyForAssert(const DatabaseName& dbName) {
+inline std::string stringify_forTest(const DatabaseName& dbName) {
     return toStringForLogging(dbName);
 }
 
@@ -789,17 +791,16 @@ constexpr auto makeDbData(const char* db) {
     p = std::copy_n(db, dbSize, p);
     return result;
 }
-#define DBNAME_CONSTANT(id, db) \
-    constexpr inline auto id##_data = makeDbData<db.size()>(db.rawData());
-#include "database_name_reserved.def.h"
-#undef DBNAME_CONSTANT
+#define X(id, db) constexpr inline auto id##_data = makeDbData<db.size()>(db.data());
+EXPAND_DBNAME_CONSTANT_TABLE(X)
+#undef X
 }  // namespace dbname_detail::constexpr_data
 
-#define DBNAME_CONSTANT(id, db)                          \
+#define X(id, db)                                        \
     constexpr inline DatabaseName DatabaseName::id(      \
         dbname_detail::constexpr_data::id##_data.data(), \
         dbname_detail::constexpr_data::id##_data.size());
-#include "database_name_reserved.def.h"
-#undef DBNAME_CONSTANT
+EXPAND_DBNAME_CONSTANT_TABLE(X)
+#undef X
 
 }  // namespace mongo

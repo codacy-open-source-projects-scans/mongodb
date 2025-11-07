@@ -29,9 +29,8 @@
 
 #pragma once
 
-#include "api_parameters.h"
-
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/api_parameters.h"
 #include "mongo/db/api_parameters_gen.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/operation_context.h"
@@ -64,7 +63,10 @@ int getAPIVersion(StringType apiVersion, bool allowTestVersion) {
 }
 
 /**
- * If the server parameter "requireApiVersion" is set, enforce it.
+ * If the server parameter "requireApiVersion" is set, enforce it. This check is bypassed for
+ * "hello" commands from internal clients.
  */
-void enforceRequireAPIVersion(OperationContext* opCtx, Command* command);
+void enforceRequireAPIVersion(OperationContext* opCtx,
+                              Command* command,
+                              const OpMsgRequest& request);
 }  // namespace mongo

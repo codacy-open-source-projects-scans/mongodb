@@ -29,35 +29,15 @@
 
 #pragma once
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/inlined_vector.h>
-#include <absl/hash/hash.h>
-#include <boost/optional/optional.hpp>
-#include <cmath>
-#include <cstdint>
-#include <cstdlib>
-#include <cstring>
-#include <limits>
-#include <memory>
-#include <string>
-#include <tuple>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
-#include "mongo/base/compare_numbers.h"
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/string_data.h"
-#include "mongo/base/string_data_comparator.h"
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/exec/sbe/sort_spec.h"
 #include "mongo/db/exec/sbe/values/block_interface.h"
 #include "mongo/db/exec/sbe/values/column_op.h"
-#include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
 #include "mongo/db/exec/sbe/vm/code_fragment.h"
 #include "mongo/db/exec/sbe/vm/vm_builtin.h"
-#include "mongo/db/exec/sbe/vm/vm_instruction.h"
 #include "mongo/db/exec/sbe/vm/vm_memory.h"
 #include "mongo/db/exec/sbe/vm/vm_types.h"
 #include "mongo/db/pipeline/accumulator_multi.h"
@@ -68,6 +48,18 @@
 #include "mongo/util/allocator.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/debug_util.h"
+#include "mongo/util/modules.h"
+
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <tuple>
+#include <type_traits>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
 
 #if !defined(MONGO_CONFIG_DEBUG_BUILD)
 #define MONGO_COMPILER_ALWAYS_INLINE_OPT MONGO_COMPILER_ALWAYS_INLINE
@@ -88,7 +80,7 @@ namespace vm {
  * - The element at index `kMaxSize` is the maximum number entries the data structure holds.
  * - The element at index `kMemUsage` holds the current memory usage
  * - The element at index `kMemLimit` holds the max memory limit allowed
- * - The element at index `kIsGroupAccum` specifices if the accumulator belongs to group-by stage
+ * - The element at index `kIsGroupAccum` specifies if the accumulator belongs to group-by stage
  */
 enum class AggMultiElems {
     kInternalArr,
@@ -207,7 +199,7 @@ enum class AggPartialSumElems { kTotal, kError, kSizeOfArray };
  * This enum defines indices into an 'Array' that accumulates $stdDevPop and $stdDevSamp results.
  *
  * The array contains 3 elements:
- * - The element at index `kCount` keeps track of the total number of values processd
+ * - The element at index `kCount` keeps track of the total number of values processed
  * - The elements at index `kRunningMean` keeps track of the mean of all the values that have been
  * processed.
  * - The elements at index `kRunningM2` keeps track of running M2 value (defined within:
@@ -365,6 +357,88 @@ public:
     class TopBottomArgsFromStack;
     class TopBottomArgsFromBlocks;
 
+    static void aggDoubleDoubleSumImpl(value::Array* accumulator,
+                                       value::TypeTags rhsTag,
+                                       value::Value rhsValue);
+    static FastTuple<bool, value::TypeTags, value::Value> aggDoubleDoubleSumFinalizeImpl(
+        value::Array* accmulator);
+    static void aggMergeDoubleDoubleSumsImpl(value::Array* accumulator,
+                                             value::TypeTags rhsTag,
+                                             value::Value rhsValue);
+    static FastTuple<bool, value::TypeTags, value::Value>
+    builtinConvertSimpleSumToDoubleDoubleSumImpl(value::TypeTags simpleSumTag,
+                                                 value::Value simpleSumVal);
+    static FastTuple<bool, value::TypeTags, value::Value> builtinDoubleDoublePartialSumFinalizeImpl(
+        value::TypeTags fieldTag, value::Value fieldValue);
+    static FastTuple<bool, value::TypeTags, value::Value> genericDiv(value::TypeTags lhsTag,
+                                                                     value::Value lhsValue,
+                                                                     value::TypeTags rhsTag,
+                                                                     value::Value rhsValue);
+
+    static FastTuple<bool, value::TypeTags, value::Value> builtinAddToArrayCappedImpl(
+        value::TypeTags tagAccumulatorState,
+        value::Value valAccumulatorState,  // Owned
+        bool ownedNewElem,
+        value::TypeTags tagNewElem,
+        value::Value valNewElem,
+        int32_t sizeCap);
+
+    static FastTuple<bool, value::TypeTags, value::Value> addToSetCappedImpl(
+        value::TypeTags tagAccumulatorState,
+        value::Value valAccumulatorState,  // Owned
+        bool ownedNewElem,
+        value::TypeTags tagNewElem,
+        value::Value valNewElem,
+        int32_t sizeCap,
+        CollatorInterface* collator);
+
+    /**
+     * Moves the elements from the (tagNewArrayElements, valNewArrayElements) array onto the end of
+     * the (tagAccumulatorState, valAccumulatorState) capped array accumulator, enforcing the cap by
+     * throwing an exception if the operation would result in an accumulator state that exceeds it.
+     *
+     * Either the accumulator state or new members array may be Nothing, which gets treated as an
+     * empty array.
+     *
+     * The capped accumulator state is a two-element array, where the first element is the array
+     * value and the second element is the array value's pre-computed size. The return value is also
+     * an array with the same structure.
+     *
+     * Takes ownership of both the accumulator state and the new elements array. The caller takes
+     * ownership of the returned value iff the 'bool' component is true.
+     */
+    static FastTuple<bool, value::TypeTags, value::Value> concatArraysAccumImpl(
+        value::TypeTags tagAccumulatorState,
+        value::Value valAccumulatorState,  // Owned
+        value::TypeTags tagNewArrayElements,
+        value::Value valNewArrayElements,  // Owned
+        int64_t newArrayElementsSize,
+        int32_t sizeCap);
+
+    /**
+     * Moves the elements from the (tagNewSetMembers, valNewSetMembers) array into the
+     * (tagAccumulatorState, valAccumulatorState) capped set accumulator, preserving set semantics
+     * by ignoring duplicates and enforcing the cap by throwing an exception if the operation would
+     * result in an accumulator state that exceeds it.
+     *
+     * Either the accumulator state or new members array may be Nothing, which gets treated as an
+     * empty accumlator or empty array, respectively.
+     *
+     * The capped accumulator state is a two-element array, where the first element is an 'ArraySet'
+     * and the second element is the set's pre-computed size. The return value is also an array
+     * with the same structure.
+     *
+     * Takes ownership of both the accumulator state and the new elements array. The caller takes
+     * ownership of the returned value iff the 'bool' component is true.
+     */
+    static FastTuple<bool, value::TypeTags, value::Value> setUnionAccumImpl(
+        value::TypeTags tagAccumulatorState,
+        value::Value valAccumulatorState,  // Owned
+        value::TypeTags tagNewSetMembers,
+        value::Value valNewSetMembers,  // Owned
+        int32_t sizeCap,
+        CollatorInterface* collator);
+
     ByteCode() {
         _argStack = static_cast<uint8_t*>(::operator new(sizeOfElement * 4));
         _argStackEnd = _argStack + sizeOfElement * 4;
@@ -419,10 +493,6 @@ private:
     void runTagCheck(const uint8_t*& pcPointer, T&& predicate);
     void runTagCheck(const uint8_t*& pcPointer, value::TypeTags tagRhs);
 
-    FastTuple<bool, value::TypeTags, value::Value> genericDiv(value::TypeTags lhsTag,
-                                                              value::Value lhsValue,
-                                                              value::TypeTags rhsTag,
-                                                              value::Value rhsValue);
     FastTuple<bool, value::TypeTags, value::Value> genericIDiv(value::TypeTags lhsTag,
                                                                value::Value lhsValue,
                                                                value::TypeTags rhsTag,
@@ -480,16 +550,27 @@ private:
                                                                      value::Value fieldValue);
 
     void traverseP(const CodeFragment* code);
-    void traverseP(const CodeFragment* code, int64_t position, int64_t maxDepth);
+    void traverseP(const CodeFragment* code,
+                   int64_t position,
+                   bool providePosition,
+                   int64_t maxDepth);
     void traverseP_nested(const CodeFragment* code,
                           int64_t position,
                           value::TypeTags tag,
                           value::Value val,
-                          int64_t maxDepth);
+                          bool providePosition,
+                          int64_t maxDepth,
+                          int64_t curDepth);
 
     void traverseF(const CodeFragment* code);
-    void traverseF(const CodeFragment* code, int64_t position, bool compareArray);
-    void traverseFInArray(const CodeFragment* code, int64_t position, bool compareArray);
+    void traverseF(const CodeFragment* code,
+                   int64_t position,
+                   bool providePosition,
+                   bool compareArray);
+    void traverseFInArray(const CodeFragment* code,
+                          int64_t position,
+                          bool providePosition,
+                          bool compareArray);
     void magicTraverseF(const CodeFragment* code);
 
     bool runLambdaPredicate(const CodeFragment* code, int64_t position);
@@ -509,15 +590,6 @@ private:
 
     FastTuple<bool, value::TypeTags, value::Value> aggCount(value::TypeTags accTag,
                                                             value::Value accValue);
-
-    void aggDoubleDoubleSumImpl(value::Array* accumulator,
-                                value::TypeTags rhsTag,
-                                value::Value rhsValue);
-    void aggMergeDoubleDoubleSumsImpl(value::Array* accumulator,
-                                      value::TypeTags rhsTag,
-                                      value::Value rhsValue);
-    FastTuple<bool, value::TypeTags, value::Value> aggDoubleDoubleSumFinalizeImpl(
-        value::Array* accmulator);
 
     // This is an implementation of the following algorithm:
     // https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_online_algorithm
@@ -778,10 +850,6 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinMergeObjects(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAddToSet(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCollAddToSet(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> addToSetCappedImpl(value::TypeTags tagNewElem,
-                                                                      value::Value valNewElem,
-                                                                      int32_t sizeCap,
-                                                                      CollatorInterface* collator);
     FastTuple<bool, value::TypeTags, value::Value> isMemberImpl(value::TypeTags exprTag,
                                                                 value::Value exprVal,
                                                                 value::TypeTags arrTag,
@@ -858,56 +926,16 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinRound(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinConcat(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinConcatArrays(ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinZipArrays(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinTrim(ArityType arity,
                                                                bool trimLeft,
                                                                bool trimRight);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggConcatArraysCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinConcatArraysCapped(ArityType arity);
-
-    /**
-     * Given an array of new values via 'newElemVal' and an array accumulator via 'arrVal', add the
-     * new values into the array accumulator. Note that the accumulator is an array of two elements
-     * where the first element is the array of values in the accumulator and the second element is
-     * the size of the current accumulated values.
-     * IMPORTANT: this function does NOT create a ValueGuard over 'newElemTag' and 'newElemVal'. It
-     * is the responsibility of callers of this function to manage the memory associated with
-     * 'newElemTag/Val.
-     */
-    FastTuple<bool, value::TypeTags, value::Value> concatArraysAccumImpl(value::TypeTags newElemTag,
-                                                                         value::Value newElemVal,
-                                                                         int32_t sizeCap,
-                                                                         bool arrOwned,
-                                                                         value::TypeTags arrTag,
-                                                                         value::Value arrVal,
-                                                                         int64_t sizeOfNewElems);
-
     FastTuple<bool, value::TypeTags, value::Value> builtinAggSetUnion(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggCollSetUnion(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggSetUnionCapped(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinAggCollSetUnionCapped(ArityType arity);
-    FastTuple<bool, value::TypeTags, value::Value> aggSetUnionCappedImpl(
-        value::TypeTags tagNewElem,
-        value::Value valNewElem,
-        int32_t sizeCap,
-        CollatorInterface* collator);
-
-    /**
-     * Given an array of new values via 'newElemVal' and a set accumulator via 'accVal', add the new
-     * values into the set accumulator. Note that the accumulator is an array of two elements where
-     * the first element is the set of values in the accumulator and the second element is the size
-     * of the current accumulated values.
-     * IMPORTANT: this function does NOT create a ValueGuard over 'newElemTag' and 'newElemVal'. It
-     * is the responsibility of callers of this function to manage the memory associated with
-     * 'newElemTag/Val'.
-     */
-    FastTuple<bool, value::TypeTags, value::Value> setUnionAccumImpl(value::TypeTags newElemTag,
-                                                                     value::Value newElemVal,
-                                                                     int32_t sizeCap,
-                                                                     bool accOwned,
-                                                                     value::TypeTags accTag,
-                                                                     value::Value accVal,
-                                                                     CollatorInterface* collator);
-
     FastTuple<bool, value::TypeTags, value::Value> builtinIsMember(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCollIsMember(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinIndexOfBytes(ArityType arity);
@@ -1297,6 +1325,7 @@ private:
     FastTuple<bool, value::TypeTags, value::Value> builtinCellFoldValues_P(ArityType arity);
     FastTuple<bool, value::TypeTags, value::Value> builtinCellBlockGetFlatValuesBlock(
         ArityType arity);
+    FastTuple<bool, value::TypeTags, value::Value> builtinCurrentDate(ArityType arity);
 
     /**
      * Dispatcher for calls to VM built-in C++ functions enumerated by enum class Builtin.
@@ -1325,8 +1354,7 @@ private:
     }
 
     MONGO_COMPILER_ALWAYS_INLINE_OPT
-    FastTuple<bool, value::TypeTags, value::Value> getFromStack(size_t offset,
-                                                                bool pop = false) noexcept {
+    FastTuple<bool, value::TypeTags, value::Value> getFromStack(size_t offset, bool pop = false) {
         auto ret = readTuple(_argStackTop - offset * sizeOfElement);
 
         if (pop) {
@@ -1336,6 +1364,13 @@ private:
         return ret;
     }
 
+    /**
+     * Returns the value triple at the top of the VM stack, whether the stack owned it or not. If
+     * the stack DID own it, this transfers ownership to the caller (like a move). If the stack did
+     * NOT own it, no ownership transfer occurs, so something else still owns it.
+     *
+     * If you want the caller always to own the returned value, call moveOwnedFromStack() instead.
+     */
     MONGO_COMPILER_ALWAYS_INLINE_OPT
     FastTuple<bool, value::TypeTags, value::Value> moveFromStack(size_t offset) noexcept {
         if (MONGO_likely(offset == 0)) {
@@ -1350,6 +1385,16 @@ private:
         }
     }
 
+    /**
+     * Returns the value triple at the top of the VM stack, whether the stack owned it or not, and
+     * also causes the caller to own it and the stack not to own it. If the stack DID own it, this
+     * transfers ownership to the caller (like a move). If the stack did NOT own it, this makes a
+     * copy and gives ownership of the copy to the caller, while something else still owns the
+     * original on the top of the stack.
+     *
+     * If you do not want ownership to transfer to the caller if the stack did not already own it,
+     * call moveFromStack() instead.
+     */
     MONGO_COMPILER_ALWAYS_INLINE_OPT
     std::pair<value::TypeTags, value::Value> moveOwnedFromStack(size_t offset) {
         auto [owned, tag, val] = moveFromStack(offset);
@@ -1380,27 +1425,29 @@ private:
     }
 
     MONGO_COMPILER_ALWAYS_INLINE_OPT
-    void pushStack(bool owned, value::TypeTags tag, value::Value val) noexcept {
+    void pushStack(bool owned, value::TypeTags tag, value::Value val) {
+        dassert(_argStackEnd - _argStackTop >= static_cast<std::ptrdiff_t>(sizeOfElement),
+                "Invalid pushStack call leads to overflow");
         auto localPtr = _argStackTop += sizeOfElement;
-        if constexpr (kDebugBuild) {
-            invariant(localPtr != _argStackEnd);
-        }
 
         writeTuple(localPtr, owned, tag, val);
     }
 
+    /**
+     * Overwrites the current value at the top of the stack with the value triple passed in.
+     */
     MONGO_COMPILER_ALWAYS_INLINE void topStack(bool owned,
                                                value::TypeTags tag,
                                                value::Value val) noexcept {
         writeTuple(_argStackTop, owned, tag, val);
     }
 
-    MONGO_COMPILER_ALWAYS_INLINE void popStack() noexcept {
+    MONGO_COMPILER_ALWAYS_INLINE void popStack() {
         _argStackTop -= sizeOfElement;
     }
 
     MONGO_COMPILER_ALWAYS_INLINE_OPT
-    void popAndReleaseStack() noexcept {
+    void popAndReleaseStack() {
         auto [owned, tag, val] = getFromStack(0);
         if (owned) {
             value::releaseValue(tag, val);
@@ -1438,9 +1485,8 @@ class ByteCode::MakeObjImplBase {
 public:
     MONGO_COMPILER_ALWAYS_INLINE MakeObjImplBase(ByteCode& bc,
                                                  int argsStackOffset,
-                                                 uint32_t numArgs,
                                                  const CodeFragment* code)
-        : bc(bc), argsStackOffset(argsStackOffset), numArgs(numArgs), code(code) {}
+        : bc(bc), argsStackOffset(argsStackOffset), code(code) {}
 
 protected:
     MONGO_COMPILER_ALWAYS_INLINE FastTuple<bool, value::TypeTags, value::Value> getSpec() const {
@@ -1477,7 +1523,6 @@ protected:
 private:
     ByteCode& bc;
     const int argsStackOffset;
-    const uint32_t numArgs;
     const CodeFragment* const code;
 };
 

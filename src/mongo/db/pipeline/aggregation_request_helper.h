@@ -29,11 +29,6 @@
 
 #pragma once
 
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -47,14 +42,20 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/pipeline/exchange_spec_gen.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/legacy_runtime_constants_gen.h"
-#include "mongo/db/pipeline/plan_executor_pipeline.h"
 #include "mongo/db/query/explain_options.h"
+#include "mongo/db/version_context.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/serialization_context.h"
+
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -96,20 +97,11 @@ StatusWith<AggregateCommandRequest> parseFromBSONForTests(
     boost::optional<ExplainOptions::Verbosity> explainVerbosity = boost::none);
 
 /**
- * Serializes the options to a Document. Note that this serialization includes the original
- * pipeline object, as specified. Callers will likely want to override this field with a
- * serialization of a parsed and optimized Pipeline object.
- *
- * The explain option is not serialized. The preferred way to send an explain is with the explain
- * command, like: {explain: {aggregate: ...}, ...}, explain options are not part of the aggregate
- * command object.
- *
- * In case query settings are attached to 'expCtx', they will be serialized to the command document.
+ * Retrieves the query settings from 'expCtx' and if they are not empty, attaches them to the
+ * request object.
  */
-Document serializeToCommandDoc(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                               const AggregateCommandRequest& request);
-
-BSONObj serializeToCommandObj(const AggregateCommandRequest& request);
+void addQuerySettingsToRequest(AggregateCommandRequest& request,
+                               const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
 /**
  * Validates if 'AggregateCommandRequest' specs complies with API versioning. Throws uassert in case
@@ -123,21 +115,16 @@ void validateRequestForAPIVersion(const OperationContext* opCtx,
  */
 void validateRequestFromClusterQueryWithoutShardKey(const AggregateCommandRequest& request);
 
-/**
- * Returns the type of resumable scan required by this aggregation, if applicable. Otherwise returns
- * ResumableScanType::kNone.
- */
-PlanExecutorPipeline::ResumableScanType getResumableScanType(const AggregateCommandRequest& request,
-                                                             bool isChangeStream);
-
 // TODO SERVER-95358 remove once 9.0 becomes last LTS.
 const mongo::OptionalBool& getFromRouter(const AggregateCommandRequest& request);
 
 // TODO SERVER-95358 remove once 9.0 becomes last LTS.
-void setFromRouter(AggregateCommandRequest& request, mongo::OptionalBool value);
+void setFromRouter(const VersionContext& vCtx,
+                   AggregateCommandRequest& request,
+                   mongo::OptionalBool value);
 
 // TODO SERVER-95358 remove once 9.0 becomes last LTS.
-void setFromRouter(MutableDocument& doc, mongo::Value value);
+void setFromRouter(const VersionContext& vCtx, MutableDocument& doc, mongo::Value value);
 }  // namespace aggregation_request_helper
 
 /**
@@ -146,16 +133,13 @@ void setFromRouter(MutableDocument& doc, mongo::Value value);
  * IMPORTANT: The method should not be modified, as API version input/output guarantees could
  * break because of it.
  */
-boost::optional<mongo::ExplainOptions::Verbosity> parseExplainModeFromBSON(
-    const BSONElement& explainElem);
+boost::optional<bool> parseExplainModeFromBSON(const BSONElement& explainElem);
 
 /**
  * IMPORTANT: The method should not be modified, as API version input/output guarantees could
  * break because of it.
  */
-void serializeExplainToBSON(const mongo::ExplainOptions::Verbosity& explain,
-                            StringData fieldName,
-                            BSONObjBuilder* builder);
+void serializeExplainToBSON(const bool& explain, StringData fieldName, BSONObjBuilder* builder);
 
 /**
  * IMPORTANT: The method should not be modified, as API version input/output guarantees could
@@ -181,12 +165,12 @@ static StatusWith<std::vector<BSONObj>> attemptToParsePipelineFromBSON(
     const BSONElement& pipelineElem) {
     std::vector<BSONObj> pipeline;
 
-    if (pipelineElem.eoo() || pipelineElem.type() != BSONType::Array) {
+    if (pipelineElem.eoo() || pipelineElem.type() != BSONType::array) {
         return {ErrorCodes::TypeMismatch, "A pipeline must be an array of objects"};
     }
 
     for (auto elem : pipelineElem.Obj()) {
-        if (elem.type() != BSONType::Object) {
+        if (elem.type() != BSONType::object) {
             return {ErrorCodes::TypeMismatch,
                     "Each element of the 'pipeline' array must be an object"};
         }

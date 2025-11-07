@@ -3,17 +3,15 @@
 
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
-var name = "plan_cache_secondaryok";
+let name = "plan_cache_secondaryok";
 
 function assertPlanCacheCommandsSucceed(db) {
     assert.commandWorked(db.runCommand({planCacheClear: name, query: {a: 1}}));
 
     // Using aggregate to list the contents of the plan cache.
-    assert.commandWorked(
-        db.runCommand({aggregate: name, pipeline: [{$planCacheStats: {}}], cursor: {}}));
+    assert.commandWorked(db.runCommand({aggregate: name, pipeline: [{$planCacheStats: {}}], cursor: {}}));
 
-    assert.commandWorked(
-        db.runCommand({planCacheSetFilter: name, query: {a: 1}, indexes: [{a: 1}]}));
+    assert.commandWorked(db.runCommand({planCacheSetFilter: name, query: {a: 1}, indexes: [{a: 1}]}));
 
     assert.commandWorked(db.runCommand({planCacheListFilters: name}));
 
@@ -24,11 +22,9 @@ function assertPlanCacheCommandsFail(db) {
     assert.commandFailed(db.runCommand({planCacheClear: name, query: {a: 1}}));
 
     // Using aggregate to list the contents of the plan cache.
-    assert.commandFailed(
-        db.runCommand({aggregate: name, pipeline: [{$planCacheStats: {}}], cursor: {}}));
+    assert.commandFailed(db.runCommand({aggregate: name, pipeline: [{$planCacheStats: {}}], cursor: {}}));
 
-    assert.commandFailed(
-        db.runCommand({planCacheSetFilter: name, query: {a: 1}, indexes: [{a: 1}]}));
+    assert.commandFailed(db.runCommand({planCacheSetFilter: name, query: {a: 1}, indexes: [{a: 1}]}));
 
     assert.commandFailed(db.runCommand({planCacheListFilters: name}));
 
@@ -36,10 +32,10 @@ function assertPlanCacheCommandsFail(db) {
 }
 
 print("Start replica set with two nodes");
-var replTest = new ReplSetTest({name: name, nodes: 2});
-var nodes = replTest.startSet();
+let replTest = new ReplSetTest({name: name, nodes: 2});
+let nodes = replTest.startSet();
 replTest.initiate();
-var primary = replTest.getPrimary();
+let primary = replTest.getPrimary();
 
 // Insert a document and let it sync to the secondary.
 print("Initial sync");
@@ -53,7 +49,7 @@ assert.eq(1, primary.getDB("test")[name].findOne({a: 1})["a"]);
 assertPlanCacheCommandsSucceed(primary.getDB("test"));
 
 // With secondaryOk false, the commands should fail on the secondary.
-var secondary = replTest.getSecondary();
+let secondary = replTest.getSecondary();
 secondary.getDB("test").getMongo().setSecondaryOk(false);
 assertPlanCacheCommandsFail(secondary.getDB("test"));
 

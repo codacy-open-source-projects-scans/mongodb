@@ -29,9 +29,6 @@
 
 #pragma once
 
-#include <functional>
-#include <memory>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/operation_context.h"
@@ -52,7 +49,11 @@
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/concurrency/with_lock.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <functional>
+#include <memory>
 
 namespace mongo {
 
@@ -68,7 +69,7 @@ class ReplicationCoordinatorExternalState;
 class ReplicationProcess;
 class StorageInterface;
 
-class BackgroundSync {
+class MONGO_MOD_PARENT_PRIVATE BackgroundSync {
     BackgroundSync(const BackgroundSync&) = delete;
     BackgroundSync& operator=(const BackgroundSync&) = delete;
 

@@ -4,6 +4,8 @@
  * @tags: [
  *   # Multiple servers can mess up the plan cache list.
  *   assumes_standalone_mongod,
+ *   # During fcv upgrade/downgrade the engine might not be what we expect.
+ *   cannot_run_during_upgrade_downgrade,
  * ]
  */
 import {checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
@@ -15,15 +17,13 @@ const db = mongod.getDB(dbName);
 const sbeEnabled = checkSbeFullyEnabled(db);
 
 // Create two users, each with different roles.
-assert.commandWorked(
-    db.runCommand({createUser: "user1", pwd: "pwd", roles: [{role: "read", db: dbName}]}));
-assert.commandWorked(
-    db.runCommand({createUser: "user2", pwd: "pwd", roles: [{role: "readWrite", db: dbName}]}));
+assert.commandWorked(db.runCommand({createUser: "user1", pwd: "pwd", roles: [{role: "read", db: dbName}]}));
+assert.commandWorked(db.runCommand({createUser: "user2", pwd: "pwd", roles: [{role: "readWrite", db: dbName}]}));
 
 const coll = db.sbe_plan_cache_user_roles;
 coll.drop();
 
-const verifyPlanCache = function(role) {
+const verifyPlanCache = function (role) {
     if (sbeEnabled) {
         const caches = coll.getPlanCache().list();
         assert.eq(1, caches.length, caches);

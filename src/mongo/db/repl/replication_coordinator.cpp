@@ -28,17 +28,18 @@
  */
 
 
-#include <utility>
+#include "mongo/db/repl/replication_coordinator.h"
 
 #include "mongo/db/client.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/repl_server_parameters_gen.h"
-#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_options.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
+
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kReplication
 
@@ -97,6 +98,10 @@ bool ReplicationCoordinator::isOplogDisabledFor(OperationContext* opCtx,
     fassert(28626, shard_role_details::getRecoveryUnit(opCtx));
 
     return false;
+}
+
+void ReplicationCoordinator::setOldestTimestamp(const Timestamp& timestamp) {
+    getServiceContext()->getStorageEngine()->setOldestTimestamp(timestamp, false /*force*/);
 }
 
 bool ReplicationCoordinator::isOplogDisabledForNS(const NamespaceString& nss) {

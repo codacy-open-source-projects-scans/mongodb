@@ -29,19 +29,10 @@
 
 #pragma once
 
-#include <algorithm>
-#include <boost/optional/optional.hpp>
-#include <functional>
-#include <memory>
-#include <variant>
-#include <vector>
-
-#include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/oid.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/namespace_string.h"
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/write_ops/write_ops_gen.h"
 #include "mongo/db/record_id.h"
@@ -51,7 +42,17 @@
 #include "mongo/db/timeseries/bucket_catalog/write_batch.h"
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
-#include "mongo/stdx/unordered_map.h"
+#include "mongo/db/version_context.h"
+#include "mongo/util/modules.h"
+
+#include <functional>
+#include <memory>
+#include <variant>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
+
+MONGO_MOD_PUBLIC;
 
 namespace mongo::timeseries {
 
@@ -61,75 +62,6 @@ namespace mongo::timeseries {
  * Assumes already holding a lock on the collection.
  */
 void assertTimeseriesBucketsCollection(const Collection* bucketsColl);
-
-/**
- * Returns the document for writing a new bucket with 'measurements'. Generates the id and
- * calculates the min and max fields while building the document.
- *
- * The measurements must already be known to fit in the same bucket. No checks will be done.
- */
-BSONObj makeBucketDocument(const std::vector<BSONObj>& measurements,
-                           const NamespaceString& nss,
-                           const UUID& collectionUUID,
-                           const TimeseriesOptions& options,
-                           const StringDataComparator* comparator);
-
-using TimeseriesBatches = std::vector<std::shared_ptr<bucket_catalog::WriteBatch>>;
-using TimeseriesStmtIds = stdx::unordered_map<bucket_catalog::WriteBatch*, std::vector<StmtId>>;
-
-/**
- * Retrieves the opTime and electionId according to the current replication mode.
- */
-void getOpTimeAndElectionId(OperationContext* opCtx,
-                            boost::optional<repl::OpTime>* opTime,
-                            boost::optional<OID>* electionId);
-
-enum class BucketReopeningPermittance {
-    kAllowed,
-    kDisallowed,
-};
-
-using CompressAndWriteBucketFunc = std::function<void(
-    OperationContext*, const bucket_catalog::BucketId&, const NamespaceString&, StringData)>;
-
-/**
- * Attempts to insert a measurement doc into a bucket in the bucket catalog and retries
- * automatically on certain errors. Only reopens existing buckets if the insert was initiated from a
- * user insert.
- *
- * Returns the write batch of the insert and other information if succeeded.
- */
-StatusWith<timeseries::bucket_catalog::InsertResult> attemptInsertIntoBucket(
-    OperationContext* opCtx,
-    bucket_catalog::BucketCatalog& bucketCatalog,
-    const Collection* bucketsColl,
-    TimeseriesOptions& timeSeriesOptions,
-    const BSONObj& measurementDoc,
-    BucketReopeningPermittance,
-    const CompressAndWriteBucketFunc& compressAndWriteBucketFunc);
-
-/**
- * Prepares the final write batches needed for performing the writes to storage.
- */
-template <typename T, typename Fn>
-std::vector<std::reference_wrapper<std::shared_ptr<timeseries::bucket_catalog::WriteBatch>>>
-determineBatchesToCommit(T& batches, Fn&& extractElem) {
-    std::vector<std::reference_wrapper<std::shared_ptr<timeseries::bucket_catalog::WriteBatch>>>
-        batchesToCommit;
-    for (auto& elem : batches) {
-        std::shared_ptr<timeseries::bucket_catalog::WriteBatch>& batch = extractElem(elem);
-        if (timeseries::bucket_catalog::claimWriteBatchCommitRights(*batch)) {
-            batchesToCommit.push_back(batch);
-        }
-    }
-
-    // Sort by bucket so that preparing the commit for each batch cannot deadlock.
-    std::sort(batchesToCommit.begin(), batchesToCommit.end(), [](auto left, auto right) {
-        return left.get()->bucketId.oid < right.get()->bucketId.oid;
-    });
-
-    return batchesToCommit;
-}
 
 /**
  * Performs modifications atomically for a user command on a time-series collection.
@@ -176,7 +108,6 @@ void performAtomicWritesForUpdate(
     bool fromMigrate,
     StmtId stmtId,
     std::set<bucket_catalog::BucketId>* bucketIds,
-    const CompressAndWriteBucketFunc& compressAndWriteBucketFunc,
     boost::optional<Date_t> currentMinTime);
 
 /**
@@ -202,33 +133,27 @@ void timeseriesHintTranslation(const CollectionPtr& coll, R* request) {
  * Performs checks on an update/delete request being performed on a timeseries view.
  */
 template <typename R>
-void timeseriesRequestChecks(const CollectionPtr& coll,
-                             R* request,
-                             std::function<void(R*, const TimeseriesOptions&)> checkRequestFn) {
+void timeseriesRequestChecks(
+    const VersionContext& vCtx,
+    const CollectionPtr& coll,
+    R* request,
+    std::function<void(const VersionContext&, R*, const TimeseriesOptions&)> checkRequestFn) {
     timeseries::assertTimeseriesBucketsCollection(coll.get());
     auto timeseriesOptions = coll->getTimeseriesOptions().value();
-    checkRequestFn(request, timeseriesOptions);
+    checkRequestFn(vCtx, request, timeseriesOptions);
 }
 
 /**
  * Function that performs checks on a delete request being performed on a timeseries collection.
  */
-void deleteRequestCheckFunction(DeleteRequest* request, const TimeseriesOptions& options);
+void deleteRequestCheckFunction(const VersionContext& vCtx,
+                                DeleteRequest* request,
+                                const TimeseriesOptions& options);
 
 /**
  * Function that performs checks on an update request being performed on a timeseries collection.
  */
-void updateRequestCheckFunction(UpdateRequest* request, const TimeseriesOptions& options);
-
-/**
- * If runPostCommitDebugChecks is enabled, returns a function that runs (slow) post commit debug
- * checks to ensure we maintain expected invariants about the bucket contents. Otherwise, returns
- * nullptr.
- *
- * Set of checks:
- *  - Measurement count on-disk matches in-memory state. (Helpful for detecting race conditions.)
- */
-std::function<void(const timeseries::bucket_catalog::WriteBatch&, StringData timeField)>
-getPostCommitDebugChecks(OperationContext*, const NamespaceString&);
-
+void updateRequestCheckFunction(const VersionContext& vCtx,
+                                UpdateRequest* request,
+                                const TimeseriesOptions& options);
 }  // namespace mongo::timeseries

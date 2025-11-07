@@ -30,14 +30,8 @@
 #include "mongo/transport/service_executor_synchronous.h"
 
 // IWYU pragma: no_include "cxxabi.h"
-#include <deque>
-#include <mutex>
-#include <string>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/transport/service_executor_utils.h"
@@ -45,6 +39,11 @@
 #include "mongo/util/decorable.h"
 #include "mongo/util/functional.h"
 #include "mongo/util/out_of_line_executor.h"
+
+#include <deque>
+#include <mutex>
+#include <string>
+#include <utility>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kExecutor
 
@@ -124,9 +123,8 @@ public:
 };
 
 void ServiceExecutorSyncImpl::SharedState::schedule(Task task, StringData name) {
-    using namespace fmt::literals;
     if (!isRunning()) {
-        task(Status(ErrorCodes::ShutdownInProgress, "{} is not running"_format(name)));
+        task(Status(ErrorCodes::ShutdownInProgress, fmt::format("{} is not running", name)));
         return;
     }
 
@@ -214,7 +212,7 @@ auto ServiceExecutorSyncImpl::makeTaskRunner() -> std::unique_ptr<TaskRunner> {
             _e->_sharedState->schedule(std::move(task), _e->getName());
         }
 
-        void runOnDataAvailable(std::shared_ptr<Session> session, Task task) override {
+        void runTaskForSession(std::shared_ptr<Session> session, Task task) override {
             invariant(session);
             _e->_sharedState->schedule(std::move(task), _e->getName());
         }

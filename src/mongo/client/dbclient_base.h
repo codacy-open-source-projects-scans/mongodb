@@ -29,18 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstdint>
-#include <functional>
-#include <list>
-#include <memory>
-#include <string>
-#include <tuple>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -58,7 +46,6 @@
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/database_name.h"
 #include "mongo/db/dbmessage.h"
-#include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/find_command.h"
 #include "mongo/db/repl/read_concern_gen.h"
@@ -74,6 +61,19 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/ssl_types.h"
 #include "mongo/util/str.h"
+
+#include <cstdint>
+#include <functional>
+#include <list>
+#include <memory>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -122,6 +122,8 @@ public:
     virtual std::string toString() const = 0;
 
     virtual std::string getServerAddress() const = 0;
+
+    virtual std::string getLocalAddress() const = 0;
 
     /**
      * Reconnect if needed and allowed.
@@ -265,6 +267,14 @@ public:
      */
     bool runCommand(const DatabaseName& dbName, BSONObj cmd, BSONObj& info, int options = 0);
 
+    /**
+     * Runs a database command that return a cursor to documents (e.g. find, listCollections, ...)
+     * and exhausts the cursor, pulling all returned documents into memory.
+     */
+    StatusWith<std::list<BSONObj>> runExhaustiveCursorCommand(const DatabaseName& dbName,
+                                                              const BSONObj& cmd,
+                                                              int options = 0);
+
     /*
      * Wraps up the runCommand function avove, but returns the DBClient that actually ran the
      * command. When called against a replica set, this will return the specific replica set member
@@ -379,7 +389,8 @@ public:
      * }
      */
     std::list<BSONObj> getCollectionInfos(const DatabaseName& dbName,
-                                          const BSONObj& filter = BSONObj());
+                                          const BSONObj& filter = BSONObj(),
+                                          bool secondaryOk = true);
 
     /**
      * Drops an entire database.
@@ -529,6 +540,9 @@ public:
         return find(std::move(findRequest), readPref, ExhaustMode::kOff);
     }
 
+    bool isAuthenticated() const {
+        return _isClientAuthenticated.load();
+    }
     /**
      * Issues a find command described by 'findRequest' and the given read preference. Rather than
      * returning a cursor to the caller, iterates the cursor under the hood and calls the provided
@@ -585,12 +599,13 @@ public:
      * Counts number of objects in collection ns that match the query criteria specified.
      * Throws UserAssertion if database returns an error.
      */
-    virtual long long count(NamespaceStringOrUUID nsOrUuid,
-                            const BSONObj& query = BSONObj(),
-                            int options = 0,
-                            int limit = 0,
-                            int skip = 0,
-                            boost::optional<repl::ReadConcernArgs> readConcern = boost::none);
+    virtual long long count(
+        const NamespaceStringOrUUID& nsOrUuid,
+        const BSONObj& query = BSONObj(),
+        int options = 0,
+        int limit = 0,
+        int skip = 0,
+        const boost::optional<repl::ReadConcernArgs>& readConcern = boost::none);
 
     /**
      * Executes an acknowledged command to insert a vector of documents.
@@ -659,7 +674,7 @@ public:
 
 #ifdef MONGO_CONFIG_SSL
     /**
-     * Gets the SSL configuration of this client.
+     * Gets the SSL configuration of this client, if any.
      */
     virtual const SSLConfiguration* getSSLConfiguration() = 0;
 
@@ -709,12 +724,12 @@ protected:
      */
     bool isNotPrimaryErrorString(const BSONElement& e);
 
-    BSONObj _countCmd(NamespaceStringOrUUID nsOrUuid,
+    BSONObj _countCmd(const NamespaceStringOrUUID& nsOrUuid,
                       const BSONObj& query,
                       int options,
                       int limit,
                       int skip,
-                      boost::optional<repl::ReadConcernArgs> readConcern);
+                      const boost::optional<repl::ReadConcernArgs>& readConcern);
 
     virtual void _auth(const BSONObj& params);
 
@@ -736,13 +751,6 @@ protected:
 private:
     virtual Message _call(Message& toSend, std::string* actualServer) = 0;
 
-    /**
-     * Implementation for getIndexes() and getReadyIndexes().
-     */
-    std::list<BSONObj> _getIndexSpecs(const NamespaceStringOrUUID& nsOrUuid,
-                                      const BSONObj& cmd,
-                                      int options);
-
     auth::RunCommandHook _makeAuthRunCommandHook();
 
     rpc::RequestMetadataWriter _metadataWriter;
@@ -752,6 +760,8 @@ private:
     Timestamp _lastOperationTime;
 
     ClientAPIVersionParameters _apiParameters;
+
+    AtomicWord<bool> _isClientAuthenticated = {false};
 };  // DBClientBase
 
 BSONElement getErrField(const BSONObj& result);

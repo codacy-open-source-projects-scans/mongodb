@@ -2,14 +2,4 @@ version: 1.0.0
 filters:
   - "*":
     approvers:
-      - 10gen/query-integration-javascript
-  - "OWNERS.yml":
-    approvers:
-      - 10gen/server-programmability
-      - 10gen/query-integration-javascript
-  - "dbdirectclient_factory.*":
-    approvers:
-      - 10gen/server-programmability
-  - "deadline_monitor*": # note this wants to match _test.cpp and .idl files too
-    approvers:
-      - 10gen/server-programmability
+      - 10gen/query-integration-features

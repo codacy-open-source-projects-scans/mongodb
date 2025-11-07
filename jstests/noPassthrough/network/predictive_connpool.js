@@ -12,41 +12,48 @@ import {Thread} from "jstests/libs/parallelTester.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
 const st = new ShardingTest({mongos: 1, shards: 1, rs: {nodes: 2, protocolVersion: 1}});
-const kDbName = 'test';
+const kDbName = "test";
 const mongosClient = st.s;
 const mongos = mongosClient.getDB(kDbName);
 const rst = st.rs0;
 const primary = rst.getPrimary();
 const secondary = rst.getSecondaries()[0];
 
-const cfg = primary.getDB('local').system.replset.findOne();
-const allHosts = cfg.members.map(x => x.host);
+const cfg = primary.getDB("local").system.replset.findOne();
+const allHosts = cfg.members.map((x) => x.host);
 const primaryOnly = [primary.name];
 const secondaryOnly = [secondary.name];
 
-var threads = [];
+let threads = [];
 
 function launchFinds({times, readPref, shouldFail}) {
     jsTestLog("Starting " + times + " connections");
-    for (var i = 0; i < times; i++) {
-        var thread = new Thread(function(connStr, readPref, dbName, shouldFail) {
-            var client = new Mongo(connStr);
-            const ret = client.getDB(dbName).runCommand(
-                {find: "test", limit: 1, "$readPreference": {mode: readPref}});
+    for (let i = 0; i < times; i++) {
+        let thread = new Thread(
+            function (connStr, readPref, dbName, shouldFail) {
+                let client = new Mongo(connStr);
+                const ret = client
+                    .getDB(dbName)
+                    .runCommand({find: "test", limit: 1, "$readPreference": {mode: readPref}});
 
-            if (shouldFail) {
-                assert.commandFailed(ret);
-            } else {
-                assert.commandWorked(ret);
-            }
-        }, st.s.host, readPref, kDbName, shouldFail);
+                if (shouldFail) {
+                    assert.commandFailed(ret);
+                } else {
+                    assert.commandWorked(ret);
+                }
+            },
+            st.s.host,
+            readPref,
+            kDbName,
+            shouldFail,
+        );
         thread.start();
         threads.push(thread);
     }
 }
 
 function updateSetParameters(params) {
-    var cmd = Object.assign({"setParameter": 1}, params);
+    let cmd = Object.assign({"setParameter": 1}, params);
     assert.commandWorked(mongos.adminCommand(cmd));
 }
 
@@ -54,85 +61,93 @@ function dropConnections() {
     assert.commandWorked(mongos.adminCommand({dropConnections: 1, hostAndPort: allHosts}));
 }
 
-var currentCheckNum = 0;
-function hasConnPoolStats(args) {
-    const checkNum = currentCheckNum++;
-    jsTestLog("Check #" + checkNum + ": " + tojson(args));
-    var {ready, pending, active, hosts, isAbsent} = args;
-
-    ready = ready ? ready : 0;
-    pending = pending ? pending : 0;
-    active = active ? active : 0;
-    hosts = hosts ? hosts : allHosts;
-
-    function checkStats(res, host) {
-        var stats = res.hosts[host];
+function assertSoonMongosHasConnPoolStats({hosts, ready = 0, pending = 0, active = 0}) {
+    function checkStatsForHost({connPoolStatsResponse, host, mismatches}) {
+        const stats = connPoolStatsResponse.hosts[host];
         if (!stats) {
-            jsTestLog("Connection stats for " + host + " are absent");
-            return isAbsent;
+            mismatches[host] = "Connection stats are absent";
+            return;
         }
 
-        jsTestLog("Connection stats for " + host + ": " + tojson(stats));
+        const myMismatches = {};
         if (stats.available != ready) {
-            jsTestLog("Different stats for the \"available\" field. Actual: " + stats.available +
-                      ", Expected: " + ready);
+            myMismatches.available = {actual: stats.available, expected: ready};
         }
         if (stats.refreshing != pending) {
-            jsTestLog("Different stats for the \"refreshing\" field. Actual: " + stats.refreshing +
-                      ", Expected: " + pending);
+            myMismatches.refreshing = {actual: stats.refreshing, expected: pending};
         }
         if (stats.inUse != active) {
-            jsTestLog("Different stats for the \"inUse\" field. Actual: " + stats.inUse +
-                      ", Expected: " + active);
+            myMismatches.inUse = {actual: stats.inUse, expected: active};
         }
-        return stats.available == ready && stats.refreshing == pending && stats.inUse == active;
+
+        if (Object.keys(myMismatches).length !== 0) {
+            mismatches[host] = myMismatches;
+        }
     }
 
-    function checkAllStats() {
-        var res = mongos.adminCommand({connPoolStats: 1});
-        return hosts.map(host => checkStats(res, host)).every(x => x);
+    let mismatches;
+    let connPoolStatsResponse;
+
+    function checkStatsAndThreads() {
+        // If any of the "find" threads failed, then let that failure bubble up as an exception.
+        threads.forEach((thread) => {
+            const status = thread.currentStatus();
+            assert.eq(status.code, 0, "error occurred in 'find' thread: " + tojson(status));
+        });
+
+        // Return whether the connection pool stats for each of the `hosts` is as expected.
+        // mismatches :: {[host]: {[field]: {actual, expected}, ...}, ...}
+        // mismatches :: {[host]: "Connection stats are absent", ...}
+        mismatches = {};
+        connPoolStatsResponse = mongos.adminCommand({connPoolStats: 1});
+        hosts.forEach((host) => checkStatsForHost({connPoolStatsResponse, host, mismatches}));
+        return Object.keys(mismatches).length === 0;
     }
 
-    assert.soon(checkAllStats, "Check #" + checkNum + " failed");
+    function makeErrorMessage() {
+        const briefResponse = Object.fromEntries(
+            Object.entries(connPoolStatsResponse.hosts).map(([host, stats]) => {
+                delete stats.acquisitionWaitTimes;
+                return [host, stats];
+            }),
+        );
+        return `connPoolStats response had mismatches:
+${tojson(mismatches)}
 
-    jsTestLog("Check #" + checkNum + " successful");
-}
+Here is the most recent connPoolStats.hosts (with acquisitionWaitTimes omitted for brevity):
+${tojson(briefResponse)}`;
+    }
 
-function checkConnPoolStats() {
-    const ret = mongos.runCommand({"connPoolStats": 1});
-    const poolStats = ret["pools"]["NetworkInterfaceTL-TaskExecutorPool-0"];
-    jsTestLog(poolStats);
+    assert.soon(checkStatsAndThreads, makeErrorMessage);
 }
 
 function walkThroughBehavior({primaryFollows, secondaryFollows}) {
     // Start pooling with a ping
     mongos.adminCommand({multicast: {ping: 0}});
-    checkConnPoolStats();
 
     // Block connections from finishing
-    const fpRs = configureFailPointForRS(st.rs0.nodes,
-                                         "waitInFindBeforeMakingBatch",
-                                         {shouldCheckForInterrupt: true, nss: kDbName + ".test"});
+    const fpRs = configureFailPointForRS(st.rs0.nodes, "waitInFindBeforeMakingBatch", {
+        shouldCheckForInterrupt: true,
+        nss: kDbName + ".test",
+    });
 
     // Launch a bunch of primary finds
     launchFinds({times: 10, readPref: "primary"});
 
     // Confirm we follow
-    hasConnPoolStats({active: 10, hosts: primaryOnly});
+    assertSoonMongosHasConnPoolStats({active: 10, hosts: primaryOnly});
     if (secondaryFollows) {
-        hasConnPoolStats({ready: 10, hosts: secondaryOnly});
+        assertSoonMongosHasConnPoolStats({ready: 10, hosts: secondaryOnly});
     }
-    checkConnPoolStats();
 
     // Launch a bunch of secondary finds
     launchFinds({times: 20, readPref: "secondary"});
 
     // Confirm we follow
-    hasConnPoolStats({active: 20, hosts: secondaryOnly});
+    assertSoonMongosHasConnPoolStats({active: 20, hosts: secondaryOnly});
     if (primaryFollows) {
-        hasConnPoolStats({ready: 10, active: 10, hosts: primaryOnly});
+        assertSoonMongosHasConnPoolStats({ready: 10, active: 10, hosts: primaryOnly});
     }
-    checkConnPoolStats();
 
     fpRs.off();
 
@@ -151,15 +166,11 @@ jsTestLog("Following primary node");
 updateSetParameters({ShardingTaskExecutorPoolReplicaSetMatching: "matchPrimaryNode"});
 walkThroughBehavior({primaryFollows: false, secondaryFollows: true});
 
-// jsTestLog("Following busiest node");
-// updateSetParameters({ShardingTaskExecutorPoolReplicaSetMatching: "matchBusiestNode"});
-// walkThroughBehavior({primaryFollows: true, secondaryFollows: true});
-
 jsTestLog("Reseting to disabled");
 updateSetParameters({ShardingTaskExecutorPoolReplicaSetMatching: "disabled"});
 walkThroughBehavior({primaryFollows: false, secondaryFollows: false});
 
-threads.forEach(function(thread) {
+threads.forEach(function (thread) {
     thread.join();
 });
 

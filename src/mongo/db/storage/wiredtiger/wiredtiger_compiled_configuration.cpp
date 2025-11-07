@@ -28,8 +28,9 @@
  */
 
 #include "mongo/db/storage/wiredtiger/wiredtiger_compiled_configuration.h"
+
 #include "mongo/db/storage/wiredtiger/wiredtiger_error_util.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_session.h"
 
 namespace mongo {
 

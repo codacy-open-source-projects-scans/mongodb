@@ -27,30 +27,32 @@
  *    it in the license file.
  */
 
-#include "query_planner_params.h"
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/query_planner_params.h"
 
 #include "mongo/db/exec/projection_executor_utils.h"
+#include "mongo/db/global_catalog/shard_key_pattern_query_util.h"
 #include "mongo/db/index/multikey_metadata_access_stats.h"
 #include "mongo/db/index/wildcard_access_method.h"
+#include "mongo/db/query/compiler/stats/collection_statistics_impl.h"
 #include "mongo/db/query/distinct_access.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
 #include "mongo/db/query/planner_ixselect.h"
 #include "mongo/db/query/query_settings/query_settings_gen.h"
-#include "mongo/db/query/query_settings/query_settings_manager.h"
 #include "mongo/db/query/query_settings_decoration.h"
 #include "mongo/db/query/query_utils.h"
-#include "mongo/db/query/stats/collection_statistics_impl.h"
 #include "mongo/db/query/wildcard_multikey_paths.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/timeseries/timeseries_index_schema_conversion_functions.h"
+#include "mongo/s/shard_targeting_helpers.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/processinfo.h"
+
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
+
+MONGO_FAIL_POINT_DEFINE(pauseAfterFillingOutIndexEntries);
 
 namespace {
 /**
@@ -140,7 +142,8 @@ IndexEntry indexEntryFromIndexCatalogEntry(OperationContext* opCtx,
             ice.getFilterExpression(),
             desc->infoObj(),
             ice.getCollator(),
-            wildcardProjection};
+            wildcardProjection,
+            ice.shared_from_this()};
 }
 
 void fillOutIndexEntries(OperationContext* opCtx,
@@ -150,8 +153,8 @@ void fillOutIndexEntries(OperationContext* opCtx,
     bool apiStrict = APIParameters::get(opCtx).getAPIStrict().value_or(false);
 
     std::vector<const IndexCatalogEntry*> indexCatalogEntries;
-    auto ii = collection->getIndexCatalog()->getIndexIterator(
-        opCtx, IndexCatalog::InclusionPolicy::kReady);
+    auto ii =
+        collection->getIndexCatalog()->getIndexIterator(IndexCatalog::InclusionPolicy::kReady);
     while (ii->more()) {
         const IndexCatalogEntry* ice = ii->next();
 
@@ -177,6 +180,7 @@ void fillOutIndexEntries(OperationContext* opCtx,
         entries.emplace_back(
             indexEntryFromIndexCatalogEntry(opCtx, collection, *ice, canonicalQuery));
     }
+    pauseAfterFillingOutIndexEntries.pauseWhileSet();
 }
 
 void fillOutPlannerCollectionInfo(OperationContext* opCtx,
@@ -338,18 +342,17 @@ void QueryPlannerParams::applyQuerySettingsForCollection(
     CollectionInfo& collectionInfo,
     const boost::optional<TimeseriesOptions>& timeseriesOptions = boost::none) {
     // Retrieving the allowed indexes for the given collection.
-    auto allowedIndexes = [&]() {
-        // We should only have the timeseries option present iff namespace is a bucket collection,
-        // as view resolution occurs before applying query settings. dassert is preferred, as this
-        // should not kill the operation when applying query settings in production.
-        dassert(timeseriesOptions.has_value() == nss.isTimeseriesBucketsCollection());
-        const bool isTimeseriesBucketsCollection =
-            nss.isTimeseriesBucketsCollection() && timeseriesOptions.has_value();
+    const auto& allowedIndexes = [&]() {
+        const bool isTimeseriesColl = timeseriesOptions.has_value();
 
-        // For time series collections, we need to compare time series view namespace instead of the
-        // internal one, as query settings should be specified with the view name.
-        const auto& namespaceToCompare =
-            isTimeseriesBucketsCollection ? nss.getTimeseriesViewNamespace() : nss;
+        // For legacy time series collections (view + buckets), we need to compare time series view
+        // namespace instead of the internal one, as query settings should be specified with the
+        // view name.
+        // TODO SERVER-103011 always use `nss` once 9.0 becomes last LTS. By then only viewless
+        // timeseries will exist.
+        const auto& namespaceToCompare = isTimeseriesColl && nss.isTimeseriesBucketsCollection()
+            ? nss.getTimeseriesViewNamespace()
+            : nss;
         auto isHintForCollection = [&](const auto& hint) {
             auto hintNs =
                 NamespaceStringUtil::deserialize(*hint.getNs().getDb(), *hint.getNs().getColl());
@@ -360,7 +363,7 @@ void QueryPlannerParams::applyQuerySettingsForCollection(
             return std::vector<mongo::IndexHint>();
         }
 
-        if (isTimeseriesBucketsCollection) {
+        if (isTimeseriesColl) {
             // Time series KeyPatternIndexes hints need to be converted to match the bucket specs.
             return transformTimeseriesHints(hintIt->getAllowedIndexes(), *timeseriesOptions);
         }
@@ -456,6 +459,13 @@ void QueryPlannerParams::fillOutSecondaryCollectionsPlannerParams(
             fillOutIndexEntries(opCtx, canonicalQuery, secondaryColl, secondaryInfo.indexes);
             fillOutPlannerCollectionInfo(
                 opCtx, secondaryColl, &secondaryInfo.stats, true /* include size stats */);
+            if (storageGlobalParams.noTableScan.load()) {
+                // There are certain cases where we ignore this restriction.
+                bool ignore = nss.isSystem() || nss.isOnInternalDb();
+                if (!ignore) {
+                    secondaryInfo.options |= QueryPlannerParams::NO_TABLE_SCAN;
+                }
+            }
         } else {
             secondaryInfo.exists = false;
         }
@@ -493,7 +503,8 @@ void QueryPlannerParams::fillOutSecondaryCollectionsPlannerParams(
 void QueryPlannerParams::fillOutMainCollectionPlannerParams(
     OperationContext* opCtx,
     const CanonicalQuery& canonicalQuery,
-    const MultipleCollectionAccessor& collections) {
+    const MultipleCollectionAccessor& collections,
+    QueryPlanRankerModeEnum planRankerMode) {
     const auto& mainColl = collections.getMainCollection();
     // We will not output collection scans unless there are no indexed solutions. NO_TABLE_SCAN
     // overrides this behavior by not outputting a collscan even if there are no indexed
@@ -525,6 +536,15 @@ void QueryPlannerParams::fillOutMainCollectionPlannerParams(
         mainCollectionInfo.options |= QueryPlannerParams::OPLOG_SCAN_WAIT_FOR_VISIBLE;
     }
 
+    // Populate collection statistics for CBR. In the case of clustered collections, a query may
+    // appear to be ID-hack eligible as per 'isIdHackEligibleQuery()', but 'buildIdHackPlan()' fails
+    // as there is no _id index. In these cases, we will end up invoking the query planner and CBR,
+    // so we need this catalog information.
+    if (planRankerMode != QueryPlanRankerModeEnum::kMultiPlanning) {
+        mainCollectionInfo.collStats = std::make_unique<stats::CollectionStatisticsImpl>(
+            static_cast<double>(mainColl->getRecordStore()->numRecords()), canonicalQuery.nss());
+    }
+
     // _id queries can skip checking the catalog for indices since they will always use the _id
     // index.
     if (isIdHackEligibleQuery(mainColl, canonicalQuery)) {
@@ -537,12 +557,6 @@ void QueryPlannerParams::fillOutMainCollectionPlannerParams(
 
     fillOutPlannerCollectionInfo(
         opCtx, mainColl, &mainCollectionInfo.stats, false /* includeSizeStats */);
-
-    if (canonicalQuery.getExpCtx()->getQueryKnobConfiguration().getPlanRankerMode() !=
-        QueryPlanRankerModeEnum::kMultiPlanning) {
-        mainCollectionInfo.collStats = std::make_unique<stats::CollectionStatisticsImpl>(
-            static_cast<double>(mainColl->getRecordStore()->numRecords()), canonicalQuery.nss());
-    }
 }
 
 void QueryPlannerParams::setTargetSbeStageBuilder(OperationContext* opCtx,
@@ -560,6 +574,17 @@ void QueryPlannerParams::setTargetSbeStageBuilder(OperationContext* opCtx,
 }
 
 namespace {
+
+projection_executor::ProjectionExecutor* getWildcardProjectionExecutor(
+    const IndexDescriptor& desc, const IndexCatalogEntry& ice) {
+    if (desc.getIndexType() != IndexType::INDEX_WILDCARD) {
+        return nullptr;
+    }
+    return static_cast<const WildcardAccessMethod*>(ice.accessMethod())
+        ->getWildcardProjection()
+        ->exec();
+}
+
 std::vector<IndexEntry> getIndexEntriesForDistinct(
     const QueryPlannerParams::ArgsForDistinct& distinctArgs) {
     std::vector<IndexEntry> indices;
@@ -569,14 +594,11 @@ std::vector<IndexEntry> getIndexEntriesForDistinct(
     const auto& query = canonicalQuery.getFindCommandRequest().getFilter();
     const auto& key = canonicalQuery.getDistinct()->getKey();
     const auto& collectionPtr = distinctArgs.collections.getMainCollection();
+    const bool strictDistinctOnly =
+        distinctArgs.plannerOptions & QueryPlannerParams::STRICT_DISTINCT_ONLY;
 
-    // If the caller did not request a "strict" distinct scan then we may choose a plan which
-    // unwinds arrays and treats each element in an array as its own key.
-    const bool mayUnwindArrays =
-        !(distinctArgs.plannerOptions & QueryPlannerParams::STRICT_DISTINCT_ONLY);
-
-    auto ii = collectionPtr->getIndexCatalog()->getIndexIterator(
-        opCtx, IndexCatalog::InclusionPolicy::kReady);
+    auto ii =
+        collectionPtr->getIndexCatalog()->getIndexIterator(IndexCatalog::InclusionPolicy::kReady);
     while (ii->more()) {
         const IndexCatalogEntry* ice = ii->next();
         const IndexDescriptor* desc = ice->descriptor();
@@ -586,52 +608,17 @@ std::vector<IndexEntry> getIndexEntriesForDistinct(
             continue;
         }
 
-        if (desc->keyPattern().hasField(key)) {
-            // This handles regular fields of Compound Wildcard Indexes as well.
-            if (distinctArgs.flipDistinctScanDirection && ice->isMultikey(opCtx, collectionPtr)) {
-                // This CanonicalDistinct was generated as a result of transforming a $group with
-                // $last accumulators using the GroupFromFirstTransformation. We cannot use a
-                // DISTINCT_SCAN if $last is being applied to an indexed field which is multikey,
-                // even if the 'canonicalDistinct' key does not include multikey paths. This is
-                // because changing the sort direction also changes the comparison semantics for
-                // arrays, which means that flipping the scan may not exactly flip the order that we
-                // see documents in. In the case of using DISTINCT_SCAN for $group, that would mean
-                // that $first of the flipped scan may not be the same document as $last from the
-                // user's requested sort order.
-                continue;
-            }
-
-            if (!mayUnwindArrays &&
-                isAnyComponentOfPathMultikey(desc->keyPattern(),
-                                             ice->isMultikey(opCtx, collectionPtr),
-                                             ice->getMultikeyPaths(opCtx, collectionPtr),
-                                             key)) {
-                // If the caller requested "strict" distinct that does not "pre-unwind" arrays,
-                // then an index which is multikey on the distinct field may not be used. This is
-                // because when indexing an array each element gets inserted individually. Any plan
-                // which involves scanning the index will have effectively "unwound" all arrays.
-                continue;
-            }
-
+        if (isIndexSuitableForDistinct(desc->keyPattern(),
+                                       ice->isMultikey(opCtx, collectionPtr),
+                                       ice->getMultikeyPaths(opCtx, collectionPtr),
+                                       desc->isSparse(),
+                                       getWildcardProjectionExecutor(*desc, *ice),
+                                       key,
+                                       query,
+                                       distinctArgs.flipDistinctScanDirection,
+                                       strictDistinctOnly)) {
             indices.push_back(
                 indexEntryFromIndexCatalogEntry(opCtx, collectionPtr, *ice, canonicalQuery));
-        } else if (desc->getIndexType() == IndexType::INDEX_WILDCARD && !query.isEmpty()) {
-            // Check whether the $** projection captures the field over which we are distinct-ing.
-            auto* proj = static_cast<const WildcardAccessMethod*>(ice->accessMethod())
-                             ->getWildcardProjection()
-                             ->exec();
-            if (projection_executor_utils::applyProjectionToOneField(proj, key)) {
-                indices.push_back(
-                    indexEntryFromIndexCatalogEntry(opCtx, collectionPtr, *ice, canonicalQuery));
-            }
-
-            // It is not necessary to do any checks about 'mayUnwindArrays' in this case, because:
-            // 1) If there is no predicate on the distinct(), a wildcard indices may not be used.
-            // 2) distinct() _with_ a predicate may not be answered with a DISTINCT_SCAN on _any_
-            // multikey index.
-
-            // So, we will not distinct scan a wildcard index that's multikey on the distinct()
-            // field, regardless of the value of 'mayUnwindArrays'.
         }
     }
 
@@ -690,8 +677,45 @@ bool shouldWaitForOplogVisibility(OperationContext* opCtx,
     // visibility timestamp to be updated, it would wait for a replication batch that would never
     // complete because it couldn't reacquire its own lock, the global lock held by the waiting
     // reader.
-    return repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesForDatabase(
-        opCtx, DatabaseName::kAdmin);
+    auto* replCoord = repl::ReplicationCoordinator::get(opCtx);
+    return replCoord->canAcceptWritesForDatabase(opCtx, DatabaseName::kAdmin) &&
+        replCoord->getSettings().isReplSet();
 }
 
+bool QueryPlannerParams::requiresShardFiltering(const CanonicalQuery& canonicalQuery,
+                                                const CollectionPtr& collection) {
+    if (!(mainCollectionInfo.options & INCLUDE_SHARD_FILTER)) {
+        // Shard filter was not requested; cmd may not be from a router.
+        return false;
+    }
+    // If the caller wants a shard filter, make sure we're actually sharded.
+    if (!collection.isSharded_DEPRECATED()) {
+        // Not actually sharded.
+        return false;
+    }
+
+    // Check whether the query is running over multiple shards and will require merging.
+    const auto expCtx = canonicalQuery.getExpCtx();
+    if (expCtx->needsUnsortedMerge() || expCtx->needsSortedMerge()) {
+        return true;
+    }
+
+    const auto& shardKeyPattern = collection.getShardKeyPattern();
+    // Shards cannot own orphans for the key ranges they own, so there is no need
+    // to include a shard filtering stage. By omitting the shard filter, it may be
+    // possible to get a more efficient plan (for example, a COUNT_SCAN may be used if
+    // the query is eligible).
+    const BSONObj extractedKey = extractShardKeyFromQuery(shardKeyPattern, canonicalQuery);
+
+    if (extractedKey.isEmpty()) {
+        // Couldn't extract all the fields of the shard key from the query,
+        // no way to target a single shard.
+        return true;
+    }
+
+    return !isSingleShardTargetable(
+        extractedKey,
+        shardKeyPattern,
+        CollatorInterface::isSimpleCollator(canonicalQuery.getCollator()));
+}
 }  // namespace mongo

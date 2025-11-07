@@ -29,10 +29,7 @@
 
 
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <iostream>
-#include <memory>
-#include <string>
-#include <vector>
+#include "mongo/s/mongos_options.h"
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -40,18 +37,17 @@
 #include "mongo/config.h"  // IWYU pragma: keep
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_options_server_helpers.h"
+#include "mongo/db/sharding_environment/version_mongos.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_component_settings.h"
-#include "mongo/logv2/log_manager.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/s/mongos_options.h"
-#include "mongo/s/version_mongos.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/options_parser/startup_options.h"
 #include "mongo/util/str.h"
+
+#include <iostream>
+#include <memory>
+#include <string>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 

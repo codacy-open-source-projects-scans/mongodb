@@ -29,8 +29,30 @@
 
 #pragma once
 
-#include <absl/container/inlined_vector.h>
-#include <boost/optional/optional.hpp>
+#include "mongo/base/string_data.h"
+#include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/db/admission/execution_admission_context.h"
+#include "mongo/db/exec/plan_stats.h"
+#include "mongo/db/exec/sbe/expressions/expression.h"
+#include "mongo/db/exec/sbe/stages/collection_helpers.h"
+#include "mongo/db/exec/sbe/stages/plan_stats.h"
+#include "mongo/db/exec/sbe/stages/stages.h"
+#include "mongo/db/exec/sbe/util/debug_print.h"
+#include "mongo/db/exec/sbe/values/slot.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
+#include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/record_id.h"
+#include "mongo/db/storage/record_store.h"
+#include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/string_listset.h"
+#include "mongo/util/string_map.h"
+#include "mongo/util/uuid.h"
+
 #include <cstddef>
 #include <limits>
 #include <memory>
@@ -38,32 +60,8 @@
 #include <utility>
 #include <vector>
 
-#include "mongo/base/string_data.h"
-#include "mongo/config.h"  // IWYU pragma: keep
-#include "mongo/db/admission/execution_admission_context.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/exec/field_name_bloom_filter.h"
-#include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/exec/sbe/expressions/expression.h"
-#include "mongo/db/exec/sbe/expressions/runtime_environment.h"
-#include "mongo/db/exec/sbe/stages/collection_helpers.h"
-#include "mongo/db/exec/sbe/stages/plan_stats.h"
-#include "mongo/db/exec/sbe/stages/stages.h"
-#include "mongo/db/exec/sbe/util/debug_print.h"
-#include "mongo/db/exec/sbe/values/bson.h"
-#include "mongo/db/exec/sbe/values/slot.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/query/plan_yield_policy.h"
-#include "mongo/db/query/stage_types.h"
-#include "mongo/db/record_id.h"
-#include "mongo/db/storage/record_store.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/platform/atomic_word.h"
-#include "mongo/stdx/mutex.h"
-#include "mongo/util/string_listset.h"
-#include "mongo/util/string_map.h"
-#include "mongo/util/uuid.h"
+#include <absl/container/inlined_vector.h>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace sbe {
@@ -95,7 +93,6 @@ public:
                    boost::optional<value::SlotId> inIndexIdentSlot,
                    boost::optional<value::SlotId> inIndexKeySlot,
                    boost::optional<value::SlotId> inIndexKeyPatternSlot,
-                   boost::optional<value::SlotId> inOplogTsSlot,
                    std::vector<std::string> inScanFieldNames,
                    value::SlotVector inScanFieldSlots,
                    boost::optional<value::SlotId> inSeekRecordIdSlot,
@@ -112,7 +109,6 @@ public:
           indexIdentSlot(inIndexIdentSlot),
           indexKeySlot(inIndexKeySlot),
           indexKeyPatternSlot(inIndexKeyPatternSlot),
-          oplogTsSlot(inOplogTsSlot),
           scanFieldNames(inScanFieldNames),
           scanFieldSlots(inScanFieldSlots),
           seekRecordIdSlot(inSeekRecordIdSlot),
@@ -121,7 +117,9 @@ public:
           forward(inForward),
           scanCallbacks(inScanCallbacks),
           useRandomCursor(inUseRandomCursor) {
-        invariant(scanFieldNames.size() == scanFieldSlots.size());
+        tassert(11094712,
+                "Expecting number of scan fields to match the number of scan slots",
+                scanFieldNames.size() == scanFieldSlots.size());
     }
 
     inline size_t getNumScanFields() {
@@ -137,7 +135,6 @@ public:
     const boost::optional<value::SlotId> indexIdentSlot;
     const boost::optional<value::SlotId> indexKeySlot;
     const boost::optional<value::SlotId> indexKeyPatternSlot;
-    const boost::optional<value::SlotId> oplogTsSlot;
 
     // 'scanFieldNames' - names of the fields being scanned from the doc
     // 'scanFieldSlots' - slot IDs for the fields being scanned from the doc
@@ -160,10 +157,6 @@ public:
 /**
  * Retrieves documents from the collection with the given 'collUuid' using the storage API.
  *
- * Iff resuming a prior scan, this stage is given a 'seekRecordIdSlot' from which to read a
- * 'RecordId'. We seek to this 'RecordId' before resuming the scan. 'stageType' is set to "seek"
- * instead of "scan" for this case only.
- *
  * If the 'recordSlot' is provided, then each of the records returned from the scan is placed into
  * an output slot with this slot id. Similarly, if 'recordIdSlot' is provided, then this slot is
  * populated with the record id on each advance.
@@ -184,19 +177,15 @@ public:
  * storage snapshot from which it was obtained. This information is made available to the seek stage
  * via 'snapshotIdSlot', 'indexIdentSlot', 'indexKeySlot', and 'indexKeyPatternSlot'.
  *
- * For oplog scans, 'oplogTsSlot' will be populated with a copy of the "ts" field (which is the
- * oplog clustering key) from the doc if it is a clustered scan (for use by the EOF filter above the
- * scan) or the caller asked for the latest oplog "ts" value.
- *
  * Debug string representations:
  *
  *  scan recordSlot? recordIdSlot? snapshotIdSlot? indexIdentSlot? indexKeySlot?
  *       indexKeyPatternSlot? minRecordIdSlot? maxRecordIdSlot? [slot1 = fieldName1, ...
- *       slot_n = fieldName_n] collUuid forward needOplogSlotForTs
+ *       slot_n = fieldName_n] collUuid forward
  *
  *  seek seekKeySlot recordSlot? recordIdSlot? snapshotIdSlot? indexIdentSlot? indexKeySlot?
  *       indexKeyPatternSlot? minRecordIdSlot? maxRecordIdSlot? [slot1 = fieldName1, ...
- *       slot_n = fieldName_n] collUuid forward needOplogSlotForTs
+ *       slot_n = fieldName_n] collUuid forward
  */
 class ScanStage final : public PlanStage {
 public:
@@ -211,7 +200,6 @@ public:
               boost::optional<value::SlotId> indexIdentSlot,
               boost::optional<value::SlotId> indexKeySlot,
               boost::optional<value::SlotId> indexKeyPatternSlot,
-              boost::optional<value::SlotId> oplogTsSlot,
               std::vector<std::string> scanFieldNames,
               value::SlotVector scanFieldSlots,
               boost::optional<value::SlotId> seekRecordIdSlot,
@@ -226,6 +214,7 @@ public:
               bool participateInTrialRunTracking = true,
               bool includeScanStartRecordId = true,
               bool includeScanEndRecordId = true);
+
 
     /**
      * Constructor for clone(). Copies '_state' shared_ptr.
@@ -251,10 +240,11 @@ public:
     size_t estimateCompileTimeSize() const final;
 
 protected:
-    void doSaveState(bool relinquishCursor) override;
-    void doRestoreState(bool relinquishCursor) override;
+    void doSaveState() override;
+    void doRestoreState() override;
     void doDetachFromOperationContext() override;
     void doAttachToOperationContext(OperationContext* opCtx) override;
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override;
 
 private:
     // Returns the primary cursor or the random cursor depending on whether _useRandomCursor is set.
@@ -300,15 +290,6 @@ private:
     value::SlotAccessor* _indexKeyAccessor{nullptr};
     value::SlotAccessor* _indexKeyPatternAccessor{nullptr};
 
-    // For oplog scans only, holds a copy of the "ts" field of the record (which is the oplog
-    // clustering key) for use by the end-bound EOF filter above the scan, if applicable.
-    RuntimeEnvironment::Accessor* _oplogTsAccessor{nullptr};
-
-    // For oplog scans only, holds a cached pointer to the accessor for the "ts" field in the
-    // current document to get this accessor quickly rather than having to look it up in the
-    // '_scanFieldAccessors' hashtable each time.
-    value::SlotAccessor* _tsFieldAccessor{nullptr};
-
     // These members hold info about the target fields being scanned from the record.
     //     '_scanFieldAccessors' - slot accessors corresponding, by index, to _state->scanFieldNames
     //     '_scanFieldAccessorsMap' - a map from vector index to pointer to the corresponding
@@ -353,10 +334,6 @@ private:
     bool _firstGetNext{false};
 
     ScanStats _specificStats;
-
-    // Flag set upon restoring the stage that indicates whether the cursor's position in the
-    // collection is still valid. Only relevant to capped collections.
-    bool _needsToCheckCappedPositionLost = false;
 
     StringMap<const IndexCatalogEntry*> _indexCatalogEntryMap;
 
@@ -414,6 +391,7 @@ public:
 
     std::unique_ptr<PlanStage> clone() const final;
 
+
     void prepare(CompileCtx& ctx) final;
     value::SlotAccessor* getAccessor(CompileCtx& ctx, value::SlotId slot) final;
     void open(bool reOpen) final;
@@ -426,10 +404,11 @@ public:
     size_t estimateCompileTimeSize() const final;
 
 protected:
-    void doSaveState(bool fullSave) final;
-    void doRestoreState(bool fullSave) final;
+    void doSaveState() final;
+    void doRestoreState() final;
     void doDetachFromOperationContext() final;
     void doAttachToOperationContext(OperationContext* opCtx) final;
+    void doAttachCollectionAcquisition(const MultipleCollectionAccessor& mca) override;
 
 private:
     boost::optional<Record> nextRange();

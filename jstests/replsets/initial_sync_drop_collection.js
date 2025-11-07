@@ -9,23 +9,27 @@ import {extractUUIDFromObject, getUUIDFromListCollections} from "jstests/libs/uu
 // Set up replica set. Disallow chaining so nodes always sync from primary.
 const testName = "initial_sync_drop_collection";
 const dbName = testName;
-var replTest = new ReplSetTest(
-    {name: testName, nodes: [{}, {rsConfig: {priority: 0}}], settings: {chainingAllowed: false}});
+let replTest = new ReplSetTest({
+    name: testName,
+    nodes: [{}, {rsConfig: {priority: 0}}],
+    settings: {chainingAllowed: false},
+});
 replTest.startSet();
 replTest.initiate();
 
-var primary = replTest.getPrimary();
-var primaryDB = primary.getDB(dbName);
-var secondary = replTest.getSecondary();
-var secondaryDB = secondary.getDB(dbName);
+let primary = replTest.getPrimary();
+let primaryDB = primary.getDB(dbName);
+let secondary = replTest.getSecondary();
+let secondaryDB = secondary.getDB(dbName);
 const collName = "testcoll";
-var primaryColl = primaryDB[collName];
-var secondaryColl = secondaryDB[collName];
-var nss = primaryColl.getFullName();
+let primaryColl = primaryDB[collName];
+let secondaryColl = secondaryDB[collName];
+let nss = primaryColl.getFullName();
 
 // The default WC is majority and this test can't satisfy majority writes.
-assert.commandWorked(primary.adminCommand(
-    {setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}, writeConcern: {w: "majority"}}));
+assert.commandWorked(
+    primary.adminCommand({setDefaultRWConcern: 1, defaultWriteConcern: {w: 1}, writeConcern: {w: "majority"}}),
+);
 
 // This function adds data to the collection, restarts the secondary node with the given
 // parameters and setting the given failpoint, waits for the failpoint to be hit,
@@ -39,24 +43,26 @@ function setupTest({failPoint, extraFailPointData, secondaryStartupParams}) {
 
     jsTestLog("Restarting secondary with failPoint " + failPoint + " set for " + nss);
     secondaryStartupParams = secondaryStartupParams || {};
-    secondaryStartupParams = Object.merge(
-        secondaryStartupParams, {logComponentVerbosity: tojson({replication: {verbosity: 2}})});
-    secondaryStartupParams['failpoint.' + failPoint] = tojson({mode: 'alwaysOn', data: data});
+    secondaryStartupParams = Object.merge(secondaryStartupParams, {
+        logComponentVerbosity: tojson({replication: {verbosity: 2}}),
+    });
+    secondaryStartupParams["failpoint." + failPoint] = tojson({mode: "alwaysOn", data: data});
     // Skip clearing initial sync progress after a successful initial sync attempt so that we
     // can check initialSyncStatus fields after initial sync is complete.
-    secondaryStartupParams['failpoint.skipClearInitialSyncState'] = tojson({mode: 'alwaysOn'});
-    secondaryStartupParams['numInitialSyncAttempts'] = 1;
-    secondary =
-        replTest.restart(secondary, {startClean: true, setParameter: secondaryStartupParams});
+    secondaryStartupParams["failpoint.skipClearInitialSyncState"] = tojson({mode: "alwaysOn"});
+    secondaryStartupParams["numInitialSyncAttempts"] = 1;
+    secondary = replTest.restart(secondary, {startClean: true, setParameter: secondaryStartupParams});
     secondaryDB = secondary.getDB(dbName);
     secondaryColl = secondaryDB[collName];
 
     jsTestLog("Waiting for secondary to reach failPoint " + failPoint);
-    assert.commandWorked(secondary.adminCommand({
-        waitForFailPoint: failPoint,
-        timesEntered: 1,
-        maxTimeMS: kDefaultWaitForFailPointTimeout
-    }));
+    assert.commandWorked(
+        secondary.adminCommand({
+            waitForFailPoint: failPoint,
+            timesEntered: 1,
+            maxTimeMS: kDefaultWaitForFailPointTimeout,
+        }),
+    );
 
     // Restarting the secondary may have resulted in an election.  Wait until the system
     // stabilizes and reaches RS_STARTUP2 state.
@@ -83,10 +89,10 @@ function finishTest({failPoint, expectedLog, createNew}) {
     }
 
     jsTestLog("Allowing secondary to continue.");
-    assert.commandWorked(secondary.adminCommand({configureFailPoint: failPoint, mode: 'off'}));
+    assert.commandWorked(secondary.adminCommand({configureFailPoint: failPoint, mode: "off"}));
 
     if (expectedLog) {
-        let expectedLogDict = eval('(' + expectedLog + ')');
+        let expectedLogDict = eval("(" + expectedLog + ")");
         jsTestLog(expectedLogDict);
         checkLog.containsJson(secondary, expectedLogDict.code, expectedLogDict.attr);
     }
@@ -117,7 +123,8 @@ function finishTest({failPoint, expectedLog, createNew}) {
         (actual, expected) => {
             assert.eq(actual, expected, "Wrong number of NamespaceNotFound log messages");
             return true;
-        });
+        },
+    );
     replTest.checkReplicatedDataHashes();
 }
 
@@ -129,25 +136,23 @@ function runDropTest(params) {
 jsTestLog("[1] Testing dropping between listIndexes and find.");
 runDropTest({
     failPoint: "hangBeforeClonerStage",
-    extraFailPointData: {cloner: "CollectionCloner", stage: "query"}
+    extraFailPointData: {cloner: "CollectionCloner", stage: "query"},
 });
 
-jsTestLog(
-    "[2] Testing dropping between listIndexes and find, with new same-name collection created.");
+jsTestLog("[2] Testing dropping between listIndexes and find, with new same-name collection created.");
 runDropTest({
     failPoint: "hangBeforeClonerStage",
     extraFailPointData: {cloner: "CollectionCloner", stage: "query"},
-    createNew: true
+    createNew: true,
 });
 
-let expectedLogFor3and4 =
-    '{code: 21132, attr: { namespace: nss, uuid: (x)=>(x.uuid.$uuid === uuid)}}';
+let expectedLogFor3and4 = "{code: 21132, attr: { namespace: nss, uuid: (x)=>(x.uuid.$uuid === uuid)}}";
 
 jsTestLog("[3] Testing drop-pending between getMore calls.");
 runDropTest({
     failPoint: "initialSyncHangCollectionClonerAfterHandlingBatchResponse",
     secondaryStartupParams: {collectionClonerBatchSize: 1},
-    expectedLog: expectedLogFor3and4
+    expectedLog: expectedLogFor3and4,
 });
 
 jsTestLog("[4] Testing drop-pending with new same-name collection created, between getMore calls.");
@@ -155,12 +160,12 @@ runDropTest({
     failPoint: "initialSyncHangCollectionClonerAfterHandlingBatchResponse",
     secondaryStartupParams: {collectionClonerBatchSize: 1},
     expectedLog: expectedLogFor3and4,
-    createNew: true
+    createNew: true,
 });
 
 // Add another node to the set, so when we drop the collection it can commit.  This other
 // secondary will be finished with initial sync when the drop happens.
-var secondary2 = replTest.add({rsConfig: {priority: 0}});
+let secondary2 = replTest.add({rsConfig: {priority: 0}});
 replTest.reInitiate();
 replTest.awaitSecondaryNodes(null, [secondary2]);
 
@@ -168,16 +173,15 @@ jsTestLog("[5] Testing committed drop between getMore calls.");
 runDropTest({
     failPoint: "initialSyncHangCollectionClonerAfterHandlingBatchResponse",
     secondaryStartupParams: {collectionClonerBatchSize: 1},
-    expectedLog: '{code: 21132, attr:{namespace: nss, uuid: (x)=>(x.uuid.$uuid === uuid)}}',
+    expectedLog: "{code: 21132, attr:{namespace: nss, uuid: (x)=>(x.uuid.$uuid === uuid)}}",
 });
 
-jsTestLog(
-    "[6] Testing committed drop with new same-name collection created, between getMore calls.");
+jsTestLog("[6] Testing committed drop with new same-name collection created, between getMore calls.");
 runDropTest({
     failPoint: "initialSyncHangCollectionClonerAfterHandlingBatchResponse",
     secondaryStartupParams: {collectionClonerBatchSize: 1},
-    expectedLog: '{code: 21132, attr:{namespace: nss, uuid: (x)=>(x.uuid.$uuid === uuid)}}',
-    createNew: true
+    expectedLog: "{code: 21132, attr:{namespace: nss, uuid: (x)=>(x.uuid.$uuid === uuid)}}",
+    createNew: true,
 });
 
 replTest.stopSet();

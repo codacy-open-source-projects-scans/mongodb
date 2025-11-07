@@ -29,40 +29,39 @@
 
 #include "mongo/db/exec/sbe/util/spilling.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/concurrency/exception_util.h"
+#include "mongo/db/curop.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/exception_util.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/recovery_unit.h"
+#include "mongo/db/storage/storage_parameters_gen.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/bufreader.h"
 #include "mongo/util/str.h"
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace sbe {
 
 namespace {
-/* We don't need to retry write conflicts in this class but when WiredTiger is low on cache
- * we do need to retry the StorageUnavailable exceptions.
- */
-template <typename F>
-static void storageUnavailableRetry(OperationContext* opCtx,
-                                    StringData opStr,
-                                    F&& f,
-                                    boost::optional<size_t> retryLimit = boost::none) {
-    // writeConflictRetry already implements a retryBackoff for storage unavailable.
-    writeConflictRetry(opCtx, opStr, NamespaceString::kEmpty, f, retryLimit);
+
+[[nodiscard]] Lock::GlobalLock acquireLock(OperationContext* opCtx) {
+    return Lock::GlobalLock(
+        opCtx,
+        LockMode::MODE_IS,
+        Date_t::max(),
+        Lock::InterruptBehavior::kThrow,
+        Lock::GlobalLockOptions{.skipFlowControlTicket = true, .skipRSTLLock = true});
 }
+
 }  // namespace
 
 void assertIgnorePrepareConflictsBehavior(OperationContext* opCtx) {
@@ -77,26 +76,21 @@ std::pair<RecordId, key_string::TypeBits> encodeKeyString(key_string::Builder& k
                                                           const value::MaterializedRow& value) {
     value.serializeIntoKeyString(kb);
     auto typeBits = kb.getTypeBits();
-    auto rid = RecordId(kb.getBuffer(), kb.getSize());
+    auto rid = RecordId(kb.getView());
     return {rid, typeBits};
 }
 
 key_string::Value decodeKeyString(const RecordId& rid, key_string::TypeBits typeBits) {
-    auto rawKey = rid.getStr();
     key_string::Builder kb{key_string::Version::kLatestVersion};
-    kb.resetFromBuffer(rawKey.rawData(), rawKey.size());
+    kb.resetFromBuffer(rid.getStr());
     kb.setTypeBits(typeBits);
     return kb.getValueCopy();
 }
 
 SpillingStore::SpillingStore(OperationContext* opCtx, KeyFormat format) {
-    _recordStore =
-        opCtx->getServiceContext()->getStorageEngine()->makeTemporaryRecordStore(opCtx, format);
-
-    _spillingUnit = std::unique_ptr<RecoveryUnit>(
-        opCtx->getServiceContext()->getStorageEngine()->newRecoveryUnit());
-    _spillingUnit->setCacheMaxWaitTimeout(Milliseconds(internalQuerySpillingMaxWaitTimeout.load()));
-    _spillingState = WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork;
+    auto lk = acquireLock(opCtx);
+    _spillTable = opCtx->getServiceContext()->getStorageEngine()->makeSpillTable(
+        opCtx, format, internalQuerySpillingMinAvailableDiskSpaceBytes.load());
 }
 
 SpillingStore::~SpillingStore() {}
@@ -146,57 +140,33 @@ int SpillingStore::upsertToRecordStore(OperationContext* opCtx,
                                        bool update) {
     assertIgnorePrepareConflictsBehavior(opCtx);
 
-    switchToSpilling(opCtx);
-    ON_BLOCK_EXIT([&] { switchToOriginal(opCtx); });
-    auto result = mongo::Status::OK();
-
-    storageUnavailableRetry(opCtx, "SpillingStore::upsertToRecordStore", [&] {
-        WriteUnitOfWork wuow(opCtx);
+    auto result = [&] {
+        auto lk = acquireLock(opCtx);
         if (update) {
-            result = rs()->updateRecord(opCtx, key, buf.buf(), buf.len());
-        } else {
-            auto status = rs()->insertRecord(opCtx, key, buf.buf(), buf.len(), Timestamp{});
-            result = status.getStatus();
+            return _spillTable->updateRecord(opCtx, key, buf.buf(), buf.len());
         }
-        wuow.commit();
-    });
+        std::vector<Record> records = {{key, {buf.buf(), buf.len()}}};
+        return _spillTable->insertRecords(opCtx, &records);
+    }();
 
-    if (!result.isOK()) {
-        tasserted(5843600, str::stream() << "Failed to write to disk because " << result.reason());
-        return 0;
-    }
+    uassertStatusOK(result);
     return buf.len();
 }
 
-Status SpillingStore::insertRecords(OperationContext* opCtx,
-                                    std::vector<Record>* inOutRecords,
-                                    const std::vector<Timestamp>& timestamps) {
+Status SpillingStore::insertRecords(OperationContext* opCtx, std::vector<Record>* inOutRecords) {
     assertIgnorePrepareConflictsBehavior(opCtx);
 
-    switchToSpilling(opCtx);
-    ON_BLOCK_EXIT([&] { switchToOriginal(opCtx); });
-    auto status = Status::OK();
-
-    storageUnavailableRetry(opCtx, "SpillingStore::insertRecords", [&] {
-        WriteUnitOfWork wuow(opCtx);
-        status = rs()->insertRecords(opCtx, inOutRecords, timestamps);
-        wuow.commit();
-    });
-    return status;
+    auto lk = acquireLock(opCtx);
+    return _spillTable->insertRecords(opCtx, inOutRecords);
 }
 
 boost::optional<value::MaterializedRow> SpillingStore::readFromRecordStore(OperationContext* opCtx,
                                                                            const RecordId& rid) {
-    switchToSpilling(opCtx);
-    ON_BLOCK_EXIT([&] { switchToOriginal(opCtx); });
-
     RecordData record;
-    bool found;
-    // Because we impose a timeout for storage engine operations, we need to handle errors and retry
-    // reads too.
-    storageUnavailableRetry(opCtx, "SpillingStore::readFromRecordStore", [&] {
-        found = rs()->findRecord(opCtx, rid, &record);
-    });
+    auto found = [&] {
+        auto lk = acquireLock(opCtx);
+        return _spillTable->findRecord(opCtx, rid, &record);
+    }();
 
     if (found) {
         auto valueReader = BufReader(record.data(), record.size());
@@ -206,38 +176,18 @@ boost::optional<value::MaterializedRow> SpillingStore::readFromRecordStore(Opera
 }
 
 bool SpillingStore::findRecord(OperationContext* opCtx, const RecordId& loc, RecordData* out) {
-    switchToSpilling(opCtx);
-    ON_BLOCK_EXIT([&] { switchToOriginal(opCtx); });
-    bool found;
-    // Because we impose a timeout for storage engine operations, we need to handle errors and retry
-    // reads too.
-    storageUnavailableRetry(
-        opCtx, "SpillingStore::findRecord", [&] { found = rs()->findRecord(opCtx, loc, out); });
-    return found;
+    auto lk = acquireLock(opCtx);
+    return _spillTable->findRecord(opCtx, loc, out);
 }
 
-void SpillingStore::switchToSpilling(OperationContext* opCtx) {
-    invariant(!_originalUnit);
-    stdx::lock_guard<Client> lk(*opCtx->getClient());
-    _originalUnit = shard_role_details::releaseRecoveryUnit(opCtx);
-    _originalState =
-        shard_role_details::setRecoveryUnit(opCtx, std::move(_spillingUnit), _spillingState);
-}
-void SpillingStore::switchToOriginal(OperationContext* opCtx) {
-    invariant(!_spillingUnit);
-    stdx::lock_guard<Client> lk(*opCtx->getClient());
-    _spillingUnit = shard_role_details::releaseRecoveryUnit(opCtx);
-    _spillingState =
-        shard_role_details::setRecoveryUnit(opCtx, std::move(_originalUnit), _originalState);
-    invariant(!(_spillingUnit->getState() == RecoveryUnit::State::kInactiveInUnitOfWork ||
-                _spillingUnit->getState() == RecoveryUnit::State::kActive));
+int64_t SpillingStore::storageSize(OperationContext* opCtx) {
+    auto lk = acquireLock(opCtx);
+    return _spillTable->storageSize();
 }
 
-void SpillingStore::saveState() {
-    _spillingUnit->abandonSnapshot();
-}
-void SpillingStore::restoreState() {
-    // We do not have to do anything.
+void SpillingStore::updateSpillStorageStatsForOperation(OperationContext* opCtx) {
+    CurOp::get(opCtx)->updateSpillStorageStats(
+        _spillTable->computeOperationStatisticsSinceLastCall());
 }
 
 }  // namespace sbe

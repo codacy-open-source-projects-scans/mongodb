@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
 
 #include "mongo/db/auth/sasl_x509_server_conversation.h"
 
@@ -41,8 +40,6 @@
 #include "mongo/db/database_name.h"
 #include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/rpc/object_check.h"
 #include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/net/ssl_peer_info.h"
@@ -66,10 +63,10 @@ std::string unpackName(StringData inputData) {
     auto payload = cdr.read<Validated<BSONObj>>().val;
 
     auto request =
-        X509MechanismClientStep1::parse(IDLParserContext{"x509-authentication"}, payload);
+        X509MechanismClientStep1::parse(payload, IDLParserContext{"x509-authentication"});
     const auto& user = request.getPrincipalName();
 
-    return user.value_or("").toString();
+    return std::string{user.value_or("")};
 }
 
 /**
@@ -78,9 +75,12 @@ std::string unpackName(StringData inputData) {
  * 1. Unpack the inputData field.
  * 2. Compare the user name to the subject DN from SSLPeerInfo.
  */
-std::string getUserName(Client* client, StringData inputData, const SSLPeerInfo& sslPeerInfo) {
-    const auto& clientName = sslPeerInfo.subjectName();
+std::string getUserName(Client* client,
+                        StringData inputData,
+                        std::shared_ptr<const SSLPeerInfo> sslPeerInfo) {
+    uassert(ErrorCodes::AuthenticationFailed, "No SSLPeerInfo available", sslPeerInfo);
 
+    const auto& clientName = sslPeerInfo->subjectName();
     uassert(ErrorCodes::AuthenticationFailed,
             "No verified subject name available from client",
             !clientName.empty());
@@ -122,13 +122,14 @@ StatusWith<std::unique_ptr<UserRequest>> SaslX509ServerMechanism::makeUserReques
         return std::move(request);
     }
 
-    const auto& sslPeerInfo = SSLPeerInfo::forSession(session);
-    auto&& peerRoles = sslPeerInfo.roles();
-    if (peerRoles.empty() ||
-        (sslPeerInfo.subjectName().toString() != request->getUserName().getUser())) {
+    auto sslPeerInfo = SSLPeerInfo::forSession(session);
+
+    if (!sslPeerInfo || sslPeerInfo->roles().empty() ||
+        (sslPeerInfo->subjectName().toString() != request->getUserName().getUser())) {
         return std::move(request);
     }
 
+    const auto& peerRoles = sslPeerInfo->roles();
     std::set<RoleName> requestRoles;
     std::copy(
         peerRoles.begin(), peerRoles.end(), std::inserter(requestRoles, requestRoles.begin()));
@@ -154,15 +155,14 @@ bool SaslX509ServerMechanism::isClusterMember(Client* client) const {
     }
 
     std::shared_ptr<transport::Session> session = client->session();
-
-    if (!session || !session->getSSLManager()) {
+    if (!session || !session->getSSLConfiguration()) {
         return false;
     }
 
-    const auto& sslPeerInfo = SSLPeerInfo::forSession(session);
-    auto sslConfiguration = session->getSSLManager()->getSSLConfiguration();
-    if (!sslConfiguration.isClusterMember(this->getPrincipalName(),
-                                          sslPeerInfo.getClusterMembership())) {
+    auto sslPeerInfo = SSLPeerInfo::forSession(session);
+    auto clusterMembership = sslPeerInfo ? sslPeerInfo->getClusterMembership() : boost::none;
+    if (!session->getSSLConfiguration()->isClusterMember(this->getPrincipalName(),
+                                                         clusterMembership)) {
         return false;
     }
 
@@ -189,15 +189,14 @@ StatusWith<std::tuple<bool, std::string>> SaslX509ServerMechanism::stepImpl(
 
     uassert(ErrorCodes::BadValue,
             kX509AuthenticationDisabledMessage + ": Feature Flag is disabled.",
-            gFeatureFlagRearchitectUserAcquisition.isEnabled(
-                serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
+            gFeatureFlagRearchitectUserAcquisition.isEnabled());
 
     // We want to set the _principalName here in case we need it for auditing purposes.
     ServerMechanismBase::_principalName = unpackName(inputData);
 
     // We should get the correct UserName from SSLPeerInfo.
     auto client = opCtx->getClient();
-    const auto& sslPeerInfo = SSLPeerInfo::forSession(client->session());
+    auto sslPeerInfo = SSLPeerInfo::forSession(client->session());
     ServerMechanismBase::_principalName = getUserName(client, inputData, sslPeerInfo);
 
     uassert(ErrorCodes::BadValue,
@@ -218,14 +217,14 @@ StatusWith<std::tuple<bool, std::string>> SaslX509ServerMechanism::stepImpl(
                       "cluster authentication, check the --clusterAuthMode flag");
     }
 
-    if (!client->isInternalClient()) {
+    if (!client->isPossiblyUnauthenticatedInternalClient()) {
         LOGV2_WARNING(8209200,
                       "Client isn't a mongod or mongos, but is connecting with a certificate "
                       "with cluster membership");
     }
 
-    auto sslConfiguration = client->session()->getSSLManager()->getSSLConfiguration();
-    if (gEnforceUserClusterSeparation && sslConfiguration.isClusterExtensionSet()) {
+    auto sslConfiguration = client->session()->getSSLConfiguration();
+    if (gEnforceUserClusterSeparation && sslConfiguration->isClusterExtensionSet()) {
         auto* am = AuthorizationManager::get(opCtx->getService());
         BSONObj ignored;
 

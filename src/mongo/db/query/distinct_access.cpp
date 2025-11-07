@@ -28,35 +28,39 @@
  */
 
 #include "mongo/db/query/distinct_access.h"
+
 #include "mongo/db/exec/index_path_projection.h"
 #include "mongo/db/exec/projection_executor_utils.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution_helpers.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/query/planner_analysis.h"
 #include "mongo/db/query/planner_wildcard_helpers.h"
 #include "mongo/db/query/query_planner.h"
-#include "mongo/db/query/query_solution.h"
-#include "mongo/db/query/stage_types.h"
+
+#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 namespace mongo {
 
-namespace {
-
-/**
- * Check if an index is suitable for the DISTINCT_SCAN transition. The function represents the
- * extracted condition used by `getIndexEntriesForDistinct()` which generates all the suitable
- * indexes in case of not multiplanning.
- */
-bool isIndexSuitableForDistinct(const IndexEntry& index,
-                                const std::string& field,
+bool isIndexSuitableForDistinct(const BSONObj& keyPattern,
+                                bool multikey,
+                                const MultikeyPaths& multikeyPaths,
+                                bool sparse,
+                                projection_executor::ProjectionExecutor* wildcardProj,
+                                StringData field,
                                 const BSONObj& filter,
                                 bool flipDistinctScanDirection,
-                                bool strictDistinctOnly) {
+                                bool strictDistinctOnly,
+                                const OrderedPathSet& projectionFields,
+                                bool hasSort) {
     // If the caller did not request a "strict" distinct scan then we may choose a plan which
-    // unwinds arrays and treats each element in an array as its own key.
-    const bool mayUnwindArrays = !strictDistinctOnly;
+    // either unwinds arrays and treats each element in an array as its own key or ignores missing
+    // fields.
+    const bool mayUnwindArraysOrIgnoreMissing = !strictDistinctOnly;
 
-    if (index.keyPattern.hasField(field)) {
+    if (keyPattern.hasField(field)) {
         // This handles regular fields of Compound Wildcard Indexes as well.
-        if (flipDistinctScanDirection && index.multikey) {
+        if (flipDistinctScanDirection && multikey) {
             // This CanonicalDistinct was generated as a result of transforming a $group with
             // $last accumulators using the GroupFromFirstTransformation. We cannot use a
             // DISTINCT_SCAN if $last is being applied to an indexed field which is multikey,
@@ -68,9 +72,15 @@ bool isIndexSuitableForDistinct(const IndexEntry& index,
             // user's requested sort order.
             return false;
         }
-        if (!mayUnwindArrays &&
-            isAnyComponentOfPathMultikey(
-                index.keyPattern, index.multikey, index.multikeyPaths, field)) {
+
+        // If we do not want to ignore missing fields then we cannot use a sparse index.
+        if (!mayUnwindArraysOrIgnoreMissing && sparse) {
+            return false;
+        }
+
+        if (!mayUnwindArraysOrIgnoreMissing &&
+            isAnyComponentOfPathOrProjectionMultikey(
+                keyPattern, multikey, multikeyPaths, field, projectionFields, hasSort)) {
             // If the caller requested "strict" distinct that does not "pre-unwind" arrays,
             // then an index which is multikey on the distinct field may not be used. This is
             // because when indexing an array each element gets inserted individually. Any plan
@@ -78,11 +88,9 @@ bool isIndexSuitableForDistinct(const IndexEntry& index,
             return false;
         }
         return true;
-    } else if (index.type == IndexType::INDEX_WILDCARD && !filter.isEmpty()) {
+    } else if (wildcardProj && !filter.isEmpty()) {
         // Check whether the $** projection captures the field over which we are distinct-ing.
-        if (index.indexPathProjection != nullptr &&
-            projection_executor_utils::applyProjectionToOneField(index.indexPathProjection->exec(),
-                                                                 field)) {
+        if (projection_executor_utils::applyProjectionToOneField(wildcardProj, field)) {
             return true;
         }
         // It is not necessary to do any checks about 'mayUnwindArrays' in this case, because:
@@ -94,6 +102,43 @@ bool isIndexSuitableForDistinct(const IndexEntry& index,
         // field, regardless of the value of 'mayUnwindArrays'.
     }
     return false;
+}
+
+namespace {
+
+projection_executor::ProjectionExecutor* getWildcardProjectionExecutor(const IndexEntry& index) {
+    if (index.type != IndexType::INDEX_WILDCARD) {
+        return nullptr;
+    }
+    tassert(11154100,
+            "indexPathProjection must be non-null for INDEX_WILDCARD",
+            index.indexPathProjection);
+    return index.indexPathProjection->exec();
+}
+
+/**
+ * Check if an index is suitable for the DISTINCT_SCAN transition. The function represents the
+ * extracted condition used by `getIndexEntriesForDistinct()` which generates all the suitable
+ * indexes in case of not multiplanning.
+ */
+bool isIndexSuitableForDistinct(const IndexEntry& index,
+                                const std::string& field,
+                                const OrderedPathSet& projectionFields,
+                                const BSONObj& filter,
+                                bool flipDistinctScanDirection,
+                                bool strictDistinctOnly,
+                                bool hasSort) {
+    return isIndexSuitableForDistinct(index.keyPattern,
+                                      index.multikey,
+                                      index.multikeyPaths,
+                                      index.sparse,
+                                      getWildcardProjectionExecutor(index),
+                                      field,
+                                      filter,
+                                      flipDistinctScanDirection,
+                                      strictDistinctOnly,
+                                      projectionFields,
+                                      hasSort);
 }
 
 bool isAFullIndexScanPreferable(const IndexEntry& index,
@@ -155,6 +200,9 @@ bool indexCoversProjection(const IndexEntry& index, const OrderedPathSet& projFi
  * If there is a projection and at least one index that covers all its fields, the smallest such
  * index is selected. Otherwise, select the index with the fewest total fields.
  *
+ * Sparse indexes are not suitable when strictDistinctOnly is true, since in that case we want to
+ * treat missing fields as null rather than ignore them.
+ *
  * Multikey indices are not suitable for DistinctNode when the projection is on an array
  * element. Arrays are flattened in a multikey index which makes it impossible for the distinct
  * scan stage (plan stage generated from DistinctNode) to select the requested element by array
@@ -170,14 +218,20 @@ bool getDistinctNodeIndex(const std::vector<IndexEntry>& indices,
                           const CollatorInterface* collator,
                           bool flipDistinctScanDirection,
                           bool strictDistinctOnly,
+                          bool hasSort,
                           size_t* indexOut) {
     tassert(951520, "indexOut must be initialized", indexOut);
     size_t minIndexFields = Ordering::kMaxCompoundIndexKeys + 1;
     bool someIndexCoversProj = false;
     for (size_t i = 0; i < indices.size(); ++i) {
         // If we're here, it means the query does not have a filter.
-        if (!isIndexSuitableForDistinct(
-                indices[i], key, {} /*filter*/, flipDistinctScanDirection, strictDistinctOnly)) {
+        if (!isIndexSuitableForDistinct(indices[i],
+                                        key,
+                                        projectionFields,
+                                        {} /*filter*/,
+                                        flipDistinctScanDirection,
+                                        strictDistinctOnly,
+                                        hasSort)) {
             continue;
         }
         if (isAFullIndexScanPreferable(indices[i], key, collator)) {
@@ -219,6 +273,8 @@ std::unique_ptr<QuerySolution> constructCoveredDistinctScan(
                              collator,
                              canonicalDistinct.isDistinctScanDirectionFlipped(),
                              strictDistinctOnly,
+                             canonicalQuery.getDistinct()->getSortRequirement().has_value() ||
+                                 canonicalQuery.getSortPattern(),
                              &distinctNodeIndex)) {
         // Hand-construct a distinct scan plan. Note that this is not a valid plan yet.
         // 'analyzeDataAccess()' will add additional stages as needed and call
@@ -297,16 +353,17 @@ std::unique_ptr<QuerySolution> createDistinctScanSolution(const CanonicalQuery& 
     return nullptr;  // no suitable solution has been found
 }
 
-bool isAnyComponentOfPathMultikey(const BSONObj& indexKeyPattern,
-                                  bool isMultikey,
-                                  const MultikeyPaths& indexMultikeyInfo,
-                                  StringData path) {
+bool isAnyComponentOfPathOrProjectionMultikey(const BSONObj& indexKeyPattern,
+                                              bool isMultikey,
+                                              const MultikeyPaths& indexMultikeyInfo,
+                                              StringData path,
+                                              const OrderedPathSet& projFields,
+                                              bool hasSort) {
     if (!isMultikey) {
         return false;
     }
 
     size_t keyPatternFieldIndex = 0;
-    bool found = false;
     if (indexMultikeyInfo.empty()) {
         // There is no path-level multikey information available, so we must assume 'path' is
         // multikey.
@@ -314,16 +371,27 @@ bool isAnyComponentOfPathMultikey(const BSONObj& indexKeyPattern,
     }
 
     for (auto&& elt : indexKeyPattern) {
-        if (elt.fieldNameStringData() == path) {
-            found = true;
-            break;
+        const auto field = elt.fieldNameStringData();
+        // If we are checking for a multikey projection and have not specified a sort, plan
+        // enumeration will be bypassed. This will skip checks that would usually stop us from
+        // creating a covered IXSCAN (and, by extension, a DISTINCT_SCAN), so we need to prevent
+        // that case here.
+        if (field == path || (!hasSort && projFields.find(field) != projFields.end())) {
+            LOGV2_DEBUG(9723800,
+                        5,
+                        "Checking multikeyness",
+                        "keyPatternFieldIndex"_attr = keyPatternFieldIndex,
+                        "indexMultikeyInfoSize"_attr = indexMultikeyInfo.size());
+            tassert(9723801,
+                    "Smaller than expected indexMultikeyInfo size",
+                    indexMultikeyInfo.size() > keyPatternFieldIndex);
+            if (!indexMultikeyInfo[keyPatternFieldIndex].empty()) {
+                return true;
+            }
         }
         keyPatternFieldIndex++;
     }
-    invariant(found);
-
-    invariant(indexMultikeyInfo.size() > keyPatternFieldIndex);
-    return !indexMultikeyInfo[keyPatternFieldIndex].empty();
+    return false;
 }
 
 bool finalizeDistinctScan(const CanonicalQuery& canonicalQuery,
@@ -356,7 +424,11 @@ bool finalizeDistinctScan(const CanonicalQuery& canonicalQuery,
                 projectionNode = static_cast<ProjectionNode*>(currNode);
                 break;
             case STAGE_FETCH:
-                tassert(9245801, "Didn't expect to find two fetch nodes", !fetchNode);
+                if (fetchNode) {
+                    // In some specific circumstances, we generate a second fetch node! For
+                    // simplicity, bail out here.
+                    return false;
+                }
                 fetchNode = static_cast<FetchNode*>(currNode);
                 break;
             case STAGE_SORT_KEY_GENERATOR:
@@ -419,8 +491,13 @@ bool finalizeDistinctScan(const CanonicalQuery& canonicalQuery,
     // DISTINCT_SCAN, for e.g. if the distinct key is not part of the index. In the former case, we
     // have not done this check yet, so we filter out ineligible indexes here.
     if (isShardFilteringDistinctScanEnabled) {
-        if (!isIndexSuitableForDistinct(
-                indexEntry, field, filter, flipDistinctScanDirection, strictDistinctOnly)) {
+        if (!isIndexSuitableForDistinct(indexEntry,
+                                        field,
+                                        OrderedPathSet{},
+                                        filter,
+                                        flipDistinctScanDirection,
+                                        strictDistinctOnly,
+                                        !hasSort)) {
             return false;
         }
         if (filter.isEmpty() && !hasSort &&

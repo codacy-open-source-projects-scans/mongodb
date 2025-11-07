@@ -29,6 +29,8 @@
 
 #include "mongo/db/query/query_shape/count_cmd_shape.h"
 
+#include "mongo/db/pipeline/expression_context_builder.h"
+
 namespace mongo::query_shape {
 
 CountCmdShapeComponents::CountCmdShapeComponents(const ParsedFindCommand& request,
@@ -43,7 +45,7 @@ void CountCmdShapeComponents::HashValue(absl::HashState state) const {
         std::move(state), simpleHash(representativeQuery), hasField.limit, hasField.skip);
 }
 
-inline size_t CountCmdShapeComponents::size() const {
+size_t CountCmdShapeComponents::size() const {
     return sizeof(CountCmdShapeComponents) + representativeQuery.objsize();
 }
 
@@ -60,7 +62,7 @@ void CountCmdShape::appendCmdSpecificShapeComponents(BSONObjBuilder& bob,
                                                      const SerializationOptions& opts) const {
     tassert(9065200,
             "Serialization policy not supported - original values have been discarded",
-            opts.literalPolicy != LiteralSerializationPolicy::kUnchanged);
+            !opts.isKeepingLiteralsUnchanged());
 
     // Command name.
     bob.append("command", CountCommandRequest::kCommandName);
@@ -73,7 +75,7 @@ void CountCmdShape::appendCmdSpecificShapeComponents(BSONObjBuilder& bob,
             bob.append(CountCommandRequest::kQueryFieldName, components.representativeQuery);
         } else {
             // Slow path: We need to re-parse from our representative shapes.
-            auto expCtx = ExpressionContext::makeBlankExpressionContext(opCtx, nssOrUUID);
+            auto expCtx = makeBlankExpressionContext(opCtx, nssOrUUID);
             auto matchExpr = uassertStatusOK(
                 MatchExpressionParser::parse(components.representativeQuery,
                                              expCtx,

@@ -27,18 +27,18 @@
  *    it in the license file.
  */
 
+#include "mongo/db/persistent_task_store.h"
+
+#include "mongo/bson/bsonelement.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/catalog_test_fixture.h"
+#include "mongo/db/local_catalog/lock_manager/d_concurrency.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/unittest/unittest.h"
+
 #include <limits>
 
 #include <boost/move/utility_core.hpp>
-
-#include "mongo/bson/bsonelement.h"
-#include "mongo/db/catalog/catalog_test_fixture.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/d_concurrency.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/persistent_task_store.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 
 namespace mongo {
 namespace {
@@ -58,7 +58,7 @@ struct TestTask {
           min(bson.getField("min").Int()),
           max(bson.getField("max").Int()) {}
 
-    static TestTask parse(IDLParserContext, BSONObj bson) {
+    static TestTask parse(BSONObj bson, IDLParserContext) {
         return TestTask{bson};
     }
 
@@ -110,13 +110,10 @@ TEST_F(PersistentTaskStoreTest, TestForEach) {
 
     // No match.
     int count = 0;
-    store.forEach(opCtx,
-                  BSON("key"
-                       << "four"),
-                  [&count](const TestTask& t) {
-                      ++count;
-                      return true;
-                  });
+    store.forEach(opCtx, BSON("key" << "four"), [&count](const TestTask& t) {
+        ++count;
+        return true;
+    });
     ASSERT_EQ(count, 0);
 
     // Multiple matches.
@@ -137,13 +134,10 @@ TEST_F(PersistentTaskStoreTest, TestForEach) {
 
     // Single match.
     count = 0;
-    store.forEach(opCtx,
-                  BSON("key"
-                       << "one"),
-                  [&count](const TestTask& t) {
-                      ++count;
-                      return true;
-                  });
+    store.forEach(opCtx, BSON("key" << "one"), [&count](const TestTask& t) {
+        ++count;
+        return true;
+    });
     ASSERT_EQ(count, 1);
 }
 
@@ -158,9 +152,7 @@ TEST_F(PersistentTaskStoreTest, TestRemove) {
 
     ASSERT_EQ(store.count(opCtx), 3);
 
-    store.remove(opCtx,
-                 BSON("key"
-                      << "one"));
+    store.remove(opCtx, BSON("key" << "one"));
 
     ASSERT_EQ(store.count(opCtx), 2);
 }
@@ -194,18 +186,12 @@ TEST_F(PersistentTaskStoreTest, TestUpdate) {
 
     ASSERT_EQ(store.count(opCtx), 3);
 
-    store.update(opCtx,
-                 BSON("key"
-                      << "one"),
-                 BSON("$inc" << BSON("min" << 1)));
+    store.update(opCtx, BSON("key" << "one"), BSON("$inc" << BSON("min" << 1)));
 
-    store.forEach(opCtx,
-                  BSON("key"
-                       << "one"),
-                  [&](const TestTask& task) {
-                      ASSERT_EQ(task.min, expectedUpdatedMin);
-                      return false;
-                  });
+    store.forEach(opCtx, BSON("key" << "one"), [&](const TestTask& task) {
+        ASSERT_EQ(task.min, expectedUpdatedMin);
+        return false;
+    });
 }
 
 TEST_F(PersistentTaskStoreTest, TestUpdateOnlyUpdatesOneMatchingDocument) {
@@ -240,12 +226,10 @@ TEST_F(PersistentTaskStoreTest, TestUpsert) {
 
     // Test that an attempt to upsert from the update command throws an error.
     ASSERT_THROWS_CODE(
-        store.update(opCtx, query, taskBson, WriteConcerns::kMajorityWriteConcernShardingTimeout),
-        DBException,
-        ErrorCodes::NoMatchingDocument);
+        store.update(opCtx, query, taskBson), DBException, ErrorCodes::NoMatchingDocument);
 
     // Test that the document is created when upserted.
-    store.upsert(opCtx, query, taskBson, WriteConcerns::kMajorityWriteConcernShardingTimeout);
+    store.upsert(opCtx, query, taskBson);
 
     ASSERT_EQ(store.count(opCtx, query), 1);
 
@@ -256,19 +240,13 @@ TEST_F(PersistentTaskStoreTest, TestUpsert) {
     });
 
     // Verify that updates happen as expected with upsert and update
-    store.upsert(opCtx,
-                 query,
-                 BSON("$inc" << BSON("min" << 1)),
-                 WriteConcerns::kMajorityWriteConcernShardingTimeout);
+    store.upsert(opCtx, query, BSON("$inc" << BSON("min" << 1)));
     store.forEach(opCtx, query, [&](const TestTask& t) {
         ASSERT_EQ(t.min, 1);
         return true;
     });
 
-    store.update(opCtx,
-                 query,
-                 BSON("$inc" << BSON("min" << 1)),
-                 WriteConcerns::kMajorityWriteConcernShardingTimeout);
+    store.update(opCtx, query, BSON("$inc" << BSON("min" << 1)));
     store.forEach(opCtx, query, [&](const TestTask& t) {
         ASSERT_EQ(t.min, 2);
         return true;
@@ -295,9 +273,7 @@ TEST_F(PersistentTaskStoreTest, TestWritesPersistAcrossInstances) {
         auto count = store.count(opCtx, BSON("min" << GTE << 10));
         ASSERT_EQ(count, 2);
 
-        store.remove(opCtx,
-                     BSON("key"
-                          << "two"));
+        store.remove(opCtx, BSON("key" << "two"));
         ASSERT_EQ(store.count(opCtx), 2);
 
         count = store.count(opCtx, BSON("min" << GTE << 10));
@@ -322,18 +298,12 @@ TEST_F(PersistentTaskStoreTest, TestCountWithQuery) {
     store.add(opCtx, TestTask{"two", 10, 20});
     store.add(opCtx, TestTask{"two", 40, 50});
 
-    ASSERT_EQ(store.count(opCtx,
-                          BSON("key"
-                               << "two")),
-              2);
+    ASSERT_EQ(store.count(opCtx, BSON("key" << "two")), 2);
 
     // Remove multipe overlapping ranges.
     store.remove(opCtx, BSON("min" << 10));
 
-    ASSERT_EQ(store.count(opCtx,
-                          BSON("key"
-                               << "two")),
-              1);
+    ASSERT_EQ(store.count(opCtx, BSON("key" << "two")), 1);
 }
 
 }  // namespace

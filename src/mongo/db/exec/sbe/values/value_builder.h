@@ -29,12 +29,12 @@
 
 #pragma once
 
-#include <vector>
-
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/util/bufreader.h"
+
+#include <vector>
 
 namespace mongo::sbe::value {
 
@@ -106,8 +106,8 @@ public:
     }
 
     void append(StringData in) override {
-        if (canUseSmallString({in.rawData(), in.size()})) {
-            appendValue(makeSmallString({in.rawData(), in.size()}));
+        if (canUseSmallString({in.data(), in.size()})) {
+            appendValue(makeSmallString({in.data(), in.size()}));
         } else {
             appendValueBufferOffset(TypeTags::StringBig);
             _valueBufferBuilder->appendNum(static_cast<int32_t>(in.size() + 1));
@@ -194,7 +194,7 @@ protected:
     static constexpr int kInlinedVectorSize = 16;
 
     std::pair<TypeTags, Value> getValue(size_t index, int bufferLen) {
-        invariant(index < _tagList.size());
+        tassert(11093605, "Index out of bounds", index < _tagList.size());
         auto tag = _tagList[index];
         auto val = _valList[index];
 
@@ -214,7 +214,7 @@ protected:
             case TypeTags::bsonDBPointer:
             case TypeTags::bsonCodeWScope: {
                 auto offset = bitcastTo<decltype(bufferLen)>(val);
-                invariant(offset < bufferLen);
+                tassert(11093606, "Offset out of bounds", offset < bufferLen);
                 val = bitcastFrom<const char*>(_valueBufferBuilder->buf() + offset);
                 break;
             }
@@ -225,12 +225,12 @@ protected:
         return {tag, val};
     }
 
-    void appendValue(TypeTags tag, Value val) noexcept {
+    void appendValue(TypeTags tag, Value val) {
         _tagList.push_back(tag);
         _valList.push_back(val);
     }
 
-    void appendValue(std::pair<TypeTags, Value> in) noexcept {
+    void appendValue(std::pair<TypeTags, Value> in) {
         appendValue(in.first, in.second);
     }
 
@@ -362,7 +362,7 @@ private:
                     return {true, tag, val};
                 }
                 default:
-                    MONGO_UNREACHABLE;
+                    MONGO_UNREACHABLE_TASSERT(11122920);
             }
         }
         return {false, tag, val};

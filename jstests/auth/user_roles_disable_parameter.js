@@ -23,17 +23,20 @@ function runTest(conn, disableAtRunTime) {
     const db = conn.getDB(dbName);
 
     // Create a user.
-    assert.commandWorked(db.runCommand({
-        createUser: "user",
-        pwd: "pwd",
-        roles: [{role: "read", db: dbName}],
-    }));
+    assert.commandWorked(
+        db.runCommand({
+            createUser: "user",
+            pwd: "pwd",
+            roles: [{role: "read", db: dbName}],
+        }),
+    );
 
     // Create a view.
-    let pipeline = [{
-        $set:
-            {"a": {$cond: {if: {$in: ["read", '$$USER_ROLES.role']}, then: "$a", else: "$$REMOVE"}}}
-    }];
+    let pipeline = [
+        {
+            $set: {"a": {$cond: {if: {$in: ["read", "$$USER_ROLES.role"]}, then: "$a", else: "$$REMOVE"}}},
+        },
+    ];
     assert.commandWorked(db.createView("coll_view", collName, pipeline));
     let coll = db.getCollection(collName);
 
@@ -47,8 +50,15 @@ function runTest(conn, disableAtRunTime) {
     // Authenticate as the user we created earlier and run a find on the view. Since the
     // $$USER_ROLES server parameter is disabled, the find should fail.
     db.auth("user", "pwd");
-    assert.commandFailedWithCode(db.runCommand({find: "coll_view", filter: {}}),
-                                 varNotAvailableErr);
+
+    let res = db.runCommand({find: "coll_view", filter: {}});
+    assert(
+        res["errmsg"].includes("Builtin variable") &&
+            res["errmsg"].includes("$$USER_ROLES") &&
+            res["errmsg"].includes("as the server is not configured to accept it"),
+        "Error message did not match expected message",
+    );
+    assert.commandFailedWithCode(res, varNotAvailableErr);
 
     db.logout();
 }
@@ -59,7 +69,6 @@ runTest(mongodDisabledAtRuntime, true);
 MongoRunner.stopMongod(mongodDisabledAtRuntime);
 
 // Start up a mongod with the parameter disabled.
-const mongodDisabledAtStartup =
-    MongoRunner.runMongod({auth: "", setParameter: {enableAccessToUserRoles: false}});
+const mongodDisabledAtStartup = MongoRunner.runMongod({auth: "", setParameter: {enableAccessToUserRoles: false}});
 runTest(mongodDisabledAtStartup, false);
 MongoRunner.stopMongod(mongodDisabledAtStartup);

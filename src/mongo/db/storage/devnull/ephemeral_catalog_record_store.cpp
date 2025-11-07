@@ -30,27 +30,24 @@
 
 #include "mongo/db/storage/devnull/ephemeral_catalog_record_store.h"
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
+#include "mongo/base/error_codes.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/record_id_helpers.h"
+#include "mongo/db/storage/damage_vector.h"
+#include "mongo/db/storage/recovery_unit.h"
+#include "mongo/logv2/log.h"
+#include "mongo/util/str.h"
+
 #include <cstring>
 #include <iterator>
 #include <memory>
 #include <numeric>
 #include <utility>
 
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/smart_ptr/shared_array.hpp>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/db/record_id_helpers.h"
-#include "mongo/db/storage/damage_vector.h"
-#include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/transaction_resources.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/util/str.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -65,9 +62,9 @@ public:
     RemoveChange(Data* data, RecordId loc, const EphemeralForTestRecord& rec)
         : _data(data), _loc(loc), _rec(rec) {}
 
-    void commit(OperationContext* opCtx, boost::optional<Timestamp>) override {}
-    void rollback(OperationContext* opCtx) override {
-        stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) noexcept override {}
+    void rollback(OperationContext* opCtx) noexcept override {
+        stdx::lock_guard<stdx::recursive_mutex> lock(_data->mutex);
 
         Records::iterator it = _data->records.find(_loc);
         if (it != _data->records.end()) {
@@ -88,7 +85,7 @@ class EphemeralForTestRecordStore::TruncateChange : public RecoveryUnit::Change 
 public:
     TruncateChange(OperationContext* opCtx, Data* data, const RecordId& begin, const RecordId& end)
         : _opCtx(opCtx), _data(data), _dataSize(0) {
-        stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
+        stdx::lock_guard<stdx::recursive_mutex> lock(_data->mutex);
 
         for (auto it = _data->records.begin(); it != _data->records.end();) {
             if (it->first >= begin && it->first <= end) {
@@ -102,11 +99,11 @@ public:
         _data->dataSize -= _dataSize;
     }
 
-    void commit(OperationContext* opCtx, boost::optional<Timestamp>) override {}
-    void rollback(OperationContext* opCtx) override {
+    void commit(OperationContext* opCtx, boost::optional<Timestamp>) noexcept override {}
+    void rollback(OperationContext* opCtx) noexcept override {
         using std::swap;
 
-        stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
+        stdx::lock_guard<stdx::recursive_mutex> lock(_data->mutex);
         _data->records.merge(std::move(_deletedRecords));
         _data->dataSize += _dataSize;
     }
@@ -160,7 +157,7 @@ public:
         _savedId = RecordId();
     }
 
-    bool restore(bool tolerateCappedRepositioning) final {
+    bool restore(RecoveryUnit& ru, bool tolerateCappedRepositioning) final {
         if (_savedId.isNull()) {
             _it = _records.end();
             return true;
@@ -171,10 +168,6 @@ public:
 
         // Capped iterators die on invalidation rather than advancing.
         return !(_isCapped && _lastMoveWasRestore);
-    }
-
-    uint64_t getCheckpointId() const final {
-        return 0;
     }
 
     void detachFromOperationContext() final {}
@@ -243,7 +236,7 @@ public:
         _savedId = RecordId();
     }
 
-    bool restore(bool tolerateCappedRepositioning) final {
+    bool restore(RecoveryUnit& ru, bool tolerateCappedRepositioning) final {
         if (_savedId.isNull()) {
             _it = _records.rend();
             return true;
@@ -277,12 +270,19 @@ private:
 // RecordStore
 //
 
+std::variant<StubIntegerKeyedContainer, StubStringKeyedContainer>
+EphemeralForTestRecordStore::_makeContainer() {
+    auto container = StubIntegerKeyedContainer();
+    return container;
+}
+
 EphemeralForTestRecordStore::EphemeralForTestRecordStore(boost::optional<UUID> uuid,
                                                          StringData identName,
                                                          std::shared_ptr<void>* dataInOut,
                                                          bool isCapped,
                                                          bool isOplog)
-    : _uuid(uuid),
+    : RecordStoreBase(uuid, identName),
+      _container(_makeContainer()),
       _isCapped(isCapped),
       _data(*dataInOut ? static_cast<Data*>(dataInOut->get()) : new Data(isOplog)) {
     // NOTE : The static_cast here assumes that `dataInOut`, which is a void pointer. As of now,
@@ -297,39 +297,13 @@ const char* EphemeralForTestRecordStore::name() const {
     return "EphemeralForTest";
 }
 
-boost::optional<UUID> EphemeralForTestRecordStore::uuid() const {
-    return _uuid;
-}
-
-bool EphemeralForTestRecordStore::isTemp() const {
-    return !_uuid.has_value();
-}
-
-std::shared_ptr<Ident> EphemeralForTestRecordStore::getSharedIdent() const {
-    return _ident;
-}
-
-const std::string& EphemeralForTestRecordStore::getIdent() const {
-    return _ident->getIdent();
-}
-
-void EphemeralForTestRecordStore::setIdent(std::shared_ptr<Ident> ident) {
-    _ident = std::move(ident);
-}
-
-RecordData EphemeralForTestRecordStore::dataFor(OperationContext* opCtx,
-                                                const RecordId& loc) const {
-    stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
-    return recordFor(lock, loc)->toRecordData();
-}
-
 const EphemeralForTestRecordStore::EphemeralForTestRecord* EphemeralForTestRecordStore::recordFor(
     WithLock, const RecordId& loc) const {
     Records::const_iterator it = _data->records.find(loc);
     if (it == _data->records.end()) {
         LOGV2_ERROR(23720,
                     "EphemeralForTestRecordStore::recordFor cannot find record",
-                    "uuid"_attr = _uuid,
+                    "uuid"_attr = uuid(),
                     "loc"_attr = loc);
     }
     invariant(it != _data->records.end());
@@ -342,31 +316,20 @@ EphemeralForTestRecordStore::EphemeralForTestRecord* EphemeralForTestRecordStore
     if (it == _data->records.end()) {
         LOGV2_ERROR(23721,
                     "EphemeralForTestRecordStore::recordFor cannot find record",
-                    "uuid"_attr = _uuid,
+                    "uuid"_attr = uuid(),
                     "loc"_attr = loc);
     }
     invariant(it != _data->records.end());
     return &it->second;
 }
 
-bool EphemeralForTestRecordStore::findRecord(OperationContext* opCtx,
-                                             const RecordId& loc,
-                                             RecordData* rd) const {
-    stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
-    Records::const_iterator it = _data->records.find(loc);
-    if (it == _data->records.end()) {
-        return false;
-    }
-    *rd = it->second.toRecordData();
-    return true;
-}
-
-void EphemeralForTestRecordStore::deleteRecord(OperationContext* opCtx, const RecordId& loc) {
-    stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
+void EphemeralForTestRecordStore::_deleteRecord(OperationContext* opCtx,
+                                                RecoveryUnit& ru,
+                                                const RecordId& loc) {
+    stdx::lock_guard<stdx::recursive_mutex> lock(_data->mutex);
 
     EphemeralForTestRecord* rec = recordFor(lock, loc);
-    shard_role_details::getRecoveryUnit(opCtx)->registerChange(
-        std::make_unique<RemoveChange>(_data, loc, *rec));
+    ru.registerChange(std::make_unique<RemoveChange>(_data, loc, *rec));
     _data->dataSize -= rec->size;
     invariant(_data->records.erase(loc) == 1);
 }
@@ -388,39 +351,38 @@ StatusWith<RecordId> EphemeralForTestRecordStore::extractAndCheckLocForOplog(Wit
     return status;
 }
 
-Status EphemeralForTestRecordStore::insertRecords(OperationContext* opCtx,
-                                                  std::vector<Record>* inOutRecords,
-                                                  const std::vector<Timestamp>& timestamps) {
-    const auto insertSingleFn = [this, opCtx](Record* record) {
-        stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
+Status EphemeralForTestRecordStore::_insertRecords(OperationContext* opCtx,
+                                                   RecoveryUnit& ru,
+                                                   std::vector<Record>* inOutRecords,
+                                                   const std::vector<Timestamp>& timestamps) {
+    const auto insertSingleFn = [this, opCtx, &ru](Record* record) {
+        stdx::lock_guard<stdx::recursive_mutex> lock(_data->mutex);
         EphemeralForTestRecord rec(record->data.size());
         memcpy(rec.data.get(), record->data.data(), record->data.size());
 
-        RecordId loc;
-        if (_data->isOplog) {
-            StatusWith<RecordId> status =
-                extractAndCheckLocForOplog(lock, record->data.data(), record->data.size());
-            if (!status.isOK())
-                return status.getStatus();
-            loc = std::move(status.getValue());
-        } else {
-            loc = allocateLoc(lock);
+        if (record->id.isNull()) {
+            if (_data->isOplog) {
+                StatusWith<RecordId> status =
+                    extractAndCheckLocForOplog(lock, record->data.data(), record->data.size());
+                if (!status.isOK())
+                    return status.getStatus();
+                record->id = std::move(status.getValue());
+            } else {
+                record->id = allocateLoc(lock);
+            }
         }
-
         _data->dataSize += record->data.size();
-        _data->records[loc] = rec;
-        record->id = loc;
+        _data->records[record->id] = rec;
 
-        shard_role_details::getRecoveryUnit(opCtx)->onRollback(
-            [this, loc = std::move(loc)](OperationContext*) {
-                stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
+        ru.onRollback([this, loc = record->id](OperationContext*) {
+            stdx::lock_guard<stdx::recursive_mutex> lock(_data->mutex);
 
-                Records::iterator it = _data->records.find(loc);
-                if (it != _data->records.end()) {
-                    _data->dataSize -= it->second.size;
-                    _data->records.erase(it);
-                }
-            });
+            Records::iterator it = _data->records.find(loc);
+            if (it != _data->records.end()) {
+                _data->dataSize -= it->second.size;
+                _data->records.erase(it);
+            }
+        });
         return Status::OK();
     };
 
@@ -433,35 +395,16 @@ Status EphemeralForTestRecordStore::insertRecords(OperationContext* opCtx,
     return Status::OK();
 }
 
-StatusWith<RecordId> EphemeralForTestRecordStore::insertRecord(OperationContext* opCtx,
-                                                               const char* data,
-                                                               int len,
-                                                               Timestamp timestamp) {
-    return insertRecord(opCtx, RecordId(), data, len, timestamp);
-}
-
-StatusWith<RecordId> EphemeralForTestRecordStore::insertRecord(
-    OperationContext* opCtx, const RecordId& id, const char* data, int len, Timestamp timestamp) {
-    std::vector<Record> inOutRecords{Record{id, RecordData(data, len)}};
-    Status status = insertRecords(opCtx, &inOutRecords, std::vector<Timestamp>{timestamp});
-    if (!status.isOK())
-        return status;
-    return std::move(inOutRecords.front().id);
-}
-
-Status EphemeralForTestRecordStore::updateRecord(OperationContext* opCtx,
-                                                 const RecordId& loc,
-                                                 const char* data,
-                                                 int len) {
-    stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
+Status EphemeralForTestRecordStore::_updateRecord(
+    OperationContext* opCtx, RecoveryUnit& ru, const RecordId& loc, const char* data, int len) {
+    stdx::lock_guard<stdx::recursive_mutex> lock(_data->mutex);
     EphemeralForTestRecord* oldRecord = recordFor(lock, loc);
     int oldLen = oldRecord->size;
 
     EphemeralForTestRecord newRecord(len);
     memcpy(newRecord.data.get(), data, len);
 
-    shard_role_details::getRecoveryUnit(opCtx)->registerChange(
-        std::make_unique<RemoveChange>(_data, loc, *oldRecord));
+    ru.registerChange(std::make_unique<RemoveChange>(_data, loc, *oldRecord));
     _data->dataSize += len - oldLen;
     *oldRecord = newRecord;
     return Status::OK();
@@ -471,13 +414,15 @@ bool EphemeralForTestRecordStore::updateWithDamagesSupported() const {
     return true;
 }
 
-StatusWith<RecordData> EphemeralForTestRecordStore::updateWithDamages(OperationContext* opCtx,
-                                                                      const RecordId& loc,
-                                                                      const RecordData& oldRec,
-                                                                      const char* damageSource,
-                                                                      const DamageVector& damages) {
+StatusWith<RecordData> EphemeralForTestRecordStore::_updateWithDamages(
+    OperationContext* opCtx,
+    RecoveryUnit& ru,
+    const RecordId& loc,
+    const RecordData& oldRec,
+    const char* damageSource,
+    const DamageVector& damages) {
 
-    stdx::lock_guard<stdx::recursive_mutex> lock(_data->recordsMutex);
+    stdx::lock_guard<stdx::recursive_mutex> lock(_data->mutex);
 
     EphemeralForTestRecord* oldRecord = recordFor(lock, loc);
     const int len = std::accumulate(
@@ -487,8 +432,7 @@ StatusWith<RecordData> EphemeralForTestRecordStore::updateWithDamages(OperationC
 
     EphemeralForTestRecord newRecord(len);
 
-    shard_role_details::getRecoveryUnit(opCtx)->registerChange(
-        std::make_unique<RemoveChange>(_data, loc, *oldRecord));
+    ru.registerChange(std::make_unique<RemoveChange>(_data, loc, *oldRecord));
 
     char* root = newRecord.data.get();
     char* old = oldRecord->data.get();
@@ -525,34 +469,34 @@ StatusWith<RecordData> EphemeralForTestRecordStore::updateWithDamages(OperationC
 }
 
 std::unique_ptr<SeekableRecordCursor> EphemeralForTestRecordStore::getCursor(
-    OperationContext* opCtx, bool forward) const {
+    OperationContext* opCtx, RecoveryUnit& ru, bool forward) const {
     if (forward)
         return std::make_unique<Cursor>(opCtx, *this);
     return std::make_unique<ReverseCursor>(opCtx, *this);
 }
 
-std::unique_ptr<RecordCursor> EphemeralForTestRecordStore::getRandomCursor(
-    OperationContext*) const {
+std::unique_ptr<RecordCursor> EphemeralForTestRecordStore::getRandomCursor(OperationContext*,
+                                                                           RecoveryUnit&) const {
     return {};
 }
 
-Status EphemeralForTestRecordStore::truncate(OperationContext* opCtx) {
+Status EphemeralForTestRecordStore::_truncate(OperationContext* opCtx, RecoveryUnit& ru) {
     // Unlike other changes, TruncateChange mutates _data on construction to perform the
     // truncate
-    shard_role_details::getRecoveryUnit(opCtx)->registerChange(
+    ru.registerChange(
         std::make_unique<TruncateChange>(opCtx, _data, RecordId::minLong(), RecordId::maxLong()));
     return Status::OK();
 }
 
-Status EphemeralForTestRecordStore::rangeTruncate(OperationContext* opCtx,
-                                                  const RecordId& minRecordId,
-                                                  const RecordId& maxRecordId,
-                                                  int64_t hintDataSizeDiff,
-                                                  int64_t hintNumRecordsDiff) {
+Status EphemeralForTestRecordStore::_rangeTruncate(OperationContext* opCtx,
+                                                   RecoveryUnit& ru,
+                                                   const RecordId& minRecordId,
+                                                   const RecordId& maxRecordId,
+                                                   int64_t hintDataSizeDiff,
+                                                   int64_t hintNumRecordsDiff) {
     // Unlike other changes, TruncateChange mutates _data on construction to perform the
     // truncate.
-    shard_role_details::getRecoveryUnit(opCtx)->registerChange(
-        std::make_unique<TruncateChange>(opCtx, _data, minRecordId, maxRecordId));
+    ru.registerChange(std::make_unique<TruncateChange>(opCtx, _data, minRecordId, maxRecordId));
     return Status::OK();
 }
 
@@ -560,7 +504,9 @@ bool EphemeralForTestRecordStore::compactSupported() const {
     return false;
 }
 
-StatusWith<int64_t> EphemeralForTestRecordStore::compact(OperationContext*, const CompactOptions&) {
+StatusWith<int64_t> EphemeralForTestRecordStore::_compact(OperationContext*,
+                                                          RecoveryUnit&,
+                                                          const CompactOptions&) {
     return Status::OK();
 }
 
@@ -568,10 +514,21 @@ void EphemeralForTestRecordStore::validate(RecoveryUnit&,
                                            const CollectionValidation::ValidationOptions&,
                                            ValidateResults*) {}
 
+void EphemeralForTestRecordStore::reserveRecordIds(OperationContext* opCtx,
+                                                   RecoveryUnit& ru,
+                                                   std::vector<RecordId>* out,
+                                                   size_t nRecords) {
+    stdx::lock_guard<stdx::recursive_mutex> lock(_data->mutex);
+    for (size_t i = 0; i < nRecords; i++) {
+        out->push_back(allocateLoc(lock));
+    }
+}
+
 int64_t EphemeralForTestRecordStore::storageSize(RecoveryUnit&,
                                                  BSONObjBuilder* extraInfo,
                                                  int infoLevel) const {
     // Note: not making use of extraInfo or infoLevel since we don't have extents
+    stdx::lock_guard<stdx::recursive_mutex> lock(_data->mutex);
     const int64_t recordOverhead = numRecords() * sizeof(EphemeralForTestRecord);
     return _data->dataSize + recordOverhead;
 }
@@ -585,4 +542,9 @@ RecordId EphemeralForTestRecordStore::allocateLoc(WithLock) {
     invariant(out.isValid());
     return out;
 }
+
+RecordStore::RecordStoreContainer EphemeralForTestRecordStore::getContainer() {
+    return std::visit([](auto& v) -> RecordStore::RecordStoreContainer { return v; }, _container);
+}
+
 }  // namespace mongo

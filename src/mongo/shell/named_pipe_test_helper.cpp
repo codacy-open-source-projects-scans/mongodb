@@ -29,6 +29,24 @@
 
 #include "mongo/shell/named_pipe_test_helper.h"
 
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonmisc.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/local_catalog/virtual_collection_options.h"
+#include "mongo/db/pipeline/external_data_source_option_gen.h"
+#include "mongo/db/query/virtual_collection/input_stream.h"
+#include "mongo/db/query/virtual_collection/multi_bson_stream_cursor.h"
+#include "mongo/db/storage/record_data.h"
+#include "mongo/db/storage/record_store.h"
+#include "mongo/logv2/log.h"
+#include "mongo/platform/random.h"
+#include "mongo/stdx/thread.h"
+#include "mongo/transport/named_pipe/named_pipe.h"
+#include "mongo/util/assert_util.h"
+#include "mongo/util/static_immortal.h"
+#include "mongo/util/synchronized_value.h"
+
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -41,26 +59,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/catalog/virtual_collection_options.h"
-#include "mongo/db/pipeline/external_data_source_option_gen.h"
-#include "mongo/db/query/virtual_collection/input_stream.h"
-#include "mongo/db/query/virtual_collection/multi_bson_stream_cursor.h"
-#include "mongo/db/storage/record_data.h"
-#include "mongo/db/storage/record_store.h"
-#include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/platform/random.h"
-#include "mongo/stdx/thread.h"
-#include "mongo/transport/named_pipe/named_pipe.h"
-#include "mongo/util/assert_util.h"
-#include "mongo/util/static_immortal.h"
-#include "mongo/util/synchronized_value.h"
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kDefault
 
@@ -225,9 +223,10 @@ void NamedPipeHelper::writeToPipeObjects(std::string pipeDir,
     try {
         const int kNumBsonObjs = bsonObjs.size();
         NamedPipeOutput pipeWriter(pipeDir, pipeRelativePath, persistPipe);  // producer
+        LOGV2_INFO(8206002, "The pipe writer thread: pipe cleanup complete");
 
         pipeWriter.open();
-        LOGV2_INFO(8206002, "The pipe writer thread: pipe opened", "pipe"_attr = pipeRelativePath);
+        LOGV2_INFO(9211500, "The pipe writer thread: pipe opened", "pipe"_attr = pipeRelativePath);
         for (long i = 0; i < objects; ++i) {
             BSONObj bsonObj{bsonObjs[i % kNumBsonObjs]};
             pipeWriter.write(bsonObj.objdata(), bsonObj.objsize());

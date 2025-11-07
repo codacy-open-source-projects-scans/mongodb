@@ -29,14 +29,9 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <list>
-#include <memory>
-#include <vector>
-
 #include "mongo/db/cancelable_operation_context.h"
-#include "mongo/db/catalog/collection_options.h"
+#include "mongo/db/global_catalog/chunk_manager.h"
+#include "mongo/db/local_catalog/collection_options.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/oplog_entry.h"
@@ -50,13 +45,20 @@
 #include "mongo/db/s/resharding/resharding_oplog_batch_preparer.h"
 #include "mongo/db/s/resharding/resharding_oplog_session_application.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/s/chunk_manager.h"
 #include "mongo/s/resharding/common_types_gen.h"
 #include "mongo/util/cancellation.h"
 #include "mongo/util/future.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <list>
+#include <memory>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -141,6 +143,18 @@ private:
      */
     void _clearAppliedOpsAndStoreProgress(OperationContext* opCtx);
 
+    /**
+     * Returns true if the recipient has been configured to estimate the remaining time based on
+     * the exponential moving average of the time it takes to fetch and apply oplog entries.
+     */
+    bool _needToEstimateRemainingTimeBasedOnMovingAverage(OperationContext* opCtx);
+
+    /**
+     * Updates the average time to apply oplog entries based on the last oplog entry in the current
+     * batch if it is not empty.
+     */
+    void _updateAverageTimeToApplyOplogEntries(OperationContext* opCtx);
+
     std::unique_ptr<Env> _env;
 
     // Identifier for the oplog source.
@@ -161,6 +175,8 @@ private:
 
     // The source of the oplog entries to be applied.
     std::unique_ptr<ReshardingDonorOplogIteratorInterface> _oplogIter;
+
+    boost::optional<bool> _supportEstimatingRemainingTimeBasedOnMovingAverage;
 };
 
 }  // namespace mongo

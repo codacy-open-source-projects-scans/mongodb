@@ -28,12 +28,13 @@
  */
 #pragma once
 
+#include "mongo/db/process_health/health_observer.h"
+#include "mongo/db/service_context.h"
+#include "mongo/util/modules.h"
+
 #include <functional>
 #include <memory>
 #include <vector>
-
-#include "mongo/db/process_health/health_observer.h"
-#include "mongo/db/service_context.h"
 
 namespace mongo {
 namespace process_health {
@@ -42,7 +43,7 @@ namespace process_health {
  * Registration mechanism for all health observers.
  * This is static class not requiring an instance to work.
  */
-class HealthObserverRegistration {
+class MONGO_MOD_PUBLIC HealthObserverRegistration {
 public:
     /**
      * Registers a factory method, which will be invoked later to instantiate the observer.

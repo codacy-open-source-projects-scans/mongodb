@@ -29,12 +29,13 @@
 
 #pragma once
 
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
+
+#include <vector>
 
 namespace mongo {
 
@@ -45,7 +46,7 @@ namespace repl {
 /**
  * Arguments to the update position command.
  */
-class UpdatePositionArgs {
+class MONGO_MOD_PARENT_PRIVATE UpdatePositionArgs {
 public:
     static const char kCommandFieldName[];
     static const char kUpdateArrayFieldName[];

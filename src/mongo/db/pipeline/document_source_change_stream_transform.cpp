@@ -27,54 +27,52 @@
  *    it in the license file.
  */
 
+#include "mongo/db/pipeline/document_source_change_stream_transform.h"
 
-#include <boost/move/utility_core.hpp>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
-#include "mongo/bson/bsonobj.h"
-#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/db/basic_types.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/change_stream_helpers.h"
 #include "mongo/db/pipeline/document_source_change_stream.h"
-#include "mongo/db/pipeline/document_source_change_stream_transform.h"
 #include "mongo/db/pipeline/resume_token.h"
 #include "mongo/idl/idl_parser.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
 
-#define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kCommand
+#include <utility>
 
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
-using boost::intrusive_ptr;
-using boost::optional;
+namespace {
+// The following fields will be removed for query shape serialization.
+const StringDataSet kFieldsToRemoveForQueryShapeSerialization = {"version", "supportedEvents"};
+}  // namespace
 
 REGISTER_INTERNAL_DOCUMENT_SOURCE(_internalChangeStreamTransform,
                                   LiteParsedDocumentSourceChangeStreamInternal::parse,
                                   DocumentSourceChangeStreamTransform::createFromBson,
                                   true);
+ALLOCATE_DOCUMENT_SOURCE_ID(_internalChangeStreamTransform, DocumentSourceChangeStreamTransform::id)
 
-intrusive_ptr<DocumentSourceChangeStreamTransform> DocumentSourceChangeStreamTransform::create(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    const DocumentSourceChangeStreamSpec& spec) {
+boost::intrusive_ptr<DocumentSourceChangeStreamTransform>
+DocumentSourceChangeStreamTransform::create(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                                            const DocumentSourceChangeStreamSpec& spec) {
     return new DocumentSourceChangeStreamTransform(expCtx, spec);
 }
 
-intrusive_ptr<DocumentSourceChangeStreamTransform>
+boost::intrusive_ptr<DocumentSourceChangeStreamTransform>
 DocumentSourceChangeStreamTransform::createFromBson(
     BSONElement rawSpec, const boost::intrusive_ptr<ExpressionContext>& expCtx) {
     uassert(5467601,
             "the '$_internalChangeStreamTransform' object spec must be an object",
-            rawSpec.type() == BSONType::Object);
+            rawSpec.type() == BSONType::object);
     auto spec =
-        DocumentSourceChangeStreamSpec::parse(IDLParserContext("$changeStream"), rawSpec.Obj());
+        DocumentSourceChangeStreamSpec::parse(rawSpec.Obj(), IDLParserContext("$changeStream"));
+
+    uassert(10498501,
+            "Expecting 'supportedEvents' to be set only on a shard mongod, not on a router or "
+            "non-shard replica set member",
+            !spec.getSupportedEvents() || !change_stream::isRouterOrNonShardedReplicaSet(expCtx));
 
     // Set the change stream spec on the expression context.
     expCtx->setChangeStreamSpec(spec);
@@ -87,7 +85,7 @@ DocumentSourceChangeStreamTransform::DocumentSourceChangeStreamTransform(
     : DocumentSourceInternalChangeStreamStage(DocumentSourceChangeStreamTransform::kStageName,
                                               expCtx),
       _changeStreamSpec(std::move(spec)),
-      _transformer(expCtx, _changeStreamSpec),
+      _transformer(std::make_shared<ChangeStreamEventTransformer>(expCtx, _changeStreamSpec)),
       _isIndependentOfAnyCollection(expCtx->getNamespaceString().isCollectionlessAggregateNS()) {
 
     // Extract the resume token or high-water-mark from the spec.
@@ -98,7 +96,7 @@ DocumentSourceChangeStreamTransform::DocumentSourceChangeStreamTransform(
 }
 
 StageConstraints DocumentSourceChangeStreamTransform::constraints(
-    Pipeline::SplitState pipeState) const {
+    PipelineSplitState pipeState) const {
     StageConstraints constraints(StreamType::kStreaming,
                                  PositionRequirement::kNone,
                                  HostTypeRequirement::kNone,
@@ -112,142 +110,46 @@ StageConstraints DocumentSourceChangeStreamTransform::constraints(
     // This transformation could be part of a 'collectionless' change stream on an entire
     // database or cluster, mark as independent of any collection if so.
     constraints.isIndependentOfAnyCollection = _isIndependentOfAnyCollection;
+    constraints.consumesLogicalCollectionData = false;
     return constraints;
 }
 
-namespace {
-
-template <typename T>
-void serializeSpecField(BSONObjBuilder* builder,
-                        const SerializationOptions& opts,
-                        StringData fieldName,
-                        const boost::optional<T>& value) {
-    if (value) {
-        opts.serializeLiteral((*value).toBSON()).addToBsonObj(builder, fieldName);
-    }
-}
-
-template <>
-void serializeSpecField(BSONObjBuilder* builder,
-                        const SerializationOptions& opts,
-                        StringData fieldName,
-                        const boost::optional<Timestamp>& value) {
-    if (value) {
-        opts.serializeLiteral(*value).addToBsonObj(builder, fieldName);
-    }
-}
-
-template <typename T>
-void serializeSpecField(BSONObjBuilder* builder,
-                        const SerializationOptions& opts,
-                        StringData fieldName,
-                        const T& value) {
-    opts.appendLiteral(builder, fieldName, value);
-}
-
-template <>
-void serializeSpecField(BSONObjBuilder* builder,
-                        const SerializationOptions& opts,
-                        StringData fieldName,
-                        const mongo::OptionalBool& value) {
-    if (value.has_value()) {
-        opts.appendLiteral(builder, fieldName, value.value_or(true));
-    }
-}
-
-void serializeSpec(const DocumentSourceChangeStreamSpec& spec,
-                   const SerializationOptions& opts,
-                   BSONObjBuilder* builder) {
-    serializeSpecField(builder,
-                       opts,
-                       DocumentSourceChangeStreamSpec::kResumeAfterFieldName,
-                       spec.getResumeAfter());
-    serializeSpecField(
-        builder, opts, DocumentSourceChangeStreamSpec::kStartAfterFieldName, spec.getStartAfter());
-    serializeSpecField(builder,
-                       opts,
-                       DocumentSourceChangeStreamSpec::kStartAtOperationTimeFieldName,
-                       spec.getStartAtOperationTime());
-    serializeSpecField(builder,
-                       opts,
-                       DocumentSourceChangeStreamSpec::kFullDocumentFieldName,
-                       ::mongo::FullDocumentMode_serializer(spec.getFullDocument()));
-    serializeSpecField(
-        builder,
-        opts,
-        DocumentSourceChangeStreamSpec::kFullDocumentBeforeChangeFieldName,
-        ::mongo::FullDocumentBeforeChangeMode_serializer(spec.getFullDocumentBeforeChange()));
-    serializeSpecField(builder,
-                       opts,
-                       DocumentSourceChangeStreamSpec::kAllChangesForClusterFieldName,
-                       spec.getAllChangesForCluster());
-    serializeSpecField(builder,
-                       opts,
-                       DocumentSourceChangeStreamSpec::kShowMigrationEventsFieldName,
-                       spec.getShowMigrationEvents());
-    serializeSpecField(builder,
-                       opts,
-                       DocumentSourceChangeStreamSpec::kShowSystemEventsFieldName,
-                       spec.getShowSystemEvents());
-    serializeSpecField(builder,
-                       opts,
-                       DocumentSourceChangeStreamSpec::kAllowToRunOnConfigDBFieldName,
-                       spec.getAllowToRunOnConfigDB());
-    serializeSpecField(builder,
-                       opts,
-                       DocumentSourceChangeStreamSpec::kAllowToRunOnSystemNSFieldName,
-                       spec.getAllowToRunOnSystemNS());
-    serializeSpecField(builder,
-                       opts,
-                       DocumentSourceChangeStreamSpec::kShowExpandedEventsFieldName,
-                       spec.getShowExpandedEvents());
-    serializeSpecField(builder,
-                       opts,
-                       DocumentSourceChangeStreamSpec::kShowRawUpdateDescriptionFieldName,
-                       spec.getShowRawUpdateDescription());
-}
-
-}  // namespace
-
 Value DocumentSourceChangeStreamTransform::serialize(const SerializationOptions& opts) const {
-    if (opts.verbosity) {
-        return Value(Document{{DocumentSourceChangeStream::kStageName,
-                               Document{{"stage"_sd, "internalTransform"_sd},
-                                        {"options"_sd, _changeStreamSpec.toBSON(opts)}}}});
+    BSONObj serializedOptions = [&]() -> BSONObj {
+        BSONObj serialized = _changeStreamSpec.toBSON(opts);
+
+        if (opts.literalPolicy != LiteralSerializationPolicy::kUnchanged) {
+            // Explicitly remove specific fields from the '$changeStream' stage serialization for
+            // query shapes that should not have any influence on the query shape hash computation.
+            serialized = serialized.removeFields(kFieldsToRemoveForQueryShapeSerialization);
+        }
+
+        return serialized;
+    }();
+
+    if (opts.isSerializingForExplain()) {
+        return Value(Document{
+            {DocumentSourceChangeStream::kStageName,
+             Document{{"stage"_sd, "internalTransform"_sd}, {"options"_sd, serializedOptions}}}});
     }
 
     // Internal change stream stages are not serialized for query stats. Query stats uses this stage
     // to serialize the user specified stage, and therefore if serializing for query stats, we
     // should use the '$changeStream' stage name.
-    auto stageName =
-        (opts.literalPolicy != LiteralSerializationPolicy::kUnchanged || opts.transformIdentifiers)
+    auto stageName = (opts.isSerializingForQueryStats())
         ? DocumentSourceChangeStream::kStageName
         : DocumentSourceChangeStreamTransform::kStageName;
-    return Value(Document{{stageName, _changeStreamSpec.toBSON(opts)}});
+    return Value(Document{{stageName, serializedOptions}});
 }
 
 DepsTracker::State DocumentSourceChangeStreamTransform::getDependencies(DepsTracker* deps) const {
-    deps->fields.merge(_transformer.getFieldNameDependencies());
+    deps->fields.merge(_transformer->getFieldNameDependencies());
     return DepsTracker::State::EXHAUSTIVE_ALL;
 }
 
 DocumentSource::GetModPathsReturn DocumentSourceChangeStreamTransform::getModifiedPaths() const {
     // All paths are modified.
     return {DocumentSource::GetModPathsReturn::Type::kAllPaths, OrderedPathSet{}, {}};
-}
-
-DocumentSource::GetNextResult DocumentSourceChangeStreamTransform::doGetNext() {
-    uassert(50988,
-            "Illegal attempt to execute an internal change stream stage on router. A $changeStream "
-            "stage must be the first stage in a pipeline",
-            !pExpCtx->getInRouter());
-
-    auto input = pSource->getNext();
-    if (!input.isAdvanced()) {
-        return input;
-    }
-
-    return _transformer.applyTransformation(input.releaseDocument());
 }
 
 }  // namespace mongo

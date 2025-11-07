@@ -31,17 +31,21 @@
 
 #include "mongo/base/status.h"
 #include "mongo/bson/util/builder.h"
-// IWYU pragma: begin_exports
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_component_settings.h"
-#include "mongo/logv2/log_debug.h"
-#include "mongo/logv2/log_detail.h"
-#include "mongo/logv2/log_domain.h"
-#include "mongo/logv2/log_options.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/logv2/redaction.h"
-// IWYU pragma: end_exports
+#include "mongo/logv2/attribute_storage.h"       // IWYU pragma: export
+#include "mongo/logv2/log_attr.h"                // IWYU pragma: export
+#include "mongo/logv2/log_component.h"           // IWYU pragma: export
+#include "mongo/logv2/log_component_settings.h"  // IWYU pragma: export
+#include "mongo/logv2/log_debug.h"               // IWYU pragma: export
+#include "mongo/logv2/log_detail.h"              // IWYU pragma: export
+#include "mongo/logv2/log_domain.h"              // IWYU pragma: export
+#include "mongo/logv2/log_manager.h"             // IWYU pragma: export
+#include "mongo/logv2/log_options.h"             // IWYU pragma: export
+#include "mongo/logv2/log_severity.h"            // IWYU pragma: export
+#include "mongo/logv2/log_tag.h"                 // IWYU pragma: export
+#include "mongo/logv2/log_truncation.h"          // IWYU pragma: export
+#include "mongo/logv2/redaction.h"               // IWYU pragma: export
 #include "mongo/util/errno_util.h"
+#include "mongo/util/modules.h"
 
 // The logging macros below are documented in detail under docs/logging.md
 //
@@ -295,7 +299,7 @@
         ##__VA_ARGS__)
 
 namespace mongo::logv2 {
-inline bool shouldLog(LogComponent logComponent, LogSeverity severity) {
+MONGO_MOD_PUBLIC inline bool shouldLog(LogComponent logComponent, LogSeverity severity) {
     return LogManager::global().getGlobalSettings().shouldLog(logComponent, severity);
 }
 }  // namespace mongo::logv2

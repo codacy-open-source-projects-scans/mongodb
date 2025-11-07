@@ -3,21 +3,21 @@
 // and that indexes cannot be created on field paths that contain empty
 // fields.
 
-var coll = db.jstests_indexp;
+let coll = db.jstests_indexp;
 
 // Empty field checks.
-assert.commandFailed(coll.createIndex({'a..b': 1}));
-assert.commandFailed(coll.createIndex({'.a': 1}));
-assert.commandFailed(coll.createIndex({'a.': 1}));
-assert.commandFailed(coll.createIndex({'.': 1}));
-assert.commandFailed(coll.createIndex({'': 1}));
-assert.commandWorked(coll.createIndex({'a.b': 1}));
+assert.commandFailed(coll.createIndex({"a..b": 1}));
+assert.commandFailed(coll.createIndex({".a": 1}));
+assert.commandFailed(coll.createIndex({"a.": 1}));
+assert.commandFailed(coll.createIndex({".": 1}));
+assert.commandFailed(coll.createIndex({"": 1}));
+assert.commandWorked(coll.createIndex({"a.b": 1}));
 
 // '$'-prefixed field checks.
-assert.commandFailed(coll.createIndex({'$a': 1}));
-assert.commandFailed(coll.createIndex({'a.$b': 1}));
-assert.commandFailed(coll.createIndex({'$db': 1}));
-assert.commandWorked(coll.createIndex({'a$ap': 1}));   // $ in middle is ok
-assert.commandWorked(coll.createIndex({'a.$id': 1}));  // $id/$db/$ref are execptions
+assert.commandFailed(coll.createIndex({"$a": 1}));
+assert.commandFailed(coll.createIndex({"a.$b": 1}));
+assert.commandFailed(coll.createIndex({"$db": 1}));
+assert.commandWorked(coll.createIndex({"a$ap": 1})); // $ in middle is ok
+assert.commandWorked(coll.createIndex({"a.$id": 1})); // $id/$db/$ref are execptions
 
 coll.dropIndexes();

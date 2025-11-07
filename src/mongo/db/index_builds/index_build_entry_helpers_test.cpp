@@ -27,6 +27,24 @@
  *    it in the license file.
  */
 
+#include "mongo/db/index_builds/index_build_entry_helpers.h"
+
+#include "mongo/base/error_codes.h"
+#include "mongo/base/status.h"
+#include "mongo/base/status_with.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bsonobj.h"
+#include "mongo/db/index_builds/commit_quorum_options.h"
+#include "mongo/db/index_builds/index_build_entry_gen.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/catalog_test_fixture.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/net/hostandport.h"
+#include "mongo/util/uuid.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <memory>
@@ -36,25 +54,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 #include <fmt/format.h>
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/status.h"
-#include "mongo/base/status_with.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bsonobj.h"
-#include "mongo/db/catalog/catalog_test_fixture.h"
-#include "mongo/db/catalog_raii.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
-#include "mongo/db/index_builds/commit_quorum_options.h"
-#include "mongo/db/index_builds/index_build_entry_gen.h"
-#include "mongo/db/index_builds/index_build_entry_helpers.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/net/hostandport.h"
-#include "mongo/util/uuid.h"
 
 namespace mongo {
 
@@ -110,7 +109,6 @@ public:
         CatalogTestFixture::setUp();
 
         const UUID collectionUUID = UUID::gen();
-        const CommitQuorumOptions commitQuorum(CommitQuorumOptions::kMajority);
 
         // `_firstEntry` and `_secondEntry` are index builds on the same collection.
         _firstEntry = IndexBuildEntry(UUID::gen(),

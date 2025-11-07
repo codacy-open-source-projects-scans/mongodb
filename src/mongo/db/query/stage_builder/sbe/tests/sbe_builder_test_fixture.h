@@ -29,26 +29,27 @@
 
 #pragma once
 
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <memory>
-#include <tuple>
-#include <utility>
-
-#include "mongo/db/catalog/collection.h"
 #include "mongo/db/exec/sbe/sbe_plan_stage_test.h"
 #include "mongo/db/exec/sbe/stages/stages.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/local_catalog/collection.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/query_solution.h"
 #include "mongo/db/query/multiple_collection_accessor.h"
-#include "mongo/db/query/query_solution.h"
 #include "mongo/db/query/shard_filterer_factory_interface.h"
 #include "mongo/db/query/stage_builder/sbe/builder.h"
 #include "mongo/unittest/golden_test.h"
 #include "mongo/unittest/golden_test_base.h"
 #include "mongo/unittest/unittest.h"
+
+#include <memory>
+#include <tuple>
+#include <utility>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -71,6 +72,24 @@ using namespace mongo::unittest::match;
  */
 class SbeStageBuilderTestFixture : public sbe::PlanStageTestFixture {
 public:
+    struct BuildPlanStageParam {
+        boost::optional<boost::intrusive_ptr<ExpressionContext>> expCtx;
+        std::unique_ptr<ShardFiltererFactoryInterface> shardFilterInterface;
+        std::unique_ptr<CollatorInterface> collator;
+
+        boost::optional<int64_t> limit;
+        boost::optional<int64_t> skip;
+        mongo::OptionalBool tailable;
+
+        std::unique_ptr<FindCommandRequest> makeFindCmdReq(NamespaceString nss) {
+            auto findCommand = std::make_unique<FindCommandRequest>(nss);
+            findCommand->setLimit(limit);
+            findCommand->setSkip(skip);
+            findCommand->setTailable(tailable);
+            return findCommand;
+        }
+    };
+
     /**
      * Makes a QuerySolution from a QuerySolutionNode.
      */
@@ -93,8 +112,7 @@ public:
     buildPlanStage(std::unique_ptr<QuerySolution> querySolution,
                    MultipleCollectionAccessor& colls,
                    bool hasRecordId,
-                   std::unique_ptr<ShardFiltererFactoryInterface> shardFiltererFactoryInterface,
-                   std::unique_ptr<CollatorInterface> collator = nullptr);
+                   BuildPlanStageParam param = {});
 
     std::tuple<sbe::value::SlotVector,
                std::unique_ptr<sbe::PlanStage>,
@@ -104,15 +122,17 @@ public:
                    bool hasRecordId,
                    std::unique_ptr<ShardFiltererFactoryInterface> shardFiltererFactoryInterface,
                    std::unique_ptr<CollatorInterface> collator = nullptr) {
-        auto nullColl = MultipleCollectionAccessor(CollectionPtr::null);
+        auto nullColl = MultipleCollectionAccessor();
         return buildPlanStage(std::move(querySolution),
                               nullColl,
                               hasRecordId,
-                              std::move(shardFiltererFactoryInterface),
-                              std::move(collator));
+                              {.shardFilterInterface = std::move(shardFiltererFactoryInterface),
+                               .collator = std::move(collator)});
     }
 
 protected:
+    void insertDocuments(const NamespaceString& nss, const std::vector<BSONObj>& docs);
+
     const NamespaceString _nss =
         NamespaceString::createNamespaceString_forTest("testdb.sbe_stage_builder");
 };
@@ -129,10 +149,15 @@ public:
 protected:
     // Random uuid will fail the golden data test, replace it to a constant string.
     std::string replaceUuid(std::string input, UUID uuid);
-    void insertDocuments(const std::vector<BSONObj>& docs);
-    void runTest(std::unique_ptr<QuerySolutionNode> root, const mongo::BSONArray& expectedValue);
+    void createCollection(const std::vector<BSONObj>& docs,
+                          boost::optional<BSONObj> indexKeyPattern,
+                          CollectionOptions options = {});
+    void runTest(std::unique_ptr<QuerySolutionNode> root,
+                 const mongo::BSONArray& expectedValue,
+                 BuildPlanStageParam param = {});
 
     std::unique_ptr<GoldenTestContext> _gctx;
+    bool _collInitialized = false;
 };
 
 class GoldenSbeExprBuilderTestFixture : public GoldenSbeStageBuilderTestFixture {

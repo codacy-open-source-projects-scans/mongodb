@@ -29,13 +29,6 @@
 
 #pragma once
 
-#include <cstddef>
-#include <functional>
-#include <memory>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
@@ -50,18 +43,30 @@
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_set_config.h"
-#include "mongo/db/vector_clock_metadata_hook.h"
+#include "mongo/db/vector_clock/vector_clock_metadata_hook.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <cstddef>
+#include <functional>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
 
 namespace mongo {
 namespace repl {
 
 extern FailPoint stopReplProducer;
+
+};
+
+namespace MONGO_MOD_PARENT_PRIVATE repl {
 
 /**
  * The oplog fetcher, once started, reads operations from a remote oplog using a tailable,
@@ -140,9 +145,9 @@ public:
     using EnqueueDocumentsFn = std::function<Status(
         Documents::const_iterator begin, Documents::const_iterator end, const DocumentsInfo& info)>;
 
-    class OplogFetcherRestartDecision {
+    class MONGO_MOD_OPEN OplogFetcherRestartDecision {
     public:
-        OplogFetcherRestartDecision(){};
+        OplogFetcherRestartDecision() {};
 
         virtual ~OplogFetcherRestartDecision() = 0;
 
@@ -160,13 +165,13 @@ public:
 
     class OplogFetcherRestartDecisionDefault : public OplogFetcherRestartDecision {
     public:
-        OplogFetcherRestartDecisionDefault(std::size_t maxRestarts) : _maxRestarts(maxRestarts){};
+        OplogFetcherRestartDecisionDefault(std::size_t maxRestarts) : _maxRestarts(maxRestarts) {};
 
         bool shouldContinue(OplogFetcher* fetcher, Status status) final;
 
         void fetchSuccessful(OplogFetcher* fetcher) final;
 
-        ~OplogFetcherRestartDecisionDefault() override{};
+        ~OplogFetcherRestartDecisionDefault() override {};
 
     private:
         // Restarts since the last successful oplog query response.
@@ -276,11 +281,6 @@ public:
     FindCommandRequest makeFindCmdRequest_forTest(long long findTimeout) const;
 
     /**
-     * Returns the OpTime of the last oplog entry fetched and processed.
-     */
-    OpTime getLastOpTimeFetched_forTest() const;
-
-    /**
      * Returns the await data timeout used for the "maxTimeMS" field in getMore command requests.
      */
     Milliseconds getAwaitDataTimeout_forTest() const;
@@ -312,11 +312,10 @@ public:
      */
     Milliseconds getRetriedFindMaxTime_forTest() const;
 
-protected:
     /**
      * Returns the OpTime of the last oplog entry fetched and processed.
      */
-    virtual OpTime _getLastOpTimeFetched() const;
+    virtual OpTime getLastOpTimeFetched() const;
 
 private:
     // =============== AbstractAsyncComponent overrides ================
@@ -371,13 +370,6 @@ private:
      * response for the metadata field.
      */
     Status _createNewCursor(bool initialFind);
-
-    /**
-     * This function will create an `AggregateCommandRequest` object that will do a `$match` to find
-     * all entries greater than the last fetched timestamp.
-     */
-    AggregateCommandRequest _makeAggregateCommandRequest(long long maxTimeMs,
-                                                         Timestamp startTs) const;
 
     /**
      * This function will create the `find` query to issue to the sync source. It is provided with
@@ -535,5 +527,5 @@ public:
 
 typedef OplogFetcherFactoryImpl<OplogFetcher> CreateOplogFetcherFn;
 
-}  // namespace repl
+}  // namespace MONGO_MOD_PARENT_PRIVATE repl
 }  // namespace mongo

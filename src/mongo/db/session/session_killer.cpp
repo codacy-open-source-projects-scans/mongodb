@@ -33,9 +33,6 @@
 #include <boost/move/utility_core.hpp>
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
-#include <iterator>
-#include <utility>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/db/api_parameters.h"
 #include "mongo/db/client.h"
@@ -45,7 +42,9 @@
 #include "mongo/db/session/session_killer.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
-#include "mongo/util/destructor_guard.h"
+
+#include <iterator>
+#include <utility>
 
 namespace mongo {
 
@@ -58,7 +57,7 @@ SessionKiller::SessionKiller(Service* service, KillFunc killer)
     _thread = stdx::thread([this, service] {
         // This is the background killing thread
 
-        // TODO(SERVER-74658): Please revisit if this thread could be made killable.
+        // TODO(SERVER-111754): Please revisit if this thread could be made killable.
         ThreadClient tc("SessionKiller", service, ClientOperationKillableByStepdown{false});
 
         stdx::unique_lock<stdx::mutex> lk(_mutex);
@@ -93,7 +92,7 @@ SessionKiller::SessionKiller(Service* service, KillFunc killer)
 }
 
 SessionKiller::~SessionKiller() {
-    DESTRUCTOR_GUARD([&] {
+    try {
         {
             stdx::lock_guard<stdx::mutex> lk(_mutex);
             _inShutdown = true;
@@ -101,7 +100,9 @@ SessionKiller::~SessionKiller() {
         _killerCV.notify_one();
         _callerCV.notify_all();
         _thread.join();
-    }());
+    } catch (...) {
+        reportFailedDestructor(MONGO_SOURCE_LOCATION());
+    }
 }
 
 SessionKiller::ReapResult::ReapResult() : result(std::make_shared<boost::optional<Result>>()) {}

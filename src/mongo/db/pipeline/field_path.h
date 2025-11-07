@@ -29,19 +29,19 @@
 
 #pragma once
 
+#include "mongo/base/error_codes.h"
+#include "mongo/base/string_data.h"
+#include "mongo/bson/bson_depth.h"
+#include "mongo/db/exec/document_value/document_internal.h"
+#include "mongo/platform/compiler.h"
+#include "mongo/util/assert_util.h"
+
 #include <compare>
 #include <cstddef>
 #include <limits>
 #include <string>
 #include <utility>
 #include <vector>
-
-
-#include "mongo/base/error_codes.h"
-#include "mongo/base/string_data.h"
-#include "mongo/bson/bson_depth.h"
-#include "mongo/db/exec/document_value/document_internal.h"
-#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -80,7 +80,7 @@ public:
     /* implicit */ FieldPath(StringData inputPath,
                              bool precomputeHashes = false,
                              bool validateFieldNames = true)
-        : FieldPath(inputPath.toString(), precomputeHashes, validateFieldNames) {}
+        : FieldPath(std::string{inputPath}, precomputeHashes, validateFieldNames) {}
     /* implicit */ FieldPath(const char* inputPath,
                              bool precomputeHashes = false,
                              bool validateFieldNames = true)
@@ -96,7 +96,7 @@ public:
     /**
      * Get the subpath including path elements [0, n].
      */
-    StringData getSubpath(size_t n) const {
+    StringData getSubpath(size_t n) const MONGO_COMPILER_LIFETIME_BOUND {
         invariant(n + 1 < _fieldPathDotPosition.size());
         return StringData(_fieldPath.c_str(), _fieldPathDotPosition[n + 1]);
     }
@@ -104,21 +104,21 @@ public:
     /**
      * Return the first path component.
      */
-    StringData front() const {
+    StringData front() const MONGO_COMPILER_LIFETIME_BOUND {
         return getFieldName(0);
     }
 
     /**
      * Return the last path component.
      */
-    StringData back() const {
+    StringData back() const MONGO_COMPILER_LIFETIME_BOUND {
         return getFieldName(getPathLength() - 1);
     }
 
     /**
      * Return the ith field name from this path using zero-based indexes.
      */
-    StringData getFieldName(size_t i) const {
+    StringData getFieldName(size_t i) const MONGO_COMPILER_LIFETIME_BOUND {
         dassert(i < getPathLength());
         const auto begin = _fieldPathDotPosition[i] + 1;
         const auto end = _fieldPathDotPosition[i + 1];
@@ -127,10 +127,13 @@ public:
 
     /**
      * Return the ith field name from this path using zero-based indexes, with pre-computed hash.
+     * Tasserts when trying to access a field name hash for a position for which no hashes were
+     * calculated.
      */
-    HashedFieldName getFieldNameHashed(size_t i) const {
+    HashedFieldName getFieldNameHashed(size_t i) const MONGO_COMPILER_LIFETIME_BOUND {
         dassert(i < getPathLength());
-        invariant(_fieldHash[i] != kHashUninitialized);
+        tassert(
+            11212700, "cannot access a not-calculated field hash position", i < _fieldHash.size());
         return HashedFieldName{getFieldName(i), _fieldHash[i]};
     }
 
@@ -153,7 +156,7 @@ public:
      * Precondition getPathLength() > 1.
      */
     FieldPath tail() const {
-        massert(16409, "FieldPath::tail() called on single element path", getPathLength() > 1);
+        tassert(16409, "FieldPath::tail() called on single element path", getPathLength() > 1);
         return {_fieldPath.substr(_fieldPathDotPosition[1] + 1)};
     }
 
@@ -174,8 +177,24 @@ public:
             : lhsStr == rhsStr;
     }
 
+    FieldPath subtractPrefix(size_t prefixLength) const {
+        tassert(10985000,
+                "Expected prefixLength < numPathElements",
+                prefixLength + 1 < _fieldPathDotPosition.size());
+        if (prefixLength == 0) {
+            return *this;
+        }
+        return FieldPath(_fieldPath.substr(_fieldPathDotPosition[prefixLength] + 1));
+    }
+
+    friend std::string toStringForLogging(const FieldPath& x) {
+        // There are at least two ways of serializing 'FieldPath' (with and without the prefix). For
+        // the logging purposes the distinction is likely not too important, so we simply pick one.
+        return x.fullPath();
+    }
+
 private:
-    FieldPath(std::string string, std::vector<size_t> dots, std::vector<size_t> hashes)
+    FieldPath(std::string string, std::vector<size_t> dots, std::vector<uint32_t> hashes)
         : _fieldPath(std::move(string)),
           _fieldPathDotPosition(std::move(dots)),
           _fieldHash(std::move(hashes)) {
@@ -184,7 +203,7 @@ private:
                 _fieldPathDotPosition.size() <= BSONDepth::getMaxAllowableDepth());
     }
 
-    static const char prefix = '$';
+    static constexpr char prefix = '$';
 
     // Contains the full field path, with each field delimited by a '.' character.
     std::string _fieldPath;
@@ -194,10 +213,12 @@ private:
     // lookup.
     std::vector<size_t> _fieldPathDotPosition;
 
-    // Contains the hash value for the field names if it was requested when creating this path.
-    // Otherwise all elements are set to 'kHashUninitialized'.
-    std::vector<size_t> _fieldHash;
-    static constexpr std::size_t kHashUninitialized = std::numeric_limits<std::size_t>::max();
+    // Contains the hash values for the field names, if it was requested when creating this path.
+    // The hashes can be accessed via 'getFieldNameHashed(i)'.
+    // Can be empty if precomputing hashes was not requested.
+    // Can also be partially empty, with slots at the end not being fully filled, after
+    // concatenating two field paths of which the second did not have precomputed hashes.
+    std::vector<uint32_t> _fieldHash;
 };
 
 inline bool operator<(const FieldPath& lhs, const FieldPath& rhs) {
@@ -206,5 +227,10 @@ inline bool operator<(const FieldPath& lhs, const FieldPath& rhs) {
 
 inline bool operator==(const FieldPath& lhs, const FieldPath& rhs) {
     return lhs.fullPath() == rhs.fullPath();
+}
+
+template <typename H>
+H AbslHashValue(H h, const FieldPath& fieldPath) {
+    return H::combine(std::move(h), fieldPath.fullPath());
 }
 }  // namespace mongo

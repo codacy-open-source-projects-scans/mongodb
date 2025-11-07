@@ -29,26 +29,15 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <limits>
-#include <memory>
-#include <mutex>
-#include <queue>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/config.h"  // IWYU pragma: keep
+#include "mongo/executor/connection_pool_stats.h"
 #include "mongo/executor/egress_connection_closer.h"
 #include "mongo/executor/egress_connection_closer_manager.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
@@ -62,16 +51,29 @@
 #include "mongo/util/hierarchical_acquisition.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/net/ssl_options.h"
+#include "mongo/util/observable_mutex.h"
 #include "mongo/util/out_of_line_executor.h"
 #include "mongo/util/time_support.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <queue>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
 class BSONObjBuilder;
 
 namespace executor {
-
-struct ConnectionPoolStats;
 
 /**
  * The actual user visible connection pool.
@@ -109,13 +111,20 @@ public:
     static constexpr Milliseconds kDefaultRefreshRequirement = Minutes(1);
     static constexpr Milliseconds kDefaultRefreshTimeout = Seconds(20);
     static constexpr Milliseconds kHostRetryTimeout = Seconds(1);
+    static constexpr Milliseconds kDefaultBaseEstablishmentBackoffMS = Milliseconds(50);
+    static constexpr Milliseconds kDefaultMaxEstablishmentBackoffMS = Seconds(10);
+
+    /**
+     * Default value for limiting the size of a connection requests queue.
+     */
+    static constexpr size_t kDefaultConnectionRequestsMaxQueueDepth = 0;
 
     static const Status kConnectionStateUnknown;
 
     /**
      * Make a vanilla LimitController as a decent default option
      */
-    static std::shared_ptr<ControllerInterface> makeLimitController() noexcept;
+    static std::shared_ptr<ControllerInterface> makeLimitController();
 
     struct Options {
         Options() {}
@@ -159,6 +168,16 @@ public:
         Milliseconds hostTimeout = kDefaultHostTimeout;
 
         /**
+         * The base backoff delay for connection establishment retries for each specific pool.
+         */
+        Milliseconds baseEstablishmentBackoffMS = kDefaultBaseEstablishmentBackoffMS;
+
+        /**
+         * The maximum backoff delay for connection establishment retries for each specific pool.
+         */
+        Milliseconds maxEstablishmentBackoffMS = kDefaultMaxEstablishmentBackoffMS;
+
+        /**
          * An egress tag closer manager which will provide global access to this connection pool.
          * The manager set's tags and potentially drops connections that don't match those tags.
          *
@@ -181,41 +200,51 @@ public:
 
         std::function<std::shared_ptr<ControllerInterface>(void)> controllerFactory =
             &ConnectionPool::makeLimitController;
+
+        /**
+         * This parameter represents the limit on the size of connection requests queue. If this
+         * parameter is 0 then no checks and no rejections will be performed.
+         */
+        size_t connectionRequestsMaxQueueDepth = kDefaultConnectionRequestsMaxQueueDepth;
     };
 
     /**
-     * A set of flags describing the health of a host pool
+     * A set of states describing the health of a host pool:
      */
-    struct HostHealth {
+    enum class HostHealth {
         /**
-         * The pool is expired and can be shutdown by updateController
-         *
-         * This flag is set to true when there have been no connection requests or in use
-         * connections for ControllerInterface::hostTimeout().
-         *
-         * This flag is set to false whenever a connection is requested.
+         * The pool is healthy and will spawn new connections to reach the specified target.
          */
-        bool isExpired = false;
-
+        kHealthy,
         /**
-         *  The pool has processed a failure and will not spawn new connections until requested
+         * The pool is expired and can be shutdown by updateController.
+         * It is set when there have been no connection requests or in use connections for
+         * ControllerInterface::hostTimeout().
          *
-         *  This flag is set to true by processFailure(), and thus also triggerShutdown().
-         *
-         *  This flag is set to false whenever a connection is requested.
-         *
-         *  As a further note, this prevents us from spamming a failed host with connection
-         *  attempts. If an external user believes a host should be available, they can request
-         *  again.
+         * The host health will go back to `kHealthy` as soon as a connection is requested.
          */
-        bool isFailed = false;
-
+        kExpired,
+        /**
+         * The pool has processed a failure and will not spawn new connections until requested.
+         * It is set by processFailure() unless a shutdown has been triggered.
+         *
+         * As a further note, this prevents us from spamming a failed host with connection attempts.
+         * If an external user believes a host should be available, they can request again.
+         *
+         * The host health will go back to `kHealthy` as soon as a connection is requested.
+         */
+        kFailed,
         /**
          * The pool is shutdown and will never be called by the ConnectionPool again.
-         *
-         * This flag is set to true by triggerShutdown() or updateController(). It is never unset.
+         * It is set by triggerShutdown() or updateController(). It is never unset.
          */
-        bool isShutdown = false;
+        kShutdown,
+        /**
+         * The pool has received an overload failure during a connection setup.
+         * New connection spawns will happen with a backoff-with-jitter delay until the next
+         * returned connection gets refreshed or a setup succeeds.
+         */
+        kThrottle,
     };
 
     /**
@@ -224,7 +253,7 @@ public:
      * This should only be constructed by the SpecificPool.
      */
     struct HostState {
-        HostHealth health;
+        HostHealth health = HostHealth::kHealthy;
         size_t requests = 0;
         size_t pending = 0;
         size_t ready = 0;
@@ -264,13 +293,25 @@ public:
 
     void shutdown();
 
-    void dropConnections(const HostAndPort& hostAndPort) override;
+    /**
+     * Drops connection to a specific target in the connection pool and relays a message as to
+     * why the connection was dropped.
+     */
+    void dropConnections(const HostAndPort& target, const Status& status) override;
+    void dropConnections(const HostAndPort& target) {
+        dropConnections(
+            target,
+            Status(ErrorCodes::PooledConnectionsDropped, "Drop connections to a specific target"));
+    }
 
     /**
      * Drops all connections, but if a certain SpecificPool (and therefore HostAndPort) is
      * marked as keep open, that connection will not be dropped.
      */
-    void dropConnections() override;
+    void dropConnections(const Status& status) override;
+    void dropConnections() {
+        dropConnections(Status(ErrorCodes::PooledConnectionsDropped, "Drop all connections"));
+    }
 
     /**
      * Marks SpecificPool to be kept open for dropConnections(), must acquire connection pool
@@ -336,10 +377,13 @@ private:
     std::shared_ptr<ControllerInterface> _controller;
 
     // The global mutex for specific pool access and the generation counter
-    mutable stdx::mutex _mutex;
+    mutable ObservableMutex<stdx::mutex> _mutex;
     PoolId _nextPoolId = 0;
     stdx::unordered_map<HostAndPort, std::shared_ptr<SpecificPool>> _pools;
     bool _isShutDown = false;
+
+    // Preserves the total created connection count for SpecificPools that were destroyed.
+    stdx::unordered_map<HostAndPort, size_t> _cachedCreatedConnections;
 
     EgressConnectionCloserManager* _manager;
 
@@ -394,7 +438,14 @@ class ConnectionPool::ConnectionInterface : public TimerInterface {
     friend class ConnectionPool;
 
 public:
-    explicit ConnectionInterface(size_t generation) : _generation(generation) {}
+    /**
+     * Unique id of the connection within its SpecificPool.
+     * The type is wide enough to handle a long lifetime without overflow.
+     */
+    using PoolConnectionId = uint64_t;
+
+    explicit ConnectionInterface(PoolConnectionId id, size_t generation)
+        : _id{id}, _generation(generation) {}
 
     ~ConnectionInterface() override = default;
 
@@ -494,10 +545,12 @@ protected:
      */
     virtual void refresh(Milliseconds timeout, RefreshCallback cb) = 0;
 
+    PoolConnectionId _id;
+
 private:
     size_t _generation;
     Date_t _lastUsed;
-    size_t _timesUsed = 0;
+    AtomicWord<size_t> _timesUsed{0};
     Status _status = ConnectionPool::kConnectionStateUnknown;
 };
 
@@ -554,6 +607,12 @@ public:
     virtual Milliseconds pendingTimeout() const = 0;
     virtual Milliseconds toRefreshTimeout() const = 0;
 
+    virtual size_t connectionRequestsMaxQueueDepth() const = 0;
+    virtual size_t maxConnections() const = 0;
+
+    virtual Milliseconds baseEstablishmentBackoffMS() const = 0;
+    virtual Milliseconds maxEstablishmentBackoffMS() const = 0;
+
     /**
      * Get the name for this controller
      *
@@ -586,6 +645,8 @@ class ConnectionPool::DependentTypeFactoryInterface {
     DependentTypeFactoryInterface& operator=(const DependentTypeFactoryInterface&) = delete;
 
 public:
+    using PoolConnectionId = ConnectionInterface::PoolConnectionId;
+
     DependentTypeFactoryInterface() = default;
 
     virtual ~DependentTypeFactoryInterface() = default;
@@ -595,6 +656,7 @@ public:
      */
     virtual std::shared_ptr<ConnectionInterface> makeConnection(const HostAndPort& hostAndPort,
                                                                 transport::ConnectSSLMode sslMode,
+                                                                PoolConnectionId,
                                                                 size_t generation) = 0;
 
     /**

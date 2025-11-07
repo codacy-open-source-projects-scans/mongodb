@@ -28,101 +28,24 @@
  */
 
 
-#include <queue>
-#include <vector>
-
+#include "mongo/db/query/plan_ranker.h"
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/exec/plan_stats.h"
-#include "mongo/db/query/plan_ranker.h"
+#include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/redaction.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <queue>
+#include <vector>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
 
 namespace mongo::plan_ranker {
-namespace log_detail {
-void logScoreFormula(std::function<std::string()> formula,
-                     double score,
-                     double baseScore,
-                     double productivity,
-                     double noFetchBonus,
-                     double noSortBonus,
-                     double noIxisectBonus,
-                     double tieBreakers) {
-    LOGV2_DEBUG(
-        20961, 2, "Score formula", "formula"_attr = [&]() {
-            StringBuilder sb;
-            sb << "score(" << str::convertDoubleToString(score) << ") = baseScore("
-               << str::convertDoubleToString(baseScore) << ")"
-               << " + productivity(" << formula() << " = "
-               << str::convertDoubleToString(productivity) << ")"
-               << " + tieBreakers(" << str::convertDoubleToString(noFetchBonus)
-               << " noFetchBonus + " << str::convertDoubleToString(noSortBonus) << " noSortBonus + "
-               << str::convertDoubleToString(noIxisectBonus)
-               << " noIxisectBonus = " << str::convertDoubleToString(tieBreakers) << ")";
-            return sb.str();
-        }());
-}
-
-void logScoreBoost(double score) {
-    LOGV2_DEBUG(20962, 5, "Score boosted due to intersection forcing", "newScore"_attr = score);
-}
-
-void logScoringPlan(std::function<std::string()> solution,
-                    std::function<std::string()> explain,
-                    std::function<std::string()> planSummary,
-                    size_t planIndex,
-                    bool isEOF) {
-    LOGV2_DEBUG(20956,
-                5,
-                "Scoring plan",
-                "planIndex"_attr = planIndex,
-                "querySolution"_attr = redact(solution()),
-                "stats"_attr = redact(explain()));
-    LOGV2_DEBUG(20957,
-                2,
-                "Scoring query plan",
-                "planSummary"_attr = planSummary(),
-                "planHitEOF"_attr = isEOF);
-}
-
-void logScore(double score) {
-    LOGV2_DEBUG(20958, 5, "Basic plan score", "score"_attr = score);
-}
-
-void logEOFBonus(double eofBonus) {
-    LOGV2_DEBUG(20959, 5, "Adding EOF bonus to score", "eofBonus"_attr = eofBonus);
-}
-
-void logFailedPlan(std::function<std::string()> planSummary) {
-    LOGV2_DEBUG(
-        20960, 2, "Not scoring a plan because the plan failed", "planSummary"_attr = planSummary());
-}
-
-void logTieBreaking(double score,
-                    double docsExaminedBonus,
-                    double indexPrefixBonus,
-                    bool isPlanTied) {
-    LOGV2_DEBUG(
-        8027500, 2, "Tie breaking heuristics", "formula"_attr = [&]() {
-            StringBuilder sb;
-            sb << "isPlanTied: " << isPlanTied << ". finalScore("
-               << str::convertDoubleToString(score + docsExaminedBonus + indexPrefixBonus)
-               << ") = score(" << str::convertDoubleToString(score) << ") + docsExaminedBonus("
-               << str::convertDoubleToString(docsExaminedBonus) << ") + indexPrefixBonus("
-               << str::convertDoubleToString(indexPrefixBonus) << ")";
-            return sb.str();
-        }());
-}
-}  // namespace log_detail
 
 namespace {
 /**
@@ -149,6 +72,18 @@ protected:
     }
 
     bool hasStage(StageType type, const PlanStageStats* root) const final {
+        return hasStage(root,
+                        [type](const PlanStageStats& stage) { return stage.stageType == type; });
+    }
+
+    bool hasFetch(const PlanStageStats* root) const final {
+        return hasStage(root, [](const PlanStageStats& stage) {
+            return stage.specific && stage.specific->doesFetch();
+        });
+    }
+
+    bool hasStage(const PlanStageStats* root,
+                  std::function<bool(const PlanStageStats&)> filter) const {
         std::queue<const PlanStageStats*> remaining;
         remaining.push(root);
 
@@ -156,7 +91,7 @@ protected:
             auto stats = remaining.front();
             remaining.pop();
 
-            if (stats->stageType == type) {
+            if (filter(*stats)) {
                 return true;
             }
 
@@ -183,109 +118,6 @@ bool areNodesCompatible(const std::vector<const QuerySolutionNode*>& nodes) {
     }
 
     return true;
-}
-
-/**
- * Returns true if the value can serve as a type lower bound for the purposes of type bracketing.
- * The function is designed to work with the 'interesting' for index prefix heuristic types only:
- * Number, String, Date, Timestamp, Boolean, Object, Array, ObjectId. For other types it may return
- * false positive results. The code of the function is based on index bounds build logic from
- * 'index_bounds_builder.cpp'.
- */
-bool isLowerBound(const BSONElement& value, bool isInclusive) {
-    switch (value.type()) {
-        case NumberInt:
-        case NumberDouble:
-        case NumberLong:
-        case NumberDecimal:
-            // Lower bound value for numbers.
-            return (std::isinf(value.numberDouble()) || std::isnan(value.numberDouble())) &&
-                isInclusive == true;
-        case String:
-            // Lower bound value for strings.
-            return value.str().empty() && isInclusive == true;
-        case Date:
-            // Lower bound value for dates.
-            return value.date() == Date_t::min() && isInclusive == true;
-        case bsonTimestamp:
-            // Lower bound value for timestamps.
-            return value.timestamp() == Timestamp::min() && isInclusive == true;
-        case jstOID:
-            // Lower bound value for ObjectID.
-            return value.OID() == OID() && isInclusive == true;
-        case Object:
-        case Array:
-            // Lower bound value for Object and Array.
-            return value.Obj().isEmpty() && isInclusive == true;
-        case BinData:
-        case EOO:
-        case MinKey:
-        case MaxKey:
-        case Bool:  // Boolean bounds are considered always open since they are non-selective.
-        case jstNULL:
-        case Undefined:
-        case Symbol:
-        case RegEx:
-        case DBRef:
-        case Code:
-        case CodeWScope:
-            return true;
-    }
-
-    MONGO_UNREACHABLE_TASSERT(8102100);
-}
-
-/**
- * Returns true if the value can serve as a type upper bound for the purposes of type bracketing.
- * The function is designed to work with the 'interesting' for index prefix heuristic types only:
- * Number, String, Date, Timestamp, Boolean, Object, Array, ObjectId. For other types it may return
- * false positive results. The code of the function is based on index bounds build logic from
- * 'index_bounds_builder.cpp'.
- */
-bool isUpperBound(const BSONElement& value, bool isInclusive) {
-    switch (value.type()) {
-        case NumberInt:
-        case NumberDouble:
-        case NumberLong:
-        case NumberDecimal:
-            // Upper bound value for numbers.
-            return std::isinf(value.numberDouble()) && isInclusive == true;
-        case String:
-            // A string value cannot be an upper bound value.
-            return false;
-        case Date:
-            // Upper bound value for Date.
-            return value.date() == Date_t::max() && isInclusive == true;
-        case bsonTimestamp:
-            // Upper bound value for Timestamp.
-            return value.timestamp() == Timestamp::max() && isInclusive == true;
-        case jstOID:
-            // Upper bound value for ObjectID.
-            return value.OID() == OID::max() && isInclusive == true;
-        case Object:
-            // Upper bound value for String.
-            return value.Obj().isEmpty() && isInclusive == false;
-        case Array:
-            // Upper bound value for Object.
-            return value.Obj().isEmpty() && isInclusive == false;
-        case BinData:
-            // Upper bound value for Array.
-            return value.valuesize() == 0 && isInclusive == false;
-        case EOO:
-        case MinKey:
-        case MaxKey:
-        case Bool:  // Boolean bounds are considered always open since they are non-selective.
-        case jstNULL:
-        case Undefined:
-        case Symbol:
-        case RegEx:
-        case DBRef:
-        case Code:
-        case CodeWScope:
-            return true;
-    }
-
-    MONGO_UNREACHABLE_TASSERT(8102101);
 }
 
 /**
@@ -436,12 +268,30 @@ std::vector<size_t> applyIndexPrefixHeuristic(const std::vector<const QuerySolut
             }
         }
 
-        if (top.front()->getType() == STAGE_IXSCAN) {
+        if (top.front()->getType() == STAGE_IXSCAN ||
+            top.front()->getType() == STAGE_DISTINCT_SCAN) {
             std::vector<const IndexBounds*> bounds{};
             bounds.reserve(solutions.size());
 
-            for (auto node : top) {
-                bounds.emplace_back(&static_cast<const IndexScanNode*>(node)->bounds);
+            for (auto&& node : top) {
+                const IndexBounds* nodeBounds;
+                switch (node->getType()) {
+                    case STAGE_IXSCAN: {
+                        nodeBounds = &static_cast<const IndexScanNode*>(node)->bounds;
+                        break;
+                    }
+                    case STAGE_DISTINCT_SCAN: {
+                        nodeBounds = &static_cast<const DistinctNode*>(node)->bounds;
+                        break;
+                    }
+                    default: {
+                        tasserted(9844200,
+                                  str::stream()
+                                      << "Unexpected node type for index prefix heuristic "
+                                      << node->getType());
+                    }
+                }
+                bounds.emplace_back(nodeBounds);
             }
 
             scoreIndexBounds(bounds, solutionScores);

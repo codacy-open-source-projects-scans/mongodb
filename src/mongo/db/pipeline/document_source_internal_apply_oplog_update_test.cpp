@@ -27,25 +27,26 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <vector>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/document_source_internal_apply_oplog_update.h"
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
+#include "mongo/db/exec/agg/document_source_to_stage_registry.h"
+#include "mongo/db/exec/agg/mock_stage.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/pipeline/aggregation_context_fixture.h"
-#include "mongo/db/pipeline/document_source_internal_apply_oplog_update.h"
 #include "mongo/db/pipeline/document_source_mock.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
+
+#include <memory>
+#include <vector>
+
 
 namespace mongo {
 namespace {
@@ -77,20 +78,21 @@ TEST_F(DocumentSourceInternalApplyOplogUpdateTest, ShouldBeAbleToReParseSerializ
 TEST_F(DocumentSourceInternalApplyOplogUpdateTest, ShouldRejectNonObjectSpecs) {
     {
         auto spec = fromjson("{$_internalApplyOplogUpdate: 1}");
-
-        ASSERT_THROWS_CODE(DocumentSourceInternalApplyOplogUpdate::createFromBson(
-                               spec.firstElement(), getExpCtx()),
-                           DBException,
-                           6315901);
+        ASSERT_THROWS_CODE(
+            exec::agg::buildStage(DocumentSourceInternalApplyOplogUpdate::createFromBson(
+                spec.firstElement(), getExpCtx())),
+            DBException,
+            6315901);
     }
 
     {
         auto spec = fromjson("{$_internalApplyOplogUpdate: []}");
 
-        ASSERT_THROWS_CODE(DocumentSourceInternalApplyOplogUpdate::createFromBson(
-                               spec.firstElement(), getExpCtx()),
-                           DBException,
-                           6315901);
+        ASSERT_THROWS_CODE(
+            exec::agg::buildStage(DocumentSourceInternalApplyOplogUpdate::createFromBson(
+                spec.firstElement(), getExpCtx())),
+            DBException,
+            6315901);
     }
 }
 
@@ -99,39 +101,48 @@ TEST_F(DocumentSourceInternalApplyOplogUpdateTest, ShouldRejectMalformedSpecs) {
         R"({$_internalApplyOplogUpdate: {
                 oplogUpdate: {"$v": NumberInt(999999999), diff: {u: {b: 3}}}
            }})");
-    ASSERT_THROWS_CODE(
-        DocumentSourceInternalApplyOplogUpdate::createFromBson(spec.firstElement(), getExpCtx()),
-        DBException,
-        4772600);
+    ASSERT_THROWS_CODE(exec::agg::buildStage(DocumentSourceInternalApplyOplogUpdate::createFromBson(
+                           spec.firstElement(), getExpCtx())),
+                       DBException,
+                       4772600);
+
+    spec = fromjson(
+        R"({$_internalApplyOplogUpdate: {
+            oplogUpdate: {"$v": "2", diff: {u: {b: 3}}}
+           }})");
+    ASSERT_THROWS_CODE(exec::agg::buildStage(DocumentSourceInternalApplyOplogUpdate::createFromBson(
+                           spec.firstElement(), getExpCtx())),
+                       DBException,
+                       4772600);
 
     spec = fromjson(R"({$_internalApplyOplogUpdate: {oplogUpdate: {"$v": NumberInt(2)}}})");
-    ASSERT_THROWS_CODE(
-        DocumentSourceInternalApplyOplogUpdate::createFromBson(spec.firstElement(), getExpCtx()),
-        DBException,
-        4772601);
+    ASSERT_THROWS_CODE(exec::agg::buildStage(DocumentSourceInternalApplyOplogUpdate::createFromBson(
+                           spec.firstElement(), getExpCtx())),
+                       DBException,
+                       4772601);
 
     spec = fromjson("{$_internalApplyOplogUpdate: {}}");
-    ASSERT_THROWS_CODE(
-        DocumentSourceInternalApplyOplogUpdate::createFromBson(spec.firstElement(), getExpCtx()),
-        DBException,
-        ErrorCodes::IDLFailedToParse);
+    ASSERT_THROWS_CODE(exec::agg::buildStage(DocumentSourceInternalApplyOplogUpdate::createFromBson(
+                           spec.firstElement(), getExpCtx())),
+                       DBException,
+                       ErrorCodes::IDLFailedToParse);
 
     spec =
         fromjson(R"({$_internalApplyOplogUpdate: {foo: {"$v": NumberInt(2), diff: {u: {b: 3}}}}})");
-    ASSERT_THROWS_CODE(
-        DocumentSourceInternalApplyOplogUpdate::createFromBson(spec.firstElement(), getExpCtx()),
-        DBException,
-        40415);
+    ASSERT_THROWS_CODE(exec::agg::buildStage(DocumentSourceInternalApplyOplogUpdate::createFromBson(
+                           spec.firstElement(), getExpCtx())),
+                       DBException,
+                       40415);
 
     spec = fromjson(
         R"({$_internalApplyOplogUpdate: {
                 oplogUpdate: {"$v": NumberInt(2), diff: {u: {b: 3}}},
                 foo: 1
            }})");
-    ASSERT_THROWS_CODE(
-        DocumentSourceInternalApplyOplogUpdate::createFromBson(spec.firstElement(), getExpCtx()),
-        DBException,
-        40415);
+    ASSERT_THROWS_CODE(exec::agg::buildStage(DocumentSourceInternalApplyOplogUpdate::createFromBson(
+                           spec.firstElement(), getExpCtx())),
+                       DBException,
+                       40415);
 }
 
 TEST_F(DocumentSourceInternalApplyOplogUpdateTest, UpdateMultipleDocuments) {
@@ -140,13 +151,14 @@ TEST_F(DocumentSourceInternalApplyOplogUpdateTest, UpdateMultipleDocuments) {
                 oplogUpdate: {"$v": NumberInt(2), diff: {sb: {u: {c: 3}}}}
            }})");
 
-    auto stage =
+    auto source =
         DocumentSourceInternalApplyOplogUpdate::createFromBson(spec.firstElement(), getExpCtx());
-    auto mock = DocumentSourceMock::createForTest({Document{{"a", 0}},
-                                                   Document{{"a", 1}, {"b", 1}},
-                                                   Document{{"a", 2}, {"b", Document{{"c", 1}}}},
-                                                   Document{{"a", 3}, {"b", Document{{"d", 2}}}}},
-                                                  getExpCtx());
+    auto stage = exec::agg::buildStage(source);
+    auto mock = exec::agg::MockStage::createForTest({Document{{"a", 0}},
+                                                     Document{{"a", 1}, {"b", 1}},
+                                                     Document{{"a", 2}, {"b", Document{{"c", 1}}}},
+                                                     Document{{"a", 3}, {"b", Document{{"d", 2}}}}},
+                                                    getExpCtx());
     stage->setSource(mock.get());
 
     auto next = stage->getNext();
@@ -180,9 +192,10 @@ TEST_F(DocumentSourceInternalApplyOplogUpdateTest, ShouldErrorOnInvalidDiffs) {
             R"({$_internalApplyOplogUpdate: {
                     oplogUpdate: {"$v": NumberInt(2), diff: {}}
                }})");
-        auto stage = DocumentSourceInternalApplyOplogUpdate::createFromBson(spec.firstElement(),
-                                                                            getExpCtx());
-        auto mock = DocumentSourceMock::createForTest({Document{{"a", 0}}}, getExpCtx());
+        auto source = DocumentSourceInternalApplyOplogUpdate::createFromBson(spec.firstElement(),
+                                                                             getExpCtx());
+        auto stage = exec::agg::buildStage(source);
+        auto mock = exec::agg::MockStage::createForTest({Document{{"a", 0}}}, getExpCtx());
         stage->setSource(mock.get());
         ASSERT_THROWS_CODE(stage->getNext(), DBException, 4770500);
     }
@@ -192,9 +205,10 @@ TEST_F(DocumentSourceInternalApplyOplogUpdateTest, ShouldErrorOnInvalidDiffs) {
             R"({$_internalApplyOplogUpdate: {
                     oplogUpdate: {"$v": NumberInt(2), diff: {q: {z: -7}}}
                }})");
-        auto stage = DocumentSourceInternalApplyOplogUpdate::createFromBson(spec.firstElement(),
-                                                                            getExpCtx());
-        auto mock = DocumentSourceMock::createForTest({Document{{"a", 0}}}, getExpCtx());
+        auto source = DocumentSourceInternalApplyOplogUpdate::createFromBson(spec.firstElement(),
+                                                                             getExpCtx());
+        auto stage = exec::agg::buildStage(source);
+        auto mock = exec::agg::MockStage::createForTest({Document{{"a", 0}}}, getExpCtx());
         stage->setSource(mock.get());
         ASSERT_THROWS_CODE(stage->getNext(), DBException, 4770503);
     }
@@ -204,9 +218,10 @@ TEST_F(DocumentSourceInternalApplyOplogUpdateTest, ShouldErrorOnInvalidDiffs) {
             R"({$_internalApplyOplogUpdate: {
                     oplogUpdate: {"$v": NumberInt(2), diff: {"": {z: -7}}}
                }})");
-        auto stage = DocumentSourceInternalApplyOplogUpdate::createFromBson(spec.firstElement(),
-                                                                            getExpCtx());
-        auto mock = DocumentSourceMock::createForTest({Document{{"a", 0}}}, getExpCtx());
+        auto source = DocumentSourceInternalApplyOplogUpdate::createFromBson(spec.firstElement(),
+                                                                             getExpCtx());
+        auto stage = exec::agg::buildStage(source);
+        auto mock = exec::agg::MockStage::createForTest({Document{{"a", 0}}}, getExpCtx());
         stage->setSource(mock.get());
         ASSERT_THROWS_CODE(stage->getNext(), DBException, 4770505);
     }
@@ -216,9 +231,10 @@ TEST_F(DocumentSourceInternalApplyOplogUpdateTest, ShouldErrorOnInvalidDiffs) {
             R"({$_internalApplyOplogUpdate: {
                     oplogUpdate: {"$v": NumberInt(2), diff: {sa: []}}
                }})");
-        auto stage = DocumentSourceInternalApplyOplogUpdate::createFromBson(spec.firstElement(),
-                                                                            getExpCtx());
-        auto mock = DocumentSourceMock::createForTest({Document{{"a", 0}}}, getExpCtx());
+        auto source = DocumentSourceInternalApplyOplogUpdate::createFromBson(spec.firstElement(),
+                                                                             getExpCtx());
+        auto stage = exec::agg::buildStage(source);
+        auto mock = exec::agg::MockStage::createForTest({Document{{"a", 0}}}, getExpCtx());
         stage->setSource(mock.get());
         ASSERT_THROWS_CODE(stage->getNext(), DBException, 4770507);
     }

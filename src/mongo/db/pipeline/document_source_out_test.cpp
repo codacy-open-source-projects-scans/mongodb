@@ -27,14 +27,7 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_set.h>
-#include <boost/smart_ptr.hpp>
-#include <string>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
+#include "mongo/db/pipeline/document_source_out.h"
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -42,16 +35,20 @@
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/document_value_test_util.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/pipeline/document_source_out.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/process_interface/stub_mongo_process_interface.h"
 #include "mongo/db/pipeline/serverless_aggregation_context_fixture.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/idl/server_parameter_test_util.h"
-#include "mongo/s/chunk_version.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/db/versioning_protocol/chunk_version.h"
+#include "mongo/idl/server_parameter_test_controller.h"
+#include "mongo/unittest/unittest.h"
+
+#include <string>
+#include <vector>
+
+#include <boost/smart_ptr.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 namespace {
@@ -72,7 +69,9 @@ public:
      * of just "_id".
      */
     std::vector<FieldPath> collectDocumentKeyFieldsActingAsRouter(
-        OperationContext* opCtx, const NamespaceString& nss) const override {
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        RoutingContext* routingCtx = nullptr) const override {
         return {"_id"};
     }
 
@@ -110,15 +109,13 @@ TEST_F(DocumentSourceOutTest, FailsToParseIncorrectType) {
 }
 
 TEST_F(DocumentSourceOutTest, AcceptsStringArgument) {
-    BSONObj spec = BSON("$out"
-                        << "some_collection");
+    BSONObj spec = BSON("$out" << "some_collection");
     auto outStage = createOutStage(spec);
     ASSERT_EQ(outStage->getOutputNs().coll(), "some_collection");
 }
 
 TEST_F(DocumentSourceOutTest, SerializeToString) {
-    BSONObj spec = BSON("$out"
-                        << "some_collection");
+    BSONObj spec = BSON("$out" << "some_collection");
     auto outStage = createOutStage(spec);
     auto serialized = outStage->serialize().getDocument();
     ASSERT_EQ(serialized["$out"]["coll"].getStringData(), "some_collection");
@@ -191,9 +188,9 @@ TEST_F(DocumentSourceOutServerlessTest,
         NamespaceString::createNamespaceString_forTest(tenantId, "test", "testColl");
     std::vector<BSONObj> pipeline;
 
-    auto stageSpec = BSON("$out"
-                          << "some_collection");
-    auto liteParsedLookup = DocumentSourceOut::LiteParsed::parse(nss, stageSpec.firstElement());
+    auto stageSpec = BSON("$out" << "some_collection");
+    auto liteParsedLookup =
+        DocumentSourceOut::LiteParsed::parse(nss, stageSpec.firstElement(), LiteParserOptions{});
     auto namespaceSet = liteParsedLookup->getInvolvedNamespaces();
     ASSERT_EQ(1, namespaceSet.size());
     ASSERT_EQ(1ul,
@@ -202,11 +199,11 @@ TEST_F(DocumentSourceOutServerlessTest,
 
     // The tenantId for the outputNs should be the same as that on the expCtx despite outputting
     // into different dbs.
-    stageSpec = BSON("$out" << BSON("db"
-                                    << "target_db"
-                                    << "coll"
-                                    << "some_collection"));
-    liteParsedLookup = DocumentSourceOut::LiteParsed::parse(nss, stageSpec.firstElement());
+    stageSpec = BSON("$out" << BSON("db" << "target_db"
+                                         << "coll"
+                                         << "some_collection"));
+    liteParsedLookup =
+        DocumentSourceOut::LiteParsed::parse(nss, stageSpec.firstElement(), LiteParserOptions{});
     namespaceSet = liteParsedLookup->getInvolvedNamespaces();
     ASSERT_EQ(1, namespaceSet.size());
     ASSERT_EQ(1ul,

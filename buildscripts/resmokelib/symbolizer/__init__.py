@@ -1,5 +1,6 @@
 """Wrapper around mongosym to download everything required."""
 
+import argparse
 import logging
 import os
 import shutil
@@ -24,7 +25,7 @@ _MESSAGE = """TODO"""
 
 _COMMAND = "symbolize"
 
-DEFAULT_SYMBOLIZER_LOCATION = "/opt/mongodbtoolchain/v4/bin/llvm-symbolizer"
+DEFAULT_SYMBOLIZER_LOCATION = "/opt/mongodbtoolchain/v5/bin/llvm-symbolizer"
 
 
 class Symbolizer(Subcommand):
@@ -45,6 +46,8 @@ class Symbolizer(Subcommand):
         self.mongosym_args = all_args
         self.download_symbols_only = download_symbols_only
 
+        self.logger = logger or self.setup_logger()
+
         self.evg_api: evergreen_conn.RetryingEvergreenApi = evergreen_conn.get_evergreen_api()
         self.multiversion_setup = self._get_multiversion_setup()
         self.task_info = self.evg_api.task_by_id(task_id)
@@ -62,8 +65,6 @@ class Symbolizer(Subcommand):
             os.makedirs(src_parent_dir)
         except FileExistsError:
             pass
-
-        self.logger = logger or self.setup_logger()
 
     @staticmethod
     def setup_logger(debug=False) -> logging.Logger:
@@ -115,7 +116,9 @@ class Symbolizer(Subcommand):
             download_options = _DownloadOptions(db=False, ds=True, da=False, dv=False)
         else:
             download_options = _DownloadOptions(db=True, ds=True, da=False, dv=False)
-        return SetupMultiversion(download_options=download_options, ignore_failed_push=True)
+        return SetupMultiversion(
+            download_options=download_options, ignore_failed_push=True, logger=self.logger
+        )
 
     def _get_compile_artifacts(self):
         """Download compile artifacts from Evergreen."""
@@ -288,7 +291,14 @@ class SymbolizerPlugin(PluginInterface):
         )
         mongosymb.make_argument_parser(group)
 
-    def parse(self, subcommand, parser, parsed_args, **kwargs):
+    def parse(
+        self,
+        subcommand: str,
+        parser: argparse.ArgumentParser,
+        parsed_args: dict,
+        should_configure_otel: bool = True,
+        **kwargs,
+    ):
         """
         Return Symbolizer if command is one we recognize.
 
@@ -302,14 +312,14 @@ class SymbolizerPlugin(PluginInterface):
         if subcommand != _COMMAND:
             return None
 
-        task_id = parsed_args.task_id
-        binary_name = parsed_args.binary_name
-        download_symbols_only = parsed_args.download_symbols_only
+        task_id = parsed_args["task_id"]
+        binary_name = parsed_args["binary_name"]
+        download_symbols_only = parsed_args["download_symbols_only"]
 
         return Symbolizer(
             task_id,
             download_symbols_only=download_symbols_only,
             bin_name=binary_name,
             all_args=parsed_args,
-            logger=Symbolizer.setup_logger(parsed_args.debug),
+            logger=Symbolizer.setup_logger(parsed_args["debug"]),
         )

@@ -30,8 +30,9 @@
 #include "mongo/util/concurrency/ticketholder.h"
 
 #include "mongo/db/operation_context.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/ticketholder.h"
+#include "mongo/util/concurrency/ticketholder_parameters_gen.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/tick_source.h"
@@ -44,13 +45,18 @@ TicketHolder::TicketHolder(ServiceContext* serviceContext,
                            int numTickets,
                            bool trackPeakUsed,
                            std::int32_t maxQueueDepth,
+                           DelinquentCallback delinquentCallback,
                            ResizePolicy resizePolicy)
     : _trackPeakUsed(trackPeakUsed),
       _resizePolicy(resizePolicy),
       _serviceContext(serviceContext),
       _tickets(numTickets),
       _maxQueueDepth(maxQueueDepth),
-      _outof(numTickets) {}
+      _outof(numTickets),
+      _reportDelinquentOpCallback(delinquentCallback) {
+    _enabledDelinquent = gFeatureFlagRecordDelinquentMetrics.isEnabled();
+    _delinquentMs = Milliseconds(gDelinquentAcquisitionIntervalMillis.load());
+}
 
 bool TicketHolder::resize(OperationContext* opCtx, int32_t newSize, Date_t deadline) {
     stdx::lock_guard<stdx::mutex> lk(_resizeMutex);
@@ -67,6 +73,9 @@ bool TicketHolder::resize(OperationContext* opCtx, int32_t newSize, Date_t deadl
                     _outof.fetchAndAdd(1);
                 }
             } else {
+                tassert(10330200,
+                        "TicketHolder: OperationContext must be provided for gradual resize",
+                        opCtx);
                 // Make sure the operation isn't interrupted before waiting for tickets.
                 opCtx->checkForInterrupt();
                 // Take tickets one-by-one without releasing.
@@ -102,15 +111,15 @@ void TicketHolder::_immediateResize(WithLock, int32_t newSize) {
     }
 }
 
-void TicketHolder::_releaseTicketUpdateStats(Ticket& ticket) noexcept {
+void TicketHolder::_releaseTicketUpdateStats(Ticket& ticket) {
     if (ticket._priority == AdmissionContext::Priority::kExempt) {
-        _updateQueueStatsOnRelease(_exemptQueueStats, ticket);
+        _updateQueueStatsOnRelease(_exemptStats, ticket);
         return;
     }
 
     ticket._admissionContext->markTicketReleased();
 
-    _updateQueueStatsOnRelease(_normalPriorityQueueStats, ticket);
+    _updateQueueStatsOnRelease(_holderStats, ticket);
     _releaseNormalPriorityTicket(ticket._admissionContext);
 }
 
@@ -139,16 +148,16 @@ boost::optional<Ticket> TicketHolder::_waitForTicketUntilMaybeInterruptible(
     }
 
     auto tickSource = _serviceContext->getTickSource();
-    _normalPriorityQueueStats.totalAddedQueue.fetchAndAddRelaxed(1);
+    _holderStats.totalAddedQueue.fetchAndAddRelaxed(1);
     ON_BLOCK_EXIT([&, startWaitTime = tickSource->getTicks()] {
         auto waitDelta = tickSource->ticksTo<Microseconds>(tickSource->getTicks() - startWaitTime);
-        _normalPriorityQueueStats.totalTimeQueuedMicros.fetchAndAddRelaxed(waitDelta.count());
-        _normalPriorityQueueStats.totalRemovedQueue.fetchAndAddRelaxed(1);
+        _holderStats.totalTimeQueuedMicros.fetchAndAddRelaxed(waitDelta.count());
+        _holderStats.totalRemovedQueue.fetchAndAddRelaxed(1);
     });
 
     ScopeGuard cancelWait([&] {
         // Update statistics.
-        _normalPriorityQueueStats.totalCanceled.fetchAndAddRelaxed(1);
+        _holderStats.totalCanceled.fetchAndAddRelaxed(1);
     });
 
     WaitingForAdmissionGuard waitForAdmission(admCtx, _serviceContext->getTickSource());
@@ -156,8 +165,7 @@ boost::optional<Ticket> TicketHolder::_waitForTicketUntilMaybeInterruptible(
 
     if (ticket) {
         cancelWait.dismiss();
-        _updateQueueStatsOnTicketAcquisition(
-            admCtx, _normalPriorityQueueStats, admCtx->getPriority());
+        _updateQueueStatsOnTicketAcquisition(admCtx, _holderStats, admCtx->getPriority());
         _updatePeakUsed();
         return ticket;
     } else {
@@ -223,13 +231,13 @@ boost::optional<Ticket> TicketHolder::_performWaitForTicketUntil(OperationContex
 boost::optional<Ticket> TicketHolder::tryAcquire(AdmissionContext* admCtx) {
     const auto currentPriority = admCtx->getPriority();
     if (currentPriority == AdmissionContext::Priority::kExempt) {
-        _updateQueueStatsOnTicketAcquisition(admCtx, _exemptQueueStats, currentPriority);
+        _updateQueueStatsOnTicketAcquisition(admCtx, _exemptStats, currentPriority);
         return Ticket{this, admCtx};
     }
 
     auto ticket = _tryAcquireNormalPriorityTicket(admCtx);
     if (ticket) {
-        _updateQueueStatsOnTicketAcquisition(admCtx, _normalPriorityQueueStats, currentPriority);
+        _updateQueueStatsOnTicketAcquisition(admCtx, _holderStats, currentPriority);
         _updatePeakUsed();
     }
 
@@ -266,21 +274,24 @@ void TicketHolder::_updatePeakUsed() {
     }
 }
 
-void TicketHolder::appendStats(BSONObjBuilder& b) const {
+void TicketHolder::appendExemptStats(BSONObjBuilder& b) const {
+    _appendQueueStats(b, _exemptStats);
+}
+
+void TicketHolder::appendHolderStats(BSONObjBuilder& b) const {
+    _appendQueueStats(b, _holderStats);
+    b.append("totalDelinquentAcquisitions",
+             _delinquencyStats.totalDelinquentAcquisitions.loadRelaxed());
+    b.append("totalAcquisitionDelinquencyMillis",
+             _delinquencyStats.totalAcquisitionDelinquencyMillis.loadRelaxed());
+    b.append("maxAcquisitionDelinquencyMillis",
+             _delinquencyStats.maxAcquisitionDelinquencyMillis.loadRelaxed());
+}
+
+void TicketHolder::appendTicketStats(BSONObjBuilder& b) const {
     b.append("out", used());
     b.append("available", available());
     b.append("totalTickets", outof());
-    {
-        BSONObjBuilder bb(b.subobjStart("exempt"));
-        _appendQueueStats(bb, _exemptQueueStats);
-        bb.done();
-    }
-
-    {
-        BSONObjBuilder bb(b.subobjStart("normalPriority"));
-        _appendQueueStats(bb, _normalPriorityQueueStats);
-        bb.done();
-    }
 }
 
 void TicketHolder::_appendQueueStats(BSONObjBuilder& b, const QueueStats& stats) const {
@@ -309,6 +320,11 @@ void TicketHolder::_updateQueueStatsOnRelease(TicketHolder::QueueStats& queueSta
     auto delta =
         tickSource->ticksTo<Microseconds>(tickSource->getTicks() - ticket._acquisitionTime);
     queueStats.totalTimeProcessingMicros.fetchAndAddRelaxed(delta.count());
+
+    if (_enabledDelinquent && _reportDelinquentOpCallback && delta > _delinquentMs) {
+        _reportDelinquentOpCallback(ticket.getAdmissionContext(),
+                                    duration_cast<Milliseconds>(delta));
+    }
 }
 
 void TicketHolder::_updateQueueStatsOnTicketAcquisition(AdmissionContext* admCtx,
@@ -322,17 +338,21 @@ void TicketHolder::_updateQueueStatsOnTicketAcquisition(AdmissionContext* admCtx
         admCtx->recordExemptedAdmission();
     }
 
+    if (priority == AdmissionContext::Priority::kLow) {
+        admCtx->recordLowAdmission();
+    }
+
     admCtx->recordAdmission();
     queueStats.totalStartedProcessing.fetchAndAddRelaxed(1);
 }
 
 int64_t TicketHolder::numFinishedProcessing() const {
-    return _normalPriorityQueueStats.totalFinishedProcessing.load();
+    return _holderStats.totalFinishedProcessing.load();
 }
 
 int64_t TicketHolder::queued() const {
-    auto removed = _normalPriorityQueueStats.totalRemovedQueue.loadRelaxed();
-    auto added = _normalPriorityQueueStats.totalAddedQueue.loadRelaxed();
+    auto removed = _holderStats.totalRemovedQueue.loadRelaxed();
+    auto added = _holderStats.totalAddedQueue.loadRelaxed();
     return std::max(added - removed, (int64_t)0);
 };
 
@@ -340,7 +360,7 @@ int32_t TicketHolder::available() const {
     return _tickets.load();
 }
 
-void TicketHolder::_releaseNormalPriorityTicket(AdmissionContext* admCtx) noexcept {
+void TicketHolder::_releaseNormalPriorityTicket(AdmissionContext* admCtx) {
     // Notifying a futex costs a syscall. Since queued waiters guarantee that the `_waiterCount` is
     // non-zero while they are waiting, we can avoid the needless cost if there are tickets and no
     // queued waiters.
@@ -351,7 +371,7 @@ void TicketHolder::_releaseNormalPriorityTicket(AdmissionContext* admCtx) noexce
 }
 
 void TicketHolder::setNumFinishedProcessing_forTest(int32_t numFinishedProcessing) {
-    _normalPriorityQueueStats.totalFinishedProcessing.store(numFinishedProcessing);
+    _holderStats.totalFinishedProcessing.store(numFinishedProcessing);
 }
 
 void TicketHolder::setPeakUsed_forTest(int32_t used) {
@@ -361,4 +381,17 @@ void TicketHolder::setPeakUsed_forTest(int32_t used) {
 int32_t TicketHolder::waiting_forTest() const {
     return _waiterCount.load();
 }
+
+void TicketHolder::incrementDelinquencyStats(int64_t delinquentAcquisitions,
+                                             Milliseconds totalAcquisitionDelinquency,
+                                             Milliseconds maxAcquisitionDelinquency) {
+    auto& stats = _delinquencyStats;
+    stats.totalDelinquentAcquisitions.fetchAndAddRelaxed(delinquentAcquisitions);
+
+    stats.totalAcquisitionDelinquencyMillis.fetchAndAddRelaxed(totalAcquisitionDelinquency.count());
+
+    stats.maxAcquisitionDelinquencyMillis.storeRelaxed(std::max(
+        stats.maxAcquisitionDelinquencyMillis.loadRelaxed(), maxAcquisitionDelinquency.count()));
+}
+
 }  // namespace mongo

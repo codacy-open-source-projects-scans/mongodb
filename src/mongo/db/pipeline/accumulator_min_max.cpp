@@ -27,9 +27,6 @@
  *    it in the license file.
  */
 
-#include <vector>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/db/exec/document_value/value.h"
@@ -41,11 +38,9 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/window_function/window_function_expression.h"
 #include "mongo/db/pipeline/window_function/window_function_min_max.h"
-#include "mongo/util/intrusive_counter.h"
+
 
 namespace mongo {
-
-using boost::intrusive_ptr;
 
 template <>
 Value ExpressionFromAccumulator<AccumulatorMax>::evaluate(const Document& root,
@@ -93,13 +88,5 @@ AccumulatorMinMax::AccumulatorMinMax(ExpressionContext* const expCtx, Sense sens
 void AccumulatorMinMax::reset() {
     _val = Value();
     _memUsageTracker.set(sizeof(*this));
-}
-
-intrusive_ptr<AccumulatorState> AccumulatorMin::create(ExpressionContext* const expCtx) {
-    return new AccumulatorMin(expCtx);
-}
-
-intrusive_ptr<AccumulatorState> AccumulatorMax::create(ExpressionContext* const expCtx) {
-    return new AccumulatorMax(expCtx);
 }
 }  // namespace mongo

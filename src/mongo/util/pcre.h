@@ -29,6 +29,8 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -37,8 +39,6 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-
-#include "mongo/base/string_data.h"
 
 namespace mongo::pcre {
 
@@ -435,14 +435,26 @@ class MatchDataImpl;
 }  // namespace detail
 
 /**
+ * Limits to control regex execution CPU and RAM consumption. The value of 0 will use default pcre2
+ * library limits.
+ */
+struct Limits {
+    uint32_t heapLimitKB = 0;
+    uint32_t matchLimit = 0;
+};
+
+/**
  * Wrapper class encapsulating the PCRE2 regular expression library.
  * See https://www.pcre.org/current/doc/html/
  */
 class Regex {
 public:
-    Regex(std::string pattern, CompileOptions options);
+    Regex(std::string pattern, CompileOptions options, Limits limits);
 
-    explicit Regex(std::string pattern) : Regex{std::move(pattern), CompileOptions{}} {}
+    Regex(std::string pattern, CompileOptions options)
+        : Regex{std::move(pattern), options, Limits{}} {}
+
+    explicit Regex(std::string pattern) : Regex{std::move(pattern), CompileOptions{}, Limits{}} {}
 
     ~Regex();
 
@@ -539,9 +551,9 @@ public:
      * the full matched substring, followed by captures.
      *
      * An empty and null capture are slightly different and can be
-     * distinguished by their rawData pointer. The difference doesn't
+     * distinguished by their data pointer. The difference doesn't
      * often matter though. E.g.,
-     *    Regex{"(A|B(C))"}.match("A")[2].rawData() == nullptr
+     *    Regex{"(A|B(C))"}.match("A")[2].data() == nullptr
      * because capture group 2 (the `C`) was on the inactive `B` branch.
      * Throws `ExceptionFor<NoSuchKey>` if capture not found.
      * Requires `i <= captureCount()`.

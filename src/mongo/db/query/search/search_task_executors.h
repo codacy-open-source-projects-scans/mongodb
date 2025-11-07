@@ -29,9 +29,10 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/executor/task_executor.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
 
 namespace mongo {
 
@@ -52,7 +53,9 @@ std::shared_ptr<TaskExecutor> getSearchIndexManagementTaskExecutor(ServiceContex
 /**
  * Starts up the search executors if configured.
  */
-void startupSearchExecutorsIfNeeded(ServiceContext* svc);
+MONGO_MOD_PUB void startupSearchExecutorsIfNeeded(ServiceContext* svc);
+
+MONGO_MOD_PUB void shutdownSearchExecutorsIfNeeded(ServiceContext* svc);
 
 }  // namespace executor
 }  // namespace mongo

@@ -27,12 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <ostream>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-
 #include "mongo/base/status_with.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/record_id.h"
@@ -40,8 +34,13 @@
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/record_store_test_harness.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
+
+#include <memory>
+#include <ostream>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
 
 
 namespace mongo {
@@ -52,7 +51,7 @@ using std::stringstream;
 using std::unique_ptr;
 
 // Verify that an empty collection takes up no space.
-TEST(RecordStoreTestHarness, DataSizeEmpty) {
+TEST(RecordStoreTest, DataSizeEmpty) {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
 
@@ -62,7 +61,7 @@ TEST(RecordStoreTestHarness, DataSizeEmpty) {
 }
 
 // Verify that a nonempty collection takes up some space.
-TEST(RecordStoreTestHarness, DataSizeNonEmpty) {
+TEST(RecordStoreTest, DataSizeNonEmpty) {
     const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newRecordStore());
 
@@ -79,7 +78,11 @@ TEST(RecordStoreTestHarness, DataSizeNonEmpty) {
 
             StorageWriteTransaction txn(ru);
             StatusWith<RecordId> res =
-                rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, Timestamp());
+                rs->insertRecord(opCtx.get(),
+                                 *shard_role_details::getRecoveryUnit(opCtx.get()),
+                                 data.c_str(),
+                                 data.size() + 1,
+                                 Timestamp());
             ASSERT_OK(res.getStatus());
             txn.commit();
         }

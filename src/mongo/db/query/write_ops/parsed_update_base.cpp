@@ -27,15 +27,6 @@
  *    it in the license file.
  */
 
-#include <map>
-#include <memory>
-#include <string>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -43,20 +34,23 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_operation_source.h"
 #include "mongo/db/exec/disk_use_options_gen.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_operation_source.h"
 #include "mongo/db/matcher/expression.h"
-#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/expression_with_placeholder.h"
 #include "mongo/db/matcher/extensions_callback.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
+#include "mongo/db/query/compiler/rewrites/matcher/expression_optimizer.h"
 #include "mongo/db/query/plan_yield_policy.h"
+#include "mongo/db/query/query_utils.h"
 #include "mongo/db/query/write_ops/parsed_update.h"
 #include "mongo/db/query/write_ops/parsed_update_array_filters.h"
 #include "mongo/db/query/write_ops/parsed_writes_common.h"
@@ -69,10 +63,18 @@
 #include "mongo/db/timeseries/timeseries_gen.h"
 #include "mongo/db/timeseries/timeseries_update_delete_util.h"
 #include "mongo/db/update/update_driver.h"
+#include "mongo/db/version_context.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
+
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::impl {
 
@@ -97,7 +99,7 @@ ParsedUpdateBase::ParsedUpdateBase(OperationContext* opCtx,
                   .runtimeConstants(_request->getLegacyRuntimeConstants())
                   .letParameters(_request->getLetParameters())
                   .isUpsert(request->isUpsert())
-                  .tmpDir(storageGlobalParams.dbpath + "/_tmp")
+                  .tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp")
                   .build()),
       _driver(_expCtx),
       _modification(
@@ -109,6 +111,7 @@ ParsedUpdateBase::ParsedUpdateBase(OperationContext* opCtx,
           isRequestToTimeseries
               ? createTimeseriesWritesQueryExprsIfNecessary(
                     feature_flags::gTimeseriesUpdatesSupport.isEnabled(
+                        VersionContext::getDecoration(opCtx),
                         serverGlobalParams.featureCompatibility.acquireFCVSnapshot()),
                     collection)
               : nullptr),
@@ -125,9 +128,20 @@ ParsedUpdateBase::ParsedUpdateBase(OperationContext* opCtx,
     }
 }
 
+std::unique_ptr<MatchExpression> ParsedUpdateBase::getClosedBucketFilteredExpr() {
+    MatchExpressionParser::AllowedFeatureSet allowedFeatures =
+        MatchExpressionParser::kAllowAllSpecialFeatures;
+    if (_request->isUpsert()) {
+        allowedFeatures &= ~MatchExpressionParser::AllowedFeatures::kExpr;
+    }
+    auto buildingExpr = uassertStatusOK(MatchExpressionParser::parse(
+        _request->getQuery(), _expCtx, ExtensionsCallbackNoop(), allowedFeatures));
+    buildingExpr = normalizeMatchExpression(std::move(buildingExpr));
+    return timeseries::addClosedBucketExclusionExpr(std::move(buildingExpr));
+}
+
 void ParsedUpdateBase::maybeTranslateTimeseriesUpdate() {
     if (!_timeseriesUpdateQueryExprs) {
-        // Not a timeseries update, bail out.
         return;
     }
 
@@ -164,13 +178,14 @@ void ParsedUpdateBase::maybeTranslateTimeseriesUpdate() {
     }
     _originalExpr = uassertStatusOK(MatchExpressionParser::parse(
         _request->getQuery(), _expCtx, ExtensionsCallbackNoop(), allowedFeatures));
-    _originalExpr = MatchExpression::normalize(std::move(_originalExpr));
+    _originalExpr = normalizeMatchExpression(std::move(_originalExpr));
 }
 
 Status ParsedUpdateBase::parseRequest() {
-    // It is invalid to request that the UpdateStage return the prior or newly-updated version
-    // of a document during a multi-update.
-    invariant(!(_request->shouldReturnAnyDocs() && _request->isMulti()));
+    tassert(11052005,
+            "Cannot request UpdateStage to return the prior or newly-updated version of a document "
+            "during a multi-update",
+            !(_request->shouldReturnAnyDocs() && _request->isMulti()));
 
     // It is invalid to specify 'upsertSupplied:true' for a non-upsert operation, or if no upsert
     // document was supplied with the request.
@@ -185,12 +200,13 @@ Status ParsedUpdateBase::parseRequest() {
                 str::stream() << "the parameter '"
                               << write_ops::UpdateOpEntry::kUpsertSuppliedFieldName
                               << "' is set to 'true', but no document was supplied",
-                constants && (*constants)["new"_sd].type() == BSONType::Object);
+                constants && (*constants)["new"_sd].type() == BSONType::object);
     }
 
-    // It is invalid to request that a ProjectionStage be applied to the UpdateStage if the
-    // UpdateStage would not return any document.
-    invariant(_request->getProj().isEmpty() || _request->shouldReturnAnyDocs());
+    tassert(
+        11052006,
+        "Cannot apply projection to UpdateStage if the UpdateStage would not return any document",
+        _request->getProj().isEmpty() || _request->shouldReturnAnyDocs());
 
     auto [collatorToUse, collationMatchesDefault] =
         resolveCollator(_opCtx, _request->getCollation(), _collection);
@@ -224,7 +240,7 @@ Status ParsedUpdateBase::parseQuery() {
     dassert(!_canonicalQuery.get());
 
     if (!_timeseriesUpdateQueryExprs && !_driver.needMatchDetails() &&
-        CanonicalQuery::isSimpleIdQuery(_request->getQuery())) {
+        isSimpleIdQuery(_request->getQuery())) {
         return Status::OK();
     }
 
@@ -234,12 +250,16 @@ Status ParsedUpdateBase::parseQuery() {
 Status ParsedUpdateBase::parseQueryToCQ() {
     dassert(!_canonicalQuery.get());
 
+    // _timeseriesUpdateQueryExprs may be null even if _isRequestToTimeseries is true. See
+    // createTimeseriesWritesQueryExprsIfNecessary() for details.
     auto statusWithCQ = impl::parseWriteQueryToCQ(
         _expCtx->getOperationContext(),
         _expCtx.get(),
         *_extensionsCallback,
         *_request,
-        _timeseriesUpdateQueryExprs ? _timeseriesUpdateQueryExprs->_bucketExpr.get() : nullptr);
+        _timeseriesUpdateQueryExprs  ? _timeseriesUpdateQueryExprs->_bucketExpr.get()
+            : _isRequestToTimeseries ? getClosedBucketFilteredExpr().get()
+                                     : nullptr);
 
     if (statusWithCQ.isOK()) {
         _canonicalQuery = std::move(statusWithCQ.getValue());
@@ -287,7 +307,9 @@ bool ParsedUpdateBase::hasParsedQuery() const {
 }
 
 std::unique_ptr<CanonicalQuery> ParsedUpdateBase::releaseParsedQuery() {
-    invariant(_canonicalQuery.get() != nullptr);
+    tassert(11052007,
+            "Expected ParsedUpdateBase to own a CanonicalQuery",
+            _canonicalQuery.get() != nullptr);
     return std::move(_canonicalQuery);
 }
 

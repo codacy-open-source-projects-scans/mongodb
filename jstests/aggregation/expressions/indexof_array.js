@@ -1,9 +1,10 @@
 // In SERVER-8951, $indexOfArray was introduced. In this file, we test the correctness and error
 // cases of the expression.
 import "jstests/libs/query/sbe_assert_error_override.js";
+
 import {assertErrorCode, testExpression} from "jstests/aggregation/extras/utils.js";
 
-var coll = db.indexofarray;
+let coll = db.indexofarray;
 coll.drop();
 
 // Insert a dummy document to ensure something flows through the pipeline.
@@ -35,31 +36,31 @@ testExpression(coll, {$indexOfArray: [[1, 2, 3], 2, 3, 5]}, -1);
 
 testExpression(coll, {$indexOfArray: [[], 1]}, -1);
 
-var pipeline = {
+let pipeline = {
     $project: {
         output: {
             $indexOfArray: ["string", "s"],
-        }
-    }
+        },
+    },
 };
 assertErrorCode(coll, pipeline, 40090);
 
 pipeline = {
-    $project: {output: {$indexOfArray: [[1, 2, 3], 2, "bad"]}}
+    $project: {output: {$indexOfArray: [[1, 2, 3], 2, "bad"]}},
 };
 assertErrorCode(coll, pipeline, 40096);
 
 pipeline = {
-    $project: {output: {$indexOfArray: [[1, 2, 3], 2, 0, "bad"]}}
+    $project: {output: {$indexOfArray: [[1, 2, 3], 2, 0, "bad"]}},
 };
 assertErrorCode(coll, pipeline, 40096);
 
 pipeline = {
-    $project: {output: {$indexOfArray: [[1, 2, 3], 2, -1]}}
+    $project: {output: {$indexOfArray: [[1, 2, 3], 2, -1]}},
 };
 assertErrorCode(coll, pipeline, 40097);
 
 pipeline = {
-    $project: {output: {$indexOfArray: [[1, 2, 3], 2, 1, -1]}}
+    $project: {output: {$indexOfArray: [[1, 2, 3], 2, 1, -1]}},
 };
 assertErrorCode(coll, pipeline, 40097);

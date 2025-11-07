@@ -27,8 +27,10 @@
  *    it in the license file.
  */
 
+#pragma once
+
 #include "mongo/db/auth/authorization_router_impl.h"
-#include "mongo/unittest/assert.h"
+#include "mongo/unittest/unittest.h"
 
 namespace mongo {
 

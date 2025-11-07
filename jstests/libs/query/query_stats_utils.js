@@ -1,5 +1,6 @@
 import {resultsEq} from "jstests/aggregation/extras/utils.js";
 import {FixtureHelpers} from "jstests/libs/fixture_helpers.js";
+import {isLinux} from "jstests/libs/os_helpers.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
@@ -11,7 +12,12 @@ export const kDefaultQueryStatsHmacKey = BinData(8, "MjM0NTY3ODkxMDExMTIxMzE0MTU
  * min, and sum = max = min if only one execution).
  */
 export function verifyMetrics(batch) {
-    batch.forEach(element => {
+    batch.forEach((element) => {
+        // The cpuNanos metric should only appear for tests running on Linux.
+        assert(
+            isLinux() == "cpuNanos" in element.metrics,
+            `cpuNanos must be returned on only Linux systems, but received: ${tojson(element)}`,
+        );
         function skipMetric(summaryValues) {
             // Skip over fields that aren't aggregated metrics with sum/min/max (execCount,
             // lastExecutionMicros). We also skip metrics that are aggregated, but that haven't
@@ -19,8 +25,10 @@ export function verifyMetrics(batch) {
             // are not yet in use, or are guarded by a feature flag. Instead, it may be better to
             // keep a list of the metrics we expect to see here in the long term for a more
             // consistent check.
-            return summaryValues.sum === undefined ||
-                (typeof summaryValues.sum === "object" && summaryValues.sum.valueOf() === 0);
+            return (
+                summaryValues.sum === undefined ||
+                (typeof summaryValues.sum === "object" && summaryValues.sum.valueOf() === 0)
+            );
         }
         if (element.metrics.execCount === 1) {
             for (const [metricName, summaryValues] of Object.entries(element.metrics)) {
@@ -39,6 +47,7 @@ export function verifyMetrics(batch) {
                 if (skipMetric(summaryValues)) {
                     continue;
                 }
+
                 const debugInfo = {[metricName]: summaryValues};
                 assert.gte(summaryValues.sum, summaryValues.min, debugInfo);
                 assert.gte(summaryValues.sum, summaryValues.max, debugInfo);
@@ -58,11 +67,13 @@ export function verifyMetrics(batch) {
  *  {object} - extraMatch - optional argument that can be used to filter the pipeline
  * }
  */
-export function getLatestQueryStatsEntry(conn, options = {
-    collName: ""
-}) {
-    let sortedEntries = getQueryStats(
-        conn, Object.merge({customSort: {"metrics.latestSeenTimestamp": -1}}, options));
+export function getLatestQueryStatsEntry(
+    conn,
+    options = {
+        collName: "",
+    },
+) {
+    let sortedEntries = getQueryStats(conn, Object.merge({customSort: {"metrics.latestSeenTimestamp": -1}}, options));
     assert.neq([], sortedEntries);
     return sortedEntries[0];
 }
@@ -79,17 +90,20 @@ export function getLatestQueryStatsEntry(conn, options = {
  * deterministic.
  * }
  */
-export function getQueryStats(conn, options = {
-    collName: ""
-}) {
+export function getQueryStats(
+    conn,
+    options = {
+        collName: "",
+    },
+) {
     let match = {"key.client.application.name": kShellApplicationName, ...options.extraMatch};
     if (options.collName) {
         match["key.queryShape.cmdNs.coll"] = options.collName;
     }
     const result = conn.adminCommand({
         aggregate: 1,
-        pipeline: [{$queryStats: {}}, {$sort: (options.customSort || {key: 1})}, {$match: match}],
-        cursor: {}
+        pipeline: [{$queryStats: {}}, {$sort: options.customSort || {key: 1}}, {$match: match}],
+        cursor: {},
     });
     assert.commandWorked(result);
     return result.cursor.firstBatch;
@@ -103,14 +117,17 @@ export function getQueryStats(conn, options = {
  *  {boolean} transformIdentifiers - whether to include transform identifiers
  * }
  */
-export function getQueryStatsFindCmd(conn, options = {
-    collName: "",
-    transformIdentifiers: false,
-    hmacKey: kDefaultQueryStatsHmacKey
-}) {
+export function getQueryStatsFindCmd(
+    conn,
+    options = {
+        collName: "",
+        transformIdentifiers: false,
+        hmacKey: kDefaultQueryStatsHmacKey,
+    },
+) {
     let matchExpr = {
         "key.queryShape.command": "find",
-        "key.client.application.name": kShellApplicationName
+        "key.client.application.name": kShellApplicationName,
     };
 
     return getQueryStatsWithTransform(conn, matchExpr, options);
@@ -124,14 +141,41 @@ export function getQueryStatsFindCmd(conn, options = {
  *  {boolean} transformIdentifiers - whether to include transform identifiers
  * }
  */
-export function getQueryStatsDistinctCmd(conn, options = {
-    collName: "",
-    transformIdentifiers: false,
-    hmacKey: kDefaultQueryStatsHmacKey
-}) {
+export function getQueryStatsDistinctCmd(
+    conn,
+    options = {
+        collName: "",
+        transformIdentifiers: false,
+        hmacKey: kDefaultQueryStatsHmacKey,
+    },
+) {
     let matchExpr = {
         "key.queryShape.command": "distinct",
-        "key.client.application.name": kShellApplicationName
+        "key.client.application.name": kShellApplicationName,
+    };
+
+    return getQueryStatsWithTransform(conn, matchExpr, options);
+}
+
+/**
+ * @param {object} conn - connection to database
+ * @param {object} options {
+ *  {BinData} hmacKey
+ *  {String} collName - name of collection
+ *  {boolean} transformIdentifiers - whether to include transform identifiers
+ * }
+ */
+export function getQueryStatsUpdateCmd(
+    conn,
+    options = {
+        collName: "",
+        transformIdentifiers: false,
+        hmacKey: kDefaultQueryStatsHmacKey,
+    },
+) {
+    let matchExpr = {
+        "key.queryShape.command": "update",
+        "key.client.application.name": kShellApplicationName,
     };
 
     return getQueryStatsWithTransform(conn, matchExpr, options);
@@ -148,14 +192,17 @@ export function getQueryStatsDistinctCmd(conn, options = {
  *  {boolean} transformIdentifiers - whether to transform identifiers in reported query stats
  * }
  */
-export function getQueryStatsCountCmd(conn, options = {
-    collName: "",
-    transformIdentifiers: false,
-    hmacKey: kDefaultQueryStatsHmacKey
-}) {
+export function getQueryStatsCountCmd(
+    conn,
+    options = {
+        collName: "",
+        transformIdentifiers: false,
+        hmacKey: kDefaultQueryStatsHmacKey,
+    },
+) {
     let matchExpr = {
         "key.queryShape.command": "count",
-        "key.client.application.name": kShellApplicationName
+        "key.client.application.name": kShellApplicationName,
     };
 
     return getQueryStatsWithTransform(conn, matchExpr, options);
@@ -170,36 +217,40 @@ export function getQueryStatsCountCmd(conn, options = {
  *  {boolean} transformIdentifiers - whether to include transform identifiers
  * }
  */
-export function getQueryStatsWithTransform(conn, matchExpr, options = {
-    collName: "",
-    transformIdentifiers: false,
-    hmacKey: kDefaultQueryStatsHmacKey
-}) {
+export function getQueryStatsWithTransform(
+    conn,
+    matchExpr,
+    options = {
+        collName: "",
+        transformIdentifiers: false,
+        hmacKey: kDefaultQueryStatsHmacKey,
+    },
+) {
     if (options.collName) {
         matchExpr["key.queryShape.cmdNs.coll"] = options.collName;
     }
     // Filter out agg queries, including $queryStats.
-    var pipeline;
+    let pipeline;
     if (options.transformIdentifiers) {
         pipeline = [
             {
                 $queryStats: {
                     transformIdentifiers: {
                         algorithm: "hmac-sha-256",
-                        hmacKey: options.hmacKey ? options.hmacKey : kDefaultQueryStatsHmacKey
-                    }
-                }
+                        hmacKey: options.hmacKey ? options.hmacKey : kDefaultQueryStatsHmacKey,
+                    },
+                },
             },
             {$match: matchExpr},
-            // Sort on queryStats key so entries are in a deterministic order.
-            {$sort: {key: 1}},
+            // Sort on queryStats key, or custom sort, so entries are in a deterministic order.
+            {$sort: options.customSort || {key: 1}},
         ];
     } else {
         pipeline = [
             {$queryStats: {}},
             {$match: matchExpr},
-            // Sort on queryStats key so entries are in a deterministic order.
-            {$sort: {key: 1}},
+            // Sort on queryStats key, or custom sort, so entries are in a deterministic order.
+            {$sort: options.customSort || {key: 1}},
         ];
     }
     const result = conn.adminCommand({aggregate: 1, pipeline: pipeline, cursor: {}});
@@ -218,20 +269,23 @@ export function getQueryStatsWithTransform(conn, matchExpr, options = {
  *  {boolean} transformIdentifiers - whether to include transform identifiers
  * }
  */
-export function getQueryStatsAggCmd(db, options = {
-    transformIdentifiers: false,
-    hmacKey: kDefaultQueryStatsHmacKey
-}) {
-    var pipeline;
+export function getQueryStatsAggCmd(
+    db,
+    options = {
+        transformIdentifiers: false,
+        hmacKey: kDefaultQueryStatsHmacKey,
+    },
+) {
+    let pipeline;
     let queryStatsStage = {$queryStats: {}};
     if (options.transformIdentifiers) {
         queryStatsStage = {
             $queryStats: {
                 transformIdentifiers: {
                     algorithm: "hmac-sha-256",
-                    hmacKey: options.hmacKey ? options.hmacKey : kDefaultQueryStatsHmacKey
-                }
-            }
+                    hmacKey: options.hmacKey ? options.hmacKey : kDefaultQueryStatsHmacKey,
+                },
+            },
         };
     }
 
@@ -242,8 +296,8 @@ export function getQueryStatsAggCmd(db, options = {
             $match: {
                 "key.queryShape.command": "aggregate",
                 "key.queryShape.pipeline.0.$queryStats": {$exists: false},
-                "key.client.application.name": kShellApplicationName
-            }
+                "key.client.application.name": kShellApplicationName,
+            },
         },
         // Sort on key so entries are in a deterministic order.
         {$sort: {key: 1}},
@@ -265,9 +319,9 @@ export function confirmAllExpectedFieldsPresent(expectedKey, resultingKey) {
             continue;
         }
         if (!expectedKey.hasOwnProperty(field)) {
-            print("Field present in actual object but missing from expected: " + field);
-            print("Expected " + tojson(expectedKey));
-            print("Actual " + tojson(resultingKey));
+            jsTest.log.info("Field present in actual object but missing from expected: " + field);
+            jsTest.log.info("Expected", {expectedKey});
+            jsTest.log.info("Actual", {resultingKey});
         }
         assert(expectedKey.hasOwnProperty(field), field);
 
@@ -281,38 +335,42 @@ export function confirmAllExpectedFieldsPresent(expectedKey, resultingKey) {
     }
 
     // Make sure the resulting key isn't missing any fields.
-    assert.eq(fieldsCounter,
-              Object.keys(expectedKey).length,
-              "Query Shape Key is missing or has extra fields: " + tojson(resultingKey));
+    assert.eq(
+        fieldsCounter,
+        Object.keys(expectedKey).length,
+        "Query Shape Key is missing or has extra fields: " + tojson(resultingKey),
+    );
 }
 
-export function assertExpectedResults(results,
-                                      expectedQueryStatsKey,
-                                      expectedExecCount,
-                                      expectedDocsReturnedSum,
-                                      expectedDocsReturnedMax,
-                                      expectedDocsReturnedMin,
-                                      expectedDocsReturnedSumOfSq,
-                                      getMores) {
+export function assertExpectedResults({
+    results,
+    expectedQueryStatsKey,
+    expectedExecCount,
+    expectedDocsReturnedSum,
+    expectedDocsReturnedMax,
+    expectedDocsReturnedMin,
+    expectedDocsReturnedSumOfSq,
+    getMores,
+}) {
     const {key, keyHash, queryShapeHash, metrics, asOf} = results;
     confirmAllExpectedFieldsPresent(expectedQueryStatsKey, key);
-    assert.eq(expectedExecCount, metrics.execCount);
-    assert.docEq({
-        sum: NumberLong(expectedDocsReturnedSum),
-        max: NumberLong(expectedDocsReturnedMax),
-        min: NumberLong(expectedDocsReturnedMin),
-        sumOfSquares: NumberLong(expectedDocsReturnedSumOfSq)
-    },
-                 metrics.docsReturned);
 
-    const {
-        firstSeenTimestamp,
-        latestSeenTimestamp,
-        lastExecutionMicros,
-        totalExecMicros,
-        firstResponseExecMicros,
-        workingTimeMillis,
-    } = metrics;
+    assert.eq(expectedExecCount, metrics.execCount);
+
+    const queryExecStats = getQueryExecMetrics(metrics);
+    assert.docEq(
+        {
+            sum: NumberLong(expectedDocsReturnedSum),
+            max: NumberLong(expectedDocsReturnedMax),
+            min: NumberLong(expectedDocsReturnedMin),
+            sumOfSquares: NumberLong(expectedDocsReturnedSumOfSq),
+        },
+        queryExecStats.docsReturned,
+    );
+
+    const firstResponseExecMicros = getCursorMetrics(metrics).firstResponseExecMicros;
+    const {firstSeenTimestamp, latestSeenTimestamp, lastExecutionMicros, totalExecMicros, workingTimeMillis, cpuNanos} =
+        metrics;
 
     // The tests can't predict exact timings, so just assert these three fields have been set (are
     // non-zero).
@@ -322,12 +380,18 @@ export function assertExpectedResults(results,
     assert.neq(asOf.getTime(), 0);
     assert.neq(keyHash.length, 0);
     assert.neq(queryShapeHash.length, 0);
+    if (!isLinux()) {
+        assert(!cpuNanos, "cpuNanos should only be returned on Linux.");
+    }
 
-    const distributionFields = ['sum', 'max', 'min', 'sumOfSquares'];
+    const distributionFields = ["sum", "max", "min", "sumOfSquares"];
     for (const field of distributionFields) {
         assert.neq(totalExecMicros[field], NumberLong(0));
         assert.neq(firstResponseExecMicros[field], NumberLong(0));
         assert(bsonWoCompare(workingTimeMillis[field], NumberLong(0)) >= 0);
+        if (isLinux()) {
+            assert(bsonWoCompare(cpuNanos[field], NumberLong(0)) > 0);
+        }
         if (metrics.execCount > 1) {
             // If there are prior executions of the same query shape, we can't be certain if those
             // runs had getMores or not, so we can only check totalExec >= firstResponse.
@@ -335,7 +399,7 @@ export function assertExpectedResults(results,
         } else if (getMores) {
             // If there are getMore calls, totalExecMicros fields should be greater than or equal to
             // firstResponseExecMicros.
-            if (field == 'min' || field == 'max') {
+            if (field == "min" || field == "max") {
                 // In the case that we've executed multiple queries with the same shape, it is
                 // possible for the min or max to be equal.
                 assert.gte(totalExecMicros[field], firstResponseExecMicros[field]);
@@ -350,42 +414,125 @@ export function assertExpectedResults(results,
     }
 }
 
-export function assertAggregatedMetric(results, metricName, {sum, min, max, sumOfSq}) {
-    const {key, metrics, asOf} = results;
+export function getCursorMetrics(metrics) {
+    // When feature flag QueryStatsMetricsSubsections is enabled, metrics related to cursor would be nested
+    // inside "cursor" section within metrics. When it is disabled, metrics would have a flat structure, without
+    // the "cursor" section. This function abstracts away that difference regardless of the status of the feature flag.
+    // TODO SERVER-112150: Once all versions support feature flag, simply return metrics["cursor"].
+    const cursorMetricsSectionName = "cursor";
+    if (metrics.hasOwnProperty(cursorMetricsSectionName)) {
+        return metrics[cursorMetricsSectionName];
+    }
 
-    assert.docEq({
-        sum: NumberLong(sum),
-        max: NumberLong(max),
-        min: NumberLong(min),
-        sumOfSquares: NumberLong(sumOfSq)
-    },
-                 metrics[metricName],
-                 `Metric: ${metricName}`);
+    return {
+        firstResponseExecMicros: metrics.firstResponseExecMicros,
+    };
 }
 
-export function assertAggregatedBoolean(results, metricName, {trueCount, falseCount}) {
-    const {key, metrics, asOf} = results;
+export function getQueryExecMetrics(metrics) {
+    // When feature flag QueryStatsMetricsSubsections is enabled, metrics related to query execution would be nested
+    // inside "queryExec" section within metrics. When it is disabled, metrics would have a flat structure, without
+    // the "queryExec" section. This function abstracts away that difference regardless of the status of the feature flag.
+    // TODO SERVER-112150: Once all versions support feature flag, simply return metrics["queryExec"].
+    const queryExecSectionName = "queryExec";
+    if (metrics.hasOwnProperty(queryExecSectionName)) {
+        return metrics[queryExecSectionName];
+    }
 
-    assert.docEq({
-        "true": NumberLong(trueCount),
-        "false": NumberLong(falseCount),
-    },
-                 metrics[metricName],
-                 `Metric: ${metricName}`);
+    return {
+        docsReturned: metrics.docsReturned,
+        keysExamined: metrics.keysExamined,
+        docsExamined: metrics.docsExamined,
+        bytesRead: metrics.bytesRead,
+        readTimeMicros: metrics.readTimeMicros,
+        delinquentAcquisitions: metrics.delinquentAcquisitions,
+        totalAcquisitionDelinquencyMillis: metrics.totalAcquisitionDelinquencyMillis,
+        maxAcquisitionDelinquencyMillis: metrics.maxAcquisitionDelinquencyMillis,
+        numInterruptChecksPerSec: metrics.numInterruptChecksPerSec,
+        overdueInterruptApproxMaxMillis: metrics.overdueInterruptApproxMaxMillis,
+    };
+}
+
+export function getQueryPlannerMetrics(metrics) {
+    // When feature flag QueryStatsMetricsSubsections is enabled, metrics related to query planner would be nested
+    // inside "queryPlanner" section within metrics. When it is disabled, metrics would have a flat structure, without
+    // the "queryPlanner" section. This function abstracts away that difference regardless of the status of the feature flag.
+    // TODO SERVER-112150: Once all versions support feature flag, simply return metrics["queryPlanner"].
+    const queryPlannerSectionName = "queryPlanner";
+    if (metrics.hasOwnProperty(queryPlannerSectionName)) {
+        return metrics[queryPlannerSectionName];
+    }
+
+    return {
+        hasSortStage: metrics.hasSortStage,
+        usedDisk: metrics.usedDisk,
+        fromMultiPlanner: metrics.fromMultiPlanner,
+        fromPlanCache: metrics.fromPlanCache,
+    };
+}
+
+export function getWriteMetrics(metrics) {
+    // When featureFlagQueryStatsUpdateCommand is enabled, new write-related metrics would be
+    // nested inside "writes" section.
+    const writeMetricsSectionName = "writes";
+    assert(metrics.hasOwnProperty(writeMetricsSectionName), "Expected 'writes' field in metrics");
+    return metrics[writeMetricsSectionName];
+}
+
+export function assertAggregatedMetric(metrics, metricName, {sum, min, max, sumOfSq}) {
+    assert.docEq(
+        {
+            sum: NumberLong(sum),
+            max: NumberLong(max),
+            min: NumberLong(min),
+            sumOfSquares: NumberLong(sumOfSq),
+        },
+        metrics[metricName],
+        `Metric: ${metricName}`,
+    );
+}
+
+export function assertAggregatedBoolean(metrics, metricName, {trueCount, falseCount}) {
+    assert.docEq(
+        {
+            "true": NumberLong(trueCount),
+            "false": NumberLong(falseCount),
+        },
+        metrics[metricName],
+        `Metric: ${metricName}`,
+    );
 }
 
 export function assertAggregatedMetricsSingleExec(
     results,
-    {docsExamined, keysExamined, usedDisk, hasSortStage, fromPlanCache, fromMultiPlanner}) {
-    const numericMetric = (x) => ({sum: x, min: x, max: x, sumOfSq: x ** 2});
-    assertAggregatedMetric(results, "docsExamined", numericMetric(docsExamined));
-    assertAggregatedMetric(results, "keysExamined", numericMetric(keysExamined));
+    {docsExamined, keysExamined, usedDisk, hasSortStage, fromPlanCache, fromMultiPlanner, writes},
+) {
+    {
+        // Need to check if new format is used.
+        const queryStatSection = getQueryExecMetrics(results.metrics);
+        const numericMetric = (x) => ({sum: x, min: x, max: x, sumOfSq: x ** 2});
+        assertAggregatedMetric(queryStatSection, "docsExamined", numericMetric(docsExamined));
+        assertAggregatedMetric(queryStatSection, "keysExamined", numericMetric(keysExamined));
 
-    const booleanMetric = (x) => ({trueCount: x ? 1 : 0, falseCount: x ? 0 : 1});
-    assertAggregatedBoolean(results, "usedDisk", booleanMetric(usedDisk));
-    assertAggregatedBoolean(results, "hasSortStage", booleanMetric(hasSortStage));
-    assertAggregatedBoolean(results, "fromPlanCache", booleanMetric(fromPlanCache));
-    assertAggregatedBoolean(results, "fromMultiPlanner", booleanMetric(fromMultiPlanner));
+        if (writes) {
+            const {nMatched, nUpserted, nModified, nDeleted, nInserted} = writes;
+            const writesSection = getWriteMetrics(results.metrics);
+            assertAggregatedMetric(writesSection, "nMatched", numericMetric(nMatched));
+            assertAggregatedMetric(writesSection, "nUpserted", numericMetric(nUpserted));
+            assertAggregatedMetric(writesSection, "nModified", numericMetric(nModified));
+            assertAggregatedMetric(writesSection, "nDeleted", numericMetric(nDeleted));
+            assertAggregatedMetric(writesSection, "nInserted", numericMetric(nInserted));
+        }
+    }
+
+    {
+        const queryStatSection = getQueryPlannerMetrics(results.metrics);
+        const booleanMetric = (x) => ({trueCount: x ? 1 : 0, falseCount: x ? 0 : 1});
+        assertAggregatedBoolean(queryStatSection, "usedDisk", booleanMetric(usedDisk));
+        assertAggregatedBoolean(queryStatSection, "hasSortStage", booleanMetric(hasSortStage));
+        assertAggregatedBoolean(queryStatSection, "fromPlanCache", booleanMetric(fromPlanCache));
+        assertAggregatedBoolean(queryStatSection, "fromMultiPlanner", booleanMetric(fromMultiPlanner));
+    }
 }
 
 export function asFieldPath(str) {
@@ -400,8 +547,7 @@ export function resetQueryStatsStore(conn, queryStatsStoreSize) {
     // Set the cache size to 0MB to clear the queryStats store, and then reset to
     // queryStatsStoreSize.
     assert.commandWorked(conn.adminCommand({setParameter: 1, internalQueryStatsCacheSize: "0MB"}));
-    assert.commandWorked(
-        conn.adminCommand({setParameter: 1, internalQueryStatsCacheSize: queryStatsStoreSize}));
+    assert.commandWorked(conn.adminCommand({setParameter: 1, internalQueryStatsCacheSize: queryStatsStoreSize}));
 }
 
 /**
@@ -485,8 +631,7 @@ export function withQueryStatsEnabled(collName, callbackFn) {
  * @param {object} keyFields - List of outer fields not nested inside queryShape but should be part
  *     of the key
  */
-export function runCommandAndValidateQueryStats(
-    {coll, commandName, commandObj, shapeFields, keyFields}) {
+export function runCommandAndValidateQueryStats({coll, commandName, commandObj, shapeFields, keyFields}) {
     const testDB = coll.getDB();
     assert.commandWorked(testDB.runCommand(commandObj));
     const entry = getLatestQueryStatsEntry(testDB.getMongo(), {collName: coll.getName()});
@@ -515,15 +660,16 @@ export function runCommandAndValidateQueryStats(
     // Every path in shapeFields is in the queryShape.
     let shapeFieldsPrefixes = [];
     for (const field of shapeFields) {
-        assert(hasValueAtPath(entry.key.queryShape, field),
-               `QueryShape: ${tojson(entry.key.queryShape)} is missing field ${field}`);
+        assert(
+            hasValueAtPath(entry.key.queryShape, field),
+            `QueryShape: ${tojson(entry.key.queryShape)} is missing field ${field}`,
+        );
         shapeFieldsPrefixes.push(field.split(".")[0]);
     }
 
     // Every field in queryShape is in shapeFields or is the base of a path in shapeFields.
     for (const field in entry.key.queryShape) {
-        assert(shapeFieldsPrefixes.includes(field),
-               `Unexpected field ${field} in shape for ${commandName}`);
+        assert(shapeFieldsPrefixes.includes(field), `Unexpected field ${field} in shape for ${commandName}`);
     }
 
     // Every path in keyFields is in the key.
@@ -533,20 +679,20 @@ export function runCommandAndValidateQueryStats(
             // TODO SERVER-76263 collectionType is not yet available on mongos.
             continue;
         }
-        assert(hasValueAtPath(entry.key, field),
-               `Key: ${tojson(entry.key)} is missing field ${field}`);
+        assert(hasValueAtPath(entry.key, field), `Key: ${tojson(entry.key)} is missing field ${field}`);
         keyFieldsPrefixes.push(field.split(".")[0]);
     }
 
     // Every field in the key is in keyFields or is the base of a path in keyFields.
     for (const field in entry.key) {
-        assert(keyFieldsPrefixes.includes(field),
-               `Unexpected field ${field} in key for ${commandName}`);
+        assert(keyFieldsPrefixes.includes(field), `Unexpected field ${field} in key for ${commandName}`);
     }
 
     // $hint can only be string(index name) or object (index spec).
     assert.throwsWithCode(() => {
-        coll.find({v: {$eq: 2}}).hint({'v': 60, $hint: -128}).itcount();
+        coll.find({v: {$eq: 2}})
+            .hint({"v": 60, $hint: -128})
+            .itcount();
     }, ErrorCodes.BadValue);
 }
 
@@ -559,8 +705,10 @@ export function runCommandAndValidateQueryStats(
 function getUniqueValuesByName(entries, fieldName) {
     const hashes = new Set();
     for (const entry of entries) {
-        assert(entry[fieldName] && entry[fieldName] !== "",
-               `Entry does not have a '${fieldName}' field: ${tojson(entry)}`);
+        assert(
+            entry[fieldName] && entry[fieldName] !== "",
+            `Entry does not have a '${fieldName}' field: ${tojson(entry)}`,
+        );
         hashes.add(entry[fieldName]);
     }
     return Array.from(hashes);
@@ -573,7 +721,7 @@ function getUniqueValuesByName(entries, fieldName) {
  * @returns {list} list of unique hashes corresponding to the entries.
  */
 export function getQueryStatsKeyHashes(entries) {
-    const keyHashArray = getUniqueValuesByName(entries, 'keyHash');
+    const keyHashArray = getUniqueValuesByName(entries, "keyHash");
     // We expect all keys and hashes to be unique, so assert that we have as many unique hashes as
     // entries.
     assert.eq(keyHashArray.length, entries.length, tojson(entries));
@@ -587,13 +735,13 @@ export function getQueryStatsKeyHashes(entries) {
  * @returns {list} list of unique hashes corresponding to the shapes in the entries.
  */
 export function getQueryStatsShapeHashes(entries) {
-    return getUniqueValuesByName(entries, 'queryShapeHash');
+    return getUniqueValuesByName(entries, "queryShapeHash");
 }
 
 /**
  * Helper function to construct a query stats key for a find query.
  */
-export function getFindQueryStatsKey(conn, collName, queryShapeExtra, extra = {}) {
+export function getFindQueryStatsKey({conn, collName, queryShapeExtra, extra = {}}) {
     // This is most of the query stats key. There are configuration-specific details that are
     // added conditionally afterwards.
     const baseQueryShape = {
@@ -625,7 +773,7 @@ export function getFindQueryStatsKey(conn, collName, queryShapeExtra, extra = {}
 /**
  * Helper function to construct a query stats key for an aggregate query.
  */
-export function getAggregateQueryStatsKey(conn, collName, queryShapeExtra, extra = {}) {
+export function getAggregateQueryStatsKey({conn, collName, queryShapeExtra, extra = {}}) {
     const testDB = conn.getDB("test");
     const coll = testDB[collName];
     const baseQueryShape = {cmdNs: {db: "test", coll: collName}, command: "aggregate"};
@@ -637,9 +785,8 @@ export function getAggregateQueryStatsKey(conn, collName, queryShapeExtra, extra
 
     if (!conn.isMongos()) {
         // TODO SERVER-76263 - make this apply to mongos once it has collection telemetry info.
-        baseStatsKey.collectionType = collName == "$cmd.aggregate" ? "virtual"
-            : isView(conn, coll)                                   ? "view"
-                                                                   : "collection";
+        baseStatsKey.collectionType =
+            collName == "$cmd.aggregate" ? "virtual" : isView(conn, coll) ? "view" : "collection";
     }
 
     if (FixtureHelpers.isReplSet(conn.getDB("test"))) {
@@ -714,7 +861,7 @@ export function getDistinctQueryStatsKey(conn, collName, queryShapeExtra) {
 function getQueryStatsForNs(testDB, namespace) {
     return getQueryStats(testDB, {
         collName: namespace,
-        extraMatch: {"key.queryShape.pipeline.0.$queryStats": {$exists: false}}
+        extraMatch: {"key.queryShape.pipeline.0.$queryStats": {$exists: false}},
     });
 }
 
@@ -725,7 +872,15 @@ function getSingleQueryStatsEntryForNs(testDB, namespace) {
     return queryStats[0];
 }
 
-function getExecCount(testDB, namespace) {
+/**
+ * Gets the execution count of the latest query stat entry for the given nss. It assumes that there
+ * is only one query stats entry. If multiple entries are found, it will raise an assertion error.
+ *
+ * @param {string} testDB
+ * @param {string} namespace
+ * @returns {number} The execution count
+ */
+export function getExecCount(testDB, namespace) {
     const queryStats = getQueryStatsForNs(testDB, namespace);
     assert.lte(queryStats.length, 1, "Multiple query stats entries found for " + namespace);
     return queryStats.length == 0 ? 0 : queryStats[0].metrics.execCount;
@@ -767,7 +922,7 @@ function isView(conn, coll) {
  * returning the query stats. Asserts that the expected number of documents is ultimately returned,
  * and asserts that query stats are written as expected.
  */
-export function exhaustCursorAndGetQueryStats(conn, coll, cmd, key, expectedDocs) {
+export function exhaustCursorAndGetQueryStats({conn, cmd, key, expectedDocs}) {
     const testDB = conn.getDB("test");
 
     // Set up the namespace and the batch size - it goes in different fields for find vs. aggregate.
@@ -802,8 +957,7 @@ export function exhaustCursorAndGetQueryStats(conn, coll, cmd, key, expectedDocs
     if (batchSize < expectedDocs) {
         assert.neq(0, cursor.id, "Cursor unexpectedly exhausted in initial batch");
     } else if (batchSize > expectedDocs) {
-        assert.eq(
-            0, cursor.id, "Initial batch unexpectedly wasn't sufficient to exhaust the cursor");
+        assert.eq(0, cursor.id, "Initial batch unexpectedly wasn't sufficient to exhaust the cursor");
     }
 
     while (cursor.id != 0) {
@@ -821,20 +975,21 @@ export function exhaustCursorAndGetQueryStats(conn, coll, cmd, key, expectedDocs
     assert.eq(allResults.length, expectedDocs);
 
     const execCountPost = getExecCount(testDB, namespace);
-    assert.eq(
-        execCountPost, execCountPre + 1, "Didn't find query stats for namespace " + namespace);
+    assert.eq(execCountPost, execCountPre + 1, "Didn't find query stats for namespace " + namespace);
 
     const queryStats = getSingleQueryStatsEntryForNs(conn, namespace);
-    print("Query Stats: " + tojson(queryStats));
+    jsTest.log.info("Query Stats", {queryStats});
 
-    assertExpectedResults(queryStats,
-                          key,
-                          /* expectedExecCount */ execCountPost,
-                          /* expectedDocsReturnedSum */ expectedDocs * execCountPost,
-                          /* expectedDocsReturnedMax */ expectedDocs,
-                          /* expectedDocsReturnedMin */ expectedDocs,
-                          /* expectedDocsReturnedSumOfSq */ expectedDocs ** 2 * execCountPost,
-                          expectGetMores);
+    assertExpectedResults({
+        results: queryStats,
+        expectedQueryStatsKey: key,
+        expectedExecCount: execCountPost,
+        expectedDocsReturnedSum: expectedDocs * execCountPost,
+        expectedDocsReturnedMax: expectedDocs,
+        expectedDocsReturnedMin: expectedDocs,
+        expectedDocsReturnedSumOfSq: expectedDocs ** 2 * execCountPost,
+        getMores: expectGetMores,
+    });
 
     return queryStats;
 }
@@ -882,12 +1037,14 @@ export function runOnReplsetAndShardedCluster(callbackFn) {
 
     {
         const st = new ShardingTest(
-            Object.assign({shards: 2, other: {mongosOptions: getQueryStatsServerParameters()}}));
+            Object.assign({shards: 2, other: {mongosOptions: getQueryStatsServerParameters()}}),
+        );
 
         const testDB = st.s.getDB("test");
         // Enable sharding separate from per-test setup to avoid calling enableSharding repeatedly.
-        assert.commandWorked(testDB.adminCommand(
-            {enableSharding: testDB.getName(), primaryShard: st.shard0.shardName}));
+        assert.commandWorked(
+            testDB.adminCommand({enableSharding: testDB.getName(), primaryShard: st.shard0.shardName}),
+        );
 
         callbackFn(st.s, st);
 
@@ -899,8 +1056,7 @@ export function runOnReplsetAndShardedCluster(callbackFn) {
  * Given a query stats entry, and stats that the entry should have, this function checks that the
  * entry is the result of a change stream request and that the metrics are what are expected.
  */
-export function checkChangeStreamEntry(
-    {queryStatsEntry, db, collectionName, numExecs, numDocsReturned}) {
+export function checkChangeStreamEntry({queryStatsEntry, db, collectionName, numExecs, numDocsReturned}) {
     assert.eq(collectionName, queryStatsEntry.key.queryShape.cmdNs.coll);
 
     // Confirm entry is a change stream request.
@@ -913,17 +1069,18 @@ export function checkChangeStreamEntry(
     }
 
     // Checking that metrics match expected metrics.
-    assert.eq(queryStatsEntry.metrics.execCount, numExecs);
-    assert.eq(queryStatsEntry.metrics.docsReturned.sum, numDocsReturned);
+    const queryMetrics = queryStatsEntry.metrics;
+    const queryExecMetrics = getQueryExecMetrics(queryMetrics);
+    assert.eq(queryMetrics.execCount, numExecs);
+    assert.eq(queryExecMetrics.docsReturned.sum, numDocsReturned);
 
     // FirstResponseExecMicros and TotalExecMicros match since each getMore is recorded as a new
     // first response.
-    assert.eq(queryStatsEntry.metrics.totalExecMicros.sum,
-              queryStatsEntry.metrics.firstResponseExecMicros.sum);
-    assert.eq(queryStatsEntry.metrics.totalExecMicros.max,
-              queryStatsEntry.metrics.firstResponseExecMicros.max);
-    assert.eq(queryStatsEntry.metrics.totalExecMicros.min,
-              queryStatsEntry.metrics.firstResponseExecMicros.min);
+    const totalExecMicros = queryMetrics.totalExecMicros;
+    const firstResponseExecMicros = getCursorMetrics(queryMetrics).firstResponseExecMicros;
+    assert.eq(totalExecMicros.sum, firstResponseExecMicros.sum);
+    assert.eq(totalExecMicros.max, firstResponseExecMicros.max);
+    assert.eq(totalExecMicros.min, firstResponseExecMicros.min);
 }
 
 /**

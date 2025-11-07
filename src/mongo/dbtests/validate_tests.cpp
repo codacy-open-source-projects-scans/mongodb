@@ -32,18 +32,6 @@
 #include <fmt/format.h>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
 // IWYU pragma: no_include "boost/move/algo/detail/set_difference.hpp"
-#include <algorithm>
-#include <boost/move/algo/move.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <memory>
-#include <ostream>
-#include <string>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/data_view.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
@@ -54,35 +42,36 @@
 #include "mongo/bson/json.h"
 #include "mongo/bson/oid.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/catalog/clustered_collection_util.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/collection_catalog.h"
-#include "mongo/db/catalog/collection_options.h"
-#include "mongo/db/catalog/database.h"
-#include "mongo/db/catalog/index_catalog.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
-#include "mongo/db/catalog/validate/collection_validation.h"
-#include "mongo/db/catalog/validate/validate_results.h"
-#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/collection_crud/collection_write_path.h"
-#include "mongo/db/concurrency/lock_manager_defs.h"
 #include "mongo/db/curop.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_access_method.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/index_builds/index_build_interceptor.h"
+#include "mongo/db/index_builds/index_builds_common.h"
 #include "mongo/db/index_builds/multi_index_block.h"
+#include "mongo/db/local_catalog/catalog_raii.h"
+#include "mongo/db/local_catalog/clustered_collection_util.h"
+#include "mongo/db/local_catalog/collection.h"
+#include "mongo/db/local_catalog/collection_catalog.h"
+#include "mongo/db/local_catalog/collection_options.h"
+#include "mongo/db/local_catalog/database.h"
+#include "mongo/db/local_catalog/db_raii.h"
+#include "mongo/db/local_catalog/durable_catalog.h"
+#include "mongo/db/local_catalog/index_catalog.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
+#include "mongo/db/local_catalog/lock_manager/lock_manager_defs.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/record_id_helpers.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/storage/durable_catalog.h"
 #include "mongo/db/storage/key_format.h"
 #include "mongo/db/storage/key_string/key_string.h"
+#include "mongo/db/storage/mdb_catalog.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/snapshot.h"
@@ -90,15 +79,28 @@
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/db/validate/collection_validation.h"
+#include "mongo/db/validate/validate_results.h"
 #include "mongo/dbtests/dbtests.h"  // IWYU pragma: keep
 #include "mongo/dbtests/storage_debug_util.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/shared_buffer_fragment.h"
 #include "mongo/util/uuid.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <ostream>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/move/algo/move.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace ValidateTests {
@@ -207,8 +209,8 @@ public:
 
     // Helper to refetch the Collection from the catalog in order to see any changes made to it
     CollectionPtr coll() const {
-        return CollectionPtr(
-            CollectionCatalog::get(&_opCtx)->lookupCollectionByNamespace(&_opCtx, _nss));
+        return CollectionPtr(CollectionCatalog::get(&_opCtx)->establishConsistentCollection(
+            &_opCtx, _nss, boost::none));
     }
 
 protected:
@@ -338,13 +340,7 @@ protected:
             Lock::CollectionLock collLock(&_opCtx, _nss, MODE_X);
             CollectionWriter collection(&_opCtx, _nss);
             beginTransaction();
-            status =
-                indexer
-                    .init(&_opCtx,
-                          collection,
-                          spec,
-                          [](const std::vector<BSONObj>& specs) -> Status { return Status::OK(); })
-                    .getStatus();
+            auto status = dbtests::initializeMultiIndexBlock(&_opCtx, collection, indexer, spec);
             commitTransaction();
             if (status == ErrorCodes::IndexAlreadyExists) {
                 return Status::OK();
@@ -356,7 +352,7 @@ protected:
         {
             Lock::CollectionLock collLock(&_opCtx, _nss, MODE_IX);
             CollectionWriter collection(&_opCtx, _nss);
-            status = indexer.insertAllDocumentsInCollection(&_opCtx, collection.get());
+            status = indexer.insertAllDocumentsInCollection(&_opCtx, _nss);
             if (!status.isOK()) {
                 return status;
             }
@@ -433,7 +429,7 @@ public:
         // Remove {_id: 1} from the record store, so we get more _id entries than records.
         {
             beginTransaction();
-            rs->deleteRecord(&_opCtx, id1);
+            rs->deleteRecord(&_opCtx, *shard_role_details::getRecoveryUnit(&_opCtx), id1);
             commitTransaction();
         }
         releaseDb();
@@ -447,7 +443,11 @@ public:
             beginTransaction();
             for (int j = 0; j < 2; j++) {
                 auto doc = BSON("_id" << j);
-                ASSERT_OK(rs->insertRecord(&_opCtx, doc.objdata(), doc.objsize(), timestampToUse));
+                ASSERT_OK(rs->insertRecord(&_opCtx,
+                                           *shard_role_details::getRecoveryUnit(&_opCtx),
+                                           doc.objdata(),
+                                           doc.objsize(),
+                                           timestampToUse));
             }
             commitTransaction();
         }
@@ -477,10 +477,9 @@ public:
             commitTransaction();
         }
 
-        auto status = createIndexFromSpec(BSON("name"
-                                               << "a"
-                                               << "key" << BSON("a" << 1) << "v"
-                                               << static_cast<int>(kIndexVersion)));
+        auto status = createIndexFromSpec(BSON("name" << "a"
+                                                      << "key" << BSON("a" << 1) << "v"
+                                                      << static_cast<int>(kIndexVersion)));
 
         ASSERT_OK(status);
         releaseDb();
@@ -492,7 +491,7 @@ public:
         // Remove a record, so we get more _id entries than records, and verify validate fails.
         {
             beginTransaction();
-            rs->deleteRecord(&_opCtx, id1);
+            rs->deleteRecord(&_opCtx, *shard_role_details::getRecoveryUnit(&_opCtx), id1);
             commitTransaction();
         }
         releaseDb();
@@ -506,7 +505,11 @@ public:
             beginTransaction();
             for (int j = 0; j < 2; j++) {
                 auto doc = BSON("_id" << j);
-                ASSERT_OK(rs->insertRecord(&_opCtx, doc.objdata(), doc.objsize(), timestampToUse));
+                ASSERT_OK(rs->insertRecord(&_opCtx,
+                                           *shard_role_details::getRecoveryUnit(&_opCtx),
+                                           doc.objdata(),
+                                           doc.objsize(),
+                                           timestampToUse));
             }
             commitTransaction();
         }
@@ -538,10 +541,9 @@ public:
             commitTransaction();
         }
 
-        auto status = createIndexFromSpec(BSON("name"
-                                               << "a"
-                                               << "key" << BSON("a" << 1) << "v"
-                                               << static_cast<int>(kIndexVersion)));
+        auto status = createIndexFromSpec(BSON("name" << "a"
+                                                      << "key" << BSON("a" << 1) << "v"
+                                                      << static_cast<int>(kIndexVersion)));
 
         ASSERT_OK(status);
         releaseDb();
@@ -555,7 +557,11 @@ public:
         {
             beginTransaction();
             auto doc = BSON("_id" << 1 << "a" << 9);
-            auto updateStatus = rs->updateRecord(&_opCtx, id1, doc.objdata(), doc.objsize());
+            auto updateStatus = rs->updateRecord(&_opCtx,
+                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                 id1,
+                                                 doc.objdata(),
+                                                 doc.objsize());
 
             ASSERT_OK(updateStatus);
             commitTransaction();
@@ -598,7 +604,11 @@ public:
         {
             beginTransaction();
             auto doc = BSON("_id" << 9);
-            auto updateStatus = rs->updateRecord(&_opCtx, id1, doc.objdata(), doc.objsize());
+            auto updateStatus = rs->updateRecord(&_opCtx,
+                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                 id1,
+                                                 doc.objdata(),
+                                                 doc.objsize());
             ASSERT_OK(updateStatus);
             commitTransaction();
         }
@@ -611,7 +621,11 @@ public:
         {
             beginTransaction();
             auto doc = BSON("_id" << 1);
-            auto updateStatus = rs->updateRecord(&_opCtx, id1, doc.objdata(), doc.objsize());
+            auto updateStatus = rs->updateRecord(&_opCtx,
+                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                 id1,
+                                                 doc.objdata(),
+                                                 doc.objsize());
             ASSERT_OK(updateStatus);
             commitTransaction();
         }
@@ -625,9 +639,13 @@ public:
         // have an index entry.
         {
             beginTransaction();
-            rs->deleteRecord(&_opCtx, id1);
+            rs->deleteRecord(&_opCtx, *shard_role_details::getRecoveryUnit(&_opCtx), id1);
             auto doc = BSON("_id" << 3);
-            ASSERT_OK(rs->insertRecord(&_opCtx, doc.objdata(), doc.objsize(), timestampToUse)
+            ASSERT_OK(rs->insertRecord(&_opCtx,
+                                       *shard_role_details::getRecoveryUnit(&_opCtx),
+                                       doc.objdata(),
+                                       doc.objsize(),
+                                       timestampToUse)
                           .getStatus());
             commitTransaction();
         }
@@ -676,10 +694,9 @@ public:
         lockDb(MODE_X);
 
         // Create multi-key index.
-        auto status = createIndexFromSpec(BSON("name"
-                                               << "multikey_index"
-                                               << "key" << BSON("a.b" << 1) << "v"
-                                               << static_cast<int>(kIndexVersion)));
+        auto status = createIndexFromSpec(BSON("name" << "multikey_index"
+                                                      << "key" << BSON("a.b" << 1) << "v"
+                                                      << static_cast<int>(kIndexVersion)));
 
         ASSERT_OK(status);
         releaseDb();
@@ -691,7 +708,11 @@ public:
         // Update a document's indexed field without updating the index.
         {
             beginTransaction();
-            auto updateStatus = rs->updateRecord(&_opCtx, id1, doc1_b.objdata(), doc1_b.objsize());
+            auto updateStatus = rs->updateRecord(&_opCtx,
+                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                 id1,
+                                                 doc1_b.objdata(),
+                                                 doc1_b.objsize());
             ASSERT_OK(updateStatus);
             commitTransaction();
         }
@@ -704,7 +725,11 @@ public:
         // Index validation should still be valid.
         {
             beginTransaction();
-            auto updateStatus = rs->updateRecord(&_opCtx, id1, doc1_c.objdata(), doc1_c.objsize());
+            auto updateStatus = rs->updateRecord(&_opCtx,
+                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                 id1,
+                                                 doc1_c.objdata(),
+                                                 doc1_c.objsize());
             ASSERT_OK(updateStatus);
             commitTransaction();
         }
@@ -739,11 +764,10 @@ public:
         }
 
         // Create a sparse index.
-        auto status = createIndexFromSpec(BSON("name"
-                                               << "sparse_index"
-                                               << "key" << BSON("a" << 1) << "v"
-                                               << static_cast<int>(kIndexVersion) << "background"
-                                               << false << "sparse" << true));
+        auto status = createIndexFromSpec(
+            BSON("name" << "sparse_index"
+                        << "key" << BSON("a" << 1) << "v" << static_cast<int>(kIndexVersion)
+                        << "background" << false << "sparse" << true));
 
         ASSERT_OK(status);
         releaseDb();
@@ -756,7 +780,11 @@ public:
         {
             beginTransaction();
             auto doc = BSON("_id" << 2 << "a" << 3);
-            auto updateStatus = rs->updateRecord(&_opCtx, id1, doc.objdata(), doc.objsize());
+            auto updateStatus = rs->updateRecord(&_opCtx,
+                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                 id1,
+                                                 doc.objdata(),
+                                                 doc.objsize());
             ASSERT_OK(updateStatus);
             commitTransaction();
         }
@@ -797,12 +825,11 @@ public:
         }
 
         // Create a partial index.
-        auto status = createIndexFromSpec(BSON("name"
-                                               << "partial_index"
-                                               << "key" << BSON("a" << 1) << "v"
-                                               << static_cast<int>(kIndexVersion) << "background"
-                                               << false << "partialFilterExpression"
-                                               << BSON("a" << BSON("$gt" << 1))));
+        auto status = createIndexFromSpec(
+            BSON("name" << "partial_index"
+                        << "key" << BSON("a" << 1) << "v" << static_cast<int>(kIndexVersion)
+                        << "background" << false << "partialFilterExpression"
+                        << BSON("a" << BSON("$gt" << 1))));
 
         ASSERT_OK(status);
         releaseDb();
@@ -815,7 +842,11 @@ public:
         {
             beginTransaction();
             auto doc = BSON("_id" << 1);
-            auto updateStatus = rs->updateRecord(&_opCtx, id1, doc.objdata(), doc.objsize());
+            auto updateStatus = rs->updateRecord(&_opCtx,
+                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                 id1,
+                                                 doc.objdata(),
+                                                 doc.objsize());
             ASSERT_OK(updateStatus);
             commitTransaction();
         }
@@ -850,24 +881,16 @@ public:
         }
 
         // Create a partial geo index that indexes the document. This should return an error.
-        ASSERT_NOT_OK(createIndexFromSpec(BSON("name"
-                                               << "partial_index"
-                                               << "key"
-                                               << BSON("x"
-                                                       << "2dsphere")
-                                               << "v" << static_cast<int>(kIndexVersion)
-                                               << "partialFilterExpression"
-                                               << BSON("a" << BSON("$eq" << 2)))));
+        ASSERT_NOT_OK(createIndexFromSpec(BSON(
+            "name" << "partial_index"
+                   << "key" << BSON("x" << "2dsphere") << "v" << static_cast<int>(kIndexVersion)
+                   << "partialFilterExpression" << BSON("a" << BSON("$eq" << 2)))));
 
         // Create a partial geo index that does not index the document.
-        auto status = createIndexFromSpec(BSON("name"
-                                               << "partial_index"
-                                               << "key"
-                                               << BSON("x"
-                                                       << "2dsphere")
-                                               << "v" << static_cast<int>(kIndexVersion)
-                                               << "partialFilterExpression"
-                                               << BSON("a" << BSON("$eq" << 1))));
+        auto status = createIndexFromSpec(BSON(
+            "name" << "partial_index"
+                   << "key" << BSON("x" << "2dsphere") << "v" << static_cast<int>(kIndexVersion)
+                   << "partialFilterExpression" << BSON("a" << BSON("$eq" << 1))));
         ASSERT_OK(status);
         releaseDb();
         ensureValidateWorked();
@@ -914,16 +937,14 @@ public:
 
         // Create two compound indexes, one forward and one reverse, to test
         // validate()'s index direction parsing.
-        auto status = createIndexFromSpec(BSON("name"
-                                               << "compound_index_1"
-                                               << "key" << BSON("a" << 1 << "b" << -1) << "v"
-                                               << static_cast<int>(kIndexVersion)));
+        auto status = createIndexFromSpec(BSON("name" << "compound_index_1"
+                                                      << "key" << BSON("a" << 1 << "b" << -1) << "v"
+                                                      << static_cast<int>(kIndexVersion)));
         ASSERT_OK(status);
 
-        status = createIndexFromSpec(BSON("name"
-                                          << "compound_index_2"
-                                          << "key" << BSON("a" << -1 << "b" << 1) << "v"
-                                          << static_cast<int>(kIndexVersion)));
+        status = createIndexFromSpec(BSON("name" << "compound_index_2"
+                                                 << "key" << BSON("a" << -1 << "b" << 1) << "v"
+                                                 << static_cast<int>(kIndexVersion)));
 
         ASSERT_OK(status);
         releaseDb();
@@ -936,7 +957,11 @@ public:
         {
             beginTransaction();
             auto doc = BSON("_id" << 1 << "a" << 1 << "b" << 3);
-            auto updateStatus = rs->updateRecord(&_opCtx, id1, doc.objdata(), doc.objsize());
+            auto updateStatus = rs->updateRecord(&_opCtx,
+                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                 id1,
+                                                 doc.objdata(),
+                                                 doc.objsize());
             ASSERT_OK(updateStatus);
             commitTransaction();
         }
@@ -1012,8 +1037,12 @@ public:
                 nullptr,
                 id1);
 
-            auto removeStatus = iam->removeKeys(
-                &_opCtx, descriptor->getEntry(), {keys.begin(), keys.end()}, options, &numDeleted);
+            auto removeStatus = iam->removeKeys(&_opCtx,
+                                                *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                descriptor->getEntry(),
+                                                {keys.begin(), keys.end()},
+                                                options,
+                                                &numDeleted);
             auto insertStatus = iam->insert(&_opCtx,
                                             pooledBuilder,
                                             coll(),
@@ -1139,7 +1168,10 @@ public:
                                         recordId)
                     .release();
             ASSERT_SDI_INSERT_OK(
-                sortedDataInterface->insert(&_opCtx, indexKey, true /* dupsAllowed */));
+                sortedDataInterface->insert(&_opCtx,
+                                            *shard_role_details::getRecoveryUnit(&_opCtx),
+                                            indexKey,
+                                            true /* dupsAllowed */));
             commitTransaction();
         }
 
@@ -1160,7 +1192,10 @@ public:
                                         sortedDataInterface->getOrdering(),
                                         recordId)
                     .release();
-            sortedDataInterface->unindex(&_opCtx, indexKey, true /* dupsAllowed */);
+            sortedDataInterface->unindex(&_opCtx,
+                                         *shard_role_details::getRecoveryUnit(&_opCtx),
+                                         indexKey,
+                                         true /* dupsAllowed */);
             commitTransaction();
         }
 
@@ -1256,7 +1291,10 @@ public:
                                         sortedDataInterface->getOrdering(),
                                         recordId)
                     .release();
-            sortedDataInterface->unindex(&_opCtx, indexKey, true /* dupsAllowed */);
+            sortedDataInterface->unindex(&_opCtx,
+                                         *shard_role_details::getRecoveryUnit(&_opCtx),
+                                         indexKey,
+                                         true /* dupsAllowed */);
             commitTransaction();
         }
         releaseDb();
@@ -1313,7 +1351,11 @@ public:
         {
             beginTransaction();
             auto doc = BSON("_id" << 1 << "a" << 5);
-            auto updateStatus = rs->updateRecord(&_opCtx, rid, doc.objdata(), doc.objsize());
+            auto updateStatus = rs->updateRecord(&_opCtx,
+                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                 rid,
+                                                 doc.objdata(),
+                                                 doc.objsize());
             ASSERT_OK(updateStatus);
             commitTransaction();
         }
@@ -1418,8 +1460,12 @@ public:
                 nullptr,
                 nullptr,
                 rid);
-            auto removeStatus = iam->removeKeys(
-                &_opCtx, descriptor->getEntry(), {keys.begin(), keys.end()}, options, &numDeleted);
+            auto removeStatus = iam->removeKeys(&_opCtx,
+                                                *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                descriptor->getEntry(),
+                                                {keys.begin(), keys.end()},
+                                                options,
+                                                &numDeleted);
 
             ASSERT_EQUALS(numDeleted, 1);
             ASSERT_OK(removeStatus);
@@ -1503,7 +1549,7 @@ public:
             RecordStore* rs = coll()->getRecordStore();
 
             beginTransaction();
-            rs->deleteRecord(&_opCtx, rid);
+            rs->deleteRecord(&_opCtx, *shard_role_details::getRecoveryUnit(&_opCtx), rid);
             commitTransaction();
             releaseDb();
         }
@@ -1606,10 +1652,18 @@ public:
             std::unique_ptr<SeekableRecordCursor> cursor = coll()->getCursor(&_opCtx);
             auto record = cursor->next();
             RecordId rid = record->id;
-            ASSERT_OK(rs->updateRecord(&_opCtx, rid, doc1.objdata(), doc1.objsize()));
+            ASSERT_OK(rs->updateRecord(&_opCtx,
+                                       *shard_role_details::getRecoveryUnit(&_opCtx),
+                                       rid,
+                                       doc1.objdata(),
+                                       doc1.objsize()));
             record = cursor->next();
             rid = record->id;
-            ASSERT_OK(rs->updateRecord(&_opCtx, rid, doc2.objdata(), doc2.objsize()));
+            ASSERT_OK(rs->updateRecord(&_opCtx,
+                                       *shard_role_details::getRecoveryUnit(&_opCtx),
+                                       rid,
+                                       doc2.objdata(),
+                                       doc2.objsize()));
             commitTransaction();
         }
         releaseDb();
@@ -1785,8 +1839,12 @@ public:
                 nullptr,
                 nullptr,
                 rid);
-            auto removeStatus = iam->removeKeys(
-                &_opCtx, descriptor->getEntry(), {keys.begin(), keys.end()}, options, &numDeleted);
+            auto removeStatus = iam->removeKeys(&_opCtx,
+                                                *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                descriptor->getEntry(),
+                                                {keys.begin(), keys.end()},
+                                                options,
+                                                &numDeleted);
 
             ASSERT_EQUALS(numDeleted, 1);
             ASSERT_OK(removeStatus);
@@ -1937,7 +1995,7 @@ public:
             RecordStore* rs = coll()->getRecordStore();
 
             beginTransaction();
-            rs->deleteRecord(&_opCtx, rid);
+            rs->deleteRecord(&_opCtx, *shard_role_details::getRecoveryUnit(&_opCtx), rid);
             commitTransaction();
             releaseDb();
         }
@@ -2061,11 +2119,10 @@ public:
 
         // Create a unique index.
         const auto indexName = "a";
+        const auto indexSpec = BSON("name" << indexName << "key" << BSON("a" << 1) << "v"
+                                           << static_cast<int>(kIndexVersion) << "unique" << true);
         {
-            const auto indexKey = BSON("a" << 1);
-            auto status = createIndexFromSpec(BSON("name" << indexName << "key" << indexKey << "v"
-                                                          << static_cast<int>(kIndexVersion)
-                                                          << "unique" << true));
+            auto status = createIndexFromSpec(indexSpec);
             ASSERT_OK(status);
         }
 
@@ -2098,7 +2155,11 @@ public:
             // because there are duplicate keys, and not just because there are keys without
             // corresponding records.
             auto swRecordId = coll()->getRecordStore()->insertRecord(
-                &_opCtx, dupObj.objdata(), dupObj.objsize(), timestampToUse);
+                &_opCtx,
+                *shard_role_details::getRecoveryUnit(&_opCtx),
+                dupObj.objdata(),
+                dupObj.objsize(),
+                timestampToUse);
             ASSERT_OK(swRecordId);
             rid = swRecordId.getValue();
 
@@ -2106,10 +2167,16 @@ public:
 
             // Insert the key on _id.
             {
+                auto storageEngine = _opCtx.getServiceContext()->getStorageEngine();
                 auto descriptor = indexCatalog->findIdIndex(&_opCtx);
                 auto entry = const_cast<IndexCatalogEntry*>(indexCatalog->getEntry(descriptor));
+                IndexBuildInfo indexBuildInfo(indexCatalog->getDefaultIdIndexSpec(coll()),
+                                              entry->getIdent());
+                indexBuildInfo.setInternalIdents(*storageEngine,
+                                                 VersionContext::getDecoration(&_opCtx));
                 auto iam = entry->accessMethod()->asSortedData();
-                auto interceptor = std::make_unique<IndexBuildInterceptor>(&_opCtx, entry);
+                auto interceptor = std::make_unique<IndexBuildInterceptor>(
+                    &_opCtx, entry, indexBuildInfo, /*resume=*/false, /*generateTableWrites=*/true);
 
                 KeyStringSet keys;
                 iam->getKeys(&_opCtx,
@@ -2131,14 +2198,17 @@ public:
                     int64_t numInserted;
                     auto insertStatus = iam->insertKeysAndUpdateMultikeyPaths(
                         &_opCtx,
+                        *shard_role_details::getRecoveryUnit(&_opCtx),
                         coll(),
                         entry,
                         {keys.begin(), keys.end()},
                         {},
                         MultikeyPaths{},
                         options,
-                        [this, &entry, &interceptor](const key_string::Value& duplicateKey) {
-                            return interceptor->recordDuplicateKey(&_opCtx, entry, duplicateKey);
+                        [this, &entry, &interceptor](const CollectionPtr& coll,
+                                                     const key_string::View& duplicateKey) {
+                            return interceptor->recordDuplicateKey(
+                                &_opCtx, coll, entry, duplicateKey);
                         },
                         &numInserted);
 
@@ -2218,17 +2288,31 @@ public:
             {
                 const NamespaceString lostAndFoundNss = NamespaceString::makeLocalCollection(
                     "lost_and_found." + coll()->uuid().toString());
-                AutoGetCollectionForRead autoColl(&_opCtx, lostAndFoundNss);
+                const auto coll =
+                    acquireCollection(&_opCtx,
+                                      CollectionAcquisitionRequest(
+                                          lostAndFoundNss,
+                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          repl::ReadConcernArgs::get(&_opCtx),
+                                          AcquisitionPrerequisites::kRead),
+                                      MODE_IS);
                 Snapshotted<BSONObj> result;
-                ASSERT(autoColl.getCollection()->findDoc(&_opCtx, RecordId(1), &result));
+                ASSERT(coll.getCollectionPtr()->findDoc(&_opCtx, RecordId(1), &result));
                 ASSERT_BSONOBJ_EQ(result.value(), fromjson("{_id:1, a:1}"));
             }
 
             // Verify the newer duplicate document still appears in the collection as expected.
             {
-                AutoGetCollectionForRead autoColl(&_opCtx, _nss);
+                const auto coll =
+                    acquireCollection(&_opCtx,
+                                      CollectionAcquisitionRequest(
+                                          _nss,
+                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          repl::ReadConcernArgs::get(&_opCtx),
+                                          AcquisitionPrerequisites::kRead),
+                                      MODE_IS);
                 Snapshotted<BSONObj> result;
-                ASSERT(autoColl.getCollection()->findDoc(&_opCtx, RecordId(3), &result));
+                ASSERT(coll.getCollectionPtr()->findDoc(&_opCtx, RecordId(3), &result));
                 ASSERT_BSONOBJ_EQ(result.value(), fromjson("{_id:2, a:1}"));
             }
 
@@ -2348,7 +2432,11 @@ public:
             // checking. Inserting a record without inserting keys results in the duplicate record
             // to be missing from both unique indexes.
             auto swRecordId = coll()->getRecordStore()->insertRecord(
-                &_opCtx, dupObj.objdata(), dupObj.objsize(), timestampToUse);
+                &_opCtx,
+                *shard_role_details::getRecoveryUnit(&_opCtx),
+                dupObj.objdata(),
+                dupObj.objsize(),
+                timestampToUse);
             ASSERT_OK(swRecordId);
             rid = swRecordId.getValue();
 
@@ -2356,10 +2444,16 @@ public:
 
             // Insert the key on _id.
             {
+                auto storageEngine = _opCtx.getServiceContext()->getStorageEngine();
                 auto descriptor = indexCatalog->findIdIndex(&_opCtx);
                 auto entry = const_cast<IndexCatalogEntry*>(indexCatalog->getEntry(descriptor));
                 auto iam = entry->accessMethod()->asSortedData();
-                auto interceptor = std::make_unique<IndexBuildInterceptor>(&_opCtx, entry);
+                IndexBuildInfo indexBuildInfo(indexCatalog->getDefaultIdIndexSpec(coll()),
+                                              entry->getIdent());
+                indexBuildInfo.setInternalIdents(*storageEngine,
+                                                 VersionContext::getDecoration(&_opCtx));
+                auto interceptor = std::make_unique<IndexBuildInterceptor>(
+                    &_opCtx, entry, indexBuildInfo, /*resume=*/false, /*generateTableWrites=*/true);
 
                 KeyStringSet keys;
                 iam->getKeys(&_opCtx,
@@ -2381,14 +2475,17 @@ public:
                     int64_t numInserted;
                     auto insertStatus = iam->insertKeysAndUpdateMultikeyPaths(
                         &_opCtx,
+                        *shard_role_details::getRecoveryUnit(&_opCtx),
                         coll(),
                         entry,
                         {keys.begin(), keys.end()},
                         {},
                         MultikeyPaths{},
                         options,
-                        [this, &entry, &interceptor](const key_string::Value& duplicateKey) {
-                            return interceptor->recordDuplicateKey(&_opCtx, entry, duplicateKey);
+                        [this, &entry, &interceptor](const CollectionPtr& coll,
+                                                     const key_string::View& duplicateKey) {
+                            return interceptor->recordDuplicateKey(
+                                &_opCtx, coll, entry, duplicateKey);
                         },
                         &numInserted);
 
@@ -2475,17 +2572,31 @@ public:
             {
                 const NamespaceString lostAndFoundNss = NamespaceString::makeLocalCollection(
                     "lost_and_found." + coll()->uuid().toString());
-                AutoGetCollectionForRead autoColl(&_opCtx, lostAndFoundNss);
+                const auto coll =
+                    acquireCollection(&_opCtx,
+                                      CollectionAcquisitionRequest(
+                                          lostAndFoundNss,
+                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          repl::ReadConcernArgs::get(&_opCtx),
+                                          AcquisitionPrerequisites::kRead),
+                                      MODE_IS);
                 Snapshotted<BSONObj> result;
-                ASSERT(autoColl.getCollection()->findDoc(&_opCtx, RecordId(1), &result));
+                ASSERT(coll.getCollectionPtr()->findDoc(&_opCtx, RecordId(1), &result));
                 ASSERT_BSONOBJ_EQ(result.value(), fromjson("{_id:1, a:1, b:1}"));
             }
 
             // Verify the newer duplicate document still appears in the collection as expected.
             {
-                AutoGetCollectionForRead autoColl(&_opCtx, _nss);
+                const auto coll =
+                    acquireCollection(&_opCtx,
+                                      CollectionAcquisitionRequest(
+                                          _nss,
+                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          repl::ReadConcernArgs::get(&_opCtx),
+                                          AcquisitionPrerequisites::kRead),
+                                      MODE_IS);
                 Snapshotted<BSONObj> result;
-                ASSERT(autoColl.getCollection()->findDoc(&_opCtx, RecordId(3), &result));
+                ASSERT(coll.getCollectionPtr()->findDoc(&_opCtx, RecordId(3), &result));
                 ASSERT_BSONOBJ_EQ(result.value(), fromjson("{_id:2, a:1, b:1}"));
             }
 
@@ -2571,11 +2682,11 @@ public:
         }
 
         const auto indexNameB = "b";
+        const auto indexKeyB = BSON("b" << 1);
+        const auto indexSpecB = BSON("name" << indexNameB << "key" << indexKeyB << "v"
+                                            << static_cast<int>(kIndexVersion) << "unique" << true);
         {
-            const auto indexKeyB = BSON("b" << 1);
-            auto status = createIndexFromSpec(BSON("name" << indexNameB << "key" << indexKeyB << "v"
-                                                          << static_cast<int>(kIndexVersion)
-                                                          << "unique" << true));
+            auto status = createIndexFromSpec(indexSpecB);
             ASSERT_OK(status);
         }
 
@@ -2623,6 +2734,7 @@ public:
                     nullptr,
                     rid1);
                 auto removeStatus = iam->removeKeys(&_opCtx,
+                                                    *shard_role_details::getRecoveryUnit(&_opCtx),
                                                     descriptor->getEntry(),
                                                     {keys.begin(), keys.end()},
                                                     options,
@@ -2653,7 +2765,11 @@ public:
             // because there are duplicate keys, and not just because there are keys without
             // corresponding records.
             auto swRecordId = coll()->getRecordStore()->insertRecord(
-                &_opCtx, dupObj.objdata(), dupObj.objsize(), timestampToUse);
+                &_opCtx,
+                *shard_role_details::getRecoveryUnit(&_opCtx),
+                dupObj.objdata(),
+                dupObj.objsize(),
+                timestampToUse);
             ASSERT_OK(swRecordId);
             rid2 = swRecordId.getValue();
 
@@ -2661,10 +2777,16 @@ public:
 
             // Insert the key on _id.
             {
+                auto storageEngine = _opCtx.getServiceContext()->getStorageEngine();
                 auto descriptor = indexCatalog->findIdIndex(&_opCtx);
                 auto entry = const_cast<IndexCatalogEntry*>(indexCatalog->getEntry(descriptor));
                 auto iam = entry->accessMethod()->asSortedData();
-                auto interceptor = std::make_unique<IndexBuildInterceptor>(&_opCtx, entry);
+                IndexBuildInfo indexBuildInfo(indexCatalog->getDefaultIdIndexSpec(coll()),
+                                              entry->getIdent());
+                indexBuildInfo.setInternalIdents(*storageEngine,
+                                                 VersionContext::getDecoration(&_opCtx));
+                auto interceptor = std::make_unique<IndexBuildInterceptor>(
+                    &_opCtx, entry, indexBuildInfo, /*resume=*/false, /*generateTableWrites=*/true);
 
                 KeyStringSet keys;
                 iam->getKeys(&_opCtx,
@@ -2686,14 +2808,17 @@ public:
                     int64_t numInserted;
                     auto insertStatus = iam->insertKeysAndUpdateMultikeyPaths(
                         &_opCtx,
+                        *shard_role_details::getRecoveryUnit(&_opCtx),
                         coll(),
                         entry,
                         {keys.begin(), keys.end()},
                         {},
                         MultikeyPaths{},
                         options,
-                        [this, &entry, &interceptor](const key_string::Value& duplicateKey) {
-                            return interceptor->recordDuplicateKey(&_opCtx, entry, duplicateKey);
+                        [this, &entry, &interceptor](const CollectionPtr& coll,
+                                                     const key_string::View& duplicateKey) {
+                            return interceptor->recordDuplicateKey(
+                                &_opCtx, coll, entry, duplicateKey);
                         },
                         &numInserted);
 
@@ -2708,10 +2833,15 @@ public:
 
             // Insert the key on b.
             {
+                auto storageEngine = _opCtx.getServiceContext()->getStorageEngine();
                 auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexNameB);
                 auto entry = const_cast<IndexCatalogEntry*>(indexCatalog->getEntry(descriptor));
                 auto iam = entry->accessMethod()->asSortedData();
-                auto interceptor = std::make_unique<IndexBuildInterceptor>(&_opCtx, entry);
+                IndexBuildInfo indexBuildInfo(indexSpecB, entry->getIdent());
+                indexBuildInfo.setInternalIdents(*storageEngine,
+                                                 VersionContext::getDecoration(&_opCtx));
+                auto interceptor = std::make_unique<IndexBuildInterceptor>(
+                    &_opCtx, entry, indexBuildInfo, /*resume=*/false, /*generateTableWrites=*/true);
 
                 KeyStringSet keys;
                 iam->getKeys(&_opCtx,
@@ -2733,14 +2863,17 @@ public:
                     int64_t numInserted;
                     auto insertStatus = iam->insertKeysAndUpdateMultikeyPaths(
                         &_opCtx,
+                        *shard_role_details::getRecoveryUnit(&_opCtx),
                         coll(),
                         entry,
                         {keys.begin(), keys.end()},
                         {},
                         MultikeyPaths{},
                         options,
-                        [this, &entry, &interceptor](const key_string::Value& duplicateKey) {
-                            return interceptor->recordDuplicateKey(&_opCtx, entry, duplicateKey);
+                        [this, &entry, &interceptor](const CollectionPtr& coll,
+                                                     const key_string::View& duplicateKey) {
+                            return interceptor->recordDuplicateKey(
+                                &_opCtx, coll, entry, duplicateKey);
                         },
                         &numInserted);
 
@@ -2824,17 +2957,31 @@ public:
             {
                 const NamespaceString lostAndFoundNss = NamespaceString::makeLocalCollection(
                     "lost_and_found." + coll()->uuid().toString());
-                AutoGetCollectionForRead autoColl(&_opCtx, lostAndFoundNss);
+                const auto coll =
+                    acquireCollection(&_opCtx,
+                                      CollectionAcquisitionRequest(
+                                          lostAndFoundNss,
+                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          repl::ReadConcernArgs::get(&_opCtx),
+                                          AcquisitionPrerequisites::kRead),
+                                      MODE_IS);
                 Snapshotted<BSONObj> result;
-                ASSERT(autoColl.getCollection()->findDoc(&_opCtx, RecordId(1), &result));
+                ASSERT(coll.getCollectionPtr()->findDoc(&_opCtx, RecordId(1), &result));
                 ASSERT_BSONOBJ_EQ(result.value(), fromjson("{_id:1, a:1, b:1}"));
             }
 
             // Verify the newer duplicate document still appears in the collection as expected.
             {
-                AutoGetCollectionForRead autoColl(&_opCtx, _nss);
+                const auto coll =
+                    acquireCollection(&_opCtx,
+                                      CollectionAcquisitionRequest(
+                                          _nss,
+                                          PlacementConcern(boost::none, ShardVersion::UNSHARDED()),
+                                          repl::ReadConcernArgs::get(&_opCtx),
+                                          AcquisitionPrerequisites::kRead),
+                                      MODE_IS);
                 Snapshotted<BSONObj> result;
-                ASSERT(autoColl.getCollection()->findDoc(&_opCtx, RecordId(3), &result));
+                ASSERT(coll.getCollectionPtr()->findDoc(&_opCtx, RecordId(3), &result));
                 ASSERT_BSONOBJ_EQ(result.value(), fromjson("{_id:2, a:1, b:1}"));
             }
 
@@ -2945,6 +3092,7 @@ public:
 
                 int64_t numDeleted;
                 auto removeStatus = iam->removeKeys(&_opCtx,
+                                                    *shard_role_details::getRecoveryUnit(&_opCtx),
                                                     descriptor->getEntry(),
                                                     {keys.begin(), keys.end()},
                                                     options,
@@ -2959,7 +3107,11 @@ public:
             {
                 beginTransaction();
                 auto updateStatus = coll()->getRecordStore()->updateRecord(
-                    &_opCtx, id1, mkDoc.objdata(), mkDoc.objsize());
+                    &_opCtx,
+                    *shard_role_details::getRecoveryUnit(&_opCtx),
+                    id1,
+                    mkDoc.objdata(),
+                    mkDoc.objsize());
                 ASSERT_OK(updateStatus);
                 commitTransaction();
             }
@@ -3144,8 +3296,12 @@ public:
                 nullptr,
                 nullptr,
                 rid);
-            auto removeStatus = iam->removeKeys(
-                &_opCtx, descriptor->getEntry(), {keys.begin(), keys.end()}, options, &numDeleted);
+            auto removeStatus = iam->removeKeys(&_opCtx,
+                                                *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                descriptor->getEntry(),
+                                                {keys.begin(), keys.end()},
+                                                options,
+                                                &numDeleted);
 
             ASSERT_EQUALS(numDeleted, 1);
             ASSERT_OK(removeStatus);
@@ -3182,8 +3338,12 @@ public:
                 nullptr,
                 nullptr,
                 rid);
-            auto removeStatus = iam->removeKeys(
-                &_opCtx, descriptor->getEntry(), {keys.begin(), keys.end()}, options, &numDeleted);
+            auto removeStatus = iam->removeKeys(&_opCtx,
+                                                *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                descriptor->getEntry(),
+                                                {keys.begin(), keys.end()},
+                                                options,
+                                                &numDeleted);
 
             ASSERT_EQUALS(numDeleted, 1);
             ASSERT_OK(removeStatus);
@@ -3221,11 +3381,11 @@ public:
 
         // Create a unique index.
         const auto indexName = "a";
+        const auto indexKey = BSON("a" << 1);
+        const auto indexSpec = BSON("name" << indexName << "key" << indexKey << "v"
+                                           << static_cast<int>(kIndexVersion) << "unique" << true);
         {
-            const auto indexKey = BSON("a" << 1);
-            auto status = createIndexFromSpec(BSON("name" << indexName << "key" << indexKey << "v"
-                                                          << static_cast<int>(kIndexVersion)
-                                                          << "unique" << true));
+            auto status = createIndexFromSpec(indexSpec);
             ASSERT_OK(status);
         }
 
@@ -3267,17 +3427,27 @@ public:
             // because there are duplicate keys, and not just because there are keys without
             // corresponding records.
             auto swRecordId = coll()->getRecordStore()->insertRecord(
-                &_opCtx, dupObj.objdata(), dupObj.objsize(), timestampToUse);
+                &_opCtx,
+                *shard_role_details::getRecoveryUnit(&_opCtx),
+                dupObj.objdata(),
+                dupObj.objsize(),
+                timestampToUse);
             ASSERT_OK(swRecordId);
 
             commitTransaction();
 
             // Insert the key on _id.
             {
+                auto storageEngine = _opCtx.getServiceContext()->getStorageEngine();
                 auto descriptor = indexCatalog->findIdIndex(&_opCtx);
                 auto entry = const_cast<IndexCatalogEntry*>(indexCatalog->getEntry(descriptor));
                 auto iam = entry->accessMethod()->asSortedData();
-                auto interceptor = std::make_unique<IndexBuildInterceptor>(&_opCtx, entry);
+                IndexBuildInfo indexBuildInfo(indexCatalog->getDefaultIdIndexSpec(coll()),
+                                              entry->getIdent());
+                indexBuildInfo.setInternalIdents(*storageEngine,
+                                                 VersionContext::getDecoration(&_opCtx));
+                auto interceptor = std::make_unique<IndexBuildInterceptor>(
+                    &_opCtx, entry, indexBuildInfo, /*resume=*/false, /*generateTableWrites=*/true);
 
                 KeyStringSet keys;
                 iam->getKeys(&_opCtx,
@@ -3299,14 +3469,17 @@ public:
                     int64_t numInserted;
                     auto insertStatus = iam->insertKeysAndUpdateMultikeyPaths(
                         &_opCtx,
+                        *shard_role_details::getRecoveryUnit(&_opCtx),
                         coll(),
                         entry,
                         {keys.begin(), keys.end()},
                         {},
                         MultikeyPaths{},
                         options,
-                        [this, &entry, &interceptor](const key_string::Value& duplicateKey) {
-                            return interceptor->recordDuplicateKey(&_opCtx, entry, duplicateKey);
+                        [this, &entry, &interceptor](const CollectionPtr& coll,
+                                                     const key_string::View& duplicateKey) {
+                            return interceptor->recordDuplicateKey(
+                                &_opCtx, coll, entry, duplicateKey);
                         },
                         &numInserted);
 
@@ -3321,10 +3494,15 @@ public:
 
             // Insert the key on "a".
             {
+                auto storageEngine = _opCtx.getServiceContext()->getStorageEngine();
                 auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexName);
                 auto entry = const_cast<IndexCatalogEntry*>(indexCatalog->getEntry(descriptor));
                 auto iam = entry->accessMethod()->asSortedData();
-                auto interceptor = std::make_unique<IndexBuildInterceptor>(&_opCtx, entry);
+                IndexBuildInfo indexBuildInfo(indexSpec, entry->getIdent());
+                indexBuildInfo.setInternalIdents(*storageEngine,
+                                                 VersionContext::getDecoration(&_opCtx));
+                auto interceptor = std::make_unique<IndexBuildInterceptor>(
+                    &_opCtx, entry, indexBuildInfo, /*resume=*/false, /*generateTableWrites=*/true);
 
                 KeyStringSet keys;
                 iam->getKeys(&_opCtx,
@@ -3346,14 +3524,17 @@ public:
                     int64_t numInserted;
                     auto insertStatus = iam->insertKeysAndUpdateMultikeyPaths(
                         &_opCtx,
+                        *shard_role_details::getRecoveryUnit(&_opCtx),
                         coll(),
                         entry,
                         {keys.begin(), keys.end()},
                         {},
                         MultikeyPaths{},
                         options,
-                        [this, &entry, &interceptor](const key_string::Value& duplicateKey) {
-                            return interceptor->recordDuplicateKey(&_opCtx, entry, duplicateKey);
+                        [this, &entry, &interceptor](const CollectionPtr& coll,
+                                                     const key_string::View& duplicateKey) {
+                            return interceptor->recordDuplicateKey(
+                                &_opCtx, coll, entry, duplicateKey);
                         },
                         &numInserted);
 
@@ -3410,8 +3591,11 @@ public:
         RecordId rid;
         {
             beginTransaction();
-            auto swRecordId =
-                rs->insertRecord(&_opCtx, obj.objdata(), obj.objsize(), timestampToUse);
+            auto swRecordId = rs->insertRecord(&_opCtx,
+                                               *shard_role_details::getRecoveryUnit(&_opCtx),
+                                               obj.objdata(),
+                                               obj.objsize(),
+                                               timestampToUse);
             ASSERT_OK(swRecordId);
             rid = swRecordId.getValue();
             commitTransaction();
@@ -3487,9 +3671,21 @@ public:
         RecordStore* rs = coll()->getRecordStore();
         {
             beginTransaction();
-            ASSERT_OK(rs->insertRecord(&_opCtx, obj1.objdata(), 12ULL, timestampToUse));
-            ASSERT_OK(rs->insertRecord(&_opCtx, obj2.objdata(), 12ULL, timestampToUse));
-            ASSERT_OK(rs->insertRecord(&_opCtx, obj3.objdata(), 12ULL, timestampToUse));
+            ASSERT_OK(rs->insertRecord(&_opCtx,
+                                       *shard_role_details::getRecoveryUnit(&_opCtx),
+                                       obj1.objdata(),
+                                       12ULL,
+                                       timestampToUse));
+            ASSERT_OK(rs->insertRecord(&_opCtx,
+                                       *shard_role_details::getRecoveryUnit(&_opCtx),
+                                       obj2.objdata(),
+                                       12ULL,
+                                       timestampToUse));
+            ASSERT_OK(rs->insertRecord(&_opCtx,
+                                       *shard_role_details::getRecoveryUnit(&_opCtx),
+                                       obj3.objdata(),
+                                       12ULL,
+                                       timestampToUse));
             commitTransaction();
         }
         releaseDb();
@@ -3688,6 +3884,7 @@ public:
 
                 int64_t numDeleted;
                 auto removeStatus = iam->removeKeys(&_opCtx,
+                                                    *shard_role_details::getRecoveryUnit(&_opCtx),
                                                     descriptor->getEntry(),
                                                     {keys.begin(), keys.end()},
                                                     options,
@@ -3702,7 +3899,11 @@ public:
             {
                 beginTransaction();
                 auto updateStatus = coll()->getRecordStore()->updateRecord(
-                    &_opCtx, id1, mkDoc.objdata(), mkDoc.objsize());
+                    &_opCtx,
+                    *shard_role_details::getRecoveryUnit(&_opCtx),
+                    id1,
+                    mkDoc.objdata(),
+                    mkDoc.objsize());
                 ASSERT_OK(updateStatus);
                 commitTransaction();
             }
@@ -3727,11 +3928,14 @@ public:
                 ASSERT_EQ(keys.size(), 2);
                 ASSERT_EQ(multikeyPaths.size(), 1);
 
+                auto& ru = *shard_role_details::getRecoveryUnit(&_opCtx);
+
                 // Insert index keys one at a time in order to avoid marking index as multikey
                 // and allows us to pass in an empty set of MultikeyPaths.
                 int64_t numInserted;
                 auto keysIterator = keys.begin();
                 auto insertStatus = iam->insertKeysAndUpdateMultikeyPaths(&_opCtx,
+                                                                          ru,
                                                                           coll(),
                                                                           descriptor->getEntry(),
                                                                           {*keysIterator},
@@ -3746,6 +3950,7 @@ public:
                 keysIterator++;
                 numInserted = 0;
                 insertStatus = iam->insertKeysAndUpdateMultikeyPaths(&_opCtx,
+                                                                     ru,
                                                                      coll(),
                                                                      descriptor->getEntry(),
                                                                      {*keysIterator},
@@ -3919,6 +4124,7 @@ public:
 
                 int64_t numDeleted;
                 auto removeStatus = iam->removeKeys(&_opCtx,
+                                                    *shard_role_details::getRecoveryUnit(&_opCtx),
                                                     descriptor->getEntry(),
                                                     {keys.begin(), keys.end()},
                                                     options,
@@ -3934,7 +4140,11 @@ public:
             {
                 beginTransaction();
                 auto updateStatus = coll()->getRecordStore()->updateRecord(
-                    &_opCtx, id1, doc2.objdata(), doc2.objsize());
+                    &_opCtx,
+                    *shard_role_details::getRecoveryUnit(&_opCtx),
+                    id1,
+                    doc2.objdata(),
+                    doc2.objsize());
                 ASSERT_OK(updateStatus);
                 commitTransaction();
             }
@@ -3959,15 +4169,17 @@ public:
                 ASSERT_EQ(keys.size(), 2);
 
                 int64_t numInserted;
-                auto insertStatus = iam->insertKeysAndUpdateMultikeyPaths(&_opCtx,
-                                                                          coll(),
-                                                                          descriptor->getEntry(),
-                                                                          keys,
-                                                                          {},
-                                                                          oldMultikeyPaths,
-                                                                          options,
-                                                                          nullptr,
-                                                                          &numInserted);
+                auto insertStatus = iam->insertKeysAndUpdateMultikeyPaths(
+                    &_opCtx,
+                    *shard_role_details::getRecoveryUnit(&_opCtx),
+                    coll(),
+                    descriptor->getEntry(),
+                    keys,
+                    {},
+                    oldMultikeyPaths,
+                    options,
+                    nullptr,
+                    &numInserted);
 
                 ASSERT_EQUALS(numInserted, 2);
                 ASSERT_OK(insertStatus);
@@ -4092,8 +4304,8 @@ public:
         // of a pre-3.4 index.
         {
             beginTransaction();
-            auto collMetadata = DurableCatalog::get(&_opCtx)
-                                    ->getParsedCatalogEntry(&_opCtx, coll()->getCatalogId())
+            auto collMetadata = durable_catalog::getParsedCatalogEntry(
+                                    &_opCtx, coll()->getCatalogId(), MDBCatalog::get(&_opCtx))
                                     ->metadata;
             int offset = collMetadata->findIndexOffset(indexName);
             ASSERT_GTE(offset, 0);
@@ -4223,10 +4435,15 @@ public:
         BSONObj obj(buffer);
 
         RecordStore* rs = coll()->getRecordStore();
-        RecordId rid(OID::gen().view().view(), OID::kOIDSize);
+        RecordId rid({OID::gen().view().view(), OID::kOIDSize});
         {
             beginTransaction();
-            ASSERT_OK(rs->insertRecord(&_opCtx, rid, obj.objdata(), obj.objsize(), timestampToUse));
+            ASSERT_OK(rs->insertRecord(&_opCtx,
+                                       *shard_role_details::getRecoveryUnit(&_opCtx),
+                                       rid,
+                                       obj.objdata(),
+                                       obj.objsize(),
+                                       timestampToUse));
             commitTransaction();
         }
         releaseDb();
@@ -4329,7 +4546,11 @@ public:
         {
             beginTransaction();
             auto doc = BSON("_id" << firstRecordId << "a" << 5);
-            auto updateStatus = rs->updateRecord(&_opCtx, rid, doc.objdata(), doc.objsize());
+            auto updateStatus = rs->updateRecord(&_opCtx,
+                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                 rid,
+                                                 doc.objdata(),
+                                                 doc.objsize());
             ASSERT_OK(updateStatus);
             commitTransaction();
         }
@@ -4435,26 +4656,22 @@ public:
         // Create a unique index on {a: 1}
         const auto indexName = "a";
         const auto indexKey = BSON("a" << 1);
-        auto status = createIndexFromSpec(BSON("name" << indexName << "key" << indexKey << "v"
-                                                      << static_cast<int>(kIndexVersion) << "unique"
-                                                      << true));
+        const auto indexSpec = BSON("name" << indexName << "key" << indexKey << "v"
+                                           << static_cast<int>(kIndexVersion) << "unique" << true);
+        auto status = createIndexFromSpec(indexSpec);
         ASSERT_OK(status);
 
 
         // Insert documents.
-        auto firstDoc = BSON("_id"
-                             << "1000000000000"
-                             << "a" << 1);
-        auto secondDoc = BSON("_id"
-                              << "2000000000000"
-                              << "a" << 1);
+        auto firstDoc = BSON("_id" << "1000000000000"
+                                   << "a" << 1);
+        auto secondDoc = BSON("_id" << "2000000000000"
+                                    << "a" << 1);
         if (falsePositiveCase) {
-            firstDoc = BSON("_id"
-                            << "1"
-                            << "a" << 10000001);
-            secondDoc = BSON("_id"
-                             << "2"
-                             << "a" << 10000002);
+            firstDoc = BSON("_id" << "1"
+                                  << "a" << 10000001);
+            secondDoc = BSON("_id" << "2"
+                                   << "a" << 10000002);
         }
         OpDebug* const nullOpDebug = nullptr;
         lockDb(MODE_X);
@@ -4486,21 +4703,27 @@ public:
             // checking. Inserting a record and all of its keys ensures that validation fails
             // because there are duplicate keys, and not just because there are keys without
             // corresponding records.
-            auto swRecordId =
-                coll()->getRecordStore()->insertRecord(&_opCtx,
-                                                       record_id_helpers::keyForObj(secondDoc),
-                                                       secondDoc.objdata(),
-                                                       secondDoc.objsize(),
-                                                       timestampToUse);
+            auto swRecordId = coll()->getRecordStore()->insertRecord(
+                &_opCtx,
+                *shard_role_details::getRecoveryUnit(&_opCtx),
+                record_id_helpers::keyForObj(secondDoc),
+                secondDoc.objdata(),
+                secondDoc.objsize(),
+                timestampToUse);
             ASSERT_OK(swRecordId);
             commitTransaction();
 
             // Insert the key on "a".
             {
+                auto storageEngine = _opCtx.getServiceContext()->getStorageEngine();
                 auto descriptor = indexCatalog->findIndexByName(&_opCtx, indexName);
                 auto entry = const_cast<IndexCatalogEntry*>(indexCatalog->getEntry(descriptor));
                 auto iam = entry->accessMethod()->asSortedData();
-                auto interceptor = std::make_unique<IndexBuildInterceptor>(&_opCtx, entry);
+                IndexBuildInfo indexBuildInfo(indexSpec, entry->getIdent());
+                indexBuildInfo.setInternalIdents(*storageEngine,
+                                                 VersionContext::getDecoration(&_opCtx));
+                auto interceptor = std::make_unique<IndexBuildInterceptor>(
+                    &_opCtx, entry, indexBuildInfo, /*resume=*/false, /*generateTableWrites=*/true);
 
                 KeyStringSet keys;
                 iam->getKeys(&_opCtx,
@@ -4522,14 +4745,17 @@ public:
                     int64_t numInserted;
                     auto insertStatus = iam->insertKeysAndUpdateMultikeyPaths(
                         &_opCtx,
+                        *shard_role_details::getRecoveryUnit(&_opCtx),
                         coll(),
                         entry,
                         {keys.begin(), keys.end()},
                         {},
                         MultikeyPaths{},
                         options,
-                        [this, &entry, &interceptor](const key_string::Value& duplicateKey) {
-                            return interceptor->recordDuplicateKey(&_opCtx, entry, duplicateKey);
+                        [this, &entry, &interceptor](const CollectionPtr& coll,
+                                                     const key_string::View& duplicateKey) {
+                            return interceptor->recordDuplicateKey(
+                                &_opCtx, coll, entry, duplicateKey);
                         },
                         &numInserted);
 
@@ -4623,7 +4849,11 @@ public:
         {
             beginTransaction();
             auto doc = BSON("_id" << firstRecordId << "a" << 5);
-            auto updateStatus = rs->updateRecord(&_opCtx, rid, doc.objdata(), doc.objsize());
+            auto updateStatus = rs->updateRecord(&_opCtx,
+                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                 rid,
+                                                 doc.objdata(),
+                                                 doc.objsize());
             ASSERT_OK(updateStatus);
             commitTransaction();
         }
@@ -4781,8 +5011,11 @@ public:
         {
             beginTransaction();
             auto doc = BSON("a" << 1);
-            auto updateStatus =
-                rs->updateRecord(&_opCtx, ridMissingId, doc.objdata(), doc.objsize());
+            auto updateStatus = rs->updateRecord(&_opCtx,
+                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                 ridMissingId,
+                                                 doc.objdata(),
+                                                 doc.objsize());
             ASSERT_OK(updateStatus);
             commitTransaction();
         }
@@ -4790,8 +5023,11 @@ public:
         {
             beginTransaction();
             auto doc = BSON("_id" << OID::gen() << "a" << 2);
-            auto updateStatus =
-                rs->updateRecord(&_opCtx, ridMismatchedId, doc.objdata(), doc.objsize());
+            auto updateStatus = rs->updateRecord(&_opCtx,
+                                                 *shard_role_details::getRecoveryUnit(&_opCtx),
+                                                 ridMismatchedId,
+                                                 doc.objdata(),
+                                                 doc.objsize());
             ASSERT_OK(updateStatus);
             commitTransaction();
         }

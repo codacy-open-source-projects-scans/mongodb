@@ -31,23 +31,24 @@
 
 #include <boost/container/small_vector.hpp>
 // IWYU pragma: no_include "boost/intrusive/detail/iterator.hpp"
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/type_traits/decay.hpp>
-#include <cstdint>
-#include <memory>
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
-#include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/index/multikey_paths.h"
+#include "mongo/db/local_catalog/index_catalog_entry.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/record_store.h"
 #include "mongo/db/storage/temporary_record_store.h"
 #include "mongo/platform/atomic_word.h"
+
+#include <cstdint>
+#include <memory>
+#include <string>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/type_traits/decay.hpp>
 
 namespace mongo {
 
@@ -69,14 +70,16 @@ public:
         kKeyGenerationAndInsertion
     };
 
-    SkippedRecordTracker(OperationContext* opCtx, boost::optional<StringData> ident);
+    SkippedRecordTracker(OperationContext* opCtx,
+                         StringData skippedRecordsTrackerIdent,
+                         bool tableExists);
 
     /**
      * Records a RecordId that was unable to be indexed due to a key generation error. At the
      * conclusion of the build, the key generation and insertion into the index should be attempted
      * again by calling 'retrySkippedRecords'.
      */
-    void record(OperationContext* opCtx, const RecordId& recordId);
+    void record(OperationContext* opCtx, const CollectionPtr& coll, const RecordId& recordId);
 
     /**
      * Keeps the temporary table managed by this tracker. This is a no-op when the table is empty or
@@ -102,8 +105,9 @@ public:
         RetrySkippedRecordMode mode = RetrySkippedRecordMode::kKeyGenerationAndInsertion);
 
     boost::optional<std::string> getTableIdent() const {
-        return _skippedRecordsTable ? boost::make_optional(_skippedRecordsTable->rs()->getIdent())
-                                    : boost::none;
+        return _skippedRecordsTable
+            ? boost::make_optional(std::string{_skippedRecordsTable->rs()->getIdent()})
+            : boost::none;
     }
 
     boost::optional<MultikeyPaths> getMultikeyPaths() const {
@@ -111,7 +115,8 @@ public:
     }
 
 private:
-    // This temporary record store is owned by the duplicate key tracker.
+    std::string _ident;
+
     std::unique_ptr<TemporaryRecordStore> _skippedRecordsTable;
 
     AtomicWord<std::uint32_t> _skippedRecordCounter{0};

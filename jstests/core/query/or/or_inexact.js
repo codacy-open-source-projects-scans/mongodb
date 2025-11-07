@@ -1,7 +1,12 @@
 // Test $or with predicates that generate inexact bounds. The access planner
 // has special logic for such queries.
-var t = db.jstests_or_inexact;
-var cursor;
+// @tags: [
+//   requires_getmore,
+//   # $text is not supported on views.
+//   incompatible_with_views,
+// ]
+let t = db.jstests_or_inexact;
+let cursor;
 
 // A predicate which uses an index falls into one of three categories:
 //
@@ -37,8 +42,7 @@ t.insert({_id: 0, names: ["thomas", "alexandra"]});
 t.insert({_id: 1, names: "frank"});
 t.insert({_id: 2, names: "alice"});
 t.insert({_id: 3, names: ["dave"]});
-cursor = t.find(
-    {$or: [{names: "frank"}, {names: /^al(ice|ex)/}, {names: {$elemMatch: {$eq: "thomas"}}}]});
+cursor = t.find({$or: [{names: "frank"}, {names: /^al(ice|ex)/}, {names: {$elemMatch: {$eq: "thomas"}}}]});
 assert.eq(3, cursor.itcount(), "case 3");
 
 // Case 4: Two INEXACT_FETCH.
@@ -47,8 +51,7 @@ t.createIndex({names: 1});
 t.insert({_id: 0, names: ["thomas", "alexandra"]});
 t.insert({_id: 1, names: ["frank", "alice"]});
 t.insert({_id: 2, names: "frank"});
-cursor = t.find(
-    {$or: [{names: {$elemMatch: {$eq: "alexandra"}}}, {names: {$elemMatch: {$eq: "frank"}}}]});
+cursor = t.find({$or: [{names: {$elemMatch: {$eq: "alexandra"}}}, {names: {$elemMatch: {$eq: "frank"}}}]});
 assert.eq(2, cursor.itcount(), "case 4");
 
 // Case 5: Two indices. One has EXACT and INEXACT_COVERED. The other
@@ -61,8 +64,7 @@ t.insert({_id: 1, first: "john", last: "doe"});
 t.insert({_id: 2, first: "dave", last: "st"});
 t.insert({_id: 3, first: ["dave", "david"], last: "pasette"});
 t.insert({_id: 4, first: "joanna", last: ["smith", "doe"]});
-cursor = t.find(
-    {$or: [{first: "frank"}, {last: {$elemMatch: {$eq: "doe"}}}, {first: /david/}, {last: "st"}]});
+cursor = t.find({$or: [{first: "frank"}, {last: {$elemMatch: {$eq: "doe"}}}, {first: /david/}, {last: "st"}]});
 assert.eq(4, cursor.itcount(), "case 5");
 
 // Case 6: Multikey with only EXACT predicates.
@@ -123,10 +125,18 @@ cursor = t.find({
                 $geoWithin: {
                     $geometry: {
                         type: "Polygon",
-                        coordinates: [[[39, 4], [41, 4], [41, 6], [39, 6], [39, 4]]]
-                    }
-                }
-            }
+                        coordinates: [
+                            [
+                                [39, 4],
+                                [41, 4],
+                                [41, 6],
+                                [39, 6],
+                                [39, 4],
+                            ],
+                        ],
+                    },
+                },
+            },
         },
         {
             pre: 4,
@@ -134,12 +144,20 @@ cursor = t.find({
                 $geoWithin: {
                     $geometry: {
                         type: "Polygon",
-                        coordinates: [[[-1, -1], [1, -1], [1, 1], [-1, 1], [-1, -1]]]
-                    }
-                }
-            }
-        }
-    ]
+                        coordinates: [
+                            [
+                                [-1, -1],
+                                [1, -1],
+                                [1, 1],
+                                [-1, 1],
+                                [-1, -1],
+                            ],
+                        ],
+                    },
+                },
+            },
+        },
+    ],
 });
 assert.eq(2, cursor.itcount(), "case 11");
 
@@ -156,10 +174,18 @@ cursor = t.find({
                 $geoWithin: {
                     $geometry: {
                         type: "Polygon",
-                        coordinates: [[[39, 4], [41, 4], [41, 6], [39, 6], [39, 4]]]
-                    }
-                }
-            }
+                        coordinates: [
+                            [
+                                [39, 4],
+                                [41, 4],
+                                [41, 6],
+                                [39, 6],
+                                [39, 4],
+                            ],
+                        ],
+                    },
+                },
+            },
         },
         {
             pre: 4,
@@ -167,12 +193,20 @@ cursor = t.find({
                 $geoWithin: {
                     $geometry: {
                         type: "Polygon",
-                        coordinates: [[[-1, -1], [1, -1], [1, 1], [-1, 1], [-1, -1]]]
-                    }
-                }
-            }
-        }
-    ]
+                        coordinates: [
+                            [
+                                [-1, -1],
+                                [1, -1],
+                                [1, 1],
+                                [-1, 1],
+                                [-1, -1],
+                            ],
+                        ],
+                    },
+                },
+            },
+        },
+    ],
 });
 assert.eq(2, cursor.itcount(), "case 12");
 
@@ -189,8 +223,7 @@ t.drop();
 t.createIndex({"a.b": 1});
 t.insert({_id: 0, a: [{b: 1}, {b: 2}]});
 t.insert({_id: 1, a: [{b: 2}, {b: 4}]});
-cursor =
-    t.find({"a.b": 2, $or: [{a: {$elemMatch: {b: {$lte: 1}}}}, {a: {$elemMatch: {b: {$gte: 4}}}}]});
+cursor = t.find({"a.b": 2, $or: [{a: {$elemMatch: {b: {$lte: 1}}}}, {a: {$elemMatch: {b: {$gte: 4}}}}]});
 assert.eq(2, cursor.itcount(), "case 14");
 
 // Case 15: $or below $elemMatch.
@@ -246,8 +279,7 @@ t.insert({_id: 1, a: "z", b: "z"});
 t.insert({_id: 2});
 t.insert({_id: 3, a: "w", b: "x"});
 t.insert({_id: 4, a: "l", b: "p"});
-cursor =
-    t.find({$or: [{a: {$in: [/z/, /x/]}}, {a: "w"}, {b: {$exists: false}}, {b: {$in: ["p"]}}]});
+cursor = t.find({$or: [{a: {$in: [/z/, /x/]}}, {a: "w"}, {b: {$exists: false}}, {b: {$in: ["p"]}}]});
 assert.eq(5, cursor.itcount(), "case 19");
 
 // Case 21: two $geoWithin that collapse to a single GEO index scan.
@@ -262,21 +294,37 @@ cursor = t.find({
                 $geoWithin: {
                     $geometry: {
                         type: "Polygon",
-                        coordinates: [[[39, 4], [41, 4], [41, 6], [39, 6], [39, 4]]]
-                    }
-                }
-            }
+                        coordinates: [
+                            [
+                                [39, 4],
+                                [41, 4],
+                                [41, 6],
+                                [39, 6],
+                                [39, 4],
+                            ],
+                        ],
+                    },
+                },
+            },
         },
         {
             loc: {
                 $geoWithin: {
                     $geometry: {
                         type: "Polygon",
-                        coordinates: [[[-1, -1], [1, -1], [1, 1], [-1, 1], [-1, -1]]]
-                    }
-                }
-            }
-        }
-    ]
+                        coordinates: [
+                            [
+                                [-1, -1],
+                                [1, -1],
+                                [1, 1],
+                                [-1, 1],
+                                [-1, -1],
+                            ],
+                        ],
+                    },
+                },
+            },
+        },
+    ],
 });
 assert.eq(2, cursor.itcount(), "case 21");

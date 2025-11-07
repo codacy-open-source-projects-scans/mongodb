@@ -7,11 +7,10 @@
  *   # Does not support sharding
  *   assumes_against_mongod_not_mongos,
  *   assumes_unsharded_collection,
+ *   requires_getmore,
  * ]
  */
-import {
-    testClusteredCollectionBoundedScan
-} from "jstests/libs/clustered_collections/clustered_collection_bounded_scan_common.js";
+import {testClusteredCollectionBoundedScan} from "jstests/libs/clustered_collections/clustered_collection_bounded_scan_common.js";
 
 const replicatedDB = db.getSiblingDB(jsTestName());
 const collName = "coll";

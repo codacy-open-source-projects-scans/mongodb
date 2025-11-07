@@ -31,11 +31,6 @@ class HeaderDefinition:
         self.value = value
 
 
-def macos_get_sdk_path():
-    result = subprocess.run(["xcrun", "--show-sdk-path"], capture_output=True, text=True)
-    return result.stdout.strip()
-
-
 def compile_check(source_text: str) -> bool:
     temp = None
     if platform.system() == "Windows":
@@ -129,7 +124,6 @@ def memset_s_present_flag() -> list[HeaderDefinition]:
 
 def strnlen_present_flag() -> list[HeaderDefinition]:
     if platform.system() == "Windows":
-        # Match SCons behavior
         return []
 
     log_check("[MONGO_CONFIG_HAVE_STRNLEN] Checking for strnlen...")
@@ -389,7 +383,6 @@ def altivec_vbpermq_output_flag() -> list[HeaderDefinition]:
 
 def usdt_provider_flags() -> list[HeaderDefinition]:
     if platform.system() == "Darwin":
-        # Match SCons behavior
         return []
 
     log_check("[MONGO_CONFIG_USDT_PROVIDER] Checking if SDT usdt provider is available...")
@@ -439,6 +432,9 @@ def get_config_header_substs():
         ("@mongo_config_tcmalloc_gperf@", "MONGO_CONFIG_TCMALLOC_GPERF"),
         ("@mongo_config_streams@", "MONGO_CONFIG_STREAMS"),
         ("@mongo_config_otel@", "MONGO_CONFIG_OTEL"),
+        ("@mongo_config_disagg_storage@", "MONGO_CONFIG_DISAGG_STORAGE"),
+        ("@mongo_config_dev_stacktrace@", "MONGO_CONFIG_DEV_STACKTRACE"),
+        ("@mongo_config_antithesis@", "MONGO_CONFIG_ANTITHESIS"),
     )
     return config_header_substs
 
@@ -451,7 +447,6 @@ def generate_config_header(
     CompilerSettings.compiler_args = compiler_args
     CompilerSettings.env_vars = {
         **json.loads(env_vars),
-        **({"SDKROOT": macos_get_sdk_path()} if platform.system() == "Darwin" else {}),
     }
     logfile_path = logpath
 

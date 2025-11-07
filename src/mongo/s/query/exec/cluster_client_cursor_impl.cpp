@@ -29,16 +29,12 @@
 
 #include "mongo/s/query/exec/cluster_client_cursor_impl.h"
 
-#include <memory>
-#include <utility>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
-#include "mongo/db/commands/server_status_metric.h"
+#include "mongo/db/commands/server_status/server_status_metric.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/memory_tracking/operation_memory_usage_tracker.h"
+#include "mongo/db/query/query_shape/query_shape.h"
 #include "mongo/db/query/query_stats/query_stats.h"
 #include "mongo/db/query/tailable_mode_gen.h"
 #include "mongo/db/service_context.h"
@@ -50,6 +46,12 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source.h"
 #include "mongo/util/string_map.h"
+
+#include <memory>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kQuery
 
@@ -64,17 +66,19 @@ ClusterClientCursorGuard ClusterClientCursorImpl::make(
     OperationContext* opCtx,
     std::shared_ptr<executor::TaskExecutor> executor,
     ClusterClientCursorParams&& params) {
-    std::unique_ptr<ClusterClientCursor> cursor(new ClusterClientCursorImpl(
-        opCtx, std::move(executor), std::move(params), opCtx->getLogicalSessionId()));
-    return ClusterClientCursorGuard(opCtx, std::move(cursor));
+    return ClusterClientCursorGuard(
+        opCtx,
+        std::make_unique<ClusterClientCursorImpl>(
+            opCtx, std::move(executor), std::move(params), opCtx->getLogicalSessionId()));
 }
 
 ClusterClientCursorGuard ClusterClientCursorImpl::make(OperationContext* opCtx,
                                                        std::unique_ptr<RouterExecStage> root,
                                                        ClusterClientCursorParams&& params) {
-    std::unique_ptr<ClusterClientCursor> cursor(new ClusterClientCursorImpl(
-        opCtx, std::move(root), std::move(params), opCtx->getLogicalSessionId()));
-    return ClusterClientCursorGuard(opCtx, std::move(cursor));
+    return ClusterClientCursorGuard(
+        opCtx,
+        std::make_unique<ClusterClientCursorImpl>(
+            opCtx, std::move(root), std::move(params), opCtx->getLogicalSessionId()));
 }
 
 ClusterClientCursorImpl::ClusterClientCursorImpl(OperationContext* opCtx,
@@ -88,10 +92,12 @@ ClusterClientCursorImpl::ClusterClientCursorImpl(OperationContext* opCtx,
       _createdDate(opCtx->getServiceContext()->getPreciseClockSource()->now()),
       _lastUseDate(_createdDate),
       _planCacheShapeHash(CurOp::get(opCtx)->debug().planCacheShapeHash),
+      _queryShapeHash(CurOp::get(opCtx)->debug().getQueryShapeHash()),
       _shouldOmitDiagnosticInformation(CurOp::get(opCtx)->getShouldOmitDiagnosticInformation()),
       _queryStatsKeyHash(CurOp::get(opCtx)->debug().queryStatsInfo.keyHash),
       _queryStatsKey(std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key)),
-      _queryStatsWillNeverExhaust(CurOp::get(opCtx)->debug().queryStatsInfo.willNeverExhaust) {
+      _queryStatsWillNeverExhaust(CurOp::get(opCtx)->debug().queryStatsInfo.willNeverExhaust),
+      _isChangeStreamQuery(CurOp::get(opCtx)->debug().isChangeStreamQuery) {
     dassert(!_params.compareWholeSortKeyOnRouter ||
             SimpleBSONObjComparator::kInstance.evaluate(
                 _params.sortToApplyOnRouter == AsyncResultsMerger::kWholeSortKeySortPattern));
@@ -109,11 +115,12 @@ ClusterClientCursorImpl::ClusterClientCursorImpl(OperationContext* opCtx,
       _createdDate(opCtx->getServiceContext()->getPreciseClockSource()->now()),
       _lastUseDate(_createdDate),
       _planCacheShapeHash(CurOp::get(opCtx)->debug().planCacheShapeHash),
+      _queryShapeHash(CurOp::get(opCtx)->debug().getQueryShapeHash()),
       _shouldOmitDiagnosticInformation(CurOp::get(opCtx)->getShouldOmitDiagnosticInformation()),
       _queryStatsKeyHash(CurOp::get(opCtx)->debug().queryStatsInfo.keyHash),
       _queryStatsKey(std::move(CurOp::get(opCtx)->debug().queryStatsInfo.key)),
-      _queryStatsWillNeverExhaust(
-          std::move(CurOp::get(opCtx)->debug().queryStatsInfo.willNeverExhaust)) {
+      _queryStatsWillNeverExhaust(CurOp::get(opCtx)->debug().queryStatsInfo.willNeverExhaust),
+      _isChangeStreamQuery(CurOp::get(opCtx)->debug().isChangeStreamQuery) {
     dassert(!_params.compareWholeSortKeyOnRouter ||
             SimpleBSONObjComparator::kInstance.evaluate(
                 _params.sortToApplyOnRouter == AsyncResultsMerger::kWholeSortKeySortPattern));
@@ -138,7 +145,7 @@ StatusWith<ClusterQueryResult> ClusterClientCursorImpl::next() {
         auto front = std::move(_stash.front());
         _stash.pop();
         ++_numReturnedSoFar;
-        return {front};
+        return {std::move(front)};
     }
 
     auto next = _root->next();
@@ -148,6 +155,15 @@ StatusWith<ClusterQueryResult> ClusterClientCursorImpl::next() {
     // Record if we just got a MaxTimeMSExpired error.
     _maxTimeMSExpired |= (next.getStatus().code() == ErrorCodes::MaxTimeMSExpired);
     return next;
+}
+
+Status ClusterClientCursorImpl::releaseMemory() {
+    tassert(9745605, "releaseMemory should have a valid OperationContext", _opCtx);
+    auto interruptStatus = _opCtx->checkForInterruptNoAssert();
+    if (!interruptStatus.isOK()) {
+        return interruptStatus;
+    }
+    return _root->releaseMemory();
 }
 
 void ClusterClientCursorImpl::kill(OperationContext* opCtx) {
@@ -213,19 +229,19 @@ long long ClusterClientCursorImpl::getNumReturnedSoFar() const {
     return _numReturnedSoFar;
 }
 
-void ClusterClientCursorImpl::queueResult(const ClusterQueryResult& result) {
-    auto resultObj = result.getResult();
+void ClusterClientCursorImpl::queueResult(ClusterQueryResult&& result) {
+    const auto& resultObj = result.getResult();
     if (resultObj) {
-        invariant(resultObj->isOwned());
+        tassert(11052321, "Expected result object to be owned", resultObj->isOwned());
     }
-    _stash.push(result);
+    _stash.push(std::move(result));
 }
 
-bool ClusterClientCursorImpl::remotesExhausted() {
+bool ClusterClientCursorImpl::remotesExhausted() const {
     return _root->remotesExhausted();
 }
 
-bool ClusterClientCursorImpl::hasBeenKilled() {
+bool ClusterClientCursorImpl::hasBeenKilled() const {
     return _hasBeenKilled;
 }
 
@@ -255,6 +271,10 @@ void ClusterClientCursorImpl::setLastUseDate(Date_t now) {
 
 boost::optional<uint32_t> ClusterClientCursorImpl::getPlanCacheShapeHash() const {
     return _planCacheShapeHash;
+}
+
+boost::optional<query_shape::QueryShapeHash> ClusterClientCursorImpl::getQueryShapeHash() const {
+    return _queryShapeHash;
 }
 
 boost::optional<std::size_t> ClusterClientCursorImpl::getQueryStatsKeyHash() const {

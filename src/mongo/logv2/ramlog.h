@@ -29,15 +29,17 @@
 
 #pragma once
 
+#include "mongo/base/string_data.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/util/concurrency/with_lock.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/observable_mutex.h"
+
 #include <array>
 #include <cstddef>
 #include <mutex>
 #include <string>
 #include <vector>
-
-#include "mongo/base/string_data.h"
-#include "mongo/stdx/mutex.h"
-#include "mongo/util/concurrency/with_lock.h"
 
 namespace mongo::logv2 {
 
@@ -58,7 +60,7 @@ namespace mongo::logv2 {
  * 1. In the degenerate case of a single log line being above RamLog::kMaxSizeBytes, it may
  *    keep up to two log lines and exceed the size cap.
  */
-class RamLog {
+class MONGO_MOD_NEEDS_REPLACEMENT RamLog {
     RamLog(const RamLog&) = delete;
     RamLog& operator=(const RamLog&) = delete;
 
@@ -72,6 +74,14 @@ public:
      * Synchronizes on the RamLog catalog lock, _namedLock.
      */
     static RamLog* get(const std::string& name);
+
+    /**
+     * Returns a pointer to the ramlog named "name", creating one if it did not already exist.
+     * Allows setting custom maxLines and maxSizeBytes.
+     *
+     * Synchronizes on the RamLog catalog lock, _namedLock.
+     */
+    static RamLog* get(const std::string& name, size_t maxLines, size_t maxSizeBytes);
 
     /**
      * Returns a pointer to the ramlog named "name", or NULL if no such ramlog exists.
@@ -100,8 +110,22 @@ public:
      */
     void clear();
 
+    /**
+     * Inspect maxLines setting
+     */
+    size_t getMaxLines() const {
+        return _maxLines;
+    }
+
+    /**
+     * Inspect maxSizeBytes setting
+     */
+    size_t getMaxSizeBytes() const {
+        return _maxSizeBytes;
+    }
+
 private:
-    explicit RamLog(StringData name);
+    explicit RamLog(StringData name, size_t maxLines, size_t maxSizeBytes);
     ~RamLog();  // want this private as we want to leak so we can use them till the very end
 
     StringData getLine(size_t lineNumber) const;
@@ -110,19 +134,29 @@ private:
 
     void trimIfNeeded(size_t newStr);
 
+    static RamLog* getImpl(const std::string& name,
+                           size_t maxLines = kMaxLines,
+                           size_t maxSizeBytes = kMaxSizeBytes);
+
 private:
-    // Maximum number of lines
+    // Default maximum number of lines
     static constexpr size_t kMaxLines = 1024;
 
-    // Maximum capacity of RamLog of string data
+    // Default maximum capacity of RamLog of string data
     static constexpr size_t kMaxSizeBytes = 1024 * 1024;
+
+    // Maximum number of lines
+    size_t _maxLines;
+
+    // Maximum capacity of RamLog of string data
+    size_t _maxSizeBytes;
 
     // Guards all non-static data.
     // stdx::recursive_mutex // NOLINT is intentional, stdx::mutex can not be used here
-    mutable stdx::recursive_mutex _mutex;  // NOLINT
+    mutable ObservableMutex<stdx::recursive_mutex> _mutex;  // NOLINT
 
     // Array of lines
-    std::array<std::string, kMaxLines> _lines;
+    std::vector<std::string> _lines;
 
     // First line of ram log
     size_t _firstLinePosition;
@@ -148,7 +182,7 @@ private:
  * Instances of LineIterator hold the lock for the underlying RamLog for their whole lifetime,
  * and so should not be kept around.
  */
-class RamLog::LineIterator {
+class MONGO_MOD_NEEDS_REPLACEMENT RamLog::LineIterator {
     LineIterator(const LineIterator&) = delete;
     LineIterator& operator=(const LineIterator&) = delete;
 
@@ -178,7 +212,7 @@ private:
     const RamLog* _ramlog;
 
     // Holds RamLog's mutex
-    stdx::lock_guard<stdx::recursive_mutex> _lock;
+    stdx::lock_guard<ObservableMutex<stdx::recursive_mutex>> _lock;
 
     size_t _nextLineIndex;
 };

@@ -19,9 +19,7 @@ selector:
     - jstests/core/**/dbhash.js # dbhash.
     - jstests/core/**/fsync.js # uses fsync.
     - jstests/core/**/geo_update_btree2.js # notablescan.
-    - jstests/core/**/index9.js # "local" database.
     - jstests/core/**/queryoptimizera.js # "local" database.
-    - jstests/core/**/stages*.js # stageDebug.
     # The following tests fail because mongos behaves differently from mongod when testing certain
     # functionality. The differences are in a comment next to the failing test.
     - jstests/core/**/geo_2d_explain.js # executionSuccess in different spot in explain().
@@ -53,6 +51,8 @@ selector:
     # Parallel shell is not causally consistent because it uses a different session.
     - uses_parallel_shell
     - requires_2_or_more_shards
+    # These tests run many aggregations, and the override slows them down enough to hit the evergreen timeout.
+    - query_intensive_pbt
 executor:
   archive:
     hooks:

@@ -17,19 +17,35 @@ struct __wt_evict {
     uint64_t app_waits;  /* User threads waited for eviction */
     uint64_t app_evicts; /* Pages evicted by user threads */
 
-    wt_shared uint64_t evict_max_page_size; /* Largest page seen at eviction */
-    wt_shared uint64_t evict_max_ms;        /* Longest milliseconds spent at a single eviction */
-    uint64_t reentry_hs_eviction_ms;        /* Total milliseconds spent inside a nested eviction */
-    struct timespec stuck_time;             /* Stuck time */
+    wt_shared uint64_t evict_max_page_size;                      /* Largest page seen at eviction */
+    wt_shared uint64_t evict_max_clean_page_size_per_checkpoint; /* Largest clean page seen at
+                                                                    eviction per checkpoint */
+    wt_shared uint64_t evict_max_dirty_page_size_per_checkpoint; /* Largest dirty page seen at
+                                                                    eviction per checkpoint */
+    wt_shared uint64_t evict_max_updates_page_size_per_checkpoint; /* Largest updates page seen at
+                                                                      eviction per checkpoint */
+
+    wt_shared uint64_t evict_max_ms; /* Longest milliseconds spent at a single eviction */
+    wt_shared uint64_t
+      evict_max_ms_per_checkpoint;   /* Longest milliseconds spent at a single eviction */
+    uint64_t reentry_hs_eviction_ms; /* Total milliseconds spent inside a nested eviction */
+    struct timespec stuck_time;      /* Stuck time */
 
     /*
      * Read information.
      */
-    uint64_t read_gen;        /* Current page read generation */
-    uint64_t read_gen_oldest; /* Oldest read generation the eviction
-                               * server saw in its last queue load */
-    uint64_t evict_pass_gen;  /* Number of eviction passes */
-
+    uint64_t read_gen;                              /* Current page read generation */
+    uint64_t read_gen_oldest;                       /* Oldest read generation the eviction
+                                                     * server saw in its last queue load */
+    uint64_t evict_pass_gen;                        /* Number of eviction passes */
+    wt_shared uint64_t evict_max_unvisited_gen_gap; /* Maximum gap between page and connection evict
+                                             pass generation of unvisited pages */
+    wt_shared uint64_t evict_max_unvisited_gen_gap_per_checkpoint; /* Maximum gap between page and
+                                             connection evict pass generation of unvisited pages */
+    wt_shared uint64_t evict_max_visited_gen_gap; /* Maximum gap between page and connection evict
+                                             pass generation of visited pages */
+    wt_shared uint64_t evict_max_visited_gen_gap_per_checkpoint; /* Maximum gap between page and
+                                             connection evict pass generation of visited pages */
     /*
      * Eviction thread information.
      */
@@ -79,17 +95,17 @@ struct __wt_evict {
     WT_DATA_HANDLE *walk_tree;     /* LRU walk current tree */
 
     WT_SPINLOCK evict_queue_lock; /* Eviction current queue lock */
-    WT_EVICT_QUEUE evict_queues[WT_EVICT_QUEUE_MAX];
-    WT_EVICT_QUEUE *evict_current_queue; /* LRU current queue in use */
-    WT_EVICT_QUEUE *evict_fill_queue;    /* LRU next queue to fill.
+    WTI_EVICT_QUEUE evict_queues[WTI_EVICT_QUEUE_MAX];
+    WTI_EVICT_QUEUE *evict_current_queue; /* LRU current queue in use */
+    WTI_EVICT_QUEUE *evict_fill_queue;    /* LRU next queue to fill.
                                             This is usually the same as the
                                             "other" queue but under heavy
                                             load the eviction server will
                                             start filling the current queue
                                             before it switches. */
-    WT_EVICT_QUEUE *evict_other_queue;   /* LRU queue not in use */
-    WT_EVICT_QUEUE *evict_urgent_queue;  /* LRU urgent queue */
-    uint32_t evict_slots;                /* LRU list eviction slots */
+    WTI_EVICT_QUEUE *evict_other_queue;   /* LRU queue not in use */
+    WTI_EVICT_QUEUE *evict_urgent_queue;  /* LRU urgent queue */
+    uint32_t evict_slots;                 /* LRU list eviction slots */
 
 #define WT_EVICT_PRESSURE_THRESHOLD 0.95
 #define WT_EVICT_SCORE_BUMP 10
@@ -137,7 +153,7 @@ struct __wt_evict {
 #define WT_EVICT_CALL_URGENT 0x4u   /* Urgent eviction */
 /* AUTOMATIC FLAG VALUE GENERATION STOP 32 */
 
-#define WT_EVICT_MAX_WORKERS 20
+#define WT_EVICT_MAX_WORKERS 64
 
 /* DO NOT EDIT: automatically built by prototypes.py: BEGIN */
 
@@ -178,13 +194,14 @@ static WT_INLINE bool __wt_evict_clean_pressure(WT_SESSION_IMPL *session)
 static WT_INLINE bool __wt_evict_dirty_needed(WT_SESSION_IMPL *session, double *pct_fullp)
   WT_GCC_FUNC_DECL_ATTRIBUTE((warn_unused_result));
 static WT_INLINE bool __wt_evict_needed(WT_SESSION_IMPL *session, bool busy, bool readonly,
-  double *pct_fullp) WT_GCC_FUNC_DECL_ATTRIBUTE((warn_unused_result));
+  bool ignore_updates_dirty, double *pct_fullp) WT_GCC_FUNC_DECL_ATTRIBUTE((warn_unused_result));
 static WT_INLINE bool __wt_evict_page_is_soon(WT_PAGE *page)
   WT_GCC_FUNC_DECL_ATTRIBUTE((warn_unused_result));
 static WT_INLINE bool __wt_evict_page_is_soon_or_wont_need(WT_PAGE *page)
   WT_GCC_FUNC_DECL_ATTRIBUTE((warn_unused_result));
-static WT_INLINE int __wt_evict_app_assist_worker_check(WT_SESSION_IMPL *session, bool busy,
-  bool readonly, bool *didworkp) WT_GCC_FUNC_DECL_ATTRIBUTE((warn_unused_result));
+static WT_INLINE int __wt_evict_app_assist_worker_check(
+  WT_SESSION_IMPL *session, bool busy, bool readonly, bool interruptible, bool *didworkp)
+  WT_GCC_FUNC_DECL_ATTRIBUTE((warn_unused_result));
 static WT_INLINE void __wt_evict_clear_npos(WT_BTREE *btree);
 static WT_INLINE void __wt_evict_favor_clearing_dirty_cache(WT_SESSION_IMPL *session);
 static WT_INLINE void __wt_evict_inherit_page_state(WT_PAGE *orig_page, WT_PAGE *new_page);

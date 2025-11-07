@@ -29,12 +29,6 @@
 
 #pragma once
 
-#include <cstddef>
-#include <cstring>
-#include <tuple>
-#include <type_traits>
-#include <utility>
-
 #include "mongo/base/data_type.h"
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
@@ -43,6 +37,12 @@
 #include "mongo/stdx/type_traits.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/str.h"
+
+#include <cstddef>
+#include <cstring>
+#include <tuple>
+#include <type_traits>
+#include <utility>
 
 namespace mongo {
 class ConstDataRange {
@@ -73,9 +73,9 @@ protected:
 
     template <typename T>
     static constexpr bool isContiguousContainerOfByteLike =  //
-        stdx::is_detected_v<SizeOp, T>&&                     //
-            stdx::is_detected_v<DataOp, T>&&                 //
-                isByte<stdx::detected_t<ValueTypeOp, T>>;
+        stdx::is_detected_v<SizeOp, T> &&                    //
+        stdx::is_detected_v<DataOp, T> &&                    //
+        isByte<stdx::detected_t<ValueTypeOp, T>>;
 
 public:
     using byte_type = char;
@@ -98,6 +98,8 @@ public:
           _debug_offset(debug_offset) {
         invariant(end >= begin);
     }
+
+    ConstDataRange() = default;
 
     // Constructing from nullptr, nullptr initializes an empty ConstDataRange.
     ConstDataRange(std::nullptr_t, std::nullptr_t, std::ptrdiff_t debug_offset = 0)
@@ -233,9 +235,9 @@ protected:
     }
 
 protected:
-    const byte_type* _begin;
-    const byte_type* _end;
-    std::ptrdiff_t _debug_offset;
+    const byte_type* _begin = nullptr;
+    const byte_type* _end = nullptr;
+    std::ptrdiff_t _debug_offset = 0;
 
     Status makeOffsetStatus(size_t offset) const;
 };

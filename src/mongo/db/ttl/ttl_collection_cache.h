@@ -29,21 +29,22 @@
 
 #pragma once
 
+#include "mongo/db/service_context.h"
+#include "mongo/stdx/mutex.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/util/modules.h"
+#include "mongo/util/uuid.h"
+
 #include <string>
 #include <utility>
 #include <variant>
 #include <vector>
 
-#include "mongo/db/service_context.h"
-#include "mongo/stdx/mutex.h"
-#include "mongo/stdx/unordered_map.h"
-#include "mongo/util/uuid.h"
-
 /**
  * Caches the set of collections containing a TTL index.
  * This class is thread safe.
  */
-namespace mongo {
+namespace MONGO_MOD_PUB mongo {
 
 class TTLCollectionCache {
 public:
@@ -101,7 +102,7 @@ public:
                                            Info::ExpireAfterSecondsType type);
 
     using InfoMap = stdx::unordered_map<UUID, std::vector<Info>, UUID::Hash>;
-    InfoMap getTTLInfos();
+    MONGO_MOD_PRIVATE InfoMap getTTLInfos();
 
 private:
     /**
@@ -112,4 +113,4 @@ private:
     stdx::mutex _ttlInfosLock;
     InfoMap _ttlInfos;
 };
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

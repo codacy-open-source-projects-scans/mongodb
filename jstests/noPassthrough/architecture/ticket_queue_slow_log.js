@@ -19,8 +19,10 @@ const rst = new ReplSetTest({
             // Make yielding more common.
             internalQueryExecYieldPeriodMS: 1,
             internalQueryExecYieldIterations: 1,
+            // Disable heuristic deprioritization to ensure readers are queued in the normal pool.
+            storageEngineHeuristicDeprioritizationEnabled: false,
         },
-    }
+    },
 });
 rst.startSet();
 rst.initiate();
@@ -47,31 +49,36 @@ for (let i = 0; i < kNumDocs; i++) {
 TestData.dbName = dbName;
 TestData.collName = collName;
 for (TestData.id = 0; TestData.id < kQueuedReaders; TestData.id++) {
-    queuedReaders.push(startParallelShell(function() {
-        db.getMongo().setSecondaryOk();
-        db.getSiblingDB(TestData.dbName)
-            .timing_coordination.insert({_id: TestData.id, msg: "queued reader started"});
-        while (
-            db.getSiblingDB(TestData.dbName).timing_coordination.findOne({_id: "stop reading"}) ==
-            null) {
-            db.getSiblingDB(TestData.dbName)[TestData.collName].aggregate([{"$count": "x"}]);
-        }
-    }, primary.port));
+    queuedReaders.push(
+        startParallelShell(function () {
+            db.getMongo().setSecondaryOk();
+            db.getSiblingDB(TestData.dbName).timing_coordination.insert({
+                _id: TestData.id,
+                msg: "queued reader started",
+            });
+            while (db.getSiblingDB(TestData.dbName).timing_coordination.findOne({_id: "stop reading"}) == null) {
+                db.getSiblingDB(TestData.dbName)[TestData.collName].aggregate([{"$count": "x"}]);
+            }
+        }, primary.port),
+    );
     jsTestLog("queued reader " + queuedReaders.length + " initiated");
 }
 
 jsTestLog("Wait for many parallel reader shells to run");
-assert.soon(() => db.getSiblingDB(TestData.dbName).timing_coordination.count({
-    msg: "queued reader started"
-}) >= kQueuedReaders,
-            "Expected at least " + kQueuedReaders + " queued readers to start.");
+assert.soon(
+    () =>
+        db.getSiblingDB(TestData.dbName).timing_coordination.count({
+            msg: "queued reader started",
+        }) >= kQueuedReaders,
+    "Expected at least " + kQueuedReaders + " queued readers to start.",
+);
 
 // Ticket exhaustion should force remaining readers to wait in queue for a ticket.
 jsTestLog("Wait for no available read tickets");
 assert.soon(() => {
     let stats = db.runCommand({serverStatus: 1});
     jsTestLog(stats.queues.execution);
-    return stats.queues.execution.read.available == 0;
+    return stats.queues.execution.read.normalPriority.available == 0;
 }, "Expected to have no available read tickets.");
 
 // Force thread to sleep for 1ms to guarantee readers accrue wait time in queue.
@@ -84,11 +91,11 @@ for (let i = 0; i < queuedReaders.length; i++) {
     queuedReaders[i]();
 }
 
-const predicate =
-    new RegExp(`Slow query.*"${coll}.*"queues".*` +
-               `"(execution|ingress)":{"admissions":\\d+(?:,"totalTimeQueuedMicros":\\d+)?}` +
-               `.*"(execution|ingress)":{"admissions":\\d+(?:,"totalTimeQueuedMicros":\\d+)?}`);
-assert(checkLog.checkContainsOnce(primary, predicate),
-       "Could not find log containing " + predicate);
+const predicate = new RegExp(
+    `Slow query.*"${coll}.*"queues".*` +
+        `"(execution|ingress)":{"admissions":\\d+(?:,"totalTimeQueuedMicros":\\d+)?}` +
+        `.*"(execution|ingress)":{"admissions":\\d+(?:,"totalTimeQueuedMicros":\\d+)?}`,
+);
+assert(checkLog.checkContainsOnce(primary, predicate), "Could not find log containing " + predicate);
 
 rst.stopSet();

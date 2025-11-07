@@ -27,9 +27,8 @@
  *    it in the license file.
  */
 
-#include "mongo/db/exec/sbe/vm/vm.h"
-
 #include "mongo/db/exec/sbe/accumulator_sum_value_enum.h"
+#include "mongo/db/exec/sbe/vm/vm.h"
 
 namespace mongo {
 namespace sbe {
@@ -46,7 +45,11 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDoubleDoubleSumF
 FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDoubleDoublePartialSumFinalize(
     ArityType arity) {
     auto [_, fieldTag, fieldValue] = getFromStack(0);
+    return builtinDoubleDoublePartialSumFinalizeImpl(fieldTag, fieldValue);
+}
 
+FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDoubleDoublePartialSumFinalizeImpl(
+    value::TypeTags fieldTag, value::Value fieldValue) {
     // For {$sum: 1}, we use aggSum instruction. In this case, the result type is guaranteed to be
     // either 'NumberInt32', 'NumberInt64', or 'NumberDouble'. We should transform the scalar result
     // into an array which is the over-the-wire data format from a shard to a merging side.
@@ -57,18 +60,18 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDoubleDoublePart
         auto newArr = value::getArrayView(val);
 
         DoubleDoubleSummation res;
-        BSONType resType = BSONType::NumberInt;
+        BSONType resType = BSONType::numberInt;
         switch (fieldTag) {
             case value::TypeTags::NumberInt32:
                 res.addInt(value::bitcastTo<int32_t>(fieldValue));
                 break;
             case value::TypeTags::NumberInt64:
                 res.addLong(value::bitcastTo<long long>(fieldValue));
-                resType = BSONType::NumberLong;
+                resType = BSONType::numberLong;
                 break;
             case value::TypeTags::NumberDouble:
                 res.addDouble(value::bitcastTo<double>(fieldValue));
-                resType = BSONType::NumberDouble;
+                resType = BSONType::numberDouble;
                 break;
             default:
                 MONGO_UNREACHABLE_TASSERT(6546500);
@@ -76,7 +79,8 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDoubleDoublePart
         auto [sum, addend] = res.getDoubleDouble();
 
         // The merge-side expects that the first element is the BSON type, not internal slot type.
-        newArr->push_back(value::TypeTags::NumberInt32, value::bitcastFrom<int>(resType));
+        newArr->push_back(value::TypeTags::NumberInt32,
+                          value::bitcastFrom<int>(stdx::to_underlying(resType)));
         newArr->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(sum));
         newArr->push_back(value::TypeTags::NumberDouble, value::bitcastFrom<double>(addend));
 
@@ -100,11 +104,11 @@ FastTuple<bool, value::TypeTags, value::Value> ByteCode::builtinDoubleDoublePart
     auto bsonType = [=]() -> int {
         switch (arr->getAt(AggSumValueElems::kNonDecimalTotalTag).first) {
             case value::TypeTags::NumberInt32:
-                return static_cast<int>(BSONType::NumberInt);
+                return static_cast<int>(BSONType::numberInt);
             case value::TypeTags::NumberInt64:
-                return static_cast<int>(BSONType::NumberLong);
+                return static_cast<int>(BSONType::numberLong);
             case value::TypeTags::NumberDouble:
-                return static_cast<int>(BSONType::NumberDouble);
+                return static_cast<int>(BSONType::numberDouble);
             default:
                 MONGO_UNREACHABLE_TASSERT(6294001);
                 return 0;

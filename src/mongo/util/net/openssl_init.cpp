@@ -28,8 +28,6 @@
  */
 
 
-#include "mongo/platform/basic.h"
-
 #include "mongo/base/init.h"
 #include "mongo/config.h"
 #include "mongo/logv2/log.h"
@@ -39,10 +37,11 @@
 #include "mongo/util/scopeguard.h"
 
 #include <memory>
-#include <openssl/err.h>
-#include <openssl/ssl.h>
 #include <stack>
 #include <vector>
+
+#include <openssl/err.h>
+#include <openssl/ssl.h>
 
 #if OPENSSL_VERSION_NUMBER > 0x30000000L
 #include <openssl/provider.h>
@@ -173,6 +172,13 @@ void initFIPS() {
                             "error"_attr =
                                 SSLManagerInterface::getSSLErrorMessage(ERR_get_error()));
     }
+
+    if (!EVP_default_properties_enable_fips(nullptr, 1)) {
+        LOGV2_FATAL_NOTRACE(10788001,
+                            "Failed to set FIPS as default OpenSSL 3 provider",
+                            "error"_attr =
+                                SSLManagerInterface::getSSLErrorMessage(ERR_get_error()));
+    };
 }
 #elif defined(MONGO_CONFIG_HAVE_FIPS_MODE_SET)
 
@@ -193,7 +199,15 @@ void setupFIPS() {
 // Turn on FIPS mode if requested, OPENSSL_FIPS must be defined by the OpenSSL headers
 #if defined(_SUPPORT_FIPS)
     initFIPS();
-    LOGV2(23172, "FIPS 140-2 mode activated");
+
+#if OPENSSL_VERSION_NUMBER > 0x30000000L
+#define _FIPS_ACTIVATED_MSG "FIPS 140 mode activated"
+#else
+#define _FIPS_ACTIVATED_MSG "FIPS 140-2 mode activated"
+#endif
+
+    LOGV2(23172, _FIPS_ACTIVATED_MSG);
+
 #else
     LOGV2_FATAL_NOTRACE(23174, "this version of mongodb was not compiled with FIPS support");
 #endif

@@ -37,8 +37,38 @@ namespace {
 const auto contextDecoration = OperationContext::declareDecoration<ExecutionAdmissionContext>();
 }  // namespace
 
+ExecutionAdmissionContext::DelinquencyStats::DelinquencyStats(const DelinquencyStats& other) {
+    delinquentAcquisitions.storeRelaxed(other.delinquentAcquisitions.loadRelaxed());
+    totalAcquisitionDelinquencyMillis.storeRelaxed(
+        other.totalAcquisitionDelinquencyMillis.loadRelaxed());
+    maxAcquisitionDelinquencyMillis.storeRelaxed(
+        other.maxAcquisitionDelinquencyMillis.loadRelaxed());
+}
+
+ExecutionAdmissionContext::DelinquencyStats& ExecutionAdmissionContext::DelinquencyStats::operator=(
+    const DelinquencyStats& other) {
+    delinquentAcquisitions.storeRelaxed(other.delinquentAcquisitions.loadRelaxed());
+    totalAcquisitionDelinquencyMillis.storeRelaxed(
+        other.totalAcquisitionDelinquencyMillis.loadRelaxed());
+    maxAcquisitionDelinquencyMillis.storeRelaxed(
+        other.maxAcquisitionDelinquencyMillis.loadRelaxed());
+    return *this;
+}
+
 ExecutionAdmissionContext& ExecutionAdmissionContext::get(OperationContext* opCtx) {
     return contextDecoration(opCtx);
 }
 
+ExecutionAdmissionContext::ExecutionAdmissionContext(const ExecutionAdmissionContext& other)
+    : AdmissionContext(other),
+      _readDelinquencyStats(other._readDelinquencyStats),
+      _writeDelinquencyStats(other._writeDelinquencyStats) {}
+
+ExecutionAdmissionContext& ExecutionAdmissionContext::operator=(
+    const ExecutionAdmissionContext& other) {
+    AdmissionContext::operator=(other);
+    _readDelinquencyStats = other._readDelinquencyStats;
+    _writeDelinquencyStats = other._writeDelinquencyStats;
+    return *this;
+}
 }  // namespace mongo

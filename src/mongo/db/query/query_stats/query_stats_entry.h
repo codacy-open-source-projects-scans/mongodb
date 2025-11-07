@@ -29,63 +29,29 @@
 
 #pragma once
 
+#include "mongo/base/clonable_ptr.h"
+#include "mongo/db/query/query_stats/aggregated_metric.h"
+#include "mongo/db/query/query_stats/key.h"
 #include "mongo/db/query/query_stats/supplemental_metrics_stats.h"
-#include <algorithm>
+#include "mongo/util/modules.h"
+#include "mongo/util/time_support.h"
+
 #include <cstdint>
 #include <memory>
 
-#include "mongo/base/clonable_ptr.h"
-#include "mongo/db/commands/server_status_metric.h"
-#include "mongo/db/query/query_stats/aggregated_metric.h"
-#include "mongo/db/query/query_stats/key.h"
-#include "mongo/db/query/query_stats/optimizer_metrics_stats_entry.h"
-#include "mongo/db/query/query_stats/transform_algorithm_gen.h"
-#include "mongo/util/time_support.h"
-
 namespace mongo::query_stats {
 
-/**
- * The value stored in the query stats store. It contains a Key representing this "kind" of
- * query, and some metrics about that shape. This class is responsible for knowing its size and
- * updating our server status metrics about the size of the query stats store accordingly. At the
- * time of this writing, the LRUCache utility does not easily expose its size in a way we could use
- * as server status metrics.
- */
-struct QueryStatsEntry {
-    QueryStatsEntry(std::unique_ptr<const Key> key_)
-        : firstSeenTimestamp(Date_t::now()), key(std::move(key_)) {}
-
-    BSONObj toBSON(bool includeDiskUsageMetrics) const;
-
-    /**
-     * Timestamp for when this query shape was added to the store. Set on construction.
-     */
-    const Date_t firstSeenTimestamp;
-
-    /**
-     * Timestamp for when the latest time this query shape was seen.
-     */
-    Date_t latestSeenTimestamp;
-
-    /**
-     * Last execution time in microseconds.
-     */
-    uint64_t lastExecutionMicros = 0;
-
-    /**
-     * Number of query executions.
-     */
-    uint64_t execCount = 0;
-
-    /**
-     * Aggregates the total time for execution including getMore requests.
-     */
-    AggregatedMetric<uint64_t> totalExecMicros;
+struct CursorEntry {
+    void toBSON(BSONObjBuilder& queryStatsBuilder, bool buildAsSubsection) const;
 
     /**
      * Aggregates the time for execution for first batch only.
      */
     AggregatedMetric<uint64_t> firstResponseExecMicros;
+};
+
+struct QueryExecEntry {
+    void toBSON(BSONObjBuilder& queryStatsBuilder, bool buildAsSubsection) const;
 
     /**
      * Aggregates the number of documents returned for the query including getMore requests.
@@ -113,29 +79,134 @@ struct QueryStatsEntry {
     AggregatedMetric<int64_t> readTimeMicros;
 
     /**
+     * Aggregates the delinquent acquisitions stats including getMore requests.
+     */
+    AggregatedMetric<uint64_t> delinquentAcquisitions;
+    AggregatedMetric<int64_t> totalAcquisitionDelinquencyMillis;
+    AggregatedMetric<int64_t> maxAcquisitionDelinquencyMillis;
+
+    /**
+     * Aggregates the checkForInterrupt stats including getMore requests.
+     */
+    AggregatedMetric<uint64_t> numInterruptChecksPerSec;
+    AggregatedMetric<int64_t> overdueInterruptApproxMaxMillis;
+};
+
+struct QueryPlannerEntry {
+    void toBSON(BSONObjBuilder& queryStatsBuilder, bool buildAsSubsection) const;
+
+    /**
+     * Aggregates the number of queries that used a sort stage including getMore requests.
+     */
+    AggregatedBool hasSortStage;
+
+    /**
+     * Aggregates the number of queries that used disk including getMore requests.
+     */
+    AggregatedBool usedDisk;
+
+    /**
+     * Aggregates the number of queries that used the multi-planner including getMore requests.
+     */
+    AggregatedBool fromMultiPlanner;
+
+    /**
+     * Aggregates the number of queries that used the plan cache including getMore requests.
+     */
+    AggregatedBool fromPlanCache;
+};
+
+struct WritesEntry {
+    void toBSON(BSONObjBuilder& queryStatsBuilder) const;
+
+    /**
+     * Aggregates the number of documents selected by an update command.
+     */
+    AggregatedMetric<uint64_t> nMatched;
+
+    /**
+     * Aggregates the number of documents inserted by an upsert.
+     */
+    AggregatedMetric<uint64_t> nUpserted;
+
+    /**
+     * Aggregates the number of existing documents updated.
+     */
+    AggregatedMetric<uint64_t> nModified;
+
+    /**
+     * Aggregates the number of documents deleted.
+     */
+    AggregatedMetric<uint64_t> nDeleted;
+
+    /**
+     * Aggregates the number of documents inserted (excluding upserts).
+     */
+    AggregatedMetric<uint64_t> nInserted;
+};
+
+/**
+ * The value stored in the query stats store. It contains a Key representing this "kind" of
+ * query, and some metrics about that shape. This class is responsible for knowing its size and
+ * updating our server status metrics about the size of the query stats store accordingly. At the
+ * time of this writing, the LRUCache utility does not easily expose its size in a way we could use
+ * as server status metrics.
+ */
+struct QueryStatsEntry {
+    QueryStatsEntry(std::unique_ptr<const Key> key_)
+        : firstSeenTimestamp(Date_t::now()), key(std::move(key_)) {}
+
+    BSONObj toBSON(bool buildSubsections = false, bool includeWriteMetrics = false) const;
+
+    /**
+     * Timestamp for when this query shape was added to the store. Set on construction.
+     */
+    const Date_t firstSeenTimestamp;
+
+    /**
+     * Timestamp for when the latest time this query shape was seen.
+     */
+    Date_t latestSeenTimestamp;
+
+    /**
+     * Last execution time in microseconds.
+     */
+    uint64_t lastExecutionMicros = 0;
+
+    /**
+     * Number of query executions.
+     */
+    uint64_t execCount = 0;
+
+    /**
+     * Aggregates the total time for execution including getMore requests.
+     */
+    AggregatedMetric<uint64_t> totalExecMicros;
+
+    /**
      * Aggregates the executing time (excluding time spent blocked) including getMore requests.
      */
     AggregatedMetric<int64_t> workingTimeMillis;
 
     /**
-     * Counts the frequency of the boolean value hasSortStage.
+     * Aggregates the executing time including getMore requests.
      */
-    AggregatedBool hasSortStage;
+    AggregatedMetric<int64_t> cpuNanos;
 
     /**
-     * Counts the frequency of the boolean value usedDisk.
+     * Metrics relevant to the cursor and batching protocol
      */
-    AggregatedBool usedDisk;
+    CursorEntry cursorStats;
 
     /**
-     * Counts the frequency of the boolean value fromMultiPlanner.
+     * Metrics related to query execution.
      */
-    AggregatedBool fromMultiPlanner;
+    QueryExecEntry queryExecStats;
 
     /**
-     * Counts the frequency of the boolean value fromPlanCache.
+     * Metrics related to query planner.
      */
-    AggregatedBool fromPlanCache;
+    QueryPlannerEntry queryPlannerStats;
 
     /**
      * The Key that can generate the query stats key for this request.
@@ -148,10 +219,15 @@ struct QueryStatsEntry {
     void addSupplementalStats(std::unique_ptr<SupplementalStatsEntry> metric);
 
     /**
-     *  Supplemental metrics. The data structure is not allocated and the pointer is null if
+     * Supplemental metrics. The data structure is not allocated and the pointer is null if
      * optional metrics are not collected.
      */
     clonable_ptr<SupplementalStatsMap> supplementalStatsMap;
+
+    /**
+     * Metrics related to writes.
+     */
+    WritesEntry writesStats;
 };
 
 }  // namespace mongo::query_stats

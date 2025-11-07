@@ -29,14 +29,15 @@
 
 #pragma once
 
-#include <functional>
-#include <vector>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/util/modules.h"
+
+#include <functional>
+#include <vector>
 
 namespace mongo {
 
@@ -49,7 +50,7 @@ class OperationContext;
  * Different server deployments (standalone, replica set, sharded cluster) should
  * implement their own classes that fulfill this interface.
  */
-class SessionsCollection {
+class MONGO_MOD_OPEN SessionsCollection {
 public:
     static constexpr StringData kSessionsTTLIndex = "lsidTTLIndex"_sd;
 

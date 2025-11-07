@@ -29,25 +29,19 @@
 
 #include "mongo/db/update/update_driver.h"
 
-#include <boost/move/utility_core.hpp>
-#include <set>
-#include <string>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsontypes.h"
-#include "mongo/bson/mutable/document.h"
 #include "mongo/db/curop_failpoint_helpers.h"
-#include "mongo/db/matcher/expression_parser.h"
+#include "mongo/db/exec/mutable_bson/document.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/query/compiler/parsers/matcher/expression_parser.h"
 #include "mongo/db/query/find_command.h"
+#include "mongo/db/query/write_ops/update_request.h"
 #include "mongo/db/update/delta_executor.h"
 #include "mongo/db/update/modifier_table.h"
 #include "mongo/db/update/object_replace_executor.h"
@@ -59,6 +53,13 @@
 #include "mongo/util/fail_point.h"
 #include "mongo/util/overloaded_visitor.h"  // IWYU pragma: keep
 #include "mongo/util/str.h"
+
+#include <set>
+#include <string>
+#include <utility>
+
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo {
 
@@ -81,7 +82,7 @@ modifiertable::ModifierType validateMod(BSONElement mod) {
             str::stream() << "Modifiers operate on fields but we found type "
                           << typeName(mod.type()) << " instead. For example: {$mod: {<field>: ...}}"
                           << " not {" << mod << "}",
-            mod.type() == BSONType::Object);
+            mod.type() == BSONType::object);
 
     return modType;
 }
@@ -94,7 +95,22 @@ bool parseUpdateExpression(
     const std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>>& arrayFilters) {
     bool positional = false;
     std::set<std::string> foundIdentifiers;
+    bool foundVersionField = false;
     for (auto&& mod : updateExpr) {
+        // If there is a "$v" field among the modifiers, it should have already been used by the
+        // caller to determine that this is the correct parsing function.
+        if (mod.fieldNameStringData() == kUpdateOplogEntryVersionFieldName) {
+            uassert(
+                ErrorCodes::BadValue, "Duplicate $v in oplog update document", !foundVersionField);
+            foundVersionField = true;
+            tassert(10721100,
+                    "If we are in parseUpdateExpression for a modifier update and have a $v field, "
+                    "it must be {$v:1}.",
+                    mod.safeNumberInt() ==
+                        static_cast<int>(UpdateOplogEntryVersion::kUpdateNodeV1));
+            continue;
+        }
+
         auto modType = validateMod(mod);
         for (auto&& field : mod.Obj()) {
             auto statusWithPositional = UpdateObjectNode::parseAndMerge(
@@ -108,7 +124,7 @@ bool parseUpdateExpression(
         uassert(ErrorCodes::FailedToParse,
                 str::stream() << "The array filter for identifier '" << arrayFilter.first
                               << "' was not used in the update " << updateExpr,
-                foundIdentifiers.find(arrayFilter.first.toString()) != foundIdentifiers.end());
+                foundIdentifiers.find(std::string{arrayFilter.first}) != foundIdentifiers.end());
     }
 
     return positional;
@@ -147,7 +163,10 @@ void UpdateDriver::parse(
         return;
     }
 
-    uassert(51198, "Constant values may only be specified for pipeline updates", !constants);
+    if (MONGO_unlikely(constants)) {
+        // Throws "Constant values may be only be specified for pipeline updates" error.
+        UpdateRequest::throwUnexpectedConstantValuesException();
+    }
 
     // Check if the update expression is a full object replacement.
     if (updateMod.type() == write_ops::UpdateModification::Type::kReplacement) {
@@ -183,15 +202,26 @@ void UpdateDriver::parse(
 
     invariant(_updateType == UpdateType::kOperator);
 
-    // By this point we are expecting a "kModifier" update. This version of mongod only supports
-    // $v: 2 (delta) (older versions support $v: 0 and $v: 1). We've already checked whether
-    // this is a delta update, so we verify that we're not on the oplog application path.
-    tassert(5030100,
-            "An oplog update can only be of type 'kReplacement' or 'kDelta'",
-            !_fromOplogApplication);
+    // By this point we are expecting a "modifier" update. This version of mongod supports $v:1
+    // (modifier language) and $v:2 (delta) (older versions support $v:0). We've already checked
+    // whether this is a delta update so we check that the $v field isn't present, or has a value
+    // of 1.
+    auto updateExpr = updateMod.getUpdateModifier();
+    BSONElement versionElement = updateExpr[kUpdateOplogEntryVersionFieldName];
+    if (versionElement) {
+        uassert(ErrorCodes::FailedToParse,
+                "The $v update field is only recognized internally",
+                _fromOplogApplication);
+
+        // The UpdateModification should have verified that the value of $v is valid.
+        tassert(10721101,
+                "Modifier updates must be {$v:1} if $v is present",
+                versionElement.safeNumberInt() ==
+                    static_cast<int>(UpdateOplogEntryVersion::kUpdateNodeV1));
+    }
+
     auto root = std::make_unique<UpdateObjectNode>();
-    _positional =
-        parseUpdateExpression(updateMod.getUpdateModifier(), root.get(), _expCtx, arrayFilters);
+    _positional = parseUpdateExpression(updateExpr, root.get(), _expCtx, arrayFilters);
     _updateExecutor = std::make_unique<UpdateTreeExecutor>(std::move(root));
 }
 

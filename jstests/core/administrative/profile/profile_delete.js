@@ -13,16 +13,13 @@
 //   requires_scripting,
 //   # TODO SERVER-89016 Remove this tag
 //   does_not_support_multiplanning_single_solutions,
+//   # The test runs getLatestProfileEntry(). The downstream syncing node affects the profiler.
+//   run_getLatestProfilerEntry,
 // ]
 
-import {
-    ClusteredCollectionUtil
-} from "jstests/libs/clustered_collections/clustered_collection_util.js";
+import {ClusteredCollectionUtil} from "jstests/libs/clustered_collections/clustered_collection_util.js";
 import {isLinux} from "jstests/libs/os_helpers.js";
-import {
-    getLatestProfilerEntry,
-    profilerHasZeroMatchingEntriesOrThrow
-} from "jstests/libs/profiler.js";
+import {getLatestProfilerEntry, profilerHasZeroMatchingEntriesOrThrow} from "jstests/libs/profiler.js";
 
 // Setup test db and collection.
 const testDB = db.getSiblingDB("profile_delete");
@@ -32,8 +29,9 @@ const coll = testDB.getCollection(collName);
 
 // Don't profile the setFCV command, which could be run during this test in the
 // fcv_upgrade_downgrade_replica_sets_jscore_passthrough suite.
-assert.commandWorked(testDB.setProfilingLevel(
-    1, {filter: {'command.setFeatureCompatibilityVersion': {'$exists': false}}}));
+assert.commandWorked(
+    testDB.setProfilingLevel(1, {filter: {"command.setFeatureCompatibilityVersion": {"$exists": false}}}),
+);
 
 //
 // Confirm metrics for single document delete.
@@ -46,11 +44,13 @@ assert.commandWorked(coll.insert(docs));
 assert.commandWorked(coll.createIndex({a: 1}));
 
 let testComment = "test1";
-assert.commandWorked(testDB.runCommand({
-    delete: collName,
-    deletes: [{q: {a: {$gte: 2}, b: {$gte: 2}}, limit: 1, collation: {locale: "fr"}}],
-    comment: testComment
-}));
+assert.commandWorked(
+    testDB.runCommand({
+        delete: collName,
+        deletes: [{q: {a: {$gte: 2}, b: {$gte: 2}}, limit: 1, collation: {locale: "fr"}}],
+        comment: testComment,
+    }),
+);
 
 let profileObj = getLatestProfilerEntry(testDB, {"command.comment": testComment});
 
@@ -65,6 +65,8 @@ assert.eq(profileObj.ndeleted, 1, tojson(profileObj));
 assert.eq(profileObj.keysExamined, 1, tojson(profileObj));
 assert.eq(profileObj.docsExamined, 1, tojson(profileObj));
 assert.eq(profileObj.keysDeleted, expectedKeysDeleted, tojson(profileObj));
+assert(profileObj.hasOwnProperty("queryHash"), tojson(profileObj));
+assert(profileObj.hasOwnProperty("planCacheKey"), tojson(profileObj));
 assert.eq(profileObj.planSummary, "IXSCAN { a: 1 }", tojson(profileObj));
 assert(profileObj.execStats.hasOwnProperty("stage"), tojson(profileObj));
 if (isLinux()) {
@@ -86,8 +88,9 @@ for (let i = 0; i < 10; ++i) {
 assert.commandWorked(coll.insert(docs));
 
 testComment = "test2";
-assert.commandWorked(testDB.runCommand(
-    {delete: collName, deletes: [{q: {a: {$gte: 2}}, limit: 0}], comment: testComment}));
+assert.commandWorked(
+    testDB.runCommand({delete: collName, deletes: [{q: {a: {$gte: 2}}, limit: 0}], comment: testComment}),
+);
 
 profileObj = getLatestProfilerEntry(testDB, {"command.comment": testComment});
 
@@ -110,8 +113,9 @@ for (let i = 0; i < 5; ++i) {
 assert.commandWorked(coll.insert(docs));
 
 testComment = "test3";
-assert.commandWorked(testDB.runCommand(
-    {delete: collName, deletes: [{q: {a: 3, b: 3}, limit: 0}], comment: testComment}));
+assert.commandWorked(
+    testDB.runCommand({delete: collName, deletes: [{q: {a: 3, b: 3}, limit: 0}], comment: testComment}),
+);
 
 profileObj = getLatestProfilerEntry(testDB, {"command.comment": testComment});
 
@@ -134,7 +138,7 @@ const deleteResult = testDB.runCommand({
     delete: coll.getName(),
     deletes: [{q: {$where: "sleep(1000);return true", a: 1}, limit: 0}],
     maxTimeMS: 1,
-    comment: testComment
+    comment: testComment,
 });
 
 // This command will time out before completing.
@@ -143,5 +147,4 @@ assert.commandFailedWithCode(deleteResult, ErrorCodes.MaxTimeMSExpired);
 // Depending on where in the command path the maxTimeMS timeout occurs we will either forego writing
 // a document to the system.profile collection or we will write the delete command entry that
 // reflects failed command execution.
-profilerHasZeroMatchingEntriesOrThrow(
-    {profileDB: testDB, filter: {"command.comment": testComment, "ok": 1}});
+profilerHasZeroMatchingEntriesOrThrow({profileDB: testDB, filter: {"command.comment": testComment, "ok": 1}});

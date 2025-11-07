@@ -73,13 +73,14 @@ __wt_conn_stat_init(WT_SESSION_IMPL *session)
     conn = S2C(session);
     stats = conn->stats;
 
-    __wti_cache_stats_update(session);
+    __wt_cache_stats_update(session);
+    __wt_checkpoint_timer_stats(session);
     __wt_evict_stats_update(session);
     __wt_txn_stats_update(session);
 
     WT_STATP_CONN_SET(session, stats, file_open, conn->open_file_count);
     WT_STATP_CONN_SET(
-      session, stats, cursor_open_count, __wt_atomic_load32(&conn->open_cursor_count));
+      session, stats, cursor_open_count, __wt_atomic_load_uint32_relaxed(&conn->open_cursor_count));
     WT_STATP_CONN_SET(session, stats, dh_conn_handle_count, conn->dhandle_count);
     WT_STATP_CONN_SET(
       session, stats, dh_conn_handle_btree_count, conn->dhandle_types_count[WT_DHANDLE_TYPE_BTREE]);

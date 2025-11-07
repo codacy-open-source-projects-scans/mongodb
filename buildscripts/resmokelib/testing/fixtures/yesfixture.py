@@ -5,7 +5,7 @@ import signal
 from buildscripts.resmokelib.testing.fixtures import interface
 
 
-class YesFixture(interface.Fixture):  # pylint: disable=abstract-method
+class YesFixture(interface.Fixture):
     """Fixture which spawns several 'yes' executables to generate lots of log messages."""
 
     def __init__(self, logger, job_num, fixturelib, num_instances=1, message_length=100):
@@ -36,7 +36,7 @@ class YesFixture(interface.Fixture):  # pylint: disable=abstract-method
         )
         return self.fixturelib.generic_program(logger, ["yes", self.__message])
 
-    def _do_teardown(self, mode=None):
+    def _do_teardown(self, finished=False, mode=None):
         running_at_start = self.is_running()
         success = True  # Still a success even if nothing is running.
 

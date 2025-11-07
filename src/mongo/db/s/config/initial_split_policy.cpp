@@ -29,21 +29,6 @@
 
 #include "mongo/db/s/config/initial_split_policy.h"
 
-#include <absl/container/flat_hash_map.h>
-#include <absl/container/node_hash_map.h>
-#include <absl/container/node_hash_set.h>
-#include <absl/meta/type_traits.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-#include <limits>
-#include <numeric>
-#include <random>
-#include <set>
-#include <string>
-#include <type_traits>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
@@ -54,31 +39,50 @@
 #include "mongo/bson/oid.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/db/cluster_role.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/exec/agg/pipeline_builder.h"
 #include "mongo/db/exec/document_value/document.h"
 #include "mongo/db/exec/document_value/value.h"
 #include "mongo/db/field_ref.h"
+#include "mongo/db/global_catalog/type_shard.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/pipeline/process_interface/mongo_process_interface.h"
 #include "mongo/db/pipeline/process_interface/shardsvr_process_interface.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/s/balancer/balancer_policy.h"
+#include "mongo/db/server_feature_flags_gen.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/sharding_environment/client/shard.h"
+#include "mongo/db/sharding_environment/grid.h"
+#include "mongo/db/sharding_environment/sharding_feature_flags_gen.h"
 #include "mongo/db/storage/storage_options.h"
-#include "mongo/db/vector_clock.h"
+#include "mongo/db/topology/cluster_role.h"
+#include "mongo/db/topology/shard_registry.h"
+#include "mongo/db/vector_clock/vector_clock.h"
 #include "mongo/executor/task_executor_pool.h"
-#include "mongo/s/catalog/type_shard.h"
-#include "mongo/s/client/shard.h"
-#include "mongo/s/client/shard_registry.h"
-#include "mongo/s/grid.h"
-#include "mongo/s/sharding_feature_flags_gen.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
+
+#include <limits>
+#include <numeric>
+#include <random>
+#include <set>
+#include <string>
+#include <type_traits>
+
+#include <absl/container/flat_hash_map.h>
+#include <absl/container/node_hash_map.h>
+#include <absl/container/node_hash_set.h>
+#include <absl/meta/type_traits.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kSharding
 
@@ -88,11 +92,18 @@ namespace {
 using ChunkDistributionMap = stdx::unordered_map<ShardId, size_t>;
 using ZoneShardMap = StringMap<std::vector<ShardId>>;
 
-std::vector<ShardId> getAllNonDrainingShardIdsShuffled(OperationContext* opCtx) {
-    const auto shardsAndOpTime = uassertStatusOKWithContext(
-        Grid::get(opCtx)->catalogClient()->getAllShards(
-            opCtx, repl::ReadConcernLevel::kMajorityReadConcern, true /* excludeDraining */),
-        "Cannot retrieve updated shard list from config server");
+std::vector<ShardId> getAllNonDrainingShardIds(OperationContext* opCtx) {
+    const auto shardsAndOpTime = [&] {
+        try {
+            return Grid::get(opCtx)->catalogClient()->getAllShards(
+                opCtx,
+                repl::ReadConcernLevel::kMajorityReadConcern,
+                BSON(ShardType::draining.ne(true)) /* excludeDraining */);
+        } catch (DBException& ex) {
+            ex.addContext("Cannot retrieve updated shard list from config server");
+            throw;
+        }
+    }();
     const auto shards = std::move(shardsAndOpTime.value);
     const auto lastVisibleOpTime = std::move(shardsAndOpTime.opTime);
 
@@ -107,6 +118,11 @@ std::vector<ShardId> getAllNonDrainingShardIdsShuffled(OperationContext* opCtx) 
                    shards.end(),
                    std::back_inserter(shardIds),
                    [](const ShardType& shard) { return ShardId(shard.getName()); });
+    return shardIds;
+}
+
+std::vector<ShardId> getAllNonDrainingShardIdsShuffled(OperationContext* opCtx) {
+    auto shardIds = getAllNonDrainingShardIds(opCtx);
 
     std::default_random_engine rng{};
     std::shuffle(shardIds.begin(), shardIds.end(), rng);
@@ -356,13 +372,6 @@ InitialSplitPolicy::ShardCollectionConfig InitialSplitPolicy::generateShardColle
     const std::vector<ShardId>& allShardIds) {
     invariant(!allShardIds.empty());
 
-    size_t numInitialChunksPerShard = 1;
-    // TODO SERVER-81884: update once 8.0 becomes last LTS.
-    if (!feature_flags::gOneChunkPerShardEmptyCollectionWithHashedShardKey.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        numInitialChunksPerShard = 2;
-    }
-
     std::vector<BSONObj> finalSplitPoints;
 
     // Make sure points are unique and ordered
@@ -385,8 +394,7 @@ InitialSplitPolicy::ShardCollectionConfig InitialSplitPolicy::generateShardColle
         const BSONObj min = (i == 0) ? keyPattern.globalMin() : finalSplitPoints[i - 1];
         const BSONObj max =
             (i < finalSplitPoints.size()) ? finalSplitPoints[i] : keyPattern.globalMax();
-        // TODO SERVER-81884: simplify once numInitialChunksPerShard is always 1
-        const ShardId shardId = allShardIds[(i / numInitialChunksPerShard) % allShardIds.size()];
+        const ShardId shardId = allShardIds[i % allShardIds.size()];
 
         appendChunk(params, min, max, &version, shardId, &chunks);
     }
@@ -437,34 +445,22 @@ InitialSplitPolicy::ShardCollectionConfig SingleChunkOnShardSplitPolicy::createF
 }
 
 SplitPointsBasedSplitPolicy::SplitPointsBasedSplitPolicy(
-    const ShardKeyPattern& shardKeyPattern,
-    size_t numShards,
     boost::optional<std::vector<ShardId>> availableShardIds)
-    : _availableShardIds(std::move(availableShardIds)) {
-
-    size_t numInitialChunksPerShard = 1;
-    // TODO SERVER-81884: update once 8.0 becomes last LTS.
-    if (!feature_flags::gOneChunkPerShardEmptyCollectionWithHashedShardKey.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        numInitialChunksPerShard = 2;
-    }
-
-    _splitPoints = calculateHashedSplitPoints(
-        shardKeyPattern, BSONObj(), numShards * numInitialChunksPerShard);
-}
+    : _availableShardIds(std::move(availableShardIds)) {}
 
 InitialSplitPolicy::ShardCollectionConfig SplitPointsBasedSplitPolicy::createFirstChunks(
     OperationContext* opCtx,
     const ShardKeyPattern& shardKeyPattern,
     const SplitPolicyParams& params) {
+    auto availableShardIds =
+        _availableShardIds ? *_availableShardIds : getAllNonDrainingShardIdsShuffled(opCtx);
+    // Calculate split points such that a single chunk is allocated to every shard.
+    _splitPoints = calculateHashedSplitPoints(shardKeyPattern, BSONObj(), availableShardIds.size());
+
     const auto currentTime = VectorClock::get(opCtx)->getTime();
     const auto validAfter = currentTime.clusterTime().asTimestamp();
     return generateShardCollectionInitialChunks(
-        params,
-        shardKeyPattern,
-        validAfter,
-        _splitPoints,
-        _availableShardIds ? *_availableShardIds : getAllNonDrainingShardIdsShuffled(opCtx));
+        params, shardKeyPattern, validAfter, _splitPoints, availableShardIds);
 }
 
 AbstractTagsBasedSplitPolicy::AbstractTagsBasedSplitPolicy(
@@ -560,39 +556,17 @@ InitialSplitPolicy::ShardCollectionConfig AbstractTagsBasedSplitPolicy::createFi
 AbstractTagsBasedSplitPolicy::SplitInfo PresplitHashedZonesSplitPolicy::buildSplitInfoForTag(
     TagsType tag, const ShardKeyPattern& shardKeyPattern) {
 
-    // This strategy presplits each tag such that at least 'minNumInitialChunksPerShard' chunks are
-    // placed on every shard to which the tag is assigned. We distribute the chunks in an
-    // best-effort attempt to ensure that an equal number of chunks are created on each shard
-    // regardless of how the zones are laid out.
-
-    size_t minNumInitialChunksPerShard = 1;
-    // TODO SERVER-81884: update once 8.0 becomes last LTS.
-    if (!feature_flags::gOneChunkPerShardEmptyCollectionWithHashedShardKey.isEnabled(
-            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
-        minNumInitialChunksPerShard = 2;
-    }
-
-    // Returns the ceiling number for the decimal value of x/y.
-    auto ceilOfXOverY = [](auto x, auto y) {
-        return (x / y) + (x % y != 0);
-    };
+    // This strategy pre-splits each tag, such that a single chunk is allocated
+    // to every shard associated with the given tag.
 
     const auto& tagsToShardsMap = getTagsToShardIds();
     invariant(tagsToShardsMap.find(tag.getTag()) != tagsToShardsMap.end());
     const auto& shardsForCurrentTag = tagsToShardsMap.find(tag.getTag())->second;
 
-    // For each shard in the current zone, find the quota of chunks that can be allocated to that
-    // zone. We distribute chunks equally to all the zones present on a shard.
     std::vector<std::pair<ShardId, size_t>> chunkDistribution;
     chunkDistribution.reserve((shardsForCurrentTag.size()));
-    auto numChunksForCurrentTag = 0;
     for (auto&& shard : shardsForCurrentTag) {
-        // TODO SERVER-81884: update once 8.0 becomes last LTS.
-        // numChunksForCurrentTagOnShard will always be 1 when minNumInitialChunksPerShard == 1
-        auto numChunksForCurrentTagOnShard =
-            ceilOfXOverY(minNumInitialChunksPerShard, _numTagsPerShard[shard.toString()]);
-        chunkDistribution.push_back({shard, numChunksForCurrentTagOnShard});
-        numChunksForCurrentTag += numChunksForCurrentTagOnShard;
+        chunkDistribution.push_back({shard, 1});
     }
 
     // Extract the fields preceding the hashed field. We use this object as a base for building
@@ -606,7 +580,7 @@ AbstractTagsBasedSplitPolicy::SplitInfo PresplitHashedZonesSplitPolicy::buildSpl
     }
     auto prefixBSON = bob.obj();
 
-    return {calculateHashedSplitPoints(shardKeyPattern, prefixBSON, numChunksForCurrentTag),
+    return {calculateHashedSplitPoints(shardKeyPattern, prefixBSON, chunkDistribution.size()),
             std::move(chunkDistribution)};
 }
 
@@ -689,8 +663,8 @@ void PresplitHashedZonesSplitPolicy::_validate(const ShardKeyPattern& shardKeyPa
                            "pre-splitting. Cannot have MinKey or MaxKey in the lower bound for "
                            "fields preceding the hashed field but found one, for zone "
                         << tag.getTag(),
-                    (*startItr).type() != BSONType::MinKey &&
-                        (*startItr).type() != BSONType::MaxKey);
+                    (*startItr).type() != BSONType::minKey &&
+                        (*startItr).type() != BSONType::maxKey);
             isPrefixDifferent = isPrefixDifferent || (*startItr).woCompare(*endItr);
             ++endItr;
             // Forward the iterator until hashed field is reached.
@@ -709,7 +683,7 @@ void PresplitHashedZonesSplitPolicy::_validate(const ShardKeyPattern& shardKeyPa
                              "hashed pre-splitting. The hashed field value for lower bound must "
                              "be MinKey, for zone "
                           << tag.getTag(),
-            (*startItr).type() == BSONType::MinKey);
+            (*startItr).type() == BSONType::minKey);
 
         // Each field in the lower bound after the hashed field must be set to MinKey.
         while (startItr.more()) {
@@ -718,7 +692,7 @@ void PresplitHashedZonesSplitPolicy::_validate(const ShardKeyPattern& shardKeyPa
                                      "hashed pre-splitting. The fields after the hashed field must "
                                      "have MinKey value, for zone "
                                   << tag.getTag(),
-                    (*startItr++).type() == BSONType::MinKey);
+                    (*startItr++).type() == BSONType::minKey);
         }
     }
 }
@@ -746,7 +720,7 @@ std::vector<BSONObj> SamplingBasedSplitPolicy::createRawPipeline(const ShardKeyP
                 {"k", V{fieldRef->dottedField()}},
                 {"v", Doc{{"$ifNull", V{Arr{V{"$" + fieldRef->dottedField()}, V{BSONNULL}}}}}}});
         }
-        sortValBuilder.append(fieldRef->dottedField().toString(), 1);
+        sortValBuilder.append(std::string{fieldRef->dottedField()}, 1);
     }
     res.push_back(BSON("$sample" << BSON("size" << numInitialChunks * samplesPerChunk)));
     res.push_back(BSON("$sort" << sortValBuilder.obj()));
@@ -788,8 +762,7 @@ SamplingBasedSplitPolicy::SamplingBasedSplitPolicy(
 }
 
 BSONObjSet SamplingBasedSplitPolicy::createFirstSplitPoints(OperationContext* opCtx,
-                                                            const ShardKeyPattern& shardKey,
-                                                            const SplitPolicyParams& params) {
+                                                            const ShardKeyPattern& shardKey) {
     if (_zones) {
         for (auto& zone : *_zones) {
             zone.setRange({shardKey.getKeyPattern().extendRangeBound(zone.getMinKey(), false),
@@ -820,7 +793,7 @@ BSONObjSet SamplingBasedSplitPolicy::createFirstSplitPoints(OperationContext* op
 
 InitialSplitPolicy::ShardCollectionConfig SamplingBasedSplitPolicy::createFirstChunks(
     OperationContext* opCtx, const ShardKeyPattern& shardKey, const SplitPolicyParams& params) {
-    auto splitPoints = createFirstSplitPoints(opCtx, shardKey, params);
+    auto splitPoints = createFirstSplitPoints(opCtx, shardKey);
 
     ZoneShardMap zoneToShardMap;
     ChunkDistributionMap chunkDistribution;
@@ -891,15 +864,18 @@ void SamplingBasedSplitPolicy::_appendSplitPointsFromSample(BSONObjSet* splitPoi
 }
 
 std::unique_ptr<SamplingBasedSplitPolicy::SampleDocumentSource>
-SamplingBasedSplitPolicy::makePipelineDocumentSource_forTest(OperationContext* opCtx,
-                                                             const NamespaceString& ns,
-                                                             const ShardKeyPattern& shardKey,
-                                                             int numInitialChunks,
-                                                             int samplesPerChunk) {
-    MakePipelineOptions opts;
+SamplingBasedSplitPolicy::makePipelineDocumentSource_forTest(
+    OperationContext* opCtx,
+    boost::intrusive_ptr<DocumentSource> initialSource,
+    const NamespaceString& ns,
+    const ShardKeyPattern& shardKey,
+    int numInitialChunks,
+    int samplesPerChunk) {
+    pipeline_factory::MakePipelineOptions opts;
     opts.attachCursorSource = false;
-    return _makePipelineDocumentSource(
-        opCtx, ns, shardKey, numInitialChunks, samplesPerChunk, std::move(opts));
+    auto pipeline = _makePipeline(opCtx, ns, shardKey, numInitialChunks, samplesPerChunk, opts);
+    pipeline->addInitialSource(initialSource);
+    return std::make_unique<PipelineDocumentSource>(std::move(pipeline), samplesPerChunk - 1);
 }
 
 std::unique_ptr<SamplingBasedSplitPolicy::SampleDocumentSource>
@@ -908,10 +884,21 @@ SamplingBasedSplitPolicy::_makePipelineDocumentSource(OperationContext* opCtx,
                                                       const ShardKeyPattern& shardKey,
                                                       int numInitialChunks,
                                                       int samplesPerChunk,
-                                                      MakePipelineOptions opts) {
+                                                      pipeline_factory::MakePipelineOptions opts) {
+    auto pipeline = _makePipeline(opCtx, ns, shardKey, numInitialChunks, samplesPerChunk, opts);
+    return std::make_unique<PipelineDocumentSource>(std::move(pipeline), samplesPerChunk - 1);
+}
+
+SamplingBasedSplitPolicy::SampleDocumentPipeline SamplingBasedSplitPolicy::_makePipeline(
+    OperationContext* opCtx,
+    const NamespaceString& ns,
+    const ShardKeyPattern& shardKey,
+    int numInitialChunks,
+    int samplesPerChunk,
+    pipeline_factory::MakePipelineOptions opts) {
     auto rawPipeline = createRawPipeline(shardKey, numInitialChunks, samplesPerChunk);
-    StringMap<ResolvedNamespace> resolvedNamespaces;
-    resolvedNamespaces[ns.coll()] = {ns, std::vector<BSONObj>{}};
+    ResolvedNamespaceMap resolvedNamespaces;
+    resolvedNamespaces[ns] = {ns, std::vector<BSONObj>{}};
 
     auto pi = [&]() -> std::shared_ptr<MongoProcessInterface> {
         if (serverGlobalParams.clusterRole.has(ClusterRole::ConfigServer) ||
@@ -928,6 +915,14 @@ SamplingBasedSplitPolicy::_makePipelineDocumentSource(OperationContext* opCtx,
         return MongoProcessInterface::create(opCtx);
     }();
 
+    // Send with rawData since the shard key is already translated for timeseries.
+    auto aggRequest = AggregateCommandRequest(ns, rawPipeline);
+    if (gFeatureFlagAllBinariesSupportRawDataOperations.isEnabled(
+            VersionContext::getDecoration(opCtx),
+            serverGlobalParams.featureCompatibility.acquireFCVSnapshot())) {
+        aggRequest.setRawData(true);
+    }
+
     auto expCtx = ExpressionContextBuilder{}
                       .opCtx(opCtx)
                       .mongoProcessInterface(std::move(pi))
@@ -935,25 +930,27 @@ SamplingBasedSplitPolicy::_makePipelineDocumentSource(OperationContext* opCtx,
                       .resolvedNamespace(std::move(resolvedNamespaces))
                       .allowDiskUse(true)
                       .bypassDocumentValidation(true)
-                      .tmpDir(storageGlobalParams.dbpath + "/_tmp")
+                      .tmpDir(boost::filesystem::path(storageGlobalParams.dbpath) / "_tmp")
                       .build();
-    return std::make_unique<PipelineDocumentSource>(
-        Pipeline::makePipeline(rawPipeline, expCtx, opts), samplesPerChunk - 1);
+    return pipeline_factory::makePipeline(
+        aggRequest, expCtx, boost::none /* shardCursorsSortSpec */, opts);
 }
 
 SamplingBasedSplitPolicy::PipelineDocumentSource::PipelineDocumentSource(
     SampleDocumentPipeline pipeline, int skip)
-    : _pipeline(std::move(pipeline)), _skip(skip) {}
+    : _pipeline(std::move(pipeline)),
+      _execPipeline{exec::agg::buildPipeline(_pipeline->freeze())},
+      _skip(skip) {}
 
 boost::optional<BSONObj> SamplingBasedSplitPolicy::PipelineDocumentSource::getNext() {
-    auto val = _pipeline->getNext();
+    auto val = _execPipeline->getNext();
 
     if (!val) {
         return boost::none;
     }
 
     for (int skippedSamples = 0; skippedSamples < _skip; skippedSamples++) {
-        auto newVal = _pipeline->getNext();
+        auto newVal = _execPipeline->getNext();
 
         if (!newVal) {
             // If there are not enough samples, just select the last sample.
@@ -984,6 +981,20 @@ InitialSplitPolicy::ShardCollectionConfig ShardDistributionSplitPolicy::createFi
     const ShardKeyPattern& shardKeyPattern,
     const SplitPolicyParams& params) {
     const auto& keyPattern = shardKeyPattern.getKeyPattern();
+
+    // Check that shards receiving chunks are not draining.
+    std::vector<ShardId> nonDrainingShardIds = getAllNonDrainingShardIds(opCtx);
+    std::set<ShardId> nonDrainingShardIdSet(nonDrainingShardIds.begin(), nonDrainingShardIds.end());
+
+    for (const auto& shardInfo : _shardDistribution) {
+        auto currentShardId = shardInfo.getShard();
+
+        uassert(ErrorCodes::ShardNotFound,
+                str::stream() << "Shard " << currentShardId << " is draining and "
+                              << "cannot be used for chunk distribution",
+                nonDrainingShardIdSet.count(currentShardId) > 0);
+    }
+
     if (_zones) {
         for (auto& zone : *_zones) {
             zone.setRange({keyPattern.extendRangeBound(zone.getMinKey(), false),
@@ -1001,6 +1012,7 @@ InitialSplitPolicy::ShardCollectionConfig ShardDistributionSplitPolicy::createFi
     const auto currentTime = VectorClock::get(opCtx)->getTime();
     const auto validAfter = currentTime.clusterTime().asTimestamp();
     ChunkVersion version({OID::gen(), validAfter}, {1, 0});
+
     for (const auto& splitPoint : splitPoints) {
         _appendChunks(params, splitPoint, keyPattern, shardDistributionIdx, version, chunks);
     }
@@ -1027,6 +1039,7 @@ void ShardDistributionSplitPolicy::_appendChunks(const SplitPolicyParams& params
             keyPattern.extendRangeBound(*_shardDistribution[shardDistributionIdx].getMax(), false);
         auto lastChunkMax =
             chunks.empty() ? keyPattern.globalMin() : chunks.back().getRange().getMax();
+
         /* When we compare a defined shard range with a splitPoint, there are three cases:
          * 1. The whole shard range is on the left side of the splitPoint -> Add this shard as a
          * whole chunk and move to next shard.

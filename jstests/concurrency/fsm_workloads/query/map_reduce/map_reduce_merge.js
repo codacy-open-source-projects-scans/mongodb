@@ -17,22 +17,18 @@
  *   requires_scripting,
  *   # Disabled because MapReduce can lose cursors if the primary goes down during the operation.
  *   does_not_support_stepdowns,
- *   # TODO (SERVER-95170): Re-enable this test in txn suites.
- *   does_not_support_transactions,
  *   # TODO (SERVER-91002): server side javascript execution is deprecated, and the balancer is not
  *   # compatible with it, once the incompatibility is taken care off we can re-enable this test
  *   assumes_balancer_off
  * ]
  */
 import {extendWorkload} from "jstests/concurrency/fsm_libs/extend_workload.js";
-import {
-    $config as $baseConfig
-} from "jstests/concurrency/fsm_workloads/query/map_reduce/map_reduce_inline.js";
+import {$config as $baseConfig} from "jstests/concurrency/fsm_workloads/query/map_reduce/map_reduce_inline.js";
 
-export const $config = extendWorkload($baseConfig, function($config, $super) {
+export const $config = extendWorkload($baseConfig, function ($config, $super) {
     // Use the workload name as the database name,
     // since the workload name is assumed to be unique.
-    var uniqueDBName = 'map_reduce_merge';
+    let uniqueDBName = "map_reduce_merge";
 
     $config.states.init = function init(db, collName) {
         $super.states.init.apply(this, arguments);
@@ -41,22 +37,21 @@ export const $config = extendWorkload($baseConfig, function($config, $super) {
     };
 
     $config.states.mapReduce = function mapReduce(db, collName) {
-        var outDB = db.getSiblingDB(this.outDBName);
-        var fullName = outDB[collName].getFullName();
-        assert(outDB[collName].exists() !== null,
-               "output collection '" + fullName + "' should exist");
+        let outDB = db.getSiblingDB(this.outDBName);
+        let fullName = outDB[collName].getFullName();
+        assert(outDB[collName].exists() !== null, "output collection '" + fullName + "' should exist");
 
         // Have all threads combine their results into the same collection
-        var options = {finalize: this.finalizer, out: {merge: collName, db: this.outDBName}};
+        let options = {finalize: this.finalizer, out: {merge: collName, db: this.outDBName}};
 
-        var res = db[collName].mapReduce(this.mapper, this.reducer, options);
+        let res = db[collName].mapReduce(this.mapper, this.reducer, options);
         assert.commandWorked(res);
     };
 
     $config.setup = function setup(db, collName, cluster) {
         $super.setup.apply(this, arguments);
 
-        var outDB = db.getSiblingDB(db.getName() + uniqueDBName);
+        let outDB = db.getSiblingDB(db.getName() + uniqueDBName);
         assert.commandWorked(outDB.createCollection(collName));
     };
 

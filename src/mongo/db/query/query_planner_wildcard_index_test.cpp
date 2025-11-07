@@ -27,38 +27,36 @@
  *    it in the license file.
  */
 
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/json.h"
 #include "mongo/db/field_ref.h"
-#include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/wildcard_key_generator.h"
 #include "mongo/db/index_names.h"
+#include "mongo/db/local_catalog/index_descriptor.h"
 #include "mongo/db/matcher/expression.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
-#include "mongo/db/query/index_entry.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
+#include "mongo/db/query/compiler/metadata/index_entry.h"
 #include "mongo/db/query/planner_wildcard_helpers.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_planner_test_fixture.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/scopeguard.h"
+
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -100,7 +98,7 @@ protected:
 
         params.mainCollectionInfo.indexes.push_back({std::move(keyPattern),
                                                      IndexType::INDEX_WILDCARD,
-                                                     IndexDescriptor::kLatestIndexVersion,
+                                                     IndexConfig::kLatestIndexVersion,
                                                      isMultikey,
                                                      {},  // multikeyPaths
                                                      std::move(multikeyFieldRefs),
@@ -986,9 +984,7 @@ TEST_F(QueryPlannerWildcardTest, ChooseWildcardIndexHintByName) {
     addWildcardIndex(BSON("$**" << 1), {}, {}, {}, nullCollator, wildcard);
     addIndex(BSON("x" << 1));
 
-    runQueryHint(fromjson("{x: {$eq: 1}}"),
-                 BSON("$hint"
-                      << "wildcard"));
+    runQueryHint(fromjson("{x: {$eq: 1}}"), BSON("$hint" << "wildcard"));
 
     assertNumSolutions(1U);
     assertSolutionExists("{fetch: {node: {ixscan: {pattern: {$_path: 1, x: 1}}}}}");
@@ -1988,7 +1984,7 @@ TEST_F(QueryPlannerWildcardTest, CanPushProjectionBeneathSortWithExistsPredicate
         "{proj: {spec: {_id: 0, b: 1}, node: {fetch: {filter: {a: {$eq: 1}}, node:"
         "{ixscan: {filter: null, pattern: {$_path: 1, b: 1}, bounds:"
         "{$_path: [['b','b',true,true], ['b.', 'b/', true, false]],"
-        "b: [['MinKey','MaxKey',true,true]]}}}}}}}}}}}");
+        "b: [['MinKey','MaxKey',true,true]]}}}}}}}}}");
     assertSolutionExists(
         "{sort: {pattern: {b: 1}, limit: 0, type: 'simple', node:"
         "{proj: {spec: {_id: 0, b: 1}, node: {fetch: {filter: {b: {$exists: true}}, node:"

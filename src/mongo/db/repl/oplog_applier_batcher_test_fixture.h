@@ -28,14 +28,6 @@
  */
 
 #pragma once
-
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <string>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -51,15 +43,24 @@
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/interruptible.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/uuid.h"
+
+#include <cstddef>
+#include <string>
+#include <vector>
+
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace repl {
 // This is a simple random-access "oplog buffer" based on a vector.
 class OplogBufferMock : public RandomAccessOplogBuffer {
 public:
-    OplogBufferMock() : RandomAccessOplogBuffer(){};
+    OplogBufferMock() : RandomAccessOplogBuffer() {};
 
     void startup(OperationContext* opCtx) final;
     void shutdown(OperationContext* opCtx) final;
@@ -67,7 +68,7 @@ public:
               Batch::const_iterator begin,
               Batch::const_iterator end,
               boost::optional<const Cost&> cost = boost::none) final;
-    void waitForSpace(OperationContext* opCtx, const Cost& cost) final{};
+    void waitForSpace(OperationContext* opCtx, const Cost& cost) final {};
     bool isEmpty() const final;
     std::size_t getSize() const final;
     std::size_t getCount() const final;
@@ -104,13 +105,7 @@ OplogEntry makeDBCheckBatchEntry(int t,
                                  const NamespaceString& nss,
                                  boost::optional<UUID> uuid = boost::none);
 
-OplogEntry makeUpdateOplogEntry(int t,
-                                const NamespaceString& nss,
-                                boost::optional<UUID> uuid = boost::none,
-                                boost::optional<OpTime> preImageOpTime = boost::none,
-                                boost::optional<OpTime> postImageOpTime = boost::none);
-
-OplogEntry makeNoopOplogEntry(int t, StringData msg);
+OplogEntry makeNewPrimaryBatchEntry(int t);
 
 OplogEntry makeApplyOpsOplogEntry(int t,
                                   bool prepare,
@@ -128,16 +123,12 @@ std::vector<OplogEntry> makeMultiEntryTransactionOplogEntries(int t,
                                                               bool prepared,
                                                               int count);
 
-std::vector<OplogEntry> makeMultiEntryTransactionOplogEntries(
-    int t,
-    const DatabaseName& dbName,
-    bool prepared,
-    std::vector<std::vector<OplogEntry>> innerOps);
-std::vector<OplogEntry> makeRetryableApplyOpsOplogEntries(
-    int t,
-    const DatabaseName& dbName,
-    const OperationSessionInfo& sessionInfo,
-    std::vector<std::vector<OplogEntry>> innerOps);
+OplogEntry makeTruncateRangeEntry(int t, const NamespaceString& nss, const RecordId& maxRecordId);
+
+OplogEntry makeTruncateRangeOnPreImagesEntry(int t, int maxTruncateTimestamp);
+
+OplogEntry makeTruncateRangeOnOplogEntry(int t, int maxTruncateTimestamp);
+
 std::string toString(const std::vector<OplogEntry>& ops);
 }  // namespace repl
 }  // namespace mongo

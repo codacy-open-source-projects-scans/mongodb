@@ -27,13 +27,7 @@
  *    it in the license file.
  */
 
-#include <cstdint>
-#include <cstring>
-#include <memory>
-#include <string>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/fle/implicit_validator.h"
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -45,19 +39,23 @@
 #include "mongo/bson/bsontypes_util.h"
 #include "mongo/bson/json.h"
 #include "mongo/crypto/fle_field_schema_gen.h"
+#include "mongo/db/exec/matcher/matcher.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/matcher/expression_type.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/query/fle/implicit_validator.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/str.h"
 #include "mongo/util/uuid.h"
+
+#include <cstdint>
+#include <cstring>
+#include <memory>
+#include <string>
+
 
 namespace mongo {
 
@@ -68,7 +66,7 @@ FleBlobHeader makeFleHeader(const EncryptedField& field, EncryptedBinDataType su
     blob.fleBlobSubtype = static_cast<uint8_t>(subtype);
     memset(blob.keyUUID, 0, sizeof(blob.keyUUID));
     ASSERT(field.getBsonType().has_value());
-    blob.originalBsonType = typeFromName(field.getBsonType().value());
+    blob.originalBsonType = stdx::to_underlying(typeFromName(field.getBsonType().value()));
     return blob;
 }
 
@@ -81,18 +79,18 @@ const UUID kTestKeyId = UUID::parse("deadbeef-0000-0000-0000-0000deadbeef").getV
 
 
 void replace_str(std::string& str, StringData search, StringData replace) {
-    auto pos = str.find(search.rawData(), 0, search.size());
+    auto pos = str.find(search.data(), 0, search.size());
     if (pos == std::string::npos)
         return;
-    str.replace(pos, search.size(), replace.rawData(), replace.size());
+    str.replace(pos, search.size(), replace.data(), replace.size());
 }
 
 void replace_all(std::string& str, StringData search, StringData replace) {
-    auto pos = str.find(search.rawData(), 0, search.size());
+    auto pos = str.find(search.data(), 0, search.size());
     while (pos != std::string::npos) {
-        str.replace(pos, search.size(), replace.rawData(), replace.size());
+        str.replace(pos, search.size(), replace.data(), replace.size());
         pos += replace.size();
-        pos = str.find(search.rawData(), pos, search.size());
+        pos = str.find(search.data(), pos, search.size());
     }
 }
 
@@ -229,26 +227,32 @@ TEST_F(GenerateFLE2MatchExpression, NormalInputWithNestedFields) {
     ASSERT_BSONOBJ_EQ(expectedBSON, outputBSON);
 }
 
-DEATH_TEST(GenerateFLE2MatchExpression, EncryptedFieldsConflict, "tripwire assertions") {
+DEATH_TEST(GenerateFLE2MatchExpressionDeathTest, EncryptedFieldsConflict_Nested1Level, "6364302") {
     EncryptedField a(UUID::gen(), "a");
     a.setBsonType("string"_sd);
+    EncryptedField ab(UUID::gen(), "a.b");
+    ab.setBsonType("int"_sd);
+
+    [[maybe_unused]] auto expr =
+        generateMatchExpressionFromEncryptedFields(new ExpressionContextForTest(), {a, ab});
+}
+
+DEATH_TEST(GenerateFLE2MatchExpressionDeathTest, EncryptedFieldsConflict_Nested2Levels, "6364302") {
     EncryptedField ab(UUID::gen(), "a.b");
     ab.setBsonType("int"_sd);
     EncryptedField abc(UUID::gen(), "a.b.c");
     abc.setBsonType("int"_sd);
 
-    auto swExpr =
-        generateMatchExpressionFromEncryptedFields(new ExpressionContextForTest(), {a, ab});
-    ASSERT(!swExpr.isOK());
-    ASSERT(swExpr.getStatus().code() == 6364302);
+    [[maybe_unused]] auto expr =
+        generateMatchExpressionFromEncryptedFields(new ExpressionContextForTest(), {abc, ab});
+}
 
-    swExpr = generateMatchExpressionFromEncryptedFields(new ExpressionContextForTest(), {abc, ab});
-    ASSERT(!swExpr.isOK());
-    ASSERT(swExpr.getStatus().code() == 6364302);
+DEATH_TEST(GenerateFLE2MatchExpressionDeathTest, EncryptedFieldsConflict_Nested3Levels, "6364302") {
+    EncryptedField abc(UUID::gen(), "a.b.c");
+    abc.setBsonType("int"_sd);
 
-    swExpr = generateMatchExpressionFromEncryptedFields(new ExpressionContextForTest(), {abc, abc});
-    ASSERT(!swExpr.isOK());
-    ASSERT(swExpr.getStatus().code() == 6364302);
+    [[maybe_unused]] auto expr =
+        generateMatchExpressionFromEncryptedFields(new ExpressionContextForTest(), {abc, abc});
 }
 
 class Fle2MatchTest : public GenerateFLE2MatchExpression {
@@ -262,25 +266,25 @@ public:
 
 TEST_F(Fle2MatchTest, MatchesIfNoEncryptedFieldsInObject) {
     // no encrypted paths
-    ASSERT(expr->matchesBSON(BSONObj()));
-    ASSERT(expr->matchesBSON(fromjson(R"({name: "sue"})")));
+    ASSERT(exec::matcher::matchesBSON(expr.get(), BSONObj()));
+    ASSERT(exec::matcher::matchesBSON(expr.get(), fromjson(R"({name: "sue"})")));
 
     // has prefix of encrypted paths, but no leaf
-    ASSERT(expr->matchesBSON(fromjson(R"({a: {}})")));
-    ASSERT(expr->matchesBSON(fromjson(R"({a: {b: {}, x: { count: 23 }}})")));
+    ASSERT(exec::matcher::matchesBSON(expr.get(), fromjson(R"({a: {}})")));
+    ASSERT(exec::matcher::matchesBSON(expr.get(), fromjson(R"({a: {b: {}, x: { count: 23 }}})")));
 
     // non-object/non-array along the encrypted path
-    ASSERT(expr->matchesBSON(fromjson(R"({a: 1}})")));
-    ASSERT(expr->matchesBSON(fromjson(R"({a: { b: 2, x: "foo"}})")));
+    ASSERT(exec::matcher::matchesBSON(expr.get(), fromjson(R"({a: 1})")));
+    ASSERT(exec::matcher::matchesBSON(expr.get(), fromjson(R"({a: { b: 2, x: "foo"}})")));
 }
 
 TEST_F(Fle2MatchTest, MatchesIfSomeEncryptedFieldsInObject) {
     auto obj = BSON("c" << makeFleBinData(kValueC) << "other"
                         << "foo");
-    ASSERT(expr->matchesBSON(obj));
+    ASSERT(exec::matcher::matchesBSON(expr.get(), obj));
 
     obj = BSON("a" << BSON("b" << BSON("c" << makeFleBinData(kValueAbc))));
-    ASSERT(expr->matchesBSON(obj));
+    ASSERT(exec::matcher::matchesBSON(expr.get(), obj));
 }
 
 TEST_F(Fle2MatchTest, MatchesIfAllEncryptedFieldsInObject) {
@@ -288,50 +292,50 @@ TEST_F(Fle2MatchTest, MatchesIfAllEncryptedFieldsInObject) {
                           << BSON("b" << BSON("c" << makeFleBinData(kValueAbc) << "d"
                                                   << makeFleBinData(kValueAbd))
                                       << "x" << BSON("y" << makeFleBinData(kValueAxy))));
-    ASSERT(expr->matchesBSON(allIn));
+    ASSERT(exec::matcher::matchesBSON(expr.get(), allIn));
 }
 
 TEST_F(Fle2MatchTest, DoesNotMatchIfEncryptedFieldIsNotBinDataEncrypt) {
-    ASSERT_FALSE(expr->matchesBSON(fromjson(R"({a: {b: {c: "foo"}}})")));
-    ASSERT_FALSE(expr->matchesBSON(fromjson(R"({c: []})")));
-    ASSERT_FALSE(expr->matchesBSON(fromjson(R"({a: {x: {y: [1, 2, 3]}}})")));
-    ASSERT_FALSE(expr->matchesBSON(fromjson(R"({a: {b: {d: 42}}})")));
+    ASSERT_FALSE(exec::matcher::matchesBSON(expr.get(), fromjson(R"({a: {b: {c: "foo"}}})")));
+    ASSERT_FALSE(exec::matcher::matchesBSON(expr.get(), fromjson(R"({c: []})")));
+    ASSERT_FALSE(exec::matcher::matchesBSON(expr.get(), fromjson(R"({a: {x: {y: [1, 2, 3]}}})")));
+    ASSERT_FALSE(exec::matcher::matchesBSON(expr.get(), fromjson(R"({a: {b: {d: 42}}})")));
     auto obj = BSON("c" << BSONBinData(nullptr, 0, BinDataType::BinDataGeneral));
-    ASSERT_FALSE(expr->matchesBSON(obj));
+    ASSERT_FALSE(exec::matcher::matchesBSON(expr.get(), obj));
 }
 
 TEST_F(Fle2MatchTest, DoesNotMatchIfEncryptedFieldIsNotFLE2) {
     auto obj = BSON("c" << makeFleBinData(kValueFLE1));
-    ASSERT_FALSE(expr->matchesBSON(obj));
+    ASSERT_FALSE(exec::matcher::matchesBSON(expr.get(), obj));
 
     obj = BSON("a" << BSON("b" << BSON("c" << makeFleBinData(kValueFLE1))));
-    ASSERT_FALSE(expr->matchesBSON(obj));
+    ASSERT_FALSE(exec::matcher::matchesBSON(expr.get(), obj));
 }
 
 TEST_F(Fle2MatchTest, DoesNotMatchIfTypeMismatch) {
     auto obj = BSON("c" << makeFleBinData(kValueAbc));
-    ASSERT_FALSE(expr->matchesBSON(obj));
+    ASSERT_FALSE(exec::matcher::matchesBSON(expr.get(), obj));
 
     obj = BSON("a" << BSON_ARRAY(BSON("b" << BSON("c" << makeFleBinData(kValueAxy)))));
-    ASSERT_FALSE(expr->matchesBSON(obj));
+    ASSERT_FALSE(exec::matcher::matchesBSON(expr.get(), obj));
 }
 
 TEST_F(Fle2MatchTest, DoesNotMatchIfHasArrayInEncryptedFieldPath) {
-    ASSERT_FALSE(expr->matchesBSON(fromjson(R"({a: []})")));
-    ASSERT_FALSE(expr->matchesBSON(fromjson(R"({a: {b: [1, 2, 3]}})")));
+    ASSERT_FALSE(exec::matcher::matchesBSON(expr.get(), fromjson(R"({a: []})")));
+    ASSERT_FALSE(exec::matcher::matchesBSON(expr.get(), fromjson(R"({a: {b: [1, 2, 3]}})")));
 
     auto obj = BSON("a" << BSON_ARRAY(BSON("b" << BSON("c" << makeFleBinData(kValueAbc)))));
-    ASSERT_FALSE(expr->matchesBSON(obj));
+    ASSERT_FALSE(exec::matcher::matchesBSON(expr.get(), obj));
 }
 
 TEST_F(Fle2MatchTest, MatchOptionalType) {
     // Match against indexed
     auto obj = BSON("a" << BSON("x" << BSON("t" << makeFleBinData(kValueAxy))));
-    ASSERT_TRUE(expr->matchesBSON(obj));
+    ASSERT_TRUE(exec::matcher::matchesBSON(expr.get(), obj));
 
     // Match against unindexed
     auto obj2 = BSON("a" << BSON("x" << BSON("t" << makeFleBinData(kValueAxt))));
-    ASSERT_TRUE(expr->matchesBSON(obj2));
+    ASSERT_TRUE(exec::matcher::matchesBSON(expr.get(), obj2));
 }
 
 }  // namespace

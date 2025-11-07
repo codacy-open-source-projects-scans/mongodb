@@ -29,19 +29,6 @@
 
 #pragma once
 
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <functional>
-#include <memory>
-#include <string>
-#include <type_traits>
-#include <utility>
-#include <vector>
-
 #include "mongo/base/clonable_ptr.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -52,14 +39,27 @@
 #include "mongo/bson/util/builder_fwd.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/matcher/expression_visitor.h"
-#include "mongo/db/matcher/match_details.h"
 #include "mongo/db/matcher/matchable.h"
-#include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/compiler/dependency_analysis/dependencies.h"
 #include "mongo/db/query/query_shape/serialization_options.h"
 #include "mongo/platform/compiler.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/fail_point.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <string>
+#include <type_traits>
+#include <utility>
+#include <vector>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -69,18 +69,14 @@ namespace mongo {
  */
 extern FailPoint disableMatchExpressionOptimization;
 
-class CollatorInterface;
-
-class MatchExpression;
-class TreeMatchExpression;
-
-typedef StatusWith<std::unique_ptr<MatchExpression>> StatusWithMatchExpression;
-
 class MatchExpression {
     MatchExpression(const MatchExpression&) = delete;
     MatchExpression& operator=(const MatchExpression&) = delete;
 
 public:
+    /** In-name-only dependency. Defined in expression_hasher.h. */
+    struct HashParam;
+
     enum MatchType {
         // tree types
         AND,
@@ -279,7 +275,9 @@ public:
          */
         ErrorAnnotation(Mode mode)
             : tag(""), annotation(BSONObj()), mode(mode), schemaAnnotations(SchemaAnnotations()) {
-            invariant(mode != Mode::kGenerateError);
+            tassert(11052400,
+                    "Expected the mode to not be kGenerateError",
+                    mode != Mode::kGenerateError);
         }
 
         /**
@@ -304,57 +302,6 @@ public:
         const Mode mode;
         const SchemaAnnotations schemaAnnotations;
     };
-
-    /**
-     * Make simplifying changes to the structure of a MatchExpression tree without altering its
-     * semantics. This function may return:
-     *   - a pointer to the original, unmodified MatchExpression,
-     *   - a pointer to the original MatchExpression that has been mutated, or
-     *   - a pointer to a new MatchExpression.
-     *
-     * The value of 'expression' must not be nullptr.
-     * 'enableSimplification' parameter controls Boolean Expression Simplifier.
-     */
-    static std::unique_ptr<MatchExpression> optimize(std::unique_ptr<MatchExpression> expression,
-                                                     bool enableSimplification = true);
-
-    /**
-     * Traverses expression tree post-order. Sorts children at each non-leaf node by (MatchType,
-     * path(), children, number of children).
-     */
-    static void sortTree(MatchExpression* tree);
-
-    /**
-     * Convenience method which normalizes a MatchExpression tree by optimizing and then sorting it.
-     */
-    static std::unique_ptr<MatchExpression> normalize(std::unique_ptr<MatchExpression> tree,
-                                                      bool enableSimplification = true);
-
-    /**
-     * Assigns an optional input parameter ID to each node which is eligible for
-     * auto-parameterization.
-     * - tree - The MatchExpression to be parameterized.
-     * - maxParamCount - Optional maximum number of parameters that can be created. If the
-     *   number of parameters would exceed this value, no parameterization will be performed.
-     * - startingParamId - Optional first parameter ID to use. This enables parameterizing a forest
-     *   of match expressions, where each tree continues IDs where the prior one left off.
-     * - parameterized - Optional output argument. If non-null, the method sets this output to
-     *   indicate whether parameterization was actually done.
-     *
-     * Returns a vector-form map to a parameterized MatchExpression from assigned InputParamId. (The
-     * vector index serves as the map key.)
-     */
-    static std::vector<const MatchExpression*> parameterize(
-        MatchExpression* tree,
-        boost::optional<size_t> maxParamCount = boost::none,
-        InputParamId startingParamId = 0,
-        bool* parameterized = nullptr);
-
-    /**
-     * Sets max param count in MatchExpression::parameterize to 0, clearing MatchExpression
-     * auto-parameterization before CanonicalQuery to ABT translation.
-     */
-    static std::vector<const MatchExpression*> unparameterize(MatchExpression* tree);
 
     MatchExpression(MatchType type, clonable_ptr<ErrorAnnotation> annotation = nullptr);
     virtual ~MatchExpression() {}
@@ -437,40 +384,17 @@ public:
     virtual bool equivalent(const MatchExpression* other) const = 0;
 
     //
-    // Determine if a document satisfies the tree-predicate.
-    //
-
-    virtual bool matches(const MatchableDocument* doc, MatchDetails* details = nullptr) const = 0;
-
-    virtual bool matchesBSON(const BSONObj& doc, MatchDetails* details = nullptr) const;
-
-    /**
-     * Determines if 'elem' would satisfy the predicate if wrapped with the top-level field name of
-     * the predicate. Does not check that the predicate has a single top-level field name. For
-     * example, given the object obj={a: [5]}, the predicate {i: {$gt: 0}} would match the element
-     * obj["a"]["0"] because it performs the match as if the element at "a.0" were the BSONObj {i:
-     * 5}.
-     */
-    virtual bool matchesBSONElement(BSONElement elem, MatchDetails* details = nullptr) const;
-
-    /**
-     * Determines if the element satisfies the tree-predicate.
-     * Not valid for all expressions (e.g. $where); in those cases, returns false.
-     */
-    virtual bool matchesSingleElement(const BSONElement& e,
-                                      MatchDetails* details = nullptr) const = 0;
-
-    //
     // Tagging mechanism: Hang data off of the tree for retrieval later.
     //
 
     class TagData {
     public:
         enum class Type { IndexTag, RelevantTag, OrPushdownTag };
-        virtual ~TagData() {}
+        virtual ~TagData() = default;
         virtual void debugString(StringBuilder* builder) const = 0;
         virtual TagData* clone() const = 0;
         virtual Type getType() const = 0;
+        virtual void hash(absl::HashState& state, const HashParam& param) const = 0;
     };
 
     /**
@@ -506,7 +430,7 @@ public:
      * this no longer holds.
      *
      * If 'options.literalPolicy' is set to 'kToDebugTypeString', the result is no longer expected
-     * to re-parse, since we will put strings in places where strings may not be accpeted
+     * to re-parse, since we will put strings in places where strings may not be accepted
      * syntactically (e.g. a number is always expected, as in with the $mod expression).
      *
      * includePath:
@@ -516,7 +440,7 @@ public:
      * It is expected that most callers want to set 'includePath' to true to get a correct
      * serialization. Internally, we may set this to false if we have a situation where an outer
      * expression serializes a path and we don't want to repeat the path in the inner expression.
-
+     *
      * For example in {a: {$elemMatch: {$eq: 2}}} the "a" is serialized by the $elemMatch, and
      * should not be serialized by the EQ child.
      * The $elemMatch will serialize {a: {$elemMatch: <recurse>}} and the EQ will serialize just
@@ -599,19 +523,10 @@ public:
 
 protected:
     /**
-     * An ExpressionOptimizerFunc implements tree simplifications for a MatchExpression tree with a
-     * specific type of MatchExpression at the root. Except for requiring a specific MatchExpression
-     * subclass, an ExpressionOptimizerFunc has the same requirements and functionality as described
-     * in the specification of MatchExpression::getOptimizer(std::unique_ptr<MatchExpression>).
-     */
-    using ExpressionOptimizerFunc =
-        std::function<std::unique_ptr<MatchExpression>(std::unique_ptr<MatchExpression>)>;
-
-    /**
      * Subclasses that are collation-aware must implement this method in order to capture changes
      * to the collator that occur after initialization time.
      */
-    virtual void _doSetCollator(const CollatorInterface* collator){};
+    virtual void _doSetCollator(const CollatorInterface* collator) {};
 
     void _debugAddSpace(StringBuilder& debug, int indentationLevel) const;
 
@@ -628,23 +543,6 @@ protected:
     clonable_ptr<ErrorAnnotation> _errorAnnotation;
 
 private:
-    /**
-     * Subclasses should implement this function to provide an ExpressionOptimizerFunc specific to
-     * the subclass. This function is only called by
-     * MatchExpression::optimize(std::unique_ptr<MatchExpression>), which is responsible for calling
-     * MatchExpression::getOptimizer() on its input MatchExpression and then passing the same
-     * MatchExpression to the resulting ExpressionOptimizerFunc. There should be no other callers
-     * to this function.
-     *
-     * Any MatchExpression subclass that stores child MatchExpression objects is responsible for
-     * returning an ExpressionOptimizerFunc that recursively calls
-     * MatchExpression::optimize(std::unique_ptr<MatchExpression>) on those children.
-     *
-     * See the descriptions of MatchExpression::optimize(std::unique_ptr<MatchExpression>) and
-     * ExpressionOptimizerFunc for additional explanation of their interfaces and functionality.
-     */
-    virtual ExpressionOptimizerFunc getOptimizer() const = 0;
-
     MatchType _matchType;
     std::unique_ptr<TagData> _tagData;
 };
@@ -664,5 +562,7 @@ inline MatchExpression::Iterator end(MatchExpression& expr) {
 inline MatchExpression::ConstIterator end(const MatchExpression& expr) {
     return {&expr, expr.numChildren()};
 }
+
+using StatusWithMatchExpression = StatusWith<std::unique_ptr<MatchExpression>>;
 
 }  // namespace mongo

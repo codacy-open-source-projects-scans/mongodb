@@ -27,20 +27,18 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <exception>
-#include <fmt/format.h>
-#include <utility>
-
-#include <boost/optional/optional.hpp>
-
 #include "mongo/db/storage/recovery_unit.h"
+
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/logv2/redaction.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/scopeguard.h"
+
+#include <exception>
+#include <utility>
+
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kStorage
 
@@ -140,65 +138,40 @@ void RecoveryUnit::setOperationContext(OperationContext* opCtx) {
 }
 
 void RecoveryUnit::_executeCommitHandlers(boost::optional<Timestamp> commitTimestamp) {
-    invariant(_opCtx);
+    invariant(_opCtx ||
+              (_changes.empty() && _changesForCatalogVisibility.empty() &&
+               _changesForTwoPhaseDrop.empty()));
     bool debugLoggingThreeEnabled =
         logv2::shouldLog(MONGO_LOGV2_DEFAULT_COMPONENT, logv2::LogSeverity::Debug(3));
     for (auto& change : _changesForTwoPhaseDrop) {
-        try {
-            // Log at higher level because commits occur far more frequently than rollbacks.
-            if (debugLoggingThreeEnabled) {
-                LOGV2_DEBUG(7789501,
-                            3,
-                            "Custom commit",
-                            "changeName"_attr = redact(demangleName(typeid(*change))));
-            }
-            change->commit(_opCtx, commitTimestamp);
-        } catch (...) {
-            LOGV2_FATAL_CONTINUE(
-                8861102,
-                "Custom commit failed. Refer to log message with ID 6384300 for exception details.",
-                "commitTimestamp"_attr = commitTimestamp,
-                "changeName"_attr = redact(demangleName(typeid(*change))));
-            std::terminate();
+        // Log at higher level because commits occur far more frequently than rollbacks.
+        if (debugLoggingThreeEnabled) {
+            LOGV2_DEBUG(7789501,
+                        3,
+                        "Custom commit",
+                        "changeName"_attr = redact(demangleName(typeid(*change))));
         }
+        change->commit(_opCtx, commitTimestamp);
     }
     for (auto& change : _changesForCatalogVisibility) {
-        try {
-            // Log at higher level because commits occur far more frequently than rollbacks.
-            if (debugLoggingThreeEnabled) {
-                LOGV2_DEBUG(5255701,
-                            3,
-                            "Custom commit.",
-                            "changeName"_attr = redact(demangleName(typeid(*change))));
-            }
-            change->commit(_opCtx, commitTimestamp);
-        } catch (...) {
-            LOGV2_FATAL_CONTINUE(
-                8861101,
-                "Custom commit failed. Refer to log message with ID 6384300 for exception details.",
-                "commitTimestamp"_attr = commitTimestamp,
-                "changeName"_attr = redact(demangleName(typeid(*change))));
-            std::terminate();
+        // Log at higher level because commits occur far more frequently than rollbacks.
+        if (debugLoggingThreeEnabled) {
+            LOGV2_DEBUG(5255701,
+                        3,
+                        "Custom commit.",
+                        "changeName"_attr = redact(demangleName(typeid(*change))));
         }
+        change->commit(_opCtx, commitTimestamp);
     }
     for (auto& change : _changes) {
-        try {
-            // Log at higher level because commits occur far more frequently than rollbacks.
-            if (debugLoggingThreeEnabled) {
-                LOGV2_DEBUG(22244,
-                            3,
-                            "Custom commit.",
-                            "changeName"_attr = redact(demangleName(typeid(*change))));
-            }
-            change->commit(_opCtx, commitTimestamp);
-        } catch (...) {
-            LOGV2_FATAL_CONTINUE(
-                8861100,
-                "Custom commit failed. Refer to log message with ID 6384300 for exception details.",
-                "commitTimestamp"_attr = commitTimestamp,
-                "changeName"_attr = redact(demangleName(typeid(*change))));
-            std::terminate();
+        // Log at higher level because commits occur far more frequently than rollbacks.
+        if (debugLoggingThreeEnabled) {
+            LOGV2_DEBUG(22244,
+                        3,
+                        "Custom commit.",
+                        "changeName"_attr = redact(demangleName(typeid(*change))));
         }
+        change->commit(_opCtx, commitTimestamp);
     }
     _changes.clear();
     _changesForCatalogVisibility.clear();
@@ -220,21 +193,13 @@ void RecoveryUnit::_executeRollbackHandlers() {
     for (Changes::const_reverse_iterator it = _changes.rbegin(), end = _changes.rend(); it != end;
          ++it) {
         Change* change = it->get();
-        try {
-            if (debugLoggingTwoEnabled) {
-                LOGV2_DEBUG(22245,
-                            2,
-                            "Custom rollback",
-                            "changeName"_attr = redact(demangleName(typeid(*change))));
-            }
-            change->rollback(_opCtx);
-        } catch (...) {
-            LOGV2_FATAL_CONTINUE(9010900,
-                                 "Custom rollback failed. Refer to log message with ID 6384300 for "
-                                 "exception details.",
-                                 "changeName"_attr = redact(demangleName(typeid(*change))));
-            std::terminate();
+        if (debugLoggingTwoEnabled) {
+            LOGV2_DEBUG(22245,
+                        2,
+                        "Custom rollback",
+                        "changeName"_attr = redact(demangleName(typeid(*change))));
         }
+        change->rollback(_opCtx);
     }
 
     for (Changes::const_reverse_iterator it = _changesForTwoPhaseDrop.rbegin(),
@@ -242,21 +207,13 @@ void RecoveryUnit::_executeRollbackHandlers() {
          it != end;
          ++it) {
         Change* change = it->get();
-        try {
-            if (debugLoggingTwoEnabled) {
-                LOGV2_DEBUG(7789502,
-                            2,
-                            "Custom rollback",
-                            "changeName"_attr = redact(demangleName(typeid(*change))));
-            }
-            change->rollback(_opCtx);
-        } catch (...) {
-            LOGV2_FATAL_CONTINUE(9010902,
-                                 "Custom rollback failed. Refer to log message with ID 6384300 for "
-                                 "exception details.",
-                                 "changeName"_attr = redact(demangleName(typeid(*change))));
-            std::terminate();
+        if (debugLoggingTwoEnabled) {
+            LOGV2_DEBUG(7789502,
+                        2,
+                        "Custom rollback",
+                        "changeName"_attr = redact(demangleName(typeid(*change))));
         }
+        change->rollback(_opCtx);
     }
 
     for (Changes::const_reverse_iterator it = _changesForCatalogVisibility.rbegin(),
@@ -264,21 +221,13 @@ void RecoveryUnit::_executeRollbackHandlers() {
          it != end;
          ++it) {
         Change* change = it->get();
-        try {
-            if (debugLoggingTwoEnabled) {
-                LOGV2_DEBUG(5255702,
-                            2,
-                            "Custom rollback",
-                            "changeName"_attr = redact(demangleName(typeid(*change))));
-            }
-            change->rollback(_opCtx);
-        } catch (...) {
-            LOGV2_FATAL_CONTINUE(9010901,
-                                 "Custom rollback failed. Refer to log message with ID 6384300 for "
-                                 "exception details.",
-                                 "changeName"_attr = redact(demangleName(typeid(*change))));
-            std::terminate();
+        if (debugLoggingTwoEnabled) {
+            LOGV2_DEBUG(5255702,
+                        2,
+                        "Custom rollback",
+                        "changeName"_attr = redact(demangleName(typeid(*change))));
         }
+        change->rollback(_opCtx);
     }
 
     _changesForTwoPhaseDrop.clear();
@@ -293,6 +242,16 @@ void RecoveryUnit::_setState(State newState) {
 void RecoveryUnit::validateInUnitOfWork() const {
     invariant(_inUnitOfWork() || _readOnly,
               fmt::format("state: {}, readOnly: {}", toString(_getState()), _readOnly));
+}
+
+void RecoveryUnit::setIsolation(Isolation isolation) {
+    if (isolation == _isolation) {
+        return;
+    }
+
+    tassert(10775301, "Cannot change isolation level on an active recovery unit", !isActive());
+    _setIsolation(isolation);
+    _isolation = isolation;
 }
 
 StorageWriteTransaction::StorageWriteTransaction(RecoveryUnit& ru, bool readOnly) : _ru(ru) {

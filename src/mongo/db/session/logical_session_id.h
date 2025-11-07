@@ -29,18 +29,6 @@
 
 #pragma once
 
-#include <boost/container_hash/extensions.hpp>
-#include <boost/cstdint.hpp>
-#include <boost/functional/hash.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional.hpp>
-#include <boost/optional/optional.hpp>
-#include <cstddef>
-#include <cstdint>
-#include <ostream>
-#include <string>
-
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
@@ -52,9 +40,22 @@
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/duration.h"
+#include "mongo/util/modules.h"
 #include "mongo/util/uuid.h"
 
-namespace mongo {
+#include <cstddef>
+#include <cstdint>
+#include <ostream>
+#include <string>
+
+#include <boost/cstdint.hpp>
+#include <boost/functional/hash.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
+
+namespace MONGO_MOD_PUB mongo {
 
 using TxnNumber = std::int64_t;
 using StmtId = std::int32_t;
@@ -227,4 +228,4 @@ public:
         : OperationSessionInfoFromClientBase(std::move(other)) {}
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUB mongo

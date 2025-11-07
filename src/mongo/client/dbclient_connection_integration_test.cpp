@@ -27,8 +27,6 @@
  *    it in the license file.
  */
 
-#include <memory>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
@@ -44,12 +42,13 @@
 #include "mongo/db/database_name.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/integration_test.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
+
+#include <memory>
 
 namespace mongo {
 namespace {
@@ -102,7 +101,7 @@ TEST_F(DBClientConnectionFixture, shutdownWorksIfCalledFirst) {
 
     BSONObj reply;
     ASSERT_THROWS(conn->runCommand(DatabaseName::kAdmin, sleepCmd, reply),
-                  ExceptionForCat<ErrorCategory::NetworkError>);  // Currently SocketException.
+                  ExceptionFor<ErrorCategory::NetworkError>);  // Currently SocketException.
 }
 
 TEST_F(DBClientConnectionFixture, shutdownWorksIfRunCommandInProgress) {
@@ -117,7 +116,7 @@ TEST_F(DBClientConnectionFixture, shutdownWorksIfRunCommandInProgress) {
 
     BSONObj reply;
     ASSERT_THROWS(conn->runCommand(DatabaseName::kAdmin, sleepCmd, reply),
-                  ExceptionForCat<ErrorCategory::NetworkError>);  // Currently HostUnreachable.
+                  ExceptionFor<ErrorCategory::NetworkError>);  // Currently HostUnreachable.
 }
 
 }  // namespace

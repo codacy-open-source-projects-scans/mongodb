@@ -1,20 +1,23 @@
 // Uassert when $elemMatch is attempted within $in SERVER-3545
+// @tags: [
+//   requires_getmore
+// ]
 
 let t = db.jstests_ina;
 t.drop();
 t.save({});
 
-assert.throws(function() {
+assert.throws(function () {
     t.find({a: {$in: [{$elemMatch: {b: 1}}]}}).itcount();
 });
-assert.throws(function() {
+assert.throws(function () {
     t.find({a: {$not: {$in: [{$elemMatch: {b: 1}}]}}}).itcount();
 });
 
-assert.throws(function() {
+assert.throws(function () {
     t.find({a: {$nin: [{$elemMatch: {b: 1}}]}}).itcount();
 });
-assert.throws(function() {
+assert.throws(function () {
     t.find({a: {$not: {$nin: [{$elemMatch: {b: 1}}]}}}).itcount();
 });
 

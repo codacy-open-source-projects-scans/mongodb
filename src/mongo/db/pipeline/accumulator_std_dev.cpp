@@ -27,11 +27,6 @@
  *    it in the license file.
  */
 
-#include <cmath>
-#include <vector>
-
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/db/exec/document_value/document.h"
@@ -44,10 +39,11 @@
 #include "mongo/db/pipeline/window_function/window_function_expression.h"
 #include "mongo/db/pipeline/window_function/window_function_stddev.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/intrusive_counter.h"
+
+#include <cmath>
+
 
 namespace mongo {
-using boost::intrusive_ptr;
 
 template <>
 Value ExpressionFromAccumulator<AccumulatorStdDevPop>::evaluate(const Document& root,
@@ -88,7 +84,7 @@ void AccumulatorStdDev::processInternal(const Value& input, bool merging) {
         }
     } else {
         // This is what getValue(true) produced below.
-        MONGO_verify(input.getType() == Object);
+        assertMergingInputType(input, BSONType::object);
         const double m2 = input["m2"].getDouble();
         const double mean = input["mean"].getDouble();
         const long long count = input["count"].getLong();
@@ -104,7 +100,7 @@ void AccumulatorStdDev::processInternal(const Value& input, bool merging) {
         if (delta != 0.0) {
             // Avoid potential numerical stability issues.
             _mean = ((_count * _mean) + (count * mean)) / newCount;
-            _m2 += delta * delta * (double(_count) * count / newCount);
+            _m2 += (delta * (double(_count) * count / newCount)) * delta;
         }
         _m2 += m2;
 
@@ -122,14 +118,6 @@ Value AccumulatorStdDev::getValue(bool toBeMerged) {
     } else {
         return Value(DOC("m2" << _m2 << "mean" << _mean << "count" << _count));
     }
-}
-
-intrusive_ptr<AccumulatorState> AccumulatorStdDevSamp::create(ExpressionContext* const expCtx) {
-    return new AccumulatorStdDevSamp(expCtx);
-}
-
-intrusive_ptr<AccumulatorState> AccumulatorStdDevPop::create(ExpressionContext* const expCtx) {
-    return new AccumulatorStdDevPop(expCtx);
 }
 
 AccumulatorStdDev::AccumulatorStdDev(ExpressionContext* const expCtx, bool isSamp)

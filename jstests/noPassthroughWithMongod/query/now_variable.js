@@ -2,6 +2,7 @@
  * Tests for the $$NOW and $$CLUSTER_TIME system variable.
  */
 import "jstests/libs/query/sbe_assert_error_override.js";
+
 import {getWinningPlanFromExplain, isIxscan} from "jstests/libs/query/analyze_plan.js";
 import {checkSbeFullFeatureFlagEnabled} from "jstests/libs/query/sbe_util.js";
 
@@ -29,16 +30,16 @@ for (let i = 0; i < numdocs; ++i) {
 }
 assert.commandWorked(bulk.execute());
 
-assert.commandWorked(
-    db.createView("viewWithNow", coll.getName(), [{$addFields: {timeField: "$$NOW"}}]));
+assert.commandWorked(db.createView("viewWithNow", coll.getName(), [{$addFields: {timeField: "$$NOW"}}]));
 const viewWithNow = db["viewWithNow"];
 
-assert.commandWorked(db.createView(
-    "viewWithClusterTime", coll.getName(), [{$addFields: {timeField: "$$CLUSTER_TIME"}}]));
+assert.commandWorked(
+    db.createView("viewWithClusterTime", coll.getName(), [{$addFields: {timeField: "$$CLUSTER_TIME"}}]),
+);
 const viewWithClusterTime = db["viewWithClusterTime"];
 
 function runTests(query) {
-    const runAndCompare = function() {
+    const runAndCompare = function () {
         const results = query().toArray();
         assert.eq(results.length, numdocs);
 
@@ -74,7 +75,8 @@ function runTests(query) {
 function runTestsExpectFailure(query) {
     const results = query();
     // Expect to see "Builtin variable '$$CLUSTER_TIME' is not available" error.
-    assert.commandFailedWithCode(results, 51144);
+    // Error code changed to 10071200 in fcv_82.
+    assert.commandFailedWithCode(results, [10071200, 51144]);
 }
 
 function baseCollectionNowFind() {
@@ -84,7 +86,7 @@ function baseCollectionNowFind() {
 function baseCollectionClusterTimeFind() {
     return db.runCommand({
         find: otherColl.getName(),
-        filter: {$expr: {$lt: ["$clusterTimeField", "$$CLUSTER_TIME"]}}
+        filter: {$expr: {$lt: ["$clusterTimeField", "$$CLUSTER_TIME"]}},
     });
 }
 
@@ -96,7 +98,7 @@ function baseCollectionClusterTimeAgg() {
     return db.runCommand({
         aggregate: coll.getName(),
         pipeline: [{$addFields: {timeField: "$$CLUSTER_TIME"}}],
-        cursor: {}
+        cursor: {},
     });
 }
 
@@ -127,7 +129,7 @@ function aggWithNowNotPushedDown() {
 function withExprClusterTime() {
     return db.runCommand({
         find: viewWithClusterTime.getName(),
-        filter: {$expr: {$eq: ["$timeField", "$$CLUSTER_TIME"]}}
+        filter: {$expr: {$eq: ["$timeField", "$$CLUSTER_TIME"]}},
     });
 }
 
@@ -144,8 +146,18 @@ runTests(aggWithNow);
 runTests(aggWithNowNotPushedDown);
 
 // Test that $$NOW can be used in explain for both find and aggregate.
-assert.commandWorked(coll.explain().find({$expr: {$lte: ["$timeField", "$$NOW"]}}).finish());
-assert.commandWorked(viewWithNow.explain().find({$expr: {$eq: ["$timeField", "$$NOW"]}}).finish());
+assert.commandWorked(
+    coll
+        .explain()
+        .find({$expr: {$lte: ["$timeField", "$$NOW"]}})
+        .finish(),
+);
+assert.commandWorked(
+    viewWithNow
+        .explain()
+        .find({$expr: {$eq: ["$timeField", "$$NOW"]}})
+        .finish(),
+);
 assert.commandWorked(coll.explain().aggregate([{$addFields: {timeField: "$$NOW"}}]));
 
 // $$CLUSTER_TIME is not available on a standalone mongod.
@@ -206,11 +218,10 @@ if (checkSbeFullFeatureFlagEnabled(db)) {
     // TODO SERVER-91535: Enable this test with SBE plan cache.
     if (!checkSbeFullFeatureFlagEnabled(db)) {
         assert.commandWorked(futureColl.createIndex({timeField: 1}));
-        const explainResults =
-            futureColl.find({$expr: {$lt: ["$timeField", {$subtract: ["$$NOW", 100]}]}})
-                .explain("queryPlanner");
+        const explainResults = futureColl
+            .find({$expr: {$lt: ["$timeField", {$subtract: ["$$NOW", 100]}]}})
+            .explain("queryPlanner");
         const winningPlan = getWinningPlanFromExplain(explainResults);
-        assert(isIxscan(db, winningPlan),
-               `Expected winningPlan to be index scan plan: ${tojson(winningPlan)}`);
+        assert(isIxscan(db, winningPlan), `Expected winningPlan to be index scan plan: ${tojson(winningPlan)}`);
     }
 }

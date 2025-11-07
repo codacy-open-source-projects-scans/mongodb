@@ -1,4 +1,4 @@
-load("//bazel:mongo_src_rules.bzl", "mongo_cc_binary", "mongo_cc_grpc_library", "mongo_cc_library", "mongo_cc_proto_library", "mongo_proto_library")
+load("//bazel:mongo_src_rules.bzl", "mongo_cc_binary", "mongo_cc_grpc_library", "mongo_cc_library", "mongo_cc_proto_library", "mongo_cc_unit_test", "mongo_proto_library")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -908,6 +908,7 @@ mongo_cc_library(
         "dist/src/core/lib/gprpp/uuid_v4.h",
         "dist/src/core/lib/gprpp/validation_errors.h",
         "dist/src/core/lib/gprpp/work_serializer.h",
+        "dist/src/core/lib/gprpp/directory_reader.h",
 
         # gpr
         "dist/src/core/lib/gpr/alloc.h",
@@ -950,7 +951,6 @@ mongo_cc_library(
     includes = ["dist/include"],
     target_compatible_with = GRPC_TARGET_COMPATIBLE_WITH,
     deps = [
-        "//src/third_party/abseil-cpp:absl_bad_optional_access",
         "//src/third_party/abseil-cpp:absl_base",
         "//src/third_party/abseil-cpp:absl_civil_time",
         "//src/third_party/abseil-cpp:absl_cord",
@@ -961,15 +961,15 @@ mongo_cc_library(
         "//src/third_party/abseil-cpp:absl_debugging_internal",
         "//src/third_party/abseil-cpp:absl_demangle_internal",
         "//src/third_party/abseil-cpp:absl_exponential_biased",
-        "//src/third_party/abseil-cpp:absl_flags",
+        "//src/third_party/abseil-cpp:absl_flags_internal",
         "//src/third_party/abseil-cpp:absl_flags_marshalling",
+        "//src/third_party/abseil-cpp:absl_flags_reflection",
         "//src/third_party/abseil-cpp:absl_graphcycles_internal",
         "//src/third_party/abseil-cpp:absl_int128",
         "//src/third_party/abseil-cpp:absl_log_severity",
         "//src/third_party/abseil-cpp:absl_malloc_internal",
         "//src/third_party/abseil-cpp:absl_random_distributions",
         "//src/third_party/abseil-cpp:absl_random_internal_platform",
-        "//src/third_party/abseil-cpp:absl_random_internal_pool_urbg",
         "//src/third_party/abseil-cpp:absl_random_internal_randen",
         "//src/third_party/abseil-cpp:absl_random_internal_randen_hwaes",
         "//src/third_party/abseil-cpp:absl_random_internal_randen_hwaes_impl",
@@ -1522,11 +1522,13 @@ mongo_cc_library(
         "dist/src/core/lib/experiments/experiments.cc",
         "dist/src/core/lib/gprpp/load_file.cc",
         "dist/src/core/lib/gprpp/per_cpu.cc",
+        "dist/src/core/lib/gprpp/posix/directory_reader.cc",
         "dist/src/core/lib/gprpp/ref_counted_string.cc",
         "dist/src/core/lib/gprpp/status_helper.cc",
         "dist/src/core/lib/gprpp/time.cc",
         "dist/src/core/lib/gprpp/time_averaged_stats.cc",
         "dist/src/core/lib/gprpp/validation_errors.cc",
+        "dist/src/core/lib/gprpp/windows/directory_reader.cc",
         "dist/src/core/lib/gprpp/work_serializer.cc",
         "dist/src/core/lib/handshaker/proxy_mapper_registry.cc",
         "dist/src/core/lib/http/format_request.cc",
@@ -1676,6 +1678,7 @@ mongo_cc_library(
         "dist/src/core/lib/security/credentials/tls/grpc_tls_certificate_provider.cc",
         "dist/src/core/lib/security/credentials/tls/grpc_tls_certificate_verifier.cc",
         "dist/src/core/lib/security/credentials/tls/grpc_tls_credentials_options.cc",
+        "dist/src/core/lib/security/credentials/tls/grpc_tls_crl_provider.cc",
         "dist/src/core/lib/security/credentials/tls/tls_credentials.cc",
         "dist/src/core/lib/security/credentials/tls/tls_utils.cc",
         "dist/src/core/lib/security/credentials/xds/xds_credentials.cc",
@@ -1792,6 +1795,7 @@ mongo_cc_library(
         "dist/include/grpc/grpc.h",
         "dist/include/grpc/grpc_audit_logging.h",
         "dist/include/grpc/grpc_cronet.h",
+        "dist/include/grpc/grpc_crl_provider.h",
         "dist/include/grpc/grpc_posix.h",
         "dist/include/grpc/grpc_security.h",
         "dist/include/grpc/grpc_security_constants.h",
@@ -2149,6 +2153,7 @@ mongo_cc_library(
         "dist/src/core/lib/security/credentials/tls/grpc_tls_certificate_provider.h",
         "dist/src/core/lib/security/credentials/tls/grpc_tls_certificate_verifier.h",
         "dist/src/core/lib/security/credentials/tls/grpc_tls_credentials_options.h",
+        "dist/src/core/lib/security/credentials/tls/grpc_tls_crl_provider.h",
         "dist/src/core/lib/security/credentials/tls/tls_credentials.h",
         "dist/src/core/lib/security/credentials/tls/tls_utils.h",
         "dist/src/core/lib/security/credentials/xds/xds_credentials.h",
@@ -2755,7 +2760,6 @@ mongo_cc_library(
         ":upb_collections",
         ":upb_json",
         ":upb_textformat",
-        "//src/third_party/abseil-cpp:absl_bad_variant_access",
         "//src/third_party/abseil-cpp:absl_city",
         "//src/third_party/abseil-cpp:absl_hash",
         "//src/third_party/abseil-cpp:absl_hashtablez_sampler",
@@ -3030,6 +3034,7 @@ mongo_cc_library(
         "dist/include/grpcpp/security/tls_certificate_provider.h",
         "dist/include/grpcpp/security/tls_certificate_verifier.h",
         "dist/include/grpcpp/security/tls_credentials_options.h",
+        "dist/include/grpcpp/security/tls_crl_provider.h",
         "dist/include/grpcpp/server.h",
         "dist/include/grpcpp/server_builder.h",
         "dist/include/grpcpp/server_context.h",
@@ -3154,11 +3159,13 @@ mongo_cc_library(
         "dist/src/cpp/ext/proto_server_reflection.cc",
         "dist/src/cpp/ext/proto_server_reflection_plugin.cc",
     ],
-    copts = GRPC_COPTS + [
-        "-Isrc/third_party/grpc/dist",
-        "-I$(BINDIR)/src/third_party/grpc/dist",
+    hdrs = [
+        "dist/src/core/lib/security/credentials/ssl/ssl_credentials.h",
+        "dist/src/cpp/ext/proto_server_reflection.h",
     ],
+    copts = GRPC_COPTS,
     features = GRPC_FEATURES,
+    includes = ["dist"],
     linkopts = ["-lssl"],
     target_compatible_with = GRPC_TARGET_COMPATIBLE_WITH,
     deps = [
@@ -3470,5 +3477,24 @@ mongo_cc_library(
     ],
     hdrs = [
         "dist/include/grpc/impl/channel_arg_names.h",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "grpc_lib_test",
+    srcs = [
+        "greeter_server.h",
+        "grpc_source_test.cpp",
+    ],
+    copts = [
+        "-Isrc/third_party/grpc/dist/examples/protos",
+        "-I$(BINDIR)/src/third_party/grpc/dist/examples/protos",
+    ],
+    tags = ["mongo_unittest_eighth_group"],
+    target_compatible_with = GRPC_TARGET_COMPATIBLE_WITH,
+    deps = [
+        "grpc++_reflection",
+        "helloworld_cc_grpc",
+        "//src/mongo:base",
     ],
 )

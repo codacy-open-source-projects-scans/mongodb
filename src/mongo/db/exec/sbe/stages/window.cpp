@@ -27,7 +27,6 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
 
 #include "mongo/db/exec/sbe/stages/window.h"
 
@@ -35,10 +34,7 @@
 #include "mongo/db/exec/sbe/expressions/expression.h"
 #include "mongo/db/exec/sbe/size_estimator.h"
 #include "mongo/db/exec/sbe/util/spilling.h"
-#include "mongo/db/exec/sbe/values/arith_common.h"
-#include "mongo/db/query/util/spill_util.h"
 #include "mongo/db/stats/counters.h"
-#include "mongo/db/storage/storage_options.h"
 
 namespace mongo::sbe {
 
@@ -82,10 +78,7 @@ WindowStage::WindowStage(std::unique_ptr<PlanStage> input,
 
     _records.reserve(_batchSize);
     _recordBuffers.reserve(_batchSize);
-    _recordTimestamps.reserve(_batchSize);
-    for (size_t i = 0; i < _batchSize; i++) {
-        _recordTimestamps.push_back(Timestamp{});
-    }
+    _windowIdRanges.assign(_windows.size(), std::make_pair(1, 0));
 }
 
 std::unique_ptr<PlanStage> WindowStage::clone() const {
@@ -117,17 +110,6 @@ std::unique_ptr<PlanStage> WindowStage::clone() const {
                                          _allowDiskUse,
                                          _commonStats.nodeId,
                                          participateInTrialRunTracking());
-}
-
-void WindowStage::doSaveState(bool relinquishCursor) {
-    if (_recordStore) {
-        _recordStore->saveState();
-    }
-}
-void WindowStage::doRestoreState(bool relinquishCursor) {
-    if (_recordStore) {
-        _recordStore->restoreState();
-    }
 }
 
 size_t WindowStage::getLastRowId() {
@@ -166,36 +148,31 @@ void WindowStage::spill() {
             " pass allowDiskUse:true to opt in",
             _allowDiskUse);
 
-    // Ensure there is sufficient disk space for spilling
-    uassertStatusOK(ensureSufficientDiskSpaceForSpilling(
-        storageGlobalParams.dbpath, internalQuerySpillingMinAvailableDiskSpaceBytes.load()));
-
     // Create spilled record storage if not created.
     if (!_recordStore) {
         _recordStore = std::make_unique<SpillingStore>(_opCtx, KeyFormat::Long);
         _specificStats.usedDisk = true;
     }
-    _specificStats.spills++;
 
     auto writeBatch = [&]() {
-        auto status = _recordStore->insertRecords(_opCtx, &_records, _recordTimestamps);
-        tassert(7870901, "Failed to spill records in the window stage", status.isOK());
+        uassertStatusOK(_recordStore->insertRecords(_opCtx, &_records));
         _records.clear();
         _recordBuffers.clear();
     };
 
     // Spill all in memory rows in batches.
-    int64_t spilledBytes = 0;
+    uint64_t spilledBytes = 0;
+    uint64_t spilledRecords = 0;
     for (size_t i = 0, id = getLastSpilledRowId() + 1; i < _rows.size(); ++i, ++id) {
         BufBuilder buf;
         _rows[i].serializeForSorter(buf);
         int bufferSize = buf.len();
         spilledBytes += bufferSize;
+        spilledRecords++;
         auto buffer = buf.release();
         auto recordId = RecordId(id);
         _recordBuffers.push_back(buffer);
         _records.push_back(Record{RecordId(id), RecordData(buffer.get(), bufferSize)});
-        _specificStats.spilledRecords++;
         if (_records.size() == _batchSize) {
             writeBatch();
         }
@@ -207,16 +184,20 @@ void WindowStage::spill() {
     }
 
     // Record spilling statistics.
-    _specificStats.spilledBytes += spilledBytes;
-    auto& ru = *shard_role_details::getRecoveryUnit(_opCtx);
-    _specificStats.spilledDataStorageSize = _recordStore->rs()->storageSize(ru);
-    setWindowFieldsCounters.incrementSetWindowFieldsCountersPerSpilling(
-        1 /* spills */, spilledBytes, _rows.size());
+    auto spilledDataStorageIncrease = _specificStats.spillingStats.updateSpillingStats(
+        1 /* spills */, spilledBytes, spilledRecords, _recordStore->storageSize(_opCtx));
+    setWindowFieldsCounters.incrementPerSpilling(
+        1 /* spills */, spilledBytes, _rows.size(), spilledDataStorageIncrease);
+    _recordStore->updateSpillStorageStatsForOperation(_opCtx);
 
     // Clear the in memory window buffer.
     _rows.clear();
 
-    // Fail if spilling cannot reduce memory usage below thredshold.
+    // Update memory tracking after spilling. Note that memory usage may be non-zero if
+    // windowMemorySize was incremented during execution.
+    _memoryTracker.value().set(getMemoryEstimation());
+
+    // Fail if spilling cannot reduce memory usage below threshold.
     uassert(7870900,
             "Exceeded memory limit for $setWindowFields, but cannot reduce memory usage by "
             "spilling further.",
@@ -261,6 +242,7 @@ bool WindowStage::fetchNextRow() {
         if (_windowBufferMemoryEstimator.shouldSample()) {
             auto memory = size_estimator::estimate(_rows.back());
             _windowBufferMemoryEstimator.sample(memory);
+            _memoryTracker.value().set(getMemoryEstimation());
         }
 
         // Spill if the memory estimation is above threshold.
@@ -279,6 +261,8 @@ void WindowStage::freeUntilRow(size_t requiredId) {
     for (size_t id = getLastSpilledRowId() + 1; id < requiredId && _rows.size(); id++) {
         _rows.pop_front();
     }
+    _memoryTracker.value().set(getMemoryEstimation());
+
     _firstRowId = std::max(_firstRowId, requiredId);
     // Clear next partition id once we free everything from the previous partition.
     if (_nextPartitionId && _firstRowId >= *_nextPartitionId) {
@@ -297,7 +281,7 @@ void WindowStage::freeRows() {
 }
 
 void WindowStage::readSpilledRow(size_t id, value::MaterializedRow& row) {
-    invariant(_recordStore);
+    tassert(11093512, "Spilled record storage must be created", _recordStore);
     auto recordId = RecordId(id);
     RecordData record;
     auto result = _recordStore->findRecord(_opCtx, recordId, &record);
@@ -315,7 +299,7 @@ void WindowStage::setAccessors(size_t id,
                                const std::vector<std::unique_ptr<value::SwitchAccessor>>& accessors,
                                size_t& bufferedRowIdx,
                                value::MaterializedRow& spilledRow) {
-    invariant(id >= _firstRowId && id <= _lastRowId);
+    tassert(11093513, "Index out of bounds", id >= _firstRowId && id <= _lastRowId);
     auto lastSpilledRowId = getLastSpilledRowId();
     if (id > lastSpilledRowId) {
         for (auto&& accessor : accessors) {
@@ -518,6 +502,9 @@ void WindowStage::prepare(CompileCtx& ctx) {
     }
 
     _compiled = true;
+
+    _memoryTracker = OperationMemoryUsageTracker::createChunkedSimpleMemoryUsageTrackerForSBE(
+        _opCtx, _memoryThreshold);
 }
 
 value::SlotAccessor* WindowStage::getAccessor(CompileCtx& ctx, value::SlotId slot) {
@@ -529,12 +516,11 @@ value::SlotAccessor* WindowStage::getAccessor(CompileCtx& ctx, value::SlotId slo
     if (auto it = _outAccessorMap.find(slot); it != _outAccessorMap.end()) {
         return it->second;
     }
-    return ctx.getAccessor(slot);
+    return _children[0]->getAccessor(ctx, slot);
 }
 
 void WindowStage::setPartition(int id) {
-    _windowIdRanges.clear();
-    _windowIdRanges.resize(_windows.size(), std::make_pair(id, id - 1));
+    _windowIdRanges.assign(_windows.size(), std::make_pair(id, id - 1));
 
     // The initializer codes may depend on buffered values in slot accessors. As such, we set
     // accessors for the current document before running any of the initializer codes.
@@ -553,6 +539,8 @@ void WindowStage::setPartition(int id) {
             }
             stateMemoryEstimators[exprIdx].reset();
         }
+
+        _memoryTracker.value().set(getMemoryEstimation());
     }
 }
 
@@ -575,8 +563,7 @@ void WindowStage::open(bool reOpen) {
     // Set our initial partiton, and initialize '_windowIdRanges' accordingly such that we can
     // estimate our memory usage after fetching the first row.
     _nextPartitionId = 1;
-    _windowIdRanges.clear();
-    _windowIdRanges.resize(_windows.size(), std::make_pair(1, 0));
+    _windowIdRanges.assign(_windows.size(), std::make_pair(1, 0));
 }
 
 PlanState WindowStage::getNext() {
@@ -591,7 +578,7 @@ PlanState WindowStage::getNext() {
             return trackPlanState(PlanState::IS_EOF);
         }
     }
-    invariant(_currId <= getLastRowId());
+    tassert(11093514, "Index out of bounds", _currId <= getLastRowId());
 
     // Partition boundary check.
     if (_currId == _nextPartitionId) {
@@ -653,6 +640,7 @@ PlanState WindowStage::getNext() {
                             auto [tag, value] = windowAccessors[exprIdx]->getViewOfValue();
                             auto memory = size_estimator::estimate(tag, value);
                             stateMemoryEstimator.sample(frameSize, memory);
+                            _memoryTracker.value().set(getMemoryEstimation());
                         }
                     }
                 }
@@ -750,6 +738,9 @@ void WindowStage::close() {
 
     _children[0]->close();
     freeRows();
+
+    _memoryTracker.value().set(getMemoryEstimation());
+    _specificStats.peakTrackedMemBytes = _memoryTracker.value().peakTrackedMemoryBytes();
 }
 
 std::vector<DebugPrinter::Block> WindowStage::debugPrint() const {
@@ -837,14 +828,22 @@ std::unique_ptr<PlanStageStats> WindowStage::getStats(bool includeDebugInfo) con
     ret->specific = std::make_unique<WindowStats>(_specificStats);
 
     if (includeDebugInfo) {
-        DebugPrinter printer;
         BSONObjBuilder bob;
         // Spilling stats.
         bob.appendBool("usedDisk", _specificStats.usedDisk);
-        bob.appendNumber("spills", _specificStats.spills);
-        bob.appendNumber("spilledBytes", _specificStats.spilledBytes);
-        bob.appendNumber("spilledRecords", _specificStats.spilledRecords);
-        bob.appendNumber("spilledDataStorageSize", _specificStats.spilledDataStorageSize);
+        bob.appendNumber("spills",
+                         static_cast<long long>(_specificStats.spillingStats.getSpills()));
+        bob.appendNumber("spilledBytes",
+                         static_cast<long long>(_specificStats.spillingStats.getSpilledBytes()));
+        bob.appendNumber("spilledRecords",
+                         static_cast<long long>(_specificStats.spillingStats.getSpilledRecords()));
+        bob.appendNumber(
+            "spilledDataStorageSize",
+            static_cast<long long>(_specificStats.spillingStats.getSpilledDataStorageSize()));
+        if (feature_flags::gFeatureFlagQueryMemoryTracking.isEnabled()) {
+            bob.appendNumber("peakTrackedMemBytes",
+                             static_cast<long long>(_specificStats.peakTrackedMemBytes));
+        }
 
         ret->debugInfo = bob.obj();
     }

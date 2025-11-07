@@ -29,8 +29,6 @@
 
 #include "mongo/db/write_concern_idl.h"
 
-#include <fmt/format.h>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/util/bson_extract.h"
@@ -38,50 +36,58 @@
 #include "mongo/util/assert_util.h"
 #include "mongo/util/duration.h"
 
+#include <fmt/format.h>
+
 namespace mongo {
 // Helpers for IDL parsing
 WriteConcernW deserializeWriteConcernW(BSONElement wEl) {
-    using namespace fmt::literals;
     if (wEl.isNumber()) {
         uassert(ErrorCodes::FailedToParse, "w cannot be NaN", !wEl.isNaN());
         auto wNum = wEl.safeNumberLong();
         if (wNum < 0 || wNum > static_cast<long long>(repl::ReplSetConfig::kMaxMembers)) {
-            uasserted(ErrorCodes::FailedToParse,
-                      "w has to be a non-negative number and not greater than {}; found: {}"_format(
-                          repl::ReplSetConfig::kMaxMembers, wNum));
+            uasserted(
+                ErrorCodes::FailedToParse,
+                fmt::format("w has to be a non-negative number and not greater than {}; found: {}",
+                            repl::ReplSetConfig::kMaxMembers,
+                            wNum));
         }
 
         return WriteConcernW{wNum};
-    } else if (wEl.type() == BSONType::String) {
-        return WriteConcernW{wEl.str()};
-    } else if (wEl.type() == BSONType::Object) {
+    } else if (wEl.type() == BSONType::string) {
+        auto wStr = wEl.str();
+        uassert(ErrorCodes::FailedToParse,
+                fmt::format("w has illegal embedded NUL byte, w: {}", wStr),
+                wStr.find('\0') == std::string::npos);
+        return WriteConcernW{std::move(wStr)};
+    } else if (wEl.type() == BSONType::object) {
         auto wTags = wEl.Obj();
         uassert(ErrorCodes::FailedToParse, "tagged write concern requires tags", !wTags.isEmpty());
 
         WTags tags;
         for (auto&& e : wTags) {
-            uassert(
-                ErrorCodes::FailedToParse,
-                "tags must be a single level document with only number values; found: {}"_format(
-                    e.toString()),
-                e.isNumber());
+            uassert(ErrorCodes::FailedToParse,
+                    fmt::format(
+                        "tags must be a single level document with only number values; found: {}",
+                        e.toString()),
+                    e.isNumber());
 
             tags.try_emplace(e.fieldName(), e.safeNumberInt());
         }
 
         return WriteConcernW{std::move(tags)};
-    } else if (wEl.eoo() || wEl.type() == BSONType::jstNULL || wEl.type() == BSONType::Undefined) {
+    } else if (wEl.eoo() || wEl.type() == BSONType::null || wEl.type() == BSONType::undefined) {
         return WriteConcernW{};
     }
-    uasserted(ErrorCodes::FailedToParse,
-              "w has to be a number, string, or object; found: {}"_format(typeName(wEl.type())));
+    uasserted(
+        ErrorCodes::FailedToParse,
+        fmt::format("w has to be a number, string, or object; found: {}", typeName(wEl.type())));
 }
 
 void serializeWriteConcernW(const WriteConcernW& w, StringData fieldName, BSONObjBuilder* builder) {
     visit(OverloadedVisitor{[&](int64_t wNumNodes) {
                                 builder->appendNumber(fieldName, static_cast<long long>(wNumNodes));
                             },
-                            [&](std::string wMode) { builder->append(fieldName, wMode); },
+                            [&](const std::string& wMode) { builder->append(fieldName, wMode); },
                             [&](WTags wTags) {
                                 builder->append(fieldName, wTags);
                             }},
@@ -91,8 +97,8 @@ void serializeWriteConcernW(const WriteConcernW& w, StringData fieldName, BSONOb
 std::int64_t parseWTimeoutFromBSON(BSONElement element) {
     // Store wTimeout as a 64-bit value but functionally limit it to int32 as values larger than
     // than that do not make much sense to use and were not previously supported.
-    constexpr std::array<mongo::BSONType, 4> validTypes{
-        NumberLong, NumberInt, NumberDecimal, NumberDouble};
+    constexpr std::array validTypes{
+        BSONType::numberLong, BSONType::numberInt, BSONType::numberDecimal, BSONType::numberDouble};
     bool isValidType = std::any_of(
         validTypes.begin(), validTypes.end(), [&](auto type) { return element.type() == type; });
 

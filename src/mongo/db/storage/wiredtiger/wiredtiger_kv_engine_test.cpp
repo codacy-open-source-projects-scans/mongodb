@@ -27,29 +27,26 @@
  *    it in the license file.
  */
 
+#include <ostream>
+#include <utility>
+
 #include <boost/filesystem/fstream.hpp>
 #include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/move/utility_core.hpp>
 #include <boost/none.hpp>
 #include <boost/optional/optional.hpp>
-#include <ostream>
-#include <utility>
 // IWYU pragma: no_include "boost/system/detail/error_code.hpp"
-
-#include <fmt/format.h>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/init.h"  // IWYU pragma: keep
 #include "mongo/base/initializer.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/db/client.h"
-#include "mongo/db/global_settings.h"
+#include "mongo/db/local_catalog/shard_role_api/transaction_resources.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
-#include "mongo/db/repl/repl_settings.h"
-#include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/replication_coordinator_mock.h"
+#include "mongo/db/rss/replicated_storage_service.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/service_context_test_fixture.h"
@@ -62,49 +59,46 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_record_store.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
 #include "mongo/db/storage/write_unit_of_work.h"
-#include "mongo/db/transaction_resources.h"
+#include "mongo/idl/server_parameter_test_controller.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
-#include "mongo/logv2/log_severity.h"
-#include "mongo/unittest/assert.h"
 #include "mongo/unittest/death_test.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/log_test.h"
 #include "mongo/unittest/temp_dir.h"
-#include "mongo/util/assert_util_core.h"
+#include "mongo/unittest/unittest.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
 #include "mongo/util/version/releases.h"
 
+#include <fmt/format.h>
+
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
 namespace mongo {
 namespace {
 
+#if __has_feature(address_sanitizer)
+constexpr bool kMemLeakAllowed = false;
+#else
+constexpr bool kMemLeakAllowed = true;
+#endif
+
 class WiredTigerKVHarnessHelper : public KVHarnessHelper {
 public:
     WiredTigerKVHarnessHelper(ServiceContext* svcCtx, bool forRepair = false)
         : _svcCtx(svcCtx), _dbpath("wt-kv-harness"), _forRepair(forRepair) {
-        // Faitfhully simulate being in replica set mode for timestamping tests which requires
-        // parity for journaling settings.
-        repl::ReplSettings replSettings;
-        replSettings.setReplSetString("i am a replica set");
-        setGlobalReplSettings(replSettings);
-        repl::ReplicationCoordinator::set(
-            svcCtx, std::make_unique<repl::ReplicationCoordinatorMock>(svcCtx, replSettings));
         _svcCtx->setStorageEngine(makeEngine());
         getWiredTigerKVEngine()->notifyStorageStartupRecoveryComplete();
     }
 
     ~WiredTigerKVHarnessHelper() override {
-        getWiredTigerKVEngine()->cleanShutdown();
+        getWiredTigerKVEngine()->cleanShutdown(kMemLeakAllowed);
     }
 
     KVEngine* restartEngine() override {
-        getEngine()->cleanShutdown();
+        getEngine()->cleanShutdown(kMemLeakAllowed);
         _svcCtx->clearStorageEngine();
         _svcCtx->setStorageEngine(makeEngine());
         getEngine()->notifyStorageStartupRecoveryComplete();
@@ -123,20 +117,32 @@ private:
     std::unique_ptr<StorageEngine> makeEngine() {
         // Use a small journal for testing to account for the unlikely event that the underlying
         // filesystem does not support fast allocation of a file of zeros.
-        std::string extraStrings = "log=(file_max=1m,prealloc=false)";
+        auto& provider = rss::ReplicatedStorageService::get(_svcCtx).getPersistenceProvider();
+        WiredTigerKVEngineBase::WiredTigerConfig wtConfig =
+            getWiredTigerConfigFromStartupOptions(provider);
+        wtConfig.cacheSizeMB = 1;
+        wtConfig.extraOpenOptions = "log=(file_max=1m,prealloc=false)";
+        // Faithfully simulate being in replica set mode for timestamping tests which requires
+        // parity for journaling settings.
+        auto isReplSet = true;
+        auto shouldRecoverFromOplogAsStandalone = false;
+        auto replSetMemberInStandaloneMode = false;
         auto kv = std::make_unique<WiredTigerKVEngine>(std::string{kWiredTigerEngineName},
                                                        _dbpath.path(),
                                                        _cs.get(),
-                                                       extraStrings,
-                                                       1,
-                                                       0,
-                                                       false,
-                                                       _forRepair);
+                                                       std::move(wtConfig),
+                                                       WiredTigerExtensions::get(_svcCtx),
+                                                       provider,
+                                                       _forRepair,
+                                                       isReplSet,
+                                                       shouldRecoverFromOplogAsStandalone,
+                                                       replSetMemberInStandaloneMode);
 
         auto client = _svcCtx->getService()->makeClient("opCtx");
         auto opCtx = client->makeOperationContext();
         StorageEngineOptions options;
-        return std::make_unique<StorageEngineImpl>(opCtx.get(), std::move(kv), options);
+        return std::make_unique<StorageEngineImpl>(
+            opCtx.get(), std::move(kv), std::unique_ptr<KVEngine>(), options);
     }
 
     ServiceContext* _svcCtx;
@@ -152,10 +158,9 @@ public:
 protected:
     ServiceContext::UniqueOperationContext _makeOperationContext() {
         auto opCtx = makeOperationContext();
-        shard_role_details::setRecoveryUnit(
-            opCtx.get(),
-            std::unique_ptr<RecoveryUnit>(_helper.getEngine()->newRecoveryUnit()),
-            WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
+        shard_role_details::setRecoveryUnit(opCtx.get(),
+                                            _helper.getEngine()->newRecoveryUnit(),
+                                            WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
         return opCtx;
     }
 
@@ -171,23 +176,25 @@ TEST_F(WiredTigerKVEngineRepairTest, OrphanedDataFilesCanBeRecovered) {
     auto opCtxPtr = _makeOperationContext();
     auto& ru = *shard_role_details::getRecoveryUnit(opCtxPtr.get());
 
-    NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     std::string ident = "collection-1234";
-    std::string record = "abcd";
-    CollectionOptions defaultCollectionOptions;
-
-    std::unique_ptr<RecordStore> rs;
-    ASSERT_OK(
-        _helper.getWiredTigerKVEngine()->createRecordStore(nss, ident, defaultCollectionOptions));
-    rs = _helper.getWiredTigerKVEngine()->getRecordStore(
-        opCtxPtr.get(), nss, ident, defaultCollectionOptions);
+    RecordStore::Options options;
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
+    auto& provider = rss::ReplicatedStorageService::get(opCtxPtr.get()).getPersistenceProvider();
+    ASSERT_OK(_helper.getWiredTigerKVEngine()->createRecordStore(provider, nss, ident, options));
+    auto rs = _helper.getWiredTigerKVEngine()->getRecordStore(
+        opCtxPtr.get(), nss, ident, options, UUID::gen());
     ASSERT(rs);
 
     RecordId loc;
+    std::string record = "abcd";
     {
         StorageWriteTransaction txn(ru);
         StatusWith<RecordId> res =
-            rs->insertRecord(opCtxPtr.get(), record.c_str(), record.length() + 1, Timestamp());
+            rs->insertRecord(opCtxPtr.get(),
+                             *shard_role_details::getRecoveryUnit(opCtxPtr.get()),
+                             record.c_str(),
+                             record.length() + 1,
+                             Timestamp());
         ASSERT_OK(res.getStatus());
         loc = res.getValue();
         txn.commit();
@@ -204,7 +211,7 @@ TEST_F(WiredTigerKVEngineRepairTest, OrphanedDataFilesCanBeRecovered) {
 
 #ifdef _WIN32
     auto status =
-        _helper.getWiredTigerKVEngine()->recoverOrphanedIdent(nss, ident, defaultCollectionOptions);
+        _helper.getWiredTigerKVEngine()->recoverOrphanedIdent(provider, nss, ident, options);
     ASSERT_EQ(ErrorCodes::CommandNotSupported, status.code());
 #else
 
@@ -219,7 +226,7 @@ TEST_F(WiredTigerKVEngineRepairTest, OrphanedDataFilesCanBeRecovered) {
     ASSERT(!err) << err.message();
 
     ASSERT_OK(_helper.getWiredTigerKVEngine()->dropIdent(
-        shard_role_details::getRecoveryUnit(opCtxPtr.get()), ident, /*identHasSizeInfo=*/true));
+        *shard_role_details::getRecoveryUnit(opCtxPtr.get()), ident, /*identHasSizeInfo=*/true));
 
     // The data file is moved back in place so that it becomes an "orphan" of the storage
     // engine and the restoration process can be tested.
@@ -227,7 +234,7 @@ TEST_F(WiredTigerKVEngineRepairTest, OrphanedDataFilesCanBeRecovered) {
     ASSERT(!err) << err.message();
 
     auto status =
-        _helper.getWiredTigerKVEngine()->recoverOrphanedIdent(nss, ident, defaultCollectionOptions);
+        _helper.getWiredTigerKVEngine()->recoverOrphanedIdent(provider, nss, ident, options);
     ASSERT_EQ(ErrorCodes::DataModifiedByRepair, status.code());
 #endif
 }
@@ -238,21 +245,25 @@ TEST_F(WiredTigerKVEngineRepairTest, UnrecoverableOrphanedDataFilesAreRebuilt) {
 
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     std::string ident = "collection-1234";
-    std::string record = "abcd";
-    CollectionOptions defaultCollectionOptions;
+    RecordStore::Options options;
+    auto& provider = rss::ReplicatedStorageService::get(opCtxPtr.get()).getPersistenceProvider();
+    ASSERT_OK(_helper.getWiredTigerKVEngine()->createRecordStore(provider, nss, ident, options));
 
-    std::unique_ptr<RecordStore> rs;
-    ASSERT_OK(
-        _helper.getWiredTigerKVEngine()->createRecordStore(nss, ident, defaultCollectionOptions));
-    rs = _helper.getWiredTigerKVEngine()->getRecordStore(
-        opCtxPtr.get(), nss, ident, defaultCollectionOptions);
+    UUID uuid = UUID::gen();
+    auto rs =
+        _helper.getWiredTigerKVEngine()->getRecordStore(opCtxPtr.get(), nss, ident, options, uuid);
     ASSERT(rs);
 
     RecordId loc;
+    std::string record = "abcd";
     {
         StorageWriteTransaction txn(ru);
         StatusWith<RecordId> res =
-            rs->insertRecord(opCtxPtr.get(), record.c_str(), record.length() + 1, Timestamp());
+            rs->insertRecord(opCtxPtr.get(),
+                             *shard_role_details::getRecoveryUnit(opCtxPtr.get()),
+                             record.c_str(),
+                             record.length() + 1,
+                             Timestamp());
         ASSERT_OK(res.getStatus());
         loc = res.getValue();
         txn.commit();
@@ -268,11 +279,11 @@ TEST_F(WiredTigerKVEngineRepairTest, UnrecoverableOrphanedDataFilesAreRebuilt) {
     _helper.getWiredTigerKVEngine()->checkpoint();
 
     ASSERT_OK(_helper.getWiredTigerKVEngine()->dropIdent(
-        shard_role_details::getRecoveryUnit(opCtxPtr.get()), ident, /*identHasSizeInfo=*/true));
+        *shard_role_details::getRecoveryUnit(opCtxPtr.get()), ident, /*identHasSizeInfo=*/true));
 
 #ifdef _WIN32
     auto status =
-        _helper.getWiredTigerKVEngine()->recoverOrphanedIdent(nss, ident, defaultCollectionOptions);
+        _helper.getWiredTigerKVEngine()->recoverOrphanedIdent(provider, nss, ident, options);
     ASSERT_EQ(ErrorCodes::CommandNotSupported, status.code());
 #else
     // The ident may not get immediately dropped, so ensure it is completely gone.
@@ -291,16 +302,16 @@ TEST_F(WiredTigerKVEngineRepairTest, UnrecoverableOrphanedDataFilesAreRebuilt) {
     // This should recreate an empty data file successfully and move the old one to a name that ends
     // in ".corrupt".
     auto status =
-        _helper.getWiredTigerKVEngine()->recoverOrphanedIdent(nss, ident, defaultCollectionOptions);
+        _helper.getWiredTigerKVEngine()->recoverOrphanedIdent(provider, nss, ident, options);
     ASSERT_EQ(ErrorCodes::DataModifiedByRepair, status.code()) << status.reason();
 
     boost::filesystem::path corruptFile = (dataFilePath->string() + ".corrupt");
     ASSERT(boost::filesystem::exists(corruptFile));
 
-    rs = _helper.getWiredTigerKVEngine()->getRecordStore(
-        opCtxPtr.get(), nss, ident, defaultCollectionOptions);
+    rs = _helper.getWiredTigerKVEngine()->getRecordStore(opCtxPtr.get(), nss, ident, options, uuid);
     RecordData data;
-    ASSERT_FALSE(rs->findRecord(opCtxPtr.get(), loc, &data));
+    ASSERT_FALSE(rs->findRecord(
+        opCtxPtr.get(), *shard_role_details::getRecoveryUnit(opCtxPtr.get()), loc, &data));
 #endif
 }
 
@@ -318,9 +329,8 @@ TEST_F(WiredTigerKVEngineTest, TestOplogTruncation) {
 
     // If the test fails we want to ensure the checkpoint thread shuts down to avoid accessing the
     // storage engine during shutdown.
-    ON_BLOCK_EXIT([&] {
-        checkpointer->shutdown({ErrorCodes::ShutdownInProgress, "Test finished"});
-    });
+    ON_BLOCK_EXIT(
+        [&] { checkpointer->shutdown({ErrorCodes::ShutdownInProgress, "Test finished"}); });
 
     auto opCtxPtr = _makeOperationContext();
     // The initial data timestamp has to be set to take stable checkpoints. The first stable
@@ -402,6 +412,28 @@ TEST_F(WiredTigerKVEngineTest, TestOplogTruncation) {
     assertPinnedMovesSoon(Timestamp(40, 1));
 }
 
+TEST_F(WiredTigerKVEngineTest, CreateRecordStoreFailsWithExistingIdent) {
+    auto opCtxPtr = _makeOperationContext();
+
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
+    std::string ident = "collection-1234";
+    RecordStore::Options options;
+    auto& provider = rss::ReplicatedStorageService::get(opCtxPtr.get()).getPersistenceProvider();
+    ASSERT_OK(_helper.getWiredTigerKVEngine()->createRecordStore(provider, nss, ident, options));
+
+    // A new record store must always have its own storage table uniquely identified by the ident.
+    // Otherwise, multiple record stores could point to the same storage resource and lead to data
+    // corruption.
+    //
+    // Validate the server throws when trying to create a new record store with an ident already in
+    // use.
+
+    const auto status =
+        _helper.getWiredTigerKVEngine()->createRecordStore(provider, nss, ident, options);
+    ASSERT_NOT_OK(status);
+    ASSERT_EQ(status.code(), ErrorCodes::ObjectAlreadyExists);
+}
+
 TEST_F(WiredTigerKVEngineTest, IdentDrop) {
 #ifdef _WIN32
     // TODO SERVER-51595: to re-enable this test on Windows.
@@ -412,11 +444,10 @@ TEST_F(WiredTigerKVEngineTest, IdentDrop) {
 
     NamespaceString nss = NamespaceString::createNamespaceString_forTest("a.b");
     std::string ident = "collection-1234";
-    CollectionOptions defaultCollectionOptions;
+    RecordStore::Options options;
 
-    std::unique_ptr<RecordStore> rs;
-    ASSERT_OK(
-        _helper.getWiredTigerKVEngine()->createRecordStore(nss, ident, defaultCollectionOptions));
+    auto& provider = rss::ReplicatedStorageService::get(opCtxPtr.get()).getPersistenceProvider();
+    ASSERT_OK(_helper.getWiredTigerKVEngine()->createRecordStore(provider, nss, ident, options));
 
     const boost::optional<boost::filesystem::path> dataFilePath =
         _helper.getWiredTigerKVEngine()->getDataFilePathForIdent(ident);
@@ -429,15 +460,14 @@ TEST_F(WiredTigerKVEngineTest, IdentDrop) {
 
     // Because the underlying file was not removed, it will be renamed out of the way by WiredTiger
     // when creating a new table with the same ident.
-    ASSERT_OK(
-        _helper.getWiredTigerKVEngine()->createRecordStore(nss, ident, defaultCollectionOptions));
+    ASSERT_OK(_helper.getWiredTigerKVEngine()->createRecordStore(provider, nss, ident, options));
 
     const boost::filesystem::path renamedFilePath = dataFilePath->generic_string() + ".1";
     ASSERT(boost::filesystem::exists(*dataFilePath));
     ASSERT(boost::filesystem::exists(renamedFilePath));
 
     ASSERT_OK(_helper.getWiredTigerKVEngine()->dropIdent(
-        shard_role_details::getRecoveryUnit(opCtxPtr.get()), ident, /*identHasSizeInfo=*/true));
+        *shard_role_details::getRecoveryUnit(opCtxPtr.get()), ident, /*identHasSizeInfo=*/true));
 
     // WiredTiger drops files asynchronously.
     for (size_t check = 0; check < 30; check++) {
@@ -606,6 +636,40 @@ TEST_F(WiredTigerKVEngineTest, TestOldestStableTimestampEndOfStartupRecoveryStab
 TEST_F(WiredTigerKVEngineTest, ExtractIdentFromPath) {
     boost::filesystem::path dbpath = "/data/db";
     boost::filesystem::path identAbsolutePathDefault =
+        "/data/db/collection-8a3a1418-4f05-44d6-aca7-59a2f7b30248.wt";
+    std::string identDefault = "collection-8a3a1418-4f05-44d6-aca7-59a2f7b30248";
+
+    ASSERT_EQ(extractIdentFromPath(dbpath, identAbsolutePathDefault), identDefault);
+
+    boost::filesystem::path identAbsolutePathDirectoryPerDb =
+        "/data/db/test/collection-8a3a1418-4f05-44d6-aca7-59a2f7b30248.wt";
+    std::string identDirectoryPerDb = "test/collection-8a3a1418-4f05-44d6-aca7-59a2f7b30248";
+
+    ASSERT_EQ(extractIdentFromPath(dbpath, identAbsolutePathDirectoryPerDb), identDirectoryPerDb);
+
+    boost::filesystem::path identAbsolutePathWiredTigerDirectoryForIndexes =
+        "/data/db/collection/8a3a1418-4f05-44d6-aca7-59a2f7b30248.wt";
+    std::string identWiredTigerDirectoryForIndexes =
+        "collection/8a3a1418-4f05-44d6-aca7-59a2f7b30248";
+
+    ASSERT_EQ(extractIdentFromPath(dbpath, identAbsolutePathWiredTigerDirectoryForIndexes),
+              identWiredTigerDirectoryForIndexes);
+
+    boost::filesystem::path identAbsolutePathDirectoryPerDbAndWiredTigerDirectoryForIndexes =
+        "/data/db/test/collection/8a3a1418-4f05-44d6-aca7-59a2f7b30248.wt";
+    std::string identDirectoryPerDbWiredTigerDirectoryForIndexes =
+        "test/collection/8a3a1418-4f05-44d6-aca7-59a2f7b30248";
+
+    ASSERT_EQ(extractIdentFromPath(dbpath,
+                                   identAbsolutePathDirectoryPerDbAndWiredTigerDirectoryForIndexes),
+              identDirectoryPerDbWiredTigerDirectoryForIndexes);
+}
+
+// Prior to v8.2, idents were suffixed with a unique <counter> + <random number> combination. All
+// future versions must also maintain compatibility with the legacy ident format.
+TEST_F(WiredTigerKVEngineTest, ExtractLegacyIdentFromPath) {
+    boost::filesystem::path dbpath = "/data/db";
+    boost::filesystem::path identAbsolutePathDefault =
         "/data/db/collection-9-11733751379908443489.wt";
     std::string identDefault = "collection-9-11733751379908443489";
 
@@ -642,28 +706,28 @@ TEST_F(WiredTigerKVEngineTest, WiredTigerDowngrade) {
 
     // (Generic FCV reference): When FCV is kLatest, no downgrade is necessary.
     serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLatest);
-    ASSERT_FALSE(version.shouldDowngrade(/*hasRecoveryTimestamp=*/false));
+    ASSERT_FALSE(version.shouldDowngrade(/*hasRecoveryTimestamp=*/false, /*isReplset=*/true));
     ASSERT_EQ(WiredTigerFileVersion::kLatestWTRelease, version.getDowngradeString());
 
     // (Generic FCV reference): When FCV is kLastContinuous or kLastLTS, a downgrade may be needed.
     serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLastContinuous);
-    ASSERT_TRUE(version.shouldDowngrade(/*hasRecoveryTimestamp=*/false));
+    ASSERT_TRUE(version.shouldDowngrade(/*hasRecoveryTimestamp=*/false, /*isReplset=*/true));
     ASSERT_EQ(WiredTigerFileVersion::kLastContinuousWTRelease, version.getDowngradeString());
 
     serverGlobalParams.mutableFCV.setVersion(multiversion::GenericFCV::kLastLTS);
-    ASSERT_TRUE(version.shouldDowngrade(/*hasRecoveryTimestamp=*/false));
+    ASSERT_TRUE(version.shouldDowngrade(/*hasRecoveryTimestamp=*/false, /*isReplset=*/true));
     ASSERT_EQ(WiredTigerFileVersion::kLastLTSWTRelease, version.getDowngradeString());
 
     // (Generic FCV reference): While we're in a semi-downgraded state, we shouldn't try downgrading
     // the WiredTiger compatibility version.
     serverGlobalParams.mutableFCV.setVersion(
         multiversion::GenericFCV::kDowngradingFromLatestToLastContinuous);
-    ASSERT_FALSE(version.shouldDowngrade(/*hasRecoveryTimestamp=*/false));
+    ASSERT_FALSE(version.shouldDowngrade(/*hasRecoveryTimestamp=*/false, /*isReplset=*/true));
     ASSERT_EQ(WiredTigerFileVersion::kLatestWTRelease, version.getDowngradeString());
 
     serverGlobalParams.mutableFCV.setVersion(
         multiversion::GenericFCV::kDowngradingFromLatestToLastLTS);
-    ASSERT_FALSE(version.shouldDowngrade(/*hasRecoveryTimestamp=*/false));
+    ASSERT_FALSE(version.shouldDowngrade(/*hasRecoveryTimestamp=*/false, /*isReplset=*/true));
     ASSERT_EQ(WiredTigerFileVersion::kLatestWTRelease, version.getDowngradeString());
 }
 
@@ -681,13 +745,13 @@ TEST_F(WiredTigerKVEngineTest, TestReconfigureLog) {
         ASSERT_OK(_helper.getWiredTigerKVEngine()->reconfigureLogging());
         // Perform a checkpoint. The goal here is create some activity in WiredTiger in order
         // to generate verbose messages (we don't really care about the checkpoint itself).
-        startCapturingLogMessages();
+        unittest::LogCaptureGuard logs;
         _helper.getWiredTigerKVEngine()->checkpoint();
-        stopCapturingLogMessages();
+        logs.stop();
         // In this initial case, we don't expect to capture any debug checkpoint messages. The
         // base severity for the checkpoint component should be at Log().
         bool foundWTCheckpointMessage = false;
-        for (auto&& bson : getCapturedBSONFormatLogMessages()) {
+        for (auto&& bson : logs.getBSON()) {
             if (bson["c"].String() == "WTCHKPT" &&
                 bson["attr"]["message"]["verbose_level"].String() == "DEBUG_1" &&
                 bson["attr"]["message"]["category"].String() == "WT_VERB_CHECKPOINT") {
@@ -706,13 +770,13 @@ TEST_F(WiredTigerKVEngineTest, TestReconfigureLog) {
                   unittest::getMinimumLogSeverity(logv2::LogComponent::kWiredTigerCheckpoint));
 
         // Perform another checkpoint.
-        startCapturingLogMessages();
+        unittest::LogCaptureGuard logs;
         _helper.getWiredTigerKVEngine()->checkpoint();
-        stopCapturingLogMessages();
+        logs.stop();
 
         // This time we expect to detect WiredTiger checkpoint Debug() messages.
         bool foundWTCheckpointMessage = false;
-        for (auto&& bson : getCapturedBSONFormatLogMessages()) {
+        for (auto&& bson : logs.getBSON()) {
             if (bson["c"].String() == "WTCHKPT" &&
                 bson["attr"]["message"]["verbose_level"].String() == "DEBUG_1" &&
                 bson["attr"]["message"]["category"].String() == "WT_VERB_CHECKPOINT") {
@@ -761,7 +825,7 @@ MONGO_INITIALIZER(RegisterKVHarnessFactory)(InitializerContext*) {
 TEST_F(WiredTigerKVEngineTest, TestHandlerCleanShutdown) {
     auto* engine = _helper.getWiredTigerKVEngine();
     ASSERT(engine->isWtConnReadyForStatsCollection_UNSAFE());
-    engine->cleanShutdown();
+    engine->cleanShutdown(kMemLeakAllowed);
     ASSERT(!engine->isWtConnReadyForStatsCollection_UNSAFE());
 }
 
@@ -776,7 +840,7 @@ TEST_F(WiredTigerKVEngineTest, TestHandlerSingleActivityBeforeShutdownRAII) {
     }
     ASSERT_EQ(engine->getActiveStatsReaders(), 0);
     ASSERT(engine->isWtConnReadyForStatsCollection_UNSAFE());
-    engine->cleanShutdown();
+    engine->cleanShutdown(kMemLeakAllowed);
     ASSERT(!engine->isWtConnReadyForStatsCollection_UNSAFE());
 }
 
@@ -798,14 +862,14 @@ TEST_F(WiredTigerKVEngineTest, TestHandlerMultipleActivitiesBeforeShutdownRAII) 
     }
     ASSERT_EQ(engine->getActiveStatsReaders(), 0);
     ASSERT(engine->isWtConnReadyForStatsCollection_UNSAFE());
-    engine->cleanShutdown();
+    engine->cleanShutdown(kMemLeakAllowed);
     ASSERT(!engine->isWtConnReadyForStatsCollection_UNSAFE());
 }
 
 TEST_F(WiredTigerKVEngineTest, TestHandlerCleanShutdownBeforeActivity) {
     auto* engine = _helper.getWiredTigerKVEngine();
     ASSERT(engine->isWtConnReadyForStatsCollection_UNSAFE());
-    engine->cleanShutdown();
+    engine->cleanShutdown(kMemLeakAllowed);
     ASSERT(!engine->tryGetStatsCollectionPermit());
     ASSERT_EQ(engine->getActiveStatsReaders(), 0);
     ASSERT(!engine->isWtConnReadyForStatsCollection_UNSAFE());
@@ -818,7 +882,7 @@ TEST_F(WiredTigerKVEngineTest, TestHandlerCleanShutdownBeforeActivityReleaseRAII
         auto permit = engine->tryGetStatsCollectionPermit();
         ASSERT(engine->isWtConnReadyForStatsCollection_UNSAFE());
         ASSERT_EQ(engine->getActiveStatsReaders(), 1);
-        stdx::thread shudownThread([&]() { engine->cleanShutdown(); });
+        stdx::thread shutdownThread([&]() { engine->cleanShutdown(kMemLeakAllowed); });
         ASSERT_EQ(engine->getActiveStatsReaders(), 1);
         while (engine->isWtConnReadyForStatsCollection_UNSAFE()) {
             stdx::this_thread::yield();
@@ -826,7 +890,7 @@ TEST_F(WiredTigerKVEngineTest, TestHandlerCleanShutdownBeforeActivityReleaseRAII
 
         // Ensure that releasing the permit unblocks the shutdown
         permit.reset();
-        shudownThread.join();
+        shutdownThread.join();
     }
     ASSERT_EQ(engine->getActiveStatsReaders(), 0);
     ASSERT(!engine->isWtConnReadyForStatsCollection_UNSAFE());
@@ -839,7 +903,7 @@ TEST_F(WiredTigerKVEngineTest, TestRestartUsesNewConn) {
     {
         auto permit = engine->tryGetStatsCollectionPermit();
         ASSERT(permit);
-        ASSERT_EQ(engine->getConnection(), permit->conn());
+        ASSERT_EQ(engine->getConn(), permit->conn());
     }
 
     _helper.restartEngine();
@@ -847,7 +911,12 @@ TEST_F(WiredTigerKVEngineTest, TestRestartUsesNewConn) {
 
     auto permit = engine->tryGetStatsCollectionPermit();
     ASSERT(permit);
-    ASSERT_EQ(engine->getConnection(), permit->conn());
+    ASSERT_EQ(engine->getConn(), permit->conn());
+}
+
+TEST_F(WiredTigerKVEngineTest, TestGetBackupCheckpointTimestampWithoutOpenBackupCursor) {
+    auto* engine = _helper.getWiredTigerKVEngine();
+    ASSERT_EQ(Timestamp::min(), engine->getBackupCheckpointTimestamp());
 }
 
 DEATH_TEST_F(WiredTigerKVEngineTest, WaitUntilDurableMustBeOutOfUnitOfWork, "invariant") {
@@ -867,9 +936,11 @@ protected:
     // Creates the given ident, returning the path to it.
     StatusWith<boost::filesystem::path> createIdent(StringData ns, StringData ident) {
         NamespaceString nss = NamespaceString::createNamespaceString_forTest(ns);
-        CollectionOptions defaultCollectionOptions;
-        Status stat = _helper.getWiredTigerKVEngine()->createRecordStore(
-            nss, ident, defaultCollectionOptions);
+        RecordStore::Options options;
+        auto& provider =
+            rss::ReplicatedStorageService::get(getGlobalServiceContext()).getPersistenceProvider();
+        Status stat =
+            _helper.getWiredTigerKVEngine()->createRecordStore(provider, nss, ident, options);
         if (!stat.isOK()) {
             return stat;
         }
@@ -881,7 +952,7 @@ protected:
 
     Status removeIdent(StringData ident) {
         return _helper.getWiredTigerKVEngine()->dropIdent(
-            shard_role_details::getRecoveryUnit(_opCtx.get()), ident, /*identHasSizeInfo=*/true);
+            *shard_role_details::getRecoveryUnit(_opCtx.get()), ident, /*identHasSizeInfo=*/true);
     }
 
 private:
@@ -889,7 +960,7 @@ private:
 };
 
 TEST_F(WiredTigerKVEngineDirectoryTest, TopLevelIdentsDontRemoveDirectories) {
-    std::string ident = "ident-without-directory";
+    std::string ident = "collection-ident-without-directory";
     StatusWith<boost::filesystem::path> path = createIdent("name.space", ident);
     ASSERT_OK(path);
     ASSERT_TRUE(boost::filesystem::exists(path.getValue().parent_path()));
@@ -900,19 +971,19 @@ TEST_F(WiredTigerKVEngineDirectoryTest, TopLevelIdentsDontRemoveDirectories) {
 }
 
 TEST_F(WiredTigerKVEngineDirectoryTest, RemovingLastIdentPromptsDirectoryRemoval) {
-    std::string apple = "fruit/apple";
+    std::string apple = "fruit/collection-apple";
     StatusWith<boost::filesystem::path> applePath = createIdent("fruit.apple", apple);
     ASSERT_OK(applePath);
     boost::filesystem::path fruitDir = applePath.getValue().parent_path();
 
     // Same directory.
-    std::string orange = "fruit/orange";
+    std::string orange = "fruit/collection-orange";
     StatusWith<boost::filesystem::path> orangePath = createIdent("fruit.orange", orange);
     ASSERT_OK(orangePath);
     ASSERT_EQ(fruitDir, orangePath.getValue().parent_path());
 
     // Different directory.
-    std::string potato = "veg/potato";
+    std::string potato = "veg/collection-potato";
     StatusWith<boost::filesystem::path> potatoPath = createIdent("veg.potato", potato);
     ASSERT_OK(potatoPath);
     ASSERT_NE(fruitDir, potatoPath.getValue().parent_path());
@@ -932,24 +1003,34 @@ TEST_F(WiredTigerKVEngineDirectoryTest, RemovingLastIdentPromptsDirectoryRemoval
 }
 
 TEST_F(WiredTigerKVEngineDirectoryTest, HandlesNestedDirectories) {
-    std::string ident = "lots/and/lots/of/directories";
+    std::string ident = "dbname/collection/ident";
     StatusWith<boost::filesystem::path> path = createIdent("name.space", ident);
     ASSERT_OK(path);
     ASSERT_TRUE(boost::filesystem::exists(path.getValue()));
 
     ASSERT_OK(removeIdent(ident));
-    // directories
+    // ident
     ASSERT_FALSE(boost::filesystem::exists(path.getValue()));
-    // of
+    // collection
     ASSERT_FALSE(boost::filesystem::exists(path.getValue().parent_path()));
-    // lots
+    // dbname
     ASSERT_FALSE(boost::filesystem::exists(path.getValue().parent_path().parent_path()));
-    // and
-    ASSERT_FALSE(
-        boost::filesystem::exists(path.getValue().parent_path().parent_path().parent_path()));
-    // lots
-    ASSERT_FALSE(boost::filesystem::exists(
+    // the test parent directory
+    ASSERT_TRUE(boost::filesystem::exists(
         path.getValue().parent_path().parent_path().parent_path().parent_path()));
+}
+
+TEST_F(WiredTigerKVEngineTest, CheckSessionCacheMax) {
+
+    RAIIServerParameterControllerForTest sessionCacheMax{"wiredTigerSessionCacheMaxPercentage", 20};
+    RAIIServerParameterControllerForTest sessionMax{"wiredTigerSessionMax", 150};
+    _helper.restartEngine();
+
+    auto* engine = _helper.getWiredTigerKVEngine();
+    auto& connection = engine->getConnection();
+
+    // Check that the configured session cache max is derived correctly.
+    ASSERT_EQ(connection.getSessionCacheMax(), 30);
 }
 
 }  // namespace

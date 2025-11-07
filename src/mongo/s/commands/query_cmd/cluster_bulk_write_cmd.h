@@ -29,21 +29,6 @@
 
 #pragma once
 
-#include "mongo/rpc/reply_builder_interface.h"
-#include "mongo/s/write_ops/batched_command_request.h"
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/cstdint.hpp>
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
@@ -59,23 +44,26 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/feature_flag.h"
+#include "mongo/db/global_catalog/router_role_api/collection_routing_info_targeter.h"
 #include "mongo/db/initialize_operation_session_info.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/not_primary_error_tracker.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/pipeline/expression_context_builder.h"
 #include "mongo/db/query/find_common.h"
+#include "mongo/db/query/shard_key_diagnostic_printer.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/server_feature_flags_gen.h"
-#include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session/logical_session_id_gen.h"
+#include "mongo/db/sharding_environment/grid.h"
 #include "mongo/rpc/op_msg.h"
+#include "mongo/rpc/reply_builder_interface.h"
 #include "mongo/s/cluster_write.h"
-#include "mongo/s/collection_routing_info_targeter.h"
 #include "mongo/s/commands/document_shard_key_update_util.h"
 #include "mongo/s/commands/query_cmd/cluster_explain.h"
 #include "mongo/s/commands/query_cmd/cluster_write_cmd.h"
-#include "mongo/s/grid.h"
+#include "mongo/s/commands/query_cmd/populate_cursor.h"
 #include "mongo/s/query/exec/cluster_client_cursor.h"
 #include "mongo/s/query/exec/cluster_client_cursor_guard.h"
 #include "mongo/s/query/exec/cluster_client_cursor_impl.h"
@@ -85,8 +73,23 @@
 #include "mongo/s/query/exec/router_exec_stage.h"
 #include "mongo/s/query/exec/router_stage_queued_data.h"
 #include "mongo/s/would_change_owning_shard_exception.h"
+#include "mongo/s/write_ops/batched_command_request.h"
+#include "mongo/s/write_ops/unified_write_executor/unified_write_executor.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
+
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/cstdint.hpp>
+#include <boost/move/utility_core.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -106,7 +109,7 @@ public:
     std::unique_ptr<CommandInvocation> parse(OperationContext* opCtx,
                                              const OpMsgRequest& request) final {
         auto parsedRequest =
-            BulkWriteCommandRequest::parse(IDLParserContext{"clusterBulkWriteParse"}, request);
+            BulkWriteCommandRequest::parse(request, IDLParserContext{"clusterBulkWriteParse"});
         bulk_write_exec::addIdsForInserts(parsedRequest);
         return std::make_unique<Invocation>(this, request, std::move(parsedRequest));
     }
@@ -143,6 +146,10 @@ public:
         return "command to apply inserts, updates and deletes in bulk";
     }
 
+    bool enableDiagnosticPrintingOnFailure() const final {
+        return true;
+    }
+
     class Invocation : public CommandInvocation {
     public:
         Invocation(const ClusterBulkWriteCmd* command,
@@ -153,8 +160,7 @@ public:
               _request{std::move(bulkRequest)} {
             uassert(ErrorCodes::CommandNotSupported,
                     "BulkWrite may not be run without featureFlagBulkWriteCommand enabled",
-                    gFeatureFlagBulkWriteCommand.isEnabled(
-                        serverGlobalParams.featureCompatibility.acquireFCVSnapshot()));
+                    gFeatureFlagBulkWriteCommand.isEnabled());
 
             bulk_write_common::validateRequest(_request, /*isRouter=*/true);
         }
@@ -207,6 +213,10 @@ public:
             return true;
         }
 
+        bool supportsRawData() const override {
+            return true;
+        }
+
         void doCheckAuthorization(OperationContext* opCtx) const final {
             try {
                 doCheckAuthorizationHook(AuthorizationSession::get(opCtx->getClient()));
@@ -220,120 +230,6 @@ public:
             return static_cast<const ClusterBulkWriteCmd*>(definition());
         }
 
-        BulkWriteCommandReply _populateCursorReply(
-            OperationContext* opCtx,
-            BulkWriteCommandRequest& bulkRequest,
-            const OpMsgRequest& unparsedRequest,
-            bulk_write_exec::BulkWriteReplyInfo replyInfo) const {
-            const auto& req = bulkRequest;
-            auto reqObj = unparsedRequest.body;
-            auto& [replyItems, summaryFields, wcErrors, retriedStmtIds, _] = replyInfo;
-            const NamespaceString cursorNss =
-                NamespaceString::makeBulkWriteNSS(req.getDbName().tenantId());
-
-            if (bulk_write_common::isUnacknowledgedBulkWrite(opCtx)) {
-                // Skip cursor creation and return the simplest reply.
-                return BulkWriteCommandReply(BulkWriteCommandResponseCursor(
-                                                 0 /* cursorId */, {} /* firstBatch */, cursorNss),
-                                             summaryFields.nErrors,
-                                             summaryFields.nInserted,
-                                             summaryFields.nMatched,
-                                             summaryFields.nModified,
-                                             summaryFields.nUpserted,
-                                             summaryFields.nDeleted);
-            }
-
-            ClusterClientCursorParams params(
-                cursorNss,
-                APIParameters::get(opCtx),
-                ReadPreferenceSetting::get(opCtx),
-                repl::ReadConcernArgs::get(opCtx),
-                [&] {
-                    if (!opCtx->getLogicalSessionId())
-                        return OperationSessionInfoFromClient();
-                    // TODO (SERVER-80525): This code path does not
-                    // clear the setAutocommit field on the presence of
-                    // TransactionRouter::get
-                    return OperationSessionInfoFromClient(
-                        *opCtx->getLogicalSessionId(),
-                        // Retryable writes will have a txnNumber we do not want to associate with
-                        // the cursor. We only want to set this field for transactions.
-                        opCtx->inMultiDocumentTransaction() ? opCtx->getTxnNumber() : boost::none);
-                }());
-
-            long long batchSize = std::numeric_limits<long long>::max();
-            if (req.getCursor() && req.getCursor()->getBatchSize()) {
-                params.batchSize = req.getCursor()->getBatchSize();
-                batchSize = *req.getCursor()->getBatchSize();
-            }
-            params.originatingCommandObj = reqObj.getOwned();
-            params.originatingPrivileges = bulk_write_common::getPrivileges(req);
-
-            auto queuedDataStage = std::make_unique<RouterStageQueuedData>(opCtx);
-            BulkWriteCommandReply reply;
-            reply.setNErrors(summaryFields.nErrors);
-            reply.setNInserted(summaryFields.nInserted);
-            reply.setNDeleted(summaryFields.nDeleted);
-            reply.setNMatched(summaryFields.nMatched);
-            reply.setNModified(summaryFields.nModified);
-            reply.setNUpserted(summaryFields.nUpserted);
-            reply.setWriteConcernError(wcErrors);
-            reply.setRetriedStmtIds(retriedStmtIds);
-
-            for (auto& replyItem : replyItems) {
-                queuedDataStage->queueResult(replyItem.toBSON());
-            }
-
-            auto ccc =
-                ClusterClientCursorImpl::make(opCtx, std::move(queuedDataStage), std::move(params));
-
-            size_t numRepliesInFirstBatch = 0;
-            FindCommon::BSONArrayResponseSizeTracker responseSizeTracker;
-            for (long long objCount = 0; objCount < batchSize; objCount++) {
-                auto next = uassertStatusOK(ccc->next());
-
-                if (next.isEOF()) {
-                    break;
-                }
-
-                auto nextObj = *next.getResult();
-                if (!responseSizeTracker.haveSpaceForNext(nextObj)) {
-                    ccc->queueResult(nextObj);
-                    break;
-                }
-
-                numRepliesInFirstBatch++;
-                responseSizeTracker.add(nextObj);
-            }
-            if (numRepliesInFirstBatch == replyItems.size()) {
-                replyItems.resize(numRepliesInFirstBatch);
-                reply.setCursor(BulkWriteCommandResponseCursor(
-                    0, std::vector<BulkWriteReplyItem>(std::move(replyItems)), cursorNss));
-                return reply;
-            }
-
-            ccc->detachFromOperationContext();
-            ccc->incNBatches();
-
-            auto authUser =
-                AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserName();
-            auto cursorId = uassertStatusOK(Grid::get(opCtx)->getCursorManager()->registerCursor(
-                opCtx,
-                ccc.releaseCursor(),
-                cursorNss,
-                ClusterCursorManager::CursorType::QueuedData,
-                ClusterCursorManager::CursorLifetime::Mortal,
-                authUser));
-
-            // Record the cursorID in CurOp.
-            CurOp::get(opCtx)->debug().cursorid = cursorId;
-
-            replyItems.resize(numRepliesInFirstBatch);
-            reply.setCursor(BulkWriteCommandResponseCursor(
-                cursorId, std::vector<BulkWriteReplyItem>(std::move(replyItems)), cursorNss));
-            return reply;
-        }
-
         bool runImpl(OperationContext* opCtx,
                      const OpMsgRequest& request,
                      BulkWriteCommandRequest& bulkRequest,
@@ -344,47 +240,74 @@ public:
             // able to obtain the bucket namespace to write to which we get via targeter.
             std::vector<std::unique_ptr<NSTargeter>> targeters;
             targeters.reserve(bulkRequest.getNsInfo().size());
+
+            // This is used only for the ScopedDebugInfo construction below.
+            stdx::unordered_map<NamespaceString, boost::optional<BSONObj>> shardKeyDiagnosticInfo;
+
             for (const auto& nsInfo : bulkRequest.getNsInfo()) {
-                targeters.push_back(
-                    std::make_unique<CollectionRoutingInfoTargeter>(opCtx, nsInfo.getNs()));
+                auto targeter =
+                    std::make_unique<CollectionRoutingInfoTargeter>(opCtx, nsInfo.getNs());
+
+                shardKeyDiagnosticInfo.insert(
+                    {nsInfo.getNs(),
+                     targeter->getRoutingInfo().getChunkManager().isSharded()
+                         ? boost::optional<BSONObj>(targeter->getRoutingInfo()
+                                                        .getChunkManager()
+                                                        .getShardKeyPattern()
+                                                        .toBSON())
+                         : boost::none});
+
+                targeters.push_back(std::move(targeter));
             }
+
+            // Create an RAII object that prints each collection's shard key in the case of a
+            // tassert or crash.
+            ScopedDebugInfo shardKeyDiagnostics(
+                "MultipleShardKeysDiagnostics",
+                diagnostic_printers::MultipleShardKeysDiagnosticPrinter{shardKeyDiagnosticInfo});
 
             if (auto let = bulkRequest.getLet()) {
                 // Evaluate the let parameters.
                 auto expCtx = ExpressionContextBuilder{}.opCtx(opCtx).letParameters(*let).build();
-                expCtx->variables.seedVariablesWithLetParameters(expCtx.get(), *let);
+                expCtx->variables.seedVariablesWithLetParameters(
+                    expCtx.get(), *let, [](const Expression* expr) {
+                        return expression::getDependencies(expr).hasNoRequirements();
+                    });
                 bulkRequest.setLet(expCtx->variables.toBSON(expCtx->variablesParseState, *let));
             }
 
-            // Dispatch the bulk write through the cluster.
-            // - To ensure that possible writeErrors are properly managed, a "fire and forget"
-            //   request needs to be temporarily upgraded to 'w:1'(unless the request belongs to a
-            //   transaction, where per-operation WC settings are not supported);
-            // - Once done, The original WC is re-established to allow _populateCursorReply
-            //   evaluating whether a reply needs to be returned to the external client.
-            auto bulkWriteReply = [&] {
-                WriteConcernOptions originalWC = opCtx->getWriteConcern();
-                ScopeGuard resetWriteConcernGuard(
-                    [opCtx, &originalWC] { opCtx->setWriteConcern(originalWC); });
-                if (auto wc = opCtx->getWriteConcern();
-                    !wc.requiresWriteAcknowledgement() && !opCtx->inMultiDocumentTransaction()) {
-                    wc.w = 1;
-                    opCtx->setWriteConcern(wc);
-                }
-                return cluster::bulkWrite(opCtx, bulkRequest, targeters);
-            }();
+            if (unified_write_executor::isEnabled(opCtx)) {
+                response = unified_write_executor::bulkWrite(opCtx, bulkRequest);
+            } else {
+                // Dispatch the bulk write through the cluster.
+                // - To ensure that possible writeErrors are properly managed, a "fire and forget"
+                //   request needs to be temporarily upgraded to 'w:1'(unless the request belongs to
+                //   a transaction, where per-operation WC settings are not supported);
+                // - Once done, The original WC is re-established to allow populateCursorReply
+                //   evaluating whether a reply needs to be returned to the external client.
+                bulk_write_exec::BulkWriteExecStats execStats;
+                auto bulkWriteReply = [&] {
+                    WriteConcernOptions originalWC = opCtx->getWriteConcern();
+                    ScopeGuard resetWriteConcernGuard(
+                        [opCtx, &originalWC] { opCtx->setWriteConcern(originalWC); });
+                    if (auto wc = opCtx->getWriteConcern(); !wc.requiresWriteAcknowledgement() &&
+                        !opCtx->inMultiDocumentTransaction()) {
+                        wc.w = 1;
+                        opCtx->setWriteConcern(wc);
+                    }
+                    return cluster::bulkWrite(opCtx, bulkRequest, targeters, execStats);
+                }();
 
-            bool updatedShardKey =
-                handleWouldChangeOwningShardError(opCtx, bulkRequest, bulkWriteReply, targeters);
-            bulk_write_exec::BulkWriteExecStats execStats = std::move(bulkWriteReply.execStats);
+                bool updatedShardKey = handleWouldChangeOwningShardError(
+                    opCtx, bulkRequest, bulkWriteReply, targeters);
+                // TODO SERVER-83869 handle BulkWriteExecStats for batches of size > 1 containing
+                // updates that modify a document’s owning shard.
+                execStats.updateMetrics(opCtx, targeters, updatedShardKey);
 
-            response = _populateCursorReply(opCtx, bulkRequest, request, std::move(bulkWriteReply));
+                response = populateCursorReply(
+                    opCtx, bulkRequest, request.body, std::move(bulkWriteReply));
+            }
             result.appendElements(response.toBSON());
-
-            // TODO SERVER-83869 handle BulkWriteExecStats for batches of size > 1 containing
-            // updates that modify a document’s owning shard.
-            execStats.updateMetrics(opCtx, targeters, updatedShardKey);
-
             return true;
         }
 
@@ -487,14 +410,15 @@ public:
                         nss,
                         // RerunOriginalWriteFn:
                         [&]() {
-                            response = cluster::bulkWrite(opCtx, request, targeters);
+                            bulk_write_exec::BulkWriteExecStats execStats;
+                            response = cluster::bulkWrite(opCtx, request, targeters, execStats);
                             return getWouldChangeOwningShardErrorInfo(
                                 response, opCtx->inMultiDocumentTransaction());
                         },
                         // ProcessWCEFn:
                         [&](std::unique_ptr<WriteConcernErrorDetail> wce) {
                             auto bwWce = BulkWriteWriteConcernError::parseOwned(
-                                IDLParserContext("BulkWriteWriteConcernError"), wce->toBSON());
+                                wce->toBSON(), IDLParserContext("BulkWriteWriteConcernError"));
                             response.wcErrors = bwWce;
                         },
                         // ProcessWriteErrorFn:
@@ -554,7 +478,7 @@ public:
                 } else if (type == BulkWriteCRUDOp::kUpdate) {
                     return BatchedCommandRequest(
                         bulk_write_common::makeUpdateCommandRequestFromUpdateOp(
-                            op.getUpdate(), _request, 0));
+                            opCtx, op.getUpdate(), _request, 0));
                 } else if (type == BulkWriteCRUDOp::kDelete) {
                     return BatchedCommandRequest(bulk_write_common::makeDeleteCommandRequestForFLE(
                         opCtx, op.getDelete(), _request, _request.getNsInfo()[op.getNsInfoIdx()]));

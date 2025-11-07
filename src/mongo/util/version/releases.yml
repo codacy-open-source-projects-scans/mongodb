@@ -25,6 +25,8 @@ featureCompatibilityVersions:
   - "7.3"
   - "8.0"
   - "8.1"
+  - "8.2"
+  - "8.3"
   - "100.0" # This version is not an actual version and used for testing only
 # All LTS releases starting with 4.0.
 longTermSupportReleases:
@@ -52,7 +54,7 @@ eolVersions:
   - "4.0" # 2022-04
   - "4.2" # 2023-04
   - "4.4" # 2024-02
-  # - "5.0" # 2024-10
+  - "5.0" # 2024-10
   - "5.1" # 2022-01
   - "5.2" # 2022-04
   - "5.3" # 2022-07
@@ -68,4 +70,4 @@ eolVersions:
 # lastLTS. This is intended to ease the transition to a new lastLTS by extending the lifetime
 # of those older constants, so that they can be removed at a more convenient time.
 # For example, we can set this to "5.0" when releasing "6.0".
-generateFCVLowerBoundOverride: "5.0"
+generateFCVLowerBoundOverride: "6.0"

@@ -34,11 +34,6 @@
 #include <boost/optional/optional.hpp>
 // IWYU pragma: no_include "cxxabi.h"
 // IWYU pragma: no_include "ext/alloc_traits.h"
-#include <algorithm>
-#include <functional>
-#include <iterator>
-#include <type_traits>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -46,13 +41,16 @@
 #include "mongo/executor/network_interface.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/str.h"
 #include "mongo/util/time_support.h"
+
+#include <algorithm>
+#include <functional>
+#include <iterator>
+#include <type_traits>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -576,6 +574,7 @@ void NetworkInterfaceMock::_enqueueOperation_inlock(stdx::unique_lock<stdx::mute
     const auto timeout = op.getRequest().timeout;
     auto cbh = op.getCallbackHandle();
     auto token = op.getCancellationSource().token();
+    auto diagnosticString = op.getDiagnosticString();
 
     _operations.emplace_back(std::forward<NetworkOperation>(op));
 
@@ -599,12 +598,15 @@ void NetworkInterfaceMock::_enqueueOperation_inlock(stdx::unique_lock<stdx::mute
 
     lk.unlock();
     token.onCancel().unsafeToInlineFuture().getAsync(
-        [this, cbh, requestString = op.getDiagnosticString()](Status status) {
+        [this, cbh, requestString = std::move(diagnosticString)](Status status) {
             if (!status.isOK()) {
                 return;
             }
 
             LOGV2(9786900, "Canceling network operation", "request"_attr = requestString);
+            if (_onCancelAction) {
+                _onCancelAction();
+            }
 
             stdx::unique_lock<stdx::mutex> lk(_mutex);
             ResponseStatus rs = ResponseStatus::make_forTest(

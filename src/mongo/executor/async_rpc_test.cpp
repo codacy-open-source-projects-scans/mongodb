@@ -27,18 +27,7 @@
  *    it in the license file.
  */
 
-#include <absl/container/node_hash_map.h>
-#include <array>
-#include <boost/none.hpp>
-#include <boost/smart_ptr.hpp>
-#include <cstdint>
-#include <fmt/format.h>
-#include <memory>
-#include <string>
-#include <type_traits>
-
-#include <boost/move/utility_core.hpp>
-#include <boost/optional/optional.hpp>
+#include "mongo/executor/async_rpc.h"
 
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
@@ -51,40 +40,51 @@
 #include "mongo/client/remote_command_targeter.h"
 #include "mongo/client/remote_command_targeter_factory_mock.h"
 #include "mongo/client/remote_command_targeter_mock.h"
+#include "mongo/client/retry_strategy.h"
 #include "mongo/db/database_name.h"
 #include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/client_cursor/cursor_response.h"
 #include "mongo/db/query/client_cursor/cursor_response_gen.h"
 #include "mongo/db/query/find_command.h"
-#include "mongo/db/repl/hello_gen.h"
+#include "mongo/db/repl/hello/hello_gen.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/session/logical_session_id.h"
 #include "mongo/db/tenant_id.h"
-#include "mongo/executor/async_rpc.h"
+#include "mongo/db/versioning_protocol/shard_version.h"
 #include "mongo/executor/async_rpc_error_info.h"
-#include "mongo/executor/async_rpc_retry_policy.h"
 #include "mongo/executor/async_rpc_targeter.h"
 #include "mongo/executor/async_rpc_test_fixture.h"
 #include "mongo/executor/async_rpc_util.h"
 #include "mongo/executor/async_transaction_rpc.h"
 #include "mongo/executor/network_interface_mock.h"
+#include "mongo/executor/remote_command_request.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/idl/generic_argument_gen.h"
 #include "mongo/rpc/topology_version_gen.h"
-#include "mongo/s/shard_version.h"
 #include "mongo/s/transaction_router.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/bson_test_util.h"
-#include "mongo/unittest/framework.h"
 #include "mongo/unittest/thread_assertion_monitor.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/concurrency/notification.h"
 #include "mongo/util/duration.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/future.h"
 #include "mongo/util/future_impl.h"
 #include "mongo/util/net/hostandport.h"
+
+#include <array>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <type_traits>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/move/utility_core.hpp>
+#include <boost/none.hpp>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr.hpp>
+#include <fmt/format.h>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kNetwork
 
@@ -241,7 +241,7 @@ TEST_F(AsyncRPCTestFixture, SuccessfulHelloWithGenericFields) {
 
     auto opCtxHolder = makeOperationContext();
     auto options = std::make_shared<AsyncRPCOptions<HelloCommand>>(
-        getExecutorPtr(), _cancellationToken, helloCmd, std::make_shared<NeverRetryPolicy>());
+        getExecutorPtr(), _cancellationToken, helloCmd, std::make_shared<NoRetryStrategy>());
     ExecutorFuture<AsyncRPCResponse<HelloCommandReply>> resultFuture =
         sendCommand(options, opCtxHolder.get(), std::move(targeter));
 
@@ -280,35 +280,44 @@ TEST_F(AsyncRPCTestFixture, RetryOnSuccessfulHelloAdditionalAttempts) {
     HelloCommand helloCmd;
     initializeCommand(helloCmd);
     // Define a retry policy that simply decides to always retry a command three additional times.
-    std::shared_ptr<TestRetryPolicy> testPolicy = std::make_shared<TestRetryPolicy>();
+    std::shared_ptr<TestRetryStrategy> testStrategy = std::make_shared<TestRetryStrategy>();
     const auto maxNumRetries = 3;
     const auto retryDelay = Milliseconds(100);
-    testPolicy->setMaxNumRetries(maxNumRetries);
-    testPolicy->pushRetryDelay(retryDelay);
-    testPolicy->pushRetryDelay(retryDelay);
-    testPolicy->pushRetryDelay(retryDelay);
+    testStrategy->setMaxNumRetries(maxNumRetries);
+    testStrategy->pushRetryDelay(retryDelay);
+    testStrategy->pushRetryDelay(retryDelay);
+    testStrategy->pushRetryDelay(retryDelay);
 
     auto opCtxHolder = makeOperationContext();
     auto options = std::make_shared<AsyncRPCOptions<HelloCommand>>(
-        getExecutorPtr(), _cancellationToken, helloCmd, testPolicy);
+        getExecutorPtr(), _cancellationToken, helloCmd, testStrategy);
     ExecutorFuture<AsyncRPCResponse<HelloCommandReply>> resultFuture =
         sendCommand(options, opCtxHolder.get(), std::move(targeter));
 
-    const auto onCommandFunc = [&](const auto& request) {
+    const auto onCommandErrorFunc = [&](const auto& request) {
+        ASSERT(request.cmdObj["hello"]);
+        ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), request.target);
+        BSONObjBuilder result(helloReply.toBSON());
+        CommandHelpers::appendCommandStatusNoThrow(
+            result, Status(ErrorCodes::Overflow, "test error code for retry"));
+        return result.obj();
+    };
+    const auto onCommandOKFunc = [&](const auto& request) {
         ASSERT(request.cmdObj["hello"]);
         ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), request.target);
         return helloReply.toBSON();
     };
     // Schedule 1 request as the initial attempt, and then three following retries to satisfy the
     // condition for the runner to stop retrying.
-    for (auto i = 0; i <= maxNumRetries; i++) {
-        scheduleRequestAndAdvanceClockForRetry(testPolicy, onCommandFunc, retryDelay);
+    for (auto i = 0; i < maxNumRetries; i++) {
+        scheduleRequestAndAdvanceClockForRetry(testStrategy, onCommandErrorFunc, retryDelay);
     }
+    onCommand(onCommandOKFunc);
     AsyncRPCResponse res = resultFuture.get();
 
     ASSERT_BSONOBJ_EQ(res.response.toBSON(), helloReply.toBSON());
     ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), res.targetUsed);
-    ASSERT_EQ(maxNumRetries, testPolicy->getNumRetriesPerformed());
+    ASSERT_EQ(maxNumRetries, testStrategy->getNumRetriesPerformed());
 }
 
 /*
@@ -321,22 +330,33 @@ TEST_F(AsyncRPCTestFixture, DynamicDelayBetweenRetries) {
     HelloCommand helloCmd;
     initializeCommand(helloCmd);
     // Define a retry policy that simply decides to always retry a command three additional times.
-    std::shared_ptr<TestRetryPolicy> testPolicy = std::make_shared<TestRetryPolicy>();
+    std::shared_ptr<TestRetryStrategy> testStrategy = std::make_shared<TestRetryStrategy>();
     const auto maxNumRetries = 3;
     const std::array<Milliseconds, maxNumRetries> retryDelays{
         Milliseconds(100), Milliseconds(50), Milliseconds(10)};
-    testPolicy->setMaxNumRetries(maxNumRetries);
-    testPolicy->pushRetryDelay(retryDelays[0]);
-    testPolicy->pushRetryDelay(retryDelays[1]);
-    testPolicy->pushRetryDelay(retryDelays[2]);
+    const auto totalRetryDelay =
+        std::accumulate(retryDelays.begin(), retryDelays.end(), Milliseconds{0});
+    testStrategy->setMaxNumRetries(maxNumRetries);
+    testStrategy->pushRetryDelay(retryDelays[0]);
+    testStrategy->pushRetryDelay(retryDelays[1]);
+    testStrategy->pushRetryDelay(retryDelays[2]);
 
     auto opCtxHolder = makeOperationContext();
     auto options = std::make_shared<AsyncRPCOptions<HelloCommand>>(
-        getExecutorPtr(), _cancellationToken, helloCmd, testPolicy);
+        getExecutorPtr(), _cancellationToken, helloCmd, testStrategy);
     ExecutorFuture<AsyncRPCResponse<HelloCommandReply>> resultFuture =
         sendCommand(options, opCtxHolder.get(), std::move(targeter));
 
-    const auto onCommandFunc = [&](const auto& request) {
+    const auto onCommandErrorFunc = [&](const auto& request) {
+        ASSERT(request.cmdObj["hello"]);
+        ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), request.target);
+        BSONObjBuilder result(helloReply.toBSON());
+        CommandHelpers::appendCommandStatusNoThrow(
+            result, Status(ErrorCodes::Overflow, "test error code for retry"));
+        return result.obj();
+    };
+
+    const auto onCommandOKFunc = [&](const auto& request) {
         ASSERT(request.cmdObj["hello"]);
         ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), request.target);
         return helloReply.toBSON();
@@ -345,34 +365,35 @@ TEST_F(AsyncRPCTestFixture, DynamicDelayBetweenRetries) {
     // Schedule 1 response to the initial attempt, and then two for the following retries.
     // Advance the clock appropriately based on each retry delay.
     for (auto i = 0; i < maxNumRetries; i++) {
-        scheduleRequestAndAdvanceClockForRetry(testPolicy, onCommandFunc, retryDelays[i]);
+        scheduleRequestAndAdvanceClockForRetry(testStrategy, onCommandErrorFunc, retryDelays[i]);
     }
     // Schedule a response to the final retry. No need to advance clock since no more
     // retries should be attemped after this third one.
-    onCommand(onCommandFunc);
+    onCommand(onCommandOKFunc);
 
     AsyncRPCResponse res = resultFuture.get();
 
     ASSERT_BSONOBJ_EQ(res.response.toBSON(), helloReply.toBSON());
     ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), res.targetUsed);
-    ASSERT_EQ(maxNumRetries, testPolicy->getNumRetriesPerformed());
+    ASSERT_EQ(maxNumRetries, testStrategy->getNumRetriesPerformed());
+    ASSERT_EQ(testStrategy->getTotalBackoff(), totalRetryDelay);
 }
 
 /*
  * Tests that 'sendCommand' will not retry when the retry policy indicates accordingly.
  */
-TEST_F(AsyncRPCTestFixture, DoNotRetryOnErrorAccordingToPolicy) {
+TEST_F(AsyncRPCTestFixture, DoNotRetryOnErrorAccordingToStrategy) {
     std::unique_ptr<Targeter> targeter = std::make_unique<LocalHostTargeter>();
     HelloCommandReply helloReply = HelloCommandReply(TopologyVersion(OID::gen(), 0));
     HelloCommand helloCmd;
     initializeCommand(helloCmd);
-    std::shared_ptr<TestRetryPolicy> testPolicy = std::make_shared<TestRetryPolicy>();
+    std::shared_ptr<TestRetryStrategy> testStrategy = std::make_shared<TestRetryStrategy>();
     const auto zeroRetries = 0;
-    testPolicy->setMaxNumRetries(zeroRetries);
+    testStrategy->setMaxNumRetries(zeroRetries);
 
     auto opCtxHolder = makeOperationContext();
     auto options = std::make_shared<AsyncRPCOptions<HelloCommand>>(
-        getExecutorPtr(), _cancellationToken, helloCmd, testPolicy);
+        getExecutorPtr(), _cancellationToken, helloCmd, testStrategy);
     ExecutorFuture<AsyncRPCResponse<HelloCommandReply>> resultFuture =
         sendCommand(options, opCtxHolder.get(), std::move(targeter));
 
@@ -386,7 +407,7 @@ TEST_F(AsyncRPCTestFixture, DoNotRetryOnErrorAccordingToPolicy) {
 
     // The error returned by our API should always be RemoteCommandExecutionError
     ASSERT_EQ(error.code(), ErrorCodes::RemoteCommandExecutionError);
-    ASSERT_EQ(zeroRetries, testPolicy->getNumRetriesPerformed());
+    ASSERT_EQ(zeroRetries, testStrategy->getNumRetriesPerformed());
 }
 
 /*
@@ -642,7 +663,7 @@ TEST_F(AsyncRPCTestFixture, ExecutorShutdown) {
 
 TEST_F(AsyncRPCTestFixture, BatonTest) {
     std::unique_ptr<Targeter> targeter = std::make_unique<LocalHostTargeter>();
-    auto retryPolicy = std::make_shared<NeverRetryPolicy>();
+    auto retryStrategy = std::make_shared<NoRetryStrategy>();
     HelloCommand helloCmd;
     HelloCommandReply helloReply = HelloCommandReply(TopologyVersion(OID::gen(), 0));
     initializeCommand(helloCmd);
@@ -683,11 +704,10 @@ TEST_F(AsyncRPCTestFixture, BatonTest) {
  */
 TEST_F(AsyncRPCTestFixture, LocalTargeter) {
     LocalHostTargeter t;
-    auto targetFuture = t.resolve(_cancellationToken);
+    auto targetFuture = t.resolve(_cancellationToken, TargetingMetadata{});
     auto target = targetFuture.get();
 
-    ASSERT_EQ(target.size(), 1);
-    ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), target[0]);
+    ASSERT_EQ(HostAndPort("localhost", serverGlobalParams.port), target);
 }
 
 /*
@@ -695,20 +715,20 @@ TEST_F(AsyncRPCTestFixture, LocalTargeter) {
  */
 TEST_F(AsyncRPCTestFixture, HostAndPortTargeter) {
     FixedTargeter t{HostAndPort("FakeHost1", 12345)};
-    auto targetFuture = t.resolve(_cancellationToken);
+    auto targetFuture = t.resolve(_cancellationToken, TargetingMetadata{});
     auto target = targetFuture.get();
 
-    ASSERT_EQ(target.size(), 1);
-    ASSERT_EQ(HostAndPort("FakeHost1", 12345), target[0]);
+    ASSERT_EQ(HostAndPort("FakeHost1", 12345), target);
 }
 
 /*
- * Basic RetryPolicy that never retries.
+ * Basic RetryStrategy that never retries.
  */
 TEST_F(AsyncRPCTestFixture, NoRetry) {
-    NeverRetryPolicy p;
+    NoRetryStrategy p;
 
-    ASSERT_FALSE(p.recordAndEvaluateRetry(Status(ErrorCodes::BadValue, "mock")));
+    ASSERT_FALSE(p.recordFailureAndEvaluateShouldRetry(
+        Status(ErrorCodes::BadValue, "mock"), boost::none, std::span<const std::string>{}));
     ASSERT_EQUALS(p.getNextRetryDelay(), Milliseconds::zero());
 }
 
@@ -774,12 +794,12 @@ TEST_F(AsyncRPCTestFixture, FailedTargeting) {
 }
 TEST_F(AsyncRPCTestFixture, BatonShutdownExecutorAlive) {
     std::unique_ptr<Targeter> targeter = std::make_unique<LocalHostTargeter>();
-    auto retryPolicy = std::make_shared<TestRetryPolicy>();
+    auto retryStrategy = std::make_shared<TestRetryStrategy>();
     const auto maxNumRetries = 5;
     const auto retryDelay = Milliseconds(10);
-    retryPolicy->setMaxNumRetries(maxNumRetries);
+    retryStrategy->setMaxNumRetries(maxNumRetries);
     for (int i = 0; i < maxNumRetries; ++i)
-        retryPolicy->pushRetryDelay(retryDelay);
+        retryStrategy->pushRetryDelay(retryDelay);
     HelloCommand helloCmd;
     HelloCommandReply helloReply = HelloCommandReply(TopologyVersion(OID::gen(), 0));
     initializeCommand(helloCmd);
@@ -806,7 +826,7 @@ TEST_F(AsyncRPCTestFixture, BatonShutdownExecutorAlive) {
     auto localError = extraInfo->asLocal();
     ASSERT_EQ(localError, expectedDetachError);
 
-    ASSERT_EQ(0, retryPolicy->getNumRetriesPerformed());
+    ASSERT_EQ(0, retryStrategy->getNumRetriesPerformed());
 }
 
 TEST_F(AsyncRPCTestFixture, SendTxnCommandWithoutTxnRouterAppendsNoTxnFields) {
@@ -1064,7 +1084,7 @@ TEST_F(AsyncRPCTxnTestFixture, SendTxnCommandWithGenericArguments) {
     findCmd.setShardVersion(expectedShardVersion);
 
     auto options = std::make_shared<AsyncRPCOptions<FindCommandRequest>>(
-        getExecutorPtr(), _cancellationToken, findCmd, std::make_shared<NeverRetryPolicy>());
+        getExecutorPtr(), _cancellationToken, findCmd, std::make_shared<NoRetryStrategy>());
     auto resultFuture = sendTxnCommand(options, getOpCtx(), std::move(targeter));
 
     onCommand([&](const auto& request) {
@@ -1392,6 +1412,57 @@ TEST_F(AsyncRPCTestFixture, TargeterOnRemoteCommandError) {
     // onRemoteCommandError not called, error not from remote host.
     downHosts = targeterMock->getAndClearMarkedDownHosts();
     ASSERT_FALSE(downHosts.find(testHost) != downHosts.end());
+}
+
+/**
+ * Tests that the targeter use the set of deprioritized server to choose a different host on retry.
+ */
+TEST_F(AsyncRPCTestFixture, TargeterDeprioritizedServer) {
+    constexpr auto backoffDelayMs = 10;
+    FailPointEnableBlock _{"setBackoffDelayForTesting", BSON("backoffDelayMs" << backoffDelayMs)};
+    const std::vector<HostAndPort> hosts{
+        HostAndPort("Host1", 1),
+        HostAndPort("Host2", 2),
+    };
+    auto factory = RemoteCommandTargeterFactoryMock();
+    std::shared_ptr<RemoteCommandTargeter> t;
+    t = factory.create(ConnectionString::forStandalones(hosts));
+    auto targeterMock = RemoteCommandTargeterMock::get(t);
+    targeterMock->setFindHostsReturnValue(hosts);
+
+    ReadPreferenceSetting readPref;
+    std::unique_ptr<Targeter> targeter =
+        std::make_unique<AsyncRemoteCommandTargeterAdapter>(readPref, t);
+    auto opCtxHolder = makeOperationContext();
+    DatabaseName testDbName = DatabaseName::createDatabaseName_forTest(boost::none, "testdb");
+    NamespaceString nss = NamespaceString::createNamespaceString_forTest(testDbName);
+
+    FindCommandRequest findCmd(nss);
+    auto options = std::make_shared<AsyncRPCOptions<FindCommandRequest>>(
+        getExecutorPtr(),
+        CancellationToken::uncancelable(),
+        findCmd,
+        std::make_shared<DefaultRetryStrategy>());
+    auto future = sendCommandAndWaitUntilRequestIsReady(
+        options, opCtxHolder.get(), std::move(targeter), getNetworkInterfaceMock());
+
+    onCommand([&](const executor::RemoteCommandRequest& request) {
+        ASSERT_EQ(request.target, hosts[0]);
+        return createErrorSystemOverloaded(ErrorCodes::IngressRequestRateLimitExceeded);
+    });
+
+    advanceUntilReadyRequest();
+
+    onCommand([&](const auto& request) {
+        // For the second request, we expect the second host to be chosen.
+        // This is because host[0] returned a system overloaded error, and we expect the targeting
+        // metadata to be updated.
+        ASSERT_EQ(request.target, hosts[1]);
+        // We chose BadValue since this code is non-retryable.
+        return createErrorResponse(Status(ErrorCodes::BadValue, "test"));
+    });
+
+    future.wait();
 }
 
 }  // namespace

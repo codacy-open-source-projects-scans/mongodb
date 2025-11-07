@@ -27,19 +27,6 @@
  *    it in the license file.
  */
 
-#include <algorithm>
-#include <boost/optional.hpp>
-#include <memory>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <absl/container/node_hash_set.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
@@ -58,25 +45,34 @@
 #include "mongo/db/pipeline/external_data_source_option_gen.h"
 #include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline.h"
-#include "mongo/db/query/command_diagnostic_printer.h"
 #include "mongo/db/query/explain_options.h"
 #include "mongo/db/query/explain_verbosity_gen.h"
 #include "mongo/db/query/query_knobs_gen.h"
 #include "mongo/db/query/query_request_helper.h"
-#include "mongo/db/query/query_settings/query_settings_utils.h"
+#include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/read_concern_support_result.h"
 #include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/topology/sharding_state.h"
 #include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/reply_builder_interface.h"
 #include "mongo/s/query/exec/document_source_merge_cursors.h"
-#include "mongo/s/sharding_state.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/database_name_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/serialization_context.h"
+
+#include <algorithm>
+#include <memory>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <boost/optional.hpp>
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace {
@@ -122,16 +118,16 @@ public:
                                                       serializationCtx);
 
         auto privileges = uassertStatusOK(
-            auth::getPrivilegesForAggregate(AuthorizationSession::get(opCtx->getClient()),
+            auth::getPrivilegesForAggregate(opCtx,
+                                            AuthorizationSession::get(opCtx->getClient()),
                                             aggregationRequest.getNamespace(),
                                             aggregationRequest,
                                             false));
 
-        // TODO: SERVER-73632 Remove feature flag for PM-635.
         // Forbid users from passing 'querySettings' explicitly.
         uassert(7708001,
                 "BSON field 'querySettings' is an unknown field",
-                query_settings::utils::allowQuerySettingsFromClient(opCtx->getClient()) ||
+                query_settings::allowQuerySettingsFromClient(opCtx->getClient()) ||
                     !aggregationRequest.getQuerySettings().has_value());
 
         return std::make_unique<Invocation>(
@@ -159,6 +155,10 @@ public:
     }
 
     bool collectsResourceConsumptionMetrics() const override {
+        return true;
+    }
+
+    bool enableDiagnosticPrintingOnFailure() const final {
         return true;
     }
 
@@ -259,8 +259,12 @@ public:
 
         ReadConcernSupportResult supportsReadConcern(repl::ReadConcernLevel level,
                                                      bool isImplicitDefault) const override {
-            return _liteParsedPipeline.supportsReadConcern(
-                level, isImplicitDefault, _aggregationRequest.getExplain());
+            bool isExplain = _aggregationRequest.getExplain().get_value_or(false);
+            return _liteParsedPipeline.supportsReadConcern(level, isImplicitDefault, isExplain);
+        }
+
+        bool supportsRawData() const override {
+            return true;
         }
 
         bool allowsSpeculativeMajorityReads() const override {
@@ -273,20 +277,16 @@ public:
         void run(OperationContext* opCtx, rpc::ReplyBuilderInterface* reply) override {
             CommandHelpers::handleMarkKillOnClientDisconnect(
                 opCtx, !Pipeline::aggHasWriteStage(_request.body));
-
-            // Capture diagnostics for tassert and invariant failures that may occur during query
-            // parsing, planning or execution. No work is done on the hot-path, all computation of
-            // these diagnostics is done lazily during failure handling. This line just creates an
-            // RAII object which holds references to objects on this stack frame, which will be used
-            // to print diagnostics in the event of a tassert or invariant.
-            ScopedDebugInfo aggregateCmdDiagnostics("commandDiagnostics",
-                                                    command_diagnostics::Printer{opCtx});
-
+            boost::optional<ExplainOptions::Verbosity> verbosity = boost::none;
+            if (_aggregationRequest.getExplain().get_value_or(false)) {
+                verbosity = ExplainOptions::Verbosity::kQueryPlanner;
+            }
             uassertStatusOK(runAggregate(opCtx,
                                          _aggregationRequest,
                                          _liteParsedPipeline,
                                          _request.body,
                                          _privileges,
+                                         verbosity,
                                          reply,
                                          _usedExternalDataSources));
 
@@ -313,17 +313,18 @@ public:
                      ExplainOptions::Verbosity verbosity,
                      rpc::ReplyBuilderInterface* result) override {
             // See run() method for details.
+
             uassertStatusOK(runAggregate(opCtx,
                                          _aggregationRequest,
                                          _liteParsedPipeline,
                                          _request.body,
                                          _privileges,
+                                         verbosity,
                                          result,
                                          _usedExternalDataSources));
         }
 
-        bool canRetryOnStaleConfigOrShardCannotRefreshDueToLocksHeld(
-            const OpMsgRequest& opMsgRequest) const override {
+        bool canRetryOnStaleShardMetadataError(const OpMsgRequest& opMsgRequest) const override {
             // Can not rerun the command when executing an aggregation that runs $mergeCursors as it
             // may have consumed the cursors within.
             SerializationContext serializationCtx = opMsgRequest.getSerializationContext();

@@ -6,9 +6,6 @@
  * @tags: [
  *   config_shard_incompatible,
  *   uses_change_streams,
- *   # TODO (SERVER-97257): Re-enable this test.
- *   # Test doesn't start enough mongods to have num_mongos routers
- *   embedded_router_incompatible,
  * ]
  */
 import {ShardingTest} from "jstests/libs/shardingtest.js";
@@ -21,27 +18,29 @@ const testDB = st.s.getDB("test");
 // Test that attempting to open a stream on a single collection results in an empty, closed
 // cursor response.
 let csCmdRes = assert.commandWorked(
-    testDB.runCommand({aggregate: "testing", pipeline: [{$changeStream: {}}], cursor: {}}));
+    testDB.runCommand({aggregate: "testing", pipeline: [{$changeStream: {}}], cursor: {}}),
+);
 assert.docEq([], csCmdRes.cursor.firstBatch);
 assert.eq(csCmdRes.cursor.id, 0);
 
 // Test that attempting to open a whole-db stream results in an empty, closed cursor response.
-csCmdRes = assert.commandWorked(
-    testDB.runCommand({aggregate: 1, pipeline: [{$changeStream: {}}], cursor: {}}));
+csCmdRes = assert.commandWorked(testDB.runCommand({aggregate: 1, pipeline: [{$changeStream: {}}], cursor: {}}));
 assert.docEq([], csCmdRes.cursor.firstBatch);
 assert.eq(csCmdRes.cursor.id, 0);
 
 // Test that attempting to open a cluster-wide stream results in an empty, closed cursor
 // response.
-csCmdRes = assert.commandWorked(adminDB.runCommand(
-    {aggregate: 1, pipeline: [{$changeStream: {allChangesForCluster: true}}], cursor: {}}));
+csCmdRes = assert.commandWorked(
+    adminDB.runCommand({aggregate: 1, pipeline: [{$changeStream: {allChangesForCluster: true}}], cursor: {}}),
+);
 assert.docEq([], csCmdRes.cursor.firstBatch);
 assert.eq(csCmdRes.cursor.id, 0);
 
 // Test that a regular, non-$changeStream aggregation also results in an empty cursor when no
 // shards are present.
 const nonCsCmdRes = assert.commandWorked(
-    testDB.runCommand({aggregate: "testing", pipeline: [{$match: {}}], cursor: {}}));
+    testDB.runCommand({aggregate: "testing", pipeline: [{$match: {}}], cursor: {}}),
+);
 assert.docEq([], nonCsCmdRes.cursor.firstBatch);
 assert.eq(nonCsCmdRes.cursor.id, 0);
 

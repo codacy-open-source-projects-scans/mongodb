@@ -27,18 +27,14 @@
  *    it in the license file.
  */
 
-#include <boost/move/utility_core.hpp>
-#include <memory>
-#include <string>
-
-#include <boost/optional/optional.hpp>
+#include "mongo/db/query/allowed_contexts.h"
 
 #include "mongo/base/error_codes.h"
-#include "mongo/db/query/allowed_contexts.h"
-#include "mongo/transport/session.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/str.h"
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 
@@ -76,8 +72,8 @@ void assertLanguageFeatureIsAllowed(
             break;
         }
         case AllowedWithApiStrict::kConditionally: {
-            if (auto callback = conditionalCallback) {
-                (*callback)(apiParameters);
+            if (conditionalCallback) {
+                (*conditionalCallback)(apiParameters);
             }
             break;
         }

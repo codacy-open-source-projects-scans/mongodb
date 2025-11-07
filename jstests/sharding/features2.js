@@ -1,7 +1,7 @@
 // @tags: [requires_scripting]
 import {ShardingTest} from "jstests/libs/shardingtest.js";
 
-var s = new ShardingTest({shards: 2, mongos: 1});
+let s = new ShardingTest({shards: 2, mongos: 1});
 assert.commandWorked(s.s0.adminCommand({enablesharding: "test", primaryShard: s.shard1.shardName}));
 
 let db = s.getDB("test");
@@ -74,21 +74,21 @@ db.mr.save({x: 3, tags: ["c", "a"]});
 db.mr.save({x: 4, tags: ["b", "c"]});
 db.mr.createIndex({x: 1});
 
-let m = function() {
-    this.tags.forEach(function(z) {
+let m = function () {
+    this.tags.forEach(function (z) {
         emit(z, {count: 1});
     });
 };
 
-let r = function(key, values) {
-    var total = 0;
-    for (var i = 0; i < values.length; i++) {
+let r = function (key, values) {
+    let total = 0;
+    for (let i = 0; i < values.length; i++) {
         total += values[i].count;
     }
     return {count: total};
 };
 
-let doMR = function(n) {
+let doMR = function (n) {
     print(n);
 
     // on-disk
@@ -96,11 +96,11 @@ let doMR = function(n) {
     var res = db.mr.mapReduce(m, r, "smr1_out");
     printjson(res);
 
-    var x = db[res.result];
+    let x = db[res.result];
     assert.eq(3, x.find().count(), "MR T1 " + n);
 
     var z = {};
-    x.find().forEach(function(a) {
+    x.find().forEach(function (a) {
         z[a._id] = a.value.count;
     });
     assert.eq(3, Object.keySet(z).length, "MR T2 " + n);
@@ -116,7 +116,7 @@ let doMR = function(n) {
     printjson(res);
 
     var z = {};
-    res.results.forEach(function(a) {
+    res.results.forEach(function (a) {
         z[a._id] = a.value.count;
     });
     printjson(z);
@@ -134,9 +134,9 @@ assert.eq(2, s.onNumShards("test", "mr"), "E1");
 
 doMR("after");
 
-s.adminCommand({split: 'test.mr', middle: {x: 3}});
-s.adminCommand({split: 'test.mr', middle: {x: 4}});
-s.adminCommand({movechunk: 'test.mr', find: {x: 3}, to: s.getPrimaryShard('test').name});
+s.adminCommand({split: "test.mr", middle: {x: 3}});
+s.adminCommand({split: "test.mr", middle: {x: 4}});
+s.adminCommand({movechunk: "test.mr", find: {x: 3}, to: s.getPrimaryShard("test").name});
 
 doMR("after extra split");
 
@@ -158,6 +158,6 @@ assert.eq(3, db.countaa.find().itcount(), "counta1");
 
 let hello = db.runCommand({hello: 1});
 assert(hello.isWritablePrimary);
-assert.eq('isdbgrid', hello.msg);
+assert.eq("isdbgrid", hello.msg);
 
 s.stop();

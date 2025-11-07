@@ -1,8 +1,6 @@
 /**
  * Sharding tests for using "explain" with the $search aggregation stage for queries that do not
- * contain meaningful executionStats. This tests "queryPlanner" verbosity (no execution stats). It
- * also tests  "executionStats" and "allPlansExecution" without the feature flag for explain
- * execution stats enabled.
+ * contain meaningful executionStats. This tests "queryPlanner" verbosity (no execution stats).
  *
  */
 import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
@@ -13,9 +11,7 @@ import {
     getDefaultProtocolVersionForPlanShardedSearch,
     mongotCommandForQuery,
 } from "jstests/with_mongot/mongotmock/lib/mongotmock.js";
-import {
-    ShardingTestWithMongotMock
-} from "jstests/with_mongot/mongotmock/lib/shardingtest_with_mongotmock.js";
+import {ShardingTestWithMongotMock} from "jstests/with_mongot/mongotmock/lib/shardingtest_with_mongotmock.js";
 import {
     getDefaultLastExplainContents,
     getShardedMongotStagesAndValidateExplainExecutionStats,
@@ -39,15 +35,13 @@ const st = stWithMock.st;
 
 const mongos = st.s;
 const testDB = mongos.getDB(dbName);
-if (checkSbeRestrictedOrFullyEnabled(testDB) &&
-    FeatureFlagUtil.isPresentAndEnabled(testDB.getMongo(), 'SearchInSbe')) {
+if (checkSbeRestrictedOrFullyEnabled(testDB) && FeatureFlagUtil.isPresentAndEnabled(testDB.getMongo(), "SearchInSbe")) {
     jsTestLog("Skipping the test because it only applies to $search in classic engine.");
     stWithMock.stop();
     quit();
 }
 
-assert.commandWorked(
-    mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}));
+assert.commandWorked(mongos.getDB("admin").runCommand({enableSharding: dbName, primaryShard: st.shard0.name}));
 
 const coll = testDB.getCollection(collName);
 
@@ -67,7 +61,7 @@ const collUUID = getUUIDFromListCollections(st.rs0.getPrimary().getDB(dbName), c
 
 const searchQuery = {
     query: "fire",
-    path: "element"
+    path: "element",
 };
 
 const expectedExplainContents = getDefaultLastExplainContents();
@@ -103,38 +97,38 @@ function runExplainTest(verbosity) {
             collectionUUID: collUUID,
             explainVerbosity: {verbosity},
         });
-        const metaPipeline = [{
-            "$group": {
-                "_id": {"type": "$type", "path": "$path", "bucket": "$bucket"},
-                "value": {
-                    "$sum": "$metaVal",
-                }
-            }
-        }];
+        const metaPipeline = [
+            {
+                "$group": {
+                    "_id": {"type": "$type", "path": "$path", "bucket": "$bucket"},
+                    "value": {
+                        "$sum": "$metaVal",
+                    },
+                },
+            },
+        ];
         if (FeatureFlagUtil.isPresentAndEnabled(testDB, "ShardFilteringDistinctScan")) {
             metaPipeline[0].$group.$willBeMerged = false;
         }
 
-        const mergingPipelineHistory = [{
-            expectedCommand: {
-                planShardedSearch: collName,
-                query: searchQuery,
-                $db: dbName,
-                searchFeatures: {shardedSort: 1},
-                explain: {verbosity}
+        const mergingPipelineHistory = [
+            {
+                expectedCommand: {
+                    planShardedSearch: collName,
+                    query: searchQuery,
+                    $db: dbName,
+                    searchFeatures: {shardedSort: 1},
+                    explain: {verbosity},
+                },
+                response: {
+                    ok: 1,
+                    protocolVersion,
+                    metaPipeline,
+                },
             },
-            response: {
-                ok: 1,
-                protocolVersion,
-                metaPipeline,
-            }
-        }];
-        // TODO SERVER-91594: Testing "executionStats" and "allPlansExecution" with
-        // setUpMongotReturnExplain() is not necessary after mongot will always return a cursor for
-        // execution stats verbosities.
+        ];
         {
-            stWithMock.getMockConnectedToHost(stWithMock.st.s)
-                .setMockResponses(mergingPipelineHistory, cursorId);
+            stWithMock.getMockConnectedToHost(stWithMock.st.s).setMockResponses(mergingPipelineHistory, cursorId);
 
             setUpMongotReturnExplain({
                 searchCmd,
@@ -155,50 +149,7 @@ function runExplainTest(verbosity) {
                 nReturnedList: [NumberLong(0), NumberLong(0)],
                 expectedExplainContents,
             });
-            verifyShardsPartExplainOutput(
-                {result, searchType: "$search", metaPipeline, protocolVersion});
-        }
-
-        // TODO SERVER-85637 Remove the following block of code with
-        // setUpMongotReturnExplainAndMultiCursor(), as it will fail with the feature flag
-        // removed. This scenario is already tested with execution stats enabled in
-        // sharded_search_explain_execution_stats.js.
-        if (verbosity != "queryPlanner") {
-            {
-                stWithMock.getMockConnectedToHost(stWithMock.st.s)
-                    .setMockResponses(mergingPipelineHistory, cursorId);
-
-                // With the feature flag disabled, the protocolVersion will not be included, so only
-                // an explain and cursor object will be returned.
-                setUpMongotReturnExplainAndCursor({
-                    mongotMock: s0Mongot,
-                    coll,
-                    searchCmd,
-                    nextBatch: [
-                        {_id: 1, $searchScore: 0.321},
-                    ],
-                });
-                setUpMongotReturnExplainAndCursor({
-                    mongotMock: s1Mongot,
-                    coll,
-                    searchCmd,
-                    nextBatch: [
-                        {_id: 1, $searchScore: 0.321},
-                    ],
-                });
-
-                const result = coll.explain(verbosity).aggregate([{$search: searchQuery}]);
-                getShardedMongotStagesAndValidateExplainExecutionStats({
-                    result,
-                    stageType: "$_internalSearchMongotRemote",
-                    expectedNumStages: 2,
-                    verbosity,
-                    nReturnedList: [NumberLong(0), NumberLong(0)],
-                    expectedExplainContents,
-                });
-                verifyShardsPartExplainOutput(
-                    {result, searchType: "$search", metaPipeline, protocolVersion});
-            }
+            verifyShardsPartExplainOutput({result, searchType: "$search", metaPipeline, protocolVersion});
         }
     }
     runTestOnPrimaries(testExplainCase);
@@ -206,11 +157,5 @@ function runExplainTest(verbosity) {
 }
 
 runExplainTest("queryPlanner");
-// The following tests only work if 'featureFlagSearchExplainExecutionStats' is disabled.
-// TODO SERVER-85637 remove when the feature flag is removed.
-if (!FeatureFlagUtil.isEnabled(testDB.getMongo(), 'SearchExplainExecutionStats')) {
-    runExplainTest("executionStats");
-    runExplainTest("allPlansExecution");
-}
 
 stWithMock.stop();

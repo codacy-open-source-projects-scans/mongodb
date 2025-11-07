@@ -29,12 +29,15 @@
 
 #pragma once
 
+#include "mongo/util/modules.h"
+
 #include <string>
 #include <vector>
 
 #ifndef _WIN32
 
-#include <cerrno>        // IWYU pragma: export
+#include <cerrno>  // IWYU pragma: export
+
 #include <sys/socket.h>  // IWYU pragma: export
 #include <sys/types.h>   // IWYU pragma: export
 #include <sys/un.h>      // IWYU pragma: export
@@ -47,7 +50,7 @@
 
 #include "mongo/base/string_data.h"
 
-namespace mongo {
+namespace MONGO_MOD_PUBLIC mongo {
 class BSONObjBuilder;
 
 #if defined(_WIN32)
@@ -158,4 +161,4 @@ private:
     bool _isValid = false;
 };
 
-}  // namespace mongo
+}  // namespace MONGO_MOD_PUBLIC mongo

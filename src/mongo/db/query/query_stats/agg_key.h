@@ -29,19 +29,10 @@
 
 #pragma once
 
-#include <cstdint>
-#include <utility>
-
-#include <absl/container/node_hash_map.h>
-#include <boost/move/utility_core.hpp>
-#include <boost/none.hpp>
-#include <boost/optional/optional.hpp>
-#include <boost/smart_ptr/intrusive_ptr.hpp>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/collection_type.h"
+#include "mongo/db/local_catalog/collection_type.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregate_command_gen.h"
@@ -49,8 +40,16 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/explain_options.h"
-#include "mongo/db/query/query_shape/query_shape.h"
+#include "mongo/db/query/query_shape/agg_cmd_shape.h"
 #include "mongo/db/query/query_stats/key.h"
+#include "mongo/util/modules.h"
+
+#include <cstdint>
+#include <utility>
+
+#include <absl/container/node_hash_map.h>
+#include <boost/optional/optional.hpp>
+#include <boost/smart_ptr/intrusive_ptr.hpp>
 
 namespace mongo::query_stats {
 
@@ -62,7 +61,8 @@ struct AggCmdComponents : public SpecificKeyComponents {
     static constexpr StringData kOtherNssFieldName = "otherNss"_sd;
 
     AggCmdComponents(const AggregateCommandRequest&,
-                     stdx::unordered_set<NamespaceString> involvedNamespaces);
+                     stdx::unordered_set<NamespaceString> involvedNamespaces,
+                     const boost::optional<ExplainOptions::Verbosity>& verbosity);
 
     void HashValue(absl::HashState state) const final;
 
@@ -91,11 +91,10 @@ struct AggCmdComponents : public SpecificKeyComponents {
  */
 class AggKey final : public Key {
 public:
-    AggKey(AggregateCommandRequest request,
-           const Pipeline& pipeline,
-           const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    AggKey(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+           const AggregateCommandRequest& request,
+           std::unique_ptr<query_shape::Shape> aggShape,
            stdx::unordered_set<NamespaceString> involvedNamespaces,
-           const NamespaceString& origNss,
            query_shape::CollectionType collectionType = query_shape::CollectionType::kUnknown);
 
     const SpecificKeyComponents& specificComponents() const final {

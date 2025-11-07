@@ -28,20 +28,6 @@
  */
 
 
-#include <algorithm>
-#include <ostream>
-#include <s2cell.h>
-#include <s2latlng.h>
-#include <set>
-#include <string>
-#include <utility>
-#include <vector>
-
-#include <boost/container/flat_set.hpp>
-#include <boost/container/small_vector.hpp>
-#include <boost/container/vector.hpp>
-#include <s2cellid.h>
-
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
@@ -56,13 +42,25 @@
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/storage/key_string/key_string.h"
 #include "mongo/logv2/log.h"
-#include "mongo/logv2/log_attr.h"
-#include "mongo/logv2/log_component.h"
 #include "mongo/stdx/type_traits.h"
-#include "mongo/unittest/assert.h"
-#include "mongo/unittest/framework.h"
+#include "mongo/unittest/unittest.h"
 #include "mongo/util/shared_buffer_fragment.h"
 #include "mongo/util/str.h"
+
+#include <algorithm>
+#include <ostream>
+#include <set>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include <s2cell.h>
+#include <s2cellid.h>
+#include <s2latlng.h>
+
+#include <boost/container/flat_set.hpp>
+#include <boost/container/small_vector.hpp>
+#include <boost/container/vector.hpp>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -122,8 +120,8 @@ bool areKeysetsEqual(const KeyStringSet& expectedKeys, const KeyStringSet& actua
 void assertMultikeyPathsEqual(const MultikeyPaths& expectedMultikeyPaths,
                               const MultikeyPaths& actualMultikeyPaths) {
     if (expectedMultikeyPaths != actualMultikeyPaths) {
-        FAIL(str::stream() << "Expected: " << dumpMultikeyPaths(expectedMultikeyPaths)
-                           << ", Actual: " << dumpMultikeyPaths(actualMultikeyPaths));
+        FAIL(std::string(str::stream() << "Expected: " << dumpMultikeyPaths(expectedMultikeyPaths)
+                                       << ", Actual: " << dumpMultikeyPaths(actualMultikeyPaths)));
     }
 }
 

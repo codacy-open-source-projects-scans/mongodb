@@ -29,10 +29,6 @@
 
 #pragma once
 
-#include <boost/optional/optional.hpp>
-#include <memory>
-#include <vector>
-
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/timestamp.h"
@@ -40,17 +36,24 @@
 #include "mongo/db/commands/query_cmd/bulk_write_gen.h"
 #include "mongo/db/commands/query_cmd/bulk_write_parser.h"
 #include "mongo/db/fle_crud.h"
+#include "mongo/db/global_catalog/router_role_api/ns_targeter.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/session/logical_session_id.h"
-#include "mongo/db/shard_id.h"
+#include "mongo/db/sharding_environment/shard_id.h"
 #include "mongo/db/write_concern_options.h"
 #include "mongo/s/async_requests_sender.h"
-#include "mongo/s/ns_targeter.h"
 #include "mongo/s/write_ops/batch_write_op.h"
+#include "mongo/s/write_ops/bulk_write_reply_info.h"
 #include "mongo/s/write_ops/write_op.h"
 #include "mongo/stdx/unordered_map.h"
+#include "mongo/util/modules.h"
+
+#include <memory>
+#include <vector>
+
+#include <boost/optional/optional.hpp>
 
 namespace mongo {
 namespace bulk_write_exec {
@@ -82,47 +85,6 @@ private:
 };
 
 /**
- * Contains counters which aggregate all the individual bulk write responses.
- */
-struct SummaryFields {
-    int nErrors = 0;
-    int nInserted = 0;
-    int nMatched = 0;
-    int nModified = 0;
-    int nUpserted = 0;
-    int nDeleted = 0;
-};
-
-/**
- * Contains replies for individual bulk write ops along with the summary fields for all responses.
- */
-struct BulkWriteReplyInfo {
-    std::vector<BulkWriteReplyItem> replyItems;
-    SummaryFields summaryFields;
-    boost::optional<BulkWriteWriteConcernError> wcErrors;
-    boost::optional<std::vector<StmtId>> retriedStmtIds;
-    BulkWriteExecStats execStats;
-};
-
-/**
- * Attempt to run the bulkWriteCommandRequest through Queryable Encryption code path.
- * Returns kNotProcessed if falling back to the regular bulk write code path is needed instead.
- *
- * This function does not throw, any errors are reported via the function return.
- */
-std::pair<FLEBatchResult, BulkWriteReplyInfo> attemptExecuteFLE(
-    OperationContext* opCtx, const BulkWriteCommandRequest& clientRequest);
-
-/**
- * Processes a response from an FLE insert/update/delete command and converts it to equivalent
- * BulkWriteReplyInfo.
- */
-BulkWriteReplyInfo processFLEResponse(const BatchedCommandRequest& request,
-                                      const BulkWriteCRUDOp::OpType& firstOpType,
-                                      bool errorsOnly,
-                                      const BatchedCommandResponse& response);
-
-/**
  * Executes a client bulkWrite request by sending child batches to several shard endpoints, and
  * returns a vector of BulkWriteReplyItem (each of which is a reply for an individual op) along
  * with a count of how many of those replies are errors.
@@ -131,12 +93,34 @@ BulkWriteReplyInfo processFLEResponse(const BatchedCommandRequest& request,
  */
 BulkWriteReplyInfo execute(OperationContext* opCtx,
                            const std::vector<std::unique_ptr<NSTargeter>>& targeters,
-                           const BulkWriteCommandRequest& clientRequest);
+                           const BulkWriteCommandRequest& clientRequest,
+                           BulkWriteExecStats& execStats);
 
 
 BulkWriteCommandReply createEmulatedErrorReply(const Status& error,
                                                int errorCount,
                                                const boost::optional<TenantId>& tenantId);
+
+class BulkCommandSizeEstimator final : public BatchCommandSizeEstimatorBase {
+public:
+    explicit BulkCommandSizeEstimator(OperationContext* opCtx,
+                                      const BulkWriteCommandRequest& clientRequest);
+
+    int getBaseSizeEstimate() const final;
+    int getOpSizeEstimate(int opIdx, const ShardId& shardId) const final;
+    void addOpToBatch(int opIdx, const ShardId& shardId) final;
+
+private:
+    const BulkWriteCommandRequest& _clientRequest;
+    const bool _isRetryableWriteOrInTransaction;
+    const int _baseSizeEstimate;
+
+    // targetWriteOps() can target writes to different shards which will end up being executed
+    // inside different child batches. We need to keep a map of shardId to a set of all of the
+    // nsInfo indexes we have account for the size of. We only want to count each nsInfoIdx once
+    // per child batch.
+    absl::flat_hash_map<ShardId, absl::flat_hash_set<int>> _accountedForNsInfos;
+};
 
 /**
  * The BulkWriteOp class manages the lifecycle of a bulkWrite request received by mongos. Each op in
@@ -284,7 +268,10 @@ public:
      * unordered writes that is all writes in the batch, and for ordered writes it is only the first
      * write (since we would stop after that failed and not attempt execution of further writes.)
      */
-    void noteChildBatchError(const TargetedWriteBatch& targetedBatch, const Status& status);
+    void noteChildBatchError(
+        const TargetedWriteBatch& targetedBatch,
+        const Status& status,
+        boost::optional<stdx::unordered_map<NamespaceString, TrackedErrors>&> errorsPerNamespace);
 
     /**
      * Processes a local error encountered while trying to send a child batch to a shard. This could
@@ -334,13 +321,6 @@ public:
      */
     boost::optional<BulkWriteWriteConcernError> generateWriteConcernError() const;
 
-    /**
-     * Calculates an estimate of the size, in bytes, required to store the common fields that will
-     * go into each child batch command sent to a shard, i.e. all fields besides the actual write
-     * ops.
-     */
-    int getBaseChildBatchCommandSizeEstimate() const;
-
     const BulkWriteCommandRequest& getClientRequest() const {
         return _clientRequest;
     }
@@ -375,6 +355,10 @@ public:
 
     bool targeterHasStaleShardResponse() const {
         return _targeterHasStaleShardResponse;
+    }
+
+    BulkWriteExecStats getExecStats() const {
+        return _stats;
     }
 
 private:
